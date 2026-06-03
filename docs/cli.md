@@ -1,6 +1,6 @@
 ## CLI 参考
 
-所有脚本都位于 `knowledge-index/scripts/`，通过 `npx jiti` 执行。
+所有脚本都位于 `scripts/`，通过 `npx jiti` 执行。
 
 ---
 
@@ -11,7 +11,7 @@
 统一导入外部知识库，首次全量或增量更新。
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope <scope> \
   --results <ai-results.json> \
   [--mode full|incremental] \
@@ -41,7 +41,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 检测自上次导入以来的变更。
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts diff \
+npx jiti scripts/scan-kb.ts diff \
   --scope <scope> \
   [--output <file>]
 ```
@@ -51,7 +51,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts diff \
 ### `scan` 子命令（旧流程，保留兼容）
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts scan \
+npx jiti scripts/scan-kb.ts scan \
   --scope <scope> --source <dir> --root-name <name> \
   [--results <ai-results.json>]
 ```
@@ -59,8 +59,8 @@ npx jiti knowledge-index/scripts/scan-kb.ts scan \
 ### `vectorize` 子命令（DEPRECATED）
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts vectorize --scope <scope>
-npx jiti knowledge-index/scripts/scan-kb.ts vectorize \
+npx jiti scripts/scan-kb.ts vectorize --scope <scope>
+npx jiti scripts/scan-kb.ts vectorize \
   --scope <scope> --complete <vectorize-results.json>
 ```
 
@@ -73,13 +73,13 @@ npx jiti knowledge-index/scripts/scan-kb.ts vectorize \
 管理 Group 树索引节点。
 
 ```bash
-npx jiti knowledge-index/scripts/manage-index.ts \
+npx jiti scripts/manage-index.ts \
   --scope <scope> --action create-root --root-name <name>
 
-npx jiti knowledge-index/scripts/manage-index.ts \
+npx jiti scripts/manage-index.ts \
   --scope <scope> --action create --parent <path> --name <name>
 
-npx jiti knowledge-index/scripts/manage-index.ts \
+npx jiti scripts/manage-index.ts \
   --scope <scope> --action delete --parent <path> --name <name> [--force]
 ```
 
@@ -88,10 +88,10 @@ npx jiti knowledge-index/scripts/manage-index.ts \
 查询 Group 树、热门 Relation 和关键词词云。
 
 ```bash
-npx jiti knowledge-index/scripts/query-group.ts --scope <scope>
-npx jiti knowledge-index/scripts/query-group.ts --scope <scope> --groups "项目/API"
-npx jiti knowledge-index/scripts/query-group.ts --scope <scope> --mode hot
-npx jiti knowledge-index/scripts/query-group.ts --scope <scope> --partition warm
+npx jiti scripts/query-group.ts --scope <scope>
+npx jiti scripts/query-group.ts --scope <scope> --groups "项目/API"
+npx jiti scripts/query-group.ts --scope <scope> --mode hot
+npx jiti scripts/query-group.ts --scope <scope> --partition warm
 ```
 
 ## `get-module-info.ts`
@@ -99,7 +99,7 @@ npx jiti knowledge-index/scripts/query-group.ts --scope <scope> --partition warm
 按 Group + Relation 读取本地 KB 中的 Markdown 原文。
 
 ```bash
-npx jiti knowledge-index/scripts/get-module-info.ts \
+npx jiti scripts/get-module-info.ts \
   --scope <scope> --group <group> --relation <relation>
 ```
 
@@ -108,11 +108,11 @@ npx jiti knowledge-index/scripts/get-module-info.ts \
 把 Relation 和模块说明写入本地索引。
 
 ```bash
-npx jiti knowledge-index/scripts/sync-relation.ts \
+npx jiti scripts/sync-relation.ts \
   --scope <scope> --group <group> \
   --relation <text> --module-info <markdown> --keywords <k1,k2>
 
-npx jiti knowledge-index/scripts/sync-relation.ts \
+npx jiti scripts/sync-relation.ts \
   --scope <scope> --input <jsonFile>
 ```
 
@@ -127,10 +127,10 @@ npx jiti knowledge-index/scripts/sync-relation.ts \
 旧版外部知识库导入脚本，已被 `scan-kb import` 替代。
 
 ```bash
-npx jiti knowledge-index/scripts/import-kb.ts \
+npx jiti scripts/import-kb.ts \
   --scope <scope> --source <dir> --root-name <name>
 
-npx jiti knowledge-index/scripts/import-kb.ts \
+npx jiti scripts/import-kb.ts \
   --scope <scope> --source <dir> \
   --mapping <jsonFile> --root-name <name>
 ```

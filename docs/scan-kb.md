@@ -21,7 +21,7 @@
 # 第 1 步：AI 生成 ai-results.json（见下方格式说明）
 
 # 第 2 步：一条命令完成全部操作
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope my-project \
   --results ai-results.json
 ```
@@ -32,12 +32,12 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 
 ```bash
 # 第 1 步：检测变更
-npx jiti knowledge-index/scripts/scan-kb.ts diff --scope my-project
+npx jiti scripts/scan-kb.ts diff --scope my-project
 
 # 第 2 步：AI 根据 diff 结果生成增量 ai-results.json（每条带 action 字段）
 
 # 第 3 步：执行增量导入
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope my-project \
   --mode incremental \
   --results ai-results-incremental.json
@@ -114,7 +114,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 检测自上次导入以来外部知识库的变更：
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts diff --scope my-project
+npx jiti scripts/scan-kb.ts diff --scope my-project
 ```
 
 输出示例：
@@ -151,11 +151,11 @@ npx jiti knowledge-index/scripts/scan-kb.ts diff --scope my-project
 
 ```bash
 # 生成待处理文件列表
-npx jiti knowledge-index/scripts/scan-kb.ts scan \
+npx jiti scripts/scan-kb.ts scan \
   --scope <scope> --source <dir> --root-name <name>
 
 # 合并 AI 摘要结果
-npx jiti knowledge-index/scripts/scan-kb.ts scan \
+npx jiti scripts/scan-kb.ts scan \
   --scope <scope> --source <dir> --root-name <name> \
   --results <ai-results.json>
 ```
@@ -166,10 +166,10 @@ npx jiti knowledge-index/scripts/scan-kb.ts scan \
 
 ```bash
 # 列出待向量化条目
-npx jiti knowledge-index/scripts/scan-kb.ts vectorize --scope <scope>
+npx jiti scripts/scan-kb.ts vectorize --scope <scope>
 
 # 回写向量化完成结果
-npx jiti knowledge-index/scripts/scan-kb.ts vectorize \
+npx jiti scripts/scan-kb.ts vectorize \
   --scope <scope> --complete <vectorize-results.json>
 ```
 

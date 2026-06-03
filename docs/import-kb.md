@@ -14,7 +14,7 @@
 2. 执行：
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope my-project \
   --results ai-results.json
 ```
@@ -34,7 +34,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 ### 约定模式
 
 ```bash
-npx jiti knowledge-index/scripts/import-kb.ts \
+npx jiti scripts/import-kb.ts \
   --scope <scope> --source <dir> --root-name <name>
 ```
 
@@ -43,7 +43,7 @@ npx jiti knowledge-index/scripts/import-kb.ts \
 ### 配置模式
 
 ```bash
-npx jiti knowledge-index/scripts/import-kb.ts \
+npx jiti scripts/import-kb.ts \
   --scope <scope> --source <dir> \
   --mapping <jsonFile> --root-name <name>
 ```

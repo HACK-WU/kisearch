@@ -4,6 +4,7 @@
   "description": "AI 知识索引整理工具 - 对外部知识进行结构化索引和导航",
   "type": "module",
   "bin": {
+    "ki": "./bin/ki.mjs",
     "knowledge-indexer": "./bin/knowledge-indexer.mjs"
   },
   "scripts": {

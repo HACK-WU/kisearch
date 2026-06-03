@@ -5,7 +5,7 @@
  * 读取本地 KB index.json，返回 Relation 对应的 Markdown 文本，同时更新评分。
  *
  * 用法:
- *   npx jiti knowledge-index/scripts/get-module-info.ts --scope <scope> --group <group> --relation <relationId>
+ *   npx jiti scripts/get-module-info.ts --scope <scope> --group <group> --relation <relationId>
  */
 
 import { Command } from 'commander';

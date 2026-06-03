@@ -76,24 +76,24 @@ npm link
 
 ### 使用示例
 
-所有脚本使用 `knowledge-indexer` 命令执行（已通过 `npm link` 创建全局链接）。
+所有脚本使用 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
 ```bash
 # 1. 初始化索引（创建根节点）
-knowledge-indexer manage-index \
+ki manage-index \
   --scope my-project \
   --action create-root \
   --root-name "我的项目"
 
 # 2. 创建分组
-knowledge-indexer manage-index \
+ki manage-index \
   --scope my-project \
   --action create \
   --parent "我的项目" \
   --name "API"
 
 # 3. 写入一条知识
-knowledge-indexer sync-relation \
+ki sync-relation \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口" \
@@ -101,12 +101,12 @@ knowledge-indexer sync-relation \
   --keywords "登录,认证,token"
 
 # 4. 查询 Group 视图
-knowledge-indexer query-group \
+ki query-group \
   --scope my-project \
   --groups "我的项目/API"
 
 # 5. 读取模块原文
-knowledge-indexer get-module-info \
+ki get-module-info \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口"
@@ -195,7 +195,7 @@ knowledge-indexer get-module-info \
 2. 一条命令完成：
 
 ```bash
-knowledge-indexer scan-kb import \
+ki scan-kb import \
   --scope my-project \
   --results ai-results.json
 ```

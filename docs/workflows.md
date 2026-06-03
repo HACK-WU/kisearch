@@ -22,7 +22,7 @@
 ### 步骤 1：创建根节点
 
 ```bash
-npx jiti knowledge-index/scripts/manage-index.ts \
+npx jiti scripts/manage-index.ts \
   --scope my-project \
   --action create-root \
   --root-name "我的项目"
@@ -31,7 +31,7 @@ npx jiti knowledge-index/scripts/manage-index.ts \
 ### 步骤 2：创建 Group
 
 ```bash
-npx jiti knowledge-index/scripts/manage-index.ts \
+npx jiti scripts/manage-index.ts \
   --scope my-project \
   --action create \
   --parent "我的项目" \
@@ -41,7 +41,7 @@ npx jiti knowledge-index/scripts/manage-index.ts \
 ### 步骤 3：写入 Relation 和模块说明
 
 ```bash
-npx jiti knowledge-index/scripts/sync-relation.ts \
+npx jiti scripts/sync-relation.ts \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口" \
@@ -52,7 +52,7 @@ npx jiti knowledge-index/scripts/sync-relation.ts \
 ### 步骤 4：查看写入效果
 
 ```bash
-npx jiti knowledge-index/scripts/query-group.ts \
+npx jiti scripts/query-group.ts \
   --scope my-project \
   --groups "我的项目/API"
 ```
@@ -60,7 +60,7 @@ npx jiti knowledge-index/scripts/query-group.ts \
 ### 步骤 5：读取原文
 
 ```bash
-npx jiti knowledge-index/scripts/get-module-info.ts \
+npx jiti scripts/get-module-info.ts \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口"
@@ -130,7 +130,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 **第 1 步**：检测变更
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts diff --scope my-project
+npx jiti scripts/scan-kb.ts diff --scope my-project
 ```
 
 输出 `{ added, modified, deleted }` 列表，`modified`/`deleted` 条目携带 `memoryId`。
@@ -146,7 +146,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts diff --scope my-project
 **第 3 步**：执行增量导入
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope my-project \
   --mode incremental \
   --results ai-results-incremental.json
@@ -165,7 +165,7 @@ npx jiti knowledge-index/scripts/scan-kb.ts import \
 适合场景：外部目录结构不适合作为 Group，文件名不适合作为 Relation。
 
 ```bash
-npx jiti knowledge-index/scripts/scan-kb.ts import \
+npx jiti scripts/scan-kb.ts import \
   --scope my-project \
   --results ai-results.json \
   --mapping mapping.json

@@ -17,10 +17,13 @@
 
 **命令**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki query-group --scope <scope> --mode compact
+
+# 方式 2：直接执行
 npx jiti scripts/query-group.ts --scope <scope> --mode compact
 
-# 方式 2：使用 npm scripts
+# 方式 3：使用 npm scripts
 npm run query-group -- --scope <scope> --mode compact
 ```
 
@@ -46,10 +49,13 @@ npm run query-group -- --scope <scope> --mode compact
 
 **命令**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki query-group --scope <scope> --groups <group>
+
+# 方式 2：直接执行
 npx jiti scripts/query-group.ts --scope <scope> --groups <group>
 
-# 方式 2：使用 npm scripts
+# 方式 3：使用 npm scripts
 npm run query-group -- --scope <scope> --groups <group>
 ```
 
@@ -76,13 +82,19 @@ npm run query-group -- --scope <scope> --groups <group>
 
 **命令**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki get-module-info \
+  --scope <scope> \
+  --group <group> \
+  --relation <relation>
+
+# 方式 2：直接执行
 npx jiti scripts/get-module-info.ts \
   --scope <scope> \
   --group <group> \
   --relation <relation>
 
-# 方式 2：使用 npm scripts
+# 方式 3：使用 npm scripts
 npm run get-module-info -- --scope <scope> --group <group> --relation <relation>
 ```
 
@@ -120,40 +132,58 @@ npm run get-module-info -- --scope <scope> --group <group> --relation <relation>
 
 **新增条目验证**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki get-module-info \
+  --scope <scope> \
+  --group <新增条目的group> \
+  --relation <新增条目的relation>
+
+# 方式 2：直接执行
 npx jiti scripts/get-module-info.ts \
   --scope <scope> \
   --group <新增条目的group> \
   --relation <新增条目的relation>
 
-# 方式 2：使用 npm scripts
+# 方式 3：使用 npm scripts
 npm run get-module-info -- --scope <scope> --group <新增条目的group> --relation <新增条目的relation>
 ```
 预期：输出新增的模块信息
 
 **修改条目验证**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki get-module-info \
+  --scope <scope> \
+  --group <修改条目的group> \
+  --relation <修改条目的relation>
+
+# 方式 2：直接执行
 npx jiti scripts/get-module-info.ts \
   --scope <scope> \
   --group <修改条目的group> \
   --relation <修改条目的relation>
 
-# 方式 2：使用 npm scripts
+# 方式 3：使用 npm scripts
 npm run get-module-info -- --scope <scope> --group <修改条目的group> --relation <修改条目的relation>
 ```
 预期：输出更新后的模块信息
 
 **删除条目验证**：
 ```bash
-# 方式 1：直接执行
+# 方式 1：使用全局命令（推荐）
+ki get-module-info \
+  --scope <scope> \
+  --group <删除条目的group> \
+  --relation <删除条目的relation>
+
+# 方式 2：直接执行
 npx jiti scripts/get-module-info.ts \
   --scope <scope> \
   --group <删除条目的group> \
   --relation <删除条目的relation>
 
-# 方式 2：使用 npm scripts
-npm run get-module-info -- --scope <scope> --group <删除条目的group> --relation <删除条目的relation>
+# 方式 3：使用 npm scripts
+npm run get-module-info -- --scope <scope> --group <删除条目的group> --relation <删除条目のrelation>
 ```
 预期：报错"本地 KB 中未找到"
 
@@ -171,13 +201,13 @@ GROUP=$2
 RELATION=$3
 
 echo "=== 结构验证 ==="
-npx jiti scripts/query-group.ts --scope $SCOPE --mode compact
+ki query-group --scope $SCOPE --mode compact
 
 echo -e "\n=== Relations 验证 ==="
-npx jiti scripts/query-group.ts --scope $SCOPE --groups $GROUP
+ki query-group --scope $SCOPE --groups $GROUP
 
 echo -e "\n=== 本地 KB 验证 ==="
-npx jiti scripts/get-module-info.ts --scope $SCOPE --group $GROUP --relation $RELATION
+ki get-module-info --scope $SCOPE --group $GROUP --relation $RELATION
 
 echo -e "\n=== 验证完成 ==="
 ```
@@ -186,10 +216,10 @@ echo -e "\n=== 验证完成 ==="
 
 ```bash
 # 验证所有 Group 的结构
-npx jiti scripts/query-group.ts --scope <scope>
+ki query-group --scope <scope>
 
 # 验证特定 Group 的所有 Relation
-npx jiti scripts/query-group.ts --scope <scope> --groups "设计文档/API"
+ki query-group --scope <scope> --groups "设计文档/API"
 ```
 
 ---

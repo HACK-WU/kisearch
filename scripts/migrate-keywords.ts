@@ -11,8 +11,8 @@
  * 幂等：已迁移的 Group（无 word_cloud_keywords / 无 Relation.keywords）执行结果不变。
  *
  * 用法:
- *   单 scope: npx jiti knowledge-index/scripts/migrate-keywords.ts --scope <scope>
- *   全部:     npx jiti knowledge-index/scripts/migrate-keywords.ts --all
+ *   单 scope: npx jiti scripts/migrate-keywords.ts --scope <scope>
+ *   全部:     npx jiti scripts/migrate-keywords.ts --all
  *   预演:     额外加 --dry-run，仅打印将变更的内容，不写盘
  */
 

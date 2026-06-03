@@ -3,7 +3,7 @@
  * query-group.ts - 查询 Group + 词云生成 + 新兴热区展示 + 格式化输出
  *
  * 用法:
- *   npx jiti knowledge-index/scripts/query-group.ts --scope <scope> [--groups <g1,g2>]
+ *   npx jiti scripts/query-group.ts --scope <scope> [--groups <g1,g2>]
  *         [--hot-count <count>] [--depth <depth>] [--partition <partition>]
  *         [--mode <mode>]
  */
