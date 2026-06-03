@@ -54,7 +54,8 @@
 
 1. **全局安装 `mem` 命令**：知识索引的所有向量化操作都依赖 `mem` 命令，请先通过全局安装确保 `mem` 可用：
    ```bash
-   npm install -g https://github.com/HACK-WU/memory-lancedb-mcp/releases/download/v0.1.0/memory-lancedb-mcp-0.1.0.tgz
+   curl -fsSL https://raw.githubusercontent.com/HACK-WU/memory-lancedb-mcp/main/scripts/install-latest.sh -o install-latest.sh
+   bash install-latest.sh
    ```
 
 2. **配置嵌入 API**：确保 `~/.config/memory-mcp/config.yaml` 中已配置嵌入 API 密钥。
