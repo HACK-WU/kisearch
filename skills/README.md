@@ -11,6 +11,7 @@
 | **knowledge-index-query** | 知识库查询 | 高（日常） | 快速路径 + 检索路径 + 知识缺失路径 |
 | **knowledge-index-manage** | 索引结构管理 | 低（手动操作） | Group/Relation CRUD |
 | **knowledge-index-verify** | 验证操作结果 | 中（操作后） | 结构/内容/检索验证 |
+| **knowledge-index-restore** | 数据恢复 | 低（异常时） | 从备份恢复 / 重新初始化 |
 
 ## 使用方式
 
@@ -22,6 +23,7 @@ Agent 根据用户请求自动加载对应的 skill：
 用户提问 → 加载 knowledge-index-query
 用户请求创建/删除Group → 加载 knowledge-index-manage
 验证操作结果 → 加载 knowledge-index-verify
+数据恢复/重新初始化 → 加载 knowledge-index-restore
 ```
 
 ## 三层架构基础
@@ -68,6 +70,8 @@ knowledge-indexer/skills/
   ├── knowledge-index-manage/
   │   └── SKILL.md
   ├── knowledge-index-verify/
+  │   └── SKILL.md
+  ├── knowledge-index-restore/
   │   └── SKILL.md
   └── README.md
 ```
