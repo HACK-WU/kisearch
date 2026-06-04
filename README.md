@@ -54,7 +54,7 @@
 
 1. **全局安装 `mem` 命令**：知识索引的所有向量化操作都依赖 `mem` 命令，请先通过全局安装确保 `mem` 可用：
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/HACK-WU/memory-lancedb-mcp/main/scripts/install-latest.sh -o install-latest.sh
+   curl -fsSL https://raw.githubusercontent.com/HACK-WU/memory-lancedb-mcp/master/scripts/install-latest.sh -o install-latest.sh
    bash install-latest.sh
    ```
 
