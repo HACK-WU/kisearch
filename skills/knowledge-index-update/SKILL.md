@@ -40,14 +40,7 @@
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki scan-kb diff --scope <scope>
-
-# 方式 2：直接执行
-npx jiti scripts/scan-kb.ts diff --scope <scope>
-
-# 方式 3：使用 npm scripts
-npm run scan-kb -- diff --scope <scope>
 ```
 
 **参数**：
@@ -182,20 +175,7 @@ npm run scan-kb -- diff --scope <scope>
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki scan-kb import \
-  --scope <scope> \
-  --mode incremental \
-  --results ai-results-incremental.json
-
-# 方式 2：直接执行
-npx jiti scripts/scan-kb.ts import \
-  --scope <scope> \
-  --mode incremental \
-  --results ai-results-incremental.json
-
-# 方式 3：使用 npm scripts
-npm run scan-kb -- import \
   --scope <scope> \
   --mode incremental \
   --results ai-results-incremental.json
@@ -244,71 +224,34 @@ npm run scan-kb -- import \
 
 2. **新增条目验证**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki get-module-info \
      --scope <scope> \
      --group <新增条目的group> \
      --relation <新增条目的relation>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/get-module-info.ts \
-     --scope <scope> \
-     --group <新增条目的group> \
-     --relation <新增条目的relation>
-   
-   # 方式 3：使用 npm scripts
-   npm run get-module-info -- --scope <scope> --group <新增条目的group> --relation <新增条目的relation>
    ```
    预期：输出新增的模块信息
 
 3. **修改条目验证**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki get-module-info \
      --scope <scope> \
      --group <修改条目的group> \
      --relation <修改条目的relation>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/get-module-info.ts \
-     --scope <scope> \
-     --group <修改条目的group> \
-     --relation <修改条目的relation>
-   
-   # 方式 3：使用 npm scripts
-   npm run get-module-info -- --scope <scope> --group <修改条目的group> --relation <修改条目的relation>
    ```
    预期：输出更新后的模块信息
 
 4. **删除条目验证**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki get-module-info \
      --scope <scope> \
      --group <删除条目的group> \
      --relation <删除条目的relation>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/get-module-info.ts \
-     --scope <scope> \
-     --group <删除条目的group> \
-     --relation <删除条目的relation>
-   
-   # 方式 3：使用 npm scripts
-   npm run get-module-info -- --scope <scope> --group <删除条目的group> --relation <删除条目的relation>
    ```
    预期：报错"本地 KB 中未找到"
 
 5. **Relations 缓存验证**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki query-group --scope <scope> --groups <group>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/query-group.ts --scope <scope> --groups <group>
-   
-   # 方式 3：使用 npm scripts
-   npm run query-group -- --scope <scope> --groups <group>
    ```
    预期：确认 Relation 列表已更新
 

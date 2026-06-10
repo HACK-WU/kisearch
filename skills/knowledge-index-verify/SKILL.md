@@ -17,14 +17,7 @@
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki query-group --scope <scope> --mode compact
-
-# 方式 2：直接执行
-npx jiti scripts/query-group.ts --scope <scope> --mode compact
-
-# 方式 3：使用 npm scripts
-npm run query-group -- --scope <scope> --mode compact
 ```
 
 **预期结果**：
@@ -49,14 +42,7 @@ npm run query-group -- --scope <scope> --mode compact
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki query-group --scope <scope> --groups <group>
-
-# 方式 2：直接执行
-npx jiti scripts/query-group.ts --scope <scope> --groups <group>
-
-# 方式 3：使用 npm scripts
-npm run query-group -- --scope <scope> --groups <group>
 ```
 
 **预期结果**：
@@ -82,20 +68,10 @@ npm run query-group -- --scope <scope> --groups <group>
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki get-module-info \
   --scope <scope> \
   --group <group> \
   --relation <relation>
-
-# 方式 2：直接执行
-npx jiti scripts/get-module-info.ts \
-  --scope <scope> \
-  --group <group> \
-  --relation <relation>
-
-# 方式 3：使用 npm scripts
-npm run get-module-info -- --scope <scope> --group <group> --relation <relation>
 ```
 
 **预期结果**：
@@ -132,58 +108,28 @@ npm run get-module-info -- --scope <scope> --group <group> --relation <relation>
 
 **新增条目验证**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki get-module-info \
   --scope <scope> \
   --group <新增条目的group> \
   --relation <新增条目的relation>
-
-# 方式 2：直接执行
-npx jiti scripts/get-module-info.ts \
-  --scope <scope> \
-  --group <新增条目的group> \
-  --relation <新增条目的relation>
-
-# 方式 3：使用 npm scripts
-npm run get-module-info -- --scope <scope> --group <新增条目的group> --relation <新增条目的relation>
 ```
 预期：输出新增的模块信息
 
 **修改条目验证**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki get-module-info \
   --scope <scope> \
   --group <修改条目的group> \
   --relation <修改条目的relation>
-
-# 方式 2：直接执行
-npx jiti scripts/get-module-info.ts \
-  --scope <scope> \
-  --group <修改条目的group> \
-  --relation <修改条目的relation>
-
-# 方式 3：使用 npm scripts
-npm run get-module-info -- --scope <scope> --group <修改条目的group> --relation <修改条目的relation>
 ```
 预期：输出更新后的模块信息
 
 **删除条目验证**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki get-module-info \
   --scope <scope> \
   --group <删除条目的group> \
   --relation <删除条目的relation>
-
-# 方式 2：直接执行
-npx jiti scripts/get-module-info.ts \
-  --scope <scope> \
-  --group <删除条目的group> \
-  --relation <删除条目的relation>
-
-# 方式 3：使用 npm scripts
-npm run get-module-info -- --scope <scope> --group <删除条目的group> --relation <删除条目のrelation>
 ```
 预期：报错"本地 KB 中未找到"
 

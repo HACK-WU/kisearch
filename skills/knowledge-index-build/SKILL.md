@@ -164,18 +164,7 @@ content/
 
 **命令**：
 ```bash
-# 方式 1：使用全局命令（推荐）
 ki scan-kb import \
-  --scope <scope> \
-  --results ai-results.json
-
-# 方式 2：直接执行
-npx jiti scripts/scan-kb.ts import \
-  --scope <scope> \
-  --results ai-results.json
-
-# 方式 3：使用 npm scripts
-npm run scan-kb -- import \
   --scope <scope> \
   --results ai-results.json
 ```
@@ -220,46 +209,22 @@ npm run scan-kb -- import \
 
 1. **Group 树结构**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki query-group --scope <scope> --mode compact
-   
-   # 方式 2：直接执行
-   npx jiti scripts/query-group.ts --scope <scope> --mode compact
-   
-   # 方式 3：使用 npm scripts
-   npm run query-group -- --scope <scope> --mode compact
    ```
    预期：显示完整的 Group 目录结构
 
 2. **Relations 列表**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki query-group --scope <scope> --groups <group>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/query-group.ts --scope <scope> --groups <group>
-   
-   # 方式 3：使用 npm scripts
-   npm run query-group -- --scope <scope> --groups <group>
    ```
    预期：显示 Group 下的 Relation 列表和关键词
 
 3. **本地 KB 内容**：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki get-module-info \
      --scope <scope> \
      --group <group> \
      --relation <relation>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/get-module-info.ts \
-     --scope <scope> \
-     --group <group> \
-     --relation <relation>
-   
-   # 方式 3：使用 npm scripts
-   npm run get-module-info -- --scope <scope> --group <group> --relation <relation>
    ```
    预期：输出 Markdown 格式的模块信息
 

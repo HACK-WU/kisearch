@@ -57,14 +57,7 @@
 
 1. **查询 Group 的热门 Relation**
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki query-group --scope <scope> --groups <group> --mode hot
-   
-   # 方式 2：直接执行
-   npx jiti scripts/query-group.ts --scope <scope> --groups <group> --mode hot
-   
-   # 方式 3：使用 npm scripts
-   npm run query-group -- --scope <scope> --groups <group> --mode hot
    ```
    
    输出示例：
@@ -84,20 +77,10 @@
 
 3. **获取模块信息**
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki get-module-info \
      --scope <scope> \
      --group <group> \
      --relation <relationId或text>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/get-module-info.ts \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationId或text>
-   
-   # 方式 3：使用 npm scripts
-   npm run get-module-info -- --scope <scope> --group <group> --relation <relationId或text>
    ```
    
    输出：Markdown 文本（直接输出到 stdout）
@@ -116,14 +99,7 @@
 
 1. **获取完整索引树 + 关键词词云**
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki query-group --scope <scope>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/query-group.ts --scope <scope>
-   
-   # 方式 3：使用 npm scripts
-   npm run query-group -- --scope <scope>
    ```
    
    输出包含：
@@ -153,24 +129,12 @@
    
    命中后调用：
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki sync-relation \
      --scope <scope> \
      --group <group> \
      --relation <relationText> \
      --module-info "<markdown内容>" \
      --keywords <k1,k2,k3>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/sync-relation.ts \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationText> \
-     --module-info "<markdown内容>" \
-     --keywords <k1,k2,k3>
-   
-   # 方式 3：使用 npm scripts
-   npm run sync-relation -- --scope <scope> --group <group> --relation <relationText> --module-info "<markdown内容>" --keywords <k1,k2,k3>
    ```
    
    同时调用 MCP `memory_store` 双写：
@@ -203,45 +167,22 @@
 
 3. **创建 Group（如需要）**
    ```bash
-   # 方式 1：使用全局命令（推荐）
    ki manage-index \
      --scope <scope> \
      --action create \
      --parent <parentPath> \
      --name <groupName>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/manage-index.ts \
-     --scope <scope> \
-     --action create \
-     --parent <parentPath> \
-     --name <groupName>
-   
-   # 方式 3：使用 npm scripts
-   npm run manage-index -- --scope <scope> --action create --parent <parentPath> --name <groupName>
    ```
 
 4. **双写 Relation + 记忆系统**
    ```bash
    # 写入知识索引
-   # 方式 1：使用全局命令（推荐）
    ki sync-relation \
      --scope <scope> \
      --group <group> \
      --relation <relationText> \
      --module-info "<markdown>" \
      --keywords <k1,k2>
-   
-   # 方式 2：直接执行
-   npx jiti scripts/sync-relation.ts \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationText> \
-     --module-info "<markdown>" \
-     --keywords <k1,k2>
-   
-   # 方式 3：使用 npm scripts
-   npm run sync-relation -- --scope <scope> --group <group> --relation <relationText> --module-info "<markdown>" --keywords <k1,k2>
    ```
    
    ```json
