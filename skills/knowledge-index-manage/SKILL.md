@@ -172,18 +172,21 @@ ki query-group --scope <scope>
       [hot] 01-overview (score: 6.0) [概述, 架构]
 ```
 
-### 紧凑树视图
+### 完整索引树
 
 ```bash
-ki query-group --scope <scope> --mode compact
+ki query-group --scope <scope> --mode full
 ```
 
-**输出**（无评分和分区标签）：
+**输出**（含评分和分区标签）：
 ```
-项目根/
-  设计文档/
-    API/
-    knowledge-index/
+📁 完整索引树:
+  项目根/ (score: 15.3) [热]
+    设计文档/ (score: 13.2) [热]
+      API/ (score: 7.2) [热]
+        [热] 用户登录 (score: 8.5) [登录, 认证]
+      knowledge-index/ (score: 6.0) [常温]
+        [热] 01-overview (score: 6.0) [概述, 架构]
 ```
 
 ### 指定 Group 的 Relations
@@ -257,7 +260,7 @@ knowledge-index/kb/
 
 1. **Group 树结构**
    ```bash
-   ki query-group --scope <scope> --mode compact
+   ki query-group --scope <scope> --mode full
    ```
 
 2. **Relations 列表**

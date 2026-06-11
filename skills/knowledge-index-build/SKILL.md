@@ -209,7 +209,7 @@ ki scan-kb import \
 
 1. **Group 树结构**：
    ```bash
-   ki query-group --scope <scope> --mode compact
+   ki query-group --scope <scope> --mode full
    ```
    预期：显示完整的 Group 目录结构
 

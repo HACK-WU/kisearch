@@ -85,14 +85,37 @@ npx jiti scripts/manage-index.ts \
 
 ## `query-group.ts`
 
-查询 Group 树、热门 Relation 和关键词词云。
+查询 Group 树、Relation 分区和关键词词云。
 
 ```bash
+# 默认展示 hot 分区
 npx jiti scripts/query-group.ts --scope <scope>
+
+# 查询特定 Group 的 Relations
 npx jiti scripts/query-group.ts --scope <scope> --groups "项目/API"
-npx jiti scripts/query-group.ts --scope <scope> --mode hot
-npx jiti scripts/query-group.ts --scope <scope> --partition warm
+
+# 指定分区模式（支持逗号分隔多值）
+npx jiti scripts/query-group.ts --scope <scope> --mode warm
+npx jiti scripts/query-group.ts --scope <scope> --mode hot,warm,cold
+npx jiti scripts/query-group.ts --scope <scope> --mode full
 ```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--scope` | 项目隔离标识 | 必填 |
+| `--groups` | 逗号分隔的 Group 路径 | - |
+| `--mode` | 展示分区：`hot` / `warm` / `cold` / `emerging` / `full`（支持逗号分隔） | `hot` |
+| `--hot-count` | 热门展示个数 | `5` |
+| `--depth` | 索引层级深度 | `4` |
+
+**mode 说明**：
+- `hot`：热门索引（高频使用）
+- `warm`：常温索引
+- `cold`：冷区索引（低频使用）
+- `emerging`：新兴热区（近期活跃）
+- `full`：完整索引树
+
+统计信息始终展示，不受 `--mode` 影响。
 
 ## `get-module-info.ts`
 

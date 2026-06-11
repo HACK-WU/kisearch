@@ -201,7 +201,9 @@
 |------|------|------|
 | `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
 | `--groups` | 逗号分隔的 Group 路径列表 | 否 |
-| `--mode` | full / hot / compact | 否（默认 full） |
+| `--mode` | hot / warm / cold / emerging / full（支持逗号分隔多值，默认 hot） | 否 |
+| `--hot-count` | 热门展示个数 | 否（默认 5） |
+| `--depth` | 索引层级深度 | 否（默认 4） |
 | `--relation` | Relation ID 或描述文本 | 是（get-module-info） |
 
 ---
@@ -241,7 +243,7 @@
 
 执行查询后验证：
 
-1. **索引结构**：`query-group.ts --mode compact`
+1. **索引结构**：`query-group.ts --mode full`
 2. **关键词质量**：`query-group.ts --groups <group>`
 3. **内容完整性**：`get-module-info.ts` 检索已写入的模块信息
 4. **语义检索**：`memory_recall` 确认 tags 过滤生效

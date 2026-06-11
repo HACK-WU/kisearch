@@ -145,13 +145,6 @@ describe('本地 KB 异常', () => {
 
 // ─── §12 展示参数校验 ───
 describe('展示参数校验', () => {
-  it('无效 partition', () => {
-    const s = mkScope('err-display');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create-root', '--root-name', 'wiki']);
-    const r = runJson('query-group.ts', ['--scope', s, '--partition', 'invalid']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('无效值'));
-  });
   it('无效 mode', () => {
     const s = mkScope('err-display');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create-root', '--root-name', 'wiki']);
@@ -159,11 +152,12 @@ describe('展示参数校验', () => {
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('无效值'));
   });
-  it('help 模式', () => {
+  it('无效 mode 多值', () => {
     const s = mkScope('err-display');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create-root', '--root-name', 'wiki']);
-    const out = getOut('query-group.ts', ['--scope', s, '--mode', 'help']);
-    assert.ok(out.includes('帮助') || out.includes('知识索引'));
+    const r = runJson('query-group.ts', ['--scope', s, '--mode', 'hot,invalid']);
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('无效值'));
   });
 });
 

@@ -17,7 +17,7 @@
 
 **命令**：
 ```bash
-ki query-group --scope <scope> --mode compact
+ki query-group --scope <scope> --mode full
 ```
 
 **预期结果**：
@@ -27,13 +27,14 @@ ki query-group --scope <scope> --mode compact
 
 **示例输出**：
 ```
-项目根/
-  设计文档/
-    API/
-    knowledge-index/
-  用户模块/
-    登录/
-    注册/
+📁 完整索引树:
+  项目根/
+    设计文档/
+      API/
+      knowledge-index/
+    用户模块/
+      登录/
+      注册/
 ```
 
 ### 2. Relations 验证
@@ -147,7 +148,7 @@ GROUP=$2
 RELATION=$3
 
 echo "=== 结构验证 ==="
-ki query-group --scope $SCOPE --mode compact
+ki query-group --scope $SCOPE --mode full
 
 echo -e "\n=== Relations 验证 ==="
 ki query-group --scope $SCOPE --groups $GROUP

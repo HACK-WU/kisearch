@@ -4,8 +4,10 @@
  *
  * 用法:
  *   npx jiti scripts/query-group.ts --scope <scope> [--groups <g1,g2>]
- *         [--hot-count <count>] [--depth <depth>] [--partition <partition>]
- *         [--mode <mode>]
+ *         [--hot-count <count>] [--depth <depth>] [--mode <mode>]
+ *
+ *   --mode 支持逗号分隔多值：hot|warm|cold|emerging|full
+ *   例如：--mode hot,warm 或 --mode full
  */
 
 import { Command } from 'commander';

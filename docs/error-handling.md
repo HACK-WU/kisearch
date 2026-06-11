@@ -147,12 +147,12 @@ scopes:
 
 ## 六类：展示参数问题
 
-### `--partition` / `--mode` 无效
+### `--mode` 无效
 
-`query-group.ts` 的 `--partition` 有效值：`hot`/`warm`/`cold`/`emerging`/`all`。
-`--mode` 有效值：`full`/`hot`/`compact`/`help`。
+`query-group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
+支持逗号分隔多值，如 `--mode hot,warm`。
 
-越界参数会回退为默认值并输出警告。
+无效参数会报错退出并提示有效值列表。
 
 ---
 
