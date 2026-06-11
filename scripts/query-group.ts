@@ -16,9 +16,8 @@ import {
   validateScope,
 } from './lib/scope.js';
 import { ensureScopeDir } from './lib/store.js';
-import { calculateScore } from './lib/scoring.js';
-import type { Relation } from './lib/scoring.js';
-import type { PartitionConfig } from './lib/constants.js';
+import { calculateScore, partitionByScore } from './lib/scoring.js';
+import type { Relation, PartitionResult as ScoringPartitionResult } from './lib/scoring.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 
 // ─── 类型定义 ───
@@ -39,7 +38,7 @@ interface GroupData {
 interface RelationsCache {
   version: number;
   scope: string;
-  partition_config: PartitionConfig;
+  partition_config: typeof DEFAULT_PARTITION_CONFIG;
   groups: Record<string, GroupData>;
   updatedAt: string | null;
 }
@@ -55,24 +54,6 @@ function loadRelationsCache(scope: string): RelationsCache | null {
 }
 
 // ─── 树操作 ───
-
-function findGroupInTree(
-  roots: Record<string, Record<string, unknown>>,
-  groupPath: string
-): Record<string, unknown> | null {
-  const segments = groupPath.split('/').filter(Boolean);
-  if (segments.length === 0) return null;
-
-  let current: Record<string, unknown> | undefined = roots[segments[0]];
-  if (current === undefined) return null;
-
-  for (let i = 1; i < segments.length; i++) {
-    const child = current[segments[i]];
-    if (typeof child !== 'object' || child === null) return null;
-    current = child as Record<string, unknown>;
-  }
-  return current;
-}
 
 function collectAllGroupPaths(
   roots: Record<string, Record<string, unknown>>
@@ -118,6 +99,9 @@ interface PartitionResult {
   warm: string[];
   cold: string[];
   emergingSet: Set<string>;
+  hotSet: Set<string>;
+  warmSet: Set<string>;
+  coldSet: Set<string>;
 }
 
 function partitionGroups(
@@ -125,82 +109,41 @@ function partitionGroups(
   groupScores: Map<string, number>,
   groupsData: Record<string, GroupData>,
   now: number,
-  config: PartitionConfig
+  config: typeof DEFAULT_PARTITION_CONFIG
 ): PartitionResult {
-  const {
-    hotPercent, warmPercent, reservedEmerging, recentHours,
-    minHotCount, maxHotCount, maxWarmCount, maxColdCount,
-  } = config;
+  const recentThreshold = config.recentHours * 60 * 60 * 1000;
 
-  const recentThreshold = recentHours * 60 * 60 * 1000;
-
-  // 识别有最近使用的 group（新兴候选）
-  const emergingPaths = new Set<string>();
-  for (const path of allPaths) {
+  const isGroupEmerging = (path: string): boolean => {
     const data = groupsData[path];
-    if (!data) continue;
-    const hasRecent = data.hot_relations.some(
-      (r) =>
-        !r.isImported &&
-        r.lastUsedTime &&
-        now - r.lastUsedTime < recentThreshold
+    if (!data) return false;
+    return data.hot_relations.some(
+      (r) => r.lastUsedTime !== null && now - r.lastUsedTime < recentThreshold
     );
-    if (hasRecent) emergingPaths.add(path);
-  }
+  };
 
-  // 按评分排序
-  const sorted = allPaths
-    .map((p) => ({ path: p, score: groupScores.get(p) || 0 }))
-    .sort((a, b) => b.score - a.score);
+  const result = partitionByScore(allPaths, {
+    getId: (p) => p,
+    getScore: (p) => groupScores.get(p) || 0,
+    isEmerging: isGroupEmerging,
+  }, config);
 
-  const hot: string[] = [];
-  const hotSet = new Set<string>();
-
-  // 新兴热区
-  const emergingSeats = Math.min(reservedEmerging, emergingPaths.size);
-  let added = 0;
-  for (const item of sorted) {
-    if (added >= emergingSeats) break;
-    if (emergingPaths.has(item.path) && !hotSet.has(item.path)) {
-      hot.push(item.path);
-      hotSet.add(item.path);
-      added++;
-    }
-  }
-
-  // 历史热区
-  const totalHotSeats = Math.max(minHotCount, Math.ceil(sorted.length * hotPercent));
-  for (const item of sorted) {
-    if (hot.length >= totalHotSeats) break;
-    if (!hotSet.has(item.path)) {
-      hot.push(item.path);
-      hotSet.add(item.path);
-    }
-  }
-
-  // 常温 + 冷区
-  const remaining = sorted.filter((item) => !hotSet.has(item.path));
-  const warmCount = Math.ceil(sorted.length * warmPercent);
-  const warm = remaining.slice(0, warmCount).map((i) => i.path);
-  const cold = remaining.slice(warmCount).map((i) => i.path);
-
-  // 上限截断
-  if (maxHotCount && hot.length > maxHotCount) hot.length = maxHotCount;
-  if (maxWarmCount && warm.length > maxWarmCount) warm.length = maxWarmCount;
-  if (maxColdCount && cold.length > maxColdCount) cold.length = maxColdCount;
-
-  return { hot, warm, cold, emergingSet: emergingPaths };
+  return {
+    ...result,
+    hotSet: new Set(result.hot),
+    warmSet: new Set(result.warm),
+    coldSet: new Set(result.cold),
+  };
 }
 
 function getPartitionLabel(
   path: string,
   partition: PartitionResult
 ): string {
-  if (partition.emergingSet.has(path) && partition.hot.includes(path)) {
+  if (partition.emergingSet.has(path) && partition.hotSet.has(path)) {
     return '[新兴热]';
   }
-  if (partition.hot.includes(path)) return '[热]';
-  if (partition.warm.includes(path)) return '[常温]';
+  if (partition.hotSet.has(path)) return '[热]';
+  if (partition.warmSet.has(path)) return '[常温]';
   return '[冷]';
 }
 
@@ -212,83 +155,56 @@ function fmtScore(score: number): string {
 
 function getRelPartitionLabel(
   rel: Relation,
-  hotRels: Relation[],
-  warmRels: Relation[],
+  hotIdSet: Set<string>,
+  warmIdSet: Set<string>,
   emergingSet: Set<string>
 ): string {
   if (rel.isImported) return '[📥]';
-  if (emergingSet.has(rel.id) && hotRels.some((r) => r.id === rel.id)) return '[新兴热]';
-  if (hotRels.some((r) => r.id === rel.id)) return '[热]';
-  if (warmRels.some((r) => r.id === rel.id)) return '[常温]';
+  if (emergingSet.has(rel.id) && hotIdSet.has(rel.id)) return '[新兴热]';
+  if (hotIdSet.has(rel.id)) return '[热]';
+  if (warmIdSet.has(rel.id)) return '[常温]';
   return '[冷]';
 }
 
 function partitionRelations(
   relations: Relation[],
   now: number,
-  config: PartitionConfig
-): { hot: Relation[]; warm: Relation[]; cold: Relation[]; emergingSet: Set<string> } {
-  const {
-    hotPercent, warmPercent, reservedEmerging, recentHours,
-    minHotCount, halfLifeHours, maxHotCount, maxWarmCount, maxColdCount,
-  } = config;
+  config: typeof DEFAULT_PARTITION_CONFIG
+): ScoringPartitionResult<Relation> {
+  const { recentHours, halfLifeHours } = config;
+  const recentThreshold = recentHours * 60 * 60 * 1000;
 
   const itemsWithScore = relations.map((r) => ({
     ...r,
     score: calculateScore(r.useCount, r.lastUsedTime, now, halfLifeHours),
   }));
 
-  const recentThreshold = recentHours * 60 * 60 * 1000;
-  const emergingItems = itemsWithScore.filter(
-    (item) =>
-      !item.isImported &&
-      item.lastUsedTime &&
-      now - item.lastUsedTime < recentThreshold
+  const emergingIdSet = new Set(
+    itemsWithScore
+      .filter((r) => r.lastUsedTime && now - r.lastUsedTime < recentThreshold)
+      .map((r) => r.id)
   );
 
-  itemsWithScore.sort((a, b) => b.score - a.score);
-
-  const hot: Relation[] = [];
-  const hotSet = new Set<string>();
-  const emergingIdSet = new Set(emergingItems.map((r) => r.id));
-
-  // 新兴热区优先按 lastUsedTime 降序，确保“最近用过的先上”
-  const emergingSorted = [...emergingItems].sort(
-    (a, b) => (b.lastUsedTime ?? 0) - (a.lastUsedTime ?? 0)
-  );
-  const emergingSeats = Math.min(reservedEmerging, emergingSorted.length);
-  for (let i = 0; i < emergingSeats; i++) {
-    if (!hotSet.has(emergingSorted[i].id)) {
-      hot.push(emergingSorted[i]);
-      hotSet.add(emergingSorted[i].id);
-    }
-  }
-
-  const totalHotSeats = Math.max(minHotCount, Math.ceil(itemsWithScore.length * hotPercent));
-  for (const item of itemsWithScore) {
-    if (hot.length >= totalHotSeats) break;
-    if (!hotSet.has(item.id)) {
-      hot.push(item);
-      hotSet.add(item.id);
-    }
-  }
-
-  const remaining = itemsWithScore.filter((item) => !hotSet.has(item.id));
-  const warmCount = Math.ceil(itemsWithScore.length * warmPercent);
-  const warm = remaining.slice(0, warmCount);
-  const cold = remaining.slice(warmCount);
-
-  if (maxHotCount && hot.length > maxHotCount) hot.length = maxHotCount;
-  if (maxWarmCount && warm.length > maxWarmCount) warm.length = maxWarmCount;
-  if (maxColdCount && cold.length > maxColdCount) cold.length = maxColdCount;
-
-  return { hot, warm, cold, emergingSet: emergingIdSet };
+  return partitionByScore(itemsWithScore, {
+    getId: (r) => r.id,
+    getScore: (r) => r.score,
+    isEmerging: (r) => emergingIdSet.has(r.id),
+    getEmergingSortScore: (r) => r.lastUsedTime ?? 0,
+  }, config);
 }
 
 // ─── 展示：热门列表 ───
 
+interface HotRelationItem {
+  text: string;
+  score: number;
+  groupPath: string;
+  isImported: boolean;
+  isEmerging: boolean;
+}
+
 function formatHotRelations(
-  allRelations: { text: string; score: number; groupPath: string; isImported: boolean; isEmerging: boolean }[],
+  allRelations: HotRelationItem[],
   hotCount: number
 ): string {
   const bestByGroup = new Map<string, typeof allRelations[number]>();
@@ -344,7 +260,7 @@ function renderTree(
     const isLastRoot = rootIdx === rootNames.length - 1;
     const rootLabel = `${rootName}/`;
     const rootScore = groupScores.get(rootName) || 0;
-    const rootLabel2 = partition ? getPartitionLabel(rootName, partition) : '';
+    const rootLabel2 = getPartitionLabel(rootName, partition);
 
     if (!filterSet || hasVisibleDescendant(roots[rootName] as Record<string, unknown>, rootName, filterSet)) {
       lines.push(`${rootLabel} (score: ${fmtScore(rootScore)}) ${rootLabel2}`);
@@ -405,7 +321,7 @@ function renderTreeChildren(
     const connector = isLast ? '└── ' : '├── ';
     const childPrefix = `${parentPath}/${key}`;
     const score = groupScores.get(childPrefix) || 0;
-    const label = partition ? getPartitionLabel(childPrefix, partition) : '';
+    const label = getPartitionLabel(childPrefix, partition);
     const childNode = value as Record<string, unknown>;
     const hasChildren = Object.keys(childNode).length > 0;
 
@@ -481,7 +397,7 @@ function formatGroupRelations(
   groupPath: string,
   data: GroupData,
   now: number,
-  config: PartitionConfig,
+  config: typeof DEFAULT_PARTITION_CONFIG,
   hotCount: number,
   mode: string
 ): string {
@@ -513,12 +429,14 @@ function formatGroupRelations(
   lines.push('');
 
   // 热门知识
+  const hotIdSet = new Set(partition.hot.map((r) => r.id));
+  const warmIdSet = new Set(partition.warm.map((r) => r.id));
   const top = partition.hot.slice(0, hotCount);
   if (top.length > 0) {
     lines.push(`🔥 热门知识 (Top ${hotCount}):`);
     top.forEach((rel, i) => {
       const prefix = i === top.length - 1 ? '└──' : '├──';
-      const label = getRelPartitionLabel(rel, partition.hot, partition.warm, partition.emergingSet);
+      const label = getRelPartitionLabel(rel, hotIdSet, warmIdSet, partition.emergingSet);
       lines.push(`${prefix} ${rel.text} (score: ${fmtScore(rel.score)}) ${label}`);
     });
     lines.push('');
@@ -549,29 +467,101 @@ function computeStats(
   };
 }
 
-// ─── 帮助信息 ───
-
-function showHelp(): void {
-  console.log(`=== 知识索引帮助 ===
-
-📖 查询命令:
-- 查询 <路径>     查看具体 Group 的详细内容
-- 热门索引        查看热门索引
-- 索引层级 <N>    查看特定层级的索引
-
-🔧 参数说明:
---scope <scope>       项目隔离标识（必填）
---groups <group1,group2>  逗号分隔的 Group 路径列表
---hot-count <count>   热门索引展示个数（默认 5）
---depth <depth>       索引层级深度（默认 4，最大 10）
---partition <partition>  分区过滤：hot | warm | cold | emerging | all
---mode <mode>         展示模式：full | hot | compact | help`);
-}
-
 // ─── 输出 ───
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
+}
+
+// ─── CLI 辅助 ───
+
+const ALLOWED_MODES = ['hot', 'warm', 'cold', 'emerging', 'full'] as const;
+const PARTITION_DISPLAY_ORDER = ['hot', 'warm', 'cold', 'emerging'] as const;
+
+interface CliOpts {
+  scope: string;
+  depth: number;
+  hotCount: number;
+  modes: string[];
+  groupsParam?: string;
+}
+
+function parseCliOpts(opts: Record<string, string>): CliOpts {
+  const scope = opts.scope;
+
+  const rawDepth = parseInt(opts.depth, 10);
+  const depth = Number.isFinite(rawDepth) && rawDepth > 0 ? Math.min(rawDepth, 10) : 4;
+  if (!Number.isFinite(rawDepth) || rawDepth <= 0) {
+    console.warn('警告：--depth 取值无效或非正整数，已回退为默认 4');
+  } else if (rawDepth > 10) {
+    console.warn(`警告：--depth ${rawDepth} 超过最大值，已限制为 10`);
+  }
+
+  const rawHotCount = parseInt(opts.hotCount, 10);
+  const hotCount = Number.isFinite(rawHotCount) && rawHotCount > 0 ? rawHotCount : 5;
+  if (!Number.isFinite(rawHotCount) || rawHotCount <= 0) {
+    console.warn('警告：--hot-count 取值无效或非正整数，已回退为默认 5');
+  }
+
+  // 解析逗号分隔的 mode 值，过滤空字符串
+  const modes = opts.mode.split(',').map((m: string) => m.trim()).filter((m: string) => m.length > 0);
+
+  return {
+    scope,
+    depth,
+    hotCount,
+    modes,
+    groupsParam: opts.groups,
+  };
+}
+
+function collectHotRelations(
+  groupsData: Record<string, GroupData>,
+  now: number,
+  halfLifeHours: number,
+  emergingSet: Set<string>
+): HotRelationItem[] {
+  const result: HotRelationItem[] = [];
+  for (const [gp, data] of Object.entries(groupsData)) {
+    for (const rel of data.hot_relations) {
+      result.push({
+        text: rel.text,
+        score: calculateScore(rel.useCount, rel.lastUsedTime, now, halfLifeHours),
+        groupPath: gp,
+        isImported: rel.isImported,
+        isEmerging: emergingSet.has(gp),
+      });
+    }
+  }
+  return result;
+}
+
+function filterRelationsByMode(
+  relations: HotRelationItem[],
+  mode: string,
+  partition: PartitionResult
+): HotRelationItem[] {
+  if (mode === 'hot') {
+    return relations.filter(r => partition.hotSet.has(r.groupPath));
+  } else if (mode === 'warm') {
+    return relations.filter(r => partition.warmSet.has(r.groupPath));
+  } else if (mode === 'cold') {
+    return relations.filter(r => partition.coldSet.has(r.groupPath));
+  } else if (mode === 'emerging') {
+    return relations.filter(r => partition.emergingSet.has(r.groupPath));
+  }
+  // mode === 'full' 或其他未知 mode，返回所有关系
+  return relations;
+}
+
+function getModeTitle(mode: string): string {
+  const titles: Record<string, string> = {
+    hot: '热门索引',
+    warm: '常温索引',
+    cold: '冷区索引',
+    emerging: '新兴热区索引',
+  };
+  return titles[mode] || '索引';
 }
 
 // ─── CLI ───
@@ -585,51 +575,25 @@ program
   .option('--groups <groups>', '逗号分隔的 Group 路径列表')
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--depth <depth>', '索引层级深度', '4')
-  .option('--partition <partition>', '分区过滤：hot|warm|cold|emerging|all', 'all')
-  .option('--mode <mode>', '展示模式：full|hot|compact|help', 'full')
+  .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')
   .action(async (opts) => {
     try {
-      const { scope } = opts;
-      const rawDepthInput = parseInt(opts.depth, 10);
-      const rawDepth = Number.isFinite(rawDepthInput) && rawDepthInput > 0 ? rawDepthInput : 4;
-      if (!Number.isFinite(rawDepthInput) || rawDepthInput <= 0) {
-        console.warn(`警告：--depth 取值无效或非正整数，已回退为默认 4`);
-      }
-      const depth = Math.min(rawDepth, 10);
-      if (rawDepth > 10) {
-        console.warn(`警告：--depth ${rawDepth} 超过最大值，已限制为 10`);
-      }
-      const hotCountInput = parseInt(opts.hotCount, 10);
-      const hotCount = Number.isFinite(hotCountInput) && hotCountInput > 0 ? hotCountInput : 5;
-      if (!Number.isFinite(hotCountInput) || hotCountInput <= 0) {
-        console.warn(`警告：--hot-count 取值无效或非正整数，已回退为默认 5`);
-      }
-      const rawHotCount = hotCount;
-      const partitionFilter: string = opts.partition;
-      const mode: string = opts.mode;
-      const groupsParam: string | undefined = opts.groups;
+      const { scope, depth, hotCount, modes, groupsParam } = parseCliOpts(opts);
 
-      // 验证 partition 值
-      const ALLOWED_PARTITIONS = ['hot', 'warm', 'cold', 'emerging', 'all'];
-      if (!ALLOWED_PARTITIONS.includes(partitionFilter)) {
-        output({ ok: false, error: `--partition 无效值：${partitionFilter}，有效值：hot | warm | cold | emerging | all` });
+      // 验证每个 mode 值
+      if (modes.length === 0) {
+        output({ ok: false, error: '--mode 不能为空，有效值：hot | warm | cold | emerging | full' });
         process.exit(1);
       }
-
-      // 验证 mode 值
-      const ALLOWED_MODES = ['full', 'hot', 'compact', 'help'];
-      if (!ALLOWED_MODES.includes(mode)) {
-        output({ ok: false, error: `--mode 无效值：${mode}，有效值：full | hot | compact | help` });
-        process.exit(1);
+      for (const mode of modes) {
+        if (!ALLOWED_MODES.includes(mode as typeof ALLOWED_MODES[number])) {
+          output({ ok: false, error: `--mode 无效值：${mode}，有效值：hot | warm | cold | emerging | full` });
+          process.exit(1);
+        }
       }
 
       validateScope(scope);
       ensureScopeDir(scope);
-
-      if (mode === 'help') {
-        showHelp();
-        return;
-      }
 
       const groupIndex = loadGroupIndex(scope);
       const relationsCache = loadRelationsCache(scope);
@@ -646,97 +610,63 @@ program
       // 指定 Group → 显示 Relations + 词云
       if (groupsParam) {
         const groupPaths = groupsParam.split(',').map((s: string) => s.trim());
-        const outputs: string[] = [];
+        const results: string[] = [];
 
         for (const gp of groupPaths) {
           const data = groupsData[gp];
           if (!data) {
-            outputs.push(`=== ${gp} ===\n\n(暂无 Relations)`);
+            results.push(`=== ${gp} ===\n\n(暂无 Relations)`);
             continue;
           }
-          outputs.push(formatGroupRelations(gp, data, now, config, hotCount, mode));
+          results.push(formatGroupRelations(gp, data, now, config, hotCount, modes[0]));
         }
 
-        console.log(outputs.join('\n\n'));
+        console.log(results.join('\n\n'));
         return;
       }
 
-      // 树视图
+      // 完整展示格式（多分区索引 + 可选完整树 + 统计）
       const allPaths = collectAllGroupPaths(groupIndex.roots);
       const groupScores = getGroupAggregateScores(groupsData, now, config.halfLifeHours);
       const partition = partitionGroups(allPaths, groupScores, groupsData, now, config);
       const stats = computeStats(allPaths, partition);
 
-      switch (mode) {
-        case 'hot': {
-          console.log(`=== 热门索引 [scope: ${scope}] ===`);
-          console.log('');
-          const allRelations: { text: string; score: number; groupPath: string; isImported: boolean; isEmerging: boolean }[] = [];
-          for (const [gp, data] of Object.entries(groupsData)) {
-            for (const rel of data.hot_relations) {
-              const score = calculateScore(rel.useCount, rel.lastUsedTime, now, config.halfLifeHours);
-              allRelations.push({
-                text: rel.text, score, groupPath: gp,
-                isImported: rel.isImported,
-                isEmerging: partition.emergingSet.has(gp),
-              });
-            }
+      console.log(`=== 知识索引 [scope: ${scope}] ===`);
+      console.log('');
+
+      // 收集所有关系
+      const allRelations = collectHotRelations(groupsData, now, config.halfLifeHours, partition.emergingSet);
+
+      // 按顺序展示每个分区（hot → warm → cold → emerging）
+      for (const mode of PARTITION_DISPLAY_ORDER) {
+        if (!modes.includes(mode)) continue;
+
+        const filteredRelations = filterRelationsByMode(allRelations, mode, partition);
+        const title = getModeTitle(mode);
+        
+        if (filteredRelations.length > 0) {
+          if (hotCount > filteredRelations.length) {
+            console.warn(`警告：${title} --hot-count ${hotCount} 超过筛选后索引数 ${filteredRelations.length}，将显示全部`);
           }
-          if (rawHotCount > allRelations.length) {
-            console.warn(`警告：--hot-count ${rawHotCount} 超过总索引数 ${allRelations.length}，将显示全部`);
-          }
-          console.log(`🔥 热门索引 (Top ${hotCount}):`);
-          console.log(formatHotRelations(allRelations, hotCount));
+          console.log(`🔥 ${title} (Top ${hotCount}):`);
+          console.log(formatHotRelations(filteredRelations, hotCount));
           console.log('');
-          console.log(`📊 统计: 总索引 ${stats.total} | 热区 ${stats.hot} | 常温区 ${stats.warm} | 冷区 ${stats.cold}`);
-          break;
-        }
-
-        case 'compact': {
-          console.log(renderCompactTree(groupIndex.roots, depth));
-          break;
-        }
-
-        case 'full':
-        default: {
-          console.log(`=== 知识索引 [scope: ${scope}] ===`);
-          console.log('');
-
-          // 热门索引
-          const allRelations: { text: string; score: number; groupPath: string; isImported: boolean; isEmerging: boolean }[] = [];
-          for (const [gp, data] of Object.entries(groupsData)) {
-            for (const rel of data.hot_relations) {
-              const score = calculateScore(rel.useCount, rel.lastUsedTime, now, config.halfLifeHours);
-              allRelations.push({
-                text: rel.text, score, groupPath: gp,
-                isImported: rel.isImported,
-                isEmerging: partition.emergingSet.has(gp),
-              });
-            }
-          }
-          if (allRelations.length > 0) {
-            if (rawHotCount > allRelations.length) {
-              console.warn(`警告：--hot-count ${rawHotCount} 超过总索引数 ${allRelations.length}，将显示全部`);
-            }
-            console.log(`🔥 热门索引 (Top ${hotCount}):`);
-            console.log(formatHotRelations(allRelations, hotCount));
-            console.log('');
-          }
-
-          // 完整索引树
-          console.log('📁 完整索引树:');
-          console.log(renderTree(groupIndex.roots, groupScores, partition, depth, partitionFilter));
-          console.log('');
-
-          // 统计信息
-          console.log('📊 统计信息:');
-          console.log(`- 总索引数: ${stats.total}`);
-          console.log(`- 热区索引: ${stats.hot} (新兴热: ${stats.emerging}, 历史热: ${stats.hot - stats.emerging})`);
-          console.log(`- 常温区索引: ${stats.warm}`);
-          console.log(`- 冷区索引: ${stats.cold}`);
-          break;
         }
       }
+
+      // 仅当 modes 包含 'full' 时展示完整索引树
+      if (modes.includes('full')) {
+        console.log('📁 完整索引树:');
+        console.log(renderTree(groupIndex.roots, groupScores, partition, depth, null));
+        console.log('');
+      }
+
+      // 统计信息始终展示
+      console.log('📊 统计信息:');
+      console.log(`- 总索引数: ${stats.total}`);
+      console.log(`- 热区索引: ${stats.hot} (新兴热: ${stats.emerging}, 历史热: ${stats.hot - stats.emerging})`);
+      console.log(`- 常温区索引: ${stats.warm}`);
+      console.log(`- 冷区索引: ${stats.cold}`);
     } catch (err) {
       output({ ok: false, error: (err as Error).message });
       process.exit(1);

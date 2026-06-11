@@ -248,7 +248,7 @@ describe('hybridPartition 冷热分区', () => {
     assert.ok(result.hot.length <= 3);
   });
 
-  it('isImported 不进入新兴热区', () => {
+  it('新兴热区基于最近使用，不区分 isImported', () => {
     const items = [
       makeRelation('imported', 10, 1, true), // 导入的，最近使用
       makeRelation('native', 5, 2, false),   // 原生的，最近使用
@@ -257,11 +257,13 @@ describe('hybridPartition 冷热分区', () => {
     const config = { ...DEFAULT_PARTITION_CONFIG, reservedEmerging: 5 };
     const result = hybridPartition(items, now, config);
 
-    // imported 不应在新兴热区（通过检查 hot 中是否有 imported）
+    // 两者都应该在新兴热区（因为都是最近使用的）
     const importedInHot = result.hot.find((r) => r.id === 'imported');
-    // 如果 imported 在 hot 中，它应该是通过历史热区进入的，不是新兴热区
-    // 由于 imported 的 score=0（isImported），它不太可能进入热区
-    assert.ok(!importedInHot || importedInHot.score === 0);
+    const nativeInHot = result.hot.find((r) => r.id === 'native');
+    
+    // 两者都应该在 hot 中（新兴热区）
+    assert.ok(importedInHot, 'imported item should be in hot (emerging)');
+    assert.ok(nativeInHot, 'native item should be in hot (emerging)');
   });
 });
 

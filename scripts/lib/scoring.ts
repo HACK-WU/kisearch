@@ -4,6 +4,7 @@
  * - calculateScore: 简化使用密度评分
  * - recordUse: 防刷分使用记录
  * - hybridPartition: 相对排名冷热分区 + 上限截断
+ * - partitionByScore: 泛型冷热分区（供 query-group 等模块复用）
  * - boundaryDecay: 边界衰减（纯函数）
  */
 
@@ -85,80 +86,110 @@ export function hybridPartition(
   now: number,
   config: PartitionConfig
 ): { hot: Relation[]; warm: Relation[]; cold: Relation[] } {
-  const {
-    hotPercent = 0.3,
-    warmPercent = 0.5,
-    reservedEmerging = 10,
-    recentHours = 48,
-    minHotCount = 1,
-    halfLifeHours = 24,
-    maxHotCount = 10,
-    maxWarmCount = 50,
-    maxColdCount = null,
-  } = config;
+  const { recentHours, halfLifeHours } = config;
+  const recentThreshold = recentHours * 60 * 60 * 1000;
 
-  // 1. 计算每个内容的评分
   const itemsWithScore = items.map((item) => ({
     ...item,
     score: calculateScore(item.useCount, item.lastUsedTime, now, halfLifeHours),
   }));
 
-  // 2. 识别新兴热门（排除 isImported）
-  const recentThreshold = recentHours * 60 * 60 * 1000;
-  const emergingItems = itemsWithScore.filter(
-    (item) =>
-      !item.isImported &&
-      item.lastUsedTime &&
-      now - item.lastUsedTime < recentThreshold
+  const emergingIdSet = new Set(
+    itemsWithScore
+      .filter((r) => r.lastUsedTime && now - r.lastUsedTime < recentThreshold)
+      .map((r) => r.id)
   );
 
-  // 3. 按评分排序
-  itemsWithScore.sort((a, b) => b.score - a.score);
+  const { hot, warm, cold } = partitionByScore(itemsWithScore, {
+    getId: (r) => r.id,
+    getScore: (r) => r.score,
+    isEmerging: (r) => emergingIdSet.has(r.id),
+    getEmergingSortScore: (r) => r.lastUsedTime ?? 0,
+  }, config);
 
-  // 4. 分配热区席位
-  const hot: Relation[] = [];
-  const warm: Relation[] = [];
-  const cold: Relation[] = [];
+  return { hot, warm, cold };
+}
 
-  // 新兴热区（保留席位）——按 lastUsedTime 降序，优先最近使用的
+// ─── 泛型冷热分区 ───
+
+export interface PartitionResult<T> {
+  hot: T[];
+  warm: T[];
+  cold: T[];
+  emergingSet: Set<string>;
+}
+
+/**
+ * 泛型冷热分区算法
+ *
+ * 将新兴识别、评分排序、热/温/冷分配、上限截断统一为一个函数，
+ * 通过 accessor 回调适配不同 item 类型（Group 路径、Relation 等）。
+ *
+ * 截断策略：优先保留新兴席位，再保留历史热门。
+ */
+export function partitionByScore<T>(
+  items: T[],
+  accessors: {
+    getId: (item: T) => string;
+    getScore: (item: T) => number;
+    isEmerging: (item: T) => boolean;
+    /** 新兴项排序依据（默认用 getScore），如 Relation 按 lastUsedTime 降序 */
+    getEmergingSortScore?: (item: T) => number;
+  },
+  config: PartitionConfig
+): PartitionResult<T> {
+  const {
+    hotPercent, warmPercent, reservedEmerging,
+    minHotCount, maxHotCount, maxWarmCount, maxColdCount,
+  } = config;
+
+  const scored = items.map((item) => ({ item, score: accessors.getScore(item) }));
+  scored.sort((a, b) => b.score - a.score);
+
+  const emergingItems = items.filter(accessors.isEmerging);
+  const emergingIdSet = new Set(emergingItems.map(accessors.getId));
+
+  // 新兴热区：按 getEmergingSortScore（或 getScore）降序
+  const hot: T[] = [];
+  const hotIdSet = new Set<string>();
+  const emergingSortFn = accessors.getEmergingSortScore ?? accessors.getScore;
+
   const emergingSorted = [...emergingItems].sort(
-    (a, b) => (b.lastUsedTime ?? 0) - (a.lastUsedTime ?? 0)
+    (a, b) => emergingSortFn(b) - emergingSortFn(a)
   );
-  const emergingHotSeats = Math.min(reservedEmerging, emergingSorted.length);
-  for (let i = 0; i < emergingHotSeats; i++) {
-    if (!hot.includes(emergingSorted[i])) {
+  const emergingSeats = Math.min(reservedEmerging, emergingSorted.length);
+  for (let i = 0; i < emergingSeats; i++) {
+    const id = accessors.getId(emergingSorted[i]);
+    if (!hotIdSet.has(id)) {
       hot.push(emergingSorted[i]);
+      hotIdSet.add(id);
     }
   }
 
-  // 记录新兴席位数量，用于后续上限截断时区分保留优先级
   const emergingHeldCount = hot.length;
 
-  // 历史热区（填充剩余席位）
-  const totalHotSeats = Math.max(
-    minHotCount,
-    Math.ceil(itemsWithScore.length * hotPercent)
-  );
-  for (const item of itemsWithScore) {
+  // 历史热区：按评分填充
+  const totalHotSeats = Math.max(minHotCount, Math.ceil(scored.length * hotPercent));
+  for (const { item } of scored) {
     if (hot.length >= totalHotSeats) break;
-    if (!hot.includes(item)) {
+    const id = accessors.getId(item);
+    if (!hotIdSet.has(id)) {
       hot.push(item);
+      hotIdSet.add(id);
     }
   }
 
-  // 常温区 + 冷区
-  const remaining = itemsWithScore.filter((item) => !hot.includes(item));
-  const warmCount = Math.ceil(itemsWithScore.length * warmPercent);
-  warm.push(...remaining.slice(0, warmCount));
-  cold.push(...remaining.slice(warmCount));
+  // 常温 + 冷区
+  const remaining = scored.filter(({ item }) => !hotIdSet.has(accessors.getId(item)));
+  const warmCount = Math.ceil(scored.length * warmPercent);
+  const warm = remaining.slice(0, warmCount).map(({ item }) => item);
+  const cold = remaining.slice(warmCount).map(({ item }) => item);
 
-  // 上限截断（O4 决策）——优先保留新兴席位，再保留历史热门
+  // 上限截断：优先保留新兴席位
   if (maxHotCount && hot.length > maxHotCount) {
     if (emergingHeldCount >= maxHotCount) {
-      // 新兴席位已填满上限，直接截断为前 N 个（已按最近使用时间排序）
       hot.length = maxHotCount;
     } else {
-      // 新兴席位全部保留，剩余名额从历史热区取 top
       const emergingPart = hot.slice(0, emergingHeldCount);
       const historyPart = hot.slice(emergingHeldCount, maxHotCount);
       hot.length = 0;
@@ -168,7 +199,7 @@ export function hybridPartition(
   if (maxWarmCount && warm.length > maxWarmCount) warm.length = maxWarmCount;
   if (maxColdCount && cold.length > maxColdCount) cold.length = maxColdCount;
 
-  return { hot, warm, cold };
+  return { hot, warm, cold, emergingSet: emergingIdSet };
 }
 
 // ─── 边界衰减 ───

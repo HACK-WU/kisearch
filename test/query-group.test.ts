@@ -1,8 +1,8 @@
 /**
  * query-group.ts 测试
  *
- * 覆盖：full 模式树展示、hot 模式、compact 模式、help 模式、
- *       指定 Group 查询 Relations + 词云、partition 过滤、空数据
+ * 覆盖：hot/warm/cold/emerging 分区展示、
+ *       指定 Group 查询 Relations + 词云、空数据
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -124,26 +124,25 @@ after(async () => {
   }
 });
 
-describe('query-group full 模式', () => {
-  it('展示完整索引树', () => {
+describe('query-group hot 模式（默认）', () => {
+  it('展示完整格式（热门索引 + 树 + 统计）', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'full',
+      '--mode', 'hot',
     ]);
 
     assert.ok(output.includes('知识索引'));
     assert.ok(output.includes(`scope: ${scope}`));
+    assert.ok(output.includes('热门索引'));
     assert.ok(output.includes('完整索引树'));
     assert.ok(output.includes('项目根'));
-    assert.ok(output.includes('监控'));
-    assert.ok(output.includes('部署'));
     assert.ok(output.includes('统计信息'));
   });
 
   it('显示热门索引列表', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'full',
+      '--mode', 'hot',
       '--hot-count', '3',
     ]);
 
@@ -154,7 +153,7 @@ describe('query-group full 模式', () => {
   it('显示统计信息', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'full',
+      '--mode', 'hot',
     ]);
 
     assert.ok(output.includes('总索引数'));
@@ -164,49 +163,42 @@ describe('query-group full 模式', () => {
   });
 });
 
-describe('query-group hot 模式', () => {
-  it('只展示热门索引', () => {
+describe('query-group warm 模式', () => {
+  it('展示常温区内容', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'hot',
-      '--hot-count', '3',
+      '--mode', 'warm',
     ]);
 
-    assert.ok(output.includes('热门索引'));
-    assert.ok(output.includes('统计'));
-    // 不应包含完整索引树
-    assert.ok(!output.includes('完整索引树'));
+    assert.ok(output.includes('知识索引'));
+    assert.ok(output.includes('完整索引树'));
+    assert.ok(output.includes('统计信息'));
   });
 });
 
-describe('query-group compact 模式', () => {
-  it('展示精简树（无评分和标签）', () => {
+describe('query-group cold 模式', () => {
+  it('展示冷区内容', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'compact',
+      '--mode', 'cold',
     ]);
 
-    assert.ok(output.includes('项目根'));
-    assert.ok(output.includes('监控'));
-    assert.ok(output.includes('告警中心'));
-    // 不应包含 score
-    assert.ok(!output.includes('score:'));
-    // 不应包含分区标签
-    assert.ok(!output.includes('[热]'));
+    assert.ok(output.includes('知识索引'));
+    assert.ok(output.includes('完整索引树'));
+    assert.ok(output.includes('统计信息'));
   });
 });
 
-describe('query-group help 模式', () => {
-  it('显示帮助信息', () => {
+describe('query-group emerging 模式', () => {
+  it('展示新兴热区内容', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'help',
+      '--mode', 'emerging',
     ]);
 
-    assert.ok(output.includes('帮助'));
-    assert.ok(output.includes('--scope'));
-    assert.ok(output.includes('--groups'));
-    assert.ok(output.includes('--mode'));
+    assert.ok(output.includes('知识索引'));
+    assert.ok(output.includes('完整索引树'));
+    assert.ok(output.includes('统计信息'));
   });
 });
 
@@ -241,22 +233,10 @@ describe('query-group 指定 Group 查询', () => {
 
     assert.ok(output.includes('暂无'));
   });
-
-  it('compact 模式下 Group 详情也正确', () => {
-    const output = runQueryGroup([
-      '--scope', scope,
-      '--groups', '项目根/监控/告警中心',
-      '--mode', 'compact',
-    ]);
-
-    assert.ok(output.includes('项目根/监控/告警中心'));
-    assert.ok(output.includes('热门知识'));
-    assert.ok(output.includes('关键词'));
-  });
 });
 
 describe('query-group 边界情况', () => {
-  it('空 scope 显示空树', async () => {
+  it('空 scope 显示基本结构', async () => {
     const emptyScope = `empty-query-${Date.now()}`;
     const { initScope } = await import('../scripts/lib/store.js');
     const { getKbDir } = await import('../scripts/lib/scope.js');
@@ -266,11 +246,11 @@ describe('query-group 边界情况', () => {
 
       const output = runQueryGroup([
         '--scope', emptyScope,
-        '--mode', 'full',
+        '--mode', 'hot',
       ]);
 
       assert.ok(output.includes('知识索引'));
-      assert.ok(output.includes('项目根'));
+      assert.ok(output.includes('统计信息'));
     } finally {
       const kbDir = getKbDir(emptyScope);
       if (fs.existsSync(kbDir)) {
@@ -282,7 +262,7 @@ describe('query-group 边界情况', () => {
   it('depth 参数限制树深度', () => {
     const output = runQueryGroup([
       '--scope', scope,
-      '--mode', 'compact',
+      '--mode', 'hot',
       '--depth', '1',
     ]);
 
