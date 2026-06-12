@@ -24,16 +24,42 @@ Agent 加载顺序：
 涉及项目记忆/用户偏好 → 加载 memory-skill
 ```
 
-## 操作指南文档
+## 文档总览
+
+### 操作指南（操作流程）
 
 | 文档 | 场景 |
 |------|------|
-| `docs/build-kb.md` | 首次构建知识索引（S-04 统一 2 步导入流程） |
-| `docs/update-kb.md` | 增量更新知识索引（diff 检测 → 3 步增量） |
-| `docs/query-kb.md` | 知识库查询（快速路径 + 检索路径 + 缺失路径） |
-| `docs/manage-index.md` | 索引结构管理（Group/Relation CRUD） |
-| `docs/verify-index.md` | 验证操作结果（结构/内容/检索验证） |
+| `docs/build-kb.md` | 首次构建知识索引 |
+| `docs/update-kb.md` | 增量更新知识索引 |
+| `docs/query-kb.md` | 知识库查询 |
+| `docs/manage-index.md` | 索引结构管理 |
+| `docs/verify-index.md` | 验证操作结果 |
 | `docs/restore-data.md` | 数据恢复 / 重新初始化 |
+
+### Agent 行为规则（决策逻辑）
+
+| 文档 | 覆盖范围 |
+|------|----------|
+| `docs/codekb-agent-guide.md` | 代码知识库：四步走、白名单/黑名单、memory_recall 兜底、写入 KB 规则 |
+| `docs/memory-agent-guide.md` | 记忆系统：归档机制、自动沉淀、Group 结构、用户画像 |
+| `docs/ki-command-guide.md` | 公共命令参考：query-group / get-module-info / sync-relation / manage-index |
+
+> `codekb-agent-guide` 和 `memory-agent-guide` 以 `ki-command-guide` 为前置依赖。
+
+### 设计文档（架构与需求）
+
+| 文档 | 内容 |
+|------|------|
+| `docs/architecture.md` | ki 三层架构、数据结构、运行时链路 |
+| `docs/memory-system-requirements.md` | 记忆系统 REQ-01~16 |
+| `docs/memory-system-dataflow.md` | 数据流图 |
+| `docs/workflows.md` | 工作流设计 |
+| `docs/error-handling.md` | 错误处理策略 |
+| `docs/import-kb.md` | 批量导入规范 |
+| `docs/cli.md` | CLI 接口文档 |
+| `docs/scan-kb.md` | scan-kb 子命令详解 |
+| `docs/backup-restore.md` | 备份与恢复 |
 
 ## 三层架构基础
 
@@ -66,12 +92,11 @@ Agent 加载顺序：
 | `memory_store` | 向量化摘要 |
 | `memory_forget` | 删除记忆 |
 
-## 相关文档
+## 相关目录
 
-- 设计文档：`docs/`（S-01~S-06）
-- 操作指南：`docs/{build,update,query,manage,verify,restore}-*.md`
-- 脚本目录：`scripts/`
-- 测试覆盖：`test/`
-- 知识索引总览：`README.md`
-- scan-kb 子命令详解：`docs/scan-kb.md`
-- 备份与恢复：`docs/backup-restore.md`
+| 目录 | 用途 |
+|------|------|
+| `skills/` | 本目录，Agent 加载的 skill 文件 |
+| `docs/` | 所有文档（操作指南 + 行为规则 + 设计文档） |
+| `scripts/` | 辅助脚本 |
+| `test/` | 测试覆盖 |
