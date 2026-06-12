@@ -1,6 +1,6 @@
 # ki 命令参考
 
-> 本文件是 `ai-codekb-memory-rules` 和 `ai-memory-system-rules` 的公共命令参考。
+> 本文件是 `codekb-agent-guide` 和 `memory-agent-guide` 的公共命令参考。
 > 各规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
 
 ---
@@ -11,9 +11,9 @@
 
 | 规则 | scope 值 |
 |------|----------|
-| ai-codekb-memory-rules | `${scope}` |
-| ai-memory-system-rules（项目记忆） | `${scope}-memory` |
-| ai-memory-system-rules（用户画像） | `user-profile` |
+| codekb-agent-guide | `${scope}` |
+| memory-agent-guide（项目记忆） | `${scope}-memory` |
+| memory-agent-guide（用户画像） | `user-profile` |
 
 ### 1. 拉取全景索引
 
@@ -194,4 +194,4 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 ki query-group --scope <scope> --mode full
 ```
 
-> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由各规则文件（`ai-codekb-memory-rules.md` / `ai-memory-system-rules.md`）定义。
+> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由各规则文件（`codekb-agent-guide.md` / `memory-agent-guide.md`）定义。

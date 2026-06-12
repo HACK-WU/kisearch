@@ -1,8 +1,8 @@
-# ai-memory-system-rules 记忆系统行为规则
+# memory-agent-guide 记忆系统行为规则
 
 > **面向所有项目**。本规则指导 AI 利用 `ki` 命令构建跨会话的持久化记忆能力。
 > 覆盖两大领域：**项目记忆**（项目上下文）和**用户画像**（个人偏好与习惯）。
-> 与 `ai-codekb-memory-rules` 互补，不重叠。
+> 与 `codekb-agent-guide` 互补，不重叠。
 
 ---
 
@@ -54,7 +54,7 @@
 
 ## 2. 与代码知识库的边界
 
-| 维度 | ai-codekb-memory-rules | ai-memory-system-rules |
+| 维度 | codekb-agent-guide | memory-agent-guide |
 |------|------------------------|------------------------|
 | scope | `${scope}` | `${scope}-memory` / `user-profile` |
 | 内容类型 | 代码知识（模块、API、设计） | 项目上下文 + 用户偏好 |
@@ -517,7 +517,7 @@ ki query-group --scope user-profile --mode full
 
 ## 12. 快速命令速查
 
-> **公共命令语法见 [ki-command-reference.md](ki-command-reference.md)**。各命令在不同 scope 下的使用示例如下：
+> **公共命令语法见 [ki-command-guide](ki-command-guide.md)**。各命令在不同 scope 下的使用示例如下：
 
 ### 12.1 项目记忆（scope: `${scope}-memory`）
 
@@ -618,4 +618,4 @@ ki manage-index --scope user-profile --action create --parent "父" --name "子"
 
 ---
 
-> 本规则覆盖 REQ-01~16。与 `ai-codekb-memory-rules` 互补，各管各的 scope，互不重叠。
+> 本规则覆盖 REQ-01~16。与 `codekb-agent-guide` 互补，各管各的 scope，互不重叠。

@@ -1,4 +1,4 @@
-# ai-codekb-memory-rules 代码知识库检索行为规则
+# codekb-agent-guide 代码知识库检索行为规则
 
 > **面向 BK-Monitor 项目**。本规则直接告诉你每个阶段该敲什么命令、拿到什么输出、做什么判断。
 > 不再需要去翻其他文档。
@@ -447,7 +447,7 @@ ki manage-index --scope ${scope} --action delete --parent "父Group路径" --nam
 
 ## 9. 快速命令速查
 
-> **公共命令语法见 [ki-command-reference.md](ki-command-reference.md)**。本节仅列出代码知识库特有的命令。
+> **公共命令语法见 [ki-command-guide](ki-command-guide.md)**。本节仅列出代码知识库特有的命令。
 
 ### 9.1 批量写入 KB
 
