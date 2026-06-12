@@ -21,9 +21,9 @@
 
 | 步骤 | 文件 | 触发条件 |
 |------|------|----------|
-| ① | `skills/ki-foundation.md` | **必读前置**，涉及项目知识时必须先读 |
-| ② | `skills/codekb-skill.md` | 涉及代码/架构/API 等代码知识时加载 |
-| ③ | `skills/memory-skill.md` | 涉及项目背景/进度/偏好等上下文时加载 |
+| ① | `skills/ki-foundation/SKILL.md` | **必读前置**，涉及项目知识时必须先读 |
+| ② | `skills/codekb-skill/SKILL.md` | 涉及代码/架构/API 等代码知识时加载 |
+| ③ | `skills/memory-skill/SKILL.md` | 涉及项目背景/进度/偏好等上下文时加载 |
 
 > ② 和 ③ 可按需选其一或两者并行，但都必须在 ① 之后。
 >

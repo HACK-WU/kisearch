@@ -19,20 +19,20 @@ GITHUB_BRANCH="master"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 TARGET_DIR=""
-MODE=""
+MODES=()
 
 for arg in "$@"; do
     case "$arg" in
-        --skills) MODE="skills" ;;
-        --rules)  MODE="rules"  ;;
-        --docs)   MODE="docs"   ;;
-        --all)     MODE="all"     ;;
+        --skills) MODES+=("skills") ;;
+        --rules)  MODES+=("rules")  ;;
+        --docs)   MODES+=("docs")   ;;
+        --all)     MODES=("skills" "rules" "docs") ;;
         -*)        echo "未知选项: $arg"; exit 1 ;;
         *)         TARGET_DIR="$arg" ;;
     esac
 done
 
-if [ -z "$TARGET_DIR" ] || [ -z "$MODE" ]; then
+if [ -z "$TARGET_DIR" ] || [ ${#MODES[@]} -eq 0 ]; then
     echo "用法: bash install.sh <目标项目路径> --skills|--rules|--docs|--all"
     echo ""
     echo "  目标项目路径    安装到的项目根目录"
@@ -41,8 +41,11 @@ if [ -z "$TARGET_DIR" ] || [ -z "$MODE" ]; then
     echo "  --docs          安装操作指南与设计文档（docs/）"
     echo "  --all           安装全部（skills + rules + docs）"
     echo ""
+    echo "  可组合使用：--skills --rules"
+    echo ""
     echo "示例:"
     echo "  bash install.sh ~/projects/my-app --skills"
+    echo "  bash install.sh ~/projects/my-app --skills --rules"
     echo "  bash install.sh ~/projects/my-app --all"
     echo ""
     echo "一键安装 Skills:"
@@ -58,7 +61,12 @@ fi
 download() {
     local url="$1" dest="$2"
     mkdir -p "$(dirname "$dest")"
-    curl -fsSL "$url" -o "$dest"
+    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
+        return 0
+    else
+        rm -f "$dest" 2>/dev/null
+        return 1
+    fi
 }
 
 NORMALIZED_DIR="${TARGET_DIR%/}"
@@ -175,18 +183,13 @@ install_docs() {
 # ============================================================
 # 按模式执行
 # ============================================================
-case "$MODE" in
-    skills) install_skills ;;
-    rules)  install_rules  ;;
-    docs)   install_docs   ;;
-    all)
-        install_skills
-        echo ""
-        install_rules
-        echo ""
-        install_docs
-        ;;
-esac
+for mode in "${MODES[@]}"; do
+    case "$mode" in
+        skills) install_skills ;;
+        rules)  install_rules  ;;
+        docs)   install_docs   ;;
+    esac
+    echo ""
+done
 
-echo ""
 echo "✅ 完成: ${TARGET_DIR}"
