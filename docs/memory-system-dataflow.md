@@ -197,10 +197,20 @@ knowledge-indexer/kb/
   "useCount": 0,
   "lastUsedTime": null,
   "isImported": false,
-  "memoryId": "xxx-xxx-xxx",
   "sourcePath": null
 }
 ```
+
+**字段说明**：
+- `id`：Relation 唯一标识
+- `text`：Relation 名称（显示文本）
+- `score`：热度分数
+- `useCount`：使用次数
+- `lastUsedTime`：最后使用时间
+- `isImported`：是否为导入的数据
+- `sourcePath`：源文件路径（可选）
+
+**注意**：在新的纯 ki 命令架构中，不再使用 `memoryId` 字段，因为不再依赖 `memory_store`/`memory_recall`。
 
 ### 8.2 归档文件格式
 
