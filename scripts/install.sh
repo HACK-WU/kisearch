@@ -20,17 +20,20 @@ RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 TARGET_DIR=""
 MODES=()
+ALL_MODE=false
 
 for arg in "$@"; do
     case "$arg" in
-        --skills) MODES+=("skills") ;;
-        --rules)  MODES+=("rules")  ;;
-        --docs)   MODES+=("docs")   ;;
-        --all)     MODES=("skills" "rules" "docs") ;;
+        --all)     ALL_MODE=true ;;
+        --skills)  $ALL_MODE || MODES+=("skills") ;;
+        --rules)   $ALL_MODE || MODES+=("rules")  ;;
+        --docs)    $ALL_MODE || MODES+=("docs")   ;;
         -*)        echo "未知选项: $arg"; exit 1 ;;
         *)         TARGET_DIR="$arg" ;;
     esac
 done
+
+$ALL_MODE && MODES=("skills" "rules" "docs")
 
 if [ -z "$TARGET_DIR" ] || [ ${#MODES[@]} -eq 0 ]; then
     echo "用法: bash install.sh <目标项目路径> --skills|--rules|--docs|--all"

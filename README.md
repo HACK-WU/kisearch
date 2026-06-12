@@ -50,20 +50,20 @@
 
 | 文档 | 场景 |
 |------|------|
-| `docs/build-kb.md` | 首次构建知识索引 |
-| `docs/update-kb.md` | 增量更新知识索引 |
-| `docs/query-kb.md` | 知识库查询 |
-| `docs/manage-index.md` | 索引结构管理 |
-| `docs/verify-index.md` | 验证操作结果 |
-| `docs/restore-data.md` | 数据恢复 / 重新初始化 |
+| [`docs/build-kb.md`](./docs/build-kb.md) | 首次构建知识索引 |
+| [`docs/update-kb.md`](./docs/update-kb.md) | 增量更新知识索引 |
+| [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
+| [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
+| [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
+| [`docs/restore-data.md`](./docs/restore-data.md) | 数据恢复 / 重新初始化 |
 
 ### Agent 行为规则（完整版）
 
 | 文档 | 覆盖范围 |
 |------|----------|
-| `docs/codekb-agent-guide.md` | 代码知识库：四步走、白名单/黑名单、memory_recall 兜底、写入 KB 规则 |
-| `docs/memory-agent-guide.md` | 记忆系统：归档机制、自动沉淀、Group 结构、用户画像 |
-| `docs/ki-command-guide.md` | 公共命令参考：query-group / get-module-info / sync-relation / manage-index |
+| [`docs/codekb-agent-guide.md`](./docs/codekb-agent-guide.md) | 代码知识库：四步走、白名单/黑名单、memory_recall 兜底、写入 KB 规则 |
+| [`docs/memory-agent-guide.md`](./docs/memory-agent-guide.md) | 记忆系统：归档机制、自动沉淀、Group 结构、用户画像 |
+| [`docs/ki-command-guide.md`](./docs/ki-command-guide.md) | 公共命令参考：query-group / get-module-info / sync-relation / manage-index |
 
 ### 设计文档与架构
 
