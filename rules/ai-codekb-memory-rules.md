@@ -447,36 +447,27 @@ ki manage-index --scope ${scope} --action delete --parent "父Group路径" --nam
 
 ## 9. 快速命令速查
 
+> **公共命令语法见 [ki-command-reference.md](ki-command-reference.md)**。本节仅列出代码知识库特有的命令。
+
+### 9.1 批量写入 KB
+
 ```bash
-# 拉全景
-ki query-group --scope ${scope} --mode full
-
-# 看某 Group 热门 + 新兴热 + 关键词
-ki query-group --scope ${scope} --groups "路径" --mode hot,emerging
-
-# 取原文
-ki get-module-info --scope ${scope} --group "路径" --relation "名称"
-
-# 单条写入 KB
-ki sync-relation --scope ${scope} --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
-
-# 批量写入 KB
 ki scan-kb import --scope ${scope} --mode incremental --results /path/to/ai-results.json
-
-# 创建 Group
-ki manage-index --scope ${scope} --action create --parent "父" --name "子"
-
-# 删除 Group
-ki manage-index --scope ${scope} --action delete --parent "父" --name "子" --force
 ```
 
-**MCP memory_recall 参数速查**：
+详见 §5.2 批量写入流程。
+
+### 9.2 MCP memory_recall 语义兜底
+
+**仅当索引中找不到目标 Relation 时**使用：
 
 | 参数 | 值 | 注意事项 |
 |------|-----|----------|
 | query | 用户问题 + 关键词词云提取 | **必须用 `query`，禁止 `text`** |
 | limit | 3 | |
 | scope | `${scope}` | 直接指定 scope 过滤，**禁止用 `tags`**（实测不生效） |
+
+详见 §4.1 语义兜底流程。
 
 ---
 

@@ -517,59 +517,45 @@ ki query-group --scope user-profile --mode full
 
 ## 12. 快速命令速查
 
-### 12.1 全部命令
+> **公共命令语法见 [ki-command-reference.md](ki-command-reference.md)**。各命令在不同 scope 下的使用示例如下：
+
+### 12.1 项目记忆（scope: `${scope}-memory`）
 
 ```bash
-# ===== 查询 =====
-
-# 拉项目记忆全景
+# 拉全景
 ki query-group --scope ${scope}-memory --mode full
 
-# 拉用户画像全景
-ki query-group --scope user-profile --mode full
-
-# 查某 Group 热区（项目记忆）
+# 查热区
 ki query-group --scope ${scope}-memory --groups "路径" --mode hot,emerging
 
-# 查某 Group 热区（用户画像）
-ki query-group --scope user-profile --groups "路径" --mode hot,emerging
-
-# 取原文（项目记忆）
+# 取原文
 ki get-module-info --scope ${scope}-memory --group "路径" --relation "名称"
 
-# 取原文（用户画像）
-ki get-module-info --scope user-profile --group "路径" --relation "名称"
-
-# ===== 写入 =====
-
-# 写入项目记忆
+# 写入
 ki sync-relation --scope ${scope}-memory --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
 
-# 写入用户画像
-ki sync-relation --scope user-profile --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
-
-# ===== 管理 =====
-
-# 创建 Group（项目记忆）
+# 创建 Group
 ki manage-index --scope ${scope}-memory --action create --parent "父" --name "子"
-
-# 创建 Group（用户画像）
-ki manage-index --scope user-profile --action create --parent "父" --name "子"
-
-# 删除 Group
-ki manage-index --scope <scope> --action delete --parent "父" --name "子" --force
 ```
 
-### 12.2 常见错误与修复
+### 12.2 用户画像（scope: `user-profile`）
 
-| 错误 | 原因 | 修复 |
-|------|------|------|
-| `scope not found` | scope 尚未创建 | 先执行 `ki sync-relation` 写入任意一条数据自动创建 scope |
-| Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create` 创建 |
-| 归档时找不到 Relation | Relation 名称与预期不符 | 用 `ki query-group --mode full` 确认实际名称 |
-| `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module-info 中真实存在 |
-| `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
-| 写入到错误的 scope | 混淆了权限和 scope | 检查：项目记忆 → `${scope}-memory`，用户画像 → `user-profile` |
+```bash
+# 拉全景
+ki query-group --scope user-profile --mode full
+
+# 查热区
+ki query-group --scope user-profile --groups "路径" --mode hot,emerging
+
+# 取原文
+ki get-module-info --scope user-profile --group "路径" --relation "名称"
+
+# 写入
+ki sync-relation --scope user-profile --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
+
+# 创建 Group
+ki manage-index --scope user-profile --action create --parent "父" --name "子"
+```
 
 ---
 
