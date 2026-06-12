@@ -104,6 +104,20 @@
 
 ### 安装
 
+**方式一：一键安装（推荐用于 AI Agent 场景）**
+
+仅下载 Skills / Rules / Docs，无需克隆整个仓库：
+
+```bash
+# 安装 AI Agent Skills + 加载规则到当前项目
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install.sh | bash -s -- "$(pwd)" --skills --rules
+
+# 或安装全部（Skills + Rules + Docs）
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install.sh | bash -s -- "$(pwd)" --all
+```
+
+**方式二：完整安装（开发 & CLI 使用）**
+
 ```bash
 # 克隆项目
 git clone git@github.com:HACK-WU/knowledge-indexer.git
