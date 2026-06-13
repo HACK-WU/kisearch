@@ -79,7 +79,11 @@ rm -rf kb/{scope}
 运行任意会调用 `ensureScopeDir` 的命令，系统会自动从 `_template/` 初始化：
 
 ```bash
-ki manage-index --scope {scope} --action list
+# 方法一：查询 Group 结构（自动初始化）
+ki manage-index --scope {scope} --action create-root --root-name "项目根"
+
+# 方法二：列出 scope 确认初始化成功
+ki manage-index --action list-scopes
 ```
 
 **Step 4：重新导入数据**

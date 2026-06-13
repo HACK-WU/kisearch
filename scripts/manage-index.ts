@@ -6,11 +6,12 @@
  *   npx jiti scripts/manage-index.ts --scope <scope> --action create-root --root-name <name>
  *   npx jiti scripts/manage-index.ts --scope <scope> --action create --parent <path> --name <name>
  *   npx jiti scripts/manage-index.ts --scope <scope> --action delete --parent <path> --name <name> [--force]
+ *   npx jiti scripts/manage-index.ts --action list-scopes
  */
 
 import { Command } from 'commander';
 import { readJson, writeJson, ensureScopeDir } from './lib/store.js';
-import { getGroupIndexPath, validateScope } from './lib/scope.js';
+import { getGroupIndexPath, validateScope, listAllScopes } from './lib/scope.js';
 import { DEFAULT_ROOT_NAME } from './lib/constants.js';
 
 // ─── 类型定义 ───
@@ -82,9 +83,9 @@ const program = new Command();
 
 program
   .name('manage-index')
-  .description('Group 树索引管理')
-  .requiredOption('--scope <scope>', '项目隔离标识')
-  .option('--action <action>', '操作：create | delete | create-root', 'create')
+  .description('Group 树索引管理（支持 scope 列表查询）')
+  .option('--scope <scope>', '项目隔离标识（list-scopes 时可省略）')
+  .option('--action <action>', '操作：create | delete | create-root | list-scopes', 'create')
   .option('--parent <parent>', '父节点路径（create/delete 时使用）')
   .option('--name <name>', '节点名称（create 时使用）')
   .option('--root-name <rootName>', '根节点名称（create-root 时使用）')
@@ -92,6 +93,33 @@ program
   .action(async (opts) => {
     try {
       const { scope, action, parent, name, rootName, force } = opts;
+
+      // ─── list-scopes：不需要 scope ───
+      if (action === 'list-scopes') {
+        const scopes = listAllScopes();
+        // 为每个 scope 补充根节点信息
+        const scopeDetails = scopes.map((s) => {
+          const indexPath = getGroupIndexPath(s);
+          let rootNames: string[] = [];
+          try {
+            const data = readJson<GroupIndex>(indexPath);
+            if (data?.roots) {
+              rootNames = Object.keys(data.roots);
+            }
+          } catch (err) {
+            console.warn(`警告：scope "${s}" 的 group-index.json 读取失败: ${(err as Error).message}`);
+          }
+          return { scope: s, rootNames };
+        });
+        output({ ok: true, scopes: scopeDetails, total: scopes.length });
+        return;
+      }
+
+      // 其他 action 需要 scope
+      if (!scope) {
+        output({ ok: false, error: '此操作需要 --scope 参数' });
+        process.exit(1);
+      }
 
       // 校验 scope
       validateScope(scope);

@@ -18,10 +18,9 @@
 
 import { Command } from 'commander';
 import fs from 'fs';
-import path from 'path';
 import { readJson, writeJson } from './lib/store.js';
-import { getRelationsCachePath, validateScope } from './lib/scope.js';
-import { DEFAULT_PARTITION_CONFIG, KB_BASE_DIR, type PartitionConfig } from './lib/constants.js';
+import { getRelationsCachePath, validateScope, listAllScopes } from './lib/scope.js';
+import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './lib/constants.js';
 
 // ─── 类型定义（兼容新旧格式） ───
 
@@ -164,20 +163,6 @@ function migrateScope(scope: string, dryRun: boolean): MigrateStat {
   }
 
   return stat;
-}
-
-// ─── 收集所有 scope ───
-
-function listAllScopes(): string[] {
-  if (!fs.existsSync(KB_BASE_DIR)) return [];
-  const entries = fs.readdirSync(KB_BASE_DIR, { withFileTypes: true });
-  return entries
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .filter((name) => /^[a-zA-Z0-9_-]+$/.test(name))
-    .filter((name) =>
-      fs.existsSync(path.join(KB_BASE_DIR, name, 'relations-cache.json'))
-    );
 }
 
 // ─── CLI ───

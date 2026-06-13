@@ -29,6 +29,9 @@
 
 - `create-root` 缺少 `--root-name`
 - `create` 缺少 `--parent` 或 `--name`
+- 非 `list-scopes` 操作缺少 `--scope`
+
+> 忘记 scope 名称？执行 `ki manage-index --action list-scopes` 列出所有已初始化的 scope。
 
 ### `sync-relation.ts` 单条模式参数不完整
 

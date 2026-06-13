@@ -97,6 +97,25 @@ export function getSource(scope: string): GroupIndexSource | null {
   return { dir: source.dir, rootName: source.rootName, commit: source.commit };
 }
 
+// ─── Scope 枚举 ───
+
+/**
+ * 列出 kb/ 下所有已初始化的 scope
+ * - 仅返回符合 scope 命名规则的目录
+ * - 仅返回包含 relations-cache.json 的目录（即已初始化的 scope）
+ */
+export function listAllScopes(): string[] {
+  if (!fs.existsSync(KB_BASE_DIR)) return [];
+  const entries = fs.readdirSync(KB_BASE_DIR, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((name) => /^[a-zA-Z0-9_-]+$/.test(name))
+    .filter((name) =>
+      fs.existsSync(path.join(KB_BASE_DIR, name, 'relations-cache.json'))
+    );
+}
+
 /**
  * 写入 / 更新 source 块到 group-index.json
  * - 不修改 roots / version / scope 字段

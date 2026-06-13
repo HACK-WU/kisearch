@@ -122,7 +122,33 @@ ki scan-kb scan \
 
 ## `manage-index`
 
-管理 Group 树索引节点。
+管理 Group 树索引节点，以及查询已初始化的 scope 列表。
+
+### 列出所有 scope
+
+```bash
+ki manage-index --action list-scopes
+```
+
+**示例：**
+
+```bash
+ki manage-index --action list-scopes
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scopes": [
+    { "scope": "my-project", "rootNames": ["我的项目"] },
+    { "scope": "qoder-wiki", "rootNames": ["QoderWiki"] }
+  ],
+  "total": 2
+}
+```
+
+> `list-scopes` 不需要 `--scope` 参数。
 
 ### 创建根节点
 

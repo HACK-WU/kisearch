@@ -1,11 +1,12 @@
 # 索引结构管理 SKILL
 
-> 知识索引的底层 CRUD 能力，管理 Group 树结构和 Relation 条目。
+> 知识索引的底层 CRUD 能力，管理 Group 树结构、查询 scope 列表和 Relation 条目。
 
 ## 触发场景
 
 - 用户显式请求创建/删除 Group
 - 知识缺失路径中需要创建新 Group
+- 查询当前有哪些已初始化的 scope
 - 手动调整索引结构（非高频场景）
 
 ## 三层架构基础
@@ -31,6 +32,33 @@
 │  - 按 Group 物理隔离                               │
 └─────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 查询 Scope 列表
+
+### 列出所有已初始化的 scope
+
+```bash
+ki manage-index --action list-scopes
+```
+
+**输出**：
+```json
+{
+  "ok": true,
+  "scopes": [
+    { "scope": "my-project", "rootNames": ["我的项目"] },
+    { "scope": "qoder-wiki", "rootNames": ["QoderWiki"] }
+  ],
+  "total": 2
+}
+```
+
+**注意**：
+- `list-scopes` **不需要** `--scope` 参数
+- 仅返回符合 scope 命名规则的已初始化 scope（存在 `relations-cache.json`）
+- 同时返回每个 scope 的根节点名称列表，方便快速了解 scope 内容
 
 ---
 
@@ -212,8 +240,8 @@ ki query-group --scope <scope> --groups <group>
 
 | 参数 | 说明 | 必填 |
 |------|------|------|
-| `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
-| `--action` | create / delete / create-root | 否（默认 create） |
+| `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | `list-scopes` 时不需要，其他 action 必填 |
+| `--action` | create / delete / create-root / list-scopes | 否（默认 create） |
 | `--parent` | 父节点路径 | create/delete 时必填 |
 | `--name` | 节点名称 | create 时必填 |
 | `--root-name` | 根节点名称 | create-root 时必填 |
@@ -291,6 +319,7 @@ knowledge-index/kb/
 | `父节点不存在` | `--parent` 路径错误 | 先创建父节点 |
 | `节点非空，需 --force` | 删除非空节点未加 `--force` | 添加 `--force` 参数 |
 | `默认根节点 "项目根" 不可删除` | 尝试删除默认根节点 | 不删除，或创建新根节点 |
+| `此操作需要 --scope 参数` | `create`/`delete`/`create-root` 未传 `--scope` | 添加 `--scope`，或先用 `--action list-scopes` 确认可用 scope |
 
 ---
 

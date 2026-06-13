@@ -161,7 +161,10 @@ ki query-group \
   --scope my-project \
   --groups "我的项目/API"
 
-# 5. 读取模块原文
+# 5. 列出所有已初始化的 scope
+ki manage-index --action list-scopes
+
+# 6. 读取模块原文
 ki get-module-info \
   --scope my-project \
   --group "我的项目/API" \
@@ -173,7 +176,7 @@ ki get-module-info \
 | 命令 | 说明 |
 |------|------|
 | `scan-kb` | 统一入口：import / diff / scan / vectorize |
-| `manage-index` | Group 树 CRUD |
+| `manage-index` | Group 树 CRUD + 查询 scope 列表 |
 | `query-group` | 查询 Group + 词云 + 分区 |
 | `get-module-info` | 读取本地 KB 原文 |
 | `sync-relation` | 写入 Relation + 关键词校验 |

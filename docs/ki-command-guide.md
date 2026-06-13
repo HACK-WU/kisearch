@@ -139,6 +139,9 @@ ki sync-relation --scope <scope> --input /path/to/batch.json
 ### 5. 管理 Group
 
 ```bash
+# 列出所有已初始化的 scope（不需要 --scope 参数）
+ki manage-index --action list-scopes
+
 # 创建根节点（新 scope 首次使用时必须先创建根节点）
 ki manage-index --scope <scope> --action create-root --root-name "根节点名称"
 
@@ -149,7 +152,20 @@ ki manage-index --scope <scope> --action create --parent "父Group路径" --name
 ki manage-index --scope <scope> --action delete --parent "父Group路径" --name "目标Group名" --force
 ```
 
-**输出示例**：
+**`list-scopes` 输出示例**：
+
+```json
+{
+  "ok": true,
+  "scopes": [
+    { "scope": "my-project", "rootNames": ["我的项目"] },
+    { "scope": "qoder-wiki", "rootNames": ["QoderWiki"] }
+  ],
+  "total": 2
+}
+```
+
+**Group 操作输出示例**：
 
 ```json
 { "ok": true, "path": "父Group路径/新Group名" }
@@ -160,6 +176,8 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 **`create-root` vs `create`**：
 - `create-root`：新 scope 首次初始化时使用，创建根节点（需 `--root-name`）
 - `create`：在已有 Group 下创建子节点（需 `--parent` + `--name`）
+
+**`list-scopes`**：列出 `kb/` 下所有已初始化的 scope 及其根节点名称，不需要 `--scope` 参数
 
 ---
 
@@ -177,7 +195,7 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `scope not found` | scope 尚未创建 | 先执行 `ki manage-index --action create-root --root-name "名称"` 创建根节点，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
+| `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再执行 `ki manage-index --action create-root --root-name "名称"` 创建根节点，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
 | Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create` 创建（若 scope 也无根节点，先 `create-root`） |
 | `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module-info 中真实存在 |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
