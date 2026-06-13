@@ -27,6 +27,10 @@ import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import {
+  buildRelationContent,
+  storeOnePath,
+} from './lib/path-vectorize.js';
 
 // ─── 类型定义 ───
 
@@ -447,6 +451,12 @@ program
 
       // WAL 持久化
       writeJson(cachePath, cache);
+
+      // 写入 ki-relation 向量索引（失败不阻塞）
+      try {
+        const relText = buildRelationContent(relation, group, keywordList);
+        storeOnePath({ text: relText, tag: 'ki-relation', scope });
+      } catch { /* 向量写入失败不影响主流程 */ }
 
       output({
         ok: true,

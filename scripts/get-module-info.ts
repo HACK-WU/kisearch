@@ -20,6 +20,7 @@ import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { searchPath } from './lib/path-search.js';
 
 // ─── 类型定义 ───
 
@@ -78,8 +79,8 @@ program
       // 读取 group-index 用于路径自动补全
       const groupIndex = readGroupIndex(scope);
 
-      // Group 路径自动补全
-      const resolved = resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups);
+      // Group 路径自动补全（传入 scope 启用向量兜底）
+      const resolved = resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups, scope);
 
       if (!resolved.matched) {
         output({
@@ -110,21 +111,38 @@ program
       }
 
       // 查找 Relation
-      const rel = groupData.hot_relations.find(
+      let rel = groupData.hot_relations.find(
         (r) => r.id === relation || r.text === relation
       );
 
       if (!rel) {
-        const availableRelations = groupData.hot_relations.map((r) => r.text);
-        const relationHint = availableRelations.length > 0
-          ? `Group "${resolvedGroup}" 中可用的 Relation：\n${availableRelations.map((r) => `  - ${r}`).join('\n')}`
-          : `Group "${resolvedGroup}" 中暂无 Relation`;
-        output({
-          ok: false,
-          error: `Relation "${relation}" 不存在于 Group "${resolvedGroup}" 中`,
-          hint: relationHint,
-        });
-        process.exit(1);
+        // 向量语义兜底：尝试模糊匹配 relation 名称
+        const fuzzyRel = searchPath(relation, 'ki-relation', scope);
+        if (fuzzyRel && fuzzyRel.matched) {
+          // 用提取出的 relation 名称重新查找
+          const fuzzyRelText = fuzzyRel.extractedPath;
+          const fuzzyMatchedRel = groupData.hot_relations.find(
+            (r) => r.text === fuzzyRelText
+          );
+          if (fuzzyMatchedRel) {
+            console.error(`💡 近似匹配：Relation "${relation}" → "${fuzzyRelText}"（score: ${fuzzyRel.score.toFixed(2)}）`);
+            // 继续后续流程，用 fuzzyMatchedRel 替代 rel
+            rel = fuzzyMatchedRel;
+          }
+        }
+
+        if (!rel) {
+          const availableRelations = groupData.hot_relations.map((r) => r.text);
+          const relationHint = availableRelations.length > 0
+            ? `Group "${resolvedGroup}" 中可用的 Relation：\n${availableRelations.map((r) => `  - ${r}`).join('\n')}`
+            : `Group "${resolvedGroup}" 中暂无 Relation`;
+          output({
+            ok: false,
+            error: `Relation "${relation}" 不存在于 Group "${resolvedGroup}" 中`,
+            hint: relationHint,
+          });
+          process.exit(1);
+        }
       }
 
       // 读取本地 KB index.json
@@ -146,20 +164,20 @@ program
       }
 
       // 查找 Markdown 内容（优先用 text 作为 key）
-      const markdown = localKb[rel.text];
+      const markdown = localKb ? localKb[rel!.text] : null;
       if (!markdown) {
         output({
           ok: false,
-          error: `本地 KB 中未找到 "${rel.text}" 的内容`,
-          hint: `请使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel.text}" --module-info <内容> --keywords <词1,词2>`,
+          error: `本地 KB 中未找到 "${rel!.text}" 的内容`,
+          hint: `请使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel!.text}" --module-info <内容> --keywords <词1,词2>`,
         });
         process.exit(1);
       }
 
       // 更新评分（recordUse）
       const now = Date.now();
-      const updatedRel = recordUse(rel, now);
-      const config = cache.partition_config || DEFAULT_PARTITION_CONFIG;
+      const updatedRel = recordUse(rel!, now);
+      const config = cache!.partition_config || DEFAULT_PARTITION_CONFIG;
       updatedRel.score = calculateScore(
         updatedRel.useCount,
         updatedRel.lastUsedTime,
@@ -168,9 +186,9 @@ program
       );
 
       // 更新 cache 中的 relation
-      const relIdx = groupData.hot_relations.findIndex((r) => r.id === rel.id);
+      const relIdx = groupData.hot_relations.findIndex((r) => r.id === rel!.id);
       groupData.hot_relations[relIdx] = updatedRel;
-      writeJson(cachePath, cache);
+      writeJson(cachePath, cache! as unknown as Record<string, unknown>);
 
       // 输出 Markdown 到 stdout
       console.log(markdown);

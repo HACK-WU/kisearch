@@ -612,7 +612,7 @@ program
         const results: string[] = [];
 
         for (const gp of groupPaths) {
-          const resolved = resolveGroupPath(gp, groupIndex, groupsData);
+          const resolved = resolveGroupPath(gp, groupIndex, groupsData, scope);
 
           if (!resolved.matched) {
             // 未匹配：显示提示信息
@@ -620,7 +620,14 @@ program
             continue;
           }
 
-          const data = groupsData[resolved.resolvedPath]!;
+          const data = groupsData[resolved.resolvedPath];
+
+          // 向量兜底可能匹配到树中存在但 relations-cache 无数据的 Group
+          if (!data) {
+            if (resolved.hint) results.push(resolved.hint);
+            results.push(`=== ${resolved.resolvedPath} ===\n\n(该 Group 路径存在但暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${resolved.resolvedPath}" --relation <描述> --module-info <内容> --keywords <词1,词2>`);
+            continue;
+          }
 
           // 有补全提示时先输出提示
           if (resolved.hint) {

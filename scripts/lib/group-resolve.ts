@@ -5,6 +5,7 @@
  */
 
 import type { GroupIndex } from './scope.js';
+import { searchPath } from './path-search.js';
 
 // ─── 类型定义 ───
 
@@ -17,6 +18,10 @@ export interface ResolveResult {
   matched: boolean;
   /** 当有多个候选时的候选列表 */
   candidates?: string[];
+  /** 是否来自向量近似匹配 */
+  fuzzyMatched?: boolean;
+  /** 向量匹配分数 */
+  fuzzyScore?: number;
 }
 
 // ─── 树遍历工具函数 ───
@@ -93,22 +98,27 @@ export function getDirectChildren(
 /**
  * 解析 Group 路径：直接匹配失败时，自动尝试在顶层 Group 下补全路径
  *
- * 匹配策略（三层查找）：
+ * 匹配策略（四层查找 + 向量兜底）：
  * 1. 直接匹配：groupsData 精确匹配 或 group-index 树精确匹配
  * 2. 整段补全：拼接顶层 Group 前缀后匹配
- * 3. 部分匹配：整段补全失败时，找到最长存在前缀，提示剩余部分不存在
  *    - 唯一命中 → 自动补全
  *    - 多个命中 → 提示候选列表
- *    - 无命中 → 提示可用顶层 Group
+ * 3. 部分匹配：找到最长存在前缀，记录提示但不立即返回
+ * 4. 向量兜底：通过语义向量搜索找到近似路径（优先于部分匹配提示）
+ *    - 命中 → 返回近似匹配结果
+ *    - 未命中 → 回退到部分匹配提示
+ * 5. 完全无匹配 → 提示可用顶层 Group
  *
  * @param userInput 用户输入的 Group 路径
  * @param groupIndex group-index.json 数据
  * @param groupsData relations-cache 中的 groups 数据（用于直接匹配有 Relation 数据的 Group）
+ * @param scope 可选，传入 scope 以启用向量语义兜底
  */
 export function resolveGroupPath(
   userInput: string,
   groupIndex: GroupIndex,
-  groupsData: Record<string, unknown>
+  groupsData: Record<string, unknown>,
+  scope?: string
 ): ResolveResult {
   // 1. 直接匹配 groupsData
   if (groupsData[userInput]) {
@@ -150,28 +160,54 @@ export function resolveGroupPath(
     };
   }
 
-  // 6. 整段补全失败 → 尝试部分匹配，找到最长存在前缀
+  // 6. 整段补全失败 → 尝试部分匹配，收集提示信息（不立即返回，留给向量兜底一次机会）
+  let partialMatchHint: string | null = null;
+
   for (const top of topGroups) {
     const fullCandidate = `${top}/${userInput}`;
     const longestPrefix = findLongestExistingPrefix(groupIndex.groups, fullCandidate);
 
     if (longestPrefix && longestPrefix !== fullCandidate) {
-      // 找到了部分匹配：前缀存在，但尾部不匹配
       const failedPart = fullCandidate.slice(longestPrefix.length + 1);
       const children = getDirectChildren(groupIndex.groups, longestPrefix);
       const childHint = children.length > 0
         ? `"${longestPrefix}" 下的子节点：${children.join(', ')}`
         : `"${longestPrefix}" 下无子节点`;
 
-      return {
-        resolvedPath: userInput,
-        hint: `⚠️ 路径 "${userInput}" 补全为 "${fullCandidate}" 后，"${failedPart}" 不存在。\n${childHint}`,
-        matched: false,
-      };
+      partialMatchHint = `⚠️ 路径 "${userInput}" 补全为 "${fullCandidate}" 后，"${failedPart}" 不存在。\n${childHint}`;
+      break;
     }
   }
 
-  // 7. 完全无匹配 → 提示可用顶层 Group
+  // 7. 向量语义兜底（仅当 scope 提供时启用）
+  if (scope) {
+    const fuzzyResult = searchPath(userInput, 'ki-path', scope);
+    if (fuzzyResult && fuzzyResult.matched) {
+      const candidatePath = fuzzyResult.extractedPath;
+      // 校验向量兜底返回的路径是否真实存在于 group-index 或 groupsData 中
+      if (pathExistsInTree(groupIndex.groups, candidatePath) || groupsData[candidatePath]) {
+        return {
+          resolvedPath: candidatePath,
+          hint: `💡 近似匹配："${userInput}" → "${candidatePath}"（score: ${fuzzyResult.score.toFixed(2)}）`,
+          matched: true,
+          fuzzyMatched: true,
+          fuzzyScore: fuzzyResult.score,
+        };
+      }
+      // 向量匹配到的路径不存在于索引中，跳过（可能是旧数据残留）
+    }
+  }
+
+  // 8. 向量兜底也失败 → 使用部分匹配的提示（如有）
+  if (partialMatchHint) {
+    return {
+      resolvedPath: userInput,
+      hint: partialMatchHint,
+      matched: false,
+    };
+  }
+
+  // 9. 完全无匹配 → 提示可用顶层 Group
   const topGroupHint = topGroups.length > 0
     ? `可用的顶层 Group：${topGroups.join(', ')}`
     : '该 scope 下暂无 Group';

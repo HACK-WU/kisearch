@@ -32,6 +32,12 @@ import type { Relation } from './scoring.js';
 import { normalizeAiResults, type AiResultsFile, type ScanResultEntry } from './ai-results.js';
 import { bulkVectorize, type BatchVectorizeResult } from './batch-vectorize.js';
 import {
+  buildGroupPathContent,
+  buildRelationContent,
+  bulkStorePaths,
+  type PathVectorizeEntry,
+} from './path-vectorize.js';
+import {
   readProgressFile,
   writeProgressFile,
   cleanProgressFile,
@@ -484,6 +490,47 @@ export function handleImport(args: HandleImportArgs): ImportResult {
   // 合并 memoryMap：进度文件恢复的 + 本次新向量化的
   const mergedMap = new Map([...skippedFromProgress, ...vec.ok]);
   const skipCount = skippedFromProgress.size;
+
+  // ── 路径向量写入（ki-path + ki-relation）──
+  const pathEntries: PathVectorizeEntry[] = [];
+  const groupKeywordsMap = new Map<string, Set<string>>();
+
+  for (const e of results.entries) {
+    if (e.action === 'delete') continue;
+    const target = mapping?.get(e.path);
+    const groupPath = target ? target.groupPath : e.groupPath;
+    const relationText = target?.relation || deriveRelationText(e.path);
+    const keywords = e.keywords || [];
+
+    // 收集每个 Group 的关键词（去重）
+    if (!groupKeywordsMap.has(groupPath)) groupKeywordsMap.set(groupPath, new Set());
+    const kwSet = groupKeywordsMap.get(groupPath)!;
+    for (const kw of keywords) kwSet.add(String(kw).trim());
+
+    // ki-relation 向量
+    pathEntries.push({
+      text: buildRelationContent(relationText, groupPath, keywords),
+      tag: 'ki-relation',
+      scope: args.scope,
+    });
+  }
+
+  // ki-path 向量（每个 Group 一条，合并关键词）
+  for (const [groupPath, kwSet] of groupKeywordsMap) {
+    pathEntries.push({
+      text: buildGroupPathContent(groupPath, [...kwSet]),
+      tag: 'ki-path',
+      scope: args.scope,
+    });
+  }
+
+  if (pathEntries.length > 0) {
+    logInfo(`写入路径向量索引（${pathEntries.length} 条）...`);
+    const pathResult = bulkStorePaths(pathEntries);
+    if (pathResult.errors.length > 0) {
+      logInfo(`路径向量写入：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
+    }
+  }
 
   const ctx: ImportContext = {
     scope: args.scope,

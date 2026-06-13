@@ -30,6 +30,14 @@ import {
   deleteMemory,
   type BatchVectorizeOptions,
 } from './batch-vectorize.js';
+import {
+  buildRelationContent,
+  buildGroupPathContent,
+  storeOnePath,
+  deletePathVector,
+  bulkStorePaths,
+  type PathVectorizeEntry,
+} from './path-vectorize.js';
 import type {
   RelationsCache,
   ImportResult,
@@ -275,6 +283,9 @@ export function handleIncremental(args: HandleIncrementalArgs): IncrementalResul
       errors.push({ path: e.path, error: `[delete warn] mem delete 失败：${del.error}` });
     }
     const relationText = deriveRelationText(e.path);
+    // 同时删除对应的 ki-relation 向量
+    const relContent = buildRelationContent(relationText, e.groupPath, e.keywords || []);
+    deletePathVector(relContent, 'ki-relation', args.scope);
     const removedFromCache = removeFromCache(relationsCache, e.path);
     if (!removedFromCache) {
       errors.push({ path: e.path, error: `[delete warn] relations-cache 中未找到 sourcePath=${e.path}` });
@@ -345,6 +356,38 @@ export function handleIncremental(args: HandleIncrementalArgs): IncrementalResul
     logPhaseDone(3, TOTAL_PHASES, `向量化完成：add=${added}, modify=${modified}, errors=${vec.errors.length}`);
   } else {
     logPhaseDone(3, TOTAL_PHASES, '无需向量化');
+  }
+
+  // ── 路径向量同步（ki-path + ki-relation）──
+  const pathEntries: PathVectorizeEntry[] = [];
+  const groupKeywordsMap = new Map<string, Set<string>>();
+
+  for (const e of [...cls.add, ...cls.modify]) {
+    const relationText = deriveRelationText(e.path);
+    const keywords = e.keywords || [];
+
+    if (!groupKeywordsMap.has(e.groupPath)) groupKeywordsMap.set(e.groupPath, new Set());
+    const kwSet = groupKeywordsMap.get(e.groupPath)!;
+    for (const kw of keywords) kwSet.add(String(kw).trim());
+
+    pathEntries.push({
+      text: buildRelationContent(relationText, e.groupPath, keywords),
+      tag: 'ki-relation',
+      scope: args.scope,
+    });
+  }
+
+  for (const [groupPath, kwSet] of groupKeywordsMap) {
+    pathEntries.push({
+      text: buildGroupPathContent(groupPath, [...kwSet]),
+      tag: 'ki-path',
+      scope: args.scope,
+    });
+  }
+
+  if (pathEntries.length > 0) {
+    logInfo(`写入路径向量索引（${pathEntries.length} 条）...`);
+    bulkStorePaths(pathEntries);
   }
 
   // ── Phase 4: 持久化 + 更新 source.commit ──────────────
