@@ -21,6 +21,7 @@
 ## 特性
 
 - **本地知识目录层**：在向量数据库之上提供结构化导航和热关系缓存
+- **向量语义兜底**：精确 Group 路径未命中时，自动通过向量搜索模糊定位，支持部分名称/近似表述
 - **TypeScript 直接执行**：使用 jiti 运行时，无需编译步骤
 - **CLI 驱动**：所有操作通过命令行接口完成
 - **独立部署**：可独立安装和使用，通过 `mem` CLI 命令调用向量存储
@@ -177,8 +178,8 @@ ki get-module-info \
 |------|------|
 | `scan-kb` | 统一入口：import / diff / scan / vectorize |
 | `manage-index` | Group 树 CRUD + 查询 scope 列表 |
-| `query-group` | 查询 Group + 词云 + 分区 |
-| `get-module-info` | 读取本地 KB 原文 |
+| `query-group` | 查询 Group + 词云 + 分区（支持模糊 Group 路径语义兜底） |
+| `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
 | `sync-relation` | 写入 Relation + 关键词校验 |
 | `import-kb` | @deprecated 旧导入 |
 | `migrate-keywords` | 数据迁移 |

@@ -53,6 +53,8 @@ ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
 
 **用途**：查看指定 Group 下的热门知识和新兴热区（近 48 小时内频繁使用的知识）。
 
+> 💡 Group 路径支持向量语义兜底：输入部分名称（如 `"部署运维"`）可自动模糊匹配到完整路径（如 `"部署与运维"`），输出带 `💡 近似匹配` 前缀。
+
 **可选参数**：
 
 | 参数 | 默认值 | 说明 |
@@ -82,7 +84,7 @@ ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ki get-module-info --scope <scope> --group "目标Group路径" --relation "Relation名称"
 ```
 
-**用途**：获取指定 Relation 的完整 Markdown 原文。
+**用途**：获取指定 Relation 的完整 Markdown 原文。支持 Relation 名称的向量语义兜底：精确名称未命中时自动尝试模糊匹配。
 
 **注意**：Agent 必须提炼后回答，不要全文转储。
 
@@ -197,6 +199,7 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 |------|------|------|
 | `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再执行 `ki manage-index --action create --name "名称"` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
 | Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create --name "名称"` 创建 |
+| Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki query-group --mode full` 确认路径 |
 | `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module-info 中真实存在 |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
 | Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki query-group --mode full` 确认实际名称 |

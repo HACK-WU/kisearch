@@ -59,7 +59,9 @@
    ```bash
    ki query-group --scope <scope> --groups <group> --mode hot
    ```
-   
+
+   > 💡 **向量兜底**：若 Group 路径不精确，CLI 会自动通过向量搜索模糊匹配（如 `"部署运维"` 可匹配 `"部署与运维"`），输出带 `💡 近似匹配` 前缀。Agent 看到此提示即可确认匹配成功，无需人工修正路径。
+
    输出示例：
    ```json
    {
@@ -255,5 +257,6 @@
 | 错误 | 原因 | 修复 |
 |------|------|------|
 | `Cannot read properties of undefined (reading 'match')` | `memory_recall` 使用了 `"text"` 参数 | 改为 `"query"` 参数 |
+| Group 路径未精确命中 | Group 路径不精确（拼写、别名、简称） | CLI 已内置向量语义兜底，会自动模糊匹配并输出 `💡 近似匹配` 提示。若仍失败，用 `query-group --mode full` 确认路径 |
 | `Group "XXX" 在 relations-cache 中不存在` | Group 路径错误或未创建 | 先用 `manage-index.ts` 创建 Group |
 | `本地 KB 中未找到 "XXX" 的内容` | Relation 存在但本地 KB 缺失 | 使用 `sync-relation.ts` 写入模块信息 |

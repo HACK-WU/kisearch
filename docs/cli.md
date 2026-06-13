@@ -254,6 +254,25 @@ ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <
 - `emerging`：新兴热区（近期活跃）
 - `full`：完整索引树
 
+**💡 向量语义兜底**：当 `--groups` 指定的 Group 路径在索引树中不存在时，自动通过向量搜索进行模糊匹配。例如输入部分名称 `"部署运维"` 可匹配到 `"部署与运维"`，`"通知渠道"` 可匹配到 `"告警系统设计/通知渠道管理"`。命中后输出带 `💡 近似匹配` 前缀的提示。
+
+**示例：模糊 Group 路径匹配**
+
+```bash
+ki query-group --scope monitor --groups "部署运维"
+```
+
+输出：
+```
+💡 近似匹配："部署运维" → "BK-Monitor-Wiki/部署与运维"（score: 0.89）
+
+=== BK-Monitor-Wiki/部署与运维 ===
+
+🔥 热门知识 (Top 5):
+├── Kubernetes集群管理 (score: 0) [📥]
+└── 容器化部署 (score: 0) [📥]
+```
+
 **示例：查看热门索引**
 
 ```bash
@@ -357,7 +376,7 @@ ki query-group --scope my-project --mode full
 
 ## `get-module-info`
 
-按 Group + Relation 读取本地 KB 中的 Markdown 原文。
+按 Group + Relation 读取本地 KB 中的 Markdown 原文。支持 Relation 名称的向量语义兜底：精确名称未命中时自动尝试模糊匹配。
 
 ```bash
 ki get-module-info \
