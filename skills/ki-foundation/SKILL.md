@@ -93,7 +93,33 @@ flowchart TD
 
 ## 4. 命令参考
 
-### 4.1 拉取全景索引
+### 4.1 查看可用 Scope
+
+> **⚠️ scope 是所有 ki 操作的基础**。不同 scope 物理隔离，没有 scope 就无法进行任何查询或写入。
+> **如果你不确定当前项目有哪些 scope 可用，必须立即执行此命令查看，禁止猜测或假设 scope 名称。**
+
+```bash
+ki manage-index --action list-scopes
+```
+
+- **不需要** `--scope` 参数
+- 列出 `kb/` 下所有已初始化的 scope 及其根节点名称
+- Agent 开始任何操作前，如果不确定有哪些 scope 可用，**应先执行此命令**
+
+输出示例：
+```json
+{
+  "ok": true,
+  "scopes": [
+    { "scope": "monitor", "rootNames": ["项目根", "BK-Monitor-Wiki"] },
+    { "scope": "monitor-memory", "rootNames": ["项目根"] },
+    { "scope": "user-profile", "rootNames": ["项目根"] }
+  ],
+  "total": 3
+}
+```
+
+### 4.2 拉取全景索引
 
 ```bash
 ki query-group --scope <scope> --mode full
@@ -102,7 +128,7 @@ ki query-group --scope <scope> --mode full
 - 获取 scope 下所有 Group 的索引树和热度信息
 - 可选参数：`--hot-count <count>`（默认 5）、`--depth <depth>`（默认 4，full 模式生效）
 
-### 4.2 查 Group 热区
+### 4.3 查 Group 热区
 
 ```bash
 ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
@@ -110,7 +136,7 @@ ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
 
 - 查看指定 Group 下的热门知识和新兴热区（近 48 小时内频繁使用的知识）
 
-### 4.3 取原文
+### 4.4 取原文
 
 ```bash
 ki get-module-info --scope <scope> --group "目标Group路径" --relation "Relation名称"
@@ -119,7 +145,7 @@ ki get-module-info --scope <scope> --group "目标Group路径" --relation "Relat
 - 获取指定 Relation 的完整 Markdown 原文
 - **Agent 必须提炼后回答，不要全文转储**
 
-### 4.4 单条写入
+### 4.5 单条写入
 
 ```bash
 ki sync-relation \
@@ -144,12 +170,9 @@ ki sync-relation \
 ]
 ```
 
-### 4.5 管理 Group
+### 4.6 管理 Group
 
 ```bash
-# 列出所有已初始化的 scope（不需要 --scope 参数）
-ki manage-index --action list-scopes
-
 # 创建根节点（新 scope 首次使用时必须先创建）
 ki manage-index --scope <scope> --action create-root --root-name "根节点名称"
 
@@ -160,7 +183,6 @@ ki manage-index --scope <scope> --action create --parent "父Group路径" --name
 ki manage-index --scope <scope> --action delete --parent "父Group路径" --name "目标Group名" --force
 ```
 
-- `list-scopes`：列出 `kb/` 下所有已初始化的 scope 及其根节点名称，**不需要 `--scope` 参数**
 - `create-root`：新 scope 首次初始化时使用（需 `--root-name`）
 - `create`：在已有 Group 下创建子节点（需 `--parent` + `--name`）
 - `--force` 会删除 Group 以及所有子 Relation
