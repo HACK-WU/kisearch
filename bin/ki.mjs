@@ -13,12 +13,17 @@
  */
 
 import { execFileSync } from 'child_process';
+import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
+
+// 读取版本号
+const pkg = JSON.parse(readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf-8'));
+const VERSION = pkg.version;
 
 // 命令映射
 const COMMANDS = {
@@ -36,6 +41,12 @@ const COMMANDS = {
 // 获取命令和参数
 const args = process.argv.slice(2);
 const command = args[0];
+
+// 显示版本
+if (command === '--version' || command === '-V' || command === '-v') {
+  console.log(VERSION);
+  process.exit(0);
+}
 
 // 显示帮助
 if (!command || command === '--help' || command === '-h') {
