@@ -106,17 +106,27 @@
 
 ### 安装
 
-**方式一：一键安装（推荐用于 AI Agent 场景）**
-
-仅下载 Skills / Rules / Docs，无需克隆整个仓库：
+**方式一：全局安装 ki CLI（推荐）**
 
 ```bash
-# 安装 AI Agent Skills + 加载规则到当前项目
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install.sh | bash -s -- "$(pwd)" --skills --rules
-
-# 或安装全部（Skills + Rules + Docs）
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install.sh | bash -s -- "$(pwd)" --all
+npm install -g knowledge-indexer
 ```
+
+然后通过 `ki setup` 安装配套 Skills / Rules 到项目目录：
+
+```bash
+# 单目录安装
+ki setup --skills -t ~/projects/my-app
+ki setup --rules -t ~/projects/my-app
+
+# 多目录安装
+ki setup --skills -t ~/projects/app -t ~/projects/api
+
+# 配置文件方式（创建 ~/.ki-targets，每行一个目录）
+ki setup --skills
+```
+
+> 💡 如未安装 ki CLI，可用 `install.sh` 作为备用方案。
 
 **方式二：完整安装（开发 & CLI 使用）**
 
