@@ -26,8 +26,14 @@ export function registerQueryGroupTool(server: McpServer): void {
           modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
           autoFallback: args.auto_fallback,
         });
+        if (result.ok) {
+          return {
+            content: [{ type: 'text', text: result.output }],
+          };
+        }
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          isError: true,
+          content: [{ type: 'text', text: result.error }],
         };
       } catch (err) {
         return {
