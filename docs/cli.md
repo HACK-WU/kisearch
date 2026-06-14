@@ -512,6 +512,87 @@ ki sync-relation --scope my-project --input batch-input.json
 
 ---
 
+## `mcp`
+
+启动 MCP (Model Context Protocol) Server，通过 stdio 传输向 AI Agent 暴露知识索引能力。
+
+```bash
+ki mcp
+```
+
+无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通信。
+
+### 暴露的 MCP 工具
+
+| 工具名 | 类型 | 功能 | 对应 CLI 命令 |
+|--------|------|------|--------------|
+| `ki_query_group` | 读 | 查询 Group 树 + Relations + 词云 | `query-group` |
+| `ki_get_module_info` | 读 | 读取本地 KB Markdown 内容 | `get-module-info` |
+| `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
+| `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
+| `ki_sync_relation` | 写 | 写入 Relation + 关键词 | `sync-relation` |
+
+> **零破坏性约束**：MCP 工具集不含 delete/force 操作。Agent 只能创建和查询，无法删除任何数据。
+
+### MCP 客户端配置
+
+在 MCP 客户端配置文件（如 `~/.qoder/shared_client/mcp.json`）中添加：
+
+```json
+{
+  "mcpServers": {
+    "ki": {
+      "command": "ki",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 工具参数说明
+
+#### `ki_query_group`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 是 | — | 项目隔离标识 |
+| `groups` | string | 否 | — | 逗号分隔的 Group 路径（支持模糊匹配） |
+| `hot_count` | number | 否 | 5 | 热门展示个数 |
+| `depth` | number | 否 | 4 | 索引层级深度（1-10） |
+| `mode` | string | 否 | `hot` | 展示分区：hot/warm/cold/emerging/full |
+
+#### `ki_get_module_info`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `scope` | string | 是 | 项目隔离标识 |
+| `group` | string | 是 | Group 路径（支持模糊匹配） |
+| `relation` | string | 是 | Relation 名称 |
+
+#### `ki_sync_relation`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `scope` | string | 是 | 项目隔离标识 |
+| `group` | string | 是 | Group 路径（支持 / 层级嵌套） |
+| `relation` | string | 是 | Relation 名称 |
+| `module_info` | string | 是 | 本地 KB Markdown 内容 |
+| `keywords` | string[] | 是 | 关键词列表 |
+
+#### `ki_manage_index_create`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `scope` | string | 是 | 项目隔离标识 |
+| `name` | string | 是 | 新节点名称（不能包含 /） |
+| `parent` | string | 否 | 父节点路径（省略则挂在根层） |
+
+#### `ki_manage_index_list`
+
+无参数，返回所有 scope 及顶层 Group。
+
+---
+
 ## 常用工作流
 
 ### 本地知识沉淀
@@ -520,6 +601,13 @@ ki sync-relation --scope my-project --input batch-input.json
 2. `sync-relation` 写入模块说明
 3. `query-group` 检查导航与热点
 4. `get-module-info` 验证原文可读性
+
+### AI Agent 通过 MCP 使用
+
+1. 配置 `mcp.json`（见上方 MCP 客户端配置）
+2. 重启 AI Agent 客户端
+3. Agent 自动调用 `ki_query_group` / `ki_get_module_info` 查询知识
+4. Agent 需要沉淀知识时调用 `ki_sync_relation` / `ki_manage_index_create`
 
 ### 外部知识库导入（推荐新流程）
 

@@ -24,6 +24,7 @@
 - **向量语义兜底**：精确 Group 路径未命中时，自动通过向量搜索模糊定位，支持部分名称/近似表述
 - **TypeScript 直接执行**：使用 jiti 运行时，无需编译步骤
 - **CLI 驱动**：所有操作通过命令行接口完成
+- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 5 个 MCP 工具
 - **独立部署**：可独立安装和使用，通过 `mem` CLI 命令调用向量存储
 
 ## 文档导航
@@ -181,8 +182,44 @@ ki get-module-info \
 | `query-group` | 查询 Group + 词云 + 分区（支持模糊 Group 路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
 | `sync-relation` | 写入 Relation + 关键词校验 |
+| `mcp` | 启动 MCP Server（stdio 传输，5 个工具） |
 | `import-kb` | @deprecated 旧导入 |
 | `migrate-keywords` | 数据迁移 |
+
+## MCP Server
+
+启动 MCP Server 后，AI Agent 可直接通过标准 MCP 协议使用 ki 的知识索引能力：
+
+```bash
+ki mcp
+```
+
+### MCP 客户端配置
+
+在 MCP 客户端配置中添加：
+
+```json
+{
+  "mcpServers": {
+    "ki": {
+      "command": "ki",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 暴露的工具
+
+| 工具 | 功能 |
+|------|------|
+| `ki_query_group` | 查询 Group 树 + Relations + 词云 |
+| `ki_get_module_info` | 读取本地 KB Markdown 内容 |
+| `ki_manage_index_list` | 列出所有 scope |
+| `ki_manage_index_create` | 创建 Group 节点 |
+| `ki_sync_relation` | 写入 Relation + 关键词 |
+
+> MCP 工具集遵循零破坏性约束，不含 delete/force 操作。详见 [CLI 参考 → mcp](./docs/cli.md#mcp)。
 
 ## `ai-results.json` 最小示例
 
