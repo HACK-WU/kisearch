@@ -81,15 +81,18 @@ RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 
 ### MCP Server 支持
 
-\`ki mcp\` 启动 MCP Server，通过 stdio 传输向 AI Agent 暴露 5 个工具：
+\`ki mcp\` 启动 MCP Server，通过 stdio 传输向 AI Agent 暴露 8 个工具：
 
 | 工具 | 类型 | 功能 |
 |------|------|------|
-| \`ki_query_group\` | 读 | 查询 Group 树 + Relations + 词云 |
+| \`ki_query_group\` | 读 | 查询 Group 树 + Relations + 词云（含语义兜底） |
 | \`ki_get_module_info\` | 读 | 读取本地 KB Markdown 内容 |
+| \`ki_search\` | 读 | 语义检索知识库内容（tag: ki-search） |
 | \`ki_manage_index_list\` | 读 | 列出所有 scope |
 | \`ki_manage_index_create\` | 写 | 创建 Group 节点 |
-| \`ki_sync_relation\` | 写 | 写入 Relation + 关键词 |
+| \`ki_sync_relation\` | 写 | 写入 Relation + 关键词（含 ki-relation/ki-search 双写） |
+| \`ki_store\` | 写 | 单条文本向量存储（tag: ki-search） |
+| \`ki_bulk_store\` | 写 | 批量文本向量存储（tag: ki-search） |
 
 ### 安装方式
 
@@ -117,7 +120,8 @@ npm install -g knowledge-indexer@${VERSION}
 ### 包含文件
 - \`bin/\` — CLI 入口脚本 (ki / knowledge-indexer)
 - \`scripts/\` — 业务逻辑脚本 (TypeScript + jiti)
-- \`scripts/lib/mcp-tools/\` — MCP 工具 Handler"
+- \`scripts/lib/mcp-tools/\` — MCP 工具 Handler
+- \`scripts/lib/mem-client.ts\` — mem CLI 统一调用封装"
 
 if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
   # 如果 Release 已存在，先删除再重建
