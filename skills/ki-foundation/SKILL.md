@@ -93,20 +93,22 @@ flowchart TD
 
 ---
 
-## 4. 命令参考
+## 4. MCP 工具参考
+
+所有操作通过 MCP 工具调用，无需使用 CLI 命令。
 
 ### 4.1 查看可用 Scope
 
 > **⚠️ scope 是所有 ki 操作的基础**。不同 scope 物理隔离，没有 scope 就无法进行任何查询或写入。
-> **如果你不确定当前项目有哪些 scope 可用，必须立即执行此命令查看，禁止猜测或假设 scope 名称。**
+> **如果你不确定当前项目有哪些 scope 可用，必须立即调用此工具，禁止猜测或假设 scope 名称。**
 
-```bash
-ki manage-index --action list-scopes
+```
+tool: ki_manage_index_list
+input: (无需参数)
 ```
 
-- **不需要** `--scope` 参数
-- 列出 `kb/` 下所有已初始化的 scope 及其顶层 Group 名称
-- Agent 开始任何操作前，如果不确定有哪些 scope 可用，**应先执行此命令**
+- 列出所有已初始化的 scope 及其顶层 Group 名称
+- Agent 开始任何操作前，如果不确定有哪些 scope 可用，**应先调用此工具**
 
 输出示例：
 ```json
@@ -123,85 +125,81 @@ ki manage-index --action list-scopes
 
 ### 4.2 拉取全景索引
 
-```bash
-ki query-group --scope <scope> --mode full
+```
+tool: ki_query_group
+input:
+  scope: "<scope>"       # 必填
+  mode: "full"           # 可选：hot|warm|cold|emerging|full，默认 hot
+  depth: 4                # 可选：索引层级深度，默认 4
+  hot_count: 5            # 可选：热门展示个数，默认 5
 ```
 
 - 获取 scope 下所有 Group 的索引树和热度信息
-- 可选参数：`--hot-count <count>`（默认 5）、`--depth <depth>`（默认 4，full 模式生效）
-- Group 无 Relations 时自动引导使用 `sync-relation` 写入
+- Group 无 Relations 时自动引导使用 `ki_sync_relation` 写入
 
 ### 4.3 查 Group 热区
 
-```bash
-ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
+```
+tool: ki_query_group
+input:
+  scope: "<scope>"
+  groups: "目标Group路径"   # 支持模糊匹配
+  mode: "hot,emerging"
 ```
 
 - 查看指定 Group 下的热门知识和新兴热区（近 48 小时内频繁使用的知识）
 - 热门索引格式：`group路径 → Relation名称 (score: X.XX)`
-- Group 路径支持**自动补全**：输入部分路径会自动匹配最接近的完整路径
+- Group 路径支持**模糊匹配**：输入部分路径会自动匹配最接近的完整路径
 
 ### 4.4 取原文
 
-```bash
-ki get-module-info --scope <scope> --group "目标Group路径" --relation "Relation名称"
+```
+tool: ki_get_module_info
+input:
+  scope: "<scope>"           # 必填
+  group: "目标Group路径"     # 必填，支持模糊匹配
+  relation: "Relation名称"   # 必填，精确匹配
 ```
 
 - 获取指定 Relation 的完整 Markdown 原文
 - **Agent 必须提炼后回答，不要全文转储**
-- 本地 KB 缺失时提供可操作的修复命令（sync-relation / scan-kb / 数据恢复）
+- 本地 KB 缺失时提供可操作的修复方法（sync-relation 重写 / 数据恢复）
 
-### 4.5 单条写入
+### 4.5 写入/更新知识
 
-```bash
-ki sync-relation \
-  --scope <scope> \
-  --group "目标Group路径" \
-  --relation "Relation名称" \
-  --module-info "Markdown内容" \
-  --keywords "关键词1,关键词2,关键词3"
+```
+tool: ki_sync_relation
+input:
+  scope: "<scope>"             # 必填
+  group: "目标Group路径"       # 必填，支持 / 层级嵌套
+  relation: "Relation名称"     # 必填
+  module_info: "Markdown内容"   # 必填
+  keywords: ["关键词1", "关键词2", "关键词3"]  # 必填，数组格式
 ```
 
 - Relation 名称相同时自动覆盖原有内容
-- `--group` 路径支持**自动补全**：输入部分路径会自动匹配并提示完整路径
-- **批量模式**：`ki sync-relation --scope <scope> --input /path/to/batch.json`
-
-```json
-[
-  {
-    "group": "目标Group路径",
-    "relation": "Relation名称",
-    "module-info": "Markdown内容",
-    "keywords": "关键词1,关键词2"
-  }
-]
-```
+- `group` 路径支持自动补全：输入部分路径会自动匹配并提示完整路径
+- `keywords` 必须是数组格式：`["关键词1", "关键词2"]`
 
 ### 4.6 管理 Group
 
-```bash
-# 创建顶层 Group（不指定 --parent）
-ki manage-index --scope <scope> --action create --name "Group名称"
-
-# 创建子 Group
-ki manage-index --scope <scope> --action create --parent "父Group路径" --name "新Group名"
-
-# 删除 Group（含子数据）
-ki manage-index --scope <scope> --action delete --parent "父Group路径" --name "目标Group名" --force
+```
+tool: ki_manage_index_create
+input:
+  scope: "<scope>"         # 必填
+  name: "Group名称"        # 必填，不能包含 /
+  parent: "父Group路径"     # 可选，省略则创建顶层 Group
 ```
 
-- 不指定 `--parent` 即创建顶层 Group
-- `create`：需 `--name`；指定 `--parent` 时创建子节点，不指定时创建顶层节点
-- `--force` 会删除 Group 以及所有子 Relation
-- `--parent` 路径支持**自动补全**：输入部分路径会自动匹配完整路径
-- 节点不存在时自动列出同级可用子节点
-- 未知 action 时列出所有可用操作（`create | delete | list-scopes`）
+- `parent` 路径支持自动补全：输入部分路径会自动匹配完整路径
+- scope 不存在时自动创建
+- ⚠️ MCP 工具集不含 delete 操作，Agent 只能创建和查询，无法删除任何数据
 
 ---
 
 ## 5. Keywords 规则
 
-所有 `ki sync-relation` 写入时必须遵守：
+所有 `ki_sync_relation` 写入时必须遵守：
 
 - 必须是**自然语言词汇**，禁止代码符号（类名、方法名、路径）
 - 必须真实出现在 `module-info` 原文中
@@ -213,11 +211,11 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再 `ki manage-index --action create --name "名称"` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
-| Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create --name "名称"` 创建 |
-| `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module-info 中真实存在 |
+| `scope not found` | scope 尚未创建 | 先用 `ki_manage_index_list` 确认已有 scope，再 `ki_manage_index_create` 创建顶层 Group，或调用 `ki_sync_relation` 写入任意一条数据自动创建 |
+| Group 不存在 | 尚未创建该 Group | 调用 `ki_manage_index_create` 创建 |
+| `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module_info 中真实存在 |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
-| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki query-group --mode full` 确认实际名称 |
+| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki_query_group(mode: "full")` 确认实际名称 |
 | 写入到错误的 scope | 混淆了 scope | 确认写入目标 scope 是否正确 |
 | 父节点路径不存在 | `--parent` 路径拼写错误 | 系统会自动尝试路径补全；补全失败时列出可用节点 |
 | 本地 KB 文件不存在 | 数据被删除或未写入 | 系统会提供修复命令：sync-relation 重写 / scan-kb 重新导入 |
@@ -226,10 +224,13 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 ## 7. 写入后刷新缓存
 
-每次写入操作（`sync-relation` / `scan-kb import` / `manage-index create`）完成后，必须重新拉取全景：
+每次写入操作（`ki_sync_relation` / `ki_manage_index_create`）完成后，必须重新拉取全景：
 
-```bash
-ki query-group --scope <scope> --mode full
+```
+tool: ki_query_group
+input:
+  scope: "<scope>"
+  mode: "full"
 ```
 
 ---
