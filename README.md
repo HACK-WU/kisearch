@@ -106,10 +106,11 @@
 
 ### 安装
 
-**方式一：全局安装 ki CLI（推荐）**
+**方式一：使用 install-latest.sh 安装 ki CLI（推荐）**
 
 ```bash
-npm install -g knowledge-indexer
+# 下载并安装最新版 ki CLI
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install-latest.sh | bash
 ```
 
 然后通过 `ki setup` 安装配套 Skills / Rules 到项目目录：

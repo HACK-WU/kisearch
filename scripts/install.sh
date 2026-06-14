@@ -19,7 +19,7 @@ set -euo pipefail
 # 提示：推荐使用 ki setup（支持多目录、配置文件）
 if [ -t 2 ]; then
     echo "💡 提示：推荐使用 ki setup，功能更强大" >&2
-    echo "   npm install -g knowledge-indexer && ki setup --skills" >&2
+    echo "   curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install-latest.sh | bash && ki setup --skills" >&2
     echo "" >&2
 fi
 
@@ -121,7 +121,7 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo "  bash install.sh --rules --file ~/my-targets.txt"
     echo ""
     echo "推荐使用 ki setup（支持多目录、配置文件）:"
-    echo "  npm install -g knowledge-indexer"
+    echo "  curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install-latest.sh | bash"
     echo "  ki setup --skills -t ~/projects/my-app"
     exit 1
 fi
