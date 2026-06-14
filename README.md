@@ -24,7 +24,7 @@
 - **向量语义兜底**：精确 Group 路径未命中时，自动通过向量搜索模糊定位，支持部分名称/近似表述
 - **TypeScript 直接执行**：使用 jiti 运行时，无需编译步骤
 - **CLI 驱动**：所有操作通过命令行接口完成
-- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 5 个 MCP 工具
+- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 8 个 MCP 工具
 - **独立部署**：可独立安装和使用，通过 `mem` CLI 命令调用向量存储
 
 ## 文档导航
@@ -63,9 +63,9 @@
 
 | 文档 | 覆盖范围 |
 |------|----------|
-| [`docs/codekb-agent-guide.md`](./docs/codekb-agent-guide.md) | 代码知识库：四步走、白名单/黑名单、memory_recall 兜底、写入 KB 规则 |
+| [`docs/codekb-agent-guide.md`](./docs/codekb-agent-guide.md) | 代码知识库：四步走、白名单/黑名单、ki_search 语义兜底、写入 KB 规则 |
 | [`docs/memory-agent-guide.md`](./docs/memory-agent-guide.md) | 记忆系统：归档机制、自动沉淀、Group 结构、用户画像 |
-| [`docs/ki-command-guide.md`](./docs/ki-command-guide.md) | 公共命令参考：query-group / get-module-info / sync-relation / manage-index |
+| [`docs/ki-command-guide.md`](./docs/ki-command-guide.md) | 公共命令参考：query-group / get-module-info / sync-relation / manage-index / search / store |
 
 ### 设计文档与架构
 
@@ -89,6 +89,7 @@
 | `module-info` | Relation 对应的 Markdown 原文说明 |
 | 热门 Relation | 被频繁访问、优先展示的本地知识 |
 | 关键词词云 | 为 AI 组装检索语句提供的自然语言提示 |
+| 标签（Tag） | `ki-search`（通用语义搜索）、`ki-path`（路径级搜索）、`ki-relation`（关系检索）三层标签，指定标签可显著提升查询准确率 |
 
 ## 快速开始
 
@@ -205,9 +206,12 @@ ki get-module-info \
 | `query-group` | 查询 Group + 词云 + 分区（支持模糊 Group 路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
 | `sync-relation` | 写入 Relation + 关键词校验 |
-| `mcp` | 启动 MCP Server（stdio 传输，5 个工具） |
+| `mcp` | 启动 MCP Server（stdio 传输，8 个工具） |
 | `import-kb` | @deprecated 旧导入 |
 | `migrate-keywords` | 数据迁移 |
+| `search` | 语义检索（通过 mem 向量搜索，支持标签过滤） |
+| `store` | 向量化存储单条知识 |
+| `bulk-store` | 批量向量化存储知识 |
 
 ## MCP Server
 
@@ -226,23 +230,37 @@ ki mcp
   "mcpServers": {
     "ki": {
       "command": "ki",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": {
+        "KI_DATA_DIR": "/path/to/your/kb/data",
+        "SILICONFLOW_API_KEY": "<your-api-key>"
+      }
     }
   }
 }
 ```
 
+> **⚠️ 注意**：MCP 进程不继承 shell 环境变量（如 `.zshrc` 中的 export），必须通过 `env` 字段显式传入。`KI_DATA_DIR` 指向 KB 数据目录；`SILICONFLOW_API_KEY` 为 mem 向量引擎的 API 密钥。若不配置，向量搜索/存储工具将不可用。
+
 ### 暴露的工具
 
-| 工具 | 功能 |
-|------|------|
-| `ki_query_group` | 查询 Group 树 + Relations + 词云 |
-| `ki_get_module_info` | 读取本地 KB Markdown 内容 |
-| `ki_manage_index_list` | 列出所有 scope |
-| `ki_manage_index_create` | 创建 Group 节点 |
-| `ki_sync_relation` | 写入 Relation + 关键词 |
+| 工具 | 功能 | 向量标签 |
+|------|------|----------|
+| `ki_query_group` | 查询 Group 树 + Relations + 词云（语义兜底） | — |
+| `ki_get_module_info` | 读取本地 KB Markdown 内容（语义兜底） | — |
+| `ki_manage_index_list` | 列出所有 scope | — |
+| `ki_manage_index_create` | 创建 Group 节点 | — |
+| `ki_sync_relation` | 写入 Relation + 关键词（含向量双写） | `ki-relation` |
+| `ki_search` | 语义检索知识库内容 | `ki-search`（默认） |
+| `ki_store` | 向量化存储单条知识 | `ki-search` |
+| `ki_bulk_store` | 批量向量化存储知识 | `ki-search` |
 
 > MCP 工具集遵循零破坏性约束，不含 delete/force 操作。详见 [CLI 参考 → mcp](./docs/cli.md#mcp)。
+>
+> **💡 提高查询准确率**：`ki_search` 支持 `tags` 参数按标签过滤。根据查询意图指定标签可**显著提升语义检索准确率**，避免不同知识类型交叉干扰：
+> - **通用知识搜索** → 不传或 `tags: "ki-search"`（默认）
+> - **文件/路径定位** → `tags: "ki-path"`
+> - **关系/归属查询** → `tags: "ki-relation"`
 
 ## `ai-results.json` 最小示例
 

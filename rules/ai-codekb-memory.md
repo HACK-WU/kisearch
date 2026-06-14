@@ -54,7 +54,7 @@ AI 拥有两套记忆系统，各有适用场景，**根据信息特征选择存
 
 | 系统 | 说明 | 接口 |
 |------|------|------|
-| **ki 命令** | knowledge-indexer CLI | `ki sync-relation`、`ki query-group` |
+| **ki 命令** | knowledge-indexer CLI | `ki sync-relation`、`ki query-group`、`ki search`、`ki store` |
 | **memory MCP 服务** | memory-lancedb-mcp | `memory_recall`、`memory_store` |
 | **mem CLI** | memory-lancedb-mcp 命令行 | `mem search`、`mem store` |
 
@@ -152,4 +152,4 @@ SKILL 加载完成后，按其内部定义的触发条件执行：
 
 `user-profile`、`${scope}-memory`、`${scope}` 三个 scope 由 ki 管理，**禁止通过 memory MCP / mem CLI 直接操作**（写入、查询、更新、删除均不可）。统一使用 `ki query-group` / `ki get-module-info` / `ki sync-relation` / `ki manage-index` 代替。
 
-> 例外：`codekb-skill` 四步走第④步的 `memory_recall` 语义兜底不受此限制。平台内置记忆（`update_memory`）不写入 ki scope，也不受此限制。
+> 例外：`codekb-skill` 四步走第④步的 `ki_search` 语义兜底不受此限制（`ki_search` 是 ki MCP 内置向量工具，非 memory MCP）。平台内置记忆（`update_memory`）不写入 ki scope，也不受此限制。

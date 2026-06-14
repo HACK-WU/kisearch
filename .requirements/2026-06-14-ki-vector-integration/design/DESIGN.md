@@ -101,7 +101,7 @@ graph TB
 | 薄封装 | ki 不持有向量索引/cache，所有向量能力由 mem 提供，ki 仅做接口聚合 | S-01~S-04 |
 | mem-client | 封装 mem CLI 调用的共享模块（PATH 注入、stdout 清洗、JSON 解析） | S-01 |
 | 静默降级 | mem 不可用时向量能力优雅失败，结构化导航不受影响 | S-04 |
-| 物理隔离 | ki-search 与 ki-path/ki-relation 使用独立 tags，互不干扰 | S-01, S-02 |
+| 标签分层隔离 | `ki-search`（通用语义搜索）、`ki-path`（路径级语义搜索）、`ki-relation`（关系索引）三层独立标签，实现不同知识类型的物理隔离。详见下方"标签过滤策略" | S-01, S-02, S-03 |
 | 容错双写 | sync-relation 本地写成功后同步调 mem store（try-catch 包裹），失败不影响主流程返回值 | S-03 |
 
 ### 跨子需求接口契约
@@ -112,6 +112,25 @@ graph TB
 | `memStore()` | S-01 (mem-client) | S-03 (sync-relation) | `(scope, text, opts?) → {memoryId}` |
 | `memBulkStore()` | S-01 (mem-client) | S-01 (CLI/MCP 内部) | `(scope, entries) → BulkStoreResult` |
 | `checkMemAvailable()` | S-04 | S-01 | `() → {available: boolean, reason?: string}` |
+
+### 标签过滤策略
+
+ki 在向量存储中使用**三层标签体系**，实现不同知识类型在 mem 向量库中的物理隔离。**指定标签过滤能显著提升语义检索准确率**，避免跨类型知识串扰——mem 的语义搜索不保证精确匹配，混合标签下的结果可能掺杂不相关的知识类型。
+
+| 标签 | 写入者 | 典型数据 | 使用场景 |
+|------|--------|----------|----------|
+| `ki-search` | `ki store` / `ki bulk_store` / `sync-relation`（双写） | 通用知识条目、模块摘要 | **通用语义搜索**：关键词/自然语言查询，不限领域。`ki_search` 的默认标签 |
+| `ki-path` | `scan-kb import` | 文件路径 → 模块映射 | **路径定位**：根据文件名或目录路径定位模块。`query-group` 语义兜底场景使用 |
+| `ki-relation` | `sync-relation` | Group + Relation 关联关系 | **关系检索**：根据知识条目名称查找其归属的 Group 路径 |
+
+**标签选择建议**：
+
+- **不知道用什么标签？** → 不传 `tags` 参数，`ki_search` 默认使用 `ki-search`，覆盖通用场景
+- **想查某个文件/目录对应哪个模块？** → 指定 `tags: "ki-path"`
+- **想查某条知识属于哪个 Group？** → 指定 `tags: "ki-relation"`
+- **跨标签查询？** → 不传 `tags`（默认 `ki-search`），或多次调用分别指定不同标签
+
+> ⚠️ **强烈建议**：在 `ki_search` 调用中根据查询意图**显式指定 `tags` 参数**。指定标签 = 主动缩小检索域 = 显著提升准确率。
 
 ## 4. 全局风险 & 跨子需求依赖
 

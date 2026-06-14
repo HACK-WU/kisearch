@@ -44,7 +44,7 @@ flowchart TB
 
 ### 协作模式
 
-- **本地快取 + 远端召回**：热门知识优先走本地 JSON；长尾知识走 `memory_recall`；命中后回写本地
+- **本地快取 + 远端召回**：热门知识优先走本地 JSON；长尾知识走 `ki_search`；命中后回写本地
 - **原文与摘要分层存储**：本地 KB 保存完整 Markdown 原文；记忆系统保存摘要、标签、关键词
 - **闭环**：查询时本地优先、记忆检索兜底；写入时双写到本地索引与记忆系统；演化时热点沉淀在本地，长尾保留在记忆系统
 
@@ -81,7 +81,7 @@ flowchart TD
     H -- 是 --> M[get-module-info<br/>读取本地 KB 原文]
     M --> A[AI 直接回答]
 
-    H -- 否 --> R[memory_recall<br/>到父项目记忆系统做语义检索]
+    H -- 否 --> R[ki_search<br/>向量语义检索]
     R --> F{是否命中记忆?}
     F -- 是 --> S[sync-relation<br/>回写本地 Relation + KB]
     S --> A
@@ -195,9 +195,67 @@ input:
 - scope 不存在时自动创建
 - ⚠️ MCP 工具集不含 delete 操作，Agent 只能创建和查询，无法删除任何数据
 
+### 4.7 语义检索
+
+```
+tool: ki_search
+input:
+  scope: "<scope>"           # 必填
+  query: "查询文本"           # 必填，自然语言查询
+  limit: 10                   # 可选：返回条数上限，默认 10
+  tags: "ki-search"           # 可选：过滤标签，默认 ki-search。强烈建议根据意图指定
+  threshold: 0.15             # 可选：相似度阈值（0-1），不传则不过滤
+```
+
+- 通过 mem 向量引擎进行语义检索
+- 返回 `results[]` 数组，每项含 `memoryId`、`content`、`score`
+- **标签选择**：`ki-search`（通用）、`ki-path`（路径定位）、`ki-relation`（关系检索）
+- 指定 `tags` 参数可**显著提升查询准确率**，避免不同知识类型串扰
+
+### 4.8 单条向量存储
+
+```
+tool: ki_store
+input:
+  scope: "<scope>"           # 必填
+  text: "待向量化文本"        # 必填
+  tags: "ki-search"           # 可选：标签，默认 ki-search
+```
+
+- 单条知识向量化存储到 mem
+- 自动打上 `ki-search` 标签
+- 返回 `{ ok, memoryId }`
+
+### 4.9 批量向量存储
+
+```
+tool: ki_bulk_store
+input:
+  scope: "<scope>"                           # 必填
+  input: "/path/to/batch-data.json"           # 必填：批量数据 JSON 文件路径
+```
+
+- 批量向量化存储，适用于大量知识导入
+- 输入文件为 JSON 数组格式：`[{ "text": "内容1", "tags": "ki-search" }, ...]`
+- 返回 `{ ok, total, succeeded, failed, results[] }`，`results[]` 每项含 `index`、`success`、`memoryId`、`error`
+
 ---
 
-## 5. Keywords 规则
+## 5. 标签过滤策略
+
+ki 使用**三层标签**实现不同知识类型在向量库中的物理隔离，**指定标签可显著提升语义检索准确率**：
+
+| 标签 | 用途 | 典型场景 |
+|------|------|----------|
+| `ki-search` | 通用语义搜索（默认） | 关键词/自然语言查询，不限领域 |
+| `ki-path` | 路径级语义搜索 | 根据文件名或目录路径定位模块 |
+| `ki-relation` | 关系索引检索 | 根据知识条目名称查找 Group 归属 |
+
+> ⚠️ **强烈建议**：在 `ki_search` 调用中根据查询意图**显式指定 `tags` 参数**。不指定时默认使用 `ki-search`，但混合标签下的结果可能掺杂不相关的知识类型。指定标签 = 主动缩小检索域 = 显著提升准确率。
+
+---
+
+## 6. Keywords 规则
 
 所有 `ki_sync_relation` 写入时必须遵守：
 
@@ -207,7 +265,7 @@ input:
 
 ---
 
-## 6. 常见错误与修复
+## 7. 常见错误与修复
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
@@ -222,7 +280,7 @@ input:
 
 ---
 
-## 7. 写入后刷新缓存
+## 8. 写入后刷新缓存
 
 每次写入操作（`ki_sync_relation` / `ki_manage_index_create`）完成后，必须重新拉取全景：
 
@@ -235,7 +293,7 @@ input:
 
 ---
 
-## 8. Scope 替换表
+## 9. Scope 替换表
 
 | 规则 | scope 值 |
 |------|----------|
