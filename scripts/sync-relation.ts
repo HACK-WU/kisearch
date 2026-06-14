@@ -31,6 +31,7 @@ import {
   buildRelationContent,
   storeOnePath,
 } from './lib/path-vectorize.js';
+import { memStore, ensureMemAvailable } from './lib/mem-client.js';
 
 // ─── 类型定义 ───
 
@@ -380,7 +381,7 @@ export interface SyncRelationParams {
 }
 
 export type SyncRelationResult =
-  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string }
+  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string; vectorStored?: boolean }
   | { ok: false; error: string };
 
 export function executeSyncRelation(params: SyncRelationParams): SyncRelationResult {
@@ -433,7 +434,25 @@ export function executeSyncRelation(params: SyncRelationParams): SyncRelationRes
       storeOnePath({ text: relText, tag: 'ki-relation', scope });
     } catch { /* 向量写入失败不影响主流程 */ }
 
-    return { ok: true, ...result, ...(pathHint ? { hint: pathHint } : {}) };
+    // 容错双写：通用语义向量存储（同步 try-catch，失败不影响返回值）
+    let vectorStored: boolean | undefined;
+    try {
+      const avail = ensureMemAvailable();
+      if (avail.available) {
+        memStore({
+          scope,
+          text: moduleInfo,
+          keywords: keywordList,
+          tags: 'ki-search',
+        });
+        vectorStored = true;
+      }
+    } catch (err) {
+      console.warn(`[sync-relation] 向量双写失败: ${(err as Error).message}`);
+      vectorStored = false;
+    }
+
+    return { ok: true, ...result, ...(pathHint ? { hint: pathHint } : {}), ...(vectorStored !== undefined ? { vectorStored } : {}) };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

@@ -23,6 +23,7 @@ import type { Relation, PartitionResult as ScoringPartitionResult } from './lib/
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import type { ResolveResult } from './lib/group-resolve.js';
+import { memSearch, ensureMemAvailable } from './lib/mem-client.js';
 
 // ─── 类型定义 ───
 
@@ -483,9 +484,10 @@ interface CliOpts {
   hotCount: number;
   modes: string[];
   groupsParam?: string;
+  autoFallback?: boolean;
 }
 
-function parseCliOpts(opts: Record<string, string>): CliOpts {
+function parseCliOpts(opts: Record<string, any>): CliOpts {
   const scope = opts.scope;
 
   const rawDepth = parseInt(opts.depth, 10);
@@ -511,6 +513,7 @@ function parseCliOpts(opts: Record<string, string>): CliOpts {
     hotCount,
     modes,
     groupsParam: opts.groups,
+    autoFallback: opts.autoFallback,
   };
 }
 
@@ -571,6 +574,7 @@ export interface QueryGroupParams {
   hotCount: number;
   depth: number;
   modes: string[];
+  autoFallback?: boolean;  // 语义兜底开关，默认 true
 }
 
 export type QueryGroupResult =
@@ -580,6 +584,7 @@ export type QueryGroupResult =
 export function executeQueryGroup(params: QueryGroupParams): QueryGroupResult {
   try {
     const { scope, depth, hotCount, modes, groupsParam } = params;
+    const autoFallback = params.autoFallback ?? true;
 
     if (modes.length === 0) {
       return { ok: false, error: '--mode 不能为空，有效值：hot | warm | cold | emerging | full' };
@@ -613,7 +618,26 @@ export function executeQueryGroup(params: QueryGroupParams): QueryGroupResult {
         const resolved = resolveGroupPath(gp, groupIndex, groupsData, scope);
 
         if (!resolved.matched) {
-          results.push(`=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容> --keywords <词1,词2>\n\n${resolved.hint}`);
+          const baseOutput = `=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容> --keywords <词1,词2>\n\n${resolved.hint}`;
+
+          // 语义兜底：精确匹配和 ki-path/ki-relation 兜底均未命中时尝试通用语义搜索
+          if (autoFallback) {
+            try {
+              const avail = ensureMemAvailable();
+              if (avail.available) {
+                const semResults = memSearch({ scope, query: gp, limit: 5, tags: 'ki-path' });
+                if (semResults.length > 0) {
+                  const fallbackLines = semResults.map(
+                    r => `├── [score: ${r.score.toFixed(2)}] ${r.content.slice(0, 120)}${r.content.length > 120 ? '...' : ''}`
+                  );
+                  results.push(baseOutput + `\n\n💡 语义匹配结果（来自通用搜索）：\n${fallbackLines.join('\n')}`);
+                  continue;
+                }
+              }
+            } catch { /* 语义兜底失败，静默降级 */ }
+          }
+
+          results.push(baseOutput);
           continue;
         }
 
@@ -685,6 +709,7 @@ program
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')
+  .option('--no-auto-fallback', '禁用语义兜底（默认开启）')
   .action(async (opts) => {
     const result = executeQueryGroup(parseCliOpts(opts));
     if (result.ok) {

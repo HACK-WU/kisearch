@@ -82,7 +82,7 @@ export function vectorizeOne(
   try {
     const stdout = execFileSync(
       'mem',
-      ['store', content, '--scope', scope, '--category', category],
+      ['store', content, '--scope', scope, '--category', category, '--tags', 'ki-search'],
       {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -194,6 +194,7 @@ export function bulkVectorize(
   // 1) 构建批量存储的 JSON 数组
   const bulkEntries = entries.map((entry) => ({
     text: buildVectorizeContent(entry),
+    tags: 'ki-search',
     category,
     scope,
   }));

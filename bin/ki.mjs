@@ -36,6 +36,9 @@ const COMMANDS = {
   'migrate-keywords': 'scripts/migrate-keywords.ts',
   'mcp': 'scripts/mcp-server.ts',
   'setup': 'scripts/setup.ts',
+  'search': 'scripts/search.ts',
+  'store': 'scripts/store.ts',
+  'bulk_store': 'scripts/bulk-store.ts',
 };
 
 // 获取命令和参数
@@ -62,6 +65,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   query-group       查询 Group + 词云 + 分区
   get-module-info   读取本地 KB 原文
   sync-relation     写入 Relation + 关键词校验
+  search            语义检索知识库内容
+  store             存储文本到向量索引
+  bulk_store        批量存储文本到向量索引
   import-kb         @deprecated 旧导入
   migrate-keywords  数据迁移
   mcp               启动 MCP Server (stdio 模式)
@@ -72,6 +78,8 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki manage-index --scope my-project --action create-root --root-name "我的项目"
   ki query-group --scope my-project
   ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录"
+  ki search --scope my-project --query "用户登录流程"
+  ki store --scope my-project --text "认证模块负责校验账号密码"
 
 环境变量：
   KI_DATA_DIR  自定义数据目录（默认：{安装目录}/kb/）

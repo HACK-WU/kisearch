@@ -13,6 +13,8 @@ export function registerQueryGroupTool(server: McpServer): void {
       depth: z.number().int().min(1).max(10).optional().default(4).describe('索引层级深度'),
       mode: z.string().optional().default('hot')
         .describe('展示分区：hot|warm|cold|emerging|full（支持逗号分隔）'),
+      auto_fallback: z.boolean().optional().default(true)
+        .describe('是否启用语义兜底（默认开启）'),
     },
     async (args) => {
       try {
@@ -22,6 +24,7 @@ export function registerQueryGroupTool(server: McpServer): void {
           hotCount: args.hot_count ?? 5,
           depth: args.depth ?? 4,
           modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
+          autoFallback: args.auto_fallback,
         });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
