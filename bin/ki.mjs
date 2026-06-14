@@ -60,6 +60,10 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki query-group --scope my-project
   ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录"
 
+环境变量：
+  KI_DATA_DIR  自定义数据目录（默认：{安装目录}/kb/）
+               全局安装时建议设置：export KI_DATA_DIR=$HOME/.ki-data
+
 详细帮助：
   ki <command> --help
 `);

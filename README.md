@@ -132,6 +132,18 @@ npm install
 npm link
 ```
 
+### 配置数据目录
+
+全局安装时，KB 数据默认落在 `node_modules/knowledge-indexer/kb/` 中，重新安装会丢失。
+建议通过环境变量 `KI_DATA_DIR` 指定持久化数据目录：
+
+```bash
+# 添加到 ~/.zshrc 或 ~/.bashrc
+export KI_DATA_DIR=$HOME/.ki-data
+```
+
+设置后，所有 scope 的 KB 数据（`kb/{scope}/`）将存储在 `~/.ki-data/` 下。
+
 ### 使用示例
 
 所有脚本使用 `ki` 命令执行（已通过 `npm link` 创建全局链接）。

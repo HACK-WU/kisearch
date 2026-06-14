@@ -51,8 +51,23 @@ const __dirname = path.dirname(__filename);
 /** knowledge-index/ 根目录（从 scripts/lib/ 上溯 2 级） */
 export const KI_ROOT = path.resolve(__dirname, '..', '..');
 
-/** kb/ 运行时数据目录 */
-export const KB_BASE_DIR = path.join(KI_ROOT, 'kb');
+/**
+ * kb/ 运行时数据目录。
+ *
+ * 优先级：
+ * 1. 环境变量 KI_DATA_DIR — 自定义数据目录
+ * 2. 默认 — 项目根下的 kb/ 目录（开发模式）
+ *
+ * 全局安装时建议设置 KI_DATA_DIR，避免数据落入 node_modules。
+ * 示例：export KI_DATA_DIR=$HOME/.ki-data
+ */
+export const KB_BASE_DIR = (() => {
+  const envDir = process.env.KI_DATA_DIR?.trim();
+  if (envDir) {
+    return path.resolve(envDir);
+  }
+  return path.join(KI_ROOT, 'kb');
+})();
 
-/** _template/ 模板目录 */
+/** _template/ 模板目录（始终为包内置，不从 KI_DATA_DIR 读取） */
 export const TEMPLATE_DIR = path.join(KI_ROOT, '_template');
