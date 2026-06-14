@@ -1,10 +1,10 @@
 #!/bin/bash
 # install-latest.sh
-# 自动检查并安装 memory-lancedb-mcp 最新版本
+# 自动检查并安装 knowledge-indexer 最新版本
 
 set -e
 
-REPO="HACK-WU/memory-lancedb-mcp"
+REPO="HACK-WU/knowledge-indexer"
 INSTALL_CMD="npm install -g"
 
 # 颜色输出
@@ -91,7 +91,7 @@ get_release_via_redirect() {
   fi
   
   # 构造下载 URL
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/memory-lancedb-mcp-${LATEST_VERSION#v}.tgz"
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/knowledge-indexer-${LATEST_VERSION#v}.tgz"
   
   # 验证 URL 是否有效
   HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" "$DOWNLOAD_URL")
@@ -126,12 +126,12 @@ get_latest_release() {
 
 # 检查当前已安装版本
 check_current_version() {
-  if command -v mem &> /dev/null; then
-    CURRENT_VERSION=$(mem --version 2>/dev/null || echo "unknown")
+  if command -v ki &> /dev/null; then
+    CURRENT_VERSION=$(ki --version 2>/dev/null || echo "unknown")
     info "当前已安装版本: $CURRENT_VERSION"
   else
     CURRENT_VERSION="未安装"
-    info "当前未安装 memory-lancedb-mcp"
+    info "当前未安装 knowledge-indexer"
   fi
 }
 
@@ -155,7 +155,7 @@ install_package() {
   fi
   
   info "安装完成！"
-  mem --version 2>/dev/null && info "版本验证成功" || warn "版本验证失败，请手动检查"
+  ki --version 2>/dev/null && info "版本验证成功" || warn "版本验证失败，请手动检查"
 }
 
 # 显示帮助
@@ -163,7 +163,7 @@ show_help() {
   cat << EOF
 用法: $0 [选项]
 
-自动检查并安装 memory-lancedb-mcp 最新版本
+自动检查并安装 knowledge-indexer 最新版本
 
 选项:
   --help        显示此帮助信息
@@ -193,7 +193,7 @@ main() {
       ;;
   esac
   
-  info "memory-lancedb-mcp 最新版本安装器"
+  info "knowledge-indexer 最新版本安装器"
   echo "========================================"
   
   check_dependencies
