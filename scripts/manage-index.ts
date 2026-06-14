@@ -63,6 +63,94 @@ function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
+// ─── MCP / CLI 共享纯函数 ───
+
+export interface ManageCreateParams {
+  scope: string;
+  name: string;
+  parent?: string;
+}
+
+export type ManageCreateResult =
+  | { ok: true; path: string; hint?: string }
+  | { ok: false; error: string };
+
+export function executeManageCreate(params: ManageCreateParams): ManageCreateResult {
+  try {
+    const { scope, name, parent } = params;
+
+    if (!scope) return { ok: false, error: '此操作需要 scope 参数' };
+    validateScope(scope);
+
+    const data = readGroupIndex(scope);
+    if (!data) return { ok: false, error: 'group-index.json 不存在' };
+
+    const indexPath = getGroupIndexPath(scope);
+    const cachePath = getRelationsCachePath(scope);
+    const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
+
+    if (!name) return { ok: false, error: 'create 需要 name 参数' };
+    if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
+
+    const parentPath = (parent || '').replace(/^\/+|\/+$/g, '');
+    const result = findContainer(data.groups, parentPath);
+
+    if (!result) {
+      const resolved = resolveGroupPath(parentPath, data, groupsData);
+      if (resolved.matched) {
+        const resolvedParent = resolved.resolvedPath;
+        const resolvedResult = findContainer(data.groups, resolvedParent);
+        if (resolvedResult) {
+          const [parentNode] = resolvedResult;
+          if (parentNode[name] !== undefined) {
+            return { ok: false, error: `节点 "${name}" 已存在于 "${resolvedParent}" 下` };
+          }
+          parentNode[name] = {};
+          writeJson(indexPath, data as unknown as Record<string, unknown>);
+          return { ok: true, path: `${resolvedParent}/${name}`, ...(resolved.hint ? { hint: resolved.hint } : {}) };
+        }
+      }
+      const hintParts: string[] = [`父节点路径不存在：${parentPath || '(顶层)'}`];
+      if (resolved.hint) hintParts.push(resolved.hint);
+      const topChildren = Object.keys(data.groups);
+      if (topChildren.length > 0 && !parentPath) {
+        hintParts.push(`可用的顶层节点：${topChildren.join(', ')}`);
+      }
+      return { ok: false, error: hintParts.join('\n') };
+    }
+
+    const [parentNode] = result;
+    if (parentNode[name] !== undefined) {
+      return { ok: false, error: `节点 "${name}" 已存在于 "${parentPath || '(顶层)'}" 下` };
+    }
+
+    parentNode[name] = {};
+    writeJson(indexPath, data as unknown as Record<string, unknown>);
+    return { ok: true, path: parentPath ? `${parentPath}/${name}` : name };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export type ListScopesResult = {
+  ok: true;
+  scopes: Array<{ scope: string; topGroups: string[] }>;
+  total: number;
+};
+
+export function executeListScopes(): ListScopesResult {
+  const scopes = listAllScopes();
+  const scopeDetails = scopes.map((s) => {
+    let topGroups: string[] = [];
+    try {
+      const data = readGroupIndex(s);
+      if (data?.groups) topGroups = Object.keys(data.groups);
+    } catch { /* 读取失败则返回空列表 */ }
+    return { scope: s, topGroups };
+  });
+  return { ok: true, scopes: scopeDetails, total: scopes.length };
+}
+
 // ─── CLI 定义 ───
 
 const program = new Command();
@@ -274,4 +362,12 @@ program
     }
   });
 
-program.parse();
+// 仅在直接运行时解析参数（被 import 时不执行）
+const _isMain = (() => {
+  try {
+    const entry = process.argv[1];
+    if (!entry || !import.meta.url) return false;
+    return import.meta.url.endsWith(entry.replace(/\\/g, '/'));
+  } catch { return false; }
+})();
+if (_isMain) program.parse();

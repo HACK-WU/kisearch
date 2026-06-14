@@ -563,6 +563,116 @@ function getModeTitle(mode: string): string {
   return titles[mode] || '索引';
 }
 
+// ─── MCP / CLI 共享纯函数 ───
+
+export interface QueryGroupParams {
+  scope: string;
+  groupsParam?: string;
+  hotCount: number;
+  depth: number;
+  modes: string[];
+}
+
+export type QueryGroupResult =
+  | { ok: true; output: string }
+  | { ok: false; error: string };
+
+export function executeQueryGroup(params: QueryGroupParams): QueryGroupResult {
+  try {
+    const { scope, depth, hotCount, modes, groupsParam } = params;
+
+    if (modes.length === 0) {
+      return { ok: false, error: '--mode 不能为空，有效值：hot | warm | cold | emerging | full' };
+    }
+    for (const mode of modes) {
+      if (!ALLOWED_MODES.includes(mode as typeof ALLOWED_MODES[number])) {
+        return { ok: false, error: `--mode 无效值：${mode}，有效值：hot | warm | cold | emerging | full` };
+      }
+    }
+
+    validateScope(scope);
+    ensureScopeDir(scope);
+
+    const groupIndex = loadGroupIndex(scope);
+    const relationsCache = loadRelationsCache(scope);
+
+    if (!groupIndex) {
+      return { ok: false, error: 'group-index.json 不存在' };
+    }
+
+    const now = Date.now();
+    const config = relationsCache?.partition_config || DEFAULT_PARTITION_CONFIG;
+    const groupsData = relationsCache?.groups || {};
+
+    // 指定 Group → 显示 Relations + 词云
+    if (groupsParam) {
+      const groupPaths = groupsParam.split(',').map((s: string) => s.trim().replace(/^\/+|\/+$/g, ''));
+      const results: string[] = [];
+
+      for (const gp of groupPaths) {
+        const resolved = resolveGroupPath(gp, groupIndex, groupsData, scope);
+
+        if (!resolved.matched) {
+          results.push(`=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容> --keywords <词1,词2>\n\n${resolved.hint}`);
+          continue;
+        }
+
+        const data = groupsData[resolved.resolvedPath];
+
+        if (!data) {
+          if (resolved.hint) results.push(resolved.hint);
+          results.push(`=== ${resolved.resolvedPath} ===\n\n(该 Group 路径存在但暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${resolved.resolvedPath}" --relation <描述> --module-info <内容> --keywords <词1,词2>`);
+          continue;
+        }
+
+        if (resolved.hint) results.push(resolved.hint);
+        results.push(formatGroupRelations(resolved.resolvedPath, data, now, config, hotCount, modes[0]));
+      }
+
+      return { ok: true, output: results.join('\n\n') };
+    }
+
+    // 完整展示：多分区索引 + 可选完整树 + 统计
+    const allPaths = collectAllGroupPaths(groupIndex.groups);
+    const groupScores = getGroupAggregateScores(groupsData, now, config.halfLifeHours);
+    const partition = partitionGroups(allPaths, groupScores, groupsData, now, config);
+    const stats = computeStats(allPaths, partition);
+
+    const lines: string[] = [];
+    lines.push(`=== 知识索引 [scope: ${scope}] ===`);
+    lines.push('');
+
+    const allRelations = collectHotRelations(groupsData, now, config.halfLifeHours, partition.emergingSet);
+
+    for (const mode of PARTITION_DISPLAY_ORDER) {
+      if (!modes.includes(mode)) continue;
+      const filteredRelations = filterRelationsByMode(allRelations, mode, partition);
+      const title = getModeTitle(mode);
+      if (filteredRelations.length > 0) {
+        lines.push(`🔥 ${title} (Top ${hotCount}):`);
+        lines.push(formatHotRelations(filteredRelations, hotCount));
+        lines.push('');
+      }
+    }
+
+    if (modes.includes('full')) {
+      lines.push('📁 完整索引树:');
+      lines.push(renderTree(groupIndex.groups, groupScores, partition, depth, null));
+      lines.push('');
+    }
+
+    lines.push('📊 统计信息:');
+    lines.push(`- 总索引数: ${stats.total}`);
+    lines.push(`- 热区索引: ${stats.hot} (新兴热: ${stats.emerging}, 历史热: ${stats.hot - stats.emerging})`);
+    lines.push(`- 常温区索引: ${stats.warm}`);
+    lines.push(`- 冷区索引: ${stats.cold}`);
+
+    return { ok: true, output: lines.join('\n') };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
 // ─── CLI ───
 
 const program = new Command();
@@ -576,117 +686,21 @@ program
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')
   .action(async (opts) => {
-    try {
-      const { scope, depth, hotCount, modes, groupsParam } = parseCliOpts(opts);
-
-      // 验证每个 mode 值
-      if (modes.length === 0) {
-        output({ ok: false, error: '--mode 不能为空，有效值：hot | warm | cold | emerging | full' });
-        process.exit(1);
-      }
-      for (const mode of modes) {
-        if (!ALLOWED_MODES.includes(mode as typeof ALLOWED_MODES[number])) {
-          output({ ok: false, error: `--mode 无效值：${mode}，有效值：hot | warm | cold | emerging | full` });
-          process.exit(1);
-        }
-      }
-
-      validateScope(scope);
-      ensureScopeDir(scope);
-
-      const groupIndex = loadGroupIndex(scope);
-      const relationsCache = loadRelationsCache(scope);
-
-      if (!groupIndex) {
-        output({ ok: false, error: 'group-index.json 不存在' });
-        process.exit(1);
-      }
-
-      const now = Date.now();
-      const config = relationsCache?.partition_config || DEFAULT_PARTITION_CONFIG;
-      const groupsData = relationsCache?.groups || {};
-
-      // 指定 Group → 显示 Relations + 词云（支持路径自动补全）
-      if (groupsParam) {
-        const groupPaths = groupsParam.split(',').map((s: string) => s.trim().replace(/^\/+|\/+$/g, ''));
-        const results: string[] = [];
-
-        for (const gp of groupPaths) {
-          const resolved = resolveGroupPath(gp, groupIndex, groupsData, scope);
-
-          if (!resolved.matched) {
-            // 未匹配：显示提示信息
-            results.push(`=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容> --keywords <词1,词2>\n\n${resolved.hint}`);
-            continue;
-          }
-
-          const data = groupsData[resolved.resolvedPath];
-
-          // 向量兜底可能匹配到树中存在但 relations-cache 无数据的 Group
-          if (!data) {
-            if (resolved.hint) results.push(resolved.hint);
-            results.push(`=== ${resolved.resolvedPath} ===\n\n(该 Group 路径存在但暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${resolved.resolvedPath}" --relation <描述> --module-info <内容> --keywords <词1,词2>`);
-            continue;
-          }
-
-          // 有补全提示时先输出提示
-          if (resolved.hint) {
-            results.push(resolved.hint);
-          }
-
-          results.push(formatGroupRelations(resolved.resolvedPath, data, now, config, hotCount, modes[0]));
-        }
-
-        console.log(results.join('\n\n'));
-        return;
-      }
-
-      // 完整展示格式（多分区索引 + 可选完整树 + 统计）
-      const allPaths = collectAllGroupPaths(groupIndex.groups);
-      const groupScores = getGroupAggregateScores(groupsData, now, config.halfLifeHours);
-      const partition = partitionGroups(allPaths, groupScores, groupsData, now, config);
-      const stats = computeStats(allPaths, partition);
-
-      console.log(`=== 知识索引 [scope: ${scope}] ===`);
-      console.log('');
-
-      // 收集所有关系
-      const allRelations = collectHotRelations(groupsData, now, config.halfLifeHours, partition.emergingSet);
-
-      // 按顺序展示每个分区（hot → warm → cold → emerging）
-      for (const mode of PARTITION_DISPLAY_ORDER) {
-        if (!modes.includes(mode)) continue;
-
-        const filteredRelations = filterRelationsByMode(allRelations, mode, partition);
-        const title = getModeTitle(mode);
-        
-        if (filteredRelations.length > 0) {
-          if (hotCount > filteredRelations.length) {
-            console.warn(`警告：${title} --hot-count ${hotCount} 超过筛选后索引数 ${filteredRelations.length}，将显示全部`);
-          }
-          console.log(`🔥 ${title} (Top ${hotCount}):`);
-          console.log(formatHotRelations(filteredRelations, hotCount));
-          console.log('');
-        }
-      }
-
-      // 仅当 modes 包含 'full' 时展示完整索引树
-      if (modes.includes('full')) {
-        console.log('📁 完整索引树:');
-        console.log(renderTree(groupIndex.groups, groupScores, partition, depth, null));
-        console.log('');
-      }
-
-      // 统计信息始终展示
-      console.log('📊 统计信息:');
-      console.log(`- 总索引数: ${stats.total}`);
-      console.log(`- 热区索引: ${stats.hot} (新兴热: ${stats.emerging}, 历史热: ${stats.hot - stats.emerging})`);
-      console.log(`- 常温区索引: ${stats.warm}`);
-      console.log(`- 冷区索引: ${stats.cold}`);
-    } catch (err) {
-      output({ ok: false, error: (err as Error).message });
+    const result = executeQueryGroup(parseCliOpts(opts));
+    if (result.ok) {
+      console.log(result.output);
+    } else {
+      output({ ok: false, error: result.error });
       process.exit(1);
     }
   });
 
-program.parse();
+// 仅在直接运行时解析参数（被 import 时不执行）
+const _isMain = (() => {
+  try {
+    const entry = process.argv[1];
+    if (!entry || !import.meta.url) return false;
+    return import.meta.url.endsWith(entry.replace(/\\/g, '/'));
+  } catch { return false; }
+})();
+if (_isMain) program.parse();

@@ -29,6 +29,7 @@ const COMMANDS = {
   'sync-relation': 'scripts/sync-relation.ts',
   'import-kb': 'scripts/import-kb.ts',
   'migrate-keywords': 'scripts/migrate-keywords.ts',
+  'mcp': 'scripts/mcp-server.ts',
 };
 
 // 获取命令和参数
@@ -51,6 +52,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   sync-relation     写入 Relation + 关键词校验
   import-kb         @deprecated 旧导入
   migrate-keywords  数据迁移
+  mcp               启动 MCP Server (stdio 模式)
 
 示例：
   ki scan-kb import --scope my-project --results ai-results.json

@@ -36,8 +36,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^14.0.0",
-    "jiti": "^2.6.1"
+    "jiti": "^2.6.1",
+    "zod": "^4.4.3"
   },
   "engines": {
     "node": ">=18.0.0"

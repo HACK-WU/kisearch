@@ -369,6 +369,76 @@ function syncBatch(
   });
 }
 
+// ─── MCP / CLI 共享纯函数 ───
+
+export interface SyncRelationParams {
+  scope: string;
+  group: string;
+  relation: string;
+  moduleInfo: string;
+  keywords: string[];
+}
+
+export type SyncRelationResult =
+  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string }
+  | { ok: false; error: string };
+
+export function executeSyncRelation(params: SyncRelationParams): SyncRelationResult {
+  try {
+    const { scope, moduleInfo } = params;
+    const group = String(params.group).replace(/^\/+|\/+$/g, '');
+    const relation = params.relation;
+    const keywordList = params.keywords;
+
+    if (!group || !relation || !moduleInfo || keywordList.length === 0) {
+      return { ok: false, error: '单条模式需要 group/relation/module-info/keywords 参数' };
+    }
+    if (!String(moduleInfo).trim()) {
+      return { ok: false, error: '--module-info 内容不能为空' };
+    }
+    if (!String(group).trim() || !String(relation).trim()) {
+      return { ok: false, error: '--group / --relation 不能为空' };
+    }
+
+    validateScope(scope);
+    ensureScopeDir(scope);
+
+    const cachePath = getRelationsCachePath(scope);
+    const cache = readJson<RelationsCache>(cachePath);
+
+    if (!cache) {
+      return { ok: false, error: 'relations-cache.json 不存在' };
+    }
+
+    // Group 路径自动补全提示
+    let pathHint: string | undefined;
+    const groupIndex = readGroupIndex(scope);
+    if (groupIndex) {
+      const resolved = resolveGroupPath(group, groupIndex, cache.groups || {});
+      if (resolved.matched && resolved.resolvedPath !== group) {
+        pathHint = `💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`;
+      } else if (!resolved.matched && resolved.hint) {
+        pathHint = resolved.hint;
+      }
+    }
+
+    const result = syncSingleRelation(cache, scope, group, relation, moduleInfo, keywordList);
+
+    // WAL 持久化
+    writeJson(cachePath, cache);
+
+    // 写入 ki-relation 向量索引（失败不阻塞）
+    try {
+      const relText = buildRelationContent(relation, group, keywordList);
+      storeOnePath({ text: relText, tag: 'ki-relation', scope });
+    } catch { /* 向量写入失败不影响主流程 */ }
+
+    return { ok: true, ...result, ...(pathHint ? { hint: pathHint } : {}) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
 // ─── CLI ───
 
 const program = new Command();
@@ -383,89 +453,44 @@ program
   .option('--keywords <keywords>', '逗号分隔的关键词列表（单条模式）')
   .option('--input <input>', 'JSON 输入文件路径（批量模式）')
   .action(async (opts) => {
-    try {
-      const { scope, input } = opts;
-
-      validateScope(scope);
-      ensureScopeDir(scope);
-
-      // 批量模式
-      if (input) {
-        syncBatch(scope, input);
-        return;
-      }
-
-      // 单条模式
-      // 规范化 Group 路径：去除首尾斜杠
-      const group = opts.group ? String(opts.group).replace(/^\/+|\/+$/g, '') : '';
-      const { relation, moduleInfo, keywords } = opts;
-
-      if (!group || !relation || !moduleInfo || !keywords) {
-        output({
-          ok: false,
-          error: '单条模式需要 --group --relation --module-info --keywords 参数',
-        });
-        process.exit(1);
-      }
-
-      // 空内容防护（仅空格/制表符也不能接受）
-      if (!String(moduleInfo).trim()) {
-        output({ ok: false, error: '--module-info 内容不能为空' });
-        process.exit(1);
-      }
-      if (!String(group).trim() || !String(relation).trim()) {
-        output({ ok: false, error: '--group / --relation 不能为空' });
-        process.exit(1);
-      }
-
-      const keywordList = keywords.split(',').map((k: string) => k.trim());
-
-      // Group 路径自动补全提示
-      const groupIndex = readGroupIndex(scope);
-      const cacheForResolve = readJson<RelationsCache>(getRelationsCachePath(scope));
-      if (groupIndex) {
-        const resolved = resolveGroupPath(group, groupIndex, cacheForResolve?.groups || {});
-        if (resolved.matched && resolved.resolvedPath !== group) {
-          console.error(`💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`);
-        } else if (!resolved.matched && resolved.hint) {
-          console.error(resolved.hint);
-        }
-      }
-
-      const cachePath = getRelationsCachePath(scope);
-      const cache = readJson<RelationsCache>(cachePath);
-
-      if (!cache) {
-        output({ ok: false, error: 'relations-cache.json 不存在' });
-        process.exit(1);
-      }
-
-      const result = syncSingleRelation(
-        cache,
-        scope,
-        group,
-        relation,
-        moduleInfo,
-        keywordList
-      );
-
-      // WAL 持久化
-      writeJson(cachePath, cache);
-
-      // 写入 ki-relation 向量索引（失败不阻塞）
+    // 批量模式
+    if (opts.input) {
       try {
-        const relText = buildRelationContent(relation, group, keywordList);
-        storeOnePath({ text: relText, tag: 'ki-relation', scope });
-      } catch { /* 向量写入失败不影响主流程 */ }
+        validateScope(opts.scope);
+        ensureScopeDir(opts.scope);
+        syncBatch(opts.scope, opts.input);
+      } catch (err) {
+        output({ ok: false, error: (err as Error).message });
+        process.exit(1);
+      }
+      return;
+    }
 
-      output({
-        ok: true,
-        ...result,
-      });
-    } catch (err) {
-      output({ ok: false, error: (err as Error).message });
+    // 单条模式：调用 executeSyncRelation
+    const keywords = opts.keywords ? String(opts.keywords).split(',').map((k: string) => k.trim()) : [];
+    const result = executeSyncRelation({
+      scope: opts.scope,
+      group: opts.group || '',
+      relation: opts.relation || '',
+      moduleInfo: opts.moduleInfo || '',
+      keywords,
+    });
+
+    if (result.ok) {
+      if (result.hint) console.error(result.hint);
+      output(result as unknown as Record<string, unknown>);
+    } else {
+      output({ ok: false, error: result.error });
       process.exit(1);
     }
   });
 
-program.parse();
+// 仅在直接运行时解析参数（被 import 时不执行）
+const _isMain = (() => {
+  try {
+    const entry = process.argv[1];
+    if (!entry || !import.meta.url) return false;
+    return import.meta.url.endsWith(entry.replace(/\\/g, '/'));
+  } catch { return false; }
+})();
+if (_isMain) program.parse();
