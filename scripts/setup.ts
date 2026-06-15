@@ -7,6 +7,7 @@
  *   ki setup --rules                           # 读 ~/.ki-targets，安装到所有目录
  *   ki setup --skills -t ~/project-a -t ~/project-b
  *   ki setup --rules --file ~/my-targets.txt
+ *   ki setup --skills -n codekb-skill,memory-skill -t ~/project-a
  */
 
 import { Command } from 'commander';
@@ -155,16 +156,39 @@ function readTargetsFile(filePath: string): string[] {
 }
 
 /**
+ * 按名称过滤列表，返回过滤后的结果
+ * 未匹配的名称会输出警告
+ */
+function filterByName(available: string[], nameFilter: string[] | null, typeLabel: string): string[] {
+  if (!nameFilter || nameFilter.length === 0) return available;
+
+  const availableSet = new Set(available);
+  const matched: string[] = [];
+
+  for (const name of nameFilter) {
+    if (availableSet.has(name)) {
+      matched.push(name);
+    } else {
+      console.warn(`⚠️  未找到${typeLabel}: ${name}（跳过）`);
+    }
+  }
+
+  return matched;
+}
+
+/**
  * 安装 Skills 到目标目录（动态发现 skill 列表）
  */
-async function installSkills(targetDir: string): Promise<{ ok: number; fail: number }> {
+async function installSkills(targetDir: string, nameFilter: string[] | null = null): Promise<{ ok: number; fail: number; total: number }> {
   const destBase = path.basename(targetDir) === 'skills'
     ? targetDir
     : path.join(targetDir, 'skills');
 
   fs.mkdirSync(destBase, { recursive: true });
 
-  const skills = listSkills();
+  const allSkills = listSkills();
+  const skills = filterByName(allSkills, nameFilter, 'skill');
+  const skipped = allSkills.length - skills.length;
 
   let ok = 0;
   let fail = 0;
@@ -182,20 +206,24 @@ async function installSkills(targetDir: string): Promise<{ ok: number; fail: num
     }
   }
 
-  return { ok, fail };
+  if (skipped > 0) console.log(`  跳过: ${skipped} 个未匹配的 skill`);
+
+  return { ok, fail, total: skills.length };
 }
 
 /**
  * 安装 Rules 到目标目录（动态发现 rule 列表）
  */
-async function installRules(targetDir: string): Promise<{ ok: number; fail: number }> {
+async function installRules(targetDir: string, nameFilter: string[] | null = null): Promise<{ ok: number; fail: number; total: number }> {
   const destBase = path.basename(targetDir) === 'rules'
     ? targetDir
     : path.join(targetDir, 'rules');
 
   fs.mkdirSync(destBase, { recursive: true });
 
-  const rules = listRules();
+  const allRules = listRules();
+  const rules = filterByName(allRules, nameFilter, 'rule');
+  const skipped = allRules.length - rules.length;
 
   let ok = 0;
   let fail = 0;
@@ -212,7 +240,9 @@ async function installRules(targetDir: string): Promise<{ ok: number; fail: numb
     }
   }
 
-  return { ok, fail };
+  if (skipped > 0) console.log(`  跳过: ${skipped} 个未匹配的 rule`);
+
+  return { ok, fail, total: rules.length };
 }
 
 // ─── CLI 定义 ───
@@ -224,11 +254,17 @@ program
   .description('从 GitHub 下载 Skills / Rules 到目标项目目录')
   .option('--skills', '安装 AI Agent Skills')
   .option('--rules', '安装加载引导规则')
+  .option('-n, --names <names>', '指定要安装的 skill/rule 名称（逗号分隔）')
   .option('-t, --target <path...>', '指定目标目录（可多次使用）')
   .option('--file <path>', '指定目标目录配置文件')
   .action(async (opts) => {
     try {
-      const { skills, rules, target, file } = opts;
+      const { skills, rules, target, file, names } = opts;
+
+      // 解析名称过滤器
+      const nameFilter: string[] | null = names
+        ? names.split(',').map((n: string) => n.trim()).filter(Boolean)
+        : null;
 
       // 1. 校验模式参数：必须且只能指定 --skills 或 --rules
       if (skills && rules) {
@@ -244,13 +280,16 @@ program
       const { dirs, source } = resolveTargets(target, file);
 
       const mode = skills ? '--skills' : '--rules';
-      console.log(`🚀 ki setup ${mode}`);
+      const nameDesc = nameFilter ? ` [${nameFilter.join(', ')}]` : '';
+      console.log(`🚀 ki setup ${mode}${nameDesc}`);
       console.log(`   目标来源: ${source}`);
       console.log(`   目标数量: ${dirs.length}`);
+      if (nameFilter) console.log(`   名称过滤: ${nameFilter.join(', ')}`);
       console.log('');
 
       let totalOk = 0;
       let totalFail = 0;
+      let totalFiles = 0;
 
       // 3. 遍历目标目录安装
       for (let i = 0; i < dirs.length; i++) {
@@ -259,21 +298,28 @@ program
 
         if (skills) {
           console.log(`${label} 🧠 安装 Skills → ${dir}`);
-          const result = await installSkills(dir);
+          const result = await installSkills(dir, nameFilter);
           totalOk += result.ok;
           totalFail += result.fail;
+          totalFiles += result.total;
         } else {
           console.log(`${label} 📋 安装 Rules → ${dir}`);
-          const result = await installRules(dir);
+          const result = await installRules(dir, nameFilter);
           totalOk += result.ok;
           totalFail += result.fail;
+          totalFiles += result.total;
         }
         console.log('');
       }
 
       // 4. 输出汇总
-      const fileCount = skills ? listSkills().length : listRules().length;
-      const totalFiles = dirs.length * fileCount;
+      if (totalFiles === 0) {
+        console.log('⚠️ 未找到匹配的项，请检查名称是否正确');
+        const listPath = skills ? 'skills' : 'rules';
+        console.log(`   可用名称可通过以下方式查看：`);
+        console.log(`   gh api repos/HACK-WU/knowledge-indexer/contents/${listPath} --jq '[].name'`);
+        process.exit(1);
+      }
       if (totalFail === 0) {
         console.log(`✅ 完成: ${totalOk}/${totalFiles} 个文件安装成功`);
       } else {

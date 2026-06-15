@@ -597,17 +597,18 @@ ki mcp
 
 ## `setup`
 
-从 GitHub 下载 Skills / Rules 到目标项目目录。支持多目录批量安装。
+从 GitHub 下载 Skills / Rules 到目标项目目录。支持多目录批量安装，支持按名称筛选。
 
 ```bash
-ki setup --skills [-t <path>... | --file <path>]
-ki setup --rules [-t <path>... | --file <path>]
+ki setup --skills [-n <names>] [-t <path>... | --file <path>]
+ki setup --rules  [-n <names>] [-t <path>... | --file <path>]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `--skills` | 安装 AI Agent Skills（`skills/`） |
 | `--rules` | 安装加载引导规则（`rules/`） |
+| `-n, --names <names>` | 指定要安装的 skill/rule 名称（逗号分隔，不指定则安装全部） |
 | `-t, --target <path...>` | 指定目标目录（可多次使用，与 `--file` 互斥） |
 | `--file <path>` | 指定目标目录配置文件（每行一个路径，与 `-t` 互斥） |
 
@@ -639,6 +640,33 @@ ki setup --skills -t ~/projects/my-app
   [OK] memory-skill/SKILL.md
 
 ✅ 完成: 3/3 个文件安装成功
+```
+
+**示例：按名称安装指定 skill**
+
+```bash
+ki setup --skills -n codekb-skill,memory-skill -t ~/projects/my-app
+```
+
+输出：
+```
+🚀 ki setup --skills [codekb-skill, memory-skill]
+   目标来源: 命令行参数 (-t × 1)
+   目标数量: 1
+   名称过滤: codekb-skill, memory-skill
+
+[1/1] 🧠 安装 Skills → /Users/me/projects/my-app
+  [OK] codekb-skill/SKILL.md
+  [OK] memory-skill/SKILL.md
+  跳过: 1 个未匹配的 skill
+
+✅ 完成: 2/2 个文件安装成功
+```
+
+**示例：按名称安装指定 rule**
+
+```bash
+ki setup --rules -n ai-codekb-memory.md -t ~/projects/my-app
 ```
 
 **示例：多目录安装**

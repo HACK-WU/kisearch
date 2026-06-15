@@ -32,6 +32,7 @@ POSITIONAL_TARGET=""
 TARGETS=()
 CONFIG_FILE=""
 MODES=()
+NAME_FILTER=""
 
 while [ $# -gt 0 ]; do
     arg="$1"
@@ -51,6 +52,11 @@ while [ $# -gt 0 ]; do
             CONFIG_FILE="$1"
             ;;
         --file=*)  CONFIG_FILE="${arg#*=}" ;;
+        -n)
+            shift
+            [ $# -eq 0 ] && { echo "错误：-n 需要参数"; exit 1; }
+            NAME_FILTER="$1"
+            ;;
         -*)
             echo "未知选项: $arg"
             exit 1
@@ -110,6 +116,7 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo ""
     echo "  --skills        安装 AI Agent Skills（skills/）"
     echo "  --rules         安装加载引导规则（rules/）"
+    echo "  -n <names>      指定要安装的 skill/rule 名称（逗号分隔，如 -n codekb-skill,memory-skill）"
     echo "  -t <path>       指定目标目录（可多次使用，与 --file 互斥）"
     echo "  --file <path>   指定目标目录配置文件（与 -t 互斥）"
     echo ""
@@ -118,6 +125,7 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo ""
     echo "示例:"
     echo "  bash install.sh --skills -t ~/projects/app -t ~/projects/api"
+    echo "  bash install.sh --skills -n codekb-skill,memory-skill -t ~/projects/app"
     echo "  bash install.sh --rules --file ~/my-targets.txt"
     echo ""
     echo "推荐使用 ki setup（支持多目录、配置文件）:"
@@ -137,7 +145,26 @@ download() {
     fi
 }
 
-NORMALIZED_DIR="${TARGET_DIR%/}"
+# 解析名称过滤器
+if [ -n "$NAME_FILTER" ]; then
+    IFS=',' read -ra NAME_LIST <<< "$NAME_FILTER"
+    # 去除空格
+    for i in "${!NAME_LIST[@]}"; do
+        NAME_LIST[$i]="$(echo "${NAME_LIST[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    done
+else
+    NAME_LIST=()
+fi
+
+# 检查名称是否在过滤列表中（空列表表示全部匹配）
+name_matches() {
+    local name="$1"
+    [ ${#NAME_LIST[@]} -eq 0 ] && return 0
+    for filter_name in "${NAME_LIST[@]}"; do
+        [ "$name" = "$filter_name" ] && return 0
+    done
+    return 1
+}
 
 install_skills() {
     if [ "${NORMALIZED_DIR##*/}" = "skills" ]; then
@@ -164,8 +191,13 @@ memory-skill"
 
     count=0
     total=0
+    skipped=0
     while IFS= read -r name; do
         [ -z "$name" ] && continue
+        if ! name_matches "$name"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
         total=$((total + 1))
         f="${name}/SKILL.md"
         url="${RAW_BASE}/skills/${f}"
@@ -177,8 +209,10 @@ memory-skill"
             echo "  [FAIL] ${f}"
         fi
     done <<< "$SKILLS"
+    [ $skipped -gt 0 ] && echo "  跳过: ${skipped} 个未匹配的 skill"
     echo ""
     echo "已安装: ${count}/${total}"
+    if [ $total -gt 0 ]; then ANY_INSTALLED=1; fi
 }
 
 install_rules() {
@@ -204,8 +238,13 @@ install_rules() {
 
     count=0
     total=0
+    skipped=0
     while IFS= read -r name; do
         [ -z "$name" ] && continue
+        if ! name_matches "$name"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
         total=$((total + 1))
         url="${RAW_BASE}/rules/${name}"
         dest="${DEST}/${name}"
@@ -216,8 +255,10 @@ install_rules() {
             echo "  [FAIL] ${name}"
         fi
     done <<< "$RULES"
+    [ $skipped -gt 0 ] && echo "  跳过: ${skipped} 个未匹配的 rule"
     echo ""
     echo "已安装: ${count}/${total}"
+    if [ $total -gt 0 ]; then ANY_INSTALLED=1; fi
 }
 
 # ============================================================
@@ -226,7 +267,10 @@ install_rules() {
 echo "🚀 install.sh"
 echo "   目标来源: ${SOURCE_DESC}"
 echo "   目标数量: ${#TARGET_DIRS[@]}"
+[ ${#NAME_LIST[@]} -gt 0 ] && echo "   名称过滤: $(IFS=', '; echo "${NAME_LIST[*]}")"
 echo ""
+
+ANY_INSTALLED=0
 
 for i in "${!TARGET_DIRS[@]}"; do
     TARGET_DIR="${TARGET_DIRS[$i]}"
@@ -248,4 +292,9 @@ for i in "${!TARGET_DIRS[@]}"; do
     done
 done
 
+echo ""
+if [ $ANY_INSTALLED -eq 0 ]; then
+    echo "⚠️ 未找到匹配的项，请检查名称是否正确"
+    exit 1
+fi
 echo "✅ 完成"
