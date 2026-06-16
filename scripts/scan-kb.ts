@@ -21,6 +21,8 @@ import { CURRENT_DATA_VERSION } from './lib/constants.js';
 import { handleImport } from './lib/import.js';
 import { handleIncremental } from './lib/incremental.js';
 import { handleDiff } from './lib/diff.js';
+import { loadConfig } from './lib/config.js';
+import { autoBackup } from './lib/backup.js';
 
 const MAX_SCAN_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -786,6 +788,16 @@ program
           mappingFile,
         });
         output(result as unknown as Record<string, unknown>);
+        // 自动备份（失败不阻断）
+        try {
+          const config = loadConfig();
+          const backupResult = autoBackup(config, scope, resultsFile, 'full');
+          if (backupResult.ok) {
+            process.stderr.write(`自动备份完成：${backupResult.snapshotBackup ?? ''}\n`);
+          }
+        } catch (backupErr) {
+          process.stderr.write(`警告：自动备份失败 — ${(backupErr as Error).message}\n`);
+        }
         return;
       }
 
@@ -798,6 +810,16 @@ program
           mappingFile,
         });
         output(result as unknown as Record<string, unknown>);
+        // 自动备份（失败不阻断）
+        try {
+          const config = loadConfig();
+          const backupResult = autoBackup(config, scope, resultsFile, 'incremental');
+          if (backupResult.ok) {
+            process.stderr.write(`自动备份完成：${backupResult.snapshotBackup ?? ''}\n`);
+          }
+        } catch (backupErr) {
+          process.stderr.write(`警告：自动备份失败 — ${(backupErr as Error).message}\n`);
+        }
         return;
       }
 

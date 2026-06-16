@@ -6,7 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { KB_BASE_DIR } from './constants.js';
+import { loadConfig, getScopeDataDir } from './config.js';
 
 // scope 合法字符正则
 const SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -28,10 +28,12 @@ export function validateScope(scope: string): void {
 
 /**
  * 获取 kb/{scope}/ 目录绝对路径
+ * 优先使用 config.scopes[scope].kbDir，fallback 到 config.dataDir/{scope}
  */
 export function getKbDir(scope: string): string {
   validateScope(scope);
-  return path.join(KB_BASE_DIR, scope);
+  const config = loadConfig();
+  return getScopeDataDir(config, scope);
 }
 
 /**
@@ -62,7 +64,7 @@ export function getScanIndexPath(scope: string): string {
  */
 export function getLocalKbDir(scope: string, groupPath: string): string {
   validateScope(scope);
-  return path.join(KB_BASE_DIR, scope, groupPath, 'index.json');
+  return path.join(getKbDir(scope), groupPath, 'index.json');
 }
 
 // ─── group-index.json 的 source 块（S-01） ───
@@ -195,15 +197,30 @@ export function ensureGroupPathInTree(index: GroupIndex, groupPath: string): voi
  * - 仅返回包含 relations-cache.json 的目录（即已初始化的 scope）
  */
 export function listAllScopes(): string[] {
-  if (!fs.existsSync(KB_BASE_DIR)) return [];
-  const entries = fs.readdirSync(KB_BASE_DIR, { withFileTypes: true });
-  return entries
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .filter((name) => /^[a-zA-Z0-9_-]+$/.test(name))
-    .filter((name) =>
-      fs.existsSync(path.join(KB_BASE_DIR, name, 'relations-cache.json'))
-    );
+  const config = loadConfig();
+  const scopeSet = new Set<string>();
+
+  // 1. 扫描 dataDir 下的目录
+  if (fs.existsSync(config.dataDir)) {
+    const entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory() && /^[a-zA-Z0-9_-]+$/.test(e.name)) {
+        const scopeDir = path.join(config.dataDir, e.name);
+        if (fs.existsSync(path.join(scopeDir, 'relations-cache.json'))) {
+          scopeSet.add(e.name);
+        }
+      }
+    }
+  }
+
+  // 2. 合并 config.scopes 中配置的自定义 kbDir 的 scope
+  for (const [name, sc] of Object.entries(config.scopes)) {
+    if (sc.kbDir && fs.existsSync(path.join(sc.kbDir, 'relations-cache.json'))) {
+      scopeSet.add(name);
+    }
+  }
+
+  return [...scopeSet];
 }
 
 /**

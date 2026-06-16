@@ -39,14 +39,30 @@ const COMMANDS = {
   'search': 'scripts/search.ts',
   'store': 'scripts/store.ts',
   'bulk_store': 'scripts/bulk-store.ts',
+  'config': 'scripts/config.ts',
+  'backup': 'scripts/backup.ts',
+  'restore': 'scripts/restore.ts',
+  'export': 'scripts/export.ts',
 };
 
 // 获取命令和参数
 const args = process.argv.slice(2);
-const command = args[0];
 
-// 显示版本
-if (command === '--version' || command === '-V' || command === '-v') {
+// 预解析全局 --config 参数（可在任意位置）
+let configPath = null;
+const filteredArgs = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--config' && i + 1 < args.length) {
+    configPath = args[++i];
+  } else {
+    filteredArgs.push(args[i]);
+  }
+}
+
+const command = filteredArgs[0];
+
+// 显示版本（支持过滤 --config 后的位置）
+if (command === '--version' || command === '-V' || command === '-v' || filteredArgs.includes('--version')) {
   console.log(VERSION);
   process.exit(0);
 }
@@ -68,22 +84,27 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   search            语义检索知识库内容
   store             存储文本到向量索引
   bulk_store        批量存储文本到向量索引
+  config            配置管理：init
+  backup            备份 scope 目录快照
+  restore           从快照或 ai-results 还原
+  export            导出 KB 为 Wiki Markdown
   import-kb         @deprecated 旧导入
   migrate-keywords  数据迁移
   mcp               启动 MCP Server (stdio 模式)
   setup             下载 Skills / Rules 到目标项目目录
 
+全局参数：
+  --config <path>   指定配置文件路径（可在任意命令位置使用）
+
 示例：
+  ki config init
   ki scan-kb import --scope my-project --results ai-results.json
+  ki backup my-project
+  ki restore my-project --from-snapshot --yes
+  ki export my-project --output ./wiki-output
   ki manage-index --scope my-project --action create-root --root-name "我的项目"
   ki query-group --scope my-project
-  ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录"
   ki search --scope my-project --query "用户登录流程"
-  ki store --scope my-project --text "认证模块负责校验账号密码"
-
-环境变量：
-  KI_DATA_DIR  自定义数据目录（默认：{安装目录}/kb/）
-               全局安装时建议设置：export KI_DATA_DIR=$HOME/.ki-data
 
 详细帮助：
   ki <command> --help
@@ -102,14 +123,20 @@ if (!COMMANDS[command]) {
 const scriptPath = path.join(PROJECT_ROOT, COMMANDS[command]);
 
 // 获取剩余参数
-const scriptArgs = args.slice(1);
+const scriptArgs = filteredArgs.slice(1);
+
+// 构建子进程环境变量
+const childEnv = { ...process.env, KI_ORIGINAL_CWD: process.cwd() };
+if (configPath) {
+  childEnv.KI_CONFIG_PATH = path.resolve(configPath);
+}
 
 try {
   // 使用 jiti 执行 TypeScript 脚本
   execFileSync('npx', ['jiti', scriptPath, ...scriptArgs], {
     stdio: 'inherit',
     cwd: PROJECT_ROOT,
-    env: { ...process.env, KI_ORIGINAL_CWD: process.cwd() },
+    env: childEnv,
   });
 } catch (error) {
   // 如果脚本执行失败，退出码与子进程一致
