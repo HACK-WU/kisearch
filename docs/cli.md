@@ -2,7 +2,15 @@
 
 所有脚本都通过 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
-**环境变量**：`KI_DATA_DIR` 可自定义数据存储目录。全局安装时建议设置为持久化路径（如 `$HOME/.ki-data`），避免数据落入 `node_modules`。
+**配置优先级**：
+1. `--config <path>` 命令行参数
+2. 当前工作目录 `.ki/config.json`
+3. `$HOME/.ki/config.json`
+4. 内置默认值（`dataDir` = `$HOME/.ki-data`）
+
+**首次使用**：运行 `ki config init` 生成配置文件模板。
+
+**注意**：环境变量 `KI_DATA_DIR` 已不再支持，仅使用配置文件机制。
 
 ---
 
@@ -592,6 +600,290 @@ ki mcp
 #### `ki_manage_index_list`
 
 无参数，返回所有 scope 及顶层 Group。
+
+---
+
+## `config`
+
+配置管理命令，用于生成和管理 ki 配置文件。
+
+### `init` 子命令
+
+生成配置文件模板到 `~/.ki/config.json`。
+
+```bash
+ki config init [--dir <path>] [--force]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--dir <path>` | 目标目录，默认 `$HOME` |
+| `--force` | 强制覆盖已有配置文件 |
+
+**示例：生成配置文件**
+
+```bash
+ki config init
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "config_init",
+  "configPath": "/Users/me/.ki/config.json",
+  "existed": false,
+  "message": "配置文件已生成：/Users/me/.ki/config.json\n请根据实际需要修改 dataDir / backupDir / scopes 字段。"
+}
+```
+
+**配置文件结构**：
+
+```json
+{
+  "dataDir": "$HOME/.ki-data",
+  "backupDir": "$HOME/.ki-backup",
+  "scopes": {
+    "my-project": {
+      "kbDir": "/data/special-kb/my-project",
+      "sourceDir": ".qoder/repowiki/zh/content",
+      "rootName": "QoderWiki"
+    }
+  }
+}
+```
+
+**配置优先级**：
+1. `--config <path>` 命令行参数
+2. 当前工作目录 `.ki/config.json`
+3. `$HOME/.ki/config.json`
+4. 内置默认值
+
+**路径展开规则**：
+- `$HOME` → `process.env.HOME`
+- `~` → 同 `$HOME`
+- 相对路径 → 相对于配置文件所在目录
+
+---
+
+## `backup`
+
+备份 scope 目录快照。
+
+```bash
+ki backup <scope>               # 备份 scope 目录快照
+ki backup <scope> --list        # 列出已有备份
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<scope>` | 项目隔离标识（必填） |
+| `--list` | 列出已有备份而非执行备份 |
+
+**示例：备份 scope**
+
+```bash
+ki backup my-project
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "backup",
+  "scope": "my-project",
+  "snapshot": "snapshot.20260616-223000.tar.gz",
+  "snapshotPath": "/Users/me/.ki-backup/my-project/snapshots/snapshot.20260616-223000.tar.gz",
+  "message": "scope 快照已保存：/Users/me/.ki-backup/my-project/snapshots/snapshot.20260616-223000.tar.gz"
+}
+```
+
+**示例：列出备份**
+
+```bash
+ki backup my-project --list
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "backup_list",
+  "scope": "my-project",
+  "snapshots": [
+    "snapshot.20260616-223000.tar.gz",
+    "snapshot.20260616-210000.tar.gz"
+  ],
+  "aiResults": [
+    "ai-results.20260616-223000.full.json",
+    "ai-results.20260616-210000.incremental.json"
+  ]
+}
+```
+
+**备份存储位置**：
+- 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
+- ai-results：`{backupDir}/{scope}/ai-results/ai-results.{timestamp}.{mode}.json`
+
+---
+
+## `restore`
+
+从快照或 ai-results 还原 scope 数据。
+
+```bash
+ki restore <scope>                           # 列出可用备份
+ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
+ki restore <scope> --from-results  [--dir <ai-results-dir>]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<scope>` | 项目隔离标识（必填） |
+| `--from-snapshot` | 从 tar.gz 快照覆盖还原（破坏性操作，需 `--yes` 确认） |
+| `--from-results` | 按 timestamp 顺序重放 ai-results 备份文件 |
+| `--timestamp <ts>` | 指定快照 timestamp（可选，默认使用最新） |
+| `--dir <dir>` | 指定 ai-results 目录（可选，默认使用备份目录） |
+| `--yes` | 跳过交互确认 |
+
+**示例：列出可用备份**
+
+```bash
+ki restore my-project
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "restore_list",
+  "scope": "my-project",
+  "available": {
+    "snapshots": ["snapshot.20260616-223000.tar.gz"],
+    "aiResults": ["ai-results.20260616-223000.full.json"]
+  },
+  "hint": "使用 --from-snapshot 或 --from-results 选择还原模式"
+}
+```
+
+**示例：从快照还原**
+
+```bash
+ki restore my-project --from-snapshot --yes
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "restore_snapshot",
+  "scope": "my-project",
+  "snapshot": "snapshot.20260616-223000.tar.gz",
+  "restoredAt": "2026-06-16T22:30:00.000Z"
+}
+```
+
+**示例：从 ai-results 重放**
+
+```bash
+ki restore my-project --from-results
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "restore_results",
+  "scope": "my-project",
+  "replayed": [
+    { "file": "ai-results.20260616-223000.full.json", "mode": "full", "status": "ok" },
+    { "file": "ai-results.20260616-230000.incremental.json", "mode": "incremental", "status": "ok" }
+  ],
+  "stats": { "total": 2, "success": 2, "failed": 0 }
+}
+```
+
+**重放要求**：
+- 首个文件必须是 `full` 模式的全量备份
+- 后续文件按 timestamp 顺序依次重放
+- 任一文件重放失败会停止后续重放
+
+**安全机制**：
+- 还原前自动创建当前状态快照（安全网）
+- 快照还原失败时自动从安全网恢复
+- 破坏性操作需 `--yes` 确认
+
+---
+
+## `export`
+
+将 KB scope 中的结构化数据反向导出为 Markdown 文件目录。
+
+```bash
+ki export <scope> --output <dir> [--root-name <name>]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<scope>` | 项目隔离标识（必填） |
+| `--output <dir>` | 输出目录（必填） |
+| `--root-name <name>` | 指定根节点名称（可选，默认导出所有） |
+
+**示例：导出 scope 为 Markdown**
+
+```bash
+ki export my-project --output ./wiki-output
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "action": "export",
+  "scope": "my-project",
+  "outputDir": "/path/to/wiki-output",
+  "stats": {
+    "total": 15,
+    "exported": 12,
+    "empty": 3
+  },
+  "skipped": []
+}
+```
+
+**导出格式**：
+
+每个 Relation 导出为一个 Markdown 文件，包含 YAML frontmatter：
+
+```markdown
+---
+groupPath: 项目/API
+relation: 用户登录接口
+keywords: [登录, 认证, token]
+exportedAt: 2026-06-16T22:30:00.000Z
+---
+
+## 登录流程
+
+用户输入账号密码后进入认证流程，服务端校验成功后返回 token。
+```
+
+**目录结构**：
+```
+wiki-output/
+├── 项目/
+│   ├── API/
+│   │   ├── 用户登录接口.md
+│   │   └── 数据查询接口.md
+│   └── 前端/
+│       └── 状态管理.md
+└── ...
+```
+
+**特性**：
+- 仅使用 scope 本地数据（group-index.json + relations-cache.json + local KB index.json）
+- 不依赖 mem CLI
+- 自动处理 YAML 特殊字符
 
 ---
 

@@ -57,7 +57,6 @@
 | [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
 | [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
 | [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
-| [`docs/restore-data.md`](./docs/restore-data.md) | 数据恢复 / 重新初始化 |
 
 ### Agent 行为规则（完整版）
 
@@ -146,19 +145,32 @@ npm link
 
 ### 配置数据目录
 
-全局安装时，KB 数据默认落在 `node_modules/knowledge-indexer/kb/` 中，重新安装会丢失。
-建议通过环境变量 `KI_DATA_DIR` 指定持久化数据目录：
+推荐使用配置文件管理数据目录。首次使用时，运行以下命令生成配置模板：
 
 ```bash
-# 添加到 ~/.zshrc 或 ~/.bashrc
-export KI_DATA_DIR=$HOME/.ki-data
+ki config init
 ```
 
-设置后，所有 scope 的 KB 数据（`kb/{scope}/`）将存储在 `~/.ki-data/` 下。
+配置文件默认生成在 `~/.ki/config.json`，内容如下：
+
+```json
+{
+  "dataDir": "$HOME/.ki-data",
+  "backupDir": "$HOME/.ki-backup",
+  "scopes": {}
+}
+```
+
+**配置优先级**：
+1. `--config <path>` 命令行参数
+2. 当前工作目录 `.ki/config.json`
+3. `$HOME/.ki/config.json`
+4. 内置默认值
+
+> 注意：环境变量 `KI_DATA_DIR` 已不再支持，仅使用配置文件机制。首次运行 `ki config init` 时会自动探测 `KI_DATA_DIR` 环境变量并迁移到配置文件。
 
 ### 使用示例
 
-所有脚本使用 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
 ```bash
 # 1. 初始化索引（创建顶层 Group）
@@ -207,6 +219,10 @@ ki get-module-info \
 | `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
 | `sync-relation` | 写入 Relation + 关键词校验 |
 | `mcp` | 启动 MCP Server（stdio 传输，8 个工具） |
+| `config` | 配置管理：init（生成配置文件） |
+| `backup` | 备份 scope 目录快照 |
+| `restore` | 从快照或 ai-results 还原 |
+| `export` | 导出 KB 为 Wiki Markdown |
 | `import-kb` | @deprecated 旧导入 |
 | `migrate-keywords` | 数据迁移 |
 | `search` | 语义检索（通过 mem 向量搜索，支持标签过滤） |
@@ -232,7 +248,6 @@ ki mcp
       "command": "ki",
       "args": ["mcp"],
       "env": {
-        "KI_DATA_DIR": "/path/to/your/kb/data",
         "SILICONFLOW_API_KEY": "<your-api-key>"
       }
     }
@@ -240,7 +255,7 @@ ki mcp
 }
 ```
 
-> **⚠️ 注意**：MCP 进程不继承 shell 环境变量（如 `.zshrc` 中的 export），必须通过 `env` 字段显式传入。`KI_DATA_DIR` 指向 KB 数据目录；`SILICONFLOW_API_KEY` 为 mem 向量引擎的 API 密钥。若不配置，向量搜索/存储工具将不可用。
+> **⚠️ 注意**：MCP 进程不继承 shell 环境变量（如 `.zshrc` 中的 export），必须通过 `env` 字段显式传入。`SILICONFLOW_API_KEY` 为 mem 向量引擎的 API 密钥。若不配置，向量搜索/存储工具将不可用。KB 数据目录通过配置文件管理（`ki config init`），无需环境变量。
 
 ### 暴露的工具
 

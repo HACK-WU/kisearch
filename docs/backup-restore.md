@@ -2,6 +2,41 @@
 
 本文档说明 `knowledge-indexer` 的数据备份和恢复策略。
 
+### CLI 命令（推荐）
+
+ki 提供内置的备份恢复命令：
+
+| 命令 | 说明 | 用法 |
+|------|------|------|
+| `ki backup` | 备份 scope 目录快照 | `ki backup <scope>` |
+| `ki restore` | 从快照或 ai-results 还原 | `ki restore <scope> --from-snapshot` |
+| `ki config init` | 生成配置文件（含备份目录配置） | `ki config init` |
+
+**快速备份**：
+```bash
+ki backup my-project
+```
+
+**快速恢复**：
+```bash
+# 列出可用备份
+ki restore my-project
+
+# 从快照恢复
+ki restore my-project --from-snapshot --yes
+
+# 从 ai-results 重放
+ki restore my-project --from-results
+```
+
+**备份存储位置**：
+- 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
+- ai-results：`{backupDir}/{scope}/ai-results/ai-results.{timestamp}.{mode}.json`
+
+> 详细用法见 [CLI 参考 → backup](./cli.md#backup)、[CLI 参考 → restore](./cli.md#restore)、[CLI 参考 → config](./cli.md#config)
+
+### 手动备份策略
+
 **备份策略**：二进制完整备份，直接复制 `kb/` 目录。
 
 > 系统使用原子写入（tmp → rename）保证写入安全，不会因写入中断导致文件损坏。不再自动生成 backup 目录，由用户自行备份。
@@ -38,9 +73,35 @@ knowledge-indexer/
 
 ## 备份策略
 
-### 1. 完整备份（推荐）
+### 1. 单 scope 备份（推荐）
 
-**备份整个 `kb/` 目录**，包含所有 scope 的数据。
+使用 `ki backup` 命令备份指定 scope：
+
+```bash
+# 备份 scope 目录快照
+ki backup my-project
+
+# 列出已有备份
+ki backup my-project --list
+```
+
+备份文件存储在 `{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`。
+
+### 2. 批量备份所有 scope
+
+```bash
+# 列出所有 scope
+ki manage-index --action list-scopes
+
+# 逐个备份
+for scope in $(ki manage-index --action list-scopes | jq -r '.scopes[].scope'); do
+  ki backup "$scope"
+done
+```
+
+### 3. 手动备份（高级）
+
+**备份整个 `kb/` 目录**，包含所有 scope 的数据：
 
 ```bash
 # 备份命令
@@ -56,44 +117,37 @@ tar -czf knowledge-indexer-backup-$(date +%Y%m%d_%H%M%S).tar.gz knowledge-indexe
 - 所有 scope 的 `scan-index.json`
 - 所有 scope 的本地 KB 原文
 
-### 2. 单 scope 备份
-
-**备份特定 scope 的数据**：
-
-```bash
-# 备份指定 scope
-rsync -av knowledge-indexer/kb/{scope}/ /path/to/backup/{scope}/
-
-# 或打包
-tar -czf {scope}-backup-$(date +%Y%m%d_%H%M%S).tar.gz knowledge-indexer/kb/{scope}/
-```
-
 ---
 
 ## 恢复策略
 
-### 1. 完整恢复
+### 1. 从快照恢复（推荐）
 
-**从完整备份恢复所有数据**：
+使用 `ki restore` 命令从备份快照恢复：
 
 ```bash
-# 恢复备份
-rsync -av /path/to/backup/kb/ knowledge-indexer/kb/
+# 列出可用备份
+ki restore my-project
 
-# 或解压 tar 包
-tar -xzf knowledge-indexer-backup-20260603_163600.tar.gz
+# 从最新快照恢复（需 --yes 确认）
+ki restore my-project --from-snapshot --yes
+
+# 文件名：snapshot.20260616-223000.tar.gz
+# timestamp：20260616-223000 
+# 从指定时间戳的快照恢复（timestamp 格式：YYYYMMDD-HHMMSS）
+ki restore my-project --from-snapshot --timestamp 20260616-223000 --yes
 ```
 
-### 2. 单 scope 恢复
+### 2. 从 ai-results 重放
 
-**从单 scope 备份恢复**：
+如果保存了 ai-results 备份文件，可以重放恢复：
 
 ```bash
-# 恢复指定 scope
-rsync -av /path/to/backup/{scope}/ knowledge-indexer/kb/{scope}/
+# 从默认备份目录重放
+ki restore my-project --from-results
 
-# 或解压
-tar -xzf {scope}-backup-20260603_163600.tar.gz -C knowledge-indexer/kb/
+# 从指定目录重放
+ki restore my-project --from-results --dir /path/to/ai-results
 ```
 
 ### 3. 从模板重新初始化
@@ -101,9 +155,6 @@ tar -xzf {scope}-backup-20260603_163600.tar.gz -C knowledge-indexer/kb/
 当没有备份且数据损坏时，可删除 scope 目录后重新初始化：
 
 ```bash
-# 备份现有数据（可选）
-cp -r kb/{scope} kb/{scope}.bak.$(date +%Y%m%d%H%M%S)
-
 # 删除损坏的 scope 目录
 rm -rf kb/{scope}
 
@@ -117,196 +168,6 @@ ki scan-kb import --scope {scope} --results ai-results.json
 
 ---
 
-## 备份脚本示例
-
-### 1. 完整备份脚本
-
-```bash
-#!/bin/bash
-# backup-ki.sh - 完整备份 knowledge-indexer 数据
-
-BACKUP_DIR="/path/to/backups"
-KI_DIR="/path/to/knowledge-indexer"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_NAME="ki-backup-${TIMESTAMP}"
-
-# 创建备份目录
-mkdir -p "${BACKUP_DIR}/${BACKUP_NAME}"
-
-# 备份 kb/ 目录
-rsync -av "${KI_DIR}/kb/" "${BACKUP_DIR}/${BACKUP_NAME}/kb/"
-
-# 备份模板目录
-rsync -av "${KI_DIR}/_template/" "${BACKUP_DIR}/${BACKUP_NAME}/_template/"
-
-# 创建备份清单
-cat > "${BACKUP_DIR}/${BACKUP_NAME}/manifest.txt" <<EOF
-备份时间: $(date)
-备份目录: ${KI_DIR}/kb/
-备份内容: 所有 scope 数据
-备份文件数: $(find "${BACKUP_DIR}/${BACKUP_NAME}" -type f | wc -l)
-EOF
-
-# 打包备份
-tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "${BACKUP_DIR}" "${BACKUP_NAME}"
-
-# 清理临时目录
-rm -rf "${BACKUP_DIR}/${BACKUP_NAME}"
-
-echo "备份完成: ${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
-```
-
-### 2. 单 scope 备份脚本
-
-```bash
-#!/bin/bash
-# backup-scope.sh - 备份指定 scope 的数据
-
-SCOPE="$1"
-BACKUP_DIR="/path/to/backups"
-KI_DIR="/path/to/knowledge-indexer"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-if [ -z "$SCOPE" ]; then
-  echo "用法: $0 <scope>"
-  exit 1
-fi
-
-# 检查 scope 目录是否存在
-if [ ! -d "${KI_DIR}/kb/${SCOPE}" ]; then
-  echo "错误: scope '${SCOPE}' 不存在"
-  exit 1
-fi
-
-# 创建备份
-BACKUP_NAME="${SCOPE}-backup-${TIMESTAMP}"
-mkdir -p "${BACKUP_DIR}/${BACKUP_NAME}"
-
-# 备份 scope 目录
-rsync -av "${KI_DIR}/kb/${SCOPE}/" "${BACKUP_DIR}/${BACKUP_NAME}/"
-
-# 打包
-tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "${BACKUP_DIR}" "${BACKUP_NAME}"
-rm -rf "${BACKUP_DIR}/${BACKUP_NAME}"
-
-echo "备份完成: ${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
-```
-
-### 3. 定时备份脚本
-
-```bash
-#!/bin/bash
-# 定时备份脚本，可加入 crontab
-
-# 示例 crontab 条目（每天凌晨 2 点备份）
-# 0 2 * * * /path/to/backup-ki.sh
-
-# 备份保留策略：保留最近 7 天的备份
-BACKUP_DIR="/path/to/backups"
-KEEP_DAYS=7
-
-# 执行备份
-/path/to/backup-ki.sh
-
-# 清理旧备份
-find "${BACKUP_DIR}" -name "ki-backup-*.tar.gz" -mtime +${KEEP_DAYS} -delete
-
-echo "备份完成，保留最近 ${KEEP_DAYS} 天的备份"
-```
-
----
-
-## 恢复脚本示例
-
-### 1. 完整恢复脚本
-
-```bash
-#!/bin/bash
-# restore-ki.sh - 从完整备份恢复
-
-BACKUP_FILE="$1"
-KI_DIR="/path/to/knowledge-indexer"
-
-if [ -z "$BACKUP_FILE" ]; then
-  echo "用法: $0 <备份文件.tar.gz>"
-  exit 1
-fi
-
-if [ ! -f "$BACKUP_FILE" ]; then
-  echo "错误: 备份文件不存在"
-  exit 1
-fi
-
-# 创建临时目录
-TEMP_DIR=$(mktemp -d)
-
-# 解压备份
-tar -xzf "$BACKUP_FILE" -C "$TEMP_DIR"
-
-# 恢复 kb/ 目录
-if [ -d "${TEMP_DIR}/kb" ]; then
-  rsync -av "${TEMP_DIR}/kb/" "${KI_DIR}/kb/"
-  echo "恢复 kb/ 目录完成"
-fi
-
-# 恢复模板目录
-if [ -d "${TEMP_DIR}/_template" ]; then
-  rsync -av "${TEMP_DIR}/_template/" "${KI_DIR}/_template/"
-  echo "恢复 _template/ 目录完成"
-fi
-
-# 清理临时目录
-rm -rf "$TEMP_DIR"
-
-echo "恢复完成"
-```
-
-### 2. 单 scope 恢复脚本
-
-```bash
-#!/bin/bash
-# restore-scope.sh - 恢复指定 scope 的数据
-
-BACKUP_FILE="$1"
-SCOPE="$2"
-KI_DIR="/path/to/knowledge-indexer"
-
-if [ -z "$BACKUP_FILE" ] || [ -z "$SCOPE" ]; then
-  echo "用法: $0 <备份文件.tar.gz> <scope>"
-  exit 1
-fi
-
-if [ ! -f "$BACKUP_FILE" ]; then
-  echo "错误: 备份文件不存在"
-  exit 1
-fi
-
-# 创建临时目录
-TEMP_DIR=$(mktemp -d)
-
-# 解压备份
-tar -xzf "$BACKUP_FILE" -C "$TEMP_DIR"
-
-# 查找 scope 目录
-SCOPE_DIR=$(find "$TEMP_DIR" -type d -name "$SCOPE" | head -1)
-
-if [ -z "$SCOPE_DIR" ]; then
-  echo "错误: 备份中未找到 scope '${SCOPE}'"
-  rm -rf "$TEMP_DIR"
-  exit 1
-fi
-
-# 恢复 scope 目录
-rsync -av "${SCOPE_DIR}/" "${KI_DIR}/kb/${SCOPE}/"
-
-# 清理临时目录
-rm -rf "$TEMP_DIR"
-
-echo "恢复 scope '${SCOPE}' 完成"
-```
-
----
-
 ## 故障恢复场景
 
 ### 场景 1：group-index.json 损坏
@@ -314,32 +175,46 @@ echo "恢复 scope '${SCOPE}' 完成"
 **症状**：读取 Group 树失败，报 JSON 解析错误
 
 **恢复步骤**：
-1. 从备份恢复：`rsync -av /path/to/backup/{scope}/group-index.json kb/{scope}/group-index.json`
-2. 如无备份，删除 scope 目录后从模板重新初始化
+```bash
+# 从快照恢复整个 scope
+ki restore {scope} --from-snapshot --yes
+```
 
 ### 场景 2：relations-cache.json 损坏
 
 **症状**：Relation 查询失败，报 JSON 解析错误
 
 **恢复步骤**：
-1. 从备份恢复：`rsync -av /path/to/backup/{scope}/relations-cache.json kb/{scope}/relations-cache.json`
-2. 如无备份，删除 scope 目录后从模板重新初始化
+```bash
+# 从快照恢复整个 scope
+ki restore {scope} --from-snapshot --yes
+```
 
 ### 场景 3：整个 scope 数据丢失
 
 **症状**：`kb/{scope}/` 目录不存在或为空
 
 **恢复步骤**：
-1. 从完整备份恢复整个 scope 目录
-2. 或重新初始化 scope：`ki manage-index --scope {scope} --action create --name "初始化"`
+```bash
+# 从快照恢复
+ki restore {scope} --from-snapshot --yes
+
+# 或重新初始化 scope
+ki manage-index --scope {scope} --action create --name "初始化"
+```
 
 ### 场景 4：本地 KB 原文丢失
 
 **症状**：`get-module-info` 返回空内容
 
 **恢复步骤**：
-1. 从备份恢复 `{group}/index.json` 文件
-2. 或重新导入知识库：`ki scan-kb import --scope {scope} --results ai-results.json`
+```bash
+# 从快照恢复
+ki restore {scope} --from-snapshot --yes
+
+# 或重新导入知识库
+ki scan-kb import --scope {scope} --results ai-results.json
+```
 
 ---
 
