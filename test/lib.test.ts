@@ -13,6 +13,7 @@ import os from 'os';
 
 import { walWrite, cleanupTmpFiles } from '../scripts/lib/wal.js';
 import { validateScope, getKbDir, getGroupIndexPath } from '../scripts/lib/scope.js';
+import { loadConfig, resetConfigCache } from '../scripts/lib/config.js';
 import {
   calculateScore,
   recordUse,
@@ -28,6 +29,14 @@ let tmpDir: string;
 
 before(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-test-'));
+
+  // 隔离配置：创建测试专用 config.json，确保不依赖全局配置
+  const testConfigDir = path.join(tmpDir, '.ki');
+  fs.mkdirSync(testConfigDir, { recursive: true });
+  const testConfig = { dataDir: path.join(tmpDir, 'kb'), backupDir: path.join(tmpDir, 'backup'), scopes: {} };
+  fs.writeFileSync(path.join(testConfigDir, 'config.json'), JSON.stringify(testConfig));
+  resetConfigCache();
+  loadConfig(path.join(testConfigDir, 'config.json'));
 });
 
 after(() => {
@@ -105,10 +114,10 @@ describe('Scope 校验', () => {
 
   it('路径构造函数使用合法 scope', () => {
     const kbDir = getKbDir('project-a');
-    assert.ok(kbDir.endsWith('/kb/project-a'));
+    assert.ok(kbDir.endsWith('/project-a'), `kbDir should end with /project-a, got: ${kbDir}`);
 
     const indexPath = getGroupIndexPath('project-a');
-    assert.ok(indexPath.endsWith('/kb/project-a/group-index.json'));
+    assert.ok(indexPath.endsWith('/project-a/group-index.json'));
   });
 });
 

@@ -3,9 +3,8 @@
  *
  * 配置文件查找优先级：
  *   1. --config <path> 命令行参数
- *   2. 当前工作目录 .ki/config.json
- *   3. $HOME/.ki/config.json
- *   4. 内置默认值
+ *   2. $HOME/.ki/config.json
+ *   3. 内置默认值
  *
  * 路径展开规则：$HOME / ~ → os.homedir()，相对路径 → 相对于配置文件所在目录
  *
@@ -84,11 +83,7 @@ function findConfigFile(explicitPath?: string): string | null {
     return resolved;
   }
 
-  // 使用 KI_ORIGINAL_CWD（ki.mjs 传递的用户工作目录）
-  const userCwd = process.env.KI_ORIGINAL_CWD || process.cwd();
-
   const candidates = [
-    path.join(userCwd, '.ki', 'config.json'),
     path.join(os.homedir(), '.ki', 'config.json'),
   ];
 
