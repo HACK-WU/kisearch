@@ -11,6 +11,7 @@
 
 import { Command } from 'commander';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { getKiRoot } from './lib/config.js';
 
@@ -66,7 +67,7 @@ interface ConfigInitOptions {
 function handleConfigInit(options: ConfigInitOptions): void {
   const targetDir = options.dir
     ? path.resolve(options.dir)
-    : process.env.KI_ORIGINAL_CWD || process.cwd();
+    : os.homedir();
 
   const configDir = path.join(targetDir, '.ki');
   const configFile = path.join(configDir, 'config.json');
@@ -109,7 +110,7 @@ program.name('config').description('ki 配置管理');
 program
   .command('init')
   .description('生成配置文件模板到 .ki/config.json')
-  .option('--dir <path>', '目标目录，默认当前工作目录')
+  .option('--dir <path>', '目标目录，默认 $HOME')
   .option('--force', '强制覆盖已有配置文件')
   .action((opts) => {
     try {
