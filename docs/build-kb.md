@@ -10,24 +10,52 @@
 
 ## 前置条件
 
-1. **全局安装 `mem` 命令**：知识索引的所有向量化操作都依赖 `mem` 命令
-   ```bash
-   npm install -g https://github.com/HACK-WU/memory-lancedb-mcp/releases/download/v0.1.0/memory-lancedb-mcp-0.1.0.tgz
-   ```
+### 1. 配置初始化
 
-2. **配置嵌入 API**：确保 `~/.config/memory-mcp/config.yaml` 中已配置嵌入 API 密钥。
+首次使用前，需生成配置文件：
 
-3. **注册 scope**：首次使用某个 scope 前，需在配置文件中注册该 scope。
-   ```yaml
-   scopes:
-     default: global
-     definitions:
-       your-scope:
-         description: your scope description
-         acl:
-           - global
-           - your-scope
-   ```
+```bash
+ki config init
+```
+
+配置文件默认生成在 `~/.ki/config.json`，包含 `dataDir`（数据存储目录）和 `scopes`（scope 配置）。
+
+如需隔离测试数据，可修改 `dataDir` 指向独立目录：
+
+```bash
+# 生成配置到指定目录
+ki config init --dir /path/to/test
+
+# 或手动修改配置文件中的 dataDir 字段
+sed -i 's|"dataDir": ".*"|"dataDir": "/path/to/data"|' ~/.ki/config.json
+```
+
+### 2. 安装 mem 命令
+
+知识索引的所有向量化操作都依赖 `mem` 命令：
+
+```bash
+npm install -g https://github.com/HACK-WU/memory-lancedb-mcp/releases/download/v0.1.0/memory-lancedb-mcp-0.1.0.tgz
+```
+
+### 3. 配置嵌入 API
+
+确保 `~/.config/memory-mcp/config.yaml` 中已配置嵌入 API 密钥。
+
+### 4. 注册 scope
+
+首次使用某个 scope 前，需在配置文件中注册该 scope：
+
+```yaml
+scopes:
+  default: global
+  definitions:
+    your-scope:
+      description: your scope description
+      acl:
+        - global
+        - your-scope
+```
 
 ## 执行流程
 
@@ -193,13 +221,17 @@ ki scan-kb import \
   "mode": "full",
   "stats": {
     "total": 25,
-    "added": 25,
-    "modified": 0,
-    "deleted": 0,
+    "vectorized": 25,
     "errors": 0
+  },
+  "autoBackup": {
+    "enabled": true,
+    "path": "/path/to/backup/snapshot.20260101-120000.tar.gz"
   }
 }
 ```
+
+> **自动备份**：导入成功后，系统会自动创建 scope 快照备份，保存在 `~/.ki-backup/<scope>/snapshots/` 目录下。备份文件为 `.tar.gz` 格式，可用于后续还原。
 
 ---
 
@@ -291,3 +323,54 @@ ki scan-kb import \
 - 摘要应简洁明了，1-2 句话概括核心内容
 - 关键词应具有代表性，避免过于宽泛或过于具体
 - 分组路径应反映知识库的逻辑结构
+
+---
+
+## Wiki 同步写回
+
+当配置了 `wikiSync` 时，通过 `sync-relation` 写入的知识条目会自动同步到外部 Wiki 目录。
+
+### 配置方式
+
+在 scope 配置中添加 `wikiSync`：
+
+```json
+{
+  "dataDir": "/path/to/data",
+  "scopes": {
+    "my-project": {
+      "wikiSync": {
+        "enabled": true,
+        "sourceDir": "/path/to/wiki-output"
+      }
+    }
+  }
+}
+```
+
+### 同步行为
+
+- **写入时机**：每次 `sync-relation` 成功写入后，自动触发 Wiki 同步
+- **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation、keywords）
+- **目录结构**：按 Group 路径创建子目录，如 `wiki-output/我的项目/API/用户登录接口.md`
+- **优先级**：如果 scope 有 `source` 块（通过 scan-kb import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
+
+### Wiki 文件示例
+
+```markdown
+---
+group: 我的项目/API
+relation: 用户登录接口
+keywords:
+  - 登录
+  - 认证
+  - token
+---
+# 用户登录接口
+
+POST /api/v1/users/login
+
+请求体：{ email, password }
+
+返回：{ token, expiresIn }
+```
