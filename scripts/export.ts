@@ -20,6 +20,7 @@ import {
   getLocalKbDir,
   type GroupIndex,
 } from './lib/scope.js';
+import { generateMarkdown } from './lib/markdown-gen.js';
 
 // ─── 类型 ───
 
@@ -155,41 +156,6 @@ function readLocalKb(scope: string, groupPath: string): LocalKbIndex | null {
   } catch {
     return null;
   }
-}
-
-// ─── 生成 Markdown ───
-
-/**
- * YAML 安全字符串：用 JSON.stringify 包裹，生成合法 YAML 双引号字符串
- * 防止特殊字符（: [] {} # "）破坏 frontmatter
- */
-function yamlSafe(input: string): string {
-  // 仅当值包含 YAML 特殊字符时才包裹双引号
-  if (/[:#\[\]{}",&*?|>!%@`]/.test(input) || input.startsWith('-') || input.startsWith(' ')) {
-    return JSON.stringify(input);
-  }
-  return input;
-}
-
-function generateMarkdown(
-  groupPath: string,
-  relation: string,
-  keywords: string[],
-  content: string | null,
-  exportedAt: string
-): string {
-  const kwStr = keywords.map((k) => yamlSafe(k)).join(', ');
-  const frontmatter = [
-    '---',
-    `groupPath: ${yamlSafe(groupPath)}`,
-    `relation: ${yamlSafe(relation)}`,
-    `keywords: [${kwStr}]`,
-    `exportedAt: ${yamlSafe(exportedAt)}`,
-    '---',
-    '',
-  ].join('\n');
-
-  return content ? frontmatter + content : frontmatter;
 }
 
 // ─── 主逻辑 ───

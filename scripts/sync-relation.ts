@@ -32,6 +32,7 @@ import {
   storeOnePath,
 } from './lib/path-vectorize.js';
 import { memStore, ensureMemAvailable } from './lib/mem-client.js';
+import { writeBackToWiki } from './lib/wiki-sync.js';
 
 // ─── 类型定义 ───
 
@@ -54,6 +55,8 @@ interface SyncResult {
   keywords: string[];
   invalid_keywords: string[];
   evicted: string | null;
+  wikiSynced?: boolean;
+  wikiFile?: string;
 }
 
 interface BatchItem {
@@ -347,6 +350,17 @@ function syncBatch(
         console.warn(`警告：Relation "${item.relation}" 的关键词全部无效或为空`);
       }
 
+      // Wiki 写回（容错）
+      try {
+        const wikiResult = writeBackToWiki(
+          scope, item.group, item.relation, item.module_info, result.keywords
+        );
+        result.wikiSynced = wikiResult.synced;
+        if (wikiResult.synced) result.wikiFile = wikiResult.file;
+      } catch {
+        result.wikiSynced = false;
+      }
+
       results.push(result);
     } catch (err) {
       results.push({
@@ -381,7 +395,7 @@ export interface SyncRelationParams {
 }
 
 export type SyncRelationResult =
-  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string; vectorStored?: boolean }
+  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string; vectorStored?: boolean; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 export function executeSyncRelation(params: SyncRelationParams): SyncRelationResult {
@@ -452,7 +466,31 @@ export function executeSyncRelation(params: SyncRelationParams): SyncRelationRes
       vectorStored = false;
     }
 
-    return { ok: true, ...result, ...(pathHint ? { hint: pathHint } : {}), ...(vectorStored !== undefined ? { vectorStored } : {}) };
+    // Wiki 写回（容错，失败不阻塞）
+    let wikiSynced: boolean | undefined;
+    let wikiFile: string | undefined;
+    let wikiReason: string | undefined;
+    try {
+      const wikiResult = writeBackToWiki(scope, group, relation, moduleInfo, result.keywords);
+      wikiSynced = wikiResult.synced;
+      if (wikiResult.synced) {
+        wikiFile = wikiResult.file;
+      } else {
+        wikiReason = wikiResult.reason;
+      }
+    } catch {
+      wikiSynced = false;
+    }
+
+    return {
+      ok: true,
+      ...result,
+      ...(pathHint ? { hint: pathHint } : {}),
+      ...(vectorStored !== undefined ? { vectorStored } : {}),
+      ...(wikiSynced !== undefined ? { wikiSynced } : {}),
+      ...(wikiFile ? { wikiFile } : {}),
+      ...(wikiReason ? { wikiReason } : {}),
+    };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

@@ -23,10 +23,16 @@ const KI_ROOT = path.resolve(__dirname_cfg, '..', '..');
 
 // ─── 类型 ───
 
+export interface WikiSyncConfig {
+  enabled: boolean;
+  sourceDir?: string;
+}
+
 export interface ScopeConfig {
   kbDir?: string;
   sourceDir?: string;
   rootName?: string;
+  wikiSync?: WikiSyncConfig;
 }
 
 export interface KiConfig {
@@ -132,10 +138,15 @@ function parseAndExpand(configFile: string): KiConfig {
     for (const [name, sc] of Object.entries(raw.scopes as Record<string, unknown>)) {
       if (sc && typeof sc === 'object') {
         const s = sc as Record<string, unknown>;
+        const ws = s.wikiSync as Record<string, unknown> | undefined;
         scopes[name] = {
           kbDir: s.kbDir ? expandPath(String(s.kbDir), configDir) : undefined,
           sourceDir: s.sourceDir ? expandPath(String(s.sourceDir), configDir) : undefined,
           rootName: s.rootName ? String(s.rootName) : undefined,
+          wikiSync: ws ? {
+            enabled: ws.enabled !== false,  // 默认 true
+            sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
+          } : undefined,
         };
       }
     }
@@ -185,6 +196,13 @@ export function getScopeSourceDir(config: KiConfig, scope: string): string | nul
  */
 export function getScopeRootName(config: KiConfig, scope: string): string | null {
   return config.scopes[scope]?.rootName ?? null;
+}
+
+/**
+ * 获取指定 scope 的 wikiSync 配置
+ */
+export function getScopeWikiSync(config: KiConfig, scope: string): WikiSyncConfig | null {
+  return config.scopes[scope]?.wikiSync ?? null;
 }
 
 /**

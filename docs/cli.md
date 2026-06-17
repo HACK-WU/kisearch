@@ -454,9 +454,18 @@ ki sync-relation \
   "relation": "用户登录接口",
   "keywords": ["登录", "认证", "token"],
   "invalid_keywords": [],
-  "evicted": null
+  "evicted": null,
+  "wikiSynced": true,
+  "wikiFile": "/path/to/wiki-content/API/用户登录接口.md"
 }
 ```
+
+**Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。Wiki 目录发现优先级：
+
+1. `group-index.json` 的 `source` 块（由 `scan-kb import` 自动记录）
+2. `config.json` 中 scope 级 `wikiSync.sourceDir` 兜底配置
+
+如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
 
 ### 批量模式
 
@@ -618,7 +627,7 @@ ki config init [--dir <path>] [--force]
 | 参数 | 说明 |
 |------|------|
 | `--dir <path>` | 目标目录，默认 `$HOME` |
-| `--force` | 强制覆盖已有配置文件 |
+| `--force` | 强制覆盖已有的配置文件 |
 
 **示例：生成配置文件**
 
@@ -647,7 +656,11 @@ ki config init
     "my-project": {
       "kbDir": "/data/special-kb/my-project",
       "sourceDir": ".qoder/repowiki/zh/content",
-      "rootName": "QoderWiki"
+      "rootName": "QoderWiki",
+      "wikiSync": {
+        "enabled": true,
+        "sourceDir": "/path/to/wiki-content"
+      }
     }
   }
 }
@@ -655,9 +668,8 @@ ki config init
 
 **配置优先级**：
 1. `--config <path>` 命令行参数
-2. 当前工作目录 `.ki/config.json`
-3. `$HOME/.ki/config.json`
-4. 内置默认值
+2. `$HOME/.ki/config.json`
+3. 内置默认值
 
 **路径展开规则**：
 - `$HOME` → `process.env.HOME`

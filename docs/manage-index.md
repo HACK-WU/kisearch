@@ -152,6 +152,30 @@ ki sync-relation \
   --keywords "登录,认证,token"
 ```
 
+**Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki Markdown 文件。Wiki 目录发现优先级：
+
+1. `group-index.json` 的 `source` 块（由 `scan-kb import` 自动记录，含 `dir` + `rootName`）
+2. `config.json` 中 scope 级 `wikiSync` 兜底配置
+
+**配置示例**：
+```json
+{
+  "scopes": {
+    "my-project": {
+      "wikiSync": {
+        "enabled": true,
+        "sourceDir": "/path/to/wiki-content"
+      }
+    }
+  }
+}
+```
+
+**特性**：
+- `wikiSync.enabled` 默认 `true`，无需显式启用
+- 写回失败不阻塞主流程，仅返回 `wikiSynced: false` + `reason`
+- `relation` 字段含路径分隔符或 `..` 时自动拦截，防止路径注入
+
 ### 批量写入 Relation
 
 ```bash
@@ -184,7 +208,7 @@ ki sync-relation \
 
 ## 查询索引结构
 
-### 完整索引树
+### 热门索引
 
 ```bash
 ki query-group --scope <scope>
