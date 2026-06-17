@@ -179,6 +179,5 @@ scope 先注册
 ## 相关文档
 
 - `scan-kb` 详细流程：[`scan-kb.md`](./scan-kb.md)
-- 外部导入说明：[`import-kb.md`](./import-kb.md)
 - 典型工作流：[`workflows.md`](./workflows.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)

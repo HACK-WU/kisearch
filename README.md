@@ -71,7 +71,6 @@
 - **架构与协作关系**：[`docs/architecture.md`](./docs/architecture.md)
 - **CLI 参考**：[`docs/cli.md`](./docs/cli.md)
 - **scan-kb 子命令详解**：[`docs/scan-kb.md`](./docs/scan-kb.md)
-- **外部导入规范**：[`docs/import-kb.md`](./docs/import-kb.md)
 - **异常处理与恢复建议**：[`docs/error-handling.md`](./docs/error-handling.md)
 - **典型工作流**：[`docs/workflows.md`](./docs/workflows.md)
 - **备份与恢复**：[`docs/backup-restore.md`](./docs/backup-restore.md)

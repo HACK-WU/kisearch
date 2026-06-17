@@ -171,7 +171,7 @@ ki scan-kb import \
   --mapping mapping.json
 ```
 
-`mapping.json` 格式见：[`import-kb.md`](./import-kb.md)
+`mapping.json` 格式见：[`scan-kb.md`](./scan-kb.md)
 
 ---
 
@@ -218,7 +218,6 @@ import-kb
 ## 相关文档
 
 - `scan-kb` 详细说明：[`scan-kb.md`](./scan-kb.md)
-- 外部导入说明：[`import-kb.md`](./import-kb.md)
 - 异常与恢复：[`error-handling.md`](./error-handling.md)
 - 架构与数据文件关系：[`architecture.md`](./architecture.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)
