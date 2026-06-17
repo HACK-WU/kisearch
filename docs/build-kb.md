@@ -268,7 +268,7 @@ ki scan-kb import \
    {
      "query": "测试关键词",
      "limit": 3,
-     "tags": "knowledge-index,<scope>"
+     "tags": "ki-search"
    }
    ```
    预期：返回相关记忆条目
