@@ -289,7 +289,7 @@ program
 
       let totalOk = 0;
       let totalFail = 0;
-      let totalFiles = 0;
+      let totalItems = 0;
 
       // 3. 遍历目标目录安装
       for (let i = 0; i < dirs.length; i++) {
@@ -301,19 +301,19 @@ program
           const result = await installSkills(dir, nameFilter);
           totalOk += result.ok;
           totalFail += result.fail;
-          totalFiles += result.total;
+          totalItems += result.total;
         } else {
           console.log(`${label} 📋 安装 Rules → ${dir}`);
           const result = await installRules(dir, nameFilter);
           totalOk += result.ok;
           totalFail += result.fail;
-          totalFiles += result.total;
+          totalItems += result.total;
         }
         console.log('');
       }
 
       // 4. 输出汇总
-      if (totalFiles === 0) {
+      if (totalItems === 0) {
         console.log('⚠️ 未找到匹配的项，请检查名称是否正确');
         const listPath = skills ? 'skills' : 'rules';
         console.log(`   可用名称可通过以下方式查看：`);
@@ -321,9 +321,9 @@ program
         process.exit(1);
       }
       if (totalFail === 0) {
-        console.log(`✅ 完成: ${totalOk}/${totalFiles} 个文件安装成功`);
+        console.log(`✅ 完成: ${totalOk}/${totalItems} 个 ${skills ? 'skill' : 'rule'} 安装成功`);
       } else {
-        console.log(`⚠️ 完成: ${totalOk}/${totalFiles} 成功, ${totalFail} 失败`);
+        console.log(`⚠️ 完成: ${totalOk}/${totalItems} 个 ${skills ? 'skill' : 'rule'} 成功, ${totalFail} 失败`);
         process.exit(1);
       }
     } catch (err) {

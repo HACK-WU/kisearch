@@ -127,7 +127,7 @@ ki setup --skills -t ~/projects/app -t ~/projects/api
 ki setup --skills
 ```
 
-> 💡 如未安装 ki CLI，可用 `install.sh` 作为备用方案。
+> 💡 如未安装 ki CLI，可用 `skill-install.sh` 作为备用方案。
 
 **方式二：完整安装（开发 & CLI 使用）**
 

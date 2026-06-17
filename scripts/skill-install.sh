@@ -6,9 +6,9 @@
 #    详见: ki setup --help
 #
 # 用法:
-#   bash install.sh --skills -t /path/to/target -t /path/to/target2
-#   bash install.sh --rules --file /path/to/targets.txt
-#   bash install.sh /path/to/target --skills   # 旧用法，兼容
+#   bash skill-install.sh --skills -t /path/to/target -t /path/to/target2
+#   bash skill-install.sh --rules --file /path/to/targets.txt
+#   bash skill-install.sh /path/to/target --skills   # 旧用法，兼容
 #
 #   或:
 #   curl -fsSL ... -o ki-install.sh
@@ -112,7 +112,7 @@ else
 fi
 
 if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
-    echo "用法: bash install.sh [--skills|--rules] [-t <path>... | --file <path>]"
+    echo "用法: bash skill-install.sh [--skills|--rules] [-t <path>... | --file <path>]"
     echo ""
     echo "  --skills        安装 AI Agent Skills（skills/）"
     echo "  --rules         安装加载引导规则（rules/）"
@@ -121,12 +121,12 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo "  --file <path>   指定目标目录配置文件（与 -t 互斥）"
     echo ""
     echo "兼容旧用法:"
-    echo "  bash install.sh <目标路径> --skills"
+    echo "  bash skill-install.sh <目标路径> --skills"
     echo ""
     echo "示例:"
-    echo "  bash install.sh --skills -t ~/projects/app -t ~/projects/api"
-    echo "  bash install.sh --skills -n codekb-skill,memory-skill -t ~/projects/app"
-    echo "  bash install.sh --rules --file ~/my-targets.txt"
+    echo "  bash skill-install.sh --skills -t ~/projects/app -t ~/projects/api"
+    echo "  bash skill-install.sh --skills -n codekb-skill,memory-skill -t ~/projects/app"
+    echo "  bash skill-install.sh --rules --file ~/my-targets.txt"
     echo ""
     echo "推荐使用 ki setup（支持多目录、配置文件）:"
     echo "  curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install-latest.sh | bash"
@@ -211,8 +211,12 @@ memory-skill"
     done <<< "$SKILLS"
     [ $skipped -gt 0 ] && echo "  跳过: ${skipped} 个未匹配的 skill"
     echo ""
-    echo "已安装: ${count}/${total}"
-    if [ $total -gt 0 ]; then ANY_INSTALLED=1; fi
+    if [ $count -lt $total ]; then
+        echo "已安装: ${count}/${total} 个 skill (${count} 成功, $((total - count)) 失败)"
+    else
+        echo "已安装: ${count}/${total} 个 skill"
+    fi
+    if [ $count -gt 0 ]; then ANY_INSTALLED=1; fi
 }
 
 install_rules() {
@@ -257,14 +261,18 @@ install_rules() {
     done <<< "$RULES"
     [ $skipped -gt 0 ] && echo "  跳过: ${skipped} 个未匹配的 rule"
     echo ""
-    echo "已安装: ${count}/${total}"
-    if [ $total -gt 0 ]; then ANY_INSTALLED=1; fi
+    if [ $count -lt $total ]; then
+        echo "已安装: ${count}/${total} 个 rule (${count} 成功, $((total - count)) 失败)"
+    else
+        echo "已安装: ${count}/${total} 个 rule"
+    fi
+    if [ $count -gt 0 ]; then ANY_INSTALLED=1; fi
 }
 
 # ============================================================
 # 按模式执行（支持多目标目录）
 # ============================================================
-echo "🚀 install.sh"
+echo "🚀 skill-install.sh"
 echo "   目标来源: ${SOURCE_DESC}"
 echo "   目标数量: ${#TARGET_DIRS[@]}"
 [ ${#NAME_LIST[@]} -gt 0 ] && echo "   名称过滤: $(IFS=', '; echo "${NAME_LIST[*]}")"
