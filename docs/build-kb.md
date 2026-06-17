@@ -264,11 +264,11 @@ ki scan-kb import \
 
 4. **语义检索**：
    ```json
-   // MCP memory_recall
+   // MCP ki_search
    {
+     "scope": "<scope>",
      "query": "测试关键词",
-     "limit": 3,
-     "tags": "ki-search"
+     "limit": 3
    }
    ```
    预期：返回相关记忆条目
