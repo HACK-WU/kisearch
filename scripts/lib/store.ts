@@ -238,8 +238,20 @@ export function initScope(scope: string): void {
   // 创建目录
   fs.mkdirSync(kbDir, { recursive: true });
 
-  // 复制 group-index.json
   const templateGroupIndex = path.join(TEMPLATE_DIR, 'group-index.json');
+  const templateRelationsCache = path.join(TEMPLATE_DIR, 'relations-cache.json');
+
+  // Fail-fast：两个模板文件都不存在时，给出精确错误信息
+  if (!fs.existsSync(templateGroupIndex) && !fs.existsSync(templateRelationsCache)) {
+    throw new Error(
+      `scope 初始化失败：模板文件缺失\n` +
+      `模板目录：${TEMPLATE_DIR}\n` +
+      `原因：npm 包可能未包含 _template/ 目录\n` +
+      `修复：重新安装最新版 knowledge-indexer，或从源码仓库手动复制 _template/ 目录到上述路径`
+    );
+  }
+
+  // 复制 group-index.json
   const targetGroupIndex = getGroupIndexPath(scope);
   if (fs.existsSync(templateGroupIndex)) {
     const data = JSON.parse(fs.readFileSync(templateGroupIndex, 'utf-8'));
@@ -249,7 +261,6 @@ export function initScope(scope: string): void {
   }
 
   // 复制 relations-cache.json
-  const templateRelationsCache = path.join(TEMPLATE_DIR, 'relations-cache.json');
   const targetRelationsCache = getRelationsCachePath(scope);
   if (fs.existsSync(templateRelationsCache)) {
     const data = JSON.parse(fs.readFileSync(templateRelationsCache, 'utf-8'));

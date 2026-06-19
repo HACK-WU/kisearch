@@ -460,7 +460,15 @@ program
       const relationsCache = readJson<RelationsCache>(relationsCachePath);
 
       if (!groupIndex || !relationsCache) {
-        output({ ok: false, error: 'scope 初始化失败，缺少基础索引文件' });
+        const missing: string[] = [];
+        if (!groupIndex) missing.push(`group-index.json 不存在：${groupIndexPath}`);
+        if (!relationsCache) missing.push(`relations-cache.json 不存在：${relationsCachePath}`);
+        output({
+          ok: false,
+          error: 'scope 初始化异常：基础索引文件缺失',
+          detail: missing,
+          hint: '删除 scope 目录后重新执行 import 命令，或手动从 _template/ 复制模板文件',
+        });
         process.exit(1);
       }
 

@@ -45,6 +45,7 @@
   "files": [
     "bin/**/*",
     "scripts/**/*",
+    "_template/**/*",
     "README.md",
     "LICENSE"
   ],
