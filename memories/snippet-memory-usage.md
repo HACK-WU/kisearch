@@ -24,6 +24,36 @@
 > 问自己：这段信息是"一句话就能说清楚的代码要点（函数/流程/模式）"还是"需要段落描述的架构知识"？
 > 前者 → `snippet-memory`，后者 → `codekb-skill`。
 
+### 记忆归类原则
+
+> **禁止全部放入"通用记忆片段"。** 写入前先思考最适合的 Group 分类。
+
+| 内容类型 | 优先归类到 | 示例 |
+|----------|-----------|------|
+| 工具函数、helper、脚本 | `工具库` | `formatDate()`、`retryRequest()` |
+| 已踩过的坑、注意事项 | `项目踩坑点` | "XX 库 v2 不兼容 v1 的 YY API" |
+| 构建/调试/部署命令 | `常用命令` | `npm run build:prod -- --sourcemap` |
+| 部署流程、环境配置 | `部署运维` | "生产环境需先执行 XX 脚本" |
+| 无法归类的通用要点 | `通用记忆片段` | 仅当以上分类都不匹配 |
+
+**没有合适的现存 Group 时，自己创建**：
+
+```bash
+# 先确认目标 scope
+ki query-group --scope ${scope}-memory --mode full
+
+# 创建新 Group
+ki manage-index create --scope ${scope}-memory --name "你的新分类名"
+
+# 再写入记忆
+ki sync-relation --scope ${scope}-memory --group "你的新分类名" \
+  --relation "记忆标题" \
+  --module-info "记忆内容..." \
+  --keywords "关键词"
+```
+
+> **记住**：先归类 → 无匹配则新建 → 实在不行才用"通用记忆片段"。
+
 ---
 
 ## 需求与进度记录
