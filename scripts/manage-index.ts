@@ -9,10 +9,14 @@
  */
 
 import { Command } from 'commander';
+import fs from 'fs';
+import path from 'path';
+import { execFileSync } from 'child_process';
 import { writeJson, readJson, readGroupIndex } from './lib/store.js';
-import { getGroupIndexPath, getRelationsCachePath, validateScope, listAllScopes } from './lib/scope.js';
+import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
 import type { GroupIndex } from './lib/scope.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
+import { ensureMemAvailable } from './lib/mem-client.js';
 
 // ─── 辅助函数 ───
 
@@ -149,6 +153,111 @@ export function executeListScopes(): ListScopesResult {
     return { scope: s, topGroups };
   });
   return { ok: true, scopes: scopeDetails, total: scopes.length };
+}
+
+// ─── 级联清理：删除 Group 时同步清理 relations-cache + local-kb + mem 向量 ───
+
+interface CascadeDeleteResult {
+  cacheGroupsRemoved: string[];
+  localKbFilesRemoved: string[];
+  memDeleted: number;
+  memSkipped: number;
+  errors: string[];
+}
+
+/**
+ * 级联删除指定 Group 路径下的所有关联数据（不含 wiki 文件）。
+ *
+ * 清理范围：
+ *   1. relations-cache.json 中所有以 groupPath 为前缀的 key（含子 Group）
+ *   2. local-kb 的 index.json 文件
+ *   3. mem 向量记忆（按 memoryId 删除，无 memoryId 时跳过）
+ *
+ * 不清理 wiki 文件（用户明确要求保留）。
+ */
+function cascadeDeleteGroupData(scope: string, groupPath: string): CascadeDeleteResult {
+  const result: CascadeDeleteResult = {
+    cacheGroupsRemoved: [],
+    localKbFilesRemoved: [],
+    memDeleted: 0,
+    memSkipped: 0,
+    errors: [],
+  };
+
+  const cachePath = getRelationsCachePath(scope);
+  const cache = readJson<{
+    version: number;
+    scope: string;
+    groups: Record<string, {
+      hot_relations: Array<{ text: string; memoryId?: string }>;
+      keywords: string[];
+      max_hot_count: number;
+    }>;
+  }>(cachePath);
+
+  if (!cache || !cache.groups) {
+    return result;
+  }
+
+  // 前缀匹配：groupPath 本身 + 所有子 Group（如 "工具库" 匹配 "工具库/Redis"、"工具库/加密与哈希" 等）
+  const prefix = groupPath + '/';
+  const keysToDelete: string[] = [];
+  for (const key of Object.keys(cache.groups)) {
+    if (key === groupPath || key.startsWith(prefix)) {
+      keysToDelete.push(key);
+    }
+  }
+
+  // 删除 mem 向量（逐条按 memoryId）
+  const memAvail = ensureMemAvailable();
+  for (const key of keysToDelete) {
+    const groupData = cache.groups[key];
+    if (!groupData?.hot_relations) continue;
+
+    for (const rel of groupData.hot_relations) {
+      if (rel.memoryId && memAvail.available) {
+        try {
+          execFileSync('mem', ['delete', rel.memoryId], {
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+            timeout: 10_000,
+          });
+          result.memDeleted++;
+        } catch (err) {
+          result.errors.push(`mem delete ${rel.memoryId} 失败: ${(err as Error).message}`);
+          result.memSkipped++;
+        }
+      } else {
+        result.memSkipped++;
+      }
+    }
+  }
+
+  // 删除 local-kb 的 index.json 文件
+  for (const key of keysToDelete) {
+    const localKbPath = getLocalKbDir(scope, key);
+    try {
+      if (fs.existsSync(localKbPath)) {
+        fs.unlinkSync(localKbPath);
+        result.localKbFilesRemoved.push(key);
+      }
+    } catch (err) {
+      result.errors.push(`local-kb 删除失败 ${key}: ${(err as Error).message}`);
+    }
+  }
+
+  // 从 relations-cache 中删除所有匹配的 group key
+  for (const key of keysToDelete) {
+    delete cache.groups[key];
+    result.cacheGroupsRemoved.push(key);
+  }
+
+  // 持久化 cache
+  if (keysToDelete.length > 0) {
+    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+  }
+
+  return result;
 }
 
 // ─── CLI 定义 ───
@@ -303,7 +412,20 @@ program
                 }
                 delete parentNode[name];
                 writeJson(indexPath, data as unknown as Record<string, unknown>);
-                output({ ok: true, path: `${resolvedParent}/${name}`, hint: resolved.hint || undefined });
+                const deletedPath = `${resolvedParent}/${name}`;
+                const cascade = cascadeDeleteGroupData(scope, deletedPath);
+                output({
+                  ok: true,
+                  path: deletedPath,
+                  hint: resolved.hint || undefined,
+                  cascade: {
+                    cacheGroupsRemoved: cascade.cacheGroupsRemoved.length,
+                    localKbFilesRemoved: cascade.localKbFilesRemoved.length,
+                    memDeleted: cascade.memDeleted,
+                    memSkipped: cascade.memSkipped,
+                    errors: cascade.errors.length > 0 ? cascade.errors : undefined,
+                  },
+                });
                 break;
               }
             }
@@ -342,7 +464,19 @@ program
 
           delete parentNode[name];
           writeJson(indexPath, data as unknown as Record<string, unknown>);
-          output({ ok: true, path: parentPath ? `${parentPath}/${name}` : name });
+          const deletedPath = parentPath ? `${parentPath}/${name}` : name;
+          const cascade = cascadeDeleteGroupData(scope, deletedPath);
+          output({
+            ok: true,
+            path: deletedPath,
+            cascade: {
+              cacheGroupsRemoved: cascade.cacheGroupsRemoved.length,
+              localKbFilesRemoved: cascade.localKbFilesRemoved.length,
+              memDeleted: cascade.memDeleted,
+              memSkipped: cascade.memSkipped,
+              errors: cascade.errors.length > 0 ? cascade.errors : undefined,
+            },
+          });
           break;
         }
 
