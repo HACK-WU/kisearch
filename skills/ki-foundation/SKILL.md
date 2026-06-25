@@ -185,5 +185,5 @@ input: { scope, input: "/path/to/batch-data.json" }
 | codekb-skill | `${scope}` |
 | memory-skill（项目记忆） | `${scope}-memory` |
 | memory-skill（用户画像） | `user-profile` |
-| snippet-memory（代码要点） | `${scope}-memory`（`通用记忆片段/` Group） |
+| snippet-memory（代码要点） | `${scope}-memory`（AI 的项目百科全书：不懂就查，有新发现就写入，维护好它持续提效） |
 | agents-md-init（AGENTS.md 初始化） | 查询所有 scope + `${scope}-memory` + `user-profile` |
