@@ -1,6 +1,6 @@
 {
   "name": "knowledge-indexer",
-  "version": "0.1.2-beta",
+  "version": "0.1.3-beta",
   "description": "AI 知识索引整理工具 - 对外部知识进行结构化索引和导航",
   "type": "module",
   "bin": {
