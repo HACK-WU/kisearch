@@ -155,6 +155,7 @@ ki manage-index create --scope ${scope}-memory --name "工具库"
 ki manage-index create --scope ${scope}-memory --name "常用命令"
 ki manage-index create --scope ${scope}-memory --name "部署运维"
 ki manage-index create --scope ${scope}-memory --name "通用记忆片段"
+ki manage-index create --scope ${scope}-memory --name "专题记忆"
 ```
 
 #### Group 结构
@@ -171,6 +172,7 @@ ki manage-index create --scope ${scope}-memory --name "通用记忆片段"
 - 工具库
 - 常用命令
 - 部署运维
+- 专题记忆
 - 通用记忆片段
   - {列出实际分类，按功能或类型}
 
