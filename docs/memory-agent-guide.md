@@ -590,7 +590,7 @@ ki manage-index --scope user-profile --action create --parent "父" --name "子"
     └── {Group}/index.json              # 所有用户画像 Group 仅 index.json
 ```
 
-> 当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/knowledge-indexer/kb/`
+> 当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/KiSearch/kb/`
 >
 > **文件管理权责**：`index.json` / `group-index.json` / `relations-cache.json` 由 ki 命令自动管理；`archive.md` 由 AI 通过文件读写工具直接操作。
 

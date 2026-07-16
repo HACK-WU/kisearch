@@ -1,4 +1,4 @@
-# knowledge-indexer
+# KiSearch
 
 > AI Agent 知识索引整理工具 - 对外部知识进行结构化索引和导航
 
@@ -6,7 +6,7 @@
 
 ## 这是什么
 
-`knowledge-indexer` 是一个独立的 AI Agent 知识索引工具，解决的是一个更贴近 Agent 使用体验的问题：
+`KiSearch` 是一个独立的 AI Agent 知识索引工具，解决的是一个更贴近 Agent 使用体验的问题：
 
 - **向量数据库**擅长语义召回、长期持久化、跨会话记忆治理
 - **知识索引**擅长把项目知识组织成 AI 更容易浏览和落地使用的结构化视图
@@ -14,9 +14,9 @@
 两者组合后，形成一个完整系统：
 
 - **发现层**：向量数据库负责语义检索、长期存储、冷热治理
-- **交付层**：`knowledge-indexer` 负责 Group 导航、热门 Relation 缓存、原文交付
+- **交付层**：`KiSearch` 负责 Group 导航、热门 Relation 缓存、原文交付
 
-换句话说，向量数据库更像"**长期记忆引擎**"，而 `knowledge-indexer` 更像"**面向 Agent 的知识目录与本地交付层**"。
+换句话说，向量数据库更像"**长期记忆引擎**"，而 `KiSearch` 更像"**面向 Agent 的知识目录与本地交付层**"。
 
 ## 特性
 
@@ -109,7 +109,7 @@
 
 ```bash
 # 下载并安装最新版 ki CLI
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/knowledge-indexer/master/scripts/install-latest.sh | bash
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/KiSearch/master/scripts/install-latest.sh | bash
 ```
 
 然后通过 `ki setup` 安装配套 Skills / Rules 到项目目录：
@@ -132,8 +132,8 @@ ki setup --skills
 
 ```bash
 # 克隆项目
-git clone git@github.com:HACK-WU/knowledge-indexer.git
-cd knowledge-indexer
+git clone git@github.com:HACK-WU/KiSearch.git
+cd KiSearch
 
 # 安装依赖
 npm install
@@ -328,7 +328,7 @@ ki mcp
 >   default: global
 >   definitions:
 >     mcp-test:
->       description: knowledge-indexer test scope
+>       description: KiSearch test scope
 >       acl:
 >         - global
 >         - mcp-test
@@ -396,10 +396,10 @@ npx jiti scripts/scan-kb.ts --help
 
 ## 一句话总结
 
-`knowledge-indexer` 和向量数据库不是二选一关系，而是上下分层关系：
+`KiSearch` 和向量数据库不是二选一关系，而是上下分层关系：
 
 - **向量数据库**负责"记得住、搜得到、管得住"
-- **knowledge-indexer** 负责"看得见、找得快、交付原文"
+- **KiSearch** 负责"看得见、找得快、交付原文"
 
 两者配合后，AI 才同时具备：
 

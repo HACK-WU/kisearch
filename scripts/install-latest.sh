@@ -1,10 +1,10 @@
 #!/bin/bash
 # install-latest.sh
-# 自动检查并安装 knowledge-indexer 最新版本
+# 自动检查并安装 KiSearch 最新版本
 
 set -e
 
-REPO="HACK-WU/knowledge-indexer"
+REPO="HACK-WU/KiSearch"
 INSTALL_CMD="npm install -g"
 
 # 颜色输出
@@ -91,7 +91,7 @@ get_release_via_redirect() {
   fi
   
   # 构造下载 URL
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/knowledge-indexer-${LATEST_VERSION#v}.tgz"
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/KiSearch-${LATEST_VERSION#v}.tgz"
   
   # 验证 URL 是否有效
   HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" "$DOWNLOAD_URL")
@@ -131,7 +131,7 @@ check_current_version() {
     info "当前已安装版本: $CURRENT_VERSION"
   else
     CURRENT_VERSION="未安装"
-    info "当前未安装 knowledge-indexer"
+    info "当前未安装 KiSearch"
   fi
 }
 
@@ -163,7 +163,7 @@ show_help() {
   cat << EOF
 用法: $0 [选项]
 
-自动检查并安装 knowledge-indexer 最新版本
+  自动检查并安装 KiSearch 最新版本
 
 选项:
   --help        显示此帮助信息
@@ -193,7 +193,7 @@ main() {
       ;;
   esac
   
-  info "knowledge-indexer 最新版本安装器"
+  info "KiSearch 最新版本安装器"
   echo "========================================"
   
   check_dependencies

@@ -1,6 +1,6 @@
 ## 备份与恢复
 
-本文档说明 `knowledge-indexer` 的数据备份和恢复策略。
+本文档说明 `KiSearch` 的数据备份和恢复策略。
 
 ### CLI 命令（推荐）
 
@@ -48,7 +48,7 @@ ki restore my-project --from-results
 ### 核心数据目录
 
 ```
-knowledge-indexer/
+KiSearch/
 ├── kb/                          # 运行时数据目录
 │   ├── {scope}/                 # 每个 scope 独立目录
 │   │   ├── group-index.json     # Group 树索引 + source 块
@@ -105,10 +105,10 @@ done
 
 ```bash
 # 备份命令
-rsync -av knowledge-indexer/kb/ /path/to/backup/kb/
+rsync -av KiSearch/kb/ /path/to/backup/kb/
 
 # 或使用 tar 打包
-tar -czf knowledge-indexer-backup-$(date +%Y%m%d_%H%M%S).tar.gz knowledge-indexer/kb/
+tar -czf KiSearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz KiSearch/kb/
 ```
 
 **备份内容**：

@@ -247,7 +247,7 @@ export function initScope(scope: string): void {
       `scope 初始化失败：模板文件缺失\n` +
       `模板目录：${TEMPLATE_DIR}\n` +
       `原因：npm 包可能未包含 _template/ 目录\n` +
-      `修复：重新安装最新版 knowledge-indexer，或从源码仓库手动复制 _template/ 目录到上述路径`
+      `修复：重新安装最新版 KiSearch，或从源码仓库手动复制 _template/ 目录到上述路径`
     );
   }
 

@@ -5,7 +5,7 @@ export function registerPrompts(server: McpServer): void {
   // Prompt 1: 介绍 ki 的整体工作流程
   server.prompt(
     'ki-workflow',
-    '介绍 knowledge-indexer 的完整工作流程和最佳实践',
+    '介绍 KiSearch 的完整工作流程和最佳实践',
     (): GetPromptResult => {
       return {
         messages: [
@@ -13,14 +13,14 @@ export function registerPrompts(server: McpServer): void {
             role: 'user',
             content: {
               type: 'text',
-              text: '请介绍 knowledge-indexer (ki) 的完整工作流程和最佳实践。',
+              text: '请介绍 KiSearch (ki) 的完整工作流程和最佳实践。',
             },
           },
           {
             role: 'assistant',
             content: {
               type: 'text',
-              text: `knowledge-indexer（ki）是一个用于结构化知识索引和管理的 MCP 工具。以下是完整的工作流程和最佳实践：
+              text: `KiSearch（ki）是一个用于结构化知识索引和管理的 MCP 工具。以下是完整的工作流程和最佳实践：
 
 ## 1. 核心概念
 - **Scope**: 知识域隔离单位，不同项目/模块使用不同 scope（如 \`project-A\`、\`project-B\`）
@@ -69,7 +69,7 @@ export function registerPrompts(server: McpServer): void {
   // Prompt 2: 指导如何正确存储知识
   server.prompt(
     'ki-store-guide',
-    '指导如何正确地向 knowledge-indexer 存储知识',
+    '指导如何正确地向 KiSearch 存储知识',
     (): GetPromptResult => {
       return {
         messages: [

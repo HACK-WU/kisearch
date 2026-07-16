@@ -18,7 +18,7 @@ import os from 'os';
 
 // ─── 常量 ───
 
-const GITHUB_REPO = 'HACK-WU/knowledge-indexer';
+const GITHUB_REPO = 'HACK-WU/KiSearch';
 const GITHUB_BRANCH = 'master';
 const RAW_BASE = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}`;
 
@@ -317,7 +317,7 @@ program
         console.log('⚠️ 未找到匹配的项，请检查名称是否正确');
         const listPath = skills ? 'skills' : 'rules';
         console.log(`   可用名称可通过以下方式查看：`);
-        console.log(`   gh api repos/HACK-WU/knowledge-indexer/contents/${listPath} --jq '[].name'`);
+        console.log(`   gh api repos/HACK-WU/KiSearch/contents/${listPath} --jq '[].name'`);
         process.exit(1);
       }
       if (totalFail === 0) {

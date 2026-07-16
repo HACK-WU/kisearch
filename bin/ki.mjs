@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * knowledge-indexer CLI 入口
+ * KiSearch CLI 入口
  * 
  * 使用方式：
  *   ki <command> [options]

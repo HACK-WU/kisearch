@@ -60,7 +60,7 @@ import { registerManageIndexTools } from './lib/mcp-tools/manage-index.js';
 
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
-    name: 'knowledge-indexer',
+    name: 'KiSearch',
     version: '0.1.0',
   });
 

@@ -11,7 +11,7 @@ import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
 
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
-    name: 'knowledge-indexer',
+    name: 'KiSearch',
     version: '0.1.0',
   });
 

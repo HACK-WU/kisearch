@@ -53,7 +53,7 @@ provider:
 ### 对话开始时自动执行
 
 > **步骤0：必须加载 `agents-md-init` skill（格式模板和初始化流程）。**
-> 若 skill 文件不存在 → 提示用户 "检测到 `agents-md-init` skill 未安装，请先安装 knowledge-indexer"，然后跳过 AGENTS.md 初始化。
+> 若 skill 文件不存在 → 提示用户 "检测到 `agents-md-init` skill 未安装，请先安装 KiSearch"，然后跳过 AGENTS.md 初始化。
 
 1. **检查 AGENTS.md 是否需要初始化**（详见 `agents-md-init` skill）
    - 不存在 → 执行完整初始化
@@ -201,7 +201,7 @@ ki 记忆内部：代码知识 → `codekb-skill`（`${scope}`）；项目上下
 | 🔴 2 | **将简洁通用偏好存入 ki**（沟通语言、通用规则等用平台记忆） |
 | 🔴 3 | 跳过 ki-foundation 直接加载 codekb-skill / memory-skill |
 | 🔴 4 | `${scope}` 未确认就加载 SKILL 或执行 ki 命令 |
-| 🔴 5 | Skill 不存在时仍继续执行 ki 命令（应提示用户安装 knowledge-indexer） |
+| 🔴 5 | Skill 不存在时仍继续执行 ki 命令（应提示用户安装 KiSearch） |
 | 🔴 6 | **对 ki scope 使用 memory MCP 存取**（`user-profile`/`${scope}-memory`/`${scope}` 禁止 `memory_store`/`memory_recall`/`memory_update`/`memory_forget`，统一用 ki MCP 工具） |
 | 🔴 7 | **忽略 AGENTS.md 缓存机制**（对话开始时必须检查并更新缓存，索引变更后必须同步更新） |
 | 🔴 8 | **依赖人工提示记录需求**（AI 必须主动识别新需求信号并自动记录，不得等待用户提醒） |

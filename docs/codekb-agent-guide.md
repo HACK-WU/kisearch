@@ -483,7 +483,7 @@ ki 工具的数据存储在 npm 全局安装目录内（非项目仓库目录）
     └── index.json
 ```
 
-当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/knowledge-indexer/kb/monitor/`
+当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/KiSearch/kb/monitor/`
 
 `memory_recall` 查询的向量数据存储在 `~/.local/share/memory-mcp/lancedb/`。
 

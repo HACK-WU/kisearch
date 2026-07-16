@@ -1,6 +1,6 @@
 # ki 端到端测试验证指南
 
-本指南提供 knowledge-indexer 所有功能的真实环境测试流程，使用 `test/fixtures/mock-wiki` 作为模拟外部 wiki，无需依赖真实 wiki 仓库即可完整验证。
+本指南提供 KiSearch 所有功能的真实环境测试流程，使用 `test/fixtures/mock-wiki` 作为模拟外部 wiki，无需依赖真实 wiki 仓库即可完整验证。
 
 ---
 
@@ -29,7 +29,7 @@
 ### 环境要求
 
 - Node.js >= 18
-- 项目已安装依赖：`npm install`（在 knowledge-indexer 根目录执行）
+- 项目已安装依赖：`npm install`（在 KiSearch 根目录执行）
 - 可选：memory 服务已启动（向量化依赖，无服务时 import 阶段会报错但不影响 Group 树和元数据验证）
 
 ### 确认 ki 可用

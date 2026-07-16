@@ -1,6 +1,6 @@
 # TestWiki
 
-这是一个用于 knowledge-indexer 端到端测试的 Mock Wiki。
+这是一个用于 KiSearch 端到端测试的 Mock Wiki。
 
 ## 目录结构
 

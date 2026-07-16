@@ -1041,7 +1041,7 @@ ki setup --skills --file ~/my-targets.txt
 
 ## 相关文档
 
-- [架构与协作关系](./architecture.md) - 了解 knowledge-indexer 与向量数据库的分层关系
+- [架构与协作关系](./architecture.md) - 了解 KiSearch 与向量数据库的分层关系
 - [scan-kb 子命令详解](./scan-kb.md) - 含 `import`、`diff` 的详细说明和 `ai-results.json` 格式
 - [外部导入与 mapping 示例](./import-kb.md) - mapping 配置文件的详细说明
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案

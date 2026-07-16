@@ -9,9 +9,9 @@ set -euo pipefail
 
 VERSION="${1:?请指定版本号，例如: $0 0.2.0}"
 PRERELEASE="${2:-false}"
-PKG_NAME="knowledge-indexer"
+PKG_NAME="KiSearch"
 TARBALL="${PKG_NAME}-${VERSION}.tgz"
-REPO="HACK-WU/knowledge-indexer"
+REPO="HACK-WU/KiSearch"
 
 echo "==> 发布版本: ${VERSION}"
 

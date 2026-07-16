@@ -2,7 +2,7 @@
 
 ## 概述
 
-knowledge-indexer 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`），基于 mem CLI 的 `--tags` 机制，实现不同用途记忆数据的**物理隔离**。
+KiSearch 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`），基于 mem CLI 的 `--tags` 机制，实现不同用途记忆数据的**物理隔离**。
 
 三类标签的分工定位：
 

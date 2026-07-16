@@ -163,7 +163,7 @@ flowchart TD
 ### 7.1 文件结构
 
 ```
-knowledge-indexer/kb/
+KiSearch/kb/
 ├── ${scope}/                    # 代码知识库
 │   ├── group-index.json
 │   ├── relations-cache.json
