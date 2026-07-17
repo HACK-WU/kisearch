@@ -6,7 +6,7 @@ import { createEmbedder } from "memory-lancedb-pro/src/embedder.ts";
 
 const config = {
   provider: "openai-compatible" as const,
-  apiKey: "sk-nhucdyuoykanymnkptpnbllswqqivhqaqmlefnxzyfjnjehg",
+  apiKey: "xxxxx",
   model: "Qwen/Qwen3-Embedding-8B",
   baseURL: "https://api.siliconflow.cn/v1",
   dimensions: 4096,

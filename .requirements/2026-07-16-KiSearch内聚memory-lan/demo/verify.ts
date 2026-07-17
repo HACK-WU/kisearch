@@ -8,7 +8,7 @@ const DEMO_DB = "/tmp/ki-demo-lancedb";
 const config = {
   dbPath: DEMO_DB,
   embedding: {
-    apiKey: "sk-nhucdyuoykanymnkptpnbllswqqivhqaqmlefnxzyfjnjehg",
+    apiKey: "xxxx",
     model: "Qwen/Qwen3-Embedding-8B",
     baseURL: "https://api.siliconflow.cn/v1",
     dimensions: 4096,

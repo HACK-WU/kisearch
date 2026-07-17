@@ -52,18 +52,20 @@
       "id": "REQ-20260716-001",
       "feature": "KiSearch内聚memory-lancedb-mcp向量引擎",
       "created": "2026-07-16",
-      "updated": "2026-07-16",
-      "status": "已确认",
+      "updated": "2026-07-17",
+      "status": "已取消",
       "tags": [
         "refactor",
         "integration"
       ],
-      "version": 5,
+      "version": 6,
       "depends_on": [],
       "changelog": [
         "初始创建",
         "2026-07-16 v4: 完成设计验证(demo-verify)",
-        "2026-07-16 v5: 记录决策: 不重构底层, 采用 Option B(升级 mem + 本地 bin 调用)"
+        "2026-07-16 v5: 记录决策: 不重构底层, 采用 Option B(升级 mem + 本地 bin 调用)",
+        "2026-07-17 v6: 舍弃原重构方案(Option A); 决策改为不重构, 采用 Option B(升级 mem + 本地 bin). 需求本身取消, 文档(decision/demo)保留.",
+        "2026-07-17 v7: 被 REQ-20260717-001 取代——KiSearch 演进为常驻 MCP 服务 + 采用 zvec 引擎, 触发本决策(decision-no-refactor.md §5)推翻条件."
       ],
       "commits": [],
       "docs": [
@@ -86,6 +88,73 @@
       ],
       "role": "standalone",
       "parent_id": null,
+      "child_ids": [
+        "REQ-20260717-001"
+      ]
+    },
+    "2026-07-17-KiSearch-zvec-node-mcp": {
+      "id": "REQ-20260717-001",
+      "feature": "KiSearch基于zvec(Node)构建常驻MCP向量服务",
+      "created": "2026-07-17",
+      "updated": "2026-07-17",
+      "status": "已确认",
+      "tags": [
+        "refactor",
+        "engine-swap",
+        "mcp",
+        "performance"
+      ],
+      "version": 1,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-07-17 v1: 确立需求——zvec(Node) 替换 lancedb, 常驻 MCP 服务; 取代已取消的 REQ-20260716-001"
+      ],
+      "commits": [],
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "decision.md",
+          "type": "decision"
+        },
+        {
+          "path": "reference/benchmark-zvec-vs-mem.md",
+          "type": "reference"
+        },
+        {
+          "path": "reference/scripts/zvec_demo.py",
+          "type": "demo"
+        },
+        {
+          "path": "reference/scripts/compare.py",
+          "type": "demo"
+        },
+        {
+          "path": "reference/scripts/gen_bulk.py",
+          "type": "demo"
+        },
+        {
+          "path": "reference/scripts/memcmp-config.yaml",
+          "type": "config"
+        },
+        {
+          "path": "reference/scripts/zvec_demo_node.mjs",
+          "type": "demo"
+        },
+        {
+          "path": "dependencies/README.md",
+          "type": "reference"
+        },
+        {
+          "path": "dependencies/zvec.md",
+          "type": "reference"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": "REQ-20260716-001",
       "child_ids": []
     }
   }

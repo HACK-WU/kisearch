@@ -1,0 +1,40 @@
+# Comparison config for zvec vs memory-lancedb-pro baseline
+# Mirrors production embedding (Qwen3-Embedding-8B 4096) but uses a
+# separate DB + disables smartExtraction so indexing is doc-level 1:1
+# with the zvec side.
+
+dbPath: "/root/knowledge-indexer/zvec-probe/.mem-cmp/lancedb"
+
+embedding:
+  apiKey: "sk-nhucdyuoykanymnkptpnbllswqqivhqaqmlefnxzyfjnjehg"
+  model: "Qwen/Qwen3-Embedding-8B"
+  baseURL: "https://api.siliconflow.cn/v1"
+  dimensions: 4096
+
+smartExtraction: false
+extractMinMessages: 2
+extractMaxChars: 8000
+
+enableManagementTools: true
+
+autoCapture: false
+autoRecall: false
+
+sessionStrategy: "none"
+
+retrieval:
+  mode: "hybrid"
+  vectorWeight: 0.7
+  bm25Weight: 0.3
+  filterNoise: false
+  minScore: 0.0
+  hardMinScore: 0.0
+  rerank: "none"
+
+scopes:
+  default: "global"
+  definitions:
+    global:
+      description: "comparison global scope"
+      acl:
+        - "global"
