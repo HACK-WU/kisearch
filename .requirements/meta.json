@@ -104,11 +104,12 @@
         "mcp",
         "performance"
       ],
-      "version": 1,
+      "version": 2,
       "depends_on": [],
       "changelog": [
         "初始创建",
-        "2026-07-17 v1: 确立需求——zvec(Node) 替换 lancedb, 常驻 MCP 服务; 取代已取消的 REQ-20260716-001"
+        "2026-07-17 v1: 确立需求——zvec(Node) 替换 lancedb, 常驻 MCP 服务; 取代已取消的 REQ-20260716-001",
+        "2026-07-17 v2: 基座模块(zvec-base-module.md)质疑审查完成:15项质疑(5高/5中/5低),报告位于2026-07-17-KiSearch-zvec-node-mcp/review/challenge-report.md;注:REQ-20260717-002未在req注册故关联至父需求REQ-001"
       ],
       "commits": [],
       "docs": [
@@ -151,6 +152,10 @@
         {
           "path": "dependencies/zvec.md",
           "type": "reference"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
         }
       ],
       "role": "standalone",
