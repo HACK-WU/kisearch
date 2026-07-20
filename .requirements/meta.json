@@ -96,20 +96,24 @@
       "id": "REQ-20260717-001",
       "feature": "KiSearch基于zvec(Node)构建常驻MCP向量服务",
       "created": "2026-07-17",
-      "updated": "2026-07-17",
-      "status": "已确认",
+      "updated": "2026-07-20",
+      "status": "实施中",
       "tags": [
         "refactor",
         "engine-swap",
         "mcp",
         "performance"
       ],
-      "version": 2,
+      "version": 6,
       "depends_on": [],
       "changelog": [
         "初始创建",
         "2026-07-17 v1: 确立需求——zvec(Node) 替换 lancedb, 常驻 MCP 服务; 取代已取消的 REQ-20260716-001",
-        "2026-07-17 v2: 基座模块(zvec-base-module.md)质疑审查完成:15项质疑(5高/5中/5低),报告位于2026-07-17-KiSearch-zvec-node-mcp/review/challenge-report.md;注:REQ-20260717-002未在req注册故关联至父需求REQ-001"
+        "2026-07-17 v2: 基座模块(zvec-base-module.md)质疑审查完成:15项质疑(5高/5中/5低),报告位于2026-07-17-KiSearch-zvec-node-mcp/review/challenge-report.md;注:REQ-20260717-002未在req注册故关联至父需求REQ-001",
+        "2026-07-20 v3: 完成 ZvecEngine 基座实现级技术设计（父+6 子文档），锁定方案 X：embedding 主线程 + Transferable",
+        "2026-07-20 v4: 设计评审：20 项问题（4 阻断+2 疑似+8 警告+6 建议）全部修复，评审通过",
+        "2026-07-20 v5: ZvecEngine 基座实现完成（14/14 测试通过）：S-01 schema + S-02 filter + S-03 embedding + S-04 worker/proxy + S-05 search + S-06 engine；tsc 编译通过，0 lint 错",
+        "2026-07-20 v6: zvec-base-module.md 升 v6：回写 6 项实现期契约修正（probe 超时/open 预检/无 collectionName/zvec undefined 拒绝/vectors 必填/update 仅 fields 不可实现/embed 失败剔除）"
       ],
       "commits": [],
       "docs": [
@@ -155,6 +159,38 @@
         },
         {
           "path": "review/challenge-report.md",
+          "type": "review"
+        },
+        {
+          "path": "design/ZVEC_ENGINE_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S01_Schema_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S02_Filter_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S03_Embedding_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S04_Worker_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S05_Search_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S06_Engine_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/design-review.md",
           "type": "review"
         }
       ],

@@ -1,10 +1,10 @@
 ---
 id: REQ-20260717-002
 feature: KiSearch 基座模块（zvec 引擎抽象层）功能与接口设计
-status: 设计中
+status: 实现完成
 created: 2026-07-17
 updated: 2026-07-20
-version: 5
+version: 6
 tags: [engine-layer, zvec, base-module, interface]
 depends_on: [REQ-20260717-001]
 author: AI
@@ -15,13 +15,15 @@ document_type: requirement+interface
 
 > 本模块即 `requirement.md` 中 **REQ-01「封装 zvec 引擎层」** 的具体落地设计。它位于 KiSearch 上层（领域 / MCP / CLI）与 `@zvec/zvec` 原始绑定之间，是纯引擎抽象层。
 >
-> **v2 修订**：根据 `review/challenge-report.md` 二次质疑审查，修正 5 项高风险（embedding 同步签名、维度决策、FTS 分词器、Hit 缺原文、score 方向）与 5 项中风险（db 共享、filter 注入、embedding 重试、fts 必填、vectors 多字段）问题。
+> **v6 修订（实现期契约修正回写）**：基于 `src/zvec-engine/` 真实 Node 实现（zvec 0.6.0）+ 14/14 冒烟测试通过，回写 6 项 v5 契约与 zvec 实测行为的偏差修正：① **probe 必须带超时**（zvec `ZVecOpen` 对持锁路径**阻塞等待**而非立即抛错；实测 1505ms 超时判定 locked 成功）② **`open` 主线程预检路径存在性**（zvec 对不存在路径同样阻塞而非抛错，提前 `existsSync` 失败）③ **probe 不传 `collectionName`**（zvec open 从磁盘元数据恢复集合名；`'__probe__'` 过不了集合名正则 `^[a-zA-Z][a-zA-Z0-9_]{2,}$`）④ **zvec `querySync`/`multiQuerySync` 拒绝显式 `undefined` 参数**（所有可选参数须条件展开 `...(x !== undefined ? {x} : {})`，不能显式传 `undefined`）⑤ **zvec `upsertSync`/`insertSync`/`updateSync` 要求 `vectors`/`fields` 至少为 `{}`**（不能是 `undefined`；`updateSync` 进一步要求 dense vector 必填——与 v5 §4.5 "仅传 fields 只改标量"规则冲突，实测证实该规则**在 zvec 0.6.0 下不可实现**，须回退到"update 必须提供 vector 或不更新 vector 字段"）⑥ **embed 失败的 doc 必须从 toWrite 中剔除**（否则 vector=undefined 会被 zvec 拒绝整批）。另确认：worker ESM 必须静态 `import`（不能 `require`）；zvec `insert` 重复 id 部分失败行为与 v4 实测一致；score=1/(1+d) 公式在 hash 向量下自检索 top1 score≈0.99 符合预期。
 >
-> **v3 修订**：根据 `review/challenge-report-v2.md` 第三轮质疑审查，处理 17 项残留/新引入问题：限定 `metric` 为 COSINE（消解 IP 归一化地雷）、`open` 入参瘦身防 schema 漂移、补 `close()` 与锁/损坏类型化异常、补全 hybrid 退化矩阵与 update 联动规则、批级/文档级错误码分层、补 `includeVector`、版本锁定与 Async API 约束、统一 REQ-07 验收口径、扩充 Node demo 验证清单。
+> **v5 修订（scenario-rehearsal 修复回写）**：据 `review/scenario-rehearsal.md` 推演发现 + `review/fix-plan.md` 方案，闭合 1 项 🔴 阻断与 5 项 🟡：① **写入侧 async 改为「单一 zvec worker（actor 模型）」架构**——整个 `ZvecEngine` 实例跑在 dedicated `worker_threads`，主线程持 proxy 经 `postMessage` 转发，worker 启动时 `ZVecOpen` 一次持有唯一写句柄（消解"同进程再 open 锁冲突"，因 read_only 也锁冲突故查询亦进 worker）；embedding 在 worker 内闭环避免 4096 维向量跨线程传输；`close()` = terminate worker + `closeSync()` 释放 LOCK。② 补静态 `ZvecEngine.probe(dbPath)` 供 CLI 在 open 前探测锁/损坏。③ §4.4 批级异常显式补 `InconsistentUpdateError`。④ embedding 失败粒度 = `batchSize` 小批，预计算 vector 的 doc 不受影响。⑤ `listIds` limit 默认 1000/上限 10000。⑥ db 明确为"可重建缓存"，重灌数据源 = 上层代码库重新抽取。⑦ `open` 补维度/metric 校验异常名。#7 score 公式与 #8 delete 不存在 id 留待真实 embedding / Node 实测补验。
 >
 > **v4 修订（最小 Node demo 验证回写）**：运行 `zvec-probe-node/verify_blocking.mjs` 实测闭合 §7 全部阻塞项，并据实证**修正 §5 一处不实假设**——zvec Node 绑定(0.5.0)的 Async API 仅覆盖 `query`/`multiQuery`/`optimize`/`deleteByFilter`，`create`/`open`/`insert`/`upsert`/`update`/`delete` 仅 Sync，故"批量写入走 Async"不可实现（改走 worker 线程）。其余结论：listIds 原生可行（证伪 v2-#2）、insert 部分失败可行（闭合 v2-#3）、jieba 无需 dictDir（闭合 v2-#4）、standard 中文 FTS 失效（闭环 H-03）、weighted 被 fts 碾压（证实 v2-#5）、close 释放 LOCK + 单进程单写句柄（闭环 H-02）；H-04 仅闭合 4096 维 API 通路，语义 Recall 须真实 embedding 补验。
 >
-> **v5 修订（scenario-rehearsal 修复回写）**：据 `review/scenario-rehearsal.md` 推演发现 + `review/fix-plan.md` 方案，闭合 1 项 🔴 阻断与 5 项 🟡：① **写入侧 async 改为「单一 zvec worker（actor 模型）」架构**——整个 `ZvecEngine` 实例跑在 dedicated `worker_threads`，主线程持 proxy 经 `postMessage` 转发，worker 启动时 `ZVecOpen` 一次持有唯一写句柄（消解"同进程再 open 锁冲突"，因 read_only 也锁冲突故查询亦进 worker）；embedding 在 worker 内闭环避免 4096 维向量跨线程传输；`close()` = terminate worker + `closeSync()` 释放 LOCK。② 补静态 `ZvecEngine.probe(dbPath)` 供 CLI 在 open 前探测锁/损坏。③ §4.4 批级异常显式补 `InconsistentUpdateError`。④ embedding 失败粒度 = `batchSize` 小批，预计算 vector 的 doc 不受影响。⑤ `listIds` limit 默认 1000/上限 10000。⑥ db 明确为"可重建缓存"，重灌数据源 = 上层代码库重新抽取。⑦ `open` 补维度/metric 校验异常名。#7 score 公式与 #8 delete 不存在 id 留待真实 embedding / Node 实测补验。
+> **v3 修订**：根据 `review/challenge-report-v2.md` 第三轮质疑审查，处理 17 项残留/新引入问题：限定 `metric` 为 COSINE（消解 IP 归一化地雷）、`open` 入参瘦身防 schema 漂移、补 `close()` 与锁/损坏类型化异常、补全 hybrid 退化矩阵与 update 联动规则、批级/文档级错误码分层、补 `includeVector`、版本锁定与 Async API 约束、统一 REQ-07 验收口径、扩充 Node demo 验证清单。
+>
+> **v2 修订**：根据 `review/challenge-report.md` 二次质疑审查，修正 5 项高风险（embedding 同步签名、维度决策、FTS 分词器、Hit 缺原文、score 方向）与 5 项中风险（db 共享、filter 注入、embedding 重试、fts 必填、vectors 多字段）问题。
 
 ## 0. 已确认的决策（用户拍板）
 
@@ -270,9 +272,9 @@ interface ZvecEngineOpenConfig {
 class ZvecEngine {
   // 集合生命周期
   static create(config: ZvecEngineConfig): Promise<ZvecEngine>;   // B-01：建库即打开，维度/FTS 字段校验
-  static open(config: ZvecEngineOpenConfig): Promise<ZvecEngine>;  // B-02：打开已有库；失败抛 CollectionNotFoundError | CollectionLockedException | CollectionCorruptedException | SchemaMismatchError。open 后内部读持久化 schema 校验：embedding.dimension !== 持久化 dimension → 抛 DimensionMismatchError；持久化 metric !== 'COSINE' → 抛 SchemaMismatchError；传 schemaAssert 则逐项比对，不符抛 SchemaMismatchError
+  static open(config: ZvecEngineOpenConfig): Promise<ZvecEngine>;  // B-02：打开已有库；失败抛 CollectionNotFoundError | CollectionLockedException | CollectionCorruptedException | SchemaMismatchError。**v6 修正**：主线程先 `existsSync(dbPath)` 预检——zvec `ZVecOpen` 对**不存在路径会阻塞**而非抛错，预检直接抛 `CollectionNotFoundError`。open 后内部读持久化 schema 校验：embedding.dimension !== 持久化 dimension → 抛 DimensionMismatchError；持久化 metric !== 'COSINE' → 抛 SchemaMismatchError；传 schemaAssert 则逐项比对，不符抛 SchemaMismatchError
   static tryOpen(config: ZvecEngineOpenConfig): Promise<ZvecEngine | null>;  // B-02：任意 open 失败返回 null（不抛）；需判别原因请 catch open() 的类型化异常
-  static probe(dbPath: string): Promise<{ exists: boolean; locked: boolean; healthy: boolean; error?: 'NOT_FOUND' | 'LOCKED' | 'CORRUPTED' | 'UNKNOWN' }>;  // B-16 静态：无需句柄，CLI 在 open 前探测 db 状态以决策"走 MCP 还是排队"。实现：在调用方进程的临时 worker 内尝试一次轻量 ZVecOpen，按错误类型映射（Can't lock → locked:true；目录不存在 → exists:false；损坏 → healthy:false）；探测完立即 closeSync 释放，不影响常驻 server 持锁
+  static probe(dbPath: string, timeoutMs?: number): Promise<{ exists: boolean; locked: boolean; healthy: boolean; error?: 'NOT_FOUND' | 'LOCKED' | 'CORRUPTED' | 'UNKNOWN' }>;  // B-16 静态：无需句柄，CLI 在 open 前探测 db 状态以决策"走 MCP 还是排队"。**v6 修正**：必须带超时（默认 3000ms）——zvec `ZVecOpen` 对**持锁路径阻塞等待**而非立即抛错（实测 1505ms），`Promise.race` 超时即判定 `locked:true`。实现：调用方进程临时 worker 内尝试一次轻量 ZVecOpen（**不传 collectionName**，zvec 从磁盘元数据恢复），按错误类型映射（Can't lock → locked:true；目录不存在 → exists:false；损坏 → healthy:false；timeout → locked:true）；探测完立即 closeSync + terminate 释放，不影响常驻 server 持锁
   info(): Promise<CollectionInfo>;                                  // B-03
   close(): Promise<void>;                                           // 幂等；terminate worker + worker 内 closeSync() 释放句柄与 LOCK，close 后 isOpen()===false（支撑 REQ-09 优雅关闭）
   destroy(): Promise<void>;                                         // 不可恢复，删盘
@@ -301,8 +303,8 @@ class ZvecEngine {
 }
 ```
 
-> **`update` 联动规则（v3 补全，质疑 v2-#8）**：
-> - 仅传 `fields`：保留旧 vector 与旧 text，只更新标量字段；
+> **`update` 联动规则（v3 补全，质疑 v2-#8；v6 修正第 1 条）**：
+> - ~~仅传 `fields`：保留旧 vector 与旧 text，只更新标量字段~~ **v6 实测修正**：zvec 0.6.0 `updateSync` 要求 dense vector 必填（`Invalid doc[xx]: field[dense] is required but not provided`），"仅传 fields 不改 vector"在 zvec 0.6.0 下**不可实现**。改为：调用方若需"只改标量"，须先 `fetch` 拿原 vector 再随 update 一并传回；或在 engine 内部 fetch-then-update（v6 实现选择前者，由调用方负责）
 > - 传 `text`：**必须内部重嵌并同步更新 FTS 索引**（vector 与 FTS 索引保持一致）；
 > - 只传 `vector` 不传 `text`，且集合配置了 FTS：**抛 `InconsistentUpdateError`**，避免向量更新而 FTS 索引停留在旧原文、导致 ftsSearch/hybridSearch 漏召回且无告警；
 > - `update` 不存在的 id → 该条进 `errors[]`（`NOT_FOUND`）。
@@ -336,6 +338,21 @@ class ZvecEngine {
 - `queryType` 仅作结果来源说明，**不影响 score 解读方向**（消解 v1 的方向分叉陷阱，对应 `reference/docs/zvec-mcp-server-tools.md` 实测坑 1）。
 
 > v1 让调用方按 `queryType` 判断 score 方向（质疑 #5），上层每次排序都要 switch-on-type，极易写反导致静默错误；v2 在引擎层统一归一化。
+
+### 4.5.1 zvec 实测参数契约（v6 新增）
+
+实现期 `src/zvec-engine/worker.ts` 与 zvec 0.6.0 对齐时发现：zvec 原生 API 对参数形态有严格约束，以下规则**强约束**本模块与 zvec 的交互边界：
+
+| # | zvec API | 契约约束 | 本模块适配 |
+|---|---|---|---|
+| Z-01 | `querySync` / `multiQuerySync` / `deleteByFilter` | **拒绝显式 `undefined` 参数**（即使该参数可选）——报 `Expected a string for 'filter'` 等错 | 所有可选参数**条件展开**：`...(x !== undefined ? {x} : {})` |
+| Z-02 | `upsertSync` / `insertSync` / `updateSync` | **`vectors` / `fields` 至少为 `{}`**——不能是 `undefined` | `toZvecDocInput` 始终返回 object，即使是空 `{}` |
+| Z-03 | `updateSync` | **dense vector 必填**——`Invalid doc[xx]: field[dense] is required but not provided` | 见 §4.5 `update` 联动规则 v6 修正 |
+| Z-04 | `ZVecOpen` 对不存在路径 / 持锁路径 | **阻塞等待**而非抛错 | engine.open 主线程 `existsSync` 预检；probe 加 `Promise.race` 超时（默认 3000ms） |
+| Z-05 | `ZVecOpen` 恢复集合 | **不需要 `collectionName`**——zvec 从磁盘元数据读集合名 | probe 不传 collectionName；`'__probe__'` 过不了集合名正则 `^[a-zA-Z][a-zA-Z0-9_]{2,}$` |
+| Z-06 | worker ESM | **必须静态 `import`**——不能 `require` | worker.ts 顶部 `import { buildCollectionSchema } from './schema/builder.js'` |
+
+**嵌入失败文档剔除（v6 修正）**：`writeDocs` 编排时，`embedding.embed()` 失败的 doc 虽然已进 `WriteResult.errors[]`（`EMBEDDING_FAILED`），但**必须同时从待写列表中剔除**——否则 `vector=undefined` 会触发 zvec Z-02/Z-03 校验报错，导致整批失败（而不是部分失败）。实现：`embedFailedIds: Set<string>` 跳过。
 
 ### 4.6 Embedding 提供方（配置抽象，不关心内部）
 
