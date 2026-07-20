@@ -233,6 +233,16 @@ export class ZvecEngine {
   }
 
   async update(docs: DocInput[]): Promise<WriteResult> {
+    // Z-03 / v6 契约：zvec updateSync 要求 dense vector 必填；
+    // "仅传 fields 只改标量"在 zvec 0.6.0 下不可实现，须提供 vector 或 text（重嵌）。
+    for (const d of docs) {
+      if (d.vector === undefined && d.text === undefined) {
+        throw new InconsistentUpdateError(
+          `update doc "${d.id}": dense vector is required (provide vector or text to re-embed; scalar-only update is not supported by zvec)`,
+          { data: { id: d.id } },
+        );
+      }
+    }
     // 仅 vector 不传 text 且配 FTS → InconsistentUpdateError
     if (this.schema.fts) {
       for (const d of docs) {
@@ -350,6 +360,7 @@ export class ZvecEngine {
       if (embedFailedIds.has(d.id)) continue;
       const vector = embeddedVectors.get(d.id) ?? d.vector;
       // 校验：写入路径必须至少有 vector 或 text（upsert/insert）
+      // update 模式的输入校验由 update() 入口负责（Z-03：缺 dense vector 抛 InconsistentUpdateError）
       if (mode !== 'update' && vector === undefined && d.text === undefined) {
         allErrors.push({
           id: d.id,

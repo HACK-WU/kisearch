@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import url from 'node:url';
 
-import { vectorizeOne, batchVectorize, deleteMemory } from '../scripts/lib/batch-vectorize.ts';
+import { vectorizeOne, batchVectorize, deleteMemory } from '../../scripts/lib/batch-vectorize.ts';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 // 直接使用全局 mem 命令，无需设置 MEM_PROJECT_ROOT

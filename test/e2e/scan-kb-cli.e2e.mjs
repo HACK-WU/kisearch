@@ -8,7 +8,7 @@ import { execSync } from 'node:child_process';
 import url from 'node:url';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
-const MOCK_MEM = path.join(__dirname, 'fixtures', 'mock-mem.mjs');
+const MOCK_MEM = path.join(__dirname, '..', 'fixtures', 'mock-mem.mjs');
 
 // 创建临时目录，将 mock-mem.mjs 复制为 mem 命令
 const MOCK_BIN_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mock-mem-bin-'));
@@ -31,9 +31,9 @@ function makeRepo() {
   return dir;
 }
 
-import { getKbDir } from '../scripts/lib/scope.ts';
+import { getKbDir } from '../../scripts/lib/scope.ts';
 
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 const SCAN_KB = path.join(PROJECT_ROOT, 'knowledge-index', 'scripts', 'scan-kb.ts');
 const TEST_SCOPE = 'cli-e2e-' + Date.now();
 

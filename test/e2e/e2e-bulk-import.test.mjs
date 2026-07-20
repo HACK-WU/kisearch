@@ -18,7 +18,7 @@ import url from 'node:url';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-import { registerTestScope, getTestEnv } from './test-config.ts';
+import { registerTestScope, getTestEnv } from '../test-config.ts';
 
 // ─── 工具函数 ─────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ function runImport(scope, resultsFile, mode = 'full') {
     '--mode', mode,
   ];
   const stdout = execFileSync('npx', args, {
-    cwd: path.resolve(__dirname, '..'),
+    cwd: path.resolve(__dirname, '..', '..'),
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 120_000,
@@ -64,15 +64,15 @@ function runImport(scope, resultsFile, mode = 'full') {
 
 function cleanupScope(scope) {
   // 清理 kb 目录
-  const kbDir = path.resolve(__dirname, '..', 'kb', scope);
+  const kbDir = path.resolve(__dirname, '..', '..', 'kb', scope);
   if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
   // 清理 scope 配置
-  const scopeFile = path.resolve(__dirname, '..', 'kb', `${scope}.json`);
+  const scopeFile = path.resolve(__dirname, '..', '..', 'kb', `${scope}.json`);
   if (fs.existsSync(scopeFile)) fs.unlinkSync(scopeFile);
 }
 
 function getProgressFilePath(scope) {
-  return path.resolve(__dirname, '..', 'kb', scope, 'import-progress.json');
+  return path.resolve(__dirname, '..', '..', 'kb', scope, 'import-progress.json');
 }
 
 // ─── 测试 ─────────────────────────────────────────────────
@@ -183,7 +183,7 @@ describe('E2E: bulk-store 增量导入', () => {
     execSync(`git${GIT_ENV}add -A && git${GIT_ENV}commit -q -m v2`, { cwd: sourceDir, shell: '/bin/bash' });
 
     // 读取 a.md 的旧 memoryId
-    const kbDir = path.resolve(__dirname, '..', 'kb', SCOPE);
+    const kbDir = path.resolve(__dirname, '..', '..', 'kb', SCOPE);
     const cacheFile = path.join(kbDir, 'relations-cache.json');
     const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
     const aRel = cache.groups['IncWiki'].hot_relations.find((r) => r.sourcePath === 'a.md');

@@ -37,6 +37,13 @@ export class InvalidDocInputError extends ZvecEngineError {}
 export class InvalidSearchError extends ZvecEngineError {}
 export class InvalidFilterError extends ZvecEngineError {}
 export class SchemaMismatchError extends ZvecEngineError {}
+/**
+ * update 联动规则违反（批级抛出，不进 errors[]）：
+ *   - update 只传 vector 不传 text 且集合配置了 FTS（避免向量更新而 FTS 索引停留旧原文，
+ *     导致 ftsSearch/hybridSearch 漏召回且无告警，见 §4.5 update 联动规则）
+ *   - update 缺 dense vector（Z-03：zvec updateSync 要求 dense vector 必填；
+ *     "仅传 fields 只改标量"在 zvec 0.6.0 下不可实现，须提供 vector 或 text 重嵌）
+ */
 export class InconsistentUpdateError extends ZvecEngineError {}
 
 // ─── 集合生命周期类 ───
