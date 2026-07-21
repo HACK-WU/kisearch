@@ -1,306 +1,175 @@
-# 场景推演报告 v3：ZvecEngine 基座模块（全量推演，v5）
+# 场景推演报告 v3：方案甲（server+HTTP + CLI stdio 兜底 + 写入提示）
 
-> 推演时间：2026-07-20
-> 输入文档：`zvec-base-module.md`（v5）、`requirement.md`（REQ-20260717-001）、`dependencies/zvec.md`、`dependencies/README.md`
-> 推演口径：全量推演——在 v2 增量核验（v5 修复项已闭合）基础上，补充 v2 未深覆盖的场景，判断"设计是否正确合理、能否进入实现"。
-> 原则：只记录问题，不修改设计文档。
+> 推演时间：2026-07-21
+> 输入文档：design/REF_S04_CLI_Server_Channel_DESIGN.md §3.1–§3.4、§+6；design/REF_S06_MCP_Server_DESIGN.md；review/scenario-rehearsal-v2.md（zvec 跨进程排他锁 demo 实锤）
+> 推演目的：验证「方案甲」决策是否闭环 v2 的 🔴 阻断，并暴露新设计引入的问题
 
 ## 1. 角色清单
 
 | # | 角色 | 类型 | 权限层级 | 职责 | 来源 |
 |---|------|------|---------|------|------|
-| 1 | KiSearch 常驻 MCP server | 程序 | 持有 db 写句柄（主调用方） | 常驻持有单一 worker 写句柄；对外暴露 MCP 工具；调用所有 ZvecEngine 能力 | §0 db 归属 / §5 常驻保活 |
-| 2 | KiSearch CLI | 程序 | 并发写入方 | 一次性建库/查询/回写；写入须走 MCP 协议或排队等锁 | §0 / §5 db 归属 |
-| 3 | KiSearch 上层领域层（ki-relation/ki-path/ki-search） | 程序 | 调用方 | 把领域标签/tag/scope 映射为通用 `tags`/`fields` 传下引擎 | §2 铁律 |
-| 4 | Embedding 提供方（SiliconFlow HTTP API） | 程序（外部） | 注入依赖 | 提供 4096 维 Qwen3-Embedding-8B；含重试/分批/超时 | §4.6 / REQ-03 |
-| 5 | 开发人员 | 用户 | 配置者 | 注入 EmbeddingProvider、配置 schema/tokenizer | §4.1 |
-
-> 全部为程序/系统角色，无"用户登录层级"概念；权限差异体现在"谁持有锁"而非账号体系。
+| 1 | 终端用户 | 用户 | 已登录 | 直接执行 ki CLI 命令（search/store/import-kb…） | S-04 §术语 |
+| 2 | AI Agent | 程序 | — | MCP 客户端，调用 ki 工具做记忆读写 | S-04/S-06 |
+| 3 | 常驻 ki server（独立守护） | 程序 | — | 单一持有 zvec rw 句柄，暴露**单一 HTTP（StreamableHTTP）** 同时服务 CLI 与 Agent（模型 Y） | S-04 §3.1 |
+| 4 | CLI 子进程 ki mcp --serve | 程序 | — | 无持久 server 时的 stdio 兜底进程 | S-04 §3.4 |
 
 ## 2. 推演矩阵 + 启用策略 profile
 
-### 2.1 角色 × 场景推演矩阵
+### 2.1 启用策略 profile
 
-| 场景 \ 角色 | MCP server | CLI | 领域层 | Embedding | 开发 |
-|---|---|---|---|---|---|
-| S1 建库+写入+混合检索(Happy) | ✅ | - | ✅ | ✅ | - |
-| S2 常驻时 CLI 并发写入(锁协调) | ✅ | ✅ | - | - | - |
-| S3 批量写入(worker async 承诺) | ✅ | - | - | - | - |
-| S4 embedding 失败/限流(异常) | ✅ | - | - | ✅ | - |
-| S5 update 不一致(异常) | ✅ | - | - | - | - |
-| S6 db 损坏重建(异常) | ✅ | - | - | - | - |
-| S7 listIds 大库扫描(边界) | ✅ | - | - | - | - |
-| S8 open 维度/度量不符(异常) | ✅ | - | - | - | - |
-| S9 hybrid 退化矩阵(异常/边界) | ✅ | - | - | - | - |
-| S10 代码符号精确召回(混合语料) | ✅ | - | ✅ | - | - |
-| S11 embed 失败粒度(边界) | ✅ | - | - | ✅ | - |
-| S12 结构化 Filter 注入(安全) | ✅ | - | ✅ | - | - |
-| S13 queryText+vector 同传(边界) | ✅ | - | - | - | - |
-| S14 worker 入口打包(部署) | ✅ | - | - | - | - |
+- ✅ 并发/竞态敏感类（命中：zvec 跨进程排他锁、server 单句柄并发请求）
+- ✅ 重构/迁移类（命中：CLI 通道由 per-call stdio 迁移为 server+HTTP）
+- ➖ 未启用：CRUD/接口类、事务/状态机类、批处理/同步类、实时/推送类
 
 ### 2.2 设计点覆盖矩阵
 
-| 设计点 \ 场景 | S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 | S9 | S10 | S11 | S12 | S13 | S14 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 单集合 + tag 隔离 | ✅ | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| 维度校验铁律(4096) | ✅ | - | - | - | - | - | - | ✅ | - | - | - | - | - | - |
-| metric 限定 COSINE + score 归一化 | ✅ | - | - | - | - | - | - | ✅ | ✅ | - | - | - | - | - |
-| db 单一进程单一写句柄 | ✅ | ✅ | ✅ | - | - | - | - | - | - | - | - | - | - | - |
-| 全异步(async)承诺 | ✅ | - | ✅ | ✅ | ✅ | - | - | - | - | - | ✅ | - | - | ✅ |
-| embedding 自动 embed + 分层错误 | ✅ | - | - | ✅ | - | - | - | - | - | - | ✅ | - | - | - |
-| update 联动规则 | - | - | - | - | ✅ | - | - | - | - | - | - | - | - | - |
-| 退化矩阵(hybrid) | - | - | - | - | - | - | - | - | ✅ | - | - | - | ✅ | - |
-| 损坏识别/重建责任 | - | - | - | - | - | ✅ | - | - | - | - | - | - | - | - |
-| listIds 性能边界 | - | - | - | - | - | - | ✅ | - | - | - | - | - | - | - |
-| FTS 分词器全局唯一 | - | - | - | - | - | - | - | ✅ | ✅ | ✅ | - | - | - | - |
-| Filter 转义/注入 | - | - | - | - | - | - | - | - | - | - | - | ✅ | - | - |
-| EmbeddingProvider 跨 worker | ✅ | - | ✅ | ✅ | - | - | - | - | - | - | ✅ | - | - | ✅ |
+| 设计点 \ 场景 | S1 读(有server) | S2 写(有server) | S3 无server兜底 | S4 并发 | S5 start/恢复 | S6 连接模型 | S7 Agent抢锁 | S8 旁路命令 | S9 提示判定 |
+|--------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| HTTP 二通道路由（模型 Y：单一 HTTP 服务 CLI+Agent） | ✅ | ✅ | - | ✅ | - | ✅ | - | - | - |
+| CLI stdio 兜底（仅无 daemon） | - | - | ✅ | - | - | - | ✅ | - | - |
+| 写入提示关闭 daemon（仅 --local/批量） | - | ✅ | - | - | - | - | ✅ | ✅ | ✅ |
+| server 单句柄并发 | - | - | - | 🟡 | - | - | - | - | - |
+| server 生命周期/发现 | - | - | - | - | 🟢 | ✅ | ✅ | 🟢 | ✅ |
 
-### 2.3 启用策略 profile
+### 2.3 推演矩阵（角色 × 场景）
 
-- ✅ CRUD/接口类（命中：B-01~B-16 全为集合/文档/检索 CRUD + 接口契约）
-- ✅ 并发/竞态敏感类（命中：db 文件锁、单一写句柄、worker 串行化、CLI 锁协调）
-- ✅ 批处理/同步类（命中：bulk upsert 分批 + embedding 分批重试）
-- ➖ 未启用：事务/状态机类、实时/推送类、重构/迁移类
-
-> 加压点：并发锁语义（S2/S3）、批级错误分层（S4/S11）、Filter 注入（S12）、分词器决策（S10）。
+| 场景 \ 角色 | 终端用户 | AI Agent | ki server | CLI 子进程 |
+|-------------|:---:|:---:|:---:|:---:|
+| S1 有server读命令 | ✅ | - | ✅ | - |
+| S2 有server写命令 | ✅ | - | ✅ | - |
+| S3 无server兜底 | ✅ | ✅ | - | ✅ |
+| S4 并发多客户端 | ✅ | ✅ | ✅ | - |
+| S5 start/崩溃恢复 | ✅ | - | ✅ | - |
+| S6 连接模型（已拍板 Y） | - | ✅ | ✅ | - |
+| S7 Agent抢锁 | - | 🟡 | ✅ | 🟡 |
+| S8 import-kb/restore | ✅ | - | - | - |
+| S9 提示判定 | ✅ | 🟡 | - | - |
 
 ## 3. 场景推演详情
 
-### 🎬 S1 建库 + 写入 + 混合检索（Happy Path）
-
-【执行者】MCP server + 领域层 + Embedding
-【场景描述】首次建库 → 批量 upsert（喂 `{id,text,fields}`）→ hybridSearch 召回
-
-【数据走向验证】
-
-| 步骤 | 操作 | 数据流向 | 验证结果 | 问题 |
-|---|---|---|---|---|
-| 1 | 领域层映射标签 | 领域 → `tags`/`fields` | ✅ | - |
-| 2 | `ZvecEngine.create` | 主线程 → worker（postMessage）→ zvec 建库 | ✅ | - |
-| 3 | `upsert({id,text,fields})` | text 传 worker → embedding（SiliconFlow HTTP，worker 内）→ 向量 + FTS 索引写入 | ⚠️ | S11 embed 失败粒度 / S14 worker 内 embedding 注入（见 #2/#3） |
-| 4 | `hybridSearch({queryText,fts})` | worker 内 embed → `multiQuerySync` 两路 RRF → Hit[] | ✅（路径成立） | S10 分词器对代码符号待验 |
-
-【关键设计点验证】
-
-| # | 设计点 | 验证问题 | 结果 | 问题 | 置信度 |
-|---|---|---|---|---|---|
-| 1 | 单集合 + tag 隔离 | 三层标签是否能共存不串扰 | ✅ | filter 隔离成立 | 高 |
-| 2 | 维度校验铁律 | create 时 4096 校验 | ✅ | 不符抛 `DimensionMismatchError` | 高 |
-| 3 | metric 限定 COSINE | score 归一化方向 | ⚠️ | 公式需真实 embedding 验证（已知 #7） | 中 |
-
-【结论】Happy Path 数据走向与接口契约成立；阻塞点为 embedding 在 worker 内的注入可行性（#2）与代码符号分词（#1）。
-
----
-
-### 🎬 S2 常驻时 CLI 并发写入（锁协调，协作路径）
+### 3.1 S1：server 在跑 + 用户执行读命令 ki search
 
 ```mermaid
 sequenceDiagram
-    participant CLI as KiSearch CLI
-    participant P as ZvecEngine.probe
-    participant W as MCP server worker(持锁)
-    participant M as MCP store 工具
-    CLI->>P: probe(dbPath)
-    P->>W: 尝试 ZVecOpen(临时 worker)
-    W-->>P: ❌ Can't lock (locked:true)
-    P-->>CLI: {locked:true}
-    Note over CLI: 决策：走 MCP 协议而非直连
-    CLI->>M: store 请求
-    M->>W: upsert(经 proxy)
-    W-->>M: WriteResult
-    M-->>CLI: 结果
-    Note over P,W: probe 失败不持锁，closeSync 即释放，不影响 server
+    participant U as 终端用户
+    participant C as ki CLI
+    participant S as ki server(HTTP)
+    participant Z as zvec(rw 锁)
+    U->>C: ki search ...
+    C->>C: probe(): HTTP 健康探测 / 读端口文件
+    C->>S: POST /mcp search(经 HTTP)
+    S->>Z: querySync(已持句柄)
+    Z-->>S: 结果
+    S-->>C: 结果
+    C-->>U: 输出
+    Note over C,Z: 不二次 open，复用 server 句柄，无 Can't lock
 ```
 
-【验证】✅ 数据走向与锁协调成立（v5 #2 已闭合）。CLI 探测 → 路由 MCP → server worker 唯一写句柄，无双写冲突。
+【数据走向验证】CLI → HTTP → server（持锁）→ zvec，无第二进程 open。✅ 通过。
+【关键设计点】HTTP 路由：✅ 可行，闭环 v2 阻断。
+【推演结论】原 🔴 阻断（Agent 常驻时 CLI 读失败）已闭环。
 
----
+### 3.2 S2：server 在跑 + 用户执行写命令 ki store
 
-### 🎬 S3 批量写入（worker async 承诺）
+【设计点验证】S-04 §3.4 规定「写入类命令遇 server 持锁 → 提示关闭 MCP」。但同一文档 §3.1 又规定「CLI 优先经 HTTP 复用 server 句柄」——写也可走 HTTP（server 持 rw，能写）。两处触发条件重叠（见 P2）。
 
-【验证】✅ v5 worker actor 架构消解"同进程锁冲突 + async 承诺"矛盾：`ZVecOpen` 仅 worker 内一次，主线程 proxy 经 `postMessage` 转发天然 async；查询亦进 worker（read_only 也锁冲突）。插入分批 `insertSync` + `setImmediate` 让出查询插队，41.8ms/200 条可接受。
+- 若写命令默认走 HTTP：server 处理 insert → 成功，无需提示（无缝）。
+- 若写命令默认本地执行 + 遇锁提示：提示「关闭 MCP？[Y/n]」→ Y 停 server 后本地写；n 走 HTTP 或中止。
 
----
+【推演结论】功能可行，但提示与 HTTP 路由的优先级/触发条件必须明确，否则提示路径要么成死代码、要么与无缝路由矛盾（🟡 P2）。
 
-### 🎬 S4 embedding 失败 / 限流（异常）
+### 3.3 S3：无持久 server + Agent spawn --serve + 用户 CLI 命令
 
-【验证】✅ 分层错误设计正确：批级用法错误（维度/未知字段/schema 漂移/不一致更新）抛类型化异常；文档级可恢复错误（embedding 失败/id 冲突/not found）进 `WriteResult.errors[]` 且 `EMBEDDING_FAILED` 以 `batchSize` 小批为失败粒度。⚠️ 但"预计算 vector 不受 embed 失败影响"与"小批同成败"存在内部张力（见 S11 / #3）。
+【数据走向】无 server → CLI 回落 per-call spawn ki mcp --serve（stdio），Agent 亦 spawn 自己的 --serve。二者不同时存在（Agent 的 --serve 持锁时用户 CLI 也 spawn → 冲突？见 S7）。本场景假设时序错开或各持锁瞬间无重叠。
+【推演结论】兜底路径与 v2 前行为一致，无新增问题（需 S7 验证并发错开）。✅
 
----
+### 3.4 S4：并发多客户端打同一个 HTTP server
 
-### 🎬 S5 update 不一致（异常）
+【关键设计点】server 单 Node 进程持单 rw 句柄。insertSync/querySync 为同步原生调用，阻塞事件循环。多客户端并发请求由事件循环串行化——无数据竞争（单线程安全），但一个长 bulk_store 会阻塞 Agent 及其他 CLI 请求（🟡 P5）。
 
-【验证】✅ `update` 仅传 vector 不传 text 且集合配 FTS → 抛 `InconsistentUpdateError`（v5 #3 已补），避免向量更新而 FTS 索引停留旧原文导致漏召回。联动规则（仅 fields / 传 text 重嵌）清晰。
+### 3.5 S5：ki server start / 崩溃恢复
 
----
+【关键设计点】
+- 重复 ki server start：须读 pidfile 校验进程存活，已运行则拒绝/报告（🟢 P6）。
+- 崩溃：zvec 用文件锁，OS 在进程死亡时自动释放 LOCK；但 pidfile 可能残留 → status 须校验 pid 存活（🟢 P6）。
+【推演结论】无 🔴，属健壮性建议。
 
-### 🎬 S6 db 损坏重建（异常）
-
-【验证】✅ db 定位为"可重建缓存非权威源"，`open()` 失败抛 `CollectionCorruptedException`；重建责任 = 上层重新扫描代码库抽取 → `destroy()`+`create()`+全量 `upsert`。基座只提供闭环，不备份。责任划分正确。
-
----
-
-### 🎬 S7 listIds 大库扫描（边界）
-
-【验证】✅ `listIds` 纯 filter 扫描原生可行（H-01 已实测）；limit 默认 1000 / 上限 10000 / 超限抛 `InvalidSearchError`，与检索 topk 上限 1000 区分合理。
-
----
-
-### 🎬 S8 open 维度/度量不符（异常）
-
-【验证】✅ `open` 后校验：embedding.dimension ≠ 持久化 dimension → `DimensionMismatchError`；持久化 metric ≠ COSINE → `SchemaMismatchError`；`schemaAssert` 逐项比对。类型化异常名齐全（v5 #9）。
-
----
-
-### 🎬 S9 hybrid 退化矩阵（异常/边界）
-
-【验证】✅ 退化矩阵完整覆盖四种输入组合（hybrid / 退 vector / 退 fts / 三者皆缺抛 `InvalidSearchError`）。`queryType` 仅作来源标识，score 方向统一"越大越相关"，消解 v1 方向分叉陷阱。`weighted` 被 fts 数值碾压已实测，默认 rrf 合理。
+### 3.6 S6：连接模型——**已拍板：模型 Y（独立守护 + Agent 走 HTTP）** ✅
 
 ```mermaid
 flowchart TD
-    A[hybridSearch 入参] --> B{有 fts 且有 queryText/vector?}
-    B -->|是| C[✅ multiQuerySync 两路 RRF<br/>queryType=hybrid]
-    B -->|否| D{有 queryText/vector?}
-    D -->|是| E[✅ 退单路向量<br/>queryType=vector]
-    D -->|否| F{有 fts?}
-    F -->|是| G[✅ 退单路 FTS<br/>queryType=fts]
-    F -->|否| H[❌ 三者皆缺 抛 InvalidSearchError]
+    A[ki server start 起独立守护进程, 持 rw 锁] -->|暴露单一 HTTP StreamableHTTP| B[CLI 与 Agent 同为 HTTP 客户端]
+    B -->|CLI 短命| C[读/写默认走 HTTP 复用句柄]
+    B -->|Agent 常驻| D[Agent 改连 HTTP, 不再 spawn --serve]
+    A -->|stdio --serve| E[仅「无 daemon」时 CLI 兜底; Agent 此模式不可用, 须提示先 start]
+    Note over A,E: 模型 Y 已消除 P1 矛盾——不再有 Agent 连常驻 server stdio 表述, stdio 仅作无 daemon 兜底
 ```
 
----
+【决策（2026-07-21 用户拍板）】采用 **Y**：`ki server start` 起真正独立守护进程（持有 rw 锁 + 监听 HTTP）；**AI Agent 改连 HTTP（StreamableHTTP）**，不再 spawn `ki mcp --serve`、不再使用 stdio；stdio `--serve` 仅保留为「无 daemon」时的 CLI 兜底。该决策直接消解了原 🔴 P1（"Agent 连常驻 server stdio" 与 "server 由 ki server start 独立启动" 的自相矛盾）。
 
-### 🎬 S10 代码符号精确召回（混合语料，⚠️ 高风险）
+> 否决 X 的理由：X 要求 Agent 亲自 spawn server 为子进程（stdio 才能被 Agent 拥有），等于把"常驻 server"生命周期绑在 Agent 上，背离"常驻"心智模型；而 cli 的 stdio 兜底已由独立 `--serve` 路径保留，stdio 不必是 Agent 的常驻通道。
 
-【执行者】MCP server + 领域层
-【场景描述】KiSearch 语料 = bk-monitor 中文 wiki + 代码符号（函数名/路径，如 `syncRelation`、`ki/path/to/file`）。REQ-04 验收明确要求"代码符号查询精确命中"为刚需。
+### 3.7 S7：Agent 旧集成仍 spawn --serve 与 daemon 抢锁
 
-【关键设计点验证】
+【场景（已收敛）】模型 Y 下，稳态锁持有者只有 daemon。任何 Agent/工具若仍按旧方式 spawn `ki mcp --serve` → 子进程 open → `Can't lock` 立即失败。
+【关键设计点】**已转为构建期硬约束（非运行期隐患）**：S-04 §+6 明确「Agent 集成禁止再 spawn `--serve`，必须改连 `ki server` HTTP（StreamableHTTP）」。旧 Agent 集成不再是运行期歧义，而是需在集成改造时消除的对接项（P3 ✅ 收敛）。
 
-| # | 设计点 | 验证问题 | 结果 | 问题 | 置信度 |
-|---|---|---|---|---|---|
-| 1 | FTS 分词器全局唯一 | 单集合单 FTS 字段只能配一个 tokenizer，中文与代码符号能否同时保召回 | ⚠️ | 设计强制"默认 jieba、禁 standard"（H-03 证 standard 中文返回空），但代码符号（CamelCase/snake_case/路径）在 jieba 下的 token 行为**未经实测**；若 jieba 把 `syncRelation` 拆碎或 `ki/path` 切错，将直接失败 REQ-04 验收 | 中 |
+### 3.8 S8：ki import-kb / ki restore 批量重建命令
 
-【风险分析】
+【场景】二者强制本地独占 collection（重建/导入，无对应 MCP 写工具），不走常规 HTTP 写路由。daemon 在跑时它们必须本地 open → `Can't lock`。
+【关键设计点】**已收敛（P2/P4 延伸解决）**：S-04 §3.4/§+6 规定它们**复用 CLI 路由层同一 `isLocked()` 逻辑**——检测 daemon 持锁 → 提示「MCP 守护进程运行中（pid X），关闭它以本地重建？[Y/n]」；Y → `ki server stop` 后本地执行；n → 中止。不再有独立静默失败路径。
 
-```mermaid
-flowchart TD
-    A[单集合 单一 FTS 字段] --> B{选哪个 tokenizer?}
-    B -->|jieba(设计默认)| C[✅ 中文 wiki 召回 OK<br/>⚠️ 代码符号 token 行为待验]
-    B -->|standard| D[❌ 中文 FTS 全空(H-03 已证)]
-    B -->|whitespace| E[❌ 中文拆不了词<br/>代码符号仅按空格切]
-    C --> F{REQ-04 代码符号精确命中?}
-    F -->|jieba 保留标识符| G[✅ 验收过]
-    F -->|jieba 拆碎标识符| H[❌ REQ-04 失败]
-```
+### 3.9 S9：提示「关闭哪个 MCP」的判定
 
-> **zvec 约束**：FTS 字段不支持 alter（schema 演化），tokenizer 建库即定，无法事后更换。且单集合只有一个 FTS 字段，`ki-relation`/`ki-path`/`ki-search` 共用同一 `content` + 同一 tokenizer，无法"中文用 jieba、代码符号用 whitespace"分而治之。
-
-【结论】🔴/🟡 待实测定级 —— 设计未对"混合语料单 tokenizer"这一 REQ-04 核心验收风险给出实测结论。建议：进入实现前用真实混合语料实测 jieba 对 `CamelCase`/`snake_case`/路径分隔 的 token 产出；若不满足，考虑建库时配置**两个 STRING FTS 字段**（一个 jieba 给中文、一个 whitespace/standard 给代码符号，查询时走 hybrid 双 FTS 路）——但需先验证 zvec 是否允许同一集合多 FTS 字段且多路 `multiQuerySync` 合并。严重度暂评 🟡（功能可用，但可能升级为 🔴 阻断 REQ-04 验收）。
-
----
-
-### 🎬 S11 embed 失败粒度（边界，🔴→🟡 内部矛盾）
-
-【验证】⚠️ §4.4 与 §4.6 存在表述矛盾：
-- §4.4：`EMBEDDING_FAILED` 注"预计算 vector 的 DocInput（已给 vector）不依赖 embed，照常写入，不受 embed 失败影响"。
-- §4.6："embed 接口不支持单条失败区分时以**小批为最小失败单元（一批同成败）**"。
-
-当一个 `batchSize` 小批同时含 `text` 文档（需 embed）与预计算 `vector` 文档（不需 embed），且该批 embed 失败：按 §4.4 预计算 vector 文档应照常写入；按 §4.6"一批同成败"整批失败（含预计算 vector 文档）。**两种表述对预计算 vector 文档的命运给出相反结论**，实现者无法唯一确定行为。
-
-【建议】明确切分规则：engine 在调用 `embed` 前将小批按"是否需 embed"分为两组，embed 失败仅使 `text` 文档标 `EMBEDDING_FAILED`，预计算 `vector` 文档独立写入。此规则同时兑现 §4.4 的"预计算 vector 不受影响"承诺。严重度 🟡。
-
----
-
-### 🎬 S12 结构化 Filter 转义 / 注入（安全，🟡）
-
-【验证】⚠️ §4.3 将 `Filter` 定义为结构化类型"内部转 zvec 类 SQL 字符串并转义，避免注入"，但**未定义转义机制**：
-- zvec filter 为类 SQL 布尔表达式（`tag='ki-relation'`、`publish_year > 2000`），字段名须为合法标识符，字符串值须加引号。
-- 字段名若来自领域层映射（可控，schema 已声明），风险较低；但**字符串值**（如 `fields` 中的任意标量文本）若含引号/特殊字符且不转义，将破坏 filter 语法或注入。
-- 现有 `Filter` 联合类型还预留 `{ raw: string }` 逃生口（调用方自负转义），进一步放大注入面。
-
-【建议】在设计层明确转义策略：字段名走白名单/标识符校验（非法即抛 `InvalidFilterError`）；字符串值统一加单引号并对内部单引号转义（`'`→`\'` 或按 zvec 语法）；`{ raw }` 逃生口标注为"仅限可信内部调用"。严重度 🟡（安全 + 正确性）。
-
----
-
-### 🎬 S13 HybridSearchReq 同传 queryText + vector（边界，🟢）
-
-【验证】⚠️ §4.3 `HybridSearchReq.queryText` 与 `vector` 标注"二选一"，但未定义**两者同时传入**时的优先级/校验行为。实现者可能静默取其一或报错。
-
-【建议】明确：二者互斥校验（同时传入抛 `InvalidSearchError`）或"vector 优先于 queryText"。严重度 🟢。
-
----
-
-### 🎬 S14 worker 入口打包 / 分发（部署，🟡）
-
-【验证】⚠️ v5 架构要求整个 `ZvecEngine` 跑在 dedicated `worker_threads`。`worker_threads` 需要**可解析的 worker 脚本入口**。KiSearch 以 `bin/ki.mjs`（Node/ESM）分发，ki 进程在 `knowledge-indexer` 内以 TS 源码运行（经 loader/tsx）。若 ki 后续被打包（esbuild/tsup/pkg）或 worker 文件未被正确打包进产物，worker 入口解析将失败。
-
-【建议】实现时锁定 worker 入口方案（如 `new Worker(new URL('./zvec-worker.mjs', import.meta.url))`），并在目标运行方式（tsx 直跑 / 打包产物）下回归验证 worker 可 spawn。严重度 🟡（部署风险，不阻断设计正确性）。
-
----
+【场景（已收敛）】模型 Y 下**稳态唯一锁持有者是 daemon**（Agent 走 HTTP，不 spawn `--serve`），故提示只面向 daemon：
+- 提示 `ki server stop`（有 pidfile，安全停止）；
+- 附警告「关闭会断开任何已连接的 Agent」——因为 Agent 也连这个 daemon，stop 会使 Agent 暂时失去记忆能力，需用户知情（这是合理的、预期的，而非误杀）。
+- 不再存在 P4(b)「Agent-spawned --serve」歧义，因为 Y 已禁止该模式。
+【推演结论】P4 ✅ 收敛：提示逻辑无需再按锁持有者分流转为单一 daemon 路径 + Agent 断开警告。
 
 ## 4. 问题汇总
 
 | # | 类型 | 角色 | 场景 | 问题描述 | 建议 | 严重度 |
 |---|------|------|------|---------|------|:---:|
-| 1 | 设计冲突/待验 | 领域层/MCP | S10 | 单集合单一 FTS 分词器，无法同时适配"中文 wiki(jieba)+代码符号(whitespace)"；jieba 对标识符 token 行为未实测，直接关系 REQ-04 代码符号精确召回验收 | 真实混合语料实测 jieba 标识符 token；不满足则评估双 FTS 字段方案 | 🟡（可升级 🔴） |
-| 2 | 设计冲突 | MCP/Embedding | S1/S3/S11/S14 | v5 §5 声称"embedding 在 worker 内闭环"，但 §4.6 `EmbeddingProvider` 为可注入实例（函数对象不可 `postMessage`），跨 worker 边界未定义 → 与"可注入任意实现"矛盾，v5 未实际闭合（延续 v2 新-#1） | 明确方案 X（embedding 留主线程 + 向量 Transferable 零拷贝）或方案 Y（provider 序列化重建，约束注入形态）；改 §5 表述 | 🟡 |
-| 3 | 内部矛盾 | MCP | S4/S11 | §4.4"预计算 vector 不受 embed 失败影响" 与 §4.6"小批同成败"对混合小批中预计算 vector 文档命运给出相反结论 | engine 调用 embed 前按"是否需 embed"切分批次，embed 失败仅影响 text 文档 | 🟡 |
-| 4 | 安全/正确性 | 领域层/MCP | S12 | 结构化 Filter → zvec 类 SQL 字符串，转义机制未定义，存在注入与语法破坏风险（`{raw}` 逃生口放大面） | 明确字段名白名单 + 字符串值引号/转义策略；`{raw}` 限可信内部 | 🟡 |
-| 5 | 边界 | MCP | S13 | `HybridSearchReq` 同时传 `queryText`+`vector` 优先级未定义 | 互斥校验或"vector 优先" | 🟢 |
-| 6 | 部署 | MCP | S14 | worker_threads 入口在 ki 的 ESM/TS/打包分发下须可解析，未验证 | 锁定 worker 入口方案并回归目标运行方式 | 🟡 |
-| 7 | 需求映射 | 上层 | S4 | REQ-06 验收"ok/errors/skipped" 与设计 `WriteResult`(ok/failed/errors，无 skipped) 不完全对齐（upsert 幂等无 skip，insert 冲突进 errors 非 skipped） | REQ-06 验收重映射 skipped，或设计注明"upsert 覆盖不计 skip" | 🟢 |
-| 8 | 语义 | MCP | S2/S8 | `isLocked()` 在自身持锁进程内语义歧义（自身持锁返回 true 无意义） | 明确 isLocked = "是否有其他进程持锁"，或仅跨进程(CLI)探测用 | 🟢 |
-| 9 | 待实测 | MCP | S5/S7 | `deleteSync` 对不存在 id 的 zvec 行为未实测，NOT_FOUND 如何落入 `errors[]` 未确认 | Node 实测 deleteSync 缺失 id 返回/异常 | 🟢（同 v2 新-#3） |
-| 10 | 待实测 | MCP | S1/S9 | `score=1/(1+distance)` 公式与 Recall@5≥90% 需真实 SiliconFlow embedding + compare.py 语料闭合 | 实现后补真实 embedding 基准 | 🟢（同 v2 #7） |
-
-> 已闭合项（v5 已修复，本次确认无需重开）：🔴 #1 worker actor 架构；🟡 #2 静态 probe / #3 InconsistentUpdateError / #4 embed 失败粒度命名 / #5 listIds limit / #6 db 重灌定位 / #9 open 维度校验。
-
-统计（本次新增/未闭合）：
-- 🔴 阻断：0（#1 为 🟡 待实测，可升级）
-- 🟡 警告：6（#1~#4、#6，其中 #2 为 v5 内部未闭合项）
-- 🟢 建议：4（#5、#7、#8、#9、#10 中 🟢 部分）
-
-```mermaid
-pie title v3 全量推演问题分布（新增/未闭合）
-    "🔴 阻断" : 0
-    "🟡 警告" : 6
-    "🟢 建议" : 4
-```
+| 1 | 设计冲突 | Agent/server | S6 | 「Agent 连常驻 server 的 stdio」与「server 由 ki server start 独立启动」矛盾 | **【已决策·模型 Y】** `ki server start` 起独立守护进程，暴露单一 HTTP（StreamableHTTP）同时服务 CLI 与 Agent；Agent 改连 HTTP，不再 spawn `--serve`；stdio 仅作无 daemon 兜底。详见 S-04 §3.1–§3.4 | ✅ 已闭环 |
+| 2 | 设计冲突 | 用户 | S2/S8 | 「写命令提示关闭 MCP」与「写命令走 HTTP 复用句柄」触发条件重叠/矛盾；import-kb/restore 旁路路径未复用同一 probe | **【已收敛】** 写命令默认走 HTTP（无缝、不提示）；提示仅限显式 `--local` 或批量重建（import-kb/restore），且复用同一 `isLocked()`→`ki server stop` 路径 | ✅ 已收敛 |
+| 3 | 流程缺陷 | Agent | S7 | 旧 Agent 集成仍 spawn ki mcp --serve stdio，会与持久 server 抢锁 Can't lock | **【已收敛·构建期约束】** S-04 §+6 明确禁止 Agent spawn `--serve`，必须改连 daemon HTTP；旧集成转为对接改造项，非运行期歧义 | ✅ 已收敛 |
+| 4 | 流程缺陷 | 用户/Agent | S9 | 提示「关闭 MCP」未区分锁持有者，可能误杀 Agent 记忆 | **【已收敛·模型 Y 消除歧义】** 稳态唯一锁持有者是 daemon，提示只面向 daemon（`ki server stop` + 警告会断开 Agent）；Y 已禁止 Agent-spawned `--serve`，不再有 (b) 歧义 | ✅ 已收敛 |
+| 5 | 并发正确性 | server | S4 | server 单进程持 rw，同步原生调用阻塞事件循环；长 bulk_store 阻塞 Agent 与其他 CLI 请求 | **【保留为已知边界🟡】** 文档说明吞吐/响应性边界；必要时为该 class 操作限流或独立事务 | 🟡 已知边界 |
+| 6 | 边界处理 | 用户 | S5 | ki server start 重复启动、pidfile 残留、崩溃后 LOCK 清理 | start 校验 pidfile 存活；status 校验 pid；崩溃由 OS 释放文件锁 | 🟢 健壮性 |
 
 ## 5. 推演结论
 
 ### 整体评估
-- 推演覆盖：5 个角色 / 14 个场景（含协作 S2、异常 S4~S9、边界 S10~S13、部署 S14）
-- 问题发现：🔴 0 / 🟡 6 / 🟢 4
-- v5 已闭合的 🔴 #1（worker 架构）与 5 项 🟡 经本次确认仍然有效，设计主干正确。
+- 推演覆盖：4 角色 / 9 场景
+- 问题发现（初版）：🔴 1（P1 连接模型矛盾）/ 🟡 5（P2–P5）/ 🟢 1（P6）
+- **2026-07-21 用户拍板「模型 Y」后**：P1 ✅ 已闭环，P2–P4 ✅ 已收敛，P5 降为已知边界🟡，P6 保留为健壮性🟢
+- 当前遗留：**0 个 🔴 阻断 / 1 个 🟡 已知边界（单句柄并发阻塞）/ 1 个 🟢 健壮性**
 
 ### 评审结论
 
+```mermaid
+pie title 问题分布（拍板模型 Y 后）
+    "✅ 已闭环/收敛" : 5
+    "🟡 已知边界" : 1
+    "🟢 健壮性建议" : 1
+```
+
 | 条件 | 结论 |
-|---|---|
-| 存在 ≥1 个 🔴 阻断 | — |
-| 无 🔴 但存在 ≥1 个 🟡 | ⚠️ **有条件通过** |
+|------|------|
+| 存在 ≥1 个 🔴阻断 | ❌ 不通过 |
+| 无 🔴阻断，仅 🟡 已知边界 + 🟢 建议 | ✅ **通过（模型 Y 下方案甲成立）** |
 
-### 关键判断：设计是否正确合理？
+### 关键结论
 
-**整体正确、主干可行，但有 4 项 🟡 须在进入实现 / design-craft 上层前闭合，否则会在实现期返工：**
+1. **原 v2 🔴 阻断（Agent 常驻时 CLI 读/写全失败）已被方案甲闭环**：server 单一持 rw 锁并暴露 HTTP，CLI/Agent 经 HTTP 复用句柄，不再二次 open，杜绝 Can't lock（S1 验证）。
+2. **方案甲自身引入的 1 个 🔴（P1 连接模型矛盾）已通过「模型 Y」拍板闭环**：`ki server start` 起独立守护进程，暴露单一 HTTP（StreamableHTTP）同时服务 CLI 与 Agent；Agent 改连 HTTP，不再 spawn `--serve`、不再用 stdio。stdio 仅作无 daemon 兜底。
+3. **P2–P4 全部收敛**：写命令默认走 HTTP（无缝、不提示），提示仅在显式 `--local`/批量重建（import-kb/restore）时触发并复用同一 `isLocked()`→`ki server stop` 路径；「误杀 Agent」歧义因 Y 禁止 Agent-spawned `--serve` 而天然消除。
+4. **遗留 1 个 🟡 已知边界（P5）**：daemon 单进程持 rw，同步原生调用阻塞事件循环，长 bulk_store 会短暂阻塞其他请求——文档说明边界即可，必要时限流。1 个 🟢（P6）健壮性：start 校验 pidfile、崩溃由 OS 释放文件锁。
 
-1. **#2 EmbeddingProvider 跨 worker 边界未定义（最高优先级）**：v5 §5 自己声称"embedding 在 worker 内闭环"，但可注入的 provider 实例无法 `postMessage` 到 worker，这是 v5 内部未闭合的内在矛盾（v2 已标 🟡 但 v5 文档未改）。必须在 design-craft 上层**明确方案 X 或 Y 并回写 §5**，否则 worker 架构无法落地。
-2. **#1 FTS 分词器单选择 vs 混合语料**：直接关系 REQ-04 代码符号精确召回验收，须用真实混合语料实测 jieba 标识符行为；不满足则升级 🔴 并改方案（双 FTS 字段）。
-3. **#3 embed 失败粒度内部矛盾**：§4.4 与 §4.6 表述冲突，须统一为"按是否需 embed 切分批次"。
-4. **#4 Filter 转义机制缺失**：安全 + 正确性，须在设计层定义转义策略。
-
-其余 #5/#6/#7/#8/#9/#10 为边界、部署、需求映射与待实测项，不阻断设计，但建议在实现期一并处理。
-
-### 与依赖/需求一致性抽检
-- ✅ 需求 REQ-01（封装引擎层）、REQ-04（原生混合检索）：接口 B-01/B-04/B-11 完整覆盖。
-- ✅ 依赖 `zvec.md` 事实对齐：COSINE 度量、FTS 需 STRING+FtsIndexParam、jieba 中文有效/standard 中文失效、批量整批回滚与逐条 id 冲突、Async 仅覆盖 query/multiQuery/optimize/deleteByFilter —— 设计 §4~§7 全部正确引用且无与依赖矛盾之处。
-- ✅ 铁律（基座不认识 ki-relation、MCP 在上层）得到遵守，probe/tryOpen/close 正确支撑上层锁协调，未越界。
-- ⚠️ 依赖 `zvec.md` 提示"FTS 字段不支持 alter、单集合单 FTS 字段"，设计据此正确约束为建库即定；但由此衍生的混合语料分词冲突（#1）是依赖事实与需求 REQ-04 之间的张力，非设计错误，属需实测验证的验收风险。
-
-### 下一步建议
-1. **立即决策 #2（embedding 归属）**并回写 v5 §5——这是 worker 架构能否实现的前提。
-2. **实现前实测 #1（jieba 标识符 token）**与 #9/#10（delete 缺失 id、score 公式 + Recall@5），用真实混合语料与 SiliconFlow embedding 闭合验收。
-3. 进入 `design-craft` 上层（MCP server 常驻架构 / db 共享策略 / scope 隔离）时，一并闭合 #3（embed 批次切分）、#4（Filter 转义）、#6（worker 打包）。
-4. 基座模块**可进入实现**（P0 主链路 B-01/B-04/B-11 + worker proxy 骨架先行），但 #2 决策须在 proxy 骨架落地前锁定。
+### 下一步建议（落地）
+- **S-06（MCP Server）**：实现 `ki server` 独立守护进程，单一 HTTP（StreamableHTTP）通道，CLI 与 Agent 共用；`--serve` stdio 仅留作无 daemon 兜底；新增 `ki server start/stop/status` + pidfile。
+- **S-01（Config）**：新增 `server.httpPort`。
+- **S-03（Vector Adapter）**：暴露 `isLocked()` / `stopServer()` 及写命令 HTTP 工具。
+- **CLI 路由层（S-04）**：命令启动 `probe()` 分叉——有 daemon→读/默认写走 HTTP，`--local`/批量重建提示关闭 daemon；无 daemon→`ki mcp --serve` stdio 兜底（Agent 此模式须提示先 `ki server start`）。
+- **Agent 集成改造**：将既有「spawn `ki mcp --serve` stdio」改为「连 `ki server` HTTP（StreamableHTTP）」，消除 P3 对接项。
