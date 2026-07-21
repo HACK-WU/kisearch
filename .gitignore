@@ -21,6 +21,8 @@ npm-debug.log*
 
 # Environment
 .env
-.env.localknowledge-indexer-*.tgz
+.env.local
+.env.e2e
+knowledge-indexer-*.tgz
 
 .workbuddy/

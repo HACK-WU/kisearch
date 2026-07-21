@@ -17,7 +17,7 @@ import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.
 const SCRIPT_PATH = path.resolve(
   import.meta.dirname,
   '..',
-  'scripts',
+  'src',
   'sync-relation.ts'
 );
 

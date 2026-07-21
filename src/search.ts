@@ -63,14 +63,17 @@ program
   .requiredOption('--scope <scope>', '项目隔离标识')
   .requiredOption('--query <query>', '自然语言查询文本')
   .option('--limit <limit>', '返回条数上限', '10')
-  .option('--threshold <threshold>', '相似度阈值（0-1）', '0')
+  .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（默认 ki-search）', 'ki-search')
   .action(async (opts) => {
+    // parseFloat 遇非法值返回 NaN，而 NaN ?? undefined 仍为 NaN（?? 只拦 null/undefined），
+    // 会使下游 score >= NaN 恒为 false → 静默丢光全部结果。故非有限值一律视为不过滤。
+    const parsedThreshold = parseFloat(opts.threshold);
     const result = await executeSearch({
       scope: opts.scope,
       query: opts.query,
       limit: parseInt(opts.limit, 10),
-      threshold: parseFloat(opts.threshold) ?? undefined,
+      threshold: Number.isFinite(parsedThreshold) ? parsedThreshold : undefined,
       tags: opts.tags,
     });
     console.log(JSON.stringify(result, null, 2));

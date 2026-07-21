@@ -138,13 +138,19 @@ function buildOpenConfig(): ZvecEngineOpenConfig {
 /**
  * 获取（或创建/打开）进程内唯一的 ZvecEngine 实例。
  * 首次：dbPath 不存在 → create；已存在 → open。
- * 锁冲突等异常直接抛给调用方（由 ensureVectorAvailable 预判）。
+ * 若已被其他进程持锁（如 ki mcp/server 常驻），直接抛 CollectionLockedException，
+ * 避免 open 撞锁时挂起/抛出不可读的底层错误（MCP 路径未走 ensureVectorAvailable 时的兵底）。
  */
 export function getEngine(): Promise<ZvecEngine> {
   if (!_enginePromise) {
     const createCfg = buildCreateConfig();
     _enginePromise = (async () => {
       const exists = await ZvecEngine.probe(createCfg.dbPath);
+      if (exists.locked) {
+        throw new CollectionLockedException(
+          `向量库被其他进程占用（${createCfg.dbPath}）。如有 ki mcp/server 常驻进程在运行，请先停止`,
+        );
+      }
       if (!exists.exists) {
         return ZvecEngine.create(createCfg);
       }

@@ -178,6 +178,40 @@ test('TC-REQ-01-36: 空数组写入 → { ok:0, failed:0 }', async (t) => {
   assert.equal(result.failed, 0);
 });
 
+test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影响（S-03 §4a.2）', async (t) => {
+  // 自定义 embedding：任一小批含 "BOOM" 则该批整体抛错（模拟 provider 单次 HTTP 抛错）
+  const failing = {
+    dimension: DIM,
+    embed: async (texts) => {
+      if (texts.some((x) => x.includes('BOOM'))) throw new Error('mock batch embed failure');
+      return texts.map((x) => hashVector(x));
+    },
+  };
+  const engine = await ZvecEngine.create(makeConfig(makeDbPath('zvec-u4-'), { embedding: failing }));
+  t.after(() => engine.close());
+
+  // 构造跨 2 个 embed 小批（batchSize=64）：
+  //   batch0 = [boom, b0-0..b0-62]（64 条、含 BOOM → 整批失败）
+  //   batch1 = [b1]（1 条 → 成功）
+  //   另加 1 条预计算 vector 的 noEmbed doc（永不受 embed 影响）
+  const docs = [{ id: 'boom', text: 'BOOM trigger', fields: { tag: 'A' } }];
+  for (let i = 0; i < 63; i++) docs.push({ id: `b0-${i}`, text: `alpha-${i}`, fields: { tag: 'A' } });
+  docs.push({ id: 'b1', text: 'lonely-second-batch', fields: { tag: 'A' } });
+  docs.push({ id: 'pre', vector: hashVector('precomputed'), fields: { tag: 'A' } });
+
+  const result = await engine.upsert(docs);
+
+  // batch0 的1 boom + 63 b0-* = 64 条全标 EMBEDDING_FAILED；batch1 的 b1 + noEmbed pre 成功
+  assert.equal(result.failed, 64, 'batch0（含 BOOM）整批失败');
+  assert.equal(result.ok, 2, 'batch1 的 b1 + 预计算 pre 成功写入');
+  assert.ok(result.errors.every((e) => e.code === 'EMBEDDING_FAILED'), '失败项均为 EMBEDDING_FAILED');
+  assert.ok(result.errors.some((e) => e.id === 'boom'));
+  // b1/pre 应可 fetch 到，boom 与同批 b0-* 不应写入
+  const fetched = await engine.fetch(['b1', 'pre', 'boom', 'b0-0']);
+  const ids = fetched.map((d) => d.id).sort();
+  assert.deepEqual(ids, ['b1', 'pre'], 'b1/pre 成功写入，boom/b0-0 未写入');
+});
+
 test('TC-REQ-01-28: update 传 text → 重嵌 + 同步 FTS', async (t) => {
   const engine = await freshEngine(t, [{ id: 'doc1', text: 'old text', fields: { tag: 'A' } }]);
   const r = await engine.update([{ id: 'doc1', text: 'brand new text' }]);

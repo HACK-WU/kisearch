@@ -17,8 +17,10 @@ const TEST_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-test-'));
 const TEST_CONFIG_PATH = path.join(TEST_CONFIG_DIR, 'config.json');
 
 // 初始化空配置
+// vectorDir 指向临时目录，隔离测试向量库（避免污染 ~/.ki/vector，并保证离线优雅降级）
 fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
   dataDir: path.join(PROJECT_ROOT, 'kb'),
+  vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
   scopes: {},
 }), 'utf-8');
 

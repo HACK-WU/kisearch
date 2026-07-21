@@ -61,6 +61,9 @@ import type {
 
 const DEFAULT_WRITE_BATCH_SIZE = 100;
 const DEFAULT_LIST_IDS_LIMIT = 10_000;
+// embedding 小批大小：失败粒度 = 小批（S-03 §3.2/§4a.2）。与 SiliconFlowProvider 默认 batchSize 对齐，
+// 使 engine 的每个失败单元恰好对应 provider 的一次 HTTP 调用。
+const EMBED_BATCH_SIZE = 64;
 
 export class ZvecEngine {
   private readonly proxy: ZvecEngineProxy;
@@ -329,22 +332,22 @@ export class ZvecEngine {
 
     const allErrors: Array<{ id: string; code: WriteErrorCode; reason: string }> = [];
 
-    // embed needsEmbed（小批失败 → EMBEDDING_FAILED）
+    // embed needsEmbed：engine 自己按 EMBED_BATCH_SIZE 切小批、逐批 embed（S-03 §4a.2 步骤 2-3）。
+    // 小批为最小失败单元：某批抛错只把该批 doc 标 EMBEDDING_FAILED，其余批次与 noEmbed 组不受影响，
+    // 兑现「失败项进 errors[]，成功项正常写入」契约（S-03 §+6），避免单次抖动导致整批静默存 0。
     const embeddedVectors = new Map<string, number[]>();
-    if (needsEmbed.length > 0) {
-      const texts = needsEmbed.map((d) => d.text!);
-      const ids = needsEmbed.map((d) => d.id);
+    for (let start = 0; start < needsEmbed.length; start += EMBED_BATCH_SIZE) {
+      const batch = needsEmbed.slice(start, start + EMBED_BATCH_SIZE);
+      const batchTexts = batch.map((d) => d.text!);
       try {
-        const vectors = await this.embedding.embed(texts);
+        // 传 batchSize 使 provider 不再二次细分，令失败粒度恰好等于本批
+        const vectors = await this.embedding.embed(batchTexts, { batchSize: EMBED_BATCH_SIZE });
         for (let i = 0; i < vectors.length; i++) {
-          embeddedVectors.set(ids[i], vectors[i]);
+          embeddedVectors.set(batch[i].id, vectors[i]);
         }
       } catch (err) {
-        // 小批整体失败：全部 needsEmbed 标 EMBEDDING_FAILED
-        // （S-03 §3.2：失败粒度 = 小批；当前实现 embedding provider 内部已分批，
-        //  若 provider 在小批失败时抛错，则整批视为失败）
         const reason = (err as Error).message;
-        for (const d of needsEmbed) {
+        for (const d of batch) {
           allErrors.push({ id: d.id, code: 'EMBEDDING_FAILED', reason });
         }
       }

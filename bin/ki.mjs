@@ -27,21 +27,22 @@ const VERSION = pkg.version;
 
 // 命令映射
 const COMMANDS = {
-  'scan-kb': 'scripts/scan-kb.ts',
-  'manage-index': 'scripts/manage-index.ts',
-  'query-group': 'scripts/query-group.ts',
-  'get-module-info': 'scripts/get-module-info.ts',
-  'sync-relation': 'scripts/sync-relation.ts',
-  'import-kb': 'scripts/import-kb.ts',
+  'scan-kb': 'src/scan-kb.ts',
+  'manage-index': 'src/manage-index.ts',
+  'query-group': 'src/query-group.ts',
+  'get-module-info': 'src/get-module-info.ts',
+  'sync-relation': 'src/sync-relation.ts',
+  'delete-relation': 'src/delete-relation.ts',
+  'import-kb': 'src/import-kb.ts',
   'migrate-keywords': 'scripts/migrate-keywords.ts',
-  'mcp': 'scripts/mcp-server.ts',
+  'mcp': 'src/mcp-server.ts',
   'setup': 'scripts/setup.ts',
   'search': 'src/search.ts',
   'store': 'src/store.ts',
   'bulk_store': 'src/bulk-store.ts',
   'config': 'scripts/config.ts',
   'backup': 'scripts/backup.ts',
-  'restore': 'scripts/restore.ts',
+  'restore': 'src/restore.ts',
   'export': 'scripts/export.ts',
 };
 
@@ -81,6 +82,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   query-group       查询 Group + 词云 + 分区
   get-module-info   读取本地 KB 原文
   sync-relation     写入 Relation + 关键词校验
+  delete-relation   删除 Relation 及其关联数据（cache + KB + wiki + 向量）
   search            语义检索知识库内容
   store             存储文本到向量索引
   bulk_store        批量存储文本到向量索引
