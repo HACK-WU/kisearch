@@ -7,7 +7,7 @@ export function registerSearchTool(server: McpServer): void {
     'ki_search',
     '语义检索知识库内容',
     {
-      scope: z.string().describe('项目隔离标识'),
+      scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       query: z.string().describe('自然语言查询文本'),
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限'),
       threshold: z.number().min(0).max(1).optional().describe('相似度阈值（0-1）'),

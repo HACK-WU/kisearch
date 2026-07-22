@@ -43,12 +43,12 @@ const scope = `sync-test-${Date.now()}`;
 before(async () => {
   // 注册 scope 到测试配置，然后初始化 scope 目录
   registerTestScope(scope);
-  const { initScope } = await import('../scripts/lib/store.js');
+  const { initScope } = await import('../src/lib/store.js');
   initScope(scope);
 });
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) {
     fs.rmSync(kbDir, { recursive: true, force: true });
@@ -74,8 +74,8 @@ describe('sync-relation 单条模式', () => {
   });
 
   it('Relation 已写入 relations-cache.json', async () => {
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const cache = readJson<any>(getRelationsCachePath(scope))!;
     const groupData = cache.groups['项目根/监控/告警中心'];
@@ -89,8 +89,8 @@ describe('sync-relation 单条模式', () => {
   });
 
   it('本地 KB index.json 已写入 Markdown', async () => {
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getLocalKbDir } = await import('../src/lib/scope.js');
 
     const localKb = readJson<any>(getLocalKbDir(scope, '项目根/监控/告警中心'))!;
     assert.ok(localKb['告警规则CRUD流程']);
@@ -131,8 +131,8 @@ describe('sync-relation 单条模式', () => {
   });
 
   it('重复写入同一 Relation 更新关键词而非创建新条目', async () => {
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
     // 先写入
     runSync([
@@ -177,8 +177,8 @@ describe('sync-relation 淘汰逻辑', () => {
   it('达到 maxHotCount 时淘汰最低分 Relation', async () => {
     // 创建一个新 scope 以控制 maxHotCount
     const evictionScope = `evict-test-${Date.now()}`;
-    const { initScope, readJson, writeJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+    const { initScope, readJson, writeJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
     try {
       registerTestScope(evictionScope);
@@ -245,8 +245,8 @@ describe('sync-relation 淘汰逻辑', () => {
 describe('sync-relation 批量模式', () => {
   it('批量写入多条 Relation', async () => {
     const batchScope = `batch-test-${Date.now()}`;
-    const { initScope, readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
     try {
       registerTestScope(batchScope);
@@ -301,8 +301,8 @@ describe('sync-relation 批量模式', () => {
 
   it('批量模式中单条失败不中断其余', async () => {
     const batchScope = `batch-fail-test-${Date.now()}`;
-    const { initScope, readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
     try {
       registerTestScope(batchScope);

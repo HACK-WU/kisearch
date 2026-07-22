@@ -2,8 +2,8 @@
  * ki 配置文件加载模块（src 版）
  *
  * 配置文件查找优先级：
- *   1. --config <path> 命令行参数
- *   2. $HOME/.ki/config.json
+ *   1. --config <path> 命令行参数（按扩展名判定 YAML / JSON 解析器）
+ *   2. $HOME/.ki/config.yaml → config.yml → config.json
  *   3. 内置默认值
  *
  * 路径展开规则：$HOME / ~ → os.homedir()，相对路径 → 相对于配置文件所在目录
@@ -13,13 +13,14 @@
  * 与 scripts/lib/config.ts 的差异（S-01 向量配置独立化，最小增量）：
  *   - KiConfig 新增 vectorDir / embedding 字段（zvec 向量配置）
  *   - 新增 getVectorDir() / getEmbeddingConfig() 解析函数
- *   - 暂仍 JSON 格式（S-01 YAML 迁移后续）
+ *   - 配置格式 YAML 优先（REQ-11），保留 JSON 读取兼容（读到 .json 时提示迁移）
  */
 
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import YAML from 'yaml';
 
 // ─── 自行计算 KI_ROOT（与 constants.ts 相同算法，打破循环依赖） ───
 // src/lib/ 上溯 2 级到项目根（与 scripts/lib/ 同为 2 级，一致）
@@ -54,7 +55,8 @@ export interface KiConfig {
   backupDir: string;                     // 备份目录
   vectorDir: string;                     // 【新增】zvec collection 目录
   embedding: EmbeddingConfig;            // 【新增】embedding 配置
-  scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射）
+  scopeMode: 'default' | 'strict';       // 【新增】scope 护栏模式（默认 'default'）；见 S-01 §3.5
+  scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
   _configPath?: string;                  // 配置文件路径（内部）
 }
 
@@ -80,10 +82,18 @@ export function loadConfig(explicitPath?: string): KiConfig {
   if (_cached) return _cached;
 
   const configPath = explicitPath ?? process.env.KI_CONFIG_PATH ?? undefined;
+  const explicit = configPath !== undefined;
   const file = findConfigFile(configPath);
 
   if (file) {
     _cached = parseAndExpand(file);
+    // 旧格式迁移提示：非显式路径下读到 config.json 时，提示一次
+    if (!explicit && file.toLowerCase().endsWith('.json') && !_hintPrinted) {
+      _hintPrinted = true;
+      process.stderr.write(
+        '提示：检测到旧版 JSON 配置，建议执行 ki config init 生成 YAML 配置\n'
+      );
+    }
   } else {
     _cached = buildDefaults();
     if (!_hintPrinted) {
@@ -114,8 +124,11 @@ function findConfigFile(explicitPath?: string): string | null {
     return resolved;
   }
 
+  const kiDir = path.join(os.homedir(), '.ki');
   const candidates = [
-    path.join(os.homedir(), '.ki', 'config.json'),
+    path.join(kiDir, 'config.yaml'),
+    path.join(kiDir, 'config.yml'),
+    path.join(kiDir, 'config.json'),
   ];
 
   for (const candidate of candidates) {
@@ -140,11 +153,16 @@ function expandPath(input: string, baseDir: string): string {
 // ─── 解析 + 展开 ───
 
 function parseAndExpand(configFile: string): KiConfig {
+  const ext = path.extname(configFile).toLowerCase();
   let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    const text = fs.readFileSync(configFile, 'utf-8');
+    const parsed = (ext === '.yaml' || ext === '.yml')
+      ? YAML.parse(text)
+      : JSON.parse(text);
+    raw = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
   } catch (err) {
-    const detail = err instanceof SyntaxError ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`配置文件解析失败：${configFile}\n${detail}`);
   }
 
@@ -174,6 +192,9 @@ function parseAndExpand(configFile: string): KiConfig {
     dimension: rawEmbedding.dimension !== undefined ? Number(rawEmbedding.dimension) : DEFAULT_EMBEDDING.dimension,
   };
 
+  // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'
+  const scopeMode: 'default' | 'strict' = raw.scopeMode === 'strict' ? 'strict' : 'default';
+
   const scopes: Record<string, ScopeConfig> = {};
   if (raw.scopes && typeof raw.scopes === 'object') {
     for (const [name, sc] of Object.entries(raw.scopes as Record<string, unknown>)) {
@@ -193,7 +214,7 @@ function parseAndExpand(configFile: string): KiConfig {
     }
   }
 
-  return { dataDir, backupDir, vectorDir, embedding, scopes, _configPath: configFile };
+  return { dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, _configPath: configFile };
 }
 
 // ─── 内置默认值 ───
@@ -204,6 +225,7 @@ function buildDefaults(): KiConfig {
     backupDir: path.join(KI_ROOT, 'ki-backup'),
     vectorDir: path.join(os.homedir(), '.ki', 'vector'),
     embedding: { ...DEFAULT_EMBEDDING },
+    scopeMode: 'default',
     scopes: {},
   };
 }
@@ -261,6 +283,37 @@ export function getVectorDir(config: KiConfig): string {
  */
 export function getEmbeddingConfig(config: KiConfig): EmbeddingConfig {
   return config.embedding;
+}
+
+/**
+ * 【新增】获取 scope 护栏模式（默认 'default'）
+ */
+export function getScopeMode(config: KiConfig): 'default' | 'strict' {
+  return config.scopeMode;
+}
+
+/**
+ * 【新增】scope 护栏解析（S-01 §3.5 / S-06 §3.5 N19）
+ *   - default 档：scope 缺省/空 → 'default'，任意值放行（zvec 自动建）
+ *   - strict 档：必须显式传非空 scope，且必须在 config.scopes 白名单内，否则抛错（fail-loud）
+ * 注：字符集合法性由 scope.ts::validateScope 负责，本函数只管模式策略，不做字符校验。
+ * @throws Error strict 档下未传或未注册 scope 时
+ */
+export function resolveScope(config: KiConfig, scope?: string): string {
+  const trimmed = scope?.trim();
+  if (getScopeMode(config) === 'strict') {
+    if (!trimmed) {
+      throw new Error('scopeMode=strict：必须显式传入 scope 参数');
+    }
+    if (!Object.prototype.hasOwnProperty.call(config.scopes, trimmed)) {
+      const known = Object.keys(config.scopes);
+      throw new Error(
+        `unknown scope: "${trimmed}"（scopeMode=strict）。已注册 scope：${known.length ? known.join(', ') : '（无，请先在配置 scopes 中注册）'}`
+      );
+    }
+    return trimmed;
+  }
+  return trimmed || 'default';
 }
 
 /**

@@ -7,7 +7,7 @@ export function registerBulkStoreTool(server: McpServer): void {
     'ki_bulk_store',
     '批量存储文本到向量索引',
     {
-      scope: z.string().describe('项目隔离标识'),
+      scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       input: z.string().describe('批量数据 JSON 文件路径'),
     },
     async (args) => {

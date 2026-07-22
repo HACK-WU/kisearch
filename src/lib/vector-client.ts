@@ -23,7 +23,7 @@ import {
   type ZvecEngineConfig,
   type ZvecEngineOpenConfig,
 } from '../../dist/zvec-engine/index.js';
-import { loadConfig, getVectorDir, getEmbeddingConfig } from './config.js';
+import { loadConfig, getVectorDir, getEmbeddingConfig, resolveScope } from './config.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -225,12 +225,13 @@ export async function vectorSearch(params: {
   tags?: string;        // 单 tag（默认 ki-search）；忽略大小写
   threshold?: number;
 }): Promise<VectorSearchResult[]> {
+  const scope = resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
   const filter: Filter = {
     and: [
-      { field: SCOPE_FIELD, op: '==', value: params.scope },
+      { field: SCOPE_FIELD, op: '==', value: scope },
       { field: TAG_FIELD, op: '==', value: tag },
     ],
   };
@@ -267,6 +268,7 @@ export async function vectorStore(params: {
     throw new Error(`text 超过 ${MAX_TEXT_LENGTH} 字符限制（当前 ${params.text.length}）`);
   }
 
+  const scope = resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
@@ -275,11 +277,11 @@ export async function vectorStore(params: {
     ? `${params.text}\n\n[关键词] ${params.keywords.join(', ')}`
     : params.text;
 
-  const docId = generateDocId(fullText, params.scope);
+  const docId = generateDocId(fullText, scope);
   const result = await engine.upsert([{
     id: docId,
     text: fullText,
-    fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: params.scope },
+    fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: scope },
   }]);
 
   if (result.failed > 0) {
@@ -300,6 +302,7 @@ export async function vectorBulkStore(params: {
     return { total: 0, succeeded: 0, failed: 0, results: [] };
   }
 
+  const scope = resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
 
   const docs = params.entries.map((e) => {
@@ -308,9 +311,9 @@ export async function vectorBulkStore(params: {
       ? `${e.text}\n\n[关键词] ${e.keywords.join(', ')}`
       : e.text;
     return {
-      id: generateDocId(fullText, params.scope),
+      id: generateDocId(fullText, scope),
       text: fullText,
-      fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: params.scope },
+      fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: scope },
     };
   });
 
@@ -345,6 +348,8 @@ export async function vectorDelete(params: {
   scope: string;
   ids: string[];
 }): Promise<{ deleted: number; errors: { id: string; reason: string }[] }> {
+  // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
+  resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
   const result = await engine.delete(params.ids);
   return {

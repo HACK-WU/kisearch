@@ -47,7 +47,7 @@ function makeAiResults(sourceDir, rootName, entries) {
 
 function runImport(scope, resultsFile, mode = 'full') {
   const args = [
-    'jiti', 'scripts/scan-kb.ts', 'import',
+    'jiti', 'src/scan-kb.ts', 'import',
     '--scope', scope,
     '--results', resultsFile,
     '--mode', mode,

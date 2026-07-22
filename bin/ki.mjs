@@ -34,16 +34,17 @@ const COMMANDS = {
   'sync-relation': 'src/sync-relation.ts',
   'delete-relation': 'src/delete-relation.ts',
   'import-kb': 'src/import-kb.ts',
-  'migrate-keywords': 'scripts/migrate-keywords.ts',
+  'migrate-keywords': 'src/migrate-keywords.ts',
   'mcp': 'src/mcp-server.ts',
-  'setup': 'scripts/setup.ts',
+  'setup': 'src/setup.ts',
   'search': 'src/search.ts',
   'store': 'src/store.ts',
   'bulk_store': 'src/bulk-store.ts',
-  'config': 'scripts/config.ts',
-  'backup': 'scripts/backup.ts',
+  'config': 'src/config.ts',
+  'doctor': 'src/doctor.ts',
+  'backup': 'src/backup.ts',
   'restore': 'src/restore.ts',
-  'export': 'scripts/export.ts',
+  'export': 'src/export.ts',
 };
 
 // 获取命令和参数
@@ -86,7 +87,8 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   search            语义检索知识库内容
   store             存储文本到向量索引
   bulk_store        批量存储文本到向量索引
-  config            配置管理：init
+  config            配置管理：init（生成 YAML）
+  doctor            配置诊断（apiKey/连通性/维度/目录）
   backup            备份 scope 目录快照
   restore           从快照或 ai-results 还原
   export            导出 KB 为 Wiki Markdown
@@ -100,6 +102,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 
 示例：
   ki config init
+  ki doctor
   ki scan-kb import --scope my-project --results ai-results.json
   ki backup my-project
   ki restore my-project --from-snapshot --yes

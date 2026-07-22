@@ -10,7 +10,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
 
-const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'scripts');
+const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runJson(script: string, args: string[]): any {
   try {
@@ -32,11 +32,11 @@ function getOut(script: string, args: string[]): string {
 const createdScopes: string[] = [];
 const tempDirs: string[] = [];
 let n = 0;
-async function mkScope(p: string) { const s = `${p}-${Date.now()}-${++n}`; registerTestScope(s); createdScopes.push(s); const { initScope } = await import('../scripts/lib/store.js'); initScope(s); return s; }
+async function mkScope(p: string) { const s = `${p}-${Date.now()}-${++n}`; registerTestScope(s); createdScopes.push(s); const { initScope } = await import('../src/lib/store.js'); initScope(s); return s; }
 function mkTmp(p: string) { const d = fs.mkdtempSync(path.join(os.tmpdir(), `${p}-`)); tempDirs.push(d); return d; }
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   for (const s of createdScopes) { const d = getKbDir(s); if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true }); }
   for (const d of tempDirs) { if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true }); }
   cleanupTestConfig();
@@ -65,7 +65,7 @@ describe('Group 树索引异常', () => {
   it('损坏的 group-index.json', async () => {
     const s = await mkScope('err-g');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const { getGroupIndexPath } = await import('../scripts/lib/scope.js');
+    const { getGroupIndexPath } = await import('../src/lib/scope.js');
     fs.writeFileSync(getGroupIndexPath(s), '{{{broken');
     const r = runJson('query-group.ts', ['--scope', s]);
     assert.strictEqual(r.ok, false);
@@ -128,7 +128,7 @@ describe('本地 KB 异常', () => {
     const s = await mkScope('err-kb');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
     runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A', '--module-info', '# A\nA内容', '--keywords', 'A']);
-    const { getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { getLocalKbDir } = await import('../src/lib/scope.js');
     fs.rmSync(getLocalKbDir(s, 'wiki/t'));
     const r = runJson('get-module-info.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A']);
     assert.strictEqual(r.ok, false);
@@ -137,7 +137,7 @@ describe('本地 KB 异常', () => {
   it('relations-cache 缺失', async () => {
     const s = await mkScope('err-kb');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
     fs.rmSync(getRelationsCachePath(s));
     const r = runJson('get-module-info.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A']);
     assert.strictEqual(r.ok, false);

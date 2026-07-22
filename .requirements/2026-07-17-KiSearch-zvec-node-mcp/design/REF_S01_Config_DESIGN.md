@@ -61,6 +61,7 @@ flowchart LR
 | scope 配置 | 保留 + 继承 | KB 目录映射不能删（7 处依赖），继承简化未配置 scope | 完全移除 scopes | 破坏 KB 目录映射（kbDir/sourceDir/rootName/wikiSync） |
 | `ki init` 交互模式 | 逐步询问 + `--yes` 一键 | 兼顾新手引导和老手快速生成 | 仅 `--yes` 模式 | 新手用户不知道该填什么 |
 | 旧 config.json 处理 | 检测 + 提示迁移 | 不自动转换避免数据丢失 | 自动转换 JSON→YAML | JSON 中路径展开规则与 YAML 不同，自动转换可能出错 |
+| scope 策略 | `scopeMode`（default/strict 二档枚举） | 单开关调和 S-01 自动创建与 S-06 未声明报错的矛盾；避免两个布尔的 4 组合怪异项 | 两个布尔（enableDefaultScope + dynamicScope） | 4 组合含「强制传 + 不校验」的高串味风险项，语义空间过大 |
 
 ### 3.3 TO-BE 流程图
 
@@ -91,7 +92,19 @@ flowchart LR
 | 未配置 scope 的 sourceDir | null | 继承 default.sourceDir | 兼容增强 |
 | 未配置 scope 的 rootName | null | 继承 default.rootName | 兼容增强 |
 | 首次使用 | 手动建 JSON | `ki init` 生成 | 新增命令 |
-| ensureMemScope 校验 | scope 不存在则报错 | 移除（向量 scope 自动创建） | 兼容增强 |
+| scope 校验（原 ensureMemScope） | scope 不存在则报错 | `scopeMode=default` 自动创建；`scopeMode=strict` 未注册报错 | 由 scopeMode 决定（调和 S-01↔S-06） |
+
+### 3.5 scope 策略（scopeMode · 解决 N19，调和 S-01↔S-06）
+
+`scopeMode` 决定「未传 scope」与「未注册 scope」的处置，统一原本 S-01（自动创建）与 S-06 §3.5（未声明报错）的矛盾：
+
+| `scopeMode` | 缺省（未传 scope） | 未注册 scope（不在 `scopes` 中） | 适用场景 |
+|-------------|-------------------|-------------------------------|---------|
+| `default`（默认） | 落 `default` scope | 任意 scope 自动创建（S-01 运行时化行为） | 单项目 / 尝鲜，零摩擦 |
+| `strict` | **报错**（必须显式传 scope） | **报错** `unknown scope`（`scopes` 即白名单） | 多项目防串味护栏 |
+
+- `strict` 模式下，`scopes` map 的 key 即为**允许的 scope 白名单**，复用现有配置结构，无需新增字段。
+- **护栏边界（诚实声明）**：`strict` 只能拦「未传 / 未注册」，**拦不住「传了合法但错的 scope」**（如误传已注册的另一个 scope）。当前**不引入项目级绑定**（`X-Ki-Project` 等方案已取消）——多 scope 的正确选择由调用方（CLI 参数 / LLM 工具参数）负责，隔离边界由「全局唯一的 scope 命名 + `scopeMode` 护栏」保证。此残留风险已知并接受。
 
 ## 4b. 数据模型
 
@@ -103,7 +116,8 @@ interface KiConfig {
   backupDir: string;                  // 备份目录
   vectorDir: string;                  // 【新增】zvec collection 目录
   embedding: EmbeddingConfig;         // 【新增】embedding 配置
-  scopes: Record<string, ScopeConfig>; // 保留（KB 目录映射）
+  scopeMode: 'default' | 'strict';    // 【新增】scope 策略（默认 'default'）；见 §3.5
+  scopes: Record<string, ScopeConfig>; // 保留（KB 目录映射 + strict 模式下作 scope 白名单）
   _configPath?: string;               // 配置文件路径（内部）
 }
 
@@ -169,3 +183,4 @@ function getScopeWikiSync(config: KiConfig, scope: string): WikiSyncConfig | nul
 | `bin/ki.mjs` | 配置变更 | COMMANDS 添加 `init: 'scripts/init.ts'` | 否 |
 | `package.json` | 依赖变更 | 新增 `yaml` npm 包 | 否 |
 | 全部 config 消费方 | 行为变更 | 未配置 scope 现在有 fallback（增强，非破坏） | 否 |
+| MCP 工具寻址（S-06 §3.5） | 行为变更 | scope 校验改为读 `scopeMode`（default 自动创建 / strict 白名单报错） | 否 |

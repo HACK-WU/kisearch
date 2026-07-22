@@ -9,8 +9,30 @@ import { registerStoreTool } from './lib/mcp-tools/store.js';
 import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
 import { closeEngine } from './lib/vector-client.js';
+import { loadConfig } from './lib/config.js';
+import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 
 export async function startMcpServer(): Promise<void> {
+  // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
+  // stdio 协议占用 stdout，报告一律写 stderr；有失败项拒绝启动。
+  try {
+    const config = loadConfig();
+    const report = await runHealthCheck(config);
+    process.stderr.write(renderHealthReport(report) + '\n');
+    if (report.fail > 0) {
+      process.stderr.write(
+        '\n启动预检失败：存在 ❌ 检查项，拒绝启动。请运行 `ki doctor` 排查或 `ki config init` 重新配置。\n'
+      );
+      process.exit(1);
+    }
+    if (report.warn > 0) {
+      process.stderr.write('\n启动预检存在 ⚠️ 警告，继续启动。\n');
+    }
+  } catch (err) {
+    process.stderr.write(`启动预检异常（配置加载失败）：${(err as Error).message}\n`);
+    process.exit(1);
+  }
+
   const server = new McpServer({
     name: 'KiSearch',
     version: '0.1.0',

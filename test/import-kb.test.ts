@@ -13,7 +13,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
 
-const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'scripts', 'import-kb.ts');
+const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'import-kb.ts');
 const REAL_DOCS_DIR = path.resolve(import.meta.dirname, '..', 'docs');
 const MAX_IMPORT_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -96,7 +96,7 @@ function makeTempDir(prefix: string): string {
 }
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   for (const scope of createdScopes) {
     const kbDir = getKbDir(scope);
     if (fs.existsSync(kbDir)) {
@@ -141,8 +141,8 @@ describe('import-kb 约定模式', () => {
     assert.strictEqual(result.files_skipped, 1);
     assert.ok(result.groups_created >= 2);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getRelationsCachePath, getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getRelationsCachePath, getLocalKbDir } = await import('../src/lib/scope.js');
 
     const groupIndex = readJson<any>(getGroupIndexPath(scope))!;
     assert.ok(groupIndex.groups.wiki);
@@ -175,8 +175,8 @@ describe('import-kb 约定模式', () => {
 
     assert.strictEqual(result.ok, true);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
     const cache = readJson<any>(getRelationsCachePath(scope))!;
     const rel = cache.groups['wiki'].hot_relations.find((item: any) => item.text === '通知渠道');
 
@@ -208,8 +208,8 @@ describe('import-kb 约定模式', () => {
     ]);
     assert.strictEqual(second.ok, true);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath, getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getLocalKbDir } = await import('../src/lib/scope.js');
 
     const cache = readJson<any>(getRelationsCachePath(scope))!;
     assert.strictEqual(cache.groups['wiki'].hot_relations.length, 1);
@@ -278,8 +278,8 @@ describe('import-kb 约定模式', () => {
 
     assert.strictEqual(result.ok, true);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
     const cache = readJson<any>(getRelationsCachePath(scope))!;
     const groupData = cache.groups['wiki/监控/告警中心'];
     const rel = groupData.hot_relations.find(
@@ -330,8 +330,8 @@ describe('import-kb 配置模式', () => {
     assert.strictEqual(result.root_name, 'docs-wiki');
     assert.strictEqual(result.relations_imported, 1);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getLocalKbDir } = await import('../src/lib/scope.js');
     const groupIndex = readJson<any>(getGroupIndexPath(scope))!;
     assert.ok(groupIndex.groups['docs-wiki']);
     assert.ok(groupIndex.groups['docs-wiki']['监控']['告警中心']);
@@ -397,8 +397,8 @@ describe('import-kb 真实 docs 目录', () => {
     assert.strictEqual(result.relations_imported, importableFiles.length);
     assert.strictEqual(result.files_skipped, skippedFiles);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getRelationsCachePath, getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getRelationsCachePath, getLocalKbDir } = await import('../src/lib/scope.js');
     const groupIndex = readJson<any>(getGroupIndexPath(scope))!;
     const cache = readJson<any>(getRelationsCachePath(scope))!;
 

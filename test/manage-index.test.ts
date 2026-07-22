@@ -71,8 +71,8 @@ describe('manage-index 核心逻辑', () => {
 
 describe('manage-index 功能验证（通过模块直接调用）', () => {
   it('initScope 创建正确的目录结构（新格式 groups）', async () => {
-    const { initScope } = await import('../scripts/lib/store.js');
-    const { getKbDir, getGroupIndexPath, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { initScope } = await import('../src/lib/store.js');
+    const { getKbDir, getGroupIndexPath, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'init-test-' + Date.now();
     try {
@@ -105,8 +105,8 @@ describe('manage-index 功能验证（通过模块直接调用）', () => {
   });
 
   it('Group 树 CRUD 操作（顶层 + 子节点）', async () => {
-    const { readJson, writeJson, initScope } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir } = await import('../scripts/lib/scope.js');
+    const { readJson, writeJson, initScope } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir } = await import('../src/lib/scope.js');
 
     const scope = 'crud-test-' + Date.now();
     try {
@@ -145,8 +145,8 @@ describe('manage-index 功能验证（通过模块直接调用）', () => {
   });
 
   it('新格式 group-index.json 无 roots 字段', async () => {
-    const { initScope } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath: getIndexPath, getKbDir: getDir } = await import('../scripts/lib/scope.js');
+    const { initScope } = await import('../src/lib/store.js');
+    const { getGroupIndexPath: getIndexPath, getKbDir: getDir } = await import('../src/lib/scope.js');
 
     const scope = 'format-test-' + Date.now();
     try {
@@ -165,8 +165,8 @@ describe('manage-index 功能验证（通过模块直接调用）', () => {
 
 describe('自动迁移（旧格式 → 新格式）', () => {
   it('旧格式 roots → 自动迁移为 groups（"项目根"子节点提升）', async () => {
-    const { readGroupIndex } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readGroupIndex } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'migrate-test-' + Date.now();
     const kbDir = getKbDir(scope);
@@ -214,8 +214,8 @@ describe('自动迁移（旧格式 → 新格式）', () => {
   });
 
   it('roots + groups 共存 → 迁移时保留已有 groups 数据', async () => {
-    const { readGroupIndex } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readGroupIndex } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'merge-test-' + Date.now();
     const kbDir = getKbDir(scope);
@@ -254,8 +254,8 @@ describe('自动迁移（旧格式 → 新格式）', () => {
   });
 
   it('外部导入的 rootName 作为顶层 Group 保留（非 "项目根"）', async () => {
-    const { readGroupIndex } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readGroupIndex } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'import-migrate-' + Date.now();
     const kbDir = getKbDir(scope);
@@ -294,8 +294,8 @@ describe('自动迁移（旧格式 → 新格式）', () => {
   });
 
   it('relations-cache key 迁移：去掉 "项目根/" 前缀', async () => {
-    const { readGroupIndex } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readGroupIndex } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'cache-migrate-' + Date.now();
     const kbDir = getKbDir(scope);
@@ -338,8 +338,8 @@ describe('自动迁移（旧格式 → 新格式）', () => {
   });
 
   it('relations-cache 冲突 key 合并（"项目根/API" 和 "API" 同时存在）', async () => {
-    const { readGroupIndex } = await import('../scripts/lib/store.js');
-    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readGroupIndex } = await import('../src/lib/store.js');
+    const { getGroupIndexPath, getKbDir, getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const scope = 'cache-merge-' + Date.now();
     const kbDir = getKbDir(scope);

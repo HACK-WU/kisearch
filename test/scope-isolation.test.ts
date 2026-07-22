@@ -11,7 +11,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
 
-const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'scripts');
+const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runJson(script: string, args: string[]): any {
   try {
@@ -33,7 +33,7 @@ function getOut(script: string, args: string[]): string {
 const createdScopes: string[] = [];
 const tempDirs: string[] = [];
 let n = 0;
-async function mkScope(p: string) { const s = `${p}-${Date.now()}-${++n}`; registerTestScope(s); createdScopes.push(s); const { initScope } = await import('../scripts/lib/store.js'); initScope(s); return s; }
+async function mkScope(p: string) { const s = `${p}-${Date.now()}-${++n}`; registerTestScope(s); createdScopes.push(s); const { initScope } = await import('../src/lib/store.js'); initScope(s); return s; }
 function mkTmp(p: string) { const d = fs.mkdtempSync(path.join(os.tmpdir(), `${p}-`)); tempDirs.push(d); return d; }
 
 function getKbDirSync(scope: string): string {
@@ -89,7 +89,7 @@ describe('scope 物理隔离', () => {
   });
 
   it('磁盘路径隔离', async () => {
-    const { getKbDir } = await import('../scripts/lib/scope.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
     const sA = await mkScope('iso-disk-a');
     const sB = await mkScope('iso-disk-b');
 
@@ -104,7 +104,7 @@ describe('scope 物理隔离', () => {
   });
 
   it('删除操作互不影响', async () => {
-    const { getGroupIndexPath } = await import('../scripts/lib/scope.js');
+    const { getGroupIndexPath } = await import('../src/lib/scope.js');
     const sA = await mkScope('iso-del-a');
     const sB = await mkScope('iso-del-b');
 
@@ -117,7 +117,7 @@ describe('scope 物理隔离', () => {
     runJson('manage-index.ts', ['--scope', sA, '--action', 'delete', '--parent', 'wiki', '--name', 'to-delete']);
 
     // scope B 中仍应有 'to-delete'
-    const { readJson } = await import('../scripts/lib/store.js');
+    const { readJson } = await import('../src/lib/store.js');
     const idxB = readJson<any>(getGroupIndexPath(sB));
     assert.ok(idxB.groups.wiki['to-delete'] !== undefined);
 
@@ -142,8 +142,8 @@ describe('scope 物理隔离', () => {
     runJson('scan-kb.ts', ['scan', '--scope', sA, '--source', src, '--root-name', 'wiki', '--results', resultsFile]);
 
     // scope B: should have no scan-index
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     assert.strictEqual(readJson(getScanIndexPath(sB)), null);
 
     // scope A should have it

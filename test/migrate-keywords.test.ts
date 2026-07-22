@@ -13,8 +13,8 @@ import { registerTestScope, getTestEnv, testConfigPath } from './test-config.ts'
 let testScope: string;
 
 before(async () => {
-  const { initScope, readJson, writeJson } = await import('../scripts/lib/store.js');
-  const { getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+  const { initScope, readJson, writeJson } = await import('../src/lib/store.js');
+  const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
   testScope = `migrate-kw-${Date.now()}`;
   registerTestScope(testScope);
@@ -68,7 +68,7 @@ before(async () => {
 });
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   const kbDir = getKbDir(testScope);
   if (fs.existsSync(kbDir)) {
     fs.rmSync(kbDir, { recursive: true, force: true });
@@ -77,7 +77,7 @@ after(async () => {
 
 // 直接调用 migrateScope（不通过 CLI，避免 process.exit）
 async function runMigrate(): Promise<any> {
-  const { migrateScope } = await import('../scripts/migrate-keywords.js');
+  const { migrateScope } = await import('../src/migrate-keywords.js');
   // migrate-keywords.ts 只导出 CLI，需要走 exec 方式
   // 改用 require 方式加载模块并直接调用内部函数
   return null;
@@ -90,7 +90,7 @@ describe('migrate-keywords 幂等性', () => {
 
     // 第一次迁移
     const r1 = execSync(
-      `npx tsx scripts/migrate-keywords.ts --scope ${scope}`,
+      `npx tsx src/migrate-keywords.ts --scope ${scope}`,
       { encoding: 'utf-8', cwd: path.resolve(import.meta.dirname, '..'), env: getTestEnv() }
     );
     const result1 = JSON.parse(r1);
@@ -100,7 +100,7 @@ describe('migrate-keywords 幂等性', () => {
 
     // 第二次迁移（幂等）
     const r2 = execSync(
-      `npx tsx scripts/migrate-keywords.ts --scope ${scope}`,
+      `npx tsx src/migrate-keywords.ts --scope ${scope}`,
       { encoding: 'utf-8', cwd: path.resolve(import.meta.dirname, '..'), env: getTestEnv() }
     );
     const result2 = JSON.parse(r2);
@@ -108,8 +108,8 @@ describe('migrate-keywords 幂等性', () => {
     assert.strictEqual(result2.stats[0].groups_migrated, 0, '第二次迁移应无新迁移');
 
     // 验证数据完整性
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
     const cache = readJson<any>(getRelationsCachePath(scope))!;
 
     const g1 = cache.groups['项目根/监控/告警中心'];
@@ -141,8 +141,8 @@ describe('migrate-keywords 幂等性', () => {
 
   it('dry-run 不写盘', async () => {
     const { execSync } = await import('child_process');
-    const { initScope, readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
     const dryScope = `migrate-dry-${Date.now()}`;
     registerTestScope(dryScope);
@@ -160,12 +160,12 @@ describe('migrate-keywords 幂等性', () => {
           max_hot_count: 10,
         },
       };
-      const { writeJson } = await import('../scripts/lib/store.js');
+      const { writeJson } = await import('../src/lib/store.js');
       writeJson(cachePath, cache);
 
       // dry-run
       const r1 = execSync(
-        `npx tsx scripts/migrate-keywords.ts --scope ${dryScope} --dry-run`,
+        `npx tsx src/migrate-keywords.ts --scope ${dryScope} --dry-run`,
         { encoding: 'utf-8', cwd: path.resolve(import.meta.dirname, '..'), env: getTestEnv() }
       );
       const result1 = JSON.parse(r1);

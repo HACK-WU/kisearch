@@ -3,11 +3,11 @@
  *
  * 三类操作：
  *   - action='add'    → 新增：bulkVectorize → 写 relations-cache + local KB
- *   - action='modify' → 更新：mem delete oldId → bulkVectorize → 写新 memoryId
- *   - action='delete' → 删除：mem delete oldId → 移除 cache + local KB
+ *   - action='modify' → 更新：向量删除 oldId → bulkVectorize → 写新 memoryId
+ *   - action='delete' → 删除：向量删除 oldId → 移除 cache + local KB
  *
  * Group 树只增不删；source.commit 全部成功后才更新到 HEAD。
- * 使用 bulk-store 批量向量化 add + modify，消除逐条 mem store 的进程启动开销。
+ * 使用 bulk-store 批量向量化 add + modify，消除逐条向量写入的额外开销。
  */
 
 import fs from 'fs';
@@ -280,7 +280,7 @@ export async function handleIncremental(args: HandleIncrementalArgs): Promise<In
     }
     const del = await deleteMemory(e.memoryId, args.scope, memOpts);
     if (!del.ok) {
-      errors.push({ path: e.path, error: `[delete warn] mem delete 失败：${del.error}` });
+      errors.push({ path: e.path, error: `[delete warn] 向量删除失败：${del.error}` });
     }
     const relationText = deriveRelationText(e.path);
     // 同时删除对应的 ki-relation 向量
@@ -308,7 +308,7 @@ export async function handleIncremental(args: HandleIncrementalArgs): Promise<In
     for (const e of modifyWithId) {
       const del = await deleteMemory(e.memoryId!, args.scope, memOpts);
       if (!del.ok) {
-        errors.push({ path: e.path, error: `[modify warn] mem delete oldId 失败：${del.error}` });
+        errors.push({ path: e.path, error: `[modify warn] 向量删除 oldId 失败：${del.error}` });
       }
     }
   }

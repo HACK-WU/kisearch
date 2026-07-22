@@ -39,8 +39,8 @@ const scope = `query-test-${Date.now()}`;
 
 before(async () => {
   registerTestScope(scope);
-  const { initScope, writeJson, readJson } = await import('../scripts/lib/store.js');
-  const { getGroupIndexPath, getRelationsCachePath, getKbDir } = await import('../scripts/lib/scope.js');
+  const { initScope, writeJson, readJson } = await import('../src/lib/store.js');
+  const { getGroupIndexPath, getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
 
   initScope(scope);
 
@@ -119,7 +119,7 @@ before(async () => {
 });
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) {
     fs.rmSync(kbDir, { recursive: true, force: true });
@@ -237,8 +237,8 @@ describe('query-group 指定 Group 查询', () => {
 describe('query-group 边界情况', () => {
   it('空 scope 显示基本结构', async () => {
     const emptyScope = `empty-query-${Date.now()}`;
-    const { initScope } = await import('../scripts/lib/store.js');
-    const { getKbDir } = await import('../scripts/lib/scope.js');
+    const { initScope } = await import('../src/lib/store.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
 
     try {
       registerTestScope(emptyScope);

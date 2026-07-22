@@ -7,7 +7,7 @@ export function registerQueryGroupTool(server: McpServer): void {
     'ki_query_group',
     '查询 Group 树 + Relations + 词云，支持向量语义兜底',
     {
-      scope: z.string().describe('项目隔离标识'),
+      scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       groups: z.string().optional().describe('逗号分隔的 Group 路径列表（支持模糊匹配）'),
       hot_count: z.number().int().positive().optional().default(5).describe('热门展示个数'),
       depth: z.number().int().min(1).max(10).optional().default(4).describe('索引层级深度'),

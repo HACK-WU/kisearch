@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { normalizeAiResults } from '../scripts/lib/ai-results.ts';
+import { normalizeAiResults } from '../src/lib/ai-results.ts';
 
 function writeTmp(obj) {
   const file = path.join(os.tmpdir(), `ai-results-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);

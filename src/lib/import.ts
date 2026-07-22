@@ -3,7 +3,7 @@
  *
  * 5 个 Phase：
  *   Phase 1: validateAndNormalize  → 读 ai-results.json，校验 + 补全
- *   Phase 2: bulkVectorize          → 调 mem bulk-store 批量向量化（支持断点续跑）
+ *   Phase 2: bulkVectorize          → 调 vectorBulkStore 批量向量化（支持断点续跑）
  *   Phase 3: ensureGroups           → 按 groupPath 建 Group 树
  *   Phase 4: writeRelations         → 写 relations-cache + local KB（含 memoryId/sourcePath）
  *   Phase 5: recordSource           → 写 group-index.source 块（含 git HEAD commit）

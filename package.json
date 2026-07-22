@@ -8,11 +8,11 @@
     "knowledge-indexer": "./bin/knowledge-indexer.mjs"
   },
   "scripts": {
-    "scan-kb": "npx jiti scripts/scan-kb.ts",
-    "manage-index": "npx jiti scripts/manage-index.ts",
-    "query-group": "npx jiti scripts/query-group.ts",
-    "get-module-info": "npx jiti scripts/get-module-info.ts",
-    "sync-relation": "npx jiti scripts/sync-relation.ts",
+    "scan-kb": "npx jiti src/scan-kb.ts",
+    "manage-index": "npx jiti src/manage-index.ts",
+    "query-group": "npx jiti src/query-group.ts",
+    "get-module-info": "npx jiti src/get-module-info.ts",
+    "sync-relation": "npx jiti src/sync-relation.ts",
     "test": "npx jiti test/manage-index.test.ts",
     "test:all": "npx jiti test/*.test.ts",
     "test:manage-index": "npx jiti test/manage-index.test.ts",
@@ -31,7 +31,7 @@
     "test:e2e:step-c": "node --test test/e2e/step-c-cli.e2e.network.mjs",
     "test:e2e:scan-kb": "node --test test/e2e/scan-kb-cli.e2e.network.mjs",
     "build:zvec-engine": "tsc -p tsconfig.src.json",
-    "setup": "npx jiti scripts/setup.ts"
+    "setup": "npx jiti src/setup.ts"
   },
   "keywords": [
     "knowledge",
@@ -46,11 +46,13 @@
     "@zvec/zvec": "^0.6.0",
     "commander": "^14.0.0",
     "jiti": "^2.6.1",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "files": [
     "bin/**/*",
     "scripts/**/*",
+    "src/**/*",
     "_template/**/*",
     "dist/zvec-engine/**/*",
     "src/zvec-engine/**/*",

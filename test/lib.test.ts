@@ -11,17 +11,17 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-import { walWrite, cleanupTmpFiles } from '../scripts/lib/wal.js';
-import { validateScope, getKbDir, getGroupIndexPath } from '../scripts/lib/scope.js';
-import { loadConfig, resetConfigCache } from '../scripts/lib/config.js';
+import { walWrite, cleanupTmpFiles } from '../src/lib/wal.js';
+import { validateScope, getKbDir, getGroupIndexPath } from '../src/lib/scope.js';
+import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 import {
   calculateScore,
   recordUse,
   hybridPartition,
   boundaryDecay,
   type Relation,
-} from '../scripts/lib/scoring.js';
-import { DEFAULT_PARTITION_CONFIG } from '../scripts/lib/constants.js';
+} from '../src/lib/scoring.js';
+import { DEFAULT_PARTITION_CONFIG } from '../src/lib/constants.js';
 
 // ─── 临时目录 ───
 

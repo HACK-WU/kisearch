@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { getSource, setSource } from '../scripts/lib/scope.ts';
-import { ensureScopeDir } from '../scripts/lib/store.ts';
-import { getGroupIndexPath, getKbDir } from '../scripts/lib/scope.ts';
+import { getSource, setSource } from '../src/lib/scope.ts';
+import { ensureScopeDir } from '../src/lib/store.ts';
+import { getGroupIndexPath, getKbDir } from '../src/lib/scope.ts';
 import { registerTestScope, cleanupTestConfig } from './test-config.ts';
 
 // 使用临时 scope 名避免污染真实 mcp-test

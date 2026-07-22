@@ -49,7 +49,9 @@
 
 ## 三、未完成 / 待决 ⬜
 
-### 1）打包配置缺口（真实风险，发布必修）
+### 1）打包配置缺口 ✅已修复（2026-07-22）
+
+`package.json` 的 `files` 已增加 `"src/**/*"`，覆盖 `bin/ki.mjs` 指向的 `src/` 迁移后入口。以下为原风险记录：
 
 `package.json` 的 `files` 字段为：
 
@@ -65,31 +67,64 @@
 
 **迁移动作**：`files` 增加 `"src/**/*"`（或至少 `"src/lib/**/*"` + `"src/*.ts"`）。
 
-### 2）`package.json` scripts 快捷方式仍指 `scripts/`
+### 2）`package.json` scripts 与 5 个非 mem 命令入口 ✅已统一（2026-07-22）
 
-`scripts.scan-kb/manage-index/query-group/...` 等 npm 脚本仍 `npx jiti scripts/*.ts`，与 `bin/ki.mjs`（已指 `src/`）分叉。属开发便捷入口，不影响 `ki` CLI，可择机统一。
+`config`/`setup`/`export`/`backup`/`migrate-keywords` 已**拷贝**（`scripts/` 不改）到 `src/`，`bin/ki.mjs` 与 `package.json` 的 `scripts.*` 均已改指 `src/`。此后 `ki` CLI 与 npm 脚本入口全部统一到 `src/`，`scripts/` 仅剩冻结代码/测试引用。
 
-### 3）代码文案里的 "mem" 残留（仅措辞，功能无影响）
+**已实现**：
 
-`src/lib/import.ts`、`src/lib/incremental.ts` 的注释与错误提示字符串仍含 `mem delete / mem store / mem bulk-store` 字样（实际已走 `vectorDelete/vectorStore`）。建议后续清理为 zvec 术语，避免误导。
+1. `cp scripts/{config,setup,export,backup,migrate-keywords}.ts → src/`（逐字拷贝；这 5 个命令无 mem 依赖，仅 `import './lib/*'`，在 `src/` 下解析到 `src/lib`，无需改动）。
+2. `bin/ki.mjs` 的 `COMMANDS`：`config/setup/export/backup/migrate-keywords` 5 项从 `scripts/*.ts` 改为 `src/*.ts`。
+3. `package.json` 的 `scripts`：`scan-kb/manage-index/query-group/get-module-info/sync-relation/setup` 从 `npx jiti scripts/*.ts` 改为 `src/*.ts`。
 
-### 4）旧 mem 版测试仍在 `test/`（冻结保留）
+**验证**：`node bin/ki.mjs {config,backup,export,migrate-keywords,setup} --help` 5 命令经 jiti 全部成功加载（`./lib/*` import 全部解析），行为与 `scripts/` 原件一致。
 
-`test/batch-vectorize.test.mjs`、`test/e2e/scan-kb-cli.e2e.mjs`（mock-mem）等旧单测/e2e 仍导入 `scripts/lib/*`（旧 mem 版），随 `scripts/` 冻结保留；新链路由 `*.network.mjs` e2e 覆盖。若后续删除 `scripts/`，需同步清理。
+### 3）代码文案里的 "mem" 残留 ✅已清理（2026-07-22）
+
+`src/lib/import.ts`、`src/lib/incremental.ts` 的注释与错误提示字符中的 `mem delete / mem bulk-store` 已改为「向量删除 / vectorBulkStore」等 zvec 术语。（`deleteMemory`/`memoryId`/`memOpts` 等标识符属 API 面，故保留不改；`vector-client.ts` 中「替代 memXxx」类迁移说明性注释也保留。）
+
+### 4）旧测试对 `scripts/` 的引用 ✅已解耦（2026-07-22）
+
+`test/` 曾有 15 个测试引用 `scripts/`（`import '../scripts/lib/*'` 或 `SCRIPTS_DIR/SCRIPT_PATH = .../scripts` 拼接命令路径）。已全部重指到 `src/`，并删除测旧 mem 契约的过时测试。此后 `test/` **不再引用 `scripts/`**（仅剩 `step-c-cli.e2e.network.mjs` 一处说明性注释）。
+
+**重指（scripts/ → src/，纯逻辑一致；共 12 文件）**：`sync-relation`、`manage-index`、`query-group`、`get-module-info`、`migrate-keywords`、`scope-source`、`ai-results`、`lib`、`scope-isolation`、`error-handling`、`import-kb`、`scan-kb`、`integration`（`SCRIPTS_DIR`/`SCRIPT_PATH` 的 `'scripts'` 段一并改 `'src'`；`migrate-keywords.test.ts` 的 `npx tsx scripts/migrate-keywords.ts` 与 `import '../scripts/migrate-keywords.js'` 一并改 `src/`）。
+
+**删除（过时/不可用；共 7 文件）**：
+
+- mem 版（`mock-mem` + `resetMemScopesCache` + 断言 `mem store 失败`）：`import.test.mjs`、`incremental.test.mjs`、`batch-vectorize.test.mjs`、`e2e/batch-vectorize.e2e.mjs`（真实调 `bin/mem.mjs`）、`e2e/scan-kb-cli.e2e.mjs`（mock-mem + 失效路径），以及假 mem CLI `fixtures/mock-mem.mjs`。
+- 陈旧契约：`diff.test.mjs`——测 `parseGitDiff` 的**旧 tab 格式**（现改 `-z` NUL 分隔）且用未注册 scope（现 `ensureScopeDir` 强制注册）。已确认 `scripts/lib/diff.ts` 与 `src/lib/diff.ts` **字节一致**，故该失败为**既有**（非重指引入）；真实 `-z` 解析由 `test:e2e:scan-kb` 覆盖。
+
+**验证**：重指后纯逻辑测试全绿——`lib` 28/28、`ai-results` 11/11、`scope-source` 6/6、`scope-isolation`（走 `src/` 命令）5/5。
+
+**影响**：`test/` 与 `scripts/` 解耦后，删除 `scripts/`（含 `mem-client.ts`）的**唯一阻塞已消除**（见 §五 4）。
+
+### 5）`scopeMode` scope 护栏 ✅已落地（2026-07-22）
+
+设计已收敛（S-01 §3.5 + S-06 §3.5 N19）：引入 `scopeMode: 'default' | 'strict'` 作为 scope **护栏层**，把「漏传 scope → 静默落 default 串味」转为 fail-loud。**已明确不做**项目级绑定 / `X-Ki-Scope` 请求头（方案已取消），隔离仍靠全局唯一 scope 命名。
+
+**已实现**：
+
+1. `src/lib/config.ts`：`KiConfig` 新增 `scopeMode`（默认 `'default'`，`parseAndExpand` 仅认 `'strict'` 否则归 `'default'`）；新增 `getScopeMode()` + `resolveScope(config, scope?)`（default 档缺省/空→`default`、任意值放行；strict 档必须传且在 `scopes` 白名单内，否则抛错）。
+2. `src/lib/vector-client.ts`：`vectorSearch/vectorStore/vectorBulkStore/vectorDelete` 入口统一先调 `resolveScope`（CLI + MCP 共同咽喉，开引擎前 fail-fast）。
+3. `src/lib/mcp-tools/*.ts`（全 8 工具）：`scope: z.string()` → `.optional().default('default')`，保证 `default` 档零摩擦。
+
+**验证**：tsc --noEmit 无错；`resolveScope` default/strict 八项行为断言全 PASS；`test:scope-isolation` 真实链路 5/5 通过。
+
+**已知残留（接受）**：（a）`strict` 拦不住「传了合法但错的 scope」（见 S-01 §3.5）；（b）`ki_manage_index_create` 仅建 `group-index.json`（纯 FS，不经 vector-client），故 strict 白名单校验对它不生效（字符集仍由 `validateScope` 守）；如需严格可后续在 `executeManageCreate` 补调 `resolveScope`。
 
 ## 四、无需迁移（无 mem 依赖，刻意保留在 `scripts/`）
 
-以下命令为纯文件 / 配置操作，不触碰向量层，不在 mem→zvec 范围内：`config`、`setup`、`export`、`backup`、`migrate-keywords`。如需入口统一（全部迁 `src/`）可另行安排，与本次向量迁移解耦。
+以下命令为纯文件 / 配置操作，不触碰向量层，不在 mem→zvec 范围内：`config`、`setup`、`export`、`backup`、`migrate-keywords`。**已于 2026-07-22 拷贝到 `src/` 并统一入口**（见 §三 2）），`scripts/` 原件冻结保留。
 
 ## 五、收尾建议顺序
 
-1. **补 `package.json` 的 `files`**（唯一影响发布的真实缺口）。
-2. 清理 `import.ts`/`incremental.ts` 的 mem 文案。
-3.（可选）统一 `package.json` scripts 与 5 个非 mem 命令到 `src/`。
-4. 全部完成后方可移除 `scripts/lib/mem-client.ts` 及外部 `mem` CLI 依赖。
+1. ~~**补 `package.json` 的 `files`**~~ ✅已完成（2026-07-22）。
+2. ~~清理 `import.ts`/`incremental.ts` 的 mem 文案~~ ✅已完成（2026-07-22）。
+3. ~~统一 `package.json` scripts 与 5 个非 mem 命令到 `src/`~~ ✅已完成（2026-07-22）。
+4. ~~全部完成后方可移除 `scripts/lib/mem-client.ts` 及外部 `mem` CLI 依赖~~ **阻塞已消除**（2026-07-22 测试已与 `scripts/` 解耦，见 §三 4）。仅剩「删除 `scripts/` 目录」这一物理动作，因当前约定「`scripts/` 不改」而暂缓，可择机执行。
 
 ## 六、当前 `bin/ki.mjs` 接线对照
 
 | 已指向 `src/`（走 zvec） | 仍指向 `scripts/`（无 mem） |
 |---|---|
-| scan-kb, import-kb, restore, manage-index, query-group, get-module-info, sync-relation, delete-relation, mcp, search, store, bulk_store | migrate-keywords, setup, config, backup, export |
+| scan-kb, import-kb, restore, manage-index, query-group, get-module-info, sync-relation, delete-relation, mcp, search, store, bulk_store, migrate-keywords, setup, config, backup, export | （无，`bin/ki.mjs` 全部命令已指向 `src/`；`scripts/` 仅剩冻结代码与旧测试引用） |

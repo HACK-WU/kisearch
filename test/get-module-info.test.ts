@@ -51,8 +51,8 @@ const testMarkdown = '# 告警规则CRUD\n\n## 调用链\n1. AlertController.cre
 before(async () => {
   // 初始化 scope 并写入测试数据
   registerTestScope(scope);
-  const { initScope, writeJson, readJson } = await import('../scripts/lib/store.js');
-  const { getRelationsCachePath, getLocalKbDir } = await import('../scripts/lib/scope.js');
+  const { initScope, writeJson, readJson } = await import('../src/lib/store.js');
+  const { getRelationsCachePath, getLocalKbDir } = await import('../src/lib/scope.js');
 
   initScope(scope);
 
@@ -84,7 +84,7 @@ before(async () => {
 });
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) {
     fs.rmSync(kbDir, { recursive: true, force: true });
@@ -115,8 +115,8 @@ describe('get-module-info 基本功能', () => {
   });
 
   it('调用后 useCount 增加', async () => {
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const cache = readJson<any>(getRelationsCachePath(scope))!;
     const rel = cache.groups[testGroup].hot_relations.find(
@@ -127,8 +127,8 @@ describe('get-module-info 基本功能', () => {
   });
 
   it('防刷间隔内不重复计分', async () => {
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
     // 获取当前 useCount
     const cache1 = readJson<any>(getRelationsCachePath(scope))!;
@@ -177,8 +177,8 @@ describe('get-module-info 异常处理', () => {
 
   it('本地 KB 文件不存在返回错误', async () => {
     // 添加一个 Relation 到 cache 但没有对应的本地 KB
-    const { readJson, writeJson } = await import('../scripts/lib/store.js');
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { readJson, writeJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
     const cachePath = getRelationsCachePath(scope);
     const cache = readJson<any>(cachePath)!;

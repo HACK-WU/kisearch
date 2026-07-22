@@ -8,7 +8,7 @@ export function registerManageIndexTools(server: McpServer): void {
     'ki_manage_index_create',
     '在 Group 树中创建新节点（scope 不存在则自动创建）',
     {
-      scope: z.string().describe('项目隔离标识'),
+      scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       name: z.string().describe('新节点名称（不能包含 /）'),
       parent: z.string().optional().describe('父节点路径（省略则挂在根层）'),
     },

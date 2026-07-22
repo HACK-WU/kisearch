@@ -17,7 +17,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
 
-const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'scripts');
+const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runScript(script: string, args: string[]): { stdout: string; status: number } {
   try {
@@ -67,7 +67,7 @@ function makeScope(prefix: string): string {
 
 async function makeScopeInit(prefix: string): Promise<string> {
   const scope = makeScope(prefix);
-  const { initScope } = await import('../scripts/lib/store.js');
+  const { initScope } = await import('../src/lib/store.js');
   initScope(scope);
   return scope;
 }
@@ -79,7 +79,7 @@ function makeTempDir(prefix: string): string {
 }
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   for (const scope of createdScopes) {
     const kbDir = getKbDir(scope);
     if (fs.existsSync(kbDir)) {
@@ -290,7 +290,7 @@ describe('知识缺失路径', () => {
     ]);
 
     // 直接删除本地 KB
-    const { getLocalKbDir } = await import('../scripts/lib/scope.js');
+    const { getLocalKbDir } = await import('../src/lib/scope.js');
     const kbPath = getLocalKbDir(scope, 'wiki/配置');
     fs.rmSync(kbPath);
 
@@ -311,7 +311,7 @@ describe('知识缺失路径', () => {
     ]);
 
     // 删除 relations-cache
-    const { getRelationsCachePath } = await import('../scripts/lib/scope.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
     const cachePath = getRelationsCachePath(scope);
     fs.rmSync(cachePath);
 
@@ -374,7 +374,7 @@ describe('导入路径', () => {
       '--scope', scope, '--action', 'create', '--name', 'wiki',
     ]);
 
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     const scanIndexPath = getScanIndexPath(scope);
 
     const importResult = runScriptJson('import-kb.ts', [
@@ -537,8 +537,8 @@ describe('A/M/D 全链路', () => {
     assert.ok(scan3.merged >= 2);
 
     // Verify scan-index.json state
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     const scanIndex = readJson<any>(getScanIndexPath(scope))!;
     assert.strictEqual(scanIndex.entries.length, 3); // keep + change + new (change updated, remove deleted)
     assert.ok(scanIndex.entries.some((e: any) => e.path === 'keep.md'));

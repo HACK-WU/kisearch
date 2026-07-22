@@ -13,7 +13,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
 
-const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'scripts', 'scan-kb.ts');
+const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'scan-kb.ts');
 
 function runScan(args: string[]): any {
   try {
@@ -66,7 +66,7 @@ function makeTempDir(prefix: string): string {
 }
 
 after(async () => {
-  const { getKbDir } = await import('../scripts/lib/scope.js');
+  const { getKbDir } = await import('../src/lib/scope.js');
   for (const scope of createdScopes) {
     const kbDir = getKbDir(scope);
     if (fs.existsSync(kbDir)) {
@@ -151,8 +151,8 @@ describe('scan-kb scan 子命令', () => {
     assert.strictEqual(merged.action, 'merge_results');
     assert.strictEqual(merged.merged, 1);
 
-    const { readJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { readJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     const scanIndex = readJson<any>(getScanIndexPath(scope))!;
 
     assert.strictEqual(scanIndex.entries.length, 1);
@@ -172,8 +172,8 @@ describe('scan-kb scan 子命令', () => {
     git(repoDir, ['commit', '-m', 'init']);
     const firstCommit = git(repoDir, ['rev-parse', 'HEAD']);
 
-    const { initScope, writeJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { initScope, writeJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     initScope(scope);
     writeJson(getScanIndexPath(scope), {
       version: 1,
@@ -230,8 +230,8 @@ describe('scan-kb scan 子命令', () => {
     git(repoDir, ['commit', '-m', 'init']);
     const firstCommit = git(repoDir, ['rev-parse', 'HEAD']);
 
-    const { initScope, writeJson, readJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { initScope, writeJson, readJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
     initScope(scope);
     writeJson(getScanIndexPath(scope), {
       version: 1,
@@ -298,8 +298,8 @@ describe('scan-kb scan 子命令', () => {
 describe('scan-kb vectorize 子命令', () => {
   it('列出待向量化条目', async () => {
     const scope = makeScope('scan-vectorize-list');
-    const { initScope, writeJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { initScope, writeJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
 
     initScope(scope);
     writeJson(getScanIndexPath(scope), {
@@ -345,8 +345,8 @@ describe('scan-kb vectorize 子命令', () => {
     const completeDir = makeTempDir('ki-vectorize-complete');
     const completeFile = path.join(completeDir, 'complete.json');
 
-    const { initScope, writeJson, readJson } = await import('../scripts/lib/store.js');
-    const { getScanIndexPath } = await import('../scripts/lib/scope.js');
+    const { initScope, writeJson, readJson } = await import('../src/lib/store.js');
+    const { getScanIndexPath } = await import('../src/lib/scope.js');
 
     initScope(scope);
     writeJson(getScanIndexPath(scope), {
