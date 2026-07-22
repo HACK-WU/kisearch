@@ -155,7 +155,7 @@ ki sync-relation \
 **Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki Markdown 文件。Wiki 目录发现优先级：
 
 1. `group-index.json` 的 `source` 块（由 `scan-kb import` 自动记录，含 `dir` + `rootName`）
-2. `config.json` 中 scope 级 `wikiSync` 兜底配置
+2. `config.yaml` 中 scope 级 `wikiSync` 兜底配置
 
 **配置示例**：
 ```json

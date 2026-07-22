@@ -18,7 +18,9 @@
 ki config init
 ```
 
-配置文件默认生成在 `~/.ki/config.json`，包含 `dataDir`（数据存储目录）和 `scopes`（scope 配置）。
+配置文件默认生成在 `~/.ki/config.yaml`（YAML 格式，含注释），包含 `dataDir`（数据存储目录）、`vectorDir`（向量库目录）、`embedding`（向量提供方）和 `scopes`（scope 配置），同时自动创建 `dataDir` / `backupDir` / `vectorDir` 目录。
+
+> 配置格式以 YAML 为主，保留对旧版 `config.json` 的读取兼容；生成后可执行 `ki doctor` 校验配置与向量环境是否就绪。
 
 如需隔离测试数据，可修改 `dataDir` 指向独立目录：
 
@@ -26,8 +28,8 @@ ki config init
 # 生成配置到指定目录
 ki config init --dir /path/to/test
 
-# 或手动修改配置文件中的 dataDir 字段
-sed -i 's|"dataDir": ".*"|"dataDir": "/path/to/data"|' ~/.ki/config.json
+# 或手动编辑 ~/.ki/config.yaml 中的 dataDir 字段
+# dataDir: /path/to/data
 ```
 
 ### 2. 安装 mem 命令
@@ -59,27 +61,22 @@ scopes:
 
 ### 5. 确定 KB 存储位置
 
-不同 scope 的 KB 数据可以独立配置存储目录。在确定 scope 后，需要询问用户选择存储位置（例如："KB 数据存储位置使用默认路径还是自定义路径？"）；若用户选择自定义，引导其编辑 `~/.ki/config.json` 添加 `kbDir` 字段。
+不同 scope 的 KB 数据可以独立配置存储目录。在确定 scope 后，需要询问用户选择存储位置（例如："KB 数据存储位置使用默认路径还是自定义路径？"）；若用户选择自定义，引导其编辑 `~/.ki/config.yaml` 添加 `kbDir` 字段。
 
-- **默认位置**：使用 `~/.ki/config.json` 中 `dataDir` 配置的全局默认目录
+- **默认位置**：使用 `~/.ki/config.yaml` 中 `dataDir` 配置的全局默认目录
 - **自定义位置**：为该 scope 单独指定存储路径
 
-自定义方式如下，在 `~/.ki/config.json` 的 scope 配置中添加 `kbDir` 字段：
+自定义方式如下，在 `~/.ki/config.yaml` 的 scope 配置中添加 `kbDir` 字段：
 
-```json
-{
-  "dataDir": "$HOME/.ki-data",
-  "backupDir": "$HOME/.ki-backup",
-  "scopes": {
-    "your-scope": {
-      "kbDir": "/path/to/custom/data",
-      "wikiSync": {
-        "enabled": true,
-        "sourceDir": "/path/to/wiki-output"
-      }
-    }
-  }
-}
+```yaml
+dataDir: $HOME/.ki-data
+backupDir: $HOME/.ki-backup
+scopes:
+  your-scope:
+    kbDir: /path/to/custom/data
+    wikiSync:
+      enabled: true
+      sourceDir: /path/to/wiki-output
 ```
 
 | 字段 | 说明 |
@@ -372,22 +369,17 @@ ki scan-kb import \
 
 ### 配置方式
 
-> `wikiSync` 与 `kbDir` 均在同一个 `~/.ki/config.json` 的 scope 配置中设置，完整配置文件结构参见[前置条件第 5 步](#5-确定-kb-存储位置)。
+> `wikiSync` 与 `kbDir` 均在同一个 `~/.ki/config.yaml` 的 scope 配置中设置，完整配置文件结构参见[前置条件第 5 步](#5-确定-kb-存储位置)。
 
 在 scope 配置中添加 `wikiSync`：
 
-```json
-{
-  "dataDir": "/path/to/data",
-  "scopes": {
-    "my-project": {
-      "wikiSync": {
-        "enabled": true,
-        "sourceDir": "/path/to/wiki-output"
-      }
-    }
-  }
-}
+```yaml
+dataDir: /path/to/data
+scopes:
+  my-project:
+    wikiSync:
+      enabled: true
+      sourceDir: /path/to/wiki-output
 ```
 
 ### 同步行为

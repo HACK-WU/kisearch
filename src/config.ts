@@ -105,16 +105,19 @@ embedding:
 scopeMode: default
 
 # ─── KB 目录映射 ───
-# 每个 scope 可配置 KB 目录映射；未配置的 scope 使用 dataDir/{scope}
+# 每个 scope 可配置 KB 目录映射；未配置 kbDir 的 scope 数据落在 dataDir/{scope}
 scopes:
-  # 默认 scope：未传 --scope 时使用
-  default:
-    kbDir: ${v.dataDir}/default            # KB 数据目录（缺省: dataDir/{scope}）
-    # sourceDir: ~/projects/my-wiki        # 源文件目录（wiki-sync / diff / import 依赖）
-    # rootName: wiki                       # Group 树根名
-    # wikiSync:                            # 可选: Wiki 自动同步
-    #   enabled: true
-    #   sourceDir: ~/projects/my-wiki
+  # 默认 scope：未传 --scope 时使用。留空（{}）即数据落在 dataDir/default
+  default: {}
+  # 自定义 scope 示例（按需取消注释）：
+  #   注意 kbDir 会在其下自动创建 kb/{scope} 子目录（避免污染源码目录）
+  # my-project:
+  #   kbDir: /data/special-kb          # 实际数据在 /data/special-kb/kb/my-project
+  #   sourceDir: ~/projects/my-wiki    # 源文件目录（wiki-sync / diff / import 依赖）
+  #   rootName: wiki                   # Group 树根名
+  #   wikiSync:                        # 可选: Wiki 自动同步
+  #     enabled: true
+  #     sourceDir: ~/projects/my-wiki
 `;
 }
 

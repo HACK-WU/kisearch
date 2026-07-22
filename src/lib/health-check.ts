@@ -194,7 +194,7 @@ export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
     items.push({
       name: 'scopes.default',
       status: 'warn',
-      detail: '未配置 default，新 scope 将无 KB 目录映射可继承',
+      detail: '未配置 default scope（未传 --scope 时仍会使用 default，数据落在 dataDir/default）',
     });
   }
 

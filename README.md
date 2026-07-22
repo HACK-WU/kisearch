@@ -150,23 +150,39 @@ npm link
 ki config init
 ```
 
-配置文件默认生成在 `~/.ki/config.json`，内容如下：
+配置文件默认生成在 `~/.ki/config.yaml`（YAML 格式，含注释），并同时创建 `dataDir` / `backupDir` / `vectorDir` 目录。生成内容如下：
 
-```json
-{
-  "dataDir": "$HOME/.ki-data",
-  "backupDir": "$HOME/.ki-backup",
-  "scopes": {}
-}
+```yaml
+# ─── 基础路径 ───
+dataDir: $HOME/.ki-data       # KB 源数据目录
+backupDir: $HOME/.ki-backup   # 备份目录
+
+# ─── 向量配置 ───
+vectorDir: $HOME/.ki/vector   # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
+
+# Embedding 提供方（apiKey 从环境变量 SILICONFLOW_API_KEY 读取，不写入此文件）
+embedding:
+  provider: siliconflow
+  baseURL: https://api.siliconflow.cn/v1
+  model: Qwen/Qwen3-Embedding-8B
+  dimension: 4096             # 向量维度（必须与建库时一致）
+
+# ─── scope 护栏 ───
+scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
+
+scopes:
+  default: {}                 # 默认 scope：留空即数据落在 dataDir/default
 ```
 
 **配置优先级**：
-1. `--config <path>` 命令行参数
-2. 当前工作目录 `.ki/config.json`
-3. `$HOME/.ki/config.json`
-4. 内置默认值
+1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
+2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
+3. 内置默认值
 
-> 注意：环境变量 `KI_DATA_DIR` 已不再支持，仅使用配置文件机制。首次运行 `ki config init` 时会自动探测 `KI_DATA_DIR` 环境变量并迁移到配置文件。
+> 注意：
+> - 配置格式以 **YAML 为主**，同时保留对旧版 `config.json` 的读取兼容；当自动探测到旧版 JSON 配置时会提示执行 `ki config init` 迁移到 YAML。
+> - 环境变量 `KI_DATA_DIR` 已不再作为运行时配置来源；`ki config init` 会自动探测并迁移到配置文件。
+> - 生成配置后可执行 `ki doctor` 一键校验配置、目录、API 密钥与向量维度是否就绪。
 
 ### 使用示例
 
@@ -217,8 +233,9 @@ ki get-module-info \
 | `query-group` | 查询 Group + 词云 + 分区（支持模糊 Group 路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
 | `sync-relation` | 写入 Relation + 关键词校验 |
-| `mcp` | 启动 MCP Server（stdio 传输，8 个工具） |
-| `config` | 配置管理：init（生成配置文件） |
+| `mcp` | 启动 MCP Server（stdio 传输，8 个工具；启动前自动执行健康预检） |
+| `config` | 配置管理：init（生成 YAML 配置文件） |
+| `doctor` | 配置诊断：校验配置文件/目录/API 密钥/向量维度等，输出 ✅/⚠️/❌ 报告 |
 | `backup` | 备份 scope 目录快照 |
 | `restore` | 从快照或 ai-results 还原 |
 | `export` | 导出 KB 为 Wiki Markdown |
@@ -235,6 +252,8 @@ ki get-module-info \
 ```bash
 ki mcp
 ```
+
+> **🩺 启动预检**：`ki mcp` 在启动前会自动执行一次健康检查（等价于 `ki doctor`），报告写入 stderr（不污染 stdio 协议）。若存在 ❌ 失败项（如缺少 API 密钥、向量维度不匹配）将拒绝启动；仅 ⚠️ 警告时继续启动。启动异常时可先运行 `ki doctor` 定位问题。
 
 ### MCP 客户端配置
 

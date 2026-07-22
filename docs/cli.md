@@ -3,14 +3,15 @@
 所有脚本都通过 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
 **配置优先级**：
-1. `--config <path>` 命令行参数
-2. 当前工作目录 `.ki/config.json`
-3. `$HOME/.ki/config.json`
-4. 内置默认值（`dataDir` = `$HOME/.ki-data`）
+1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
+2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
+3. 内置默认值（`dataDir` = `$HOME/.ki-data`）
 
-**首次使用**：运行 `ki config init` 生成配置文件模板。
+**首次使用**：运行 `ki config init` 生成 YAML 配置文件模板（`~/.ki/config.yaml`）。配置格式以 YAML 为主，保留对旧版 `config.json` 的读取兼容。
 
-**注意**：环境变量 `KI_DATA_DIR` 已不再支持，仅使用配置文件机制。
+**校验**：运行 `ki doctor` 一键校验配置文件 / 目录 / API 密钥 / 向量维度是否就绪。
+
+**注意**：环境变量 `KI_DATA_DIR` 已不再作为运行时配置来源，仅使用配置文件机制（`ki config init` 会自动探测并迁移）。
 
 ---
 
@@ -463,7 +464,7 @@ ki sync-relation \
 **Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。Wiki 目录发现优先级：
 
 1. `group-index.json` 的 `source` 块（由 `scan-kb import` 自动记录）
-2. `config.json` 中 scope 级 `wikiSync.sourceDir` 兜底配置
+2. `config.yaml` 中 scope 级 `wikiSync.sourceDir` 兜底配置
 
 如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
 
@@ -618,7 +619,7 @@ ki mcp
 
 ### `init` 子命令
 
-生成配置文件模板到 `~/.ki/config.json`。
+生成配置文件模板到 `~/.ki/config.yaml`（YAML 格式，含注释），并同时创建 `dataDir` / `backupDir` / `vectorDir` 目录。
 
 ```bash
 ki config init [--dir <path>] [--force]
@@ -640,30 +641,39 @@ ki config init
 {
   "ok": true,
   "action": "config_init",
-  "configPath": "/Users/me/.ki/config.json",
+  "configPath": "/Users/me/.ki/config.yaml",
   "existed": false,
-  "message": "配置文件已生成：/Users/me/.ki/config.json\n请根据实际需要修改 dataDir / backupDir / scopes 字段。"
+  "createdDirs": ["/Users/me/.ki-data", "/Users/me/.ki-backup", "/Users/me/.ki/vector"],
+  "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 请通过环境变量 SILICONFLOW_API_KEY 提供。"
 }
 ```
 
-**配置文件结构**：
+**配置文件结构（YAML）**：
 
-```json
-{
-  "dataDir": "$HOME/.ki-data",
-  "backupDir": "$HOME/.ki-backup",
-  "scopes": {
-    "my-project": {
-      "kbDir": "/data/special-kb/my-project",
-      "sourceDir": ".qoder/repowiki/zh/content",
-      "rootName": "QoderWiki",
-      "wikiSync": {
-        "enabled": true,
-        "sourceDir": "/path/to/wiki-content"
-      }
-    }
-  }
-}
+```yaml
+dataDir: $HOME/.ki-data       # KB 源数据目录
+backupDir: $HOME/.ki-backup   # 备份目录
+vectorDir: $HOME/.ki/vector   # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
+
+embedding:                    # Embedding 提供方（apiKey 从环境变量 SILICONFLOW_API_KEY 读取）
+  provider: siliconflow
+  baseURL: https://api.siliconflow.cn/v1
+  model: Qwen/Qwen3-Embedding-8B
+  dimension: 4096             # 向量维度（必须与建库时一致）
+
+scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
+
+scopes:
+  # 默认 scope：`ki config init` 自动生成，留空（{}）即数据落在 dataDir/default（ki doctor 会检查此项）
+  default: {}
+  # 自定义 scope（可选，按需添加）；kbDir 会在其下自动创建 kb/{scope} 子目录
+  my-project:
+    kbDir: /data/special-kb              # 实际数据在 /data/special-kb/kb/my-project
+    sourceDir: .qoder/repowiki/zh/content
+    rootName: QoderWiki
+    wikiSync:
+      enabled: true
+      sourceDir: /path/to/wiki-content
 ```
 
 **字段说明**：
@@ -672,21 +682,55 @@ ki config init
 |------|------|------|
 | `dataDir` | 顶级 | 全局默认数据存储目录，各 scope 数据默认放在 `dataDir/{scope}/` 下 |
 | `backupDir` | 顶级 | 备份快照存储目录 |
-| `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 数据存储路径，优先级高于 `dataDir/{scope}` |
+| `vectorDir` | 顶级 | zvec 向量库目录，所有 scope 共享一个 collection，靠 metadata 隔离（独立，不进备份） |
+| `embedding.provider` | 顶级 | Embedding 提供方：`siliconflow` \| `openai-compatible` |
+| `embedding.baseURL` | 顶级 | API 端点（siliconflow 须含 `/v1`） |
+| `embedding.model` | 顶级 | 模型名称 |
+| `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
+| `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
+| `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
+| `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |
 | `scopes.<scope>.sourceDir` | scope | 外部知识库源目录（由 `scan-kb import` 自动记录） |
 | `scopes.<scope>.rootName` | scope | 导入根节点名称（由 `scan-kb import` 自动记录） |
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 
+> `apiKey` 不写入配置文件，统一从环境变量 `SILICONFLOW_API_KEY` 读取。
+
 **配置优先级**：
-1. `--config <path>` 命令行参数
-2. `$HOME/.ki/config.json`
+1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
+2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
 3. 内置默认值
 
 **路径展开规则**：
 - `$HOME` → `process.env.HOME`
 - `~` → 同 `$HOME`
 - 相对路径 → 相对于配置文件所在目录
+
+---
+
+## `doctor`
+
+配置诊断命令，一次性只读检查 ki 运行环境是否就绪，输出 ✅/⚠️/❌ 分级报告。
+
+```bash
+ki doctor
+```
+
+**检查项**（约 10 项）：
+
+| 检查项 | 说明 |
+|--------|------|
+| 配置文件 | 是否成功加载配置文件（`_configPath`） |
+| dataDir / backupDir / vectorDir | 目录是否存在且可写 |
+| API 密钥 | 环境变量 `SILICONFLOW_API_KEY` 是否已设置 |
+| 连通性 / 密钥有效性 / 向量维度 | 发起一次 embedding 探测（5s 超时、不重试），映射为端点连通性、密钥有效性、维度匹配三项 |
+| zvec collection | `vectorDir` 是否已初始化 |
+| scopes.default | 是否配置了默认 scope |
+
+**退出码**：存在 ❌ 失败项时退出码为 `1`，否则为 `0`（便于 CI / 脚本判定）。
+
+> `ki mcp` 在启动前会自动执行同样的健康检查，报告写入 stderr（不污染 stdio 协议）；存在 ❌ 失败项将拒绝启动，仅 ⚠️ 警告时继续启动。
 
 ---
 
