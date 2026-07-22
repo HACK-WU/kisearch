@@ -242,6 +242,271 @@ ki manage-index --scope my-project --action delete --parent "我的项目" --nam
 
 ---
 
+## `scope`
+
+scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `delete` / `clear` 三个子命令。
+
+> **两层一致性**：`delete` / `clear` 为破坏性操作，需向量服务可用且强制 `--yes`；向量服务不可用时拒绝执行，以免两层不一致。
+
+### `list` 子命令
+
+列出所有 scope（KB 目录层 + 向量语义层并集），标注每个 scope 存在于哪层、是否已在配置注册。
+
+```bash
+ki scope list
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scopeMode": "default",
+  "vectorAvailable": true,
+  "count": 2,
+  "scopes": [
+    { "scope": "default", "kb": true, "vector": true, "registered": true },
+    { "scope": "my-project", "kb": true, "vector": false, "registered": false }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `kb` | 该 scope 在 KB 目录层存在（`dataDir/{scope}/`） |
+| `vector` | 该 scope 在向量语义层存在（zvec collection 的 `scope` 字段） |
+| `registered` | 该 scope 已在 `config.scopes` 中注册 |
+
+> 向量服务不可用时降级：`vectorAvailable:false` + `vectorReason`，`scopes` 仅依 KB 目录与配置列出。
+
+### `delete` 子命令
+
+彻底删除 scope：清向量文档 + 删 KB 目录 + 移除 `config.scopes` 条目（尽力而为）。`default` 不可删除。
+
+```bash
+ki scope delete <name> --yes
+```
+
+**示例：预览（不带 `--yes`，仅回显将删项并拒绝）**
+
+```bash
+ki scope delete my-project
+```
+
+输出：
+```json
+{
+  "ok": false,
+  "error": "破坏性操作需 --yes 确认：将删除向量 15 条 + KB 目录 + 配置条目",
+  "requireConfirm": true,
+  "willDelete": { "vectorCount": 15, "kbExists": true, "registered": true }
+}
+```
+
+**示例：确认删除**
+
+```bash
+ki scope delete my-project --yes
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "deletedVectors": 15,
+  "kbRemoved": true,
+  "configRemoved": true
+}
+```
+
+### `clear` 子命令
+
+清空 scope 内容但**保留 scope 与配置**：清向量文档 + 清 KB 目录内容（保留目录本身）。带 `--tags` 时仅清向量层对应 tag，不动 KB 目录（tag 是向量层概念，KB 层无 tag）。
+
+```bash
+ki scope clear <name> [--tags t1,t2] --yes
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<name>` | scope 名称（必填） |
+| `--tags <tags>` | 仅清指定标签，逗号分隔多值（省略则清全部并清 KB 目录内容） |
+| `--yes` | 确认执行（缺省则仅预览并拒绝） |
+
+**示例：清空整个 scope（保留目录与配置）**
+
+```bash
+ki scope clear my-project --yes
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "tags": "all",
+  "deletedVectors": 15,
+  "kbCleared": true
+}
+```
+
+**示例：仅清向量层指定 tag**
+
+```bash
+ki scope clear my-project --tags ki-search --yes
+```
+
+输出（`kbCleared:false`，不动 KB 目录）：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "tags": ["ki-search"],
+  "deletedVectors": 8,
+  "kbCleared": false
+}
+```
+
+---
+
+## `tag`
+
+向量层 tag 发现（**只读**）。tag 是文档上的标量字段，无独立生命周期；本命令用于发现某 scope 下用过哪些 tag，便于后续 `ki search` / `ki doc list --tags` 精确过滤。
+
+> 删除某 tag 下内容请用 `ki doc delete` / `ki scope clear --tags`；tag 本身无单独删除 / 改名语义。
+
+### `list` 子命令
+
+列出指定 scope 下用过的 tag（含文档数，按数量降序）。
+
+```bash
+ki tag list [--scope <scope>] [--scan-limit <n>]
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--scope <scope>` | 项目隔离标识 | `default` |
+| `--scan-limit <n>` | 扫描上限（超出则结果为近似，`truncated:true`） | `10000` |
+
+**示例：**
+
+```bash
+ki tag list --scope my-project
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "count": 2,
+  "scanned": 23,
+  "truncated": false,
+  "tags": [
+    { "tag": "ki-search", "count": 15 },
+    { "tag": "note", "count": 8 }
+  ]
+}
+```
+
+> 引擎无 distinct：一次扫描 + 内存去重计数；`scanned` 为实际扫描条数，超过 `--scan-limit` 时 `truncated:true` 表示结果为“已扫描范围内”的近似值。
+
+---
+
+## `doc`
+
+向量层文档的查看与删除（管理面）。包含 `list` / `delete` 两个子命令。
+
+### `list` 子命令
+
+列出指定 scope 下文档（**顺序不保证**，引擎无排序 / 时间字段）。
+
+```bash
+ki doc list [--scope <scope>] [--limit <n>] [--tags t1,t2] [--full]
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--scope <scope>` | 项目隔离标识 | `default` |
+| `--limit <n>` | 返回条数上限 | `10` |
+| `--tags <tags>` | 过滤标签，逗号分隔多值 | `ki-search` |
+| `--full` | 显示完整内容（默认截断预览 200 字） | `false` |
+
+**示例：**
+
+```bash
+ki doc list --scope my-project --limit 5
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "tags": ["ki-search"],
+  "count": 2,
+  "docs": [
+    { "docId": "abc123", "scope": "my-project", "tag": "ki-search", "content": "用户登录接口的实现…" },
+    { "docId": "def456", "scope": "my-project", "tag": "ki-search", "content": "数据查询接口的实现…" }
+  ]
+}
+```
+
+### `delete` 子命令
+
+按 docid 删除向量层记忆（可多个）。删前自动取回用于预览 / 核对（docid 不透明，防删错）。
+
+> **scope 护栏**：docid = `sha256(text+scope)`，一条 doc 只属于一个 scope。delete **只删归属 `--scope` 指定 scope 的 docid**；传入的 docid 若属于其他 scope，会被列入 `scopeMismatch` 并**跳过不删**（防跨 scope 误删）。
+
+```bash
+ki doc delete <docid...> [--scope <scope>] --yes
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `<docid...>` | 一个或多个 docid（必填） | — |
+| `--scope <scope>` | 项目隔离标识（护栏：仅删归属该 scope 的 docid，跨 scope 跳过） | `default` |
+| `--yes` | 确认执行删除（缺省则仅预览并拒绝） | `false` |
+
+**示例：预览（不带 `--yes`）**
+
+```bash
+ki doc delete abc123 zzz999 --scope my-project
+```
+
+输出（回显将删项 + 未找到项 + 跨 scope 跳过项）：
+```json
+{
+  "ok": false,
+  "error": "破坏性操作需 --yes 确认：将删除 1 条（1 条未找到）",
+  "requireConfirm": true,
+  "willDelete": [{ "docId": "abc123", "scope": "my-project", "tag": "ki-search", "content": "用户登录接口…" }],
+  "notFound": ["zzz999"],
+  "scopeMismatch": []
+}
+```
+
+**示例：确认删除**
+
+```bash
+ki doc delete abc123 --scope my-project --yes
+```
+
+输出：
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "requested": 1,
+  "deleted": 1,
+  "errors": []
+}
+```
+
+> ⚠️ `doc delete` 仅删向量层单条记忆；若该 docid 来自 `scan-kb` / `sync-relation`，KB 层 `relations-cache` 的 `memoryId` 会变悬空引用。删关系请用 `ki delete-relation`。
+
+---
+
 ## `query-group`
 
 查询 Group 树、Relation 分区和关键词词云。
@@ -549,6 +814,8 @@ ki mcp
 | `ki_query_group` | 读 | 查询 Group 树 + Relations + 词云 | `query-group` |
 | `ki_get_module_info` | 读 | 读取本地 KB Markdown 内容 | `get-module-info` |
 | `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
+| `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
+| `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
 | `ki_sync_relation` | 写 | 写入 Relation + 关键词 | `sync-relation` |
 
@@ -610,6 +877,16 @@ ki mcp
 #### `ki_manage_index_list`
 
 无参数，返回所有 scope 及顶层 Group。
+
+#### `ki_scope_list`
+
+无参数，返回所有 scope（KB 目录层 + 向量语义层并集），标注每个 scope 存在于哪层、是否已在配置注册。
+
+#### `ki_tag_list`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default） |
 
 ---
 

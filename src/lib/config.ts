@@ -322,3 +322,52 @@ export function resolveScope(config: KiConfig, scope?: string): string {
 export function getKiRoot(): string {
   return KI_ROOT;
 }
+
+// ─── 配置写回（scope delete 用：移除 scopes 条目） ───
+
+export interface RemoveScopeResult {
+  removed: boolean;
+  configPath?: string;
+  reason?: string;
+}
+
+/**
+ * 从配置文件的 scopes 中移除指定 scope 条目（尽力而为）。
+ * - 无配置文件 / scope 不在 scopes 中 → removed:false（非错误，default 档下 scopes 常为空）
+ * - YAML：用 Document API 保留注释与格式
+ * - JSON：解析后删除并写回
+ * 写回后清除配置缓存（resetConfigCache）。
+ */
+export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
+  const config = loadConfig();
+  const configPath = config._configPath;
+  if (!configPath || !fs.existsSync(configPath)) {
+    return { removed: false, reason: '未找到配置文件，无 scopes 条目可移除' };
+  }
+  const ext = path.extname(configPath).toLowerCase();
+  const text = fs.readFileSync(configPath, 'utf-8');
+
+  if (ext === '.yaml' || ext === '.yml') {
+    const doc = YAML.parseDocument(text);
+    if (!doc.hasIn(['scopes', scope])) {
+      return { removed: false, configPath, reason: `配置 scopes 中无 "${scope}"` };
+    }
+    doc.deleteIn(['scopes', scope]);
+    fs.writeFileSync(configPath, doc.toString(), 'utf-8');
+    resetConfigCache();
+    return { removed: true, configPath };
+  }
+
+  // JSON
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  const scopes = (parsed.scopes && typeof parsed.scopes === 'object')
+    ? parsed.scopes as Record<string, unknown>
+    : null;
+  if (!scopes || !(scope in scopes)) {
+    return { removed: false, configPath, reason: `配置 scopes 中无 "${scope}"` };
+  }
+  delete scopes[scope];
+  fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  resetConfigCache();
+  return { removed: true, configPath };
+}

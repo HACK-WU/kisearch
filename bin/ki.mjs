@@ -40,6 +40,9 @@ const COMMANDS = {
   'search': 'src/search.ts',
   'store': 'src/store.ts',
   'bulk_store': 'src/bulk-store.ts',
+  'scope': 'src/scope.ts',
+  'doc': 'src/doc.ts',
+  'tag': 'src/tag.ts',
   'config': 'src/config.ts',
   'doctor': 'src/doctor.ts',
   'backup': 'src/backup.ts',
@@ -87,6 +90,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   search            语义检索知识库内容
   store             存储文本到向量索引
   bulk_store        批量存储文本到向量索引
+  scope             scope 管理：list / delete / clear（KB + 向量两层）
+  doc               向量文档管理：list / delete
+  tag               向量 tag 发现：list（只读，含文档数）
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）
   backup            备份 scope 目录快照
@@ -104,6 +110,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki config init
   ki doctor
   ki scan-kb import --scope my-project --results ai-results.json
+  ki scope list
+  ki doc list --scope my-project --limit 10
+  ki tag list --scope my-project
   ki backup my-project
   ki restore my-project --from-snapshot --yes
   ki export my-project --output ./wiki-output

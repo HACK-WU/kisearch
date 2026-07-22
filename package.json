@@ -27,6 +27,7 @@
     "test:scope-isolation": "npx jiti test/scope-isolation.test.ts",
     "test:migrate-keywords": "npx jiti test/migrate-keywords.test.ts",
     "test:config-doctor": "npx jiti test/config-doctor.test.ts",
+    "test:scope-doc": "npx jiti test/scope-doc.test.ts",
     "test:zvec-engine": "node --test test/zvec-engine*.test.mjs",
     "test:e2e:kisearch": "node --test test/e2e/kisearch-cli.e2e.network.mjs",
     "test:e2e:step-c": "node --test test/e2e/step-c-cli.e2e.network.mjs",

@@ -24,6 +24,7 @@ import {
   type ZvecEngineOpenConfig,
 } from '../../dist/zvec-engine/index.js';
 import { loadConfig, getVectorDir, getEmbeddingConfig, resolveScope } from './config.js';
+import { validateScope } from './scope.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -55,6 +56,18 @@ export interface VectorBulkStoreResult {
 export interface VectorAvailableResult {
   available: boolean;
   reason?: string;
+}
+
+export interface VectorDocInfo {
+  docId: string;
+  scope?: string;
+  tag?: string;
+  content: string;
+}
+
+export interface VectorTagInfo {
+  tag: string;
+  count: number;
 }
 
 // ─── 常量 ───
@@ -356,4 +369,141 @@ export async function vectorDelete(params: {
     deleted: result.ok,
     errors: (result.errors ?? []).map((e) => ({ id: e.id, reason: e.reason })),
   };
+}
+
+// ─── 管理面（scope / doc 命令；绕过 strict 白名单，仅做字符校验） ───
+//
+// 注意：管理命令需能操作"未注册但向量层有数据"的 scope，故这些函数一律用
+// validateScope（仅字符安全）而非 resolveScope（会按 strict 白名单拒绝）。
+
+const LIST_ALL_LIMIT = 10_000;
+
+/**
+ * 构建 scope + tag 过滤：scope 必等；tags 非空时多 tag 以 OR 组合。
+ * tags 为空/未传 → 不按 tag 过滤（覆盖该 scope 下全部 tag）。
+ */
+function buildScopeTagFilter(scope: string, tags?: string[]): Filter {
+  const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: scope };
+  const cleaned = (tags ?? []).map((t) => normalizeTag(t)).filter((t) => t.length > 0);
+  if (cleaned.length === 0) return scopeCond;
+  const tagConds: Filter[] = cleaned.map((t) => ({ field: TAG_FIELD, op: '==', value: t }));
+  const tagFilter: Filter = tagConds.length === 1 ? tagConds[0] : { or: tagConds };
+  return { and: [scopeCond, tagFilter] };
+}
+
+function toDocInfo(d: { id: string; text?: string; fields?: Record<string, unknown> }): VectorDocInfo {
+  return {
+    docId: d.id,
+    scope: d.fields?.[SCOPE_FIELD] !== undefined && d.fields?.[SCOPE_FIELD] !== null ? String(d.fields[SCOPE_FIELD]) : undefined,
+    tag: d.fields?.[TAG_FIELD] !== undefined ? String(d.fields[TAG_FIELD]) : undefined,
+    content: d.text ?? String(d.fields?.[FTS_FIELD] ?? ''),
+  };
+}
+
+/**
+ * 列出指定 scope 下文档（listIds + fetch）。
+ * 顺序为引擎内部顺序（无排序保证），取前 limit 条。
+ */
+export async function vectorListDocs(params: {
+  scope: string;
+  tags?: string[];
+  limit?: number;
+}): Promise<VectorDocInfo[]> {
+  validateScope(params.scope);
+  const engine = await getEngine();
+  const filter = buildScopeTagFilter(params.scope, params.tags);
+  const ids = await engine.listIds(filter, params.limit ?? 10);
+  if (ids.length === 0) return [];
+  const docs = await engine.fetch(ids, false);
+  return docs.map(toDocInfo);
+}
+
+/**
+ * 按 doc id 批量取回文档（供 doc delete 删前预览）。
+ */
+export async function vectorFetchDocs(ids: string[]): Promise<VectorDocInfo[]> {
+  if (ids.length === 0) return [];
+  const engine = await getEngine();
+  const docs = await engine.fetch(ids, false);
+  return docs.map(toDocInfo);
+}
+
+/**
+ * 枚举向量层出现过的所有 scope（distinct）。
+ * 引擎无 distinct/count API：listIds 全量 + fetch 取 scope 字段去重，
+ * 受 scanLimit 约束（默认 10000）——大库下为"已扫描范围内"的 scope。
+ */
+export async function vectorListScopes(scanLimit: number = LIST_ALL_LIMIT): Promise<string[]> {
+  const engine = await getEngine();
+  const ids = await engine.listIds(undefined, scanLimit);
+  if (ids.length === 0) return [];
+  const docs = await engine.fetch(ids, false);
+  const set = new Set<string>();
+  for (const d of docs) {
+    const s = d.fields?.[SCOPE_FIELD];
+    if (s !== undefined && s !== null) set.add(String(s));
+  }
+  return [...set];
+}
+
+/**
+ * 枚举指定 scope 下出现过的所有 tag（distinct + 计数）。
+ * 引擎无 distinct/group-by：一次 listIds(scope) + fetch，内存按 tag 字段分组计数。
+ * 受 scanLimit 约束（默认 10000）——大库下 truncated:true 表示为"已扫描范围内"的近似结果。
+ */
+export async function vectorListTags(params: {
+  scope: string;
+  scanLimit?: number;
+}): Promise<{ tags: VectorTagInfo[]; scanned: number; truncated: boolean }> {
+  validateScope(params.scope);
+  const limit = params.scanLimit ?? LIST_ALL_LIMIT;
+  const engine = await getEngine();
+  const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: params.scope };
+  const ids = await engine.listIds(scopeCond, limit);
+  const truncated = ids.length >= limit;
+  if (ids.length === 0) return { tags: [], scanned: 0, truncated };
+  const docs = await engine.fetch(ids, false);
+  const counts = new Map<string, number>();
+  for (const d of docs) {
+    const raw = d.fields?.[TAG_FIELD];
+    const tag = raw !== undefined && raw !== null ? String(raw) : '';
+    if (tag.length === 0) continue;
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  const tags: VectorTagInfo[] = [...counts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag));
+  return { tags, scanned: ids.length, truncated };
+}
+
+/**
+ * 统计指定 scope（可选 tag）下文档数（listIds 长度，受 LIST_ALL_LIMIT 约束）。
+ */
+export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
+  validateScope(params.scope);
+  const engine = await getEngine();
+  const filter = buildScopeTagFilter(params.scope, params.tags);
+  const ids = await engine.listIds(filter, LIST_ALL_LIMIT);
+  return ids.length;
+}
+
+/**
+ * 删除指定 scope（可选 tag）下的全部文档。循环处理以覆盖 > LIST_ALL_LIMIT 的情况。
+ */
+export async function vectorDeleteScope(params: { scope: string; tags?: string[] }): Promise<{ deleted: number }> {
+  validateScope(params.scope);
+  const engine = await getEngine();
+  const filter = buildScopeTagFilter(params.scope, params.tags);
+  let total = 0;
+  for (;;) {
+    const ids = await engine.listIds(filter, LIST_ALL_LIMIT);
+    if (ids.length === 0) break;
+    const res = await engine.delete(ids);
+    total += res.ok;
+    // 无进展保护：本批一条都没删掉（全部报错/被锁），再循环仍是同一批 ids，
+    // 直接退出避免死循环空转（P1 健壮性）
+    if (res.ok === 0) break;
+    if (ids.length < LIST_ALL_LIMIT) break;
+  }
+  return { deleted: total };
 }

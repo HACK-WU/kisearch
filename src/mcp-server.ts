@@ -8,6 +8,8 @@ import { registerSearchTool } from './lib/mcp-tools/search.js';
 import { registerStoreTool } from './lib/mcp-tools/store.js';
 import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
+import { registerScopeListTool } from './lib/mcp-tools/scope-list.js';
+import { registerTagListTool } from './lib/mcp-tools/tag-list.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig } from './lib/config.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
@@ -47,6 +49,8 @@ export async function startMcpServer(): Promise<void> {
   registerStoreTool(server);
   registerBulkStoreTool(server);
   registerDeleteRelationTool(server);
+  registerScopeListTool(server);
+  registerTagListTool(server);
 
   // 长驻进程：engine 在首次向量调用时惰性打开并跨请求复用（不 per-call 关闭），
   // 仅在进程退出时统一 terminate worker + 释放 LOCK。
