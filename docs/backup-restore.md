@@ -126,7 +126,7 @@ tar -czf KiSearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz KiSearch/kb/
 使用 `ki restore` 命令从备份快照恢复：
 
 ```bash
-# 列出可用备份
+# 列出可用备份（输出中的 backupDir / locations 字段会给出备份文件的物理路径）
 ki restore my-project
 
 # 从最新快照恢复（需 --yes 确认）
@@ -136,6 +136,12 @@ ki restore my-project --from-snapshot --yes
 # timestamp：20260616-223000 
 # 从指定时间戳的快照恢复（timestamp 格式：YYYYMMDD-HHMMSS）
 ki restore my-project --from-snapshot --timestamp 20260616-223000 --yes
+
+# 指定备份根目录（不传则使用配置中的默认 backupDir）
+# --backup-dir 对「列出/快照还原/结果重放」均生效，
+# 按 <backup-dir>/<scope>/{snapshots,ai-results} 布局查找
+ki restore my-project --backup-dir /path/to/other-backups
+ki restore my-project --from-snapshot --backup-dir /path/to/other-backups --yes
 ```
 
 ### 2. 从 ai-results 重放
@@ -143,12 +149,17 @@ ki restore my-project --from-snapshot --timestamp 20260616-223000 --yes
 如果保存了 ai-results 备份文件，可以重放恢复：
 
 ```bash
-# 从默认备份目录重放
+# 先预览总览（不加 --yes 时仅展示总览并退出，不执行）
 ki restore my-project --from-results
 
+# 确认总览无误后加 --yes 重新执行，真正重放还原
+ki restore my-project --from-results --yes
+
 # 从指定目录重放
-ki restore my-project --from-results --dir /path/to/ai-results
+ki restore my-project --from-results --dir /path/to/ai-results --yes
 ```
+
+> CLI 为非交互式：`--from-snapshot` 与 `--from-results` 均不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原/重放来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
 
 ### 3. 从模板重新初始化
 

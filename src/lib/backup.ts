@@ -176,15 +176,20 @@ export function autoBackup(
 
 /**
  * 列出现有备份
+ *
+ * @param backupDirOverride 可选的备份根目录（对应 `ki restore --backup-dir`）；
+ *   缺省时使用 config.backupDir。传入后按同样的 `<backupDir>/<scope>/{snapshots,ai-results}`
+ *   布局在该目录下查找。
  */
 export function listBackups(
   config: KiConfig,
-  scope: string
+  scope: string,
+  backupDirOverride?: string
 ): {
   snapshots: Array<{ file: string; timestamp: string; size: number }>;
   aiResults: Array<{ file: string; timestamp: string; mode: string; size: number }>;
 } {
-  const backupDir = getBackupDir(config);
+  const backupDir = backupDirOverride ?? getBackupDir(config);
 
   const snapshots: Array<{ file: string; timestamp: string; size: number }> = [];
   const snapDir = path.join(backupDir, scope, 'snapshots');

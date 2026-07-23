@@ -7,6 +7,11 @@
  *   ki restore <scope> --from-results  [--dir <ai-results-dir>]
  *   ki restore <scope>                 (列出可用备份)
  *
+ *   通用选项：
+ *     --backup-dir <dir>  指定备份根目录（不传则用配置中的默认 backupDir）。
+ *                         对列出/快照还原/结果重放三种模式均生效，按
+ *                         `<backup-dir>/<scope>/{snapshots,ai-results}` 布局查找。
+ *
  * --from-snapshot: 从 tar.gz 快照覆盖还原（破坏性操作，需 --yes 确认）
  * --from-results:  按 timestamp 顺序重放 ai-results 备份文件
  */
@@ -14,7 +19,6 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import readline from 'readline';
 import {
   loadConfig,
   getScopeDataDir,
@@ -42,19 +46,21 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-// ─── 交互确认 ───
+// ─── 确认（非交互）───
 
-async function askConfirmation(message: string): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stderr,
+/**
+ * 展示还原总览并以 CONFIRMATION_REQUIRED 退出。
+ * CLI 均为非交互式：不做任何交互提示、不挂起。未加 --yes 时，仅把总览写到 stderr，
+ * 并输出机器可读的错误后直接退出；确认无误后由使用者加 --yes 重新执行以真正还原。
+ */
+function previewAndRequireYes(overview: string): never {
+  process.stderr.write(overview);
+  output({
+    ok: false,
+    error: '这是破坏性操作。确认以上总览无误后，请添加 --yes 重新执行以真正还原。',
+    code: 'CONFIRMATION_REQUIRED',
   });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === 'y');
-    });
-  });
+  process.exit(1);
 }
 
 // ─── tar 解压 ───
@@ -118,12 +124,15 @@ function summarizeScopeDir(scopeDataDir: string): string {
 
 async function restoreFromSnapshot(
   scope: string,
-  opts: { timestamp?: string; yes?: boolean }
+  opts: { timestamp?: string; yes?: boolean; backupDir?: string }
 ): Promise<void> {
   ensureTarAvailable();
 
   const config = loadConfig();
-  const backupDir = getBackupDir(config);
+  const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
+  // 还原前安全网快照始终写入受管的默认 backupDir：--backup-dir 仅控制「从哪读」，
+  // 不应把新建快照写进可能只读/外部的自定义目录（否则会因写失败而被 CH-2 中断还原）。
+  const safetyBackupDir = getBackupDir(config);
   const snapDir = path.join(backupDir, scope, 'snapshots');
 
   if (!fs.existsSync(snapDir)) {
@@ -172,19 +181,15 @@ async function restoreFromSnapshot(
     throw err;
   }
 
-  // 确认（NEG-11：展示将被删除的数据摘要）
+  // 确认（NEG-11）：CLI 非交互式——展示总览后要求显式 --yes 重新执行，绝不交互挂起
   if (!opts.yes) {
-    const msg =
+    previewAndRequireYes(
       `⚠️  即将删除并覆盖目录：${scopeDataDir}\n` +
-      `${summarizeScopeDir(scopeDataDir)}\n` +
-      `   还原快照：${snapshotFile}\n` +
-      `   ⚠️  此操作不可逆（还原前会自动创建安全网快照）\n` +
-      `   确认继续？`;
-    const confirmed = await askConfirmation(msg);
-    if (!confirmed) {
-      console.log('已取消还原操作');
-      process.exit(0);
-    }
+        `${summarizeScopeDir(scopeDataDir)}\n` +
+        `   还原来源：${snapshotPath}\n` +
+        `   还原快照：${snapshotFile}\n` +
+        `   ⚠️  此操作不可逆（还原前会自动创建安全网快照）\n`
+    );
   }
 
   // 备份当前状态（还原前快照，安全网）
@@ -195,7 +200,7 @@ async function restoreFromSnapshot(
   if (fs.existsSync(scopeDataDir)) {
     process.stderr.write('还原前：创建当前状态快照...\n');
     try {
-      preRestoreSnapshot = backupScopeSnapshot(backupDir, scope, scopeDataDir);
+      preRestoreSnapshot = backupScopeSnapshot(safetyBackupDir, scope, scopeDataDir);
     } catch (err) {
       output({
         ok: false,
@@ -260,9 +265,14 @@ async function restoreFromSnapshot(
 
 // ─── from-results 重放 ───
 
-async function restoreFromResults(scope: string, opts: { dir?: string }): Promise<void> {
+async function restoreFromResults(
+  scope: string,
+  opts: { dir?: string; backupDir?: string; yes?: boolean }
+): Promise<void> {
   const config = loadConfig();
-  const backupDir = getBackupDir(config);
+  const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
+  // 同 restoreFromSnapshot：重放前安全网快照写入受管的默认 backupDir，而非 --backup-dir 覆盖目录。
+  const safetyBackupDir = getBackupDir(config);
 
   const aiResultsDir = opts.dir
     ? path.resolve(opts.dir)
@@ -304,12 +314,26 @@ async function restoreFromResults(scope: string, opts: { dir?: string }): Promis
     );
   }
 
-  // 还原前快照（仅一次）
+  // 确认（与 --from-snapshot 一致）：CLI 非交互式，展示总览后要求显式 --yes 重新执行
   const scopeDataDir = getScopeDataDir(config, scope);
+  if (!opts.yes) {
+    const fullCount = files.filter((f) => /\.full\.json$/.test(f)).length;
+    const incCount = files.length - fullCount;
+    previewAndRequireYes(
+      `⚠️  即将通过重放 ai-results 改写 scope：${scope}\n` +
+        `   目标目录：${scopeDataDir}\n` +
+        `${summarizeScopeDir(scopeDataDir)}\n` +
+        `   重放来源：${aiResultsDir}\n` +
+        `   重放文件：共 ${files.length} 个（全量 ${fullCount} + 增量 ${incCount}），首个全量基底：${files[0]}\n` +
+        `   ⚠️  此操作会改写现有数据（重放前会自动创建安全网快照）\n`
+    );
+  }
+
+  // 还原前快照（仅一次）
   try {
     if (fs.existsSync(scopeDataDir)) {
       process.stderr.write('重放前：创建当前状态快照...\n');
-      backupScopeSnapshot(backupDir, scope, scopeDataDir);
+      backupScopeSnapshot(safetyBackupDir, scope, scopeDataDir);
     }
   } catch (err) {
     process.stderr.write(
@@ -380,16 +404,25 @@ async function restoreFromResults(scope: string, opts: { dir?: string }): Promis
 
 // ─── 列出备份 ───
 
-function listAvailableBackups(scope: string): void {
+function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}): void {
   const config = loadConfig();
-  const backups = listBackups(config, scope);
+  const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
+  const backups = listBackups(config, scope, backupDir);
 
   output({
     ok: true,
     action: 'restore_list',
     scope,
+    // 明确告知备份文件物理位置，available 中的 file 为相对于对应 location 的文件名
+    backupDir,
+    locations: {
+      snapshots: path.join(backupDir, scope, 'snapshots'),
+      aiResults: path.join(backupDir, scope, 'ai-results'),
+    },
     available: backups,
-    hint: '使用 --from-snapshot 或 --from-results 选择还原模式',
+    hint:
+      '使用 --from-snapshot 或 --from-results 选择还原模式；' +
+      '--backup-dir <dir> 可指定其它备份目录',
   });
 }
 
@@ -397,16 +430,16 @@ function listAvailableBackups(scope: string): void {
 
 const args = process.argv.slice(2);
 
-// 未知参数检测（NEG-01）：--timestamp / --dir 为带值参数
+// 未知参数检测（NEG-01）：--timestamp / --dir / --backup-dir 为带值参数
 detectUnknownFlags(
   args,
-  ['--from-snapshot', '--from-results', '--yes', '--timestamp', '--dir'],
-  ['--timestamp', '--dir']
+  ['--from-snapshot', '--from-results', '--yes', '--timestamp', '--dir', '--backup-dir'],
+  ['--timestamp', '--dir', '--backup-dir']
 );
 
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
-  console.error('用法：ki restore <scope> [--from-snapshot [--timestamp <ts>]] [--from-results [--dir <dir>]]');
+  console.error('用法：ki restore <scope> [--from-snapshot [--timestamp <ts>]] [--from-results [--dir <dir>]] [--backup-dir <dir>]');
   process.exit(1);
 }
 
@@ -428,6 +461,13 @@ if (dirIdx !== -1 && dirIdx + 1 < args.length) {
   dir = args[dirIdx + 1];
 }
 
+// 提取 --backup-dir（指定备份根目录，不传则用配置默认）
+let backupDirOverride: string | undefined;
+const bdIdx = args.indexOf('--backup-dir');
+if (bdIdx !== -1 && bdIdx + 1 < args.length) {
+  backupDirOverride = args[bdIdx + 1];
+}
+
 // ─── 主逻辑 ───
 
 async function main() {
@@ -439,11 +479,11 @@ async function main() {
     }
 
     if (fromSnapshot) {
-      await restoreFromSnapshot(scope, { timestamp, yes: skipYes });
+      await restoreFromSnapshot(scope, { timestamp, yes: skipYes, backupDir: backupDirOverride });
     } else if (fromResults) {
-      await restoreFromResults(scope, { dir });
+      await restoreFromResults(scope, { dir, backupDir: backupDirOverride, yes: skipYes });
     } else {
-      listAvailableBackups(scope);
+      listAvailableBackups(scope, { backupDir: backupDirOverride });
     }
   } catch (err) {
     output(toErrorPayload(err));
