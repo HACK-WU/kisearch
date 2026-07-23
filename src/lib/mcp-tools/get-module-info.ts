@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeGetModuleInfo } from '../../get-module-info.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerGetModuleInfoTool(server: McpServer): void {
   server.tool(
@@ -13,11 +14,15 @@ export function registerGetModuleInfoTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeGetModuleInfo({
-          scope: args.scope,
-          group: args.group,
-          relation: args.relation,
-        });
+        const result = await withTimeout(
+          executeGetModuleInfo({
+            scope: args.scope,
+            group: args.group,
+            relation: args.relation,
+          }),
+          TOOL_TIMEOUT.READ,
+          'ki_get_module_info'
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

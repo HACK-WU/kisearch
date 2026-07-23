@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeTagList } from '../../tag.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerTagListTool(server: McpServer): void {
   server.tool(
@@ -11,7 +12,11 @@ export function registerTagListTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeTagList({ scope: args.scope });
+        const result = await withTimeout(
+          executeTagList({ scope: args.scope }),
+          TOOL_TIMEOUT.READ,
+          'ki_tag_list'
+        );
         if (!result.ok) {
           return {
             isError: true,

@@ -22,6 +22,7 @@ import {
   closeEngine,
   type VectorTagInfo,
 } from './lib/vector-client.js';
+import { parseIntArg } from './lib/cli-args.js';
 
 // ─── 纯函数（供 CLI / MCP 共享） ───
 
@@ -61,7 +62,7 @@ program
   .action(async (opts) => {
     const result = await executeTagList({
       scope: opts.scope,
-      scanLimit: parseInt(opts.scanLimit, 10),
+      scanLimit: parseIntArg(opts.scanLimit, 10000, '--scan-limit', { min: 1 }),
     });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();

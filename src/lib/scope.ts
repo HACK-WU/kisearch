@@ -11,17 +11,33 @@ import { loadConfig, getScopeDataDir } from './config.js';
 // scope 合法字符正则
 const SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+/** scope 校验错误码（NEG-03：统一错误码/文案） */
+export type ScopeErrorCode = 'EMPTY_SCOPE' | 'INVALID_SCOPE';
+
+export class ScopeError extends Error {
+  code: ScopeErrorCode;
+  constructor(code: ScopeErrorCode, message: string) {
+    super(message);
+    this.name = 'ScopeError';
+    this.code = code;
+  }
+}
+
 /**
  * 校验 scope 参数合法性
- * @throws Error 如果 scope 不合法
+ * @throws ScopeError 如果 scope 不合法
  */
 export function validateScope(scope: string): void {
   if (!scope || typeof scope !== 'string') {
-    throw new Error('scope 不能为空');
+    throw new ScopeError('EMPTY_SCOPE', 'scope 不能为空');
   }
   if (!SCOPE_PATTERN.test(scope)) {
-    throw new Error(
-      `scope "${scope}" 不合法：仅允许字母、数字、连字符、下划线，禁止路径遍历字符`
+    // 标出具体非法字符，便于定位（去重保留顺序）
+    const illegal = Array.from(new Set(scope.split('').filter((c) => !/[a-zA-Z0-9_-]/.test(c))));
+    throw new ScopeError(
+      'INVALID_SCOPE',
+      `scope "${scope}" 不合法：仅允许字母、数字、连字符(-)、下划线(_)，禁止路径遍历字符` +
+        (illegal.length > 0 ? `\n  非法字符：${illegal.map((c) => JSON.stringify(c)).join(', ')}` : '')
     );
   }
 }

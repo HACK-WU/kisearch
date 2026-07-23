@@ -52,6 +52,8 @@ interface SyncResult {
   keywords: string[];
   invalid_keywords: string[];
   evicted: string | null;
+  keywords_truncated?: number;
+  keywords_warning?: string;
   wikiSynced?: boolean;
   wikiFile?: string;
 }
@@ -262,9 +264,14 @@ function syncSingleRelation(
       groupData.keywords.push(kw);
     }
   }
+  let keywordsTruncated = 0;
+  const droppedKeywords: string[] = [];
   if (groupData.keywords.length > config.maxKeywordCount) {
     const overflow = groupData.keywords.length - config.maxKeywordCount;
+    // 记录被 FIFO 淘汰的旧关键词（NEG-05：避免静默截断）
+    droppedKeywords.push(...groupData.keywords.slice(0, overflow));
     groupData.keywords.splice(0, overflow);
+    keywordsTruncated = overflow;
   }
 
   // 8. 写入本地 KB
@@ -285,6 +292,14 @@ function syncSingleRelation(
     keywords: validKeywords,
     invalid_keywords: invalidKeywords,
     evicted,
+    ...(keywordsTruncated > 0
+      ? {
+          keywords_truncated: keywordsTruncated,
+          keywords_warning:
+            `Group "${group}" 关键词已达上限 ${config.maxKeywordCount}，` +
+            `本次 FIFO 淘汰 ${keywordsTruncated} 个最早关键词：${droppedKeywords.join(', ')}`,
+        }
+      : {}),
   };
 }
 
@@ -360,6 +375,11 @@ function syncBatch(
         console.warn(`警告：Relation "${item.relation}" 的关键词全部无效或为空`);
       }
 
+      // NEG-05：关键词 FIFO 截断告警回显
+      if (result.keywords_warning) {
+        console.warn(`警告：${result.keywords_warning}`);
+      }
+
       // Wiki 写回（容错）
       try {
         const wikiResult = writeBackToWiki(
@@ -405,7 +425,7 @@ export interface SyncRelationParams {
 }
 
 export type SyncRelationResult =
-  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; hint?: string; vectorPending?: boolean; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; keywords_truncated?: number; keywords_warning?: string; hint?: string; vectorPending?: boolean; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───

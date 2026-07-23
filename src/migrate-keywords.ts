@@ -21,6 +21,8 @@ import fs from 'fs';
 import { readJson, writeJson } from './lib/store.js';
 import { getRelationsCachePath, validateScope, listAllScopes } from './lib/scope.js';
 import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './lib/constants.js';
+import { loadConfig, getScopeDataDir, getBackupDir } from './lib/config.js';
+import { backupScopeSnapshot } from './lib/backup.js';
 
 // ─── 类型定义（兼容新旧格式） ───
 
@@ -190,7 +192,29 @@ program
       }
 
       const stats: MigrateStat[] = [];
+      const backups: Array<{ scope: string; snapshot: string }> = [];
       for (const scope of scopes) {
+        // NEG-12：非预演模式下，写盘前自动快照（可通过 ki restore 回滚）
+        if (!dryRun) {
+          try {
+            validateScope(scope);
+            const config = loadConfig();
+            const scopeDataDir = getScopeDataDir(config, scope);
+            if (fs.existsSync(scopeDataDir)) {
+              const snap = backupScopeSnapshot(getBackupDir(config), scope, scopeDataDir);
+              backups.push({ scope, snapshot: snap });
+              process.stderr.write(`迁移前：已为 scope "${scope}" 创建快照 ${snap}\n`);
+            }
+          } catch (err) {
+            // 备份失败视为阻断性错误：无回滚保障时不应执行破坏性迁移
+            output({
+              ok: false,
+              error: `迁移前自动备份失败（scope=${scope}）：${(err as Error).message}\n为避免无法回滚，已中止迁移`,
+              code: 'BACKUP_FAILED',
+            });
+            process.exit(1);
+          }
+        }
         stats.push(migrateScope(scope, dryRun));
       }
 
@@ -198,6 +222,7 @@ program
         ok: true,
         dry_run: dryRun,
         scopes_processed: stats.length,
+        ...(backups.length > 0 ? { backups } : {}),
         stats,
       });
     } catch (err) {

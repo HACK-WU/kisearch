@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeQueryGroup } from '../../query-group.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerQueryGroupTool(server: McpServer): void {
   server.tool(
@@ -18,14 +19,18 @@ export function registerQueryGroupTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeQueryGroup({
-          scope: args.scope,
-          groupsParam: args.groups,
-          hotCount: args.hot_count ?? 5,
-          depth: args.depth ?? 4,
-          modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
-          autoFallback: args.auto_fallback,
-        });
+        const result = await withTimeout(
+          executeQueryGroup({
+            scope: args.scope,
+            groupsParam: args.groups,
+            hotCount: args.hot_count ?? 5,
+            depth: args.depth ?? 4,
+            modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
+            autoFallback: args.auto_fallback,
+          }),
+          TOOL_TIMEOUT.READ,
+          'ki_query_group'
+        );
         if (result.ok) {
           return {
             content: [{ type: 'text', text: result.output }],

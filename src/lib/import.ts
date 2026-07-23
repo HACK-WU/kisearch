@@ -26,6 +26,7 @@ import {
   type GroupIndex,
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
+import { cleanupTmpFiles } from './wal.js';
 import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
 
@@ -393,6 +394,14 @@ async function phase2Vectorize(
     if (newProgressEntries.length > lastSaveCount) {
       saveProgressIncrement();
     }
+    // NEG-09：清理 WAL 残留（半截 .tmp / 陈旧 .lock），避免下次启动受影响
+    try {
+      const scopeDir = path.dirname(getRelationsCachePath(scope));
+      const cleaned = cleanupTmpFiles(scopeDir);
+      if (cleaned > 0) {
+        process.stderr.write(`已清理 ${cleaned} 个中断残留文件（.tmp/.lock）\n`);
+      }
+    } catch { /* 清理失败不阻断退出 */ }
     process.stderr.write(`\n⚠ 中断：已保存 ${newProgressEntries.length} 条向量化进度，重新执行 import 可从断点继续\n`);
     process.exit(130);
   };

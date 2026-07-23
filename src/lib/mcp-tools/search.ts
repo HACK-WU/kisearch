@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeSearch } from '../../search.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerSearchTool(server: McpServer): void {
   server.tool(
@@ -15,13 +16,17 @@ export function registerSearchTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeSearch({
-          scope: args.scope,
-          query: args.query,
-          limit: args.limit,
-          threshold: args.threshold,
-          tags: args.tags,
-        });
+        const result = await withTimeout(
+          executeSearch({
+            scope: args.scope,
+            query: args.query,
+            limit: args.limit,
+            threshold: args.threshold,
+            tags: args.tags,
+          }),
+          TOOL_TIMEOUT.WRITE,
+          'ki_search'
+        );
         if (!result.ok) {
           return {
             isError: true,

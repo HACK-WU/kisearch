@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeSyncRelation } from '../../sync-relation.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerSyncRelationTool(server: McpServer): void {
   server.tool(
@@ -15,13 +16,17 @@ export function registerSyncRelationTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeSyncRelation({
-          scope: args.scope,
-          group: args.group,
-          relation: args.relation,
-          moduleInfo: args.module_info,
-          keywords: args.keywords,
-        });
+        const result = await withTimeout(
+          executeSyncRelation({
+            scope: args.scope,
+            group: args.group,
+            relation: args.relation,
+            moduleInfo: args.module_info,
+            keywords: args.keywords,
+          }),
+          TOOL_TIMEOUT.WRITE,
+          'ki_sync_relation'
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

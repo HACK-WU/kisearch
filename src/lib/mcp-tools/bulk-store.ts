@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeBulkStore } from '../../bulk-store.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerBulkStoreTool(server: McpServer): void {
   server.tool(
@@ -12,10 +13,14 @@ export function registerBulkStoreTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeBulkStore({
-          scope: args.scope,
-          inputFile: args.input,
-        });
+        const result = await withTimeout(
+          executeBulkStore({
+            scope: args.scope,
+            inputFile: args.input,
+          }),
+          TOOL_TIMEOUT.BULK,
+          'ki_bulk_store'
+        );
         if (!result.ok) {
           return {
             isError: true,

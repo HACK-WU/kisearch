@@ -21,7 +21,8 @@ import {
   type GroupIndex,
 } from './lib/scope.js';
 import { generateMarkdown } from './lib/markdown-gen.js';
-
+import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
+import { checkWritable } from './lib/preflight.js';
 // ─── 类型 ───
 
 interface ExportOptions {
@@ -190,6 +191,9 @@ function handleExport(options: ExportOptions): ExportResult {
   const exportedAt = new Date().toISOString();
   const absOutputDir = path.resolve(outputDir);
 
+  // NEG-07：写盘前预检输出目录可写性（避免途中 EACCES 产生半截产物）
+  checkWritable(absOutputDir);
+
   // 遍历每个 Group
   for (const groupPath of groupPaths) {
     const relations = relationsCache.groups[groupPath]?.hot_relations || [];
@@ -256,10 +260,12 @@ function handleExport(options: ExportOptions): ExportResult {
 
 const args = process.argv.slice(2);
 
+// 未知参数检测（NEG-01）：--output / --root-name 为带值参数
+detectUnknownFlags(args, ['--output', '--root-name'], ['--output', '--root-name']);
+
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
-  console.error('用法：ki export <scope> --output <dir> [--root-name <name>]');
-  process.exit(1);
+  fail('用法：ki export <scope> --output <dir> [--root-name <name>]');
 }
 
 // 提取 --output
@@ -286,5 +292,7 @@ try {
   const result = handleExport({ scope, output: outputDir, rootName });
   output(result as unknown as Record<string, unknown>);
 } catch (err) {
-  fail((err as Error).message);
+  // 统一错误契约（NEG-04）：携带 code 的错误（如 PreflightError）一并回显
+  output(toErrorPayload(err));
+  process.exit(1);
 }

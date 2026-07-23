@@ -28,6 +28,8 @@ import {
 import { handleImport } from './lib/import.js';
 import { handleIncremental } from './lib/incremental.js';
 import { closeEngine } from './lib/vector-client.js';
+import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
+import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
 
 // ─── 工具 ───
 
@@ -65,6 +67,51 @@ function ensureTarAvailable(): void {
       'tar 命令不可用，请安装 tar（Linux/macOS 内置，Windows 请安装 Git for Windows）'
     );
   }
+}
+
+// ─── 目标摘要（NEG-11：破坏性覆盖前展示将被删除的数据规模）───
+
+/**
+ * 汇总即将被覆盖的 scope 目录信息，供二次确认时展示。
+ * 尽力而为：任何读取失败都降级为「未知」，不阻断流程。
+ */
+function summarizeScopeDir(scopeDataDir: string): string {
+  if (!fs.existsSync(scopeDataDir)) {
+    return '   目标目录当前不存在（等价于全新导入）';
+  }
+  const lines: string[] = [];
+
+  // 关系条目数：统计 relations-cache.json 各 Group 的 hot_relations
+  try {
+    const rcPath = path.join(scopeDataDir, 'relations-cache.json');
+    if (fs.existsSync(rcPath)) {
+      const rc = JSON.parse(fs.readFileSync(rcPath, 'utf-8')) as {
+        groups?: Record<string, { hot_relations?: unknown[] }>;
+      };
+      const groups = rc.groups || {};
+      const groupCount = Object.keys(groups).length;
+      let relCount = 0;
+      for (const g of Object.values(groups)) {
+        relCount += g.hot_relations?.length || 0;
+      }
+      lines.push(`   现有数据：${groupCount} 个 Group、${relCount} 条 Relation`);
+    }
+  } catch {
+    /* 忽略统计失败 */
+  }
+
+  // 目录体积与最后修改时间
+  try {
+    const size = estimateDirSize(scopeDataDir);
+    const mtime = fs.statSync(scopeDataDir).mtime;
+    lines.push(
+      `   目录体积：约 ${(size / 1024).toFixed(1)} KB，最后修改：${mtime.toISOString()}`
+    );
+  } catch {
+    /* 忽略统计失败 */
+  }
+
+  return lines.length > 0 ? lines.join('\n') : '   （无法读取现有数据摘要）';
 }
 
 // ─── from-snapshot 还原 ───
@@ -110,11 +157,28 @@ async function restoreFromSnapshot(
   const scopeDataDir = getScopeDataDir(config, scope);
   const scopeDirParent = path.dirname(scopeDataDir);
 
-  // 确认
+  // NEG-07：还原前预检目标父目录可写性 + 解压空间（避免删除后无法写入）
+  try {
+    checkWritable(scopeDirParent);
+    const snapSize = fs.statSync(snapshotPath).size;
+    // tar.gz 解压后通常膨胀数倍，保守按 5x 估算所需空间
+    checkDiskSpace(scopeDirParent, snapSize * 5);
+  } catch (err) {
+    if (err instanceof PreflightError) {
+      output({ ok: false, error: err.message, code: err.code });
+      await closeEngine();
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  // 确认（NEG-11：展示将被删除的数据摘要）
   if (!opts.yes) {
     const msg =
       `⚠️  即将删除并覆盖目录：${scopeDataDir}\n` +
+      `${summarizeScopeDir(scopeDataDir)}\n` +
       `   还原快照：${snapshotFile}\n` +
+      `   ⚠️  此操作不可逆（还原前会自动创建安全网快照）\n` +
       `   确认继续？`;
     const confirmed = await askConfirmation(msg);
     if (!confirmed) {
@@ -124,16 +188,26 @@ async function restoreFromSnapshot(
   }
 
   // 备份当前状态（还原前快照，安全网）
+  // CH-2：安全网快照失败视为阻断性错误 —— 与 migrate-keywords 的备份策略保持一致。
+  // 无法创建安全网时，绝不执行后续不可逆的删除+覆盖，避免「确认文案承诺了快照、
+  // 却在快照失败后仍继续删除」造成的数据丢失窗口。
   let preRestoreSnapshot: string | null = null;
-  try {
-    if (fs.existsSync(scopeDataDir)) {
-      process.stderr.write('还原前：创建当前状态快照...\n');
+  if (fs.existsSync(scopeDataDir)) {
+    process.stderr.write('还原前：创建当前状态快照...\n');
+    try {
       preRestoreSnapshot = backupScopeSnapshot(backupDir, scope, scopeDataDir);
+    } catch (err) {
+      output({
+        ok: false,
+        error:
+          `还原前安全网快照创建失败：${(err as Error).message}\n` +
+          `为避免不可逆的数据丢失，已中止还原（未删除任何现有数据）。\n` +
+          `请修复上述问题（如磁盘空间 / 目录权限 / tar 可用性）后重试。`,
+        code: 'SAFETY_SNAPSHOT_FAILED',
+      });
+      await closeEngine();
+      process.exit(1);
     }
-  } catch (err) {
-    process.stderr.write(
-      `警告：还原前快照失败 — ${(err as Error).message}（继续还原）\n`
-    );
   }
 
   // 删除现有目录内容
@@ -167,8 +241,10 @@ async function restoreFromSnapshot(
         );
       }
     } else {
+      // CH-2 下：preRestoreSnapshot 为空仅出现于目标目录原本不存在（等价全新导入），
+      // 此时无现有数据可丢失，无需安全网。
       fail(
-        `tar 解压失败：${(err as Error).message}\n还原前未创建安全网快照，请检查备份目录`
+        `tar 解压失败：${(err as Error).message}\n目标为空（全新导入，无现有数据丢失），请检查快照文件是否完整`
       );
     }
   }
@@ -199,7 +275,7 @@ async function restoreFromResults(scope: string, opts: { dir?: string }): Promis
   // 扫描并排序
   const files = fs
     .readdirSync(aiResultsDir)
-    .filter((f) => /^ai-results\.\d{8}-\d{6}\.(full|incremental)\.json$/.test(f))
+    .filter((f) => /^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/.test(f))
     .sort();
 
   if (files.length === 0) {
@@ -208,7 +284,7 @@ async function restoreFromResults(scope: string, opts: { dir?: string }): Promis
 
   // 校验首个文件的 meta 字段 + 模式
   const firstFile = path.join(aiResultsDir, files[0]);
-  const firstModeMatch = files[0].match(/^ai-results\.\d{8}-\d{6}\.(full|incremental)\.json$/);
+  const firstModeMatch = files[0].match(/^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/);
   if (!firstModeMatch || firstModeMatch[1] !== 'full') {
     fail(
       `首个文件不是全量备份，无法作为重放基底：\n  ${files[0]}\n` +
@@ -253,7 +329,7 @@ async function restoreFromResults(scope: string, opts: { dir?: string }): Promis
     const file = files[i];
     const filePath = path.join(aiResultsDir, file);
     // 从文件名解析实际模式（而非按位置推断）
-    const modeMatch = file.match(/^ai-results\.\d{8}-\d{6}\.(full|incremental)\.json$/)!;
+    const modeMatch = file.match(/^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/)!;
     const mode = modeMatch[1] as 'full' | 'incremental';
 
     process.stderr.write(`[${i + 1}/${files.length}] 重放：${file} (${mode})...\n`);
@@ -321,6 +397,13 @@ function listAvailableBackups(scope: string): void {
 
 const args = process.argv.slice(2);
 
+// 未知参数检测（NEG-01）：--timestamp / --dir 为带值参数
+detectUnknownFlags(
+  args,
+  ['--from-snapshot', '--from-results', '--yes', '--timestamp', '--dir'],
+  ['--timestamp', '--dir']
+);
+
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
   console.error('用法：ki restore <scope> [--from-snapshot [--timestamp <ts>]] [--from-results [--dir <dir>]]');
@@ -363,7 +446,7 @@ async function main() {
       listAvailableBackups(scope);
     }
   } catch (err) {
-    output({ ok: false, error: (err as Error).message });
+    output(toErrorPayload(err));
     process.exit(1);
   } finally {
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则 worker 线程持引用导致进程无法退出

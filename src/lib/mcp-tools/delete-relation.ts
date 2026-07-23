@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeDeleteRelation } from '../../delete-relation.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerDeleteRelationTool(server: McpServer): void {
   server.tool(
@@ -13,11 +14,15 @@ export function registerDeleteRelationTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await executeDeleteRelation({
-          scope: args.scope,
-          group: args.group,
-          relation: args.relation,
-        });
+        const result = await withTimeout(
+          executeDeleteRelation({
+            scope: args.scope,
+            group: args.group,
+            relation: args.relation,
+          }),
+          TOOL_TIMEOUT.WRITE,
+          'ki_delete_relation'
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

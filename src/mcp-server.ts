@@ -13,6 +13,7 @@ import { registerTagListTool } from './lib/mcp-tools/tag-list.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig } from './lib/config.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
+import { readKiVersion, startVersionGuard } from './lib/version-guard.js';
 
 export async function startMcpServer(): Promise<void> {
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
@@ -37,8 +38,11 @@ export async function startMcpServer(): Promise<void> {
 
   const server = new McpServer({
     name: 'KiSearch',
-    version: '0.1.0',
+    version: readKiVersion(),
   });
+
+  // NEG-13：长驻进程版本自检 banner + 升级监听（升级后提示重启）
+  const stopVersionGuard = startVersionGuard('KiSearch');
 
   // 注册所有工具
   registerQueryGroupTool(server);
@@ -58,6 +62,11 @@ export async function startMcpServer(): Promise<void> {
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    try {
+      stopVersionGuard();
+    } catch {
+      /* 忽略 */
+    }
     try {
       await closeEngine();
     } catch {

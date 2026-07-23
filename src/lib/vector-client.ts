@@ -56,6 +56,21 @@ export interface VectorBulkStoreResult {
 export interface VectorAvailableResult {
   available: boolean;
   reason?: string;
+  /** 不可用原因码（NEG-10：便于上层区分占用/损坏/异常） */
+  code?: 'LOCKED' | 'CORRUPTED' | 'PROBE_ERROR';
+}
+
+/**
+ * 向量库被占用时的可操作处置提示（NEG-10）。
+ */
+function lockedHint(dbPath: string): string {
+  return (
+    `向量库被其他进程占用（${dbPath}）。\n` +
+    `  处置方式：\n` +
+    `  1) 若有 ki mcp/server 常驻进程在运行，请先停止它；\n` +
+    `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
+    `  3) 若进程已异常退出，锁会在片刻后自动释放，可稍后重试`
+  );
 }
 
 export interface VectorDocInfo {
@@ -160,9 +175,7 @@ export function getEngine(): Promise<ZvecEngine> {
     _enginePromise = (async () => {
       const exists = await ZvecEngine.probe(createCfg.dbPath);
       if (exists.locked) {
-        throw new CollectionLockedException(
-          `向量库被其他进程占用（${createCfg.dbPath}）。如有 ki mcp/server 常驻进程在运行，请先停止`,
-        );
+        throw new CollectionLockedException(lockedHint(createCfg.dbPath));
       }
       if (!exists.exists) {
         return ZvecEngine.create(createCfg);
@@ -208,21 +221,23 @@ export async function ensureVectorAvailable(): Promise<VectorAvailableResult> {
     if (probe.locked) {
       return {
         available: false,
-        reason: `向量库被其他进程占用（${dbPath}）。如有 ki mcp/server 常驻进程在运行，请先停止`,
+        reason: lockedHint(dbPath),
+        code: 'LOCKED',
       };
     }
     if (probe.exists && !probe.healthy) {
       return {
         available: false,
-        reason: `向量库损坏（${dbPath}），建议执行 ki restore 重建`,
+        reason: `向量库损坏（${dbPath}），建议执行 ki restore <scope> --from-snapshot 重建`,
+        code: 'CORRUPTED',
       };
     }
     return { available: true };
   } catch (err) {
     if (err instanceof CollectionLockedException) {
-      return { available: false, reason: `向量库被其他进程占用（${dbPath}）` };
+      return { available: false, reason: lockedHint(dbPath), code: 'LOCKED' };
     }
-    return { available: false, reason: `向量服务检测异常: ${(err as Error).message}` };
+    return { available: false, reason: `向量服务检测异常: ${(err as Error).message}`, code: 'PROBE_ERROR' };
   }
 }
 

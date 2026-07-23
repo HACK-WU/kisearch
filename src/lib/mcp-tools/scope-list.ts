@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeScopeList } from '../../scope.js';
+import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerScopeListTool(server: McpServer): void {
   server.tool(
@@ -8,7 +9,11 @@ export function registerScopeListTool(server: McpServer): void {
     {},
     async () => {
       try {
-        const result = await executeScopeList();
+        const result = await withTimeout(
+          executeScopeList(),
+          TOOL_TIMEOUT.READ,
+          'ki_scope_list'
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

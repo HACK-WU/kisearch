@@ -15,6 +15,7 @@ import {
   backupScopeSnapshot,
   listBackups,
 } from './lib/backup.js';
+import { detectUnknownFlags, failJson, toErrorPayload } from './lib/cli-args.js';
 
 // ─── 工具 ───
 
@@ -26,6 +27,9 @@ function output(result: Record<string, unknown>): void {
 
 const args = process.argv.slice(2);
 
+// 未知参数检测（NEG-01）：仅 --list 为合法 flag
+detectUnknownFlags(args, ['--list']);
+
 // 检查 --list
 const listMode = args.includes('--list');
 const filteredArgs = args.filter((a) => a !== '--list');
@@ -34,8 +38,7 @@ const filteredArgs = args.filter((a) => a !== '--list');
 const scope = filteredArgs[0];
 
 if (!scope) {
-  console.error('用法：ki backup <scope> [--list]');
-  process.exit(1);
+  failJson('用法：ki backup <scope> [--list]', 'MISSING_SCOPE');
 }
 
 // ─── 主逻辑 ───
@@ -82,6 +85,6 @@ try {
     });
   }
 } catch (err) {
-  output({ ok: false, error: (err as Error).message });
+  output(toErrorPayload(err));
   process.exit(1);
 }

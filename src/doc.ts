@@ -25,6 +25,7 @@ import {
   closeEngine,
   type VectorDocInfo,
 } from './lib/vector-client.js';
+import { parseIntArg } from './lib/cli-args.js';
 
 const PREVIEW_LEN = 200;
 
@@ -159,7 +160,7 @@ program
     const result = await executeDocList({
       scope: opts.scope,
       tags: parseTags(opts.tags),
-      limit: parseInt(opts.limit, 10),
+      limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       full: !!opts.full,
     });
     console.log(JSON.stringify(result, null, 2));

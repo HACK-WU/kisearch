@@ -12,6 +12,7 @@ import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
+import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
@@ -66,14 +67,13 @@ program
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（默认 ki-search）', 'ki-search')
   .action(async (opts) => {
-    // parseFloat 遇非法值返回 NaN，而 NaN ?? undefined 仍为 NaN（?? 只拦 null/undefined），
-    // 会使下游 score >= NaN 恒为 false → 静默丢光全部结果。故非有限值一律视为不过滤。
-    const parsedThreshold = parseFloat(opts.threshold);
+    // NEG-02：非法数值显式警告并回退（避免 NaN 静默丢光结果）
+    const parsedThreshold = parseFloatArg(opts.threshold, undefined, '--threshold');
     const result = await executeSearch({
       scope: opts.scope,
       query: opts.query,
-      limit: parseInt(opts.limit, 10),
-      threshold: Number.isFinite(parsedThreshold) ? parsedThreshold : undefined,
+      limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
+      threshold: parsedThreshold,
       tags: opts.tags,
     });
     console.log(JSON.stringify(result, null, 2));
