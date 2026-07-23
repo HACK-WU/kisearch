@@ -355,3 +355,93 @@ describe('sync-relation 批量模式', () => {
     }
   });
 });
+
+describe('sync-relation relation 名安全校验', () => {
+  it('单条模式：含 "/" 的 relation 直接失败（ok:false）', () => {
+    const result = runSync([
+      '--scope', scope,
+      '--group', '项目根/监控/告警中心',
+      '--relation', '配置/加载流程',
+      '--module-info', '# 配置加载流程\n\n## 概述\n配置加载相关流程。',
+      '--keywords', '配置,加载',
+    ]);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /非法路径字符/);
+    assert.match(result.error, /配置\/加载流程/);
+  });
+
+  it('单条模式：含 ".." 的 relation 直接失败', () => {
+    const result = runSync([
+      '--scope', scope,
+      '--group', '项目根/监控/告警中心',
+      '--relation', '..evil',
+      '--module-info', '# evil\n\n## 概述\n路径穿越测试。',
+      '--keywords', 'evil',
+    ]);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /非法路径字符/);
+  });
+
+  it('单条模式：非法 relation 未写入 cache（无半成品状态）', async () => {
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
+    runSync([
+      '--scope', scope,
+      '--group', '项目根/监控/告警中心',
+      '--relation', '写不进去/的关系',
+      '--module-info', '# x\n\n## 概述\n不应写入。',
+      '--keywords', '写不进去',
+    ]);
+    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const groupData = cache.groups['项目根/监控/告警中心'];
+    const found = (groupData?.hot_relations || []).find(
+      (r: any) => r.text === '写不进去/的关系'
+    );
+    assert.strictEqual(found, undefined, '非法 relation 不应写入 cache');
+  });
+
+  it('批量模式：非法 relation 被跳过并计入 failed，合法条目正常写入', async () => {
+    const guardScope = `guard-batch-${Date.now()}`;
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
+    try {
+      registerTestScope(guardScope);
+      initScope(guardScope);
+      const inputFile = path.join(
+        path.dirname(getKbDir(guardScope)),
+        `guard-batch-${Date.now()}.json`
+      );
+      fs.writeFileSync(inputFile, JSON.stringify({
+        items: [
+          {
+            group: '项目根/正常',
+            relation: '合法关系',
+            module_info: '# 合法关系\n\n## 概述\n正常写入。',
+            keywords: ['合法', '关系'],
+          },
+          {
+            group: '项目根/非法',
+            relation: '非法/关系',
+            module_info: '# 非法关系\n\n## 概述\n应被跳过。',
+            keywords: ['非法', '关系'],
+          },
+        ],
+      }));
+      const result = runSync(['--scope', guardScope, '--input', inputFile]);
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.total, 2);
+      assert.strictEqual(result.failed, 1, '非法 relation 应计入 failed');
+
+      const cache = readJson<any>(getRelationsCachePath(guardScope))!;
+      assert.ok(cache.groups['项目根/正常'], '合法条目应写入');
+      assert.strictEqual(cache.groups['项目根/非法'], undefined, '非法条目不应写入');
+
+      fs.unlinkSync(inputFile);
+    } finally {
+      const kbDir = getKbDir(guardScope);
+      if (fs.existsSync(kbDir)) {
+        fs.rmSync(kbDir, { recursive: true, force: true });
+      }
+    }
+  });
+});

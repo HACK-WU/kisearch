@@ -137,6 +137,10 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
     }
 
     // 3. 删除 wiki .md 文件
+    //
+    // 含 "/"（或 "\\"、".."）的 relation 在 sync 入口即被 isUnsafeRelationName 拒绝、
+    // 根本无法建立，故正常不会出现含非法字符的 wiki 文件。wiki 文件按 relation
+    // 文件名约定定位：findWikiFile 找不到就不动，不视为"孤儿文件"。
     try {
       const wikiFile = findWikiFile(scope, resolvedGroup, relation);
       if (wikiFile && fs.existsSync(wikiFile)) {

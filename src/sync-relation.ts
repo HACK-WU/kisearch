@@ -29,7 +29,7 @@ import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
-import { writeBackToWiki } from './lib/wiki-sync.js';
+import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 
 // ─── 类型定义 ───
 
@@ -333,6 +333,19 @@ function syncBatch(
         continue;
       }
 
+      // relation 名含 "/"、"\\"、".." 会破坏 wiki 文件路径，与空 module-info 同等处理：跳过并计入 failed
+      if (isUnsafeRelationName(item.relation || '')) {
+        console.warn(`警告：Relation "${item.relation}" 含非法路径字符（不能包含 "/"、"\\" 或 ".."），已跳过`);
+        results.push({
+          relation: item.relation || '(空)',
+          keywords: [],
+          invalid_keywords: [],
+          evicted: null,
+        });
+        failed++;
+        continue;
+      }
+
       const result = syncSingleRelation(
         cache,
         scope,
@@ -466,6 +479,12 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
     }
     if (!String(group).trim() || !String(relation).trim()) {
       return { ok: false, error: '--group / --relation 不能为空' };
+    }
+    // relation 名会直接作为 wiki 文件名，含 "/"、"\\"、".." 会破坏路径结构。
+    // 在写入任何数据（cache / 向量 / wiki）之前直接拒绝，避免产生“cache/向量已写、
+    // wiki 却静默跳过”的半成品状态。
+    if (isUnsafeRelationName(relation)) {
+      return { ok: false, error: `--relation 含非法路径字符，不能包含 "/"、"\\" 或 ".."：${relation}` };
     }
 
     validateScope(scope);

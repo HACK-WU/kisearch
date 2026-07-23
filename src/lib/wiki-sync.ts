@@ -28,6 +28,15 @@ export interface WikiWritebackResult {
 // ─── 核心函数 ───
 
 /**
+ * relation 名合法性判定：relation 会直接作为 wiki 文件名（${relation}.md），
+ * 含路径分隔符（"/"、"\\"）或 ".." 会破坏目录结构或造成路径穿越，视为非法。
+ * sync_relation 入口据此直接拒绝；本文件及各文件名定位点复用同一判定避免漂移。
+ */
+export function isUnsafeRelationName(relation: string): boolean {
+  return /[\/\\]/.test(relation) || relation.includes('..');
+}
+
+/**
  * 解析 wiki 写回目标目录和 rootName
  *
  * @returns { sourceDir, rootName } 或 null（无法确定写回目录）
@@ -66,8 +75,9 @@ export function writeBackToWiki(
     return { synced: false, reason: '无可用 wiki 写回目录（source 块和 wikiSync 均未配置）' };
   }
 
-  // relation 路径安全校验：禁止含路径分隔符或 ..
-  if (/[\/\\]/.test(relation) || relation.includes('..')) {
+  // 防御性兜底：正常情况下 sync_relation 入口已用 isUnsafeRelationName 拒绝含
+  // "/"、"\\"、".." 的非法 relation；此处再校验一次，避免其他调用方绕过入口校验。
+  if (isUnsafeRelationName(relation)) {
     return { synced: false, reason: `relation 含非法路径字符：${relation}` };
   }
 

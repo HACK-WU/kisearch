@@ -219,6 +219,32 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-07-23-src负向需求分析": {
+      "id": "REQ-20260723-001",
+      "feature": "src负向需求分析",
+      "created": "2026-07-23",
+      "updated": "2026-07-23",
+      "status": "草案",
+      "tags": [
+        "refactor"
+      ],
+      "version": 2,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-07-23 v2: 落盘 src 负向需求分析报告（A/C/D 三范围，15 个负向场景）"
+      ],
+      "commits": [],
+      "docs": [
+        {
+          "path": "negative-requirement.md",
+          "type": "requirement"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   }
 }
