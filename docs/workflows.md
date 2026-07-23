@@ -91,7 +91,7 @@ flowchart TD
 
 ## 工作流三：外部知识库导入（推荐：S-04 统一流程）
 
-> 前置条件：**首次使用某个 `scope` 前**，需在 `~/.config/memory-mcp/config.yaml` 注册该 scope，否则 `mem store` 会提示 `Access denied to scope: <scope>`。
+> 前置条件：**首次使用某个 `scope` 前**，需在 `~/.ki/config.yaml` 的 `scopes` 中注册该 scope。
 
 ### 首次导入（2 步）
 
@@ -123,7 +123,7 @@ ki scan-kb import \
   --results ai-results.json
 ```
 
-内部完成：格式校验 → 批量 `mem store` 向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit）。
+内部完成：格式校验 → 批量 zvec 引擎向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit）。
 
 ### 增量更新（3 步）
 
@@ -155,8 +155,8 @@ ki scan-kb import \
 增量语义：
 
 - `add`：新增 → 向量化 + 写入索引
-- `modify`：`mem delete <oldId>` + 重新向量化（拿新 id）+ 替换索引
-- `delete`：`mem delete <oldId>` + 移除索引
+- `modify`：删除旧向量（`engine.delete`）+ 重新向量化（拿新 id）+ 替换索引
+- `delete`：删除旧向量（`engine.delete`）+ 移除索引
 
 ---
 

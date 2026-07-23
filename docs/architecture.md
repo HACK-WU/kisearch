@@ -1,11 +1,12 @@
 ## 架构说明
 
-`knowledge-index` 是父项目记忆系统之上的一层**本地知识目录与交付层**。
+`knowledge-index`（KiSearch）是一个**本地知识索引与向量检索系统**，基于 zvec 向量引擎，提供完整的知识管理能力。
 
-它不替代 `memory-lancedb-mcp` / `memory-lancedb-pro`，而是补齐 AI Agent 在项目知识访问过程中的两个关键能力：
+核心能力：
 
 - **结构化导航**：把知识整理成 Group 树，便于 Agent 先缩小范围
 - **原文交付**：把模块说明保存在本地 KB 中，便于 Agent 直接读取 Markdown 原文回答问题
+- **向量检索**：基于 zvec 引擎的混合检索（dense + FTS），毫秒级响应
 
 ## 整体架构
 
@@ -13,24 +14,24 @@
 flowchart TB
     U[用户 / MCP Client / AI Agent]
     KI[knowledge-index<br/>Group 树 + Relations 缓存 + 本地 KB]
-    MCP[memory-lancedb-mcp<br/>MCP 工具层]
-    CORE[memory-lancedb-pro<br/>长期记忆与混合检索引擎]
-    DATA[(LanceDB / 持久化记忆)]
+    MCP[ki MCP Server<br/>常驻服务]
+    ZVEC[ZvecEngine<br/>@zvec/zvec Rust 内核]
+    DATA[(zvec DB 文件<br/>持久化向量)]
 
     U --> KI
     U --> MCP
-    KI --> MCP
-    MCP --> CORE
-    CORE --> DATA
+    KI --> ZVEC
+    MCP --> ZVEC
+    ZVEC --> DATA
 ```
 
 ## 分层职责
 
 | 组件 | 主要职责 |
 |------|------|
-| `knowledge-index` | Group 导航、热门 Relation 缓存、本地 Markdown 原文交付 |
-| `memory-lancedb-mcp` | 对外暴露 `memory_store`、`memory_recall` 等 MCP 能力 |
-| `memory-lancedb-pro` | 负责混合检索、向量存储、长期记忆治理 |
+| `knowledge-index` | Group 导航、热门 Relation 缓存、本地 Markdown 原文交付、CLI 命令 |
+| `ki MCP Server` | 常驻 MCP 服务，暴露 store/search/list/stats 等工具 |
+| `ZvecEngine` | 进程内向量引擎：insert/upsert/hybridSearch，Embedding 集成 |
 
 ## knowledge-index 内部结构
 
@@ -132,7 +133,7 @@ flowchart TD
 flowchart LR
     EXT[外部 Markdown 知识库] --> AI[AI 生成 ai-results.json<br/>meta + entries]
     AI --> IMP[scan-kb import<br/>5 阶段流水线]
-    IMP --> VEC[mem store 向量化]
+    IMP --> VEC[zvec 引擎向量化]
     IMP --> GI2[group-index.json<br/>Group 树 + source 块]
     IMP --> RC2[relations-cache.json<br/>含 memoryId / sourcePath]
     IMP --> KB2[本地 KB 原文]

@@ -32,19 +32,19 @@ ki config init --dir /path/to/test
 # dataDir: /path/to/data
 ```
 
-### 2. 安装 mem 命令
+### 2. 配置嵌入 API
 
-知识索引的所有向量化操作都依赖 `mem` 命令：
+确保 `~/.ki/config.yaml` 中已配置嵌入 API 密钥（SiliconFlow 或其他 OpenAI 兼容 API）：
 
-```bash
-npm install -g https://github.com/HACK-WU/memory-lancedb-mcp/releases/download/v0.1.0/memory-lancedb-mcp-0.1.0.tgz
+```yaml
+embedding:
+  provider: openai-compatible
+  apiKey: ${OPENAI_API_KEY}
+  model: Qwen/Qwen3-Embedding-8B
+  dimension: 4096
 ```
 
-### 3. 配置嵌入 API
-
-确保 `~/.config/memory-mcp/config.yaml` 中已配置嵌入 API 密钥。
-
-### 4. 注册 scope
+### 3. 注册 scope
 
 首次使用某个 scope 前，需在配置文件中注册该 scope：
 
@@ -240,7 +240,7 @@ ki scan-kb import \
 **内部 5 阶段流水线**：
 
 1. **格式校验**：验证 `ai-results.json` 格式和字段完整性
-2. **批量向量化**：调用 `mem store` 批量向量化所有条目，解析 `Memory ID`
+2. **批量向量化**：调用 zvec 引擎批量向量化所有条目
 3. **Group 树创建**：自动创建 Group 目录结构
 4. **Relations 缓存写入**：写入 `relations-cache.json`，包含 `memoryId` 和 `sourcePath`
 5. **group-index.source 记录**：记录导入元信息（含 git HEAD commit）
@@ -317,7 +317,7 @@ ki scan-kb import \
 | `ai-results.json 格式错误` | JSON 格式不合法 | 检查 JSON 语法 |
 | `meta.sourceDir 不存在` | 源目录路径错误 | 确认目录存在且路径正确 |
 | `groupPath 首段必须等于 rootName` | Group 路径格式错误 | 确保 `groupPath` 以 `rootName` 开头 |
-| `mem store 失败` | mem 命令未安装或配置错误 | 安装 mem 命令，检查 API 密钥配置 |
+| `向量化失败` | Embedding API 配置错误或网络问题 | 检查 `~/.ki/config.yaml` 中的 embedding 配置，确认 API 密钥有效 |
 | `source.dir 不在 git 仓库中` | 源目录未初始化 Git | 执行 `git init` 并至少提交一次 |
 
 ---

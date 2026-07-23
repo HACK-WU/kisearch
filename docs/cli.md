@@ -1227,7 +1227,7 @@ wiki-output/
 
 **特性**：
 - 仅使用 scope 本地数据（group-index.json + relations-cache.json + local KB index.json）
-- 不依赖 mem CLI
+- 不依赖外部向量服务（使用内置 zvec 引擎）
 - 自动处理 YAML 特殊字符
 
 ---

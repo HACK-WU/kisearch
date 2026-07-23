@@ -263,7 +263,7 @@ ki scan-kb import \
 |------|------|------|
 | `group-index.source 不存在` | 未完成首次构建 | 先执行 `knowledge-index-build` |
 | `memoryId 不存在` | diff 未找到对应 memoryId | 检查 `relations-cache.json` 或重新全量导入 |
-| `mem delete 失败` | mem 命令问题 | 检查 mem 安装和配置 |
+| `向量化删除失败` | zvec 引擎问题 | 检查嵌入 API 配置和 zvec 引擎状态 |
 | `action='delete' 缺少 memoryId` | 增量文件格式错误 | 补充 memoryId 字段 |
 | `action='modify' 缺少 memoryId` | 增量文件格式错误 | 补充 memoryId 字段 |
 

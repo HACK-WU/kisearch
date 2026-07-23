@@ -26,7 +26,7 @@ ki scan-kb import \
   --results ai-results.json
 ```
 
-内部 5 阶段流水线：格式校验 → 批量 `mem store` 向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit）。
+内部 5 阶段流水线：格式校验 → 批量 zvec 引擎向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit）。
 
 ### 增量导入
 
@@ -46,8 +46,8 @@ ki scan-kb import \
 增量语义：
 
 - `action='add'`：新增 → 向量化 + 写入索引
-- `action='modify'`：更新 → `mem delete <oldId>` + 重新向量化（拿新 id）+ 替换索引
-- `action='delete'`：删除 → `mem delete <oldId>` + 移除索引
+- `action='modify'`：更新 → 删除旧向量（`engine.delete`）+ 重新向量化（拿新 id）+ 替换索引
+- `action='delete'`：删除 → 删除旧向量（`engine.delete`）+ 移除索引
 
 ### `ai-results.json` 格式
 
@@ -173,7 +173,7 @@ ki scan-kb vectorize \
   --scope <scope> --complete <vectorize-results.json>
 ```
 
-> **废弃原因**：`import` 子命令内部已集成批量向量化（通过 `mem store` CLI 子进程 + `Memory ID:` stdout 解析），不再需要手动管理向量化状态。
+> **废弃原因**：`import` 子命令内部已集成批量向量化（通过 zvec 引擎直接调用），不再需要手动管理向量化状态。
 
 ---
 
