@@ -123,25 +123,44 @@ tar -czf KiSearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz KiSearch/kb/
 
 ### 1. 从快照恢复（推荐）
 
-使用 `ki restore` 命令从备份快照恢复：
+操作流程：**先列出可用快照 → 选择目标快照 → 执行恢复**。
 
 ```bash
-# 列出可用备份（输出中的 backupDir / locations 字段会给出备份文件的物理路径）
+# 第 1 步：列出可用快照
 ki restore my-project
+```
 
-# 从最新快照恢复（需 --yes 确认）
+输出示例（多个快照）：
+```json
+{
+  "ok": true,
+  "action": "restore_list",
+  "scope": "my-project",
+  "available": {
+    "snapshots": [
+      "snapshot.20260616-223000.tar.gz",
+      "snapshot.20260615-100000.tar.gz",
+      "snapshot.20260614-080000.tar.gz"
+    ],
+    "aiResults": ["ai-results.20260616-223000.full.json"]
+  }
+}
+```
+
+```bash
+# 第 2 步：从指定快照恢复（timestamp 从文件名提取，格式：YYYYMMDD-HHMMSS）
+ki restore my-project --from-snapshot --timestamp 20260615-100000 --yes
+
+# 或：从最新快照恢复（省略 --timestamp 默认使用最新）
 ki restore my-project --from-snapshot --yes
+```
 
-# 文件名：snapshot.20260616-223000.tar.gz
-# timestamp：20260616-223000 
-# 从指定时间戳的快照恢复（timestamp 格式：YYYYMMDD-HHMMSS）
-ki restore my-project --from-snapshot --timestamp 20260616-223000 --yes
-
-# 指定备份根目录（不传则使用配置中的默认 backupDir）
+**指定备份根目录**（不传则使用配置中的默认 `backupDir`）：
+```bash
 # --backup-dir 对「列出/快照还原/结果重放」均生效，
 # 按 <backup-dir>/<scope>/{snapshots,ai-results} 布局查找
 ki restore my-project --backup-dir /path/to/other-backups
-ki restore my-project --from-snapshot --backup-dir /path/to/other-backups --yes
+ki restore my-project --from-snapshot --timestamp 20260615-100000 --backup-dir /path/to/other-backups --yes
 ```
 
 ### 2. 从 ai-results 重放
