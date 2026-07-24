@@ -119,11 +119,21 @@ function generateDocId(text: string, scope: string): string {
 function buildEmbedding(): SiliconFlowProvider {
   const config = loadConfig();
   const emb = getEmbeddingConfig(config);
+  // apiKey 必须来自配置（明文或 ${ENV_VAR} 已在 loadConfig 解析）。
+  // 不做任何隐式 env 回退：提供商可经 baseURL 自由配置，若回退到某个固定厂商
+  // 的密钥变量（如 SILICONFLOW_API_KEY），在非该厂商 baseURL 下会注入错误密钥。
+  // 缺失即 fail-loud（与 provider 无密钥时的构造报错行为一致，getEngine 同步抛出）。
+  if (!emb.apiKey) {
+    throw new Error(
+      'embedding.apiKey 未配置：请在配置文件的 embedding.apiKey 填写明文密钥，'
+      + '或用 ${VAR_NAME} 引用环境变量',
+    );
+  }
   return new SiliconFlowProvider({
     baseURL: emb.baseURL,
     model: emb.model,
     dimension: emb.dimension,
-    // apiKey 由 SiliconFlowProvider 从 env SILICONFLOW_API_KEY 读取
+    apiKey: emb.apiKey,
   });
 }
 

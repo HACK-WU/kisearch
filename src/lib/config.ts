@@ -43,11 +43,12 @@ export interface ScopeConfig {
 }
 
 export interface EmbeddingConfig {
-  provider: string;      // "siliconflow" | "openai-compatible"
-  baseURL: string;       // API 端点
+  provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
+  baseURL: string;       // API 端点（决定实际对接的提供商）
   model: string;         // 模型名称
   dimension: number;     // 向量维度（必须 === collection.dimension，KiSearch 固定 4096）
-  // apiKey 从 env SILICONFLOW_API_KEY 读取，不写入配置文件
+  apiKey?: string;       // API 密钥：支持明文（sk-xxx）或环境变量引用（${VAR_NAME}）；
+                         // 缺省则不解析（KI 层 fail-loud），不做任何隐式 env 回退
 }
 
 export interface KiConfig {
@@ -150,6 +151,28 @@ function expandPath(input: string, baseDir: string): string {
   return result;
 }
 
+// ─── apiKey 解析（明文 / ${ENV_VAR} 引用） ───
+
+/**
+ * 解析 embedding.apiKey 配置值，支持两种写法：
+ *   - 明文密钥：`apiKey: sk-xxxx` → 原样返回
+ *   - 环境变量引用：`apiKey: ${MY_API_KEY}` → 从 process.env.MY_API_KEY 读取（变量名自定义）
+ * 返回 undefined 的情形（由 KI 层 fail-loud，不做隐式 env 回退）：
+ *   - 未配置 / 空字符串
+ *   - `${VAR}` 引用但对应环境变量未设置
+ */
+function resolveApiKey(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(trimmed);
+  if (m) {
+    const envVal = process.env[m[1]];
+    return envVal && envVal.trim() ? envVal : undefined;
+  }
+  return trimmed;
+}
+
 // ─── 解析 + 展开 ───
 
 function parseAndExpand(configFile: string): KiConfig {
@@ -190,6 +213,7 @@ function parseAndExpand(configFile: string): KiConfig {
     baseURL: rawEmbedding.baseURL ? String(rawEmbedding.baseURL) : DEFAULT_EMBEDDING.baseURL,
     model: rawEmbedding.model ? String(rawEmbedding.model) : DEFAULT_EMBEDDING.model,
     dimension: rawEmbedding.dimension !== undefined ? Number(rawEmbedding.dimension) : DEFAULT_EMBEDDING.dimension,
+    apiKey: resolveApiKey(rawEmbedding.apiKey),
   };
 
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'

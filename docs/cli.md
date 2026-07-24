@@ -921,7 +921,7 @@ ki config init
   "configPath": "/Users/me/.ki/config.yaml",
   "existed": false,
   "createdDirs": ["/Users/me/.ki-data", "/Users/me/.ki-backup", "/Users/me/.ki/vector"],
-  "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 请通过环境变量 SILICONFLOW_API_KEY 提供。"
+  "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 ${VAR_NAME} 引用环境变量（不做隐式回退）。"
 }
 ```
 
@@ -932,11 +932,12 @@ dataDir: $HOME/.ki-data       # KB 源数据目录
 backupDir: $HOME/.ki-backup   # 备份目录
 vectorDir: $HOME/.ki/vector   # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
 
-embedding:                    # Embedding 提供方（apiKey 从环境变量 SILICONFLOW_API_KEY 读取）
+embedding:                    # Embedding 提供方（OpenAI 兼容，实际提供商由 baseURL 决定）
   provider: siliconflow
   baseURL: https://api.siliconflow.cn/v1
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 向量维度（必须与建库时一致）
+  apiKey: ${SILICONFLOW_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量（变量名自定义）
 
 scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
 
@@ -960,10 +961,11 @@ scopes:
 | `dataDir` | 顶级 | 全局默认数据存储目录，各 scope 数据默认放在 `dataDir/{scope}/` 下 |
 | `backupDir` | 顶级 | 备份快照存储目录 |
 | `vectorDir` | 顶级 | zvec 向量库目录，所有 scope 共享一个 collection，靠 metadata 隔离（独立，不进备份） |
-| `embedding.provider` | 顶级 | Embedding 提供方：`siliconflow` \| `openai-compatible` |
-| `embedding.baseURL` | 顶级 | API 端点（siliconflow 须含 `/v1`） |
+| `embedding.provider` | 顶级 | Embedding 提供方：`siliconflow` \| `openai-compatible`（均为 OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
+| `embedding.baseURL` | 顶级 | API 端点（决定实际对接的提供商；换成其他厂商端点即可对接其他提供商） |
 | `embedding.model` | 顶级 | 模型名称 |
 | `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
+| `embedding.apiKey` | 顶级 | API 密钥（**必填**）：支持明文（`sk-xxx`）或环境变量引用（`${VAR_NAME}`，变量名自定义）；不做任何隐式回退 |
 | `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |
@@ -972,7 +974,9 @@ scopes:
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 
-> `apiKey` 不写入配置文件，统一从环境变量 `SILICONFLOW_API_KEY` 读取。
+> `apiKey` 为必填项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的 `SILICONFLOW_API_KEY`），以免在非硅基流动提供商下误用密钥。若仍想用 `SILICONFLOW_API_KEY`，显式写 `apiKey: ${SILICONFLOW_API_KEY}` 即可。
+>
+> ⚠️ **向后不兼容变更**：旧版仅靠环境变量 `SILICONFLOW_API_KEY`（未写 `embedding.apiKey`）的配置，升级后需在配置文件显式声明 `apiKey`。
 
 **配置优先级**：
 1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
@@ -1000,7 +1004,7 @@ ki doctor
 |--------|------|
 | 配置文件 | 是否成功加载配置文件（`_configPath`） |
 | dataDir / backupDir / vectorDir | 目录是否存在且可写 |
-| API 密钥 | 环境变量 `SILICONFLOW_API_KEY` 是否已设置 |
+| API 密钥 | 配置 `embedding.apiKey`（明文或 `${VAR_NAME}` 引用）是否已解析出密钥 |
 | 连通性 / 密钥有效性 / 向量维度 | 发起一次 embedding 探测（5s 超时、不重试），映射为端点连通性、密钥有效性、维度匹配三项 |
 | zvec collection | `vectorDir` 是否已初始化 |
 | scopes.default | 是否配置了默认 scope |

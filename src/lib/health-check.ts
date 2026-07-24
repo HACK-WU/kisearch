@@ -54,9 +54,13 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
   const nameKey = '密钥有效性';
   const nameDim = '维度匹配';
 
+  // 有效密钥：仅取配置 apiKey（明文 / ${ENV_VAR} 已解析）。
+  // 不做隐式 env 回退：提供商由 baseURL 自由配置，固定厂商密钥变量不应跨厂商注入。
+  const effectiveApiKey = emb.apiKey;
+
   // apiKey 缺失时无法发起请求，三项均标失败（根因见 apiKey 检查项）
-  if (!process.env.SILICONFLOW_API_KEY) {
-    const detail = 'SILICONFLOW_API_KEY 未设置，跳过检查';
+  if (!effectiveApiKey) {
+    const detail = '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用），跳过检查';
     return [
       { name: nameConn, status: 'fail', detail },
       { name: nameKey, status: 'fail', detail },
@@ -70,6 +74,7 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
       baseURL: emb.baseURL,
       model: emb.model,
       dimension: emb.dimension,
+      apiKey: effectiveApiKey,
     });
   } catch (err) {
     // 构造期错误（EmbeddingConfigError）：apiKey / baseURL 非法
@@ -158,11 +163,12 @@ export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
   items.push(checkDir('backupDir', config.backupDir));
   items.push(checkDir('vectorDir', getVectorDir(config)));
 
-  // 5. apiKey 环境变量
-  if (process.env.SILICONFLOW_API_KEY) {
-    items.push({ name: 'apiKey', status: 'pass', detail: 'SILICONFLOW_API_KEY 已设置' });
+  // 5. apiKey：仅取配置 embedding.apiKey（明文 / ${ENV_VAR}），不做隐式 env 回退
+  const embForKey = getEmbeddingConfig(config);
+  if (embForKey.apiKey) {
+    items.push({ name: 'apiKey', status: 'pass', detail: '已从配置 embedding.apiKey 解析' });
   } else {
-    items.push({ name: 'apiKey', status: 'fail', detail: 'SILICONFLOW_API_KEY 未设置' });
+    items.push({ name: 'apiKey', status: 'fail', detail: '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用）' });
   }
 
   // 6~8. embedding 连通性 / 密钥 / 维度（三合一请求）

@@ -92,12 +92,17 @@ backupDir: ${v.backupDir}
 vectorDir: ${v.vectorDir}
 
 # Embedding 提供方配置
-# apiKey 从环境变量 SILICONFLOW_API_KEY 读取，不写在此文件中
+# provider / baseURL / model 可自由配置任意 OpenAI 兼容提供商（实际提供商由 baseURL 决定）
+# apiKey 为必填项，支持两种写法（二选一）：
+#   1. 明文密钥：  apiKey: sk-xxxxxxxx
+#   2. 环境变量引用：apiKey: \${OPENAI_API_KEY}   # 变量名可自定义，运行时从同名环境变量读取
+# 注：不做任何隐式回退。未配置 apiKey 则向量操作会 fail-loud（避免跨提供商误用密钥）
 embedding:
-  provider: siliconflow                    # embedding 提供方: siliconflow | openai-compatible
-  baseURL: https://api.siliconflow.cn/v1   # API 端点
+  provider: siliconflow                    # embedding 提供方: siliconflow | openai-compatible（均为 OpenAI 兼容）
+  baseURL: https://api.siliconflow.cn/v1   # API 端点（换成其他厂商端点即可对接其他提供商）
   model: Qwen/Qwen3-Embedding-8B           # 模型名称
   dimension: 4096                          # 向量维度（必须与建库时一致）
+  # apiKey: \${SILICONFLOW_API_KEY}          # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
 
 # ─── scope 护栏 ───
 # default: 未传 --scope 时静默落 default（任意 scope 自动创建）
@@ -176,7 +181,7 @@ function handleConfigInit(options: ConfigInitOptions): void {
     configPath: configFile,
     existed: false,
     createdDirs,
-    message: `配置文件已生成（YAML）：${configFile}\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 请通过环境变量 SILICONFLOW_API_KEY 提供。`,
+    message: `配置文件已生成（YAML）：${configFile}\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 \${VAR_NAME} 引用环境变量（不做隐式回退）。`,
   });
 }
 

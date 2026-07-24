@@ -10,8 +10,9 @@
  *     scope delete 删 KB 目录、scope clear 保目录清内容、doc delete 无 --yes 需确认
  *
  * 离线约定：
- *  - 不设 SILICONFLOW_API_KEY 时，getEngine 构造 provider 抛错 → 向量操作降级（scope list 仍返回 KB 层）
- *  - 设 dummy key 时，listIds/fetch/delete 不发网络，可在临时目录建空 collection 离线跑
+ *  - 未在 config 配置 embedding.apiKey 时，getEngine 构造 provider 抛错 → 向量操作降级（scope list 仍返回 KB 层）
+ *  - 在 config 写 dummy apiKey 时，listIds/fetch/delete 不发网络，可在临时目录建空 collection 离线跑
+ *  - apiKey 已取消隐式 env 回退，密钥只经 config.embedding.apiKey 注入
  *
  * 运行：npx jiti test/scope-doc.test.ts
  */
@@ -60,7 +61,7 @@ after(async () => {
 function makeWorkspace(opts: {
   scopesYaml?: string;      // scopes 块（YAML 片段，含缩进），省略则不写 scopes
   header?: string;          // 顶部注释等
-  apiKey?: string;          // 设置 SILICONFLOW_API_KEY；省略则删除（离线降级）
+  apiKey?: string;          // 写入 config.embedding.apiKey；省略则无密钥（离线降级）
 }): { dir: string; configPath: string; dataDir: string; vectorDir: string } {
   const dir = fs.mkdtempSync(path.join(tmpRoot, 'ws-'));
   const dataDir = path.join(dir, 'data');
@@ -73,6 +74,10 @@ function makeWorkspace(opts: {
     `vectorDir: ${vectorDir}`,
     'scopeMode: default',
   ];
+  if (opts.apiKey !== undefined) {
+    lines.push('embedding:');
+    lines.push(`  apiKey: ${opts.apiKey}`);
+  }
   if (opts.scopesYaml !== undefined) {
     lines.push('scopes:');
     lines.push(opts.scopesYaml);
@@ -81,8 +86,8 @@ function makeWorkspace(opts: {
   fs.writeFileSync(configPath, lines.join('\n') + '\n', 'utf-8');
 
   process.env.KI_CONFIG_PATH = configPath;
-  if (opts.apiKey === undefined) delete process.env.SILICONFLOW_API_KEY;
-  else process.env.SILICONFLOW_API_KEY = opts.apiKey;
+  // apiKey 已取消隐式 env 回退：一律清除 env，密钥只经 config 注入
+  delete process.env.SILICONFLOW_API_KEY;
   resetConfigCache();
 
   return { dir, configPath, dataDir, vectorDir };
