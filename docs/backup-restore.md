@@ -14,19 +14,19 @@ ki 提供内置的备份恢复命令：
 
 **快速备份**：
 ```bash
-ki backup my-project
+ki backup scope-name
 ```
 
 **快速恢复**：
 ```bash
 # 列出可用备份
-ki restore my-project
+ki restore scope-name
 
 # 从快照恢复
-ki restore my-project --from-snapshot --yes
+ki restore scope-name --from-snapshot --yes
 
 # 从 ai-results 重放
-ki restore my-project --from-results
+ki restore scope-name --from-results
 ```
 
 **备份存储位置**：
@@ -79,10 +79,10 @@ KiSearch/
 
 ```bash
 # 备份 scope 目录快照
-ki backup my-project
+ki backup scope-name
 
 # 列出已有备份
-ki backup my-project --list
+ki backup scope-name --list
 ```
 
 备份文件存储在 `{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`。
@@ -127,7 +127,7 @@ tar -czf KiSearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz KiSearch/kb/
 
 ```bash
 # 第 1 步：列出可用快照
-ki restore my-project
+ki restore scope-name
 ```
 
 输出示例（多个快照）：
@@ -135,7 +135,7 @@ ki restore my-project
 {
   "ok": true,
   "action": "restore_list",
-  "scope": "my-project",
+  "scope": "scope-name",
   "available": {
     "snapshots": [
       "snapshot.20260616-223000.tar.gz",
@@ -149,18 +149,18 @@ ki restore my-project
 
 ```bash
 # 第 2 步：从指定快照恢复（timestamp 从文件名提取，格式：YYYYMMDD-HHMMSS）
-ki restore my-project --from-snapshot --timestamp 20260615-100000 --yes
+ki restore scope-name --from-snapshot --timestamp 20260615-100000 --yes
 
 # 或：从最新快照恢复（省略 --timestamp 默认使用最新）
-ki restore my-project --from-snapshot --yes
+ki restore scope-name --from-snapshot --yes
 ```
 
 **指定备份根目录**（不传则使用配置中的默认 `backupDir`）：
 ```bash
 # --backup-dir 对「列出/快照还原/结果重放」均生效，
 # 按 <backup-dir>/<scope>/{snapshots,ai-results} 布局查找
-ki restore my-project --backup-dir /path/to/other-backups
-ki restore my-project --from-snapshot --timestamp 20260615-100000 --backup-dir /path/to/other-backups --yes
+ki restore scope-name --backup-dir /path/to/other-backups
+ki restore scope-name --from-snapshot --timestamp 20260615-100000 --backup-dir /path/to/other-backups --yes
 ```
 
 ### 2. 从 ai-results 重放
@@ -169,13 +169,13 @@ ki restore my-project --from-snapshot --timestamp 20260615-100000 --backup-dir /
 
 ```bash
 # 先预览总览（不加 --yes 时仅展示总览并退出，不执行）
-ki restore my-project --from-results
+ki restore scope-name --from-results
 
 # 确认总览无误后加 --yes 重新执行，真正重放还原
-ki restore my-project --from-results --yes
+ki restore scope-name --from-results --yes
 
 # 从指定目录重放
-ki restore my-project --from-results --dir /path/to/ai-results --yes
+ki restore scope-name --from-results --dir /path/to/ai-results --yes
 ```
 
 > CLI 为非交互式：`--from-snapshot` 与 `--from-results` 均不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原/重放来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
