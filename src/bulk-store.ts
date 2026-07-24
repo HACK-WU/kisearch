@@ -17,6 +17,7 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import { validateScope } from './lib/scope.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { BulkStoreItemResult } from './lib/vector-client.js';
 
@@ -27,11 +28,13 @@ export type BulkStoreResult =
   | { ok: false; error: string };
 
 export async function executeBulkStore(params: {
-  scope: string;
+  scope?: string;
   inputFile: string;
 }): Promise<BulkStoreResult> {
   try {
-    validateScope(params.scope);
+    // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+    const scope = resolveScope(loadConfig(), params.scope);
+    validateScope(scope);
 
     const avail = await ensureVectorAvailable();
     if (!avail.available) {
@@ -70,7 +73,7 @@ export async function executeBulkStore(params: {
       return { ok: false, error: `输入文件解析失败: ${(err as Error).message}` };
     }
 
-    const result = await vectorBulkStore({ scope: params.scope, entries });
+    const result = await vectorBulkStore({ scope, entries });
     return { ok: true, ...result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -84,7 +87,7 @@ const program = new Command();
 program
   .name('bulk_store')
   .description('批量存储文本到向量索引')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--input <file>', '批量数据 JSON 文件路径')
   .action(async (opts) => {
     const result = await executeBulkStore({

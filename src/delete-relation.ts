@@ -26,7 +26,7 @@ import {
 } from './lib/scope.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
-import { loadConfig, getScopeWikiSync } from './lib/config.js';
+import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { getSource } from './lib/scope.js';
 
 // ─── 类型 ───
@@ -69,7 +69,7 @@ interface DeleteResult {
 // ─── 核心删除逻辑 ───
 
 export interface DeleteRelationParams {
-  scope: string;
+  scope?: string;
   group: string;
   relation: string;
 }
@@ -80,7 +80,9 @@ export type DeleteRelationOutcome =
 
 export async function executeDeleteRelation(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
   try {
-    const { scope, group, relation } = params;
+    const { group, relation } = params;
+    // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+    const scope = resolveScope(loadConfig(), params.scope);
     validateScope(scope);
 
     const cachePath = getRelationsCachePath(scope);
@@ -322,7 +324,7 @@ interface BatchDeleteItem {
   relation: string;
 }
 
-export async function executeBatchDelete(scope: string, items: BatchDeleteItem[]): Promise<{
+export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<{
   ok: boolean;
   results: DeleteResult[];
   total: number;
@@ -366,7 +368,7 @@ const program = new Command();
 program
   .name('delete-relation')
   .description('删除 Relation 及其关联数据（cache + KB + wiki + mem）')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--group <group>', 'Group 路径')
   .option('--relation <relation>', 'Relation 名称')
   .option('--input <input>', 'JSON 输入文件路径（批量模式，格式 {"items":[{"group","relation"}]}）')

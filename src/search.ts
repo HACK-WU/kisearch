@@ -10,6 +10,7 @@
 
 import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
@@ -21,14 +22,16 @@ export type SearchResult =
   | { ok: false; error: string; degraded?: boolean };
 
 export async function executeSearch(params: {
-  scope: string;
+  scope?: string;
   query: string;
   limit?: number;
   threshold?: number;
   tags?: string;
 }): Promise<SearchResult> {
   try {
-    validateScope(params.scope);
+    // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+    const scope = resolveScope(loadConfig(), params.scope);
+    validateScope(scope);
 
     // 向量服务可用性检测
     const avail = await ensureVectorAvailable();
@@ -41,7 +44,7 @@ export async function executeSearch(params: {
     }
 
     const results = await vectorSearch({
-      scope: params.scope,
+      scope,
       query: params.query,
       limit: params.limit ?? 10,
       threshold: params.threshold,
@@ -61,7 +64,7 @@ const program = new Command();
 program
   .name('search')
   .description('语义检索知识库内容')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--query <query>', '自然语言查询文本')
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')

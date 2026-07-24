@@ -51,11 +51,8 @@ async function loadModulesWithMock() {
   vectorClientModule = await import('../src/lib/vector-client.js');
 
   // Patch vector-client 的导出函数
-  const origEnsure = vectorClientModule.ensureVectorAvailable;
-  const origSearch = vectorClientModule.vectorSearch;
-  const origStore = vectorClientModule.vectorStore;
-  const origBulk = vectorClientModule.vectorBulkStore;
-
+  // 注意：不能在 import CLI 模块后恢复。jiti/CJS interop 下，CLI 模块在
+  // 调用时才从模块命名空间取函数，若恢复则 mock 立即失效（真实引擎被调用）。
   (vectorClientModule as any).ensureVectorAvailable = async () => {
     return mockAvailable
       ? { available: true }
@@ -81,12 +78,6 @@ async function loadModulesWithMock() {
   searchModule = await import('../src/search.js');
   storeModule = await import('../src/store.js');
   bulkStoreModule = await import('../src/bulk-store.js');
-
-  // 恢复（不影响已 import 的引用）
-  (vectorClientModule as any).ensureVectorAvailable = origEnsure;
-  (vectorClientModule as any).vectorSearch = origSearch;
-  (vectorClientModule as any).vectorStore = origStore;
-  (vectorClientModule as any).vectorBulkStore = origBulk;
 }
 
 // ─── 测试 ───
@@ -128,15 +119,27 @@ describe('CLI 纯函数 · executeSearch', () => {
     assert.equal(mockSearchCalls[0].tags, 'ki-search');
   });
 
-  it('scope 校验失败返回 ok=false', async () => {
+  it('非法字符 scope 校验失败返回 ok=false', async () => {
     const r = await searchModule.executeSearch({
-      scope: '',  // 空 scope 应校验失败
+      scope: 'bad/scope',  // 含非法字符应校验失败
       query: 'test',
     });
     assert.equal(r.ok, false);
     if (!r.ok) {
       assert.ok(r.error.includes('scope') || r.error.includes('Scope'), `error: ${r.error}`);
     }
+  });
+
+  it('default 模式下省略 scope 回退 default', async () => {
+    mockAvailable = true;
+    mockSearchResults = [];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({
+      scope: '',  // 空 scope 在 default 模式下回退为 default
+      query: 'test',
+    });
+    assert.equal(r.ok, true);
+    assert.equal(mockSearchCalls[0].scope, 'default');
   });
 
   it('向量不可用返回 ok=false + degraded', async () => {
@@ -208,12 +211,24 @@ describe('CLI 纯函数 · executeStore', () => {
     assert.equal(mockStoreCalls[0].tags, 'ki-search');
   });
 
-  it('scope 校验失败返回 ok=false', async () => {
+  it('非法字符 scope 校验失败返回 ok=false', async () => {
     const r = await storeModule.executeStore({
-      scope: '',
+      scope: 'bad/scope',
       text: 'test',
     });
     assert.equal(r.ok, false);
+  });
+
+  it('default 模式下省略 scope 回退 default', async () => {
+    mockAvailable = true;
+    mockStoreResult = { docId: 'def123' };
+    mockStoreCalls = [];
+    const r = await storeModule.executeStore({
+      scope: '',  // 空 scope 在 default 模式下回退为 default
+      text: 'test',
+    });
+    assert.equal(r.ok, true);
+    assert.equal(mockStoreCalls[0].scope, 'default');
   });
 
   it('向量不可用返回 ok=false', async () => {
@@ -332,13 +347,26 @@ describe('CLI 纯函数 · executeBulkStore', () => {
     }
   });
 
-  it('scope 校验失败返回 ok=false', async () => {
+  it('非法字符 scope 校验失败返回 ok=false', async () => {
     fs.writeFileSync(tmpInput, JSON.stringify([{ text: 'test' }]), 'utf-8');
     const r = await bulkStoreModule.executeBulkStore({
-      scope: '',
+      scope: 'bad/scope',
       inputFile: tmpInput,
     });
     assert.equal(r.ok, false);
+  });
+
+  it('default 模式下省略 scope 回退 default', async () => {
+    mockAvailable = true;
+    mockBulkResult = { total: 1, succeeded: 1, failed: 0, results: [{ index: 0, memoryId: 'id1', success: true }] };
+    mockBulkCalls = [];
+    fs.writeFileSync(tmpInput, JSON.stringify([{ text: 'test' }]), 'utf-8');
+    const r = await bulkStoreModule.executeBulkStore({
+      scope: '',  // 空 scope 在 default 模式下回退为 default
+      inputFile: tmpInput,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(mockBulkCalls[0].scope, 'default');
   });
 
   it('向量不可用返回 ok=false', async () => {
@@ -384,5 +412,95 @@ describe('CLI 纯函数 · executeBulkStore', () => {
       inputFile: tmpInput,
     });
     assert.deepEqual(mockBulkCalls[0].entries[0].keywords, ['A', 'B']);
+  });
+});
+
+// ─── scope 护栏 · strict 模式 ───
+//
+// 覆盖 resolveScope 在 strict 档下的两条 fail-loud 分支（config.ts）：
+//   1. 省略/空 scope   → 抛 "必须显式传入 scope"
+//   2. 未注册 scope    → 抛 "unknown scope"
+// 以及白名单内 scope 正常放行。
+// 通过临时切换 KI_CONFIG_PATH 到 strict 配置 + resetConfigCache，
+// 让 loadConfig 重新读取（前序用例已把 loadConfig 缓存为 default 档）。
+describe('CLI 纯函数 · scope 护栏 strict 模式', () => {
+  const strictConfigPath = path.join(os.tmpdir(), `cli-fn-strict-config-${Date.now()}.json`);
+  let prevConfigPath: string | undefined;
+  let resetConfigCache: () => void;
+  let strictInput: string;
+
+  before(async () => {
+    // strict 配置：白名单仅注册 scope "registered"
+    fs.writeFileSync(strictConfigPath, JSON.stringify({
+      vectorDir: testVectorDir,
+      scopeMode: 'strict',
+      scopes: { registered: {} },
+    }), 'utf-8');
+    fs.mkdirSync(testVectorDir, { recursive: true });
+    strictInput = path.join(os.tmpdir(), `strict-bulk-input-${Date.now()}.json`);
+    fs.writeFileSync(strictInput, JSON.stringify([{ text: 'test' }]), 'utf-8');
+
+    // 切换配置并清缓存，使 loadConfig 重新读取 strict 配置
+    prevConfigPath = process.env.KI_CONFIG_PATH;
+    process.env.KI_CONFIG_PATH = strictConfigPath;
+    ({ resetConfigCache } = await import('../src/lib/config.js'));
+    resetConfigCache();
+  });
+
+  after(() => {
+    // 还原配置，避免污染同进程内其他用例
+    if (prevConfigPath === undefined) delete process.env.KI_CONFIG_PATH;
+    else process.env.KI_CONFIG_PATH = prevConfigPath;
+    resetConfigCache();
+    fs.rmSync(strictConfigPath, { force: true });
+    fs.rmSync(strictInput, { force: true });
+    fs.rmSync(testVectorDir, { recursive: true, force: true });
+  });
+
+  it('strict 模式省略 scope → ok=false（必须显式传入）', async () => {
+    const r = await searchModule.executeSearch({ scope: '', query: 'test' });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.ok(
+        r.error.includes('必须显式传入') || r.error.includes('strict'),
+        `error: ${r.error}`
+      );
+    }
+  });
+
+  it('strict 模式未注册 scope → ok=false（unknown scope）', async () => {
+    const r = await searchModule.executeSearch({ scope: 'unregistered', query: 'test' });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.ok(r.error.includes('unknown scope'), `error: ${r.error}`);
+    }
+  });
+
+  it('strict 模式白名单 scope → 正常放行', async () => {
+    mockAvailable = true;
+    mockSearchResults = [];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({ scope: 'registered', query: 'test' });
+    assert.equal(r.ok, true);
+    assert.equal(mockSearchCalls[0].scope, 'registered');
+  });
+
+  it('strict 护栏对 executeStore 生效（未注册 scope → ok=false）', async () => {
+    const r = await storeModule.executeStore({ scope: 'unregistered', text: 'test' });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.ok(r.error.includes('unknown scope'), `error: ${r.error}`);
+    }
+  });
+
+  it('strict 护栏对 executeBulkStore 生效（省略 scope → ok=false）', async () => {
+    const r = await bulkStoreModule.executeBulkStore({ scope: '', inputFile: strictInput });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.ok(
+        r.error.includes('必须显式传入') || r.error.includes('strict'),
+        `error: ${r.error}`
+      );
+    }
   });
 });

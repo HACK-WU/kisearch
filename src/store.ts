@@ -10,6 +10,7 @@
 
 import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
@@ -19,12 +20,14 @@ export type StoreResult =
   | { ok: false; error: string };
 
 export async function executeStore(params: {
-  scope: string;
+  scope?: string;
   text: string;
   tags?: string;
 }): Promise<StoreResult> {
   try {
-    validateScope(params.scope);
+    // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+    const scope = resolveScope(loadConfig(), params.scope);
+    validateScope(scope);
 
     const avail = await ensureVectorAvailable();
     if (!avail.available) {
@@ -35,7 +38,7 @@ export async function executeStore(params: {
     }
 
     const result = await vectorStore({
-      scope: params.scope,
+      scope,
       text: params.text,
       tags: params.tags ?? 'ki-search',
     });
@@ -53,7 +56,7 @@ const program = new Command();
 program
   .name('store')
   .description('存储文本到向量索引')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--text <text>', '待向量化文本')
   .option('--tags <tags>', '标签（默认 ki-search）', 'ki-search')
   .action(async (opts) => {

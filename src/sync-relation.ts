@@ -30,6 +30,7 @@ import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 
 // ─── 类型定义 ───
 
@@ -417,7 +418,7 @@ function syncBatch(
 // ─── MCP / CLI 共享纯函数 ───
 
 export interface SyncRelationParams {
-  scope: string;
+  scope?: string;
   group: string;
   relation: string;
   moduleInfo: string;
@@ -486,7 +487,9 @@ async function vectorWriteBack(params: {
 
 export async function executeSyncRelation(params: SyncRelationParams): Promise<SyncRelationResult> {
   try {
-    const { scope, moduleInfo } = params;
+    const { moduleInfo } = params;
+    // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+    const scope = resolveScope(loadConfig(), params.scope);
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
     const relation = params.relation;
     const keywordList = params.keywords;
@@ -575,7 +578,7 @@ const program = new Command();
 program
   .name('sync-relation')
   .description('关系回写：校验关键词 + 写入缓存 + 本地 KB')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--group <group>', 'Group 路径（单条模式）')
   .option('--relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
@@ -585,9 +588,11 @@ program
     // 批量模式
     if (opts.input) {
       try {
-        validateScope(opts.scope);
-        ensureScopeDir(opts.scope);
-        syncBatch(opts.scope, opts.input);
+        // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
+        const scope = resolveScope(loadConfig(), opts.scope);
+        validateScope(scope);
+        ensureScopeDir(scope);
+        syncBatch(scope, opts.input);
       } catch (err) {
         output({ ok: false, error: (err as Error).message });
         process.exit(1);
