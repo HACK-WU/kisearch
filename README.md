@@ -24,7 +24,7 @@
 - **向量语义兜底**：精确 Group 路径未命中时，自动通过向量搜索模糊定位，支持部分名称/近似表述
 - **TypeScript 直接执行**：使用 jiti 运行时，无需编译步骤
 - **CLI 驱动**：所有操作通过命令行接口完成
-- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 8 个 MCP 工具
+- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 MCP 工具；或用 `ki mcp --http` 以 HTTP 共享单例模式让多个 IDE 共享同一持锁进程（见 [`docs/mcp-http.md`](./docs/mcp-http.md)）
 - **独立部署**：可独立安装和使用，通过 `mem` CLI 命令调用向量存储
 
 ## 文档导航
@@ -70,6 +70,7 @@
 
 - **架构与协作关系**：[`docs/architecture.md`](./docs/architecture.md)
 - **CLI 参考**：[`docs/cli.md`](./docs/cli.md)
+- **MCP HTTP 共享单例模式**：[`docs/mcp-http.md`](./docs/mcp-http.md)
 - **scan-kb 子命令详解**：[`docs/scan-kb.md`](./docs/scan-kb.md)
 - **异常处理与恢复建议**：[`docs/error-handling.md`](./docs/error-handling.md)
 - **典型工作流**：[`docs/workflows.md`](./docs/workflows.md)

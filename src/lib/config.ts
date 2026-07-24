@@ -42,6 +42,17 @@ export interface ScopeConfig {
   wikiSync?: WikiSyncConfig;
 }
 
+/** MCP HTTP 传输默认值（token 只走 CLI/env，绝不入配置文件） */
+export interface McpHttpConfig {
+  host?: string;          // 监听地址，缺省 127.0.0.1（回环，免鉴权；对外监听改 0.0.0.0）
+  port?: number;          // 监听端口，缺省 DEFAULT_MCP_HTTP_PORT
+  allowedHosts?: string[]; // DNS rebinding 保护允许的 Host 头（可选）
+}
+
+export interface McpConfig {
+  http?: McpHttpConfig;
+}
+
 export interface EmbeddingConfig {
   provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
@@ -58,6 +69,7 @@ export interface KiConfig {
   embedding: EmbeddingConfig;            // 【新增】embedding 配置
   scopeMode: 'default' | 'strict';       // 【新增】scope 护栏模式（默认 'default'）；见 S-01 §3.5
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
+  mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
   _configPath?: string;                  // 配置文件路径（内部）
 }
 
@@ -219,6 +231,24 @@ function parseAndExpand(configFile: string): KiConfig {
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'
   const scopeMode: 'default' | 'strict' = raw.scopeMode === 'strict' ? 'strict' : 'default';
 
+  // 【新增】mcp.http：仅解析默认监听地址/端口/allowedHosts（token 不从配置读取）
+  let mcp: McpConfig | undefined;
+  if (raw.mcp && typeof raw.mcp === 'object') {
+    const rawMcp = raw.mcp as Record<string, unknown>;
+    if (rawMcp.http && typeof rawMcp.http === 'object') {
+      const h = rawMcp.http as Record<string, unknown>;
+      mcp = {
+        http: {
+          host: h.host ? String(h.host) : undefined,
+          port: h.port !== undefined ? Number(h.port) : undefined,
+          allowedHosts: Array.isArray(h.allowedHosts)
+            ? (h.allowedHosts as unknown[]).map(String)
+            : undefined,
+        },
+      };
+    }
+  }
+
   const scopes: Record<string, ScopeConfig> = {};
   if (raw.scopes && typeof raw.scopes === 'object') {
     for (const [name, sc] of Object.entries(raw.scopes as Record<string, unknown>)) {
@@ -238,7 +268,7 @@ function parseAndExpand(configFile: string): KiConfig {
     }
   }
 
-  return { dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, _configPath: configFile };
+  return { dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, mcp, _configPath: configFile };
 }
 
 // ─── 内置默认值 ───

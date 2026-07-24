@@ -100,7 +100,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   export            导出 KB 为 Wiki Markdown
   import-kb         @deprecated 旧导入
   migrate-keywords  数据迁移
-  mcp               启动 MCP Server (stdio 模式)
+  mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
   setup             下载 Skills / Rules 到目标项目目录
 
 全局参数：
@@ -119,6 +119,10 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki manage-index --scope my-project --action create-root --root-name "我的项目"
   ki query-group --scope my-project
   ki search --scope my-project --query "用户登录流程"
+  ki mcp                                  # stdio 模式（默认）
+  ki mcp --http                           # HTTP 共享单例（默认回环 127.0.0.1，本机免鉴权）
+  ki mcp --http --host 0.0.0.0 --token <t> # HTTP 共享单例（对外监听，远程需 Bearer Token）
+  ki mcp --status                         # 查看 HTTP 单例运行状态（只读）
 
 详细帮助：
   ki <command> --help
