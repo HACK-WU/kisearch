@@ -52,6 +52,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 | 命令 | 说明 |
 |------|------|
 | `ki mcp token generate` | 一键生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**并提示改用 reset |
+| `ki mcp token show` | 查看当前托管 Token 明文（含路径与创建时间），便于配置多个 IDE 客户端；不存在时报错（`MCP_TOKEN_NOT_FOUND`）并提示先 generate，文件存在但为空时报错（`MCP_TOKEN_EMPTY`）并提示用 reset 重建 |
 | `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。破坏性操作，必须显式 `--yes` 确认；重置后需更新客户端并重启运行中的服务（若启动环境设有 `KI_MCP_TOKEN`/`--token`，其优先级高于托管文件，需一并更新） |
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。

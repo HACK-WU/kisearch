@@ -808,6 +808,7 @@ ki sync-relation --scope my-project --input batch-input.json
 ki mcp                                  # stdio 模式（默认，行为不变）
 ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
 ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-token，0600），已存在则拒绝覆盖
+ki mcp token show                       # 查看当前托管 Token（配置多个 IDE 时免去翻文件）
 ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
 ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
@@ -831,6 +832,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | 命令 | 说明 |
 |------|------|
 | `ki mcp token generate` | 生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**（`MCP_TOKEN_EXISTS`）并提示改用 reset |
+| `ki mcp token show` | 查看当前托管 Token 明文（含路径与创建时间）；不存在时报错（`MCP_TOKEN_NOT_FOUND`）并提示先 generate，文件存在但为空时报错（`MCP_TOKEN_EMPTY`）并提示用 reset 重建 |
 | `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。无 `--yes` 时拒绝执行（`MCP_TOKEN_RESET_CONFIRM`）；重置后需更新客户端 Authorization 头并重启运行中的服务 |
 
 > **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合托管 Token 或 `--token`）。

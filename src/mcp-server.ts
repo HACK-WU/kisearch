@@ -22,7 +22,12 @@ import {
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
-import { createManagedToken, resetManagedToken, readManagedToken } from './lib/mcp-token.js';
+import {
+  createManagedToken,
+  resetManagedToken,
+  readManagedToken,
+  managedTokenInfo,
+} from './lib/mcp-token.js';
 
 /**
  * 构建一个 KiSearch McpServer 并注册全部工具。
@@ -148,7 +153,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
   return { http: true, host, port, token: resolvedToken, allowedHosts };
 }
 
-/** ki mcp token <generate|reset> 子命令：托管 Token 的生成与轮换（JSON 输出契约） */
+/** ki mcp token <generate|show|reset> 子命令：托管 Token 的生成、查看与轮换（JSON 输出契约） */
 function runTokenCommand(args: string[]): void {
   const action = args[0];
   if (action === 'generate') {
@@ -162,7 +167,7 @@ function runTokenCommand(args: string[]): void {
             path: tokenPath,
             hint:
               'Token 已生成并托管（0600）。启动远程模式无需 export：ki mcp --http --host 0.0.0.0；' +
-              'IDE 客户端配置 Authorization: Bearer <token>。明文仅本次输出，请妥善保存。',
+              'IDE 客户端配置 Authorization: Bearer <token>。后续可用 ki mcp token show 再次查看。',
           },
           null,
           2,
@@ -172,6 +177,34 @@ function runTokenCommand(args: string[]): void {
       const e = err as Error & { code?: string };
       failJson(e.message, e.code ?? 'MCP_TOKEN_GENERATE_FAILED');
     }
+    return;
+  }
+  if (action === 'show') {
+    // 只读查看：权限等价于文件拥有者 cat ~/.ki/mcp-token，不新增暴露面
+    const info = managedTokenInfo();
+    const token = readManagedToken(info.path);
+    if (!token) {
+      // 区分“文件不存在”与“文件存在但为空”：后者若引导 generate 会撞上 MCP_TOKEN_EXISTS 形成死循环
+      failJson(
+        info.exists
+          ? `托管 Token 文件为空（${info.path}）。请执行 ki mcp token reset --yes 重建。`
+          : `托管 Token 不存在（${info.path}）。请先执行 ki mcp token generate 生成。`,
+        info.exists ? 'MCP_TOKEN_EMPTY' : 'MCP_TOKEN_NOT_FOUND',
+      );
+    }
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          token,
+          path: info.path,
+          createdAt: info.exists ? info.createdAt : undefined,
+          hint: 'IDE 客户端配置 Authorization: Bearer <token>。请勿将输出粘贴到公开渠道。',
+        },
+        null,
+        2,
+      ),
+    );
     return;
   }
   if (action === 'reset') {
@@ -193,7 +226,7 @@ function runTokenCommand(args: string[]): void {
             'Token 已重置。请更新所有 IDE 客户端的 Authorization 头，' +
             '并重启运行中的 HTTP 服务（旧 Token 在重启前仍生效）。' +
             '注意：若启动环境设有 KI_MCP_TOKEN 或传了 --token，其优先级高于托管文件，需一并更新/移除。' +
-            '明文仅本次输出，请妥善保存。',
+            '后续可用 ki mcp token show 再次查看。',
         },
         null,
         2,
@@ -202,7 +235,7 @@ function runTokenCommand(args: string[]): void {
     return;
   }
   failJson(
-    `未知的 token 子命令（${action ?? '缺失'}）。可用：ki mcp token generate | ki mcp token reset --yes`,
+    `未知的 token 子命令（${action ?? '缺失'}）。可用：ki mcp token generate | ki mcp token show | ki mcp token reset --yes`,
     'MCP_TOKEN_UNKNOWN_ACTION',
   );
 }
