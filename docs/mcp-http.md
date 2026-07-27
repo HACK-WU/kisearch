@@ -14,9 +14,9 @@ HTTP 共享单例模式让 `ki mcp` 以**单进程 HTTP 服务**运行，作为�
 # 仅本机访问（默认即回环绑定 127.0.0.1，免鉴权，开箱即用）
 ki mcp --http
 
-# 远程跨机访问（非回环绑定，强制 Token）
-export KI_MCP_TOKEN='your-strong-secret'
-ki mcp --http --host 0.0.0.0 --port 7423
+# 远程跨机访问（非回环绑定，强制 Token）：一键生成托管 Token 后直接启动
+ki mcp token generate       # 输出 Token 明文，持久化到 ~/.ki/mcp-token（0600）
+ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token，无需 export
 ```
 
 各 IDE 在 `mcp.json` 中用 URL 型条目接入：
@@ -43,9 +43,18 @@ ki mcp --http --host 0.0.0.0 --port 7423
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，行为完全不变） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | Bearer Token；推荐用环境变量 `KI_MCP_TOKEN`。**非回环绑定时必填** |
+| `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐用 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON），不启动服务、跳过预检 |
+| `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
+
+托管 Token 子命令：
+
+| 命令 | 说明 |
+|------|------|
+| `ki mcp token generate` | 一键生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**并提示改用 reset |
+| `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。破坏性操作，必须显式 `--yes` 确认；重置后需更新客户端并重启运行中的服务（若启动环境设有 `KI_MCP_TOKEN`/`--token`，其优先级高于托管文件，需一并更新） |
+
+> ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
 
 CLI 参数优先于配置文件默认值。
 
@@ -80,9 +89,9 @@ ki mcp --status --host 127.0.0.1 --port 7423
 - **回环地址**（`127.0.0.1` / `localhost` / `::1`）：无网络暴露面，**免鉴权**，Token 可省略。
 - **非回环地址**（`0.0.0.0` / 外网 IP，即远程跨机）：**强制 Bearer Token**，未提供则拒绝启动（fail-loud）。
 
-Token 来源仅限 `--token <t>` 或环境变量 `KI_MCP_TOKEN`（推荐 env），**绝不写入配置文件明文**。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，常量时间比较，失败返回 401。
+Token 来源三级优先：`--token` > 环境变量 `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`（`ki mcp token generate` 生成），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，常量时间比较，失败返回 401。
 
-> ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。如需鉴权请绑定非回环地址。
+> ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。同理，回环绑定不会读取托管文件。如需鉴权请绑定非回环地址。
 
 ## 幂等单例守护
 
@@ -113,7 +122,7 @@ Token 来源仅限 `--token <t>` 或环境变量 `KI_MCP_TOKEN`（推荐 env）�
 
 - 生产远程暴露建议前置 **TLS 反向代理**（如 Nginx/Caddy），HTTP 服务本身只处理明文，TLS 由反代终结。
 - 配合防火墙 / 安全组收敛来源 IP；跨机 IDE 来源不定时，可用 `--allowed-hosts` 限定 Host 头以缓解 DNS rebinding。
-- Token 请使用足够强度的随机串，通过环境变量注入，避免出现在 shell 历史或配置文件中。
+- Token 推荐用 `ki mcp token generate` 托管（强随机、不进 shell 历史与配置文件）；怀疑泄露时 `ki mcp token reset --yes` 立即轮换并重启服务。
 
 ## 配置文件默认值
 

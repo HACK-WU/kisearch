@@ -807,7 +807,9 @@ ki sync-relation --scope my-project --input batch-input.json
 ```bash
 ki mcp                                  # stdio 模式（默认，行为不变）
 ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
-ki mcp --http --host 0.0.0.0 --token <t> # 对外监听（远程/跨机共享），强制 Bearer Token
+ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-token，0600），已存在则拒绝覆盖
+ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
+ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
 ```
 
@@ -820,13 +822,20 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | Bearer Token；也可用环境变量 `KI_MCP_TOKEN`（推荐）。**非回环绑定时必填** |
+| `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（不启动服务、跳过预检） |
+| `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含托管 Token 存在性；不启动服务、跳过预检） |
 
-> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0 --token <t>` 主动开启。
+### 托管 Token 子命令
+
+| 命令 | 说明 |
+|------|------|
+| `ki mcp token generate` | 生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**（`MCP_TOKEN_EXISTS`）并提示改用 reset |
+| `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。无 `--yes` 时拒绝执行（`MCP_TOKEN_RESET_CONFIRM`）；重置后需更新客户端 Authorization 头并重启运行中的服务 |
+
+> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合托管 Token 或 `--token`）。
 >
-> **条件鉴权**：绑定回环地址时无网络暴露面，免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时必须提供 Token，否则拒绝启动。Token 只走 `--token`/`KI_MCP_TOKEN`，**绝不写入配置文件**。
+> **条件鉴权**：绑定回环地址时无网络暴露面，免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时必须提供 Token，否则拒绝启动。Token 来源三级优先：`--token` > `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`，**绝不写入配置文件**；非回环启动时会明示本次生效的 Token 来源。
 >
 > **幂等单例**：`ki mcp --http` 启动前会探活 `GET /healthz`，若目标地址已有健康的 KiSearch 实例则复用并退出（重复运行安全）。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
 >

@@ -22,6 +22,7 @@ import {
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
+import { createManagedToken, resetManagedToken, readManagedToken } from './lib/mcp-token.js';
 
 /**
  * 构建一个 KiSearch McpServer 并注册全部工具。
@@ -106,6 +107,8 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     );
   }
   const token = tokenFromFlag ?? process.env.KI_MCP_TOKEN;
+  let resolvedToken = token;
+  let tokenSource = tokenFromFlag !== undefined ? '--token 参数' : token ? '环境变量 KI_MCP_TOKEN' : '';
 
   // NEG-03：回环绑定时鉴权被禁用，此时提供 Token 不生效，明确告知避免安全误判
   if (isLoopbackHost(host) && (tokenFromFlag !== undefined || process.env.KI_MCP_TOKEN)) {
@@ -119,21 +122,99 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     ? allowedHostsRaw.split(',').map((s) => s.trim()).filter(Boolean)
     : httpCfg.allowedHosts;
 
-  // 非回环绑定必须提供 token（远程裸奔不安全）
-  if (!isLoopbackHost(host) && (!token || !token.trim())) {
-    failJson(
-      `HTTP 模式绑定非回环地址（${host}）时必须提供鉴权 Token：` +
-        `请设置环境变量 KI_MCP_TOKEN 或传入 --token <值>。` +
-        `（若仅本机访问，可用 --host 127.0.0.1 绑定回环地址免鉴权）`,
-      'MCP_HTTP_TOKEN_REQUIRED',
-    );
+  // 非回环绑定必须提供 token（远程裸奔不安全）；
+  // 显式来源（--token/env）缺失时自动回退到托管 Token（~/.ki/mcp-token，ki mcp token generate 生成）。
+  // 回环绑定不读托管文件：鉴权本就禁用，Token 不会生效。
+  if (!isLoopbackHost(host) && (!resolvedToken || !resolvedToken.trim())) {
+    const managed = readManagedToken();
+    if (managed) {
+      resolvedToken = managed;
+      tokenSource = '托管文件 ~/.ki/mcp-token';
+    } else {
+      failJson(
+        `HTTP 模式绑定非回环地址（${host}）时必须提供鉴权 Token：` +
+          `推荐执行 ki mcp token generate 一键生成托管 Token，或设置环境变量 KI_MCP_TOKEN / 传入 --token <值>。` +
+          `（若仅本机访问，可用默认回环绑定免鉴权）`,
+        'MCP_HTTP_TOKEN_REQUIRED',
+      );
+    }
   }
 
-  return { http: true, host, port, token, allowedHosts };
+  // REQ-04：非回环模式明示 Token 来源，避免“改了文件/环境变量为何不生效”的困惑
+  if (!isLoopbackHost(host) && tokenSource) {
+    process.stderr.write(`鉴权 Token 来源：${tokenSource}（优先级 --token > KI_MCP_TOKEN > 托管文件）。\n`);
+  }
+
+  return { http: true, host, port, token: resolvedToken, allowedHosts };
+}
+
+/** ki mcp token <generate|reset> 子命令：托管 Token 的生成与轮换（JSON 输出契约） */
+function runTokenCommand(args: string[]): void {
+  const action = args[0];
+  if (action === 'generate') {
+    try {
+      const { token, path: tokenPath } = createManagedToken();
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            token,
+            path: tokenPath,
+            hint:
+              'Token 已生成并托管（0600）。启动远程模式无需 export：ki mcp --http --host 0.0.0.0；' +
+              'IDE 客户端配置 Authorization: Bearer <token>。明文仅本次输出，请妥善保存。',
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      failJson(e.message, e.code ?? 'MCP_TOKEN_GENERATE_FAILED');
+    }
+    return;
+  }
+  if (action === 'reset') {
+    if (!args.includes('--yes')) {
+      failJson(
+        '重置托管 Token 是破坏性操作：所有已配置该 Token 的客户端将立即失效，' +
+          '运行中的 HTTP 服务需重启后才使用新 Token。确认请加 --yes：ki mcp token reset --yes',
+        'MCP_TOKEN_RESET_CONFIRM',
+      );
+    }
+    const { token, path: tokenPath } = resetManagedToken();
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          token,
+          path: tokenPath,
+          hint:
+            'Token 已重置。请更新所有 IDE 客户端的 Authorization 头，' +
+            '并重启运行中的 HTTP 服务（旧 Token 在重启前仍生效）。' +
+            '注意：若启动环境设有 KI_MCP_TOKEN 或传了 --token，其优先级高于托管文件，需一并更新/移除。' +
+            '明文仅本次输出，请妥善保存。',
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  failJson(
+    `未知的 token 子命令（${action ?? '缺失'}）。可用：ki mcp token generate | ki mcp token reset --yes`,
+    'MCP_TOKEN_UNKNOWN_ACTION',
+  );
 }
 
 export async function startMcpServer(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // ─── ki mcp token <generate|reset>：托管 Token 管理，不启动服务、跳过预检 ───
+  if (argv[0] === 'token') {
+    runTokenCommand(argv.slice(1));
+    return;
+  }
 
   // ─── ki mcp --status：只读诊断，读 lock + 探活，跳过预检与启动（NEG-01/02） ───
   if (argv.includes('--status')) {

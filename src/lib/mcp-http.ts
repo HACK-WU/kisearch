@@ -22,6 +22,7 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
+import { managedTokenInfo } from './mcp-token.js';
 
 /** 默认监听端口 */
 export const DEFAULT_MCP_HTTP_PORT = 7423;
@@ -422,6 +423,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
   }
   const info = await fetchHealthz(host, port);
   const running = info?.ok === true && info?.name === 'KiSearch';
+  const tokenInfo = managedTokenInfo();
   console.log(
     JSON.stringify(
       {
@@ -430,6 +432,10 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
         target: { host: probeHost(host), port },
         healthz: running ? info : null,
         lock: lock ?? null,
+        // 托管 Token 仅报告存在性与创建时间，绝不回显明文
+        managedToken: tokenInfo.exists
+          ? { exists: true, createdAt: tokenInfo.createdAt, path: tokenInfo.path }
+          : { exists: false },
         hint: running
           ? '已有健康的 KiSearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
           : '未探测到运行中的 KiSearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',

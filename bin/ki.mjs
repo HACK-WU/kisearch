@@ -121,7 +121,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki search --scope my-project --query "用户登录流程"
   ki mcp                                  # stdio 模式（默认）
   ki mcp --http                           # HTTP 共享单例（默认回环 127.0.0.1，本机免鉴权）
-  ki mcp --http --host 0.0.0.0 --token <t> # HTTP 共享单例（对外监听，远程需 Bearer Token）
+  ki mcp token generate                   # 一键生成托管 Token（已存在则拒绝覆盖）
+  ki mcp --http --host 0.0.0.0            # 对外监听，自动读取托管 Token（远程需 Bearer Token）
+  ki mcp token reset --yes                # 轮换托管 Token（破坏性，需显式确认）
   ki mcp --status                         # 查看 HTTP 单例运行状态（只读）
 
 详细帮助：
