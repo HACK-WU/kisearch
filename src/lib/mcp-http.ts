@@ -128,6 +128,8 @@ export interface HealthzInfo {
   version?: string;
   host?: string;
   port?: number;
+  /** 启动以来的鉴权失败次数（仅非回环鉴权模式下出现） */
+  authFailures?: number;
 }
 
 /** GET /healthz 并解析返回体；失败返回 null */
@@ -211,6 +213,22 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const lastActive = new Map<string, number>();
+
+  // 鉴权失败可观测：客户端（IDE）往往吞掉 401 只显示“工具(0)”，
+  // 服务端必须留下痕迹（stderr 日志 + /healthz 计数）才有排查入口。
+  let authFailures = 0;
+  let lastAuthLogAt = 0;
+  const AUTH_LOG_INTERVAL_MS = 5000; // 限流：客户端重试风暴不刷屏
+  const logAuthFailure = (req: http.IncomingMessage, reason: string): void => {
+    authFailures++;
+    const now = Date.now();
+    if (now - lastAuthLogAt < AUTH_LOG_INTERVAL_MS) return;
+    lastAuthLogAt = now;
+    process.stderr.write(
+      `[KiSearch] 鉴权失败（第 ${authFailures} 次）：来自 ${req.socket.remoteAddress ?? '未知'}，${reason}。` +
+        `请核对客户端 Authorization: Bearer 与 ki mcp token show 的输出完全一致（整段复制，勿手抄）。\n`,
+    );
+  };
   const touch = (id?: string): void => {
     if (id) lastActive.set(id, Date.now());
   };
@@ -264,6 +282,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         pid: process.pid,
         version: readKiVersion(),
         ...(advertiseAddr ? { host: advertiseAddr.host, port: advertiseAddr.port } : {}),
+        ...(authEnabled ? { authFailures } : {}),
       });
       return;
     }
@@ -280,6 +299,13 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         ? auth.slice('Bearer '.length).trim()
         : '';
       if (!token || !bearer || !tokenMatches(bearer, token)) {
+        // 只披露长度差异不披露内容：足以定位“手抄漏字符/多空格”这类高频错误
+        const reason = !bearer
+          ? '请求未携带 Authorization: Bearer 头'
+          : token && bearer.length !== token.length
+            ? `Token 长度不匹配（收到 ${bearer.length} 位，期望 ${token.length} 位）`
+            : 'Token 内容不匹配';
+        logAuthFailure(req, reason);
         res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
         res.end(
           JSON.stringify({
@@ -437,7 +463,10 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
           ? { exists: true, createdAt: tokenInfo.createdAt, path: tokenInfo.path }
           : { exists: false },
         hint: running
-          ? '已有健康的 KiSearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
+          ? (info?.authFailures ?? 0) > 0
+            ? `实例健康，但启动以来已有 ${info!.authFailures} 次鉴权失败：很可能有客户端 Token 配置错误，` +
+              `请核对各 IDE 的 Authorization: Bearer 与 ki mcp token show 输出完全一致（服务端 stderr 日志有失败原因）。`
+            : '已有健康的 KiSearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
           : '未探测到运行中的 KiSearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',
       },
       null,

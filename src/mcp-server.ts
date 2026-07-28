@@ -247,6 +247,32 @@ function runTokenCommand(args: string[]): void {
 export async function startMcpServer(): Promise<void> {
   const argv = process.argv.slice(2);
 
+  // ─── ki mcp -h/--help：打印帮助后直接退出，绝不落入默认 stdio 启动 ───
+  //（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
+  if (argv.includes('-h') || argv.includes('--help')) {
+    console.log(`
+ki mcp - 启动 KiSearch MCP Server
+
+用法：
+  ki mcp                        stdio 模式（默认，单客户端单进程）
+  ki mcp --http                 HTTP 共享单例（默认回环 127.0.0.1:7423，本机免鉴权）
+  ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
+  ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
+  ki mcp token generate         生成托管 Token（已存在则拒绝覆盖）
+  ki mcp token show             查看当前托管 Token
+  ki mcp token reset --yes      轮换托管 Token（破坏性，需显式确认）
+
+HTTP 模式参数：
+  --host <addr>                 绑定地址（默认 127.0.0.1；非回环绑定需鉴权 Token）
+  --port <port>                 端口（默认 7423）
+  --token <value>               鉴权 Token（优先级 --token > KI_MCP_TOKEN > 托管文件）
+  --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
+
+提示：多个 IDE 共享同一持锁进程以避免向量库锁冲突，请用 ki mcp --http。
+`);
+    return;
+  }
+
   // ─── ki mcp token <generate|reset>：托管 Token 管理，不启动服务、跳过预检 ───
   if (argv[0] === 'token') {
     runTokenCommand(argv.slice(1));
