@@ -71,7 +71,7 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 /** 探活/连接地址归一：0.0.0.0 / :: / localhost 统一到 127.0.0.1，确保同机不同写法命中同一实例（NEG-01） */
-function probeHost(host: string): string {
+export function probeHost(host: string): string {
   const h = host.trim().toLowerCase();
   if (h === '0.0.0.0' || h === '::' || h === '' || h === 'localhost') return '127.0.0.1';
   return host;

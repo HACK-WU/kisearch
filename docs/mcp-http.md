@@ -40,12 +40,14 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，行为完全不变） |
+| `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，启动时同样经过多实例冲突守卫，见下文「stdio 启动守卫」） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐用 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
+
+子命令 `ki mcp stop`：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock，见下文「一键关闭」。
 
 托管 Token 子命令：
 
@@ -96,17 +98,52 @@ Token 来源三级优先：`--token` > 环境变量 `KI_MCP_TOKEN` > 托管文�
 
 ## 幂等单例守护
 
-`ki mcp --http` 启动流程：
+`ki mcp --http` 启动流程（探活与冲突检测均在启动预检之前执行）：
 
-1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 KiSearch 实例 → 打印“已有健康实例，复用，退出”并 `exit(0)`。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
-2. 否则 `listen`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
-3. 成功监听后写 `~/.ki/mcp-http.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
+1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 KiSearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
+2. 检查 stdio 实例 lock（`~/.ki/mcp-stdio.lock`，pid 存活校验）。若存在存活的 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid，避免 HTTP 单例与 stdio 进程争抢向量库锁后静默降级。
+3. 通过守卫后执行启动预检，再 `listen`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
+4. 成功监听后写 `~/.ki/mcp-http.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
-因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程。
+因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程——且不要求这些环境都能通过预检。
+
+## stdio 启动守卫
+
+stdio 模式（默认 `ki mcp`）同样在启动时强制检查多实例冲突，**不允许多进程静默共存降级**：
+
+1. **已有健康 HTTP 单例**（按配置/默认地址探活 `host:port/healthz`）→ 拒绝启动（`exit 1`），提示将本 IDE 配置改为 URL 型接入 `{ "url": "http://<host>:<port>/mcp" }`。
+2. **已有存活的 stdio 实例**：守卫以**原子独占方式**创建自身 lock（`~/.ki/mcp-stdio.lock`，pid + startedAt），创建失败即说明已有存活实例 → 拒绝启动（`exit 1`）并提示冲突 pid。独占创建保证多个 IDE **同时**拉起 stdio 时也只有一个胜出，不存在预检窗口内的竞态共存。
+3. lock 在守卫阶段（预检之前）即登记，退出时自动清理（含预检失败路径）；`kill -9` 残留的陈旧锁会在下次启动的存活校验中自动清理，不会误拦。
+
+> ⚠️ 被拒绝的 stdio 进程会在 stderr 给出完整出路后非 0 退出；部分 IDE 会自动重拉 MCP 进程，若 MCP 日志中反复出现该提示，请按提示将该 IDE 的配置迁移为 URL 型接入。
+>
+> 注意：守卫基于 lock 文件，升级前启动的存量 stdio 进程没有 lock，对守卫不可见，需手动清理一次（`ps -ef | grep 'ki mcp'`）。
+
+## 一键关闭（`ki mcp stop`）
+
+关闭本机所有 ki mcp 实例并清理 lock，适用于「迁移到 HTTP 单例前清场」或「手动排障后恢复干净状态」：
+
+```bash
+ki mcp stop
+```
+
+工作方式：
+
+1. **定位**：读 `~/.ki/mcp-stdio.lock`、`~/.ki/mcp-http.lock` 取服务进程 pid，并探活 `/healthz` 兜底（lock 被手动删过但服务仍在跑的场景）；
+2. **身份校验**：发信号前读 `/proc/<pid>/cmdline` 确认目标确为 ki mcp 进程，pid 已被无关进程复用时跳过不杀（仅清陈旧 lock）；
+3. **关闭**：SIGTERM 优雅退出（走退出钩子自动释放 lock 与向量库锁），超时 SIGKILL 兜底；
+4. **清理**：移除残留/陈旧/损坏的 lock 文件，输出 JSON 报告（每个目标的处置结果 + 被清理的 lock 列表）。
+
+相比手动 `kill <pid>`，它直接对真正的服务进程（即持锁者本体）发信号——`ki mcp` 实际是多层进程链（ki 壳 → npm exec → sh → node mcp-server），手动 kill 顶层壳会留下持锁的孤儿进程，造成「关了还提示冲突、lock 不释放」的假象。
+
+> 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；迁移 HTTP 单例的正确顺序是：先改 IDE 配置为 URL 型 → `ki mcp stop` → `ki mcp --http`。
+
+> **已知局限**：升级前启动的旧 stdio 进程不写 lock、也无 HTTP 端口，三个定位来源均无法发现它（与启动守卫的「存量进程盲区」同源）；如怀疑仍有此类残留，用 `ps -ef | grep mcp-server` 人工确认后 kill，属一次性迁移成本。
 
 ### 排查
 
-- 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`
+- 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`；stdio 实例：`cat ~/.ki/mcp-stdio.lock`
+- 关闭全部实例并清理 lock：`ki mcp stop`
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"KiSearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 

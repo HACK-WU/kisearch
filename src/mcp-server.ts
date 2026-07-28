@@ -19,9 +19,13 @@ import {
   startHttpMcpServer,
   printHttpStatus,
   isLoopbackHost,
+  fetchHealthz,
+  probeHost,
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
+import { readLiveStdioLock, acquireStdioLock, releaseStdioLock } from './lib/mcp-stdio-lock.js';
+import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
   createManagedToken,
   resetManagedToken,
@@ -259,7 +263,100 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
+  // ─── ki mcp stop：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理 lock，跳过预检 ───
+  // 按 lock/healthz 定位真正的服务进程直接发信号，规避「杀顶层壳留下持锁孤儿」的多层进程链坑。
+  if (argv[0] === 'stop') {
+    const config = loadConfig();
+    const httpCfg = config.mcp?.http ?? {};
+    const host = getFlagValue(argv, '--host') ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
+    const port = resolveHttpPort(argv, httpCfg);
+    const report = await stopMcpInstances({ host, port });
+    const nothing = report.stopped.length === 0 && report.cleanedLocks.length === 0;
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          stopped: report.stopped,
+          cleanedLocks: report.cleanedLocks,
+          hint: nothing
+            ? '未发现运行中的 ki mcp 实例，也没有残留 lock。' +
+              '注意：升级前启动的旧 stdio 进程不写 lock，本命令无法定位；' +
+              '如怀疑仍有残留，可用 ps -ef | grep mcp-server 人工确认后 kill。'
+            : '已关闭的实例若由 IDE 以 command 型配置拉起，IDE 可能自动重启它；' +
+              '如需长期使用 HTTP 单例，请将 IDE 配置迁移为 URL 型接入后再 ki mcp --http。',
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
   const opts = parseMcpArgs(argv);
+
+  // ─── 启动守卫（预检之前）：幂等复用 / 多实例冲突检测 ───
+  // 探活与 lock 检查必须前置，保证「已有实例可复用/该被拒绝」的判定不被预检
+  // （如缺 embedding Key 的异构 shell）拦截——重复运行在任何环境下都安全。
+  if (opts.http) {
+    // 命中健康实例 → 复用退出，全程不做预检
+    const live = await fetchHealthz(opts.host, opts.port);
+    if (live?.ok === true && live?.name === 'KiSearch') {
+      process.stderr.write(
+        `已有健康的 KiSearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
+      );
+      process.exit(0);
+    }
+    // 存活的 stdio 实例会与 HTTP 单例争抢向量库锁 → 启动前指明冲突来源并拒绝（而非等取锁失败才报占用）
+    const stdioLock = readLiveStdioLock();
+    if (stdioLock) {
+      process.stderr.write(
+        `检测到存活的 ki mcp stdio 实例（pid ${stdioLock.pid}，启动于 ${stdioLock.startedAt}），` +
+          `它与 HTTP 单例并存会争抢向量库锁导致降级，拒绝启动。\n` +
+          `请先关闭该 stdio 进程（kill ${stdioLock.pid}）并将对应 IDE 配置迁移为 URL 型接入，再启动 HTTP 服务。\n`,
+      );
+      process.exit(1);
+    }
+  } else {
+    // stdio 守卫①：已有健康 HTTP 单例 → 拒绝启动，引导迁移 URL 接入（fail-loud + 明确出路）
+    let guardHost: string = DEFAULT_MCP_HTTP_HOST;
+    let guardPort: number = DEFAULT_MCP_HTTP_PORT;
+    try {
+      const httpCfg = loadConfig().mcp?.http ?? {};
+      if (httpCfg.host) guardHost = httpCfg.host;
+      if (Number.isInteger(httpCfg.port) && httpCfg.port! >= 1 && httpCfg.port! <= 65535) {
+        guardPort = httpCfg.port!;
+      }
+    } catch {
+      /* 配置异常交由后续预检报告，此处用默认地址探活 */
+    }
+    const live = await fetchHealthz(guardHost, guardPort);
+    if (live?.ok === true && live?.name === 'KiSearch') {
+      // 展示用地址同步归一（0.0.0.0 等监听写法不是可连接地址）
+      const connectHost = probeHost(guardHost);
+      process.stderr.write(
+        `已有健康的 KiSearch HTTP 单例在 ${connectHost}:${guardPort}（pid ${live.pid}），` +
+          `stdio 模式与其并存会争抢向量库锁，拒绝启动。\n` +
+          `请将本 IDE 的 MCP 配置改为 URL 型接入：{ "url": "http://${connectHost}:${guardPort}/mcp" }。\n`,
+      );
+      process.exit(1);
+    }
+    // stdio 守卫②：原子独占创建自身 lock，并发启动时竞态输家在此被拒
+    // （陈旧锁在创建时已自动清理，不会误拦）；必须在预检之前登记，
+    // 避免多 IDE 同时拉起时在预检窗口内静默共存。
+    const conflict = acquireStdioLock();
+    if (conflict) {
+      process.stderr.write(
+        `已有 ki mcp stdio 实例在运行（pid ${conflict.pid}，启动于 ${conflict.startedAt}），` +
+          `多个 stdio 进程会争抢向量库锁，拒绝启动。\n` +
+          `建议迁移 HTTP 单例模式：执行 ki mcp --http 后，将所有 IDE 配置改为 URL 型接入 ` +
+          `http://${probeHost(guardHost)}:${guardPort}/mcp。\n`,
+      );
+      process.exit(1);
+    }
+    // 'exit' 钩子保证预检失败/shutdown/process.exit 各路径都释放
+    // （kill -9 残留由下次启动的存活校验清理）
+    process.on('exit', () => releaseStdioLock());
+  }
 
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
   // stdio 协议占用 stdout，报告一律写 stderr；有失败项拒绝启动。
@@ -297,7 +394,7 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
-  // ─── stdio 模式（默认，行为与以往完全一致） ───
+  // ─── stdio 模式（默认，单客户端单进程） ───
   process.stderr.write(
     'KiSearch MCP 以 stdio 模式启动（默认，单客户端单进程）。\n' +
       '如需多个 IDE 共享同一持锁进程以避免向量库锁冲突，请改用 HTTP 单例模式：ki mcp --http。\n',

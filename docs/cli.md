@@ -805,16 +805,22 @@ ki sync-relation --scope my-project --input batch-input.json
 - **HTTP 共享单例（`--http`）**：以单进程 HTTP 服务运行，作为向量库唯一持锁者，多个 IDE（本地/远程）经 URL 共享同一进程，从根本上消除多进程锁冲突。详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ```bash
-ki mcp                                  # stdio 模式（默认，行为不变）
+ki mcp                                  # stdio 模式（默认，启动时经多实例冲突守卫）
 ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
 ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-token，0600），已存在则拒绝覆盖
 ki mcp token show                       # 查看当前托管 Token（配置多个 IDE 时免去翻文件）
 ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
 ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
+ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
 ```
 
 stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通信。
+
+> **启动守卫（stdio 与 HTTP 通用，均在预检之前执行）**：不允许多个 ki mcp 进程静默共存降级。
+> - `ki mcp --http`：探活命中健康实例 → 复用退出（`exit 0`，不做预检）；检测到存活 stdio 实例 → 拒绝启动（`exit 1`，提示冲突 pid）。
+> - `ki mcp`（stdio）：检测到健康 HTTP 单例或存活 stdio 实例 → 拒绝启动（`exit 1`），提示迁移 URL 型接入；守卫通过后写入 `~/.ki/mcp-stdio.lock`（pid 存活校验，陈旧锁自动清理）。
+> 详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### HTTP 模式参数
 
@@ -826,6 +832,12 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含托管 Token 存在性；不启动服务、跳过预检） |
+
+### 关闭实例（`ki mcp stop`）
+
+按 lock 文件 + healthz 探活定位本机所有 ki mcp 服务进程（stdio 与 HTTP），先 SIGTERM 优雅退出、超时 SIGKILL 兜底，最后清理残留 lock，输出 JSON 报告。直接对真正的服务进程发信号，避免手动 kill 顶层壳时留下持锁孤儿进程的多层进程链问题；杀前校验 `/proc/<pid>/cmdline` 防止 pid 复用误杀无辜进程。
+
+> 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；如需长期使用 HTTP 单例，请先将 IDE 配置迁移为 URL 型接入再 `ki mcp --http`。
 
 ### 托管 Token 子命令
 
@@ -839,7 +851,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **条件鉴权**：绑定回环地址时无网络暴露面，免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时必须提供 Token，否则拒绝启动。Token 来源三级优先：`--token` > `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`，**绝不写入配置文件**；非回环启动时会明示本次生效的 Token 来源。
 >
-> **幂等单例**：`ki mcp --http` 启动前会探活 `GET /healthz`，若目标地址已有健康的 KiSearch 实例则复用并退出（重复运行安全）。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
+> **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 KiSearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
 >
 > **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, hint }` JSON，用于确认单例是否在跑、由谁持有；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
