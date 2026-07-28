@@ -426,7 +426,7 @@ export interface SyncRelationParams {
 }
 
 export type SyncRelationResult =
-  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; keywords_truncated?: number; keywords_warning?: string; hint?: string; vectorPending?: boolean; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; keywords_truncated?: number; keywords_warning?: string; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
@@ -434,7 +434,8 @@ export type SyncRelationResult =
 /**
  * 向量写入：一次 vectorBulkStore 批量写 ki-relation 路径向量 + ki-search 语义向量，
  * 并把 ki-search 条（index 1）的 docId 回写到 cache（供后续 delete 定位）。
- * 失败仅记日志，不抛，不阻塞主流程。
+ * 失败仅记日志，不抛，不阻塞主流程；返回 { stored, reason? } 供上层透出
+ * 部分写入状态（cache/wiki 成功但向量未写时，调用方需要感知）。
  */
 async function vectorWriteBack(params: {
   relation: string;
@@ -443,14 +444,14 @@ async function vectorWriteBack(params: {
   moduleInfo: string;
   scope: string;
   cachePath: string;
-}): Promise<void> {
+}): Promise<{ stored: boolean; reason?: string }> {
   const { relation, group, keywordList, moduleInfo, scope, cachePath } = params;
 
   try {
     const avail = await ensureVectorAvailable();
     if (!avail.available) {
       console.warn(`[sync-relation] 向量服务不可用，跳过向量写入: ${avail.reason || ''}`);
-      return;
+      return { stored: false, reason: avail.reason || '向量服务不可用' };
     }
 
     const relText = buildRelationContent(relation, group, keywordList);
@@ -480,8 +481,16 @@ async function vectorWriteBack(params: {
         // memoryId 回写失败不影响主流程，delete 时用 search 兜底
       }
     }
+
+    // 两条都失败才算未写入；部分成功也如实透出
+    const failed = result.results.filter((r) => !r.success);
+    if (failed.length === result.results.length) {
+      return { stored: false, reason: failed[0]?.error || '向量写入全部失败' };
+    }
+    return { stored: true };
   } catch (err) {
     console.warn(`[sync-relation] 向量写入失败: ${(err as Error).message}`);
+    return { stored: false, reason: (err as Error).message };
   }
 }
 
@@ -538,8 +547,9 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
     writeJson(cachePath, cache);
 
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
-    // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程。
-    await vectorWriteBack({ relation, group, keywordList, moduleInfo, scope, cachePath });
+    // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，
+    // 但把写入结果透出到返回值（vectorStored/vectorReason），避免部分写入被静默吞掉。
+    const vec = await vectorWriteBack({ relation, group, keywordList, moduleInfo, scope, cachePath });
 
     // Wiki 写回（容错，失败不阻塞）
     let wikiSynced: boolean | undefined;
@@ -562,6 +572,8 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
       ...result,
       ...(pathHint ? { hint: pathHint } : {}),
       vectorPending: false,
+      vectorStored: vec.stored,
+      ...(vec.reason ? { vectorReason: vec.reason } : {}),
       ...(wikiSynced !== undefined ? { wikiSynced } : {}),
       ...(wikiFile ? { wikiFile } : {}),
       ...(wikiReason ? { wikiReason } : {}),

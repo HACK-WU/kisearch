@@ -14,6 +14,7 @@ import path from 'path';
 import { writeJson, readJson, readGroupIndex } from './lib/store.js';
 import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
 import type { GroupIndex } from './lib/scope.js';
+import { loadConfig } from './lib/config.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
 import { vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 
@@ -137,21 +138,163 @@ export async function executeManageCreate(params: ManageCreateParams): Promise<M
 
 export type ListScopesResult = {
   ok: true;
-  scopes: Array<{ scope: string; topGroups: string[] }>;
+  scopes: Array<{ scope: string; topGroups: string[]; registered: boolean; initialized: boolean }>;
   total: number;
 };
 
 export function executeListScopes(): ListScopesResult {
-  const scopes = listAllScopes();
-  const scopeDetails = scopes.map((s) => {
+  // 已初始化（磁盘上有 relations-cache.json）与已注册（config.scopes）取并集：
+  // 已注册但未初始化的 scope 也列出，避免首次使用前“看不见”造成困惑
+  const registeredSet = new Set(Object.keys(loadConfig().scopes));
+  const initialized = listAllScopes();
+  const initializedSet = new Set(initialized);
+  const allScopes = [...new Set([...initialized, ...registeredSet])];
+  const scopeDetails = allScopes.map((s) => {
     let topGroups: string[] = [];
     try {
       const data = readGroupIndex(s);
       if (data?.groups) topGroups = Object.keys(data.groups);
     } catch { /* 读取失败则返回空列表 */ }
-    return { scope: s, topGroups };
+    return {
+      scope: s,
+      topGroups,
+      registered: registeredSet.has(s),
+      initialized: initializedSet.has(s),
+    };
   });
-  return { ok: true, scopes: scopeDetails, total: scopes.length };
+  return { ok: true, scopes: scopeDetails, total: scopeDetails.length };
+}
+
+// ─── MCP 空节点删除（NEG-15 边界内：仅限无子节点、无 relations、无本地 KB） ───
+
+export interface ManageDeleteEmptyParams {
+  scope: string;
+  name: string;
+  parent?: string;
+}
+
+export type ManageDeleteEmptyResult =
+  | { ok: true; path: string; hint?: string }
+  | { ok: false; error: string; children?: string[]; hint?: string };
+
+/**
+ * 删除空节点（供 MCP 使用）：仅当目标节点无子节点、无任何 relation、
+ * 无本地 KB 文件时才执行，非空一律拒绝并引导走 CLI（带二次确认）。
+ * 非破坏性：不触发级联删除，只清理树节点和 cache 中无 relation 的空壳 key。
+ */
+export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams): Promise<ManageDeleteEmptyResult> {
+  try {
+    const { scope, name, parent } = params;
+
+    if (!scope) return { ok: false, error: '此操作需要 scope 参数' };
+    validateScope(scope);
+    if (!name) return { ok: false, error: 'delete 需要 name 参数' };
+    if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
+
+    const data = readGroupIndex(scope);
+    if (!data) return { ok: false, error: 'group-index.json 不存在' };
+
+    const indexPath = getGroupIndexPath(scope);
+    const cachePath = getRelationsCachePath(scope);
+    const cache = readJson<{ groups?: Record<string, { hot_relations?: unknown[] }> }>(cachePath);
+    const groupsData = (cache?.groups as Record<string, unknown>) || {};
+
+    const parentPath = (parent || '').replace(/^\/+|\/+$/g, '');
+    let container = findContainer(data.groups, parentPath);
+    let resolvedParent = parentPath;
+    let hint: string | undefined;
+    if (!container) {
+      const resolved = await resolveGroupPath(parentPath, data, groupsData);
+      if (resolved.matched) {
+        const r = findContainer(data.groups, resolved.resolvedPath);
+        if (r) {
+          container = r;
+          resolvedParent = resolved.resolvedPath;
+          hint = resolved.hint;
+        }
+      }
+      if (!container) {
+        return { ok: false, error: `父节点路径不存在：${parentPath || '(顶层)'}` };
+      }
+    }
+
+    const [parentNode] = container;
+    if (parentNode[name] === undefined) {
+      const siblings = Object.keys(parentNode);
+      return {
+        ok: false,
+        error: `节点 "${name}" 不存在于 "${resolvedParent || '(顶层)'}" 下`,
+        ...(siblings.length ? { hint: `可用子节点：${siblings.join(', ')}` } : {}),
+      };
+    }
+
+    const targetNode = parentNode[name] as Record<string, unknown>;
+    const fullPath = resolvedParent ? `${resolvedParent}/${name}` : name;
+    const cliHint = `ki manage-index --scope ${scope} --action delete --name ${name}`
+      + (resolvedParent ? ` --parent ${resolvedParent}` : '') + ' --force';
+
+    if (!isEmptyNode(targetNode)) {
+      return {
+        ok: false,
+        error: `节点 "${fullPath}" 非空（含子节点）。MCP 仅支持删除空节点，级联删除请使用 CLI：${cliHint}`,
+        children: Object.keys(targetNode),
+      };
+    }
+
+    // 检查 relations：cache 中本节点及子路径下不能有任何 relation
+    const prefix = fullPath + '/';
+    const relatedKeys = Object.keys(cache?.groups || {}).filter(
+      (k) => k === fullPath || k.startsWith(prefix),
+    );
+    const relationCount = relatedKeys.reduce(
+      (n, k) => n + (cache?.groups?.[k]?.hot_relations?.length || 0), 0,
+    );
+    if (relationCount > 0) {
+      return {
+        ok: false,
+        error: `节点 "${fullPath}" 下仍有 ${relationCount} 条 relation。MCP 仅支持删除空节点，`
+          + `请先用 ki_delete_relation 逐条清空，或使用 CLI 级联删除：${cliHint}`,
+      };
+    }
+
+    // 检查本地 KB 文件：index.json 是 Record<relationText, moduleInfo> 外加
+    // version/updatedAt 元字段；relation 删光后会留下只剩元字段的空壳，
+    // 空壳不阻断删除（顺带清理），含实际条目才拒绝
+    const localKbPath = getLocalKbDir(scope, fullPath);
+    let localKbShell = false;
+    if (fs.existsSync(localKbPath)) {
+      const localKb = readJson<Record<string, unknown>>(localKbPath) || {};
+      const entryKeys = Object.keys(localKb).filter((k) => k !== 'version' && k !== 'updatedAt');
+      if (entryKeys.length > 0) {
+        return {
+          ok: false,
+          error: `节点 "${fullPath}" 本地 KB 仍有 ${entryKeys.length} 条内容。MCP 仅支持删除空节点，请使用 CLI 级联删除：${cliHint}`,
+        };
+      }
+      localKbShell = true;
+    }
+
+    delete parentNode[name];
+    writeJson(indexPath, data as unknown as Record<string, unknown>);
+
+    // 清理只剩元字段的 local-kb 空壳文件（及随之变空的目录）
+    if (localKbShell) {
+      try {
+        fs.unlinkSync(localKbPath);
+        fs.rmdirSync(path.dirname(localKbPath));
+      } catch { /* 目录非空或已不存在，忽略 */ }
+    }
+
+    // 顺带清理 cache 中无 relation 的空壳 key（上面已确认 relationCount === 0）
+    if (cache?.groups && relatedKeys.length > 0) {
+      for (const k of relatedKeys) delete cache.groups[k];
+      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    }
+
+    return { ok: true, path: fullPath, ...(hint ? { hint } : {}) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
 }
 
 // ─── 级联清理：删除 Group 时同步清理 relations-cache + local-kb + 向量 ───
@@ -285,20 +428,7 @@ program
 
       // ─── list-scopes：不需要 scope ───
       if (action === 'list-scopes') {
-        const scopes = listAllScopes();
-        const scopeDetails = scopes.map((s) => {
-          let topGroups: string[] = [];
-          try {
-            const data = readGroupIndex(s);
-            if (data?.groups) {
-              topGroups = Object.keys(data.groups);
-            }
-          } catch (err) {
-            console.warn(`警告：scope "${s}" 的 group-index.json 读取失败: ${(err as Error).message}`);
-          }
-          return { scope: s, topGroups };
-        });
-        output({ ok: true, scopes: scopeDetails, total: scopes.length });
+        output(executeListScopes() as unknown as Record<string, unknown>);
         return;
       }
 

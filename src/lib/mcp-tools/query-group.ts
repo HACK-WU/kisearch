@@ -10,6 +10,7 @@ export function registerQueryGroupTool(server: McpServer): void {
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       groups: z.string().optional().describe('逗号分隔的 Group 路径列表（支持模糊匹配）'),
+      group: z.string().optional().describe('groups 的单数别名（两者同时传时以 groups 为准）'),
       hot_count: z.number().int().positive().optional().default(5).describe('热门展示个数'),
       depth: z.number().int().min(1).max(10).optional().default(4).describe('索引层级深度'),
       mode: z.string().optional().default('hot')
@@ -22,7 +23,8 @@ export function registerQueryGroupTool(server: McpServer): void {
         const result = await withTimeout(
           executeQueryGroup({
             scope: args.scope,
-            groupsParam: args.groups,
+            // 兼容单数 group 别名：之前传 group 会被 zod 静默剔除，误落入全库视图
+            groupsParam: args.groups ?? args.group,
             hotCount: args.hot_count ?? 5,
             depth: args.depth ?? 4,
             modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),

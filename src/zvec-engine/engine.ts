@@ -164,10 +164,12 @@ export class ZvecEngine {
         setTimeout(() => reject(new ProbeTimeoutError('probe timeout')), timeoutMs),
       );
       await Promise.race([openPromise, timeoutPromise]);
-      await probeProxy.terminate();
+      // 先经 worker closeSync 释放句柄/LOCK 再 terminate：直接 terminate 不会触发
+      // 原生 close，会泄漏 rocksdb 后台线程与文件锁（常驻进程内永久泄漏）
+      await closeProbeProxyBounded(probeProxy);
       return { exists: true, locked: false, healthy: true };
     } catch (err) {
-      await probeProxy.terminate();
+      await closeProbeProxyBounded(probeProxy);
       if (err instanceof ProbeTimeoutError) {
         // 超时未返回 → 判定为锁占用（zvec 持锁时 ZVecOpen 阻塞）
         return { exists: true, locked: true, healthy: true };
@@ -515,4 +517,24 @@ class ProbeTimeoutError extends Error {
     super(message);
     this.name = 'ProbeTimeoutError';
   }
+}
+
+/**
+ * 限时关闭 probe 临时 proxy：
+ * - 正常路径：close（worker closeSync 释放 LOCK/句柄）后 terminate
+ * - worker 若阻塞在原生 ZVecOpen 内，close/terminate 可能永不返回，
+ *   故整体加 2s 上限：超时则放弃等待（宁可泄漏一个 worker，不能让
+ *   probe 自身挂死拖垂整个调用链）
+ */
+async function closeProbeProxyBounded(proxy: ZvecEngineProxy, timeoutMs = 2000): Promise<void> {
+  const bounded = new Promise<void>((r) => setTimeout(r, timeoutMs));
+  try {
+    await Promise.race([
+      (async () => {
+        try { await proxy.close(500); } catch { /* worker 可能已死 */ }
+        await proxy.terminate();
+      })(),
+      bounded,
+    ]);
+  } catch { /* ignore */ }
 }

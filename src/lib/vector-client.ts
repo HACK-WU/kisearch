@@ -99,6 +99,37 @@ const MAX_TEXT_LENGTH = 50_000;
 
 let _enginePromise: Promise<ZvecEngine> | null = null;
 
+// 进程内 probe/open 串行化队尾：zvec 同进程并发 ZVecOpen 同一 dbPath 会以
+// 高概率（实测约 62%）触发原生竞态永久阻塞，故所有涉及原生 open 的操作
+//（probe / create / open）必须串行排队，禁止并发。
+let _engineOpTail: Promise<unknown> = Promise.resolve();
+
+function serializeEngineOp<T>(op: () => Promise<T>): Promise<T> {
+  const run = _engineOpTail.then(op, op);
+  // 队尾吞掉异常，避免一次失败阻断后续排队
+  _engineOpTail = run.catch(() => {});
+  return run;
+}
+
+// open/create 上限：小于工具护栏 READ 30s，保证 _enginePromise 必定 settle，
+// 避免原生挂死时 promise 永久 pending 导致向量层失去自愈能力
+const ENGINE_OPEN_TIMEOUT_MS = 20_000;
+
+function withOpenTimeout(p: Promise<ZvecEngine>, label: string): Promise<ZvecEngine> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // 超时后若底层迟到成功，关掉这个孤儿 engine 释放 LOCK（fire-and-forget）
+      p.then((e) => { void e.close().catch(() => {}); }).catch(() => {});
+      reject(new Error(
+        `向量库${label}超过 ${ENGINE_OPEN_TIMEOUT_MS}ms 未完成，已中断本次调用；`
+        + '后续调用会自动重试，若持续失败请检查向量库目录与磁盘状态',
+      ));
+    }, ENGINE_OPEN_TIMEOUT_MS);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer!));
+}
+
 /**
  * 规范化 tag：转小写（D2「== 忽略大小写」靠写入/查询双侧小写化实现）
  */
@@ -178,20 +209,23 @@ function buildOpenConfig(): ZvecEngineOpenConfig {
  * 首次：dbPath 不存在 → create；已存在 → open。
  * 若已被其他进程持锁（如 ki mcp/server 常驻），直接抛 CollectionLockedException，
  * 避免 open 撞锁时挂起/抛出不可读的底层错误（MCP 路径未走 ensureVectorAvailable 时的兵底）。
+ *
+ * 并发安全：probe→create/open 全链路经 serializeEngineOp 串行化，且 open 带超时，
+ * 保证 _enginePromise 必定 settle（失败即重置缓存，后续调用可重试自愈）。
  */
 export function getEngine(): Promise<ZvecEngine> {
   if (!_enginePromise) {
     const createCfg = buildCreateConfig();
-    _enginePromise = (async () => {
+    _enginePromise = serializeEngineOp(async () => {
       const exists = await ZvecEngine.probe(createCfg.dbPath);
       if (exists.locked) {
         throw new CollectionLockedException(lockedHint(createCfg.dbPath));
       }
       if (!exists.exists) {
-        return ZvecEngine.create(createCfg);
+        return withOpenTimeout(ZvecEngine.create(createCfg), '创建');
       }
-      return ZvecEngine.open(buildOpenConfig());
-    })();
+      return withOpenTimeout(ZvecEngine.open(buildOpenConfig()), '打开');
+    });
     // 失败时重置缓存，允许下次重试
     _enginePromise.catch(() => { _enginePromise = null; });
   }
@@ -219,15 +253,32 @@ export const resetEngine = closeEngine;
 
 /**
  * 检测向量服务是否可用。
+ * - 本进程 engine 已打开/正在打开 → 直接复用单例状态（不重新 probe：
+ *   重 probe 会被自家 LOCK 挡住而误报「被其他进程占用」，常驻服务内
+ *   向量层会变成每进程只能用一次）
  * - dbPath 不存在 → 可用（首次 store 会 create）
  * - 被其他进程持锁 → 不可用（提示）
  * - 损坏 → 不可用（提示重建）
  */
 export async function ensureVectorAvailable(): Promise<VectorAvailableResult> {
+  // engine 单例已存在（open 中或已 open）：等它 settle 即可，跳过 probe
+  if (_enginePromise) {
+    try {
+      await _enginePromise;
+      return { available: true };
+    } catch (err) {
+      // getEngine 已自行重置缓存；这里将失败原因直接作为不可用理由返回，
+      // 不再另发一次 probe（避免重复开销与竞态窗口）
+      if (err instanceof CollectionLockedException) {
+        return { available: false, reason: err.message, code: 'LOCKED' };
+      }
+      return { available: false, reason: `向量服务初始化失败: ${(err as Error).message}`, code: 'PROBE_ERROR' };
+    }
+  }
   const config = loadConfig();
   const dbPath = getVectorDir(config);
   try {
-    const probe = await ZvecEngine.probe(dbPath);
+    const probe = await serializeEngineOp(() => ZvecEngine.probe(dbPath));
     if (probe.locked) {
       return {
         available: false,
