@@ -25,6 +25,7 @@ import {
   getBackupDir,
 } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
+import { rebuildScopeVectors } from './lib/rebuild-vector.js';
 import {
   backupScopeSnapshot,
   listBackups,
@@ -124,7 +125,13 @@ function summarizeScopeDir(scopeDataDir: string): string {
 
 async function restoreFromSnapshot(
   scope: string,
-  opts: { timestamp?: string; yes?: boolean; backupDir?: string; snapshotFile?: string }
+  opts: {
+    timestamp?: string;
+    yes?: boolean;
+    backupDir?: string;
+    snapshotFile?: string;
+    rebuildVector?: boolean;
+  }
 ): Promise<void> {
   ensureTarAvailable();
 
@@ -272,6 +279,10 @@ async function restoreFromSnapshot(
     scope,
     snapshot: snapshotFile,
     restoredAt: new Date().toISOString(),
+    // KB 已还原；向量文档不随快照还原，未指定 --rebuild-vector 时提示重建
+    hint: opts.rebuildVector
+      ? undefined
+      : `KB 已还原。向量文档不随快照还原，如需语义检索请执行：ki restore ${scope} --rebuild-vector`,
   });
 }
 
@@ -279,7 +290,7 @@ async function restoreFromSnapshot(
 
 async function restoreFromResults(
   scope: string,
-  opts: { dir?: string; backupDir?: string; yes?: boolean }
+  opts: { dir?: string; backupDir?: string; yes?: boolean; rebuildVector?: boolean }
 ): Promise<void> {
   const config = loadConfig();
   const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
@@ -411,6 +422,10 @@ async function restoreFromResults(
       success: replayed.filter((r) => r.status === 'ok').length,
       failed: 0,
     },
+    // KB 已还原；向量文档不随快照还原，未指定 --rebuild-vector 时提示重建
+    hint: opts.rebuildVector
+      ? undefined
+      : `KB 已还原。向量文档不随快照还原，如需语义检索请执行：ki restore ${scope} --rebuild-vector`,
   });
 }
 
@@ -449,10 +464,12 @@ const RESTORE_HELP = `ki restore - 从快照或 ai-results 还原 scope
   ki restore <scope>                  列出可用备份
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
   ki restore <scope> --from-results [--dir <ai-results-dir>] [--yes]
+  ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
 
 选项：
   --from-snapshot [<file>]  从 tar.gz 快照覆盖还原；可直接指定快照文件路径（缺省从 <backup-dir>/<scope>/snapshots 取最新/--timestamp）
   --from-results      按 timestamp 顺序重放 ai-results 备份文件
+  --rebuild-vector    还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path)
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --dir <dir>         指定 ai-results 备份目录
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
@@ -468,7 +485,7 @@ if (args.includes('-h') || args.includes('--help')) {
 // 未知参数检测（NEG-01）：--timestamp / --dir / --backup-dir 为带值参数
 detectUnknownFlags(
   args,
-  ['--from-snapshot', '--from-results', '--yes', '--timestamp', '--dir', '--backup-dir'],
+  ['--from-snapshot', '--from-results', '--rebuild-vector', '--yes', '--timestamp', '--dir', '--backup-dir'],
   ['--timestamp', '--dir', '--backup-dir'],
   RESTORE_HELP
 );
@@ -485,6 +502,7 @@ const fromSnapshot = args.some(
 );
 const fromResults = args.includes('--from-results');
 const skipYes = args.includes('--yes');
+const rebuildVector = args.includes('--rebuild-vector');
 
 // --from-snapshot 可选带值：`--from-snapshot <file>` 或 `--from-snapshot=<file>`
 // 直接指定快照文件路径；后跟 -- 开头的 token 视为纯布尔用法（取约定目录最新/--timestamp）
@@ -519,6 +537,33 @@ if (bdIdx !== -1 && bdIdx + 1 < args.length) {
   backupDirOverride = args[bdIdx + 1];
 }
 
+// ─── 向量重建（--rebuild-vector）───
+
+/** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1 */
+async function rebuildAndReport(scopeName: string): Promise<void> {
+  const result = await rebuildScopeVectors(scopeName);
+  if (!result.ok) {
+    output({
+      ok: false,
+      action: 'rebuild_vector',
+      scope: scopeName,
+      error: result.errors[0]?.error ?? '重建向量失败',
+    });
+    process.exit(1);
+  }
+  output({
+    ok: true,
+    action: 'rebuild_vector',
+    scope: scopeName,
+    stats: result.stats,
+    errors: result.errors.length > 0 ? result.errors : undefined,
+    hint:
+      result.errors.length > 0
+        ? '部分条目向量化失败，详见 errors（不影响已成功部分）'
+        : undefined,
+  });
+}
+
 // ─── 主逻辑 ───
 
 async function main() {
@@ -535,9 +580,15 @@ async function main() {
         yes: skipYes,
         backupDir: backupDirOverride,
         snapshotFile: snapshotFileArg,
+        rebuildVector,
       });
+      if (rebuildVector) await rebuildAndReport(scope);
     } else if (fromResults) {
-      await restoreFromResults(scope, { dir, backupDir: backupDirOverride, yes: skipYes });
+      await restoreFromResults(scope, { dir, backupDir: backupDirOverride, yes: skipYes, rebuildVector });
+      if (rebuildVector) await rebuildAndReport(scope);
+    } else if (rebuildVector) {
+      // 独立调用：对已还原的 KB 仅重建向量
+      await rebuildAndReport(scope);
     } else {
       listAvailableBackups(scope, { backupDir: backupDirOverride });
     }
