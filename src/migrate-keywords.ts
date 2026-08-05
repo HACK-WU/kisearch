@@ -173,6 +173,7 @@ const program = new Command();
 
 program
   .name('migrate-keywords')
+  .showHelpAfterError()
   .description('keywords Group 级别重构数据迁移（幂等）')
   .option('--scope <scope>', '迁移指定 scope')
   .option('--all', '迁移 kb/ 下的全部 scope')

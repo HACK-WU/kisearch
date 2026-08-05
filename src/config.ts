@@ -188,7 +188,7 @@ function handleConfigInit(options: ConfigInitOptions): void {
 // ─── CLI 注册 ───
 
 const program = new Command();
-program.name('config').description('ki 配置管理');
+program.name('config').showHelpAfterError().description('ki 配置管理');
 
 program
   .command('init')

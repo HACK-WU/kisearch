@@ -758,6 +758,7 @@ const program = new Command();
 
 program
   .name('query-group')
+  .showHelpAfterError()
   .description('查询 Group + 词云 + 格式化输出')
   .requiredOption('--scope <scope>', '项目隔离标识')
   .option('--groups <groups>', '逗号分隔的 Group 路径列表')

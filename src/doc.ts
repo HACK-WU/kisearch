@@ -147,7 +147,7 @@ export async function executeDocDelete(params: {
 // ─── CLI ───
 
 const program = new Command();
-program.name('doc').description('向量层文档查看与删除（管理面）');
+program.name('doc').showHelpAfterError().description('向量层文档查看与删除（管理面）');
 
 program
   .command('list')

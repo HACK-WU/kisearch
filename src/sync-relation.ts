@@ -589,6 +589,7 @@ const program = new Command();
 
 program
   .name('sync-relation')
+  .showHelpAfterError()
   .description('关系回写：校验关键词 + 写入缓存 + 本地 KB')
   .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--group <group>', 'Group 路径（单条模式）')

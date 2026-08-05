@@ -52,7 +52,7 @@ export async function executeTagList(params: {
 // ─── CLI ───
 
 const program = new Command();
-program.name('tag').description('向量层 tag 发现（只读）');
+program.name('tag').showHelpAfterError().description('向量层 tag 发现（只读）');
 
 program
   .command('list')

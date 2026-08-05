@@ -415,6 +415,7 @@ const program = new Command();
 
 program
   .name('import-kb')
+  .showHelpAfterError()
   .description('外部知识库导入：约定模式 / 配置模式')
   .requiredOption('--scope <scope>', '项目隔离标识')
   .requiredOption('--source <sourceDir>', '外部知识库根目录路径')

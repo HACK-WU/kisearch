@@ -63,6 +63,7 @@ const program = new Command();
 
 program
   .name('search')
+  .showHelpAfterError()
   .description('语义检索知识库内容')
   .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--query <query>', '自然语言查询文本')

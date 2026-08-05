@@ -251,6 +251,7 @@ const program = new Command();
 
 program
   .name('setup')
+  .showHelpAfterError()
   .description('从 GitHub 下载 Skills / Rules 到目标项目目录')
   .option('--skills', '安装 AI Agent Skills')
   .option('--rules', '安装加载引导规则')

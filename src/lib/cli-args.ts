@@ -66,15 +66,19 @@ function suggest(unknown: string, known: string[]): string | undefined {
 
 /**
  * 检出未知的 --flag 参数。发现即通过 failJson 报错（附近似建议）。
+ * 传入 helpText 时，未知参数会先输出完整帮助到 stderr（回退到 -h 行为），
+ * stdout 仍保留 JSON 错误契约，退出码 1。
  *
  * @param args      process.argv.slice(2)
  * @param knownFlags 该命令认识的全部 --flag 名（含带值与布尔型）
  * @param valueFlags 需要消费下一个 token 作为值的 --flag（其值不应被当作未知参数）
+ * @param helpText  可选：该命令的帮助文本，未知参数时输出到 stderr
  */
 export function detectUnknownFlags(
   args: string[],
   knownFlags: string[],
-  valueFlags: string[] = []
+  valueFlags: string[] = [],
+  helpText?: string
 ): void {
   const valueSet = new Set(valueFlags);
   for (let i = 0; i < args.length; i++) {
@@ -86,6 +90,8 @@ export function detectUnknownFlags(
 
     if (!knownFlags.includes(name)) {
       const tip = suggest(name, knownFlags);
+      // 非预期参数：stderr 给出帮助（与 -h 同文本），stdout 保留 JSON 契约
+      if (helpText) process.stderr.write(helpText + '\n');
       failJson(
         `未知参数 ${name}` + (tip ? `，您是否想输入 ${tip}？` : `\n可用参数：${knownFlags.join(', ')}`),
         'UNKNOWN_OPTION'

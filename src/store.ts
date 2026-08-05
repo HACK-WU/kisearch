@@ -55,6 +55,7 @@ const program = new Command();
 
 program
   .name('store')
+  .showHelpAfterError()
   .description('存储文本到向量索引')
   .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--text <text>', '待向量化文本')

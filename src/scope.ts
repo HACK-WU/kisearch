@@ -210,7 +210,7 @@ function parseTags(raw?: string): string[] | undefined {
 // ─── CLI ───
 
 const program = new Command();
-program.name('scope').description('scope 生命周期管理（KB 目录层 + 向量语义层）');
+program.name('scope').showHelpAfterError().description('scope 生命周期管理（KB 目录层 + 向量语义层）');
 
 program
   .command('list')

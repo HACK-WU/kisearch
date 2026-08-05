@@ -416,6 +416,7 @@ const program = new Command();
 
 program
   .name('manage-index')
+  .showHelpAfterError()
   .description('Group 树索引管理（支持 scope 列表查询）')
   .option('--scope <scope>', '项目隔离标识（list-scopes 时可省略）')
   .option('--action <action>', '操作：create | delete | list-scopes', 'create')

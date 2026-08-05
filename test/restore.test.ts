@@ -232,3 +232,52 @@ describe('restore --from-results 确认流程（非交互）', () => {
     assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
   });
 });
+
+describe('restore --from-snapshot 直接指定快照文件', () => {
+  it('指定快照文件路径 → 还原成功（绕过 <backup-dir>/<scope>/snapshots 约定）', () => {
+    const { configPath, scope, scopeDataDir, defBackupDir } = setupScope();
+    const snapshotPath = path.join(
+      defBackupDir,
+      scope,
+      'snapshots',
+      'snapshot.20260618-021614.tar.gz'
+    );
+    const result = runRestore(configPath, [scope, '--from-snapshot', snapshotPath, '--yes']);
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.action, 'restore_snapshot');
+    // 数据被覆盖
+    assert.ok(fs.existsSync(path.join(scopeDataDir, 'new.txt')));
+    assert.ok(!fs.existsSync(path.join(scopeDataDir, 'old.txt')));
+  });
+
+  it('--from-snapshot=<file> 等号形式同样生效', () => {
+    const { configPath, scope, scopeDataDir, defBackupDir } = setupScope();
+    const snapshotPath = path.join(
+      defBackupDir,
+      scope,
+      'snapshots',
+      'snapshot.20260618-021614.tar.gz'
+    );
+    const result = runRestore(configPath, [scope, `--from-snapshot=${snapshotPath}`, '--yes']);
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.action, 'restore_snapshot');
+    assert.ok(fs.existsSync(path.join(scopeDataDir, 'new.txt')));
+  });
+
+  it('指定的快照文件不存在 → 报错且不破坏现有数据', () => {
+    const { configPath, scope, scopeDataDir } = setupScope();
+    const result = runRestore(configPath, [
+      scope,
+      '--from-snapshot',
+      '/nonexistent/snapshot.tar.gz',
+      '--yes',
+    ]);
+
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /快照文件不存在/);
+    // 现有数据保持原样
+    assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
+  });
+});

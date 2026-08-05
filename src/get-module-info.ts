@@ -171,6 +171,7 @@ const program = new Command();
 
 program
   .name('get-module-info')
+  .showHelpAfterError()
   .description('模块检索：读取本地 KB + 更新评分')
   .requiredOption('--scope <scope>', '项目隔离标识')
   .requiredOption('--group <group>', 'Group 路径')

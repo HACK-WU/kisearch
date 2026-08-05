@@ -690,6 +690,7 @@ const program = new Command();
 
 program
   .name('scan-kb')
+  .showHelpAfterError()
   .description('外部知识库扫描与导入：scan / import / diff');
 
 program

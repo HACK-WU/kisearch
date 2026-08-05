@@ -124,7 +124,7 @@ function summarizeScopeDir(scopeDataDir: string): string {
 
 async function restoreFromSnapshot(
   scope: string,
-  opts: { timestamp?: string; yes?: boolean; backupDir?: string }
+  opts: { timestamp?: string; yes?: boolean; backupDir?: string; snapshotFile?: string }
 ): Promise<void> {
   ensureTarAvailable();
 
@@ -133,36 +133,48 @@ async function restoreFromSnapshot(
   // 还原前安全网快照始终写入受管的默认 backupDir：--backup-dir 仅控制「从哪读」，
   // 不应把新建快照写进可能只读/外部的自定义目录（否则会因写失败而被 CH-2 中断还原）。
   const safetyBackupDir = getBackupDir(config);
-  const snapDir = path.join(backupDir, scope, 'snapshots');
 
-  if (!fs.existsSync(snapDir)) {
-    fail(`快照目录不存在：${snapDir}，无可还原的快照`);
-  }
-
-  // 列出快照
-  const snapFiles = fs
-    .readdirSync(snapDir)
-    .filter((f) => f.startsWith('snapshot.') && f.endsWith('.tar.gz'))
-    .sort();
-
-  if (snapFiles.length === 0) {
-    fail(`快照目录为空：${snapDir}`);
-  }
-
-  // 选择快照
+  // 快照来源：直接指定的文件路径 > 约定目录 <backup-dir>/<scope>/snapshots/ 内按 timestamp/最新选取
+  // snapshotFile 提升为函数级：确认总览与输出字段均需引用（直接指定文件时取 basename）
+  let snapshotPath: string;
   let snapshotFile: string;
-  if (opts.timestamp) {
-    snapshotFile = `snapshot.${opts.timestamp}.tar.gz`;
-    if (!snapFiles.includes(snapshotFile)) {
-      fail(
-        `指定 timestamp 的快照不存在：${opts.timestamp}\n可用快照：\n${snapFiles.join('\n')}`
-      );
+  if (opts.snapshotFile) {
+    snapshotPath = path.resolve(opts.snapshotFile);
+    if (!fs.existsSync(snapshotPath)) {
+      fail(`指定的快照文件不存在：${snapshotPath}`);
     }
+    snapshotFile = path.basename(snapshotPath);
   } else {
-    snapshotFile = snapFiles[snapFiles.length - 1]; // 最新
+    const snapDir = path.join(backupDir, scope, 'snapshots');
+
+    if (!fs.existsSync(snapDir)) {
+      fail(`快照目录不存在：${snapDir}，无可还原的快照`);
+    }
+
+    // 列出快照
+    const snapFiles = fs
+      .readdirSync(snapDir)
+      .filter((f) => f.startsWith('snapshot.') && f.endsWith('.tar.gz'))
+      .sort();
+
+    if (snapFiles.length === 0) {
+      fail(`快照目录为空：${snapDir}`);
+    }
+
+    // 选择快照
+    if (opts.timestamp) {
+      snapshotFile = `snapshot.${opts.timestamp}.tar.gz`;
+      if (!snapFiles.includes(snapshotFile)) {
+        fail(
+          `指定 timestamp 的快照不存在：${opts.timestamp}\n可用快照：\n${snapFiles.join('\n')}`
+        );
+      }
+    } else {
+      snapshotFile = snapFiles[snapFiles.length - 1]; // 最新
+    }
+    snapshotPath = path.join(snapDir, snapshotFile);
   }
 
-  const snapshotPath = path.join(snapDir, snapshotFile);
   const scopeDataDir = getScopeDataDir(config, scope);
   const scopeDirParent = path.dirname(scopeDataDir);
 
@@ -430,9 +442,8 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 
 const args = process.argv.slice(2);
 
-// -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
-if (args.includes('-h') || args.includes('--help')) {
-  console.log(`ki restore - 从快照或 ai-results 还原 scope
+/** 帮助文本：-h/--help 与缺省 scope 时共用 */
+const RESTORE_HELP = `ki restore - 从快照或 ai-results 还原 scope
 
 用法：
   ki restore <scope>                  列出可用备份
@@ -440,13 +451,17 @@ if (args.includes('-h') || args.includes('--help')) {
   ki restore <scope> --from-results [--dir <ai-results-dir>] [--yes]
 
 选项：
-  --from-snapshot     从 tar.gz 快照覆盖还原（破坏性操作，需 --yes 确认）
+  --from-snapshot [<file>]  从 tar.gz 快照覆盖还原；可直接指定快照文件路径（缺省从 <backup-dir>/<scope>/snapshots 取最新/--timestamp）
   --from-results      按 timestamp 顺序重放 ai-results 备份文件
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --dir <dir>         指定 ai-results 备份目录
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
   --yes               跳过确认直接执行（破坏性）
-  -h, --help          显示帮助`);
+  -h, --help          显示帮助`;
+
+// -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(RESTORE_HELP);
   process.exit(0);
 }
 
@@ -454,18 +469,34 @@ if (args.includes('-h') || args.includes('--help')) {
 detectUnknownFlags(
   args,
   ['--from-snapshot', '--from-results', '--yes', '--timestamp', '--dir', '--backup-dir'],
-  ['--timestamp', '--dir', '--backup-dir']
+  ['--timestamp', '--dir', '--backup-dir'],
+  RESTORE_HELP
 );
 
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
-  console.error('用法：ki restore <scope> [--from-snapshot [--timestamp <ts>]] [--from-results [--dir <dir>]] [--backup-dir <dir>]');
+  // 缺 scope 视为用法错误：完整帮助输出到 stderr，退出码 1（供脚本检测）
+  console.error(RESTORE_HELP);
   process.exit(1);
 }
 
-const fromSnapshot = args.includes('--from-snapshot');
+const fromSnapshot = args.some(
+  (a) => a === '--from-snapshot' || a.startsWith('--from-snapshot=')
+);
 const fromResults = args.includes('--from-results');
 const skipYes = args.includes('--yes');
+
+// --from-snapshot 可选带值：`--from-snapshot <file>` 或 `--from-snapshot=<file>`
+// 直接指定快照文件路径；后跟 -- 开头的 token 视为纯布尔用法（取约定目录最新/--timestamp）
+let snapshotFileArg: string | undefined;
+const eqSnap = args.find((a) => a.startsWith('--from-snapshot='));
+if (eqSnap) snapshotFileArg = eqSnap.slice('--from-snapshot='.length);
+if (!snapshotFileArg) {
+  const fsIdx = args.indexOf('--from-snapshot');
+  if (fsIdx !== -1 && fsIdx + 1 < args.length && !args[fsIdx + 1].startsWith('--')) {
+    snapshotFileArg = args[fsIdx + 1];
+  }
+}
 
 // 提取 --timestamp
 let timestamp: string | undefined;
@@ -499,7 +530,12 @@ async function main() {
     }
 
     if (fromSnapshot) {
-      await restoreFromSnapshot(scope, { timestamp, yes: skipYes, backupDir: backupDirOverride });
+      await restoreFromSnapshot(scope, {
+        timestamp,
+        yes: skipYes,
+        backupDir: backupDirOverride,
+        snapshotFile: snapshotFileArg,
+      });
     } else if (fromResults) {
       await restoreFromResults(scope, { dir, backupDir: backupDirOverride, yes: skipYes });
     } else {
