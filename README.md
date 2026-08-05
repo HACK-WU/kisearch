@@ -1,52 +1,263 @@
 # KiSearch
 
-> AI Agent 知识索引整理工具 - 对外部知识进行结构化索引和导航
+<p align="center">
+  <strong>AI Agent 知识索引系统 · RAG 语义检索 + 结构化知识索引的结合体</strong>
+</p>
 
-基于 [memory-lancedb-mcp](https://github.com/HACK-WU/memory-lancedb-mcp) 项目的知识索引模块独立而来。
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-0.2.0--beta-blue">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="node" src="https://img.shields.io/badge/node-%3E%3D18-339933">
+  <img alt="typescript" src="https://img.shields.io/badge/TypeScript-jiti-3178c6">
+</p>
+
+---
 
 ## 这是什么
 
-`KiSearch` 是一个独立的 AI Agent 知识索引工具，解决的是一个更贴近 Agent 使用体验的问题：
+`KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 **zvec 混合检索引擎**（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
-- **向量数据库**擅长语义召回、长期持久化、跨会话记忆治理
-- **知识索引**擅长把项目知识组织成 AI 更容易浏览和落地使用的结构化视图
+```
+发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
+交付层  KiSearch：Group 树导航 · Relation 热缓存 · 原文全文交付
+```
 
-两者组合后，形成一个完整系统：
+![KiSearch 架构](./assets/architecture.svg)
 
-- **发现层**：向量数据库负责语义检索、长期存储、冷热治理
-- **交付层**：`KiSearch` 负责 Group 导航、热门 Relation 缓存、原文交付
+**知识写入与检索链路（两条查询路径）**：
 
-换句话说，向量数据库更像"**长期记忆引擎**"，而 `KiSearch` 更像"**面向 Agent 的知识目录与本地交付层**"。
+```mermaid
+flowchart TB
+    subgraph 输入
+        W1[Wiki 导入]
+        W2[AI 记忆存储]
+    end
+    subgraph 知识索引层
+        G[Group 树] --> R[Relation<br/>memoryId · isFullText · sourcePath]
+        R --> SRC[原文 · local KB]
+        R --> VEC[向量 · zvec<br/>ki-search / ki-relation / ki-path]
+    end
+    subgraph 查询[查询 · 两条路径]
+        direction LR
+        subgraph A[路径 A · 索引直查]
+            P1[已知 Group/Relation 路径] --> P2[直读索引 + 原文]
+            P2 --> P3[原文交付]
+        end
+        subgraph B[路径 B · 语义检索 ki-search]
+            Q[自然语言查询] --> H[混合检索<br/>向量 + BM25 + RRF]
+            H --> M[memoryId 反查 · relation-map]
+            M --> O[结果：原文 + isFullText + group]
+        end
+    end
+    W1 --> G
+    W2 --> G
+    SRC --> P2
+    VEC --> H
+    SRC --> O
+```
+
+## 为什么不是常规 RAG
+
+常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。KiSearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
+
+| 维度 | 常规 RAG | KiSearch |
+|------|---------|----------|
+| **知识组织** | 无序 chunk，无层级关系 | Group 树 + Relation 结构化索引，知识有归属有层级 |
+| **检索结果** | chunk 片段（可能断裂、缺上下文） | 原文全文（`isFullText=true` 时可直接引用） |
+| **查询路径** | 仅语义检索一条路（模糊召回） | **双路径**：已知索引时**直接精准查询原文**（100% 命中、无向量噪声）；未知时语义检索兜底 |
+| **检索精准度** | 语义模糊匹配，存在噪声 | 索引直查**精准命中**原文（零误差）；语义检索有 memoryId 反查定位兜底 |
+| **原文定位** | 黑盒召回，不知结果来自哪 | 每条结果带 `group` / `relation` / `keywords` / `isFullText`，可定位到原文出处 |
+| **符号检索** | 弱（纯语义向量，camelCase 难匹配） | BM25 全文路支持类名 / 方法名精确召回 |
+| **状态管理** | 无状态，每次检索平等 | 冷热治理 + 评分衰减 + 使用计数，热点 Relation 优先 |
+| **跨会话** | 一次性检索，无积累 | 长期记忆库，Agent 沉淀的知识持续积累 |
+| **写入校验** | 无约束，随意写入 | 关键词校验 + scope 隔离 + isFullText 标记 + WAL 原子写入 |
+
+> **一句话**：常规 RAG 解决"搜得到"，KiSearch 同时解决"搜得到 + 看得见 + 定位到原文"。
+
+## 核心概念
+
+| 概念 | 含义 |
+|------|------|
+| `scope` | 项目隔离标识，不同 scope 物理隔离（`scopeMode: default` 自动创建 / `strict` 需注册） |
+| `Group` | 知识分组路径，如 `项目/告警系统设计/告警处理服务` |
+| `Relation` | 某个 Group 下可被检索和命中的知识条目（含 memoryId / isFullText / sourcePath） |
+| `module-info` | Relation 对应的 Markdown 原文说明 |
+| `isFullText` | 内容是否原文全文（`true` = 可作原文引用；`false` = AI 摘要，需按 group/relation 定位原文） |
+| 标签（Tag） | `ki-search`（内容）/ `ki-path`（路径）/ `ki-relation`（关系）三层标签 |
+| 记忆库 | 跨会话持续积累的知识，带评分衰减与冷热治理 |
 
 ## 特性
 
-- **本地知识目录层**：在向量数据库之上提供结构化导航和热关系缓存
-- **向量语义兜底**：精确 Group 路径未命中时，自动通过向量搜索模糊定位，支持部分名称/近似表述
-- **TypeScript 直接执行**：使用 jiti 运行时，无需编译步骤
-- **CLI 驱动**：所有操作通过命令行接口完成
-- **MCP 协议支持**：启动 `ki mcp` 即可通过 stdio 传输向 AI Agent 暴露 MCP 工具；或用 `ki mcp --http` 以 HTTP 共享单例模式让多个 IDE 共享同一持锁进程（见 [`docs/mcp-http.md`](./docs/mcp-http.md)）
-- **独立部署**：可独立安装和使用，通过 `mem` CLI 命令调用向量存储
+- **结构化知识索引**：Group 树导航、Relation 热缓存、关键词词云 —— 不是无序 chunk
+- **混合检索（Hybrid）**：语义向量 + BM25 全文 + RRF 融合排序；camelCase 符号（类名/方法名）可精确召回
+- **双路径查询**：索引直查（已知路径 → 原文）+ 语义检索（自然语言 → 向量 → 反查原文）
+- **原文交付**：search 结果按 memoryId 反查定位（group / relation / keywords / isFullText），交付原文全文而非片段
+- **三层标签**：`ki-search` / `ki-relation` / `ki-path`，按需过滤提升准确率；默认搜全部且按标签限流（内容优先）
+- **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
+- **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
+- **CLI + MCP 双通道**：21 个 CLI 命令；`ki mcp` 暴露 11 个 MCP 工具（stdio / HTTP 共享单例）
+- **零破坏性 MCP**：工具集不含 delete/force 类危险操作，Agent 侧可安全调用
+
+## 快速开始
+
+### 1. 安装
+
+```bash
+# 方式一：一键安装 CLI（推荐）
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/KiSearch/master/scripts/install-latest.sh | bash
+
+# 方式二：源码安装（开发 & CLI）
+git clone git@github.com:HACK-WU/KiSearch.git && cd KiSearch
+npm install && npm link
+```
+
+### 2. 初始化配置
+
+```bash
+ki config init        # 生成 ~/.ki/config.yaml（含 dataDir/backupDir/vectorDir/embedding/scopeMode）
+ki doctor             # 一键校验配置、目录、Embedding API 密钥与向量维度
+```
+
+生成的配置（节选）：
+
+```yaml
+dataDir: $HOME/.ki-data       # KB 源数据目录
+backupDir: $HOME/.ki-backup   # 备份目录
+vectorDir: $HOME/.ki/vector   # zvec 向量库（所有 scope 共享，按 metadata 隔离）
+embedding:
+  provider: siliconflow       # apiKey 从环境变量 SILICONFLOW_API_KEY 读取
+  model: Qwen/Qwen3-Embedding-8B
+  dimension: 4096             # 必须与建库时一致
+scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
+```
+
+> `SILICONFLOW_API_KEY` 需在环境中导出（MCP 场景必须在客户端 `env` 字段显式传入，MCP 进程不继承 shell 环境）。
+
+### 3. 使用示例
+
+```bash
+# 创建分组
+ki manage-index --scope my-project --action create --name "API"
+
+# 写入一条知识（原文全文 + 关键词）
+ki sync-relation \
+  --scope my-project \
+  --group "我的项目/API" \
+  --relation "用户登录接口" \
+  --module-info "## 登录流程\n用户输入账号密码进入认证流程，服务端校验成功后返回 token。" \
+  --keywords "登录,认证,token"
+
+# 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
+ki search --scope my-project --query "用户登录流程"
+
+# 索引直查（已知 Group/Relation，直接读原文，不走向量）
+ki query-group --scope my-project --groups "我的项目/API"
+ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录接口"
+```
+
+## 命令列表（21 个）
+
+| 命令 | 说明 |
+|------|------|
+| `scan-kb` | 外部知识库导入统一入口：import / diff / scan / vectorize |
+| `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
+| `query-group` | 查询 Group + 词云 + 分区（索引直查 · 支持模糊路径语义兜底） |
+| `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
+| `sync-relation` | 写入 Relation + 关键词校验（向量 + KB 双写） |
+| `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
+| `search` | 语义检索（zvec 混合检索，输出含原文定位字段） |
+| `store` | 向量化存储单条知识 |
+| `bulk_store` | 批量向量化存储知识 |
+| `scope` | scope 管理：list / delete / clear（KB + 向量两层） |
+| `doc` | 向量文档管理：list / delete |
+| `tag` | 向量 tag 发现：list（只读，含文档数） |
+| `config` | 配置管理：init（生成 YAML） |
+| `doctor` | 配置诊断（apiKey / 连通性 / 维度 / 目录） |
+| `backup` | 备份 scope 目录快照 |
+| `restore` | 从快照或 ai-results 还原 |
+| `export` | 导出 KB 为 Wiki Markdown |
+| `import-kb` | @deprecated 旧导入（建议改用 scan-kb import） |
+| `migrate-keywords` | 关键词数据迁移 |
+| `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
+| `setup` | 下载 Skills / Rules 到目标项目目录 |
+
+> `ki <command> --help` 查看每个命令的完整参数。
+
+## MCP Server
+
+启动后 AI Agent 可通过标准 MCP 协议使用知识索引能力：
+
+```bash
+ki mcp                      # stdio 模式（默认，单客户端单进程）
+ki mcp --http               # HTTP 共享单例（多 IDE 共享同一持锁进程，见 docs/mcp-http.md）
+ki mcp --status             # 查看 HTTP 单例运行状态（只读）
+ki mcp stop                 # 关闭本机所有 ki mcp 实例并清理 lock
+ki mcp token generate       # 一键生成托管 Token（远程访问鉴权）
+ki mcp token show           # 查看当前托管 Token
+ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认）
+```
+
+> **启动预检**：`ki mcp` 启动前自动执行健康检查（等价 `ki doctor`），报告写入 stderr（不污染 stdio）。存在 ❌ 失败项（缺 API 密钥、向量维度不匹配）拒绝启动；仅 ⚠️ 警告继续启动。
+
+### MCP 客户端配置
+
+```json
+{
+  "mcpServers": {
+    "ki": {
+      "command": "ki",
+      "args": ["mcp"],
+      "env": { "SILICONFLOW_API_KEY": "<your-api-key>" }
+    }
+  }
+}
+```
+
+### 暴露的工具（11 个）
+
+| 工具 | 功能 | 对应路径 |
+|------|------|---------|
+| `ki_query_group` | 查询 Group 树 + Relations + 词云 | 索引直查 |
+| `ki_get_module_info` | 读取本地 KB Markdown 原文 | 索引直查 |
+| `ki_manage_index_create` | 创建 Group 节点 | — |
+| `ki_manage_index_list` | 列出所有 scope | — |
+| `ki_sync_relation` | 写入 Relation + 关键词（向量 + KB 双写） | 写入 |
+| `ki_delete_relation` | 删除 Relation（四层清理） | — |
+| `ki_search` | 语义检索，输出 group/relation/keywords/isFullText | 语义检索 |
+| `ki_store` | 向量化存储单条知识 | 写入 |
+| `ki_bulk_store` | 批量向量化存储知识 | 写入 |
+| `ki_scope_list` | 列出 scope 及其 KB/向量状态 | — |
+| `ki_tag_list` | 列出 scope 下 tag 及文档数 | — |
+
+> `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（每个标签最多返回 `limit` 条，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
+> 工具集遵循零破坏性约束，不含 delete/force 操作。
+
+## 外部知识库导入
+
+### 前置：scope 注册
+
+- `scopeMode: default`（默认）：首次使用某个 scope 时自动创建，无需注册
+- `scopeMode: strict`：必须在 `~/.ki/config.yaml` 的 `scopes` 中显式注册，否则拒绝访问
+
+### 首次导入（AI 生成 ai-results.json → 一条命令）
+
+```bash
+ki scan-kb import --scope my-project --results ai-results.json
+```
+
+内部完成：格式校验 → 批量向量化（zvec）→ Group 树创建 → relations-cache 写入（含 memoryId）→ local KB 写入 → group-index.source 记录（含 git HEAD）。
+
+### 增量更新
+
+```bash
+ki scan-kb diff --scope my-project                          # 1. 输出变更文件列表
+# AI 生成带 action: add | modify | delete 的增量 ai-results.json
+ki scan-kb import --scope my-project --mode incremental --results ai-results.json
+```
+
+`ai-results.json` 最小示例与字段说明见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
 
 ## 文档导航
-
-### AI Agent Skills
-
-> **`skills/`** — Agent 行为规则，按需加载。加载顺序见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
-
-| Skill | 场景 | 核心能力 |
-|-------|------|---------|
-| [**ki-foundation**](./skills/ki-foundation/SKILL.md) | 前置知识（必读） | ki 架构心智模型 + 命令参考 |
-| [**codekb-skill**](./skills/codekb-skill/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
-| [**memory-skill**](./skills/memory-skill/SKILL.md) | 项目记忆/用户画像读写 | 归档机制 + 自动沉淀 + Group 结构 |
-
-```
-涉及项目知识？
-  ├─ 否 → 不加载
-  └─ 是 → 已加载过 ki-foundation？→ 否 → 按顺序加载：
-      ① ki-foundation  （必读前置）
-      ② codekb-skill  （代码知识场景）
-         memory-skill  （项目记忆/用户偏好场景）
-```
 
 ### 操作指南
 
@@ -57,376 +268,56 @@
 | [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
 | [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
 | [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
+| [`docs/scan-kb.md`](./docs/scan-kb.md) | scan-kb 子命令与 ai-results 详解 |
 
-### Agent 行为规则（完整版）
+### 参考与架构
 
-| 文档 | 覆盖范围 |
-|------|----------|
-| [`docs/codekb-agent-guide.md`](./docs/codekb-agent-guide.md) | 代码知识库：四步走、白名单/黑名单、ki_search 语义兜底、写入 KB 规则 |
-| [`docs/memory-agent-guide.md`](./docs/memory-agent-guide.md) | 记忆系统：归档机制、自动沉淀、Group 结构、用户画像 |
-| [`docs/ki-command-guide.md`](./docs/ki-command-guide.md) | 公共命令参考：query-group / get-module-info / sync-relation / manage-index / search / store |
-
-### 设计文档与架构
-
-- **架构与协作关系**：[`docs/architecture.md`](./docs/architecture.md)
-- **CLI 参考**：[`docs/cli.md`](./docs/cli.md)
-- **MCP HTTP 共享单例模式**：[`docs/mcp-http.md`](./docs/mcp-http.md)
-- **scan-kb 子命令详解**：[`docs/scan-kb.md`](./docs/scan-kb.md)
-- **异常处理与恢复建议**：[`docs/error-handling.md`](./docs/error-handling.md)
-- **典型工作流**：[`docs/workflows.md`](./docs/workflows.md)
-- **备份与恢复**：[`docs/backup-restore.md`](./docs/backup-restore.md)
-- **记忆系统需求**：[`docs/memory-system-requirements.md`](./docs/memory-system-requirements.md)
-- **数据流图**：[`docs/memory-system-dataflow.md`](./docs/memory-system-dataflow.md)
-
-## 核心概念
-
-| 概念 | 含义 |
+| 文档 | 内容 |
 |------|------|
-| `scope` | 项目隔离标识，不同 scope 物理隔离 |
-| `Group` | 知识分组路径，例如 `项目/API`、`项目/前端/状态管理` |
-| `Relation` | 某个 Group 下可被检索和命中的知识条目 |
-| `module-info` | Relation 对应的 Markdown 原文说明 |
-| 热门 Relation | 被频繁访问、优先展示的本地知识 |
-| 关键词词云 | 为 AI 组装检索语句提供的自然语言提示 |
-| 标签（Tag） | `ki-search`（通用语义搜索）、`ki-path`（路径级搜索）、`ki-relation`（关系检索）三层标签，指定标签可显著提升查询准确率 |
-
-## 快速开始
-
-### 前置条件
-
-1. **全局安装 `mem` 命令**：知识索引的所有向量化操作都依赖 `mem` 命令，请先通过全局安装确保 `mem` 可用：
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/HACK-WU/memory-lancedb-mcp/master/scripts/install-latest.sh -o install-latest.sh
-   bash install-latest.sh
-   ```
-
-2. **配置嵌入 API**：确保 `~/.config/memory-mcp/config.yaml` 中已配置嵌入 API 密钥。配置文档详见：[memory-lancedb-mcp 配置文档](https://github.com/HACK-WU/memory-lancedb-mcp#configuration-reference)
-
-3. **注册 scope**：首次使用某个 scope 前，需在配置文件中注册该 scope（详见下方"外部知识库导入"部分）。
-
-### 安装
-
-**方式一：使用 install-latest.sh 安装 ki CLI（推荐）**
-
-```bash
-# 下载并安装最新版 ki CLI
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/KiSearch/master/scripts/install-latest.sh | bash
-```
-
-然后通过 `ki setup` 安装配套 Skills / Rules 到项目目录：
-
-```bash
-# 单目录安装
-ki setup --skills -t ~/projects/my-app
-ki setup --rules -t ~/projects/my-app
-
-# 多目录安装
-ki setup --skills -t ~/projects/app -t ~/projects/api
-
-# 配置文件方式（创建 ~/.ki-targets，每行一个目录）
-ki setup --skills
-```
-
-> 💡 如未安装 ki CLI，可用 `skill-install.sh` 作为备用方案。
-
-**方式二：完整安装（开发 & CLI 使用）**
-
-```bash
-# 克隆项目
-git clone git@github.com:HACK-WU/KiSearch.git
-cd KiSearch
-
-# 安装依赖
-npm install
-
-# 创建全局链接（支持任意路径执行）
-npm link
-```
-
-### 配置数据目录
-
-推荐使用配置文件管理数据目录。首次使用时，运行以下命令生成配置模板：
-
-```bash
-ki config init
-```
-
-配置文件默认生成在 `~/.ki/config.yaml`（YAML 格式，含注释），并同时创建 `dataDir` / `backupDir` / `vectorDir` 目录。生成内容如下：
-
-```yaml
-# ─── 基础路径 ───
-dataDir: $HOME/.ki-data       # KB 源数据目录
-backupDir: $HOME/.ki-backup   # 备份目录
-
-# ─── 向量配置 ───
-vectorDir: $HOME/.ki/vector   # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
-
-# Embedding 提供方（apiKey 从环境变量 SILICONFLOW_API_KEY 读取，不写入此文件）
-embedding:
-  provider: siliconflow
-  baseURL: https://api.siliconflow.cn/v1
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096             # 向量维度（必须与建库时一致）
-
-# ─── scope 护栏 ───
-scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
-
-scopes:
-  default: {}                 # 默认 scope：留空即数据落在 dataDir/default
-```
-
-**配置优先级**：
-1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
-2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
-3. 内置默认值
-
-> 注意：
-> - 配置格式以 **YAML 为主**，同时保留对旧版 `config.json` 的读取兼容；当自动探测到旧版 JSON 配置时会提示执行 `ki config init` 迁移到 YAML。
-> - 环境变量 `KI_DATA_DIR` 已不再作为运行时配置来源；`ki config init` 会自动探测并迁移到配置文件。
-> - 生成配置后可执行 `ki doctor` 一键校验配置、目录、API 密钥与向量维度是否就绪。
-
-### 使用示例
-
-
-```bash
-# 1. 初始化索引（创建顶层 Group）
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --name "API"
-
-# 2. 创建分组
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --parent "我的项目" \
-  --name "API"
-
-# 3. 写入一条知识
-ki sync-relation \
-  --scope my-project \
-  --group "我的项目/API" \
-  --relation "用户登录接口" \
-  --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。" \
-  --keywords "登录,认证,token"
-
-# 4. 查询 Group 视图
-ki query-group \
-  --scope my-project \
-  --groups "我的项目/API"
-
-# 5. 列出所有已初始化的 scope
-ki manage-index --action list-scopes
-
-# 6. 读取模块原文
-ki get-module-info \
-  --scope my-project \
-  --group "我的项目/API" \
-  --relation "用户登录接口"
-```
-
-## 命令列表
-
-| 命令 | 说明 |
-|------|------|
-| `scan-kb` | 统一入口：import / diff / scan / vectorize |
-| `manage-index` | Group 树 CRUD + 查询 scope 列表 |
-| `query-group` | 查询 Group + 词云 + 分区（支持模糊 Group 路径语义兜底） |
-| `get-module-info` | 读取本地 KB 原文（支持模糊 Relation 名称语义兜底） |
-| `sync-relation` | 写入 Relation + 关键词校验 |
-| `mcp` | 启动 MCP Server（stdio 传输，8 个工具；启动前自动执行健康预检） |
-| `config` | 配置管理：init（生成 YAML 配置文件） |
-| `doctor` | 配置诊断：校验配置文件/目录/API 密钥/向量维度等，输出 ✅/⚠️/❌ 报告 |
-| `backup` | 备份 scope 目录快照 |
-| `restore` | 从快照或 ai-results 还原 |
-| `export` | 导出 KB 为 Wiki Markdown |
-| `import-kb` | @deprecated 旧导入 |
-| `migrate-keywords` | 数据迁移 |
-| `search` | 语义检索（通过 mem 向量搜索，支持标签过滤） |
-| `store` | 向量化存储单条知识 |
-| `bulk-store` | 批量向量化存储知识 |
-
-## MCP Server
-
-启动 MCP Server 后，AI Agent 可直接通过标准 MCP 协议使用 ki 的知识索引能力：
-
-```bash
-ki mcp
-```
-
-> **🩺 启动预检**：`ki mcp` 在启动前会自动执行一次健康检查（等价于 `ki doctor`），报告写入 stderr（不污染 stdio 协议）。若存在 ❌ 失败项（如缺少 API 密钥、向量维度不匹配）将拒绝启动；仅 ⚠️ 警告时继续启动。启动异常时可先运行 `ki doctor` 定位问题。
-
-### MCP 客户端配置
-
-在 MCP 客户端配置中添加：
-
-```json
-{
-  "mcpServers": {
-    "ki": {
-      "command": "ki",
-      "args": ["mcp"],
-      "env": {
-        "SILICONFLOW_API_KEY": "<your-api-key>"
-      }
-    }
-  }
-}
-```
-
-> **⚠️ 注意**：MCP 进程不继承 shell 环境变量（如 `.zshrc` 中的 export），必须通过 `env` 字段显式传入。`SILICONFLOW_API_KEY` 为 mem 向量引擎的 API 密钥。若不配置，向量搜索/存储工具将不可用。KB 数据目录通过配置文件管理（`ki config init`），无需环境变量。
-
-### 暴露的工具
-
-| 工具 | 功能 | 向量标签 |
-|------|------|----------|
-| `ki_query_group` | 查询 Group 树 + Relations + 词云（语义兜底） | — |
-| `ki_get_module_info` | 读取本地 KB Markdown 内容（语义兜底） | — |
-| `ki_manage_index_list` | 列出所有 scope | — |
-| `ki_manage_index_create` | 创建 Group 节点 | — |
-| `ki_sync_relation` | 写入 Relation + 关键词（含向量双写） | `ki-relation` |
-| `ki_search` | 语义检索知识库内容 | `ki-search`（默认） |
-| `ki_store` | 向量化存储单条知识 | `ki-search` |
-| `ki_bulk_store` | 批量向量化存储知识 | `ki-search` |
-
-> MCP 工具集遵循零破坏性约束，不含 delete/force 操作。详见 [CLI 参考 → mcp](./docs/cli.md#mcp)。
->
-> **💡 提高查询准确率**：`ki_search` 支持 `tags` 参数按标签过滤。根据查询意图指定标签可**显著提升语义检索准确率**，避免不同知识类型交叉干扰：
-> - **通用知识搜索** → 不传或 `tags: "ki-search"`（默认）
-> - **文件/路径定位** → `tags: "ki-path"`
-> - **关系/归属查询** → `tags: "ki-relation"`
-
-## `ai-results.json` 最小示例
-
-如果你只想先知道 `ai-results.json` 长什么样，可以先看这个最小示例：
-
-```json
-{
-  "meta": {
-    "sourceDir": ".qoder/repowiki/zh/content",
-    "rootName": "QoderWiki"
-  },
-  "entries": [
-    {
-      "path": "核心概念/Scope 隔离机制.md",
-      "groupPath": "QoderWiki/核心概念",
-      "relation": "Scope 隔离机制",
-      "summary": "Scope 隔离通过服务端 scope 注入、agentId 绕过与 wrapper 层 ACL 检查三段式实现。",
-      "keywords": ["Scope", "隔离", "访问控制", "ACL", "agentId"],
-      "action": "add"
-    }
-  ]
-}
-```
-
-更完整的字段说明、校验规则和导入建议见：[`docs/scan-kb.md`](./docs/scan-kb.md)
-
-## 典型工作流
-
-### 本地知识沉淀
-
-1. `manage-index.ts` 创建 Group
-2. `sync-relation.ts` 写入模块说明
-3. `query-group.ts` 查看导航与热点
-4. `get-module-info.ts` 读取原文回答
-
-### 外部知识库导入（推荐：S-04 统一流程）
-
-> 前置条件：**首次使用某个 `scope` 前**，需在 `~/.config/memory-mcp/config.yaml` 注册该 scope，否则 `mem store` 会提示 `Access denied to scope: <scope>`。
->
-> **配置结构说明：**
->
-> - `scopes.default`：默认 scope 名称，未指定 scope 时使用，通常设为 `global`。
-> - `scopes.definitions`：所有 scope 的定义，每个 key 即 scope 名称，包含：
->   - `description`：该 scope 的用途说明，便于识别。
->   - `acl`：访问控制列表，声明该 scope **允许读取哪些 scope 的数据**。例如 `["global", "mcp-test"]` 表示该 scope 可访问 `global` 和自身的记忆。通常至少包含 `global` 和自身 scope 名。
->
-> **示例：多 scope 配置**
->
-> ```yaml
-> scopes:
->   default: global
->   definitions:
->     mcp-test:
->       description: KiSearch test scope
->       acl:
->         - global
->         - mcp-test
->     qoder-wiki:
->       description: qoder repowiki external KB scope
->       acl:
->         - global
->         - qoder-wiki
-> ```
->
-> 上面定义了两个 scope：`mcp-test` 用于知识库测试，`qoder-wiki` 用于外部 Wiki 导入。每个 scope 的 `acl` 都包含 `global` 和自身，确保能读取公共记忆与自身数据。
-
-#### 首次导入（2 步）
-
-1. AI 生成 `ai-results.json`（顶层 `meta: { sourceDir, rootName }` + `entries[]`）
-2. 一条命令完成：
-
-```bash
-ki scan-kb import \
-  --scope my-project \
-  --results ai-results.json
-```
-
-CLI 内部完成：格式校验 → 批量 `mem store` 向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`） → `local KB` 写入 → `group-index.source` 块记录（含 git HEAD commit）。
-
-#### 增量更新（3 步）
-
-1. `scan-kb diff --scope my-project` 输出变更文件列表（含已导入条目的 `memoryId`）
-2. AI 根据 diff 处理变更，生成增量 `ai-results.json`（每条带 `action: 'add' | 'modify' | 'delete'`）
-3. `scan-kb import --scope my-project --mode incremental --results ai-results.json`
-
-增量语义：
-
-- `add`：新增 → 向量化 + 写入索引
-- `modify`：更新 → `mem delete <oldId>` + 重新向量化（拿新 id）+ 替换索引
-- `delete`：删除 → `mem delete <oldId>` + 移除索引
-
-### 外部知识库导入（旧流程，仍可用）
-
-旧的 7 步流程仍保留兼容：`scan` → `scan --results` → `vectorize` → `memory_store` → `vectorize --complete` → `import-kb`。`vectorize` 子命令已标记 DEPRECATED，建议迁移到 `import` 子命令。
+| [`docs/cli.md`](./docs/cli.md) | CLI 命令完整参考（含 search 输出字段说明） |
+| [`docs/architecture.md`](./docs/architecture.md) | 架构与协作关系 |
+| [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式 |
+| [`docs/vector-engine-mem.md`](./docs/vector-engine-mem.md) | 向量引擎（zvec）设计说明 |
+| [`docs/tags-design.md`](./docs/tags-design.md) | 三层标签设计 |
+| [`docs/error-handling.md`](./docs/error-handling.md) | 异常处理与恢复 |
+| [`docs/workflows.md`](./docs/workflows.md) | 典型工作流 |
+| [`docs/backup-restore.md`](./docs/backup-restore.md) | 备份与恢复 |
+| [`docs/memory-system-requirements.md`](./docs/memory-system-requirements.md) | 记忆系统需求 |
+| [`docs/memory-system-dataflow.md`](./docs/memory-system-dataflow.md) | 数据流图 |
+
+### Agent Skills
+
+| Skill | 场景 | 核心能力 |
+|-------|------|---------|
+| [`skills/ki-foundation/SKILL.md`](./skills/ki-foundation/SKILL.md) | 前置知识（必读） | ki 架构心智模型 + 命令参考 |
+| [`skills/codekb-skill/SKILL.md`](./skills/codekb-skill/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
+| [`skills/memory-skill/SKILL.md`](./skills/memory-skill/SKILL.md) | 项目记忆/用户画像 | 归档机制 + 自动沉淀 + Group 结构 |
+| [`skills/snippet-memory/SKILL.md`](./skills/snippet-memory/SKILL.md) | 代码片段记忆 | 片段级知识的沉淀与召回 |
+| [`skills/update-kb/SKILL.md`](./skills/update-kb/SKILL.md) | 知识库增量更新 | diff / 增量导入流程 |
+
+> 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
 
 ## 约束与边界
 
 - **Scope 隔离**：仅允许字母、数字、连字符、下划线；禁止路径遍历 `../`；不同 scope 物理隔离
-- **关键词规则**：仅自然语言词汇，禁止代码符号（类名、方法名、路径等）；关键词必须真实出现在 `module-info` 原文中，避免随意指定关键词
-- **数据版本**：所有 JSON 文件包含 `version` 字段，当前版本 1
-- **WAL 写入**：所有 JSON 写入采用临时文件 → 原子 rename
-- **自动迁移**：读取旧格式 `group-index.json`（`roots`）自动迁移为新格式（`groups`）
-- **幂等安全**：重复操作不产生副作用（重复导入覆盖更新）
+- **关键词规则**：仅自然语言词汇，禁止代码符号（类名、方法名、路径等）；关键词需真实出现在原文中
+- **数据版本**：所有 JSON 文件含 `version` 字段，当前版本 1
+- **WAL 写入**：JSON 写入采用临时文件 → 原子 rename
+- **自动迁移**：读取旧格式 `group-index.json`（`roots`）自动迁移为 `groups`
+- **幂等安全**：重复操作无副作用（重复导入覆盖更新）
 - **快速失败**：输入校验失败立即退出，不静默降级
 - **异常恢复**：运行时数据损坏自动从 `_template/` 恢复
 
 ## 开发
 
 ```bash
-# 运行单个测试
-npm test
-
-# 运行所有测试
-npm run test:all
-
-# 直接执行脚本
-npx jiti src/scan-kb.ts --help
+npm install                 # 安装依赖
+npm run build:zvec-engine   # 构建 zvec 引擎层（tsc）
+npm test                    # 运行单元测试（test/*.test.ts）
+npm run test:zvec-engine    # zvec 引擎测试（node --test）
+npm run test:all            # 全部单元测试
+npx jiti src/search.ts --help   # 直接执行任意命令
 ```
-
-## 一句话总结
-
-`KiSearch` 和向量数据库不是二选一关系，而是上下分层关系：
-
-- **向量数据库**负责"记得住、搜得到、管得住"
-- **KiSearch** 负责"看得见、找得快、交付原文"
-
-两者配合后，AI 才同时具备：
-
-- **长期记忆能力**
-- **项目结构化导航能力**
-- **本地快速命中能力**
-- **可直接回答的原文交付能力**
 
 ## License
 

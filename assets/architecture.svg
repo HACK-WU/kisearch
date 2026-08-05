@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 600" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect width="940" height="600" fill="#ffffff" rx="12"/>
+
+  <!-- ============ 区域标题 ============ -->
+  <text x="120" y="34" text-anchor="middle" font-size="14" font-weight="700" fill="#475569">输入</text>
+  <text x="450" y="34" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">知识索引层</text>
+  <text x="790" y="34" text-anchor="middle" font-size="14" font-weight="700" fill="#475569">查询（两条路径）</text>
+
+  <!-- ============ 输入列 ============ -->
+  <rect x="30" y="50" width="180" height="490" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+
+  <rect x="46" y="70" width="148" height="80" rx="8" fill="#fff" stroke="#cbd5e1"/>
+  <text x="120" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">Wiki 导入</text>
+  <text x="120" y="114" text-anchor="middle" font-size="11" fill="#64748b">外部 Wiki 知识库</text>
+  <text x="120" y="130" text-anchor="middle" font-size="11" fill="#64748b">结构化 Markdown</text>
+  <text x="120" y="146" text-anchor="middle" font-size="10" fill="#94a3b8">按目录扫描 → 抽取</text>
+
+  <rect x="46" y="170" width="148" height="80" rx="8" fill="#fff" stroke="#cbd5e1"/>
+  <text x="120" y="194" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">AI 记忆存储</text>
+  <text x="120" y="214" text-anchor="middle" font-size="11" fill="#64748b">Agent 沉淀的知识</text>
+  <text x="120" y="230" text-anchor="middle" font-size="11" fill="#64748b">原文全文 + 关键词</text>
+  <text x="120" y="246" text-anchor="middle" font-size="10" fill="#94a3b8">摘要 / 全文标记</text>
+
+  <line x1="194" y1="110" x2="244" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="194" y1="210" x2="244" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="219" y="102" text-anchor="middle" font-size="9.5" fill="#94a3b8">写入</text>
+
+  <!-- ============ 知识索引层（树形结构）============ -->
+  <rect x="250" y="50" width="400" height="490" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+
+  <circle cx="280" cy="80" r="5" fill="#1d4ed8"/>
+  <text x="294" y="85" font-size="13" font-weight="700" fill="#1e3a8a">scope: monitor</text>
+  <text x="430" y="85" font-size="10.5" fill="#94a3b8">（项目隔离）</text>
+
+  <line x1="280" y1="85" x2="280" y2="120" stroke="#93c5fd" stroke-width="1.5"/>
+  <line x1="280" y1="120" x2="310" y2="120" stroke="#93c5fd" stroke-width="1.5"/>
+  <circle cx="310" cy="120" r="4" fill="#7c3aed"/>
+  <text x="322" y="125" font-size="12.5" font-weight="600" fill="#5b21b6">Group: 告警系统设计 / 告警处理服务</text>
+  <text x="322" y="140" font-size="10" fill="#94a3b8">group-index.json</text>
+
+  <line x1="310" y1="120" x2="310" y2="170" stroke="#c4b5fd" stroke-width="1.5"/>
+  <line x1="310" y1="170" x2="340" y2="170" stroke="#c4b5fd" stroke-width="1.5"/>
+  <rect x="340" y="158" width="280" height="44" rx="6" fill="#fff" stroke="#a78bfa"/>
+  <text x="354" y="178" font-size="12.5" font-weight="600" fill="#4c1d95">Relation: 告警处理</text>
+  <text x="354" y="194" font-size="10.5" fill="#64748b">memoryId · isFullText · sourcePath · 关键词</text>
+
+  <line x1="340" y1="202" x2="340" y2="240" stroke="#c4b5fd" stroke-width="1.5"/>
+  <line x1="340" y1="240" x2="370" y2="240" stroke="#c4b5fd" stroke-width="1.5"/>
+  <rect x="370" y="222" width="150" height="38" rx="6" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="384" y="240" font-size="12" font-weight="600" fill="#15803d">原文</text>
+  <text x="384" y="254" font-size="10" fill="#6b7280">local KB · index.json</text>
+
+  <line x1="340" y1="280" x2="370" y2="280" stroke="#c4b5fd" stroke-width="1.5"/>
+  <rect x="370" y="262" width="240" height="38" rx="6" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="384" y="280" font-size="12" font-weight="600" fill="#c2410c">向量</text>
+  <text x="384" y="294" font-size="10" fill="#6b7280">zvec · ki-search / ki-relation / ki-path</text>
+
+  <line x1="340" y1="240" x2="340" y2="280" stroke="#c4b5fd" stroke-width="1.5"/>
+
+  <line x1="520" y1="180" x2="610" y2="280" stroke="#2563eb" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="565" y="225" font-size="9.5" fill="#2563eb" font-style="italic">memoryId 关联</text>
+
+  <line x1="280" y1="85" x2="280" y2="330" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.5"/>
+  <text x="294" y="340" font-size="10.5" fill="#94a3b8" font-style="italic">…更多 Group / Relation 同理</text>
+
+  <rect x="270" y="365" width="360" height="98" rx="8" fill="#fff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="284" y="388" font-size="12" font-weight="700" fill="#c2410c">向量索引（zvec 单一集合）</text>
+  <line x1="284" y1="394" x2="616" y2="394" stroke="#fed7aa"/>
+  <text x="284" y="412" font-size="11" fill="#475569">▸ <tspan font-weight="600" fill="#c2410c">ki-search</tspan>　内容向量（原文 / 摘要）</text>
+  <text x="284" y="430" font-size="11" fill="#475569">▸ <tspan font-weight="600" fill="#c2410c">ki-relation</tspan>　关系向量（含 group 字段）</text>
+  <text x="284" y="448" font-size="11" fill="#475569">▸ <tspan font-weight="600" fill="#c2410c">ki-path</tspan>　路径向量（Group 定位）</text>
+
+  <rect x="270" y="478" width="360" height="44" rx="8" fill="#eef2ff" stroke="#a5b4fc"/>
+  <text x="284" y="498" font-size="12" font-weight="600" fill="#3730a3">记忆库（长期沉淀）</text>
+  <text x="284" y="514" font-size="10.5" fill="#64748b">跨会话持续积累 · 冷热治理 · 评分衰减</text>
+
+  <!-- ============ 查询列：两条路径 ============ -->
+  <!-- 路径 A：索引直查（上半，紫色系）-->
+  <rect x="670" y="50" width="240" height="235" rx="10" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <text x="790" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="#6d28d9">路径 A · 索引直查</text>
+  <text x="790" y="90" text-anchor="middle" font-size="10.5" fill="#94a3b8">已知 Group / Relation 路径</text>
+
+  <rect x="690" y="102" width="200" height="40" rx="8" fill="#fff" stroke="#a78bfa"/>
+  <text x="790" y="120" text-anchor="middle" font-size="12" font-weight="600" fill="#4c1d95">① 已知 Group / Relation</text>
+  <text x="790" y="134" text-anchor="middle" font-size="10" fill="#64748b">路径索引（不走向量）</text>
+
+  <line x1="790" y1="142" x2="790" y2="156" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#ap)"/>
+
+  <rect x="690" y="158" width="200" height="40" rx="8" fill="#fff" stroke="#a78bfa"/>
+  <text x="790" y="176" text-anchor="middle" font-size="12" font-weight="600" fill="#4c1d95">② 直读索引 + 原文</text>
+  <text x="790" y="190" text-anchor="middle" font-size="10" fill="#64748b">relations-cache + local KB</text>
+
+  <line x1="790" y1="198" x2="790" y2="212" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#ap)"/>
+
+  <rect x="690" y="214" width="200" height="40" rx="8" fill="#fff" stroke="#a78bfa"/>
+  <text x="790" y="232" text-anchor="middle" font-size="12" font-weight="600" fill="#4c1d95">③ 原文交付</text>
+  <text x="790" y="246" text-anchor="middle" font-size="10" fill="#64748b">module-info 全文</text>
+
+  <!-- 路径 B：语义检索（下半，绿色系）-->
+  <rect x="670" y="300" width="240" height="240" rx="10" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text x="790" y="324" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">路径 B · 语义检索</text>
+  <text x="790" y="340" text-anchor="middle" font-size="10.5" fill="#94a3b8">ki-search · 自然语言查询</text>
+
+  <rect x="690" y="352" width="200" height="36" rx="8" fill="#fff" stroke="#86efac"/>
+  <text x="790" y="369" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">① 自然语言查询</text>
+  <line x1="790" y1="388" x2="790" y2="402" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ag)"/>
+
+  <rect x="690" y="404" width="200" height="50" rx="8" fill="#fff" stroke="#86efac"/>
+  <text x="790" y="422" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">② 混合检索（向量+BM25+RRF）</text>
+  <text x="790" y="438" text-anchor="middle" font-size="10" fill="#64748b">向量语义 + 全文 + RRF 融合</text>
+  <line x1="790" y1="454" x2="790" y2="468" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ag)"/>
+
+  <rect x="690" y="470" width="200" height="36" rx="8" fill="#fff" stroke="#86efac"/>
+  <text x="790" y="487" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">③ memoryId 反查</text>
+  <text x="790" y="501" text-anchor="middle" font-size="10" fill="#64748b">→ group / relation / keywords</text>
+  <line x1="790" y1="506" x2="790" y2="518" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ag)"/>
+
+  <rect x="690" y="520" width="200" height="20" rx="8" fill="#dcfce7" stroke="#86efac"/>
+  <text x="790" y="534" text-anchor="middle" font-size="11" font-weight="600" fill="#14532d">④ 结果：原文 + isFullText</text>
+
+  <!-- ============ 关联箭头：查询 → 索引层 ============ -->
+  <!-- 路径 A 读原文（紫）-->
+  <path d="M 690 178 C 660 178 660 241 520 241" fill="none" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#ap)"/>
+  <text x="600" y="195" font-size="9.5" fill="#7c3aed" font-style="italic">直读原文</text>
+
+  <!-- 路径 B 读向量（绿）-->
+  <path d="M 690 429 C 660 429 660 281 610 281" fill="none" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="600" y="360" font-size="9.5" fill="#16a34a" font-style="italic">检索向量</text>
+
+  <!-- 路径 B 反查原文（绿虚线）-->
+  <path d="M 690 487 C 650 487 650 260 520 260" fill="none" stroke="#16a34a" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#ag)"/>
+  <text x="610" y="445" font-size="9.5" fill="#16a34a" font-style="italic">反查原文</text>
+
+  <!-- ============ 底部说明 ============ -->
+  <line x1="30" y1="558" x2="910" y2="558" stroke="#e2e8f0"/>
+  <text x="30" y="578" font-size="11.5" fill="#64748b"><tspan font-weight="700" fill="#475569">写入：</tspan>Wiki 导入 / AI 记忆 → Group 树 → Relation → 原文 + 向量</text>
+  <text x="30" y="594" font-size="11.5" fill="#64748b"><tspan font-weight="700" fill="#6d28d9">索引直查：</tspan>已知路径 → 直读 relations-cache + local KB → 原文交付　　<tspan font-weight="700" fill="#15803d">语义检索：</tspan>ki-search → 向量+BM25 → memoryId 反查 → 原文</text>
+</svg>
