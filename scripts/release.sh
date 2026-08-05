@@ -32,7 +32,7 @@ fi
 
 # 3. 确认关键文件存在
 echo "==> 检查关键文件..."
-for f in bin/ki.mjs scripts/mcp-server.ts README.md package.json; do
+for f in bin/ki.mjs src/mcp-server.ts README.md package.json; do
   if [ ! -f "$f" ]; then
     echo "错误: 关键文件 $f 不存在"
     exit 1

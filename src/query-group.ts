@@ -3,7 +3,7 @@
  * query-group.ts - 查询 Group + 词云生成 + 新兴热区展示 + 格式化输出
  *
  * 用法:
- *   npx jiti scripts/query-group.ts --scope <scope> [--groups <g1,g2>]
+ *   npx jiti src/query-group.ts --scope <scope> [--groups <g1,g2>]
  *         [--hot-count <count>] [--depth <depth>] [--mode <mode>]
  *
  *   --mode 支持逗号分隔多值：hot|warm|cold|emerging|full

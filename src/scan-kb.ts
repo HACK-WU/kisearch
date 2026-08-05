@@ -124,7 +124,7 @@ function buildSourceDirError(sourceDir: string): Record<string, unknown> {
     next_step: [
       '1. 检查传入路径是否真实存在，并确认它是一个目录',
       '2. 确认该目录下包含待扫描的 `.md` 文件',
-      '3. 重新执行：npx jiti scripts/scan-kb.ts scan --scope <scope> --source <dir> --root-name <name>',
+      '3. 重新执行：npx jiti src/scan-kb.ts scan --scope <scope> --source <dir> --root-name <name>',
     ],
     possible_causes: [
       '路径写错，或目录尚未创建',
@@ -139,8 +139,8 @@ function buildMissingPendingError(scope: string, pendingPath: string): Record<st
     error: `scan-pending.json 不存在：${pendingPath}`,
     hint: '`scan --results` 只能合并已经准备好的待处理列表。请先执行一次不带 `--results` 的 `scan`，生成 `scan-pending.json` 后再重试。',
     next_step: [
-      `1. 先执行：npx jiti scripts/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name>`,
-      `2. 再执行：npx jiti scripts/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name> --results <ai-results.json>`,
+      `1. 先执行：npx jiti src/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name>`,
+      `2. 再执行：npx jiti src/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name> --results <ai-results.json>`,
     ],
     possible_causes: [
       '还没有执行第一步扫描准备，只直接执行了 `scan --results`',
@@ -187,8 +187,8 @@ function buildMissingScanIndexError(scope: string, target: string, currentComman
     error: `scan-index.json 不存在：${target}`,
     hint: `${currentCommand} 只能读取已有的 \`scan-index.json\`。请先执行 \`scan --results\` 合并 AI 摘要结果，生成扫描索引后再重试。`,
     next_step: [
-      `1. 先执行：npx jiti scripts/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name>`,
-      `2. 再执行：npx jiti scripts/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name> --results <ai-results.json>`,
+      `1. 先执行：npx jiti src/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name>`,
+      `2. 再执行：npx jiti src/scan-kb.ts scan --scope ${scope} --source <dir> --root-name <name> --results <ai-results.json>`,
       `3. 最后执行：${currentCommand}`,
     ],
     possible_causes: possibleCauses,
@@ -610,8 +610,8 @@ function handleVectorizeList(scope: string, scanIndexFile?: string): void {
   const scanIndex = readJson<ScanIndex>(target);
   if (!scanIndex) {
     const command = scanIndexFile
-      ? `npx jiti scripts/scan-kb.ts vectorize --scope ${scope} --scan-index ${path.resolve(scanIndexFile)}`
-      : `npx jiti scripts/scan-kb.ts vectorize --scope ${scope}`;
+      ? `npx jiti src/scan-kb.ts vectorize --scope ${scope} --scan-index ${path.resolve(scanIndexFile)}`
+      : `npx jiti src/scan-kb.ts vectorize --scope ${scope}`;
     fail(buildMissingScanIndexError(scope, target, command));
   }
 
@@ -642,8 +642,8 @@ function handleVectorizeComplete(scope: string, completeFile: string, scanIndexF
   const scanIndex = readJson<ScanIndex>(target);
   if (!scanIndex) {
     const command = scanIndexFile
-      ? `npx jiti scripts/scan-kb.ts vectorize --scope ${scope} --scan-index ${path.resolve(scanIndexFile)} --complete ${completeFile}`
-      : `npx jiti scripts/scan-kb.ts vectorize --scope ${scope} --complete ${completeFile}`;
+      ? `npx jiti src/scan-kb.ts vectorize --scope ${scope} --scan-index ${path.resolve(scanIndexFile)} --complete ${completeFile}`
+      : `npx jiti src/scan-kb.ts vectorize --scope ${scope} --complete ${completeFile}`;
     fail(buildMissingScanIndexError(scope, target, command));
   }
 

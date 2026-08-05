@@ -411,7 +411,7 @@ npm test
 npm run test:all
 
 # 直接执行脚本
-npx jiti scripts/scan-kb.ts --help
+npx jiti src/scan-kb.ts --help
 ```
 
 ## 一句话总结

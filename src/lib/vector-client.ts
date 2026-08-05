@@ -1,7 +1,7 @@
 /**
  * vector-client.ts —— Vector Adapter（S-03）
  *
- * 替换 scripts/lib/mem-client.ts：封装 ZvecEngine 基座（worker proxy），
+ * 封装 ZvecEngine 基座（worker proxy），
  * 为 CLI / MCP 提供 async 语义检索 / 存储接口。
  *
  * 设计要点（与 zvec-probe-node / S-03 对齐）：

@@ -131,7 +131,7 @@ function search(scope, query, extra = []) {
 }
 
 /**
- * 纯 JS 复刻 scripts/lib/store.ts initScope：从 _template 拷贝 group-index / relations-cache
+ * 纯 JS 复刻 src/lib/store.ts initScope：从 _template 拷贝 group-index / relations-cache
  * 到 dataDir/scope/ 并回填 scope 与 updatedAt（避免在 .mjs 中直接 import .ts）。
  */
 function initScopeFiles(scope) {

@@ -10,7 +10,7 @@
  *
  * 【循环依赖解决】本模块自行计算 KI_ROOT，不 import constants.ts
  *
- * 与 scripts/lib/config.ts 的差异（S-01 向量配置独立化，最小增量）：
+ * 与旧版 lib/config.ts 的差异（S-01 向量配置独立化，最小增量）：
  *   - KiConfig 新增 vectorDir / embedding 字段（zvec 向量配置）
  *   - 新增 getVectorDir() / getEmbeddingConfig() 解析函数
  *   - 配置格式 YAML 优先（REQ-11），保留 JSON 读取兼容（读到 .json 时提示迁移）
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url';
 import YAML from 'yaml';
 
 // ─── 自行计算 KI_ROOT（与 constants.ts 相同算法，打破循环依赖） ───
-// src/lib/ 上溯 2 级到项目根（与 scripts/lib/ 同为 2 级，一致）
+// src/lib/ 上溯 2 级到项目根
 const __filename_cfg = fileURLToPath(import.meta.url);
 const __dirname_cfg = path.dirname(__filename_cfg);
 const KI_ROOT = path.resolve(__dirname_cfg, '..', '..');

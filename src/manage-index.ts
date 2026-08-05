@@ -3,9 +3,9 @@
  * manage-index.ts - Group 树索引管理 CLI
  * 
  * 用法:
- *   npx jiti scripts/manage-index.ts --scope <scope> --action create --name <name> [--parent <path>]
- *   npx jiti scripts/manage-index.ts --scope <scope> --action delete --name <name> [--parent <path>] [--force]
- *   npx jiti scripts/manage-index.ts --action list-scopes
+ *   npx jiti src/manage-index.ts --scope <scope> --action create --name <name> [--parent <path>]
+ *   npx jiti src/manage-index.ts --scope <scope> --action delete --name <name> [--parent <path>] [--force]
+ *   npx jiti src/manage-index.ts --action list-scopes
  */
 
 import { Command } from 'commander';

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @deprecated 自 S-04 起，此文件的导入逻辑已迁移到 `scripts/lib/import.ts`，
+ * @deprecated 自 S-04 起，导入逻辑已迁移到 `src/lib/import.ts`，
  * 推荐使用 `scan-kb import --scope ... --results <ai-results.json>`。
  *
  * 本文件保留作为兼容层（仅命令行入口可用），核心逻辑不再演进。

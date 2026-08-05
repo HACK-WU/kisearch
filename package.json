@@ -4,8 +4,7 @@
   "description": "AI 知识索引整理工具 - 对外部知识进行结构化索引和导航",
   "type": "module",
   "bin": {
-    "ki": "./bin/ki.mjs",
-    "knowledge-indexer": "./bin/knowledge-indexer.mjs"
+    "ki": "./bin/ki.mjs"
   },
   "scripts": {
     "scan-kb": "npx jiti src/scan-kb.ts",
@@ -14,7 +13,7 @@
     "get-module-info": "npx jiti src/get-module-info.ts",
     "sync-relation": "npx jiti src/sync-relation.ts",
     "test": "npx jiti test/manage-index.test.ts",
-    "test:all": "npx jiti test/*.test.ts",
+    "test:all": "for f in test/*.test.ts; do npx jiti \"$f\" || exit 1; done",
     "test:manage-index": "npx jiti test/manage-index.test.ts",
     "test:query-group": "npx jiti test/query-group.test.ts",
     "test:get-module-info": "npx jiti test/get-module-info.test.ts",
@@ -53,7 +52,7 @@
   },
   "files": [
     "bin/**/*",
-    "scripts/**/*",
+    "scripts/*.sh",
     "src/**/*",
     "_template/**/*",
     "dist/zvec-engine/**/*",
