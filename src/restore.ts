@@ -430,6 +430,26 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 
 const args = process.argv.slice(2);
 
+// -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(`ki restore - 从快照或 ai-results 还原 scope
+
+用法：
+  ki restore <scope>                  列出可用备份
+  ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
+  ki restore <scope> --from-results [--dir <ai-results-dir>] [--yes]
+
+选项：
+  --from-snapshot     从 tar.gz 快照覆盖还原（破坏性操作，需 --yes 确认）
+  --from-results      按 timestamp 顺序重放 ai-results 备份文件
+  --timestamp <ts>    指定快照时间戳（默认取最新）
+  --dir <dir>         指定 ai-results 备份目录
+  --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
+  --yes               跳过确认直接执行（破坏性）
+  -h, --help          显示帮助`);
+  process.exit(0);
+}
+
 // 未知参数检测（NEG-01）：--timestamp / --dir / --backup-dir 为带值参数
 detectUnknownFlags(
   args,

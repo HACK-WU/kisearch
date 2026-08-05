@@ -27,6 +27,20 @@ function output(result: Record<string, unknown>): void {
 
 const args = process.argv.slice(2);
 
+// -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住）
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(`ki backup - 备份 scope 目录快照
+
+用法：
+  ki backup <scope>               备份 scope 目录快照
+  ki backup <scope> --list        列出已有备份
+
+选项：
+  --list            列出已有备份（只读）
+  -h, --help        显示帮助`);
+  process.exit(0);
+}
+
 // 未知参数检测（NEG-01）：仅 --list 为合法 flag
 detectUnknownFlags(args, ['--list']);
 

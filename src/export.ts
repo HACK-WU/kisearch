@@ -260,6 +260,20 @@ function handleExport(options: ExportOptions): ExportResult {
 
 const args = process.argv.slice(2);
 
+// -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住）
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(`ki export - 导出 KB scope 为 Wiki Markdown
+
+用法：
+  ki export <scope> --output <dir> [--root-name <name>]
+
+选项：
+  --output <dir>      导出输出目录（必填）
+  --root-name <name>  指定 Group 树根名
+  -h, --help          显示帮助`);
+  process.exit(0);
+}
+
 // 未知参数检测（NEG-01）：--output / --root-name 为带值参数
 detectUnknownFlags(args, ['--output', '--root-name'], ['--output', '--root-name']);
 

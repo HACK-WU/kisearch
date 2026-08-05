@@ -16,6 +16,21 @@ import { loadConfig } from './lib/config.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 
 async function main(): Promise<void> {
+  // -h/--help：打印帮助后直接退出（不落入健康检查，避免无意义失败退出码 1）
+  if (process.argv.slice(2).includes('-h') || process.argv.slice(2).includes('--help')) {
+    console.log(`ki doctor - 配置与向量环境诊断
+
+用法：
+  ki doctor
+  ki --config <path> doctor
+
+说明：
+  一键诊断配置文件 / 目录可写 / apiKey / embedding 连通性与维度 / zvec collection / scopes.default。
+  只读，不修改任何配置或数据；有失败项时退出码为 1（供脚本 gate）。
+  -h, --help   显示帮助`);
+    process.exit(0);
+  }
+
   let report;
   try {
     const config = loadConfig();

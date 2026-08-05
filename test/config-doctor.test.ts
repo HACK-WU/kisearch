@@ -2,8 +2,9 @@
  * config + doctor 单元测试（REQ-11 / REQ-15 / REQ-16）
  *
  * 覆盖三个面：
- *  A. src/lib/config.ts —— YAML 解析、scope 数据目录语义、resolveScope 护栏、
- *     null scope 丢弃、embedding 默认合并、scopeMode 归一化
+ *  A. src/lib/config.ts —— YAML 解析、scope 数据目录语义、sourceDir/rootName/wikiSync
+ *     可选字段解析与路径展开、resolveScope 护栏、null scope 丢弃、
+ *     embedding 默认合并、scopeMode 归一化
  *  B. src/config.ts（CLI `ki config init`，子进程黑盒）—— 生成 YAML 模板、
  *     default scope 为 {} 的路径回归（不双层嵌套）、幂等
  *  C. src/lib/health-check.ts —— scopes.default pass/warn、目录检查、
@@ -23,6 +24,9 @@ import {
   loadConfig,
   resetConfigCache,
   getScopeDataDir,
+  getScopeSourceDir,
+  getScopeRootName,
+  getScopeWikiSync,
   resolveScope,
   getScopeMode,
   getEmbeddingConfig,
@@ -79,6 +83,88 @@ describe('A. lib/config —— scope 数据目录语义', () => {
   it('未注册 scope 回退到 dataDir/{scope}', () => {
     const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  default: {}');
     assert.strictEqual(getScopeDataDir(cfg, 'ghost'), path.join('/abs/data', 'ghost'));
+  });
+});
+
+describe('A. lib/config —— scope 可选字段（sourceDir / rootName / wikiSync）', () => {
+  it('未配置 sourceDir 的 default scope → null（模板 default: {} 的安全默认）', () => {
+    const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  default: {}');
+    assert.strictEqual(getScopeSourceDir(cfg, 'default'), null);
+  });
+
+  it('default scope 按需配置 sourceDir 同样生效，且未配 kbDir 仍落 dataDir/default', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  default:', '    sourceDir: /custom/wiki'].join('\n')
+    );
+    assert.strictEqual(getScopeSourceDir(cfg, 'default'), '/custom/wiki');
+    assert.strictEqual(getScopeDataDir(cfg, 'default'), path.join('/abs/data', 'default'));
+  });
+
+  it('sourceDir 支持 $HOME 前缀展开', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: $HOME/wiki'].join('\n')
+    );
+    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.join(os.homedir(), 'wiki'));
+  });
+
+  it('sourceDir 支持 ~ 前缀展开', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: ~/wiki-out'].join('\n')
+    );
+    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.join(os.homedir(), 'wiki-out'));
+  });
+
+  it('相对 sourceDir → 相对于配置文件所在目录展开', () => {
+    const dir = fs.mkdtempSync(path.join(tmpDir, 'cfg-rel-'));
+    const file = path.join(dir, 'config.yaml');
+    fs.writeFileSync(
+      file,
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: rel/wiki'].join('\n'),
+      'utf-8'
+    );
+    resetConfigCache();
+    const cfg = loadConfig(file);
+    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.resolve(dir, 'rel/wiki'));
+  });
+
+  it('rootName：未配置 → null；配置 → 原样返回', () => {
+    const empty = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  proj: {}');
+    assert.strictEqual(getScopeRootName(empty, 'proj'), null);
+
+    const withName = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    rootName: wiki'].join('\n')
+    );
+    assert.strictEqual(getScopeRootName(withName, 'proj'), 'wiki');
+  });
+
+  it('wikiSync：未配置 → null', () => {
+    const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  proj: {}');
+    assert.strictEqual(getScopeWikiSync(cfg, 'proj'), null);
+  });
+
+  it('wikiSync.enabled 缺省为 true，sourceDir 展开', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    wikiSync:', '      sourceDir: ~/wiki-out'].join('\n')
+    );
+    const ws = getScopeWikiSync(cfg, 'proj');
+    assert.ok(ws, 'wikiSync 应存在');
+    assert.strictEqual(ws.enabled, true);
+    assert.strictEqual(ws.sourceDir, path.join(os.homedir(), 'wiki-out'));
+  });
+
+  it('wikiSync.enabled: false 生效', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'scopes:', '  proj:', '    wikiSync:', '      enabled: false'].join('\n')
+    );
+    const ws = getScopeWikiSync(cfg, 'proj');
+    assert.ok(ws, 'wikiSync 应存在');
+    assert.strictEqual(ws.enabled, false);
   });
 });
 
