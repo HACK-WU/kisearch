@@ -182,6 +182,7 @@ describe('import-kb 约定模式', () => {
 
     assert.ok(rel);
     assert.strictEqual(rel.isImported, true);
+    assert.strictEqual(rel.isFullText, true, 'import-kb 导入的是 markdown 文件全文');
     assert.strictEqual(rel.score, 0);
     assert.strictEqual(rel.useCount, 0);
     assert.strictEqual(rel.lastUsedTime, null);

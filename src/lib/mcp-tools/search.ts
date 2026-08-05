@@ -12,7 +12,7 @@ export function registerSearchTool(server: McpServer): void {
       query: z.string().describe('自然语言查询文本'),
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限'),
       threshold: z.number().min(0).max(1).optional().describe('相似度阈值（0-1）'),
-      tags: z.string().optional().default('ki-search').describe('过滤标签（默认 ki-search）'),
+      tags: z.string().optional().describe('过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）'),
     },
     async (args) => {
       try {

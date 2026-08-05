@@ -33,14 +33,14 @@ export interface BatchVectorizeOptions {
 }
 
 /**
- * 构造向量化的 content 文本
- *   [摘要] ...
- *   [关键词] k1, k2
- *   [路径] xxx
+ * 构造向量化的 content 文本。
+ *
+ * content 纯化契约：直接返回传入的原始内容（ai-results 的 summary），
+ * 不再手动拼接 `[摘要]/[关键词]/[路径]` 前缀；关键词通过 keywords 参数
+ * 传给 vector-client（底层自动追加 `\n\n[关键词] xxx`，保证 BM25 全文召回）。
  */
 export function buildVectorizeContent(entry: ScanResultEntry): string {
-  const kw = (entry.keywords || []).join(', ');
-  return `[摘要] ${entry.summary}\n[关键词] ${kw}\n[路径] ${entry.path}`;
+  return entry.summary;
 }
 
 /**
@@ -55,7 +55,12 @@ export async function vectorizeOne(
   const content = buildVectorizeContent(entry);
 
   try {
-    const { docId } = await vectorStore({ scope, text: content, tags: VECTORIZE_TAG });
+    const { docId } = await vectorStore({
+      scope,
+      text: content,
+      tags: VECTORIZE_TAG,
+      keywords: entry.keywords,
+    });
     return { ok: true, memoryId: docId };
   } catch (err) {
     return { ok: false, error: `向量存储失败: ${(err as Error).message}` };
@@ -137,7 +142,11 @@ export async function bulkVectorize(
   try {
     const result = await vectorBulkStore({
       scope,
-      entries: entries.map((e) => ({ text: buildVectorizeContent(e), tags: VECTORIZE_TAG })),
+      entries: entries.map((e) => ({
+        text: buildVectorizeContent(e),
+        tags: VECTORIZE_TAG,
+        keywords: e.keywords,
+      })),
     });
     for (const item of result.results) {
       const entry = entries[item.index];

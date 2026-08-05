@@ -232,6 +232,8 @@ function upsertImportedRelation(
 
   if (existing) {
     existing.isImported = true;
+    // 本地 markdown 文件全文，重复导入时补全标记（兼容旧数据缺字段）
+    existing.isFullText = true;
     existing.score = 0;
     existing.useCount = 0;
     existing.lastUsedTime = null;
@@ -243,6 +245,8 @@ function upsertImportedRelation(
       useCount: 0,
       lastUsedTime: null,
       isImported: true,
+      // 本地 markdown 文件全文（非 AI 摘要）
+      isFullText: true,
     });
   }
 

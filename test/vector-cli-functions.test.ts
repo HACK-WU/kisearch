@@ -40,6 +40,7 @@ let vectorClientModule: typeof import('../src/lib/vector-client.js');
 // mock 状态
 let mockAvailable = true;
 let mockSearchResults: any[] = [];
+let mockSearchResultsByTag: Record<string, any[]> | null = null;
 let mockStoreResult = { docId: 'mock_doc_id_1234567890abcdef' };
 let mockBulkResult = { total: 1, succeeded: 1, failed: 0, results: [{ index: 0, memoryId: 'mock_bulk_id', success: true }] };
 let mockSearchCalls: any[] = [];
@@ -61,7 +62,23 @@ async function loadModulesWithMock() {
 
   (vectorClientModule as any).vectorSearch = async (params: any) => {
     mockSearchCalls.push(params);
-    return mockSearchResults;
+    // 按 tag 返回不同结果（模拟 per-tag 分查）+ 模拟 topk 截断
+    const src =
+      mockSearchResultsByTag && params.tags
+        ? (mockSearchResultsByTag[params.tags] ?? [])
+        : mockSearchResults;
+    return src.slice(0, params.limit ?? 10);
+  };
+
+  (vectorClientModule as any).vectorListTags = async () => {
+    return {
+      tags: [
+        { tag: 'ki-search', count: 1 },
+        { tag: 'ki-relation', count: 1 },
+      ],
+      scanned: 2,
+      truncated: false,
+    };
   };
 
   (vectorClientModule as any).vectorStore = async (params: any) => {
@@ -156,14 +173,53 @@ describe('CLI 纯函数 · executeSearch', () => {
     mockAvailable = true; // 恢复
   });
 
-  it('默认 tags = ki-search', async () => {
+  it('默认不传 tags（搜索全部 tag，按 tag 分查）', async () => {
     mockSearchResults = [];
     mockSearchCalls = [];
     await searchModule.executeSearch({
       scope: 'test',
       query: 'test',
     });
-    assert.equal(mockSearchCalls[0].tags, 'ki-search');
+    // 默认搜全部 → 对每个 tag 分别查询，每条结果再按 tag 限流
+    assert.equal(mockSearchCalls.length, 2);
+    assert.deepEqual(mockSearchCalls.map((c) => c.tags), ['ki-search', 'ki-relation']);
+  });
+
+  it('默认搜全部：per-tag 限流 + ki-search 优先排序', async () => {
+    mockSearchCalls = [];
+    mockSearchResultsByTag = {
+      // ki-search 4 条（超过 limit=3 应截断为 3），按 score 降序排列
+      'ki-search': [
+        { memoryId: 's1', content: '内容A', score: 0.02, tag: 'ki-search' },
+        { memoryId: 's2', content: '内容B', score: 0.01, tag: 'ki-search' },
+        { memoryId: 's3', content: '内容C', score: 0.005, tag: 'ki-search' },
+        { memoryId: 's4', content: '内容D', score: 0.001, tag: 'ki-search' },
+      ],
+      'ki-relation': [
+        { memoryId: 'r1', content: '关系A', score: 0.03, tag: 'ki-relation' },
+      ],
+    };
+    const r = await searchModule.executeSearch({
+      scope: 'test',
+      query: 'test',
+      limit: 3,
+    });
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      // per-tag 限流：ki-search 截断为 3 条，ki-relation 仅 1 条 → 共 4 条
+      assert.equal(r.results.length, 4);
+      // ki-search 内容优先：前 3 条 ki-search，最后 ki-relation
+      assert.deepEqual(
+        r.results.map((x: any) => x.tag),
+        ['ki-search', 'ki-search', 'ki-search', 'ki-relation']
+      );
+      // 组内按 score 降序（s4 被 limit 截断）
+      assert.deepEqual(
+        r.results.map((x: any) => x.memoryId),
+        ['s1', 's2', 's3', 'r1']
+      );
+    }
+    mockSearchResultsByTag = null; // 恢复默认 mock 行为
   });
 
   it('默认 limit = 10', async () => {

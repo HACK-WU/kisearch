@@ -13,6 +13,7 @@
  *   - content 字段兼作 FTS 字段（jieba 分词）
  */
 
+import fs from 'node:fs';
 import { createHash } from 'crypto';
 import {
   ZvecEngine,
@@ -33,6 +34,8 @@ export interface VectorSearchResult {
   content: string;
   score: number;       // 越大越相关（基座已归一化）
   tag?: string;
+  /** 结构化 Group 字段（ki-relation 向量写入时的归属 Group 路径，可能缺失） */
+  group?: string;
 }
 
 export interface VectorStoreResult {
@@ -69,7 +72,9 @@ function lockedHint(dbPath: string): string {
     `  处置方式：\n` +
     `  1) 若有 ki mcp/server 常驻进程在运行，请先停止它；\n` +
     `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
-    `  3) 若进程已异常退出，锁会在片刻后自动释放，可稍后重试`
+    `  3) 若进程已异常退出，锁会在片刻后自动释放，可稍后重试；\n` +
+    `  4) 若确认无任何进程占用仍持续报此错（如向量库目录为空/状态异常），\n` +
+    `     可执行 ki restore <scope> --from-snapshot 重建向量库`
   );
 }
 
@@ -92,6 +97,7 @@ const DENSE_FIELD = 'dense';
 const FTS_FIELD = 'content';
 const TAG_FIELD = 'tag';
 const SCOPE_FIELD = 'scope';
+const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
 
@@ -184,6 +190,7 @@ function buildCreateConfig(): ZvecEngineConfig {
       scalarFields: [
         { name: TAG_FIELD, dataType: 'STRING', indexed: true },
         { name: SCOPE_FIELD, dataType: 'STRING', indexed: true },
+        { name: GROUP_FIELD, dataType: 'STRING', indexed: true },
         { name: FTS_FIELD, dataType: 'STRING' },
       ],
       fts: {
@@ -222,6 +229,13 @@ export function getEngine(): Promise<ZvecEngine> {
         throw new CollectionLockedException(lockedHint(createCfg.dbPath));
       }
       if (!exists.exists) {
+        // zvec create 要求 dbPath 不存在；probe 对空目录返回 NOT_FOUND 时目录仍存在，
+        // 先移除空目录（rmdirSync 仅删空目录，非空即抛错回退给 create 报错兜底）
+        try {
+          fs.rmdirSync(createCfg.dbPath);
+        } catch {
+          /* 忽略：非空目录/不可删，交由 create 报错 */
+        }
         return withOpenTimeout(ZvecEngine.create(createCfg), '创建');
       }
       return withOpenTimeout(ZvecEngine.open(buildOpenConfig()), '打开');
@@ -306,24 +320,23 @@ export async function ensureVectorAvailable(): Promise<VectorAvailableResult> {
 
 /**
  * 语义检索（hybrid：语义 + FTS 关键词 + RRF），按 scope + tag 过滤。
+ *
+ * tags：可选。不传/空 → 不按 tag 过滤（搜索 scope 下全部 tag）；
+ * 传单个 tag 或逗号分隔多个 tag → 多 tag 以 OR 组合（复用 buildScopeTagFilter）。
  */
 export async function vectorSearch(params: {
   scope: string;
   query: string;
   limit?: number;
-  tags?: string;        // 单 tag（默认 ki-search）；忽略大小写
+  tags?: string;        // 单个或多个 tag（逗号分隔）；不传/空 → 全部 tag；忽略大小写
   threshold?: number;
 }): Promise<VectorSearchResult[]> {
   const scope = resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
-  const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
-
-  const filter: Filter = {
-    and: [
-      { field: SCOPE_FIELD, op: '==', value: scope },
-      { field: TAG_FIELD, op: '==', value: tag },
-    ],
-  };
+  const tagList = params.tags
+    ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
+    : undefined;
+  const filter = buildScopeTagFilter(scope, tagList);
 
   const hits: Hit[] = await engine.hybridSearch({
     queryText: params.query,
@@ -338,6 +351,7 @@ export async function vectorSearch(params: {
       content: h.text ?? String(h.fields?.[FTS_FIELD] ?? ''),
       score: h.score,
       tag: h.fields?.[TAG_FIELD] !== undefined ? String(h.fields[TAG_FIELD]) : undefined,
+      group: h.fields?.[GROUP_FIELD] !== undefined ? String(h.fields[GROUP_FIELD]) : undefined,
     }))
     .filter((r) => params.threshold === undefined || r.score >= params.threshold);
 }
@@ -352,6 +366,7 @@ export async function vectorStore(params: {
   text: string;
   tags?: string;
   keywords?: string[];
+  group?: string;
 }): Promise<VectorStoreResult> {
   if (params.text.length > MAX_TEXT_LENGTH) {
     throw new Error(`text 超过 ${MAX_TEXT_LENGTH} 字符限制（当前 ${params.text.length}）`);
@@ -370,7 +385,11 @@ export async function vectorStore(params: {
   const result = await engine.upsert([{
     id: docId,
     text: fullText,
-    fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: scope },
+    fields: {
+      [TAG_FIELD]: tag,
+      [SCOPE_FIELD]: scope,
+      ...(params.group ? { [GROUP_FIELD]: params.group } : {}),
+    },
   }]);
 
   if (result.failed > 0) {
@@ -385,7 +404,7 @@ export async function vectorStore(params: {
  */
 export async function vectorBulkStore(params: {
   scope: string;
-  entries: { text: string; tags?: string; keywords?: string[] }[];
+  entries: { text: string; tags?: string; keywords?: string[]; group?: string }[];
 }): Promise<VectorBulkStoreResult> {
   if (params.entries.length === 0) {
     return { total: 0, succeeded: 0, failed: 0, results: [] };
@@ -402,7 +421,11 @@ export async function vectorBulkStore(params: {
     return {
       id: generateDocId(fullText, scope),
       text: fullText,
-      fields: { [TAG_FIELD]: tag, [SCOPE_FIELD]: scope },
+      fields: {
+        [TAG_FIELD]: tag,
+        [SCOPE_FIELD]: scope,
+        ...(e.group ? { [GROUP_FIELD]: e.group } : {}),
+      },
     };
   });
 

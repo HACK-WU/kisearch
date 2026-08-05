@@ -11,14 +11,50 @@
 import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
-import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { vectorSearch, vectorListTags, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
+import { getRelationMap } from './lib/relation-map.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
+
+/**
+ * tag 优先级：默认搜全部时，ki-search（内容）优先，其次 ki-relation / ki-path
+ * 路径解析辅助向量，其余自定义 tag 垫底。
+ */
+const TAG_PRIORITY = ['ki-search', 'ki-relation', 'ki-path'];
+
+function tagPriority(tag: string): number {
+  const idx = TAG_PRIORITY.indexOf(tag);
+  return idx === -1 ? TAG_PRIORITY.length : idx;
+}
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
+/**
+ * 判定 content 是否为全文（前缀推断兜底）。
+ *
+ * 兜底契约：仅用于"未命中 relations-cache 反查"的数据（ki store / bulk-store
+ * 等只写向量层、不写 relations-cache 的数据）。content 纯化后摘要类写入方不再
+ * 加 `[摘要]` 前缀，因此兜底恒为 true（用户直传原文）；旧数据以 `[摘要]` 开头
+ * 时判定为摘要（false）。
+ */
+export function isFullTextContent(content: string): boolean {
+  return !content.startsWith('[摘要]');
+}
+
+/** 搜索结果：附带 memoryId 反查的原文定位信息 */
+export interface SearchHit extends VectorSearchResult {
+  /** 所属 Group 路径（relations-cache 反查，可能缺失） */
+  group?: string;
+  /** 原文全文（relations-cache 的 hot_relation.text，可能缺失） */
+  relation?: string;
+  /** 当前内容所在 Group 的索引关键词（group 级 keywords，可能缺失） */
+  keywords?: string[];
+  /** content 是否为全文（仅 ki-search 结果计算；true=可作原文引用，false=AI 摘要） */
+  isFullText?: boolean;
+}
+
 export type SearchResult =
-  | { ok: true; scope: string; results: VectorSearchResult[] }
+  | { ok: true; scope: string; results: SearchHit[] }
   | { ok: false; error: string; degraded?: boolean };
 
 export async function executeSearch(params: {
@@ -43,12 +79,54 @@ export async function executeSearch(params: {
       };
     }
 
-    const results = await vectorSearch({
-      scope,
-      query: params.query,
-      limit: params.limit ?? 10,
-      threshold: params.threshold,
-      tags: params.tags ?? 'ki-search',
+    // 显式传 tags → 单次查询（多 tag OR，复用 vectorSearch 的 buildScopeTagFilter）。
+    // 不传 tags（默认搜全部）→ 按 tag 分查：每个 tag 最多取 limit 条（组内按 score 降序），
+    // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
+    let raw: VectorSearchResult[];
+    if (params.tags) {
+      raw = await vectorSearch({
+        scope,
+        query: params.query,
+        limit: params.limit ?? 10,
+        threshold: params.threshold,
+        tags: params.tags,
+      });
+    } else {
+      const { tags } = await vectorListTags({ scope });
+      const perTag: { priority: number; hits: VectorSearchResult[] }[] = [];
+      for (const t of tags) {
+        const hits = await vectorSearch({
+          scope,
+          query: params.query,
+          limit: params.limit ?? 10,
+          threshold: params.threshold,
+          tags: t.tag,
+        });
+        if (hits.length > 0) perTag.push({ priority: tagPriority(t.tag), hits });
+      }
+      perTag.sort((a, b) => a.priority - b.priority);
+      raw = perTag.flatMap((p) => p.hits);
+    }
+
+    // 按 memoryId 反查 relations-cache：命中附加 group / relation / keywords 定位原文
+    // （getRelationMap 带 TTL+mtime 缓存：首次构建 O(N)，后续 O(1)）
+    // isFullText 仅对 ki-search tag 计算：
+    //   - 命中反查 → 读 rel.isFullText（缺失默认 false=摘要，兼容旧数据）
+    //   - 未命中（ki store / bulk-store 只写向量层）→ 前缀推断兜底 isFullTextContent
+    //     （content 纯化后无 [摘要] 前缀 → 兜底恒为 true，符合"用户直传原文"语义）
+    const map = getRelationMap(scope);
+    const results: SearchHit[] = raw.map((r) => {
+      const hit: SearchHit = { ...r };
+      const meta = map.get(r.memoryId);
+      if (meta) {
+        hit.group = meta.group;
+        hit.relation = meta.relation;
+        hit.keywords = meta.keywords;
+      }
+      if (r.tag === 'ki-search') {
+        hit.isFullText = meta ? (meta.isFullText ?? false) : isFullTextContent(r.content);
+      }
+      return hit;
     });
 
     return { ok: true, scope, results };
@@ -69,7 +147,7 @@ program
   .requiredOption('--query <query>', '自然语言查询文本')
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
-  .option('--tags <tags>', '过滤标签（默认 ki-search）', 'ki-search')
+  .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
   .action(async (opts) => {
     // NEG-02：非法数值显式警告并回退（避免 NaN 静默丢光结果）
     const parsedThreshold = parseFloatArg(opts.threshold, undefined, '--threshold');

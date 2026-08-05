@@ -216,11 +216,14 @@ function upsertRelation(
       useCount: 0,
       lastUsedTime: null,
       isImported: true,
+      // ai-results 的 summary 是摘要（非全文），rebuild/search 依赖此标记
+      isFullText: false,
     };
     groupData.hot_relations.push(rel);
   } else {
     // 已存在：刷新为导入态，不做评分回退（与 import-kb 行为一致）
     rel.isImported = true;
+    rel.isFullText = false;
   }
   // 持久化真实 docId（zvec 中删除向量的唯一钥匙）：供后续 diff → 增量 modify/delete 关联旧向量
   // 与 incremental.upsertRelation 对称；向量化失败时 memoryId 为 null，保留旧值不覆盖
@@ -570,16 +573,17 @@ export async function handleImport(args: HandleImportArgs): Promise<ImportResult
 
     // ki-relation 向量
     pathEntries.push({
-      text: buildRelationContent(relationText, groupPath, keywords),
+      text: buildRelationContent(relationText, groupPath),
       tag: 'ki-relation',
       scope: args.scope,
+      group: groupPath,
     });
   }
 
-  // ki-path 向量（每个 Group 一条，合并关键词）
-  for (const [groupPath, kwSet] of groupKeywordsMap) {
+  // ki-path 向量（每个 Group 一条）
+  for (const [groupPath] of groupKeywordsMap) {
     pathEntries.push({
-      text: buildGroupPathContent(groupPath, [...kwSet]),
+      text: buildGroupPathContent(groupPath),
       tag: 'ki-path',
       scope: args.scope,
     });

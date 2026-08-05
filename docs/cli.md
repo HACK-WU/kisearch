@@ -521,7 +521,7 @@ ki search --query "<自然语言查询>" [--scope <scope>] [--limit <n>] [--thre
 | `--scope <scope>` | 项目隔离标识 | `default` |
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
-| `--tags <tags>` | 过滤标签，逗号分隔多值 | `ki-search` |
+| `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
 
 **示例：**
 
@@ -529,16 +529,39 @@ ki search --query "<自然语言查询>" [--scope <scope>] [--limit <n>] [--thre
 ki search --query "仪表盘配置" --scope monitor
 ```
 
-输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常）：
+输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常；`content` 为向量层存储文本，`isFullText=false` 时仅为摘要，非原文全文）：
+
 ```json
 {
   "ok": true,
   "scope": "monitor",
   "results": [
-    { "memoryId": "…", "content": "…", "score": 0.0325, "tag": "ki-search" }
+    {
+      "memoryId": "6271ebe0…",
+      "content": "本文件面向“钉钉通知渠道”的集成与使用…",
+      "score": 0.0327,
+      "tag": "ki-search",
+      "group": "BKMonitorWiki/告警系统设计/通知渠道管理",
+      "relation": "钉钉集成",
+      "keywords": ["钉钉", "通知渠道"],
+      "isFullText": false
+    }
   ]
 }
 ```
+
+**定位与全文判定字段**：`content` 是向量层存储文本（纯化后不再带 `[摘要]/[关键词]/[路径]` 前缀，关键词经 vector-client 底层自动拼接）。`isFullText=false` 时仅为摘要，无法直接作原文引用，因此每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
+
+| 字段 | 含义 |
+|------|------|
+| `group` | 该记忆所属 Group 路径（定位到模块） |
+| `relation` | 原文全文（`hot_relation.text`，非摘要） |
+| `keywords` | 当前内容所在 Group 的索引关键词（`groups[path].keywords`） |
+| `isFullText` | content 是否为全文。**仅 `ki-search` tag 的结果计算**：命中反查读 `rel.isFullText`（缺失默认 `false`=摘要）；未命中（如 `ki store` 数据只写向量层）按前缀推断兜底（纯化后无 `[摘要]` 前缀 → 恒为 `true`）。`false` = AI 摘要（`scan-kb import` / 增量 import 写入），需按 `group`/`relation` 定位原文；`true` = 原文全文（`sync-relation` 的 module-info、`import-kb`、`ki store` 输入） |
+
+反查使用**内存缓存**：首次构建 `Map<memoryId, …>` 后复用，文件 mtime/size 变化或 10 分钟 TTL 过期才重建，`ki search` 连续调用无额外 IO 开销。
+
+> `restore --rebuild-vector` 重建的内容向量与 `scan-kb import` 采用相同的 content 纯化格式（index.json 原始值 + 关系名经 `keywords` 参数传递）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。`isFullText` 标记独立存在于 relations-cache 的 `hot_relation`（rebuild 不读取该标记，仅反映导入来源语义；标记与重建内容可能不一致，属已知 trade-off）。
 
 **关于相关性**：hybrid 检索 = 向量语义 + 全文（BM25）两路融合。头部结果由向量语义主导（通常高度相关）；当查询含宽泛词（如"配置"、"API"）时，全文路可能召回较多低分边缘结果——这是混合检索"召回广"的设计特性，非数据异常。若需收紧，用 `--threshold` 过滤低分命中：
 

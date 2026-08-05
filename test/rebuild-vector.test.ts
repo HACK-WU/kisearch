@@ -34,11 +34,11 @@ function makeScopeDir(scopeDir: string): void {
     JSON.stringify({
       groups: {
         BKMonitorWiki: {
-          hot_relations: [{ text: '快速开始', memoryId: 'old_1' }],
+          hot_relations: [{ text: '快速开始', memoryId: 'old_1', sourcePath: '快速开始.md' }],
           keywords: ['蓝鲸'],
         },
         'BKMonitorWiki/用户界面设计': {
-          hot_relations: [{ text: '按钮', memoryId: 'old_2' }],
+          hot_relations: [{ text: '按钮', memoryId: 'old_2', sourcePath: '用户界面设计/按钮.md' }],
           keywords: ['UI'],
         },
       },
@@ -81,11 +81,20 @@ describe('A. collectContentEntries —— Group 树 index.json 收集', () => {
     assert.strictEqual(entries.length, 2);
     assert.ok(entries.every((e) => e.tags === 'ki-search'));
     const byName = Object.fromEntries(entries.map((e) => [e.relationName, e]));
-    assert.strictEqual(byName['快速开始'].text, '快速开始描述');
-    assert.strictEqual(byName['快速开始'].keywords?.[0], '快速开始');
     assert.strictEqual(byName['快速开始'].groupPath, 'BKMonitorWiki');
     assert.strictEqual(byName['按钮'].groupPath, 'BKMonitorWiki/用户界面设计');
     assert.ok(entries.every((e) => !e.text.includes('version')));
+  });
+
+  it('content 纯化：text 取 index.json 原始值，关系名经 keywords 传递', () => {
+    const scopeDir = fs.mkdtempSync(path.join(tmpRoot, 'collect-format-'));
+    makeScopeDir(scopeDir);
+    const entries = collectContentEntries(scopeDir);
+
+    const byName = Object.fromEntries(entries.map((e) => [e.relationName, e]));
+    const quick = byName['快速开始'];
+    assert.strictEqual(quick.text, '快速开始描述', 'text 应为 index.json 原始值，无 [摘要]/[路径] 前缀');
+    assert.deepStrictEqual(quick.keywords, ['快速开始'], '关系名经 keywords 传给 vector-client');
   });
 
   it('scope 目录不存在 → 返回空数组', () => {
@@ -116,10 +125,10 @@ describe('B. collectPathRelationEntries —— relation/path 向量条目', () =
     assert.ok(pathEntries.every((e) => e.tags === 'ki-path'));
   });
 
-  it('relation 向量文本包含关系名与 Group 路径', () => {
+  it('relation 向量文本只含关系名，Group 归属走结构化字段', () => {
     const { relationEntries } = collectPathRelationEntries(groups);
-    assert.match(relationEntries[0].text, /快速开始/);
-    assert.match(relationEntries[0].text, /BKMonitorWiki/);
+    assert.strictEqual(relationEntries[0].text, '快速开始', 'content 不含 Group 路径，避免误匹配');
+    assert.strictEqual(relationEntries[0].group, 'BKMonitorWiki', 'Group 归属经 group 字段传递');
     const pathText = collectPathRelationEntries(groups).pathEntries[0].text;
     assert.match(pathText, /BKMonitorWiki/);
   });

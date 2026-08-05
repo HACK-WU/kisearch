@@ -37,6 +37,8 @@ export interface RebuildVectorEntry {
   groupPath?: string;
   /** 内容向量专用：关系名（index.json 键） */
   relationName?: string;
+  /** ki-relation 专用：结构化 Group 字段（不再拼入 content） */
+  group?: string;
 }
 
 export interface RebuildVectorStats {
@@ -66,6 +68,12 @@ interface CacheGroup {
 /**
  * 收集内容向量条目：遍历 scope 数据目录下全部 index.json。
  * 排除 version/updatedAt 元数据键；groupPath 为相对 scope 数据目录的 Group 路径。
+ *
+ * content 纯化契约：text 直接取 index.json 的值（传入什么就是什么，不再拼接
+ * `[摘要]/[关键词]/[路径]` 前缀）；关系名经 keywords 参数传给 vector-client
+ * （底层自动追加 `\n\n[关键词] xxx`，保证 BM25 全文召回不降级）。
+ *
+ * @param scopeDir scope 数据目录
  */
 export function collectContentEntries(scopeDir: string): RebuildVectorEntry[] {
   const entries: RebuildVectorEntry[] = [];
@@ -121,18 +129,16 @@ export function collectPathRelationEntries(
   const pathEntries: RebuildVectorEntry[] = [];
 
   for (const [groupPath, g] of Object.entries(groups)) {
-    const keywords = g.keywords ?? [];
     for (const rel of g.hot_relations ?? []) {
       relationEntries.push({
-        text: buildRelationContent(rel.text, groupPath, keywords),
+        text: buildRelationContent(rel.text, groupPath),
         tags: RELATION_TAG,
-        keywords,
+        group: groupPath,
       });
     }
     pathEntries.push({
-      text: buildGroupPathContent(groupPath, keywords),
+      text: buildGroupPathContent(groupPath),
       tags: PATH_TAG,
-      keywords,
     });
   }
 

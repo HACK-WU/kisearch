@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { walWrite } from './wal.js';
 import { getKbDir, getGroupIndexPath, getRelationsCachePath, validateScope, migrateGroupIndex } from './scope.js';
-import { loadConfig } from './config.js';
+import { loadConfig, getScopeMode } from './config.js';
 import { CURRENT_DATA_VERSION, TEMPLATE_DIR } from './constants.js';
 
 // ─── JSON 读写 ───
@@ -167,16 +167,17 @@ function migrateRelationsCacheKeys(scope: string): void {
 /**
  * 确保 kb/{scope}/ 目录存在，不存在则从 _template 初始化
  *
- * 校验规则：如果 ki 配置文件存在但 scope 未在 scopes 中注册，
- * 且数据目录不存在，拒绝自动创建空目录并给出修复建议。
+ * 校验规则：仅 scopeMode=strict 时强制 scope 注册白名单；
+ * scopeMode=default 时任意 scope 放行（与 resolveScope 语义一致，
+ * 未注册但有数据的 scope 不会被误拒，全新 scope 自动从模板初始化）。
  */
 export function ensureScopeDir(scope: string): void {
   validateScope(scope);
   const kbDir = getKbDir(scope);
 
-  // Scope 配置校验：配置文件存在但 scope 未注册时，拒绝并给出修复建议
+  // Scope 配置校验：仅 strict 模式下，配置文件存在但 scope 未注册时拒绝
   const config = loadConfig();
-  if (config._configPath && !(scope in config.scopes)) {
+  if (getScopeMode(config) === 'strict' && config._configPath && !(scope in config.scopes)) {
     const available = Object.keys(config.scopes);
     const lines: string[] = [
       `scope "${scope}" 未在 ki 配置中注册。`,

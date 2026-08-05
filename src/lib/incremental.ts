@@ -157,10 +157,13 @@ function upsertRelation(
       useCount: 0,
       lastUsedTime: null,
       isImported: true,
+      // 增量导入同样基于 ai-results 的 summary（摘要，非全文）
+      isFullText: false,
     };
     grp.hot_relations.push(rel);
   } else {
     rel.isImported = true;
+    rel.isFullText = false;
   }
   rel.memoryId = memoryId;
   rel.sourcePath = sourcePath;
@@ -284,7 +287,7 @@ export async function handleIncremental(args: HandleIncrementalArgs): Promise<In
     }
     const relationText = deriveRelationText(e.path);
     // 同时删除对应的 ki-relation 向量
-    const relContent = buildRelationContent(relationText, e.groupPath, e.keywords || []);
+    const relContent = buildRelationContent(relationText, e.groupPath);
     await deletePathVector(relContent, 'ki-relation', args.scope);
     const removedFromCache = removeFromCache(relationsCache, e.path);
     if (!removedFromCache) {
@@ -372,15 +375,16 @@ export async function handleIncremental(args: HandleIncrementalArgs): Promise<In
     for (const kw of keywords) kwSet.add(String(kw).trim());
 
     pathEntries.push({
-      text: buildRelationContent(relationText, e.groupPath, keywords),
+      text: buildRelationContent(relationText, e.groupPath),
       tag: 'ki-relation',
       scope: args.scope,
+      group: e.groupPath,
     });
   }
 
-  for (const [groupPath, kwSet] of groupKeywordsMap) {
+  for (const [groupPath] of groupKeywordsMap) {
     pathEntries.push({
-      text: buildGroupPathContent(groupPath, [...kwSet]),
+      text: buildGroupPathContent(groupPath),
       tag: 'ki-path',
       scope: args.scope,
     });

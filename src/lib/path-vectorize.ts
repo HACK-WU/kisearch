@@ -22,6 +22,8 @@ export interface PathVectorizeEntry {
   tag: 'ki-path' | 'ki-relation';
   /** scope */
   scope: string;
+  /** 归属 Group 路径（ki-relation 条目的结构化字段，不再拼入 content） */
+  group?: string;
 }
 
 export interface PathVectorizeOptions {
@@ -40,38 +42,27 @@ export interface PathVectorizeResult {
 /**
  * 构建 Group 路径向量文本
  *
- * 格式：路径层级用空格分隔（含根节点） | 关键词
- * @example buildGroupPathContent("BK-Monitor-Wiki/告警系统设计/告警收敛机制", ["告警收敛","降噪"])
- *          → "BK-Monitor-Wiki 告警系统设计 告警收敛机制 | 告警收敛,降噪"
+ * 格式：路径层级用空格分隔（含根节点）。
+ * 关键词不再拼入 content（content 纯化契约：传入什么就是什么），
+ * 避免 relation/path 辅助向量被 group 关键词列表撑大、在混合检索中虚高。
+ * @example buildGroupPathContent("BK-Monitor-Wiki/告警系统设计/告警收敛机制")
+ *          → "BK-Monitor-Wiki 告警系统设计 告警收敛机制"
  */
-export function buildGroupPathContent(
-  groupPath: string,
-  keywords: string[]
-): string {
+export function buildGroupPathContent(groupPath: string): string {
   // 保留根节点，整条路径用空格分隔，确保 extractPathFromContent 能还原完整路径
-  const pathWords = groupPath.split('/').filter(Boolean).join(' ');
-  const kw = keywords.filter(Boolean).join(',');
-  return kw ? `${pathWords} | ${kw}` : pathWords;
+  return groupPath.split('/').filter(Boolean).join(' ');
 }
 
 /**
  * 构建 Relation 向量文本
  *
- * 格式：Relation 名称 | Group: 路径层级（空格分隔，含根节点）| 关键词
- * @example buildRelationContent("告警收敛服务", "BK-Monitor-Wiki/告警系统设计/告警处理服务", ["收敛","去重"])
- *          → "告警收敛服务 | Group: BK-Monitor-Wiki 告警系统设计 告警处理服务 | 收敛,去重"
+ * 只含 Relation 名称。Group 归属不再拼入 content（避免 Group 关键词参与
+ * BM25/语义匹配造成误匹配），改经 PathVectorizeEntry.group 结构化字段存储。
+ * @example buildRelationContent("告警收敛服务", "BK-Monitor-Wiki/告警系统设计/告警处理服务")
+ *          → "告警收敛服务"
  */
-export function buildRelationContent(
-  relationText: string,
-  groupPath: string,
-  keywords: string[]
-): string {
-  // 保留根节点，保证路径可还原
-  const pathWords = groupPath.split('/').filter(Boolean).join(' ');
-  const kw = keywords.filter(Boolean).join(',');
-  const groupPart = pathWords ? ` | Group: ${pathWords}` : '';
-  const kwPart = kw ? ` | ${kw}` : '';
-  return `${relationText}${groupPart}${kwPart}`;
+export function buildRelationContent(relationText: string, _groupPath?: string): string {
+  return relationText;
 }
 
 // ─── 批量存储 ───
@@ -102,7 +93,7 @@ export async function bulkStorePaths(
     try {
       const result = await vectorBulkStore({
         scope,
-        entries: scopeEntries.map((e) => ({ text: e.text, tags: e.tag })),
+        entries: scopeEntries.map((e) => ({ text: e.text, tags: e.tag, group: e.group })),
       });
       for (const item of result.results) {
         const entry = scopeEntries[item.index];
@@ -138,6 +129,7 @@ export async function storeOnePathAsync(
       scope: entry.scope,
       text: entry.text,
       tags: entry.tag,
+      group: entry.group,
     });
     return { ok: true, memoryId: docId };
   } catch (err) {

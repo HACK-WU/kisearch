@@ -61,9 +61,9 @@ await t('vectorSearch: scope 隔离（B 查不到 A 的文档）', async () => {
   assert.equal(rs.length, 0, `scopeB 应为空, 实际 ${rs.length} 条`);
 });
 
-await t('vectorSearch: 不传 tags 默认 ki-search', async () => {
+await t('vectorSearch: 不传 tags 搜索全部 tag（不过滤）', async () => {
   const rs = await vectorSearch({ scope: SCOPE_A, query: '登录' });
-  assert.ok(rs.length > 0);
+  assert.ok(rs.length > 0, '不传 tags 应返回该 scope 全部 tag 的命中');
 });
 
 await t('vectorBulkStore: 批量写入成功计数', async () => {

@@ -10,7 +10,7 @@
  *   - 生命周期：close / destroy / isHealthy / isLocked / isOpen / probe
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isAbsolute } from 'node:path';
 import {
@@ -152,6 +152,17 @@ export class ZvecEngine {
     assertAbsolutePath(dbPath);
     if (!existsSync(dbPath)) {
       return { exists: false, locked: false, healthy: false, error: 'NOT_FOUND' };
+    }
+    // 空目录预检：目录存在但无任何集合文件 → 视为不存在（NOT_FOUND）。
+    // 背景：zvec 原生 ZVecOpen 对空目录会挂起不返回，若直接 open 将触发
+    // 超时并被误判为 locked（实测约 5s 返回 locked:true），导致「空库」永远
+    // 无法走 create 自愈路径。读取失败时保守跳过预检，回退原 open 逻辑。
+    try {
+      if (readdirSync(dbPath).length === 0) {
+        return { exists: false, locked: false, healthy: false, error: 'NOT_FOUND' };
+      }
+    } catch {
+      /* 目录不可读：回退原 probe 路径 */
     }
 
     const probeProxy = new ZvecEngineProxy();

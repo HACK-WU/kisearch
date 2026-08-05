@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -200,6 +200,13 @@ test('S-06: create → upsert → 4 类检索 → close → reopen → probe', a
 
 test('S-06: probe 不存在 → NOT_FOUND', async () => {
   const dbPath = join(tmpdir(), 'zvec-probe-nonexistent-' + Date.now());
+  const result = await ZvecEngine.probe(dbPath);
+  assert.deepEqual(result, { exists: false, locked: false, healthy: false, error: 'NOT_FOUND' });
+});
+
+test('S-06: probe 空目录 → NOT_FOUND（不误判 locked）', async () => {
+  const dbPath = join(tmpdir(), 'zvec-probe-empty-' + Date.now());
+  mkdirSync(dbPath, { recursive: true });
   const result = await ZvecEngine.probe(dbPath);
   assert.deepEqual(result, { exists: false, locked: false, healthy: false, error: 'NOT_FOUND' });
 });

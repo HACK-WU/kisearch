@@ -27,6 +27,13 @@ export interface Relation {
   memoryId?: string;
   /** S-04+ 新增：原始文件相对路径（meta.sourceDir 的相对 posix 路径），用于 diff 关联 memoryId */
   sourcePath?: string;
+  /**
+   * 该 relation 的向量 content 是否为全文。
+   * - true  = 全文（sync-relation 的 module-info、import-kb 的文件全文）
+   * - false = AI 摘要（scan-kb import / 增量 import 的 ai-results summary）
+   * 缺失默认按非全文处理（兼容旧数据）；rebuild-vector 与 search 依赖此标记。
+   */
+  isFullText?: boolean;
 }
 
 // ─── 评分计算 ───

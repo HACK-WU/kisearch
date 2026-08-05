@@ -222,6 +222,8 @@ function syncSingleRelation(
       now,
       config.halfLifeHours
     );
+    // module-info 是全文，重复同步时补全标记（兼容旧数据缺字段）
+    existingRel.isFullText = true;
     // 重新按 score 降序
     groupData.hot_relations.sort((a, b) => b.score - a.score);
   } else {
@@ -233,6 +235,8 @@ function syncSingleRelation(
       useCount: 0,
       lastUsedTime: null,
       isImported: false,
+      // module-info 为原文全文（非 AI 摘要）
+      isFullText: true,
     };
 
     // 5. 检查是否需要淘汰
@@ -455,12 +459,12 @@ async function vectorWriteBack(params: {
       return { stored: false, reason: avail.reason || '向量服务不可用' };
     }
 
-    const relText = buildRelationContent(relation, group, keywordList);
+    const relText = buildRelationContent(relation, group);
     // 一次 embed 批量 2 条：ki-relation 路径向量 + ki-search 语义向量
     const result = await vectorBulkStore({
       scope,
       entries: [
-        { text: relText, tags: 'ki-relation' },
+        { text: relText, tags: 'ki-relation', group },
         { text: moduleInfo, tags: 'ki-search', keywords: keywordList },
       ],
     });
