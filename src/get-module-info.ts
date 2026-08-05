@@ -54,7 +54,7 @@ export interface GetModuleInfoParams {
 }
 
 export type GetModuleInfoResult =
-  | { ok: true; content: string; hint?: string }
+  | { ok: true; scope: string; content: string; hint?: string }
   | { ok: false; error: string; hint?: string };
 
 export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
@@ -157,6 +157,7 @@ export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise
 
     return {
       ok: true,
+      scope,
       content: markdown,
       ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
     };
@@ -184,9 +185,10 @@ program
     });
     if (result.ok) {
       if (result.hint) console.error(result.hint);
-      console.log(result.content);
+      // 文本展示输出：开头标注 scope，保证输出内容自解释
+      console.log(`[scope: ${result.scope}]\n${result.content}`);
     } else {
-      output({ ok: false, error: result.error, ...(result.hint ? { hint: result.hint } : {}) });
+      output({ ok: false, scope: opts.scope, error: result.error, ...(result.hint ? { hint: result.hint } : {}) });
     }
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK）
     await closeEngine();

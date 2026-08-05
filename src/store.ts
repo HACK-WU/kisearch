@@ -16,7 +16,7 @@ import { vectorStore, ensureVectorAvailable, closeEngine } from './lib/vector-cl
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
 export type StoreResult =
-  | { ok: true; docId: string }
+  | { ok: true; scope: string; docId: string }
   | { ok: false; error: string };
 
 export async function executeStore(params: {
@@ -43,7 +43,7 @@ export async function executeStore(params: {
       tags: params.tags ?? 'ki-search',
     });
 
-    return { ok: true, docId: result.docId };
+    return { ok: true, scope, docId: result.docId };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

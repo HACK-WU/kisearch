@@ -612,7 +612,7 @@ export interface QueryGroupParams {
 }
 
 export type QueryGroupResult =
-  | { ok: true; output: string }
+  | { ok: true; scope: string; output: string }
   | { ok: false; error: string };
 
 export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
@@ -708,7 +708,7 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
         }
       }
 
-      return { ok: true, output: results.join('\n\n') };
+      return { ok: true, scope, output: results.join('\n\n') };
     }
 
     // 完整展示：多分区索引 + 可选完整树 + 统计
@@ -746,7 +746,7 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
     lines.push(`- 常温区索引: ${stats.warm}`);
     lines.push(`- 冷区索引: ${stats.cold}`);
 
-    return { ok: true, output: lines.join('\n') };
+    return { ok: true, scope, output: lines.join('\n') };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -769,9 +769,10 @@ program
   .action(async (opts) => {
     const result = await executeQueryGroup(parseCliOpts(opts));
     if (result.ok) {
-      console.log(result.output);
+      // 文本展示输出：开头标注 scope，保证输出内容自解释
+      console.log(`[scope: ${result.scope}]\n${result.output}`);
     } else {
-      output({ ok: false, error: result.error });
+      output({ ok: false, scope: opts.scope, error: result.error });
     }
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出
     await closeEngine();

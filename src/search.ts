@@ -18,7 +18,7 @@ import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
 export type SearchResult =
-  | { ok: true; results: VectorSearchResult[] }
+  | { ok: true; scope: string; results: VectorSearchResult[] }
   | { ok: false; error: string; degraded?: boolean };
 
 export async function executeSearch(params: {
@@ -51,7 +51,7 @@ export async function executeSearch(params: {
       tags: params.tags ?? 'ki-search',
     });
 
-    return { ok: true, results };
+    return { ok: true, scope, results };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

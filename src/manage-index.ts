@@ -76,7 +76,7 @@ export interface ManageCreateParams {
 }
 
 export type ManageCreateResult =
-  | { ok: true; path: string; hint?: string }
+  | { ok: true; scope: string; path: string; hint?: string }
   | { ok: false; error: string };
 
 export async function executeManageCreate(params: ManageCreateParams): Promise<ManageCreateResult> {
@@ -111,7 +111,7 @@ export async function executeManageCreate(params: ManageCreateParams): Promise<M
           }
           parentNode[name] = {};
           writeJson(indexPath, data as unknown as Record<string, unknown>);
-          return { ok: true, path: `${resolvedParent}/${name}`, ...(resolved.hint ? { hint: resolved.hint } : {}) };
+          return { ok: true, scope, path: `${resolvedParent}/${name}`, ...(resolved.hint ? { hint: resolved.hint } : {}) };
         }
       }
       const hintParts: string[] = [`父节点路径不存在：${parentPath || '(顶层)'}`];
@@ -130,7 +130,7 @@ export async function executeManageCreate(params: ManageCreateParams): Promise<M
 
     parentNode[name] = {};
     writeJson(indexPath, data as unknown as Record<string, unknown>);
-    return { ok: true, path: parentPath ? `${parentPath}/${name}` : name };
+    return { ok: true, scope, path: parentPath ? `${parentPath}/${name}` : name };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -291,7 +291,7 @@ export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams):
       writeJson(cachePath, cache as unknown as Record<string, unknown>);
     }
 
-    return { ok: true, path: fullPath, ...(hint ? { hint } : {}) };
+    return { ok: true, scope, path: fullPath, ...(hint ? { hint } : {}) };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -485,7 +485,7 @@ program
                 }
                 parentNode[name] = {};
                 writeJson(indexPath, data as unknown as Record<string, unknown>);
-                output({ ok: true, path: `${resolvedParent}/${name}`, hint: resolved.hint || undefined });
+                output({ ok: true, scope, path: `${resolvedParent}/${name}`, hint: resolved.hint || undefined });
                 break;
               }
             }
@@ -508,7 +508,7 @@ program
 
           parentNode[name] = {};
           writeJson(indexPath, data as unknown as Record<string, unknown>);
-          output({ ok: true, path: parentPath ? `${parentPath}/${name}` : name });
+          output({ ok: true, scope, path: parentPath ? `${parentPath}/${name}` : name });
           break;
         }
 
@@ -554,6 +554,7 @@ program
                 const cascade = await cascadeDeleteGroupData(scope, deletedPath);
                 output({
                   ok: true,
+                  scope,
                   path: deletedPath,
                   hint: resolved.hint || undefined,
                   cascade: {

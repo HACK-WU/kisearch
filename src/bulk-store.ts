@@ -24,7 +24,7 @@ import type { BulkStoreItemResult } from './lib/vector-client.js';
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
 export type BulkStoreResult =
-  | { ok: true; total: number; succeeded: number; failed: number; results: BulkStoreItemResult[] }
+  | { ok: true; scope: string; total: number; succeeded: number; failed: number; results: BulkStoreItemResult[] }
   | { ok: false; error: string };
 
 export async function executeBulkStore(params: {
@@ -74,7 +74,7 @@ export async function executeBulkStore(params: {
     }
 
     const result = await vectorBulkStore({ scope, entries });
-    return { ok: true, ...result };
+    return { ok: true, scope, ...result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

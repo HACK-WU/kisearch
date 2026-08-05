@@ -75,7 +75,7 @@ export interface DeleteRelationParams {
 }
 
 export type DeleteRelationOutcome =
-  | { ok: true; result: DeleteResult }
+  | { ok: true; scope: string; result: DeleteResult }
   | { ok: false; error: string };
 
 export async function executeDeleteRelation(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
@@ -166,7 +166,7 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
     writeJson(cachePath, cache);
 
     result.deleted = result.cacheRemoved;
-    return { ok: true, result };
+    return { ok: true, scope, result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -326,6 +326,7 @@ interface BatchDeleteItem {
 
 export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<{
   ok: boolean;
+  scope?: string;
   results: DeleteResult[];
   total: number;
   failed: number;
@@ -358,7 +359,7 @@ export async function executeBatchDelete(scope: string | undefined, items: Batch
     }
   }
 
-  return { ok: true, results, total: items.length, failed };
+  return { ok: true, scope, results, total: items.length, failed };
 }
 
 // ─── CLI ───

@@ -409,6 +409,7 @@ function syncBatch(
 
   output({
     ok: true,
+    scope,
     results,
     total: items.length,
     failed,
@@ -426,7 +427,7 @@ export interface SyncRelationParams {
 }
 
 export type SyncRelationResult =
-  | { ok: true; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; keywords_truncated?: number; keywords_warning?: string; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; scope: string; relation: string; keywords: string[]; invalid_keywords: string[]; evicted: string | null; keywords_truncated?: number; keywords_warning?: string; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
@@ -569,6 +570,7 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
 
     return {
       ok: true,
+      scope,
       ...result,
       ...(pathHint ? { hint: pathHint } : {}),
       vectorPending: false,

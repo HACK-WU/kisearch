@@ -94,6 +94,7 @@ interface FileEntry {
 
 interface ImportSummary {
   ok: true;
+  scope: string;
   root_name: string;
   groups_created: number;
   relations_imported: number;
@@ -481,6 +482,7 @@ program
       const keywordMap = loadKeywordMap(scanIndexFile);
       const summary: ImportSummary = {
         ok: true,
+        scope,
         root_name: rootName,
         groups_created: 0,
         relations_imported: 0,
