@@ -507,6 +507,56 @@ ki doc delete abc123 --scope my-project --yes
 
 ---
 
+## `search`
+
+语义检索知识库内容（**hybrid 混合检索**：向量语义 + 全文 BM25 两路召回，RRF 融合排序）。
+
+```bash
+ki search --query "<自然语言查询>" [--scope <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2]
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--query <query>` | 自然语言查询文本（**必填**） | - |
+| `--scope <scope>` | 项目隔离标识 | `default` |
+| `--limit <n>` | 返回条数上限 | `10` |
+| `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
+| `--tags <tags>` | 过滤标签，逗号分隔多值 | `ki-search` |
+
+**示例：**
+
+```bash
+ki search --query "仪表盘配置" --scope monitor
+```
+
+输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常）：
+```json
+{
+  "ok": true,
+  "scope": "monitor",
+  "results": [
+    { "memoryId": "…", "content": "…", "score": 0.0325, "tag": "ki-search" }
+  ]
+}
+```
+
+**关于相关性**：hybrid 检索 = 向量语义 + 全文（BM25）两路融合。头部结果由向量语义主导（通常高度相关）；当查询含宽泛词（如"配置"、"API"）时，全文路可能召回较多低分边缘结果——这是混合检索"召回广"的设计特性，非数据异常。若需收紧，用 `--threshold` 过滤低分命中：
+
+```bash
+ki search --query "仪表盘配置" --scope monitor --threshold 0.03
+```
+
+（实测保留 score ≥ 0.03 的高度相关命中、过滤边缘结果；阈值需按数据校准——RRF 融合分与 topk 相关。）
+
+**threshold 建议区间**：`0.02 ~ 0.03`。RRF 融合分（`rankConstant=60`）的理论上限约 **0.033**（向量 + 全文两路都排第 1 时），因此：
+- `0.03`：最严格，只留两路强命中的高度相关结果
+- `0.02`：宽松，额外保留单路强命中
+- **超过 0.033 会过滤掉所有结果**（空返回）
+
+> 结合 `ki tag list --scope <scope>` 发现可用标签，用 `--tags` 精确过滤。
+
+---
+
 ## `query-group`
 
 查询 Group 树、Relation 分区和关键词词云。
