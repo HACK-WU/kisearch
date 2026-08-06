@@ -119,17 +119,23 @@ program
   .name('search')
   .showHelpAfterError()
   .description('语义检索知识库内容')
-  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .requiredOption('--query <query>', '自然语言查询文本')
+  .argument('[query]', '自然语言查询文本（位置参数，REQ-12；--query 保留兼容）')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
+  .option('-q, --query <query>', '自然语言查询文本')
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
-  .action(async (opts) => {
+  .action(async (query: string | undefined, opts) => {
+    const finalQuery = query ?? opts.query;
+    if (!finalQuery) {
+      console.error('错误: 缺少查询文本。用法: ki search <query> 或 ki search --query <query>');
+      process.exit(1);
+    }
     // NEG-02：非法数值显式警告并回退（避免 NaN 静默丢光结果）
     const parsedThreshold = parseFloatArg(opts.threshold, undefined, '--threshold');
     const result = await executeSearch({
       scope: opts.scope,
-      query: opts.query,
+      query: finalQuery,
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       threshold: parsedThreshold,
       tags: opts.tags,

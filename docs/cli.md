@@ -2,6 +2,11 @@
 
 所有脚本都通过 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
+**CLI 简化约定（批次 4，REQ-11/12）**：
+- **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-o`(--output)、`-n`(--name)，覆盖所有常用/必填参数
+- **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 直接传位置参数；原 `--query`/`--text` option 保留兼容（两种写法均可，位置参数优先）
+- **超长内容警告（REQ-10）**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `scan-kb import --source`），不自动切分
+
 **配置优先级**：
 1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
 2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
@@ -28,7 +33,7 @@
 
 ```bash
 ki scan-kb import \
-  --scope <scope> \
+  -s <scope> \
   --source <dir> \
   --root-name <name> \
   [--chunk-size <chars>] \
@@ -37,7 +42,7 @@ ki scan-kb import \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--scope` | 是 | 项目隔离标识 |
+| `-s, --scope` | 是 | 项目隔离标识 |
 | `--source` | 是 | Markdown 目录绝对路径（仅 `--mode full` 时必填；`--mode incremental` 缺省复用 source 块） |
 | `--root-name` | 是（full）/ 否（incremental） | 根 Group 名 |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
@@ -46,7 +51,7 @@ ki scan-kb import \
 **示例：首次全量导入**
 
 ```bash
-ki scan-kb import --scope my-project --source /path/to/wiki --root-name wiki
+ki scan-kb import -s my-project --source /path/to/wiki --root-name wiki
 ```
 
 自动切分：大文件按段落边界（`\n\n > \n > 。 > ；`）优先切分，relation 命名为 `文件名-N`（如 `deploy-01`），sourcePath 为 `文件路径#N`（文件级 diff 前缀聚合键）。切分参数持久化到 source 块。
@@ -496,24 +501,26 @@ ki doc delete abc123 --scope my-project --yes
 语义检索知识库内容（**hybrid 混合检索**：向量语义 + 全文 BM25 两路召回，RRF 融合排序）。
 
 ```bash
-ki search --query "<自然语言查询>" [--scope <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2]
+ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2]
 ```
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--query <query>` | 自然语言查询文本（**必填**） | - |
-| `--scope <scope>` | 项目隔离标识 | `default` |
+| `<query>`（位置） | 自然语言查询文本（**必填**；`-q/--query` 等效，位置参数优先） | - |
+| `-s, --scope <scope>` | 项目隔离标识 | `default` |
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
 
+> 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
+
 **示例：**
 
 ```bash
-ki search --query "仪表盘配置" --scope monitor
+ki search "仪表盘配置" -s monitor
 ```
 
-输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常；`content` 为向量层存储文本，`isFullText=false` 时仅为摘要，非原文全文）：
+输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常；`content` 为向量层存储文本）：
 
 ```json
 {
@@ -753,17 +760,19 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 ```bash
 ki sync-relation \
-  --scope <scope> --group <group> \
-  --relation <text> --module-info <markdown>
+  -s <scope> -g <group> \
+  -r <text> --module-info <markdown>
 ```
+
+> **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `scan-kb import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
 **示例：写入单条知识**
 
 ```bash
 ki sync-relation \
-  --scope my-project \
-  --group "项目/API" \
-  --relation "用户登录接口" \
+  -s my-project \
+  -g "项目/API" \
+  -r "用户登录接口" \
   --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。"
 ```
 
@@ -791,13 +800,13 @@ ki sync-relation \
 
 ```bash
 ki sync-relation \
-  --scope <scope> --input <jsonFile>
+  -s <scope> -i <jsonFile>
 ```
 
 **示例：批量写入**
 
 ```bash
-ki sync-relation --scope my-project --input batch-input.json
+ki sync-relation -s my-project -i batch-input.json
 ```
 
 `batch-input.json` 格式：
@@ -919,7 +928,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
-| `ki_sync_relation` | 写 | 写入 Relation + 关键词 | `sync-relation` |
+| `ki_sync_relation` | 写 | 写入 Relation + 模块说明 | `sync-relation` |
 
 > **零破坏性约束**：MCP 工具集不含 delete/force 操作。Agent 只能创建和查询，无法删除任何数据。
 

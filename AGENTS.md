@@ -296,10 +296,32 @@ openclaw memory-pro stats
 - [x] **`diff.ts` realpath 越界**：macOS `/var` → `/private/var` 软链导致 `path.relative(repoRoot, source.dir)` 计算出 `../../…` 越界 pathspec，git diff 失败。修复：`sourceDirReal = fs.realpathSync(source.dir)` 统一
 - [x] **`backup.ts` 缺失 `backupScopeSnapshot`**：批次 2 重写 backup.ts 时误删该函数（`autoBackup` 与 `restore.ts` 均引用），运行时 `backupScopeSnapshot is not defined`，restore 快照还原 4 用例失败。已按历史版本恢复（tar.gz 打包 + 防碰撞 + 预检）
 
-### 待办（批次 4~5）
+### 批次 4 已完成（2026-08-06，REQ-10/11/12 CLI 简化）
 
-- [ ] **批次 4（CLI 简化 REQ-10/11/12）**：短别名（-s/-q/-t/-g/-r/-i/-o）、位置参数（`ki search "sas"`）、sync_relation 超长 module-info 警告（>1000 字符）
+- [x] **REQ-11 短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-o`(--output)、`-n`(--name)，覆盖 search/store/sync-relation/query-group/get-module-info/delete-relation/scan-kb(import/diff)/bulk-store/manage-index 的常用/必填参数
+- [x] **REQ-12 位置参数**：`ki search "sas"`、`ki store "内容"` 位置参数可用；`--query`/`--text` option 保留兼容（位置参数优先）；双通道均缺时明确报错退出
+- [x] **REQ-10 超长警告**：`sync-relation --module-info` >1000 字符输出警告（建议拆分或改用 `scan-kb import --source`），不自动切分
+- [x] **测试**：新增 `test/cli-aliases.test.ts`（21 用例：短别名帮助、位置参数消费、超长警告）；修正 error-handling 空 root-name 断言；31 文件全绿
+- [x] **docs**：cli.md 顶部新增"CLI 简化约定"，更新 search/sync-relation 章节为短别名 + 位置参数示例
+
+### 批次 4 code-review 修复（2026-08-07）
+
+- [x] **P1-1：`store.ts` 缺 text 校验缺失**：`ki store -s some-scope`（位置参数与 `-t` 均缺）原报晦涩错误 `Cannot read properties of undefined (reading 'length')`，且与 search 的 `if (!finalQuery)` 校验不一致。修复：补 `if (!finalText)` 校验，报"缺少存储文本"并 exit(1)。测试补 1 用例（cli-aliases.test.ts 22/22 全绿）
+- [x] 复查确认：`setup.ts` 的 `-t, --target` 与 `store` 的 `-t, --text` 不同命令域，REQ-11 避让要求正确；MCP 层经 zod schema 校验必填，不受 CLI 校验影响
+
+### 后续事项（待办）
+
+**批次 4 收尾（未提交 git）**
+- [ ] 批次 4 全部改动尚未提交 git（含 store 缺 text 校验修复），待用户确认后提交
+
+**P2 建议（低优先，随批次推进处理）**
+- [ ] `query-group` 的 `-g` 短别名语义是 `--groups`（复数），REQ-11 定义为 `--group`（单数）——不同命令域语义接近，docs 需注明
+- [ ] `setup` 的 `-n, --names` 与 `manage-index` 的 `-n, --name` 语义不同（names/name），属既有行为，不影响
+
+**批次 5（配套 REQ-14/15）**
 - [ ] **批次 5（配套 REQ-14/15）**：docs 剩余 13 个（build-kb/workflows/manage-index/architecture/verify-index/memory-system-dataflow/tags-design 等整篇旧流程）+ skills 5 个文档同步（拆独立任务）
+
+**技术设计遗留**
 - [ ] 技术设计遗留：P-5（grep 清点 `scan-index|getScanIndexPath` 消费方——已随批次 3 清理，待复核）、P-6（FTS 规模量化实测）、P-7（超大文件上限数值确认：2MB / 500 chunk）
 - [ ] **重建向量库后补验路径向量**：备份 + 删除 `/root/.ki/vector` 让引擎 create 自愈，重跑直导 + 增量全链路（用 timeout 包裹）
 

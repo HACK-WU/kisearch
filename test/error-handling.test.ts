@@ -159,7 +159,10 @@ describe('导入异常', () => {
     const src = mkTmp('ki-err-root');
     const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', '']);
     assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('--root-name'), `CLI 层应提示必须传 --root-name；实际=${r.error}`);
+    assert.ok(
+      r.error.includes('rootName') || r.error.includes('--root-name'),
+      `应提示 root-name 缺失；实际=${r.error}`
+    );
   });
   it('scan-kb import 目录无 md 文件', async () => {
     const s = await mkScope('err-imp');

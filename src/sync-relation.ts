@@ -485,12 +485,19 @@ program
   .name('sync-relation')
   .showHelpAfterError()
   .description('关系回写：写入缓存 + 本地 KB')
-  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('--group <group>', 'Group 路径（单条模式）')
-  .option('--relation <relation>', 'Relation 描述文本（单条模式）')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
+  .option('-g, --group <group>', 'Group 路径（单条模式）')
+  .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
-  .option('--input <input>', 'JSON 输入文件路径（批量模式）')
+  .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')
   .action(async (opts) => {
+    // REQ-10：超长 module-info（>1000 字符）输出警告，不自动切分（保持单条关系语义）
+    if (opts.moduleInfo && opts.moduleInfo.length > 1000) {
+      console.error(
+        `警告: --module-info 长度 ${opts.moduleInfo.length} 字符（>1000）。` +
+        `超长内容可能导致向量质量稀释；建议拆分多条写入，或改用 "scan-kb import --source <dir>" 自动切分导入。`
+      );
+    }
     // 批量模式
     if (opts.input) {
       try {

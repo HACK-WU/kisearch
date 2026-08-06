@@ -85,8 +85,8 @@ program
   .name('bulk-store')
   .showHelpAfterError()
   .description('批量存储文本到向量索引')
-  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .requiredOption('--input <file>', '批量数据 JSON 文件路径')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
+  .requiredOption('-i, --input <file>', '批量数据 JSON 文件路径')
   .action(async (opts) => {
     const result = await executeBulkStore({
       scope: opts.scope,

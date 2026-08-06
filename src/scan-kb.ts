@@ -40,7 +40,7 @@ program
 program
   .command('import')
   .description('导入：--source 直导外部 Wiki（无 AI，自动切分；full / incremental）')
-  .requiredOption('--scope <scope>', '项目隔离标识')
+  .requiredOption('-s, --scope <scope>', '项目隔离标识')
   .requiredOption('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')
   .option('--mode <mode>', '导入模式：full | incremental（默认 full）', 'full')
   .option('--root-name <rootName>', '导入根节点名称（全量直导必填）')
@@ -93,8 +93,8 @@ program
 program
   .command('diff')
   .description('对比 group-index.source.commit 与 HEAD，输出变更文件列表（含 memoryId 关联）')
-  .requiredOption('--scope <scope>', '项目隔离标识')
-  .option('--output <outputFile>', '将结果写入指定文件（默认仅 stdout）')
+  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-o, --output <outputFile>', '将结果写入指定文件（默认仅 stdout）')
   .action((opts) => {
     try {
       const scope = String(opts.scope);

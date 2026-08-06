@@ -5,7 +5,8 @@
  * 存储文本到向量索引（Vector Adapter / zvec）。
  *
  * 用法:
- *   ki store --scope <scope> --text "存储内容" [--keywords "词1,词2"] [--tags "tag1"]
+ *   ki store --scope <scope> --text "存储内容" [--tags "tag1"]
+ *   ki store "存储内容" [--scope <scope>]   # 位置参数（REQ-12，--text 保留兼容）
  */
 
 import { Command } from 'commander';
@@ -57,13 +58,19 @@ program
   .name('store')
   .showHelpAfterError()
   .description('存储文本到向量索引')
-  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .requiredOption('--text <text>', '待向量化文本')
+  .argument('[text]', '待向量化文本（位置参数，REQ-12；--text 保留兼容）')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
+  .option('-t, --text <text>', '待向量化文本')
   .option('--tags <tags>', '标签（默认 ki-search）', 'ki-search')
-  .action(async (opts) => {
+  .action(async (text: string | undefined, opts) => {
+    const finalText = text ?? opts.text;
+    if (!finalText) {
+      console.error('错误: 缺少存储文本。用法: ki store <text> 或 ki store --text <text>');
+      process.exit(1);
+    }
     const result = await executeStore({
       scope: opts.scope,
-      text: opts.text,
+      text: finalText,
       tags: opts.tags,
     });
     console.log(JSON.stringify(result, null, 2));

@@ -751,9 +751,9 @@ const program = new Command();
 program
   .name('query-group')
   .showHelpAfterError()
-  .description('查询 Group + 词云 + 格式化输出')
-  .requiredOption('--scope <scope>', '项目隔离标识')
-  .option('--groups <groups>', '逗号分隔的 Group 路径列表')
+  .description('查询 Group + 格式化输出')
+  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-g, --groups <groups>', '逗号分隔的 Group 路径列表')
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')

@@ -174,9 +174,9 @@ program
   .name('get-module-info')
   .showHelpAfterError()
   .description('模块检索：读取本地 KB + 更新评分')
-  .requiredOption('--scope <scope>', '项目隔离标识')
-  .requiredOption('--group <group>', 'Group 路径')
-  .requiredOption('--relation <relation>', 'Relation ID 或名称')
+  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .requiredOption('-g, --group <group>', 'Group 路径')
+  .requiredOption('-r, --relation <relation>', 'Relation ID 或名称')
   .action(async (opts) => {
     const result = await executeGetModuleInfo({
       scope: opts.scope,

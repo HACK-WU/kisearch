@@ -370,10 +370,10 @@ program
   .name('delete-relation')
   .showHelpAfterError()
   .description('删除 Relation 及其关联数据（cache + KB + wiki + mem）')
-  .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('--group <group>', 'Group 路径')
-  .option('--relation <relation>', 'Relation 名称')
-  .option('--input <input>', 'JSON 输入文件路径（批量模式，格式 {"items":[{"group","relation"}]}）')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
+  .option('-g, --group <group>', 'Group 路径')
+  .option('-r, --relation <relation>', 'Relation 名称')
+  .option('-i, --input <input>', 'JSON 输入文件路径（批量模式，格式 {"items":[{"group","relation"}]}）')
   .action(async (opts) => {
     try {
       if (opts.input) {

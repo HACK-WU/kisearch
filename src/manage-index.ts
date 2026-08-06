@@ -418,10 +418,10 @@ program
   .name('manage-index')
   .showHelpAfterError()
   .description('Group 树索引管理（支持 scope 列表查询）')
-  .option('--scope <scope>', '项目隔离标识（list-scopes 时可省略）')
+  .option('-s, --scope <scope>', '项目隔离标识（list-scopes 时可省略）')
   .option('--action <action>', '操作：create | delete | list-scopes', 'create')
   .option('--parent <parent>', '父节点路径（为空时在顶层操作）')
-  .option('--name <name>', '节点名称')
+  .option('-n, --name <name>', '节点名称')
   .option('--force', '强制删除非空节点', false)
   .action(async (opts) => {
     try {
