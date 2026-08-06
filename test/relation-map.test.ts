@@ -54,7 +54,7 @@ describe('getRelationMap', () => {
     clearRelationMapCache();
   });
 
-  it('构建映射：memoryId 可反查 group / relation / keywords / isFullText', () => {
+  it('构建映射：memoryId 可反查 group / relation（旧数据 keywords/isFullText 字段忽略）', () => {
     setupConfig();
     writeCache('default', {
       'a/b': {
@@ -75,21 +75,15 @@ describe('getRelationMap', () => {
     assert.deepEqual(map.get('m1'), {
       group: 'a/b',
       relation: '钉钉集成配置',
-      keywords: ['钉钉', '集成'],
-      isFullText: false,
     });
     assert.deepEqual(map.get('m2'), {
       group: 'a/b',
       relation: '钉钉 webhook 地址',
-      keywords: ['钉钉', '集成'],
-      isFullText: true,
     });
-    // 字段缺失 → isFullText 为 undefined（search 按默认 false=摘要处理）
+    // 旧数据 keywords / isFullText 字段不进入映射（REQ-05/09 已删除）
     assert.deepEqual(map.get('m3'), {
       group: 'c',
       relation: '企业微信回调',
-      keywords: ['企业微信'],
-      isFullText: undefined,
     });
     assert.equal(map.get('unknown-id'), undefined);
   });

@@ -46,7 +46,6 @@ interface ExportResult {
 
 interface RelationEntry {
   relation: string;
-  keywords: string[];
   memoryId?: string;
   sourcePath?: string;
 }
@@ -207,7 +206,6 @@ function handleExport(options: ExportOptions): ExportResult {
       stats.total++;
 
       const relationName = rel.text || rel.relation;
-      const keywords = rel.keywords || [];
       const rawContent = localKb?.[relationName];
       let content: string | null = null;
       if (typeof rawContent === 'string') {
@@ -234,7 +232,6 @@ function handleExport(options: ExportOptions): ExportResult {
       const markdown = generateMarkdown(
         groupPath,
         relationName,
-        keywords,
         content,
         exportedAt
       );

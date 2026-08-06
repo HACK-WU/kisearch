@@ -407,7 +407,7 @@ function formatGroupRelations(
     lines.push('(暂无 Relations)');
     lines.push('');
     lines.push('💡 可使用 sync-relation 写入知识条目：');
-    lines.push(`   ki sync-relation --scope <scope> --group "${groupPath}" --relation <描述> --module-info <内容> --keywords <词1,词2>`);
+    lines.push(`   ki sync-relation --scope <scope> --group "${groupPath}" --relation <描述> --module-info <内容>`);
     return lines.join('\n');
   }
 
@@ -420,7 +420,6 @@ function formatGroupRelations(
     const top = partition.hot.slice(0, hotCount);
     top.forEach((rel) => lines.push(`├── ${rel.text}`));
     lines.push('');
-    lines.push(`关键词: ${data.keywords.join(', ')}`);
     return lines.join('\n');
   }
 
@@ -474,13 +473,6 @@ function formatGroupRelations(
       });
       lines.push('');
     }
-  }
-
-  // 词云：keywords 属于 Group 级，无法按 Relation 分区归类热度
-  // 设计决策：接受简化，以换取数据模型清晰（详见 keywords-group-level-refactor_DESIGN §14）
-  if (data.keywords.length > 0) {
-    lines.push('🏷️ 关键词词云:');
-    lines.push(`└── ${data.keywords.join(', ')}`);
   }
 
   return lines.join('\n');
@@ -659,7 +651,7 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
         const gp = groupPaths[idx];
 
         if (!resolved.matched) {
-          const baseOutput = `=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容> --keywords <词1,词2>\n\n${resolved.hint}`;
+          const baseOutput = `=== ${gp} ===\n\n(暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${gp}" --relation <描述> --module-info <内容>\n\n${resolved.hint}`;
 
           // 语义兜底：精确匹配和 ki-path/ki-relation 兜底均未命中时尝试通用语义搜索
           if (autoFallback) {
@@ -686,7 +678,7 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
 
         if (!data) {
           if (resolved.hint) results.push(resolved.hint);
-          results.push(`=== ${resolved.resolvedPath} ===\n\n(该 Group 路径存在但暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${resolved.resolvedPath}" --relation <描述> --module-info <内容> --keywords <词1,词2>`);
+          results.push(`=== ${resolved.resolvedPath} ===\n\n(该 Group 路径存在但暂无 Relations)\n\n💡 可使用 sync-relation 写入知识条目：\n   ki sync-relation --scope ${scope} --group "${resolved.resolvedPath}" --relation <描述> --module-info <内容>`);
           continue;
         }
 

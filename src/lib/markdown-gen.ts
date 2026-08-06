@@ -3,6 +3,8 @@
  *
  * 供 export.ts 和 wiki-sync.ts 共同使用，
  * 确保 KB 导出与 wiki 写回的 frontmatter 格式始终一致。
+ *
+ * 批次 3（REQ-05）：frontmatter 移除 keywords 字段。
  */
 
 /**
@@ -23,16 +25,13 @@ export function yamlSafe(input: string): string {
 export function generateMarkdown(
   groupPath: string,
   relation: string,
-  keywords: string[],
   content: string | null,
   exportedAt: string
 ): string {
-  const kwStr = keywords.map((k) => yamlSafe(k)).join(', ');
   const frontmatter = [
     '---',
     `groupPath: ${yamlSafe(groupPath)}`,
     `relation: ${yamlSafe(relation)}`,
-    `keywords: [${kwStr}]`,
     `exportedAt: ${yamlSafe(exportedAt)}`,
     '---',
     '',

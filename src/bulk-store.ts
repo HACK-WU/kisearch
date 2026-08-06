@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 /**
- * bulk-store.ts - ki bulk_store CLI（src 版）
+ * bulk-store.ts - ki bulk-store CLI（src 版）
  *
  * 批量存储文本到向量索引（Vector Adapter / zvec）。
  *
  * 用法:
- *   ki bulk_store --scope <scope> --input /path/to/batch.json
+ *   ki bulk-store --scope <scope> --input /path/to/batch.json
  *
  * batch.json 格式:
  *   [
- *     { "text": "内容1", "keywords": "词1,词2", "tags": "ki-search" },
- *     { "text": "内容2", "keywords": "词3" }
+ *     { "text": "内容1", "tags": "ki-search" },
+ *     { "text": "内容2" }
  *   ]
+ *
+ * 批次 3（REQ-13）：命令名由 bulk_store 改为 bulk-store；keywords 机制已删除（REQ-05）。
  */
 
 import { Command } from 'commander';
@@ -49,7 +51,7 @@ export async function executeBulkStore(params: {
       return { ok: false, error: `输入文件不存在: ${params.inputFile}` };
     }
 
-    let entries: { text: string; tags?: string; keywords?: string[] }[];
+    let entries: { text: string; tags?: string }[];
     try {
       const raw = JSON.parse(fs.readFileSync(params.inputFile, 'utf-8'));
       if (!Array.isArray(raw)) {
@@ -62,11 +64,6 @@ export async function executeBulkStore(params: {
         return {
           text: item.text,
           tags: item.tags || 'ki-search',
-          keywords: item.keywords
-            ? (typeof item.keywords === 'string'
-              ? item.keywords.split(',').map((k: string) => k.trim()).filter(Boolean)
-              : item.keywords)
-            : undefined,
         };
       });
     } catch (err) {
@@ -85,7 +82,7 @@ export async function executeBulkStore(params: {
 const program = new Command();
 
 program
-  .name('bulk_store')
+  .name('bulk-store')
   .showHelpAfterError()
   .description('批量存储文本到向量索引')
   .option('--scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')

@@ -130,10 +130,8 @@ describe('restore 列出备份', () => {
       result.locations.snapshots,
       path.join(defBackupDir, scope, 'snapshots')
     );
-    assert.strictEqual(
-      result.locations.aiResults,
-      path.join(defBackupDir, scope, 'ai-results')
-    );
+    // ai-results 位置已移除（REQ-04：--from-results 重放已删除）
+    assert.strictEqual(result.locations.aiResults, undefined);
     assert.strictEqual(result.available.snapshots.length, 1);
   });
 
@@ -206,30 +204,6 @@ describe('restore --backup-dir 只控制读取来源', () => {
     assert.strictEqual(listSnapshots(customSnapDir).length, 1);
     // 安全网快照落在默认目录
     assert.strictEqual(listSnapshots(defSnapDir).length, 1);
-  });
-});
-
-describe('restore --from-results 确认流程（非交互）', () => {
-  it('未加 --yes 时以 CONFIRMATION_REQUIRED 退出且不改动数据', () => {
-    const { configPath, scope, scopeDataDir, defBackupDir } = setupScope();
-
-    // 放一个通过 meta 校验的全量 ai-results 文件（重放前即被确认闸门拦截）
-    const aiDir = path.join(defBackupDir, scope, 'ai-results');
-    fs.mkdirSync(aiDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(aiDir, 'ai-results.20260618-021614.full.json'),
-      JSON.stringify({
-        meta: { sourceDir: '/tmp/src', rootName: 'wiki' },
-        relations: [],
-      })
-    );
-
-    const result = runRestore(configPath, [scope, '--from-results']);
-
-    assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.code, 'CONFIRMATION_REQUIRED');
-    // 数据保持原样
-    assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
   });
 });
 

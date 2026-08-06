@@ -67,8 +67,7 @@ export function writeBackToWiki(
   scope: string,
   group: string,
   relation: string,
-  moduleInfo: string,
-  keywords: string[]
+  moduleInfo: string
 ): WikiWritebackResult {
   const target = resolveWikiTarget(scope);
   if (!target) {
@@ -104,7 +103,6 @@ export function writeBackToWiki(
     const markdown = generateMarkdown(
       group,
       relation,
-      keywords,
       moduleInfo,
       new Date().toISOString()
     );

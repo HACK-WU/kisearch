@@ -129,7 +129,7 @@ export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise
         error: `本地 KB 文件不存在：${localKbPath}`,
         hint: [
           '本地 KB 缺失的可能原因与修复方式：',
-          `1. 使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel.text}" --module-info <内容> --keywords <词1,词2>`,
+          `1. 使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel.text}" --module-info <内容>`,
           '2. 如果是从外部 Wiki 导入的数据，检查 scan-kb import 是否完整执行',
           '3. 检查数据文件是否被误删除或备份恢复不完整',
         ].join('\n'),
@@ -141,7 +141,7 @@ export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise
       return {
         ok: false,
         error: `本地 KB 中未找到 "${rel!.text}" 的内容`,
-        hint: `请使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel!.text}" --module-info <内容> --keywords <词1,词2>`,
+        hint: `请使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel!.text}" --module-info <内容>`,
       };
     }
 

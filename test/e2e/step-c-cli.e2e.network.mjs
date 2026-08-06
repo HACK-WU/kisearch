@@ -116,14 +116,13 @@ function ki(args, timeout = 120_000) {
   return { status: res.status, stdout, stderr: res.stderr ?? '', json };
 }
 
-function syncRelation(scope, group, relation, moduleInfo, keywords) {
+function syncRelation(scope, group, relation, moduleInfo) {
   return ki([
     'sync-relation',
     '--scope', scope,
     '--group', group,
     '--relation', relation,
     '--module-info', moduleInfo,
-    '--keywords', keywords,
   ]);
 }
 function search(scope, query, extra = []) {
@@ -187,13 +186,13 @@ after(() => {
 // ─── 旅程 ───
 
 test('E2E-1 sync: sync-relation 写入 A → ok + vectorPending:false（await 完成向量写入）', { ...SKIP, timeout: 120_000 }, () => {
-  const r = syncRelation(SCOPE_A, GROUP_A, REL_A, MODULE_A, KEYWORDS_A);
+  const r = syncRelation(SCOPE_A, GROUP_A, REL_A, MODULE_A);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}`);
   assert.ok(r.json, `stdout 应含可解析 JSON；实际=${r.stdout}`);
   assert.equal(r.json.ok, true, `sync 应成功；实际=${JSON.stringify(r.json)}`);
   assert.equal(r.json.vectorPending, false, `迁移后向量写入应 await 完成（vectorPending:false）；实际=${JSON.stringify(r.json)}`);
-  assert.ok(Array.isArray(r.json.keywords) && r.json.keywords.length > 0, `应有有效关键词；实际=${JSON.stringify(r.json.keywords)}`);
-  console.log(`  ✓ sync A → keywords=${JSON.stringify(r.json.keywords)} vectorPending=${r.json.vectorPending}`);
+  assert.strictEqual(r.json.keywords, undefined, `keywords 机制已删除（REQ-05），返回不应含 keywords 字段；实际=${JSON.stringify(r.json)}`);
+  console.log(`  ✓ sync A → vectorStored=${r.json.vectorStored} vectorPending=${r.json.vectorPending}`);
 });
 
 test('E2E-2 query: query-group A（full 树）→ 输出包含刚写入的 Group', { ...SKIP, timeout: 120_000 }, () => {
@@ -220,7 +219,7 @@ test('E2E-4 recall: search A（ki-search）→ 语义召回 sync 写入的模块
 });
 
 test('E2E-5 scope-iso: A 查不到 B 私有内容；B 能查到（scope 隔离）', { ...SKIP, timeout: 120_000 }, () => {
-  const rSync = syncRelation(SCOPE_B, GROUP_B, REL_B, MODULE_B, KEYWORDS_B);
+  const rSync = syncRelation(SCOPE_B, GROUP_B, REL_B, MODULE_B);
   assert.equal(rSync.json?.ok, true, `B 写入应成功；${JSON.stringify(rSync.json)}`);
 
   const rA = search(SCOPE_A, QUERY_B);

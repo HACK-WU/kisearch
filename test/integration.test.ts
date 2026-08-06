@@ -5,8 +5,7 @@
  *   快速路径: manage-index → sync-relation → query-group → get-module-info
  *   检索回退路径: 查询不存在的 Group/Relation
  *   知识缺失路径: 本地 KB 缺失
- *   导入路径: scan-kb → import-kb
- *   A/M/D 全链路: scan → incremental scan → vectorize
+ *   导入路径: scan-kb import --source 直导（full / incremental，git diff 驱动）
  */
 
 import { describe, it, after } from 'node:test';
@@ -142,11 +141,9 @@ describe('快速路径', () => {
       '--group', 'wiki/监控',
       '--relation', '告警规则',
       '--module-info', '# 告警规则\n告警规则文档内容',
-      '--keywords', '告警,规则',
     ]);
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.relation, '告警规则');
-    assert.strictEqual(result.keywords.length, 2);
   });
 
   it('sync-relation 批量回写', async () => {
@@ -160,8 +157,8 @@ describe('快速路径', () => {
 
     fs.writeFileSync(inputFile, JSON.stringify({
       items: [
-        { group: 'wiki/监控', relation: '规则A', module_info: '# 规则A\n内容A', keywords: ['规则', 'A'] },
-        { group: 'wiki/监控', relation: '规则B', module_info: '# 规则B\n内容B', keywords: ['规则', 'B'] },
+        { group: 'wiki/监控', relation: '规则A', module_info: '# 规则A\n内容A' },
+        { group: 'wiki/监控', relation: '规则B', module_info: '# 规则B\n内容B' },
       ],
     }, null, 2));
 
@@ -186,7 +183,7 @@ describe('快速路径', () => {
 
     fs.writeFileSync(inputFile, JSON.stringify({
       items: [
-        { group: 'wiki/监控', relation: '查询规则', module_info: '# 查询\n内容', keywords: ['查询'] },
+        { group: 'wiki/监控', relation: '查询规则', module_info: '# 查询\n内容' },
       ],
     }, null, 2));
 
@@ -214,7 +211,6 @@ describe('快速路径', () => {
       '--group', 'wiki/监控',
       '--relation', '模块A',
       '--module-info', '# 模块A\n这是模块A的详细说明文档',
-      '--keywords', '模块,详细',
     ]);
 
     // get-module-info reads the markdown content
@@ -258,7 +254,6 @@ describe('检索回退路径', () => {
       '--group', 'wiki/监控',
       '--relation', '存在的关系',
       '--module-info', '# 内容\n存在的关系内容',
-      '--keywords', '存在',
     ]);
 
     const result = runScriptJson('get-module-info.ts', [
@@ -266,8 +261,19 @@ describe('检索回退路径', () => {
       '--group', 'wiki/监控',
       '--relation', '不存在的关系',
     ]);
-    assert.strictEqual(result.ok, false);
-    assert.ok(result.error.includes('不存在'));
+    // get-module-info 成功时输出文本（非 JSON），失败时输出 JSON。
+    // fuzzy 向量兜底（searchPath threshold=0 接受 top-1）：
+    //   - 无 embedding key（离线）：searchPath 返回 null → 失败 + error 含"不存在"
+    //   - 有 embedding key（在线）：近似命中已存在的"存在的关系" → 文本含"存在的关系内容"
+    const raw = result.raw ?? result.content ?? '';
+    if (result.ok) {
+      assert.ok(String(raw).includes('存在的关系内容'), '在线 fuzzy 应近似命中已存在的 relation');
+    } else if (raw) {
+      assert.ok(String(raw).includes('存在的关系内容'), '文本输出（ok 分支）应含 fuzzy 命中内容');
+    } else {
+      assert.strictEqual(result.ok, false);
+      assert.ok(String(result.error ?? '').includes('不存在'));
+    }
   });
 });
 
@@ -286,7 +292,6 @@ describe('知识缺失路径', () => {
       '--group', 'wiki/配置',
       '--relation', '数据库配置',
       '--module-info', '# 数据库配置\n数据库连接信息',
-      '--keywords', '数据库,连接',
     ]);
 
     // 直接删除本地 KB
@@ -325,10 +330,10 @@ describe('知识缺失路径', () => {
   });
 });
 
-// ─── 导入路径: scan-kb → import-kb ───
+// ─── 导入路径: scan-kb import --source 直导 ───
 
 describe('导入路径', () => {
-  it('scan-kb → import-kb 完整导入链路', async () => {
+  it('scan-kb import --source 直导完整链路', async () => {
     const scope = await makeScopeInit('integration-import');
     const sourceDir = makeTempDir('ki-int-source');
 
@@ -336,213 +341,91 @@ describe('导入路径', () => {
     fs.writeFileSync(path.join(sourceDir, '监控', '告警.md'), '# 告警模块\n告警配置说明');
     fs.writeFileSync(path.join(sourceDir, '部署.md'), '# 部署文档\n部署流程说明');
 
-    // scan
-    const resultsFile = path.join(sourceDir, 'scan-results.json');
-    const scanPrep = runScriptJson('scan-kb.ts', [
-      'scan',
+    // 全量直导（无 AI）：--source + --root-name
+    const importResult = runScriptJson('scan-kb.ts', [
+      'import',
       '--scope', scope,
       '--source', sourceDir,
       '--root-name', 'wiki',
-    ]);
-    assert.strictEqual(scanPrep.ok, true);
-
-    // fake AI results
-    const pendingData = JSON.parse(fs.readFileSync(scanPrep.pending_file, 'utf-8'));
-    fs.writeFileSync(resultsFile, JSON.stringify({
-      entries: pendingData.files.map((f: any) => ({
-        path: f.path,
-        summary: f.path === '部署.md'
-          ? '部署流程说明文档\n[路径] docs/部署.md'
-          : '告警配置说明\n[路径] docs/监控/告警.md',
-        keywords: f.path === '部署.md' ? ['部署', '流程'] : ['告警', '监控'],
-        enriched: false,
-      })),
-    }, null, 2));
-
-    const scanMerged = runScriptJson('scan-kb.ts', [
-      'scan',
-      '--scope', scope,
-      '--source', sourceDir,
-      '--root-name', 'wiki',
-      '--results', resultsFile,
-    ]);
-    assert.strictEqual(scanMerged.ok, true);
-    assert.strictEqual(scanMerged.merged, 2);
-
-    // import-kb convention mode
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
-
-    const { getScanIndexPath } = await import('../src/lib/scope.js');
-    const scanIndexPath = getScanIndexPath(scope);
-
-    const importResult = runScriptJson('import-kb.ts', [
-      '--scope', scope,
-      '--source', sourceDir,
-      '--root-name', 'wiki_imported',
-      '--scan-index', scanIndexPath,
     ]);
     assert.strictEqual(importResult.ok, true);
-    assert.strictEqual(importResult.relations_imported, 2);
-    // resultsFile (scan-results.json) 也在 sourceDir 中，walkFiles 计入后被跳过
+    assert.strictEqual(importResult.mode, 'full');
+    assert.strictEqual(importResult.stats.total, 2);
+    assert.strictEqual(importResult.groups.length, 2);
+    assert.ok(importResult.groups.includes('wiki'));
+    assert.ok(importResult.groups.includes('wiki/监控'));
+
+    // 验证 relations-cache 已写入（原文直导：chunkRelation 命名）
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
+    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const deployRel = cache.groups['wiki'].hot_relations.find((r: any) => r.text === '部署-01');
+    assert.ok(deployRel, '部署.md 应按文件名-N 命名 chunk relation');
+    assert.strictEqual(deployRel.sourcePath, '部署.md#1');
+    assert.strictEqual(deployRel.isImported, true);
   });
 
-  it('import-kb 映射模式导入', async () => {
-    const scope = await makeScopeInit('integration-mapping');
-    const sourceDir = makeTempDir('ki-int-mapping');
-    const mappingFile = path.join(sourceDir, 'mapping.json');
-
-    fs.writeFileSync(path.join(sourceDir, 'doc.md'), '# 文档\n文档内容');
-    fs.writeFileSync(path.join(sourceDir, 'api.md'), '# API\nAPI说明');
-
-    fs.writeFileSync(mappingFile, JSON.stringify({
-      root_name: 'external_wiki',
-      groups: [
-        { path: '参考资料', sources: [
-          { file: 'doc.md', relation: '参考文档' },
-          { file: 'api.md', relation: 'API文档', code_refs: ['src/api.ts'] },
-        ]},
-      ],
-    }, null, 2));
-
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'external_wiki',
-    ]);
-
-    const result = runScriptJson('import-kb.ts', [
-      '--scope', scope,
-      '--source', sourceDir,
-      '--root-name', 'external_wiki',
-      '--mapping', mappingFile,
-    ]);
-    assert.strictEqual(result.ok, true);
-    assert.strictEqual(result.relations_imported, 2);
-  });
-});
-
-// ─── A/M/D 全链路 ───
-
-describe('A/M/D 全链路', () => {
-  it('add → modify → delete 完整增量扫描链路', async () => {
-    const scope = await makeScopeInit('integration-amd');
-    const repoDir = makeTempDir('ki-int-amd');
-    const resultsFile = path.join(repoDir, 'scan-results.json');
+  it('scan-kb import 增量直连（git diff 驱动）', async () => {
+    const scope = await makeScopeInit('integration-inc');
+    const repoDir = makeTempDir('ki-int-inc');
 
     git(repoDir, ['init']);
-    fs.writeFileSync(path.join(repoDir, 'keep.md'), '# keep');
-    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v1');
-    fs.writeFileSync(path.join(repoDir, 'remove.md'), '# remove');
+    fs.writeFileSync(path.join(repoDir, 'keep.md'), '# keep\n内容A');
+    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v1\n内容B');
+    fs.writeFileSync(path.join(repoDir, 'remove.md'), '# remove\n内容C');
     git(repoDir, ['add', '.']);
     git(repoDir, ['commit', '-m', 'init']);
 
-    // Initial scan to build baseline
-    fs.writeFileSync(resultsFile, JSON.stringify({
-      entries: [
-        {
-          path: 'keep.md',
-          summary: 'keep\n[路径] docs/keep.md',
-          keywords: ['keep'],
-          enriched: false,
-        },
-        {
-          path: 'change.md',
-          summary: 'change v1\n[路径] docs/change.md',
-          keywords: ['change'],
-          enriched: false,
-        },
-        {
-          path: 'remove.md',
-          summary: 'remove\n[路径] docs/remove.md',
-          keywords: ['remove'],
-          enriched: false,
-        },
-      ],
-    }, null, 2));
-
-    // Initial scan: first prepare baseline by running scan without results
-    const scanPrep = runScriptJson('scan-kb.ts', [
-      'scan',
+    // 全量直导
+    const full = runScriptJson('scan-kb.ts', [
+      'import',
       '--scope', scope,
       '--source', repoDir,
       '--root-name', 'wiki',
     ]);
-    assert.strictEqual(scanPrep.ok, true);
+    assert.strictEqual(full.ok, true);
+    assert.strictEqual(full.stats.total, 3);
 
-    // Now merge AI results into baseline
-    const scan1 = runScriptJson('scan-kb.ts', [
-      'scan',
-      '--scope', scope,
-      '--source', repoDir,
-      '--root-name', 'wiki',
-      '--results', resultsFile,
-    ]);
-    assert.strictEqual(scan1.ok, true);
-    assert.strictEqual(scan1.merged, 3);
-
-    // Now modify: add new file, modify change.md, remove remove.md
-    fs.writeFileSync(path.join(repoDir, 'new.md'), '# new');
-    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v2');
+    // A/M/D：新增 new.md、修改 change.md、删除 remove.md
+    fs.writeFileSync(path.join(repoDir, 'new.md'), '# new\n内容D');
+    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v2\n内容E');
     fs.unlinkSync(path.join(repoDir, 'remove.md'));
     git(repoDir, ['add', '-A']);
     git(repoDir, ['commit', '-m', 'changes']);
 
-    // Incremental scan - prepare
-    const scan2 = runScriptJson('scan-kb.ts', [
-      'scan',
+    // 增量直连
+    const inc = runScriptJson('scan-kb.ts', [
+      'import',
       '--scope', scope,
       '--source', repoDir,
-      '--root-name', 'wiki',
+      '--mode', 'incremental',
     ]);
-    assert.strictEqual(scan2.ok, true);
-    assert.strictEqual(scan2.mode, 'incremental');
-    // Should detect A=1 (new.md), M=1 (change.md), D=1 (remove.md)
-    assert.strictEqual(scan2.changes.added, 1);
-    assert.strictEqual(scan2.changes.modified, 1);
-    assert.strictEqual(scan2.changes.deleted, 1);
+    assert.strictEqual(inc.ok, true);
+    assert.strictEqual(inc.mode, 'incremental');
+    assert.strictEqual(inc.stats.added, 1); // new.md
+    assert.strictEqual(inc.stats.modified, 1); // change.md
+    assert.strictEqual(inc.stats.deleted, 1); // remove.md
+    assert.strictEqual(inc.stats.errors, 0);
 
-    const pending = JSON.parse(fs.readFileSync(scan2.pending_file, 'utf-8'));
-    assert.ok(pending.files.some((f: any) => f.path === 'new.md' && f.changeType === 'A'));
-    assert.ok(pending.files.some((f: any) => f.path === 'change.md' && f.changeType === 'M'));
-    assert.ok(pending.deleted.some((f: any) => f.path === 'remove.md'));
+    // source.commit 已更新
+    const { getSource } = await import('../src/lib/scope.js');
+    const source = getSource(scope);
+    assert.ok(source.commit.length === 40, '增量后 source.commit 应为新 HEAD');
+    const head = git(repoDir, ['rev-parse', 'HEAD']);
+    assert.strictEqual(source.commit, head);
 
-    // Merge with AI results for the new/changed files
-    fs.writeFileSync(resultsFile, JSON.stringify({
-      entries: [
-        {
-          path: 'new.md',
-          summary: 'new\n[路径] docs/new.md',
-          keywords: ['new'],
-          enriched: false,
-        },
-        {
-          path: 'change.md',
-          summary: 'change v2\n[路径] docs/change.md',
-          keywords: ['change', 'v2'],
-          enriched: false,
-        },
-      ],
-    }, null, 2));
-
-    const scan3 = runScriptJson('scan-kb.ts', [
-      'scan',
-      '--scope', scope,
-      '--source', repoDir,
-      '--root-name', 'wiki',
-      '--results', resultsFile,
-    ]);
-    assert.strictEqual(scan3.ok, true);
-    assert.strictEqual(scan3.action, 'merge_results');
-    // merged 为 results.entries.length，确认至少合并了变更文件
-    assert.ok(scan3.merged >= 2);
-
-    // Verify scan-index.json state
+    // relations-cache 内容断言（回归保护：modified 删旧不得误删新 chunk，P0 bug）
     const { readJson } = await import('../src/lib/store.js');
-    const { getScanIndexPath } = await import('../src/lib/scope.js');
-    const scanIndex = readJson<any>(getScanIndexPath(scope))!;
-    assert.strictEqual(scanIndex.entries.length, 3); // keep + change + new (change updated, remove deleted)
-    assert.ok(scanIndex.entries.some((e: any) => e.path === 'keep.md'));
-    assert.ok(scanIndex.entries.some((e: any) => e.path === 'new.md'));
-    assert.ok(!scanIndex.entries.some((e: any) => e.path === 'remove.md'));
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
+    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const allRels = Object.values(cache.groups).flatMap((g: any) => g.hot_relations);
+    const texts = allRels.map((r: any) => r.text);
+
+    // keep.md 保留；new.md 新增；change.md 修改后仍在（新 chunk）
+    assert.ok(texts.some((t: string) => t === 'keep-01'), 'keep.md 应保留');
+    assert.ok(texts.some((t: string) => t === 'new-01'), 'new.md 应新增');
+    assert.ok(texts.some((t: string) => t === 'change-01'), 'change.md 修改后新 chunk 应存在（回归：不得被删旧误删）');
+    // remove.md 删除
+    assert.ok(!texts.some((t: string) => t === 'remove-01'), 'remove.md 应删除');
   });
 });

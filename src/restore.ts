@@ -4,16 +4,15 @@
  *
  * 用法：
  *   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
- *   ki restore <scope> --from-results  [--dir <ai-results-dir>]
  *   ki restore <scope>                 (列出可用备份)
  *
  *   通用选项：
  *     --backup-dir <dir>  指定备份根目录（不传则用配置中的默认 backupDir）。
- *                         对列出/快照还原/结果重放三种模式均生效，按
- *                         `<backup-dir>/<scope>/{snapshots,ai-results}` 布局查找。
+ *                         对列出/快照还原均生效，按 `<backup-dir>/<scope>/snapshots` 布局查找。
  *
  * --from-snapshot: 从 tar.gz 快照覆盖还原（破坏性操作，需 --yes 确认）
- * --from-results:  按 timestamp 顺序重放 ai-results 备份文件
+ *
+ * 批次 3（REQ-04）：`--from-results` 重放已删除（ai-results 输入契约移除）。
  */
 
 import fs from 'fs';
@@ -30,8 +29,6 @@ import {
   backupScopeSnapshot,
   listBackups,
 } from './lib/backup.js';
-import { handleImport } from './lib/import.js';
-import { handleIncremental } from './lib/incremental.js';
 import { closeEngine } from './lib/vector-client.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
@@ -212,9 +209,8 @@ async function restoreFromSnapshot(
   }
 
   // 备份当前状态（还原前快照，安全网）
-  // CH-2：安全网快照失败视为阻断性错误 —— 与 migrate-keywords 的备份策略保持一致。
-  // 无法创建安全网时，绝不执行后续不可逆的删除+覆盖，避免「确认文案承诺了快照、
-  // 却在快照失败后仍继续删除」造成的数据丢失窗口。
+  // CH-2：安全网快照失败视为阻断性错误。无法创建安全网时，绝不执行后续不可逆的
+  // 删除+覆盖，避免「确认文案承诺了快照、却在快照失败后仍继续删除」造成的数据丢失窗口。
   let preRestoreSnapshot: string | null = null;
   if (fs.existsSync(scopeDataDir)) {
     process.stderr.write('还原前：创建当前状态快照...\n');
@@ -286,149 +282,6 @@ async function restoreFromSnapshot(
   });
 }
 
-// ─── from-results 重放 ───
-
-async function restoreFromResults(
-  scope: string,
-  opts: { dir?: string; backupDir?: string; yes?: boolean; rebuildVector?: boolean }
-): Promise<void> {
-  const config = loadConfig();
-  const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
-  // 同 restoreFromSnapshot：重放前安全网快照写入受管的默认 backupDir，而非 --backup-dir 覆盖目录。
-  const safetyBackupDir = getBackupDir(config);
-
-  const aiResultsDir = opts.dir
-    ? path.resolve(opts.dir)
-    : path.join(backupDir, scope, 'ai-results');
-
-  if (!fs.existsSync(aiResultsDir)) {
-    fail(`ai-results 目录不存在：${aiResultsDir}`);
-  }
-
-  // 扫描并排序
-  const files = fs
-    .readdirSync(aiResultsDir)
-    .filter((f) => /^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/.test(f))
-    .sort();
-
-  if (files.length === 0) {
-    fail(`ai-results 目录为空：${aiResultsDir}`);
-  }
-
-  // 校验首个文件的 meta 字段 + 模式
-  const firstFile = path.join(aiResultsDir, files[0]);
-  const firstModeMatch = files[0].match(/^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/);
-  if (!firstModeMatch || firstModeMatch[1] !== 'full') {
-    fail(
-      `首个文件不是全量备份，无法作为重放基底：\n  ${files[0]}\n` +
-        `重放要求第一个文件必须是 full 模式的全量备份`  );
-  }
-  let firstRaw: Record<string, unknown>;
-  try {
-    firstRaw = JSON.parse(fs.readFileSync(firstFile, 'utf-8'));
-  } catch (err) {
-    fail(`读取首个文件失败：${(err as Error).message}`);
-  }
-  const meta = firstRaw.meta as Record<string, string> | undefined;
-  if (!meta?.sourceDir || !meta?.rootName) {
-    fail(
-      `首个文件缺少 meta.sourceDir/rootName，无法作为全量基底：\n  ${files[0]}\n` +
-        `请确保目录中包含完整的全量备份文件`
-    );
-  }
-
-  // 确认（与 --from-snapshot 一致）：CLI 非交互式，展示总览后要求显式 --yes 重新执行
-  const scopeDataDir = getScopeDataDir(config, scope);
-  if (!opts.yes) {
-    const fullCount = files.filter((f) => /\.full\.json$/.test(f)).length;
-    const incCount = files.length - fullCount;
-    previewAndRequireYes(
-      `⚠️  即将通过重放 ai-results 改写 scope：${scope}\n` +
-        `   目标目录：${scopeDataDir}\n` +
-        `${summarizeScopeDir(scopeDataDir)}\n` +
-        `   重放来源：${aiResultsDir}\n` +
-        `   重放文件：共 ${files.length} 个（全量 ${fullCount} + 增量 ${incCount}），首个全量基底：${files[0]}\n` +
-        `   ⚠️  此操作会改写现有数据（重放前会自动创建安全网快照）\n`
-    );
-  }
-
-  // 还原前快照（仅一次）
-  try {
-    if (fs.existsSync(scopeDataDir)) {
-      process.stderr.write('重放前：创建当前状态快照...\n');
-      backupScopeSnapshot(safetyBackupDir, scope, scopeDataDir);
-    }
-  } catch (err) {
-    process.stderr.write(
-      `警告：重放前快照失败 — ${(err as Error).message}（继续重放）\n`
-    );
-  }
-
-  // 顺序重放
-  const replayed: Array<{
-    file: string;
-    mode: 'full' | 'incremental';
-    status: 'ok' | 'failed';
-    error?: string;
-  }> = [];
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const filePath = path.join(aiResultsDir, file);
-    // 从文件名解析实际模式（而非按位置推断）
-    const modeMatch = file.match(/^ai-results\.\d{8}-\d{6}(?:-\d+)?\.(full|incremental)\.json$/)!;
-    const mode = modeMatch[1] as 'full' | 'incremental';
-
-    process.stderr.write(`[${i + 1}/${files.length}] 重放：${file} (${mode})...\n`);
-
-    try {
-      if (mode === 'full') {
-        await handleImport({ scope, resultsFile: filePath });
-      } else {
-        await handleIncremental({ scope, resultsFile: filePath });
-      }
-      replayed.push({ file, mode, status: 'ok' });
-    } catch (err) {
-      const errMsg = (err as Error).message;
-      replayed.push({ file, mode, status: 'failed', error: errMsg });
-      process.stderr.write(`重放失败：${file} — ${errMsg}\n`);
-
-      // 停止后续重放
-      output({
-        ok: false,
-        action: 'restore_results',
-        scope,
-        replayed,
-        stats: {
-          total: files.length,
-          success: replayed.filter((r) => r.status === 'ok').length,
-          failed: replayed.filter((r) => r.status === 'failed').length,
-        },
-        hint: '可从还原前快照恢复：ki restore ' + scope + ' --from-snapshot',
-      });
-      // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出
-      await closeEngine();
-      process.exit(1);
-    }
-  }
-
-  output({
-    ok: true,
-    action: 'restore_results',
-    scope,
-    replayed,
-    stats: {
-      total: files.length,
-      success: replayed.filter((r) => r.status === 'ok').length,
-      failed: 0,
-    },
-    // KB 已还原；向量文档不随快照还原，未指定 --rebuild-vector 时提示重建
-    hint: opts.rebuildVector
-      ? undefined
-      : `KB 已还原。向量文档不随快照还原，如需语义检索请执行：ki restore ${scope} --rebuild-vector`,
-  });
-}
-
 // ─── 列出备份 ───
 
 function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}): void {
@@ -444,11 +297,10 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
     backupDir,
     locations: {
       snapshots: path.join(backupDir, scope, 'snapshots'),
-      aiResults: path.join(backupDir, scope, 'ai-results'),
     },
     available: backups,
     hint:
-      '使用 --from-snapshot 或 --from-results 选择还原模式；' +
+      '使用 --from-snapshot 选择还原模式；' +
       '--backup-dir <dir> 可指定其它备份目录',
   });
 }
@@ -458,20 +310,17 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 const args = process.argv.slice(2);
 
 /** 帮助文本：-h/--help 与缺省 scope 时共用 */
-const RESTORE_HELP = `ki restore - 从快照或 ai-results 还原 scope
+const RESTORE_HELP = `ki restore - 从快照还原 scope
 
 用法：
   ki restore <scope>                  列出可用备份
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
-  ki restore <scope> --from-results [--dir <ai-results-dir>] [--yes]
   ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
 
 选项：
   --from-snapshot [<file>]  从 tar.gz 快照覆盖还原；可直接指定快照文件路径（缺省从 <backup-dir>/<scope>/snapshots 取最新/--timestamp）
-  --from-results      按 timestamp 顺序重放 ai-results 备份文件
   --rebuild-vector    还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path)
   --timestamp <ts>    指定快照时间戳（默认取最新）
-  --dir <dir>         指定 ai-results 备份目录
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
   --yes               跳过确认直接执行（破坏性）
   -h, --help          显示帮助`;
@@ -482,11 +331,11 @@ if (args.includes('-h') || args.includes('--help')) {
   process.exit(0);
 }
 
-// 未知参数检测（NEG-01）：--timestamp / --dir / --backup-dir 为带值参数
+// 未知参数检测（NEG-01）：--timestamp / --backup-dir 为带值参数
 detectUnknownFlags(
   args,
-  ['--from-snapshot', '--from-results', '--rebuild-vector', '--yes', '--timestamp', '--dir', '--backup-dir'],
-  ['--timestamp', '--dir', '--backup-dir'],
+  ['--from-snapshot', '--rebuild-vector', '--yes', '--timestamp', '--backup-dir'],
+  ['--timestamp', '--backup-dir'],
   RESTORE_HELP
 );
 
@@ -500,7 +349,6 @@ if (!scope || scope.startsWith('--')) {
 const fromSnapshot = args.some(
   (a) => a === '--from-snapshot' || a.startsWith('--from-snapshot=')
 );
-const fromResults = args.includes('--from-results');
 const skipYes = args.includes('--yes');
 const rebuildVector = args.includes('--rebuild-vector');
 
@@ -521,13 +369,6 @@ let timestamp: string | undefined;
 const tsIdx = args.indexOf('--timestamp');
 if (tsIdx !== -1 && tsIdx + 1 < args.length) {
   timestamp = args[tsIdx + 1];
-}
-
-// 提取 --dir
-let dir: string | undefined;
-const dirIdx = args.indexOf('--dir');
-if (dirIdx !== -1 && dirIdx + 1 < args.length) {
-  dir = args[dirIdx + 1];
 }
 
 // 提取 --backup-dir（指定备份根目录，不传则用配置默认）
@@ -570,10 +411,6 @@ async function main() {
   try {
     validateScope(scope);
 
-    if (fromSnapshot && fromResults) {
-      fail('--from-snapshot 和 --from-results 不能同时使用');
-    }
-
     if (fromSnapshot) {
       await restoreFromSnapshot(scope, {
         timestamp,
@@ -582,9 +419,6 @@ async function main() {
         snapshotFile: snapshotFileArg,
         rebuildVector,
       });
-      if (rebuildVector) await rebuildAndReport(scope);
-    } else if (fromResults) {
-      await restoreFromResults(scope, { dir, backupDir: backupDirOverride, yes: skipYes, rebuildVector });
       if (rebuildVector) await rebuildAndReport(scope);
     } else if (rebuildVector) {
       // 独立调用：对已还原的 KB 仅重建向量

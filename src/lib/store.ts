@@ -130,12 +130,6 @@ function migrateRelationsCacheKeys(scope: string): void {
               if (!existingTexts.has((rel as any).text)) newData.hot_relations.push(rel);
             }
           }
-          // 合并 keywords（去重）
-          if (Array.isArray(oldData.keywords) && Array.isArray(newData.keywords)) {
-            for (const kw of oldData.keywords) {
-              if (!newData.keywords.includes(kw)) newData.keywords.push(kw);
-            }
-          }
         }
 
         keysToDelete.push(key);

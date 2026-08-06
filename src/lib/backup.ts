@@ -2,11 +2,11 @@
  * backup.ts —— 备份模块
  *
  * 提供：
- *   - autoBackup: import 成功后自动备份（ai-results.json + scope 快照）
- *   - backupAiResults: 备份 ai-results.json 到备份目录
+ *   - autoBackup: import 成功后自动备份（scope 快照）
  *   - backupScopeSnapshot: 打包 scope 目录为 tar.gz
  *   - listBackups: 列出现有备份
  *
+ * 批次 3（REQ-04）：ai-results 输入契约已删除，备份仅保留 scope 快照。
  * 备份失败不阻断 import 返回（仅输出 stderr 警告）。
  */
 
@@ -24,7 +24,6 @@ export interface BackupResult {
   ok: boolean;
   action: 'backup';
   scope: string;
-  aiResultsBackup?: string;
   snapshotBackup?: string;
 }
 
@@ -78,31 +77,12 @@ function ensureTarAvailable(): void {
 // ─── 核心函数 ───
 
 /**
- * 备份 ai-results.json 到备份目录
- */
-export function backupAiResults(
-  backupDir: string,
-  scope: string,
-  resultsFile: string,
-  mode: 'full' | 'incremental'
-): string {
-  const targetDir = path.join(backupDir, scope, 'ai-results');
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  // 预检：可写性 + 磁盘空间（NEG-07）
-  checkWritable(targetDir);
-  try { checkDiskSpace(targetDir, fs.statSync(resultsFile).size); } catch (e) {
-    if ((e as { code?: string }).code === 'DISK_INSUFFICIENT') throw e;
-  }
-
-  const ts = makeTimestamp();
-  const targetFile = avoidCollision(path.join(targetDir, `ai-results.${ts}.${mode}.json`), '.json');
-  fs.copyFileSync(resultsFile, targetFile);
-  return targetFile;
-}
-
-/**
- * 备份 scope 目录为 tar.gz
+ * 备份 scope 目录为 tar.gz（供 import 自动备份与 restore 还原前安全网使用）
+ *
+ * @param backupDir     备份根目录（快照落 `<backupDir>/<scope>/snapshots`）
+ * @param scope         scope 名
+ * @param scopeDataDir  scope 数据目录绝对路径
+ * @returns 生成的快照文件绝对路径
  */
 export function backupScopeSnapshot(
   backupDir: string,
@@ -138,29 +118,18 @@ export function backupScopeSnapshot(
 
 /**
  * 自动备份：import 成功后调用
- * 1. 复制 ai-results.json 到备份目录
- * 2. 打包 scope 目录到快照目录
+ * 1. 打包 scope 目录到快照目录
  *
  * 备份失败仅输出 stderr 警告，不阻断调用方
  */
 export function autoBackup(
   config: KiConfig,
   scope: string,
-  resultsFile: string,
-  mode: 'full' | 'incremental'
+  _mode?: 'full' | 'incremental'
 ): BackupResult {
   const backupDir = getBackupDir(config);
   const scopeDataDir = getKbDir(scope);
   const result: BackupResult = { ok: true, action: 'backup', scope };
-
-  try {
-    result.aiResultsBackup = backupAiResults(backupDir, scope, resultsFile, mode);
-  } catch (err) {
-    process.stderr.write(
-      `警告：ai-results 备份失败 — ${(err as Error).message}\n`
-    );
-    result.ok = false;
-  }
 
   try {
     result.snapshotBackup = backupScopeSnapshot(backupDir, scope, scopeDataDir);
@@ -178,7 +147,7 @@ export function autoBackup(
  * 列出现有备份
  *
  * @param backupDirOverride 可选的备份根目录（对应 `ki restore --backup-dir`）；
- *   缺省时使用 config.backupDir。传入后按同样的 `<backupDir>/<scope>/{snapshots,ai-results}`
+ *   缺省时使用 config.backupDir。传入后按同样的 `<backupDir>/<scope>/snapshots`
  *   布局在该目录下查找。
  */
 export function listBackups(
@@ -187,7 +156,6 @@ export function listBackups(
   backupDirOverride?: string
 ): {
   snapshots: Array<{ file: string; timestamp: string; size: number }>;
-  aiResults: Array<{ file: string; timestamp: string; mode: string; size: number }>;
 } {
   const backupDir = backupDirOverride ?? getBackupDir(config);
 
@@ -204,21 +172,7 @@ export function listBackups(
     }
   }
 
-  const aiResults: Array<{ file: string; timestamp: string; mode: string; size: number }> = [];
-  const arDir = path.join(backupDir, scope, 'ai-results');
-  if (fs.existsSync(arDir)) {
-    const files = fs.readdirSync(arDir).filter((f) => f.startsWith('ai-results.') && f.endsWith('.json'));
-    for (const file of files) {
-      const match = file.match(/^ai-results\.(\d{8}-\d{6}(?:-\d+)?)\.(full|incremental)\.json$/);
-      if (match) {
-        const stat = fs.statSync(path.join(arDir, file));
-        aiResults.push({ file, timestamp: match[1], mode: match[2], size: stat.size });
-      }
-    }
-  }
-
   snapshots.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  aiResults.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  return { snapshots, aiResults };
+  return { snapshots };
 }

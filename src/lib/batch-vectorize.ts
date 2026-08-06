@@ -7,9 +7,11 @@
  *   - vectorizeOne：单条向量化，增量 modify 使用
  *   - deleteMemory：按 docId 删除（增量 modify/delete 使用），需传 scope
  *   - 底层走 vector-client（zvec 基座），替换原 mem CLI spawn；写入均为 async
- *   - doc id 由 vector-client 用 sha256(fullText+scope) 确定性生成，返回真实 docId
+ *   - doc id 由 vector-client 用 sha256(text+scope) 确定性生成，返回真实 docId
  *   - 失败条目记入 errors，不中断整体
- *   - 不处理 action=delete 条目（调用方过滤）
+ *
+ * 批次 3（REQ-04/05）：ScanResultEntry 瘦身为 {path, groupPath, text, memoryId, chunkRelation}，
+ * keywords 机制已删除，content 纯化为原文（entry.text）。
  */
 
 import type { ScanResultEntry } from './ai-results.js';
@@ -35,12 +37,11 @@ export interface BatchVectorizeOptions {
 /**
  * 构造向量化的 content 文本。
  *
- * content 纯化契约：直接返回传入的原始内容（ai-results 的 summary），
- * 不再手动拼接 `[摘要]/[关键词]/[路径]` 前缀；关键词通过 keywords 参数
- * 传给 vector-client（底层自动追加 `\n\n[关键词] xxx`，保证 BM25 全文召回）。
+ * content 纯化契约：直接返回 entry.text（直导为 chunk 原文 / 文件全文），
+ * 不再拼接 `[摘要]/[关键词]/[路径]` 前缀（REQ-05 keywords 机制已删除）。
  */
 export function buildVectorizeContent(entry: ScanResultEntry): string {
-  return entry.summary;
+  return entry.text;
 }
 
 /**
@@ -59,7 +60,6 @@ export async function vectorizeOne(
       scope,
       text: content,
       tags: VECTORIZE_TAG,
-      keywords: entry.keywords,
     });
     return { ok: true, memoryId: docId };
   } catch (err) {
@@ -69,7 +69,7 @@ export async function vectorizeOne(
 
 /**
  * 批量向量化（串行逐条）
- * @param entries  需要向量化的条目（调用方应预先过滤掉 action=delete）
+ * @param entries  需要向量化的条目
  * @param scope    目标 scope
  * @returns        ok Map（成功）+ errors（失败明细）
  */
@@ -82,10 +82,6 @@ export async function batchVectorize(
   const errors: { path: string; error: string }[] = [];
 
   for (const entry of entries) {
-    if (entry.action === 'delete') {
-      // 调用方未过滤，跳过以容错
-      continue;
-    }
     const r = await vectorizeOne(entry, scope, options);
     if (r.ok) {
       ok.set(entry.path, r.memoryId);
@@ -124,7 +120,7 @@ export async function deleteMemory(
  *
  * 一次调用完成全部条目的 embed + 写入，共享一次 engine。
  *
- * @param entries  需要向量化的条目（调用方应预先过滤掉 action=delete）
+ * @param entries  需要向量化的条目
  * @param scope    目标 scope
  * @param options  选项
  * @returns        ok Map（path → 真实 docId）+ errors（失败明细）
@@ -145,7 +141,6 @@ export async function bulkVectorize(
       entries: entries.map((e) => ({
         text: buildVectorizeContent(e),
         tags: VECTORIZE_TAG,
-        keywords: e.keywords,
       })),
     });
     for (const item of result.results) {

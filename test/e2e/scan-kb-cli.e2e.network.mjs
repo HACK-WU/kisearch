@@ -6,23 +6,23 @@
  *   → src/lib/{import,incremental,diff,batch-vectorize,path-vectorize,vector-client}.ts
  *   → dist/zvec-engine（真实 SiliconFlow embedding + 真实 zvec worker）
  * 与 step-c-cli.e2e.network.mjs / kisearch-cli.e2e.network.mjs 互补：本文件覆盖
- * 外部知识库导入的"全量 import → diff → 增量 import（add/modify/delete）"闭环。
+ * 外部知识库导入的"全量直导 → diff → 增量直连（add/modify/delete）"闭环。
  *
+ * 批次 3（REQ-04）：ai-results 输入契约已删除，改为 --source 原文直导 / git diff 直连。
  * requirement_ref：MIGRATION_P3_MEM_TO_ZVEC（向量化管线 mem → zvec Vector Adapter）。
  *   断言只对照对外契约（CLI 入参 → JSON 输出与副作用），不依赖内部实现。
- *   重点回归：全量 import 必须把真实 docId 持久化到 relations-cache，使后续
+ *   重点回归：全量直导必须把真实 docId 持久化到 relations-cache，使后续
  *   diff → 增量 modify/delete 能关联旧向量（docId 是 zvec 删除向量的唯一钥匙）。
  *
  * 覆盖旅程（共享 Context 串联；顺序敏感）：
  *   setup       : 载入 .env.e2e → 临时 dataDir + vectorDir + config.json（隔离，不污染 ~/.ki）
  *                 + 一个 git 仓库 fixture 作为外部知识库 sourceDir
- *   E2E-1 full  : import full → ok + mode:full + stats.vectorized=2 + source.commit(40-hex)
+ *   E2E-1 full  : import --source 直导 → ok + mode:full + stats.total=2 + source.commit(40-hex)
  *   E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）
  *   E2E-3 diff0 : diff（无变更）→ stats.total=0
  *   E2E-4 diffN : 改 a.md + 增 c.md + 删 b.md + commit → diff → added/modified/deleted 各 1
- *                 且 modified/deleted 关联到 docId（32-hex）← 全量 import 持久化 docId 的回归点
- *   E2E-5 inc   : 用 diff 输出构造增量 ai-results → import --mode incremental
- *                 → mode:incremental + added=1 + modified=1 + deleted=1 + errors=0
+ *                 且 modified/deleted 关联到 docId（32-hex）← 全量直导持久化 docId 的回归点
+ *   E2E-5 inc   : import --mode incremental（git diff 直连）→ mode:incremental + added=1 + modified=1 + deleted=1 + errors=0
  *   E2E-6 verify: 删除项的旧向量应被清理（search 不再召回）；再 diff → total=0
  *   teardown    : 删除临时目录
  *
@@ -107,12 +107,6 @@ function ki(args, timeout = 180_000) {
   return { status: res.status, stdout, stderr: res.stderr ?? '', json };
 }
 
-function writeJsonFile(name, data) {
-  const p = path.join(ctx.tmpBase, name);
-  fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
-  return p;
-}
-
 // ─── setup / teardown ───
 
 before(() => {
@@ -164,21 +158,15 @@ after(() => {
 
 // ─── 旅程 ───
 
-test('E2E-1 full: import full → ok + mode:full + vectorized=2 + source.commit(40-hex)', { ...SKIP, timeout: 180_000 }, () => {
-  const full = writeJsonFile('full.json', {
-    meta: { sourceDir: ctx.sourceDir, rootName: ROOT_NAME },
-    entries: [
-      { path: 'a.md', groupPath: `${ROOT_NAME}/工具库`, relation: 'AES 加密工具', summary: 'AES 对称加密算法用于数据保护与传输安全', keywords: ['AES', '加密'] },
-      { path: 'sub/b.md', groupPath: `${ROOT_NAME}/财务`, relation: '季度对账流程', summary: '季度财务报表结算与对账科目明细', keywords: ['财务', '对账'] },
-    ],
-  });
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--results', full]);
+test('E2E-1 full: import --source 直导 → ok + mode:full + total=2 + source.commit(40-hex)', { ...SKIP, timeout: 180_000 }, () => {
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--root-name', ROOT_NAME]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
   assert.equal(r.json?.ok, true, `import 应成功；实际=${JSON.stringify(r.json)}`);
   assert.equal(r.json.mode, 'full', `应为全量模式；实际=${JSON.stringify(r.json)}`);
-  assert.equal(r.json.stats.vectorized, 2, `应向量化 2 条；实际=${JSON.stringify(r.json.stats)}`);
+  assert.equal(r.json.stats.total, 2, `应导入 2 个 chunk（a.md + sub/b.md 各 1）；实际=${JSON.stringify(r.json.stats)}`);
+  assert.equal(r.json.stats.errors, 0, `不应有错误；errors=${JSON.stringify(r.json.errors)}`);
   assert.match(r.json.source.commit, /^[0-9a-f]{40}$/, `source.commit 应为 git HEAD；实际=${r.json.source?.commit}`);
-  console.log(`  ✓ full import：vectorized=${r.json.stats.vectorized} commit=${r.json.source.commit.slice(0, 8)}`);
+  console.log(`  ✓ full 直导：chunks=${r.json.stats.total} commit=${r.json.source.commit.slice(0, 8)}`);
 });
 
 test('E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）', { ...SKIP, timeout: 180_000 }, () => {
@@ -186,7 +174,7 @@ test('E2E-2 recall: search → 语义召回全量向量化写入的模块（证�
   assert.equal(r.json?.ok, true, `search 应成功；${JSON.stringify(r.json)}`);
   assert.ok(Array.isArray(r.json.results) && r.json.results.length > 0, `应召回结果；实际=${JSON.stringify(r.json.results)}`);
   const hit = r.json.results.some((x) => (x.content ?? '').includes('对称加密'));
-  assert.ok(hit, `语义召回应命中全量写入的 ki-search 向量；实际=${JSON.stringify(r.json.results.map((x) => x.content?.slice(0, 40)))}`);
+  assert.ok(hit, `语义召回应命中直导写入的 ki-search 向量；实际=${JSON.stringify(r.json.results.map((x) => x.content?.slice(0, 40)))}`);
   console.log(`  ✓ recall 命中全量向量；返回 ${r.json.results.length} 条`);
 });
 
@@ -210,28 +198,16 @@ test('E2E-4 diffN: 改/增/删 + commit → diff 各 1，且 modified/deleted �
   assert.equal(r.json.stats.added, 1, `added 应为 1；实际=${JSON.stringify(r.json.stats)}`);
   assert.equal(r.json.stats.modified, 1, `modified 应为 1；实际=${JSON.stringify(r.json.stats)}`);
   assert.equal(r.json.stats.deleted, 1, `deleted 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  // 关键回归：全量 import 已持久化真实 docId，diff 应能为 modified/deleted 关联 docId
-  assert.match(r.json.modified[0].memoryId ?? '', DOC_ID_RE, `modified 应关联 docId（全量 import 持久化回归）；实际=${JSON.stringify(r.json.modified)}`);
-  assert.match(r.json.deleted[0].memoryId ?? '', DOC_ID_RE, `deleted 应关联 docId（全量 import 持久化回归）；实际=${JSON.stringify(r.json.deleted)}`);
-  // 暂存到 ctx 供 E2E-5 构造增量
-  ctx._diff = r.json;
+  // 关键回归：全量直导已持久化真实 docId，diff 应能为 modified/deleted 关联 docId
+  assert.match(r.json.modified[0].memoryId ?? '', DOC_ID_RE, `modified 应关联 docId（全量直导持久化回归）；实际=${JSON.stringify(r.json.modified)}`);
+  assert.match(r.json.deleted[0].memoryId ?? '', DOC_ID_RE, `deleted 应关联 docId（全量直导持久化回归）；实际=${JSON.stringify(r.json.deleted)}`);
   console.log(`  ✓ diff：+${r.json.stats.added}/~${r.json.stats.modified}/-${r.json.stats.deleted}；modified.docId=${r.json.modified[0].memoryId.slice(0, 12)}…`);
 });
 
-test('E2E-5 inc: 用 diff 输出构造增量 → import --mode incremental → add/modify/delete 各 1，errors=0', { ...SKIP, timeout: 180_000 }, () => {
-  const diff = ctx._diff;
-  assert.ok(diff, 'E2E-4 应已产出 diff 结果');
-  const inc = writeJsonFile('inc.json', {
-    meta: { sourceDir: ctx.sourceDir, rootName: ROOT_NAME },
-    entries: [
-      { path: 'c.md', groupPath: `${ROOT_NAME}/工具库`, relation: 'RSA 非对称加密', summary: 'RSA 非对称加密用于密钥交换与数字签名', keywords: ['RSA', '非对称加密'], action: 'add' },
-      { path: 'a.md', groupPath: `${ROOT_NAME}/工具库`, relation: 'AES 加密工具', summary: 'AES-GCM 在对称加密上额外提供完整性校验', keywords: ['AES', 'GCM', '完整性'], memoryId: diff.modified[0].memoryId, action: 'modify' },
-      { path: 'sub/b.md', groupPath: `${ROOT_NAME}/财务`, relation: '季度对账流程', summary: '', keywords: [], memoryId: diff.deleted[0].memoryId, action: 'delete' },
-    ],
-  });
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--mode', 'incremental', '--results', inc]);
+test('E2E-5 inc: import --mode incremental（git diff 直连）→ add/modify/delete 各 1，errors=0', { ...SKIP, timeout: 180_000 }, () => {
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--mode', 'incremental']);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
-  assert.equal(r.json?.ok, true, `增量 import 应成功；${JSON.stringify(r.json)}`);
+  assert.equal(r.json?.ok, true, `增量直连应成功；${JSON.stringify(r.json)}`);
   assert.equal(r.json.mode, 'incremental');
   assert.equal(r.json.stats.added, 1, `added 应为 1；实际=${JSON.stringify(r.json.stats)}`);
   assert.equal(r.json.stats.modified, 1, `modified 应为 1；实际=${JSON.stringify(r.json.stats)}`);

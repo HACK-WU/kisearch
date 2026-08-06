@@ -34,7 +34,7 @@
 
 ### `sync-relation.ts` 单条模式参数不完整
 
-单条模式要求同时提供 `--group`、`--relation`、`--module-info`、`--keywords`。
+单条模式要求同时提供 `--group`、`--relation`、`--module-info`。
 
 ---
 
@@ -77,29 +77,35 @@
 
 恢复：确认文件变更已 commit，再执行 diff。
 
-### `meta.sourceDir 不存在或不是目录`
+### `sourceDir 不存在或不是目录`
 
-原因：`--source-dir` 路径写错，或传入的是文件而非目录。
+原因：`--source` 路径写错，或传入的是文件而非目录。
 
 恢复：确认路径指向外部 Markdown 知识库根目录。
 
-### `meta.rootName 与首次导入不一致`
+### 增量导入时 rootName 与首次不一致
 
-原因：增量导入时 `meta.rootName` 与 `source.rootName` 不匹配。
+原因：`--mode incremental` 缺省复用 source 块时，source 块中记录的 `rootName` 与预期不符（增量不允许更改 rootName）。
 
-恢复：使用与首次导入相同的 `rootName`。
+恢复：保持与首次导入相同的 `--source` 目录（rootName 从 source 块读取）。
 
-### `entries[].path 必填且为字符串`
+### 增量导入 source 目录无 md 文件
 
-原因：`ai-results.json` 格式有误，缺少必填的 `path` 字段。
+原因：`--mode incremental` 传入的 source 目录中没有 Markdown 文件。
 
-恢复：检查 JSON 格式，确保每条 entry 包含 `path`。
+恢复：确认 source 目录路径正确，且包含 `.md` 文件。
 
-### `action=delete 必须携带 memoryId`
+### 增量导入未首次导入
 
-原因：增量删除条目缺少旧 `memoryId`。
+原因：`--mode incremental` 时 scope 尚无 `group-index.source` 块（从未全量导入）。
 
-恢复：先执行 `scan-kb diff` 获取变更文件的 `memoryId`，填入 `ai-results.json`。
+恢复：先执行 `scan-kb import --source <dir> --root-name <name>` 完成全量导入。
+
+### 未知 --mode
+
+原因：`--mode` 只接受 `full` / `incremental`。
+
+恢复：检查 `--mode` 参数拼写。
 
 ### `Access denied to scope: <scope>`
 

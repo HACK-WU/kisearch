@@ -274,19 +274,33 @@ openclaw memory-pro stats
 - [x] 检索：`ki search --scope wiki-test --query "告警收敛"` alarm-01 命中第一（注意：`npx jiti src/search.ts --query ...` 直接运行，不带 `search` 子命令参数）
 - [x] 增量 add（new.md）+ delete（alarm.md）：add=1/delete=1/errors=0，commit 8713b8ee→4bbfcd93，alarm-01 消失、new-01 添加、deploy chunks 保留
 - [x] 增量 modified（deploy 8 chunks→1 chunk）：删旧修复后 KB 层正确
-- [ ] 路径向量（ki-path/ki-relation）写入验证未闭环——**受向量库锁异常阻塞**（见下方阻塞点）
+- [x] 路径向量（ki-path/ki-relation）写入验证闭环：**2026-08-06 环境切换 macOS 后阻塞解除**，`ki doctor` 10 通过，`search`/`doc list` 正常
 
 ### 阻塞点（重要）
 
-- **向量库锁异常**：调试路径向量时误删 RocksDB LOCK 文件导致集合半损坏，`ZVecOpen` 挂起不返回（引擎已知行为，probe 超时误判 locked）。已 pkill 挂起进程恢复现场，向量库未删除（mv 未执行）。**后续所有涉及向量写入的命令必须用 `timeout 60` 包裹，禁止无超时执行**（AGENTS.md 底部已加此约定）
+- ~~**向量库锁异常**~~ **已解除（2026-08-06）**：原记录在 WSL 环境（`/root/.ki-data/wiki-test/`）；当前环境为 macOS，`~/.ki/vector` 于 22:00 重建，`lsof` 无进程持锁，`ki doctor` 全绿。**约定保留**：涉及向量写入的命令用 `perl -e 'alarm N; exec @ARGV'` 包裹（macOS 无 `timeout`）
 - 陈旧锁处理记录：`/root/.ki/vector/LOCK`（零字节）与 `fts.2.rocksdb/LOCK`、`scalar.index.1.rocksdb/LOCK` 等 RocksDB 锁经 flock 测试均可获取（非真持锁），但 zvec probe 对锁文件存在即判 locked
 
-### 待办（批次 3~5，需求清单一半未实现）
+### 批次 3 已完成（2026-08-06，REQ-04/05/09/13）
 
-- [ ] **批次 3（删除旧链路 REQ-04/05/09/13）**：删除 ai-results 导入契约、keywords 全链路（sync-relation/query-group/migrate-keywords/export/wiki frontmatter）、isFullText（import.ts:226/incremental.ts:161 唯一 false 来源）、scan 子命令（含 scan-pending/scan-index）、restore --from-results、import-kb、vectorize；bulk_store → bulk-store 改名（MCP ki_bulk_store 名不变）
+- [x] **删除 ai-results 输入契约（REQ-04）**：`scan`/`vectorize` 子命令、`scan-pending.json`/`scan-index.json`（`getScanIndexPath` 删除）、restore `--from-results`、`backupAiResults`
+- [x] **删除 keywords 全链路（REQ-05）**：sync-relation 校验（`parseKeywords`/`isValidKeyword`/`invalid_keywords`）、query-group 词云、`migrate-keywords` 命令 + 脚本删除、export/wiki frontmatter keywords、vectorStore/vectorBulkStore/batch-vectorize 的 keywords 参数；Relation 接口去 keywords；MCP 返回结构同步
+- [x] **取消 isFullText（REQ-09）**：`upsertRelation` 不再写 `isFullText:false`、`isFullTextContent` 删除、SearchHit/relation-map/scoring 相关字段移除
+- [x] **删除 import-kb + bulk_store 改名（REQ-13）**：`import-kb.ts` 删除、`bulk_store` → `bulk-store`（MCP 工具名 `ki_bulk_store` 不变，数据结构同步）、`bin/ki.mjs` 命令映射清理
+- [x] **测试同步（REQ-15 随批）**：删除 scan-kb/import-kb/migrate-keywords/search-is-full-text/ai-results 测试文件；重写 sync-relation/integration/scan-kb-cli-e2e/e2e-bulk-import；清理 lib/manage-index/query-group/relation-map/rebuild-vector/vector-cli-functions/error-handling/scope-isolation/cli-help/restore 测试断言；**28 个测试文件全绿**
+- [x] **核心文档同步**：cli.md（scan-kb import/diff、search 定位字段、backup/restore、sync-relation）、scan-kb.md（重写为直导/直连）、backup-restore.md、error-handling.md
+- [x] **测试环境 embedding 注入**：`test/test-config.ts` 从环境变量 `SILICONFLOW_API_KEY`/`GITNEXUS_EMBEDDING_API_KEY` 注入 embedding 配置（不写死密钥），integration 等向量化用例可真实跑通
+
+### 批次 3 修复的批次 2 遗留 bug
+
+- [x] **`diff.ts` realpath 越界**：macOS `/var` → `/private/var` 软链导致 `path.relative(repoRoot, source.dir)` 计算出 `../../…` 越界 pathspec，git diff 失败。修复：`sourceDirReal = fs.realpathSync(source.dir)` 统一
+- [x] **`backup.ts` 缺失 `backupScopeSnapshot`**：批次 2 重写 backup.ts 时误删该函数（`autoBackup` 与 `restore.ts` 均引用），运行时 `backupScopeSnapshot is not defined`，restore 快照还原 4 用例失败。已按历史版本恢复（tar.gz 打包 + 防碰撞 + 预检）
+
+### 待办（批次 4~5）
+
 - [ ] **批次 4（CLI 简化 REQ-10/11/12）**：短别名（-s/-q/-t/-g/-r/-i/-o）、位置参数（`ki search "sas"`）、sync_relation 超长 module-info 警告（>1000 字符）
-- [ ] **批次 5（配套 REQ-14/15）**：docs 17 个 + skills 5 个文档同步（拆独立任务）；test 30+ 文件重构 + 删除 ai-results fixtures
-- [ ] 技术设计遗留：P-5（grep 清点 `scan-index|getScanIndexPath` 消费方）、P-6（FTS 规模量化实测）、P-7（超大文件上限数值确认：2MB / 500 chunk）
+- [ ] **批次 5（配套 REQ-14/15）**：docs 剩余 13 个（build-kb/workflows/manage-index/architecture/verify-index/memory-system-dataflow/tags-design 等整篇旧流程）+ skills 5 个文档同步（拆独立任务）
+- [ ] 技术设计遗留：P-5（grep 清点 `scan-index|getScanIndexPath` 消费方——已随批次 3 清理，待复核）、P-6（FTS 规模量化实测）、P-7（超大文件上限数值确认：2MB / 500 chunk）
 - [ ] **重建向量库后补验路径向量**：备份 + 删除 `/root/.ki/vector` 让引擎 create 自愈，重跑直导 + 增量全链路（用 timeout 包裹）
 
 ### 相关资产

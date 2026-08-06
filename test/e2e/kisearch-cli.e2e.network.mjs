@@ -1,15 +1,16 @@
 /**
  * kisearch-cli.e2e.network.mjs —— ki CLI 上层链路真实端到端验收（黑盒）
  *
- * 被测对象（"当前代码"）：ki store / bulk_store / search 三条 CLI
+ * 被测对象（"当前代码"）：ki store / bulk-store / search 三条 CLI
  *   → bin/ki.mjs → src/{store,bulk-store,search}.ts → src/lib/vector-client.ts
  *   → dist/zvec-engine（真实 SiliconFlow embedding + 真实 zvec worker）
  * 与已有的 zvec-engine-e2e.network.mjs 互补：后者直接打引擎，本文件走**真实 CLI 进程**，
  * 覆盖 Vector Adapter + 命令层的对外契约。
  *
- * requirement_ref：MIGRATION_STEP_C 前置（Step A：search/store/bulk_store 迁移 zvec）
+ * requirement_ref：MIGRATION_STEP_C 前置（Step A：search/store/bulk-store 迁移 zvec）
  *   + requirement §4.4（写入部分失败不静默）。断言只对照对外契约（入参→CLI JSON 输出/副作用），
  *   不依赖代码内部实现。
+ * 批次 3（REQ-13）：命令名 bulk_store → bulk-store。
  *
  * 覆盖旅程（共享 Context 串联；顺序敏感——先写后查）：
  *   setup            : 载入 .env.e2e → 临时 vectorDir + 临时 config.json（隔离，不污染 ~/.ki）
@@ -175,13 +176,13 @@ test('E2E-3 seed: 写入 A2 / scope B 私有 / ki-relation 标签文档', { ...S
 
 test('E2E-4 bulk: 批量写入 → total/succeeded/failed + 逐项 results', { ...SKIP, timeout: 120_000 }, () => {
   const batch = [
-    { text: '向量索引使用 HNSW 图结构实现近似最近邻搜索，兼顾召回率与查询延迟。', keywords: 'HNSW,向量索引', tags: TAG_SEARCH },
-    { text: 'RRF 倒数排名融合把向量召回与全文召回两路结果按排名加权合并，提升整体相关性。', keywords: 'RRF,融合', tags: TAG_SEARCH },
+    { text: '向量索引使用 HNSW 图结构实现近似最近邻搜索，兼顾召回率与查询延迟。', tags: TAG_SEARCH },
+    { text: 'RRF 倒数排名融合把向量召回与全文召回两路结果按排名加权合并，提升整体相关性。', tags: TAG_SEARCH },
     { text: 'jieba 分词让中文全文检索能对代码符号与术语做精确匹配召回。', tags: TAG_SEARCH },
   ];
   const batchFile = path.join(ctx.tmpBase, 'batch.json');
   fs.writeFileSync(batchFile, JSON.stringify(batch));
-  const r = ki(['bulk_store', '--scope', SCOPE_A, '--input', batchFile]);
+  const r = ki(['bulk-store', '--scope', SCOPE_A, '--input', batchFile]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}`);
   assert.equal(r.json?.ok, true, `bulk 应成功；${JSON.stringify(r.json)}`);
   assert.equal(r.json.total, 3, 'total=3');

@@ -67,13 +67,6 @@ export function getRelationsCachePath(scope: string): string {
 }
 
 /**
- * 获取 scan-index.json 绝对路径
- */
-export function getScanIndexPath(scope: string): string {
-  return path.join(getKbDir(scope), 'scan-index.json');
-}
-
-/**
  * 获取本地 KB 中某个 Group 的 index.json 路径
  * @param scope 项目标识
  * @param groupPath Group 路径，如 "监控/告警中心"

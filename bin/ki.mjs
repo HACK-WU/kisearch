@@ -7,7 +7,7 @@
  *   ki <command> [options]
  * 
  * 示例：
- *   ki scan-kb import --scope my-project --results ai-results.json
+ *   ki scan-kb import --scope my-project --source ./wiki --root-name wiki
  *   ki manage-index --scope my-project --action create-root --root-name "我的项目"
  *   ki query-group --scope my-project
  */
@@ -33,13 +33,11 @@ const COMMANDS = {
   'get-module-info': 'src/get-module-info.ts',
   'sync-relation': 'src/sync-relation.ts',
   'delete-relation': 'src/delete-relation.ts',
-  'import-kb': 'src/import-kb.ts',
-  'migrate-keywords': 'src/migrate-keywords.ts',
   'mcp': 'src/mcp-server.ts',
   'setup': 'src/setup.ts',
   'search': 'src/search.ts',
   'store': 'src/store.ts',
-  'bulk_store': 'src/bulk-store.ts',
+  'bulk-store': 'src/bulk-store.ts',
   'scope': 'src/scope.ts',
   'doc': 'src/doc.ts',
   'tag': 'src/tag.ts',
@@ -81,25 +79,23 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki <command> [options]
 
 命令：
-  scan-kb           统一入口：import / diff / scan / vectorize
+  scan-kb           统一入口：import（--source 直导/增量直连）/ diff
   manage-index      Group 树 CRUD
-  query-group       查询 Group + 词云 + 分区
+  query-group       查询 Group + 分区
   get-module-info   读取本地 KB 原文
-  sync-relation     写入 Relation + 关键词校验
+  sync-relation     写入 Relation + 本地 KB
   delete-relation   删除 Relation 及其关联数据（cache + KB + wiki + 向量）
   search            语义检索知识库内容
   store             存储文本到向量索引
-  bulk_store        批量存储文本到向量索引
+  bulk-store        批量存储文本到向量索引
   scope             scope 管理：list / delete / clear（KB + 向量两层）
   doc               向量文档管理：list / delete
   tag               向量 tag 发现：list（只读，含文档数）
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）
   backup            备份 scope 目录快照
-  restore           从快照或 ai-results 还原
+  restore           从快照还原
   export            导出 KB 为 Wiki Markdown
-  import-kb         @deprecated 旧导入
-  migrate-keywords  数据迁移
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
   setup             下载 Skills / Rules 到目标项目目录
 
@@ -109,7 +105,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 示例：
   ki config init
   ki doctor
-  ki scan-kb import --scope my-project --results ai-results.json
+  ki scan-kb import --scope my-project --source ./wiki --root-name wiki
   ki scope list
   ki doc list --scope my-project --limit 10
   ki tag list --scope my-project

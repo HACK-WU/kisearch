@@ -9,7 +9,7 @@ ki 提供内置的备份恢复命令：
 | 命令 | 说明 | 用法 |
 |------|------|------|
 | `ki backup` | 备份 scope 目录快照 | `ki backup <scope>` |
-| `ki restore` | 从快照或 ai-results 还原 | `ki restore <scope> --from-snapshot` |
+| `ki restore` | 从快照还原 | `ki restore <scope> --from-snapshot` |
 | `ki config init` | 生成配置文件（含备份目录配置） | `ki config init` |
 
 **快速备份**：
@@ -24,14 +24,12 @@ ki restore scope-name
 
 # 从快照恢复
 ki restore scope-name --from-snapshot --yes
-
-# 从 ai-results 重放
-ki restore scope-name --from-results
 ```
 
 **备份存储位置**：
 - 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
-- ai-results：`{backupDir}/{scope}/ai-results/ai-results.{timestamp}.{mode}.json`
+
+> （ai-results 备份已随批次 3 删除：REQ-04 移除 ai-results 输入契约，备份仅保留 scope 快照。）
 
 > 详细用法见 [CLI 参考 → backup](./cli.md#backup)、[CLI 参考 → restore](./cli.md#restore)、[CLI 参考 → config](./cli.md#config)
 
@@ -141,8 +139,7 @@ ki restore scope-name
       "snapshot.20260616-223000.tar.gz",
       "snapshot.20260615-100000.tar.gz",
       "snapshot.20260614-080000.tar.gz"
-    ],
-    "aiResults": ["ai-results.20260616-223000.full.json"]
+    ]
   }
 }
 ```
@@ -157,30 +154,15 @@ ki restore scope-name --from-snapshot --yes
 
 **指定备份根目录**（不传则使用配置中的默认 `backupDir`）：
 ```bash
-# --backup-dir 对「列出/快照还原/结果重放」均生效，
-# 按 <backup-dir>/<scope>/{snapshots,ai-results} 布局查找
+# --backup-dir 对「列出/快照还原」均生效，
+# 按 <backup-dir>/<scope>/snapshots 布局查找；安全网快照始终写默认 backupDir
 ki restore scope-name --backup-dir /path/to/other-backups
 ki restore scope-name --from-snapshot --timestamp 20260615-100000 --backup-dir /path/to/other-backups --yes
 ```
 
-### 2. 从 ai-results 重放
+> CLI 为非交互式：`--from-snapshot` 不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
 
-如果保存了 ai-results 备份文件，可以重放恢复：
-
-```bash
-# 先预览总览（不加 --yes 时仅展示总览并退出，不执行）
-ki restore scope-name --from-results
-
-# 确认总览无误后加 --yes 重新执行，真正重放还原
-ki restore scope-name --from-results --yes
-
-# 从指定目录重放
-ki restore scope-name --from-results --dir /path/to/ai-results --yes
-```
-
-> CLI 为非交互式：`--from-snapshot` 与 `--from-results` 均不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原/重放来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
-
-### 3. 从模板重新初始化
+### 2. 从模板重新初始化
 
 当没有备份且数据损坏时，可删除 scope 目录后重新初始化：
 
@@ -190,10 +172,10 @@ rm -rf kb/{scope}
 
 # 触发自动初始化（运行任一 ki 命令即可）
 ki manage-index --action list-scopes
-ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化" --keywords "初始化"
+ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化"
 
-# 重新导入数据（如有原始 ai-results.json）
-ki scan-kb import --scope {scope} --results ai-results.json
+# 重新导入数据（原文直导）
+ki scan-kb import --scope {scope} --source /path/to/wiki --root-name wiki
 ```
 
 ---
@@ -242,8 +224,8 @@ ki manage-index --scope {scope} --action create --name "初始化"
 # 从快照恢复
 ki restore {scope} --from-snapshot --yes
 
-# 或重新导入知识库
-ki scan-kb import --scope {scope} --results ai-results.json
+# 或重新导入知识库（原文直导）
+ki scan-kb import --scope {scope} --source /path/to/wiki --root-name wiki
 ```
 
 ---

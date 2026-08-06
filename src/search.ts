@@ -29,28 +29,12 @@ function tagPriority(tag: string): number {
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
-/**
- * 判定 content 是否为全文（前缀推断兜底）。
- *
- * 兜底契约：仅用于"未命中 relations-cache 反查"的数据（ki store / bulk-store
- * 等只写向量层、不写 relations-cache 的数据）。content 纯化后摘要类写入方不再
- * 加 `[摘要]` 前缀，因此兜底恒为 true（用户直传原文）；旧数据以 `[摘要]` 开头
- * 时判定为摘要（false）。
- */
-export function isFullTextContent(content: string): boolean {
-  return !content.startsWith('[摘要]');
-}
-
 /** 搜索结果：附带 memoryId 反查的原文定位信息 */
 export interface SearchHit extends VectorSearchResult {
   /** 所属 Group 路径（relations-cache 反查，可能缺失） */
   group?: string;
   /** 原文全文（relations-cache 的 hot_relation.text，可能缺失） */
   relation?: string;
-  /** 当前内容所在 Group 的索引关键词（group 级 keywords，可能缺失） */
-  keywords?: string[];
-  /** content 是否为全文（仅 ki-search 结果计算；true=可作原文引用，false=AI 摘要） */
-  isFullText?: boolean;
 }
 
 export type SearchResult =
@@ -108,12 +92,8 @@ export async function executeSearch(params: {
       raw = perTag.flatMap((p) => p.hits);
     }
 
-    // 按 memoryId 反查 relations-cache：命中附加 group / relation / keywords 定位原文
+    // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文
     // （getRelationMap 带 TTL+mtime 缓存：首次构建 O(N)，后续 O(1)）
-    // isFullText 仅对 ki-search tag 计算：
-    //   - 命中反查 → 读 rel.isFullText（缺失默认 false=摘要，兼容旧数据）
-    //   - 未命中（ki store / bulk-store 只写向量层）→ 前缀推断兜底 isFullTextContent
-    //     （content 纯化后无 [摘要] 前缀 → 兜底恒为 true，符合"用户直传原文"语义）
     const map = getRelationMap(scope);
     const results: SearchHit[] = raw.map((r) => {
       const hit: SearchHit = { ...r };
@@ -121,10 +101,6 @@ export async function executeSearch(params: {
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
-        hit.keywords = meta.keywords;
-      }
-      if (r.tag === 'ki-search') {
-        hit.isFullText = meta ? (meta.isFullText ?? false) : isFullTextContent(r.content);
       }
       return hit;
     });

@@ -380,12 +380,8 @@ describe('自动迁移（旧格式 → 新格式）', () => {
       // hot_relations 合并去重
       assert.strictEqual(apiGroup.hot_relations.length, 2);
 
-      // keywords 合并去重（kw2 只保留一份）
-      assert.ok(apiGroup.keywords.includes('kw1'));
-      assert.ok(apiGroup.keywords.includes('kw2'));
-      assert.ok(apiGroup.keywords.includes('kw3'));
-      // kw2 不应重复
-      assert.strictEqual(apiGroup.keywords.filter((k: string) => k === 'kw2').length, 1);
+      // keywords 不再合并（REQ-05 已删除 keywords 机制，保留新 key 原值）
+      assert.deepStrictEqual(apiGroup.keywords, ['kw2', 'kw3']);
     } finally {
       if (fs.existsSync(kbDir)) {
         fs.rmSync(kbDir, { recursive: true, force: true });

@@ -365,7 +365,6 @@ export async function vectorStore(params: {
   scope: string;
   text: string;
   tags?: string;
-  keywords?: string[];
   group?: string;
 }): Promise<VectorStoreResult> {
   if (params.text.length > MAX_TEXT_LENGTH) {
@@ -376,15 +375,10 @@ export async function vectorStore(params: {
   const engine = await getEngine();
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
-  // 关键词追加到 text 末尾（与 mem 行为一致，提升召回）
-  const fullText = params.keywords?.length
-    ? `${params.text}\n\n[关键词] ${params.keywords.join(', ')}`
-    : params.text;
-
-  const docId = generateDocId(fullText, scope);
+  const docId = generateDocId(params.text, scope);
   const result = await engine.upsert([{
     id: docId,
-    text: fullText,
+    text: params.text,
     fields: {
       [TAG_FIELD]: tag,
       [SCOPE_FIELD]: scope,
@@ -404,7 +398,7 @@ export async function vectorStore(params: {
  */
 export async function vectorBulkStore(params: {
   scope: string;
-  entries: { text: string; tags?: string; keywords?: string[]; group?: string }[];
+  entries: { text: string; tags?: string; group?: string }[];
 }): Promise<VectorBulkStoreResult> {
   if (params.entries.length === 0) {
     return { total: 0, succeeded: 0, failed: 0, results: [] };
@@ -415,12 +409,9 @@ export async function vectorBulkStore(params: {
 
   const docs = params.entries.map((e) => {
     const tag = normalizeTag(e.tags ?? DEFAULT_TAG);
-    const fullText = e.keywords?.length
-      ? `${e.text}\n\n[关键词] ${e.keywords.join(', ')}`
-      : e.text;
     return {
-      id: generateDocId(fullText, scope),
-      text: fullText,
+      id: generateDocId(e.text, scope),
+      text: e.text,
       fields: {
         [TAG_FIELD]: tag,
         [SCOPE_FIELD]: scope,

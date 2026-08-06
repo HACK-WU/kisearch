@@ -446,28 +446,20 @@ describe('CLI 纯函数 · executeBulkStore', () => {
     assert.equal(mockBulkCalls[0].entries[0].tags, 'ki-search');
   });
 
-  it('keywords 字符串逗号分隔解析', async () => {
+  it('输入中的 keywords 字段被忽略（REQ-05 已删除）', async () => {
     mockBulkCalls = [];
     fs.writeFileSync(tmpInput, JSON.stringify([
       { text: 'keyword测试', keywords: 'Redis, 缓存, TTL' },
-    ]), 'utf-8');
-    await bulkStoreModule.executeBulkStore({
-      scope: 'test',
-      inputFile: tmpInput,
-    });
-    assert.deepEqual(mockBulkCalls[0].entries[0].keywords, ['Redis', '缓存', 'TTL']);
-  });
-
-  it('keywords 数组直接传递', async () => {
-    mockBulkCalls = [];
-    fs.writeFileSync(tmpInput, JSON.stringify([
       { text: 'keyword数组', keywords: ['A', 'B'] },
     ]), 'utf-8');
     await bulkStoreModule.executeBulkStore({
       scope: 'test',
       inputFile: tmpInput,
     });
-    assert.deepEqual(mockBulkCalls[0].entries[0].keywords, ['A', 'B']);
+    for (const entry of mockBulkCalls[0].entries) {
+      assert.strictEqual('keywords' in entry, false, 'keywords 字段不应再透传（REQ-05）');
+    }
+    assert.strictEqual(mockBulkCalls[0].entries.length, 2);
   });
 });
 

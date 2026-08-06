@@ -179,7 +179,6 @@ describe('recordUse 防刷分', () => {
     score: 0,
     useCount: 0,
     lastUsedTime: null,
-    keywords: [],
     isImported: false,
   };
 
@@ -227,7 +226,6 @@ describe('hybridPartition 冷热分区', () => {
       score: 0,
       useCount,
       lastUsedTime: hoursAgo >= 0 ? now - hoursAgo * 3600000 : null,
-      keywords: [],
       isImported,
     };
   }
@@ -280,7 +278,7 @@ describe('hybridPartition 冷热分区', () => {
 
 describe('boundaryDecay 边界衰减', () => {
   function makeRelation(id: string, score: number): Relation {
-    return { id, text: id, score, useCount: 1, lastUsedTime: Date.now(), keywords: [], isImported: false };
+    return { id, text: id, score, useCount: 1, lastUsedTime: Date.now(), isImported: false };
   }
 
   it('不触发衰减（新分数低于热区最低）', () => {

@@ -92,24 +92,7 @@ describe('Relations 缓存异常', () => {
   it('sync-relation 空 module-info 被拒绝', async () => {
     const s = await mkScope('err-r');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'x', '--module-info', '', '--keywords', 'x']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('需要'));
-  });
-  it('keywords 不在原文中被移除', async () => {
-    const s = await mkScope('err-r');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'kw', '--module-info', '# t\n只有测试', '--keywords', '测试,虚构']);
-    assert.strictEqual(r.ok, true);
-    assert.strictEqual(r.keywords.length, 1);
-    assert.ok(r.invalid_keywords.includes('虚构'));
-  });
-  it('keywords 为空仍继续', async () => {
-    const s = await mkScope('err-r');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    // 传逗号分隔无实际关键词，split 后产生空数组，但 commander 会传空字符串
-    // 当前实现：空字符串为 falsy，被参数校验拦截
-    const r = runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'empty', '--module-info', '# t\n内容', '--keywords', '']);
+    const r = runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'x', '--module-info', '']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('需要'));
   });
@@ -127,7 +110,7 @@ describe('本地 KB 异常', () => {
   it('get-module-info 本地 KB 缺失', async () => {
     const s = await mkScope('err-kb');
     runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A', '--module-info', '# A\nA内容', '--keywords', 'A']);
+    runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A', '--module-info', '# A\nA内容']);
     const { getLocalKbDir } = await import('../src/lib/scope.js');
     fs.rmSync(getLocalKbDir(s, 'wiki/t'));
     const r = runJson('get-module-info.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A']);
@@ -163,84 +146,43 @@ describe('展示参数校验', () => {
   });
 });
 
-// ─── §8 预扫描异常 ───
-describe('预扫描异常', () => {
-  it('scan-kb source 目录不存在', async () => {
-    const s = await mkScope('err-scan');
-    const r = runJson('scan-kb.ts', ['scan', '--scope', s, '--source', '/nonexistent/path', '--root-name', 'wiki']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('source 目录不存在或不是目录'));
-    assert.ok(r.hint.includes('--source'));
-    assert.ok(Array.isArray(r.next_step));
-    assert.ok(r.next_step.length >= 2);
-  });
-  it('scan-kb vectorize 无 scan-index', async () => {
-    const s = await mkScope('err-scan');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('scan-kb.ts', ['vectorize', '--scope', s]);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('scan-index.json 不存在'));
-    assert.ok(r.hint.includes('scan --results'));
-    assert.ok(Array.isArray(r.possible_causes));
-    assert.ok(r.possible_causes.some((item: string) => item.includes('scan-pending.json')));
-  });
-  it('scan-kb scan --results 缺少 pending 文件时给出下一步提示', async () => {
-    const s = await mkScope('err-scan');
-    const src = mkTmp('ki-err-results-no-pending');
-    const resultsFile = path.join(src, 'results.json');
-    fs.writeFileSync(resultsFile, JSON.stringify({ entries: [] }, null, 2));
-
-    const r = runJson('scan-kb.ts', ['scan', '--scope', s, '--source', src, '--root-name', 'wiki', '--results', resultsFile]);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('scan-pending.json 不存在'));
-    assert.ok(r.hint.includes('不带 `--results` 的 `scan`'));
-    assert.ok(Array.isArray(r.next_step));
-    assert.ok(r.next_step[0].includes('scan --scope'));
-  });
-  it('scan-kb scan --results 缺少结果文件时返回格式示例', async () => {
-    const s = await mkScope('err-scan');
-    const src = mkTmp('ki-err-missing-results');
-    runJson('scan-kb.ts', ['scan', '--scope', s, '--source', src, '--root-name', 'wiki']);
-
-    const r = runJson('scan-kb.ts', ['scan', '--scope', s, '--source', src, '--root-name', 'wiki', '--results', path.join(src, 'missing.json')]);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('results 文件不存在'));
-    assert.ok(r.hint.includes('entries'));
-    assert.deepStrictEqual(r.example.entries[0].keywords, ['API', '接口', '认证']);
-  });
-  it('scan-kb vectorize --complete 缺少完成文件时返回格式示例', async () => {
-    const s = await mkScope('err-scan');
-    const r = runJson('scan-kb.ts', ['vectorize', '--scope', s, '--complete', '/tmp/not-found-complete.json']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('complete 文件不存在'));
-    assert.ok(r.hint.includes('memoryId'));
-    assert.strictEqual(r.example.entries[0].path, 'docs/api.md');
-  });
-  it('scan-kb 空 md 文件被跳过', async () => {
-    const s = await mkScope('err-scan');
-    const src = mkTmp('ki-err-empty');
-    fs.writeFileSync(path.join(src, 'empty.md'), '');
-    fs.writeFileSync(path.join(src, 'good.md'), '# good');
-    const r = runJson('scan-kb.ts', ['scan', '--scope', s, '--source', src, '--root-name', 'wiki']);
-    assert.strictEqual(r.ok, true);
-    assert.strictEqual(r.total_files, 1);
-    const pending = JSON.parse(fs.readFileSync(r.pending_file, 'utf-8'));
-    assert.ok(!pending.files.some((f: any) => f.path === 'empty.md'));
-    assert.ok(pending.files.some((f: any) => f.path === 'good.md'));
-  });
-});
-
-// ─── §7 导入异常 ───
+// ─── §8 导入异常（直导 / 增量直连） ───
 describe('导入异常', () => {
-  it('import-kb source 目录不存在', async () => {
+  it('scan-kb import source 目录不存在', async () => {
     const s = await mkScope('err-imp');
-    const r = runJson('import-kb.ts', ['--scope', s, '--source', '/nonexistent', '--root-name', 'wiki']);
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', '/nonexistent/path', '--root-name', 'wiki']);
     assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('sourceDir 不存在或不是目录'));
   });
-  it('import-kb 空 root-name', async () => {
+  it('scan-kb import 空 root-name', async () => {
     const s = await mkScope('err-imp');
     const src = mkTmp('ki-err-root');
-    const r = runJson('import-kb.ts', ['--scope', s, '--source', src, '--root-name', '']);
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', '']);
     assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('--root-name'), `CLI 层应提示必须传 --root-name；实际=${r.error}`);
+  });
+  it('scan-kb import 目录无 md 文件', async () => {
+    const s = await mkScope('err-imp');
+    const src = mkTmp('ki-err-nomd');
+    fs.writeFileSync(path.join(src, 'a.txt'), 'not markdown');
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', 'wiki']);
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('未发现 .md 文件'));
+  });
+  it('scan-kb incremental 未首次导入', async () => {
+    const s = await mkScope('err-imp');
+    const src = mkTmp('ki-err-inc');
+    fs.writeFileSync(path.join(src, 'a.md'), '# a');
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--mode', 'incremental']);
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('尚未首次导入'));
+  });
+  it('scan-kb import 未知 mode', async () => {
+    const s = await mkScope('err-imp');
+    const src = mkTmp('ki-err-mode');
+    fs.writeFileSync(path.join(src, 'a.md'), '# a');
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', 'wiki', '--mode', 'bogus']);
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.includes('未知 --mode'));
   });
 });

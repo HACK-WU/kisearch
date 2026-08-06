@@ -56,7 +56,7 @@ describe('scope 物理隔离', () => {
     runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
 
     // scope A: sync relation
-    runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/监控', '--relation', '告警-A', '--module-info', '# A\nA内容', '--keywords', 'A']);
+    runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/监控', '--relation', '告警-A', '--module-info', '# A\nA内容']);
 
     // scope B: 不应看到 scope A 的 relation
     const outB = getOut('query-group.ts', ['--scope', sB, '--groups', 'wiki/监控']);
@@ -74,8 +74,8 @@ describe('scope 物理隔离', () => {
     runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--name', 'wiki']);
     runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
 
-    runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB A\nscope A 的数据库', '--keywords', 'DB,A']);
-    runJson('sync-relation.ts', ['--scope', sB, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB B\nscope B 的数据库', '--keywords', 'DB,B']);
+    runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB A\nscope A 的数据库']);
+    runJson('sync-relation.ts', ['--scope', sB, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB B\nscope B 的数据库']);
 
     // get-module-info from scope A
     const outA = getOut('get-module-info.ts', ['--scope', sA, '--group', 'wiki/config', '--relation', 'DB']);
@@ -126,29 +126,29 @@ describe('scope 物理隔离', () => {
     assert.strictEqual(idxA.groups.wiki['to-delete'], undefined);
   });
 
-  it('scan-kb 和 import-kb 在不同 scope 下隔离', async () => {
+  it('scan-kb import 直导在不同 scope 下隔离', async () => {
     const sA = await mkScope('iso-scan-a');
     const sB = await mkScope('iso-scan-b');
     const src = mkTmp('iso-src');
 
     fs.writeFileSync(path.join(src, 'doc.md'), '# doc\ncontent');
 
-    // scope A scan
-    const resultsFile = path.join(src, 'results.json');
-    const prepA = runJson('scan-kb.ts', ['scan', '--scope', sA, '--source', src, '--root-name', 'wiki']);
-    fs.writeFileSync(resultsFile, JSON.stringify({
-      entries: [{ path: 'doc.md', summary: 'content\n[路径] docs/doc.md', keywords: ['doc'], enriched: false }],
-    }));
-    runJson('scan-kb.ts', ['scan', '--scope', sA, '--source', src, '--root-name', 'wiki', '--results', resultsFile]);
+    // scope A 直导
+    const rA = runJson('scan-kb.ts', ['import', '--scope', sA, '--source', src, '--root-name', 'wiki']);
+    assert.strictEqual(rA.ok, true);
+    assert.strictEqual(rA.stats.total, 1);
 
-    // scope B: should have no scan-index
+    // scope B: 应无任何数据（initScope 会创建空 cache，groups 应为空）
     const { readJson } = await import('../src/lib/store.js');
-    const { getScanIndexPath } = await import('../src/lib/scope.js');
-    assert.strictEqual(readJson(getScanIndexPath(sB)), null);
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
+    const rcB = readJson<any>(getRelationsCachePath(sB));
+    assert.ok(rcB !== null);
+    assert.strictEqual(Object.keys(rcB.groups || {}).length, 0, 'scope B 不应有任何 Group');
 
-    // scope A should have it
-    const siA = readJson<any>(getScanIndexPath(sA));
-    assert.ok(siA !== null);
-    assert.strictEqual(siA.entries.length, 1);
+    // scope A: relations-cache 已写入
+    const rcA = readJson<any>(getRelationsCachePath(sA));
+    assert.ok(rcA !== null);
+    assert.ok(rcA.groups['wiki'] !== undefined);
+    assert.strictEqual(rcA.groups['wiki'].hot_relations.length, 1);
   });
 });

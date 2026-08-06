@@ -17,74 +17,68 @@
 
 ## `scan-kb`（统一入口）
 
-外部知识库扫描与导入的统一入口，支持 `import`、`diff`、`scan` 三个子命令。
+外部知识库导入的统一入口，支持 `import`、`diff` 两个子命令。
+（批次 3：`scan` 子命令与 ai-results 输入契约已删除，改为 `--source` 原文直导 / git diff 增量直连，无 AI 依赖。）
 
 ### `import` 子命令（推荐）
 
 统一导入外部知识库，首次全量或增量更新。
 
+**全量直导**（首次导入，无 AI）：
+
 ```bash
 ki scan-kb import \
   --scope <scope> \
-  --results <ai-results.json> \
-  [--mode full|incremental] \
-  [--source-dir <dir>] \
-  [--root-name <name>] \
-  [--mapping <jsonFile>]
+  --source <dir> \
+  --root-name <name> \
+  [--chunk-size <chars>] \
+  [--chunk-overlap <chars>]
 ```
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `--scope` | 是 | 项目隔离标识 |
-| `--results` | 是 | `ai-results.json` 路径 |
-| `--mode` | 否 | `full`（默认）或 `incremental` |
-| `--source-dir` | 否 | 覆盖 `meta.sourceDir` |
-| `--root-name` | 否 | 覆盖 `meta.rootName` |
-| `--mapping` | 否 | mapping 文件（配置模式） |
+| `--source` | 是 | Markdown 目录绝对路径（仅 `--mode full` 时必填；`--mode incremental` 缺省复用 source 块） |
+| `--root-name` | 是（full）/ 否（incremental） | 根 Group 名 |
+| `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
+| `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 
 **示例：首次全量导入**
 
 ```bash
-ki scan-kb import --scope my-project --results ai-results.json
+ki scan-kb import --scope my-project --source /path/to/wiki --root-name wiki
 ```
+
+自动切分：大文件按段落边界（`\n\n > \n > 。 > ；`）优先切分，relation 命名为 `文件名-N`（如 `deploy-01`），sourcePath 为 `文件路径#N`（文件级 diff 前缀聚合键）。切分参数持久化到 source 块。
 
 输出：
 ```json
 {
   "ok": true,
-  "action": "import",
+  "mode": "full",
   "scope": "my-project",
-  "total_entries": 15,
-  "vectorized": 15,
-  "groups_created": 5,
-  "relations_cached": 15,
-  "local_kb_written": 15,
-  "source_recorded": true
+  "stats": { "total": 15, "vectorized": 15, "errors": 0 },
+  "groups": ["wiki", "wiki/api"],
+  "source": { "dir": "/path/to/wiki", "rootName": "wiki", "commit": "<40-hex>" }
 }
 ```
 
-**示例：增量更新**
+**示例：增量直连**（git diff 驱动，无 AI）
 
 ```bash
-# 1. 检测变更
-ki scan-kb diff --scope my-project
-
-# 2. AI 生成增量 ai-results.json（每条带 action: add|modify|delete）
-
-# 3. 执行增量导入
-ki scan-kb import --scope my-project --mode incremental --results ai-results.json
+# 修改 source 目录文件后：
+ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 ```
 
 输出：
 ```json
 {
   "ok": true,
-  "action": "incremental",
+  "mode": "incremental",
   "scope": "my-project",
-  "added": 3,
-  "modified": 2,
-  "deleted": 1,
-  "total_processed": 6
+  "stats": { "total": 3, "added": 1, "modified": 1, "deleted": 1, "errors": 0 },
+  "previousCommit": "<40-hex>",
+  "newCommit": "<40-hex>"
 }
 ```
 
@@ -110,23 +104,13 @@ ki scan-kb diff --scope my-project
   "ok": true,
   "action": "diff",
   "scope": "my-project",
-  "last_commit": "abc123",
-  "current_commit": "def456",
-  "changes": {
-    "added": ["docs/new-feature.md"],
-    "modified": ["docs/api.md"],
-    "deleted": ["docs/old-feature.md"]
-  },
-  "total_changes": 3
+  "baseCommit": "abc123",
+  "headCommit": "def456",
+  "added": [{ "path": "docs/new-feature.md", "absPath": "/path/to/wiki/docs/new-feature.md" }],
+  "modified": [{ "path": "docs/api.md", "memoryId": "<32-hex>" }],
+  "deleted": [{ "path": "docs/old-feature.md", "memoryId": "<32-hex>" }],
+  "stats": { "added": 1, "modified": 1, "deleted": 1, "total": 3 }
 }
-```
-
-### `scan` 子命令（旧流程，保留兼容）
-
-```bash
-ki scan-kb scan \
-  --scope <scope> --source <dir> --root-name <name> \
-  [--results <ai-results.json>]
 ```
 
 ---
@@ -542,26 +526,24 @@ ki search --query "仪表盘配置" --scope monitor
       "score": 0.0327,
       "tag": "ki-search",
       "group": "BKMonitorWiki/告警系统设计/通知渠道管理",
-      "relation": "钉钉集成",
-      "keywords": ["钉钉", "通知渠道"],
-      "isFullText": false
+      "relation": "钉钉集成"
     }
   ]
 }
 ```
 
-**定位与全文判定字段**：`content` 是向量层存储文本（纯化后不再带 `[摘要]/[关键词]/[路径]` 前缀，关键词经 vector-client 底层自动拼接）。`isFullText=false` 时仅为摘要，无法直接作原文引用，因此每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
+**定位字段**：`content` 是向量层存储文本（纯化后为 index.json 原始值，不再拼接任何前缀）。每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
 
 | 字段 | 含义 |
 |------|------|
 | `group` | 该记忆所属 Group 路径（定位到模块） |
-| `relation` | 原文全文（`hot_relation.text`，非摘要） |
-| `keywords` | 当前内容所在 Group 的索引关键词（`groups[path].keywords`） |
-| `isFullText` | content 是否为全文。**仅 `ki-search` tag 的结果计算**：命中反查读 `rel.isFullText`（缺失默认 `false`=摘要）；未命中（如 `ki store` 数据只写向量层）按前缀推断兜底（纯化后无 `[摘要]` 前缀 → 恒为 `true`）。`false` = AI 摘要（`scan-kb import` / 增量 import 写入），需按 `group`/`relation` 定位原文；`true` = 原文全文（`sync-relation` 的 module-info、`import-kb`、`ki store` 输入） |
+| `relation` | 原文全文（`hot_relation.text`） |
+
+> 批次 3（REQ-05/09）：`keywords` 与 `isFullText` 字段已从 search 输出与 relations-cache 移除（keywords 机制、isFullText 标记全链路删除）。
 
 反查使用**内存缓存**：首次构建 `Map<memoryId, …>` 后复用，文件 mtime/size 变化或 10 分钟 TTL 过期才重建，`ki search` 连续调用无额外 IO 开销。
 
-> `restore --rebuild-vector` 重建的内容向量与 `scan-kb import` 采用相同的 content 纯化格式（index.json 原始值 + 关系名经 `keywords` 参数传递）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。`isFullText` 标记独立存在于 relations-cache 的 `hot_relation`（rebuild 不读取该标记，仅反映导入来源语义；标记与重建内容可能不一致，属已知 trade-off）。
+> `restore --rebuild-vector` 重建的内容向量与 `scan-kb import` 采用相同的 content 纯化格式（index.json 原始值）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。
 
 **关于相关性**：hybrid 检索 = 向量语义 + 全文（BM25）两路融合。头部结果由向量语义主导（通常高度相关）；当查询含宽泛词（如"配置"、"API"）时，全文路可能召回较多低分边缘结果——这是混合检索"召回广"的设计特性，非数据异常。若需收紧，用 `--threshold` 过滤低分命中：
 
@@ -582,7 +564,7 @@ ki search --query "仪表盘配置" --scope monitor --threshold 0.03
 
 ## `query-group`
 
-查询 Group 树、Relation 分区和关键词词云。
+查询 Group 树和 Relation 分区（词云展示已移除，REQ-05）。
 
 ```bash
 ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <count>] [--depth <depth>]
@@ -772,7 +754,7 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 ```bash
 ki sync-relation \
   --scope <scope> --group <group> \
-  --relation <text> --module-info <markdown> --keywords <k1,k2>
+  --relation <text> --module-info <markdown>
 ```
 
 **示例：写入单条知识**
@@ -782,8 +764,7 @@ ki sync-relation \
   --scope my-project \
   --group "项目/API" \
   --relation "用户登录接口" \
-  --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。" \
-  --keywords "登录,认证,token"
+  --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。"
 ```
 
 输出：
@@ -1198,38 +1179,35 @@ ki backup my-project --list
   "snapshots": [
     "snapshot.20260616-223000.tar.gz",
     "snapshot.20260616-210000.tar.gz"
-  ],
-  "aiResults": [
-    "ai-results.20260616-223000.full.json",
-    "ai-results.20260616-210000.incremental.json"
   ]
 }
 ```
 
 **备份存储位置**：
 - 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
-- ai-results：`{backupDir}/{scope}/ai-results/ai-results.{timestamp}.{mode}.json`
+
+（ai-results 备份已随批次 3 删除，备份仅保留 scope 快照。）
 
 ---
 
 ## `restore`
 
-从快照或 ai-results 还原 scope 数据。
+从快照还原 scope 数据。
 
 ```bash
 ki restore <scope>                           # 列出可用备份
 ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
-ki restore <scope> --from-results  [--dir <ai-results-dir>]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `<scope>` | 项目隔离标识（必填） |
 | `--from-snapshot` | 从 tar.gz 快照覆盖还原（破坏性操作，需 `--yes` 确认） |
-| `--from-results` | 按 timestamp 顺序重放 ai-results 备份文件 |
 | `--timestamp <ts>` | 指定快照 timestamp（可选，默认使用最新） |
-| `--dir <dir>` | 指定 ai-results 目录（可选，默认使用备份目录） |
+| `--backup-dir <dir>` | 指定备份根目录（默认用配置 backupDir） |
 | `--yes` | 跳过交互确认 |
+
+（`--from-results` 重放已删除，REQ-04：ai-results 输入契约移除。）
 
 **示例：列出可用备份**
 
@@ -1243,11 +1221,14 @@ ki restore my-project
   "ok": true,
   "action": "restore_list",
   "scope": "my-project",
-  "available": {
-    "snapshots": ["snapshot.20260616-223000.tar.gz"],
-    "aiResults": ["ai-results.20260616-223000.full.json"]
+  "backupDir": "/Users/me/.ki-backup",
+  "locations": {
+    "snapshots": "/Users/me/.ki-backup/my-project/snapshots"
   },
-  "hint": "使用 --from-snapshot 或 --from-results 选择还原模式"
+  "available": {
+    "snapshots": ["snapshot.20260616-223000.tar.gz"]
+  },
+  "hint": "使用 --from-snapshot 选择还原模式"
 }
 ```
 
@@ -1268,33 +1249,8 @@ ki restore my-project --from-snapshot --yes
 }
 ```
 
-**示例：从 ai-results 重放**
-
-```bash
-ki restore my-project --from-results
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "action": "restore_results",
-  "scope": "my-project",
-  "replayed": [
-    { "file": "ai-results.20260616-223000.full.json", "mode": "full", "status": "ok" },
-    { "file": "ai-results.20260616-230000.incremental.json", "mode": "incremental", "status": "ok" }
-  ],
-  "stats": { "total": 2, "success": 2, "failed": 0 }
-}
-```
-
-**重放要求**：
-- 首个文件必须是 `full` 模式的全量备份
-- 后续文件按 timestamp 顺序依次重放
-- 任一文件重放失败会停止后续重放
-
 **安全机制**：
-- 还原前自动创建当前状态快照（安全网）
+- 还原前自动创建当前状态快照（安全网，写默认 backupDir）
 - 快照还原失败时自动从安全网恢复
 - 破坏性操作需 `--yes` 确认
 
@@ -1487,16 +1443,10 @@ ki setup --skills --file ~/my-targets.txt
 3. Agent 自动调用 `ki_query_group` / `ki_get_module_info` 查询知识
 4. Agent 需要沉淀知识时调用 `ki_sync_relation` / `ki_manage_index_create`
 
-### 外部知识库导入（推荐新流程）
+### 外部知识库导入（原文直导，无 AI）
 
-1. AI 生成 `ai-results.json`
-2. `scan-kb import --scope <s> --results <f>`
-
-### 增量更新
-
-1. `scan-kb diff --scope <s>`
-2. AI 生成增量 `ai-results.json`
-3. `scan-kb import --scope <s> --mode incremental --results <f>`
+1. `scan-kb import --scope <s> --source <dir> --root-name <name>`（首次全量）
+2. 修改 source 目录文件后：`scan-kb import --scope <s> --source <dir> --mode incremental`（git diff 驱动增量）
 
 ---
 
@@ -1504,8 +1454,7 @@ ki setup --skills --file ~/my-targets.txt
 
 - [架构与协作关系](./architecture.md) - 了解 KiSearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
-- [scan-kb 子命令详解](./scan-kb.md) - 含 `import`、`diff` 的详细说明和 `ai-results.json` 格式
-- [外部导入与 mapping 示例](./import-kb.md) - mapping 配置文件的详细说明
+- [scan-kb 子命令详解](./scan-kb.md) - 含 `import`、`diff` 的详细说明（原文直导 / 增量直连）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案
 - [典型工作流](./workflows.md) - 完整的使用场景和最佳实践
 - [备份与恢复](./backup-restore.md) - 数据备份和恢复策略

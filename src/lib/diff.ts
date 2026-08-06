@@ -185,12 +185,21 @@ export function handleDiff(args: HandleDiffArgs): DiffOutput {
     throw new Error(`source.dir 不存在或不是目录：${source.dir}`);
   }
 
-  const gitInfo = getGitInfo(source.dir);
+  // realpath 规范化：macOS os.tmpdir() 的 /var 软链到 /private/var，git rev-parse
+  // 返回 realpath；source.dir 若未规范化，path.relative 会计算出越界 pathspec（../../…）
+  let sourceDirReal: string;
+  try {
+    sourceDirReal = fs.realpathSync(source.dir);
+  } catch {
+    sourceDirReal = source.dir;
+  }
+
+  const gitInfo = getGitInfo(sourceDirReal);
   if (!gitInfo) {
     throw new Error(`source.dir 不在 git 仓库中：${source.dir}`);
   }
 
-  const relativeSource = toPosix(path.relative(gitInfo.repoRoot, source.dir)) || '.';
+  const relativeSource = toPosix(path.relative(gitInfo.repoRoot, sourceDirReal)) || '.';
   let rawDiff: string;
   try {
     rawDiff = execFileSync(
@@ -219,7 +228,7 @@ export function handleDiff(args: HandleDiffArgs): DiffOutput {
   // 把 repo 内路径转为相对 source.dir 的 posix；越界则跳过
   const toSourceRel = (repoRelPath: string): string | null => {
     const abs = path.resolve(gitInfo.repoRoot, repoRelPath);
-    const rel = toPosix(path.relative(source.dir, abs));
+    const rel = toPosix(path.relative(sourceDirReal, abs));
     if (rel.startsWith('..')) return null;
     return rel;
   };
@@ -234,9 +243,9 @@ export function handleDiff(args: HandleDiffArgs): DiffOutput {
     if (!/\.md$/i.test(rel)) continue;
 
     if (item.status === 'A') {
-      added.push({ path: rel, absPath: path.resolve(source.dir, rel) });
+      added.push({ path: rel, absPath: path.resolve(sourceDirReal, rel) });
     } else if (item.status === 'M') {
-      const entry: DiffEntry = { path: rel, absPath: path.resolve(source.dir, rel) };
+      const entry: DiffEntry = { path: rel, absPath: path.resolve(sourceDirReal, rel) };
       const ids = memMap.get(rel);
       if (ids && ids.length > 0) {
         entry.memoryIds = ids;

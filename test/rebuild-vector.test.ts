@@ -86,15 +86,15 @@ describe('A. collectContentEntries —— Group 树 index.json 收集', () => {
     assert.ok(entries.every((e) => !e.text.includes('version')));
   });
 
-  it('content 纯化：text 取 index.json 原始值，关系名经 keywords 传递', () => {
+  it('content 纯化：text 取 index.json 原始值，不拼接任何前缀', () => {
     const scopeDir = fs.mkdtempSync(path.join(tmpRoot, 'collect-format-'));
     makeScopeDir(scopeDir);
     const entries = collectContentEntries(scopeDir);
 
     const byName = Object.fromEntries(entries.map((e) => [e.relationName, e]));
     const quick = byName['快速开始'];
-    assert.strictEqual(quick.text, '快速开始描述', 'text 应为 index.json 原始值，无 [摘要]/[路径] 前缀');
-    assert.deepStrictEqual(quick.keywords, ['快速开始'], '关系名经 keywords 传给 vector-client');
+    assert.strictEqual(quick.text, '快速开始描述', 'text 应为 index.json 原始值，无 [摘要]/[路径]/[关键词] 前缀');
+    assert.strictEqual('keywords' in quick, false, 'RebuildVectorEntry 不再有 keywords 字段（REQ-05）');
   });
 
   it('scope 目录不存在 → 返回空数组', () => {

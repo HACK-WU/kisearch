@@ -1,9 +1,9 @@
 /**
- * relation-map.ts —— memoryId → { group, relation, keywords, isFullText } 反查映射（带 TTL 缓存）
+ * relation-map.ts —— memoryId → { group, relation } 反查映射（带 TTL 缓存）
  *
  * 用途：ki search 命中向量层结果后，按 memoryId 反查 relations-cache.json，
- * 给每条结果附加所属 Group、原文全文、Group 级索引关键词与全文标记，解决
- * "content 只是摘要、无法定位原文"的问题。
+ * 给每条结果附加所属 Group、原文全文，解决"content 只是摘要、无法定位原文"的问题。
+ * 批次 3（REQ-05/09）：keywords 与 isFullText 字段已删除。
  *
  * 缓存策略（方案 A + TTL，mtime/size 优先失效）：
  *   - 模块级单例 Map<scope, { builtAt, mtimeMs, size, map }>
@@ -25,10 +25,6 @@ export interface RelationMapEntry {
   group: string;
   /** 原文全文（relations-cache 的 hot_relation.text） */
   relation: string;
-  /** Group 级索引关键词（该 Group 下所有 relation 复用，可能为空数组） */
-  keywords: string[];
-  /** 该 relation 的向量 content 是否为全文（缺失 → search 按默认 false=摘要处理） */
-  isFullText?: boolean;
 }
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
@@ -86,20 +82,16 @@ function buildRelationMap(cachePath: string): Map<string, RelationMapEntry> {
   try {
     const raw = fs.readFileSync(cachePath, 'utf-8');
     const data = JSON.parse(raw) as {
-      groups?: Record<string, { hot_relations?: Relation[]; keywords?: string[] }>;
+      groups?: Record<string, { hot_relations?: Relation[] }>;
     };
     const groups = data.groups || {};
     for (const [group, gd] of Object.entries(groups)) {
-      // Group 级 keywords 一份，供该 group 下所有 relation 复用
-      const keywords = gd?.keywords ?? [];
       const hot = gd?.hot_relations || [];
       for (const rel of hot) {
         if (rel?.memoryId) {
           map.set(rel.memoryId, {
             group,
             relation: rel.text,
-            keywords,
-            isFullText: rel.isFullText,
           });
         }
       }

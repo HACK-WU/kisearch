@@ -202,7 +202,7 @@ describe('query-group emerging 模式', () => {
 });
 
 describe('query-group 指定 Group 查询', () => {
-  it('展示 Group 的 Relations + 词云', () => {
+  it('展示 Group 的 Relations（词云已移除，REQ-05）', () => {
     const output = runQueryGroup([
       '--scope', scope,
       '--groups', '项目根/监控/告警中心',
@@ -211,7 +211,7 @@ describe('query-group 指定 Group 查询', () => {
     assert.ok(output.includes('项目根/监控/告警中心'));
     assert.ok(output.includes('告警规则CRUD流程'));
     assert.ok(output.includes('通知渠道配置'));
-    assert.ok(output.includes('关键词词云') || output.includes('关键词'));
+    assert.ok(!output.includes('关键词词云'), '词云展示已移除（REQ-05）');
   });
 
   it('展示多个 Group', () => {

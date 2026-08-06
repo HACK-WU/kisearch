@@ -18,11 +18,28 @@ const TEST_CONFIG_PATH = path.join(TEST_CONFIG_DIR, 'config.json');
 
 // 初始化空配置
 // vectorDir 指向临时目录，隔离测试向量库（避免污染 ~/.ki/vector，并保证离线优雅降级）
-fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
-  dataDir: path.join(PROJECT_ROOT, 'kb'),
-  vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
-  scopes: {},
-}), 'utf-8');
+//
+// embedding：apiKey 仅从环境变量 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY 读取
+// （外部注入，测试配置本身不写死任何密钥；未注入时走 fail-loud，向量化相关用例需跳过）。
+function buildTestConfig(): Record<string, unknown> {
+  const embKey = process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY;
+  const baseConfig: Record<string, unknown> = {
+    dataDir: path.join(PROJECT_ROOT, 'kb'),
+    vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
+    scopes: {},
+  };
+  if (embKey) {
+    baseConfig.embedding = {
+      provider: 'siliconflow',
+      baseURL: 'https://api.siliconflow.cn/v1',
+      model: process.env.GITNEXUS_EMBEDDING_MODEL ?? 'text-embedding-3-small',
+      dimension: parseInt(process.env.GITNEXUS_EMBEDDING_DIMS ?? '4096', 10),
+      apiKey: '${SILICONFLOW_API_KEY}', // loadConfig 会从进程环境解析
+    };
+  }
+  return baseConfig;
+}
+fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify(buildTestConfig()), 'utf-8');
 
 // 设置主进程环境变量，确保直接导入的模块（initScope、readJson 等）与子进程使用相同配置
 process.env.KI_CONFIG_PATH = TEST_CONFIG_PATH;
