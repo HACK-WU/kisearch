@@ -11,11 +11,15 @@
   <img alt="typescript" src="https://img.shields.io/badge/TypeScript-jiti-3178c6">
 </p>
 
+<p align="center">
+  <sub>底层向量引擎：<a href="https://github.com/alibaba/zvec"><b>zvec</b></a>（阿里巴巴开源） · 可视化：<a href="https://github.com/zvec-ai/zvec-studio"><b>Zvec Studio</b></a></sub>
+</p>
+
 ---
 
 ## 这是什么
 
-`KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 **zvec 混合检索引擎**（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
+`KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
 ```
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
@@ -24,37 +28,11 @@
 
 ![KiSearch 架构](./assets/architecture.svg)
 
-**知识写入与检索链路（两条查询路径）**：
+### 配套可视化：Zvec Studio
 
-```mermaid
-flowchart TB
-    subgraph 输入
-        W1[Wiki 导入]
-        W2[AI 记忆存储]
-    end
-    subgraph 知识索引层
-        G[Group 树] --> R[Relation<br/>memoryId · isFullText · sourcePath]
-        R --> SRC[原文 · local KB]
-        R --> VEC[向量 · zvec<br/>ki-search / ki-relation / ki-path]
-    end
-    subgraph 查询[查询 · 两条路径]
-        direction LR
-        subgraph A[路径 A · 索引直查]
-            P1[已知 Group/Relation 路径] --> P2[直读索引 + 原文]
-            P2 --> P3[原文交付]
-        end
-        subgraph B[路径 B · 语义检索 ki-search]
-            Q[自然语言查询] --> H[混合检索<br/>向量 + BM25 + RRF]
-            H --> M[memoryId 反查 · relation-map]
-            M --> O[结果：原文 + isFullText + group]
-        end
-    end
-    W1 --> G
-    W2 --> G
-    SRC --> P2
-    VEC --> H
-    SRC --> O
-```
+底层向量引擎 [**zvec**](https://github.com/alibaba/zvec) 配套可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio)，提供集合概览、数据浏览与查询调试能力，便于在知识导入后验证向量写入效果、排查检索异常。
+
+![Zvec Studio 集合概览](assets/zvec-overview.png)
 
 ## 为什么不是常规 RAG
 
