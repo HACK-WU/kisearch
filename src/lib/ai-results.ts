@@ -38,6 +38,8 @@ export interface ScanResultEntry {
   action: EntryAction;
   /** 旧字段保留兼容（重命名时关联旧 memory），不再使用建议忽略 */
   replaces?: string;
+  /** 直导专用：chunk 的 relation 名（如 foo-01）。ai-results 路径不设置此字段 */
+  chunkRelation?: string;
 }
 
 export interface AiResultsFile {
@@ -53,7 +55,8 @@ function toPosix(input: string): string {
   return input.split(path.sep).join('/');
 }
 
-function deriveGroupPath(rootName: string, entryPath: string): string {
+/** 从 entry 相对路径推导 groupPath（含 rootName 前缀） */
+export function deriveGroupPath(rootName: string, entryPath: string): string {
   const dir = path.posix.dirname(toPosix(entryPath));
   return dir === '.' ? rootName : `${rootName}/${dir}`;
 }

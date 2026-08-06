@@ -89,6 +89,10 @@ export interface GroupIndexSource {
   dir: string;
   rootName: string;
   commit: string;
+  /** 切分参数持久化（H-18）：全量直导写入，增量复用；缺失时回退默认值 */
+  chunkSize?: number;
+  /** 切分参数持久化（H-18）：全量直导写入，增量复用；缺失时回退默认值 */
+  chunkOverlap?: number;
 }
 
 /**
@@ -204,14 +208,17 @@ export function listAllScopes(): string[] {
 
 /**
  * 写入 / 更新 source 块到 group-index.json
+ *
+ * commit 允许为空（全量直导非 git 仓库场景，H-25 仅增量强依赖 git）；
+ * 但 dir / rootName 必填。
  */
 export function setSource(scope: string, source: GroupIndexSource): void {
   const filePath = getGroupIndexPath(scope);
   if (!fs.existsSync(filePath)) {
     throw new Error(`group-index.json 不存在：${filePath}，请先 ensureScopeDir`);
   }
-  if (!source.dir || !source.rootName || !source.commit) {
-    throw new Error('setSource 要求 source.{dir,rootName,commit} 均非空');
+  if (!source.dir || !source.rootName) {
+    throw new Error('setSource 要求 source.{dir,rootName} 均非空');
   }
 
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -221,7 +228,13 @@ export function setSource(scope: string, source: GroupIndexSource): void {
     ? (migrated as unknown as Record<string, unknown>)
     : parsed;
 
-  data.source = { dir: source.dir, rootName: source.rootName, commit: source.commit };
+  data.source = {
+    dir: source.dir,
+    rootName: source.rootName,
+    commit: source.commit || '',
+    ...(source.chunkSize !== undefined ? { chunkSize: source.chunkSize } : {}),
+    ...(source.chunkOverlap !== undefined ? { chunkOverlap: source.chunkOverlap } : {}),
+  };
   data.updatedAt = new Date().toISOString();
 
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');

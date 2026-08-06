@@ -24,7 +24,7 @@ import {
   type GroupIndex,
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
-import { normalizeAiResults, type ScanResultEntry, type AiResultsFile } from './ai-results.js';
+import { normalizeAiResults, deriveGroupPath, type ScanResultEntry, type AiResultsFile } from './ai-results.js';
 import {
   bulkVectorize,
   deleteMemory,
@@ -48,8 +48,12 @@ import {
   logPhaseDone,
   logProgress,
   logInfo,
+  logWarn,
   logSummary,
 } from './progress.js';
+import { handleDiff, type DiffResult } from './diff.js';
+import { splitIntoChunks } from './chunker.js';
+import { deriveChunkRelation, deriveChunkSourcePath, readFileToChunks } from './import.js';
 
 // ─── 类型 ───
 
@@ -223,6 +227,18 @@ export function removeFromLocalKb(scope: string, groupPath: string, relationText
 
 export interface HandleIncrementalArgs extends HandleImportArgs {
   // memBinPath 已移除，直接使用全局 mem 命令
+}
+
+export interface HandleIncrementalDirectArgs {
+  scope: string;
+  /** 外部 Wiki 根目录；缺省时用 source 块 dir（H-20 全量直导已写入） */
+  sourceDir?: string;
+  /** 切分参数：仅首次新增 chunk 时用于读取（缺省用 source 块持久化值，D-8） */
+  chunkSize?: number;
+  /** 切分参数（同上） */
+  chunkOverlap?: number;
+  /** 单文件大小上限（字节），超限跳过并告警；默认 2MB */
+  maxFileSizeBytes?: number;
 }
 
 export async function handleIncremental(args: HandleIncrementalArgs): Promise<IncrementalResult> {
@@ -422,6 +438,243 @@ export async function handleIncremental(args: HandleIncrementalArgs): Promise<In
       deleted,
       errors: errors.length,
     },
+    errors,
+    groups: [...groupsTouched].sort(),
+    source: newSource,
+    previousCommit: existingSource.commit,
+    newCommit,
+  };
+}
+
+// ─── 增量直连（git diff 驱动，无 AI，H-17 文件级覆盖更新）────────────────
+
+/**
+ * 把变更文件重新切分并向量化（added / modified 共用）。
+ * 返回该文件的 chunk 条目（含 chunkRelation / chunkSourcePath）。
+ */
+function chunkifyFile(absPath: string, relPath: string, rootName: string, chunkSize: number, chunkOverlap: number): ScanResultEntry[] {
+  const chunks = readFileToChunks(absPath, chunkSize, chunkOverlap);
+  return chunks.map((chunk) => ({
+    path: deriveChunkSourcePath(relPath, chunk.index), // foo.md#N
+    groupPath: deriveGroupPath(rootName, relPath),
+    summary: chunk.text, // 原文
+    keywords: [],
+    enriched: false,
+    memoryId: null,
+    action: 'add',
+    chunkRelation: deriveChunkRelation(relPath, chunk.index), // foo-01
+  }));
+}
+
+/**
+ * 增量直连：基于 git diff（复用 handleDiff）驱动，无 AI 依赖。
+ *
+ * - added    → 读原文 → 切分 → 向量化 → 写 cache + local KB
+ * - modified → 先写新全 chunk（成功后再删旧全 chunk，写序见 D-3/质疑意见2）
+ * - deleted  → 按文件关联全 chunk memoryId 清理（向量 + cache + local KB + 路径向量）
+ * - 全部成功后才更新 source.commit 到 HEAD
+ * - 切分参数用 source 块持久化值（D-8）；无 git 明确报错（D-9）
+ */
+export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs): Promise<IncrementalResult> {
+  const TOTAL_PHASES = 4;
+  ensureScopeDir(args.scope);
+
+  // Phase 1: 校验首次导入 + source 块
+  logPhaseStart(1, TOTAL_PHASES, '校验增量直连前置条件 ...');
+  const existingSource = getSource(args.scope);
+  if (!existingSource) {
+    throw new Error(`scope "${args.scope}" 尚未首次导入，无法执行增量。请先执行 scan-kb import --source 完成全量直导。`);
+  }
+
+  const sourceDir = args.sourceDir ? path.resolve(args.sourceDir) : existingSource.dir;
+  if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+    throw new Error(`source 目录不存在或不是目录：${sourceDir}`);
+  }
+
+  // 切分参数：source 块持久化值优先（D-8），缺省回退默认（H-18 缺失回退）
+  const chunkSize = existingSource.chunkSize ?? args.chunkSize ?? 1000;
+  const chunkOverlap = existingSource.chunkOverlap ?? args.chunkOverlap ?? 150;
+  const maxFileSizeBytes = args.maxFileSizeBytes ?? 2 * 1024 * 1024;
+  const rootName = existingSource.rootName;
+  logPhaseDone(1, TOTAL_PHASES, `校验通过（sourceDir=${sourceDir}，chunkSize=${chunkSize}，rootName=${rootName}）`);
+
+  // git diff 获取变更（无 git → handleDiff 内部明确报错，D-9）
+  const diffOutput = handleDiff({ scope: args.scope });
+  if (diffOutput.action === 'diff' && 'status' in diffOutput) {
+    throw new Error(`scope "${args.scope}" 尚未首次导入，无法执行增量。`);
+  }
+  const diff = diffOutput as DiffResult;
+  logInfo(`git diff: base=${diff.baseCommit.slice(0, 8)} head=${diff.headCommit.slice(0, 8)}  added=${diff.stats.added} modified=${diff.stats.modified} deleted=${diff.stats.deleted}`);
+
+  // 读取 group-index + relations-cache
+  const groupIndexPath = getGroupIndexPath(args.scope);
+  const relationsCachePath = getRelationsCachePath(args.scope);
+  const groupIndex = readGroupIndex(args.scope);
+  const relationsCache = readJson<RelationsCache>(relationsCachePath);
+  if (!groupIndex || !relationsCache) {
+    throw new Error('scope 缺少 group-index.json 或 relations-cache.json');
+  }
+
+  const errors: { path: string; error: string }[] = [];
+  const groupsTouched = new Set<string>();
+  const memOpts: BatchVectorizeOptions = { timeoutMs: 60_000 };
+  let added = 0;
+  let modified = 0;
+  let deleted = 0;
+
+  // ── Phase 2: deleted 清理（按文件关联全 chunk memoryId）──
+  logPhaseStart(2, TOTAL_PHASES, `清理 deleted（${diff.deleted.length} 个文件）...`);
+  for (const entry of diff.deleted) {
+    logProgress(diff.deleted.indexOf(entry) + 1, diff.deleted.length, `[delete] ${entry.path}`);
+    const ids = entry.memoryIds && entry.memoryIds.length > 0 ? entry.memoryIds : (entry.memoryId ? [entry.memoryId] : []);
+    if (ids.length === 0) {
+      errors.push({ path: entry.path, error: 'deleted 文件未关联任何 memoryId（可能未导入过或 cache 缺失）' });
+      continue;
+    }
+    // 1) 删除全部 chunk 向量
+    for (const id of ids) {
+      const del = await deleteMemory(id, args.scope, memOpts);
+      if (!del.ok) {
+        errors.push({ path: entry.path, error: `[delete warn] 向量删除失败 id=${id.slice(0, 8)}：${del.error}` });
+      }
+    }
+    // 2) 清理 relations-cache + local KB（按文件前缀匹配 chunk sourcePath）
+    const groupPaths = new Set<string>();
+    for (const [groupPath, groupData] of Object.entries(relationsCache.groups)) {
+      const rels = groupData.hot_relations.filter((r) => r.sourcePath && (r.sourcePath === entry.path || r.sourcePath.startsWith(entry.path + '#')));
+      for (const rel of rels) {
+        const idx = groupData.hot_relations.indexOf(rel);
+        if (idx >= 0) groupData.hot_relations.splice(idx, 1);
+        groupPaths.add(groupPath);
+        removeFromLocalKb(args.scope, groupPath, rel.text);
+        // 删除 ki-relation 路径向量
+        await deletePathVector(buildRelationContent(rel.text, groupPath), 'ki-relation', args.scope);
+      }
+    }
+    for (const gp of groupPaths) groupsTouched.add(gp);
+    deleted++;
+  }
+  logPhaseDone(2, TOTAL_PHASES, `deleted 清理完成：${deleted} 个文件`);
+
+  // ── Phase 3: modified 先写新 → 成功后再删旧；added 直接写 ──
+  const processFiles = [...diff.added.map((e) => ({ e, isModify: false })), ...diff.modified.map((e) => ({ e, isModify: true }))];
+  const writeTotal = processFiles.length;
+  logPhaseStart(3, TOTAL_PHASES, `向量化写入（add=${diff.added.length}, modify=${diff.modified.length}）...`);
+
+  for (let fi = 0; fi < processFiles.length; fi++) {
+    const { e, isModify } = processFiles[fi];
+    logProgress(fi + 1, writeTotal, `[${isModify ? 'modify' : 'add'}] ${e.path}`);
+    const absPath = e.absPath || path.resolve(sourceDir, e.path);
+    if (!fs.existsSync(absPath)) {
+      errors.push({ path: e.path, error: `文件不存在：${absPath}` });
+      continue;
+    }
+    const stat = fs.statSync(absPath);
+    if (stat.size > maxFileSizeBytes) {
+      logWarn(`文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}）：${e.path}`);
+      continue;
+    }
+
+    // 读原文 → 切分 → 构造 chunk entries
+    const entries = chunkifyFile(absPath, e.path, rootName, chunkSize, chunkOverlap);
+    if (entries.length === 0) {
+      errors.push({ path: e.path, error: '切分后无内容' });
+      continue;
+    }
+
+    // 先写新全 chunk（bulkVectorize + upsertRelation + local KB）
+    const vec = await bulkVectorize(entries, args.scope, {
+      timeoutMs: 60_000 + entries.length * 10_000,
+    });
+    const okIds: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const en = entries[i];
+      const memoryId = vec.ok.get(en.path);
+      if (!memoryId) {
+        const err = vec.errors.find((er) => er.path === en.path);
+        errors.push({ path: en.path, error: `[${isModify ? 'modify' : 'add'}] ${err?.error || '向量化失败'}` });
+        continue;
+      }
+      okIds.push(memoryId);
+      ensureGroupPathInTree(groupIndex, en.groupPath);
+      groupsTouched.add(en.groupPath);
+      upsertRelation(relationsCache, en.groupPath, en.chunkRelation || deriveRelationText(en.path), en.keywords || [], memoryId, en.path);
+      writeLocalKb(args.scope, en.groupPath, en.chunkRelation || deriveRelationText(en.path), en.summary);
+    }
+    // 路径向量（ki-relation 每条 chunk + ki-path 每 group）
+    const pathEntries: PathVectorizeEntry[] = [];
+    const groupPathsOfFile = new Set(entries.map((x) => x.groupPath));
+    for (const en of entries) {
+      pathEntries.push({
+        text: buildRelationContent(en.chunkRelation || deriveRelationText(en.path), en.groupPath),
+        tag: 'ki-relation',
+        scope: args.scope,
+        group: en.groupPath,
+      });
+    }
+    for (const gp of groupPathsOfFile) {
+      pathEntries.push({ text: buildGroupPathContent(gp), tag: 'ki-path', scope: args.scope });
+    }
+    if (pathEntries.length > 0) {
+      await bulkStorePaths(pathEntries);
+    }
+
+    // modified：新 chunk 全部成功后，再删旧全 chunk（写序 D-3/质疑意见2）
+    if (isModify) {
+      const oldIds = e.memoryIds && e.memoryIds.length > 0 ? e.memoryIds : (e.memoryId ? [e.memoryId] : []);
+      if (okIds.length > 0) {
+        for (const oldId of oldIds) {
+          if (okIds.includes(oldId)) continue; // 新旧 id 相同（内容未变时）跳过
+          const del = await deleteMemory(oldId, args.scope, memOpts);
+          if (!del.ok) {
+            errors.push({ path: e.path, error: `[modify warn] 删旧向量失败 id=${oldId.slice(0, 8)}：${del.error}` });
+          }
+        }
+        // 清理旧 chunk 的 relations-cache / local KB / 路径向量（与 deleted 分支对齐）
+        for (const [groupPath, groupData] of Object.entries(relationsCache.groups)) {
+          const oldRels = groupData.hot_relations.filter(
+            (r) => r.sourcePath && (r.sourcePath === e.path || r.sourcePath.startsWith(e.path + '#'))
+          );
+          for (const rel of oldRels) {
+            const idx = groupData.hot_relations.indexOf(rel);
+            if (idx >= 0) groupData.hot_relations.splice(idx, 1);
+            groupsTouched.add(groupPath);
+            removeFromLocalKb(args.scope, groupPath, rel.text);
+            await deletePathVector(buildRelationContent(rel.text, groupPath), 'ki-relation', args.scope);
+          }
+        }
+      } else {
+        errors.push({ path: e.path, error: `[modify] 新 chunk 写入失败，保留旧数据待下次重试（okIds 为空）` });
+      }
+      modified++;
+    } else {
+      added++;
+    }
+  }
+  logPhaseDone(3, TOTAL_PHASES, `向量化完成：add=${added}, modify=${modified}, errors=${errors.length}`);
+
+  // ── Phase 4: 持久化 + 更新 source.commit ──
+  logPhaseStart(4, TOTAL_PHASES, '持久化 + 更新 source ...');
+  writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
+  writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+
+  const newCommit = getGitHead(sourceDir);
+  if (!newCommit) {
+    throw new Error(`无法获取 sourceDir 的 git HEAD：${sourceDir}`);
+  }
+  const newSource = { ...existingSource, commit: newCommit };
+  setSource(args.scope, newSource);
+  logPhaseDone(4, TOTAL_PHASES, `source 已更新，commit=${newCommit.slice(0, 8)}`);
+
+  const total = diff.stats.added + diff.stats.modified + diff.stats.deleted;
+  logSummary(`增量直连完成：total=${total}  added=${added}  modified=${modified}  deleted=${deleted}  errors=${errors.length}`);
+
+  return {
+    ok: true,
+    action: 'import',
+    mode: 'incremental',
+    scope: args.scope,
+    stats: { total, added, modified, deleted, errors: errors.length },
     errors,
     groups: [...groupsTouched].sort(),
     source: newSource,

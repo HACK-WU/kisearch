@@ -272,6 +272,158 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-08-06-外部Wiki直接导入与自动切分": {
+      "id": "REQ-20260806-001",
+      "feature": "外部Wiki直接导入与自动切分",
+      "created": "2026-08-06 15:07:17",
+      "updated": "2026-08-06 18:41:58",
+      "status": "实施中",
+      "tags": [
+        "feat"
+      ],
+      "version": 16,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-08-06 15:07:42 v2: 需求分析完成落盘",
+        "2026-08-06 16:00:21 v3: v2: 删除 ai-results + keywords，增量改 git diff 驱动，需求清单更新为 9 条",
+        "2026-08-06 16:07:32 v4: v3: 取消 isFullText + keywords 全链路删除(含 sync_relation/词云) + sync_relation 不切分仅超长警告，需求清单 10 条",
+        "2026-08-06 16:17:32 v5: v4: 纳入 CLI 范围 A+B（短别名 REQ-11 / 位置参数 REQ-12 / 命令清理 REQ-13），需求清单 13 条；其余 CLI 迁移拆分为 REQ-002",
+        "2026-08-06 16:35:41 v6: v5: 核对后确认 6 疑点处置（删 scan / 删 from-results / 文件变更全 chunk 覆盖 / 切分参数持久化 / MCP 名不变结构同步 / sourceDir 绝对路径写入），REQ-01/04/06/07/08/09/13 更新",
+        "2026-08-06 16:41:59 v7: v6: 第2轮核对确认4疑点（删 migrate-keywords / export frontmatter 去 keywords / docs+skills 拆独立任务 / test 纳入），新增 REQ-14/15，需求清单 15 条",
+        "2026-08-06 17:13:37 v8: 数据流设计完成（全量直导/增量直连/检索三图 + ER 模型 + 批处理分析 + 4 待确认项）",
+        "2026-08-06 17:25:41 v9: 数据流设计评审通过（修复9项含2阻断，核心决策：buildMemoryIdMap 多值映射方案②）",
+        "2026-08-06 17:32:34 v10: 完成设计文档质疑审查（1🔴+5🟡：Map构建时机/写序原子性/参数变更语义/进度粒度/scan消费方/FTS规模）",
+        "2026-08-06 17:38:18 v11: 数据流设计按质疑报告优化：Map构建时机/失效策略、modified先写新后删旧、切分参数变更语义D-8、进度文件级跳过、新增P-5/P-6/P-7",
+        "2026-08-06 17:54:19 v12: 完成场景推演（⚠️有条件通过：0🔴/4🟡/2🟢，重点：D-8参数变更语义、无git增量行为待明确）",
+        "2026-08-06 17:58:06 v13: 场景推演修复：H-25/D-9（无git增量明确报错）、H-26/D-8更新（full重导可更新chunk-size，增量用source块值）、P-7定方向（文件上限+chunk上限）",
+        "2026-08-06 17:59:33 v14: 创建分批实现计划（6批：基线/切分直导/增量/删除/CLI/配套），进入实施阶段",
+        "2026-08-06 18:14:26 v15: 批次1完成：chunker切分器(9测试)+handleDirectImport直导+scan-kb import --source+setSource支持空commit+chunkSize/chunkOverlap持久化+GroupIndexSource扩展+setScopeSourceDir(H-20)+ScanResultEntry.chunkRelation。端到端验证：deploy.md 14.7KB→10 chunks、relation=deploy-01..10、sourcePath=docs/deploy.md#N、检索alarm-01命中",
+        "2026-08-06 18:41:58 v16: 实施进度落盘：批次0-2完成明细+端到端验证结果+阻塞点(向量库锁)+待办(批次3-5)"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "design/data-flow.md",
+          "type": "data_flow"
+        },
+        {
+          "path": "design/design-review.md",
+          "type": "review"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
+        },
+        {
+          "path": "review/scenario-rehearsal.md",
+          "type": "rehearsal"
+        },
+        {
+          "path": "design/implementation-plan.md",
+          "type": "design"
+        },
+        {
+          "path": "design/implementation-progress.md",
+          "type": "design"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
+    },
+    "2026-08-06-CLI命令迁移与规范化": {
+      "id": "REQ-20260806-002",
+      "feature": "CLI命令迁移与规范化",
+      "created": "2026-08-06 16:16:37",
+      "updated": "2026-08-06 16:18:06",
+      "status": "已确认",
+      "tags": [
+        "refactor"
+      ],
+      "version": 2,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-08-06 16:18:06 v2: v1: CLI 迁移规范化独立需求，承接范围 A/B 之外 11 项优化点"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
+    },
+    "2026-08-06-可视化前端界面": {
+      "id": "REQ-20260806-003",
+      "feature": "可视化前端界面",
+      "created": "2026-08-06 17:30:58",
+      "updated": "2026-08-06 18:12:33",
+      "status": "设计中",
+      "tags": [
+        "feat",
+        "ux"
+      ],
+      "version": 5,
+      "depends_on": [
+        "REQ-20260806-001"
+      ],
+      "changelog": [
+        "初始创建",
+        "2026-08-06 17:31:29 v2: 落盘需求挖掘报告",
+        "2026-08-06 17:42:38 v3: 整理第三方依赖文档",
+        "2026-08-06 17:55:43 v4: 完成交互设计落盘",
+        "2026-08-06 18:12:33 v5: 完成交互设计场景推演（含能力缺口决策）"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "dependencies/README.md",
+          "type": "reference"
+        },
+        {
+          "path": "dependencies/zvec-studio.md",
+          "type": "reference"
+        },
+        {
+          "path": "dependencies/ki-mcp-http.md",
+          "type": "reference"
+        },
+        {
+          "path": "dependencies/mcp-sdk.md",
+          "type": "reference"
+        },
+        {
+          "path": "design/interaction-design.md",
+          "type": "design"
+        },
+        {
+          "path": "review/scenario-rehearsal.md",
+          "type": "rehearsal"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
+  },
+  "id_counters": {
+    "REQ-20260806": 3
   }
 }

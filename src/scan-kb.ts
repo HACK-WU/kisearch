@@ -18,8 +18,8 @@ import { getKbDir, getScanIndexPath, validateScope } from './lib/scope.js';
 import { walWrite } from './lib/wal.js';
 import { CURRENT_DATA_VERSION } from './lib/constants.js';
 
-import { handleImport } from './lib/import.js';
-import { handleIncremental } from './lib/incremental.js';
+import { handleImport, handleDirectImport } from './lib/import.js';
+import { handleIncremental, handleIncrementalDirect } from './lib/incremental.js';
 import { handleDiff } from './lib/diff.js';
 import { loadConfig } from './lib/config.js';
 import { autoBackup } from './lib/backup.js';
@@ -765,21 +765,22 @@ program
 
 program
   .command('import')
-  .description('一条命令完成：AI 结果校验 → 批量向量化 → Group 树创建 → 元数据写入 → source 块记录')
+  .description('导入：--source 直导外部 Wiki（无 AI，自动切分）或 --results 走 AI 结果导入（存量）')
   .requiredOption('--scope <scope>', '项目隔离标识')
-  .requiredOption('--results <resultsFile>', 'AI 输出的 ai-results.json 路径（含 meta + entries）')
+  .option('--results <resultsFile>', 'AI 输出的 ai-results.json 路径（含 meta + entries）')
+  .option('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')
   .option('--mode <mode>', '导入模式：full | incremental（默认 full）', 'full')
-  .option('--source-dir <sourceDir>', '强制覆盖 ai-results.meta.sourceDir（一般无需传）')
-  .option('--root-name <rootName>', '强制覆盖 ai-results.meta.rootName（一般无需传）')
+  .option('--source-dir <sourceDir>', '强制覆盖 ai-results.meta.sourceDir（--results 模式专用，一般无需传）')
+  .option('--root-name <rootName>', '导入根节点名称（直导必填；--results 模式为覆盖 ai-results.meta.rootName）')
   .option('--mapping <mappingFile>', 'mapping 配置文件路径（覆盖 groupPath / relation）')
+  .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000，直导模式专用）')
+  .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150，直导模式专用）')
   .action(async (opts) => {
     try {
       const scope = String(opts.scope);
-      const resultsFile = path.resolve(String(opts.results));
       const mode = String(opts.mode || 'full');
-      const sourceDirOverride = opts.sourceDir ? path.resolve(String(opts.sourceDir)) : undefined;
-      const rootNameOverride = opts.rootName ? String(opts.rootName).trim() : undefined;
-      const mappingFile = opts.mapping ? path.resolve(String(opts.mapping)) : undefined;
+      const hasResults = Boolean(opts.results);
+      const hasSource = Boolean(opts.source);
 
       validateScope(scope);
 
@@ -787,6 +788,41 @@ program
         output({ ok: false, error: `未知 --mode: ${mode}（应为 full | incremental）` });
         process.exit(1);
       }
+      if (hasResults === hasSource) {
+        output({ ok: false, error: '必须二选一：--results <ai-results.json> 或 --source <wiki目录>（不能同时或都缺省）' });
+        process.exit(1);
+      }
+
+      // 直导模式：--source（无 AI，原文直导 + 自动切分；支持 full / incremental）
+      if (hasSource) {
+        const sourceDir = path.resolve(String(opts.source));
+        const rootName = opts.rootName ? String(opts.rootName).trim() : '';
+        const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
+        const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
+
+        if (mode === 'full') {
+          if (!rootName) {
+            output({ ok: false, error: '直导全量模式必须传 --root-name <name>' });
+            process.exit(1);
+          }
+          const result = await handleDirectImport({ scope, sourceDir, rootName, chunkSize, chunkOverlap });
+          await closeEngine();
+          output(result as unknown as Record<string, unknown>);
+          return;
+        }
+
+        // incremental 直连：git diff 驱动，sourceDir 缺省用 source 块 dir
+        const result = await handleIncrementalDirect({ scope, sourceDir, chunkSize, chunkOverlap });
+        await closeEngine();
+        output(result as unknown as Record<string, unknown>);
+        return;
+      }
+
+      // 存量 AI 结果模式：--results
+      const resultsFile = path.resolve(String(opts.results));
+      const sourceDirOverride = opts.sourceDir ? path.resolve(String(opts.sourceDir)) : undefined;
+      const rootNameOverride = opts.rootName ? String(opts.rootName).trim() : undefined;
+      const mappingFile = opts.mapping ? path.resolve(String(opts.mapping)) : undefined;
 
       const result = mode === 'full'
         ? await handleImport({

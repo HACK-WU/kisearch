@@ -29,8 +29,9 @@ import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js'
 import { cleanupTmpFiles } from './wal.js';
 import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
+import { splitIntoChunks, type Chunk } from './chunker.js';
 
-import { normalizeAiResults, type AiResultsFile, type ScanResultEntry } from './ai-results.js';
+import { normalizeAiResults, deriveGroupPath, type AiResultsFile, type ScanResultEntry } from './ai-results.js';
 import { bulkVectorize, type BatchVectorizeResult } from './batch-vectorize.js';
 import {
   buildGroupPathContent,
@@ -48,6 +49,7 @@ import {
   logPhaseDone,
   logProgress,
   logInfo,
+  logWarn,
   logSummary,
 } from './progress.js';
 
@@ -128,6 +130,20 @@ export interface HandleImportArgs {
   mappingFile?: string;
 }
 
+export interface HandleDirectImportArgs {
+  scope: string;
+  /** 外部 Wiki 根目录（绝对路径） */
+  sourceDir: string;
+  /** 导入根节点名称（= groupPath 首段） */
+  rootName: string;
+  /** 切分参数：目标长度（字符），默认 1000 */
+  chunkSize?: number;
+  /** 切分参数：重叠字符数，默认 150 */
+  chunkOverlap?: number;
+  /** 单文件大小上限（字节），超限跳过并告警；默认 2MB */
+  maxFileSizeBytes?: number;
+}
+
 // ─── 工具函数 ───────────────────────────────────────────
 
 function trimSlashes(input: string): string {
@@ -147,6 +163,221 @@ function deriveRelationText(filePath: string): string {
   const base = stripMarkdownExtension(path.posix.basename(filePath));
   const cleaned = base.replace(/[*~`]/g, '').trim();
   return cleaned || base;
+}
+
+// ─── 直导（原文直导 + 切分）工具 ─────────────────────────
+
+/** 递归收集 sourceDir 下的 .md 文件（相对路径，posix 风格） */
+function collectMarkdownFiles(sourceDir: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // 跳过隐藏目录与备份目录
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        walk(abs);
+      } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+        out.push(toPosix(path.relative(sourceDir, abs)));
+      }
+    }
+  };
+  walk(sourceDir);
+  return out.sort();
+}
+
+/** chunk relation 命名：文件名-N（如 foo.md → foo-01），`#` 避免与 isUnsafeRelationName 冲突 */
+export function deriveChunkRelation(filePath: string, chunkIndex: number): string {
+  const base = deriveRelationText(filePath);
+  return `${base}-${String(chunkIndex).padStart(2, '0')}`;
+}
+
+/** chunk 的 sourcePath：文件路径#序号（如 docs/foo.md#1），文件级 diff 前缀聚合的键 */
+export function deriveChunkSourcePath(filePath: string, chunkIndex: number): string {
+  return `${toPosix(filePath)}#${chunkIndex}`;
+}
+
+/** 读取文件内容并按参数切分；未超限返回单 chunk */
+export function readFileToChunks(absPath: string, chunkSize: number, chunkOverlap: number): Chunk[] {
+  const text = fs.readFileSync(absPath, 'utf-8');
+  return splitIntoChunks(text, { chunkSize, chunkOverlap });
+}
+
+/** 直导入口：把 sourceDir 下的 Markdown 目录直接导入（无 AI 依赖） */
+export async function handleDirectImport(
+  args: HandleDirectImportArgs
+): Promise<ImportResult> {
+  const scope = args.scope;
+  const sourceDir = path.resolve(args.sourceDir);
+  const rootName = args.rootName.trim();
+  const chunkSize = args.chunkSize ?? 1000;
+  const chunkOverlap = args.chunkOverlap ?? 150;
+  const maxFileSizeBytes = args.maxFileSizeBytes ?? 2 * 1024 * 1024;
+
+  if (!rootName) throw new Error('rootName 不能为空');
+  if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+    throw new Error(`sourceDir 不存在或不是目录：${sourceDir}`);
+  }
+
+  // 0) 准备 scope 目录 + 收集文件
+  ensureScopeDir(scope);
+  const files = collectMarkdownFiles(sourceDir);
+  if (files.length === 0) {
+    throw new Error(`目录下未发现 .md 文件：${sourceDir}`);
+  }
+
+  logInfo(`扫描到 ${files.length} 个 .md 文件（chunkSize=${chunkSize}, overlap=${chunkOverlap}）`);
+
+  // 1) 逐文件读 + 切分 → 构造瘦身 ScanResultEntry（原文直导：summary=chunk 原文，keywords 空）
+  const entries: ScanResultEntry[] = [];
+  const skipped: string[] = [];
+  for (const rel of files) {
+    const absPath = path.resolve(sourceDir, rel);
+    const stat = fs.statSync(absPath);
+    if (stat.size > maxFileSizeBytes) {
+      skipped.push(rel);
+      logWarn(`文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}）：${rel}，可手动切分后导入`);
+      continue;
+    }
+    const chunks = readFileToChunks(absPath, chunkSize, chunkOverlap);
+    for (const chunk of chunks) {
+      entries.push({
+        path: deriveChunkSourcePath(rel, chunk.index), // sourcePath = 文件#N
+        groupPath: deriveGroupPath(rootName, rel),
+        summary: chunk.text, // 原文直导：content = chunk 原文
+        keywords: [],
+        enriched: false,
+        memoryId: null,
+        action: 'add',
+        chunkRelation: deriveChunkRelation(rel, chunk.index), // relation = 文件名-N
+      });
+    }
+    logProgress(entries.length, files.length * 10, rel); // 粗粒度进度
+  }
+  if (skipped.length > 0) {
+    logWarn(`跳过 ${skipped.length} 个超大文件`);
+  }
+
+  logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${files.length} 个文件）`);
+
+  // 2) Phase 2~5 复用（与 handleImport 相同的后半段）
+  const TOTAL = 5;
+  const memoryMap = new Map<string, string>();
+
+  // ── 预构建路径向量条目（ki-relation 每个 chunk 一条 + ki-path 每 group 一条）──
+  const pathEntries: PathVectorizeEntry[] = [];
+  const groupSet = new Set<string>();
+  for (const e of entries) {
+    const groupPath = e.groupPath;
+    groupSet.add(groupPath);
+    pathEntries.push({
+      text: buildRelationContent(e.chunkRelation || deriveChunkRelation(e.path.split('#')[0], Number(e.path.split('#')[1])), groupPath),
+      tag: 'ki-relation',
+      scope,
+      group: groupPath,
+    });
+  }
+  for (const groupPath of groupSet) {
+    pathEntries.push({
+      text: buildGroupPathContent(groupPath),
+      tag: 'ki-path',
+      scope,
+    });
+  }
+
+  // ── 预读 group-index + relations-cache ──
+  const groupIndexPath = getGroupIndexPath(scope);
+  const relationsCachePath = getRelationsCachePath(scope);
+  const groupIndex = readGroupIndex(scope);
+  const relationsCache = readJson<RelationsCache>(relationsCachePath);
+  if (!groupIndex || !relationsCache) {
+    throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+  }
+
+  // ── Phase 2（向量化）与 Phase 3/4（KB）并行 ──
+  const [vectorizeResult, kbResult] = await Promise.all([
+    (async () => {
+      const vec = await bulkVectorize(entries, scope, {
+        timeoutMs: 60_000 + entries.length * 10_000,
+      });
+      if (pathEntries.length > 0) {
+        const pathResult = await bulkStorePaths(pathEntries);
+        logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
+      }
+      return vec;
+    })(),
+    (async () => {
+      const ctx: ImportContext = {
+        scope,
+        sourceDir,
+        rootName,
+        entries,
+        memoryMap,
+        groups: new Set<string>([rootName]),
+      };
+      logPhaseStart(3, TOTAL, '构建 Group 树 ...');
+      phase3EnsureGroups(ctx, groupIndex);
+      logPhaseDone(3, TOTAL, `Group 树构建完成，涉及 ${ctx.groups.size} 个 Group`);
+
+      logPhaseStart(4, TOTAL, `写入元数据（${ctx.entries.length} 条 relations + local KB）...`);
+      phase4WriteRelations(ctx, relationsCache);
+      writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
+      writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+      logPhaseDone(4, TOTAL, '元数据写入完成');
+      return ctx;
+    })(),
+  ]);
+
+  // 回填真实 docId 到 relations-cache（memoryId）
+  const mergedMap = vectorizeResult.ok;
+  if (mergedMap.size > 0) {
+    for (const groupData of Object.values(relationsCache.groups)) {
+      for (const rel of groupData.hot_relations) {
+        const docId = rel.sourcePath ? mergedMap.get(rel.sourcePath) : undefined;
+        if (docId) rel.memoryId = docId;
+      }
+    }
+    writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+  }
+
+  // Phase 5: 记录 source（含切分参数持久化 H-18；无 git 时全量直导可容忍——增量才强依赖 git）
+  logPhaseStart(5, TOTAL, '记录 source commit ...');
+  const head = getGitHead(sourceDir);
+  const source: GroupIndexSource = {
+    dir: sourceDir,
+    rootName,
+    commit: head || '',
+    chunkSize,
+    chunkOverlap,
+  };
+  setSource(scope, source);
+  logPhaseDone(5, TOTAL, `source 已记录${head ? `，commit=${head.slice(0, 8)}` : '（非 git 仓库，commit 为空）'}`);
+
+  // scope 未配置 sourceDir 时写入绝对路径（H-20）
+  try {
+    const { setScopeSourceDir } = await import('./config.js');
+    const wrote = setScopeSourceDir(scope, sourceDir);
+    if (wrote) {
+      logInfo(`已写入 scope sourceDir（绝对路径）：${sourceDir}`);
+    }
+  } catch { /* 写入失败不阻断 */ }
+
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  errors=${vectorizeResult.errors.length}`);
+
+  return {
+    ok: true,
+    action: 'import',
+    mode: 'full',
+    scope,
+    stats: {
+      total: entries.length,
+      vectorized: mergedMap.size,
+      errors: vectorizeResult.errors.length,
+    },
+    errors: vectorizeResult.errors,
+    groups: [...kbResult.groups].sort(),
+    source,
+  };
 }
 
 /** 把 commit hash 取出来，失败返回 null */
@@ -503,7 +734,7 @@ function phase4WriteRelations(
 
     const target = ctx.mapping?.get(e.path);
     const groupPath = target ? target.groupPath : e.groupPath;
-    const relationText = target?.relation || deriveRelationText(e.path);
+    const relationText = target?.relation || e.chunkRelation || deriveRelationText(e.path);
 
     upsertRelation(cache, groupPath, relationText, e.keywords || [], memoryId, e.path);
 

@@ -18,8 +18,10 @@ export interface DiffEntry {
   path: string;
   /** 绝对路径（added/modified） */
   absPath?: string;
-  /** 已导入条目的 memoryId（deleted/modified） */
+  /** 已导入条目的 memoryId（deleted/modified，兼容单值场景） */
   memoryId?: string;
+  /** 已导入条目的全部 chunk memoryId（文件级聚合，H-17/D-2 方案②） */
+  memoryIds?: string[];
 }
 
 export interface DiffChangeGroup {
@@ -75,14 +77,18 @@ function getGitInfo(sourceDir: string): GitInfo | null {
 }
 
 /**
- * 从 relations-cache.json 构造 path → memoryId 映射
- * 当前 relations-cache 的 hot_relation 中尚未有 memoryId 字段，本函数兼容两种结构：
- *   1. 已扩展：relation.memoryId
- *   2. 未扩展：返回空 Map（调用方自行处理空值）
+ * 从 relations-cache.json 构造 文件级 path → memoryId[] 多值映射（D-2 方案②）
+ *
+ * relations-cache 的 hot_relation.sourcePath 为 chunk 粒度（`foo.md#1`、`foo.md#2`），
+ * 按 `#` 前缀聚合到文件级 key（`foo.md`），得到该文件的全部 chunk memoryId：
+ *   Map{ "docs/foo.md" → ["m1", "m2", "m3"] }
+ *
+ * 兼容旧数据：sourcePath 为文件级（无 `#`）时，key 即 sourcePath 本身。
+ * 兼容未扩展：relations-cache 无 memoryId 时返回空 Map（调用方自行处理空值）。
  */
-export function buildMemoryIdMap(scope: string): Map<string, string> {
+export function buildMemoryIdMap(scope: string): Map<string, string[]> {
   const cachePath = getRelationsCachePath(scope);
-  const map = new Map<string, string>();
+  const map = new Map<string, string[]>();
   if (!fs.existsSync(cachePath)) return map;
 
   try {
@@ -91,10 +97,16 @@ export function buildMemoryIdMap(scope: string): Map<string, string> {
     };
     for (const group of Object.values(cache.groups || {})) {
       for (const rel of group.hot_relations || []) {
-        // sourcePath 优先：S-04 新增的关联字段
-        const key = rel.sourcePath;
-        if (key && rel.memoryId) {
-          map.set(key, rel.memoryId);
+        const sp = rel.sourcePath;
+        if (!sp || !rel.memoryId) continue;
+        // 按 `#` 前缀聚合到文件级 key；无 `#`（旧数据）key 即 sp
+        const hashIdx = sp.indexOf('#');
+        const fileKey = hashIdx >= 0 ? sp.slice(0, hashIdx) : sp;
+        const list = map.get(fileKey);
+        if (list) {
+          if (!list.includes(rel.memoryId)) list.push(rel.memoryId);
+        } else {
+          map.set(fileKey, [rel.memoryId]);
         }
       }
     }
@@ -225,13 +237,19 @@ export function handleDiff(args: HandleDiffArgs): DiffOutput {
       added.push({ path: rel, absPath: path.resolve(source.dir, rel) });
     } else if (item.status === 'M') {
       const entry: DiffEntry = { path: rel, absPath: path.resolve(source.dir, rel) };
-      const id = memMap.get(rel);
-      if (id) entry.memoryId = id;
+      const ids = memMap.get(rel);
+      if (ids && ids.length > 0) {
+        entry.memoryIds = ids;
+        entry.memoryId = ids[0]; // 兼容单值消费方（取第一个）
+      }
       modified.push(entry);
     } else {
       const entry: DiffEntry = { path: rel };
-      const id = memMap.get(rel);
-      if (id) entry.memoryId = id;
+      const ids = memMap.get(rel);
+      if (ids && ids.length > 0) {
+        entry.memoryIds = ids;
+        entry.memoryId = ids[0];
+      }
       deleted.push(entry);
     }
   }

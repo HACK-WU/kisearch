@@ -68,7 +68,62 @@ openclaw memory-pro stats
 - **提交前检查**：提交会经过 `scripts/pre-commit/` 下的脚本（提交信息格式校验、敏感信息扫描），请确保提交信息规范且不含敏感数据。
 - **文档归档**：新增项目 Wiki 时，建议按项目分目录归档，保持与现有结构一致。
 
+# zvec-studio
+
+`zvec-studio/` 目录是一个独立的项目，**在这里仅作为参考使用**（不参与本仓库的构建/提交）。
+
+## 项目简介
+
+**zvec-studio** 是 [Zvec](https://github.com/alibaba/zvec) 向量数据库的**可视化管理工具**：不用写代码，直接浏览数据、测试查询、管理 Schema。
+
+- 形态：pip 安装的 Web 工具（`zvec-studio`，默认 7860 端口）+ 实验性桌面应用。
+- 仓库结构（pnpm workspace monorepo）：
+  - `apps/backend/`：Python 后端（uv 管理，包名 `zvec_studio`），提供 REST API（FastAPI，OpenAPI 文档在 `/api/v1/openapi.json`）
+  - `apps/frontend/`：React + Vite 前端（见下方技术栈）
+  - `apps/desktop/`：Rust 桌面应用
+  - `packages/api-client/`：前端 API client 包（由 `openapi-typescript` 从后端 OpenAPI 生成）
+
+## 前端技术栈（apps/frontend，主要参考对象）
+
+- React 18 + TypeScript + Vite 5
+- React Router v7 + TanStack Query + i18next（i18n）
+- API client 由 `openapi-typescript` 从后端 OpenAPI 自动生成（`gen:api` 脚本）
+- 目录组织：`pages/`（页面）、`components/`（组件）、`features/`（业务逻辑）、`lib/`（工具）、`layouts/`、`router/`、`styles/`
+- 测试：vitest + Testing Library + msw（API mock）+ Playwright（e2e）
+
+## 后续计划（对本仓库的意义）
+
+为当前项目（ki，knowledge-indexer）实现一个**可视化界面**，参考 zvec-studio 的前端实现：
+
+- [ ] 文档数据查看页面：浏览已索引的文档/向量数据（对应 ki 的 scope、doc、search 能力）
+- [ ] 上传文档页面：将文档导入知识库（对应 ki 的 import / scan-kb 能力）
+
+实现时可参考 zvec-studio 的前端架构（pages/components/features 分层、TanStack Query 数据获取、openapi-typescript 生成类型安全 client）。
+
 # 变更记录
+
+## [记录] 建立 GitNexus 代码索引 + .gitnexusignore 2026-08-06
+
+### 已完成
+
+- [x] 新建根目录 `.gitnexusignore`（语法同 .gitignore，last-match-wins），忽略：node_modules/dist/kb/ki-backup/.idea/.e2e-run/.codebuddy/.workbuddy/.requirements/.module-experts、独立子项目（zvec-studio、zvec-probe、zvec-probe-node、zvec-mcp-server、CodeWikiHub、memory-lancedb-pro）、测试运行数据（test_data、test_wiki）
+- [x] 取反强制索引：`!test/`、`!test/fixtures/`、`!bin/`（gitnexus 默认硬编码忽略 `fixtures`/`bin`，需显式取反，见 ignore-service.js DEFAULT_IGNORE_LIST）
+- [x] `gitnexus analyze --skip-agents-md` 索引完成：2,719 nodes / 6,046 edges / 122 clusters / 230 flows
+- [x] 验证：test/ 537 节点、src/ 1070 节点、bin/ki.mjs 15 节点、test/fixtures 74 节点；被忽略目录 0 节点
+- [x] 跳过 2 个大文件（>512KB）：`test/zvec-lock-demo/data/0/emb.index.1.proxima` 等（zvec 测试数据）
+
+### 环境踩坑（重要）
+
+- 系统 PATH 中的 `gitnexus` 指向 Windows 侧安装（`/mnt/c/nvm4w/nodejs/gitnexus`），其原生模块（`@ladybugdb/core/lbugjs.node`）是 Windows 编译的，在 WSL 下报 `invalid ELF header`
+- **WSL 下必须用完整路径**：`/root/.nvm/versions/node/v22.22.2/bin/gitnexus`（WSL 侧已 `npm i -g gitnexus`）
+- 安装时 onnxruntime-node 二进制下载失败（微软 CDN 不通），用 `--ignore-scripts` 安装后需手动补 ladybugdb 二进制：`node .../node_modules/@ladybugdb/core/install.js`
+- FTS 扩展 load-only（未预装），`--embeddings` 语义搜索不可用；基本索引/图检索正常
+- 索引用 `--skip-agents-md` 防止 gitnexus 改写 AGENTS.md
+
+## [记录] AGENTS.md 新增 zvec-studio 参考项目说明 2026-08-06
+
+- 记录 zvec-studio 为独立参考项目（Zvec 向量数据库可视化管理工具，monorepo：Python FastAPI 后端 + React/Vite 前端 + Rust 桌面端 + api-client 包）
+- 明确后续计划：为 ki 实现可视化界面（文档数据查看页 + 上传文档页），前端参考 zvec-studio 的 pages/components/features 分层、TanStack Query、openapi-typescript 生成 client
 
 ## [需求] ki-search 混合检索体验优化（per-tag 限流 + relation content 纯化 + group 结构化字段） 2026-08-05
 
@@ -177,3 +232,68 @@ openclaw memory-pro stats
 
 - [ ] index.json 现在存文件全文（import.ts phase4 moduleInfo），若对全文类数据跑 rebuild-vector 重建的 content 与 `isFullText` 标记可能不一致（标记反映导入来源语义，rebuild 反映 index.json 现有内容，两者解耦，属已接受的 trade-off）
 - [ ] 端到端待人工验证：monitor rebuild 后 search 输出含 `keywords`/`isFullText`、无 `sourcePath`；`ki store` 数据 `isFullText: true`；不传 `--tags` 返回混合 tag 结果
+
+---
+
+## [需求] 外部Wiki直接导入与自动切分（实施中，批次 3~5 未完成） 2026-08-06
+
+### 需求落盘
+
+- 需求文档：`.requirements/2026-08-06-外部Wiki直接导入与自动切分/requirement.md`（REQ-20260806-001，状态：实施中，v15，15 条需求 REQ-01~15 + 26 项假设 H-01~H-26）
+- CLI 迁移独立需求：`.requirements/2026-08-06-CLI命令迁移与规范化/requirement.md`（REQ-20260806-002，已确认，承接范围 A/B 之外的 11 项优化点 CLI-01~11）
+- 数据流设计：`design/data-flow.md`（已通过 design-review + challenger 质疑 + scenario-rehearsal，9 项评审问题 + 6 项质疑意见 + 4 项推演问题均已修复）
+- 实现计划：`design/implementation-plan.md`（6 批：基线/切分直导/增量/删除/CLI/配套）
+- 评审与推演报告：`design/design-review.md`、`review/challenge-report.md`、`review/scenario-rehearsal.md`
+
+### 需求核心决策（已确认）
+
+- **原文直导**：`scan-kb import --source <dir>` 无 AI 依赖直接导入 Markdown 目录，`--results`（ai-results 存量路径）与 `--source` 二选一
+- **自动切分**：内存执行（无独立命令），固定长度（默认 1000 字符）+ 段落边界优先（`\n\n → \n → 。 → ；`），overlap 150；relation 名 = `文件名-N`（deploy-01）；sourcePath = `文件路径#N`（文件级 diff 前缀聚合键）
+- **增量直连**：`--mode incremental --source <dir>` 内部 git diff 驱动（复用 handleDiff），无 AI；add→切分写入，modified→先写新全 chunk 成功后再删旧，deleted→按文件清全 chunk；source 块切分参数为唯一权威（D-8），无 git 明确报错（D-9/H-25）
+- **删除清单**：ai-results 导入、keywords 全链路（含 sync-relation 词云、migrate-keywords 命令、export/wiki frontmatter）、isFullText 字段、scan 子命令、restore --from-results、import-kb（@deprecated）、scan-kb vectorize、bulk_store → bulk-store 改名（MCP 工具名 ki_bulk_store 不变，数据结构同步）
+- **文件↔chunk 映射方案②**：`buildMemoryIdMap` 改多值 `Map<文件path, memoryId[]>`，遍历 relations-cache 按 sourcePath `#` 前缀聚合，无新增数据文件；每次增量现场重建（质疑意见1 修复）
+- 其他：切分参数持久化 source 块（H-18）、全量直导写入 scope sourceDir 绝对路径（H-20/setScopeSourceDir）、进度跳过文件级最小粒度、超大文件上限（2MB）+ 单文件 chunk 上限（500）、docs/skills 拆独立任务（REQ-14）、test 纳入本次（REQ-15）
+
+### 已实施（批次 0~2）
+
+- [x] **批次 1（切分器 + 直导核心）**：
+  - `src/lib/chunker.ts`（新建）：`splitIntoChunks` 递归字符切分，overlap 逻辑修复（`nextStart = max(pos+1, cut-overlap)` 保证推进）；`test/chunker.test.ts` 9 用例全绿
+  - `src/lib/import.ts`：`handleDirectImport`（复用 5-Phase 后半段）+ `HandleDirectImportArgs` + `collectMarkdownFiles`（递归、跳过隐藏/node_modules）+ `deriveChunkRelation`/`deriveChunkSourcePath`/`readFileToChunks`（已导出）
+  - `src/lib/ai-results.ts`：`deriveGroupPath` 导出 + `ScanResultEntry.chunkRelation` 字段
+  - `src/lib/scope.ts`：`GroupIndexSource` 加 `chunkSize/chunkOverlap`；`setSource` 允许 commit 为空（直导非 git 场景）
+  - `src/lib/config.ts`：`setScopeSourceDir`（YAML 用 parseDocument 保留注释/JSON 回写，仅未配置时写入，写回后 resetConfigCache）
+  - `src/scan-kb.ts`：`import` 子命令 `--results`/`--source` 二选一 + `--chunk-size/--chunk-overlap` 参数
+- [x] **批次 2（增量直连）**：
+  - `src/lib/diff.ts`：`DiffEntry` 加 `memoryIds`；`buildMemoryIdMap` 改多值映射（按 `#` 前缀聚合到文件级 key，兼容无 `#` 旧数据）
+  - `src/lib/incremental.ts`：`handleIncrementalDirect`（4-Phase：校验 source 块→deleted 清理→add/modify 向量化→持久化+更新 commit）+ `chunkifyFile`；modified 删旧对齐 deleted 分支（清 relations-cache/local KB/路径向量，修复 deploy-02~08 残留 bug）
+  - `src/scan-kb.ts`：`--source` + `--mode incremental` 走 handleIncrementalDirect
+
+### 端到端验证结果（wiki-test scope，`/root/.ki-data/wiki-test/`）
+
+- [x] 全量直导：deploy.md 14.7KB → 10 chunks（deploy-01..10），relation 命名/sourcePath/source 块持久化/keywords 未写入/memoryId 关联全部正确
+- [x] 检索：`ki search --scope wiki-test --query "告警收敛"` alarm-01 命中第一（注意：`npx jiti src/search.ts --query ...` 直接运行，不带 `search` 子命令参数）
+- [x] 增量 add（new.md）+ delete（alarm.md）：add=1/delete=1/errors=0，commit 8713b8ee→4bbfcd93，alarm-01 消失、new-01 添加、deploy chunks 保留
+- [x] 增量 modified（deploy 8 chunks→1 chunk）：删旧修复后 KB 层正确
+- [ ] 路径向量（ki-path/ki-relation）写入验证未闭环——**受向量库锁异常阻塞**（见下方阻塞点）
+
+### 阻塞点（重要）
+
+- **向量库锁异常**：调试路径向量时误删 RocksDB LOCK 文件导致集合半损坏，`ZVecOpen` 挂起不返回（引擎已知行为，probe 超时误判 locked）。已 pkill 挂起进程恢复现场，向量库未删除（mv 未执行）。**后续所有涉及向量写入的命令必须用 `timeout 60` 包裹，禁止无超时执行**（AGENTS.md 底部已加此约定）
+- 陈旧锁处理记录：`/root/.ki/vector/LOCK`（零字节）与 `fts.2.rocksdb/LOCK`、`scalar.index.1.rocksdb/LOCK` 等 RocksDB 锁经 flock 测试均可获取（非真持锁），但 zvec probe 对锁文件存在即判 locked
+
+### 待办（批次 3~5，需求清单一半未实现）
+
+- [ ] **批次 3（删除旧链路 REQ-04/05/09/13）**：删除 ai-results 导入契约、keywords 全链路（sync-relation/query-group/migrate-keywords/export/wiki frontmatter）、isFullText（import.ts:226/incremental.ts:161 唯一 false 来源）、scan 子命令（含 scan-pending/scan-index）、restore --from-results、import-kb、vectorize；bulk_store → bulk-store 改名（MCP ki_bulk_store 名不变）
+- [ ] **批次 4（CLI 简化 REQ-10/11/12）**：短别名（-s/-q/-t/-g/-r/-i/-o）、位置参数（`ki search "sas"`）、sync_relation 超长 module-info 警告（>1000 字符）
+- [ ] **批次 5（配套 REQ-14/15）**：docs 17 个 + skills 5 个文档同步（拆独立任务）；test 30+ 文件重构 + 删除 ai-results fixtures
+- [ ] 技术设计遗留：P-5（grep 清点 `scan-index|getScanIndexPath` 消费方）、P-6（FTS 规模量化实测）、P-7（超大文件上限数值确认：2MB / 500 chunk）
+- [ ] **重建向量库后补验路径向量**：备份 + 删除 `/root/.ki/vector` 让引擎 create 自愈，重跑直导 + 增量全链路（用 timeout 包裹）
+
+### 相关资产
+
+- `.module-experts/`：PROJECT.md + INDEX.md + 6 个业务专家（存储配置/MCP 服务/向量引擎/检索客户端/知识导入/关系索引）已创建完成，expert-audit 验收未执行
+- zvec 官方 AI 向导文档：<https://zvec.org/llms.txt>（已记录到 PROJECT.md）
+- GitNexus 已配置：`gitnexus analyze` 索引 2719 symbols / 230 flows，可用 `context`/`impact`/`query` 查询调用链
+
+---
+执行cli  测试时，必须设置超时时间，防止一直被挂着。无法退出。
