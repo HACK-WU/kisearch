@@ -17,7 +17,24 @@
 
 ---
 
-## 这是什么
+## 📑 目录
+
+- [📖 项目介绍](#项目介绍)
+- [🆚 与常规 RAG 的差异](#与常规-rag-的差异)
+- [🧩 核心概念](#核心概念)
+- [✨ 核心特性](#核心特性)
+- [🚀 快速开始](#快速开始)
+- [🛠️ CLI 命令参考](#cli-命令参考)
+- [🔌 MCP 集成](#mcp-集成)
+- [📥 知识库导入](#知识库导入)
+- [📚 文档导航](#文档导航)
+- [🔒 设计约束](#设计约束)
+- [🤝 参与开发](#参与开发)
+- [📄 License](#license)
+
+---
+
+## 📖 项目介绍
 
 `KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
@@ -34,7 +51,7 @@
 
 ![Zvec Studio 集合概览](assets/zvec-overview.png)
 
-## 为什么不是常规 RAG
+## 🆚 与常规 RAG 的差异
 
 常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。KiSearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
 
@@ -52,7 +69,7 @@
 
 > **一句话**：常规 RAG 解决"搜得到"，KiSearch 同时解决"搜得到 + 看得见 + 定位到原文"。
 
-## 核心概念
+## 🧩 核心概念
 
 | 概念 | 含义 |
 |------|------|
@@ -64,7 +81,7 @@
 | 标签（Tag） | `ki-search`（内容）/ `ki-path`（路径）/ `ki-relation`（关系）三层标签 |
 | 记忆库 | 跨会话持续积累的知识，带评分衰减与冷热治理 |
 
-## 特性
+## ✨ 核心特性
 
 - **结构化知识索引**：Group 树导航、Relation 热缓存、关键词词云 —— 不是无序 chunk
 - **混合检索（Hybrid）**：语义向量 + BM25 全文 + RRF 融合排序；camelCase 符号（类名/方法名）可精确召回
@@ -76,7 +93,7 @@
 - **CLI + MCP 双通道**：21 个 CLI 命令；`ki mcp` 暴露 11 个 MCP 工具（stdio / HTTP 共享单例）
 - **零破坏性 MCP**：工具集不含 delete/force 类危险操作，Agent 侧可安全调用
 
-## 快速开始
+## 🚀 快速开始
 
 ### 1. 安装
 
@@ -133,7 +150,7 @@ ki query-group --scope my-project --groups "我的项目/API"
 ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录接口"
 ```
 
-## 命令列表（21 个）
+## 🛠️ CLI 命令参考
 
 | 命令 | 说明 |
 |------|------|
@@ -161,7 +178,7 @@ ki get-module-info --scope my-project --group "我的项目/API" --relation "用
 
 > `ki <command> --help` 查看每个命令的完整参数。
 
-## MCP Server
+## 🔌 MCP 集成
 
 启动后 AI Agent 可通过标准 MCP 协议使用知识索引能力：
 
@@ -210,7 +227,7 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 > `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（每个标签最多返回 `limit` 条，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
 > 工具集遵循零破坏性约束，不含 delete/force 操作。
 
-## 外部知识库导入
+## 📥 知识库导入
 
 ### 前置：scope 注册
 
@@ -235,7 +252,7 @@ ki scan-kb import --scope my-project --mode incremental --results ai-results.jso
 
 `ai-results.json` 最小示例与字段说明见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
 
-## 文档导航
+## 📚 文档导航
 
 ### 操作指南
 
@@ -275,7 +292,7 @@ ki scan-kb import --scope my-project --mode incremental --results ai-results.jso
 
 > 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
 
-## 约束与边界
+## 🔒 设计约束
 
 - **Scope 隔离**：仅允许字母、数字、连字符、下划线；禁止路径遍历 `../`；不同 scope 物理隔离
 - **关键词规则**：仅自然语言词汇，禁止代码符号（类名、方法名、路径等）；关键词需真实出现在原文中
@@ -286,7 +303,7 @@ ki scan-kb import --scope my-project --mode incremental --results ai-results.jso
 - **快速失败**：输入校验失败立即退出，不静默降级
 - **异常恢复**：运行时数据损坏自动从 `_template/` 恢复
 
-## 开发
+## 🤝 参与开发
 
 ```bash
 npm install                 # 安装依赖
@@ -297,6 +314,6 @@ npm run test:all            # 全部单元测试
 npx jiti src/search.ts --help   # 直接执行任意命令
 ```
 
-## License
+## 📄 License
 
 MIT
