@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ki 知识库 · 浏览</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+/* 浏览页特有 */
+.ki-filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ki-doc-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 14px; border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border); margin-bottom: 8px;
+  background: var(--ki-color-surface); cursor: pointer; transition: border-color var(--ki-motion-fast);
+}
+.ki-doc-item:hover { border-color: color-mix(in srgb, var(--ki-color-primary) 30%, transparent); }
+.ki-doc-item__name { font-weight: 600; font-size: var(--ki-font-size-md); color: var(--ki-color-text); }
+.ki-doc-item__path { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); font-family: var(--ki-font-mono); margin-top: 2px; }
+.ki-doc-item__snippet { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); margin-top: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.5; }
+.ki-doc-item__meta { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ki-rel-item { cursor: pointer; }
+.ki-rel-item:hover .ki-doc-item__name { color: var(--ki-color-primary); }
+
+/* ── Group 树与文档区独立滚动兜底 ── */
+#groupTree {
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+#groupTree::-webkit-scrollbar { width: 6px; }
+#groupTree::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
+#groupTree::-webkit-scrollbar-track { background: transparent; }
+
+#docList {
+  max-height: calc(100vh - 300px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+#docList::-webkit-scrollbar { width: 6px; }
+#docList::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
+#docList::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 文件夹层级树（Finder 风格，纯目录，层级区分） ── */
+.ki-tree-root { display: flex; flex-direction: column; gap: 1px; }
+/* 一级目录：粗体大号 */
+.ki-tree-root > .ki-tree-dir {
+  font-size: var(--ki-font-size-lg);
+  font-weight: 700;
+  padding: 7px 8px;
+  margin-top: 4px;
+}
+.ki-tree-root > .ki-tree-dir:first-child { margin-top: 0; }
+/* 子级容器：缩进 + 左侧引导线 */
+.ki-tree-group {
+  padding-left: 14px;
+  margin-left: 9px;
+  border-left: 1px solid var(--ki-color-border);
+  display: flex; flex-direction: column; gap: 1px;
+  margin-top: 2px; margin-bottom: 4px;
+  animation: ki-tree-expand 0.15s ease;
+}
+@keyframes ki-tree-expand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* 二级目录：中等 */
+.ki-tree-group > .ki-tree-dir {
+  font-size: var(--ki-font-size-md);
+  font-weight: 600;
+  padding: 4px 8px;
+}
+/* 三级及更深：更轻 */
+.ki-tree-group .ki-tree-group > .ki-tree-dir {
+  font-size: var(--ki-font-size-sm);
+  font-weight: 500;
+  color: var(--ki-color-text-muted);
+}
+.ki-tree-dir {
+  display: flex; align-items: center; gap: 6px;
+  border-radius: 5px; cursor: pointer; user-select: none;
+  white-space: nowrap; line-height: 1.5;
+  transition: background var(--ki-motion-fast);
+  color: var(--ki-color-text);
+}
+.ki-tree-dir:hover { background: var(--ki-color-hover); }
+.ki-tree-dir--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-tree-arrow { width: 12px; font-size: 9px; color: var(--ki-color-text-subtle); flex-shrink: 0; text-align: center; }
+.ki-tree-icon { width: 16px; height: 16px; flex-shrink: 0; }
+.ki-tree-dir__label { overflow: hidden; text-overflow: ellipsis; }
+.ki-tree-dir .ki-heat { margin-left: auto; }
+/* 原文抽屉 */
+.ki-drawer {
+  position: fixed; top: 0; right: -640px; width: min(640px, 92vw); height: 100vh;
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2);
+  transition: right 0.3s ease; z-index: 1000; display: flex; flex-direction: column;
+}
+.ki-drawer--open { right: 0; }
+.ki-drawer__head {
+  display: flex; align-items: center; gap: 12px; padding: 16px 20px;
+  border-bottom: 1px solid var(--ki-color-border); flex-shrink: 0;
+}
+.ki-drawer__title { font-weight: 600; font-size: var(--ki-font-size-lg); flex: 1; min-width: 0; }
+.ki-drawer__body { flex: 1; overflow-y: auto; padding: 20px; }
+.ki-markdown { line-height: 1.7; font-size: var(--ki-font-size-md); }
+.ki-markdown h1 { font-size: 20px; margin: 16px 0 8px; }
+.ki-markdown h2 { font-size: 17px; margin: 14px 0 6px; }
+.ki-markdown h3 { font-size: 15px; margin: 12px 0 4px; }
+.ki-markdown p { margin: 8px 0; }
+.ki-markdown ul, .ki-markdown ol { padding-left: 20px; margin: 8px 0; }
+.ki-markdown code { font-family: var(--ki-font-mono); font-size: 12px; background: var(--ki-color-bg-muted); padding: 1px 5px; border-radius: 4px; }
+.ki-markdown pre { background: var(--ki-color-bg); padding: 12px; border-radius: var(--ki-radius-sm); overflow-x: auto; font-family: var(--ki-font-mono); font-size: 12px; margin: 8px 0; }
+.ki-markdown blockquote { border-left: 3px solid var(--ki-color-primary); padding-left: 12px; color: var(--ki-color-text-muted); margin: 8px 0; }
+.ki-drawer__scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 999; display: none; }
+.ki-drawer__scrim--show { display: block; }
+</style>
+</head>
+<body data-theme="light" data-page="browse">
+<div class="ki-shell">
+
+  <!-- ════════ 侧边栏 ════════ -->
+  <aside class="ki-sidebar" id="sidebar">
+    <div class="ki-sidebar__header">
+      <div class="ki-logo">ki</div>
+      <span class="ki-sidebar__title">ki 知识库</span>
+    </div>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">导航</span></div>
+      <a class="ki-nav-item" href="index.html"><span class="ki-nav-item__icon">◧</span><span class="ki-nav-item__name">总览</span></a>
+      <a class="ki-nav-item ki-nav-item--active" href="browse.html"><span class="ki-nav-item__icon">☰</span><span class="ki-nav-item__name">知识库浏览</span></a>
+      <a class="ki-nav-item" href="search.html"><span class="ki-nav-item__icon">⌕</span><span class="ki-nav-item__name">语义搜索</span></a>
+      <a class="ki-nav-item" href="import.html"><span class="ki-nav-item__icon">⇪</span><span class="ki-nav-item__name">上传导入</span></a>
+      <a class="ki-nav-item" href="write.html"><span class="ki-nav-item__icon">✎</span><span class="ki-nav-item__name">知识写入</span></a>
+    </nav>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">集成</span></div>
+      <a class="ki-nav-item" href="http://127.0.0.1:7861" target="_blank" rel="noopener noreferrer">
+        <span class="ki-nav-item__icon">⬡</span><span class="ki-nav-item__name">向量可视化</span><span class="ki-nav-item__ext">zvec</span>
+      </a>
+    </nav>
+    <div class="ki-sidebar__spacer"></div>
+    <div class="ki-sidebar__footer">
+      <div class="ki-sidebar__footer-version">ki v0.9.0 · MCP 7423</div>
+      <div class="ki-sidebar__footer-row">
+        <button class="ki-icon-link" id="btnTheme" title="切换主题"><svg viewBox="0 0 16 16" fill="currentColor" id="iconSun"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm.5-9.5a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zm0 11a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zM4.146 4.146a.5.5 0 0 1 .708 0l.707.708a.5.5 0 1 1-.708.707l-.707-.707a.5.5 0 0 1 0-.708zm6.292 6.293a.5.5 0 0 1 .708 0l.707.707a.5.5 0 0 1-.707.708l-.708-.708a.5.5 0 0 1 0-.707zM2.5 8.5a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zm11 0a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zM4.146 11.854a.5.5 0 0 1 0-.708l.708-.707a.5.5 0 0 1 .707.707l-.707.708a.5.5 0 0 1-.708 0zm6.293-6.293a.5.5 0 0 1 0-.707l.707-.708a.5.5 0 0 1 .708.708l-.708.707a.5.5 0 0 1-.707 0z"/></svg>
+        <svg viewBox="0 0 16 16" fill="currentColor" id="iconMoon" style="display:none"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg></button>
+        <a class="ki-icon-link" href="https://github.com/CortexReach" target="_blank" rel="noopener noreferrer" title="GitHub"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════ 主区域 ════════ -->
+  <div class="ki-main">
+    <header class="ki-topbar">
+      <button class="ki-topbar__toggle" id="btnSidebar" title="收起/展开侧边栏">◁</button>
+      <span class="ki-topbar__title">知识库浏览</span>
+      <div class="ki-topbar__spacer"></div>
+      <span class="ki-service-badge"><span class="ki-dot ki-dot--ok"></span>MCP HTTP 已就绪</span>
+    </header>
+
+    <main class="ki-content">
+      <div class="ki-content-inner">
+
+        <!-- 页头 + scope 选择 -->
+        <div class="ki-page-head">
+          <div>
+            <h1>知识库浏览</h1>
+            <p>Group 树 · 文档列表 · 原文查看</p>
+          </div>
+          <div class="ki-filter-bar">
+            <label class="ki-form-label" style="margin-bottom:0;font-size:12px">Scope</label>
+            <select class="ki-form-select" id="scopeSelect" style="width:auto;min-width:140px">
+              <option value="monitor">monitor</option>
+              <option value="wiki-test">wiki-test</option>
+              <option value="default">default</option>
+              <option value="legacy-notes">legacy-notes</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 双栏：左 Group 树 / 右文档列表 -->
+        <div class="ki-split">
+          <!-- 左：Group 树 -->
+          <aside class="ki-split__side">
+            <div class="ki-card">
+              <div class="ki-card__head">
+                <span class="ki-card__title">Group 树</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="ki-card__sub" id="treeMeta"></span>
+                  <button class="ki-mini-btn" id="btnExpandAll" title="展开全部目录">展开全部</button>
+                  <button class="ki-mini-btn" id="btnCollapseAll" title="折叠全部目录">折叠全部</button>
+                </div>
+              </div>
+              <div class="ki-card__body" style="padding:12px">
+                <div id="groupTree" style="min-height:200px">
+                  <div class="ki-skeleton" style="width:100%;height:28px;margin-bottom:8px"></div>
+                  <div class="ki-skeleton" style="width:80%;height:28px;margin-bottom:8px"></div>
+                  <div class="ki-skeleton" style="width:90%;height:28px"></div>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <!-- 右：文档列表 -->
+          <section>
+            <div class="ki-card">
+              <div class="ki-card__head">
+                <span class="ki-card__title">文档</span>
+                <span class="ki-card__sub" id="docMeta">加载中…</span>
+              </div>
+              <div style="padding:16px 20px;border-bottom:1px solid var(--ki-color-border);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <select class="ki-form-select" id="tagFilter" style="width:auto;min-width:120px">
+                  <option value="">全部 tag</option>
+                  <option value="alarm">alarm</option>
+                  <option value="deploy">deploy</option>
+                  <option value="monitor">monitor</option>
+                  <option value="wiki">wiki</option>
+                </select>
+                <input class="ki-form-input" id="docSearch" placeholder="过滤文档名…" style="max-width:220px">
+                <span class="ki-cell-sub" style="margin-left:auto">query-group · doc list</span>
+              </div>
+              <div id="docList"></div>
+            </div>
+          </section>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 原文抽屉 -->
+<div class="ki-drawer__scrim" id="drawerScrim"></div>
+<aside class="ki-drawer" id="drawer" aria-label="原文查看">
+  <div class="ki-drawer__head">
+    <span class="ki-drawer__title" id="drawerTitle">原文</span>
+    <button class="ki-btn ki-btn--secondary ki-btn--small" onclick="kiToast('演示：复制原文')">复制</button>
+    <button class="ki-dialog__close" id="drawerClose" title="关闭">✕</button>
+  </div>
+  <div class="ki-drawer__body">
+    <div class="ki-markdown" id="drawerBody"></div>
+  </div>
+</aside>
+
+<!-- Toast -->
+<div class="ki-toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  /* 主题 */
+  const applyTheme = (t) => {
+    document.body.dataset.theme = t;
+    $('iconSun').style.display = t === 'dark' ? 'none' : '';
+    $('iconMoon').style.display = t === 'dark' ? '' : 'none';
+    try { localStorage.setItem('ki-theme', t); } catch (e) { }
+  };
+  let t = 'light'; try { t = localStorage.getItem('ki-theme') || 'light'; } catch (e) { }
+  applyTheme(t);
+  $('btnTheme').addEventListener('click', () => applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+  let sidebarHidden = false;
+  $('btnSidebar').addEventListener('click', () => {
+    sidebarHidden = !sidebarHidden;
+    $('sidebar').classList.toggle('ki-sidebar--hidden', sidebarHidden);
+    $('btnSidebar').textContent = sidebarHidden ? '☰' : '◁';
+  });
+
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('ki-toast--show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('ki-toast--show'), 1800);
+  }
+  window.kiToast = toast;
+
+  /* ── Mock 数据（树只含目录层级，不含 .md 文件节点；默认一级展开、子级折叠） ── */
+  const treeByScope = {
+    'monitor': [
+      { name: '告警系统', open: true, heat: 'hot', children: [
+        { name: '告警收敛', heat: 'hot', children: [
+          { name: '收敛策略', heat: 'hot', children: [] },
+          { name: '规则配置', heat: 'hot', children: [] },
+          { name: '阈值管理', heat: 'warm', children: [] },
+          { name: '风暴抑制', heat: 'warm', children: [] },
+        ]},
+        { name: '告警通知', heat: 'warm', children: [
+          { name: '通知渠道', heat: 'warm', children: [] },
+          { name: '静默策略', heat: 'warm', children: [] },
+          { name: '升级机制', heat: 'warm', children: [] },
+        ]},
+        { name: '告警路由', heat: 'warm', children: [
+          { name: '分派规则', heat: 'warm', children: [] },
+          { name: '值班排班', heat: 'cold', children: [] },
+        ]},
+        { name: '告警归档', heat: 'cold', children: [
+          { name: '归档策略', heat: 'cold', children: [] },
+          { name: '检索回溯', heat: 'cold', children: [] },
+        ]},
+      ]},
+      { name: '监控指标', open: true, heat: 'warm', children: [
+        { name: '指标采集', heat: 'warm', children: [] },
+        { name: '指标聚合', heat: 'warm', children: [] },
+        { name: '指标存储', heat: 'cold', children: [] },
+        { name: '指标查询', heat: 'warm', children: [] },
+        { name: '大盘配置', heat: 'cold', children: [] },
+      ]},
+      { name: '事件管理', heat: 'warm', children: [
+        { name: '事件溯源', heat: 'warm', children: [] },
+        { name: '事件关联', heat: 'warm', children: [] },
+        { name: '事件压缩', heat: 'cold', children: [] },
+      ]},
+      { name: '巡检报告', heat: 'cold', children: [
+        { name: '日报', heat: 'cold', children: [] },
+        { name: '周报', heat: 'cold', children: [] },
+        { name: '月报', heat: 'cold', children: [] },
+      ]},
+    ],
+    'wiki-test': [
+      { name: '部署', open: true, heat: 'hot', children: [
+        { name: '全量直导', heat: 'hot', children: [] },
+        { name: '增量更新', heat: 'hot', children: [] },
+        { name: '回滚预案', heat: 'warm', children: [] },
+        { name: '灰度发布', heat: 'warm', children: [] },
+      ]},
+      { name: '运维', open: true, heat: 'warm', children: [
+        { name: '日常巡检', heat: 'warm', children: [] },
+        { name: '故障处理', heat: 'hot', children: [] },
+        { name: '容量规划', heat: 'cold', children: [] },
+        { name: '安全加固', heat: 'warm', children: [] },
+      ]},
+      { name: '架构设计', heat: 'warm', children: [
+        { name: '系统设计', heat: 'warm', children: [] },
+        { name: '数据模型', heat: 'warm', children: [] },
+        { name: '接口规范', heat: 'cold', children: [] },
+      ]},
+      { name: '开发规范', heat: 'cold', children: [
+        { name: '代码风格', heat: 'cold', children: [] },
+        { name: 'Git 流程', heat: 'cold', children: [] },
+        { name: 'Code Review', heat: 'cold', children: [] },
+        { name: '测试规范', heat: 'cold', children: [] },
+      ]},
+    ],
+    'default': [
+      { name: '通用知识', open: true, heat: 'warm', children: [
+        { name: '笔记', heat: 'warm', children: [] },
+        { name: '备忘录', heat: 'cold', children: [] },
+      ]},
+      { name: '工具箱', heat: 'cold', children: [
+        { name: '常用脚本', heat: 'cold', children: [] },
+        { name: '命令速查', heat: 'cold', children: [] },
+      ]},
+    ],
+    'legacy-notes': [],
+  };
+
+  const docsByGroup = {
+    '告警系统': [
+      { id: 'alarm-01', name: '告警收敛', path: 'docs/alarm/alarm.md#1', tags: ['alarm','monitor'], heat: 'hot', snippet: '告警收敛的核心策略：基于时间窗口与规则去重，将重复告警合并为一条事件，避免告警风暴……' },
+      { id: 'notify-01', name: '告警通知', path: 'docs/alarm/notify.md#1', tags: ['alarm'], heat: 'warm', snippet: '通知渠道：企业微信 / 邮件 / Webhook，支持按告警级别分派与静默时段配置……' },
+    ],
+    '告警收敛': [
+      { id: 'alarm-01', name: '告警收敛', path: 'docs/alarm/alarm.md#1', tags: ['alarm','monitor'], heat: 'hot', snippet: '告警收敛的核心策略：基于时间窗口与规则去重，将重复告警合并为一条事件，避免告警风暴……' },
+      { id: 'alert-01', name: 'alert-rule', path: 'docs/alarm/alert-rule.md#2', tags: ['alarm'], heat: 'warm', snippet: '规则引擎支持按级别、来源、关键词配置收敛阈值，超过阈值的告警进入人工队列……' },
+    ],
+    '收敛策略': [
+      { id: 'window-01', name: '时间窗口', path: 'docs/alarm/策略/时间窗口.md#1', tags: ['alarm'], heat: 'hot', snippet: '时间窗口去重：同一告警源 5 分钟内重复上报仅保留首条；窗口长度可按级别配置……' },
+      { id: 'rule-01', name: '规则引擎', path: 'docs/alarm/策略/规则引擎.md#2', tags: ['alarm'], heat: 'warm', snippet: '规则引擎 DSL：条件字段 / 比较符 / 阈值，支持多条件 AND/OR 组合与动作派发……' },
+    ],
+    '告警通知': [
+      { id: 'notify-01', name: '告警通知', path: 'docs/alarm/notify.md#1', tags: ['alarm'], heat: 'warm', snippet: '通知渠道：企业微信 / 邮件 / Webhook，支持按告警级别分派与静默时段配置……' },
+    ],
+    '通知渠道': [
+      { id: 'webhook-01', name: 'webhook', path: 'docs/alarm/通知渠道/webhook.md#1', tags: ['alarm'], heat: 'warm', snippet: 'Webhook 渠道：签名鉴权（HMAC-SHA256），支持自定义 JSON 模板与重试策略……' },
+    ],
+    '监控指标': [
+      { id: 'metric-01', name: '监控指标', path: 'docs/metrics/metrics.md#1', tags: ['monitor'], heat: 'cold', snippet: '核心指标：CPU / 内存 / QPS / 错误率，聚合周期 1min，保留 30 天……' },
+    ],
+    '指标采集': [
+      { id: 'collect-01', name: '指标采集', path: 'docs/metrics/指标采集/metrics.md#1', tags: ['monitor'], heat: 'cold', snippet: '采集链路：node_exporter → prometheus → 远程写入，label 规范与命名约定……' },
+    ],
+    '部署': [
+      { id: 'deploy-01', name: 'deploy-01', path: 'wiki/deploy.md#1', tags: ['deploy','wiki'], heat: 'hot', snippet: '部署流程：拉取镜像 → 滚动更新 → 健康检查 → 回滚预案。镜像标签需带 commit 短哈希……' },
+      { id: 'deploy-02', name: 'deploy-02', path: 'wiki/deploy.md#2', tags: ['deploy'], heat: 'hot', snippet: '切分参数：chunk-size 1000 / overlap 150，段落边界优先，relation 名 = 文件名-N……' },
+      { id: 'deploy-03', name: 'deploy-03', path: 'wiki/deploy.md#3', tags: ['deploy'], heat: 'warm', snippet: '增量导入：git diff 驱动，modified 先写新全 chunk 成功后再删旧，保证数据一致性……' },
+    ],
+    '全量直导': [
+      { id: 'direct-01', name: 'direct-import', path: 'wiki/部署/全量直导/direct-import.md#1', tags: ['deploy','wiki'], heat: 'hot', snippet: '全量直导：scan-kb import --source 无 AI 依赖直接导入 Markdown 目录，自动递归收集……' },
+      { id: 'chunk-01', name: 'chunker', path: 'wiki/部署/全量直导/chunker.md#2', tags: ['deploy'], heat: 'warm', snippet: '切分器：固定长度 + 段落边界优先（\\n\\n → \\n → 。 → ；），overlap 150 保证衔接……' },
+    ],
+    '运维': [
+      { id: 'new-01', name: 'new', path: 'wiki/new.md#1', tags: ['wiki'], heat: 'warm', snippet: '新增的运维手册：日常巡检项与告警处理 SLO……' },
+    ],
+    '日常巡检': [
+      { id: 'daily-01', name: '日常巡检', path: 'wiki/运维/日常巡检/new.md#1', tags: ['wiki'], heat: 'warm', snippet: '巡检清单：磁盘水位 / 证书有效期 / 备份校验，每周四执行并归档结果……' },
+    ],
+    '通用知识': [
+      { id: 'note-01', name: 'notes', path: 'kb/notes.md#1', tags: [], heat: 'warm', snippet: '零散知识沉淀：Markdown 原文直存，搜索命中按 RRF 融合排序……' },
+    ],
+    '笔记': [
+      { id: 'note-sub-01', name: '笔记', path: 'kb/笔记/notes.md#1', tags: [], heat: 'warm', snippet: '子目录示例：多级路径下的文档同样可被索引与检索，sourcePath 带完整路径……' },
+    ],
+  };
+
+  const rawByDoc = {
+    'alarm-01': {
+      title: '告警收敛',
+      body: `# 告警收敛
+
+> 目标：减少重复告警，避免告警风暴。
+
+## 策略
+
+1. **时间窗口去重**：同一告警源 5 分钟内重复上报，只保留首条
+2. **规则收敛**：按级别 / 来源 / 关键词配置阈值
+3. **风暴抑制**：单源告警超过 20 条/分钟，进入静默
+
+## 数据流
+
+\`\`\`text
+告警源 → 去重器 → 规则引擎 → 通知通道
+\`\`\`
+
+## 注意事项
+
+- 收敛不丢原始事件，全部落日志
+- 静默期间恢复告警自动解除`,
+    },
+    'deploy-01': {
+      title: '部署流程（deploy-01）',
+      body: `# 部署流程
+
+## 步骤
+
+1. 拉取镜像（标签 = commit 短哈希）
+2. 滚动更新（maxUnavailable 25%）
+3. 健康检查（/healthz 连续 3 次通过）
+4. 失败回滚（保留上一版本镜像）
+
+## 切分说明
+
+- chunk-size: 1000，overlap: 150
+- 段落边界优先：\\n\\n → \\n → 。 → ；
+- relation 名 = 文件名-N（如 deploy-01）`,
+    },
+    'window-01': {
+      title: '时间窗口（收敛策略子文档）',
+      body: `# 时间窗口去重
+
+> 子路径示例：文档位于 \`告警系统/告警收敛/收敛策略/\` 下。
+
+## 规则
+
+1. 同一告警源 5 分钟内重复上报，只保留首条
+2. P0 级窗口 3 分钟，P1 级窗口 10 分钟
+3. 窗口滑动重置：新事件到达后重新计时
+
+## 配置
+
+\`\`\`yaml
+dedup:
+  window: 5m
+  level: { p0: 3m, p1: 10m }
+  reset_on_new: true
+\`\`\``,
+    },
+    'direct-01': {
+      title: '全量直导（direct-import）',
+      body: `# 全量直导
+
+> 子路径示例：文档位于 \`部署/全量直导/\` 下。
+
+## 命令
+
+\`\`\`bash
+ki scan-kb import --source ./docs --scope wiki-test
+\`\`\`
+
+## 特性
+
+- 无 AI 依赖，直接导入 Markdown 目录
+- 自动递归收集 .md 文件（跳过隐藏目录 / node_modules）
+- 内存切分：固定长度 + 段落边界优先`,
+    },
+    'webhook-01': {
+      title: 'Webhook 通知渠道',
+      body: `# Webhook 渠道
+
+> 子路径示例：文档位于 \`告警系统/告警通知/通知渠道/\` 下。
+
+## 鉴权
+
+- HMAC-SHA256 签名，密钥由平台下发
+- 请求头携带 \`X-Signature\` 与时间戳
+
+## 模板
+
+\`\`\`json
+{
+  "title": "告警通知",
+  "level": "P1",
+  "body": "{{.Message}}"
+}
+\`\`\``,
+    },
+  };
+
+  const fallbackBody = (name) =>
+    '# ' + name + '\n\n（该文档为演示数据，原文以 get-module-info 返回的 Markdown 为准。）\n\n## 说明\n\n- 本 demo 仅展示浏览交互，不接真实后端。\n- 原文内容来自 relations-cache.json / index.json。';
+
+  /* ── 渲染 Group 树（纯目录层级，文件夹图标，可折叠展开） ── */
+  const ICON_FOLDER = '<svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none"><path d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z" fill="#7db3ef" stroke="#5f97d6" stroke-width="0.6"/></svg>';
+  let currentScope = 'monitor';
+  let activeGroup = '';
+
+  function renderTree(scope) {
+    currentScope = scope;
+    const tree = treeByScope[scope] || [];
+    $('treeMeta').textContent = tree.length + ' 个目录';
+    if (tree.length === 0) {
+      $('groupTree').innerHTML = '<div class="ki-empty" style="padding:24px"><div><h3>空知识库</h3><p>该 scope 暂无 Group，可前往上传导入。</p></div></div>';
+      return;
+    }
+    const html = [];
+    const walk = (items) => {
+      items.forEach((n) => {
+        const hasSub = n.children && n.children.length > 0;
+        const isActive = n.name === activeGroup;
+        html.push(
+          '<div class="ki-tree-dir' + (n.open ? ' ki-tree-dir--open' : '') + (isActive ? ' ki-tree-dir--active' : '') + '" data-name="' + n.name + '" data-group="' + n.name + '">' +
+            '<span class="ki-tree-arrow">' + (hasSub ? (n.open ? '▾' : '▸') : '') + '</span>' +
+            ICON_FOLDER +
+            '<span class="ki-tree-dir__label">' + n.name + '</span>' +
+            (n.heat ? '<span class="ki-heat ki-heat--' + n.heat + '">' + n.heat + '</span>' : '') +
+          '</div>'
+        );
+        if (hasSub && n.open) {
+          html.push('<div class="ki-tree-group">');
+          walk(n.children);
+          html.push('</div>');
+        }
+      });
+    };
+    html.push('<div class="ki-tree-root">');
+    walk(tree);
+    html.push('</div>');
+    $('groupTree').innerHTML = html.join('');
+
+    // 点击目录：翻转数据 open → 重渲染 → 保持选中并加载文档
+    $('groupTree').querySelectorAll('.ki-tree-dir').forEach((node) => {
+      node.addEventListener('click', () => {
+        const name = node.dataset.name;
+        toggleOpen(tree, name);
+        activeGroup = name;
+        renderTree(currentScope);
+        renderDocs(name);
+      });
+    });
+
+    // 默认选中第一个目录（一级目录展开）
+    if (!activeGroup && tree.length > 0) {
+      activeGroup = tree[0].name;
+      renderDocs(activeGroup);
+    }
+  }
+
+  function toggleOpen(items, name) {
+    for (const n of items) {
+      if (n.name === name) {
+        n.open = !n.open;
+        return;
+      }
+      if (n.children && n.children.length > 0) toggleOpen(n.children, name);
+    }
+  }
+
+  function setAllOpen(items, open) {
+    items.forEach((n) => {
+      if (n.children && n.children.length > 0) {
+        n.open = open;
+        setAllOpen(n.children, open);
+      }
+    });
+  }
+
+  $('btnExpandAll').addEventListener('click', () => {
+    setAllOpen(treeByScope[currentScope] || [], true);
+    renderTree(currentScope);
+  });
+  $('btnCollapseAll').addEventListener('click', () => {
+    setAllOpen(treeByScope[currentScope] || [], false);
+    renderTree(currentScope);
+  });
+
+  function clearTreeActive() {
+    $('groupTree').querySelectorAll('.ki-tree-dir--active').forEach((x) =>
+      x.classList.remove('ki-tree-dir--active'));
+  }
+
+  function renderDocs(group) {
+    if (!group) { $('docList').innerHTML = ''; return; }
+    let docs = docsByGroup[group];
+    if (!docs) {
+      docs = [
+        { id: group + '-ov', name: group + ' · 概述', path: 'docs/' + group + '/overview.md#1', tags: [], heat: 'warm', snippet: '【' + group + '】分组概述文档：包含该目录下的核心概念、设计目标、适用场景与基本使用说明，作为该模块的入口指引……' },
+        { id: group + '-d1', name: group + ' · 实现详解', path: 'docs/' + group + '/detail.md#1', tags: [], heat: 'warm', snippet: '【' + group + '】实现详解：深入展开架构设计、核心流程、配置参数、数据结构与关键算法，适合需要二次开发或深度排错的场景……' },
+        { id: group + '-d2', name: group + ' · 最佳实践', path: 'docs/' + group + '/best-practice.md#1', tags: [], heat: 'warm', snippet: '【' + group + '】最佳实践：汇总线上运维经验，包含常见坑点、性能调优建议、故障排查清单与监控告警配置……' },
+        { id: group + '-d3', name: group + ' · 变更记录', path: 'docs/' + group + '/changelog.md#1', tags: [], heat: 'warm', snippet: '【' + group + '】变更记录：按版本记录该模块的功能新增、问题修复与不兼容变更，便于升级评估……' },
+        { id: group + '-d4', name: group + ' · FAQ', path: 'docs/' + group + '/faq.md#1', tags: [], heat: 'warm', snippet: '【' + group + '】常见问题：收集高频疑问与解答，涵盖配置、部署、排错、性能等维度……' },
+      ];
+    }
+    const tag = $('tagFilter').value;
+    const kw = $('docSearch').value.trim().toLowerCase();
+    let filtered = docs;
+    if (tag) filtered = filtered.filter((d) => d.tags.includes(tag));
+    if (kw) filtered = filtered.filter((d) => d.name.toLowerCase().includes(kw) || d.snippet.toLowerCase().includes(kw));
+    $('docMeta').textContent = group + ' · ' + filtered.length + ' 条';
+
+    if (filtered.length === 0) {
+      $('docList').innerHTML = '<div class="ki-empty" style="padding:32px"><div><h3>无匹配文档</h3><p>调整 tag / 关键词过滤后重试。</p></div></div>';
+      return;
+    }
+    $('docList').innerHTML = filtered.map((d) =>
+      '<div class="ki-doc-item ki-rel-item" data-id="' + d.id + '">' +
+        '<span class="ki-scope-name__dot ki-dot--' + (d.heat === 'hot' ? 'orange' : d.heat === 'warm' ? 'teal' : 'gray') + '" style="margin-top:3px"></span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="ki-doc-item__name">' + d.name + '</div>' +
+          '<div class="ki-doc-item__path">' + d.path + '</div>' +
+          '<div class="ki-doc-item__snippet">' + d.snippet + '</div>' +
+          '<div class="ki-doc-item__meta">' +
+            '<span class="ki-heat ki-heat--' + d.heat + '">' + d.heat + '</span>' +
+            d.tags.map((t2) => '<span class="ki-badge ki-badge--reg">' + t2 + '</span>').join('') +
+          '</div>' +
+        '</div>' +
+        '<span class="ki-cell-sub" style="align-self:center">查看原文 ›</span>' +
+      '</div>'
+    ).join('');
+
+    $('docList').querySelectorAll('.ki-rel-item').forEach((el) => {
+      el.addEventListener('click', () => openDoc(el.dataset.id));
+    });
+  }
+
+  /* ── 原文抽屉 ── */
+  function openDoc(id) {
+    const raw = rawByDoc[id] || { title: id, body: fallbackBody(id) };
+    $('drawerTitle').textContent = raw.title;
+    $('drawerBody').innerHTML = renderMarkdown(raw.body);
+    $('drawer').classList.add('ki-drawer--open');
+    $('drawerScrim').classList.add('ki-drawer__scrim--show');
+  }
+  function closeDrawer() {
+    $('drawer').classList.remove('ki-drawer--open');
+    $('drawerScrim').classList.remove('ki-drawer__scrim--show');
+  }
+  $('drawerClose').addEventListener('click', closeDrawer);
+  $('drawerScrim').addEventListener('click', closeDrawer);
+
+  /* 简易 Markdown 渲染（演示用，非完整实现） */
+  function renderMarkdown(md) {
+    let out = md
+      .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+      .replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>')
+      .replace(/^- (.*)$/gm, '<li>$1</li>')
+      .replace(/^(\d+)\. (.*)$/gm, '<li>$2</li>');
+    // 聚合列表
+    out = out.replace(/(<li>.*<\/li>)(\n?)+/g, '<ul>$1</ul>');
+    // 行内 code
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // 代码块
+    out = out.replace(/```[\s\S]*?```/g, (m) => {
+      const code = m.replace(/```\w*\n?/, '').replace(/\n?```/, '');
+      return '<pre>' + code.replace(/</g, '&lt;') + '</pre>';
+    });
+    // 段落
+    out = out.split('\n').filter((l) => l.trim()).map((l) => {
+      if (/^<[hup]/.test(l)) return l;
+      return '<p>' + l + '</p>';
+    }).join('');
+    return out;
+  }
+
+  /* ── scope 切换 ── */
+  $('scopeSelect').addEventListener('change', (e) => {
+    activeGroup = '';
+    renderTree(e.target.value);
+  });
+  $('tagFilter').addEventListener('change', () => {
+    const active = $('groupTree').querySelector('.ki-tree-dir--active');
+    if (active) renderDocs(active.dataset.group);
+  });
+  $('docSearch').addEventListener('input', () => {
+    const active = $('groupTree').querySelector('.ki-tree-dir--active');
+    if (active) renderDocs(active.dataset.group);
+  });
+
+  /* 首屏 */
+  const urlScope = new URLSearchParams(location.search).get('scope');
+  if (urlScope && $('scopeSelect').querySelector('option[value="' + urlScope + '"]')) {
+    $('scopeSelect').value = urlScope;
+  }
+  setTimeout(() => renderTree($('scopeSelect').value), 700);
+})();
+</script>
+</body>
+</html>

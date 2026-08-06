@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ki 知识库 · 总览</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body data-theme="light" data-page="dashboard">
+<div class="ki-shell">
+
+  <!-- ════════ 侧边栏 ════════ -->
+  <aside class="ki-sidebar" id="sidebar">
+    <div class="ki-sidebar__header">
+      <div class="ki-logo">ki</div>
+      <span class="ki-sidebar__title">ki 知识库</span>
+    </div>
+
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head">
+        <span class="ki-sidebar__section-label">导航</span>
+      </div>
+      <a class="ki-nav-item ki-nav-item--active" href="index.html">
+        <span class="ki-nav-item__icon">◧</span><span class="ki-nav-item__name">总览</span>
+      </a>
+      <a class="ki-nav-item" href="browse.html">
+        <span class="ki-nav-item__icon">☰</span><span class="ki-nav-item__name">知识库浏览</span>
+      </a>
+      <a class="ki-nav-item" href="search.html">
+        <span class="ki-nav-item__icon">⌕</span><span class="ki-nav-item__name">语义搜索</span>
+      </a>
+      <a class="ki-nav-item" href="import.html">
+        <span class="ki-nav-item__icon">⇪</span><span class="ki-nav-item__name">上传导入</span>
+      </a>
+      <a class="ki-nav-item" href="write.html">
+        <span class="ki-nav-item__icon">✎</span><span class="ki-nav-item__name">知识写入</span>
+      </a>
+    </nav>
+
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head">
+        <span class="ki-sidebar__section-label">集成</span>
+      </div>
+      <a class="ki-nav-item" href="http://127.0.0.1:7861" target="_blank" rel="noopener noreferrer">
+        <span class="ki-nav-item__icon">⬡</span><span class="ki-nav-item__name">向量可视化</span>
+        <span class="ki-nav-item__ext">zvec</span>
+      </a>
+    </nav>
+
+    <div class="ki-sidebar__spacer"></div>
+
+    <div class="ki-sidebar__footer">
+      <div class="ki-sidebar__footer-version">ki v0.9.0 · MCP 7423</div>
+      <div class="ki-sidebar__footer-row">
+        <button class="ki-icon-link" id="btnTheme" title="切换主题" aria-label="切换主题">
+          <svg viewBox="0 0 16 16" fill="currentColor" id="iconSun"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm.5-9.5a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zm0 11a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zM4.146 4.146a.5.5 0 0 1 .708 0l.707.708a.5.5 0 1 1-.708.707l-.707-.707a.5.5 0 0 1 0-.708zm6.292 6.293a.5.5 0 0 1 .708 0l.707.707a.5.5 0 0 1-.707.708l-.708-.708a.5.5 0 0 1 0-.707zM2.5 8.5a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zm11 0a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zM4.146 11.854a.5.5 0 0 1 0-.708l.708-.707a.5.5 0 0 1 .707.707l-.707.708a.5.5 0 0 1-.708 0zm6.293-6.293a.5.5 0 0 1 0-.707l.707-.708a.5.5 0 0 1 .708.708l-.708.707a.5.5 0 0 1-.707 0z"/></svg>
+          <svg viewBox="0 0 16 16" fill="currentColor" id="iconMoon" style="display:none"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg>
+        </button>
+        <a class="ki-icon-link" href="https://github.com/CortexReach" target="_blank" rel="noopener noreferrer" title="GitHub" aria-label="GitHub">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════ 主区域 ════════ -->
+  <div class="ki-main">
+    <header class="ki-topbar">
+      <button class="ki-topbar__toggle" id="btnSidebar" title="收起/展开侧边栏">◁</button>
+      <span class="ki-topbar__title">总览</span>
+      <div class="ki-topbar__spacer"></div>
+      <span class="ki-service-badge" id="serviceBadge">
+        <span class="ki-dot ki-dot--ok" id="serviceDot"></span>
+        <span id="serviceText">MCP HTTP 已就绪</span>
+      </span>
+      <button class="ki-btn ki-btn--secondary ki-btn--small" id="btnRefresh">↻ 刷新</button>
+    </header>
+
+    <main class="ki-content">
+      <div class="ki-content-inner">
+
+        <!-- 页头 -->
+        <div class="ki-page-head">
+          <div>
+            <h1>总览</h1>
+            <p>知识库全貌 · 服务状态 · 健康度</p>
+          </div>
+        </div>
+
+        <!-- 服务横幅 -->
+        <div class="ki-banner" id="banner">
+          <div class="ki-banner__msg">
+            <span>⚠</span>
+            <span>MCP HTTP 服务未就绪（127.0.0.1:7423），部分功能不可用。</span>
+          </div>
+          <div class="ki-banner__actions">
+            <button class="ki-btn ki-btn--primary ki-btn--small" id="btnStartSvc">启动服务</button>
+            <button class="ki-btn ki-btn--secondary ki-btn--small" id="btnHideBanner">忽略</button>
+          </div>
+        </div>
+
+        <!-- 统计卡 -->
+        <section id="statsSection">
+          <div class="ki-stats" id="statsGrid">
+            <div class="ki-stat-card"><div class="ki-stat-label">Scopes</div><div class="ki-stat-value"><span class="ki-skeleton" style="width:48px;height:28px"></span></div></div>
+            <div class="ki-stat-card"><div class="ki-stat-label">向量总数</div><div class="ki-stat-value"><span class="ki-skeleton" style="width:60px;height:28px"></span></div></div>
+            <div class="ki-stat-card"><div class="ki-stat-label">Groups</div><div class="ki-stat-value"><span class="ki-skeleton" style="width:36px;height:28px"></span></div></div>
+            <div class="ki-stat-card"><div class="ki-stat-label">Tags</div><div class="ki-stat-value"><span class="ki-skeleton" style="width:30px;height:28px"></span></div></div>
+          </div>
+        </section>
+
+        <!-- Scope 列表 -->
+        <section>
+          <div class="ki-card">
+            <div class="ki-card__head">
+              <span class="ki-card__title">知识库（Scopes）</span>
+              <span class="ki-card__sub" id="scopeMeta">检测中…</span>
+            </div>
+            <div id="scopeList"></div>
+          </div>
+        </section>
+
+        <!-- 健康状态 -->
+        <section>
+          <div class="ki-card">
+            <div class="ki-card__head">
+              <span class="ki-card__title">健康状态</span>
+              <span class="ki-health-summary" id="healthSummary"></span>
+            </div>
+            <div class="ki-card__body" id="healthList"></div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="ki-toast" id="toast"></div>
+
+<script>
+/* =========================================================
+   Demo 交互脚本（演示性质，无真实后端）
+   ========================================================= */
+(function () {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+
+  /* ── 主题切换 ── */
+  const applyTheme = (t) => {
+    document.body.dataset.theme = t;
+    $('iconSun').style.display = t === 'dark' ? 'none' : '';
+    $('iconMoon').style.display = t === 'dark' ? '' : 'none';
+    try { localStorage.setItem('ki-theme', t); } catch (e) { /* ignore */ }
+  };
+  const initTheme = () => {
+    let t = 'light';
+    try { t = localStorage.getItem('ki-theme') || 'light'; } catch (e) { /* ignore */ }
+    applyTheme(t);
+  };
+  $('btnTheme').addEventListener('click', () => {
+    applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark');
+  });
+  initTheme();
+
+  /* ── 侧边栏折叠 ── */
+  let sidebarHidden = false;
+  $('btnSidebar').addEventListener('click', () => {
+    sidebarHidden = !sidebarHidden;
+    $('sidebar').classList.toggle('ki-sidebar--hidden', sidebarHidden);
+    $('btnSidebar').textContent = sidebarHidden ? '☰' : '◁';
+  });
+
+  /* ── Toast ── */
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('ki-toast--show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('ki-toast--show'), 1800);
+  }
+  window.kiToast = toast;
+
+  /* ── 服务状态（模拟就绪/未就绪切换） ── */
+  let svcOk = false;
+  function renderBanner() {
+    const b = $('banner');
+    if (svcOk) {
+      b.style.display = 'none';
+    } else {
+      b.style.display = 'flex';
+      b.classList.remove('ki-banner--ok');
+    }
+    $('serviceDot').className = 'ki-dot ' + (svcOk ? 'ki-dot--ok' : 'ki-dot--err');
+    $('serviceText').textContent = svcOk ? 'MCP HTTP 已就绪' : 'MCP HTTP 未就绪';
+  }
+  $('btnStartSvc').addEventListener('click', () => {
+    svcOk = true;
+    renderBanner();
+    toast('服务已启动：ki mcp --http (127.0.0.1:7423)');
+  });
+  $('btnHideBanner').addEventListener('click', () => { $('banner').style.display = 'none'; });
+
+  /* ── Mock 数据（对齐 ki scope list 结构：kb/vector/registered） ── */
+  const scopes = [
+    { scope: 'monitor', kb: true, vector: true, registered: true,  vectors: 300, groups: 12, tags: 5,  dot: 'blue',   path: '~/.ki/kb/monitor', last: '2 分钟前' },
+    { scope: 'wiki-test', kb: true, vector: true, registered: true, vectors: 45,  groups: 3,  tags: 2,  dot: 'green',  path: '~/.ki/kb/wiki-test', last: '昨天' },
+    { scope: 'default', kb: true, vector: true, registered: true,  vectors: 18,  groups: 2,  tags: 1,  dot: 'purple', path: '~/.ki/kb/default', last: '3 天前' },
+    { scope: 'legacy-notes', kb: true, vector: false, registered: false, vectors: 0, groups: 0, tags: 0, dot: 'gray', path: '~/.ki/kb/legacy-notes', last: '未导入' },
+  ];
+
+  const health = [
+    { name: '配置文件',  status: 'pass', detail: '~/.ki/config.yaml 格式正确' },
+    { name: 'dataDir',   status: 'pass', detail: '存在且可写' },
+    { name: 'apiKey',    status: 'pass', detail: '已解析 embedding.apiKey' },
+    { name: 'Embedding', status: 'pass', detail: 'baseURL /embeddings 可达，维度 1536' },
+    { name: 'zvec 集合', status: 'warn', detail: 'collection 存在，但 legacy-notes 无向量' },
+    { name: 'scopes',    status: 'pass', detail: 'scopeMode: default，已注册 3 个' },
+  ];
+
+  const healthIcon = { pass: '✅', warn: '⚠️', fail: '❌' };
+
+  /* ── 渲染：骨架屏 → 真实数据 ── */
+  function renderStats() {
+    const total = scopes.reduce((s, x) => s + x.vectors, 0);
+    const groups = scopes.reduce((s, x) => s + x.groups, 0);
+    const tags = scopes.reduce((s, x) => s + x.tags, 0);
+    const vals = [
+      { label: 'Scopes', value: scopes.length, primary: true, sub: '两层并集' },
+      { label: '向量总数', value: total, primary: false, sub: 'vectorCountScope 汇总' },
+      { label: 'Groups', value: groups, primary: false, sub: '关系分组' },
+      { label: 'Tags', value: tags, primary: false, sub: '标签去重' },
+    ];
+    const grid = $('statsGrid');
+    grid.innerHTML = vals.map((v) =>
+      '<div class="ki-stat-card">' +
+        '<div class="ki-stat-label">' + v.label + '</div>' +
+        '<div class="ki-stat-value' + (v.primary ? ' ki-stat-value--primary' : '') + '">' + v.value + '</div>' +
+        '<div class="ki-stat-sub" style="margin-top:6px">' + v.sub + '</div>' +
+      '</div>'
+    ).join('');
+  }
+
+  function badgeCell(ok, label, cls) {
+    return '<span class="ki-badge' + (ok ? ' ' + cls : ' ki-badge--off') + '">' + (ok ? label : '—') + '</span>';
+  }
+
+  function renderScopes() {
+    $('scopeMeta').textContent = scopes.length + ' 个 scope · 点击行进入浏览';
+    const empty = scopes.length === 0;
+    $('scopeList').innerHTML = empty
+      ? '<div class="ki-empty"><div><h3>暂无知识库</h3><p>导入第一个知识库，开始沉淀你的文档。</p><div class="ki-empty__actions"><button class="ki-btn ki-btn--primary ki-btn--small" onclick="location.href=\'import.html\'">上传文档</button></div></div></div>'
+      : '<table class="ki-table"><thead><tr>' +
+          '<th>Scope</th><th>层状态</th><th style="text-align:right">向量数</th><th style="text-align:right">Groups</th><th style="text-align:right">Tags</th><th>最近导入</th><th></th>' +
+        '</tr></thead><tbody>' +
+        scopes.map((s) =>
+          '<tr data-scope="' + s.scope + '">' +
+            '<td><div class="ki-scope-name">' +
+              '<span class="ki-scope-name__dot ki-dot--' + s.dot + '"></span>' +
+              '<span><span class="ki-scope-name__text">' + s.scope + '</span><br>' +
+              '<span class="ki-scope-name__path">' + s.path + '</span></span>' +
+            '</div></td>' +
+            '<td><div class="ki-badge-group">' +
+              badgeCell(s.kb, 'KB', 'ki-badge--kb') +
+              badgeCell(s.vector, 'VEC', 'ki-badge--vec') +
+              badgeCell(s.registered, 'REG', 'ki-badge--reg') +
+            '</div></td>' +
+            '<td style="text-align:right"><span class="ki-num">' + s.vectors + '</span>' + (s.vectors === 0 ? '<div class="ki-cell-sub">空库</div>' : '') + '</td>' +
+            '<td style="text-align:right"><span class="ki-num">' + s.groups + '</span></td>' +
+            '<td style="text-align:right"><span class="ki-num">' + s.tags + '</span></td>' +
+            '<td><span class="ki-cell-sub">' + s.last + '</span></td>' +
+            '<td><div class="ki-row-actions">' +
+              '<button class="ki-mini-btn" data-scope-action="browse">浏览</button>' +
+              '<button class="ki-mini-btn" data-scope-action="search">搜索</button>' +
+              '<button class="ki-mini-btn ki-mini-btn--danger" data-scope-action="delete">删除</button>' +
+            '</div></td>' +
+          '</tr>'
+        ).join('') + '</tbody></table>';
+
+    document.querySelectorAll('#scopeList tbody tr').forEach((tr) => {
+      tr.addEventListener('click', (e) => {
+        const btn = e.target.closest('.ki-mini-btn');
+        if (btn) {
+          const act = btn.dataset.scopeAction;
+          if (act === 'browse') location.href = 'browse.html?scope=' + tr.dataset.scope;
+          else if (act === 'search') location.href = 'search.html?scope=' + tr.dataset.scope;
+          else toast('演示：删除「' + tr.dataset.scope + '」（需二次确认）');
+          return;
+        }
+        location.href = 'browse.html?scope=' + tr.dataset.scope;
+      });
+    });
+  }
+
+  function renderHealth() {
+    const pass = health.filter((h) => h.status === 'pass').length;
+    const warn = health.filter((h) => h.status === 'warn').length;
+    const fail = health.filter((h) => h.status === 'fail').length;
+    $('healthSummary').innerHTML =
+      '<span><b style="color:var(--ki-color-success)">' + pass + '</b> 通过</span>' +
+      (warn ? '<span><b style="color:var(--ki-color-warning)">' + warn + '</b> 警告</span>' : '') +
+      (fail ? '<span><b style="color:var(--ki-color-danger)">' + fail + '</b> 失败</span>' : '');
+    $('healthList').innerHTML = health.map((h) =>
+      '<div class="ki-health-item">' +
+        '<span class="ki-health-item__icon">' + healthIcon[h.status] + '</span>' +
+        '<span class="ki-health-item__name">' + h.name + '</span>' +
+        '<span class="ki-health-item__detail">' + h.detail + '</span>' +
+      '</div>'
+    ).join('');
+  }
+
+  /* ── 刷新（模拟加载） ── */
+  $('btnRefresh').addEventListener('click', () => {
+    toast('刷新中…');
+    const grid = $('statsGrid');
+    grid.innerHTML = '<div class="ki-stat-card"><div class="ki-stat-label">Scopes</div><div class="ki-stat-value"><span class="ki-skeleton" style="width:48px;height:28px"></span></div></div>'.repeat(4);
+    $('scopeList').innerHTML = '';
+    $('healthList').innerHTML = '';
+    setTimeout(() => {
+      renderStats();
+      renderScopes();
+      renderHealth();
+      toast('已刷新（演示数据）');
+    }, 800);
+  });
+
+  /* ── 首屏：模拟加载 → 渲染 ── */
+  renderBanner();
+  setTimeout(() => {
+    renderStats();
+    renderScopes();
+    renderHealth();
+  }, 900);
+})();
+</script>
+</body>
+</html>

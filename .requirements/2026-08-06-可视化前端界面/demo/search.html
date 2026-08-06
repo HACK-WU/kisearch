@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ki 知识库 · 语义搜索</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.ki-search-form {
+  background: var(--ki-color-surface); border-radius: var(--ki-radius-md);
+  border: 1px solid var(--ki-color-border); padding: 16px;
+}
+.ki-search-bar { display: flex; gap: 8px; }
+.ki-search-input {
+  flex: 1; border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 10px 14px; font-size: var(--ki-font-size-lg); font-family: var(--ki-font-family);
+  color: var(--ki-color-text); background: var(--ki-color-bg); outline: none;
+  transition: border-color var(--ki-motion-fast);
+}
+.ki-search-input:focus { border-color: var(--ki-color-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 10%, transparent); }
+.ki-query-options { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.ki-query-option { display: flex; align-items: center; gap: 8px; font-size: var(--ki-font-size-sm); }
+.ki-query-option .ki-form-label { margin-bottom: 0; text-transform: none; letter-spacing: 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-results { background: var(--ki-color-surface); border-radius: var(--ki-radius-md); border: 1px solid var(--ki-color-border); overflow: hidden; }
+.ki-results__head { padding: 16px 20px; border-bottom: 1px solid var(--ki-color-border); display: flex; align-items: center; justify-content: space-between; }
+.ki-results__title { font-size: var(--ki-font-size-md); font-weight: 600; }
+.ki-results__meta { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-tag-select { display: flex; gap: 6px; flex-wrap: wrap; }
+.ki-tag-chip {
+  padding: 3px 10px; font-size: var(--ki-font-size-sm); border-radius: 20px;
+  border: 1px solid var(--ki-color-border); background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted); cursor: pointer; transition: all var(--ki-motion-fast);
+}
+.ki-tag-chip:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-tag-chip--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+input[type="range"].ki-range { width: 140px; accent-color: var(--ki-color-primary); }
+.ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 32px; }
+</style>
+</head>
+<body data-theme="light" data-page="search">
+<div class="ki-shell">
+
+  <!-- ════════ 侧边栏 ════════ -->
+  <aside class="ki-sidebar" id="sidebar">
+    <div class="ki-sidebar__header">
+      <div class="ki-logo">ki</div>
+      <span class="ki-sidebar__title">ki 知识库</span>
+    </div>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">导航</span></div>
+      <a class="ki-nav-item" href="index.html"><span class="ki-nav-item__icon">◧</span><span class="ki-nav-item__name">总览</span></a>
+      <a class="ki-nav-item" href="browse.html"><span class="ki-nav-item__icon">☰</span><span class="ki-nav-item__name">知识库浏览</span></a>
+      <a class="ki-nav-item ki-nav-item--active" href="search.html"><span class="ki-nav-item__icon">⌕</span><span class="ki-nav-item__name">语义搜索</span></a>
+      <a class="ki-nav-item" href="import.html"><span class="ki-nav-item__icon">⇪</span><span class="ki-nav-item__name">上传导入</span></a>
+      <a class="ki-nav-item" href="write.html"><span class="ki-nav-item__icon">✎</span><span class="ki-nav-item__name">知识写入</span></a>
+    </nav>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">集成</span></div>
+      <a class="ki-nav-item" href="http://127.0.0.1:7861" target="_blank" rel="noopener noreferrer">
+        <span class="ki-nav-item__icon">⬡</span><span class="ki-nav-item__name">向量可视化</span><span class="ki-nav-item__ext">zvec</span>
+      </a>
+    </nav>
+    <div class="ki-sidebar__spacer"></div>
+    <div class="ki-sidebar__footer">
+      <div class="ki-sidebar__footer-version">ki v0.9.0 · MCP 7423</div>
+      <div class="ki-sidebar__footer-row">
+        <button class="ki-icon-link" id="btnTheme" title="切换主题"><svg viewBox="0 0 16 16" fill="currentColor" id="iconSun"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm.5-9.5a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zm0 11a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zM4.146 4.146a.5.5 0 0 1 .708 0l.707.708a.5.5 0 1 1-.708.707l-.707-.707a.5.5 0 0 1 0-.708zm6.292 6.293a.5.5 0 0 1 .708 0l.707.707a.5.5 0 0 1-.707.708l-.708-.708a.5.5 0 0 1 0-.707zM2.5 8.5a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zm11 0a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zM4.146 11.854a.5.5 0 0 1 0-.708l.708-.707a.5.5 0 0 1 .707.707l-.707.708a.5.5 0 0 1-.708 0zm6.293-6.293a.5.5 0 0 1 0-.707l.707-.708a.5.5 0 0 1 .708.708l-.708.707a.5.5 0 0 1-.707 0z"/></svg>
+        <svg viewBox="0 0 16 16" fill="currentColor" id="iconMoon" style="display:none"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg></button>
+        <a class="ki-icon-link" href="https://github.com/CortexReach" target="_blank" rel="noopener noreferrer" title="GitHub"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════ 主区域 ════════ -->
+  <div class="ki-main">
+    <header class="ki-topbar">
+      <button class="ki-topbar__toggle" id="btnSidebar" title="收起/展开侧边栏">◁</button>
+      <span class="ki-topbar__title">语义搜索</span>
+      <div class="ki-topbar__spacer"></div>
+      <span class="ki-service-badge"><span class="ki-dot ki-dot--ok"></span>MCP HTTP 已就绪</span>
+    </header>
+
+    <main class="ki-content">
+      <div class="ki-content-inner">
+
+        <div class="ki-page-head">
+          <div>
+            <h1>语义搜索</h1>
+            <p>向量 + BM25 混合检索 · RRF 融合</p>
+          </div>
+          <select class="ki-form-select" id="scopeSelect" style="width:auto;min-width:140px">
+            <option value="">全部 scope</option>
+            <option value="monitor">monitor</option>
+            <option value="wiki-test">wiki-test</option>
+            <option value="default">default</option>
+          </select>
+        </div>
+
+        <!-- 搜索表单 -->
+        <form class="ki-search-form" id="searchForm">
+          <div class="ki-search-bar">
+            <input class="ki-search-input" id="query" placeholder="输入自然语言查询，如：告警收敛策略是什么？" autocomplete="off">
+            <button class="ki-btn ki-btn--primary" id="btnSearch" style="height:42px;padding:0 24px">搜索</button>
+          </div>
+          <div class="ki-query-options">
+            <div class="ki-query-option">
+              <span class="ki-form-label">Tags</span>
+              <div class="ki-tag-select" id="tagChips">
+                <button type="button" class="ki-tag-chip ki-tag-chip--active" data-tag="">全部</button>
+                <button type="button" class="ki-tag-chip" data-tag="alarm">alarm</button>
+                <button type="button" class="ki-tag-chip" data-tag="deploy">deploy</button>
+                <button type="button" class="ki-tag-chip" data-tag="monitor">monitor</button>
+                <button type="button" class="ki-tag-chip" data-tag="wiki">wiki</button>
+              </div>
+            </div>
+            <div class="ki-query-option">
+              <span class="ki-form-label">Threshold</span>
+              <input type="range" class="ki-range" id="threshold" min="0" max="1" step="0.05" value="0">
+              <span class="ki-threshold-val" id="thresholdVal">0</span>
+            </div>
+            <div class="ki-query-option">
+              <span class="ki-form-label">Limit</span>
+              <select class="ki-form-select" id="limit" style="width:auto;min-width:72px">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+              </select>
+            </div>
+          </div>
+        </form>
+
+        <!-- 结果 -->
+        <section id="resultsSection" style="display:none">
+          <div class="ki-results">
+            <div class="ki-results__head">
+              <span class="ki-results__title">搜索结果</span>
+              <span class="ki-results__meta" id="resultsMeta"></span>
+            </div>
+            <div id="resultsList"></div>
+          </div>
+        </section>
+
+        <!-- 空状态引导 -->
+        <section id="idleSection">
+          <div class="ki-empty" style="padding:56px">
+            <div>
+              <div style="font-size:32px;margin-bottom:8px">⌕</div>
+              <h3>输入查询开始搜索</h3>
+              <p>混合检索全部 scope 的知识库内容，命中结果可定位原文。</p>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="ki-toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  /* 主题 */
+  const applyTheme = (t) => {
+    document.body.dataset.theme = t;
+    $('iconSun').style.display = t === 'dark' ? 'none' : '';
+    $('iconMoon').style.display = t === 'dark' ? '' : 'none';
+    try { localStorage.setItem('ki-theme', t); } catch (e) { }
+  };
+  let t = 'light'; try { t = localStorage.getItem('ki-theme') || 'light'; } catch (e) { }
+  applyTheme(t);
+  $('btnTheme').addEventListener('click', () => applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+  let sidebarHidden = false;
+  $('btnSidebar').addEventListener('click', () => {
+    sidebarHidden = !sidebarHidden;
+    $('sidebar').classList.toggle('ki-sidebar--hidden', sidebarHidden);
+    $('btnSidebar').textContent = sidebarHidden ? '☰' : '◁';
+  });
+
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('ki-toast--show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('ki-toast--show'), 1800);
+  }
+  window.kiToast = toast;
+
+  /* 过滤项 */
+  let activeTag = '';
+  $('tagChips').querySelectorAll('.ki-tag-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      $('tagChips').querySelectorAll('.ki-tag-chip').forEach((c) => c.classList.remove('ki-tag-chip--active'));
+      chip.classList.add('ki-tag-chip--active');
+      activeTag = chip.dataset.tag;
+    });
+  });
+  $('threshold').addEventListener('input', (e) => {
+    $('thresholdVal').textContent = e.target.value;
+  });
+
+  /* Mock 搜索 */
+  const mockResults = [
+    { id: 'alarm-01', scope: 'monitor', group: '告警收敛', relation: 'alarm-01', score: 0.912, tag: 'alarm', isFullText: true,
+      content: '告警收敛的核心策略：基于时间窗口与规则去重，将重复告警合并为一条事件，避免告警风暴。收敛不丢失原始事件，全部落日志……' },
+    { id: 'deploy-01', scope: 'wiki-test', group: '部署', relation: 'deploy-01', score: 0.855, tag: 'deploy', isFullText: true,
+      content: '部署流程：拉取镜像 → 滚动更新 → 健康检查 → 回滚预案。镜像标签需带 commit 短哈希，maxUnavailable 25%……' },
+    { id: 'deploy-02', scope: 'wiki-test', group: '部署', relation: 'deploy-02', score: 0.801, tag: 'deploy', isFullText: true,
+      content: '切分参数：chunk-size 1000 / overlap 150，段落边界优先（\\n\\n → \\n → 。 → ；），relation 名 = 文件名-N……' },
+    { id: 'notify-01', scope: 'monitor', group: '告警通知', relation: 'notify-01', score: 0.734, tag: 'alarm', isFullText: false,
+      content: '[摘要] 通知渠道：企业微信 / 邮件 / Webhook，支持按告警级别分派与静默时段配置……' },
+    { id: 'metric-01', scope: 'monitor', group: '监控指标', relation: 'metric-01', score: 0.692, tag: 'monitor', isFullText: true,
+      content: '核心指标：CPU / 内存 / QPS / 错误率，聚合周期 1min，保留 30 天。错误率超过 1% 触发 P1 告警……' },
+  ];
+
+  function renderResults(items, total, ms) {
+    $('resultsSection').style.display = '';
+    $('idleSection').style.display = 'none';
+    $('resultsMeta').textContent = total + ' 条结果 · ' + ms + 'ms';
+
+    if (items.length === 0) {
+      $('resultsList').innerHTML = '<div class="ki-empty" style="padding:40px"><div><h3>未找到相关内容</h3><p>建议：调整关键词 / 降低 threshold / 切换 tag 过滤。</p></div></div>';
+      return;
+    }
+    $('resultsList').innerHTML = items.map((r, i) =>
+      '<div class="ki-qr-item" data-id="' + r.id + '">' +
+        '<div class="ki-qr-rank' + (i < 3 ? ' ki-qr-rank--top' : '') + '">' + (i + 1) + '</div>' +
+        '<div class="ki-qr-body">' +
+          '<div class="ki-qr-content">' + r.content + '</div>' +
+          '<div class="ki-qr-meta">' +
+            '<span class="ki-badge ki-badge--vec">' + r.scope + '</span>' +
+            '<span class="ki-badge ki-badge--kb">' + r.group + '</span>' +
+            '<span class="ki-badge ki-badge--reg">' + r.relation + '</span>' +
+            '<span class="ki-badge">' + (r.isFullText ? '全文' : '摘要') + '</span>' +
+            '<span class="ki-cell-sub">' + r.tag + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="ki-qr-score">' + r.score.toFixed(3) + '<div class="ki-score-bar-bg"><div class="ki-score-bar" style="width:' + Math.round(r.score * 100) + '%"></div></div></div>' +
+      '</div>'
+    ).join('');
+
+    $('resultsList').querySelectorAll('.ki-qr-item').forEach((el) => {
+      el.addEventListener('click', () => toast('演示：跳转原文 ' + el.dataset.id));
+    });
+  }
+
+  $('searchForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = $('query').value.trim();
+    if (!q) { toast('请输入查询内容'); return; }
+
+    $('btnSearch').classList.add('ki-btn--loading');
+    $('btnSearch').disabled = true;
+    $('resultsSection').style.display = '';
+    $('idleSection').style.display = 'none';
+    $('resultsList').innerHTML = '<div class="ki-empty" style="padding:40px"><div class="ki-skeleton" style="width:200px;height:16px;margin:0 auto 12px"></div><div class="ki-skeleton" style="width:300px;height:16px;margin:0 auto"></div></div>';
+
+    setTimeout(() => {
+      $('btnSearch').classList.remove('ki-btn--loading');
+      $('btnSearch').disabled = false;
+
+      const threshold = parseFloat($('threshold').value);
+      const scope = $('scopeSelect').value;
+      let items = mockResults.filter((r) => {
+        if (scope && r.scope !== scope) return false;
+        if (activeTag && r.tag !== activeTag) return false;
+        if (threshold > 0 && r.score < threshold) return false;
+        return r.content.includes(q) || r.relation.includes(q);
+      });
+      const total = items.length;
+      const limit = parseInt($('limit').value, 10);
+      items = items.slice(0, limit);
+      renderResults(items, total, 68 + Math.random() * 80);
+      if (items.length === 0) toast('未命中：建议调整关键词或降低 threshold');
+    }, 800);
+  });
+  $('btnSearch').addEventListener('click', () => $('searchForm').dispatchEvent(new Event('submit')));
+
+  /* 首屏 */
+  const urlScope = new URLSearchParams(location.search).get('scope');
+  if (urlScope && $('scopeSelect').querySelector('option[value="' + urlScope + '"]')) {
+    $('scopeSelect').value = urlScope;
+  }
+})();
+</script>
+</body>
+</html>

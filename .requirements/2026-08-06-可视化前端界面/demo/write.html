@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ki 知识库 · 知识写入</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.ki-write-layout { max-width: 860px; }
+.ki-mode-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 7px; padding: 2px; border: 1px solid var(--ki-color-border); margin-bottom: 20px; }
+.ki-mode-tab { flex: 1; padding: 6px 12px; font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text-muted); border-radius: 6px; cursor: pointer; transition: all var(--ki-motion-fast); border: none; background: none; font-family: var(--ki-font-family); }
+.ki-mode-tab--active { background: var(--ki-color-primary); color: white; }
+.ki-md-editor { position: relative; margin-top: 8px; }
+.ki-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ki-md-preview {
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  padding: 12px 14px; background: var(--ki-color-bg); line-height: 1.7;
+  overflow-y: auto; font-size: var(--ki-font-size-sm);
+}
+.ki-md-preview::-webkit-scrollbar { width: 6px; }
+.ki-md-preview::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
+.ki-preview-btn {
+  padding: 3px 12px; border-radius: 5px;
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  cursor: pointer; border: 1px solid var(--ki-color-border-strong);
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  transition: all var(--ki-motion-fast); font-family: var(--ki-font-family);
+  flex-shrink: 0;
+}
+.ki-preview-btn:hover { background: var(--ki-color-bg-secondary); }
+.ki-preview-btn--active {
+  background: var(--ki-color-primary); border-color: var(--ki-color-primary); color: #fff;
+}
+.ki-md-preview h1 { font-size: 17px; margin: 10px 0 6px; }
+.ki-md-preview h2 { font-size: 15px; margin: 8px 0 4px; }
+.ki-md-preview p { margin: 6px 0; }
+.ki-md-preview ul { padding-left: 20px; margin: 6px 0; }
+.ki-md-preview code { font-family: var(--ki-font-mono); background: var(--ki-color-surface-muted); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.ki-tag-input-row { display: flex; gap: 8px; align-items: center; }
+.ki-tag-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.ki-tag-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 20px;
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+  color: var(--ki-color-primary); border: 1px solid color-mix(in srgb, var(--ki-color-primary) 15%, transparent);
+}
+.ki-tag-pill__x { cursor: pointer; opacity: 0.6; padding: 0 2px; }
+.ki-tag-pill__x:hover { opacity: 1; }
+.ki-tag-option {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; margin: 2px; border-radius: 20px;
+  font-size: var(--ki-font-size-sm); cursor: pointer;
+  border: 1px solid var(--ki-color-border); background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted); transition: all var(--ki-motion-fast);
+}
+.ki-tag-option:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-tag-option--selected { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+
+/* ── Group 树选择器（combobox + tree） ── */
+.ki-combobox { position: relative; }
+.ki-combobox__input-wrap { position: relative; }
+.ki-combobox__input-wrap .ki-form-input { padding-right: 32px; }
+.ki-combobox__toggle {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: var(--ki-color-text-subtle);
+  font-size: 12px; padding: 4px 6px; border-radius: 4px; line-height: 1;
+  transition: all var(--ki-motion-fast);
+}
+.ki-combobox__toggle:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-combobox__toggle--open { color: var(--ki-color-primary); }
+.ki-combobox__panel {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100;
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2);
+  display: none; flex-direction: column;
+}
+.ki-combobox__panel--open { display: flex; }
+.ki-combobox__tree { padding: 8px; max-height: 240px; overflow-y: auto; overflow-x: hidden; }
+.ki-combobox__tree::-webkit-scrollbar { width: 6px; }
+.ki-combobox__tree::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
+.ki-combobox__footer { padding: 8px 12px; border-top: 1px solid var(--ki-color-border); }
+/* 树节点样式 */
+.ki-gtree-dir {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border-radius: 5px; cursor: pointer; user-select: none;
+  white-space: nowrap; line-height: 1.5; transition: background var(--ki-motion-fast);
+  font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text);
+}
+.ki-gtree-dir:hover { background: var(--ki-color-hover); }
+.ki-gtree-dir--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); }
+.ki-gtree-arrow { width: 12px; font-size: 9px; color: var(--ki-color-text-subtle); flex-shrink: 0; text-align: center; }
+.ki-gtree-icon { width: 15px; height: 15px; flex-shrink: 0; }
+.ki-gtree-label { overflow: hidden; text-overflow: ellipsis; }
+.ki-gtree-group { padding-left: 13px; margin-left: 8px; border-left: 1px solid var(--ki-color-border); display: flex; flex-direction: column; gap: 1px; margin-top: 2px; margin-bottom: 2px; }
+</style>
+</head>
+<body data-theme="light" data-page="write">
+<div class="ki-shell">
+
+  <!-- ════════ 侧边栏 ════════ -->
+  <aside class="ki-sidebar" id="sidebar">
+    <div class="ki-sidebar__header">
+      <div class="ki-logo">ki</div>
+      <span class="ki-sidebar__title">ki 知识库</span>
+    </div>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">导航</span></div>
+      <a class="ki-nav-item" href="index.html"><span class="ki-nav-item__icon">◧</span><span class="ki-nav-item__name">总览</span></a>
+      <a class="ki-nav-item" href="browse.html"><span class="ki-nav-item__icon">☰</span><span class="ki-nav-item__name">知识库浏览</span></a>
+      <a class="ki-nav-item" href="search.html"><span class="ki-nav-item__icon">⌕</span><span class="ki-nav-item__name">语义搜索</span></a>
+      <a class="ki-nav-item" href="import.html"><span class="ki-nav-item__icon">⇪</span><span class="ki-nav-item__name">上传导入</span></a>
+      <a class="ki-nav-item ki-nav-item--active" href="write.html"><span class="ki-nav-item__icon">✎</span><span class="ki-nav-item__name">知识写入</span></a>
+    </nav>
+    <nav class="ki-sidebar__section">
+      <div class="ki-sidebar__section-head"><span class="ki-sidebar__section-label">集成</span></div>
+      <a class="ki-nav-item" href="http://127.0.0.1:7861" target="_blank" rel="noopener noreferrer">
+        <span class="ki-nav-item__icon">⬡</span><span class="ki-nav-item__name">向量可视化</span><span class="ki-nav-item__ext">zvec</span>
+      </a>
+    </nav>
+    <div class="ki-sidebar__spacer"></div>
+    <div class="ki-sidebar__footer">
+      <div class="ki-sidebar__footer-version">ki v0.9.0 · MCP 7423</div>
+      <div class="ki-sidebar__footer-row">
+        <button class="ki-icon-link" id="btnTheme" title="切换主题"><svg viewBox="0 0 16 16" fill="currentColor" id="iconSun"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm.5-9.5a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zm0 11a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zM4.146 4.146a.5.5 0 0 1 .708 0l.707.708a.5.5 0 1 1-.708.707l-.707-.707a.5.5 0 0 1 0-.708zm6.292 6.293a.5.5 0 0 1 .708 0l.707.707a.5.5 0 0 1-.707.708l-.708-.708a.5.5 0 0 1 0-.707zM2.5 8.5a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zm11 0a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zM4.146 11.854a.5.5 0 0 1 0-.708l.708-.707a.5.5 0 0 1 .707.707l-.707.708a.5.5 0 0 1-.708 0zm6.293-6.293a.5.5 0 0 1 0-.707l.707-.708a.5.5 0 0 1 .708.708l-.708.707a.5.5 0 0 1-.707 0z"/></svg>
+        <svg viewBox="0 0 16 16" fill="currentColor" id="iconMoon" style="display:none"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg></button>
+        <a class="ki-icon-link" href="https://github.com/CortexReach" target="_blank" rel="noopener noreferrer" title="GitHub"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ════════ 主区域 ════════ -->
+  <div class="ki-main">
+    <header class="ki-topbar">
+      <button class="ki-topbar__toggle" id="btnSidebar" title="收起/展开侧边栏">◁</button>
+      <span class="ki-topbar__title">知识写入</span>
+      <div class="ki-topbar__spacer"></div>
+      <span class="ki-service-badge"><span class="ki-dot ki-dot--ok"></span>MCP HTTP 已就绪</span>
+    </header>
+
+    <main class="ki-content">
+      <div class="ki-content-inner ki-write-layout">
+
+        <div class="ki-page-head">
+          <div>
+            <h1>知识写入</h1>
+            <p>store · sync-relation · 批量写入</p>
+          </div>
+        </div>
+
+        <div class="ki-card">
+          <div class="ki-card__body" style="padding:20px">
+
+            <!-- 写入类型切换 -->
+            <div class="ki-mode-tabs">
+              <button type="button" class="ki-mode-tab ki-mode-tab--active" data-mode="store">单条文本（store）</button>
+              <button type="button" class="ki-mode-tab" data-mode="relation">关系写入（sync-relation）</button>
+              <button type="button" class="ki-mode-tab" data-mode="batch">批量（JSON）</button>
+            </div>
+
+            <!-- 单条文本 -->
+            <div id="panel-store">
+              <div class="ki-form-group">
+                <label class="ki-form-label">Scope</label>
+                <select class="ki-form-select" id="storeScope">
+                  <option value="monitor">monitor</option>
+                  <option value="wiki-test">wiki-test</option>
+                  <option value="default">default</option>
+                </select>
+              </div>
+              <div class="ki-form-group">
+                <div class="ki-label-row">
+                  <label class="ki-form-label" style="margin-bottom:0">内容（原文直存）</label>
+                  <button type="button" class="ki-preview-btn" id="storePreviewToggle" title="切换编辑/预览">预览</button>
+                </div>
+                <div class="ki-md-editor">
+                  <textarea class="ki-form-textarea" id="storeText" style="height:180px" placeholder="输入要沉淀的知识内容，将作为全文存储并可被语义检索…"></textarea>
+                  <div class="ki-md-preview" id="storePreview" style="display:none;height:180px"></div>
+                </div>
+                <div class="ki-form-hint">写入后 isFullText = true，可在搜索页命中。</div>
+              </div>
+              <div class="ki-form-group">
+                <label class="ki-form-label">Tags</label>
+                <div class="ki-combobox" id="tagCombobox">
+                  <div class="ki-combobox__input-wrap">
+                    <input class="ki-form-input" id="storeTags" placeholder="选择已有 tag 或输入新建，回车确认" autocomplete="off">
+                    <button type="button" class="ki-combobox__toggle" id="tagToggle" tabindex="-1">▾</button>
+                  </div>
+                  <div class="ki-combobox__panel" id="tagPanel">
+                    <div class="ki-combobox__tree" id="tagList" style="padding:6px 8px"></div>
+                    <div class="ki-combobox__footer">
+                      <span class="ki-cell-sub">输入后按回车确认；新建 tag 将自动加入</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="ki-tag-pills" id="tagPills" style="margin-top:8px"></div>
+                <div class="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车新建。</div>
+              </div>
+            </div>
+
+            <!-- 关系写入 -->
+            <div id="panel-relation" style="display:none">
+              <div class="ki-form-row">
+                <div class="ki-form-group">
+                  <label class="ki-form-label">Scope</label>
+                  <select class="ki-form-select" id="relScope">
+                    <option value="monitor">monitor</option>
+                    <option value="wiki-test">wiki-test</option>
+                    <option value="default">default</option>
+                  </select>
+                </div>
+                <div class="ki-form-group">
+                  <label class="ki-form-label">Group</label>
+                  <div class="ki-combobox" id="groupCombobox">
+                    <div class="ki-combobox__input-wrap">
+                      <input class="ki-form-input" id="relGroup" placeholder="选择或输入 Group 路径，如：告警系统/告警收敛" autocomplete="off">
+                      <button type="button" class="ki-combobox__toggle" id="groupToggle" tabindex="-1">▾</button>
+                    </div>
+                    <div class="ki-combobox__panel" id="groupPanel">
+                      <div class="ki-combobox__tree" id="groupTree"></div>
+                      <div class="ki-combobox__footer">
+                        <span class="ki-cell-sub" id="groupNewHint">输入新路径可新建 Group</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="ki-form-hint">斜杠分隔层级，下拉选择已有 Group 或直接输入新建。</div>
+                </div>
+              </div>
+              <div class="ki-form-group">
+                <label class="ki-form-label">Relation 名</label>
+                <input class="ki-form-input" id="relName" placeholder="如：alert-converge">
+              </div>
+              <div class="ki-form-group">
+                <div class="ki-label-row">
+                  <label class="ki-form-label" style="margin-bottom:0">Module Info（Markdown）</label>
+                  <button type="button" class="ki-preview-btn" id="relPreviewToggle" title="切换编辑/预览">预览</button>
+                </div>
+                <div class="ki-md-editor">
+                  <textarea class="ki-form-textarea" id="relMarkdown" style="height:180px" placeholder="# 标题&#10;&#10;Markdown 正文…"></textarea>
+                  <div class="ki-md-preview" id="relPreview" style="display:none;height:180px"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 批量 -->
+            <div id="panel-batch" style="display:none">
+              <div class="ki-form-group">
+                <label class="ki-form-label">批量 JSON</label>
+                <textarea class="ki-form-textarea" id="batchJson" style="height:220px;font-family:var(--ki-font-mono)" placeholder='[{"scope":"monitor","text":"…"}, {"scope":"monitor","text":"…"}]'></textarea>
+                <div class="ki-form-hint">数组格式，每项含 scope / text（或 group / relation / moduleInfo）。</div>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+              <button class="ki-btn ki-btn--primary" id="btnSubmit">保存</button>
+              <button class="ki-btn ki-btn--secondary" id="btnReset">清空</button>
+              <span class="ki-cell-sub" id="writeHint"></span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="ki-toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  const applyTheme = (t) => {
+    document.body.dataset.theme = t;
+    $('iconSun').style.display = t === 'dark' ? 'none' : '';
+    $('iconMoon').style.display = t === 'dark' ? '' : 'none';
+    try { localStorage.setItem('ki-theme', t); } catch (e) { }
+  };
+  let t = 'light'; try { t = localStorage.getItem('ki-theme') || 'light'; } catch (e) { }
+  applyTheme(t);
+  $('btnTheme').addEventListener('click', () => applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+  let sidebarHidden = false;
+  $('btnSidebar').addEventListener('click', () => {
+    sidebarHidden = !sidebarHidden;
+    $('sidebar').classList.toggle('ki-sidebar--hidden', sidebarHidden);
+    $('btnSidebar').textContent = sidebarHidden ? '☰' : '◁';
+  });
+
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('ki-toast--show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('ki-toast--show'), 1800);
+  }
+  window.kiToast = toast;
+
+  /* 写入类型切换 */
+  let mode = 'store';
+  document.querySelectorAll('.ki-mode-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.ki-mode-tab').forEach((x) => x.classList.remove('ki-mode-tab--active'));
+      tab.classList.add('ki-mode-tab--active');
+      mode = tab.dataset.mode;
+      $('panel-store').style.display = mode === 'store' ? '' : 'none';
+      $('panel-relation').style.display = mode === 'relation' ? '' : 'none';
+      $('panel-batch').style.display = mode === 'batch' ? '' : 'none';
+      $('writeHint').textContent = mode === 'store' ? '对应 MCP 工具 ki_store' : mode === 'relation' ? '对应 MCP 工具 ki_sync_relation' : '对应 ki_bulk_store';
+    });
+  });
+
+  /* ── Group 树选择器（combobox：可选择已有 / 输入新建） ── */
+  const ICON_FOLDER_SM = '<svg class="ki-gtree-icon" viewBox="0 0 16 16" fill="none"><path d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z" fill="#7db3ef" stroke="#5f97d6" stroke-width="0.6"/></svg>';
+
+  const groupTreeByScope = {
+    'monitor': [
+      { name: '告警系统', open: true, children: [
+        { name: '告警收敛', open: true, children: [
+          { name: '收敛策略', children: [] },
+          { name: '规则配置', children: [] },
+          { name: '阈值管理', children: [] },
+        ]},
+        { name: '告警通知', children: [
+          { name: '通知渠道', children: [] },
+          { name: '静默策略', children: [] },
+        ]},
+        { name: '告警路由', children: [] },
+        { name: '告警归档', children: [] },
+      ]},
+      { name: '监控指标', open: true, children: [
+        { name: '指标采集', children: [] },
+        { name: '指标聚合', children: [] },
+        { name: '指标查询', children: [] },
+      ]},
+      { name: '事件管理', children: [] },
+      { name: '巡检报告', children: [] },
+    ],
+    'wiki-test': [
+      { name: '部署', open: true, children: [
+        { name: '全量直导', children: [] },
+        { name: '增量更新', children: [] },
+        { name: '灰度发布', children: [] },
+      ]},
+      { name: '运维', children: [
+        { name: '日常巡检', children: [] },
+        { name: '故障处理', children: [] },
+      ]},
+      { name: '架构设计', children: [] },
+      { name: '开发规范', children: [] },
+    ],
+    'default': [
+      { name: '通用知识', open: true, children: [
+        { name: '笔记', children: [] },
+        { name: '备忘录', children: [] },
+      ]},
+      { name: '工具箱', children: [] },
+    ],
+  };
+
+  let groupPanelOpen = false;
+  function toggleGroupPanel(open) {
+    groupPanelOpen = (typeof open === 'boolean') ? open : !groupPanelOpen;
+    $('groupPanel').classList.toggle('ki-combobox__panel--open', groupPanelOpen);
+    $('groupToggle').classList.toggle('ki-combobox__toggle--open', groupPanelOpen);
+    $('groupToggle').textContent = groupPanelOpen ? '▴' : '▾';
+  }
+
+  function renderGroupTree(scope) {
+    const tree = groupTreeByScope[scope] || [];
+    const html = [];
+    const walk = (items, pathPrefix) => {
+      items.forEach((n) => {
+        const fullPath = pathPrefix ? pathPrefix + '/' + n.name : n.name;
+        const hasSub = n.children && n.children.length > 0;
+        html.push(
+          '<div class="ki-gtree-dir' + (n.open ? ' ki-gtree-dir--open' : '') + '" data-path="' + fullPath + '" data-name="' + n.name + '">' +
+            '<span class="ki-gtree-arrow">' + (hasSub ? (n.open ? '▾' : '▸') : '') + '</span>' +
+            ICON_FOLDER_SM +
+            '<span class="ki-gtree-label">' + n.name + '</span>' +
+          '</div>'
+        );
+        if (hasSub && n.open) {
+          html.push('<div class="ki-gtree-group">');
+          walk(n.children, fullPath);
+          html.push('</div>');
+        }
+      });
+    };
+    walk(tree, '');
+    $('groupTree').innerHTML = html.join('');
+
+    $('groupTree').querySelectorAll('.ki-gtree-dir').forEach((node) => {
+      node.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const hasSub = node.querySelector('.ki-gtree-arrow') && node.querySelector('.ki-gtree-arrow').textContent;
+        const path = node.dataset.path;
+        if (hasSub) {
+          node.classList.toggle('ki-gtree-dir--open');
+          // 翻转数据 open
+          const toggleData = (items) => items.forEach((n) => {
+            if (n.name === node.dataset.name) { n.open = !n.open; }
+            if (n.children) toggleData(n.children);
+          });
+          toggleData(tree);
+          renderGroupTree(scope);
+          return;
+        }
+        // 叶子目录：选中并填充路径
+        $('relGroup').value = path;
+        updateGroupHint(path);
+        toggleGroupPanel(false);
+        toast('已选择 Group：' + path);
+      });
+    });
+  }
+
+  function updateGroupHint(value) {
+    const allPaths = [];
+    const collect = (items, prefix) => items.forEach((n) => {
+      const p = prefix ? prefix + '/' + n.name : n.name;
+      allPaths.push(p);
+      if (n.children) collect(n.children, p);
+    });
+    collect(groupTreeByScope[$('relScope').value] || [], '');
+    if (value && allPaths.indexOf(value) === -1) {
+      $('groupNewHint').innerHTML = '<span style="color:var(--ki-color-success)">✚ 将新建 Group：' + value + '</span>';
+    } else if (value) {
+      $('groupNewHint').innerHTML = '<span style="color:var(--ki-color-primary)">✓ 已有 Group</span>';
+    } else {
+      $('groupNewHint').textContent = '输入新路径可新建 Group';
+    }
+  }
+
+  // 下拉开关
+  $('groupToggle').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleGroupPanel();
+  });
+  $('relGroup').addEventListener('focus', () => {
+    if (!groupPanelOpen) toggleGroupPanel(true);
+  });
+  $('relGroup').addEventListener('input', (e) => {
+    updateGroupHint(e.target.value);
+  });
+  // 点击外部关闭
+  document.addEventListener('click', (e) => {
+    if (groupPanelOpen && !e.target.closest('#groupCombobox')) toggleGroupPanel(false);
+  });
+  // scope 切换 → 重建 Group 树
+  $('relScope').addEventListener('change', (e) => {
+    renderGroupTree(e.target.value);
+    updateGroupHint($('relGroup').value);
+  });
+  // 首屏渲染
+  renderGroupTree($('relScope').value);
+
+  /* ── Tag 选择器（选已有 / 输入新建 / 删除） ── */
+  const EXISTING_TAGS = ['alarm', 'monitor', 'deploy', 'wiki', 'devops', 'kubernetes', 'redis', 'mysql'];
+  let selectedTags = [];
+
+  function renderTagPills() {
+    $('tagPills').innerHTML = selectedTags.map((t) =>
+      '<span class="ki-tag-pill">' + t + '<span class="ki-tag-pill__x" data-tag="' + t + '">✕</span></span>'
+    ).join('');
+    $('tagPills').querySelectorAll('.ki-tag-pill__x').forEach((x) => {
+      x.addEventListener('click', () => {
+        selectedTags = selectedTags.filter((t) => t !== x.dataset.tag);
+        renderTagPills();
+        renderTagOptions();
+      });
+    });
+  }
+
+  function renderTagOptions(filter) {
+    const kw = (filter || '').toLowerCase();
+    const shown = EXISTING_TAGS.filter((t) => !kw || t.includes(kw));
+    const html = shown.map((t) => {
+      const sel = selectedTags.indexOf(t) >= 0;
+      return '<span class="ki-tag-option' + (sel ? ' ki-tag-option--selected' : '') + '" data-tag="' + t + '">' +
+        (sel ? '✓ ' : '+ ') + t + '</span>';
+    }).join('');
+    $('tagList').innerHTML = html || '<div class="ki-cell-sub" style="padding:6px">无匹配 tag</div>';
+
+    $('tagList').querySelectorAll('.ki-tag-option').forEach((opt) => {
+      opt.addEventListener('click', () => {
+        const t = opt.dataset.tag;
+        if (selectedTags.indexOf(t) >= 0) {
+          selectedTags = selectedTags.filter((x) => x !== t);
+        } else {
+          selectedTags.push(t);
+        }
+        renderTagPills();
+        renderTagOptions($('storeTags').value);
+      });
+    });
+  }
+
+  function addNewTag(raw) {
+    const parts = raw.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    parts.forEach((p) => {
+      if (selectedTags.indexOf(p) < 0) {
+        selectedTags.push(p);
+        if (EXISTING_TAGS.indexOf(p) < 0) EXISTING_TAGS.push(p); // 新建 tag 自动加入候选
+      }
+    });
+    renderTagPills();
+    renderTagOptions('');
+  }
+
+  let tagPanelOpen = false;
+  function toggleTagPanel(open) {
+    tagPanelOpen = (typeof open === 'boolean') ? open : !tagPanelOpen;
+    $('tagPanel').classList.toggle('ki-combobox__panel--open', tagPanelOpen);
+    $('tagToggle').classList.toggle('ki-combobox__toggle--open', tagPanelOpen);
+    $('tagToggle').textContent = tagPanelOpen ? '▴' : '▾';
+    if (tagPanelOpen) renderTagOptions($('storeTags').value);
+  }
+
+  $('tagToggle').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleTagPanel();
+  });
+  $('storeTags').addEventListener('focus', () => {
+    if (!tagPanelOpen) toggleTagPanel(true);
+  });
+  $('storeTags').addEventListener('input', (e) => {
+    if (tagPanelOpen) renderTagOptions(e.target.value);
+  });
+  $('storeTags').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const v = $('storeTags').value.trim();
+      if (v) { addNewTag(v); $('storeTags').value = ''; toggleTagPanel(false); }
+    }
+  });
+  // 点击外部关闭
+  document.addEventListener('click', (e) => {
+    if (tagPanelOpen && !e.target.closest('#tagCombobox')) toggleTagPanel(false);
+  });
+
+  // 获取已选 tags（提交时用）
+  window.getSelectedTags = function () { return selectedTags; };
+
+  /* Markdown 预览（右上角按钮切换编辑/预览，同一位置渲染） */
+  let relPreviewMode = false;
+  function renderPreview() {
+    const md = $('relMarkdown').value || '';
+    const out = md
+      .replace(/^### (.*)$/gm, '<h2>$1</h2>')
+      .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+      .replace(/^- (.*)$/gm, '<li>$1</li>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .split('\n').filter((l) => l.trim()).map((l) => /^<[hup]/.test(l) || /^<li/.test(l) ? l : '<p>' + l + '</p>').join('');
+    $('relPreview').innerHTML = out || '<div class="ki-empty" style="padding:24px;border:none"><div><p>暂无内容</p></div></div>';
+  }
+  function setRelPreviewMode(show) {
+    relPreviewMode = show;
+    $('relMarkdown').style.display = show ? 'none' : '';
+    $('relPreview').style.display = show ? '' : 'none';
+    $('relPreviewToggle').classList.toggle('ki-preview-btn--active', show);
+    $('relPreviewToggle').textContent = show ? '编辑' : '预览';
+    if (show) renderPreview();
+  }
+  $('relPreviewToggle').addEventListener('click', () => {
+    setRelPreviewMode(!relPreviewMode);
+  });
+  // 编辑时实时刷新预览（隐藏时也保持同步，切换即见最新）
+  $('relMarkdown').addEventListener('input', () => {
+    if (relPreviewMode) renderPreview();
+  });
+
+  /* Store 模式内容预览 */
+  let storePreviewMode = false;
+  function renderStorePreview() {
+    const text = $('storeText').value || '';
+    // 纯文本预览：保留换行和段落结构
+    const out = text
+      .split('\n')
+      .map((l) => l.trim() ? '<p>' + l.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p>' : '')
+      .filter(Boolean)
+      .join('') || '<div class="ki-empty" style="padding:24px;border:none"><div><p>暂无内容</p></div></div>';
+    $('storePreview').innerHTML = out;
+  }
+  function setStorePreviewMode(show) {
+    storePreviewMode = show;
+    $('storeText').style.display = show ? 'none' : '';
+    $('storePreview').style.display = show ? '' : 'none';
+    $('storePreviewToggle').classList.toggle('ki-preview-btn--active', show);
+    $('storePreviewToggle').textContent = show ? '编辑' : '预览';
+    if (show) renderStorePreview();
+  }
+  $('storePreviewToggle').addEventListener('click', () => {
+    setStorePreviewMode(!storePreviewMode);
+  });
+  $('storeText').addEventListener('input', () => {
+    if (storePreviewMode) renderStorePreview();
+  });
+
+  /* 校验 + 提交 */
+  function setError(input, hasErr) {
+    input.classList.toggle('ki-form-input--error', hasErr);
+  }
+  $('btnSubmit').addEventListener('click', () => {
+    let ok = true;
+
+    if (mode === 'store') {
+      setError($('storeText'), false);
+      if (!$('storeText').value.trim()) { setError($('storeText'), true); toast('内容不能为空'); ok = false; }
+      // 提交时若输入框有未确认的 tag，也一并加入
+      if ($('storeTags').value.trim()) addNewTag($('storeTags').value);
+      if (!ok) return;
+    } else if (mode === 'relation') {
+      setError($('relGroup'), false);
+      setError($('relName'), false);
+      setError($('relMarkdown'), false);
+      if (!$('relGroup').value.trim()) { setError($('relGroup'), true); toast('Group 不能为空'); ok = false; }
+      if (!$('relName').value.trim()) { setError($('relName'), true); toast('Relation 名不能为空'); ok = false; }
+      if (!$('relMarkdown').value.trim()) { setError($('relMarkdown'), true); toast('Module Info 不能为空'); ok = false; }
+      if (!ok) return;
+    } else {
+      setError($('batchJson'), false);
+      let parsed;
+      try { parsed = JSON.parse($('batchJson').value); } catch (e) { setError($('batchJson'), true); toast('JSON 格式错误'); return; }
+      if (!Array.isArray(parsed) || parsed.length === 0) { setError($('batchJson'), true); toast('需为数组且非空'); return; }
+    }
+
+    // 提交模拟
+    $('btnSubmit').classList.add('ki-btn--loading');
+    $('btnSubmit').disabled = true;
+    $('writeHint').textContent = '提交中…';
+    setTimeout(() => {
+      $('btnSubmit').classList.remove('ki-btn--loading');
+      $('btnSubmit').disabled = false;
+      const label = mode === 'store' ? '单条文本' : mode === 'relation' ? '关系' : '批量 ' + (function () { try { return JSON.parse($('batchJson').value).length; } catch (e) { return 0; } })() + ' 条';
+      $('writeHint').textContent = '写入成功（演示）';
+      const tagInfo = mode === 'store' && selectedTags.length > 0 ? ' · tags: ' + selectedTags.join(', ') : '';
+
+      toast(label + '写入成功' + tagInfo + '，可前往搜索验证');
+    }, 700);
+  });
+
+  $('btnReset').addEventListener('click', () => {
+    $('storeText').value = '';
+    $('storeTags').value = '';
+    $('relGroup').value = '';
+    $('relName').value = '';
+    $('relMarkdown').value = '';
+    $('batchJson').value = '';
+    document.querySelectorAll('.ki-form-input, .ki-form-textarea').forEach((el) => el.classList.remove('ki-form-input--error'));
+    $('writeHint').textContent = '';
+    toast('已清空');
+  });
+})();
+</script>
+</body>
+</html>
