@@ -196,7 +196,9 @@ export function handleDiff(args: HandleDiffArgs): DiffOutput {
 
   const gitInfo = getGitInfo(sourceDirReal);
   if (!gitInfo) {
-    throw new Error(`source.dir 不在 git 仓库中：${source.dir}`);
+    throw new Error(
+      `source 目录不在 git 仓库中（${source.dir}）。增量更新依赖 git，请先 git init 或改用 --mode full 全量导入`
+    );
   }
 
   const relativeSource = toPosix(path.relative(gitInfo.repoRoot, sourceDirReal)) || '.';

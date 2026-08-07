@@ -1,0 +1,51 @@
+# GitNexus 索引忽略规则（语法与 .gitignore 一致，last-match-wins）
+# 目标：只为 knowledge-indexer 核心代码（src / test / docs / scripts / bin 等）建立索引，
+#       忽略依赖、构建产物、运行时数据、AI 工作流数据与独立子项目。
+# 注：gitnexus 另有硬编码默认忽略（node_modules / dist / bin / fixtures / __tests__ / 点目录等），
+#     此处显式列出以便维护；取反规则（!）优先级高于硬编码规则。
+
+# ---- 依赖与构建产物 ----
+node_modules/
+dist/
+*.tsbuildinfo
+
+# ---- 运行时数据 ----
+kb/
+ki-backup/
+
+# ---- IDE 与本地配置 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- 环境变量 ----
+.env*
+!.env.e2e.example
+
+# ---- AI 工作流数据（索引价值低）----
+.codebuddy/
+.workbuddy/
+.requirements/
+.module-experts/
+.e2e-run/
+
+# ---- 独立子项目（独立仓库 / 仅参考，不属于本仓库代码）----
+zvec-studio/
+zvec-probe/
+zvec-probe-node/
+zvec-mcp-server/
+CodeWikiHub/
+memory-lancedb-pro/
+
+# ---- 测试运行数据（非测试代码，不索引）----
+test_data/
+test_wiki/
+
+# ---- 取反：以下内容强制索引 ----
+# 测试文件需要被索引（gitnexus 默认忽略 fixtures/，显式取反）
+!test/
+!test/fixtures/
+# bin/ 在本项目是源码入口（ki.mjs），默认被硬编码忽略，需取反
+!bin/

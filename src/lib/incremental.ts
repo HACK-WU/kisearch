@@ -433,7 +433,9 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
 
   const newCommit = getGitHead(sourceDir);
   if (!newCommit) {
-    throw new Error(`无法获取 sourceDir 的 git HEAD：${sourceDir}`);
+    throw new Error(
+      `source 目录不在 git 仓库中（${sourceDir}）。增量更新依赖 git，请先 git init 或改用 --mode full 全量导入`
+    );
   }
   const newSource = { ...existingSource, commit: newCommit };
   setSource(args.scope, newSource);
