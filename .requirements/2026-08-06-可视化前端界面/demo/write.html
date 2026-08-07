@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ki 知识库 · 知识写入</title>
-<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="shared.css?v=2">
 <style>
 .ki-write-layout { max-width: 860px; }
 .ki-mode-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 7px; padding: 2px; border: 1px solid var(--ki-color-border); margin-bottom: 20px; }
@@ -144,7 +144,7 @@
         <div class="ki-page-head">
           <div>
             <h1>知识写入</h1>
-            <p>store · sync-relation · 批量写入</p>
+            <p>store · sync-relation</p>
           </div>
         </div>
 
@@ -155,7 +155,6 @@
             <div class="ki-mode-tabs">
               <button type="button" class="ki-mode-tab ki-mode-tab--active" data-mode="store">单条文本（store）</button>
               <button type="button" class="ki-mode-tab" data-mode="relation">关系写入（sync-relation）</button>
-              <button type="button" class="ki-mode-tab" data-mode="batch">批量（JSON）</button>
             </div>
 
             <!-- 单条文本 -->
@@ -242,16 +241,16 @@
               </div>
             </div>
 
-            <!-- 批量 -->
-            <div id="panel-batch" style="display:none">
-              <div class="ki-form-group">
-                <label class="ki-form-label">批量 JSON</label>
-                <textarea class="ki-form-textarea" id="batchJson" style="height:220px;font-family:var(--ki-font-mono)" placeholder='[{"scope":"monitor","text":"…"}, {"scope":"monitor","text":"…"}]'></textarea>
-                <div class="ki-form-hint">数组格式，每项含 scope / text（或 group / relation / moduleInfo）。</div>
+            <!-- 是否向量化 -->
+            <div class="ki-vec-switch" style="margin-top:12px">
+              <div class="ki-vec-switch__label">
+                <span class="ki-vec-switch__title">向量化</span>
+                <span class="ki-vec-switch__desc">写入向量库，可被语义搜索；关闭则仅写入 KB 文本</span>
               </div>
+              <div class="ki-switch ki-switch--on" id="vectorizeToggle" role="switch" aria-checked="true" title="切换向量化"><div class="ki-switch__knob"></div></div>
             </div>
 
-            <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+            <div style="display:flex;gap:8px;align-items:center;margin-top:20px">
               <button class="ki-btn ki-btn--primary" id="btnSubmit">保存</button>
               <button class="ki-btn ki-btn--secondary" id="btnReset">清空</button>
               <span class="ki-cell-sub" id="writeHint"></span>
@@ -309,8 +308,7 @@
       mode = tab.dataset.mode;
       $('panel-store').style.display = mode === 'store' ? '' : 'none';
       $('panel-relation').style.display = mode === 'relation' ? '' : 'none';
-      $('panel-batch').style.display = mode === 'batch' ? '' : 'none';
-      $('writeHint').textContent = mode === 'store' ? '对应 MCP 工具 ki_store' : mode === 'relation' ? '对应 MCP 工具 ki_sync_relation' : '对应 ki_bulk_store';
+      $('writeHint').textContent = mode === 'store' ? '对应 MCP 工具 ki_store' : '对应 MCP 工具 ki_sync_relation';
     });
   });
 
@@ -623,11 +621,6 @@
       if (!$('relName').value.trim()) { setError($('relName'), true); toast('Relation 名不能为空'); ok = false; }
       if (!$('relMarkdown').value.trim()) { setError($('relMarkdown'), true); toast('Module Info 不能为空'); ok = false; }
       if (!ok) return;
-    } else {
-      setError($('batchJson'), false);
-      let parsed;
-      try { parsed = JSON.parse($('batchJson').value); } catch (e) { setError($('batchJson'), true); toast('JSON 格式错误'); return; }
-      if (!Array.isArray(parsed) || parsed.length === 0) { setError($('batchJson'), true); toast('需为数组且非空'); return; }
     }
 
     // 提交模拟
@@ -637,12 +630,21 @@
     setTimeout(() => {
       $('btnSubmit').classList.remove('ki-btn--loading');
       $('btnSubmit').disabled = false;
-      const label = mode === 'store' ? '单条文本' : mode === 'relation' ? '关系' : '批量 ' + (function () { try { return JSON.parse($('batchJson').value).length; } catch (e) { return 0; } })() + ' 条';
-      $('writeHint').textContent = '写入成功（演示）';
+      const label = mode === 'store' ? '单条文本' : '关系';
+      $('writeHint').textContent = '写入成功（演示）' + (isVectorized() ? '' : ' · 未向量化');
       const tagInfo = mode === 'store' && selectedTags.length > 0 ? ' · tags: ' + selectedTags.join(', ') : '';
 
       toast(label + '写入成功' + tagInfo + '，可前往搜索验证');
     }, 700);
+  });
+
+  /* 向量化开关 */
+  function isVectorized() { return $('vectorizeToggle').classList.contains('ki-switch--on'); }
+  $('vectorizeToggle').addEventListener('click', () => {
+    const on = isVectorized();
+    $('vectorizeToggle').classList.toggle('ki-switch--on', !on);
+    $('vectorizeToggle').setAttribute('aria-checked', String(!on));
+    toast(!on ? '已开启向量化' : '已关闭向量化，仅写入 KB');
   });
 
   $('btnReset').addEventListener('click', () => {
@@ -651,7 +653,6 @@
     $('relGroup').value = '';
     $('relName').value = '';
     $('relMarkdown').value = '';
-    $('batchJson').value = '';
     document.querySelectorAll('.ki-form-input, .ki-form-textarea').forEach((el) => el.classList.remove('ki-form-input--error'));
     $('writeHint').textContent = '';
     toast('已清空');

@@ -411,6 +411,34 @@ a:hover { text-decoration: underline; }
 .ki-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .ki-checkbox-label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); font-weight: 500; cursor: pointer; }
 
+/* 向量化开关（toggle switch） */
+.ki-vec-switch {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 10px; border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md); background: var(--ki-color-surface);
+  transition: border-color var(--ki-motion-fast);
+}
+.ki-vec-switch:hover { border-color: var(--ki-color-border-strong); }
+.ki-vec-switch__label { display: block; }
+.ki-vec-switch__title { display: block; font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
+.ki-vec-switch__desc { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 1px; }
+.ki-switch {
+  position: relative; flex-shrink: 0;
+  width: 44px; height: 24px; border-radius: 12px;
+  background: var(--ki-color-border-strong); cursor: pointer;
+  transition: background var(--ki-motion-fast); padding: 0;
+  overflow: hidden; -webkit-user-select: none; user-select: none;
+}
+.ki-switch__knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; box-shadow: var(--ki-shadow-1);
+  transition: transform var(--ki-motion-fast);
+  pointer-events: none;
+}
+.ki-switch--on { background: var(--ki-color-primary); }
+.ki-switch--on .ki-switch__knob { transform: translateX(20px); }
+
 /* 分段控件（tabs） */
 .ki-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 8px; padding: 2px; border: 1px solid var(--ki-color-border); }
 .ki-tab {

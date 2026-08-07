@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ki 知识库 · 上传导入</title>
-<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="shared.css?v=2">
 <style>
 .ki-import-layout { max-width: 860px; }
 .ki-mode-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 7px; padding: 2px; border: 1px solid var(--ki-color-border); margin-bottom: 16px; }
@@ -145,6 +145,15 @@
                 </div>
                 <div class="ki-form-hint">切分规则：段落边界优先（\n\n → \n → 。 → ；），超过上限强制按长度切。</div>
               </div>
+            </div>
+
+            <!-- 是否向量化 -->
+            <div class="ki-vec-switch" style="margin-top:12px">
+              <div class="ki-vec-switch__label">
+                <span class="ki-vec-switch__title">向量化</span>
+                <span class="ki-vec-switch__desc">生成向量写入 zvec 集合，可被语义搜索；关闭则仅写入 KB 文本</span>
+              </div>
+              <div class="ki-switch ki-switch--on" id="vectorizeToggle" role="switch" aria-checked="true" title="切换向量化"><div class="ki-switch__knob"></div></div>
             </div>
 
             <div style="display:flex;gap:8px;margin-top:20px;align-items:center">
@@ -304,6 +313,15 @@
     $('advToggle').classList.toggle('ki-adv-toggle--open', !open);
   });
 
+  /* 向量化开关 */
+  function isVectorized() { return $('vectorizeToggle').classList.contains('ki-switch--on'); }
+  $('vectorizeToggle').addEventListener('click', () => {
+    const on = isVectorized();
+    $('vectorizeToggle').classList.toggle('ki-switch--on', !on);
+    $('vectorizeToggle').setAttribute('aria-checked', String(!on));
+    toast(!on ? '已开启向量化' : '已关闭向量化，仅写入 KB');
+  });
+
   /* 开始导入 */
   $('btnImport').addEventListener('click', () => {
     if (pendingFiles.length === 0) { toast('请先选择文件'); return; }
@@ -335,8 +353,8 @@
         $('progressLabel').textContent = '切分文件…';
         $('progressSub').textContent = '按 chunk-size 1000 / overlap 150 切分，共 ' + total + ' 个文件' + (isInc ? '（仅新增）' : '');
       } else if (pct < 85) {
-        $('progressLabel').textContent = '向量化…';
-        $('progressSub').textContent = '生成向量并写入 zvec 集合';
+        $('progressLabel').textContent = isVectorized() ? '向量化…' : '写入 KB…';
+        $('progressSub').textContent = isVectorized() ? '生成向量并写入 zvec 集合' : '仅写入 KB 文本（relations-cache / index.json）';
       } else {
         $('progressLabel').textContent = '持久化…';
         $('progressSub').textContent = '更新 relations-cache / index.json';
@@ -353,10 +371,11 @@
       const skipped = isInc ? total - newFiles : 0;
       const chunks = newFiles * 3 + (newFiles % 2);
       const scope = $('scopeSelect').value;
+      const vecNote = isVectorized() ? '' : ' · 未向量化，仅写入 KB';
       $('resultBlock').style.display = '';
       const detail = isInc
-        ? '<strong>增量导入完成：</strong>新增 ' + newFiles + ' 个文件 / ' + chunks + ' 个 chunk 已入库，跳过已存在 ' + skipped + ' 个（scope: ' + scope + '）'
-        : '<strong>全量导入完成：</strong>' + newFiles + ' 个文件 / ' + chunks + ' 个 chunk 已入库（scope: ' + scope + '）';
+        ? '<strong>增量导入完成：</strong>新增 ' + newFiles + ' 个文件 / ' + chunks + ' 个 chunk 已入库，跳过已存在 ' + skipped + ' 个（scope: ' + scope + '）' + vecNote
+        : '<strong>全量导入完成：</strong>' + newFiles + ' 个文件 / ' + chunks + ' 个 chunk 已入库（scope: ' + scope + '）' + vecNote;
       $('resultBlock').innerHTML =
         '<div class="ki-result-banner ' + (isInc && skipped > 0 ? 'ki-result-banner--warn' : 'ki-result-banner--ok') + '">' +
           '<span>' + (isInc && skipped > 0 ? '⚠️' : '✅') + '</span><div>' + detail + '</div>' +
