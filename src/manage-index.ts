@@ -14,7 +14,7 @@ import path from 'path';
 import { writeJson, readJson, readGroupIndex } from './lib/store.js';
 import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
 import type { GroupIndex } from './lib/scope.js';
-import { loadConfig } from './lib/config.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
 import { vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 
@@ -433,26 +433,22 @@ program
         return;
       }
 
-      // 其他 action 需要 scope
-      if (!scope) {
-        output({ ok: false, error: '此操作需要 --scope 参数' });
-        process.exit(1);
-      }
-
+      // 其他 action 需要 scope（resolveScope：default 可省略、strict 必填）
+      const resolvedScope = resolveScope(loadConfig(), scope);
       // 校验 scope
-      validateScope(scope);
+      validateScope(resolvedScope);
 
-      const data = readGroupIndex(scope);
+      const data = readGroupIndex(resolvedScope);
 
       if (!data) {
         output({ ok: false, error: `group-index.json 不存在` });
         process.exit(1);
       }
 
-      const indexPath = getGroupIndexPath(scope);
+      const indexPath = getGroupIndexPath(resolvedScope);
 
       // 读取 relations-cache 用于 resolveGroupPath
-      const cachePath = getRelationsCachePath(scope);
+      const cachePath = getRelationsCachePath(resolvedScope);
       const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
 
       switch (action) {
@@ -485,7 +481,7 @@ program
                 }
                 parentNode[name] = {};
                 writeJson(indexPath, data as unknown as Record<string, unknown>);
-                output({ ok: true, scope, path: `${resolvedParent}/${name}`, hint: resolved.hint || undefined });
+                output({ ok: true, scope: resolvedScope, path: `${resolvedParent}/${name}`, hint: resolved.hint || undefined });
                 break;
               }
             }
@@ -508,7 +504,7 @@ program
 
           parentNode[name] = {};
           writeJson(indexPath, data as unknown as Record<string, unknown>);
-          output({ ok: true, scope, path: parentPath ? `${parentPath}/${name}` : name });
+          output({ ok: true, scope: resolvedScope, path: parentPath ? `${parentPath}/${name}` : name });
           break;
         }
 
@@ -551,10 +547,10 @@ program
                 delete parentNode[name];
                 writeJson(indexPath, data as unknown as Record<string, unknown>);
                 const deletedPath = `${resolvedParent}/${name}`;
-                const cascade = await cascadeDeleteGroupData(scope, deletedPath);
+                const cascade = await cascadeDeleteGroupData(resolvedScope, deletedPath);
                 output({
                   ok: true,
-                  scope,
+                  scope: resolvedScope,
                   path: deletedPath,
                   hint: resolved.hint || undefined,
                   cascade: {
@@ -604,7 +600,7 @@ program
           delete parentNode[name];
           writeJson(indexPath, data as unknown as Record<string, unknown>);
           const deletedPath = parentPath ? `${parentPath}/${name}` : name;
-          const cascade = await cascadeDeleteGroupData(scope, deletedPath);
+          const cascade = await cascadeDeleteGroupData(resolvedScope, deletedPath);
           output({
             ok: true,
             path: deletedPath,

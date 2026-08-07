@@ -402,6 +402,18 @@ ki tag list --scope my-project
 
 ---
 
+## 数值参数语义（CLI-11）
+
+| 参数 | 出现命令 | 语义 |
+|------|----------|------|
+| `--limit <n>` | `search` / `doc list` | **返回条数上限**（结果截断，非扫描上限）；默认 `10` |
+| `--hot-count <n>` | `query-group` | 热门分区展示个数；默认 `5` |
+| `--scan-limit <n>` | `tag list` | **扫描上限**（引擎扫描条数上限，超出则 `truncated:true` 近似）；默认 `10000` |
+
+> 三者语义不同：`--limit` 截断**返回**条数，`--scan-limit` 限制**扫描**条数，`--hot-count` 控制展示个数。历史命名保留（统一为 `--limit` 语义易混淆，本期仅文档化标注）。
+
+---
+
 ## `doc`
 
 向量层文档的查看与删除（管理面）。包含 `list` / `delete` 两个子命令。
@@ -418,7 +430,7 @@ ki doc list [--scope <scope>] [--limit <n>] [--tags t1,t2] [--full]
 |------|------|--------|
 | `--scope <scope>` | 项目隔离标识 | `default` |
 | `--limit <n>` | 返回条数上限 | `10` |
-| `--tags <tags>` | 过滤标签，逗号分隔多值 | `ki-search` |
+| `--tags <tags>` | 过滤标签，逗号分隔多值 | 不传则返回全部 |
 | `--full` | 显示完整内容（默认截断预览 200 字） | `false` |
 
 **示例：**
@@ -651,9 +663,6 @@ ki query-group --scope my-project --groups "项目/API"
 ├── 文件上传接口 (score: 4.8) [常温]
 ├── 权限验证接口 (score: 3.2) [常温]
 └── 日志记录接口 (score: 1.5) [冷]
-
-🏷️ 关键词词云:
-└── 登录, 认证, token, 查询, 上传, 权限, 日志
 ```
 
 **示例：查看多个分区**
@@ -780,10 +789,10 @@ ki sync-relation \
 ```json
 {
   "ok": true,
+  "scope": "my-project",
   "relation": "用户登录接口",
-  "keywords": ["登录", "认证", "token"],
-  "invalid_keywords": [],
   "evicted": null,
+  "vectorStored": true,
   "wikiSynced": true,
   "wikiFile": "/path/to/wiki-content/API/用户登录接口.md"
 }
@@ -816,14 +825,12 @@ ki sync-relation -s my-project -i batch-input.json
     {
       "group": "项目/API",
       "relation": "用户登录接口",
-      "module_info": "## 登录流程\n用户输入账号密码后进入认证流程...",
-      "keywords": ["登录", "认证", "token"]
+      "module_info": "## 登录流程\n用户输入账号密码后进入认证流程..."
     },
     {
       "group": "项目/API",
       "relation": "数据查询接口",
-      "module_info": "## 查询流程\n支持分页查询和条件筛选...",
-      "keywords": ["查询", "分页", "筛选"]
+      "module_info": "## 查询流程\n支持分页查询和条件筛选..."
     }
   ]
 }
@@ -836,15 +843,13 @@ ki sync-relation -s my-project -i batch-input.json
   "results": [
     {
       "relation": "用户登录接口",
-      "keywords": ["登录", "认证", "token"],
-      "invalid_keywords": [],
-      "evicted": null
+      "evicted": null,
+      "wikiSynced": true
     },
     {
       "relation": "数据查询接口",
-      "keywords": ["查询", "分页", "筛选"],
-      "invalid_keywords": [],
-      "evicted": null
+      "evicted": null,
+      "wikiSynced": true
     }
   ],
   "total": 2,
@@ -922,7 +927,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 | 工具名 | 类型 | 功能 | 对应 CLI 命令 |
 |--------|------|------|--------------|
-| `ki_query_group` | 读 | 查询 Group 树 + Relations + 词云 | `query-group` |
+| `ki_query_group` | 读 | 查询 Group 树 + Relations 分区 | `query-group` |
 | `ki_get_module_info` | 读 | 读取本地 KB Markdown 内容 | `get-module-info` |
 | `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
@@ -990,7 +995,6 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `group` | string | 是 | Group 路径（支持 / 层级嵌套） |
 | `relation` | string | 是 | Relation 名称 |
 | `module_info` | string | 是 | 本地 KB Markdown 内容 |
-| `keywords` | string[] | 是 | 关键词列表 |
 
 #### `ki_manage_index_create`
 
@@ -1309,7 +1313,6 @@ ki export my-project --output ./wiki-output
 ---
 groupPath: 项目/API
 relation: 用户登录接口
-keywords: [登录, 认证, token]
 exportedAt: 2026-06-16T22:30:00.000Z
 ---
 

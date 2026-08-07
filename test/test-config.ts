@@ -32,7 +32,7 @@ function buildTestConfig(): Record<string, unknown> {
     baseConfig.embedding = {
       provider: 'siliconflow',
       baseURL: 'https://api.siliconflow.cn/v1',
-      model: process.env.GITNEXUS_EMBEDDING_MODEL ?? 'text-embedding-3-small',
+      model: process.env.GITNEXUS_EMBEDDING_MODEL ?? 'Qwen/Qwen3-Embedding-8B',
       dimension: parseInt(process.env.GITNEXUS_EMBEDDING_DIMS ?? '4096', 10),
       apiKey: '${SILICONFLOW_API_KEY}', // loadConfig 会从进程环境解析
     };

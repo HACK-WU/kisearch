@@ -50,8 +50,8 @@ KiSearch/
 ├── kb/                          # 运行时数据目录
 │   ├── {scope}/                 # 每个 scope 独立目录
 │   │   ├── group-index.json     # Group 树索引 + source 块
-│   │   ├── relations-cache.json # Relation 缓存（评分/淘汰/词云）
-│   │   ├── scan-index.json      # 扫描状态账本（可选）
+│   │   ├── relations-cache.json # Relation 缓存（评分/淘汰/分区）
+│   │   ├── scan-index.json      # 扫描状态账本（已废弃，批次 3 移除 scan 子命令）
 │   │   └── {group}/             # 本地 KB 原文
 │   │       └── index.json       # 模块说明原文
 │   └── _template/               # 模板目录（初始化新 scope 用）

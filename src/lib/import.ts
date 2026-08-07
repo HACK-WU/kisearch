@@ -26,7 +26,7 @@ import {
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
 import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
-import { splitIntoChunks, type Chunk } from './chunker.js';
+import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 
 import { deriveGroupPath, type ScanResultEntry } from './ai-results.js';
 import { bulkVectorize, type BatchVectorizeResult } from './batch-vectorize.js';
@@ -207,6 +207,11 @@ export async function handleDirectImport(
       continue;
     }
     const chunks = readFileToChunks(absPath, chunkSize, chunkOverlap);
+    if (chunks.length > MAX_CHUNKS_PER_FILE) {
+      skipped.push(rel);
+      logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
+      continue;
+    }
     for (const chunk of chunks) {
       entries.push({
         path: deriveChunkSourcePath(rel, chunk.index), // sourcePath = 文件#N

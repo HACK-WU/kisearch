@@ -55,10 +55,9 @@ ki query-group --scope <scope> --groups <group>
 {
   "group": "设计文档/API",
   "hot_relations": [
-    { "id": "rel_001", "text": "用户登录", "score": 8.5, "keywords": ["登录", "认证"] },
-    { "id": "rel_002", "text": "API文档", "score": 7.2, "keywords": ["API", "接口"] }
-  ],
-  "keywords": ["登录", "认证", "token", "API", "接口"]
+    { "id": "rel_001", "text": "用户登录", "score": 8.5 },
+    { "id": "rel_002", "text": "API文档", "score": 7.2 }
+  ]
 }
 ```
 

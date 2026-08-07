@@ -235,6 +235,37 @@ openclaw memory-pro stats
 
 ---
 
+## [需求] CLI命令迁移与规范化（REQ-20260806-002，已完成） 2026-08-07
+
+### 需求落盘
+
+- 需求文档：`.requirements/2026-08-06-CLI命令迁移与规范化/requirement.md`（REQ-20260806-002，状态：已完成 v4）
+- 承接 REQ-001 CLI 范围 A/B 之外的全部优化点（11 项 CLI-01~11）
+
+### 实施明细（2026-08-07，全量测试 339/339 全绿 + lint 零错误）
+
+| CLI | 内容 | 落点 |
+|-----|------|------|
+| CLI-01 | `--scope` 必填性统一 | doc/tag/query-group/get-module-info/manage-index/scan-kb 改 `resolveScope`（default 可省略、strict 必填）；manage-index 内部 `scope` → `resolvedScope` |
+| CLI-02 | `--output` 三义拆分 | scan 已随 REQ-001 删除，diff（文件）/export（目录）语义唯一 |
+| CLI-03 | `--tags` 默认值统一 | `doc list --tags` 改"不传=全部"（原默认 ki-search） |
+| CLI-04 | export 补 `--yes` | 非空输出目录覆盖需 `--yes` 否则拒绝（`requireConfirm: true`），端到端验证 |
+| CLI-05 | commander 迁移 | **评估后维持现状**（§5.4）：5 手写命令已规范化（NEG-01/04 + detectUnknownFlags + 前置 -h），mcp 错误码契约/restore 可选带值迁移风险高收益低 |
+| CLI-06 | 帮助去重 | 已委托式（`ki.mjs` 概览 + `ki <cmd> --help`），无需改动 |
+| CLI-07 | `--root-name` 语义 | `import --mode full` 必填（前置校验）、incremental 忽略 |
+| CLI-08 | restore 补 `--list` | 显式 flag + 无参兼容（`detectUnknownFlags` 加 `--list`） |
+| CLI-09 | bulk_store 改名 | 已随 REQ-001 |
+| CLI-10 | `--yes` 审计 | 全部破坏性命令（doc/scope delete/clear、restore、export、mcp token reset）均有 |
+| CLI-11 | 数值参数文档化 | `docs/cli.md` 新增"数值参数语义"表（--limit 截断返回 / --scan-limit 限制扫描 / --hot-count 展示个数） |
+
+### CLI-05 评估结论（§5.4）
+
+- **决策**：维持现状，不迁移 commander
+- **理由**：手写解析已统一行为（未知参数检测 NEG-01 / 统一错误契约 NEG-04 / 前置 -h），迁移是"换框架"而非"补能力"；mcp（token 子命令 + 鉴权优先级 + MCP_HTTP_TOKEN_REQUIRED 错误码）与 restore（`--from-snapshot [file]` 可选带值）迁移风险高
+- **触发条件**：新增第 6 个手写命令且复杂度上升，或 commander 能力成为硬需求；届时按 backup → export → restore → mcp 顺序迁移
+
+---
+
 ## [需求] 外部Wiki直接导入与自动切分（实施中，批次 3~5 未完成） 2026-08-06
 
 ### 需求落盘
@@ -318,12 +349,17 @@ openclaw memory-pro stats
 - [ ] `query-group` 的 `-g` 短别名语义是 `--groups`（复数），REQ-11 定义为 `--group`（单数）——不同命令域语义接近，docs 需注明
 - [ ] `setup` 的 `-n, --names` 与 `manage-index` 的 `-n, --name` 语义不同（names/name），属既有行为，不影响
 
-**批次 5（配套 REQ-14/15）**
-- [ ] **批次 5（配套 REQ-14/15）**：docs 剩余 13 个（build-kb/workflows/manage-index/architecture/verify-index/memory-system-dataflow/tags-design 等整篇旧流程）+ skills 5 个文档同步（拆独立任务）
+**批次 5（配套 REQ-14/15）——已完成（2026-08-07）**
+- [x] docs 16 个 + skills 5 个同步为直导/增量直连流程；`test/fixtures/ai-results-*.json` 删除；`test/test-config.ts` 默认模型改 `Qwen/Qwen3-Embedding-8B`；全量测试 339/339 全绿
 
-**技术设计遗留**
-- [ ] 技术设计遗留：P-5（grep 清点 `scan-index|getScanIndexPath` 消费方——已随批次 3 清理，待复核）、P-6（FTS 规模量化实测）、P-7（超大文件上限数值确认：2MB / 500 chunk）
-- [ ] **重建向量库后补验路径向量**：备份 + 删除 `/root/.ki/vector` 让引擎 create 自愈，重跑直导 + 增量全链路（用 timeout 包裹）
+**技术设计遗留——已收尾（2026-08-07）**
+- [x] **P-5**：grep 清点 `scan-index|getScanIndexPath`——全库仅一处注释提及，无代码引用，确认干净
+- [x] **P-7**：`MAX_CHUNKS_PER_FILE=500` 补实现（`chunker.ts` 常量 + `import.ts` 直导 + `incremental.ts` 双处防护，chunker 9/9 全绿）；文件大小上限 2MB 已在批次 1 实现
+- [x] **重建向量库 + 补验路径向量**：向量库 FTS 索引损坏（`FtsColumnIndexer failed to load segment stats`，根因：此前误删 RocksDB LOCK 致集合半损坏）→ 备份删除 `/root/.ki/vector` → 用 `test_data/monitor/snapshots/snapshot.20260618-021614.tar.gz` 还原 monitor KB → `ki restore monitor --rebuild-vector` 重建 **300 向量（content 137 + relation 137 + path 26，failed 0）** → 检索正常（"告警收敛"命中）、ki-path 检索命中、`doc list` 无 FTS 报错
+- [ ] **P-6**：FTS 规模量化实测（1000 文件直导的索引构建时间/存储/延迟）——性能验证可选，需专门构造基准
+
+**CLI 规范化（REQ-20260806-002）——已完成（2026-08-07）**
+- [x] CLI-01~04/06/07/08/10/11 落地（scope 统一 resolveScope、export --yes、restore --list、数值参数文档化等）；CLI-05 评估后维持现状（§5.4：手写解析已规范化，commander 迁移风险高收益低）；全量 339/339 全绿
 
 ### 相关资产
 

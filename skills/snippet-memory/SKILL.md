@@ -140,8 +140,7 @@ ki_sync_relation(
   scope: "${scope}-memory",
   group: "工具库",
   relation: "日期时间",
-  module_info: "### formatDate\n- **函数**: ...\n...",
-  keywords: ["DateUtils", "日期", "格式化"]
+  module_info: "### formatDate\n- **函数**: ...\n..."
 )
 ```
 

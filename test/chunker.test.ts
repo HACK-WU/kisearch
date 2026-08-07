@@ -12,7 +12,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { splitIntoChunks } from '../src/lib/chunker.js';
+import { splitIntoChunks, MAX_CHUNKS_PER_FILE } from '../src/lib/chunker.js';
 
 describe('splitIntoChunks', () => {
   it('空文本 → 空数组', () => {
@@ -87,5 +87,13 @@ describe('splitIntoChunks', () => {
 
   it('非法 chunkSize 抛错', () => {
     assert.throws(() => splitIntoChunks('abc', { chunkSize: 0 }));
+  });
+
+  it('MAX_CHUNKS_PER_FILE 契约：500（P-7 单文件 chunk 数上限）', () => {
+    assert.strictEqual(MAX_CHUNKS_PER_FILE, 500);
+    // 超限场景：构造 501 个 chunk 的文本，切分器应产出 501 chunk（上限拦截在 import/incremental 消费层）
+    const text = '无'.repeat(501 * 100);
+    const chunks = splitIntoChunks(text, { chunkSize: 100, overlap: 0 });
+    assert.ok(chunks.length > MAX_CHUNKS_PER_FILE, `chunks=${chunks.length} 应超 500 触发消费层防护`);
   });
 });

@@ -277,12 +277,12 @@
       "id": "REQ-20260806-001",
       "feature": "外部Wiki直接导入与自动切分",
       "created": "2026-08-06 15:07:17",
-      "updated": "2026-08-06 18:41:58",
+      "updated": "2026-08-07 11:59:50",
       "status": "实施中",
       "tags": [
         "feat"
       ],
-      "version": 16,
+      "version": 18,
       "depends_on": [],
       "changelog": [
         "初始创建",
@@ -300,7 +300,9 @@
         "2026-08-06 17:58:06 v13: 场景推演修复：H-25/D-9（无git增量明确报错）、H-26/D-8更新（full重导可更新chunk-size，增量用source块值）、P-7定方向（文件上限+chunk上限）",
         "2026-08-06 17:59:33 v14: 创建分批实现计划（6批：基线/切分直导/增量/删除/CLI/配套），进入实施阶段",
         "2026-08-06 18:14:26 v15: 批次1完成：chunker切分器(9测试)+handleDirectImport直导+scan-kb import --source+setSource支持空commit+chunkSize/chunkOverlap持久化+GroupIndexSource扩展+setScopeSourceDir(H-20)+ScanResultEntry.chunkRelation。端到端验证：deploy.md 14.7KB→10 chunks、relation=deploy-01..10、sourcePath=docs/deploy.md#N、检索alarm-01命中",
-        "2026-08-06 18:41:58 v16: 实施进度落盘：批次0-2完成明细+端到端验证结果+阻塞点(向量库锁)+待办(批次3-5)"
+        "2026-08-06 18:41:58 v16: 实施进度落盘：批次0-2完成明细+端到端验证结果+阻塞点(向量库锁)+待办(批次3-5)",
+        "2026-08-07 09:52:14 v17: 批次5完成：修复 test-config 默认模型为 Qwen3-Embedding-8B（text-embedding-3-small 不存在导致向量化失败）、incremental-direct 测试 git gpgsign=false；删除 2 个 ai-results fixtures；e2e-guide/update-kb/build-kb/workflows/cli/query-kb/manage-index/verify-index/architecture/tags-design/backup-restore/memory-agent-guide/codekb-agent-guide/memory-system-dataflow/vector-engine-mem 文档同步为直导+git diff 增量；5 个 skill（ki-foundation/snippet-memory/memory-skill/codekb-skill/update-kb）同步。全量测试 339/339 全绿",
+        "2026-08-07 11:59:50 v18: 技术设计遗留收尾：P-7 单文件chunk数上限(MAX_CHUNKS_PER_FILE=500, import/incremental 双处防护)✅；向量库FTS索引损坏(segment stats加载失败,误删RocksDB LOCK所致)→备份删除/root/.ki/vector→test_data monitor快照还原KB→rebuild-vector重建300向量(content137+relation137+path26, failed0)✅ 路径向量验证闭环；检索/doc list/FTS均正常"
       ],
       "commits": [],
       "branch": null,
@@ -342,16 +344,19 @@
       "id": "REQ-20260806-002",
       "feature": "CLI命令迁移与规范化",
       "created": "2026-08-06 16:16:37",
-      "updated": "2026-08-06 16:18:06",
-      "status": "已确认",
+      "updated": "2026-08-07 14:19:39",
+      "status": "已完成",
       "tags": [
         "refactor"
       ],
-      "version": 2,
+      "version": 5,
       "depends_on": [],
       "changelog": [
         "初始创建",
-        "2026-08-06 16:18:06 v2: v1: CLI 迁移规范化独立需求，承接范围 A/B 之外 11 项优化点"
+        "2026-08-06 16:18:06 v2: v1: CLI 迁移规范化独立需求，承接范围 A/B 之外 11 项优化点",
+        "2026-08-07 10:36:23 v3: v2: 完成 CLI-01(scope统一resolveScope: doc/tag/query-group/get-module-info/manage-index/scan-kb)、CLI-02(output语义:scan已删diff/export唯一)、CLI-03(doc list --tags默认改不传=全部)、CLI-04(export补--yes覆盖保护)、CLI-06(帮助已委托式)、CLI-07(root-name full必填前置校验)、CLI-08(restore补--list)、CLI-10(--yes审计通过)、CLI-11(数值参数文档化)。CLI-09随REQ-001完成。CLI-05(commander迁移)评估中",
+        "2026-08-07 10:41:53 v4: v3: CLI-05 评估结论落盘(§5.4 维持现状理由+迁移触发条件)，REQ-002 全部 11 项完结，需求状态置已完成",
+        "2026-08-07 14:19:39 v5: 完成质疑审查：发现并修复🔴增量chunk超限静默丢数据(errors记录)、P2 restore死代码/测试补覆盖；意见2(strict管理命令收窄)待确认"
       ],
       "commits": [],
       "branch": null,
@@ -359,6 +364,10 @@
         {
           "path": "requirement.md",
           "type": "requirement"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
         }
       ],
       "role": "standalone",

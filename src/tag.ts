@@ -23,6 +23,7 @@ import {
   type VectorTagInfo,
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 
 // ─── 纯函数（供 CLI / MCP 共享） ───
 
@@ -57,11 +58,12 @@ program.name('tag').showHelpAfterError().description('向量层 tag 发现（只
 program
   .command('list')
   .description('列出指定 scope 下用过的 tag（含文档数，按数量降序）')
-  .option('--scope <scope>', '项目隔离标识（省略用 default）', 'default')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--scan-limit <n>', '扫描上限（超出则结果为近似，truncated:true）', '10000')
   .action(async (opts) => {
+    const scope = resolveScope(loadConfig(), opts.scope);
     const result = await executeTagList({
-      scope: opts.scope,
+      scope,
       scanLimit: parseIntArg(opts.scanLimit, 10000, '--scan-limit', { min: 1 }),
     });
     console.log(JSON.stringify(result, null, 2));

@@ -18,14 +18,14 @@ KiSearch 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`�
 
 ### 1.1 内容格式
 
-格式：**路径层级（空格分隔，含根节点）| 合并关键词**
+格式：**路径层级（空格分隔，含根节点）**
 
 示例：
 ```
-BK-Monitor-Wiki 告警系统设计 告警处理服务 | 告警收敛,降噪,通知
+BK-Monitor-Wiki 告警系统设计 告警处理服务
 ```
 
-构建方式：`buildGroupPathContent(groupPath, keywords)` → [path-vectorize.ts](../src/lib/path-vectorize.ts#L57-L65)
+构建方式：`buildGroupPathContent(groupPath)` → [path-vectorize.ts](../src/lib/path-vectorize.ts#L51-L54)（keywords 已随 REQ-05 移除，content 纯化为路径本身）
 
 ### 1.2 写入路径
 
@@ -34,7 +34,7 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务 | 告警收敛,降噪,通�
 | `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 全量导入 |
 | `incremental.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 增量导入 |
 
-每个 Group 合并所有 Entry 的关键词后写入一条，不重复。
+每个 Group 写入一条（按 groupPath 去重）。
 
 参考代码：[import.ts L518-L525](../src/lib/import.ts#L518-L525)、[incremental.ts L380-L386](../src/lib/incremental.ts#L380-L386)
 
@@ -52,14 +52,14 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务 | 告警收敛,降噪,通�
 
 ### 2.1 内容格式
 
-格式：**Relation 名称 | Group: 路径层级（空格分隔）| 关键词**
+格式：**Relation 名称**（content 纯化；Group 路径经 `PathVectorizeEntry.group` 结构化字段存储）
 
 示例：
 ```
-告警收敛服务 | Group: BK-Monitor-Wiki 告警系统设计 告警处理服务 | 收敛,去重
+告警收敛服务
 ```
 
-构建方式：`buildRelationContent(relationText, groupPath, keywords)` → [path-vectorize.ts](../src/lib/path-vectorize.ts#L74-L84)
+构建方式：`buildRelationContent(relationText, groupPath?)` → [path-vectorize.ts](../src/lib/path-vectorize.ts#L64-L66)（仅返回 relationText，避免 BM25 误匹配）
 
 ### 2.2 写入路径
 
@@ -103,7 +103,7 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 
 自由文本，无固定格式约束。典型内容：
 
-- scan-kb 导入的文档摘要 + 关键词 + 路径
+- scan-kb 直导的文档原文（chunk 粒度，含 `文件名-N` relation 命名）
 - sync-relation 写入的 moduleInfo 模块说明
 - 用户通过 `ki store` 手动写入的任意知识片段
 

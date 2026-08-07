@@ -69,7 +69,6 @@ erDiagram
         string group_id FK "所属 Group"
         string name "Relation 名称"
         string summary "一句话摘要"
-        string keywords "关键词（逗号分隔）"
         int use_count "使用次数"
         datetime last_used "最后使用时间"
     }

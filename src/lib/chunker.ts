@@ -22,6 +22,9 @@ export interface ChunkOptions {
   overlap?: number;
 }
 
+/** 单文件 chunk 数上限（P-7）：超限视为"超大文件"，防单文件向量爆炸 */
+export const MAX_CHUNKS_PER_FILE = 500;
+
 /** 分隔符优先级：优先在更干净的语义边界切断 */
 const BREAK_PATTERNS: string[] = ['\n\n', '\n', '。', '；'];
 

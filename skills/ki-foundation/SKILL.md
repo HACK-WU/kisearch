@@ -1,6 +1,6 @@
 ---
 name: ki-foundation
-description: ki 命令架构心智模型与命令参考。codekb-skill、memory-skill、snippet-memory、agents-md-init 的前置依赖。当 AI 需要使用 KiSearch 时必须先加载本 skill。覆盖 ki 三层架构、内部数据结构、运行时链路、query-group/get-module-info/sync-relation/manage-index 命令语法、keywords 规则、常见错误与修复。
+description: ki 命令架构心智模型与命令参考。codekb-skill、memory-skill、snippet-memory、agents-md-init 的前置依赖。当 AI 需要使用 KiSearch 时必须先加载本 skill。覆盖 ki 三层架构、内部数据结构、运行时链路、query-group/get-module-info/sync-relation/manage-index 命令语法、常见错误与修复。
 ---
 
 # ki 基础知识与命令参考
@@ -37,7 +37,7 @@ description: ki 命令架构心智模型与命令参考。codekb-skill、memory-
 | 文件 | 角色 | 生命周期 |
 |------|------|---------|
 | `group-index.json` | Group 树索引 + `source` 块 | 永久 |
-| `relations-cache.json` | Relation 缓存（评分/淘汰/词云），含 `memoryId`/`sourcePath` | 永久，动态更新 |
+| `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryId`/`sourcePath` | 永久，动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | 永久 |
 
 > 所有 JSON 通过原子写入（tmp → rename）保证安全。
@@ -91,11 +91,11 @@ input: { scope, group: "Group路径(模糊匹配)", relation: "Relation名称(�
 
 ```
 tool: ki_sync_relation
-input: { scope, group: "Group路径(支持/层级)", relation: "名称", module_info: "Markdown内容", keywords: ["词1","词2"] }
+input: { scope, group: "Group路径(支持/层级)", relation: "名称", module_info: "Markdown内容" }
 ```
 
 - Relation 名称相同时自动覆盖
-- `keywords` 必须是数组格式
+- 超长 module-info（>1000 字符）会收到警告，建议拆分或用 `scan-kb import --source` 自动切分导入
 
 **写入后必须刷新缓存**：
 
@@ -169,7 +169,7 @@ input: { scope, input: "/path/to/batch-data.json" }
 |------|------|
 | `scope not found` | 用 `ki_manage_index_list` 确认，或写入任意数据自动创建 |
 | Group 不存在 | `ki_manage_index_create` 创建 |
-| `keywords` 被拒绝 | 改用自然语言词，确认在原文中存在 |
+| `--module-info 内容不能为空` | 补充 `--module-info "<markdown>"` |
 | `${scope}` 字面量 | 暂停，问用户确认 scope |
 | Relation 名称不符 | `ki_query_group(mode: "full")` 确认 |
 | 写入到错误 scope | 确认目标 scope |

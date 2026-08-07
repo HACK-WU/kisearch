@@ -22,7 +22,6 @@
 ┌─────────────────────────────────────────────────────┐
 │  Layer 2: Relations 缓存 (relations-cache.json)    │
 │  - 热门 Relation 列表 + 评分                        │
-│  - 关键词词云（冷门 Relation 的检索入口）           │
 │  - 冷热分区：hot / warm / cold / emerging         │
 └─────────────────────────────────────────────────────┘
           ↓
@@ -42,7 +41,7 @@
   │
   ├─[1] 快速路径：热门 Relation 直接命中 → 获取模块信息 → 回答
   │
-  ├─[2] 检索路径：关键词词云匹配 → MCP memory_recall → 回写 Relation
+  ├─[2] 检索路径：向量语义检索（ki search）→ 回写 Relation
   │
   └─[3] 知识缺失路径：均未命中 → 暂停询问用户 → 双写
 ```
@@ -66,16 +65,16 @@
    ```json
    {
      "group": "项目/API",
-     "hot_relations": [
-       { "id": "rel_001", "text": "用户登录", "score": 8.5, "keywords": ["登录", "认证"] },
-       { "id": "rel_002", "text": "API文档", "score": 7.2, "keywords": ["API", "接口"] }
-     ]
+    "hot_relations": [
+      { "id": "rel_001", "text": "用户登录", "score": 8.5 },
+      { "id": "rel_002", "text": "API文档", "score": 7.2 }
+    ]
    }
    ```
 
 2. **匹配 Relation**
    - 从 `hot_relations` 中选择与用户问题最匹配的 Relation
-   - 匹配依据：`text` 字段语义相似度 + `keywords` 关键词命中
+   - 匹配依据：`text` 字段语义相似度
 
 3. **获取模块信息**
    ```bash
@@ -95,29 +94,29 @@
 
 ### 路径 2: 检索路径（冷门回退）
 
-**适用条件**：快速路径未命中，但关键词词云中有匹配项
+**适用条件**：快速路径未命中，需语义检索召回
 
 **执行步骤**：
 
-1. **获取完整索引树 + 关键词词云**
+1. **向量语义检索**
    ```bash
-   ki query-group --scope <scope>
+   ki search --scope <scope> --query "<用户问题>"
    ```
    
    输出包含：
-   - Group 树结构
-   - 每个 Group 的 `keywords`（Group 级主题标签集合）
+   - 命中的 `relation` / `group` / `sourcePath`（原文定位字段）
+   - `content`（原文全文 / chunk）
 
-2. **组装语义查询**
-   - 从 `keywords` 中提取相关关键词
-   - 组装查询语句：`"<用户问题核心词> <关键词1> <关键词2>"`
+2. **定位原文**
+   - 命中结果反查 `relations-cache` 得到 `relation` / `group`
+   - `ki get-module-info --scope <scope> --group <group> --relation <relation>` 读取原文
 
-3. **调用 MCP memory_recall**
+3. **调用 MCP memory_recall**（检索外部记忆）
    
    **重要参数**：
    ```json
    {
-     "query": "<组装的查询语句>",
+     "query": "<用户问题>",
      "limit": 3,
      "tags": "knowledge-index,<scope>"
    }
@@ -135,8 +134,7 @@
      --scope <scope> \
      --group <group> \
      --relation <relationText> \
-     --module-info "<markdown内容>" \
-     --keywords <k1,k2,k3>
+     --module-info "<markdown内容>"
    ```
    
    同时调用 MCP `memory_store` 双写：
@@ -183,8 +181,7 @@
      --scope <scope> \
      --group <group> \
      --relation <relationText> \
-     --module-info "<markdown>" \
-     --keywords <k1,k2>
+     --module-info "<markdown>"
    ```
    
    ```json

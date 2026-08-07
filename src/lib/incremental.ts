@@ -54,6 +54,7 @@ import {
 } from './progress.js';
 import { handleDiff, type DiffResult } from './diff.js';
 import { deriveChunkRelation, deriveChunkSourcePath, readFileToChunks } from './import.js';
+import { MAX_CHUNKS_PER_FILE } from './chunker.js';
 
 // ─── 类型 ───
 
@@ -335,6 +336,14 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     const entries = chunkifyFile(absPath, e.path, rootName, chunkSize, chunkOverlap);
     if (entries.length === 0) {
       errors.push({ path: e.path, error: '切分后无内容' });
+      continue;
+    }
+    if (entries.length > MAX_CHUNKS_PER_FILE) {
+      // 记入 errors：commit 仍推进（防永久卡死），但用户可见该文件未同步（旧数据保留）
+      errors.push({
+        path: e.path,
+        error: `文件切分 chunk 数超限已跳过（${entries.length} > ${MAX_CHUNKS_PER_FILE}），旧数据保留。可增大 --chunk-size 或手动拆分后导入`,
+      });
       continue;
     }
 

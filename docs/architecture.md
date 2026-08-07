@@ -54,7 +54,7 @@ flowchart LR
 | 文件 | 角色 | 读写方 | 生命周期 |
 |------|------|--------|---------|
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir`/`rootName`/`commit`） | 所有脚本读写 | 永久，随 Group 增删改 |
-| `relations-cache.json` | Relation 缓存（评分/淘汰/词云），含 `memoryId`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+| `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryId`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb / import-kb 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
 | `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |
@@ -131,23 +131,21 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    EXT[外部 Markdown 知识库] --> AI[AI 生成 ai-results.json<br/>meta + entries]
-    AI --> IMP[scan-kb import<br/>5 阶段流水线]
-    IMP --> VEC[zvec 引擎向量化]
+    EXT[外部 Markdown 知识库] --> IMP[scan-kb import --source<br/>原文直导 + 自动切分]
+    IMP --> VEC[zvec 引擎向量化<br/>content = chunk 原文]
     IMP --> GI2[group-index.json<br/>Group 树 + source 块]
     IMP --> RC2[relations-cache.json<br/>含 memoryId / sourcePath]
     IMP --> KB2[本地 KB 原文]
 ```
 
-### 增量更新链路（S-05 + S-06）
+### 增量更新链路（git diff 直连）
 
 ```mermaid
 flowchart LR
-    DIFF[scan-kb diff] --> AI2[AI 生成增量 ai-results.json<br/>含 action 字段]
-    AI2 --> INCR[scan-kb import --mode incremental]
-    INCR --> ADD[add: 向量化 + 写索引]
-    INCR --> MOD[modify: mem delete + 重新向量化 + 替换索引]
-    INCR --> DEL[delete: mem delete + 移除索引]
+    EXT2[外部知识库 git 提交变更] --> INCR[scan-kb import --mode incremental<br/>git diff 直连]
+    INCR --> ADD[added: 切分 + 向量化 + 写索引]
+    INCR --> MOD[modified: 先写新全 chunk → 删旧全 chunk]
+    INCR --> DEL[deleted: 按文件关联全 chunk 清理]
 ```
 
 ## 与父项目记忆系统的配合

@@ -92,143 +92,30 @@ scopes:
 
 ## 执行流程
 
-### S-04 统一导入流程（2 步）
+### 原文直导（--source，无 AI 依赖）
+
+> **REQ-01/04（批次 3）**：ai-results.json 输入契约已删除，首次导入统一走 `--source` 原文直导（无 AI 依赖，大文档自动切分）。
 
 ```
-外部知识库目录
+外部知识库目录（Markdown）
      │
      ▼
-[Step 1] AI 扫描目录，生成 ai-results.json
-     │
-     ▼
-[Step 2] scan-kb import 命令完成全部操作
-     │
+[Step 1] scan-kb import --source <dir> --root-name <root>
+     │  （内部：递归扫描 .md → 逐文件切分 → 向量化 → 写 cache + local KB）
      ▼
 知识索引构建完成
 ```
 
 ---
 
-### Step 1: AI 生成 `ai-results.json`
-
-**任务**：扫描外部知识库目录，为每个文件生成结构化条目。
-
-**⚠️ 重要提醒**：不要读取所有知识库文件的完整内容。应优先使用文件路径、文件名、文档开头（前 10-20 行）等轻量信息生成摘要和关键词。避免加载整个文档内容到内存中。
-
-**输入**：
-- 外部知识库目录路径（如 `.qoder/repowiki/zh/content`）
-- 根节点名称（如 `QoderWiki`）
-
-**输出**：`ai-results.json` 文件
-
-**生成规则**：
-
-**重要提示**：不要读取所有知识库文件的完整内容。应优先使用以下轻量信息源：
-
-1. **扫描目录**：递归扫描指定目录，识别所有 Markdown 文件
-2. **分析文件**：按以下优先级获取信息（避免读取全文）：
-   - **文件路径**：从目录结构推导分组和主题
-   - **文件名**：推导 Relation 文本
-   - **文档开头**：仅读取前 10-20 行，提取标题、摘要或目录
-   - **YAML 前置元数据**：如有 `title`、`description`、`tags` 等字段
-3. **生成摘要**：基于上述轻量信息，用 1-2 句话概括核心内容（最多 500 字）
-4. **提取关键词**：从标题、路径、前几行中提取 3-5 个自然语言关键词
-5. **推导分组路径**：根据目录结构推导 Group 路径
-6. **生成条目**：为每个文件创建一个 entry
-
-**执行示例**：
-
-假设知识库目录结构如下：
-```
-content/
-├── README.md
-├── getting-started/
-│   ├── installation.md
-│   └── quick-start.md
-└── advanced/
-    ├── configuration.md
-    └── performance.md
-```
-
-**轻量信息获取策略**：
-1. **`README.md`**：读取前 10 行，找到标题和简介
-2. **`getting-started/installation.md`**：从文件名推导主题，读取前 5 行确认
-3. **`advanced/configuration.md`**：从目录名 "advanced" 推导分组，从文件名推导主题
-
-**生成结果**：
-```json
-{
-  "path": "README.md",
-  "groupPath": "ProjectDocs",
-  "relation": "README",
-  "summary": "项目总览文档，包含项目简介和目录结构。",
-  "keywords": ["项目", "简介", "目录"],
-  "action": "add"
-}
-```
-
-**`ai-results.json` 格式规范**：
-
-```json
-{
-  "meta": {
-    "sourceDir": ".qoder/repowiki/zh/content",
-    "rootName": "QoderWiki"
-  },
-  "entries": [
-    {
-      "path": "核心概念/Scope 隔离机制.md",
-      "groupPath": "QoderWiki/核心概念",
-      "relation": "Scope 隔离机制",
-      "summary": "Scope 隔离通过服务端 scope 注入、agentId 绕过与 wrapper 层 ACL 检查三段式实现。",
-      "keywords": ["Scope", "隔离", "访问控制", "ACL", "agentId"],
-      "action": "add"
-    }
-  ]
-}
-```
-
-**字段说明**：
-
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `meta.sourceDir` | 是 | 外部知识库目录（相对项目根或绝对路径） |
-| `meta.rootName` | 是 | 导入根节点名称，需与首次导入一致 |
-| `entries[].path` | 是 | 相对 `meta.sourceDir` 的 posix 路径 |
-| `entries[].groupPath` | 否 | Group 完整路径（含 rootName 前缀）；缺失时从 `path` 推导 |
-| `entries[].relation` | 否 | Relation 文本；缺失时从文件名推导 |
-| `entries[].summary` | 否 | 1-2 句摘要，最多 500 字 |
-| `entries[].keywords` | 否 | 自然语言关键词数组 |
-| `entries[].action` | 否 | 操作语义：`add`（默认）/ `modify` / `delete` |
-| `entries[].memoryId` | 条件 | `modify`/`delete` 时必填；首次导入由系统填充 |
-
-**校验规则**：
-
-1. `meta.sourceDir` 和 `meta.rootName` 必填
-2. `groupPath` 首段必须等于 `rootName`
-3. `action='delete'` 必须携带 `memoryId`
-4. `action` 缺失时默认 `'add'`
-
-**关键词规则**：
-
-- ✅ 自然语言词汇（如"登录"、"认证"、"token"）
-- ✅ 关键词必须来源于 summary 文本中出现的词汇
-- ❌ 代码符号（如类名、方法名、路径）
-- 关键词必须从以下轻量信息中提取：
-  - 文件名（如 `installation.md` → "安装"）
-  - 目录名（如 `getting-started/` → "入门"、"快速开始"）
-  - 文档标题（如 `# 配置指南` → "配置"、"指南"）
-  - 前几行内容中的高频词汇
-
----
-
-### Step 2: 执行统一导入
+### Step 1: 执行统一直导
 
 **命令**：
 ```bash
 ki scan-kb import \
   --scope <scope> \
-  --results ai-results.json
+  --source <外部知识库目录> \
+  --root-name <根节点名称>
 ```
 
 **参数**：
@@ -236,15 +123,20 @@ ki scan-kb import \
 | 参数 | 说明 | 必填 |
 |------|------|------|
 | `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
-| `--results` | AI 生成的 `ai-results.json` 文件路径 | 是 |
+| `--source` | 外部 Markdown 目录（递归扫描含子目录） | 是 |
+| `--root-name` | 导入根节点名称（= groupPath 首段） | 是 |
+| `--chunk-size` | 切分目标长度（字符，默认 1000） | 否 |
+| `--chunk-overlap` | 切分重叠字符数（默认 150） | 否 |
 
-**内部 5 阶段流水线**：
+**自动行为**：
 
-1. **格式校验**：验证 `ai-results.json` 格式和字段完整性
-2. **批量向量化**：调用 zvec 引擎批量向量化所有条目
-3. **Group 树创建**：自动创建 Group 目录结构
-4. **Relations 缓存写入**：写入 `relations-cache.json`，包含 `memoryId` 和 `sourcePath`
-5. **group-index.source 记录**：记录导入元信息（含 git HEAD commit）
+1. **递归扫描**：遍历 `--source` 下所有 `.md` 文件（跳过隐藏目录 / node_modules）
+2. **自动切分**：超过 `chunk-size` 的文件按"固定长度 + 段落边界优先"切分为多 chunk，relation 名 = `文件名-N`（如 `deploy-01`），sourcePath = `文件#N`
+3. **批量向量化**：调用 zvec 引擎批量向量化（content = chunk 原文）
+4. **Group 树创建**：自动创建 Group 目录结构（groupPath 从目录结构推导）
+5. **Relations 缓存写入**：写入 `relations-cache.json`，包含 `memoryId` 和 `sourcePath`
+6. **group-index.source 记录**：记录导入元信息（含 git HEAD commit + 切分参数持久化）
+7. **sourceDir 写入**：scope 未配置 sourceDir 时写入绝对路径（供增量免传 `--source`）
 
 **输出示例**：
 ```json
@@ -314,12 +206,12 @@ ki scan-kb import \
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `Access denied to scope: <scope>` | scope 未注册 | 在 `~/.config/memory-mcp/config.yaml` 注册 scope |
-| `ai-results.json 格式错误` | JSON 格式不合法 | 检查 JSON 语法 |
-| `meta.sourceDir 不存在` | 源目录路径错误 | 确认目录存在且路径正确 |
-| `groupPath 首段必须等于 rootName` | Group 路径格式错误 | 确保 `groupPath` 以 `rootName` 开头 |
+| `Access denied to scope: <scope>` | scope 未注册 | 在 `~/.ki/config.yaml` 注册 scope |
+| `sourceDir 不存在或不是目录` | `--source` 路径错误 | 确认目录存在且路径正确 |
+| `目录下未发现 .md 文件` | 目录无 Markdown 文件 | 确认目录含 `.md` 文件 |
+| `rootName 不能为空` | 缺 `--root-name` | 补充 `--root-name <name>` |
 | `向量化失败` | Embedding API 配置错误或网络问题 | 检查 `~/.ki/config.yaml` 中的 embedding 配置，确认 API 密钥有效 |
-| `source.dir 不在 git 仓库中` | 源目录未初始化 Git | 执行 `git init` 并至少提交一次 |
+| `文件过大已跳过` | 超过单文件大小上限（默认 2MB） | 手动切分后导入或调整上限 |
 
 ---
 
@@ -338,29 +230,23 @@ ki scan-kb import \
 
 ## 注意事项
 
-### 轻量信息获取最佳实践
+### 直导特性
 
-1. **避免全文读取**：不要使用 `readFile` 读取整个文档内容
-2. **使用目录列表**：使用 `listDir` 或 `glob` 获取文件列表
-3. **读取前 N 行**：使用 `readFile` 的 `offset` 和 `limit` 参数，只读取前 10-20 行
-4. **利用文件元数据**：
-   - 文件名：`installation.md` → "安装"
-   - 目录名：`getting-started/` → "入门"
-   - 文件大小：大文件可能是详细文档，小文件可能是概览
-5. **提取 YAML 前置元数据**：如有 `title`、`description`、`tags` 等字段
-6. **批量处理**：并行读取多个文件的开头部分，提高效率
+1. **原文直导**：向量 content = chunk 原文（无 AI 摘要），语义检索直接索引原文
+2. **自动切分**：超过 `chunk-size`（默认 1000 字符）的文件按"固定长度 + 段落边界优先"切分，relation 名 = `文件名-N`（`deploy-01`），sourcePath = `文件#N`
+3. **大文件上限**：单文件默认上限 2MB，超限跳过并告警（可手动切分后导入）
+4. **groupPath 推导**：从文件目录结构推导（`dir/sub/file.md` → `rootName/dir/sub`）
 
 ### 性能优化
 
-- 对于大型知识库（>100 个文件），建议分批处理
-- 使用并行读取，但避免同时打开过多文件
-- 优先处理重要文件（如 README、index 等）
+- 对于大型知识库（>100 个文件），复用现有批量向量化 + 断点续跑（文件级跳过粒度）
+- 切分参数影响向量数量：chunk 越小向量越多；建议默认 1000 字符平衡检索粒度与规模
 
 ### 质量保证
 
-- 摘要应简洁明了，1-2 句话概括核心内容
-- 关键词应具有代表性，避免过于宽泛或过于具体
-- 分组路径应反映知识库的逻辑结构
+- 切分粒度决定检索精度：过大 → 语义稀释；过小 → 向量爆炸（建议不调小默认值）
+- 分组路径反映知识库的逻辑结构（目录层级）
+- 增量更新用 `--mode incremental`（git diff 驱动），保证与首次直导的切分参数一致（source 块持久化）
 
 ---
 
@@ -386,9 +272,10 @@ scopes:
 ### 同步行为
 
 - **写入时机**：每次 `sync-relation` 成功写入后，自动触发 Wiki 同步
-- **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation、keywords）
+- **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation；keywords 已移除）
 - **目录结构**：按 Group 路径创建子目录，如 `wiki-output/我的项目/API/用户登录接口.md`
 - **优先级**：如果 scope 有 `source` 块（通过 scan-kb import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
+- **直导不触发写回**：`scan-kb import --source` 只写本地 KB + 向量层，不写回外部 Wiki（避免 chunk 的 `{relation}.md` 污染源目录）
 
 ### Wiki 文件示例
 
@@ -396,10 +283,6 @@ scopes:
 ---
 group: 我的项目/API
 relation: 用户登录接口
-keywords:
-  - 登录
-  - 认证
-  - token
 ---
 # 用户登录接口
 

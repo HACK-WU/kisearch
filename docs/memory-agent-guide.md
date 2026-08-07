@@ -200,13 +200,11 @@ ki query-group --scope user-profile --groups "目标Group路径" --mode hot,emer
 ├── 技术选型原因 (score: 6.2) [热]
 └── 业务领域 (score: 4.8) [常温]
 
-🏷️ 关键词词云:
-└── 监控, 告警, 运维, 蓝鲸, SaaS
+
 ```
 
 **操作**：
 - 从热门知识中选择最匹配的 relation
-- 记下关键词词云（后续扩展查询时备用）
 - **命中** → 进入第③步取原文
 - **未命中** → 先检查 Group 是否定位正确（可换 Group 重试一次），确认无误后回问用户或使用默认行为
 
@@ -260,16 +258,14 @@ ki sync-relation \
   --scope ${scope}-memory \
   --group "目标Group路径" \
   --relation "Relation名称" \
-  --module-info "Markdown内容" \
-  --keywords "关键词1,关键词2,关键词3"
+  --module-info "Markdown内容"
 
 # 用户画像
 ki sync-relation \
   --scope user-profile \
   --group "目标Group路径" \
   --relation "Relation名称" \
-  --module-info "Markdown内容" \
-  --keywords "关键词1,关键词2,关键词3"
+  --module-info "Markdown内容"
 ```
 
 **写入后刷新**：每次写入完成后，必须重新执行对应全景查询更新缓存：
@@ -282,11 +278,10 @@ ki query-group --scope ${scope}-memory --mode full
 ki query-group --scope user-profile --mode full
 ```
 
-### 6.3 keywords 规则
+### 6.3 module-info 内容要求
 
-- 必须是**自然语言词汇**，禁止代码符号（类名、方法名、路径）
-- 必须真实出现在 `module-info` 原文中
-- 3~5 个为宜
+- 内容为 Markdown 格式的模块说明
+- 超长内容（>1000 字符）会收到警告，建议拆分多条写入或用 `scan-kb import --source` 自动切分导入
 
 ### 6.4 最近需求与进度的写入格式
 
@@ -334,8 +329,7 @@ ki sync-relation \
   --scope ${scope}-memory \
   --group "目标Group路径" \
   --relation "同一Relation名称" \
-  --module-info "更新后的Markdown内容" \
-  --keywords "更新后的关键词"
+  --module-info "更新后的Markdown内容"
 
 # 4. 刷新缓存
 ki query-group --scope ${scope}-memory --mode full
@@ -355,8 +349,7 @@ ki sync-relation \
   --scope user-profile \
   --group "目标Group路径" \
   --relation "同一Relation名称" \
-  --module-info "更新后的Markdown内容" \
-  --keywords "更新后的关键词"
+  --module-info "更新后的Markdown内容"
 
 # 4. 刷新缓存
 ki query-group --scope user-profile --mode full
@@ -417,8 +410,7 @@ ki sync-relation \
   --group "最近需求" \
   --relation "最近需求" \
   --module-info "[2026-06-12] 实现用户登录功能
-[2026-06-12] 优化搜索性能" \
-  --keywords "登录,搜索,性能"
+[2026-06-12] 优化搜索性能"
 
 # 5. 追加过期条目到 archive.md
 # （使用文件写入工具，向 最近需求/archive.md 追加以下内容）
@@ -532,7 +524,7 @@ ki query-group --scope ${scope}-memory --groups "路径" --mode hot,emerging
 ki get-module-info --scope ${scope}-memory --group "路径" --relation "名称"
 
 # 写入
-ki sync-relation --scope ${scope}-memory --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
+ki sync-relation --scope ${scope}-memory --group "路径" --relation "名称" --module-info "内容"
 
 # 创建 Group
 ki manage-index --scope ${scope}-memory --action create --parent "父" --name "子"
@@ -551,7 +543,7 @@ ki query-group --scope user-profile --groups "路径" --mode hot,emerging
 ki get-module-info --scope user-profile --group "路径" --relation "名称"
 
 # 写入
-ki sync-relation --scope user-profile --group "路径" --relation "名称" --module-info "内容" --keywords "k1,k2"
+ki sync-relation --scope user-profile --group "路径" --relation "名称" --module-info "内容"
 
 # 创建 Group
 ki manage-index --scope user-profile --action create --parent "父" --name "子"

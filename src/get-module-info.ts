@@ -22,6 +22,7 @@ import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 
 // ─── 类型定义 ───
 
@@ -174,12 +175,12 @@ program
   .name('get-module-info')
   .showHelpAfterError()
   .description('模块检索：读取本地 KB + 更新评分')
-  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('-g, --group <group>', 'Group 路径')
   .requiredOption('-r, --relation <relation>', 'Relation ID 或名称')
   .action(async (opts) => {
     const result = await executeGetModuleInfo({
-      scope: opts.scope,
+      scope: resolveScope(loadConfig(), opts.scope),
       group: opts.group,
       relation: opts.relation,
     });

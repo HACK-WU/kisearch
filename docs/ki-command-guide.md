@@ -71,9 +71,6 @@ ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ├── 用户登录接口 (score: 8.5) [热]
 ├── 数据查询接口 (score: 6.2) [热]
 └── 文件上传接口 (score: 4.8) [常温]
-
-🏷️ 关键词词云:
-└── 登录, 认证, token, 查询, 上传
 ```
 
 ---
@@ -97,8 +94,7 @@ ki sync-relation \
   --scope <scope> \
   --group "目标Group路径" \
   --relation "Relation名称" \
-  --module-info "Markdown内容" \
-  --keywords "关键词1,关键词2,关键词3"
+  --module-info "Markdown内容"
 ```
 
 **用途**：向指定 Group 写入一条知识条目。
@@ -109,9 +105,8 @@ ki sync-relation \
 {
   "ok": true,
   "relation": "agent-rule-体验测试条目",
-  "keywords": ["测试", "agent-rule", "体验"],
-  "invalid_keywords": [],
-  "evicted": null
+  "evicted": null,
+  "vectorStored": true
 }
 ```
 
@@ -130,8 +125,7 @@ ki sync-relation --scope <scope> --input /path/to/batch.json
   {
     "group": "目标Group路径",
     "relation": "Relation名称",
-    "module-info": "Markdown内容",
-    "keywords": "关键词1,关键词2"
+    "module-info": "Markdown内容"
   }
 ]
 ```
@@ -183,13 +177,9 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 ---
 
-## Keywords 规则
+## 超长 module-info 提示（REQ-10）
 
-所有 `ki sync-relation` 写入时必须遵守：
-
-- 必须是**自然语言词汇**，禁止代码符号（类名、方法名、路径）
-- 必须真实出现在 `module-info` 原文中
-- 3~5 个为宜
+`sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `scan-kb import --source` 自动切分），但仍正常写入单条。
 
 ---
 
@@ -200,7 +190,7 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 | `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再执行 `ki manage-index --action create --name "名称"` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
 | Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create --name "名称"` 创建 |
 | Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki query-group --mode full` 确认路径 |
-| `keywords` 被拒绝 | 包含代码符号或未出现在原文中 | 改用自然语言词，确认词在 module-info 中真实存在 |
+| `--module-info 内容不能为空` | 未传或空内容 | 补充 `--module-info "<markdown>"` |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
 | Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki query-group --mode full` 确认实际名称 |
 | 写入到错误的 scope | 混淆了 scope | 确认写入目标 scope 是否正确 |

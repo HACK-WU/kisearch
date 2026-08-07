@@ -26,6 +26,7 @@ import {
   type VectorDocInfo,
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 
 const PREVIEW_LEN = 200;
 
@@ -152,13 +153,14 @@ program.name('doc').showHelpAfterError().description('向量层文档查看与�
 program
   .command('list')
   .description('列出指定 scope 下文档（顺序不保证）')
-  .option('--scope <scope>', '项目隔离标识（省略用 default）', 'default')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--limit <limit>', '返回条数上限', '10')
-  .option('--tags <tags>', '过滤标签，逗号分隔多值（默认 ki-search）', 'ki-search')
+  .option('--tags <tags>', '过滤标签，逗号分隔多值（不传=全部）')
   .option('--full', '显示完整内容（默认截断预览 200 字）', false)
   .action(async (opts) => {
+    const scope = resolveScope(loadConfig(), opts.scope);
     const result = await executeDocList({
-      scope: opts.scope,
+      scope,
       tags: parseTags(opts.tags),
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       full: !!opts.full,
@@ -172,11 +174,12 @@ program
   .command('delete')
   .description('按 docid 删除向量层记忆（可多个）')
   .argument('<docid...>', '一个或多个 docid')
-  .option('--scope <scope>', '项目隔离标识（护栏：仅删归属该 scope 的 docid，跨 scope 跳过）', 'default')
+  .option('-s, --scope <scope>', '项目隔离标识（护栏：仅删归属该 scope 的 docid，跨 scope 跳过）')
   .option('--yes', '确认执行删除（缺省则仅预览并拒绝）', false)
   .action(async (docids: string[], opts) => {
+    const scope = resolveScope(loadConfig(), opts.scope);
     const result = await executeDocDelete({
-      scope: opts.scope,
+      scope,
       ids: docids,
       yes: !!opts.yes,
     });

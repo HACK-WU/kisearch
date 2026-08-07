@@ -1,6 +1,11 @@
+---
+name: update-kb
+description: 增量更新外部知识库的变更内容。基于 git diff 驱动的增量直连流程，无 AI 依赖，高效处理新增、修改、删除操作。当外部知识库发生变更（新增/修改/删除文件）或用户要求"更新知识库"、"增量导入"、"同步变更"时使用。
+---
+
 # 知识库更新 SKILL
 
-> 增量更新外部知识库的变更内容。基于 diff 检测的 3 步增量流程，高效处理新增、修改、删除操作。
+> 增量更新外部知识库的变更内容。基于 git diff 驱动的增量直连，无 AI 依赖（REQ-04/06 批次 3）。
 
 ## 触发场景
 
@@ -10,33 +15,33 @@
 
 ## 前置条件
 
-1. **已完成首次构建**：必须先使用 `knowledge-index-build` 完成首次全量导入
+1. **已完成首次直导**：必须先使用 `scan-kb import --source` 完成首次全量直导（记录 `source.commit` 增量基线）
 2. **外部知识库目录存在**：确保外部知识库目录可访问
-3. **Git 仓库**：增量更新依赖 `git diff` 检测变更，外部知识库需在 Git 仓库中
+3. **Git 仓库**：增量更新依赖 `git diff` 检测变更，外部知识库需在 Git 仓库中；**非 git 仓库跑增量会明确报错**
 
 ## 执行流程
 
-### 3 步增量更新流程
+### 一步增量直连（git diff 驱动）
 
 ```
-外部知识库变更
+外部知识库变更 → git commit
      │
      ▼
-[Step 1] scan-kb diff 检测变更
-     │
+ki scan-kb import --source <dir> --mode incremental
+     │  （内部：git diff 检测变更 → 按文件处理）
      ▼
-[Step 2] AI 生成增量 ai-results.json
-     │
+add    → 读原文 → 切分 → 向量化 → 写 cache + local KB
+modify → 先写新全 chunk → 成功后再删旧全 chunk（覆盖更新）
+delete → 按文件关联全 chunk memoryId 清理（向量 + cache + local KB）
      ▼
-[Step 3] scan-kb import --mode incremental
-     │
-     ▼
-知识索引更新完成
+全部成功 → 更新 source.commit 到 HEAD
 ```
+
+> **REQ-04/06（批次 3）**：ai-results.json 输入契约已删除，增量由 git diff 直连驱动，无需 AI 生成增量文件。
 
 ---
 
-### Step 1: 检测变更
+### Step 1: 检测变更（可选，仅查看）
 
 **命令**：
 ```bash
@@ -63,10 +68,10 @@ ki scan-kb diff --scope <scope>
     { "path": "新增文件.md", "absPath": "/path/to/source/新增文件.md" }
   ],
   "modified": [
-    { "path": "核心概念/Scope 隔离机制.md", "absPath": "...", "memoryId": "dbc6f2a0-..." }
+    { "path": "核心概念/Scope 隔离机制.md", "absPath": "..." }
   ],
   "deleted": [
-    { "path": "已删除文件.md", "memoryId": "33b1b2bb-..." }
+    { "path": "已删除文件.md" }
   ],
   "stats": { "added": 1, "modified": 1, "deleted": 1, "total": 3 }
 }
@@ -81,104 +86,24 @@ ki scan-kb diff --scope <scope>
 | `sourceDir` | 外部知识库目录 |
 | `rootName` | 根节点名称 |
 | `added` | 新增文件列表 |
-| `modified` | 修改文件列表（含 `memoryId`） |
-| `deleted` | 删除文件列表（含 `memoryId`） |
+| `modified` | 修改文件列表（文件级） |
+| `deleted` | 删除文件列表（文件级） |
 | `stats` | 变更统计 |
 
 **特殊情况**：
 - 如果 `group-index.source` 块不存在，返回 `status: 'first_import'` 提示
-- `modified`/`deleted` 条目会尝试从 `relations-cache` 关联 `memoryId`
+- `modified`/`deleted` 的 chunk memoryId 由导入器从 `relations-cache` 按文件前缀（`文件#N`）自动聚合，diff 输出本身不展开
 
 ---
 
-### Step 2: AI 生成增量 `ai-results.json`
-
-**任务**：根据 diff 结果，为每个变更文件生成结构化条目。
-
-**处理规则**：
-
-1. **新增文件（added）**：
-   - 读取文件内容，生成摘要和关键词
-   - 设置 `action: "add"`
-   - 不需要 `memoryId`
-
-2. **修改文件（modified）**：
-   - 读取最新内容，生成更新后的摘要和关键词
-   - 设置 `action: "modify"`
-   - 必须包含 `memoryId`（从 diff 结果获取）
-
-3. **删除文件（deleted）**：
-   - 设置 `action: "delete"`
-   - 必须包含 `memoryId`（从 diff 结果获取）
-   - 不需要摘要和关键词
-
-**增量 `ai-results.json` 格式**：
-
-```json
-{
-  "meta": {
-    "sourceDir": ".qoder/repowiki/zh/content",
-    "rootName": "QoderWiki"
-  },
-  "entries": [
-    {
-      "path": "新增文件.md",
-      "groupPath": "QoderWiki/新增分组",
-      "relation": "新增文件",
-      "summary": "新增文件的摘要...",
-      "keywords": ["新增", "文件"],
-      "action": "add"
-    },
-    {
-      "path": "核心概念/Scope 隔离机制.md",
-      "groupPath": "QoderWiki/核心概念",
-      "relation": "Scope 隔离机制",
-      "summary": "更新后的摘要...",
-      "keywords": ["Scope", "隔离", "访问控制", "ACL", "agentId", "动态更新"],
-      "memoryId": "dbc6f2a0-d62b-47cb-835a-371942fdc08a",
-      "action": "modify"
-    },
-    {
-      "path": "已删除的文件.md",
-      "groupPath": "QoderWiki/某个分组",
-      "relation": "已删除的条目",
-      "memoryId": "33b1b2bb-68fd-4290-b5d2-9e8c062089b2",
-      "action": "delete"
-    }
-  ]
-}
-```
-
-**字段说明**：
-
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `meta.sourceDir` | 是 | 外部知识库目录 |
-| `meta.rootName` | 是 | 根节点名称 |
-| `entries[].path` | 是 | 文件相对路径 |
-| `entries[].groupPath` | 否 | Group 路径（缺失时推导） |
-| `entries[].relation` | 否 | Relation 文本（缺失时推导） |
-| `entries[].summary` | 否 | 3~5 句摘要 |
-| `entries[].keywords` | 否 | 自然语言关键词数组 |
-| `entries[].action` | 是 | 操作语义：`add` / `modify` / `delete` |
-| `entries[].memoryId` | 条件 | `modify`/`delete` 时必填 |
-
-**校验规则**：
-
-1. `action` 字段必填
-2. `action='delete'` 必须携带 `memoryId`
-3. `action='modify'` 必须携带 `memoryId`
-
----
-
-### Step 3: 执行增量导入
+### Step 2: 执行增量导入（增量直连）
 
 **命令**：
 ```bash
 ki scan-kb import \
   --scope <scope> \
-  --mode incremental \
-  --results ai-results-incremental.json
+  --source <sourceDir> \
+  --mode incremental
 ```
 
 **参数**：
@@ -186,16 +111,18 @@ ki scan-kb import \
 | 参数 | 说明 | 必填 |
 |------|------|------|
 | `--scope` | 项目隔离标识 | 是 |
+| `--source` | 外部知识库目录（缺省用 `source.commit` 记录的 dir；全量直导时已写入 scope sourceDir） | 否 |
 | `--mode` | 导入模式：`incremental` | 是 |
-| `--results` | 增量 `ai-results.json` 文件路径 | 是 |
+
+> **切分参数（D-8）**：增量永远使用 `source` 块持久化的 `chunkSize/chunkOverlap`，命令行传参忽略；缺省回退默认（1000 / 150）。
 
 **增量语义**：
 
-| action | 执行操作 |
-|--------|----------|
-| `add` | 向量化 + 写入索引 |
-| `modify` | `mem delete <oldId>` + 重新向量化（拿新 id）+ 替换索引 |
-| `delete` | `mem delete <oldId>` + 移除索引 |
+| 变更 | 执行操作 |
+|------|----------|
+| `added` | 读原文 → 切分 → 向量化 → 写 cache + local KB |
+| `modified` | **先写新全 chunk → 全部成功后再删旧全 chunk**（写序保证中断不丢数据） |
+| `deleted` | 按文件关联全 chunk memoryId → 删向量 + cache + local KB + 路径向量 |
 
 **输出示例**：
 ```json
@@ -261,11 +188,11 @@ ki scan-kb import \
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `group-index.source 不存在` | 未完成首次构建 | 先执行 `knowledge-index-build` |
-| `memoryId 不存在` | diff 未找到对应 memoryId | 检查 `relations-cache.json` 或重新全量导入 |
-| `mem delete 失败` | mem 命令问题 | 检查 mem 安装和配置 |
-| `action='delete' 缺少 memoryId` | 增量文件格式错误 | 补充 memoryId 字段 |
-| `action='modify' 缺少 memoryId` | 增量文件格式错误 | 补充 memoryId 字段 |
+| `scope 尚未首次导入` | 未完成首次直导 | 先执行 `scan-kb import --source` 全量直导 |
+| `source 目录不在 git 仓库中` | 增量依赖 git diff | `git init` 或将 `--source` 指向 git 仓库内目录；或改用 `--mode full` |
+| `memoryId 关联失败` | cache 中无对应 chunk memoryId | 检查 `relations-cache.json` 或重新全量直导 |
+| `向量化删除失败` | zvec 引擎问题 | 检查嵌入 API 配置和 zvec 引擎状态 |
+| `文件过大已跳过` | 超过单文件大小上限（默认 2MB） | 手动切分后导入或调整上限 |
 
 ---
 
@@ -273,7 +200,7 @@ ki scan-kb import \
 
 | Skill | 使用场景 | 依赖关系 |
 |------|---------|----------|
-| knowledge-index-build | 首次构建 | 必须先完成首次构建 |
+| knowledge-index-build | 首次构建（`scan-kb import --source`） | 必须先完成首次直导 |
 | knowledge-index-verify | 验证更新结果 | 在更新完成后执行 |
 | knowledge-index-query | 查询知识 | 更新完成后使用 |
 | knowledge-index-manage | 管理索引结构 | 更新过程中自动维护 Group |

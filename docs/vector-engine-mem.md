@@ -185,7 +185,7 @@ const hits = await engine.hybridSearch({
 const engine = await getOrCreateEngine(config);
 const result = await engine.insert([{
   id: generateDocId(scope, text),
-  text: textWithKeywords,
+  text: text,
   fields: { scope, tags, doc_id },
 }]);
 return { memoryId: result.id };

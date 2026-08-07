@@ -261,11 +261,12 @@ const args = process.argv.slice(2);
 const EXPORT_HELP = `ki export - 导出 KB scope 为 Wiki Markdown
 
 用法：
-  ki export <scope> --output <dir> [--root-name <name>]
+  ki export <scope> --output <dir> [--root-name <name>] [--yes]
 
 选项：
   --output <dir>      导出输出目录（必填）
   --root-name <name>  指定 Group 树根名
+  --yes               确认覆盖已存在的输出目录（缺省则拒绝覆盖）
   -h, --help          显示帮助`;
 
 // -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住）
@@ -274,8 +275,8 @@ if (args.includes('-h') || args.includes('--help')) {
   process.exit(0);
 }
 
-// 未知参数检测（NEG-01）：--output / --root-name 为带值参数；未知参数回退到帮助
-detectUnknownFlags(args, ['--output', '--root-name'], ['--output', '--root-name'], EXPORT_HELP);
+// 未知参数检测（NEG-01）：--output / --root-name 为带值参数，--yes 为布尔；未知参数回退到帮助
+detectUnknownFlags(args, ['--output', '--root-name'], ['--output', '--root-name', '--yes'], EXPORT_HELP);
 
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
@@ -298,6 +299,23 @@ let rootName: string | undefined;
 const rnIdx = args.indexOf('--root-name');
 if (rnIdx !== -1 && rnIdx + 1 < args.length) {
   rootName = args[rnIdx + 1];
+}
+
+// 提取 --yes
+const yes = args.includes('--yes');
+
+// CLI-04：破坏性写盘确认——输出目录已存在且非空时，无 --yes 拒绝（防误覆盖）
+const absOutputDir = path.resolve(outputDir);
+if (fs.existsSync(absOutputDir) && !yes) {
+  const entries = fs.readdirSync(absOutputDir);
+  if (entries.length > 0) {
+    output({
+      ok: false,
+      error: `输出目录已存在且非空（${entries.length} 项）：${absOutputDir}。覆盖前请确认：ki export ${scope} --output ${outputDir} --yes`,
+      requireConfirm: true,
+    });
+    process.exit(1);
+  }
 }
 
 // ─── 执行 ───

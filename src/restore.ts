@@ -313,11 +313,13 @@ const args = process.argv.slice(2);
 const RESTORE_HELP = `ki restore - 从快照还原 scope
 
 用法：
-  ki restore <scope>                  列出可用备份
+  ki restore <scope> --list             列出可用备份（显式 flag，与 backup --list 一致）
+  ki restore <scope>                    列出可用备份（无参兼容）
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
   ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
 
 选项：
+  --list              列出可用备份（显式）
   --from-snapshot [<file>]  从 tar.gz 快照覆盖还原；可直接指定快照文件路径（缺省从 <backup-dir>/<scope>/snapshots 取最新/--timestamp）
   --rebuild-vector    还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path)
   --timestamp <ts>    指定快照时间戳（默认取最新）
@@ -335,7 +337,7 @@ if (args.includes('-h') || args.includes('--help')) {
 detectUnknownFlags(
   args,
   ['--from-snapshot', '--rebuild-vector', '--yes', '--timestamp', '--backup-dir'],
-  ['--timestamp', '--backup-dir'],
+  ['--timestamp', '--backup-dir', '--list'],
   RESTORE_HELP
 );
 
@@ -351,6 +353,7 @@ const fromSnapshot = args.some(
 );
 const skipYes = args.includes('--yes');
 const rebuildVector = args.includes('--rebuild-vector');
+// --list 由 detectUnknownFlags 的 allowFlags 识别放行；列表展示走默认分支（无操作参数即列出），无需独立变量
 
 // --from-snapshot 可选带值：`--from-snapshot <file>` 或 `--from-snapshot=<file>`
 // 直接指定快照文件路径；后跟 -- 开头的 token 视为纯布尔用法（取约定目录最新/--timestamp）
@@ -424,6 +427,7 @@ async function main() {
       // 独立调用：对已还原的 KB 仅重建向量
       await rebuildAndReport(scope);
     } else {
+      // 默认 / 显式 --list：列出可用备份（无参兼容）
       listAvailableBackups(scope, { backupDir: backupDirOverride });
     }
   } catch (err) {

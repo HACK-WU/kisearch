@@ -26,7 +26,7 @@ description: 代码知识库检索与写入行为规则。当用户问题涉及�
 
 写入 KB:
   1~2 条 → ki_sync_relation 逐条写
-  ≥3 条  → ai-results.json → ki scan-kb import（CLI）
+  ≥3 条  → ki_sync_relation --input 批量写（CLI）
 ```
 
 ---
@@ -80,7 +80,6 @@ description: 代码知识库检索与写入行为规则。当用户问题涉及�
 `ki_query_group(scope: "${scope}", groups: "目标Group路径", mode: "hot,emerging")`
 
 - 从热门中选择最匹配的 relation
-- 记下关键词词云（④备用）
 - 命中 → ③；未命中 → 换 Group 重试一次，仍无则 → ④
 
 ### ③ 取原文
@@ -92,15 +91,15 @@ description: 代码知识库检索与写入行为规则。当用户问题涉及�
 **ki_search 语义兜底**（仅索引找不到时）：
 
 ```
-ki_search(scope: "${scope}", query: "核心词 + 关键词词云", limit: 3, tags: "ki-search", threshold: 0.15)
+ki_search(scope: "${scope}", query: "核心词", limit: 3, tags: "ki-search", threshold: 0.15)
 ```
 
 - 返回 `results[]`，每项含 `memoryId`、`content`、`score`
 - 标签按意图指定：`ki-search`（通用）、`ki-path`（路径）、`ki-relation`（关系）
 
 **命中后回写本地**：
-1. 取 `content` 作为 `module_info`（去掉 `【标签:xxx】` 前缀）
-2. 提取 3~5 个自然语言关键词
+1. 取 `content` 作为 `module_info`
+2. 依据命中结果的 `group`/`relation`/`sourcePath` 定位
 3. 推断 Group（无法定位则写入 `"临时/语义兜底"` 或跳过）
 4. `ki_sync_relation` 回写
 5. 基于 content 提炼回答
@@ -125,24 +124,20 @@ ki_search(scope: "${scope}", query: "核心词 + 关键词词云", limit: 3, tag
 
 | 条数 | 方式 |
 |------|------|
-| 1~2 | `ki_sync_relation(scope, group, relation, module_info, keywords)` |
-| ≥3 | `ai-results.json` → `ki scan-kb import`（CLI） |
+| 1~2 | `ki_sync_relation(scope, group, relation, module_info)` |
+| ≥3 | `ki_sync_relation --input` 批量写（CLI） |
 
 写入后必须刷新全景缓存。
 
-### 批量格式（ai-results.json）
+### 批量格式（sync-relation --input）
 
 ```json
 {
-  "meta": { "sourceDir": "/path", "rootName": "ProjectWiki" },
-  "entries": [
-    { "path": "相对路径", "groupPath": "Group路径", "relation": "名称",
-      "summary": "摘要", "keywords": ["词1"], "action": "add|modify|delete" }
+  "items": [
+    { "group": "Group路径", "relation": "名称", "module_info": "Markdown内容" }
   ]
 }
 ```
-
-- `delete` 必须携带 `memoryId`
 
 ### Group 管理
 
@@ -157,7 +152,7 @@ ki_search(scope: "${scope}", query: "核心词 + 关键词词云", limit: 3, tag
 |---|------|
 | 🔴 1 | `${scope}` 仍是字面量时执行任何 ki MCP 调用 |
 | 🔴 2 | `ki_search` 未指定正确的 `tags` |
-| 🔴 3 | `keywords` 使用代码符号或未出现在原文中的词 |
+| 🔴 3 | 超长 module-info 不拆分直接写入（收到警告仍应拆分） |
 | 🔴 4 | 跨 scope 串数据 |
 | 🔴 5 | 把用户喜好/项目记忆/临时上下文写入 KB |
 | 🔴 6 | 用 `memory_store` 逐条塞入应走批量导入的内容 |

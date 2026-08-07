@@ -68,14 +68,16 @@ test/fixtures/mock-wiki/
     └── 安装问题.md             ← 安装排查指南
 ```
 
-### ai-results 文件
+### 直导模式（--source）
 
-| 文件 | 用途 | 说明 |
-|------|------|------|
-| `test/fixtures/ai-results-full.json` | 全量导入 | 7 个条目，覆盖 4 个目录 |
-| `test/fixtures/ai-results-incremental.json` | 增量导入 | modify 1 条 + delete 1 条 + add 1 条 |
+> **REQ-04（批次 3）**：ai-results.json 输入契约已删除，导入统一走 `--source` 原文直导。
 
-> **注意**：ai-results 文件中的 `meta.sourceDir` 是占位路径，实际测试时需通过 `--source-dir` 参数覆盖为 mock-wiki 的绝对路径。
+| 能力 | 说明 |
+|------|------|
+| 全量直导 | `scan-kb import --source <mock-wiki> --root-name TestWiki`（原文直导 + 大文档自动切分） |
+| 增量直连 | `scan-kb import --source <mock-wiki> --mode incremental`（git diff 驱动，无 AI 依赖） |
+
+> **注意**：`--source` 目录必须是 git 仓库（增量模式依赖 git diff 检测变更；非 git 仓库跑增量会明确报错）。
 
 ---
 
@@ -185,8 +187,8 @@ MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   scan-kb import \
   --scope e2e-test \
-  --results test/fixtures/ai-results-full.json \
-  --source-dir "$MOCK_WIKI"
+  --source "$MOCK_WIKI" \
+  --root-name TestWiki
 ```
 
 **预期输出**：
@@ -374,7 +376,6 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   --scope e2e-test \
   --group "TestWiki/部署指南" \
   --relation "Kubernetes 部署" \
-  --keywords "K8s,容器编排,Deployment" \
   --module-info "# Kubernetes 部署\n\n使用 kubectl apply 部署应用到 K8s 集群。"
 ```
 
@@ -459,7 +460,6 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   --scope e2e-test \
   --group "TestWiki/部署指南" \
   --relation "Helm Charts" \
-  --keywords "Helm,Charts,K8s" \
   --module-info "# Helm Charts\n\n使用 Helm 管理 K8s 应用部署。"
 ```
 
@@ -478,7 +478,6 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   --scope e2e-test \
   --group "TestWiki/部署指南" \
   --relation "../escape/hack" \
-  --keywords "test" \
   --module-info "test"
 ```
 
@@ -528,7 +527,6 @@ node bin/ki.mjs --config $CONFIG \
   --scope e2e-pure-sync \
   --group "我的项目/后端" \
   --relation "用户注册接口" \
-  --keywords "注册,用户,POST,邮箱" \
   --module-info "# 用户注册接口\n\nPOST /api/v1/users/register\n\n请求体：{ email, password, name }\n\n返回：{ userId, token }"
 
 # 3. 写入第二条 Relation
@@ -537,7 +535,6 @@ node bin/ki.mjs --config $CONFIG \
   --scope e2e-pure-sync \
   --group "我的项目/后端" \
   --relation "数据库设计" \
-  --keywords "数据库,PostgreSQL,表结构" \
   --module-info "# 数据库设计\n\n使用 PostgreSQL，核心表：users、orders、products。"
 
 # 4. 写入前端组的 Relation
@@ -546,7 +543,6 @@ node bin/ki.mjs --config $CONFIG \
   --scope e2e-pure-sync \
   --group "我的项目/前端" \
   --relation "组件库" \
-  --keywords "组件,React,UI" \
   --module-info "# 组件库\n\n基于 React + Ant Design 的通用组件库。"
 ```
 
@@ -591,7 +587,6 @@ node bin/ki.mjs --config $CONFIG \
   --scope e2e-auto-create \
   --group "运维手册/监控告警" \
   --relation "Prometheus 配置" \
-  --keywords "Prometheus,监控,告警,指标" \
   --module-info "# Prometheus 配置\n\n使用 Prometheus + Alertmanager 搭建监控告警体系。\n\n## 指标采集\n\n- CPU / 内存 / 磁盘\n- HTTP 请求延迟\n- 业务自定义指标"
 ```
 
@@ -786,49 +781,28 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ## 12. scan-kb import --mode incremental：增量导入
 
-### 12.1 准备增量 ai-results
+### 12.1 制造增量变更
 
-增量导入需要全量导入返回的真实 memoryId。从全量导入结果中提取：
-
-```bash
-# 方法一：从 relations-cache.json 中提取
-KB_DIR="/tmp/ki-e2e-test/kb/e2e-test"
-
-# 查看数据查询的 memoryId
-python3 -c "
-import json
-data = json.load(open('$KB_DIR/relations-cache.json'))
-for g in data['groups'].values():
-    for r in g.get('hot_relations', []):
-        if r['text'] == '数据查询':
-            print(r.get('memoryId', 'N/A'))
-"
-```
-
-将提取到的 memoryId 填入 `ai-results-incremental.json`（替换 `PLACEHOLDER_FULL_IMPORT`）：
+增量直连（git diff 驱动）无需准备任何 AI 产物。在 mock-wiki 中制造三类变更并提交：
 
 ```bash
-MEMORY_ID="<上一步提取的值>"
+cd "$(realpath test/fixtures/mock-wiki)"
 
-# 复制模板并替换占位符
-cp test/fixtures/ai-results-incremental.json /tmp/ki-ai-results-inc.json
-sed -i "s/PLACEHOLDER_FULL_IMPORT/$MEMORY_ID/g" /tmp/ki-ai-results-inc.json
+# 新增文件
+echo '# 权限管理' > "API 参考/权限管理.md"
 
-# 为 delete 条目提取"安装问题"的 memoryId
-DELETE_ID=$(python3 -c "
-import json
-data = json.load(open('$KB_DIR/relations-cache.json'))
-for g in data['groups'].values():
-    for r in g.get('hot_relations', []):
-        if r['text'] == '安装问题':
-            print(r.get('memoryId', ''))
-            break
-")
-# 如果两个条目 memoryId 不同，手动处理第二个
-# 此处简化处理：使用同一个值（实际场景中每个条目有独立 memoryId）
+# 修改文件
+echo -e '# 数据查询 v2\n\n更新后的查询规范。' > "API 参考/数据查询.md"
+
+# 删除文件
+rm "常见问题/安装问题.md"
+
+# 提交变更（增量基线 = source.commit 记录的 commit）
+git add -A
+git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q -m "e2e incremental changes"
 ```
 
-> **注意**：实际测试中 modify 和 delete 条目的 memoryId 各不相同，需分别提取。上面是简化流程。
+> **注意**：增量直连以 `source.commit`（上次导入时记录的 git commit）为基线，用 `git diff` 检测变更；memoryId 由系统从 relations-cache 按文件自动聚合，无需手工准备。
 
 ### 12.2 执行增量导入
 
@@ -838,9 +812,8 @@ MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   scan-kb import \
   --scope e2e-test \
-  --results /tmp/ki-ai-results-inc.json \
-  --mode incremental \
-  --source-dir "$MOCK_WIKI"
+  --source "$MOCK_WIKI" \
+  --mode incremental
 ```
 
 **预期输出**：
@@ -862,11 +835,11 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 **验证要点**：
 - [ ] `ok: true`
 - [ ] `stats.added` = 1（权限管理.md）
-- [ ] `stats.modified` = 1（数据查询.md 摘要更新）
+- [ ] `stats.modified` = 1（数据查询.md 原文更新）
 - [ ] `stats.deleted` = 1（安装问题.md 移除）
 - [ ] group-index.json 中"常见问题"组无"安装问题"子节点
 - [ ] "API 参考"组新增"权限管理"节点
-- [ ] relations-cache.json 中"数据查询"的 summary 已更新
+- [ ] relations-cache.json 中"数据查询"的 memoryId 已更新（新原文 chunk 覆盖旧 chunk）
 
 ---
 
@@ -916,7 +889,6 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 rm -rf /tmp/ki-e2e-test
 rm -rf /tmp/ki-e2e-export
 rm -f /tmp/ki-batch-input.json
-rm -f /tmp/ki-ai-results-inc.json
 
 # 恢复 mock-wiki 到初始状态（移除测试中新增的文件）
 MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
@@ -969,7 +941,7 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 | Group 树完整 | group-index.json | groups 层级正确 |
 | source 块记录 | group-index.json | source.{dir,rootName,commit} |
 | Relation 写入 | relations-cache.json | hot_relations 含 isImported/memoryId |
-| 关键词合并 | relations-cache.json | keywords 去重且非空 |
+| memoryId 回填 | relations-cache.json | hot_relations 含 memoryId（直导真实 docId） |
 | local KB 存在 | kb/{scope}/**/index.json | 每个 Group 有 index.json |
 | local KB 内容 | kb/{scope}/**/index.json | 内容为原始 Markdown |
 | Wiki 写回文件 | wikiSync.dir | frontmatter 格式正确 |
@@ -997,10 +969,9 @@ node bin/ki.mjs config init --dir /tmp/ki-e2e-test
 # 修改 dataDir 为隔离目录
 sed -i 's|"dataDir": "/root/.ki-data"|"dataDir": "/tmp/ki-e2e-test/kb"|' $CONFIG
 
-# 全量导入
+# 全量直导（--source 原文直导，无 AI 依赖）
 node bin/ki.mjs --config $CONFIG scan-kb import \
-  --scope e2e-test --results test/fixtures/ai-results-full.json \
-  --source-dir "$MOCK_WIKI"
+  --scope e2e-test --source "$MOCK_WIKI" --root-name TestWiki
 
 # 查询
 node bin/ki.mjs --config $CONFIG query-group --scope e2e-test --groups "TestWiki"
@@ -1009,10 +980,10 @@ node bin/ki.mjs --config $CONFIG query-group --scope e2e-test --groups "TestWiki
 node bin/ki.mjs --config $CONFIG get-module-info --scope e2e-test \
   --group "TestWiki/API 参考" --relation "用户认证"
 
-# 写入 relation
+# 写入 relation（keywords 已移除，仅 module-info）
 node bin/ki.mjs --config $CONFIG sync-relation --scope e2e-test \
   --group "TestWiki/部署指南" --relation "CI/CD" \
-  --keywords "CI,CD,自动化" --module-info "# CI/CD\n持续集成持续部署。"
+  --module-info "# CI/CD\n持续集成持续部署。"
 
 # 导出
 node bin/ki.mjs --config $CONFIG export e2e-test --output /tmp/ki-e2e-export

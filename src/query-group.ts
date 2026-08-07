@@ -21,6 +21,7 @@ import type { GroupIndex } from './lib/scope.js';
 import { calculateScore, partitionByScore } from './lib/scoring.js';
 import type { Relation, PartitionResult as ScoringPartitionResult } from './lib/scoring.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import type { ResolveResult } from './lib/group-resolve.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
@@ -752,14 +753,14 @@ program
   .name('query-group')
   .showHelpAfterError()
   .description('查询 Group + 格式化输出')
-  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('-g, --groups <groups>', '逗号分隔的 Group 路径列表')
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')
   .option('--no-auto-fallback', '禁用语义兜底（默认开启）')
   .action(async (opts) => {
-    const result = await executeQueryGroup(parseCliOpts(opts));
+    const result = await executeQueryGroup(parseCliOpts({ ...opts, scope: resolveScope(loadConfig(), opts.scope) }));
     if (result.ok) {
       // 文本展示输出：开头标注 scope，保证输出内容自解释
       console.log(`[scope: ${result.scope}]\n${result.output}`);

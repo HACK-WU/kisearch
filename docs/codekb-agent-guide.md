@@ -27,7 +27,7 @@
 
 产生了项目代码知识 → 【只写 KB】
   1~2 条 → ki sync-relation 逐条写
-  ≥3 条  → 组织 ai-results.json → ki scan-kb import --mode incremental
+  ≥3 条  → ki sync-relation --input <json> 批量写
   ❌ 用户喜好/项目记忆/临时信息 → 不写 KB
 ```
 
@@ -176,16 +176,12 @@ ki query-group --scope ${scope} --groups "目标Group路径" --mode hot,emerging
 ├── 用户登录接口 (score: 8.5) [热]
 ├── 数据查询接口 (score: 6.2) [热]
 └── 文件上传接口 (score: 4.8) [常温]
-
-🏷️ 关键词词云:
-└── 登录, 认证, token, 查询, 上传
 ```
 
 **为什么要查看新兴热区**：新兴热区是近期 48 小时内频繁使用的知识，它们可能还没有积累足够分数进入热区，但往往是最贴近当前工作上下文的内容。优先查看可以快速命中最近在用的知识。
 
 **操作**：
 - 从热门知识中选择最匹配的 relation
-- 记下关键词词云（第④步备用）
 - **命中** → 进入第③步取原文
 - **未命中** → 先检查 Group 是否定位正确（可换 Group 重试一次），确认无误后进入第④步
 
@@ -205,7 +201,7 @@ ki get-module-info --scope ${scope} --group "目标Group路径" --relation "Rela
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| query | `"<用户问题核心词> <关键词词云摘取>"` | **必须用 `query` 参数，禁止用 `text`** |
+| query | `"<用户问题核心词>"` | **必须用 `query` 参数，禁止用 `text`** |
 | limit | `3` | |
 | scope | `"${scope}"` | 直接指定 scope 过滤，**禁止用 `tags`**（实测不生效） |
 
@@ -230,7 +226,7 @@ ki get-module-info --scope ${scope} --group "目标Group路径" --relation "Rela
 
 **关键字段**：
 - `details.memories[].id` = **memoryId**（后续 del 必需）
-- `details.memories[].text` = 三段式文本 `[摘要]\n[关键词]\n[路径]`
+- `details.memories[].text` = 内容文本（直导后为原文 / chunk）
 - `details.memories[].score` = 相关性分数
 
 **⚠️ 常见错误与修复**：
@@ -240,24 +236,21 @@ ki get-module-info --scope ${scope} --group "目标Group路径" --relation "Rela
 
 #### 4.1.1 命中后：回写本地索引
 
-`memory_recall` 命中后，`details.memories[].text` 是三段式文本：`[摘要]\n[关键词]\n[路径]`。Agent 必须：
+`memory_recall` 命中后，`details.memories[].text` 为内容文本（直导后为原文 / chunk）。Agent 回写时：
 
-1. **提取摘要**：取 `[摘要]` 部分内容作为 `--module-info`（**去掉 `[路径]` 段**，路径是 KB 内部索引信息，不应写入本地 KB 原文）。
-2. **提取关键词**：取 `[关键词]` 部分内容作为 `--keywords`。
-3. **解析路径用于定位**：从 `[路径]` 段提取 Group 路径和 Relation 名称（如 `BK-Monitor-Wiki/告警系统设计/告警引擎核心` → group=`BK-Monitor-Wiki/告警系统设计`，relation=`告警引擎核心`）。若路径为空或无法解析，跳过回写，直接基于摘要回答。
-4. **回写本地**：执行 `ki sync-relation` 将摘要沉淀到本地索引，提升后续查询效率。
-5. **提炼回答**：基于摘要内容回答用户问题。
+1. **定位**：根据命中结果的 `group`/`relation`/`sourcePath` 字段（或内容上下文）确定 Group 与 Relation 名称；无法解析则跳过回写，直接基于内容回答。
+2. **回写本地**：执行 `ki sync-relation` 将内容沉淀到本地索引，提升后续查询效率。
+3. **提炼回答**：基于内容回答用户问题。
 
 ```bash
 ki sync-relation \
   --scope ${scope} \
-  --group "从路径提取的Group" \
-  --relation "从路径提取的Relation" \
-  --module-info "memory_recall 返回的摘要内容（不含路径段）" \
-  --keywords "从摘要/关键词段提取的关键词"
+  --group "目标Group" \
+  --relation "目标Relation" \
+  --module-info "内容文本"
 ```
 
-> **内容来源说明**：`--module-info` 使用 `memory_recall` 返回的**摘要文本**（三段式的第一段），不额外调用 `get-module-info` 取原文。摘要已经包含核心知识要点，足以作为本地 KB 条目。
+> **内容来源说明**：`--module-info` 使用 `memory_recall` 返回的内容文本，不额外调用 `get-module-info` 取原文。
 >
 > 这样做的目的是：热门知识从记忆系统逐步沉淀到本地索引，后续同类查询可直接命中本地热区，无需再走语义搜索。
 
@@ -290,7 +283,7 @@ ki sync-relation \
 | 条数 | 命令 |
 |------|------|
 | 1~2 条 | `ki sync-relation` 逐条写 |
-| ≥3 条 | 组织 `ai-results.json` → `ki scan-kb import --mode incremental` |
+| ≥3 条 | `ki sync-relation --input <json>` 批量写 |
 
 ### 5.1 单条写入（sync-relation）
 
@@ -299,8 +292,7 @@ ki sync-relation \
   --scope ${scope} \
   --group "目标Group路径" \
   --relation "Relation名称" \
-  --module-info "Markdown内容" \
-  --keywords "关键词1,关键词2,关键词3"
+  --module-info "Markdown内容"
 ```
 
 **真实输出示例**：
@@ -308,35 +300,26 @@ ki sync-relation \
 {
   "ok": true,
   "relation": "agent-rule-体验测试条目",
-  "keywords": ["测试", "agent-rule", "体验"],
-  "invalid_keywords": [],
-  "evicted": null
+  "evicted": null,
+  "vectorStored": true
 }
 ```
 
 **注意事项**：
-- `keywords` 必须是自然语言词汇，禁止代码符号（类名、方法名、路径）
-- `keywords` 必须真实出现在 `module-info` 原文中
+- 超长 `--module-info`（>1000 字符）会收到警告，建议拆分多条或改用 `scan-kb import --source` 自动切分导入
 - **`sync-relation` 只写 relations-cache + local KB，不写 memory**
 
-### 5.2 批量写入（ai-results.json + scan-kb import）
+### 5.2 批量写入（sync-relation --input）
 
 当单次写入 ≥3 条时，组织如下 JSON：
 
 ```json
 {
-  "meta": {
-    "sourceDir": "/path/to/source",
-    "rootName": "ProjectWiki"
-  },
-  "entries": [
+  "items": [
     {
-      "path": "相对于sourceDir的文件路径",
-      "groupPath": "完整Group路径",
+      "group": "完整Group路径",
       "relation": "Relation名称",
-      "summary": "一句话摘要",
-      "keywords": ["关键词1", "关键词2"],
-      "action": "add"
+      "module_info": "Markdown 内容"
     }
   ]
 }
@@ -345,40 +328,22 @@ ki sync-relation \
 **执行命令**：
 
 ```bash
-ki scan-kb import --scope ${scope} --mode incremental --results /path/to/ai-results.json
+ki sync-relation --scope ${scope} --input /path/to/batch.json
 ```
 
 **真实输出示例**：
 
-```
-[Phase 1/4] 校验增量导入前置条件 ...
-  ✓ 校验通过
-
-[Phase 2/4] 删除过时条目（0 条）...
-  ✓ 删除完成：0 条
-
-[Phase 3/4] 预处理 modify + 批量向量化（add=3, modify=0）...
-  ✓ 向量化完成：add=3, modify=0, errors=0
-
-[Phase 4/4] 持久化 + 更新 source ...
-
-增量导入完成：total=3  added=3  modified=0  deleted=0  errors=0
+```json
 {
   "ok": true,
-  "stats": { "total": 3, "added": 3, "modified": 0, "deleted": 0, "errors": 0 }
+  "results": [
+    { "relation": "条目1", "evicted": null, "wikiSynced": true },
+    { "relation": "条目2", "evicted": null, "wikiSynced": true }
+  ],
+  "added": 2,
+  "failed": 0
 }
 ```
-
-**支持的操作（action 字段）**：
-
-| action | 用途 | 必要额外字段 |
-|--------|------|-------------|
-| `add` | 新增 | summary, keywords |
-| `modify` | 修改已有 | summary, keywords, memoryId |
-| `delete` | 删除 | **memoryId** |
-
-**⚠️ `delete` 操作必须携带 `memoryId`**，否则报错：
-`"entries[0] action=delete 必须携带 memoryId"`
 
 ---
 
@@ -410,8 +375,8 @@ ki manage-index --scope ${scope} --action delete --parent "父Group路径" --nam
 |---|------|
 | 🔴 1 | `${scope}` 仍是字面量时，执行任何 ki 命令或 memory_* 操作 |
 | 🔴 2 | `memory_recall` 使用 `text` 参数（必须用 `query`） |
-| 🔴 3 | 把代码符号（类名/方法名/路径）作为 `keywords` |
-| 🔴 4 | `keywords` 中出现未在 `module-info` 原文中出现的词 |
+| 🔴 3 | 把用户喜好 / 项目记忆 / 临时上下文写入 KB |
+| 🔴 4 | 超长 module-info 不拆分直接写入（收到警告仍应拆分） |
 | 🔴 5 | 跨 scope 串数据 |
 | 🔴 6 | 把用户喜好 / 项目记忆 / 临时上下文写入 KB |
 | 🔴 7 | 用 `memory_store` 逐条塞入本应走 `scan-kb import` 的批量内容 |
@@ -452,7 +417,7 @@ ki manage-index --scope ${scope} --action delete --parent "父Group路径" --nam
 ### 9.1 批量写入 KB
 
 ```bash
-ki scan-kb import --scope ${scope} --mode incremental --results /path/to/ai-results.json
+ki sync-relation --scope ${scope} --input /path/to/batch.json
 ```
 
 详见 §5.2 批量写入流程。
@@ -463,7 +428,7 @@ ki scan-kb import --scope ${scope} --mode incremental --results /path/to/ai-resu
 
 | 参数 | 值 | 注意事项 |
 |------|-----|----------|
-| query | 用户问题 + 关键词词云提取 | **必须用 `query`，禁止 `text`** |
+| query | 用户问题 | **必须用 `query`，禁止 `text`** |
 | limit | 3 | |
 | scope | `${scope}` | 直接指定 scope 过滤，**禁止用 `tags`**（实测不生效） |
 

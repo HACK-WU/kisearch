@@ -45,8 +45,7 @@ ki sync-relation \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口" \
-  --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。" \
-  --keywords "登录,认证,token"
+  --module-info "## 登录流程\n用户输入账号密码后进入认证流程，服务端校验成功后返回 token。"
 ```
 
 ### 步骤 4：查看写入效果
@@ -93,70 +92,40 @@ flowchart TD
 
 > 前置条件：**首次使用某个 `scope` 前**，需在 `~/.ki/config.yaml` 的 `scopes` 中注册该 scope。
 
-### 首次导入（2 步）
+### 首次导入（原文直导，1 步）
 
-**第 1 步**：AI 生成 `ai-results.json`
+> **REQ-04（批次 3）**：ai-results.json 输入契约已删除，改为 `--source` 原文直导。
 
-AI 读取外部 Markdown 文件，为每个文件生成摘要、关键词，输出为：
-
-```json
-{
-  "meta": { "sourceDir": ".qoder/repowiki/zh/content", "rootName": "QoderWiki" },
-  "entries": [
-    {
-      "path": "核心概念/Scope 隔离机制.md",
-      "groupPath": "QoderWiki/核心概念",
-      "relation": "Scope 隔离机制",
-      "summary": "Scope 隔离通过服务端 scope 注入、agentId 绕过与 wrapper 层 ACL 检查三段式实现。",
-      "keywords": ["Scope", "隔离", "访问控制", "ACL", "agentId"],
-      "action": "add"
-    }
-  ]
-}
-```
-
-**第 2 步**：一条命令完成
+**一条命令完成**：
 
 ```bash
 ki scan-kb import \
   --scope my-project \
-  --results ai-results.json
+  --source /path/to/wiki \
+  --root-name QoderWiki
 ```
 
-内部完成：格式校验 → 批量 zvec 引擎向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit）。
+内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit + 切分参数持久化）→ scope sourceDir 写入。
 
-### 增量更新（3 步）
+### 增量更新（git diff 直连，1 步）
 
-**第 1 步**：检测变更
-
-```bash
-ki scan-kb diff --scope my-project
-```
-
-输出 `{ added, modified, deleted }` 列表，`modified`/`deleted` 条目携带 `memoryId`。
-
-**第 2 步**：AI 根据 diff 生成增量 `ai-results.json`
-
-每条带 `action` 字段：
-
-- `add`：新增文件
-- `modify`：修改文件（需携带旧 `memoryId`）
-- `delete`：删除文件（需携带旧 `memoryId`）
-
-**第 3 步**：执行增量导入
+> **REQ-06（批次 3）**：增量由 git diff 驱动，无 AI 依赖。
 
 ```bash
+# 在外部知识库目录提交变更后
 ki scan-kb import \
   --scope my-project \
-  --mode incremental \
-  --results ai-results-incremental.json
+  --source /path/to/wiki \
+  --mode incremental
 ```
 
-增量语义：
+增量语义（文件级覆盖更新）：
 
-- `add`：新增 → 向量化 + 写入索引
-- `modify`：删除旧向量（`engine.delete`）+ 重新向量化（拿新 id）+ 替换索引
-- `delete`：删除旧向量（`engine.delete`）+ 移除索引
+- `added`：读原文 → 切分 → 向量化 + 写入索引
+- `modified`：先写新全 chunk → 成功后再删旧全 chunk（写序保证中断不丢数据）
+- `deleted`：按文件关联全 chunk memoryId → 删向量 + cache + local KB
+
+可选：先查看变更（`ki scan-kb diff --scope my-project`），确认后再执行增量。
 
 ---
 
@@ -167,7 +136,8 @@ ki scan-kb import \
 ```bash
 ki scan-kb import \
   --scope my-project \
-  --results ai-results.json \
+  --source /path/to/wiki \
+  --root-name QoderWiki \
   --mapping mapping.json
 ```
 
@@ -203,8 +173,8 @@ import-kb
 
 - **`scan-kb diff` 返回 `status: 'first_import'`**：说明尚未首次导入
 - **`scan-kb import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
-- **`scan-kb import` 报 `entries[].path 必填且为字符串`**：`ai-results.json` 格式有误
-- **`scan-kb import` 报 `action=delete 必须携带 memoryId`**：增量删除缺少旧 id
+- **`scan-kb import` 报 `必须二选一：--results 或 --source`**：导入参数未指定正确模式
+- **`scan-kb import --mode incremental` 报 `source 目录不在 git 仓库中`**：增量依赖 git，需 `git init` 或用 `--mode full`
 - **增量 diff 返回 0 变更**：文件可能未 git commit，或 `source.commit` 已是最新
 
 ---

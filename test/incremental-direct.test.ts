@@ -34,13 +34,13 @@ function makeRepo(files: Record<string, string>): string {
   }
   execFileSync('git', ['init', '-q'], { cwd: dir });
   execFileSync('git', ['add', '.'], { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
-  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init'], { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   return dir;
 }
 
 function commitChange(repoDir: string, msg: string): void {
   execFileSync('git', ['add', '-A'], { cwd: repoDir });
-  execFileSync('git', ['commit', '-q', '-m', msg], { cwd: repoDir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg], { cwd: repoDir, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
 }
 
 /** 构造一个 chunk 必然 >1 的大文件内容 */

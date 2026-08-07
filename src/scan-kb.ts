@@ -20,7 +20,7 @@ import { validateScope } from './lib/scope.js';
 import { handleDirectImport } from './lib/import.js';
 import { handleIncrementalDirect } from './lib/incremental.js';
 import { handleDiff } from './lib/diff.js';
-import { loadConfig } from './lib/config.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
 
@@ -40,7 +40,7 @@ program
 program
   .command('import')
   .description('导入：--source 直导外部 Wiki（无 AI，自动切分；full / incremental）')
-  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')
   .option('--mode <mode>', '导入模式：full | incremental（默认 full）', 'full')
   .option('--root-name <rootName>', '导入根节点名称（全量直导必填）')
@@ -48,10 +48,8 @@ program
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150，全量直导专用）')
   .action(async (opts) => {
     try {
-      const scope = String(opts.scope);
+      const scope = resolveScope(loadConfig(), opts.scope);
       const mode = String(opts.mode || 'full');
-
-      validateScope(scope);
 
       if (mode !== 'full' && mode !== 'incremental') {
         output({ ok: false, error: `未知 --mode: ${mode}（应为 full | incremental）` });
@@ -62,6 +60,12 @@ program
       const rootName = opts.rootName ? String(opts.rootName).trim() : '';
       const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
       const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
+
+      // CLI-07：--root-name 语义统一——full 模式必填（前置校验），incremental 忽略
+      if (mode === 'full' && !rootName) {
+        output({ ok: false, error: '全量直导必须传 --root-name <name>' });
+        process.exit(1);
+      }
 
       const result =
         mode === 'full'
@@ -93,13 +97,12 @@ program
 program
   .command('diff')
   .description('对比 group-index.source.commit 与 HEAD，输出变更文件列表（含 memoryId 关联）')
-  .requiredOption('-s, --scope <scope>', '项目隔离标识')
+  .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('-o, --output <outputFile>', '将结果写入指定文件（默认仅 stdout）')
   .action((opts) => {
     try {
-      const scope = String(opts.scope);
+      const scope = resolveScope(loadConfig(), opts.scope);
       const outputFile = opts.output ? path.resolve(String(opts.output)) : undefined;
-      validateScope(scope);
 
       const result = handleDiff({ scope, outputFile });
       const json = JSON.stringify(result, null, 2);

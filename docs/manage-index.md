@@ -138,8 +138,7 @@ ki sync-relation \
   --scope <scope> \
   --group <group> \
   --relation <relationText> \
-  --module-info "<markdown内容>" \
-  --keywords <k1,k2,k3>
+  --module-info "<markdown内容>"
 ```
 
 **示例**：
@@ -148,8 +147,7 @@ ki sync-relation \
   --scope my-project \
   --group "设计文档/API" \
   --relation "用户登录" \
-  --module-info "# 用户登录\n\n## 流程\n1. 输入账号密码\n2. 验证\n3. 返回token" \
-  --keywords "登录,认证,token"
+  --module-info "# 用户登录\n\n## 流程\n1. 输入账号密码\n2. 验证\n3. 返回token"
 ```
 
 **Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki Markdown 文件。Wiki 目录发现优先级：
@@ -191,14 +189,12 @@ ki sync-relation \
     {
       "group": "设计文档/API",
       "relation": "用户登录",
-      "module_info": "# 用户登录\n...",
-      "keywords": ["登录", "认证", "token"]
+      "module_info": "# 用户登录\n..."
     },
     {
       "group": "设计文档/API",
       "relation": "用户注册",
-      "module_info": "# 用户注册\n...",
-      "keywords": ["注册", "邮箱", "验证"]
+      "module_info": "# 用户注册\n..."
     }
   ]
 }
@@ -252,8 +248,7 @@ ki query-group --scope <scope> --groups <group>
   "group": "设计文档/API",
   "hot_relations": [
     { "id": "rel_001", "text": "用户登录", "score": 8.5 }
-  ],
-  "keywords": ["登录", "认证", "token", "注册", "验证"]
+  ]
 }
 ```
 
@@ -271,7 +266,6 @@ ki query-group --scope <scope> --groups <group>
 | `--group` | Group 路径 | sync-relation 时必填 |
 | `--relation` | Relation ID 或描述文本 | sync-relation 时必填 |
 | `--module-info` | Markdown 格式模块信息 | sync-relation 时必填 |
-| `--keywords` | 逗号分隔关键词 | sync-relation 时必填 |
 | `--input` | 批量输入 JSON 文件 | 批量模式必填 |
 
 ---
