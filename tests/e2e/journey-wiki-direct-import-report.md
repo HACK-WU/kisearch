@@ -4,6 +4,7 @@
 - 通过步骤：10 / 总 11（teardown 不计入判定；发现并修复 1 个体验问题）
 - 环境：本地 CLI（隔离 config `/tmp/ki-e2e-config.yaml`，独立 dataDir/vectorDir）
 - 旅程状态：✅ PASS（含 1 次体验问题修复后复验）
+- **被测代码基线 commit**：`2548d73c3e60266803bf3f43fb41facddc0cc711`（e2e 执行时 HEAD；体验修复未含在本 commit 内）
 
 ## 明细
 

@@ -76,6 +76,8 @@ export interface ImportStats {
   total: number;
   vectorized: number;
   errors: number;
+  /** 被跳过的文件数（过大 / chunk 超限），结构化输出可观测（体验修复） */
+  skipped: number;
 }
 
 export interface ImportResult {
@@ -224,10 +226,10 @@ export async function handleDirectImport(
     logProgress(entries.length, files.length * 10, rel); // 粗粒度进度
   }
   if (skipped.length > 0) {
-    logWarn(`跳过 ${skipped.length} 个超大文件`);
+    logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
   }
 
-  logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${files.length} 个文件）`);
+  logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${files.length - skipped.length} 个文件，跳过 ${skipped.length}）`);
 
   // 2) Phase 2~5
   const TOTAL = 5;
@@ -331,7 +333,7 @@ export async function handleDirectImport(
     }
   } catch { /* 写入失败不阻断 */ }
 
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  errors=${vectorizeResult.errors.length}`);
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}`);
 
   return {
     ok: true,
@@ -342,6 +344,7 @@ export async function handleDirectImport(
       total: entries.length,
       vectorized: mergedMap.size,
       errors: vectorizeResult.errors.length,
+      skipped: skipped.length,
     },
     errors: vectorizeResult.errors,
     groups: [...kbResult.groups].sort(),

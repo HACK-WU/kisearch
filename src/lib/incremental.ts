@@ -285,7 +285,8 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     logProgress(diff.deleted.indexOf(entry) + 1, diff.deleted.length, `[delete] ${entry.path}`);
     const ids = entry.memoryIds && entry.memoryIds.length > 0 ? entry.memoryIds : (entry.memoryId ? [entry.memoryId] : []);
     if (ids.length === 0) {
-      errors.push({ path: entry.path, error: 'deleted 文件未关联任何 memoryId（可能未导入过或 cache 缺失）' });
+      // 文件从未导入（或 cache 无关联）：无事可做，降级为信息提示而非 error（体验修复 P2）
+      logWarn(`[delete skip] ${entry.path} 未关联 memoryId（文件可能从未成功导入），跳过删除`);
       continue;
     }
     // 1) 删除全部 chunk 向量
@@ -328,7 +329,11 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     }
     const stat = fs.statSync(absPath);
     if (stat.size > maxFileSizeBytes) {
-      logWarn(`文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}）：${e.path}`);
+      // 记入 errors：commit 仍推进（防永久卡死），但用户可见该文件未同步（旧数据保留）
+      errors.push({
+        path: e.path,
+        error: `文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}），旧数据保留。可手动切分后导入`,
+      });
       continue;
     }
 
