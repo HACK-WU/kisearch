@@ -12,6 +12,7 @@ export function registerSyncRelationTool(server: McpServer): void {
       group: z.string().describe('Group 路径（支持 / 层级嵌套）'),
       relation: z.string().describe('Relation 名称'),
       module_info: z.string().describe('本地 KB Markdown 内容'),
+      vector: z.boolean().optional().default(true).describe('是否写入向量层（ki-search/ki-relation）。false=非向量化：仅写 KB 层（不产生 memoryId，无法被 ki search 召回）'),
     },
     async (args) => {
       try {
@@ -21,6 +22,7 @@ export function registerSyncRelationTool(server: McpServer): void {
             group: args.group,
             relation: args.relation,
             moduleInfo: args.module_info,
+            vector: args.vector,
           }),
           TOOL_TIMEOUT.WRITE,
           'ki_sync_relation'

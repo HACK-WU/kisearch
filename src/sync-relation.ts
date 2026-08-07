@@ -220,7 +220,8 @@ function syncSingleRelation(
 
 function syncBatch(
   scope: string,
-  inputFile: string
+  inputFile: string,
+  vector = true
 ): void {
   if (!fs.existsSync(inputFile)) {
     output({ ok: false, error: `输入文件不存在：${inputFile}` });
@@ -308,6 +309,8 @@ function syncBatch(
     results,
     total: items.length,
     failed,
+    // 非向量化模式透出：批量模式当前不做向量写入；--no-vector 时明确标注（供调用方感知）
+    ...(vector === false ? { vector: false, vectorNote: '非向量化模式（--no-vector），仅写 KB 层' } : {}),
   });
 }
 
@@ -318,6 +321,8 @@ export interface SyncRelationParams {
   group: string;
   relation: string;
   moduleInfo: string;
+  /** 是否写入向量层（ki-search / ki-relation）。false = 非向量化（仅 KB 层，不产生 memoryId） */
+  vector?: boolean;
 }
 
 export type SyncRelationResult =
@@ -442,7 +447,10 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
     // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，
     // 但把写入结果透出到返回值（vectorStored/vectorReason），避免部分写入被静默吞掉。
-    const vec = await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath });
+    // 非向量化模式（vector=false）：跳过 embed 与 memoryId 回写，仅 KB 层。
+    const vec = params.vector === false
+      ? { stored: false, reason: '非向量化模式（--no-vector），跳过向量写入，无 memoryId' }
+      : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath });
 
     // Wiki 写回（容错，失败不阻塞）
     let wikiSynced: boolean | undefined;
@@ -490,6 +498,7 @@ program
   .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')
+  .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB + Wiki），不写向量（不产生 memoryId，无法被 ki search 召回）')
   .action(async (opts) => {
     // REQ-10：超长 module-info（>1000 字符）输出警告，不自动切分（保持单条关系语义）
     if (opts.moduleInfo && opts.moduleInfo.length > 1000) {
@@ -498,6 +507,8 @@ program
         `超长内容可能导致向量质量稀释；建议拆分多条写入，或改用 "scan-kb import --source <dir>" 自动切分导入。`
       );
     }
+    // 非向量化模式（--no-vector → opts.vector=false）
+    const vector = opts.vector !== false;
     // 批量模式
     if (opts.input) {
       try {
@@ -505,7 +516,7 @@ program
         const scope = resolveScope(loadConfig(), opts.scope);
         validateScope(scope);
         ensureScopeDir(scope);
-        syncBatch(scope, opts.input);
+        syncBatch(scope, opts.input, vector);
       } catch (err) {
         output({ ok: false, error: (err as Error).message });
         process.exit(1);
@@ -519,6 +530,7 @@ program
       group: opts.group || '',
       relation: opts.relation || '',
       moduleInfo: opts.moduleInfo || '',
+      vector,
     });
 
     if (result.ok) {

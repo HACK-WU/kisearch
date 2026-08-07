@@ -235,6 +235,47 @@ openclaw memory-pro stats
 
 ---
 
+## [需求] sync_relation 非向量化模式（--no-vector / vector:false）2026-08-07
+
+### 需求确认（对话确认 3 点，未落盘 REQ 条目）
+
+- **需求**：`sync_relation` 支持非向量化（仅写 KB 层，省 embedding 成本）
+- **决策 1**：非向量化时 memoryId 为空 ✅
+- **决策 2**：非向量化写入不可被 `ki search` 召回（仅 query-group/get-module-info 可访问）✅
+- **决策 3**：单条 + 批量均支持 ✅
+
+### 已实施（src/sync-relation.ts + src/lib/mcp-tools/sync-relation.ts + docs/cli.md）
+
+- CLI：`ki sync-relation --no-vector`（commander `.option('--no-vector')` → `opts.vector=false`）
+- 单条：`executeSyncRelation` 加 `vector?: boolean`（默认 true）；false 时跳过 `vectorWriteBack`，返回 `vectorStored:false` + `vectorReason`
+- 批量：`syncBatch(scope, input, vector)` 透传，输出标注 `vector:false` + `vectorNote`
+- MCP：`ki_sync_relation` schema 加 `vector: boolean`（默认 true），与 CLI 同一执行函数
+- 类型：`SyncRelationParams.vector`
+
+### 验证
+
+- 单条非向量化：vectorStored:false + 原因；cache memoryId=None；local KB 已写入
+- 批量非向量化：vector:false + note
+- 不可被 search 召回（0 命中，预期）
+- sync-relation 11/11、lint 零错误
+
+### 审查结论（code-review A- + challenger）
+
+- 无阻塞项；M1：**批量模式本就不做向量写入（历史现状），`--no-vector` 仅作显式声明**（已文档标注）
+- M2：delete-relation 对非向量化关系返回"未删除"易困惑（范围外增强，未改）
+- 该需求**未落盘 REQ 条目**，待补
+
+---
+
+## [记录] Commit 基线 2026-08-07
+
+- **当前 HEAD（体验修复前基线）**：`2548d73c3e60266803bf3f43fb41facddc0cc711`（fix(diff): 增量无git报错补充引导提示 + E2E旅程与质疑报告）
+- 前置提交：`25af078`（CLI规范化 + P-7 + 批次5配套）、`b778074`（批次4）、`b6f8ea9`（批次3）、`3d68c45`（批次0-2）
+- **未提交改动（体验修复，待提交）**：`src/lib/import.ts`（stats.skipped）、`src/lib/incremental.ts`（P1 超大文件 errors + P2 删除降级）、`tests/e2e/experience/`（体验资产）
+- 另有可视化前端 demo 改动（`.requirements/2026-08-06-可视化前端界面/demo/`）未提交
+
+---
+
 ## [需求] CLI命令迁移与规范化（REQ-20260806-002，已完成） 2026-08-07
 
 ### 需求落盘

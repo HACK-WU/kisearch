@@ -775,6 +775,17 @@ ki sync-relation \
 
 > **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `scan-kb import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
+> **非向量化模式（`--no-vector`）**：仅写 KB 层（relations-cache + local KB + Wiki 写回），**跳过向量写入**——不调用 embedding API、不产生 `memoryId`，写入的关系**无法被 `ki search` 召回**（只能通过 `query-group` / `get-module-info` 访问）。单条与批量模式均支持（**注：批量模式当前本就不做向量写入（历史现状），`--no-vector` 仅作显式声明**）：
+> ```bash
+> # 单条非向量化
+> ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --no-vector
+> # 批量非向量化
+> ki sync-relation -s <scope> -i batch.json --no-vector
+> ```
+> 单条模式返回值 `vectorStored: false` + `vectorReason` 说明；批量模式返回 `vector: false` 标注。
+>
+> **MCP 工具 `ki_sync_relation` 同样支持**：入参 `vector: boolean`（默认 `true`），传 `false` 即非向量化——CLI 与 MCP 行为一致。
+
 **示例：写入单条知识**
 
 ```bash
