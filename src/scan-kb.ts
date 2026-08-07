@@ -46,6 +46,7 @@ program
   .option('--root-name <rootName>', '导入根节点名称（全量直导必填）')
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000，全量直导专用；增量复用 source 块持久化值）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150，全量直导专用）')
+  .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB），不写向量（不产生 memoryId，无法被 ki search 召回）')
   .action(async (opts) => {
     try {
       const scope = resolveScope(loadConfig(), opts.scope);
@@ -60,6 +61,7 @@ program
       const rootName = opts.rootName ? String(opts.rootName).trim() : '';
       const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
       const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
+      const vector = opts.vector !== false;
 
       // CLI-07：--root-name 语义统一——full 模式必填（前置校验），incremental 忽略
       if (mode === 'full' && !rootName) {
@@ -69,8 +71,8 @@ program
 
       const result =
         mode === 'full'
-          ? await handleDirectImport({ scope, sourceDir, rootName, chunkSize, chunkOverlap })
-          : await handleIncrementalDirect({ scope, sourceDir, chunkSize, chunkOverlap });
+          ? await handleDirectImport({ scope, sourceDir, rootName, chunkSize, chunkOverlap, vector })
+          : await handleIncrementalDirect({ scope, sourceDir, chunkSize, chunkOverlap, vector });
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
 

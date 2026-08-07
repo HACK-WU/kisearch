@@ -114,7 +114,7 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 | `batch-vectorize.ts` | `vectorizeOne` / `bulkVectorize` → engine.insert `tags: 'ki-search'` | scan-kb 导入的文档内容向量 |
 | `sync-relation.ts` | `engine.upsert({ tags: 'ki-search' })` | 容错双写 moduleInfo |
 | `store.ts` | `engine.insert({ tags: 'ki-search' })` | `ki store` CLI 手动写入 |
-| `bulk-store.ts` | `engine.insert({ tags: 'ki-search' })` | `ki bulk_store` CLI 手动批量写入 |
+| `bulk-store.ts` | `engine.insert({ tags: 'ki-search' })` | `ki bulk-store` CLI 手动批量写入 |
 | `mcp-tools/store.ts` | `engine.insert({ tags: 'ki-search' })` | MCP ki_store 工具 |
 
 > 注意：写入时必须显式传 `tags: 'ki-search'`，确保 metadata 字段正确，避免标签污染。

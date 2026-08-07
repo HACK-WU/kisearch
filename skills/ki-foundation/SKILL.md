@@ -153,13 +153,12 @@ input: { scope, input: "/path/to/batch-data.json" }
 
 ---
 
-## 6. Keywords 规则
+## 6. 写入约束
 
 `ki_sync_relation` 写入时：
 
-- 必须是**自然语言词汇**，禁止代码符号
-- 必须真实出现在 `module_info` 原文中
-- 3~5 个为宜
+- `--module-info` 为 Markdown 原文，超过 1000 字符时输出拆分警告（建议改用 `scan-kb import --source` 自动切分）
+- 支持 `--no-vector` 非向量化模式：仅写 KB 层，不产生 memoryId、不可被 `ki search` 召回
 
 ---
 

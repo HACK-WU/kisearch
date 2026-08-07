@@ -238,7 +238,7 @@ ki get-module-info --scope ${scope} --group "目标Group路径" --relation "Rela
 
 `memory_recall` 命中后，`details.memories[].text` 为内容文本（直导后为原文 / chunk）。Agent 回写时：
 
-1. **定位**：根据命中结果的 `group`/`relation`/`sourcePath` 字段（或内容上下文）确定 Group 与 Relation 名称；无法解析则跳过回写，直接基于内容回答。
+1. **定位**：根据命中结果的 `group`/`relation` 字段（或内容上下文）确定 Group 与 Relation 名称；无法解析则跳过回写，直接基于内容回答。
 2. **回写本地**：执行 `ki sync-relation` 将内容沉淀到本地索引，提升后续查询效率。
 3. **提炼回答**：基于内容回答用户问题。
 

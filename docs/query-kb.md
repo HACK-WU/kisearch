@@ -62,19 +62,17 @@
    > 💡 **向量兜底**：若 Group 路径不精确，CLI 会自动通过向量搜索模糊匹配（如 `"部署运维"` 可匹配 `"部署与运维"`），输出带 `💡 近似匹配` 前缀。Agent 看到此提示即可确认匹配成功，无需人工修正路径。
 
    输出示例：
-   ```json
-   {
-     "group": "项目/API",
-    "hot_relations": [
-      { "id": "rel_001", "text": "用户登录", "score": 8.5 },
-      { "id": "rel_002", "text": "API文档", "score": 7.2 }
-    ]
-   }
+   ```
+   === 项目/API ===
+
+   🔥 热门知识 (Top 5):
+   ├── 用户登录接口 (score: 8.5) [热]
+   ├── 数据查询接口 (score: 6.2) [热]
    ```
 
 2. **匹配 Relation**
-   - 从 `hot_relations` 中选择与用户问题最匹配的 Relation
-   - 匹配依据：`text` 字段语义相似度
+   - 从输出的 Relation 列表中选择与用户问题最匹配的 Relation
+   - 匹配依据：Relation 名称语义相似度
 
 3. **获取模块信息**
    ```bash
@@ -104,7 +102,7 @@
    ```
    
    输出包含：
-   - 命中的 `relation` / `group` / `sourcePath`（原文定位字段）
+   - 命中的 `relation` / `group`（原文定位字段，按 memoryId 反查 relations-cache）
    - `content`（原文全文 / chunk）
 
 2. **定位原文**

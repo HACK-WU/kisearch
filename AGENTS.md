@@ -410,3 +410,66 @@ openclaw memory-pro stats
 
 ---
 执行cli  测试时，必须设置超时时间，防止一直被挂着。无法退出。
+
+---
+
+## [需求] 向量库导入中断防护与自愈（REQ-20260807-001，草案） 2026-08-07
+
+### 需求落盘
+
+- 需求文档：`.requirements/2026-08-07-向量库导入中断防护与自愈/requirement.md`（REQ-20260807-001，status: 草案，tags: fix,vector）
+- meta.json 索引已更新（`req create` 创建，独立需求，无父需求）
+
+### 背景（事故复盘）
+
+- 现象：`scan-kb import` 向量化阶段被中断（Ctrl+C/kill）后，`ki doc list -s monitor` 触发 zvec 原生日志刷屏：
+  - `ForwardBlock/Index file already exists (possible crash residue); cleaning and overwriting`
+  - `Failed to put [docId, N] into IDMap[.../idmap.0], code[3], Not supported operation in read only mode`（被中断批次 docId 300~2601 全部失败）
+- 根因链：`probe()` 以 `readOnly:true` 打开集合（`engine.ts:171`）撞上 zvec"打开即 recovery"行为（需写 idmap）→ 只读拒绝 → ERROR 刷屏；full 直导不写 progress/state 文件、无 SIGINT 处理 → 中断无法识别与自愈
+- 数据风险：被中断批次"索引文件已重建、idmap 未登记"→ 检索/计数/删除可能遗漏（`doc list` 仍返回 `ok:true`，具误导性）
+
+### 需求条目
+
+- REQ-01 导入中断安全收尾：`scan-kb import` 捕获 SIGINT/SIGTERM，写"导入中断"状态标记 + 明确提示
+- REQ-02 中断标记检测与恢复引导：`getEngine` 前置检测中断标记 + probe 异常 → 引导 `rebuild-vector` / `restore --rebuild-vector`
+- REQ-03 probe 异常提示增强：`lockedHint` 补"崩溃残留可重建"恢复引导
+- REQ-04 中断恢复测试：kill -9 模拟中断 → 引导提示 + 重建后召回完整
+- REQ-05 导入进度可观测性（v2 合并 artifact-optimizer O-01/02/03/05）：
+  - O-01 切分进度分母错误（`import.ts:226` `files.length*10` 超 100%，实测 `1444/1430`）→ 按文件数/总 chunk 数做分母
+  - O-02 并行进度条冲突（`import.ts:269-300` `Promise.all` 双 `\r` 进度条互相覆盖，用户看不到向量化进度）→ 串行或分区显示
+  - O-03 向量化无中间进度（`bulkVectorize` 单次提交全部）→ 分批（200 条/批）+ 批间 `logProgress`
+  - O-05 非 TTY 进度退化（`progress.ts:145` `\r` 仅 TTY 有效）→ 检测 `process.stderr.isTTY` 降级逐行
+- REQ-06 向量化前数据清洗（v2 合并 O-04）：剥离 UTF-8 BOM + YAML frontmatter + 折叠连续空行 + 过滤空 chunk（`--no-clean` 逃生阀，默认开启）
+  - 现状：`readFileToChunks`（`import.ts:158-161`）直接读原文切分，frontmatter/BOM/空 chunk 入向量污染检索
+
+### 关键认知
+
+- zvec 写入非原子（segment 文件与 idmap 分离），中断必然留 residue；**只读 probe 也会触发 recovery**（`engine.ts:171` 是事故直接触发的代码点）
+- zvec 原生日志无法低成本拦截（worker_threads 直写 stderr），ki 侧只能做"检测-提示-自愈"闭环
+- 临时恢复路径（事故现场可用）：`ki restore monitor --from-snapshot --rebuild-vector` 或 `rebuild-vector`
+- 待办：本需求已落盘待确认；与此前 artifact-optimizer 的 O-01（进度分母）/O-04（数据清洗）属不同需求，未合并
+
+---
+
+## [需求] scan-kb import 支持 --no-vector 非向量化 2026-08-07
+
+### 需求背景
+
+- 用户发现 `scan-kb import` 无 `--no-vector`（`sync-relation` 已有），期望 import 也支持非向量化（省 embedding 成本，仅写 KB 层）
+
+### 已实施（src/scan-kb.ts + src/lib/import.ts + src/lib/incremental.ts + docs/cli.md + docs/scan-kb.md）
+
+- CLI：import 子命令加 `.option('--no-vector')` → `opts.vector !== false`，full/incremental 均透传
+- full（`handleDirectImport`）：`args.vector?: boolean`（默认 true）；false 时 Promise.all 向量化分支直接返回空结果（跳过 `bulkVectorize` + `bulkStorePaths`），memoryMap 为空 → relations-cache memoryId 保持 null；`ImportStats` 加 `vector: boolean`；summary 加 `[非向量化:仅写KB层]` 标注
+- incremental（`handleIncrementalDirect`）：`vector=false` 时跳过向量写入（bulkVectorize/路径向量）、向量删除（deleteMemory/deletePathVector）；upsertRelation 传 memoryId=undefined 不覆盖旧值；modified 判定改 `vector ? okIds.length > 0 : true`（非向量化时 KB 层成功即算成功）；`IncrementalStats` 加 `vector`
+- 决策与 sync-relation 非向量化一致：memoryId 为空、不可被 `ki search` 召回、仅 query-group/get-module-info 可访问
+
+### 验证
+
+- full 端到端（独立 config + 2 文件 wiki）：`vectorized=0`、`stats.vector=false`、`vector/` 目录完全不创建、query-group KB 层正常
+- incremental-direct 3/3 全绿；lint 零错误
+- 边界：非向量化增量时旧向量不删（混用向量/非向量模式属边界场景，文档已标注）
+
+### 待办
+
+- [ ] 该需求未落盘 REQ 条目（与 REQ-20260807-001 同源，如需可并入）

@@ -109,7 +109,7 @@ provider:
      scope: "${scope}-memory",
      group: "最近需求",
      relation: "[YYYY-MM-DD] 需求描述（详细）",
-     keywords: ["关键词1", "关键词2"]
+     module_info: "<需求详细描述 Markdown>"
    )
 ③ 写入 AGENTS.md（简要）：
    在"近期工作"章节追加：

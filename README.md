@@ -58,14 +58,14 @@
 | 维度 | 常规 RAG | KiSearch |
 |------|---------|----------|
 | **知识组织** | 无序 chunk，无层级关系 | Group 树 + Relation 结构化索引，知识有归属有层级 |
-| **检索结果** | chunk 片段（可能断裂、缺上下文） | 原文全文（`isFullText=true` 时可直接引用） |
+| **检索结果** | chunk 片段（可能断裂、缺上下文） | 原文全文（命中时可直接引用原文） |
 | **查询路径** | 仅语义检索一条路（模糊召回） | **双路径**：已知索引时**直接精准查询原文**（100% 命中、无向量噪声）；未知时语义检索兜底 |
 | **检索精准度** | 语义模糊匹配，存在噪声 | 索引直查**精准命中**原文（零误差）；语义检索有 memoryId 反查定位兜底 |
-| **原文定位** | 黑盒召回，不知结果来自哪 | 每条结果带 `group` / `relation` / `keywords` / `isFullText`，可定位到原文出处 |
+| **原文定位** | 黑盒召回，不知结果来自哪 | 每条结果带 `group` / `relation` 定位字段，可定位到原文出处 |
 | **符号检索** | 弱（纯语义向量，camelCase 难匹配） | BM25 全文路支持类名 / 方法名精确召回 |
 | **状态管理** | 无状态，每次检索平等 | 冷热治理 + 评分衰减 + 使用计数，热点 Relation 优先 |
 | **跨会话** | 一次性检索，无积累 | 长期记忆库，Agent 沉淀的知识持续积累 |
-| **写入校验** | 无约束，随意写入 | 关键词校验 + scope 隔离 + isFullText 标记 + WAL 原子写入 |
+| **写入校验** | 无约束，随意写入 | scope 隔离 + WAL 原子写入 + 幂等覆盖更新 |
 
 > **一句话**：常规 RAG 解决"搜得到"，KiSearch 同时解决"搜得到 + 看得见 + 定位到原文"。
 
@@ -75,9 +75,8 @@
 |------|------|
 | `scope` | 项目隔离标识，不同 scope 物理隔离（`scopeMode: default` 自动创建 / `strict` 需注册） |
 | `Group` | 知识分组路径，如 `项目/告警系统设计/告警处理服务` |
-| `Relation` | 某个 Group 下可被检索和命中的知识条目（含 memoryId / isFullText / sourcePath） |
+| `Relation` | 某个 Group 下可被检索和命中的知识条目（含 memoryId / sourcePath） |
 | `module-info` | Relation 对应的 Markdown 原文说明 |
-| `isFullText` | 内容是否原文全文（`true` = 可作原文引用；`false` = AI 摘要，需按 group/relation 定位原文） |
 | 标签（Tag） | `ki-search`（内容）/ `ki-path`（路径）/ `ki-relation`（关系）三层标签 |
 | 记忆库 | 跨会话持续积累的知识，带评分衰减与冷热治理 |
 
@@ -86,12 +85,12 @@
 - **结构化知识索引**：Group 树导航、Relation 热缓存、关键词词云 —— 不是无序 chunk
 - **混合检索（Hybrid）**：语义向量 + BM25 全文 + RRF 融合排序；camelCase 符号（类名/方法名）可精确召回
 - **双路径查询**：索引直查（已知路径 → 原文）+ 语义检索（自然语言 → 向量 → 反查原文）
-- **原文交付**：search 结果按 memoryId 反查定位（group / relation / keywords / isFullText），交付原文全文而非片段
+- **原文交付**：search 结果按 memoryId 反查定位（group / relation），交付原文全文而非片段
 - **三层标签**：`ki-search` / `ki-relation` / `ki-path`，按需过滤提升准确率；默认搜全部且按标签限流（内容优先）
 - **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
 - **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
-- **CLI + MCP 双通道**：21 个 CLI 命令；`ki mcp` 暴露 11 个 MCP 工具（stdio / HTTP 共享单例）
-- **零破坏性 MCP**：工具集不含 delete/force 类危险操作，Agent 侧可安全调用
+- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 11 个 MCP 工具（stdio / HTTP 共享单例）
+- **MCP 安全约束**：工具集不含 scope / doc 级破坏性操作，仅 `ki_delete_relation` 可按 Group+Relation 删除单条知识条目
 
 ## <a id="quickstart"></a>🚀 快速开始
 
@@ -139,8 +138,7 @@ ki sync-relation \
   --scope my-project \
   --group "我的项目/API" \
   --relation "用户登录接口" \
-  --module-info "## 登录流程\n用户输入账号密码进入认证流程，服务端校验成功后返回 token。" \
-  --keywords "登录,认证,token"
+  --module-info "## 登录流程\n用户输入账号密码进入认证流程，服务端校验成功后返回 token。"
 
 # 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
@@ -154,25 +152,23 @@ ki get-module-info --scope my-project --group "我的项目/API" --relation "用
 
 | 命令 | 说明 |
 |------|------|
-| `scan-kb` | 外部知识库导入统一入口：import / diff / scan / vectorize |
+| `scan-kb` | 外部知识库导入统一入口：import（原文直导/增量直连，支持 `--no-vector` 非向量化）/ diff |
 | `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
-| `query-group` | 查询 Group + 词云 + 分区（索引直查 · 支持模糊路径语义兜底） |
+| `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
-| `sync-relation` | 写入 Relation + 关键词校验（向量 + KB 双写） |
+| `sync-relation` | 写入 Relation + 本地 KB（向量 + KB 双写，支持 `--no-vector`） |
 | `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
 | `search` | 语义检索（zvec 混合检索，输出含原文定位字段） |
 | `store` | 向量化存储单条知识 |
-| `bulk_store` | 批量向量化存储知识 |
+| `bulk-store` | 批量向量化存储知识 |
 | `scope` | scope 管理：list / delete / clear（KB + 向量两层） |
 | `doc` | 向量文档管理：list / delete |
 | `tag` | 向量 tag 发现：list（只读，含文档数） |
 | `config` | 配置管理：init（生成 YAML） |
 | `doctor` | 配置诊断（apiKey / 连通性 / 维度 / 目录） |
 | `backup` | 备份 scope 目录快照 |
-| `restore` | 从快照或 ai-results 还原 |
+| `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`） |
 | `export` | 导出 KB 为 Wiki Markdown |
-| `import-kb` | @deprecated 旧导入（建议改用 scan-kb import） |
-| `migrate-keywords` | 关键词数据迁移 |
 | `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
 | `setup` | 下载 Skills / Rules 到目标项目目录 |
 
@@ -218,7 +214,7 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 | `ki_manage_index_list` | 列出所有 scope | — |
 | `ki_sync_relation` | 写入 Relation + 关键词（向量 + KB 双写） | 写入 |
 | `ki_delete_relation` | 删除 Relation（四层清理） | — |
-| `ki_search` | 语义检索，输出 group/relation/keywords/isFullText | 语义检索 |
+| `ki_search` | 语义检索，输出 group/relation 定位字段 | 语义检索 |
 | `ki_store` | 向量化存储单条知识 | 写入 |
 | `ki_bulk_store` | 批量向量化存储知识 | 写入 |
 | `ki_scope_list` | 列出 scope 及其 KB/向量状态 | — |

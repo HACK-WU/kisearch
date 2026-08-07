@@ -22,7 +22,8 @@ ki scan-kb import \
   --source /path/to/wiki \
   --root-name QoderWiki \
   [--chunk-size 1000] \
-  [--chunk-overlap 150]
+  [--chunk-overlap 150] \
+  [--no-vector]
 ```
 
 | 参数 | 必填 | 说明 |
@@ -32,8 +33,9 @@ ki scan-kb import \
 | `--root-name` | 是（full） | 根 Group 名 |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回） |
 
-内部 5 阶段流水线：收集 .md → 切分 → 批量 zvec 向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）+ `group-index.source` 块记录（含 git HEAD commit 与切分参数）。
+内部 5 阶段流水线：收集 .md → 切分 → 批量 zvec 向量化 → Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）+ `group-index.source` 块记录（含 git HEAD commit 与切分参数）。`--no-vector` 时跳过向量化阶段（memoryId 为空）。
 
 **自动切分**（REQ-01/02/03）：大文件递归字符切分，边界优先 `\n\n > \n > 。 > ； > 硬切`；relation 命名为 `文件名-N`（如 `deploy-01`）；sourcePath 为 `文件路径#N`（文件级 diff 前缀聚合键）。切分参数持久化到 source 块（H-18）。
 

@@ -212,12 +212,12 @@ ki query-group --scope <scope>
 
 **输出**：
 ```
-设计文档/
-  API/
-    [hot] 用户登录 (score: 8.5) [登录, 认证]
-    [hot] 用户注册 (score: 7.2) [注册, 验证]
-  knowledge-index/
-    [hot] 01-overview (score: 6.0) [概述, 架构]
+=== 知识索引 [scope: my-project] ===
+
+🔥 热门索引 (Top 5):
+├── 项目/API (score: 8.5) [热]
+├── 项目/前端/状态管理 (score: 6.2) [热]
+└── 项目/文档/README (score: 1.5) [冷]
 ```
 
 ### 完整索引树
@@ -228,12 +228,16 @@ ki query-group --scope <scope> --mode full
 
 **输出**（含评分和分区标签）：
 ```
+=== 知识索引 [scope: my-project] ===
+
 📁 完整索引树:
-  设计文档/ (score: 13.2) [热]
-    API/ (score: 7.2) [热]
-      [热] 用户登录 (score: 8.5) [登录, 认证]
-    knowledge-index/ (score: 6.0) [常温]
-      [热] 01-overview (score: 6.0) [概述, 架构]
+我的项目/ (score: 25.2) [热]
+├── API/ (score: 15.5) [热]
+│   └── 用户管理/ (score: 8.5) [热]
+└── 部署/ (score: 3.2) [常温]
+
+📊 统计信息:
+- 总索引数: 15
 ```
 
 ### 指定 Group 的 Relations
@@ -243,13 +247,12 @@ ki query-group --scope <scope> --groups <group>
 ```
 
 **输出**：
-```json
-{
-  "group": "设计文档/API",
-  "hot_relations": [
-    { "id": "rel_001", "text": "用户登录", "score": 8.5 }
-  ]
-}
+```
+=== 设计文档/API ===
+
+🔥 热门知识 (Top 5):
+├── 用户登录 (score: 8.5) [热]
+└── 用户注册 (score: 7.2) [热]
 ```
 
 ---

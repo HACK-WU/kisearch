@@ -147,25 +147,13 @@ ki scan-kb import \
 
 ## 工作流五：外部知识库导入（旧 7 步流程，仍可用）
 
-> 旧流程保留兼容，建议迁移到 `scan-kb import`。
+> 旧流程（ai-results 契约）已随批次 3 删除，仅保留 `scan-kb import --source` 原文直导。
 
 ```text
-scan
-  ↓
-AI 生成摘要与关键词
-  ↓
-scan --results
-  ↓
-vectorize
-  ↓
-memory_store
-  ↓
-vectorize --complete
-  ↓
-import-kb
+（旧流程已删除：scan / scan --results / vectorize / import-kb / migrate-keywords）
 ```
 
-详细步骤见旧版文档。
+迁移路径：首次全量 `scan-kb import --source <dir> --root-name <name>`；增量 `scan-kb import --source <dir> --mode incremental`。
 
 ---
 
@@ -173,7 +161,7 @@ import-kb
 
 - **`scan-kb diff` 返回 `status: 'first_import'`**：说明尚未首次导入
 - **`scan-kb import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
-- **`scan-kb import` 报 `必须二选一：--results 或 --source`**：导入参数未指定正确模式
+- **`scan-kb import` 报 `--source 目录不存在或不是目录`**：确认 `--source` 指向的 Markdown 目录存在
 - **`scan-kb import --mode incremental` 报 `source 目录不在 git 仓库中`**：增量依赖 git，需 `git init` 或用 `--mode full`
 - **增量 diff 返回 0 变更**：文件可能未 git commit，或 `source.commit` 已是最新
 

@@ -47,18 +47,16 @@ ki query-group --scope <scope> --groups <group>
 
 **预期结果**：
 - 显示 Group 下的 Relation 列表
-- 包含评分和关键词信息
+- 包含评分信息
 - 热门 Relation 正确标记
 
 **示例输出**：
-```json
-{
-  "group": "设计文档/API",
-  "hot_relations": [
-    { "id": "rel_001", "text": "用户登录", "score": 8.5 },
-    { "id": "rel_002", "text": "API文档", "score": 7.2 }
-  ]
-}
+```
+=== 设计文档/API ===
+
+🔥 热门知识 (Top 5):
+├── 用户登录 (score: 8.5) [热]
+├── API文档 (score: 7.2) [热]
 ```
 
 ### 3. 本地 KB 验证

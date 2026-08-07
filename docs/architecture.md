@@ -38,7 +38,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     GI["group-index.json<br/>Group 树索引 + source 块"]
-    RC["relations-cache.json<br/>Relation 缓存 / 关键词 / 分区<br/>（含 memoryId / sourcePath）"]
+    RC["relations-cache.json<br/>Relation 缓存 / 分区<br/>（含 memoryId / sourcePath）"]
     KB["kb/<scope>/<group>/index.json<br/>本地 KB 原文"]
     SI["scan-index.json<br/>[旧流程] 外部知识库扫描状态账本"]
     SP["scan-pending.json<br/>[旧流程] 扫描断点（临时）"]
@@ -56,7 +56,7 @@ flowchart LR
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir`/`rootName`/`commit`） | 所有脚本读写 | 永久，随 Group 增删改 |
 | `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryId`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
-| `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb / import-kb 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
+| `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
 | `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |
 
 ### `group-index.json` 的 `source` 块
@@ -105,7 +105,7 @@ S-04 新增的关联字段，写入 `hot_relations` 每条 relation 中：
 
 | 写入脚本 | key 来源 | 示例 |
 |---------|---------|------|
-| `import-kb.ts` / `scan-kb import` | 文件名去 `.md` 扩展名 | `"多项目隔离"` |
+| `scan-kb import` | 文件名去 `.md` 扩展名 | `"多项目隔离"` |
 | `sync-relation.ts` | `--relation` 参数原文 | `"标签系统"` |
 
 ## 运行时主链路

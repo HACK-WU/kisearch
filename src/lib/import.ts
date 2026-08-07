@@ -78,6 +78,8 @@ export interface ImportStats {
   errors: number;
   /** 被跳过的文件数（过大 / chunk 超限），结构化输出可观测（体验修复） */
   skipped: number;
+  /** 是否写入向量层（false = 非向量化模式 --no-vector，仅 KB 层） */
+  vector: boolean;
 }
 
 export interface ImportResult {
@@ -103,6 +105,8 @@ export interface HandleDirectImportArgs {
   chunkOverlap?: number;
   /** 单文件大小上限（字节），超限跳过并告警；默认 2MB */
   maxFileSizeBytes?: number;
+  /** 非向量化模式：仅写 KB 层（relations-cache + local KB），跳过向量写入；默认 true */
+  vector?: boolean;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -182,6 +186,7 @@ export async function handleDirectImport(
   const chunkSize = args.chunkSize ?? 1000;
   const chunkOverlap = args.chunkOverlap ?? 150;
   const maxFileSizeBytes = args.maxFileSizeBytes ?? 2 * 1024 * 1024;
+  const vector = args.vector !== false;
 
   if (!rootName) throw new Error('rootName 不能为空');
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
@@ -268,6 +273,10 @@ export async function handleDirectImport(
   // ── Phase 2（向量化）与 Phase 3/4（KB）并行 ──
   const [vectorizeResult, kbResult] = await Promise.all([
     (async () => {
+      // 非向量化模式（--no-vector）：跳过向量写入，memoryId 保持 null（与 sync-relation 决策一致）
+      if (!vector) {
+        return { ok: new Map<string, string>(), errors: [] };
+      }
       const vec = await bulkVectorize(entries, scope, {
         timeoutMs: 60_000 + entries.length * 10_000,
       });
@@ -333,7 +342,7 @@ export async function handleDirectImport(
     }
   } catch { /* 写入失败不阻断 */ }
 
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}`);
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}${vector ? '' : '  [非向量化:仅写KB层]'}`);
 
   return {
     ok: true,
@@ -345,6 +354,7 @@ export async function handleDirectImport(
       vectorized: mergedMap.size,
       errors: vectorizeResult.errors.length,
       skipped: skipped.length,
+      vector,
     },
     errors: vectorizeResult.errors,
     groups: [...kbResult.groups].sort(),

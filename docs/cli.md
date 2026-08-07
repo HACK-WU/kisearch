@@ -37,7 +37,8 @@ ki scan-kb import \
   --source <dir> \
   --root-name <name> \
   [--chunk-size <chars>] \
-  [--chunk-overlap <chars>]
+  [--chunk-overlap <chars>] \
+  [--no-vector]
 ```
 
 | 参数 | 必填 | 说明 |
@@ -47,6 +48,7 @@ ki scan-kb import \
 | `--root-name` | 是（full）/ 否（incremental） | 根 Group 名 |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
 
 **示例：首次全量导入**
 
@@ -870,9 +872,7 @@ ki sync-relation -s my-project -i batch-input.json
 
 ### 关键词约束
 
-- 关键词必须是自然语言词汇
-- 关键词必须真实出现在 `module-info` 原文中
-- 未出现在原文中的关键词会被判为无效
+> （已随批次 3 REQ-05 删除：`sync-relation` 不再接收 `--keywords`，关键词机制全链路移除。）
 
 ---
 
@@ -943,10 +943,14 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
+| `ki_search` | 读 | 语义检索（hybrid 混合检索，输出 group/relation 定位字段） | `search` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
-| `ki_sync_relation` | 写 | 写入 Relation + 模块说明 | `sync-relation` |
+| `ki_sync_relation` | 写 | 写入 Relation + 模块说明（可非向量化） | `sync-relation` |
+| `ki_store` | 写 | 向量化存储单条知识 | `store` |
+| `ki_bulk_store` | 写 | 批量向量化存储知识 | `bulk-store` |
+| `ki_delete_relation` | 写 | 删除 Relation（cache + KB + wiki + 向量四层清理） | `delete-relation` |
 
-> **零破坏性约束**：MCP 工具集不含 delete/force 操作。Agent 只能创建和查询，无法删除任何数据。
+> **安全约束**：MCP 工具集不含 scope / doc 级破坏性操作（无 `scope delete` / `doc delete` 等价物）；仅 `ki_delete_relation` 可按 Group + Relation 删除单条知识条目。
 
 ### MCP 客户端配置
 
@@ -1006,6 +1010,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `group` | string | 是 | Group 路径（支持 / 层级嵌套） |
 | `relation` | string | 是 | Relation 名称 |
 | `module_info` | string | 是 | 本地 KB Markdown 内容 |
+| `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层，无 memoryId、不可被 `ki_search` 召回） |
 
 #### `ki_manage_index_create`
 
@@ -1028,6 +1033,39 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default） |
+
+#### `ki_search`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内） |
+| `query` | string | 是 | — | 自然语言查询文本 |
+| `limit` | number | 否 | 10 | 返回条数上限 |
+| `threshold` | number | 否 | — | 相似度阈值（0-1，过滤低分命中） |
+| `tags` | string | 否 | — | 过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合） |
+
+#### `ki_store`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内） |
+| `text` | string | 是 | — | 待向量化文本 |
+| `tags` | string | 否 | `ki-search` | 逗号分隔 tags |
+
+#### `ki_bulk_store`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内） |
+| `input` | string | 是 | — | 批量数据 JSON 文件路径（数组：`[{ "text": "...", "tags": "..." }]`） |
+
+#### `ki_delete_relation`
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内） |
+| `group` | string | 是 | — | Group 路径（支持模糊匹配） |
+| `relation` | string | 是 | — | Relation 名称（精确匹配） |
 
 ---
 
@@ -1219,15 +1257,19 @@ ki backup my-project --list
 从快照还原 scope 数据。
 
 ```bash
-ki restore <scope>                           # 列出可用备份
+ki restore <scope> --list                  # 列出可用备份（显式 flag，与 backup --list 一致）
+ki restore <scope>                         # 列出可用备份（无参兼容）
 ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
+ki restore <scope> --from-snapshot --rebuild-vector   # 还原后重建向量（内容+关系+路径）
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `<scope>` | 项目隔离标识（必填） |
+| `--list` | 列出可用备份（显式 flag；无操作参数时默认同样列出） |
 | `--from-snapshot` | 从 tar.gz 快照覆盖还原（破坏性操作，需 `--yes` 确认） |
 | `--timestamp <ts>` | 指定快照 timestamp（可选，默认使用最新） |
+| `--rebuild-vector` | 还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path) |
 | `--backup-dir <dir>` | 指定备份根目录（默认用配置 backupDir） |
 | `--yes` | 跳过交互确认 |
 
@@ -1285,7 +1327,7 @@ ki restore my-project --from-snapshot --yes
 将 KB scope 中的结构化数据反向导出为 Markdown 文件目录。
 
 ```bash
-ki export <scope> --output <dir> [--root-name <name>]
+ki export <scope> --output <dir> [--root-name <name>] [--yes]
 ```
 
 | 参数 | 说明 |
@@ -1293,6 +1335,7 @@ ki export <scope> --output <dir> [--root-name <name>]
 | `<scope>` | 项目隔离标识（必填） |
 | `--output <dir>` | 输出目录（必填） |
 | `--root-name <name>` | 指定根节点名称（可选，默认导出所有） |
+| `--yes` | 输出目录已存在且非空时确认覆盖（缺省则拒绝并提示加 `--yes`） |
 
 **示例：导出 scope 为 Markdown**
 

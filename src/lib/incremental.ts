@@ -64,6 +64,8 @@ export interface IncrementalStats {
   modified: number;
   deleted: number;
   errors: number;
+  /** 是否写入向量层（false = 非向量化模式 --no-vector，仅 KB 层） */
+  vector: boolean;
 }
 
 export interface IncrementalResult extends Omit<ImportResult, 'mode' | 'stats'> {
@@ -206,6 +208,8 @@ export interface HandleIncrementalDirectArgs {
   chunkOverlap?: number;
   /** 单文件大小上限（字节），超限跳过并告警；默认 2MB */
   maxFileSizeBytes?: number;
+  /** 非向量化模式：仅写 KB 层（relations-cache + local KB），跳过向量写入与向量删除；默认 true */
+  vector?: boolean;
 }
 
 /**
@@ -252,6 +256,7 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
   const chunkSize = existingSource.chunkSize ?? args.chunkSize ?? 1000;
   const chunkOverlap = existingSource.chunkOverlap ?? args.chunkOverlap ?? 150;
   const maxFileSizeBytes = args.maxFileSizeBytes ?? 2 * 1024 * 1024;
+  const vector = args.vector !== false;
   const rootName = existingSource.rootName;
   logPhaseDone(1, TOTAL_PHASES, `校验通过（sourceDir=${sourceDir}，chunkSize=${chunkSize}，rootName=${rootName}）`);
 
@@ -289,11 +294,13 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
       logWarn(`[delete skip] ${entry.path} 未关联 memoryId（文件可能从未成功导入），跳过删除`);
       continue;
     }
-    // 1) 删除全部 chunk 向量
-    for (const id of ids) {
-      const del = await deleteMemory(id, args.scope, memOpts);
-      if (!del.ok) {
-        errors.push({ path: entry.path, error: `[delete warn] 向量删除失败 id=${id.slice(0, 8)}：${del.error}` });
+    // 1) 删除全部 chunk 向量（非向量化模式无向量，跳过）
+    if (vector) {
+      for (const id of ids) {
+        const del = await deleteMemory(id, args.scope, memOpts);
+        if (!del.ok) {
+          errors.push({ path: entry.path, error: `[delete warn] 向量删除失败 id=${id.slice(0, 8)}：${del.error}` });
+        }
       }
     }
     // 2) 清理 relations-cache + local KB（按文件前缀匹配 chunk sourcePath）
@@ -305,8 +312,10 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
         if (idx >= 0) groupData.hot_relations.splice(idx, 1);
         groupPaths.add(groupPath);
         removeFromLocalKb(args.scope, groupPath, rel.text);
-        // 删除 ki-relation 路径向量
-        await deletePathVector(buildRelationContent(rel.text, groupPath), 'ki-relation', args.scope);
+        // 删除 ki-relation 路径向量（非向量化模式无路径向量，跳过）
+        if (vector) {
+          await deletePathVector(buildRelationContent(rel.text, groupPath), 'ki-relation', args.scope);
+        }
       }
     }
     for (const gp of groupPaths) groupsTouched.add(gp);
@@ -353,51 +362,57 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     }
 
     // 先写新全 chunk（bulkVectorize + upsertRelation + local KB）
-    const vec = await bulkVectorize(entries, args.scope, {
-      timeoutMs: 60_000 + entries.length * 10_000,
-    });
+    // 非向量化模式（--no-vector）：跳过向量写入，memoryId 为空，仅 KB 层
+    const vec = vector
+      ? await bulkVectorize(entries, args.scope, { timeoutMs: 60_000 + entries.length * 10_000 })
+      : { ok: new Map<string, string>(), errors: [] };
     const okIds: string[] = [];
     for (let i = 0; i < entries.length; i++) {
       const en = entries[i];
-      const memoryId = vec.ok.get(en.path);
-      if (!memoryId) {
+      const memoryId = vector ? vec.ok.get(en.path) : undefined;
+      if (vector && !memoryId) {
         const err = vec.errors.find((er) => er.path === en.path);
         errors.push({ path: en.path, error: `[${isModify ? 'modify' : 'add'}] ${err?.error || '向量化失败'}` });
         continue;
       }
-      okIds.push(memoryId);
+      if (memoryId) okIds.push(memoryId);
       ensureGroupPathInTree(groupIndex, en.groupPath);
       groupsTouched.add(en.groupPath);
       upsertRelation(relationsCache, en.groupPath, en.chunkRelation || deriveRelationText(en.path), memoryId, en.path);
       writeLocalKb(args.scope, en.groupPath, en.chunkRelation || deriveRelationText(en.path), en.text);
     }
-    // 路径向量（ki-relation 每条 chunk + ki-path 每 group）
-    const pathEntries: PathVectorizeEntry[] = [];
-    const groupPathsOfFile = new Set(entries.map((x) => x.groupPath));
-    for (const en of entries) {
-      pathEntries.push({
-        text: buildRelationContent(en.chunkRelation || deriveRelationText(en.path), en.groupPath),
-        tag: 'ki-relation',
-        scope: args.scope,
-        group: en.groupPath,
-      });
-    }
-    for (const gp of groupPathsOfFile) {
-      pathEntries.push({ text: buildGroupPathContent(gp), tag: 'ki-path', scope: args.scope });
-    }
-    if (pathEntries.length > 0) {
-      await bulkStorePaths(pathEntries);
+    // 路径向量（ki-relation 每条 chunk + ki-path 每 group）——非向量化时跳过
+    if (vector) {
+      const pathEntries: PathVectorizeEntry[] = [];
+      const groupPathsOfFile = new Set(entries.map((x) => x.groupPath));
+      for (const en of entries) {
+        pathEntries.push({
+          text: buildRelationContent(en.chunkRelation || deriveRelationText(en.path), en.groupPath),
+          tag: 'ki-relation',
+          scope: args.scope,
+          group: en.groupPath,
+        });
+      }
+      for (const gp of groupPathsOfFile) {
+        pathEntries.push({ text: buildGroupPathContent(gp), tag: 'ki-path', scope: args.scope });
+      }
+      if (pathEntries.length > 0) {
+        await bulkStorePaths(pathEntries);
+      }
     }
 
     // modified：新 chunk 全部成功后，再删旧全 chunk（写序 D-3/质疑意见2）
     if (isModify) {
       const oldIds = e.memoryIds && e.memoryIds.length > 0 ? e.memoryIds : (e.memoryId ? [e.memoryId] : []);
-      if (okIds.length > 0) {
-        for (const oldId of oldIds) {
-          if (okIds.includes(oldId)) continue; // 新旧 id 相同（内容未变时）跳过
-          const del = await deleteMemory(oldId, args.scope, memOpts);
-          if (!del.ok) {
-            errors.push({ path: e.path, error: `[modify warn] 删旧向量失败 id=${oldId.slice(0, 8)}：${del.error}` });
+      if (vector ? okIds.length > 0 : true) {
+        // 删旧向量（非向量化模式无向量可删，跳过）
+        if (vector) {
+          for (const oldId of oldIds) {
+            if (okIds.includes(oldId)) continue; // 新旧 id 相同（内容未变时）跳过
+            const del = await deleteMemory(oldId, args.scope, memOpts);
+            if (!del.ok) {
+              errors.push({ path: e.path, error: `[modify warn] 删旧向量失败 id=${oldId.slice(0, 8)}：${del.error}` });
+            }
           }
         }
         // 清理旧 chunk 的 relations-cache / local KB / 路径向量（与 deleted 分支对齐）。
@@ -454,7 +469,7 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     action: 'import',
     mode: 'incremental',
     scope: args.scope,
-    stats: { total, added, modified, deleted, errors: errors.length },
+    stats: { total, added, modified, deleted, errors: errors.length, vector },
     errors,
     groups: [...groupsTouched].sort(),
     source: newSource,
