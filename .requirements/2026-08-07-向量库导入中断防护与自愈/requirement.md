@@ -4,7 +4,7 @@ feature: 向量库导入中断防护与自愈
 status: 草案
 created: 2026-08-07
 updated: 2026-08-07
-version: 2
+version: 4
 tags: [fix, vector]
 depends_on: []
 author: AI
@@ -15,7 +15,7 @@ document_type: requirement
 
 > 本需求源于真实事故：`scan-kb import` 导入过程中被中断（Ctrl+C/kill），导致向量库留下 crash residue，后续所有向量命令触发 zvec 原生 ERROR 刷屏，且被中断批次的向量存在"索引已重建、idmap 未登记"的数据完整性风险。
 > **依赖**：无。独立演进项，与导入/向量链路并行。
-> **来源**：① 导入中断事故复盘（bug-impact-analysis）；② 导入链路代码优化分析（artifact-optimizer：O-01 切分进度分母 / O-02 并行进度条冲突 / O-03 向量化分批进度 / O-04 向量化前数据清洗 / O-05 非 TTY 进度降级）。
+> **来源**：① 导入中断事故复盘（bug-impact-analysis）；② 导入链路代码优化分析（artifact-optimizer：O-01 切分进度分母 / O-02 并行进度条冲突 / O-03 向量化分批进度 / O-04 向量化前数据清洗 / O-05 非 TTY 进度降级）；③ 用户新增：自定义数据清洗钩子（REQ-07）。
 
 ## 1. 原始需求描述
 
@@ -82,6 +82,7 @@ document_type: requirement
 4. **中断恢复测试**：模拟中断 → 验证引导提示 + rebuild 后检索完整
 5. **导入进度可观测性**（O-01/02/03/05）：修复切分进度超 100%、消除并行进度条冲突、向量化分批进度、非 TTY 降级
 6. **向量化前数据清洗**（O-04）：剥离 frontmatter/BOM、过滤空 chunk、空白规范化（`--no-clean` 逃生阀）
+7. **自定义数据清洗钩子**（REQ-07）：config 注入外部清洗脚本，与内置规则组成管道链
 
 ### 3.2 范围 B（明确不做）
 1. **拦截 zvec 原生日志**：worker 是 `worker_threads`，原生库直接写 stderr，低成本过滤不可行；不改造为子进程捕获 stdio
@@ -141,17 +142,53 @@ document_type: requirement
 
 ### REQ-06 向量化前数据清洗（O-04）
 
-- **描述**：`readFileToChunks`（`import.ts:158-161`）直接读原文切分，frontmatter（`---` YAML 头）、UTF-8 BOM、空 chunk、导航/页脚噪音直接进入向量 content，污染语义与 BM25 检索 → 切分前执行低风险清洗（默认开启）：
+- **描述**：向量化前执行**模式识别清洗**（默认开启，规则独立可配）；**local KB 直接存原文（不清洗），清洗后数据只去向量化**（用户澄清确认，方案 C）。当前 `readFileToChunks`（`import.ts:162-165`）直接读原文切分，frontmatter（`---` YAML 头）、UTF-8 BOM、空 chunk、引用清单、mermaid、文件路径、代码块等噪音直接进入向量 content，污染语义与 BM25 检索。清洗规则：
   1. 剥离 UTF-8 BOM（`/^\uFEFF/`）
-  2. 剥离 YAML frontmatter（首行 `---` 与闭合 `\n---`，`title/date/tags` 等元数据不入向量）
+  2. 剥离 YAML frontmatter（**整块删除**：首行 `---` 起至闭合 `\n---`，含 `title/date/tags` 等全部字段；仅当块内匹配键值对特征 `key:` 才剥，防误伤正文 `---` 分隔线）
   3. 折叠 3+ 连续空行为 2 个（保留段落边界供切分）
-  4. 过滤空/近空 chunk（`if (!chunk.text.trim()) continue`）
-  - 提供 `--no-clean` 逃生阀关闭清洗（依赖 frontmatter 检索的用户可回退）
+  4. **mermaid 块剥离**（` ```mermaid ... ``` `，图语法语义密度低、正文已覆盖图信息）
+  5. **文件路径剥离（模式识别，不依赖 `<cite>`/`**来源**` 等结构化标记）**：`file://` URL、markdown 文件链接、`#L188-L605` 行号引用、裸代码文件路径（`[\w./-]+\.(py|ts|js|go|java|rs|sh|md|json|yaml|yml)`）；剥离后整行仅剩空白/符号 → 删行
+  6. **代码块剥离**（默认剥离；`keepShortSamples` 可保留 ≤15 行短命令/配置示例，如 curl/JSON 响应）
+  7. 过滤空/近空 chunk（`if (!chunk.text.trim()) continue`）
+  - 提供 `--no-clean` 逃生阀关闭全部清洗（依赖 frontmatter/代码块检索的用户可回退）
 - **验收标准**：
-  - 向量 content 无 `\uFEFF`、无 `---title` 类 frontmatter 头
+  - 向量 content 无 `\uFEFF`、无 `---title` 类 frontmatter 头、无 mermaid 块、无 file:// 路径残留
+  - **local KB 存原文（未被清洗），清洗后数据只进向量化**（`get-module-info` 可返回原文 chunk）
   - 空/近空文件不产生向量（节省 embedding 配额）
   - `--no-clean` 关闭后行为回退（不清洗）
-- **改动位置**：`src/lib/import.ts`、`src/lib/chunker.ts`（清洗函数落点）
+  - 规则独立开关（`--clean-rules bom,frontmatter,mermaid,codePath,codeBlock`）生效
+- **改动位置**：`src/lib/clean.ts`（新建：`cleanMarkdownText` 规则函数 + 模式识别路径剥离）、`src/lib/import.ts`（`handleDirectImport` 在 `bulkVectorize` 前清洗 entries）、`src/lib/incremental.ts`（`handleIncrementalDirect` 在 `bulkVectorize` 前清洗 entries，对齐 import.ts）；**`readFileToChunks`/`chunker.ts`/local KB 写入链路不改**（保持原文）
+
+### REQ-07 自定义数据清洗钩子
+
+- **描述**：为 `scan-kb import` 数据清洗提供**扩展点**，允许用户通过 config 注入自定义清洗逻辑（外部命令/脚本），与内置规则组成管道链：
+  - config 扩展 `scopes.<scope>.clean`：
+    ```yaml
+    scopes:
+      my-project:
+        clean:
+          enabled: true          # 总开关（false 等效 --no-clean，连 hooks 一起关闭）
+          rules:                 # 内置规则开关（默认全开）
+            bom: true            # BOM 剥离
+            frontmatter: true    # YAML frontmatter 剥离
+            htmlComment: true    # HTML 注释剥离
+            mermaid: true        # mermaid 图块剥离
+            codePath: true       # 文件路径剥离（模式识别，不依赖 <cite> 标记）
+            codeBlock: true      # 代码块剥离（keepShortSamples: true 可保留短命令/配置示例）
+            emptyChunk: true     # 空 chunk 过滤
+          hooks:                 # 外部清洗钩子（按序管道执行，stdin→stdout）
+            - "node scripts/clean.js"
+            - "python3 clean.py"
+    ```
+  - **钩子协议**：每个文件内容经 stdin 传入钩子，stdout 输出清洗后内容（一次一个文件，互不感知）；钩子失败（非零退出 / 超时）→ 跳过该钩子 + 告警（不阻断导入），该文件记入 skipped 并提示
+  - **执行顺序**：内置规则先执行 → 外部 hooks 依次（管道链）；`--no-clean` / `enabled:false` 全部关闭
+  - CLI 补充：`--clean-rules bom,frontmatter` 覆盖内置规则开关（可选，不传用 config）
+- **验收标准**：
+  - config 配置 hooks 后，导入内容经过自定义清洗（端到端可验证，如 `doc list` 抽查）
+  - 钩子失败不阻断整体导入（告警 + 计入统计）
+  - `enabled:false` / `--no-clean` 完全关闭清洗（含 hooks）
+  - hook 超时保护（默认 10s），不卡死导入
+- **改动位置**：`src/lib/import.ts`（清洗链接入）、`src/lib/clean.ts`（新建：内置规则 + hook 管道执行）、`src/lib/config.ts`（schema 扩展 `clean`）、`src/scan-kb.ts`（`--clean-rules`）
 
 ## 5. 影响范围
 
@@ -161,7 +198,8 @@ document_type: requirement
 | 2 | 所有向量命令（search/store/doc/scope/tag/restore） | `getEngine` 前置检测新增中断标记检查 | ⚠️ 需回归 |
 | 3 | `ZVecEngine.probe` | 新增 residue 检测提示 | ⚠️ 需回归 |
 | 4 | `scan-kb import` 切分/向量化阶段 | 进度输出重构（分母/并行/分批/TTY） | ⚠️ 需回归 |
-| 5 | `scan-kb import` 导入内容 | 内容清洗改变入向量文本（默认开启，`--no-clean` 可关） | ⚠️ 行为变更 |
+| 5 | `scan-kb import` 导入内容 | 内容清洗改变**入向量文本**（默认开启，`--no-clean` 可关）；**local KB 存原文不受影响** | ⚠️ 行为变更 |
+| 6 | `scan-kb import` 导入内容 | 自定义清洗钩子（外部命令执行，配置驱动） | ⚠️ 行为变更（显式配置才生效） |
 
 ## 6. 文件路径清单
 
@@ -170,9 +208,12 @@ document_type: requirement
 - `src/zvec-engine/engine.ts`（REQ-03：probe 提示增强）
 - `src/lib/batch-vectorize.ts`（REQ-05：分批提交 + 批间进度）
 - `src/lib/progress.ts`（REQ-05：TTY 检测降级）
-- `src/lib/chunker.ts`（REQ-06：清洗函数）
-- `test/`（REQ-04：中断模拟用例，如 `test/import-interrupt.test.ts`；REQ-05/06：进度与清洗用例）
-- `docs/cli.md`、`docs/scan-kb.md`（行为说明：中断提示、恢复引导、清洗开关）
+- `src/lib/incremental.ts`（REQ-06：向量化前清洗，line 367 对齐 import.ts）
+- `src/lib/clean.ts`（REQ-06/07：新建，内置清洗规则 + hook 管道执行）
+- `src/lib/config.ts`（REQ-07：schema 扩展 `scopes.<scope>.clean`）
+- `src/scan-kb.ts`（REQ-07：`--clean-rules`）
+- `test/`（REQ-04：中断模拟用例；REQ-05/06：进度与清洗用例；REQ-07：hook 管道用例）
+- `docs/cli.md`、`docs/scan-kb.md`（行为说明：中断提示、恢复引导、清洗开关与 hook 配置）
 
 ## 7. 测试方案
 
@@ -180,11 +221,14 @@ document_type: requirement
 |----------|--------|------|
 | 导入中断（kill -9）后 doc list/search 可引导 | P0 | 直接对应本次事故 |
 | 中断后 `rebuild-vector` 全量重建后检索完整 | P0 | 验证自愈路径有效 |
-| 含 frontmatter/BOM fixture 导入 → doc list 抽查 content 无污染 | P0 | 验证 REQ-06 清洗 |
+| 含 frontmatter/BOM fixture 导入 → doc list 抽查 content 无污染 + local KB 抽查原文未清洗 | P0 | 验证 REQ-06 清洗与原文保留（方案 C） |
 | probe 只读打开在正常库上无副作用 | P1 | 回归基线 |
 | 中断标记存在时引导提示出现、无标记时零输出 | P1 | 新功能验证 |
 | 切分进度恒 ≤100%（大文件 fixture） | P1 | 验证 REQ-05 O-01 |
 | 非 TTY 下进度可读（stderr 重定向） | P1 | 验证 REQ-05 O-05 |
+| config 配置 hook（如 node 脚本去行号）→ doc list 抽查已清洗 | P0 | 验证 REQ-07 钩子生效 |
+| hook 失败（exit 1）→ 不阻断导入 + 计入统计 | P1 | 验证 REQ-07 容错 |
+| `enabled:false`/`--no-clean` → hooks 与内置规则全部关闭 | P1 | 验证 REQ-07 逃生阀 |
 
 ## 8. 验收标准
 
@@ -193,7 +237,8 @@ document_type: requirement
 3. `rebuild-vector` / `restore --rebuild-vector` 重建后，被中断批次的文档可正常检索
 4. 全量测试通过（含新增中断用例），lint 零错误
 5. 导入进度恒 ≤100%；向量化与 KB 写入进度独立呈现，均有动态刷新
-6. 导入内容经清洗：无 BOM/frontmatter/空 chunk 污染（`--no-clean` 可关闭）
+6. 导入内容经清洗：无 BOM/frontmatter/空 chunk 污染（`--no-clean` 可关闭）；**local KB 存原文（未被清洗），清洗后数据只进向量化**
+7. config 配置的自定义清洗钩子按序生效；钩子失败不阻断导入且超时有保护
 
 ## 9. 当前进度
 
@@ -203,4 +248,5 @@ document_type: requirement
 - [ ] REQ-04 中断恢复测试
 - [ ] REQ-05 导入进度可观测性（O-01/02/03/05）
 - [ ] REQ-06 向量化前数据清洗（O-04）
+- [ ] REQ-07 自定义数据清洗钩子
 - **状态**：草案（已落盘，待评审确认）

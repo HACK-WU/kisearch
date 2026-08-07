@@ -435,17 +435,53 @@
       "id": "REQ-20260807-001",
       "feature": "向量库导入中断防护与自愈",
       "created": "2026-08-07 16:10:17",
-      "updated": "2026-08-07 16:13:03",
+      "updated": "2026-08-07 17:51:18",
       "status": "草案",
       "tags": [
         "fix",
         "vector"
       ],
+      "version": 6,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-08-07 16:13:03 v2: 合并 artifact-optimizer 优化点：REQ-05 导入进度可观测性（O-01进度分母/O-02并行冲突/O-03向量化分批/O-05非TTY）+ REQ-06 向量化前数据清洗（O-04 frontmatter/BOM/空chunk）",
+        "2026-08-07 16:30:48 v3: 新增 REQ-07 自定义数据清洗钩子（config 注入外部清洗脚本，内置规则+hooks 管道链，--no-clean 逃生阀）",
+        "2026-08-07 17:51:18 v4: 完成数据清洗方案场景推演（REQ-06/07）",
+        "2026-08-07 v5: 场景推演修正（基于源码核实 import.ts:479-486 / incremental.ts:382）：v1 误判 local KB 存原文，实际 phase4WriteRelations 因 e.path 含 #N 路径不存在降级用 chunk.text（清洗后）→ S6 反转为阻断 B1，破坏 REQ-002 原文召回前提；新增 URL 误伤/frontmatter 闭合校验等发现；阻断1/警告4/建议4，结论改为不通过",
+        "2026-08-07 v6: 质疑审查（challenger）：B1 根因/影响面/定级均认可，但修复方案 A 有副作用（local KB 膨胀+语义错配），提出方案 C（分离清洗与切分：local KB 存原文 chunk、向量化前单独清洗）；补 cleanMarkdownText 异常兜底遗漏"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "review/scenario-rehearsal.md",
+          "type": "rehearsal"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
+    },
+    "2026-08-07-ki-search返回原文支持": {
+      "id": "REQ-20260807-002",
+      "feature": "ki-search返回原文支持",
+      "created": "2026-08-07 16:42:51",
+      "updated": "2026-08-07 16:43:55",
+      "status": "草案",
+      "tags": [
+        "feat",
+        "search"
+      ],
       "version": 2,
       "depends_on": [],
       "changelog": [
         "初始创建",
-        "2026-08-07 16:13:03 v2: 合并 artifact-optimizer 优化点：REQ-05 导入进度可观测性（O-01进度分母/O-02并行冲突/O-03向量化分批/O-05非TTY）+ REQ-06 向量化前数据清洗（O-04 frontmatter/BOM/空chunk）"
+        "2026-08-07 16:43:55 v2: REQ-04 降级策略细化：新增 originalHint 失败提示（无定位信息/本地KB缺失+恢复引导/异常原因），MCP/CLI 结构化可见"
       ],
       "commits": [],
       "branch": null,
@@ -457,6 +493,6 @@
   },
   "id_counters": {
     "REQ-20260806": 3,
-    "REQ-20260807": 1
+    "REQ-20260807": 2
   }
 }
