@@ -525,6 +525,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
+| `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`，REQ-09） |
 
 > 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
 
@@ -559,6 +560,7 @@ ki search "仪表盘配置" -s monitor
 |------|------|
 | `group` | 该记忆所属 Group 路径（定位到模块） |
 | `relation` | 原文全文（`hot_relation.text`） |
+| `original` | local KB 文件级原文（**仅 `--original` 开启时**；`originalRetrieved` 标记获取成功，多 chunk 命中仅首条携带并标 `deduplicated`，失败降级 `originalHint`） |
 
 > 批次 3（REQ-05/09）：`keywords` 与 `isFullText` 字段已从 search 输出与 relations-cache 移除（keywords 机制、isFullText 标记全链路删除）。
 

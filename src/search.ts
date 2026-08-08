@@ -73,7 +73,7 @@ export async function executeSearch(params: {
   limit?: number;
   threshold?: number;
   tags?: string;
-  /** REQ-09：是否返回原文（默认 true） */
+  /** REQ-09：是否返回 local KB 文件级原文（默认 false；CLI --original / MCP include_original 显式开启） */
   includeOriginal?: boolean;
 }): Promise<SearchResult> {
   try {
@@ -122,7 +122,8 @@ export async function executeSearch(params: {
 
     // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文
     // （getRelationMap 带 TTL+mtime 缓存：首次构建 O(N)，后续 O(1)）
-    const includeOriginal = params.includeOriginal !== false; // 默认 true（REQ-09）
+    // includeOriginal 默认 false（不返回原文）；CLI --original / MCP include_original 显式传 true 才返回
+    const includeOriginal = params.includeOriginal === true;
     const map = getRelationMap(scope);
     const results: SearchHit[] = raw.map((r) => {
       const hit: SearchHit = { ...r };
@@ -130,7 +131,7 @@ export async function executeSearch(params: {
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
-        // REQ-09：原文召回（默认开启）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
+        // REQ-09：原文召回（显式开启才执行）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
         if (includeOriginal && meta.group && meta.relation) {
           const fetched = fetchOriginal(scope, meta.group, meta.relation);
           if (fetched?.original) {
@@ -182,7 +183,7 @@ program
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
-  .option('--no-original', '不返回原文（默认返回 local KB 文件级原文，REQ-09）')
+  .option('--original', '返回 local KB 文件级原文（默认不返回，仅返回向量匹配数据，REQ-09）')
   .action(async (query: string | undefined, opts) => {
     const finalQuery = query ?? opts.query;
     if (!finalQuery) {
@@ -197,7 +198,7 @@ program
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       threshold: parsedThreshold,
       tags: opts.tags,
-      includeOriginal: opts.original !== false,
+      includeOriginal: opts.original === true,
     });
     console.log(JSON.stringify(result, null, 2));
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出

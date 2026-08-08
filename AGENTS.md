@@ -104,8 +104,8 @@ openclaw memory-pro stats
 
 ## 项目现状速览
 
-- **测试基线**：全量测试全绿（340/340），lint 零错误
-- **当前 HEAD**：`204c1da`（feat(scan-kb): import 支持 --no-vector + 文档同步 + REQ-20260807-001 落盘）
+- **测试基线**：全量测试全绿，lint 零错误
+- **当前 HEAD**：方案 D（REQ-20260807-001）已提交（含 clean.ts 清洗、local KB 一对多、中断防护、原文召回）
 - **GitNexus 索引**：2,719 symbols / 6,046 edges / 122 clusters / 230 flows（`.gitnexusignore` 已配；WSL 下必须用完整路径 `/root/.nvm/versions/node/v22.22.2/bin/gitnexus`，索引用 `--skip-agents-md` 防止改写本文件）
 - **需求归档**：`.requirements/` 按 `YYYY-MM-DD-需求名/requirement.md` + `meta.json` 索引（REQ-ID 由 `req create` 分配）
 
@@ -139,6 +139,16 @@ openclaw memory-pro stats
 - 实施：CLI `--no-vector` + MCP `vector: boolean`（默认 true）；批量模式本就不做向量写入（历史现状），`--no-vector` 仅显式声明
 - 审查：无阻塞项；delete-relation 对非向量化关系提示易困惑（范围外，未改）
 
+### REQ-20260807-001 向量库导入中断防护与自愈（已完成，方案 D）
+
+- **数据模型（方案 D）**：local KB 存**文件级原文**（一个文件一条）+ relation-cache 文件级 relation 挂 **memoryIds 多值**；清洗只作用于向量化输入；原文召回命中任一 memoryId → 返回文件原文（去重）
+- **数据清洗（REQ-06/07）**：`clean.ts` 7 条内置规则（BOM/frontmatter/mermaid/代码块先剥→路径/空行/空 chunk）+ `--no-clean`/`--clean-rules`；外部 hook 管道（stdin→stdout、10s 超时、P-7 失败回滚）
+- **导入链路（REQ-05/08）**：格式白名单（config `import.extensions`）+ 大小限制（默认 1MB）；进度文件数分母 + 串行化 + batch-vectorize 分批 + TTY 降级；`--no-vector` 仅跳向量化
+- **中断防护（REQ-01~04）**：SIGINT/SIGTERM 捕获写标记（SIGKILL 由 probe 兜底，双路径）+ 并发锁 + `bin/ki.mjs` 信号透传（spawn+转发）
+- **原文召回（REQ-09，合并 REQ-002）**：`ki search` 默认不返回原文（仅向量匹配数据；CLI `--original` / MCP `include_original` 显式开启）+ 去重；originalHint 降级
+- **关键踩坑**：① full 重导幂等（冲突检测按 sourcePath 区分同文件重导 vs 真冲突）；② `bin/ki.mjs` 必须 spawn+信号转发否则中断标记失效
+- 需求文档 v9 + 实现计划 v7；测试：5 个单测 + 1 个 e2e + 真实 Wiki 体验；`scope list` 表格化 + Docs 列
+
 ### 其他已完成（2026-08-05/06）
 
 - **ki-search 混合检索优化**：默认搜全部 tag + per-tag 限流 + `TAG_PRIORITY` 排序（ki-search > ki-relation > ki-path > 自定义）+ relation content 纯化 + `group` 结构化字段（`GROUP_FIELD` 标量）
@@ -147,33 +157,7 @@ openclaw memory-pro stats
 
 ## 当前需求（进行中）
 
-### REQ-20260807-001 向量库导入中断防护与自愈（草案，待确认）
-
-- **背景**：导入中断 → zvec crash residue + probe 只读 recovery 冲突（idmap put 失败 ERROR 刷屏）+ 被中断批次"索引已重建、idmap 未登记"的数据完整性风险
-- REQ-01 导入中断安全收尾：`scan-kb import` 捕获 SIGINT/SIGTERM，写"导入中断"状态标记 + 明确提示
-- REQ-02 中断标记检测与恢复引导：`getEngine` 前置检测中断标记 + probe 异常 → 引导 `rebuild-vector` / `restore --rebuild-vector`
-- REQ-03 probe 异常提示增强：`lockedHint` 补"崩溃残留可重建"恢复引导
-- REQ-04 中断恢复测试：kill -9 模拟中断 → 引导提示 + 重建后召回完整
-- REQ-05 导入进度可观测性（O-01 切分进度分母 / O-02 并行进度条冲突 / O-03 向量化分批进度 / O-05 非 TTY 降级）
-- REQ-06 向量化前数据清洗（O-04：剥离 BOM/frontmatter、过滤空 chunk、空白规范化，`--no-clean` 逃生阀，默认开启）
-  - **推演结论（2026-08-07，基于源码核实；用户澄清确认方案 C）**：🔴 阻断 B1——调研文档 §5 建议"清洗落点在 readFileToChunks 内"**错误**：该落点使 chunk.text 被清洗，而 chunk.text 同时流向 local KB（`phase4WriteRelations` import.ts:479-486 因 `e.path` 含 `#N` 降级用 `e.text`=chunk.text）→ local KB 失原文 → 破坏 REQ-002 原文召回。**采纳方案 C**（用户原则：local KB 存原内容，清洗后数据只去向量化）：`readFileToChunks` 不内嵌清洗返回原文 chunk，清洗移到向量化前（`bulkVectorize` 入口 `entries.map` 清洗）。方案 A（phase4 读全文）弃用（致 local KB 膨胀+语义错配）。另补：cleanMarkdownText 异常兜底、frontmatter 闭合 `---` 行尾校验、URL 路径前置排除。报告：`review/scenario-rehearsal.md` + `review/challenge-report.md`
-- REQ-07 自定义数据清洗钩子（config `scopes.<scope>.clean.hooks` 注入外部清洗脚本，stdin→stdout 管道，内置规则+钩子按序执行，超时 10s 容错，`--clean-rules` 覆盖规则开关）
-- 需求文档：`.requirements/2026-08-07-向量库导入中断防护与自愈/requirement.md`（v3）
-- 调研文档：`.requirements/2026-08-07-向量库导入中断防护与自愈/reference/code-survey.md`（清洗方案：零依赖纯 Node 正则 + NFC；落点 readFileToChunks）
-
-### REQ-20260807-002 ki-search 返回原文支持（草案，待确认）
-
-- 背景：数据清洗（REQ-06）使向量 content 非原文；search 需支持返回 local KB 原文
-- 方案：`ki_search` 新增 `include_original`（默认 true）/ CLI `--include-original`/`--no-original`；复用 `executeGetModuleInfo({scope,group,relation})` 取原文，按 group 聚合读 index.json
-- 降级：获取失败（group/relation 缺失、文件缺失）→ 返回原 search 信息 + `originalRetrieved:false` + **`originalHint` 失败提示**（无定位信息 / 本地 KB 缺失含 sync-relation、rebuild-vector 恢复引导 / 异常原因），不抛错
-- 需求文档：`.requirements/2026-08-07-ki-search返回原文支持/requirement.md`（REQ-01~05）
-
-### scan-kb import --no-vector 非向量化（已完成，未落盘 REQ 条目）
-
-- CLI `--no-vector`（full/incremental 均支持），仅写 KB 层、memoryId 为空、不可被 `ki search` 召回（对齐 sync-relation 决策）
-- 实施：`import.ts`/`incremental.ts` 加 `vector` 参数（跳过向量写入与向量删除）；`ImportStats`/`IncrementalStats` 加 `vector` 字段
-- 验证：full 端到端 `vectorized=0` + `vector/` 目录完全不创建 + KB 层正常；incremental-direct 3/3 全绿
-- 边界：非向量化增量时旧向量不删（混用向量/非向量模式属边界场景，文档已标注）
+（暂无——REQ-20260807-001 方案 D 已完成提交）
 
 ## 相关资产
 

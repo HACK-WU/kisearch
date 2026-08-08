@@ -13,6 +13,7 @@ export function registerSearchTool(server: McpServer): void {
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限'),
       threshold: z.number().min(0).max(1).optional().describe('相似度阈值（0-1）'),
       tags: z.string().optional().describe('过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）'),
+      include_original: z.boolean().optional().default(false).describe('是否返回 local KB 文件级原文（默认 false：仅返回向量匹配数据）'),
     },
     async (args) => {
       try {
@@ -23,6 +24,7 @@ export function registerSearchTool(server: McpServer): void {
             limit: args.limit,
             threshold: args.threshold,
             tags: args.tags,
+            includeOriginal: args.include_original,
           }),
           TOOL_TIMEOUT.WRITE,
           'ki_search'

@@ -3,8 +3,8 @@
  *
  * 契约：
  *   - fetchOriginal：从 local KB 按 (group, relation) 取文件级原文；失败返回 hint
- *   - executeSearch：include_original 默认 true；多 chunk 命中去重（deduplicated 标记）；
- *     原文获取失败 originalRetrieved:false + originalHint
+ *   - executeSearch：includeOriginal 默认 false（不返回原文；CLI --original / MCP include_original 显式开启）；
+ *     传 true 时多 chunk 命中去重（deduplicated 标记）；原文获取失败 originalRetrieved:false + originalHint
  *
  * 运行：npx jiti test/search-original.test.ts
  */

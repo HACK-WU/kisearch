@@ -142,8 +142,17 @@ test('E2E-D1 full 导入：local KB 存原文（未清洗），向量 content �
   console.log('  ✓ local KB 存文件级原文（未清洗）');
 });
 
-test('E2E-D2 search 原文召回：命中返回 original（文件级原文，未清洗）', { ...SKIP, timeout: 180_000 }, () => {
-  const r = ki(['search', '--scope', SCOPE, '--query', 'API 模块 调用']);
+test('E2E-D2 search 原文召回：默认不含 original，--original 返回文件级原文（未清洗）', { ...SKIP, timeout: 180_000 }, () => {
+  // 2a. 默认（不传 --original）→ 仅向量匹配数据，无 original（CLI/MCP 默认值统一为 false）
+  const r0 = ki(['search', '--scope', SCOPE, '--query', 'API 模块 调用']);
+  assert.equal(r0.status, 0, `search 应成功；stderr=${r0.stderr}`);
+  assert.equal(r0.json?.ok, true, `search 应 ok；${JSON.stringify(r0.json)}`);
+  assert.ok((r0.json?.results ?? []).length > 0, '默认应至少有一个向量命中');
+  assert.ok((r0.json?.results ?? []).every((x) => !x.original), `默认不应返回 original；${JSON.stringify(r0.json?.results)}`);
+  console.log('  ✓ 默认不返回 original（仅向量匹配数据）');
+
+  // 2b. --original 显式开启 → 返回文件级原文（未清洗）
+  const r = ki(['search', '--scope', SCOPE, '--query', 'API 模块 调用', '--original']);
   assert.equal(r.status, 0, `search 应成功；stderr=${r.stderr}`);
   assert.equal(r.json?.ok, true, `search 应 ok；${JSON.stringify(r.json)}`);
   const hit = (r.json?.results ?? []).find((x) => x.original);
@@ -152,7 +161,7 @@ test('E2E-D2 search 原文召回：命中返回 original（文件级原文，未
   assert.ok(hit.original.includes('API 模块'), `original 应为文件原文：${hit.original.slice(0, 50)}`);
   // local KB 存原文（未清洗）：mermaid 块应保留在 original（向量 content 才被剥离）
   assert.ok(hit.original.includes('mermaid'), `original 应为未清洗原文（含 mermaid，清洗只作用于向量侧）`);
-  console.log('  ✓ search 返回文件级原文（original 字段，含未清洗内容）');
+  console.log('  ✓ --original 返回文件级原文（original 字段，含未清洗内容）');
 });
 
 test('E2E-D3 --no-vector：local KB 原文写入、memoryIds 空', { ...SKIP, timeout: 180_000 }, () => {
