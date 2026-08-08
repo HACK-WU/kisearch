@@ -386,6 +386,13 @@ if (bdIdx !== -1 && bdIdx + 1 < args.length) {
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1 */
 async function rebuildAndReport(scopeName: string): Promise<void> {
   const result = await rebuildScopeVectors(scopeName);
+  // REQ-02 生命周期①：重建成功后清除中断标记（引导消失）
+  if (result.ok) {
+    try {
+      const { clearInterruptMark } = await import('./lib/interrupt.js');
+      clearInterruptMark(scopeName);
+    } catch { /* 清除失败不阻断 */ }
+  }
   if (!result.ok) {
     output({
       ok: false,

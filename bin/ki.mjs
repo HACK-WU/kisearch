@@ -12,7 +12,7 @@
  *   ki query-group --scope my-project
  */
 
-import { execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -149,13 +149,34 @@ if (configPath) {
 }
 
 try {
-  // 使用 jiti 执行 TypeScript 脚本
+  // 使用 jiti 执行 TypeScript 脚本（spawn 异步 + 信号转发）
   // cwd 设为用户当前目录，确保相对路径参数（如 --results）正确解析
-  execFileSync('npx', ['jiti', scriptPath, ...scriptArgs], {
+  const child = spawn('npx', ['jiti', scriptPath, ...scriptArgs], {
     stdio: 'inherit',
     cwd: process.cwd(),
     env: childEnv,
   });
+
+  // REQ-01 信号透传：父进程收到 SIGTERM/SIGINT → 转发给子进程（子进程的 handler 写中断标记/清理后退出）。
+  // 否则 SIGTERM 打到 ki.mjs 时 execFileSync/spawnSync 默认行为直接终止父进程，子进程 handler 不执行，
+  // 导致"导入中断标记"机制在真实 CLI 链路失效（P0）。
+  const forward = (sig) => {
+    try { child.kill(sig); } catch { /* ignore */ }
+  };
+  process.on('SIGINT', () => forward('SIGINT'));
+  process.on('SIGTERM', () => forward('SIGTERM'));
+
+  const code = await new Promise((resolve) => {
+    child.on('exit', (c) => resolve(c ?? 1));
+    child.on('error', (err) => {
+      console.error(`错误：启动子进程失败 — ${err.message}`);
+      resolve(1);
+    });
+  });
+  // 子进程退出后移除转发 handler，避免父进程常驻
+  process.removeListener('SIGINT', forward);
+  process.removeListener('SIGTERM', forward);
+  process.exit(code);
 } catch (error) {
   // 如果脚本执行失败，退出码与子进程一致
   process.exit(error.status || 1);

@@ -23,6 +23,7 @@ import { handleDiff } from './lib/diff.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
+import { parseCleanRules, type CleanRules } from './lib/clean.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -47,6 +48,8 @@ program
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000，全量直导专用；增量复用 source 块持久化值）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150，全量直导专用）')
   .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB），不写向量（不产生 memoryId，无法被 ki search 召回）')
+  .option('--no-clean', '关闭全部数据清洗（含外部 hooks，等价 config clean.enabled:false）')
+  .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
   .action(async (opts) => {
     try {
       const scope = resolveScope(loadConfig(), opts.scope);
@@ -62,6 +65,9 @@ program
       const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
       const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
       const vector = opts.vector !== false;
+      // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则
+      const cleanEnabled = opts.clean !== false;
+      const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
 
       // CLI-07：--root-name 语义统一——full 模式必填（前置校验），incremental 忽略
       if (mode === 'full' && !rootName) {
@@ -71,8 +77,8 @@ program
 
       const result =
         mode === 'full'
-          ? await handleDirectImport({ scope, sourceDir, rootName, chunkSize, chunkOverlap, vector })
-          : await handleIncrementalDirect({ scope, sourceDir, chunkSize, chunkOverlap, vector });
+          ? await handleDirectImport({ scope, sourceDir, rootName, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules })
+          : await handleIncrementalDirect({ scope, sourceDir, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules });
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
 

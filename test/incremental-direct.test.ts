@@ -1,11 +1,10 @@
 /**
  * incremental-direct.test.ts —— 增量直连专项测试（git diff 驱动）
  *
- * 回归保护：批次 3 审查发现的 P0 bug——modified 删旧逻辑若按 sourcePath 前缀
- * 匹配，会把新写入的 chunk 也误删（relations-cache 变空）。修复后：
- *   - 删旧基于 oldIds（旧 memoryId）∩ okIds（新 id）的差集（staleIds）
- *   - chunk 数不变：新 chunk 更新 memoryId 保留
- *   - chunk 数减少：多余旧 chunk 删除
+ * 方案 D（REQ-20260807-001）：relation 为文件级（basename 去扩展名），
+ * relation-cache 文件级 relation 挂 memoryIds 多值。回归保护：
+ *   - P-2 先删后更：删旧向量成功后再更新 memoryIds 字段，删旧失败字段保持旧值（无孤儿向量）
+ *   - 文件级 relation 单条记录，modified 更新 memoryIds、deleted 按文件清理
  *
  * 这些用例用 mock 向量层（不依赖真实 embedding），聚焦 cache 层语义。
  */
@@ -60,9 +59,20 @@ function getCache(scope: string): any {
   return JSON.parse(fs.readFileSync(p, 'utf-8'));
 }
 
+/** 方案 D：返回全部文件级 relation 名（一个文件一条） */
 function getTexts(scope: string): string[] {
   const cache = getCache(scope);
   return Object.values(cache.groups).flatMap((g: any) => g.hot_relations.map((r: any) => r.text));
+}
+
+/** 方案 D：读取某 relation 的 memoryIds 多值（文件全部 chunk memoryId） */
+function getMemoryIds(scope: string, relation: string): string[] {
+  const cache = getCache(scope);
+  for (const g of Object.values(cache.groups) as any[]) {
+    const rel = g.hot_relations.find((r: any) => r.text === relation);
+    if (rel) return rel.memoryIds || [];
+  }
+  return [];
 }
 
 // 用一个固定 scope 前缀，每个用例独立 scope
@@ -81,12 +91,13 @@ describe('incremental-direct 增量直连', () => {
     if (repoDir && fs.existsSync(repoDir)) fs.rmSync(repoDir, { recursive: true, force: true });
   });
 
-  it('chunk 数不变：modified 后新 chunk 更新 memoryId 且保留', SKIP, async () => {
+  it('chunk 数不变：modified 后新 chunk 更新 memoryIds 且保留', SKIP, async () => {
     repoDir = makeRepo({ 'a.md': bigContent('v1') });
     const full = runImport(scope, repoDir, 'wiki');
     assert.strictEqual(full.ok, true, `full 导入应成功: ${JSON.stringify(full)}`);
-    const beforeCount = getTexts(scope).length;
-    assert.ok(beforeCount >= 2, `v1 大文件应切出 ≥2 chunk，实际 ${beforeCount}`);
+    // 方案 D：文件级 relation 'a' + memoryIds 多值（大文件 ≥2 chunk）
+    const beforeIds = getMemoryIds(scope, 'a');
+    assert.ok(beforeIds.length >= 2, `v1 大文件应切出 ≥2 chunk memoryId，实际 ${beforeIds.length}`);
 
     // modified：内容更新但长度相当（chunk 数不变）
     fs.writeFileSync(path.join(repoDir, 'a.md'), bigContent('v2'));
@@ -97,10 +108,12 @@ describe('incremental-direct 增量直连', () => {
     assert.strictEqual(inc.stats.modified, 1);
     assert.strictEqual(inc.stats.errors, 0);
 
-    // 回归断言：修改后 relations-cache 不应为空（P0：误删新 chunk）
+    // 回归断言：修改后文件级 relation 'a' 仍存在，memoryIds 更新为新的 chunk id（P0：误删新 chunk）
     const afterTexts = getTexts(scope);
-    assert.ok(afterTexts.length >= 2, `modified 后 chunk 数不应减少到 <2，实际 ${JSON.stringify(afterTexts)}`);
-    assert.ok(afterTexts.some((t) => t.startsWith('a-')), `应有 a-N chunk，实际 ${JSON.stringify(afterTexts)}`);
+    assert.ok(afterTexts.includes('a'), `modified 后文件级 relation 'a' 应保留，实际 ${JSON.stringify(afterTexts)}`);
+    const afterIds = getMemoryIds(scope, 'a');
+    assert.ok(afterIds.length >= 2, `modified 后 memoryIds 不应减少到 <2，实际 ${JSON.stringify(afterIds)}`);
+    assert.ok(afterIds.every((id) => !beforeIds.includes(id)), `modified 后 memoryIds 应为新 id（内容已变），实际 ${JSON.stringify(afterIds)}`);
   });
 
   it('chunk 数减少：多余旧 chunk 被删、新 chunk 保留', SKIP, async () => {
@@ -113,8 +126,8 @@ describe('incremental-direct 增量直连', () => {
     try {
       const full = runImport(scope2, repo, 'wiki');
       assert.ok(full.ok);
-      const beforeTexts = getTexts(scope2);
-      assert.ok(beforeTexts.length >= 2);
+      const beforeIds = getMemoryIds(scope2, 'a');
+      assert.ok(beforeIds.length >= 2);
 
       // modified：缩成短内容（必然 1 chunk）
       fs.writeFileSync(path.join(repo, 'a.md'), shortContent('a'));
@@ -125,10 +138,12 @@ describe('incremental-direct 增量直连', () => {
       assert.strictEqual(inc.stats.modified, 1);
       assert.strictEqual(inc.stats.errors, 0);
 
+      // 方案 D：文件级 relation 'a' 保留，memoryIds 收缩为 1 个（旧多余 chunk 已删）
       const afterTexts = getTexts(scope2);
-      // 只剩 1 个 chunk（a-01），且旧 a-02 等已删
-      assert.strictEqual(afterTexts.length, 1, `缩短后应只剩 1 chunk，实际 ${JSON.stringify(afterTexts)}`);
-      assert.ok(afterTexts[0].startsWith('a-01'), `应保留 a-01，实际 ${JSON.stringify(afterTexts)}`);
+      assert.ok(afterTexts.includes('a'), `文件级 relation 'a' 应保留，实际 ${JSON.stringify(afterTexts)}`);
+      const afterIds = getMemoryIds(scope2, 'a');
+      assert.strictEqual(afterIds.length, 1, `缩短后 memoryIds 应只剩 1 个，实际 ${JSON.stringify(afterIds)}`);
+      assert.ok(!afterIds.some((id) => beforeIds.includes(id)), `缩短后 memoryIds 应为新 id，实际 ${JSON.stringify(afterIds)}`);
     } finally {
       if (fs.existsSync(repo)) fs.rmSync(repo, { recursive: true, force: true });
     }
@@ -147,8 +162,9 @@ describe('incremental-direct 增量直连', () => {
     try {
       const full = runImport(scope3, repo, 'wiki');
       assert.ok(full.ok);
-      assert.ok(getTexts(scope3).some((t) => t === 'keep-01'));
-      assert.ok(getTexts(scope3).some((t) => t === 'gone-01'));
+      // 方案 D：文件级 relation（basename 去扩展名）
+      assert.ok(getTexts(scope3).includes('keep'));
+      assert.ok(getTexts(scope3).includes('gone'));
 
       // add new.md + delete gone.md
       fs.writeFileSync(path.join(repo, 'new.md'), '# new\n内容');
@@ -162,9 +178,9 @@ describe('incremental-direct 增量直连', () => {
       assert.strictEqual(inc.stats.errors, 0);
 
       const texts = getTexts(scope3);
-      assert.ok(texts.some((t) => t === 'keep-01'), 'keep.md 应保留');
-      assert.ok(texts.some((t) => t === 'new-01'), 'new.md 应新增');
-      assert.ok(!texts.some((t) => t === 'gone-01'), 'gone.md 应删除');
+      assert.ok(texts.includes('keep'), 'keep.md 应保留');
+      assert.ok(texts.includes('new'), 'new.md 应新增');
+      assert.ok(!texts.includes('gone'), 'gone.md 应删除');
     } finally {
       if (fs.existsSync(repo)) fs.rmSync(repo, { recursive: true, force: true });
     }

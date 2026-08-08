@@ -210,6 +210,10 @@ export interface HandleIncrementalDirectArgs {
   maxFileSizeBytes?: number;
   /** 非向量化模式：仅写 KB 层（relations-cache + local KB），跳过向量写入与向量删除；默认 true */
   vector?: boolean;
+  /** 清洗总开关（false = --no-clean，关闭全部清洗含 hooks）；默认 true */
+  cleanEnabled?: boolean;
+  /** 内置清洗规则覆盖（--clean-rules 解析结果） */
+  cleanRules?: Partial<import('./clean.js').CleanRules>;
 }
 
 /**
@@ -303,7 +307,8 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
         }
       }
     }
-    // 2) 清理 relations-cache + local KB（按文件前缀匹配 chunk sourcePath）
+    // 2) 清理 relations-cache + local KB（方案 D：文件级 relation sourcePath === 文件路径，无 #N）
+    //    兼容旧数据：chunk 级 sourcePath（file#N）按前缀匹配
     const groupPaths = new Set<string>();
     for (const [groupPath, groupData] of Object.entries(relationsCache.groups)) {
       const rels = groupData.hot_relations.filter((r) => r.sourcePath && (r.sourcePath === entry.path || r.sourcePath.startsWith(entry.path + '#')));
@@ -361,8 +366,14 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
       continue;
     }
 
-    // 先写新全 chunk（bulkVectorize + upsertRelation + local KB）
-    // 非向量化模式（--no-vector）：跳过向量写入，memoryId 为空，仅 KB 层
+    // 方案 D：文件级 relation + memoryIds 多值
+    // 文件级 relation = deriveRelationText(文件路径)（basename 去扩展名）；sourcePath = 文件路径（无 #N）
+    const fileRelation = deriveRelationText(e.path);
+    const groupPathFile = deriveGroupPath(rootName, e.path);
+    const fileText = fs.readFileSync(absPath, 'utf-8');
+
+    // 先写新全 chunk（bulkVectorize）
+    // 非向量化模式（--no-vector）：跳过向量写入，memoryIds 为空，仅 KB 层
     const vec = vector
       ? await bulkVectorize(entries, args.scope, { timeoutMs: 60_000 + entries.length * 10_000 })
       : { ok: new Map<string, string>(), errors: [] };
@@ -378,8 +389,13 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
       if (memoryId) okIds.push(memoryId);
       ensureGroupPathInTree(groupIndex, en.groupPath);
       groupsTouched.add(en.groupPath);
-      upsertRelation(relationsCache, en.groupPath, en.chunkRelation || deriveRelationText(en.path), memoryId, en.path);
-      writeLocalKb(args.scope, en.groupPath, en.chunkRelation || deriveRelationText(en.path), en.text);
+    }
+    // 文件级 relation：local KB 写文件原文（未清洗，方案 D）+ relation-cache 挂 memoryIds（回填）
+    writeLocalKb(args.scope, groupPathFile, fileRelation, fileText);
+    upsertRelation(relationsCache, groupPathFile, fileRelation, okIds, e.path);
+    if (okIds.length > 0) {
+      // 供 modified 删旧使用（新 memoryIds 字段更新放在删旧成功后，P-2 先删后更）
+      // 此处先记录新 id，删旧成功后再更新字段（见下方 isModify 分支）
     }
     // 路径向量（ki-relation 每条 chunk + ki-path 每 group）——非向量化时跳过
     if (vector) {
@@ -401,39 +417,34 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
       }
     }
 
-    // modified：新 chunk 全部成功后，再删旧全 chunk（写序 D-3/质疑意见2）
+    // modified：方案 D P-2 先删后更——基于旧 memoryIds 删旧向量 → 全部成功后再更新字段为新 okIds
     if (isModify) {
       const oldIds = e.memoryIds && e.memoryIds.length > 0 ? e.memoryIds : (e.memoryId ? [e.memoryId] : []);
       if (vector ? okIds.length > 0 : true) {
-        // 删旧向量（非向量化模式无向量可删，跳过）
+        let deleteOk = true;
+        // 删旧向量（非向量化模式无向量可删；新旧 id 相同跳过）
         if (vector) {
           for (const oldId of oldIds) {
             if (okIds.includes(oldId)) continue; // 新旧 id 相同（内容未变时）跳过
             const del = await deleteMemory(oldId, args.scope, memOpts);
             if (!del.ok) {
+              deleteOk = false;
               errors.push({ path: e.path, error: `[modify warn] 删旧向量失败 id=${oldId.slice(0, 8)}：${del.error}` });
             }
           }
         }
-        // 清理旧 chunk 的 relations-cache / local KB / 路径向量（与 deleted 分支对齐）。
-        // ⚠️ 不能按 sourcePath 前缀匹配——新 chunk 的 sourcePath 同为 `a.md#N` 格式，
-        // 前缀匹配会把刚写入的新 rel 也误删（P0：modified 后 relations-cache 变空）。
-        // 应基于 oldIds（旧 memoryId）且不在 okIds（新 id）中的「陈旧条目」精确删除：
-        //   - 新旧 text 相同的 rel（chunk 数不变）已被 upsert 更新为 okIds → 不在 staleIds，保留
-        //   - 旧 chunk 多于新 chunk 时，多余 rel 的 memoryId ∈ staleIds → 删除
-        const staleIds = oldIds.filter((id) => !okIds.includes(id));
-        if (staleIds.length > 0) {
-          for (const [groupPath, groupData] of Object.entries(relationsCache.groups)) {
-            const oldRels = groupData.hot_relations.filter(
-              (r) => r.memoryId && staleIds.includes(r.memoryId)
-            );
-            for (const rel of oldRels) {
-              const idx = groupData.hot_relations.indexOf(rel);
-              if (idx >= 0) groupData.hot_relations.splice(idx, 1);
-              groupsTouched.add(groupPath);
-              removeFromLocalKb(args.scope, groupPath, rel.text);
-              await deletePathVector(buildRelationContent(rel.text, groupPath), 'ki-relation', args.scope);
-            }
+        // P-2：删旧全部成功 → 更新 memoryIds 字段为新 okIds；删旧失败 → 字段保持旧值（无孤儿向量）
+        const rel = relationsCache.groups[groupPathFile]?.hot_relations.find((r) => r.text === fileRelation);
+        if (rel) {
+          if (deleteOk) {
+            rel.memoryIds = okIds;
+            rel.memoryId = okIds.length > 0 ? okIds[0] : undefined;
+          } else {
+            // 删旧失败：字段保持旧值（旧 id 仍在库中），不更新，告警提示增量未完成
+            errors.push({
+              path: e.path,
+              error: `[modify] 删旧向量部分失败，relation memoryIds 保持旧值（${oldIds.length} 个旧 id），可重新执行或 rebuild-vector`,
+            });
           }
         }
       } else {
@@ -460,6 +471,12 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
   const newSource = { ...existingSource, commit: newCommit };
   setSource(args.scope, newSource);
   logPhaseDone(4, TOTAL_PHASES, `source 已更新，commit=${newCommit.slice(0, 8)}`);
+
+  // REQ-02 生命周期③：增量成功导入清除中断标记（diff 基于完整库的前提已满足）
+  try {
+    const { releaseImportLock } = await import('./interrupt.js');
+    releaseImportLock(args.scope);
+  } catch { /* 清理失败不阻断 */ }
 
   const total = diff.stats.added + diff.stats.modified + diff.stats.deleted;
   logSummary(`增量直连完成：total=${total}  added=${added}  modified=${modified}  deleted=${deleted}  errors=${errors.length}`);

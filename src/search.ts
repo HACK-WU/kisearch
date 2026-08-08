@@ -9,11 +9,12 @@
  */
 
 import { Command } from 'commander';
-import { validateScope } from './lib/scope.js';
+import { validateScope, getLocalKbDir } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorSearch, vectorListTags, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
+import { readJson } from './lib/store.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 
 /**
@@ -33,13 +34,38 @@ function tagPriority(tag: string): number {
 export interface SearchHit extends VectorSearchResult {
   /** 所属 Group 路径（relations-cache 反查，可能缺失） */
   group?: string;
-  /** 原文全文（relations-cache 的 hot_relation.text，可能缺失） */
+  /** 文件级 relation（方案 D：basename 去扩展名，可能缺失） */
   relation?: string;
+  /** REQ-09：原文是否成功获取 */
+  originalRetrieved?: boolean;
+  /** REQ-09：原文内容（local KB 文件级原文，未清洗；获取失败时缺失） */
+  original?: string;
+  /** REQ-09：原文获取失败提示（精简，与 REQ-02 引导去重） */
+  originalHint?: string;
+  /** REQ-09：同一文件多 chunk 命中去重标记（原文已在前一条返回，本条省略） */
+  deduplicated?: boolean;
 }
 
 export type SearchResult =
   | { ok: true; scope: string; results: SearchHit[] }
   | { ok: false; error: string; degraded?: boolean };
+
+/** REQ-09：从 local KB 按 (group, relation) 取文件级原文；失败返回 null + hint */
+function fetchOriginal(scope: string, group: string, relation: string): { original: string; hint?: string } | null {
+  try {
+    const localKbPath = getLocalKbDir(scope, group);
+    const localKb = readJson<Record<string, string>>(localKbPath);
+    const original = localKb?.[relation] ?? null;
+    if (original) return { original };
+    // 本地 KB 缺失该 relation → 精简提示（REQ-09 与 REQ-02 引导去重，不重复完整恢复文案）
+    return {
+      original: '',
+      hint: `原文不可用：本地 KB 缺失 relation "${relation}"（可尝试 sync-relation 或 rebuild-vector）`,
+    };
+  } catch {
+    return { original: '', hint: '原文不可用：本地 KB 读取异常' };
+  }
+}
 
 export async function executeSearch(params: {
   scope?: string;
@@ -47,14 +73,16 @@ export async function executeSearch(params: {
   limit?: number;
   threshold?: number;
   tags?: string;
+  /** REQ-09：是否返回原文（默认 true） */
+  includeOriginal?: boolean;
 }): Promise<SearchResult> {
   try {
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
     const scope = resolveScope(loadConfig(), params.scope);
     validateScope(scope);
 
-    // 向量服务可用性检测
-    const avail = await ensureVectorAvailable();
+    // 向量服务可用性检测（REQ-02：传入 scope 触发中断标记前置检测引导）
+    const avail = await ensureVectorAvailable(scope);
     if (!avail.available) {
       return {
         ok: false,
@@ -94,6 +122,7 @@ export async function executeSearch(params: {
 
     // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文
     // （getRelationMap 带 TTL+mtime 缓存：首次构建 O(N)，后续 O(1)）
+    const includeOriginal = params.includeOriginal !== false; // 默认 true（REQ-09）
     const map = getRelationMap(scope);
     const results: SearchHit[] = raw.map((r) => {
       const hit: SearchHit = { ...r };
@@ -101,9 +130,37 @@ export async function executeSearch(params: {
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
+        // REQ-09：原文召回（默认开启）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
+        if (includeOriginal && meta.group && meta.relation) {
+          const fetched = fetchOriginal(scope, meta.group, meta.relation);
+          if (fetched?.original) {
+            hit.originalRetrieved = true;
+            hit.original = fetched.original;
+          } else {
+            hit.originalRetrieved = false;
+            hit.originalHint = fetched?.hint ?? '原文不可用';
+          }
+        }
       }
       return hit;
     });
+
+    // REQ-09：同一文件多 chunk 命中去重（保留首个命中，其余 original 置空避免重复返回）
+    if (includeOriginal) {
+      const seen = new Set<string>();
+      for (const hit of results) {
+        const key = hit.group && hit.relation ? `${hit.group}/${hit.relation}` : '';
+        if (key && seen.has(key)) {
+          // 同一文件多 chunk 命中：原文已在前一条返回，本条省略 original；
+          // originalRetrieved 保持 true（非失败），并标注 deduplicated 供消费方区分
+          delete hit.original;
+          hit.originalRetrieved = true;
+          hit.deduplicated = true;
+        } else if (key) {
+          seen.add(key);
+        }
+      }
+    }
 
     return { ok: true, scope, results };
   } catch (err) {
@@ -125,6 +182,7 @@ program
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
+  .option('--no-original', '不返回原文（默认返回 local KB 文件级原文，REQ-09）')
   .action(async (query: string | undefined, opts) => {
     const finalQuery = query ?? opts.query;
     if (!finalQuery) {
@@ -139,6 +197,7 @@ program
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       threshold: parsedThreshold,
       tags: opts.tags,
+      includeOriginal: opts.original !== false,
     });
     console.log(JSON.stringify(result, null, 2));
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出

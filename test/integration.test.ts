@@ -355,14 +355,16 @@ describe('导入路径', () => {
     assert.ok(importResult.groups.includes('wiki'));
     assert.ok(importResult.groups.includes('wiki/监控'));
 
-    // 验证 relations-cache 已写入（原文直导：chunkRelation 命名）
+    // 验证 relations-cache 已写入（方案 D：文件级 relation + memoryIds 多值）
     const { readJson } = await import('../src/lib/store.js');
     const { getRelationsCachePath } = await import('../src/lib/scope.js');
     const cache = readJson<any>(getRelationsCachePath(scope))!;
-    const deployRel = cache.groups['wiki'].hot_relations.find((r: any) => r.text === '部署-01');
-    assert.ok(deployRel, '部署.md 应按文件名-N 命名 chunk relation');
-    assert.strictEqual(deployRel.sourcePath, '部署.md#1');
+    const deployRel = cache.groups['wiki'].hot_relations.find((r: any) => r.text === '部署');
+    assert.ok(deployRel, '部署.md 应按文件级 relation（basename 去扩展名）命名');
+    assert.strictEqual(deployRel.sourcePath, '部署.md');
     assert.strictEqual(deployRel.isImported, true);
+    // 向量化成功 → memoryIds 多值（单 chunk 文件 = 1 个 id）
+    assert.ok(Array.isArray(deployRel.memoryIds) && deployRel.memoryIds.length >= 1, '文件级 relation 应挂 memoryIds 多值');
   });
 
   it('scan-kb import 增量直连（git diff 驱动）', async () => {
@@ -421,11 +423,11 @@ describe('导入路径', () => {
     const allRels = Object.values(cache.groups).flatMap((g: any) => g.hot_relations);
     const texts = allRels.map((r: any) => r.text);
 
-    // keep.md 保留；new.md 新增；change.md 修改后仍在（新 chunk）
-    assert.ok(texts.some((t: string) => t === 'keep-01'), 'keep.md 应保留');
-    assert.ok(texts.some((t: string) => t === 'new-01'), 'new.md 应新增');
-    assert.ok(texts.some((t: string) => t === 'change-01'), 'change.md 修改后新 chunk 应存在（回归：不得被删旧误删）');
+    // keep.md 保留；new.md 新增；change.md 修改后仍在（文件级 relation + memoryIds 更新）
+    assert.ok(texts.some((t: string) => t === 'keep'), 'keep.md 应保留');
+    assert.ok(texts.some((t: string) => t === 'new'), 'new.md 应新增');
+    assert.ok(texts.some((t: string) => t === 'change'), 'change.md 修改后文件级 relation 应存在（回归：不得被删旧误删）');
     // remove.md 删除
-    assert.ok(!texts.some((t: string) => t === 'remove-01'), 'remove.md 应删除');
+    assert.ok(!texts.some((t: string) => t === 'remove'), 'remove.md 应删除');
   });
 });

@@ -99,15 +99,17 @@
 1. **向量语义检索**
    ```bash
    ki search --scope <scope> --query "<用户问题>"
+   # 默认返回 local KB 文件级原文（REQ-09）；--no-original 关闭
    ```
    
    输出包含：
    - 命中的 `relation` / `group`（原文定位字段，按 memoryId 反查 relations-cache）
-   - `content`（原文全文 / chunk）
+   - `original`（**文件级原文**，local KB 未清洗原文；同一文件多 chunk 命中去重只返回一次）
+   - `originalRetrieved` / `originalHint`（原文获取失败时降级提示，不抛错）
 
 2. **定位原文**
-   - 命中结果反查 `relations-cache` 得到 `relation` / `group`
-   - `ki get-module-info --scope <scope> --group <group> --relation <relation>` 读取原文
+   - 命中结果反查 `relations-cache` 得到 `relation` / `group`（文件级）
+   - `ki get-module-info --scope <scope> --group <group> --relation <relation>` 读取原文（按文件级 relation 返回整文件原文）
 
 3. **调用 MCP memory_recall**（检索外部记忆）
    

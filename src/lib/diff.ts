@@ -77,14 +77,12 @@ function getGitInfo(sourceDir: string): GitInfo | null {
 }
 
 /**
- * 从 relations-cache.json 构造 文件级 path → memoryId[] 多值映射（D-2 方案②）
+ * 从 relations-cache.json 构造 文件级 path → memoryId[] 多值映射（方案 D 字段直读 + 旧 #N 聚合回退）
  *
- * relations-cache 的 hot_relation.sourcePath 为 chunk 粒度（`foo.md#1`、`foo.md#2`），
- * 按 `#` 前缀聚合到文件级 key（`foo.md`），得到该文件的全部 chunk memoryId：
- *   Map{ "docs/foo.md" → ["m1", "m2", "m3"] }
- *
- * 兼容旧数据：sourcePath 为文件级（无 `#`）时，key 即 sourcePath 本身。
- * 兼容未扩展：relations-cache 无 memoryId 时返回空 Map（调用方自行处理空值）。
+ * 方案 D（REQ-20260807-001）：文件级 relation 挂 `memoryIds` 多值 + `sourcePath` 存文件路径（无 #N）。
+ *   优先读 `memoryIds` 字段（文件级 key 直读）：Map{ "docs/foo.md" → ["m1","m2","m3"] }
+ *   回退旧数据（chunk 级 sourcePath `foo.md#N` 按 # 前缀聚合；或单值 memoryId）。
+ * 兼容：无字段 relation（sync-relation 手动写入，无 memoryIds）→ 返回空数组（不可被 search 向量召回）。
  */
 export function buildMemoryIdMap(scope: string): Map<string, string[]> {
   const cachePath = getRelationsCachePath(scope);
@@ -93,13 +91,24 @@ export function buildMemoryIdMap(scope: string): Map<string, string[]> {
 
   try {
     const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
-      groups?: Record<string, { hot_relations?: Array<{ text?: string; memoryId?: string; sourcePath?: string }> }>;
+      groups?: Record<string, { hot_relations?: Array<{ text?: string; memoryId?: string; memoryIds?: string[]; sourcePath?: string }> }>;
     };
     for (const group of Object.values(cache.groups || {})) {
       for (const rel of group.hot_relations || []) {
         const sp = rel.sourcePath;
-        if (!sp || !rel.memoryId) continue;
-        // 按 `#` 前缀聚合到文件级 key；无 `#`（旧数据）key 即 sp
+        if (!sp) continue;
+        // 方案 D：优先读 memoryIds 多值字段（文件级 sourcePath 直读）
+        if (Array.isArray(rel.memoryIds) && rel.memoryIds.length > 0) {
+          const fileKey = sp; // 方案 D：sourcePath 无 #N，key 即文件路径
+          const list = map.get(fileKey) || [];
+          for (const mid of rel.memoryIds) {
+            if (mid && !list.includes(mid)) list.push(mid);
+          }
+          if (list.length > 0) map.set(fileKey, list);
+          continue;
+        }
+        // 回退旧数据：单值 memoryId + chunk 级 sourcePath（#N）按前缀聚合
+        if (!rel.memoryId) continue;
         const hashIdx = sp.indexOf('#');
         const fileKey = hashIdx >= 0 ? sp.slice(0, hashIdx) : sp;
         const list = map.get(fileKey);

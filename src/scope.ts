@@ -19,7 +19,7 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
-import { listAllScopes, getKbDir, validateScope } from './lib/scope.js';
+import { listAllScopes, getKbDir, getRelationsCachePath, validateScope } from './lib/scope.js';
 import { loadConfig, removeScopeFromConfigFile } from './lib/config.js';
 import {
   vectorListScopes,
@@ -60,6 +60,26 @@ export interface ScopeEntry {
   kb: boolean;         // 存在于 KB 目录层
   vector: boolean;     // 存在于向量语义层
   registered: boolean; // 在 config.scopes 中注册
+  /** KB 层文档数（relations-cache 的 hot_relations 总数 = 文件级 relation 数；无 cache 时为 0） */
+  wikiCount: number;
+}
+
+/** 统计 scope 的 KB 层文档数（读 relations-cache 的 hot_relations 总数） */
+function countWikiDocs(scope: string): number {
+  const cachePath = getRelationsCachePath(scope);
+  if (!fs.existsSync(cachePath)) return 0;
+  try {
+    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
+      groups?: Record<string, { hot_relations?: unknown[] }>;
+    };
+    let n = 0;
+    for (const g of Object.values(cache.groups || {})) {
+      n += (g?.hot_relations?.length ?? 0);
+    }
+    return n;
+  } catch {
+    return 0; // 损坏 cache 视为 0
+  }
 }
 
 export type ScopeListResult = {
@@ -98,6 +118,7 @@ export async function executeScopeList(): Promise<ScopeListResult> {
     kb: kbScopes.has(s),
     vector: vectorScopes.has(s),
     registered: Object.prototype.hasOwnProperty.call(config.scopes, s),
+    wikiCount: kbScopes.has(s) ? countWikiDocs(s) : 0,
   }));
 
   return {
@@ -215,9 +236,33 @@ program.name('scope').showHelpAfterError().description('scope 生命周期管理
 program
   .command('list')
   .description('列出所有 scope（两层并集，标注所在层）')
-  .action(async () => {
+  .option('--json', '以 JSON 格式输出（脚本解析用）', false)
+  .action(async (opts) => {
     const result = await executeScopeList();
-    console.log(JSON.stringify(result, null, 2));
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      await closeEngine();
+      return;
+    }
+    // 人类可读表格输出（默认）——动态列宽适配长 scope 名
+    const nameWidth = Math.max(10, ...result.scopes.map((s) => s.scope.length));
+    const header = `  ${'scope'.padEnd(nameWidth)}  KB     Vector   Registered  Docs`;
+    const sep = '─'.repeat(header.length + 2);
+    console.log(`\nScopes (${result.count}) — mode: ${result.scopeMode}`);
+    console.log(sep);
+    console.log(header);
+    console.log(sep);
+    for (const s of result.scopes) {
+      console.log(
+        `  ${s.scope.padEnd(nameWidth)}  ${s.kb ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.vector ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.registered ? '✓'.padEnd(9) : '✗'.padEnd(9)}  ${s.wikiCount}`
+      );
+    }
+    console.log(sep);
+    if (!result.vectorAvailable) {
+      console.log(`\n⚠ 向量层不可用：${result.vectorReason || '未知原因'}`);
+      console.log('  （scope 列表来自 KB 目录层 + config；向量层数据暂不可见）');
+    }
+    console.log('');
     await closeEngine();
   });
 

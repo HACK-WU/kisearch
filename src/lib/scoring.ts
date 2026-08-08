@@ -27,6 +27,9 @@ export interface Relation {
   memoryId?: string;
   /** S-04+ 新增：原始文件相对路径（meta.sourceDir 的相对 posix 路径），用于 diff 关联 memoryId */
   sourcePath?: string;
+  /** 方案 D（REQ-20260807-001）新增：文件级 relation 的全部 chunk memoryId（多值）；
+   *  导入链路（full/incremental）使用多值；sync-relation 等旧链路仍用单值 memoryId */
+  memoryIds?: string[];
 }
 
 // ─── 评分计算 ───

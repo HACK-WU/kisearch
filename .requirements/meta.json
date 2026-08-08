@@ -96,15 +96,15 @@
       "id": "REQ-20260717-001",
       "feature": "KiSearch基于zvec(Node)构建常驻MCP向量服务",
       "created": "2026-07-17",
-      "updated": "2026-07-20",
-      "status": "实施中",
+      "updated": "2026-08-08 14:49:11",
+      "status": "已完成",
       "tags": [
         "refactor",
         "engine-swap",
         "mcp",
         "performance"
       ],
-      "version": 6,
+      "version": 7,
       "depends_on": [],
       "changelog": [
         "初始创建",
@@ -113,7 +113,8 @@
         "2026-07-20 v3: 完成 ZvecEngine 基座实现级技术设计（父+6 子文档），锁定方案 X：embedding 主线程 + Transferable",
         "2026-07-20 v4: 设计评审：20 项问题（4 阻断+2 疑似+8 警告+6 建议）全部修复，评审通过",
         "2026-07-20 v5: ZvecEngine 基座实现完成（14/14 测试通过）：S-01 schema + S-02 filter + S-03 embedding + S-04 worker/proxy + S-05 search + S-06 engine；tsc 编译通过，0 lint 错",
-        "2026-07-20 v6: zvec-base-module.md 升 v6：回写 6 项实现期契约修正（probe 超时/open 预检/无 collectionName/zvec undefined 拒绝/vectors 必填/update 仅 fields 不可实现/embed 失败剔除）"
+        "2026-07-20 v6: zvec-base-module.md 升 v6：回写 6 项实现期契约修正（probe 超时/open 预检/无 collectionName/zvec undefined 拒绝/vectors 必填/update 仅 fields 不可实现/embed 失败剔除）",
+        "2026-08-08 14:49:11 v7: 2026-08-08 v7: 需求完成。ZvecEngine 基座实现落地（S-01 schema + S-02 filter + S-03 embedding + S-04 worker/proxy + S-05 search + S-06 engine，14/14 测试通过），zvec-base-module 实现期契约修正 6 项回写；项目全链路切换到 zvec 引擎（search/store/bulk-store/import 等），lancedb 依赖移除"
       ],
       "commits": [],
       "docs": [
@@ -202,17 +203,18 @@
       "id": "REQ-20260722-001",
       "feature": "ki管理命令系列-scope与doc",
       "created": "2026-07-22",
-      "updated": "2026-07-22",
-      "status": "已确认",
+      "updated": "2026-08-08 14:49:10",
+      "status": "已完成",
       "tags": [
         "feature",
         "cli",
         "management"
       ],
-      "version": 1,
+      "version": 2,
       "depends_on": [],
       "changelog": [
-        "初始创建"
+        "初始创建",
+        "2026-08-08 14:49:10 v2: 2026-08-08 v2: 需求完成。ki scope list/delete/clear + ki doc list/delete 落地（src/scope.ts / src/doc.ts / src/tag.ts）：scope 两层（KB目录+向量语义）并集枚举与标注、破坏性操作强制 --yes + 删前预览、default 删除保护、--tags 按 tag 清理；ki_scope_list MCP 工具同步"
       ],
       "commits": [],
       "docs": [],
@@ -224,16 +226,17 @@
       "id": "REQ-20260723-001",
       "feature": "src负向需求分析",
       "created": "2026-07-23",
-      "updated": "2026-07-23",
-      "status": "草案",
+      "updated": "2026-08-08 14:49:09",
+      "status": "已完成",
       "tags": [
         "refactor"
       ],
-      "version": 2,
+      "version": 3,
       "depends_on": [],
       "changelog": [
         "初始创建",
-        "2026-07-23 v2: 落盘 src 负向需求分析报告（A/C/D 三范围，15 个负向场景）"
+        "2026-07-23 v2: 落盘 src 负向需求分析报告（A/C/D 三范围，15 个负向场景）",
+        "2026-08-08 14:49:09 v3: 2026-08-08 v3: 需求完成。src 负向需求分析报告落盘（A/C/D 三范围，15 个负向场景：P0 3 / P1 5 / P2 4 / P3 2），为后续命令护栏/并发锁/恢复引导等实现提供依据"
       ],
       "commits": [],
       "docs": [
@@ -250,17 +253,18 @@
       "id": "REQ-20260805-001",
       "feature": "ki-search 输出增强与全文标记",
       "created": "2026-08-05",
-      "updated": "2026-08-05",
-      "status": "已确认",
+      "updated": "2026-08-08 14:49:08",
+      "status": "已完成",
       "tags": [
         "feature",
         "search",
         "vector"
       ],
-      "version": 1,
+      "version": 2,
       "depends_on": [],
       "changelog": [
-        "初始创建：需求落盘（含上下文与当前进度）"
+        "初始创建：需求落盘（含上下文与当前进度）",
+        "2026-08-08 14:49:08 v2: 2026-08-08 v2: 需求完成。search 输出增强落地：memoryId→relation-map 反查输出 group/relation/keywords 定位字段 + isFullText 标记（Relation 接口/upsertRelation/syncSingleRelation 打标 + 反查缓存 TTL/mtime 双失效）；content 纯化（去 [摘要]/[关键词]/[路径] 手动拼接，底层 keywords 自动拼接保留保证 BM25）；默认 tags 搜索全部 + per-tag 限流 + TAG_PRIORITY 排序。注：isFullText 字段后续随 REQ-20260806-001 删除（ai-results 链路整体移除）"
       ],
       "commits": [],
       "docs": [
@@ -277,12 +281,12 @@
       "id": "REQ-20260806-001",
       "feature": "外部Wiki直接导入与自动切分",
       "created": "2026-08-06 15:07:17",
-      "updated": "2026-08-07 11:59:50",
-      "status": "实施中",
+      "updated": "2026-08-08 14:46:58",
+      "status": "已完成",
       "tags": [
         "feat"
       ],
-      "version": 18,
+      "version": 19,
       "depends_on": [],
       "changelog": [
         "初始创建",
@@ -302,7 +306,8 @@
         "2026-08-06 18:14:26 v15: 批次1完成：chunker切分器(9测试)+handleDirectImport直导+scan-kb import --source+setSource支持空commit+chunkSize/chunkOverlap持久化+GroupIndexSource扩展+setScopeSourceDir(H-20)+ScanResultEntry.chunkRelation。端到端验证：deploy.md 14.7KB→10 chunks、relation=deploy-01..10、sourcePath=docs/deploy.md#N、检索alarm-01命中",
         "2026-08-06 18:41:58 v16: 实施进度落盘：批次0-2完成明细+端到端验证结果+阻塞点(向量库锁)+待办(批次3-5)",
         "2026-08-07 09:52:14 v17: 批次5完成：修复 test-config 默认模型为 Qwen3-Embedding-8B（text-embedding-3-small 不存在导致向量化失败）、incremental-direct 测试 git gpgsign=false；删除 2 个 ai-results fixtures；e2e-guide/update-kb/build-kb/workflows/cli/query-kb/manage-index/verify-index/architecture/tags-design/backup-restore/memory-agent-guide/codekb-agent-guide/memory-system-dataflow/vector-engine-mem 文档同步为直导+git diff 增量；5 个 skill（ki-foundation/snippet-memory/memory-skill/codekb-skill/update-kb）同步。全量测试 339/339 全绿",
-        "2026-08-07 11:59:50 v18: 技术设计遗留收尾：P-7 单文件chunk数上限(MAX_CHUNKS_PER_FILE=500, import/incremental 双处防护)✅；向量库FTS索引损坏(segment stats加载失败,误删RocksDB LOCK所致)→备份删除/root/.ki/vector→test_data monitor快照还原KB→rebuild-vector重建300向量(content137+relation137+path26, failed0)✅ 路径向量验证闭环；检索/doc list/FTS均正常"
+        "2026-08-07 11:59:50 v18: 技术设计遗留收尾：P-7 单文件chunk数上限(MAX_CHUNKS_PER_FILE=500, import/incremental 双处防护)✅；向量库FTS索引损坏(segment stats加载失败,误删RocksDB LOCK所致)→备份删除/root/.ki/vector→test_data monitor快照还原KB→rebuild-vector重建300向量(content137+relation137+path26, failed0)✅ 路径向量验证闭环；检索/doc list/FTS均正常",
+        "2026-08-08 14:46:58 v19: 2026-08-08 v19: 需求全部完成，状态置已完成。批次0-5（基线/切分直导/增量/删除/CLI/配套文档与技能同步）全量落地，技术设计遗留收尾（P-5 干净、P-7 MAX_CHUNKS_PER_FILE=500 双处防护、向量库重建验证闭环、路径向量补验）；P-6（FTS 规模实测）评估为可选未做。全量测试 339/339 全绿"
       ],
       "commits": [],
       "branch": null,
@@ -449,43 +454,53 @@
         "2026-08-07 16:30:48 v3: 新增 REQ-07 自定义数据清洗钩子（config 注入外部清洗脚本，内置规则+hooks 管道链，--no-clean 逃生阀）",
         "2026-08-07 17:51:18 v4: 完成数据清洗方案场景推演（REQ-06/07）",
         "2026-08-07 v5: 场景推演修正（基于源码核实 import.ts:479-486 / incremental.ts:382）：v1 误判 local KB 存原文，实际 phase4WriteRelations 因 e.path 含 #N 路径不存在降级用 chunk.text（清洗后）→ S6 反转为阻断 B1，破坏 REQ-002 原文召回前提；新增 URL 误伤/frontmatter 闭合校验等发现；阻断1/警告4/建议4，结论改为不通过",
-        "2026-08-07 v6: 质疑审查（challenger）：B1 根因/影响面/定级均认可，但修复方案 A 有副作用（local KB 膨胀+语义错配），提出方案 C（分离清洗与切分：local KB 存原文 chunk、向量化前单独清洗）；补 cleanMarkdownText 异常兜底遗漏"
+        "2026-08-07 v6: 质疑审查（challenger）：B1 根因/影响面/定级均认可，但修复方案 A 有副作用（local KB 膨胀+语义错配），提出方案 C（分离清洗与切分：local KB 存原文 chunk、向量化前单独清洗）；补 cleanMarkdownText 异常兜底遗漏",
+        "2026-08-08 v7: 方案 D 定稿（local KB 文件级原文 + memoryIds 多值）：用户确认 O1 relation 冲突跳过、O2 存量不兼容重建；新增 REQ-08 格式白名单 + 大小限制（config maxFileSize 默认 1MB）；demo 验证 15/15 通过；真实文档清洗发现规则细化（空引用/孤儿标题/-L 行号/孤立语言标记）；合并 REQ-20260807-002（ki-search 返回原文，以本需求设计为准，删除原条目）；--no-vector 仅跳过向量化、local KB 必须写入；进度分母改文件数",
+        "2026-08-08 v8: auto-review + challenger 二次质疑定稿：清洗规则执行顺序（代码块先剥→路径仅代码块外，意见2）；REQ-09 originalHint 与 REQ-02 引导去重（意见1）；进度按 local KB 写入计（意见3）；前置检查先于写 local KB（S-1）；--no-clean+--no-vector 组合、sync-relation 无 memoryIds 字段兼容（S-3）；测试方案 +4 用例；demo/clean.mjs 顺序修复（15/15 通过）",
+        "2026-08-08 v9: 场景推演（需求文档模式，12 场景）：🔴2（REQ-01 SIGKILL 不可捕获与 REQ-04 kill -9 矛盾、P-2 删旧失败孤儿向量）/🟡3（标记生命周期、--no-vector 混用语义、导入并发竞态），结论不通过",
+        "2026-08-08 v10: 推演问题回写（需求 v8）：REQ-01 双路径（SIGTERM 写标记 + SIGKILL probe 兜底）；REQ-02 标记清除时机（重建/成功导入后/手动）；REQ-06 P-2 删旧先删后更原子顺序 + 孤儿向量防护；--no-vector 混用语义；并发导入拒绝；测试方案 +6 用例",
+        "2026-08-08 v11: 增量推演回写（需求 v9，N1-N5）：REQ-02 probe 触发命令范围 + incremental 标记清除；REQ-06 删旧部分失败中间态（id 清单 + 增量未完成标记）+ 导入锁文件选型 + SIGKILL 锁残留清理；REQ-07 hook 子进程中断终止 + 中断走标记不触发 P-7 回滚；测试方案 +6 用例",
+        "2026-08-08 v12: 创建分批实现计划（7 批：基线/清洗/数据模型/导入链路/中断防护/召回+hook/配套）",
+        "2026-08-08 v13: 批次 0-6 全部实现完成：clean.ts 清洗、方案 D 数据模型（文件级 relation+memoryIds）、导入链路重构+REQ08/05、中断防护 REQ01-04、REQ09 原文召回+REQ07 hook、docs 同步+新增测试；全量测试 exit 0 全绿",
+        "2026-08-08 v14: code-review 修复（P0）：中断标记带真实进度 + 中断路径只清锁保留标记（clearImportLock）；search 去重命中 originalRetrieved:true + deduplicated 标记；删 clean.ts 死代码；全量测试 exit 0",
+        "2026-08-08 v15: 测试补齐——单测（search-original 4 / memory-id-map 6 / import-scheme-d 4）+ e2e（scheme-d-cli 4 真实 embedding）；修复 stats.skipped 未含冲突计数；全量测试 exit 0 全绿"
       ],
       "commits": [],
       "branch": null,
       "docs": [
         {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "design/implementation-plan.md",
+          "type": "design"
+        },
+        {
+          "path": "reference/code-survey.md",
+          "type": "reference"
+        },
+        {
           "path": "review/scenario-rehearsal.md",
           "type": "rehearsal"
         },
         {
-          "path": "review/challenge-report.md",
-          "type": "review"
+          "path": "demo/verify-report.md",
+          "type": "demo"
+        },
+        {
+          "path": "demo/demo-main.mjs",
+          "type": "demo"
+        },
+        {
+          "path": "demo/clean.mjs",
+          "type": "demo"
+        },
+        {
+          "path": "demo/chunker.mjs",
+          "type": "demo"
         }
       ],
-      "role": "standalone",
-      "parent_id": null,
-      "child_ids": []
-    },
-    "2026-08-07-ki-search返回原文支持": {
-      "id": "REQ-20260807-002",
-      "feature": "ki-search返回原文支持",
-      "created": "2026-08-07 16:42:51",
-      "updated": "2026-08-07 16:43:55",
-      "status": "草案",
-      "tags": [
-        "feat",
-        "search"
-      ],
-      "version": 2,
-      "depends_on": [],
-      "changelog": [
-        "初始创建",
-        "2026-08-07 16:43:55 v2: REQ-04 降级策略细化：新增 originalHint 失败提示（无定位信息/本地KB缺失+恢复引导/异常原因），MCP/CLI 结构化可见"
-      ],
-      "commits": [],
-      "branch": null,
-      "docs": [],
       "role": "standalone",
       "parent_id": null,
       "child_ids": []

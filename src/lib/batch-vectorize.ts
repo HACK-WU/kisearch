@@ -16,6 +16,7 @@
 
 import type { ScanResultEntry } from './ai-results.js';
 import { vectorStore, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { logProgress } from './progress.js';
 
 const VECTORIZE_TAG = 'ki-search';
 
@@ -125,6 +126,9 @@ export async function deleteMemory(
  * @param options  选项
  * @returns        ok Map（path → 真实 docId）+ errors（失败明细）
  */
+/** 向量化分批大小（REQ-05 O-03：批量 embed 分批提交，避免一次性提交全部条目无中间态） */
+const VECTORIZE_BATCH_SIZE = 200;
+
 export async function bulkVectorize(
   entries: ScanResultEntry[],
   scope: string,
@@ -135,29 +139,37 @@ export async function bulkVectorize(
 
   if (entries.length === 0) return { ok, errors };
 
-  try {
-    const result = await vectorBulkStore({
-      scope,
-      entries: entries.map((e) => ({
-        text: buildVectorizeContent(e),
-        tags: VECTORIZE_TAG,
-      })),
-    });
-    for (const item of result.results) {
-      const entry = entries[item.index];
-      if (!entry) continue;
-      if (item.success && item.memoryId) {
-        ok.set(entry.path, item.memoryId);
-      } else {
-        errors.push({ path: entry.path, error: item.error || 'unknown error' });
+  // REQ-05 O-03：分批提交（200 条/批）+ 批间进度反馈（引擎内部批量 embed 无中间态，分批后用户可感知进度）
+  const totalBatches = Math.ceil(entries.length / VECTORIZE_BATCH_SIZE);
+  for (let b = 0; b < totalBatches; b++) {
+    const slice = entries.slice(b * VECTORIZE_BATCH_SIZE, (b + 1) * VECTORIZE_BATCH_SIZE);
+    try {
+      const result = await vectorBulkStore({
+        scope,
+        entries: slice.map((e) => ({
+          text: buildVectorizeContent(e),
+          tags: VECTORIZE_TAG,
+        })),
+      });
+      for (const item of result.results) {
+        const entry = slice[item.index];
+        if (!entry) continue;
+        if (item.success && item.memoryId) {
+          ok.set(entry.path, item.memoryId);
+        } else {
+          errors.push({ path: entry.path, error: item.error || 'unknown error' });
+        }
+      }
+    } catch (err) {
+      const errMsg = `bulk-store 失败: ${(err as Error).message}`;
+      for (const entry of slice) {
+        errors.push({ path: entry.path, error: errMsg });
       }
     }
-  } catch (err) {
-    const errMsg = `bulk-store 失败: ${(err as Error).message}`;
-    for (const entry of entries) {
-      errors.push({ path: entry.path, error: errMsg });
+    // 批间进度（仅多批时输出，避免单批场景刷屏）
+    if (totalBatches > 1) {
+      logProgress(Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
     }
-    return { ok, errors };
   }
 
   // 完成后一次性回调（供调用方增量保存进度）

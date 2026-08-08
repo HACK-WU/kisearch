@@ -88,7 +88,18 @@ function buildRelationMap(cachePath: string): Map<string, RelationMapEntry> {
     for (const [group, gd] of Object.entries(groups)) {
       const hot = gd?.hot_relations || [];
       for (const rel of hot) {
-        if (rel?.memoryId) {
+        if (!rel) continue;
+        // 方案 D：优先多值 memoryIds（文件级 relation 全部 chunk memoryId → 同一文件级 relation）
+        if (Array.isArray(rel.memoryIds) && rel.memoryIds.length > 0) {
+          for (const mid of rel.memoryIds) {
+            if (mid && !map.has(mid)) {
+              map.set(mid, { group, relation: rel.text });
+            }
+          }
+          continue;
+        }
+        // 回退旧数据：单值 memoryId
+        if (rel.memoryId) {
           map.set(rel.memoryId, {
             group,
             relation: rel.text,

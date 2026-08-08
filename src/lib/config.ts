@@ -35,11 +35,35 @@ export interface WikiSyncConfig {
   sourceDir?: string;
 }
 
+/** scopes.<scope>.clean：数据清洗配置（REQ-06/07/08） */
+export interface CleanConfig {
+  enabled: boolean;                       // 总开关（false 等效 --no-clean，连 hooks 一起关闭）
+  rules?: {
+    bom?: boolean;
+    frontmatter?: boolean;
+    htmlComment?: boolean;
+    mermaid?: boolean;
+    codePath?: boolean;
+    codeBlock?: boolean;
+    emptyChunk?: boolean;
+    keepShortSamples?: boolean;
+  };
+  hooks?: string[];                       // 外部清洗钩子（stdin→stdout 管道，按序执行）
+}
+
+/** scopes.<scope>.import：导入配置（REQ-08） */
+export interface ImportConfig {
+  extensions?: string[];                  // 格式白名单（默认 [.md]）
+  maxFileSize?: number;                   // 单文件大小上限（字节，默认 1MB）
+}
+
 export interface ScopeConfig {
   kbDir?: string;
   sourceDir?: string;
   rootName?: string;
   wikiSync?: WikiSyncConfig;
+  clean?: CleanConfig;                    // 【新增】数据清洗配置（REQ-06/07）
+  import?: ImportConfig;                  // 【新增】导入配置（REQ-08）
 }
 
 /** MCP HTTP 传输默认值（token 只走 CLI/env，绝不入配置文件） */
@@ -255,6 +279,35 @@ function parseAndExpand(configFile: string): KiConfig {
       if (sc && typeof sc === 'object') {
         const s = sc as Record<string, unknown>;
         const ws = s.wikiSync as Record<string, unknown> | undefined;
+        // 【新增】clean 配置（REQ-06/07）
+        let clean: CleanConfig | undefined;
+        if (s.clean && typeof s.clean === 'object') {
+          const c = s.clean as Record<string, unknown>;
+          const cRules = c.rules && typeof c.rules === 'object' ? c.rules as Record<string, unknown> : undefined;
+          clean = {
+            enabled: c.enabled !== false,  // 默认 true
+            rules: cRules ? {
+              bom: cRules.bom !== false,
+              frontmatter: cRules.frontmatter !== false,
+              htmlComment: cRules.htmlComment !== false,
+              mermaid: cRules.mermaid !== false,
+              codePath: cRules.codePath !== false,
+              codeBlock: cRules.codeBlock !== false,
+              emptyChunk: cRules.emptyChunk !== false,
+              keepShortSamples: cRules.keepShortSamples !== false,
+            } : undefined,
+            hooks: Array.isArray(c.hooks) ? (c.hooks as unknown[]).map(String) : undefined,
+          };
+        }
+        // 【新增】import 配置（REQ-08）
+        let imp: ImportConfig | undefined;
+        if (s.import && typeof s.import === 'object') {
+          const im = s.import as Record<string, unknown>;
+          imp = {
+            extensions: Array.isArray(im.extensions) ? (im.extensions as unknown[]).map(String) : undefined,
+            maxFileSize: im.maxFileSize !== undefined ? Number(im.maxFileSize) : undefined,
+          };
+        }
         scopes[name] = {
           kbDir: s.kbDir ? expandPath(String(s.kbDir), configDir) : undefined,
           sourceDir: s.sourceDir ? expandPath(String(s.sourceDir), configDir) : undefined,
@@ -263,6 +316,8 @@ function parseAndExpand(configFile: string): KiConfig {
             enabled: ws.enabled !== false,  // 默认 true
             sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
           } : undefined,
+          clean,
+          import: imp,
         };
       }
     }
@@ -323,6 +378,20 @@ export function getScopeRootName(config: KiConfig, scope: string): string | null
  */
 export function getScopeWikiSync(config: KiConfig, scope: string): WikiSyncConfig | null {
   return config.scopes[scope]?.wikiSync ?? null;
+}
+
+/**
+ * 【新增】获取指定 scope 的 clean 配置（无配置返回 null，调用方用默认值）
+ */
+export function getScopeCleanConfig(config: KiConfig, scope: string): CleanConfig | null {
+  return config.scopes[scope]?.clean ?? null;
+}
+
+/**
+ * 【新增】获取指定 scope 的 import 配置（无配置返回 null，调用方用默认值）
+ */
+export function getScopeImportConfig(config: KiConfig, scope: string): ImportConfig | null {
+  return config.scopes[scope]?.import ?? null;
 }
 
 /**

@@ -26,6 +26,7 @@ import {
 } from '../../dist/zvec-engine/index.js';
 import { loadConfig, getVectorDir, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
+import { interruptGuidance } from './interrupt.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -68,12 +69,14 @@ export interface VectorAvailableResult {
  */
 function lockedHint(dbPath: string): string {
   return (
-    `向量库被其他进程占用（${dbPath}）。\n` +
+    `向量库被其他进程占用或存在崩溃残留（${dbPath}）。\n` +
     `  处置方式：\n` +
     `  1) 若有 ki mcp/server 常驻进程在运行，请先停止它；\n` +
     `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
     `  3) 若进程已异常退出，锁会在片刻后自动释放，可稍后重试；\n` +
-    `  4) 若确认无任何进程占用仍持续报此错（如向量库目录为空/状态异常），\n` +
+    `  4) 若上次导入被中断（Ctrl+C/kill），可能存在 crash residue（如 "already exists"/"crash residue" 报错）——` +
+    `     可执行 ki rebuild-vector 或 ki restore <scope> --from-snapshot --rebuild-vector 全量重建恢复；\n` +
+    `  5) 若确认无任何进程占用仍持续报此错（如向量库目录为空/状态异常），\n` +
     `     可执行 ki restore <scope> --from-snapshot 重建向量库`
   );
 }
@@ -274,7 +277,14 @@ export const resetEngine = closeEngine;
  * - 被其他进程持锁 → 不可用（提示）
  * - 损坏 → 不可用（提示重建）
  */
-export async function ensureVectorAvailable(): Promise<VectorAvailableResult> {
+export async function ensureVectorAvailable(scope?: string): Promise<VectorAvailableResult> {
+  // REQ-02：中断标记前置检测（传入 scope 时）——中断后给出可执行恢复引导（不阻断，继续执行）
+  if (scope) {
+    const guidance = interruptGuidance(scope);
+    if (guidance) {
+      process.stderr.write(`  ⚠ ${guidance}\n`);
+    }
+  }
   // engine 单例已存在（open 中或已 open）：等它 settle 即可，跳过 probe
   if (_enginePromise) {
     try {

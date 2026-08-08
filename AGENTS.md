@@ -180,3 +180,9 @@ openclaw memory-pro stats
 - `.module-experts/`：PROJECT.md + INDEX.md + 6 个业务专家（存储配置/MCP 服务/向量引擎/检索客户端/知识导入/关系索引），expert-audit 验收未执行
 - zvec 官方 AI 向导文档：<https://zvec.org/llms.txt>
 - GitNexus：可用 `context`/`impact`/`query`/`cypher` 查询调用链
+
+---
+代码编写过程中，涉及到临时文件时，存放在当前工作区的.temp 目录下，只做新增操作操作。不做删除操作。
+
+---
+执行终端命令时，如果时具备一定时长的命令，比如10秒以上时，需要添加time out 命令前缀，避免进程挂住无法退出。

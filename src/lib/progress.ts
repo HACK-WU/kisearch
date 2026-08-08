@@ -138,13 +138,18 @@ export function logPhaseDone(phase: number, _totalPhases: number, message: strin
   process.stderr.write(`  ✓ ${message}\n`);
 }
 
-/** 覆写当前行展示进度条（apt install 风格） */
+/** 覆写当前行展示进度条（apt install 风格）；非 TTY 时逐行输出（REQ-05 O-05） */
 export function logProgress(current: number, total: number, detail?: string): void {
   const bar = formatProgressBar(current, total);
   const line = detail ? `${bar} ${detail}` : bar;
-  process.stderr.write(`\r  ${line}`);
-  if (current >= total) {
-    process.stderr.write('\n');
+  if (process.stderr.isTTY) {
+    process.stderr.write(`\r  ${line}`);
+    if (current >= total) {
+      process.stderr.write('\n');
+    }
+  } else {
+    // 非 TTY（stderr 重定向到文件/管道）：逐行输出，进度仍可读
+    process.stderr.write(`  ${line}\n`);
   }
 }
 
