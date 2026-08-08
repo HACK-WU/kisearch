@@ -2,7 +2,7 @@
  * relation-map.ts —— memoryId → { group, relation } 反查映射（带 TTL 缓存）
  *
  * 用途：ki search 命中向量层结果后，按 memoryId 反查 relations-cache.json，
- * 给每条结果附加所属 Group、原文全文，解决"content 只是摘要、无法定位原文"的问题。
+ * 给每条结果附加所属 Group、文件级 relation 名（方案 D：原文经 original 字段召回，此处仅定位）。
  * 批次 3（REQ-05/09）：keywords 与 isFullText 字段已删除。
  *
  * 缓存策略（方案 A + TTL，mtime/size 优先失效）：
@@ -23,7 +23,7 @@ import type { Relation } from './scoring.js';
 export interface RelationMapEntry {
   /** 所属 Group 路径 */
   group: string;
-  /** 原文全文（relations-cache 的 hot_relation.text） */
+  /** 文件级 relation 名（relations-cache 的 hot_relation.text，文件名去扩展名） */
   relation: string;
 }
 

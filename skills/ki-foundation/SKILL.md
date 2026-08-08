@@ -118,10 +118,12 @@ input: { scope, name: "Group名称(不含/)", parent: "父Group路径(可选)" }
 
 ```
 tool: ki_search
-input: { scope, query: "查询文本", limit(默认10), tags: "ki-search|ki-path|ki-relation", threshold(0-1,可选) }
+input: { scope, query: "查询文本", limit(默认10), tags: "ki-search|ki-path|ki-relation", threshold(0-1,可选), include_original(false,可选) }
 ```
 
-- 返回 `results[]`，每项含 `memoryId`、`content`、`score`
+- 返回 `results[]`，每项含 `memoryId`、`content`、`score`、`group`、`relation`
+- **默认仅返回向量匹配数据**（`content` 为向量层存储文本）；传 `include_original: true` 时额外返回 `original`（local KB 文件级原文，未清洗；同一文件多 chunk 命中去重只返回一次）
+- 需要完整原文时优先 `get-module-info`（按 group + relation 精确读取），而非 `include_original`
 - **显式指定 `tags` 可显著提升准确率**（见下方标签表）
 
 ### 4.8 单条向量存储

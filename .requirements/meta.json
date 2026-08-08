@@ -383,13 +383,13 @@
       "id": "REQ-20260806-003",
       "feature": "可视化前端界面",
       "created": "2026-08-06 17:30:58",
-      "updated": "2026-08-06 18:12:33",
+      "updated": "2026-08-08 22:11:32",
       "status": "设计中",
       "tags": [
         "feat",
         "ux"
       ],
-      "version": 5,
+      "version": 7,
       "depends_on": [
         "REQ-20260806-001"
       ],
@@ -398,7 +398,9 @@
         "2026-08-06 17:31:29 v2: 落盘需求挖掘报告",
         "2026-08-06 17:42:38 v3: 整理第三方依赖文档",
         "2026-08-06 17:55:43 v4: 完成交互设计落盘",
-        "2026-08-06 18:12:33 v5: 完成交互设计场景推演（含能力缺口决策）"
+        "2026-08-06 18:12:33 v5: 完成交互设计场景推演（含能力缺口决策）",
+        "2026-08-08 22:02:50 v6: 完成技术设计（5 个子需求）",
+        "2026-08-08 22:11:32 v7: 完成设计质疑审查（challenger）"
       ],
       "commits": [],
       "branch": null,
@@ -430,6 +432,34 @@
         {
           "path": "review/scenario-rehearsal.md",
           "type": "rehearsal"
+        },
+        {
+          "path": "design/DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S01_web静态服务与前端工程_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S02_健康与文档列表路由_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S03_导入接口_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S04_前端页面实现_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S05_zvec占位跳转与集成_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
         }
       ],
       "role": "standalone",

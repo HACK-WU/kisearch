@@ -38,7 +38,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     GI["group-index.json<br/>Group 树索引 + source 块"]
-    RC["relations-cache.json<br/>Relation 缓存 / 分区<br/>（含 memoryId / sourcePath）"]
+    RC["relations-cache.json<br/>Relation 缓存 / 分区<br/>（含 memoryIds / sourcePath）"]
     KB["kb/<scope>/<group>/index.json<br/>本地 KB 原文"]
     SI["scan-index.json<br/>[旧流程] 外部知识库扫描状态账本"]
     SP["scan-pending.json<br/>[旧流程] 扫描断点（临时）"]
@@ -54,7 +54,7 @@ flowchart LR
 | 文件 | 角色 | 读写方 | 生命周期 |
 |------|------|--------|---------|
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir`/`rootName`/`commit`） | 所有脚本读写 | 永久，随 Group 增删改 |
-| `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryId`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+| `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
 | `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |
@@ -81,9 +81,9 @@ S-01 新增字段，记录外部知识库来源信息，用于增量 diff：
 - `rootName`：导入时的顶层 Group 名称（与 `meta.rootName` 一致，作为 Group 树的第一层节点）
 - `commit`：导入时的 git HEAD commit，`scan-kb diff` 以此为基准检测变更
 
-### `relations-cache.json` 的 `memoryId` / `sourcePath`
+### `relations-cache.json` 的 `memoryIds` / `sourcePath`
 
-S-04 新增的关联字段，写入 `hot_relations` 每条 relation 中：
+关联字段写入 `hot_relations` 每条 relation（方案 D：`scan-kb import` 为**文件级 relation**，挂该文件全部 chunk 的 memoryIds 多值）：
 
 ```json
 {
@@ -93,12 +93,12 @@ S-04 新增的关联字段，写入 `hot_relations` 每条 relation 中：
   "useCount": 0,
   "lastUsedTime": null,
   "isImported": true,
-  "memoryId": "dbc6f2a0-d62b-47cb-835a-371942fdc08a",
+  "memoryIds": ["dbc6f2a0-d62b-47cb-835a-371942fdc08a", "9f3ab1c4-e2d5-48a0-b7c6-0a1b2c3d4e5f"],
   "sourcePath": "核心概念/Scope 隔离机制.md"
 }
 ```
 
-- `memoryId`：向量数据库中对应记录的 ID，用于 `modify`（delete+create）和 `delete` 操作
+- `memoryIds`：向量数据库中该文件全部 chunk 的 ID 列表（方案 D 多值）；`ki search` 命中任一 memoryId → 反查到同一文件级 relation → 返回文件原文（`--original`/`include_original` 开启时）。旧数据兼容单值 `memoryId` 字段
 - `sourcePath`：相对 `source.dir` 的 posix 路径，用于 `scan-kb diff` 关联变更文件
 
 ### `index.json` 的 key 因写入来源不同而异
@@ -134,7 +134,7 @@ flowchart LR
     EXT[外部 Markdown 知识库] --> IMP[scan-kb import --source<br/>原文直导 + 自动切分]
     IMP --> VEC[zvec 引擎向量化<br/>content = chunk 原文]
     IMP --> GI2[group-index.json<br/>Group 树 + source 块]
-    IMP --> RC2[relations-cache.json<br/>含 memoryId / sourcePath]
+    IMP --> RC2[relations-cache.json<br/>含 memoryIds / sourcePath]
     IMP --> KB2[本地 KB 原文]
 ```
 

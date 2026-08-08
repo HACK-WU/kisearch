@@ -62,6 +62,8 @@ interface McpCliOptions {
   port: number;
   token?: string;
   allowedHosts?: string[];
+  /** --web：HTTP 模式下同时提供前端静态页面（web/dist） */
+  web: boolean;
 }
 
 /** 帮助文本：-h/--help 与未知参数时共用 */
@@ -81,6 +83,7 @@ HTTP 模式参数：
   --port <port>                 端口（默认 7423）
   --token <value>               鉴权 Token（优先级 --token > KI_MCP_TOKEN > 托管文件）
   --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
+  --web                         HTTP 模式下同时提供前端静态页面（web/dist，浏览器访问 http://<host>:<port>/）
 
 提示：多个 IDE 共享同一持锁进程以避免向量库锁冲突，请用 ki mcp --http。`;
 
@@ -114,12 +117,13 @@ function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
 
 /** 解析 ki mcp 的命令行参数（无 --http 时走 stdio，行为不变） */
 function parseMcpArgs(args: string[]): McpCliOptions {
-  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status'];
+  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status', '--web'];
   detectUnknownFlags(args, known, ['--host', '--port', '--token', '--allowed-hosts'], MCP_HELP);
 
   const http = args.includes('--http');
+  const web = args.includes('--web');
   if (!http) {
-    return { http: false, host: '', port: 0 };
+    return { http: false, host: '', port: 0, web };
   }
 
   const config = loadConfig();
@@ -174,7 +178,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     process.stderr.write(`鉴权 Token 来源：${tokenSource}（优先级 --token > KI_MCP_TOKEN > 托管文件）。\n`);
   }
 
-  return { http: true, host, port, token: resolvedToken, allowedHosts };
+  return { http: true, host, port, token: resolvedToken, allowedHosts, web };
 }
 
 /** ki mcp token <generate|show|reset> 子命令：托管 Token 的生成、查看与轮换（JSON 输出契约） */
@@ -415,6 +419,7 @@ export async function startMcpServer(): Promise<void> {
       port: opts.port,
       token: opts.token,
       allowedHosts: opts.allowedHosts,
+      web: opts.web,
       buildServer: buildKiMcpServer,
       onShutdown: stopVersionGuard,
     });

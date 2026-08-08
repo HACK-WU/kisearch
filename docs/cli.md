@@ -559,7 +559,7 @@ ki search "仪表盘配置" -s monitor
 | 字段 | 含义 |
 |------|------|
 | `group` | 该记忆所属 Group 路径（定位到模块） |
-| `relation` | 原文全文（`hot_relation.text`） |
+| `relation` | 文件级 relation 名（`hot_relation.text`，文件名去扩展名；用于定位原文，非原文全文） |
 | `original` | local KB 文件级原文（**仅 `--original` 开启时**；`originalRetrieved` 标记获取成功，多 chunk 命中仅首条携带并标 `deduplicated`，失败降级 `originalHint`） |
 
 > 批次 3（REQ-05/09）：`keywords` 与 `isFullText` 字段已从 search 输出与 relations-cache 移除（keywords 机制、isFullText 标记全链路删除）。

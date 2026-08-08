@@ -63,7 +63,7 @@ KiSearch/
 | 文件 | 作用 | 备份优先级 |
 |------|------|-----------|
 | `group-index.json` | Group 树结构索引 + source 块 | **必须** |
-| `relations-cache.json` | Relation 缓存（含 memoryId） | **必须** |
+| `relations-cache.json` | Relation 缓存（含 memoryIds/sourcePath） | **必须** |
 | `scan-index.json` | 扫描状态账本 | 建议 |
 | `{group}/index.json` | 本地 KB 原文 | 建议 |
 

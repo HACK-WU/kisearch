@@ -24,6 +24,13 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { managedTokenInfo } from './mcp-token.js';
 
+// 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
+let apiHandlerPromise: Promise<typeof import('./mcp-http-api.js')> | null = null;
+function getApiHandler(): Promise<typeof import('./mcp-http-api.js')> {
+  apiHandlerPromise ??= import('./mcp-http-api.js');
+  return apiHandlerPromise;
+}
+
 /** 默认监听端口 */
 export const DEFAULT_MCP_HTTP_PORT = 7423;
 
@@ -62,6 +69,8 @@ export interface HttpServerOptions {
   buildServer: () => McpServer;
   /** 进程退出前的额外清理（如停止 version guard） */
   onShutdown?: () => void;
+  /** --web：同时提供前端静态页面（默认 webDir，浏览器访问 http://<host>:<port>/） */
+  web?: boolean;
 }
 
 /** 判断是否为回环地址（回环 → 免鉴权） */
@@ -174,6 +183,69 @@ function sendJson(res: http.ServerResponse, status: number, payload: unknown): v
   res.end(JSON.stringify(payload));
 }
 
+/** 静态文件 MIME 映射 */
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.json': 'application/json; charset=utf-8',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json; charset=utf-8',
+};
+
+/** 提供 --web 静态页面：GET 请求，支持 SPA fallback（非 /api /mcp 的 404 返回 index.html） */
+function serveStatic(res: http.ServerResponse, webDir: string, pathname: string): void {
+  try {
+    // 防路径穿越：decodeURIComponent 后 normalize，确保解析路径仍在 webDir 内
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(pathname);
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'Bad Request: invalid URL encoding' });
+      return;
+    }
+    const relative = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
+    const resolved = path.normalize(path.join(webDir, relative));
+    if (!resolved.startsWith(path.normalize(webDir))) {
+      sendJson(res, 403, { ok: false, error: 'Forbidden' });
+      return;
+    }
+
+    // 读文件；不存在时 SPA fallback（仅对非静态资源扩展名）
+    let content: Buffer;
+    try {
+      content = fs.readFileSync(resolved);
+    } catch {
+      // SPA fallback：非 /api /mcp 的 GET 404 都回 index.html（前端路由接管）
+      const index = path.join(webDir, 'index.html');
+      if (fs.existsSync(index)) {
+        content = fs.readFileSync(index);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(content);
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'Not Found' });
+      return;
+    }
+
+    const ext = path.extname(resolved).toLowerCase();
+    res.writeHead(200, { 'Content-Type': STATIC_MIME[ext] ?? 'application/octet-stream' });
+    res.end(content);
+  } catch {
+    sendJson(res, 500, { ok: false, error: 'Internal error serving static file' });
+  }
+}
+
 /**
  * MCP HTTP 服务构建参数（不含生命周期字段）。
  */
@@ -192,6 +264,8 @@ export interface HttpAppOptions {
   maxSessions?: number;
   /** 会话空闲超时毫秒（缺省 DEFAULT_SESSION_IDLE_MS） */
   sessionIdleMs?: number;
+  /** --web：静态文件根目录（缺省不提供静态页面）；为 null/undefined 时禁用 */
+  webDir?: string | null;
 }
 
 export interface McpHttpApp {
@@ -209,6 +283,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const { authEnabled, token, allowedHosts, buildServer, advertiseAddr } = opts;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+  const webDir = opts.webDir ?? null;
 
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -287,7 +362,20 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       return;
     }
 
+    // /api/*：方案 A 扩展接口（导入/健康/文档列表），与 MCP 会话隔离
+    // 注意：/api/* 未匹配的请求返回 JSON 404（不 fallback 到静态页面，防止前端 JSON.parse 崩溃）
+    if (url.pathname.startsWith('/api/')) {
+      const api = await getApiHandler();
+      await api.handleApiRequest(req, res, url, { authEnabled, token });
+      return;
+    }
+
     if (url.pathname !== '/mcp') {
+      // --web：提供前端静态页面（GET 请求走静态服务，含 SPA fallback）
+      if (webDir && req.method === 'GET') {
+        serveStatic(res, webDir, url.pathname);
+        return;
+      }
       sendJson(res, 404, { ok: false, error: 'Not Found' });
       return;
     }
@@ -493,12 +581,25 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     process.exit(0);
   }
 
+  // --web：静态目录默认 web/dist（相对于包根目录）；目录不存在时提示但不阻塞 MCP 启动
+  let webDir: string | null = null;
+  if (opts.web) {
+    webDir = path.join(getPackageRoot(), 'web', 'dist');
+    if (!fs.existsSync(path.join(webDir, 'index.html'))) {
+      process.stderr.write(
+        `警告：--web 已指定，但未找到前端构建产物（${path.join(webDir, 'index.html')}）。` +
+          `请先在 web/ 目录执行 npm install && npm run build。静态页面将不可访问，MCP 服务正常启动。\n`,
+      );
+    }
+  }
+
   const { httpServer, closeAllSessions } = createMcpHttpServer({
     authEnabled,
     token,
     allowedHosts,
     buildServer,
     advertiseAddr: { host, port },
+    webDir,
   });
 
   // ─── 监听 + 单例 lock 文件 ───
@@ -513,7 +614,9 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
 
   process.stderr.write(
     `KiSearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
-      `（鉴权：${authEnabled ? '开启，需 Bearer Token' : '关闭，回环绑定'}）\n`,
+      `（鉴权：${authEnabled ? '开启，需 Bearer Token' : '关闭，回环绑定'}）` +
+      (webDir ? `；前端页面：http://${host}:${port}/` : '') +
+      '\n',
   );
   if (allowedHosts && allowedHosts.length > 0) {
     process.stderr.write(
@@ -579,4 +682,22 @@ function removeLockFile(): void {
   } catch {
     /* 忽略 */
   }
+}
+
+/**
+ * 包根目录：从 __dirname 向上探测含 web/ 的目录（jiti 运行时 __dirname 指向 src/lib，
+ * 编译后指向 dist/lib，探测法兼容两种场景）。支持 KI_WEB_DIR 环境变量显式覆盖。
+ */
+function getPackageRoot(): string {
+  const explicit = process.env.KI_WEB_DIR;
+  if (explicit) return path.resolve(explicit);
+  let dir = __dirname;
+  for (let i = 0; i < 6; i++) {
+    if (fs.existsSync(path.join(dir, 'web'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // 兜底：cwd（通常是项目根，如 jiti src/mcp-server.ts）
+  return process.cwd();
 }

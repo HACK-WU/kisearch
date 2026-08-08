@@ -105,7 +105,7 @@ ki scan-kb import \
   --root-name QoderWiki
 ```
 
-内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（含 `memoryId`/`sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit + 切分参数持久化）→ scope sourceDir 写入。
+内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（文件级 relation 挂 `memoryIds` 多值 + `sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit + 切分参数持久化）→ scope sourceDir 写入。
 
 ### 增量更新（git diff 直连，1 步）
 

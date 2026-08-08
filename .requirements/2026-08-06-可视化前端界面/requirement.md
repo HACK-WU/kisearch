@@ -3,8 +3,8 @@ id: REQ-20260806-003
 feature: 可视化前端界面
 status: 已确认
 created: 2026-08-06
-updated: 2026-08-06
-version: 1
+updated: 2026-08-08
+version: 4
 tags: [feat, ux]
 depends_on: [REQ-20260806-001]
 author: AI
@@ -25,23 +25,24 @@ document_type: requirement
 ## 2. 需求澄清
 
 ### 2.1 需求形态
-真实需求。底层诉求：将 ki 的 CLI/MCP 文本能力 Web 化，让知识库管理员/开发者在浏览器中直观浏览文档数据、上传文档、检索与管理知识，脱离命令行。
+真实需求。底层诉求：将 ki 的 CLI/MCP 文本能力 Web 化，让知识库管理员/开发者在浏览器中直观浏览文档数据、上传文档、检索与沉淀知识，脱离命令行。
 
 ### 2.2 功能本质
 为既有能力（CLI 21 个命令模块 + MCP 11 个工具）构建"表示层"Web 界面，不改核心架构；向量可视化复用官方 zvec-studio。
 
-### 2.3 架构形态（已确认）
-- ki 前端 = 独立 Web 应用（浏览器访问）
-- 后端底座 = `ki mcp --http`（127.0.0.1:7423，Streamable HTTP，MCP 协议）
-- 向量可视化 = 独立启动 `zvec-studio`（127.0.0.1:**7861**），前端超链接跳转集成
-- **能力分层**：①MCP HTTP（已有 11 工具，核心能力）②**独立新增 API 接口**（补齐 MCP 缺失能力：导入 scan-kb import、管理操作 doc delete/scope/backup/restore/export）③第三方接口（健康状态 zvec-studio `healthz/readyz`）
-- **不新增 MCP 工具**：doc list 等功能冗余，现有 MCP 工具已满足
+### 2.3 架构形态（已确认，v3 修订）
+- ki 前端 = 独立 Web 应用（浏览器访问），**由 `ki mcp --http` 一并提供服务**（新增 `--web` 参数控制是否提供前端静态页面，见 REQ-F01）
+- 后端底座 = `ki mcp --http`（127.0.0.1:7423，Streamable HTTP，MCP 协议）；前端**不负责启动/关闭服务**，仅检测状态 + 手动指引（v3 决策）
+- 向量可视化 = 独立启动 `zvec-studio`（127.0.0.1:**7861**），前端超链接跳转（**占位跳转**，打开 ki 向量库后续实现）
+- **能力分层**：①MCP HTTP（已有 11 工具，核心能力）②**扩展 mcp-http 新增 `/api/*` 路由**（方案 A，补齐 MCP 缺失能力：导入 upload/run/status、健康 /api/health、浏览页文件名检索 /api/doc/list）③第三方接口（zvec-studio 跳转 7861）
+- **不新增 MCP 工具**：文档列表（doc list）能力走 `/api/doc/list` HTTP 路由（v3，文件名模糊搜索），不注册为 MCP 工具（避免冗余）
+- **管理操作不做**：破坏性操作（doc delete / scope clear|delete / backup / restore / export）前端不提供入口，保留在 CLI（v2 决策：防误操作）
 
 ### 2.4 使用场景与角色
-- 场景 1：知识库管理员在浏览器查看文档数据（Group 树/文档列表/原文/tag）
-- 场景 2：上传 Markdown 文档到知识库（对接 REQ-20260806-001 直导/切分/增量链路）
-- 场景 3：语义搜索 + 结果定位原文
-- 场景 4：跳转 zvec-studio 查看向量数据可视化
+- 场景 1：知识库管理员在浏览器查看文档数据（Group 树/文档列表/原文，文档列表支持文件名模糊搜索）
+- 场景 2：上传 Markdown 文档到知识库（对接 REQ-20260806-001 直导/切分/增量链路），必须选择目标 scope（default 兜底）
+- 场景 3：语义搜索（支持 tag 过滤）+ 结果定位原文（展示原文内容 + Group 路径，点击查看原文）
+- 场景 4：跳转 zvec-studio 查看向量数据可视化（占位跳转）
 - 用户角色：知识库管理员 / 开发者（本机单用户，无复杂权限）
 
 ### 2.5 核心痛点
@@ -53,14 +54,18 @@ document_type: requirement
 - 性能：页面响应可接受（复用 MCP HTTP 服务，避免新增常驻进程负担）
 - 兼容性：前端与 `ki mcp --http` 版本匹配；MCP 工具名/返回结构同步（受 REQ-20260806-001 的 H-19 约束）
 - 可用性：本机 127.0.0.1 免鉴权（回环绑定默认安全）
+- **服务生命周期**：前端**不启动、不关闭**任何服务（ki mcp / zvec-studio），只检测服务状态并给出手动启动指引（v3 决策）
 
 ### 2.7 关键假设
 | 假设 | 内容 | 状态 |
 |------|------|------|
-| H-01 | 前端独立 Web 应用，复用 `ki mcp --http` 作后端底座 | ✅ 确认 |
-| H-02 | 向量可视化 = zvec-studio 独立 Web 应用（`zvec-studio` 启动，7860 端口），前端超链接跳转集成 | ✅ 确认 |
-| H-03 | 功能清单（总览/浏览/搜索/导入/上传/写入/管理/向量可视化）按当前版本推进 | ✅ 确认 |
+| H-01 | 前端独立 Web 应用，复用 `ki mcp --http` 作后端底座；前端由 `ki mcp --http --web` 一并提供静态页面 | ✅ 确认（v3 修订） |
+| H-02 | 向量可视化 = zvec-studio 独立 Web 应用（`zvec-studio` 启动，**7861** 端口），前端超链接**占位跳转**（打开 ki 向量库后续实现） | ✅ 确认（v2 端口 / v3 占位） |
+| H-03 | 功能清单（总览/浏览/搜索/上传/写入/向量可视化占位）按当前版本推进 | ✅ 确认 |
 | H-04 | 前端通过 MCP HTTP 协议（JSON-RPC）调用 ki 能力 | ✅ 确认 |
+| H-05 | 上传/写入必须选择 scope（default 兜底） | ✅ 确认（v3） |
+| H-06 | 浏览页文档列表支持**文件名模糊搜索**；`/api/doc/list` 直接返回 **Group 路径 + 文档**（结构化），支持 `q` 文件名搜索参数 | ✅ 确认（v3 / v4 明确契约） |
+| H-07 | 语义检索默认 `include_original: true`（返回向量命中原文内容 + Group 路径） | ✅ 确认（v3） |
 
 ## 3. 根本性分析
 
@@ -73,13 +78,14 @@ document_type: requirement
 ### 3.3 关键发现（调研暴露的缺口）
 | 缺口 | 现状 | 影响 |
 |------|------|------|
-| 导入链路无 MCP 工具 | `scan-kb import`（直导/切分/增量）只在 CLI；MCP 只有 `ki_bulk_store`（输入 JSON 文件路径） | "上传文档"功能无法纯靠现有 MCP HTTP 实现，需新增 MCP 导入工具或前端另开 CLI 通道 |
-| 破坏性操作不在 MCP 层 | `doc delete`、`scope clear/delete` 等仅在 CLI（MCP 零破坏性约束） | 前端管理页面删除功能受限，需决定走 CLI 通道或明确降级 |
-| MCP 写工具输入形态 | `ki_bulk_store`/`ki_sync_relation` 输入为文件路径/文本 | 前端表单需转成对应参数形态 |
+| 导入链路无 MCP 工具 | `scan-kb import`（直导/切分/增量）只在 CLI；MCP 只有 `ki_bulk_store`（输入 JSON 文件路径） | "上传文档"功能无法纯靠现有 MCP HTTP 实现，需扩展 mcp-http 新增 `/api/import/*` 路由（方案 A） |
+| 破坏性操作不在 MCP 层 | `doc delete`、`scope clear/delete` 等仅在 CLI（MCP 零破坏性约束） | **v2 决策：前端不提供破坏性操作入口**，保留在 CLI（防误操作） |
+| MCP 写工具输入形态 | `ki_store`/`ki_sync_relation` 输入为文本；`ki_bulk_store` 输入为文件路径 | 前端表单需转成对应参数形态；**v3 决策：批量写入取消**，仅保留单条文本 + 关系写入 |
+| 浏览页文件名检索无工具 | `ki_query_group` 返回文本格式、无 tag、无文件名过滤；`ki_search` 为语义检索 | 浏览页文档列表需**新增 `/api/doc/list` 结构化接口**：直接返回 **Group 路径 + 文档**，支持文件名搜索（v4 明确契约），不复用文本解析 |
 
 ### 3.4 预期效果
-- 核心场景覆盖度：高（浏览/搜索/上传/管理全覆盖）
-- 潜在副作用：上传与管理功能需为 MCP 层补能力（新增导入类工具），否则只能做"CLI 半包"Web 界面
+- 核心场景覆盖度：高（浏览/搜索/上传/写入全覆盖；管理操作按 v2 决策留 CLI；批量写入按 v3 决策取消）
+- 潜在副作用：上传功能需为 mcp-http 补 `/api/import/*` 路由（方案 A），否则只能做"CLI 半包"Web 界面
 
 ## 4. 需求清单
 
@@ -87,58 +93,68 @@ document_type: requirement
 
 | 优先级 | 需求 ID | 需求描述 | 预期效果 | 依赖 | 验收标准 |
 |--------|---------|----------|----------|------|----------|
-| P0 | REQ-F01 | 前端 Web 应用骨架：独立 Web 应用，启动时拉起 `ki mcp --http`（7423），经 MCP HTTP 协议与 ki 通信 | 浏览器访问即用 | - | 前端启动 → MCP HTTP 就绪 → 页面能拉到 scope 数据 |
-| P0 | REQ-F02 | 总览 Dashboard：scope 列表（`scope list`）+ 统计（向量数/Group/tag）+ 健康状态（`doctor`） | 一眼看清知识库全貌 | REQ-F01 | 正确显示 scope 两层状态与统计 |
-| P0 | REQ-F03 | 知识库浏览：Group 树（`query-group`）+ 文档列表（`doc list`，tag 过滤/全文预览）+ 原文查看（`get-module-info`） | 图形化浏览文档数据 | REQ-F01 | Group 树可展开、文档可查原文 |
-| P0 | REQ-F04 | 语义搜索：搜索框 + 结果（得分/group/relation 定位）+ threshold/tags 过滤（`search`/`ki_search`） | 可视化检索体验 | REQ-F01 | 结果完整、可跳原文 |
-| P0 | REQ-F05 | 上传文档页：上传 Markdown 文件/目录 → 写入 sourceDir → 触发导入 | 拖拽/选择即可入库 | REQ-F01, REQ-F06 | 上传后知识可被搜索到 |
-| P0 | REQ-F06 | 导入能力通道：为"上传/导入"提供后端通道（新增 MCP 导入工具 或 HTTP 端点，封装 `scan-kb import` 直导/切分/增量） | 前端可触发直导与增量 | REQ-20260806-001 | 直导/增量经前端可触发，进度可展示 |
-| P1 | REQ-F07 | 知识写入：单条/批量 store、sync-relation 表单、Group 树管理 | 浏览器中沉淀知识 | REQ-F01 | 表单提交后数据可查 |
-| P1 | REQ-F08 | 管理运维：scope 生命周期、删除（经确认通道）、备份/导出入口 | 管理操作可视化 | REQ-F01 | 受控操作可用 |
-| P1 | REQ-F09 | zvec-studio 集成：内部启动 `zvec-studio`（7860）+ 前端导航区超链接跳转 | 一键进入向量可视化 | REQ-F01 | 跳转后浏览器打开 zvec-studio 页面 |
+| P0 | REQ-F01 | 前端 Web 应用骨架：独立 Web 应用，**由 `ki mcp --http --web` 一并提供前端静态页面**（新增 `--web` 参数控制），经 MCP HTTP 协议与 ki 通信；前端**不启动/不关闭任何服务**，仅检测状态 + 手动指引 | 浏览器访问即用（服务由 CLI 启动） | - | `ki mcp --http --web` 启动 → 浏览器打开前端 → 页面能拉到 scope 数据 |
+| P0 | REQ-F02 | 总览 Dashboard：scope 列表（`scope list`）+ 统计（向量数/Group/tag）+ 健康状态（`/api/health`，doctor 逻辑） | 一眼看清知识库全貌 | REQ-F01 | 正确显示 scope 两层状态与统计 |
+| P0 | REQ-F03 | 知识库浏览：文档列表 + Group 分组（**数据源统一走 `/api/doc/list`**，直接返回 Group 路径 + 文档，支持文件名模糊搜索 `q` 参数）+ 原文查看（`get-module-info`） | 图形化浏览文档数据 | REQ-F01 | `/api/doc/list` 返回 Group 路径 + 文档列表，按文件名模糊搜索可过滤；点击文档可查原文（v4 修订：浏览页数据源 = `/api/doc/list`，Group 树与文档列表同源） |
+| P0 | REQ-F04 | 语义搜索：搜索框 + 结果（内容摘要/得分/group/relation 定位）+ threshold/tags 过滤（`ki_search`，**默认 `include_original: true` 返回原文内容 + Group 路径**） | 可视化检索体验 | REQ-F01 | 结果完整、展示原文内容与命中 Group 路径、可点击查看原文（v3 修订） |
+| P0 | REQ-F05 | 上传文档页：上传 Markdown 文件/本地目录（`webkitdirectory`）→ 落盘受控目录 → 触发导入；**必须选择目标 scope（default 兜底）** | 拖拽/选择即可入库 | REQ-F01, REQ-F06 | 上传后知识可被搜索到（v2 目录为本地选择；v3 强制 scope） |
+| P0 | REQ-F06 | 导入能力通道：**扩展 mcp-http 新增 `/api/import/*` 路由**（upload/run/status，封装 `scan-kb import` 直导/切分/增量） | 前端可触发直导与增量 | REQ-20260806-001 | 直导/增量经前端可触发，进度可展示 |
+| P1 | REQ-F07 | 知识写入：**单条文本 store + sync-relation 关系写入**（**批量/JSON 导入取消**，v3 决策），**必须选择 scope（default 兜底）** | 浏览器中沉淀知识 | REQ-F01 | 表单提交后数据可查 |
+| P1 | REQ-F08 | ~~管理运维：scope 生命周期、删除（经确认通道）、备份/导出入口~~ | **已取消**（v2 决策：破坏性操作前端不提供入口，保留 CLI，防误操作） | - | - |
+| P1 | REQ-F09 | zvec-studio 集成：前端导航区超链接**占位跳转** `zvec-studio`（**7861**）；**打开 ki 向量库后续实现**（v3 决策） | 一键进入向量可视化 | REQ-F01 | 点击跳转后浏览器打开 zvec-studio 页面（v2 端口 / v3 占位） |
 
 ### 4.2 需求依赖图
 ```
-REQ-F01 (Web 骨架 + MCP HTTP)
-   ├→ F02 总览 / F03 浏览 / F04 搜索 / F07 写入 / F08 管理 / F09 zvec跳转
-   └→ F06 导入通道（需新增 MCP 工具）→ F05 上传 / 导入进度
+REQ-F01 (Web 骨架 + MCP HTTP + --web 静态页面)
+   ├→ F02 总览 / F03 浏览(/api/doc/list) / F04 搜索 / F07 写入 / F09 zvec跳转
+   └→ F06 导入通道（扩展 mcp-http 加 /api/import/*）→ F05 上传 / 导入进度
 ```
 
 ### 4.3 需求验证标准
 | 需求 ID | 验证方式 | 验证指标 | 验证时机 |
 |---------|----------|----------|----------|
-| REQ-F01 | 用户验收 | 浏览器打开页面，数据可加载 | 开发完成后 |
+| REQ-F01 | 用户验收 | `ki mcp --http --web` 启动后浏览器打开前端页面，数据可加载 | 开发完成后 |
 | REQ-F02 | 用户验收 | scope 两层状态与统计正确 | 开发完成后 |
-| REQ-F03 | 用户验收 | Group 树可展开、文档原文可读 | 开发完成后 |
-| REQ-F04 | 用户验收 | 搜索结果完整、可定位原文 | 开发完成后 |
+| REQ-F03 | 用户验收 | Group 树可展开；文件名模糊搜索可过滤文档；文档原文可读 | 开发完成后 |
+| REQ-F04 | 用户验收 | 搜索结果展示原文内容 + Group 路径，点击可查看原文 | 开发完成后 |
 | REQ-F05 | 集成测试 | 上传后知识可搜索到 | 集成阶段 |
 | REQ-F06 | 集成测试 | 直导/增量经前端可触发 | 集成阶段 |
-| REQ-F07 | 用户验收 | 表单提交后数据可查 | 开发完成后 |
-| REQ-F08 | 用户验收 | 受控管理操作可用 | 开发完成后 |
-| REQ-F09 | 用户验收 | 跳转后打开 zvec-studio | 开发完成后 |
+| REQ-F07 | 用户验收 | 单条/关系表单提交后数据可查 | 开发完成后 |
+| ~~REQ-F08~~ | — | ~~已取消~~（v2 决策：管理操作留 CLI） | — |
+| REQ-F09 | 用户验收 | 点击跳转后打开 zvec-studio（占位） | 开发完成后 |
 
 ### 4.4 非功能性约束
 - 复用 `ki mcp --http` 作为后端底座，不另起常驻服务（本机回环免鉴权）
 - MCP 工具名/返回结构随 REQ-20260806-001（H-19）同步
 - 前端为独立仓库/目录，与 ki 主项目解耦
+- **前端不启动/不关闭服务**：ki mcp / zvec-studio 均由用户手动启动，前端只检测状态并给出手动指引（v3 决策）
+- 前端静态页面由 `ki mcp --http --web` 一并提供（新增 `--web` 参数，控制是否启动 web 服务）
 
 ### 4.5 潜在风险与注意事项
-- **导入通道缺口**（REQ-F06）：MCP 层无导入工具，需新增 MCP 导入工具（如 `ki_import` 封装 scan-kb import）或 HTTP 端点；与 REQ-20260806-001 开发中的直导链路对接
-- **破坏性操作受限**：MCP 零破坏性约束下，`doc delete`/`scope clear/delete` 等前端管理功能需走 CLI 通道或明确降级为"跳转 CLI 指引"
-- **zvec-studio 依赖**：需本机已安装 zvec-studio（pip 或源码），前端内部启动命令需处理未安装/端口占用
-- **上传链路**：前端上传文件需服务端落盘到 scope sourceDir，再触发导入；需明确上传临时目录与权限
+- **导入通道缺口**（REQ-F06）：MCP 层无导入工具，**v2 决策 = 扩展 mcp-http 新增 `/api/import/*` 路由**（方案 A），封装 `handleDirectImport`/`handleIncrementalDirect` 纯函数；与 REQ-20260806-001 直导链路对接
+- **破坏性操作**：**v2 决策 = 前端不提供入口**（防误操作），`doc delete`/`scope clear/delete`/backup/restore/export 保留在 CLI
+- **zvec-studio 依赖**：需本机已安装 zvec-studio（pip 或源码）；前端仅**占位跳转**（不启动、不检测 zvec 状态），打开 ki 向量库后续实现（v3 决策）
+- **上传链路**：前端上传文件（单文件/本地目录）落盘到**受控上传目录**（`~/.ki/import-uploads/<uploadId>/`），**不接受服务器路径参数**；按相对路径重建目录结构后再触发导入
+- **本地目录选择**：目录模式用 `<input type="file" webkitdirectory>`，浏览器递归读取本地目录文件内容并逐个上传，服务器不接触用户文件系统路径
+- **服务生命周期**（v3 决策）：前端**不启动/不关闭**服务，仅检测 MCP HTTP 状态并给出手动启动指引；`ki mcp --http` 新增 `--web` 参数控制是否提供前端静态页面
+- **浏览页文件名检索**（v3/v4 决策）：文档列表走 `/api/doc/list` 结构化接口（**直接返回 Group 路径 + 文档**，支持 `q` 文件名模糊搜索），不复用 `ki_query_group` 文本解析；语义搜索页保留 tag 过滤
+- **批量写入取消**（v3 决策）：F07 仅保留单条文本 store + sync-relation 关系写入，删除批量/JSON 导入（`ki_bulk_store` 不在前端范围）
+- **demo 需按 v3 调整**（实现时执行）：`browse.html` 移除 tag 过滤栏、改文件名搜索框；`search.html` 移除 `isFullText` mock 字段；`write.html` 移除批量/JSON 导入 tab 与 `isFullText` 提示；全部页面去掉"一键启动"按钮、改为服务状态检测 + 手动指引；上传/写入页 scope 改为必选
 
 ### 4.6 复杂度评估与快速实现判断
 | 评估维度 | 评分 | 说明 |
 |----------|------|------|
 | 技术难度 | 中 | MCP HTTP 客户端对接（JSON-RPC）+ React 前端 |
-| 范围大小 | 高 | 7 个功能页面 + 导入通道建设 |
-| 依赖关系 | 中 | 依赖 `ki mcp --http`、`scan-kb import`（开发中）、zvec-studio |
-| 需求清晰度 | 中 | 页面已定，但导入通道形态待确认 |
-| 风险程度 | 中 | 导入能力缺口是主要不确定点 |
+| 范围大小 | 高 | 5 个功能页面 + 导入通道建设（方案 A：扩展 mcp-http `/api/import/*` + `/api/doc/list` + `--web`） |
+| 依赖关系 | 中 | 依赖 `ki mcp --http`、`scan-kb import`（已完成）、zvec-studio（占位） |
+| 需求清晰度 | 高 | 页面已定，导入通道（方案 A）、服务生命周期（--web）、检索语义（语义 vs 文件名）均已确认（v3） |
+| 风险程度 | 中 | 导入通道（方案 A 路由扩展）+ MCP SDK 浏览器兼容性（C-03 实测）是主要不确定点 |
 
 **综合复杂度**：高（H=1，M=4）
-**推荐下一步**：`interaction-design`（多页面交互流程）→ `design-craft`（技术设计，重点解决 MCP 导入通道）
+**推荐下一步**：`design-craft`（技术设计，重点落地方案 A 的 `/api/*` 路由、`--web` 静态页面服务与前端工程）
 
 ## 5. 变更记录
 - 2026-08-06 v1：需求调研完成，功能清单（总览/浏览/搜索/导入/上传/写入/管理/向量可视化）确认；架构确认（独立 Web 应用 + `ki mcp --http` 底座 + zvec-studio 跳转集成）；状态"已确认"
+- 2026-08-08 v2：需求对齐修订——①目录选择明确为**本地目录**（`webkitdirectory`），上传落盘受控目录、不接受服务器路径；②zvec-studio 端口统一 **7861**；③导入通道定形为**扩展 mcp-http 加 `/api/import/*` 路由**（方案 A）；④**取消 REQ-F08 管理运维**（破坏性操作留 CLI，前端不提供入口）；⑤健康状态改为 `/api/health`（doctor 逻辑，非 zvec-studio healthz）；⑥浏览页移除 tag 过滤（relations 无 tag 字段，tag 过滤保留在搜索页）
+- 2026-08-08 v3：决策修订——①**批量写入取消**（F07 仅保留单条 store + sync-relation，删除批量/JSON 导入）；②**zvec-studio 打开 ki 向量库暂不做**（S-07 占位跳转，后续实现）；③**上传/写入必须选择 scope**（default 兜底）；④**前端不启动/不关闭服务**（仅状态检测 + 手动指引，去掉"一键启动"）；⑤浏览页检索语义明确为**文件名模糊搜索**（新增 `/api/doc/list` 结构化接口），语义搜索页默认 `include_original: true` 返回原文内容 + Group 路径；⑥S-01~S-07 需**实际验证**（C-03 MCP SDK 浏览器兼容性实测）；⑦`ki mcp --http` **新增 `--web` 参数**控制是否提供前端静态页面
+- 2026-08-08 v4：`/api/doc/list` 接口契约明确——**直接返回 Group 路径 + 文档**，支持 `q` 文件名模糊搜索参数；浏览页数据源统一走该接口（Group 树与文档列表同源），空查询 = 返回全部文档按 Group 分组；关闭推演问题 E3/N1

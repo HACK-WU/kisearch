@@ -134,7 +134,7 @@ ki scan-kb import \
 2. **自动切分**：超过 `chunk-size` 的文件按"固定长度 + 段落边界优先"切分为多 chunk，relation 名 = `文件名-N`（如 `deploy-01`），sourcePath = `文件#N`
 3. **批量向量化**：调用 zvec 引擎批量向量化（content = chunk 原文）
 4. **Group 树创建**：自动创建 Group 目录结构（groupPath 从目录结构推导）
-5. **Relations 缓存写入**：写入 `relations-cache.json`，包含 `memoryId` 和 `sourcePath`
+5. **Relations 缓存写入**：写入 `relations-cache.json`，文件级 relation 包含 `memoryIds`（多值）和 `sourcePath`
 6. **group-index.source 记录**：记录导入元信息（含 git HEAD commit + 切分参数持久化）
 7. **sourceDir 写入**：scope 未配置 sourceDir 时写入绝对路径（供增量免传 `--source`）
 

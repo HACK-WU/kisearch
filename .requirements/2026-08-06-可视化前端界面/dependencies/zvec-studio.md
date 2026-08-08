@@ -9,7 +9,7 @@
 | 官方 API 文档 | https://github.com/zvec-ai/zvec-studio/blob/main/docs/api.md |
 | 本地参考副本 | `/root/knowledge-indexer/zvec-studio/`（本仓库内，仅参考） |
 | 用途 | ①向量数据可视化（集合/文档/向量检索浏览）②前端导航"向量可视化"跳转目标 ③可按需调用其 REST API |
-| 启动方式 | `zvec-studio`（pip 安装后命令）或从源码 `make dev`；内部进程拉起用 `zvec-studio` 命令 |
+| 启动方式 | `zvec-studio`（pip 安装后命令）或从源码 `make dev`；手动启动 `zvec-studio --port 7861`（v3：前端不启动，仅占位跳转） |
 | 版本要求 | pip `zvec-studio` 或源码；Node ≥ 20、pnpm ≥ 9、Python ≥ 3.10（源码运行） |
 
 ## 地址汇总（重要）
@@ -23,7 +23,7 @@
 | OpenAPI Schema | `http://127.0.0.1:7861/openapi.json` |
 | 健康检查 | `GET /api/v1/healthz`（liveness）、`GET /api/v1/readyz`（readiness） |
 
-> 端口通过启动参数 `--port 7861` 指定（`cli.py` 默认 7860）。前端一键启动命令：`zvec-studio --port 7861`。
+> 端口通过启动参数 `--port 7861` 指定（`cli.py` 默认 7860）。手动启动命令：`zvec-studio --port 7861`（v3 决策：前端**不负责启动**，仅占位跳转）。
 
 ## 接口清单（按需，完整见官方 api.md）
 
@@ -80,7 +80,7 @@
 
 ## 风险与注意事项
 
-- **与本项目的关系**：zvec-studio 是**独立的官方工具**（查看的是其自有 collection 数据），不是 ki 的向量库界面。ki 的向量数据位于 `~/.ki/vector/`（zvec collection），zvec-studio 能否直接打开该库需在设计中验证（取决于 zvec-studio 的 open 机制是否支持任意 collection 路径）
-- 内部启动需处理：未安装（引导 pip install / 源码）、端口 7860 被占用（探测 + 提示）
-- 前端集成定位为"跳转 + 一键启动"（REQ-F09），API 调用为可选增强
+- **与本项目的关系**：zvec-studio 是**独立的官方工具**（查看的是其自有 collection 数据），不是 ki 的向量库界面。ki 的向量数据位于 `~/.ki/vector/`（zvec collection），**v3 决策：打开 ki 向量库暂不考虑**（占位跳转，后续实现）
+- 手动启动：`zvec-studio --port 7861`；前端**不负责启动/检测**（v3 决策，仅占位跳转）
+- 前端集成定位为"**占位跳转**"（REQ-F09，v3 修订），API 调用为可选增强
 - 破坏性维护动词（`:destroy`、`:optimize`）勿在 ki 前端暴露

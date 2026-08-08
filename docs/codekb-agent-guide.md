@@ -443,7 +443,7 @@ ki 工具的数据存储在 npm 全局安装目录内（非项目仓库目录）
 ```
 <ki安装路径>/kb/${scope}/
 ├── group-index.json       # Group 树索引
-├── relations-cache.json   # Relations 缓存（含 memoryId）
+├── relations-cache.json   # Relations 缓存（含 memoryIds/sourcePath）
 └── {Group}/               # 本地 KB 原文（按 Group 分目录）
     └── index.json
 ```
