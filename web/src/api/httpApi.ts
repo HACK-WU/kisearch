@@ -40,6 +40,8 @@ export interface DocListResponse {
   docs: DocItem[];
   total: number;
   truncated?: boolean;
+  /** 完整 group 列表 + 文档数量（不受 docs 分页 limit 影响），用于构建 Group 树 */
+  groups?: { name: string; count: number }[];
   error?: string;
 }
 
@@ -112,9 +114,14 @@ export async function getHealth(): Promise<HealthResponse> {
   return req<HealthResponse>('/api/health');
 }
 
-export async function getDocList(scope: string, q?: string): Promise<DocListResponse> {
+export async function getDocList(
+  scope: string,
+  opts: { q?: string; group?: string } = {},
+): Promise<DocListResponse> {
   const params = new URLSearchParams({ scope });
-  if (q) params.set('q', q);
+  if (opts.q) params.set('q', opts.q);
+  // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响）
+  if (opts.group) params.set('group', opts.group);
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 
@@ -154,4 +161,24 @@ export async function runImport(args: {
 
 export async function getImportStatus(jobId: string): Promise<StatusResponse> {
   return req<StatusResponse>(`/api/import/status?jobId=${encodeURIComponent(jobId)}`);
+}
+
+// ─── Tag 相关 ───────────────────────────────────────────
+
+export interface TagInfo {
+  tag: string;
+  count: number;
+}
+
+export interface TagsResponse {
+  ok: boolean;
+  tags: TagInfo[];
+  scope: string;
+  error?: string;
+}
+
+/** 获取 tag 列表（排除 ki-search/ki-relation/ki-path 内部保留 tag） */
+export async function fetchTags(scope?: string): Promise<TagsResponse> {
+  const sp = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+  return req<TagsResponse>(`/api/tags${sp}`);
 }

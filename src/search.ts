@@ -156,6 +156,26 @@ export async function executeSearch(params: {
       return hit;
     });
 
+    // Multi-tag 去重：同一 (group, relation) 因多 tag 写入产生多条向量命中 → 保留 score 最高的一条
+    // （sync-relation 为每个自定义 tag 各写一个 content 向量，搜索时同一文档会重复返回）
+    {
+      const best = new Map<string, SearchHit>();
+      for (const hit of results) {
+        const key = hit.group && hit.relation ? `${hit.group}|${hit.relation}` : '';
+        if (!key) continue;
+        const prev = best.get(key);
+        if (!prev || (hit.score ?? 0) > (prev.score ?? 0)) {
+          best.set(key, hit);
+        }
+      }
+      if (best.size > 0 && best.size < results.length) {
+        results.length = 0;
+        results.push(...best.values());
+        // 保持 score 降序
+        results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+      }
+    }
+
     // REQ-09：同一文件多 chunk 命中去重（保留首个命中，其余 original 置空避免重复返回）
     if (includeOriginal) {
       const seen = new Set<string>();

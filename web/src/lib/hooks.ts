@@ -38,3 +38,14 @@ export function useDocList(scope: string) {
     retry: 1,
   });
 }
+
+/** 指定 group 的完整文档列表（不受 500 条全量分页截断影响） */
+export function useGroupDocs(scope: string, group: string | null) {
+  return useQuery<DocListResponse>({
+    queryKey: ['docList', scope, 'group', group ?? ''],
+    queryFn: () => getDocList(scope, { group: group ?? '' }),
+    enabled: !!group,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}

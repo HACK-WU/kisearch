@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList } from '@/lib/hooks';
 import { kiSyncRelation } from '@/api/mcpClient';
+import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 
 /** Group 树节点（从 doc list 的 group 路径构建） */
@@ -20,8 +21,9 @@ interface GTreeNode {
   open: boolean;
 }
 
-/** 从 docs 的 group 路径构建递归树（全路径节点，唯一顶层折叠） */
-function buildGroupTree(docs: { group: string }[]): GTreeNode[] {
+/** 从 groups（含 name+count）构建递归树（全路径节点，唯一顶层折叠） */
+function buildGroupTree(groups: { name: string; count: number }[] | undefined): GTreeNode[] {
+  if (!groups?.length) return [];
   const roots: GTreeNode[] = [];
   const map = new Map<string, GTreeNode>();
   const getNode = (path: string): GTreeNode => {
@@ -32,8 +34,8 @@ function buildGroupTree(docs: { group: string }[]): GTreeNode[] {
     }
     return n;
   };
-  for (const d of docs) {
-    const segs = d.group.split('/').filter(Boolean);
+  for (const g of groups) {
+    const segs = g.name.split('/').filter(Boolean);
     if (segs.length === 0) continue;
     let prev: GTreeNode | null = null;
     for (let i = 0; i < segs.length; i++) {
@@ -78,7 +80,13 @@ export function WritePage(): JSX.Element {
   const [group, setGroup] = useState('');
   const [relation, setRelation] = useState('');
   const [markdown, setMarkdown] = useState('');
-  const [tags, setTags] = useState('');
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+
+  // tag 选择器状态
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [tagOpen, setTagOpen] = useState(false);
+  const tagRef = useRef<HTMLDivElement>(null);
 
   // combobox 状态
   const [groupOpen, setGroupOpen] = useState(false);
@@ -88,11 +96,11 @@ export function WritePage(): JSX.Element {
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Group 树数据（当前 scope 的 doc list → group 路径聚合）
+  // Group 树数据（当前 scope 的 groups 列表，不受 docs 分页截断影响）
   const { data: docData } = useDocList(scope);
   const [groupTree, setGroupTree] = useState<GTreeNode[]>([]);
   useEffect(() => {
-    const t = buildGroupTree(docData?.docs ?? []);
+    const t = buildGroupTree(docData?.groups);
     setDefaultOpen(t);
     setGroupTree(t);
   }, [docData]);
@@ -101,10 +109,20 @@ export function WritePage(): JSX.Element {
   useEffect(() => {
     const onDocClick = (e: MouseEvent): void => {
       if (groupRef.current && !groupRef.current.contains(e.target as Node)) setGroupOpen(false);
+      if (tagRef.current && !tagRef.current.contains(e.target as Node)) setTagOpen(false);
     };
     document.addEventListener('click', onDocClick);
     return () => document.removeEventListener('click', onDocClick);
   }, []);
+
+  // 加载可用 tag 列表
+  useEffect(() => {
+    let cancelled = false;
+    fetchTags(scope).then((res) => {
+      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [scope]);
 
   const toggleGroup = (node: GTreeNode): void => {
     setGroup(node.path);
@@ -120,16 +138,13 @@ export function WritePage(): JSX.Element {
     }
     setSubmitting(true);
     try {
-      const tagList = tags
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean);
-      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: tagList });
-      setResult(`写入成功${vector ? '' : '（未向量化）'}${tagList.length > 0 ? `（标签：${tagList.join(', ')}）` : ''}`);
+      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: selectedTags });
+      setResult(`写入成功${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`);
       setGroup('');
       setRelation('');
       setMarkdown('');
-      setTags('');
+      setSelectedTags([]);
+      setTagInput('');
       setPreview(false);
     } catch (e) {
       setError((e as Error).message);
@@ -138,11 +153,28 @@ export function WritePage(): JSX.Element {
     }
   };
 
+  const toggleTag = (tag: string): void => {
+    setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+  };
+
+  const addTagFromInput = (): void => {
+    const t = tagInput.trim().toLowerCase();
+    if (!t || selectedTags.includes(t)) return;
+    setSelectedTags((prev) => [...prev, t]);
+    setTagInput('');
+    setTagOpen(false);
+  };
+
+  const removeTag = (tag: string): void => {
+    setSelectedTags((prev) => prev.filter((t) => t !== tag));
+  };
+
   const reset = (): void => {
     setGroup('');
     setRelation('');
     setMarkdown('');
-    setTags('');
+    setSelectedTags([]);
+    setTagInput('');
     setPreview(false);
     setResult(null);
     setError(null);
@@ -255,16 +287,76 @@ export function WritePage(): JSX.Element {
 
             {/* 自定义标签（可选） */}
             <div className="ki-form-group" style={{ marginTop: 14 }}>
-              <label className="ki-form-label">自定义标签（可选）</label>
-              <input
-                className="ki-form-input"
-                placeholder="逗号分隔多个，如：api, auth（叠加在默认 ki-search 之上）"
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-              />
-              <div className="ki-form-hint">
-                为空时仅写 ki-search；指定后内容额外按各标签写入向量，可用语义搜索按标签过滤召回。
+              <label className="ki-form-label">Tags</label>
+              {/* combobox：输入框 + 下拉 */}
+              <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
+                <div className="ki-combobox__input-wrap">
+                  <input
+                    className="ki-form-input"
+                    style={{ width: '100%', boxSizing: 'border-box' }}
+                    placeholder="选择已有 tag 或输入新建，回车确认"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onFocus={() => setTagOpen(true)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
+                    }}
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    className={`ki-combobox__toggle${tagOpen ? ' ki-combobox__toggle--open' : ''}`}
+                    tabIndex={-1}
+                    onClick={(e) => { e.stopPropagation(); setTagOpen((v) => !v); }}
+                  >
+                    {tagOpen ? '▴' : '▾'}
+                  </button>
+                </div>
+                {tagOpen && (
+                  <div className="ki-combobox__panel ki-combobox__panel--open">
+                    <div className="ki-combobox__tree" style={{ padding: '6px 8px', maxHeight: 180, overflowY: 'auto' }}>
+                      {availableTags.length === 0 && !tagInput ? (
+                        <div className="ki-cell-sub" style={{ padding: 6 }}>暂无已有 tag</div>
+                      ) : (
+                        <>
+                          {availableTags
+                            .filter((t) => !tagInput || t.includes(tagInput.toLowerCase()))
+                            .map((t) => (
+                              <span
+                                key={t}
+                                className={`ki-tag-option${selectedTags.includes(t) ? ' ki-tag-option--selected' : ''}`}
+                                onClick={() => toggleTag(t)}
+                              >
+                                {selectedTags.includes(t) ? '✓ ' : '+ '}{t}
+                              </span>
+                            ))
+                          }
+                          {tagInput && !availableTags.some((t) => t === tagInput.toLowerCase()) && !selectedTags.includes(tagInput.toLowerCase()) && (
+                            <span className="ki-tag-option" onClick={addTagFromInput} style={{ color: 'var(--ki-color-primary)' }}>
+                              ✚ 新建：{tagInput.trim()}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <div className="ki-combobox__footer">
+                      <span className="ki-cell-sub">输入后按回车确认；新建 tag 将自动加入</span>
+                    </div>
+                  </div>
+                )}
               </div>
+              {/* 已选 tag pills（独立行） */}
+              {selectedTags.length > 0 && (
+                <div className="ki-tag-pills" style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {selectedTags.map((t) => (
+                    <span key={t} className="ki-tag-pill">
+                      {t}
+                      <span className="ki-tag-pill__x" onClick={() => removeTag(t)}>✕</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车创建。</div>
             </div>
 
             {/* 是否向量化 */}

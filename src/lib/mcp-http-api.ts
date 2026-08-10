@@ -28,6 +28,7 @@ import {
   handleIncrementalDirect,
   type IncrementalResult,
 } from './incremental.js';
+import { executeTagList } from '../tag.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -217,6 +218,7 @@ export async function handleApiRequest(
   const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
   try {
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
+    if (p === '/tags' && req.method === 'GET') return void (await handleTags(res, url));
     if (p === '/doc/list' && req.method === 'GET') return void (await handleDocList(res, url));
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res));
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res));
@@ -244,23 +246,69 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
   sendJson(res, 200, { ok: true, report });
 }
 
+// ─── GET /api/tags ──────────────────────────────────────
+
+async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
+  const scopeRaw = url.searchParams.get('scope') ?? '';
+  const scope = resolveScope(loadConfig(), scopeRaw);
+  const result = await executeTagList({ scope });
+  if (!result.ok) {
+    sendJson(res, 200, { ok: false, error: result.error, tags: [], scope });
+    return;
+  }
+  // 过滤内部保留 tag（ki-search/ki-relation/ki-path）
+  const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
+  const tags = result.tags.filter(t => !reserved.has(t.tag));
+  sendJson(res, 200, { ok: true, tags, scope });
+}
+
 // ─── GET /api/doc/list ────────────────────────────────
 
 async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
   const scope = resolveScope(loadConfig(), scopeRaw);
   const q = (url.searchParams.get('q') ?? '').toLowerCase();
+  const groupRaw = url.searchParams.get('group');
   const limitRaw = url.searchParams.get('limit');
   const limit = limitRaw ? Math.min(Math.max(parseInt(limitRaw, 10) || 0, 1), DOC_LIST_LIMIT) : DOC_LIST_LIMIT;
 
   const all = buildDocList(scope);
-  const filtered = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all;
+  // Group 树需要完整 group 集合 + 每组文档数量，不受 docs 分页 limit 影响
+  // （否则后写入的独立 group 如 tag 若排在前 500 条 docs 之外，前端 Group 树会缺失该节点）
+  const groupCounts = new Map<string, number>();
+  for (const d of all) {
+    groupCounts.set(d.group, (groupCounts.get(d.group) ?? 0) + 1);
+  }
+  const groups = Array.from(groupCounts.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, count]) => ({ name, count }));
+
+  // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响），确保选中任一节点都能取到完整文档
+  if (groupRaw) {
+    const groupDocs = all
+      .filter((d) => d.group === groupRaw && (!q || d.name.toLowerCase().includes(q)))
+      .slice(0, limit);
+    sendJson(res, 200, {
+      ok: true,
+      scope,
+      docs: groupDocs,
+      total: groupDocs.length,
+      truncated: false,
+      groups,
+    });
+    return;
+  }
+
+  // 不带 group 参数时 docs 被截断到 500 条无意义（前端 BrowsePage 已改用 useGroupDocs 按组拉取），
+  // 仅返回空数组 + 完整 groups 供 Group 树构建；搜索场景请用 q + group 组合。
+  const filtered = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : [];
   sendJson(res, 200, {
     ok: true,
     scope,
     docs: filtered.slice(0, limit),
     total: filtered.length,
     truncated: filtered.length > limit,
+    groups,
   });
 }
 

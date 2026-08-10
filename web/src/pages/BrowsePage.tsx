@@ -5,9 +5,9 @@
  * 原文：ki_get_module_info
  */
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
-import { useDocList } from '@/lib/hooks';
+import { useDocList, useGroupDocs } from '@/lib/hooks';
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
@@ -23,29 +23,30 @@ const ICON_FOLDER = (
   </svg>
 );
 
-/** Group 树节点：按路径段递归聚合，docs 为直接挂载的文档 */
+/** Group 树节点：按路径段递归聚合 */
 interface TreeNode {
   name: string;
   path: string;
-  docs: DocItem[];
+  /** 后端返回的文档数量（不受分页截断影响） */
+  count: number;
   children: TreeNode[];
   open: boolean;
 }
 
-/** 从 docs 的 group 路径构建递归层级树；根目录只有一个文件夹时上提一级（不显示该层） */
-function buildTree(docs: DocItem[]): TreeNode[] {
+/** 从 group 列表（含文档数量）构建递归层级树；根目录只有一个文件夹时上提一级（不显示该层） */
+function buildTreeFromGroups(groups: { name: string; count: number }[]): TreeNode[] {
   const roots: TreeNode[] = [];
   const map = new Map<string, TreeNode>();
   const getNode = (path: string): TreeNode => {
     let n = map.get(path);
     if (!n) {
-      n = { name: path.split('/').pop() || path, path, docs: [], children: [], open: false };
+      n = { name: path.split('/').pop() || path, path, count: 0, children: [], open: false };
       map.set(path, n);
     }
     return n;
   };
-  for (const d of docs) {
-    const segs = d.group.split('/').filter(Boolean);
+  for (const g of groups) {
+    const segs = g.name.split('/').filter(Boolean);
     if (segs.length === 0) continue;
     let prev: TreeNode | null = null;
     for (let i = 0; i < segs.length; i++) {
@@ -57,7 +58,8 @@ function buildTree(docs: DocItem[]): TreeNode[] {
       }
       prev = node;
     }
-    prev!.docs.push(d);
+    // 叶子节点：直接挂载后端返回的文档数量
+    prev!.count = g.count;
   }
   // 唯一顶层目录：上提其子级（根目录只有一层时不显示该层）
   if (roots.length === 1) {
@@ -75,9 +77,9 @@ function setDefaultOpen(nodes: TreeNode[], depth = 0): void {
   }
 }
 
-/** 子树文档总数（父目录显示含子级计数） */
+/** 子树文档总数（父目录显示含子级计数，直接使用后端返回的 count 字段） */
 function countDocs(node: TreeNode): number {
-  return node.docs.length + node.children.reduce((s, c) => s + countDocs(c), 0);
+  return node.count + node.children.reduce((s, c) => s + countDocs(c), 0);
 }
 
 export function BrowsePage(): JSX.Element {
@@ -89,6 +91,10 @@ export function BrowsePage(): JSX.Element {
 
   const { data, isLoading } = useDocList(scope);
 
+  // 选中 group 的完整文档（后端按 group 精确返回，不受 500 条全量分页截断影响）
+  const groupQuery = useGroupDocs(scope, activeGroup || null);
+  const groupDocs = groupQuery.data?.docs ?? [];
+
   // 浏览页：禁止外层 .ki-content 滚动，让双栏内部各自滚动
   useEffect(() => {
     const el = document.querySelector('.ki-content');
@@ -96,26 +102,21 @@ export function BrowsePage(): JSX.Element {
     return () => { el?.classList.remove('ki-content--noscroll'); };
   }, []);
 
-  // 前端内存模糊过滤（一次拉取全量，无需每次输入请求后端）
-  const filteredDocs = useMemo(() => {
-    const docs = data?.docs ?? [];
-    const kw = q.trim().toLowerCase();
-    if (!kw) return docs;
-    return docs.filter(
-      (d) =>
-        d.name.toLowerCase().includes(kw) ||
-        (d.path ?? '').toLowerCase().includes(kw) ||
-        d.group.toLowerCase().includes(kw),
-    );
-  }, [data, q]);
-
-  // 数据（scope/过滤）变化时重建树；保留仍在树中的选中项
+  // ── Group 树构建（仅在 groups 数据变化时重建，activeGroup 变化不触发重建）──
+  // 分离原因：activeGroup 变化时若重建树 + setDefaultOpen，会导致非一级节点被折叠。
   useEffect(() => {
-    const t = buildTree(filteredDocs);
+    const rawGroups = data?.groups;
+    if (!rawGroups?.length) {
+      setTree([]);
+      return;
+    }
+    const t = buildTreeFromGroups(rawGroups);
     setDefaultOpen(t);
     setTree(t);
+    // 默认选中第一个叶子 group（无子级），页面加载即显示该 group 文档
     setActiveGroup((prev) => {
       if (prev) {
+        // 已有选中且仍在树中 → 保留（避免重复请求）
         const stack = [...t];
         while (stack.length) {
           const n = stack.pop()!;
@@ -123,28 +124,43 @@ export function BrowsePage(): JSX.Element {
           stack.push(...n.children);
         }
       }
-      return t.length > 0 ? t[0].path : '';
+      const findFirstLeaf = (nodes: TreeNode[]): string => {
+        for (const n of nodes) {
+          if (n.children.length === 0) return n.path;
+          const leaf = findFirstLeaf(n.children);
+          if (leaf) return leaf;
+        }
+        return '';
+      };
+      return findFirstLeaf(t) || (t.length > 0 ? t[0].path : '');
     });
-  }, [filteredDocs]);
+  }, [data?.groups]); // ← 仅依赖 groups，不依赖 activeGroup
 
-  // 当前选中组文档（按完整路径匹配）
-  const activeDocs = useMemo(() => {
-    if (!activeGroup) return [];
-    const stack = [...tree];
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (n.path === activeGroup) return n.docs;
-      stack.push(...n.children);
-    }
-    return [];
-  }, [tree, activeGroup]);
+  // ── 选中 group 文档回填（groupDocs 就绪时写入对应树节点，不重建树）──
+  useEffect(() => {
+    if (!activeGroup || groupDocs.length === 0) return;
+    setTree((prev) => {
+      const walk = (nodes: TreeNode[]): boolean => {
+        for (const n of nodes) {
+          if (n.path === activeGroup) {
+            n.count = groupDocs.length; // 用实际返回的文档数更新 count
+            return true;
+          }
+          if (walk(n.children)) return true;
+        }
+        return false;
+      };
+      const copy = prev.map((n) => ({ ...n }));
+      walk(copy);
+      return copy;
+    });
+  }, [activeGroup, groupDocs]);
 
-  // 展示列表：搜索时展示全部匹配（跨目录扁平），否则展示选中目录文档
-  const shownDocs = useMemo(() => {
-    if (q.trim()) return filteredDocs;
-    return activeDocs;
-  }, [q, filteredDocs, activeDocs]);
-  const isSearching = q.trim().length > 0;
+  // 当前选中组文档（直接使用 useGroupDocs 返回值，无需再从树中取）
+  const activeDocs = groupDocs;
+
+  // 展示列表：展示选中目录文档（搜索功能已移至后端 q+group 组合）
+  const shownDocs = activeDocs;
 
   /** 切换节点展开/折叠（原地 mutate + 新数组引用触发渲染） */
   const toggleOpen = (path: string): void => {
@@ -178,8 +194,16 @@ export function BrowsePage(): JSX.Element {
     });
   };
 
+  /**
+   * 目录点击：
+   * - 父目录（有子级）：仅展开/折叠，不选中、不请求文档
+   * - 叶子 group：选中并请求该 group 完整文档
+   */
   const handleDirClick = (node: TreeNode): void => {
-    if (node.children.length > 0) toggleOpen(node.path);
+    if (node.children.length > 0) {
+      toggleOpen(node.path);
+      return;
+    }
     setActiveGroup(node.path);
     setViewing(null);
   };
@@ -257,11 +281,9 @@ export function BrowsePage(): JSX.Element {
             <div className="ki-card__head">
               <span className="ki-card__title">文档</span>
               <span className="ki-card__sub">
-                {isSearching
-                  ? `搜索「${q.trim()}」 · ${shownDocs.length} 条`
-                  : activeGroup
-                    ? `${activeGroup} · ${activeDocs.length} 条`
-                    : '选择左侧 Group 查看文档'}
+                {activeGroup
+                  ? `${activeGroup} · ${activeDocs.length} 条`
+                  : '选择左侧 Group 查看文档'}
               </span>
             </div>
             <div
@@ -291,7 +313,7 @@ export function BrowsePage(): JSX.Element {
                 <div className="ki-empty" style={{ border: 'none' }}>
                   <div>
                     <h3>无匹配文档</h3>
-                    <p>{isSearching ? '未找到包含该关键词的文件，换个关键词试试。' : '调整文件名关键词后重试。'}</p>
+                    <p>该 Group 暂无文档，或选择其他 Group 查看。</p>
                   </div>
                 </div>
               ) : (

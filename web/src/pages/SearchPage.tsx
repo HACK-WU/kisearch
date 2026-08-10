@@ -4,9 +4,10 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiSearch } from '@/api/mcpClient';
+import { fetchTags } from '@/api/httpApi';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 
 interface Result {
@@ -27,15 +28,31 @@ export function SearchPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState<{ module: string; content?: string } | null>(null);
 
+  // Tag 过滤
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTags(scope).then((res) => {
+      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [scope]);
+
   const run = async (): Promise<void> => {
     if (!query.trim()) return;
     setLoading(true);
     setError(null);
     setResults(null);
     try {
+      // Tag 过滤语义：选中具体 tag 时精确过滤（不含 ki-search），"全部"才用默认 ki-search
+      const searchTags = selectedTags.length > 0
+        ? selectedTags          // 仅用户选中的 tag（精确过滤）
+        : ['ki-search'];        // 默认全部（ki-search）
       const res = await kiSearch(query.trim(), {
         scope,
-        tags: ['ki-search'],
+        tags: searchTags,
         threshold: threshold || undefined,
         limit: Number(limit) || 10,
       });
@@ -53,6 +70,10 @@ export function SearchPage(): JSX.Element {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleTag = (tag: string): void => {
+    setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
   };
 
   return (
@@ -85,6 +106,26 @@ export function SearchPage(): JSX.Element {
           </button>
         </div>
         <div className="ki-query-options">
+          <div className="ki-query-option" style={{ flex: '1 0 100%' }}>
+            <span className="ki-form-label" style={{ marginRight: 8 }}>Tags</span>
+            <div className="ki-tag-select">
+              <span
+                className={`ki-tag-chip${selectedTags.length === 0 ? ' ki-tag-chip--active' : ''}`}
+                onClick={() => setSelectedTags([])}
+              >
+                全部
+              </span>
+              {availableTags.map((t) => (
+                <span
+                  key={t}
+                  className={`ki-tag-chip${selectedTags.includes(t) ? ' ki-tag-chip--active' : ''}`}
+                  onClick={() => toggleTag(t)}
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          </div>
           <div className="ki-query-option">
             <span className="ki-form-label">Threshold</span>
             <input
