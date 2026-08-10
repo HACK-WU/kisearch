@@ -161,6 +161,7 @@ export async function kiSyncRelation(args: {
   relation: string;
   content: string;
   vector?: boolean;
+  tags?: string[];
 }): Promise<StoreResult> {
   return callTool<StoreResult>('ki_sync_relation', {
     scope: args.scope,
@@ -168,5 +169,6 @@ export async function kiSyncRelation(args: {
     relation: args.relation,
     module_info: args.content,
     ...(args.vector !== undefined ? { vector: args.vector } : {}),
+    ...(args.tags && args.tags.length > 0 ? { tags: args.tags.join(',') } : {}),
   });
 }

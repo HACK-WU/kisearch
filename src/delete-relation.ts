@@ -40,6 +40,8 @@ interface GroupData {
     lastUsedTime: number | null;
     isImported: boolean;
     memoryId?: string;
+    /** 多值：文档内容向量（多 tag 各一）的全部 docId，供 delete 精确清理（与 scoring.ts Relation.memoryIds 一致） */
+    memoryIds?: string[];
   }>;
   keywords: string[];
   max_hot_count: number;
@@ -153,8 +155,9 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
       result.reason = `${result.reason || ''} Wiki 删除失败: ${(err as Error).message}`.trim();
     }
 
-    // 4. 删除向量记忆（rel 可能为 undefined，无 memoryId 时走 search 兜底）
-    const memOutcome = await deleteMemMemory(scope, relation, rel?.memoryId);
+    // 4. 删除向量记忆（rel 可能为 undefined；优先按 memoryIds 多值删多 tag 内容向量，
+    //    退化为单 memoryId，无则走 search 兜底）
+    const memOutcome = await deleteMemMemory(scope, relation, rel?.memoryIds ?? (rel?.memoryId ? [rel.memoryId] : undefined));
     result.memRemoved = memOutcome.removed;
     result.memMethod = memOutcome.method;
     if (memOutcome.memoryId) result.memMemoryId = memOutcome.memoryId;
@@ -177,33 +180,36 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
 async function deleteMemMemory(
   scope: string,
   relation: string,
-  memoryId?: string
+  memoryIds?: string[]
 ): Promise<{ removed: boolean; method: 'memoryId' | 'search' | 'skip' | 'none'; memoryId?: string; reason?: string }> {
   const avail = await ensureVectorAvailable();
   if (!avail.available) {
     return { removed: false, method: 'skip', reason: `向量服务不可用: ${avail.reason}` };
   }
 
-  // 优先按 memoryId(docId) 删除
-  if (memoryId) {
+  const ids = (memoryIds ?? []).filter(Boolean);
+
+  // 优先按 memoryIds(docId) 批量删除（多 tag 内容向量全部清理）
+  if (ids.length > 0) {
     try {
-      const res = await vectorDelete({ scope, ids: [memoryId] });
+      const res = await vectorDelete({ scope, ids });
       if (res.deleted > 0) {
-        return { removed: true, method: 'memoryId', memoryId };
+        const primary = ids[0];
+        return { removed: true, method: 'memoryId', memoryId: primary };
       }
-      // 未命中（id 不存在，可能 text 变更导致 docId 漂移），继续 search 兜底
+      // 全部未命中（id 不存在，可能 text 变更导致 docId 漂移），继续 search 兜底
       const searchResult = await deleteBySearch(scope, relation);
       return {
         ...searchResult,
-        reason: `memoryId(${memoryId}) 未命中，已尝试 search 兜底。${searchResult.reason || ''}`.trim(),
+        reason: `memoryIds(${ids.join(',')}) 未命中，已尝试 search 兜底。${searchResult.reason || ''}`.trim(),
       };
     } catch (err) {
-      // memoryId 删除失败，继续 search 兜底
+      // memoryIds 删除失败，继续 search 兜底
       const e = err as Error;
       const searchResult = await deleteBySearch(scope, relation);
       return {
         ...searchResult,
-        reason: `memoryId(${memoryId}) 删除失败: ${e.message}，已尝试 search 兜底。${searchResult.reason || ''}`.trim(),
+        reason: `memoryIds(${ids.join(',')}) 删除失败: ${e.message}，已尝试 search 兜底。${searchResult.reason || ''}`.trim(),
       };
     }
   }
@@ -221,12 +227,11 @@ async function deleteMemMemory(
  */
 async function deleteBySearch(scope: string, relation: string): Promise<{ removed: boolean; method: 'search'; memoryId?: string; reason?: string }> {
   try {
-    // 用 relation 名称做查询
+    // 用 relation 名称做查询（不限 tag，覆盖多 tag 内容向量——兜底时须清理全部 tag 的该内容 doc，#M1）
     const results = await vectorSearch({
       scope,
       query: relation,
-      limit: 10,
-      tags: 'ki-search',
+      limit: 20,
     });
 
     if (results.length === 0) {
@@ -252,17 +257,13 @@ async function deleteBySearch(scope: string, relation: string): Promise<{ remove
       return { removed: false, method: 'search', reason: `search 返回 ${results.length} 条但无严格匹配（relation 名称未作为标题前缀出现）` };
     }
 
-    if (matched.length > 1) {
-      return { removed: false, method: 'search', reason: `search 严格匹配到 ${matched.length} 条，无法确定删除目标，需人工确认` };
-    }
-
-    // 唯一匹配，执行删除
-    const target = matched[0];
-    const res = await vectorDelete({ scope, ids: [target.memoryId] });
+    // 删除所有严格匹配的内容 doc（多 tag 内容各有独立 doc，须全部清理，#M1）
+    const ids = matched.map((r) => r.memoryId).filter(Boolean) as string[];
+    const res = await vectorDelete({ scope, ids });
     if (res.deleted === 0) {
-      return { removed: false, method: 'search', memoryId: target.memoryId, reason: `vectorDelete 未删除任何条目（id=${target.memoryId}）` };
+      return { removed: false, method: 'search', reason: `vectorDelete 未删除任何条目（ids=${ids.join(',')}）` };
     }
-    return { removed: true, method: 'search', memoryId: target.memoryId };
+    return { removed: true, method: 'search', memoryId: ids[0] };
   } catch (err) {
     return { removed: false, method: 'search', reason: `search 兜底失败: ${(err as Error).message}` };
   }

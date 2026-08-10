@@ -294,6 +294,51 @@ describe('sync-relation 批量模式', () => {
   });
 });
 
+describe('sync-relation 自定义 tags 解析', () => {
+  it('parseContentTags：逗号分隔 + 去空格 + 去重', async () => {
+    const { parseContentTags } = await import('../src/sync-relation.js');
+    assert.deepStrictEqual(parseContentTags('api, auth ,api, bugfix'), ['api', 'auth', 'bugfix']);
+  });
+
+  it('parseContentTags：过滤内部保留 tag（ki-search/ki-relation/ki-path）', async () => {
+    const { parseContentTags } = await import('../src/sync-relation.js');
+    assert.deepStrictEqual(parseContentTags('ki-search,api,ki-relation,ki-path'), ['api']);
+  });
+
+  it('parseContentTags：空/未传返回空数组', async () => {
+    const { parseContentTags } = await import('../src/sync-relation.js');
+    assert.deepStrictEqual(parseContentTags(undefined), []);
+    assert.deepStrictEqual(parseContentTags(''), []);
+    assert.deepStrictEqual(parseContentTags('   '), []);
+  });
+
+  it('parseContentTags：统一转小写', async () => {
+    const { parseContentTags } = await import('../src/sync-relation.js');
+    assert.deepStrictEqual(parseContentTags('API,Auth'), ['api', 'auth']);
+  });
+});
+
+describe('sync-relation 多 tag docId 唯一性（#M1）', () => {
+  it('generateDocId：同内容不同 tag 产生不同 docId（多 tag 各自独立 doc）', async () => {
+    const { generateDocId } = await import('../src/lib/vector-client.js');
+    const idKi = generateDocId('内容', 'scope1', 'ki-search');
+    const idApi = generateDocId('内容', 'scope1', 'api');
+    const idAuth = generateDocId('内容', 'scope1', 'auth');
+    assert.notStrictEqual(idKi, idApi, 'ki-search 与 api 的 docId 应不同');
+    assert.notStrictEqual(idApi, idAuth, 'api 与 auth 的 docId 应不同');
+  });
+
+  it('generateDocId：同内容同 tag 同 scope → 同 docId（幂等 upsert）', async () => {
+    const { generateDocId } = await import('../src/lib/vector-client.js');
+    assert.strictEqual(generateDocId('内容', 'scope1', 'api'), generateDocId('内容', 'scope1', 'api'));
+  });
+
+  it('generateDocId：tag 参与生成，与旧版（无 tag）docId 不同', async () => {
+    const { generateDocId } = await import('../src/lib/vector-client.js');
+    assert.notStrictEqual(generateDocId('内容', 'scope1', 'ki-search'), generateDocId('内容', 'scope1'));
+  });
+});
+
 describe('sync-relation relation 名安全校验', () => {
   it('单条模式：含 "/" 的 relation 直接失败（ok:false）', () => {
     const result = runSync([

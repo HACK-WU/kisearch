@@ -351,12 +351,29 @@ export class ZvecEngine {
     const embeddedVectors = new Map<string, number[]>();
     for (let start = 0; start < needsEmbed.length; start += EMBED_BATCH_SIZE) {
       const batch = needsEmbed.slice(start, start + EMBED_BATCH_SIZE);
-      const batchTexts = batch.map((d) => d.text!);
+      // 批内去重（M5）：相同 text 只需 embed 一次，向量复用给所有同文本 doc。
+      // 同文本必产出同向量，故语义完全一致；仅消除重复 embedding HTTP 调用
+      // （sync-relation 多 tag 场景：同一 moduleInfo 打 N 个 tag → N 个 doc 同 text，原先被 embed N 次）。
+      // 去重只在批内进行（批间跨 batch 相同文本不合并，避免失败粒度从「小批」上浮到「整批」）。
+      const uniqueByText = new Map<string, DocInput>();
+      const order: string[] = [];
+      for (const d of batch) {
+        if (!uniqueByText.has(d.text!)) {
+          uniqueByText.set(d.text!, d);
+          order.push(d.text!);
+        }
+      }
+      const uniqueTexts = order;
       try {
         // 传 batchSize 使 provider 不再二次细分，令失败粒度恰好等于本批
-        const vectors = await this.embedding.embed(batchTexts, { batchSize: EMBED_BATCH_SIZE });
+        const vectors = await this.embedding.embed(uniqueTexts, { batchSize: EMBED_BATCH_SIZE });
+        const vectorByText = new Map<string, number[]>();
         for (let i = 0; i < vectors.length; i++) {
-          embeddedVectors.set(batch[i].id, vectors[i]);
+          vectorByText.set(uniqueTexts[i], vectors[i]);
+        }
+        for (const d of batch) {
+          const vec = vectorByText.get(d.text!);
+          if (vec) embeddedVectors.set(d.id, vec);
         }
       } catch (err) {
         const reason = (err as Error).message;

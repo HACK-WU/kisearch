@@ -78,6 +78,7 @@ export function WritePage(): JSX.Element {
   const [group, setGroup] = useState('');
   const [relation, setRelation] = useState('');
   const [markdown, setMarkdown] = useState('');
+  const [tags, setTags] = useState('');
 
   // combobox 状态
   const [groupOpen, setGroupOpen] = useState(false);
@@ -119,11 +120,16 @@ export function WritePage(): JSX.Element {
     }
     setSubmitting(true);
     try {
-      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector });
-      setResult(`写入成功${vector ? '' : '（未向量化）'}`);
+      const tagList = tags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: tagList });
+      setResult(`写入成功${vector ? '' : '（未向量化）'}${tagList.length > 0 ? `（标签：${tagList.join(', ')}）` : ''}`);
       setGroup('');
       setRelation('');
       setMarkdown('');
+      setTags('');
       setPreview(false);
     } catch (e) {
       setError((e as Error).message);
@@ -136,6 +142,7 @@ export function WritePage(): JSX.Element {
     setGroup('');
     setRelation('');
     setMarkdown('');
+    setTags('');
     setPreview(false);
     setResult(null);
     setError(null);
@@ -243,6 +250,20 @@ export function WritePage(): JSX.Element {
                     onChange={(e) => setMarkdown(e.target.value)}
                   />
                 )}
+              </div>
+            </div>
+
+            {/* 自定义标签（可选） */}
+            <div className="ki-form-group" style={{ marginTop: 14 }}>
+              <label className="ki-form-label">自定义标签（可选）</label>
+              <input
+                className="ki-form-input"
+                placeholder="逗号分隔多个，如：api, auth（叠加在默认 ki-search 之上）"
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+              />
+              <div className="ki-form-hint">
+                为空时仅写 ki-search；指定后内容额外按各标签写入向量，可用语义搜索按标签过滤召回。
               </div>
             </div>
 

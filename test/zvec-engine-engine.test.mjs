@@ -97,6 +97,51 @@ describe('共享 engine · 只读用例', () => {
   });
 });
 
+// ─── M5：批内相同 text 去重 embed（多 tag 场景同一 moduleInfo 打多个 tag） ───
+
+test('M5: 批内相同 text 只 embed 一次，向量复用给所有同文本 doc', async (t) => {
+  // 计数 embedding：记录每次 embed 收到的去重后文本集合
+  const embeddedBatches = [];
+  const countingEmbedding = {
+    dimension: DIM,
+    embed: async (texts) => {
+      embeddedBatches.push([...texts]);
+      return texts.map((x) => hashVector(x));
+    },
+  };
+  const engine = await ZvecEngine.create(
+    makeConfig(makeDbPath('zvec-m5-'), { embedding: countingEmbedding }),
+  );
+  t.after(() => engine.close());
+
+  // 同一 text 打 3 个 tag（docId 各不同），应只 embed 一次该 text
+  const SAME_TEXT = '同一段模块信息内容';
+  const docs = [
+    { id: 't1', text: SAME_TEXT, fields: { tag: 'ki-search', content: SAME_TEXT } },
+    { id: 't2', text: SAME_TEXT, fields: { tag: 'api', content: SAME_TEXT } },
+    { id: 't3', text: SAME_TEXT, fields: { tag: 'auth', content: SAME_TEXT } },
+    { id: 't4', text: '独立文本', fields: { tag: 'x', content: '独立文本' } },
+  ];
+  const res = await engine.upsert(docs);
+
+  assert.ok(res.ok > 0, '应成功写入全部 doc');
+  assert.equal(res.failed, 0, '不应有失败项');
+
+  // 批内去重：第一次 embed 调用应只含 2 个唯一 text（SAME_TEXT + 独立文本），而非 4 个
+  const firstBatch = embeddedBatches.find((b) => b.length > 0);
+  assert.ok(firstBatch, 'embed 应被调用');
+  assert.equal(firstBatch.length, 2, `同 text 应去重：仅 embed 2 个唯一文本，实际 ${JSON.stringify(firstBatch)}`);
+  assert.ok(firstBatch.includes(SAME_TEXT), '应包含相同文本');
+  assert.ok(firstBatch.includes('独立文本'), '应包含独立文本');
+
+  // 数据守恒：3 个同 text doc 均写入成功（向量已复用）
+  const fetched = await engine.fetch(['t1', 't2', 't3', 't4'], true);
+  assert.equal(fetched.length, 4, '4 个 doc 应全部可 fetch');
+  for (const f of fetched) {
+    assert.ok(Array.isArray(f.vector) && f.vector.length === DIM, `doc ${f.id} 应有向量`);
+  }
+});
+
 // ─── 破坏性 / 独立 engine 用例 ───
 
 test('TC-REQ-01-25: upsert 写入维度不符 → DimensionMismatchError（批级）', async (t) => {

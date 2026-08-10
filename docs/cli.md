@@ -790,6 +790,16 @@ ki sync-relation \
 >
 > **MCP 工具 `ki_sync_relation` 同样支持**：入参 `vector: boolean`（默认 `true`），传 `false` 即非向量化——CLI 与 MCP 行为一致。
 
+> **自定义标签（`--tags` / MCP `tags`）**：为**文档内容**（`module-info`）额外指定多个业务标签（逗号分隔），叠加在默认 `ki-search` 之上。`ki-search` 始终写入；自定义标签各写一条内容向量（zvec tag 单值字段，多 tag 以「同内容多 doc」实现）。不传则只写 `ki-search`（与旧行为一致）。指定后可按 `ki search --tags <自定义标签>` 定向召回：
+> ```bash
+> # 内容打 api + auth 两个自定义标签（叠加 ki-search）
+> ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --tags "api,auth"
+> ```
+> - 内部保留标签（`ki-search` / `ki-relation` / `ki-path`）会被过滤，不可作为自定义标签
+> - 返回值透出 `contentTags`（向量化时为 `["ki-search","api","auth"]`；无自定义标签则为 `["ki-search"]`；非向量化（`--no-vector`）为 `[]`）
+> - **重复同步**同一 relation 时，若自定义标签变化（如 `api` 改为 `auth`），旧标签的内容向量会被自动清理，避免残留
+> - MCP 工具 `ki_sync_relation` 同样支持入参 `tags`（逗号分隔字符串）
+
 **示例：写入单条知识**
 
 ```bash
@@ -1015,6 +1025,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `relation` | string | 是 | Relation 名称 |
 | `module_info` | string | 是 | 本地 KB Markdown 内容 |
 | `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层，无 memoryId、不可被 `ki_search` 召回） |
+| `tags` | string | 否 | 文档内容自定义标签（逗号分隔多个，叠加在默认 `ki-search` 之上，如 `"api,auth"`） |
 
 #### `ki_manage_index_create`
 

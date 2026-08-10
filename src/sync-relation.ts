@@ -30,7 +30,7 @@ import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
-import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 
@@ -323,6 +323,8 @@ export interface SyncRelationParams {
   moduleInfo: string;
   /** 是否写入向量层（ki-search / ki-relation）。false = 非向量化（仅 KB 层，不产生 memoryId） */
   vector?: boolean;
+  /** 文档内容的自定义标签（逗号分隔多个）。ki-search 始终默认写入；自定义 tags 额外各写一条内容向量 */
+  tags?: string;
 }
 
 export type SyncRelationResult =
@@ -337,14 +339,31 @@ export type SyncRelationResult =
  * 失败仅记日志，不抛，不阻塞主流程；返回 { stored, reason? } 供上层透出
  * 部分写入状态（cache/wiki 成功但向量未写时，调用方需要感知）。
  */
+/**
+ * 解析自定义 tags：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
+ */
+export function parseContentTags(tags?: string): string[] {
+  if (!tags) return [];
+  const seen = new Set<string>();
+  const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
+  for (const raw of tags.split(',')) {
+    const t = raw.trim().toLowerCase();
+    if (t.length === 0 || reserved.has(t)) continue;
+    seen.add(t);
+  }
+  return [...seen];
+}
+
 async function vectorWriteBack(params: {
   relation: string;
   group: string;
   moduleInfo: string;
   scope: string;
   cachePath: string;
+  /** 文档内容自定义标签（额外叠加在 ki-search 之上） */
+  tags?: string;
 }): Promise<{ stored: boolean; reason?: string }> {
-  const { relation, group, moduleInfo, scope, cachePath } = params;
+  const { relation, group, moduleInfo, scope, cachePath, tags } = params;
 
   try {
     const avail = await ensureVectorAvailable();
@@ -354,25 +373,64 @@ async function vectorWriteBack(params: {
     }
 
     const relText = buildRelationContent(relation, group);
-    // 一次 embed 批量 2 条：ki-relation 路径向量 + ki-search 语义向量
+    const customTags = parseContentTags(tags);
+    // 内容向量：ki-search（默认）+ 每个自定义 tag 各写一条（text 相同、tag 不同 → docId 不同）
+    const contentEntries = [
+      { text: moduleInfo, tags: 'ki-search' },
+      ...customTags.map((t) => ({ text: moduleInfo, tags: t })),
+    ];
+
+    // 一次 embed 批量写：ki-relation 路径向量 + 内容向量（ki-search + 自定义 tags）
+    // 顺序：先写新向量，成功后再清旧 tag 向量，避免「先删后写」在写失败时丢内容向量（M2）
     const result = await vectorBulkStore({
       scope,
       entries: [
         { text: relText, tags: 'ki-relation', group },
-        { text: moduleInfo, tags: 'ki-search' },
+        ...contentEntries,
       ],
     });
 
-    // ki-search 条（index 1）的 docId 回写 memoryId 到 cache
+    // 写失败：不删任何旧向量，保持数据守恒（仅残留旧 tag 向量，delete 时 search 兜底可清）
+    const failed = result.results.filter((r) => !r.success);
+    if (failed.length === result.results.length) {
+      return { stored: false, reason: failed[0]?.error || '向量写入全部失败' };
+    }
+
+    // 新向量写入成功（至少部分成功）后，清理旧自定义 tag 内容：
+    // 删除「旧 memoryIds 中不在本次新 tag 集合」的 docId，避免修改 tags 后旧标签内容向量残留（#M1 数据守恒）
+    const newContentIds = new Set([
+      generateDocId(moduleInfo, scope, 'ki-search'),
+      ...customTags.map((t) => generateDocId(moduleInfo, scope, t)),
+    ]);
+    try {
+      const priorCache = readJson<RelationsCache>(cachePath);
+      const priorIds = priorCache?.groups?.[group]?.hot_relations?.find((r) => r.text === relation)?.memoryIds ?? [];
+      const staleIds = priorIds.filter((id) => id && !newContentIds.has(id));
+      if (staleIds.length > 0) {
+        await vectorDelete({ scope, ids: staleIds });
+      }
+    } catch {
+      // 旧 tag 清理失败不影响主流程（仅可能残留孤儿向量，delete 时 search 兜底可清）
+    }
+
+    // 内容向量（ki-search + 自定义 tags）的全部 docId 回写 cache：
+    // memoryId = ki-search 主条（向后兼容）；memoryIds = 全部内容 docId（多 tag 各一，供 delete 精确清理）
+    const contentItems = result.results.filter((r) => r.index >= 1 && r.success);
     const searchItem = result.results.find((r) => r.index === 1 && r.success);
-    if (searchItem?.memoryId) {
+    if (contentItems.length > 0 || searchItem) {
       try {
         const latestCache = readJson<RelationsCache>(cachePath);
         if (latestCache) {
           const groupData = latestCache.groups[group];
           const rel = groupData?.hot_relations.find(r => r.text === relation);
           if (rel) {
-            rel.memoryId = searchItem.memoryId;
+            const allIds = contentItems.map((r) => r.memoryId).filter(Boolean) as string[];
+            if (allIds.length > 0) {
+              rel.memoryIds = allIds;
+            }
+            if (searchItem?.memoryId) {
+              rel.memoryId = searchItem.memoryId;
+            }
             writeJson(cachePath, latestCache);
           }
         }
@@ -381,11 +439,6 @@ async function vectorWriteBack(params: {
       }
     }
 
-    // 两条都失败才算未写入；部分成功也如实透出
-    const failed = result.results.filter((r) => !r.success);
-    if (failed.length === result.results.length) {
-      return { stored: false, reason: failed[0]?.error || '向量写入全部失败' };
-    }
     return { stored: true };
   } catch (err) {
     console.warn(`[sync-relation] 向量写入失败: ${(err as Error).message}`);
@@ -450,7 +503,7 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
     // 非向量化模式（vector=false）：跳过 embed 与 memoryId 回写，仅 KB 层。
     const vec = params.vector === false
       ? { stored: false, reason: '非向量化模式（--no-vector），跳过向量写入，无 memoryId' }
-      : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath });
+      : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath, tags: params.tags });
 
     // Wiki 写回（容错，失败不阻塞）
     let wikiSynced: boolean | undefined;
@@ -468,6 +521,11 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
       wikiSynced = false;
     }
 
+    // 透出实际写入的内容标签：向量化时始终为「ki-search + 自定义 tags」；
+    // 非向量化时透出 []（空数组语义 = 未写向量，无内容标签）。
+    const customTags = parseContentTags(params.tags);
+    const contentTags = params.vector === false ? [] : ['ki-search', ...customTags];
+
     return {
       ok: true,
       scope,
@@ -475,6 +533,7 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
       ...(pathHint ? { hint: pathHint } : {}),
       vectorPending: false,
       vectorStored: vec.stored,
+      contentTags,
       ...(vec.reason ? { vectorReason: vec.reason } : {}),
       ...(wikiSynced !== undefined ? { wikiSynced } : {}),
       ...(wikiFile ? { wikiFile } : {}),
@@ -498,6 +557,7 @@ program
   .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')
+  .option('--tags <tags>', '文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 api,auth）')
   .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB + Wiki），不写向量（不产生 memoryId，无法被 ki search 召回）')
   .action(async (opts) => {
     // REQ-10：超长 module-info（>1000 字符）输出警告，不自动切分（保持单条关系语义）
@@ -531,6 +591,7 @@ program
       relation: opts.relation || '',
       moduleInfo: opts.moduleInfo || '',
       vector,
+      tags: opts.tags,
     });
 
     if (result.ok) {

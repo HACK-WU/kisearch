@@ -147,10 +147,22 @@ function normalizeTag(tag: string): string {
 }
 
 /**
- * 生成 doc id：sha256(text + scope) 截 32（S-03 generateDocId）
+ * 生成 doc id：sha256(text + scope + tag) 截 32
+ *
+ * tag 参与 id 生成：同 scope + text 打不同 tag → 不同 docId → 各自独立 doc，
+ * 支撑「一个内容多 tag 各写一条」的多标签能力（tag 单值字段，多 tag 必须分 doc）。
+ * 同 scope + text + tag → 同 docId → 幂等 upsert（重复写入覆盖）。
+ *
+ * ⚠️ 迁移影响（breaking）：tag 参与生成后，**所有调用 vectorStore/vectorBulkStore 的链路**
+ * （sync-relation、scan-kb import、bulk-store、path-vectorize、batch-vectorize）产出的 docId 均改变，
+ * 存量向量 docId 与新 scheme 失配。后果：
+ *   - 存量 cache 的 memoryId/memoryIds 指向的 docId 失效 → REQ-20260807-001 的「原文召回」、
+ *     按 docId 精确删除、scan-kb 幂等重导（旧 scheme 孤儿向量）在迁移前不可靠；
+ *   - delete 有 search 兜底可清，原文召回需 re-import 或 `ki restore <scope> --rebuild-vector` 迁移。
+ * 部署含存量向量数据时，发布后需全量 re-import 或 rebuild-vector 迁移。
  */
-function generateDocId(text: string, scope: string): string {
-  return createHash('sha256').update(text + scope).digest('hex').slice(0, 32);
+export function generateDocId(text: string, scope: string, tag?: string): string {
+  return createHash('sha256').update(text + scope + (tag ?? '')).digest('hex').slice(0, 32);
 }
 
 /**
@@ -385,7 +397,7 @@ export async function vectorStore(params: {
   const engine = await getEngine();
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
-  const docId = generateDocId(params.text, scope);
+  const docId = generateDocId(params.text, scope, tag);
   const result = await engine.upsert([{
     id: docId,
     text: params.text,
@@ -420,7 +432,7 @@ export async function vectorBulkStore(params: {
   const docs = params.entries.map((e) => {
     const tag = normalizeTag(e.tags ?? DEFAULT_TAG);
     return {
-      id: generateDocId(e.text, scope),
+      id: generateDocId(e.text, scope, tag),
       text: e.text,
       fields: {
         [TAG_FIELD]: tag,

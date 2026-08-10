@@ -118,6 +118,8 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 | `mcp-tools/store.ts` | `engine.insert({ tags: 'ki-search' })` | MCP ki_store 工具 |
 
 > 注意：写入时必须显式传 `tags: 'ki-search'`，确保 metadata 字段正确，避免标签污染。
+>
+> **`sync-relation` 自定义标签（多 tag）**：`sync-relation` 的 `--tags` / MCP `tags` 可为**文档内容**额外叠加业务标签（逗号分隔多个）。因 zvec `tag` 为单值 STRING 字段，多 tag 以「同内容多 doc」实现——内容写 `ki-search` + 每个自定义 tag 各一条（docId 由 `sha256(text + scope + tag)` 生成，tag 不同则 docId 不同）。检索时 `ki search --tags api,auth` 以 OR 组合召回。内部保留标签（`ki-search`/`ki-relation`/`ki-path`）会被过滤。
 
 ### 3.3 查询消费
 
