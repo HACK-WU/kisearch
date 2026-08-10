@@ -51,7 +51,7 @@ export type SearchResult =
   | { ok: false; error: string; degraded?: boolean };
 
 /** REQ-09：从 local KB 按 (group, relation) 取文件级原文；失败返回 null + hint */
-function fetchOriginal(scope: string, group: string, relation: string): { original: string; hint?: string } | null {
+export function fetchOriginal(scope: string, group: string, relation: string): { original: string; hint?: string } | null {
   try {
     const localKbPath = getLocalKbDir(scope, group);
     const localKb = readJson<Record<string, string>>(localKbPath);
@@ -131,16 +131,26 @@ export async function executeSearch(params: {
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
-        // REQ-09：原文召回（显式开启才执行）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
-        if (includeOriginal && meta.group && meta.relation) {
+      }
+      // REQ-09：原文召回（显式开启才执行）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
+      // 原文不可用（含 relation 反查缺失）时降级：以向量文档 content 兜底，并提示没有原文
+      if (includeOriginal) {
+        if (meta?.group && meta.relation) {
           const fetched = fetchOriginal(scope, meta.group, meta.relation);
           if (fetched?.original) {
             hit.originalRetrieved = true;
             hit.original = fetched.original;
           } else {
             hit.originalRetrieved = false;
-            hit.originalHint = fetched?.hint ?? '原文不可用';
+            // 兜底：返回向量文档作为原文，并提示无原文（REQ 原文不可用降级）
+            hit.original = r.content;
+            hit.originalHint = fetched?.hint ?? '原文不可用：已降级返回向量文档';
           }
+        } else {
+          // relation 反查缺失：无 local KB 定位，无法取文件级原文 → 向量文档兜底
+          hit.originalRetrieved = false;
+          hit.original = r.content;
+          hit.originalHint = '原文不可用：无法定位本地 KB 原文，已降级返回向量文档';
         }
       }
       return hit;
