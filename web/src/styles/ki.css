@@ -407,6 +407,34 @@ a:hover { text-decoration: underline; }
   border-color: var(--ki-color-primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
 }
+
+/* 新建 Group 输入框独特样式（绿色边框 + 淡绿背景，区别于已有 Group 的蓝色） */
+.ki-form-input--new {
+  border-color: var(--ki-color-success);
+  background: color-mix(in srgb, var(--ki-color-success) 6%, transparent);
+}
+.ki-form-input--new:focus {
+  border-color: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 25%, transparent);
+}
+/* 回车确认后的 Group 输入框（更深的绿 + 实心边框，配合右侧 ✓ 图标） */
+.ki-form-input--confirmed {
+  border-color: var(--ki-color-success);
+  border-width: 2px;
+  background: color-mix(in srgb, var(--ki-color-success) 14%, transparent);
+}
+/* 确认态右侧 ✓ 图标（位于 toggle 左侧，避免重叠） */
+.ki-combobox__confirm {
+  position: absolute;
+  right: 34px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ki-color-success);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
 .ki-form-input--error, .ki-form-textarea--error { border-color: var(--ki-color-danger); }
 .ki-form-error { font-size: var(--ki-font-size-xs); color: var(--ki-color-danger); margin-top: 4px; }
 .ki-form-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 4px; }

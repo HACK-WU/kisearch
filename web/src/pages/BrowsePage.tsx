@@ -10,6 +10,7 @@ import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs } from '@/lib/hooks';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { GroupPathSelect } from '@/components/GroupPathSelect';
 
 const ICON_FOLDER = (
   <svg className="ki-tree-icon" viewBox="0 0 16 16" fill="none">
@@ -290,14 +291,21 @@ export function BrowsePage(): JSX.Element {
                 padding: '16px 20px',
                 borderBottom: '1px solid var(--ki-color-border)',
                 display: 'flex',
-                gap: 8,
+                gap: 10,
                 alignItems: 'center',
+                flexWrap: 'wrap',
               }}
             >
+              <GroupPathSelect
+                scope={scope}
+                value={activeGroup}
+                onChange={(v) => { setActiveGroup(v); setViewing(null); }}
+                placeholder="选择或输入 Group 路径…"
+              />
               <input
                 className="ki-form-input"
                 placeholder="按文件名/路径模糊搜索…"
-                style={{ maxWidth: 220 }}
+                style={{ maxWidth: 220, flex: '1 1 200px' }}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
               />

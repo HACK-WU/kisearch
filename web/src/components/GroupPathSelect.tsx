@@ -14,8 +14,8 @@ interface GTreeNode {
   open: boolean;
 }
 
-/** 从 docs 的 group 路径构建递归树（全路径节点，唯一顶层折叠） */
-function buildGroupTree(docs: { group: string }[]): GTreeNode[] {
+/** 从 groups 列表（完整 group 路径 + count）构建递归树（全路径节点，唯一顶层折叠） */
+function buildGroupTree(groups: { name: string }[]): GTreeNode[] {
   const roots: GTreeNode[] = [];
   const map = new Map<string, GTreeNode>();
   const getNode = (path: string): GTreeNode => {
@@ -26,8 +26,8 @@ function buildGroupTree(docs: { group: string }[]): GTreeNode[] {
     }
     return n;
   };
-  for (const d of docs) {
-    const segs = d.group.split('/').filter(Boolean);
+  for (const g of groups) {
+    const segs = g.name.split('/').filter(Boolean);
     if (segs.length === 0) continue;
     let prev: GTreeNode | null = null;
     for (let i = 0; i < segs.length; i++) {
@@ -129,12 +129,15 @@ interface GroupPathSelectProps {
 
 export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: GroupPathSelectProps): JSX.Element {
   const [open, setOpen] = useState(false);
+  /** 是否已确认（回车确认或从下拉选中） */
+  const [confirmed, setConfirmed] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const { data: docData } = useDocList(scope);
   const [tree, setTree] = useState<GTreeNode[]>([]);
   useEffect(() => {
-    const t = buildGroupTree(docData?.docs ?? []);
+    // 用完整 groups 列表构建树（不受 docs 500 条分页截断影响；空 Group 也能显示）
+    const t = buildGroupTree(docData?.groups ?? []);
     setDefaultOpen(t);
     setTree(t);
   }, [docData]);
@@ -148,22 +151,44 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: G
     return () => document.removeEventListener('click', onDocClick);
   }, []);
 
+  // 外部清空值时重置确认态
+  useEffect(() => {
+    if (!value) setConfirmed(false);
+  }, [value]);
+
   const pick = (n: GTreeNode): void => {
     onChange(n.path);
+    setConfirmed(true);
     setOpen(false);
   };
+
+  /** 回车确认：关闭面板并标记已确认（输入变更时自动重置） */
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (value.trim()) {
+        setConfirmed(true);
+        setOpen(false);
+      }
+    }
+  };
+
+  /** 当前输入值是否为新建 Group（不在已有树中） */
+  const isNew = value && !isPathInTree(tree, value);
 
   return (
     <div className="ki-combobox" ref={rootRef}>
       <div className="ki-combobox__input-wrap">
         <input
-          className="ki-form-input"
+          className={`ki-form-input${isNew ? ' ki-form-input--new' : ''}${confirmed ? ' ki-form-input--confirmed' : ''}`}
           placeholder={placeholder ?? '选择或输入 Group 路径，如：wiki/我的文档'}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => { setConfirmed(false); onChange(e.target.value); }}
           onFocus={() => setOpen(true)}
+          onKeyDown={handleKeyDown}
           autoComplete="off"
         />
+        {confirmed && <span className="ki-combobox__confirm">✓</span>}
         <button
           type="button"
           className={`ki-combobox__toggle${open ? ' ki-combobox__toggle--open' : ''}`}
@@ -188,8 +213,10 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: G
         </div>
         <div className="ki-combobox__footer">
           <span className="ki-cell-sub">
-            {value && !isPathInTree(tree, value) ? (
-              <span style={{ color: 'var(--ki-color-success)' }}>✚ 将新建 Group：{value}</span>
+            {confirmed ? (
+              <span style={{ color: 'var(--ki-color-success)' }}>✓ 已确认：{value}</span>
+            ) : value && !isPathInTree(tree, value) ? (
+              <span style={{ color: 'var(--ki-color-success)' }}>✚ 将新建 Group：{value}（回车确认）</span>
             ) : value ? (
               <span style={{ color: 'var(--ki-color-primary)' }}>✓ 已有 Group</span>
             ) : (

@@ -8,68 +8,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
-import { useDocList } from '@/lib/hooks';
 import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
-
-/** Group 树节点（从 doc list 的 group 路径构建） */
-interface GTreeNode {
-  name: string;
-  path: string;
-  children: GTreeNode[];
-  open: boolean;
-}
-
-/** 从 groups（含 name+count）构建递归树（全路径节点，唯一顶层折叠） */
-function buildGroupTree(groups: { name: string; count: number }[] | undefined): GTreeNode[] {
-  if (!groups?.length) return [];
-  const roots: GTreeNode[] = [];
-  const map = new Map<string, GTreeNode>();
-  const getNode = (path: string): GTreeNode => {
-    let n = map.get(path);
-    if (!n) {
-      n = { name: path.split('/').pop() || path, path, children: [], open: false };
-      map.set(path, n);
-    }
-    return n;
-  };
-  for (const g of groups) {
-    const segs = g.name.split('/').filter(Boolean);
-    if (segs.length === 0) continue;
-    let prev: GTreeNode | null = null;
-    for (let i = 0; i < segs.length; i++) {
-      const node = getNode(segs.slice(0, i + 1).join('/'));
-      if (prev) {
-        if (!prev.children.some((c) => c.path === node.path)) prev.children.push(node);
-      } else if (!roots.some((r) => r.path === node.path)) {
-        roots.push(node);
-      }
-      prev = node;
-    }
-  }
-  if (roots.length === 1 && roots[0].children.length > 0) return roots[0].children;
-  return roots;
-}
-
-/** 默认展开一层 */
-function setDefaultOpen(nodes: GTreeNode[], depth = 0): void {
-  for (const n of nodes) {
-    n.open = depth === 0;
-    setDefaultOpen(n.children, depth + 1);
-  }
-}
-
-const ICON_FOLDER_SM = (
-  <svg className="ki-gtree-icon" viewBox="0 0 16 16" fill="none">
-    <path
-      d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z"
-      fill="#7db3ef"
-      stroke="#5f97d6"
-      strokeWidth="0.6"
-    />
-  </svg>
-);
+import { GroupPathSelect } from '@/components/GroupPathSelect';
 
 export function WritePage(): JSX.Element {
   const scope = useScopeValue();
@@ -88,27 +30,13 @@ export function WritePage(): JSX.Element {
   const [tagOpen, setTagOpen] = useState(false);
   const tagRef = useRef<HTMLDivElement>(null);
 
-  // combobox 状态
-  const [groupOpen, setGroupOpen] = useState(false);
-  const groupRef = useRef<HTMLDivElement>(null);
-
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Group 树数据（当前 scope 的 groups 列表，不受 docs 分页截断影响）
-  const { data: docData } = useDocList(scope);
-  const [groupTree, setGroupTree] = useState<GTreeNode[]>([]);
-  useEffect(() => {
-    const t = buildGroupTree(docData?.groups);
-    setDefaultOpen(t);
-    setGroupTree(t);
-  }, [docData]);
-
-  // 点击外部关闭 combobox
+  // 点击外部关闭 tag combobox
   useEffect(() => {
     const onDocClick = (e: MouseEvent): void => {
-      if (groupRef.current && !groupRef.current.contains(e.target as Node)) setGroupOpen(false);
       if (tagRef.current && !tagRef.current.contains(e.target as Node)) setTagOpen(false);
     };
     document.addEventListener('click', onDocClick);
@@ -123,11 +51,6 @@ export function WritePage(): JSX.Element {
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [scope]);
-
-  const toggleGroup = (node: GTreeNode): void => {
-    setGroup(node.path);
-    setGroupOpen(false);
-  };
 
   const submit = async (): Promise<void> => {
     setError(null);
@@ -195,52 +118,13 @@ export function WritePage(): JSX.Element {
             <div className="ki-form-row">
               <div className="ki-form-group">
                 <label className="ki-form-label">Group（文档分组）</label>
-                <div className="ki-combobox" ref={groupRef}>
-                  <div className="ki-combobox__input-wrap">
-                    <input
-                      className="ki-form-input"
-                      placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
-                      value={group}
-                      onChange={(e) => setGroup(e.target.value)}
-                      onFocus={() => setGroupOpen(true)}
-                      autoComplete="off"
-                    />
-                    <button
-                      type="button"
-                      className={`ki-combobox__toggle${groupOpen ? ' ki-combobox__toggle--open' : ''}`}
-                      tabIndex={-1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setGroupOpen((v) => !v);
-                      }}
-                    >
-                      {groupOpen ? '▴' : '▾'}
-                    </button>
-                  </div>
-                  <div className={`ki-combobox__panel${groupOpen ? ' ki-combobox__panel--open' : ''}`}>
-                    <div className="ki-combobox__tree">
-                      {groupTree.length === 0 ? (
-                        <div className="ki-cell-sub" style={{ padding: 6 }}>
-                          当前 scope 暂无 Group，可直接输入新建
-                        </div>
-                      ) : (
-                        <GroupTreeView nodes={groupTree} onPick={toggleGroup} />
-                      )}
-                    </div>
-                    <div className="ki-combobox__footer">
-                      <span className="ki-cell-sub">
-                        {group && !isPathInTree(groupTree, group) ? (
-                          <span style={{ color: 'var(--ki-color-success)' }}>✚ 将新建 Group：{group}</span>
-                        ) : group ? (
-                          <span style={{ color: 'var(--ki-color-primary)' }}>✓ 已有 Group</span>
-                        ) : (
-                          '输入新路径可新建 Group'
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div className="ki-form-hint">斜杠分隔层级，下拉选择已有 Group 或直接输入新建。</div>
+                <GroupPathSelect
+                  scope={scope}
+                  value={group}
+                  onChange={setGroup}
+                  placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
+                  hint="斜杠分隔层级，下拉选择已有 Group 或直接输入新建。"
+                />
               </div>
               <div className="ki-form-group">
                 <label className="ki-form-label">文档名称（Relation）</label>
@@ -402,59 +286,4 @@ export function WritePage(): JSX.Element {
       </div>
     </>
   );
-}
-
-/** 判断路径是否已在树中（供 footer 提示） */
-function isPathInTree(nodes: GTreeNode[], path: string): boolean {
-  for (const n of nodes) {
-    if (n.path === path) return true;
-    if (isPathInTree(n.children, path)) return true;
-  }
-  return false;
-}
-
-/** 递归 Group 树（点击节点选中并关闭） */
-function GroupTreeView({ nodes, onPick }: { nodes: GTreeNode[]; onPick: (n: GTreeNode) => void }): JSX.Element {
-  const [tree, setTree] = useState<GTreeNode[]>(nodes);
-  useEffect(() => setTree(nodes), [nodes]);
-
-  const toggleOpen = (path: string): void => {
-    setTree((prev) => {
-      const walk = (items: GTreeNode[]): boolean => {
-        for (const n of items) {
-          if (n.path === path) {
-            n.open = !n.open;
-            return true;
-          }
-          if (walk(n.children)) return true;
-        }
-        return false;
-      };
-      walk(prev);
-      return [...prev];
-    });
-  };
-
-  const render = (n: GTreeNode): JSX.Element => {
-    const hasSub = n.children.length > 0;
-    return (
-      <div key={n.path}>
-        <div
-          className="ki-gtree-dir"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (hasSub) toggleOpen(n.path);
-            onPick(n);
-          }}
-        >
-          <span className="ki-gtree-arrow">{hasSub ? (n.open ? '▾' : '▸') : ''}</span>
-          {ICON_FOLDER_SM}
-          <span className="ki-gtree-label">{n.name}</span>
-        </div>
-        {hasSub && n.open && <div className="ki-gtree-group">{n.children.map(render)}</div>}
-      </div>
-    );
-  };
-
-  return <>{tree.map(render)}</>;
 }
