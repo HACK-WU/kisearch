@@ -127,6 +127,7 @@ openclaw memory-pro stats
 - **删除清单**：ai-results 契约、keywords 全链路（含 sync-relation 词云、migrate-keywords）、isFullText 字段、scan 子命令、restore --from-results、import-kb、scan-kb vectorize、`bulk_store` → `bulk-store`（MCP 工具名 `ki_bulk_store` 不变）
 - **文件↔chunk 映射**：`buildMemoryIdMap` 多值 `Map<文件path, memoryId[]>`（按 sourcePath `#` 前缀聚合），无新增数据文件
 - 批次 0~5 + 技术设计遗留全部完成（P-5 干净、P-7 MAX_CHUNKS_PER_FILE=500、向量库重建验证闭环）；P-6（FTS 规模实测）可选未做
+- **文档同步核对（2026-08-10）**：批次 5 的 16 docs + 5 skills 已同步，旧关键词命中均为"已删除说明标注"；发现并修复 `docs/error-handling.md` 残留——删除"四类：关键词相关问题"整节（REQ-05 已删 keywords）、修正 `mem delete` 命令引用（改为"增量删除失败"，`deleteMemory` 为内部函数）、config 路径 `~/.config/memory-mcp/config.yaml` → `~/.ki/config.yaml`；发现项：docs 多处写 `scopes.definitions.<scope>`，但源码为 `scopes.<scope>` 直接映射（历史遗留，未改，待确认）
 
 ### REQ-20260806-002 CLI命令迁移与规范化（已完成）
 

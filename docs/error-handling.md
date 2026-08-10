@@ -109,7 +109,7 @@
 
 ### `Access denied to scope: <scope>`
 
-原因：scope 未在 `~/.config/memory-mcp/config.yaml` 的 `scopes.definitions` 中注册。
+原因：scope 未在 `~/.ki/config.yaml` 的 `scopes.definitions` 中注册。
 
 恢复：在 config.yaml 中添加 scope 定义：
 
@@ -123,23 +123,11 @@ scopes:
 
 ---
 
-## 四类：关键词相关问题
+## 四类：增量导入相关错误
 
-### 关键词没有被接受
+### 增量删除失败
 
-影响：`sync-relation.ts`
-
-规则：必须是自然语言词汇，不能像代码符号；必须真实出现在 `module-info` 原文中。
-
-恢复：先把关键词写进 `module-info`，再执行 `sync-relation.ts`。
-
----
-
-## 五类：增量导入相关错误（S-06）
-
-### `mem delete` 失败
-
-现象：增量 modify/delete 时 `deleteMemory` 返回错误。
+现象：增量 modify/delete 时 `deleteMemory`（内部函数，非独立命令）返回错误。
 
 处理：不阻塞流程，记录为 warning 继续执行。旧记录可能残留在向量数据库中，但不影响新记录的写入。
 
@@ -153,7 +141,7 @@ scopes:
 
 ---
 
-## 六类：展示参数问题
+## 五类：展示参数问题
 
 ### `--mode` 无效
 
