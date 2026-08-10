@@ -891,6 +891,7 @@ ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7
 ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-token，0600），已存在则拒绝覆盖
 ki mcp token show                       # 查看当前托管 Token（配置多个 IDE 时免去翻文件）
 ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
+ki mcp --http --web                     # HTTP 模式 + 可视化前端页面（浏览器访问 http://127.0.0.1:7423/）
 ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
 ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
@@ -913,6 +914,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含托管 Token 存在性；不启动服务、跳过预检） |
+| `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 
 ### 关闭实例（`ki mcp stop`）
 

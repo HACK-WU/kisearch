@@ -383,13 +383,13 @@
       "id": "REQ-20260806-003",
       "feature": "可视化前端界面",
       "created": "2026-08-06 17:30:58",
-      "updated": "2026-08-08 22:11:32",
-      "status": "设计中",
+      "updated": "2026-08-10",
+      "status": "已完成",
       "tags": [
         "feat",
         "ux"
       ],
-      "version": 7,
+      "version": 9,
       "depends_on": [
         "REQ-20260806-001"
       ],
@@ -400,7 +400,9 @@
         "2026-08-06 17:55:43 v4: 完成交互设计落盘",
         "2026-08-06 18:12:33 v5: 完成交互设计场景推演（含能力缺口决策）",
         "2026-08-08 22:02:50 v6: 完成技术设计（5 个子需求）",
-        "2026-08-08 22:11:32 v7: 完成设计质疑审查（challenger）"
+        "2026-08-08 22:11:32 v7: 完成设计质疑审查（challenger）",
+        "2026-08-10 v8: 需求完成。前端 Web 应用（web/，React 18 + Vite + TanStack Query + MCP SDK）全部落地：总览（F02）/浏览（F03，/api/doc/list）/语义搜索（F04，include_original）/上传导入（F05/F06，/api/import/*）/知识写入（F07，sync-relation）；后端扩展 mcp-http 新增 --web 参数 + /api/health、/api/doc/list、/api/import/upload|run|status 路由（方案 A）；静态页面由 ki mcp --http --web 一并提供（SPA fallback）。测试：mcp-http.test.ts + mcp-http-api.test.ts",
+        "2026-08-10 v9: REQ-F09（zvec-studio 占位跳转）已取消——前端不集成 zvec 跳转入口，zvec-studio 作为独立工具手动使用；需求文档同步至 v5，状态保持已完成"
       ],
       "commits": [],
       "branch": null,

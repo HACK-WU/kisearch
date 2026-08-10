@@ -46,6 +46,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 | `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐用 `ki mcp token generate` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
+| `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 
 子命令 `ki mcp stop`：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock，见下文「一键关闭」。
 
@@ -60,6 +61,39 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
 
 CLI 参数优先于配置文件默认值。
+
+## 前端页面服务（`--web`）与 `/api/*` 扩展路由
+
+`ki mcp --http --web` 在提供 MCP 协议的同时，一并提供**可视化前端静态页面**（浏览器访问 `http://127.0.0.1:7423/`）和**`/api/*` 扩展接口**（方案 A，补齐 MCP 缺失能力，如导入与文档列表）。
+
+```bash
+# 启动（需先构建前端产物）
+cd web && npm install && npm run build
+ki mcp --http --web
+
+# 浏览器打开 http://127.0.0.1:7423/ → 前端页面（总览/浏览/搜索/上传导入/知识写入）
+```
+
+### 静态页面
+
+- 页面由 `web/dist` 提供，经 Vite 构建产物（React SPA）。
+- **SPA fallback**：非 `/api`、`/mcp` 的 GET 请求若文件不存在，回退返回 `index.html`，由前端路由接管（深链可直达）。
+- 有**路径穿越防护**：解析后的路径必须落在 `webDir` 内，否则 403。
+- `--web` 已指定但未找到 `index.html` 时打印警告，MCP 服务仍正常启动。
+- 前端经 MCP SDK（`StreamableHTTPClientTransport`）同源调用 `/mcp` 工具，`/api/*` 走同源 fetch，无需 CORS。
+
+### `/api/*` 扩展路由
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/health` | GET | 健康报告（`runHealthCheck` doctor 逻辑，含 zvec 探活，10s 超时） |
+| `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
+| `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId` |
+| `/api/import/run` | POST | 触发导入（`full`/`incremental`，异步 job，返回 `jobId`） |
+| `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
+
+- `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
+- 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。
 
 ## 状态自查（`ki mcp --status`）
 

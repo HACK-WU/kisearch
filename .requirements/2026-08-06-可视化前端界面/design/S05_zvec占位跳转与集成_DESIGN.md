@@ -1,10 +1,10 @@
 ---
 id: REQ-20260806-003
 feature: 可视化前端界面
-status: 设计中
+status: 已取消
 created: 2026-08-08
-updated: 2026-08-08
-version: 1
+updated: 2026-08-10
+version: 2
 tags: [feat, ux, design]
 depends_on: [REQ-20260806-001]
 author: AI
@@ -13,6 +13,8 @@ parent: design/DESIGN.md
 ---
 
 # S-05：zvec-studio 占位跳转 + 端到端集成
+
+> **本子需求（REQ-F09 zvec-studio 占位跳转）已取消**（2026-08-10，用户确认）：前端不集成 zvec 跳转入口，zvec-studio 作为独立工具手动使用。下列方案保留作为历史记录。
 
 ## 术语
 
@@ -82,3 +84,4 @@ ki mcp --http --web
 ## 变更记录
 
 - 2026-08-08 v1：初版
+- 2026-08-10 v2：**已取消**（REQ-F09 zvec-studio 占位跳转）——前端不集成 zvec 跳转入口，zvec-studio 作为独立工具手动使用；status 置"已取消"

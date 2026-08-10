@@ -120,6 +120,15 @@ openclaw memory-pro stats
 
 ## 近期需求（已完成）
 
+### REQ-20260806-003 可视化前端界面（已完成）
+
+- **前端工程（`web/`）**：React 18 + Vite + TanStack Query + MCP SDK（StreamableHTTPClientTransport 同源调 `/mcp`）；5 个页面：总览（F02）/浏览（F03，Group 树 + 文档列表 + 文件名模糊搜索 + 原文抽屉）/语义搜索（F04，`include_original: true` + threshold/tags）/上传导入（F05/F06，拖拽/目录 + 切分参数 + 向量化开关 + 进度轮询）/知识写入（F07，sync-relation + Group 树下拉 + Markdown 预览）
+- **后端扩展（方案 A）**：`ki mcp --http --web` 一并提供前端静态页面（`web/dist`，SPA fallback + 路径穿越防护）；mcp-http 新增 `/api/health`、`/api/doc/list`（Group+文档+`q` 搜索）、`/api/import/upload|run|status` 路由
+- **REQ-F09 已取消**：zvec-studio 占位跳转（前端侧边栏"向量可视化"外链）取消，不做（用户确认）
+- **服务生命周期**：前端不启动/不关闭服务，仅检测 MCP HTTP 状态 + 手动指引；破坏性操作（F08）留 CLI
+- **测试**：`mcp-http.test.ts` + `mcp-http-api.test.ts`；前端 `npm run build`（tsc + vite）通过
+- **文档同步**：docs/mcp-http.md 补 `--web` + `/api/*` 路由章节；docs/cli.md mcp 参数表补 `--web`；README 补内置前端 + `--web` 启动说明
+
 ### REQ-20260806-001 外部Wiki直接导入与自动切分（已完成）
 
 - **原文直导**：`scan-kb import --source <dir>` 无 AI 依赖；自动切分（chunkSize 默认 1000 / overlap 150，段落边界 `\n\n → \n → 。 → ；` 优先，relation 名 = `文件名-N`，sourcePath = `文件路径#N`）；超大文件上限 2MB + 单文件 chunk 上限 500

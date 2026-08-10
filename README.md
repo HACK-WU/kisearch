@@ -51,6 +51,18 @@
 
 ![Zvec Studio 集合概览](assets/zvec-overview.png)
 
+### 内置 Web 前端（`ki mcp --http --web`）
+
+KiSearch 自带可视化前端（`web/`，React 18 + Vite），提供总览、知识库浏览（Group 树 + 文档列表 + 文件名搜索）、语义搜索、上传导入、知识写入五个页面。由 `ki mcp --http --web` 一并提供静态页面与 `/api/*` 扩展路由：
+
+```bash
+cd web && npm install && npm run build   # 构建前端产物（web/dist）
+ki mcp --http --web                      # 启动服务
+# 浏览器打开 http://127.0.0.1:7423/
+```
+
+> Zvec Studio 作为向量可视化工具独立使用（`zvec-studio --port 7861`），ki 内置前端不集成跳转入口。
+
 ## <a id="why-not-rag"></a>🆚 与常规 RAG 的差异
 
 常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。KiSearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
@@ -181,6 +193,7 @@ ki get-module-info --scope my-project --group "我的项目/API" --relation "用
 ```bash
 ki mcp                      # stdio 模式（默认，单客户端单进程）
 ki mcp --http               # HTTP 共享单例（多 IDE 共享同一持锁进程，见 docs/mcp-http.md）
+ki mcp --http --web         # HTTP 模式 + 可视化前端（浏览器访问 http://127.0.0.1:7423/）
 ki mcp --status             # 查看 HTTP 单例运行状态（只读）
 ki mcp stop                 # 关闭本机所有 ki mcp 实例并清理 lock
 ki mcp token generate       # 一键生成托管 Token（远程访问鉴权）
