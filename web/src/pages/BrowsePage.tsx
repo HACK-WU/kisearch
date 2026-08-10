@@ -8,7 +8,6 @@
 import { Fragment, useEffect, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs } from '@/lib/hooks';
-import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 
