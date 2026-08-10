@@ -11,11 +11,9 @@
   <img alt="typescript" src="https://img.shields.io/badge/TypeScript-jiti-3178c6">
 </p>
 
-<p align="center">
-  <sub>底层向量引擎：<a href="https://github.com/alibaba/zvec"><b>zvec</b></a>（阿里巴巴开源） · 可视化：<a href="https://github.com/zvec-ai/zvec-studio"><b>Zvec Studio</b></a></sub>
-</p>
-
 ---
+
+
 
 ## 📑 目录
 
@@ -37,6 +35,8 @@
 ## <a id="intro"></a>📖 项目介绍
 
 `KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
+
+底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） · 可视化：[**Zvec Studio**](https://github.com/zvec-ai/zvec-studio)
 
 ```
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
@@ -326,3 +326,5 @@ npx jiti src/search.ts --help   # 直接执行任意命令
 ## <a id="license"></a>📄 License
 
 MIT
+
+
