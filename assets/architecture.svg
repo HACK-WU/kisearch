@@ -100,7 +100,7 @@
 
   <!-- ===== 右侧：查询层（全高，与输入层底部对齐） ===== -->
   <rect x="480" y="218" width="428" height="420" rx="8" fill="#faf5ff" stroke="#c084fc" stroke-width="1.5"/>
-  <text x="694" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#7e22ce">查 询 层（全高贯通）</text>
+  <text x="694" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#7e22ce">查 询 层</text>
 
   <!-- 路径 A -->
   <rect x="496" y="256" width="396" height="115" rx="6" fill="#f0f9ff" stroke="#38bdf8" stroke-width="1.2"/>
