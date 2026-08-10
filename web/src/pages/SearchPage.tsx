@@ -157,9 +157,8 @@ export function SearchPage(): JSX.Element {
                   <div className="ki-qr-body">
                     <div className="ki-qr-content">{r.original ?? r.relation ?? '(无内容)'}</div>
                     <div className="ki-qr-meta">
-                      <span className="ki-badge ki-badge--vec">{scope}</span>
+                      <span className="ki-badge ki-badge--vec">RAG</span>
                       <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
-                      <span className="ki-badge ki-badge--reg">{r.relation ?? ''}</span>
                       <span className="ki-cell-sub">点击查看原文</span>
                     </div>
                   </div>

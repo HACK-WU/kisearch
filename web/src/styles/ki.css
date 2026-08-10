@@ -362,7 +362,6 @@ a:hover { text-decoration: underline; }
 }
 .ki-badge--kb { background: color-mix(in srgb, var(--ki-color-purple) 8%, transparent); color: var(--ki-color-purple); }
 .ki-badge--vec { background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent); color: var(--ki-color-primary); }
-.ki-badge--reg { background: color-mix(in srgb, var(--ki-color-success) 8%, transparent); color: var(--ki-color-success); }
 .ki-badge--off { background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle); }
 .ki-badge-group { display: flex; gap: 4px; flex-wrap: wrap; }
 

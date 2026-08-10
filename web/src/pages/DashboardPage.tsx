@@ -215,8 +215,7 @@ export function DashboardPage(): JSX.Element {
                       <td>
                         <div className="ki-badge-group">
                           {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
-                          {badgeCell(s.vector, 'VEC', 'ki-badge--vec')}
-                          {badgeCell(s.registered, 'REG', 'ki-badge--reg')}
+                          {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
                         </div>
                       </td>
                       <td style={{ textAlign: 'right' }}>
