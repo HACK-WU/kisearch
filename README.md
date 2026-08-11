@@ -36,7 +36,7 @@
 
 `KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
-底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） · 可视化：[**Zvec Studio**](https://github.com/zvec-ai/zvec-studio)
+> 底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） 
 
 ```
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
@@ -45,23 +45,21 @@
 
 ![KiSearch 架构](./assets/architecture.svg)
 
-### 配套可视化：Zvec Studio
+### 配套可视化：内置 Web 前端
 
-底层向量引擎 [**zvec**](https://github.com/alibaba/zvec) 配套可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio)，提供集合概览、数据浏览与查询调试能力，便于在知识导入后验证向量写入效果、排查检索异常。
+KiSearch 自带可视化前端 `web`，由 `ki mcp --http --web` 一并提供：浏览器打开 `http://127.0.0.1:7423/` 即可查看**总览**（scope / KB / 向量 / 注册 / 当前 scope 等状态）、**知识库浏览**（Group 树 + 文档列表 + 文件名模糊搜索）、**语义搜索**、**上传导入**、**知识写入**五个页面，便于在知识导入后验证写入效果、排查检索异常。
 
-![Zvec Studio 集合概览](assets/zvec-overview.png)
+![KiSearch Web 前端 · 总览](assets/overview.png)
 
-### 内置 Web 前端（`ki mcp --http --web`）
+> 底层向量引擎 [zvec](https://github.com/alibaba/zvec) 的独立可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio) 仍可作为向量层的辅助调试工具单独使用（`zvec-studio --port 7861`），本项目内置前端不集成跳转入口。
 
-KiSearch 自带可视化前端（`web/`，React 18 + Vite），提供总览、知识库浏览（Group 树 + 文档列表 + 文件名搜索）、语义搜索、上传导入、知识写入五个页面。由 `ki mcp --http --web` 一并提供静态页面与 `/api/*` 扩展路由：
+### 启动内置 Web 前端
 
 ```bash
 cd web && npm install && npm run build   # 构建前端产物（web/dist）
-ki mcp --http --web                      # 启动服务
+ki mcp --http --web                      # 启动服务（提供静态页面 + /api/* 扩展路由）
 # 浏览器打开 http://127.0.0.1:7423/
 ```
-
-> Zvec Studio 作为向量可视化工具独立使用（`zvec-studio --port 7861`），ki 内置前端不集成跳转入口。
 
 ## <a id="why-not-rag"></a>🆚 与常规 RAG 的差异
 
@@ -139,26 +137,56 @@ scopeMode: default            # default: 自动创建 scope；strict: 必须显�
 
 > `SILICONFLOW_API_KEY` 需在环境中导出（MCP 场景必须在客户端 `env` 字段显式传入，MCP 进程不继承 shell 环境）。
 
-### 3. 使用示例
+### 3. 使用示例（导入外部 Wiki + HTTP 模式启动 MCP）
 
 ```bash
-# 创建分组
-ki manage-index --scope my-project --action create --name "API"
-
-# 写入一条知识（原文全文 + 关键词）
-ki sync-relation \
+# ① 首次全量导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分）
+ki scan-kb import \
   --scope my-project \
-  --group "我的项目/API" \
-  --relation "用户登录接口" \
-  --module-info "## 登录流程\n用户输入账号密码进入认证流程，服务端校验成功后返回 token。"
+  --source /path/to/wiki \
+  --root-name Wiki \
+  --chunk-size 1000 \
+  --chunk-overlap 150
 
-# 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
+# ② 增量导入（修改 source 目录文件后执行，git diff 驱动）
+ki scan-kb import \
+  --scope my-project \
+  --source /path/to/wiki \
+  --mode incremental
+
+# ③ 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
 
-# 索引直查（已知 Group/Relation，直接读原文，不走向量）
-ki query-group --scope my-project --groups "我的项目/API"
-ki get-module-info --scope my-project --group "我的项目/API" --relation "用户登录接口"
+# ④ 启动 MCP HTTP 共享单例（供 AI Agent 经 URL 接入）
+ki mcp --http
+
+# ⑤ 查看连接信息（含持锁进程与对外绑定地址）
+ki mcp --status
 ```
+
+导入完成后，AI Agent 通过 MCP 接入（推荐 **HTTP 模式**）：
+
+```json
+{
+  "mcpServers": {
+    "ki": {
+      "url": "http://127.0.0.1:7423/mcp",
+      "headers": { "Authorization": "Bearer <your-token>" }
+    }
+  }
+}
+```
+
+> 回环绑定（仅本机）免鉴权时省略 `headers`；跨机访问需绑定 `0.0.0.0` 并先生成 Token。连接 URL 需与 `ki mcp --status` 输出的 `host`/`port` 完全一致。
+
+Token 生成与查看：
+
+```bash
+ki mcp token generate       # 生成托管 Token 并持久化到 ~/.ki/mcp-token
+ki mcp token show           # 查看当前托管 Token（填入上方 headers 的 <your-token>）
+```
+
+> ⚠️ 已存在 Token 时 `generate` 会拒绝覆盖，需改用 `ki mcp token reset --yes` 轮换。
 
 ## <a id="cli-commands"></a>🛠️ CLI 命令参考
 
@@ -205,6 +233,10 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 
 ### MCP 客户端配置
 
+支持 **stdio** 与 **HTTP** 两种接入方式：
+
+#### 方式一：stdio（单客户端单进程）
+
 ```json
 {
   "mcpServers": {
@@ -216,6 +248,24 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
   }
 }
 ```
+
+#### 方式二：HTTP（共享单例，多 IDE / 远程接入）
+
+先用 `ki mcp --http` 启动服务（详见 [`docs/mcp-http.md`](./docs/mcp-http.md)），再用 URL 型条目接入：
+
+```json
+{
+  "mcpServers": {
+    "ki": {
+      "url": "http://127.0.0.1:7423/mcp",
+      "headers": { "Authorization": "Bearer <your-token>" }
+    }
+  }
+}
+```
+
+> 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate` 生成托管 Token，再用 `ki mcp token show` 查看明文填入上方 `<your-token>`。
+> 所有 IDE 必须使用完全一致的连接 URL，且不要再保留 stdio 的 `command` 配置，否则会争抢向量库锁。
 
 ### 暴露的工具（11 个）
 
@@ -243,23 +293,25 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 - `scopeMode: default`（默认）：首次使用某个 scope 时自动创建，无需注册
 - `scopeMode: strict`：必须在 `~/.ki/config.yaml` 的 `scopes` 中显式注册，否则拒绝访问
 
-### 首次导入（AI 生成 ai-results.json → 一条命令）
+### 首次导入（外部 Wiki 原文直导，无 AI 依赖）
 
 ```bash
-ki scan-kb import --scope my-project --results ai-results.json
+ki scan-kb import \
+  --scope my-project \
+  --source /path/to/wiki \
+  --root-name Wiki
 ```
 
-内部完成：格式校验 → 批量向量化（zvec）→ Group 树创建 → relations-cache 写入（含 memoryId）→ local KB 写入 → group-index.source 记录（含 git HEAD）。
+内部完成：格式白名单校验（默认 `.md`）→ 自动切分（chunkSize 1000 / overlap 150，段落边界优先）→ 批量向量化（zvec）→ local KB 文件级原文写入 → relations-cache 写入（含 memoryIds）。
 
-### 增量更新
+### 增量更新（git diff 驱动，无 AI）
 
 ```bash
-ki scan-kb diff --scope my-project                          # 1. 输出变更文件列表
-# AI 生成带 action: add | modify | delete 的增量 ai-results.json
-ki scan-kb import --scope my-project --mode incremental --results ai-results.json
+# 修改 source 目录中文件后直接执行，自动按 diff 增/改/删
+ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 ```
 
-`ai-results.json` 最小示例与字段说明见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
+`--source` / `--mode` / `--chunk-*` 等参数详解见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
 
 ## <a id="docs"></a>📚 文档导航
 
