@@ -12,7 +12,7 @@ import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
-import { groupError, relationError, tagError, isInvalidTag } from '@/lib/validators';
+import { groupError, relationError, tagError } from '@/lib/validators';
 
 export function WritePage(): JSX.Element {
   const scope = useScopeValue();
