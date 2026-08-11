@@ -12,8 +12,9 @@
 | 规则 | scope 值 |
 |------|----------|
 | codekb-agent-guide | `${scope}` |
-| memory-agent-guide（项目记忆） | `${scope}-memory` |
-| memory-agent-guide（用户画像） | `user-profile` |
+| memory-agent-guide | `${scope}-memory` |
+
+> 用户画像已迁移至 AGENTS.md"用户画像"章节直接存储，不再使用 `user-profile` scope（见 `agents-md-init` skill）。
 
 ### 1. 拉取全景索引
 

@@ -1,7 +1,7 @@
 # memory-agent-guide 记忆系统行为规则
 
 > **面向所有项目**。本规则指导 AI 利用 `ki` 命令构建跨会话的持久化记忆能力。
-> 覆盖两大领域：**项目记忆**（项目上下文）和**用户画像**（个人偏好与习惯）。
+> 覆盖两大领域：**项目记忆与代码片段**（`${scope}-memory`，经 ki）和**用户画像/近期工作**（AGENTS.md 直接存储，不经 ki）。
 > 与 `codekb-agent-guide` 互补，不重叠。
 
 ---
@@ -11,17 +11,16 @@
 ```
 对话开始?
   ├─ scope 已知 → 自动召回
-  │   ├─ ki query-group --scope ${scope}-memory --mode full   → 项目记忆全景
-  │   └─ ki query-group --scope user-profile --mode full     → 用户画像全景
+  │   ├─ ki query-group --scope ${scope}-memory --mode full   → 项目记忆 + 片段全景
+  │   └─ 读取 AGENTS.md"用户画像"/"近期工作"章节
   │
   └─ scope 未知 → 暂停，问用户
 
 对话中发现关键信息?
-  ├─ 项目信息（背景/技术栈/进度/踩坑/需求...）  → 项目记忆
-  │   └─ ki sync-relation --scope ${scope}-memory ...
-  │
-  └─ 用户偏好（沟通/代码风格/工具/习惯...）      → 用户画像
-      └─ ki sync-relation --scope user-profile ...
+  ├─ 项目信息（背景/技术栈/踩坑...）  → ki sync-relation --scope ${scope}-memory ...
+  ├─ 代码要点（函数/逻辑/模型...）    → ki sync-relation --scope ${scope}-memory（工具库/通用记忆片段等）
+  ├─ 需求/进度                        → 更新 AGENTS.md"近期工作"章节
+  └─ 用户偏好（沟通/代码风格/工具...）→ 更新 AGENTS.md"用户画像"章节
 
 查询记忆（三步走）:
   ① 定位 Group  → 从全景缓存中锁定目标 Group
@@ -29,22 +28,23 @@
   ③ 取原文      → 命中 → ki get-module-info → 提炼回答
                   未命中 → 回问用户 / 使用默认行为
 
-访问"最近需求"或"进度"时?
-  → 检查过期条目，超过 7 天的移动到 archive.md（归档，不删除）
+访问 AGENTS.md"近期工作"时?
+  → 检查过期条目，超过 7 天的移入项目根目录 archive.md（归档，不删除）
 ```
 
 ---
 
 ## 1. Scope 约定
 
-本规则使用两个 scope：
+本规则使用一个 ki scope：
 
 | scope | 用途 | 命名规则 |
 |-------|------|----------|
-| `${scope}-memory` | 项目记忆 | 代码知识库 scope + `-memory` 后缀 |
-| `user-profile` | 用户画像 | 固定值，全局唯一 |
+| `${scope}-memory` | 项目记忆 + 代码片段记忆 | 代码知识库 scope + `-memory` 后缀 |
 
 **示例**：代码知识库 scope 为 `monitor` → 项目记忆 scope 为 `monitor-memory`
+
+**用户画像与近期工作不使用 scope**：直接存储于项目根目录 AGENTS.md 的"用户画像"/"近期工作"章节（格式由 `agents-md-init` skill 维护），不经 ki。
 
 **前提条件**：`${scope}` 必须已知（来自代码知识库规则或用户指定）。若未知，暂停问用户。
 
@@ -56,24 +56,28 @@
 
 | 维度 | codekb-agent-guide | memory-agent-guide |
 |------|------------------------|------------------------|
-| scope | `${scope}` | `${scope}-memory` / `user-profile` |
-| 内容类型 | 代码知识（模块、API、设计） | 项目上下文 + 用户偏好 |
-| 查询兜底 | `memory_recall` 语义兜底 | 无语义兜底，未命中则回问 |
+| scope | `${scope}` | `${scope}-memory` |
+| 内容类型 | 代码知识（模块、API、设计） | 项目上下文 + 代码级要点 |
+| 查询兜底 | `ki_search` 语义兜底 | 无语义兜底，未命中则回问 |
 
 **代码知识库已覆盖**（不要写入记忆系统）：
 - 模块/组件职责、API 接口、架构约束、bug 模式、重构策略、依赖版本、测试策略
 
 **记忆系统覆盖**：
-- 项目背景、技术栈选型、团队约定、项目历史、当前状态、需求进度、踩坑点
-- 用户沟通偏好、代码风格、工具链、技术背景、工作/对话习惯
+- 项目记忆：项目背景、技术栈选型、团队约定、项目历史、当前状态、踩坑点、项目架构、工具库
+- 代码片段：工具函数、关键执行逻辑、核心流程、数据模型、API 调用、配置模板、错误处理（归入工具库/项目踩坑点/部署运维/通用记忆片段等 Group）
 
-**判断口诀**：能用代码引用回答的 → 代码知识库；需要项目背景/个人偏好的 → 记忆系统。
+**AGENTS.md 直接存储（不经 ki）**：
+- 用户画像：沟通偏好、代码风格、工具链、技术背景、工作习惯、对话习惯
+- 近期工作：最近需求 + 进度
+
+**判断口诀**：能用代码引用回答的 → 代码知识库；需要项目背景/代码要点的 → 记忆系统；用户偏好/需求进度 → AGENTS.md。
 
 ---
 
-## 3. Group 结构定义
+## 3. 存储结构定义
 
-### 3.1 项目记忆（scope: `${scope}-memory`）
+### 3.1 项目记忆 + 代码片段（scope: `${scope}-memory`）
 
 ```
 ${scope}-memory/
@@ -83,37 +87,40 @@ ${scope}-memory/
 ├── 项目历史/            # 重大变更记录、架构演进决策
 ├── 当前状态/            # 进行中任务、待解决问题、阻塞项
 ├── 外部依赖/            # 第三方服务、API 配置、环境变量
-├── 最近需求/            # ⚡ 动态 Group，见 §3.3
-├── 进度/                # ⚡ 动态 Group，见 §3.3
-├── 项目踩坑点/          # 常见问题、解决方案、注意事项
+├── 项目踩坑点/          # 常见问题、解决方案、注意事项（含代码踩坑片段）
 ├── 项目架构/            # 整体架构、模块关系、数据流
-└── ...                  # 🔄 AI 可自行扩展（见 §8）
+├── 工具库/              # 通用工具函数、脚本（代码片段）
+├── 常用命令/
+├── 部署运维/            # 配置模板、部署流程（代码片段）
+├── 通用记忆片段/        # 兜底：按功能/类型细分（关键逻辑、数据模型、API 调用、配置模板、错误处理）
+└── ...                  # 🔄 AI 可自行扩展（见 §9）
 ```
 
-### 3.2 用户画像（scope: `user-profile`）
+> **已移除**：`最近需求`、`进度` 两个 Group 不再建于 ki，改由 AGENTS.md"近期工作"章节直接维护。
+
+> **代码片段记忆**：详细分类原则与片段格式见 `rules/ai-codekb-memory.md`"代码片段记忆"章节。
+
+### 3.2 用户画像（存 AGENTS.md，不经 ki）
 
 ```
-user-profile/
-├── 沟通偏好/            # 简洁/详细、中/英文、是否举例
-├── 代码风格/            # 命名习惯、注释偏好、格式化规则
-├── 工具链/              # 编辑器、终端、Git 客户端、常用命令
-├── 技术背景/            # 擅长领域、技术栈熟悉度、学习方向
-├── 工作习惯/            # 工作时间段、文档风格偏好、反馈方式
-└── 对话习惯/            # 对 AI 的要求、回复风格偏好
+沟通偏好/  代码风格/  工具链/  技术背景/  工作习惯/  对话习惯/
 ```
 
-### 3.3 动态 Group（归档机制）
+> 以上为 AGENTS.md"用户画像"章节的预定义维度（见 `agents-md-init` skill 的模板），非 ki Group。
 
-以下 Group 有时效性，使用 `active.md` + `archive.md` 双文件结构：
+### 3.3 近期工作（存 AGENTS.md）
 
-| Group | 活跃文件 | 归档文件 | 保留规则 |
-|-------|----------|----------|----------|
-| 最近需求 | Relation（`ki` 管理） | `archive.md`（追加文件） | 只保留最近 7 天，超期移入归档 |
-| 进度 | 分 `进行中` 和 `已完成` 两类 Relation（`ki` 管理） | `archive.md`（追加文件） | 进行中永久保留；已完成保留 7 天，超期移入归档 |
+```
+## 近期工作 (7天内)
+### 最近需求
+- [YYYY-MM-DD] 需求描述（1-2 句话）
 
-**归档文件的本质**：`archive.md` 是独立于 ki 的纯文本追加文件，由 AI 直接读写。ki 管理的 Relation 内容只保留活跃条目。归档内容永久追加到 `archive.md` 用于历史查阅。
+### 进度
+- 进行中: [YYYY-MM-DD] 🔄 描述
+- 已完成: [YYYY-MM-DD] ✅ 描述
+```
 
-**其他 Group** 均使用单文件 `index.json`，无归档机制。
+> 超过 7 天的已完成条目移入项目根目录 `archive.md`（进行中进度永久保留）。
 
 ---
 
@@ -124,9 +131,9 @@ user-profile/
 ```mermaid
 flowchart LR
     A[检测到 scope] --> B[ki query-group<br/>--scope $scope-memory<br/>--mode full]
-    A --> C[ki query-group<br/>--scope user-profile<br/>--mode full]
-    B --> D[缓存项目记忆全景]
-    C --> E[缓存用户画像全景]
+    A --> C[读取 AGENTS.md<br/>用户画像/近期工作]
+    B --> D[缓存项目记忆+片段全景]
+    C --> E[加载用户偏好/需求进度]
     D --> F[后续查询直接用缓存]
     E --> F
 ```
@@ -134,11 +141,10 @@ flowchart LR
 **执行命令**：
 
 ```bash
-# 1. 加载项目记忆全景
+# 1. 加载项目记忆 + 片段全景
 ki query-group --scope ${scope}-memory --mode full
 
-# 2. 加载用户画像全景
-ki query-group --scope user-profile --mode full
+# 2. 读取 AGENTS.md"用户画像"/"近期工作"章节（无需 ki 调用）
 ```
 
 **缓存策略**：首次查询后，索引信息在当前会话中有效。写入操作后需刷新。
@@ -152,12 +158,11 @@ ki query-group --scope user-profile --mode full
 ```mermaid
 flowchart TD
     A([需要记忆信息]) --> Q{信息类型?}
-    Q -- 项目记忆 --> S1[从项目记忆缓存<br/>定位目标 Group]
-    Q -- 用户画像 --> S2[从用户画像缓存<br/>定位目标 Group]
+    Q -- 项目记忆/片段 --> S1[从 ${scope}-memory 缓存<br/>定位目标 Group]
+    Q -- 用户画像 --> S2[读取 AGENTS.md<br/>用户画像章节]
+    Q -- 近期工作 --> S3[读取 AGENTS.md<br/>近期工作章节]
     
     S1 --> P{全景中已明确<br/>Relation 名称?}
-    S2 --> P
-    
     P -- 是 --> F[取原文<br/>ki get-module-info]
     P -- 否 --> D[查该 Group 热区<br/>ki query-group --groups G<br/>--mode hot,emerging]
     
@@ -173,9 +178,9 @@ flowchart TD
 
 基于 §4 已缓存的全景索引，判断信息属于哪个 Group。
 
-- **项目记忆**：根据用户问题锁定 `${scope}-memory` 下的某个 Group
-- **用户画像**：根据需求锁定 `user-profile` 下的某个 Group
-- **若缓存中无明确匹配**，重新执行对应全景查询确认
+- **项目记忆/片段**：根据用户问题锁定 `${scope}-memory` 下的某个 Group（工具库、通用记忆片段、背景与目标等）
+- **用户画像/近期工作**：直接读取 AGENTS.md 对应章节
+- **若缓存中无明确匹配**，重新执行全景查询确认
 - **若定位到多个候选 Group**，优先选择得分最高的；不确定时可依次排查
 
 ### 第②步：查热门 + 新兴热区
@@ -183,11 +188,8 @@ flowchart TD
 对目标 Group 执行：
 
 ```bash
-# 项目记忆
+# 项目记忆 / 代码片段
 ki query-group --scope ${scope}-memory --groups "目标Group路径" --mode hot,emerging
-
-# 用户画像
-ki query-group --scope user-profile --groups "目标Group路径" --mode hot,emerging
 ```
 
 **输出示例**：
@@ -213,11 +215,8 @@ ki query-group --scope user-profile --groups "目标Group路径" --mode hot,emer
 ### 第③步：取原文
 
 ```bash
-# 项目记忆
+# 项目记忆 / 代码片段
 ki get-module-info --scope ${scope}-memory --group "目标Group路径" --relation "Relation名称"
-
-# 用户画像
-ki get-module-info --scope user-profile --group "目标Group路径" --relation "Relation名称"
 ```
 
 返回完整 Markdown 原文。**Agent 必须提炼后回答**，不要全文转储。
@@ -229,9 +228,8 @@ ki get-module-info --scope user-profile --group "目标Group路径" --relation "
 | 背景与目标 | "项目简介"、"业务领域"、"里程碑节点" |
 | 团队约定 | "分支策略"、"Commit 规范"、"发布流程" |
 | 技术栈选型 | "技术栈清单"、"选型原因" |
-| 沟通偏好 | "回复风格"、"语言偏好" |
-| 代码风格 | "命名习惯"、"格式化规则" |
-| 对话习惯 | "对 AI 的要求" |
+| 工具库 | "日期时间"、"字符串处理" |
+| 通用记忆片段/关键逻辑 | "认证流程"、"告警收敛" |
 
 ---
 
@@ -241,16 +239,17 @@ ki get-module-info --scope user-profile --group "目标Group路径" --relation "
 
 AI 在对话中识别到以下信息时，**自动沉淀**（无需用户指示）：
 
-| 信息类型 | 触发信号 | 目标 scope | 示例 Group |
-|----------|----------|------------|------------|
+| 信息类型 | 触发信号 | 记录位置 | 示例 Group |
+|----------|----------|----------|------------|
 | 项目信息 | 用户明确陈述项目事实 | `${scope}-memory` | 背景与目标、技术栈选型、团队约定... |
-| 需求/进度 | 用户提到要做的事或完成情况 | `${scope}-memory` | 最近需求、进度 |
 | 踩坑经验 | 用户提及问题与解决方案 | `${scope}-memory` | 项目踩坑点 |
-| 用户偏好 | 用户表达个人倾向 | `user-profile` | 沟通偏好、代码风格、对话习惯... |
+| 代码要点 | 工具函数/关键逻辑/数据模型/API等 | `${scope}-memory` | 工具库、通用记忆片段/关键逻辑... |
+| 需求/进度 | 用户提到要做的事或完成情况 | AGENTS.md"近期工作"章节 | — |
+| 用户偏好 | 用户表达个人倾向 | AGENTS.md"用户画像"章节 | — |
 
 ### 6.2 写入方式
 
-**所有写入统一使用 `ki sync-relation`**：
+**项目记忆/代码片段统一使用 `ki sync-relation`**：
 
 ```bash
 # 项目记忆
@@ -259,23 +258,14 @@ ki sync-relation \
   --group "目标Group路径" \
   --relation "Relation名称" \
   --module-info "Markdown内容"
-
-# 用户画像
-ki sync-relation \
-  --scope user-profile \
-  --group "目标Group路径" \
-  --relation "Relation名称" \
-  --module-info "Markdown内容"
 ```
 
-**写入后刷新**：每次写入完成后，必须重新执行对应全景查询更新缓存：
+**用户画像/近期工作直接更新 AGENTS.md 对应章节**（覆盖/追加写入），不经 ki。
+
+**写入后刷新**：每次写入完成后，必须重新执行全景查询更新缓存：
 
 ```bash
-# 写入项目记忆后刷新
 ki query-group --scope ${scope}-memory --mode full
-
-# 写入用户画像后刷新
-ki query-group --scope user-profile --mode full
 ```
 
 ### 6.3 module-info 内容要求
@@ -283,28 +273,32 @@ ki query-group --scope user-profile --mode full
 - 内容为 Markdown 格式的模块说明
 - 超长内容（>1000 字符）会收到警告，建议拆分多条写入或用 `scan-kb import --source` 自动切分导入
 
-### 6.4 最近需求与进度的写入格式
+### 6.4 代码片段写入前检查
+
+写入片段前必须检查目标 Relation 是否已存在同名片段：
+- 先 `ki get-module-info` 获取该 Relation 当前内容
+- 已存在同名 `###` 片段 → 更新而非追加
+- 不存在 → 追加
+
+### 6.5 近期工作（AGENTS.md）的写入格式
 
 **最近需求**：每条只需 1-2 句话，必须带日期前缀：
 
 ```
-[YYYY-MM-DD] 需求描述
+- [YYYY-MM-DD] 需求描述
 ```
 
 示例：
 ```
-[2026-06-12] 实现用户登录功能
-[2026-06-12] 优化搜索性能，目标响应时间 < 200ms
+- [2026-06-12] 实现用户登录功能
+- [2026-06-12] 优化搜索性能，目标响应时间 < 200ms
 ```
 
 **进度**：区分进行中与已完成：
 
 ```
-进行中：
-[YYYY-MM-DD] 🔄 重构告警引擎（预计 6/15 完成）
-
-已完成：
-[2026-06-12] ✅ 修复登录页面样式问题
+- 进行中: [YYYY-MM-DD] 🔄 重构告警引擎（预计 6/15 完成）
+- 已完成: [2026-06-12] ✅ 修复登录页面样式问题
 ```
 
 ---
@@ -315,7 +309,7 @@ ki query-group --scope user-profile --mode full
 
 **流程**：查找现有内容 → 确认 → 覆盖写入
 
-**项目记忆更新**：
+**项目记忆/片段更新**：
 
 ```bash
 # 1. 查找现有 Relation
@@ -335,25 +329,7 @@ ki sync-relation \
 ki query-group --scope ${scope}-memory --mode full
 ```
 
-**用户画像更新**：
-
-```bash
-# 1. 查找现有 Relation
-ki query-group --scope user-profile --groups "目标Group路径" --mode hot,emerging
-
-# 2. 取现有内容确认
-ki get-module-info --scope user-profile --group "目标Group路径" --relation "Relation名称"
-
-# 3. 覆盖写入新内容
-ki sync-relation \
-  --scope user-profile \
-  --group "目标Group路径" \
-  --relation "同一Relation名称" \
-  --module-info "更新后的Markdown内容"
-
-# 4. 刷新缓存
-ki query-group --scope user-profile --mode full
-```
+**用户画像/近期工作更新**：直接覆盖写入 AGENTS.md 对应章节/小节。
 
 **`sync-relation` 同名覆盖**：Relation 名称相同时，自动覆盖原有内容。
 
@@ -363,70 +339,42 @@ ki query-group --scope user-profile --mode full
 
 ### 8.1 归档策略
 
-| Group | 保留规则 | 归档方式 |
-|-------|----------|----------|
-| 最近需求 | 只保留最近 7 天，每条必须带日期 | AI 发现超过 7 天的需求移动到 `archive.md` |
-| 进度（已完成） | 只保留最近 7 天 | AI 发现超过 7 天的已完成进度移动到 `archive.md` |
-| 进度（未完成） | 永久保留 | 不归档 |
-| 当前状态 | 超过 30 天自动标记过期 | AI 定期检查并归档到 `archive.md` |
-| 其他 Group | 永久保留 | 不归档 |
+| 数据 | 位置 | 保留规则 | 归档方式 |
+|------|------|----------|----------|
+| 近期工作（最近需求/已完成进度） | AGENTS.md"近期工作"章节 | 仅保留最近 7 天，每条必须带日期 | 超期移入项目根目录 `archive.md` |
+| 近期工作（进行中进度） | AGENTS.md"近期工作"章节 | 永久保留 | 不归档 |
+| 当前状态 | ki `${scope}-memory` | 超过 30 天自动标记过期 | 移到 `archive.md` |
+| 其他 Group（含代码片段） | ki `${scope}-memory` | 永久保留 | 不归档 |
 
 ### 8.2 归档时机
 
-**每次访问"最近需求"或"进度" Group 时**，AI 必须检查并归档过期条目。
+**每次访问 AGENTS.md"近期工作"章节或"当前状态"时**，AI 必须检查并归档过期条目。
 
 ### 8.3 归档操作
 
-**核心原理**：动态 Group 的活跃内容仍由 ki 的 `sync-relation` 管理（写 `index.json`）。`archive.md` 是独立于 ki 的纯文本追加文件，由 AI 直接读写。归档 = 从 ki Relation 中移除过期条目 + 追加到 `archive.md`。
-
-**操作步骤**：
+**近期工作（AGENTS.md）**：
 
 ```
-1. ki get-module-info → 获取当前 Group 的 Relation 完整内容
-2. AI 解析内容 → 识别所有 [YYYY-MM-DD] 条目
-3. AI 判断过期 → 距今超过 7 天的条目标记为过期
-4. ki sync-relation → 将活跃条目（≤7天）写回 ki（覆盖原 Relation）
-5. 文件写入工具 → 将过期条目追加到 archive.md（按日期分组）
-6. ki query-group --mode full → 刷新缓存
+1. 读取 AGENTS.md"近期工作"章节 → 解析 [YYYY-MM-DD] 条目
+2. AI 标记超 7 天为过期（进行中进度永久保留）
+3. 覆盖写回 AGENTS.md → 保留活跃条目
+4. 文件写入 → 过期条目追加到项目根目录 archive.md（按日期分组）
 ```
 
-**最近需求归档示例**：
+**当前状态（ki）**：
 
-```bash
-# 1. 读取当前内容
-ki get-module-info --scope ${scope}-memory --group "最近需求" --relation "最近需求"
-
-# 返回示例：
-# [2026-06-12] 实现用户登录功能
-# [2026-06-12] 优化搜索性能
-# [2026-06-05] 添加数据导出功能        ← 超过 7 天，需归档
-# [2026-06-04] 重构告警引擎            ← 超过 7 天，需归档
-
-# 2-3. AI 在脑中完成：识别 [2026-06-05] 和 [2026-06-04] 已过期
-
-# 4. 写回活跃条目（只保留 7 天内的）
-ki sync-relation \
-  --scope ${scope}-memory \
-  --group "最近需求" \
-  --relation "最近需求" \
-  --module-info "[2026-06-12] 实现用户登录功能
-[2026-06-12] 优化搜索性能"
-
-# 5. 追加过期条目到 archive.md
-# （使用文件写入工具，向 最近需求/archive.md 追加以下内容）
-# ## 2026-06-05
-# - [2026-06-05] 添加数据导出功能
-# ## 2026-06-04
-# - [2026-06-04] 重构告警引擎
-
-# 6. 刷新缓存
-ki query-group --scope ${scope}-memory --mode full
+```
+1. ki get-module-info → 获取 Relation 完整内容
+2. AI 标记超 30 天为过期
+3. ki sync-relation → 活跃条目写回（覆盖原 Relation）
+4. 文件写入 → 过期条目追加到 archive.md
+5. ki query-group --mode full → 刷新缓存
 ```
 
-**archive.md 格式**：
+**archive.md 位置与格式**：位于项目根目录（与 AGENTS.md 同级），按日期分组追加，不删除历史信息。首次归档时自动创建。
 
 ```markdown
-# 最近需求归档
+# 归档记录
 
 ## 2026-06-05
 - [2026-06-05] 添加数据导出功能
@@ -435,16 +383,7 @@ ki query-group --scope ${scope}-memory --mode full
 - [2026-06-04] 重构告警引擎
 ```
 
-**进度归档的特殊处理**：由于"进度" Group 同时包含进行中和已完成内容，归档时：
-1. `ki get-module-info` 读取"进度"的 Relation 原文
-2. AI 解析出「进行中」和「已完成」两部分
-3. 保留所有「进行中」条目 + 最近 7 天的「已完成」条目
-4. 超过 7 天的已完成条目追加到 `archive.md`
-5. `ki sync-relation` 写回保留的内容
-
 > **关键原则**：过期条目归档（移到 archive.md），不是删除。历史信息有参考价值。
->
-> **若 archive.md 不存在**：首次归档时自动创建。
 
 ---
 
@@ -455,21 +394,13 @@ ki query-group --scope ${scope}-memory --mode full
 **示例**：对话中发现"部署流程"相关信息，但现有 Group 无此分类 → 自动创建"部署流程" Group。
 
 ```bash
-# 项目记忆
 ki manage-index --scope ${scope}-memory --action create --parent "" --name "部署流程"
-
-# 用户画像
-ki manage-index --scope user-profile --action create --parent "" --name "新维度"
 ```
 
-**创建后刷新**：创建 Group 后重新执行对应全景查询：
+**创建后刷新**：创建 Group 后重新执行全景查询：
 
 ```bash
-# 项目记忆
 ki query-group --scope ${scope}-memory --mode full
-
-# 用户画像
-ki query-group --scope user-profile --mode full
 ```
 
 ---
@@ -480,8 +411,9 @@ ki query-group --scope user-profile --mode full
 
 ```
 1. 先查代码知识库 ${scope} → 找到模块/架构信息
-2. 再查项目记忆 ${scope}-memory → 找到相关项目上下文
-3. 综合两方信息回答
+2. 再查项目记忆 ${scope}-memory → 找到相关项目上下文/代码要点
+3. 用户偏好/需求进度 → 读取 AGENTS.md
+4. 综合信息回答
 ```
 
 **示例**：用户问"告警引擎为什么这样设计？"
@@ -496,13 +428,17 @@ ki query-group --scope user-profile --mode full
 |---|------|
 | 🔴 1 | `${scope}` 仍是字面量时，执行任何 ki 命令 |
 | 🔴 2 | 把代码知识（模块、API、设计）写入记忆系统 scope |
-| 🔴 3 | 把用户偏好/项目上下文写入代码知识库 scope |
-| 🔴 4 | 跨 scope 串数据（项目记忆写入 `user-profile`，反之亦然） |
-| 🔴 5 | 删除过期的 Relation 条目而非归档（必须移到 `archive.md`） |
-| 🔴 6 | 在"最近需求"中记录超过 1-2 句话的详细描述 |
-| 🔴 7 | "最近需求"或"进度"条目不带日期前缀 `[YYYY-MM-DD]` |
+| 🔴 3 | 把项目上下文写入代码知识库 scope |
+| 🔴 4 | 跨 scope 串数据 |
+| 🔴 5 | 删除过期条目而非归档（必须移到 `archive.md`） |
+| 🔴 6 | 用户偏好写入 ki scope（应存 AGENTS.md"用户画像"章节） |
+| 🔴 7 | 需求/进度写入 ki scope（应存 AGENTS.md"近期工作"章节） |
+| 🔴 8 | 近期工作条目不带日期前缀 `[YYYY-MM-DD]` 或超过 1-2 句 |
+| 🔴 9 | 代码片段内容过长（超 5 行）或写入无意义片段 |
+| 🔴 10 | 不检查重复就写入代码片段（同名片段应先检查再更新） |
+| 🔴 11 | 将临时记忆写入片段记忆（临时方案等必须写 AGENTS.md） |
 
-**写前自检三问**：scope 对了吗？是项目上下文/用户偏好吗？归档检查做了吗？
+**写前自检三问**：scope 对了吗？是项目上下文/代码要点/用户偏好吗？归档检查做了吗？
 
 ---
 
@@ -510,7 +446,7 @@ ki query-group --scope user-profile --mode full
 
 > **公共命令语法见 [ki-command-guide](ki-command-guide.md)**。各命令在不同 scope 下的使用示例如下：
 
-### 12.1 项目记忆（scope: `${scope}-memory`）
+### 12.1 项目记忆 + 代码片段（scope: `${scope}-memory`）
 
 ```bash
 # 拉全景
@@ -529,23 +465,11 @@ ki sync-relation --scope ${scope}-memory --group "路径" --relation "名称" --
 ki manage-index --scope ${scope}-memory --action create --parent "父" --name "子"
 ```
 
-### 12.2 用户画像（scope: `user-profile`）
+### 12.2 用户画像 / 近期工作（AGENTS.md）
 
 ```bash
-# 拉全景
-ki query-group --scope user-profile --mode full
-
-# 查热区
-ki query-group --scope user-profile --groups "路径" --mode hot,emerging
-
-# 取原文
-ki get-module-info --scope user-profile --group "路径" --relation "名称"
-
-# 写入
-ki sync-relation --scope user-profile --group "路径" --relation "名称" --module-info "内容"
-
-# 创建 Group
-ki manage-index --scope user-profile --action create --parent "父" --name "子"
+# 读取：直接读项目根目录 AGENTS.md 的"用户画像"/"近期工作"章节
+# 写入：直接编辑对应章节（不经 ki 命令）
 ```
 
 ---
@@ -554,36 +478,29 @@ ki manage-index --scope user-profile --action create --parent "父" --name "子"
 
 ```
 <ki安装路径>/kb/
-├── ${scope}-memory/                    # 项目记忆
-│   ├── group-index.json                # Group 树索引（ki 自动管理）
-│   ├── relations-cache.json            # Relations 缓存（ki 自动管理）
-│   │
-│   ├── 背景与目标/index.json           # 内容稳定的 Group：仅 index.json
-│   ├── 技术栈选型/index.json
-│   ├── 团队约定/index.json
-│   ├── 项目历史/index.json
-│   ├── 当前状态/index.json
-│   ├── 外部依赖/index.json
-│   ├── 项目踩坑点/index.json
-│   ├── 项目架构/index.json
-│   │
-│   ├── 最近需求/                       # 动态 Group
-│   │   ├── index.json                  # ki 管理：仅保留最近 7 天的条目
-│   │   └── archive.md                  # AI 管理：归档超过 7 天的条目
-│   │
-│   └── 进度/                           # 动态 Group
-│       ├── index.json                  # ki 管理：进行中 + 最近 7 天已完成
-│       └── archive.md                  # AI 管理：归档超过 7 天的已完成条目
-│
-└── user-profile/                       # 用户画像
-    ├── group-index.json
-    ├── relations-cache.json
-    └── {Group}/index.json              # 所有用户画像 Group 仅 index.json
+└── ${scope}-memory/                    # 项目记忆 + 代码片段
+    ├── group-index.json                # Group 树索引（ki 自动管理）
+    ├── relations-cache.json            # Relations 缓存（ki 自动管理）
+    ├── 背景与目标/index.json           # 内容稳定的 Group：仅 index.json
+    ├── 技术栈选型/index.json
+    ├── 团队约定/index.json
+    ├── 项目历史/index.json
+    ├── 当前状态/index.json
+    ├── 外部依赖/index.json
+    ├── 项目踩坑点/index.json
+    ├── 项目架构/index.json
+    ├── 工具库/index.json
+    ├── 部署运维/index.json
+    └── 通用记忆片段/index.json
+
+项目根目录/
+├── AGENTS.md                            # 用户画像 + 近期工作 + 项目记忆索引缓存
+└── archive.md                           # 近期工作归档（AI 直接读写）
 ```
 
 > 当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/KiSearch/kb/`
 >
-> **文件管理权责**：`index.json` / `group-index.json` / `relations-cache.json` 由 ki 命令自动管理；`archive.md` 由 AI 通过文件读写工具直接操作。
+> **文件管理权责**：`index.json` / `group-index.json` / `relations-cache.json` 由 ki 命令自动管理；`AGENTS.md` / `archive.md` 由 AI 通过文件读写工具直接操作。
 
 ---
 

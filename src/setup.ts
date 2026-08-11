@@ -7,7 +7,7 @@
  *   ki setup --rules                           # 读 ~/.ki-targets，安装到所有目录
  *   ki setup --skills -t ~/project-a -t ~/project-b
  *   ki setup --rules --file ~/my-targets.txt
- *   ki setup --skills -n codekb-skill,memory-skill -t ~/project-a
+ *   ki setup --skills -n codekb-skill,agents-md-init -t ~/project-a
  */
 
 import { Command } from 'commander';

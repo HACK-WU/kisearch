@@ -14,11 +14,11 @@
 涉及的数据操作：
 | 操作 | 数据实体 | 场景类型 | 说明 |
 |------|----------|----------|------|
-| 写入项目记忆 | Relation + KB | 简单 CRUD | ki sync-relation 单条写入 |
+| 写入项目记忆/代码片段 | Relation + KB | 简单 CRUD | ki sync-relation 单条写入 |
 | 批量导入项目记忆 | Relation + KB | 简单 CRUD | ki scan-kb import 批量写入 |
-| 读取项目记忆 | Relation + KB | 简单 CRUD | ki get-module-info 读取原文 |
-| 写入用户画像 | Relation + KB | 简单 CRUD | ki sync-relation 单条写入 |
-| 读取用户画像 | Relation + KB | 简单 CRUD | ki get-module-info 读取原文 |
+| 读取项目记忆/代码片段 | Relation + KB | 简单 CRUD | ki get-module-info 读取原文 |
+| 写入用户画像/近期工作 | AGENTS.md 章节 | 文件读写 | 直接编辑 AGENTS.md（不经 ki） |
+| 读取用户画像/近期工作 | AGENTS.md 章节 | 文件读写 | 直接读取 AGENTS.md |
 | 更新记忆 | Relation + KB | 简单 CRUD | 重新 sync-relation 覆盖 |
 | 删除记忆 | Relation + KB | 简单 CRUD | ki manage-index delete |
 ```
@@ -35,9 +35,10 @@
 
 | 实体 | 说明 | 存储位置 | 来源 |
 |------|------|----------|------|
-| Scope | 作用域，区分项目/用户画像 | group-index.json | 系统定义 |
+| Scope | 作用域，区分项目 | group-index.json | 系统定义 |
 | Group | 知识分组，树形结构 | group-index.json | 用户/AI 创建 |
 | Relation | 知识条目，挂在 Group 下 | relations-cache.json + KB | AI 沉淀 |
+| AGENTS.md 章节 | 用户画像/近期工作（不经 ki） | 项目根目录 AGENTS.md | AI 直接读写 |
 ```
 
 ---
@@ -51,7 +52,7 @@ erDiagram
 
     SCOPE {
         string name PK "作用域名称（如 monitor-memory）"
-        string type "类型：project-memory / user-profile"
+        string type "类型：project-memory（用户画像不经 ki，存 AGENTS.md）"
         datetime created_at "创建时间"
     }
 
@@ -84,8 +85,8 @@ erDiagram
 flowchart TB
     User[用户] -->|对话| AI[AI Agent]
     
-    AI -->|写入项目记忆| KI_SYNC[ki sync-relation]
-    AI -->|写入用户画像| KI_SYNC
+    AI -->|写入项目记忆/片段| KI_SYNC[ki sync-relation]
+    AI -->|写入用户画像/近期工作| MD[编辑 AGENTS.md]
     
     KI_SYNC -->|创建| RC[Relations 缓存]
     KI_SYNC -->|创建| KB[本地 KB]
@@ -103,7 +104,8 @@ flowchart TB
 
 | 流向 | 触发条件 | 操作 | 数据变化 | 备注 |
 |------|----------|------|----------|------|
-| AI → ki sync-relation | 对话中发现项目知识/用户偏好 | C | 新增 Relation + KB 原文 | 自动沉淀或用户明确告知 |
+| AI → ki sync-relation | 对话中发现项目知识/代码要点 | C | 新增 Relation + KB 原文 | 自动沉淀或用户明确告知 |
+| AI → AGENTS.md | 发现用户偏好/需求进度 | C | 更新对应章节 | 不经 ki |
 | AI → ki query-group | 对话开始或需要查询 | R | 读取 Group 树 + 热区 | 优先本地热区 |
 | AI → ki get-module-info | 热区命中后取原文 | R | 读取 KB 原文 | 提炼后回答 |
 
@@ -116,8 +118,8 @@ flowchart LR
     D[对话内容] --> P{AI 识别<br/>关键信息?}
     P -- 否 --> E[继续对话]
     P -- 是 --> T{信息类型}
-    T -- 项目记忆 --> S1[ki sync-relation<br/>scope: ${scope}-memory]
-    T -- 用户画像 --> S2[ki sync-relation<br/>scope: user-profile]
+    T -- 项目记忆/代码要点 --> S1[ki sync-relation<br/>scope: ${scope}-memory]
+    T -- 用户画像/近期工作 --> S2[更新 AGENTS.md<br/>对应章节]
     S1 --> E
     S2 --> E
 ```
@@ -142,17 +144,16 @@ flowchart TD
     L --> H
 ```
 
-### 6.2 用户画像查询流程
+### 6.2 用户画像/近期工作查询流程
 
 ```mermaid
 flowchart TD
-    A[需要用户偏好] --> B[ki query-group --scope user-profile<br/>--groups 相关Group --mode hot,emerging]
-    B --> C{命中 relation?}
-    C -- 是 --> D[ki get-module-info<br/>取原文]
-    D --> E[应用偏好]
-    E --> F[结束]
+    A[需要用户偏好/近期工作] --> B[读取 AGENTS.md<br/>用户画像/近期工作章节]
+    B --> C{命中?}
+    C -- 是 --> D[应用偏好/需求进度]
+    D --> E[结束]
     C -- 否 --> J[使用默认行为]
-    J --> F
+    J --> E
 ```
 
 ---
@@ -168,19 +169,17 @@ KiSearch/kb/
 │   ├── relations-cache.json
 │   └── {Group}/index.json
 │
-├── ${scope}-memory/             # 项目记忆
-│   ├── group-index.json
-│   ├── relations-cache.json
-│   └── {Group}/
-│       ├── index.json           # 内容稳定的 Group（单文件）
-│       ├── active.md            # 内容动态的 Group（当前活跃内容）
-│       └── archive.md           # 内容动态的 Group（归档内容）
-│
-└── user-profile/                # 用户画像
+└── ${scope}-memory/             # 项目记忆 + 代码片段
     ├── group-index.json
     ├── relations-cache.json
-    └── {Group}/index.json       # 所有用户画像 Group 使用单文件
+    └── {Group}/index.json       # 内容稳定的 Group（单文件）
+
+项目根目录/
+├── AGENTS.md                    # 用户画像 + 近期工作 + 项目记忆索引缓存
+└── archive.md                   # 近期工作归档（AI 直接读写）
 ```
+
+> 用户画像/近期工作不经 ki：直接存于项目根目录 AGENTS.md；归档追加到同目录 archive.md。
 
 ---
 
@@ -213,10 +212,10 @@ KiSearch/kb/
 
 ### 8.2 归档文件格式
 
-`archive.md` 文件格式示例：
+`archive.md`（项目根目录）文件格式示例：
 
 ```markdown
-# 最近需求归档
+# 归档记录
 
 ## 2026-06-05
 - [2026-06-05] 实现用户登录功能
@@ -230,3 +229,4 @@ KiSearch/kb/
 - 按日期分组，最新日期在前
 - 每条记录格式：`[YYYY-MM-DD] 简短描述`
 - 保持简洁，便于后续查阅
+- 归档源：AGENTS.md"近期工作"章节中超过 7 天的已完成条目（进行中进度不归档）；`${scope}-memory` 中"当前状态"超 30 天条目

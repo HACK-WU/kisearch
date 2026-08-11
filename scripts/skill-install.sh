@@ -116,7 +116,7 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo ""
     echo "  --skills        安装 AI Agent Skills（skills/）"
     echo "  --rules         安装加载引导规则（rules/）"
-    echo "  -n <names>      指定要安装的 skill/rule 名称（逗号分隔，如 -n codekb-skill,memory-skill）"
+    echo "  -n <names>      指定要安装的 skill/rule 名称（逗号分隔，如 -n codekb-skill,agents-md-init）"
     echo "  -t <path>       指定目标目录（可多次使用，与 --file 互斥）"
     echo "  --file <path>   指定目标目录配置文件（与 -t 互斥）"
     echo ""
@@ -125,7 +125,7 @@ if [ ${#TARGET_DIRS[@]} -eq 0 ] || [ ${#MODES[@]} -eq 0 ]; then
     echo ""
     echo "示例:"
     echo "  bash skill-install.sh --skills -t ~/projects/app -t ~/projects/api"
-    echo "  bash skill-install.sh --skills -n codekb-skill,memory-skill -t ~/projects/app"
+    echo "  bash skill-install.sh --skills -n codekb-skill,agents-md-init -t ~/projects/app"
     echo "  bash skill-install.sh --rules --file ~/my-targets.txt"
     echo ""
     echo "推荐使用 ki setup（支持多目录、配置文件）:"
@@ -181,9 +181,8 @@ install_skills() {
 
     if [ -z "${SKILLS:-}" ]; then
         echo "⚠️  gh 不可用，使用静态 skill 列表（可能不是最新）" >&2
-        SKILLS="codekb-skill
-ki-foundation
-memory-skill"
+        SKILLS="agents-md-init
+codekb-skill"
     fi
 
     echo "🧠 安装 AI Skills → ${DEST}"

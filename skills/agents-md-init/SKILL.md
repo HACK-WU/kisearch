@@ -1,11 +1,12 @@
 ---
 name: agents-md-init
-description: 初始化或更新项目根目录的 AGENTS.md 文件。自动查询 ki 获取真实索引数据填充三类索引（知识库/项目记忆/用户画像），无真实数据时用示例格式兜底。支持首次使用引导创建 scope。同步近期工作记录。对话开始时必须加载。
+description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${scope}-memory 项目记忆索引、用户画像、近期工作等章节。仅当用户明确说明要初始化或刷新 AGENTS.md 时才调用，禁止 AI 自动触发。
 ---
 
 # agents-md-init AGENTS.md 初始化
 
-> **前置条件**：AI 已了解 ki MCP 工具（ki-foundation）。AGENTS.md 位于项目根目录。
+> **前置条件**：AI 已了解 ki MCP 工具。AGENTS.md 位于项目根目录。
+> **格式模板**：完整 AGENTS.md 模板见 [AGENTS-template.md](AGENTS-template.md)，本文件不内嵌模板。
 
 ---
 
@@ -14,15 +15,17 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。自动查�
 **目的**：自动维护 AGENTS.md 文件，确保其中的索引信息与实际 ki 数据保持一致。解决规则文件中嵌入模板导致的内容混乱问题。
 
 **功能**：
-- 首次对话时自动创建/更新 AGENTS.md
-- 查询 ki 获取真实索引数据填充三类索引
+- 用户手动触发时创建/更新 AGENTS.md（如用户说"初始化 AGENTS.md"、"刷新缓存"）
+- 查询 ki 获取真实索引数据填充项目记忆索引（`${scope}-memory`）
+- 代码知识库（`${scope}`）索引不写入 AGENTS.md，查询走 `codekb-skill` 直连 ki
+- 用户画像与近期工作直接存储于 AGENTS.md，不依赖 ki
 - 无真实数据时用示例格式兜底（标注 ⚠️）
 - 同步近期工作记录（7 天内）
 - 索引变更后自动刷新
 
-**使用场景**：
-- 首次对话，AGENTS.md 不存在或索引为空
-- 索引变更后需要刷新缓存
+**使用场景**（用户手动触发）：
+- 首次对话，用户要求初始化 AGENTS.md
+- 索引变更后用户要求刷新缓存
 - 手动触发"初始化 AGENTS.md"、"刷新缓存"
 - ki 中无任何 scope 时引导用户创建
 
@@ -36,32 +39,34 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。自动查�
 ① ki_manage_index_list → 无任何 scope
     ↓
 ② 主动提示用户：
-    "检测到项目尚未配置知识库索引。是否需要我帮你初始化？"
+    "检测到项目尚未配置 ki 索引。是否需要我帮你初始化？"
     ↓ 用户确认
 ③ 确定 scope 名称（默认取项目目录名的小写简写）
 ④ ki_manage_index_create(scope, name: "项目概述")
 ⑤ ki_manage_index_create(scope: "${scope}-memory", name: "背景与目标")
-⑥ ki_manage_index_create(scope: "user-profile", name: "沟通偏好")
-⑦ 执行完整初始化（步骤 2.1）
+⑥ 执行完整初始化（步骤 2.1）
 ```
 
 > 用户拒绝则跳过，后续按需触发。
+> 用户画像与近期工作（最近需求/进度）不再创建对应 scope/Group——直接写入 AGENTS.md 的"用户画像"/"近期工作"章节。
 
 ### 异常处理
 
-若本 skill 文件不存在（如新克隆项目）：`ai-codekb-memory` 规则的步骤0 会提示用户安装 KiSearch，然后跳过 AGENTS.md 初始化，后续按需触发。此流程也记录在 `ai-codekb-memory` 规则的"首次使用引导"中。
+若本 skill 文件不存在（如新克隆项目）：跳过 AGENTS.md 初始化，后续用户明确要求时再按需处理（KiSearch 缺失由 `ai-codekb-memory` 规则提示安装）。
 
 ---
 
 ## 2. 初始化流程
 
+> **仅当用户明确说明要初始化或刷新 AGENTS.md 时才执行，禁止 AI 自动触发。**
+
 ```
-对话开始
+用户明确要求后
     │
     ├── AGENTS.md 不存在？
     │       └── 是 → 执行完整初始化（步骤 2.1）
     │
-    ├── AGENTS.md 存在但无"知识库索引"章节？
+    ├── AGENTS.md 存在但无"项目记忆索引"章节？
     │       └── 是 → 执行完整初始化
     │
     └── AGENTS.md 存在且完整？
@@ -71,170 +76,86 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。自动查�
 ### 2.1 完整初始化
 
 ```
-① ki_manage_index_list → 获取所有 scope
-② 对获取到的 scope 分类：
-   - 代码知识库 scope → 知识库索引
-   - ${scope}-memory scope → 项目记忆索引
-   - user-profile scope → 用户画像索引
-③ 对每个 scope 执行 ki_query_group(mode: "full,depth=4") → Group 结构
-④ 对每个 scope 执行 ki_query_group(mode: "hot,hot_count=3") → 热门 Relation
-⑤ 从项目记忆中提取近期工作：ki_query_group(groups: "最近需求,进度")
-⑥ 写入 AGENTS.md
+① ki_manage_index_list → 获取所有 scope，识别 ${scope}-memory 项目记忆 scope
+② 对每个 ${scope}-memory 执行 ki_query_group(mode: "full,depth=4") → Group 结构
+③ 对每个 ${scope}-memory 执行 ki_query_group(mode: "hot,hot_count=3") → 热门 Relation
+④ 用户画像与近期工作 → 直接写入 AGENTS.md 对应章节（空模板 + 预定义维度）
+⑤ 写入 AGENTS.md（参考 AGENTS-template.md）
 ```
+
+> 代码知识库 `${scope}` 的索引不初始化到 AGENTS.md，仅缓存 `${scope}-memory` 项目记忆索引。
 
 ### 2.2 增量更新
 
 当 AGENTS.md 已存在但部分过期时：
 
 ```
-① 读取 AGENTS.md，提取已有的 scope 列表
-② ki_manage_index_list → 获取最新 scope 列表
+① 读取 AGENTS.md，提取已有的 ${scope}-memory 列表
+② ki_manage_index_list → 获取最新 scope 列表，识别 ${scope}-memory
 ③ 对比差异：
-   - 新增 scope → 补充对应章节
-   - 删除 scope → 移除对应章节
+   - 新增 ${scope}-memory → 补充对应章节
+   - 删除 ${scope}-memory → 移除对应章节
    - Group 结构变更 → 更新对应章节
 ④ 检查项目记忆预定义 Group 是否存在，缺失则初始化（见 §项目记忆索引）
-⑤ 检查用户画像预定义 Group 是否存在，缺失则初始化（见 §用户画像索引）
-⑥ 检查"近期工作"时间戳 → 超过 1 天则刷新
+⑤ 检查"近期工作"时间戳 → 超过 1 天则刷新（直接维护 AGENTS.md 章节）
+⑥ 用户画像 → 保持 AGENTS.md 中已有内容，不重复初始化；仅当维度缺失时补充小节
 ```
 
 ---
 
 ## 3. AGENTS.md 格式模板
 
-```markdown
+> **完整模板见 [AGENTS-template.md](AGENTS-template.md)**，本文件只描述结构与维护规则。
+
+模板章节结构：
+
+```
 # AGENTS.md - AI AGENT 项目记忆文件
-
-> **本文件由 AI AGENT 自动维护，用于缓存索引信息、记录近期工作、跟踪新需求。**
-
----
-
-## 知识库索引
-
-### Scope 列表
-- {scope}: {描述}
-- {scope}-memory: {scope}项目记忆
-- user-profile: 用户画像（全局固定）
-
-### {scope} 索引
-#### Group 结构
-- {Group1}
-- {Group2}
-- ...
-
-#### 热门 Relation
-- {Relation1} (热度: {score})
-- {Relation2} (热度: {score})
-
----
-
-## 项目记忆索引
-
-### {scope}-memory 索引
-
-#### Group 初始化检查
-
-首次或 Group 缺失时，先查询当前实际 Group，再补建缺少的：
-
-```bash
-# 1. 查询当前 Group 全貌
-ki query-group --scope ${scope}-memory --mode full
-
-# 2. 对比预定义列表，缺失则逐个创建
-ki manage-index create --scope ${scope}-memory --name "背景与目标"
-ki manage-index create --scope ${scope}-memory --name "技术栈选型"
-ki manage-index create --scope ${scope}-memory --name "团队约定"
-ki manage-index create --scope ${scope}-memory --name "项目历史"
-ki manage-index create --scope ${scope}-memory --name "当前状态"
-ki manage-index create --scope ${scope}-memory --name "外部依赖"
-ki manage-index create --scope ${scope}-memory --name "最近需求"
-ki manage-index create --scope ${scope}-memory --name "进度"
-ki manage-index create --scope ${scope}-memory --name "项目踩坑点"
-ki manage-index create --scope ${scope}-memory --name "项目架构"
-ki manage-index create --scope ${scope}-memory --name "工具库"
-ki manage-index create --scope ${scope}-memory --name "常用命令"
-ki manage-index create --scope ${scope}-memory --name "部署运维"
-ki manage-index create --scope ${scope}-memory --name "通用记忆片段"
-ki manage-index create --scope ${scope}-memory --name "专题记忆"
+├── 项目记忆索引      # ki ${scope}-memory scope（Group 结构 + 热门 Relation）
+├── 用户画像          # 直接存储，不走 ki（沟通偏好/代码风格/工具链/技术背景/工作习惯/对话习惯）
+├── 近期工作 (7天内)  # 直接存储，不走 ki（最近需求 + 进度，超期移入 archive.md）
+└── 更新日志          # 最近 10 条变更记录
 ```
 
-#### Group 结构
-- 背景与目标
-- 技术栈选型
-- 团队约定
-- 项目历史
-- 当前状态
-- 外部依赖
-- 最近需求
-- 进度
-- 项目踩坑点
-- 项目架构
-- 工具库
-- 常用命令
-- 部署运维
-- 专题记忆
-  > **注意**：专题记忆组下必须创建子索引（子组）后才能写入记忆片段，禁止直接向专题记忆组写入 relation。
-- 通用记忆片段
-  - {列出实际分类，按功能或类型}
-
-#### 热门 Relation
-- {Relation1} (热度: {score})
-- ...
+> 代码知识库（`${scope}`）索引不写入 AGENTS.md。
 
 ---
 
-## 用户画像索引
+## 3.5 直接存储章节维护（用户画像 + 近期工作）
 
-### user-profile 索引
+> **用户画像与近期工作均不再使用 ki scope/Group，直接存储在 AGENTS.md 对应章节。**
 
-#### Group 初始化检查
+### 用户画像
 
-首次或 Group 缺失时，查询当前实际 Group，补建缺少的：
+#### 预定义维度
 
-```bash
-# 1. 查询当前 Group 全貌
-ki query-group --scope user-profile --mode full
-
-# 2. 对比预定义列表，缺失则逐个创建
-ki manage-index create --scope user-profile --name "沟通偏好"
-ki manage-index create --scope user-profile --name "代码风格"
-ki manage-index create --scope user-profile --name "工具链"
-ki manage-index create --scope user-profile --name "技术背景"
-ki manage-index create --scope user-profile --name "工作习惯"
-ki manage-index create --scope user-profile --name "对话习惯"
+```
+沟通偏好/  代码风格/  工具链/  技术背景/  工作习惯/  对话习惯/
 ```
 
-#### Group 结构
-- 沟通偏好
-- 代码风格
-- 工具链
-- 技术背景
-- 工作习惯
-- 对话习惯
+#### 写入规则
 
-#### 热门 Relation
-- {Relation1} (热度: {score})
-- ...
+- 对话中发现用户偏好 → 直接更新 AGENTS.md 对应小节（覆盖写入）
+- 维度缺失 → 新增小节（命名保持 4-8 字名词短语）
+- **不执行任何 ki MCP 调用**
 
----
+#### 读取规则
 
-## 近期工作 (7天内)
+- 对话开始 → 读取 AGENTS.md"用户画像"章节，加载用户偏好
+- 无需任何 ki 查询
 
-### 最近需求
-- [YYYY-MM-DD] {需求描述}
+### 近期工作（最近需求 + 进度）
 
-### 进度
-- 进行中: [YYYY-MM-DD] 🔄 {描述}
-- 已完成: [YYYY-MM-DD] ✅ {描述}
+#### 写入规则
 
----
+- 新需求 → 在 AGENTS.md"近期工作 → 最近需求"小节追加 `[YYYY-MM-DD] {描述}`（1-2 句话）
+- 进度变化 → 更新"进度"小节（进行中 🔄 / 已完成 ✅）
+- **不执行任何 ki MCP 调用**（无"最近需求"/"进度" Group）
 
-## 更新日志
+#### 过期清理
 
-| 日期 | 更新内容 |
-|------|----------|
-| YYYY-MM-DD | {更新说明} |
-```
+- 最近需求/已完成进度超过 7 天 → 移入项目根目录 `archive.md`（按日期分组追加）
+- 进行中进度永久保留
 
 ---
 
@@ -244,47 +165,44 @@ ki manage-index create --scope user-profile --name "对话习惯"
 
 ### 有真实数据时
 
-- Scope 列表 → 来自 `ki_manage_index_list`
-- Group 结构 → 来自 `ki_query_group(mode: "full")`
-- 热门 Relation → 来自 `ki_query_group(mode: "hot")`
-- 近期工作 → 来自 `ki_query_group(groups: "最近需求,进度")`
+- `${scope}-memory` 列表 → 来自 `ki_manage_index_list`
+- Group 结构 → 来自 `ki_query_group(mode: "full")`（仅 ${scope}-memory）
+- 热门 Relation → 来自 `ki_query_group(mode: "hot")`（仅 ${scope}-memory）
+- 近期工作 → AGENTS.md 内已有内容（无 ki 数据源）
+- 用户画像 → AGENTS.md 内已有内容（无 ki 数据源）
 
 ### 无真实数据时（示例兜底）
 
 在对应章节使用 ⚠️ 标注：
 
 ```markdown
-## 知识库索引
-
-> ⚠️ 知识库索引为空，尚未创建任何代码知识库 scope。
-> 执行 `ki_manage_index_create` 创建 scope 后自动更新。
-
 ## 项目记忆索引
 
 > ⚠️ 项目记忆索引为空，尚未创建任何项目记忆。
-> 执行 `ki_manage_index_create` 创建 scope 后自动更新。
+> 执行 `ki_manage_index_create` 创建 ${scope}-memory scope 后自动更新。
 
-## 用户画像索引
+## 用户画像
 
-> ⚠️ 用户画像索引为空，尚未创建任何用户画像。
-> 执行 `ki_manage_index_create` 创建 scope 后自动更新。
+> 用户画像直接存储于本文件。尚无已记录偏好，随对话逐步补充。
 ```
 
 ---
 
-## 5. 近期工作提取
+## 5. 近期工作维护
 
-从项目记忆的"最近需求"和"进度" Group 中提取：
+> **近期工作（最近需求/进度）直接存储于 AGENTS.md 的"近期工作"章节，不从 ki 提取。**
 
-```
-ki_query_group(scope: "${scope}-memory", groups: "最近需求,进度", mode: "hot")
-```
+### 写入
 
-**格式**：
-- 需求：`[YYYY-MM-DD] {需求描述（1-2句话）}`
-- 进度：`进行中/已完成: [YYYY-MM-DD] {状态图标} {描述}`
+- 新需求 → "最近需求"小节追加 `[YYYY-MM-DD] {需求描述（1-2句话）}`
+- 进度 → "进度"小节：`进行中: [YYYY-MM-DD] 🔄 {描述}` / `已完成: [YYYY-MM-DD] ✅ {描述}`
 
-**过期处理**：超过 7 天的条目不写入 AGENTS.md。
+### 过期处理
+
+- 访问"近期工作"章节时检查：最近需求/已完成进度超过 7 天 → 移入项目根目录 `archive.md`
+- 进行中进度永久保留
+
+> archive.md 由 AI 直接读写（追加式，不删除历史），首次归档时自动创建。
 
 ---
 
@@ -302,9 +220,7 @@ ki_query_group(scope: "${scope}-memory", groups: "最近需求,进度", mode: "h
 
 ## 7. 协同
 
-- **与 `ai-codekb-memory` 规则**：本 skill 负责 AGENTS.md 的创建和格式维护，规则文件负责行为决策（何时缓存、何时更新）
-- **与 `ki-foundation`**：本 skill 依赖 ki MCP 工具获取索引数据
-- **与 `memory-skill`**：近期工作数据从项目记忆中提取
+- **与 `ai-codekb-memory` 规则**：本 skill 负责 AGENTS.md 的创建和格式维护（用户手动触发）；规则文件负责运行期行为决策（何时缓存、何时更新、如何沉淀/归档）。代码要点记忆存 `${scope}-memory`，与项目记忆索引共用同一 scope，片段格式见 `rules/ai-codekb-memory.md`"代码片段记忆"章节
 
 ---
 
@@ -317,3 +233,5 @@ ki_query_group(scope: "${scope}-memory", groups: "最近需求,进度", mode: "h
 | 🔴 3 | 不检查 ki 数据直接写入示例格式 |
 | 🔴 4 | 写入后不记录更新日志 |
 | 🔴 5 | 近期工作记录超过 7 天不清理 |
+| 🔴 6 | 将用户画像写入 ki 记忆的任何 scope（应存 AGENTS.md"用户画像"章节） |
+| 🔴 7 | 在 ki 中创建/写入"最近需求"/"进度" Group（已迁移至 AGENTS.md"近期工作"章节） |

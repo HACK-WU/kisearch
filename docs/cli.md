@@ -1449,29 +1449,28 @@ ki setup --skills -t ~/projects/my-app
    目标数量: 1
 
 [1/1] 🧠 安装 Skills → /Users/me/projects/my-app
-  [OK] ki-foundation/SKILL.md
+  [OK] agents-md-init/SKILL.md
   [OK] codekb-skill/SKILL.md
-  [OK] memory-skill/SKILL.md
 
-✅ 完成: 3/3 个文件安装成功
+✅ 完成: 2/2 个文件安装成功
 ```
 
 **示例：按名称安装指定 skill**
 
 ```bash
-ki setup --skills -n codekb-skill,memory-skill -t ~/projects/my-app
+ki setup --skills -n codekb-skill,agents-md-init -t ~/projects/my-app
 ```
 
 输出：
 ```
-🚀 ki setup --skills [codekb-skill, memory-skill]
+🚀 ki setup --skills [codekb-skill, agents-md-init]
    目标来源: 命令行参数 (-t × 1)
    目标数量: 1
-   名称过滤: codekb-skill, memory-skill
+   名称过滤: codekb-skill, agents-md-init
 
 [1/1] 🧠 安装 Skills → /Users/me/projects/my-app
   [OK] codekb-skill/SKILL.md
-  [OK] memory-skill/SKILL.md
+  [OK] agents-md-init/SKILL.md
   跳过: 1 个未匹配的 skill
 
 ✅ 完成: 2/2 个文件安装成功

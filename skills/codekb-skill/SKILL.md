@@ -1,11 +1,11 @@
 ---
 name: codekb-skill
-description: 代码知识库检索与写入行为规则。当用户问题涉及代码知识、模块架构、API 接口、bug 排查、代码审查等场景时使用。覆盖四步走查询流程、定位级/理解级判定、ki_search 语义兜底、写入 KB 白名单黑名单、批量导入规范。
+description: 代码知识库检索行为规则。当用户问题涉及代码知识、模块架构、API 接口、bug 排查、代码审查等场景时使用。覆盖四步走查询流程（优先 ki_search ${scope}-memory）、定位级/理解级判定、索引原位兜底、宏观兜底。${scope} 默认只读：仅当发现知识库与实际代码不符且获得用户明确授权后，才可修改。
 ---
 
 # codekb-skill 代码知识库检索行为规则
 
-> **前置条件**：AI 已了解 MCP 工具定义和架构心智模型（ki-foundation）。
+> **前置条件**：AI 已了解 MCP 工具定义和架构心智模型。
 > 本文件专注**行为决策逻辑**，不重复命令语法。
 
 ---
@@ -19,12 +19,15 @@ description: 代码知识库检索与写入行为规则。当用户问题涉及�
       ├─ 否 → 问用户
       └─ 是 → 查询类型?
           ├─ 定位级 → SearchSymbol/grep/Read，不走 KB
-          └─ 理解级 → 拉全景 → 四步走
+          └─ 理解级 → 四步走
 
 四步走（理解级）:
-  ① 定位 Group → ② 查热区 → ③ 取原文 → ④ 语义兜底(ki_search)
+  ① ki_search(scope: "${scope}-memory", limit: 4, threshold: 0.02)  → 优先语义检索
+  ② 未命中 → ki_get_module_info 索引取原位信息
+  ③ 仍未命中 → ki_search(scope: "${scope}", limit: 4, threshold: 0.02)  → 宏观兜底
+  ④ 都未命中 → 回问用户
 
-写入 KB:
+写入 KB（仅用户明确授权后）:
   1~2 条 → ki_sync_relation 逐条写
   ≥3 条  → ki_sync_relation --input 批量写（CLI）
 ```
@@ -58,59 +61,61 @@ description: 代码知识库检索与写入行为规则。当用户问题涉及�
 
 ## 3. 对话开始：拉取全景
 
-理解级查询时自动执行：`ki_query_group(scope: "${scope}", mode: "full")`
+理解级查询时自动执行：`ki_query_group(scope: "${scope}-memory", mode: "full")`
 
 - 首次查询后缓存有效，写入后需刷新
 - scope 不存在或树为空时静默失败，记录"无已建索引"
+- 全景用于步骤②的 Group/Relation 定位；**查询始终以 ki_search 语义检索优先**，不要按索引遍历
 
 ---
 
 ## 4. 查询项目知识：四步走
 
-### ① 定位目标 Group
+### ① 语义检索（优先）：ki_search ${scope}-memory
 
-从缓存全景中判断用户问题涉及哪个 Group。
-
-- 无明确匹配 → 重新拉取全景确认
-- 多个候选 → 优先得分最高的
-- 全景中已明确 Relation 名称 → 跳过②直接③
-
-### ② 查热门 + 新兴热区
-
-`ki_query_group(scope: "${scope}", groups: "目标Group路径", mode: "hot,emerging")`
-
-- 从热门中选择最匹配的 relation
-- 命中 → ③；未命中 → 换 Group 重试一次，仍无则 → ④
-
-### ③ 取原文
-
-`ki_get_module_info(scope, group, relation)` → **Agent 必须提炼后回答，不要全文转储。**
-
-### ④ 语义兜底与回问用户
-
-**ki_search 语义兜底**（仅索引找不到时）：
+> **ki-search 已支持 `${scope}-memory`，优先使用语义检索，不直接按索引查找。**
 
 ```
-ki_search(scope: "${scope}", query: "核心词", limit: 3, tags: "ki-search", threshold: 0.15)
+ki_search(scope: "${scope}-memory", query: "核心词", limit: 4, threshold: 0.02, tags: "ki-search")
 ```
 
 - 返回 `results[]`，每项含 `memoryId`、`content`、`score`
 - 标签按意图指定：`ki-search`（通用）、`ki-path`（路径）、`ki-relation`（关系）
+- **limit 固定 4**：取最相关的 4 条
+- **threshold 固定 0.02**：过滤低相似度内容，确保返回的是相似度较高的结果
+- 命中 → 基于 `content` 提炼回答；未命中 → ②
 
-**命中后回写本地**：
-1. 取 `content` 作为 `module_info`
-2. 依据命中结果的 `group`/`relation`/`sourcePath` 定位
-3. 推断 Group（无法定位则写入 `"临时/语义兜底"` 或跳过）
-4. `ki_sync_relation` 回写
-5. 基于 content 提炼回答
+### ② 索引原位兜底：ki_get_module_info
 
-**仍未命中** → 回问用户：
+语义检索未命中时，才回到索引定位取原文：
+
+1. 从缓存全景（`${scope}-memory`）判断问题涉及哪个 Group
+2. `ki_query_group(scope: "${scope}-memory", groups: "目标Group路径", mode: "hot,emerging")` → 查热区
+3. `ki_get_module_info(scope, group, relation)` → **Agent 必须提炼后回答，不要全文转储。**
+
+- 命中 → 回答；未命中 → 换 Group 重试一次，仍无 → ③
+
+### ③ 宏观兜底：ki_search ${scope}
+
+> **为什么不优先 `${scope}`？** 因为 `${scope}` 的文档比较宏观、内容更多，匹配精度不如 `${scope}-memory` 准确，因此只作为最后兜底。
+
+```
+ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags: "ki-search")
+```
+
+- 命中 → 基于 `content` 提炼回答；未命中 → ④
+
+### ④ 回问用户
 
 > 知识库中没有找到相关信息。请提供模块名称/文件路径/功能描述。
 
+> **不回写**：本地 KB 与向量数据是一致的，语义检索命中的内容即为 KB 中原位内容，无需 `ki_sync_relation` 回写。
+
 ---
 
-## 5. 写入 KB
+## 5. 写入 KB（默认只读，需用户明确授权）
+
+> **`${scope}` 默认只读**：正常检索不写入。当发现知识库与实际代码不符（如架构变更、接口过期、文档过时）需要修正时，必须先向用户说明差异并**获得明确授权**，才可执行下述写入。
 
 ### 白名单（8类）
 
@@ -157,8 +162,12 @@ ki_search(scope: "${scope}", query: "核心词", limit: 3, tags: "ki-search", th
 | 🔴 5 | 把用户喜好/项目记忆/临时上下文写入 KB |
 | 🔴 6 | 用 `memory_store` 逐条塞入应走批量导入的内容 |
 | 🔴 7 | shell/模板中让 `${scope}` 被展开 |
+| 🔴 8 | 理解级查询跳过 ① 直接按索引遍历（必须优先 `ki_search(${scope}-memory)`） |
+| 🔴 9 | `ki_search` 未按 `limit: 4, threshold: 0.02` 执行 |
+| 🔴 10 | 优先查询 `${scope}` 而非 `${scope}-memory`（`${scope}` 仅作宏观兜底） |
+| 🔴 11 | **未经用户明确授权修改 `${scope}` 知识库**（默认只读，仅知识库与实际代码不符且获授权后才可改） |
 
-**写前自检**：scope 解析了吗？是项目代码知识吗？走对通道了吗？
+**写前自检**：scope 解析了吗？是项目代码知识吗？走对通道了吗？获用户授权了吗？
 
 ---
 

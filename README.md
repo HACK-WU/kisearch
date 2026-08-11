@@ -326,7 +326,6 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 | 文档 | 场景 |
 |------|------|
 | [`docs/build-kb.md`](./docs/build-kb.md) | 首次构建知识索引 |
-| [`docs/update-kb.md`](./docs/update-kb.md) | 增量更新知识索引 |
 | [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
 | [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
 | [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
@@ -352,11 +351,8 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 
 | Skill | 场景 | 核心能力 |
 |-------|------|---------|
-| [`skills/ki-foundation/SKILL.md`](./skills/ki-foundation/SKILL.md) | 前置知识（必读） | ki 架构心智模型 + 命令参考 |
 | [`skills/codekb-skill/SKILL.md`](./skills/codekb-skill/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
-| [`skills/memory-skill/SKILL.md`](./skills/memory-skill/SKILL.md) | 项目记忆/用户画像 | 归档机制 + 自动沉淀 + Group 结构 |
-| [`skills/snippet-memory/SKILL.md`](./skills/snippet-memory/SKILL.md) | 代码片段记忆 | 片段级知识的沉淀与召回 |
-| [`skills/update-kb/SKILL.md`](./skills/update-kb/SKILL.md) | 知识库增量更新 | diff / 增量导入流程 |
+| [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md) | 记忆系统行为总控 | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
 
 > 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
 

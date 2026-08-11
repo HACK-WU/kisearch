@@ -3,11 +3,9 @@
 简洁 + 通用 + 跨项目 + 每次对话都需要 → 平台内置记忆（`update_memory`）
 其他一切 → ki 记忆，按内容类型分流：
 
-- 代码要点（函数/流程/模式） → `snippet-memory`
+- 代码要点（函数/流程/模式） → `rules/ai-codekb-memory.md`
 - 模块架构、API 设计 → `codekb-skill`
-- 项目背景、进度、偏好 → `memory-skill`
-
-> 详细路由判断见 `project-encyclopedia.md`
+- 项目背景、进度、偏好 → `rules/ai-codekb-memory.md`
 
 - 内置示例："用中文回复"、"不要擅自提交代码"
 - ki 示例：工具函数用法、架构决策、踩坑经验、需求记录
