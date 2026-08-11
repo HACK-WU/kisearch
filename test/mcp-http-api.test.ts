@@ -254,3 +254,66 @@ describe('/api/* 与 /mcp 隔离', () => {
     assert.equal(res.status, 200);
   });
 });
+
+describe('/api/* 鉴权（对外绑定 + 本地豁免）', () => {
+  /** 起一个 authEnabled=true 的 server，注入 clientAddr 模拟来源 */
+  async function startAuthServer(clientAddr: string): Promise<{ base: string; port: number; close: () => Promise<void> }> {
+    const { httpServer, closeAllSessions } = createMcpHttpServer({
+      authEnabled: true,
+      token: 'secret-token',
+      buildServer: buildTestServer,
+      webDir: null,
+      resolveClientAddr: () => clientAddr,
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const addr = httpServer.address() as AddressInfo;
+    return {
+      base: `http://127.0.0.1:${addr.port}`,
+      port: addr.port,
+      close: async () => {
+        await closeAllSessions();
+        await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      },
+    };
+  }
+
+  it('本地来源（127.0.0.1）+ 无 token → /api/health 200（本地豁免）', async () => {
+    const srv = await startAuthServer('127.0.0.1');
+    try {
+      const res = await fetch(`${srv.base}/api/health`);
+      assert.equal(res.status, 200);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('远程来源（192.168.1.10）+ 无 token → /api/health 401', async () => {
+    const srv = await startAuthServer('192.168.1.10');
+    try {
+      const res = await fetch(`${srv.base}/api/health`);
+      assert.equal(res.status, 401);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('远程来源 + 错误 token → /api/health 401', async () => {
+    const srv = await startAuthServer('192.168.1.10');
+    try {
+      const res = await fetch(`${srv.base}/api/health`, { headers: { Authorization: 'Bearer wrong-token' } });
+      assert.equal(res.status, 401);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('远程来源 + 正确 token → /api/health 200', async () => {
+    const srv = await startAuthServer('192.168.1.10');
+    try {
+      const res = await fetch(`${srv.base}/api/health`, { headers: { Authorization: 'Bearer secret-token' } });
+      assert.equal(res.status, 200);
+    } finally {
+      await srv.close();
+    }
+  });
+});

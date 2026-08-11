@@ -42,13 +42,15 @@ interface TestHandle {
 }
 
 async function startTestServer(
-  opts: { authEnabled: boolean; token?: string; maxSessions?: number; advertiseAddr?: { host: string; port: number } } = { authEnabled: false },
+  opts: { authEnabled: boolean; token?: string; maxSessions?: number; advertiseAddr?: { host: string; port: number }; clientAddr?: string } = { authEnabled: false },
 ): Promise<TestHandle> {
   const { httpServer, closeAllSessions } = createMcpHttpServer({
     authEnabled: opts.authEnabled,
     token: opts.token,
     maxSessions: opts.maxSessions,
     advertiseAddr: opts.advertiseAddr,
+    // 测试注入客户端地址：缺省为本地回环（127.0.0.1）；传入 clientAddr 模拟远程来源以验证远程鉴权
+    resolveClientAddr: () => opts.clientAddr ?? '127.0.0.1',
     buildServer: buildTestServer,
   });
   await new Promise<void>((resolve) =>
@@ -160,12 +162,29 @@ describe('回环绑定（authEnabled=false）', () => {
   });
 });
 
-// ─── D. 非回环绑定：条件鉴权 ───
+// ─── D. 非回环绑定：本地来源豁免，远程来源鉴权 ───
 
-describe('非回环绑定（authEnabled=true）', () => {
+describe('非回环绑定 + 本地来源（authEnabled=true, remote=127.0.0.1）', () => {
   let srv: TestHandle;
   before(async () => {
+    // 缺省 clientAddr=127.0.0.1：本地回环来源，即使对外绑定也应免鉴权
     srv = await startTestServer({ authEnabled: true, token: 'secret-token' });
+  });
+  after(async () => {
+    await srv.close();
+  });
+
+  it('无 Token → 200（本地来源豁免鉴权）', async () => {
+    const { status } = await initialize(srv.base);
+    assert.equal(status, 200);
+  });
+});
+
+describe('非回环绑定 + 远程来源（authEnabled=true, remote=192.168.1.10）', () => {
+  let srv: TestHandle;
+  before(async () => {
+    // 注入远程客户端地址：远程来源必须鉴权
+    srv = await startTestServer({ authEnabled: true, token: 'secret-token', clientAddr: '192.168.1.10' });
   });
   after(async () => {
     await srv.close();

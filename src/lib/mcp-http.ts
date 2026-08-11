@@ -73,11 +73,9 @@ export interface HttpServerOptions {
   web?: boolean;
 }
 
-/** 判断是否为回环地址（回环 → 免鉴权） */
-export function isLoopbackHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
-  return h === '127.0.0.1' || h === '::1' || h === 'localhost' || h === '[::1]';
-}
+import { isLoopbackAddr, isLoopbackHost } from './net-addr.js';
+// re-export isLoopbackHost 保持向后兼容（外部/测试从 mcp-http 引用）
+export { isLoopbackHost };
 
 /** 探活/连接地址归一：0.0.0.0 / :: / localhost 统一到 127.0.0.1，确保同机不同写法命中同一实例（NEG-01） */
 export function probeHost(host: string): string {
@@ -266,6 +264,11 @@ export interface HttpAppOptions {
   sessionIdleMs?: number;
   /** --web：静态文件根目录（缺省不提供静态页面）；为 null/undefined 时禁用 */
   webDir?: string | null;
+  /**
+   * 解析请求客户端地址（用于鉴权时判定本地回环来源豁免）。
+   * 默认 `(req) => req.socket.remoteAddress`；测试可注入返回非本地地址以验证远程来源需鉴权。
+   */
+  resolveClientAddr?: (req: http.IncomingMessage) => string | undefined;
 }
 
 export interface McpHttpApp {
@@ -284,6 +287,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const webDir = opts.webDir ?? null;
+  // 解析请求客户端地址：默认取 socket.remoteAddress，测试可注入覆盖（验证远程来源需鉴权）
+  const resolveClientAddr = opts.resolveClientAddr ?? ((req: http.IncomingMessage) => req.socket.remoteAddress);
 
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -366,7 +371,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 注意：/api/* 未匹配的请求返回 JSON 404（不 fallback 到静态页面，防止前端 JSON.parse 崩溃）
     if (url.pathname.startsWith('/api/')) {
       const api = await getApiHandler();
-      await api.handleApiRequest(req, res, url, { authEnabled, token });
+      await api.handleApiRequest(req, res, url, { authEnabled, token, clientAddr: resolveClientAddr(req) });
       return;
     }
 
@@ -380,8 +385,9 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       return;
     }
 
-    // 鉴权（仅非回环绑定启用）
-    if (authEnabled) {
+    // 鉴权：对外绑定（authEnabled）时，本地回环来源（127.0.0.1/::1）免鉴权，远程来源需 Bearer Token。
+    // 即 --host 0.0.0.0 下本地浏览器/工具可直接访问，远程接入仍需鉴权。
+    if (authEnabled && !isLoopbackAddr(resolveClientAddr(req))) {
       const auth = req.headers['authorization'];
       const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
         ? auth.slice('Bearer '.length).trim()

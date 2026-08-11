@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, resolveScope } from './config.js';
+import { isLoopbackAddr } from './net-addr.js';
 import { runHealthCheck } from './health-check.js';
 import { getRelationsCachePath } from './scope.js';
 import { handleDirectImport, type ImportResult } from './import.js';
@@ -191,6 +192,8 @@ function buildDocList(scope: string): DocListCache['docs'] {
 export interface ApiRequestCtx {
   authEnabled: boolean;
   token?: string;
+  /** 客户端来源地址（由 mcp-http.ts 按 resolveClientAddr 解析传入；缺省用 req.socket.remoteAddress） */
+  clientAddr?: string;
 }
 
 /**
@@ -203,8 +206,9 @@ export async function handleApiRequest(
   url: URL,
   ctx: ApiRequestCtx,
 ): Promise<void> {
-  // 鉴权（与 /mcp 一致，仅非回环绑定启用）
-  if (ctx.authEnabled) {
+  // 鉴权（与 /mcp 一致）：对外绑定（authEnabled）时，本地回环来源免鉴权，远程来源需 Bearer Token
+  // clientAddr 由 mcp-http.ts 的 resolveClientAddr 解析传入（支持测试注入模拟远程来源）
+  if (ctx.authEnabled && !isLoopbackAddr(ctx.clientAddr ?? req.socket.remoteAddress)) {
     const auth = req.headers['authorization'];
     const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
       ? auth.slice('Bearer '.length).trim()
