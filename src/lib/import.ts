@@ -346,7 +346,9 @@ export async function handleDirectImport(
     }));
     fileRecords.push({ rel, groupPath, relation, chunks, entries });
     importedFileCount = fileRecords.length; // 中断标记已处理文件数（REQ-01）
-    logProgress(fileRecords.length, files.length, rel); // 进度 = 已处理文件数（O-01 文件数分母）
+    // 进度 = 已处理文件数（O-01 文件数分母）。不传 detail（文件名）：避免 TTY \r 刷新时
+    // 长路径残留叠加成乱码（bug-impact-analysis），进度条仅显示文件数 + 百分比。
+    logProgress(fileRecords.length, files.length);
   }
   if (skipped.length > 0) {
     logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
@@ -665,7 +667,8 @@ function phase4WriteRelations(
   const total = fileRelMap.size;
   for (const { groupPath, relation, sourcePath } of fileRelMap.values()) {
     i++;
-    logProgress(i, total, sourcePath);
+    // 不传 sourcePath detail：避免 TTY \r 刷新长路径残留叠加成乱码（与全量导入进度一致）
+    logProgress(i, total);
     // 方案 D：文件级 relation 挂 memoryIds（向量化完成后由回填逻辑写入），此处先建空记录占位
     upsertRelation(cache, groupPath, relation, [], sourcePath);
   }

@@ -296,6 +296,8 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
   // ── Phase 2: deleted 清理（按文件关联全 chunk memoryId）──
   logPhaseStart(2, TOTAL_PHASES, `清理 deleted（${diff.deleted.length} 个文件）...`);
   for (const entry of diff.deleted) {
+    // 增量导入保留路径 detail（有意与全量导入不同）：TTY 下可能因 \r 叠加乱码，但
+    // `[delete] 路径` 对追踪增量删除有实际价值；如无需可改为 logProgress 传两个参数。
     logProgress(diff.deleted.indexOf(entry) + 1, diff.deleted.length, `[delete] ${entry.path}`);
     const ids = entry.memoryIds && entry.memoryIds.length > 0 ? entry.memoryIds : (entry.memoryId ? [entry.memoryId] : []);
     if (ids.length === 0) {
@@ -340,6 +342,8 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
 
   for (let fi = 0; fi < processFiles.length; fi++) {
     const { e, isModify } = processFiles[fi];
+    // 增量导入保留路径 detail（有意与全量导入不同）：`[add]/[modify] 路径` 对追踪增量变化有实际价值，
+    // TTY 下可能因 \r 叠加乱码，但日志重定向场景可读性优先。
     logProgress(fi + 1, writeTotal, `[${isModify ? 'modify' : 'add'}] ${e.path}`);
     const absPath = e.absPath || path.resolve(sourceDir, e.path);
     if (!fs.existsSync(absPath)) {
