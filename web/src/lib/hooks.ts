@@ -40,11 +40,11 @@ export function useDocList(scope: string) {
   });
 }
 
-/** 指定 group 的完整文档列表（不受 500 条全量分页截断影响） */
-export function useGroupDocs(scope: string, group: string | null) {
+/** 指定 group 的完整文档列表（不受 500 条全量分页截断影响），可选 tag 过滤 */
+export function useGroupDocs(scope: string, group: string | null, tag?: string) {
   return useQuery<DocListResponse>({
-    queryKey: ['docList', scope, 'group', group ?? ''],
-    queryFn: () => getDocList(scope, { group: group ?? '' }),
+    queryKey: ['docList', scope, 'group', group ?? '', tag ?? ''],
+    queryFn: () => getDocList(scope, { group: group ?? '', tag: tag }),
     enabled: !!group,
     staleTime: 30_000,
     retry: 1,

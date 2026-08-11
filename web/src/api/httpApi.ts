@@ -32,6 +32,8 @@ export interface DocItem {
   name: string;
   group: string;
   path?: string;
+  /** 文档级自定义标签（来自 relations-cache relation.tags） */
+  tags?: string[];
 }
 
 export interface DocListResponse {
@@ -42,6 +44,8 @@ export interface DocListResponse {
   truncated?: boolean;
   /** 完整 group 列表 + 文档数量（不受 docs 分页 limit 影响），用于构建 Group 树 */
   groups?: { name: string; count: number }[];
+  /** 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用） */
+  tags?: string[];
   error?: string;
 }
 
@@ -116,12 +120,14 @@ export async function getHealth(): Promise<HealthResponse> {
 
 export async function getDocList(
   scope: string,
-  opts: { q?: string; group?: string } = {},
+  opts: { q?: string; group?: string; tag?: string } = {},
 ): Promise<DocListResponse> {
   const params = new URLSearchParams({ scope });
   if (opts.q) params.set('q', opts.q);
   // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响）
   if (opts.group) params.set('group', opts.group);
+  // 按自定义 tag 过滤（relation.tags 精确匹配）
+  if (opts.tag) params.set('tag', opts.tag);
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 

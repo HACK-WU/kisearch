@@ -145,7 +145,7 @@ function sanitizeFileName(name: string): string {
 
 interface DocListCache {
   scope: string;
-  docs: { name: string; group: string; path?: string }[];
+  docs: { name: string; group: string; path?: string; tags?: string[] }[];
   mtimeMs: number;
   size: number;
   builtAt: number;
@@ -165,7 +165,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
 
   const raw = fs.readFileSync(cachePath, 'utf-8');
   const data = JSON.parse(raw) as {
-    groups?: Record<string, { hot_relations?: { text?: string; sourcePath?: string }[] }>;
+    groups?: Record<string, { hot_relations?: { text?: string; sourcePath?: string; tags?: string[] }[] }>;
   };
   const docs: DocListCache['docs'] = [];
   const seen = new Set<string>();
@@ -179,6 +179,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
         name: rel.text,
         group,
         ...(rel.sourcePath ? { path: rel.sourcePath } : {}),
+        ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),
       });
     }
   }
@@ -273,6 +274,8 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   const scope = resolveScope(loadConfig(), scopeRaw);
   const q = (url.searchParams.get('q') ?? '').toLowerCase();
   const groupRaw = url.searchParams.get('group');
+  // 按自定义 tag 过滤（relation.tags 精确匹配；缺省不过滤）
+  const tagRaw = (url.searchParams.get('tag') ?? '').toLowerCase();
   const limitRaw = url.searchParams.get('limit');
   const limit = limitRaw ? Math.min(Math.max(parseInt(limitRaw, 10) || 0, 1), DOC_LIST_LIMIT) : DOC_LIST_LIMIT;
 
@@ -280,17 +283,25 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   // Group 树需要完整 group 集合 + 每组文档数量，不受 docs 分页 limit 影响
   // （否则后写入的独立 group 如 tag 若排在前 500 条 docs 之外，前端 Group 树会缺失该节点）
   const groupCounts = new Map<string, number>();
+  const tagSet = new Set<string>();
   for (const d of all) {
     groupCounts.set(d.group, (groupCounts.get(d.group) ?? 0) + 1);
+    for (const t of d.tags ?? []) tagSet.add(t);
   }
   const groups = Array.from(groupCounts.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([name, count]) => ({ name, count }));
+  // 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用）
+  const tags = Array.from(tagSet).sort();
+
+  // tag 过滤辅助：tagRaw 为空则不过滤；否则匹配 relation.tags 中的某个 tag
+  const matchTag = (d: { tags?: string[] }): boolean =>
+    !tagRaw || (d.tags ?? []).some((t) => t.toLowerCase() === tagRaw);
 
   // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响），确保选中任一节点都能取到完整文档
   if (groupRaw) {
     const groupDocs = all
-      .filter((d) => d.group === groupRaw && (!q || d.name.toLowerCase().includes(q)))
+      .filter((d) => d.group === groupRaw && (!q || d.name.toLowerCase().includes(q)) && matchTag(d))
       .slice(0, limit);
     sendJson(res, 200, {
       ok: true,
@@ -299,6 +310,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
       total: groupDocs.length,
       truncated: false,
       groups,
+      tags,
     });
     return;
   }
@@ -307,7 +319,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   //   - 有搜索词(q)：返回跨组模糊匹配的文档（全局搜索场景，limit 放宽到 2000）
   //   - 无搜索词(q)：返回前 limit 条全部 docs（兼容既有 API 契约；BrowsePage 前端已改用 useGroupDocs 按组精确拉取）
   const SEARCH_LIMIT = 2000;
-  const filtered = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all;
+  const filtered = (q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all).filter(matchTag);
   const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
   sendJson(res, 200, {
     ok: true,
@@ -316,6 +328,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     total: filtered.length,
     truncated: filtered.length > searchLimit,
     groups,
+    tags,
   });
 }
 

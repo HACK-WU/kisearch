@@ -89,11 +89,16 @@ export function BrowsePage(): JSX.Element {
   const [activeGroup, setActiveGroup] = useState('');
   const [viewing, setViewing] = useState<{ module: string; group: string } | null>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
+  const [selectedTag, setSelectedTag] = useState('');
 
   const { data, isLoading } = useDocList(scope);
+  // 可用 tag 列表：来自 /api/doc/list 返回的 tags 字段（KB 层 relation.tags 去重），
+  // 而非 /api/tags（向量库）——文档列表过滤应基于持久化的 KB 层 tag
+  const availableTags = data?.tags ?? [];
 
   // 选中 group 的完整文档（后端按 group 精确返回，不受 500 条全量分页截断影响）
-  const groupQuery = useGroupDocs(scope, activeGroup || null);
+  const groupQuery = useGroupDocs(scope, activeGroup || null, selectedTag || undefined);
   const groupDocs = groupQuery.data?.docs ?? [];
 
   // 浏览页：禁止外层 .ki-content 滚动，让双栏内部各自滚动
@@ -162,8 +167,8 @@ export function BrowsePage(): JSX.Element {
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
-    queryKey: ['docList', scope, 'search', q.trim()],
-    queryFn: () => getDocList(scope, { q: q.trim() }),
+    queryKey: ['docList', scope, 'search', q.trim(), selectedTag],
+    queryFn: () => getDocList(scope, { q: q.trim(), tag: selectedTag || undefined }),
     enabled: q.trim().length > 0,
     staleTime: 10_000,
     retry: 1,
@@ -325,6 +330,19 @@ export function BrowsePage(): JSX.Element {
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
               />
+              <select
+                className="ki-form-input ki-tag-filter"
+                style={{ maxWidth: 140 }}
+                value={selectedTag}
+                disabled={availableTags.length === 0}
+                onChange={(e) => setSelectedTag(e.target.value)}
+                title={availableTags.length === 0 ? '当前知识库暂无自定义 tag' : '按 tag 过滤文档'}
+              >
+                <option value="">{availableTags.length === 0 ? '暂无 tag' : '全部 tag'}</option>
+                {availableTags.map((t) => (
+                  <option key={t} value={t}>#{t}</option>
+                ))}
+              </select>
               <span className="ki-cell-sub" style={{ marginLeft: 'auto' }}>
                 /api/doc/list
               </span>

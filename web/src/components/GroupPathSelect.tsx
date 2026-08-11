@@ -125,9 +125,11 @@ interface GroupPathSelectProps {
   hint?: string;
   /** 底部提示文本定制（默认提示新建/已有） */
   newLabel?: string;
+  /** 校验错误文案（用于红框 + 错误提示） */
+  error?: string | null;
 }
 
-export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: GroupPathSelectProps): JSX.Element {
+export function GroupPathSelect({ scope, value, onChange, placeholder, hint, error }: GroupPathSelectProps): JSX.Element {
   const [open, setOpen] = useState(false);
   /** 是否已确认（回车确认或从下拉选中） */
   const [confirmed, setConfirmed] = useState(false);
@@ -180,13 +182,14 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: G
     <div className="ki-combobox" ref={rootRef}>
       <div className="ki-combobox__input-wrap">
         <input
-          className={`ki-form-input${isNew ? ' ki-form-input--new' : ''}${confirmed ? ' ki-form-input--confirmed' : ''}`}
+          className={`ki-form-input${isNew ? ' ki-form-input--new' : ''}${confirmed ? ' ki-form-input--confirmed' : ''}${error ? ' ki-form-input--error' : ''}`}
           placeholder={placeholder ?? '选择或输入 Group 路径，如：wiki/我的文档'}
           value={value}
           onChange={(e) => { setConfirmed(false); onChange(e.target.value); }}
           onFocus={() => setOpen(true)}
           onKeyDown={handleKeyDown}
           autoComplete="off"
+          aria-invalid={error ? true : undefined}
         />
         {confirmed && <span className="ki-combobox__confirm">✓</span>}
         <button
@@ -225,7 +228,8 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint }: G
           </span>
         </div>
       </div>
-      {hint && <div className="ki-form-hint">{hint}</div>}
+      {hint && !error && <div className="ki-form-hint">{hint}</div>}
+      {error && <div className="ki-form-error">{error}</div>}
     </div>
   );
 }

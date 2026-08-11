@@ -420,8 +420,6 @@ async function vectorWriteBack(params: {
             if (searchItem?.memoryId) {
               rel.memoryId = searchItem.memoryId;
             }
-            // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
-            rel.tags = customTags.length > 0 ? customTags : undefined;
             writeJson(cachePath, latestCache);
           }
         }
@@ -485,6 +483,17 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
 
     const result = syncSingleRelation(cache, scope, group, relation, moduleInfo);
 
+    // 文档级自定义 tag 持久化到 KB 层（relation.tags）：
+    // 无论是否向量化都记录，供 rebuild-vector/restore 恢复 tag 向量、以及 /api/doc/list tag 过滤。
+    // （向量化时 memoryIds 由 vectorWriteBack 回填；tags 在此统一写，避免两处不一致。）
+    const customTags = parseContentTags(params.tags);
+    const groupData = cache.groups[group];
+    const relRec = groupData?.hot_relations.find((r) => r.text === relation);
+    if (relRec) {
+      if (customTags.length > 0) relRec.tags = customTags;
+      else delete relRec.tags; // 无 tag 时移除字段（避免残留）
+    }
+
     // WAL 持久化
     writeJson(cachePath, cache);
 
@@ -514,7 +523,6 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
 
     // 透出实际写入的内容标签：向量化时始终为「ki-search + 自定义 tags」；
     // 非向量化时透出 []（空数组语义 = 未写向量，无内容标签）。
-    const customTags = parseContentTags(params.tags);
     const contentTags = params.vector === false ? [] : ['ki-search', ...customTags];
 
     return {

@@ -12,6 +12,7 @@ import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { groupError, relationError, tagError, isInvalidTag } from '@/lib/validators';
 
 export function WritePage(): JSX.Element {
   const scope = useScopeValue();
@@ -27,12 +28,18 @@ export function WritePage(): JSX.Element {
   // tag 选择器状态
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
+  const [tagInputErr, setTagInputErr] = useState<string | null>(null);
   const [tagOpen, setTagOpen] = useState(false);
   const tagRef = useRef<HTMLDivElement>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // 实时校验 group / relation（空字符串时不报错，避免初次进入显示错误）
+  const groupErr = group.trim() ? groupError(group) : null;
+  const relationErr = relation.trim() ? relationError(relation) : null;
+  const hasFormError = !!groupErr || !!relationErr;
 
   // 点击外部关闭 tag combobox
   useEffect(() => {
@@ -59,6 +66,13 @@ export function WritePage(): JSX.Element {
       setError('Group、Relation、Module Info 均不能为空');
       return;
     }
+    // 字符格式校验（与后端 isUnsafeRelationName / resolveGroupPath 对齐）
+    const gErr = groupError(group);
+    const rErr = relationError(relation);
+    if (gErr || rErr) {
+      setError(gErr || rErr);
+      return;
+    }
     setSubmitting(true);
     try {
       await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: selectedTags });
@@ -68,6 +82,7 @@ export function WritePage(): JSX.Element {
       setMarkdown('');
       setSelectedTags([]);
       setTagInput('');
+      setTagInputErr(null);
       setPreview(false);
     } catch (e) {
       setError((e as Error).message);
@@ -82,9 +97,13 @@ export function WritePage(): JSX.Element {
 
   const addTagFromInput = (): void => {
     const t = tagInput.trim().toLowerCase();
-    if (!t || selectedTags.includes(t)) return;
+    if (!t) { setTagInputErr('Tag 不能为空'); return; }
+    const err = tagError(t);
+    if (err) { setTagInputErr(err); return; }
+    if (selectedTags.includes(t)) { setTagInput(''); setTagInputErr(null); return; }
     setSelectedTags((prev) => [...prev, t]);
     setTagInput('');
+    setTagInputErr(null);
     setTagOpen(false);
   };
 
@@ -98,6 +117,7 @@ export function WritePage(): JSX.Element {
     setMarkdown('');
     setSelectedTags([]);
     setTagInput('');
+    setTagInputErr(null);
     setPreview(false);
     setResult(null);
     setError(null);
@@ -123,18 +143,24 @@ export function WritePage(): JSX.Element {
                   value={group}
                   onChange={setGroup}
                   placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
-                  hint="斜杠分隔层级，下拉选择已有 Group 或直接输入新建。"
+                  hint="斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .."
+                  error={groupErr}
                 />
               </div>
               <div className="ki-form-group">
                 <label className="ki-form-label">文档名称（Relation）</label>
                 <input
-                  className="ki-form-input"
+                  className={`ki-form-input${relationErr ? ' ki-form-input--error' : ''}`}
                   placeholder="如：告警收敛策略"
                   value={relation}
                   onChange={(e) => setRelation(e.target.value)}
+                  aria-invalid={relationErr ? true : undefined}
                 />
-                <div className="ki-form-hint">同 Group 内唯一；浏览页按此名显示文档。</div>
+                {relationErr ? (
+                  <div className="ki-form-error">{relationErr}</div>
+                ) : (
+                  <div className="ki-form-hint">同 Group 内唯一；浏览页按此名显示文档。禁止包含 / / \ 和 ..</div>
+                )}
               </div>
             </div>
             <div className="ki-form-group">
@@ -176,16 +202,17 @@ export function WritePage(): JSX.Element {
               <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
                 <div className="ki-combobox__input-wrap">
                   <input
-                    className="ki-form-input"
+                    className={`ki-form-input${tagInputErr ? ' ki-form-input--error' : ''}`}
                     style={{ width: '100%', boxSizing: 'border-box' }}
                     placeholder="选择已有 tag 或输入新建，回车确认"
                     value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
+                    onChange={(e) => { setTagInput(e.target.value); if (tagInputErr) setTagInputErr(null); }}
                     onFocus={() => setTagOpen(true)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
                     }}
                     autoComplete="off"
+                    aria-invalid={tagInputErr ? true : undefined}
                   />
                   <button
                     type="button"
@@ -240,7 +267,11 @@ export function WritePage(): JSX.Element {
                   ))}
                 </div>
               )}
-              <div className="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车创建。</div>
+              {tagInputErr ? (
+                <div className="ki-form-error">{tagInputErr}</div>
+              ) : (
+                <div className="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车创建。禁止包含 , / \ 和 ..</div>
+              )}
             </div>
 
             {/* 是否向量化 */}
@@ -260,7 +291,11 @@ export function WritePage(): JSX.Element {
             </div>
 
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 20 }}>
-              <button className="ki-btn ki-btn--primary" onClick={() => void submit()} disabled={submitting}>
+              <button
+                className="ki-btn ki-btn--primary"
+                onClick={() => void submit()}
+                disabled={submitting || hasFormError}
+              >
                 {submitting ? '保存中…' : '保存'}
               </button>
               <button className="ki-btn ki-btn--secondary" onClick={reset}>

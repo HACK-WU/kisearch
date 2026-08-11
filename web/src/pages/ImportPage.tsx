@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getImportStatus, runImport, uploadFiles, fetchTags, type ImportJob } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { groupError, tagError } from '@/lib/validators';
 
 interface PendingFile {
   name: string;
@@ -34,8 +35,12 @@ export function ImportPage(): JSX.Element {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
+  const [tagInputErr, setTagInputErr] = useState<string | null>(null);
   const [tagOpen, setTagOpen] = useState(false);
   const tagRef = useRef<HTMLDivElement>(null);
+
+  // 实时校验 group（空字符串不报错，避免初次进入显示错误）
+  const groupErr = group.trim() ? groupError(group) : null;
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -64,9 +69,13 @@ export function ImportPage(): JSX.Element {
 
   const addTagFromInput = (): void => {
     const t = tagInput.trim().toLowerCase();
-    if (!t || selectedTags.includes(t)) return;
+    if (!t) { setTagInputErr('Tag 不能为空'); return; }
+    const err = tagError(t);
+    if (err) { setTagInputErr(err); return; }
+    if (selectedTags.includes(t)) { setTagInput(''); setTagInputErr(null); return; }
     setSelectedTags((prev) => [...prev, t]);
     setTagInput('');
+    setTagInputErr(null);
     setTagOpen(false);
   };
 
@@ -162,6 +171,11 @@ export function ImportPage(): JSX.Element {
   const start = async (): Promise<void> => {
     if (files.length === 0) {
       setError('请先选择文件或目录');
+      return;
+    }
+    // group 字符格式校验（与后端 resolveGroupPath 对齐）
+    if (groupErr) {
+      setError(groupErr);
       return;
     }
     setError(null);
@@ -271,7 +285,8 @@ export function ImportPage(): JSX.Element {
               value={group}
               onChange={setGroup}
               placeholder="选择或输入 Group 路径，如：wiki/我的文档"
-              hint="留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。"
+              hint="留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .."
+              error={groupErr}
             />
           </div>
 
@@ -281,16 +296,17 @@ export function ImportPage(): JSX.Element {
             <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
               <div className="ki-combobox__input-wrap">
                 <input
-                  className="ki-form-input"
+                  className={`ki-form-input${tagInputErr ? ' ki-form-input--error' : ''}`}
                   style={{ width: '100%', boxSizing: 'border-box' }}
                   placeholder="选择已有 tag 或输入新建，回车确认"
                   value={tagInput}
-                  onChange={(e) => setTagInput(e.target.value)}
+                  onChange={(e) => { setTagInput(e.target.value); if (tagInputErr) setTagInputErr(null); }}
                   onFocus={() => setTagOpen(true)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
                   }}
                   autoComplete="off"
+                  aria-invalid={tagInputErr ? true : undefined}
                 />
                 <button
                   type="button"
@@ -345,7 +361,11 @@ export function ImportPage(): JSX.Element {
                 ))}
               </div>
             )}
-            <div className="ki-form-hint">选择后，本次导入（含上传目录与上传文件）的所有文档将带上这些标签，可在语义搜索按标签过滤。</div>
+            {tagInputErr ? (
+              <div className="ki-form-error">{tagInputErr}</div>
+            ) : (
+              <div className="ki-form-hint">选择后，本次导入（含上传目录与上传文件）的所有文档将带上这些标签，可在语义搜索按标签过滤。禁止包含 , / \ 和 ..</div>
+            )}
           </div>
 
           <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
