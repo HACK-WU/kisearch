@@ -143,33 +143,89 @@ export function collectPathRelationEntries(
 }
 
 /**
- * 回写内容向量 docId 到 relations-cache 的 rel.memoryId。
+ * 收集自定义 tag 内容向量条目（从 relations-cache 的 relation.tags 恢复）。
+ * 每个有 tags 字段的 relation，从 local KB（index.json）读取原文，为每个 tag 生成一条内容向量。
+ * 用于 rebuild-vector/restore 时自动恢复自定义 tag 向量，使 -t <tag> 可召回。
+ */
+export function collectTagEntries(
+  scope: string,
+  groups: Record<string, CacheGroup>
+): RebuildVectorEntry[] {
+  const entries: RebuildVectorEntry[] = [];
+  const config = loadConfig();
+  const scopeDir = getScopeDataDir(config, scope);
+  // 按 group 缓存 index.json 内容，避免每个 relation 重复读文件（性能优化）
+  const localKbCache = new Map<string, Record<string, string> | undefined>();
+
+  for (const [groupPath, g] of Object.entries(groups)) {
+    let localKb = localKbCache.get(groupPath);
+    if (localKb === undefined && !localKbCache.has(groupPath)) {
+      // 首次访问该 group：加载 index.json（读取失败则缓存 undefined 避免重复尝试）
+      const localKbPath = path.join(scopeDir, groupPath, 'index.json');
+      try {
+        if (fs.existsSync(localKbPath)) {
+          localKb = JSON.parse(fs.readFileSync(localKbPath, 'utf-8')) as Record<string, string>;
+        }
+      } catch {
+        localKb = undefined;
+      }
+      localKbCache.set(groupPath, localKb);
+    }
+    if (!localKb) continue; // 无 local KB 无法恢复 tag 原文
+    for (const rel of g.hot_relations ?? []) {
+      if (!rel.tags || rel.tags.length === 0) continue;
+      const text = localKb[rel.text]; // 从 local KB 读取文件原文（键 = relation 名）
+      if (!text) continue; // 无原文无法写 tag 向量
+      // 每个 tag 生成一条内容向量（text 相同、tag 不同）
+      for (const tag of rel.tags) {
+        entries.push({
+          text,
+          tags: tag,
+          group: groupPath,
+          relationName: rel.text,
+        });
+      }
+    }
+  }
+  return entries;
+}
+
+/**
+ * 回写向量 docId 到 relations-cache 的 rel.memoryId / rel.memoryIds。
  * 匹配键 = groupPath + relationName（index.json 键 ↔ rel.text）。
- * 仅内容向量参与回写（relation/path 向量为检索辅助，不关联 cache 条目）。
+ * 覆盖内容向量 + 自定义 tag 向量（按 group,relation 聚合 docId），relation/path 向量为检索辅助不关联 cache 条目。
+ * @param allEntries 全量 entries（content + relation + path + tag）
  * @param results vectorBulkStore 返回值（index 为全量 entries 索引）
- * @param contentCount 内容向量在前缀中的条数（allEntries 前 N 条）
  */
 export function updateMemoryIds(
   groups: Record<string, CacheGroup>,
   allEntries: RebuildVectorEntry[],
-  contentCount: number,
   results: VectorBulkStoreResult['results']
 ): number {
-  const keyToMid = new Map<string, string>();
+  // 按 (groupPath, relationName) 分组收集全部成功条目的 docId（含内容向量 + 自定义 tag 向量）
+  const keyToMids = new Map<string, string[]>();
   for (const r of results) {
     if (!r.success) continue;
     const e = allEntries[r.index];
-    if (r.index < contentCount && e?.groupPath && e?.relationName) {
-      keyToMid.set(`${e.groupPath}\u0000${e.relationName}`, r.memoryId);
+    if (e?.groupPath && e?.relationName) {
+      const key = `${e.groupPath}\u0000${e.relationName}`;
+      const arr = keyToMids.get(key);
+      if (arr) arr.push(r.memoryId);
+      else keyToMids.set(key, [r.memoryId]);
     }
   }
   let updated = 0;
   for (const [groupPath, g] of Object.entries(groups)) {
     for (const rel of g.hot_relations ?? []) {
-      const mid = keyToMid.get(`${groupPath}\u0000${rel.text}`);
-      if (mid && rel.memoryId !== mid) {
-        rel.memoryId = mid;
-        updated++;
+      const mids = keyToMids.get(`${groupPath}\u0000${rel.text}`);
+      if (mids && mids.length > 0) {
+        // memoryId = 第一个（ki-search 内容向量，向后兼容）；memoryIds = 全部（含 tag docId）
+        const changed = rel.memoryId !== mids[0] || (rel.memoryIds ?? []).join(',') !== mids.join(',');
+        if (changed) {
+          rel.memoryId = mids[0];
+          rel.memoryIds = mids;
+          updated++;
+        }
       }
     }
   }
@@ -221,15 +277,16 @@ export async function rebuildScopeVectors(
     };
   }
 
-  // 1. 收集三类条目
+  // 1. 收集四类条目（内容 + relation + path + 自定义 tag）
   const rc = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as { groups?: Record<string, CacheGroup> };
   const groups = rc.groups ?? {};
   const contentEntries = collectContentEntries(scopeDir);
   const { relationEntries, pathEntries } = collectPathRelationEntries(groups);
+  const tagEntries = collectTagEntries(scope, groups);
   stats.content = contentEntries.length;
   stats.relation = relationEntries.length;
   stats.path = pathEntries.length;
-  const allEntries = [...contentEntries, ...relationEntries, ...pathEntries];
+  const allEntries = [...contentEntries, ...relationEntries, ...pathEntries, ...tagEntries];
 
   // 2. 清空旧向量（保证结果与 KB 一致；失败则中止，避免新旧混杂）
   try {
@@ -258,8 +315,8 @@ export async function rebuildScopeVectors(
     }
   }
 
-  // 4. memoryId 回写（仅内容向量；relation/path 向量不关联 cache）
-  stats.updatedMemoryId = updateMemoryIds(groups, allEntries, contentEntries.length, res.results);
+  // 4. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
+  stats.updatedMemoryId = updateMemoryIds(groups, allEntries, res.results);
   fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
 
   return { ok: true, scope, stats, errors };

@@ -420,6 +420,8 @@ async function vectorWriteBack(params: {
             if (searchItem?.memoryId) {
               rel.memoryId = searchItem.memoryId;
             }
+            // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
+            rel.tags = customTags.length > 0 ? customTags : undefined;
             writeJson(cachePath, latestCache);
           }
         }

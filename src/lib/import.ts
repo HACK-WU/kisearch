@@ -480,6 +480,8 @@ export async function handleDirectImport(
           rel.memoryIds = allIds;
           rel.memoryId = allIds[0]; // 兼容单值消费方
         }
+        // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
+        rel.tags = customTags.length > 0 ? customTags : undefined;
       }
     }
   }
@@ -577,7 +579,8 @@ function upsertRelation(
   groupPath: string,
   relationText: string,
   memoryIds: string[] | null | undefined,
-  sourcePath: string | null | undefined
+  sourcePath: string | null | undefined,
+  tags?: string[]
 ): void {
   const groupData = ensureCacheGroup(cache, groupPath);
   let rel = groupData.hot_relations.find((r) => r.text === relationText);
@@ -603,6 +606,9 @@ function upsertRelation(
     if (memoryIds.length > 0) rel.memoryId = memoryIds[0]; // 兼容单值消费方（取第一个）
   }
   if (sourcePath) rel.sourcePath = sourcePath;
+  // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
+  if (tags && tags.length > 0) rel.tags = tags;
+  else rel.tags = undefined; // 清空已删除的 tag（无 tag 时不留字段）
 }
 
 // ─── local KB 操作 ───────────────────────────────────────

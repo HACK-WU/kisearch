@@ -18,6 +18,7 @@ import path from 'path';
 import {
   collectContentEntries,
   collectPathRelationEntries,
+  collectTagEntries,
   updateMemoryIds,
   rebuildScopeVectors,
   type RebuildVectorEntry,
@@ -148,7 +149,7 @@ describe('C. updateMemoryIds —— memoryId 回写', () => {
     },
   };
 
-  it('按 (groupPath, relationName) 匹配并回写；仅内容向量前缀', () => {
+  it('按 (groupPath, relationName) 匹配并回写', () => {
     const allEntries: RebuildVectorEntry[] = [
       { text: 'a', tags: 'ki-search', groupPath: 'BKMonitorWiki', relationName: '快速开始' },
       { text: 'b', tags: 'ki-search', groupPath: 'BKMonitorWiki/用户界面设计', relationName: '按钮' },
@@ -160,7 +161,7 @@ describe('C. updateMemoryIds —— memoryId 回写', () => {
       { index: 1, memoryId: 'm1', success: false },
       { index: 2, memoryId: 'm2', success: true },
     ];
-    const updated = updateMemoryIds(groups, allEntries, 2, results);
+    const updated = updateMemoryIds(groups, allEntries, results);
 
     assert.strictEqual(updated, 1);
     assert.strictEqual(groups.BKMonitorWiki.hot_relations[0].memoryId, 'm0');
@@ -169,11 +170,115 @@ describe('C. updateMemoryIds —— memoryId 回写', () => {
     assert.strictEqual(groups['BKMonitorWiki/用户界面设计'].hot_relations[1].memoryId, 'old');
   });
 
+  it('自定义 tag 向量 docId 也回填到 memoryIds（首 docId 兼容 memoryId）', () => {
+    const g = {
+      G1: { hot_relations: [{ text: 'x', memoryId: 'old' }] },
+    };
+    const allEntries: RebuildVectorEntry[] = [
+      // 内容向量（ki-search）在前
+      { text: 'x原文', tags: 'ki-search', groupPath: 'G1', relationName: 'x' },
+      // 自定义 tag 向量在后（同 relation）
+      { text: 'x原文', tags: 'api', groupPath: 'G1', relationName: 'x' },
+      { text: 'x原文', tags: 'auth', groupPath: 'G1', relationName: 'x' },
+    ];
+    const results = [
+      { index: 0, memoryId: 'content_id', success: true },
+      { index: 1, memoryId: 'tag_api_id', success: true },
+      { index: 2, memoryId: 'tag_auth_id', success: true },
+    ];
+    const updated = updateMemoryIds(g, allEntries, results);
+
+    assert.strictEqual(updated, 1);
+    const rel = g.G1.hot_relations[0];
+    // memoryId = 首个 docId（内容向量）；memoryIds = 全部（含 tag docId）
+    assert.strictEqual(rel.memoryId, 'content_id');
+    assert.deepStrictEqual(rel.memoryIds, ['content_id', 'tag_api_id', 'tag_auth_id']);
+  });
+
   it('无匹配条目 → 不改动', () => {
     const g = { G1: { hot_relations: [{ text: 'x', memoryId: 'keep' }] } };
-    const updated = updateMemoryIds(g, [], 0, []);
+    const updated = updateMemoryIds(g, [], []);
     assert.strictEqual(updated, 0);
     assert.strictEqual(g.G1.hot_relations[0].memoryId, 'keep');
+  });
+});
+
+describe('E. collectTagEntries —— 从 relations-cache 恢复自定义 tag 向量', () => {
+  /** 构造含 tags 的 scope：Group index.json + relations-cache.json */
+  function makeTagScopeDir(scopeDir: string): void {
+    fs.mkdirSync(path.join(scopeDir, 'Wiki'), { recursive: true });
+    // local KB：index.json 键 = relation 名 → 原文
+    fs.writeFileSync(
+      path.join(scopeDir, 'Wiki', 'index.json'),
+      JSON.stringify({ 快速开始: '快速开始原文', version: 1 }),
+      'utf-8'
+    );
+    // relations-cache：relation 带 tags 字段
+    fs.writeFileSync(
+      path.join(scopeDir, 'relations-cache.json'),
+      JSON.stringify({
+        groups: {
+          Wiki: {
+            hot_relations: [
+              { text: '快速开始', tags: ['api', 'auth'], memoryId: 'old' },
+              { text: '无标签', memoryId: 'old2' }, // 无 tags → 跳过
+            ],
+          },
+        },
+      }),
+      'utf-8'
+    );
+  }
+
+  it('有 tags 的 relation 为每个 tag 生成一条条目，text 取 local KB 原文', () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'tags-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 's1');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configPath, `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  s1: {}\n`, 'utf-8');
+    makeTagScopeDir(scopeDir);
+    process.env.KI_CONFIG_PATH = configPath;
+    resetConfigCache();
+
+    const groups = {
+      Wiki: { hot_relations: [{ text: '快速开始', tags: ['api', 'auth'] }] },
+    };
+    const entries = collectTagEntries('s1', groups as never);
+
+    assert.strictEqual(entries.length, 2, '两个 tag 各一条');
+    const tags = entries.map((e) => e.tags).sort();
+    assert.deepStrictEqual(tags, ['api', 'auth']);
+    assert.strictEqual(entries[0].text, '快速开始原文', 'text 取 local KB 原文');
+    assert.strictEqual(entries[0].group, 'Wiki');
+
+    delete process.env.KI_CONFIG_PATH;
+    resetConfigCache();
+  });
+
+  it('无 tags 字段的 relation 跳过；local KB 缺键跳过', () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'tags-skip-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 's2');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configPath, `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  s2: {}\n`, 'utf-8');
+    makeTagScopeDir(scopeDir);
+    process.env.KI_CONFIG_PATH = configPath;
+    resetConfigCache();
+
+    // relation 无 tags / local KB 无该键 → 均不生成条目
+    const groups = {
+      Wiki: {
+        hot_relations: [
+          { text: '无标签', memoryId: 'old2' }, // 无 tags
+          { text: '不存在的文档', tags: ['api'] }, // local KB 无该键
+        ],
+      },
+    };
+    const entries = collectTagEntries('s2', groups as never);
+    assert.strictEqual(entries.length, 0);
+
+    delete process.env.KI_CONFIG_PATH;
+    resetConfigCache();
   });
 });
 

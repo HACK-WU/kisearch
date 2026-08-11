@@ -482,6 +482,8 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
             const baseIds = rel.memoryIds ?? okIds;
             rel.memoryIds = [...baseIds, ...tagIds];
             if (!rel.memoryId) rel.memoryId = rel.memoryIds[0];
+            // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
+            rel.tags = customTags.length > 0 ? customTags : undefined;
           }
         }
       } catch (err) {
