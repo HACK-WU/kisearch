@@ -104,23 +104,14 @@ export function DashboardPage(): JSX.Element {
           <div className="ki-stat-card">
             <div className="ki-stat-label">KB 文档</div>
             <div className="ki-stat-value">{totalDocs}</div>
-            <div className="ki-stat-sub" style={{ marginTop: 6 }}>
-              relations-cache 汇总
-            </div>
           </div>
           <div className="ki-stat-card">
             <div className="ki-stat-label">向量层</div>
             <div className="ki-stat-value">{vecCount}</div>
-            <div className="ki-stat-sub" style={{ marginTop: 6 }}>
-              已向量化 scope
-            </div>
           </div>
           <div className="ki-stat-card">
             <div className="ki-stat-label">注册</div>
             <div className="ki-stat-value">{list.filter((x) => x.registered).length}</div>
-            <div className="ki-stat-sub" style={{ marginTop: 6 }}>
-              config.scopes
-            </div>
           </div>
         </div>
       </section>
@@ -139,26 +130,22 @@ export function DashboardPage(): JSX.Element {
               <div className="ki-stat-card">
                 <div className="ki-stat-label">文档数</div>
                 <div className="ki-stat-value">{curDocs.length}</div>
-                <div className="ki-stat-sub" style={{ marginTop: 6 }}>doc/list 全量</div>
               </div>
               <div className="ki-stat-card">
                 <div className="ki-stat-label">Groups</div>
                 <div className="ki-stat-value">{curGroups}</div>
-                <div className="ki-stat-sub" style={{ marginTop: 6 }}>group 路径去重</div>
               </div>
               <div className="ki-stat-card">
                 <div className="ki-stat-label">KB 层</div>
                 <div className="ki-stat-value">
                   {currentMeta ? (currentMeta.kb ? '✓' : '✗') : '—'}
                 </div>
-                <div className="ki-stat-sub" style={{ marginTop: 6 }}>relations-cache</div>
               </div>
               <div className="ki-stat-card">
                 <div className="ki-stat-label">向量层</div>
                 <div className="ki-stat-value">
                   {currentMeta ? (currentMeta.vector ? '✓' : '✗') : '—'}
                 </div>
-                <div className="ki-stat-sub" style={{ marginTop: 6 }}>zvec 向量库</div>
               </div>
             </div>
           </div>
