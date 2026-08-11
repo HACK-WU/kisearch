@@ -21,6 +21,7 @@ import { handleDirectImport } from './lib/import.js';
 import { handleIncrementalDirect } from './lib/incremental.js';
 import { handleDiff } from './lib/diff.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { getRelationsCachePath } from './lib/scope.js';
 import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
@@ -48,6 +49,7 @@ program
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000，全量直导专用；增量复用 source 块持久化值）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150，全量直导专用）')
   .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB），不写向量（不产生 memoryId，无法被 ki search 召回）')
+  .option('--yes', '确认覆盖：scope 已存在时跳过确认提示直接执行（full 模式覆盖导入含向量清空重建）')
   .option('--no-clean', '关闭全部数据清洗（含外部 hooks，等价 config clean.enabled:false）')
   .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
   .action(async (opts) => {
@@ -73,6 +75,21 @@ program
       if (mode === 'full' && !rootName) {
         output({ ok: false, error: '全量直导必须传 --root-name <name>' });
         process.exit(1);
+      }
+
+      // 覆盖保护（full 模式）：scope 已存在（有 relations-cache 即已建过）时，
+      // 覆盖导入会清空重建向量，必须显式 --yes 确认；incremental 是增量更新不触发。
+      if (mode === 'full' && !opts.yes) {
+        const scopeExists = fs.existsSync(getRelationsCachePath(scope));
+        if (scopeExists) {
+          output({
+            ok: false,
+            error:
+              `scope "${scope}" 已存在，全量导入将覆盖原数据（KB + 向量：先清空旧向量再重建）。` +
+              '如确认覆盖请追加 --yes（incremental 增量更新无需）。',
+          });
+          process.exit(1);
+        }
       }
 
       const result =

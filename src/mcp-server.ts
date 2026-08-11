@@ -278,6 +278,36 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
+  // ─── 裸参数（positional）校验：仅允许 stop / token 两个子命令 ───
+  // 其他裸参数（如误输入 status 而非 --status）在 detectUnknownFlags 拦截不到
+  //（它只扫 -- 前缀），若不校验会被静默忽略并直接启动 stdio 服务（NEG-01）。
+  // 注意：必须跳过 flag 的分离值（--host 127.0.0.1 中的 127.0.0.1），
+  // 否则会把合法 flag 值误判为裸参数（P1 回归）。
+  // 单横线短 flag（-status 等）同样拦截：-h 已在上方 return，此处出现的任何 -xxx 均为未知。
+  const knownPositionals = ['stop', 'token'];
+  let positional: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      // 分离值形式：--flag <value> 时 value 不是 flag，跳过
+      if (!a.includes('=') && i + 1 < argv.length && !argv[i + 1].startsWith('-')) i++;
+      continue;
+    }
+    if (a.startsWith('-')) {
+      // 未知短 flag（如 -status）：-h 已提前处理，此处应为非法输入
+      const tip = a === '-status' ? '，您是否想输入 --status（注意双横线前缀）？' : '';
+      process.stderr.write(MCP_HELP + '\n');
+      failJson(`未知参数 ${a}${tip}`, 'UNKNOWN_OPTION');
+    }
+    positional = a; // 首个非 flag token 即裸参数
+    break;
+  }
+  if (positional !== undefined && !knownPositionals.includes(positional)) {
+    const tip = positional === 'status' ? '，您是否想输入 --status（注意带 -- 前缀）？' : '';
+    process.stderr.write(MCP_HELP + '\n');
+    failJson(`未知参数 ${positional}${tip}`, 'UNKNOWN_OPTION');
+  }
+
   // ─── ki mcp token <generate|reset>：托管 Token 管理，不启动服务、跳过预检 ───
   if (argv[0] === 'token') {
     runTokenCommand(argv.slice(1));
