@@ -106,6 +106,8 @@ export function SearchPage(): JSX.Element {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoComplete="off"
+            data-ki-search-input
+            aria-label="语义搜索"
           />
           <button className="ki-btn ki-btn--primary" style={{ height: 42, padding: '0 24px' }} disabled={loading || !query.trim()}>
             {loading ? '搜索中…' : '搜索'}

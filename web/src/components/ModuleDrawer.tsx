@@ -27,6 +27,8 @@ export function ModuleDrawer({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
     if (content !== null || !fetcher || !group) return;
@@ -39,16 +41,31 @@ export function ModuleDrawer({
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scope, module, content, fetcher]);
+  }, [scope, module, group, content, fetcher]);
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
+    // 优先用 Clipboard API（需 HTTPS 或 localhost）；失败回退到 execCommand
     try {
-      await navigator.clipboard.writeText(content);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        // fallback：旧版 textarea + execCommand（兼容非安全上下文）
+        const ta = document.createElement('textarea');
+        ta.value = content;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // fallback: 降级静默失败
+      // 失败：独立提示条（不污染加载错误状态，正文保留）
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 2500);
     }
   }, [content]);
 
@@ -67,9 +84,18 @@ export function ModuleDrawer({
   return (
     <>
       <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />
-      <aside className="ki-drawer" aria-label="原文查看">
+      <aside className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`} aria-label="原文查看">
         {/* 头部 */}
         <header className="ki-drawer__head">
+          <button
+            className="ki-drawer__close"
+            onClick={onClose}
+            title="关闭 (ESC)"
+            type="button"
+            aria-label="关闭"
+          >
+            →<span className="ki-drawer__close-label">收起</span>
+          </button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="ki-drawer__title">{module}</div>
             <div className="ki-drawer__meta">
@@ -93,12 +119,22 @@ export function ModuleDrawer({
                 {copied ? '已复制' : '复制'}
               </button>
             )}
-            <button className="ki-dialog__close" onClick={onClose} title="关闭 (ESC)" type="button">✕</button>
+            <button
+              className="ki-drawer__fullscreen"
+              onClick={() => setFullscreen((v) => !v)}
+              title={fullscreen ? '退出全屏' : '全屏查看'}
+              type="button"
+            >
+              {fullscreen ? '⤢ 还原' : '⤢ 全屏'}
+            </button>
           </div>
         </header>
 
         {/* 内容区 */}
         <div className="ki-drawer__body">
+          {copyFailed && (
+            <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
+          )}
           {loading ? (
             <div className="ki-drawer__status">
               <div className="ki-skeleton" style={{ width: '60%', height: 20, marginBottom: 10 }} />

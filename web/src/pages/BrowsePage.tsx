@@ -329,6 +329,8 @@ export function BrowsePage(): JSX.Element {
                 style={{ maxWidth: 220, flex: '1 1 200px' }}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
+                data-ki-search-input
+                aria-label="按文件名或路径搜索文档"
               />
               <select
                 className="ki-form-input ki-tag-filter"

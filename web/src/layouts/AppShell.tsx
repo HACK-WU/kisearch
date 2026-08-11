@@ -67,6 +67,24 @@ export function AppShell(): JSX.Element {
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
 
+  // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
+  // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
+  // 抽屉打开时不拦截：用户可能想在文档原文内用浏览器查找文本
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      const isFind = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F');
+      if (!isFind) return;
+      if (document.querySelector('.ki-drawer')) return; // 抽屉打开：保留浏览器默认查找
+      const target = document.querySelector<HTMLInputElement>('[data-ki-search-input]');
+      if (!target) return; // 当前页无应用内搜索框，保留浏览器默认
+      e.preventDefault();
+      target.focus();
+      target.select();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   return (
     <div className="ki-shell">
       {/* ════════ 侧边栏 ════════ */}

@@ -729,6 +729,26 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
   background: var(--ki-color-surface);
 }
+/* 左侧收起按钮（向内箭头） */
+.ki-drawer__close {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ki-color-text-subtle);
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 4px 6px 6px;
+  cursor: pointer;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.ki-drawer__close:hover { color: var(--ki-color-accent); }
+.ki-drawer__close-icon { font-size: 16px; line-height: 1; }
+.ki-drawer__close-label { font-size: 13px; }
+/* 全屏态下箭头方向反转（向内指向左侧页面） */
+.ki-drawer--fullscreen .ki-drawer__close { flex-direction: row-reverse; }
 .ki-drawer__title {
   font-weight: 600;
   font-size: var(--ki-font-size-lg);
@@ -774,6 +794,40 @@ a:hover { text-decoration: underline; }
 }
 .ki-drawer__copy:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
 .ki-drawer__copy--done { color: var(--ki-color-success); border-color: var(--ki-color-success); }
+/* 复制失败提示条：独立于加载错误，正文保留 */
+.ki-drawer__copy-failed {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 0 12px;
+  padding: 8px 14px;
+  background: var(--ki-color-danger-bg, #fdecec);
+  color: var(--ki-color-danger, #d93025);
+  border: 1px solid rgba(217, 48, 37, 0.25);
+  border-radius: var(--ki-radius-sm);
+  font-size: 12px;
+}
+/* 全屏切换按钮 */
+.ki-drawer__fullscreen {
+  background: none;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  font-size: 12px;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  padding: 5px 10px;
+  transition: all 0.15s;
+}
+.ki-drawer__fullscreen:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+
+/* 全屏态：铺满视口（无侧边、无圆角），淡入过渡 */
+.ki-drawer--fullscreen {
+  width: 100vw;
+  max-width: 100vw;
+  box-shadow: none;
+}
+.ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
+.ki-drawer--fullscreen .ki-markdown--drawer { max-width: 100%; }
 
 /* 内容区 */
 .ki-drawer__body {
