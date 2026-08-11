@@ -38,7 +38,7 @@ import {
   bulkStorePaths,
   type PathVectorizeEntry,
 } from './path-vectorize.js';
-import { vectorBulkStore } from './vector-client.js';
+import { vectorBulkStore, vectorCountScope, vectorDeleteScope } from './vector-client.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -399,6 +399,20 @@ export async function handleDirectImport(
   const relationsCache = relationsCache0;
 
   // ── Phase 2（向量化）串行于 Phase 3/4 之前（REQ-05 O-02/C-4：local KB 已前置，无并行进度条冲突）──
+  // 覆盖导入前置：scope 已存在向量（KB 与向量均已有数据）时，提示覆盖并先清空旧向量再重建，
+  // 与 rebuild-vector 语义一致（vectorDeleteScope → bulkVectorize），消除文件变更后的孤儿向量。
+  // 仅向量化模式执行；--no-vector 不动向量层；incremental 模式由 handleIncrementalDirect 增量清理。
+  if (vector) {
+    const existingVecCount = await vectorCountScope({ scope });
+    if (existingVecCount > 0) {
+      logWarn(`scope "${scope}" 已存在 ${existingVecCount} 条向量，导入将覆盖原数据（KB + 向量），旧向量先删除后重建`);
+      // 删除旧向量带动态进度展示（apt install 风格进度条，TTY 覆写 / 非 TTY 逐行）
+      const del = await vectorDeleteScope({ scope }, (deleted) => {
+        logProgress(deleted, existingVecCount, '删除旧向量');
+      });
+      logInfo(`已删除旧向量 ${del.deleted} 条，开始重建 ...`);
+    }
+  }
   logPhaseStart(2, TOTAL, '向量化 ...');
   // 非向量化模式（--no-vector）：跳过向量写入，memoryIds 为空（与 sync-relation 决策一致）
   const vectorizeResult = !vector

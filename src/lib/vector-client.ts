@@ -601,8 +601,12 @@ export async function vectorCountScope(params: { scope: string; tags?: string[] 
 
 /**
  * 删除指定 scope（可选 tag）下的全部文档。循环处理以覆盖 > LIST_ALL_LIMIT 的情况。
+ * onProgress 可选：每批删除后回调（deleted 累计值），用于导入覆盖场景的动态进度展示。
  */
-export async function vectorDeleteScope(params: { scope: string; tags?: string[] }): Promise<{ deleted: number }> {
+export async function vectorDeleteScope(
+  params: { scope: string; tags?: string[] },
+  onProgress?: (deleted: number) => void
+): Promise<{ deleted: number }> {
   validateScope(params.scope);
   const engine = await getEngine();
   const filter = buildScopeTagFilter(params.scope, params.tags);
@@ -612,6 +616,7 @@ export async function vectorDeleteScope(params: { scope: string; tags?: string[]
     if (ids.length === 0) break;
     const res = await engine.delete(ids);
     total += res.ok;
+    onProgress?.(total);
     // 无进展保护：本批一条都没删掉（全部报错/被锁），再循环仍是同一批 ids，
     // 直接退出避免死循环空转（P1 健壮性）
     if (res.ok === 0) break;
