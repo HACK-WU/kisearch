@@ -299,15 +299,18 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     return;
   }
 
-  // 不带 group 参数时 docs 被截断到 500 条无意义（前端 BrowsePage 已改用 useGroupDocs 按组拉取），
-  // 仅返回空数组 + 完整 groups 供 Group 树构建；搜索场景请用 q + group 组合。
-  const filtered = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : [];
+  // 不带 group 参数时：
+  //   - 有搜索词(q)：返回跨组模糊匹配的文档（全局搜索场景，limit 放宽到 2000）
+  //   - 无搜索词(q)：返回前 limit 条全部 docs（兼容既有 API 契约；BrowsePage 前端已改用 useGroupDocs 按组精确拉取）
+  const SEARCH_LIMIT = 2000;
+  const filtered = q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all;
+  const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
   sendJson(res, 200, {
     ok: true,
     scope,
-    docs: filtered.slice(0, limit),
+    docs: filtered.slice(0, searchLimit),
     total: filtered.length,
-    truncated: filtered.length > limit,
+    truncated: filtered.length > searchLimit,
     groups,
   });
 }
@@ -393,6 +396,8 @@ async function handleImportRun(req: http.IncomingMessage, res: http.ServerRespon
     chunkSize?: number;
     chunkOverlap?: number;
     vector?: boolean;
+    /** 文档级自定义标签（逗号分隔多个），对本次导入全部文件生效 */
+    tags?: string;
   } | undefined;
   if (!body || !body.scope || !body.uploadId) {
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
@@ -421,6 +426,7 @@ async function handleImportRun(req: http.IncomingMessage, res: http.ServerRespon
     chunkSize: body.chunkSize,
     chunkOverlap: body.chunkOverlap,
     vector: body.vector,
+    tags: body.tags,
   });
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope, mode });
@@ -434,6 +440,7 @@ interface RunImportArgs {
   chunkSize?: number;
   chunkOverlap?: number;
   vector?: boolean;
+  tags?: string;
 }
 
 async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> {
@@ -446,6 +453,7 @@ async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> 
             chunkSize: args.chunkSize,
             chunkOverlap: args.chunkOverlap,
             vector: args.vector,
+            tags: args.tags,
           })
         : await handleDirectImport({
             scope: args.scope,
@@ -454,6 +462,7 @@ async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> 
             chunkSize: args.chunkSize,
             chunkOverlap: args.chunkOverlap,
             vector: args.vector,
+            tags: args.tags,
           });
     job.state = 'done';
     job.result = result;

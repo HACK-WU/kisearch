@@ -49,6 +49,24 @@ export const DEFAULT_ROOT_NAME = '项目根';
 /** 不传 tags 时默认查询的三类标签 */
 export const DEFAULT_TAGS = ['ki-search', 'ki-path', 'ki-relation'] as const;
 
+/** 内部保留标签（用户不可用，写向量时过滤） */
+const RESERVED_TAGS = new Set(['ki-search', 'ki-relation', 'ki-path']);
+
+/**
+ * 解析自定义 tags：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）。
+ * import / incremental / sync-relation 共用，避免重复实现。
+ */
+export function parseContentTags(tags?: string): string[] {
+  if (!tags) return [];
+  const seen = new Set<string>();
+  for (const raw of tags.split(',')) {
+    const t = raw.trim().toLowerCase();
+    if (t.length === 0 || RESERVED_TAGS.has(t)) continue;
+    seen.add(t);
+  }
+  return [...seen];
+}
+
 // ─── 路径常量 ───
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

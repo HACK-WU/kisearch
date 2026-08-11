@@ -6,8 +6,9 @@ import { useQuery } from '@tanstack/react-query';
 import { getDocList, getHealth, type DocListResponse, type HealthResponse } from '@/api/httpApi';
 import { kiScopeList, type ScopeListResponse } from '@/api/mcpClient';
 
-export type { ScopeListResponse };
+export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
+export { getDocList, getHealth };
 
 /** 服务健康状态（仅加载时查一次，避免频繁触发 zvec 探活） */
 export function useHealth() {

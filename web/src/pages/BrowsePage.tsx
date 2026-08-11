@@ -6,8 +6,9 @@
  */
 
 import { Fragment, useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useScopeValue } from '@/lib/scopeContext';
-import { useDocList, useGroupDocs } from '@/lib/hooks';
+import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
@@ -159,8 +160,21 @@ export function BrowsePage(): JSX.Element {
   // 当前选中组文档（直接使用 useGroupDocs 返回值，无需再从树中取）
   const activeDocs = groupDocs;
 
-  // 展示列表：展示选中目录文档（搜索功能已移至后端 q+group 组合）
-  const shownDocs = activeDocs;
+  // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
+  const searchQuery = useQuery<DocListResponse>({
+    queryKey: ['docList', scope, 'search', q.trim()],
+    queryFn: () => getDocList(scope, { q: q.trim() }),
+    enabled: q.trim().length > 0,
+    staleTime: 10_000,
+    retry: 1,
+  });
+  const searchDocs = searchQuery.data?.docs ?? [];
+  // 搜索中（全局 q 请求在途）时展示 loading 态
+  const isSearchLoading = searchQuery.isLoading && q.trim().length > 0;
+
+  // 展示列表：有搜索词时展示全局搜索结果，否则展示当前选中 group 文档
+  const shownDocs = q.trim().length > 0 ? searchDocs : activeDocs;
+  const isSearching = q.trim().length > 0;
 
   /** 切换节点展开/折叠（原地 mutate + 新数组引用触发渲染） */
   const toggleOpen = (path: string): void => {
@@ -281,9 +295,11 @@ export function BrowsePage(): JSX.Element {
             <div className="ki-card__head">
               <span className="ki-card__title">文档</span>
               <span className="ki-card__sub">
-                {activeGroup
-                  ? `${activeGroup} · ${activeDocs.length} 条`
-                  : '选择左侧 Group 查看文档'}
+                {isSearching
+                  ? `搜索「${q.trim()}」 · ${shownDocs.length} 条`
+                  : activeGroup
+                    ? `${activeGroup} · ${activeDocs.length} 条`
+                    : '选择左侧 Group 查看文档'}
               </span>
             </div>
             <div
@@ -314,13 +330,13 @@ export function BrowsePage(): JSX.Element {
               </span>
             </div>
             <div className="ki-card__body" style={{ padding: 12, flex: 1, overflowY: 'auto' }}>
-              {isLoading ? (
+              {isLoading || isSearchLoading ? (
                 <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
               ) : shownDocs.length === 0 ? (
                 <div className="ki-empty" style={{ border: 'none' }}>
                   <div>
                     <h3>无匹配文档</h3>
-                    <p>该 Group 暂无文档，或选择其他 Group 查看。</p>
+                    <p>{isSearching ? '未找到包含该关键词的文件，换个关键词试试。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
                   </div>
                 </div>
               ) : (

@@ -27,12 +27,16 @@ import type { GroupIndex } from './lib/scope.js';
 import { calculateScore, recordUse } from './lib/scoring.js';
 import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
-import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
+import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+
+// 向后兼容 re-export：parseContentTags 已统一提取到 lib/constants.js，
+// 保留本模块导出供既有测试/外部依赖引用。
+export { parseContentTags };
 
 // ─── 类型定义 ───
 
@@ -339,21 +343,6 @@ export type SyncRelationResult =
  * 失败仅记日志，不抛，不阻塞主流程；返回 { stored, reason? } 供上层透出
  * 部分写入状态（cache/wiki 成功但向量未写时，调用方需要感知）。
  */
-/**
- * 解析自定义 tags：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
- */
-export function parseContentTags(tags?: string): string[] {
-  if (!tags) return [];
-  const seen = new Set<string>();
-  const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
-  for (const raw of tags.split(',')) {
-    const t = raw.trim().toLowerCase();
-    if (t.length === 0 || reserved.has(t)) continue;
-    seen.add(t);
-  }
-  return [...seen];
-}
-
 async function vectorWriteBack(params: {
   relation: string;
   group: string;

@@ -152,6 +152,8 @@ export async function runImport(args: {
   chunkSize?: number;
   chunkOverlap?: number;
   vector?: boolean;
+  /** 文档级自定义标签（逗号分隔），对本次导入全部文件生效 */
+  tags?: string;
 }): Promise<RunImportResponse> {
   return req<RunImportResponse>('/api/import/run', {
     method: 'POST',

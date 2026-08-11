@@ -15,6 +15,12 @@ interface Result {
   relation?: string;
   score?: number;
   original?: string;
+  /** 向量文档内容 */
+  content?: string;
+  /** 命中向量对应的标签 */
+  tag?: string;
+  /** 向量数据标识（doc id） */
+  memoryId?: string;
 }
 
 export function SearchPage(): JSX.Element {
@@ -196,10 +202,20 @@ export function SearchPage(): JSX.Element {
                 >
                   <div className={`ki-qr-rank${i < 3 ? ' ki-qr-rank--top' : ''}`}>{i + 1}</div>
                   <div className="ki-qr-body">
-                    <div className="ki-qr-content">{r.original ?? r.relation ?? '(无内容)'}</div>
+                    {/* 文档名称 + Group 路径 */}
+                    <div className="ki-qr-title">
+                      <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
+                      <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
+                    </div>
+                    {/* 原文 / 向量内容 */}
+                    <div className="ki-qr-content">{r.original ?? r.content ?? r.relation ?? '(无内容)'}</div>
+                    {/* meta：标签 + 向量数据 */}
                     <div className="ki-qr-meta">
                       <span className="ki-badge ki-badge--vec">RAG</span>
-                      <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
+                      {r.tag && <span className="ki-badge ki-badge--tag">#{r.tag}</span>}
+                      <span className="ki-cell-sub ki-memoryid" title={r.memoryId ?? ''}>
+                        {r.memoryId ? `vector: ${r.memoryId.slice(0, 12)}…` : 'vector: -'}
+                      </span>
                       <span className="ki-cell-sub">点击查看原文</span>
                     </div>
                   </div>

@@ -592,8 +592,13 @@ a:hover { text-decoration: underline; }
 }
 .ki-qr-rank--top { background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent); color: var(--ki-color-primary); }
 .ki-qr-body { flex: 1; min-width: 0; }
+/* 搜索结果：文档名称 + Group 路径行 */
+.ki-qr-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ki-qr-name { font-size: var(--ki-font-size-md); font-weight: 600; color: var(--ki-color-text); }
 .ki-qr-content { font-size: var(--ki-font-size-md); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .ki-qr-meta { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ki-badge--tag { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
+.ki-memoryid { font-family: var(--ki-font-mono); font-size: 11px; color: var(--ki-color-text-muted); }
 .ki-qr-score { font-size: 16px; font-weight: 700; letter-spacing: -0.5px; font-family: var(--ki-font-mono); flex-shrink: 0; }
 .ki-score-bar-bg { width: 80px; height: 4px; background: var(--ki-color-bg-secondary); border-radius: 2px; margin-top: 4px; }
 .ki-score-bar { height: 4px; background: var(--ki-color-primary); border-radius: 2px; }

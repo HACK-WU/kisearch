@@ -54,6 +54,8 @@ import {
 } from './progress.js';
 import { handleDiff, type DiffResult } from './diff.js';
 import { deriveChunkRelation, deriveChunkSourcePath, readFileToChunks } from './import.js';
+import { vectorBulkStore } from './vector-client.js';
+import { parseContentTags } from './constants.js';
 import { MAX_CHUNKS_PER_FILE } from './chunker.js';
 
 // ─── 类型 ───
@@ -214,6 +216,8 @@ export interface HandleIncrementalDirectArgs {
   cleanEnabled?: boolean;
   /** 内置清洗规则覆盖（--clean-rules 解析结果） */
   cleanRules?: Partial<import('./clean.js').CleanRules>;
+  /** 文档级自定义标签（逗号分隔多个）。非向量化时忽略；向量化时为新增/修改文件写一条 tag 内容向量 */
+  tags?: string;
 }
 
 /**
@@ -261,6 +265,7 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
   const chunkOverlap = existingSource.chunkOverlap ?? args.chunkOverlap ?? 150;
   const maxFileSizeBytes = args.maxFileSizeBytes ?? 2 * 1024 * 1024;
   const vector = args.vector !== false;
+  const customTags = parseContentTags(args.tags);
   const rootName = existingSource.rootName;
   logPhaseDone(1, TOTAL_PHASES, `校验通过（sourceDir=${sourceDir}，chunkSize=${chunkSize}，rootName=${rootName}）`);
 
@@ -418,10 +423,10 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
     }
 
     // modified：方案 D P-2 先删后更——基于旧 memoryIds 删旧向量 → 全部成功后再更新字段为新 okIds
+    let deleteOk = true; // 提升到循环级：modified 删旧失败时跳过 tag 追加，避免污染 memoryIds
     if (isModify) {
       const oldIds = e.memoryIds && e.memoryIds.length > 0 ? e.memoryIds : (e.memoryId ? [e.memoryId] : []);
       if (vector ? okIds.length > 0 : true) {
-        let deleteOk = true;
         // 删旧向量（非向量化模式无向量可删；新旧 id 相同跳过）
         if (vector) {
           for (const oldId of oldIds) {
@@ -448,11 +453,36 @@ export async function handleIncrementalDirect(args: HandleIncrementalDirectArgs)
           }
         }
       } else {
+        deleteOk = false; // 新 chunk 写入失败：同样视为未完成，不追加 tag
         errors.push({ path: e.path, error: `[modify] 新 chunk 写入失败，保留旧数据待下次重试（okIds 为空）` });
       }
       modified++;
     } else {
       added++;
+    }
+
+    // 文档级自定义 tag 向量（可选）：为文件原文写 tag 内容向量，追加到 relation.memoryIds，使 -t <tag> 可召回
+    // 放在删旧逻辑之后，避免干扰 modified 的 okIds 对比。
+    // modified 删旧/新写失败（deleteOk=false）时跳过：保持旧 memoryIds 完整性，避免新旧 tag id 混存导致孤儿向量引用。
+    if (vector && customTags.length > 0 && deleteOk) {
+      try {
+        const tagResult = await vectorBulkStore({
+          scope: args.scope,
+          entries: customTags.map((t) => ({ text: fileText, tags: t, group: groupPathFile })),
+        });
+        const tagIds = tagResult.results.filter((r) => r.success && r.memoryId).map((r) => r.memoryId!) as string[];
+        if (tagIds.length > 0) {
+          const rel = relationsCache.groups[groupPathFile]?.hot_relations.find((r) => r.text === fileRelation);
+          if (rel) {
+            // 覆盖旧 tag id + 保留 chunk id（modified 已把 rel.memoryIds 更新为 okIds；add 时 upsertRelation 已写 okIds）
+            const baseIds = rel.memoryIds ?? okIds;
+            rel.memoryIds = [...baseIds, ...tagIds];
+            if (!rel.memoryId) rel.memoryId = rel.memoryIds[0];
+          }
+        }
+      } catch (err) {
+        errors.push({ path: e.path, error: `[tag warn] 自定义标签向量写入失败：${(err as Error).message}` });
+      }
     }
   }
   logPhaseDone(3, TOTAL_PHASES, `向量化完成：add=${added}, modify=${modified}, errors=${errors.length}`);

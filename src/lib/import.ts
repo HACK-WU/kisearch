@@ -24,7 +24,7 @@ import {
   type GroupIndex,
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
-import { DEFAULT_PARTITION_CONFIG, type PartitionConfig } from './constants.js';
+import { DEFAULT_PARTITION_CONFIG, parseContentTags, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 
@@ -38,6 +38,7 @@ import {
   bulkStorePaths,
   type PathVectorizeEntry,
 } from './path-vectorize.js';
+import { vectorBulkStore } from './vector-client.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -113,6 +114,8 @@ export interface HandleDirectImportArgs {
   cleanEnabled?: boolean;
   /** 内置清洗规则覆盖（--clean-rules 解析结果） */
   cleanRules?: Partial<import('./clean.js').CleanRules>;
+  /** 文档级自定义标签（逗号分隔多个）。非向量化时忽略；向量化时为每个导入文件写一条 tag 内容向量 */
+  tags?: string;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -212,6 +215,8 @@ export async function handleDirectImport(
   // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则（批次 3 接入实际清洗）
   const cleanEnabled = args.cleanEnabled !== false;
   const cleanRules: CleanRules | undefined = args.cleanRules;
+  // 文档级自定义标签：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
+  const customTags = parseContentTags(args.tags);
 
   if (!rootName) throw new Error('rootName 不能为空');
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
@@ -403,7 +408,42 @@ export async function handleDirectImport(
     const pathResult = await bulkStorePaths(pathEntries);
     logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
   }
-  logPhaseDone(2, TOTAL, `向量化完成：成功 ${vectorizeResult.ok.size}，失败 ${vectorizeResult.errors.length}`);
+
+  // ── 文档级自定义 tag 向量写入（可选）：为每个成功导入文件写一条 tag 内容向量 ──
+  // 机制对齐 sync-relation：text=文件原文、tags=自定义 tag（每个 tag 各一条），
+  // 使 `ki search -t <tag>` 能召回导入文件。tag 向量 docId 回填到文件级 relation 的 memoryIds。
+  let tagMemoryMap = new Map<string, string[]>();
+  if (vector && customTags.length > 0) {
+    logPhaseStart(2, TOTAL, `写入自定义标签向量（${customTags.join(', ')}）...`);
+    const tagEntries: { text: string; tags: string; group: string }[] = [];
+    // fileRecords 含清洗后原文（textForVector）用于向量化；local KB 存原始 fileText
+    for (const rec of fileRecords) {
+      const origText = fs.readFileSync(path.resolve(sourceDir, rec.rel), 'utf-8');
+      for (const t of customTags) {
+        tagEntries.push({ text: origText, tags: t, group: rec.groupPath });
+      }
+    }
+    if (tagEntries.length > 0) {
+      try {
+        const tagResult = await vectorBulkStore({ scope, entries: tagEntries });
+        // 聚合到 文件 → [tag memoryIds]（成功条目按 index 回推文件/标签）
+        const newMap = new Map<string, string[]>();
+        for (const item of tagResult.results) {
+          if (!item.success || !item.memoryId) continue;
+          const rec = fileRecords[Math.floor(item.index / customTags.length)];
+          if (!rec) continue;
+          const arr = newMap.get(rec.rel) ?? [];
+          arr.push(item.memoryId);
+          newMap.set(rec.rel, arr);
+        }
+        tagMemoryMap = newMap;
+        logInfo(`自定义标签向量写入完成：成功 ${tagResult.results.filter((r) => r.success).length}/${tagEntries.length}`);
+      } catch (err) {
+        logWarn(`自定义标签向量写入失败（不影响导入）：${(err as Error).message}`);
+      }
+    }
+    logPhaseDone(2, TOTAL, `标签向量写入完成`);
+  }
 
   // ── Phase 3/4：Group 树 + relation-cache（串行，KB 写入近实时无并行损失）──
   const ctx: ImportContext = {
@@ -422,7 +462,7 @@ export async function handleDirectImport(
   phase4WriteRelations(ctx, relationsCache);
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值
   const mergedMap = vectorizeResult.ok;
-  if (mergedMap.size > 0) {
+  if (mergedMap.size > 0 || tagMemoryMap.size > 0) {
     for (const rec of fileRecords) {
       // 该文件全部 chunk 的 memoryId（按 sourcePath 文件#N 匹配）
       const ids = rec.entries
@@ -430,9 +470,14 @@ export async function handleDirectImport(
         .filter((id): id is string => !!id);
       const groupData = relationsCache.groups[rec.groupPath];
       const rel = groupData?.hot_relations.find((r) => r.text === rec.relation);
-      if (rel && ids.length > 0) {
-        rel.memoryIds = ids;
-        rel.memoryId = ids[0]; // 兼容单值消费方
+      if (rel) {
+        // 追加文档级自定义 tag 向量的 docId（使 -t <tag> 可召回）
+        const tagIds = tagMemoryMap.get(rec.rel) ?? [];
+        const allIds = [...ids, ...tagIds];
+        if (allIds.length > 0) {
+          rel.memoryIds = allIds;
+          rel.memoryId = allIds[0]; // 兼容单值消费方
+        }
       }
     }
   }

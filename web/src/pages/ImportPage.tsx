@@ -5,8 +5,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportStatus, runImport, uploadFiles, type ImportJob } from '@/api/httpApi';
+import { getImportStatus, runImport, uploadFiles, fetchTags, type ImportJob } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 
 interface PendingFile {
@@ -28,6 +29,50 @@ export function ImportPage(): JSX.Element {
   const [vector, setVector] = useState(true);
   const [group, setGroup] = useState('');
   const [dragOver, setDragOver] = useState(false);
+
+  // tag 选择器状态（复用 WritePage 实现：combobox 选择已有 / 输入新建）
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [tagOpen, setTagOpen] = useState(false);
+  const tagRef = useRef<HTMLDivElement>(null);
+
+  // 加载可用 tag 列表（当前 scope）
+  useEffect(() => {
+    let cancelled = false;
+    fetchTags(scope).then((res) => {
+      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [scope]);
+
+  // 点击 tag combobox 外部关闭下拉
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent): void => {
+      if (tagRef.current && !tagRef.current.contains(e.target as Node)) setTagOpen(false);
+    };
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, []);
+
+  const toggleTag = (tag: string): void => {
+    // 点击已有 tag：加入选中并关闭下拉（会话级一次性选择，无需反选）
+    if (selectedTags.includes(tag)) return;
+    setSelectedTags((prev) => [...prev, tag]);
+    setTagOpen(false);
+  };
+
+  const addTagFromInput = (): void => {
+    const t = tagInput.trim().toLowerCase();
+    if (!t || selectedTags.includes(t)) return;
+    setSelectedTags((prev) => [...prev, t]);
+    setTagInput('');
+    setTagOpen(false);
+  };
+
+  const removeTag = (tag: string): void => {
+    setSelectedTags((prev) => prev.filter((t) => t !== tag));
+  };
 
   const [phase, setPhase] = useState<'idle' | 'uploading' | 'importing' | 'done' | 'failed'>('idle');
   const [job, setJob] = useState<ImportJob | null>(null);
@@ -154,6 +199,7 @@ export function ImportPage(): JSX.Element {
         chunkSize: chunkSize ? Number(chunkSize) : undefined,
         chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
         vector,
+        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
       });
       if (!run.ok || !run.jobId) {
         setPhase('failed');
@@ -228,6 +274,80 @@ export function ImportPage(): JSX.Element {
               hint="留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。"
             />
           </div>
+
+          {/* Tags（可选）：对本次导入的全部文件（目录/文件）生效 */}
+          <div style={{ marginTop: 8 }}>
+            <label className="ki-form-label">Tags（可选，对全部导入文件生效）</label>
+            <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
+              <div className="ki-combobox__input-wrap">
+                <input
+                  className="ki-form-input"
+                  style={{ width: '100%', boxSizing: 'border-box' }}
+                  placeholder="选择已有 tag 或输入新建，回车确认"
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onFocus={() => setTagOpen(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
+                  }}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className={`ki-combobox__toggle${tagOpen ? ' ki-combobox__toggle--open' : ''}`}
+                  tabIndex={-1}
+                  onClick={(e) => { e.stopPropagation(); setTagOpen((v) => !v); }}
+                >
+                  {tagOpen ? '▴' : '▾'}
+                </button>
+              </div>
+              {tagOpen && (
+                <div className="ki-combobox__panel ki-combobox__panel--open">
+                  <div className="ki-combobox__tree" style={{ padding: '6px 8px', maxHeight: 180, overflowY: 'auto' }}>
+                    {availableTags.length === 0 && !tagInput ? (
+                      <div className="ki-cell-sub" style={{ padding: 6 }}>暂无已有 tag</div>
+                    ) : (
+                      <>
+                        {availableTags
+                          .filter((t) => !tagInput || t.includes(tagInput.toLowerCase()))
+                          .map((t) => (
+                            <span
+                              key={t}
+                              className={`ki-tag-option${selectedTags.includes(t) ? ' ki-tag-option--selected' : ''}`}
+                              onClick={() => toggleTag(t)}
+                            >
+                              {selectedTags.includes(t) ? '✓ ' : '+ '}{t}
+                            </span>
+                          ))
+                        }
+                        {tagInput && !availableTags.some((t) => t === tagInput.toLowerCase()) && !selectedTags.includes(tagInput.toLowerCase()) && (
+                          <span className="ki-tag-option" onClick={addTagFromInput} style={{ color: 'var(--ki-color-primary)' }}>
+                            ✚ 新建：{tagInput.trim()}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <div className="ki-combobox__footer">
+                    <span className="ki-cell-sub">输入后按回车确认；新建 tag 将自动加入</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* 已选 tag pills（独立行） */}
+            {selectedTags.length > 0 && (
+              <div className="ki-tag-pills" style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {selectedTags.map((t) => (
+                  <span key={t} className="ki-tag-pill">
+                    {t}
+                    <span className="ki-tag-pill__x" onClick={() => removeTag(t)}>✕</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="ki-form-hint">选择后，本次导入（含上传目录与上传文件）的所有文档将带上这些标签，可在语义搜索按标签过滤。</div>
+          </div>
+
           <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
             <button className="ki-btn ki-btn--secondary ki-btn--small" onClick={openDirPicker}>
               上传目录
@@ -361,9 +481,9 @@ export function ImportPage(): JSX.Element {
                 : '导入已完成，可前往搜索验证。'}
             </p>
             <div className="ki-empty__actions">
-              <a className="ki-btn ki-btn--primary ki-btn--small" href="#/search">
+              <Link className="ki-btn ki-btn--primary ki-btn--small" to="/search">
                 前往搜索验证 →
-              </a>
+              </Link>
             </div>
           </div>
         </div>
