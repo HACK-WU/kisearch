@@ -113,6 +113,9 @@ curl -fsSL https://raw.githubusercontent.com/HACK-WU/KiSearch/master/scripts/ins
 # 方式二：源码安装（开发 & CLI）
 git clone git@github.com:HACK-WU/KiSearch.git && cd KiSearch
 npm install && npm link
+# 编译 zvec 引擎（必需）：vector-client 从 dist/zvec-engine 导入运行时，跳过会在 ki mcp 启动时报
+# 'Cannot find module ../../dist/zvec-engine/index.js'
+npm run build:zvec-engine
 ```
 
 ### 2. 初始化配置
@@ -157,10 +160,13 @@ ki scan-kb import \
 # ③ 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
 
-# ④ 启动 MCP HTTP 共享单例（供 AI Agent 经 URL 接入）
-ki mcp --http
+# ④ 构建内置 Web 前端（产物输出到 web/dist，仅需首次构建或前端改动后）
+cd web && npm install && npm run build && cd ..
 
-# ⑤ 查看连接信息（含持锁进程与对外绑定地址）
+# ⑤ 启动 MCP HTTP 共享单例并附带可视化前端（供 AI Agent 经 URL 接入；浏览器访问 http://127.0.0.1:7423/）
+ki mcp --http --web
+
+# ⑥ 查看连接信息（含持锁进程与对外绑定地址）
 ki mcp --status
 ```
 
