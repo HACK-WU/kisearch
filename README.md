@@ -337,6 +337,7 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 | 文档 | 内容 |
 |------|------|
 | [`docs/cli.md`](./docs/cli.md) | CLI 命令完整参考（含 search 输出字段说明） |
+| [`docs/configuration.md`](./docs/configuration.md) | 配置文件说明（数据目录/Embedding/scope 映射/导入清洗） |
 | [`docs/architecture.md`](./docs/architecture.md) | 架构与协作关系 |
 | [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式 |
 | [`docs/vector-engine-mem.md`](./docs/vector-engine-mem.md) | 向量引擎（zvec）设计说明 |
