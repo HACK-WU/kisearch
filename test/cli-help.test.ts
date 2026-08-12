@@ -29,7 +29,6 @@ const SUB_COMMANDS = [
   'sync-relation',
   'delete-relation',
   'mcp',
-  'setup',
   'search',
   'store',
   'bulk-store',

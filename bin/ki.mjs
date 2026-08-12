@@ -34,7 +34,6 @@ const COMMANDS = {
   'sync-relation': 'src/sync-relation.ts',
   'delete-relation': 'src/delete-relation.ts',
   'mcp': 'src/mcp-server.ts',
-  'setup': 'src/setup.ts',
   'search': 'src/search.ts',
   'store': 'src/store.ts',
   'bulk-store': 'src/bulk-store.ts',
@@ -97,7 +96,6 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
-  setup             下载 Skills / Rules 到目标项目目录
 
 全局参数：
   --config <path>   指定配置文件路径（可在任意命令位置使用）

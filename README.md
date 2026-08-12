@@ -216,7 +216,6 @@ ki mcp token show           # 查看当前托管 Token（填入上方 headers �
 | `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`） |
 | `export` | 导出 KB 为 Wiki Markdown |
 | `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
-| `setup` | 下载 Skills / Rules 到目标项目目录 |
 
 > `ki <command> --help` 查看每个命令的完整参数。
 
@@ -355,6 +354,20 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 | [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md) | 记忆系统行为总控 | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
 
 > 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
+
+**安装本仓库的 Skill**（基于 [`HACK-WU/skills`](https://github.com/HACK-WU/skills) 的 `skill-install.sh`，通过 `--repo` 指定本仓库）：
+
+```bash
+# 一键安装本仓库全部 skill 到目标项目
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
+  bash -s -- install --repo HACK-WU/KiSearch -t /path/to/your-project
+
+# 只安装指定 skill（如 codekb-skill）
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
+  bash -s -- install --repo HACK-WU/KiSearch -n codekb-skill -t /path/to/your-project
+```
+
+> 该安装器基于 `npx skills`（需 Node.js >= 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update`（更新）、`remove`（删除）、`list`（查看）子命令。安装后直接对话即可触发对应 skill。
 
 ## <a id="constraints"></a>🔒 设计约束
 
