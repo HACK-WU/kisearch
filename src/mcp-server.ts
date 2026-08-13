@@ -34,13 +34,13 @@ import {
 } from './lib/mcp-token.js';
 
 /**
- * 构建一个 KiSearch McpServer 并注册全部工具。
+ * 构建一个 kisearch McpServer 并注册全部工具。
  * stdio 与 HTTP 传输复用同一工厂：HTTP 模式下每个会话新建一个实例，
  * 但它们共享 vector-client 的模块级单例 engine（单进程单锁）。
  */
 export function buildKiMcpServer(): McpServer {
   const server = new McpServer({
-    name: 'KiSearch',
+    name: 'kisearch',
     version: readKiVersion(),
   });
   registerQueryGroupTool(server);
@@ -67,7 +67,7 @@ interface McpCliOptions {
 }
 
 /** 帮助文本：-h/--help 与未知参数时共用 */
-const MCP_HELP = `ki mcp - 启动 KiSearch MCP Server
+const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
 
 用法：
   ki mcp                        stdio 模式（默认，单客户端单进程）
@@ -361,9 +361,9 @@ export async function startMcpServer(): Promise<void> {
   if (opts.http) {
     // 命中健康实例 → 复用退出，全程不做预检
     const live = await fetchHealthz(opts.host, opts.port);
-    if (live?.ok === true && live?.name === 'KiSearch') {
+    if (live?.ok === true && live?.name === 'kisearch') {
       process.stderr.write(
-        `已有健康的 KiSearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
+        `已有健康的 kisearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
       );
       process.exit(0);
     }
@@ -391,11 +391,11 @@ export async function startMcpServer(): Promise<void> {
       /* 配置异常交由后续预检报告，此处用默认地址探活 */
     }
     const live = await fetchHealthz(guardHost, guardPort);
-    if (live?.ok === true && live?.name === 'KiSearch') {
+    if (live?.ok === true && live?.name === 'kisearch') {
       // 展示用地址同步归一（0.0.0.0 等监听写法不是可连接地址）
       const connectHost = probeHost(guardHost);
       process.stderr.write(
-        `已有健康的 KiSearch HTTP 单例在 ${connectHost}:${guardPort}（pid ${live.pid}），` +
+        `已有健康的 kisearch HTTP 单例在 ${connectHost}:${guardPort}（pid ${live.pid}），` +
           `stdio 模式与其并存会争抢向量库锁，拒绝启动。\n` +
           `请将本 IDE 的 MCP 配置改为 URL 型接入：{ "url": "http://${connectHost}:${guardPort}/mcp" }。\n`,
       );
@@ -440,7 +440,7 @@ export async function startMcpServer(): Promise<void> {
   }
 
   // NEG-13：长驻进程版本自检 banner + 升级监听（升级后提示重启）
-  const stopVersionGuard = startVersionGuard('KiSearch');
+  const stopVersionGuard = startVersionGuard('kisearch');
 
   // ─── HTTP 共享单例模式（多 IDE 共享同一持锁进程） ───
   if (opts.http) {
@@ -458,7 +458,7 @@ export async function startMcpServer(): Promise<void> {
 
   // ─── stdio 模式（默认，单客户端单进程） ───
   process.stderr.write(
-    'KiSearch MCP 以 stdio 模式启动（默认，单客户端单进程）。\n' +
+    'kisearch MCP 以 stdio 模式启动（默认，单客户端单进程）。\n' +
       '如需多个 IDE 共享同一持锁进程以避免向量库锁冲突，请改用 HTTP 单例模式：ki mcp --http。\n',
   );
   const server = buildKiMcpServer();

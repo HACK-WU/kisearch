@@ -52,7 +52,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 
 ### 异常处理
 
-若本 skill 文件不存在（如新克隆项目）：跳过 AGENTS.md 初始化，后续用户明确要求时再按需处理（KiSearch 缺失由 `ai-codekb-memory` 规则提示安装）。
+若本 skill 文件不存在（如新克隆项目）：跳过 AGENTS.md 初始化，后续用户明确要求时再按需处理（kisearch 缺失由 `ai-codekb-memory` 规则提示安装）。
 
 ---
 

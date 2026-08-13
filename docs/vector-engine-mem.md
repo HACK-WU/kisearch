@@ -4,9 +4,9 @@
 > 调研来源：代码搜索 ✓（src/zvec-engine/ 目录、src/store.ts、src/search.ts、src/bulk-store.ts、src/sync-relation.ts）
 > 调研范围：文本向量化、文本向量检索、zvec 引擎层封装
 
-## 1. 架构定位：KiSearch 自有向量引擎
+## 1. 架构定位：kisearch 自有向量引擎
 
-KiSearch 现在**拥有自己的向量引擎**（基于 `@zvec/zvec` 的 Rust 内核），不再依赖外部 `mem` CLI。核心变化：
+kisearch 现在**拥有自己的向量引擎**（基于 `@zvec/zvec` 的 Rust 内核），不再依赖外部 `mem` CLI。核心变化：
 
 - **从 spawn 到进程内**：向量引擎以 Node 原生模块形式存在，无 shell 调用开销
 - **从冷启动到常驻**：MCP server 模式下引擎常驻，查询延迟从 ~4s 降至 <5ms
@@ -14,7 +14,7 @@ KiSearch 现在**拥有自己的向量引擎**（基于 `@zvec/zvec` 的 Rust �
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  KiSearch 脚本（store / search / sync-relation …）        │
+│  kisearch 脚本（store / search / sync-relation …）        │
 │  本地索引（Group 树 + relations-cache + local KB）         │
 └───────────────┬─────────────────────────────────────┘
                 │  直接 API 调用（无 shell）
@@ -246,11 +246,11 @@ zvec 引擎通过 metadata 字段 `tags` 实现向量空间隔离，语义与原
 
 ## 8. 小结
 
-KiSearch 的文本向量化与向量检索现在基于**进程内 zvec 引擎**，彻底消除了对外部 `mem` CLI 的依赖：
+kisearch 的文本向量化与向量检索现在基于**进程内 zvec 引擎**，彻底消除了对外部 `mem` CLI 的依赖：
 
 - **向量化** = `engine.insert()` / `engine.upsert()`（text + metadata → doc_id）
 - **检索** = `engine.hybridSearch()`（自然语言 query → 带 score 的 Hit[]）
 - **本地索引** = Group 树 + `relations-cache` + `local KB`，与向量库解耦，可独立恢复
 - **异步双写** = `sync-relation` 先落本地索引，再用 `setImmediate` + `engine.upsert()` 后台向量化
 
-设计上严格遵循"引擎内嵌、常驻复用"原则：所有向量能力、召回算法、scope 治理都在 zvec 引擎层，KiSearch 只做编排与交付。
+设计上严格遵循"引擎内嵌、常驻复用"原则：所有向量能力、召回算法、scope 治理都在 zvec 引擎层，kisearch 只做编排与交付。

@@ -2,7 +2,7 @@
 
 ## 概述
 
-KiSearch 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`），基于 zvec 引擎的 metadata 字段 `tags`，实现不同用途记忆数据的**物理隔离**。
+kisearch 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`），基于 zvec 引擎的 metadata 字段 `tags`，实现不同用途记忆数据的**物理隔离**。
 
 三类标签的分工定位：
 

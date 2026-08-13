@@ -33,7 +33,7 @@ fs.writeFileSync(
 );
 
 function buildTestServer(): McpServer {
-  const server = new McpServer({ name: 'KiSearch', version: '0.0.0-test' });
+  const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
   }));

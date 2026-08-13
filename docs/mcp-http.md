@@ -110,7 +110,7 @@ ki mcp --status --host 127.0.0.1 --port 7423
   "ok": true,
   "running": true,
   "target": { "host": "127.0.0.1", "port": 7423 },
-  "healthz": { "ok": true, "name": "KiSearch", "pid": 12345, "version": "...", "host": "0.0.0.0", "port": 7423 },
+  "healthz": { "ok": true, "name": "kisearch", "pid": 12345, "version": "...", "host": "0.0.0.0", "port": 7423 },
   "lock": { "pid": 12345, "host": "0.0.0.0", "port": 7423, "startedAt": "..." },
   "hint": "..."
 }
@@ -134,7 +134,7 @@ Token 来源三级优先：`--token` > 环境变量 `KI_MCP_TOKEN` > 托管文�
 
 `ki mcp --http` 启动流程（探活与冲突检测均在启动预检之前执行）：
 
-1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 KiSearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
+1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
 2. 检查 stdio 实例 lock（`~/.ki/mcp-stdio.lock`，pid 存活校验）。若存在存活的 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid，避免 HTTP 单例与 stdio 进程争抢向量库锁后静默降级。
 3. 通过守卫后执行启动预检，再 `listen`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
 4. 成功监听后写 `~/.ki/mcp-http.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
@@ -178,7 +178,7 @@ ki mcp stop
 
 - 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`；stdio 实例：`cat ~/.ki/mcp-stdio.lock`
 - 关闭全部实例并清理 lock：`ki mcp stop`
-- 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"KiSearch","pid":...,"version":"..."}`
+- 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 
 ## 会话模型
@@ -218,5 +218,5 @@ mcp:
 ## 相关文档
 
 - [CLI 参考 · `mcp` 命令](./cli.md) — 完整命令与工具清单
-- [架构与协作关系](./architecture.md) — KiSearch 与向量数据库的分层关系
+- [架构与协作关系](./architecture.md) — kisearch 与向量数据库的分层关系
 - [向量引擎与内存](./vector-engine-mem.md) — 嵌入式向量库与锁机制

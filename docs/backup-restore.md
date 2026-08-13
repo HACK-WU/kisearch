@@ -1,6 +1,6 @@
 ## 备份与恢复
 
-本文档说明 `KiSearch` 的数据备份和恢复策略。
+本文档说明 `kisearch` 的数据备份和恢复策略。
 
 ### CLI 命令（推荐）
 
@@ -46,7 +46,7 @@ ki restore scope-name --from-snapshot --yes
 ### 核心数据目录
 
 ```
-KiSearch/
+kisearch/
 ├── kb/                          # 运行时数据目录
 │   ├── {scope}/                 # 每个 scope 独立目录
 │   │   ├── group-index.json     # Group 树索引 + source 块
@@ -103,10 +103,10 @@ done
 
 ```bash
 # 备份命令
-rsync -av KiSearch/kb/ /path/to/backup/kb/
+rsync -av kisearch/kb/ /path/to/backup/kb/
 
 # 或使用 tar 打包
-tar -czf KiSearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz KiSearch/kb/
+tar -czf kisearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz kisearch/kb/
 ```
 
 **备份内容**：

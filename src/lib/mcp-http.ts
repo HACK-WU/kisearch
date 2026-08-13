@@ -11,7 +11,7 @@
  *   - 传输：@modelcontextprotocol/sdk 的 StreamableHTTPServerTransport（node:http 内建，不引入 express）
  *   - 会话：每个 initialize 建一个 transport + 一个 McpServer（经工厂），共享模块级单例 engine
  *   - 鉴权：按绑定地址条件生效——回环免鉴权，非回环强制 Bearer Token
- *   - 单例：启动先探活 /healthz，已有健康 KiSearch 实例则复用退出；写 lock 文件供排查
+ *   - 单例：启动先探活 /healthz，已有健康 kisearch 实例则复用退出；写 lock 文件供排查
  */
 
 import http from 'node:http';
@@ -169,10 +169,10 @@ export function fetchHealthz(
   });
 }
 
-/** 探活：命中健康的 KiSearch 实例返回 true（供幂等单例判定） */
+/** 探活：命中健康的 kisearch 实例返回 true（供幂等单例判定） */
 export function probeHealthz(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
   return fetchHealthz(host, port, timeoutMs).then(
-    (info) => info?.ok === true && info?.name === 'KiSearch',
+    (info) => info?.ok === true && info?.name === 'kisearch',
   );
 }
 
@@ -305,7 +305,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     if (now - lastAuthLogAt < AUTH_LOG_INTERVAL_MS) return;
     lastAuthLogAt = now;
     process.stderr.write(
-      `[KiSearch] 鉴权失败（第 ${authFailures} 次）：来自 ${req.socket.remoteAddress ?? '未知'}，${reason}。` +
+      `[kisearch] 鉴权失败（第 ${authFailures} 次）：来自 ${req.socket.remoteAddress ?? '未知'}，${reason}。` +
         `请核对客户端 Authorization: Bearer 与 ki mcp token show 的输出完全一致（整段复制，勿手抄）。\n`,
     );
   };
@@ -358,7 +358,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     if (req.method === 'GET' && url.pathname === '/healthz') {
       sendJson(res, 200, {
         ok: true,
-        name: 'KiSearch',
+        name: 'kisearch',
         pid: process.pid,
         version: readKiVersion(),
         ...(advertiseAddr ? { host: advertiseAddr.host, port: advertiseAddr.port } : {}),
@@ -519,7 +519,7 @@ export function describeListenError(
   switch (err.code) {
     case 'EADDRINUSE':
       return (
-        `端口 ${host}:${port} 已被占用，但探活未发现健康的 KiSearch 实例。` +
+        `端口 ${host}:${port} 已被占用，但探活未发现健康的 kisearch 实例。` +
         `可能是非 ki 进程占用或存在残留实例。请更换端口（--port）或排查该端口的占用进程后重试。`
       );
     case 'EACCES':
@@ -542,7 +542,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
     /* 无 lock 文件视为未运行 */
   }
   const info = await fetchHealthz(host, port);
-  const running = info?.ok === true && info?.name === 'KiSearch';
+  const running = info?.ok === true && info?.name === 'kisearch';
   const tokenInfo = managedTokenInfo();
   console.log(
     JSON.stringify(
@@ -560,8 +560,8 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
           ? (info?.authFailures ?? 0) > 0
             ? `实例健康，但启动以来已有 ${info!.authFailures} 次鉴权失败：很可能有客户端 Token 配置错误，` +
               `请核对各 IDE 的 Authorization: Bearer 与 ki mcp token show 输出完全一致（服务端 stderr 日志有失败原因）。`
-            : '已有健康的 KiSearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
-          : '未探测到运行中的 KiSearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',
+            : '已有健康的 kisearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
+          : '未探测到运行中的 kisearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',
       },
       null,
       2,
@@ -571,7 +571,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
 
 /**
  * 启动 HTTP 版 ki mcp（幂等单例）。
- * 若目标 host:port 已有健康的 KiSearch 实例，则复用并 process.exit(0)。
+ * 若目标 host:port 已有健康的 kisearch 实例，则复用并 process.exit(0)。
  */
 export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void> {
   const { host, port, buildServer, allowedHosts, onShutdown } = opts;
@@ -581,7 +581,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   // ─── 幂等单例：先探活，命中健康实例则复用退出 ───
   if (await probeHealthz(host, port)) {
     process.stderr.write(
-      `已有健康的 KiSearch 实例在 ${probeHost(host)}:${port}，复用该实例，本次不再启动。\n`,
+      `已有健康的 kisearch 实例在 ${probeHost(host)}:${port}，复用该实例，本次不再启动。\n`,
     );
     onShutdown?.();
     process.exit(0);
@@ -619,7 +619,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   writeLockFile(host, port);
 
   process.stderr.write(
-    `KiSearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
+    `kisearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
       `（鉴权：${authEnabled ? '开启，需 Bearer Token' : '关闭，回环绑定'}）` +
       (webDir ? `；前端页面：http://${host}:${port}/` : '') +
       '\n',

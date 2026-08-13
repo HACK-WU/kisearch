@@ -81,7 +81,7 @@ export interface EmbeddingConfig {
   provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
   model: string;         // 模型名称
-  dimension: number;     // 向量维度（必须 === collection.dimension，KiSearch 固定 4096）
+  dimension: number;     // 向量维度（必须 === collection.dimension，kisearch 固定 4096）
   apiKey?: string;       // API 密钥：支持明文（sk-xxx）或环境变量引用（${VAR_NAME}）；
                          // 缺省则不解析（KI 层 fail-loud），不做任何隐式 env 回退
 }

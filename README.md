@@ -1,4 +1,4 @@
-# KiSearch
+# kisearch
 
 <p align="center">
   <strong>AI Agent 知识索引系统 · RAG 语义检索 + 结构化知识索引的结合体</strong>
@@ -34,22 +34,22 @@
 
 ## <a id="intro"></a>📖 项目介绍
 
-`KiSearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
+`kisearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
 > 底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） 
 
 ```
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
-交付层  KiSearch：Group 树导航 · Relation 热缓存 · 原文全文交付
+交付层  kisearch：Group 树导航 · Relation 热缓存 · 原文全文交付
 ```
 
-![KiSearch 架构](./assets/architecture.svg)
+![kisearch 架构](./assets/architecture.svg)
 
 ### 配套可视化：内置 Web 前端
 
-KiSearch 自带可视化前端 `web`，由 `ki mcp --http --web` 一并提供：浏览器打开 `http://127.0.0.1:7423/` 即可查看**总览**（scope / KB / 向量 / 注册 / 当前 scope 等状态）、**知识库浏览**（Group 树 + 文档列表 + 文件名模糊搜索）、**语义搜索**、**上传导入**、**知识写入**五个页面，便于在知识导入后验证写入效果、排查检索异常。
+kisearch 自带可视化前端 `web`，由 `ki mcp --http --web` 一并提供：浏览器打开 `http://127.0.0.1:7423/` 即可查看**总览**（scope / KB / 向量 / 注册 / 当前 scope 等状态）、**知识库浏览**（Group 树 + 文档列表 + 文件名模糊搜索）、**语义搜索**、**上传导入**、**知识写入**五个页面，便于在知识导入后验证写入效果、排查检索异常。
 
-![KiSearch Web 前端 · 总览](assets/overview.png)
+![kisearch Web 前端 · 总览](assets/overview.png)
 
 > 底层向量引擎 [zvec](https://github.com/alibaba/zvec) 的独立可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio) 仍可作为向量层的辅助调试工具单独使用（`zvec-studio --port 7861`），本项目内置前端不集成跳转入口。
 
@@ -63,9 +63,9 @@ ki mcp --http --web                      # 启动服务（提供静态页面 + /
 
 ## <a id="why-not-rag"></a>🆚 与常规 RAG 的差异
 
-常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。KiSearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
+常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。kisearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
 
-| 维度 | 常规 RAG | KiSearch |
+| 维度 | 常规 RAG | kisearch |
 |------|---------|----------|
 | **知识组织** | 无序 chunk，无层级关系 | Group 树 + Relation 结构化索引，知识有归属有层级 |
 | **检索结果** | chunk 片段（可能断裂、缺上下文） | 原文全文（命中时可直接引用原文） |
@@ -77,7 +77,7 @@ ki mcp --http --web                      # 启动服务（提供静态页面 + /
 | **跨会话** | 一次性检索，无积累 | 长期记忆库，Agent 沉淀的知识持续积累 |
 | **写入校验** | 无约束，随意写入 | scope 隔离 + WAL 原子写入 + 幂等覆盖更新 |
 
-> **一句话**：常规 RAG 解决"搜得到"，KiSearch 同时解决"搜得到 + 看得见 + 定位到原文"。
+> **一句话**：常规 RAG 解决"搜得到"，kisearch 同时解决"搜得到 + 看得见 + 定位到原文"。
 
 ## <a id="concepts"></a>🧩 核心概念
 
@@ -108,10 +108,10 @@ ki mcp --http --web                      # 启动服务（提供静态页面 + /
 
 ```bash
 # 方式一：一键安装 CLI（推荐）
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/KiSearch/master/scripts/install-latest.sh | bash
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/scripts/install-latest.sh | bash
 
 # 方式二：源码安装（开发 & CLI）
-git clone git@github.com:HACK-WU/KiSearch.git && cd KiSearch
+git clone git@github.com:HACK-WU/kisearch.git && cd kisearch
 npm install && npm link
 # 编译 zvec 引擎（必需）：vector-client 从 dist/zvec-engine 导入运行时，跳过会在 ki mcp 启动时报
 # 'Cannot find module ../../dist/zvec-engine/index.js'
@@ -360,14 +360,25 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 ```bash
 # 一键安装本仓库全部 skill 到目标项目
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/KiSearch -t /path/to/your-project
+  bash -s -- install --repo HACK-WU/kisearch -t /path/to/your-project
 
 # 只安装指定 skill（如 codekb-skill）
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/KiSearch -n codekb-skill -t /path/to/your-project
+  bash -s -- install --repo HACK-WU/kisearch -n codekb-skill -t /path/to/your-project
 ```
 
 > 该安装器基于 `npx skills`（需 Node.js >= 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update`（更新）、`remove`（删除）、`list`（查看）子命令。安装后直接对话即可触发对应 skill。
+
+**安装本仓库的 Rules**（当前安装器仅支持 Skills，Rules 需手动放置）：
+
+```bash
+# 将记忆行为总控规则安装到目标项目的 rules/ 目录
+mkdir -p /path/to/your-project/rules
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/rules/ai-codekb-memory.md \
+  -o /path/to/your-project/rules/ai-codekb-memory.md
+```
+
+> 存量用户迁移提示：旧版 `ki setup` 使用 `~/.ki-targets` 记录目标目录，现已由 HACK-WU/skills 安装器的 `~/.skill-targets`（或当前目录 `./.skill-targets`）取代，旧配置文件不再生效；如需保留原目标列表，请将其内容迁移到新配置文件。
 
 ## <a id="constraints"></a>🔒 设计约束
 

@@ -1,6 +1,6 @@
 # 配置指南
 
-KiSearch 通过一个 YAML/JSON 配置文件集中管理数据目录、向量引擎、Embedding、scope 映射与导入/清洗等行为。本文档说明配置文件的查找顺序、全部配置项及其默认值，并给出完整示例。
+kisearch 通过一个 YAML/JSON 配置文件集中管理数据目录、向量引擎、Embedding、scope 映射与导入/清洗等行为。本文档说明配置文件的查找顺序、全部配置项及其默认值，并给出完整示例。
 
 ---
 
@@ -73,7 +73,7 @@ Embedding 提供商配置。
 | `provider` | `string` | `siliconflow` | `siliconflow` \| `openai-compatible`（OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
 | `baseURL` | `string` | `https://api.siliconflow.cn/v1` | API 端点，决定实际对接的提供商 |
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
-| `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（KiSearch 固定 4096） |
+| `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
 
 ```yaml

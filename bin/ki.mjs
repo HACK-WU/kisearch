@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * KiSearch CLI 入口
+ * kisearch CLI 入口
  * 
  * 使用方式：
  *   ki <command> [options]

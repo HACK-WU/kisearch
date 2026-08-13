@@ -340,7 +340,7 @@ describe('C. health-check —— 渲染与图标', () => {
       fail: 0,
     };
     const text = renderHealthReport(report);
-    assert.match(text, /KiSearch 配置诊断/);
+    assert.match(text, /kisearch 配置诊断/);
     assert.match(text, /1 通过, 0 警告, 0 失败/);
   });
 });

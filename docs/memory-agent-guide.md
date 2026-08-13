@@ -498,7 +498,7 @@ ki manage-index --scope ${scope}-memory --action create --parent "父" --name "�
 └── archive.md                           # 近期工作归档（AI 直接读写）
 ```
 
-> 当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/KiSearch/kb/`
+> 当前环境实际路径：`/root/.npm/node_modules/lib/node_modules/kisearch/kb/`
 >
 > **文件管理权责**：`index.json` / `group-index.json` / `relations-cache.json` 由 ki 命令自动管理；`AGENTS.md` / `archive.md` 由 AI 通过文件读写工具直接操作。
 

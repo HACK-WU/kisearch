@@ -1,6 +1,6 @@
 ## 架构说明
 
-`knowledge-index`（KiSearch）是一个**本地知识索引与向量检索系统**，基于 zvec 向量引擎，提供完整的知识管理能力。
+`knowledge-index`（kisearch）是一个**本地知识索引与向量检索系统**，基于 zvec 向量引擎，提供完整的知识管理能力。
 
 核心能力：
 

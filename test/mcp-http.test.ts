@@ -28,7 +28,7 @@ import {
 
 // ─── 测试用最小 McpServer 工厂（不触碰向量引擎） ───
 function buildTestServer(): McpServer {
-  const server = new McpServer({ name: 'KiSearch', version: '0.0.0-test' });
+  const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
   }));
@@ -134,12 +134,12 @@ describe('/healthz 探活', () => {
     await srv.close();
   });
 
-  it('即使开启鉴权，/healthz 仍免鉴权返回 KiSearch 标识', async () => {
+  it('即使开启鉴权，/healthz 仍免鉴权返回 kisearch 标识', async () => {
     const res = await fetch(`${srv.base}/healthz`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as { ok: boolean; name: string; pid: number };
     assert.equal(body.ok, true);
-    assert.equal(body.name, 'KiSearch');
+    assert.equal(body.name, 'kisearch');
     assert.equal(typeof body.pid, 'number');
   });
 });
@@ -277,7 +277,7 @@ describe('fetchHealthz + advertiseAddr', () => {
   it('/healthz 回体携带 advertiseAddr 的 host/port', async () => {
     const info = await fetchHealthz('127.0.0.1', srv.port);
     assert.ok(info, '应返回 healthz 信息');
-    assert.equal(info!.name, 'KiSearch');
+    assert.equal(info!.name, 'kisearch');
     assert.equal(info!.host, '0.0.0.0');
     assert.equal(info!.port, 7423);
   });
@@ -285,7 +285,7 @@ describe('fetchHealthz + advertiseAddr', () => {
   it("localhost 归一到 127.0.0.1，探活同一实例（NEG-01）", async () => {
     const info = await fetchHealthz('localhost', srv.port);
     assert.ok(info, "localhost 应归一为 127.0.0.1 并命中同一实例");
-    assert.equal(info!.name, 'KiSearch');
+    assert.equal(info!.name, 'kisearch');
   });
 });
 

@@ -220,7 +220,7 @@ export function statusIcon(status: HealthStatus): string {
 /** 渲染报告为多行文本（doctor stdout / mcp stderr 共用） */
 export function renderHealthReport(report: HealthReport): string {
   const lines: string[] = [];
-  lines.push('KiSearch 配置诊断');
+  lines.push('kisearch 配置诊断');
   lines.push('━━━━━━━━━━━━━━━━');
   const nameWidth = Math.max(...report.items.map((i) => i.name.length), 8);
   for (const item of report.items) {

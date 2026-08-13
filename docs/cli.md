@@ -944,7 +944,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **条件鉴权**：绑定回环地址时无网络暴露面，免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时必须提供 Token，否则拒绝启动。Token 来源三级优先：`--token` > `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`，**绝不写入配置文件**；非回环启动时会明示本次生效的 Token 来源。
 >
-> **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 KiSearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
+> **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
 >
 > **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, hint }` JSON，用于确认单例是否在跑、由谁持有；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
@@ -1434,7 +1434,7 @@ wiki-output/
 
 ## 相关文档
 
-- [架构与协作关系](./architecture.md) - 了解 KiSearch 与向量数据库的分层关系
+- [架构与协作关系](./architecture.md) - 了解 kisearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
 - [scan-kb 子命令详解](./scan-kb.md) - 含 `import`、`diff` 的详细说明（原文直导 / 增量直连）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案

@@ -9,7 +9,7 @@
  *   - tag：单值 STRING 字段，写入时统一转小写（实现 D2「== 忽略大小写」）
  *   - scope：单值 STRING 字段，一 doc 一个 scope，查询按 scope 过滤
  *   - doc id = sha256(text + scope) 截 32（S-03 generateDocId，幂等 upsert）
- *   - 检索走 hybridSearch（queryText 语义 + fts 关键词 + RRF，KiSearch 召回主路径）
+ *   - 检索走 hybridSearch（queryText 语义 + fts 关键词 + RRF，kisearch 召回主路径）
  *   - content 字段兼作 FTS 字段（jieba 分词）
  */
 

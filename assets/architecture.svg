@@ -60,7 +60,7 @@
 
   <!-- ============ 2. 核心引擎（缩小底部间隙）============ -->
   <rect x="20" y="166" width="900" height="520" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
-  <text x="470" y="186" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">核 心 引 擎（KiSearch Core）</text>
+  <text x="470" y="186" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">核 心 引 擎（kisearch Core）</text>
   <text x="470" y="202" text-anchor="middle" font-size="9.5" fill="#94a3b8">左侧：数据存储 + 输入　｜　中间：记忆库（长期沉淀）　｜　右侧：查询层（全高贯通）</text>
 
   <!-- ===== 左侧：数据存储层大框 ===== -->

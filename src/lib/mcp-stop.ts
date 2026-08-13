@@ -105,9 +105,9 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
   };
   addTarget(readLockPid(stdioLockPath), 'stdio');
   addTarget(readLockPid(httpLockPath), 'http');
-  // healthz 兜底：lock 丢失但服务仍在跑（返回体自带 KiSearch 身份，无需再校验 cmdline）
+  // healthz 兜底：lock 丢失但服务仍在跑（返回体自带 kisearch 身份，无需再校验 cmdline）
   const live = await fetchHealthz(opts.host, opts.port);
-  if (live?.ok === true && live?.name === 'KiSearch' && typeof live.pid === 'number') {
+  if (live?.ok === true && live?.name === 'kisearch' && typeof live.pid === 'number') {
     addTarget(live.pid, 'http');
   }
 

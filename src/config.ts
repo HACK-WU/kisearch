@@ -75,7 +75,7 @@ function buildConfigTemplateValues(kiRoot: string): ConfigTemplateValues {
  */
 function renderConfigYaml(v: ConfigTemplateValues): string {
   const now = new Date().toISOString();
-  return `# KiSearch 配置文件
+  return `# kisearch 配置文件
 # 生成时间: ${now}
 # 文档: https://github.com/your-repo/knowledge-indexer
 
