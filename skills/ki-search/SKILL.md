@@ -148,6 +148,15 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 - `tags` 可选，逗号分隔多个，叠加在默认 `ki-search` 之上
 - `vector` 可选，默认 `true`；`false` 时仅写 KB 层（不产生 memoryId，不可被 `ki_search` 召回）
 
+### 批量写入策略（重要）
+
+> `ki_bulk_sync_relation` 虽然支持一次传大量 `items`，但**组织大量文档数据本身耗时、占上下文、易出错**。推荐**分批调用**，每批 ≤5 条：
+> - 3~5 条：一次调用
+> - 6~10 条：分 2 批（每批 ≤5 条）
+> - >10 条：每批 5 条，分批调用
+>
+> 每次调用是独立的批量写入（各自一次 embed + 一次向量写入），服务端总耗时几乎不变，但**组织成本更低、单批失败只重试该批**。
+
 ### Group 管理
 
 - 创建：`ki_manage_index_create(scope, parent, name)`

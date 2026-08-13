@@ -845,6 +845,8 @@ ki sync-relation -s my-project -i batch-input.json
 
 **批量模式默认向量化**（`--no-vector` 关闭）：一次 embedding HTTP + 一次向量批量写入，取代多次单条调用的 N 次独立 embedding + N 次串行写入，性能显著提升。
 
+> **批量写入策略**：虽然一次可传大量 `items`，但一次性组织大量文档数据耗时、占上下文、易出错。推荐**分批调用，每批 ≤5 条**（分多次 `--input` 文件调用）。服务端每次仍是批量 embed + 批量写入，总耗时几乎不变，但组织成本更低、单批失败只重试该批。
+
 `batch-input.json` 格式：
 ```json
 {

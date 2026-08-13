@@ -283,9 +283,12 @@ ki sync-relation \
 | 条数 | 方式 |
 |------|------|
 | 1~2 条 | `ki_sync_relation(scope, group, relation, module_info)` 逐条写 |
-| ≥3 条 | `ki_bulk_sync_relation(scope, items)` 批量写（一次 embed + 一次向量写入） |
+| 3~5 条 | `ki_bulk_sync_relation(scope, items)` 一次批量写（一次 embed + 一次向量写入） |
+| >5 条 | `ki_bulk_sync_relation(scope, items)` **分 2~3 批调用**（每批 ≤5 条） |
 
 > CLI 等价：`ki sync-relation -s <scope> -i batch.json`（默认向量化；`--no-vector` 非向量化）
+
+> **分批原因**：`ki_bulk_sync_relation` 支持一次传大量 `items`，但一次性组织大量文档数据耗时、占上下文、易出错。分批次调用（每批 ≤5 条）时，服务端每次仍是批量 embed + 批量写入（总耗时几乎不变），但组织成本更低、单批失败只重试该批。
 
 ### 5.1 单条写入（sync-relation）
 
