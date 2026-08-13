@@ -4,7 +4,7 @@
 其他一切 → ki 记忆，按内容类型分流：
 
 - 代码要点（函数/流程/模式） → `rules/ai-codekb-memory.md`
-- 模块架构、API 设计 → `codekb-skill`
+- 模块架构、API 设计 → `ki-search`
 - 项目背景、进度、偏好 → `rules/ai-codekb-memory.md`
 
 - 内置示例："用中文回复"、"不要擅自提交代码"

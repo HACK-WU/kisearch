@@ -350,7 +350,7 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 
 | Skill | 场景 | 核心能力 |
 |-------|------|---------|
-| [`skills/codekb-skill/SKILL.md`](./skills/codekb-skill/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
+| [`skills/ki-search/SKILL.md`](./skills/ki-search/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
 | [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md) | 记忆系统行为总控 | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
 
 > 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
@@ -362,9 +362,9 @@ ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
   bash -s -- install --repo HACK-WU/kisearch -t /path/to/your-project
 
-# 只安装指定 skill（如 codekb-skill）
+# 只安装指定 skill（如 ki-search）
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/kisearch -n codekb-skill -t /path/to/your-project
+  bash -s -- install --repo HACK-WU/kisearch -n ki-search -t /path/to/your-project
 ```
 
 > 该安装器基于 `npx skills`（需 Node.js >= 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update`（更新）、`remove`（删除）、`list`（查看）子命令。安装后直接对话即可触发对应 skill。

@@ -17,7 +17,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 **功能**：
 - 用户手动触发时创建/更新 AGENTS.md（如用户说"初始化 AGENTS.md"、"刷新缓存"）
 - 查询 ki 获取真实索引数据填充项目记忆索引（`${scope}-memory`）
-- 代码知识库（`${scope}`）索引不写入 AGENTS.md，查询走 `codekb-skill` 直连 ki
+- 代码知识库（`${scope}`）索引不写入 AGENTS.md，查询走 `ki-search` 直连 ki
 - 用户画像与近期工作直接存储于 AGENTS.md，不依赖 ki
 - 无真实数据时用示例格式兜底（标注 ⚠️）
 - 同步近期工作记录（7 天内）
