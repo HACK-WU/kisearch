@@ -9,6 +9,13 @@ import { loadConfig } from './config.js';
 // ─── 数据版本 ───
 export const CURRENT_DATA_VERSION = 1;
 
+// ─── 服务身份 ───
+/**
+ * MCP 服务身份标识（healthz `name` 契约 + McpServer name + 探活判断共用）。
+ * 写入方与读取方必须引用同一常量，避免改名时手动同步遗漏导致单例复用失效。
+ */
+export const SERVICE_NAME = 'kisearch';
+
 // ─── 评分相关 ───
 export const MIN_RECORD_INTERVAL_MINUTES = 5;
 export const MAX_USE_COUNT = 10;

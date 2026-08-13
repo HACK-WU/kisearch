@@ -77,7 +77,7 @@ function renderConfigYaml(v: ConfigTemplateValues): string {
   const now = new Date().toISOString();
   return `# kisearch 配置文件
 # 生成时间: ${now}
-# 文档: https://github.com/your-repo/knowledge-indexer
+# 文档: https://github.com/HACK-WU/kisearch
 
 # ─── 基础路径 ───
 # KB 源数据目录：存放各 scope 的 markdown / ai-results.json / group-index.json

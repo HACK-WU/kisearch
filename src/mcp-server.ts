@@ -14,6 +14,7 @@ import { closeEngine } from './lib/vector-client.js';
 import { loadConfig } from './lib/config.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 import { readKiVersion, startVersionGuard } from './lib/version-guard.js';
+import { SERVICE_NAME } from './lib/constants.js';
 import { detectUnknownFlags, parseIntArg, failJson } from './lib/cli-args.js';
 import {
   startHttpMcpServer,
@@ -40,7 +41,7 @@ import {
  */
 export function buildKiMcpServer(): McpServer {
   const server = new McpServer({
-    name: 'kisearch',
+    name: SERVICE_NAME,
     version: readKiVersion(),
   });
   registerQueryGroupTool(server);
@@ -361,7 +362,7 @@ export async function startMcpServer(): Promise<void> {
   if (opts.http) {
     // 命中健康实例 → 复用退出，全程不做预检
     const live = await fetchHealthz(opts.host, opts.port);
-    if (live?.ok === true && live?.name === 'kisearch') {
+    if (live?.ok === true && live?.name === SERVICE_NAME) {
       process.stderr.write(
         `已有健康的 kisearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
       );
@@ -391,7 +392,7 @@ export async function startMcpServer(): Promise<void> {
       /* 配置异常交由后续预检报告，此处用默认地址探活 */
     }
     const live = await fetchHealthz(guardHost, guardPort);
-    if (live?.ok === true && live?.name === 'kisearch') {
+    if (live?.ok === true && live?.name === SERVICE_NAME) {
       // 展示用地址同步归一（0.0.0.0 等监听写法不是可连接地址）
       const connectHost = probeHost(guardHost);
       process.stderr.write(
@@ -440,7 +441,7 @@ export async function startMcpServer(): Promise<void> {
   }
 
   // NEG-13：长驻进程版本自检 banner + 升级监听（升级后提示重启）
-  const stopVersionGuard = startVersionGuard('kisearch');
+  const stopVersionGuard = startVersionGuard(SERVICE_NAME);
 
   // ─── HTTP 共享单例模式（多 IDE 共享同一持锁进程） ───
   if (opts.http) {

@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 
 import { getHttpLockPath, fetchHealthz } from './mcp-http.js';
 import { getStdioLockPath, pidAlive } from './mcp-stdio-lock.js';
+import { SERVICE_NAME } from './constants.js';
 
 /** 待关闭的目标进程 */
 interface StopTarget {
@@ -107,7 +108,7 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
   addTarget(readLockPid(httpLockPath), 'http');
   // healthz 兜底：lock 丢失但服务仍在跑（返回体自带 kisearch 身份，无需再校验 cmdline）
   const live = await fetchHealthz(opts.host, opts.port);
-  if (live?.ok === true && live?.name === 'kisearch' && typeof live.pid === 'number') {
+  if (live?.ok === true && live?.name === SERVICE_NAME && typeof live.pid === 'number') {
     addTarget(live.pid, 'http');
   }
 

@@ -23,6 +23,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
 import { managedTokenInfo } from './mcp-token.js';
+import { SERVICE_NAME } from './constants.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
 let apiHandlerPromise: Promise<typeof import('./mcp-http-api.js')> | null = null;
@@ -172,7 +173,7 @@ export function fetchHealthz(
 /** 探活：命中健康的 kisearch 实例返回 true（供幂等单例判定） */
 export function probeHealthz(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
   return fetchHealthz(host, port, timeoutMs).then(
-    (info) => info?.ok === true && info?.name === 'kisearch',
+    (info) => info?.ok === true && info?.name === SERVICE_NAME,
   );
 }
 
@@ -358,7 +359,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     if (req.method === 'GET' && url.pathname === '/healthz') {
       sendJson(res, 200, {
         ok: true,
-        name: 'kisearch',
+        name: SERVICE_NAME,
         pid: process.pid,
         version: readKiVersion(),
         ...(advertiseAddr ? { host: advertiseAddr.host, port: advertiseAddr.port } : {}),
@@ -542,7 +543,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
     /* 无 lock 文件视为未运行 */
   }
   const info = await fetchHealthz(host, port);
-  const running = info?.ok === true && info?.name === 'kisearch';
+  const running = info?.ok === true && info?.name === SERVICE_NAME;
   const tokenInfo = managedTokenInfo();
   console.log(
     JSON.stringify(
