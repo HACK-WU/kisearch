@@ -147,6 +147,8 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 
 - `tags` 可选，逗号分隔多个，叠加在默认 `ki-search` 之上
 - `vector` 可选，默认 `true`；`false` 时仅写 KB 层（不产生 memoryId，不可被 `ki_search` 召回）
+- `items` 单次最多 **50 条**（超出需分批调用）；同批出现重复 `(group, relation)` 时，后一条覆盖前一条，前一条不再独立写向量
+- 返回值：`results[].vectorStored` 为该条向量是否写入（主内容 `ki-search` 成功即可召回）；顶层 `vectorStored` 仅在**所有条目全部写入成功**时为 `true`；`hints`（可选）含 Group 路径解析提示
 
 ### 批量写入策略（重要）
 

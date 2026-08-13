@@ -386,6 +386,8 @@ export type BulkSyncRelationResult =
       skipped: number;
       results: BulkSyncResultItem[];
       vectorStored: boolean;
+      /** Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），按出现顺序收集 */
+      hints?: string[];
     }
   | { ok: false; error: string };
 
@@ -427,6 +429,7 @@ export async function executeBulkSyncRelation(params: {
 
     // ─── 阶段 1：循环 syncSingleRelation 改 cache + 收集 entries ───
     const results: BulkSyncResultItem[] = [];
+    const hints: string[] = [];
     let failed = 0;
 
     // Group 路径自动补全：读取一次 groupIndex 供所有 item 复用
@@ -512,6 +515,8 @@ export async function executeBulkSyncRelation(params: {
           if (resolved.matched) {
             resolvedGroup = resolved.resolvedPath;
           }
+          // 透出路径解析提示（自动补全 / 多候选歧义 / 部分匹配 / 未匹配），供调用方感知路径是否精确命中
+          if (resolved.hint) hints.push(resolved.hint);
         }
 
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
@@ -561,46 +566,93 @@ export async function executeBulkSyncRelation(params: {
       }
     }
 
+    // ─── 阶段 1.5：同批重复 (group, relation) 去重 ───
+    // 同批出现同 group+relation（module_info 可能不同）时，后一条覆盖前一条
+    // （对齐单条「重复 sync = 更新」语义）。前一条的向量 entries 剔除，避免：
+    //   1) 两次写入产生两个不同 docId 的孤儿向量；
+    //   2) 后一条 stale 清理按自己的 newContentIds 误删前一条刚写入的向量（M1）。
+    let filteredEntries = allEntries;
+    let filteredMetas = entryMetas;
+    // 被去重覆盖的条目下标集合：独立于 vectorReason 跟踪，供顶层 vectorStored 计算区分
+    // 「去重覆盖」（非失败）与「部分/全部失败」（失败）——避免二者混用导致顶层误判。
+    const dedupCovered = new Set<number>();
+    if (vector) {
+      const lastIdxByRel = new Map<string, number>();
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].skipped) continue;
+        lastIdxByRel.set(`${results[i].group}\u0000${results[i].relation}`, i);
+      }
+      const keep = new Array<boolean>(entryMetas.length).fill(true);
+      for (let i = 0; i < entryMetas.length; i++) {
+        const m = entryMetas[i];
+        if (results[m.itemIdx]?.skipped) continue;
+        if (lastIdxByRel.get(`${m.group}\u0000${m.relation}`) !== m.itemIdx) {
+          keep[i] = false;
+          dedupCovered.add(m.itemIdx);
+        }
+      }
+      if (dedupCovered.size > 0) {
+        filteredEntries = allEntries.filter((_, i) => keep[i]);
+        filteredMetas = entryMetas.filter((_, i) => keep[i]);
+        // 被覆盖的条目标记未独立写向量（内容向量由批次内后一条覆盖写入）
+        for (const i of dedupCovered) {
+          if (results[i] && !results[i].skipped) {
+            results[i].vectorStored = false;
+            results[i].vectorReason = '批次内存在同 group/relation 的后续条目，内容向量由后续条目覆盖写入';
+          }
+        }
+      }
+    }
+
     // ─── 阶段 2：批量向量写入（一次 embedding HTTP + 一次 worker upsert） ───
     let vectorStored = false;
-    if (vector && allEntries.length > 0) {
+    if (vector && filteredEntries.length > 0) {
       try {
         const avail = await ensureVectorAvailable();
         if (!avail.available) {
           // 向量服务不可用：所有 item 标记向量未写入，但不阻塞 KB 层
           for (let i = 0; i < results.length; i++) {
             if (results[i].skipped) continue;
+            if (results[i].vectorReason) continue; // 已被去重标记，不再覆盖
             results[i].vectorStored = false;
             results[i].vectorReason = avail.reason || '向量服务不可用';
           }
         } else {
-          const bulkResult = await vectorBulkStore({ scope, entries: allEntries });
+          const bulkResult = await vectorBulkStore({ scope, entries: filteredEntries });
 
           // ─── 阶段 3：拆分结果 + 回写 memoryId/memoryIds ───
-          // 按 itemIdx 分组：每个 item 的 content entries（index >= 1 起）的 memoryId 收集为 memoryIds，
-          // ki-search 条（contentTag === 'ki-search'）的 memoryId 作为主 memoryId
+          // 按 itemIdx 分组：每个 item 的 content entries 的 memoryId 收集为 memoryIds，
+          // ki-search 条（contentTag === 'ki-search'）的 memoryId 作为主 memoryId。
           const itemContentIds: Map<number, { searchId?: string; allIds: string[] }> = new Map();
+          // 记录每个 item 的 content entries 是否全部成功（部分失败时不清理旧向量，避免删旧丢新）
+          const itemContentAllOk: Map<number, boolean> = new Map();
           const itemRelationIds: Map<number, string[]> = new Map();
 
           for (let j = 0; j < bulkResult.results.length; j++) {
             const r = bulkResult.results[j];
-            const meta = entryMetas[j];
-            if (!meta || !r.success || !r.memoryId) continue;
+            const meta = filteredMetas[j];
+            if (!meta) continue;
 
             if (meta.tagKind === 'content') {
               const entry = itemContentIds.get(meta.itemIdx) ?? { allIds: [] };
-              entry.allIds.push(r.memoryId);
-              if (meta.contentTag === 'ki-search') {
-                entry.searchId = r.memoryId;
+              if (r.success && r.memoryId) {
+                entry.allIds.push(r.memoryId);
+                if (meta.contentTag === 'ki-search') {
+                  entry.searchId = r.memoryId;
+                }
               }
               itemContentIds.set(meta.itemIdx, entry);
+              itemContentAllOk.set(meta.itemIdx, (itemContentAllOk.get(meta.itemIdx) ?? true) && r.success);
             } else {
               // relation 路径向量（ki-relation），不回写到 cache（cache 只记内容向量 docId）
               const ids = itemRelationIds.get(meta.itemIdx) ?? [];
-              ids.push(r.memoryId);
+              if (r.success && r.memoryId) ids.push(r.memoryId);
               itemRelationIds.set(meta.itemIdx, ids);
             }
           }
+
+          // 收集待删除的 stale docId（聚合一次 vectorDelete，避免 N 次串行删除稀释批量性能收益）
+          const staleIdsToDelete: string[] = [];
 
           // 回写到 cache
           for (const [itemIdx, ids] of itemContentIds) {
@@ -610,21 +662,17 @@ export async function executeBulkSyncRelation(params: {
             const groupData = cache.groups[group];
             const rel = groupData?.hot_relations.find((r) => r.text === relation);
             if (rel) {
-              // 清理旧 tag 向量：删除旧 memoryIds 中不在本次新 tag 集合的 docId
-              // （对齐单条模式 vectorWriteBack:725-740 的 #M1 数据守恒逻辑）
-              const customTags = itemCustomTags[itemIdx] ?? [];
-              const newContentIds = new Set([
-                generateDocId(items[itemIdx].module_info, scope, 'ki-search'),
-                ...customTags.map((t) => generateDocId(items[itemIdx].module_info, scope, t)),
-              ]);
-              const priorIds = rel.memoryIds ?? [];
-              const staleIds = priorIds.filter((id) => id && !newContentIds.has(id));
-              if (staleIds.length > 0) {
-                try {
-                  await vectorDelete({ scope, ids: staleIds });
-                } catch {
-                  // 旧 tag 清理失败不影响主流程（仅可能残留孤儿向量，delete 时 search 兜底可清）
-                }
+              const allOk = itemContentAllOk.get(itemIdx) ?? true;
+              if (allOk) {
+                // 本次内容向量全部写入成功，才清理旧 tag 向量（对齐单条模式 #M1 数据守恒）。
+                // 部分失败时保留旧向量，避免「删旧丢新」：新 tag 未写成功却把旧 tag 向量删了。
+                const customTags = itemCustomTags[itemIdx] ?? [];
+                const newContentIds = new Set([
+                  generateDocId(items[itemIdx].module_info, scope, 'ki-search'),
+                  ...customTags.map((t) => generateDocId(items[itemIdx].module_info, scope, t)),
+                ]);
+                const priorIds = rel.memoryIds ?? [];
+                staleIdsToDelete.push(...priorIds.filter((id) => id && !newContentIds.has(id)));
               }
 
               if (ids.allIds.length > 0) {
@@ -634,17 +682,33 @@ export async function executeBulkSyncRelation(params: {
                 rel.memoryId = ids.searchId;
               }
             }
-            // 透出向量写入状态
-            if (results[itemIdx] && !results[itemIdx].skipped) {
-              results[itemIdx].vectorStored = true;
+            // 透出向量写入状态：有内容 entry 即视为已写入（对齐单条 vectorWriteBack「非全部失败即 stored」语义）
+            if (results[itemIdx] && !results[itemIdx].skipped && !results[itemIdx].vectorReason) {
+              results[itemIdx].vectorStored = ids.allIds.length > 0;
+              if (ids.allIds.length === 0) {
+                results[itemIdx].vectorReason = '向量内容写入全部失败';
+              } else if (itemContentAllOk.get(itemIdx) === false) {
+                // 有成功但存在失败 entry（ki-search 或自定义 tag 有缺失）：
+                // 主内容仍可召回，但部分 tag 向量缺失；已保留旧向量，标记 reason 供调用方感知
+                results[itemIdx].vectorReason = '部分内容向量写入失败，已保留旧向量（rebuild-vector 可恢复）';
+              }
             }
           }
 
-          // 检查是否有 item 的向量全部失败
+          // 聚合一次删除 stale 向量（先写后删，写失败不删旧，保持数据守恒）
+          if (staleIdsToDelete.length > 0) {
+            try {
+              await vectorDelete({ scope, ids: staleIdsToDelete });
+            } catch {
+              // 旧 tag 清理失败不影响主流程（仅可能残留孤儿向量，delete 时 search 兜底可清）
+            }
+          }
+
+          // 检查是否有 item 的向量全部失败（无任何成功 entry）
           const failedItems = new Set<number>();
           for (let j = 0; j < bulkResult.results.length; j++) {
             if (!bulkResult.results[j].success) {
-              const meta = entryMetas[j];
+              const meta = filteredMetas[j];
               if (meta) failedItems.add(meta.itemIdx);
             }
           }
@@ -653,20 +717,27 @@ export async function executeBulkSyncRelation(params: {
             const contentIds = itemContentIds.get(itemIdx);
             const relIds = itemRelationIds.get(itemIdx);
             if ((!contentIds || contentIds.allIds.length === 0) && (!relIds || relIds.length === 0)) {
-              if (results[itemIdx] && !results[itemIdx].skipped) {
+              if (results[itemIdx] && !results[itemIdx].skipped && !results[itemIdx].vectorReason) {
                 results[itemIdx].vectorStored = false;
                 results[itemIdx].vectorReason = '向量写入全部失败';
               }
             }
           }
 
-          vectorStored = bulkResult.failed === 0;
+          // 顶层 vectorStored：排除 skipped 与去重覆盖条目后，
+          // 所有条目都必须「完全成功」（vectorStored=true 且无失败 reason）才为 true。
+          // 任一「部分失败」（vectorStored=true 但带 vectorReason）或「全部失败」→ false。
+          const activeItems = results.filter((r, i) => !r.skipped && !dedupCovered.has(i));
+          vectorStored =
+            activeItems.length > 0 &&
+            activeItems.every((r) => r.vectorStored === true && !r.vectorReason);
         }
       } catch (err) {
         // 向量批量写入异常：不阻塞 KB 层，标记所有未跳过 item
         const reason = (err as Error).message;
         for (let i = 0; i < results.length; i++) {
           if (results[i].skipped) continue;
+          if (results[i].vectorReason) continue; // 已被去重标记，不再覆盖
           results[i].vectorStored = false;
           results[i].vectorReason = reason;
         }
@@ -708,6 +779,7 @@ export async function executeBulkSyncRelation(params: {
       skipped: skippedCount,
       results,
       vectorStored,
+      ...(hints.length > 0 ? { hints } : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

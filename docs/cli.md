@@ -845,6 +845,8 @@ ki sync-relation -s my-project -i batch-input.json
 
 **批量模式默认向量化**（`--no-vector` 关闭）：一次 embedding HTTP + 一次向量批量写入，取代多次单条调用的 N 次独立 embedding + N 次串行写入，性能显著提升。
 
+> ⚠️ **行为变更（breaking）**：旧版 `sync-relation --input` 走 `syncBatch`，参数虽叫 `vector=true` 但**实际只写 KB 层**（不产生向量与 `memoryId`）。新版批量模式默认真正向量化——存量调用方若依赖旧的「仅 KB」行为，需显式加 `--no-vector` 保持原语义。
+
 > **批量写入策略**：虽然一次可传大量 `items`，但一次性组织大量文档数据耗时、占上下文、易出错。推荐**分批调用，每批 ≤5 条**（分多次 `--input` 文件调用）。服务端每次仍是批量 embed + 批量写入，总耗时几乎不变，但组织成本更低、单批失败只重试该批。
 
 `batch-input.json` 格式：
@@ -1053,10 +1055,13 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `scope` | string | 否 | 项目隔离标识（省略则用 `default`；strict 模式下必须传且须在白名单内） |
-| `items` | array | 是 | 批量条目，每项含 `group`（Group 路径）、`relation`（Relation 名称）、`module_info`（KB Markdown）、`tags`（可选，自定义标签，逗号分隔） |
+| `items` | array | 是 | 批量条目（**单次最多 50 条**，超出请分批调用），每项含 `group`（Group 路径）、`relation`（Relation 名称）、`module_info`（KB Markdown）、`tags`（可选，自定义标签，逗号分隔） |
 | `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层） |
 
-> 返回：`{ ok, scope, total, succeeded, failed, skipped, results: [{ group, relation, evicted, contentTags, vectorStored, vectorReason?, wikiSynced?, wikiFile?, wikiReason?, skipped?, skipReason? }], vectorStored }`
+> 返回：`{ ok, scope, total, succeeded, failed, skipped, results: [{ group, relation, evicted, contentTags, vectorStored, vectorReason?, wikiSynced?, wikiFile?, wikiReason?, skipped?, skipReason? }], vectorStored, hints? }`
+> - `results[].vectorStored`（逐条）：该条**主内容向量（`ki-search`）是否成功写入**（成功即可被 `ki_search` 召回；部分自定义 tag 失败仍为 `true`，配合 `vectorReason` 感知不完整）
+> - `vectorStored`（顶层）：**所有需向量化的条目全部完整写入成功**才为 `true`；任一条失败（含部分 tag 失败）即为 `false`。⚠️ 注意：顶层与逐条粒度不同——顶层 `false` 不代表每条都失败，需结合 `results[].vectorStored`/`vectorReason` 定位
+> - `hints`（可选）：Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），供调用方感知路径是否精确命中
 
 #### `ki_manage_index_create`
 
