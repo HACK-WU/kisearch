@@ -15,7 +15,8 @@
 | 操作 | 数据实体 | 场景类型 | 说明 |
 |------|----------|----------|------|
 | 写入项目记忆/代码片段 | Relation + KB | 简单 CRUD | ki sync-relation 单条写入 |
-| 批量导入项目记忆 | Relation + KB | 简单 CRUD | ki scan-kb import 批量写入 |
+| 批量写入项目记忆 | Relation + KB | 简单 CRUD | ki_bulk_sync_relation 批量写入（MCP，一次 embed + 一次向量写入） |
+| 批量导入外部文档 | Relation + KB | 简单 CRUD | ki scan-kb import 批量写入 |
 | 读取项目记忆/代码片段 | Relation + KB | 简单 CRUD | ki get-module-info 读取原文 |
 | 写入用户画像/近期工作 | AGENTS.md 章节 | 文件读写 | 直接编辑 AGENTS.md（不经 ki） |
 | 读取用户画像/近期工作 | AGENTS.md 章节 | 文件读写 | 直接读取 AGENTS.md |

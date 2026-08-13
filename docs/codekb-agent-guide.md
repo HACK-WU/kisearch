@@ -26,8 +26,8 @@
   ④ 语义兜底    → ②/③ 未命中 → memory_recall → 仍无 → 问用户
 
 产生了项目代码知识 → 【只写 KB】
-  1~2 条 → ki sync-relation 逐条写
-  ≥3 条  → ki sync-relation --input <json> 批量写
+  1~2 条 → ki_sync_relation 逐条写
+  ≥3 条  → ki_bulk_sync_relation 批量写（一次 embed + 一次向量写入，比多次逐条调用快 N 倍）
   ❌ 用户喜好/项目记忆/临时信息 → 不写 KB
 ```
 
@@ -280,10 +280,12 @@ ki sync-relation \
 
 ### 写入方式：单条 vs 批量
 
-| 条数 | 命令 |
+| 条数 | 方式 |
 |------|------|
-| 1~2 条 | `ki sync-relation` 逐条写 |
-| ≥3 条 | `ki sync-relation --input <json>` 批量写 |
+| 1~2 条 | `ki_sync_relation(scope, group, relation, module_info)` 逐条写 |
+| ≥3 条 | `ki_bulk_sync_relation(scope, items)` 批量写（一次 embed + 一次向量写入） |
+
+> CLI 等价：`ki sync-relation -s <scope> -i batch.json`（默认向量化；`--no-vector` 非向量化）
 
 ### 5.1 单条写入（sync-relation）
 
@@ -309,39 +311,54 @@ ki sync-relation \
 - 超长 `--module-info`（>1000 字符）会收到警告，建议拆分多条或改用 `scan-kb import --source` 自动切分导入
 - **`sync-relation` 只写 relations-cache + local KB，不写 memory**
 
-### 5.2 批量写入（sync-relation --input）
+### 5.2 批量写入（ki_bulk_sync_relation）
 
-当单次写入 ≥3 条时，组织如下 JSON：
+当单次写入 ≥3 条时，调用 MCP 工具 `ki_bulk_sync_relation`（一次 embedding + 一次向量写入，比多次逐条调用快 N 倍）：
 
 ```json
 {
+  "scope": "${scope}",
   "items": [
     {
       "group": "完整Group路径",
       "relation": "Relation名称",
+      "module_info": "Markdown 内容",
+      "tags": "api,auth"
+    },
+    {
+      "group": "完整Group路径",
+      "relation": "另一条Relation",
       "module_info": "Markdown 内容"
     }
   ]
 }
 ```
 
-**执行命令**：
+- `tags` 可选：文档内容自定义标签（逗号分隔，叠加在默认 `ki-search` 之上）
+- `vector` 可选，默认 `true`；`false` 时仅写 KB 层（无 memoryId，不可被 `ki_search` 召回）
+- 各条目 `group` 自动补全路径；单条异常不中断整个批量
+
+**CLI 等价**（如需）：
 
 ```bash
 ki sync-relation --scope ${scope} --input /path/to/batch.json
 ```
 
-**真实输出示例**：
+**输出示例**：
 
 ```json
 {
   "ok": true,
+  "scope": "my-project",
+  "total": 2,
+  "succeeded": 2,
+  "failed": 0,
+  "skipped": 0,
   "results": [
-    { "relation": "条目1", "evicted": null, "wikiSynced": true },
-    { "relation": "条目2", "evicted": null, "wikiSynced": true }
+    { "group": "完整Group路径", "relation": "条目1", "evicted": null, "contentTags": ["ki-search", "api", "auth"], "vectorStored": true, "wikiSynced": true },
+    { "group": "完整Group路径", "relation": "条目2", "evicted": null, "contentTags": ["ki-search"], "vectorStored": true, "wikiSynced": true }
   ],
-  "added": 2,
-  "failed": 0
+  "vectorStored": true
 }
 ```
 

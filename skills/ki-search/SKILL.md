@@ -130,19 +130,23 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 | 条数 | 方式 |
 |------|------|
 | 1~2 | `ki_sync_relation(scope, group, relation, module_info)` |
-| ≥3 | `ki_sync_relation --input` 批量写（CLI） |
+| ≥3 | `ki_bulk_sync_relation(scope, items)` 批量写（MCP，一次 embed + 一次向量写入） |
 
 写入后必须刷新全景缓存。
 
-### 批量格式（sync-relation --input）
+### 批量格式（ki_bulk_sync_relation）
 
 ```json
 {
+  "scope": "项目名",
   "items": [
-    { "group": "Group路径", "relation": "名称", "module_info": "Markdown内容" }
+    { "group": "Group路径", "relation": "名称", "module_info": "Markdown内容", "tags": "api,auth" }
   ]
 }
 ```
+
+- `tags` 可选，逗号分隔多个，叠加在默认 `ki-search` 之上
+- `vector` 可选，默认 `true`；`false` 时仅写 KB 层（不产生 memoryId，不可被 `ki_search` 召回）
 
 ### Group 管理
 

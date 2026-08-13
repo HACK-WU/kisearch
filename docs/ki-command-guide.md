@@ -113,23 +113,28 @@ ki sync-relation \
 
 **`sync-relation` 同名覆盖**：Relation 名称相同时，自动覆盖原有内容。
 
-**批量模式**：当需一次性写入多条 Relation 时，使用 `--input` 指定 JSON 文件：
+**批量模式**：当需一次性写入多条 Relation 时，使用 `--input` 指定 JSON 文件。**批量模式默认向量化**（一次 embedding + 一次向量批量写入，比多次逐条调用快 N 倍）；`--no-vector` 关闭向量化：
 
 ```bash
 ki sync-relation --scope <scope> --input /path/to/batch.json
 ```
 
-`batch.json` 格式：
+`batch.json` 格式（`tags` 可选，自定义标签逗号分隔）：
 
 ```json
-[
-  {
-    "group": "目标Group路径",
-    "relation": "Relation名称",
-    "module-info": "Markdown内容"
-  }
-]
+{
+  "items": [
+    {
+      "group": "目标Group路径",
+      "relation": "Relation名称",
+      "module_info": "Markdown内容",
+      "tags": "api,auth"
+    }
+  ]
+}
 ```
+
+> 等价 MCP 工具：`ki_bulk_sync_relation(scope, items)`（AI Agent 场景推荐，无需经 CLI）
 
 ---
 

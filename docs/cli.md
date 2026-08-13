@@ -779,14 +779,14 @@ ki sync-relation \
 
 > **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `scan-kb import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
-> **非向量化模式（`--no-vector`）**：仅写 KB 层（relations-cache + local KB + Wiki 写回），**跳过向量写入**——不调用 embedding API、不产生 `memoryId`，写入的关系**无法被 `ki search` 召回**（只能通过 `query-group` / `get-module-info` 访问）。单条与批量模式均支持（**注：批量模式当前本就不做向量写入（历史现状），`--no-vector` 仅作显式声明**）：
+> **非向量化模式（`--no-vector`）**：仅写 KB 层（relations-cache + local KB + Wiki 写回），**跳过向量写入**——不调用 embedding API、不产生 `memoryId`，写入的关系**无法被 `ki search` 召回**（只能通过 `query-group` / `get-module-info` 访问）。单条与批量模式均支持：
 > ```bash
 > # 单条非向量化
 > ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --no-vector
 > # 批量非向量化
 > ki sync-relation -s <scope> -i batch.json --no-vector
 > ```
-> 单条模式返回值 `vectorStored: false` + `vectorReason` 说明；批量模式返回 `vector: false` 标注。
+> 单条模式返回值 `vectorStored: false` + `vectorReason` 说明；批量模式（向量化时）返回 `vectorStored: false` + 各条 `vectorReason` 说明。
 >
 > **MCP 工具 `ki_sync_relation` 同样支持**：入参 `vector: boolean`（默认 `true`），传 `false` 即非向量化——CLI 与 MCP 行为一致。
 
@@ -843,6 +843,8 @@ ki sync-relation \
 ki sync-relation -s my-project -i batch-input.json
 ```
 
+**批量模式默认向量化**（`--no-vector` 关闭）：一次 embedding HTTP + 一次向量批量写入，取代多次单条调用的 N 次独立 embedding + N 次串行写入，性能显著提升。
+
 `batch-input.json` 格式：
 ```json
 {
@@ -850,7 +852,8 @@ ki sync-relation -s my-project -i batch-input.json
     {
       "group": "项目/API",
       "relation": "用户登录接口",
-      "module_info": "## 登录流程\n用户输入账号密码后进入认证流程..."
+      "module_info": "## 登录流程\n用户输入账号密码后进入认证流程...",
+      "tags": "api,auth"
     },
     {
       "group": "项目/API",
@@ -861,24 +864,37 @@ ki sync-relation -s my-project -i batch-input.json
 }
 ```
 
+> - `tags` 可选：文档内容自定义标签（逗号分隔多个，叠加在默认 `ki-search` 之上，行为同单条模式 `--tags`）
+> - 各条目的 `group` 会做路径自动补全（对齐单条模式的 `resolveGroupPath` 逻辑）
+> - 单条写入异常不中断整个批量（该条标记 `skipped` + 计入 `failed`，其余继续）
+
 输出：
 ```json
 {
   "ok": true,
   "results": [
     {
+      "group": "项目/API",
       "relation": "用户登录接口",
       "evicted": null,
+      "contentTags": ["ki-search", "api", "auth"],
+      "vectorStored": true,
       "wikiSynced": true
     },
     {
+      "group": "项目/API",
       "relation": "数据查询接口",
       "evicted": null,
+      "contentTags": ["ki-search"],
+      "vectorStored": true,
       "wikiSynced": true
     }
   ],
   "total": 2,
-  "failed": 0
+  "succeeded": 2,
+  "failed": 0,
+  "skipped": 0,
+  "vectorStored": true
 }
 ```
 
@@ -959,7 +975,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
 | `ki_search` | 读 | 语义检索（hybrid 混合检索，输出 group/relation 定位字段） | `search` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
-| `ki_sync_relation` | 写 | 写入 Relation + 模块说明（可非向量化） | `sync-relation` |
+| `ki_sync_relation` | 写 | 写入单条 Relation + 模块说明（可非向量化） | `sync-relation` |
+| `ki_bulk_sync_relation` | 写 | 批量写入 Relation + 模块说明（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | `sync-relation --input` |
 | `ki_store` | 写 | 向量化存储单条知识 | `store` |
 | `ki_bulk_store` | 写 | 批量向量化存储知识 | `bulk-store` |
 | `ki_delete_relation` | 写 | 删除 Relation（cache + KB + wiki + 向量四层清理） | `delete-relation` |
@@ -1026,6 +1043,18 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `module_info` | string | 是 | 本地 KB Markdown 内容 |
 | `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层，无 memoryId、不可被 `ki_search` 召回） |
 | `tags` | string | 否 | 文档内容自定义标签（逗号分隔多个，叠加在默认 `ki-search` 之上，如 `"api,auth"`） |
+
+#### `ki_bulk_sync_relation`
+
+批量写入多条 Relation（一次 embedding + 一次向量写入，比多次并发调用 `ki_sync_relation` 快 N 倍）。适合一次沉淀多条知识时使用。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `scope` | string | 否 | 项目隔离标识（省略则用 `default`；strict 模式下必须传且须在白名单内） |
+| `items` | array | 是 | 批量条目，每项含 `group`（Group 路径）、`relation`（Relation 名称）、`module_info`（KB Markdown）、`tags`（可选，自定义标签，逗号分隔） |
+| `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层） |
+
+> 返回：`{ ok, scope, total, succeeded, failed, skipped, results: [{ group, relation, evicted, contentTags, vectorStored, vectorReason?, wikiSynced?, wikiFile?, wikiReason?, skipped?, skipReason? }], vectorStored }`
 
 #### `ki_manage_index_create`
 

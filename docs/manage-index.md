@@ -182,14 +182,17 @@ ki sync-relation \
   --input <jsonFile>
 ```
 
-**输入格式**：
+**批量模式默认向量化**（一次 embedding + 一次向量批量写入，比多次逐条调用快 N 倍）；`--no-vector` 关闭向量化（仅写 KB 层）。
+
+**输入格式**（`tags` 可选，自定义标签逗号分隔）：
 ```json
 {
   "items": [
     {
       "group": "设计文档/API",
       "relation": "用户登录",
-      "module_info": "# 用户登录\n..."
+      "module_info": "# 用户登录\n...",
+      "tags": "api,auth"
     },
     {
       "group": "设计文档/API",

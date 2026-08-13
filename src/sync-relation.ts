@@ -222,6 +222,26 @@ function syncSingleRelation(
 
 // ─── 批量模式 ───
 
+/**
+ * 读取批量输入文件并解析为 BulkSyncItem[]。
+ * 支持两种格式：
+ *   1. { items: [...] }（与现有 syncBatch 输入格式一致）
+ *   2. [...]（直接数组）
+ */
+function readBulkInput(inputFile: string): BulkSyncItem[] {
+  if (!fs.existsSync(inputFile)) {
+    output({ ok: false, error: `输入文件不存在：${inputFile}` });
+    process.exit(1);
+  }
+  const raw = JSON.parse(fs.readFileSync(inputFile, 'utf-8'));
+  const items: BulkSyncItem[] = Array.isArray(raw) ? raw : raw?.items;
+  if (!Array.isArray(items)) {
+    output({ ok: false, error: '输入文件格式错误：缺少 items 数组或本身不是数组' });
+    process.exit(1);
+  }
+  return items;
+}
+
 function syncBatch(
   scope: string,
   inputFile: string,
@@ -329,6 +349,369 @@ export interface SyncRelationParams {
   vector?: boolean;
   /** 文档内容的自定义标签（逗号分隔多个）。ki-search 始终默认写入；自定义 tags 额外各写一条内容向量 */
   tags?: string;
+}
+
+// ─── 批量同步（MCP / CLI 共享纯函数） ───
+
+export interface BulkSyncItem {
+  group: string;
+  relation: string;
+  module_info: string;
+  /** 文档内容的自定义标签（逗号分隔多个，叠加在默认 ki-search 之上） */
+  tags?: string;
+}
+
+export interface BulkSyncResultItem {
+  group: string;
+  relation: string;
+  evicted: string | null;
+  vectorStored?: boolean;
+  vectorReason?: string;
+  wikiSynced?: boolean;
+  wikiFile?: string;
+  wikiReason?: string;
+  /** 透出实际写入的内容标签（向量化时为 ki-search + 自定义 tags；非向量化时为空数组） */
+  contentTags?: string[];
+  skipped?: boolean;
+  skipReason?: string;
+}
+
+export type BulkSyncRelationResult =
+  | {
+      ok: true;
+      scope: string;
+      total: number;
+      succeeded: number;
+      failed: number;
+      skipped: number;
+      results: BulkSyncResultItem[];
+      vectorStored: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * 批量同步 Relation（向量化模式）：一次 embedding HTTP + 一次 worker upsert，
+ * 取代多次单条 sync_relation 并发时的 N 次独立 HTTP 往返 + N 次串行 worker 写入。
+ *
+ * 链路：
+ *   1. 循环 syncSingleRelation 改 cache（内存中）+ 收集向量 entries（ki-relation + ki-search + 自定义 tags）
+ *   2. 一次 vectorBulkStore 批量 embed + 批量 upsert（worker 单次调用）
+ *   3. 按切片拆分结果 → 回写 memoryId/memoryIds 到 cache
+ *   4. 一次 writeJson 落盘 cache
+ *   5. 各自 wiki 写回（文件路径不同，天然无冲突）
+ *
+ * 非向量化模式（vector=false）：跳过步骤 2-3，仅 KB 层（与单条 --no-vector 一致）。
+ */
+export async function executeBulkSyncRelation(params: {
+  scope?: string;
+  items: BulkSyncItem[];
+  vector?: boolean;
+}): Promise<BulkSyncRelationResult> {
+  try {
+    const scope = resolveScope(loadConfig(), params.scope);
+    const items = params.items;
+    const vector = params.vector !== false;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return { ok: false, error: 'items 不能为空' };
+    }
+
+    validateScope(scope);
+    ensureScopeDir(scope);
+
+    const cachePath = getRelationsCachePath(scope);
+    const cache = readJson<RelationsCache>(cachePath);
+    if (!cache) {
+      return { ok: false, error: 'relations-cache.json 不存在' };
+    }
+
+    // ─── 阶段 1：循环 syncSingleRelation 改 cache + 收集 entries ───
+    const results: BulkSyncResultItem[] = [];
+    let failed = 0;
+
+    // Group 路径自动补全：读取一次 groupIndex 供所有 item 复用
+    // （对齐单条模式 executeSyncRelation:809-819 的 resolveGroupPath 逻辑）
+    const groupIndex = readGroupIndex(scope);
+
+    // 向量 entries 收集：每条 item 产出 [ki-relation, ki-search, ...customTags] 个 entry
+    // 用 sliceStart/sliceEnd 记录每条 item 在 entries 数组中的区间，用于后续结果拆分
+    interface EntryMeta {
+      itemIdx: number;       // 对应 items 的下标
+      relation: string;      // 对应的 relation text
+      group: string;         // 对应的 group
+      tagKind: 'relation' | 'content';  // relation=ki-relation 路径向量, content=ki-search/自定义 tag 内容向量
+      contentTag?: string;   // content 类型时的具体 tag（ki-search 或自定义 tag）
+    }
+    const allEntries: { text: string; tags?: string; group?: string }[] = [];
+    const entryMetas: EntryMeta[] = [];
+
+    // 记录每条 item 的 customTags（用于回写 relRec.tags 和透出 contentTags）
+    const itemCustomTags: string[][] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const group = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      const relation = item.relation || '';
+      const moduleInfo = item.module_info || '';
+
+      // 校验（与单条模式一致）
+      if (!group || !relation || !moduleInfo) {
+        results.push({
+          group: item.group || '',
+          relation: relation || '(空)',
+          evicted: null,
+          skipped: true,
+          skipReason: '缺少 group/relation/module_info 参数',
+        });
+        failed++;
+        itemCustomTags.push([]);
+        continue;
+      }
+      if (!String(moduleInfo).trim()) {
+        results.push({
+          group,
+          relation,
+          evicted: null,
+          skipped: true,
+          skipReason: 'module_info 内容不能为空',
+        });
+        failed++;
+        itemCustomTags.push([]);
+        continue;
+      }
+      if (!String(group).trim() || !String(relation).trim()) {
+        results.push({
+          group,
+          relation,
+          evicted: null,
+          skipped: true,
+          skipReason: 'group / relation 不能为空',
+        });
+        failed++;
+        itemCustomTags.push([]);
+        continue;
+      }
+      if (isUnsafeRelationName(relation)) {
+        results.push({
+          group,
+          relation,
+          evicted: null,
+          skipped: true,
+          skipReason: `relation 含非法路径字符，不能包含 "/"、"\\\\" 或 ".."`,
+        });
+        failed++;
+        itemCustomTags.push([]);
+        continue;
+      }
+
+      try {
+        // Group 路径自动补全（对齐单条模式 executeSyncRelation:809-819）
+        let resolvedGroup = group;
+        if (groupIndex) {
+          const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
+          if (resolved.matched) {
+            resolvedGroup = resolved.resolvedPath;
+          }
+        }
+
+        const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
+
+        // 文档级自定义 tag 持久化到 KB 层（与单条模式一致）
+        const customTags = parseContentTags(item.tags);
+        itemCustomTags.push(customTags);
+        const groupData = cache.groups[resolvedGroup];
+        const relRec = groupData?.hot_relations.find((r) => r.text === relation);
+        if (relRec) {
+          if (customTags.length > 0) relRec.tags = customTags;
+          else delete relRec.tags;
+        }
+
+        // 收集向量 entries（向量化模式才需要）
+        if (vector) {
+          const relText = buildRelationContent(relation, resolvedGroup);
+          // ki-relation 路径向量
+          allEntries.push({ text: relText, tags: 'ki-relation', group: resolvedGroup });
+          entryMetas.push({ itemIdx: i, relation, group: resolvedGroup, tagKind: 'relation' });
+          // ki-search 内容向量 + 每个自定义 tag 各一条
+          allEntries.push({ text: moduleInfo, tags: 'ki-search' });
+          entryMetas.push({ itemIdx: i, relation, group: resolvedGroup, tagKind: 'content', contentTag: 'ki-search' });
+          for (const t of customTags) {
+            allEntries.push({ text: moduleInfo, tags: t });
+            entryMetas.push({ itemIdx: i, relation, group: resolvedGroup, tagKind: 'content', contentTag: t });
+          }
+        }
+
+        results.push({
+          group: resolvedGroup,
+          relation,
+          evicted: result.evicted,
+          contentTags: vector ? ['ki-search', ...customTags] : [],
+        });
+      } catch (err) {
+        // 单条 syncSingleRelation 异常不中断整个批量（对齐 syncBatch 的容错策略）
+        results.push({
+          group,
+          relation,
+          evicted: null,
+          skipped: true,
+          skipReason: `写入异常：${(err as Error).message}`,
+        });
+        failed++;
+        itemCustomTags.push([]);
+      }
+    }
+
+    // ─── 阶段 2：批量向量写入（一次 embedding HTTP + 一次 worker upsert） ───
+    let vectorStored = false;
+    if (vector && allEntries.length > 0) {
+      try {
+        const avail = await ensureVectorAvailable();
+        if (!avail.available) {
+          // 向量服务不可用：所有 item 标记向量未写入，但不阻塞 KB 层
+          for (let i = 0; i < results.length; i++) {
+            if (results[i].skipped) continue;
+            results[i].vectorStored = false;
+            results[i].vectorReason = avail.reason || '向量服务不可用';
+          }
+        } else {
+          const bulkResult = await vectorBulkStore({ scope, entries: allEntries });
+
+          // ─── 阶段 3：拆分结果 + 回写 memoryId/memoryIds ───
+          // 按 itemIdx 分组：每个 item 的 content entries（index >= 1 起）的 memoryId 收集为 memoryIds，
+          // ki-search 条（contentTag === 'ki-search'）的 memoryId 作为主 memoryId
+          const itemContentIds: Map<number, { searchId?: string; allIds: string[] }> = new Map();
+          const itemRelationIds: Map<number, string[]> = new Map();
+
+          for (let j = 0; j < bulkResult.results.length; j++) {
+            const r = bulkResult.results[j];
+            const meta = entryMetas[j];
+            if (!meta || !r.success || !r.memoryId) continue;
+
+            if (meta.tagKind === 'content') {
+              const entry = itemContentIds.get(meta.itemIdx) ?? { allIds: [] };
+              entry.allIds.push(r.memoryId);
+              if (meta.contentTag === 'ki-search') {
+                entry.searchId = r.memoryId;
+              }
+              itemContentIds.set(meta.itemIdx, entry);
+            } else {
+              // relation 路径向量（ki-relation），不回写到 cache（cache 只记内容向量 docId）
+              const ids = itemRelationIds.get(meta.itemIdx) ?? [];
+              ids.push(r.memoryId);
+              itemRelationIds.set(meta.itemIdx, ids);
+            }
+          }
+
+          // 回写到 cache
+          for (const [itemIdx, ids] of itemContentIds) {
+            // 使用 results[itemIdx].group（已经过 resolveGroupPath 补全，非原始 item.group）
+            const group = results[itemIdx].group;
+            const relation = results[itemIdx].relation;
+            const groupData = cache.groups[group];
+            const rel = groupData?.hot_relations.find((r) => r.text === relation);
+            if (rel) {
+              // 清理旧 tag 向量：删除旧 memoryIds 中不在本次新 tag 集合的 docId
+              // （对齐单条模式 vectorWriteBack:725-740 的 #M1 数据守恒逻辑）
+              const customTags = itemCustomTags[itemIdx] ?? [];
+              const newContentIds = new Set([
+                generateDocId(items[itemIdx].module_info, scope, 'ki-search'),
+                ...customTags.map((t) => generateDocId(items[itemIdx].module_info, scope, t)),
+              ]);
+              const priorIds = rel.memoryIds ?? [];
+              const staleIds = priorIds.filter((id) => id && !newContentIds.has(id));
+              if (staleIds.length > 0) {
+                try {
+                  await vectorDelete({ scope, ids: staleIds });
+                } catch {
+                  // 旧 tag 清理失败不影响主流程（仅可能残留孤儿向量，delete 时 search 兜底可清）
+                }
+              }
+
+              if (ids.allIds.length > 0) {
+                rel.memoryIds = ids.allIds;
+              }
+              if (ids.searchId) {
+                rel.memoryId = ids.searchId;
+              }
+            }
+            // 透出向量写入状态
+            if (results[itemIdx] && !results[itemIdx].skipped) {
+              results[itemIdx].vectorStored = true;
+            }
+          }
+
+          // 检查是否有 item 的向量全部失败
+          const failedItems = new Set<number>();
+          for (let j = 0; j < bulkResult.results.length; j++) {
+            if (!bulkResult.results[j].success) {
+              const meta = entryMetas[j];
+              if (meta) failedItems.add(meta.itemIdx);
+            }
+          }
+          // 标记全部失败的 item（该 item 的所有 entry 都失败）
+          for (const itemIdx of failedItems) {
+            const contentIds = itemContentIds.get(itemIdx);
+            const relIds = itemRelationIds.get(itemIdx);
+            if ((!contentIds || contentIds.allIds.length === 0) && (!relIds || relIds.length === 0)) {
+              if (results[itemIdx] && !results[itemIdx].skipped) {
+                results[itemIdx].vectorStored = false;
+                results[itemIdx].vectorReason = '向量写入全部失败';
+              }
+            }
+          }
+
+          vectorStored = bulkResult.failed === 0;
+        }
+      } catch (err) {
+        // 向量批量写入异常：不阻塞 KB 层，标记所有未跳过 item
+        const reason = (err as Error).message;
+        for (let i = 0; i < results.length; i++) {
+          if (results[i].skipped) continue;
+          results[i].vectorStored = false;
+          results[i].vectorReason = reason;
+        }
+      }
+    }
+
+    // ─── 阶段 4：一次 writeJson 落盘 cache ───
+    writeJson(cachePath, cache);
+
+    // ─── 阶段 5：各自 wiki 写回（文件路径不同，无冲突） ───
+    for (let i = 0; i < items.length; i++) {
+      if (results[i].skipped) continue;
+      // 使用 results[i].group（已经过 resolveGroupPath 补全，非原始 item.group）
+      const group = results[i].group;
+      const relation = results[i].relation;
+      const moduleInfo = items[i].module_info;
+      try {
+        const wikiResult = writeBackToWiki(scope, group, relation, moduleInfo);
+        results[i].wikiSynced = wikiResult.synced;
+        if (wikiResult.synced) {
+          results[i].wikiFile = wikiResult.file;
+        } else {
+          results[i].wikiReason = wikiResult.reason;
+        }
+      } catch {
+        results[i].wikiSynced = false;
+      }
+    }
+
+    const skippedCount = results.filter((r) => r.skipped).length;
+    const succeeded = results.length - skippedCount;
+
+    return {
+      ok: true,
+      scope,
+      total: items.length,
+      succeeded,
+      failed,
+      skipped: skippedCount,
+      results,
+      vectorStored,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
 }
 
 export type SyncRelationResult =
@@ -571,11 +954,20 @@ program
     // 批量模式
     if (opts.input) {
       try {
-        // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
-        const scope = resolveScope(loadConfig(), opts.scope);
-        validateScope(scope);
-        ensureScopeDir(scope);
-        syncBatch(scope, opts.input, vector);
+        if (vector) {
+          // 向量化批量模式：走 executeBulkSyncRelation（一次 embed + 一次 worker upsert）
+          const items = readBulkInput(opts.input);
+          const result = await executeBulkSyncRelation({ scope: opts.scope, items, vector: true });
+          output(result as unknown as Record<string, unknown>);
+          await closeEngine();
+          if (!result.ok) process.exit(1);
+        } else {
+          // 非向量化批量模式：走原 syncBatch（仅 KB 层，不写向量）
+          const scope = resolveScope(loadConfig(), opts.scope);
+          validateScope(scope);
+          ensureScopeDir(scope);
+          syncBatch(scope, opts.input, false);
+        }
       } catch (err) {
         output({ ok: false, error: (err as Error).message });
         process.exit(1);

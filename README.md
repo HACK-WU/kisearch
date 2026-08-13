@@ -202,7 +202,7 @@ ki mcp token show           # 查看当前托管 Token（填入上方 headers �
 | `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
 | `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
-| `sync-relation` | 写入 Relation + 本地 KB（向量 + KB 双写，支持 `--no-vector`） |
+| `sync-relation` | 写入 Relation + 本地 KB（单条/批量向量化，支持 `--no-vector` 非向量化） |
 | `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
 | `search` | 语义检索（zvec 混合检索，输出含原文定位字段） |
 | `store` | 向量化存储单条知识 |
@@ -280,7 +280,8 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 | `ki_get_module_info` | 读取本地 KB Markdown 原文 | 索引直查 |
 | `ki_manage_index_create` | 创建 Group 节点 | — |
 | `ki_manage_index_list` | 列出所有 scope | — |
-| `ki_sync_relation` | 写入 Relation + 关键词（向量 + KB 双写） | 写入 |
+| `ki_sync_relation` | 写入单条 Relation（向量 + KB 双写，`vector=false` 非向量化） | 写入 |
+| `ki_bulk_sync_relation` | 批量写入 Relation（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | 写入 |
 | `ki_delete_relation` | 删除 Relation（四层清理） | — |
 | `ki_search` | 语义检索，输出 group/relation 定位字段 | 语义检索 |
 | `ki_store` | 向量化存储单条知识 | 写入 |

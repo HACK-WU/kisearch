@@ -423,3 +423,213 @@ describe('sync-relation relation 名安全校验', () => {
     }
   });
 });
+
+// ─── executeBulkSyncRelation 纯函数测试（非向量化模式，离线可测） ───
+
+describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
+  it('批量写入多条 Relation 到 cache + 本地 KB（一次落盘）', async () => {
+    const bulkScope = `bulk-novec-${Date.now()}`;
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getLocalKbDir, getKbDir } = await import('../src/lib/scope.js');
+
+    try {
+      registerTestScope(bulkScope);
+      initScope(bulkScope);
+
+      const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+      const result = await executeBulkSyncRelation({
+        scope: bulkScope,
+        vector: false,
+        items: [
+          {
+            group: '项目根/模块A',
+            relation: '功能A流程',
+            module_info: '# 功能A\n\n## 概述\n功能A的说明。',
+          },
+          {
+            group: '项目根/模块B',
+            relation: '功能B流程',
+            module_info: '# 功能B\n\n## 概述\n功能B的说明。',
+          },
+        ],
+      });
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.strictEqual(result.total, 2);
+        assert.strictEqual(result.succeeded, 2);
+        assert.strictEqual(result.failed, 0);
+        assert.strictEqual(result.results.length, 2);
+        assert.strictEqual(result.vectorStored, false);
+        // 非向量化时 contentTags 为空数组
+        assert.deepStrictEqual(result.results[0].contentTags, []);
+      }
+
+      // 验证 cache 写入
+      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      assert.ok(cache.groups['项目根/模块A']);
+      assert.ok(cache.groups['项目根/模块B']);
+
+      // 验证本地 KB 写入
+      const kbA = readJson<any>(getLocalKbDir(bulkScope, '项目根/模块A'))!;
+      assert.ok(kbA['功能A流程']);
+      const kbB = readJson<any>(getLocalKbDir(bulkScope, '项目根/模块B'))!;
+      assert.ok(kbB['功能B流程']);
+    } finally {
+      const kbDir = getKbDir(bulkScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('空 module_info / 非法 relation 被跳过并计入 failed，合法条目正常写入', async () => {
+    const bulkScope = `bulk-skip-${Date.now()}`;
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
+
+    try {
+      registerTestScope(bulkScope);
+      initScope(bulkScope);
+
+      const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+      const result = await executeBulkSyncRelation({
+        scope: bulkScope,
+        vector: false,
+        items: [
+          {
+            group: '项目根/正常',
+            relation: '合法关系',
+            module_info: '# 合法关系\n\n正常内容。',
+          },
+          {
+            group: '项目根/空',
+            relation: '空内容',
+            module_info: '',
+          },
+          {
+            group: '项目根/非法',
+            relation: '非法/关系',
+            module_info: '# 不应写入\n\n内容。',
+          },
+        ],
+      });
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        assert.strictEqual(result.total, 3);
+        assert.strictEqual(result.failed, 2);
+        assert.strictEqual(result.succeeded, 1);
+
+        // 跳过的条目有 skipped 标记
+        const skipped = result.results.filter((r) => r.skipped);
+        assert.strictEqual(skipped.length, 2);
+        assert.ok(skipped.some((r) => r.relation === '空内容'));
+        assert.ok(skipped.some((r) => r.relation === '非法/关系'));
+      }
+
+      // 合法条目写入，非法条目未写入
+      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      assert.ok(cache.groups['项目根/正常'], '合法条目应写入');
+      assert.strictEqual(cache.groups['项目根/空'], undefined, '空内容条目不应写入');
+      assert.strictEqual(cache.groups['项目根/非法'], undefined, '非法条目不应写入');
+    } finally {
+      const kbDir = getKbDir(bulkScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('自定义 tags 持久化到 cache 的 relRec.tags', async () => {
+    const bulkScope = `bulk-tags-${Date.now()}`;
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
+
+    try {
+      registerTestScope(bulkScope);
+      initScope(bulkScope);
+
+      const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+      const result = await executeBulkSyncRelation({
+        scope: bulkScope,
+        vector: false,
+        items: [
+          {
+            group: '项目根/带标签',
+            relation: '带标签关系',
+            module_info: '# 带标签\n\n内容。',
+            tags: 'api,auth',
+          },
+        ],
+      });
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        // 非向量化时 contentTags 仍为空（因为没写向量）
+        assert.deepStrictEqual(result.results[0].contentTags, []);
+      }
+
+      // tags 持久化到 cache
+      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      const rel = cache.groups['项目根/带标签'].hot_relations.find(
+        (r: any) => r.text === '带标签关系'
+      );
+      assert.ok(rel);
+      assert.deepStrictEqual(rel.tags, ['api', 'auth']);
+    } finally {
+      const kbDir = getKbDir(bulkScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('空 items 数组返回错误', async () => {
+    const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+    const result = await executeBulkSyncRelation({
+      scope: 'default',
+      vector: false,
+      items: [],
+    });
+    assert.strictEqual(result.ok, false);
+  });
+
+  it('单条 syncSingleRelation 异常不中断整个批量（容错隔离）', async () => {
+    const bulkScope = `bulk-fault-${Date.now()}`;
+    const { initScope, readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
+
+    try {
+      registerTestScope(bulkScope);
+      initScope(bulkScope);
+
+      const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+      const result = await executeBulkSyncRelation({
+        scope: bulkScope,
+        vector: false,
+        items: [
+          {
+            group: '项目根/正常',
+            relation: '正常关系',
+            module_info: '# 正常\n\n内容。',
+          },
+          // 故意传一个 group 为空格的条目（通过首层校验但 trim 后为空）
+          {
+            group: '   ',
+            relation: '异常关系',
+            module_info: '# 异常\n\n内容。',
+          },
+        ],
+      });
+
+      assert.strictEqual(result.ok, true);
+      if (result.ok) {
+        // 异常条目被跳过，正常条目正常写入
+        assert.strictEqual(result.total, 2);
+        assert.ok(result.failed >= 1, '异常条目应计入 failed');
+        assert.ok(result.skipped >= 1, '异常条目应被标记 skipped');
+        // 正常条目写入 cache
+        const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+        assert.ok(cache.groups['项目根/正常'], '正常条目应写入');
+      }
+    } finally {
+      const kbDir = getKbDir(bulkScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});

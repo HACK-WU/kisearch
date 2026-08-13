@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerQueryGroupTool } from './lib/mcp-tools/query-group.js';
 import { registerGetModuleInfoTool } from './lib/mcp-tools/get-module-info.js';
 import { registerSyncRelationTool } from './lib/mcp-tools/sync-relation.js';
+import { registerBulkSyncRelationTool } from './lib/mcp-tools/bulk-sync-relation.js';
 import { registerManageIndexTools } from './lib/mcp-tools/manage-index.js';
 import { registerSearchTool } from './lib/mcp-tools/search.js';
 import { registerStoreTool } from './lib/mcp-tools/store.js';
@@ -47,6 +48,7 @@ export function buildKiMcpServer(): McpServer {
   registerQueryGroupTool(server);
   registerGetModuleInfoTool(server);
   registerSyncRelationTool(server);
+  registerBulkSyncRelationTool(server);
   registerManageIndexTools(server);
   registerSearchTool(server);
   registerStoreTool(server);
