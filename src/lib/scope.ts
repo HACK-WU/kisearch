@@ -81,10 +81,11 @@ export function getLocalKbDir(scope: string, groupPath: string): string {
 export interface GroupIndexSource {
   dir: string;
   rootName: string;
-  commit: string;
-  /** 切分参数持久化（H-18）：全量直导写入，增量复用；缺失时回退默认值 */
+  /** 旧字段：git HEAD commit（增量直连废弃后不再写入，仅向后兼容旧数据读取） */
+  commit?: string;
+  /** 切分参数持久化（H-18）：导入时写入，缺失时回退默认值 */
   chunkSize?: number;
-  /** 切分参数持久化（H-18）：全量直导写入，增量复用；缺失时回退默认值 */
+  /** 切分参数持久化（H-18）：导入时写入，缺失时回退默认值 */
   chunkOverlap?: number;
 }
 
@@ -99,7 +100,7 @@ export function getSource(scope: string): GroupIndexSource | null {
   const data = JSON.parse(raw) as { source?: GroupIndexSource | null };
   const source = data.source;
   if (!source || typeof source !== 'object') return null;
-  if (!source.dir || !source.rootName || !source.commit) return null;
+  if (!source.dir || !source.rootName) return null;
   return { dir: source.dir, rootName: source.rootName, commit: source.commit };
 }
 
@@ -202,8 +203,7 @@ export function listAllScopes(): string[] {
 /**
  * 写入 / 更新 source 块到 group-index.json
  *
- * commit 允许为空（全量直导非 git 仓库场景，H-25 仅增量强依赖 git）；
- * 但 dir / rootName 必填。
+ * dir / rootName 必填；commit 不再写入（增量直连已废弃，git 依赖移除）。
  */
 export function setSource(scope: string, source: GroupIndexSource): void {
   const filePath = getGroupIndexPath(scope);
@@ -224,7 +224,6 @@ export function setSource(scope: string, source: GroupIndexSource): void {
   data.source = {
     dir: source.dir,
     rootName: source.rootName,
-    commit: source.commit || '',
     ...(source.chunkSize !== undefined ? { chunkSize: source.chunkSize } : {}),
     ...(source.chunkOverlap !== undefined ? { chunkOverlap: source.chunkOverlap } : {}),
   };

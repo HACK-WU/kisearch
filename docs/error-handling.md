@@ -62,20 +62,7 @@
 
 ## 三类：`scan-kb.ts` 相关错误
 
-### `scan-kb diff` 返回 `status: 'first_import'`
-
-原因：`group-index.source` 块不存在，说明尚未首次导入。
-
-恢复：先执行 `scan-kb import` 完成全量导入。
-
-### `scan-kb diff` 返回 0 变更
-
-可能原因：
-
-1. 文件修改后未 `git commit`（diff 依赖 git commit 记录）
-2. `source.commit` 已是最新 HEAD
-
-恢复：确认文件变更已 commit，再执行 diff。
+> 历史：`--mode incremental` 与 `diff` 子命令已废弃移除（git diff 依赖被「幂等追加」语义替代）。
 
 ### `sourceDir 不存在或不是目录`
 
@@ -83,29 +70,17 @@
 
 恢复：确认路径指向外部 Markdown 知识库根目录。
 
-### 增量导入时 rootName 与首次不一致
+### 目录无 md 文件
 
-原因：`--mode incremental` 缺省复用 source 块时，source 块中记录的 `rootName` 与预期不符（增量不允许更改 rootName）。
+原因：`--source` 目录下没有格式白名单内的 Markdown 文件（默认 `.md`，可用 `scopes.<scope>.import.extensions` 扩展）。
 
-恢复：保持与首次导入相同的 `--source` 目录（rootName 从 source 块读取）。
+恢复：确认 source 目录包含 `.md` 文件，或调整格式白名单配置。
 
-### 增量导入 source 目录无 md 文件
+### `--group` 为空
 
-原因：`--mode incremental` 传入的 source 目录中没有 Markdown 文件。
+原因：`--group` 传了空值。
 
-恢复：确认 source 目录路径正确，且包含 `.md` 文件。
-
-### 增量导入未首次导入
-
-原因：`--mode incremental` 时 scope 尚无 `group-index.source` 块（从未全量导入）。
-
-恢复：先执行 `scan-kb import --source <dir> --root-name <name>` 完成全量导入。
-
-### 未知 --mode
-
-原因：`--mode` 只接受 `full` / `incremental`。
-
-恢复：检查 `--mode` 参数拼写。
+恢复：检查 `--group` 参数。缺省不传时落到 `default` group。
 
 ### `Access denied to scope: <scope>`
 

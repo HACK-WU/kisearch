@@ -12,7 +12,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
 
 import {
   getGroupIndexPath,
@@ -67,11 +66,11 @@ export interface RelationsCache {
 export interface ImportContext {
   scope: string;
   sourceDir: string;
-  rootName: string;
+  group: string;
   entries: ScanResultEntry[];
   /** path → memoryId（成功向量化的条目） */
   memoryMap: Map<string, string>;
-  /** Phase 3 创建/确认的 Group 路径（含 rootName 前缀） */
+  /** Phase 3 创建/确认的 Group 路径（含 group 前缀） */
   groups: Set<string>;
 }
 
@@ -88,7 +87,6 @@ export interface ImportStats {
 export interface ImportResult {
   ok: true;
   action: 'import';
-  mode: 'full' | 'incremental';
   scope: string;
   stats: ImportStats;
   errors: { path: string; error: string }[];
@@ -100,8 +98,8 @@ export interface HandleDirectImportArgs {
   scope: string;
   /** 外部 Wiki 根目录（绝对路径） */
   sourceDir: string;
-  /** 导入根节点名称（= groupPath 首段） */
-  rootName: string;
+  /** 目标 Group 落点（幂等追加；不存在时自动新建，含父路径） */
+  group: string;
   /** 切分参数：目标长度（字符），默认 1000 */
   chunkSize?: number;
   /** 切分参数：重叠字符数，默认 150 */
@@ -190,25 +188,13 @@ export function readFileToChunks(absPath: string, chunkSize: number, chunkOverla
   return splitIntoChunks(text, { chunkSize, overlap: chunkOverlap });
 }
 
-/** 把 commit hash 取出来，失败返回 null */
-function getGitHead(dir: string): string | null {
-  try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-/** 直导入口：把 sourceDir 下的 Markdown 目录直接导入（无 AI 依赖，方案 D：local KB 文件原文 + memoryIds 多值） */
+/** 直导入口：把 sourceDir 下的 Markdown 目录直接导入（无 AI 依赖，方案 D：local KB 文件原文 + memoryIds 多值；幂等追加） */
 export async function handleDirectImport(
   args: HandleDirectImportArgs
 ): Promise<ImportResult> {
   const scope = args.scope;
   const sourceDir = path.resolve(args.sourceDir);
-  const rootName = args.rootName.trim();
+  const group = args.group.trim();
   const chunkSize = args.chunkSize ?? 1000;
   const chunkOverlap = args.chunkOverlap ?? 150;
   const vector = args.vector !== false;
@@ -218,7 +204,7 @@ export async function handleDirectImport(
   // 文档级自定义标签：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
   const customTags = parseContentTags(args.tags);
 
-  if (!rootName) throw new Error('rootName 不能为空');
+  if (!group) throw new Error('--group 不能为空');
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     throw new Error(`sourceDir 不存在或不是目录：${sourceDir}`);
   }
@@ -296,7 +282,7 @@ export async function handleDirectImport(
       continue;
     }
     const fileText = fs.readFileSync(absPath, 'utf-8');
-    const groupPath = deriveGroupPath(rootName, rel);
+    const groupPath = deriveGroupPath(group, rel);
     const relation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
     // relation 冲突检查（用户决策 O1 + 幂等修复）：
     //   - 同 group 下 relation 名已存在 **且 sourcePath 不同**（真冲突：不同文件同名）→ 跳过 + 反馈
@@ -401,7 +387,7 @@ export async function handleDirectImport(
   // ── Phase 2（向量化）串行于 Phase 3/4 之前（REQ-05 O-02/C-4：local KB 已前置，无并行进度条冲突）──
   // 覆盖导入前置：scope 已存在向量（KB 与向量均已有数据）时，提示覆盖并先清空旧向量再重建，
   // 与 rebuild-vector 语义一致（vectorDeleteScope → bulkVectorize），消除文件变更后的孤儿向量。
-  // 仅向量化模式执行；--no-vector 不动向量层；incremental 模式由 handleIncrementalDirect 增量清理。
+  // 仅向量化模式执行；--no-vector 不动向量层。
   if (vector) {
     const existingVecCount = await vectorCountScope({ scope });
     if (existingVecCount > 0) {
@@ -465,10 +451,10 @@ export async function handleDirectImport(
   const ctx: ImportContext = {
     scope,
     sourceDir,
-    rootName,
+    group,
     entries,
     memoryMap,
-    groups: new Set<string>([rootName]),
+    groups: new Set<string>([group]),
   };
   logPhaseStart(3, TOTAL, '构建 Group 树 ...');
   phase3EnsureGroups(ctx, groupIndex);
@@ -504,18 +490,16 @@ export async function handleDirectImport(
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
 
-  // Phase 5: 记录 source（含切分参数持久化 H-18；无 git 时全量直导可容忍——增量才强依赖 git）
-  logPhaseStart(5, TOTAL, '记录 source commit ...');
-  const head = getGitHead(sourceDir);
+  // Phase 5: 记录 source（含切分参数持久化 H-18；不再依赖 git commit——增量由幂等追加承载）
+  logPhaseStart(5, TOTAL, '记录 source ...');
   const source: GroupIndexSource = {
     dir: sourceDir,
-    rootName,
-    commit: head || '',
+    rootName: group,
     chunkSize,
     chunkOverlap,
   };
   setSource(scope, source);
-  logPhaseDone(5, TOTAL, `source 已记录${head ? `，commit=${head.slice(0, 8)}` : '（非 git 仓库，commit 为空）'}`);
+  logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}，group=${group}）`);
 
   // scope 未配置 sourceDir 时写入绝对路径（H-20）
   try {
@@ -536,7 +520,6 @@ export async function handleDirectImport(
   return {
     ok: true,
     action: 'import',
-    mode: 'full',
     scope,
     stats: {
       total: entries.length,

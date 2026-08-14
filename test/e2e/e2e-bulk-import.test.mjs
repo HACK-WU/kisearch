@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * E2E 集成测试：scan-kb import 全量直导 + 增量直连（原文直导，无 AI）
+ * E2E 集成测试：scan-kb import 幂等追加直导（原文直导，无 AI）
  *
  * 测试场景：
  *   1. 全量直导 5 个文件 → 验证导入成功 + chunk 切分 + source 块
- *   2. 增量直连 add + modify + delete → 验证 git diff 驱动链路
+ *   2. 重复追加（幂等）：同文件重导不新增、不冲突
+ *   3. 新文档追加：新增文件落入已有 group
  *
- * 批次 3（REQ-04）：ai-results 输入契约已删除，改为 --source 直导 / git diff 直连。
+ * 批次 3（REQ-04）：ai-results 输入契约已删除，改为 --source 直导。
+ * 后续迭代：废弃 --mode incremental（git diff 驱动），统一为幂等追加语义。
  */
 
 import { test, describe, before, after } from 'node:test';
@@ -14,7 +16,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import url from 'node:url';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -23,27 +25,22 @@ import { registerTestScope, getTestEnv } from '../test-config.ts';
 
 // ─── 工具函数 ─────────────────────────────────────────────
 
-const GIT_ENV = ' -c user.email=t@t -c user.name=t -c commit.gpgsign=false -c tag.gpgsign=false ';
-
-function makeRepo(files) {
+function makeDir(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-kb-'));
   for (const [relPath, content] of Object.entries(files)) {
     const absPath = path.join(dir, relPath);
     fs.mkdirSync(path.dirname(absPath), { recursive: true });
     fs.writeFileSync(absPath, content);
   }
-  execSync('git init -q', { cwd: dir });
-  execSync(`git${GIT_ENV}add . && git${GIT_ENV}commit -q -m init`, { cwd: dir, shell: '/bin/bash' });
   return dir;
 }
 
-function runImport(scope, sourceDir, rootName, mode = 'full') {
+function runImport(scope, sourceDir, group = 'default') {
   const args = [
     'jiti', 'src/scan-kb.ts', 'import',
     '--scope', scope,
     '--source', sourceDir,
-    '--root-name', rootName,
-    '--mode', mode,
+    '--group', group,
   ];
   const stdout = execFileSync('npx', args, {
     cwd: path.resolve(__dirname, '..', '..'),
@@ -56,10 +53,8 @@ function runImport(scope, sourceDir, rootName, mode = 'full') {
 }
 
 function cleanupScope(scope) {
-  // 清理 kb 目录
   const kbDir = path.resolve(__dirname, '..', '..', 'kb', scope);
   if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
-  // 清理 scope 配置
   const scopeFile = path.resolve(__dirname, '..', '..', 'kb', `${scope}.json`);
   if (fs.existsSync(scopeFile)) fs.unlinkSync(scopeFile);
 }
@@ -73,8 +68,8 @@ describe('E2E: 全量直导', () => {
   let sourceDir;
 
   before(() => {
-    // 创建测试仓库：5 个 markdown 文件
-    sourceDir = makeRepo({
+    // 创建测试目录：5 个 markdown 文件
+    sourceDir = makeDir({
       'README.md': '# 测试项目\n这是根 README',
       'guides/setup.md': '# 安装指南\nnpm install && npm run dev',
       'guides/deploy.md': '# 部署指南\n使用 Docker 部署',
@@ -89,21 +84,19 @@ describe('E2E: 全量直导', () => {
   });
 
   test('全量直导 5 个文件，全部成功', () => {
-    const result = runImport(TEST_SCOPE, sourceDir, 'TestWiki', 'full');
+    const result = runImport(TEST_SCOPE, sourceDir, 'TestWiki');
 
     assert.equal(result.ok, true, `导入应成功: ${JSON.stringify(result)}`);
-    assert.equal(result.mode, 'full');
     assert.equal(result.stats.total, 5, `chunks 应为 5（每文件 1 chunk）: ${JSON.stringify(result.stats)}`);
     assert.equal(result.stats.errors, 0);
 
-    // groups 包含 rootName + 子目录
+    // groups 包含 group + 子目录
     assert.ok(result.groups.includes('TestWiki'));
     assert.ok(result.groups.includes('TestWiki/guides'));
     assert.ok(result.groups.includes('TestWiki/api'));
 
     // source 块写入（含切分参数持久化 H-18）
-    assert.ok(result.source.commit);
-    assert.match(result.source.commit, /^[0-9a-f]{40}$/);
+    assert.equal(result.source.rootName, 'TestWiki');
     assert.equal(result.source.chunkSize, 1000);
     assert.equal(result.source.chunkOverlap, 150);
 
@@ -119,23 +112,20 @@ describe('E2E: 全量直导', () => {
   });
 });
 
-describe('E2E: 增量直连（git diff 驱动）', () => {
+describe('E2E: 幂等追加', () => {
   let sourceDir;
-  let baseCommit;
-
-  const SCOPE = TEST_SCOPE + '-inc';
+  const SCOPE = TEST_SCOPE + '-append';
   registerTestScope(SCOPE);
 
   before(() => {
-    sourceDir = makeRepo({
+    sourceDir = makeDir({
       'a.md': '# 文件 A v1',
       'b.md': '# 文件 B v1',
       'sub/c.md': '# 文件 C v1',
     });
-
-    const fullResult = runImport(SCOPE, sourceDir, 'IncWiki', 'full');
+    const fullResult = runImport(SCOPE, sourceDir, 'Wiki');
+    assert.equal(fullResult.ok, true, JSON.stringify(fullResult));
     assert.equal(fullResult.stats.total, 3);
-    baseCommit = fullResult.source.commit;
   });
 
   after(() => {
@@ -143,51 +133,29 @@ describe('E2E: 增量直连（git diff 驱动）', () => {
     if (sourceDir) fs.rmSync(sourceDir, { recursive: true, force: true });
   });
 
-  test('增量直连：add + modify + delete', () => {
-    // 修改 a.md，新增 d.md，删除 b.md
-    fs.writeFileSync(path.join(sourceDir, 'a.md'), '# 文件 A v2 改了');
-    fs.writeFileSync(path.join(sourceDir, 'd.md'), '# 新文件 D');
-    fs.unlinkSync(path.join(sourceDir, 'b.md'));
-    execSync(`git${GIT_ENV}add -A && git${GIT_ENV}commit -q -m v2`, { cwd: sourceDir, shell: '/bin/bash' });
+  test('同文件重复追加：幂等覆盖，不新增、不冲突', () => {
+    const result = runImport(SCOPE, sourceDir, 'Wiki');
+    assert.equal(result.ok, true, `重复追加应成功: ${JSON.stringify(result)}`);
+    // 幂等：同 sourcePath 重导覆盖，不跳过、不新增
+    assert.equal(result.stats.total, 3, '同文件重导 total 应仍为 3');
+    assert.equal(result.stats.skipped, 0, '幂等重导不应计入 skipped');
+    console.log('  ✓ 同文件重复追加幂等');
+  });
 
-    // 增量直连（不传 root-name，复用 source 块）
-    const result = runImport(SCOPE, sourceDir, 'IncWiki', 'incremental');
+  test('新增文档追加到已有 group', () => {
+    // 新增 d.md + 修改 a.md
+    fs.writeFileSync(path.join(sourceDir, 'd.md'), '# 文件 D 新增');
+    fs.writeFileSync(path.join(sourceDir, 'a.md'), '# 文件 A v2 已改');
 
-    assert.equal(result.ok, true, `增量直连应成功: ${JSON.stringify(result)}`);
-    assert.equal(result.mode, 'incremental');
-    assert.equal(result.stats.added, 1, `added=${result.stats.added}`);
-    assert.equal(result.stats.modified, 1, `modified=${result.stats.modified}`);
-    assert.equal(result.stats.deleted, 1, `deleted=${result.stats.deleted}`);
-    assert.equal(result.stats.errors, 0, `errors=${JSON.stringify(result.errors)}`);
+    const result = runImport(SCOPE, sourceDir, 'Wiki');
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // 3 个旧文件（a 覆盖 + b 幂等 + sub/c 幂等）+ 1 新增 = 4 chunks
+    assert.equal(result.stats.total, 4, `total 应为 4；实际=${result.stats.total}`);
 
-    // source.commit 应更新
-    assert.notEqual(result.newCommit, baseCommit);
-    assert.equal(result.previousCommit, baseCommit);
-
-    // 验证 cache 状态
     const kbDir = path.resolve(__dirname, '..', '..', 'kb', SCOPE);
-    const cacheFile = path.join(kbDir, 'relations-cache.json');
-    const newCache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-
-    // a.md 仍在 cache 中（modify 后为新 chunk）
-    const aRel = newCache.groups['IncWiki'].hot_relations.find((r) => r.text === 'a-01');
-    assert.ok(aRel, 'a.md 仍在 cache 中（chunk 名 a-01）');
-    assert.ok(aRel.memoryId, 'modify 后应有 memoryId');
-    assert.equal(aRel.sourcePath, 'a.md#1');
-
-    // d.md 应新增
-    const dRel = newCache.groups['IncWiki'].hot_relations.find((r) => r.text === 'd-01');
-    assert.ok(dRel, 'd.md 应在 cache 中（chunk 名 d-01）');
-    assert.ok(dRel.memoryId, '新增条目应有 memoryId');
-
-    // b.md 应已删除
-    const bRel = newCache.groups['IncWiki'].hot_relations.find((r) => r.text === 'b-01');
-    assert.equal(bRel, undefined, 'b.md 应从 cache 移除');
-
-    // c.md 仍保留
-    const cRel = newCache.groups['IncWiki/sub'].hot_relations.find((r) => r.text === 'c-01');
-    assert.ok(cRel, 'c.md 应保留（chunk 名 c-01）');
-
-    console.log('  ✓ 增量直连 add+modify+delete 成功');
+    const cache = JSON.parse(fs.readFileSync(path.join(kbDir, 'relations-cache.json'), 'utf-8'));
+    const dRel = cache.groups['Wiki'].hot_relations.find((r) => r.text === 'd-01');
+    assert.ok(dRel, 'd.md 应新增（chunk 名 d-01）');
+    console.log('  ✓ 新文档追加成功');
   });
 });

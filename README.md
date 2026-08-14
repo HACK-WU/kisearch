@@ -143,21 +143,16 @@ scopeMode: default            # default: 自动创建 scope；strict: 必须显�
 ### 3. 使用示例（导入外部 Wiki + HTTP 模式启动 MCP）
 
 ```bash
-# ① 首次全量导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分）
+# ① 导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分；幂等追加，
+#    重复执行即增量更新——修改/新增 source 目录文件后重新跑同命令即可）
 ki scan-kb import \
   --scope my-project \
   --source /path/to/wiki \
-  --root-name Wiki \
+  --group Wiki \
   --chunk-size 1000 \
   --chunk-overlap 150
 
-# ② 增量导入（修改 source 目录文件后执行，git diff 驱动）
-ki scan-kb import \
-  --scope my-project \
-  --source /path/to/wiki \
-  --mode incremental
-
-# ③ 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
+# ② 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
 
 # ④ 构建内置 Web 前端（产物输出到 web/dist，仅需首次构建或前端改动后）
@@ -310,19 +305,19 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 ki scan-kb import \
   --scope my-project \
   --source /path/to/wiki \
-  --root-name Wiki
+  --group Wiki
 ```
 
 内部完成：格式白名单校验（默认 `.md`）→ 自动切分（chunkSize 1000 / overlap 150，段落边界优先）→ 批量向量化（zvec）→ local KB 文件级原文写入 → relations-cache 写入（含 memoryIds）。
 
-### 增量更新（git diff 驱动，无 AI）
+### 增量更新（幂等追加，无 AI）
 
 ```bash
-# 修改 source 目录中文件后直接执行，自动按 diff 增/改/删
-ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
+# 修改/新增 source 目录文件后，重新执行同一条 import 命令即可（幂等追加）
+ki scan-kb import --scope my-project --source /path/to/wiki --group Wiki
 ```
 
-`--source` / `--mode` / `--chunk-*` 等参数详解见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
+`--group` / `--chunk-*` 等参数详解见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
 
 ## <a id="docs"></a>📚 文档导航
 

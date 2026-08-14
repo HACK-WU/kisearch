@@ -102,30 +102,27 @@ flowchart TD
 ki scan-kb import \
   --scope my-project \
   --source /path/to/wiki \
-  --root-name QoderWiki
+  --group QoderWiki
 ```
 
-内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（文件级 relation 挂 `memoryIds` 多值 + `sourcePath`）→ `group-index.source` 块记录（含 git HEAD commit + 切分参数持久化）→ scope sourceDir 写入。
+内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（文件级 relation 挂 `memoryIds` 多值 + `sourcePath`）→ `group-index.source` 块记录（含切分参数持久化）→ scope sourceDir 写入。
 
-### 增量更新（git diff 直连，1 步）
+### 增量更新（幂等追加，1 步）
 
-> **REQ-06（批次 3）**：增量由 git diff 驱动，无 AI 依赖。
+> 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，不再依赖 git。
 
 ```bash
-# 在外部知识库目录提交变更后
+# 修改 / 新增 source 目录中的文件后，重新执行同一条 import 命令即可
 ki scan-kb import \
   --scope my-project \
   --source /path/to/wiki \
-  --mode incremental
+  --group QoderWiki
 ```
 
-增量语义（文件级覆盖更新）：
-
-- `added`：读原文 → 切分 → 向量化 + 写入索引
-- `modified`：先写新全 chunk → 成功后再删旧全 chunk（写序保证中断不丢数据）
-- `deleted`：按文件关联全 chunk memoryId → 删向量 + cache + local KB
-
-可选：先查看变更（`ki scan-kb diff --scope my-project`），确认后再执行增量。
+幂等语义（文件级）：
+- 同文件重导（sourcePath 相同）→ 覆盖更新
+- 同名不同文件（sourcePath 不同）→ 跳过
+- 新文件 → 正常导入
 
 ---
 
@@ -153,17 +150,16 @@ ki scan-kb import \
 （旧流程已删除：scan / scan --results / vectorize / import-kb / migrate-keywords）
 ```
 
-迁移路径：首次全量 `scan-kb import --source <dir> --root-name <name>`；增量 `scan-kb import --source <dir> --mode incremental`。
+迁移路径：`scan-kb import --source <dir> --group <name>`（幂等追加，重复执行即增量）。
 
 ---
 
 ## 工作流六：排障时怎么判断自己卡在哪一步
 
-- **`scan-kb diff` 返回 `status: 'first_import'`**：说明尚未首次导入
 - **`scan-kb import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
 - **`scan-kb import` 报 `--source 目录不存在或不是目录`**：确认 `--source` 指向的 Markdown 目录存在
-- **`scan-kb import --mode incremental` 报 `source 目录不在 git 仓库中`**：增量依赖 git，需 `git init` 或用 `--mode full`
-- **增量 diff 返回 0 变更**：文件可能未 git commit，或 `source.commit` 已是最新
+- **`scan-kb import` 报 `--group 不能为空`**：`--group` 未传或为空（缺省会落到 `default` group）
+- **追加后 `ki search` 召回不到**：确认导入未用 `--no-vector`（非向量化模式不产生 memoryId，无法被召回）
 
 ---
 

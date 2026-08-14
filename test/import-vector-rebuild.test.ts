@@ -83,7 +83,7 @@ describe('import 覆盖导入：向量清空重建逻辑', () => {
     const r = await handleDirectImport({
       scope,
       sourceDir: src,
-      rootName: 'TestWiki',
+      group: 'TestWiki',
       vector: true,
     });
 
@@ -104,7 +104,7 @@ describe('import 覆盖导入：向量清空重建逻辑', () => {
     const r = await handleDirectImport({
       scope,
       sourceDir: src,
-      rootName: 'TestWiki',
+      group: 'TestWiki',
       vector: true,
     });
 
@@ -123,7 +123,7 @@ describe('import 覆盖导入：向量清空重建逻辑', () => {
     const r = await handleDirectImport({
       scope,
       sourceDir: src,
-      rootName: 'TestWiki',
+      group: 'TestWiki',
       vector: false,
     });
 

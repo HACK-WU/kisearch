@@ -7,7 +7,7 @@
  *   ki <command> [options]
  * 
  * 示例：
- *   ki scan-kb import --scope my-project --source ./wiki --root-name wiki
+ *   ki scan-kb import --scope my-project --source ./wiki --group wiki
  *   ki manage-index --scope my-project --action create-root --root-name "我的项目"
  *   ki query-group --scope my-project
  */
@@ -78,7 +78,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki <command> [options]
 
 命令：
-  scan-kb           统一入口：import（--source 直导/增量直连）/ diff
+  scan-kb           统一入口：import（--source 直导，幂等追加）
   manage-index      Group 树 CRUD
   query-group       查询 Group + 分区
   get-module-info   读取本地 KB 原文
@@ -103,7 +103,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 示例：
   ki config init
   ki doctor
-  ki scan-kb import --scope my-project --source ./wiki --root-name wiki
+  ki scan-kb import --scope my-project --source ./wiki --group wiki
   ki scope list
   ki doc list --scope my-project --limit 10
   ki tag list --scope my-project

@@ -146,46 +146,28 @@ describe('展示参数校验', () => {
   });
 });
 
-// ─── §8 导入异常（直导 / 增量直连） ───
+// ─── §8 导入异常（幂等追加直导） ───
 describe('导入异常', () => {
   it('scan-kb import source 目录不存在', async () => {
     const s = await mkScope('err-imp');
-    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', '/nonexistent/path', '--root-name', 'wiki']);
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', '/nonexistent/path', '--group', 'wiki']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('sourceDir 不存在或不是目录'));
   });
-  it('scan-kb import 空 root-name', async () => {
+  it('scan-kb import 不传 --group 默认落 default', async () => {
     const s = await mkScope('err-imp');
     const src = mkTmp('ki-err-root');
-    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', '']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(
-      r.error.includes('rootName') || r.error.includes('--root-name'),
-      `应提示 root-name 缺失；实际=${r.error}`
-    );
+    fs.writeFileSync(path.join(src, 'a.md'), '# a');
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--no-vector']);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.ok(r.groups.includes('default'), '默认应落 default group');
   });
   it('scan-kb import 目录无 md 文件', async () => {
     const s = await mkScope('err-imp');
     const src = mkTmp('ki-err-nomd');
     fs.writeFileSync(path.join(src, 'a.txt'), 'not markdown');
-    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', 'wiki']);
+    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--group', 'wiki']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('未发现 .md 文件'));
-  });
-  it('scan-kb incremental 未首次导入', async () => {
-    const s = await mkScope('err-imp');
-    const src = mkTmp('ki-err-inc');
-    fs.writeFileSync(path.join(src, 'a.md'), '# a');
-    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--mode', 'incremental']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('尚未首次导入'));
-  });
-  it('scan-kb import 未知 mode', async () => {
-    const s = await mkScope('err-imp');
-    const src = mkTmp('ki-err-mode');
-    fs.writeFileSync(path.join(src, 'a.md'), '# a');
-    const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--root-name', 'wiki', '--mode', 'bogus']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('未知 --mode'));
   });
 });

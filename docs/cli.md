@@ -22,20 +22,18 @@
 
 ## `scan-kb`（统一入口）
 
-外部知识库导入的统一入口，支持 `import`、`diff` 两个子命令。
-（批次 3：`scan` 子命令与 ai-results 输入契约已删除，改为 `--source` 原文直导 / git diff 增量直连，无 AI 依赖。）
+外部知识库导入的统一入口，提供 `import` 子命令。
+（历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除，增量更新由幂等追加语义承载。）
 
 ### `import` 子命令（推荐）
 
-统一导入外部知识库，首次全量或增量更新。
-
-**全量直导**（首次导入，无 AI）：
+统一导入外部知识库，**幂等追加**（重复执行 = 增量）。
 
 ```bash
 ki scan-kb import \
   -s <scope> \
   --source <dir> \
-  --root-name <name> \
+  --group <name> \
   [--chunk-size <chars>] \
   [--chunk-overlap <chars>] \
   [--no-vector]
@@ -43,80 +41,36 @@ ki scan-kb import \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `-s, --scope` | 是 | 项目隔离标识 |
-| `--source` | 是 | Markdown 目录绝对路径（仅 `--mode full` 时必填；`--mode incremental` 缺省复用 source 块） |
-| `--root-name` | 是（full）/ 否（incremental） | 根 Group 名 |
+| `-s, --scope` | 否 | 项目隔离标识 |
+| `--source` | 是 | Markdown 目录绝对路径 |
+| `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径）。缺省 `default` |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
 
-**示例：首次全量导入**
+**示例：首次导入**
 
 ```bash
-ki scan-kb import -s my-project --source /path/to/wiki --root-name wiki
+ki scan-kb import -s my-project --source /path/to/wiki --group wiki
 ```
 
-自动切分：大文件按段落边界（`\n\n > \n > 。 > ；`）优先切分，relation 命名为 `文件名-N`（如 `deploy-01`），sourcePath 为 `文件路径#N`（文件级 diff 前缀聚合键）。切分参数持久化到 source 块。
+自动切分：大文件按段落边界（`\n\n > \n > 。 > ；`）优先切分，relation 命名为 `文件名-N`（如 `deploy-01`），sourcePath 为 `文件路径#N`。切分参数持久化到 source 块。
+
+**幂等语义**：
+- 同文件重导（sourcePath 相同）→ 覆盖更新
+- 同名不同文件（sourcePath 不同）→ 跳过
+- 新文件 → 正常导入
+
+因此重复执行同命令即同步变更（追加新文档 / 更新已有文档），无需 `--mode incremental`。
 
 输出：
 ```json
 {
   "ok": true,
-  "mode": "full",
   "scope": "my-project",
   "stats": { "total": 15, "vectorized": 15, "errors": 0 },
   "groups": ["wiki", "wiki/api"],
-  "source": { "dir": "/path/to/wiki", "rootName": "wiki", "commit": "<40-hex>" }
-}
-```
-
-**示例：增量直连**（git diff 驱动，无 AI）
-
-```bash
-# 修改 source 目录文件后：
-ki scan-kb import --scope my-project --source /path/to/wiki --mode incremental
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "mode": "incremental",
-  "scope": "my-project",
-  "stats": { "total": 3, "added": 1, "modified": 1, "deleted": 1, "errors": 0 },
-  "previousCommit": "<40-hex>",
-  "newCommit": "<40-hex>"
-}
-```
-
-### `diff` 子命令
-
-检测自上次导入以来的变更。
-
-```bash
-ki scan-kb diff \
-  --scope <scope> \
-  [--output <file>]
-```
-
-**示例：查看变更**
-
-```bash
-ki scan-kb diff --scope my-project
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "action": "diff",
-  "scope": "my-project",
-  "baseCommit": "abc123",
-  "headCommit": "def456",
-  "added": [{ "path": "docs/new-feature.md", "absPath": "/path/to/wiki/docs/new-feature.md" }],
-  "modified": [{ "path": "docs/api.md", "memoryId": "<32-hex>" }],
-  "deleted": [{ "path": "docs/old-feature.md", "memoryId": "<32-hex>" }],
-  "stats": { "added": 1, "modified": 1, "deleted": 1, "total": 3 }
+  "source": { "dir": "/path/to/wiki", "rootName": "wiki" }
 }
 ```
 

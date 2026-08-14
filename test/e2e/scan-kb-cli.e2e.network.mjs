@@ -1,29 +1,22 @@
 /**
- * scan-kb-cli.e2e.network.mjs —— scan-kb import/diff 管线真实端到端验收（黑盒）
+ * scan-kb-cli.e2e.network.mjs —— scan-kb import 管线真实端到端验收（黑盒）
  *
- * 被测对象（"当前代码"）：ki scan-kb import / diff CLI
+ * 被测对象（"当前代码"）：ki scan-kb import CLI
  *   → bin/ki.mjs → src/scan-kb.ts
- *   → src/lib/{import,incremental,diff,batch-vectorize,path-vectorize,vector-client}.ts
+ *   → src/lib/{import,batch-vectorize,path-vectorize,vector-client}.ts
  *   → dist/zvec-engine（真实 SiliconFlow embedding + 真实 zvec worker）
- * 与 step-c-cli.e2e.network.mjs / kisearch-cli.e2e.network.mjs 互补：本文件覆盖
- * 外部知识库导入的"全量直导 → diff → 增量直连（add/modify/delete）"闭环。
  *
- * 批次 3（REQ-04）：ai-results 输入契约已删除，改为 --source 原文直导 / git diff 直连。
- * requirement_ref：MIGRATION_P3_MEM_TO_ZVEC（向量化管线 mem → zvec Vector Adapter）。
- *   断言只对照对外契约（CLI 入参 → JSON 输出与副作用），不依赖内部实现。
- *   重点回归：全量直导必须把真实 docId 持久化到 relations-cache，使后续
- *   diff → 增量 modify/delete 能关联旧向量（docId 是 zvec 删除向量的唯一钥匙）。
+ * 批次 3（REQ-04）：ai-results 输入契约已删除，改为 --source 原文直导。
+ * 后续迭代：废弃 --mode incremental 与 diff 子命令（git diff 驱动），
+ * 统一为「--group 幂等追加」语义（重复执行 = 增量）。
  *
  * 覆盖旅程（共享 Context 串联；顺序敏感）：
  *   setup       : 载入 .env.e2e → 临时 dataDir + vectorDir + config.json（隔离，不污染 ~/.ki）
- *                 + 一个 git 仓库 fixture 作为外部知识库 sourceDir
- *   E2E-1 full  : import --source 直导 → ok + mode:full + stats.total=2 + source.commit(40-hex)
+ *                 + 一个源目录 fixture 作为外部知识库 sourceDir
+ *   E2E-1 full  : import --source 直导 → ok + total=2 + source.rootName
  *   E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）
- *   E2E-3 diff0 : diff（无变更）→ stats.total=0
- *   E2E-4 diffN : 改 a.md + 增 c.md + 删 b.md + commit → diff → added/modified/deleted 各 1
- *                 且 modified/deleted 关联到 docId（32-hex）← 全量直导持久化 docId 的回归点
- *   E2E-5 inc   : import --mode incremental（git diff 直连）→ mode:incremental + added=1 + modified=1 + deleted=1 + errors=0
- *   E2E-6 verify: 删除项的旧向量应被清理（search 不再召回）；再 diff → total=0
+ *   E2E-3 append: 新增文档 + 同文件修改后重新 import → 幂等追加（新文件导入、旧文件覆盖）
+ *   E2E-4 verify: 幂等追加后，新增文档可召回
  *   teardown    : 删除临时目录
  *
  * 安全：源码零秘钥。凭证从 .env.e2e（回退 .env / 进程环境）读取；缺 apiKey 整套跳过。
@@ -34,7 +27,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync, execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -78,14 +71,9 @@ function resolveBaseURL(raw) {
 
 const PID = process.pid;
 const SCOPE = `e2e-scankb-${PID}`;
-const ROOT_NAME = 'wiki';
-
-const DOC_ID_RE = /^[0-9a-f]{32}$/; // vector-client: sha256(text+scope).slice(0,32)
+const GROUP = 'wiki';
 
 const ctx = { tmpBase: null, dataDir: null, vectorDir: null, configPath: null, sourceDir: null };
-
-// git fixture 工具（关闭 gpg 签名，固定身份，保证可复现）
-const GIT_ENV = ' -c user.email=t@t -c user.name=t -c commit.gpgsign=false ';
 
 /** 调用 ki CLI：node bin/ki.mjs <args> --config <tmp>；解析 stdout 中的 JSON（若有） */
 function ki(args, timeout = 180_000) {
@@ -111,13 +99,11 @@ function ki(args, timeout = 180_000) {
 
 before(() => {
   if (!RUN) return;
-  // realpathSync 规范化：macOS os.tmpdir() 为 /var/folders/...（软链到 /private/var/...），
-  // 而 git rev-parse --show-toplevel 返回真实路径；不规范化会导致 diff 的 path.relative 越界。
   ctx.tmpBase = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ki-scankb-e2e-${PID}-`)));
   ctx.dataDir = path.join(ctx.tmpBase, 'kb');
   ctx.vectorDir = path.join(ctx.tmpBase, 'vector'); // 首次向量写入时由引擎创建
 
-  // 外部知识库 git fixture
+  // 外部知识库 sourceDir fixture
   ctx.sourceDir = path.join(ctx.tmpBase, 'source');
   fs.mkdirSync(path.join(ctx.sourceDir, 'sub'), { recursive: true });
   fs.writeFileSync(
@@ -128,8 +114,6 @@ before(() => {
     path.join(ctx.sourceDir, 'sub', 'b.md'),
     '# 季度对账流程\n\n季度财务报表的结算流程与对账科目明细，涵盖应收应付的核销与差异调整。'
   );
-  execSync('git init -q', { cwd: ctx.sourceDir });
-  execSync(`git${GIT_ENV}add . && git${GIT_ENV}commit -q -m init`, { cwd: ctx.sourceDir, shell: '/bin/bash' });
 
   const config = {
     dataDir: ctx.dataDir,
@@ -158,15 +142,14 @@ after(() => {
 
 // ─── 旅程 ───
 
-test('E2E-1 full: import --source 直导 → ok + mode:full + total=2 + source.commit(40-hex)', { ...SKIP, timeout: 180_000 }, () => {
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--root-name', ROOT_NAME]);
+test('E2E-1 full: import --source 直导 → ok + total=2 + source.rootName', { ...SKIP, timeout: 180_000 }, () => {
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
   assert.equal(r.json?.ok, true, `import 应成功；实际=${JSON.stringify(r.json)}`);
-  assert.equal(r.json.mode, 'full', `应为全量模式；实际=${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.total, 2, `应导入 2 个 chunk（a.md + sub/b.md 各 1）；实际=${JSON.stringify(r.json.stats)}`);
   assert.equal(r.json.stats.errors, 0, `不应有错误；errors=${JSON.stringify(r.json.errors)}`);
-  assert.match(r.json.source.commit, /^[0-9a-f]{40}$/, `source.commit 应为 git HEAD；实际=${r.json.source?.commit}`);
-  console.log(`  ✓ full 直导：chunks=${r.json.stats.total} commit=${r.json.source.commit.slice(0, 8)}`);
+  assert.equal(r.json.source.rootName, GROUP, `source.rootName 应为 ${GROUP}；实际=${r.json.source?.rootName}`);
+  console.log(`  ✓ 直导：chunks=${r.json.stats.total} group=${r.json.source.rootName}`);
 });
 
 test('E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）', { ...SKIP, timeout: 180_000 }, () => {
@@ -178,61 +161,25 @@ test('E2E-2 recall: search → 语义召回全量向量化写入的模块（证�
   console.log(`  ✓ recall 命中全量向量；返回 ${r.json.results.length} 条`);
 });
 
-test('E2E-3 diff0: diff（无变更）→ stats.total=0', { ...SKIP, timeout: 120_000 }, () => {
-  const r = ki(['scan-kb', 'diff', '--scope', SCOPE]);
-  assert.equal(r.json?.ok, true, `diff 应成功；${JSON.stringify(r.json)}`);
-  assert.equal(r.json.action, 'diff');
-  assert.equal(r.json.stats.total, 0, `无变更时 total 应为 0；实际=${JSON.stringify(r.json.stats)}`);
-  console.log('  ✓ diff（无变更）total=0');
-});
-
-test('E2E-4 diffN: 改/增/删 + commit → diff 各 1，且 modified/deleted 关联 docId（回归点）', { ...SKIP, timeout: 120_000 }, () => {
-  // 改 a.md、增 c.md、删 sub/b.md，然后 commit
-  fs.writeFileSync(path.join(ctx.sourceDir, 'a.md'), '# AES 加密工具 v2\n\nAES-GCM 模式在对称加密基础上额外提供完整性校验。');
+test('E2E-3 append: 新增文档 + 修改后重新 import → 幂等追加', { ...SKIP, timeout: 180_000 }, () => {
+  // 新增 c.md，修改 a.md
   fs.writeFileSync(path.join(ctx.sourceDir, 'c.md'), '# RSA 非对称加密\n\nRSA 使用公钥加密、私钥解密，常用于密钥交换与数字签名。');
-  fs.unlinkSync(path.join(ctx.sourceDir, 'sub', 'b.md'));
-  execSync(`git${GIT_ENV}add -A && git${GIT_ENV}commit -q -m v2`, { cwd: ctx.sourceDir, shell: '/bin/bash' });
+  fs.writeFileSync(path.join(ctx.sourceDir, 'a.md'), '# AES 加密工具 v2\n\nAES-GCM 模式在对称加密基础上额外提供完整性校验。');
 
-  const r = ki(['scan-kb', 'diff', '--scope', SCOPE]);
-  assert.equal(r.json?.ok, true, `diff 应成功；${JSON.stringify(r.json)}`);
-  assert.equal(r.json.stats.added, 1, `added 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  assert.equal(r.json.stats.modified, 1, `modified 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  assert.equal(r.json.stats.deleted, 1, `deleted 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  // 关键回归：全量直导已持久化真实 docId，diff 应能为 modified/deleted 关联 docId
-  assert.match(r.json.modified[0].memoryId ?? '', DOC_ID_RE, `modified 应关联 docId（全量直导持久化回归）；实际=${JSON.stringify(r.json.modified)}`);
-  assert.match(r.json.deleted[0].memoryId ?? '', DOC_ID_RE, `deleted 应关联 docId（全量直导持久化回归）；实际=${JSON.stringify(r.json.deleted)}`);
-  console.log(`  ✓ diff：+${r.json.stats.added}/~${r.json.stats.modified}/-${r.json.stats.deleted}；modified.docId=${r.json.modified[0].memoryId.slice(0, 12)}…`);
-});
-
-test('E2E-5 inc: import --mode incremental（git diff 直连）→ add/modify/delete 各 1，errors=0', { ...SKIP, timeout: 180_000 }, () => {
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--mode', 'incremental']);
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
-  assert.equal(r.json?.ok, true, `增量直连应成功；${JSON.stringify(r.json)}`);
-  assert.equal(r.json.mode, 'incremental');
-  assert.equal(r.json.stats.added, 1, `added 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  assert.equal(r.json.stats.modified, 1, `modified 应为 1；实际=${JSON.stringify(r.json.stats)}`);
-  assert.equal(r.json.stats.deleted, 1, `deleted 应为 1；实际=${JSON.stringify(r.json.stats)}`);
+  assert.equal(r.json?.ok, true, `幂等追加应成功；${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.errors, 0, `不应有错误；errors=${JSON.stringify(r.json.errors)}`);
-  assert.notEqual(r.json.previousCommit, r.json.newCommit, 'source.commit 应推进到新 HEAD');
-  console.log(`  ✓ incremental：+${r.json.stats.added}/~${r.json.stats.modified}/-${r.json.stats.deleted} errors=0`);
+  // 3 个文件（a 覆盖 + sub/b 幂等 + c 新增）各 1 chunk
+  assert.equal(r.json.stats.total, 3, `total 应为 3；实际=${JSON.stringify(r.json.stats)}`);
+  console.log(`  ✓ 幂等追加：chunks=${r.json.stats.total}（新增 c.md + 覆盖 a.md + 幂等 sub/b.md）`);
 });
 
-test('E2E-6 verify: 删除项旧向量被清理（search 不再召回）；再 diff → total=0', { ...SKIP, timeout: 180_000 }, () => {
-  // 删除的 b.md（季度对账）不应再被召回
-  const rDel = ki(['search', '--scope', SCOPE, '--query', '季度财务报表结算与对账科目明细']);
-  assert.equal(rDel.json?.ok, true, `search 应成功；${JSON.stringify(rDel.json)}`);
-  const stillHit = (rDel.json.results ?? []).some((x) => (x.content ?? '').includes('对账科目'));
-  assert.equal(stillHit, false, `删除项旧向量应被清理，不应再召回；results=${JSON.stringify((rDel.json.results ?? []).map((x) => x.content?.slice(0, 30)))}`);
-
-  // 新增的 RSA 应可被召回（证明增量 add 写入成功）
+test('E2E-4 verify: 幂等追加后，新增文档可召回', { ...SKIP, timeout: 180_000 }, () => {
+  // 新增的 RSA 应可被召回（证明追加写入成功）
   const rAdd = ki(['search', '--scope', SCOPE, '--query', '公钥加密私钥解密用于密钥交换']);
   assert.equal(rAdd.json?.ok, true);
   const rsaHit = (rAdd.json.results ?? []).some((x) => (x.content ?? '').includes('非对称') || (x.content ?? '').includes('RSA'));
-  assert.ok(rsaHit, `增量 add 的 RSA 向量应可召回；results=${JSON.stringify((rAdd.json.results ?? []).map((x) => x.content?.slice(0, 30)))}`);
-
-  // 增量后 commit 已推进，diff 应回到 0 变更
-  const rDiff = ki(['scan-kb', 'diff', '--scope', SCOPE]);
-  assert.equal(rDiff.json?.ok, true);
-  assert.equal(rDiff.json.stats.total, 0, `增量后 diff 应回到 total=0；实际=${JSON.stringify(rDiff.json.stats)}`);
-  console.log('  ✓ verify：删除项已清理、RSA 可召回、diff 归零');
+  assert.ok(rsaHit, `追加的 RSA 向量应可召回；results=${JSON.stringify((rAdd.json.results ?? []).map((x) => x.content?.slice(0, 30)))}`);
+  console.log('  ✓ verify：追加文档可召回');
 });

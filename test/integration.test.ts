@@ -39,20 +39,6 @@ function runScriptJson(script: string, args: string[]): any {
   }
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=master', ...args], {
-    cwd,
-    encoding: 'utf-8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'test-int',
-      GIT_AUTHOR_EMAIL: 'test-int@example.com',
-      GIT_COMMITTER_NAME: 'test-int',
-      GIT_COMMITTER_EMAIL: 'test-int@example.com',
-    },
-  }).trim();
-}
-
 const createdScopes: string[] = [];
 const tempDirs: string[] = [];
 let counter = 0;
@@ -341,15 +327,14 @@ describe('导入路径', () => {
     fs.writeFileSync(path.join(sourceDir, '监控', '告警.md'), '# 告警模块\n告警配置说明');
     fs.writeFileSync(path.join(sourceDir, '部署.md'), '# 部署文档\n部署流程说明');
 
-    // 全量直导（无 AI）：--source + --root-name
+    // 幂等追加直导（无 AI）：--source + --group
     const importResult = runScriptJson('scan-kb.ts', [
       'import',
       '--scope', scope,
       '--source', sourceDir,
-      '--root-name', 'wiki',
+      '--group', 'wiki',
     ]);
     assert.strictEqual(importResult.ok, true);
-    assert.strictEqual(importResult.mode, 'full');
     assert.strictEqual(importResult.stats.total, 2);
     assert.strictEqual(importResult.groups.length, 2);
     assert.ok(importResult.groups.includes('wiki'));
@@ -367,67 +352,4 @@ describe('导入路径', () => {
     assert.ok(Array.isArray(deployRel.memoryIds) && deployRel.memoryIds.length >= 1, '文件级 relation 应挂 memoryIds 多值');
   });
 
-  it('scan-kb import 增量直连（git diff 驱动）', async () => {
-    const scope = await makeScopeInit('integration-inc');
-    const repoDir = makeTempDir('ki-int-inc');
-
-    git(repoDir, ['init']);
-    fs.writeFileSync(path.join(repoDir, 'keep.md'), '# keep\n内容A');
-    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v1\n内容B');
-    fs.writeFileSync(path.join(repoDir, 'remove.md'), '# remove\n内容C');
-    git(repoDir, ['add', '.']);
-    git(repoDir, ['commit', '-m', 'init']);
-
-    // 全量直导
-    const full = runScriptJson('scan-kb.ts', [
-      'import',
-      '--scope', scope,
-      '--source', repoDir,
-      '--root-name', 'wiki',
-    ]);
-    assert.strictEqual(full.ok, true);
-    assert.strictEqual(full.stats.total, 3);
-
-    // A/M/D：新增 new.md、修改 change.md、删除 remove.md
-    fs.writeFileSync(path.join(repoDir, 'new.md'), '# new\n内容D');
-    fs.writeFileSync(path.join(repoDir, 'change.md'), '# change v2\n内容E');
-    fs.unlinkSync(path.join(repoDir, 'remove.md'));
-    git(repoDir, ['add', '-A']);
-    git(repoDir, ['commit', '-m', 'changes']);
-
-    // 增量直连
-    const inc = runScriptJson('scan-kb.ts', [
-      'import',
-      '--scope', scope,
-      '--source', repoDir,
-      '--mode', 'incremental',
-    ]);
-    assert.strictEqual(inc.ok, true);
-    assert.strictEqual(inc.mode, 'incremental');
-    assert.strictEqual(inc.stats.added, 1); // new.md
-    assert.strictEqual(inc.stats.modified, 1); // change.md
-    assert.strictEqual(inc.stats.deleted, 1); // remove.md
-    assert.strictEqual(inc.stats.errors, 0);
-
-    // source.commit 已更新
-    const { getSource } = await import('../src/lib/scope.js');
-    const source = getSource(scope);
-    assert.ok(source.commit.length === 40, '增量后 source.commit 应为新 HEAD');
-    const head = git(repoDir, ['rev-parse', 'HEAD']);
-    assert.strictEqual(source.commit, head);
-
-    // relations-cache 内容断言（回归保护：modified 删旧不得误删新 chunk，P0 bug）
-    const { readJson } = await import('../src/lib/store.js');
-    const { getRelationsCachePath } = await import('../src/lib/scope.js');
-    const cache = readJson<any>(getRelationsCachePath(scope))!;
-    const allRels = Object.values(cache.groups).flatMap((g: any) => g.hot_relations);
-    const texts = allRels.map((r: any) => r.text);
-
-    // keep.md 保留；new.md 新增；change.md 修改后仍在（文件级 relation + memoryIds 更新）
-    assert.ok(texts.some((t: string) => t === 'keep'), 'keep.md 应保留');
-    assert.ok(texts.some((t: string) => t === 'new'), 'new.md 应新增');
-    assert.ok(texts.some((t: string) => t === 'change'), 'change.md 修改后文件级 relation 应存在（回归：不得被删旧误删）');
-    // remove.md 删除
-    assert.ok(!texts.some((t: string) => t === 'remove'), 'remove.md 应删除');
-  });
 });

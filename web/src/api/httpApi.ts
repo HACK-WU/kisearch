@@ -69,14 +69,12 @@ export interface RunImportResponse {
   ok: boolean;
   jobId?: string;
   scope?: string;
-  mode?: string;
   error?: string;
 }
 
 export interface ImportJob {
   id: string;
   scope: string;
-  mode: 'full' | 'incremental';
   state: 'running' | 'done' | 'failed';
   phase?: string;
   progress?: { done: number; total: number };
@@ -151,8 +149,6 @@ export async function uploadFiles(
 export async function runImport(args: {
   scope: string;
   uploadId: string;
-  mode: 'full' | 'incremental';
-  rootName?: string;
   /** 自定义 Group 路径前缀（如 "wiki/我的文档"） */
   group?: string;
   chunkSize?: number;

@@ -11,7 +11,7 @@
  * 设计要点：
  *   - 延迟加载（mcp-http.ts 动态 import），避免初始化拉重依赖
  *   - 上传仅接受文件内容，不接受服务器路径（受控目录防路径注入）
- *   - 导入直接调 handleDirectImport/handleIncrementalDirect（纯函数，复用内部锁）
+ *   - 导入直接调 handleDirectImport（纯函数，复用内部锁）
  *   - job 状态内存 Map，服务重启即清空（低频操作可接受）
  */
 
@@ -26,10 +26,6 @@ import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck } from './health-check.js';
 import { getRelationsCachePath } from './scope.js';
 import { handleDirectImport, type ImportResult } from './import.js';
-import {
-  handleIncrementalDirect,
-  type IncrementalResult,
-} from './incremental.js';
 import { executeTagList } from '../tag.js';
 
 // ─── 常量 ─────────────────────────────────────────────
@@ -55,11 +51,10 @@ function getUploadsRoot(): string {
 interface ImportJob {
   id: string;
   scope: string;
-  mode: 'full' | 'incremental';
   state: 'running' | 'done' | 'failed';
   phase?: 'scan' | 'vectorize' | 'persist';
   progress?: { done: number; total: number };
-  result?: ImportResult | IncrementalResult;
+  result?: ImportResult;
   error?: string;
   startedAt: number;
   finishedAt?: number;
@@ -69,7 +64,7 @@ const jobs = new Map<string, ImportJob>();
 const MAX_JOBS = 50;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1h
 
-function createJob(scope: string, mode: 'full' | 'incremental'): ImportJob {
+function createJob(scope: string): ImportJob {
   // 清理过期 job，防止 Map 无界增长
   const now = Date.now();
   for (const [id, j] of jobs) {
@@ -83,7 +78,6 @@ function createJob(scope: string, mode: 'full' | 'incremental'): ImportJob {
   const job: ImportJob = {
     id: crypto.randomUUID(),
     scope,
-    mode,
     state: 'running',
     startedAt: now,
   };
@@ -465,9 +459,7 @@ async function handleImportRun(
   const body = (await readJsonBody(req)) as {
     scope?: string;
     uploadId?: string;
-    mode?: string;
-    rootName?: string;
-    /** 自定义 Group 前缀路径（如 "wiki/我的文档"），覆盖 rootName */
+    /** 目标 Group 落点（如 "wiki/我的文档"）；缺省用 scope */
     group?: string;
     chunkSize?: number;
     chunkOverlap?: number;
@@ -485,7 +477,6 @@ async function handleImportRun(
     return;
   }
   const scope = resolveScope(loadConfig(), body.scope);
-  const mode = body.mode === 'incremental' ? 'incremental' : 'full';
   const sourceDir = path.join(getUploadsRoot(), body.uploadId);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     sendJson(res, 400, { ok: false, error: `uploadId 不存在（${body.uploadId}）` });
@@ -498,26 +489,24 @@ async function handleImportRun(
     return;
   }
 
-  const job = createJob(scope, mode);
+  const job = createJob(scope);
   void runImportJob(job, {
     scope,
     sourceDir,
-    mode,
-    rootName: (body.group || body.rootName)?.trim() || scope,
+    group: body.group?.trim() || scope,
     chunkSize: body.chunkSize,
     chunkOverlap: body.chunkOverlap,
     vector: body.vector,
     tags: body.tags,
   });
 
-  sendJson(res, 202, { ok: true, jobId: job.id, scope, mode });
+  sendJson(res, 202, { ok: true, jobId: job.id, scope });
 }
 
 interface RunImportArgs {
   scope: string;
   sourceDir: string;
-  mode: 'full' | 'incremental';
-  rootName?: string;
+  group?: string;
   chunkSize?: number;
   chunkOverlap?: number;
   vector?: boolean;
@@ -526,25 +515,15 @@ interface RunImportArgs {
 
 async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> {
   try {
-    const result =
-      args.mode === 'incremental'
-        ? await handleIncrementalDirect({
-            scope: args.scope,
-            sourceDir: args.sourceDir,
-            chunkSize: args.chunkSize,
-            chunkOverlap: args.chunkOverlap,
-            vector: args.vector,
-            tags: args.tags,
-          })
-        : await handleDirectImport({
-            scope: args.scope,
-            sourceDir: args.sourceDir,
-            rootName: args.rootName ?? args.scope,
-            chunkSize: args.chunkSize,
-            chunkOverlap: args.chunkOverlap,
-            vector: args.vector,
-            tags: args.tags,
-          });
+    const result = await handleDirectImport({
+      scope: args.scope,
+      sourceDir: args.sourceDir,
+      group: args.group ?? args.scope,
+      chunkSize: args.chunkSize,
+      chunkOverlap: args.chunkOverlap,
+      vector: args.vector,
+      tags: args.tags,
+    });
     job.state = 'done';
     job.result = result;
     job.phase = 'persist';
@@ -570,7 +549,6 @@ async function handleImportStatus(res: http.ServerResponse, url: URL): Promise<v
     job: {
       id: job.id,
       scope: job.scope,
-      mode: job.mode,
       state: job.state,
       phase: job.phase,
       progress: job.progress,

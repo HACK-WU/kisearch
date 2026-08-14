@@ -134,7 +134,7 @@ describe('scope 物理隔离', () => {
     fs.writeFileSync(path.join(src, 'doc.md'), '# doc\ncontent');
 
     // scope A 直导
-    const rA = runJson('scan-kb.ts', ['import', '--scope', sA, '--source', src, '--root-name', 'wiki']);
+    const rA = runJson('scan-kb.ts', ['import', '--scope', sA, '--source', src, '--group', 'wiki']);
     assert.strictEqual(rA.ok, true);
     assert.strictEqual(rA.stats.total, 1);
 

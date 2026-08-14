@@ -23,7 +23,6 @@ export function ImportPage(): JSX.Element {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [files, setFiles] = useState<PendingFile[]>([]);
-  const [mode, setMode] = useState<'full' | 'incremental'>('full');
   const [advOpen, setAdvOpen] = useState(false);
   const [chunkSize, setChunkSize] = useState('1000');
   const [chunkOverlap, setChunkOverlap] = useState('150');
@@ -208,7 +207,6 @@ export function ImportPage(): JSX.Element {
       const run = await runImport({
         scope,
         uploadId: up.uploadId,
-        mode,
         group: group.trim() || undefined,
         chunkSize: chunkSize ? Number(chunkSize) : undefined,
         chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
@@ -220,7 +218,7 @@ export function ImportPage(): JSX.Element {
         setError(run.error ?? '导入触发失败');
         return;
       }
-      setJob({ id: run.jobId, scope, mode, state: 'running', startedAt: Date.now() });
+      setJob({ id: run.jobId, scope, state: 'running', startedAt: Date.now() });
       setProgressText('导入中…');
       setPhase('importing');
     } catch (e) {
@@ -238,17 +236,8 @@ export function ImportPage(): JSX.Element {
       <div className="ki-page-head">
         <div>
           <h1>上传导入</h1>
-          <p>目标：{scope} · 直导无需 AI · 无第三方依赖</p>
+          <p>目标：{scope} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
         </div>
-        <select
-          className="ki-form-select"
-          style={{ width: 'auto', minWidth: 140 }}
-          value={mode}
-          onChange={(e) => setMode(e.target.value as 'full' | 'incremental')}
-        >
-          <option value="full">全量导入</option>
-          <option value="incremental">增量导入</option>
-        </select>
       </div>
 
       <div className="ki-card">
