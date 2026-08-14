@@ -227,6 +227,8 @@ ki mcp token show           # 查看当前托管 Token（填入上方 headers �
 ki mcp                      # stdio 模式（默认，单客户端单进程）
 ki mcp --http               # HTTP 共享单例（多 IDE 共享同一持锁进程，见 docs/mcp-http.md）
 ki mcp --http --web         # HTTP 模式 + 可视化前端（浏览器访问 http://127.0.0.1:7423/）
+ki mcp --http --daemon      # HTTP 模式后台常驻运行（-d 同义，SSH 断开不退出；--web 组合同样生效）
+ki mcp restart              # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
 ki mcp --status             # 查看 HTTP 单例运行状态（只读）
 ki mcp stop                 # 关闭本机所有 ki mcp 实例并清理 lock
 ki mcp token generate       # 一键生成托管 Token（远程访问鉴权）
