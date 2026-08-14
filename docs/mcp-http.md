@@ -45,7 +45,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
+| `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含多 Token 存储数量 `managedTokens.count`），不启动服务、跳过预检 |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
@@ -117,9 +117,12 @@ ki mcp --status --host 127.0.0.1 --port 7423
   "target": { "host": "127.0.0.1", "port": 7423 },
   "healthz": { "ok": true, "name": "kisearch", "pid": 12345, "version": "...", "host": "0.0.0.0", "port": 7423 },
   "lock": { "pid": 12345, "host": "0.0.0.0", "port": 7423, "startedAt": "..." },
+  "managedTokens": { "count": 2 },
   "hint": "..."
 }
 ```
+
+- `managedTokens.count`：多 Token 存储（`~/.ki/mcp-tokens.json`）中的 Token 数量，仅报告数量、不回显明文。
 
 - `running=false` 且 `lock` 非空：可能是残留 lock（进程已退出）——直接重启即可，启动时会真实探活覆盖。
 - `healthz.host/port` 即该实例对外声明的绑定地址，可据此核对所有 IDE 的 URL 是否一致。
@@ -222,6 +225,8 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - 关闭全部实例并清理 lock：`ki mcp stop`
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
+- **鉴权失败（401）**：Token 无效或缺失。核对客户端 `Authorization: Bearer` 与 `ki mcp token list` 输出的明文完全一致（整段复制勿手抄）；若用全权临时 Token，确认 `--token`/`KI_MCP_TOKEN` 仍在生效。服务端 stderr 有失败原因日志。
+- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。
 
 ## 会话模型
 
