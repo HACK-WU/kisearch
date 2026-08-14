@@ -922,6 +922,8 @@ ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-t
 ki mcp token show                       # 查看当前托管 Token（配置多个 IDE 时免去翻文件）
 ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
 ki mcp --http --web                     # HTTP 模式 + 可视化前端页面（浏览器访问 http://127.0.0.1:7423/）
+ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端；--web 组合同样生效）
+ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
 ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
 ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
@@ -945,12 +947,18 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含托管 Token 存在性；不启动服务、跳过预检） |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
+| `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
+| `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
 
 ### 关闭实例（`ki mcp stop`）
 
 按 lock 文件 + healthz 探活定位本机所有 ki mcp 服务进程（stdio 与 HTTP），先 SIGTERM 优雅退出、超时 SIGKILL 兜底，最后清理残留 lock，输出 JSON 报告。直接对真正的服务进程发信号，避免手动 kill 顶层壳时留下持锁孤儿进程的多层进程链问题；杀前校验 `/proc/<pid>/cmdline` 防止 pid 复用误杀无辜进程。
 
 > 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；如需长期使用 HTTP 单例，请先将 IDE 配置迁移为 URL 型接入再 `ki mcp --http`。
+
+### 重启实例（`ki mcp restart`）
+
+仅 HTTP 模式：一键重启 HTTP 单例，语义 = 关闭现有实例 + 以守护进程方式后台常驻重启。`host`/`port` 解析优先级为 CLI 参数 > lock 文件（上次运行值）> 配置文件 > 默认值；其余参数（`--token`/`--allowed-hosts`）透传给重启后的进程。上次以 `--web` 启动时重启自动延续 `--web`（lock 记录），可用 `--no-web` 显式关闭。无运行实例时等价于直接启动（幂等）。输出 JSON 报告（`target`/`stopped`/`cleanedLocks`）。详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### 托管 Token 子命令
 

@@ -47,8 +47,12 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
+| `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
+| `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
 
 子命令 `ki mcp stop`：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock，见下文「一键关闭」。
+
+子命令 `ki mcp restart`：仅 HTTP 模式，一键重启 HTTP 单例（先关闭现有实例，再以守护进程方式后台常驻重启），见下文「后台常驻与重启」。
 
 托管 Token 子命令：
 
@@ -173,6 +177,39 @@ ki mcp stop
 > 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；迁移 HTTP 单例的正确顺序是：先改 IDE 配置为 URL 型 → `ki mcp stop` → `ki mcp --http`。
 
 > **已知局限**：升级前启动的旧 stdio 进程不写 lock、也无 HTTP 端口，三个定位来源均无法发现它（与启动守卫的「存量进程盲区」同源）；如怀疑仍有此类残留，用 `ps -ef | grep mcp-server` 人工确认后 kill，属一次性迁移成本。
+
+## 后台常驻与重启（`--daemon` / `ki mcp restart`）
+
+### 后台常驻（`--daemon` / `-d`）
+
+`ki mcp --http` 默认**前台运行**（阻塞终端）。如需在服务器上长期部署、断开 SSH 后服务仍存活，加 `--daemon`（或 `-d`）：
+
+```bash
+ki mcp --http --daemon          # 后台常驻，终端立即返回
+ki mcp --http -d                # 短别名，等价
+ki mcp --http --web --daemon    # 含前端页面，同样后台常驻
+```
+
+- 守护进程脱离终端与父进程组，`ki` 壳退出后服务继续运行，`SSH` 断开不受影响。
+- 启动后终端立即返回，可用 `ki mcp --status` 确认是否就绪（启动含预检，需数秒）。
+- **不带 `--http` 时 `--daemon`/`-d` 报错**（`MCP_DAEMON_REQUIRES_HTTP`）：stdio 模式依赖 stdin/stdout 通信，后台运行会丢失传输通道。
+- 后台进程的 stdout/stderr 不落盘（丢弃），排障依赖 `ki mcp --status` 与 `curl http://<host>:<port>/healthz`。
+
+### 一键重启（`ki mcp restart`）
+
+```bash
+ki mcp restart                  # 沿用上次运行的 host/port，后台常驻重启
+ki mcp restart --host 0.0.0.0 --port 7423   # 显式覆盖 host/port 后重启
+ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --web 的自动延续）
+```
+
+- **仅 HTTP 模式**；语义 = 关闭现有实例 + 以守护进程方式后台重启（重启后默认后台常驻）。
+- **幂等**：无运行实例时 `restart` 等价于直接启动（`ok:true` 且提示「已直接后台启动」）。
+- **配置保留**：`host`/`port` 解析优先级为 CLI 参数 > lock 文件（上次运行值）> 配置文件 > 默认值；`--token`/`--allowed-hosts` 等其余参数透传给重启后的进程（Token 走既有三级优先级）。
+- **`--web` 自动延续**：上次以 `--web` 启动（lock 记录 `web:true`）且本次未显式指定时，重启自动补回 `--web`；用 `--no-web` 可显式关闭，用 `--web` 可显式开启（`--no-web` 优先级高于 `--web`）。
+- 输出 JSON 报告：`target`（重启后的 host/port）、`stopped`（被关闭的旧实例）、`cleanedLocks`（清理的 lock）。
+
+> ⚠️ 重启后服务仍需数秒完成预检，`restart` 返回的 `ok:true` 表示已发起后台启动；请用 `ki mcp --status` 确认就绪后再让 IDE 接入。
 
 ### 排查
 

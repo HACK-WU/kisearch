@@ -115,6 +115,8 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki search --scope my-project --query "用户登录流程"
   ki mcp                                  # stdio 模式（默认）
   ki mcp --http                           # HTTP 共享单例（默认回环 127.0.0.1，本机免鉴权）
+  ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端）
+  ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp token generate                   # 一键生成托管 Token（已存在则拒绝覆盖）
   ki mcp token show                       # 查看当前托管 Token
   ki mcp --http --host 0.0.0.0            # 对外监听，自动读取托管 Token（远程需 Bearer Token）
@@ -147,13 +149,27 @@ if (configPath) {
 }
 
 try {
+  // 守护进程模式：--daemon/-d 后台常驻，仅 HTTP 模式有效（须与 --http 同时出现）。
+  // detached + stdio 忽略，子进程脱离终端与父进程组；父进程 unref 后立即退出。
+  // 不带 --http 的 --daemon 走正常 spawn，交由 mcp-server 内的「仅 HTTP 模式」校验报错。
+  const isDaemon =
+    scriptArgs.includes('--http') && (scriptArgs.includes('--daemon') || scriptArgs.includes('-d'));
+
   // 使用 jiti 执行 TypeScript 脚本（spawn 异步 + 信号转发）
   // cwd 设为用户当前目录，确保相对路径参数（如 --results）正确解析
   const child = spawn('npx', ['jiti', scriptPath, ...scriptArgs], {
-    stdio: 'inherit',
+    stdio: isDaemon ? 'ignore' : 'inherit',
+    detached: isDaemon,
     cwd: process.cwd(),
     env: childEnv,
   });
+
+  if (isDaemon) {
+    child.unref();
+    console.log('kisearch MCP 服务已在后台启动（daemon 模式）。');
+    console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop    |    重启：ki mcp restart');
+    process.exit(0);
+  }
 
   // REQ-01 信号透传：父进程收到 SIGTERM/SIGINT → 转发给子进程（子进程的 handler 写中断标记/清理后退出）。
   // 否则 SIGTERM 打到 ki.mjs 时 execFileSync/spawnSync 默认行为直接终止父进程，子进程 handler 不执行，

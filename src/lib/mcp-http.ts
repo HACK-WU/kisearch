@@ -617,7 +617,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     httpServer.listen(port, host, () => resolve());
   });
 
-  writeLockFile(host, port);
+  writeLockFile(host, port, opts.web === true);
 
   process.stderr.write(
     `kisearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
@@ -666,14 +666,14 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   process.on('SIGTERM', () => void shutdown(0));
 }
 
-function writeLockFile(host: string, port: number): void {
+function writeLockFile(host: string, port: number, web: boolean): void {
   try {
     const lockPath = getHttpLockPath();
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(
       lockPath,
       JSON.stringify(
-        { pid: process.pid, host, port, startedAt: new Date().toISOString() },
+        { pid: process.pid, host, port, startedAt: new Date().toISOString(), web },
         null,
         2,
       ),

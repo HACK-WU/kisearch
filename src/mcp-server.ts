@@ -1,3 +1,7 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerQueryGroupTool } from './lib/mcp-tools/query-group.js';
@@ -23,6 +27,7 @@ import {
   isLoopbackHost,
   fetchHealthz,
   probeHost,
+  getHttpLockPath,
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
@@ -75,6 +80,8 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
 用法：
   ki mcp                        stdio 模式（默认，单客户端单进程）
   ki mcp --http                 HTTP 共享单例（默认回环 127.0.0.1:7423，本机免鉴权）
+  ki mcp --http --daemon        HTTP 模式后台常驻运行（-d 同义，脱离终端）
+  ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
   ki mcp token generate         生成托管 Token（已存在则拒绝覆盖）
@@ -87,6 +94,8 @@ HTTP 模式参数：
   --token <value>               鉴权 Token（优先级 --token > KI_MCP_TOKEN > 托管文件）
   --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
   --web                         HTTP 模式下同时提供前端静态页面（web/dist，浏览器访问 http://<host>:<port>/）
+  --no-web                      显式关闭前端页面（restart 时用于覆盖上次的 --web 延续）
+  --daemon, -d                  后台常驻运行（仅 HTTP 模式，含 --web；脱离终端）
 
 提示：多个 IDE 共享同一持锁进程以避免向量库锁冲突，请用 ki mcp --http。`;
 
@@ -120,12 +129,21 @@ function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
 
 /** 解析 ki mcp 的命令行参数（无 --http 时走 stdio，行为不变） */
 function parseMcpArgs(args: string[]): McpCliOptions {
-  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status', '--web'];
+  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status', '--web', '--no-web', '--daemon'];
   detectUnknownFlags(args, known, ['--host', '--port', '--token', '--allowed-hosts'], MCP_HELP);
 
   const http = args.includes('--http');
-  const web = args.includes('--web');
+  // --web 显式开启；--no-web 显式关闭（优先级高于 --web，二者同时出现时以后者为准）
+  const web = args.includes('--web') && !args.includes('--no-web');
+  const daemon = args.includes('--daemon');
   if (!http) {
+    // --daemon/-d 仅 HTTP 模式有意义：stdio 依赖 stdin/stdout 通信，后台运行会丢失传输通道
+    if (daemon) {
+      failJson(
+        '--daemon/-d 仅支持 HTTP 模式，需配合 --http 使用（如 ki mcp --http --daemon）。stdio 模式通过 stdin/stdout 通信，无法后台运行。',
+        'MCP_DAEMON_REQUIRES_HTTP',
+      );
+    }
     return { http: false, host: '', port: 0, web };
   }
 
@@ -271,8 +289,138 @@ function runTokenCommand(args: string[]): void {
   );
 }
 
+/** 读取 HTTP 单例 lock 文件（host/port/web 供 restart 沿用上次运行值），缺失/损坏返回 null */
+function readHttpLock(): {
+  pid?: number;
+  host?: string;
+  port?: number;
+  startedAt?: string;
+  web?: boolean;
+} | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(getHttpLockPath(), 'utf-8')) as {
+      pid?: number;
+      host?: string;
+      port?: number;
+      startedAt?: string;
+      web?: boolean;
+    };
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/** 判断 args 中是否含某 --flag（支持 --flag=value 与 --flag value 两种形式） */
+function hasFlagValue(args: string[], name: string): boolean {
+  return args.some((a) => a === name || a.startsWith(name + '='));
+}
+
+/**
+ * 以守护进程方式重新拉起 HTTP 单例（detached + stdio 忽略，父进程立即退出）。
+ * 与 bin/ki.mjs 的 daemon 启动路径一致：npx jiti <mcp-server.ts> --http --daemon ...
+ */
+function spawnMcpDaemon(args: string[]): void {
+  const mcpServerPath = fileURLToPath(import.meta.url);
+  const child = spawn('npx', ['jiti', mcpServerPath, ...args], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  child.unref();
+}
+
+/**
+ * ki mcp restart：停止现有 HTTP 单例后，以守护进程方式后台重启（仅 HTTP 模式）。
+ * host/port 解析优先级：CLI > lock 文件（上次运行值）> 配置文件 > 默认。
+ * 无运行实例时等价于直接启动（幂等）；重启后默认后台常驻（daemon）。
+ */
+async function runRestartCommand(args: string[]): Promise<void> {
+  const config = loadConfig();
+  const httpCfg = config.mcp?.http ?? {};
+  const lock = readHttpLock();
+
+  // host：CLI > lock > 配置 > 默认
+  const cliHost = getFlagValue(args, '--host');
+  const host = cliHost ?? lock?.host ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
+
+  // port：CLI > lock > 配置 > 默认
+  const cliPortRaw = getFlagValue(args, '--port');
+  let port: number;
+  if (cliPortRaw !== undefined) {
+    port = parseIntArg(cliPortRaw, DEFAULT_MCP_HTTP_PORT, '--port', { min: 1, max: 65535 });
+  } else if (
+    typeof lock?.port === 'number' &&
+    Number.isInteger(lock.port) &&
+    lock.port >= 1 &&
+    lock.port <= 65535
+  ) {
+    port = lock.port;
+  } else {
+    port = resolveHttpPort(args, httpCfg);
+  }
+
+  // 守卫①（对齐 startMcpServer 的 stdio 冲突守卫）：存活的 stdio 实例会与 HTTP 单例争抢向量库锁，
+  // 若在此静默 kill 会让用户某 IDE 的 stdio 连接无提示中断。fail-loud 并引导迁移 URL 接入。
+  const stdioLock = readLiveStdioLock();
+  if (stdioLock) {
+    process.stderr.write(
+      `检测到存活的 ki mcp stdio 实例（pid ${stdioLock.pid}，启动于 ${stdioLock.startedAt}），` +
+        `restart 不会静默关闭它，以免中断正在使用该实例的 IDE 连接。\n` +
+        `请先将该 IDE 配置迁移为 URL 型接入（http://${probeHost(host)}:${port}/mcp），` +
+        `再执行 ki mcp restart。\n`,
+    );
+    process.exit(1);
+  }
+
+  // 守卫②（对齐 startMcpServer 的非回环 token 校验）：重启后新进程才会 fail-loud 校验 token，
+  // 若此处不提前拦截，restart 会先打印 ok:true 造成「重启成功」假象，随后新进程因缺 token 退出。
+  // 复用 parseMcpArgs 的完整 token 校验链（--token > KI_MCP_TOKEN > 托管文件），仅用于验证不采信其返回值。
+  if (!isLoopbackHost(host)) {
+    parseMcpArgs(['--http', '--host', host, '--port', String(port)]);
+  }
+
+  // 关闭现有实例（复用 stop 的身份校验 + SIGTERM 优雅退出 + SIGKILL 兜底 + lock 清理）
+  const report = await stopMcpInstances({ host: probeHost(host), port });
+
+  // 后台重启：强制 --http --daemon；host/port/web 未显式传入时补齐（web 沿用上次运行值），
+  // 再透传其余参数（--allowed-hosts/--token 等）。
+  const filteredArgs = args.filter((a) => a !== '--daemon' && a !== '-d');
+  const spawnArgs = ['--http', '--daemon'];
+  if (!hasFlagValue(filteredArgs, '--host')) spawnArgs.push('--host', host);
+  if (!hasFlagValue(filteredArgs, '--port')) spawnArgs.push('--port', String(port));
+  // --web 延续：上次以 --web 启动（lock.web===true）且本次未显式指定 web 状态时，自动补回。
+  // --no-web 显式关闭优先（可覆盖 lock 延续，让用户能去掉 web）；--web 显式开启则原样透传。
+  const webExplicit = hasFlagValue(filteredArgs, '--web') || hasFlagValue(filteredArgs, '--no-web');
+  if (!webExplicit && lock?.web === true) spawnArgs.push('--web');
+  spawnArgs.push(...filteredArgs);
+  spawnMcpDaemon(spawnArgs);
+
+  const nothing = report.stopped.length === 0 && report.cleanedLocks.length === 0;
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        restarted: true,
+        target: { host: probeHost(host), port },
+        stopped: report.stopped,
+        cleanedLocks: report.cleanedLocks,
+        hint: nothing
+          ? '未发现运行中的实例，已直接后台启动（幂等）。'
+          : '已后台重启 kisearch HTTP 服务（daemon 模式）。',
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 export async function startMcpServer(): Promise<void> {
-  const argv = process.argv.slice(2);
+  let argv = process.argv.slice(2);
+
+  // -d 是 --daemon 的短别名，统一归一为 --daemon，后续逻辑只看 --daemon。
+  // 必须在 positional 检测之前：否则 -d 会被下方「未知短 flag」分支拦截报错。
+  argv = argv.map((a) => (a === '-d' ? '--daemon' : a));
 
   // ─── ki mcp -h/--help：打印帮助后直接退出，绝不落入默认 stdio 启动 ───
   //（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
@@ -281,13 +429,13 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
-  // ─── 裸参数（positional）校验：仅允许 stop / token 两个子命令 ───
+  // ─── 裸参数（positional）校验：仅允许 stop / token / restart 三个子命令 ───
   // 其他裸参数（如误输入 status 而非 --status）在 detectUnknownFlags 拦截不到
   //（它只扫 -- 前缀），若不校验会被静默忽略并直接启动 stdio 服务（NEG-01）。
   // 注意：必须跳过 flag 的分离值（--host 127.0.0.1 中的 127.0.0.1），
   // 否则会把合法 flag 值误判为裸参数（P1 回归）。
   // 单横线短 flag（-status 等）同样拦截：-h 已在上方 return，此处出现的任何 -xxx 均为未知。
-  const knownPositionals = ['stop', 'token'];
+  const knownPositionals = ['stop', 'token', 'restart'];
   let positional: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -353,6 +501,12 @@ export async function startMcpServer(): Promise<void> {
         2,
       ),
     );
+    return;
+  }
+
+  // ─── ki mcp restart：仅 HTTP 模式，stop + 后台常驻重启 ───
+  if (argv[0] === 'restart') {
+    await runRestartCommand(argv.slice(1));
     return;
   }
 
