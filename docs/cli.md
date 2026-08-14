@@ -918,13 +918,14 @@ ki sync-relation -s my-project -i batch-input.json
 ```bash
 ki mcp                                  # stdio 模式（默认，启动时经多实例冲突守卫）
 ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
-ki mcp token generate                   # 一键生成托管 Token（~/.ki/mcp-token，0600），已存在则拒绝覆盖
-ki mcp token show                       # 查看当前托管 Token（配置多个 IDE 时免去翻文件）
-ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），自动读取托管 Token
+ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
+ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
+ki mcp token update <id> --scope all    # 修改指定 Token 的授权 scope
+ki mcp token delete <id>                # 删除指定 Token（立即失效）
+ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），鉴权基于多 Token 存储
 ki mcp --http --web                     # HTTP 模式 + 可视化前端页面（浏览器访问 http://127.0.0.1:7423/）
 ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端；--web 组合同样生效）
 ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
-ki mcp token reset --yes                # 轮换 Token（破坏性，需显式确认）
 ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
 ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
 ```
@@ -943,7 +944,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐 `ki mcp token generate` 托管 |
+| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含托管 Token 存在性；不启动服务、跳过预检） |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
@@ -960,17 +961,18 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 仅 HTTP 模式：一键重启 HTTP 单例，语义 = 关闭现有实例 + 以守护进程方式后台常驻重启。`host`/`port` 解析优先级为 CLI 参数 > lock 文件（上次运行值）> 配置文件 > 默认值；其余参数（`--token`/`--allowed-hosts`）透传给重启后的进程。上次以 `--web` 启动时重启自动延续 `--web`（lock 记录），可用 `--no-web` 显式关闭。无运行实例时等价于直接启动（幂等）。输出 JSON 报告（`target`/`stopped`/`cleanedLocks`）。详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
-### 托管 Token 子命令
+### 多 Token 子命令（scope 授权）
 
 | 命令 | 说明 |
 |------|------|
-| `ki mcp token generate` | 生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**（`MCP_TOKEN_EXISTS`）并提示改用 reset |
-| `ki mcp token show` | 查看当前托管 Token 明文（含路径与创建时间）；不存在时报错（`MCP_TOKEN_NOT_FOUND`）并提示先 generate，文件存在但为空时报错（`MCP_TOKEN_EMPTY`）并提示用 reset 重建 |
-| `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。无 `--yes` 时拒绝执行（`MCP_TOKEN_RESET_CONFIRM`）；重置后需更新客户端 Authorization 头并重启运行中的服务 |
+| `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
+| `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
+| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
+| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
 
-> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合托管 Token 或 `--token`）。
+> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储或 `--token` 全权临时 Token）。
 >
-> **条件鉴权**：绑定回环地址时无网络暴露面，免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时必须提供 Token，否则拒绝启动。Token 来源三级优先：`--token` > `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`，**绝不写入配置文件**；非回环启动时会明示本次生效的 Token 来源。
+> **条件鉴权 + scope 越权校验**：绑定回环地址时免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时，请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。
 >
 > **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
 >

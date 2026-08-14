@@ -117,10 +117,11 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki mcp --http                           # HTTP 共享单例（默认回环 127.0.0.1，本机免鉴权）
   ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻）
-  ki mcp token generate                   # 一键生成托管 Token（已存在则拒绝覆盖）
-  ki mcp token show                       # 查看当前托管 Token
-  ki mcp --http --host 0.0.0.0            # 对外监听，自动读取托管 Token（远程需 Bearer Token）
-  ki mcp token reset --yes                # 轮换托管 Token（破坏性，需显式确认）
+  ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/多个/all）
+  ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
+  ki mcp token update <id> --scope all    # 修改指定 Token 的授权 scope
+  ki mcp token delete <id>                # 删除指定 Token（立即失效）
+  ki mcp --http --host 0.0.0.0            # 对外监听（远程需 Bearer Token，鉴权基于多 Token 存储）
   ki mcp --status                         # 查看 HTTP 单例运行状态（只读）
 
 详细帮助：

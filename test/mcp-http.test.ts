@@ -27,7 +27,7 @@ import {
 } from '../src/lib/mcp-http.js';
 
 // ─── 测试用最小 McpServer 工厂（不触碰向量引擎） ───
-function buildTestServer(): McpServer {
+function buildTestServer(_authScopes: string[] | null = null): McpServer {
   const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
@@ -42,7 +42,15 @@ interface TestHandle {
 }
 
 async function startTestServer(
-  opts: { authEnabled: boolean; token?: string; maxSessions?: number; advertiseAddr?: { host: string; port: number }; clientAddr?: string } = { authEnabled: false },
+  opts: {
+    authEnabled: boolean;
+    token?: string;
+    maxSessions?: number;
+    advertiseAddr?: { host: string; port: number };
+    clientAddr?: string;
+    resolveTokenScopes?: (token: string) => string[] | undefined;
+    buildServer?: (authScopes: string[] | null) => McpServer;
+  } = { authEnabled: false },
 ): Promise<TestHandle> {
   const { httpServer, closeAllSessions } = createMcpHttpServer({
     authEnabled: opts.authEnabled,
@@ -51,7 +59,8 @@ async function startTestServer(
     advertiseAddr: opts.advertiseAddr,
     // 测试注入客户端地址：缺省为本地回环（127.0.0.1）；传入 clientAddr 模拟远程来源以验证远程鉴权
     resolveClientAddr: () => opts.clientAddr ?? '127.0.0.1',
-    buildServer: buildTestServer,
+    resolveTokenScopes: opts.resolveTokenScopes,
+    buildServer: opts.buildServer ?? buildTestServer,
   });
   await new Promise<void>((resolve) =>
     httpServer.listen(0, '127.0.0.1', () => resolve()),
@@ -99,6 +108,93 @@ async function initialize(
     /* 忽略 */
   }
   return { status: res.status, sid };
+}
+
+/** 发一个 tools/call 请求（带 sessionId），返回状态码 */
+async function callTool(
+  base: string,
+  sid: string,
+  token: string | undefined,
+  scope: string,
+): Promise<{ status: number }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sid,
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'ping', arguments: { scope } },
+    }),
+  });
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* 忽略 */
+  }
+  return { status: res.status };
+}
+
+/** 发一个 tools/call 请求并读取响应体文本（用于验证 403 脱敏：响应体不含 scope 名） */
+async function callToolReadBody(
+  base: string,
+  sid: string,
+  token: string | undefined,
+  scope: string,
+): Promise<{ status: number; body: string }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sid,
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'ping', arguments: { scope } },
+    }),
+  });
+  const body = await res.text();
+  return { status: res.status, body };
+}
+
+/** 发一个 JSON-RPC batch 请求（含两个 tools/call），返回状态码（用于验证 batch 越权绕过被拦截） */
+async function callToolBatch(
+  base: string,
+  sid: string,
+  token: string | undefined,
+  scopes: [string, string],
+): Promise<{ status: number }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sid,
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify([
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'ping', arguments: { scope: scopes[0] } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'ping', arguments: { scope: scopes[1] } } },
+    ]),
+  });
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* 忽略 */
+  }
+  return { status: res.status };
 }
 
 // ─── A. isLoopbackHost ───
@@ -313,5 +409,107 @@ describe('describeListenError', () => {
   it('未知错误回退到通用文案且包含 code', () => {
     const msg = describeListenError(mk('EPERM'), '0.0.0.0', 7423);
     assert.match(msg, /EPERM/);
+  });
+});
+
+// ─── K. scope 越权校验（RBAC：token → 授权 scope 集合） ───
+
+describe('scope 越权校验（RBAC）', () => {
+  let srv: TestHandle;
+  before(async () => {
+    // 注入 token→scope 查询：'team-a-token' 仅授权 ['team-a']，其余 token 未授权
+    srv = await startTestServer({
+      authEnabled: true,
+      clientAddr: '192.168.1.10', // 远程来源，强制鉴权
+      resolveTokenScopes: (t) => (t === 'team-a-token' ? ['team-a'] : undefined),
+    });
+  });
+  after(async () => {
+    await srv.close();
+  });
+
+  it('授权 scope 的 tools/call → 放行（200）', async () => {
+    const { status, sid } = await initialize(srv.base, 'team-a-token');
+    assert.equal(status, 200);
+    assert.ok(sid);
+    const res = await callTool(srv.base, sid!, 'team-a-token', 'team-a');
+    assert.equal(res.status, 200);
+  });
+
+  it('未授权 scope 的 tools/call → 拒绝（403）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    const res = await callTool(srv.base, sid!, 'team-a-token', 'team-b');
+    assert.equal(res.status, 403);
+  });
+
+  it('403 响应体脱敏：不泄露具体 scope 名（防枚举探测）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    const res = await callToolReadBody(srv.base, sid!, 'team-a-token', 'team-b');
+    assert.equal(res.status, 403);
+    assert.ok(!res.body.includes('team-b'), '响应体不应包含被拒的 scope 名');
+  });
+
+  it('batch 中任一 tools/call 越权 → 整体拒绝（403，防绕过）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    // 首项合法 team-a，次项越权 team-b：必须整体拒绝，不能只校验首项
+    const res = await callToolBatch(srv.base, sid!, 'team-a-token', ['team-a', 'team-b']);
+    assert.equal(res.status, 403);
+  });
+
+  it("'all' 权限 token 可访问任意 scope", async () => {
+    const srv2 = await startTestServer({
+      authEnabled: true,
+      clientAddr: '192.168.1.10',
+      resolveTokenScopes: (t) => (t === 'admin-token' ? ['all'] : undefined),
+    });
+    try {
+      const { sid } = await initialize(srv2.base, 'admin-token');
+      assert.ok(sid);
+      const res = await callTool(srv2.base, sid!, 'admin-token', 'any-scope');
+      assert.equal(res.status, 200);
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it('授权 scope 集合正确传递到 buildServer 工厂（枚举工具过滤依据）', async () => {
+    let received: string[] | null = null;
+    const srv2 = await startTestServer({
+      authEnabled: true,
+      clientAddr: '192.168.1.10',
+      resolveTokenScopes: (t) => (t === 'team-a-token' ? ['team-a'] : undefined),
+      buildServer: (authScopes) => {
+        received = authScopes;
+        return buildTestServer(authScopes);
+      },
+    });
+    try {
+      const { sid } = await initialize(srv2.base, 'team-a-token');
+      assert.ok(sid);
+      assert.deepEqual(received, ['team-a']);
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it('免鉴权（回环）时 buildServer 收到 null（不过滤）', async () => {
+    let received: string[] | null = 'unset' as unknown as string[] | null;
+    const srv2 = await startTestServer({
+      authEnabled: false,
+      buildServer: (authScopes) => {
+        received = authScopes;
+        return buildTestServer(authScopes);
+      },
+    });
+    try {
+      const { sid } = await initialize(srv2.base);
+      assert.ok(sid);
+      assert.equal(received, null);
+    } finally {
+      await srv2.close();
+    }
   });
 });

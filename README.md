@@ -185,14 +185,16 @@ ki mcp --status
 
 > 回环绑定（仅本机）免鉴权时省略 `headers`；跨机访问需绑定 `0.0.0.0` 并先生成 Token。连接 URL 需与 `ki mcp --status` 输出的 `host`/`port` 完全一致。
 
-Token 生成与查看：
+Token 生成与查看（多 Token + scope 授权）：
 
 ```bash
-ki mcp token generate       # 生成托管 Token 并持久化到 ~/.ki/mcp-token
-ki mcp token show           # 查看当前托管 Token（填入上方 headers 的 <your-token>）
+ki mcp token generate --scope team-a      # 生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
+ki mcp token list                          # 列出所有 Token（含明文与授权 scope）
+ki mcp token update <id> --scope team-b    # 修改指定 Token 的授权 scope
+ki mcp token delete <id>                   # 删除指定 Token（立即失效）
 ```
 
-> ⚠️ 已存在 Token 时 `generate` 会拒绝覆盖，需改用 `ki mcp token reset --yes` 轮换。
+> 每个 Token 可绑定一个或多个 scope（`all` 表示全部），不同 Token 访问不同 scope，实现租户/项目数据隔离。
 
 ## <a id="cli-commands"></a>🛠️ CLI 命令参考
 
@@ -231,9 +233,10 @@ ki mcp --http --daemon      # HTTP 模式后台常驻运行（-d 同义，SSH �
 ki mcp restart              # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
 ki mcp --status             # 查看 HTTP 单例运行状态（只读）
 ki mcp stop                 # 关闭本机所有 ki mcp 实例并清理 lock
-ki mcp token generate       # 一键生成托管 Token（远程访问鉴权）
-ki mcp token show           # 查看当前托管 Token
-ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认）
+ki mcp token generate --scope team-a   # 生成授权 Token（必须指定 scope）
+ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
+ki mcp token update <id> --scope all    # 修改 Token 授权 scope
+ki mcp token delete <id>                # 删除 Token（立即失效）
 ```
 
 > **启动预检**：`ki mcp` 启动前自动执行健康检查（等价 `ki doctor`），报告写入 stderr（不污染 stdio）。存在 ❌ 失败项（缺 API 密钥、向量维度不匹配）拒绝启动；仅 ⚠️ 警告继续启动。
@@ -271,7 +274,7 @@ ki mcp token reset --yes    # 轮换托管 Token（破坏性，需显式确认�
 }
 ```
 
-> 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate` 生成托管 Token，再用 `ki mcp token show` 查看明文填入上方 `<your-token>`。
+> 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate --scope <scope>` 生成授权 Token，再用 `ki mcp token list` 查看明文填入上方 `<your-token>`。
 > 所有 IDE 必须使用完全一致的连接 URL，且不要再保留 stdio 的 `command` 配置，否则会争抢向量库锁。
 
 ### 暴露的工具（11 个）

@@ -34,10 +34,13 @@ import {
 import { readLiveStdioLock, acquireStdioLock, releaseStdioLock } from './lib/mcp-stdio-lock.js';
 import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
-  createManagedToken,
-  resetManagedToken,
-  readManagedToken,
-  managedTokenInfo,
+  createToken,
+  updateTokenScopes,
+  deleteToken,
+  listTokensStrict,
+  resolveScopesArg,
+  tokenCount,
+  ALL_SCOPES,
 } from './lib/mcp-token.js';
 
 /**
@@ -45,7 +48,7 @@ import {
  * stdio 与 HTTP 传输复用同一工厂：HTTP 模式下每个会话新建一个实例，
  * 但它们共享 vector-client 的模块级单例 engine（单进程单锁）。
  */
-export function buildKiMcpServer(): McpServer {
+export function buildKiMcpServer(authScopes: string[] | null = null): McpServer {
   const server = new McpServer({
     name: SERVICE_NAME,
     version: readKiVersion(),
@@ -54,12 +57,12 @@ export function buildKiMcpServer(): McpServer {
   registerGetModuleInfoTool(server);
   registerSyncRelationTool(server);
   registerBulkSyncRelationTool(server);
-  registerManageIndexTools(server);
+  registerManageIndexTools(server, authScopes);
   registerSearchTool(server);
   registerStoreTool(server);
   registerBulkStoreTool(server);
   registerDeleteRelationTool(server);
-  registerScopeListTool(server);
+  registerScopeListTool(server, authScopes);
   registerTagListTool(server);
   return server;
 }
@@ -84,14 +87,15 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
-  ki mcp token generate         生成托管 Token（已存在则拒绝覆盖）
-  ki mcp token show             查看当前托管 Token
-  ki mcp token reset --yes      轮换托管 Token（破坏性，需显式确认）
+  ki mcp token generate --scope <scope>  生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
+  ki mcp token list             列出所有 Token（含明文与授权 scope）
+  ki mcp token update <id> --scope <scope>  修改指定 Token 的授权 scope
+  ki mcp token delete <id>      删除指定 Token（立即失效）
 
 HTTP 模式参数：
   --host <addr>                 绑定地址（默认 127.0.0.1；非回环绑定需鉴权 Token）
   --port <port>                 端口（默认 7423）
-  --token <value>               鉴权 Token（优先级 --token > KI_MCP_TOKEN > 托管文件）
+  --token <value>               全权临时 Token（进程级，优先级高于多 Token 存储；也可用环境变量 KI_MCP_TOKEN）
   --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
   --web                         HTTP 模式下同时提供前端静态页面（web/dist，浏览器访问 http://<host>:<port>/）
   --no-web                      显式关闭前端页面（restart 时用于覆盖上次的 --web 延续）
@@ -176,47 +180,68 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     ? allowedHostsRaw.split(',').map((s) => s.trim()).filter(Boolean)
     : httpCfg.allowedHosts;
 
-  // 非回环绑定必须提供 token（远程裸奔不安全）；
-  // 显式来源（--token/env）缺失时自动回退到托管 Token（~/.ki/mcp-token，ki mcp token generate 生成）。
-  // 回环绑定不读托管文件：鉴权本就禁用，Token 不会生效。
+  // 非回环绑定必须可鉴权（远程裸奔不安全）：
+  //   - 显式全权临时 Token（--token/env）优先，进程级生效，优先级高于存储；
+  //   - 否则走多 Token 存储（~/.ki/mcp-tokens.json，ki mcp token generate 创建），须至少存在一个。
+  // 回环绑定不校验存储：鉴权本就禁用，Token 不会生效。
   if (!isLoopbackHost(host) && (!resolvedToken || !resolvedToken.trim())) {
-    const managed = readManagedToken();
-    if (managed) {
-      resolvedToken = managed;
-      tokenSource = '托管文件 ~/.ki/mcp-token';
-    } else {
+    const count = tokenCount();
+    if (count === 0) {
       failJson(
-        `HTTP 模式绑定非回环地址（${host}）时必须提供鉴权 Token：` +
-          `推荐执行 ki mcp token generate 一键生成托管 Token，或设置环境变量 KI_MCP_TOKEN / 传入 --token <值>。` +
+        `HTTP 模式绑定非回环地址（${host}）时需配置鉴权：` +
+          `推荐执行 ki mcp token generate --scope <...> 创建授权 Token，` +
+          `或设置环境变量 KI_MCP_TOKEN / 传入 --token <值>（全权临时 Token）。` +
           `（若仅本机访问，可用默认回环绑定免鉴权）`,
         'MCP_HTTP_TOKEN_REQUIRED',
       );
     }
+    tokenSource = `多 Token 存储（~/.ki/mcp-tokens.json，共 ${count} 个）`;
   }
 
   // REQ-04：非回环模式明示 Token 来源，避免“改了文件/环境变量为何不生效”的困惑
   if (!isLoopbackHost(host) && tokenSource) {
-    process.stderr.write(`鉴权 Token 来源：${tokenSource}（优先级 --token > KI_MCP_TOKEN > 托管文件）。\n`);
+    process.stderr.write(
+      `鉴权 Token 来源：${tokenSource}（优先级 --token > KI_MCP_TOKEN > 多 Token 存储）。\n`,
+    );
   }
 
   return { http: true, host, port, token: resolvedToken, allowedHosts, web };
 }
 
-/** ki mcp token <generate|show|reset> 子命令：托管 Token 的生成、查看与轮换（JSON 输出契约） */
+/** 从 args 解析并校验 --scope 参数（必须显式指定），返回归一化后的 scope 集合 */
+function resolveScopesFlag(args: string[], action: string): string[] {
+  const raw = getFlagValue(args, '--scope');
+  if (!raw || !raw.trim()) {
+    failJson(
+      `${action} 必须显式指定 --scope（单个 / 多个逗号分隔 / ${ALL_SCOPES} 表示全部）。` +
+        `例如：ki mcp token ${action}${action === 'generate' ? '' : ' <id>'} --scope team-a,team-b`,
+      'MCP_TOKEN_SCOPE_REQUIRED',
+    );
+  }
+  return resolveScopesArg(raw);
+}
+
+/** ki mcp token <generate|list|update|delete> 子命令：多 Token + scope 授权的全生命周期管理 */
 function runTokenCommand(args: string[]): void {
   const action = args[0];
+
+  // generate：生成授权 Token，必须显式指定 scope
   if (action === 'generate') {
     try {
-      const { token, path: tokenPath } = createManagedToken();
+      const scopes = resolveScopesFlag(args, 'generate');
+      const record = createToken(scopes);
       console.log(
         JSON.stringify(
           {
             ok: true,
-            token,
-            path: tokenPath,
+            id: record.id,
+            token: record.token,
+            scopes: record.scopes,
+            createdAt: record.createdAt,
             hint:
-              'Token 已生成并托管（0600）。启动远程模式无需 export：ki mcp --http --host 0.0.0.0；' +
-              'IDE 客户端配置 Authorization: Bearer <token>。后续可用 ki mcp token show 再次查看。',
+              'Token 已生成（0600 落盘到 ~/.ki/mcp-tokens.json）。' +
+              `授权 scope：${record.scopes.join(', ')}。` +
+              'IDE 客户端配置 Authorization: Bearer <token>。请勿将明文粘贴到公开渠道。',
           },
           null,
           2,
@@ -228,63 +253,96 @@ function runTokenCommand(args: string[]): void {
     }
     return;
   }
-  if (action === 'show') {
-    // 只读查看：权限等价于文件拥有者 cat ~/.ki/mcp-token，不新增暴露面
-    const info = managedTokenInfo();
-    const token = readManagedToken(info.path);
-    if (!token) {
-      // 区分“文件不存在”与“文件存在但为空”：后者若引导 generate 会撞上 MCP_TOKEN_EXISTS 形成死循环
-      failJson(
-        info.exists
-          ? `托管 Token 文件为空（${info.path}）。请执行 ki mcp token reset --yes 重建。`
-          : `托管 Token 不存在（${info.path}）。请先执行 ki mcp token generate 生成。`,
-        info.exists ? 'MCP_TOKEN_EMPTY' : 'MCP_TOKEN_NOT_FOUND',
+
+  // list：列出所有 Token（含明文与授权 scope，用户明确要求）
+  if (action === 'list') {
+    try {
+      const records = listTokensStrict(); // 损坏时报错（MCP_TOKEN_CORRUPT），避免静默空列表误导
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            count: records.length,
+            tokens: records,
+            hint:
+              'Token 明文已列出（按需回显）。请勿将输出粘贴到公开渠道；' +
+              '用 ki mcp token delete <id> 吊销，ki mcp token update <id> --scope <...> 改权限。',
+          },
+          null,
+          2,
+        ),
       );
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      failJson(e.message, e.code ?? 'MCP_TOKEN_LIST_FAILED');
     }
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          token,
-          path: info.path,
-          createdAt: info.exists ? info.createdAt : undefined,
-          hint: 'IDE 客户端配置 Authorization: Bearer <token>。请勿将输出粘贴到公开渠道。',
-        },
-        null,
-        2,
-      ),
-    );
     return;
   }
-  if (action === 'reset') {
-    if (!args.includes('--yes')) {
+
+  // update <id> --scope <...>：修改授权 scope
+  if (action === 'update') {
+    const id = args[1];
+    if (!id) {
       failJson(
-        '重置托管 Token 是破坏性操作：所有已配置该 Token 的客户端将立即失效，' +
-          '运行中的 HTTP 服务需重启后才使用新 Token。确认请加 --yes：ki mcp token reset --yes',
-        'MCP_TOKEN_RESET_CONFIRM',
+        'update 需要指定 Token 短 ID：ki mcp token update <id> --scope <...>（用 ki mcp token list 查看 id）。',
+        'MCP_TOKEN_ID_REQUIRED',
       );
     }
-    const { token, path: tokenPath } = resetManagedToken();
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          token,
-          path: tokenPath,
-          hint:
-            'Token 已重置。请更新所有 IDE 客户端的 Authorization 头，' +
-            '并重启运行中的 HTTP 服务（旧 Token 在重启前仍生效）。' +
-            '注意：若启动环境设有 KI_MCP_TOKEN 或传了 --token，其优先级高于托管文件，需一并更新/移除。' +
-            '后续可用 ki mcp token show 再次查看。',
-        },
-        null,
-        2,
-      ),
-    );
+    try {
+      const scopes = resolveScopesFlag(args, 'update');
+      const record = updateTokenScopes(id, scopes);
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            id: record.id,
+            scopes: record.scopes,
+            createdAt: record.createdAt,
+            hint: `Token（id: ${record.id}）授权 scope 已更新为：${record.scopes.join(', ')}。`,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      failJson(e.message, e.code ?? 'MCP_TOKEN_UPDATE_FAILED');
+    }
     return;
   }
+
+  // delete <id>：删除 Token，立即失效
+  if (action === 'delete') {
+    const id = args[1];
+    if (!id) {
+      failJson(
+        'delete 需要指定 Token 短 ID：ki mcp token delete <id>（用 ki mcp token list 查看 id）。',
+        'MCP_TOKEN_ID_REQUIRED',
+      );
+    }
+    try {
+      deleteToken(id);
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            deleted: id,
+            hint: `Token（id: ${id}）已删除并立即失效；已用该 Token 建立的服务端会话仍保留，但新请求会 401。`,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      failJson(e.message, e.code ?? 'MCP_TOKEN_DELETE_FAILED');
+    }
+    return;
+  }
+
   failJson(
-    `未知的 token 子命令（${action ?? '缺失'}）。可用：ki mcp token generate | ki mcp token show | ki mcp token reset --yes`,
+    `未知的 token 子命令（${action ?? '缺失'}）。可用：` +
+      `ki mcp token generate --scope <...> | ki mcp token list | ki mcp token update <id> --scope <...> | ki mcp token delete <id>`,
     'MCP_TOKEN_UNKNOWN_ACTION',
   );
 }

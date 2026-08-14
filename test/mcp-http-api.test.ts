@@ -32,7 +32,7 @@ fs.writeFileSync(
   JSON.stringify({ scopeMode: 'default', embedding: { provider: 'mock', model: 'mock' } }),
 );
 
-function buildTestServer(): McpServer {
+function buildTestServer(_authScopes: string[] | null = null): McpServer {
   const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],

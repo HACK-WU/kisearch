@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, resolveScope } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
+import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck } from './health-check.js';
 import { getRelationsCachePath } from './scope.js';
 import { handleDirectImport, type ImportResult } from './import.js';
@@ -132,6 +133,21 @@ function tokenMatches(provided: string, expected: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
+/** 判断 scope 是否在授权集合内（'all' 通配全部） */
+function scopeAllowed(scopes: string[], scope: string): boolean {
+  return scopes.includes(ALL_SCOPES) || scopes.includes(scope);
+}
+
+/**
+ * scope 越权拒绝：服务端记日志（含具体 scope 便于排查），响应体脱敏（不下发 scope 名，防枚举探测）。
+ */
+function rejectScopeViolation(res: http.ServerResponse, scope: string, via: string): void {
+  process.stderr.write(
+    `[kisearch] scope 越权拦截（/api${via}）：请求 scope "${scope}" 不在该 Token 授权范围内。\n`,
+  );
+  sendJson(res, 403, { ok: false, error: 'Forbidden: 无权访问该 scope' });
+}
+
 function sanitizeFileName(name: string): string {
   // 仅允许相对路径文件名（支持子目录），拒绝绝对路径与穿越
   const normalized = path.normalize(name);
@@ -195,6 +211,8 @@ export interface ApiRequestCtx {
   token?: string;
   /** 客户端来源地址（由 mcp-http.ts 按 resolveClientAddr 解析传入；缺省用 req.socket.remoteAddress） */
   clientAddr?: string;
+  /** 按 Token 明文查询授权 scope（缺省走多 Token 存储；测试可注入覆盖） */
+  resolveTokenScopes?: (token: string) => string[] | undefined;
 }
 
 /**
@@ -207,26 +225,50 @@ export async function handleApiRequest(
   url: URL,
   ctx: ApiRequestCtx,
 ): Promise<void> {
-  // 鉴权（与 /mcp 一致）：对外绑定（authEnabled）时，本地回环来源免鉴权，远程来源需 Bearer Token
+  // 鉴权（与 /mcp 一致）：对外绑定（authEnabled）时，本地回环来源免鉴权，远程来源需 Bearer Token。
+  // 同时解析该 Token 的授权 scope 集合（全权临时 Token → ['all']；否则查多 Token 存储），
+  // 供后续 handler 做 scope 越权校验。authScopes 为 null 表示免鉴权（不限）。
   // clientAddr 由 mcp-http.ts 的 resolveClientAddr 解析传入（支持测试注入模拟远程来源）
+  let authScopes: string[] | null = null;
   if (ctx.authEnabled && !isLoopbackAddr(ctx.clientAddr ?? req.socket.remoteAddress)) {
     const auth = req.headers['authorization'];
     const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
       ? auth.slice('Bearer '.length).trim()
       : '';
-    if (!ctx.token || !bearer || !tokenMatches(bearer, ctx.token)) {
+    let scopes: string[] | undefined;
+    if (bearer && ctx.token && tokenMatches(bearer, ctx.token)) {
+      scopes = [ALL_SCOPES];
+    } else if (bearer) {
+      scopes = ctx.resolveTokenScopes
+        ? ctx.resolveTokenScopes(bearer)
+        : findTokenScopes(bearer);
+    }
+    if (!scopes) {
       sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid or missing Bearer token' });
+      return;
+    }
+    authScopes = scopes;
+  }
+
+  const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
+
+  // query scope 越权校验：仅对带 scope 的只读接口（tags / doc/list）生效；
+  // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
+  if (authScopes !== null && (p === '/tags' || p === '/doc/list')) {
+    const queryScope = url.searchParams.get('scope');
+    const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
+    if (!scopeAllowed(authScopes, effectiveScope)) {
+      rejectScopeViolation(res, effectiveScope, p);
       return;
     }
   }
 
-  const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
   try {
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
     if (p === '/tags' && req.method === 'GET') return void (await handleTags(res, url));
     if (p === '/doc/list' && req.method === 'GET') return void (await handleDocList(res, url));
-    if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res));
-    if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res));
+    if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
+    if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url));
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
@@ -334,11 +376,24 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
 
 // ─── POST /api/import/upload ──────────────────────────
 
-async function handleImportUpload(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleImportUpload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+): Promise<void> {
   const body = (await readJsonBody(req)) as {
     scope?: string;
     files?: { name?: string; content?: string; size?: number }[];
   } | undefined;
+  // scope 越权校验：鉴权模式下校验 body.scope（缺省 'default'，与工具缺省值一致）
+  if (authScopes !== null) {
+    const rawScope = body?.scope;
+    const effectiveScope = rawScope && rawScope.trim() ? rawScope.trim() : 'default';
+    if (!scopeAllowed(authScopes, effectiveScope)) {
+      rejectScopeViolation(res, effectiveScope, '/import/upload');
+      return;
+    }
+  }
   if (!body || !Array.isArray(body.files) || body.files.length === 0) {
     sendJson(res, 400, { ok: false, error: '缺少 files 数组（{ scope, files: [{ name, content }] }）' });
     return;
@@ -402,7 +457,11 @@ async function handleImportUpload(req: http.IncomingMessage, res: http.ServerRes
 
 // ─── POST /api/import/run ─────────────────────────────
 
-async function handleImportRun(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleImportRun(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+): Promise<void> {
   const body = (await readJsonBody(req)) as {
     scope?: string;
     uploadId?: string;
@@ -418,6 +477,11 @@ async function handleImportRun(req: http.IncomingMessage, res: http.ServerRespon
   } | undefined;
   if (!body || !body.scope || !body.uploadId) {
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
+    return;
+  }
+  // scope 越权校验（body.scope 必填）
+  if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
+    rejectScopeViolation(res, body.scope, '/import/run');
     return;
   }
   const scope = resolveScope(loadConfig(), body.scope);

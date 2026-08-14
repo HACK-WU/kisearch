@@ -22,7 +22,7 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
-import { managedTokenInfo } from './mcp-token.js';
+import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { SERVICE_NAME } from './constants.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
@@ -66,8 +66,12 @@ export interface HttpServerOptions {
   token?: string;
   /** DNS rebinding 保护允许的 Host 头（可选） */
   allowedHosts?: string[];
-  /** 每个 MCP 会话新建一个 McpServer 的工厂 */
-  buildServer: () => McpServer;
+  /**
+   * 每个 MCP 会话新建一个 McpServer 的工厂。
+   * 接收该会话的授权 scope 集合（authScopes）：null = 免鉴权（不限）；否则为授权集合（['all'] 或具体列表）。
+   * 供枚举类工具（ki_scope_list / ki_manage_index_list）按授权过滤，避免泄露未授权 scope。
+   */
+  buildServer: (authScopes: string[] | null) => McpServer;
   /** 进程退出前的额外清理（如停止 version guard） */
   onShutdown?: () => void;
   /** --web：同时提供前端静态页面（默认 webDir，浏览器访问 http://<host>:<port>/） */
@@ -90,6 +94,34 @@ function isInitializeBody(body: unknown): boolean {
   const isInit = (m: unknown): boolean =>
     !!m && typeof m === 'object' && (m as { method?: unknown }).method === 'initialize';
   return Array.isArray(body) ? body.some(isInit) : isInit(body);
+}
+
+/**
+ * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
+ * 逐个 tools/call 校验（含 batch 数组），任一越权即拒绝，防止「batch 首项合法、后续越权」绕过。
+ * @returns 违规的 scope（需拒绝）；null 表示无需拒绝（非 tools/call 或全部 scope 被授权）
+ */
+function findScopeViolation(body: unknown, scopes: string[]): string | null {
+  const items = Array.isArray(body) ? body : [body];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const m = item as { method?: unknown; params?: { arguments?: { scope?: unknown } } };
+    if (m.method !== 'tools/call') continue;
+    const args = m.params?.arguments;
+    if (!args || typeof args !== 'object') continue;
+    const scope = (args as { scope?: unknown }).scope;
+    const effective = typeof scope === 'string' && scope.trim() ? scope.trim() : 'default';
+    if (scopes.includes(ALL_SCOPES) || scopes.includes(effective)) continue;
+    return effective;
+  }
+  return null;
+}
+
+/** 提取 JSON-RPC 请求 id（供错误响应回填，兼容 batch 取首项） */
+function extractJsonRpcId(body: unknown): unknown {
+  const item = Array.isArray(body) ? body[0] : body;
+  if (item && typeof item === 'object') return (item as { id?: unknown }).id ?? null;
+  return null;
 }
 
 /** 读取并解析 JSON 请求体（POST）；空体返回 undefined */
@@ -255,8 +287,8 @@ export interface HttpAppOptions {
   token?: string;
   /** DNS rebinding 保护允许的 Host 头（可选） */
   allowedHosts?: string[];
-  /** 每个 MCP 会话新建一个 McpServer 的工厂 */
-  buildServer: () => McpServer;
+  /** 每个 MCP 会话新建一个 McpServer 的工厂（接收该会话的授权 scope 集合，见 HttpServerOptions） */
+  buildServer: (authScopes: string[] | null) => McpServer;
   /** 对外暴露的绑定地址（写入 /healthz，便于客户端确认连接目标一致，NEG-01） */
   advertiseAddr?: { host: string; port: number };
   /** 最大并发会话数（缺省 DEFAULT_MAX_SESSIONS） */
@@ -270,6 +302,12 @@ export interface HttpAppOptions {
    * 默认 `(req) => req.socket.remoteAddress`；测试可注入返回非本地地址以验证远程来源需鉴权。
    */
   resolveClientAddr?: (req: http.IncomingMessage) => string | undefined;
+  /**
+   * 按 Token 明文查询授权 scope 集合（RBAC 鉴权）。
+   * 默认走多 Token 存储 `findTokenScopes`（读 ~/.ki/mcp-tokens.json）；测试可注入返回固定 scopes，
+   * 以验证 scope 越权校验（无需触碰真实 HOME 存储）。
+   */
+  resolveTokenScopes?: (token: string) => string[] | undefined;
 }
 
 export interface McpHttpApp {
@@ -290,6 +328,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const webDir = opts.webDir ?? null;
   // 解析请求客户端地址：默认取 socket.remoteAddress，测试可注入覆盖（验证远程来源需鉴权）
   const resolveClientAddr = opts.resolveClientAddr ?? ((req: http.IncomingMessage) => req.socket.remoteAddress);
+  // 按 Token 查授权 scope：默认走多 Token 存储，测试可注入覆盖
+  const resolveTokenScopes = opts.resolveTokenScopes ?? ((t: string) => findTokenScopes(t));
 
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -307,7 +347,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     lastAuthLogAt = now;
     process.stderr.write(
       `[kisearch] 鉴权失败（第 ${authFailures} 次）：来自 ${req.socket.remoteAddress ?? '未知'}，${reason}。` +
-        `请核对客户端 Authorization: Bearer 与 ki mcp token show 的输出完全一致（整段复制，勿手抄）。\n`,
+        `请核对客户端 Authorization: Bearer 与 ki mcp token list 的输出完全一致（整段复制，勿手抄）。\n`,
     );
   };
   const touch = (id?: string): void => {
@@ -372,7 +412,12 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 注意：/api/* 未匹配的请求返回 JSON 404（不 fallback 到静态页面，防止前端 JSON.parse 崩溃）
     if (url.pathname.startsWith('/api/')) {
       const api = await getApiHandler();
-      await api.handleApiRequest(req, res, url, { authEnabled, token, clientAddr: resolveClientAddr(req) });
+      await api.handleApiRequest(req, res, url, {
+        authEnabled,
+        token,
+        clientAddr: resolveClientAddr(req),
+        resolveTokenScopes,
+      });
       return;
     }
 
@@ -387,19 +432,26 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     }
 
     // 鉴权：对外绑定（authEnabled）时，本地回环来源（127.0.0.1/::1）免鉴权，远程来源需 Bearer Token。
-    // 即 --host 0.0.0.0 下本地浏览器/工具可直接访问，远程接入仍需鉴权。
+    // 同时解析该 Token 的授权 scope 集合（全权临时 Token → ['all']；否则查多 Token 存储），
+    // 供 handleMcpPost 做 tools/call 的 scope 越权校验。authScopes 为 null 表示免鉴权（不限）。
+    let authScopes: string[] | null = null;
     if (authEnabled && !isLoopbackAddr(resolveClientAddr(req))) {
       const auth = req.headers['authorization'];
       const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
         ? auth.slice('Bearer '.length).trim()
         : '';
-      if (!token || !bearer || !tokenMatches(bearer, token)) {
-        // 只披露长度差异不披露内容：足以定位“手抄漏字符/多空格”这类高频错误
+      let scopes: string[] | undefined;
+      if (bearer && token && tokenMatches(bearer, token)) {
+        // 全权临时 Token（--token/KI_MCP_TOKEN）：授权全部 scope
+        scopes = [ALL_SCOPES];
+      } else if (bearer) {
+        // 多 Token 存储：按明文查找授权 scope 集合（常量时间比较）
+        scopes = resolveTokenScopes(bearer);
+      }
+      if (!scopes) {
         const reason = !bearer
           ? '请求未携带 Authorization: Bearer 头'
-          : token && bearer.length !== token.length
-            ? `Token 长度不匹配（收到 ${bearer.length} 位，期望 ${token.length} 位）`
-            : 'Token 内容不匹配';
+          : 'Token 无效（未在托管 Token 存储中匹配到）';
         logAuthFailure(req, reason);
         res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
         res.end(
@@ -411,10 +463,11 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         );
         return;
       }
+      authScopes = scopes;
     }
 
     if (req.method === 'POST') {
-      await handleMcpPost(req, res);
+      await handleMcpPost(req, res, authScopes);
       return;
     }
     if (req.method === 'GET' || req.method === 'DELETE') {
@@ -428,8 +481,30 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   async function handleMcpPost(
     req: http.IncomingMessage,
     res: http.ServerResponse,
+    authScopes: string[] | null,
   ): Promise<void> {
     const body = await readJsonBody(req);
+
+    // scope 越权校验：鉴权模式下（authScopes !== null），拦截 tools/call 的 scope 参数。
+    // 所有工具 scope 参数统一位于 arguments.scope 顶层（缺省 'default'），
+    // 在此统一校验，避免下沉到各工具导致鉴权入口分散（安全关键路径）。
+    if (authScopes !== null) {
+      const violation = findScopeViolation(body, authScopes);
+      if (violation !== null) {
+        // 越权日志：服务端留痕（含具体 scope 便于排查），但响应体不下发 scope 名，避免被用于枚举探测
+        process.stderr.write(
+          `[kisearch] scope 越权拦截：来自 ${req.socket.remoteAddress ?? '未知'}，` +
+            `请求 scope "${violation}" 不在该 Token 授权范围内（授权：${authScopes.join(', ')}）。\n`,
+        );
+        sendJson(res, 403, {
+          jsonrpc: '2.0',
+          error: { code: -32002, message: 'Forbidden: 无权访问该 scope' },
+          id: extractJsonRpcId(body),
+        });
+        return;
+      }
+    }
+
     const sid = req.headers['mcp-session-id'];
     const sessionId = Array.isArray(sid) ? sid[0] : sid;
 
@@ -466,7 +541,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       newTransport.onclose = () => {
         if (newTransport.sessionId) dropSession(newTransport.sessionId);
       };
-      const server = buildServer();
+      const server = buildServer(authScopes);
       await server.connect(newTransport);
       transport = newTransport;
     } else {
@@ -544,7 +619,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
   }
   const info = await fetchHealthz(host, port);
   const running = info?.ok === true && info?.name === SERVICE_NAME;
-  const tokenInfo = managedTokenInfo();
+  const tokenTotal = tokenCount();
   console.log(
     JSON.stringify(
       {
@@ -553,14 +628,12 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
         target: { host: probeHost(host), port },
         healthz: running ? info : null,
         lock: lock ?? null,
-        // 托管 Token 仅报告存在性与创建时间，绝不回显明文
-        managedToken: tokenInfo.exists
-          ? { exists: true, createdAt: tokenInfo.createdAt, path: tokenInfo.path }
-          : { exists: false },
+        // 多 Token 存储：仅报告数量，绝不回显明文
+        managedTokens: { count: tokenTotal },
         hint: running
           ? (info?.authFailures ?? 0) > 0
             ? `实例健康，但启动以来已有 ${info!.authFailures} 次鉴权失败：很可能有客户端 Token 配置错误，` +
-              `请核对各 IDE 的 Authorization: Bearer 与 ki mcp token show 输出完全一致（服务端 stderr 日志有失败原因）。`
+              `请核对各 IDE 的 Authorization: Bearer 与 ki mcp token list 输出完全一致（服务端 stderr 日志有失败原因）。`
             : '已有健康的 kisearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
           : '未探测到运行中的 kisearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',
       },

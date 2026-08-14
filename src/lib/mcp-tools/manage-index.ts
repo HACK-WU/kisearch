@@ -1,9 +1,16 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeManageCreate, executeListScopes, executeManageDeleteEmpty } from '../../manage-index.js';
+import { isScopeAuthorized } from '../mcp-token.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
-export function registerManageIndexTools(server: McpServer): void {
+/**
+ * 注册 ki_manage_index_* 工具。
+ * @param authScopes 当前会话的授权 scope 集合（null = 免鉴权不限）；非 null 时
+ *   ki_manage_index_list 按授权过滤，避免泄露未授权 scope 的存在与结构。
+ *   （create/delete 带 scope 参数，已由 HTTP 层 tools/call 越权校验统一拦截）
+ */
+export function registerManageIndexTools(server: McpServer, authScopes: string[] | null = null): void {
   // ✅ 注册 create 工具
   server.tool(
     'ki_manage_index_create',
@@ -44,8 +51,15 @@ export function registerManageIndexTools(server: McpServer): void {
     async () => {
       try {
         const result = executeListScopes();
+        // RBAC：按授权 scope 过滤（null 免鉴权不过滤；否则仅保留授权范围内的 scope）
+        const visible = authScopes === null
+          ? result.scopes
+          : result.scopes.filter((s) => isScopeAuthorized(authScopes, s.scope));
+        const payload = authScopes === null
+          ? result
+          : { ...result, total: visible.length, scopes: visible };
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
         };
       } catch (err) {
         return {

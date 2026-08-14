@@ -14,9 +14,9 @@ HTTP 共享单例模式让 `ki mcp` 以**单进程 HTTP 服务**运行，作为�
 # 仅本机访问（默认即回环绑定 127.0.0.1，免鉴权，开箱即用）
 ki mcp --http
 
-# 远程跨机访问（非回环绑定，强制 Token）：一键生成托管 Token 后直接启动
-ki mcp token generate       # 输出 Token 明文，持久化到 ~/.ki/mcp-token（0600）
-ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token，无需 export
+# 远程跨机访问（非回环绑定，强制 Token）：生成授权 Token 后直接启动
+ki mcp token generate --scope team-a   # 输出短 ID + Token 明文，持久化到 ~/.ki/mcp-tokens.json（0600）
+ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无需 export
 ```
 
 各 IDE 在 `mcp.json` 中用 URL 型条目接入：
@@ -43,7 +43,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，启动时同样经过多实例冲突守卫，见下文「stdio 启动守卫」） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | Bearer Token（显式传入，优先级最高）。**非回环绑定时必须有 Token**，推荐用 `ki mcp token generate` 托管 |
+| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含托管 Token 存在性），不启动服务、跳过预检 |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
@@ -54,13 +54,14 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 启动时自动读取托管 Token�
 
 子命令 `ki mcp restart`：仅 HTTP 模式，一键重启 HTTP 单例（先关闭现有实例，再以守护进程方式后台常驻重启），见下文「后台常驻与重启」。
 
-托管 Token 子命令：
+多 Token 子命令（scope 授权）：
 
 | 命令 | 说明 |
 |------|------|
-| `ki mcp token generate` | 一键生成密码学强随机 Token（32 字节熵）并托管到 `~/.ki/mcp-token`（0600）；**已存在时拒绝覆盖**并提示改用 reset |
-| `ki mcp token show` | 查看当前托管 Token 明文（含路径与创建时间），便于配置多个 IDE 客户端；不存在时报错（`MCP_TOKEN_NOT_FOUND`）并提示先 generate，文件存在但为空时报错（`MCP_TOKEN_EMPTY`）并提示用 reset 重建 |
-| `ki mcp token reset --yes` | 轮换：生成新 Token 覆盖旧值。破坏性操作，必须显式 `--yes` 确认；重置后需更新客户端并重启运行中的服务（若启动环境设有 `KI_MCP_TOKEN`/`--token`，其优先级高于托管文件，需一并更新） |
+| `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
+| `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
+| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
+| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
 
@@ -130,9 +131,13 @@ ki mcp --status --host 127.0.0.1 --port 7423
 - **回环地址**（`127.0.0.1` / `localhost` / `::1`）：无网络暴露面，**免鉴权**，Token 可省略。
 - **非回环地址**（`0.0.0.0` / 外网 IP，即远程跨机）：**强制 Bearer Token**，未提供则拒绝启动（fail-loud）。
 
-Token 来源三级优先：`--token` > 环境变量 `KI_MCP_TOKEN` > 托管文件 `~/.ki/mcp-token`（`ki mcp token generate` 生成），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，常量时间比较，失败返回 401。
+Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Token）> 多 Token 存储 `~/.ki/mcp-tokens.json`（`ki mcp token generate --scope <...>` 创建），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，按明文在存储中匹配（常量时间比较）得到授权 scope 集合，失败返回 401。
 
-> ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。同理，回环绑定不会读取托管文件。如需鉴权请绑定非回环地址。
+**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
+
+**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_manage_index_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。免鉴权（回环）或 `all` 权限时不过滤。
+
+> ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。同理，回环绑定不会读取多 Token 存储。如需鉴权请绑定非回环地址。
 
 ## 幂等单例守护
 
@@ -231,7 +236,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 
 - 生产远程暴露建议前置 **TLS 反向代理**（如 Nginx/Caddy），HTTP 服务本身只处理明文，TLS 由反代终结。
 - 配合防火墙 / 安全组收敛来源 IP；跨机 IDE 来源不定时，可用 `--allowed-hosts` 限定 Host 头以缓解 DNS rebinding。
-- Token 推荐用 `ki mcp token generate` 托管（强随机、不进 shell 历史与配置文件）；怀疑泄露时 `ki mcp token reset --yes` 立即轮换并重启服务。
+- Token 推荐用 `ki mcp token generate --scope <...>` 托管（强随机、不进 shell 历史与配置文件，且按 scope 最小授权）；怀疑泄露时 `ki mcp token delete <id>` 立即吊销（或 `ki mcp token update <id> --scope <...>` 收敛权限）。
 
 ## 配置文件默认值
 
