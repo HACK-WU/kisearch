@@ -70,16 +70,15 @@ S-01 新增字段，记录外部知识库来源信息，用于增量 diff：
   "groups": { "QoderWiki": { ... } },
   "source": {
     "dir": "/abs/path/to/source",
-    "rootName": "QoderWiki",
-    "commit": "b945303942b62176ace2bd58f294f5c78e5c2438"
+    "rootName": "QoderWiki"
   },
   "updatedAt": "2026-05-28T05:17:22.360Z"
 }
 ```
 
 - `dir`：外部知识库目录绝对路径
-- `rootName`：导入时的顶层 Group 名称（与 `meta.rootName` 一致，作为 Group 树的第一层节点）
-- `commit`：导入时的 git HEAD commit，`scan-kb diff` 以此为基准检测变更
+- `rootName`：导入时的目标 Group 落点（即 `--group` 值，作为 Group 树的第一层前缀；可多级路径）
+- ~~`commit`~~：已废弃（incremental 移除后不再依赖 git）
 
 ### `relations-cache.json` 的 `memoryIds` / `sourcePath`
 
@@ -99,7 +98,7 @@ S-01 新增字段，记录外部知识库来源信息，用于增量 diff：
 ```
 
 - `memoryIds`：向量数据库中该文件全部 chunk 的 ID 列表（方案 D 多值）；`ki search` 命中任一 memoryId → 反查到同一文件级 relation → 返回文件原文（`--original`/`include_original` 开启时）。旧数据兼容单值 `memoryId` 字段
-- `sourcePath`：相对 `source.dir` 的 posix 路径，用于 `scan-kb diff` 关联变更文件
+- `sourcePath`：相对 `source.dir` 的 posix 路径，用于幂等判定（同 sourcePath 重导覆盖、不同 sourcePath 同名跳过）
 
 ### `index.json` 的 key 因写入来源不同而异
 
@@ -138,15 +137,17 @@ flowchart LR
     IMP --> KB2[本地 KB 原文]
 ```
 
-### 增量更新链路（git diff 直连）
+### 增量更新链路（幂等追加）
 
 ```mermaid
 flowchart LR
-    EXT2[外部知识库 git 提交变更] --> INCR[scan-kb import --mode incremental<br/>git diff 直连]
-    INCR --> ADD[added: 切分 + 向量化 + 写索引]
-    INCR --> MOD[modified: 先写新全 chunk → 删旧全 chunk]
-    INCR --> DEL[deleted: 按文件关联全 chunk 清理]
+    EXT2[外部知识库 文件变更/新增] --> IMP2[scan-kb import --group &lt;name&gt;<br/>幂等追加]
+    IMP2 --> ADD[新文件: 切分 + 向量化 + 写索引]
+    IMP2 --> MOD[同 sourcePath: 覆盖更新]
+    IMP2 --> SKIP[同名不同 sourcePath: 跳过]
 ```
+
+> 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，重复执行同命令即同步变更，不再依赖 git。
 
 ## 与父项目记忆系统的配合
 

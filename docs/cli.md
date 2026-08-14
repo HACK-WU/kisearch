@@ -61,7 +61,7 @@ ki scan-kb import -s my-project --source /path/to/wiki --group wiki
 - 同名不同文件（sourcePath 不同）→ 跳过
 - 新文件 → 正常导入
 
-因此重复执行同命令即同步变更（追加新文档 / 更新已有文档），无需 `--mode incremental`。
+因此重复执行同命令即同步变更（追加新文档 / 更新已有文档）。
 
 输出：
 ```json
@@ -886,9 +886,9 @@ ki mcp stop                             # 一键关闭本机所有 ki mcp 实例
 
 stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通信。
 
-> **启动守卫（stdio 与 HTTP 通用，均在预检之前执行）**：不允许多个 ki mcp 进程静默共存降级。
-> - `ki mcp --http`：探活命中健康实例 → 复用退出（`exit 0`，不做预检）；检测到存活 stdio 实例 → 拒绝启动（`exit 1`，提示冲突 pid）。
-> - `ki mcp`（stdio）：检测到健康 HTTP 单例或存活 stdio 实例 → 拒绝启动（`exit 1`），提示迁移 URL 型接入；守卫通过后写入 `~/.ki/mcp-stdio.lock`（pid 存活校验，陈旧锁自动清理）。
+> **启动守卫（stdio 与 HTTP 通用，均在预检之前执行）**：
+> - `ki mcp --http`：探活命中健康实例 → 复用退出（`exit 0`，不做预检）；检测到存活 stdio 实例 → 拒绝启动（`exit 1`，提示冲突 pid，保持 HTTP 单例独占）。
+> - `ki mcp`（stdio）：检测到健康 HTTP 单例 → 拒绝启动（`exit 1`），提示迁移 URL 型接入；多个 stdio 实例**不再互斥**——靠向量库空闲释放锁 + 撞锁重试错开共享（错开使用互不影响）。守卫仍登记首个实例 lock（pid 存活校验，陈旧锁自动清理）。
 > 详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### HTTP 模式参数
@@ -1425,10 +1425,10 @@ wiki-output/
 3. Agent 自动调用 `ki_query_group` / `ki_get_module_info` 查询知识
 4. Agent 需要沉淀知识时调用 `ki_sync_relation` / `ki_manage_index_create`
 
-### 外部知识库导入（原文直导，无 AI）
+### 外部知识库导入（原文直导，无 AI，幂等追加）
 
-1. `scan-kb import --scope <s> --source <dir> --root-name <name>`（首次全量）
-2. 修改 source 目录文件后：`scan-kb import --scope <s> --source <dir> --mode incremental`（git diff 驱动增量）
+1. `scan-kb import --scope <s> --source <dir> --group <name>`（首次导入）
+2. 修改/新增 source 目录文件后，重新执行同一条命令即可（幂等追加 = 增量更新）
 
 ---
 

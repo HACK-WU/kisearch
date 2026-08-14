@@ -100,7 +100,7 @@ scopes:
 外部知识库目录（Markdown）
      │
      ▼
-[Step 1] scan-kb import --source <dir> --root-name <root>
+[Step 1] scan-kb import --source <dir> --group <group>
      │  （内部：递归扫描 .md → 逐文件切分 → 向量化 → 写 cache + local KB）
      ▼
 知识索引构建完成
@@ -115,16 +115,16 @@ scopes:
 ki scan-kb import \
   --scope <scope> \
   --source <外部知识库目录> \
-  --root-name <根节点名称>
+  --group <目标 Group>
 ```
 
 **参数**：
 
 | 参数 | 说明 | 必填 |
 |------|------|------|
-| `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
+| `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 否 |
 | `--source` | 外部 Markdown 目录（递归扫描含子目录） | 是 |
-| `--root-name` | 导入根节点名称（= groupPath 首段） | 是 |
+| `--group` | 目标 Group 落点（不存在时自动新建，含父路径）。缺省 `default` | 否 |
 | `--chunk-size` | 切分目标长度（字符，默认 1000） | 否 |
 | `--chunk-overlap` | 切分重叠字符数（默认 150） | 否 |
 
@@ -135,7 +135,7 @@ ki scan-kb import \
 3. **批量向量化**：调用 zvec 引擎批量向量化（content = chunk 原文）
 4. **Group 树创建**：自动创建 Group 目录结构（groupPath 从目录结构推导）
 5. **Relations 缓存写入**：写入 `relations-cache.json`，文件级 relation 包含 `memoryIds`（多值）和 `sourcePath`
-6. **group-index.source 记录**：记录导入元信息（含 git HEAD commit + 切分参数持久化）
+6. **group-index.source 记录**：记录导入元信息（含切分参数持久化）
 7. **sourceDir 写入**：scope 未配置 sourceDir 时写入绝对路径（供增量免传 `--source`）
 
 **输出示例**：
@@ -209,7 +209,7 @@ ki scan-kb import \
 | `Access denied to scope: <scope>` | scope 未注册 | 在 `~/.ki/config.yaml` 注册 scope |
 | `sourceDir 不存在或不是目录` | `--source` 路径错误 | 确认目录存在且路径正确 |
 | `目录下未发现 .md 文件` | 目录无 Markdown 文件 | 确认目录含 `.md` 文件 |
-| `rootName 不能为空` | 缺 `--root-name` | 补充 `--root-name <name>` |
+| `--group 不能为空` | `--group` 传了空值 | 检查 `--group` 参数（缺省不传落到 `default`） |
 | `向量化失败` | Embedding API 配置错误或网络问题 | 检查 `~/.ki/config.yaml` 中的 embedding 配置，确认 API 密钥有效 |
 | `文件过大已跳过` | 超过单文件大小上限（默认 2MB） | 手动切分后导入或调整上限 |
 
@@ -235,7 +235,7 @@ ki scan-kb import \
 1. **原文直导**：向量 content = chunk 原文（无 AI 摘要），语义检索直接索引原文
 2. **自动切分**：超过 `chunk-size`（默认 1000 字符）的文件按"固定长度 + 段落边界优先"切分，relation 名 = `文件名-N`（`deploy-01`），sourcePath = `文件#N`
 3. **大文件上限**：单文件默认上限 2MB，超限跳过并告警（可手动切分后导入）
-4. **groupPath 推导**：从文件目录结构推导（`dir/sub/file.md` → `rootName/dir/sub`）
+4. **groupPath 推导**：从文件目录结构推导（`dir/sub/file.md` → `group/dir/sub`）
 
 ### 性能优化
 
@@ -246,7 +246,7 @@ ki scan-kb import \
 
 - 切分粒度决定检索精度：过大 → 语义稀释；过小 → 向量爆炸（建议不调小默认值）
 - 分组路径反映知识库的逻辑结构（目录层级）
-- 增量更新用 `--mode incremental`（git diff 驱动），保证与首次直导的切分参数一致（source 块持久化）
+- 增量更新 = 幂等追加（重复执行同命令即同步变更），不再依赖 git diff；切分参数由 source 块持久化保证一致
 
 ---
 

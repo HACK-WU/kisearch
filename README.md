@@ -221,7 +221,7 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 启动后 AI Agent 可通过标准 MCP 协议使用知识索引能力：
 
 ```bash
-ki mcp                      # stdio 模式（默认，单客户端单进程）
+ki mcp                      # stdio 模式（默认；多实例与 CLI 错开共享向量库，见 docs/mcp-http.md）
 ki mcp --http               # HTTP 共享单例（多 IDE 共享同一持锁进程，见 docs/mcp-http.md）
 ki mcp --http --web         # HTTP 模式 + 可视化前端（浏览器访问 http://127.0.0.1:7423/）
 ki mcp --http --daemon      # HTTP 模式后台常驻运行（-d 同义，SSH 断开不退出；--web 组合同样生效）

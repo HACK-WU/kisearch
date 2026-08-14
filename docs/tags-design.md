@@ -31,12 +31,11 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务
 
 | 写入方 | 调用链 | 说明 |
 |--------|--------|------|
-| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 全量导入 |
-| `incremental.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 增量导入 |
+| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 幂等追加导入 |
 
 每个 Group 写入一条（按 groupPath 去重）。
 
-参考代码：[import.ts L518-L525](../src/lib/import.ts#L518-L525)、[incremental.ts L380-L386](../src/lib/incremental.ts#L380-L386)
+参考代码：[import.ts L410](../src/lib/import.ts#L410)
 
 ### 1.3 查询消费
 
@@ -65,11 +64,10 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务
 
 | 写入方 | 调用链 | 说明 |
 |--------|--------|------|
-| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-relation'` | scan-kb 全量导入 |
-| `incremental.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-relation'` | scan-kb 增量导入 |
-| `sync-relation.ts` | `storeOnePath({ tag: 'ki-relation' })` | 单条 Relation 写入，失败不阻塞主流程 |
+| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-relation'` | scan-kb 幂等追加导入 |
+| `sync-relation.ts` | `buildRelationContent` + `vectorBulkStore` | 单条 Relation 写入，失败不阻塞主流程 |
 
-参考代码：[import.ts L510-L515](../src/lib/import.ts#L510-L515)、[sync-relation.ts L431-L434](../src/sync-relation.ts#L431-L434)
+参考代码：[import.ts L410](../src/lib/import.ts#L410)、[path-vectorize.ts storeOnePathAsync L123](../src/lib/path-vectorize.ts#L123)
 
 ### 2.3 查询消费
 
@@ -148,8 +146,8 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 │  │  query-group │  │              │  │                          │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 │                                                                  │
-│  写入源: import.ts / incremental.ts / sync-relation.ts           │
-│          store.ts / bulk-store.ts                                │
+│  写入源: import.ts / sync-relation.ts / store.ts                 │
+│          bulk-store.ts                                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -221,7 +219,6 @@ const hits = await engine.hybridSearch({
 | [zvec-engine/engine.ts](../src/zvec-engine/engine.ts) | ZvecEngine 核心：insert/upsert/search/close 生命周期 |
 | [sync-relation.ts](../src/sync-relation.ts) | ki-relation + ki-search 双写 |
 | [import.ts](../src/lib/import.ts) | scan-kb 导入：bulkVectorize（ki-search）+ bulkStorePaths（ki-path/ki-relation） |
-| [incremental.ts](../src/lib/incremental.ts) | scan-kb 增量：同上写入逻辑 |
 | [search.ts](../src/search.ts) | ki search CLI（默认 tags: ki-search） |
 | [store.ts](../src/store.ts) | ki store CLI（默认 tags: ki-search） |
 | [query-group.ts](../src/query-group.ts) | 语义兜底（tags: ki-path） |

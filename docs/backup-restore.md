@@ -174,8 +174,8 @@ rm -rf kb/{scope}
 ki manage-index --action list-scopes
 ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化"
 
-# 重新导入数据（原文直导）
-ki scan-kb import --scope {scope} --source /path/to/wiki --root-name wiki
+# 重新导入数据（原文直导，幂等追加）
+ki scan-kb import --scope {scope} --source /path/to/wiki --group wiki
 ```
 
 ---
@@ -224,8 +224,8 @@ ki manage-index --scope {scope} --action create --name "初始化"
 # 从快照恢复
 ki restore {scope} --from-snapshot --yes
 
-# 或重新导入知识库（原文直导）
-ki scan-kb import --scope {scope} --source /path/to/wiki --root-name wiki
+# 或重新导入知识库（原文直导，幂等追加）
+ki scan-kb import --scope {scope} --source /path/to/wiki --group wiki
 ```
 
 ---

@@ -126,22 +126,6 @@ ki scan-kb import \
 
 ---
 
-## 工作流四：用 `mapping.json` 精确导入
-
-适合场景：外部目录结构不适合作为 Group，文件名不适合作为 Relation。
-
-```bash
-ki scan-kb import \
-  --scope my-project \
-  --source /path/to/wiki \
-  --root-name QoderWiki \
-  --mapping mapping.json
-```
-
-`mapping.json` 格式见：[`scan-kb.md`](./scan-kb.md)
-
----
-
 ## 工作流五：外部知识库导入（旧 7 步流程，仍可用）
 
 > 旧流程（ai-results 契约）已随批次 3 删除，仅保留 `scan-kb import --source` 原文直导。
@@ -165,8 +149,8 @@ ki scan-kb import \
 
 ## 最推荐的落地策略
 
-1. 先用 `scan-kb import` 跑通首次导入
-2. 之后变更走 `diff` → AI → `import --mode incremental`
+1. 先用 `scan-kb import --group <name>` 跑通首次导入
+2. 之后变更：修改/新增 source 目录文件后重新执行同一条 `scan-kb import` 命令（幂等追加 = 增量更新）
 3. 查询时遵循"本地优先，记忆兜底，命中后回写"的闭环
 
 ## 相关文档
