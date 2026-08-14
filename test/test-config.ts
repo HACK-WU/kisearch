@@ -26,6 +26,8 @@ function buildTestConfig(): Record<string, unknown> {
   const baseConfig: Record<string, unknown> = {
     dataDir: path.join(PROJECT_ROOT, 'kb'),
     vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
+    // 备份隔离到临时目录：避免测试快照污染项目内 ki-backup/（也减少项目目录的批量写）
+    backupDir: path.join(TEST_CONFIG_DIR, 'backup'),
     scopes: {},
   };
   if (embKey) {
@@ -58,13 +60,22 @@ export function registerTestScope(scope: string): void {
 
 /**
  * 获取子进程的环境变量（包含 KI_CONFIG_PATH 指向测试配置）
+ *
+ * 剥离 IDE 注入的 node shim（NODE_OPTIONS=--require node-language-shim.cjs 等）：
+ * safe-delete 拦截在单轮文件操作数达到批量阈值（50）后，会把非交互子进程的
+ * 文件写入挂起在"等待用户确认"上，导致 import 子进程永久挂起（epoll_wait）+
+ * WAL 锁残留。测试子进程不需要 IDE 拦截层。
  */
 export function getTestEnv(): Record<string, string | undefined> {
-  return {
-    ...process.env,
-    NODE_NO_WARNINGS: '1',
-    KI_CONFIG_PATH: TEST_CONFIG_PATH,
-  };
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.NODE_OPTIONS;
+  delete env.BASH_ENV;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CODEBUDDY_SAFE_DELETE')) delete env[key];
+  }
+  env.NODE_NO_WARNINGS = '1';
+  env.KI_CONFIG_PATH = TEST_CONFIG_PATH;
+  return env;
 }
 
 /** 测试配置文件路径（供需要直接引用的场景使用） */

@@ -124,7 +124,7 @@ ki scan-kb import \
 |------|------|------|
 | `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 否 |
 | `--source` | 外部 Markdown 目录（递归扫描含子目录） | 是 |
-| `--group` | 目标 Group 落点（不存在时自动新建，含父路径）。缺省 `default` | 否 |
+| `--group` | 目标 Group 落点（不存在时自动新建，含父路径，支持多级）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name | 否 |
 | `--chunk-size` | 切分目标长度（字符，默认 1000） | 否 |
 | `--chunk-overlap` | 切分重叠字符数（默认 150） | 否 |
 
@@ -153,9 +153,7 @@ ki scan-kb import \
   "errors": [],
   "groups": ["MyProject", "MyProject/API", "MyProject/前端"],
   "source": {
-    "dir": "/path/to/wiki",
-    "rootName": "MyProject",
-    "commit": "abc123..."
+    "dir": "/path/to/wiki"
   }
 }
 ```

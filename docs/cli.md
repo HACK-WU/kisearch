@@ -43,7 +43,7 @@ ki scan-kb import \
 |------|------|------|
 | `-s, --scope` | 否 | 项目隔离标识 |
 | `--source` | 是 | Markdown 目录绝对路径 |
-| `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径）。缺省 `default` |
+| `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
@@ -70,7 +70,7 @@ ki scan-kb import -s my-project --source /path/to/wiki --group wiki
   "scope": "my-project",
   "stats": { "total": 15, "vectorized": 15, "errors": 0 },
   "groups": ["wiki", "wiki/api"],
-  "source": { "dir": "/path/to/wiki", "rootName": "wiki" }
+  "source": { "dir": "/path/to/wiki" }
 }
 ```
 
@@ -719,6 +719,42 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 ---
 
+## `delete-relation`
+
+删除 Relation 或整个 Group 及其关联数据（relations-cache + 本地 KB + wiki 文件 + 向量），wiki 文件移入回收站（`.trash`，保留完整相对结构）。
+
+### 文档级删除（`--group` + `--relation`）
+
+```bash
+ki delete-relation --scope <scope> --group <group> --relation <relation>
+```
+
+删除单个 Relation。向量删除优先按 `memoryId` 精确删除，无 `memoryId` 时用向量搜索严格匹配兜底。
+
+### 目录级删除（仅 `--group`）
+
+```bash
+ki delete-relation --scope <scope> --group <group>
+```
+
+删除整个 Group 及其全部子 Group（级联），适用：
+- **relations-cache**：清空该 group 及前缀 `group/` 下的全部关系
+- **本地 KB**：删除 `kb/{scope}/{group}/` 目录
+- **wiki**：源目录对应子树移入回收站 `.trash/{group}/`（保留完整结构，重名追加时间戳）
+- **向量**：聚合该 group 下全部 `memoryIds` 一并删除；删除失败（或部分失败）时结果含 `vectorRemoved:false` 与原因，避免孤儿向量静默残留（已不存在的 doc 记 `NOT_FOUND`，视为已清理不误报）
+
+> **安全约束**：目录级删除为不可逆的破坏性操作，仅通过 CLI 暴露；MCP 工具 `ki_delete_relation` 仅支持文档级单条删除（`relation` 必填）。
+
+### 批量删除（`--input`）
+
+```bash
+ki delete-relation --scope <scope> --input <file.json>
+```
+
+JSON 格式 `{"items":[{"group":"...","relation":"..."}]}`，逐条文档级删除并汇总 `total`/`failed`。
+
+---
+
 ## `sync-relation`
 
 把 Relation 和模块说明写入本地索引。支持单条模式和批量模式。
@@ -1142,7 +1178,6 @@ scopes:
   my-project:
     kbDir: /data/special-kb              # 实际数据在 /data/special-kb/kb/my-project
     sourceDir: .qoder/repowiki/zh/content
-    rootName: QoderWiki
     wikiSync:
       enabled: true
       sourceDir: /path/to/wiki-content
@@ -1164,7 +1199,6 @@ scopes:
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |
 | `scopes.<scope>.sourceDir` | scope | 外部知识库源目录（由 `scan-kb import` 自动记录） |
-| `scopes.<scope>.rootName` | scope | 导入根节点名称（由 `scan-kb import` 自动记录） |
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 
@@ -1342,14 +1376,14 @@ ki restore my-project --from-snapshot --yes
 将 KB scope 中的结构化数据反向导出为 Markdown 文件目录。
 
 ```bash
-ki export <scope> --output <dir> [--root-name <name>] [--yes]
+ki export <scope> --output <dir> [--group <path>] [--yes]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `<scope>` | 项目隔离标识（必填） |
 | `--output <dir>` | 输出目录（必填） |
-| `--root-name <name>` | 指定根节点名称（可选，默认导出所有） |
+| `--group <path>` | 指定导出的 Group 路径（可选，父目录名取 group 最后一段；缺省全量导出，顶层名 = scope name） |
 | `--yes` | 输出目录已存在且非空时确认覆盖（缺省则拒绝并提示加 `--yes`） |
 
 **示例：导出 scope 为 Markdown**

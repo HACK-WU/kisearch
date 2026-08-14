@@ -140,7 +140,7 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
       result.reason = `KB 删除失败: ${(err as Error).message}`;
     }
 
-    // 3. 删除 wiki .md 文件
+    // 3. 将 wiki .md 文件移入回收站（不再物理删除）
     //
     // 含 "/"（或 "\\"、".."）的 relation 在 sync 入口即被 isUnsafeRelationName 拒绝、
     // 根本无法建立，故正常不会出现含非法字符的 wiki 文件。wiki 文件按 relation
@@ -148,7 +148,7 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
     try {
       const wikiFile = findWikiFile(scope, resolvedGroup, relation);
       if (wikiFile && fs.existsSync(wikiFile)) {
-        fs.unlinkSync(wikiFile);
+        moveToTrash(wikiFile, resolvedGroup);
         result.wikiRemoved = true;
       }
     } catch (err) {
@@ -166,13 +166,216 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
     }
 
     // 持久化 cache
-    writeJson(cachePath, cache);
+    writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
     result.deleted = result.cacheRemoved;
     return { ok: true, scope, result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+// ─── 目录级删除（REQ-11） ───
+
+export interface DeleteGroupParams {
+  scope?: string;
+  group: string;
+}
+
+export interface DeleteGroupResult {
+  group: string;
+  deleted: boolean;
+  /** 移除的 relation 数 */
+  relationCount: number;
+  /** wiki 目录是否移入回收站 */
+  wikiMoved: boolean;
+  /** group-index 树节点是否删除 */
+  nodeRemoved: boolean;
+  /** 向量是否已清理（false = 存在残留孤儿向量，需 rebuild 或后续重删）；无向量可删时为 true */
+  vectorRemoved: boolean;
+  reason?: string;
+}
+
+export type DeleteGroupOutcome =
+  | { ok: true; scope: string; result: DeleteGroupResult }
+  | { ok: false; error: string };
+
+/**
+ * 删除整个 group：清空该 group 下所有 relations（cache + KB + 向量），
+ * 将该 group 的 wiki 目录移入回收站，并连带删除 group-index 树节点。
+ */
+export async function executeDeleteGroup(params: DeleteGroupParams): Promise<DeleteGroupOutcome> {
+  try {
+    const { group } = params;
+    const scope = resolveScope(loadConfig(), params.scope);
+    validateScope(scope);
+
+    const cachePath = getRelationsCachePath(scope);
+    const cache = readJson<RelationsCache>(cachePath);
+    if (!cache) {
+      return { ok: false, error: 'relations-cache.json 不存在' };
+    }
+
+    const groupIndexPath = cachePath.replace('relations-cache.json', 'group-index.json');
+    const groupIndex = readJson<Record<string, unknown>>(groupIndexPath);
+    const resolved = await resolveGroupPath(group, groupIndex as any, cache.groups, scope);
+    if (!resolved.matched) {
+      return { ok: false, error: `Group "${group}" 未匹配到任何节点` };
+    }
+    const resolvedGroup = resolved.resolvedPath;
+
+    // 卫兵：resolvedGroup 必须是非空路径——下方 rmSync 会递归删除 kb/<scope>/<group>/ 整个子树，
+    // 空串时 path.join 会解析到 kb/<scope>/（整个 scope 数据目录），绝不允许
+    if (!resolvedGroup || !resolvedGroup.trim()) {
+      return { ok: false, error: `Group "${group}" 解析为空路径，拒绝执行目录删除` };
+    }
+
+    // 级联收集：relations-cache 的 groups 是平铺完整路径键（'wiki' 与 'wiki/docs' 互为独立键），
+    // 删除目录 group 必须连带全部子 group（前缀 = resolvedGroup + '/'），否则树节点已删
+    // 而 cache/KB/向量残留，形成查不到却删不掉的幽灵数据
+    const cascadeKeys = Object.keys(cache.groups).filter(
+      (k) => k === resolvedGroup || k.startsWith(`${resolvedGroup}/`)
+    );
+    const relations = cascadeKeys.flatMap((k) => cache.groups[k]?.hot_relations ?? []);
+    const result: DeleteGroupResult = {
+      group: resolvedGroup,
+      deleted: false,
+      relationCount: relations.length,
+      wikiMoved: false,
+      nodeRemoved: false,
+      vectorRemoved: true,
+    };
+
+    // 1. 删除该 group 下所有 relation 的向量（聚合 memoryIds）
+    //    失败/部分失败时标记 vectorRemoved:false，避免「删除后仍能搜到」的静默不一致——
+    //    索引层已删但向量层残留属孤儿向量，需显式反馈（REQ-13：cache 与向量仍删除）。
+    //    NOT_FOUND（doc 已不存在）视为「已清理」——删除目标本就是让它不存在，幂等重删不误报。
+    const allIds = relations.flatMap((r) => r.memoryIds ?? (r.memoryId ? [r.memoryId] : []));
+    const cleanIds = allIds.filter(Boolean) as string[];
+    if (cleanIds.length > 0) {
+      try {
+        const del = await vectorDelete({ scope, ids: cleanIds });
+        const realErrors = (del.errors ?? []).filter((e) => e.code !== 'NOT_FOUND');
+        if (realErrors.length > 0) {
+          result.vectorRemoved = false;
+          result.reason = `向量删除失败：${realErrors.length} 个 doc 写入错误（${realErrors.map((e) => e.id).join(', ')}）`;
+        }
+      } catch (err) {
+        result.vectorRemoved = false;
+        result.reason = `向量删除失败: ${(err as Error).message}`;
+      }
+    }
+
+    // 2. 从 relations-cache 删除整个 group（含全部子 group 的平铺键）
+    for (const key of cascadeKeys) {
+      delete cache.groups[key];
+    }
+
+    // 3. 删除本地 KB（递归删除该 group 子树目录：自身与全部子 group 的 index.json）
+    const localKbPath = getLocalKbDir(scope, resolvedGroup);
+    const kbGroupDir = path.dirname(localKbPath);
+    if (fs.existsSync(kbGroupDir)) {
+      try {
+        fs.rmSync(kbGroupDir, { recursive: true, force: true });
+      } catch (err) {
+        result.reason = `${result.reason || ''} KB 删除失败: ${(err as Error).message}`.trim();
+      }
+    }
+
+    // 4. 将该 group 的 wiki 目录移入回收站
+    const wikiDir = resolveWikiDir(scope, resolvedGroup);
+    if (wikiDir && fs.existsSync(wikiDir)) {
+      try {
+        moveDirToTrash(wikiDir, resolvedGroup);
+        result.wikiMoved = true;
+      } catch (err) {
+        result.reason = `${result.reason || ''} wiki 目录移入回收站失败: ${(err as Error).message}`.trim();
+      }
+    }
+
+    // 5. 删除 group-index 树节点
+    if (removeGroupNode(groupIndex as unknown as { groups: Record<string, unknown> }, resolvedGroup)) {
+      result.nodeRemoved = true;
+    }
+
+    // 持久化
+    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
+
+    result.deleted = true;
+    return { ok: true, scope, result };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * 定位 group 对应的 wiki 目录（sourceDir 优先，wikiSync 兜底）
+ */
+function resolveWikiDir(scope: string, group: string): string | null {
+  let sourceDir: string | null = null;
+  const source = getSource(scope);
+  if (source?.dir) sourceDir = source.dir;
+  if (!sourceDir) {
+    const config = loadConfig();
+    const wikiSync = getScopeWikiSync(config, scope);
+    if (wikiSync?.enabled && wikiSync?.sourceDir) sourceDir = wikiSync.sourceDir;
+  }
+  if (!sourceDir) return null;
+  return group ? path.join(sourceDir, group) : sourceDir;
+}
+
+/**
+ * 将 group 目录移入回收站（保留完整 group 路径结构，与文件级 moveToTrash 一致；
+ * 重名追加时间戳——多级路径避免不同父目录下同名 group 无法区分来源）
+ */
+function moveDirToTrash(dirPath: string, group: string): string {
+  // 反推 sourceDir：去掉末尾 group 各段
+  const segs = group.split('/').filter(Boolean);
+  let baseDir = dirPath;
+  for (let i = 0; i < segs.length; i++) {
+    baseDir = path.dirname(baseDir);
+  }
+  const trashRoot = path.join(baseDir, '.trash');
+  // 保留 group 完整相对路径（REQ-10 保留原结构）：.trash/<group>/，而非仅 .trash/<末段>/
+  const groupRel = segs.join('/');
+  let dest = groupRel ? path.join(trashRoot, groupRel) : path.join(trashRoot, path.basename(dirPath));
+
+  if (fs.existsSync(dest)) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    dest = `${dest}.${ts}`;
+  }
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(dirPath, dest);
+  return dest;
+}
+
+/**
+ * 从 group-index 树中删除指定 group 节点（若为叶子节点则一并清理空父节点）
+ */
+function removeGroupNode(groupIndex: { groups: Record<string, unknown> }, group: string): boolean {
+  const segs = group.split('/').filter(Boolean);
+  if (segs.length === 0) return false;
+
+  const walk = (node: Record<string, unknown>, idx: number): boolean => {
+    const key = segs[idx];
+    if (!(key in node)) return false;
+    if (idx === segs.length - 1) {
+      delete node[key];
+      return true;
+    }
+    const child = node[key];
+    if (typeof child !== 'object' || child === null) return false;
+    const removed = walk(child as Record<string, unknown>, idx + 1);
+    // 若子节点变空，则一并删除父节点引用
+    if (removed && Object.keys(child as Record<string, unknown>).length === 0) {
+      delete node[key];
+    }
+    return removed;
+  };
+
+  return walk(groupIndex.groups, 0);
 }
 
 // ─── 向量删除（先 memoryId 后 search 兜底） ───
@@ -277,19 +480,17 @@ function escapeRegExp(s: string): string {
 
 /**
  * 根据 config.json 的 wikiSync 配置定位 wiki 文件路径
- * 优先级与 wiki-sync.ts 的 resolveWikiTarget 一致：
- *   1. group-index.json 的 source 块（source.dir + source.rootName）
+ * 优先级与 wiki-sync.ts 的 resolveWikiTarget 一致（rootName 概念已移除）：
+ *   1. group-index.json 的 source 块（source.dir）
  *   2. config.json 中 scope 级 wikiSync.sourceDir
  */
 function findWikiFile(scope: string, group: string, relation: string): string | null {
   let sourceDir: string | null = null;
-  let rootName: string | null = null;
 
   // 优先级 1：group-index.json 的 source 块
   const source = getSource(scope);
   if (source?.dir) {
     sourceDir = source.dir;
-    rootName = source.rootName || null;
   }
 
   // 优先级 2：config.json 的 wikiSync
@@ -303,19 +504,48 @@ function findWikiFile(scope: string, group: string, relation: string): string | 
 
   if (!sourceDir) return null;
 
-  // 计算子路径：去掉 rootName 前缀（与 wiki-sync.ts 一致）
-  let subPath = group;
-  if (rootName && group.startsWith(rootName + '/')) {
-    subPath = group.slice(rootName.length + 1);
-  } else if (rootName && group === rootName) {
-    subPath = '';
-  }
-
-  const filePath = subPath
-    ? path.join(sourceDir, subPath, `${relation}.md`)
+  // 计算文件路径（group 即完整相对路径，不做前缀剥离）
+  const filePath = group
+    ? path.join(sourceDir, group, `${relation}.md`)
     : path.join(sourceDir, `${relation}.md`);
 
   return fs.existsSync(filePath) ? filePath : null;
+}
+
+/**
+ * 将文件移入回收站目录，保留原目录结构，重名追加时间戳。
+ * 回收站位置：由 wikiFile 反推 sourceDir（group 之前的部分），落入 {sourceDir}/.trash/{group}/{relation}.md。
+ * 用于替代物理删除：删除的文档/目录统一移入回收站，可手动恢复。
+ *
+ * @param filePath 待移入回收站的源文件绝对路径
+ * @param group group 相对路径（用于在回收站中保留原结构）
+ * @returns 回收站中的目标路径
+ */
+function moveToTrash(filePath: string, group: string): string {
+  // 从 filePath 反推 sourceDir：去掉末尾的 group/{relation}.md
+  const segs = group.split('/').filter(Boolean);
+  let baseDir = path.dirname(filePath);
+  for (let i = 0; i < segs.length; i++) {
+    baseDir = path.dirname(baseDir);
+  }
+  const trashRoot = path.join(baseDir, '.trash');
+
+  // 保留原目录结构：.trash/{group}/{relation}.md
+  const fileName = path.basename(filePath);
+  const destDir = group ? path.join(trashRoot, group) : trashRoot;
+  let dest = path.join(destDir, fileName);
+
+  // 重名追加时间戳，避免覆盖
+  if (fs.existsSync(dest)) {
+    const ext = path.extname(fileName);
+    const base = path.basename(fileName, ext);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    dest = path.join(destDir, `${base}.${ts}${ext}`);
+  }
+
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.renameSync(filePath, dest);
+  return dest;
 }
 
 // ─── 批量删除 ───
@@ -370,10 +600,10 @@ const program = new Command();
 program
   .name('delete-relation')
   .showHelpAfterError()
-  .description('删除 Relation 及其关联数据（cache + KB + wiki + mem）')
+  .description('删除 Relation 或整个 Group 及其关联数据（cache + KB + wiki + mem，wiki 移入回收站）')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('-g, --group <group>', 'Group 路径')
-  .option('-r, --relation <relation>', 'Relation 名称')
+  .option('-r, --relation <relation>', 'Relation 名称（省略时删除整个 group）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式，格式 {"items":[{"group","relation"}]}）')
   .action(async (opts) => {
     try {
@@ -391,10 +621,19 @@ program
         return;
       }
 
-      if (!opts.group || !opts.relation) {
-        console.log(JSON.stringify({ ok: false, error: '单条模式需提供 --group 和 --relation' }, null, 2));
+      if (!opts.group) {
+        console.log(JSON.stringify({ ok: false, error: '需提供 --group（目录级删除省略 --relation，文档级删除需 --group + --relation）' }, null, 2));
         await closeEngine();
         process.exit(1);
+      }
+
+      // 目录级删除：只传 --group 不传 --relation
+      if (!opts.relation) {
+        const result = await executeDeleteGroup({ scope: opts.scope, group: opts.group });
+        console.log(JSON.stringify(result, null, 2));
+        await closeEngine();
+        if (!result.ok) process.exit(1);
+        return;
       }
 
       const result = await executeDeleteRelation({

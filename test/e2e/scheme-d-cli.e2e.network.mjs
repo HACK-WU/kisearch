@@ -127,7 +127,7 @@ after(() => {
 // ─── 旅程 ───
 
 test('E2E-D1 full 导入：local KB 存原文（未清洗），向量 content 清洗后', { ...SKIP, timeout: 180_000 }, () => {
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--root-name', ROOT_NAME]);
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', ROOT_NAME]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}`);
   assert.equal(r.json?.ok, true, `import 应成功；${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.total, 1, `应导入 1 个文件（docs/api.md；notes.txt 非 md 跳过）`);
@@ -168,7 +168,7 @@ test('E2E-D3 --no-vector：local KB 原文写入、memoryIds 空', { ...SKIP, ti
   const srcNoVec = path.join(ctx.tmpBase, 'source-novec');
   fs.mkdirSync(srcNoVec, { recursive: true });
   fs.writeFileSync(path.join(srcNoVec, 'plain.md'), '# Plain\n纯文本内容');
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', srcNoVec, '--root-name', ROOT_NAME, '--no-vector']);
+  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', srcNoVec, '--group', ROOT_NAME, '--no-vector']);
   assert.equal(r.status, 0, `--no-vector 导入应成功；stderr=${r.stderr}`);
   assert.equal(r.json?.ok, true);
   assert.equal(r.json.stats.vectorized, 0, `--no-vector 不应向量化`);
@@ -188,7 +188,7 @@ test('E2E-D4 非 md 文件跳过 + 汇总提示', { ...SKIP, timeout: 180_000 },
   fs.mkdirSync(srcD4, { recursive: true });
   fs.writeFileSync(path.join(srcD4, 'ok.md'), '# OK\n纯文本内容');
   fs.writeFileSync(path.join(srcD4, 'note.txt'), 'not markdown');
-  const r = ki(['scan-kb', 'import', '--scope', scopeD4, '--source', srcD4, '--root-name', ROOT_NAME]);
+  const r = ki(['scan-kb', 'import', '--scope', scopeD4, '--source', srcD4, '--group', ROOT_NAME]);
   assert.equal(r.status, 0, `import 应成功；stderr=${r.stderr}`);
   assert.equal(r.json?.ok, true);
   assert.equal(r.json.stats.total, 1, `应只导入 ok.md`);

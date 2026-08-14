@@ -20,11 +20,17 @@ const SCRIPT = path.resolve('src/scan-kb.ts');
 
 function runImport(args: string[]): any {
   const { execFileSync } = require('node:child_process');
-  const out = execFileSync('npx', ['jiti', SCRIPT, ...args], {
-    encoding: 'utf-8',
-    env: getTestEnv(),
-    cwd: path.resolve('.'),
-  });
+  let out: string;
+  try {
+    out = execFileSync('npx', ['jiti', SCRIPT, ...args], {
+      encoding: 'utf-8',
+      env: getTestEnv(),
+      cwd: path.resolve('.'),
+    });
+  } catch (err: any) {
+    // 负向用例：子进程非零退出但 stdout 仍输出结果 JSON
+    out = err.stdout ?? '';
+  }
   return JSON.parse(out);
 }
 
@@ -131,11 +137,32 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(r.groups.includes('wiki/部署运维/sub'), `子目录应挂到落点下；实际=${JSON.stringify(r.groups)}`);
   });
 
-  it('--group 缺省时落 default', () => {
+  it('--group 缺省时：顶层 .md 落 scope name（K2 决策）', () => {
     const src = mkSource({ 'a.md': '# A\n内容' });
     const r = runImport(['import', '--scope', scope, '--source', src, '--no-vector']);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
-    assert.ok(r.groups.includes('default'), `缺省 --group 应落 default；实际=${JSON.stringify(r.groups)}`);
+    assert.ok(r.groups.includes(scope), `缺省 --group 顶层 .md 应落 scope name；实际=${JSON.stringify(r.groups)}`);
+  });
+
+  it('单文件导入：--source 直接传 .md 文件', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-d-file-'));
+    const file = path.join(dir, 'solo.md');
+    fs.writeFileSync(file, '# Solo\n单文件内容');
+    // 显式 --group
+    const r1 = runImport(['import', '--scope', scope, '--source', file, '--group', 'wiki', '--no-vector']);
+    assert.strictEqual(r1.ok, true, JSON.stringify(r1));
+    assert.strictEqual(r1.stats.total, 1);
+    assert.ok(r1.groups.includes('wiki'), `显式 --group 应生效；实际=${JSON.stringify(r1.groups)}`);
+    // 缺省 --group → scope name（回退用例：修复 ENOTDIR 单文件路径拼接 bug）
+    const r2 = runImport(['import', '--scope', scope, '--source', file, '--no-vector']);
+    assert.strictEqual(r2.ok, true, JSON.stringify(r2));
+    assert.ok(r2.groups.includes(scope), `单文件缺省 --group 应落 scope name；实际=${JSON.stringify(r2.groups)}`);
+    // 非 .md 单文件：fail-loud 拒绝（REQ-08 白名单不因单文件路径绕过）
+    const txt = path.join(dir, 'plain.txt');
+    fs.writeFileSync(txt, 'not markdown');
+    const r3 = runImport(['import', '--scope', scope, '--source', txt, '--no-vector']);
+    assert.strictEqual(r3.ok, false, '非白名单后缀应 fail-loud');
+    assert.ok(String(r3.error).includes('不支持的文件格式'), `实际=${JSON.stringify(r3.error)}`);
   });
 
   it('新增文档追加到已有 group', () => {

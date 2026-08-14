@@ -96,10 +96,10 @@ export interface ImportResult {
 
 export interface HandleDirectImportArgs {
   scope: string;
-  /** 外部 Wiki 根目录（绝对路径） */
+  /** 外部 Wiki 根目录或单个 Markdown 文件（绝对路径） */
   sourceDir: string;
-  /** 目标 Group 落点（幂等追加；不存在时自动新建，含父路径） */
-  group: string;
+  /** 目标 Group 落点（幂等追加；不存在时自动新建，含父路径）。可选：缺省时目录导入按顶层子目录名各建根节点，单文档导入用 scope name */
+  group?: string;
   /** 切分参数：目标长度（字符），默认 1000 */
   chunkSize?: number;
   /** 切分参数：重叠字符数，默认 150 */
@@ -131,6 +131,28 @@ function deriveRelationText(filePath: string): string {
   const base = stripMarkdownExtension(path.posix.basename(filePath));
   const cleaned = base.replace(/[*~`]/g, '').trim();
   return cleaned || base;
+}
+
+/**
+ * 推导文件的 groupPath（rootName 概念移除后的落点规则）
+ *
+ * - 显式 --group（非空）：沿用旧语义——group 作为统一根前缀，文件相对子目录挂其下。
+ *   `deriveGroupPath(group, rel)` = `group` 或 `group/<子目录>`。
+ * - 缺省 --group（空）：
+ *   - 目录导入：文件的相对目录即 groupPath（顶层子目录名 = 根节点）；根目录下的顶层 .md 归 scope name 根。
+ *   - 单文件导入：groupPath = scope name。
+ *
+ * @param group 显式 group（可空）
+ * @param rel 文件相对 sourceDir 的 posix 路径
+ * @param scope scope name（缺省 group 时的兜底根）
+ */
+function resolveGroupForSource(group: string, rel: string, scope: string): string {
+  if (group) {
+    return deriveGroupPath(group, rel);
+  }
+  // 缺省 group：取文件相对目录为 groupPath（顶层子目录名即根节点）
+  const dir = path.posix.dirname(toPosix(rel));
+  return dir === '.' ? scope : dir;
 }
 
 // ─── 直导（原文直导 + 切分）工具 ─────────────────────────
@@ -194,7 +216,8 @@ export async function handleDirectImport(
 ): Promise<ImportResult> {
   const scope = args.scope;
   const sourceDir = path.resolve(args.sourceDir);
-  const group = args.group.trim();
+  // group 缺省时传空串，由 resolveGroupForSource 根据 source 类型（目录/单文件）推断
+  const group = (args.group ?? '').trim();
   const chunkSize = args.chunkSize ?? 1000;
   const chunkOverlap = args.chunkOverlap ?? 150;
   const vector = args.vector !== false;
@@ -204,9 +227,10 @@ export async function handleDirectImport(
   // 文档级自定义标签：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
   const customTags = parseContentTags(args.tags);
 
-  if (!group) throw new Error('--group 不能为空');
-  if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
-    throw new Error(`sourceDir 不存在或不是目录：${sourceDir}`);
+  // 单文件导入支持：sourceDir 可为单个 .md 文件（缺省 group 时用 scope name）
+  const sourceIsFile = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isFile();
+  if (!fs.existsSync(sourceDir) || (!sourceIsFile && !fs.statSync(sourceDir).isDirectory())) {
+    throw new Error(`sourceDir 不存在或不是目录/文件：${sourceDir}`);
   }
 
   // 0) 准备 scope 目录 + 并发锁 + 信号捕获 + 预读索引（REQ-01/02，N4）
@@ -243,9 +267,16 @@ export async function handleDirectImport(
   // REQ-07：外部清洗 hook（config scopes.<scope>.clean.hooks；--no-clean 时全部关闭）
   const cleanCfg = getScopeCleanConfig(cfg, scope);
   const cleanHooks = cleanEnabled ? (cleanCfg?.hooks ?? []) : [];
-  const { files, skippedNonMd } = collectMarkdownFiles(sourceDir, extensions);
+  // 单文件导入：sourceDir 指向单个文件时，files 只含该文件（相对路径 = basename）
+  // 后缀仍需命中 extensions 白名单（REQ-08），未命中 fail-loud 报错而非静默导入
+  if (sourceIsFile && !extensions.some((e) => sourceDir.toLowerCase().endsWith(e))) {
+    throw new Error(`不支持的文件格式：${sourceDir}（格式白名单：${extensions.join(', ')}）`);
+  }
+  const { files, skippedNonMd } = sourceIsFile
+    ? { files: [toPosix(path.basename(sourceDir))], skippedNonMd: [] as string[] }
+    : collectMarkdownFiles(sourceDir, extensions);
   if (files.length === 0) {
-    throw new Error(`目录下未发现 .md 文件（格式白名单：${extensions.join(', ')}）：${sourceDir}`);
+    throw new Error(`未发现 .md 文件（格式白名单：${extensions.join(', ')}）：${sourceDir}`);
   }
   if (skippedNonMd.length > 0) {
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
@@ -273,7 +304,8 @@ export async function handleDirectImport(
   totalFileCount = files.length; // 中断标记总文件数（REQ-01）
 
   for (const rel of files) {
-    const absPath = path.resolve(sourceDir, rel);
+    // 单文件导入：rel 是 basename，absPath 即 sourceDir 本身（避免 xxx.md/xxx.md 的 ENOTDIR）
+    const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
     const stat = fs.statSync(absPath);
     // 前置检查（先于写 local KB）：大小超限 / chunk 超限 / relation 冲突
     if (stat.size > maxFileSizeBytes) {
@@ -282,7 +314,7 @@ export async function handleDirectImport(
       continue;
     }
     const fileText = fs.readFileSync(absPath, 'utf-8');
-    const groupPath = deriveGroupPath(group, rel);
+    const groupPath = resolveGroupForSource(group, rel, scope);
     const relation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
     // relation 冲突检查（用户决策 O1 + 幂等修复）：
     //   - 同 group 下 relation 名已存在 **且 sourcePath 不同**（真冲突：不同文件同名）→ 跳过 + 反馈
@@ -420,7 +452,7 @@ export async function handleDirectImport(
     const tagEntries: { text: string; tags: string; group: string }[] = [];
     // fileRecords 含清洗后原文（textForVector）用于向量化；local KB 存原始 fileText
     for (const rec of fileRecords) {
-      const origText = fs.readFileSync(path.resolve(sourceDir, rec.rel), 'utf-8');
+      const origText = fs.readFileSync(sourceIsFile ? sourceDir : path.resolve(sourceDir, rec.rel), 'utf-8');
       for (const t of customTags) {
         tagEntries.push({ text: origText, tags: t, group: rec.groupPath });
       }
@@ -448,13 +480,14 @@ export async function handleDirectImport(
   }
 
   // ── Phase 3/4：Group 树 + relation-cache（串行，KB 写入近实时无并行损失）──
+  // groups 初始集：缺省 group 时为空（由 phase3EnsureGroups 从 entries 反推），显式 group 时含该根
   const ctx: ImportContext = {
     scope,
     sourceDir,
     group,
     entries,
     memoryMap,
-    groups: new Set<string>([group]),
+    groups: new Set<string>(group ? [group] : []),
   };
   logPhaseStart(3, TOTAL, '构建 Group 树 ...');
   phase3EnsureGroups(ctx, groupIndex);
@@ -494,12 +527,11 @@ export async function handleDirectImport(
   logPhaseStart(5, TOTAL, '记录 source ...');
   const source: GroupIndexSource = {
     dir: sourceDir,
-    rootName: group,
     chunkSize,
     chunkOverlap,
   };
   setSource(scope, source);
-  logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}，group=${group}）`);
+  logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
   // scope 未配置 sourceDir 时写入绝对路径（H-20）
   try {

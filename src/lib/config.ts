@@ -60,7 +60,6 @@ export interface ImportConfig {
 export interface ScopeConfig {
   kbDir?: string;
   sourceDir?: string;
-  rootName?: string;
   wikiSync?: WikiSyncConfig;
   clean?: CleanConfig;                    // 【新增】数据清洗配置（REQ-06/07）
   import?: ImportConfig;                  // 【新增】导入配置（REQ-08）
@@ -311,7 +310,6 @@ function parseAndExpand(configFile: string): KiConfig {
         scopes[name] = {
           kbDir: s.kbDir ? expandPath(String(s.kbDir), configDir) : undefined,
           sourceDir: s.sourceDir ? expandPath(String(s.sourceDir), configDir) : undefined,
-          rootName: s.rootName ? String(s.rootName) : undefined,
           wikiSync: ws ? {
             enabled: ws.enabled !== false,  // 默认 true
             sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
@@ -364,13 +362,6 @@ export function getBackupDir(config: KiConfig): string {
  */
 export function getScopeSourceDir(config: KiConfig, scope: string): string | null {
   return config.scopes[scope]?.sourceDir ?? null;
-}
-
-/**
- * 获取指定 scope 的 rootName（如果配置了）
- */
-export function getScopeRootName(config: KiConfig, scope: string): string | null {
-  return config.scopes[scope]?.rootName ?? null;
 }
 
 /**

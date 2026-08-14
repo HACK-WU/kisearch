@@ -154,13 +154,13 @@ describe('导入异常', () => {
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('sourceDir 不存在或不是目录'));
   });
-  it('scan-kb import 不传 --group 默认落 default', async () => {
+  it('scan-kb import 不传 --group：顶层 .md 落 scope name（K2 决策）', async () => {
     const s = await mkScope('err-imp');
     const src = mkTmp('ki-err-root');
     fs.writeFileSync(path.join(src, 'a.md'), '# a');
     const r = runJson('scan-kb.ts', ['import', '--scope', s, '--source', src, '--no-vector']);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
-    assert.ok(r.groups.includes('default'), '默认应落 default group');
+    assert.ok(r.groups.includes(s), `缺省 --group 顶层 .md 应落 scope name；实际=${JSON.stringify(r.groups)}`);
   });
   it('scan-kb import 目录无 md 文件', async () => {
     const s = await mkScope('err-imp');

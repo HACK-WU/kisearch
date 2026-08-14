@@ -493,7 +493,9 @@ async function handleImportRun(
   void runImportJob(job, {
     scope,
     sourceDir,
-    group: body.group?.trim() || scope,
+    // group 缺省 → undefined → handleDirectImport 按推断落点（与 CLI 语义一致，REQ-01）；
+    // 不再用 scope 兜底（子目录会落 <scope>/<sub>，与 CLI 缺省落 <sub> 不一致）
+    group: body.group?.trim() || undefined,
     chunkSize: body.chunkSize,
     chunkOverlap: body.chunkOverlap,
     vector: body.vector,
@@ -518,7 +520,8 @@ async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> 
     const result = await handleDirectImport({
       scope: args.scope,
       sourceDir: args.sourceDir,
-      group: args.group ?? args.scope,
+      // group 缺省（undefined）→ handleDirectImport 推断落点，与 CLI 缺省语义一致
+      group: args.group,
       chunkSize: args.chunkSize,
       chunkOverlap: args.chunkOverlap,
       vector: args.vector,

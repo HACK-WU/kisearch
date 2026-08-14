@@ -28,7 +28,7 @@ ki scan-kb import \
 |------|------|------|
 | `--scope` | 否 | 项目隔离标识（default 模式缺省；strict 模式必填） |
 | `--source` | 是 | Markdown 目录绝对路径 |
-| `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径）。缺省 `default` |
+| `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回；local KB 文件原文照写） |

@@ -548,14 +548,14 @@ export async function vectorBulkStore(params: {
 export async function vectorDelete(params: {
   scope: string;
   ids: string[];
-}): Promise<{ deleted: number; errors: { id: string; reason: string }[] }> {
+}): Promise<{ deleted: number; errors: { id: string; code: string; reason: string }[] }> {
   // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
   resolveScope(loadConfig(), params.scope);
   const engine = await getEngine();
   const result = await engine.delete(params.ids);
   return {
     deleted: result.ok,
-    errors: (result.errors ?? []).map((e) => ({ id: e.id, reason: e.reason })),
+    errors: (result.errors ?? []).map((e) => ({ id: e.id, code: e.code, reason: e.reason })),
   };
 }
 

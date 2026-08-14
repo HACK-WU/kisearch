@@ -142,14 +142,15 @@ after(() => {
 
 // ─── 旅程 ───
 
-test('E2E-1 full: import --source 直导 → ok + total=2 + source.rootName', { ...SKIP, timeout: 180_000 }, () => {
+test('E2E-1 full: import --source 直导 → ok + total=2 + source.dir', { ...SKIP, timeout: 180_000 }, () => {
   const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
   assert.equal(r.json?.ok, true, `import 应成功；实际=${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.total, 2, `应导入 2 个 chunk（a.md + sub/b.md 各 1）；实际=${JSON.stringify(r.json.stats)}`);
   assert.equal(r.json.stats.errors, 0, `不应有错误；errors=${JSON.stringify(r.json.errors)}`);
-  assert.equal(r.json.source.rootName, GROUP, `source.rootName 应为 ${GROUP}；实际=${r.json.source?.rootName}`);
-  console.log(`  ✓ 直导：chunks=${r.json.stats.total} group=${r.json.source.rootName}`);
+  assert.equal(r.json.source.dir, ctx.sourceDir, `source.dir 应为 ${ctx.sourceDir}；实际=${r.json.source?.dir}`);
+  assert.ok(!r.json.source.rootName, `source.rootName 应已移除；实际=${r.json.source?.rootName}`);
+  console.log(`  ✓ 直导：chunks=${r.json.stats.total} dir=${r.json.source.dir}`);
 });
 
 test('E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）', { ...SKIP, timeout: 180_000 }, () => {

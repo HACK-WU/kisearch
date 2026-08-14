@@ -2,12 +2,12 @@
  * wiki-sync.ts — sync_relation 写回外部 Wiki 文件
  *
  * Wiki 目录发现优先级：
- *   1. group-index.json 的 source 块（source.dir + source.rootName）
+ *   1. group-index.json 的 source 块（source.dir）
  *   2. config.json 中 scope 级 wikiSync（wikiSync.sourceDir）
  *   3. 都没有 → 跳过
  *
- * 写回路径计算：
- *   source 块: {source.dir}/{group去掉rootName}/{relation}.md
+ * 写回路径计算（rootName 概念已移除，group 即完整相对路径）：
+ *   source 块: {source.dir}/{group}/{relation}.md
  *   config兜底: {wikiSync.sourceDir}/{group}/{relation}.md
  */
 
@@ -37,22 +37,22 @@ export function isUnsafeRelationName(relation: string): boolean {
 }
 
 /**
- * 解析 wiki 写回目标目录和 rootName
+ * 解析 wiki 写回目标目录
  *
- * @returns { sourceDir, rootName } 或 null（无法确定写回目录）
+ * @returns sourceDir 或 null（无法确定写回目录）
  */
-function resolveWikiTarget(scope: string): { sourceDir: string; rootName: string | null } | null {
+function resolveWikiTarget(scope: string): string | null {
   // 优先级 1：group-index.json 的 source 块
   const source = getSource(scope);
   if (source?.dir) {
-    return { sourceDir: source.dir, rootName: source.rootName || null };
+    return source.dir;
   }
 
   // 优先级 2：config.json 的 wikiSync
   const config = loadConfig();
   const wikiSync = getScopeWikiSync(config, scope);
   if (wikiSync?.enabled && wikiSync?.sourceDir) {
-    return { sourceDir: wikiSync.sourceDir, rootName: null };
+    return wikiSync.sourceDir;
   }
 
   return null;
@@ -69,8 +69,8 @@ export function writeBackToWiki(
   relation: string,
   moduleInfo: string
 ): WikiWritebackResult {
-  const target = resolveWikiTarget(scope);
-  if (!target) {
+  const sourceDir = resolveWikiTarget(scope);
+  if (!sourceDir) {
     return { synced: false, reason: '无可用 wiki 写回目录（source 块和 wikiSync 均未配置）' };
   }
 
@@ -80,19 +80,11 @@ export function writeBackToWiki(
     return { synced: false, reason: `relation 含非法路径字符：${relation}` };
   }
 
-  // 计算子路径：去掉 rootName 前缀
-  let subPath = group;
-  if (target.rootName && group.startsWith(target.rootName + '/')) {
-    subPath = group.slice(target.rootName.length + 1);
-  } else if (target.rootName && group === target.rootName) {
-    subPath = '';
-  }
-
-  // 构建文件路径
+  // 构建文件路径（group 即完整相对路径，rootName 概念已移除，不做前缀剥离）
   const fileName = `${relation}.md`;
-  const filePath = subPath
-    ? path.join(target.sourceDir, subPath, fileName)
-    : path.join(target.sourceDir, fileName);
+  const filePath = group
+    ? path.join(sourceDir, group, fileName)
+    : path.join(sourceDir, fileName);
 
   try {
     // 确保目录存在

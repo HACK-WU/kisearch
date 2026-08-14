@@ -53,7 +53,7 @@ flowchart LR
 
 | 文件 | 角色 | 读写方 | 生命周期 |
 |------|------|--------|---------|
-| `group-index.json` | Group 树结构索引 + `source` 块（`dir`/`rootName`/`commit`） | 所有脚本读写 | 永久，随 Group 增删改 |
+| `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
 | `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
@@ -61,24 +61,23 @@ flowchart LR
 
 ### `group-index.json` 的 `source` 块
 
-S-01 新增字段，记录外部知识库来源信息，用于增量 diff：
+记录外部知识库来源信息，用于 Wiki 写回定位源目录：
 
 ```json
 {
   "version": 1,
   "scope": "qoder-wiki",
-  "groups": { "QoderWiki": { ... } },
+  "groups": { "wiki": { ... } },
   "source": {
-    "dir": "/abs/path/to/source",
-    "rootName": "QoderWiki"
+    "dir": "/abs/path/to/source"
   },
   "updatedAt": "2026-05-28T05:17:22.360Z"
 }
 ```
 
-- `dir`：外部知识库目录绝对路径
-- `rootName`：导入时的目标 Group 落点（即 `--group` 值，作为 Group 树的第一层前缀；可多级路径）
-- ~~`commit`~~：已废弃（incremental 移除后不再依赖 git）
+- `dir`：外部知识库目录绝对路径（`scan-kb import` 自动记录，Wiki 写回据此定位源文件）
+- `chunkSize` / `chunkOverlap`：切分参数持久化（缺失时回退默认值）
+- ~~`rootName` / `commit`~~：已彻底移除（rootName 概念废弃、incremental 废弃后不再保留，无向后兼容读取）
 
 ### `relations-cache.json` 的 `memoryIds` / `sourcePath`
 

@@ -119,7 +119,6 @@ scopes:
   # my-project:
   #   kbDir: /data/special-kb          # 实际数据在 /data/special-kb/kb/my-project
   #   sourceDir: ~/projects/my-wiki    # 源文件目录（wiki-sync / diff / import 依赖）
-  #   rootName: wiki                   # Group 树根名
   #   wikiSync:                        # 可选: Wiki 自动同步
   #     enabled: true
   #     sourceDir: ~/projects/my-wiki

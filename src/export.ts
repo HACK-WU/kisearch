@@ -7,7 +7,7 @@
  * 不依赖 mem CLI。
  *
  * 用法：
- *   ki export <scope> --output <dir> [--root-name <name>]
+ *   ki export <scope> --output <dir> [--group <path>] [--yes]
  */
 
 import fs from 'fs';
@@ -28,7 +28,8 @@ import { checkWritable } from './lib/preflight.js';
 interface ExportOptions {
   scope: string;
   output: string;
-  rootName?: string;
+  /** 指定导出的 group 路径（可选）。缺省时全量导出，顶层目录名 = scope name */
+  group?: string;
 }
 
 interface ExportResult {
@@ -45,7 +46,8 @@ interface ExportResult {
 }
 
 interface RelationEntry {
-  relation: string;
+  /** relation 名称（relations-cache.json 的 hot_relations[].text 字段） */
+  text: string;
   memoryId?: string;
   sourcePath?: string;
 }
@@ -90,6 +92,43 @@ function collectGroupPaths(
   }
 
   return paths;
+}
+
+/**
+ * 判断 group 路径是否存在于 Group 树中
+ */
+function groupExists(
+  groups: Record<string, Record<string, unknown>>,
+  groupPath: string
+): boolean {
+  const segs = groupPath.split('/').filter(Boolean);
+  if (segs.length === 0) return false;
+  let current: unknown = groups[segs[0]];
+  if (current === undefined) return false;
+  for (let i = 1; i < segs.length; i++) {
+    if (typeof current !== 'object' || current === null) return false;
+    current = (current as Record<string, unknown>)[segs[i]];
+    if (current === undefined) return false;
+  }
+  return true;
+}
+
+/**
+ * 从 Group 树中提取指定 group 路径下的子树（作为新的顶层树）
+ */
+function extractSubtree(
+  groups: Record<string, Record<string, unknown>>,
+  groupPath: string
+): Record<string, Record<string, unknown>> {
+  const segs = groupPath.split('/').filter(Boolean);
+  let current: unknown = groups;
+  for (const seg of segs) {
+    if (typeof current !== 'object' || current === null) return {};
+    current = (current as Record<string, unknown>)[seg];
+    if (current === undefined) return {};
+  }
+  if (typeof current !== 'object' || current === null) return {};
+  return current as Record<string, Record<string, unknown>>;
 }
 
 // ─── 读取 relations-cache.json ───
@@ -157,7 +196,7 @@ function readLocalKb(scope: string, groupPath: string): LocalKbIndex | null {
 // ─── 主逻辑 ───
 
 function handleExport(options: ExportOptions): ExportResult {
-  const { scope, output: outputDir, rootName } = options;
+  const { scope, output: outputDir, group } = options;
 
   validateScope(scope);
 
@@ -173,16 +212,45 @@ function handleExport(options: ExportOptions): ExportResult {
   const relationsCache = readRelationsCache(scope);
 
   // 确定要导出的 Group 路径
+  // 显式 --group：只导出该 group 路径下的子树；缺省：导出全量
   let groupsToExport = groupIndex.groups;
-  if (rootName) {
-    if (!groupsToExport[rootName]) {
-      fail(`指定的 rootName 不存在：${rootName}`);
+  if (group) {
+    if (!groupExists(groupIndex.groups, group)) {
+      fail(`指定的 group 不存在：${group}`);
     }
-    groupsToExport = { [rootName]: groupsToExport[rootName] };
+    groupsToExport = extractSubtree(groupIndex.groups, group);
   }
 
   // 收集所有 Group 路径
-  const groupPaths = collectGroupPaths(groupsToExport);
+  // 显式 --group：collectGroupPaths 必须传 prefix 保留完整路径——relations-cache 的
+  // groups 键与 local KB 路径均为完整 groupPath（如 'wiki/docs'），剥前缀会全部 miss；
+  // 且显式包含 group 自身（REQ-09「导出 X/Y 及其全部子目录」含根本身的 relations）
+  let groupPaths: string[];
+  if (group) {
+    groupPaths = [group, ...collectGroupPaths(groupsToExport, group)];
+  } else {
+    groupPaths = collectGroupPaths(groupsToExport);
+  }
+
+  // 输出路径规则：
+  //   - 显式 --group A/B：父目录名 = group 最后一段（B），丢 A/ 前缀
+  //   - 缺省：顶层目录名 = scope name
+  const exportRoot = group
+    ? (group.split('/').filter(Boolean).pop() || group)
+    : scope;
+  // 冲突说明：单次导出内 groupPaths 来自 Group 树的唯一路径，映射后天然无重复；
+  // 跨次导出到同一输出目录由 CLI-04（输出目录非空需 --yes）拦截覆盖。
+  const relPathFor = (groupPath: string): string => {
+    if (!group) {
+      // 缺省全量：顶层名 = scope name，后面接完整 groupPath
+      return path.join(scope, groupPath);
+    }
+    // 显式 --group：父目录名 = group 最后一段；groupPath 去掉该 group 前缀后接其后
+    const segs = groupPath.split('/').filter(Boolean);
+    const rootSegs = group.split('/').filter(Boolean);
+    const rest = segs.slice(rootSegs.length);
+    return path.join(exportRoot, ...rest);
+  };
 
   const stats = { total: 0, exported: 0, empty: 0 };
   const skipped: Array<{ groupPath: string; relation: string; reason: string }> = [];
@@ -205,7 +273,7 @@ function handleExport(options: ExportOptions): ExportResult {
     for (const rel of relations) {
       stats.total++;
 
-      const relationName = rel.text || rel.relation;
+      const relationName = rel.text;
       const rawContent = localKb?.[relationName];
       let content: string | null = null;
       if (typeof rawContent === 'string') {
@@ -218,10 +286,10 @@ function handleExport(options: ExportOptions): ExportResult {
         stats.empty++;
       }
 
-      // 构建输出路径
+      // 构建输出路径（父目录命名规则见 relPathFor）
       const outputFilePath = path.join(
         absOutputDir,
-        groupPath,
+        relPathFor(groupPath),
         `${relationName}.md`
       );
 
@@ -261,11 +329,11 @@ const args = process.argv.slice(2);
 const EXPORT_HELP = `ki export - 导出 KB scope 为 Wiki Markdown
 
 用法：
-  ki export <scope> --output <dir> [--root-name <name>] [--yes]
+  ki export <scope> --output <dir> [--group <path>] [--yes]
 
 选项：
   --output <dir>      导出输出目录（必填）
-  --root-name <name>  指定 Group 树根名
+  --group <path>      指定导出的 Group 路径（父目录名取 group 最后一段；缺省全量导出，顶层名 = scope name）
   --yes               确认覆盖已存在的输出目录（缺省则拒绝覆盖）
   -h, --help          显示帮助`;
 
@@ -275,12 +343,12 @@ if (args.includes('-h') || args.includes('--help')) {
   process.exit(0);
 }
 
-// 未知参数检测（NEG-01）：--output / --root-name 为带值参数，--yes 为布尔；未知参数回退到帮助
-detectUnknownFlags(args, ['--output', '--root-name'], ['--output', '--root-name', '--yes'], EXPORT_HELP);
+// 未知参数检测（NEG-01）：knownFlags 含全部已知 flag（--yes 为布尔），valueFlags 仅为带值参数
+detectUnknownFlags(args, ['--output', '--group', '--yes'], ['--output', '--group'], EXPORT_HELP);
 
 const scope = args[0];
 if (!scope || scope.startsWith('--')) {
-  fail('用法：ki export <scope> --output <dir> [--root-name <name>]');
+  fail('用法：ki export <scope> --output <dir> [--group <path>]');
 }
 
 // 提取 --output
@@ -294,11 +362,11 @@ if (!outputDir) {
   fail('缺少 --output 参数');
 }
 
-// 提取 --root-name
-let rootName: string | undefined;
-const rnIdx = args.indexOf('--root-name');
-if (rnIdx !== -1 && rnIdx + 1 < args.length) {
-  rootName = args[rnIdx + 1];
+// 提取 --group
+let group: string | undefined;
+const gIdx = args.indexOf('--group');
+if (gIdx !== -1 && gIdx + 1 < args.length) {
+  group = args[gIdx + 1];
 }
 
 // 提取 --yes
@@ -321,7 +389,7 @@ if (fs.existsSync(absOutputDir) && !yes) {
 // ─── 执行 ───
 
 try {
-  const result = handleExport({ scope, output: outputDir, rootName });
+  const result = handleExport({ scope, output: outputDir, group });
   output(result as unknown as Record<string, unknown>);
 } catch (err) {
   // 统一错误契约（NEG-04）：携带 code 的错误（如 PreflightError）一并回显

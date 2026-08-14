@@ -105,7 +105,6 @@ scope → KB 目录映射。每个 scope 可独立配置数据来源与导入/�
 |------|------|--------|------|
 | `kbDir` | `string` | 无 | KB **基础目录**。程序自动拼接 `kb/{scope}` 子目录（如 `kbDir=/data/kb`、scope=monitor → 实际数据目录 `/data/kb/kb/monitor`），**不要**在 `kbDir` 里带上 scope 名。未配置时回退到 `dataDir/{scope}` |
 | `sourceDir` | `string` | 无 | 外部源目录（供 wiki 同步 / 增量导入） |
-| `rootName` | `string` | 无 | 导入根路径名 |
 | `wikiSync` | `object` | — | wiki 同步配置 |
 | `clean` | `object` | — | 数据清洗配置 |
 | `import` | `object` | — | 导入配置 |
@@ -115,7 +114,6 @@ scopes:
   monitor:
     kbDir: /data/kb
     sourceDir: /repo/bk-monitor-wiki/wiki
-    rootName: wiki
     wikiSync:
       enabled: true
       sourceDir: /repo/bk-monitor-wiki/wiki
@@ -201,7 +199,6 @@ scopes:
     # kbDir 为基础目录，程序自动拼接 kb/{scope}，实际数据目录 = /data/kb/kb/monitor
     kbDir: /data/kb
     sourceDir: /repo/bk-monitor-wiki/wiki
-    rootName: wiki
     wikiSync:
       enabled: true
       sourceDir: /repo/bk-monitor-wiki/wiki
@@ -222,7 +219,6 @@ scopes:
       maxFileSize: 1048576
   docs:
     kbDir: /data/kb
-    rootName: docs
 
 mcp:
   host: 127.0.0.1

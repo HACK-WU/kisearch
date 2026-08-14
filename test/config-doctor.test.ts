@@ -2,7 +2,7 @@
  * config + doctor 单元测试（REQ-11 / REQ-15 / REQ-16）
  *
  * 覆盖三个面：
- *  A. src/lib/config.ts —— YAML 解析、scope 数据目录语义、sourceDir/rootName/wikiSync
+ *  A. src/lib/config.ts —— YAML 解析、scope 数据目录语义、sourceDir/wikiSync
  *     可选字段解析与路径展开、resolveScope 护栏、null scope 丢弃、
  *     embedding 默认合并、scopeMode 归一化
  *  B. src/config.ts（CLI `ki config init`，子进程黑盒）—— 生成 YAML 模板、
@@ -25,7 +25,6 @@ import {
   resetConfigCache,
   getScopeDataDir,
   getScopeSourceDir,
-  getScopeRootName,
   getScopeWikiSync,
   resolveScope,
   getScopeMode,
@@ -86,7 +85,7 @@ describe('A. lib/config —— scope 数据目录语义', () => {
   });
 });
 
-describe('A. lib/config —— scope 可选字段（sourceDir / rootName / wikiSync）', () => {
+describe('A. lib/config —— scope 可选字段（sourceDir / wikiSync）', () => {
   it('未配置 sourceDir 的 default scope → null（模板 default: {} 的安全默认）', () => {
     const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  default: {}');
     assert.strictEqual(getScopeSourceDir(cfg, 'default'), null);
@@ -128,17 +127,6 @@ describe('A. lib/config —— scope 可选字段（sourceDir / rootName / wikiS
     resetConfigCache();
     const cfg = loadConfig(file);
     assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.resolve(dir, 'rel/wiki'));
-  });
-
-  it('rootName：未配置 → null；配置 → 原样返回', () => {
-    const empty = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  proj: {}');
-    assert.strictEqual(getScopeRootName(empty, 'proj'), null);
-
-    const withName = writeAndLoad(
-      'config.yaml',
-      ['dataDir: /abs/data', 'scopes:', '  proj:', '    rootName: wiki'].join('\n')
-    );
-    assert.strictEqual(getScopeRootName(withName, 'proj'), 'wiki');
   });
 
   it('wikiSync：未配置 → null', () => {

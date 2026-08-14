@@ -160,8 +160,8 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 {
   "ok": true,
   "scopes": [
-    { "scope": "my-project", "rootNames": ["我的项目"] },
-    { "scope": "qoder-wiki", "rootNames": ["QoderWiki"] }
+    { "scope": "my-project", "topGroups": ["我的项目"], "registered": true, "initialized": true },
+    { "scope": "qoder-wiki", "topGroups": ["QoderWiki"], "registered": true, "initialized": true }
   ],
   "total": 2
 }

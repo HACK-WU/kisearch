@@ -11,7 +11,7 @@ import path from 'path';
 export interface ScanResultEntry {
   /** 相对 sourceDir 的文件路径，posix 风格；直导 chunk 为 `文件#N`（deriveChunkSourcePath） */
   path: string;
-  /** 在 Group 树中的完整路径，含 rootName 前缀，例如 "wiki/部署运维" */
+  /** 在 Group 树中的完整路径，例如 "wiki/部署运维" */
   groupPath: string;
   /** 原文内容（直导：chunk 原文 / 文件全文） */
   text: string;
@@ -25,8 +25,8 @@ function toPosix(input: string): string {
   return input.split(path.sep).join('/');
 }
 
-/** 从 entry 相对路径推导 groupPath（含 rootName 前缀） */
-export function deriveGroupPath(rootName: string, entryPath: string): string {
+/** 从 entry 相对路径推导 groupPath（group 作为根前缀） */
+export function deriveGroupPath(group: string, entryPath: string): string {
   const dir = path.posix.dirname(toPosix(entryPath));
-  return dir === '.' ? rootName : `${rootName}/${dir}`;
+  return dir === '.' ? group : `${group}/${dir}`;
 }

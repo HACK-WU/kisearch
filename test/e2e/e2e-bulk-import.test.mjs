@@ -95,8 +95,8 @@ describe('E2E: 全量直导', () => {
     assert.ok(result.groups.includes('TestWiki/guides'));
     assert.ok(result.groups.includes('TestWiki/api'));
 
-    // source 块写入（含切分参数持久化 H-18）
-    assert.equal(result.source.rootName, 'TestWiki');
+    // source 块写入（含切分参数持久化 H-18；rootName 已移除）
+    assert.ok(!result.source.rootName, 'source.rootName 应已移除');
     assert.equal(result.source.chunkSize, 1000);
     assert.equal(result.source.chunkOverlap, 150);
 

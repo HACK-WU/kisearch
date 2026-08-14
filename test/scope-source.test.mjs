@@ -27,22 +27,23 @@ test('S-01: 新 scope 初始化后 source 为 null', () => {
   cleanup();
 });
 
-test('S-01: setSource 写入后 getSource 应能读出', () => {
+test('S-01: setSource 写入后 getSource 应能读出（rootName 已移除）', () => {
   cleanup();
   ensureScopeDir(TEST_SCOPE);
-  setSource(TEST_SCOPE, { dir: '/tmp/abc', rootName: 'wiki', commit: 'deadbeef' });
+  setSource(TEST_SCOPE, { dir: '/tmp/abc' });
   const src = getSource(TEST_SCOPE);
-  assert.deepEqual(src, { dir: '/tmp/abc', rootName: 'wiki', commit: 'deadbeef' });
+  assert.equal(src?.dir, '/tmp/abc');
+  assert.equal(src?.rootName, undefined, 'rootName 已移除，读取应为 undefined');
   cleanup();
 });
 
-test('S-01: setSource 覆盖更新 commit', () => {
+test('S-01: setSource 覆盖更新 chunkSize', () => {
   cleanup();
   ensureScopeDir(TEST_SCOPE);
-  setSource(TEST_SCOPE, { dir: '/tmp/abc', rootName: 'wiki', commit: 'old123' });
-  setSource(TEST_SCOPE, { dir: '/tmp/abc', rootName: 'wiki', commit: 'new456' });
+  setSource(TEST_SCOPE, { dir: '/tmp/abc', chunkSize: 1000 });
+  setSource(TEST_SCOPE, { dir: '/tmp/abc', chunkSize: 2000 });
   const src = getSource(TEST_SCOPE);
-  assert.equal(src.commit, 'new456');
+  assert.equal(src?.chunkSize, 2000);
   cleanup();
 });
 
@@ -63,7 +64,7 @@ test('S-01: 存量 group-index.json（无 source 字段）兼容读取', () => {
 test('S-01: setSource 字段不全应抛错', () => {
   cleanup();
   ensureScopeDir(TEST_SCOPE);
-  assert.throws(() => setSource(TEST_SCOPE, { dir: '', rootName: 'wiki', commit: 'a' }));
+  assert.throws(() => setSource(TEST_SCOPE, { dir: '' }));
   cleanup();
 });
 
@@ -76,10 +77,10 @@ test('S-01: 旧格式 roots 应在 setSource 时迁移为 groups', () => {
   data.roots = { wiki: { 部署运维: {} } };
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 
-  setSource(TEST_SCOPE, { dir: '/tmp/abc', rootName: 'wiki', commit: 'c1' });
+  setSource(TEST_SCOPE, { dir: '/tmp/abc', chunkSize: 1000 });
   const after = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   // setSource 会触发 migrateGroupIndex，roots 迁移为 groups
   assert.deepEqual(after.groups, { wiki: { 部署运维: {} } }, 'roots 应迁移为 groups');
-  assert.equal(after.source.commit, 'c1');
+  assert.equal(after.source.chunkSize, 1000);
   cleanup();
 });

@@ -37,7 +37,7 @@ program
   .description('导入：--source 直导外部 Wiki（无 AI，自动切分；幂等追加到目标 group）')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')
-  .option('--group <group>', '目标 Group 落点（不存在时自动新建，含父路径）。默认 default')
+  .option('--group <group>', '目标 Group 落点（不存在时自动新建，含父路径）。缺省时目录导入按顶层子目录名各建根节点，单文档导入用 scope name')
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150）')
   .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB），不写向量（不产生 memoryId，无法被 ki search 召回）')
@@ -47,7 +47,7 @@ program
     try {
       const scope = resolveScope(loadConfig(), opts.scope);
       const sourceDir = path.resolve(String(opts.source));
-      const group = opts.group ? String(opts.group).trim() : 'default';
+      const group = opts.group ? String(opts.group).trim() : '';
       const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
       const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
       const vector = opts.vector !== false;
