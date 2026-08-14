@@ -28,7 +28,7 @@ export interface Relation {
   /** S-04+ 新增：原始文件相对路径（meta.sourceDir 的相对 posix 路径），用于 diff 关联 memoryId */
   sourcePath?: string;
   /** 方案 D（REQ-20260807-001）新增：文件级 relation 的全部 chunk memoryId（多值）；
-   *  导入链路（full/incremental）使用多值；sync-relation 等旧链路仍用单值 memoryId */
+   *  导入链路使用多值；sync-relation 等旧链路仍用单值 memoryId */
   memoryIds?: string[];
   /** 文档级自定义标签（如 ['api', 'auth']）。持久化到 KB 层，供 rebuild-vector/restore 恢复 tag 向量。
    *  缺省 undefined 或 [] 表示无自定义 tag（仅有默认的 ki-search）。 */

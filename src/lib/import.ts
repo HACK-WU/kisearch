@@ -5,9 +5,9 @@
  *   Phase 2: bulkVectorize       → 调 vectorBulkStore 批量向量化
  *   Phase 3: ensureGroups        → 按 groupPath 建 Group 树
  *   Phase 4: writeRelations      → 写 relations-cache + local KB（含 memoryId/sourcePath）
- *   Phase 5: recordSource        → 写 group-index.source 块（含 git HEAD commit + 切分参数）
+ *   Phase 5: recordSource        → 写 group-index.source 块（含切分参数）
  *
- * 仅处理 full 模式；增量直连由 S-06（incremental.ts）基于 git diff 驱动。
+ * 幂等追加语义承载增量更新：同 sourcePath 覆盖、同名不同 sourcePath 跳过、新文件导入。
  */
 
 import fs from 'fs';

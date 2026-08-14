@@ -3,7 +3,7 @@
  *
  * 设计（REQ-20260807-001 v9）：
  *   - 中断标记：导入被 SIGINT/SIGTERM 中断时写入（含进度/时间），向量命令前置检测引导重建
- *   - 标记生命周期：rebuild-vector/restore 成功后自动清除；full/incremental 成功导入后清除；手动清除
+ *   - 标记生命周期：rebuild-vector/restore 成功后自动清除；import 成功导入后清除；手动清除
  *   - 导入锁：<scope>/.import.lock（pid + 开始时间），正常完成删除；SIGKILL 残留 → pid 不存在自动清理（N4）
  *   - 触发范围（N1）：getEngine 前置检测（所有打开向量库的命令）；纯 KB 命令不触发
  */

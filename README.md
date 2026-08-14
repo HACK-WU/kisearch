@@ -240,7 +240,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 
 支持 **stdio** 与 **HTTP** 两种接入方式：
 
-#### 方式一：stdio（单客户端单进程）
+#### 方式一：stdio（默认，多实例错开共享）
 
 ```json
 {

@@ -23,6 +23,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
+import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { SERVICE_NAME } from './constants.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
@@ -609,7 +610,7 @@ export function describeListenError(
   }
 }
 
-/** 输出 HTTP 单例运行状态（ki mcp --status）：读取 lock + 探活，便于确认是否只有一个持锁进程（NEG-01/02） */
+/** 输出 ki mcp 运行状态（ki mcp --status）：读取 HTTP lock + stdio lock + 探活，便于确认实例全貌（NEG-01/02） */
 export async function printHttpStatus(host: string, port: number): Promise<void> {
   let lock: unknown = null;
   try {
@@ -620,6 +621,8 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
   const info = await fetchHealthz(host, port);
   const running = info?.ok === true && info?.name === SERVICE_NAME;
   const tokenTotal = tokenCount();
+  // stdio 多实例：遍历 lock 目录，报告所有存活实例（排除当前进程）
+  const stdioInstances = listLiveStdioLocks().map((l) => ({ pid: l.pid, startedAt: l.startedAt }));
   console.log(
     JSON.stringify(
       {
@@ -628,6 +631,8 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
         target: { host: probeHost(host), port },
         healthz: running ? info : null,
         lock: lock ?? null,
+        // stdio 多实例：存活实例列表（HTTP 单例与 stdio 互斥，正常二者不会同时存在）
+        stdioInstances,
         // 多 Token 存储：仅报告数量，绝不回显明文
         managedTokens: { count: tokenTotal },
         hint: running
@@ -635,7 +640,9 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
             ? `实例健康，但启动以来已有 ${info!.authFailures} 次鉴权失败：很可能有客户端 Token 配置错误，` +
               `请核对各 IDE 的 Authorization: Bearer 与 ki mcp token list 输出完全一致（服务端 stderr 日志有失败原因）。`
             : '已有健康的 kisearch HTTP 实例在运行；请让所有 IDE 使用同一 URL 连接以共享单例，避免锁冲突。'
-          : '未探测到运行中的 kisearch HTTP 实例（可能未启动，或 --host/--port 与实例不一致）。',
+          : stdioInstances.length > 0
+            ? `未探测到 HTTP 实例，但有 ${stdioInstances.length} 个 stdio 实例在运行（pid ${stdioInstances.map((s) => s.pid).join(', ')}）；用 ki mcp stop 可全部关闭。`
+            : '未探测到运行中的 kisearch 实例（可能未启动，或 --host/--port 与实例不一致）。',
       },
       null,
       2,

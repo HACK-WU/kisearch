@@ -21,6 +21,7 @@ import {
   CollectionLockedException,
   type Hit,
   type Filter,
+  type ProbeResult,
   type ZvecEngineConfig,
   type ZvecEngineOpenConfig,
 } from '../../dist/zvec-engine/index.js';
@@ -81,6 +82,24 @@ function lockedHint(dbPath: string): string {
   );
 }
 
+/**
+ * probe 带撞锁重试：检测到 locked 时等待对方释放后重试（错开共享向量库）。
+ * 多 stdio MCP 实例 / CLI 短命令共享同一向量库，空闲释放锁会让持锁方空闲后自动
+ * 释放，此处重试即可「撞了多等几秒」而非立即失败。最多 LOCK_RETRY_MAX 次。
+ */
+async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
+  for (let attempt = 0; ; attempt++) {
+    const probe = await ZvecEngine.probe(dbPath);
+    if (!probe.locked || attempt >= LOCK_RETRY_MAX) {
+      return probe;
+    }
+    process.stderr.write(
+      `[kisearch] 向量库被其他进程占用，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
+    );
+    await sleep(LOCK_RETRY_INTERVAL_MS);
+  }
+}
+
 export interface VectorDocInfo {
   docId: string;
   scope?: string;
@@ -103,6 +122,53 @@ const SCOPE_FIELD = 'scope';
 const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
+
+// ─── 撞锁重试 + 空闲释放锁（错开共享向量库） ───
+//
+// 背景：向量库为单进程独占锁。多个常驻 MCP 实例（stdio 多实例）与 CLI 短命令
+// 需在「错开使用」的前提下共享同一向量库：
+//   - 撞锁重试：probe/open 检测到 locked 时，等对方空闲释放后重试（而非立即失败）；
+//   - 空闲释放锁：常驻 MCP 层调用 enableIdleClose，空闲超时后自动 closeEngine 释放锁，
+//     让其他实例 / CLI 能抢到。CLI 短命令不启用（per-call 结束即 closeEngine）。
+
+/** 撞锁后重试等待间隔（ms） */
+const LOCK_RETRY_INTERVAL_MS = 2_000;
+/** 撞锁重试上限次数（最多额外等待 LOCK_RETRY_INTERVAL_MS × LOCK_RETRY_MAX 后仍锁则报错） */
+const LOCK_RETRY_MAX = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 空闲释放锁状态：仅常驻 MCP 层经 enableIdleClose 启用；CLI 不启用（_idleCloseMs 恒 0）。
+let _idleCloseMs = 0;
+let _lastUseAt = 0;
+let _idleTimer: NodeJS.Timeout | null = null;
+
+/** 记录一次引擎使用（空闲计时起点）；未启用空闲释放时无副作用 */
+function touchEngineUse(): void {
+  if (_idleCloseMs > 0) _lastUseAt = Date.now();
+}
+
+/**
+ * 启用向量库空闲释放锁（仅供常驻 MCP 层调用，CLI 勿用）。
+ * 空闲超过 idleMs 后自动 closeEngine 释放 LOCK，让其他 MCP 实例 / CLI 能错开抢锁；
+ * 下次向量调用时 getEngine 惰性 reopen（实测约 0.7s）。
+ * 安全：close 底层会 drain 在途操作，故不会中断正在执行的写入/检索。
+ */
+export function enableIdleClose(idleMs: number): void {
+  _idleCloseMs = idleMs;
+  _lastUseAt = Date.now();
+  if (_idleTimer) clearInterval(_idleTimer);
+  _idleTimer = setInterval(() => {
+    if (_idleCloseMs <= 0) return;
+    if (_enginePromise && Date.now() - _lastUseAt >= _idleCloseMs) {
+      void closeEngine(); // 空闲超时，释放锁（不阻塞定时器）
+    }
+  }, Math.max(500, Math.floor(idleMs / 2)));
+  // 不阻止进程退出（正常退出由各自 closeEngine / shutdown 负责）
+  _idleTimer.unref?.();
+}
 
 // ─── Engine 单例（进程内缓存） ───
 
@@ -236,10 +302,12 @@ function buildOpenConfig(): ZvecEngineOpenConfig {
  * 保证 _enginePromise 必定 settle（失败即重置缓存，后续调用可重试自愈）。
  */
 export function getEngine(): Promise<ZvecEngine> {
+  // 每次引擎访问刷新空闲计时（空闲释放锁依据）；CLI 未启用时无副作用
+  touchEngineUse();
   if (!_enginePromise) {
     const createCfg = buildCreateConfig();
     _enginePromise = serializeEngineOp(async () => {
-      const exists = await ZvecEngine.probe(createCfg.dbPath);
+      const exists = await probeWithRetry(createCfg.dbPath);
       if (exists.locked) {
         throw new CollectionLockedException(lockedHint(createCfg.dbPath));
       }
@@ -266,12 +334,20 @@ export function getEngine(): Promise<ZvecEngine> {
  * CLI per-call 命令结束时必须调用，否则 worker 线程持引用导致进程无法退出。
  */
 export async function closeEngine(): Promise<void> {
-  if (_enginePromise) {
-    try {
-      const engine = await _enginePromise;
-      await engine.close();
-    } catch { /* ignore */ }
-    _enginePromise = null;
+  // 先置空缓存再 close：close 期间新 getEngine 会走 reopen + 撞锁重试，
+  // 而非拿到正在 closing 的旧 engine（避免 WorkerCrashedError 竞态）。
+  const promise = _enginePromise;
+  _enginePromise = null;
+  if (promise) {
+    // close 也经 serializeEngineOp 串行化：worker 的 closeSync（释放 LOCK）+ terminate
+    // 同样是原生操作，若与 reopen 的 probe/open 并发会触发 zvec 同进程原生竞态
+    // （62% 概率永久阻塞，见 _engineOpTail 注释）。串行化后 close 与后续 open 互斥。
+    await serializeEngineOp(async () => {
+      try {
+        const engine = await promise;
+        await engine.close();
+      } catch { /* ignore */ }
+    });
   }
 }
 
@@ -314,7 +390,7 @@ export async function ensureVectorAvailable(scope?: string): Promise<VectorAvail
   const config = loadConfig();
   const dbPath = getVectorDir(config);
   try {
-    const probe = await serializeEngineOp(() => ZvecEngine.probe(dbPath));
+    const probe = await serializeEngineOp(() => probeWithRetry(dbPath));
     if (probe.locked) {
       return {
         available: false,

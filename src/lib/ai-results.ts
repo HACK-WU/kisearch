@@ -2,8 +2,8 @@
  * ai-results.ts —— 导入条目的最小数据结构
  *
  * REQ-04（批次 3）：ai-results.json 输入契约已删除。本文件仅保留：
- *   - ScanResultEntry：直导 / 增量直连使用的条目类型（瘦身为 {path, groupPath, text, memoryId, chunkRelation}）
- *   - deriveGroupPath：从文件相对路径推导 groupPath（含 rootName 前缀）
+ *   - ScanResultEntry：导入使用的条目类型（瘦身为 {path, groupPath, text, memoryId, chunkRelation}）
+ *   - deriveGroupPath：从文件相对路径推导 groupPath（含 group 前缀）
  */
 
 import path from 'path';

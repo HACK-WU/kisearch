@@ -14,7 +14,7 @@
 import * as fs from 'node:fs';
 
 import { getHttpLockPath, fetchHealthz } from './mcp-http.js';
-import { getStdioLockPath, pidAlive } from './mcp-stdio-lock.js';
+import { getStdioLockDir, listStdioLockFiles, stdioLockPidFromPath, pidAlive } from './mcp-stdio-lock.js';
 import { SERVICE_NAME } from './constants.js';
 
 /** 待关闭的目标进程 */
@@ -41,7 +41,8 @@ export interface StopReport {
 export interface StopOptions {
   host: string;
   port: number;
-  stdioLockPath?: string;
+  /** stdio lock 目录（每实例一个 mcp-stdio-<pid>.lock 文件），默认 ~/.ki */
+  stdioLockDir?: string;
   httpLockPath?: string;
   /** SIGTERM 后等待优雅退出的时长（毫秒），超时 SIGKILL */
   gracefulTimeoutMs?: number;
@@ -91,7 +92,7 @@ async function waitPidExit(pid: number, timeoutMs: number): Promise<boolean> {
  * 定位来源：stdio lock、http lock、healthz 探活（lock 被手动删过时的兜底）。
  */
 export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
-  const stdioLockPath = opts.stdioLockPath ?? getStdioLockPath();
+  const stdioLockDir = opts.stdioLockDir ?? getStdioLockDir();
   const httpLockPath = opts.httpLockPath ?? getHttpLockPath();
   const gracefulTimeoutMs = opts.gracefulTimeoutMs ?? 3000;
   const verifyPid = opts.verifyPid ?? defaultVerifyPid;
@@ -104,7 +105,10 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
     seen.add(pid);
     if (pidAlive(pid)) targets.push({ pid, kind });
   };
-  addTarget(readLockPid(stdioLockPath), 'stdio');
+  // stdio：遍历目录下所有实例 lock 文件（多实例逐一登记，逐个定位）
+  for (const lockFile of listStdioLockFiles(stdioLockDir)) {
+    addTarget(stdioLockPidFromPath(lockFile), 'stdio');
+  }
   addTarget(readLockPid(httpLockPath), 'http');
   // healthz 兜底：lock 丢失但服务仍在跑（返回体自带 kisearch 身份，无需再校验 cmdline）
   const live = await fetchHealthz(opts.host, opts.port);
@@ -150,9 +154,13 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
 
   // ─── 清理残留 lock（正常退出路径已自清；此处兜底 SIGKILL/陈旧/复用场景） ───
   const cleanedLocks: string[] = [];
-  for (const lockPath of [stdioLockPath, httpLockPath]) {
+  // stdio：遍历所有实例 lock 文件；http：单文件
+  const lockPaths = [...listStdioLockFiles(stdioLockDir), httpLockPath];
+  for (const lockPath of lockPaths) {
     if (!fs.existsSync(lockPath)) continue;
-    const pid = readLockPid(lockPath);
+    // stdio 从文件名取 pid（内容可能损坏），http 读内容
+    const pid =
+      stdioLockPidFromPath(lockPath) ?? readLockPid(lockPath);
     // pid 已死（含刚被杀掉的）或内容损坏 → 删；仍存活（如校验失败被跳过且真是 ki 进程）→ 保留
     if (pid === null || !pidAlive(pid) || (seen.has(pid) && verifyPid(pid) === false)) {
       try {

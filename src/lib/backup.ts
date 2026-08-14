@@ -124,8 +124,7 @@ export function backupScopeSnapshot(
  */
 export function autoBackup(
   config: KiConfig,
-  scope: string,
-  _mode?: 'full' | 'incremental'
+  scope: string
 ): BackupResult {
   const backupDir = getBackupDir(config);
   const scopeDataDir = getKbDir(scope);

@@ -15,7 +15,7 @@ import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
 import { registerScopeListTool } from './lib/mcp-tools/scope-list.js';
 import { registerTagListTool } from './lib/mcp-tools/tag-list.js';
-import { closeEngine } from './lib/vector-client.js';
+import { closeEngine, enableIdleClose } from './lib/vector-client.js';
 import { loadConfig } from './lib/config.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 import { readKiVersion, startVersionGuard } from './lib/version-guard.js';
@@ -31,7 +31,10 @@ import {
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
-import { readLiveStdioLock, acquireStdioLock, releaseStdioLock } from './lib/mcp-stdio-lock.js';
+import { listLiveStdioLocks, acquireStdioLock, releaseStdioLock } from './lib/mcp-stdio-lock.js';
+
+/** 向量库空闲释放锁超时（ms）：常驻 MCP 空闲超时后自动 closeEngine 释放 LOCK */
+const VECTOR_IDLE_CLOSE_MS = 3_000;
 import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
   createToken,
@@ -420,10 +423,12 @@ async function runRestartCommand(args: string[]): Promise<void> {
 
   // 守卫①（对齐 startMcpServer 的 stdio 冲突守卫）：存活的 stdio 实例会与 HTTP 单例争抢向量库锁，
   // 若在此静默 kill 会让用户某 IDE 的 stdio 连接无提示中断。fail-loud 并引导迁移 URL 接入。
-  const stdioLock = readLiveStdioLock();
-  if (stdioLock) {
+  const stdioLocks = listLiveStdioLocks();
+  if (stdioLocks.length > 0) {
+    const first = stdioLocks[0];
+    const extra = stdioLocks.length > 1 ? `（另有 ${stdioLocks.length - 1} 个 stdio 实例）` : '';
     process.stderr.write(
-      `检测到存活的 ki mcp stdio 实例（pid ${stdioLock.pid}，启动于 ${stdioLock.startedAt}），` +
+      `检测到存活的 ki mcp stdio 实例（pid ${first.pid}，启动于 ${first.startedAt}${extra}），` +
         `restart 不会静默关闭它，以免中断正在使用该实例的 IDE 连接。\n` +
         `请先将该 IDE 配置迁移为 URL 型接入（http://${probeHost(host)}:${port}/mcp），` +
         `再执行 ki mcp restart。\n`,
@@ -583,12 +588,13 @@ export async function startMcpServer(): Promise<void> {
       process.exit(0);
     }
     // 存活的 stdio 实例会与 HTTP 单例争抢向量库锁 → 启动前指明冲突来源并拒绝（而非等取锁失败才报占用）
-    const stdioLock = readLiveStdioLock();
-    if (stdioLock) {
+    const stdioLocks = listLiveStdioLocks();
+    if (stdioLocks.length > 0) {
+      const pids = stdioLocks.map((l) => l.pid).join(' ');
       process.stderr.write(
-        `检测到存活的 ki mcp stdio 实例（pid ${stdioLock.pid}，启动于 ${stdioLock.startedAt}），` +
+        `检测到存活的 ki mcp stdio 实例（pid ${pids}），` +
           `它与 HTTP 单例并存会争抢向量库锁导致降级，拒绝启动。\n` +
-          `请先关闭该 stdio 进程（kill ${stdioLock.pid}）并将对应 IDE 配置迁移为 URL 型接入，再启动 HTTP 服务。\n`,
+          `请先关闭该 stdio 进程（kill ${pids}）并将对应 IDE 配置迁移为 URL 型接入，再启动 HTTP 服务。\n`,
       );
       process.exit(1);
     }
@@ -616,18 +622,16 @@ export async function startMcpServer(): Promise<void> {
       );
       process.exit(1);
     }
-    // stdio 守卫②：原子独占创建自身 lock，并发启动时竞态输家在此被拒
-    // （陈旧锁在创建时已自动清理，不会误拦）；必须在预检之前登记，
-    // 避免多 IDE 同时拉起时在预检窗口内静默共存。
-    const conflict = acquireStdioLock();
-    if (conflict) {
+    // stdio 守卫②：登记自身 lock（供 HTTP/restart 检测 stdio 冲突 + stop 定位）。
+    // 不再拒绝多实例：多 stdio 实例靠向量库空闲释放锁 + 撞锁重试错开共享，
+    // 「错开使用」互不影响。返回的其他存活实例仅提示，不阻断。
+    const others = acquireStdioLock();
+    if (others.length > 0) {
+      const pids = others.map((o) => o.pid).join(', ');
       process.stderr.write(
-        `已有 ki mcp stdio 实例在运行（pid ${conflict.pid}，启动于 ${conflict.startedAt}），` +
-          `多个 stdio 进程会争抢向量库锁，拒绝启动。\n` +
-          `建议迁移 HTTP 单例模式：执行 ki mcp --http 后，将所有 IDE 配置改为 URL 型接入 ` +
-          `http://${probeHost(guardHost)}:${guardPort}/mcp。\n`,
+        `检测到已有 ki mcp stdio 实例（pid ${pids}），` +
+          `多实例将共享向量库（空闲自动释放锁，错开使用互不影响；同时使用时会短暂等待）。\n`,
       );
-      process.exit(1);
     }
     // 'exit' 钩子保证预检失败/shutdown/process.exit 各路径都释放
     // （kill -9 残留由下次启动的存活校验清理）
@@ -657,6 +661,10 @@ export async function startMcpServer(): Promise<void> {
   // NEG-13：长驻进程版本自检 banner + 升级监听（升级后提示重启）
   const stopVersionGuard = startVersionGuard(SERVICE_NAME);
 
+  // 常驻进程启用向量库空闲释放锁：空闲超时后自动 closeEngine 释放 LOCK，
+  // 让多 stdio 实例 / CLI 能错开共享同一向量库（撞锁时 probe/open 自动重试）。
+  enableIdleClose(VECTOR_IDLE_CLOSE_MS);
+
   // ─── HTTP 共享单例模式（多 IDE 共享同一持锁进程） ───
   if (opts.http) {
     await startHttpMcpServer({
@@ -673,8 +681,8 @@ export async function startMcpServer(): Promise<void> {
 
   // ─── stdio 模式（默认，单客户端单进程） ───
   process.stderr.write(
-    'kisearch MCP 以 stdio 模式启动（默认，单客户端单进程）。\n' +
-      '如需多个 IDE 共享同一持锁进程以避免向量库锁冲突，请改用 HTTP 单例模式：ki mcp --http。\n',
+    'kisearch MCP 以 stdio 模式启动（默认）。\n' +
+      '多个 stdio 实例与 CLI 共享同一向量库：空闲自动释放锁，错开使用互不影响。\n',
   );
   const server = buildKiMcpServer();
 

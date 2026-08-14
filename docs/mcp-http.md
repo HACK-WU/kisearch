@@ -42,12 +42,12 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，启动时同样经过多实例冲突守卫，见下文「stdio 启动守卫」） |
+| `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，启动时同样经过启动守卫，见下文「HTTP 启动守卫」与「stdio 启动守卫」） |
 | `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：读取 lock 文件并探活，输出当前 HTTP 单例运行状态（JSON，含多 Token 存储数量 `managedTokens.count`），不启动服务、跳过预检 |
+| `--status` | — | 只读诊断：读取 HTTP lock + stdio 多实例 lock + 探活，输出实例全貌（JSON，含 `stdioInstances` 存活 stdio 列表与 `managedTokens.count`），不启动服务、跳过预检。读取时**顺带清理已死进程的陈旧 stdio lock**（非纯只读，但为有益副作用） |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
@@ -149,7 +149,7 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 `ki mcp --http` 启动流程（探活与冲突检测均在启动预检之前执行）：
 
 1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
-2. 检查 stdio 实例 lock（`~/.ki/mcp-stdio.lock`，pid 存活校验）。若存在存活的 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid，避免 HTTP 单例与 stdio 进程争抢向量库锁后静默降级。
+2. 检查 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid，避免 HTTP 单例与 stdio 进程争抢向量库锁后静默降级。
 3. 通过守卫后执行启动预检，再 `listen`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
 4. 成功监听后写 `~/.ki/mcp-http.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
@@ -157,13 +157,13 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 
 ## stdio 启动守卫
 
-stdio 模式（默认 `ki mcp`）同样在启动时强制检查多实例冲突，**不允许多进程静默共存降级**：
+stdio 模式（默认 `ki mcp`）在启动时检查**与 HTTP 单例的冲突**，但不拒绝多个 stdio 实例并存：
 
 1. **已有健康 HTTP 单例**（按配置/默认地址探活 `host:port/healthz`）→ 拒绝启动（`exit 1`），提示将本 IDE 配置改为 URL 型接入 `{ "url": "http://<host>:<port>/mcp" }`。
-2. **已有存活的 stdio 实例**：不再拒绝多实例——多个 stdio 实例靠**向量库空闲释放锁 + 撞锁重试**错开共享（错开使用互不影响，同时使用会短暂等待）。守卫仍以**原子独占方式**登记首个实例的 lock（`~/.ki/mcp-stdio.lock`，pid + startedAt），供 `stop`/`restart` 定位与 HTTP 冲突检测。
+2. **已有存活的 stdio 实例**：不再拒绝多实例——多个 stdio 实例靠**向量库空闲释放锁 + 撞锁重试**错开共享（错开使用互不影响，同时使用会短暂等待）。每个实例以**原子独占方式**登记自己的 lock（`~/.ki/mcp-stdio-<pid>.lock`，文件名即 pid），供 `stop`/`restart`/`status` 逐一定位与 HTTP 冲突检测。
 3. lock 在守卫阶段（预检之前）即登记，退出时自动清理（含预检失败路径）；`kill -9` 残留的陈旧锁会在下次启动的存活校验中自动清理，不会误拦。
 
-> ⚠️ 被拒绝的 stdio 进程会在 stderr 给出完整出路后非 0 退出；部分 IDE 会自动重拉 MCP 进程，若 MCP 日志中反复出现该提示，请按提示将该 IDE 的配置迁移为 URL 型接入。
+> ⚠️ 因「已有健康 HTTP 单例」被拒绝的 stdio 进程会在 stderr 给出完整出路后非 0 退出；部分 IDE 会自动重拉 MCP 进程，若 MCP 日志中反复出现该提示，请按提示将该 IDE 的配置迁移为 URL 型接入。多个 stdio 实例之间不再拒绝，仅在 stderr 提示已存在其他实例（错开共享）。
 >
 > 注意：守卫基于 lock 文件，升级前启动的存量 stdio 进程没有 lock，对守卫不可见，需手动清理一次（`ps -ef | grep 'ki mcp'`）。
 
@@ -177,7 +177,7 @@ ki mcp stop
 
 工作方式：
 
-1. **定位**：读 `~/.ki/mcp-stdio.lock`、`~/.ki/mcp-http.lock` 取服务进程 pid，并探活 `/healthz` 兜底（lock 被手动删过但服务仍在跑的场景）；
+1. **定位**：遍历 `~/.ki/mcp-stdio-<pid>.lock`（每实例一个）与 `~/.ki/mcp-http.lock` 取服务进程 pid，并探活 `/healthz` 兜底（lock 被手动删过但服务仍在跑的场景）；
 2. **身份校验**：发信号前读 `/proc/<pid>/cmdline` 确认目标确为 ki mcp 进程，pid 已被无关进程复用时跳过不杀（仅清陈旧 lock）；
 3. **关闭**：SIGTERM 优雅退出（走退出钩子自动释放 lock 与向量库锁），超时 SIGKILL 兜底；
 4. **清理**：移除残留/陈旧/损坏的 lock 文件，输出 JSON 报告（每个目标的处置结果 + 被清理的 lock 列表）。
@@ -223,7 +223,8 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 
 ### 排查
 
-- 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`；stdio 实例：`cat ~/.ki/mcp-stdio.lock`
+- 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`；stdio 实例：`ls ~/.ki/mcp-stdio-*.lock`（每实例一个，文件名即 pid）
+- 旧版单文件残留：`~/.ki/mcp-stdio.lock`（无 pid 后缀）为历史遗留格式，新版已不读它；若确认无旧版进程在跑，可手动 `rm ~/.ki/mcp-stdio.lock` 清理
 - 关闭全部实例并清理 lock：`ki mcp stop`
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。

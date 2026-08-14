@@ -5,7 +5,7 @@
  *   GET  /api/health                ki doctor 健康报告（runHealthCheck）
  *   GET  /api/doc/list              Group 路径 + 文档列表（支持 q 文件名模糊搜索）
  *   POST /api/import/upload         上传文件落盘受控目录（~/.ki/import-uploads/<uploadId>/）
- *   POST /api/import/run            触发导入（full/incremental，异步 job）
+ *   POST /api/import/run            触发导入（幂等追加，异步 job）
  *   GET  /api/import/status         轮询导入进度/结果
  *
  * 设计要点：

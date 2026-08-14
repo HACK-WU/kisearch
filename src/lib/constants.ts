@@ -61,7 +61,7 @@ const RESERVED_TAGS = new Set(['ki-search', 'ki-relation', 'ki-path']);
 
 /**
  * 解析自定义 tags：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）。
- * import / incremental / sync-relation 共用，避免重复实现。
+ * import / sync-relation 共用，避免重复实现。
  */
 export function parseContentTags(tags?: string): string[] {
   if (!tags) return [];

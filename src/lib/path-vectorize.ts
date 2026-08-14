@@ -118,7 +118,7 @@ export async function bulkStorePaths(
 // ─── 单条存储 ───
 
 /**
- * 异步单条存储路径向量（sync-relation / incremental 场景）。
+ * 异步单条存储路径向量（sync-relation 场景）。
  */
 export async function storeOnePathAsync(
   entry: PathVectorizeEntry,

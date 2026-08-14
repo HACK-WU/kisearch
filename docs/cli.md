@@ -930,7 +930,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
 >
-> **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, managedTokens, hint }` JSON（`managedTokens.count` 为多 Token 存储数量），用于确认单例是否在跑、由谁持有；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
+> **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, stdioInstances, managedTokens, hint }` JSON（`stdioInstances` 为存活 stdio 实例列表、`managedTokens.count` 为多 Token 存储数量），用于确认实例全貌（HTTP 单例与多个 stdio 实例）；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### 暴露的 MCP 工具
 

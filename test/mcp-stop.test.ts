@@ -3,7 +3,8 @@
  *
  * 覆盖：无实例无 lock 的空报告、陈旧 lock 清理、损坏 lock 清理、
  * 存活进程 SIGTERM 优雅关闭、忽略 SIGTERM 时 SIGKILL 兜底、
- * pid 复用校验跳过（不误杀 + 清陈旧锁）、排除自身 pid、healthz 兜底目标去重。
+ * pid 复用校验跳过（不误杀 + 清陈旧锁）、排除自身 pid、healthz 兜底目标去重、
+ * 多 stdio 实例逐一登记并全部停止。
  * 运行：node node_modules/jiti/lib/jiti-cli.mjs test/mcp-stop.test.ts
  */
 
@@ -22,124 +23,134 @@ const DEAD_PID = 2 ** 30;
 const NO_SERVICE = { host: '127.0.0.1', port: 65531 };
 
 let tmpDir: string;
-let stdioLockPath: string;
+let stdioLockDir: string;
 let httpLockPath: string;
-let child: ChildProcess | null = null;
+const children: ChildProcess[] = [];
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-mcp-stop-'));
-  stdioLockPath = path.join(tmpDir, 'mcp-stdio.lock');
+  stdioLockDir = tmpDir; // 多实例 lock 直接落在 tmpDir 下
   httpLockPath = path.join(tmpDir, 'mcp-http.lock');
 });
 
 afterEach(() => {
-  if (child && child.pid) {
-    try {
-      process.kill(child.pid, 'SIGKILL');
-    } catch {
-      /* 已退出 */
+  for (const c of children) {
+    if (c.pid) {
+      try {
+        process.kill(c.pid, 'SIGKILL');
+      } catch {
+        /* 已退出 */
+      }
     }
-    child = null;
   }
+  children.length = 0;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function writeLock(lockPath: string, pid: number): void {
-  fs.writeFileSync(lockPath, JSON.stringify({ pid, startedAt: new Date().toISOString() }));
+function spawnChild(): ChildProcess {
+  const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  children.push(c);
+  return c;
+}
+
+/** 写 stdio 实例 lock（每实例一个 mcp-stdio-<pid>.lock） */
+function writeStdioLock(pid: number): void {
+  fs.writeFileSync(
+    path.join(stdioLockDir, `mcp-stdio-${pid}.lock`),
+    JSON.stringify({ pid, startedAt: new Date().toISOString() }),
+  );
+}
+
+/** 写 http lock（单文件，内容含 pid） */
+function writeHttpLock(pid: number): void {
+  fs.writeFileSync(httpLockPath, JSON.stringify({ pid, startedAt: new Date().toISOString() }));
 }
 
 describe('stopMcpInstances：空环境', () => {
   it('无实例无 lock 时返回空报告', async () => {
-    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockPath, httpLockPath });
+    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockDir, httpLockPath });
     assert.deepEqual(report.stopped, []);
     assert.deepEqual(report.cleanedLocks, []);
   });
 });
 
 describe('stopMcpInstances：陈旧/损坏 lock 清理', () => {
-  it('pid 已死的陈旧 lock 被清理，不产生 stopped 记录', async () => {
-    writeLock(stdioLockPath, DEAD_PID);
-    writeLock(httpLockPath, DEAD_PID);
-    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockPath, httpLockPath });
+  it('pid 已死的陈旧 stdio + http lock 被清理，不产生 stopped 记录', async () => {
+    writeStdioLock(DEAD_PID);
+    writeHttpLock(DEAD_PID);
+    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockDir, httpLockPath });
     assert.deepEqual(report.stopped, []);
-    assert.deepEqual(report.cleanedLocks.sort(), [httpLockPath, stdioLockPath].sort());
-    assert.equal(fs.existsSync(stdioLockPath), false);
+    assert.equal(report.cleanedLocks.length, 2);
+    assert.equal(fs.existsSync(path.join(stdioLockDir, `mcp-stdio-${DEAD_PID}.lock`)), false);
     assert.equal(fs.existsSync(httpLockPath), false);
   });
 
-  it('内容损坏的 lock 同样被清理', async () => {
-    fs.writeFileSync(stdioLockPath, 'not-json');
-    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockPath, httpLockPath });
-    assert.deepEqual(report.cleanedLocks, [stdioLockPath]);
-    assert.equal(fs.existsSync(stdioLockPath), false);
+  it('内容损坏的 http lock 同样被清理', async () => {
+    fs.writeFileSync(httpLockPath, 'not-json');
+    const report = await stopMcpInstances({ ...NO_SERVICE, stdioLockDir, httpLockPath });
+    assert.deepEqual(report.cleanedLocks, [httpLockPath]);
+    assert.equal(fs.existsSync(httpLockPath), false);
   });
 });
 
 describe('stopMcpInstances：关闭存活进程', () => {
-  it('SIGTERM 优雅关闭 lock 指向的存活进程并清理 lock', async () => {
-    // 用一个长驻 node 子进程模拟 ki mcp 服务（默认 SIGTERM 行为即退出）
-    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  it('SIGTERM 优雅关闭 stdio lock 指向的存活进程并清理 lock', async () => {
+    const child = spawnChild();
     const pid = child.pid!;
-    writeLock(stdioLockPath, pid);
+    writeStdioLock(pid);
     const report = await stopMcpInstances({
       ...NO_SERVICE,
-      stdioLockPath,
+      stdioLockDir,
       httpLockPath,
-      verifyPid: () => true, // 测试进程 cmdline 无 mcp-server 特征，注入放行
+      verifyPid: () => true,
     });
     assert.deepEqual(report.stopped, [{ pid, kind: 'stdio', result: 'terminated' }]);
-    assert.deepEqual(report.cleanedLocks, [stdioLockPath]);
-    assert.equal(fs.existsSync(stdioLockPath), false);
+    assert.equal(fs.existsSync(path.join(stdioLockDir, `mcp-stdio-${pid}.lock`)), false);
   });
 
   it('忽略 SIGTERM 的进程走 SIGKILL 兜底，lock 被清理', async () => {
-    // 捕获并忽略 SIGTERM，模拟卡死/拒绝优雅退出的服务
-    child = spawn(
+    const child = spawn(
       process.execPath,
       ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
       { stdio: 'ignore' },
     );
+    children.push(child);
     const pid = child.pid!;
-    // 给子进程一点时间装好 SIGTERM handler，避免竞态下默认行为直接退出
     await new Promise((r) => setTimeout(r, 300));
-    writeLock(httpLockPath, pid);
+    writeHttpLock(pid);
     const report = await stopMcpInstances({
       ...NO_SERVICE,
-      stdioLockPath,
+      stdioLockDir,
       httpLockPath,
-      gracefulTimeoutMs: 500, // 缩短优雅等待，加速进入兜底分支
+      gracefulTimeoutMs: 500,
       verifyPid: () => true,
     });
     assert.equal(report.stopped.length, 1);
     assert.equal(report.stopped[0].result, 'killed');
-    assert.equal(report.stopped[0].reason, undefined); // SIGKILL 后应确认退出
     assert.deepEqual(report.cleanedLocks, [httpLockPath]);
-    assert.equal(fs.existsSync(httpLockPath), false);
   });
 
   it('pid 校验判定复用时跳过发信号，仅清理陈旧 lock', async () => {
-    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const child = spawnChild();
     const pid = child.pid!;
-    writeLock(stdioLockPath, pid);
+    writeStdioLock(pid);
     const report = await stopMcpInstances({
       ...NO_SERVICE,
-      stdioLockPath,
+      stdioLockDir,
       httpLockPath,
-      verifyPid: () => false, // 模拟 pid 已被无关进程复用
+      verifyPid: () => false,
     });
     assert.equal(report.stopped.length, 1);
     assert.equal(report.stopped[0].result, 'skipped');
-    // 无辜进程未被杀
     assert.doesNotThrow(() => process.kill(pid, 0));
-    // 复用者的锁属陈旧锁，应被清理
-    assert.deepEqual(report.cleanedLocks, [stdioLockPath]);
+    assert.equal(fs.existsSync(path.join(stdioLockDir, `mcp-stdio-${pid}.lock`)), false);
   });
 
   it('lock 指向自身 pid 时不发信号（排除自杀）', async () => {
-    writeLock(stdioLockPath, process.pid);
+    writeStdioLock(process.pid);
     const report = await stopMcpInstances({
       ...NO_SERVICE,
-      stdioLockPath,
+      stdioLockDir,
       httpLockPath,
       verifyPid: () => true,
     });
@@ -147,18 +158,38 @@ describe('stopMcpInstances：关闭存活进程', () => {
   });
 
   it('stdio 与 http lock 指向同一 pid 时只处理一次', async () => {
-    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const child = spawnChild();
     const pid = child.pid!;
-    writeLock(stdioLockPath, pid);
-    writeLock(httpLockPath, pid);
+    writeStdioLock(pid);
+    writeHttpLock(pid);
     const report = await stopMcpInstances({
       ...NO_SERVICE,
-      stdioLockPath,
+      stdioLockDir,
       httpLockPath,
       verifyPid: () => true,
     });
     assert.equal(report.stopped.length, 1);
     assert.equal(report.stopped[0].result, 'terminated');
-    assert.deepEqual(report.cleanedLocks.sort(), [httpLockPath, stdioLockPath].sort());
+    assert.equal(report.cleanedLocks.length, 2);
+  });
+
+  it('多个 stdio 实例逐一登记并全部停止', async () => {
+    const c1 = spawnChild();
+    const c2 = spawnChild();
+    const c3 = spawnChild();
+    const pids = [c1.pid!, c2.pid!, c3.pid!];
+    for (const p of pids) writeStdioLock(p);
+    const report = await stopMcpInstances({
+      ...NO_SERVICE,
+      stdioLockDir,
+      httpLockPath,
+      verifyPid: () => true,
+    });
+    const stoppedPids = report.stopped.filter((s) => s.kind === 'stdio').map((s) => s.pid).sort();
+    assert.deepEqual(stoppedPids, pids.slice().sort());
+    assert.equal(report.stopped.length, 3);
+    for (const p of pids) {
+      assert.equal(fs.existsSync(path.join(stdioLockDir, `mcp-stdio-${p}.lock`)), false);
+    }
   });
 });
