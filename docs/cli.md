@@ -721,7 +721,7 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 ## `delete-relation`
 
-删除 Relation 或整个 Group 及其关联数据（relations-cache + 本地 KB + wiki 文件 + 向量），wiki 文件移入回收站（`.trash`，保留完整相对结构）。
+删除 Relation 或整个 Group 及其关联数据（relations-cache + 本地 KB + wiki 文件 + 向量），wiki 文件移入回收站（`.ki/trash`，保留完整相对结构）。
 
 ### 文档级删除（`--group` + `--relation`）
 
@@ -740,7 +740,7 @@ ki delete-relation --scope <scope> --group <group>
 删除整个 Group 及其全部子 Group（级联），适用：
 - **relations-cache**：清空该 group 及前缀 `group/` 下的全部关系
 - **本地 KB**：删除 `kb/{scope}/{group}/` 目录
-- **wiki**：源目录对应子树移入回收站 `.trash/{group}/`（保留完整结构，重名追加时间戳）
+- **wiki**：源目录对应子树移入回收站 `.ki/trash/{group}/`（保留完整结构，重名追加时间戳）
 - **向量**：聚合该 group 下全部 `memoryIds` 一并删除；删除失败（或部分失败）时结果含 `vectorRemoved:false` 与原因，避免孤儿向量静默残留（已不存在的 doc 记 `NOT_FOUND`，视为已清理不误报）
 
 > **安全约束**：目录级删除为不可逆的破坏性操作，仅通过 CLI 暴露；MCP 工具 `ki_delete_relation` 仅支持文档级单条删除（`relation` 必填）。

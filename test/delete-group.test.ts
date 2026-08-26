@@ -4,7 +4,7 @@
  * 契约（REQ-20260814-001）：
  *   - 删除整个 group：清空该 group 下所有 relations（cache + KB + 向量）
  *   - 级联删除：删除父 group 连带全部子 group（前缀 = group + '/'）
- *   - wiki 目录移入回收站（.trash/<group>/ 保留完整结构）
+ *   - wiki 目录移入回收站（.ki/trash/<group>/ 保留完整结构）
  *   - group-index 树节点删除（叶子节点连带清理空父节点）
  *   - 向量删除失败 → vectorRemoved:false（可观测，避免孤儿向量静默残留）
  *   - NOT_FOUND（doc 已不存在）视为「已清理」，幂等重删不误报
@@ -152,7 +152,7 @@ describe('executeDeleteGroup：目录级删除', () => {
 
     // wiki 移入回收站
     assert.equal(fs.existsSync(path.join(sourceDir, 'wiki')), false);
-    assert.equal(fs.existsSync(path.join(sourceDir, '.trash', 'wiki', 'a.md')), true);
+    assert.equal(fs.existsSync(path.join(sourceDir, '.ki', 'trash', 'wiki', 'a.md')), true);
 
     // 向量被调用一次，携带聚合 ids
     assert.equal(deleteCalls.length, 1);

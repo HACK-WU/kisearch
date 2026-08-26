@@ -336,8 +336,8 @@ function moveDirToTrash(dirPath: string, group: string): string {
   for (let i = 0; i < segs.length; i++) {
     baseDir = path.dirname(baseDir);
   }
-  const trashRoot = path.join(baseDir, '.trash');
-  // 保留 group 完整相对路径（REQ-10 保留原结构）：.trash/<group>/，而非仅 .trash/<末段>/
+  const trashRoot = path.join(baseDir, '.ki', 'trash');
+  // 保留 group 完整相对路径（REQ-10 保留原结构）：.ki/trash/<group>/，而非仅 .ki/trash/<末段>/
   const groupRel = segs.join('/');
   let dest = groupRel ? path.join(trashRoot, groupRel) : path.join(trashRoot, path.basename(dirPath));
 
@@ -514,7 +514,7 @@ function findWikiFile(scope: string, group: string, relation: string): string | 
 
 /**
  * 将文件移入回收站目录，保留原目录结构，重名追加时间戳。
- * 回收站位置：由 wikiFile 反推 sourceDir（group 之前的部分），落入 {sourceDir}/.trash/{group}/{relation}.md。
+ * 回收站位置：由 wikiFile 反推 sourceDir（group 之前的部分），落入 {sourceDir}/.ki/trash/{group}/{relation}.md。
  * 用于替代物理删除：删除的文档/目录统一移入回收站，可手动恢复。
  *
  * @param filePath 待移入回收站的源文件绝对路径
@@ -528,9 +528,9 @@ function moveToTrash(filePath: string, group: string): string {
   for (let i = 0; i < segs.length; i++) {
     baseDir = path.dirname(baseDir);
   }
-  const trashRoot = path.join(baseDir, '.trash');
+  const trashRoot = path.join(baseDir, '.ki', 'trash');
 
-  // 保留原目录结构：.trash/{group}/{relation}.md
+  // 保留原目录结构：.ki/trash/{group}/{relation}.md
   const fileName = path.basename(filePath);
   const destDir = group ? path.join(trashRoot, group) : trashRoot;
   let dest = path.join(destDir, fileName);
