@@ -13,7 +13,7 @@ import { Command } from 'commander';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { getKiRoot } from './lib/config.js';
+import { getKiRoot, resolveDefaultDataPaths } from './lib/config.js';
 
 // ─── 工具 ───
 
@@ -38,35 +38,31 @@ interface ConfigTemplateValues {
 /**
  * 探测配置模板的默认路径值
  *
+ * 与运行时 lib/config.ts 共用 resolveDefaultDataPaths，避免两处默认逻辑漂移：
  * dataDir 探测顺序：
  *  1. KI_DATA_DIR 环境变量（存量用户迁移）
- *  2. {KI_ROOT}/kb 目录是否存在且有内容
- *  3. 默认值 $HOME/.ki-data
+ *  2. {KI_ROOT}/kb 或 ~/.ki-data 存在且有内容（存量兼容）
+ *  3. 默认值 $HOME/.ki/kb
+ * backupDir 默认 $HOME/.ki/backup（存量 {KI_ROOT}/ki-backup 有内容时沿用）
+ *
+ * 返回的路径统一为可移植形式：home 下转 $HOME/...，其余保留绝对路径。
  */
 function buildConfigTemplateValues(kiRoot: string): ConfigTemplateValues {
-  let dataDir = '$HOME/.ki-data';
-
-  if (process.env.KI_DATA_DIR) {
-    dataDir = process.env.KI_DATA_DIR;
-  } else {
-    const defaultKb = path.join(kiRoot, 'kb');
-    if (fs.existsSync(defaultKb)) {
-      try {
-        const entries = fs.readdirSync(defaultKb);
-        if (entries.length > 0) {
-          dataDir = defaultKb;
-        }
-      } catch {
-        // ignore — fallback to default
-      }
-    }
-  }
-
+  // includeEnv=true：仅模板探测时读 KI_DATA_DIR（存量迁移），运行时不做环境变量回退
+  const { dataDir, backupDir } = resolveDefaultDataPaths(kiRoot, true);
   return {
-    dataDir,
-    backupDir: '$HOME/.ki-backup',
+    dataDir: toHomeRel(dataDir),
+    backupDir: toHomeRel(backupDir),
     vectorDir: '$HOME/.ki/vector',
   };
+}
+
+/** 绝对路径 → 可移植形式：home 下转 $HOME/...，否则保留绝对路径 */
+function toHomeRel(abs: string): string {
+  const home = os.homedir();
+  if (abs === home) return '$HOME';
+  if (abs.startsWith(home + path.sep)) return '$HOME' + abs.slice(home.length);
+  return abs;
 }
 
 /**

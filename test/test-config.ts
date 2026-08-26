@@ -26,7 +26,7 @@ function buildTestConfig(): Record<string, unknown> {
   const baseConfig: Record<string, unknown> = {
     dataDir: path.join(PROJECT_ROOT, 'kb'),
     vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
-    // 备份隔离到临时目录：避免测试快照污染项目内 ki-backup/（也减少项目目录的批量写）
+    // 备份隔离到临时目录：避免测试快照污染用户默认数据目录（~/.ki/backup）
     backupDir: path.join(TEST_CONFIG_DIR, 'backup'),
     scopes: {},
   };

@@ -95,11 +95,11 @@ node bin/ki.mjs config init --dir /tmp/ki-e2e-test
 
 ### 3.2 修改 dataDir 路径
 
-> **重要**：`config init` 生成的 `dataDir` 是全局默认路径（如 `/root/.ki-data`），需要手动修改为隔离的临时目录。
+> **重要**：`config init` 生成的 `dataDir` 是全局默认路径（如 `/root/.ki/kb`），需要手动修改为隔离的临时目录。
 
 ```bash
 # 修改 dataDir 为测试专用目录
-sed -i 's|"dataDir": "/root/.ki-data"|"dataDir": "/tmp/ki-e2e-test/kb"|' /tmp/ki-e2e-test/.ki/config.json
+sed -i 's|"dataDir": "/root/.ki/kb"|"dataDir": "/tmp/ki-e2e-test/kb"|' /tmp/ki-e2e-test/.ki/config.json
 ```
 
 **验证要点**：
@@ -967,7 +967,7 @@ mkdir -p /tmp/ki-e2e-test
 node bin/ki.mjs config init --dir /tmp/ki-e2e-test
 
 # 修改 dataDir 为隔离目录
-sed -i 's|"dataDir": "/root/.ki-data"|"dataDir": "/tmp/ki-e2e-test/kb"|' $CONFIG
+sed -i 's|"dataDir": "/root/.ki/kb"|"dataDir": "/tmp/ki-e2e-test/kb"|' $CONFIG
 
 # 全量直导（--source 原文直导，无 AI 依赖）
 node bin/ki.mjs --config $CONFIG scan-kb import \

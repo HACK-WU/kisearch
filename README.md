@@ -128,9 +128,9 @@ ki doctor             # 一键校验配置、目录、Embedding API 密钥与向
 生成的配置（节选）：
 
 ```yaml
-dataDir: $HOME/.ki-data       # KB 源数据目录
-backupDir: $HOME/.ki-backup   # 备份目录
-vectorDir: $HOME/.ki/vector   # zvec 向量库（所有 scope 共享，按 metadata 隔离）
+dataDir: $HOME/.ki/kb       # KB 源数据目录
+backupDir: $HOME/.ki/backup  # 备份目录
+vectorDir: $HOME/.ki/vector  # zvec 向量库（所有 scope 共享，按 metadata 隔离）
 embedding:
   provider: siliconflow       # apiKey 从环境变量 SILICONFLOW_API_KEY 读取
   model: Qwen/Qwen3-Embedding-8B

@@ -10,7 +10,7 @@
 **配置优先级**：
 1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
 2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
-3. 内置默认值（`dataDir` = `$HOME/.ki-data`）
+3. 内置默认值（`dataDir` = `$HOME/.ki/kb`，`backupDir` = `$HOME/.ki/backup`，`vectorDir` = `$HOME/.ki/vector`）
 
 **首次使用**：运行 `ki config init` 生成 YAML 配置文件模板（`~/.ki/config.yaml`）。配置格式以 YAML 为主，保留对旧版 `config.json` 的读取兼容。
 
@@ -1150,7 +1150,7 @@ ki config init
   "action": "config_init",
   "configPath": "/Users/me/.ki/config.yaml",
   "existed": false,
-  "createdDirs": ["/Users/me/.ki-data", "/Users/me/.ki-backup", "/Users/me/.ki/vector"],
+  "createdDirs": ["/Users/me/.ki/kb", "/Users/me/.ki/backup", "/Users/me/.ki/vector"],
   "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 ${VAR_NAME} 引用环境变量（不做隐式回退）。"
 }
 ```
@@ -1158,9 +1158,9 @@ ki config init
 **配置文件结构（YAML）**：
 
 ```yaml
-dataDir: $HOME/.ki-data       # KB 源数据目录
-backupDir: $HOME/.ki-backup   # 备份目录
-vectorDir: $HOME/.ki/vector   # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
+dataDir: $HOME/.ki/kb       # KB 源数据目录
+backupDir: $HOME/.ki/backup  # 备份目录
+vectorDir: $HOME/.ki/vector  # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
 
 embedding:                    # Embedding 提供方（OpenAI 兼容，实际提供商由 baseURL 决定）
   provider: siliconflow
@@ -1270,8 +1270,8 @@ ki backup my-project
   "action": "backup",
   "scope": "my-project",
   "snapshot": "snapshot.20260616-223000.tar.gz",
-  "snapshotPath": "/Users/me/.ki-backup/my-project/snapshots/snapshot.20260616-223000.tar.gz",
-  "message": "scope 快照已保存：/Users/me/.ki-backup/my-project/snapshots/snapshot.20260616-223000.tar.gz"
+  "snapshotPath": "/Users/me/.ki/backup/my-project/snapshots/snapshot.20260616-223000.tar.gz",
+  "message": "scope 快照已保存：/Users/me/.ki/backup/my-project/snapshots/snapshot.20260616-223000.tar.gz"
 }
 ```
 
@@ -1336,9 +1336,9 @@ ki restore my-project
   "ok": true,
   "action": "restore_list",
   "scope": "my-project",
-  "backupDir": "/Users/me/.ki-backup",
+  "backupDir": "/Users/me/.ki/backup",
   "locations": {
-    "snapshots": "/Users/me/.ki-backup/my-project/snapshots"
+    "snapshots": "/Users/me/.ki/backup/my-project/snapshots"
   },
   "available": {
     "snapshots": ["snapshot.20260616-223000.tar.gz"]

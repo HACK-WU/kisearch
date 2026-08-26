@@ -70,8 +70,8 @@ scopes:
 自定义方式如下，在 `~/.ki/config.yaml` 的 scope 配置中添加 `kbDir` 字段：
 
 ```yaml
-dataDir: $HOME/.ki-data
-backupDir: $HOME/.ki-backup
+dataDir: $HOME/.ki/kb
+backupDir: $HOME/.ki/backup
 scopes:
   your-scope:
     kbDir: /path/to/custom/data
@@ -158,7 +158,7 @@ ki scan-kb import \
 }
 ```
 
-> **自动备份**：导入成功后，系统会自动创建 scope 快照备份（输出到 stderr）。备份文件保存在 `~/.ki-backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原。
+> **自动备份**：导入成功后，系统会自动创建 scope 快照备份（输出到 stderr）。备份文件保存在 `~/.ki/backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原。
 
 ---
 
