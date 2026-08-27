@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: zvec_studio/backend_app/app_bootstrap
+title: 应用启动与配置持久化
+scope:
+    - zvec-studio/apps/backend/zvec_studio/main.py
+    - zvec-studio/apps/backend/zvec_studio/settings.py
+    - zvec-studio/apps/backend/zvec_studio/config_store.py
+source_files: []
+depends_on: []
+related_to:
+    - path: zvec_studio/backend_app/ai_service
+    - path: zvec_studio/backend_app/middleware
+    - path: zvec_studio/backend_app/schemas

@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: zvec_studio/backend_app/middleware
+title: FastAPI 请求中间件（追踪、访问日志与错误处理）
+scope:
+    - zvec-studio/apps/backend/zvec_studio/middleware/
+source_files: []
+depends_on: []
+related_to:
+    - path: zvec_studio/backend_app/app_bootstrap

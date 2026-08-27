@@ -1,0 +1,22 @@
+schema_version: 1
+module_path: ""
+title: kisearch 知识索引器（ki）Monorepo 根
+scope:
+    - README.md
+    - package.json
+    - tsconfig.json
+    - tsconfig.src.json
+    - .gitignore
+    - .gitnexusignore
+    - AGENTS.md
+    - CLAUDE.md
+    - bin/
+    - scripts/
+    - _template/
+    - .env.e2e.example
+    - LICENSE
+    - package-lock.json
+    - swim-pet.user.js
+source_files: []
+depends_on: []
+related_to: []

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: core_engine
+title: Knowledge Indexer 核心引擎（ki）
+scope:
+    - src/
+source_files: []
+depends_on: []
+related_to:
+    - path: data_and_config
+    - path: docs_and_skills

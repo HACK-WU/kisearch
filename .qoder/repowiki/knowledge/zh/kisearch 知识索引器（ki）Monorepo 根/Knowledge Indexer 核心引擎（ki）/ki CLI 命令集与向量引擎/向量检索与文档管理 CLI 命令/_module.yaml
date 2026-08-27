@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_engine/cli_commands/indexing_search_commands
+title: 向量检索与文档管理 CLI 命令
+scope:
+    - src/search.ts
+    - src/doc.ts
+    - src/tag.ts
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/cli_commands/shared_libs/health_version_guards
+    - path: core_engine/cli_commands/shared_libs/vector_indexing

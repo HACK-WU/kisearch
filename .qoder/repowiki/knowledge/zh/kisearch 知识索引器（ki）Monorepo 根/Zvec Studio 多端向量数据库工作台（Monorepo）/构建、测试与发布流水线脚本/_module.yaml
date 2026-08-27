@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: zvec_studio/build_and_scripts
+title: 构建、测试与发布流水线脚本
+scope:
+    - zvec-studio/scripts/
+    - zvec-studio/.github/workflows/
+source_files: []
+depends_on: []
+related_to:
+    - path: zvec_studio/desktop_app
+    - path: zvec_studio/frontend_app

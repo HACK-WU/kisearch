@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_engine/cli_commands/shared_libs/health_version_guards
+title: CLI 健康检查与版本/中断/预检守卫
+scope:
+    - src/lib/health-check.ts
+    - src/lib/version-guard.ts
+    - src/lib/interrupt.ts
+    - src/lib/preflight.ts
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/cli_commands/indexing_search_commands

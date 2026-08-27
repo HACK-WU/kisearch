@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: zvec_studio/frontend_app/rerankers_pages
+title: Reranker 管理页面（创建与详情）
+scope:
+    - zvec-studio/apps/frontend/src/pages/rerankers/
+source_files: []
+depends_on: []
+related_to: []

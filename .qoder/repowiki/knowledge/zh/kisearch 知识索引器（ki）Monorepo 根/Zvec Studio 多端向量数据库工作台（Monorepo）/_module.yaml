@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: zvec_studio
+title: Zvec Studio 多端向量数据库工作台（Monorepo）
+scope:
+    - zvec-studio/
+source_files: []
+depends_on: []
+related_to: []

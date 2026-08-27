@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: zvec_studio/desktop_app
+title: Zvec Studio 桌面端 Tauri Shell
+scope:
+    - zvec-studio/apps/desktop/
+source_files: []
+depends_on: []
+related_to:
+    - path: zvec_studio/backend_app
+    - path: zvec_studio/build_and_scripts

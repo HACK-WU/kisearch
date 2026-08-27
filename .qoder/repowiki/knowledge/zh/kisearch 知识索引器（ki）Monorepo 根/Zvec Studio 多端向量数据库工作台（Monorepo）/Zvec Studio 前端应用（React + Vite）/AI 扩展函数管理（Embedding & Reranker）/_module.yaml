@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: zvec_studio/frontend_app/ai_feature
+title: AI 扩展函数管理（Embedding & Reranker）
+scope:
+    - zvec-studio/apps/frontend/src/features/ai/
+    - zvec-studio/apps/frontend/src/pages/ai/
+source_files: []
+depends_on: []
+related_to:
+    - path: zvec_studio/backend_app

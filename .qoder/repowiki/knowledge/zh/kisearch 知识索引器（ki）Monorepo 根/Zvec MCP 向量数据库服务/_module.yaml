@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: zvec_mcp_server
+title: Zvec MCP 向量数据库服务
+scope:
+    - zvec-mcp-server/
+source_files: []
+depends_on: []
+related_to: []

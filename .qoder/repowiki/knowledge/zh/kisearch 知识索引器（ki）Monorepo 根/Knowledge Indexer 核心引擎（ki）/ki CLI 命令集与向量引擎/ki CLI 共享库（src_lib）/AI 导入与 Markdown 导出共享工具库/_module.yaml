@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_engine/cli_commands/shared_libs/ai_markdown_progress
+title: AI 导入与 Markdown 导出共享工具库
+scope:
+    - src/lib/ai-results.ts
+    - src/lib/markdown-gen.ts
+    - src/lib/progress.ts
+    - src/lib/net-addr.ts
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/cli_commands/backup_restore_commands

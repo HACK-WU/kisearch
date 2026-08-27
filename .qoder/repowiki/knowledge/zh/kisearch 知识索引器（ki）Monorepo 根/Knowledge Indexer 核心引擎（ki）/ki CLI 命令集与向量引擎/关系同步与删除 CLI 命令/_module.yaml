@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_engine/cli_commands/sync_relation_commands
+title: 关系同步与删除 CLI 命令
+scope:
+    - src/sync-relation.ts
+    - src/delete-relation.ts
+    - src/wiki-backfill.ts
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/shared_lib

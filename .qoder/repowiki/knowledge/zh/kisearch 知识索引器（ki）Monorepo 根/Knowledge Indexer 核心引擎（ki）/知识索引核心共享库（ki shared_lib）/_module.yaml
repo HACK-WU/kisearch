@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_engine/shared_lib
+title: 知识索引核心共享库（ki shared_lib）
+scope:
+    - src/lib/
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/cli_commands
+    - path: core_engine/cli_commands/backup_restore_commands
+    - path: core_engine/cli_commands/sync_relation_commands

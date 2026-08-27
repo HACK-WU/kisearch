@@ -1,0 +1,591 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: master
+nodes_managed: true
+exported_at: "2026-08-27T10:38:43Z"
+modules:
+    "":
+        dir_name: kisearch 知识索引器（ki）Monorepo 根
+        title: kisearch 知识索引器（ki）Monorepo 根
+        scope:
+            - README.md
+            - package.json
+            - tsconfig.json
+            - tsconfig.src.json
+            - .gitignore
+            - .gitnexusignore
+            - AGENTS.md
+            - CLAUDE.md
+            - bin/
+            - scripts/
+            - _template/
+            - .env.e2e.example
+            - LICENSE
+            - package-lock.json
+            - swim-pet.user.js
+        source_files: []
+        children:
+            - core_engine
+            - data_and_config
+            - docs_and_skills
+            - probes_and_tools
+            - tests_and_fixtures
+            - web_ui
+            - zvec_mcp_server
+            - zvec_studio
+        depends_on: []
+        related_to: []
+    core_engine:
+        dir_name: Knowledge Indexer 核心引擎（ki）
+        title: Knowledge Indexer 核心引擎（ki）
+        scope:
+            - src/
+        source_files: []
+        children:
+            - core_engine/cli_commands
+            - core_engine/shared_lib
+            - core_engine/zvec_engine
+        depends_on: []
+        related_to:
+            - path: data_and_config
+            - path: docs_and_skills
+    core_engine/cli_commands:
+        dir_name: ki CLI 命令集与向量引擎
+        title: ki CLI 命令集与向量引擎
+        scope:
+            - src/
+        source_files: []
+        children:
+            - core_engine/cli_commands/backup_restore_commands
+            - core_engine/cli_commands/indexing_search_commands
+            - core_engine/cli_commands/maintenance_commands
+            - core_engine/cli_commands/server_mcp_commands
+            - core_engine/cli_commands/shared_libs
+            - core_engine/cli_commands/sync_relation_commands
+            - core_engine/cli_commands/vector_engine
+        depends_on: []
+        related_to:
+            - path: core_engine/shared_lib
+            - path: tests_and_fixtures
+    core_engine/cli_commands/backup_restore_commands:
+        dir_name: 备份_还原_导出 CLI 命令
+        title: 备份/还原/导出 CLI 命令
+        scope:
+            - src/backup.ts
+            - src/restore.ts
+            - src/export.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/ai_markdown_progress
+            - path: core_engine/shared_lib
+    core_engine/cli_commands/indexing_search_commands:
+        dir_name: 向量检索与文档管理 CLI 命令
+        title: 向量检索与文档管理 CLI 命令
+        scope:
+            - src/search.ts
+            - src/doc.ts
+            - src/tag.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/health_version_guards
+            - path: core_engine/cli_commands/shared_libs/vector_indexing
+    core_engine/cli_commands/maintenance_commands:
+        dir_name: 知识索引维护与诊断 CLI 命令集
+        title: 知识索引维护与诊断 CLI 命令集
+        scope:
+            - src/doctor.ts
+            - src/manage-index.ts
+            - src/query-group.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/scope_config_cli
+    core_engine/cli_commands/server_mcp_commands:
+        dir_name: ki mcp 服务器 CLI 与 HTTP_stdio 传输层
+        title: ki mcp 服务器 CLI 与 HTTP/stdio 传输层
+        scope:
+            - src/mcp-server.ts
+            - src/lib/mcp-http.ts
+            - src/lib/mcp-stdio-lock.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/mcp_tools
+            - path: web_ui
+    core_engine/cli_commands/shared_libs:
+        dir_name: ki CLI 共享库（src_lib）
+        title: ki CLI 共享库（src/lib）
+        scope:
+            - src/lib/
+        source_files: []
+        children:
+            - core_engine/cli_commands/shared_libs/ai_markdown_progress
+            - core_engine/cli_commands/shared_libs/data_store_wal
+            - core_engine/cli_commands/shared_libs/health_version_guards
+            - core_engine/cli_commands/shared_libs/mcp_tools
+            - core_engine/cli_commands/shared_libs/scope_config_cli
+            - core_engine/cli_commands/shared_libs/vector_indexing
+        depends_on: []
+        related_to: []
+    core_engine/cli_commands/shared_libs/ai_markdown_progress:
+        dir_name: AI 导入与 Markdown 导出共享工具库
+        title: AI 导入与 Markdown 导出共享工具库
+        scope:
+            - src/lib/ai-results.ts
+            - src/lib/markdown-gen.ts
+            - src/lib/progress.ts
+            - src/lib/net-addr.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/backup_restore_commands
+    core_engine/cli_commands/shared_libs/data_store_wal:
+        dir_name: 数据持久化与导入_写回核心（WAL、Store、Import、Wiki-Sync、Relation-Map）
+        title: 数据持久化与导入/写回核心（WAL、Store、Import、Wiki-Sync、Relation-Map）
+        scope:
+            - src/lib/store.ts
+            - src/lib/wal.ts
+            - src/lib/import.ts
+            - src/lib/wiki-sync.ts
+            - src/lib/relation-map.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/scope_config_cli
+    core_engine/cli_commands/shared_libs/health_version_guards:
+        dir_name: CLI 健康检查与版本_中断_预检守卫
+        title: CLI 健康检查与版本/中断/预检守卫
+        scope:
+            - src/lib/health-check.ts
+            - src/lib/version-guard.ts
+            - src/lib/interrupt.ts
+            - src/lib/preflight.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/indexing_search_commands
+    core_engine/cli_commands/shared_libs/mcp_tools:
+        dir_name: MCP 工具与 HTTP 传输层
+        title: MCP 工具与 HTTP 传输层
+        scope:
+            - src/lib/mcp-tools/
+            - src/lib/mcp-http-api.ts
+            - src/lib/mcp-http.ts
+            - src/lib/mcp-stdio-lock.ts
+            - src/lib/mcp-stop.ts
+            - src/lib/mcp-token.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/server_mcp_commands
+            - path: core_engine/cli_commands/shared_libs/vector_indexing
+    core_engine/cli_commands/shared_libs/scope_config_cli:
+        dir_name: Scope 配置与 CLI 参数解析共享库
+        title: Scope 配置与 CLI 参数解析共享库
+        scope:
+            - src/lib/scope.ts
+            - src/lib/cli-args.ts
+            - src/lib/constants.ts
+            - src/lib/group-resolve.ts
+            - src/lib/path-search.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/maintenance_commands
+            - path: core_engine/cli_commands/shared_libs/data_store_wal
+    core_engine/cli_commands/shared_libs/vector_indexing:
+        dir_name: 向量检索与评分引擎（Vector Indexing & Scoring）
+        title: 向量检索与评分引擎（Vector Indexing & Scoring）
+        scope:
+            - src/lib/vector-client.ts
+            - src/lib/batch-vectorize.ts
+            - src/lib/rebuild-vector.ts
+            - src/lib/scoring.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/indexing_search_commands
+            - path: core_engine/cli_commands/shared_libs/mcp_tools
+            - path: core_engine/cli_commands/vector_engine/core_runtime
+            - path: core_engine/zvec_engine
+    core_engine/cli_commands/sync_relation_commands:
+        dir_name: 关系同步与删除 CLI 命令
+        title: 关系同步与删除 CLI 命令
+        scope:
+            - src/sync-relation.ts
+            - src/delete-relation.ts
+            - src/wiki-backfill.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/shared_lib
+    core_engine/cli_commands/vector_engine:
+        dir_name: ZvecEngine 向量引擎模块
+        title: ZvecEngine 向量引擎模块
+        scope:
+            - src/zvec-engine/
+        source_files: []
+        children:
+            - core_engine/cli_commands/vector_engine/core_runtime
+        depends_on: []
+        related_to:
+            - path: core_engine/zvec_engine
+    core_engine/cli_commands/vector_engine/core_runtime:
+        dir_name: ZvecEngine 核心运行时（主线程引擎与 Worker 通信）
+        title: ZvecEngine 核心运行时（主线程引擎与 Worker 通信）
+        scope:
+            - src/zvec-engine/engine.ts
+            - src/zvec-engine/index.ts
+            - src/zvec-engine/proxy.ts
+            - src/zvec-engine/types.ts
+            - src/zvec-engine/errors.ts
+            - src/zvec-engine/worker-protocol.ts
+            - src/zvec-engine/worker.ts
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/vector_indexing
+    core_engine/shared_lib:
+        dir_name: 知识索引核心共享库（ki shared_lib）
+        title: 知识索引核心共享库（ki shared_lib）
+        scope:
+            - src/lib/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands
+            - path: core_engine/cli_commands/backup_restore_commands
+            - path: core_engine/cli_commands/sync_relation_commands
+    core_engine/zvec_engine:
+        dir_name: ZvecEngine 向量检索引擎（主线程门面 + Worker 后端）
+        title: ZvecEngine 向量检索引擎（主线程门面 + Worker 后端）
+        scope:
+            - src/zvec-engine/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/shared_libs/vector_indexing
+            - path: core_engine/cli_commands/vector_engine
+            - path: probes_and_tools
+    data_and_config:
+        dir_name: 需求追踪与项目记忆（.requirements_.gitnexus_memories）
+        title: 需求追踪与项目记忆（.requirements/.gitnexus/memories）
+        scope:
+            - memories/
+            - .requirements/
+            - .gitnexus/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine
+    docs_and_skills:
+        dir_name: 项目文档、Agent Skills 与模块专家知识库
+        title: 项目文档、Agent Skills 与模块专家知识库
+        scope:
+            - docs/
+            - skills/
+            - .module-experts/
+            - .claude/skills/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine
+    probes_and_tools:
+        dir_name: zvec 引擎探针与验证脚本（Python_Node）
+        title: zvec 引擎探针与验证脚本（Python/Node）
+        scope:
+            - zvec-probe/
+            - zvec-probe-node/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/zvec_engine
+    tests_and_fixtures:
+        dir_name: 测试套件与测试数据夹具
+        title: 测试套件与测试数据夹具
+        scope:
+            - test/
+            - test_data/
+            - .e2e-run/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands
+            - path: zvec_studio/backend_app
+    web_ui:
+        dir_name: ki 知识库 Web 前端（React + Vite）
+        title: ki 知识库 Web 前端（React + Vite）
+        scope:
+            - web/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_engine/cli_commands/server_mcp_commands
+    zvec_mcp_server:
+        dir_name: Zvec MCP 向量数据库服务
+        title: Zvec MCP 向量数据库服务
+        scope:
+            - zvec-mcp-server/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    zvec_studio:
+        dir_name: Zvec Studio 多端向量数据库工作台（Monorepo）
+        title: Zvec Studio 多端向量数据库工作台（Monorepo）
+        scope:
+            - zvec-studio/
+        source_files: []
+        children:
+            - zvec_studio/api_client_package
+            - zvec_studio/backend_app
+            - zvec_studio/build_and_scripts
+            - zvec_studio/desktop_app
+            - zvec_studio/frontend_app
+        depends_on: []
+        related_to: []
+    zvec_studio/api_client_package:
+        dir_name: Zvec Studio OpenAPI 类型客户端
+        title: Zvec Studio OpenAPI 类型客户端
+        scope:
+            - zvec-studio/packages/api-client/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+            - path: zvec_studio/frontend_app/shared_lib
+    zvec_studio/backend_app:
+        dir_name: Zvec Studio 后端应用（FastAPI 服务）
+        title: Zvec Studio 后端应用（FastAPI 服务）
+        scope:
+            - zvec-studio/apps/backend/
+        source_files: []
+        children:
+            - zvec_studio/backend_app/ai_service
+            - zvec_studio/backend_app/app_bootstrap
+            - zvec_studio/backend_app/middleware
+            - zvec_studio/backend_app/routers
+            - zvec_studio/backend_app/schemas
+        depends_on: []
+        related_to:
+            - path: tests_and_fixtures
+            - path: zvec_studio/api_client_package
+            - path: zvec_studio/desktop_app
+            - path: zvec_studio/frontend_app
+            - path: zvec_studio/frontend_app/ai_feature
+            - path: zvec_studio/frontend_app/collections_feature
+            - path: zvec_studio/frontend_app/documents_feature
+            - path: zvec_studio/frontend_app/searches_feature
+    zvec_studio/backend_app/ai_service:
+        dir_name: AI 扩展服务与函数注册中心
+        title: AI 扩展服务与函数注册中心
+        scope:
+            - zvec-studio/apps/backend/zvec_studio/ai_service.py
+            - zvec-studio/apps/backend/zvec_studio/ai_store.py
+            - zvec-studio/apps/backend/zvec_studio/registry.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app/app_bootstrap
+            - path: zvec_studio/backend_app/routers
+    zvec_studio/backend_app/app_bootstrap:
+        dir_name: 应用启动与配置持久化
+        title: 应用启动与配置持久化
+        scope:
+            - zvec-studio/apps/backend/zvec_studio/main.py
+            - zvec-studio/apps/backend/zvec_studio/settings.py
+            - zvec-studio/apps/backend/zvec_studio/config_store.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app/ai_service
+            - path: zvec_studio/backend_app/middleware
+            - path: zvec_studio/backend_app/schemas
+    zvec_studio/backend_app/middleware:
+        dir_name: FastAPI 请求中间件（追踪、访问日志与错误处理）
+        title: FastAPI 请求中间件（追踪、访问日志与错误处理）
+        scope:
+            - zvec-studio/apps/backend/zvec_studio/middleware/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app/app_bootstrap
+    zvec_studio/backend_app/routers:
+        dir_name: FastAPI HTTP 路由层（集合_文档_AI_搜索_文件系统）
+        title: FastAPI HTTP 路由层（集合/文档/AI/搜索/文件系统）
+        scope:
+            - zvec-studio/apps/backend/zvec_studio/routers/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app/ai_service
+    zvec_studio/backend_app/schemas:
+        dir_name: Zvec Studio REST API Pydantic 数据模型
+        title: Zvec Studio REST API Pydantic 数据模型
+        scope:
+            - zvec-studio/apps/backend/zvec_studio/schemas/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app/app_bootstrap
+    zvec_studio/build_and_scripts:
+        dir_name: 构建、测试与发布流水线脚本
+        title: 构建、测试与发布流水线脚本
+        scope:
+            - zvec-studio/scripts/
+            - zvec-studio/.github/workflows/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/desktop_app
+            - path: zvec_studio/frontend_app
+    zvec_studio/desktop_app:
+        dir_name: Zvec Studio 桌面端 Tauri Shell
+        title: Zvec Studio 桌面端 Tauri Shell
+        scope:
+            - zvec-studio/apps/desktop/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+            - path: zvec_studio/build_and_scripts
+    zvec_studio/frontend_app:
+        dir_name: Zvec Studio 前端应用（React + Vite）
+        title: Zvec Studio 前端应用（React + Vite）
+        scope:
+            - zvec-studio/apps/frontend/
+        source_files: []
+        children:
+            - zvec_studio/frontend_app/ai_feature
+            - zvec_studio/frontend_app/collections_feature
+            - zvec_studio/frontend_app/documents_feature
+            - zvec_studio/frontend_app/embeddings_pages
+            - zvec_studio/frontend_app/onboarding_feature
+            - zvec_studio/frontend_app/rerankers_pages
+            - zvec_studio/frontend_app/searches_feature
+            - zvec_studio/frontend_app/shared_lib
+            - zvec_studio/frontend_app/ui_components
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+            - path: zvec_studio/build_and_scripts
+    zvec_studio/frontend_app/ai_feature:
+        dir_name: AI 扩展函数管理（Embedding & Reranker）
+        title: AI 扩展函数管理（Embedding & Reranker）
+        scope:
+            - zvec-studio/apps/frontend/src/features/ai/
+            - zvec-studio/apps/frontend/src/pages/ai/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+    zvec_studio/frontend_app/collections_feature:
+        dir_name: 向量集合管理功能（Collections Feature）
+        title: 向量集合管理功能（Collections Feature）
+        scope:
+            - zvec-studio/apps/frontend/src/features/collections/
+            - zvec-studio/apps/frontend/src/pages/collections/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+    zvec_studio/frontend_app/documents_feature:
+        dir_name: 文档集合数据访问与 React Query 钩子
+        title: 文档集合数据访问与 React Query 钩子
+        scope:
+            - zvec-studio/apps/frontend/src/features/documents/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+    zvec_studio/frontend_app/embeddings_pages:
+        dir_name: Embedding 函数详情页与创建对话框
+        title: Embedding 函数详情页与创建对话框
+        scope:
+            - zvec-studio/apps/frontend/src/pages/embeddings/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    zvec_studio/frontend_app/onboarding_feature:
+        dir_name: 新手引导与聚光灯导览
+        title: 新手引导与聚光灯导览
+        scope:
+            - zvec-studio/apps/frontend/src/features/onboarding/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    zvec_studio/frontend_app/rerankers_pages:
+        dir_name: Reranker 管理页面（创建与详情）
+        title: Reranker 管理页面（创建与详情）
+        scope:
+            - zvec-studio/apps/frontend/src/pages/rerankers/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    zvec_studio/frontend_app/searches_feature:
+        dir_name: 向量搜索功能模块
+        title: 向量搜索功能模块
+        scope:
+            - zvec-studio/apps/frontend/src/features/searches/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/backend_app
+    zvec_studio/frontend_app/shared_lib:
+        dir_name: 前端共享库（API 客户端、查询缓存与运行时适配）
+        title: 前端共享库（API 客户端、查询缓存与运行时适配）
+        scope:
+            - zvec-studio/apps/frontend/src/lib/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: zvec_studio/api_client_package
+    zvec_studio/frontend_app/ui_components:
+        dir_name: 前端 UI 组件库（Design System Primitives）
+        title: 前端 UI 组件库（Design System Primitives）
+        scope:
+            - zvec-studio/apps/frontend/src/components/ui/
+            - zvec-studio/apps/frontend/src/components/ErrorBoundary.tsx
+            - zvec-studio/apps/frontend/src/components/ErrorBoundary.css
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
