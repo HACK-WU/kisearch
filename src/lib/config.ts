@@ -8,7 +8,7 @@
  *
  * 路径展开规则：$HOME / ~ → os.homedir()，相对路径 → 相对于配置文件所在目录
  *
- * 【循环依赖解决】本模块自行计算 KI_ROOT，不 import constants.ts
+ * 【默认路径】数据/备份目录统一 ~/.ki 用户数据根（resolveDefaultDataPaths）
  *
  * 与旧版 lib/config.ts 的差异（S-01 向量配置独立化，最小增量）：
  *   - KiConfig 新增 vectorDir / embedding 字段（zvec 向量配置）
@@ -19,29 +19,13 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import YAML from 'yaml';
-
-// ─── 自行计算 KI_ROOT（与 constants.ts 相同算法，打破循环依赖） ───
-// src/lib/ 上溯 2 级到项目根
-const __filename_cfg = fileURLToPath(import.meta.url);
-const __dirname_cfg = path.dirname(__filename_cfg);
-const KI_ROOT = path.resolve(__dirname_cfg, '..', '..');
 
 // ─── 默认路径（方案 A：统一 ~/.ki/ 用户数据根，运行时数据不落源码仓库） ───
 
 /** 用户数据根目录（config.yaml / vector / mcp-tokens / lock 均落此） */
 function getKiDir(): string {
   return path.join(os.homedir(), '.ki');
-}
-
-/** 目录存在且有内容（用于存量路径探测） */
-function isNonEmptyDir(dir: string): boolean {
-  try {
-    return fs.statSync(dir).isDirectory() && fs.readdirSync(dir).length > 0;
-  } catch {
-    return false;
-  }
 }
 
 export interface ResolvedDefaultPaths {
@@ -53,30 +37,17 @@ export interface ResolvedDefaultPaths {
  * 解析 dataDir / backupDir 的默认值（未显式配置时的 fallback）。
  * lib 运行时（loadConfig）与 `ki config init` 模板共用，避免两处默认逻辑漂移。
  *
- * dataDir 探测顺序：
- *   1. KI_DATA_DIR 环境变量（仅 includeEnv=true 时，即 `config init` 模板探测；
- *      运行时不做环境变量回退——见 docs/cli.md「KI_DATA_DIR 不作运行时配置来源」）
- *   2. {KI_ROOT}/kb 存在且有内容（历史默认：数据落在源码仓库）
- *   3. ~/.ki-data 存在且有内容（早期 init 模板默认）
- *   4. 新默认 ~/.ki/kb
- * backupDir 探测顺序：
- *   1. {KI_ROOT}/ki-backup 存在且有内容（历史默认）
- *   2. 新默认 ~/.ki/backup
+ * dataDir 默认 ~/.ki/kb；includeEnv=true 时（仅 `config init` 模板）允许
+ * KI_DATA_DIR 显式覆盖——运行时不做环境变量回退（见 docs/cli.md「KI_DATA_DIR 不作运行时配置来源」）。
+ * backupDir 默认 ~/.ki/backup。
  *
- * 原则：运行时数据默认落用户目录 ~/.ki/，不随安装位置（源码仓库）漂移；
- * 存量旧路径仅在"已有数据"时继承，避免静默丢失。
+ * 原则：不做存量路径继承（旧默认 {项目根}/kb、~/.ki-data 不再自动沿用，
+ * 用户需迁移数据或显式配置 dataDir），运行时数据恒落用户目录 ~/.ki/，不随安装位置漂移。
  */
-export function resolveDefaultDataPaths(kiRoot: string, includeEnv = false): ResolvedDefaultPaths {
+export function resolveDefaultDataPaths(includeEnv = false): ResolvedDefaultPaths {
   const home = os.homedir();
 
   let dataDir = path.join(home, '.ki', 'kb');
-  const legacyDataCandidates = [path.join(kiRoot, 'kb'), path.join(home, '.ki-data')];
-  for (const cand of legacyDataCandidates) {
-    if (isNonEmptyDir(cand)) {
-      dataDir = cand;
-      break;
-    }
-  }
   if (includeEnv) {
     const envDataDir = process.env.KI_DATA_DIR?.trim();
     if (envDataDir) {
@@ -84,20 +55,7 @@ export function resolveDefaultDataPaths(kiRoot: string, includeEnv = false): Res
     }
   }
 
-  let backupDir = path.join(home, '.ki', 'backup');
-  const legacyBackup = path.join(kiRoot, 'ki-backup');
-  if (isNonEmptyDir(legacyBackup)) {
-    backupDir = legacyBackup;
-  }
-
-  return { dataDir, backupDir };
-}
-
-/** 是否为存量旧默认路径（用于迁移提示） */
-function isLegacyDefaultPath(p: string): boolean {
-  return p === path.join(KI_ROOT, 'kb')
-    || p === path.join(os.homedir(), '.ki-data')
-    || p === path.join(KI_ROOT, 'ki-backup');
+  return { dataDir, backupDir: path.join(home, '.ki', 'backup') };
 }
 
 // ─── 类型 ───
@@ -181,7 +139,6 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
 
 let _cached: KiConfig | null = null;
 let _hintPrinted = false;
-let _legacyHintPrinted = false;
 
 /**
  * 加载配置文件（进程内缓存，只读一次）
@@ -213,18 +170,6 @@ export function loadConfig(explicitPath?: string): KiConfig {
     }
   }
 
-  // 存量旧默认路径迁移提示（仅在实际沿用了旧路径时提示一次）
-  if (!_legacyHintPrinted && _cached) {
-    const usedLegacy = isLegacyDefaultPath(_cached.dataDir) || isLegacyDefaultPath(_cached.backupDir);
-    if (usedLegacy) {
-      _legacyHintPrinted = true;
-      process.stderr.write(
-        '提示：检测到旧版默认数据目录（仓库 kb/ 或 ~/.ki-data），已自动沿用。' +
-        '建议迁移至 ~/.ki/kb 与 ~/.ki/backup，或在配置中显式指定 dataDir / backupDir。\n'
-      );
-    }
-  }
-
   return _cached;
 }
 
@@ -232,7 +177,6 @@ export function loadConfig(explicitPath?: string): KiConfig {
 export function resetConfigCache(): void {
   _cached = null;
   _hintPrinted = false;
-  _legacyHintPrinted = false;
 }
 
 // ─── 配置文件查找 ───
@@ -312,8 +256,8 @@ function parseAndExpand(configFile: string): KiConfig {
 
   const configDir = path.dirname(configFile);
 
-  // 未显式配置时使用统一默认路径（含存量探测，见 resolveDefaultDataPaths）
-  const { dataDir: defaultDataDir, backupDir: defaultBackupDir } = resolveDefaultDataPaths(KI_ROOT);
+  // 未显式配置时使用统一默认路径（~/.ki/kb、~/.ki/backup，见 resolveDefaultDataPaths）
+  const { dataDir: defaultDataDir, backupDir: defaultBackupDir } = resolveDefaultDataPaths();
 
   const dataDir = raw.dataDir
     ? expandPath(String(raw.dataDir), configDir)
@@ -416,7 +360,7 @@ function parseAndExpand(configFile: string): KiConfig {
 // ─── 内置默认值 ───
 
 function buildDefaults(): KiConfig {
-  const { dataDir, backupDir } = resolveDefaultDataPaths(KI_ROOT);
+  const { dataDir, backupDir } = resolveDefaultDataPaths();
   return {
     dataDir,
     backupDir,
@@ -518,13 +462,6 @@ export function resolveScope(config: KiConfig, scope?: string): string {
     return trimmed;
   }
   return trimmed || 'default';
-}
-
-/**
- * 导出 KI_ROOT 供其他模块使用（避免循环依赖）
- */
-export function getKiRoot(): string {
-  return KI_ROOT;
 }
 
 // ─── 配置写回（scope delete 用：移除 scopes 条目） ───

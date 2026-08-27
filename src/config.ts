@@ -13,7 +13,7 @@ import { Command } from 'commander';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { getKiRoot, resolveDefaultDataPaths } from './lib/config.js';
+import { resolveDefaultDataPaths } from './lib/config.js';
 
 // ─── 工具 ───
 
@@ -39,17 +39,15 @@ interface ConfigTemplateValues {
  * 探测配置模板的默认路径值
  *
  * 与运行时 lib/config.ts 共用 resolveDefaultDataPaths，避免两处默认逻辑漂移：
- * dataDir 探测顺序：
- *  1. KI_DATA_DIR 环境变量（存量用户迁移）
- *  2. {KI_ROOT}/kb 或 ~/.ki-data 存在且有内容（存量兼容）
- *  3. 默认值 $HOME/.ki/kb
- * backupDir 默认 $HOME/.ki/backup（存量 {KI_ROOT}/ki-backup 有内容时沿用）
+ * dataDir 默认 $HOME/.ki/kb；KI_DATA_DIR 环境变量可显式覆盖（仅 init 时生效，
+ * 运行时不做环境变量回退）；不做存量路径继承。
+ * backupDir 默认 $HOME/.ki/backup
  *
  * 返回的路径统一为可移植形式：home 下转 $HOME/...，其余保留绝对路径。
  */
-function buildConfigTemplateValues(kiRoot: string): ConfigTemplateValues {
-  // includeEnv=true：仅模板探测时读 KI_DATA_DIR（存量迁移），运行时不做环境变量回退
-  const { dataDir, backupDir } = resolveDefaultDataPaths(kiRoot, true);
+function buildConfigTemplateValues(): ConfigTemplateValues {
+  // includeEnv=true：仅 init 模板读 KI_DATA_DIR 显式覆盖，运行时不做环境变量回退
+  const { dataDir, backupDir } = resolveDefaultDataPaths(true);
   return {
     dataDir: toHomeRel(dataDir),
     backupDir: toHomeRel(backupDir),
@@ -152,8 +150,7 @@ function handleConfigInit(options: ConfigInitOptions): void {
   fs.mkdirSync(configDir, { recursive: true });
 
   // 生成模板
-  const kiRoot = getKiRoot();
-  const values = buildConfigTemplateValues(kiRoot);
+  const values = buildConfigTemplateValues();
   const yamlText = renderConfigYaml(values);
 
   fs.writeFileSync(configFile, yamlText, 'utf-8');
