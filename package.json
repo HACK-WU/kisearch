@@ -12,6 +12,7 @@
     "query-group": "npx jiti src/query-group.ts",
     "get-module-info": "npx jiti src/get-module-info.ts",
     "sync-relation": "npx jiti src/sync-relation.ts",
+    "build": "tsc -p tsconfig.src.json",
     "test": "npx jiti test/manage-index.test.ts",
     "test:all": "for f in test/*.test.ts; do npx jiti \"$f\" || exit 1; done",
     "test:manage-index": "npx jiti test/manage-index.test.ts",

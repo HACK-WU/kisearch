@@ -57,4 +57,5 @@ export {
   CollectionLockedException,
   CollectionCorruptedException,
   CollectionAlreadyExistsError,
+  WorkerUnavailableError,
 } from './errors.js';

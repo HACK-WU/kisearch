@@ -15,6 +15,9 @@
 
 import fs from 'node:fs';
 import { createHash } from 'crypto';
+// 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
+// 编译后的 worker.js，源码目录无法直接运行；故 dist 是运行时必需品，
+// 源码变更后需 npx tsc -p tsconfig.src.json（npm run build）重建。
 import {
   ZvecEngine,
   SiliconFlowProvider,
@@ -144,6 +147,8 @@ function sleep(ms: number): Promise<void> {
 let _idleCloseMs = 0;
 let _lastUseAt = 0;
 let _idleTimer: NodeJS.Timeout | null = null;
+/** 在途 engine 操作计数（idle close 判定依据：>0 时禁止空闲释放，见 enableIdleClose） */
+let _inFlightOps = 0;
 
 /** 记录一次引擎使用（空闲计时起点）；未启用空闲释放时无副作用 */
 function touchEngineUse(): void {
@@ -162,7 +167,12 @@ export function enableIdleClose(idleMs: number): void {
   if (_idleTimer) clearInterval(_idleTimer);
   _idleTimer = setInterval(() => {
     if (_idleCloseMs <= 0) return;
-    if (_enginePromise && Date.now() - _lastUseAt >= _idleCloseMs) {
+    // 在途保护（竞态修复）：有进行中的 engine 操作（含 embedding 网络阶段）时禁止空闲释放。
+    // 此前竞态：hybridSearch 主线程 embedding（网络 0.5s~数秒）超过 idle 窗口时，
+    // proxy.close() 的 drain 只等已 postMessage 的请求，embedding 阶段不可见 → drain
+    // 立即完成 → worker closed → embedding 返回后 proxy.send 报
+    // "worker not open (state=closed)"。
+    if (_enginePromise && _inFlightOps === 0 && Date.now() - _lastUseAt >= _idleCloseMs) {
       void closeEngine(); // 空闲超时，释放锁（不阻塞定时器）
     }
   }, Math.max(500, Math.floor(idleMs / 2)));
@@ -354,6 +364,48 @@ export async function closeEngine(): Promise<void> {
 /** 测试用别名（等价 closeEngine） */
 export const resetEngine = closeEngine;
 
+/**
+ * worker 不可用判定（duck-typing，与 dist 构建版本解耦）：
+ * err.name === 'WorkerUnavailableError'（ZvecEngineError 基类以 new.target.name 设置）
+ * 或消息含 "worker not open"（proxy.ts 状态检查的固定文案）。
+ * 不用 instanceof/命名导入——旧构建产物缺新导出时 instanceof undefined 会崩。
+ */
+function isWorkerUnavailable(err: unknown): boolean {
+  return err instanceof Error && (
+    err.name === 'WorkerUnavailableError' || /worker not open/i.test(err.message)
+  );
+}
+
+/**
+ * engine 操作包装：在途保护 + 空闲续期 + worker 不可用自愈重试。
+ *
+ * 1. 在途保护：进入即 _inFlightOps++（idle timer 见此计数不打断）；
+ *    完成后 finally 减计数并续期空闲起点（上一次调用的耗时不计入空闲）。
+ * 2. 自愈重试：worker 已 closed 等（残余竞态兜底）时重置 engine 重开一次重试。
+ *
+ * 所有 engine 使用一律经此包装（getEngine 的直接 await 不受在途保护，
+ * 会重演 idle close 竞态——见 enableIdleClose 注释）。
+ */
+async function withEngine<T>(op: (engine: ZvecEngine) => Promise<T>): Promise<T> {
+  touchEngineUse();
+  _inFlightOps++;
+  try {
+    try {
+      const engine = await getEngine();
+      return await op(engine);
+    } catch (err) {
+      if (!isWorkerUnavailable(err)) throw err;
+      // worker 已不可用（如 state=closed）：重置后重开重试一次
+      await closeEngine();
+      const engine = await getEngine();
+      return await op(engine);
+    }
+  } finally {
+    _inFlightOps--;
+    touchEngineUse();
+  }
+}
+
 // ─── 可用性检测（替代 ensureMemAvailable） ───
 
 /**
@@ -430,18 +482,17 @@ export async function vectorSearch(params: {
   threshold?: number;
 }): Promise<VectorSearchResult[]> {
   const scope = resolveScope(loadConfig(), params.scope);
-  const engine = await getEngine();
   const tagList = params.tags
     ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
     : undefined;
   const filter = buildScopeTagFilter(scope, tagList);
 
-  const hits: Hit[] = await engine.hybridSearch({
+  const hits: Hit[] = await withEngine((engine) => engine.hybridSearch({
     queryText: params.query,
     fts: params.query,
     topk: params.limit ?? 10,
     filter,
-  });
+  }));
 
   return hits
     .map((h) => ({
@@ -470,11 +521,10 @@ export async function vectorStore(params: {
   }
 
   const scope = resolveScope(loadConfig(), params.scope);
-  const engine = await getEngine();
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
   const docId = generateDocId(params.text, scope, tag);
-  const result = await engine.upsert([{
+  const result = await withEngine((engine) => engine.upsert([{
     id: docId,
     text: params.text,
     fields: {
@@ -482,7 +532,7 @@ export async function vectorStore(params: {
       [SCOPE_FIELD]: scope,
       ...(params.group ? { [GROUP_FIELD]: params.group } : {}),
     },
-  }]);
+  }]));
 
   if (result.failed > 0) {
     const reason = result.errors?.[0]?.reason ?? 'unknown';
@@ -503,7 +553,6 @@ export async function vectorBulkStore(params: {
   }
 
   const scope = resolveScope(loadConfig(), params.scope);
-  const engine = await getEngine();
 
   const docs = params.entries.map((e) => {
     const tag = normalizeTag(e.tags ?? DEFAULT_TAG);
@@ -518,7 +567,7 @@ export async function vectorBulkStore(params: {
     };
   });
 
-  const result = await engine.upsert(docs);
+  const result = await withEngine((engine) => engine.upsert(docs));
 
   // 组装逐项结果（WriteResult.errors 按 doc id 定位）
   const errorById = new Map<string, string>();
@@ -551,8 +600,7 @@ export async function vectorDelete(params: {
 }): Promise<{ deleted: number; errors: { id: string; code: string; reason: string }[] }> {
   // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
   resolveScope(loadConfig(), params.scope);
-  const engine = await getEngine();
-  const result = await engine.delete(params.ids);
+  const result = await withEngine((engine) => engine.delete(params.ids));
   return {
     deleted: result.ok,
     errors: (result.errors ?? []).map((e) => ({ id: e.id, code: e.code, reason: e.reason })),
@@ -598,12 +646,13 @@ export async function vectorListDocs(params: {
   limit?: number;
 }): Promise<VectorDocInfo[]> {
   validateScope(params.scope);
-  const engine = await getEngine();
   const filter = buildScopeTagFilter(params.scope, params.tags);
-  const ids = await engine.listIds(filter, params.limit ?? 10);
-  if (ids.length === 0) return [];
-  const docs = await engine.fetch(ids, false);
-  return docs.map(toDocInfo);
+  return withEngine(async (engine) => {
+    const ids = await engine.listIds(filter, params.limit ?? 10);
+    if (ids.length === 0) return [];
+    const docs = await engine.fetch(ids, false);
+    return docs.map(toDocInfo);
+  });
 }
 
 /**
@@ -611,9 +660,10 @@ export async function vectorListDocs(params: {
  */
 export async function vectorFetchDocs(ids: string[]): Promise<VectorDocInfo[]> {
   if (ids.length === 0) return [];
-  const engine = await getEngine();
-  const docs = await engine.fetch(ids, false);
-  return docs.map(toDocInfo);
+  return withEngine(async (engine) => {
+    const docs = await engine.fetch(ids, false);
+    return docs.map(toDocInfo);
+  });
 }
 
 /**
@@ -622,16 +672,17 @@ export async function vectorFetchDocs(ids: string[]): Promise<VectorDocInfo[]> {
  * 受 scanLimit 约束（默认 10000）——大库下为"已扫描范围内"的 scope。
  */
 export async function vectorListScopes(scanLimit: number = LIST_ALL_LIMIT): Promise<string[]> {
-  const engine = await getEngine();
-  const ids = await engine.listIds(undefined, scanLimit);
-  if (ids.length === 0) return [];
-  const docs = await engine.fetch(ids, false);
-  const set = new Set<string>();
-  for (const d of docs) {
-    const s = d.fields?.[SCOPE_FIELD];
-    if (s !== undefined && s !== null) set.add(String(s));
-  }
-  return [...set];
+  return withEngine(async (engine) => {
+    const ids = await engine.listIds(undefined, scanLimit);
+    if (ids.length === 0) return [];
+    const docs = await engine.fetch(ids, false);
+    const set = new Set<string>();
+    for (const d of docs) {
+      const s = d.fields?.[SCOPE_FIELD];
+      if (s !== undefined && s !== null) set.add(String(s));
+    }
+    return [...set];
+  });
 }
 
 /**
@@ -645,23 +696,24 @@ export async function vectorListTags(params: {
 }): Promise<{ tags: VectorTagInfo[]; scanned: number; truncated: boolean }> {
   validateScope(params.scope);
   const limit = params.scanLimit ?? LIST_ALL_LIMIT;
-  const engine = await getEngine();
   const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: params.scope };
-  const ids = await engine.listIds(scopeCond, limit);
-  const truncated = ids.length >= limit;
-  if (ids.length === 0) return { tags: [], scanned: 0, truncated };
-  const docs = await engine.fetch(ids, false);
-  const counts = new Map<string, number>();
-  for (const d of docs) {
-    const raw = d.fields?.[TAG_FIELD];
-    const tag = raw !== undefined && raw !== null ? String(raw) : '';
-    if (tag.length === 0) continue;
-    counts.set(tag, (counts.get(tag) ?? 0) + 1);
-  }
-  const tags: VectorTagInfo[] = [...counts.entries()]
-    .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag));
-  return { tags, scanned: ids.length, truncated };
+  return withEngine(async (engine) => {
+    const ids = await engine.listIds(scopeCond, limit);
+    const truncated = ids.length >= limit;
+    if (ids.length === 0) return { tags: [], scanned: 0, truncated };
+    const docs = await engine.fetch(ids, false);
+    const counts = new Map<string, number>();
+    for (const d of docs) {
+      const raw = d.fields?.[TAG_FIELD];
+      const tag = raw !== undefined && raw !== null ? String(raw) : '';
+      if (tag.length === 0) continue;
+      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+    const tags: VectorTagInfo[] = [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag));
+    return { tags, scanned: ids.length, truncated };
+  });
 }
 
 /**
@@ -669,10 +721,8 @@ export async function vectorListTags(params: {
  */
 export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
   validateScope(params.scope);
-  const engine = await getEngine();
   const filter = buildScopeTagFilter(params.scope, params.tags);
-  const ids = await engine.listIds(filter, LIST_ALL_LIMIT);
-  return ids.length;
+  return withEngine((engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
 }
 
 /**
@@ -684,19 +734,20 @@ export async function vectorDeleteScope(
   onProgress?: (deleted: number) => void
 ): Promise<{ deleted: number }> {
   validateScope(params.scope);
-  const engine = await getEngine();
   const filter = buildScopeTagFilter(params.scope, params.tags);
-  let total = 0;
-  for (;;) {
-    const ids = await engine.listIds(filter, LIST_ALL_LIMIT);
-    if (ids.length === 0) break;
-    const res = await engine.delete(ids);
-    total += res.ok;
-    onProgress?.(total);
-    // 无进展保护：本批一条都没删掉（全部报错/被锁），再循环仍是同一批 ids，
-    // 直接退出避免死循环空转（P1 健壮性）
-    if (res.ok === 0) break;
-    if (ids.length < LIST_ALL_LIMIT) break;
-  }
-  return { deleted: total };
+  return withEngine(async (engine) => {
+    let total = 0;
+    for (;;) {
+      const ids = await engine.listIds(filter, LIST_ALL_LIMIT);
+      if (ids.length === 0) break;
+      const res = await engine.delete(ids);
+      total += res.ok;
+      onProgress?.(total);
+      // 无进展保护：本批一条都没删掉（全部报错/被锁），再循环仍是同一批 ids，
+      // 直接退出避免死循环空转（P1 健壮性）
+      if (res.ok === 0) break;
+      if (ids.length < LIST_ALL_LIMIT) break;
+    }
+    return { deleted: total };
+  });
 }
