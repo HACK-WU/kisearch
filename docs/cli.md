@@ -820,6 +820,12 @@ ki sync-relation \
 
 如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
 
+> **注意**：`wikiSync.enabled: false` 会禁用**一切** Wiki 写回（含走 source 块路径的场景）。
+>
+> **历史补齐**：Wiki 写回是事件驱动的——只覆盖 `sync-relation` 执行之后的关系。历史关系的补齐有两条路径：
+> - **自动**：写回时检测到 wiki 目标目录不存在或为空 → 自动全量补齐后写入本条（`wikiSync.autoBackfill: false` 可关闭）
+> - **手动**：`ki wiki-backfill <scope>`（已存在文件跳过、不刷新时间戳；`--force` 全量覆盖）
+
 ### 批量模式
 
 ```bash

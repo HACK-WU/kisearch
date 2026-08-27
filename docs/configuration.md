@@ -123,7 +123,8 @@ scopes:
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | `boolean` | `true` | 是否启用 wiki 同步 |
+| `enabled` | `boolean` | `true` | 是否启用 Wiki 写回（显式 `false` 时禁用一切写回，含 source 块路径）|
+| `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
 | `sourceDir` | `string` | 无 | 源文档目录 |
 
 #### `scopes.<scope>.clean`

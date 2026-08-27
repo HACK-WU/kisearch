@@ -45,6 +45,7 @@ const COMMANDS = {
   'backup': 'src/backup.ts',
   'restore': 'src/restore.ts',
   'export': 'src/export.ts',
+  'wiki-backfill': 'src/wiki-backfill.ts',
 };
 
 // 获取命令和参数
@@ -95,6 +96,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   backup            备份 scope 目录快照
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
+  wiki-backfill     KB 历史关系全量写回 Wiki（幂等补齐）
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
 
 全局参数：

@@ -63,6 +63,8 @@ export function resolveDefaultDataPaths(includeEnv = false): ResolvedDefaultPath
 export interface WikiSyncConfig {
   enabled: boolean;
   sourceDir?: string;
+  /** 写回时检测 wiki 目标目录不存在/为空则自动全量补齐（默认 true；显式 false 关闭） */
+  autoBackfill?: boolean;
 }
 
 /** scopes.<scope>.clean：数据清洗配置（REQ-06/07/08） */
@@ -344,6 +346,7 @@ function parseAndExpand(configFile: string): KiConfig {
           wikiSync: ws ? {
             enabled: ws.enabled !== false,  // 默认 true
             sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
+            autoBackfill: ws.autoBackfill !== false,  // 默认 true
           } : undefined,
           clean,
           import: imp,
