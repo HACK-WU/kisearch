@@ -138,7 +138,7 @@ ki mcp --status --host 127.0.0.1 --port 7423
 
 Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Token）> 多 Token 存储 `~/.ki/mcp-tokens.json`（`ki mcp token generate --scope <...>` 创建），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，按明文在存储中匹配（常量时间比较）得到授权 scope 集合，失败返回 401。
 
-**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
+**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_manage_index_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
 
 **枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_manage_index_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。免鉴权（回环）或 `all` 权限时不过滤。
 
@@ -229,7 +229,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 - **鉴权失败（401）**：Token 无效或缺失。核对客户端 `Authorization: Bearer` 与 `ki mcp token list` 输出的明文完全一致（整段复制勿手抄）；若用全权临时 Token，确认 `--token`/`KI_MCP_TOKEN` 仍在生效。服务端 stderr 有失败原因日志。
-- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。
+- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_manage_index_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
 
 ## 会话模型
 

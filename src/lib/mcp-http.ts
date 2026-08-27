@@ -98,18 +98,37 @@ function isInitializeBody(body: unknown): boolean {
 }
 
 /**
+ * 无 scope 参数的工具白名单（schema 为 `{}`，输出由工具层按 authScopes 过滤）。
+ *
+ * 这类「枚举/元数据」工具的授权语义是「按 Token 权限集合过滤输出」，而非「校验单点
+ * scope」，不适用「缺省 default」的单点越权规则——否则受限 Token（授权不含 default）
+ * 按契约无参调用会天然被 403（其安全边界由工具层 authScopes 过滤兜住，不受影响）。
+ *
+ * ⚠️ 新增 schema 不含 scope 参数的工具时必须同步加入此清单。
+ */
+const SCOPE_LESS_TOOLS = new Set(['ki_scope_list', 'ki_manage_index_list']);
+
+/**
  * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
  * 逐个 tools/call 校验（含 batch 数组），任一越权即拒绝，防止「batch 首项合法、后续越权」绕过。
+ * 白名单工具（SCOPE_LESS_TOOLS）跳过此校验，由工具层 authScopes 过滤兜底。
  * @returns 违规的 scope（需拒绝）；null 表示无需拒绝（非 tools/call 或全部 scope 被授权）
  */
 function findScopeViolation(body: unknown, scopes: string[]): string | null {
   const items = Array.isArray(body) ? body : [body];
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
-    const m = item as { method?: unknown; params?: { arguments?: { scope?: unknown } } };
+    const m = item as {
+      method?: unknown;
+      params?: { name?: unknown; arguments?: { scope?: unknown } };
+    };
     if (m.method !== 'tools/call') continue;
-    const args = m.params?.arguments;
-    if (!args || typeof args !== 'object') continue;
+    // 无 scope 参数的枚举工具：放行给工具层按授权集合过滤（见 SCOPE_LESS_TOOLS 注释）
+    if (typeof m.params?.name === 'string' && SCOPE_LESS_TOOLS.has(m.params.name)) continue;
+    // 缺失/非法 arguments 等价于工具层 zod 缺省 scope='default'，必须参与校验，
+    // 否则恶意客户端省略 arguments 即可绕过闸门读未授权的 default scope
+    const rawArgs = m.params?.arguments;
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
     const scope = (args as { scope?: unknown }).scope;
     const effective = typeof scope === 'string' && scope.trim() ? scope.trim() : 'default';
     if (scopes.includes(ALL_SCOPES) || scopes.includes(effective)) continue;

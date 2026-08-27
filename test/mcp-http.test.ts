@@ -32,6 +32,10 @@ function buildTestServer(_authScopes: string[] | null = null): McpServer {
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
   }));
+  // 模拟枚举类无参工具（schema 为 {}），用于验证 HTTP 闸门对白名单工具的豁免
+  server.tool('ki_scope_list', 'test scope list', {}, async () => ({
+    content: [{ type: 'text', text: JSON.stringify({ scopes: [] }) }],
+  }));
   return server;
 }
 
@@ -195,6 +199,36 @@ async function callToolBatch(
     /* 忽略 */
   }
   return { status: res.status };
+}
+
+/** 发一个任意 tools/call 请求（自定义工具名与 arguments），返回状态码与响应体 */
+async function callToolRaw(
+  base: string,
+  sid: string,
+  token: string | undefined,
+  name: string,
+  args?: Record<string, unknown>,
+): Promise<{ status: number; body: string }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sid,
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const params: Record<string, unknown> = { name };
+  if (args !== undefined) params.arguments = args;
+  const res = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params,
+    }),
+  });
+  const body = await res.text();
+  return { status: res.status, body };
 }
 
 // ─── A. isLoopbackHost ───
@@ -456,6 +490,48 @@ describe('scope 越权校验（RBAC）', () => {
     assert.ok(sid);
     // 首项合法 team-a，次项越权 team-b：必须整体拒绝，不能只校验首项
     const res = await callToolBatch(srv.base, sid!, 'team-a-token', ['team-a', 'team-b']);
+    assert.equal(res.status, 403);
+  });
+
+  it('无 scope 参数工具（白名单）无参调用 → 放行（200，输出由工具层按授权过滤）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    const res = await callToolRaw(srv.base, sid!, 'team-a-token', 'ki_scope_list', {});
+    assert.equal(res.status, 200);
+  });
+
+  it('batch 混合：白名单工具豁免 + 越权 scope 工具仍整体拒绝（豁免不扩大化）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: 'Bearer team-a-token',
+      'mcp-session-id': sid!,
+    };
+    const res = await fetch(`${srv.base}/mcp`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify([
+        // 白名单工具：无 scope 参数，HTTP 层不做缺省校验
+        { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'ki_scope_list', arguments: {} } },
+        // 普通 scope 工具越权：必须整体拦截
+        { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'ping', arguments: { scope: 'team-b' } } },
+      ]),
+    });
+    try {
+      await res.body?.cancel();
+    } catch {
+      /* 忽略 */
+    }
+    assert.equal(res.status, 403);
+  });
+
+  it('scope 工具完全省略 arguments 字段 → 视为缺省 default 参与校验（防缺参绕过）', async () => {
+    const { sid } = await initialize(srv.base, 'team-a-token');
+    assert.ok(sid);
+    // 省略 arguments 时工具层 zod 会缺省 scope='default'，而 'default' 不在授权集合内，必须拦截
+    const res = await callToolRaw(srv.base, sid!, 'team-a-token', 'ping');
     assert.equal(res.status, 403);
   });
 
