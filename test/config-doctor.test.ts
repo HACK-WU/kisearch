@@ -24,7 +24,6 @@ import {
   loadConfig,
   resetConfigCache,
   getScopeDataDir,
-  getScopeSourceDir,
   getScopeWikiSync,
   resolveScope,
   getScopeMode,
@@ -85,48 +84,10 @@ describe('A. lib/config —— scope 数据目录语义', () => {
   });
 });
 
-describe('A. lib/config —— scope 可选字段（sourceDir / wikiSync）', () => {
-  it('未配置 sourceDir 的 default scope → null（模板 default: {} 的安全默认）', () => {
+describe('A. lib/config —— scope 可选字段（wikiSync）', () => {
+  it('default scope 未配 kbDir → 数据仍落 dataDir/default（模板 default: {} 的安全默认）', () => {
     const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  default: {}');
-    assert.strictEqual(getScopeSourceDir(cfg, 'default'), null);
-  });
-
-  it('default scope 按需配置 sourceDir 同样生效，且未配 kbDir 仍落 dataDir/default', () => {
-    const cfg = writeAndLoad(
-      'config.yaml',
-      ['dataDir: /abs/data', 'scopes:', '  default:', '    sourceDir: /custom/wiki'].join('\n')
-    );
-    assert.strictEqual(getScopeSourceDir(cfg, 'default'), '/custom/wiki');
     assert.strictEqual(getScopeDataDir(cfg, 'default'), path.join('/abs/data', 'default'));
-  });
-
-  it('sourceDir 支持 $HOME 前缀展开', () => {
-    const cfg = writeAndLoad(
-      'config.yaml',
-      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: $HOME/wiki'].join('\n')
-    );
-    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.join(os.homedir(), 'wiki'));
-  });
-
-  it('sourceDir 支持 ~ 前缀展开', () => {
-    const cfg = writeAndLoad(
-      'config.yaml',
-      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: ~/wiki-out'].join('\n')
-    );
-    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.join(os.homedir(), 'wiki-out'));
-  });
-
-  it('相对 sourceDir → 相对于配置文件所在目录展开', () => {
-    const dir = fs.mkdtempSync(path.join(tmpDir, 'cfg-rel-'));
-    const file = path.join(dir, 'config.yaml');
-    fs.writeFileSync(
-      file,
-      ['dataDir: /abs/data', 'scopes:', '  proj:', '    sourceDir: rel/wiki'].join('\n'),
-      'utf-8'
-    );
-    resetConfigCache();
-    const cfg = loadConfig(file);
-    assert.strictEqual(getScopeSourceDir(cfg, 'proj'), path.resolve(dir, 'rel/wiki'));
   });
 
   it('wikiSync：未配置 → null', () => {

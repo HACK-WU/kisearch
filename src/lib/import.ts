@@ -533,15 +533,6 @@ export async function handleDirectImport(
   setSource(scope, source);
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
-  // scope 未配置 sourceDir 时写入绝对路径（H-20）
-  try {
-    const { setScopeSourceDir } = await import('./config.js');
-    const wrote = setScopeSourceDir(scope, sourceDir);
-    if (wrote) {
-      logInfo(`已写入 scope sourceDir（绝对路径）：${sourceDir}`);
-    }
-  } catch { /* 写入失败不阻断 */ }
-
   logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}${vector ? '' : '  [非向量化:仅写KB层]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）

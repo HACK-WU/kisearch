@@ -1198,7 +1198,6 @@ scopes:
 | `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |
-| `scopes.<scope>.sourceDir` | scope | 外部知识库源目录（由 `scan-kb import` 自动记录） |
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 

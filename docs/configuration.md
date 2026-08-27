@@ -104,16 +104,16 @@ scope → KB 目录映射。每个 scope 可独立配置数据来源与导入/�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `kbDir` | `string` | 无 | KB **基础目录**。程序自动拼接 `kb/{scope}` 子目录（如 `kbDir=/data/kb`、scope=monitor → 实际数据目录 `/data/kb/kb/monitor`），**不要**在 `kbDir` 里带上 scope 名。未配置时回退到 `dataDir/{scope}` |
-| `sourceDir` | `string` | 无 | 外部源目录（供 wiki 同步 / 增量导入） |
-| `wikiSync` | `object` | — | wiki 同步配置 |
+| `wikiSync` | `object` | — | wiki 写回/回收站的源目录定位（`sourceDir`）与开关（`enabled`）|
 | `clean` | `object` | — | 数据清洗配置 |
 | `import` | `object` | — | 导入配置 |
+
+> 注：顶层 `scopes.<scope>.sourceDir` 已废弃删除——导入源记录由 group-index 的 source 块承载；Wiki 源目录请配置在 `wikiSync.sourceDir`。旧配置文件中残留的该字段会被忽略。
 
 ```yaml
 scopes:
   monitor:
     kbDir: /data/kb
-    sourceDir: /repo/bk-monitor-wiki/wiki
     wikiSync:
       enabled: true
       sourceDir: /repo/bk-monitor-wiki/wiki
@@ -198,7 +198,6 @@ scopes:
   monitor:
     # kbDir 为基础目录，程序自动拼接 kb/{scope}，实际数据目录 = /data/kb/kb/monitor
     kbDir: /data/kb
-    sourceDir: /repo/bk-monitor-wiki/wiki
     wikiSync:
       enabled: true
       sourceDir: /repo/bk-monitor-wiki/wiki

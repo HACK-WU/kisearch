@@ -112,8 +112,7 @@ scopes:
   #   注意 kbDir 会在其下自动创建 kb/{scope} 子目录（避免污染源码目录）
   # my-project:
   #   kbDir: /data/special-kb          # 实际数据在 /data/special-kb/kb/my-project
-  #   sourceDir: ~/projects/my-wiki    # 源文件目录（wiki-sync / diff / import 依赖）
-  #   wikiSync:                        # 可选: Wiki 自动同步
+  #   wikiSync:                        # 可选: Wiki 写回/回收站的源目录定位
   #     enabled: true
   #     sourceDir: ~/projects/my-wiki
 `;

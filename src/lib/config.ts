@@ -89,7 +89,6 @@ export interface ImportConfig {
 
 export interface ScopeConfig {
   kbDir?: string;
-  sourceDir?: string;
   wikiSync?: WikiSyncConfig;
   clean?: CleanConfig;                    // 【新增】数据清洗配置（REQ-06/07）
   import?: ImportConfig;                  // 【新增】导入配置（REQ-08）
@@ -342,7 +341,6 @@ function parseAndExpand(configFile: string): KiConfig {
         }
         scopes[name] = {
           kbDir: s.kbDir ? expandPath(String(s.kbDir), configDir) : undefined,
-          sourceDir: s.sourceDir ? expandPath(String(s.sourceDir), configDir) : undefined,
           wikiSync: ws ? {
             enabled: ws.enabled !== false,  // 默认 true
             sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
@@ -389,13 +387,6 @@ export function getScopeDataDir(config: KiConfig, scope: string): string {
  */
 export function getBackupDir(config: KiConfig): string {
   return config.backupDir;
-}
-
-/**
- * 获取指定 scope 的 sourceDir（如果配置了）
- */
-export function getScopeSourceDir(config: KiConfig, scope: string): string | null {
-  return config.scopes[scope]?.sourceDir ?? null;
 }
 
 /**
@@ -511,57 +502,4 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
   fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   resetConfigCache();
   return { removed: true, configPath };
-}
-
-/**
- * 直导完成时，若 scope 尚未配置 sourceDir，则写入绝对路径（H-20）。
- * - 无配置文件 / scope 已配置 sourceDir → 不写入，返回 false
- * - YAML：用 Document API 保留注释与格式
- * - JSON：解析后写入并回写
- * 写回后清除配置缓存（resetConfigCache）。
- */
-export function setScopeSourceDir(scope: string, sourceDir: string): boolean {
-  const config = loadConfig();
-  const configPath = config._configPath;
-  if (!configPath || !fs.existsSync(configPath)) {
-    return false; // 无配置文件，不创建
-  }
-  if (getScopeSourceDir(config, scope)) {
-    return false; // 已配置，不覆盖
-  }
-
-  const absSourceDir = path.resolve(sourceDir);
-  const ext = path.extname(configPath).toLowerCase();
-  const text = fs.readFileSync(configPath, 'utf-8');
-
-  if (ext === '.yaml' || ext === '.yml') {
-    const doc = YAML.parseDocument(text);
-    if (!doc.hasIn(['scopes', scope])) {
-      doc.setIn(['scopes', scope], { sourceDir: absSourceDir });
-    } else {
-      doc.setIn(['scopes', scope, 'sourceDir'], absSourceDir);
-    }
-    fs.writeFileSync(configPath, doc.toString(), 'utf-8');
-    resetConfigCache();
-    return true;
-  }
-
-  // JSON
-  try {
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    if (!parsed.scopes || typeof parsed.scopes !== 'object') {
-      parsed.scopes = {};
-    }
-    const scopes = parsed.scopes as Record<string, unknown>;
-    if (!scopes[scope] || typeof scopes[scope] !== 'object') {
-      scopes[scope] = {};
-    }
-    const sc = scopes[scope] as Record<string, unknown>;
-    sc.sourceDir = absSourceDir;
-    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
-    resetConfigCache();
-    return true;
-  } catch {
-    return false; // JSON 解析失败不阻断
-  }
 }
