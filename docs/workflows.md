@@ -107,6 +107,8 @@ ki scan-kb import \
 
 内部完成：递归扫描 .md → 逐文件切分（大文档自动切分）→ 批量 zvec 引擎向量化（content = chunk 原文）→ Group 树创建 → `relations-cache` 写入（文件级 relation 挂 `memoryIds` 多值 + `sourcePath`）→ `group-index.source` 块记录（含切分参数持久化）。
 
+**可选：导入时打标**（附加 `--tags <t1,t2>`）：为导入文件附加自定义标签，每个 tag 各写一条内容向量，导入后即可 `ki search -t <tag>` 召回；标签持久化到 `relation.tags`，后续 `ki restore <scope> --rebuild-vector` 可自动恢复。注意：不带 `--tags` 重导会清除已有标签（导入为覆盖语义，区别于重建打标的只增不减）。
+
 ### 增量更新（幂等追加，1 步）
 
 > 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，不再依赖 git。

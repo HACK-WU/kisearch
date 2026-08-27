@@ -10,6 +10,7 @@ ki 提供内置的备份恢复命令：
 |------|------|------|
 | `ki backup` | 备份 scope 目录快照 | `ki backup <scope>` |
 | `ki restore` | 从快照还原 | `ki restore <scope> --from-snapshot` |
+| `ki restore --rebuild-vector` | 重建向量（还原后或独立；支持 `--group` 过滤 / `--tags` 打标的局部重建） | `ki restore <scope> --rebuild-vector [--group <path>] [--tags <t1,t2>]` |
 | `ki config init` | 生成配置文件（含备份目录配置） | `ki config init` |
 
 **快速备份**：
@@ -161,6 +162,20 @@ ki restore scope-name --from-snapshot --timestamp 20260615-100000 --backup-dir /
 ```
 
 > CLI 为非交互式：`--from-snapshot` 不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
+
+**还原后重建向量**（向量文档不随快照还原，如需语义检索需重建）：
+```bash
+# 还原后全量重建（内容 + 关系 + 路径向量）
+ki restore scope-name --from-snapshot --rebuild-vector --yes
+
+# 局部重建：仅重建指定 Group 子树（幂等覆盖，不清空其他向量）
+ki restore scope-name --rebuild-vector --group wiki/部署运维
+
+# 重建打标：为重建范围内文档附加标签（与已有标签合并去重，跨命令累积：先 a 再 b = a∪b）
+ki restore scope-name --rebuild-vector --tags api,auth
+```
+
+> 局部重建（带 `--group`/`--tags`）成功后不清除导入中断标记，仅全量重建清除；参数值缺失/全为保留标签时拒绝执行，避免误降级为全量清空重建。局部重建亦**不可与 `--from-snapshot` 组合**（快照还原后向量层需与快照 KB 全量对齐）。详见 [cli.md](./cli.md) 的 `restore` 章节。
 
 ### 2. 从模板重新初始化
 

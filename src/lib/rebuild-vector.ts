@@ -11,6 +11,12 @@
  * 内容向量（ki-search）的 docId 回写 relations-cache.json 的 rel.memoryId，
  * 防止 delete-relation 等命令产生悬空引用（与 import 的 writeRelations 语义一致）。
  *
+ * 局部重建（--group / --tags）：指定过滤/打标参数时为 partial 模式——
+ *   - 不执行全量 deleteScope，仅对匹配子集幂等覆盖（docId 确定性，upsert 幂等），其他向量不受影响；
+ *   - --tags 为打标语义：与重建范围内 relation 的已有 rel.tags 合并去重（只增不减），
+ *     合并后每个 tag 生成一条内容向量；跨命令累积天然成立（载体即 rel.tags）；
+ *   - partial 重建成功后不清导入中断标记（由调用方依据 result.partial 判定）。
+ *
  * 数据源完全来自已还原 KB（自包含，无需 ai-results.json / 外部源目录）。
  */
 
@@ -23,6 +29,7 @@ import {
   vectorDeleteScope,
   type VectorBulkStoreResult,
 } from './vector-client.js';
+import { parseContentTags } from './constants.js';
 
 // 与 import 流程对齐的 tag 常量（VECTORIZE_TAG / ki-relation / ki-path）
 const CONTENT_TAG = 'ki-search';
@@ -44,22 +51,46 @@ export interface RebuildVectorStats {
   content: number;
   relation: number;
   path: number;
+  /** 自定义 tag 内容向量条目数（含恢复的 + --tags 新打的） */
+  tag: number;
   succeeded: number;
   failed: number;
   updatedMemoryId: number;
+  /** --tags 打标：本次实际新增标签的 relation 数（未传 --tags 为 0） */
+  taggedRelations: number;
+  /** --tags 解析去重后的标签集合（未传为空数组） */
+  mergedTags: string[];
 }
 
 export interface RebuildVectorResult {
   ok: boolean;
   scope: string;
+  /** true = 局部重建（带 --group/--tags）：未清空其他向量、不清中断标记 */
+  partial: boolean;
   stats: RebuildVectorStats;
   errors: { type: string; path: string; error: string }[];
 }
 
+/** 重建选项（对应 CLI 的 --group / --tags） */
+export interface RebuildVectorOptions {
+  /** --group 过滤：仅重建该 Group 子树（相对 scope 数据目录的 Group 路径，如 `a/b`） */
+  groupFilter?: string;
+  /** --tags 打标：逗号分隔；与范围内 relation 已有 rel.tags 合并去重（只增不减） */
+  tags?: string;
+  /** CLI 层是否显式传入了 --tags（NEG：原始值非空但解析后为空时提示保留标签被过滤） */
+  tagsProvided?: boolean;
+}
+
 /** relations-cache 的 groups 扁平结构（键 = 完整 groupPath） */
 interface CacheGroup {
-  hot_relations?: { text: string; memoryId?: string | null }[];
+  hot_relations?: { text: string; memoryId?: string | null; memoryIds?: string[]; tags?: string[] }[];
   keywords?: string[];
+}
+
+/** groupPath 是否在过滤子树内（自身或子孙）；未指定过滤时全部命中 */
+export function isInGroupScope(groupPath: string, groupFilter?: string): boolean {
+  if (!groupFilter) return true;
+  return groupPath === groupFilter || groupPath.startsWith(groupFilter + '/');
 }
 
 // ─── 条目收集（纯函数，可单测） ───
@@ -72,8 +103,9 @@ interface CacheGroup {
  * `[摘要]/[关键词]/[路径]` 前缀；keywords 机制已删除，REQ-05）。
  *
  * @param scopeDir scope 数据目录
+ * @param groupFilter 可选：仅收集该 Group 子树下的 index.json（目录不存在时返回空）
  */
-export function collectContentEntries(scopeDir: string): RebuildVectorEntry[] {
+export function collectContentEntries(scopeDir: string, groupFilter?: string): RebuildVectorEntry[] {
   const entries: RebuildVectorEntry[] = [];
   if (!fs.existsSync(scopeDir)) return entries;
 
@@ -110,6 +142,14 @@ export function collectContentEntries(scopeDir: string): RebuildVectorEntry[] {
     }
   }
 
+  if (groupFilter) {
+    // 过滤模式：直接从子树目录起遍历（子树不存在时返回空，由调用方先校验）
+    const subDir = path.join(scopeDir, ...groupFilter.split('/'));
+    if (fs.existsSync(subDir) && fs.statSync(subDir).isDirectory()) {
+      walk(subDir, groupFilter);
+    }
+    return entries;
+  }
   walk(scopeDir, '');
   return entries;
 }
@@ -120,12 +160,14 @@ export function collectContentEntries(scopeDir: string): RebuildVectorEntry[] {
  * - 每个 group → 一条 ki-path 向量
  */
 export function collectPathRelationEntries(
-  groups: Record<string, CacheGroup>
+  groups: Record<string, CacheGroup>,
+  groupFilter?: string
 ): { relationEntries: RebuildVectorEntry[]; pathEntries: RebuildVectorEntry[] } {
   const relationEntries: RebuildVectorEntry[] = [];
   const pathEntries: RebuildVectorEntry[] = [];
 
   for (const [groupPath, g] of Object.entries(groups)) {
+    if (!isInGroupScope(groupPath, groupFilter)) continue;
     for (const rel of g.hot_relations ?? []) {
       relationEntries.push({
         text: buildRelationContent(rel.text, groupPath),
@@ -149,7 +191,8 @@ export function collectPathRelationEntries(
  */
 export function collectTagEntries(
   scope: string,
-  groups: Record<string, CacheGroup>
+  groups: Record<string, CacheGroup>,
+  groupFilter?: string
 ): RebuildVectorEntry[] {
   const entries: RebuildVectorEntry[] = [];
   const config = loadConfig();
@@ -158,6 +201,7 @@ export function collectTagEntries(
   const localKbCache = new Map<string, Record<string, string> | undefined>();
 
   for (const [groupPath, g] of Object.entries(groups)) {
+    if (!isInGroupScope(groupPath, groupFilter)) continue;
     let localKb = localKbCache.get(groupPath);
     if (localKb === undefined && !localKbCache.has(groupPath)) {
       // 首次访问该 group：加载 index.json（读取失败则缓存 undefined 避免重复尝试）
@@ -181,7 +225,7 @@ export function collectTagEntries(
         entries.push({
           text,
           tags: tag,
-          group: groupPath,
+          groupPath: groupPath,
           relationName: rel.text,
         });
       }
@@ -205,7 +249,7 @@ export function updateMemoryIds(
   // 按 (groupPath, relationName) 分组收集全部成功条目的 docId（含内容向量 + 自定义 tag 向量）
   const keyToMids = new Map<string, string[]>();
   for (const r of results) {
-    if (!r.success) continue;
+    if (!r.success || !r.memoryId) continue;
     const e = allEntries[r.index];
     if (e?.groupPath && e?.relationName) {
       const key = `${e.groupPath}\u0000${e.relationName}`;
@@ -232,6 +276,34 @@ export function updateMemoryIds(
   return updated;
 }
 
+// ─── 打标合并（--tags） ───
+
+/**
+ * --tags 打标：将 CLI 标签与重建范围内 relation 的已有 rel.tags 合并去重（只增不减）。
+ * 跨命令累积天然成立：载体即 rel.tags（restore 打 a → 再次 rebuild 打 b → a∪b）。
+ * @param tags 已经 parseContentTags 解析去重的标签；空数组时不操作
+ * @returns taggedRelations 本次实际新增标签的 relation 数（无新增不计）
+ */
+export function mergeRebuildTags(
+  groups: Record<string, CacheGroup>,
+  tags: string[],
+  groupFilter?: string
+): { taggedRelations: number } {
+  if (tags.length === 0) return { taggedRelations: 0 };
+  let taggedRelations = 0;
+  for (const [groupPath, g] of Object.entries(groups)) {
+    if (!isInGroupScope(groupPath, groupFilter)) continue;
+    for (const rel of g.hot_relations ?? []) {
+      const existing = rel.tags ?? [];
+      const toAdd = tags.filter((t) => !existing.includes(t));
+      if (toAdd.length === 0) continue;
+      rel.tags = [...existing, ...toAdd];
+      taggedRelations++;
+    }
+  }
+  return { taggedRelations };
+}
+
 // ─── 主流程 ───
 
 export interface RebuildDeps {
@@ -240,67 +312,141 @@ export interface RebuildDeps {
 }
 
 /**
- * 从已还原 KB 重建 scope 的三类向量，并回写 memoryId。
+ * 从已还原 KB 重建 scope 的向量，并回写 memoryId。
+ * 不带 opts 时为全量重建（清空+重建，幂等）；带 --group/--tags 时为局部重建（见模块头说明）。
  * @param deps 依赖注入（测试用 mock，缺省用真实实现）
+ * @param opts 局部重建选项（--group 过滤 / --tags 打标）
  */
 export async function rebuildScopeVectors(
   scope: string,
-  deps: RebuildDeps = {}
+  deps: RebuildDeps = {},
+  opts: RebuildVectorOptions = {}
 ): Promise<RebuildVectorResult> {
   const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const deleteScope = deps.deleteScope ?? vectorDeleteScope;
+
+  const groupFilter = opts.groupFilter?.trim() || undefined;
+  const cliTags = parseContentTags(opts.tags);
+  const partial = Boolean(groupFilter) || cliTags.length > 0;
 
   const emptyStats = (): RebuildVectorStats => ({
     content: 0,
     relation: 0,
     path: 0,
+    tag: 0,
     succeeded: 0,
     failed: 0,
     updatedMemoryId: 0,
+    taggedRelations: 0,
+    mergedTags: cliTags,
   });
   const stats = emptyStats();
   const errors: { type: string; path: string; error: string }[] = [];
+
+  // NEG：显式传入 --tags 但解析后为空（全为保留标签/空白）：
+  //   - 无 --group 时拒绝执行（库层与 CLI 层一致，避免程序化调用静默降级为全量清空重建）；
+  //   - 有 --group 时仅警告（仍为局部重建，无全量清空风险）。
+  if (opts.tagsProvided && cliTags.length === 0) {
+    if (!groupFilter) {
+      return {
+        ok: false,
+        scope,
+        partial,
+        stats,
+        errors: [{ type: 'tags', path: opts.tags ?? '', error: '--tags 解析后无有效标签（内部保留标签 ki-search/ki-relation/ki-path 不可用）；为避免误降级为全量清空重建，本次未执行' }],
+      };
+    }
+    process.stderr.write(
+      '警告：--tags 解析后无有效标签（内部保留标签 ki-search/ki-relation/ki-path 不可用作自定义标签；已忽略）。\n'
+    );
+  }
 
   const config = loadConfig();
   const scopeDir = getScopeDataDir(config, scope);
 
   if (!fs.existsSync(scopeDir)) {
-    return { ok: false, scope, stats, errors: [{ type: 'scope', path: scopeDir, error: 'scope 数据目录不存在' }] };
+    return { ok: false, scope, partial, stats, errors: [{ type: 'scope', path: scopeDir, error: 'scope 数据目录不存在' }] };
   }
   const cachePath = path.join(scopeDir, 'relations-cache.json');
   if (!fs.existsSync(cachePath)) {
     return {
       ok: false,
       scope,
+      partial,
       stats,
       errors: [{ type: 'cache', path: cachePath, error: 'relations-cache.json 不存在' }],
     };
   }
 
-  // 1. 收集四类条目（内容 + relation + path + 自定义 tag）
+  // --group 路径安全校验（禁空段与 ./..，防目录穿越与归一化后元数据错位）
+  if (groupFilter) {
+    const segs = groupFilter.split('/');
+    if (segs.some((s) => s === '' || s === '.' || s === '..')) {
+      return {
+        ok: false,
+        scope,
+        partial,
+        stats,
+        errors: [{ type: 'group', path: groupFilter, error: '--group 路径非法（不允许空段或 ..）' }],
+      };
+    }
+  }
+
+  // 1. 读取 relations-cache；--group 需存在（目录或 cache 任一侧命中）
   const rc = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as { groups?: Record<string, CacheGroup> };
   const groups = rc.groups ?? {};
-  const contentEntries = collectContentEntries(scopeDir);
-  const { relationEntries, pathEntries } = collectPathRelationEntries(groups);
-  const tagEntries = collectTagEntries(scope, groups);
+  if (groupFilter) {
+    const groupAbs = path.join(scopeDir, ...groupFilter.split('/'));
+    const dirExists = fs.existsSync(groupAbs) && fs.statSync(groupAbs).isDirectory();
+    const cacheExists = Object.keys(groups).some((k) => isInGroupScope(k, groupFilter));
+    if (!dirExists && !cacheExists) {
+      return {
+        ok: false,
+        scope,
+        partial,
+        stats,
+        errors: [{ type: 'group', path: groupFilter, error: `--group 指定的 Group 不存在：${groupFilter}` }],
+      };
+    }
+  }
+
+  // 2. --tags 打标：先合并写 rel.tags，再收集（使本次重建包含新标签的向量）
+  const { taggedRelations } = mergeRebuildTags(groups, cliTags, groupFilter);
+  stats.taggedRelations = taggedRelations;
+
+  // 3. 收集四类条目（内容 + relation + path + 自定义 tag）
+  const contentEntries = collectContentEntries(scopeDir, groupFilter);
+  const { relationEntries, pathEntries } = collectPathRelationEntries(groups, groupFilter);
+  const tagEntries = collectTagEntries(scope, groups, groupFilter);
   stats.content = contentEntries.length;
   stats.relation = relationEntries.length;
   stats.path = pathEntries.length;
+  stats.tag = tagEntries.length;
   const allEntries = [...contentEntries, ...relationEntries, ...pathEntries, ...tagEntries];
 
-  // 2. 清空旧向量（保证结果与 KB 一致；失败则中止，避免新旧混杂）
-  try {
-    await deleteScope({ scope });
-  } catch (err) {
-    return {
-      ok: false,
-      scope,
-      stats,
-      errors: [{ type: 'cleanup', path: scope, error: `清空旧向量失败：${(err as Error).message}` }],
-    };
+  // 4. 清空旧向量：仅全量重建执行（保证结果与 KB 一致）；
+  //    局部重建跳过（幂等覆盖匹配子集，其他向量不受影响）。失败则中止，避免新旧混杂。
+  if (!partial) {
+    try {
+      await deleteScope({ scope });
+    } catch (err) {
+      return {
+        ok: false,
+        scope,
+        partial,
+        stats,
+        errors: [{ type: 'cleanup', path: scope, error: `清空旧向量失败：${(err as Error).message}` }],
+      };
+    }
   }
 
-  // 3. 批量向量化
+  // 5. 批量向量化（局部重建时 allEntries 为空则直接完成，仅保留打标回写）
+  if (partial && allEntries.length === 0) {
+    // NEG：范围内无任何可重建条目 → 显式提示，避免用户误以为重建生效（如 --group 目录下无 index.json 且 cache 无该子树条目）
+    process.stderr.write(
+      '提示：本次局部重建范围内未收集到任何条目（目标 Group 下可能没有 index.json / relations-cache 条目）；未写入任何向量。\n'
+    );
+  }
   const res = await bulkStore({ scope, entries: allEntries });
   stats.succeeded = res.succeeded;
   stats.failed = res.failed;
@@ -315,9 +461,9 @@ export async function rebuildScopeVectors(
     }
   }
 
-  // 4. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
+  // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
   stats.updatedMemoryId = updateMemoryIds(groups, allEntries, res.results);
   fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
 
-  return { ok: true, scope, stats, errors };
+  return { ok: true, scope, partial, stats, errors };
 }

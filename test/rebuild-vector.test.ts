@@ -2,10 +2,11 @@
  * rebuild-vector 单元测试：从已还原 KB 重建向量（--rebuild-vector）
  *
  * 覆盖：
- *   A. collectContentEntries —— Group 树 index.json 收集（排除元数据键、groupPath 推导）
- *   B. collectPathRelationEntries —— relation(ki-relation) / path(ki-path) 条目
+ *   A. collectContentEntries —— Group 树 index.json 收集（排除元数据键、groupPath 推导、--group 子树过滤）
+ *   B. collectPathRelationEntries —— relation(ki-relation) / path(ki-path) 条目（含 --group 过滤）
  *   C. updateMemoryIds —— 内容向量 docId 回写 relations-cache 的 rel.memoryId
- *   D. rebuildScopeVectors 主流程（mock 向量层）—— 三类向量、清空调用、回写、失败路径
+ *   D. rebuildScopeVectors 主流程（mock 向量层）—— 三类向量、清空调用、回写、失败路径、局部重建（--group/--tags）
+ *   F. mergeRebuildTags —— --tags 打标合并去重（只增不减、子树过滤）
  *
  * 运行：npx jiti test/rebuild-vector.test.ts
  */
@@ -20,6 +21,8 @@ import {
   collectPathRelationEntries,
   collectTagEntries,
   updateMemoryIds,
+  mergeRebuildTags,
+  isInGroupScope,
   rebuildScopeVectors,
   type RebuildVectorEntry,
 } from '../src/lib/rebuild-vector.js';
@@ -104,6 +107,22 @@ describe('A. collectContentEntries —— Group 树 index.json 收集', () => {
       []
     );
   });
+
+  it('--group 过滤：仅收集子树内条目，groupPath 保持完整路径', () => {
+    const scopeDir = fs.mkdtempSync(path.join(tmpRoot, 'collect-filter-'));
+    makeScopeDir(scopeDir);
+    const entries = collectContentEntries(scopeDir, 'BKMonitorWiki/用户界面设计');
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].relationName, '按钮');
+    assert.strictEqual(entries[0].groupPath, 'BKMonitorWiki/用户界面设计');
+  });
+
+  it('--group 过滤：根 Group 命中自身及子孙；子树不存在 → 空', () => {
+    const scopeDir = fs.mkdtempSync(path.join(tmpRoot, 'collect-filter2-'));
+    makeScopeDir(scopeDir);
+    assert.strictEqual(collectContentEntries(scopeDir, 'BKMonitorWiki').length, 2, '根 Group 含子孙共 2 条');
+    assert.deepStrictEqual(collectContentEntries(scopeDir, 'Nope'), []);
+  });
 });
 
 describe('B. collectPathRelationEntries —— relation/path 向量条目', () => {
@@ -139,6 +158,79 @@ describe('B. collectPathRelationEntries —— relation/path 向量条目', () =
     assert.strictEqual(relationEntries.length, 0);
     assert.strictEqual(pathEntries.length, 0);
   });
+
+  it('--group 过滤：仅子树内 group 的 relation/path（前缀边界不误伤）', () => {
+    const g = {
+      ...groups,
+      BKMonitorWikiX: { hot_relations: [{ text: '误伤校验' }] }, // 前缀同名但非子孙，不应命中 'BKMonitorWiki' 之外的过滤…此处验证不会被 'BKMonitorWiki' 过滤误包含之外的反向：
+    };
+    // 过滤到子树：仅命中子孙（不含根自身）
+    const sub = collectPathRelationEntries(g, 'BKMonitorWiki/用户界面设计');
+    assert.strictEqual(sub.relationEntries.length, 2);
+    assert.strictEqual(sub.pathEntries.length, 1);
+    // 过滤到根：含自身 + 子孙，不含前缀同名的 BKMonitorWikiX
+    const root = collectPathRelationEntries(g, 'BKMonitorWiki');
+    assert.strictEqual(root.relationEntries.length, 3);
+    assert.strictEqual(root.pathEntries.length, 2);
+    assert.ok(root.relationEntries.every((e) => e.group !== 'BKMonitorWikiX'));
+  });
+
+  it('isInGroupScope 边界：自身/子孙命中，前缀同名不误伤，无过滤全命中', () => {
+    assert.strictEqual(isInGroupScope('a', 'a'), true);
+    assert.strictEqual(isInGroupScope('a/b', 'a'), true);
+    assert.strictEqual(isInGroupScope('ab', 'a'), false, '前缀同名非子孙不命中');
+    assert.strictEqual(isInGroupScope('anything'), true, '无过滤全命中');
+  });
+});
+
+describe('F. mergeRebuildTags —— --tags 打标合并去重', () => {
+  type TestGroups = Record<string, { hot_relations: { text: string; tags?: string[] }[] }>;
+  function makeGroups(): TestGroups {
+    return {
+      Wiki: {
+        hot_relations: [
+          { text: 'r1', tags: ['api'] },
+          { text: 'r2' },
+        ],
+      },
+      'Wiki/sub': { hot_relations: [{ text: 'r3', tags: ['api'] }] },
+      Other: { hot_relations: [{ text: 'r4' }] },
+    };
+  }
+
+  it('合并去重：已有标签保留、新标签追加（只增不减）', () => {
+    const groups = makeGroups();
+    const { taggedRelations } = mergeRebuildTags(groups, ['api', 'auth'], undefined);
+    // r1: +auth；r2: +api,auth；r3: +auth；r4: +api,auth → 4 个 relation 均有新增
+    assert.strictEqual(taggedRelations, 4);
+    assert.deepStrictEqual(groups.Wiki.hot_relations[0].tags, ['api', 'auth']);
+    assert.deepStrictEqual(groups.Wiki.hot_relations[1].tags, ['api', 'auth']);
+    assert.deepStrictEqual(groups['Wiki/sub'].hot_relations[0].tags, ['api', 'auth']);
+  });
+
+  it('全部已存在 → 不改动、计数 0（幂等）', () => {
+    const groups = makeGroups();
+    const { taggedRelations } = mergeRebuildTags(groups, ['api'], undefined);
+    assert.strictEqual(taggedRelations, 2); // r2/r4 无 api → 新增；r1/r3 已有不动
+    assert.deepStrictEqual(groups.Wiki.hot_relations[0].tags, ['api'], '已有标签不重复');
+    // 再次传入同标签 → 0 新增（跨命令幂等）
+    assert.strictEqual(mergeRebuildTags(groups, ['api'], undefined).taggedRelations, 0);
+  });
+
+  it('--group 过滤：仅子树内 relation 打标', () => {
+    const groups = makeGroups();
+    const { taggedRelations } = mergeRebuildTags(groups, ['auth'], 'Wiki/sub');
+    assert.strictEqual(taggedRelations, 1);
+    assert.deepStrictEqual(groups['Wiki/sub'].hot_relations[0].tags, ['api', 'auth']);
+    assert.deepStrictEqual(groups.Wiki.hot_relations[0].tags, ['api'], '范围外不动');
+    assert.strictEqual(groups.Other.hot_relations[0].tags, undefined);
+  });
+
+  it('空 tags → 不操作', () => {
+    const groups = makeGroups();
+    assert.strictEqual(mergeRebuildTags(groups, [], undefined).taggedRelations, 0);
+    assert.deepStrictEqual(groups.Wiki.hot_relations[0].tags, ['api']);
+  });
 });
 
 describe('C. updateMemoryIds —— memoryId 回写', () => {
@@ -171,7 +263,7 @@ describe('C. updateMemoryIds —— memoryId 回写', () => {
   });
 
   it('自定义 tag 向量 docId 也回填到 memoryIds（首 docId 兼容 memoryId）', () => {
-    const g = {
+    const g: Record<string, { hot_relations: { text: string; memoryId: string; memoryIds?: string[] }[] }> = {
       G1: { hot_relations: [{ text: 'x', memoryId: 'old' }] },
     };
     const allEntries: RebuildVectorEntry[] = [
@@ -249,7 +341,7 @@ describe('E. collectTagEntries —— 从 relations-cache 恢复自定义 tag �
     const tags = entries.map((e) => e.tags).sort();
     assert.deepStrictEqual(tags, ['api', 'auth']);
     assert.strictEqual(entries[0].text, '快速开始原文', 'text 取 local KB 原文');
-    assert.strictEqual(entries[0].group, 'Wiki');
+    assert.strictEqual(entries[0].groupPath, 'Wiki', 'tag 条目必须携带 groupPath（updateMemoryIds 回填匹配键）');
 
     delete process.env.KI_CONFIG_PATH;
     resetConfigCache();
@@ -276,6 +368,66 @@ describe('E. collectTagEntries —— 从 relations-cache 恢复自定义 tag �
     };
     const entries = collectTagEntries('s2', groups as never);
     assert.strictEqual(entries.length, 0);
+
+    delete process.env.KI_CONFIG_PATH;
+    resetConfigCache();
+  });
+
+  it('--group 过滤：仅收集子树内 group 的 tag 条目，范围外不动', () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'tags-filter-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 's3');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configPath, `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  s3: {}\n`, 'utf-8');
+    // 两个 group 各有一个带 tag 的 relation + local KB
+    fs.mkdirSync(path.join(scopeDir, 'WikiA'), { recursive: true });
+    fs.mkdirSync(path.join(scopeDir, 'WikiB'), { recursive: true });
+    fs.writeFileSync(path.join(scopeDir, 'WikiA', 'index.json'), JSON.stringify({ docA: 'A原文' }), 'utf-8');
+    fs.writeFileSync(path.join(scopeDir, 'WikiB', 'index.json'), JSON.stringify({ docB: 'B原文' }), 'utf-8');
+    process.env.KI_CONFIG_PATH = configPath;
+    resetConfigCache();
+
+    const groups = {
+      WikiA: { hot_relations: [{ text: 'docA', tags: ['api'] }] },
+      WikiB: { hot_relations: [{ text: 'docB', tags: ['api'] }] },
+    };
+    const entries = collectTagEntries('s3', groups as never, 'WikiA');
+    assert.strictEqual(entries.length, 1, '仅 WikiA 子树的 tag 条目');
+    assert.strictEqual(entries[0].groupPath, 'WikiA');
+    assert.strictEqual(entries[0].text, 'A原文');
+
+    delete process.env.KI_CONFIG_PATH;
+    resetConfigCache();
+  });
+
+  it('真实管道贯通：collectTagEntries 产出条目经 updateMemoryIds 回填 tag docId（回归：字段失配会导致重建后 tag docId 丢失）', () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'tags-pipeline-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 's4');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configPath, `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  s4: {}\n`, 'utf-8');
+    makeTagScopeDir(scopeDir);
+    process.env.KI_CONFIG_PATH = configPath;
+    resetConfigCache();
+
+    const groups = {
+      Wiki: { hot_relations: [{ text: '快速开始', tags: ['api'], memoryId: 'old' }] },
+    };
+    // 真实管道：collectTagEntries 产出条目 + 内容向量一起走 updateMemoryIds
+    const tagEntries = collectTagEntries('s4', groups as never);
+    assert.strictEqual(tagEntries.length, 1);
+    assert.strictEqual(tagEntries[0].groupPath, 'Wiki', 'tag 条目必须携带 groupPath');
+    const allEntries: RebuildVectorEntry[] = [
+      { text: '快速开始原文', tags: 'ki-search', groupPath: 'Wiki', relationName: '快速开始' },
+      ...tagEntries,
+    ];
+    const results = allEntries.map((_, i) => ({ index: i, memoryId: `mid_${i}`, success: true }));
+    updateMemoryIds(groups as never, allEntries, results);
+    assert.deepStrictEqual(
+      (groups.Wiki.hot_relations[0] as { memoryIds?: string[] }).memoryIds,
+      ['mid_0', 'mid_1'],
+      '内容 + tag docId 均回填'
+    );
 
     delete process.env.KI_CONFIG_PATH;
     resetConfigCache();
@@ -321,13 +473,17 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
 
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.scope, 'rs-a');
+    assert.strictEqual(result.partial, false, '无过滤参数 = 全量重建');
     assert.deepStrictEqual(result.stats, {
       content: 2,
       relation: 2,
       path: 2,
+      tag: 0,
       succeeded: 6,
       failed: 0,
       updatedMemoryId: 2,
+      taggedRelations: 0,
+      mergedTags: [],
     });
     // 清空调用：一次，scope 正确
     assert.strictEqual(calls.deleteScope.length, 1);
@@ -427,5 +583,222 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
     assert.strictEqual(result.stats.updatedMemoryId, 1); // 仅成功的内容向量回写
     assert.strictEqual(result.errors.length, 1);
     assert.strictEqual(result.errors[0].type, 'vectorize');
+  });
+
+  it('局部重建 --group：不清空旧向量、仅提交子树条目、partial=true', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+
+    const calls: { deleteScope: number; bulkStore: { entries: { tags: string; groupPath?: string; group?: string }[] }[] } = {
+      deleteScope: 0,
+      bulkStore: [],
+    };
+    const mockDelete = async () => {
+      calls.deleteScope++;
+      return { deleted: 0 };
+    };
+    const mockBulk = async (p: { entries: { tags: string; groupPath?: string; group?: string }[] }) => {
+      calls.bulkStore.push(p);
+      return {
+        total: p.entries.length,
+        succeeded: p.entries.length,
+        failed: 0,
+        results: p.entries.map((_, i) => ({ index: i, memoryId: `p_${i}`, success: true })),
+      };
+    };
+
+    const result = await rebuildScopeVectors(
+      'rs-a',
+      { bulkStore: mockBulk as never, deleteScope: mockDelete as never },
+      { groupFilter: 'BKMonitorWiki/用户界面设计' }
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.partial, true, '带 --group = 局部重建');
+    assert.strictEqual(calls.deleteScope, 0, '局部重建不得全量清空');
+    const submitted = calls.bulkStore[0].entries;
+    // 子树内：1 内容(按钮) + 1 relation + 1 path
+    assert.strictEqual(submitted.length, 3);
+    assert.deepStrictEqual(
+      submitted.map((e) => e.tags).sort(),
+      ['ki-path', 'ki-relation', 'ki-search']
+    );
+    const content = submitted.find((e) => e.tags === 'ki-search');
+    assert.strictEqual(content?.groupPath, 'BKMonitorWiki/用户界面设计');
+  });
+
+  it('局部重建 --group 不存在 → ok:false（group 错误，不触碰向量层）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+
+    let deleteCalls = 0;
+    let bulkCalls = 0;
+    const result = await rebuildScopeVectors(
+      'rs-a',
+      {
+        bulkStore: (async () => { bulkCalls++; return { total: 0, succeeded: 0, failed: 0, results: [] }; }) as never,
+        deleteScope: (async () => { deleteCalls++; return { deleted: 0 }; }) as never,
+      },
+      { groupFilter: 'NotExists' }
+    );
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.errors[0].type, 'group');
+    assert.match(result.errors[0].error, /Group 不存在/);
+    assert.strictEqual(deleteCalls, 0);
+    assert.strictEqual(bulkCalls, 0);
+  });
+
+  it('--group 路径含 ./.. 或空段 → 拒绝（非法路径，防归一化后 groupPath 元数据错位）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+    for (const bad of ['../escape', './wiki', 'wiki/./sub', '.']) {
+      const result = await rebuildScopeVectors('rs-a', {}, { groupFilter: bad });
+      assert.strictEqual(result.ok, false, `--group ${bad} 应被拒绝`);
+      assert.strictEqual(result.errors[0].type, 'group');
+      assert.match(result.errors[0].error, /路径非法/);
+    }
+  });
+
+  it('NEG：tagsProvided 但解析后为空且有 --group → 仅警告，继续局部重建（无全量清空风险）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+
+    let deleteCalls = 0;
+    const origWrite = process.stderr.write;
+    let captured = '';
+    process.stderr.write = ((chunk: unknown) => { captured += String(chunk); return true; }) as typeof process.stderr.write;
+    let result!: Awaited<ReturnType<typeof rebuildScopeVectors>>;
+    try {
+      result = await rebuildScopeVectors(
+        'rs-a',
+        {
+          bulkStore: (async (p: { entries: unknown[] }) => ({
+            total: p.entries.length,
+            succeeded: p.entries.length,
+            failed: 0,
+            results: p.entries.map((_, i) => ({ index: i, memoryId: `w_${i}`, success: true })),
+          })) as never,
+          deleteScope: (async () => { deleteCalls++; return { deleted: 0 }; }) as never,
+        },
+        { groupFilter: 'BKMonitorWiki', tags: 'ki-search', tagsProvided: true }
+      );
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    assert.strictEqual(result.ok, true, '有 --group 时无全量清空风险，应继续执行');
+    assert.strictEqual(result.partial, true);
+    assert.strictEqual(deleteCalls, 0, '局部重建不清空');
+    assert.strictEqual(result.stats.taggedRelations, 0, '无有效标签，不打标');
+    assert.match(captured, /无有效标签/, '应输出保留标签被过滤的警告');
+  });
+
+  it('NEG：局部重建范围内零条目 → stderr 显式提示（避免误以为生效）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+    // 目录存在但无 index.json，且 cache 无该子树条目 → 校验通过但收集为 0 条
+    fs.mkdirSync(path.join(s.scopeDir, 'Empty'), { recursive: true });
+
+    const origWrite = process.stderr.write;
+    let captured = '';
+    process.stderr.write = ((chunk: unknown) => { captured += String(chunk); return true; }) as typeof process.stderr.write;
+    let result!: Awaited<ReturnType<typeof rebuildScopeVectors>>;
+    try {
+      result = await rebuildScopeVectors(
+        'rs-a',
+        {
+          bulkStore: (async (p: { entries: unknown[] }) => ({ total: p.entries.length, succeeded: 0, failed: 0, results: [] })) as never,
+          deleteScope: (async () => ({ deleted: 0 })) as never,
+        },
+        { groupFilter: 'Empty' }
+      );
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.partial, true);
+    assert.strictEqual(result.stats.content + result.stats.relation + result.stats.path + result.stats.tag, 0);
+    assert.match(captured, /未收集到任何条目/, '零条目时应显式提示');
+  });
+
+  it('NEG：tagsProvided 但解析后为空且无 --group → 库层拒绝（与 CLI 一致，不静默全量清空）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+    let deleteCalls = 0;
+    const result = await rebuildScopeVectors(
+      'rs-a',
+      {
+        bulkStore: (async () => ({ total: 0, succeeded: 0, failed: 0, results: [] })) as never,
+        deleteScope: (async () => { deleteCalls++; return { deleted: 0 }; }) as never,
+      },
+      { tags: 'ki-search,ki-path', tagsProvided: true }
+    );
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.errors[0].type, 'tags');
+    assert.strictEqual(deleteCalls, 0, '不得执行全量清空');
+  });
+
+  it('局部重建 --tags：与已有标签合并去重、写 tag 向量、不清空、回写持久化', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+
+    const calls: { deleteScope: number; bulkStore: { entries: { tags: string }[] }[] } = { deleteScope: 0, bulkStore: [] };
+    const mockDelete = async () => { calls.deleteScope++; return { deleted: 0 }; };
+    const mockBulk = async (p: { entries: { tags: string }[] }) => {
+      calls.bulkStore.push(p);
+      return {
+        total: p.entries.length,
+        succeeded: p.entries.length,
+        failed: 0,
+        results: p.entries.map((_, i) => ({ index: i, memoryId: `t_${i}`, success: true })),
+      };
+    };
+
+    const result = await rebuildScopeVectors(
+      'rs-a',
+      { bulkStore: mockBulk as never, deleteScope: mockDelete as never },
+      { tags: 'Api, api ,ki-search' } // 验证去空/去重/小写化/过滤保留标签
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.partial, true, '带 --tags = 局部重建');
+    assert.strictEqual(calls.deleteScope, 0, '局部重建不得全量清空');
+    assert.deepStrictEqual(result.stats.mergedTags, ['api'], '去重 + 过滤保留标签');
+    assert.strictEqual(result.stats.taggedRelations, 2, '两个 relation 均新增标签');
+    // 提交条目：2 内容 + 2 relation + 2 path + 2 tag（每个 relation 各一条 api 向量）
+    const submitted = calls.bulkStore[0].entries;
+    assert.strictEqual(submitted.filter((e) => e.tags === 'api').length, 2);
+    // rel.tags 回写持久化（跨命令累积的载体）
+    const rc = JSON.parse(fs.readFileSync(path.join(s.scopeDir, 'relations-cache.json'), 'utf-8'));
+    assert.deepStrictEqual(rc.groups.BKMonitorWiki.hot_relations[0].tags, ['api']);
+    assert.deepStrictEqual(rc.groups['BKMonitorWiki/用户界面设计'].hot_relations[0].tags, ['api']);
+  });
+
+  it('跨命令标签累积：第二次重建传入新标签 → 并集（restore 打 a 后再打 b = a∪b）', async () => {
+    const s = setupScope('rs-a');
+    useConfig(s.configPath);
+    const noopBulk = (async (p: { entries: unknown[] }) => ({
+      total: p.entries.length,
+      succeeded: p.entries.length,
+      failed: 0,
+      results: p.entries.map((_, i) => ({ index: i, memoryId: `m_${i}`, success: true })),
+    })) as never;
+    const noopDelete = (async () => ({ deleted: 0 })) as never;
+
+    // 第一次：restore --rebuild-vector --tags a
+    const r1 = await rebuildScopeVectors('rs-a', { bulkStore: noopBulk, deleteScope: noopDelete }, { tags: 'a' });
+    assert.strictEqual(r1.ok, true);
+    // 第二次：独立 --rebuild-vector --tags b → 合并为 a∪b
+    const r2 = await rebuildScopeVectors('rs-a', { bulkStore: noopBulk, deleteScope: noopDelete }, { tags: 'b' });
+    assert.strictEqual(r2.ok, true);
+    assert.strictEqual(r2.stats.taggedRelations, 2, 'b 为新增标签');
+    const rc = JSON.parse(fs.readFileSync(path.join(s.scopeDir, 'relations-cache.json'), 'utf-8'));
+    assert.deepStrictEqual(rc.groups.BKMonitorWiki.hot_relations[0].tags, ['a', 'b'], '并集累积');
+    // tag 向量覆盖并集：a、b 各两条（2 个 relation）
+    const tagEntries = collectTagEntries('rs-a', rc.groups);
+    assert.strictEqual(tagEntries.filter((e) => e.tags === 'a').length, 2);
+    assert.strictEqual(tagEntries.filter((e) => e.tags === 'b').length, 2);
   });
 });

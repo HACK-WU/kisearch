@@ -106,7 +106,7 @@ document_type: requirement
 ### REQ-02 中断标记检测与恢复引导
 
 - **描述**：向量命令打开向量库前（`getEngine`/`ensureVectorAvailable` 路径）检测中断标记；若存在且向量库 probe 异常 → 输出可执行引导：
-  - `检测到未完成的导入（<时间>），向量库可能不完整。建议执行：ki rebuild-vector 或 ki restore <scope> --from-snapshot --rebuild-vector 恢复`
+  - `检测到未完成的导入（<时间>），向量库可能不完整。建议执行：ki restore <scope> --rebuild-vector 或 ki restore <scope> --from-snapshot --rebuild-vector 恢复`
   - **触发命令范围（推演 N1 决策）**：中断标记检测挂在 `getEngine`/`ensureVectorAvailable` 路径，即**所有打开向量库的命令**（search/store/doc/scope/tag/restore 等）；**纯 KB 命令（不碰向量库，如 doc list 仅查 local KB 时）不触发引导**——若 doc list 实现为"先 getEngine 后查 KB"，则也触发（保持一致性，实现时按"是否实际打开向量库"判定，文档明确此边界）
   - **标记生命周期（推演问题 2 + N2 决策）**：中断标记的**清除时机**——① `rebuild-vector`/`restore --rebuild-vector` 全量重建成功后**自动清除**；② 用户**手动重跑一次成功的 full 导入**（完整走完）后自动清除；③ **incremental 增量导入成功**（完整走完且无中断标记新增）后同样自动清除（增量从当前库状态继续，若库因中断不完整则增量可能不完整——增量导入成功后清除标记的前提是 diff 基于完整库；实现时若增量前检测到标记，可提示"库可能不完整，建议 rebuild"但允许用户继续）④ 提供手动清除方式（如 `ki clear-interrupt-mark` 或重建命令的 `--force` 隐含清除）。**未清除前**，向量命令按本条提示引导（这是有意的提醒，非 bug）；重建/成功导入后引导消失
 - **验收标准**：

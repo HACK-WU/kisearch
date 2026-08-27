@@ -41,6 +41,7 @@ program
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150）')
   .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB），不写向量（不产生 memoryId，无法被 ki search 召回）')
+  .option('--tags <tags>', '文档级自定义标签（逗号分隔多个）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 ki search -t <tag> 召回；--no-vector 时仅持久化到 relation.tags（供后续重建恢复）')
   .option('--no-clean', '关闭全部数据清洗（含外部 hooks，等价 config clean.enabled:false）')
   .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
   .action(async (opts) => {
@@ -55,7 +56,7 @@ program
       const cleanEnabled = opts.clean !== false;
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
 
-      const result = await handleDirectImport({ scope, sourceDir, group, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules });
+      const result = await handleDirectImport({ scope, sourceDir, group, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules, tags: opts.tags });
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
 

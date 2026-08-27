@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 
 const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'restore.ts');
 
@@ -253,5 +253,86 @@ describe('restore --from-snapshot 直接指定快照文件', () => {
     assert.match(result.error, /快照文件不存在/);
     // 现有数据保持原样
     assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
+  });
+});
+
+describe('NEG：--group/--tags 参数负向防护（不得静默降级为全量重建）', () => {
+  it('--rebuild-vector --group 缺值 → 拒绝执行（避免静默全量清空重建）', () => {
+    const { configPath, scope } = setupScope();
+    const result = runRestore(configPath, [scope, '--rebuild-vector', '--group']);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.action, 'rebuild_vector');
+    assert.match(result.error, /--group 缺少值/);
+  });
+
+  it('--rebuild-vector --group=（空值）→ 拒绝执行', () => {
+    const { configPath, scope } = setupScope();
+    const result = runRestore(configPath, [scope, '--rebuild-vector', '--group=']);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /--group 缺少值/);
+  });
+
+  it('--rebuild-vector --tags 全为保留标签 → 拒绝执行', () => {
+    const { configPath, scope } = setupScope();
+    const result = runRestore(configPath, [scope, '--rebuild-vector', '--tags', 'ki-search,ki-path']);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /--tags 缺少值或解析后无有效标签/);
+  });
+
+  it('--rebuild-vector --tags ,,, （全空白）→ 拒绝执行', () => {
+    const { configPath, scope } = setupScope();
+    const result = runRestore(configPath, [scope, '--rebuild-vector', '--tags', ',,,']);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /--tags/);
+  });
+
+  it('不带 --rebuild-vector 时 --group/--tags 被忽略（列表模式正常，仅警告）', () => {
+    const { configPath, scope } = setupScope();
+    const result = runRestore(configPath, [scope, '--group', 'wiki', '--tags', 'x']);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.action, 'restore_list', '应回退到列表模式而非重建');
+  });
+
+  it('列表模式误传重建参数的警告内容：stderr 明确提示需配合 --rebuild-vector', () => {
+    const { configPath, scope } = setupScope();
+    const res = spawnSync('npx', ['jiti', SCRIPT_PATH, scope, '--group', 'wiki'], {
+      encoding: 'utf-8',
+      env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
+    });
+    assert.strictEqual(res.status, 0);
+    const parsed = JSON.parse(res.stdout);
+    assert.strictEqual(parsed.action, 'restore_list');
+    assert.match(res.stderr, /需与 --rebuild-vector 配合/, '应警告参数被忽略');
+  });
+
+  it('参数校验先于破坏性还原：--from-snapshot --rebuild-vector --group 缺值 → 不执行还原', () => {
+    const { configPath, scope, scopeDataDir } = setupScope();
+    const result = runRestore(configPath, [scope, '--from-snapshot', '--yes', '--rebuild-vector', '--group']);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /--group 缺少值/);
+    // 还原未执行：旧数据仍在、快照新数据未出现（避免先破坏后报错的残缺现场）
+    assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
+    assert.ok(!fs.existsSync(path.join(scopeDataDir, 'new.txt')));
+  });
+
+  it('M1：--from-snapshot 与局部重建组合 → 拒绝执行（快照还原后需全量重建对齐）', () => {
+    const { configPath, scope, scopeDataDir } = setupScope();
+    const result = runRestore(configPath, [scope, '--from-snapshot', '--yes', '--rebuild-vector', '--group', 'wiki']);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.action, 'rebuild_vector');
+    assert.match(result.error, /不支持与 --group\/--tags 局部重建组合/);
+    // 还原未执行（校验先于破坏性操作）
+    assert.ok(fs.existsSync(path.join(scopeDataDir, 'old.txt')));
+  });
+
+  it('M1：--from-snapshot + --tags 组合同样拒绝；不带局部参数的全量重建组合不受影响', () => {
+    const { configPath, scope } = setupScope();
+    const r1 = runRestore(configPath, [scope, '--from-snapshot', '--yes', '--rebuild-vector', '--tags', 'api']);
+    assert.strictEqual(r1.ok, false);
+    assert.match(r1.error, /不支持与 --group\/--tags 局部重建组合/);
+    // 缺快照场景下全量重建组合不被参数校验拦截（报错应为快照不存在，而非参数组合拒绝）
+    const r2 = runRestore(configPath, [scope, '--from-snapshot', '--yes', '--rebuild-vector']);
+    assert.notStrictEqual(r2.ok, true);
+    assert.match(r2.error, /快照|snapshot/);
   });
 });

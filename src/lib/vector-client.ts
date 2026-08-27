@@ -79,7 +79,7 @@ function lockedHint(dbPath: string): string {
     `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
     `  3) 若进程已异常退出，锁会在片刻后自动释放，可稍后重试；\n` +
     `  4) 若上次导入被中断（Ctrl+C/kill），可能存在 crash residue（如 "already exists"/"crash residue" 报错）——` +
-    `     可执行 ki rebuild-vector 或 ki restore <scope> --from-snapshot --rebuild-vector 全量重建恢复；\n` +
+    `     可执行 ki restore <scope> --rebuild-vector 或 ki restore <scope> --from-snapshot --rebuild-vector 全量重建恢复；\n` +
     `  5) 若确认无任何进程占用仍持续报此错（如向量库目录为空/状态异常），\n` +
     `     可执行 ki restore <scope> --from-snapshot 重建向量库`
   );

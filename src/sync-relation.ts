@@ -690,7 +690,7 @@ export async function executeBulkSyncRelation(params: {
               } else if (itemContentAllOk.get(itemIdx) === false) {
                 // 有成功但存在失败 entry（ki-search 或自定义 tag 有缺失）：
                 // 主内容仍可召回，但部分 tag 向量缺失；已保留旧向量，标记 reason 供调用方感知
-                results[itemIdx].vectorReason = '部分内容向量写入失败，已保留旧向量（rebuild-vector 可恢复）';
+                results[itemIdx].vectorReason = `部分内容向量写入失败，已保留旧向量（ki restore ${scope} --rebuild-vector 可恢复）`;
               }
             }
           }

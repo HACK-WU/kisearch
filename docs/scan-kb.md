@@ -21,6 +21,7 @@ ki scan-kb import \
   --group wiki \
   [--chunk-size 1000] \
   [--chunk-overlap 150] \
+  [--tags t1,t2] \
   [--no-vector]
 ```
 
@@ -31,6 +32,7 @@ ki scan-kb import \
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回；local KB 文件原文照写） |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
 | `--clean-rules` | 否 | 覆盖内置清洗规则开关：`bom,frontmatter,htmlComment,mermaid,codePath,codeBlock` |
@@ -62,7 +64,7 @@ local KB 存**文件级原文**（一个文件一条，key=文件级 relation，
 
 ### 中断防护（REQ-01/02）
 
-导入捕获 SIGINT/SIGTERM 写中断标记；`SIGKILL`（kill -9）不可捕获由 probe residue 兜底（双路径）。中断后任意向量命令给出恢复引导（`ki rebuild-vector` 或 `ki restore <scope> --from-snapshot --rebuild-vector`）；重建/成功导入后标记自动清除。并发导入拒绝（`import.lock`，残留自动清理）。
+导入捕获 SIGINT/SIGTERM 写中断标记；`SIGKILL`（kill -9）不可捕获由 probe residue 兜底（双路径）。中断后任意向量命令给出恢复引导（`ki restore <scope> --rebuild-vector` 或 `ki restore <scope> --from-snapshot --rebuild-vector`）；重建/成功导入后标记自动清除。并发导入拒绝（`import.lock`，残留自动清理）。
 
 ### 切分格式说明
 

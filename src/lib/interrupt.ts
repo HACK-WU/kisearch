@@ -73,7 +73,7 @@ export function interruptGuidance(scope: string): string | null {
   if (!mark) return null;
   return (
     `检测到未完成的导入（${mark.interruptedAt}，已完成 ${mark.processedFiles}/${mark.totalFiles} 个文件），` +
-    `向量库可能不完整。建议执行：ki rebuild-vector 或 ki restore ${scope} --from-snapshot --rebuild-vector 恢复`
+    `向量库可能不完整。建议执行：ki restore ${scope} --rebuild-vector 或 ki restore ${scope} --from-snapshot --rebuild-vector 恢复`
   );
 }
 

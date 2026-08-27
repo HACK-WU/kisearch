@@ -36,6 +36,7 @@ ki scan-kb import \
   --group <name> \
   [--chunk-size <chars>] \
   [--chunk-overlap <chars>] \
+  [--tags <t1,t2>] \
   [--no-vector]
 ```
 
@@ -46,6 +47,7 @@ ki scan-kb import \
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--tags <t1,t2>` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复）。注意：不带 `--tags` 重导会清除该文件已有标签（导入为覆盖语义，区别于重建的只增不减） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
 
 **示例：首次导入**
@@ -1315,6 +1317,8 @@ ki restore <scope> --list                  # 列出可用备份（显式 flag，
 ki restore <scope>                         # 列出可用备份（无参兼容）
 ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
 ki restore <scope> --from-snapshot --rebuild-vector   # 还原后重建向量（内容+关系+路径）
+ki restore <scope> --rebuild-vector --group <path>    # 局部重建：仅重建指定 Group 子树（幂等覆盖，不清空其他向量）
+ki restore <scope> --rebuild-vector --tags <t1,t2>    # 重建打标：为重建范围内文档附加标签（与已有标签合并去重）
 ```
 
 | 参数 | 说明 |
@@ -1324,8 +1328,12 @@ ki restore <scope> --from-snapshot --rebuild-vector   # 还原后重建向量（
 | `--from-snapshot` | 从 tar.gz 快照覆盖还原（破坏性操作，需 `--yes` 确认） |
 | `--timestamp <ts>` | 指定快照 timestamp（可选，默认使用最新） |
 | `--rebuild-vector` | 还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path) |
+| `--group <path>` | 重建过滤（需配合 `--rebuild-vector`）：仅重建指定 Group 子树的向量，幂等覆盖匹配子集、**不清空其他向量**；不带本参数与 `--tags` 时为全量重建（清空+重建）。限制：局部重建不会清理子树内已删除/变更条目的旧向量（不执行删除），内容发生变化的 Group 建议使用全量重建 |
+| `--tags <t1,t2>` | 重建打标（需配合 `--rebuild-vector`）：逗号分隔，为重建范围内文档附加自定义标签，与已有 `relation.tags` 合并去重（只增不减），并为每个标签生成内容向量；跨命令累积（先 `--tags a` 再 `--tags b` = a∪b），删标签走 `sync-relation`。仅传 `--tags`（不传 `--group`）时范围为全 scope：全部条目幂等刷写（不清空，成本同全量重建）；`--tags` 值缺失/空/全为保留标签（ki-search/ki-relation/ki-path）时拒绝执行，避免误降级为全量清空重建 |
 | `--backup-dir <dir>` | 指定备份根目录（默认用配置 backupDir） |
 | `--yes` | 跳过交互确认 |
+
+> **局部重建与中断标记**：带 `--group` 或 `--tags` 的重建为局部重建（输出 `partial: true`），成功后**不清除**导入中断标记（库整体仍可能不完整）；仅不带过滤参数的全量重建才清除。局部重建**不可与 `--from-snapshot` 组合**：快照仅还原 KB 层（向量层不随快照还原），还原后需全量重建与快照 KB 对齐；局部重建请对当前 KB 单独执行（不带 `--from-snapshot`）。
 
 （`--from-results` 重放已删除，REQ-04：ai-results 输入契约移除。）
 

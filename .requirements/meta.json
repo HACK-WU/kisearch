@@ -472,13 +472,13 @@
       "id": "REQ-20260807-001",
       "feature": "向量库导入中断防护与自愈",
       "created": "2026-08-07 16:10:17",
-      "updated": "2026-08-07 17:51:18",
+      "updated": "2026-08-27 22:50:39",
       "status": "草案",
       "tags": [
         "fix",
         "vector"
       ],
-      "version": 6,
+      "version": 10,
       "depends_on": [],
       "changelog": [
         "初始创建",
@@ -495,7 +495,11 @@
         "2026-08-08 v12: 创建分批实现计划（7 批：基线/清洗/数据模型/导入链路/中断防护/召回+hook/配套）",
         "2026-08-08 v13: 批次 0-6 全部实现完成：clean.ts 清洗、方案 D 数据模型（文件级 relation+memoryIds）、导入链路重构+REQ08/05、中断防护 REQ01-04、REQ09 原文召回+REQ07 hook、docs 同步+新增测试；全量测试 exit 0 全绿",
         "2026-08-08 v14: code-review 修复（P0）：中断标记带真实进度 + 中断路径只清锁保留标记（clearImportLock）；search 去重命中 originalRetrieved:true + deduplicated 标记；删 clean.ts 死代码；全量测试 exit 0",
-        "2026-08-08 v15: 测试补齐——单测（search-original 4 / memory-id-map 6 / import-scheme-d 4）+ e2e（scheme-d-cli 4 真实 embedding）；修复 stats.skipped 未含冲突计数；全量测试 exit 0 全绿"
+        "2026-08-08 v15: 测试补齐——单测（search-original 4 / memory-id-map 6 / import-scheme-d 4）+ e2e（scheme-d-cli 4 真实 embedding）；修复 stats.skipped 未含冲突计数；全量测试 exit 0 全绿",
+        "2026-08-27 22:33:12 v7: 完成代码审查（局部重建 --group/--tags）",
+        "2026-08-27 22:33:12 v8: 完成自动质疑审查",
+        "2026-08-27 22:50:39 v9: 完成修复轮次复审（评分A无P0）并更新质疑报告",
+        "2026-08-27 22:50:39 v10: 复审轮次自动质疑：2条🟡跟进项，维持可合入结论"
       ],
       "commits": [],
       "branch": null,
@@ -531,6 +535,14 @@
         {
           "path": "demo/chunker.mjs",
           "type": "demo"
+        },
+        {
+          "path": "review/code-review.md",
+          "type": "review"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
         }
       ],
       "role": "standalone",

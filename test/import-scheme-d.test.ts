@@ -180,6 +180,52 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(r2.stats.total, 2, `追加后 total 应为 2；实际=${r2.stats.total}`);
   });
 
+  it('--tags：--no-vector 模式下标签仍持久化到 relation.tags（供重建恢复；本次修复回归点）', () => {
+    const src = mkSource({ 't1.md': '# T1\n内容' });
+    const r = runImport(['import', '--scope', scope, '--source', src, '--group', 'tagkb-a', '--no-vector', '--tags', 'Alpha, beta ,alpha']);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+
+    const { getRelationsCachePath } = require('../src/lib/scope.js');
+    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
+    const rel = cache.groups['tagkb-a'].hot_relations.find((x: any) => x.text === 't1');
+    assert.ok(rel, '文件级 relation t1 应存在');
+    assert.deepStrictEqual(rel.tags, ['alpha', 'beta'], '去空/去重/小写化后持久化');
+    assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时仍无 memoryIds');
+  });
+
+  it('--tags：不带 --tags 重导会清除已有标签（导入为覆盖语义）', () => {
+    const src = mkSource({ 't2.md': '# T2\n内容' });
+    const r1 = runImport(['import', '--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector', '--tags', 'x']);
+    assert.strictEqual(r1.ok, true);
+    // 不带 --tags 重导同文件 → 标签被清除（覆盖语义，区别于重建的只增不减）
+    const r2 = runImport(['import', '--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector']);
+    assert.strictEqual(r2.ok, true);
+
+    const { getRelationsCachePath } = require('../src/lib/scope.js');
+    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
+    const rel = cache.groups['tagkb-b'].hot_relations.find((x: any) => x.text === 't2');
+    assert.strictEqual(rel.tags, undefined, '不带 --tags 重导应清除已有标签');
+  });
+
+  it('--tags 全为保留标签：不打标 + stderr 警告（fail-loud 提示，不静默）', () => {
+    const src = mkSource({ 't3.md': '# T3\n内容' });
+    const { spawnSync } = require('node:child_process');
+    const res = spawnSync('npx', ['jiti', SCRIPT, 'import', '--scope', scope, '--source', src, '--group', 'tagkb-c', '--no-vector', '--tags', 'ki-search,ki-path'], {
+      encoding: 'utf-8',
+      env: getTestEnv(),
+      cwd: path.resolve('.'),
+    });
+    assert.strictEqual(res.status, 0, `导入应成功；stderr=${res.stderr}`);
+    const r = JSON.parse(res.stdout);
+    assert.strictEqual(r.ok, true);
+
+    const { getRelationsCachePath } = require('../src/lib/scope.js');
+    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
+    const rel = cache.groups['tagkb-c'].hot_relations.find((x: any) => x.text === 't3');
+    assert.strictEqual(rel.tags, undefined, '保留标签被过滤，不打标');
+    assert.match(res.stderr, /无有效标签/, '应输出警告提示');
+  });
+
   it('废弃参数负向验证：--mode/--root-name 报未知，diff 子命令不存在', () => {
     const src = mkSource({ 'a.md': '# A\n内容' });
     const { execFileSync } = require('node:child_process');

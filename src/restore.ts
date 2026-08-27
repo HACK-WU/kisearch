@@ -24,7 +24,8 @@ import {
   getBackupDir,
 } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
-import { rebuildScopeVectors } from './lib/rebuild-vector.js';
+import { rebuildScopeVectors, type RebuildVectorOptions } from './lib/rebuild-vector.js';
+import { parseContentTags } from './lib/constants.js';
 import {
   backupScopeSnapshot,
   listBackups,
@@ -322,6 +323,8 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   --list              列出可用备份（显式）
   --from-snapshot [<file>]  从 tar.gz 快照覆盖还原；可直接指定快照文件路径（缺省从 <backup-dir>/<scope>/snapshots 取最新/--timestamp）
   --rebuild-vector    还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path)
+  --group <path>      重建过滤：仅重建指定 Group 子树的向量（幂等覆盖，不清空其他向量；需与 --rebuild-vector 配合）
+  --tags <t1,t2>      重建打标：为重建范围内文档附加自定义标签（与已有标签合并去重，只增不减；需与 --rebuild-vector 配合）
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
   --yes               跳过确认直接执行（破坏性）
@@ -336,8 +339,8 @@ if (args.includes('-h') || args.includes('--help')) {
 // 未知参数检测（NEG-01）：--timestamp / --backup-dir 为带值参数
 detectUnknownFlags(
   args,
-  ['--from-snapshot', '--rebuild-vector', '--yes', '--timestamp', '--backup-dir'],
-  ['--timestamp', '--backup-dir', '--list'],
+  ['--from-snapshot', '--rebuild-vector', '--yes', '--timestamp', '--backup-dir', '--group', '--tags'],
+  ['--timestamp', '--backup-dir', '--list', '--group', '--tags'],
   RESTORE_HELP
 );
 
@@ -381,13 +384,77 @@ if (bdIdx !== -1 && bdIdx + 1 < args.length) {
   backupDirOverride = args[bdIdx + 1];
 }
 
+// 提取 --group / --tags（支持 `--flag <value>` 与 `--flag=<value>`；仅对 --rebuild-vector 生效）
+function extractValuedFlag(flag: string): string | undefined {
+  const eq = args.find((a) => a.startsWith(`${flag}=`));
+  if (eq) return eq.slice(flag.length + 1);
+  const idx = args.indexOf(flag);
+  if (idx !== -1 && idx + 1 < args.length && !args[idx + 1].startsWith('--')) {
+    return args[idx + 1];
+  }
+  return undefined;
+}
+const rebuildGroupRaw = extractValuedFlag('--group');
+const rebuildTagsRaw = extractValuedFlag('--tags');
+// NEG：记录用户是否显式传入了 --group/--tags（值缺失/空/全保留标签时不得静默降级为全量重建）
+const groupFlagProvided = args.some((a) => a === '--group' || a.startsWith('--group='));
+const tagsFlagProvided = args.some((a) => a === '--tags' || a.startsWith('--tags='));
+const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided };
+if (rebuildGroupRaw && rebuildGroupRaw.trim()) rebuildOpts.groupFilter = rebuildGroupRaw.trim();
+if (rebuildTagsRaw && parseContentTags(rebuildTagsRaw).length > 0) rebuildOpts.tags = rebuildTagsRaw;
+
+/**
+ * NEG：重建参数合法性前置校验（必须在破坏性 --from-snapshot 之前执行）。
+ * ① 显式传入 --group/--tags 但值缺失/为空/全为保留标签 → 拒绝执行，
+ *    避免用户预期局部重建却静默降级为全量清空重建；
+ * ② --from-snapshot 与局部重建组合 → 拒绝：快照仅还原 KB 层（向量层不随快照还原），
+ *    局部重建只覆盖子树，非子树向量仍是还原前旧 KB 派生，与快照 KB 不一致且无 verify 类命令可暴露；
+ *    快照还原后应执行全量重建收敛。
+ */
+function validateRebuildOptsOrExit(): void {
+  if (!rebuildVector) {
+    if (groupFlagProvided || tagsFlagProvided) {
+      process.stderr.write('警告：--group/--tags 需与 --rebuild-vector 配合，本次未执行重建，参数已忽略。\n');
+    }
+    return;
+  }
+  if (groupFlagProvided && !rebuildOpts.groupFilter) {
+    output({
+      ok: false,
+      action: 'rebuild_vector',
+      scope,
+      error: '--group 缺少值或为空：请提供 Group 路径（如 --group wiki/部署运维）。为避免误将局部重建降级为全量清空重建，本次未执行',
+    });
+    process.exit(1);
+  }
+  if (tagsFlagProvided && parseContentTags(rebuildTagsRaw ?? '').length === 0) {
+    output({
+      ok: false,
+      action: 'rebuild_vector',
+      scope,
+      error: '--tags 缺少值或解析后无有效标签（内部保留标签 ki-search/ki-relation/ki-path 不可用）。为避免误将局部重建降级为全量清空重建，本次未执行',
+    });
+    process.exit(1);
+  }
+  // 组合校验放在值校验之后：参数本身非法时优先报参数错误，值合法但组合非法才报组合拒绝
+  if (fromSnapshot && (groupFlagProvided || tagsFlagProvided)) {
+    output({
+      ok: false,
+      action: 'rebuild_vector',
+      scope,
+      error: '--from-snapshot 不支持与 --group/--tags 局部重建组合：快照还原后向量层需与快照 KB 全量对齐（局部重建仅覆盖子树，其余向量仍为还原前状态）。请去掉 --group/--tags 执行全量重建，或对当前 KB 单独执行局部重建（不带 --from-snapshot）',
+    });
+    process.exit(1);
+  }
+}
+
 // ─── 向量重建（--rebuild-vector）───
 
-/** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1 */
-async function rebuildAndReport(scopeName: string): Promise<void> {
-  const result = await rebuildScopeVectors(scopeName);
-  // REQ-02 生命周期①：重建成功后清除中断标记（引导消失）
-  if (result.ok) {
+/** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
+async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
+  const result = await rebuildScopeVectors(scopeName, {}, opts);
+  // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
+  if (result.ok && !result.partial) {
     try {
       const { clearInterruptMark } = await import('./lib/interrupt.js');
       clearInterruptMark(scopeName);
@@ -406,12 +473,19 @@ async function rebuildAndReport(scopeName: string): Promise<void> {
     ok: true,
     action: 'rebuild_vector',
     scope: scopeName,
+    partial: result.partial,
+    filter:
+      result.partial
+        ? { group: opts.groupFilter, tags: result.stats.mergedTags.length > 0 ? result.stats.mergedTags : undefined }
+        : undefined,
     stats: result.stats,
     errors: result.errors.length > 0 ? result.errors : undefined,
     hint:
       result.errors.length > 0
         ? '部分条目向量化失败，详见 errors（不影响已成功部分）'
-        : undefined,
+        : result.partial
+          ? '局部重建：仅幂等覆盖匹配范围，其他向量未受影响；局部重建不清除导入中断标记（如需清除请执行不带 --group/--tags 的全量重建）'
+          : undefined,
   });
 }
 
@@ -420,6 +494,8 @@ async function rebuildAndReport(scopeName: string): Promise<void> {
 async function main() {
   try {
     validateScope(scope);
+    // NEG：重建参数校验前置——先于破坏性 --from-snapshot，避免还原已执行后才因参数错误失败（用户只剩残缺现场）
+    validateRebuildOptsOrExit();
 
     if (fromSnapshot) {
       await restoreFromSnapshot(scope, {
@@ -429,10 +505,10 @@ async function main() {
         snapshotFile: snapshotFileArg,
         rebuildVector,
       });
-      if (rebuildVector) await rebuildAndReport(scope);
+      if (rebuildVector) await rebuildAndReport(scope, rebuildOpts);
     } else if (rebuildVector) {
-      // 独立调用：对已还原的 KB 仅重建向量
-      await rebuildAndReport(scope);
+      // 独立调用：对已还原的 KB 仅重建向量（支持 --group/--tags 局部重建）
+      await rebuildAndReport(scope, rebuildOpts);
     } else {
       // 默认 / 显式 --list：列出可用备份（无参兼容）
       listAvailableBackups(scope, { backupDir: backupDirOverride });

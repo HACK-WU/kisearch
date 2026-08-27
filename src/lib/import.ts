@@ -112,7 +112,7 @@ export interface HandleDirectImportArgs {
   cleanEnabled?: boolean;
   /** 内置清洗规则覆盖（--clean-rules 解析结果） */
   cleanRules?: Partial<import('./clean.js').CleanRules>;
-  /** 文档级自定义标签（逗号分隔多个）。非向量化时忽略；向量化时为每个导入文件写一条 tag 内容向量 */
+  /** 文档级自定义标签（逗号分隔多个）。无论是否向量化均持久化到 relation.tags（供 rebuild-vector/restore 恢复）；向量化时额外为每个导入文件每个 tag 写一条内容向量 */
   tags?: string;
 }
 
@@ -226,6 +226,10 @@ export async function handleDirectImport(
   const cleanRules: CleanRules | undefined = args.cleanRules;
   // 文档级自定义标签：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
   const customTags = parseContentTags(args.tags);
+  // NEG：显式传入 --tags 但解析后为空（全为保留标签/空白）→ 提示，避免用户误以为打标生效
+  if (args.tags && customTags.length === 0) {
+    logWarn('--tags 解析后无有效标签（内部保留标签 ki-search/ki-relation/ki-path 不可用作自定义标签；已忽略，本次不打标）');
+  }
 
   // 单文件导入支持：sourceDir 可为单个 .md 文件（缺省 group 时用 scope name）
   const sourceIsFile = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isFile();
@@ -250,7 +254,7 @@ export async function handleDirectImport(
     interrupted = true;
     try {
       writeInterruptMark(scope, { processedFiles: importedFileCount, totalFiles: totalFileCount, signal });
-      process.stderr.write(`\n⚠ 导入已中断（${signal}），已写中断标记（已完成 ${importedFileCount}/${totalFileCount} 个文件）。重新导入或执行 ki rebuild-vector 恢复\n`);
+      process.stderr.write(`\n⚠ 导入已中断（${signal}），已写中断标记（已完成 ${importedFileCount}/${totalFileCount} 个文件）。重新导入或执行 ki restore <scope> --rebuild-vector 恢复\n`);
       // 中断路径同步清锁（N4：避免 SIGTERM 后 import.lock 残留）；保留中断标记供引导（不清标记）
       clearImportLock(scope);
     } catch { /* 标记/锁清理失败不阻断退出 */ }
@@ -495,9 +499,10 @@ export async function handleDirectImport(
 
   logPhaseStart(4, TOTAL, `写入元数据（${ctx.entries.length} 条 relations）...`);
   phase4WriteRelations(ctx, relationsCache);
-  // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值
+  // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
+  // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
   const mergedMap = vectorizeResult.ok;
-  if (mergedMap.size > 0 || tagMemoryMap.size > 0) {
+  if (mergedMap.size > 0 || tagMemoryMap.size > 0 || customTags.length > 0) {
     for (const rec of fileRecords) {
       // 该文件全部 chunk 的 memoryId（按 sourcePath 文件#N 匹配）
       const ids = rec.entries

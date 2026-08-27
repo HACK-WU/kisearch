@@ -151,6 +151,7 @@ ki scan-kb import \
   --group Wiki \
   --chunk-size 1000 \
   --chunk-overlap 150
+  # 可选：--tags <t1,t2> 为导入文件打标（可被 ki search -t <tag> 召回；--no-vector 时仅持久化到 relation.tags）
 
 # ② 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
@@ -210,7 +211,7 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 | `config` | 配置管理：init（生成 YAML） |
 | `doctor` | 配置诊断（apiKey / 连通性 / 维度 / 目录） |
 | `backup` | 备份 scope 目录快照 |
-| `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`） |
+| `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`；重建支持 `--group` 过滤 / `--tags` 打标的局部重建） |
 | `export` | 导出 KB 为 Wiki Markdown |
 | `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
 

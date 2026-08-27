@@ -60,7 +60,7 @@ export function fetchOriginal(scope: string, group: string, relation: string): {
     // 本地 KB 缺失该 relation → 精简提示（REQ-09 与 REQ-02 引导去重，不重复完整恢复文案）
     return {
       original: '',
-      hint: `原文不可用：本地 KB 缺失 relation "${relation}"（可尝试 sync-relation 或 rebuild-vector）`,
+      hint: `原文不可用：本地 KB 缺失 relation "${relation}"（可尝试 sync-relation 或 ki restore ${scope} --rebuild-vector）`,
     };
   } catch {
     return { original: '', hint: '原文不可用：本地 KB 读取异常' };
