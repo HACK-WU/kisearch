@@ -168,6 +168,29 @@ try {
   });
 
   if (isDaemon) {
+    // 启动期存活探测（bug 修复）：token 缺失/参数非法/端口冲突等 fail-loud
+    // 发生在子进程启动早期（parseMcpArgs/预检阶段）。此前父进程 spawn 后
+    // 立即打印"已在后台启动"，子进程随后退出 → 假成功（实测：非回环无
+    // token 时子进程 exit(MCP_HTTP_TOKEN_REQUIRED)，父进程仍报成功）。
+    // 探测窗口内退出 → 真实失败暴露；存活 → 正常提示（慢启动容错：超时按
+    // 成功处理，残余失败由 ki mcp --status 兜底，不会误报失败）。
+    const exited = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.removeAllListeners('exit');
+        resolve(null);
+      }, 3000);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve({ code });
+      });
+    });
+    if (exited) {
+      const fgArgs = scriptArgs.filter((a) => a !== '--daemon' && a !== '-d').join(' ');
+      console.error(`错误：daemon 启动失败 —— 子进程在预检阶段退出（exit ${exited.code ?? 'signal'}）。`);
+      console.error('请前台运行同样命令（去掉 -d/--daemon）查看具体错误：');
+      console.error(`  ki mcp ${fgArgs}`);
+      process.exit(1);
+    }
     child.unref();
     console.log('kisearch MCP 服务已在后台启动（daemon 模式）。');
     console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop    |    重启：ki mcp restart');

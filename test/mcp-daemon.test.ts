@@ -11,15 +11,23 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
 
-function runCli(args: string[]): { stdout: string; stderr: string; status: number } {
+function runCli(args: string[], envExtra: Record<string, string | undefined> = {}): { stdout: string; stderr: string; status: number } {
+  const env: Record<string, string> = { ...process.env, NODE_NO_WARNINGS: '1' } as Record<string, string>;
+  for (const [k, v] of Object.entries(envExtra)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
   try {
     const stdout = execFileSync('node', [CLI, ...args], {
       encoding: 'utf-8',
-      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+      timeout: 30000,
+      env,
     });
     return { stdout, stderr: '', status: 0 };
   } catch (err) {
@@ -44,9 +52,9 @@ describe('--daemon/-d 仅 HTTP 模式', () => {
   });
 
   it('--daemon 与 --http 组合不再报错（daemon 校验通过）', () => {
-    // 仅验证参数层：--http --daemon 不应落入「仅 HTTP 模式」报错分支。
-    // 真实启动会进入探活/预检，这里断言它不输出 MCP_DAEMON_REQUIRES_HTTP 即通过。
-    const { stdout } = runCli(['mcp', '--http', '--daemon', '--status']);
+    // 仅验证参数层：--http 不应落入「仅 HTTP 模式」报错分支。
+    // （不用 -d + --status 组合：daemon 存活探测会把它判为"子进程退出"失败）
+    const { stdout } = runCli(['mcp', '--http', '--status']);
     assert.doesNotMatch(stdout, /MCP_DAEMON_REQUIRES_HTTP/);
   });
 });
@@ -80,5 +88,66 @@ describe('--no-web 显式关闭前端页面', () => {
     const { stdout } = runCli(['mcp', '--http', '--web', '--no-web', '--status']);
     assert.doesNotMatch(stdout, /UNKNOWN_OPTION/);
     assert.doesNotMatch(stdout, /未知参数/);
+  });
+});
+
+describe('daemon 启动期存活探测（假成功修复）', () => {
+  const randPort = () => 20000 + Math.floor(Math.random() * 20000);
+
+  it('非回环 + 无 token + -d → exit 1 报"启动失败"（不再假成功）', () => {
+    // 隔离 HOME（无 ~/.ki/mcp-tokens.json）+ 删 KI_MCP_TOKEN → 子进程必 fail-loud
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-fail-'));
+    const port = randPort();
+    const { stdout, stderr, status } = runCli(
+      ['mcp', '--http', '--host', '0.0.0.0', '--port', String(port), '-d'],
+      { HOME: home, KI_MCP_TOKEN: undefined }
+    );
+    fs.rmSync(home, { recursive: true, force: true });
+    assert.strictEqual(status, 1, `stdout=${stdout} stderr=${stderr}`);
+    assert.match(stderr, /daemon 启动失败/);
+    assert.match(stderr, /ki mcp --http --host 0\.0\.0\.0/); // 前台复跑指引（-d 已剥离）
+  });
+
+  it('回环正常启动 + -d → exit 0 且服务真实就绪（探测不误杀）', { skip: !process.env.SILICONFLOW_API_KEY && '需真实 embedding 密钥（预检含网络探测）' }, async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-ok-'));
+    const port = randPort();
+    try {
+      // 构造可通过启动预检的最小配置：目录齐全 + apiKey 引用环境变量
+      for (const d of ['kb', 'vector', 'backup']) fs.mkdirSync(path.join(home, `.ki/${d}`), { recursive: true });
+      fs.writeFileSync(path.join(home, '.ki', 'config.json'), JSON.stringify({
+        dataDir: path.join(home, '.ki/kb'),
+        vectorDir: path.join(home, '.ki/vector'),
+        backupDir: path.join(home, '.ki/backup'),
+        embedding: {
+          provider: 'siliconflow',
+          baseURL: 'https://api.siliconflow.cn/v1',
+          model: 'Qwen/Qwen3-Embedding-8B',
+          dimension: 4096,
+          apiKey: '${SILICONFLOW_API_KEY}',
+        },
+        scopes: { default: {} },
+      }));
+      const { stdout, status } = runCli(
+        ['mcp', '--http', '--port', String(port), '-d'],
+        { HOME: home }
+      );
+      assert.strictEqual(status, 0, `stdout=${stdout}`);
+      assert.match(stdout, /已在后台启动/);
+      // 轮询 healthz 确认服务真实就绪（jiti 冷启动 + 预检（含 embedding 网络探测）
+      // 可能超过 3s 探测窗口，探测超时按成功处理——此断言确保其确实成立）
+      let ready = false;
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+          if (res.ok) { ready = true; break; }
+        } catch { /* not yet */ }
+      }
+      assert.ok(ready, 'healthz 应在 30s 内就绪');
+    } finally {
+      // 清理：stop 走同一隔离 HOME（lock 文件位置一致）
+      runCli(['mcp', 'stop'], { HOME: home });
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
