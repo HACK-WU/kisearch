@@ -151,3 +151,50 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
     }
   });
 });
+
+describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修复）', () => {
+  /** 在隔离 HOME 写 lock 文件 */
+  function writeLock(home: string, lock: Record<string, unknown>): void {
+    fs.mkdirSync(path.join(home, '.ki'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.ki', 'mcp-http.lock'), JSON.stringify(lock));
+  }
+
+  it('裸 --status → target 回退到存活 lock 的 host/port（而非默认 127.0.0.1:7423）', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-lock-'));
+    try {
+      writeLock(home, { pid: process.pid, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString(), web: false });
+      const { stdout } = runCli(['mcp', '--status'], { HOME: home });
+      const out = JSON.parse(stdout);
+      assert.equal(out.target.host, '192.168.1.5');
+      assert.equal(out.target.port, 19876);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('陈旧 lock（pid 已死）→ 回退默认地址，不误探 lock 地址', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-dead-'));
+    try {
+      writeLock(home, { pid: 999999999, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString() });
+      const { stdout } = runCli(['mcp', '--status'], { HOME: home });
+      const out = JSON.parse(stdout);
+      assert.notEqual(out.target.port, 19876, '死 pid 的 lock 不应参与回退');
+      assert.equal(out.target.port, 7423); // 默认
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI 显式 --host/--port 优先于 lock', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-cli-'));
+    try {
+      writeLock(home, { pid: process.pid, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString() });
+      const { stdout } = runCli(['mcp', '--status', '--host', '10.0.0.1', '--port', '12345'], { HOME: home });
+      const out = JSON.parse(stdout);
+      assert.equal(out.target.host, '10.0.0.1');
+      assert.equal(out.target.port, 12345);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

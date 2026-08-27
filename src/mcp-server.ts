@@ -350,6 +350,17 @@ function runTokenCommand(args: string[]): void {
   );
 }
 
+/** pid 存活校验（与 listLiveStdioLocks 同手法：信号 0 探测，EPERM 也算存活） */
+function isPidAlive(pid?: number): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 /** 读取 HTTP 单例 lock 文件（host/port/web 供 restart 沿用上次运行值），缺失/损坏返回 null */
 function readHttpLock(): {
   pid?: number;
@@ -532,8 +543,16 @@ export async function startMcpServer(): Promise<void> {
   if (argv.includes('--status')) {
     const config = loadConfig();
     const httpCfg = config.mcp?.http ?? {};
-    const host = getFlagValue(argv, '--host') ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
-    const port = resolveHttpPort(argv, httpCfg);
+    // 探测目标解析（与 restart 语义对齐）：CLI 显式 > lock（pid 存活的运行值）> 配置 > 默认。
+    // 此前 status 只走 CLI > 配置 > 默认——daemon 启动在非默认地址时，裸 --status 探错地址
+    // 报 running:false，而输出里明明展示了 lock（target 与 lock 同屏不一致却不交叉验证）。
+    // 陈旧 lock 防护：pid 已死的 lock 不参与回退（否则服务跑在 config 地址时反而探错）。
+    const lock = readHttpLock();
+    const liveLock = lock && isPidAlive(lock.pid) ? lock : null;
+    const host = getFlagValue(argv, '--host') ?? liveLock?.host ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
+    const port = getFlagValue(argv, '--port') !== undefined
+      ? resolveHttpPort(argv, httpCfg)
+      : (liveLock?.port ?? resolveHttpPort(argv, httpCfg));
     await printHttpStatus(host, port);
     return;
   }
