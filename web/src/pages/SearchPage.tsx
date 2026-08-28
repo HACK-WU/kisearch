@@ -28,8 +28,10 @@ interface Result {
   original?: string;
   /** 向量文档内容 */
   content?: string;
-  /** 命中向量对应的标签 */
+  /** 命中向量对应的标签（多 tag 文档去重后仅其一） */
   tag?: string;
+  /** 文档级自定义标签全量（后端反查 relations-cache relation.tags） */
+  tags?: string[];
   /** 向量数据标识（doc id） */
   memoryId?: string;
 }
@@ -239,7 +241,13 @@ export function SearchPage(): JSX.Element {
                     {/* meta：标签 + 向量数据 */}
                     <div className="ki-qr-meta">
                       <span className="ki-badge ki-badge--vec">RAG</span>
-                      {r.tag && <span className="ki-badge ki-badge--tag">#{r.tag}</span>}
+                      {(() => {
+                        // 优先展示全量自定义 tags；旧后端无 tags 字段时回退单条 hit.tag
+                        const tags = r.tags?.length ? r.tags : (r.tag ? [r.tag] : []);
+                        return tags.map((t) => (
+                          <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
+                        ));
+                      })()}
                       <span className="ki-cell-sub ki-memoryid" title={r.memoryId ?? ''}>
                         {r.memoryId ? `vector: ${r.memoryId.slice(0, 12)}…` : 'vector: -'}
                       </span>

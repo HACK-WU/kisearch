@@ -25,6 +25,8 @@ export interface RelationMapEntry {
   group: string;
   /** 文件级 relation 名（relations-cache 的 hot_relation.text，文件名去扩展名） */
   relation: string;
+  /** 文档级自定义标签（来自 relation.tags，缺省/空数组无自定义 tag） */
+  tags?: string[];
 }
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
@@ -93,17 +95,16 @@ function buildRelationMap(cachePath: string): Map<string, RelationMapEntry> {
         if (Array.isArray(rel.memoryIds) && rel.memoryIds.length > 0) {
           for (const mid of rel.memoryIds) {
             if (mid && !map.has(mid)) {
-              map.set(mid, { group, relation: rel.text });
+              map.set(mid, rel.tags?.length ? { group, relation: rel.text, tags: rel.tags } : { group, relation: rel.text });
             }
           }
           continue;
         }
         // 回退旧数据：单值 memoryId
         if (rel.memoryId) {
-          map.set(rel.memoryId, {
-            group,
-            relation: rel.text,
-          });
+          map.set(rel.memoryId, rel.tags?.length
+            ? { group, relation: rel.text, tags: rel.tags }
+            : { group, relation: rel.text });
         }
       }
     }

@@ -44,6 +44,8 @@ export interface SearchHit extends VectorSearchResult {
   originalHint?: string;
   /** REQ-09：同一文件多 chunk 命中去重标记（原文已在前一条返回，本条省略） */
   deduplicated?: boolean;
+  /** 文档级自定义标签全量（来自 relations-cache relation.tags 反查；缺省无自定义 tag） */
+  tags?: string[];
 }
 
 export type SearchResult =
@@ -150,6 +152,8 @@ export async function executeSearch(params: {
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
+        // 附加文档全量自定义标签（tag 字段仅是本条命中的向量 tag，多 tag 文档会去重丢标签）
+        if (meta.tags && meta.tags.length > 0) hit.tags = meta.tags;
       }
       // REQ-09：原文召回（显式开启才执行）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
       // 原文不可用（含 relation 反查缺失）时降级：以向量文档 content 兜底，并提示没有原文

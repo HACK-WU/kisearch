@@ -88,6 +88,28 @@ describe('getRelationMap', () => {
     assert.equal(map.get('unknown-id'), undefined);
   });
 
+  it('relation.tags 透传到映射条目（多标签文档）；无 tags 时键缺省', () => {
+    setupConfig();
+    writeCache('default', {
+      'a/b': {
+        hot_relations: [
+          { id: 'r1', text: '多标签文档', memoryId: 'm1', tags: ['api', 'auth'] },
+          { id: 'r2', text: '无标签文档', memoryId: 'm2' },
+        ],
+      },
+    });
+
+    const map = getRelationMap('default');
+    // 有 tags → 透传（executeSearch 附加到 SearchHit.tags 供前端全量展示）
+    assert.deepEqual(map.get('m1'), {
+      group: 'a/b',
+      relation: '多标签文档',
+      tags: ['api', 'auth'],
+    });
+    // 无 tags → 不注入该键（与旧数据 deepEqual 兼容，JSON 输出不变）
+    assert.deepEqual(map.get('m2'), { group: 'a/b', relation: '无标签文档' });
+  });
+
   it('无 memoryId 的条目跳过（不进入映射）', () => {
     setupConfig();
     writeCache('default', {

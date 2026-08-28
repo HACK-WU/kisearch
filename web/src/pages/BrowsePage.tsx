@@ -383,6 +383,9 @@ export function BrowsePage(): JSX.Element {
                       {d.path && <div className="ki-doc-item__path">{d.path}</div>}
                       <div className="ki-doc-item__meta">
                         <span className="ki-badge ki-badge--kb">{d.group}</span>
+                        {(d.tags ?? []).map((t) => (
+                          <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
+                        ))}
                       </div>
                     </div>
                     <span className="ki-cell-sub" style={{ alignSelf: 'center' }}>

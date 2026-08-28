@@ -26,6 +26,10 @@ export interface SearchHit {
   original?: string;
   originalRetrieved?: boolean;
   deduplicated?: boolean;
+  /** 本条命中向量的 tag（多 tag 文档去重后只保留一条命中，此字段仅含其一） */
+  tag?: string;
+  /** 文档级自定义标签全量（来自 relations-cache relation.tags 反查） */
+  tags?: string[];
   [k: string]: unknown;
 }
 
