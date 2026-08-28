@@ -446,6 +446,60 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
     resetConfigCache();
   });
 
+  it('分批向量化：>200 条分多批提交，聚合结果索引加批偏移（错误定位到全量 entries）', async () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'cfg-batch-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 'rs-batch');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(
+      configPath,
+      `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  rs-batch: {}\n`,
+      'utf-8'
+    );
+    // 210 个内容条目（单 Group）+ 1 条路径向量 = 211 条 → 分 2 批（200 + 11）
+    const indexContent: Record<string, string> = {};
+    for (let i = 0; i < 210; i++) indexContent[`rel_${i}`] = `文本${i}`;
+    fs.mkdirSync(path.join(scopeDir, 'G'), { recursive: true });
+    fs.writeFileSync(path.join(scopeDir, 'G', 'index.json'), JSON.stringify(indexContent), 'utf-8');
+    fs.writeFileSync(
+      path.join(scopeDir, 'relations-cache.json'),
+      JSON.stringify({ groups: { G: { hot_relations: [] } } }),
+      'utf-8'
+    );
+    useConfig(configPath);
+
+    const bulkCalls: { entries: { text: string }[] }[] = [];
+    const mockBulk = async (p: { entries: { text: string }[] }) => {
+      bulkCalls.push(p);
+      return {
+        total: p.entries.length,
+        succeeded: p.entries.filter((e) => e.text !== '文本200').length,
+        failed: p.entries.filter((e) => e.text === '文本200').length,
+        // 第 2 批的 文本200（批内 index 0）置败，验证聚合后应定位到全量 index 200（而非 0）
+        results: p.entries.map((e, i) =>
+          e.text === '文本200'
+            ? { index: i, success: false, error: 'mock fail' }
+            : { index: i, memoryId: `mid_${i}`, success: true }
+        ),
+      };
+    };
+
+    const result = await rebuildScopeVectors('rs-batch', {
+      bulkStore: mockBulk as never,
+      deleteScope: (async () => ({ deleted: 0 })) as never,
+    });
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(bulkCalls.length, 2, '211 条应分 2 批提交');
+    assert.strictEqual(bulkCalls[0].entries.length, 200);
+    assert.strictEqual(bulkCalls[1].entries.length, 11);
+    assert.strictEqual(result.stats.succeeded, 210);
+    assert.strictEqual(result.stats.failed, 1);
+    // 批偏移校正：失败条目应映射到全量第 201 条（文本200），而非第 1 条（文本0）
+    assert.strictEqual(result.errors.length, 1);
+    assert.strictEqual(result.errors[0].path, '文本200');
+  });
+
   it('重建三类向量 + 清空旧向量 + memoryId 回写', async () => {
     const s = setupScope('rs-a');
     useConfig(s.configPath);

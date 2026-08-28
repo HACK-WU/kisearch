@@ -29,7 +29,11 @@ import {
   vectorDeleteScope,
   type VectorBulkStoreResult,
 } from './vector-client.js';
+import { logInfo, logProgress } from './progress.js';
 import { parseContentTags } from './constants.js';
+
+/** 向量化分批大小（与 import 链路 bulkVectorize 对齐：批间输出进度，避免单次 upsert 无中间态） */
+const VECTORIZE_BATCH_SIZE = 200;
 
 // 与 import 流程对齐的 tag 常量（VECTORIZE_TAG / ki-relation / ki-path）
 const CONTENT_TAG = 'ki-search';
@@ -309,6 +313,11 @@ export function mergeRebuildTags(
 export interface RebuildDeps {
   bulkStore?: typeof vectorBulkStore;
   deleteScope?: typeof vectorDeleteScope;
+  /**
+   * 进度展示用：全量重建清空前统计旧向量总数（CLI 注入真实实现）。
+   * 省略时跳过统计，删除旧向量无进度条（测试注入 mock 时不得触碰真实引擎）。
+   */
+  countScope?: (params: { scope: string }) => Promise<number>;
 }
 
 /**
@@ -322,8 +331,10 @@ export async function rebuildScopeVectors(
   deps: RebuildDeps = {},
   opts: RebuildVectorOptions = {}
 ): Promise<RebuildVectorResult> {
+  const startedAt = Date.now();
   const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const deleteScope = deps.deleteScope ?? vectorDeleteScope;
+  const countScope = deps.countScope;
 
   const groupFilter = opts.groupFilter?.trim() || undefined;
   const cliTags = parseContentTags(opts.tags);
@@ -423,12 +434,26 @@ export async function rebuildScopeVectors(
   stats.path = pathEntries.length;
   stats.tag = tagEntries.length;
   const allEntries = [...contentEntries, ...relationEntries, ...pathEntries, ...tagEntries];
+  logInfo(
+    `收集到 ${allEntries.length} 个条目（内容 ${stats.content} / 关系 ${stats.relation} / 路径 ${stats.path} / 标签 ${stats.tag}）`
+  );
 
   // 4. 清空旧向量：仅全量重建执行（保证结果与 KB 一致）；
   //    局部重建跳过（幂等覆盖匹配子集，其他向量不受影响）。失败则中止，避免新旧混杂。
+  //    注入 countScope 时（CLI 路径）先统计旧向量总数，删除过程输出进度条。
   if (!partial) {
     try {
-      await deleteScope({ scope });
+      let existingCount: number | undefined;
+      if (countScope) existingCount = await countScope({ scope });
+      const del = await deleteScope(
+        { scope },
+        existingCount !== undefined && existingCount > 0
+          ? (deleted) => logProgress(deleted, existingCount!, '删除旧向量')
+          : undefined
+      );
+      if (existingCount !== undefined && existingCount > 0) {
+        logInfo(`已删除旧向量 ${del.deleted} 条`);
+      }
     } catch (err) {
       return {
         ok: false,
@@ -441,16 +466,40 @@ export async function rebuildScopeVectors(
   }
 
   // 5. 批量向量化（局部重建时 allEntries 为空则直接完成，仅保留打标回写）
+  //    分批提交（200 条/批，与 import 链路 bulkVectorize 对齐）：引擎内部批量 embed 无中间态，
+  //    分批后批间可输出进度；docId 由 text+scope+tag 确定性生成，分批不改变幂等语义。
   if (partial && allEntries.length === 0) {
     // NEG：范围内无任何可重建条目 → 显式提示，避免用户误以为重建生效（如 --group 目录下无 index.json 且 cache 无该子树条目）
     process.stderr.write(
       '提示：本次局部重建范围内未收集到任何条目（目标 Group 下可能没有 index.json / relations-cache 条目）；未写入任何向量。\n'
     );
   }
-  const res = await bulkStore({ scope, entries: allEntries });
-  stats.succeeded = res.succeeded;
-  stats.failed = res.failed;
-  for (const r of res.results) {
+  const aggResults: VectorBulkStoreResult['results'] = [];
+  if (allEntries.length > 0) {
+    const totalBatches = Math.ceil(allEntries.length / VECTORIZE_BATCH_SIZE);
+    if (totalBatches > 1) {
+      logInfo(`开始向量化：共 ${allEntries.length} 条，每批 ${VECTORIZE_BATCH_SIZE} 条，共 ${totalBatches} 批`);
+    }
+    for (let b = 0; b < totalBatches; b++) {
+      const offset = b * VECTORIZE_BATCH_SIZE;
+      const slice = allEntries.slice(offset, offset + VECTORIZE_BATCH_SIZE);
+      const res = await bulkStore({ scope, entries: slice });
+      stats.succeeded += res.succeeded;
+      stats.failed += res.failed;
+      // results[].index 为批内相对索引，聚合时加批偏移还原为全量 entries 索引
+      for (const r of res.results) {
+        aggResults.push({ ...r, index: r.index + offset });
+      }
+      if (totalBatches > 1) {
+        logProgress(
+          Math.min(offset + VECTORIZE_BATCH_SIZE, allEntries.length),
+          allEntries.length,
+          `向量化批次 ${b + 1}/${totalBatches}`
+        );
+      }
+    }
+  }
+  for (const r of aggResults) {
     if (!r.success) {
       const src = allEntries[r.index];
       errors.push({
@@ -462,8 +511,9 @@ export async function rebuildScopeVectors(
   }
 
   // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
-  stats.updatedMemoryId = updateMemoryIds(groups, allEntries, res.results);
+  stats.updatedMemoryId = updateMemoryIds(groups, allEntries, aggResults);
   fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
+  logInfo(`向量重建完成，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
   return { ok: true, scope, partial, stats, errors };
 }

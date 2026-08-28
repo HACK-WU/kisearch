@@ -30,7 +30,7 @@ import {
   backupScopeSnapshot,
   listBackups,
 } from './lib/backup.js';
-import { closeEngine } from './lib/vector-client.js';
+import { closeEngine, vectorCountScope } from './lib/vector-client.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
 
@@ -452,7 +452,8 @@ function validateRebuildOptsOrExit(): void {
 
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
 async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
-  const result = await rebuildScopeVectors(scopeName, {}, opts);
+  // 注入真实 countScope：全量重建清空旧向量前统计总数，删除过程输出进度条
+  const result = await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, opts);
   // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
   if (result.ok && !result.partial) {
     try {
