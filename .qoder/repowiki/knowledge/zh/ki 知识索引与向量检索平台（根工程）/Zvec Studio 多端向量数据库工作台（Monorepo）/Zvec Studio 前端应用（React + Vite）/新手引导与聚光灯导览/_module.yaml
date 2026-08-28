@@ -5,4 +5,5 @@ scope:
     - zvec-studio/apps/frontend/src/features/onboarding/
 source_files: []
 depends_on: []
-related_to: []
+related_to:
+    - path: zvec_studio/frontend_app/ui_components

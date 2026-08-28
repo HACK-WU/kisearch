@@ -6,4 +6,4 @@ scope:
 source_files: []
 depends_on: []
 related_to:
-    - path: zvec_studio/backend_app
+    - path: zvec_studio/backend_app/routers

@@ -5,4 +5,5 @@ scope:
     - zvec-studio/apps/frontend/src/pages/rerankers/
 source_files: []
 depends_on: []
-related_to: []
+related_to:
+    - path: zvec_studio/frontend_app/ai_feature

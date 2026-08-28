@@ -12,4 +12,3 @@ source_files: []
 depends_on: []
 related_to:
     - path: core_engine/cli_commands/server_mcp_commands
-    - path: core_engine/cli_commands/shared_libs/vector_indexing

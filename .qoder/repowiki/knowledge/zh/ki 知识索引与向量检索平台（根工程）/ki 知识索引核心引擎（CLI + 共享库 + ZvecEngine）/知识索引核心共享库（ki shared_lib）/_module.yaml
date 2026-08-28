@@ -5,7 +5,4 @@ scope:
     - src/lib/
 source_files: []
 depends_on: []
-related_to:
-    - path: core_engine/cli_commands
-    - path: core_engine/cli_commands/backup_restore_commands
-    - path: core_engine/cli_commands/sync_relation_commands
+related_to: []

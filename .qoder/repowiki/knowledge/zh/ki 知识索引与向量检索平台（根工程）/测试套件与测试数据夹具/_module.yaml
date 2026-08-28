@@ -8,5 +8,4 @@ scope:
 source_files: []
 depends_on: []
 related_to:
-    - path: core_engine/cli_commands
-    - path: zvec_studio/backend_app
+    - path: core_engine/zvec_engine

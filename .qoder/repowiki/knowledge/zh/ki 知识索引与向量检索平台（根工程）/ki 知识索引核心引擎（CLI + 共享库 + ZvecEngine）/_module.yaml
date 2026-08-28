@@ -5,6 +5,4 @@ scope:
     - src/
 source_files: []
 depends_on: []
-related_to:
-    - path: data_and_config
-    - path: docs_and_skills
+related_to: []

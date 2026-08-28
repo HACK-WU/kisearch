@@ -5,5 +5,4 @@ scope:
     - zvec-studio/apps/backend/zvec_studio/middleware/
 source_files: []
 depends_on: []
-related_to:
-    - path: zvec_studio/backend_app/app_bootstrap
+related_to: []

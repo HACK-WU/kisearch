@@ -8,5 +8,4 @@ scope:
     - src/lib/preflight.ts
 source_files: []
 depends_on: []
-related_to:
-    - path: core_engine/cli_commands/indexing_search_commands
+related_to: []

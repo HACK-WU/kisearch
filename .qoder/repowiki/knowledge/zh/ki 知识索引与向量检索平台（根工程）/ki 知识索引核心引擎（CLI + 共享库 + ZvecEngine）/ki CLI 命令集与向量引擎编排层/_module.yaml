@@ -5,6 +5,4 @@ scope:
     - src/
 source_files: []
 depends_on: []
-related_to:
-    - path: core_engine/shared_lib
-    - path: tests_and_fixtures
+related_to: []

@@ -11,5 +11,4 @@ scope:
     - src/zvec-engine/worker.ts
 source_files: []
 depends_on: []
-related_to:
-    - path: core_engine/cli_commands/shared_libs/vector_indexing
+related_to: []

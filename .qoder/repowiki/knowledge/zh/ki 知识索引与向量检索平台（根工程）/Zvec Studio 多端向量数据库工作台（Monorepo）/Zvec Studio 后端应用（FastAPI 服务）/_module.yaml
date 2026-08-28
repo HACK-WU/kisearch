@@ -6,11 +6,5 @@ scope:
 source_files: []
 depends_on: []
 related_to:
-    - path: tests_and_fixtures
-    - path: zvec_studio/api_client_package
+    - path: zvec_studio/build_and_scripts
     - path: zvec_studio/desktop_app
-    - path: zvec_studio/frontend_app
-    - path: zvec_studio/frontend_app/ai_feature
-    - path: zvec_studio/frontend_app/collections_feature
-    - path: zvec_studio/frontend_app/documents_feature
-    - path: zvec_studio/frontend_app/searches_feature

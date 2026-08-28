@@ -7,7 +7,4 @@ scope:
     - zvec-studio/apps/backend/zvec_studio/config_store.py
 source_files: []
 depends_on: []
-related_to:
-    - path: zvec_studio/backend_app/ai_service
-    - path: zvec_studio/backend_app/middleware
-    - path: zvec_studio/backend_app/schemas
+related_to: []

@@ -8,5 +8,4 @@ scope:
     - src/lib/net-addr.ts
 source_files: []
 depends_on: []
-related_to:
-    - path: core_engine/cli_commands/backup_restore_commands
+related_to: []
