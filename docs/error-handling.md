@@ -36,6 +36,20 @@
 
 单条模式要求同时提供 `--group`、`--relation`、`--module-info`。
 
+### 配置文件字段不合法（`CONFIG_FIELD_INVALID`）
+
+典型现象（任何 ki 命令，包括 `ki doctor` / `ki mcp` 启动）：
+
+```
+❌ 配置加载失败：CONFIG_FIELD_INVALID: 配置文件字段校验失败：/root/.ki/config.yaml（共 2 处）
+  - datadir：非预期字段，您是否想输入 "dataDir"？（可用：dataDir | backupDir | ...）
+  - embedding.dimension：应为数字，实际为 string（4096）
+```
+
+原因：配置除语法外还会校验**字段名 / 类型 / 取值**，避免拼错的字段静默落默认值。只要有一处非法，所有命令直接拒绝运行（不再带着错配继续跑）。
+
+恢复：按错误清单逐条修配置（一次已列出至多 10 条，修完重跑会继续报下一批）；字段含义与合法取值见 [configuration.md · 字段校验](./configuration.md#字段校验)。注意两个写法陷阱：只写键名不赋值（`dataDir:` 后空着）会报错；YAML 合并键 `<<:` 本项目不生效，只能用整值引用 `*anchor`。
+
 ---
 
 ## 二类：数据文件缺失或损坏

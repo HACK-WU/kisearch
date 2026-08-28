@@ -14,12 +14,18 @@
  *   - KiConfig 新增 vectorDir / embedding 字段（zvec 向量配置）
  *   - 新增 getVectorDir() / getEmbeddingConfig() 解析函数
  *   - 配置格式 YAML 优先（REQ-11），保留 JSON 读取兼容（读到 .json 时提示迁移）
+ *
+ * 字段级校验（2026-08-28）：语法解析成功后、宽容归一化之前，先由
+ *   config-schema.ts 校验字段名/类型/取值，不合法则 fail-loud 抛
+ *   CONFIG_FIELD_INVALID（一次性列出全部问题），不再静默落默认值/NaN。
  */
 
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import YAML from 'yaml';
+
+import { validateConfigFields, type ConfigIssue } from './config-schema.js';
 
 // ─── 默认路径（方案 A：统一 ~/.ki/ 用户数据根，运行时数据不落源码仓库） ───
 
@@ -124,6 +130,8 @@ export interface KiConfig {
   scopeMode: 'default' | 'strict';       // 【新增】scope 护栏模式（默认 'default'）；见 S-01 §3.5
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
+  /** 字段校验告警（废弃字段 / null scope 条目等）：不阻断加载，由 ki doctor 报告 */
+  _fieldWarnings?: ConfigIssue[];
   _configPath?: string;                  // 配置文件路径（内部）
 }
 
@@ -255,6 +263,20 @@ function parseAndExpand(configFile: string): KiConfig {
     throw new Error(`配置文件解析失败：${configFile}\n${detail}`);
   }
 
+  // 字段级校验：语法正确 ≠ 内容合法。字段名拼错/类型错/非法枚举值一律 fail-loud，
+  // 避免过去「静默落默认值 / NaN」导致的隐性错配（null 的 scope 条目等仅告警不阻断）。
+  const { errors: fieldErrors, warns: fieldWarns } = validateConfigFields(raw);
+  if (fieldErrors.length > 0) {
+    const MAX_SHOW = 10;
+    const lines = fieldErrors.slice(0, MAX_SHOW).map((e) => `  - ${e.path}：${e.message}`);
+    if (fieldErrors.length > MAX_SHOW) {
+      lines.push(`  ...（另有 ${fieldErrors.length - MAX_SHOW} 处，修正以上问题后继续检查）`);
+    }
+    throw new Error(
+      `CONFIG_FIELD_INVALID: 配置文件字段校验失败：${configFile}（共 ${fieldErrors.length} 处）\n${lines.join('\n')}`
+    );
+  }
+
   const configDir = path.dirname(configFile);
 
   // 未显式配置时使用统一默认路径（~/.ki/kb、~/.ki/backup，见 resolveDefaultDataPaths）
@@ -355,7 +377,11 @@ function parseAndExpand(configFile: string): KiConfig {
     }
   }
 
-  return { dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, mcp, _configPath: configFile };
+  return {
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, mcp,
+    _fieldWarnings: fieldWarns,
+    _configPath: configFile,
+  };
 }
 
 // ─── 内置默认值 ───

@@ -5,6 +5,8 @@
  *
  * 设计要点：
  *   - 纯只读：不修改任何配置或数据
+ *   - 配置文件检查涵盖语法（YAML/JSON 解析）与字段级校验（名称/类型/取值，
+ *     见 config-schema.ts）：字段不合法时 loadConfig 直接抛错，本检查项只在加载成功后报告
  *   - embedding 检查用 1 条最短文本（"test"）发一次真实请求，三合一验证
  *     URL 连通性 + 密钥有效性 + 维度匹配（复用 SiliconFlowProvider 现成错误语义）
  *   - 超时 8s（timeoutMs），重试 1 次（retries:1），容忍瞬时网络抖动（冷 DNS/TLS 握手/临时拥塞），
@@ -148,14 +150,39 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
 export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
   const items: HealthItem[] = [];
 
-  // 1. 配置文件存在且可解析
+  // 1. 配置文件存在且可解析（字段名/类型/取值校验在 loadConfig 阶段 fail-loud，
+  //    能走到这里即已通过语法 + 字段双重检查；无配置文件时 _configPath 为空）
   if (config._configPath) {
-    items.push({ name: '配置文件', status: 'pass', detail: `${config._configPath} 格式正确` });
+    items.push({ name: '配置文件', status: 'pass', detail: `${config._configPath} 格式与字段均合法` });
   } else {
     items.push({
       name: '配置文件',
       status: 'fail',
       detail: '未找到配置文件（使用内置默认值），建议执行 ki config init',
+    });
+  }
+
+  // 1b. 字段告警（不阻断加载但需知道）：废弃字段 / null 的 scope 条目。
+  // 同一原因的告警归组展示（如多个 scope 残留同一废弃字段），避免重复文案刷屏。
+  const fieldWarns = config._fieldWarnings ?? [];
+  if (fieldWarns.length === 0) {
+    items.push({ name: '配置字段', status: 'pass', detail: '无废弃字段、无空 scope 条目' });
+  } else {
+    const byMessage = new Map<string, string[]>();
+    for (const w of fieldWarns) {
+      const paths = byMessage.get(w.message);
+      if (paths) paths.push(w.path);
+      else byMessage.set(w.message, [w.path]);
+    }
+    const MAX_MSG = 3;
+    const groups = [...byMessage.entries()].slice(0, MAX_MSG).map(
+      ([msg, paths]) => `${paths.join(', ')} → ${msg}`
+    );
+    items.push({
+      name: '配置字段',
+      status: 'warn',
+      detail: `${fieldWarns.length} 处提示：${groups.join(' ｜ ')}`
+        + (byMessage.size > MAX_MSG ? `（另有 ${byMessage.size - MAX_MSG} 类）` : ''),
     });
   }
 

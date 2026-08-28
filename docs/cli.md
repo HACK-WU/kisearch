@@ -14,7 +14,7 @@
 
 **首次使用**：运行 `ki config init` 生成 YAML 配置文件模板（`~/.ki/config.yaml`）。配置格式以 YAML 为主，保留对旧版 `config.json` 的读取兼容。
 
-**校验**：运行 `ki doctor` 一键校验配置文件 / 目录 / API 密钥 / 向量维度是否就绪。
+**校验**：运行 `ki doctor` 一键校验配置文件（语法 + 字段名/类型/取值）/ 目录 / API 密钥 / 向量维度是否就绪。字段名拼错、类型写错会在配置加载阶段直接报 `CONFIG_FIELD_INVALID` 并退出（详见 [configuration.md · 字段校验](./configuration.md#字段校验)）。
 
 **注意**：环境变量 `KI_DATA_DIR` 已不再作为运行时配置来源，仅使用配置文件机制（`ki config init` 生成模板时可被其显式覆盖默认值 `~/.ki/kb`）。
 
@@ -1185,7 +1185,6 @@ scopes:
   # 自定义 scope（可选，按需添加）；kbDir 会在其下自动创建 kb/{scope} 子目录
   my-project:
     kbDir: /data/special-kb              # 实际数据在 /data/special-kb/kb/my-project
-    sourceDir: .qoder/repowiki/zh/content
     wikiSync:
       enabled: true
       sourceDir: /path/to/wiki-content
@@ -1233,18 +1232,21 @@ scopes:
 ki doctor
 ```
 
-**检查项**（约 10 项）：
+**检查项**（约 12 项）：
 
 | 检查项 | 说明 |
 |--------|------|
-| 配置文件 | 是否成功加载配置文件（`_configPath`） |
+| 配置文件 | 是否成功加载配置文件（`_configPath`）；加载成功即代表语法 + 字段名/类型/取值均已通过校验 |
+| 配置字段 | 字段级 ⚠️ 告警（废弃的 `scopes.<scope>.sourceDir`、YAML 裸写导致的 null scope 条目） |
 | dataDir / backupDir / vectorDir | 目录是否存在且可写 |
 | API 密钥 | 配置 `embedding.apiKey`（明文或 `${VAR_NAME}` 引用）是否已解析出密钥 |
-| 连通性 / 密钥有效性 / 向量维度 | 发起一次 embedding 探测（5s 超时、不重试），映射为端点连通性、密钥有效性、维度匹配三项 |
+| 连通性 / 密钥有效性 / 向量维度 | 发起一次 embedding 探测（8s 超时、重试 1 次），映射为端点连通性、密钥有效性、维度匹配三项 |
 | zvec collection | `vectorDir` 是否已初始化 |
 | scopes.default | 是否配置了默认 scope |
 
 **退出码**：存在 ❌ 失败项时退出码为 `1`，否则为 `0`（便于 CI / 脚本判定）。
+
+> 字段校验失败（`CONFIG_FIELD_INVALID`）时报告不会输出，而是直接打印错误清单并以退出码 `1` 结束；错误项内已含字段路径与相近字段建议，修正后重跑即可。
 
 > `ki mcp` 在启动前会自动执行同样的健康检查，报告写入 stderr（不污染 stdio 协议）；存在 ❌ 失败项将拒绝启动，仅 ⚠️ 警告时继续启动。
 
