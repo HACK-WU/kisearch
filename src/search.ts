@@ -105,19 +105,38 @@ export async function executeSearch(params: {
       });
     } else {
       const { tags } = await vectorListTags({ scope });
-      const perTag: { priority: number; hits: VectorSearchResult[] }[] = [];
-      for (const t of tags) {
+      if (tags.length === 0) {
+        raw = [];
+      } else {
+        // 单次查询（多 tag OR 过滤）：embedding 只做 1 次（逐 tag 分查会对同一 query
+        // 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按 tag 数放大保障
+        // 每 tag 召回上限，查询后按 tag 分组限额 + TAG_PRIORITY 排序。
+        // ⚠️ 与原逐 tag 分查近似等价：topk 为全局分配，极端场景（单 tag 命中数
+        // 超过 limit×N 且 score 全面占优）下其他 tag 可能被挤出——多数场景因下游
+        // (group, relation) 去重（同文档多 tag 各写一条）而效果一致。
+        // 传数组而非 join(',')：tag 值本身可能含逗号，join/split 往返会错拆。
+        const limit = params.limit ?? 10;
         const hits = await vectorSearch({
           scope,
           query: params.query,
-          limit: params.limit ?? 10,
+          limit: limit * tags.length,
           threshold: params.threshold,
-          tags: t.tag,
+          tags: tags.map((t) => t.tag),
         });
-        if (hits.length > 0) perTag.push({ priority: tagPriority(t.tag), hits });
+        const byTag = new Map<string, VectorSearchResult[]>();
+        for (const h of hits) {
+          const tag = h.tag ?? '';
+          const group = byTag.get(tag);
+          if (group) group.push(h);
+          else byTag.set(tag, [h]);
+        }
+        const perTag: { priority: number; hits: VectorSearchResult[] }[] = [];
+        for (const group of byTag.values()) {
+          perTag.push({ priority: tagPriority(group[0].tag ?? ''), hits: group.slice(0, limit) });
+        }
+        perTag.sort((a, b) => a.priority - b.priority);
+        raw = perTag.flatMap((p) => p.hits);
       }
-      perTag.sort((a, b) => a.priority - b.priority);
-      raw = perTag.flatMap((p) => p.hits);
     }
 
     // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文

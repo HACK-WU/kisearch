@@ -505,13 +505,15 @@ export async function vectorSearch(params: {
   scope: string;
   query: string;
   limit?: number;
-  tags?: string;        // 单个或多个 tag（逗号分隔）；不传/空 → 全部 tag；忽略大小写
+  tags?: string | string[]; // 数组：tag 值本身可能含逗号，join/split 往返会错拆；字符串：逗号分隔多 tag
   threshold?: number;
 }): Promise<VectorSearchResult[]> {
   const scope = resolveScope(loadConfig(), params.scope);
-  const tagList = params.tags
-    ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
-    : undefined;
+  const tagList = Array.isArray(params.tags)
+    ? params.tags
+    : params.tags
+      ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
+      : undefined;
   const filter = buildScopeTagFilter(scope, tagList);
 
   const hits: Hit[] = await withEngine((engine) => engine.hybridSearch({
