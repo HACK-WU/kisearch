@@ -115,6 +115,10 @@ export interface ScopeListResponse {
   scopeMode?: string;
   count?: number;
   scopes: ScopeInfo[];
+  /** 向量层是否可用；false 表示已降级为仅 KB 层枚举（如向量库被导入进程持锁） */
+  vectorAvailable?: boolean;
+  /** 向量层不可用原因（降级时用于悬停提示） */
+  vectorReason?: string;
 }
 
 export async function kiScopeList(): Promise<ScopeListResponse> {

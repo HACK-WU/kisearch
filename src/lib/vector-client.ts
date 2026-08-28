@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
 // 编译后的 worker.js，源码目录无法直接运行；故 dist 是运行时必需品，
@@ -86,6 +87,23 @@ function lockedHint(dbPath: string): string {
 }
 
 /**
+ * 当前异步链的向量操作来源（HTTP 端点 / MCP 工具名）。
+ * HTTP 层在请求入口用 runWithVectorSource 标注，probeWithRetry 的撞锁日志
+ * 附带该来源，便于从服务端日志直接定位是哪个端点/工具触发的撞锁。
+ */
+const vectorSourceStorage = new AsyncLocalStorage<string>();
+
+/** 标注向量操作来源：fn 执行期间 probeWithRetry 的撞锁日志会附带该来源 */
+export function runWithVectorSource<T>(source: string, fn: () => T): T {
+  return vectorSourceStorage.run(source, fn);
+}
+
+/** 读取当前异步链的向量操作来源（未标注时 undefined）；诊断/测试用 */
+export function getVectorOpSource(): string | undefined {
+  return vectorSourceStorage.getStore();
+}
+
+/**
  * probe 带撞锁重试：检测到 locked 时等待对方释放后重试（错开共享向量库）。
  * 多 stdio MCP 实例 / CLI 短命令共享同一向量库，空闲释放锁会让持锁方空闲后自动
  * 释放，此处重试即可「撞了多等几秒」而非立即失败。最多 LOCK_RETRY_MAX 次。
@@ -96,8 +114,10 @@ async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
     if (!probe.locked || attempt >= LOCK_RETRY_MAX) {
       return probe;
     }
+    // 撞锁日志附带来源（HTTP 端点/MCP 工具名；CLI 路径未标注则无来源段）
+    const source = vectorSourceStorage.getStore();
     process.stderr.write(
-      `[kisearch] 向量库被其他进程占用，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
+      `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
     );
     await sleep(LOCK_RETRY_INTERVAL_MS);
   }
@@ -417,7 +437,10 @@ async function withEngine<T>(op: (engine: ZvecEngine) => Promise<T>): Promise<T>
  * - 被其他进程持锁 → 不可用（提示）
  * - 损坏 → 不可用（提示重建）
  */
-export async function ensureVectorAvailable(scope?: string): Promise<VectorAvailableResult> {
+export async function ensureVectorAvailable(
+  scope?: string,
+  opts?: { fastFail?: boolean },
+): Promise<VectorAvailableResult> {
   // REQ-02：中断标记前置检测（传入 scope 时）——中断后给出可执行恢复引导（不阻断，继续执行）
   if (scope) {
     const guidance = interruptGuidance(scope);
@@ -442,7 +465,11 @@ export async function ensureVectorAvailable(scope?: string): Promise<VectorAvail
   const config = loadConfig();
   const dbPath = getVectorDir(config);
   try {
-    const probe = await serializeEngineOp(() => probeWithRetry(dbPath));
+    // fastFail（scope 枚举等轻量路径）：单次 probe 不重试，撞锁立即返回不可用。
+    // 轻量接口不应为等锁白耗十余秒（重试留给必须过向量层的写入/检索路径）。
+    const probe = await serializeEngineOp(() =>
+      opts?.fastFail ? ZvecEngine.probe(dbPath) : probeWithRetry(dbPath),
+    );
     if (probe.locked) {
       return {
         available: false,

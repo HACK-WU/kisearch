@@ -99,7 +99,9 @@ export async function executeScopeList(): Promise<ScopeListResult> {
   let vectorAvailable = true;
   let vectorReason: string | undefined;
 
-  const avail = await ensureVectorAvailable();
+  // fastFail：scope 枚举走单次 probe，撞锁立即降级为仅 KB 层（不依赖向量引擎），
+  // 不像写入/检索路径那样重试等锁——scope 下拉不应因向量锁挂起十余秒
+  const avail = await ensureVectorAvailable(undefined, { fastFail: true });
   if (avail.available) {
     try {
       vectorScopes = new Set(await vectorListScopes());

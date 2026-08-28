@@ -24,6 +24,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
+import { runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
@@ -142,6 +143,24 @@ function extractJsonRpcId(body: unknown): unknown {
   const item = Array.isArray(body) ? body[0] : body;
   if (item && typeof item === 'object') return (item as { id?: unknown }).id ?? null;
   return null;
+}
+
+/**
+ * 从 MCP 请求体提取撞锁日志来源标识：tools/call 取工具名（batch 取首个），
+ * 其他取 JSON-RPC method；无法识别时返回 'mcp'。
+ * 来源截断到 80 字符：name/method 来自客户端请求体，防超长串污染日志。
+ */
+function describeMcpSource(body: unknown): string {
+  const first = Array.isArray(body) ? body[0] : body;
+  if (first && typeof first === 'object') {
+    const msg = first as Record<string, unknown>;
+    const params = msg.params as Record<string, unknown> | undefined;
+    if (msg.method === 'tools/call' && params && typeof params.name === 'string') {
+      return `mcp:${params.name.slice(0, 80)}`;
+    }
+    if (typeof msg.method === 'string') return `mcp:${msg.method.slice(0, 80)}`;
+  }
+  return 'mcp';
 }
 
 /** 读取并解析 JSON 请求体（POST）；空体返回 undefined */
@@ -432,12 +451,15 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 注意：/api/* 未匹配的请求返回 JSON 404（不 fallback 到静态页面，防止前端 JSON.parse 崩溃）
     if (url.pathname.startsWith('/api/')) {
       const api = await getApiHandler();
-      await api.handleApiRequest(req, res, url, {
-        authEnabled,
-        token,
-        clientAddr: resolveClientAddr(req),
-        resolveTokenScopes,
-      });
+      // 撞锁日志来源标注：以 API 端点路径标识（执行链内 probeWithRetry 日志附带）
+      await runWithVectorSource(`api:${url.pathname}`, () =>
+        api.handleApiRequest(req, res, url, {
+          authEnabled,
+          token,
+          clientAddr: resolveClientAddr(req),
+          resolveTokenScopes,
+        }),
+      );
       return;
     }
 
@@ -504,6 +526,19 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     authScopes: string[] | null,
   ): Promise<void> {
     const body = await readJsonBody(req);
+    // 撞锁日志来源标注：提取首个 tools/call 工具名（或 JSON-RPC method），
+    // 后续执行链（含各工具 handler）内 probeWithRetry 的日志会附带该来源
+    await runWithVectorSource(describeMcpSource(body), () =>
+      handleMcpPostInner(req, res, authScopes, body),
+    );
+  }
+
+  async function handleMcpPostInner(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    authScopes: string[] | null,
+    body: unknown,
+  ): Promise<void> {
 
     // scope 越权校验：鉴权模式下（authScopes !== null），拦截 tools/call 的 scope 参数。
     // 所有工具 scope 参数统一位于 arguments.scope 顶层（缺省 'default'），

@@ -6,7 +6,7 @@
  */
 
 import { Fragment, useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
 import { kiGetModuleInfo } from '@/api/mcpClient';
@@ -85,6 +85,9 @@ function countDocs(node: TreeNode): number {
 
 export function BrowsePage(): JSX.Element {
   const scope = useScopeValue();
+  const queryClient = useQueryClient();
+  // 全局在途请求数：> 0 时刷新按钮置为「刷新中…」并禁用，避免重复点击
+  const fetching = useIsFetching();
   const [q, setQ] = useState('');
   const [activeGroup, setActiveGroup] = useState('');
   const [viewing, setViewing] = useState<{ module: string; group: string } | null>(null);
@@ -265,6 +268,14 @@ export function BrowsePage(): JSX.Element {
               <span className="ki-card__title">Group 树</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span className="ki-card__sub">{tree.length} 个目录</span>
+                <button
+                  className="ki-mini-btn"
+                  onClick={() => { void queryClient.invalidateQueries(); }}
+                  disabled={fetching > 0}
+                  title="重新拉取 scope 与文档列表（导入完成后无需重启服务，点此即可看到新 Group）"
+                >
+                  {fetching > 0 ? '刷新中…' : '刷新'}
+                </button>
                 <button className="ki-mini-btn" onClick={() => setAllOpen(true)} title="展开全部目录">
                   展开全部
                 </button>
