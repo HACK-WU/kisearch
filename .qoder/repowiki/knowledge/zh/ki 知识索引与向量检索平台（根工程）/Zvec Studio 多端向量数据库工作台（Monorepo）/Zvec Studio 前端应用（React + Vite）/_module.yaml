@@ -1,9 +1,0 @@
-schema_version: 1
-module_path: zvec_studio/frontend_app
-title: Zvec Studio 前端应用（React + Vite）
-scope:
-    - zvec-studio/apps/frontend/
-source_files: []
-depends_on: []
-related_to:
-    - path: zvec_studio/build_and_scripts

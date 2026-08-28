@@ -1,9 +1,0 @@
-schema_version: 1
-module_path: zvec_studio/frontend_app/embeddings_pages
-title: Embedding 函数详情页与创建对话框
-scope:
-    - zvec-studio/apps/frontend/src/pages/embeddings/
-source_files: []
-depends_on: []
-related_to:
-    - path: zvec_studio/frontend_app/ai_feature

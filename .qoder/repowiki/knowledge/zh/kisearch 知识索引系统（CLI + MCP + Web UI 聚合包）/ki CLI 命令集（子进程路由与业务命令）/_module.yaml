@@ -1,0 +1,28 @@
+schema_version: 1
+module_path: cli_commands
+title: ki CLI 命令集（子进程路由与业务命令）
+scope:
+    - src/scan-kb.ts
+    - src/manage-index.ts
+    - src/query-group.ts
+    - src/get-module-info.ts
+    - src/sync-relation.ts
+    - src/search.ts
+    - src/tag.ts
+    - src/store.ts
+    - src/doc.ts
+    - src/export.ts
+    - src/backup.ts
+    - src/restore.ts
+    - src/delete-relation.ts
+    - src/config.ts
+    - src/wiki-backfill.ts
+    - src/scope.ts
+    - bin/
+    - scripts/
+source_files: []
+depends_on: []
+related_to:
+    - path: core_lib/storage_wal
+    - path: dev_tools_and_probes
+    - path: tests

@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: zvec_studio/backend_app/schemas
-title: Zvec Studio REST API Pydantic 数据模型
-scope:
-    - zvec-studio/apps/backend/zvec_studio/schemas/
-source_files: []
-depends_on: []
-related_to: []

@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: core_lib/mcp_server
+title: MCP 服务与工具层（HTTP/stdio 传输、鉴权、进程守护与 MCP Tools）
+scope:
+    - src/lib/mcp-tools/
+    - src/lib/mcp-http-api.ts
+    - src/lib/mcp-http.ts
+    - src/lib/mcp-stdio-lock.ts
+    - src/lib/mcp-stop.ts
+    - src/lib/mcp-token.ts
+source_files: []
+depends_on: []
+related_to: []

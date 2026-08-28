@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: zvec_engine/core_engine_and_workers
+title: ZvecEngine 核心引擎与 Worker 进程
+scope:
+    - src/zvec-engine/engine.ts
+    - src/zvec-engine/proxy.ts
+    - src/zvec-engine/worker.ts
+    - src/zvec-engine/worker-protocol.ts
+    - src/zvec-engine/index.ts
+    - src/zvec-engine/types.ts
+    - src/zvec-engine/errors.ts
+source_files: []
+depends_on: []
+related_to: []

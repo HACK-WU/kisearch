@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: dev_tools_and_probes
+title: E2E 运行环境与向量探针工具集
+scope:
+    - .e2e-run/
+    - zvec-probe/
+    - zvec-probe-node/
+source_files: []
+depends_on: []
+related_to:
+    - path: cli_commands
+    - path: python_mcp_server

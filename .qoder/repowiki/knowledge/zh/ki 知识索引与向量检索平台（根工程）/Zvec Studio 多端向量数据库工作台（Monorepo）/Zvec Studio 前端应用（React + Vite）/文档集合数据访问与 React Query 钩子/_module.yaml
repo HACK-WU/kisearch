@@ -1,9 +1,0 @@
-schema_version: 1
-module_path: zvec_studio/frontend_app/documents_feature
-title: 文档集合数据访问与 React Query 钩子
-scope:
-    - zvec-studio/apps/frontend/src/features/documents/
-source_files: []
-depends_on: []
-related_to:
-    - path: zvec_studio/backend_app/routers

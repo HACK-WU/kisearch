@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: core_engine
-title: ki 知识索引核心引擎（CLI + 共享库 + ZvecEngine）
-scope:
-    - src/
-source_files: []
-depends_on: []
-related_to: []

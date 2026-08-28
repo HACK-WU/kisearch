@@ -1,9 +1,0 @@
-schema_version: 1
-module_path: web_ui
-title: ki 知识库 Web 前端（React + Vite）
-scope:
-    - web/
-source_files: []
-depends_on: []
-related_to:
-    - path: core_engine/cli_commands/server_mcp_commands

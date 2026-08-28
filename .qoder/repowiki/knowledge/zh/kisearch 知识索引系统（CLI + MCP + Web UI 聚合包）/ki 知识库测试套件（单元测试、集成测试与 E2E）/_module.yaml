@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: tests
+title: ki 知识库测试套件（单元测试、集成测试与 E2E）
+scope:
+    - test/
+    - tests/
+source_files: []
+depends_on: []
+related_to:
+    - path: cli_commands
+    - path: python_mcp_server
