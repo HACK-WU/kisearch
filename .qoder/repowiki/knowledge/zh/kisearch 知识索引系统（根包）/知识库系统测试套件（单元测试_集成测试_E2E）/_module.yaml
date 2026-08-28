@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: tests
+title: 知识库系统测试套件（单元测试/集成测试/E2E）
+scope:
+    - test/
+    - tests/
+source_files: []
+depends_on: []
+related_to:
+    - path: cli_commands
+    - path: core_lib/storage_wal
+    - path: zvec_engine/core_engine_and_workers

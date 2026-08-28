@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-08-28T04:59:55Z"
+exported_at: "2026-08-28T07:50:43Z"
 modules:
     "":
-        dir_name: kisearch 知识索引系统（CLI + MCP + Web UI 聚合包）
-        title: kisearch 知识索引系统（CLI + MCP + Web UI 聚合包）
+        dir_name: kisearch 知识索引系统（根包）
+        title: kisearch 知识索引系统（根包）
         scope:
             - README.md
             - package.json
@@ -33,8 +33,8 @@ modules:
         depends_on: []
         related_to: []
     cli_commands:
-        dir_name: ki CLI 命令集（子进程路由与业务命令）
-        title: ki CLI 命令集（子进程路由与业务命令）
+        dir_name: ki CLI 命令入口与子命令实现
+        title: ki CLI 命令入口与子命令实现
         scope:
             - src/scan-kb.ts
             - src/manage-index.ts
@@ -58,12 +58,12 @@ modules:
         children: []
         depends_on: []
         related_to:
-            - path: core_lib/storage_wal
-            - path: dev_tools_and_probes
+            - path: core_lib/search_scoring
             - path: tests
+            - path: zvec_engine/core_engine_and_workers
     core_lib:
-        dir_name: 知识库核心库（src_lib）
-        title: 知识库核心库（src/lib）
+        dir_name: 知识库核心库层（src_lib）
+        title: 知识库核心库层（src/lib）
         scope:
             - src/lib/
         source_files: []
@@ -101,7 +101,9 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: dev_tools_and_probes
+            - path: web_ui
     core_lib/search_scoring:
         dir_name: 搜索评分、导入与 Wiki 写回工具集
         title: 搜索评分、导入与 Wiki 写回工具集
@@ -113,7 +115,9 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: cli_commands
+            - path: knowledge_bases_and_data
     core_lib/storage_wal:
         dir_name: 知识存储层与 WAL 持久化
         title: 知识存储层与 WAL 持久化
@@ -127,7 +131,7 @@ modules:
         children: []
         depends_on: []
         related_to:
-            - path: cli_commands
+            - path: tests
     core_lib/utilities:
         dir_name: 通用工具库（AI 结果、备份、清洗、健康检查、中断、网络地址、路径搜索、预检、进度）
         title: 通用工具库（AI 结果、备份、清洗、健康检查、中断、网络地址、路径搜索、预检、进度）
@@ -156,8 +160,7 @@ modules:
         children: []
         depends_on: []
         related_to:
-            - path: cli_commands
-            - path: python_mcp_server
+            - path: core_lib/mcp_server
     docs_and_assets:
         dir_name: 知识索引文档与 Agent Skill 规范
         title: 知识索引文档与 Agent Skill 规范
@@ -177,7 +180,8 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: core_lib/search_scoring
     python_mcp_server:
         dir_name: Zvec MCP 向量数据库服务
         title: Zvec MCP 向量数据库服务
@@ -187,13 +191,10 @@ modules:
         children: []
         depends_on: []
         related_to:
-            - path: dev_tools_and_probes
-            - path: tests
-            - path: web_ui
-            - path: zvec_engine
+            - path: zvec_engine/core_engine_and_workers
     tests:
-        dir_name: ki 知识库测试套件（单元测试、集成测试与 E2E）
-        title: ki 知识库测试套件（单元测试、集成测试与 E2E）
+        dir_name: 知识库系统测试套件（单元测试_集成测试_E2E）
+        title: 知识库系统测试套件（单元测试/集成测试/E2E）
         scope:
             - test/
             - tests/
@@ -202,17 +203,18 @@ modules:
         depends_on: []
         related_to:
             - path: cli_commands
-            - path: python_mcp_server
+            - path: core_lib/storage_wal
+            - path: zvec_engine/core_engine_and_workers
     web_ui:
-        dir_name: ki 前端 Web UI（React + Vite）
-        title: ki 前端 Web UI（React + Vite）
+        dir_name: 知识索引器 Web 管理界面（ki-web）
+        title: 知识索引器 Web 管理界面（ki-web）
         scope:
             - web/
         source_files: []
         children: []
         depends_on: []
         related_to:
-            - path: python_mcp_server
+            - path: core_lib/mcp_server
     zvec_engine:
         dir_name: ZvecEngine 向量检索引擎
         title: ZvecEngine 向量检索引擎
@@ -222,8 +224,7 @@ modules:
         children:
             - zvec_engine/core_engine_and_workers
         depends_on: []
-        related_to:
-            - path: python_mcp_server
+        related_to: []
     zvec_engine/core_engine_and_workers:
         dir_name: ZvecEngine 核心引擎与 Worker 进程
         title: ZvecEngine 核心引擎与 Worker 进程
@@ -238,4 +239,7 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: cli_commands
+            - path: python_mcp_server
+            - path: tests

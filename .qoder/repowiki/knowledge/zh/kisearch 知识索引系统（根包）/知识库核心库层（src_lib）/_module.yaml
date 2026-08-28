@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: core_lib
+title: 知识库核心库层（src/lib）
+scope:
+    - src/lib/
+source_files: []
+depends_on: []
+related_to: []

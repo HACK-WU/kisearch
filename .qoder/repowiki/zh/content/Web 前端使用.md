@@ -19,6 +19,13 @@
 - [web/src/styles/ki.css](file://web/src/styles/ki.css)
 </cite>
 
+## 更新摘要
+**变更内容**
+- 更新了语义搜索页面的阈值控制功能说明
+- 新增精确滑块和步进按钮的交互描述
+- 更新了阈值范围配置（0~0.2）和步进精度（0.005）
+- 增强了搜索结果筛选功能的详细说明
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -65,7 +72,7 @@ F --> K
 - [web/src/layouts/AppShell.tsx:1-170](file://web/src/layouts/AppShell.tsx#L1-L170)
 - [web/src/pages/DashboardPage.tsx:1-227](file://web/src/pages/DashboardPage.tsx#L1-L227)
 - [web/src/pages/BrowsePage.tsx:1-411](file://web/src/pages/BrowsePage.tsx#L1-L411)
-- [web/src/pages/SearchPage.tsx:1-251](file://web/src/pages/SearchPage.tsx#L1-L251)
+- [web/src/pages/SearchPage.tsx:1-276](file://web/src/pages/SearchPage.tsx#L1-L276)
 - [web/src/pages/ImportPage.tsx:1-503](file://web/src/pages/ImportPage.tsx#L1-L503)
 - [web/src/pages/WritePage.tsx:1-325](file://web/src/pages/WritePage.tsx#L1-L325)
 - [web/src/lib/hooks.ts:1-53](file://web/src/lib/hooks.ts#L1-L53)
@@ -92,7 +99,7 @@ F --> K
 - [web/src/lib/hooks.ts:1-53](file://web/src/lib/hooks.ts#L1-L53)
 - [web/src/api/httpApi.ts:1-189](file://web/src/api/httpApi.ts#L1-L189)
 - [web/src/api/mcpClient.ts:1-179](file://web/src/api/mcpClient.ts#L1-L179)
-- [web/src/styles/ki.css:1-200](file://web/src/styles/ki.css#L1-L200)
+- [web/src/styles/ki.css:1-977](file://web/src/styles/ki.css#L1-L977)
 
 ## 架构总览
 前端通过两条通道获取数据：
@@ -118,7 +125,7 @@ FE-->>U : 渲染结果/进度/预览
 图表来源
 - [web/src/api/mcpClient.ts:48-179](file://web/src/api/mcpClient.ts#L48-L179)
 - [web/src/api/httpApi.ts:93-189](file://web/src/api/httpApi.ts#L93-L189)
-- [web/src/pages/SearchPage.tsx:49-79](file://web/src/pages/SearchPage.tsx#L49-L79)
+- [web/src/pages/SearchPage.tsx:60-90](file://web/src/pages/SearchPage.tsx#L60-L90)
 - [web/src/pages/ImportPage.tsx:170-228](file://web/src/pages/ImportPage.tsx#L170-L228)
 
 ## 详细页面说明
@@ -162,7 +169,7 @@ Render --> End(["完成"])
 - 交互与数据流
   - useDocList(scope) 获取全量文档与 groups；useGroupDocs(scope, group, tag) 获取指定 group 的完整文档。
   - 全局搜索触发 getDocList(scope, {q, tag}) 并缓存结果。
-  - 支持“展开全部/折叠全部”、刷新按钮（使 QueryClient 失效重新拉取）。
+  - 支持"展开全部/折叠全部"、刷新按钮（使 QueryClient 失效重新拉取）。
 - 可视化
   - 双栏布局：左树右表；空态提示；骨架屏加载。
 
@@ -198,13 +205,17 @@ BP-->>U : 抽屉中渲染原文
 ### 语义搜索界面
 - 功能要点
   - 自然语言查询，支持 tags 过滤、阈值 threshold、结果数量 limit。
+  - **增强的阈值控制**：精确滑块范围优化至 0~0.2，步进精度提升至 0.005，新增 +/- 步进按钮实现精细调节。
   - 结果展示：命中文档名、Group 路径、片段内容、分数条、向量标识 memoryId。
   - 原文定位：点击结果打开抽屉，传入 original 或调用 ki_get_module_info。
 - 交互与数据流
   - 调用 ki_search(query, {scope, tags, threshold, limit, include_original:true})。
+  - **阈值控制机制**：通过 THRESHOLD_MAX (0.2)、THRESHOLD_STEP (0.005) 常量定义范围，stepThreshold 函数确保数值精度和边界控制。
   - 错误处理：当后端返回 ok=false 时，展示业务错误信息。
 - 可视化
-  - 搜索表单、Tag 多选芯片、阈值滑块、结果列表与分数条。
+  - 搜索表单、Tag 多选芯片、**增强的阈值滑块控件**、结果列表与分数条。
+
+**更新** 阈值控制功能已大幅增强，提供更精确的检索质量调节能力。
 
 ```mermaid
 sequenceDiagram
@@ -213,6 +224,7 @@ participant SP as "SearchPage"
 participant MC as "mcpClient.ts"
 participant BK as "后端"
 U->>SP : 输入查询/设置阈值/选择Tags
+SP->>SP : stepThreshold() 精确调整阈值
 SP->>MC : ki_search(query, options)
 MC-->>BK : 转发搜索请求
 BK-->>MC : 返回 results[]
@@ -223,11 +235,13 @@ SP-->>U : 抽屉中展示 original/content
 ```
 
 图表来源
-- [web/src/pages/SearchPage.tsx:26-251](file://web/src/pages/SearchPage.tsx#L26-L251)
+- [web/src/pages/SearchPage.tsx:13-22](file://web/src/pages/SearchPage.tsx#L13-L22)
+- [web/src/pages/SearchPage.tsx:148-174](file://web/src/pages/SearchPage.tsx#L148-L174)
+- [web/src/pages/SearchPage.tsx:60-90](file://web/src/pages/SearchPage.tsx#L60-L90)
 - [web/src/api/mcpClient.ts:128-140](file://web/src/api/mcpClient.ts#L128-L140)
 
 章节来源
-- [web/src/pages/SearchPage.tsx:1-251](file://web/src/pages/SearchPage.tsx#L1-L251)
+- [web/src/pages/SearchPage.tsx:1-276](file://web/src/pages/SearchPage.tsx#L1-L276)
 - [web/src/api/mcpClient.ts:1-179](file://web/src/api/mcpClient.ts#L1-L179)
 
 ### 上传导入工具
@@ -322,7 +336,7 @@ HK --> HA
 图表来源
 - [web/src/pages/DashboardPage.tsx:1-227](file://web/src/pages/DashboardPage.tsx#L1-L227)
 - [web/src/pages/BrowsePage.tsx:1-411](file://web/src/pages/BrowsePage.tsx#L1-L411)
-- [web/src/pages/SearchPage.tsx:1-251](file://web/src/pages/SearchPage.tsx#L1-L251)
+- [web/src/pages/SearchPage.tsx:1-276](file://web/src/pages/SearchPage.tsx#L1-L276)
 - [web/src/pages/ImportPage.tsx:1-503](file://web/src/pages/ImportPage.tsx#L1-L503)
 - [web/src/pages/WritePage.tsx:1-325](file://web/src/pages/WritePage.tsx#L1-L325)
 - [web/src/lib/hooks.ts:1-53](file://web/src/lib/hooks.ts#L1-L53)
@@ -345,6 +359,9 @@ HK --> HA
   - 使用骨架屏与空态提示改善加载与无数据体验。
 - 可访问性
   - 关键输入控件具备 aria-label/aria-invalid，键盘快捷键 Ctrl/Cmd+F 聚焦应用内搜索框。
+- **阈值控制优化**
+  - 精确的阈值范围（0~0.2）匹配实际检索分数量级，避免无效的大范围调节。
+  - 高精度步进（0.005）支持精细调优，stepThreshold 函数确保数值精度和边界安全。
 
 [本节为通用指导，无需具体文件引用]
 
@@ -368,6 +385,7 @@ HK --> HA
 - 主题与样式
   - 修改 web/src/styles/ki.css 中的 CSS 变量以调整颜色、间距、圆角、字体等。
   - 支持明暗主题切换，通过 data-theme="dark" 切换深色模式。
+  - **新增样式**：ki-step-btn、ki-threshold-val 等阈值控制相关样式类。
 - 路由与页面扩展
   - 在 web/src/router/routes.tsx 中添加新路由与页面组件。
   - 在 web/src/layouts/AppShell.tsx 的 NAV_MAIN 中添加导航项。
@@ -377,19 +395,19 @@ HK --> HA
   - 使用 @ 别名指向 src 目录；构建目标 es2022，关闭 sourcemap 以提升体积。
 
 章节来源
-- [web/src/styles/ki.css:1-200](file://web/src/styles/ki.css#L1-L200)
+- [web/src/styles/ki.css:1-977](file://web/src/styles/ki.css#L1-L977)
 - [web/src/router/routes.tsx:1-22](file://web/src/router/routes.tsx#L1-L22)
 - [web/src/layouts/AppShell.tsx:12-18](file://web/src/layouts/AppShell.tsx#L12-L18)
 - [web/vite.config.ts:1-30](file://web/vite.config.ts#L1-L30)
 
 ## 常见问题排查
 - 服务健康异常
-  - 现象：顶栏服务徽标显示“未就绪”或“健康异常”。
+  - 现象：顶栏服务徽标显示"未就绪"或"健康异常"。
   - 排查：检查 /api/health 是否可达；确认后端 ki mcp --http 正常启动。
   - 参考：useHealth 与 ServiceBadge 逻辑。
 - 搜索无结果
   - 现象：语义搜索结果为空。
-  - 排查：确认向量库可用；降低 threshold；调整 tags 过滤；检查是否有向量数据。
+  - 排查：确认向量库可用；**降低 threshold 值**（当前范围为 0~0.2）；调整 tags 过滤；检查是否有向量数据。
   - 参考：SearchPage 的 ki_search 调用与错误处理。
 - 导入失败
   - 现象：导入任务状态为 failed。
@@ -403,13 +421,18 @@ HK --> HA
   - 现象：主题或布局异常。
   - 排查：确认 ki.css 正确引入；检查浏览器控制台 CSS 错误；验证 data-theme 属性。
   - 参考：AppShell 的主题切换逻辑与 ki.css 变量。
+- **阈值控制问题**
+  - 现象：阈值滑块无法调节或步进按钮无效。
+  - 排查：检查 THRESHOLD_MAX 和 THRESHOLD_STEP 常量配置；确认 stepThreshold 函数正常工作；验证按钮禁用状态逻辑。
+  - 参考：SearchPage.tsx 中的阈值控制逻辑。
 
 章节来源
 - [web/src/layouts/AppShell.tsx:39-64](file://web/src/layouts/AppShell.tsx#L39-L64)
-- [web/src/pages/SearchPage.tsx:49-79](file://web/src/pages/SearchPage.tsx#L49-L79)
+- [web/src/pages/SearchPage.tsx:13-22](file://web/src/pages/SearchPage.tsx#L13-L22)
+- [web/src/pages/SearchPage.tsx:148-174](file://web/src/pages/SearchPage.tsx#L148-L174)
 - [web/src/pages/ImportPage.tsx:91-116](file://web/src/pages/ImportPage.tsx#L91-L116)
 - [web/src/api/mcpClient.ts:72-77](file://web/src/api/mcpClient.ts#L72-L77)
-- [web/src/styles/ki.css:69-92](file://web/src/styles/ki.css#L69-L92)
+- [web/src/styles/ki.css:909-920](file://web/src/styles/ki.css#L909-L920)
 
 ## 用户反馈收集
 - 建议渠道
@@ -424,6 +447,6 @@ HK --> HA
 [本节为通用指导，无需具体文件引用]
 
 ## 结论
-本指南系统化介绍了 ki 知识库 Web 前端的五个核心页面及其交互、数据流与可视化展示方式，提供了构建部署、样式定制与常见问题排查方法。通过 MCP 与 HTTP 双通道，前端实现了高效的数据获取与良好的用户体验。建议在实际使用中结合团队规范进行样式与路由定制，并通过反馈渠道持续改进产品。
+本指南系统化介绍了 ki 知识库 Web 前端的五个核心页面及其交互、数据流与可视化展示方式，提供了构建部署、样式定制与常见问题排查方法。通过 MCP 与 HTTP 双通道，前端实现了高效的数据获取与良好的用户体验。**特别地，语义搜索页面的阈值控制功能已得到显著增强，提供更精确的检索质量调节能力**。建议在实际使用中结合团队规范进行样式与路由定制，并通过反馈渠道持续改进产品。
 
 [本节为总结性内容，无需具体文件引用]
