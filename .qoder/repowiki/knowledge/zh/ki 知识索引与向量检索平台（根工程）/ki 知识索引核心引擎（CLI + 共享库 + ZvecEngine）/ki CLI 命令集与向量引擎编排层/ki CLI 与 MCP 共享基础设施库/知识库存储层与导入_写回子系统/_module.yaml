@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: core_engine/cli_commands/shared_libs/data_store_wal
+title: 知识库存储层与导入/写回子系统
+scope:
+    - src/lib/store.ts
+    - src/lib/wal.ts
+    - src/lib/import.ts
+    - src/lib/wiki-sync.ts
+    - src/lib/relation-map.ts
+source_files: []
+depends_on: []
+related_to:
+    - path: core_engine/cli_commands/shared_libs/scope_config_cli

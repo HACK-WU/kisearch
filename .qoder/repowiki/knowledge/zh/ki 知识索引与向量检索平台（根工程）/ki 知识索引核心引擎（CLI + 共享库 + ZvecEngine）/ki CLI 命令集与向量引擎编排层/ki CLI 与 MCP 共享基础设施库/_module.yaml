@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: core_engine/cli_commands/shared_libs
+title: ki CLI 与 MCP 共享基础设施库
+scope:
+    - src/lib/
+source_files: []
+depends_on: []
+related_to: []

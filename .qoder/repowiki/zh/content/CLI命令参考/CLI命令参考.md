@@ -19,7 +19,16 @@
 - [src/wiki-backfill.ts](file://src/wiki-backfill.ts)
 - [src/bulk-store.ts](file://src/bulk-store.ts)
 - [src/lib/cli-args.ts](file://src/lib/cli-args.ts)
+- [src/lib/import.ts](file://src/lib/import.ts)
+- [src/lib/constants.ts](file://src/lib/constants.ts)
 </cite>
+
+## 更新摘要
+**变更内容**
+- 为 scan-kb import 命令新增 `--group` 和 `--tags` 参数支持
+- 为 restore --rebuild-vector 命令新增 `--group` 和 `--tags` 参数支持
+- 实现完整的参数验证和负向防护机制
+- 增强标签解析和过滤功能
 
 ## 目录
 1. [简介](#简介)
@@ -51,10 +60,10 @@ A --> H["config / doctor<br/>src/config.ts / src/doctor.ts"]
 A --> I["backup / restore / export / wiki-backfill<br/>src/backup.ts / src/restore.ts / src/export.ts / src/wiki-backfill.ts"]
 ```
 
-图表来源
+**图表来源**
 - [bin/ki.mjs:28-49](file://bin/ki.mjs#L28-L49)
 
-章节来源
+**章节来源**
 - [bin/ki.mjs:1-133](file://bin/ki.mjs#L1-L133)
 
 ## 核心组件
@@ -64,12 +73,12 @@ A --> I["backup / restore / export / wiki-backfill<br/>src/backup.ts / src/resto
 - 配置与范围：lib/config.js、lib/scope.js 提供加载配置、scope 解析与路径计算。
 - 健康检查：lib/health-check.js 用于 doctor 与 mcp 启动前预检。
 
-章节来源
+**章节来源**
 - [bin/ki.mjs:51-133](file://bin/ki.mjs#L51-L133)
 - [src/lib/cli-args.ts:1-152](file://src/lib/cli-args.ts#L1-L152)
 
 ## 架构总览
-下图展示典型“导入→索引→检索”的数据流：scan-kb import 将外部 Wiki 切分写入本地 KB 与 relations-cache；可选向量化后写入向量库；search 通过向量检索并反查 relations-cache 定位原文；store/bulk-store 直接写入向量层；manage-index 维护 Group 树；mcp 暴露工具供 IDE/Agent 调用。
+下图展示典型"导入→索引→检索"的数据流：scan-kb import 将外部 Wiki 切分写入本地 KB 与 relations-cache；可选向量化后写入向量库；search 通过向量检索并反查 relations-cache 定位原文；store/bulk-store 直接写入向量层；manage-index 维护 Group 树；mcp 暴露工具供 IDE/Agent 调用。
 
 ```mermaid
 sequenceDiagram
@@ -102,7 +111,7 @@ MCP->>VC : 共享单例引擎(多IDE复用)
 MCP-->>U : stdio/HTTP 工具调用
 ```
 
-图表来源
+**图表来源**
 - [bin/ki.mjs:28-49](file://bin/ki.mjs#L28-L49)
 - [src/scan-kb.ts:35-77](file://src/scan-kb.ts#L35-L77)
 - [src/manage-index.ts:415-635](file://src/manage-index.ts#L415-L635)
@@ -115,7 +124,7 @@ MCP-->>U : stdio/HTTP 工具调用
 ### 全局参数
 - --config <path>：指定配置文件路径，可在任意命令位置使用。入口会将其注入子进程环境变量，供后续命令读取。
 
-章节来源
+**章节来源**
 - [bin/ki.mjs:54-63](file://bin/ki.mjs#L54-L63)
 
 ### 命令组：scan-kb（知识库导入）
@@ -124,21 +133,27 @@ MCP-->>U : stdio/HTTP 工具调用
 - 关键参数
   - --source <sourceDir>：外部 Wiki 根目录（必填）
   - --scope <scope>：项目隔离标识（default 可省略，strict 必填）
-  - --group <group>：目标 Group 落点（不存在时自动新建）
+  - --group <group>：目标 Group 落点（不存在时自动新建，含父路径）。缺省时目录导入按顶层子目录名各建根节点，单文档导入用 scope name
   - --chunk-size <n>：切分目标长度（字符）
   - --chunk-overlap <n>：切分重叠字符数
   - --no-vector：仅写 KB 层，不写向量
+  - --tags <tags>：文档级自定义标签（逗号分隔多个）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 ki search -t <tag> 召回；--no-vector 时仅持久化到 relation.tags（供后续重建恢复）
   - --no-clean：关闭数据清洗
   - --clean-rules <rules>：覆盖内置清洗规则开关（逗号分隔）
 - 行为要点
   - 导入成功后触发自动备份（失败不阻断）
   - 输出 JSON 结果，异常返回 {ok:false,...}
+  - 标签解析会自动过滤内部保留标签（ki-search/ki-relation/ki-path）
 - 示例
   - ki scan-kb import --scope my-project --source ./wiki --group wiki
   - ki scan-kb import --source ./wiki --no-vector
+  - ki scan-kb import --source ./wiki --tags api,auth --group docs
 
-章节来源
+**更新** 新增 --group 和 --tags 参数支持，实现文档级标签管理和灵活的Group组织
+
+**章节来源**
 - [src/scan-kb.ts:35-77](file://src/scan-kb.ts#L35-L77)
+- [src/lib/import.ts:97-117](file://src/lib/import.ts#L97-L117)
 - [bin/ki.mjs:74-133](file://bin/ki.mjs#L74-L133)
 
 ### 命令组：manage-index（索引管理）
@@ -158,7 +173,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki manage-index --scope my-project --action delete --name "旧分组" --force
   - ki manage-index --action list-scopes
 
-章节来源
+**章节来源**
 - [src/manage-index.ts:415-635](file://src/manage-index.ts#L415-L635)
 
 ### 命令组：search（搜索检索）
@@ -178,7 +193,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki search "用户登录流程" --scope my-project --limit 5
   - ki search --query "权限模型" --tags ki-relation,ki-path --original
 
-章节来源
+**章节来源**
 - [src/search.ts:204-237](file://src/search.ts#L204-L237)
 
 ### 命令组：store（数据存储）
@@ -194,7 +209,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki store "临时笔记内容" --scope my-project
   - ki store --text "API 变更摘要" --tags ki-search,ki-relation
 
-章节来源
+**章节来源**
 - [src/store.ts:55-80](file://src/store.ts#L55-L80)
 
 ### 命令组：bulk-store（批量存储）
@@ -209,7 +224,7 @@ MCP-->>U : stdio/HTTP 工具调用
 - 示例
   - ki bulk-store --input ./batch.json --scope my-project
 
-章节来源
+**章节来源**
 - [src/bulk-store.ts:82-99](file://src/bulk-store.ts#L82-L99)
 
 ### 命令组：mcp（MCP服务管理）
@@ -241,7 +256,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki mcp token delete <id>
   - ki mcp --http --host 0.0.0.0
 
-章节来源
+**章节来源**
 - [src/mcp-server.ts:83-107](file://src/mcp-server.ts#L83-L107)
 - [src/mcp-server.ts:137-212](file://src/mcp-server.ts#L137-L212)
 - [src/mcp-server.ts:227-351](file://src/mcp-server.ts#L227-L351)
@@ -260,7 +275,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki scope delete my-project --yes
   - ki scope clear my-project --tags ki-search --yes
 
-章节来源
+**章节来源**
 - [src/scope.ts:233-292](file://src/scope.ts#L233-L292)
 
 ### 命令：doc（向量文档管理）
@@ -279,7 +294,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki doc list --scope my-project --limit 20 --tags ki-search
   - ki doc delete abc123 --scope my-project --yes
 
-章节来源
+**章节来源**
 - [src/doc.ts:150-189](file://src/doc.ts#L150-L189)
 
 ### 命令：tag（标签发现）
@@ -291,7 +306,7 @@ MCP-->>U : stdio/HTTP 工具调用
 - 示例
   - ki tag list --scope my-project --scan-limit 5000
 
-章节来源
+**章节来源**
 - [src/tag.ts:55-72](file://src/tag.ts#L55-L72)
 
 ### 命令：config（配置管理）
@@ -306,7 +321,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki config init
   - ki config init --dir ~/my-config --force
 
-章节来源
+**章节来源**
 - [src/config.ts:181-203](file://src/config.ts#L181-L203)
 
 ### 命令：doctor（健康诊断）
@@ -317,7 +332,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki doctor
   - ki --config ./custom.yaml doctor
 
-章节来源
+**章节来源**
 - [src/doctor.ts:18-49](file://src/doctor.ts#L18-L49)
 
 ### 命令：backup（备份）
@@ -330,7 +345,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki backup my-project
   - ki backup my-project --list
 
-章节来源
+**章节来源**
 - [src/backup.ts:26-103](file://src/backup.ts#L26-L103)
 
 ### 命令：restore（还原）
@@ -338,19 +353,29 @@ MCP-->>U : stdio/HTTP 工具调用
 - 关键参数
   - --from-snapshot [<file>]：从快照覆盖还原（破坏性，需 --yes）
   - --rebuild-vector：还原后（或独立）从已还原 KB 重建向量
+  - --group <path>：重建过滤：仅重建指定 Group 子树的向量（幂等覆盖，不清空其他向量；需与 --rebuild-vector 配合）
+  - --tags <t1,t2>：重建打标：为重建范围内文档附加自定义标签（与已有标签合并去重，只增不减；需与 --rebuild-vector 配合）
   - --timestamp <ts>：指定快照时间戳（默认取最新）
   - --backup-dir <dir>：指定备份根目录
   - --yes：跳过确认直接执行
 - 行为要点
   - 还原前创建安全网快照；tar 解压失败尝试自动恢复
   - 向量文档不随快照还原，需单独重建
+  - 支持局部重建：可通过 --group 指定子树，--tags 添加自定义标签
+  - 参数验证：--group/--tags 必须与 --rebuild-vector 配合，且值必须有效
+  - 组合保护：--from-snapshot 不支持与 --group/--tags 局部重建组合
 - 示例
   - ki restore my-project --from-snapshot --yes
   - ki restore my-project --rebuild-vector
+  - ki restore my-project --rebuild-vector --group wiki/部署运维
+  - ki restore my-project --rebuild-vector --tags api,auth
   - ki restore my-project --list
 
-章节来源
+**更新** 新增 --group 和 --tags 参数支持局部重建，实现更精细的向量重建控制
+
+**章节来源**
 - [src/restore.ts:310-446](file://src/restore.ts#L310-L446)
+- [src/restore.ts:387-451](file://src/restore.ts#L387-L451)
 
 ### 命令：export（导出）
 - 功能：将 KB scope 的结构化数据反向导出为 Markdown 文件目录。
@@ -364,7 +389,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki export my-project --output ./wiki-output
   - ki export my-project --output ./wiki-output --group "核心概念/认证"
 
-章节来源
+**章节来源**
 - [src/export.ts:324-399](file://src/export.ts#L324-L399)
 
 ### 命令：wiki-backfill（Wiki历史补齐）
@@ -377,7 +402,7 @@ MCP-->>U : stdio/HTTP 工具调用
   - ki wiki-backfill my-project
   - ki wiki-backfill my-project --force
 
-章节来源
+**章节来源**
 - [src/wiki-backfill.ts:18-66](file://src/wiki-backfill.ts#L18-L66)
 
 ## 依赖关系与执行顺序
@@ -402,7 +427,7 @@ H --> I["mcp 提供服务"]
 I --> J["doctor/backup/restore/export/wiki-backfill 运维"]
 ```
 
-图表来源
+**图表来源**
 - [src/scan-kb.ts:35-77](file://src/scan-kb.ts#L35-L77)
 - [src/manage-index.ts:415-635](file://src/manage-index.ts#L415-L635)
 - [src/search.ts:204-237](file://src/search.ts#L204-L237)
@@ -415,6 +440,9 @@ I --> J["doctor/backup/restore/export/wiki-backfill 运维"]
 - 级联删除：manage-index delete 批量收集 memoryId 一次 vectorDelete，减少网络往返。
 - 空闲释放：mcp 长驻进程启用向量库空闲释放锁，避免多实例争抢导致阻塞。
 - 预检与防护：restore/export/backup 在写盘前进行可写性与空间检查，降低失败风险。
+- 局部重建优化：restore --rebuild-vector 支持 --group 和 --tags 参数，可实现精确的局部重建，避免全量重建的性能开销。
+
+**更新** 新增局部重建优化，支持按 Group 和标签精确重建向量
 
 [本节为通用指导，无需特定文件来源]
 
@@ -427,17 +455,26 @@ I --> J["doctor/backup/restore/export/wiki-backfill 运维"]
   - 健康检查失败：运行 ki doctor 查看详细问题
   - 守护模式启动失败：前台运行同样命令查看具体错误
 - 还原失败：restore 会在 tar 解压失败时尝试从安全网快照恢复；若仍失败，按提示手动恢复。
+- 参数验证失败：
+  - --group 缺少值或为空时会拒绝执行，避免静默降级为全量重建
+  - --tags 解析后无有效标签（内部保留标签不可用）时会拒绝执行
+  - --from-snapshot 与 --group/--tags 组合会被拒绝，需要分开执行
 
-章节来源
+**更新** 新增参数验证失败的故障排查指南
+
+**章节来源**
 - [src/lib/cli-args.ts:77-106](file://src/lib/cli-args.ts#L77-L106)
 - [src/lib/cli-args.ts:117-150](file://src/lib/cli-args.ts#L117-L150)
 - [src/search.ts:84-92](file://src/search.ts#L84-L92)
 - [src/mcp-server.ts:186-212](file://src/mcp-server.ts#L186-L212)
-- [src/mcp-server.ts:660-678](file://src/mcp-server.ts#L660-L678)
+- [src/mcp-server.ts:660-678](file://src/mcp-server.ts#L660-678)
 - [src/restore.ts:239-270](file://src/restore.ts#L239-L270)
+- [src/restore.ts:414-449](file://src/restore.ts#L414-L449)
 
 ## 结论
-ki CLI 提供了完整的知识库导入、索引管理、检索、存储与服务管理能力。通过统一的参数规范、健壮的参数校验与错误处理、以及完善的运维工具链，用户可以高效地完成从数据入库到检索应用的全流程。建议在生产环境中结合 doctor 预检、backup/restore 快照机制与 mcp 共享单例模式，保障稳定性与可维护性。
+ki CLI 提供了完整的知识库导入、索引管理、检索、存储与服务管理能力。通过统一的参数规范、健壮的参数校验与错误处理、以及完善的运维工具链，用户可以高效地完成从数据入库到检索应用的全流程。新增的 --group 和 --tags 参数进一步增强了导入和重建的灵活性，支持更精细的知识组织和管理。建议在生产环境中结合 doctor 预检、backup/restore 快照机制与 mcp 共享单例模式，保障稳定性与可维护性。
+
+**更新** 新增参数功能增强了系统的灵活性和精确性
 
 [本节为总结，无需特定文件来源]
 
@@ -448,10 +485,14 @@ ki CLI 提供了完整的知识库导入、索引管理、检索、存储与服�
   - 批量入库：准备 batch.json → ki bulk-store → ki search 验证
   - 服务化接入：ki mcp --http → IDE 配置 URL 型接入 → 使用 ki mcp token 管理鉴权
   - 运维保障：定期 ki backup → 必要时 ki restore → 导出归档 ki export → 历史补齐 ki wiki-backfill
+  - 局部重建：使用 restore --rebuild-vector --group 和 --tags 进行精确的向量重建
 - 性能优化建议
   - 合理设置 chunk-size/chunk-overlap 平衡检索精度与体积
   - 使用 tags 精确过滤缩小检索范围
   - 批量写入优先使用 bulk-store
   - 长驻服务使用 mcp --http 共享单例，避免多进程锁竞争
+  - 利用 --group 和 --tags 参数进行局部重建，减少不必要的重建开销
+
+**更新** 新增局部重建的最佳实践和性能优化建议
 
 [本节为通用指导，无需特定文件来源]

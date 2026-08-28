@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-08-27T10:38:43Z"
+exported_at: "2026-08-28T01:36:19Z"
 modules:
     "":
-        dir_name: kisearch 知识索引器（ki）Monorepo 根
-        title: kisearch 知识索引器（ki）Monorepo 根
+        dir_name: ki 知识索引与向量检索平台（根工程）
+        title: ki 知识索引与向量检索平台（根工程）
         scope:
             - README.md
             - package.json
@@ -37,8 +37,8 @@ modules:
         depends_on: []
         related_to: []
     core_engine:
-        dir_name: Knowledge Indexer 核心引擎（ki）
-        title: Knowledge Indexer 核心引擎（ki）
+        dir_name: ki 知识索引核心引擎（CLI + 共享库 + ZvecEngine）
+        title: ki 知识索引核心引擎（CLI + 共享库 + ZvecEngine）
         scope:
             - src/
         source_files: []
@@ -51,8 +51,8 @@ modules:
             - path: data_and_config
             - path: docs_and_skills
     core_engine/cli_commands:
-        dir_name: ki CLI 命令集与向量引擎
-        title: ki CLI 命令集与向量引擎
+        dir_name: ki CLI 命令集与向量引擎编排层
+        title: ki CLI 命令集与向量引擎编排层
         scope:
             - src/
         source_files: []
@@ -69,8 +69,8 @@ modules:
             - path: core_engine/shared_lib
             - path: tests_and_fixtures
     core_engine/cli_commands/backup_restore_commands:
-        dir_name: 备份_还原_导出 CLI 命令
-        title: 备份/还原/导出 CLI 命令
+        dir_name: Scope 备份_还原_导出 CLI 命令
+        title: Scope 备份/还原/导出 CLI 命令
         scope:
             - src/backup.ts
             - src/restore.ts
@@ -82,8 +82,8 @@ modules:
             - path: core_engine/cli_commands/shared_libs/ai_markdown_progress
             - path: core_engine/shared_lib
     core_engine/cli_commands/indexing_search_commands:
-        dir_name: 向量检索与文档管理 CLI 命令
-        title: 向量检索与文档管理 CLI 命令
+        dir_name: 知识库 CLI 索引与检索命令（search_doc_tag）
+        title: 知识库 CLI 索引与检索命令（search/doc/tag）
         scope:
             - src/search.ts
             - src/doc.ts
@@ -120,8 +120,8 @@ modules:
             - path: core_engine/cli_commands/shared_libs/mcp_tools
             - path: web_ui
     core_engine/cli_commands/shared_libs:
-        dir_name: ki CLI 共享库（src_lib）
-        title: ki CLI 共享库（src/lib）
+        dir_name: ki CLI 与 MCP 共享基础设施库
+        title: ki CLI 与 MCP 共享基础设施库
         scope:
             - src/lib/
         source_files: []
@@ -148,8 +148,8 @@ modules:
         related_to:
             - path: core_engine/cli_commands/backup_restore_commands
     core_engine/cli_commands/shared_libs/data_store_wal:
-        dir_name: 数据持久化与导入_写回核心（WAL、Store、Import、Wiki-Sync、Relation-Map）
-        title: 数据持久化与导入/写回核心（WAL、Store、Import、Wiki-Sync、Relation-Map）
+        dir_name: 知识库存储层与导入_写回子系统
+        title: 知识库存储层与导入/写回子系统
         scope:
             - src/lib/store.ts
             - src/lib/wal.ts
@@ -162,8 +162,8 @@ modules:
         related_to:
             - path: core_engine/cli_commands/shared_libs/scope_config_cli
     core_engine/cli_commands/shared_libs/health_version_guards:
-        dir_name: CLI 健康检查与版本_中断_预检守卫
-        title: CLI 健康检查与版本/中断/预检守卫
+        dir_name: CLI 共享健康诊断与运行期守卫库
+        title: CLI 共享健康诊断与运行期守卫库
         scope:
             - src/lib/health-check.ts
             - src/lib/version-guard.ts
@@ -206,8 +206,8 @@ modules:
             - path: core_engine/cli_commands/maintenance_commands
             - path: core_engine/cli_commands/shared_libs/data_store_wal
     core_engine/cli_commands/shared_libs/vector_indexing:
-        dir_name: 向量检索与评分引擎（Vector Indexing & Scoring）
-        title: 向量检索与评分引擎（Vector Indexing & Scoring）
+        dir_name: 向量检索与评分引擎（Zvec 适配层）
+        title: 向量检索与评分引擎（Zvec 适配层）
         scope:
             - src/lib/vector-client.ts
             - src/lib/batch-vectorize.ts
@@ -222,8 +222,8 @@ modules:
             - path: core_engine/cli_commands/vector_engine/core_runtime
             - path: core_engine/zvec_engine
     core_engine/cli_commands/sync_relation_commands:
-        dir_name: 关系同步与删除 CLI 命令
-        title: 关系同步与删除 CLI 命令
+        dir_name: Relation 同步_删除与 Wiki 补齐 CLI
+        title: Relation 同步/删除与 Wiki 补齐 CLI
         scope:
             - src/sync-relation.ts
             - src/delete-relation.ts
