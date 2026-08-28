@@ -10,6 +10,17 @@ import { kiSearch } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 
+/** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
+const THRESHOLD_MAX = 0.2;
+/** Threshold 步进（滑块与 −/+ 按钮共用） */
+const THRESHOLD_STEP = 0.005;
+
+/** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
+const stepThreshold = (cur: number, dir: 1 | -1): number => {
+  const next = Math.round((cur + dir * THRESHOLD_STEP) * 1000) / 1000;
+  return Math.min(THRESHOLD_MAX, Math.max(0, next));
+};
+
 interface Result {
   group?: string;
   relation?: string;
@@ -140,12 +151,26 @@ export function SearchPage(): JSX.Element {
               type="range"
               className="ki-range"
               min={0}
-              max={1}
-              step={0.05}
+              max={THRESHOLD_MAX}
+              step={THRESHOLD_STEP}
               value={threshold}
               onChange={(e) => setThreshold(Number(e.target.value))}
             />
-            <span className="ki-threshold-val">{threshold}</span>
+            <button
+              type="button"
+              className="ki-step-btn"
+              aria-label="降低阈值"
+              disabled={threshold <= 0}
+              onClick={() => setThreshold((v) => stepThreshold(v, -1))}
+            >−</button>
+            <span className="ki-threshold-val">{threshold.toFixed(3)}</span>
+            <button
+              type="button"
+              className="ki-step-btn"
+              aria-label="提高阈值"
+              disabled={threshold >= THRESHOLD_MAX}
+              onClick={() => setThreshold((v) => stepThreshold(v, 1))}
+            >+</button>
           </div>
           <div className="ki-query-option">
             <span className="ki-form-label">Limit</span>

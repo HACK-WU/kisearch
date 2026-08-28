@@ -905,8 +905,19 @@ a:hover { text-decoration: underline; }
 .ki-tag-chip { padding: 3px 10px; font-size: var(--ki-font-size-sm); border-radius: 20px; border: 1px solid var(--ki-color-border); background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer; transition: all var(--ki-motion-fast); }
 .ki-tag-chip:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
 .ki-tag-chip--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
-input[type="range"].ki-range { width: 140px; accent-color: var(--ki-color-primary); }
-.ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 32px; }
+input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primary); }
+.ki-step-btn {
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); color: var(--ki-color-text);
+  font-size: 14px; line-height: 1; cursor: pointer;
+  transition: border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+  user-select: none;
+}
+.ki-step-btn:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 40px; text-align: center; }
 
 /* ── 导入页 ── */
 .ki-adv-toggle { background: none; border: none; color: var(--ki-color-primary); font-size: var(--ki-font-size-sm); cursor: pointer; padding: 0; }
