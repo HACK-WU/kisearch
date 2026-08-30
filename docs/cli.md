@@ -555,10 +555,11 @@ ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--scope` | 项目隔离标识 | 必填 |
-| `--groups` | 逗号分隔的 Group 路径 | - |
+| `--groups` | 逗号分隔的 Group 路径（展示各 Group 的 **Relations**；与 `--subtree` 互斥） | - |
+| `--subtree` | 以指定 Group 路径为根输出**子树结构**（结构导航视角：该 Group 下有哪些子 Group；支持同样的路径补全/模糊兜底；无子 Group 时提示并附自身 Relations 概要；与 `--groups` 互斥，不受 `--mode` 过滤） | - |
 | `--mode` | 展示分区：`hot` / `warm` / `cold` / `emerging` / `full`（支持逗号分隔） | `hot` |
 | `--hot-count` | 热门展示个数 | `5` |
-| `--depth` | 索引层级深度 | `4` |
+| `--depth` | 索引层级深度（`--subtree` 时从子树根起算） | `4` |
 
 **mode 说明**：
 - `hot`：热门索引（高频使用）
@@ -584,6 +585,20 @@ ki query-group --scope monitor --groups "部署运维"
 🔥 热门知识 (Top 5):
 ├── Kubernetes集群管理 (score: 0) [📥]
 └── 容器化部署 (score: 0) [📥]
+```
+
+**示例：子树导航（某 Group 下有哪些子 Group）**
+
+```bash
+ki query-group --scope monitor --subtree "项目根/监控"
+```
+
+输出（结构导航视角，节点带 score 与分区标签；叶子 Group 则提示无子 Group 并附自身 Relations 概要）：
+```
+=== 子树: 项目根/监控 ===
+项目根/监控/ (score: 16.8) [热]
+├── 告警中心 (score: 9.6) [新兴热]
+└── 日志查询 (score: 7.2) [热]
 ```
 
 **示例：查看热门索引**

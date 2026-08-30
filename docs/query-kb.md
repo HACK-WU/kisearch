@@ -200,7 +200,8 @@
 | 参数 | 说明 | 必填 |
 |------|------|------|
 | `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
-| `--groups` | 逗号分隔的 Group 路径列表 | 否 |
+| `--groups` | 逗号分隔的 Group 路径列表（展示 Relations；与 `--subtree` 互斥） | 否 |
+| `--subtree` | 以指定 Group 为根输出子树结构（导航：该 Group 下有哪些子 Group；与 `--groups` 互斥） | 否 |
 | `--mode` | hot / warm / cold / emerging / full（支持逗号分隔多值，默认 hot） | 否 |
 | `--hot-count` | 热门展示个数 | 否（默认 5） |
 | `--depth` | 索引层级深度 | 否（默认 4） |

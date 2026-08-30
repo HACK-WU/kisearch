@@ -8,6 +8,7 @@
  *
  *   --mode 支持逗号分隔多值：hot|warm|cold|emerging|full
  *   例如：--mode hot,warm 或 --mode full
+ *   --subtree <path>：以指定 Group 为根输出子树结构（结构导航视角，与 --groups 互斥）
  */
 
 import { Command } from 'commander';
@@ -72,6 +73,25 @@ function collectAllGroupPaths(
   }
   walk(groups, '');
   return paths;
+}
+
+/**
+ * 按路径提取树节点（子树根）；路径不存在返回 null，叶子节点返回空对象。
+ * 与 group-resolve.getDirectChildren 同构，但返回节点本身供子树渲染。
+ */
+function getTreeNodeByPath(
+  groups: Record<string, Record<string, unknown>>,
+  groupPath: string
+): Record<string, unknown> | null {
+  const segments = groupPath.split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+  let current: unknown = groups;
+  for (const seg of segments) {
+    if (typeof current !== 'object' || current === null) return null;
+    current = (current as Record<string, unknown>)[seg];
+    if (current === undefined) return null;
+  }
+  return typeof current === 'object' && current !== null ? (current as Record<string, unknown>) : {};
 }
 
 // ─── 评分聚合 ───
@@ -339,6 +359,21 @@ function renderTreeChildren(
   });
 }
 
+/** 子树视图：以指定路径为根渲染结构树（节点带 score + 分区标签，深度从子树根起算） */
+function renderSubtree(
+  rootNode: Record<string, unknown>,
+  rootPath: string,
+  groupScores: Map<string, number>,
+  partition: PartitionResult,
+  depth: number
+): string {
+  const lines: string[] = [];
+  const rootScore = groupScores.get(rootPath) || 0;
+  lines.push(`${rootPath}/ (score: ${fmtScore(rootScore)}) ${getPartitionLabel(rootPath, partition)}`);
+  renderTreeChildren(rootNode, rootPath, '', 1, depth, groupScores, partition, null, lines);
+  return lines.join('\n');
+}
+
 function renderCompactTree(
   groups: Record<string, Record<string, unknown>>,
   depth: number
@@ -511,6 +546,8 @@ interface CliOpts {
   hotCount: number;
   modes: string[];
   groupsParam?: string;
+  /** 子树视图：以指定 Group 路径为根（与 groupsParam 互斥） */
+  subtreeParam?: string;
   autoFallback?: boolean;
 }
 
@@ -540,6 +577,7 @@ function parseCliOpts(opts: Record<string, any>): CliOpts {
     hotCount,
     modes,
     groupsParam: opts.groups,
+    subtreeParam: opts.subtree,
     autoFallback: opts.autoFallback,
   };
 }
@@ -598,6 +636,8 @@ function getModeTitle(mode: string): string {
 export interface QueryGroupParams {
   scope: string;
   groupsParam?: string;
+  /** 子树视图：以指定 Group 路径为根输出结构树（与 groupsParam 互斥；不受 mode 过滤） */
+  subtreeParam?: string;
   hotCount: number;
   depth: number;
   modes: string[];
@@ -610,8 +650,17 @@ export type QueryGroupResult =
 
 export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
   try {
-    const { scope, depth, hotCount, modes, groupsParam } = params;
+    const { scope, depth, hotCount, modes } = params;
+    // groups 原样透传（存量行为零变化）；仅 subtree 做归一化（新参数，空串等价未传）
+    const groupsParam = params.groupsParam;
+    const subtreeParam = params.subtreeParam?.trim() || undefined;
     const autoFallback = params.autoFallback ?? true;
+
+    // 互斥护栏：两种路径视角语义不同（Relations 视图 vs 结构子树），同时传时 fail-loud 避免歧义。
+    // groups 侧独立 trim 判定：避免"纯空白 groups + subtree"被误放行落入子树以外的分支。
+    if (groupsParam?.trim() && subtreeParam) {
+      return { ok: false, error: 'groups 与 subtree 互斥：前者展示 Group 的 Relations，后者展示子树结构，请只传其一' };
+    }
 
     if (modes.length === 0) {
       return { ok: false, error: '--mode 不能为空，有效值：hot | warm | cold | emerging | full' };
@@ -635,6 +684,61 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
     const now = Date.now();
     const config = relationsCache?.partition_config || DEFAULT_PARTITION_CONFIG;
     const groupsData = relationsCache?.groups || {};
+
+    // 子树视图：以指定 Group 为根输出结构树（结构导航视角，不受 hot/warm/cold mode 过滤）
+    if (subtreeParam) {
+      const rawPath = subtreeParam.replace(/^\/+|\/+$/g, '');
+      if (!rawPath) {
+        return { ok: false, error: 'subtree 路径解析为空：请传入有效的 Group 路径' };
+      }
+      const resolved = await resolveGroupPath(rawPath, groupIndex, groupsData, scope);
+      if (!resolved.matched) {
+        let baseOutput = `=== 子树: ${rawPath} ===\n\n(Group 路径不存在)` + (resolved.hint ? `\n\n${resolved.hint}` : '');
+        if (autoFallback) {
+          try {
+            const avail = await ensureVectorAvailable();
+            if (avail.available) {
+              const semResults = await vectorSearch({ scope, query: rawPath, limit: 5, tags: 'ki-path' });
+              if (semResults.length > 0) {
+                const fallbackLines = semResults.map(
+                  r => `├── [score: ${r.score.toFixed(2)}] ${r.content.slice(0, 120)}${r.content.length > 120 ? '...' : ''}`
+                );
+                baseOutput += `\n\n💡 语义匹配结果（来自通用搜索）：\n${fallbackLines.join('\n')}`;
+              }
+            }
+          } catch { /* 语义兜底失败，静默降级 */ }
+        }
+        return { ok: true, scope, output: baseOutput };
+      }
+
+      const rootPath = resolved.resolvedPath;
+      const rootNode = getTreeNodeByPath(groupIndex.groups, rootPath) ?? {};
+      const childCount = Object.values(rootNode).filter((v) => typeof v === 'object' && v !== null).length;
+
+      const parts: string[] = [];
+      if (resolved.hint) parts.push(resolved.hint);
+
+      if (childCount === 0) {
+        // REQ-03：无子 Group → 提示 + 自身 Relations 概要（空结果不丢上下文）。
+        // 概要固定按热区展示：子树是结构导航视角，不受用户 --mode 过滤，
+        // 避免 --mode cold 时热区 Relations 被滤空造成"有数据却显示空"的误导。
+        const lines = [`=== 子树: ${rootPath} ===`, '', '该 Group 下无子 Group。'];
+        const data = groupsData[rootPath];
+        if (data && data.hot_relations.length > 0) {
+          lines.push('', formatGroupRelations(rootPath, data, now, config, hotCount, ['hot']));
+        } else {
+          lines.push('', '(该 Group 也暂无 Relations)');
+        }
+        parts.push(lines.join('\n'));
+      } else {
+        const allPaths = collectAllGroupPaths(groupIndex.groups);
+        const groupScores = getGroupAggregateScores(groupsData, now, config.halfLifeHours);
+        const partition = partitionGroups(allPaths, groupScores, groupsData, now, config);
+        parts.push(`=== 子树: ${rootPath} ===`);
+        parts.push(renderSubtree(rootNode, rootPath, groupScores, partition, depth));
+      }
+      return { ok: true, scope, output: parts.join('\n\n') };
+    }
 
     // 指定 Group → 显示 Relations + 词云
     if (groupsParam) {
@@ -755,6 +859,7 @@ program
   .description('查询 Group + 格式化输出')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('-g, --groups <groups>', '逗号分隔的 Group 路径列表')
+  .option('--subtree <path>', '以指定 Group 路径为根输出子树结构（与 --groups 互斥）')
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（支持逗号分隔多值）', 'hot')

@@ -282,3 +282,122 @@ describe('query-group 边界情况', () => {
     assert.ok(output.includes('Top 1'));
   });
 });
+
+// ─── subtree 子树视图（结构导航视角）───
+
+describe('query-group subtree 子树视图', () => {
+  it('以指定 Group 为根输出子树结构（含直接子 Group）', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根/监控',
+    ]);
+
+    assert.ok(output.includes('=== 子树: 项目根/监控 ==='));
+    // 直接子 Group 均在子树中，且带 score 标注
+    assert.ok(output.includes('告警中心'));
+    assert.ok(output.includes('日志查询'));
+    assert.ok(output.includes('(score:'));
+    // 兄弟分支（部署）不在子树内
+    assert.ok(!output.includes('部署/'));
+  });
+
+  it('根路径子树包含多个一级分支', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根',
+    ]);
+
+    assert.ok(output.includes('=== 子树: 项目根 ==='));
+    assert.ok(output.includes('监控'));
+    assert.ok(output.includes('部署'));
+  });
+
+  it('depth 从子树根起算：--depth 2 只展开一级子节点', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根',
+      '--depth', '2',
+    ]);
+
+    assert.ok(output.includes('监控'));
+    // 孙层（告警中心）不应展开（renderTreeChildren 深度守卫 currentDepth >= maxDepth）
+    assert.ok(!output.includes('告警中心'));
+  });
+
+  it('叶子 Group（无子节点）：提示 + 自身 Relations 概要（REQ-03）', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根/监控/告警中心',
+    ]);
+
+    assert.ok(output.includes('该 Group 下无子 Group'));
+    // 自身 Relations 概要不丢上下文（告警中心有 rel_001/rel_002）
+    assert.ok(output.includes('告警规则CRUD流程'));
+  });
+
+  it('叶子 Group 且无 Relations：提示无子 Group + 提示暂无 Relations', () => {
+    // 部署/后端：树中存在但夹具未写入 Relations
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根/部署/后端',
+    ]);
+
+    assert.ok(output.includes('该 Group 下无子 Group'));
+    assert.ok(output.includes('也暂无 Relations'));
+  });
+
+  it('路径补全：省略顶层时自动补全后展示子树（与 groups 一致的四层解析）', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '监控/告警中心',
+      '--no-auto-fallback',
+    ]);
+
+    // resolveGroupPath 顶层补全：监控/告警中心 → 项目根/监控/告警中心（叶子 → 无子 Group 提示）
+    assert.ok(output.includes('项目根/监控/告警中心'));
+    assert.ok(output.includes('该 Group 下无子 Group'));
+  });
+
+  it('路径不存在：提示不存在 + 兜底引导', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '完全不存在的路径',
+      '--no-auto-fallback',
+    ]);
+
+    assert.ok(output.includes('(Group 路径不存在)'));
+  });
+
+  it('与 --groups 互斥：同时传时 fail-loud', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--groups', '项目根/监控',
+      '--subtree', '项目根/部署',
+    ]);
+
+    assert.ok(output.includes('互斥'));
+  });
+
+  it('subtree 不受 mode 过滤：hot 模式下仍展示全结构', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根/部署',
+      '--mode', 'hot',
+    ]);
+
+    // 冷区的后端节点也在结构树中（结构视图不受分区过滤）
+    assert.ok(output.includes('前端'));
+    assert.ok(output.includes('后端'));
+  });
+
+  it('叶子概要固定按热区：--mode cold 不滤空热区 Relations（challenger Q2）', () => {
+    const output = runQueryGroup([
+      '--scope', scope,
+      '--subtree', '项目根/监控/告警中心',
+      '--mode', 'cold',
+    ]);
+
+    // 告警中心的 Relations 属热区：概要固定热区展示，不被 --mode cold 滤空
+    assert.ok(output.includes('告警规则CRUD流程'));
+  });
+});
