@@ -130,9 +130,9 @@ describe('CLI 纯函数 · executeSearch', () => {
       assert.equal(r.results.length, 1);
       assert.equal(r.results[0].memoryId, 'id1');
     }
-    // 验证参数传递
+    // 验证参数传递（executeSearch 以 scopes 数组形式下传，单 scope 为单元素数组）
     assert.equal(mockSearchCalls.length, 1);
-    assert.equal(mockSearchCalls[0].scope, 'test');
+    assert.deepEqual(mockSearchCalls[0].scopes, ['test']);
     assert.equal(mockSearchCalls[0].query, '测试查询');
     assert.equal(mockSearchCalls[0].limit, 5);
     assert.equal(mockSearchCalls[0].tags, 'ki-search');
@@ -158,7 +158,7 @@ describe('CLI 纯函数 · executeSearch', () => {
       query: 'test',
     });
     assert.equal(r.ok, true);
-    assert.equal(mockSearchCalls[0].scope, 'default');
+    assert.deepEqual(mockSearchCalls[0].scopes, ['default']);
   });
 
   it('向量不可用返回 ok=false + degraded', async () => {
@@ -473,6 +473,54 @@ describe('CLI 纯函数 · executeBulkStore', () => {
   });
 });
 
+// ─── 多 scope 聚合检索（default 档，mock 向量层）───
+//
+// 覆盖 executeSearch 多 scope 主路径（与 test/search-multiscope.test.ts 互补：
+// 后者无向量环境只能断言失败/降级路径，本组以 mock 让 ok:true 主路径真实执行）：
+//   - 响应结构：scopes[] + 命中级 scope + 无 skipped 时不返回
+//   - 参数下传：vectorSearch 收到 scopes 数组（单次查询）
+describe('CLI 纯函数 · executeSearch 多 scope（default 档）', () => {
+  before(async () => {
+    mockAvailable = true;
+    mockSearchResults = [
+      { memoryId: 'id1', content: 'a', score: 0.8, scope: 'alpha' },
+      { memoryId: 'id2', content: 'b', score: 0.6, scope: 'beta' },
+    ];
+    mockSearchCalls = [];
+  });
+
+  it('多 scope：返回 scopes[] + 命中标注来源 + 单次查询下传 scopes 数组', async () => {
+    const r = await searchModule.executeSearch({
+      scope: 'alpha,beta',
+      query: 'q',
+      tags: 'ki-search',
+    });
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.deepEqual(r.scopes, ['alpha', 'beta']);
+      assert.equal(r.skipped, undefined, '无跳过时不返回 skipped');
+      assert.equal(r.scope, 'alpha');
+      // 命中透传来源 scope（mock 按引擎语义已按 score 降序返回）
+      assert.deepEqual(r.results.map((h) => h.scope), ['alpha', 'beta']);
+    }
+    assert.equal(mockSearchCalls.length, 1, '多 scope 仅单次向量查询');
+    assert.deepEqual(mockSearchCalls[0].scopes, ['alpha', 'beta']);
+  });
+
+  it('单段含尾随逗号（"test,"）：归一化为单 scope，与多 scope 解析语义一致（Q9）', async () => {
+    mockAvailable = true;
+    mockSearchResults = [];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({
+      scope: 'test,',
+      query: 'q',
+      tags: 'ki-search',
+    });
+    assert.equal(r.ok, true, '空段应被忽略而非报"不合法"');
+    assert.deepEqual(mockSearchCalls[0].scopes, ['test']);
+  });
+});
+
 // ─── scope 护栏 · strict 模式 ───
 //
 // 覆盖 resolveScope 在 strict 档下的两条 fail-loud 分支（config.ts）：
@@ -540,7 +588,31 @@ describe('CLI 纯函数 · scope 护栏 strict 模式', () => {
     mockSearchCalls = [];
     const r = await searchModule.executeSearch({ scope: 'registered', query: 'test' });
     assert.equal(r.ok, true);
-    assert.equal(mockSearchCalls[0].scope, 'registered');
+    assert.deepEqual(mockSearchCalls[0].scopes, ['registered']);
+  });
+
+  it('strict 模式多 scope：未注册跳过+提示，白名单内照常（ok:true + skipped）', async () => {
+    mockAvailable = true;
+    mockSearchResults = [{ memoryId: 'id1', content: 't', score: 0.5, scope: 'registered' }];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({ scope: 'registered,ghost', query: 'q', tags: 'ki-search' });
+    assert.equal(r.ok, true, '未注册不应阻塞白名单内 scope');
+    if (r.ok) {
+      assert.deepEqual(r.scopes, ['registered']);
+      assert.deepEqual(r.skipped?.map((k) => k.scope), ['ghost']);
+      assert.match(r.skipped?.[0]?.reason ?? '', /未注册/);
+      assert.equal(r.scope, 'registered');
+    }
+    assert.deepEqual(mockSearchCalls[0].scopes, ['registered'], '仅检索白名单内 scope');
+  });
+
+  it('strict 模式多 scope：全部未注册 → ok:false 且提示', async () => {
+    const r = await searchModule.executeSearch({ scope: 'ghost1,ghost2', query: 'q' });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.error, /无可检索的 scope/);
+      assert.match(r.error, /ghost1/);
+    }
   });
 
   it('strict 护栏对 executeStore 生效（未注册 scope → ok=false）', async () => {

@@ -42,6 +42,8 @@ export interface VectorSearchResult {
   tag?: string;
   /** 结构化 Group 字段（ki-relation 向量写入时的归属 Group 路径，可能缺失） */
   group?: string;
+  /** 命中所属 scope（多 scope 检索时供上层区分来源/反查定位；旧库缺字段时可能缺失） */
+  scope?: string;
 }
 
 export interface VectorStoreResult {
@@ -498,23 +500,28 @@ export async function ensureVectorAvailable(
 /**
  * 语义检索（hybrid：语义 + FTS 关键词 + RRF），按 scope + tag 过滤。
  *
+ * scope：单个或数组（多 scope 检索：单次查询 + scope OR 过滤，embedding 仅 1 次）。
  * tags：可选。不传/空 → 不按 tag 过滤（搜索 scope 下全部 tag）；
  * 传单个 tag 或逗号分隔多个 tag → 多 tag 以 OR 组合（复用 buildScopeTagFilter）。
  */
 export async function vectorSearch(params: {
-  scope: string;
+  scope?: string;
+  /** 多 scope：优先于 scope；数组成员逐个 resolve（strict 模式逐个校验） */
+  scopes?: string[];
   query: string;
   limit?: number;
   tags?: string | string[]; // 数组：tag 值本身可能含逗号，join/split 往返会错拆；字符串：逗号分隔多 tag
   threshold?: number;
 }): Promise<VectorSearchResult[]> {
-  const scope = resolveScope(loadConfig(), params.scope);
+  const config = loadConfig();
+  const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
+  if (scopes.length === 0) throw new Error('scope 不能为空：至少传入一个 scope');
   const tagList = Array.isArray(params.tags)
     ? params.tags
     : params.tags
       ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
       : undefined;
-  const filter = buildScopeTagFilter(scope, tagList);
+  const filter = buildScopeTagFilter(scopes, tagList);
 
   const hits: Hit[] = await withEngine((engine) => engine.hybridSearch({
     queryText: params.query,
@@ -530,6 +537,7 @@ export async function vectorSearch(params: {
       score: h.score,
       tag: h.fields?.[TAG_FIELD] !== undefined ? String(h.fields[TAG_FIELD]) : undefined,
       group: h.fields?.[GROUP_FIELD] !== undefined ? String(h.fields[GROUP_FIELD]) : undefined,
+      scope: h.fields?.[SCOPE_FIELD] !== undefined ? String(h.fields[SCOPE_FIELD]) : undefined,
     }))
     .filter((r) => params.threshold === undefined || r.score >= params.threshold);
 }
@@ -644,11 +652,13 @@ export async function vectorDelete(params: {
 const LIST_ALL_LIMIT = 10_000;
 
 /**
- * 构建 scope + tag 过滤：scope 必等；tags 非空时多 tag 以 OR 组合。
- * tags 为空/未传 → 不按 tag 过滤（覆盖该 scope 下全部 tag）。
+ * 构建 scope + tag 过滤：scope 单值必等 / 多值 OR；tags 非空时多 tag 以 OR 组合。
+ * tags 为空/未传 → 不按 tag 过滤（覆盖该（些）scope 下全部 tag）。
  */
-function buildScopeTagFilter(scope: string, tags?: string[]): Filter {
-  const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: scope };
+function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
+  if (scopes.length === 0) throw new Error('scope 不能为空：至少传入一个 scope');
+  const scopeConds: Filter[] = scopes.map((s) => ({ field: SCOPE_FIELD, op: '==', value: s }));
+  const scopeCond: Filter = scopeConds.length === 1 ? scopeConds[0] : { or: scopeConds };
   const cleaned = (tags ?? []).map((t) => normalizeTag(t)).filter((t) => t.length > 0);
   if (cleaned.length === 0) return scopeCond;
   const tagConds: Filter[] = cleaned.map((t) => ({ field: TAG_FIELD, op: '==', value: t }));
@@ -675,7 +685,7 @@ export async function vectorListDocs(params: {
   limit?: number;
 }): Promise<VectorDocInfo[]> {
   validateScope(params.scope);
-  const filter = buildScopeTagFilter(params.scope, params.tags);
+  const filter = buildScopeTagFilter([params.scope], params.tags);
   return withEngine(async (engine) => {
     const ids = await engine.listIds(filter, params.limit ?? 10);
     if (ids.length === 0) return [];
@@ -750,7 +760,7 @@ export async function vectorListTags(params: {
  */
 export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
   validateScope(params.scope);
-  const filter = buildScopeTagFilter(params.scope, params.tags);
+  const filter = buildScopeTagFilter([params.scope], params.tags);
   return withEngine((engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
 }
 
@@ -763,7 +773,7 @@ export async function vectorDeleteScope(
   onProgress?: (deleted: number) => void
 ): Promise<{ deleted: number }> {
   validateScope(params.scope);
-  const filter = buildScopeTagFilter(params.scope, params.tags);
+  const filter = buildScopeTagFilter([params.scope], params.tags);
   return withEngine(async (engine) => {
     let total = 0;
     for (;;) {

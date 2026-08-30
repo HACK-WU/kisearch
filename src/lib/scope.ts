@@ -43,6 +43,32 @@ export function validateScope(scope: string): void {
 }
 
 /**
+ * 解析逗号分隔的多 scope 参数（REQ 多 scope 检索）
+ *
+ * 语义：去空格、去重、保序；空段忽略；逐个字符集校验（安全类快速失败）。
+ * 不做模式策略（注册/授权）校验——由调用方按 strict/授权上下文处理。
+ * @param raw 逗号分隔的 scope 字符串；空/未传 → 返回 []（由调用方走缺省回退）
+ * @throws ScopeError 任一段不合法（含空解析后为空但 raw 非空的纯分隔符输入）
+ */
+export function parseScopes(raw?: string): string[] {
+  if (raw === undefined || raw === null) return [];
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (raw.trim().length > 0 && parts.length === 0) {
+    throw new ScopeError('EMPTY_SCOPE', `scope "${raw}" 解析为空：逗号分隔列表无有效段`);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    validateScope(p);
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
  * 获取 kb/{scope}/ 目录绝对路径
  * 优先使用 config.scopes[scope].kbDir，fallback 到 config.dataDir/{scope}
  */

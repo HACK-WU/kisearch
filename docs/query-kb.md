@@ -99,7 +99,8 @@
 1. **向量语义检索**
    ```bash
    ki search --scope <scope> --query "<用户问题>"
-   # 默认仅返回向量匹配数据（不返回原文，REQ-09）；--original 开启返回 local KB 文件级原文
+   # 默认仅返回向量匹配数据（不返回原文，REQ-09）；--original 开启返回 local KB 文件级原文。
+   # 跨项目联合召回：--scope 传逗号分隔多个（如 a,b），单次查询、结果统一排序并标注来源 scope
    ```
 
    输出包含（默认不传 `--original`）：

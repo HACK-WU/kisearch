@@ -477,7 +477,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `<query>`（位置） | 自然语言查询文本（**必填**；`-q/--query` 等效，位置参数优先） | - |
-| `-s, --scope <scope>` | 项目隔离标识 | `default` |
+| `-s, --scope <scope>` | 项目隔离标识（**多个用逗号分隔聚合检索**：单次查询跨 scope 召回，结果按得分统一排序，每条命中标注来源 `scope`；strict 模式下未注册的多传 scope 会被跳过并在 `skipped` 中提示） | `default` |
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
@@ -489,6 +489,9 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 
 ```bash
 ki search "仪表盘配置" -s monitor
+
+# 多 scope 聚合检索（逗号分隔；响应额外含 scopes[]，命中带来源 scope；limit 为总量上限）
+ki search "告警静默策略" -s monitor,alerting
 ```
 
 输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常；`content` 为向量层存储文本）：

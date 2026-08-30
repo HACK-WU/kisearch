@@ -114,8 +114,9 @@ const SCOPE_LESS_TOOLS = new Set(['ki_scope_list', 'ki_manage_index_list']);
  * 逐个 tools/call 校验（含 batch 数组），任一越权即拒绝，防止「batch 首项合法、后续越权」绕过。
  * 白名单工具（SCOPE_LESS_TOOLS）跳过此校验，由工具层 authScopes 过滤兜底。
  * @returns 违规的 scope（需拒绝）；null 表示无需拒绝（非 tools/call 或全部 scope 被授权）
+ * @internal 导出仅供单测（白盒验证多 scope 逐段校验）；非稳定公共 API。
  */
-function findScopeViolation(body: unknown, scopes: string[]): string | null {
+export function findScopeViolation(body: unknown, scopes: string[]): string | null {
   const items = Array.isArray(body) ? body : [body];
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
@@ -127,13 +128,20 @@ function findScopeViolation(body: unknown, scopes: string[]): string | null {
     // 无 scope 参数的枚举工具：放行给工具层按授权集合过滤（见 SCOPE_LESS_TOOLS 注释）
     if (typeof m.params?.name === 'string' && SCOPE_LESS_TOOLS.has(m.params.name)) continue;
     // 缺失/非法 arguments 等价于工具层 zod 缺省 scope='default'，必须参与校验，
-    // 否则恶意客户端省略 arguments 即可绕过闸门读未授权的 default scope
+    // 否则恶意客户端省略 arguments 即可绕过闸门读未授权的 default scope。
+    // 多 scope（逗号分隔）：逐段校验，任一段越权即拒绝，防止 "authorized,secret" 绕过。
     const rawArgs = m.params?.arguments;
     const args = rawArgs && typeof rawArgs === 'object' ? rawArgs : {};
     const scope = (args as { scope?: unknown }).scope;
-    const effective = typeof scope === 'string' && scope.trim() ? scope.trim() : 'default';
-    if (scopes.includes(ALL_SCOPES) || scopes.includes(effective)) continue;
-    return effective;
+    const trimmed = typeof scope === 'string' ? scope.trim() : '';
+    const segments = trimmed.length > 0
+      ? trimmed.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    const effectiveList = segments.length > 0 ? segments : ['default'];
+    for (const effective of effectiveList) {
+      if (scopes.includes(ALL_SCOPES) || scopes.includes(effective)) continue;
+      return effective;
+    }
   }
   return null;
 }

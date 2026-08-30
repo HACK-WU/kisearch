@@ -229,7 +229,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 - **鉴权失败（401）**：Token 无效或缺失。核对客户端 `Authorization: Bearer` 与 `ki mcp token list` 输出的明文完全一致（整段复制勿手抄）；若用全权临时 Token，确认 `--token`/`KI_MCP_TOKEN` 仍在生效。服务端 stderr 有失败原因日志。
-- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_manage_index_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
+- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。多 scope（逗号分隔）调用逐段校验，任一段越权即整体拒绝。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_manage_index_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
 
 ## 会话模型
 
