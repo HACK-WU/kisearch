@@ -1,6 +1,6 @@
 ---
 name: agents-md-init
-description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${scope}-memory 项目记忆索引、用户画像、近期工作等章节。仅当用户明确说明要初始化或刷新 AGENTS.md 时才调用，禁止 AI 自动触发。
+description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${scope}-memory 项目记忆索引、同步「团队约定」Group（空则写"无"）、用户画像、近期工作等章节。仅当用户明确说明要初始化或刷新 AGENTS.md 时才调用，禁止 AI 自动触发。
 ---
 
 # agents-md-init AGENTS.md 初始化
@@ -17,6 +17,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 **功能**：
 - 用户手动触发时创建/更新 AGENTS.md（如用户说"初始化 AGENTS.md"、"刷新缓存"）
 - 查询 ki 获取真实索引数据填充项目记忆索引（`${scope}-memory`）
+- 同步「团队约定」Group 内容到 AGENTS.md"团队约定"章节（空则写"无"，见 §3.6）
 - 代码知识库（`${scope}`）索引不写入 AGENTS.md，查询走 `ki-search` 直连 ki
 - 用户画像与近期工作直接存储于 AGENTS.md，不依赖 ki
 - 无真实数据时用示例格式兜底（标注 ⚠️）
@@ -79,8 +80,9 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ① ki_manage_index_list → 获取所有 scope，识别 ${scope}-memory 项目记忆 scope
 ② 对每个 ${scope}-memory 执行 ki_query_group(mode: "full,depth=4") → Group 结构
 ③ 对每个 ${scope}-memory 执行 ki_query_group(mode: "hot,hot_count=3") → 热门 Relation
-④ 用户画像与近期工作 → 直接写入 AGENTS.md 对应章节（空模板 + 预定义维度）
-⑤ 写入 AGENTS.md（参考 AGENTS-template.md）
+④ 同步「团队约定」Group → 填充 AGENTS.md"团队约定"章节（Group 为空则写"无"，见 §3.6）
+⑤ 用户画像与近期工作 → 直接写入 AGENTS.md 对应章节（空模板 + 预定义维度）
+⑥ 写入 AGENTS.md（参考 AGENTS-template.md）
 ```
 
 > 代码知识库 `${scope}` 的索引不初始化到 AGENTS.md，仅缓存 `${scope}-memory` 项目记忆索引。
@@ -99,6 +101,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ④ 检查项目记忆预定义 Group 是否存在，缺失则初始化（见 §项目记忆索引）
 ⑤ 检查"近期工作"时间戳 → 超过 1 天则刷新（直接维护 AGENTS.md 章节）
 ⑥ 用户画像 → 保持 AGENTS.md 中已有内容，不重复初始化；仅当维度缺失时补充小节
+⑦ 回刷"团队约定"章节 → ki_query_group(scope: "${scope}-memory", groups: "团队约定", mode: "full") 与本节比对，不一致则覆盖（Group 为空则写"无"）
 ```
 
 ---
@@ -112,6 +115,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ```
 # AGENTS.md - AI AGENT 项目记忆文件
 ├── 项目记忆索引      # ki ${scope}-memory scope（Group 结构 + 热门 Relation）
+├── 团队约定          # 同步 ki ${scope}-memory「团队约定」Group（缓存，空则写"无"）
 ├── 用户画像          # 直接存储，不走 ki（沟通偏好/代码风格/工具链/技术背景/工作习惯/对话习惯）
 ├── 近期工作 (7天内)  # 直接存储，不走 ki（最近需求 + 进度，超期移入 archive.md）
 └── 更新日志          # 最近 10 条变更记录
@@ -159,6 +163,25 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 
 ---
 
+## 3.6 团队约定章节同步（AGENTS.md ↔ ki）
+
+> **同步源**：`${scope}-memory` → 「团队约定」Group。本节是缓存，权威数据在 ki。
+> **目的**：agent 读 AGENTS.md 即可直接获取团队约定，免一次 ki 查询。
+
+### 同步规则
+
+- **方向**：先写 ki（`ki_sync_relation(scope: "${scope}-memory", group: "团队约定", relation, module_info)`），再把要点回刷本节。**禁止只在 AGENTS.md 写约定而不写回 ki。**
+- **粒度**：每条 Relation 压缩为一行要点 `- {Relation 名}: {一句话要点}`，不全文转储。
+- **空值约定**：Group 无 Relation 时，本节内容只写 `- 无`；**禁止留空、禁止删除本节**。
+- **刷新时机**：完整初始化（§2.1 ④）、增量更新（§2.2 ⑦）、写入/修改团队约定后。
+- **同步日期**：每次回刷时更新本节引用块中的 `同步日期: YYYY-MM-DD`。
+
+### 读取规则
+
+- 对话需遵循团队约定时先读本节；需完整原文再走 `ki_get_module_info(scope: "${scope}-memory", group: "团队约定", relation)`。
+
+---
+
 ## 4. 真实数据 vs 示例数据
 
 > **优先使用 ki 中的真实数据。仅当 ki 中无对应 scope 时，才使用示例格式兜底。**
@@ -168,6 +191,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 - `${scope}-memory` 列表 → 来自 `ki_manage_index_list`
 - Group 结构 → 来自 `ki_query_group(mode: "full")`（仅 ${scope}-memory）
 - 热门 Relation → 来自 `ki_query_group(mode: "hot")`（仅 ${scope}-memory）
+- 团队约定 → 来自 `ki_query_group(groups: "团队约定", mode: "full")`，空则写"无"（见 §3.6）
 - 近期工作 → AGENTS.md 内已有内容（无 ki 数据源）
 - 用户画像 → AGENTS.md 内已有内容（无 ki 数据源）
 
@@ -235,3 +259,4 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 | 🔴 5 | 近期工作记录超过 7 天不清理 |
 | 🔴 6 | 将用户画像写入 ki 记忆的任何 scope（应存 AGENTS.md"用户画像"章节） |
 | 🔴 7 | 在 ki 中创建/写入"最近需求"/"进度" Group（已迁移至 AGENTS.md"近期工作"章节） |
+| 🔴 8 | AGENTS.md"团队约定"章节留空或删除（无约定时必须写"无"）；只在 AGENTS.md 写约定而不回写 ki |

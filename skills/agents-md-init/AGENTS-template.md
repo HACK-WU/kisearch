@@ -1,6 +1,6 @@
 ---
 name: agents-md-template
-description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scope}-memory）、用户画像与近期工作（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
+description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像与近期工作（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
 ---
 
 # AGENTS.md - AI AGENT 项目记忆文件
@@ -63,6 +63,19 @@ ki manage-index create --scope ${scope}-memory --name "专题记忆"
 
 - {Relation1} (热度: {score})
 - ...
+
+---
+
+## 团队约定
+
+> **同步源**：ki `${scope}-memory` → 「团队约定」Group（`ki_query_group(scope: "${scope}-memory", groups: "团队约定", mode: "full")`）。
+> **本节为缓存**：权威数据在 ki，此处只做占位同步，便于 agent 免查询直接获取。
+> **无内容时必须写 `无`**，禁止留空或删除本节；写入 ki 后须回刷本节。
+> **写入方向**：先 `ki_sync_relation(scope: "${scope}-memory", group: "团队约定", ...)`，再把要点回刷到本节。
+
+- 无
+
+<!-- 有约定时逐条列：`- {Relation 名}: {一句话要点}`；最后同步日期: YYYY-MM-DD -->
 
 ---
 
