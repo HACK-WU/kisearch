@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -391,8 +391,9 @@ function hasFlagValue(args: string[], name: string): boolean {
 /**
  * 以守护进程方式重新拉起 HTTP 单例（detached + stdio 忽略，父进程立即退出）。
  * 与 bin/ki.mjs 的 daemon 启动路径一致：npx jiti <mcp-server.ts> --http --daemon ...
+ * 返回子进程句柄，供 restart 就绪等待使用（探测子进程是否在启动阶段退出）。
  */
-function spawnMcpDaemon(args: string[]): void {
+function spawnMcpDaemon(args: string[]): ChildProcess {
   const mcpServerPath = fileURLToPath(import.meta.url);
   const child = spawn('npx', ['jiti', mcpServerPath, ...args], {
     detached: true,
@@ -400,6 +401,45 @@ function spawnMcpDaemon(args: string[]): void {
     env: process.env,
   });
   child.unref();
+  return child;
+}
+
+/** restart 就绪等待参数：jiti 冷启动 + 预检有成本，30s 内未就绪按"仍在启动"处理（不判死，对齐"慢失败按成功"决策） */
+const RESTART_READY_TIMEOUT_MS = 30_000;
+const RESTART_POLL_INTERVAL_MS = 300;
+
+/**
+ * 等待重启后的新实例就绪（healthz ok）。
+ * - 子进程在启动阶段退出 / spawn 失败 → fail-loud（复用 bin/ki.mjs 直启探测的语义，补齐 restart 链路缺口）
+ * - 就绪 → 返回 true（此时新实例 lock 已写，后续 --status 目标解析正确）
+ * - 超时 → 返回 false（不判死，调用方以"仍在启动中"提示收尾，--status 兜底）
+ */
+async function waitForRestartReady(child: ChildProcess, host: string, port: number): Promise<boolean> {
+  // 用对象包装承载闭包赋值（TS 不追踪回调内的直接变量赋值收窄）
+  const spawnError: { msg: string | null } = { msg: null };
+  child.on('error', (err) => { spawnError.msg = err.message; });
+
+  const start = Date.now();
+  while (Date.now() - start < RESTART_READY_TIMEOUT_MS) {
+    if (spawnError.msg) {
+      failJson(
+        `重启失败 —— daemon 进程启动异常（${spawnError.msg}）。` +
+        `请前台运行同样命令（去掉 -d/--daemon）查看具体错误：\n  ki mcp --http --host ${host} --port ${port}`,
+        'MCP_RESTART_FAILED',
+      );
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      failJson(
+        `重启失败 —— 新实例在启动阶段退出（exit ${child.exitCode ?? child.signalCode}），旧实例已停止。` +
+        `请前台运行同样命令（去掉 -d/--daemon）查看具体错误：\n  ki mcp --http --host ${host} --port ${port}`,
+        'MCP_RESTART_FAILED',
+      );
+    }
+    const info = await fetchHealthz(probeHost(host), port, 1500);
+    if (info?.ok === true && info.name === SERVICE_NAME) return true;
+    await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
+  }
+  return false;
 }
 
 /**
@@ -468,7 +508,12 @@ async function runRestartCommand(args: string[]): Promise<void> {
   const webExplicit = hasFlagValue(filteredArgs, '--web') || hasFlagValue(filteredArgs, '--no-web');
   if (!webExplicit && lock?.web === true) spawnArgs.push('--web');
   spawnArgs.push(...filteredArgs);
-  spawnMcpDaemon(spawnArgs);
+  const child = spawnMcpDaemon(spawnArgs);
+
+  // 就绪等待（bug 修复）：此前 spawn 后立即 ok:true，新实例尚在 jiti 冷启动/预检阶段，
+  // lock 未写、healthz 未服务——紧随的 --status 读不到 lock 回退默认端口（探错地址）报
+  // running:false。现等待 healthz 就绪再返回；子进程早期退出则 fail-loud 暴露真实失败。
+  const ready = await waitForRestartReady(child, probeHost(host), port);
 
   const nothing = report.stopped.length === 0 && report.cleanedLocks.length === 0;
   console.log(
@@ -476,12 +521,15 @@ async function runRestartCommand(args: string[]): Promise<void> {
       {
         ok: true,
         restarted: true,
+        ready,
         target: { host: probeHost(host), port },
         stopped: report.stopped,
         cleanedLocks: report.cleanedLocks,
-        hint: nothing
-          ? '未发现运行中的实例，已直接后台启动（幂等）。'
-          : '已后台重启 kisearch HTTP 服务（daemon 模式）。',
+        hint: !ready
+          ? `已后台重启，但 ${RESTART_READY_TIMEOUT_MS / 1000}s 内未就绪（可能仍在启动），请稍后执行 ki mcp --status 确认。`
+          : nothing
+          ? '未发现运行中的实例，已直接后台启动并就绪（幂等）。'
+          : '已后台重启 kisearch HTTP 服务（daemon 模式），新实例已就绪。',
       },
       null,
       2,
