@@ -568,6 +568,8 @@ ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <
 - `emerging`：新兴热区（近期活跃）
 - `full`：完整索引树
 
+> **分区上限语义（仅展示，非存储上限）**：hot 分区最多展示 `partition_config.maxHotCount`（默认 `10`）条，新兴席位（`reservedEmerging`，默认 `10`）优先保留，历史热区按 score 填充剩余席位；warm/cold 分区上限分别为 `maxWarmCount`（默认 `50`）/ `maxColdCount`（默认不截断）。**存储层（`relations-cache.json` 的 `hot_relations`）不设上限**，`full` 模式可查看 Group 全量 Relation。注意区分：`--hot-count`（默认 `5`）是单次查询的展示条数，再次截断分区结果，与 `maxHotCount` 是两个独立旋钮。
+
 **💡 向量语义兜底**：当 `--groups` 指定的 Group 路径在索引树中不存在时，自动通过向量搜索进行模糊匹配。例如输入部分名称 `"部署运维"` 可匹配到 `"部署与运维"`，`"通知渠道"` 可匹配到 `"告警系统设计/通知渠道管理"`。命中后输出带 `💡 近似匹配` 前缀的提示。
 
 **示例：模糊 Group 路径匹配**

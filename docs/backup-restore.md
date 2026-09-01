@@ -51,7 +51,7 @@ kisearch/
 ├── kb/                          # 运行时数据目录
 │   ├── {scope}/                 # 每个 scope 独立目录
 │   │   ├── group-index.json     # Group 树索引 + source 块
-│   │   ├── relations-cache.json # Relation 缓存（评分/淘汰/分区）
+│   │   ├── relations-cache.json # Relation 缓存（评分/分区，存储不设上限）
 │   │   ├── scan-index.json      # 扫描状态账本（已废弃，批次 3 移除 scan 子命令）
 │   │   └── {group}/             # 本地 KB 原文
 │   │       └── index.json       # 模块说明原文

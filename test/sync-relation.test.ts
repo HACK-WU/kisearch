@@ -1,7 +1,7 @@
 /**
  * sync-relation.ts 测试
  *
- * 覆盖：Relation 写入、本地 KB 写入、淘汰逻辑（maxHotCount）、批量模式、单条失败不中断
+ * 覆盖：Relation 写入、本地 KB 写入、存储不设上限（maxHotCount 仅展示分区口径）、批量模式、单条失败不中断
  *
  * 批次 3（REQ-05）：keywords 校验机制已删除，相关测试移除。
  */
@@ -133,9 +133,9 @@ describe('sync-relation 单条模式', () => {
   });
 });
 
-describe('sync-relation 淘汰逻辑', () => {
-  it('达到 maxHotCount 时淘汰最低分 Relation', async () => {
-    // 创建一个新 scope 以控制 maxHotCount
+describe('sync-relation 存储不设上限', () => {
+  it('超过 maxHotCount 后新 Relation 全部保留，不再逐出', async () => {
+    // 创建一个新 scope 以控制 maxHotCount（展示侧分区口径，非存储上限）
     const evictionScope = `evict-test-${Date.now()}`;
     const { initScope, readJson, writeJson } = await import('../src/lib/store.js');
     const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
@@ -144,43 +144,29 @@ describe('sync-relation 淘汰逻辑', () => {
       registerTestScope(evictionScope);
       initScope(evictionScope);
 
-      // 设置 maxHotCount = 2
+      // 设置 maxHotCount = 2（仅影响展示分区，不应影响存储）
       const cachePath = getRelationsCachePath(evictionScope);
       const cache = readJson<any>(cachePath)!;
       cache.partition_config.maxHotCount = 2;
       writeJson(cachePath, cache);
 
-      // 写入 2 个 Relation（达到上限）
-      runSync([
-        '--scope', evictionScope,
-        '--group', '项目根/测试',
-        '--relation', '功能A描述',
-        '--module-info', '# 功能A\n\n这是功能A的说明文档。',
-      ]);
+      // 连续写入 3 个 Relation（超过 maxHotCount）
+      for (const name of ['功能A描述', '功能B描述', '功能C描述']) {
+        runSync([
+          '--scope', evictionScope,
+          '--group', '项目根/测试',
+          '--relation', name,
+          '--module-info', `# ${name}\n\n这是${name}的说明文档。`,
+        ]);
+      }
 
-      runSync([
-        '--scope', evictionScope,
-        '--group', '项目根/测试',
-        '--relation', '功能B描述',
-        '--module-info', '# 功能B\n\n这是功能B的说明文档。',
-      ]);
-
-      // 写入第 3 个，应触发淘汰
-      const result = runSync([
-        '--scope', evictionScope,
-        '--group', '项目根/测试',
-        '--relation', '功能C描述',
-        '--module-info', '# 功能C\n\n这是功能C的说明文档。',
-      ]);
-
-      assert.strictEqual(result.ok, true);
-      assert.ok(result.evicted !== null, '应有一个被淘汰的 Relation');
-
-      // 验证淘汰后数量不超过 maxHotCount
+      // 验证：3 条全部保留，evicted 恒为 null
       const updatedCache = readJson<any>(cachePath)!;
       const groupData = updatedCache.groups['项目根/测试'];
-      assert.ok(groupData.hot_relations.length <= 2);
-      assert.ok(groupData.hot_relations.some((r: any) => r.text === '功能C描述'));
+      assert.strictEqual(groupData.hot_relations.length, 3, '存储层不应有上限，3 条应全部保留');
+      for (const name of ['功能A描述', '功能B描述', '功能C描述']) {
+        assert.ok(groupData.hot_relations.some((r: any) => r.text === name), `${name} 应保留`);
+      }
     } finally {
       const kbDir = getKbDir(evictionScope);
       if (fs.existsSync(kbDir)) {

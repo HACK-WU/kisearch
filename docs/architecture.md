@@ -54,7 +54,9 @@ flowchart LR
 | 文件 | 角色 | 读写方 | 生命周期 |
 |------|------|--------|---------|
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
-| `relations-cache.json` | Relation 缓存（评分/淘汰/分区），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+| `relations-cache.json` | Relation 缓存（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+
+> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
 | `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |

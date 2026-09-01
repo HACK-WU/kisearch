@@ -56,6 +56,7 @@ interface RelationsCache {
 
 interface SyncResult {
   relation: string;
+  /** @deprecated 兼容保留字段，恒为 null（存储层已取消逐出上限，2026-09-01） */
   evicted: string | null;
   wikiSynced?: boolean;
   wikiFile?: string;
@@ -150,7 +151,6 @@ function syncSingleRelation(
 
   // 3. 查找或创建 Relation
   let existingRel = groupData.hot_relations.find((r) => r.text === relationText);
-  let evicted: string | null = null;
   const now = Date.now();
 
   if (existingRel) {
@@ -178,23 +178,10 @@ function syncSingleRelation(
       isImported: false,
     };
 
-    // 4. 检查是否需要淘汰
-    if (groupData.hot_relations.length >= config.maxHotCount) {
-      // 找 score 最低的 Relation
-      let minIdx = 0;
-      for (let i = 1; i < groupData.hot_relations.length; i++) {
-        if (groupData.hot_relations[i].score < groupData.hot_relations[minIdx].score) {
-          minIdx = i;
-        }
-      }
-
-      const evictedRel = groupData.hot_relations[minIdx];
-      evicted = evictedRel.text;
-
-      groupData.hot_relations.splice(minIdx, 1);
-    }
-
-    // 5. 添加新 Relation
+    // 4. 直接追加（存储层不设上限）：
+    //    maxHotCount 仅是 query-group 展示侧的分区口径（partitionByScore），
+    //    不再作为存储上限做逐出——历史行为是静默 splice 最低分条目导致数据零和丢失（bug 已修）。
+    //    按用户决策保留热区展示上限 10，由展示侧负责截断。
     groupData.hot_relations.push(newRel);
 
     // 按 score 降序排列
@@ -216,7 +203,8 @@ function syncSingleRelation(
 
   return {
     relation: relationText,
-    evicted,
+    // 兼容保留：存储层已取消逐出，恒为 null
+    evicted: null,
   };
 }
 
@@ -364,6 +352,7 @@ export interface BulkSyncItem {
 export interface BulkSyncResultItem {
   group: string;
   relation: string;
+  /** @deprecated 兼容保留字段，恒为 null（存储层已取消逐出上限，2026-09-01） */
   evicted: string | null;
   vectorStored?: boolean;
   vectorReason?: string;
@@ -787,7 +776,7 @@ export async function executeBulkSyncRelation(params: {
 }
 
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
