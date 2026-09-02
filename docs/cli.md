@@ -705,15 +705,23 @@ ki query-group --scope my-project --mode full
 
 按 Group + Relation 读取本地 KB 中的 Markdown 原文。支持 Relation 名称的向量语义兜底：精确名称未命中时自动尝试模糊匹配。
 
+支持批量：`--relation` 传入逗号分隔的多个名称（**≤10 条**，须同 Group，超限报错），一次查询返回逐条 `results`（部分失败不影响其他条目）。MCP 工具 `ki_get_module_info` 用 `relations` 数组参数等价批量查询。
+
 ```bash
 ki get-module-info \
-  --scope <scope> --group <group> --relation <relation>
+  --scope <scope> --group <group> --relation <relation>[,<relation2>,...]  # 多个逗号分隔 = 批量（≤10 条）
 ```
 
 **示例：读取模块原文**
 
 ```bash
 ki get-module-info --scope my-project --group "项目/API" --relation "用户登录接口"
+```
+
+**示例：批量读取（逗号分隔，返回 JSON results）**
+
+```bash
+ki get-module-info --scope my-project --group "项目/API" --relation "用户登录接口,鉴权中间件"
 ```
 
 输出：
@@ -1063,7 +1071,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 |------|------|------|------|
 | `scope` | string | 是 | 项目隔离标识 |
 | `group` | string | 是 | Group 路径（支持模糊匹配） |
-| `relation` | string | 是 | Relation 名称 |
+| `relation` | string | 二选一 | Relation 名称（单条查询） |
+| `relations` | string[] | 二选一 | 同 Group 下批量查询（**≤10 条**，超限报错）；逐条返回 `results`（含 `matchedRelation` 近似命中名），部分失败不影响其他条目；Group 解析与 localKB 读取只做一次 |
 
 #### `ki_sync_relation`
 

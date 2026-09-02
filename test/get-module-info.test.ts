@@ -203,3 +203,83 @@ describe('get-module-info 异常处理', () => {
     assert.ok(result.error.includes('未找到') || result.error.includes('不存在'));
   });
 });
+
+describe('get-module-info 批量模式（--relation 逗号分隔多条）', () => {
+  // 批量测试自备第二条有 KB 内容的 Relation，避免与既有用例数据耦合
+  before(async () => {
+    const { readJson, writeJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getLocalKbDir } = await import('../src/lib/scope.js');
+
+    const cachePath = getRelationsCachePath(scope);
+    const cache = readJson<any>(cachePath)!;
+    cache.groups[testGroup].hot_relations.push({
+      id: 'rel_010',
+      text: '静默策略说明',
+      score: 1.0,
+      useCount: 0,
+      lastUsedTime: null,
+      isImported: false,
+    });
+    writeJson(cachePath, cache);
+
+    const localKbPath = getLocalKbDir(scope, testGroup);
+    const kb = JSON.parse(fs.readFileSync(localKbPath, 'utf-8'));
+    kb['静默策略说明'] = '# 静默策略\n\n告警静默窗口配置说明。';
+    writeJson(localKbPath, kb);
+  });
+
+  it('批量查询多条全部成功', () => {
+    const result = runGetModuleInfoJson([
+      '--scope', scope,
+      '--group', testGroup,
+      '--relation', 'rel_001,静默策略说明',
+    ]);
+
+    assert.strictEqual(result.ok, true, `stdout=${JSON.stringify(result)}`);
+    assert.strictEqual(result.succeeded, 2);
+    assert.strictEqual(result.failed, 0);
+    assert.strictEqual(result.results.length, 2);
+    assert.ok(result.results[0].content.includes('AlertController'));
+    assert.ok(result.results[1].content.includes('静默策略'));
+  });
+
+  it('部分失败不影响其他条目', () => {
+    const result = runGetModuleInfoJson([
+      '--scope', scope,
+      '--group', testGroup,
+      '--relation', 'rel_001,不存在的关系,rel_002',
+    ]);
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.succeeded, 1);
+    assert.strictEqual(result.failed, 2);
+    assert.strictEqual(result.results[0].ok, true);
+    assert.strictEqual(result.results[1].ok, false);
+    assert.ok(result.results[1].error.includes('不存在'));
+    assert.strictEqual(result.results[2].ok, false);
+  });
+
+  it('重复 relation 去重（只查询一次）', () => {
+    const result = runGetModuleInfoJson([
+      '--scope', scope,
+      '--group', testGroup,
+      '--relation', '静默策略说明,静默策略说明',
+    ]);
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.succeeded, 1);
+  });
+
+  it('超过 10 条 fail-loud 报错（不静默截断）', () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => `不存在-${i}`).join(',');
+    const result = runGetModuleInfoJson([
+      '--scope', scope,
+      '--group', testGroup,
+      '--relation', eleven,
+    ]);
+
+    assert.strictEqual(result.ok, false);
+    assert.ok(result.error.includes('上限'));
+  });
+});

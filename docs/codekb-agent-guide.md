@@ -193,6 +193,8 @@ ki get-module-info --scope ${scope} --group "目标Group路径" --relation "Rela
 
 返回完整 Markdown 原文。**Agent 必须提炼后回答**，不要全文转储。
 
+> 💡 **批量取原文**：需一次读取同 Group 下多条 Relation 时，`--relation` 可逗号分隔多个（≤10 条），或 MCP 工具传 `relations` 数组——返回逐条 `results`（部分失败不影响其他），比多次单条调用省往返。
+
 ### 第④步：语义兜底与回问用户
 
 #### 4.1 MCP memory_recall 语义搜索
