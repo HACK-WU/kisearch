@@ -568,7 +568,15 @@ ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <
 - `emerging`：新兴热区（近期活跃）
 - `full`：完整索引树
 
-> **分区上限语义（仅展示，非存储上限）**：hot 分区最多展示 `partition_config.maxHotCount`（默认 `10`）条，新兴席位（`reservedEmerging`，默认 `10`）优先保留，历史热区按 score 填充剩余席位；warm/cold 分区上限分别为 `maxWarmCount`（默认 `50`）/ `maxColdCount`（默认不截断）。**存储层（`relations-cache.json` 的 `hot_relations`）不设上限**，`full` 模式可查看 Group 全量 Relation。注意区分：`--hot-count`（默认 `5`）是单次查询的展示条数，再次截断分区结果，与 `maxHotCount` 是两个独立旋钮。
+> **分区上限语义（仅展示，非存储上限）**：hot 分区最多展示 `partition_config.maxHotCount`（默认 `10`）条，新兴席位（`reservedEmerging`，默认 `10`）优先保留，历史热区按 score 填充剩余席位；warm/cold 分区上限分别为 `maxWarmCount`（默认 `50`）/ `maxColdCount`（默认不截断）。**存储层（`relations-cache.json` 的 `hot_relations`）不设上限**；`full` 模式按分区展示 Relation，但**每区最多渲染 50 条**（超出时输出「还有 N 个未展示」并附上查看该区完整列表的命令）。注意区分：`--hot-count`（默认 `5`）是单次查询的展示条数，再次截断分区结果，与 `maxHotCount` 是两个独立旋钮。**两个旋钮的截断都可感知**：非 `full` 模式被 `--hot-count` 截断时，标题追加 `/ 本区共 N` 并输出「还有 N 个未展示；查看本区完整列表：`--mode <区> --hot-count <N>`」（默认 `--mode hot --hot-count 5` 同样适用，不会静默只给 5 条）。
+>
+> **分区守恒不变量**：被上限挤出的条目**回流到下一层分区**（热区溢出 → 常温/冷区，常温溢出 → 冷区），因此 `hot + warm + cold` 恒等于全量条目数，统计信息的三区之和与「总索引数」自洽，任何 Relation 都能在某个分区下查到（不再有「所有 mode 都查不到」的展示黑洞）。唯一例外是显式配置 `maxColdCount` 时对冷区末端的截断（冷区已是最后一层，无处回流；默认 `null` 不截断）。**注意**：守恒说的是**分区归属**，不等于一次渲染出全部条目——`full` 模式渲染层每区有 50 条上限（见上），非 `full` 模式受 `--hot-count`（默认 5）截断；两者均会输出未展示计数与可执行的完整查看命令，按提示用 `--mode <区> --hot-count <N>` 取完整列表。
+>
+> **配比基准**：`warmPercent`（默认 `0.5`）以「热区之外的候选池」为基准计算，使常温/冷区配比与热区规模解耦。
+>
+> **Group 聚合分**：Group 的 score 取其下 Relation 评分的**均值**（非求和），反映「平均活跃度」，避免条目多但冷的 Group 仅凭规模压过条目少但活跃的 Group；空 Group 记 0 分。
+>
+> **`maxHotCount: 0`** 表示热区不展示（不是「不限制」）；不限制请置为 `null`（与 `maxWarmCount` / `maxColdCount` 同语义）。
 
 **💡 向量语义兜底**：当 `--groups` 指定的 Group 路径在索引树中不存在时，自动通过向量搜索进行模糊匹配。例如输入部分名称 `"部署运维"` 可匹配到 `"部署与运维"`，`"通知渠道"` 可匹配到 `"告警系统设计/通知渠道管理"`。命中后输出带 `💡 近似匹配` 前缀的提示。
 

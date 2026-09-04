@@ -32,7 +32,6 @@ import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-c
 interface GroupData {
   hot_relations: Relation[];
   keywords: string[];
-  max_hot_count: number;
 }
 
 interface RelationsCache {
@@ -49,8 +48,69 @@ function loadGroupIndex(scope: string): GroupIndex | null {
   return readGroupIndex(scope);
 }
 
+/**
+ * 在加载边界一次性校验 relations-cache 的结构，使内部全部 hot_relations 访问点
+ * （getGroupAggregateScores / isGroupEmerging / formatGroupRelations /
+ *   collectHotRelations / 子树与 full 递归展示）无需各自防御。
+ *
+ * 为什么 fail-loud 而不是在各消费点 `?? []` 静默降级：
+ * - GroupData.hot_relations 声明为必需字段，写入方（import.ts / sync-relation.ts 建组时
+ *   即初始化为 []）保证其存在，故缺失/非数组只可能是文件被外部改坏或迁移中断；
+ * - query-group 是只读展示主路径，把损坏的 Group 静默当成「0 分 / 0 条 Relation」会让
+ *   用户与 AI 误判该模块没有知识，且据此算出的冷热分区本身就是错的；
+ * - 与 readJson 的 CORRUPT_JSON（JSON 语法层）分层互补：语法正确 ≠ 结构合法，
+ *   口径对齐 config.ts 的 CONFIG_FIELD_INVALID。
+ *
+ * 抛出点位于 executeQueryGroup 的 try 内，对外仍表现为 {ok:false, error}，
+ * 不违背「executeXxx 不抛异常、失败以 ok:false 返回」的可复用纯函数契约
+ * （MCP 层 ki_query_group 将其转为 isError:true + 同文案；web 前端不调用本工具）。
+ *
+ * ⚠ 口径差异是有意的，勿误「统一」：同一份 relations-cache，
+ * `mcp-http-api.ts::buildDocList` 用宽松降级（`hot_relations?` + `?? []`）。因为那里只是
+ * 枚举文档清单（name/group/path/tags）给前端列表页，缺字段仅使清单少几条、不产出错误结论；
+ * 而本模块要算聚合评分与冷热分区，缺字段会得出「该 Group 0 分 / 全进冷区」的**错误结论**。
+ * 同理 `relation-map.ts` 对 cache 损坏降级空 Map（它是检索的可选增强，缺了只丢
+ * group/relation 标注）；而 `wiki-sync.ts::backfillWiki` 则 fail-loud（数据源不完整时
+ * 写出的 wiki 是错的）。判据统一为：**降级后会不会产出错误结论**——会则 fail-loud。
+ */
+function assertCacheShape(cache: RelationsCache, scope: string, cachePath: string): void {
+  const MAX_SHOW = 5;
+  // 出路刻意不预置 --yes：restore.ts 对快照还原是「先预览总览 → 再加 --yes 执行」的两步门禁
+  // （NEG-11，previewAndRequireYes）。预置 --yes 等于替使用者跳过预览，直接触发不可逆的
+  // 「删除 + 覆盖 scope 目录」，且看不到将使用哪个快照（默认取最新，可能早于现有数据）；
+  // 本文案还会经 MCP ki_query_group（isError:true）原样流给 AI agent，被照抄执行的风险更高。
+  const hint = `建议：先执行 ki restore ${scope} --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；`
+    + `或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）`;
+
+  if (!cache.groups || typeof cache.groups !== 'object') {
+    throw new Error(
+      `CACHE_SHAPE_INVALID: relations-cache.json 缺少 groups 对象：${cachePath}\n${hint}`
+    );
+  }
+
+  const broken = Object.entries(cache.groups)
+    .filter(([, data]) => !data || typeof data !== 'object' || !Array.isArray(data.hot_relations))
+    .map(([groupPath]) => groupPath);
+  if (broken.length === 0) return;
+
+  const lines = broken.slice(0, MAX_SHOW).map((p) => `  - ${p}：hot_relations 缺失或不是数组`);
+  if (broken.length > MAX_SHOW) {
+    lines.push(`  ...（另有 ${broken.length - MAX_SHOW} 个 Group 同样损坏，修正以上问题后继续检查）`);
+  }
+  throw new Error(
+    `CACHE_SHAPE_INVALID: relations-cache.json 结构校验失败：${cachePath}`
+    + `（共 ${broken.length} 个 Group 损坏）\n${lines.join('\n')}\n${hint}`
+  );
+}
+
 function loadRelationsCache(scope: string): RelationsCache | null {
-  return readJson<RelationsCache>(getRelationsCachePath(scope));
+  const cachePath = getRelationsCachePath(scope);
+  const cache = readJson<RelationsCache>(cachePath);
+  // cache 为 null 是合法状态（scope 只有 group-index、尚未写入任何 Relation），保持原降级语义；
+  // JSON 语法损坏由 readJson 抛 CORRUPT_JSON，此处只补结构层校验。
+  if (!cache) return null;
+  assertCacheShape(cache, scope, cachePath);
+  return cache;
 }
 
 // ─── 树操作 ───
@@ -96,6 +156,14 @@ function getTreeNodeByPath(
 
 // ─── 评分聚合 ───
 
+/**
+ * Group 聚合评分：取组内 Relation 评分的**均值**（非求和）。
+ * 求和会让「条目多但冷」的 Group 仅凭规模压过「条目少但活跃」的 Group
+ * （实测：30 条×useCount=5×150h 前 = 20.7 > 2 条×useCount=10×刚用 = 19.6），
+ * 均值反映的是「该 Group 的平均活跃度」，与冷热语义一致。
+ * 空 Group 记 0 分（避免 0/0 = NaN 污染排序）。
+ * hot_relations 的存在性由加载边界的 assertCacheShape 保证，此处不再重复防御。
+ */
 function getGroupAggregateScores(
   groups: Record<string, GroupData>,
   now: number,
@@ -103,10 +171,15 @@ function getGroupAggregateScores(
 ): Map<string, number> {
   const scores = new Map<string, number>();
   for (const [path, data] of Object.entries(groups)) {
-    const totalScore = data.hot_relations.reduce((sum, rel) => {
+    const relations = data.hot_relations;
+    if (relations.length === 0) {
+      scores.set(path, 0);
+      continue;
+    }
+    const totalScore = relations.reduce((sum, rel) => {
       return sum + calculateScore(rel.useCount, rel.lastUsedTime, now, halfLifeHours);
     }, 0);
-    scores.set(path, totalScore);
+    scores.set(path, totalScore / relations.length);
   }
   return scores;
 }
@@ -467,12 +540,13 @@ function formatGroupRelations(
   lines.push('');
 
   if (isFull) {
-    // full 模式：按分区展示全量 Relations，各分区上限 maxFullCount 防止输出过长
+    // full 模式：按分区展示全量 Relations，各分区渲染上限 maxFullCount 防止输出过长
+    // （分区本身守恒，此处的截断只是渲染层；提示需给出可执行的完整查看命令）
     const maxFullCount = 50;
-    const sections: Array<{ title: string; rels: Relation[] }> = [
-      { title: `🔥 热区 (全部 ${partition.hot.length})`, rels: partition.hot },
-      { title: `🌡️ 常温区 (全部 ${partition.warm.length})`, rels: partition.warm },
-      { title: `❄️ 冷区 (全部 ${partition.cold.length})`, rels: partition.cold },
+    const sections: Array<{ title: string; mode: string; rels: Relation[] }> = [
+      { title: `🔥 热区 (全部 ${partition.hot.length})`, mode: 'hot', rels: partition.hot },
+      { title: `🌡️ 常温区 (全部 ${partition.warm.length})`, mode: 'warm', rels: partition.warm },
+      { title: `❄️ 冷区 (全部 ${partition.cold.length})`, mode: 'cold', rels: partition.cold },
     ];
     for (const section of sections) {
       if (section.rels.length === 0) continue;
@@ -486,7 +560,8 @@ function formatGroupRelations(
         lines.push(`${prefix} ${rel.text} (score: ${fmtScore(rel.score)}) ${label}`);
       });
       if (truncated) {
-        lines.push(`└── ... 还有 ${section.rels.length - maxFullCount} 个未展示，请缩小 groups 范围或用 hot/warm/cold 模式按需查看`);
+        // hot/warm/cold 模式同样受 --hot-count（默认 5）截断，故出路必须带上放大后的 --hot-count
+        lines.push(`└── ... 还有 ${section.rels.length - maxFullCount} 个未展示（full 模式每区最多渲染 ${maxFullCount} 条，分区数据本身无丢失）；查看该区完整列表：--mode ${section.mode} --hot-count ${section.rels.length}`);
       }
       lines.push('');
     }
@@ -501,12 +576,20 @@ function formatGroupRelations(
       if (rels.length === 0) continue;
       const title = getModeTitle(mode);
       const top = rels.slice(0, hotCount);
-      lines.push(`${title} (Top ${Math.min(hotCount, top.length)}):`);
+      // 截断必须可感知 + 给出路（与 full 模式同一口径）。默认 --hot-count 5 下，
+      // 一个 120 条 Relation 的 Group 只渲染 5 条，而原标题 `(Top 5)` 不含本区总数 ——
+      // 使用者（尤其是 AI）会据此误判「该 Group 只有 5 条知识」。实测：120 条时
+      // cold 区有 60 条、默认只渲染 5 条且零提示（分区守恒保证了数据在，但看不见等于没召回）。
+      const truncated = rels.length > top.length;
+      lines.push(`${title} (Top ${Math.min(hotCount, top.length)}${truncated ? ` / 本区共 ${rels.length}` : ''}):`);
       top.forEach((rel, i) => {
-        const prefix = i === top.length - 1 ? '└──' : '├──';
+        const prefix = !truncated && i === top.length - 1 ? '└──' : '├──';
         const label = getRelPartitionLabel(rel, hotIdSet, warmIdSet, partition.emergingSet);
         lines.push(`${prefix} ${rel.text} (score: ${fmtScore(rel.score)}) ${label}`);
       });
+      if (truncated) {
+        lines.push(`└── ... 还有 ${rels.length - top.length} 个未展示；查看本区完整列表：--mode ${mode} --hot-count ${rels.length}`);
+      }
       lines.push('');
     }
   }
