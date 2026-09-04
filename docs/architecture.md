@@ -55,11 +55,15 @@ flowchart LR
 |------|------|--------|---------|
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
 | `relations-cache.json` | Relation 缓存（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
-
-> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
 | `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |
+
+> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
+>
+> **分区守恒不变量（2026-09-04 修复）**：展示侧截断只改变条目所属分区，不会让条目消失——热区溢出回流常温/冷区、常温溢出回流冷区，`hot + warm + cold` 恒等于全量（唯一例外：显式配置 `maxColdCount` 时的冷区末端截断）。修复前规模 ≥ 34 时被截断条目会在**所有 mode 下都查不到**（且被兜底标记为 `[冷]` 却筛不到）。`warmPercent` 以热区之外的候选池为基准；Group 聚合分取组内 Relation 评分的**均值**（非求和，避免规模压倒活跃度）。
+>
+> **已清理的字段/函数**：`GroupData.max_hot_count`（只写不读的死字段，2026-09-01 存储上限 bug 残留）、`partition_config.decayStep` 与 `scoring.ts` 的 `boundaryDecay`/`hybridPartition`（生产零调用死代码；且 boundaryDecay 修改的 score 会被下次 `calculateScore` 重算覆盖，与派生评分模型不兼容）均已删除；存量 cache 中残留的同名键不被读取，无需迁移。
 
 ### `group-index.json` 的 `source` 块
 

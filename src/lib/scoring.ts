@@ -3,9 +3,11 @@
  * 
  * - calculateScore: 简化使用密度评分
  * - recordUse: 防刷分使用记录
- * - hybridPartition: 相对排名冷热分区 + 上限截断
  * - partitionByScore: 泛型冷热分区（供 query-group 等模块复用）
- * - boundaryDecay: 边界衰减（纯函数）
+ *
+ * 分区不变量：hot + warm + cold 与输入条目守恒。上限截断只改变条目所属分区
+ * （热区溢出回流到常温/冷区），不会让条目凭空消失；唯一例外是显式配置
+ * maxColdCount 时对冷区末端的截断（冷区是最后一层，无处回流）。
  */
 
 import {
@@ -80,44 +82,6 @@ export function recordUse(relation: Relation, now: number): Relation {
 
 // ─── 冷热分区 ───
 
-/**
- * 相对排名冷热分区
- * - 新兴热区：最近 recentHours 内使用过，有保留席位（排除 isImported）
- * - 历史热区：按评分排序填充
- * - 常温区 + 冷区：剩余内容按比例分配
- * - 上限截断（O4 决策）
- */
-export function hybridPartition(
-  items: Relation[],
-  now: number,
-  config: PartitionConfig
-): { hot: Relation[]; warm: Relation[]; cold: Relation[] } {
-  const { recentHours, halfLifeHours } = config;
-  const recentThreshold = recentHours * 60 * 60 * 1000;
-
-  const itemsWithScore = items.map((item) => ({
-    ...item,
-    score: calculateScore(item.useCount, item.lastUsedTime, now, halfLifeHours),
-  }));
-
-  const emergingIdSet = new Set(
-    itemsWithScore
-      .filter((r) => r.lastUsedTime && now - r.lastUsedTime < recentThreshold)
-      .map((r) => r.id)
-  );
-
-  const { hot, warm, cold } = partitionByScore(itemsWithScore, {
-    getId: (r) => r.id,
-    getScore: (r) => r.score,
-    isEmerging: (r) => emergingIdSet.has(r.id),
-    getEmergingSortScore: (r) => r.lastUsedTime ?? 0,
-  }, config);
-
-  return { hot, warm, cold };
-}
-
-// ─── 泛型冷热分区 ───
-
 export interface PartitionResult<T> {
   hot: T[];
   warm: T[];
@@ -131,7 +95,18 @@ export interface PartitionResult<T> {
  * 将新兴识别、评分排序、热/温/冷分配、上限截断统一为一个函数，
  * 通过 accessor 回调适配不同 item 类型（Group 路径、Relation 等）。
  *
- * 截断策略：优先保留新兴席位，再保留历史热门。
+ * 截断策略：优先保留新兴席位，再保留历史热门；被上限挤出的条目回流到候选池
+ * 重新参与常温/冷区分配（保证分区守恒，条目不会因截断而在任何分区都查不到）。
+ *
+ * 守恒前提：`getId` 返回的 id 在 items 内唯一（真实调用方均满足：Group 路径唯一、
+ * Relation 为 rel_NNN）。违约传入重复 id 时**不保证守恒**，具体表现分两种：
+ * ① 重复项中有一个进了热区 → 其余同 id 项在热区填充时被 hotIdSet 跳过，又因该 id
+ *    已在候选池排除集里而被过滤，最终彻底不出现（hot + warm + cold < items.length）；
+ * ② 重复项全部落在热区之外 → 候选池只按「已入热区的 id」过滤、不对池内重复二次去重，
+ *    故全部保留（三区之和 == items.length），但同一 id 会分散到不同分区，展示时
+ *    分区标签按 hot > warm > cold 优先级只取其一。
+ * 两种均属输入违约下的兜底表现、非契约（情形②选择「保留全部」而非「静默丢弃」）；
+ * 回归锁见 test/lib.test.ts「重复 id 全部落在热区外时不丢条目」。
  */
 export function partitionByScore<T>(
   items: T[],
@@ -172,8 +147,6 @@ export function partitionByScore<T>(
     }
   }
 
-  const emergingHeldCount = hot.length;
-
   // 历史热区：按评分填充
   const totalHotSeats = Math.max(minHotCount, Math.ceil(scored.length * hotPercent));
   for (const { item } of scored) {
@@ -185,90 +158,43 @@ export function partitionByScore<T>(
     }
   }
 
-  // 常温 + 冷区
-  const remaining = scored.filter(({ item }) => !hotIdSet.has(accessors.getId(item)));
-  const warmCount = Math.ceil(scored.length * warmPercent);
-  const warm = remaining.slice(0, warmCount).map(({ item }) => item);
-  const cold = remaining.slice(warmCount).map(({ item }) => item);
-
-  // 上限截断：优先保留新兴席位
-  if (maxHotCount && hot.length > maxHotCount) {
-    if (emergingHeldCount >= maxHotCount) {
-      hot.length = maxHotCount;
-    } else {
-      const emergingPart = hot.slice(0, emergingHeldCount);
-      const historyPart = hot.slice(emergingHeldCount, maxHotCount);
-      hot.length = 0;
-      hot.push(...emergingPart, ...historyPart);
-    }
+  // 上限截断：砍尾即可。新兴项恒位于 hot 前部（先按 recency 填新兴席位，再按 score 填历史），
+  // 故砍尾天然保留新兴席位。此处刻意不写 if/else 分支做「防御」：填充顺序一旦改变，
+  // 「hot 前部的新兴项数」这个量本身也不再成立，两个分支会一起失效——真正的护栏是
+  // test/lib.test.ts「新兴数超过 maxHotCount 而触发截断」的顺序断言（改坏即刻红）。
+  // 用 != null 判断而非 falsy：maxHotCount = 0 表示「热区不展示」，不能被当成「不限制」
+  if (maxHotCount != null && hot.length > maxHotCount) {
+    hot.length = maxHotCount;
   }
-  if (maxWarmCount && warm.length > maxWarmCount) warm.length = maxWarmCount;
-  if (maxColdCount && cold.length > maxColdCount) cold.length = maxColdCount;
+
+  // 候选池 = 未入热区的全部条目。scored 已含全量，过滤掉最终热区 id 即可；
+  // 被上限挤出的项本就不在 hot 中，天然被这里接住 → 分区守恒（hot + warm + cold == items）。
+  // 同分顺序 = items 输入顺序（sort 稳定），刻意不引入隐式 tie-break：原先单独前置 overflow
+  // 会使「曾被挤出热区的同分项」排到其他同分项之前，实测（3000 轮随机差分）仅影响 score
+  // 相同的条目、分区归属零差异，属实现副产物而非契约，故移除以让顺序可解释、可复现。
+  const seen = new Set(hot.map(accessors.getId));
+  const pool = scored.filter(({ item }) => !seen.has(accessors.getId(item)));
+  // 降序不变量显式化。实测（mutation test：删掉本行后 lib 37/37 仍全绿）表明它**当前冗余**：
+  // scored 已降序、filter 保序，故 pool 天然有序。保留是有意权衡：成本仅 O(N)（TimSort
+  // 对已排序输入接近线性），收益是将来有人改动 scored 的排序方向或 pool 的构建方式时，
+  // 不会静默产出乱序分区（warm/cold 的切分直接依赖 pool 有序，乱了会分错层且不报错）。
+  pool.sort((a, b) => b.score - a.score);
+
+  // 常温 + 冷区：warmPercent 以「热区之外的候选池」为基准，
+  // 使常温/冷区配比与热区规模解耦（原实现以全量为基准，热区越大冷区被挤占越多）
+  const warmCount = Math.ceil(pool.length * warmPercent);
+  let warm = pool.slice(0, warmCount).map(({ item }) => item);
+  let cold = pool.slice(warmCount).map(({ item }) => item);
+
+  // 常温区截断：溢出项回流冷区（同样不得丢弃）
+  if (maxWarmCount != null && warm.length > maxWarmCount) {
+    cold = [...warm.slice(maxWarmCount), ...cold];
+    warm = warm.slice(0, maxWarmCount);
+  }
+  // 冷区截断：唯一的展示丢弃点（冷区已是最后一层，无处回流；默认 null 不截断）
+  if (maxColdCount != null && cold.length > maxColdCount) {
+    cold = cold.slice(0, maxColdCount);
+  }
 
   return { hot, warm, cold, emergingSet: emergingIdSet };
-}
-
-// ─── 边界衰减 ───
-
-/**
- * 边界衰减（纯函数，返回新对象，不修改输入）
- * 
- * 当新内容要进入热区时触发：
- * 1. 保存常温区最高分
- * 2. 常温区最高分 - decayStep
- * 3. 热区最低分衰减到原常温区最高分
- * 4. 热区最高分 - decayStep
- */
-export function boundaryDecay(
-  hotItems: Relation[],
-  warmItems: Relation[],
-  newScore: number,
-  decayStep: number = 5
-): {
-  hotItems: Relation[];
-  warmItems: Relation[];
-  triggered: boolean;
-  originMax?: number;
-} {
-  // 不需要触发衰减
-  if (
-    hotItems.length === 0 ||
-    newScore <= hotItems[hotItems.length - 1].score
-  ) {
-    return {
-      hotItems: [...hotItems],
-      warmItems: [...warmItems],
-      triggered: false,
-    };
-  }
-
-  // 深拷贝，不修改原始数据
-  const newHot = hotItems.map((item) => ({ ...item }));
-  const newWarm = warmItems.map((item) => ({ ...item }));
-
-  // 步骤1：保存常温区最高分
-  const originMax = newWarm.length > 0 ? newWarm[0].score : 0;
-
-  // 步骤2：常温区最高分 - decayStep
-  if (newWarm.length > 0) {
-    newWarm[0].score = Math.max(0, newWarm[0].score - decayStep);
-  }
-
-  if (newHot.length === 1) {
-    // 单元素退化：该元素既是最高也是最低，按“热区最高分 - decayStep”执行，
-    // 不覆盖为 originMax，避免误将分数拉低到常温区水平
-    newHot[0].score = Math.max(0, newHot[0].score - decayStep);
-  } else {
-    // 步骤3：热区最低分衰减到原常温区最高分
-    newHot[newHot.length - 1].score = originMax;
-    // 步骤4：热区最高分 - decayStep
-    newHot[0].score = Math.max(0, newHot[0].score - decayStep);
-  }
-
-  return {
-    hotItems: newHot,
-    warmItems: newWarm,
-    triggered: true,
-    originMax,
-  };
 }

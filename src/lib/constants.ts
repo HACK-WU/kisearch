@@ -27,9 +27,9 @@ export interface PartitionConfig {
   reservedEmerging: number;
   recentHours: number;
   minHotCount: number;
-  decayStep: number;
   halfLifeHours: number;
-  maxHotCount: number;
+  /** 热区展示上限（仅展示口径，非存储上限；0 = 热区不展示，null/undefined = 不限制） */
+  maxHotCount: number | null;
   maxWarmCount: number | null;
   maxColdCount: number | null;
   maxKeywordCount: number;
@@ -41,7 +41,6 @@ export const DEFAULT_PARTITION_CONFIG: PartitionConfig = {
   reservedEmerging: 10,
   recentHours: 48,
   minHotCount: 1,
-  decayStep: 5,
   halfLifeHours: 24,
   maxHotCount: 10,
   maxWarmCount: 50,
