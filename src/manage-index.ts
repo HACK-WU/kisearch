@@ -333,7 +333,6 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
     groups: Record<string, {
       hot_relations: Array<{ text: string; memoryId?: string }>;
       keywords: string[];
-      max_hot_count: number;
     }>;
   }>(cachePath);
 

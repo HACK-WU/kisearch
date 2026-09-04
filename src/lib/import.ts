@@ -23,7 +23,7 @@ import {
   type GroupIndex,
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
-import { DEFAULT_PARTITION_CONFIG, parseContentTags, type PartitionConfig } from './constants.js';
+import { parseContentTags, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 
@@ -52,7 +52,6 @@ import {
 export interface GroupData {
   hot_relations: Relation[];
   keywords: string[];
-  max_hot_count: number;
 }
 
 export interface RelationsCache {
@@ -574,7 +573,6 @@ function ensureCacheGroup(cache: RelationsCache, groupPath: string): GroupData {
     cache.groups[groupPath] = {
       hot_relations: [],
       keywords: [],
-      max_hot_count: (cache.partition_config || DEFAULT_PARTITION_CONFIG).maxHotCount,
     };
   }
   return cache.groups[groupPath];

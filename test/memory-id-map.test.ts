@@ -51,7 +51,6 @@ describe('buildMemoryIdMap 字段直读（方案 D）', () => {
           },
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     });
     const map = buildMemoryIdMap(scope);
@@ -67,7 +66,6 @@ describe('buildMemoryIdMap 字段直读（方案 D）', () => {
           { id: 'rel_003', text: 'api-03', memoryId: 'm3', sourcePath: 'docs/api.md#3' },
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     });
     const map = buildMemoryIdMap(scope);
@@ -81,7 +79,6 @@ describe('buildMemoryIdMap 字段直读（方案 D）', () => {
           { id: 'rel_001', text: 'old', memoryId: 'm9', sourcePath: 'docs/old.md' },
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     });
     const map = buildMemoryIdMap(scope);
@@ -95,7 +92,6 @@ describe('buildMemoryIdMap 字段直读（方案 D）', () => {
           { id: 'rel_001', text: 'manual', sourcePath: 'docs/manual.md' }, // 无 memoryIds/memoryId
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     });
     const map = buildMemoryIdMap(scope);
@@ -109,7 +105,6 @@ describe('buildMemoryIdMap 字段直读（方案 D）', () => {
           { id: 'rel_001', text: 'dup', memoryIds: ['m1', 'm1', 'm2'], sourcePath: 'docs/dup.md' },
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     });
     const map = buildMemoryIdMap(scope);

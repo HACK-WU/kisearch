@@ -44,7 +44,6 @@ interface GroupData {
     memoryIds?: string[];
   }>;
   keywords: string[];
-  max_hot_count: number;
 }
 
 interface RelationsCache {

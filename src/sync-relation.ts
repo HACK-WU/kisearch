@@ -43,7 +43,6 @@ export { parseContentTags };
 interface GroupData {
   hot_relations: Relation[];
   keywords: string[];
-  max_hot_count: number;
 }
 
 interface RelationsCache {
@@ -144,7 +143,6 @@ function syncSingleRelation(
     cache.groups[group] = {
       hot_relations: [],
       keywords: [],
-      max_hot_count: config.maxHotCount,
     };
   }
   const groupData = cache.groups[group];

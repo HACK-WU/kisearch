@@ -48,7 +48,6 @@ function buildRelationsCache(): void {
           },
         ],
         keywords: [],
-        max_hot_count: 10,
       },
     },
     updatedAt: null,

@@ -71,7 +71,6 @@ before(async () => {
       },
     ],
     keywords: ['规则', '阈值', '静默', '聚合'],
-    max_hot_count: 10,
   };
   writeJson(cachePath, cache);
 

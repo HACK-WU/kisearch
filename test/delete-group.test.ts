@@ -119,8 +119,8 @@ describe('executeDeleteGroup：目录级删除', () => {
       s,
       { wiki: { docs: {} } },
       {
-        'wiki': { hot_relations: [mkRelation('r1', '父 relation', ['mem-1'])], keywords: [], max_hot_count: 10 },
-        'wiki/docs': { hot_relations: [], keywords: [], max_hot_count: 10 },
+        'wiki': { hot_relations: [mkRelation('r1', '父 relation', ['mem-1'])], keywords: [] },
+        'wiki/docs': { hot_relations: [], keywords: [] },
       }
     );
 
@@ -166,11 +166,11 @@ describe('executeDeleteGroup：目录级删除', () => {
       s,
       { wiki: { docs: { sub: {} } } },
       {
-        'wiki': { hot_relations: [mkRelation('r1', '父', ['mem-1'])], keywords: [], max_hot_count: 10 },
-        'wiki/docs': { hot_relations: [mkRelation('r2', '子', ['mem-2'])], keywords: [], max_hot_count: 10 },
-        'wiki/docs/sub': { hot_relations: [mkRelation('r3', '孙', ['mem-3'])], keywords: [], max_hot_count: 10 },
+        'wiki': { hot_relations: [mkRelation('r1', '父', ['mem-1'])], keywords: [] },
+        'wiki/docs': { hot_relations: [mkRelation('r2', '子', ['mem-2'])], keywords: [] },
+        'wiki/docs/sub': { hot_relations: [mkRelation('r3', '孙', ['mem-3'])], keywords: [] },
         // 无关 group 不应被删除
-        'other': { hot_relations: [mkRelation('r4', '无关', ['mem-4'])], keywords: [], max_hot_count: 10 },
+        'other': { hot_relations: [mkRelation('r4', '无关', ['mem-4'])], keywords: [] },
       }
     );
 
@@ -205,7 +205,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     const { sourceDir } = setupGroup(
       s,
       { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-1'])], keywords: [], max_hot_count: 10 } }
+      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-1'])], keywords: [] } }
     );
     fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
@@ -228,7 +228,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     const { sourceDir } = setupGroup(
       s,
       { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-gone'])], keywords: [], max_hot_count: 10 } }
+      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-gone'])], keywords: [] } }
     );
     fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
@@ -253,7 +253,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     const { sourceDir } = setupGroup(
       s,
       { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-bad'])], keywords: [], max_hot_count: 10 } }
+      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-bad'])], keywords: [] } }
     );
     fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
@@ -275,7 +275,7 @@ describe('executeDeleteGroup：目录级删除', () => {
   it('group 未匹配 → ok:false（不执行删除）', async () => {
     const s = `nomatch-${Date.now()}`;
     registerTestScope(s);
-    setupGroup(s, { wiki: {} }, { 'wiki': { hot_relations: [], keywords: [], max_hot_count: 10 } });
+    setupGroup(s, { wiki: {} }, { 'wiki': { hot_relations: [], keywords: [] } });
 
     const r = await executeDeleteGroup({ scope: s, group: 'nonexistent' });
 
@@ -291,7 +291,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     const { sourceDir } = setupGroup(
       s,
       { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x')], keywords: [], max_hot_count: 10 } }
+      { 'wiki': { hot_relations: [mkRelation('r1', 'x')], keywords: [] } }
     );
     fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });

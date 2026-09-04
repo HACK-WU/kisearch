@@ -80,7 +80,7 @@ function seedRelationWithOldVectors(
   const cachePath = scopeModule.getRelationsCachePath(scope);
   const cache: any = storeModule.readJson(cachePath)!;
   if (!cache.groups[group]) {
-    cache.groups[group] = { hot_relations: [], keywords: [], max_hot_count: 50 };
+    cache.groups[group] = { hot_relations: [], keywords: [] };
   }
   cache.groups[group].hot_relations.push({
     id: 'rel_099',

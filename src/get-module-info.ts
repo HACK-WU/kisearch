@@ -29,7 +29,6 @@ import { loadConfig, resolveScope } from './lib/config.js';
 interface GroupData {
   hot_relations: Relation[];
   keywords: string[];
-  max_hot_count: number;
 }
 
 interface RelationsCache {

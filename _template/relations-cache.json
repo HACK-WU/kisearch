@@ -7,7 +7,6 @@
     "reservedEmerging": 10,
     "recentHours": 48,
     "minHotCount": 1,
-    "decayStep": 5,
     "halfLifeHours": 24,
     "maxHotCount": 10,
     "maxWarmCount": 50,

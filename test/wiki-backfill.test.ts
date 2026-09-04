@@ -57,10 +57,10 @@ function seedKb(): void {
       'docs': { hot_relations: [
         { text: 'api-design', score: 1, sourcePath: 'docs/api.md' },
         { text: 'unsafe/name', score: 1, sourcePath: 'docs/x.md' },
-      ], keywords: [], max_hot_count: 0 },
+      ], keywords: [] },
       'guide/intro': { hot_relations: [
         { text: 'quickstart', score: 1, sourcePath: 'guide/intro.md' },
-      ], keywords: [], max_hot_count: 0 },
+      ], keywords: [] },
     },
     updatedAt: null,
   }));

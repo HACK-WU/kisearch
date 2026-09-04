@@ -80,7 +80,6 @@ function seedRelationsCache(scope: string, groups: Record<string, string[]>): vo
     (data.groups as Record<string, unknown>)[group] = {
       hot_relations: rels.map((r) => ({ id: `r-${r}`, text: r, score: 1, sourcePath: `docs/${r}.md` })),
       keywords: [],
-      max_hot_count: 0,
     };
   }
   fs.writeFileSync(cachePath, JSON.stringify(data));
