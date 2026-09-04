@@ -156,7 +156,7 @@ export function ModuleDrawer({
             </div>
           ) : (
             <article className="ki-markdown ki-markdown--drawer">
-              <MarkdownPreview text={content} />
+              <MarkdownPreview text={content} assetBase={group ? { scope, group } : undefined} />
             </article>
           )}
         </div>

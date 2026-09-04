@@ -37,7 +37,8 @@ ki scan-kb import \
   [--chunk-size <chars>] \
   [--chunk-overlap <chars>] \
   [--tags <t1,t2>] \
-  [--no-vector]
+  [--no-vector] \
+  [--no-assets]
 ```
 
 | 参数 | 必填 | 说明 |

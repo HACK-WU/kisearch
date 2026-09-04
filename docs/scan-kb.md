@@ -35,6 +35,7 @@ ki scan-kb import \
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回；local KB 文件原文照写） |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
+| `--no-assets` | 否 | 关闭本地图片附件收集（等价 config `import.assets:false`；关闭后前端对图片引用显示占位块） |
 | `--clean-rules` | 否 | 覆盖内置清洗规则开关：`bom,frontmatter,htmlComment,mermaid,codePath,codeBlock` |
 
 ### 幂等语义（重复执行 = 增量）

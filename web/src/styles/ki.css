@@ -888,6 +888,19 @@ a:hover { text-decoration: underline; }
 .ki-markdown blockquote { border-left: 3px solid var(--ki-color-primary); padding-left: 12px; color: var(--ki-color-text-muted); margin: 8px 0; }
 .ki-mermaid { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); padding: 12px; margin: 8px 0; overflow-x: auto; }
 .ki-mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+/* 附件缺失占位块（REQ-20260904-001：fail-loud，明确告知图片未导入 + 原始路径，而非静默破图/空白） */
+.ki-asset-missing {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  margin: 8px 0; padding: 8px 12px;
+  border: 1px dashed var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+}
+.ki-asset-missing__icon { font-size: 14px; }
+.ki-asset-missing__text { font-family: var(--ki-font-mono); font-size: 12px; word-break: break-all; }
+.ki-asset-missing__alt { color: var(--ki-color-text-subtle); font-size: 12px; }
+.ki-markdown img { max-width: 100%; height: auto; border-radius: var(--ki-radius-sm); }
 
 /* ── 搜索页 ── */
 .ki-search-form { background: var(--ki-color-surface); border-radius: var(--ki-radius-md); border: 1px solid var(--ki-color-border); padding: 16px; }

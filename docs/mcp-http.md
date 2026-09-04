@@ -95,6 +95,7 @@ ki mcp --http --web
 |------|------|------|
 | `/api/health` | GET | 健康报告（`runHealthCheck` doctor 逻辑，含 zvec 探活，10s 超时） |
 | `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
+| `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |
 | `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId` |
 | `/api/import/run` | POST | 触发导入（幂等追加到 `group`，异步 job，返回 `jobId`） |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |

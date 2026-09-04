@@ -45,7 +45,7 @@ export function SearchPage(): JSX.Element {
   const [results, setResults] = useState<Result[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [viewing, setViewing] = useState<{ module: string; content?: string } | null>(null);
+  const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string } | null>(null);
 
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
@@ -227,7 +227,7 @@ export function SearchPage(): JSX.Element {
                 <div
                   key={i}
                   className="ki-qr-item"
-                  onClick={() => setViewing({ module: r.relation ?? r.group ?? 'doc', content: r.original })}
+                  onClick={() => setViewing({ module: r.relation ?? r.group ?? 'doc', content: r.original, group: r.group })}
                 >
                   <div className={`ki-qr-rank${i < 3 ? ' ki-qr-rank--top' : ''}`}>{i + 1}</div>
                   <div className="ki-qr-body">
@@ -274,6 +274,7 @@ export function SearchPage(): JSX.Element {
         <ModuleDrawer
           scope={scope}
           module={viewing.module}
+          group={viewing.group}
           initialContent={viewing.content}
           onClose={() => setViewing(null)}
         />

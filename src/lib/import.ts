@@ -17,6 +17,7 @@ import {
   getGroupIndexPath,
   getRelationsCachePath,
   getLocalKbDir,
+  getAssetsDir,
   setSource,
   ensureGroupPathInTree,
   type GroupIndexSource,
@@ -81,6 +82,8 @@ export interface ImportStats {
   skipped: number;
   /** 是否写入向量层（false = 非向量化模式 --no-vector，仅 KB 层） */
   vector: boolean;
+  /** 已复制进 KB 的本地图片附件数（REQ-20260904-001；--no-assets 或配置关闭时为 0） */
+  assets: number;
 }
 
 export interface ImportResult {
@@ -113,6 +116,8 @@ export interface HandleDirectImportArgs {
   cleanRules?: Partial<import('./clean.js').CleanRules>;
   /** 文档级自定义标签（逗号分隔多个）。无论是否向量化均持久化到 relation.tags（供 rebuild-vector/restore 恢复）；向量化时额外为每个导入文件每个 tag 写一条内容向量 */
   tags?: string;
+  /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
+  assets?: boolean;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -159,6 +164,12 @@ function resolveGroupForSource(group: string, rel: string, scope: string): strin
 /** 默认格式白名单：.md（REQ-08，可配置扩展 .markdown 等） */
 const DEFAULT_EXTENSIONS = ['.md'];
 
+/** 图片附件后缀白名单（REQ-20260904-001：仅本地相对路径引用会被复制进 KB） */
+export const ASSET_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif'];
+
+/** 单附件默认大小上限：5MB（config scopes.<scope>.import.maxAssetSize 可覆盖） */
+export const DEFAULT_MAX_ASSET_SIZE = 5 * 1024 * 1024;
+
 /**
  * 递归收集 sourceDir 下白名单格式文件（相对路径，posix 风格）+ 非白名单跳过统计（REQ-08）
  * @param sourceDir 源目录
@@ -190,6 +201,152 @@ function collectMarkdownFiles(sourceDir: string, extensions: string[] = DEFAULT_
   };
   walk(sourceDir);
   return { files: out.sort(), skippedNonMd };
+}
+
+// ─── 附件（本地图片）收集（REQ-20260904-001）───────────────
+
+/** markdown 图片语法：![alt](url) / ![alt](url "title")；URL 允许含空格（形态 2，导入侧宽松收集，前端渲染时再编码） */
+const MD_IMAGE_RE = /!\[[^\]]*\]\(([^)]+)\)/g;
+/** HTML 写法：<img src="url"> / <img src='url'> / <img src=url> */
+const HTML_IMG_RE = /<img\b[^>]*?\ssrc\s*=\s*["']?([^"'\s>]+)["']?/gi;
+
+/** 剥离 markdown 图片 URL 尾部的 title 部分（` "..."` / ` '...'`） */
+function stripImageTitle(raw: string): string {
+  return raw.replace(/\s+["'][^"']*["']\s*$/, '').trim();
+}
+
+/** 归一化图片引用 URL：剥 CommonMark 尖括号 destination（`![a](<p q.png>)`）、去尾部 title 与 #fragment */
+function normalizeRefUrl(raw: string): string {
+  let u = stripImageTitle(raw).trim();
+  const angled = /^<([\s\S]*)>$/.exec(u);
+  if (angled) u = angled[1].trim();
+  return u.replace(/#.*$/, '');
+}
+
+/**
+ * 按代码围栏（``` / ~~~）切分，仅对围栏外文本执行 extract（P2：防代码块内的示例图片
+ * 被当真实引用收集 → 无谓告警；前端同源保护见 MarkdownPreview.encodeImageSpaces）
+ */
+function outsideCodeFences(md: string, extract: (seg: string) => void): void {
+  const lines = md.split('\n');
+  let inFence = false;
+  let buf: string[] = [];
+  const flush = (): void => {
+    if (buf.length > 0) {
+      extract(buf.join('\n'));
+      buf = [];
+    }
+  };
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      flush();
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    buf.push(line);
+  }
+  flush();
+}
+
+/** 提取 md 原文中的全部图片引用 URL（markdown 语法 + HTML <img src>；围栏外；不去重、不过滤） */
+export function extractImageRefs(mdText: string): string[] {
+  const out: string[] = [];
+  outsideCodeFences(mdText, (seg) => {
+    // 顺序语义：先遍历完 markdown 语法、再遍历 HTML <img>（非文档出现顺序）
+    for (const m of seg.matchAll(MD_IMAGE_RE)) out.push(normalizeRefUrl(m[1]));
+    for (const m of seg.matchAll(HTML_IMG_RE)) out.push(normalizeRefUrl(m[1]));
+  });
+  return out.filter((u) => u.length > 0);
+}
+
+/** 是否为“可收集的本地相对路径”：排除任何 scheme（http/https/file/data）、协议相对、posix/windows 绝对路径与锚点 */
+export function isCollectibleRelativeAsset(url: string): boolean {
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) return false;
+  if (url.startsWith('/')) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(url)) return false;
+  if (url.startsWith('#')) return false;
+  return true;
+}
+
+export interface AssetCollectResult {
+  /** 已复制的附件相对路径（相对 assets 目录，posix 风格） */
+  copied: string[];
+  /** 未复制原因（导入汇总告警用；外链/绝对路径不在此列，属不支持形态由前端占位提示） */
+  warnings: string[];
+}
+
+/**
+ * 收集并复制 md 引用的本地图片附件到 group 级 assets 目录（REQ-20260904-001）
+ *
+ * 安全边界（两道）：
+ *   1. 源侧：解析后必须落在 sourceDir 内——禁止借导入读取源目录之外的宿主机文件；
+ *   2. 目标侧：复制目标必须落在 assetsDir 内——防 `../` 路径穿越写出。
+ * 外链 / 绝对路径 / file:// 一律不复制（静默跳过，前端对这些形态显示占位提示）。
+ * 保持相对 md 的目录结构（images/x.png → assets/images/x.png），使前端可直接用原 URL 寻址。
+ */
+export function collectAndCopyAssets(opts: {
+  sourceDir: string;
+  mdDir: string;
+  mdLabel: string;
+  assetsDir: string;
+  urls: string[];
+  maxAssetBytes: number;
+}): AssetCollectResult {
+  const copied: string[] = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  const srcRoot = path.resolve(opts.sourceDir);
+  const dstRoot = path.resolve(opts.assetsDir);
+  for (const raw of opts.urls) {
+    if (!isCollectibleRelativeAsset(raw)) continue;
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { /* 非法百分号编码按原样处理 */ }
+    const rel = toPosix(decoded);
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const abs = path.resolve(opts.mdDir, decoded);
+    if (abs !== srcRoot && !abs.startsWith(srcRoot + path.sep)) {
+      warnings.push(`附件引用超出源目录已跳过（${rel}）：${opts.mdLabel}`);
+      continue;
+    }
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+      warnings.push(`附件引用未命中源目录文件已跳过（${rel}）：${opts.mdLabel}`);
+      continue;
+    }
+    // 符号链接复检：stat/copyFileSync 跟随软链 → 源目录内后缀伪装的软链可越界读宿主机文件。
+    // 用 realpath 复检解析后仍须在 sourceDir 内（允许指向源目录内部的软链）。
+    let realAbs: string;
+    try {
+      realAbs = fs.realpathSync(abs);
+    } catch {
+      warnings.push(`附件读取失败已跳过（${rel}）：${opts.mdLabel}`);
+      continue;
+    }
+    if (realAbs !== srcRoot && !realAbs.startsWith(srcRoot + path.sep)) {
+      warnings.push(`附件符号链接指向源目录外已跳过（${rel}）：${opts.mdLabel}`);
+      continue;
+    }
+    const ext = path.extname(abs).toLowerCase();
+    if (!ASSET_EXTENSIONS.includes(ext)) {
+      warnings.push(`附件后缀不在白名单已跳过（${rel}，白名单：${ASSET_EXTENSIONS.join(', ')}）：${opts.mdLabel}`);
+      continue;
+    }
+    const size = fs.statSync(abs).size;
+    if (size > opts.maxAssetBytes) {
+      warnings.push(`附件过大已跳过（${size} bytes > ${opts.maxAssetBytes}）：${rel}（${opts.mdLabel}）`);
+      continue;
+    }
+    const dst = path.resolve(dstRoot, rel);
+    if (!dst.startsWith(dstRoot + path.sep)) {
+      warnings.push(`附件目标路径越界已跳过（${rel}）：${opts.mdLabel}`);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(abs, dst); // 幂等重导：同名覆盖
+    copied.push(rel);
+  }
+  return { copied, warnings };
 }
 
 /** chunk relation 命名：文件名-N（如 foo.md → foo-01），`#` 避免与 isUnsafeRelationName 冲突 */
@@ -267,6 +424,9 @@ export async function handleDirectImport(
   const importCfg = getScopeImportConfig(cfg, scope);
   const extensions = importCfg?.extensions ?? DEFAULT_EXTENSIONS;
   const maxFileSizeBytes = args.maxFileSizeBytes ?? importCfg?.maxFileSize ?? 1024 * 1024; // 默认 1MB（REQ-08）
+  // REQ-20260904-001：附件收集开关（--no-assets / config assets:false 关闭）与单附件上限（默认 5MB）
+  const assetsEnabled = args.assets !== false && importCfg?.assets !== false;
+  const maxAssetBytes = importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;
   // REQ-07：外部清洗 hook（config scopes.<scope>.clean.hooks；--no-clean 时全部关闭）
   const cleanCfg = getScopeCleanConfig(cfg, scope);
   const cleanHooks = cleanEnabled ? (cleanCfg?.hooks ?? []) : [];
@@ -304,6 +464,10 @@ export async function handleDirectImport(
   }[] = [];
   const skipped: string[] = [];
   const conflictSkipped: string[] = [];
+  /** 附件收集告警（未命中/超限/越界等，循环后汇总）与已落盘的唯一附件集合（REQ-20260904-001） */
+  const assetWarnings: string[] = [];
+  /** 用 Set 去重：同一附件被多篇 md 引用时仅计一次（复制为同名覆盖，计数语义 = 落盘文件数） */
+  const assetCopied = new Set<string>();
   totalFileCount = files.length; // 中断标记总文件数（REQ-01）
 
   for (const rel of files) {
@@ -358,6 +522,20 @@ export async function handleDirectImport(
       removeFromLocalKb(scope, groupPath, relation); // 超限同样回滚（保持一致性）
       continue;
     }
+    // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
+    if (assetsEnabled) {
+      const assetResult = collectAndCopyAssets({
+        // 单文件导入时 sourceDir 是文件路径，源根应取其所在目录（否则同级图片全部判为越界）
+        sourceDir: sourceIsFile ? path.dirname(absPath) : sourceDir,
+        mdDir: path.dirname(absPath),
+        mdLabel: rel,
+        assetsDir: getAssetsDir(scope, groupPath),
+        urls: extractImageRefs(fileText),
+        maxAssetBytes,
+      });
+      for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
+      assetWarnings.push(...assetResult.warnings);
+    }
     const entries = chunks.map((chunk) => ({
       path: deriveChunkSourcePath(rel, chunk.index), // sourcePath = 文件#N（向量化条目内部用）
       groupPath,
@@ -376,6 +554,9 @@ export async function handleDirectImport(
   }
   if (conflictSkipped.length > 0) {
     logWarn(`跳过 ${conflictSkipped.length} 个文件（relation 冲突）：${conflictSkipped.join(', ')}`);
+  }
+  if (assetWarnings.length > 0) {
+    logWarn(`附件收集告警 ${assetWarnings.length} 条：${assetWarnings.slice(0, 10).join('；')}${assetWarnings.length > 10 ? ` ...等 ${assetWarnings.length} 条` : ''}`);
   }
   if (fileRecords.length === 0) {
     throw new Error(`无可导入文件（全部被跳过：过大/超限/冲突 ${skipped.length + conflictSkipped.length} 个）`);
@@ -537,7 +718,7 @@ export async function handleDirectImport(
   setSource(scope, source);
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}${vector ? '' : '  [非向量化:仅写KB层]'}`);
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}  assets=${assetCopied.size}${vector ? '' : '  [非向量化:仅写KB层]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
@@ -555,6 +736,7 @@ export async function handleDirectImport(
       // skipped 合并：过大/超限/hook 失败 + relation 冲突（REQ-06：冲突计入 skipped）
       skipped: skipped.length + conflictSkipped.length,
       vector,
+      assets: assetCopied.size,
     },
     errors: vectorizeResult.errors,
     groups: [...kbResult.groups].sort(),

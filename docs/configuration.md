@@ -162,6 +162,8 @@ scopes:
 |------|------|--------|------|
 | `extensions` | `string[]` | `[.md]` | 格式白名单，导入时过滤不支持的扩展名 |
 | `maxFileSize` | `number` | `1048576`（1MB） | 单文件大小上限（字节），超限跳过 |
+| `assets` | `boolean` | `true` | 导入时收集 md 引用的本地图片附件到 group 级 `assets/` 目录（`--no-assets` 可关闭） |
+| `maxAssetSize` | `number` | `5242880`（5MB） | 单附件大小上限（字节），超限跳过该附件并告警，不阻断导入 |
 
 ### `mcp`
 
@@ -219,6 +221,8 @@ scopes:
     import:
       extensions: [.md]
       maxFileSize: 1048576
+      assets: true
+      maxAssetSize: 5242880
   docs:
     kbDir: /data/kb
 

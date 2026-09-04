@@ -18,6 +18,7 @@ import {
   getGroupIndexPath,
   getRelationsCachePath,
   getLocalKbDir,
+  getAssetsDir,
   type GroupIndex,
 } from './lib/scope.js';
 import { generateMarkdown } from './lib/markdown-gen.js';
@@ -41,6 +42,8 @@ interface ExportResult {
     total: number;
     exported: number;
     empty: number;
+    /** 随导出复制的附件文件数（REQ-20260904-001） */
+    assets: number;
   };
   skipped: Array<{ groupPath: string; relation: string; reason: string }>;
 }
@@ -157,6 +160,23 @@ function readRelationsCache(scope: string): RelationsCache {
   };
 }
 
+/** 递归复制目录（REQ-20260904-001：export 携带 group 级附件）；返回复制的文件数 */
+function copyDirRecursive(src: string, dst: string): number {
+  let count = 0;
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      count += copyDirRecursive(s, d);
+    } else if (entry.isFile()) {
+      fs.mkdirSync(path.dirname(d), { recursive: true });
+      fs.copyFileSync(s, d);
+      count++;
+    }
+  }
+  return count;
+}
+
 // ─── 读取 group-index.json ───
 
 function readGroupIndex(scope: string): GroupIndex {
@@ -252,7 +272,7 @@ function handleExport(options: ExportOptions): ExportResult {
     return path.join(exportRoot, ...rest);
   };
 
-  const stats = { total: 0, exported: 0, empty: 0 };
+  const stats = { total: 0, exported: 0, empty: 0, assets: 0 };
   const skipped: Array<{ groupPath: string; relation: string; reason: string }> = [];
 
   const exportedAt = new Date().toISOString();
@@ -268,6 +288,14 @@ function handleExport(options: ExportOptions): ExportResult {
 
     // 读取该 Group 的 local KB
     const localKb = readLocalKb(scope, groupPath);
+
+    // 附件携带（REQ-20260904-001）：group 级 assets 目录随导出复制，使导出产物中的图片引用自包含。
+    // 落盘于 <out>/<group>/ 下（与 md 同级、保持原相对结构）：md 内 `images/x.png` 解析为
+    // <out>/<group>/images/x.png；若多加一层 assets/ 则导出后全部断链。
+    const assetsSrc = getAssetsDir(scope, groupPath);
+    if (fs.existsSync(assetsSrc)) {
+      stats.assets += copyDirRecursive(assetsSrc, path.join(absOutputDir, relPathFor(groupPath)));
+    }
 
     // 为每个 Relation 生成 Markdown
     for (const rel of relations) {

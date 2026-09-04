@@ -24,7 +24,7 @@ import { loadConfig, resolveScope } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
 import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck } from './health-check.js';
-import { getRelationsCachePath } from './scope.js';
+import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import { handleDirectImport, type ImportResult } from './import.js';
 import { executeTagList } from '../tag.js';
 
@@ -248,7 +248,7 @@ export async function handleApiRequest(
 
   // query scope 越权校验：仅对带 scope 的只读接口（tags / doc/list）生效；
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
-  if (authScopes !== null && (p === '/tags' || p === '/doc/list')) {
+  if (authScopes !== null && (p === '/tags' || p === '/doc/list' || p === '/asset')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -261,6 +261,7 @@ export async function handleApiRequest(
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
     if (p === '/tags' && req.method === 'GET') return void (await handleTags(res, url));
     if (p === '/doc/list' && req.method === 'GET') return void (await handleDocList(res, url));
+    if (p === '/asset' && req.method === 'GET') return void (await handleAsset(res, url));
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url));
@@ -301,6 +302,92 @@ async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
   const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
   const tags = result.tags.filter(t => !reserved.has(t.tag));
   sendJson(res, 200, { ok: true, tags, scope });
+}
+
+// ─── GET /api/asset ──────────────────────────────────
+
+/** 附件 MIME 映射（REQ-20260904-001；后缀集合与 import.ts ASSET_EXTENSIONS 对应） */
+const ASSET_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.avif': 'image/avif',
+};
+
+/**
+ * GET /api/asset?scope=&group=&path= —— 读取 group 级 assets 目录下的附件（REQ-20260904-001）
+ *
+ * 纯文件读取（不经过向量引擎），导入后无需重启即可生效（与 /api/doc/list 同模式）。
+ * 安全：path 经 decodeURIComponent + normalize 后必须仍落在该 group 的 assets 目录内（防路径穿越）；
+ * scope 越权由 handleApiRequest 统一校验（authScopes）。
+ * 404 返回 JSON：/api/* 不走 SPA fallback，避免把缺失附件伪装成 200 + index.html（REQ 层 2 缺陷）。
+ */
+async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
+  const scopeRaw = url.searchParams.get('scope') ?? '';
+  const scope = resolveScope(loadConfig(), scopeRaw);
+  const group = (url.searchParams.get('group') ?? '').trim();
+  const rawPath = url.searchParams.get('path') ?? '';
+  if (!group || !rawPath.trim()) {
+    sendJson(res, 400, { ok: false, error: 'Bad Request: group and path are required' });
+    return;
+  }
+  // group 穿越校验：group 原样进 path.join 会搬移下方前缀校验的锚点 → 跨 scope 越权 / KB 外宿主机文件读取。
+  // 拒绝绝对路径与含 .. / . / 空段的 group（合法 group 为干净相对路径段序列）。
+  if (path.isAbsolute(group) || group.split(/[\\/]/).some((s) => s === '..' || s === '.' || s === '')) {
+    sendJson(res, 400, { ok: false, error: 'Bad Request: invalid group' });
+    return;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    // 与导入侧“解码失败按原样”对称：文件名含裸 % （如 50%.png）时不至永远 404
+    decoded = rawPath;
+  }
+  // 双锚点校验：assetsDir 必须落在该 scope 的 KB 根内（不可搬移），resolved 必须落在 assetsDir 内（防穿越）
+  const kbRoot = path.resolve(getKbDir(scope));
+  const assetsDir = path.resolve(getAssetsDir(scope, group));
+  if (assetsDir !== kbRoot && !assetsDir.startsWith(kbRoot + path.sep)) {
+    sendJson(res, 403, { ok: false, error: 'Forbidden' });
+    return;
+  }
+  const resolved = path.normalize(path.join(assetsDir, decoded));
+  if (resolved !== assetsDir && !resolved.startsWith(assetsDir + path.sep)) {
+    sendJson(res, 403, { ok: false, error: 'Forbidden' });
+    return;
+  }
+  // 后缀白名单（与导入侧 ASSET_EXTENSIONS 对齐）：assets 目录内非图片文件不予服务
+  const ext = path.extname(resolved).toLowerCase();
+  if (!ASSET_MIME[ext]) {
+    sendJson(res, 404, { ok: false, error: `Not Found: 不支持的附件类型 ${ext || '(无后缀)'}` });
+    return;
+  }
+  let content: Buffer;
+  try {
+    content = fs.readFileSync(resolved);
+  } catch (err) {
+    // 仅 ENOENT 映射为 404；EISDIR/EACCES/EMFILE 等真实故障向上抛（fail-loud，不伪装成“未导入”）
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    sendJson(res, 404, {
+      ok: false,
+      error: `Not Found: 附件 ${rawPath} 未随文档导入（导入时未开启附件收集、源文件缺失，或该引用为不支持的形态）`,
+    });
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': ASSET_MIME[ext],
+    // 幂等重导会覆盖同名附件 → 不做强缓存，每次向服务器协商
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+    // SVG 可内嵌脚本：sandbox 使其成为独立 origin，防外部 wiki 的 SVG 在本应用同源执行
+    ...(ext === '.svg' ? { 'Content-Security-Policy': 'sandbox' } : {}),
+  });
+  res.end(content);
 }
 
 // ─── GET /api/doc/list ────────────────────────────────

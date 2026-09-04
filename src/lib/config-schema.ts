@@ -112,6 +112,8 @@ const SCOPE_ENTRY: ConfigNode = {
       fields: {
         extensions: { type: 'stringArray' },
         maxFileSize: { type: 'number', validate: positiveInt },
+        assets: { type: 'boolean' },
+        maxAssetSize: { type: 'number', validate: positiveInt },
       },
     },
   },

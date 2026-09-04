@@ -574,11 +574,54 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-09-04-外部Wiki图片附件导入与显示": {
+      "id": "REQ-20260904-001",
+      "feature": "外部Wiki图片附件导入与显示",
+      "created": "2026-09-04 15:34:50",
+      "updated": "2026-09-04 20:02:13",
+      "status": "实施中",
+      "tags": [
+        "feat"
+      ],
+      "version": 5,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-09-04 15:41:12 v2: 需求落盘：三层断裂诊断 + 向量侧图片语法损坏实测取证（7用例4结果）+ 方案空间A/B/C/D与推荐组合 + 4项待决策点（方案未拍板，状态保持草案）",
+        "2026-09-04 17:53:31 v3: 端到端取证完成：自建 fixture test_data/wiki-with-images/（6 形态+2 对照组）在真实 --http --web 实例复现；实测坐实 SPA fallback 把 404 伪装成 200（web:false 404 JSON vs web:true 200 HTML）、浏览器 DOM 三失败表现（破图/字面源码/空白）与两对照组正常；修正方案 A 的 source.dir 证据基础（真实 dataDir 3/4 失效，含 Web 上传暂存目录必然失效）；诚实记录 restart 先停后启导致的停服事故与教训",
+        "2026-09-04 19:23:02 v4: 完整实现（用户拍板 D-1=本地相对路径/D-2=完整实现）：group 级 assets 存储 + /api/asset 路由（鉴权+防穿越+404不伪装）+ 前端 src 重写/<img> 白名单/空格编码/缺失占位块 + export 携带 + --no-assets 开关 + maxAssetSize 配置；非向量套件 219/219 全绿（含新增 import-assets 18 例）；浏览器实测形态1/2/3 真显示、形态4 占位块；D-3/D-4 本次排除",
+        "2026-09-04 20:02:13 v5: auto-review+challenger 修复轮：P0-1 /api/asset group 穿越（双锚点校验+8 回归锁）+ P1×8（title/多标签token/export断链/单文件源根/符号链接/尖括号/SearchPage group/SVG CSP）+ P2×5 + docs 4 处；243/243 全绿；challenger 命中 5 点（Q1 存量需重导/Q2 wiki-sync 错位登记/Q3 文案已修/Q4 待运行验证/Q5 孤儿可接受）"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "demo/probe-clean-image.mjs",
+          "type": "demo"
+        },
+        {
+          "path": "demo/screenshot-broken-images.png",
+          "type": "demo"
+        },
+        {
+          "path": "demo/screenshot-after-fix.png",
+          "type": "demo"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   },
   "id_counters": {
     "REQ-20260806": 3,
     "REQ-20260807": 2,
-    "REQ-20260814": 1
+    "REQ-20260814": 1,
+    "REQ-20260904": 1
   }
 }

@@ -102,6 +102,19 @@ export function getLocalKbDir(scope: string, groupPath: string): string {
   return path.join(getKbDir(scope), groupPath, 'index.json');
 }
 
+/**
+ * 获取某个 Group 的附件目录（REQ-20260904-001：导入时复制的本地图片落地处）
+ *
+ * 与 local KB 同生命周期（同 group 目录下），使 delete-group 级联、export 子树收集、
+ * backup 快照天然覆盖附件，无需额外联动逻辑。
+ * @param scope 项目标识
+ * @param groupPath Group 路径，如 "监控/告警中心"
+ */
+export function getAssetsDir(scope: string, groupPath: string): string {
+  validateScope(scope);
+  return path.join(getKbDir(scope), groupPath, 'assets');
+}
+
 // ─── group-index.json 的 source 块 ───
 
 export interface GroupIndexSource {

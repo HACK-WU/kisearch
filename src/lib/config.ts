@@ -93,6 +93,10 @@ export interface CleanConfig {
 export interface ImportConfig {
   extensions?: string[];                  // 格式白名单（默认 [.md]）
   maxFileSize?: number;                   // 单文件大小上限（字节，默认 1MB）
+  /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端显示占位块） */
+  assets?: boolean;
+  /** 单附件大小上限（字节，REQ-20260904-001，默认 5MB；超限跳过该附件并告警，不阻断导入） */
+  maxAssetSize?: number;
 }
 
 export interface ScopeConfig {
