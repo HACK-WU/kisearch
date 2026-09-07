@@ -289,9 +289,10 @@ unset NODE_OPTIONS BASH_ENV                                  # IDE 注入的 shi
 
 ### 11.2 改动文件
 
-- 后端：`src/lib/scope.ts`（getAssetsDir）、`src/lib/config.ts` + `config-schema.ts`（`import.assets` / `import.maxAssetSize` 字段级校验）、`src/lib/import.ts`（extractImageRefs / isCollectibleRelativeAsset / collectAndCopyAssets + 主循环接入 + 计数 + summary）、`src/scan-kb.ts`（`--no-assets`）、`src/lib/mcp-http-api.ts`（`/api/asset`）、`src/export.ts`（携带 assets + copyDirRecursive）
+- 后端：`src/lib/scope.ts`（getAssetsDir）、`src/lib/config.ts` + `config-schema.ts`（`import.assets` / `import.maxAssetSize` 字段级校验）、`src/config.ts`（`ki config init` 模板补 `import:` 段注释：extensions / maxFileSize / assets / maxAssetSize）、`src/lib/import.ts`（extractImageRefs / isCollectibleRelativeAsset / collectAndCopyAssets + 主循环接入 + 计数 + summary）、`src/scan-kb.ts`（`--no-assets`）、`src/lib/mcp-http-api.ts`（`/api/asset`）、`src/export.ts`（携带 assets + copyDirRecursive）
 - 前端：`web/src/components/MarkdownPreview.tsx`（src 重写 + `<img>` 白名单 + 空格编码 + 占位块）、`ModuleDrawer.tsx`（传 assetBase）、`web/src/styles/ki.css`（占位块与 img 样式）
-- 测试：`test/import-assets.test.ts`（新增 18 用例：提取/形态判定/安全边界/路由）
+- 测试：`test/import-assets.test.ts`（新增 26 用例：提取/形态判定/安全边界/路由）
+- 文档：`docs/configuration.md`（import 字段表 + 示例）、`docs/scan-kb.md`（`--no-assets`）、`docs/cli.md`（用法块）、`docs/mcp-http.md`（`/api/asset` 路由）、`docs/build-kb.md`（附件收集与上限描述；**顺带修正既有错误**：单文件上限误写 2MB，实际 1MB）
 
 ### 11.3 验证证据
 

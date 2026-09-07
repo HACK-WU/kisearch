@@ -131,7 +131,7 @@ ki scan-kb import \
 
 **自动行为**：
 
-1. **递归扫描**：遍历 `--source` 下所有 `.md` 文件（跳过隐藏目录 / node_modules）
+1. **递归扫描**：遍历 `--source` 下所有 `.md` 文件（跳过隐藏目录 / node_modules），并收集 md 引用的本地图片附件（markdown 与 `<img>` 两种写法）到 group 级 `assets/` 目录（`--no-assets` 可关闭）
 2. **自动切分**：超过 `chunk-size` 的文件按"固定长度 + 段落边界优先"切分为多 chunk，relation 名 = `文件名-N`（如 `deploy-01`），sourcePath = `文件#N`
 3. **批量向量化**：调用 zvec 引擎批量向量化（content = chunk 原文）
 4. **Group 树创建**：自动创建 Group 目录结构（groupPath 从目录结构推导）
@@ -210,7 +210,7 @@ ki scan-kb import \
 | `目录下未发现 .md 文件` | 目录无 Markdown 文件 | 确认目录含 `.md` 文件 |
 | `--group 不能为空` | `--group` 传了空值 | 检查 `--group` 参数（缺省不传落到 `default`） |
 | `向量化失败` | Embedding API 配置错误或网络问题 | 检查 `~/.ki/config.yaml` 中的 embedding 配置，确认 API 密钥有效 |
-| `文件过大已跳过` | 超过单文件大小上限（默认 2MB） | 手动切分后导入或调整上限 |
+| `文件过大已跳过` | 超过单文件大小上限（默认 1MB，config `import.maxFileSize`） | 手动切分后导入或调整上限 |
 
 ---
 
@@ -233,8 +233,9 @@ ki scan-kb import \
 
 1. **原文直导**：向量 content = chunk 原文（无 AI 摘要），语义检索直接索引原文
 2. **自动切分**：超过 `chunk-size`（默认 1000 字符）的文件按"固定长度 + 段落边界优先"切分，relation 名 = `文件名-N`（`deploy-01`），sourcePath = `文件#N`
-3. **大文件上限**：单文件默认上限 2MB，超限跳过并告警（可手动切分后导入）
-4. **groupPath 推导**：从文件目录结构推导（`dir/sub/file.md` → `group/dir/sub`）
+3. **大文件上限**：单文件默认上限 1MB（config `import.maxFileSize` 可配），超限跳过并告警（可手动切分后导入）
+4. **附件上限**：单附件默认上限 5MB（config `import.maxAssetSize`），超限跳过该附件并告警、不阻断导入
+5. **groupPath 推导**：从文件目录结构推导（`dir/sub/file.md` → `group/dir/sub`）
 
 ### 性能优化
 

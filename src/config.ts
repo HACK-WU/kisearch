@@ -115,6 +115,11 @@ scopes:
   #   wikiSync:                        # 可选: Wiki 写回/回收站的源目录定位
   #     enabled: true
   #     sourceDir: ~/projects/my-wiki
+  #   import:                          # 可选: 导入行为（不写即用括号内默认值）
+  #     extensions: [.md]              # 格式白名单，非白名单文件跳过
+  #     maxFileSize: 1048576           # 单文件上限（字节，默认 1MB），超限跳过该文件
+  #     assets: true                   # 导入时收集 md 引用的本地图片附件到 group 级 assets/（--no-assets 可关闭）
+  #     maxAssetSize: 5242880          # 单附件上限（字节，默认 5MB），超限跳过该附件并告警、不阻断导入
 `;
 }
 

@@ -106,7 +106,7 @@ export interface HandleDirectImportArgs {
   chunkSize?: number;
   /** 切分参数：重叠字符数，默认 150 */
   chunkOverlap?: number;
-  /** 单文件大小上限（字节），超限跳过并告警；默认 2MB */
+  /** 单文件大小上限（字节），超限跳过并告警；默认 1MB（config `import.maxFileSize` 可配） */
   maxFileSizeBytes?: number;
   /** 非向量化模式：仅写 KB 层（relations-cache + local KB），跳过向量写入；默认 true */
   vector?: boolean;
