@@ -300,4 +300,4 @@ vi ~/.ki/config.yaml
 - [`docs/cli.md`](./cli.md) — CLI 命令完整参考
 - [`docs/vector-engine-mem.md`](./vector-engine-mem.md) — 向量引擎（zvec）设计说明
 - [`docs/tags-design.md`](./tags-design.md) — 三层标签设计
-- [`docs/scan-kb.md`](./scan-kb.md) — 导入流程详解
+- [`docs/import.md`](./import.md) — 导入流程详解

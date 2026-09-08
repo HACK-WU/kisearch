@@ -1,21 +1,19 @@
-## `scan-kb` 使用说明
+## `ki import` 使用说明
 
-`scan-kb.ts` 是外部 Markdown 知识库导入的统一入口，提供 `import` 子命令：
+`src/import.ts` 实现外部 Markdown Wiki 导入（幂等追加）。**扁平命令，无子命令层级**。
 
-| 子命令 | 用途 | 状态 |
-|--------|------|------|
-| `import` | 外部 Wiki 导入（幂等追加） | **推荐** |
-
-> 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义天然承载——重复执行 `import` 即同步变更（同文件覆盖更新、新文件导入、同名文件跳过），不再依赖 git。
+> 历史（2026-09-07）：由 `ki scan-kb import` 扁平化为 `ki import`——scan-kb 壳下仅存 `import` 一个子命令，层级冗余；且 `bin/ki.mjs` 的命令映射是单级扁平结构（会剥掉子命令名），与 commander 嵌套子命令不兼容。**scan-kb 已移除、不保留兼容别名**，旧调用 `ki scan-kb import ...` 会 fail-loud 报「未知命令」并列出全部可用命令。
+>
+> 历史（更早）：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义天然承载——重复执行 `ki import` 即同步变更（同文件覆盖更新、新文件导入、同名文件跳过），不再依赖 git。
 
 ---
 
-## `import` 子命令（推荐）
+## 用法
 
 ### 幂等追加导入
 
 ```bash
-ki scan-kb import \
+ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group wiki \

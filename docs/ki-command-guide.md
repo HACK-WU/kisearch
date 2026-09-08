@@ -185,7 +185,7 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 ## 超长 module-info 提示（REQ-10）
 
-`sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `scan-kb import --source` 自动切分），但仍正常写入单条。
+`sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `ki import --source` 自动切分），但仍正常写入单条。
 
 ---
 
@@ -205,7 +205,7 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 ## 写入后刷新缓存
 
-每次写入操作（`sync-relation` / `scan-kb import` / `manage-index create`）完成后，必须重新拉取全景：
+每次写入操作（`sync-relation` / `ki import` / `manage-index create`）完成后，必须重新拉取全景：
 
 ```bash
 ki query-group --scope <scope> --mode full

@@ -1005,7 +1005,7 @@ program
     if (opts.moduleInfo && opts.moduleInfo.length > 1000) {
       console.error(
         `警告: --module-info 长度 ${opts.moduleInfo.length} 字符（>1000）。` +
-        `超长内容可能导致向量质量稀释；建议拆分多条写入，或改用 "scan-kb import --source <dir>" 自动切分导入。`
+        `超长内容可能导致向量质量稀释；建议拆分多条写入，或改用 "ki import --source <dir>" 自动切分导入。`
       );
     }
     // 非向量化模式（--no-vector → opts.vector=false）

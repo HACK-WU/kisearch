@@ -56,8 +56,8 @@ flowchart LR
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
 | `relations-cache.json` | Relation 缓存（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
-| `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | scan-kb import 读写 | 永久，增量扫描依赖 `lastScannedCommit` |
-| `scan-pending.json` | [旧流程] 扫描断点 | scan-kb 写，AI 读 | 临时，merge 后可删除 |
+| `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | **已无生产/消费方**（随 incremental 流程移除，`src/` 零引用） | 遗留文件，可删 |
+| `scan-pending.json` | [旧流程] 扫描断点 | **已无生产/消费方**（同上） | 遗留文件，可删 |
 
 > **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
 >
@@ -81,13 +81,13 @@ flowchart LR
 }
 ```
 
-- `dir`：外部知识库目录绝对路径（`scan-kb import` 自动记录，Wiki 写回据此定位源文件）
+- `dir`：外部知识库目录绝对路径（`ki import` 自动记录，Wiki 写回据此定位源文件）
 - `chunkSize` / `chunkOverlap`：切分参数持久化（缺失时回退默认值）
 - ~~`rootName` / `commit`~~：已彻底移除（rootName 概念废弃、incremental 废弃后不再保留，无向后兼容读取）
 
 ### `relations-cache.json` 的 `memoryIds` / `sourcePath`
 
-关联字段写入 `hot_relations` 每条 relation（方案 D：`scan-kb import` 为**文件级 relation**，挂该文件全部 chunk 的 memoryIds 多值）：
+关联字段写入 `hot_relations` 每条 relation（方案 D：`ki import` 为**文件级 relation**，挂该文件全部 chunk 的 memoryIds 多值）：
 
 ```json
 {
@@ -109,7 +109,7 @@ flowchart LR
 
 | 写入脚本 | key 来源 | 示例 |
 |---------|---------|------|
-| `scan-kb import` | 文件名去 `.md` 扩展名 | `"多项目隔离"` |
+| `ki import` | 文件名去 `.md` 扩展名 | `"多项目隔离"` |
 | `sync-relation.ts` | `--relation` 参数原文 | `"标签系统"` |
 
 ## 运行时主链路
@@ -135,7 +135,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    EXT[外部 Markdown 知识库] --> IMP[scan-kb import --source<br/>原文直导 + 自动切分]
+    EXT[外部 Markdown 知识库] --> IMP[ki import --source<br/>原文直导 + 自动切分]
     IMP --> VEC[zvec 引擎向量化<br/>content = chunk 原文]
     IMP --> GI2[group-index.json<br/>Group 树 + source 块]
     IMP --> RC2[relations-cache.json<br/>含 memoryIds / sourcePath]
@@ -146,7 +146,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    EXT2[外部知识库 文件变更/新增] --> IMP2[scan-kb import --group &lt;name&gt;<br/>幂等追加]
+    EXT2[外部知识库 文件变更/新增] --> IMP2[ki import --group &lt;name&gt;<br/>幂等追加]
     IMP2 --> ADD[新文件: 切分 + 向量化 + 写索引]
     IMP2 --> MOD[同 sourcePath: 覆盖更新]
     IMP2 --> SKIP[同名不同 sourcePath: 跳过]

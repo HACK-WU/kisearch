@@ -126,7 +126,7 @@ describe('scope 物理隔离', () => {
     assert.strictEqual(idxA.groups.wiki['to-delete'], undefined);
   });
 
-  it('scan-kb import 直导在不同 scope 下隔离', async () => {
+  it('ki import 直导在不同 scope 下隔离', async () => {
     const sA = await mkScope('iso-scan-a');
     const sB = await mkScope('iso-scan-b');
     const src = mkTmp('iso-src');
@@ -134,7 +134,7 @@ describe('scope 物理隔离', () => {
     fs.writeFileSync(path.join(src, 'doc.md'), '# doc\ncontent');
 
     // scope A 直导
-    const rA = runJson('scan-kb.ts', ['import', '--scope', sA, '--source', src, '--group', 'wiki']);
+    const rA = runJson('import.ts', ['--scope', sA, '--source', src, '--group', 'wiki']);
     assert.strictEqual(rA.ok, true);
     assert.strictEqual(rA.stats.total, 1);
 

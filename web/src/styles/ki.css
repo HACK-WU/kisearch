@@ -900,6 +900,16 @@ a:hover { text-decoration: underline; }
 .ki-asset-missing__icon { font-size: 14px; }
 .ki-asset-missing__text { font-family: var(--ki-font-mono); font-size: 12px; word-break: break-all; }
 .ki-asset-missing__alt { color: var(--ki-color-text-subtle); font-size: 12px; }
+/* 被 scheme 白名单拦下的链接标记（XSS 防线，fail-loud：不静默吞掉，hover 可见拦截原因与原文 URL） */
+.ki-link-blocked {
+  margin-left: 3px; padding: 0 3px;
+  font-size: 11px; line-height: 1.4;
+  color: var(--ki-color-text-muted);
+  border: 1px dashed var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  cursor: help;
+}
 .ki-markdown img { max-width: 100%; height: auto; border-radius: var(--ki-radius-sm); }
 
 /* ── 搜索页 ── */

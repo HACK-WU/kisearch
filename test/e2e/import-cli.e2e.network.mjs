@@ -1,8 +1,8 @@
 /**
- * scan-kb-cli.e2e.network.mjs —— scan-kb import 管线真实端到端验收（黑盒）
+ * import-cli.e2e.network.mjs —— ki import 管线真实端到端验收（黑盒）
  *
- * 被测对象（"当前代码"）：ki scan-kb import CLI
- *   → bin/ki.mjs → src/scan-kb.ts
+ * 被测对象（"当前代码"）：ki import CLI
+ *   → bin/ki.mjs → src/import.ts
  *   → src/lib/{import,batch-vectorize,path-vectorize,vector-client}.ts
  *   → dist/zvec-engine（真实 SiliconFlow embedding + 真实 zvec worker）
  *
@@ -13,7 +13,7 @@
  * 覆盖旅程（共享 Context 串联；顺序敏感）：
  *   setup       : 载入 .env.e2e → 临时 dataDir + vectorDir + config.json（隔离，不污染 ~/.ki）
  *                 + 一个源目录 fixture 作为外部知识库 sourceDir
- *   E2E-1 full  : import --source 直导 → ok + total=2 + source.rootName
+ *   E2E-1 full  : import --source 直导 → ok + total=2 + source.dir
  *   E2E-2 recall: search → 语义召回全量向量化写入的模块（证明真实 zvec 写入）
  *   E2E-3 append: 新增文档 + 同文件修改后重新 import → 幂等追加（新文件导入、旧文件覆盖）
  *   E2E-4 verify: 幂等追加后，新增文档可召回
@@ -22,7 +22,7 @@
  * 安全：源码零秘钥。凭证从 .env.e2e（回退 .env / 进程环境）读取；缺 apiKey 整套跳过。
  * 运行：
  *   cp .env.e2e.example .env.e2e  # 填入 SILICONFLOW_API_KEY
- *   node --test test/e2e/scan-kb-cli.e2e.network.mjs
+ *   node --test test/e2e/import-cli.e2e.network.mjs
  */
 
 import { test, before, after } from 'node:test';
@@ -58,7 +58,7 @@ loadEnvFile();
 const API_KEY = process.env.GITNEXUS_EMBEDDING_API_KEY ?? process.env.SILICONFLOW_API_KEY;
 const RUN = Boolean(API_KEY);
 const SKIP = RUN ? {} : { skip: '缺少 embedding apiKey（SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY），跳过真实联网 CLI e2e' };
-if (!RUN) console.warn('[E2E-scan-kb] 未检测到 apiKey，整套真实联网 CLI 用例已跳过（CI 安全）。');
+if (!RUN) console.warn('[E2E-import] 未检测到 apiKey，整套真实联网 CLI 用例已跳过（CI 安全）。');
 
 /** SiliconFlow OpenAI 兼容端点为 <base>/v1/embeddings；裸 base 补 /v1，已含 /vN 则保留 */
 function resolveBaseURL(raw) {
@@ -143,7 +143,7 @@ after(() => {
 // ─── 旅程 ───
 
 test('E2E-1 full: import --source 直导 → ok + total=2 + source.dir', { ...SKIP, timeout: 180_000 }, () => {
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
+  const r = ki(['import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
   assert.equal(r.json?.ok, true, `import 应成功；实际=${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.total, 2, `应导入 2 个 chunk（a.md + sub/b.md 各 1）；实际=${JSON.stringify(r.json.stats)}`);
@@ -167,7 +167,7 @@ test('E2E-3 append: 新增文档 + 修改后重新 import → 幂等追加', { .
   fs.writeFileSync(path.join(ctx.sourceDir, 'c.md'), '# RSA 非对称加密\n\nRSA 使用公钥加密、私钥解密，常用于密钥交换与数字签名。');
   fs.writeFileSync(path.join(ctx.sourceDir, 'a.md'), '# AES 加密工具 v2\n\nAES-GCM 模式在对称加密基础上额外提供完整性校验。');
 
-  const r = ki(['scan-kb', 'import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
+  const r = ki(['import', '--scope', SCOPE, '--source', ctx.sourceDir, '--group', GROUP]);
   assert.equal(r.status, 0, `退出码应为 0；stderr=${r.stderr}\nstdout=${r.stdout}`);
   assert.equal(r.json?.ok, true, `幂等追加应成功；${JSON.stringify(r.json)}`);
   assert.equal(r.json.stats.errors, 0, `不应有错误；errors=${JSON.stringify(r.json.errors)}`);

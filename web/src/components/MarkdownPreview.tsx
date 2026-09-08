@@ -3,8 +3,12 @@
  *
  * - marked 渲染标题/列表/表格/代码块/引用/链接等 GFM 语法
  * - ```mermaid 代码块渲染为图表（mermaid 动态加载，仅当文档含 mermaid 时才拉取 chunk）
- * - 安全：丢弃文档中内嵌的原始 HTML（避免样式注入/XSS），仅白名单放行 `<img>`（只取 src/alt/title，
- *   其余属性含 on* 事件一律丢弃）
+ * - 安全（渲染的是**导入的外部不可信 wiki**，故按不可信输入处理）：
+ *   ① 丢弃文档中内嵌的原始 HTML（避免样式注入/XSS），仅白名单放行 `<img>`（只取 src/alt/title，
+ *      其余属性含 on* 事件一律丢弃）
+ *   ② **URL scheme 白名单**：marked v18 默认不净化 href/src，`[x](javascript:...)` 会产出点击即
+ *      执行的 `<a>`（浏览器实测），`data:text/html,<script>` 同理 → 对 link 与 image 都做 scheme
+ *      白名单，拦下的降级为纯文本 + 可见标记（fail-loud，不静默吞掉）
  * - 本地图片附件（REQ-20260904-001）：提供 assetBase 时，相对路径 src 重写为 `/api/asset` 路由寻址
  *   group 级 assets 目录；加载失败的图片替换为可见占位块（fail-loud：明确告知"图片未导入 + 路径"，
  *   而非静默破图或空白）
@@ -27,6 +31,85 @@ function escapeAttr(s: string): string {
 /** 是否为外部或不可寻址 URL（scheme / 协议相对 / posix 绝对路径）：保持原样不重写 */
 export function isExternalOrAbsoluteUrl(url: string): boolean {
   return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url) || url.startsWith('/');
+}
+
+// ─── URL scheme 白名单（XSS 防线）────────────────────────────
+
+/** 链接放行的 scheme；无 scheme（相对路径 / 锚点 / 查询）也放行 */
+const SAFE_LINK_SCHEMES = new Set(['http', 'https', 'mailto']);
+/** 图片放行的 scheme；`data:` 单独处理（只允许 image/* 子类型，内联图片是合法用法） */
+const SAFE_IMAGE_SCHEMES = new Set(['http', 'https']);
+
+/**
+ * 归一化后再判 scheme：去控制字符（含 \t\n，防 `java\tscript:` 绕过）与首尾空白，
+ * 并解码数字实体（防 `java&#115;cript:` 绕过——浏览器解析属性值时会先解码实体）。
+ */
+function normalizeUrlForCheck(url: string): string {
+  return url
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/&#x([0-9a-f]+);?/gi, (_m, h: string) => safeFromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);?/gi, (_m, d: string) => safeFromCodePoint(parseInt(d, 10)))
+    .trim();
+}
+
+/** String.fromCodePoint 对越界值会抛 RangeError；畸形实体不应让整个渲染失败 */
+function safeFromCodePoint(n: number): string {
+  try {
+    return Number.isFinite(n) ? String.fromCodePoint(n) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 取归一化后的 scheme（小写）；无 scheme 返回 null */
+export function schemeOf(url: string): string | null {
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(normalizeUrlForCheck(url));
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * 链接 URL 是否可安全渲染为 `<a href>`。
+ *
+ * 为何必须自己判：marked v18 默认**不净化** href，而 `renderer.link` 此前从未被覆盖 →
+ * `[x](javascript:alert(1))` 会原样产出可点击执行的 `<a>`（浏览器实测：大小写混淆
+ * `JaVaScRiPt:`、前导空白、`data:text/html,<script>` 均透出）。渲染对象是导入的外部 wiki，
+ * 同源下可进而调 `/api/*` 与 `/mcp` 写操作篡改 KB → 构成存储型 XSS。
+ *
+ * 放行：http(s) / mailto / 无 scheme（相对路径、锚点、查询、协议相对 `//`）。
+ * 拦截：javascript: data: vbscript: blob: file: 等一切非白名单 scheme。
+ */
+export function isSafeLinkUrl(url: string): boolean {
+  const u = normalizeUrlForCheck(url);
+  if (!u) return false;
+  const s = schemeOf(u);
+  return s === null || SAFE_LINK_SCHEMES.has(s);
+}
+
+/** 图片 src 是否可安全渲染：http(s) / 相对路径 / `data:image/*`；拦 javascript: 与 data:text/html */
+export function isSafeImageSrc(url: string): boolean {
+  const u = normalizeUrlForCheck(url);
+  if (!u) return false;
+  const s = schemeOf(u);
+  if (s === null) return true;
+  if (SAFE_IMAGE_SCHEMES.has(s)) return true;
+  return s === 'data' && /^data:image\//i.test(u);
+}
+
+/** 被拦下的链接：保留可读文本 + 一个带诊断信息的可见标记（fail-loud，不静默吞掉） */
+function blockedLinkMark(url: string): string {
+  const s = schemeOf(url) ?? '(未知)';
+  return `<span class="ki-link-blocked" role="note" title="已拦截不安全的链接协议 ${escapeAttr(s)}:；原文 ${escapeAttr(url)}">⚠</span>`;
+}
+
+/** 被拦下的图片：沿用附件缺失占位块的视觉语义（同类：“这里本该有图，但它不可用”） */
+function blockedImageNotice(url: string, alt: string): string {
+  const s = schemeOf(url) ?? '(未知)';
+  const altPart = alt ? `<span class="ki-asset-missing__alt">（${escapeAttr(alt)}）</span>` : '';
+  return `<span class="ki-asset-missing" role="note">`
+    + `<span class="ki-asset-missing__icon">⚠</span>`
+    + `<span class="ki-asset-missing__text">已拦截不安全的图片协议 ${escapeAttr(s)}: · ${escapeAttr(url)}</span>`
+    + altPart
+    + `</span>`;
 }
 
 /** 相对路径图片 → /api/asset 路由；外链与绝对路径原样返回 */
@@ -92,13 +175,28 @@ function extractAttr(attrs: string, name: string): string {
   return bare ? bare[1] : '';
 }
 
-/** 构造渲染器：image 重写 src；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃（XSS 防护） */
+/** 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃 */
 function buildRenderer(base?: AssetBase) {
   const renderer = new marked.Renderer();
   renderer.image = ({ href, title, text }) => {
-    const src = rewriteAssetSrc(href ?? '', base);
+    const raw = href ?? '';
+    // scheme 白名单：javascript: 在 <img src> 中虽不执行（实测），但仍拦下以免留下误导性死图；
+    // data:image/* 是合法内联图片用法，放行
+    if (!isSafeImageSrc(raw)) return blockedImageNotice(raw, text ?? '');
+    const src = rewriteAssetSrc(raw, base);
     const t = title ? ` title="${escapeAttr(title)}"` : '';
     return `<img src="${escapeAttr(src)}" alt="${escapeAttr(text ?? '')}"${t}>`;
+  };
+  // 用 function 而非箭头函数：需要 this.parser.parseInline 渲染链接内嵌套格式（`[`code`](url)` 等），
+  // 只用 token.text 会把内部 markdown 当字面文本输出
+  renderer.link = function ({ href, title, tokens, text }) {
+    const url = href ?? '';
+    const inner = this.parser?.parseInline(tokens) ?? escapeAttr(text ?? '');
+    if (!isSafeLinkUrl(url)) return `${inner}${blockedLinkMark(url)}`;
+    const t = title ? ` title="${escapeAttr(title)}"` : '';
+    // 外部链接开新页并断 opener（防 window.opener 反向操控来源页）；站内相对链接不加 target
+    const ext = /^(?:https?:)?\/\//i.test(url.trim()) ? ' target="_blank" rel="noopener noreferrer"' : '';
+    return `<a href="${escapeAttr(url)}"${t}${ext}>${inner}</a>`;
   };
   renderer.html = ({ text }) => {
     // 块级 html token 可含多个标签（吃到空行为止）：遍历全部 <img> 逐个净化重建，
@@ -109,9 +207,17 @@ function buildRenderer(base?: AssetBase) {
       if (!src) continue;
       const alt = extractAttr(m[1], 'alt');
       const title = extractAttr(m[1], 'title');
+      if (!isSafeImageSrc(src)) {
+        out += blockedImageNotice(src, alt);
+        continue;
+      }
       const t = title ? ` title="${escapeAttr(title)}"` : '';
       out += `<img src="${escapeAttr(rewriteAssetSrc(src, base))}" alt="${escapeAttr(alt)}"${t}>`;
     }
+    // 注：原生 HTML 的 `<a>` 不在白名单内，故被丢弃——这是**安全的**：marked 把
+    // `<a href="javascript:x">文字</a>` 拆为 html token + text token + html token，丢标签后中间文字仍保留；
+    // 整块级 html token 的情况下则连同文字一起丢（过度丢弃，但不构成注入面）。
+    // 切勿在此重建 `<a>`：正则只能匹配开标签、拿不到标签文字，反而会用 href 充当文本并凭空多出链接。
     return out;
   };
   return renderer;
@@ -179,7 +285,16 @@ export function MarkdownPreview({ text, assetBase }: { text: string; assetBase?:
     void loadMermaid().then((mod) => {
       if (cancelled) return;
       const mermaid = mod.default;
-      mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+      // securityLevel 必须为 'strict'（mermaid 默认值），**不得改成 'loose'**：
+      // 源码实证（mermaid 11.16.1）三处均以 loose 为开关——
+      //   ① mermaid.core.mjs `else if (!isLooseSecurityLevel) DOMPurify.sanitize(...)`：loose 时**完全跳过净化**，
+      //      原始 SVG 直接进 innerHTML（可含 foreignObject/事件属性）；
+      //   ② setClickFun / setClickFunc 开头均 `if (securityLevel !== 'loose') return`：loose 时
+      //      `click A call fn()` 会绑定为活动 JS 回调（比 javascript: 链接更危险）。
+      // 本组件渲染的是**导入的外部不可信 wiki**，故取 strict。
+      // 代价：图表内 HTML 标签会被转义为文本、`click` 交互失效——知识 wiki 的图表只用于展示，可接受。
+      // 注：'loose' 是前端初始脚手架提交（c56d68b「对齐 demo」）带入的，无注释/无测试锁定，非故意围栏。
+      mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
       const blocks = root.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
       const renderAll = async (): Promise<void> => {
         for (const block of Array.from(blocks)) {

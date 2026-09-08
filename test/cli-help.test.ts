@@ -15,32 +15,42 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
 
-/** 与 bin/ki.mjs 的 COMMANDS 保持一致；新增子命令时同步维护 */
-const SUB_COMMANDS = [
-  'scan-kb',
-  'manage-index',
-  'query-group',
-  'get-module-info',
-  'sync-relation',
-  'delete-relation',
-  'mcp',
-  'search',
-  'store',
-  'bulk-store',
-  'scope',
-  'doc',
-  'tag',
-  'config',
-  'doctor',
-  'backup',
-  'restore',
-  'export',
-];
+/**
+ * 子命令清单**从 bin/ki.mjs 的 COMMANDS 映射派生**，不再维护手工副本。
+ *
+ * 为何改：此处原为硬编码列表 + 注释「与 COMMANDS 保持一致；新增子命令时同步维护」，
+ * 但该注释的断言长期为假——`wiki-backfill` 自加入 COMMANDS 起就未被列入（18 vs 19）。
+ * 更隐蔽的是：缺一个命令**不会让本套件变红**，只是静默少测一个（覆盖率降低无人察觉）。
+ * 改为派生后，新增命令自动纳入本套件，一致性由结构保证而非靠人记得同步。
+ */
+const SUB_COMMANDS: string[] = (() => {
+  const src = fs.readFileSync(CLI, 'utf-8');
+  const block = /const COMMANDS = \{([\s\S]*?)\n\};/.exec(src)?.[1];
+  if (!block) {
+    throw new Error(`无法从 ${CLI} 解析 COMMANDS 映射——入口结构已变，请同步本测试的解析规则`);
+  }
+  // 剥掉整行注释再匹配：否则块内注释里的 `'xxx':` 会被当成活命令，生成指向不存在命令的
+  // 幻影用例（实测：在块内写一行「// 历史：'mcp-legacy': '...' 已移除」或注释掉一个条目，
+  // 都会让本套件假红且报错指向一个从未存在的命令，排查者会先怀疑 CLI 坏了而非解析规则）
+  const code = block.replace(/^\s*\/\/.*$/gm, '');
+  const cmds = [...code.matchAll(/'([^']+)'\s*:/g)].map((m) => m[1]);
+  // fail-loud：解析到空清单时拒绝「空跑绿」（否则本套件会因零用例而静默失去守护作用）
+  if (cmds.length === 0) {
+    throw new Error(`从 ${CLI} 解析到 0 个命令——解析规则已失效，不得以空清单跑绿`);
+  }
+  // fail-loud：重复命令名意味着解析误纳了注释或块外内容（剥注释后仍重复 → 规则真的错了）
+  const dup = cmds.filter((c, i) => cmds.indexOf(c) !== i);
+  if (dup.length > 0) {
+    throw new Error(`从 ${CLI} 派生出重复命令名 [${[...new Set(dup)].join(', ')}]——解析规则可能误纳了注释或块外内容`);
+  }
+  return cmds;
+})();
 
 function runCli(args: string[]): { stdout: string; status: number } {
   try {

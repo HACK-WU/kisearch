@@ -7,7 +7,7 @@
     "ki": "./bin/ki.mjs"
   },
   "scripts": {
-    "scan-kb": "npx jiti src/scan-kb.ts",
+    "import": "npx jiti src/import.ts",
     "manage-index": "npx jiti src/manage-index.ts",
     "query-group": "npx jiti src/query-group.ts",
     "get-module-info": "npx jiti src/get-module-info.ts",
@@ -28,7 +28,8 @@
     "test:zvec-engine": "node --test test/zvec-engine*.test.mjs",
     "test:e2e:kisearch": "node --test test/e2e/kisearch-cli.e2e.network.mjs",
     "test:e2e:step-c": "node --test test/e2e/step-c-cli.e2e.network.mjs",
-    "test:e2e:scan-kb": "node --test test/e2e/scan-kb-cli.e2e.network.mjs",
+    "test:e2e:import": "node --test test/e2e/import-cli.e2e.network.mjs",
+    "test:e2e:bulk-import": "node --test test/e2e/e2e-bulk-import.test.mjs",
     "build:zvec-engine": "tsc -p tsconfig.src.json"
   },
   "keywords": [

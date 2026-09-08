@@ -12,7 +12,7 @@
  *   - list 顺序不保证（引擎无排序 / 时间字段），--limit 返回任意顺序前 N 条
  *   - delete 仅删向量层单条记忆；按 scope 护栏，只删归属该 scope 的 docid，
  *     跨 scope 的 docid 列入 scopeMismatch 跳过（docid = sha256(text+scope)，一条只属一个 scope）
- *   - 若该 docid 来自 scan-kb/sync-relation，KB 层 relations-cache 的 memoryId 会变悬空引用
+ *   - 若该 docid 来自 ki import / ki sync-relation，KB 层 relations-cache 的 memoryId 会变悬空引用
  *     （删关系请用 ki delete-relation）
  */
 

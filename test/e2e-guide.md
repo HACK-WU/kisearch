@@ -2,6 +2,18 @@
 
 本指南提供 kisearch 所有功能的真实环境测试流程，使用 `test/fixtures/mock-wiki` 作为模拟外部 wiki，无需依赖真实 wiki 仓库即可完整验证。
 
+> ✅ **本指南已于 2026-09-07 完成失准整改**。整改前它记载了大量 2026-08-14 就已删除的功能，照执行会直接失败。变更摘要：
+>
+> - **删除原 §11「ki scan-kb diff 增量差异检测」与 §12「--mode incremental 增量导入」两章（共 128 行）**：这两个命令已于 2026-08-14（commit `fce0b57`）随增量导入模式一并移除，现无对应命令。增量更新由「幂等追加」语义承载——**重跑同一条 `ki import` 即同步变更**（同文件覆盖、新文件导入、同名异源跳过），不再依赖 git。原 §13/§14/§15 顺延为 §11/§12/§13。
+> - **命令名扁平化**：`ki scan-kb import` → `ki import`（scan-kb 壳已移除、**无兼容别名**，旧调用报「未知命令」并列出可用命令）。注意本指南示例多用 `node bin/ki.mjs ...` 直呼入口，此时命令名后**不再接 `import` 子命令名**。
+> - **已删参数与前置条件全部清理**：`--root-name` → `--group <path>`；`--mode full`（直导本就是默认全量，无替代）；`--mode incremental`（见上）；**「`--source` 必须是 git 仓库」这一前置条件已随增量模式删除**（实测 fixture 本身就不是 git 仓库）。
+> - **§5 预期输出按实测重写**（code review 复查发现首轮只改了 `source` 子块、JSON 样例主体漏改，已补齐）：删除**根本不存在的 `"mode": "full"` 字段**（`ImportResult` 无 `mode`）；`stats.total` / `vectorized` 由 7 更正为 **14**（mock-wiki 实有 14 个 `.md`，2026-09-07 真实执行取得）；`stats` 补齐为实测 6 字段 `{total, vectorized, errors, skipped, vector, assets}`（**整块样例由 2026-09-07 真实执行 §5.1 那条带向量化的命令逐字段抄录**：`total=14, vectorized=14, errors=0, skipped=0, vector=true, assets=0`，非推断）；`source` 块实测为 `{dir, chunkSize, chunkOverlap}`，**不含已删除的 `rootName` / `commit`**。样例对应**带向量化**的 §5.1 命令（故 `vector: true`）；若加 `--no-vector` 则 `vectorized: 0`、`vector: false`。
+> - 保留的历史注记：§2 关于 `ai-results.json` 输入契约已删除的说明（该句本身正确，是历史交代而非操作指引）。
+>
+> ⚠️ **整改边界（诚实声明）**：本轮只核实并修正了「引用已删除功能」与「§5 预期输出」两类失准，依据是真实跑一次导入。**§6–§13 各步的预期输出值未逐项实跑复核**，若发现与实测不符请以实际输出为准并回改本文件。
+>
+> 现行权威口径以 [`docs/import.md`](../docs/import.md) 与 [`docs/cli.md`](../docs/cli.md) 为准。
+
 ---
 
 ## 目录
@@ -10,17 +22,15 @@
 2. [测试数据说明](#2-测试数据说明)
 3. [初始化配置](#3-初始化配置)
 4. [manage-index：Group 树管理](#4-manage-indexgroup-树管理)
-5. [scan-kb import：全量导入](#5-scan-kb-import全量导入)
+5. [ki import：全量导入](#5-ki-import全量导入)
 6. [query-group：索引查询](#6-query-group索引查询)
 7. [get-module-info：读取本地 KB](#7-get-module-info读取本地-kb)
 8. [sync-relation：关系写入](#8-sync-relation关系写入)
 9. [search：语义搜索](#9-search语义搜索)
 10. [export：反向导出](#10-export反向导出)
-11. [scan-kb diff：增量差异检测](#11-scan-kb-diff增量差异检测)
-12. [scan-kb import --mode incremental：增量导入](#12-scan-kb-import---mode-incremental增量导入)
-13. [backup / restore：备份还原](#13-backup--restore备份还原)
-14. [清理](#14-清理)
-15. [测试检查清单](#15-测试检查清单)
+11. [backup / restore：备份还原](#11-backup--restore备份还原)
+12. [清理](#12-清理)
+13. [测试检查清单](#13-测试检查清单)
 
 ---
 
@@ -74,10 +84,10 @@ test/fixtures/mock-wiki/
 
 | 能力 | 说明 |
 |------|------|
-| 全量直导 | `scan-kb import --source <mock-wiki> --root-name TestWiki`（原文直导 + 大文档自动切分） |
-| 增量直连 | `scan-kb import --source <mock-wiki> --mode incremental`（git diff 驱动，无 AI 依赖） |
+| 全量直导 | `ki import --source <mock-wiki> --group <path>`（原文直导 + 大文档自动切分）⚠️ 原示例的 `--root-name` 已删除 |
+| ~~增量直连~~ | ⚠️ **已删除**（`--mode incremental`，2026-08-14）：增量现由幂等追加承载，重跑同一条 `ki import` 即可 |
 
-> **注意**：`--source` 目录必须是 git 仓库（增量模式依赖 git diff 检测变更；非 git 仓库跑增量会明确报错）。
+> **说明**：`--source` 可为任意目录或单个 `.md` 文件，**不依赖 git**。原「必须是 git 仓库」的前置条件随增量模式（git diff 驱动）于 2026-08-14 一并移除；实测本指南指定的 `test/fixtures/mock-wiki` 就不是 git 仓库（无 `.git`），导入照样成功。
 
 ---
 
@@ -128,7 +138,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ### 4.2 全量导入后查看 scope 列表
 
-> 需先完成 [第 5 步全量导入](#5-scan-kb-import全量导入)
+> 需先完成 [第 5 步全量导入](#5-ki-import全量导入)
 
 ```bash
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
@@ -175,9 +185,9 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ---
 
-## 5. scan-kb import：全量导入
+## 5. ki import：全量导入
 
-核心链路：AI 结果校验 → 批量向量化 → Group 树构建 → 元数据写入 → source 块记录
+核心链路：源文件收集（后缀白名单）→ 写 local KB 原文 → 清洗 → 切分 → 图片附件收集 → 批量向量化（Phase 2）→ Group 树构建（Phase 3）→ relations-cache 写入（Phase 4）→ source 块记录（Phase 5）
 
 ### 5.1 执行全量导入
 
@@ -185,10 +195,10 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
 
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
-  scan-kb import \
+  import \
   --scope e2e-test \
   --source "$MOCK_WIKI" \
-  --root-name TestWiki
+  --group TestWiki
 ```
 
 **预期输出**：
@@ -197,12 +207,14 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 {
   "ok": true,
   "action": "import",
-  "mode": "full",
   "scope": "e2e-test",
   "stats": {
-    "total": 7,
-    "vectorized": 7,
-    "errors": 0
+    "total": 14,
+    "vectorized": 14,
+    "errors": 0,
+    "skipped": 0,
+    "vector": true,
+    "assets": 0
   },
   "errors": [],
   "groups": [
@@ -214,8 +226,8 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
   ],
   "source": {
     "dir": "/absolute/path/to/mock-wiki",
-    "rootName": "TestWiki",
-    "commit": "dade327..."
+    "chunkSize": 1000,
+    "chunkOverlap": 150
   }
 }
 ```
@@ -223,10 +235,11 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 **验证要点**：
 
 - [ ] `ok: true`
-- [ ] `stats.total` = 7
-- [ ] `stats.vectorized` = 7（或部分成功，取决于 memory 服务状态）
+- [ ] `stats.total` = **14**（mock-wiki 实有 14 个 .md；2026-09-07 实测。原指南写 7 已失准）
+- [ ] `stats.vectorized` = 14（或部分成功，取决于 embedding 服务状态；`--no-vector` 时为 0 且 `stats.vector` = false）
 - [ ] `groups` 包含 5 个 Group 路径
-- [ ] `source.commit` 非空
+- [ ] `source` = `{dir, chunkSize, chunkOverlap}`（**不含已删除的 `rootName` / `commit`**）
+- [ ] `stats.assets` 存在（本地图片附件落盘数；mock-wiki 无图片故为 0）
 
 ### 5.2 验证生成的数据文件
 
@@ -246,8 +259,8 @@ cat "$KB_DIR/relations-cache.json" | python3 -m json.tool
 - [ ] `scope` = "e2e-test"
 - [ ] `groups` 包含 "TestWiki" 及其子节点
 - [ ] `source.dir` 指向 mock-wiki 绝对路径
-- [ ] `source.rootName` = "TestWiki"
-- [ ] `source.commit` = mock-wiki HEAD
+- [ ] `source.chunkSize` / `source.chunkOverlap` = 导入时生效的切分参数（默认 1000 / 150）
+- [ ] **无 `source.rootName` / `source.commit`**（两者已随 rootName 概念与增量模式删除）
 
 **relations-cache.json 验证要点**：
 
@@ -452,7 +465,7 @@ cat > /tmp/ki-e2e-test/.ki/config.json << 'EOF'
 EOF
 ```
 
-> **注意**：如果 scope 已有 `source` 块（通过 scan-kb import 导入），wikiSync 不会生效，写回会直接写入 source 目录。wikiSync 仅对无 source 块的 scope（如纯 sync 场景）生效。
+> **注意**：如果 scope 已有 `source` 块（通过 ki import 导入），wikiSync 不会生效，写回会直接写入 source 目录。wikiSync 仅对无 source 块的 scope（如纯 sync 场景）生效。
 
 ```bash
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
@@ -487,7 +500,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ### 8.5 纯 sync-relation 场景（无外部 wiki 导入）
 
-此场景模拟**不通过 scan-kb import 导入外部 wiki**，而是直接使用 sync-relation 从零构建知识库。覆盖两个子场景：先建节点再写入 vs 直接写入自动建节点。
+此场景模拟**不通过 ki import 导入外部 wiki**，而是直接使用 sync-relation 从零构建知识库。覆盖两个子场景：先建节点再写入 vs 直接写入自动建节点。
 
 > 使用独立 scope `e2e-pure-sync`，与前面的 `e2e-test` 隔离。
 
@@ -623,9 +636,9 @@ find /tmp/ki-e2e-test/wiki-output -path "*/运维手册*" -name "*.md"
 | relations-cache.json | 正常写入 | 正常写入（与 A 一致） |
 | local KB | 正常写入 | 正常写入（与 A 一致） |
 | Wiki 写回 | 正常写回 | 正常写回（与 A 一致） |
-| source 块 | 无（非 scan-kb import 不会写 source） | 无 |
+| source 块 | 无（非 ki import 不会写 source） | 无 |
 
-**关键结论**：sync-relation 不依赖 scan-kb import 预先初始化，可独立从零构建知识库。两种方式产出的数据结构完全一致，唯一区别是 source 块（仅 scan-kb import 写入）。
+**关键结论**：sync-relation 不依赖 ki import 预先初始化，可独立从零构建知识库。两种方式产出的数据结构完全一致，唯一区别是 source 块（仅 ki import 写入）。
 
 ## 9. search：语义搜索
 
@@ -715,137 +728,9 @@ head -20 "/tmp/ki-e2e-export/TestWiki/API 参考/用户认证.md"
 
 ---
 
-## 11. scan-kb diff：增量差异检测
+## 11. backup / restore：备份还原
 
-> 此步骤需在全量导入后、mock-wiki 有新 commit 时才能产生 diff
-
-### 11.1 在 mock-wiki 中制造变更
-
-```bash
-MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
-
-# 新增一个文件
-echo "# API 网关\n\n网关层统一入口管理。" > "$MOCK_WIKI/API 参考/API 网关.md"
-
-# 修改一个文件
-echo "\n\n## 限流策略\n\n支持令牌桶和滑动窗口两种限流算法。" >> "$MOCK_WIKI/API 参考/数据查询.md"
-
-# 提交变更
-cd "$MOCK_WIKI" && git add -A && git -c commit.gpgsign=false commit -m "add: API 网关 + 限流策略" && cd -
-```
-
-### 11.2 执行 diff
-
-```bash
-node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
-  scan-kb diff --scope e2e-test
-```
-
-**预期输出**：
-
-```json
-{
-  "ok": true,
-  "action": "diff",
-  "scope": "e2e-test",
-  "baseCommit": "dade327...",
-  "headCommit": "5d860f...",
-  "sourceDir": "/absolute/path/to/mock-wiki",
-  "rootName": "TestWiki",
-  "added": [
-    { "path": "API 参考/API 网关.md", "absPath": "..." },
-    ...
-  ],
-  "modified": [
-    { "path": "API 参考/数据查询.md", "absPath": "...", "memoryId": "unknown" }
-  ],
-  "deleted": [],
-  "stats": {
-    "added": 6,
-    "modified": 1,
-    "deleted": 0,
-    "total": 7
-  }
-}
-```
-
-> **注意**：实际输出中 `added` 和 `modified` 数组的元素是对象 `{ path, absPath }`，不是纯字符串。`stats.added` 可能大于手动新增的文件数，因为它包含 source commit 之后所有新增的文件。
-
-**验证要点**：
-- [ ] `ok: true`
-- [ ] `added` 数组包含新增的文件路径
-- [ ] `modified` 数组包含修改的文件路径
-- [ ] `deleted` 为空
-
----
-
-## 12. scan-kb import --mode incremental：增量导入
-
-### 12.1 制造增量变更
-
-增量直连（git diff 驱动）无需准备任何 AI 产物。在 mock-wiki 中制造三类变更并提交：
-
-```bash
-cd "$(realpath test/fixtures/mock-wiki)"
-
-# 新增文件
-echo '# 权限管理' > "API 参考/权限管理.md"
-
-# 修改文件
-echo -e '# 数据查询 v2\n\n更新后的查询规范。' > "API 参考/数据查询.md"
-
-# 删除文件
-rm "常见问题/安装问题.md"
-
-# 提交变更（增量基线 = source.commit 记录的 commit）
-git add -A
-git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q -m "e2e incremental changes"
-```
-
-> **注意**：增量直连以 `source.commit`（上次导入时记录的 git commit）为基线，用 `git diff` 检测变更；memoryId 由系统从 relations-cache 按文件自动聚合，无需手工准备。
-
-### 12.2 执行增量导入
-
-```bash
-MOCK_WIKI=$(realpath test/fixtures/mock-wiki)
-
-node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
-  scan-kb import \
-  --scope e2e-test \
-  --source "$MOCK_WIKI" \
-  --mode incremental
-```
-
-**预期输出**：
-
-```json
-{
-  "ok": true,
-  "action": "import",
-  "mode": "incremental",
-  "stats": {
-    "added": 1,
-    "modified": 1,
-    "deleted": 1,
-    "unchanged": 7
-  }
-}
-```
-
-**验证要点**：
-- [ ] `ok: true`
-- [ ] `stats.added` = 1（权限管理.md）
-- [ ] `stats.modified` = 1（数据查询.md 原文更新）
-- [ ] `stats.deleted` = 1（安装问题.md 移除）
-- [ ] group-index.json 中"常见问题"组无"安装问题"子节点
-- [ ] "API 参考"组新增"权限管理"节点
-- [ ] relations-cache.json 中"数据查询"的 memoryId 已更新（新原文 chunk 覆盖旧 chunk）
-
----
-
-## 13. backup / restore：备份还原
-
-### 13.1 备份
+### 11.1 备份
 
 ```bash
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
@@ -858,7 +743,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 - [ ] 返回 `ok: true`
 - [ ] 备份目录下生成 `.tar.gz` 文件
 
-### 13.2 列出备份
+### 11.2 列出备份
 
 ```bash
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
@@ -868,7 +753,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 **验证要点**：
 - [ ] 列出刚才创建的备份记录
 
-### 13.3 还原
+### 11.3 还原
 
 ```bash
 node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
@@ -881,7 +766,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ---
 
-## 14. 清理
+## 12. 清理
 
 测试完成后清理临时数据：
 
@@ -900,7 +785,7 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 
 ---
 
-## 15. 测试检查清单
+## 13. 测试检查清单
 
 ### 完整功能矩阵
 
@@ -909,7 +794,7 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 | 1 | `config init` | 生成配置模板 | [ ] |
 | 1a | 手动修改 dataDir | 隔离测试数据目录 | [ ] |
 | 2 | `manage-index --action list-scopes` | 空列表 | [ ] |
-| 3 | `scan-kb import --mode full` | 全量导入 7 条 | [ ] |
+| 3 | `ki import --group <path>` | 全量导入 **14** 条（实测；原 `--mode full` 已删除，直导即默认全量） | [ ] |
 | 4 | `manage-index --action list-scopes` | 包含 e2e-test | [ ] |
 | 5 | `manage-index --action create` | 创建子 Group | [ ] |
 | 6 | `manage-index --action delete` | 删除空 Group | [ ] |
@@ -928,8 +813,7 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 | 17 | `search` | 语义搜索 | [ ] |
 | 18 | `search --threshold` | 带阈值搜索 | [ ] |
 | 19 | `export` | 反向导出为 Markdown | [ ] |
-| 20 | `scan-kb diff` | 增量差异检测 | [ ] |
-| 21 | `scan-kb import --mode incremental` | 增量导入（add/modify/delete） | [ ] |
+| ~~20 / 21~~ | ~~增量 diff / 增量导入~~ | **两章已随命令删除而移除**（2026-08-14）；增量由「重跑同一条 `ki import`」的幂等追加承载，编号保留空位不复用 | — |
 | 22 | `backup` | 创建备份快照 | [ ] |
 | 23 | `backup --list` | 列出备份 | [ ] |
 | 24 | `restore --from-snapshot` | 从快照还原 | [ ] |
@@ -939,7 +823,7 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 | 检查点 | 文件 | 关键字段 |
 |--------|------|----------|
 | Group 树完整 | group-index.json | groups 层级正确 |
-| source 块记录 | group-index.json | source.{dir,rootName,commit} |
+| source 块记录 | group-index.json | source.{dir,chunkSize?,chunkOverlap?} |
 | Relation 写入 | relations-cache.json | hot_relations 含 isImported/memoryId |
 | memoryId 回填 | relations-cache.json | hot_relations 含 memoryId（直导真实 docId） |
 | local KB 存在 | kb/{scope}/**/index.json | 每个 Group 有 index.json |
@@ -970,8 +854,8 @@ node bin/ki.mjs config init --dir /tmp/ki-e2e-test
 sed -i 's|"dataDir": "/root/.ki/kb"|"dataDir": "/tmp/ki-e2e-test/kb"|' $CONFIG
 
 # 全量直导（--source 原文直导，无 AI 依赖）
-node bin/ki.mjs --config $CONFIG scan-kb import \
-  --scope e2e-test --source "$MOCK_WIKI" --root-name TestWiki
+node bin/ki.mjs --config $CONFIG import \
+  --scope e2e-test --source "$MOCK_WIKI" --group TestWiki
 
 # 查询
 node bin/ki.mjs --config $CONFIG query-group --scope e2e-test --groups "TestWiki"

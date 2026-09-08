@@ -3,9 +3,10 @@
 所有脚本都通过 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
 
 **CLI 简化约定（批次 4，REQ-11/12）**：
-- **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-o`(--output)、`-n`(--name)，覆盖所有常用/必填参数
+- **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-n`(--name)，覆盖 commander 化命令的常用/必填参数。
+  > `-o`(--output) 属 REQ-11 原规划但**从未实现**：`export` 走手写 argv 解析，只认 `--output` 长选项（实测 `ki export -h`）。
 - **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 直接传位置参数；原 `--query`/`--text` option 保留兼容（两种写法均可，位置参数优先）
-- **超长内容警告（REQ-10）**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `scan-kb import --source`），不自动切分
+- **超长内容警告（REQ-10）**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分
 
 **配置优先级**：
 1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
@@ -20,17 +21,17 @@
 
 ---
 
-## `scan-kb`（统一入口）
+## `ki import`（外部 Wiki 导入）
 
-外部知识库导入的统一入口，提供 `import` 子命令。
-（历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除，增量更新由幂等追加语义承载。）
+外部 Markdown Wiki 导入（**幂等追加**，重复执行 = 增量）。扁平命令，**无子命令层级**。
+（历史：2026-09-07 由 `ki scan-kb import` 扁平化而来，scan-kb 壳已移除且不保留兼容别名（旧调用报「未知命令」）；更早的 `--mode incremental`（git diff 驱动）与 `diff` 子命令亦已废弃移除。）
 
-### `import` 子命令（推荐）
+### 用法
 
 统一导入外部知识库，**幂等追加**（重复执行 = 增量）。
 
 ```bash
-ki scan-kb import \
+ki import \
   -s <scope> \
   --source <dir> \
   --group <name> \
@@ -54,7 +55,7 @@ ki scan-kb import \
 **示例：首次导入**
 
 ```bash
-ki scan-kb import -s my-project --source /path/to/wiki --group wiki
+ki import -s my-project --source /path/to/wiki --group wiki
 ```
 
 自动切分：大文件按段落边界（`\n\n > \n > 。 > ；`）优先切分，relation 命名为 `文件名-N`（如 `deploy-01`），sourcePath 为 `文件路径#N`。切分参数持久化到 source 块。
@@ -463,7 +464,7 @@ ki doc delete abc123 --scope my-project --yes
 }
 ```
 
-> ⚠️ `doc delete` 仅删向量层单条记忆；若该 docid 来自 `scan-kb` / `sync-relation`，KB 层 `relations-cache` 的 `memoryId` 会变悬空引用。删关系请用 `ki delete-relation`。
+> ⚠️ `doc delete` 仅删向量层单条记忆；若该 docid 来自 `ki import` / `sync-relation`，KB 层 `relations-cache` 的 `memoryId` 会变悬空引用。删关系请用 `ki delete-relation`。
 
 ---
 
@@ -526,7 +527,7 @@ ki search "告警静默策略" -s monitor,alerting
 
 反查使用**内存缓存**：首次构建 `Map<memoryId, …>` 后复用，文件 mtime/size 变化或 10 分钟 TTL 过期才重建，`ki search` 连续调用无额外 IO 开销。
 
-> `restore --rebuild-vector` 重建的内容向量与 `scan-kb import` 采用相同的 content 纯化格式（index.json 原始值）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。
+> `restore --rebuild-vector` 重建的内容向量与 `ki import` 采用相同的 content 纯化格式（index.json 原始值）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。
 
 **关于相关性**：hybrid 检索 = 向量语义 + 全文（BM25）两路融合。头部结果由向量语义主导（通常高度相关）；当查询含宽泛词（如"配置"、"API"）时，全文路可能召回较多低分边缘结果——这是混合检索"召回广"的设计特性，非数据异常。若需收紧，用 `--threshold` 过滤低分命中：
 
@@ -806,7 +807,7 @@ ki sync-relation \
   -r <text> --module-info <markdown>
 ```
 
-> **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `scan-kb import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
+> **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
 > **非向量化模式（`--no-vector`）**：仅写 KB 层（relations-cache + local KB + Wiki 写回），**跳过向量写入**——不调用 embedding API、不产生 `memoryId`，写入的关系**无法被 `ki search` 召回**（只能通过 `query-group` / `get-module-info` 访问）。单条与批量模式均支持：
 > ```bash
@@ -854,7 +855,7 @@ ki sync-relation \
 
 **Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。Wiki 目录发现优先级：
 
-1. `group-index.json` 的 `source` 块（由 `scan-kb import` 自动记录）
+1. `group-index.json` 的 `source` 块（由 `ki import` 自动记录）
 2. `config.yaml` 中 scope 级 `wikiSync.sourceDir` 兜底配置
 
 如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
@@ -1514,7 +1515,7 @@ wiki-output/
 
 ### 外部知识库导入（原文直导，无 AI，幂等追加）
 
-1. `scan-kb import --scope <s> --source <dir> --group <name>`（首次导入）
+1. `ki import --scope <s> --source <dir> --group <name>`（首次导入）
 2. 修改/新增 source 目录文件后，重新执行同一条命令即可（幂等追加 = 增量更新）
 
 ---
@@ -1523,7 +1524,7 @@ wiki-output/
 
 - [架构与协作关系](./architecture.md) - 了解 kisearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
-- [scan-kb 子命令详解](./scan-kb.md) - 含 `import`、`diff` 的详细说明（原文直导 / 增量直连）
+- [ki import 详解](./import.md) - 导入流程、参数与幂等追加语义（原文直导，无 AI）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案
 - [典型工作流](./workflows.md) - 完整的使用场景和最佳实践
 - [备份与恢复](./backup-restore.md) - 数据备份和恢复策略

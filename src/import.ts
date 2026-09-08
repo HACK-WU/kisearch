@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 /**
- * scan-kb.ts - 外部知识库导入
+ * import.ts - 外部知识库导入（ki import）
  *
- * 子命令:
- *   import    （REQ-01）--source 直导外部 Markdown 目录（无 AI，自动切分；幂等追加）
+ *   （REQ-01）--source 直导外部 Markdown 目录（无 AI，自动切分；幂等追加）
  *
- * 历史（已废弃）：
- *   import --mode incremental（增量直连，git diff 驱动）—— 由幂等追加语义替代
- *   diff 子命令（对比 source.commit..HEAD）—— 随 incremental 一并移除
+ * 历史：
+ *   2026-09-07  由 `ki scan-kb import` 扁平化为 `ki import`，scan-kb 壳已移除且不保留兼容别名。
+ *               两点依据：① 壳下仅存 import 一个子命令，层级冗余（19 个命令中 14 个本就是扁平）；
+ *               ② bin/ki.mjs 的 COMMANDS 是单级扁平映射且 scriptArgs 会剥掉子命令名，与 commander
+ *               嵌套子命令不兼容——实测 `jiti src/scan-kb.ts --source x` 报 `unknown option '--source'`，
+ *               故仅在映射表加一行不可行，必须拆掉 .command() 嵌套层。
+ *   已废弃      import --mode incremental（增量直连，git diff 驱动）—— 由幂等追加语义替代；
+ *               diff 子命令（对比 source.commit..HEAD）—— 随 incremental 一并移除
  */
 
 import { Command } from 'commander';
@@ -25,15 +29,12 @@ function output(result: Record<string, unknown>): void {
 
 const program = new Command();
 
-program
-  .name('scan-kb')
-  .showHelpAfterError()
-  .description('外部知识库导入：import');
-
 // ─── S-04：统一导入命令（幂等追加）──────────────────────────
+// 扁平结构：选项直接挂在 program 上（对齐 export/search/store/restore 等扁平命令惯例）
 
 program
-  .command('import')
+  .name('import')
+  .showHelpAfterError()
   .description('导入：--source 直导外部 Wiki（无 AI，自动切分；幂等追加到目标 group）')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')

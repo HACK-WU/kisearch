@@ -100,7 +100,7 @@
 
 ---
 
-## 三类：`scan-kb.ts` 相关错误
+## 三类：`src/lib/import.ts`（导入核心）相关错误
 
 > 历史：`--mode incremental` 与 `diff` 子命令已废弃移除（git diff 依赖被「幂等追加」语义替代）。
 
@@ -187,6 +187,6 @@ scope 先注册
 
 ## 相关文档
 
-- `scan-kb` 详细流程：[`scan-kb.md`](./scan-kb.md)
+- `ki import` 详细流程：[`import.md`](./import.md)
 - 典型工作流：[`workflows.md`](./workflows.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)

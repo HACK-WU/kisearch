@@ -145,7 +145,7 @@ scopeMode: default            # default: 自动创建 scope；strict: 必须显�
 ```bash
 # ① 导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分；幂等追加，
 #    重复执行即增量更新——修改/新增 source 目录文件后重新跑同命令即可）
-ki scan-kb import \
+ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group Wiki \
@@ -196,7 +196,7 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 
 | 命令 | 说明 |
 |------|------|
-| `scan-kb` | 外部知识库导入统一入口：import（原文直导/增量直连，支持 `--no-vector` 非向量化）/ diff |
+| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--no-vector` 非向量化、`--no-assets` 关闭图片附件收集 |
 | `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
 | `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
@@ -303,7 +303,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 ### 首次导入（外部 Wiki 原文直导，无 AI 依赖）
 
 ```bash
-ki scan-kb import \
+ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group Wiki
@@ -315,10 +315,10 @@ ki scan-kb import \
 
 ```bash
 # 修改/新增 source 目录文件后，重新执行同一条 import 命令即可（幂等追加）
-ki scan-kb import --scope my-project --source /path/to/wiki --group Wiki
+ki import --scope my-project --source /path/to/wiki --group Wiki
 ```
 
-`--group` / `--chunk-*` 等参数详解见 [`docs/scan-kb.md`](./docs/scan-kb.md)。
+`--group` / `--chunk-*` 等参数详解见 [`docs/import.md`](./docs/import.md)。
 
 ## <a id="docs"></a>📚 文档导航
 
@@ -330,7 +330,7 @@ ki scan-kb import --scope my-project --source /path/to/wiki --group Wiki
 | [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
 | [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
 | [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
-| [`docs/scan-kb.md`](./docs/scan-kb.md) | scan-kb 子命令与 ai-results 详解 |
+| [`docs/import.md`](./docs/import.md) | `ki import` 导入流程、参数与幂等追加语义详解 |
 
 ### 参考与架构
 

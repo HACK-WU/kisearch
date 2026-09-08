@@ -5,7 +5,7 @@
  *   快速路径: manage-index → sync-relation → query-group → get-module-info
  *   检索回退路径: 查询不存在的 Group/Relation
  *   知识缺失路径: 本地 KB 缺失
- *   导入路径: scan-kb import --source 直导（full / incremental，git diff 驱动）
+ *   导入路径: ki import --source 直导（幂等追加，无 AI / 无 git 依赖）
  */
 
 import { describe, it, after } from 'node:test';
@@ -316,10 +316,10 @@ describe('知识缺失路径', () => {
   });
 });
 
-// ─── 导入路径: scan-kb import --source 直导 ───
+// ─── 导入路径: ki import --source 直导 ───
 
 describe('导入路径', () => {
-  it('scan-kb import --source 直导完整链路', async () => {
+  it('ki import --source 直导完整链路', async () => {
     const scope = await makeScopeInit('integration-import');
     const sourceDir = makeTempDir('ki-int-source');
 
@@ -328,8 +328,7 @@ describe('导入路径', () => {
     fs.writeFileSync(path.join(sourceDir, '部署.md'), '# 部署文档\n部署流程说明');
 
     // 幂等追加直导（无 AI）：--source + --group
-    const importResult = runScriptJson('scan-kb.ts', [
-      'import',
+    const importResult = runScriptJson('import.ts', [
       '--scope', scope,
       '--source', sourceDir,
       '--group', 'wiki',

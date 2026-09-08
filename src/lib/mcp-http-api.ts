@@ -246,8 +246,9 @@ export async function handleApiRequest(
 
   const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
 
-  // query scope 越权校验：仅对带 scope 的只读接口（tags / doc/list）生效；
+  // query scope 越权校验：对带 scope 参数的只读接口（tags / doc/list / asset）生效；
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
+  // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
   if (authScopes !== null && (p === '/tags' || p === '/doc/list' || p === '/asset')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';

@@ -31,7 +31,7 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务
 
 | 写入方 | 调用链 | 说明 |
 |--------|--------|------|
-| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | scan-kb 幂等追加导入 |
+| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-path'` | ki import 幂等追加导入 |
 
 每个 Group 写入一条（按 groupPath 去重）。
 
@@ -64,7 +64,7 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务
 
 | 写入方 | 调用链 | 说明 |
 |--------|--------|------|
-| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-relation'` | scan-kb 幂等追加导入 |
+| `import.ts` | `bulkStorePaths(pathEntries)` → engine.insert `tags: 'ki-relation'` | ki import 幂等追加导入 |
 | `sync-relation.ts` | `buildRelationContent` + `vectorBulkStore` | 单条 Relation 写入，失败不阻塞主流程 |
 
 参考代码：[import.ts L410](../src/lib/import.ts#L410)、[path-vectorize.ts storeOnePathAsync L123](../src/lib/path-vectorize.ts#L123)
@@ -101,7 +101,7 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 
 自由文本，无固定格式约束。典型内容：
 
-- scan-kb 直导的文档原文（chunk 粒度，含 `文件名-N` relation 命名）
+- ki import 直导的文档原文（chunk 粒度，含 `文件名-N` relation 命名）
 - sync-relation 写入的 moduleInfo 模块说明
 - 用户通过 `ki store` 手动写入的任意知识片段
 
@@ -109,7 +109,7 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 
 | 写入方 | 调用链 | 说明 |
 |--------|--------|------|
-| `batch-vectorize.ts` | `vectorizeOne` / `bulkVectorize` → engine.insert `tags: 'ki-search'` | scan-kb 导入的文档内容向量 |
+| `batch-vectorize.ts` | `vectorizeOne` / `bulkVectorize` → engine.insert `tags: 'ki-search'` | ki import 导入的文档内容向量 |
 | `sync-relation.ts` | `engine.upsert({ tags: 'ki-search' })` | 容错双写 moduleInfo |
 | `store.ts` | `engine.insert({ tags: 'ki-search' })` | `ki store` CLI 手动写入 |
 | `bulk-store.ts` | `engine.insert({ tags: 'ki-search' })` | `ki bulk-store` CLI 手动批量写入 |
@@ -205,7 +205,7 @@ const hits = await engine.hybridSearch({
 | 修改查询标签 | 影响**搜索召回范围**（改后搜不到历史数据） |
 | 删除/弃用标签 | `group-resolve` / `get-module-info` 向量匹配功能失效 |
 
-历史标签数据（如 scan-kb import 修复前写入的自动提取标签）需要通过 `engine.delete()` 逐个删除后重新导入。
+历史标签数据（如 ki import 修复前写入的自动提取标签）需要通过 `engine.delete()` 逐个删除后重新导入。
 
 ---
 
@@ -214,11 +214,11 @@ const hits = await engine.hybridSearch({
 | 文件 | 职责 |
 |------|------|
 | [path-vectorize.ts](../src/lib/path-vectorize.ts) | ki-path / ki-relation 写入核心（bulkStorePaths / storeOnePath） |
-| [batch-vectorize.ts](../src/lib/batch-vectorize.ts) | ki-search 批量写入（scan-kb import 文档内容向量化） |
+| [batch-vectorize.ts](../src/lib/batch-vectorize.ts) | ki-search 批量写入（ki import 文档内容向量化） |
 | [path-search.ts](../src/lib/path-search.ts) | searchPath 统一搜索接口（ki-path / ki-relation 查询） |
 | [zvec-engine/engine.ts](../src/zvec-engine/engine.ts) | ZvecEngine 核心：insert/upsert/search/close 生命周期 |
 | [sync-relation.ts](../src/sync-relation.ts) | ki-relation + ki-search 双写 |
-| [import.ts](../src/lib/import.ts) | scan-kb 导入：bulkVectorize（ki-search）+ bulkStorePaths（ki-path/ki-relation） |
+| [import.ts](../src/lib/import.ts) | ki import 导入：bulkVectorize（ki-search）+ bulkStorePaths（ki-path/ki-relation） |
 | [search.ts](../src/search.ts) | ki search CLI（默认 tags: ki-search） |
 | [store.ts](../src/store.ts) | ki store CLI（默认 tags: ki-search） |
 | [query-group.ts](../src/query-group.ts) | 语义兜底（tags: ki-path） |

@@ -252,10 +252,10 @@ function normalizeTag(tag: string): string {
  * 同 scope + text + tag → 同 docId → 幂等 upsert（重复写入覆盖）。
  *
  * ⚠️ 迁移影响（breaking）：tag 参与生成后，**所有调用 vectorStore/vectorBulkStore 的链路**
- * （sync-relation、scan-kb import、bulk-store、path-vectorize、batch-vectorize）产出的 docId 均改变，
+ * （sync-relation、ki import、bulk-store、path-vectorize、batch-vectorize）产出的 docId 均改变，
  * 存量向量 docId 与新 scheme 失配。后果：
  *   - 存量 cache 的 memoryId/memoryIds 指向的 docId 失效 → REQ-20260807-001 的「原文召回」、
- *     按 docId 精确删除、scan-kb 幂等重导（旧 scheme 孤儿向量）在迁移前不可靠；
+ *     按 docId 精确删除、ki import 幂等重导（旧 scheme 孤儿向量）在迁移前不可靠；
  *   - delete 有 search 兜底可清，原文召回需 re-import 或 `ki restore <scope> --rebuild-vector` 迁移。
  * 部署含存量向量数据时，发布后需全量 re-import 或 rebuild-vector 迁移。
  */

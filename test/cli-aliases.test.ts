@@ -1,8 +1,13 @@
 /**
  * CLI 简化回归测试（REQ-11 / REQ-12 / REQ-10）
  *
- * REQ-11 短别名：-s(--scope) -q(--query) -t(--text) -g(--group) -r(--relation)
- *               -i(--input) -o(--output) -n(--name)
+ * REQ-11 短别名（实测 src/ 中存在的 7 个）：-s(--scope) -q(--query) -t(--text)
+ *               -g(--group) -r(--relation) -i(--input) -n(--name)
+ *   注：REQ-11 原列的 -o(--output) **在代码里从未实现**——export 走手写 argv 解析
+ *       （detectUnknownFlags 只认 --output 长选项），不经 commander 故短别名机制对其不适用。
+ *       实测 `ki export -h` 只有 --output；全仓 grep 无 '-o, --output'。
+ *       因此本文件无 -o 用例（原那条断言的是早已删除的 `scan-kb diff --output`，长期预存失败，
+ *       已于 2026-09-07 删除，不构成覆盖率净损失）；若将来给 export 补 commander 化 + -o，需在此补断言。
  * REQ-12 位置参数：search <query>、store <text>（--query/--text option 保留兼容）
  * REQ-10 超长警告：sync-relation --module-info >1000 字符输出警告
  *
@@ -46,8 +51,10 @@ describe('REQ-11 短别名帮助输出', () => {
     { cmd: 'delete-relation', helpArgs: [], short: '-r', long: '--relation' },
     { cmd: 'bulk-store', helpArgs: [], short: '-i', long: '--input' },
     { cmd: 'manage-index', helpArgs: [], short: '-n', long: '--name' },
-    { cmd: 'scan-kb', helpArgs: ['import'], short: '-s', long: '--scope' },
-    { cmd: 'scan-kb', helpArgs: ['diff'], short: '-o', long: '--output' },
+    { cmd: 'import', helpArgs: [], short: '-s', long: '--scope' },
+    // 已删：{ cmd: 'scan-kb', helpArgs: ['diff'], short: '-o', long: '--output' }
+    //   —— `diff` 子命令与其 `--output` 选项早已随 incremental 一并移除，该用例长期预存失败；
+    //   本轮 scan-kb 扁平化为 ki import 时清理（无对应断言目标，不需补新用例）。
   ];
 
   for (const { cmd, helpArgs, short, long } of cases) {

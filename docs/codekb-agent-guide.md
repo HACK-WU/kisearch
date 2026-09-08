@@ -91,7 +91,7 @@
 
 **触发条件**：对话涉及代码且为“理解级”查询（见 §2 查询类型判定）。定位级查询不走 KB，无需拉取全景。
 
-**缓存策略**：首次查询后，索引信息在当前会话中有效，后续对话无需重复拉取。仅在执行写入操作（sync-relation / scan-kb import）后需要刷新。
+**缓存策略**：首次查询后，索引信息在当前会话中有效，后续对话无需重复拉取。仅在执行写入操作（sync-relation / ki import）后需要刷新。
 
 **第一个动作**：
 
@@ -270,7 +270,7 @@ ki sync-relation \
 
 **本规则只管写 KB。不管写 memory。AI 是否写 memory 自行决定。**
 
-**写入后刷新**：每次写入完成（sync-relation 或 scan-kb import）后，必须重新执行 `ki query-group --scope ${scope} --mode full` 更新本地索引缓存。
+**写入后刷新**：每次写入完成（sync-relation 或 ki import）后，必须重新执行 `ki query-group --scope ${scope} --mode full` 更新本地索引缓存。
 
 ### 允许写入的白名单（8 类项目代码知识）
 
@@ -313,7 +313,7 @@ ki sync-relation \
 ```
 
 **注意事项**：
-- 超长 `--module-info`（>1000 字符）会收到警告，建议拆分多条或改用 `scan-kb import --source` 自动切分导入
+- 超长 `--module-info`（>1000 字符）会收到警告，建议拆分多条或改用 `ki import --source` 自动切分导入
 - **`sync-relation` 只写 relations-cache + local KB，不写 memory**
 
 ### 5.2 批量写入（ki_bulk_sync_relation）
@@ -401,7 +401,7 @@ ki manage-index --scope ${scope} --action delete --parent "父Group路径" --nam
 | 🔴 4 | 超长 module-info 不拆分直接写入（收到警告仍应拆分） |
 | 🔴 5 | 跨 scope 串数据 |
 | 🔴 6 | 把用户喜好 / 项目记忆 / 临时上下文写入 KB |
-| 🔴 7 | 用 `memory_store` 逐条塞入本应走 `scan-kb import` 的批量内容 |
+| 🔴 7 | 用 `memory_store` 逐条塞入本应走 `ki import` 的批量内容 |
 | 🔴 8 | 在 shell/模板中让 `${scope}` 被展开（本规则内反引号包裹） |
 
 **写前自检三问**：scope 解析了吗？是项目代码知识吗？走对通道了吗？

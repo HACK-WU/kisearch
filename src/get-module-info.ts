@@ -151,7 +151,7 @@ export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise
         hint: [
           '本地 KB 缺失的可能原因与修复方式：',
           `1. 使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation "${rel.text}" --module-info <内容>`,
-          '2. 如果是从外部 Wiki 导入的数据，检查 scan-kb import 是否完整执行',
+          '2. 如果是从外部 Wiki 导入的数据，检查 ki import 是否完整执行',
           '3. 检查数据文件是否被误删除或备份恢复不完整',
         ].join('\n'),
       };
@@ -291,7 +291,7 @@ export async function executeGetModuleInfoBatch(params: BatchGetModuleInfoParams
         hint: [
           '本地 KB 缺失的可能原因与修复方式：',
           `1. 使用 sync-relation 重新写入：ki sync-relation --scope ${scope} --group "${resolvedGroup}" --relation <名称> --module-info <内容>`,
-          '2. 如果是从外部 Wiki 导入的数据，检查 scan-kb import 是否完整执行',
+          '2. 如果是从外部 Wiki 导入的数据，检查 ki import 是否完整执行',
           '3. 检查数据文件是否被误删除或备份恢复不完整',
         ].join('\n'),
       };

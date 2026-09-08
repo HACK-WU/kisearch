@@ -99,7 +99,7 @@ flowchart TD
 **一条命令完成**：
 
 ```bash
-ki scan-kb import \
+ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group QoderWiki
@@ -115,7 +115,7 @@ ki scan-kb import \
 
 ```bash
 # 修改 / 新增 source 目录中的文件后，重新执行同一条 import 命令即可
-ki scan-kb import \
+ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group QoderWiki
@@ -130,34 +130,34 @@ ki scan-kb import \
 
 ## 工作流五：外部知识库导入（旧 7 步流程，仍可用）
 
-> 旧流程（ai-results 契约）已随批次 3 删除，仅保留 `scan-kb import --source` 原文直导。
+> 旧流程（ai-results 契约）已随批次 3 删除，仅保留 `ki import --source` 原文直导。
 
 ```text
 （旧流程已删除：scan / scan --results / vectorize / import-kb / migrate-keywords）
 ```
 
-迁移路径：`scan-kb import --source <dir> --group <name>`（幂等追加，重复执行即增量）。
+迁移路径：`ki import --source <dir> --group <name>`（幂等追加，重复执行即增量）。
 
 ---
 
 ## 工作流六：排障时怎么判断自己卡在哪一步
 
-- **`scan-kb import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
-- **`scan-kb import` 报 `--source 目录不存在或不是目录`**：确认 `--source` 指向的 Markdown 目录存在
-- **`scan-kb import` 报 `--group 不能为空`**：`--group` 未传或为空（缺省会落到 `default` group）
+- **`ki import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
+- **`ki import` 报 `--source 目录不存在或不是目录`**：确认 `--source` 指向的 Markdown 目录存在
+- **`ki import` 报 `--group 不能为空`**：`--group` 未传或为空（缺省会落到 `default` group）
 - **追加后 `ki search` 召回不到**：确认导入未用 `--no-vector`（非向量化模式不产生 memoryId，无法被召回）
 
 ---
 
 ## 最推荐的落地策略
 
-1. 先用 `scan-kb import --group <name>` 跑通首次导入
-2. 之后变更：修改/新增 source 目录文件后重新执行同一条 `scan-kb import` 命令（幂等追加 = 增量更新）
+1. 先用 `ki import --group <name>` 跑通首次导入
+2. 之后变更：修改/新增 source 目录文件后重新执行同一条 `ki import` 命令（幂等追加 = 增量更新）
 3. 查询时遵循"本地优先，记忆兜底，命中后回写"的闭环
 
 ## 相关文档
 
-- `scan-kb` 详细说明：[`scan-kb.md`](./scan-kb.md)
+- `ki import` 详细说明：[`import.md`](./import.md)
 - 异常与恢复：[`error-handling.md`](./error-handling.md)
 - 架构与数据文件关系：[`architecture.md`](./architecture.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)

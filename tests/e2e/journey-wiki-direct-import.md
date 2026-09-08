@@ -1,5 +1,13 @@
 # E2E Journey：外部Wiki直接导入与自动切分
 
+> ⚠️ **本 journey 已失效（2026-09-07 核实），重写前请勿据此编排 e2e**：
+> 
+> - `scan-kb` 壳已移除 → 命令改为 `ki import`（2026-09-07 扁平化，无兼容别名）
+> - `--root-name` 已删除 → 改由 `--group <path>` 指定落点
+> - `--mode incremental` / `--mode full` 已删除（2026-08-14）→ 增量由「重跑同一条 `ki import`」的幂等追加承载
+> - `source.commit` 字段已删除 → 现 `source` 块为 `{dir, chunkSize?, chunkOverlap?}`
+> - 因此下表 `full_import` / `incr_import` / `no_git_error` 等步骤的断言**均不再可达**（「非 git 目录跑增量应报错」这一预期本身也已作废：导入不再依赖 git）。
+
 > requirement_ref: REQ-20260806-001（REQ-01/02/03/06/07/08/12 + §4.4）
 > 环境：本地 CLI（真实向量引擎，SILICONFLOW_API_KEY 已配置）
 > 凭证：无（本地 CLI，无 token）

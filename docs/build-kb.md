@@ -100,7 +100,7 @@ scopes:
 外部知识库目录（Markdown）
      │
      ▼
-[Step 1] scan-kb import --source <dir> --group <group>
+[Step 1] ki import --source <dir> --group <group>
      │  （内部：递归扫描 .md → 逐文件切分 → 向量化 → 写 cache + local KB）
      ▼
 知识索引构建完成
@@ -112,7 +112,7 @@ scopes:
 
 **命令**：
 ```bash
-ki scan-kb import \
+ki import \
   --scope <scope> \
   --source <外部知识库目录> \
   --group <目标 Group>
@@ -274,8 +274,8 @@ scopes:
 - **写入时机**：每次 `sync-relation` 成功写入后，自动触发 Wiki 同步
 - **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation；keywords 已移除）
 - **目录结构**：按 Group 路径创建子目录，如 `wiki-output/我的项目/API/用户登录接口.md`
-- **优先级**：如果 scope 有 `source` 块（通过 scan-kb import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
-- **直导不触发写回**：`scan-kb import --source` 只写本地 KB + 向量层，不写回外部 Wiki（避免 chunk 的 `{relation}.md` 污染源目录）
+- **优先级**：如果 scope 有 `source` 块（通过 ki import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
+- **直导不触发写回**：`ki import --source` 只写本地 KB + 向量层，不写回外部 Wiki（避免 chunk 的 `{relation}.md` 污染源目录）
 
 ### Wiki 文件示例
 
