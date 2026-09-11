@@ -333,8 +333,12 @@ async function closeEntry(scope: string, promise: Promise<ZvecEngine>): Promise<
 async function enforceEngineLimit(excludeScope: string): Promise<void> {
   const limit = maxOpenCollections();
   for (;;) {
-    const count = [..._enginePromises.keys()].filter((scope) => scope !== excludeScope).length;
-    if (count < limit) return;
+    // 只把已经 ready 的句柄计入上限。尚未开始的 open 请求本身已经排在
+    // serializeEngineOp 队列中，若在这里等待它们会形成自等待：当前 open
+    // 队列项必须先返回，后续 open 才有机会执行并释放 LRU。
+    const readyEntries = [..._engineMeta.entries()]
+      .filter(([scope, meta]) => scope !== excludeScope && meta.ready);
+    if (readyEntries.length < limit) return;
     const candidate = [..._engineMeta.entries()]
       .filter(([scope, meta]) => scope !== excludeScope && meta.ready && meta.activeUses === 0)
       .sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
@@ -344,12 +348,14 @@ async function enforceEngineLimit(excludeScope: string): Promise<void> {
       if (promise) await closeEntry(scope, promise);
       continue;
     }
-    // 所有句柄都在打开或使用中，等待任一 entry settle 后再次选择；不绕过上限强行打开。
-    const pending = [..._enginePromises.entries()]
-      .filter(([scope]) => scope !== excludeScope)
-      .map(([, promise]) => promise.then(() => undefined, () => undefined));
-    if (pending.length === 0) return;
-    await Promise.race(pending);
+    // 达到上限且所有 ready 句柄都在使用中：等待使用者释放租约后再淘汰，
+    // 不能强行关闭活跃 worker。用短轮询避免额外引入一套通知状态机；该等待
+    // 发生在原生操作队列内，但活跃使用者不占用该队列，故不会自锁。
+    if (readyEntries.some(([, meta]) => meta.activeUses > 0)) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      continue;
+    }
+    return;
   }
 }
 
@@ -517,6 +523,10 @@ export function getEngine(scope = 'default'): Promise<ZvecEngine> {
     return existing;
   }
   const createCfg = buildCreateConfig(normalizedScope);
+  // withEngine 会在 await getEngine 前预占 activeUses，避免句柄刚 ready 但调用方
+  // 尚未恢复执行时被另一个 scope 误判为空闲并提前 LRU 淘汰。直接调用 getEngine
+  // 的维护路径不预占，因此仍以 0 个活跃使用者登记。
+  const reservedMeta = _engineMeta.get(normalizedScope);
   const enginePromise = serializeEngineOp(async () => {
       await enforceEngineLimit(normalizedScope);
       const openStartedAt = Date.now();
@@ -554,7 +564,12 @@ export function getEngine(scope = 'default'): Promise<ZvecEngine> {
   // 必须与 _enginePromises 同时登记：缺少这一步时 getEngine 的 dbPath 校验会因
   // openedAt 恒为 undefined 而永不触发，中途漂移保护形同虚设。
   _engineDbPaths.set(normalizedScope, createCfg.dbPath);
-  _engineMeta.set(normalizedScope, { lastUsedAt: Date.now(), activeUses: 0, ready: false });
+  // 若 withEngine 已预占租约，必须复用同一个对象；替换对象会让 finally
+  // 递减旧引用，map 中的 activeUses 永远不归零，后续 LRU 会永久等待。
+  const engineMeta = reservedMeta ?? { lastUsedAt: Date.now(), activeUses: 0, ready: false };
+  engineMeta.lastUsedAt = Date.now();
+  engineMeta.ready = false;
+  _engineMeta.set(normalizedScope, engineMeta);
   enginePromise.then(() => {
     const meta = _engineMeta.get(normalizedScope);
     if (meta) meta.ready = true;
@@ -624,6 +639,15 @@ function isWorkerUnavailable(err: unknown): boolean {
   );
 }
 
+/** 为一次 withEngine 调用预占租约，覆盖首次打开和 worker 自愈重试。 */
+function reserveEngineLease(scope: string): EngineMeta {
+  const meta = _engineMeta.get(scope) ?? { lastUsedAt: Date.now(), activeUses: 0, ready: false };
+  meta.activeUses++;
+  meta.lastUsedAt = Date.now();
+  _engineMeta.set(scope, meta);
+  return meta;
+}
+
 /**
  * engine 操作包装：在途保护 + 空闲续期 + worker 不可用自愈重试。
  *
@@ -637,12 +661,9 @@ function isWorkerUnavailable(err: unknown): boolean {
 async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<T>): Promise<T> {
   touchEngineUse();
   _inFlightOps++;
-  const meta = _engineMeta.get(scope);
-  let leasedMeta: EngineMeta | undefined = meta;
-  if (meta) {
-    meta.activeUses++;
-    meta.lastUsedAt = Date.now();
-  }
+  // 预占租约必须在 getEngine 前完成：首次打开的 promise 解析后到调用方恢复
+  // 之间存在 microtask 窗口，其他 scope 不得在此期间把该句柄当作空闲 LRU。
+  let leasedMeta = reserveEngineLease(scope);
   try {
     try {
       const engine = await getEngine(scope);
@@ -659,6 +680,9 @@ async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<
       // 只重置当前 scope；不同 scope 的 worker 允许并行，不能因一个分片
       // 的自愈重连而关闭其他 scope 正在执行的请求。
       await closeEngine(scope);
+      // closeEngine 已移除旧 metadata；重开前重新预占，避免新句柄 ready
+      // 后到 retry 调用方恢复之间再次被其他 scope 误判为空闲。
+      leasedMeta = reserveEngineLease(scope);
       const engine = await getEngine(scope);
       const current = _engineMeta.get(scope);
       if (current && current !== leasedMeta) {

@@ -622,7 +622,7 @@
       "id": "REQ-20260910-001",
       "feature": "CLI与MCP共享zvec守护进程",
       "created": "2026-09-10 10:24:25",
-      "updated": "2026-09-10 16:50:00",
+      "updated": "2026-09-11 16:31:15",
       "status": "实施中",
       "tags": [
         "refactor",
@@ -630,7 +630,7 @@
         "mcp",
         "integration"
       ],
-      "version": 13,
+      "version": 23,
       "depends_on": [],
       "changelog": [
         "初始创建",
@@ -644,7 +644,17 @@
         "2026-09-10 v10: 阶段 1 决策确认：CLI/stdio 自动拉起 daemon，Unix Socket，直接采用按 scope Collection 新布局，不做兼容迁移；跨 scope 并发上限为 min(4, CPU 数量)。",
         "2026-09-10 v11: 对齐阶段边界：REQ-01/02/03/04/05/09/10 属于阶段 1，REQ-11/12 属于阶段 2；同步确认已决策的 IPC、自动启动与新布局措辞。",
         "2026-09-10 v12: 阶段 2 实现核心闭环：多 scope fan-out 与一次 query embedding、旧 Collection 显式迁移和安全续跑、import job 进度/取消、daemon 失败日志与执行耗时；阶段状态更新为实施中。",
-        "2026-09-10 v13: 补充阶段 2 当前实施进度与未完成边界；记录 restore job、Collection LRU/资源上限、真实负载基准仍待后续验收；daemon 自动启动失败改为监听子进程退出并立即反馈。"
+        "2026-09-10 v13: 补充阶段 2 当前实施进度与未完成边界；记录 restore job、Collection LRU/资源上限、真实负载基准仍待后续验收；daemon 自动启动失败改为监听子进程退出并立即反馈。",
+        "2026-09-11 v14: 阶段 2 收尾：restore/rebuild job、请求级配置快照、HTTP lock 身份派生、backup/export/wiki-backfill daemon 队列、Collection LRU 与资源指标落地。",
+        "2026-09-11 v15: 记录阶段 2 收尾验证与阶段 3 首轮真实 embedding 基准，保留稳定基线和 F01/F02 扩展评估边界。",
+        "2026-09-11 v16: 修复 maxOpenCollections=1 多 scope 并发首次打开的资源队列自等待风险，固化阶段 3 真实负载 e2e 基准入口。",
+        "2026-09-11 15:03:56 v17: 阶段3新增可重复真实 embedding 基准与 F01/F02 扩展决策记录",
+        "2026-09-11 15:07:06 v18: 阶段3基准补齐跨 scope 写入吞吐，记录正式 e2e 运行与网络波动范围",
+        "2026-09-11 15:11:25 v19: 阶段3正式基准改为跨 scope 写入，补录第二次写入运行与环境波动",
+        "2026-09-11 15:12:00 v20: 阶段3基准报告补充正式写入运行环境元数据",
+        "2026-09-11 15:38:03 v21: auto-review 修复 Collection LRU 活跃租约竞态并完成 challenger 复核",
+        "2026-09-11 16:12:01 v22: 首次整体验收：L1 相关套件 485/485 与全量 tsc 通过；L2 边界反馈通过；L3 真实 embedding 12/12 写入通过。结论为有条件通过，保留 20+ 稳定基线、真实长 restore 取消、OS 级资源观测和 stage3 teardown 隔离补验项。",
+        "2026-09-11 16:31:15 v23: 进度同步：确认 ki restore default --rebuild-vector 成功；澄清 ki-search 与 kisearch scope 命名及多余位置参数语义；追加阶段当前进度和后续补验事项，需求文档升级至 v23。"
       ],
       "commits": [],
       "branch": null,
@@ -655,6 +665,10 @@
         },
         {
           "path": "reference/code-survey.md",
+          "type": "report"
+        },
+        {
+          "path": "reference/stage3-scale-decision.md",
           "type": "report"
         }
       ],

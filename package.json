@@ -30,6 +30,7 @@
     "test:e2e:step-c": "node --test test/e2e/step-c-cli.e2e.network.mjs",
     "test:e2e:import": "node --test test/e2e/import-cli.e2e.network.mjs",
     "test:e2e:bulk-import": "node --test test/e2e/e2e-bulk-import.test.mjs",
+    "test:e2e:stage3": "node --test test/e2e/stage3-scale.network.mjs",
     "build:zvec-engine": "tsc -p tsconfig.src.json"
   },
   "keywords": [
