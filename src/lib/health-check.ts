@@ -11,13 +11,14 @@
  *     URL 连通性 + 密钥有效性 + 维度匹配（复用 SiliconFlowProvider 现成错误语义）
  *   - 超时 8s（timeoutMs），重试 1 次（retries:1），容忍瞬时网络抖动（冷 DNS/TLS 握手/临时拥塞），
  *     避免常驻 MCP 因单次瞬断被启动预检拒绝；同时上限有界，网络确实不通时不会长时间卡住
- *   - zvec collection 用目录非空判定（不 open，避开与常驻 server 的文件锁冲突）
+ *   - zvec Collection 用按 scope 根目录下的子目录判定（不 open，避开与常驻 server 的文件锁冲突）
  */
 
 import fs from 'fs';
 import { SiliconFlowProvider } from '../../dist/zvec-engine/index.js';
 import type { KiConfig } from './config.js';
 import { getVectorDir, getEmbeddingConfig } from './config.js';
+import { getCollectionsRoot } from './scope-collection.js';
 
 export type HealthStatus = 'pass' | 'warn' | 'fail';
 
@@ -204,10 +205,11 @@ export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
   items.push(...embItems);
 
   // 9. zvec collection（目录非空判定，不 open）
-  const vectorDir = getVectorDir(config);
+  const collectionsRoot = getCollectionsRoot(config);
   let collectionCreated = false;
   try {
-    collectionCreated = fs.existsSync(vectorDir) && fs.readdirSync(vectorDir).length > 0;
+    collectionCreated = fs.existsSync(collectionsRoot) && fs.readdirSync(collectionsRoot, { withFileTypes: true })
+      .some((entry) => entry.isDirectory());
   } catch {
     collectionCreated = false;
   }
@@ -217,7 +219,7 @@ export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
     items.push({
       name: 'zvec collection',
       status: 'warn',
-      detail: '首次使用，未创建（执行 ki store 后自动创建）',
+      detail: '按 scope 的 Collection 尚未创建（执行 ki store/import 后自动创建）',
     });
   }
 

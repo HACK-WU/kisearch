@@ -13,7 +13,7 @@
 
 import * as fs from 'node:fs';
 
-import { getHttpLockPath, fetchHealthz } from './mcp-http.js';
+import { getHttpLockPath, listHttpLockPaths, fetchHealthz } from './mcp-http.js';
 import { getStdioLockDir, listStdioLockFiles, stdioLockPidFromPath, pidAlive } from './mcp-stdio-lock.js';
 import { SERVICE_NAME } from './constants.js';
 
@@ -93,7 +93,9 @@ async function waitPidExit(pid: number, timeoutMs: number): Promise<boolean> {
  */
 export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
   const stdioLockDir = opts.stdioLockDir ?? getStdioLockDir();
-  const httpLockPath = opts.httpLockPath ?? getHttpLockPath();
+  const httpLockPaths = opts.httpLockPath
+    ? [opts.httpLockPath]
+    : [...new Set([getHttpLockPath(), ...listHttpLockPaths()])];
   const gracefulTimeoutMs = opts.gracefulTimeoutMs ?? 3000;
   const verifyPid = opts.verifyPid ?? defaultVerifyPid;
 
@@ -109,7 +111,7 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
   for (const lockFile of listStdioLockFiles(stdioLockDir)) {
     addTarget(stdioLockPidFromPath(lockFile), 'stdio');
   }
-  addTarget(readLockPid(httpLockPath), 'http');
+  for (const lockPath of httpLockPaths) addTarget(readLockPid(lockPath), 'http');
   // healthz 兜底：lock 丢失但服务仍在跑（返回体自带 kisearch 身份，无需再校验 cmdline）
   const live = await fetchHealthz(opts.host, opts.port);
   if (live?.ok === true && live?.name === SERVICE_NAME && typeof live.pid === 'number') {
@@ -155,7 +157,7 @@ export async function stopMcpInstances(opts: StopOptions): Promise<StopReport> {
   // ─── 清理残留 lock（正常退出路径已自清；此处兜底 SIGKILL/陈旧/复用场景） ───
   const cleanedLocks: string[] = [];
   // stdio：遍历所有实例 lock 文件；http：单文件
-  const lockPaths = [...listStdioLockFiles(stdioLockDir), httpLockPath];
+  const lockPaths = [...listStdioLockFiles(stdioLockDir), ...httpLockPaths];
   for (const lockPath of lockPaths) {
     if (!fs.existsSync(lockPath)) continue;
     // stdio 从文件名取 pid（内容可能损坏），http 读内容

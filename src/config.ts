@@ -82,8 +82,13 @@ backupDir: ${v.backupDir}
 
 # ─── 向量配置 ───
 # zvec collection 目录：向量数据库存储位置（独立，不进备份）
-# 所有 scope 共享一个 collection，靠 metadata 字段隔离
+# 每个 scope 使用 vectorDir/collections/<scope> 独立 Collection
 vectorDir: ${v.vectorDir}
+
+# Collection 资源治理（daemon 生效）
+# 达到上限后按最近最少使用（LRU）释放空闲 handle/worker；正在使用的不会被强制关闭
+vector:
+  maxOpenCollections: 8
 
 # Embedding 提供方配置
 # provider / baseURL / model 可自由配置任意 OpenAI 兼容提供商（实际提供商由 baseURL 决定）

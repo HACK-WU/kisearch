@@ -2,10 +2,9 @@
  * mcp-http.ts —— ki mcp 的 Streamable HTTP 传输 + 幂等单例守护
  *
  * 背景（多 IDE 锁冲突根治）：
- *   嵌入式向量库同一时刻只能被一个进程持锁打开。多个 IDE 各自用
- *   `command: ki mcp` 拉起独立 stdio 进程时，只有一个能拿到锁，其余降级。
- *   本模块让 ki mcp 以「单进程 HTTP 服务」形态运行，作为向量库唯一持锁者，
- *   所有 IDE（本地/远程）经 URL 共享同一进程 → 从根本上消除锁冲突。
+ *   嵌入式向量库同一时刻只能由一个 owner 进程持锁打开。当前 HTTP daemon
+ *   是指定 vectorDir 的唯一 zvec owner；CLI 与 stdio MCP 均通过 daemon
+ *   调度/桥接，不再各自打开 Collection 或互相争抢锁。
  *
  * 关键设计：
  *   - 传输：@modelcontextprotocol/sdk 的 StreamableHTTPServerTransport（node:http 内建，不引入 express）
@@ -24,8 +23,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
-import { runWithVectorSource } from './vector-client.js';
+import { getVectorResourceMetrics, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
+import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { loadConfig, getConfigLoadIssue, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
 let apiHandlerPromise: Promise<typeof import('./mcp-http-api.js')> | null = null;
@@ -56,9 +58,24 @@ const SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 /** 优雅退出兜底超时（毫秒）：超过则强制 exit，避免残留进程仍持锁 */
 const SHUTDOWN_TIMEOUT_MS = 5000;
 
-/** lock 文件路径：~/.ki/mcp-http.lock（持锁者身份可查） */
-export function getHttpLockPath(): string {
-  return path.join(os.homedir(), '.ki', 'mcp-http.lock');
+/** HTTP lock 按 daemon 身份隔离，避免多份配置并存时 bridge 连错实例。 */
+export function getHttpLockPath(config: KiConfig = loadConfig()): string {
+  return path.join(os.homedir(), '.ki', `mcp-http-${daemonIdentityFingerprint(config)}.lock`);
+}
+
+/** 供 stop 清理多配置实例；只返回受控命名格式的 lock。 */
+export function listHttpLockPaths(): string[] {
+  const dir = path.join(os.homedir(), '.ki');
+  try {
+    const derived = fs.readdirSync(dir)
+      .filter((name) => /^mcp-http-[a-f0-9]{16,128}\.lock$/.test(name))
+      .map((name) => path.join(dir, name));
+    // 仅供 stop 清理升级前遗留的固定 lock；status/bridge 不读取它，避免连错实例。
+    const legacy = path.join(dir, 'mcp-http.lock');
+    return fs.existsSync(legacy) ? [legacy, ...derived] : derived;
+  } catch {
+    return [];
+  }
 }
 
 export interface HttpServerOptions {
@@ -215,6 +232,11 @@ export interface HealthzInfo {
   version?: string;
   host?: string;
   port?: number;
+  protocol?: number;
+  configFingerprint?: string;
+  layoutVersion?: number;
+  queue?: { activeWorkers: number; maxWorkers: number; queues: Record<string, number> };
+  vectorResources?: import('./vector-client.js').VectorResourceMetrics;
   /** 启动以来的鉴权失败次数（仅非回环鉴权模式下出现） */
   authFailures?: number;
 }
@@ -282,7 +304,7 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 /** 提供 --web 静态页面：GET 请求，支持 SPA fallback（非 /api /mcp 的 404 返回 index.html） */
-function serveStatic(res: http.ServerResponse, webDir: string, pathname: string): void {
+export function serveStatic(res: http.ServerResponse, webDir: string, pathname: string): void {
   try {
     // 防路径穿越：decodeURIComponent 后 normalize，确保解析路径仍在 webDir 内
     let decoded: string;
@@ -293,10 +315,30 @@ function serveStatic(res: http.ServerResponse, webDir: string, pathname: string)
       return;
     }
     const relative = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
-    const resolved = path.normalize(path.join(webDir, relative));
-    if (!resolved.startsWith(path.normalize(webDir))) {
+    const webRoot = path.resolve(webDir);
+    const resolved = path.resolve(webRoot, relative);
+    // 必须检查 path segment 边界；仅 startsWith(webRoot) 会把
+    // /web-evil/secret 当成 /web 下的路径，允许 SPA 静态服务越界读文件。
+    if (resolved !== webRoot && !resolved.startsWith(webRoot + path.sep)) {
       sendJson(res, 403, { ok: false, error: 'Forbidden' });
       return;
+    }
+
+    // 物理路径复检：webDir 内的符号链接也可能把读取目标指向宿主机外部，
+    // 仅做 lexical path.resolve 无法阻止这类越界。
+    try {
+      const realRoot = fs.realpathSync(webRoot);
+      const realResolved = fs.realpathSync(resolved);
+      if (realResolved !== realRoot && !realResolved.startsWith(realRoot + path.sep)) {
+        sendJson(res, 403, { ok: false, error: 'Forbidden' });
+        return;
+      }
+    } catch (err) {
+      // 不存在的目标交给下方 SPA fallback；其它 realpath 错误按静态服务异常处理。
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        sendJson(res, 500, { ok: false, error: 'Internal error serving static file' });
+        return;
+      }
     }
 
     // 读文件；不存在时 SPA fallback（仅对非静态资源扩展名）
@@ -441,18 +483,84 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     res: http.ServerResponse,
   ): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    let requestConfig: KiConfig | undefined;
 
     // /healthz：免鉴权，供单例探活与运维排查
     if (req.method === 'GET' && url.pathname === '/healthz') {
+      // healthz 是配置异常/身份漂移时唯一的诊断入口，绝不允许因 loadConfig 抛错而 500：
+      // 否则配置写坏时 ki mcp --status 会报 running:false，而 daemon 其实活着，
+      // 与「漂移/异常时运维必须拿得到诊断端点」的设计意图相反。
+      // 同时只调一次 loadConfig：连调两次可能拿到不同快照（配置正在变更）。
+      let fingerprint: string | undefined;
+      let identityDrift: boolean | undefined;
+      let configError: string | undefined;
+      try {
+        const cfg = loadConfig();
+        fingerprint = configFingerprint(cfg);
+        identityDrift = isDaemonIdentityDrifted(cfg);
+      } catch (err) {
+        configError = (err as Error).message;
+      }
+      // loadConfig 现在对“配置源不可用/内容损坏”会沿用 last-known-good 而不抛错
+      //（daemon 是共享故障域，不应因读取问题而全面不可用），因此该故障必须从
+      // 这里暴露；否则“当前用的不是磁盘上的配置”这件事完全静默，运维无从诊断。
+      const loadIssue = getConfigLoadIssue();
+      if (loadIssue && configError === undefined) configError = loadIssue;
       sendJson(res, 200, {
         ok: true,
         name: SERVICE_NAME,
         pid: process.pid,
         version: readKiVersion(),
         ...(advertiseAddr ? { host: advertiseAddr.host, port: advertiseAddr.port } : {}),
+        protocol: 1,
+        ...(fingerprint !== undefined ? { configFingerprint: fingerprint } : {}),
+        layoutVersion: VECTOR_LAYOUT_VERSION,
+        ...(identityDrift !== undefined ? { identityDrift } : {}),
+        ...(configError !== undefined ? { configError } : {}),
+        queue: getSharedOperationCoordinator().snapshot(),
+        vectorResources: getVectorResourceMetrics(),
         ...(authEnabled ? { authFailures } : {}),
       });
       return;
+    }
+
+    // 身份漂移守卫：仅覆盖业务入口，且用与路由同源的精确匹配（真实 MCP 端点是
+    // `=== '/mcp'`；用前缀会把 /mcp-anything 也纳入，一旦前端出现 /mcp-* 静态资源，
+    // 漂移时它会返回 409 JSON 而不是文件，破坏「静态资源豁免」的设计意图）。
+    // healthz（上方）与静态资源必须豁免 —— 否则漂移时前端页面本身就加载不出来，
+    // 用户只能看到一个裸 409、无任何上下文；豁免后前端能正常加载，再调 /api/* 时
+    // 拿到 409 并展示错误与出路。
+    if (url.pathname.startsWith('/api/') || url.pathname === '/mcp') {
+      // 「取配置」与「判漂移」必须分开：loadConfig 会因 YAML 语法错、字段非法、
+      // --config 路径不存在而抛错；若无条件归为 DAEMON_IDENTITY_DRIFT，客户端会拿到
+      // 「请重启 daemon」的错误出路（重启后仍失败）—— 正是本轮要消灭的文案误导。
+      let guardConfig: KiConfig;
+      try {
+        guardConfig = loadConfig();
+        requestConfig = guardConfig;
+      } catch (err) {
+        sendJson(res, 503, {
+          ok: false,
+          error: `配置加载失败：${(err as Error).message}`,
+          code: 'CONFIG_LOAD_FAILED',
+          hint: '请执行 ki doctor 排查配置文件，或 ki config init 重新生成；修复后无需重启即生效。',
+        });
+        return;
+      }
+      try {
+        // 漂移意味着 daemon 内存中的 engine/句柄指向旧 vectorDir、而路径解析已按新配置走，
+        // 继续服务会把数据写到错误位置，故 fail-loud 而不静默跟着配置跑。
+        assertDaemonIdentityCurrent(guardConfig);
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        const code = e.code ?? 'DAEMON_IDENTITY_DRIFT';
+        // /mcp 的其余错误路径（401/403/503/500）均返回 JSON-RPC 2.0 信封；这里若用
+        // REST 包体，MCP SDK 客户端无法解析 → 用户只看到通用连接错误，出路文案丢失。
+        sendJson(res, 409, url.pathname === '/mcp'
+          ? { jsonrpc: '2.0', error: { code: -32003, message: e.message, data: { code } }, id: null }
+          : { ok: false, error: e.message, code });
+        return;
+      }
     }
 
     // /api/*：方案 A 扩展接口（导入/健康/文档列表），与 MCP 会话隔离
@@ -460,14 +568,14 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     if (url.pathname.startsWith('/api/')) {
       const api = await getApiHandler();
       // 撞锁日志来源标注：以 API 端点路径标识（执行链内 probeWithRetry 日志附带）
-      await runWithVectorSource(`api:${url.pathname}`, () =>
+      await runWithConfigSnapshot(requestConfig ?? loadConfig(), () => runWithVectorSource(`api:${url.pathname}`, () =>
         api.handleApiRequest(req, res, url, {
           authEnabled,
           token,
           clientAddr: resolveClientAddr(req),
           resolveTokenScopes,
         }),
-      );
+      ));
       return;
     }
 
@@ -517,7 +625,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     }
 
     if (req.method === 'POST') {
-      await handleMcpPost(req, res, authScopes);
+      await handleMcpPost(req, res, authScopes, requestConfig ?? loadConfig());
       return;
     }
     if (req.method === 'GET' || req.method === 'DELETE') {
@@ -532,12 +640,62 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     req: http.IncomingMessage,
     res: http.ServerResponse,
     authScopes: string[] | null,
+    requestConfig: KiConfig,
   ): Promise<void> {
     const body = await readJsonBody(req);
     // 撞锁日志来源标注：提取首个 tools/call 工具名（或 JSON-RPC method），
     // 后续执行链（含各工具 handler）内 probeWithRetry 的日志会附带该来源
-    await runWithVectorSource(describeMcpSource(body), () =>
-      handleMcpPostInner(req, res, authScopes, body),
+    const messages = Array.isArray(body) ? body : [body];
+    const readMethod = (message: unknown): unknown => (message && typeof message === 'object'
+      ? (message as { method?: unknown }).method
+      : undefined);
+    // 会话级方法（initialize / notifications/* / tools/list / ping）不触碰 zvec 与 KB 状态。
+    // 把它们排进 scope 队列会让长任务（如 import）期间新开的 IDE 无法建连：
+    // initialize 排在队尾 → 客户端初始化超时 → 连接失败（可用性回退）。
+    const touchesState = messages.some((message) => {
+      const method = readMethod(message);
+      return method === 'tools/call' || method === 'resources/read' || method === 'resources/list';
+    });
+    if (!touchesState) {
+      return handleMcpPostInner(req, res, authScopes, body);
+    }
+    const queueScopes = new Set<string>();
+    let needsGlobal = false;
+    let onlyReadOnly = true;
+    for (const message of messages) {
+      const method = readMethod(message);
+      if (method !== 'tools/call' && method !== 'resources/read' && method !== 'resources/list') continue;
+      const toolName = method === 'tools/call' && message && typeof message === 'object'
+        ? ((message as { params?: { name?: unknown } }).params?.name)
+        : undefined;
+      // scope 枚举只读且自带 fastFail 撞锁降级（“scope 下拉不应因向量锁挂起十余秒”），
+      // 归入只读通道：不占用任何 scope，也不被其他 scope 的写操作阻塞。
+      if (toolName === 'ki_scope_list') continue;
+      onlyReadOnly = false;
+      // 索引树枚举会返回跨 scope 的 Group 结构，需要一致快照，保留全局独占。
+      if (toolName === 'ki_manage_index_list') {
+        needsGlobal = true;
+        continue;
+      }
+      const args = message && typeof message === 'object'
+        ? ((message as { params?: { arguments?: unknown } }).params?.arguments as { scope?: unknown } | undefined)
+        : undefined;
+      const rawScope = typeof args?.scope === 'string' ? args.scope.trim() : '';
+      const scopes = rawScope.split(',').map((scope) => scope.trim()).filter(Boolean);
+      // 缺省 scope 与 CLI 的默认 scope 共用同一条队列；否则 MCP/CLI 都未传 scope
+      // 时会落到不同的队列，绕过同 scope 串行约束。
+      for (const scope of scopes.length > 0 ? scopes : ['default']) queueScopes.add(scope);
+    }
+    // 多 scope batch 只需占用它**实际涉及**的分片，不再归入全局屏障：
+    // 旧写法把多 scope 请求当成全局独占，会在它排队期间冻结所有无关 scope 的调度。
+    const occupied = needsGlobal ? [GLOBAL_SCOPE] : (onlyReadOnly ? [] : [...queueScopes]);
+    await getSharedOperationCoordinator().submit(
+      { operation: 'mcp-request', params: body },
+      () => runWithConfigSnapshot(requestConfig, () => runWithVectorSource(
+        describeMcpSource(body),
+        () => handleMcpPostInner(req, res, authScopes, body),
+      )),
+      occupied,
     );
   }
 
@@ -693,7 +851,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
         target: { host: probeHost(host), port },
         healthz: running ? info : null,
         lock: lock ?? null,
-        // stdio 多实例：存活实例列表（HTTP 单例与 stdio 互斥，正常二者不会同时存在）
+        // stdio 多实例：存活实例列表（stdio 可与 HTTP daemon 同时存在，仅用于进程管理）
         stdioInstances,
         // 多 Token 存储：仅报告数量，绝不回显明文
         managedTokens: { count: tokenTotal },
@@ -720,6 +878,9 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   const { host, port, buildServer, allowedHosts, onShutdown } = opts;
   const authEnabled = !isLoopbackHost(host);
   const token = opts.token;
+  // 固定本实例的 lock 路径；即使运行期间配置文件发生身份漂移，退出时也必须
+  // 清理启动时的 lock，而不能按新配置计算出另一条路径。
+  const lockPath = getHttpLockPath(loadConfig());
 
   // ─── 幂等单例：先探活，命中健康实例则复用退出 ───
   if (await probeHealthz(host, port)) {
@@ -759,7 +920,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     httpServer.listen(port, host, () => resolve());
   });
 
-  writeLockFile(host, port, opts.web === true);
+  writeLockFile(lockPath, host, port, opts.web === true);
 
   process.stderr.write(
     `kisearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
@@ -800,7 +961,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     }
     // 关闭 http 服务
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
-    removeLockFile();
+    removeLockFile(lockPath);
     clearTimeout(forceExit);
     process.exit(code);
   };
@@ -808,14 +969,20 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   process.on('SIGTERM', () => void shutdown(0));
 }
 
-function writeLockFile(host: string, port: number, web: boolean): void {
+function writeLockFile(lockPath: string, host: string, port: number, web: boolean): void {
   try {
-    const lockPath = getHttpLockPath();
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(
       lockPath,
       JSON.stringify(
-        { pid: process.pid, host, port, startedAt: new Date().toISOString(), web },
+        {
+          pid: process.pid,
+          host,
+          port,
+          startedAt: new Date().toISOString(),
+          web,
+          identityFingerprint: path.basename(lockPath).slice('mcp-http-'.length, -'.lock'.length),
+        },
         null,
         2,
       ),
@@ -825,9 +992,9 @@ function writeLockFile(host: string, port: number, web: boolean): void {
   }
 }
 
-function removeLockFile(): void {
+function removeLockFile(lockPath: string): void {
   try {
-    fs.rmSync(getHttpLockPath(), { force: true });
+    fs.rmSync(lockPath, { force: true });
   } catch {
     /* 忽略 */
   }

@@ -7,12 +7,20 @@
 import fs from 'fs';
 import path from 'path';
 import { loadConfig, getScopeDataDir } from './config.js';
+import { GLOBAL_SCOPE } from './operation-coordinator.js';
 
 // scope 合法字符正则
 const SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+/**
+ * 调度器保留字：OperationCoordinator 用 GLOBAL_SCOPE 表示「需要独占全部 scope 的操作」。
+ * 该字面量恰好完全落在 SCOPE_PATTERN 白名单内（只有下划线与字母），若不显式排除，
+ * 用户创建同名 scope 后其全部请求都会被当成全局独占操作，与所有其他 scope 互相阻塞。
+ */
+const RESERVED_SCOPES: ReadonlySet<string> = new Set([GLOBAL_SCOPE]);
+
 /** scope 校验错误码（NEG-03：统一错误码/文案） */
-export type ScopeErrorCode = 'EMPTY_SCOPE' | 'INVALID_SCOPE';
+export type ScopeErrorCode = 'EMPTY_SCOPE' | 'INVALID_SCOPE' | 'RESERVED_SCOPE';
 
 export class ScopeError extends Error {
   code: ScopeErrorCode;
@@ -38,6 +46,13 @@ export function validateScope(scope: string): void {
       'INVALID_SCOPE',
       `scope "${scope}" 不合法：仅允许字母、数字、连字符(-)、下划线(_)，禁止路径遍历字符` +
         (illegal.length > 0 ? `\n  非法字符：${illegal.map((c) => JSON.stringify(c)).join(', ')}` : '')
+    );
+  }
+  if (RESERVED_SCOPES.has(scope)) {
+    throw new ScopeError(
+      'RESERVED_SCOPE',
+      `scope "${scope}" 是调度器保留字（用于标记需独占全部 scope 的操作），不能用作 scope 名；`
+        + '请换一个名称，例如去掉下划线前后缀'
     );
   }
 }

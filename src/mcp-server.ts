@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerQueryGroupTool } from './lib/mcp-tools/query-group.js';
 import { registerGetModuleInfoTool } from './lib/mcp-tools/get-module-info.js';
 import { registerSyncRelationTool } from './lib/mcp-tools/sync-relation.js';
@@ -15,8 +14,10 @@ import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
 import { registerScopeListTool } from './lib/mcp-tools/scope-list.js';
 import { registerTagListTool } from './lib/mcp-tools/tag-list.js';
-import { closeEngine, enableIdleClose } from './lib/vector-client.js';
-import { loadConfig } from './lib/config.js';
+import { enableIdleClose } from './lib/vector-client.js';
+import { loadConfig, invalidateConfigFreshness, getConfigLoadIssue } from './lib/config.js';
+import { captureDaemonIdentity, isDaemonIdentityDrifted } from './lib/scope-collection.js';
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 import { readKiVersion, startVersionGuard } from './lib/version-guard.js';
 import { SERVICE_NAME } from './lib/constants.js';
@@ -31,9 +32,11 @@ import {
   DEFAULT_MCP_HTTP_PORT,
   DEFAULT_MCP_HTTP_HOST,
 } from './lib/mcp-http.js';
-import { listLiveStdioLocks, acquireStdioLock, releaseStdioLock } from './lib/mcp-stdio-lock.js';
+import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
+import { startDaemonRpcServer } from './lib/daemon-rpc.js';
+import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 
-/** 向量库空闲释放锁超时（ms）：常驻 MCP 空闲超时后自动 closeEngine 释放 LOCK */
+/** 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection */
 const VECTOR_IDLE_CLOSE_MS = 3_000;
 import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
@@ -49,7 +52,7 @@ import {
 /**
  * 构建一个 kisearch McpServer 并注册全部工具。
  * stdio 与 HTTP 传输复用同一工厂：HTTP 模式下每个会话新建一个实例，
- * 但它们共享 vector-client 的模块级单例 engine（单进程单锁）。
+ * daemon 进程内按 scope 复用 Collection engine，并由 coordinator 统一调度。
  */
 export function buildKiMcpServer(authScopes: string[] | null = null): McpServer {
   const server = new McpServer({
@@ -84,8 +87,8 @@ interface McpCliOptions {
 const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
 
 用法：
-  ki mcp                        stdio 模式（默认，单客户端单进程）
-  ki mcp --http                 HTTP 共享单例（默认回环 127.0.0.1:7423，本机免鉴权）
+  ki mcp                        stdio 模式（默认，桥接本机 daemon）
+  ki mcp --http                 HTTP 共享单例/唯一 zvec owner（默认回环 127.0.0.1:7423，本机免鉴权）
   ki mcp --http --daemon        HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
@@ -104,7 +107,7 @@ HTTP 模式参数：
   --no-web                      显式关闭前端页面（restart 时用于覆盖上次的 --web 延续）
   --daemon, -d                  后台常驻运行（仅 HTTP 模式，含 --web；脱离终端）
 
-提示：多个 IDE 共享同一持锁进程以避免向量库锁冲突，请用 ki mcp --http。`;
+提示：CLI、stdio MCP、HTTP MCP 共用同一 daemon；daemon 不可用时客户端会自动拉起，失败将明确报错。`;
 
 /** 从 args 取 --flag 的值（支持 --flag=value 与 --flag value 两种形式） */
 function getFlagValue(args: string[], name: string): string | undefined {
@@ -472,17 +475,16 @@ async function runRestartCommand(args: string[]): Promise<void> {
     port = resolveHttpPort(args, httpCfg);
   }
 
-  // 守卫①（对齐 startMcpServer 的 stdio 冲突守卫）：存活的 stdio 实例会与 HTTP 单例争抢向量库锁，
-  // 若在此静默 kill 会让用户某 IDE 的 stdio 连接无提示中断。fail-loud 并引导迁移 URL 接入。
+  // 仅拦截升级前遗留的直连 stdio 实例；新版本 stdio 是 daemon 桥接，不会持有 zvec 锁。
+  // 若在此静默 kill 旧实例会让用户某 IDE 的连接无提示中断，因此 fail-loud。
   const stdioLocks = listLiveStdioLocks();
   if (stdioLocks.length > 0) {
     const first = stdioLocks[0];
     const extra = stdioLocks.length > 1 ? `（另有 ${stdioLocks.length - 1} 个 stdio 实例）` : '';
     process.stderr.write(
-      `检测到存活的 ki mcp stdio 实例（pid ${first.pid}，启动于 ${first.startedAt}${extra}），` +
+      `检测到升级前遗留的直连 ki mcp stdio 实例（pid ${first.pid}，启动于 ${first.startedAt}${extra}），` +
         `restart 不会静默关闭它，以免中断正在使用该实例的 IDE 连接。\n` +
-        `请先将该 IDE 配置迁移为 URL 型接入（http://${probeHost(host)}:${port}/mcp），` +
-        `再执行 ki mcp restart。\n`,
+        `请先关闭该旧实例（或重启对应 IDE）后，再执行 ki mcp restart。\n`,
     );
     process.exit(1);
   }
@@ -642,67 +644,34 @@ export async function startMcpServer(): Promise<void> {
 
   const opts = parseMcpArgs(argv);
 
+  // stdio 作为薄桥接，不在客户端进程打开 zvec；首次使用时自动拉起本机 daemon。
+  if (!opts.http) {
+    await startStdioDaemonBridge();
+    return;
+  }
+
   // ─── 启动守卫（预检之前）：幂等复用 / 多实例冲突检测 ───
   // 探活与 lock 检查必须前置，保证「已有实例可复用/该被拒绝」的判定不被预检
   // （如缺 embedding Key 的异构 shell）拦截——重复运行在任何环境下都安全。
-  if (opts.http) {
-    // 命中健康实例 → 复用退出，全程不做预检
-    const live = await fetchHealthz(opts.host, opts.port);
-    if (live?.ok === true && live?.name === SERVICE_NAME) {
-      process.stderr.write(
-        `已有健康的 kisearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
-      );
-      process.exit(0);
-    }
-    // 存活的 stdio 实例会与 HTTP 单例争抢向量库锁 → 启动前指明冲突来源并拒绝（而非等取锁失败才报占用）
-    const stdioLocks = listLiveStdioLocks();
-    if (stdioLocks.length > 0) {
-      const pids = stdioLocks.map((l) => l.pid).join(' ');
-      process.stderr.write(
-        `检测到存活的 ki mcp stdio 实例（pid ${pids}），` +
-          `它与 HTTP 单例并存会争抢向量库锁导致降级，拒绝启动。\n` +
-          `请先关闭该 stdio 进程（kill ${pids}）并将对应 IDE 配置迁移为 URL 型接入，再启动 HTTP 服务。\n`,
-      );
-      process.exit(1);
-    }
-  } else {
-    // stdio 守卫①：已有健康 HTTP 单例 → 拒绝启动，引导迁移 URL 接入（fail-loud + 明确出路）
-    let guardHost: string = DEFAULT_MCP_HTTP_HOST;
-    let guardPort: number = DEFAULT_MCP_HTTP_PORT;
-    try {
-      const httpCfg = loadConfig().mcp?.http ?? {};
-      if (httpCfg.host) guardHost = httpCfg.host;
-      if (Number.isInteger(httpCfg.port) && httpCfg.port! >= 1 && httpCfg.port! <= 65535) {
-        guardPort = httpCfg.port!;
-      }
-    } catch {
-      /* 配置异常交由后续预检报告，此处用默认地址探活 */
-    }
-    const live = await fetchHealthz(guardHost, guardPort);
-    if (live?.ok === true && live?.name === SERVICE_NAME) {
-      // 展示用地址同步归一（0.0.0.0 等监听写法不是可连接地址）
-      const connectHost = probeHost(guardHost);
-      process.stderr.write(
-        `已有健康的 kisearch HTTP 单例在 ${connectHost}:${guardPort}（pid ${live.pid}），` +
-          `stdio 模式与其并存会争抢向量库锁，拒绝启动。\n` +
-          `请将本 IDE 的 MCP 配置改为 URL 型接入：{ "url": "http://${connectHost}:${guardPort}/mcp" }。\n`,
-      );
-      process.exit(1);
-    }
-    // stdio 守卫②：登记自身 lock（供 HTTP/restart 检测 stdio 冲突 + stop 定位）。
-    // 不再拒绝多实例：多 stdio 实例靠向量库空闲释放锁 + 撞锁重试错开共享，
-    // 「错开使用」互不影响。返回的其他存活实例仅提示，不阻断。
-    const others = acquireStdioLock();
-    if (others.length > 0) {
-      const pids = others.map((o) => o.pid).join(', ');
-      process.stderr.write(
-        `检测到已有 ki mcp stdio 实例（pid ${pids}），` +
-          `多实例将共享向量库（空闲自动释放锁，错开使用互不影响；同时使用时会短暂等待）。\n`,
-      );
-    }
-    // 'exit' 钩子保证预检失败/shutdown/process.exit 各路径都释放
-    // （kill -9 残留由下次启动的存活校验清理）
-    process.on('exit', () => releaseStdioLock());
+  // 命中健康实例 → 复用退出，全程不做预检
+  const live = await fetchHealthz(opts.host, opts.port);
+  if (live?.ok === true && live?.name === SERVICE_NAME) {
+    process.stderr.write(
+      `已有健康的 kisearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
+    );
+    process.exit(0);
+  }
+  // 旧版 stdio 实例仍可能直接持有旧布局的 zvec 锁；拒绝其与新 owner 并存，
+  // 避免旧客户端绕过 daemon 造成跨进程锁竞争。
+  const stdioLocks = listLiveStdioLocks();
+  if (stdioLocks.length > 0) {
+    const pids = stdioLocks.map((l) => l.pid).join(' ');
+    process.stderr.write(
+      `检测到存活的旧版 ki mcp stdio 实例（pid ${pids}），` +
+        `它可能绕过 daemon 直接占用向量库，拒绝启动。\n` +
+        `请先关闭该 stdio 进程（kill ${pids}）后再启动 HTTP daemon。\n`,
+    );
+    process.exit(1);
   }
 
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
@@ -728,57 +697,79 @@ export async function startMcpServer(): Promise<void> {
   // NEG-13：长驻进程版本自检 banner + 升级监听（升级后提示重启）
   const stopVersionGuard = startVersionGuard(SERVICE_NAME);
 
-  // 常驻进程启用向量库空闲释放锁：空闲超时后自动 closeEngine 释放 LOCK，
-  // 让多 stdio 实例 / CLI 能错开共享同一向量库（撞锁时 probe/open 自动重试）。
+  // HTTP 进程即为唯一 zvec owner，同时开放本地 RPC 给 CLI/stdio 使用。
+  process.env.KI_DAEMON_OWNER = '1';
+  // 捕获启动时的身份指纹（vectorDir + dataDir）。loadConfig 已支持 mtime 热失效：
+  // scope 授权类变更可热生效（否则撤权后仍 fail-open），但 vectorDir/dataDir 变更
+  // 会让内存 engine 与新解析路径不一致，必须由 assertDaemonIdentityCurrent fail-loud。
+  // 注意：客户端与 daemon 读同一份配置文件，热失效后两边指纹仍相同，ping 拦不住
+  // 这类漂移（它比的是“客户端 vs 磁盘”，而漂移是“daemon 内存 vs 磁盘”）。
+  captureDaemonIdentity(loadConfig());
+  // 配置热失效的已知边界：statSync 只能看 mtimeMs + size，若配置文件被改写为
+  // **字节数相同**的内容且落在同一毫秒内（如脚本 sed -i 原地替换同长度值），
+  // 缓存不会失效 —— 实测可复现且非确定性（同长度改名零间隔：一次检出、一次漏检）。
+  // 因该窗口涉及授权（撤权后仍可能放行），提供 SIGHUP 作为确定性出路（Unix 惯例）。
+  // 仅对真正的后台 daemon 注册：前台 `ki mcp --http` 仍在终端进程组内，注册监听器
+  // 会抑制 Node 默认终止行为 → 关终端后服务不退出、成为继续占用 HTTP 端口/RPC
+  // socket/zvec 锁的孤儿；前台模式保留 SIGHUP 的默认终止语义。
+  if (process.env.KI_DAEMON_DETACHED === '1') {
+    process.on('SIGHUP', () => {
+      // 队列非空时拒绝刷新：长操作（import/restore 可达数分钟）中途切配置，会让
+      // 同一请求的前后半段按不同路径解析（全仓 82 处独立 loadConfig、无请求级快照），
+      // 造成数据混合落位。“确定性出路”不能本身就是一致性风险源。
+      const snapshot = getSharedOperationCoordinator().snapshot();
+      const pending = Object.values(snapshot.queues).reduce((sum, n) => sum + n, 0);
+      if (snapshot.activeWorkers > 0 || pending > 0) {
+        process.stderr.write(
+          `[kisearch-daemon] SIGHUP 已忽略：当前有 ${snapshot.activeWorkers} 个操作在执行、${pending} 个在排队。`
+          + '长操作中途切换配置会导致同一请求前后半段按不同路径解析（数据混合落位）；'
+          + '请等操作完成后重发 SIGHUP，或用 ki mcp restart 重启。\n',
+        );
+        return;
+      }
+      // 必须「先失效新鲜度、再重读」而不是「先 resetConfigCache 再 loadConfig」：
+      // 后者会先销毁 last-known-good、再去读可能已损坏的配置；而信号回调内抛异常
+      // 无 uncaughtException 兜底 → daemon 当场崩溃并绕过优雅关闭（HTTP lock 与 RPC
+      // socket 残留、在跑的写盘中途被斩断）—— 运维最需要它的时刻（怀疑配置有问题
+      // → kill -HUP）反而变成自杀开关。
+      try {
+        invalidateConfigFreshness();
+        const next = loadConfig();
+        const issue = getConfigLoadIssue();
+        process.stderr.write(
+          '[kisearch-daemon] 收到 SIGHUP：配置缓存已强制刷新（scope 授权/token 类变更即时生效）。\n'
+          + (isDaemonIdentityDrifted(next)
+            ? '[kisearch-daemon] 注意：vectorDir/dataDir 已变，属身份漂移，必须 ki mcp stop && ki mcp --http --daemon 重启；SIGHUP 不能代替重启。\n'
+            : '')
+          + (issue ? `[kisearch-daemon] 注意：配置源当前有问题（${issue}），已沿用上一份配置。\n` : ''),
+        );
+      } catch (err) {
+        // 走到这里说明连 last-known-good 都没有（首次加载即失败）：保留错误可见，
+        // 但绝不让信号回调抛异常终止进程。
+        process.stderr.write(
+          `[kisearch-daemon] SIGHUP 刷新失败：${(err as Error).message}\n`
+          + '请执行 ki doctor 排查配置文件；修复后重发 SIGHUP 即生效，无需重启。\n',
+        );
+      }
+    });
+  }
+  const daemonRpc = await startDaemonRpcServer();
+
+  // daemon 启用向量库空闲释放：空闲超时后释放已打开的 Collection，降低 mmap/worker 占用。
   enableIdleClose(VECTOR_IDLE_CLOSE_MS);
 
-  // ─── HTTP 共享单例模式（多 IDE 共享同一持锁进程） ───
-  if (opts.http) {
-    await startHttpMcpServer({
-      host: opts.host,
-      port: opts.port,
-      token: opts.token,
-      allowedHosts: opts.allowedHosts,
-      web: opts.web,
-      buildServer: buildKiMcpServer,
-      onShutdown: stopVersionGuard,
-    });
-    return;
-  }
-
-  // ─── stdio 模式（默认，单客户端单进程） ───
-  process.stderr.write(
-    'kisearch MCP 以 stdio 模式启动（默认）。\n' +
-      '多个 stdio 实例与 CLI 共享同一向量库：空闲自动释放锁，错开使用互不影响。\n',
-  );
-  const server = buildKiMcpServer();
-
-  // 长驻进程：engine 在首次向量调用时惰性打开并跨请求复用（不 per-call 关闭），
-  // 仅在进程退出时统一 terminate worker + 释放 LOCK。
-  let shuttingDown = false;
-  const shutdown = async (code = 0) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    try {
+  await startHttpMcpServer({
+    host: opts.host,
+    port: opts.port,
+    token: opts.token,
+    allowedHosts: opts.allowedHosts,
+    web: opts.web,
+    buildServer: buildKiMcpServer,
+    onShutdown: () => {
       stopVersionGuard();
-    } catch {
-      /* 忽略 */
-    }
-    try {
-      await closeEngine();
-    } catch {
-      /* 关闭失败不阻塞退出 */
-    }
-    process.exit(code);
-  };
-  process.on('SIGINT', () => { void shutdown(0); });
-  process.on('SIGTERM', () => { void shutdown(0); });
-
-  // 启动 stdio 传输
-  const transport = new StdioServerTransport();
-  // stdio 关闭（客户端断开）时释放 engine，避免 worker 线程悬挂导致进程无法退出
-  transport.onclose = () => { void shutdown(0); };
-  await server.connect(transport);
+      daemonRpc.close();
+    },
+  });
 }
 
 // 入口

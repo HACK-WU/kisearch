@@ -26,6 +26,7 @@ import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import type { ResolveResult } from './lib/group-resolve.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 类型定义 ───
 
@@ -731,7 +732,7 @@ export type QueryGroupResult =
   | { ok: true; scope: string; output: string }
   | { ok: false; error: string };
 
-export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
+async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGroupResult> {
   try {
     const { scope, depth, hotCount, modes } = params;
     // groups 原样透传（存量行为零变化）；仅 subtree 做归一化（新参数，空串等价未传）
@@ -930,6 +931,11 @@ export async function executeQueryGroup(params: QueryGroupParams): Promise<Query
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
+  if (shouldUseDaemonClient()) return callDaemon<QueryGroupResult>('query-group', params);
+  return executeQueryGroupLocal(params);
 }
 
 // ─── CLI ───

@@ -33,6 +33,8 @@ import {
 import { closeEngine, vectorCountScope } from './lib/vector-client.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { extractScopeSnapshot } from './lib/safe-tar.js';
 
 // ─── 工具 ───
 
@@ -238,17 +240,13 @@ async function restoreFromSnapshot(
 
   // 解压
   try {
-    execFileSync('tar', ['-xzf', snapshotPath, '-C', scopeDirParent], {
-      stdio: 'ignore',
-    });
+    extractScopeSnapshot(snapshotPath, scopeDataDir);
   } catch (err) {
     // tar 解压失败：目录已删，尝试自动从安全网快照恢复
     if (preRestoreSnapshot) {
       process.stderr.write(`tar 解压失败，尝试从还原前快照自动恢复...\n`);
       try {
-        execFileSync('tar', ['-xzf', preRestoreSnapshot, '-C', scopeDirParent], {
-          stdio: 'ignore',
-        });
+        extractScopeSnapshot(preRestoreSnapshot, scopeDataDir);
         fail(
           `tar 解压失败：${(err as Error).message}\n已自动从还原前快照恢复原始数据`
         );
@@ -453,7 +451,13 @@ function validateRebuildOptsOrExit(): void {
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
 async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
   // 注入真实 countScope：全量重建清空旧向量前统计总数，删除过程输出进度条
-  const result = await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, opts);
+  const result = shouldUseDaemonClient()
+    // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
+    ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
+      scope: scopeName,
+      options: opts,
+    }, 0)
+    : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, opts);
   // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
   if (result.ok && !result.partial) {
     try {
@@ -499,6 +503,34 @@ async function main() {
     validateRebuildOptsOrExit();
 
     if (fromSnapshot) {
+      // 覆盖 scope KB 是复合写操作，真实 CLI 必须把删除、解压及可选向量重建
+      // 一次提交给 daemon；否则 daemon 内的 import/search 可能在目录删除与解压之间
+      // 读到半成品。未加 --yes 时仍在客户端执行只读预览，不产生任何写入。
+      if (shouldUseDaemonClient() && skipYes) {
+        // timeoutMs=0：快照解压与可选向量重建均为长任务，客户端超时只会误报失败。
+        const daemonResult = await callDaemon<Record<string, any>>('restore-snapshot', {
+          scope,
+          timestamp,
+          yes: true,
+          backupDir: backupDirOverride ? path.resolve(backupDirOverride) : undefined,
+          snapshotFile: snapshotFileArg ? path.resolve(snapshotFileArg) : undefined,
+          rebuildVector,
+          options: rebuildVector ? rebuildOpts : undefined,
+        }, 0);
+        const rebuilt = daemonResult.rebuildVector as Awaited<ReturnType<typeof rebuildScopeVectors>> | undefined;
+        if (rebuilt && !rebuilt.ok) {
+          output({
+            ok: false,
+            action: 'rebuild_vector',
+            scope,
+            error: rebuilt.errors[0]?.error ?? '重建向量失败',
+            restore: daemonResult,
+          });
+          process.exit(1);
+        }
+        output(daemonResult);
+        return;
+      }
       await restoreFromSnapshot(scope, {
         timestamp,
         yes: skipYes,

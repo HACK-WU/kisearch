@@ -2,11 +2,25 @@
 
 ## 解决的问题
 
-嵌入式向量库 `~/.ki/vector/` 同一时刻只能被**一个进程**持锁打开。当一台服务器连接多个 IDE，每个 IDE 各自用 `command: ki mcp`（stdio）拉起独立子进程时，只有一个进程能拿到锁，其余全部降级（`vectorAvailable: false`）。
+嵌入式向量库的 Collection 同一时刻只能由一个写入 owner 打开。当前 `ki mcp --http --daemon` 会成为指定 `vectorDir` 的**唯一 zvec owner**，CLI、stdio MCP 和 HTTP MCP 请求统一通过本机 daemon 调度，不再由各入口直接抢锁。
 
-HTTP 共享单例模式让 `ki mcp` 以**单进程 HTTP 服务**运行，作为向量库唯一持锁者，所有 IDE（本地或远程跨机）经 URL 共享同一进程 —— 从根本上消除多进程锁冲突。
+stdio 模式会自动桥接到本机 daemon；CLI 在 daemon 不存在时也会按当前配置自动拉起。不同 scope 使用独立 Collection 和队列，最多 `min(4, CPU 数量)` 并行；同一 scope 仍按序执行。因此“并发提交”不等于“同一 Collection 并行写入”，但用户不再需要手动停止 MCP 或反复重试锁错误。
 
-> **多实例错开共享**：常驻 MCP 实例（stdio / HTTP）与 CLI 命令现在也支持**错开共享**同一向量库——常驻实例空闲超时（3s）后自动释放向量库锁，撞锁方自动重试（2s × 3 次）等待对方释放。因此多个 stdio 实例 / CLI 在「错开使用」时互不影响，仅「同时使用」时会短暂等待（而非直接失败）。HTTP 单例模式仍是唯一持锁进程、避免任何并发等待的最彻底方案。
+HTTP lock 按 `vectorDir + dataDir` 身份指纹派生，多份配置可并存且不会让 stdio bridge 误连另一实例。
+
+## 长任务 API
+
+restore 与 rebuild-vector 通过统一 job 机制提供进度和取消：
+
+```text
+POST /api/restore/run
+GET  /api/restore/status?jobId=<id>
+POST /api/restore/cancel   {"jobId":"<id>"}
+```
+
+`/api/restore/run` 必须包含 `scope`；还原使用 `rebuildVector: true` 可在还原完成后继续重建向量，独立重建使用 `rebuildOnly: true`。阶段为 `restore` / `rebuild`，取消沿用批次边界语义：不会强行中断当前 tar、embedding 或 zvec 批次；当前批次完成后停止后续写入。取消响应为 `202` 的 `cancelling`，需继续轮询 status 确认最终状态。
+
+`GET /healthz` 额外返回 `vectorResources`，包含当前/峰值打开句柄数、打开/释放次数及耗时累计，可用于性能基线。
 
 ## 快速开始
 
@@ -36,7 +50,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 > 回环绑定（仅本机）免鉴权时，可省略 `headers`。
 >
-> ⚠️ **所有 IDE 必须使用完全一致的连接 URL**（`host`/`port` 一字不差，且不要混用 `localhost` 与 `127.0.0.1` 以外的写法）。URL 不一致会各自拉起独立进程，退回锁冲突。同样地，**不要再保留任何 IDE 的 stdio `command: ki mcp` 配置**，混用 stdio 会与 HTTP 单例争抢向量库锁。可用 `ki mcp --status` 确认当前是否只有一个持锁进程。
+> ⚠️ HTTP 客户端仍应使用一致的 `host`/`port`，以便连接同一服务；本机 IDE 也可以继续使用 stdio `command: ki mcp`，它会桥接到该 daemon，不会另开 zvec owner。可用 `ki mcp --status` 和 `/healthz` 查看 owner、布局版本及队列状态。
 
 ## 命令行参数
 
@@ -99,6 +113,9 @@ ki mcp --http --web
 | `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId` |
 | `/api/import/run` | POST | 触发导入（幂等追加到 `group`，异步 job，返回 `jobId`） |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
+| `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
+
+`/api/import/status` 的 `job` 会返回 `state`（`running`/`done`/`failed`/`cancelled`）、`phase`（`scan`/`vectorize`/`persist`）、`progress` 和 `cancelRequested`。服务重启后内存中的 job 状态不保留，需要重新提交或查看 daemon 日志。
 
 - `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
 - 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。
@@ -150,23 +167,21 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 `ki mcp --http` 启动流程（探活与冲突检测均在启动预检之前执行）：
 
 1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
-2. 检查 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid，避免 HTTP 单例与 stdio 进程争抢向量库锁后静默降级。
+2. 检查升级前遗留的 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的旧版直连 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid；新版本 stdio 是 daemon 桥，不会产生这类 zvec owner 冲突。
 3. 通过守卫后执行启动预检，再 `listen`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
-4. 成功监听后写 `~/.ki/mcp-http.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
+4. 成功监听后写按身份派生的 `~/.ki/mcp-http-<fingerprint>.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
 因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程——且不要求这些环境都能通过预检。
 
-## stdio 启动守卫
+## stdio 启动与 daemon 桥接
 
-stdio 模式（默认 `ki mcp`）在启动时检查**与 HTTP 单例的冲突**，但不拒绝多个 stdio 实例并存：
+stdio 模式（默认 `ki mcp`）不直接打开 zvec，也不再与 HTTP 单例抢锁：
 
-1. **已有健康 HTTP 单例**（按配置/默认地址探活 `host:port/healthz`）→ 拒绝启动（`exit 1`），提示将本 IDE 配置改为 URL 型接入 `{ "url": "http://<host>:<port>/mcp" }`。
-2. **已有存活的 stdio 实例**：不再拒绝多实例——多个 stdio 实例靠**向量库空闲释放锁 + 撞锁重试**错开共享（错开使用互不影响，同时使用会短暂等待）。每个实例以**原子独占方式**登记自己的 lock（`~/.ki/mcp-stdio-<pid>.lock`，文件名即 pid），供 `stop`/`restart`/`status` 逐一定位与 HTTP 冲突检测。
-3. lock 在守卫阶段（预检之前）即登记，退出时自动清理（含预检失败路径）；`kill -9` 残留的陈旧锁会在下次启动的存活校验中自动清理，不会误拦。
+1. 客户端先按当前配置连接对应 Unix Socket daemon；daemon 不存在时自动拉起 `ki mcp --http --daemon` 并等待健康握手。
+2. stdio 的 MCP 消息通过 Streamable HTTP 桥接到 daemon，工具执行和 scope 队列与 CLI/HTTP 请求共用。
+3. daemon 配置指纹、协议版本或存活检查失败时，stdio 以明确错误退出；不会静默切换到 direct zvec 路径。
 
-> ⚠️ 因「已有健康 HTTP 单例」被拒绝的 stdio 进程会在 stderr 给出完整出路后非 0 退出；部分 IDE 会自动重拉 MCP 进程，若 MCP 日志中反复出现该提示，请按提示将该 IDE 的配置迁移为 URL 型接入。多个 stdio 实例之间不再拒绝，仅在 stderr 提示已存在其他实例（错开共享）。
->
-> 注意：守卫基于 lock 文件，升级前启动的存量 stdio 进程没有 lock，对守卫不可见，需手动清理一次（`ps -ef | grep 'ki mcp'`）。
+> 多个 stdio 客户端可以同时启动，它们共享同一个 daemon owner；`~/.ki/mcp-stdio-<pid>.lock` 仅用于 `stop`/`status` 进程管理，不代表 zvec 持锁者。HTTP daemon 退出后，stdio 客户端需要重新连接或由 IDE 重启。
 
 ## 一键关闭（`ki mcp stop`）
 
@@ -178,7 +193,7 @@ ki mcp stop
 
 工作方式：
 
-1. **定位**：遍历 `~/.ki/mcp-stdio-<pid>.lock`（每实例一个）与 `~/.ki/mcp-http.lock` 取服务进程 pid，并探活 `/healthz` 兜底（lock 被手动删过但服务仍在跑的场景）；
+1. **定位**：遍历 `~/.ki/mcp-stdio-<pid>.lock`（每实例一个）与 `~/.ki/mcp-http-<fingerprint>.lock` 取服务进程 pid，并探活 `/healthz` 兜底（lock 被手动删过但服务仍在跑的场景）；
 2. **身份校验**：发信号前读 `/proc/<pid>/cmdline` 确认目标确为 ki mcp 进程，pid 已被无关进程复用时跳过不杀（仅清陈旧 lock）；
 3. **关闭**：SIGTERM 优雅退出（走退出钩子自动释放 lock 与向量库锁），超时 SIGKILL 兜底；
 4. **清理**：移除残留/陈旧/损坏的 lock 文件，输出 JSON 报告（每个目标的处置结果 + 被清理的 lock 列表）。
@@ -224,7 +239,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 
 ### 排查
 
-- 查看当前持锁守护进程：`cat ~/.ki/mcp-http.lock`；stdio 实例：`ls ~/.ki/mcp-stdio-*.lock`（每实例一个，文件名即 pid）
+- 查看当前持锁守护进程：`ls ~/.ki/mcp-http-*.lock` 后读取对应文件；stdio 实例：`ls ~/.ki/mcp-stdio-*.lock`（每实例一个，文件名即 pid）
 - 旧版单文件残留：`~/.ki/mcp-stdio.lock`（无 pid 后缀）为历史遗留格式，新版已不读它；若确认无旧版进程在跑，可手动 `rm ~/.ki/mcp-stdio.lock` 清理
 - 关闭全部实例并清理 lock：`ki mcp stop`
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`

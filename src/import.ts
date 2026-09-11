@@ -16,12 +16,13 @@
 
 import { Command } from 'commander';
 import path from 'path';
-import { loadConfig, resolveScope } from './lib/config.js';
+import { loadConfig, resolveScope, runWithConfigSnapshot } from './lib/config.js';
 
 import { handleDirectImport } from './lib/import.js';
 import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -47,8 +48,10 @@ program
   .option('--no-assets', '关闭本地图片附件收集（等价 config import.assets:false；关闭后前端对图片引用显示占位块）')
   .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
   .action(async (opts) => {
+    const requestConfig = loadConfig();
+    return runWithConfigSnapshot(requestConfig, async () => {
     try {
-      const scope = resolveScope(loadConfig(), opts.scope);
+      const scope = resolveScope(requestConfig, opts.scope);
       const sourceDir = path.resolve(String(opts.source));
       const group = opts.group ? String(opts.group).trim() : '';
       const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
@@ -58,16 +61,26 @@ program
       const cleanEnabled = opts.clean !== false;
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
 
-      const result = await handleDirectImport({ scope, sourceDir, group, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules, tags: opts.tags, assets: opts.assets !== false });
+      const importParams = { scope, sourceDir, group, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules, tags: opts.tags, assets: opts.assets !== false };
+      const result = !shouldUseDaemonClient()
+        ? await handleDirectImport(importParams)
+        // timeoutMs=0：导入内部向量化预算为 60s + N*10s（100 chunk ≈ 17 分钟），
+        // 任何固定客户端超时都会先于任务完成而误报失败；而超时并不取消 daemon
+        // 侧任务，用户看到失败后重跑会撞 import.lock 进入死路（清锁会破坏正在
+        // 运行的任务，不清则永远进不去）。daemon 死亡由 socket error 兜底感知。
+        : await callDaemon('import', importParams, 0);
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
 
       // 自动备份（失败不阻断）：导入成功后触发，保证首次导入也生成 scope 快照。
       try {
-        const config = loadConfig();
-        const backupResult = autoBackup(config, scope);
-        if (backupResult.ok && backupResult.snapshotBackup) {
-          process.stderr.write(`自动备份完成：${backupResult.snapshotBackup}\n`);
+        const backupResult = shouldUseDaemonClient()
+          ? await callDaemon<Record<string, unknown>>('backup', { scope }, 0)
+          : autoBackup(loadConfig(), scope);
+        const snapshot = (backupResult as { snapshotPath?: string; snapshotBackup?: string }).snapshotPath
+          ?? (backupResult as { snapshotBackup?: string }).snapshotBackup;
+        if ((backupResult as { ok?: boolean }).ok && snapshot) {
+          process.stderr.write(`自动备份完成：${snapshot}\n`);
         }
       } catch (backupErr) {
         process.stderr.write(`警告：自动备份失败 — ${(backupErr as Error).message}\n`);
@@ -77,6 +90,7 @@ program
       output({ ok: false, error: (err as Error).message });
       process.exit(1);
     }
+    });
   });
 
 program.parse();

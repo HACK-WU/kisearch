@@ -46,6 +46,7 @@ const COMMANDS = {
   'restore': 'src/restore.ts',
   'export': 'src/export.ts',
   'wiki-backfill': 'src/wiki-backfill.ts',
+  'migrate-vector': 'src/migrate-vector.ts',
 };
 
 // 获取命令和参数
@@ -97,6 +98,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
   wiki-backfill     KB 历史关系全量写回 Wiki（幂等补齐）
+  migrate-vector    显式迁移旧单 Collection 到按 scope Collection（旧数据保留）
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
 
 全局参数：
@@ -112,11 +114,12 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki backup my-project
   ki restore my-project --from-snapshot --yes
   ki export my-project --output ./wiki-output
+  ki migrate-vector --yes
   ki manage-index --scope my-project --action create-root --root-name "我的项目"
   ki query-group --scope my-project
   ki search --scope my-project --query "用户登录流程"
-  ki mcp                                  # stdio 模式（默认）
-  ki mcp --http                           # HTTP 共享单例（默认回环 127.0.0.1，本机免鉴权）
+  ki mcp                                  # stdio 模式（默认，桥接本机 daemon）
+  ki mcp --http                           # HTTP 共享单例/唯一 zvec owner（默认回环 127.0.0.1，本机免鉴权）
   ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/多个/all）
@@ -150,6 +153,9 @@ const scriptArgs = filteredArgs.slice(1);
 
 // 构建子进程环境变量
 const childEnv = { ...process.env, KI_ORIGINAL_CWD: process.cwd() };
+// 标记真实 CLI 客户端：命令的 execute 层将通过本机 daemon RPC 统一排队。
+// daemon 自身稍后设置 KI_DAEMON_OWNER=1，避免 RPC 回调自身。
+childEnv.KI_DAEMON_CLIENT = '1';
 if (configPath) {
   childEnv.KI_CONFIG_PATH = path.resolve(configPath);
 }
@@ -160,6 +166,11 @@ try {
   // 不带 --http 的 --daemon 走正常 spawn，交由 mcp-server 内的「仅 HTTP 模式」校验报错。
   const isDaemon =
     scriptArgs.includes('--http') && (scriptArgs.includes('--daemon') || scriptArgs.includes('-d'));
+
+  // 标记真正的后台 daemon（detached + stdio ignore），供 mcp-server 判定 SIGHUP 语义：
+  // 前台 `ki mcp --http` 仍在终端进程组内，注册 SIGHUP 监听器会抑制 Node 默认终止
+  // 行为，导致关闭终端后服务不退出、成为继续占用 HTTP 端口/RPC socket/zvec 锁的孤儿。
+  if (isDaemon) childEnv.KI_DAEMON_DETACHED = '1';
 
   // 使用 jiti 执行 TypeScript 脚本（spawn 异步 + 信号转发）
   // cwd 设为用户当前目录，确保相对路径参数（如 --results）正确解析

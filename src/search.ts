@@ -12,11 +12,12 @@
 import { Command } from 'commander';
 import { validateScope, parseScopes, getLocalKbDir } from './lib/scope.js';
 import { loadConfig, resolveScope, getScopeMode } from './lib/config.js';
-import { vectorSearch, vectorListTags, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { vectorSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 /**
  * tag 优先级：默认搜全部时，ki-search（内容）优先，其次 ki-relation / ki-path
@@ -58,7 +59,7 @@ export type SearchResult =
       /** 多 scope 检索时实际检索的 scope 列表（单 scope 不返回，向后兼容） */
       scopes?: string[];
       results: SearchHit[];
-      /** 多 scope 下被跳过的 scope 及原因（合法但未注册等；无跳过时不返回） */
+      /** 被跳过的 scope 及原因（多 scope 下未注册；或任意 scope 缺向量 Collection；无跳过时不返回） */
       skipped?: { scope: string; reason: string }[];
     }
   | { ok: false; error: string; degraded?: boolean };
@@ -80,7 +81,7 @@ export function fetchOriginal(scope: string, group: string, relation: string): {
   }
 }
 
-export async function executeSearch(params: {
+async function executeSearchLocal(params: {
   scope?: string;
   query: string;
   limit?: number;
@@ -126,7 +127,7 @@ export async function executeSearch(params: {
       scopes = effective;
     }
 
-    // 向量服务可用性检测（单集合共享：以首个 scope 触发中断标记前置检测引导）
+    // 向量服务可用性检测（以首个 scope 触发中断标记前置检测引导）
     const avail = await ensureVectorAvailable(scopes[0]);
     if (!avail.available) {
       return {
@@ -136,10 +137,21 @@ export async function executeSearch(params: {
       };
     }
 
+    // Collection 缺失检测（REQ-11 降级标记）：vectorSearch 的 fan-out 会静默跳过
+    // 「已解析为合法 scope、但 Collection 目录不存在或为空」的分片（避免查询意外
+    // 创建新库）。不上报就是静默漏召回：存量未迁移或目录被外部删除都会表现为
+    // “搜不到”且零可诊断信息，故在此显式记录并给出出路。
+    for (const missing of findMissingScopeCollections(scopes)) {
+      skipped.push({
+        scope: missing,
+        reason: '无向量 Collection（尚未导入或存量未迁移）；可执行 ki migrate-vector --yes 迁移旧布局，或 ki import 重新导入',
+      });
+    }
+
     // 显式传 tags → 单次查询（多 tag OR，复用 vectorSearch 的 buildScopeTagFilter）。
     // 不传 tags（默认搜全部）→ 按 tag 分查：每个 tag 最多取 limit 条（组内按 score 降序），
     // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
-    // 多 scope：单次查询 + scope OR 过滤（embedding 仅 1 次）；无 tags 时对各 scope tag 并集分组限额。
+    // 多 scope：各 Collection fan-out 后应用层合并，query vector 在 fan-out 前只生成一次。
     let raw: VectorSearchResult[];
     if (params.tags) {
       raw = await vectorSearch({
@@ -159,8 +171,8 @@ export async function executeSearch(params: {
       if (tagNames.length === 0) {
         raw = [];
       } else {
-        // 单次查询（多 tag OR 过滤）：embedding 只做 1 次（逐 tag 分查会对同一 query
-        // 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按 tag 数放大保障
+        // 单次查询（多 tag OR 过滤）：每个 scope 内多 tag 只做 1 次 embedding（逐 tag
+        // 分查会对同一 query 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按 tag 数放大保障
         // 每 tag 召回上限，查询后按 tag 分组限额 + TAG_PRIORITY 排序。
         // ⚠️ 与原逐 tag 分查近似等价：topk 为全局分配，极端场景（单 tag 命中数
         // 超过 limit×N 且 score 全面占优）下其他 tag 可能被挤出——多数场景因下游
@@ -275,13 +287,26 @@ export async function executeSearch(params: {
       }
     }
 
-    // 响应结构：单 scope 保持现状（向后兼容）；多 scope 增量返回 scopes / skipped 与命中级 scope
+    // 响应结构：单 scope 保持现状（向后兼容）；多 scope 增量返回 scopes 与命中级 scope。
+    // skipped 不再仅限多 scope：单 scope 的 Collection 缺失同样是漏召回，必须显式标记。
     return multi
       ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}) }
-      : { ok: true, scope: scopes[0], results };
+      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}) };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeSearch(params: {
+  scope?: string;
+  query: string;
+  limit?: number;
+  threshold?: number;
+  tags?: string;
+  includeOriginal?: boolean;
+}): Promise<SearchResult> {
+  if (shouldUseDaemonClient()) return callDaemon<SearchResult>('search', params);
+  return executeSearchLocal(params);
 }
 
 // ─── CLI ───

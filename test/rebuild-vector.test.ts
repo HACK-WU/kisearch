@@ -855,4 +855,24 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
     assert.strictEqual(tagEntries.filter((e) => e.tags === 'a').length, 2);
     assert.strictEqual(tagEntries.filter((e) => e.tags === 'b').length, 2);
   });
+
+  it('取消在批次边界生效：已取消任务不清空旧向量也不写入 KB', async () => {
+    const s = setupScope('rs-cancel');
+    useConfig(s.configPath);
+    const controller = new AbortController();
+    controller.abort();
+    let deleteCalls = 0;
+    await assert.rejects(
+      () => rebuildScopeVectors(
+        'rs-cancel',
+        {
+          deleteScope: async () => { deleteCalls++; return { deleted: 0 }; },
+          bulkStore: async () => ({ total: 0, succeeded: 0, failed: 0, results: [] }),
+        },
+        { abortSignal: controller.signal },
+      ),
+      (err: any) => err.code === 'REBUILD_CANCELLED',
+    );
+    assert.equal(deleteCalls, 0);
+  });
 });

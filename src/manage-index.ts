@@ -17,6 +17,7 @@ import type { GroupIndex } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
 import { vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 辅助函数 ───
 
@@ -79,7 +80,7 @@ export type ManageCreateResult =
   | { ok: true; scope: string; path: string; hint?: string }
   | { ok: false; error: string };
 
-export async function executeManageCreate(params: ManageCreateParams): Promise<ManageCreateResult> {
+async function executeManageCreateLocal(params: ManageCreateParams): Promise<ManageCreateResult> {
   try {
     const { scope, name, parent } = params;
 
@@ -136,6 +137,11 @@ export async function executeManageCreate(params: ManageCreateParams): Promise<M
   }
 }
 
+export async function executeManageCreate(params: ManageCreateParams): Promise<ManageCreateResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ManageCreateResult>('manage-create', params);
+  return executeManageCreateLocal(params);
+}
+
 export type ListScopesResult = {
   ok: true;
   scopes: Array<{ scope: string; topGroups: string[]; registered: boolean; initialized: boolean }>;
@@ -174,7 +180,7 @@ export interface ManageDeleteEmptyParams {
 }
 
 export type ManageDeleteEmptyResult =
-  | { ok: true; path: string; hint?: string }
+  | { ok: true; scope: string; path: string; hint?: string }
   | { ok: false; error: string; children?: string[]; hint?: string };
 
 /**
@@ -182,7 +188,7 @@ export type ManageDeleteEmptyResult =
  * 无本地 KB 文件时才执行，非空一律拒绝并引导走 CLI（带二次确认）。
  * 非破坏性：不触发级联删除，只清理树节点和 cache 中无 relation 的空壳 key。
  */
-export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams): Promise<ManageDeleteEmptyResult> {
+async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): Promise<ManageDeleteEmptyResult> {
   try {
     const { scope, name, parent } = params;
 
@@ -297,6 +303,103 @@ export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams):
   }
 }
 
+export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams): Promise<ManageDeleteEmptyResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ManageDeleteEmptyResult>('manage-delete-empty', params);
+  return executeManageDeleteEmptyLocal(params);
+}
+
+export type ManageDeleteResult =
+  | { ok: true; scope: string; path: string; hint?: string; cascade: Record<string, unknown> }
+  | { ok: false; error: string; children?: string[]; hint?: string };
+
+/**
+ * Group 删除的可复用实现。CLI 客户端把该完整复合操作提交给 daemon，
+ * 由 owner 在同一 scope 队列内完成 Group 树、cache、KB 与向量级联删除。
+ */
+async function executeManageDeleteLocal(params: {
+  scope?: string;
+  parent?: string;
+  name?: string;
+  force?: boolean;
+}): Promise<ManageDeleteResult> {
+  try {
+    const { name, force } = params;
+    if (!name) return { ok: false, error: 'delete 需要 --name 参数' };
+    const resolvedScope = resolveScope(loadConfig(), params.scope);
+    validateScope(resolvedScope);
+    const data = readGroupIndex(resolvedScope);
+    if (!data) return { ok: false, error: 'group-index.json 不存在' };
+
+    const indexPath = getGroupIndexPath(resolvedScope);
+    const cachePath = getRelationsCachePath(resolvedScope);
+    const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
+    let parentPath = (params.parent || '').replace(/^\/+|\/+$/g, '');
+    let container = findContainer(data.groups, parentPath);
+    let hint: string | undefined;
+
+    if (!container) {
+      const resolved = await resolveGroupPath(parentPath, data, groupsData);
+      if (!resolved.matched) {
+        const hintParts: string[] = [`父节点路径不存在：${parentPath || '(顶层)'}`];
+        if (resolved.hint) hintParts.push(resolved.hint);
+        const topChildren = Object.keys(data.groups);
+        if (topChildren.length > 0 && !parentPath) hintParts.push(`可用的顶层节点：${topChildren.join(', ')}`);
+        return { ok: false, error: hintParts.join('\n') };
+      }
+      parentPath = resolved.resolvedPath;
+      hint = resolved.hint;
+      container = findContainer(data.groups, parentPath);
+    }
+    if (!container) return { ok: false, error: `父节点路径不存在：${parentPath || '(顶层)'}` };
+
+    const [parentNode] = container;
+    if (parentNode[name] === undefined) {
+      const siblings = Object.keys(parentNode);
+      return {
+        ok: false,
+        error: `节点 "${name}" 不存在于 "${parentPath || '(顶层)'}" 下`,
+        hint: siblings.length > 0
+          ? `"${parentPath || '(顶层)'}" 下的子节点：${siblings.join(', ')}`
+          : `"${parentPath || '(顶层)'}" 下无子节点`,
+      };
+    }
+    const targetNode = parentNode[name] as Record<string, unknown>;
+    if (!isEmptyNode(targetNode) && !force) {
+      return { ok: false, error: `节点 "${name}" 非空，包含子节点。使用 --force 强制删除`, children: Object.keys(targetNode) };
+    }
+
+    delete parentNode[name];
+    writeJson(indexPath, data as unknown as Record<string, unknown>);
+    const deletedPath = parentPath ? `${parentPath}/${name}` : name;
+    const cascade = await cascadeDeleteGroupData(resolvedScope, deletedPath);
+    return {
+      ok: true,
+      scope: resolvedScope,
+      path: deletedPath,
+      ...(hint ? { hint } : {}),
+      cascade: {
+        cacheGroupsRemoved: cascade.cacheGroupsRemoved.length,
+        localKbFilesRemoved: cascade.localKbFilesRemoved.length,
+        memDeleted: cascade.memDeleted,
+        memSkipped: cascade.memSkipped,
+        ...(cascade.errors.length > 0 ? { errors: cascade.errors } : {}),
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export async function executeManageDelete(params: {
+  scope?: string;
+  parent?: string;
+  name?: string;
+  force?: boolean;
+}): Promise<ManageDeleteResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ManageDeleteResult>('manage-delete', params);
+  return executeManageDeleteLocal(params);
+}
+
 // ─── 级联清理：删除 Group 时同步清理 relations-cache + local-kb + 向量 ───
 
 interface CascadeDeleteResult {
@@ -313,7 +416,7 @@ interface CascadeDeleteResult {
  * 清理范围：
  *   1. relations-cache.json 中所有以 groupPath 为前缀的 key（含子 Group）
  *   2. local-kb 的 index.json 文件
- *   3. 向量记忆（收集所有 memoryId 一次批量 vectorDelete，无 memoryId 的条目计入 memSkipped）
+ *   3. 向量记忆（收集所有 memoryIds 一次批量 vectorDelete，无 memoryId 的条目计入 memSkipped）
  *
  * 不清理 wiki 文件（用户明确要求保留）。
  */
@@ -349,36 +452,41 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
     }
   }
 
-  // 收集所有 memoryId，一次批量 vectorDelete；无 memoryId 的条目计入 memSkipped
-  const idsToDelete: string[] = [];
+  // 收集所有 memoryIds，一次批量 vectorDelete；无向量 id 的 relation 计入 memSkipped
+  const idsToDelete = new Set<string>();
   for (const key of keysToDelete) {
     const groupData = cache.groups[key];
     if (!groupData?.hot_relations) continue;
     for (const rel of groupData.hot_relations) {
-      if (rel.memoryId) {
-        idsToDelete.push(rel.memoryId);
+      const relationIds = Array.isArray((rel as { memoryIds?: unknown }).memoryIds)
+        ? (rel as unknown as { memoryIds: unknown[] }).memoryIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+        : rel.memoryId
+          ? [rel.memoryId]
+          : [];
+      if (relationIds.length > 0) {
+        for (const id of relationIds) idsToDelete.add(id);
       } else {
         result.memSkipped++;
       }
     }
   }
 
-  if (idsToDelete.length > 0) {
+  if (idsToDelete.size > 0) {
     const avail = await ensureVectorAvailable();
     if (avail.available) {
       try {
-        const delResult = await vectorDelete({ scope, ids: idsToDelete });
+        const delResult = await vectorDelete({ scope, ids: [...idsToDelete] });
         result.memDeleted = delResult.deleted;
         for (const e of delResult.errors) {
           result.errors.push(`vectorDelete ${e.id} 失败: ${e.reason}`);
         }
       } catch (err) {
         result.errors.push(`vectorDelete 批量失败: ${(err as Error).message}`);
-        result.memSkipped += idsToDelete.length;
+        result.memSkipped += idsToDelete.size;
       }
     } else {
       result.errors.push(`向量服务不可用，跳过向量删除: ${avail.reason || ''}`);
-      result.memSkipped += idsToDelete.length;
+      result.memSkipped += idsToDelete.size;
     }
   }
 
@@ -426,9 +534,30 @@ program
     try {
       const { scope, action, parent, name, force } = opts;
 
+      // Group 删除包含向量级联清理；真实 CLI 交给 daemon 作为一个完整复合操作执行，
+      // 避免客户端直接打开 scope Collection。daemon owner 内会落到 local helper。
+      if (action === 'delete' && shouldUseDaemonClient()) {
+        const result = await executeManageDelete({ scope, parent, name, force: !!force });
+        output(result as unknown as Record<string, unknown>);
+        await closeEngine();
+        if (!result.ok) process.exit(1);
+        return;
+      }
+
       // ─── list-scopes：不需要 scope ───
       if (action === 'list-scopes') {
         output(executeListScopes() as unknown as Record<string, unknown>);
+        return;
+      }
+
+      // Group 创建同样是 KB/Group 树的写操作，必须和 import/sync 共用 daemon
+      // 队列；否则客户端读旧 group-index 后直接写回会覆盖 owner 刚提交的更新。
+      if (action === 'create' && shouldUseDaemonClient()) {
+        const resolvedScope = resolveScope(loadConfig(), scope);
+        validateScope(resolvedScope);
+        const result = await executeManageCreate({ scope: resolvedScope, parent, name });
+        output(result as unknown as Record<string, unknown>);
+        if (!result.ok) process.exit(1);
         return;
       }
 

@@ -118,6 +118,10 @@ export interface HandleDirectImportArgs {
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
   assets?: boolean;
+  /** daemon HTTP job 使用：报告可观测进度；不影响 CLI 输出。 */
+  onProgress?: (progress: { phase: 'scan' | 'vectorize' | 'persist'; done: number; total: number }) => void;
+  /** daemon HTTP job 使用：在当前批次完成后安全中止，不强行打断 zvec/embedding 调用。 */
+  abortSignal?: AbortSignal;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -387,6 +391,40 @@ export async function handleDirectImport(
     logWarn('--tags 解析后无有效标签（内部保留标签 ki-search/ki-relation/ki-path 不可用作自定义标签；已忽略，本次不打标）');
   }
 
+  let processedFileCount = 0;
+  let totalFileCount = 0;
+  let cleanedUp = false;
+  let lockAcquired = false;
+  let onInterrupt: ((signal: NodeJS.Signals) => void) | null = null;
+  // handleDirectImport 既被独立 CLI 调用，也被 daemon owner 调用。后者不能
+  // 注册会直接 process.exit 的进程级信号处理器，否则 `ki mcp stop` 在导入中
+  // 会绕过 HTTP 优雅关闭，遗留 zvec worker/LOCK。daemon 任务使用 abortSignal
+  // 取消；只有独立 CLI 保留 Ctrl+C/TERM 的旧语义。
+  const installProcessSignalHandler = process.env.KI_DAEMON_OWNER !== '1';
+  const cleanupCancelledImport = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try {
+      if (lockAcquired) {
+        writeInterruptMark(scope, { processedFiles: processedFileCount, totalFiles: totalFileCount, signal: 'CANCEL' });
+        clearImportLock(scope);
+        lockAcquired = false;
+      }
+      if (onInterrupt) {
+        process.removeListener('SIGINT', onInterrupt);
+        process.removeListener('SIGTERM', onInterrupt);
+      }
+    } catch { /* 取消反馈不应覆盖主错误 */ }
+  };
+  const checkCancelled = () => {
+    if (!args.abortSignal?.aborted) return;
+    cleanupCancelledImport();
+    throw Object.assign(new Error(`导入已取消（已完成 ${processedFileCount}/${totalFileCount} 个文件；当前批次已结束）`), {
+      code: 'IMPORT_CANCELLED',
+    });
+  };
+  checkCancelled();
+
   // 单文件导入支持：sourceDir 可为单个 .md 文件（缺省 group 时用 scope name）
   const sourceIsFile = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isFile();
   if (!fs.existsSync(sourceDir) || (!sourceIsFile && !fs.statSync(sourceDir).isDirectory())) {
@@ -400,25 +438,28 @@ export async function handleDirectImport(
   if (!acquireImportLock(scope)) {
     throw new Error(`scope "${scope}" 已有导入进行中（import.lock 存在），请等待完成或清理锁文件后重试`);
   }
+  lockAcquired = true;
   // REQ-01：SIGINT/SIGTERM 捕获 → 写中断标记 + 明确提示；SIGKILL 不可捕获由 probe 兜底（双路径）
   let interrupted = false;
   /** 中断时可读的进度状态（文件处理循环中更新；信号回调是同步的，无法读异步循环内变量） */
-  let importedFileCount = 0;
-  let totalFileCount = 0;
-  const onInterrupt = (signal: NodeJS.Signals) => {
-    if (interrupted) return;
-    interrupted = true;
-    try {
-      writeInterruptMark(scope, { processedFiles: importedFileCount, totalFiles: totalFileCount, signal });
-      process.stderr.write(`\n⚠ 导入已中断（${signal}），已写中断标记（已完成 ${importedFileCount}/${totalFileCount} 个文件）。重新导入或执行 ki restore <scope> --rebuild-vector 恢复\n`);
-      // 中断路径同步清锁（N4：避免 SIGTERM 后 import.lock 残留）；保留中断标记供引导（不清标记）
-      clearImportLock(scope);
-    } catch { /* 标记/锁清理失败不阻断退出 */ }
-    process.exit(130);
-  };
-  process.once('SIGINT', onInterrupt);
-  process.once('SIGTERM', onInterrupt);
+  if (installProcessSignalHandler) {
+    onInterrupt = (signal: NodeJS.Signals) => {
+      if (interrupted) return;
+      interrupted = true;
+      try {
+        writeInterruptMark(scope, { processedFiles: processedFileCount, totalFiles: totalFileCount, signal });
+        process.stderr.write(`\n⚠ 导入已中断（${signal}），已写中断标记（已完成 ${processedFileCount}/${totalFileCount} 个文件）。重新导入或执行 ki restore <scope> --rebuild-vector 恢复\n`);
+        // 中断路径同步清锁（N4：避免 SIGTERM 后 import.lock 残留）；保留中断标记供引导（不清标记）
+        clearImportLock(scope);
+        lockAcquired = false;
+      } catch { /* 标记/锁清理失败不阻断退出 */ }
+      process.exit(130);
+    };
+    process.once('SIGINT', onInterrupt);
+    process.once('SIGTERM', onInterrupt);
+  }
 
+  try {
   const { loadConfig, getScopeImportConfig, getScopeCleanConfig } = await import('./config.js');
   const cfg = loadConfig();
   const importCfg = getScopeImportConfig(cfg, scope);
@@ -469,14 +510,18 @@ export async function handleDirectImport(
   /** 用 Set 去重：同一附件被多篇 md 引用时仅计一次（复制为同名覆盖，计数语义 = 落盘文件数） */
   const assetCopied = new Set<string>();
   totalFileCount = files.length; // 中断标记总文件数（REQ-01）
+  args.onProgress?.({ phase: 'scan', done: 0, total: files.length });
 
   for (const rel of files) {
+    checkCancelled();
     // 单文件导入：rel 是 basename，absPath 即 sourceDir 本身（避免 xxx.md/xxx.md 的 ENOTDIR）
     const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
     const stat = fs.statSync(absPath);
     // 前置检查（先于写 local KB）：大小超限 / chunk 超限 / relation 冲突
     if (stat.size > maxFileSizeBytes) {
       skipped.push(rel);
+      processedFileCount++;
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
       logWarn(`文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}）：${rel}，可手动切分后导入`);
       continue;
     }
@@ -490,6 +535,8 @@ export async function handleDirectImport(
     const existingRel = groupData?.hot_relations.find((r) => r.text === relation);
     if (existingRel && existingRel.sourcePath !== rel) {
       conflictSkipped.push(rel);
+      processedFileCount++;
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
       logWarn(`relation 冲突已跳过（同 group "${groupPath}" 下已有 "${relation}"）：${rel}`);
       continue;
     }
@@ -510,6 +557,8 @@ export async function handleDirectImport(
         skipped.push(rel);
         logWarn(`清洗 hook 失败已跳过（${rel}）：${hookResult.failedHooks.join(', ')}，已回滚 local KB`);
         removeFromLocalKb(scope, groupPath, relation);
+        processedFileCount++;
+        args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
         continue;
       }
       textForVector = hookResult.text;
@@ -520,6 +569,8 @@ export async function handleDirectImport(
       skipped.push(rel);
       logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
       removeFromLocalKb(scope, groupPath, relation); // 超限同样回滚（保持一致性）
+      processedFileCount++;
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
       continue;
     }
     // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
@@ -544,10 +595,11 @@ export async function handleDirectImport(
       chunkRelation: deriveChunkRelation(rel, chunk.index),
     }));
     fileRecords.push({ rel, groupPath, relation, chunks, entries });
-    importedFileCount = fileRecords.length; // 中断标记已处理文件数（REQ-01）
+    processedFileCount++;
     // 进度 = 已处理文件数（O-01 文件数分母）。不传 detail（文件名）：避免 TTY \r 刷新时
     // 长路径残留叠加成乱码（bug-impact-analysis），进度条仅显示文件数 + 百分比。
     logProgress(fileRecords.length, files.length);
+    args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
   }
   if (skipped.length > 0) {
     logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
@@ -569,6 +621,8 @@ export async function handleDirectImport(
   // 2) Phase 2~5
   const TOTAL = 5;
   const memoryMap = new Map<string, string>();
+  checkCancelled();
+  args.onProgress?.({ phase: 'vectorize', done: 0, total: Math.max(entries.length, 1) });
 
   // ── 预构建路径向量条目（ki-relation 每个 chunk 一条 + ki-path 每 group 一条）──
   const pathEntries: PathVectorizeEntry[] = [];
@@ -622,6 +676,11 @@ export async function handleDirectImport(
     : await bulkVectorize(entries, scope, {
         timeoutMs: 60_000 + entries.length * 10_000,
       });
+  checkCancelled();
+  args.onProgress?.({ phase: 'vectorize', done: entries.length, total: Math.max(entries.length, 1) });
+  // 取消请求在向量化批次完成后生效；路径向量和自定义标签属于后续独立写批次，
+  // 开始每个批次前再次检查，避免“已取消”仍继续写入全部辅助向量。
+  checkCancelled();
   if (vector && pathEntries.length > 0) {
     const pathResult = await bulkStorePaths(pathEntries);
     logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
@@ -631,6 +690,7 @@ export async function handleDirectImport(
   // 机制对齐 sync-relation：text=文件原文、tags=自定义 tag（每个 tag 各一条），
   // 使 `ki search -t <tag>` 能召回导入文件。tag 向量 docId 回填到文件级 relation 的 memoryIds。
   let tagMemoryMap = new Map<string, string[]>();
+  checkCancelled();
   if (vector && customTags.length > 0) {
     logPhaseStart(2, TOTAL, `写入自定义标签向量（${customTags.join(', ')}）...`);
     const tagEntries: { text: string; tags: string; group: string }[] = [];
@@ -664,6 +724,8 @@ export async function handleDirectImport(
   }
 
   // ── Phase 3/4：Group 树 + relation-cache（串行，KB 写入近实时无并行损失）──
+  checkCancelled();
+  args.onProgress?.({ phase: 'persist', done: 0, total: 1 });
   // groups 初始集：缺省 group 时为空（由 phase3EnsureGroups 从 entries 反推），显式 group 时含该根
   const ctx: ImportContext = {
     scope,
@@ -705,6 +767,7 @@ export async function handleDirectImport(
   }
   writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
   writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+  args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
 
@@ -722,8 +785,11 @@ export async function handleDirectImport(
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
-  process.removeListener('SIGINT', onInterrupt);
-  process.removeListener('SIGTERM', onInterrupt);
+  lockAcquired = false;
+  if (onInterrupt) {
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onInterrupt);
+  }
 
   return {
     ok: true,
@@ -742,6 +808,19 @@ export async function handleDirectImport(
     groups: [...kbResult.groups].sort(),
     source,
   };
+  } finally {
+    // 任意失败（配置/扫描/向量化/元数据写入）都必须释放 import.lock，
+    // 否则下一次导入会被误判为“仍有任务运行”。取消路径已提前清锁，
+    // 这里通过 lockAcquired 保证幂等；成功路径 releaseImportLock 同样会置 false。
+    if (lockAcquired) {
+      clearImportLock(scope);
+      lockAcquired = false;
+    }
+    if (onInterrupt) {
+      process.removeListener('SIGINT', onInterrupt);
+      process.removeListener('SIGTERM', onInterrupt);
+    }
+  }
 }
 
 // ─── Group 树构建 ───────────────────────────────────────

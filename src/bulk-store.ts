@@ -18,10 +18,12 @@
 
 import { Command } from 'commander';
 import fs from 'fs';
+import path from 'path';
 import { validateScope } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { BulkStoreItemResult } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
@@ -29,7 +31,7 @@ export type BulkStoreResult =
   | { ok: true; scope: string; total: number; succeeded: number; failed: number; results: BulkStoreItemResult[] }
   | { ok: false; error: string };
 
-export async function executeBulkStore(params: {
+async function executeBulkStoreLocal(params: {
   scope?: string;
   inputFile: string;
 }): Promise<BulkStoreResult> {
@@ -75,6 +77,18 @@ export async function executeBulkStore(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeBulkStore(params: {
+  scope?: string;
+  inputFile: string;
+}): Promise<BulkStoreResult> {
+  // daemon 的 cwd 属于常驻进程，不能解释 CLI 调用方的相对路径；在客户端
+  // 先绝对化，保证从不同 cwd 连续执行 bulk-store 仍读取用户指定的文件。
+  const normalized = { ...params, inputFile: path.resolve(params.inputFile) };
+  // timeoutMs=0：批量写入逐条向量化，条目多时远超固定客户端超时。
+  if (shouldUseDaemonClient()) return callDaemon<BulkStoreResult>('bulk-store', normalized, 0);
+  return executeBulkStoreLocal(normalized);
 }
 
 // ─── CLI ───

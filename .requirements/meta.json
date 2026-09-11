@@ -389,7 +389,7 @@
         "feat",
         "ux"
       ],
-      "version": 9,
+      "version": 10,
       "depends_on": [
         "REQ-20260806-001"
       ],
@@ -617,12 +617,57 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-09-10-CLI与MCP共享zvec守护进程": {
+      "id": "REQ-20260910-001",
+      "feature": "CLI与MCP共享zvec守护进程",
+      "created": "2026-09-10 10:24:25",
+      "updated": "2026-09-10 16:50:00",
+      "status": "实施中",
+      "tags": [
+        "refactor",
+        "performance",
+        "mcp",
+        "integration"
+      ],
+      "version": 13,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-09-10 10:59:48 v3: 补充 Zvec 官方并发边界与 @zvec/zvec 0.6.0 隔离实测：同一 Collection 写写不并行，当前 rw+ro 也不能跨进程共存；新增 REQ-09 读写调度验收",
+        "2026-09-10 11:15:59 v4: 新增按 scope 拆分 Collection 的代码调研：路由、跨 Collection 检索、资源、迁移与测试影响",
+        "2026-09-10 11:31:24 v5: 确认本期目标架构：一个 scope 一个 Collection；新增按 scope 独立队列、跨 scope fan-out 检索、存量迁移/重建与 Collection 资源治理需求及验收标准。",
+        "2026-09-10 14:18:57 v6: 按新版 requirement-mining 更新需求报告：新增现状→预期 Mermaid 流程/数据流图、变更点追踪和 Mermaid 依赖图；记录用户放弃临时副本 Collection 方案，统一 daemon 队列 + 一 scope 一 Collection 为本期主线。",
+        "2026-09-10 14:21:04 v7: 按新版图示规范补充短期建议与长期演进表述，明确 scope Collection 是当前主线、未来仅评估更细粒度分片。",
+        "2026-09-10 14:22:05 v8: 二次质疑修正需求歧义：REQ-04 区分未授权跨 scope 与已授权多 scope 检索；REQ-09 明确仅同 scope 写入必须有序；REQ-10 明确跨 scope 并行发生在同一 daemon owner 内。",
+        "2026-09-10 15:07:21 v9: 补充三阶段迭代规划：明确每阶段目标、覆盖需求 ID、用户可感知预期效果和可判定的阶段进入条件；副本 Collection 方案不纳入阶段。",
+        "2026-09-10 v10: 阶段 1 决策确认：CLI/stdio 自动拉起 daemon，Unix Socket，直接采用按 scope Collection 新布局，不做兼容迁移；跨 scope 并发上限为 min(4, CPU 数量)。",
+        "2026-09-10 v11: 对齐阶段边界：REQ-01/02/03/04/05/09/10 属于阶段 1，REQ-11/12 属于阶段 2；同步确认已决策的 IPC、自动启动与新布局措辞。",
+        "2026-09-10 v12: 阶段 2 实现核心闭环：多 scope fan-out 与一次 query embedding、旧 Collection 显式迁移和安全续跑、import job 进度/取消、daemon 失败日志与执行耗时；阶段状态更新为实施中。",
+        "2026-09-10 v13: 补充阶段 2 当前实施进度与未完成边界；记录 restore job、Collection LRU/资源上限、真实负载基准仍待后续验收；daemon 自动启动失败改为监听子进程退出并立即反馈。"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "reference/code-survey.md",
+          "type": "report"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   },
   "id_counters": {
     "REQ-20260806": 3,
     "REQ-20260807": 2,
     "REQ-20260814": 1,
-    "REQ-20260904": 1
+    "REQ-20260904": 1,
+    "REQ-20260910": 1
   }
 }

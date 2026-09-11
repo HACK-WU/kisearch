@@ -28,6 +28,8 @@ import {
   ensureVectorAvailable,
   closeEngine,
 } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { removeScopeCollection } from './lib/scope-collection.js';
 
 // ─── KB 目录辅助 ───
 
@@ -91,7 +93,7 @@ export type ScopeListResult = {
   scopes: ScopeEntry[];
 };
 
-export async function executeScopeList(): Promise<ScopeListResult> {
+async function executeScopeListLocal(): Promise<ScopeListResult> {
   const config = loadConfig();
   const kbScopes = new Set(listAllScopes());
 
@@ -133,6 +135,11 @@ export async function executeScopeList(): Promise<ScopeListResult> {
   };
 }
 
+export async function executeScopeList(): Promise<ScopeListResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ScopeListResult>('scope-list', {});
+  return executeScopeListLocal();
+}
+
 // ─── 纯函数：scope delete ───
 
 export type ScopeDeleteResult =
@@ -144,7 +151,7 @@ export type ScopeDeleteResult =
       willDelete?: { vectorCount: number; kbExists: boolean; registered: boolean };
     };
 
-export async function executeScopeDelete(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
+async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
   try {
     validateScope(params.scope);
     if (params.scope === 'default') {
@@ -171,13 +178,21 @@ export async function executeScopeDelete(params: { scope: string; yes: boolean }
     }
 
     const deletedVectors = (await vectorDeleteScope({ scope: params.scope })).deleted;
+    // daemon 内只关闭被删除 scope 的 engine，不能影响其他 scope 的并行请求。
+    await closeEngine(params.scope);
     const kbRemoved = removeKbDir(params.scope);
     const configResult = removeScopeFromConfigFile(params.scope);
+    removeScopeCollection(config, params.scope);
 
     return { ok: true, scope: params.scope, deletedVectors, kbRemoved, configRemoved: configResult.removed };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeScopeDelete(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ScopeDeleteResult>('scope-delete', params);
+  return executeScopeDeleteLocal(params);
 }
 
 // ─── 纯函数：scope clear ───
@@ -191,7 +206,7 @@ export type ScopeClearResult =
       willDelete?: { vectorCount: number; kbWillClear: boolean };
     };
 
-export async function executeScopeClear(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
+async function executeScopeClearLocal(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
   try {
     validateScope(params.scope);
 
@@ -220,6 +235,11 @@ export async function executeScopeClear(params: { scope: string; tags?: string[]
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeScopeClear(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
+  if (shouldUseDaemonClient()) return callDaemon<ScopeClearResult>('scope-clear', params);
+  return executeScopeClearLocal(params);
 }
 
 // ─── 辅助 ───

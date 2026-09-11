@@ -13,8 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { getKbDir } from './scope.js';
-import { getBackupDir } from './config.js';
+import { getBackupDir, getScopeDataDir, loadConfig } from './config.js';
 import type { KiConfig } from './config.js';
 import { checkWritable, checkDiskSpace, estimateDirSize } from './preflight.js';
 
@@ -25,6 +24,37 @@ export interface BackupResult {
   action: 'backup';
   scope: string;
   snapshotBackup?: string;
+  snapshot?: string;
+  snapshotPath?: string;
+  message?: string;
+}
+
+export interface BackupOperationParams {
+  scope: string;
+}
+
+/** daemon/CLI 共用的单 scope 备份操作；调用方负责调度与输出。 */
+export function executeBackup(params: BackupOperationParams): BackupResult & { snapshotPath?: string } {
+  const config = loadConfig();
+  const { scope } = params;
+  const scopeDataDir = getScopeDataDir(config, scope);
+  if (!fs.existsSync(scopeDataDir)) throw new Error(`scope 数据目录不存在：${scopeDataDir}`);
+  const rcPath = path.join(scopeDataDir, 'relations-cache.json');
+  if (!fs.existsSync(rcPath)) throw new Error(`scope "${scope}" 尚未初始化（缺少 relations-cache.json），请先执行 import`);
+  const snapshotPath = backupScopeSnapshot(config.backupDir, scope, scopeDataDir);
+  return {
+    ok: true,
+    action: 'backup',
+    scope,
+    snapshot: path.basename(snapshotPath),
+    snapshotPath,
+    message: `scope 快照已保存：${snapshotPath}`,
+  };
+}
+
+export function executeBackupList(scope: string): Record<string, unknown> {
+  const config = loadConfig();
+  return { ok: true, action: 'backup_list', scope, ...listBackups(config, scope) };
 }
 
 // ─── timestamp 工具 ───
@@ -127,11 +157,10 @@ export function autoBackup(
   scope: string
 ): BackupResult {
   const backupDir = getBackupDir(config);
-  const scopeDataDir = getKbDir(scope);
   const result: BackupResult = { ok: true, action: 'backup', scope };
 
   try {
-    result.snapshotBackup = backupScopeSnapshot(backupDir, scope, scopeDataDir);
+    result.snapshotBackup = backupScopeSnapshot(backupDir, scope, getScopeDataDir(config, scope));
   } catch (err) {
     process.stderr.write(
       `警告：scope 快照备份失败 — ${(err as Error).message}\n`

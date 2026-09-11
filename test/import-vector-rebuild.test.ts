@@ -22,6 +22,7 @@ import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.
 // ─── 被测模块（先 import 以便 patch 导出）───
 const vectorClient = await import('../src/lib/vector-client.js');
 const batchVectorize = await import('../src/lib/batch-vectorize.js');
+const { closeEngine } = vectorClient;
 
 // ─── mock 状态 ───
 let mockVecCount = 0;
@@ -70,7 +71,10 @@ describe('import 覆盖导入：向量清空重建逻辑', () => {
     registerTestScope(scope);
   });
 
-  after(() => {
+  after(async () => {
+    // handleDirectImport 会为路径向量写入打开真实 engine；测试不运行 daemon，
+    // 因此必须显式释放 worker/LOCK，避免断言完成后留下活动句柄。
+    await closeEngine();
     cleanupTestConfig();
   });
 
@@ -130,6 +134,24 @@ describe('import 覆盖导入：向量清空重建逻辑', () => {
     assert.equal(r.ok, true);
     assert.equal(deleteCalls.length, 0, '--no-vector 不应清空向量');
     assert.equal(vectorizeCalls, 0, '--no-vector 不应向量化');
+    fs.rmSync(src, { recursive: true, force: true });
+  });
+
+  it('导入进度回调报告 scan/vectorize/persist 三个阶段', async () => {
+    const src = mkSource({ 'progress.md': '# 进度文档\n\n用于验证阶段进度。' });
+    const progress: { phase: string; done: number; total: number }[] = [];
+
+    const r = await handleDirectImport({
+      scope,
+      sourceDir: src,
+      group: 'TestWiki',
+      vector: false,
+      onProgress: (value) => progress.push(value),
+    });
+
+    assert.equal(r.ok, true);
+    assert.deepEqual([...new Set(progress.map((value) => value.phase))], ['scan', 'vectorize', 'persist']);
+    assert.deepEqual(progress.at(-1), { phase: 'persist', done: 1, total: 1 });
     fs.rmSync(src, { recursive: true, force: true });
   });
 });

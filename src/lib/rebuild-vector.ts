@@ -83,6 +83,9 @@ export interface RebuildVectorOptions {
   tags?: string;
   /** CLI 层是否显式传入了 --tags（NEG：原始值非空但解析后为空时提示保留标签被过滤） */
   tagsProvided?: boolean;
+  /** 仅在批次边界检查；不强行打断正在进行的 embedding/zvec 批次。 */
+  abortSignal?: AbortSignal;
+  onProgress?: (progress: { phase: 'rebuild'; done: number; total: number }) => void;
 }
 
 /** relations-cache 的 groups 扁平结构（键 = 完整 groupPath） */
@@ -331,6 +334,13 @@ export async function rebuildScopeVectors(
   deps: RebuildDeps = {},
   opts: RebuildVectorOptions = {}
 ): Promise<RebuildVectorResult> {
+  const checkCancelled = (done = 0, total = 1): void => {
+    opts.onProgress?.({ phase: 'rebuild', done, total });
+    if (opts.abortSignal?.aborted) {
+      throw Object.assign(new Error(`向量重建已取消（当前批次完成，已处理 ${done}/${total} 条）`), { code: 'REBUILD_CANCELLED' });
+    }
+  };
+  checkCancelled();
   const startedAt = Date.now();
   const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const deleteScope = deps.deleteScope ?? vectorDeleteScope;
@@ -443,6 +453,7 @@ export async function rebuildScopeVectors(
   //    注入 countScope 时（CLI 路径）先统计旧向量总数，删除过程输出进度条。
   if (!partial) {
     try {
+      checkCancelled();
       let existingCount: number | undefined;
       if (countScope) existingCount = await countScope({ scope });
       const del = await deleteScope(
@@ -477,10 +488,12 @@ export async function rebuildScopeVectors(
   const aggResults: VectorBulkStoreResult['results'] = [];
   if (allEntries.length > 0) {
     const totalBatches = Math.ceil(allEntries.length / VECTORIZE_BATCH_SIZE);
+    checkCancelled(0, allEntries.length);
     if (totalBatches > 1) {
       logInfo(`开始向量化：共 ${allEntries.length} 条，每批 ${VECTORIZE_BATCH_SIZE} 条，共 ${totalBatches} 批`);
     }
     for (let b = 0; b < totalBatches; b++) {
+      checkCancelled(Math.min(b * VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
       const offset = b * VECTORIZE_BATCH_SIZE;
       const slice = allEntries.slice(offset, offset + VECTORIZE_BATCH_SIZE);
       const res = await bulkStore({ scope, entries: slice });
@@ -497,6 +510,7 @@ export async function rebuildScopeVectors(
           `向量化批次 ${b + 1}/${totalBatches}`
         );
       }
+      checkCancelled(Math.min(offset + VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
     }
   }
   for (const r of aggResults) {
@@ -513,6 +527,7 @@ export async function rebuildScopeVectors(
   // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
   stats.updatedMemoryId = updateMemoryIds(groups, allEntries, aggResults);
   fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
+  opts.onProgress?.({ phase: 'rebuild', done: allEntries.length, total: Math.max(allEntries.length, 1) });
   logInfo(`向量重建完成，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
   return { ok: true, scope, partial, stats, errors };

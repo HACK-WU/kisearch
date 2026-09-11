@@ -6,8 +6,8 @@
  * 现改为「每实例独立 lock 文件」：每个 stdio 实例用自己的文件 ~/.ki/mcp-stdio-<pid>.lock
  * （文件名即 pid），天然支持多实例登记、并发启动互不干扰、退出只删自己的文件。
  *
- * 与「多实例错开共享向量库」配套：lock 只用于进程管理（stop/restart/status 定位），
- * 不再拒绝多实例——多个 stdio 实例靠向量库空闲释放锁 + 撞锁重试错开共享。
+ * 当前 stdio 进程只是 daemon 桥接，不持有 zvec 锁；lock 仅保留用于进程管理
+ * （stop/restart/status 定位）和识别升级前遗留的直连 stdio 实例。
  *
  * 陈旧锁处理：进程被 kill -9 等异常退出会残留 lock，读取时做 pid 存活校验，
  * pid 已死则视为陈旧锁自动清理。

@@ -17,7 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
-/** 多 Token 存储文件路径：~/.ki/mcp-tokens.json（与 mcp-http.lock 同目录） */
+/** 多 Token 存储文件路径：~/.ki/mcp-tokens.json（与 HTTP lock 同目录） */
 export function getTokensPath(): string {
   return path.join(os.homedir(), '.ki', 'mcp-tokens.json');
 }

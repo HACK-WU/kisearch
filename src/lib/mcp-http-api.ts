@@ -7,11 +7,15 @@
  *   POST /api/import/upload         上传文件落盘受控目录（~/.ki/import-uploads/<uploadId>/）
  *   POST /api/import/run            触发导入（幂等追加，异步 job）
  *   GET  /api/import/status         轮询导入进度/结果
+ *   POST /api/import/cancel         请求在当前批次完成后取消导入
+ *   POST /api/restore/run           提交 restore/rebuild-vector 长任务
+ *   GET  /api/restore/status        轮询 restore/rebuild 进度/结果
+ *   POST /api/restore/cancel        请求在当前 restore/rebuild 批次完成后取消
  *
  * 设计要点：
  *   - 延迟加载（mcp-http.ts 动态 import），避免初始化拉重依赖
  *   - 上传仅接受文件内容，不接受服务器路径（受控目录防路径注入）
- *   - 导入直接调 handleDirectImport（纯函数，复用内部锁）
+ *   - 导入通过 daemon 进程内的 OperationCoordinator 调度后调 handleDirectImport
  *   - job 状态内存 Map，服务重启即清空（低频操作可接受）
  */
 
@@ -20,13 +24,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, resolveScope } from './config.js';
+import { loadConfig, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
 import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import { handleDirectImport, type ImportResult } from './import.js';
+import { rebuildScopeVectors, type RebuildVectorResult } from './rebuild-vector.js';
+import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
+import { getSharedOperationCoordinator } from './operation-coordinator.js';
+import { vectorCountScope } from './vector-client.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -48,23 +56,26 @@ function getUploadsRoot(): string {
 
 // ─── job 管理（内存 Map） ─────────────────────────────
 
-interface ImportJob {
+interface Job {
   id: string;
   scope: string;
-  state: 'running' | 'done' | 'failed';
-  phase?: 'scan' | 'vectorize' | 'persist';
+  operation: 'import' | 'restore-snapshot' | 'rebuild-vector';
+  state: 'running' | 'done' | 'failed' | 'cancelled';
+  phase?: 'scan' | 'vectorize' | 'persist' | 'restore' | 'rebuild';
   progress?: { done: number; total: number };
-  result?: ImportResult;
+  result?: ImportResult | RestoreSnapshotResult | RebuildVectorResult | Record<string, unknown>;
   error?: string;
   startedAt: number;
   finishedAt?: number;
+  cancelRequested: boolean;
+  abortController: AbortController;
 }
 
-const jobs = new Map<string, ImportJob>();
+const jobs = new Map<string, Job>();
 const MAX_JOBS = 50;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1h
 
-function createJob(scope: string): ImportJob {
+function createJob(scope: string, operation: Job['operation']): Job {
   // 清理过期 job，防止 Map 无界增长
   const now = Date.now();
   for (const [id, j] of jobs) {
@@ -75,11 +86,14 @@ function createJob(scope: string): ImportJob {
     const oldest = [...jobs.values()].filter((j) => j.finishedAt).sort((a, b) => a.finishedAt! - b.finishedAt!)[0];
     if (oldest) jobs.delete(oldest.id);
   }
-  const job: ImportJob = {
+  const job: Job = {
     id: crypto.randomUUID(),
     scope,
+    operation,
     state: 'running',
     startedAt: now,
+    cancelRequested: false,
+    abortController: new AbortController(),
   };
   jobs.set(job.id, job);
   return job;
@@ -219,6 +233,9 @@ export async function handleApiRequest(
   url: URL,
   ctx: ApiRequestCtx,
 ): Promise<void> {
+  // 直接调用测试/嵌入方也要在入口捕获快照；生产 HTTP 调用由 mcp-http 外层
+  // 再建立同一快照，避免队列出队后回到磁盘最新配置。
+  const requestConfig = loadConfig();
   // 鉴权（与 /mcp 一致）：对外绑定（authEnabled）时，本地回环来源免鉴权，远程来源需 Bearer Token。
   // 同时解析该 Token 的授权 scope 集合（全权临时 Token → ['all']；否则查多 Token 存储），
   // 供后续 handler 做 scope 越权校验。authScopes 为 null 表示免鉴权（不限）。
@@ -260,12 +277,52 @@ export async function handleApiRequest(
 
   try {
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
-    if (p === '/tags' && req.method === 'GET') return void (await handleTags(res, url));
-    if (p === '/doc/list' && req.method === 'GET') return void (await handleDocList(res, url));
-    if (p === '/asset' && req.method === 'GET') return void (await handleAsset(res, url));
+    if (p === '/tags' && req.method === 'GET') {
+      // /api/tags 会打开/读取 zvec Collection，必须与同 scope 的写操作共用
+      // coordinator；否则 API 读请求会绕过 daemon 的单写者调度。
+      // 队列占用必须用**解析后**的 scope：前端不传时 query 为空串，直接入队会落
+      // 'default'，而 handler 内部 resolveScope 在 strict 模式下可能解析为其他值或
+      // fail-loud，两者不一致会让读请求排到错误队列、绕过同 scope 串行约束。
+      const scopeRaw = url.searchParams.get('scope') ?? '';
+      const effectiveScope = resolveScope(requestConfig, scopeRaw);
+      await getSharedOperationCoordinator().submit(
+        { operation: 'tag-list', params: { scope: effectiveScope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleTags(res, url)),
+        [effectiveScope],
+      );
+      return;
+    }
+    if (p === '/doc/list' && req.method === 'GET') {
+      // 文档列表虽然不打开 zvec，但会读取 relations-cache/local KB；必须与
+      // 同 scope 的 import/sync/delete 共用队列，避免返回删除或写回中间态。
+      const scopeRaw = url.searchParams.get('scope') ?? '';
+      const effectiveScope = resolveScope(requestConfig, scopeRaw);
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-list-api', params: { scope: effectiveScope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleDocList(res, url)),
+        [effectiveScope],
+      );
+      return;
+    }
+    if (p === '/asset' && req.method === 'GET') {
+      // 附件复制与 scope delete 可能同时操作 assets 目录；读请求也要经过
+      // 同一 scope 队列，避免读到半写文件或已删除目录。
+      const scopeRaw = url.searchParams.get('scope') ?? '';
+      const effectiveScope = resolveScope(requestConfig, scopeRaw);
+      await getSharedOperationCoordinator().submit(
+        { operation: 'asset-read-api', params: { scope: effectiveScope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleAsset(res, url)),
+        [effectiveScope],
+      );
+      return;
+    }
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
-    if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url));
+    if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
+    if (p === '/import/cancel' && req.method === 'POST') return void (await handleImportCancel(req, res, authScopes));
+    if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
+    if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
+    if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
     const e = err as Error & { code?: string };
@@ -544,6 +601,7 @@ async function handleImportRun(
   res: http.ServerResponse,
   authScopes: string[] | null,
 ): Promise<void> {
+  const requestConfig = loadConfig();
   const body = (await readJsonBody(req)) as {
     scope?: string;
     uploadId?: string;
@@ -564,7 +622,7 @@ async function handleImportRun(
     rejectScopeViolation(res, body.scope, '/import/run');
     return;
   }
-  const scope = resolveScope(loadConfig(), body.scope);
+  const scope = resolveScope(requestConfig, body.scope);
   const sourceDir = path.join(getUploadsRoot(), body.uploadId);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     sendJson(res, 400, { ok: false, error: `uploadId 不存在（${body.uploadId}）` });
@@ -577,7 +635,7 @@ async function handleImportRun(
     return;
   }
 
-  const job = createJob(scope);
+  const job = createJob(scope, 'import');
   void runImportJob(job, {
     scope,
     sourceDir,
@@ -588,7 +646,7 @@ async function handleImportRun(
     chunkOverlap: body.chunkOverlap,
     vector: body.vector,
     tags: body.tags,
-  });
+  }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
 }
@@ -603,36 +661,75 @@ interface RunImportArgs {
   tags?: string;
 }
 
-async function runImportJob(job: ImportJob, args: RunImportArgs): Promise<void> {
+async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
   try {
-    const result = await handleDirectImport({
-      scope: args.scope,
-      sourceDir: args.sourceDir,
-      // group 缺省（undefined）→ handleDirectImport 推断落点，与 CLI 缺省语义一致
-      group: args.group,
-      chunkSize: args.chunkSize,
-      chunkOverlap: args.chunkOverlap,
-      vector: args.vector,
-      tags: args.tags,
-    });
+    const result = await getSharedOperationCoordinator().submit(
+      { operation: 'import', params: { ...args, jobId: job.id } },
+      () => runWithConfigSnapshot(requestConfig, () => handleDirectImport({
+        scope: args.scope,
+        sourceDir: args.sourceDir,
+        group: args.group,
+        chunkSize: args.chunkSize,
+        chunkOverlap: args.chunkOverlap,
+        vector: args.vector,
+        tags: args.tags,
+        onProgress: (progress) => {
+          job.phase = progress.phase;
+          job.progress = { done: progress.done, total: progress.total };
+        },
+        abortSignal: job.abortController.signal,
+      })),
+      args.scope,
+    ).then((outcome) => outcome.result as ImportResult);
     job.state = 'done';
     job.result = result;
     job.phase = 'persist';
   } catch (err) {
-    job.state = 'failed';
+    job.state = (err as Error & { code?: string }).code === 'IMPORT_CANCELLED' ? 'cancelled' : 'failed';
     job.error = (err as Error).message;
   } finally {
     job.finishedAt = Date.now();
   }
 }
 
+// ─── POST /api/import/cancel ──────────────────────────
+
+async function handleImportCancel(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as { jobId?: string } | undefined;
+  const jobId = body?.jobId?.trim() ?? '';
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    sendJson(res, 404, { ok: false, error: 'job not found（服务可能已重启，请重新导入）' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, job.scope)) {
+    rejectScopeViolation(res, job.scope, '/import/cancel');
+    return;
+  }
+  if (job.state !== 'running') {
+    sendJson(res, 409, { ok: false, error: `任务已结束：${job.state}`, jobId, state: job.state });
+    return;
+  }
+  job.cancelRequested = true;
+  job.abortController.abort();
+  sendJson(res, 202, { ok: true, jobId, state: 'cancelling', message: '已请求取消；当前 embedding/zvec 批次完成后停止后续写入' });
+}
+
 // ─── GET /api/import/status ───────────────────────────
 
-async function handleImportStatus(res: http.ServerResponse, url: URL): Promise<void> {
+async function handleImportStatus(res: http.ServerResponse, url: URL, authScopes: string[] | null): Promise<void> {
   const jobId = url.searchParams.get('jobId') ?? '';
   const job = jobId ? jobs.get(jobId) : undefined;
   if (!job) {
     sendJson(res, 404, { ok: false, error: 'job not found（服务可能已重启，请重新导入）' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, job.scope)) {
+    rejectScopeViolation(res, job.scope, '/import/status');
     return;
   }
   sendJson(res, 200, {
@@ -643,6 +740,185 @@ async function handleImportStatus(res: http.ServerResponse, url: URL): Promise<v
       state: job.state,
       phase: job.phase,
       progress: job.progress,
+      cancelRequested: job.cancelRequested,
+      result: job.result,
+      error: job.error,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+    },
+  });
+}
+
+// ─── restore/rebuild job ──────────────────────────────
+
+interface RestoreJobArgs {
+  scope: string;
+  timestamp?: string;
+  backupDir?: string;
+  snapshotFile?: string;
+  rebuildVector: boolean;
+  rebuildOptions?: Record<string, unknown>;
+  rebuildOnly: boolean;
+}
+
+async function handleRestoreRun(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  const body = await readJsonBody(req) as {
+    scope?: string;
+    timestamp?: string;
+    backupDir?: string;
+    snapshotFile?: string;
+    rebuildVector?: boolean;
+    rebuildOnly?: boolean;
+  } | undefined;
+  if (!body?.scope) {
+    sendJson(res, 400, { ok: false, error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
+    rejectScopeViolation(res, body.scope, '/restore/run');
+    return;
+  }
+  const scope = resolveScope(requestConfig, body.scope);
+  const rebuildOnly = body.rebuildOnly === true;
+  const rebuildVector = rebuildOnly || body.rebuildVector === true;
+  const job = createJob(scope, rebuildOnly ? 'rebuild-vector' : 'restore-snapshot');
+  const args: RestoreJobArgs = {
+    scope,
+    timestamp: body.timestamp,
+    backupDir: body.backupDir ? path.resolve(body.backupDir) : undefined,
+    snapshotFile: body.snapshotFile ? path.resolve(body.snapshotFile) : undefined,
+    rebuildVector,
+    rebuildOnly,
+  };
+  void runRestoreJob(job, args, requestConfig);
+  sendJson(res, 202, {
+    ok: true,
+    jobId: job.id,
+    scope,
+    operation: job.operation,
+    message: '任务已提交；取消仅在当前 restore/rebuild 批次完成后生效',
+  });
+}
+
+async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiConfig): Promise<void> {
+  try {
+    const result = await getSharedOperationCoordinator().submit(
+      { operation: args.rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', params: { ...args, jobId: job.id } },
+      async () => runWithConfigSnapshot(requestConfig, async () => {
+        let restored: RestoreSnapshotResult | undefined;
+        if (!args.rebuildOnly) {
+          job.phase = 'restore';
+          job.progress = { done: 0, total: 1 };
+          restored = await restoreSnapshotLocal(args.scope, {
+            timestamp: args.timestamp,
+            backupDir: args.backupDir,
+            snapshotFile: args.snapshotFile,
+            abortSignal: job.abortController.signal,
+            onProgress: (progress) => {
+              job.phase = progress.phase;
+              job.progress = { done: progress.done, total: progress.total };
+            },
+          });
+          if (job.abortController.signal.aborted) {
+            return { restore: restored, rebuildSkipped: true, cancelled: true };
+          }
+        }
+        if (!args.rebuildVector) return restored;
+        job.phase = 'rebuild';
+        job.progress = { done: 0, total: 1 };
+        const rebuilt = await rebuildScopeVectors(
+          args.scope,
+          { countScope: vectorCountScope },
+          {
+            ...(args.rebuildOptions ?? {}),
+            abortSignal: job.abortController.signal,
+            onProgress: (progress) => {
+              job.phase = progress.phase;
+              job.progress = { done: progress.done, total: progress.total };
+            },
+          },
+        );
+        return restored ? { restore: restored, rebuildVector: rebuilt } : rebuilt;
+      }),
+      args.scope,
+    );
+    const value = result.result as any;
+    job.result = value;
+    const cancelled = value?.cancelled === true
+      || value?.errors?.some((e: any) => e.type === 'cancelled');
+    const failed = value?.ok === false
+      || value?.rebuildVector?.ok === false;
+    job.state = cancelled ? 'cancelled' : failed ? 'failed' : 'done';
+    if (failed && !job.error) {
+      job.error = value?.errors?.[0]?.error
+        ?? value?.rebuildVector?.errors?.[0]?.error
+        ?? 'restore/rebuild 失败';
+    }
+  } catch (err) {
+    const code = (err as Error & { code?: string }).code;
+    job.state = code === 'RESTORE_CANCELLED' || code === 'REBUILD_CANCELLED' ? 'cancelled' : 'failed';
+    job.error = (err as Error).message;
+  } finally {
+    job.finishedAt = Date.now();
+  }
+}
+
+async function handleJobCancel(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+): Promise<void> {
+  const body = await readJsonBody(req) as { jobId?: string } | undefined;
+  const jobId = body?.jobId?.trim() ?? '';
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    sendJson(res, 404, { ok: false, error: 'job not found（服务可能已重启，请重新提交）' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, job.scope)) {
+    rejectScopeViolation(res, job.scope, '/restore/cancel');
+    return;
+  }
+  if (job.state !== 'running') {
+    sendJson(res, 409, { ok: false, error: `任务已结束：${job.state}`, jobId, state: job.state });
+    return;
+  }
+  job.cancelRequested = true;
+  job.abortController.abort();
+  sendJson(res, 202, {
+    ok: true,
+    jobId,
+    state: 'cancelling',
+    message: '已请求取消；当前 restore/rebuild 批次完成后停止后续写入',
+  });
+}
+
+async function handleJobStatus(res: http.ServerResponse, url: URL, authScopes: string[] | null): Promise<void> {
+  const jobId = url.searchParams.get('jobId') ?? '';
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    sendJson(res, 404, { ok: false, error: 'job not found（服务可能已重启，请重新提交）' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, job.scope)) {
+    rejectScopeViolation(res, job.scope, '/restore/status');
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    job: {
+      id: job.id,
+      scope: job.scope,
+      operation: job.operation,
+      state: job.state,
+      phase: job.phase,
+      progress: job.progress,
+      cancelRequested: job.cancelRequested,
       result: job.result,
       error: job.error,
       startedAt: job.startedAt,

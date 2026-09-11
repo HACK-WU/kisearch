@@ -80,6 +80,20 @@ ki import -s my-project --source /path/to/wiki --group wiki
 
 ---
 
+## `ki migrate-vector`（旧向量布局迁移）
+
+将旧版 `vectorDir` 根目录中的单 Collection 按文档的 `scope` 字段迁移到
+`vectorDir/collections/<scope>`。旧目录只读保留，不会删除或覆盖；迁移使用预计算向量，不需要重新调用 embedding 服务。
+
+```bash
+ki migrate-vector --yes             # 首次执行，创建按 scope Collection
+ki migrate-vector --yes --resume    # 从 collections/migration.json 断点续跑
+```
+
+不带 `--yes` 只返回确认提示且不创建新布局。迁移发现 scope 缺失、目标内容漂移或目标包含额外文档时会明确失败；续跑只补写缺失文档，完成后再按 scope 核对文档数和 doc id。
+
+---
+
 ## `manage-index`
 
 管理 Group 树索引节点，以及查询已初始化的 scope 列表。
@@ -966,12 +980,9 @@ ki mcp --status                         # 只读查看 HTTP 单例运行状态�
 ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
 ```
 
-stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通信。
+stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通信，并桥接到本机 daemon。
 
-> **启动守卫（stdio 与 HTTP 通用，均在预检之前执行）**：
-> - `ki mcp --http`：探活命中健康实例 → 复用退出（`exit 0`，不做预检）；检测到存活 stdio 实例 → 拒绝启动（`exit 1`，提示冲突 pid，保持 HTTP 单例独占）。
-> - `ki mcp`（stdio）：检测到健康 HTTP 单例 → 拒绝启动（`exit 1`），提示迁移 URL 型接入；多个 stdio 实例**不再互斥**——靠向量库空闲释放锁 + 撞锁重试错开共享（错开使用互不影响）。守卫仍登记首个实例 lock（pid 存活校验，陈旧锁自动清理）。
-> 详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
+> **启动守卫（stdio 与 HTTP）**：HTTP daemon 启动前执行预检并成为唯一 zvec owner；stdio 只连接/桥接对应 daemon，缺失时自动拉起，不直接打开 Collection。多个 CLI、stdio 和 HTTP 请求进入同一 daemon 调度器；配置指纹或协议不匹配时 fail-loud。详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### HTTP 模式参数
 
@@ -982,7 +993,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：探活 `/healthz` 并读取 `~/.ki/mcp-http.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检） |
+| `--status` | — | 只读诊断：探活 `/healthz` 并读取当前身份的 `~/.ki/mcp-http-<fingerprint>.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检） |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
@@ -991,7 +1002,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 按 lock 文件 + healthz 探活定位本机所有 ki mcp 服务进程（stdio 与 HTTP），先 SIGTERM 优雅退出、超时 SIGKILL 兜底，最后清理残留 lock，输出 JSON 报告。直接对真正的服务进程发信号，避免手动 kill 顶层壳时留下持锁孤儿进程的多层进程链问题；杀前校验 `/proc/<pid>/cmdline` 防止 pid 复用误杀无辜进程。
 
-> 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；如需长期使用 HTTP 单例，请先将 IDE 配置迁移为 URL 型接入再 `ki mcp --http`。
+> 若被关闭的 stdio 实例由 IDE 以 command 型配置拉起，IDE 可能自动重启它；stdio 会在 daemon 恢复后重新桥接，无需迁移为 URL 型接入。
 
 ### 重启实例（`ki mcp restart`）
 
@@ -1010,7 +1021,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **条件鉴权 + scope 越权校验**：绑定回环地址时免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时，请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。
 >
-> **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http.lock`（记录 pid/host/port）供排查。
+> **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http-<fingerprint>.lock`（记录 pid/host/port）供排查。
 >
 > **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, stdioInstances, managedTokens, hint }` JSON（`stdioInstances` 为存活 stdio 实例列表、`managedTokens.count` 为多 Token 存储数量），用于确认实例全貌（HTTP 单例与多个 stdio 实例）；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
@@ -1207,7 +1218,10 @@ ki config init
 ```yaml
 dataDir: $HOME/.ki/kb       # KB 源数据目录
 backupDir: $HOME/.ki/backup  # 备份目录
-vectorDir: $HOME/.ki/vector  # zvec collection 目录（所有 scope 共享，靠 metadata 隔离）
+vectorDir: $HOME/.ki/vector  # zvec collection 根目录（每个 scope 使用独立 Collection）
+
+vector:
+  maxOpenCollections: 8      # daemon 同时保留的 Collection handle 上限（LRU）
 
 embedding:                    # Embedding 提供方（OpenAI 兼容，实际提供商由 baseURL 决定）
   provider: siliconflow
@@ -1235,7 +1249,8 @@ scopes:
 |------|------|------|
 | `dataDir` | 顶级 | 全局默认数据存储目录，各 scope 数据默认放在 `dataDir/{scope}/` 下 |
 | `backupDir` | 顶级 | 备份快照存储目录 |
-| `vectorDir` | 顶级 | zvec 向量库目录，所有 scope 共享一个 collection，靠 metadata 隔离（独立，不进备份） |
+| `vectorDir` | 顶级 | zvec 向量库目录，每个 scope 使用 `collections/<scope>` 独立 Collection（独立，不进备份） |
+| `vector.maxOpenCollections` | `vector` | daemon 同时保留的 Collection handle 上限；达到上限后释放空闲 LRU 句柄，默认 8 |
 | `embedding.provider` | 顶级 | Embedding 提供方：`siliconflow` \| `openai-compatible`（均为 OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
 | `embedding.baseURL` | 顶级 | API 端点（决定实际对接的提供商；换成其他厂商端点即可对接其他提供商） |
 | `embedding.model` | 顶级 | 模型名称 |

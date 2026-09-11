@@ -14,6 +14,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
 
@@ -156,7 +157,11 @@ describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修�
   /** 在隔离 HOME 写 lock 文件 */
   function writeLock(home: string, lock: Record<string, unknown>): void {
     fs.mkdirSync(path.join(home, '.ki'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.ki', 'mcp-http.lock'), JSON.stringify(lock));
+    const identity = daemonIdentityFingerprint({
+      dataDir: path.join(home, '.ki', 'kb'),
+      vectorDir: path.join(home, '.ki', 'vector'),
+    } as unknown as Parameters<typeof daemonIdentityFingerprint>[0]);
+    fs.writeFileSync(path.join(home, '.ki', `mcp-http-${identity}.lock`), JSON.stringify(lock));
   }
 
   it('裸 --status → target 回退到存活 lock 的 host/port（而非默认 127.0.0.1:7423）', () => {

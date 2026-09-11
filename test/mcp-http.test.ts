@@ -14,6 +14,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -24,7 +25,9 @@ import {
   fetchHealthz,
   describeListenError,
   DEFAULT_MCP_HTTP_PORT,
+  getHttpLockPath,
 } from '../src/lib/mcp-http.js';
+import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
 
 // ─── 测试用最小 McpServer 工厂（不触碰向量引擎） ───
 function buildTestServer(_authScopes: string[] | null = null): McpServer {
@@ -250,6 +253,15 @@ describe('isLoopbackHost', () => {
 describe('默认端口常量', () => {
   it('DEFAULT_MCP_HTTP_PORT 为 7423', () => {
     assert.equal(DEFAULT_MCP_HTTP_PORT, 7423);
+  });
+});
+
+describe('HTTP lock 身份隔离', () => {
+  it('不同 vectorDir/dataDir 使用不同 lock 路径', () => {
+    const a = { vectorDir: '/tmp/vector-a', dataDir: '/tmp/kb-a' } as any;
+    const b = { vectorDir: '/tmp/vector-b', dataDir: '/tmp/kb-b' } as any;
+    assert.equal(getHttpLockPath(a), path.join(process.env.HOME!, '.ki', `mcp-http-${daemonIdentityFingerprint(a)}.lock`));
+    assert.notEqual(getHttpLockPath(a), getHttpLockPath(b));
   });
 });
 

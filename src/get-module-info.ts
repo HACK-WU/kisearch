@@ -23,6 +23,7 @@ import { resolveGroupPath } from './lib/group-resolve.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 类型定义 ───
 
@@ -85,7 +86,7 @@ async function findRelationWithFuzzy(
   return null;
 }
 
-export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
+async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
   try {
     const { scope, relation } = params;
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
@@ -187,6 +188,11 @@ export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise
   }
 }
 
+export async function executeGetModuleInfo(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
+  if (shouldUseDaemonClient()) return callDaemon<GetModuleInfoResult>('get-module-info', params);
+  return executeGetModuleInfoLocal(params);
+}
+
 // ─── 批量查询（同 Group 下多个 Relation，CLI/MCP 共享纯函数） ───
 
 /** 单次批量查询上限：超限 fail-loud（防 AI 单次拖爆上下文），提示拆批 */
@@ -237,7 +243,7 @@ export interface BatchGetModuleInfoParams {
  *   - 超上限 fail-loud 报错（不静默截断）；
  *   - 整体性失败（cache/group/KB 缺失）返回 ok:false，与单条链路同语义。
  */
-export async function executeGetModuleInfoBatch(params: BatchGetModuleInfoParams): Promise<GetModuleInfoBatchResult> {
+async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams): Promise<GetModuleInfoBatchResult> {
   try {
     const { scope } = params;
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
@@ -363,6 +369,11 @@ export async function executeGetModuleInfoBatch(params: BatchGetModuleInfoParams
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeGetModuleInfoBatch(params: BatchGetModuleInfoParams): Promise<GetModuleInfoBatchResult> {
+  if (shouldUseDaemonClient()) return callDaemon<GetModuleInfoBatchResult>('get-module-info-batch', params);
+  return executeGetModuleInfoBatchLocal(params);
 }
 
 // ─── CLI ───

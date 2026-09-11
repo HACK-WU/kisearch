@@ -151,6 +151,12 @@ const CONFIG_SCHEMA: ConfigNode = {
         else add(path, issue.message);
       },
     },
+    vector: {
+      type: 'object',
+      fields: {
+        maxOpenCollections: { type: 'number', validate: positiveInt },
+      },
+    },
     mcp: {
       type: 'object',
       fields: {

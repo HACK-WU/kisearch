@@ -30,6 +30,8 @@ import {
   resolveScope,
   getScopeMode,
   getEmbeddingConfig,
+  runWithConfigSnapshot,
+  getConfigSnapshot,
   type KiConfig,
 } from '../src/lib/config.js';
 import {
@@ -84,6 +86,20 @@ describe('A. lib/config —— scope 数据目录语义', () => {
   it('未注册 scope 回退到 dataDir/{scope}', () => {
     const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nscopes:\n  default: {}');
     assert.strictEqual(getScopeDataDir(cfg, 'ghost'), path.join('/abs/data', 'ghost'));
+  });
+});
+
+describe('阶段 3：请求级配置快照与资源配置', () => {
+  it('vector.maxOpenCollections 解析并在快照上下文内固定 loadConfig', async () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      ['dataDir: /abs/data', 'vector:', '  maxOpenCollections: 2', 'scopes:', '  default: {}'].join('\n'),
+    );
+    assert.equal(cfg.vector?.maxOpenCollections, 2);
+    await runWithConfigSnapshot(cfg, async () => {
+      assert.equal(getConfigSnapshot(), cfg);
+      assert.equal(loadConfig(), cfg);
+    });
   });
 });
 

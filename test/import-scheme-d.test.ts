@@ -99,6 +99,14 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(r.stats.total, 1);
   });
 
+  it('扫描阶段失败也释放 import.lock，下一次导入不会被误判并发', () => {
+    const src = mkSource({}, ['only.txt']);
+    const r = runImport(['--scope', scope, '--source', src, '--group', 'wiki', '--no-vector']);
+    assert.equal(r.ok, false);
+    const { getImportLockPath } = require('../src/lib/interrupt.js');
+    assert.equal(fs.existsSync(getImportLockPath(scope)), false);
+  });
+
   it('幂等重导：同文件重跑 import 不冲突，正常覆盖', () => {
     // 第一次导入 x/a.md（group wiki/x，relation a）
     const srcA = mkSource({ 'x/a.md': '# A1\n内容1' });

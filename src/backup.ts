@@ -7,15 +7,13 @@
  *   ki backup <scope> --list        列出已有备份
  */
 
-import fs from 'fs';
-import path from 'path';
-import { loadConfig, getScopeDataDir } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
 import {
-  backupScopeSnapshot,
-  listBackups,
+  executeBackup,
+  executeBackupList,
 } from './lib/backup.js';
 import { detectUnknownFlags, failJson, toErrorPayload } from './lib/cli-args.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 工具 ───
 
@@ -62,44 +60,16 @@ if (!scope) {
 
 try {
   validateScope(scope);
-  const config = loadConfig();
-
   if (listMode) {
-    // 列出备份
-    const backups = listBackups(config, scope);
-    output({
-      ok: true,
-      action: 'backup_list',
-      scope,
-      ...backups,
-    });
+    const result = shouldUseDaemonClient()
+      ? await callDaemon<Record<string, unknown>>('backup-list', { scope }, 0)
+      : executeBackupList(scope);
+    output(result as Record<string, unknown>);
   } else {
-    // 执行备份
-    const scopeDataDir = getScopeDataDir(config, scope);
-
-    if (!fs.existsSync(scopeDataDir)) {
-      throw new Error(`scope 数据目录不存在：${scopeDataDir}`);
-    }
-
-    // 检查是否有 relations-cache.json（确认 scope 已初始化）
-    const rcPath = path.join(scopeDataDir, 'relations-cache.json');
-    if (!fs.existsSync(rcPath)) {
-      throw new Error(
-        `scope "${scope}" 尚未初始化（缺少 relations-cache.json），请先执行 import`
-      );
-    }
-
-    const backupDir = config.backupDir;
-    const snapshotPath = backupScopeSnapshot(backupDir, scope, scopeDataDir);
-
-    output({
-      ok: true,
-      action: 'backup',
-      scope,
-      snapshot: path.basename(snapshotPath),
-      snapshotPath,
-      message: `scope 快照已保存：${snapshotPath}`,
-    });
+    const result = shouldUseDaemonClient()
+      ? await callDaemon<Record<string, unknown>>('backup', { scope }, 0)
+      : executeBackup({ scope });
+    output(result as Record<string, unknown>);
   }
 } catch (err) {
   output(toErrorPayload(err));

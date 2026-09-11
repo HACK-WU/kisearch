@@ -31,6 +31,7 @@ import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 
@@ -311,7 +312,7 @@ function syncBatch(
   }
 
   // 统一 WAL 持久化
-  writeJson(cachePath, cache);
+  writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
   output({
     ok: true,
@@ -391,7 +392,7 @@ export type BulkSyncRelationResult =
  *
  * 非向量化模式（vector=false）：跳过步骤 2-3，仅 KB 层（与单条 --no-vector 一致）。
  */
-export async function executeBulkSyncRelation(params: {
+async function executeBulkSyncRelationLocal(params: {
   scope?: string;
   items: BulkSyncItem[];
   vector?: boolean;
@@ -732,7 +733,7 @@ export async function executeBulkSyncRelation(params: {
     }
 
     // ─── 阶段 4：一次 writeJson 落盘 cache ───
-    writeJson(cachePath, cache);
+    writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
     // ─── 阶段 5：各自 wiki 写回（文件路径不同，无冲突） ───
     for (let i = 0; i < items.length; i++) {
@@ -773,8 +774,18 @@ export async function executeBulkSyncRelation(params: {
   }
 }
 
+export async function executeBulkSyncRelation(params: {
+  scope?: string;
+  items: BulkSyncItem[];
+  vector?: boolean;
+}): Promise<BulkSyncRelationResult> {
+  // timeoutMs=0：批量回写逐条向量化，条目多时远超固定客户端超时。
+  if (shouldUseDaemonClient()) return callDaemon<BulkSyncRelationResult>('bulk-sync-relation', params, 0);
+  return executeBulkSyncRelationLocal(params);
+}
+
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
@@ -862,7 +873,7 @@ async function vectorWriteBack(params: {
             if (searchItem?.memoryId) {
               rel.memoryId = searchItem.memoryId;
             }
-            writeJson(cachePath, latestCache);
+            writeJson(cachePath, latestCache as unknown as Record<string, unknown>);
           }
         }
       } catch {
@@ -877,7 +888,7 @@ async function vectorWriteBack(params: {
   }
 }
 
-export async function executeSyncRelation(params: SyncRelationParams): Promise<SyncRelationResult> {
+async function executeSyncRelationLocal(params: SyncRelationParams): Promise<SyncRelationResult> {
   try {
     const { moduleInfo } = params;
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
@@ -937,7 +948,7 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
     }
 
     // WAL 持久化
-    writeJson(cachePath, cache);
+    writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
     // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，
@@ -985,6 +996,11 @@ export async function executeSyncRelation(params: SyncRelationParams): Promise<S
   }
 }
 
+export async function executeSyncRelation(params: SyncRelationParams): Promise<SyncRelationResult> {
+  if (shouldUseDaemonClient()) return callDaemon<SyncRelationResult>('sync-relation', params);
+  return executeSyncRelationLocal(params);
+}
+
 // ─── CLI ───
 
 const program = new Command();
@@ -1021,11 +1037,13 @@ program
           await closeEngine();
           if (!result.ok) process.exit(1);
         } else {
-          // 非向量化批量模式：走原 syncBatch（仅 KB 层，不写向量）
-          const scope = resolveScope(loadConfig(), opts.scope);
-          validateScope(scope);
-          ensureScopeDir(scope);
-          syncBatch(scope, opts.input, false);
+          // 非向量化模式也必须走 executeBulkSyncRelation：虽然不打开 zvec，
+          // 仍会读改写 relations-cache / local KB / wiki，不能在客户端绕过
+          // daemon 的 scope 队列与其他 import/sync 并发执行。
+          const items = readBulkInput(opts.input);
+          const result = await executeBulkSyncRelation({ scope: opts.scope, items, vector: false });
+          output(result as unknown as Record<string, unknown>);
+          if (!result.ok) process.exit(1);
         }
       } catch (err) {
         output({ ok: false, error: (err as Error).message });

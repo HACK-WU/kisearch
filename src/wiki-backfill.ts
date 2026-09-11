@@ -14,6 +14,7 @@ import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { backfillWiki } from './lib/wiki-sync.js';
 import { validateScope } from './lib/scope.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 const WIKI_BACKFILL_HELP = `ki wiki-backfill - 将 KB 中已有 Relations 全量写回 Wiki（历史补齐）
 
@@ -36,7 +37,7 @@ function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.includes('-h') || args.includes('--help')) {
@@ -59,11 +60,14 @@ function main(): void {
     const config = loadConfig();
     const scope = resolveScope(config, scopeArg);
     validateScope(scope);
-    output(backfillWiki(scope, { force: flags.includes('--force') }));
+    const result = shouldUseDaemonClient()
+      ? await callDaemon<Record<string, unknown>>('wiki-backfill', { scope, force: flags.includes('--force') }, 0)
+      : backfillWiki(scope, { force: flags.includes('--force') });
+    output(result as Record<string, unknown>);
   } catch (err) {
     output(toErrorPayload(err));
     process.exitCode = 1;
   }
 }
 
-main();
+void main();

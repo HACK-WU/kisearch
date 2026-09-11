@@ -24,6 +24,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 纯函数（供 CLI / MCP 共享） ───
 
@@ -31,7 +32,7 @@ export type TagListResult =
   | { ok: true; scope: string; count: number; scanned: number; truncated: boolean; tags: VectorTagInfo[] }
   | { ok: false; error: string; degraded?: boolean };
 
-export async function executeTagList(params: {
+async function executeTagListLocal(params: {
   scope: string;
   scanLimit?: number;
 }): Promise<TagListResult> {
@@ -48,6 +49,11 @@ export async function executeTagList(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeTagList(params: { scope: string; scanLimit?: number }): Promise<TagListResult> {
+  if (shouldUseDaemonClient()) return callDaemon<TagListResult>('tag-list', params);
+  return executeTagListLocal(params);
 }
 
 // ─── CLI ───

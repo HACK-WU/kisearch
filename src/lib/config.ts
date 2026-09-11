@@ -24,6 +24,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import YAML from 'yaml';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { validateConfigFields, type ConfigIssue } from './config-schema.js';
 
@@ -117,6 +118,11 @@ export interface McpConfig {
   http?: McpHttpConfig;
 }
 
+export interface VectorResourceConfig {
+  /** daemon 进程最多同时保留的 Collection handle；未配置时使用保守默认值。 */
+  maxOpenCollections?: number;
+}
+
 export interface EmbeddingConfig {
   provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
@@ -133,6 +139,7 @@ export interface KiConfig {
   embedding: EmbeddingConfig;            // 【新增】embedding 配置
   scopeMode: 'default' | 'strict';       // 【新增】scope 护栏模式（默认 'default'）；见 S-01 §3.5
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
+  vector?: VectorResourceConfig;         // Collection handle/worker 资源治理
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
   /** 字段校验告警（废弃字段 / null scope 条目等）：不阻断加载，由 ki doctor 报告 */
   _fieldWarnings?: ConfigIssue[];
@@ -148,24 +155,144 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
   dimension: 4096,
 };
 
+const DEFAULT_VECTOR_RESOURCES: VectorResourceConfig = {
+  maxOpenCollections: 8,
+};
+
+/** 请求级配置快照，贯穿 daemon/HTTP 请求的排队与执行链。 */
+const configSnapshotStorage = new AsyncLocalStorage<KiConfig>();
+
+export function runWithConfigSnapshot<T>(config: KiConfig, fn: () => T): T {
+  return configSnapshotStorage.run(config, fn);
+}
+
+export function getConfigSnapshot(): KiConfig | undefined {
+  return configSnapshotStorage.getStore();
+}
+
 // ─── 进程内缓存 ───
 
 let _cached: KiConfig | null = null;
+/** 缓存来源文件的绝对路径（null = 未找到配置文件、当前用的是默认值） */
+let _cachedFile: string | null = null;
+/** 缓存来源文件的 mtimeMs 与 size；两者任一变化即视为配置已更新。 */
+let _cachedMtimeMs = 0;
+let _cachedSize = -1;
+/** 缓存对应的 explicitPath：不同 --config 不得共用同一份缓存。 */
+let _cachedExplicitPath: string | undefined;
+/** 配置源不可用告警只打一次（恢复后重置），避免热路径上每次调用都刷屏。 */
+let _configUnavailableWarned = false;
+/**
+ * 当前配置源的已知问题（文件不可用或内容解析失败），已沿用 last-known-good。
+ * 沿用意味着 loadConfig 不抛错，调用方无从得知“现在用的不是磁盘上的配置”，
+ * 故把原因存在这里供 /healthz 上报（否则故障静默、运维无从诊断）。
+ */
+let _configLoadIssue: string | null = null;
 let _hintPrinted = false;
 
+function statFingerprint(file: string): { mtimeMs: number; size: number } | null {
+  try {
+    const st = fs.statSync(file);
+    // mtime 在部分文件系统上只有秒级精度，同秒内的改写会漏检；叠加 size 降低漏检率。
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 加载配置文件（进程内缓存，只读一次）
+ * 加载配置文件（进程内缓存 + mtime/size 失效）
+ *
+ * daemon 是常驻进程，缓存若永不失效就会永久持有启动那一刻的配置快照：
+ *  - 用户改配置后 CLI 算出的指纹与 daemon 不同 → 全线报“配置指纹不匹配”，
+ *    而旧文案把原因指向用户的 --config，排查方向被带偏；
+ *  - 更严重：从配置里移除某个 scope（撤销授权）后 daemon 的白名单仍是旧的 →
+ *    HTTP MCP 继续为已撤权 scope 提供服务，属 fail-open。
+ * 因此每次调用用一次同步 statSync 校验来源文件（约 0.05ms；相对于配置漂移
+ * 造成的授权与一致性风险，该开销可接受）。
+ *
+ * 注意：热失效只适用于授权/scope/token 类变更。vectorDir/dataDir 变更会使
+ * daemon 内存中的 engine 与已打开句柄指向旧路径，由 assertDaemonIdentityCurrent
+ * 单独 fail-loud（见 lib/scope-collection.ts），不得静默热生效。
+ *
  * @param explicitPath --config 指定的路径
  */
 export function loadConfig(explicitPath?: string): KiConfig {
-  if (_cached) return _cached;
+  const snapshot = configSnapshotStorage.getStore();
+  if (snapshot && (explicitPath === undefined || path.resolve(explicitPath) === snapshot._configPath)) {
+    return snapshot;
+  }
+  const requestedPath = explicitPath ?? process.env.KI_CONFIG_PATH ?? undefined;
+  if (_cached && _cachedExplicitPath === explicitPath) {
+    if (_cachedFile === null) {
+      // 当前用的是默认值（启动时未找到配置文件）：配置文件可能在进程启动后
+      // 才被创建（ki config init），所以仍需重新查找一次。
+      if (!findConfigFile(requestedPath)) return _cached;
+    } else {
+      const st = statFingerprint(_cachedFile);
+      // _configLoadIssue 非 null 说明上一份缓存来自 last-known-good（磁盘当时不可用或
+      // 内容损坏）。此时即使 stat 指纹一致也必须重读：文件可能是被 rename 回来的
+      //（rename 不改 mtime，指纹与缓存完全相同），不重读会让故障状态永久残留、
+      // /healthz 一直报已经不存在的配置问题。
+      if (st && _configLoadIssue === null && st.mtimeMs === _cachedMtimeMs && st.size === _cachedSize) {
+        return _cached;
+      }
+      // 已变更，或存在未解除的配置问题 → 落到下方重新加载
+    }
+  }
 
-  const configPath = explicitPath ?? process.env.KI_CONFIG_PATH ?? undefined;
-  const explicit = configPath !== undefined;
-  const file = findConfigFile(configPath);
+  const explicit = requestedPath !== undefined;
+  let file: string | null;
+  try {
+    file = findConfigFile(requestedPath);
+  } catch (err) {
+    // 显式路径（--config / KI_CONFIG_PATH）失效：对一次性 CLI 进程应 fail-loud；
+    // 但对已用该配置成功启动的常驻 daemon，运行中路径消失不应让所有请求都报错，
+    // 故有 last-known-good 时沿用并告警，没有则原样抛出。
+    if (canReuseLastKnownGood(explicitPath)) {
+      warnConfigUnavailable(`${(err as Error).message}`);
+      return _cached!;
+    }
+    throw err;
+  }
 
   if (file) {
-    _cached = parseAndExpand(file);
+    // TOCTOU 防护：读前采一次指纹、读完再采一次，两者一致才允许入缓存。
+    // 缓存指纹若在解析之后才采集，而写者恰好落在 readFileSync 与 statSync 之间，
+    // 就会把「旧内容 + 新指纹」一起写进缓存 → 此后 mtime/size 恒等、热失效永远
+    // 命中缓存，该次变更在本进程生命周期内**永久不可见**（实测可复现），
+    // 直接抵消撤权实时生效的目标。窗口不是纳秒级：它覆盖整个 YAML.parse +
+    // 字段校验 + 路径展开。不稳定时本次结果仍返回，但不入缓存（下次重读）。
+    const before = statFingerprint(file);
+    let parsed: KiConfig;
+    try {
+      parsed = parseAndExpand(file);
+    } catch (err) {
+      // 配置内容损坏（YAML 语法错、字段非法）：沿用 last-known-good，而不是让
+      // daemon 全面不可用 —— daemon 是共享故障域（需求 §5：崩溃会同时影响 CLI 与
+      // MCP），且授权口径不应因读取问题而降级或中断。问题经 stderr 告警 +
+      // getConfigLoadIssue()（由 /healthz 上报）暴露，仍属 fail-loud + 给出路。
+      if (canReuseLastKnownGood(explicitPath)) {
+        warnConfigUnavailable(`内容解析失败：${(err as Error).message}`);
+        return _cached!;
+      }
+      throw err;
+    }
+    const after = statFingerprint(file);
+    const stable = before !== null && after !== null
+      && before.mtimeMs === after.mtimeMs && before.size === after.size;
+    _cached = parsed;
+    _cachedFile = stable ? file : null;
+    _cachedMtimeMs = stable ? after!.mtimeMs : 0;
+    _cachedSize = stable ? after!.size : -1;
+    _cachedExplicitPath = explicitPath;
+    _configUnavailableWarned = false;
+    _configLoadIssue = null;
+    if (!stable) {
+      process.stderr.write(
+        `提示：配置文件 ${file} 在读取期间发生变更，本次结果不入缓存，下次调用将重新读取。\n`
+      );
+    }
     // 旧格式迁移提示：非显式路径下读到 config.json 时，提示一次
     if (!explicit && file.toLowerCase().endsWith('.json') && !_hintPrinted) {
       _hintPrinted = true;
@@ -173,22 +300,80 @@ export function loadConfig(explicitPath?: string): KiConfig {
         '提示：检测到旧版 JSON 配置，建议执行 ki config init 生成 YAML 配置\n'
       );
     }
-  } else {
-    _cached = buildDefaults();
-    if (!_hintPrinted) {
-      _hintPrinted = true;
-      process.stderr.write(
-        '提示：未找到配置文件，使用默认路径。执行 ki config init 创建配置文件\n'
-      );
-    }
+    return _cached;
+  }
+
+  // 配置源不可用（被删/改名/全部候选缺失）。**绝对不能降级为 buildDefaults()**：
+  // 那会把 scopeMode 从 strict 静默变成 default、scopes 清空 → resolveScope 从白名单
+  // 校验退化为任意放行（越权 fail-open）；且 getScopeDataDir 丢掉 scope 级 kbDir →
+  // KB 写入目录静默迁移、新数据与存量分裂。而身份指纹只含 vectorDir/dataDir，
+  // **检测不到这类降级**，守卫会直接放行。旧实现（永久缓存）对此免疫，是热失效
+  // 把它暴露了出来，因此必须保留 last-known-good。
+  if (canReuseLastKnownGood(explicitPath)) {
+    warnConfigUnavailable(_cachedFile ?? requestedPath ?? '默认候选路径');
+    return _cached!;
+  }
+
+  _cached = buildDefaults();
+  _cachedFile = null;
+  _cachedMtimeMs = 0;
+  _cachedSize = -1;
+  _cachedExplicitPath = explicitPath;
+  if (!_hintPrinted) {
+    _hintPrinted = true;
+    process.stderr.write(
+      '提示：未找到配置文件，使用默认路径。执行 ki config init 创建配置文件\n'
+    );
   }
 
   return _cached;
 }
 
+/** 是否具备可沿用的 last-known-good：必须是同一 explicitPath 且曾从真实文件加载过。 */
+function canReuseLastKnownGood(explicitPath?: string): boolean {
+  return _cached !== null && _cachedExplicitPath === explicitPath && _cachedFile !== null;
+}
+
+function warnConfigUnavailable(detail: string): void {
+  _configLoadIssue = detail;
+  if (_configUnavailableWarned) return;
+  _configUnavailableWarned = true;
+  process.stderr.write(
+    `警告：配置文件不可用（${detail}），已沿用上次成功加载的配置。`
+    + '授权与路径口径**不降级**；请恢复该文件，或 ki mcp stop && ki mcp --http --daemon 以新配置重启。\n'
+  );
+}
+
+/**
+ * 当前配置源是否有已知问题（已沿用 last-known-good）；无问题返回 null。
+ * 供 /healthz 上报：沿用意味着 loadConfig 不抛错，不主动暴露就会静默。
+ */
+export function getConfigLoadIssue(): string | null {
+  return _configLoadIssue;
+}
+
+/**
+ * 仅失效缓存的「新鲜度标记」，**保留 last-known-good 内容**（区别于 resetConfigCache 的全清）。
+ *
+ * 供 SIGHUP 使用：下一次 loadConfig 必然重读文件（绕过 statSync 无法检测的
+ * “同字节数 + 同毫秒”边界）；若重读失败，loadConfig 的 last-known-good 分支会沿用
+ * 旧配置并告警。若改用「先 resetConfigCache 再 loadConfig」，则坏配置下会先销毁
+ * 可用状态、再加载失败，信号回调内抛异常又无 uncaughtException 兜底 → daemon 当场崩溃。
+ */
+export function invalidateConfigFreshness(): void {
+  _cachedMtimeMs = -1;
+  _cachedSize = -1;
+}
+
 /** 测试用：清除进程内缓存 */
 export function resetConfigCache(): void {
   _cached = null;
+  _cachedFile = null;
+  _cachedMtimeMs = 0;
+  _cachedSize = -1;
+  _cachedExplicitPath = undefined;
+  _configUnavailableWarned = false;
+  _configLoadIssue = null;
   _hintPrinted = false;
 }
 
@@ -311,6 +496,15 @@ function parseAndExpand(configFile: string): KiConfig {
     apiKey: resolveApiKey(rawEmbedding.apiKey),
   };
 
+  const rawVector = raw.vector && typeof raw.vector === 'object'
+    ? raw.vector as Record<string, unknown>
+    : {};
+  const vector: VectorResourceConfig = {
+    maxOpenCollections: rawVector.maxOpenCollections !== undefined
+      ? Number(rawVector.maxOpenCollections)
+      : DEFAULT_VECTOR_RESOURCES.maxOpenCollections,
+  };
+
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'
   const scopeMode: 'default' | 'strict' = raw.scopeMode === 'strict' ? 'strict' : 'default';
 
@@ -382,7 +576,7 @@ function parseAndExpand(configFile: string): KiConfig {
   }
 
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, mcp,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };
@@ -397,6 +591,7 @@ function buildDefaults(): KiConfig {
     backupDir,
     vectorDir: path.join(os.homedir(), '.ki', 'vector'),
     embedding: { ...DEFAULT_EMBEDDING },
+    vector: { ...DEFAULT_VECTOR_RESOURCES },
     scopeMode: 'default',
     scopes: {},
   };
@@ -518,7 +713,7 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
       return { removed: false, configPath, reason: `配置 scopes 中无 "${scope}"` };
     }
     doc.deleteIn(['scopes', scope]);
-    fs.writeFileSync(configPath, doc.toString(), 'utf-8');
+    atomicWriteConfig(configPath, doc.toString());
     resetConfigCache();
     return { removed: true, configPath };
   }
@@ -532,7 +727,34 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
     return { removed: false, configPath, reason: `配置 scopes 中无 "${scope}"` };
   }
   delete scopes[scope];
-  fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  atomicWriteConfig(configPath, JSON.stringify(parsed, null, 2) + '\n');
   resetConfigCache();
   return { removed: true, configPath };
+}
+
+/**
+ * 原子写配置文件（临时文件 + rename），并保留原文件权限。
+ *
+ * 两个理由：
+ *  1. 直接 writeFileSync 会让并发的 daemon（loadConfig 现在每次 statSync + 按需重读）
+ *     有机会读到**半截文件** → YAML 解析失败 → 沿用 last-known-good 并告警，
+ *     看起来像“配置坏了”，实际只是写入未完成。同目录 rename 是原子的，消除该窗口。
+ *  2. rename 会用临时文件的权限覆盖目标，而配置可能含 apiKey 明文；
+ *     原本 0600 的文件被改成默认 0644 就是密钥泄露，故必须显式沿用原 mode。
+ */
+function atomicWriteConfig(configPath: string, content: string): void {
+  const tmp = `${configPath}.tmp-${process.pid}`;
+  let mode: number | undefined;
+  try {
+    mode = fs.statSync(configPath).mode & 0o777;
+  } catch {
+    /* 目标不存在（首次创建）：用 writeFileSync 默认权限 */
+  }
+  try {
+    fs.writeFileSync(tmp, content, mode !== undefined ? { encoding: 'utf-8', mode } : 'utf-8');
+    fs.renameSync(tmp, configPath);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 临时文件残留无害 */ }
+    throw err;
+  }
 }

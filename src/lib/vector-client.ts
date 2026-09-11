@@ -5,10 +5,10 @@
  * 为 CLI / MCP 提供 async 语义检索 / 存储接口。
  *
  * 设计要点（与 zvec-probe-node / S-03 对齐）：
- *   - 单一 collection（config.vectorDir），scope/tag 以标量字段过滤隔离
+ *   - 一个 scope 一个 collection（config.vectorDir/collections/<scope>），scope 以物理目录隔离
  *   - tag：单值 STRING 字段，写入时统一转小写（实现 D2「== 忽略大小写」）
  *   - scope：单值 STRING 字段，一 doc 一个 scope，查询按 scope 过滤
- *   - doc id = sha256(text + scope) 截 32（S-03 generateDocId，幂等 upsert）
+ *   - doc id = sha256(text + scope + tag) 截 32（S-03 generateDocId，幂等 upsert）
  *   - 检索走 hybridSearch（queryText 语义 + fts 关键词 + RRF，kisearch 召回主路径）
  *   - content 字段兼作 FTS 字段（jieba 分词）
  */
@@ -29,14 +29,16 @@ import {
   type ZvecEngineConfig,
   type ZvecEngineOpenConfig,
 } from '../../dist/zvec-engine/index.js';
-import { loadConfig, getVectorDir, getEmbeddingConfig, resolveScope } from './config.js';
+import type { EmbeddingProvider } from '../zvec-engine/embedding/provider.js';
+import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
+import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
 export interface VectorSearchResult {
-  memoryId: string;    // = zvec Hit.id（doc id，sha256(text+scope) 截 32）
+  memoryId: string;    // = zvec Hit.id（doc id，sha256(text+scope+tag) 截 32）
   content: string;
   score: number;       // 越大越相关（基座已归一化）
   tag?: string;
@@ -106,9 +108,9 @@ export function getVectorOpSource(): string | undefined {
 }
 
 /**
- * probe 带撞锁重试：检测到 locked 时等待对方释放后重试（错开共享向量库）。
- * 多 stdio MCP 实例 / CLI 短命令共享同一向量库，空闲释放锁会让持锁方空闲后自动
- * 释放，此处重试即可「撞了多等几秒」而非立即失败。最多 LOCK_RETRY_MAX 次。
+ * probe 带撞锁重试：检测到 locked 时等待外部维护进程释放后重试。
+ * 正常 CLI/stdio/HTTP 请求均由 daemon 内部调度，不会互相抢锁；重试仅作为
+ * daemon 启动期间或显式维护模式的兜底，最多 LOCK_RETRY_MAX 次。
  */
 async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
   for (let attempt = 0; ; attempt++) {
@@ -137,6 +139,39 @@ export interface VectorTagInfo {
   count: number;
 }
 
+/**
+ * 预计算一次查询向量。
+ *
+ * zvec 的 hybridSearch 支持 `vector + fts`，因此多 Collection fan-out 时
+ * 可以把 embedding 从每个 engine 内部提升到 fan-out 外层，避免 scope 数量
+ * 放大 embedding HTTP 请求次数。
+ */
+export async function embedQueryOnce(
+  query: string,
+  provider: Pick<EmbeddingProvider, 'embed' | 'dimension'> = buildEmbedding(),
+): Promise<number[]> {
+  const vectors = await provider.embed([query], { batchSize: 1 });
+  const vector = vectors[0];
+  if (!vector) throw new Error('查询 embedding 未返回向量');
+  if (vector.length !== provider.dimension) {
+    throw new Error(`查询 embedding 维度不匹配：期望 ${provider.dimension}，实际 ${vector.length}`);
+  }
+  return vector;
+}
+
+/** 应用层合并各 scope 的候选命中，并截断为全局 top-k（纯函数，供测试/对照复用）。 */
+export function mergeVectorSearchHits(
+  perScope: VectorSearchResult[][],
+  limit: number,
+): VectorSearchResult[] {
+  return perScope
+    .flat()
+    // Node 的稳定排序保留同分命中在 scope/engine 返回中的顺序，避免单 scope
+    // 检索因 fan-out 适配层引入额外 tie-break 而发生无意义的排序漂移。
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 // ─── 常量 ───
 
 const COLLECTION_NAME = 'kisearch';
@@ -148,13 +183,12 @@ const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
 
-// ─── 撞锁重试 + 空闲释放锁（错开共享向量库） ───
+// ─── 撞锁重试 + 空闲释放锁（daemon owner 兜底） ───
 //
-// 背景：向量库为单进程独占锁。多个常驻 MCP 实例（stdio 多实例）与 CLI 短命令
-// 需在「错开使用」的前提下共享同一向量库：
-//   - 撞锁重试：probe/open 检测到 locked 时，等对方空闲释放后重试（而非立即失败）；
-//   - 空闲释放锁：常驻 MCP 层调用 enableIdleClose，空闲超时后自动 closeEngine 释放锁，
-//     让其他实例 / CLI 能抢到。CLI 短命令不启用（per-call 结束即 closeEngine）。
+// 背景：向量库为单进程独占锁。正常 CLI/MCP 请求都由 daemon owner 调度，
+// 这里的重试和空闲释放只服务于 daemon 启动/维护模式等兜底路径：
+//   - 撞锁重试：probe/open 检测到 locked 时，等外部进程释放后重试；
+//   - 空闲释放锁：常驻 daemon 空闲超时后释放所有 Collection；CLI 短命令不启用。
 
 /** 撞锁后重试等待间隔（ms） */
 const LOCK_RETRY_INTERVAL_MS = 2_000;
@@ -178,6 +212,24 @@ function touchEngineUse(): void {
 }
 
 /**
+ * 显式持有/释放在途 engine 操作计数，供**不走 withEngine** 的调用方使用
+ *（当前仅存量迁移 lib/vector-migrate.ts）。
+ *
+ * 必要性：idle-close 定时器以 `_inFlightOps === 0` 为放行条件，而它由
+ * `setInterval` 触发、**不经过 OperationCoordinator**，因此即使迁移已占得全局
+ * 独占队列，定时器仍会在迁移途中 `void closeEngine()`，与迁移直接发起的原生
+ * ZVecOpen 并发 —— 触发下方 _engineOpTail 注释记载的同进程并发 open 永久阻塞
+ *（实测约 62%）。迁移必须全程持有该计数。
+ */
+export function beginExternalEngineOp(): void {
+  _inFlightOps++;
+}
+
+export function endExternalEngineOp(): void {
+  _inFlightOps = Math.max(0, _inFlightOps - 1);
+}
+
+/**
  * 启用向量库空闲释放锁（仅供常驻 MCP 层调用，CLI 勿用）。
  * 空闲超过 idleMs 后自动 closeEngine 释放 LOCK，让其他 MCP 实例 / CLI 能错开抢锁；
  * 下次向量调用时 getEngine 惰性 reopen（实测约 0.7s）。
@@ -194,7 +246,7 @@ export function enableIdleClose(idleMs: number): void {
     // proxy.close() 的 drain 只等已 postMessage 的请求，embedding 阶段不可见 → drain
     // 立即完成 → worker closed → embedding 返回后 proxy.send 报
     // "worker not open (state=closed)"。
-    if (_enginePromise && _inFlightOps === 0 && Date.now() - _lastUseAt >= _idleCloseMs) {
+    if (_enginePromises.size > 0 && _inFlightOps === 0 && Date.now() - _lastUseAt >= _idleCloseMs) {
       void closeEngine(); // 空闲超时，释放锁（不阻塞定时器）
     }
   }, Math.max(500, Math.floor(idleMs / 2)));
@@ -204,14 +256,110 @@ export function enableIdleClose(idleMs: number): void {
 
 // ─── Engine 单例（进程内缓存） ───
 
-let _enginePromise: Promise<ZvecEngine> | null = null;
+const _enginePromises = new Map<string, Promise<ZvecEngine>>();
+
+/**
+ * scope → 已打开句柄的 dbPath。
+ *
+ * _enginePromises 只以 scope 名为键，命中即返回、不校验路径。而 loadConfig 已支持
+ * 热失效，长操作（import/restore 可达数分钟）中途 vectorDir 变化时，缓存会返回
+ * **指向旧路径的已打开句柄**，而同一次操作里的 getScopeCollectionPath /
+ * scopeCollectionExists 已按新路径解析 → 读旧句柄、写新路径，数据静默落错位置。
+ * 入口的身份守卫只在请求开始时检查一次，拦不住这类中途漂移，故在此记录并在
+ * 命中缓存前比对（见 getEngine）。
+ */
+const _engineDbPaths = new Map<string, string>();
+
+interface EngineMeta {
+  lastUsedAt: number;
+  activeUses: number;
+  ready: boolean;
+}
+
+const _engineMeta = new Map<string, EngineMeta>();
+const DEFAULT_MAX_OPEN_COLLECTIONS = 8;
+const resourceMetrics = {
+  openCount: 0,
+  peakOpenCount: 0,
+  opened: 0,
+  closed: 0,
+  openMsTotal: 0,
+  closeMsTotal: 0,
+  lastOpenMs: 0,
+  lastCloseMs: 0,
+};
+
+export interface VectorResourceMetrics {
+  openCount: number;
+  peakOpenCount: number;
+  opened: number;
+  closed: number;
+  openMsTotal: number;
+  closeMsTotal: number;
+  lastOpenMs: number;
+  lastCloseMs: number;
+}
+
+export function getVectorResourceMetrics(): VectorResourceMetrics {
+  return { ...resourceMetrics };
+}
+
+function maxOpenCollections(): number {
+  const configured = loadConfig().vector?.maxOpenCollections;
+  return configured && Number.isInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_MAX_OPEN_COLLECTIONS;
+}
+
+async function closeEntry(scope: string, promise: Promise<ZvecEngine>): Promise<void> {
+  if (_enginePromises.get(scope) === promise) _enginePromises.delete(scope);
+  _engineDbPaths.delete(scope);
+  _engineMeta.delete(scope);
+  const startedAt = Date.now();
+  try {
+    await (await promise).close();
+  } catch {
+    /* 释放失败仍从缓存移除，后续调用可重新探测并暴露真实状态。 */
+  } finally {
+    const elapsed = Date.now() - startedAt;
+    resourceMetrics.closed++;
+    resourceMetrics.closeMsTotal += elapsed;
+    resourceMetrics.lastCloseMs = elapsed;
+    resourceMetrics.openCount = Math.max(0, resourceMetrics.openCount - 1);
+  }
+}
+
+/** 在 serializeEngineOp 内执行；只淘汰已 ready 且没有活跃使用者的最老 entry。 */
+async function enforceEngineLimit(excludeScope: string): Promise<void> {
+  const limit = maxOpenCollections();
+  for (;;) {
+    const count = [..._enginePromises.keys()].filter((scope) => scope !== excludeScope).length;
+    if (count < limit) return;
+    const candidate = [..._engineMeta.entries()]
+      .filter(([scope, meta]) => scope !== excludeScope && meta.ready && meta.activeUses === 0)
+      .sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+    if (candidate) {
+      const [scope] = candidate;
+      const promise = _enginePromises.get(scope);
+      if (promise) await closeEntry(scope, promise);
+      continue;
+    }
+    // 所有句柄都在打开或使用中，等待任一 entry settle 后再次选择；不绕过上限强行打开。
+    const pending = [..._enginePromises.entries()]
+      .filter(([scope]) => scope !== excludeScope)
+      .map(([, promise]) => promise.then(() => undefined, () => undefined));
+    if (pending.length === 0) return;
+    await Promise.race(pending);
+  }
+}
 
 // 进程内 probe/open 串行化队尾：zvec 同进程并发 ZVecOpen 同一 dbPath 会以
 // 高概率（实测约 62%）触发原生竞态永久阻塞，故所有涉及原生 open 的操作
 //（probe / create / open）必须串行排队，禁止并发。
+// 已导出：存量迁移直接调用原生 ZvecEngine.*，不经 withEngine，必须自行入队。
 let _engineOpTail: Promise<unknown> = Promise.resolve();
 
-function serializeEngineOp<T>(op: () => Promise<T>): Promise<T> {
+export function serializeEngineOp<T>(op: () => Promise<T>): Promise<T> {
   const run = _engineOpTail.then(op, op);
   // 队尾吞掉异常，避免一次失败阻断后续排队
   _engineOpTail = run.catch(() => {});
@@ -226,8 +374,11 @@ function withOpenTimeout(p: Promise<ZvecEngine>, label: string): Promise<ZvecEng
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      // 超时后若底层迟到成功，关掉这个孤儿 engine 释放 LOCK（fire-and-forget）
-      p.then((e) => { void e.close().catch(() => {}); }).catch(() => {});
+      // 超时后若底层迟到成功，仍须经统一原生操作队列关闭孤儿 engine，释放 LOCK。
+      // 不能直接调用 close：它会与同进程的 open/probe/close 发生原生竞态。
+      p.then((e) => {
+        void serializeEngineOp(async () => { await e.close(); }).catch(() => {});
+      }).catch(() => {});
       reject(new Error(
         `向量库${label}超过 ${ENGINE_OPEN_TIMEOUT_MS}ms 未完成，已中断本次调用；`
         + '后续调用会自动重试，若持续失败请检查向量库目录与磁盘状态',
@@ -290,11 +441,12 @@ function buildEmbedding(): SiliconFlowProvider {
 /**
  * 构建 create/open 配置
  */
-function buildCreateConfig(): ZvecEngineConfig {
+function buildCreateConfig(scope: string): ZvecEngineConfig {
   const config = loadConfig();
   const emb = getEmbeddingConfig(config);
+  ensureVectorLayout(config);
   return {
-    dbPath: getVectorDir(config),
+    dbPath: getScopeCollectionPath(config, scope),
     collection: {
       name: COLLECTION_NAME,
       denseField: DENSE_FIELD,
@@ -315,17 +467,17 @@ function buildCreateConfig(): ZvecEngineConfig {
   };
 }
 
-function buildOpenConfig(): ZvecEngineOpenConfig {
+function buildOpenConfig(scope: string): ZvecEngineOpenConfig {
   const config = loadConfig();
   return {
-    dbPath: getVectorDir(config),
+    dbPath: getScopeCollectionPath(config, scope),
     collectionName: COLLECTION_NAME,
     embedding: buildEmbedding(),
   };
 }
 
 /**
- * 获取（或创建/打开）进程内唯一的 ZvecEngine 实例。
+ * 获取（或创建/打开）指定 scope 的进程内 ZvecEngine 实例。
  * 首次：dbPath 不存在 → create；已存在 → open。
  * 若已被其他进程持锁（如 ki mcp/server 常驻），直接抛 CollectionLockedException，
  * 避免 open 撞锁时挂起/抛出不可读的底层错误（MCP 路径未走 ensureVectorAvailable 时的兵底）。
@@ -333,12 +485,41 @@ function buildOpenConfig(): ZvecEngineOpenConfig {
  * 并发安全：probe→create/open 全链路经 serializeEngineOp 串行化，且 open 带超时，
  * 保证 _enginePromise 必定 settle（失败即重置缓存，后续调用可重试自愈）。
  */
-export function getEngine(): Promise<ZvecEngine> {
+export function getEngine(scope = 'default'): Promise<ZvecEngine> {
+  validateScope(scope);
+  const normalizedScope = scope;
   // 每次引擎访问刷新空闲计时（空闲释放锁依据）；CLI 未启用时无副作用
   touchEngineUse();
-  if (!_enginePromise) {
-    const createCfg = buildCreateConfig();
-    _enginePromise = serializeEngineOp(async () => {
+  const existing = _enginePromises.get(normalizedScope);
+  if (existing) {
+    const meta = _engineMeta.get(normalizedScope);
+    if (meta) meta.lastUsedAt = Date.now();
+    // 命中缓存前校验 dbPath。仅 daemon owner 需要：CLI 是短命进程，单命令内配置
+    // 不会中途变化，且这里要调 ensureVectorLayout/getScopeCollectionPath（内含路径
+    // 规范化 IO），会破坏
+    // 原本“零 IO”的缓存命中快路径。
+    if (process.env.KI_DAEMON_OWNER === '1') {
+      const openedAt = _engineDbPaths.get(normalizedScope);
+      const currentConfig = loadConfig();
+      ensureVectorLayout(currentConfig);
+      const current = getScopeCollectionPath(currentConfig, normalizedScope);
+      if (openedAt !== undefined && openedAt !== current) {
+        throw Object.assign(
+          new Error(
+            `scope "${normalizedScope}" 的向量目录在操作进行中发生变化：已打开句柄指向 ${openedAt}，`
+            + `而当前配置解析为 ${current}。继续使用会把数据写到错误位置。`
+            + '请执行 ki mcp stop && ki mcp --http --daemon 以新配置重启 daemon。'
+          ),
+          { code: 'DAEMON_IDENTITY_DRIFT' },
+        );
+      }
+    }
+    return existing;
+  }
+  const createCfg = buildCreateConfig(normalizedScope);
+  const enginePromise = serializeEngineOp(async () => {
+      await enforceEngineLimit(normalizedScope);
+      const openStartedAt = Date.now();
       const exists = await probeWithRetry(createCfg.dbPath);
       if (exists.locked) {
         throw new CollectionLockedException(lockedHint(createCfg.dbPath));
@@ -351,33 +532,78 @@ export function getEngine(): Promise<ZvecEngine> {
         } catch {
           /* 忽略：非空目录/不可删，交由 create 报错 */
         }
-        return withOpenTimeout(ZvecEngine.create(createCfg), '创建');
+        const engine = await withOpenTimeout(ZvecEngine.create(createCfg), '创建');
+        const elapsed = Date.now() - openStartedAt;
+        resourceMetrics.opened++;
+        resourceMetrics.openMsTotal += elapsed;
+        resourceMetrics.lastOpenMs = elapsed;
+        resourceMetrics.openCount++;
+        resourceMetrics.peakOpenCount = Math.max(resourceMetrics.peakOpenCount, resourceMetrics.openCount);
+        return engine;
       }
-      return withOpenTimeout(ZvecEngine.open(buildOpenConfig()), '打开');
+      const engine = await withOpenTimeout(ZvecEngine.open(buildOpenConfig(normalizedScope)), '打开');
+      const elapsed = Date.now() - openStartedAt;
+      resourceMetrics.opened++;
+      resourceMetrics.openMsTotal += elapsed;
+      resourceMetrics.lastOpenMs = elapsed;
+      resourceMetrics.openCount++;
+      resourceMetrics.peakOpenCount = Math.max(resourceMetrics.peakOpenCount, resourceMetrics.openCount);
+      return engine;
     });
-    // 失败时重置缓存，允许下次重试
-    _enginePromise.catch(() => { _enginePromise = null; });
-  }
-  return _enginePromise;
+  _enginePromises.set(normalizedScope, enginePromise);
+  // 必须与 _enginePromises 同时登记：缺少这一步时 getEngine 的 dbPath 校验会因
+  // openedAt 恒为 undefined 而永不触发，中途漂移保护形同虚设。
+  _engineDbPaths.set(normalizedScope, createCfg.dbPath);
+  _engineMeta.set(normalizedScope, { lastUsedAt: Date.now(), activeUses: 0, ready: false });
+  enginePromise.then(() => {
+    const meta = _engineMeta.get(normalizedScope);
+    if (meta) meta.ready = true;
+  }).catch(() => {});
+  // 失败时重置缓存，允许下次重试
+  enginePromise.catch(() => {
+    if (_enginePromises.get(normalizedScope) === enginePromise) {
+      _enginePromises.delete(normalizedScope);
+      _engineDbPaths.delete(normalizedScope);
+      _engineMeta.delete(normalizedScope);
+    }
+  });
+  return enginePromise;
 }
 
 /**
  * 关闭 engine（terminate worker + 释放 LOCK）并重置缓存。
  * CLI per-call 命令结束时必须调用，否则 worker 线程持引用导致进程无法退出。
  */
-export async function closeEngine(): Promise<void> {
-  // 先置空缓存再 close：close 期间新 getEngine 会走 reopen + 撞锁重试，
-  // 而非拿到正在 closing 的旧 engine（避免 WorkerCrashedError 竞态）。
-  const promise = _enginePromise;
-  _enginePromise = null;
-  if (promise) {
+export async function closeEngine(scope?: string): Promise<void> {
+  // 传 scope 时只释放该 Collection；scope delete 等 daemon 内操作不能因为
+  // 删除一个分片而关闭其他 scope 正在使用的 engine。无参仍保留全量关闭语义，
+  // 供 CLI 进程收尾与 daemon shutdown 使用。
+  const entries = scope
+    ? [..._enginePromises.entries()].filter(([key]) => key === scope)
+    : [..._enginePromises.entries()];
+  for (const [key, promise] of entries) {
+    // 同步清理两个 map 与 LRU 元数据：否则下次 open 时残留值可能误报漂移，
+    // 或资源上限错误地把已关闭句柄算作占用。
+    if (_enginePromises.get(key) === promise) _enginePromises.delete(key);
+    _engineDbPaths.delete(key);
+    _engineMeta.delete(key);
+  }
+  const promises = entries.map(([, promise]) => promise);
+  if (promises.length > 0) {
     // close 也经 serializeEngineOp 串行化：worker 的 closeSync（释放 LOCK）+ terminate
     // 同样是原生操作，若与 reopen 的 probe/open 并发会触发 zvec 同进程原生竞态
     // （62% 概率永久阻塞，见 _engineOpTail 注释）。串行化后 close 与后续 open 互斥。
     await serializeEngineOp(async () => {
       try {
-        const engine = await promise;
-        await engine.close();
+        for (const [key, promise] of entries) {
+          const startedAt = Date.now();
+          try { await (await promise).close(); } catch { /* ignore */ }
+          const elapsed = Date.now() - startedAt;
+          resourceMetrics.closed++;
+          resourceMetrics.closeMsTotal += elapsed;
+          resourceMetrics.lastCloseMs = elapsed;
+          resourceMetrics.openCount = Math.max(0, resourceMetrics.openCount - 1);
+        }
       } catch { /* ignore */ }
     });
   }
@@ -408,22 +634,46 @@ function isWorkerUnavailable(err: unknown): boolean {
  * 所有 engine 使用一律经此包装（getEngine 的直接 await 不受在途保护，
  * 会重演 idle close 竞态——见 enableIdleClose 注释）。
  */
-async function withEngine<T>(op: (engine: ZvecEngine) => Promise<T>): Promise<T> {
+async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<T>): Promise<T> {
   touchEngineUse();
   _inFlightOps++;
+  const meta = _engineMeta.get(scope);
+  let leasedMeta: EngineMeta | undefined = meta;
+  if (meta) {
+    meta.activeUses++;
+    meta.lastUsedAt = Date.now();
+  }
   try {
     try {
-      const engine = await getEngine();
+      const engine = await getEngine(scope);
+      const current = _engineMeta.get(scope);
+      if (current && current !== leasedMeta) {
+        current.activeUses++;
+        current.lastUsedAt = Date.now();
+        leasedMeta = current;
+      }
       return await op(engine);
     } catch (err) {
       if (!isWorkerUnavailable(err)) throw err;
       // worker 已不可用（如 state=closed）：重置后重开重试一次
-      await closeEngine();
-      const engine = await getEngine();
+      // 只重置当前 scope；不同 scope 的 worker 允许并行，不能因一个分片
+      // 的自愈重连而关闭其他 scope 正在执行的请求。
+      await closeEngine(scope);
+      const engine = await getEngine(scope);
+      const current = _engineMeta.get(scope);
+      if (current && current !== leasedMeta) {
+        current.activeUses++;
+        current.lastUsedAt = Date.now();
+        leasedMeta = current;
+      }
       return await op(engine);
     }
   } finally {
     _inFlightOps--;
+    if (leasedMeta) {
+      leasedMeta.activeUses = Math.max(0, leasedMeta.activeUses - 1);
+      leasedMeta.lastUsedAt = Date.now();
+    }
     touchEngineUse();
   }
 }
@@ -451,9 +701,13 @@ export async function ensureVectorAvailable(
     }
   }
   // engine 单例已存在（open 中或已 open）：等它 settle 即可，跳过 probe
-  if (_enginePromise) {
+  let normalizedScope: string | undefined;
+  try { normalizedScope = scope ? resolveScope(loadConfig(), scope) : undefined; } catch (err) {
+    return { available: false, reason: (err as Error).message, code: 'PROBE_ERROR' };
+  }
+  if (normalizedScope && _enginePromises.has(normalizedScope)) {
     try {
-      await _enginePromise;
+      await _enginePromises.get(normalizedScope);
       return { available: true };
     } catch (err) {
       // getEngine 已自行重置缓存；这里将失败原因直接作为不可用理由返回，
@@ -465,7 +719,14 @@ export async function ensureVectorAvailable(
     }
   }
   const config = loadConfig();
-  const dbPath = getVectorDir(config);
+  const embedding = getEmbeddingConfig(config);
+  if (!embedding.apiKey) {
+    return { available: false, reason: 'embedding.apiKey 未配置', code: 'PROBE_ERROR' };
+  }
+  ensureVectorLayout(config);
+  if (!scope) return { available: true };
+  normalizedScope = resolveScope(config, scope);
+  const dbPath = getScopeCollectionPath(config, normalizedScope);
   try {
     // fastFail（scope 枚举等轻量路径）：单次 probe 不重试，撞锁立即返回不可用。
     // 轻量接口不应为等锁白耗十余秒（重试留给必须过向量层的写入/检索路径）。
@@ -500,7 +761,7 @@ export async function ensureVectorAvailable(
 /**
  * 语义检索（hybrid：语义 + FTS 关键词 + RRF），按 scope + tag 过滤。
  *
- * scope：单个或数组（多 scope 检索：单次查询 + scope OR 过滤，embedding 仅 1 次）。
+ * scope：单个或数组；多 scope 在各 Collection fan-out 后由应用层合并。
  * tags：可选。不传/空 → 不按 tag 过滤（搜索 scope 下全部 tag）；
  * 传单个 tag 或逗号分隔多个 tag → 多 tag 以 OR 组合（复用 buildScopeTagFilter）。
  */
@@ -512,6 +773,8 @@ export async function vectorSearch(params: {
   limit?: number;
   tags?: string | string[]; // 数组：tag 值本身可能含逗号，join/split 往返会错拆；字符串：逗号分隔多 tag
   threshold?: number;
+  /** 测试/嵌入适配器注入；生产调用不传，默认使用配置中的 provider。 */
+  embeddingProvider?: Pick<EmbeddingProvider, 'embed' | 'dimension'>;
 }): Promise<VectorSearchResult[]> {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
@@ -521,16 +784,26 @@ export async function vectorSearch(params: {
     : params.tags
       ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
       : undefined;
-  const filter = buildScopeTagFilter(scopes, tagList);
-
-  const hits: Hit[] = await withEngine((engine) => engine.hybridSearch({
-    queryText: params.query,
-    fts: params.query,
-    topk: params.limit ?? 10,
-    filter,
+  // fan-out 前只做一次 embedding；engine 侧改用预计算 vector + fts，
+  // 保证多 scope 搜索不会按 scope 数量重复调用 embedding 服务。
+  const existingScopes = scopes.filter((scope) => scopeCollectionExists(scope));
+  if (existingScopes.length === 0) return [];
+  const queryVector = await embedQueryOnce(params.query, params.embeddingProvider ?? buildEmbedding());
+  const perScope = await Promise.all(existingScopes.map(async (scope) => {
+    const filter = buildScopeTagFilter([scope], tagList);
+    try {
+      return await withEngine(scope, (engine) => engine.hybridSearch({
+        vector: queryVector,
+        fts: params.query,
+        topk: params.limit ?? 10,
+        filter,
+      }));
+    } catch (err) {
+      throw new Error(`scope "${scope}" 检索失败：${(err as Error).message}`);
+    }
   }));
-
-  return hits
+  const hits: Hit[] = perScope.flat();
+  const normalized = hits
     .map((h) => ({
       memoryId: h.id,
       content: h.text ?? String(h.fields?.[FTS_FIELD] ?? ''),
@@ -540,6 +813,7 @@ export async function vectorSearch(params: {
       scope: h.fields?.[SCOPE_FIELD] !== undefined ? String(h.fields[SCOPE_FIELD]) : undefined,
     }))
     .filter((r) => params.threshold === undefined || r.score >= params.threshold);
+  return mergeVectorSearchHits([normalized], params.limit ?? 10);
 }
 
 // ─── 存储（替代 memStore / memBulkStore） ───
@@ -561,7 +835,7 @@ export async function vectorStore(params: {
   const tag = normalizeTag(params.tags ?? DEFAULT_TAG);
 
   const docId = generateDocId(params.text, scope, tag);
-  const result = await withEngine((engine) => engine.upsert([{
+  const result = await withEngine(scope, (engine) => engine.upsert([{
     id: docId,
     text: params.text,
     fields: {
@@ -604,7 +878,7 @@ export async function vectorBulkStore(params: {
     };
   });
 
-  const result = await withEngine((engine) => engine.upsert(docs));
+  const result = await withEngine(scope, (engine) => engine.upsert(docs));
 
   // 组装逐项结果（WriteResult.errors 按 doc id 定位）
   const errorById = new Map<string, string>();
@@ -636,8 +910,8 @@ export async function vectorDelete(params: {
   ids: string[];
 }): Promise<{ deleted: number; errors: { id: string; code: string; reason: string }[] }> {
   // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
-  resolveScope(loadConfig(), params.scope);
-  const result = await withEngine((engine) => engine.delete(params.ids));
+  const scope = resolveScope(loadConfig(), params.scope);
+  const result = await withEngine(scope, (engine) => engine.delete(params.ids));
   return {
     deleted: result.ok,
     errors: (result.errors ?? []).map((e) => ({ id: e.id, code: e.code, reason: e.reason })),
@@ -666,6 +940,29 @@ function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
   return { and: [scopeCond, tagFilter] };
 }
 
+/** 只读路径使用：不存在/空 Collection 视为空 scope，避免查询意外创建新库。 */
+function scopeCollectionExists(scope: string): boolean {
+  const config = loadConfig();
+  const dbPath = getScopeCollectionPath(config, scope);
+  try {
+    return fs.statSync(dbPath).isDirectory() && fs.readdirSync(dbPath).length > 0;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+/**
+ * 找出「已解析为合法 scope、但 Collection 目录不存在或为空」的 scope。
+ *
+ * vectorSearch 的 fan-out 会静默过滤掉这些 scope（避免查询意外创建新库），
+ * 但过滤本身就是一次静默漏召回：调用方必须能拿到名单并显式告知用户，
+ * 否则“迁移未完成 / 目录被外部删除”会表现为“搜不到”，无任何可诊断信息。
+ */
+export function findMissingScopeCollections(scopes: string[]): string[] {
+  return scopes.filter((scope) => !scopeCollectionExists(scope));
+}
+
 function toDocInfo(d: { id: string; text?: string; fields?: Record<string, unknown> }): VectorDocInfo {
   return {
     docId: d.id,
@@ -685,8 +982,9 @@ export async function vectorListDocs(params: {
   limit?: number;
 }): Promise<VectorDocInfo[]> {
   validateScope(params.scope);
+  if (!scopeCollectionExists(params.scope)) return [];
   const filter = buildScopeTagFilter([params.scope], params.tags);
-  return withEngine(async (engine) => {
+  return withEngine(params.scope, async (engine) => {
     const ids = await engine.listIds(filter, params.limit ?? 10);
     if (ids.length === 0) return [];
     const docs = await engine.fetch(ids, false);
@@ -699,10 +997,22 @@ export async function vectorListDocs(params: {
  */
 export async function vectorFetchDocs(ids: string[]): Promise<VectorDocInfo[]> {
   if (ids.length === 0) return [];
-  return withEngine(async (engine) => {
-    const docs = await engine.fetch(ids, false);
-    return docs.map(toDocInfo);
-  });
+  const config = loadConfig();
+  ensureVectorLayout(config);
+  const root = getCollectionsRoot(config);
+  if (!fs.existsSync(root)) return [];
+  const scopes = fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((scope) => /^[a-zA-Z0-9_-]+$/.test(scope));
+  const found: VectorDocInfo[] = [];
+  for (const scope of scopes) {
+    if (!scopeCollectionExists(scope)) continue;
+    const docs = await withEngine(scope, (engine) => engine.fetch(ids, false));
+    found.push(...docs.map(toDocInfo));
+    if (found.length >= ids.length) break;
+  }
+  return found;
 }
 
 /**
@@ -711,17 +1021,13 @@ export async function vectorFetchDocs(ids: string[]): Promise<VectorDocInfo[]> {
  * 受 scanLimit 约束（默认 10000）——大库下为"已扫描范围内"的 scope。
  */
 export async function vectorListScopes(scanLimit: number = LIST_ALL_LIMIT): Promise<string[]> {
-  return withEngine(async (engine) => {
-    const ids = await engine.listIds(undefined, scanLimit);
-    if (ids.length === 0) return [];
-    const docs = await engine.fetch(ids, false);
-    const set = new Set<string>();
-    for (const d of docs) {
-      const s = d.fields?.[SCOPE_FIELD];
-      if (s !== undefined && s !== null) set.add(String(s));
-    }
-    return [...set];
-  });
+  void scanLimit;
+  const config = loadConfig();
+  ensureVectorLayout(config);
+  if (!fs.existsSync(getCollectionsRoot(config))) return [];
+  return fs.readdirSync(getCollectionsRoot(config), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^[a-zA-Z0-9_-]+$/.test(entry.name))
+    .map((entry) => entry.name);
 }
 
 /**
@@ -734,9 +1040,10 @@ export async function vectorListTags(params: {
   scanLimit?: number;
 }): Promise<{ tags: VectorTagInfo[]; scanned: number; truncated: boolean }> {
   validateScope(params.scope);
+  if (!scopeCollectionExists(params.scope)) return { tags: [], scanned: 0, truncated: false };
   const limit = params.scanLimit ?? LIST_ALL_LIMIT;
   const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: params.scope };
-  return withEngine(async (engine) => {
+  return withEngine(params.scope, async (engine) => {
     const ids = await engine.listIds(scopeCond, limit);
     const truncated = ids.length >= limit;
     if (ids.length === 0) return { tags: [], scanned: 0, truncated };
@@ -760,8 +1067,9 @@ export async function vectorListTags(params: {
  */
 export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
   validateScope(params.scope);
+  if (!scopeCollectionExists(params.scope)) return 0;
   const filter = buildScopeTagFilter([params.scope], params.tags);
-  return withEngine((engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
+  return withEngine(params.scope, (engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
 }
 
 /**
@@ -773,8 +1081,9 @@ export async function vectorDeleteScope(
   onProgress?: (deleted: number) => void
 ): Promise<{ deleted: number }> {
   validateScope(params.scope);
+  if (!scopeCollectionExists(params.scope)) return { deleted: 0 };
   const filter = buildScopeTagFilter([params.scope], params.tags);
-  return withEngine(async (engine) => {
+  return withEngine(params.scope, async (engine) => {
     let total = 0;
     for (;;) {
       const ids = await engine.listIds(filter, LIST_ALL_LIMIT);

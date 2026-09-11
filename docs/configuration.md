@@ -32,6 +32,7 @@ kisearch 通过一个 YAML/JSON 配置文件集中管理数据目录、向量引
 dataDir     # KB 源数据目录
 backupDir   # 备份目录
 vectorDir   # zvec 向量库 collection 目录
+vector.maxOpenCollections # daemon 同时保留的 Collection handle 上限（LRU）
 embedding   # Embedding 提供商配置
 scopeMode   # scope 护栏模式（default | strict）
 scopes      # scope → KB 目录映射
@@ -65,6 +66,13 @@ zvec 向量库 collection 目录，存储向量数据与索引。
 - **类型**：`string`
 - **默认值**：`~/.ki/vector`
 - **说明**：⚠️ 向量库 schema 是创建时白名单（无 alter/drop API）。**增加字段需删 vectorDir 重建，会丢失该 scope 全部向量数据并需重新导入**。
+
+### `vector.maxOpenCollections`
+
+- **类型**：正整数，默认 `8`
+- **作用**：daemon 同时保留的 scope Collection handle/worker 上限。达到上限时，优先释放没有在途操作且最近最久未使用的 Collection；正在使用的句柄不会被强制关闭。
+- **观测**：`GET /healthz` 的 `vectorResources` 提供当前打开数、峰值、打开/释放次数及耗时累计。
+- **注意**：该上限不改变既有 idle-close 参数；idle-close 仍按原配置运行。
 
 ### `embedding`
 

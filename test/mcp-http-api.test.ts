@@ -7,6 +7,7 @@
  *   - POST /api/import/upload         文件校验（扩展名白名单/大小/路径穿越）；落盘受控目录
  *   - POST /api/import/run            参数校验（scope/uploadId 缺失 → 400；uploadId 不存在 → 400）
  *   - GET  /api/import/status         jobId 不存在 → 404
+ *   - POST /api/import/cancel         jobId 不存在 → 404
  *   - /api/* 与 /mcp 隔离（非 /api 404）
  *
  * 运行：npx jiti test/mcp-http-api.test.ts
@@ -14,14 +15,18 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { createMcpHttpServer } from '../src/lib/mcp-http.js';
+import { createMcpHttpServer, serveStatic } from '../src/lib/mcp-http.js';
 import { getRelationsCachePath } from '../src/lib/scope.js';
+import { backupScopeSnapshot } from '../src/lib/backup.js';
+import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
+import { loadConfig, getScopeDataDir } from '../src/lib/config.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -189,6 +194,97 @@ describe('/api/import/run + status', () => {
     const res = await fetch(`${handle!.base}/api/import/status?jobId=no-such-job`);
     assert.equal(res.status, 404);
   });
+
+  it('cancel jobId 不存在 → 404', async () => {
+    const res = await fetch(`${handle!.base}/api/import/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: 'no-such-job' }),
+    });
+    assert.equal(res.status, 404);
+  });
+});
+
+describe('/api/restore job', () => {
+  it('run 缺 scope → 400', async () => {
+    const res = await fetch(`${handle!.base}/api/restore/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rebuildVector: true }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('status/cancel 不存在 job → 404', async () => {
+    const status = await fetch(`${handle!.base}/api/restore/status?jobId=no-such-restore-job`);
+    assert.equal(status.status, 404);
+    const cancel = await fetch(`${handle!.base}/api/restore/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: 'no-such-restore-job' }),
+    });
+    assert.equal(cancel.status, 404);
+  });
+
+  it('restore job 完成后可查询结果与 restore 阶段进度', async () => {
+    const scope = 'restore-job';
+    const config = loadConfig();
+    const scopeDir = getScopeDataDir(config, scope);
+    fs.mkdirSync(scopeDir, { recursive: true });
+    fs.writeFileSync(getRelationsCachePath(scope), JSON.stringify({ version: 1, scope, groups: {} }));
+    const snapshot = backupScopeSnapshot(config.backupDir, scope, scopeDir);
+    fs.writeFileSync(path.join(scopeDir, 'changed-after-snapshot.txt'), 'changed');
+
+    const run = await fetch(`${handle!.base}/api/restore/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, snapshotFile: snapshot }),
+    });
+    assert.equal(run.status, 202);
+    const { jobId } = await run.json();
+    let status: any;
+    for (let i = 0; i < 30; i++) {
+      status = await (await fetch(`${handle!.base}/api/restore/status?jobId=${jobId}`)).json();
+      if (status.job.state !== 'running') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(status.job.state, 'done', JSON.stringify(status));
+    assert.equal(status.job.operation, 'restore-snapshot');
+    assert.equal(status.job.result.action, 'restore_snapshot');
+    assert.equal(fs.existsSync(path.join(scopeDir, 'changed-after-snapshot.txt')), false);
+  });
+
+  it('取消排队中的 restore：批次未开始写入且最终状态为 cancelled', async () => {
+    const scope = 'restore-cancel-job';
+    const gate = getSharedOperationCoordinator().submit(
+      { operation: 'test-gate', params: { scope } },
+      async () => { await new Promise((resolve) => setTimeout(resolve, 100)); },
+      scope,
+    );
+    const run = await fetch(`${handle!.base}/api/restore/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, snapshotFile: '/tmp/should-not-be-read.tar.gz' }),
+    });
+    assert.equal(run.status, 202);
+    const { jobId } = await run.json();
+    const cancel = await fetch(`${handle!.base}/api/restore/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId }),
+    });
+    assert.equal(cancel.status, 202);
+    await gate;
+    let status: any;
+    for (let i = 0; i < 30; i++) {
+      status = await (await fetch(`${handle!.base}/api/restore/status?jobId=${jobId}`)).json();
+      if (status.job.state !== 'running') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(status.job.state, 'cancelled', JSON.stringify(status));
+    assert.equal(status.job.operation, 'restore-snapshot');
+    assert.equal(status.job.cancelRequested, true);
+  });
 });
 
 describe('--web 静态服务', () => {
@@ -199,6 +295,10 @@ describe('--web 静态服务', () => {
     fs.mkdirSync(webDir, { recursive: true });
     fs.writeFileSync(path.join(webDir, 'index.html'), '<html>ki-web</html>');
     fs.writeFileSync(path.join(webDir, 'app.js'), 'console.log(1)');
+    const siblingWebDir = path.join(tmpHome, 'webdist-evil');
+    fs.mkdirSync(siblingWebDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingWebDir, 'secret.txt'), 'must-not-leak');
+    fs.symlinkSync(path.join(siblingWebDir, 'secret.txt'), path.join(webDir, 'linked-secret.txt'));
 
     const { httpServer, closeAllSessions } = createMcpHttpServer({
       authEnabled: false,
@@ -223,6 +323,29 @@ describe('--web 静态服务', () => {
       const spa = await fetch(`${base}/some/route`);
       assert.equal(spa.status, 200);
       assert.ok((await spa.text()).includes('ki-web'));
+
+      // 编码后的 .. 不能借 startsWith(webRoot) 的前缀误判读到相邻目录。
+      const traversal = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.get({ hostname: '127.0.0.1', port: addr.port, path: '/%2e%2e/webdist-evil/secret.txt' }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+        });
+        req.on('error', reject);
+      });
+      assert.notEqual(traversal.body, 'must-not-leak');
+      assert.ok([200, 403].includes(traversal.status));
+
+      // 直接把原始编码路径交给静态服务，锁定 segment 边界校验本身（HTTP URL
+      // 解析器会先规范化 %2e%2e，无法仅靠 fetch 覆盖这一分支）。
+      const direct = { statusCode: 0, body: '', writeHead(status: number) { this.statusCode = status; }, end(body?: Buffer | string) { this.body = body?.toString() ?? ''; } };
+      serveStatic(direct as any, webDir, '/%2e%2e/webdist-evil/secret.txt');
+      assert.equal(direct.statusCode, 403);
+      assert.notEqual(direct.body, 'must-not-leak');
+
+      const linked = await fetch(`${base}/linked-secret.txt`);
+      assert.equal(linked.status, 403);
+      assert.notEqual(await linked.text(), 'must-not-leak');
 
       // /api/* 未匹配 → JSON 404（不 fallback HTML）
       const api = await fetch(`${base}/api/nope`);

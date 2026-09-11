@@ -13,6 +13,7 @@ import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
@@ -20,7 +21,7 @@ export type StoreResult =
   | { ok: true; scope: string; docId: string }
   | { ok: false; error: string };
 
-export async function executeStore(params: {
+async function executeStoreLocal(params: {
   scope?: string;
   text: string;
   tags?: string;
@@ -48,6 +49,15 @@ export async function executeStore(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeStore(params: {
+  scope?: string;
+  text: string;
+  tags?: string;
+}): Promise<StoreResult> {
+  if (shouldUseDaemonClient()) return callDaemon<StoreResult>('store', params);
+  return executeStoreLocal(params);
 }
 
 // ─── CLI ───

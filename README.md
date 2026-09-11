@@ -213,6 +213,7 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 | `backup` | 备份 scope 目录快照 |
 | `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`；重建支持 `--group` 过滤 / `--tags` 打标的局部重建） |
 | `export` | 导出 KB 为 Wiki Markdown |
+| `migrate-vector` | 显式迁移旧单 Collection 到按 scope Collection（旧数据保留） |
 | `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
 
 > `ki <command> --help` 查看每个命令的完整参数。
@@ -222,8 +223,8 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 启动后 AI Agent 可通过标准 MCP 协议使用知识索引能力：
 
 ```bash
-ki mcp                      # stdio 模式（默认；多实例与 CLI 错开共享向量库，见 docs/mcp-http.md）
-ki mcp --http               # HTTP 共享单例（多 IDE 共享同一持锁进程，见 docs/mcp-http.md）
+ki mcp                      # stdio 模式（默认；桥接本机 daemon，见 docs/mcp-http.md）
+ki mcp --http               # HTTP 共享单例/唯一 zvec owner（见 docs/mcp-http.md）
 ki mcp --http --web         # HTTP 模式 + 可视化前端（浏览器访问 http://127.0.0.1:7423/）
 ki mcp --http --daemon      # HTTP 模式后台常驻运行（-d 同义，SSH 断开不退出；--web 组合同样生效）
 ki mcp restart              # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
@@ -235,13 +236,13 @@ ki mcp token update <id> --scope all    # 修改 Token 授权 scope
 ki mcp token delete <id>                # 删除 Token（立即失效）
 ```
 
-> **启动预检**：`ki mcp` 启动前自动执行健康检查（等价 `ki doctor`），报告写入 stderr（不污染 stdio）。存在 ❌ 失败项（缺 API 密钥、向量维度不匹配）拒绝启动；仅 ⚠️ 警告继续启动。
+> **启动预检**：HTTP daemon 启动前自动执行健康检查（等价 `ki doctor`），报告写入 stderr（不污染 stdio）。stdio 客户端只负责桥接并等待 daemon 就绪；daemon 不可用或配置不匹配时 fail-loud。
 
 ### MCP 客户端配置
 
 支持 **stdio** 与 **HTTP** 两种接入方式：
 
-#### 方式一：stdio（默认，多实例错开共享）
+#### 方式一：stdio（默认，桥接本机 daemon）
 
 ```json
 {
@@ -271,7 +272,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 ```
 
 > 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate --scope <scope>` 生成授权 Token，再用 `ki mcp token list` 查看明文填入上方 `<your-token>`。
-> 所有 IDE 必须使用完全一致的连接 URL，且不要再保留 stdio 的 `command` 配置，否则会争抢向量库锁。
+> HTTP 客户端应使用一致的连接 URL；本机 IDE 可以继续保留 stdio `command: ki mcp`，stdio 会桥接到同一 daemon，不会另开 zvec owner。
 
 ### 暴露的工具（11 个）
 
@@ -407,5 +408,4 @@ npx jiti src/search.ts --help   # 直接执行任意命令
 ## <a id="license"></a>📄 License
 
 MIT
-
 

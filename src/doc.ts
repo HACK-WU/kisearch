@@ -27,6 +27,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 const PREVIEW_LEN = 200;
 
@@ -56,7 +57,7 @@ export type DocListResult =
   | { ok: true; scope: string; tags: string[] | 'all'; count: number; docs: VectorDocInfo[] }
   | { ok: false; error: string; degraded?: boolean };
 
-export async function executeDocList(params: {
+async function executeDocListLocal(params: {
   scope: string;
   tags?: string[];
   limit?: number;
@@ -84,11 +85,16 @@ export async function executeDocList(params: {
   }
 }
 
+export async function executeDocList(params: { scope: string; tags?: string[]; limit?: number; full?: boolean }): Promise<DocListResult> {
+  if (shouldUseDaemonClient()) return callDaemon<DocListResult>('doc-list', params);
+  return executeDocListLocal(params);
+}
+
 export type DocDeleteResult =
   | { ok: true; scope: string; requested: number; deleted: number; errors: { id: string; reason: string }[] }
   | { ok: false; error: string; requireConfirm?: boolean; willDelete?: VectorDocInfo[]; notFound?: string[]; scopeMismatch?: VectorDocInfo[] };
 
-export async function executeDocDelete(params: {
+async function executeDocDeleteLocal(params: {
   scope: string;
   ids: string[];
   yes: boolean;
@@ -143,6 +149,11 @@ export async function executeDocDelete(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeDocDelete(params: { scope: string; ids: string[]; yes: boolean }): Promise<DocDeleteResult> {
+  if (shouldUseDaemonClient()) return callDaemon<DocDeleteResult>('doc-delete', params);
+  return executeDocDeleteLocal(params);
 }
 
 // ─── CLI ───

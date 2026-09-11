@@ -477,7 +477,7 @@ describe('CLI 纯函数 · executeBulkStore', () => {
 //
 // 覆盖 executeSearch 多 scope 主路径（与 test/search-multiscope.test.ts 互补：
 // 后者无向量环境只能断言失败/降级路径，本组以 mock 让 ok:true 主路径真实执行）：
-//   - 响应结构：scopes[] + 命中级 scope + 无 skipped 时不返回
+//   - 响应结构：scopes[] + 命中级 scope + Collection 缺失时可诊断 skipped
 //   - 参数下传：vectorSearch 收到 scopes 数组（单次查询）
 describe('CLI 纯函数 · executeSearch 多 scope（default 档）', () => {
   before(async () => {
@@ -498,7 +498,7 @@ describe('CLI 纯函数 · executeSearch 多 scope（default 档）', () => {
     assert.equal(r.ok, true);
     if (r.ok) {
       assert.deepEqual(r.scopes, ['alpha', 'beta']);
-      assert.equal(r.skipped, undefined, '无跳过时不返回 skipped');
+      assert.deepEqual(r.skipped?.map((item) => item.scope), ['alpha', 'beta'], '缺失 Collection 必须显式标记 skipped');
       assert.equal(r.scope, 'alpha');
       // 命中透传来源 scope（mock 按引擎语义已按 score 降序返回）
       assert.deepEqual(r.results.map((h) => h.scope), ['alpha', 'beta']);
@@ -599,7 +599,7 @@ describe('CLI 纯函数 · scope 护栏 strict 模式', () => {
     assert.equal(r.ok, true, '未注册不应阻塞白名单内 scope');
     if (r.ok) {
       assert.deepEqual(r.scopes, ['registered']);
-      assert.deepEqual(r.skipped?.map((k) => k.scope), ['ghost']);
+      assert.deepEqual(r.skipped?.map((k) => k.scope), ['ghost', 'registered']);
       assert.match(r.skipped?.[0]?.reason ?? '', /未注册/);
       assert.equal(r.scope, 'registered');
     }

@@ -24,16 +24,17 @@ import {
 import { generateMarkdown } from './lib/markdown-gen.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable } from './lib/preflight.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 // ─── 类型 ───
 
-interface ExportOptions {
+export interface ExportOptions {
   scope: string;
   output: string;
   /** 指定导出的 group 路径（可选）。缺省时全量导出，顶层目录名 = scope name */
   group?: string;
 }
 
-interface ExportResult {
+export interface ExportResult {
   ok: boolean;
   action: 'export';
   scope: string;
@@ -66,8 +67,7 @@ function output(result: Record<string, unknown>): void {
 }
 
 function fail(msg: string): never {
-  output({ ok: false, error: msg });
-  process.exit(1);
+  throw new Error(msg);
 }
 
 // ─── 遍历 Group 树 ───
@@ -215,7 +215,7 @@ function readLocalKb(scope: string, groupPath: string): LocalKbIndex | null {
 
 // ─── 主逻辑 ───
 
-function handleExport(options: ExportOptions): ExportResult {
+export function handleExport(options: ExportOptions): ExportResult {
   const { scope, output: outputDir, group } = options;
 
   validateScope(scope);
@@ -349,7 +349,9 @@ function handleExport(options: ExportOptions): ExportResult {
   };
 }
 
-// ─── 参数解析 ───
+// ─── 参数解析（daemon owner 只导入 handleExport，不执行 CLI 参数解析）───
+
+if (process.env.KI_DAEMON_OWNER !== '1') {
 
 const args = process.argv.slice(2);
 
@@ -416,11 +418,15 @@ if (fs.existsSync(absOutputDir) && !yes) {
 
 // ─── 执行 ───
 
-try {
-  const result = handleExport({ scope, output: outputDir, group });
-  output(result as unknown as Record<string, unknown>);
-} catch (err) {
-  // 统一错误契约（NEG-04）：携带 code 的错误（如 PreflightError）一并回显
-  output(toErrorPayload(err));
-  process.exit(1);
+  try {
+    const options = { scope, output: path.resolve(outputDir), group };
+    const result = shouldUseDaemonClient()
+      ? await callDaemon<ExportResult>('export', options, 0)
+      : handleExport(options);
+    output(result as unknown as Record<string, unknown>);
+  } catch (err) {
+    // 统一错误契约（NEG-04）：携带 code 的错误（如 PreflightError）一并回显
+    output(toErrorPayload(err));
+    process.exit(1);
+  }
 }

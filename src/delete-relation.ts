@@ -26,6 +26,7 @@ import {
 } from './lib/scope.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { getSource } from './lib/scope.js';
 
@@ -79,7 +80,7 @@ export type DeleteRelationOutcome =
   | { ok: true; scope: string; result: DeleteResult }
   | { ok: false; error: string };
 
-export async function executeDeleteRelation(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
+async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
   try {
     const { group, relation } = params;
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
@@ -174,6 +175,11 @@ export async function executeDeleteRelation(params: DeleteRelationParams): Promi
   }
 }
 
+export async function executeDeleteRelation(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
+  if (shouldUseDaemonClient()) return callDaemon<DeleteRelationOutcome>('delete-relation', params);
+  return executeDeleteRelationLocal(params);
+}
+
 // ─── 目录级删除（REQ-11） ───
 
 export interface DeleteGroupParams {
@@ -203,7 +209,7 @@ export type DeleteGroupOutcome =
  * 删除整个 group：清空该 group 下所有 relations（cache + KB + 向量），
  * 将该 group 的 wiki 目录移入回收站，并连带删除 group-index 树节点。
  */
-export async function executeDeleteGroup(params: DeleteGroupParams): Promise<DeleteGroupOutcome> {
+async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<DeleteGroupOutcome> {
   try {
     const { group } = params;
     const scope = resolveScope(loadConfig(), params.scope);
@@ -306,6 +312,11 @@ export async function executeDeleteGroup(params: DeleteGroupParams): Promise<Del
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+export async function executeDeleteGroup(params: DeleteGroupParams): Promise<DeleteGroupOutcome> {
+  if (shouldUseDaemonClient()) return callDaemon<DeleteGroupOutcome>('delete-group', params);
+  return executeDeleteGroupLocal(params);
 }
 
 /**
@@ -554,13 +565,15 @@ interface BatchDeleteItem {
   relation: string;
 }
 
-export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<{
+type BatchDeleteResult = {
   ok: boolean;
   scope?: string;
   results: DeleteResult[];
   total: number;
   failed: number;
-}> {
+};
+
+async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDeleteItem[]): Promise<BatchDeleteResult> {
   const results: DeleteResult[] = [];
   let failed = 0;
 
@@ -590,6 +603,11 @@ export async function executeBatchDelete(scope: string | undefined, items: Batch
   }
 
   return { ok: true, scope, results, total: items.length, failed };
+}
+
+export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<BatchDeleteResult> {
+  if (shouldUseDaemonClient()) return callDaemon<BatchDeleteResult>('batch-delete', { scope, items });
+  return executeBatchDeleteLocal(scope, items);
 }
 
 // ─── CLI ───
