@@ -163,7 +163,7 @@ ki restore scope-name --from-snapshot --timestamp 20260615-100000 --backup-dir /
 
 > CLI 为非交互式：`--from-snapshot` 不会弹出交互提示、不会挂起。未加 `--yes` 时，仅展示还原总览（目标目录、现有数据规模、还原来源与文件数）并以 `CONFIRMATION_REQUIRED` 退出、不执行任何还原；确认总览无误后加 `--yes` 重新执行才会真正还原。
 
-**还原后重建向量**（向量文档不随快照还原，如需语义检索需重建）：
+**还原后重建向量**（向量文档不随快照还原，如需语义检索需重建；重建与 `ki import` **同构**——读取 KB 原文后执行同一套清洗与切分，按 chunk 级写入，docId 与 import 一致）：
 ```bash
 # 还原后全量重建（内容 + 关系 + 路径向量）
 ki restore scope-name --from-snapshot --rebuild-vector --yes

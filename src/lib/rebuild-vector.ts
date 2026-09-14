@@ -22,18 +22,25 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, getScopeDataDir } from './config.js';
+import { loadConfig, getScopeDataDir, getScopeCleanConfig } from './config.js';
 import { buildGroupPathContent, buildRelationContent } from './path-vectorize.js';
+import { buildChunkEntries } from './chunk-entries.js';
+import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
+import { getSource } from './scope.js';
 import {
   vectorBulkStore,
   vectorDeleteScope,
   type VectorBulkStoreResult,
 } from './vector-client.js';
-import { logInfo, logProgress } from './progress.js';
+import { logInfo, logProgress, logWarn } from './progress.js';
 import { parseContentTags } from './constants.js';
 
 /** 向量化分批大小（与 import 链路 bulkVectorize 对齐：批间输出进度，避免单次 upsert 无中间态） */
 const VECTORIZE_BATCH_SIZE = 200;
+
+/** 切分参数默认值（与 import 的 --chunk-size / --chunk-overlap 默认对齐；source 块缺失时回退） */
+const DEFAULT_CHUNK_SIZE = 1000;
+const DEFAULT_CHUNK_OVERLAP = 150;
 
 // 与 import 流程对齐的 tag 常量（VECTORIZE_TAG / ki-relation / ki-path）
 const CONTENT_TAG = 'ki-search';
@@ -49,6 +56,8 @@ export interface RebuildVectorEntry {
   relationName?: string;
   /** ki-relation 专用：结构化 Group 字段（不再拼入 content） */
   group?: string;
+  /** content 向量专用：chunk relation 名（如 foo-01）；ki-relation 向量以它作为文本 */
+  chunkRelation?: string;
 }
 
 export interface RebuildVectorStats {
@@ -85,6 +94,9 @@ export interface RebuildVectorOptions {
   tagsProvided?: boolean;
   /** 仅在批次边界检查；不强行打断正在进行的 embedding/zvec 批次。 */
   abortSignal?: AbortSignal;
+  /** 切分参数覆盖；缺省读 group-index.source（导入时持久化），再缺省 1000/150 */
+  chunkSize?: number;
+  chunkOverlap?: number;
   onProgress?: (progress: {
     phase: 'rebuild';
     done: number;
@@ -170,33 +182,92 @@ export function collectContentEntries(scopeDir: string, groupFilter?: string): R
 }
 
 /**
- * 收集关系向量 + 路径向量条目（relations-cache.groups 为扁平键结构）。
- * - 每个 group 的每条 relation → ki-relation 向量
- * - 每个 group → 一条 ki-path 向量
+ * 从 chunk 级 content 条目派生 ki-relation 向量条目。
+ *
+ * 与 import 对齐：**每个 chunk 一条**（文本 = chunk relation 名，如 `foo-01`）。
+ * 旧实现从 relations-cache 的 hot_relations 收集（文件级 relation 一条），
+ * 导致 rebuild 的 ki-relation 向量数量与 import 不一致。
  */
-export function collectPathRelationEntries(
-  groups: Record<string, CacheGroup>,
-  groupFilter?: string
-): { relationEntries: RebuildVectorEntry[]; pathEntries: RebuildVectorEntry[] } {
-  const relationEntries: RebuildVectorEntry[] = [];
-  const pathEntries: RebuildVectorEntry[] = [];
+export function collectRelationEntries(contentEntries: RebuildVectorEntry[]): RebuildVectorEntry[] {
+  return contentEntries
+    .filter((e) => e.chunkRelation)
+    .map((e) => ({
+      text: buildRelationContent(e.chunkRelation!, e.groupPath),
+      tags: RELATION_TAG,
+      group: e.groupPath,
+    }));
+}
 
-  for (const [groupPath, g] of Object.entries(groups)) {
-    if (!isInGroupScope(groupPath, groupFilter)) continue;
-    for (const rel of g.hot_relations ?? []) {
-      relationEntries.push({
-        text: buildRelationContent(rel.text, groupPath),
-        tags: RELATION_TAG,
-        group: groupPath,
+/**
+ * 收集 ki-path 向量条目（每个出现过 content chunk 的 group 一条）。
+ * 与 import 的 groupSet 语义一致：只对实际有向量条目的 group 建 path 向量。
+ */
+export function collectPathEntries(contentEntries: RebuildVectorEntry[]): RebuildVectorEntry[] {
+  const groupSet = new Set<string>();
+  for (const e of contentEntries) {
+    if (e.groupPath) groupSet.add(e.groupPath);
+  }
+  return [...groupSet].map((groupPath) => ({
+    text: buildGroupPathContent(groupPath),
+    tags: PATH_TAG,
+  }));
+}
+
+/**
+ * 把文件级原文条目（local KB 的值）清洗 + 切分为 chunk 级 content 条目。
+ *
+ * 必要性：local KB 存的是**文件级原文**（方案 D），而 import 的向量化输入是
+ * **清洗后的 chunk**。旧 rebuild 直接拿 KB 原文做向量，造成粒度（文件级 vs chunk 级）
+ * 与文本（原文 vs 清洗后）双重不一致，docId/memoryId 语义随之漂移。
+ * 本函数复用 import 的清洗与 chunk 实现，保证两条链路产出相同的 chunkRelation / docId。
+ */
+async function buildContentChunkEntries(
+  rawEntries: RebuildVectorEntry[],
+  opts: {
+    cleanEnabled: boolean;
+    cleanRules?: CleanRules;
+    cleanHooks: string[];
+    chunkSize: number;
+    chunkOverlap: number;
+    abortSignal?: AbortSignal;
+  },
+): Promise<RebuildVectorEntry[]> {
+  const out: RebuildVectorEntry[] = [];
+  for (const raw of rawEntries) {
+    // 切分 + 清洗是逐文件的 CPU 工作，取消不应等到向量化阶段才生效
+    if (opts.abortSignal?.aborted) {
+      throw Object.assign(new Error('向量重建已取消（切分阶段）'), { code: 'REBUILD_CANCELLED' });
+    }
+    const relationName = raw.relationName ?? '<unknown>';
+    let text = opts.cleanEnabled ? cleanMarkdownText(raw.text, opts.cleanRules) : raw.text;
+    if (opts.cleanEnabled && opts.cleanHooks.length > 0) {
+      const hookResult = await runCleanHooks(text, opts.cleanHooks);
+      if (!hookResult.ok) {
+        // 与 import 的 P-7 语义一致：hooks 全部失败 → 不写该文件的向量
+        logWarn(`清洗 hook 失败已跳过（${relationName}）：${hookResult.failedHooks.join(', ')}`);
+        continue;
+      }
+      text = hookResult.text;
+    }
+    // chunk 命名以 local KB 键（= 导入时的 deriveRelationText(rel)）为前缀，与 import 产物同构
+    const { entries } = buildChunkEntries({
+      fileKey: relationName,
+      groupPath: raw.groupPath ?? '',
+      text,
+      chunkSize: opts.chunkSize,
+      chunkOverlap: opts.chunkOverlap,
+    });
+    for (const e of entries) {
+      out.push({
+        text: e.text,
+        tags: CONTENT_TAG,
+        groupPath: raw.groupPath,
+        relationName: raw.relationName,
+        chunkRelation: e.chunkRelation,
       });
     }
-    pathEntries.push({
-      text: buildGroupPathContent(groupPath),
-      tags: PATH_TAG,
-    });
   }
-
-  return { relationEntries, pathEntries };
+  return out;
 }
 
 /**
@@ -447,15 +518,37 @@ export async function rebuildScopeVectors(
   const { taggedRelations } = mergeRebuildTags(groups, cliTags, groupFilter);
   stats.taggedRelations = taggedRelations;
 
-  // 3. 收集四类条目（内容 + relation + path + 自定义 tag）
-  const contentEntries = collectContentEntries(scopeDir, groupFilter);
-  const { relationEntries, pathEntries } = collectPathRelationEntries(groups, groupFilter);
+  // 3. 收集条目：content 与 import 对齐 —— 清洗 → 按 source 块记录的参数切分 → chunk 级条目。
+  //    必要性：local KB 存的是文件级原文（方案 D），直接向量化会与 import 的
+  //    清洗后 chunk 产物在粒度与文本上双重不一致（docId/memoryId 随之漂移）。
+  const source = getSource(scope);
+  const chunkSize = opts.chunkSize ?? source?.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const chunkOverlap = opts.chunkOverlap ?? source?.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
+  const cleanCfg = getScopeCleanConfig(config, scope);
+  const cleanEnabled = cleanCfg?.enabled !== false;
+  const cleanHooks = cleanCfg?.hooks ?? [];
+
+  const rawContentEntries = collectContentEntries(scopeDir, groupFilter);
+  const contentEntries = await buildContentChunkEntries(rawContentEntries, {
+    cleanEnabled,
+    cleanRules: cleanCfg?.rules,
+    cleanHooks,
+    chunkSize,
+    chunkOverlap,
+    abortSignal: opts.abortSignal,
+  });
+  const relationEntries = collectRelationEntries(contentEntries);
+  const pathEntries = collectPathEntries(contentEntries);
   const tagEntries = collectTagEntries(scope, groups, groupFilter);
   stats.content = contentEntries.length;
   stats.relation = relationEntries.length;
   stats.path = pathEntries.length;
   stats.tag = tagEntries.length;
   const allEntries = [...contentEntries, ...relationEntries, ...pathEntries, ...tagEntries];
+  logInfo(
+    `切分完成：${rawContentEntries.length} 个 KB 条目 → ${contentEntries.length} 个 chunk`
+      + `（chunkSize=${chunkSize}, overlap=${chunkOverlap}, clean=${cleanEnabled ? 'on' : 'off'}）`
+  );
   logInfo(
     `收集到 ${allEntries.length} 个条目（内容 ${stats.content} / 关系 ${stats.relation} / 路径 ${stats.path} / 标签 ${stats.tag}）`
   );

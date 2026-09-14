@@ -166,7 +166,9 @@ scopes:
 
 #### `scopes.<scope>.clean`
 
-数据清洗配置（REQ-06/07）。
+数据清洗配置（REQ-06/07）。清洗只作用于**向量化输入**（local KB 始终保存文件原文），
+且 `ki import` 与 `restore --rebuild-vector` **共用同一套规则与 hooks** —— 两条链路的
+向量文本因此保持一致（rebuild 会按 `group-index.source` 记录的切分参数重新切 chunk）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|

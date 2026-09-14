@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   A. collectContentEntries —— Group 树 index.json 收集（排除元数据键、groupPath 推导、--group 子树过滤）
- *   B. collectPathRelationEntries —— relation(ki-relation) / path(ki-path) 条目（含 --group 过滤）
+ *   B. collectRelationEntries / collectPathEntries —— 从 chunk 级 content 条目派生 relation/path 向量
  *   C. updateMemoryIds —— 内容向量 docId 回写 relations-cache 的 rel.memoryId
  *   D. rebuildScopeVectors 主流程（mock 向量层）—— 三类向量、清空调用、回写、失败路径、局部重建（--group/--tags）
  *   F. mergeRebuildTags —— --tags 打标合并去重（只增不减、子树过滤）
@@ -18,7 +18,8 @@ import os from 'os';
 import path from 'path';
 import {
   collectContentEntries,
-  collectPathRelationEntries,
+  collectPathEntries,
+  collectRelationEntries,
   collectTagEntries,
   updateMemoryIds,
   mergeRebuildTags,
@@ -125,54 +126,57 @@ describe('A. collectContentEntries —— Group 树 index.json 收集', () => {
   });
 });
 
-describe('B. collectPathRelationEntries —— relation/path 向量条目', () => {
-  const groups = {
-    BKMonitorWiki: {
-      hot_relations: [{ text: '快速开始' }],
-      keywords: ['蓝鲸'],
-    },
-    'BKMonitorWiki/用户界面设计': {
-      hot_relations: [{ text: '按钮' }, { text: '表单' }],
-      keywords: ['UI'],
-    },
-  };
+describe('B. collectRelationEntries / collectPathEntries —— 从 chunk 级条目派生', () => {
+  /** 构造 chunk 级 content 条目（模拟 buildContentChunkEntries 的产物） */
+  const chunkEntry = (
+    groupPath: string | undefined,
+    relationName: string,
+    chunkRelation: string,
+  ): RebuildVectorEntry => ({
+    text: `${chunkRelation} 的正文`,
+    tags: 'ki-search',
+    groupPath,
+    relationName,
+    chunkRelation,
+  });
 
-  it('每个 relation 一条 ki-relation，每个 group 一条 ki-path', () => {
-    const { relationEntries, pathEntries } = collectPathRelationEntries(groups);
-    assert.strictEqual(relationEntries.length, 3);
-    assert.strictEqual(pathEntries.length, 2);
+  const contentEntries: RebuildVectorEntry[] = [
+    chunkEntry('BKMonitorWiki', '快速开始', '快速开始-01'),
+    chunkEntry('BKMonitorWiki/用户界面设计', '按钮', '按钮-01'),
+    chunkEntry('BKMonitorWiki/用户界面设计', '按钮', '按钮-02'),
+  ];
+
+  it('每个 chunk 一条 ki-relation（与 import 对齐），每个 group 一条 ki-path', () => {
+    const relationEntries = collectRelationEntries(contentEntries);
+    const pathEntries = collectPathEntries(contentEntries);
+    assert.strictEqual(relationEntries.length, 3, 'chunk 级：3 个 chunk → 3 条 relation 向量');
+    assert.strictEqual(pathEntries.length, 2, 'group 级去重：2 个 group → 2 条 path 向量');
     assert.ok(relationEntries.every((e) => e.tags === 'ki-relation'));
     assert.ok(pathEntries.every((e) => e.tags === 'ki-path'));
   });
 
-  it('relation 向量文本只含关系名，Group 归属走结构化字段', () => {
-    const { relationEntries } = collectPathRelationEntries(groups);
-    assert.strictEqual(relationEntries[0].text, '快速开始', 'content 不含 Group 路径，避免误匹配');
+  it('relation 向量文本只含 chunk 关系名，Group 归属走结构化字段', () => {
+    const relationEntries = collectRelationEntries(contentEntries);
+    assert.strictEqual(relationEntries[0].text, '快速开始-01', 'content 不含 Group 路径，避免误匹配');
     assert.strictEqual(relationEntries[0].group, 'BKMonitorWiki', 'Group 归属经 group 字段传递');
-    const pathText = collectPathRelationEntries(groups).pathEntries[0].text;
-    assert.match(pathText, /BKMonitorWiki/);
+    assert.match(collectPathEntries(contentEntries)[0].text, /BKMonitorWiki/);
   });
 
-  it('空 groups → 空条目', () => {
-    const { relationEntries, pathEntries } = collectPathRelationEntries({});
-    assert.strictEqual(relationEntries.length, 0);
-    assert.strictEqual(pathEntries.length, 0);
+  it('同文件的多个 chunk 各自成条（不再被折叠为文件级一条）', () => {
+    const btnChunks = collectRelationEntries(contentEntries)
+      .filter((e) => e.group === 'BKMonitorWiki/用户界面设计');
+    assert.deepStrictEqual(btnChunks.map((e) => e.text), ['按钮-01', '按钮-02']);
   });
 
-  it('--group 过滤：仅子树内 group 的 relation/path（前缀边界不误伤）', () => {
-    const g = {
-      ...groups,
-      BKMonitorWikiX: { hot_relations: [{ text: '误伤校验' }] }, // 前缀同名但非子孙，不应命中 'BKMonitorWiki' 之外的过滤…此处验证不会被 'BKMonitorWiki' 过滤误包含之外的反向：
-    };
-    // 过滤到子树：仅命中子孙（不含根自身）
-    const sub = collectPathRelationEntries(g, 'BKMonitorWiki/用户界面设计');
-    assert.strictEqual(sub.relationEntries.length, 2);
-    assert.strictEqual(sub.pathEntries.length, 1);
-    // 过滤到根：含自身 + 子孙，不含前缀同名的 BKMonitorWikiX
-    const root = collectPathRelationEntries(g, 'BKMonitorWiki');
-    assert.strictEqual(root.relationEntries.length, 3);
-    assert.strictEqual(root.pathEntries.length, 2);
-    assert.ok(root.relationEntries.every((e) => e.group !== 'BKMonitorWikiX'));
+  it('无 groupPath（根目录）的 chunk 不产生 ki-path，但 relation 照常派生', () => {
+    const rootOnly = [chunkEntry(undefined, '根文档', '根文档-01')];
+    assert.strictEqual(collectRelationEntries(rootOnly).length, 1);
+    assert.strictEqual(collectPathEntries(rootOnly).length, 0);
+  });
+
+  it('空条目 → 空结果', () => {
+    assert.strictEqual(collectRelationEntries([]).length, 0);
+    assert.strictEqual(collectPathEntries([]).length, 0);
   });
 
   it('isInGroupScope 边界：自身/子孙命中，前缀同名不误伤，无过滤全命中', () => {
@@ -456,7 +460,8 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
       `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  rs-batch: {}\n`,
       'utf-8'
     );
-    // 210 个内容条目（单 Group）+ 1 条路径向量 = 211 条 → 分 2 批（200 + 11）
+    // 210 个 KB 条目 → 210 条 content chunk + 210 条 ki-relation（每 chunk 一条，与 import 对齐）
+    // + 1 条 ki-path（单 Group）= 421 条 → 分 3 批（200 + 200 + 21）
     const indexContent: Record<string, string> = {};
     for (let i = 0; i < 210; i++) indexContent[`rel_${i}`] = `文本${i}`;
     fs.mkdirSync(path.join(scopeDir, 'G'), { recursive: true });
@@ -490,14 +495,70 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
     });
 
     assert.strictEqual(result.ok, true);
-    assert.strictEqual(bulkCalls.length, 2, '211 条应分 2 批提交');
+    assert.strictEqual(bulkCalls.length, 3, '421 条应分 3 批提交');
     assert.strictEqual(bulkCalls[0].entries.length, 200);
-    assert.strictEqual(bulkCalls[1].entries.length, 11);
-    assert.strictEqual(result.stats.succeeded, 210);
+    assert.strictEqual(bulkCalls[1].entries.length, 200);
+    assert.strictEqual(bulkCalls[2].entries.length, 21);
+    assert.strictEqual(result.stats.succeeded, 420);
     assert.strictEqual(result.stats.failed, 1);
+    // 向量粒度与 import 对齐：content 与 ki-relation 均为 chunk 级（此处 210 文件 = 210 chunk）
+    assert.strictEqual(result.stats.content, 210);
+    assert.strictEqual(result.stats.relation, 210);
+    assert.strictEqual(result.stats.path, 1);
     // 批偏移校正：失败条目应映射到全量第 201 条（文本200），而非第 1 条（文本0）
     assert.strictEqual(result.errors.length, 1);
     assert.strictEqual(result.errors[0].path, '文本200');
+  });
+
+  it('长文本 KB 条目按 source 参数切分并清洗（与 import 的 chunk 级产物对齐）', async () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'cfg-chunk-'));
+    const dataDir = path.join(dir, 'kb');
+    const scopeDir = path.join(dataDir, 'rs-chunk');
+    const configPath = path.join(dir, 'config.yaml');
+    fs.writeFileSync(
+      configPath,
+      `dataDir: ${dataDir}\nvectorDir: ${path.join(dir, 'vector')}\nscopes:\n  rs-chunk: {}\n`,
+      'utf-8'
+    );
+    // 3000 字正文 + frontmatter + HTML 注释：后两者应被清洗剥离；
+    // 正文按 source 块记录的非默认参数（chunkSize=500/overlap=50）切成多 chunk。
+    const longText = `---\ntitle: x\n---\n${'段落内容。'.repeat(600)}\n<!-- 注释应被清洗 -->`;
+    fs.mkdirSync(path.join(scopeDir, 'G'), { recursive: true });
+    fs.writeFileSync(path.join(scopeDir, 'G', 'index.json'), JSON.stringify({ 长文: longText }), 'utf-8');
+    fs.writeFileSync(
+      path.join(scopeDir, 'group-index.json'),
+      JSON.stringify({ source: { dir: '/x', chunkSize: 500, chunkOverlap: 50 }, groups: {} }),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(scopeDir, 'relations-cache.json'),
+      JSON.stringify({ groups: { G: { hot_relations: [{ text: '长文' }] } } }),
+      'utf-8'
+    );
+    useConfig(configPath);
+
+    const batches: { text: string }[][] = [];
+    const result = await rebuildScopeVectors('rs-chunk', {
+      bulkStore: (async (p: { entries: { text: string }[] }) => {
+        batches.push(p.entries);
+        return {
+          total: p.entries.length,
+          succeeded: p.entries.length,
+          failed: 0,
+          results: p.entries.map((_, i) => ({ index: i, memoryId: `m${i}`, success: true })),
+        };
+      }) as never,
+      deleteScope: (async () => ({ deleted: 0 })) as never,
+    });
+
+    assert.strictEqual(result.ok, true);
+    // 3000 字 / (500-50) ≈ 7 个 chunk；若未读取 source 参数（回退默认 1000/150）则只有 ~4 个
+    assert.ok(result.stats.content >= 6, `长文本应按 source 参数切分为多 chunk，实际 ${result.stats.content}`);
+    assert.strictEqual(result.stats.relation, result.stats.content, 'ki-relation 与 chunk 数量一致（每 chunk 一条）');
+    assert.strictEqual(result.stats.path, 1, '单 Group 一条 ki-path');
+    const texts = batches.flat().map((e) => e.text);
+    assert.ok(texts.every((t) => !t.includes('<!--')), 'HTML 注释应被清洗');
+    assert.ok(texts.every((t) => !t.startsWith('---')), 'frontmatter 应被清洗');
   });
 
   it('重建三类向量 + 清空旧向量 + memoryId 回写', async () => {

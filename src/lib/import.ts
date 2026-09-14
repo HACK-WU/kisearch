@@ -27,8 +27,18 @@ import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js'
 import { parseContentTags, type PartitionConfig } from './constants.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
+import {
+  buildChunkEntries,
+  deriveChunkRelation,
+  deriveChunkSourcePath,
+  deriveRelationText,
+  toPosix,
+} from './chunk-entries.js';
 
 import { deriveGroupPath, type ScanResultEntry } from './ai-results.js';
+
+// 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
+export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
 import { bulkVectorize } from './batch-vectorize.js';
 import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
 import { acquireImportLock, releaseImportLock, clearImportLock, writeInterruptMark } from './interrupt.js';
@@ -133,21 +143,9 @@ export interface HandleDirectImportArgs {
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
-
-function stripMarkdownExtension(filename: string): string {
-  return filename.replace(/\.md$/i, '');
-}
-
-function toPosix(p: string): string {
-  return p.split(path.sep).join('/');
-}
-
-/** 从 entry.path 推导 relation 文本（剥 .md + 去掉 markdown 强格式字符） */
-function deriveRelationText(filePath: string): string {
-  const base = stripMarkdownExtension(path.posix.basename(filePath));
-  const cleaned = base.replace(/[*~`]/g, '').trim();
-  return cleaned || base;
-}
+//
+// relation/chunk 命名与 chunk 条目构造统一收敛在 chunk-entries.ts（import 与
+// rebuild 共用同一实现，避免两条链路的向量粒度/文本漂移）；本模块只做 re-export。
 
 /**
  * 推导文件的 groupPath（rootName 概念移除后的落点规则）
@@ -361,17 +359,6 @@ export function collectAndCopyAssets(opts: {
   return { copied, warnings };
 }
 
-/** chunk relation 命名：文件名-N（如 foo.md → foo-01），`#` 避免与 isUnsafeRelationName 冲突 */
-export function deriveChunkRelation(filePath: string, chunkIndex: number): string {
-  const base = deriveRelationText(filePath);
-  return `${base}-${String(chunkIndex).padStart(2, '0')}`;
-}
-
-/** chunk 的 sourcePath：文件路径#序号（如 docs/foo.md#1），文件级 diff 前缀聚合的键 */
-export function deriveChunkSourcePath(filePath: string, chunkIndex: number): string {
-  return `${toPosix(filePath)}#${chunkIndex}`;
-}
-
 /** 读取文件内容并按参数切分；未超限返回单 chunk */
 export function readFileToChunks(absPath: string, chunkSize: number, chunkOverlap: number): Chunk[] {
   const text = fs.readFileSync(absPath, 'utf-8');
@@ -390,8 +377,10 @@ export async function handleDirectImport(
   const chunkOverlap = args.chunkOverlap ?? 150;
   const vector = args.vector !== false;
   // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则（批次 3 接入实际清洗）
-  const cleanEnabled = args.cleanEnabled !== false;
-  const cleanRules: CleanRules | undefined = args.cleanRules;
+  // 清洗开关与规则的**最终值**在读取 scope 配置后再定（见下方 cleanCfg 处）：
+  // CLI 显式参数优先、配置补齐——rebuild 链路的清洗来源只有配置，两者必须同源。
+  let cleanEnabled = args.cleanEnabled !== false;
+  let cleanRules: CleanRules | undefined = args.cleanRules;
   // 文档级自定义标签：逗号分隔、去空、去重、过滤内部保留 tag（ki-search/ki-relation/ki-path）
   const customTags = parseContentTags(args.tags);
   // NEG：显式传入 --tags 但解析后为空（全为保留标签/空白）→ 提示，避免用户误以为打标生效
@@ -477,7 +466,11 @@ export async function handleDirectImport(
   const assetsEnabled = args.assets !== false && importCfg?.assets !== false;
   const maxAssetBytes = importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;
   // REQ-07：外部清洗 hook（config scopes.<scope>.clean.hooks；--no-clean 时全部关闭）
+  // 清洗规则来源合并：CLI 显式参数 > 配置 clean.rules > 内置默认。
+  // rebuild 只能读到配置，若此处不消费配置，两条链路的清洗结果仍会漂移。
   const cleanCfg = getScopeCleanConfig(cfg, scope);
+  cleanEnabled = cleanEnabled && cleanCfg?.enabled !== false;
+  cleanRules = cleanRules ?? cleanCfg?.rules;
   const cleanHooks = cleanEnabled ? (cleanCfg?.hooks ?? []) : [];
   // 单文件导入：sourceDir 指向单个文件时，files 只含该文件（相对路径 = basename）
   // 后缀仍需命中 extensions 白名单（REQ-08），未命中 fail-loud 报错而非静默导入
@@ -572,7 +565,15 @@ export async function handleDirectImport(
       textForVector = hookResult.text;
     }
 
-    const chunks = splitIntoChunks(textForVector, { chunkSize, overlap: chunkOverlap });
+    // chunk 与条目构造统一走共享实现（chunk-entries）：rebuild 使用同一套命名/条目规则，
+    // 保证两条链路产出相同的 chunkRelation 与 docId（此前 rebuild 各自内联，导致产物漂移）。
+    const { chunks, entries } = buildChunkEntries({
+      fileKey: rel,
+      groupPath,
+      text: textForVector,
+      chunkSize,
+      chunkOverlap,
+    });
     if (chunks.length > MAX_CHUNKS_PER_FILE) {
       skipped.push(rel);
       logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
@@ -595,13 +596,6 @@ export async function handleDirectImport(
       for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
       assetWarnings.push(...assetResult.warnings);
     }
-    const entries = chunks.map((chunk) => ({
-      path: deriveChunkSourcePath(rel, chunk.index), // sourcePath = 文件#N（向量化条目内部用）
-      groupPath,
-      text: chunk.text, // 清洗后 chunk（向量化 content）
-      memoryId: null as string | null,
-      chunkRelation: deriveChunkRelation(rel, chunk.index),
-    }));
     fileRecords.push({ rel, groupPath, relation, chunks, entries });
     processedFileCount++;
     // 进度 = 已处理文件数（O-01 文件数分母）。不传 detail（文件名）：避免 TTY \r 刷新时

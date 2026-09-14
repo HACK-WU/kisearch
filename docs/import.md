@@ -53,6 +53,8 @@ ki import \
 
 local KB 存**文件级原文**（一个文件一条，key=文件级 relation，basename 去扩展名）；relation-cache 文件级 relation 挂 **`memoryIds` 多值**（该文件全部 chunk 的向量 docId）；`sourcePath` 存文件路径（无 `#N`）。清洗只作用于**向量化输入**（local KB 保留原文，未被清洗）。
 
+> `restore --rebuild-vector` 与此**同构**：读取 local KB 原文后走同一套清洗 + 切分（切分参数取 `group-index.source` 快照，缺失时回退 1000/150），按 chunk 级重建向量，因此 docId 与首次导入一致、可幂等重跑。
+
 ### 清洗
 
 默认开启：内置规则（BOM/frontmatter/mermaid/代码块先剥→路径/空行折叠）→ 外部 hooks（config `scopes.<scope>.clean.hooks`，stdin→stdout 管道，超时 10s，失败跳过）。hook 全部失败 → 文件跳过 + local KB 回滚（P-7）。

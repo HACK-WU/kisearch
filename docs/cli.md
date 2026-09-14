@@ -529,7 +529,7 @@ ki search "告警静默策略" -s monitor,alerting
 }
 ```
 
-**定位字段**：`content` 是向量层存储文本（纯化后为 index.json 原始值，不再拼接任何前缀）。每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
+**定位字段**：`content` 是向量层存储文本（清洗后的 chunk 原文，不再拼接任何前缀；local KB 的文件级原文经 `--original` 获取）。每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
 
 | 字段 | 含义 |
 |------|------|
@@ -541,7 +541,7 @@ ki search "告警静默策略" -s monitor,alerting
 
 反查使用**内存缓存**：首次构建 `Map<memoryId, …>` 后复用，文件 mtime/size 变化或 10 分钟 TTL 过期才重建，`ki search` 连续调用无额外 IO 开销。
 
-> `restore --rebuild-vector` 重建的内容向量与 `ki import` 采用相同的 content 纯化格式（index.json 原始值）。`ki-relation` 向量的 content 仅含关系名，Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。
+> `restore --rebuild-vector` 与 `ki import` **同构**：读取 local KB（index.json）的文件级原文后，执行同一套清洗（`clean.rules` / hooks）与切分（取 `group-index.source` 记录的 `chunkSize` / `chunkOverlap`），按 **chunk 级**写入内容向量——因此重建结果与 import 的 docId 一致、幂等可重跑。`ki-relation` 向量的 content 仅含 chunk 关系名（如 `foo-01`，与 import 同为每 chunk 一条），Group 归属经结构化 `group` 字段存储（避免 Group 路径词参与 BM25/语义匹配造成误匹配）；`ki-path` 向量 content 为 Group 路径本身。
 
 **关于相关性**：hybrid 检索 = 向量语义 + 全文（BM25）两路融合。头部结果由向量语义主导（通常高度相关）；当查询含宽泛词（如"配置"、"API"）时，全文路可能召回较多低分边缘结果——这是混合检索"召回广"的设计特性，非数据异常。若需收紧，用 `--threshold` 过滤低分命中：
 
@@ -1391,7 +1391,7 @@ ki restore <scope> --rebuild-vector --tags <t1,t2>    # 重建打标：为重建
 | `--list` | 列出可用备份（显式 flag；无操作参数时默认同样列出） |
 | `--from-snapshot` | 从 tar.gz 快照覆盖还原（破坏性操作，需 `--yes` 确认） |
 | `--timestamp <ts>` | 指定快照 timestamp（可选，默认使用最新） |
-| `--rebuild-vector` | 还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path) |
+| `--rebuild-vector` | 还原后（或独立）从已还原 KB 重建向量：内容(ki-search) + 关系(ki-relation) + 路径(ki-path)。与 `ki import` **同构**：读取 KB 原文后执行同一套清洗（`clean.rules`/hooks）与切分（取 `group-index.source` 记录的 `chunkSize`/`chunkOverlap`），按 **chunk 级**写入，docId 与 import 一致、幂等可重跑 |
 | `--group <path>` | 重建过滤（需配合 `--rebuild-vector`）：仅重建指定 Group 子树的向量，幂等覆盖匹配子集、**不清空其他向量**；不带本参数与 `--tags` 时为全量重建（清空+重建）。限制：局部重建不会清理子树内已删除/变更条目的旧向量（不执行删除），内容发生变化的 Group 建议使用全量重建 |
 | `--tags <t1,t2>` | 重建打标（需配合 `--rebuild-vector`）：逗号分隔，为重建范围内文档附加自定义标签，与已有 `relation.tags` 合并去重（只增不减），并为每个标签生成内容向量；跨命令累积（先 `--tags a` 再 `--tags b` = a∪b），删标签走 `sync-relation`。仅传 `--tags`（不传 `--group`）时范围为全 scope：全部条目幂等刷写（不清空，成本同全量重建）；`--tags` 值缺失/空/全为保留标签（ki-search/ki-relation/ki-path）时拒绝执行，避免误降级为全量清空重建 |
 | `--backup-dir <dir>` | 指定备份根目录（默认用配置 backupDir） |
