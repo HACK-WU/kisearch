@@ -773,7 +773,14 @@ export async function startMcpServer(): Promise<void> {
 }
 
 // 入口
-startMcpServer().catch((err) => {
-  console.error('MCP Server 启动失败:', err);
+startMcpServer().catch((err: unknown) => {
+  // 启动失败多为配置/端口类问题：直接打印 Error 对象会把唯一可读的信息淹没在
+  // 几十行调用帧里（用户看到的是 "at parseAndExpand (...)" 而不是"配置哪错了"）。
+  // 默认只输出 message，多行时统一缩进；完整堆栈用 KI_DEBUG=1 显式索取。
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`MCP Server 启动失败：\n  ${message.split('\n').join('\n  ')}`);
+  if (process.env.KI_DEBUG === '1' && err instanceof Error && err.stack) {
+    console.error(err.stack);
+  }
   process.exit(1);
 });

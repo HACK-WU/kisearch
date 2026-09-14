@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   EmbeddingSchedulerRuntime,
+  normalizeEmbeddingScheduler,
   type EmbeddingBatch,
 } from '../src/zvec-engine/embedding/batch-scheduler.ts';
 import type { EmbeddingProvider } from '../src/zvec-engine/embedding/provider.ts';
@@ -147,4 +148,65 @@ test('scheduler rejects a buffer smaller than one estimated batch before provide
     (err: Error & { code?: string }) => err.code === 'VECTOR_BUFFER_LIMIT_INVALID',
   );
   assert.equal(calls, 0);
+});
+
+test('maxPrefetchBatches 省略时自动跟随 maxConcurrency（只写一个字段即可生效）', () => {
+  // 只改 maxConcurrency：预取窗口自动跟随，不再因默认值触发"不能小于"报错
+  const derived = normalizeEmbeddingScheduler({ maxConcurrency: 30, maxGlobalConcurrency: 30 });
+  assert.equal(derived.maxConcurrency, 30);
+  assert.equal(derived.maxPrefetchBatches, 30);
+
+  // 默认值必须自洽：预取窗口 ≥ 并发上限，否则实际并发会被 workerCount = min(...) 静默压低
+  const defaults = normalizeEmbeddingScheduler();
+  assert.equal(defaults.batchSize, 16);
+  assert.equal(defaults.maxConcurrency, 25);
+  assert.equal(defaults.maxGlobalConcurrency, 25);
+  assert.equal(defaults.maxPrefetchBatches, 25);
+
+  // 仅改其它字段 / 调小并发：预取窗口保持默认值，不因派生而意外膨胀
+  assert.equal(normalizeEmbeddingScheduler({ batchSize: 32 }).maxPrefetchBatches, 25);
+  assert.equal(normalizeEmbeddingScheduler({ maxConcurrency: 1 }).maxPrefetchBatches, 25);
+
+  // 显式配置仍按用户意图生效（允许预取窗口大于 maxConcurrency）
+  assert.equal(normalizeEmbeddingScheduler({ maxConcurrency: 1, maxPrefetchBatches: 5 }).maxPrefetchBatches, 5);
+
+  // 只有显式写出矛盾值才 fail-loud，且报错带实际值与修复动作
+  assert.throws(
+    () => normalizeEmbeddingScheduler({ maxConcurrency: 3, maxPrefetchBatches: 2 }),
+    /maxPrefetchBatches 不能小于 maxConcurrency（当前 maxPrefetchBatches=2，maxConcurrency=3；修复：删除配置中的 maxPrefetchBatches/,
+  );
+});
+
+test('maxConcurrency 超过默认全局槽位时报错指出默认值来源与修复动作', () => {
+  assert.throws(
+    () => normalizeEmbeddingScheduler({ maxConcurrency: 26 }),
+    /maxConcurrency 不能大于 maxGlobalConcurrency（当前 maxConcurrency=26，maxGlobalConcurrency=25，后者来自默认值；修复：/,
+  );
+  // 显式把全局槽位一并调大即合法，不再误报
+  assert.equal(normalizeEmbeddingScheduler({ maxConcurrency: 30, maxGlobalConcurrency: 30 }).maxConcurrency, 30);
+});
+
+test('调度器把配置的 requestTimeoutMs 透传给 provider（默认 60s，超上限 fail-loud）', async () => {
+  const seen: Array<number | undefined> = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts, opts) {
+      seen.push(opts?.timeoutMs);
+      return texts.map(() => [1, 2]);
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 2, requestTimeoutMs: 45_000 });
+  await runtime.schedule(provider, ['a', 'b', 'c'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.items.length, failed: 0 }),
+  });
+  // 每个批次都带上配置的超时（而非 provider 自身的 30s 默认）
+  assert.deepEqual(seen, [45_000, 45_000]);
+
+  assert.equal(normalizeEmbeddingScheduler().requestTimeoutMs, 60_000);
+  assert.throws(
+    () => normalizeEmbeddingScheduler({ requestTimeoutMs: 600_001 }),
+    /requestTimeoutMs 不能大于 600000/,
+  );
 });

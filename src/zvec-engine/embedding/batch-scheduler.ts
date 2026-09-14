@@ -22,16 +22,33 @@ export interface EmbeddingSchedulerConfig {
   maxBufferedVectorBytes: number;
   /** daemon 内所有任务共享的待持久化向量估算字节数 */
   globalBufferedVectorBytes: number;
+  /**
+   * 单次 provider 请求的超时（ms）。超时按 provider 既有策略重试，
+   * 故单批最坏耗时 ≈ 本值 ×(重试次数 + 1) + 退避；长文本（wiki 全文）可适当调大。
+   */
+  requestTimeoutMs: number;
 }
 
+/**
+ * 默认值依据实测标定（真实 SiliconFlow + wiki 全文负载）：
+ *   - batchSize 16：单批约 18 万字符 ≈ 10s，距 requestTimeoutMs(60s) 有 5 倍余量；
+ *     旧的 64（单批约 76 万字符 ≈ 41s）在并发排队下会击穿超时线，是历史上整批失败的成因。
+ *   - maxConcurrency / maxGlobalConcurrency 25：实测 20 并发即可跑完 rebuild（23/23 批、0 失败批），
+ *     25 为同量级上限；若 provider 出现 429/超时，优先下调本值。
+ *   - maxPrefetchBatches 必须 ≥ maxConcurrency，否则实际并发会被它静默压低（workerCount 取 min）。
+ */
 export const DEFAULT_EMBEDDING_SCHEDULER: EmbeddingSchedulerConfig = {
-  batchSize: 64,
-  maxConcurrency: 2,
-  maxGlobalConcurrency: 4,
-  maxPrefetchBatches: 2,
+  batchSize: 16,
+  maxConcurrency: 25,
+  maxGlobalConcurrency: 25,
+  maxPrefetchBatches: 25,
   maxBufferedVectorBytes: 64 * 1024 * 1024,
   globalBufferedVectorBytes: 128 * 1024 * 1024,
+  requestTimeoutMs: 60_000,
 };
+
+/** 单请求超时上限：再大就不是调优而是配置事故——一次失败重试即十几分钟，且与重试次数相乘。 */
+export const MAX_REQUEST_TIMEOUT_MS = 600_000;
 
 export function normalizeEmbeddingScheduler(
   config?: Partial<EmbeddingSchedulerConfig>,
@@ -42,17 +59,43 @@ export function normalizeEmbeddingScheduler(
       throw new Error(`embedding.scheduler.${key} 必须是正整数，实际=${value}`);
     }
   }
+  // maxPrefetchBatches 是内部预取窗口，对用户没有业务语义：未显式配置时自动跟随
+  // maxConcurrency，避免"只想改并发、却被迫同时配对预取"的陷阱（只写 maxConcurrency 即可生效）。
+  // 仅当用户显式写出矛盾值时才 fail-loud（意图明确但自相矛盾，不能替他猜）。
+  if (config?.maxPrefetchBatches === undefined && merged.maxPrefetchBatches < merged.maxConcurrency) {
+    merged.maxPrefetchBatches = merged.maxConcurrency;
+  }
+  // 成对约束的报错必须给出实际值、默认值来源与修复动作，否则用户不知道"该改哪个、改成多少"。
   if (merged.maxConcurrency > merged.maxGlobalConcurrency) {
-    throw new Error('embedding.scheduler.maxConcurrency 不能大于 maxGlobalConcurrency');
+    throw new Error(
+      'embedding.scheduler.maxConcurrency 不能大于 maxGlobalConcurrency'
+      + `（当前 maxConcurrency=${merged.maxConcurrency}，maxGlobalConcurrency=${merged.maxGlobalConcurrency}`
+      + `${config?.maxGlobalConcurrency === undefined ? '，后者来自默认值' : ''}；`
+      + `修复：调小 maxConcurrency，或在配置中同时把 maxGlobalConcurrency 设为 ≥ ${merged.maxConcurrency}）`,
+    );
   }
   if (merged.maxPrefetchBatches < merged.maxConcurrency) {
-    throw new Error('embedding.scheduler.maxPrefetchBatches 不能小于 maxConcurrency');
+    throw new Error(
+      'embedding.scheduler.maxPrefetchBatches 不能小于 maxConcurrency'
+      + `（当前 maxPrefetchBatches=${merged.maxPrefetchBatches}，maxConcurrency=${merged.maxConcurrency}；`
+      + '修复：删除配置中的 maxPrefetchBatches（省略时会自动跟随 maxConcurrency）、把它调到不低于 maxConcurrency，'
+      + '或把 maxConcurrency 调到不高于它）',
+    );
   }
   if (merged.batchSize > 1000) {
-    throw new Error('embedding.scheduler.batchSize 不能大于 1000');
+    throw new Error(`embedding.scheduler.batchSize 不能大于 1000（当前 batchSize=${merged.batchSize}）`);
+  }
+  if (merged.requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS) {
+    throw new Error(
+      `embedding.scheduler.requestTimeoutMs 不能大于 ${MAX_REQUEST_TIMEOUT_MS}（当前 requestTimeoutMs=${merged.requestTimeoutMs}；`
+      + '超时越大，单批失败重试的总耗时按倍数放大——需要更长超时请优先减小 batchSize）',
+    );
   }
   if (merged.maxBufferedVectorBytes > merged.globalBufferedVectorBytes) {
-    throw new Error('embedding.scheduler.maxBufferedVectorBytes 不能大于 globalBufferedVectorBytes');
+    throw new Error(
+      'embedding.scheduler.maxBufferedVectorBytes 不能大于 globalBufferedVectorBytes'
+      + `（当前 maxBufferedVectorBytes=${merged.maxBufferedVectorBytes}，globalBufferedVectorBytes=${merged.globalBufferedVectorBytes}）`,
+    );
   }
   return merged;
 }
@@ -429,6 +472,9 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             this.metrics.inFlightRequests++;
             vectors = await provider.embed(requestTexts, {
               batchSize: requestTexts.length,
+              // 超时由调度配置统一提供：provider 内部按本值起 AbortController，
+              // 未传时回落到 provider 自身默认（30s）。
+              timeoutMs: this.config.requestTimeoutMs,
               onAttempt: (event) => {
                 if (event.kind === 'request') this.metrics.providerRequests++;
                 else {

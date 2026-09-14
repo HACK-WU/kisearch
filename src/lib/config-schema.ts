@@ -147,6 +147,7 @@ const CONFIG_SCHEMA: ConfigNode = {
             maxPrefetchBatches: { type: 'number', validate: positiveInt },
             maxBufferedVectorBytes: { type: 'number', validate: positiveInt },
             globalBufferedVectorBytes: { type: 'number', validate: positiveInt },
+            requestTimeoutMs: { type: 'number', validate: positiveInt },
           },
         },
       },

@@ -495,17 +495,25 @@ function parseAndExpand(configFile: string): KiConfig {
   const rawEmbedding = (raw.embedding && typeof raw.embedding === 'object')
     ? raw.embedding as Record<string, unknown>
     : {};
+  // scheduler 关系约束失败时必须能定位到文件：报错带上配置文件路径，
+  // 否则用户只看到"某字段不能大于某字段"，不知道该改哪个文件（甚至不知道是配置问题）。
+  let scheduler: EmbeddingSchedulerConfig;
+  try {
+    scheduler = normalizeEmbeddingScheduler(
+      rawEmbedding.scheduler && typeof rawEmbedding.scheduler === 'object'
+        ? rawEmbedding.scheduler as Partial<EmbeddingSchedulerConfig>
+        : undefined,
+    );
+  } catch (err) {
+    throw new Error(`配置文件 ${configFile} 的 embedding.scheduler 非法：${(err as Error).message}`);
+  }
   const embedding: EmbeddingConfig = {
     provider: rawEmbedding.provider ? String(rawEmbedding.provider) : DEFAULT_EMBEDDING.provider,
     baseURL: rawEmbedding.baseURL ? String(rawEmbedding.baseURL) : DEFAULT_EMBEDDING.baseURL,
     model: rawEmbedding.model ? String(rawEmbedding.model) : DEFAULT_EMBEDDING.model,
     dimension: rawEmbedding.dimension !== undefined ? Number(rawEmbedding.dimension) : DEFAULT_EMBEDDING.dimension,
     apiKey: resolveApiKey(rawEmbedding.apiKey),
-    scheduler: normalizeEmbeddingScheduler(
-      rawEmbedding.scheduler && typeof rawEmbedding.scheduler === 'object'
-        ? rawEmbedding.scheduler as Partial<EmbeddingSchedulerConfig>
-        : undefined,
-    ),
+    scheduler,
   };
 
   const rawVector = raw.vector && typeof raw.vector === 'object'

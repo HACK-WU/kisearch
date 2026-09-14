@@ -126,6 +126,7 @@ describe('阶段 3：请求级配置快照与资源配置', () => {
       maxPrefetchBatches: 4,
       maxBufferedVectorBytes: 1000,
       globalBufferedVectorBytes: 2000,
+      requestTimeoutMs: 60000,
     });
   });
 

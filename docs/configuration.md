@@ -91,12 +91,19 @@ Embedding 提供商配置。
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `batchSize` | `64` | 每次逻辑 provider 调用的文本数 |
-| `maxConcurrency` | `2` | 单任务同时在途的逻辑 provider 调用数 |
-| `maxGlobalConcurrency` | `4` | daemon 内所有任务共享的逻辑调用槽数，包含 provider 重试/退避 |
-| `maxPrefetchBatches` | `2` | 单任务预取批次数 |
+| `batchSize` | `16` | 每次逻辑 provider 调用的文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数 |
+| `maxConcurrency` | `25` | 单任务同时在途的逻辑 provider 调用数；出现 429/超时优先下调 |
+| `maxGlobalConcurrency` | `25` | daemon 内所有任务共享的逻辑调用槽数（含 provider 重试/退避）；必须 ≥ `maxConcurrency` |
+| `maxPrefetchBatches` | `25` | 单任务预取批次数；**可省略**：省略时自动取 `max(maxConcurrency, 2)`；显式设置时不能小于 `maxConcurrency`，否则实际并发会被静默压低（worker 数取两者最小值） |
 | `maxBufferedVectorBytes` | `67108864` | 单任务待持久化向量估算上限，超限背压 |
 | `globalBufferedVectorBytes` | `134217728` | daemon 级待持久化向量估算上限 |
+| `requestTimeoutMs` | `60000` | 单次 provider 请求超时（ms），上限 `600000`；超时按既有策略重试，**单批最坏耗时 ≈ 本值 ×(重试次数+1)**（重试 3 次时即 4 倍） |
+
+> **通常只需设置 `batchSize` 与 `maxConcurrency`**，其余字段省略即用默认值：
+> `maxPrefetchBatches` 省略时会自动跟随 `maxConcurrency`（无需手动配对），
+> `maxGlobalConcurrency` 是 daemon 级共享上限（仅当 `maxConcurrency` 超过它时才需要一并调大）。
+> 硬约束：`maxConcurrency ≤ maxGlobalConcurrency`、`batchSize ≤ 1000`、`maxBufferedVectorBytes ≤ globalBufferedVectorBytes`；
+> 违反时配置加载会 fail-loud，并在报错中给出实际值、默认值来源与修复动作。
 
 ```yaml
 embedding:
@@ -106,12 +113,13 @@ embedding:
   dimension: 4096
   apiKey: ${SILICONFLOW_API_KEY}
   scheduler:
-    batchSize: 64
-    maxConcurrency: 2
-    maxGlobalConcurrency: 4
-    maxPrefetchBatches: 2
+    batchSize: 16
+    maxConcurrency: 25
+    maxGlobalConcurrency: 25
+    maxPrefetchBatches: 25
     maxBufferedVectorBytes: 67108864
     globalBufferedVectorBytes: 134217728
+    requestTimeoutMs: 60000
 ```
 
 > **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。

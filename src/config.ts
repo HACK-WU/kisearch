@@ -103,12 +103,13 @@ embedding:
   dimension: 4096                          # 向量维度（必须与建库时一致）
   # apiKey: \${SILICONFLOW_API_KEY}          # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
   scheduler:
-    batchSize: 64
-    maxConcurrency: 2
-    maxGlobalConcurrency: 4
-    maxPrefetchBatches: 2
-    maxBufferedVectorBytes: 67108864
-    globalBufferedVectorBytes: 134217728
+    batchSize: 16                          # 每批文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数
+    maxConcurrency: 25                     # 单任务并发（同时在途的 provider 请求数）；遇 429/超时优先下调
+    requestTimeoutMs: 60000                # 单次 provider 请求超时（ms）；单批最坏耗时 ≈ 本值 ×(重试次数+1)
+    # maxGlobalConcurrency: 25             # daemon 级共享槽位，必须 ≥ maxConcurrency
+    # maxPrefetchBatches: 25               # 省略时自动跟随 maxConcurrency（必须 ≥ maxConcurrency），通常无需设置
+    # maxBufferedVectorBytes: 67108864
+    # globalBufferedVectorBytes: 134217728
 
 # ─── scope 护栏 ───
 # default: 未传 --scope 时静默落 default（任意 scope 自动创建）
