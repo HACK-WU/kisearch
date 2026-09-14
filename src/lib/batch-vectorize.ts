@@ -31,6 +31,10 @@ export interface BatchVectorizeOptions {
   timeoutMs?: number;
   /** 保留字段（vector 版不再使用 category，仅为签名兼容） */
   category?: string;
+  /** 在当前批次边界请求取消；provider 当前逻辑调用仍会收束后才返回。 */
+  abortSignal?: AbortSignal;
+  /** 调度器批次进度（done/total 为当前 vectorBulkStore 调用内的条目数）。 */
+  onVectorProgress?: (progress: { done: number; total: number; persisted?: number; metadataPending?: number; failed?: number; cancelled?: number }) => void;
   /** 每完成一条时回调，用于增量保存进度 */
   onProgress?: (completed: { path: string; memoryId: string }[], failedCount: number) => void;
 }
@@ -141,8 +145,13 @@ export async function bulkVectorize(
 
   // REQ-05 O-03：分批提交（200 条/批）+ 批间进度反馈（引擎内部批量 embed 无中间态，分批后用户可感知进度）
   const totalBatches = Math.ceil(entries.length / VECTORIZE_BATCH_SIZE);
-  for (let b = 0; b < totalBatches; b++) {
+  let cumulativePersisted = 0;
+  let cumulativeMetadataPending = 0;
+  let cumulativeFailed = 0;
+  let cumulativeCancelled = 0;
+  for (let b = 0; b < totalBatches && !options.abortSignal?.aborted; b++) {
     const slice = entries.slice(b * VECTORIZE_BATCH_SIZE, (b + 1) * VECTORIZE_BATCH_SIZE);
+    let currentProgress = { persisted: 0, metadataPending: 0, failed: 0, cancelled: 0 };
     try {
       const result = await vectorBulkStore({
         scope,
@@ -150,7 +159,27 @@ export async function bulkVectorize(
           text: buildVectorizeContent(e),
           tags: VECTORIZE_TAG,
         })),
+      }, {
+        abortSignal: options.abortSignal,
+        onProgress: (progress) => options.onVectorProgress?.({
+          done: Math.min(entries.length, b * VECTORIZE_BATCH_SIZE + progress.done),
+          total: entries.length,
+          persisted: cumulativePersisted + (currentProgress.persisted = progress.persisted ?? 0),
+          metadataPending: cumulativeMetadataPending + (currentProgress.metadataPending = progress.metadataPending ?? 0),
+          failed: cumulativeFailed + (currentProgress.failed = progress.failed ?? 0),
+          cancelled: cumulativeCancelled + (currentProgress.cancelled = progress.cancelled ?? 0),
+        }),
       });
+      currentProgress = {
+        persisted: result.succeeded,
+        metadataPending: result.metadataPending ?? 0,
+        failed: result.failed,
+        cancelled: result.cancelled ?? 0,
+      };
+      cumulativePersisted += currentProgress.persisted;
+      cumulativeMetadataPending += currentProgress.metadataPending;
+      cumulativeFailed += currentProgress.failed;
+      cumulativeCancelled += currentProgress.cancelled;
       for (const item of result.results) {
         const entry = slice[item.index];
         if (!entry) continue;
@@ -160,16 +189,37 @@ export async function bulkVectorize(
           errors.push({ path: entry.path, error: item.error || 'unknown error' });
         }
       }
+      options.onVectorProgress?.({
+        done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
+        total: entries.length,
+        persisted: cumulativePersisted,
+        metadataPending: cumulativeMetadataPending,
+        failed: cumulativeFailed,
+        cancelled: cumulativeCancelled,
+      });
     } catch (err) {
       const errMsg = `bulk-store 失败: ${(err as Error).message}`;
       for (const entry of slice) {
         errors.push({ path: entry.path, error: errMsg });
       }
+      cumulativeFailed += slice.length;
+      options.onVectorProgress?.({
+        done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
+        total: entries.length,
+        persisted: cumulativePersisted,
+        metadataPending: cumulativeMetadataPending,
+        failed: cumulativeFailed,
+        cancelled: cumulativeCancelled,
+      });
     }
     // 批间进度（仅多批时输出，避免单批场景刷屏）
     if (totalBatches > 1) {
       logProgress(Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
     }
+  }
+
+  if (options.abortSignal?.aborted && errors.length === 0) {
+    errors.push({ path: entries[0]?.path ?? '<batch>', error: '向量化已取消' });
   }
 
   // 完成后一次性回调（供调用方增量保存进度）

@@ -85,6 +85,18 @@ Embedding 提供商配置。
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
 | `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
+| `scheduler` | `object` | 见下表 | import/restore/rebuild 的有界 Embedding 调度与背压护栏 |
+
+`embedding.scheduler` 子字段：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `batchSize` | `64` | 每次逻辑 provider 调用的文本数 |
+| `maxConcurrency` | `2` | 单任务同时在途的逻辑 provider 调用数 |
+| `maxGlobalConcurrency` | `4` | daemon 内所有任务共享的逻辑调用槽数，包含 provider 重试/退避 |
+| `maxPrefetchBatches` | `2` | 单任务预取批次数 |
+| `maxBufferedVectorBytes` | `67108864` | 单任务待持久化向量估算上限，超限背压 |
+| `globalBufferedVectorBytes` | `134217728` | daemon 级待持久化向量估算上限 |
 
 ```yaml
 embedding:
@@ -93,6 +105,13 @@ embedding:
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096
   apiKey: ${SILICONFLOW_API_KEY}
+  scheduler:
+    batchSize: 64
+    maxConcurrency: 2
+    maxGlobalConcurrency: 4
+    maxPrefetchBatches: 2
+    maxBufferedVectorBytes: 67108864
+    globalBufferedVectorBytes: 134217728
 ```
 
 > **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。

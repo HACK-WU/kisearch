@@ -101,6 +101,60 @@ describe('阶段 3：请求级配置快照与资源配置', () => {
       assert.equal(loadConfig(), cfg);
     });
   });
+
+  it('embedding.scheduler 解析默认值与显式护栏', () => {
+    const cfg = writeAndLoad(
+      'config.yaml',
+      [
+        'dataDir: /abs/data',
+        'embedding:',
+        '  scheduler:',
+        '    batchSize: 32',
+        '    maxConcurrency: 3',
+        '    maxGlobalConcurrency: 5',
+        '    maxPrefetchBatches: 4',
+        '    maxBufferedVectorBytes: 1000',
+        '    globalBufferedVectorBytes: 2000',
+        'scopes:',
+        '  default: {}',
+      ].join('\n'),
+    );
+    assert.deepEqual(cfg.embedding.scheduler, {
+      batchSize: 32,
+      maxConcurrency: 3,
+      maxGlobalConcurrency: 5,
+      maxPrefetchBatches: 4,
+      maxBufferedVectorBytes: 1000,
+      globalBufferedVectorBytes: 2000,
+    });
+  });
+
+  it('embedding.scheduler 关系约束错误时 fail-loud', () => {
+    assert.throws(
+      () => writeAndLoad(
+        'config.yaml',
+        ['embedding:', '  scheduler:', '    maxConcurrency: 5', '    maxGlobalConcurrency: 2'].join('\n'),
+      ),
+      /maxConcurrency 不能大于 maxGlobalConcurrency/,
+    );
+  });
+
+  it('embedding.scheduler 拒绝过大批次与任务级缓冲超过全局缓冲', () => {
+    assert.throws(
+      () => writeAndLoad(
+        'config.yaml',
+        ['embedding:', '  scheduler:', '    batchSize: 1001'].join('\n'),
+      ),
+      /batchSize 不能大于 1000/,
+    );
+    assert.throws(
+      () => writeAndLoad(
+        'config.yaml',
+        ['embedding:', '  scheduler:', '    maxBufferedVectorBytes: 2048', '    globalBufferedVectorBytes: 1024'].join('\n'),
+      ),
+      /maxBufferedVectorBytes 不能大于 globalBufferedVectorBytes/,
+    );
+  });
 });
 
 describe('A. lib/config —— scope 可选字段（wikiSync）', () => {

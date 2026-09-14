@@ -15,6 +15,15 @@ export interface EmbedOptions {
   timeoutMs?: number;
   /** 进度回调 */
   onProgress?: (done: number, total: number) => void;
+  /** provider 级请求/重试观测；异常不得改变 embedding 结果。 */
+  onAttempt?: (event: EmbeddingAttemptEvent) => void;
+}
+
+export interface EmbeddingAttemptEvent {
+  kind: 'request' | 'retry';
+  attempt: number;
+  retryAfterMs?: number;
+  reason?: string;
 }
 
 export interface EmbeddingProvider {

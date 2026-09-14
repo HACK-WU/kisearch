@@ -22,7 +22,8 @@ import { handleDirectImport } from './lib/import.js';
 import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
-import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { logProgress } from './lib/progress.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -62,13 +63,29 @@ program
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
 
       const importParams = { scope, sourceDir, group, chunkSize, chunkOverlap, vector, cleanEnabled, cleanRules, tags: opts.tags, assets: opts.assets !== false };
-      const result = !shouldUseDaemonClient()
-        ? await handleDirectImport(importParams)
-        // timeoutMs=0：导入内部向量化预算为 60s + N*10s（100 chunk ≈ 17 分钟），
-        // 任何固定客户端超时都会先于任务完成而误报失败；而超时并不取消 daemon
-        // 侧任务，用户看到失败后重跑会撞 import.lock 进入死路（清锁会破坏正在
-        // 运行的任务，不清则永远进不去）。daemon 死亡由 socket error 兜底感知。
-        : await callDaemon('import', importParams, 0);
+      const daemonJobId = createDaemonJobId();
+      const useDaemon = shouldUseDaemonClient();
+      const daemonAbort = useDaemon ? new AbortController() : undefined;
+      const onDaemonSignal = () => {
+        process.stderr.write('\n已请求取消 daemon import，等待当前批次收束...\n');
+        daemonAbort?.abort();
+      };
+      if (useDaemon) process.once('SIGINT', onDaemonSignal);
+      let result: unknown;
+      try {
+        result = !useDaemon
+          ? await handleDirectImport(importParams)
+          // timeoutMs=0：导入内部向量化预算为 60s + N*10s（100 chunk ≈ 17 分钟），
+          // 固定客户端超时会在任务完成前误报失败；daemon 死亡由 socket error 兜底感知。
+          : await callDaemon('import', importParams, 0, {
+            streamProgress: true,
+            jobId: daemonJobId,
+            abortSignal: daemonAbort?.signal,
+            onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `import ${event.progress.phase ?? 'running'}`),
+          });
+      } finally {
+        if (useDaemon) process.removeListener('SIGINT', onDaemonSignal);
+      }
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
 

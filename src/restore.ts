@@ -33,8 +33,9 @@ import {
 import { closeEngine, vectorCountScope } from './lib/vector-client.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
-import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { extractScopeSnapshot } from './lib/safe-tar.js';
+import { logProgress } from './lib/progress.js';
 
 // ─── 工具 ───
 
@@ -46,6 +47,8 @@ function fail(msg: string): never {
   output({ ok: false, error: msg });
   process.exit(1);
 }
+
+let cliAbortSignal: AbortSignal | undefined;
 
 // ─── 确认（非交互）───
 
@@ -450,14 +453,22 @@ function validateRebuildOptsOrExit(): void {
 
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
 async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
+  const effectiveOpts = { ...opts, abortSignal: opts.abortSignal ?? cliAbortSignal };
+  const { abortSignal: _abortSignal, ...rpcOpts } = effectiveOpts;
+  const jobId = createDaemonJobId();
   // 注入真实 countScope：全量重建清空旧向量前统计总数，删除过程输出进度条
   const result = shouldUseDaemonClient()
     // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
     ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
       scope: scopeName,
-      options: opts,
-    }, 0)
-    : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, opts);
+      options: rpcOpts,
+    }, 0, {
+      streamProgress: true,
+      jobId,
+      abortSignal: _abortSignal,
+      onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `rebuild ${event.progress.phase ?? 'running'}`),
+    })
+    : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, effectiveOpts);
   // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
   if (result.ok && !result.partial) {
     try {
@@ -497,6 +508,14 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
 // ─── 主逻辑 ───
 
 async function main() {
+  const abortController = new AbortController();
+  const onInterrupt = () => {
+    if (abortController.signal.aborted) return;
+    process.stderr.write('\n已请求取消 daemon restore/rebuild，等待当前批次收束...\n');
+    abortController.abort();
+  };
+  cliAbortSignal = abortController.signal;
+  if (shouldUseDaemonClient()) process.once('SIGINT', onInterrupt);
   try {
     validateScope(scope);
     // NEG：重建参数校验前置——先于破坏性 --from-snapshot，避免还原已执行后才因参数错误失败（用户只剩残缺现场）
@@ -508,6 +527,7 @@ async function main() {
       // 读到半成品。未加 --yes 时仍在客户端执行只读预览，不产生任何写入。
       if (shouldUseDaemonClient() && skipYes) {
         // timeoutMs=0：快照解压与可选向量重建均为长任务，客户端超时只会误报失败。
+        const daemonJobId = createDaemonJobId();
         const daemonResult = await callDaemon<Record<string, any>>('restore-snapshot', {
           scope,
           timestamp,
@@ -516,7 +536,12 @@ async function main() {
           snapshotFile: snapshotFileArg ? path.resolve(snapshotFileArg) : undefined,
           rebuildVector,
           options: rebuildVector ? rebuildOpts : undefined,
-        }, 0);
+        }, 0, {
+          streamProgress: true,
+          jobId: daemonJobId,
+          abortSignal: abortController.signal,
+          onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `restore ${event.progress.phase ?? 'running'}`),
+        });
         const rebuilt = daemonResult.rebuildVector as Awaited<ReturnType<typeof rebuildScopeVectors>> | undefined;
         if (rebuilt && !rebuilt.ok) {
           output({
@@ -550,6 +575,8 @@ async function main() {
     output(toErrorPayload(err));
     process.exit(1);
   } finally {
+    if (shouldUseDaemonClient()) process.removeListener('SIGINT', onInterrupt);
+    cliAbortSignal = undefined;
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则 worker 线程持引用导致进程无法退出
     await closeEngine();
   }

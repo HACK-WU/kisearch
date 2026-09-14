@@ -23,7 +23,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
-import { getVectorResourceMetrics, runWithVectorSource } from './vector-client.js';
+import { getVectorResourceMetrics, getVectorizationMetrics, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
 import { loadConfig, getConfigLoadIssue, runWithConfigSnapshot, type KiConfig } from './config.js';
@@ -237,6 +237,7 @@ export interface HealthzInfo {
   layoutVersion?: number;
   queue?: { activeWorkers: number; maxWorkers: number; queues: Record<string, number> };
   vectorResources?: import('./vector-client.js').VectorResourceMetrics;
+  vectorization?: import('./vector-client.js').VectorizationMetrics;
   /** 启动以来的鉴权失败次数（仅非回环鉴权模式下出现） */
   authFailures?: number;
 }
@@ -519,6 +520,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         ...(configError !== undefined ? { configError } : {}),
         queue: getSharedOperationCoordinator().snapshot(),
         vectorResources: getVectorResourceMetrics(),
+        vectorization: getVectorizationMetrics(),
         ...(authEnabled ? { authFailures } : {}),
       });
       return;

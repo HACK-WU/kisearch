@@ -45,6 +45,8 @@ import type {
   VectorSearchReq,
   WriteErrorCode,
   WriteResult,
+  VectorWriteBatchPersistedEvent,
+  ZvecWriteOptions,
   ZvecEngineConfig,
   ZvecEngineOpenConfig,
 } from './types.js';
@@ -240,15 +242,15 @@ export class ZvecEngine {
 
   // ─── 写入 ───
 
-  async upsert(docs: DocInput[]): Promise<WriteResult> {
-    return this.writeDocs(docs, 'upsert');
+  async upsert(docs: DocInput[], options?: ZvecWriteOptions): Promise<WriteResult> {
+    return this.writeDocs(docs, 'upsert', options);
   }
 
-  async insert(docs: DocInput[]): Promise<WriteResult> {
-    return this.writeDocs(docs, 'insert');
+  async insert(docs: DocInput[], options?: ZvecWriteOptions): Promise<WriteResult> {
+    return this.writeDocs(docs, 'insert', options);
   }
 
-  async update(docs: DocInput[]): Promise<WriteResult> {
+  async update(docs: DocInput[], options?: ZvecWriteOptions): Promise<WriteResult> {
     // Z-03 / v6 契约：zvec updateSync 要求 dense vector 必填；
     // "仅传 fields 只改标量"在 zvec 0.6.0 下不可实现，须提供 vector 或 text（重嵌）。
     for (const d of docs) {
@@ -270,7 +272,7 @@ export class ZvecEngine {
         }
       }
     }
-    return this.writeDocs(docs, 'update');
+    return this.writeDocs(docs, 'update', options);
   }
 
   async delete(ids: string[]): Promise<WriteResult> {
@@ -327,7 +329,11 @@ export class ZvecEngine {
 
   // ─── 内部：写入编排 ───
 
-  private async writeDocs(docs: DocInput[], mode: 'upsert' | 'insert' | 'update'): Promise<WriteResult> {
+  private async writeDocs(
+    docs: DocInput[],
+    mode: 'upsert' | 'insert' | 'update',
+    options: ZvecWriteOptions = {},
+  ): Promise<WriteResult> {
     this.assertWritable();
 
     if (docs.length === 0) return { ok: 0, failed: 0 };
@@ -344,6 +350,12 @@ export class ZvecEngine {
     }
 
     const allErrors: Array<{ id: string; code: WriteErrorCode; reason: string }> = [];
+
+    // 新调度路径：provider 批次可并行，批次完成后进入同一 writer 链；
+    // 不传 scheduler 的旧调用继续走下方稳定的串行实现。
+    if (options.scheduler && needsEmbed.length > 0) {
+      return this.writeDocsWithScheduler(docs, mode, needsEmbed, noEmbed, allErrors, options);
+    }
 
     // embed needsEmbed：engine 自己按 EMBED_BATCH_SIZE 切小批、逐批 embed（S-03 §4a.2 步骤 2-3）。
     // 小批为最小失败单元：某批抛错只把该批 doc 标 EMBEDDING_FAILED，其余批次与 noEmbed 组不受影响，
@@ -446,6 +458,204 @@ export class ZvecEngine {
       ok: writeResult.ok,
       failed: writeResult.failed + allErrors.length,
       errors: merged.length > 0 ? merged : undefined,
+    };
+  }
+
+  /**
+   * 有界并行 embedding + 单 writer 持久化。
+   * provider 失败按批转换为逐项 EMBEDDING_FAILED；zvec/回调异常则交给
+   * scheduler 触发 failure-drain，禁止继续提交新的 payload。
+   */
+  private async writeDocsWithScheduler(
+    docs: DocInput[],
+    mode: 'upsert' | 'insert' | 'update',
+    needsEmbed: DocInput[],
+    noEmbed: DocInput[],
+    allErrors: Array<{ id: string; code: WriteErrorCode; reason: string }>,
+    options: ZvecWriteOptions,
+  ): Promise<WriteResult> {
+    let persisted = 0;
+    let metadataPending = 0;
+    let failed = 0;
+    const metadataPendingItems: string[] = [];
+    let fatalWriteError: Error | undefined;
+    let writerTail: Promise<import('./embedding/batch-scheduler.js').BatchPersistOutcome> = Promise.resolve({ persisted: 0, failed: 0 });
+
+    const validateAndBuild = (doc: DocInput, vector: number[] | undefined): WriteDocPayload => {
+      if (mode !== 'update' && vector === undefined && doc.text === undefined) {
+        throw new InvalidDocInputError(`doc "${doc.id}" must provide at least one of text/vector`);
+      }
+      if (vector !== undefined && vector.length !== this.schema.dimension) {
+        throw new DimensionMismatchError(
+          `doc "${doc.id}" vector dimension ${vector.length} !== collection dimension ${this.schema.dimension}`,
+          { data: { id: doc.id, expected: this.schema.dimension, actual: vector.length } },
+        );
+      }
+      if (doc.fields) {
+        for (const key of Object.keys(doc.fields)) {
+          if (!this.allowedFields.has(key)) {
+            throw new InvalidDocInputError(
+              `doc "${doc.id}" field "${key}" not declared in scalarFields`,
+              { data: { id: doc.id, field: key } },
+            );
+          }
+        }
+      }
+      return {
+        id: doc.id,
+        text: doc.text,
+        vector: vector ? Float32Array.from(vector) : undefined,
+        fields: doc.fields,
+      };
+    };
+
+    const persistBatch = async (
+      batch: import('./embedding/batch-scheduler.js').EmbeddingBatch<DocInput>,
+    ): Promise<import('./embedding/batch-scheduler.js').BatchPersistOutcome> => {
+      if (fatalWriteError) throw fatalWriteError;
+      if (batch.error) {
+        for (const item of batch.items) {
+          allErrors.push({ id: item.docId, code: 'EMBEDDING_FAILED', reason: batch.error.message });
+        }
+        failed += batch.items.length;
+        options.onProgress?.({ phase: 'embedding', done: persisted + failed, total: docs.length, persisted, failed, metadataPending });
+        return { persisted: 0, failed: batch.items.length };
+      }
+
+      const payloadDocs: WriteDocPayload[] = [];
+      const payloadItems: Array<{ id: string; inputIndex: number }> = [];
+      for (let i = 0; i < batch.items.length; i++) {
+        const item = batch.items[i];
+        const vector = batch.vectors[i];
+        if (!vector) {
+          allErrors.push({ id: item.docId, code: 'EMBEDDING_FAILED', reason: 'Embedding 未返回向量' });
+          failed++;
+          continue;
+        }
+        payloadDocs.push(validateAndBuild(item.item, vector));
+        payloadItems.push({ id: item.docId, inputIndex: item.inputIndex });
+      }
+      if (payloadDocs.length === 0) {
+        options.onProgress?.({ phase: 'persist', done: persisted + failed, total: docs.length, persisted, failed, metadataPending });
+        return { persisted: 0, failed: batch.items.length };
+      }
+
+      const writeResult = await this.proxy.send<WriteResultPayload>(mode, {
+        docs: payloadDocs,
+        batchSize: DEFAULT_WRITE_BATCH_SIZE,
+      });
+      const zvecErrors = new Map((writeResult.errors ?? []).map((error) => [error.id, error]));
+      for (const error of zvecErrors.values()) {
+        allErrors.push({ id: error.id, code: error.code as WriteErrorCode, reason: error.reason });
+      }
+      const zvecPersisted = Math.max(0, writeResult.ok);
+      const zvecFailed = Math.max(0, writeResult.failed);
+      persisted += zvecPersisted;
+      failed += zvecFailed;
+
+      let batchMetadataPending = 0;
+      if (options.onBatchPersisted && zvecPersisted > 0 && zvecFailed === 0) {
+        const event: VectorWriteBatchPersistedEvent = {
+          sequence: batch.batchIndex,
+          items: payloadItems
+            .filter((item) => !zvecErrors.has(item.id))
+            .map((item) => ({ docId: item.id, inputIndex: item.inputIndex, memoryId: item.id })),
+          zvecPersisted,
+          failed: zvecFailed,
+        };
+        const successfulItems = event.items;
+        try {
+          const outcome = await options.onBatchPersisted(event, batch);
+          // metadata 回调若报告任意 pending，按设计将整个 callback batch
+          // 视为待补偿，避免没有逐项事务结果时误报部分条目已完全成功。
+          batchMetadataPending = outcome?.metadataPending && outcome.metadataPending > 0
+            ? successfulItems.length
+            : 0;
+        } catch (err) {
+          // zvec 已成功但元数据不是同一事务；保留幂等重试入口，且停止后续批次。
+          batchMetadataPending = zvecPersisted;
+          metadataPending += batchMetadataPending;
+          persisted -= batchMetadataPending;
+          metadataPendingItems.push(...successfulItems.map((item) => item.docId));
+          throw Object.assign(new Error(`批次元数据回调失败（${zvecPersisted} 条已写入 zvec）：${(err as Error).message}`), {
+            code: 'METADATA_PERSIST_FAILED',
+          });
+        }
+        if (batchMetadataPending > 0) {
+          metadataPending += batchMetadataPending;
+          persisted -= batchMetadataPending;
+        }
+      }
+      if (zvecFailed > 0) {
+        fatalWriteError = Object.assign(new Error(`zvec 批次持久化失败（成功 ${zvecPersisted}，失败 ${zvecFailed}），已停止后续批次`), {
+          code: 'ZVEC_WRITE_ERROR',
+        });
+      }
+      options.onProgress?.({ phase: 'persist', done: persisted + failed + metadataPending, total: docs.length, persisted, failed, metadataPending });
+      return {
+        persisted: zvecPersisted - batchMetadataPending,
+        failed: zvecFailed,
+        metadataPending: batchMetadataPending,
+      };
+    };
+
+    const scheduler = options.scheduler;
+    if (!scheduler) throw new Error('内部错误：调度器未提供');
+    const scheduleOutcome = await scheduler.schedule(this.embedding, needsEmbed, {
+      getText: (doc) => doc.text!,
+      getDocId: (doc) => doc.id,
+      dedupeKey: (doc) => doc.text!,
+      abortSignal: options.abortSignal,
+      onBatchComplete: (batch) => {
+        const current = writerTail.then(() => persistBatch(batch));
+        writerTail = current;
+        return current;
+      },
+    });
+    try {
+      await writerTail;
+    } catch {
+      // scheduler 已把 writer 失败转换为 failure-drain 结果；这里继续汇总，
+      // 让调用方拿到逐项 failed/cancelled，而不是丢失批次级诊断。
+    }
+
+    const cancelledItems = scheduleOutcome.cancelledItems.map((item) => item.docId);
+    // noEmbed 文档不需要 provider；仍沿用同一 zvec writer 进行一次持久化。
+    if (!scheduleOutcome.fatalError && !options.abortSignal?.aborted && noEmbed.length > 0) {
+      const noEmbedPayload = noEmbed.map((doc) => validateAndBuild(doc, doc.vector));
+      const noEmbedResult = await this.proxy.send<WriteResultPayload>(mode, {
+        docs: noEmbedPayload,
+        batchSize: DEFAULT_WRITE_BATCH_SIZE,
+      });
+      persisted += noEmbedResult.ok;
+      failed += noEmbedResult.failed;
+      for (const error of noEmbedResult.errors ?? []) {
+        allErrors.push({ id: error.id, code: error.code as WriteErrorCode, reason: error.reason });
+      }
+    }
+
+    if (scheduleOutcome.fatalError) {
+      allErrors.push({ id: '<batch>', code: 'ZVEC_WRITE_ERROR', reason: scheduleOutcome.fatalError.message });
+    }
+    const cancelled = scheduleOutcome.cancelled;
+    const failedItems = scheduleOutcome.failedItems.map((item) => item.docId);
+    const totalFailed = failed + Math.max(0, allErrors.length - failed - metadataPending);
+    const ok = Math.max(0, persisted);
+    const status: WriteResult['status'] = cancelled > 0
+      ? (ok > 0 ? 'partial' : 'cancelled')
+      : ok === docs.length ? 'succeeded' : ok > 0 ? 'partial' : 'failed';
+    options.onProgress?.({ phase: 'persist', done: Math.min(docs.length, ok + metadataPending + totalFailed + cancelled), total: docs.length, persisted: ok, failed: totalFailed, metadataPending, cancelled });
+    return {
+      ok,
+      failed: Math.max(0, docs.length - ok - metadataPending - cancelled),
+      attempted: scheduleOutcome.attempted,
+      errors: allErrors.length > 0 ? allErrors : undefined,
+      cancelled,
+      cancelledItems,
+      failedItems,
+      metadataPending,
+      metadataPendingItems,
+      status,
     };
   }
 

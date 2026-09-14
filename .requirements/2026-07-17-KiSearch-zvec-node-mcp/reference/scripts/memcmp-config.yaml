@@ -6,7 +6,7 @@
 dbPath: "/root/knowledge-indexer/zvec-probe/.mem-cmp/lancedb"
 
 embedding:
-  apiKey: "sk-nhucdyuoykanymnkptpnbllswqqivhqaqmlefnxzyfjnjehg"
+  apiKey: "${SILICONFLOW_API_KEY}"
   model: "Qwen/Qwen3-Embedding-8B"
   baseURL: "https://api.siliconflow.cn/v1"
   dimensions: 4096

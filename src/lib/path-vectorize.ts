@@ -29,6 +29,7 @@ export interface PathVectorizeEntry {
 export interface PathVectorizeOptions {
   /** 保留字段（vector 版不再使用超时参数，仅为签名兼容） */
   timeoutMs?: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface PathVectorizeResult {
@@ -94,7 +95,7 @@ export async function bulkStorePaths(
       const result = await vectorBulkStore({
         scope,
         entries: scopeEntries.map((e) => ({ text: e.text, tags: e.tag, group: e.group })),
-      });
+      }, { abortSignal: _options?.abortSignal });
       for (const item of result.results) {
         const entry = scopeEntries[item.index];
         if (!entry) continue;

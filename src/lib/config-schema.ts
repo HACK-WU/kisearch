@@ -138,6 +138,17 @@ const CONFIG_SCHEMA: ConfigNode = {
         model: { type: 'string' },
         dimension: { type: 'number', validate: positiveInt },
         apiKey: { type: 'string' },
+        scheduler: {
+          type: 'object',
+          fields: {
+            batchSize: { type: 'number', validate: positiveInt },
+            maxConcurrency: { type: 'number', validate: positiveInt },
+            maxGlobalConcurrency: { type: 'number', validate: positiveInt },
+            maxPrefetchBatches: { type: 'number', validate: positiveInt },
+            maxBufferedVectorBytes: { type: 'number', validate: positiveInt },
+            globalBufferedVectorBytes: { type: 'number', validate: positiveInt },
+          },
+        },
       },
     },
     scopeMode: { type: 'literal', values: ['default', 'strict'] },

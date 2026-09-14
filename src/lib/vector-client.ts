@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
@@ -30,6 +31,8 @@ import {
   type ZvecEngineOpenConfig,
 } from '../../dist/zvec-engine/index.js';
 import type { EmbeddingProvider } from '../zvec-engine/embedding/provider.js';
+import { EmbeddingSchedulerRuntime, type EmbeddingSchedulerConfig, type EmbeddingSchedulerMetrics } from '../zvec-engine/embedding/batch-scheduler.js';
+import type { ZvecWriteOptions } from '../zvec-engine/types.js';
 import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
@@ -61,9 +64,41 @@ export interface BulkStoreItemResult {
 
 export interface VectorBulkStoreResult {
   total: number;
+  /** 兼容旧字段；与 totalItems 相同。 */
+  totalItems?: number;
+  /** 已进入 scheduler 的条目数，取消未启动项不计入。 */
+  attempted?: number;
   succeeded: number;
   failed: number;
   results: BulkStoreItemResult[];
+  metadataPending?: number;
+  metadataPendingItems?: string[];
+  cancelled?: number;
+  cancelledItems?: number;
+  failedItems?: string[];
+  status?: 'succeeded' | 'partial' | 'failed' | 'cancelled';
+}
+
+export interface VectorBulkStoreOptions {
+  /** 可选任务级覆盖；daemon 全局 limiter 仍按相同配置 key 共享。 */
+  scheduler?: Partial<EmbeddingSchedulerConfig>;
+  abortSignal?: AbortSignal;
+  onProgress?: ZvecWriteOptions['onProgress'];
+  onBatchPersisted?: ZvecWriteOptions['onBatchPersisted'];
+}
+
+const schedulerRuntimes = new Map<string, EmbeddingSchedulerRuntime>();
+
+function getEmbeddingSchedulerRuntime(override?: Partial<EmbeddingSchedulerConfig>): EmbeddingSchedulerRuntime {
+  const base = getEmbeddingConfig(loadConfig()).scheduler as EmbeddingSchedulerConfig;
+  const scheduler = { ...base, ...(override ?? {}) };
+  const key = JSON.stringify(scheduler);
+  const existing = schedulerRuntimes.get(key);
+  if (existing) return existing;
+  const runtime = new EmbeddingSchedulerRuntime(scheduler);
+  schedulerRuntimes.clear();
+  schedulerRuntimes.set(key, runtime);
+  return runtime;
 }
 
 export interface VectorAvailableResult {
@@ -302,6 +337,50 @@ export interface VectorResourceMetrics {
 
 export function getVectorResourceMetrics(): VectorResourceMetrics {
   return { ...resourceMetrics };
+}
+
+export interface VectorizationMetrics extends EmbeddingSchedulerMetrics {
+  rssBytes: number;
+  mmapCount: number;
+  fdCount: number;
+  machineAvailableMemoryBytes: number;
+}
+
+function countProcEntries(name: string): number {
+  try { return fs.readdirSync(`/proc/self/${name}`).length; } catch { return 0; }
+}
+
+/**
+ * Embedding 调度指标与 OS 资源指标分开读取，避免把 Node heap 当成 daemon
+ * 的真实内存占用；/proc 不可用的平台返回 0，但不伪造一个“健康”数值。
+ */
+export function getVectorizationMetrics(): VectorizationMetrics {
+  const metrics: EmbeddingSchedulerMetrics = {
+    activeTasks: 0,
+    inFlightRequests: 0,
+    bufferedVectorBytes: 0,
+    submittedBatches: 0,
+    completedBatches: 0,
+    failedBatches: 0,
+    cancelledItems: 0,
+    providerRequests: 0,
+    retries: 0,
+    rateLimited: 0,
+    timeouts: 0,
+  };
+  for (const runtime of schedulerRuntimes.values()) {
+    const current = runtime.getMetrics();
+    for (const key of Object.keys(metrics) as (keyof EmbeddingSchedulerMetrics)[]) {
+      metrics[key] += current[key];
+    }
+  }
+  return {
+    ...metrics,
+    rssBytes: process.memoryUsage().rss,
+    mmapCount: countProcEntries('maps'),
+    fdCount: countProcEntries('fd'),
+    machineAvailableMemoryBytes: os.freemem(),
+  };
 }
 
 function maxOpenCollections(): number {
@@ -882,9 +961,9 @@ export async function vectorStore(params: {
 export async function vectorBulkStore(params: {
   scope: string;
   entries: { text: string; tags?: string; group?: string }[];
-}): Promise<VectorBulkStoreResult> {
+}, options: VectorBulkStoreOptions = {}): Promise<VectorBulkStoreResult> {
   if (params.entries.length === 0) {
-    return { total: 0, succeeded: 0, failed: 0, results: [] };
+    return { total: 0, totalItems: 0, attempted: 0, succeeded: 0, failed: 0, cancelledItems: 0, results: [] };
   }
 
   const scope = resolveScope(loadConfig(), params.scope);
@@ -902,25 +981,77 @@ export async function vectorBulkStore(params: {
     };
   });
 
-  const result = await withEngine(scope, (engine) => engine.upsert(docs));
+  // 相同 text+scope+tag 会生成同一个幂等 docId。调度器要求批内 docId
+  // 唯一，因此按最终 docId 合并请求；结果仍按原始 entries 回映射。
+  // 保留最后一次 fields，使行为与旧的顺序 upsert 一致。
+  const uniqueDocs: typeof docs = [];
+  const uniqueById = new Map<string, number>();
+  for (const doc of docs) {
+    const existingIndex = uniqueById.get(doc.id);
+    if (existingIndex === undefined) {
+      uniqueById.set(doc.id, uniqueDocs.length);
+      uniqueDocs.push(doc);
+    } else {
+      uniqueDocs[existingIndex] = doc;
+    }
+  }
+
+  const writeOptions: ZvecWriteOptions = {
+    scheduler: getEmbeddingSchedulerRuntime(options.scheduler),
+    abortSignal: options.abortSignal,
+    onProgress: options.onProgress,
+    onBatchPersisted: options.onBatchPersisted,
+  };
+  const result = await withEngine(scope, (engine) => engine.upsert(uniqueDocs, writeOptions));
 
   // 组装逐项结果（WriteResult.errors 按 doc id 定位）
   const errorById = new Map<string, string>();
   for (const e of result.errors ?? []) {
     errorById.set(e.id, e.reason);
   }
+  const cancelledIds = new Set(result.cancelledItems ?? []);
+  const failedIds = new Set(result.failedItems ?? []);
+  const metadataPendingIds = new Set(result.metadataPendingItems ?? []);
   const results: BulkStoreItemResult[] = docs.map((d, i) => {
     const err = errorById.get(d.id);
+    if (cancelledIds.has(d.id)) {
+      return { index: i, success: false, error: '向量化已取消，条目尚未提交' };
+    }
+    if (metadataPendingIds.has(d.id)) {
+      return { index: i, success: false, error: 'zvec 已写入但元数据尚未完成，请重试元数据回写' };
+    }
+    if (failedIds.has(d.id)) {
+      return { index: i, success: false, error: '批次持久化失败，后续批次已停止' };
+    }
     return err
       ? { index: i, success: false, error: err }
       : { index: i, memoryId: d.id, success: true };
   });
 
+  const succeeded = results.filter((item) => item.success).length;
+  const cancelled = results.filter((item) => cancelledIds.has(docs[item.index].id)).length;
+  const metadataPending = results.filter((item) => metadataPendingIds.has(docs[item.index].id)).length;
+  const failed = results.length - succeeded - cancelled - metadataPending;
+  const attempted = results.length - cancelled;
+  const status: VectorBulkStoreResult['status'] = cancelled > 0
+    ? (succeeded > 0 ? 'partial' : 'cancelled')
+    : failed > 0 || metadataPending > 0
+      ? (succeeded > 0 ? 'partial' : 'failed')
+      : 'succeeded';
+
   return {
     total: params.entries.length,
-    succeeded: result.ok,
-    failed: result.failed,
+    totalItems: params.entries.length,
+    attempted,
+    succeeded,
+    failed,
     results,
+    metadataPending,
+    metadataPendingItems: result.metadataPendingItems,
+    cancelled,
+    cancelledItems: result.cancelled,
+    failedItems: result.failedItems,
+    status,
   };
 }
 

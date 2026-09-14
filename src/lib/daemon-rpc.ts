@@ -6,6 +6,7 @@ import { configFingerprint, ensureVectorLayout, VECTOR_LAYOUT_VERSION, assertDae
 import { getDaemonSocketPath, DAEMON_PROTOCOL_VERSION } from './daemon-protocol.js';
 import { getSharedOperationCoordinator, scopesOf, scopeOf, type OperationRequest, type OperationCoordinator } from './operation-coordinator.js';
 import { dispatchOperation, supportedOperations } from './daemon-dispatch.js';
+import { getVectorizationMetrics } from './vector-client.js';
 import { readKiVersion } from './version-guard.js';
 
 export interface DaemonRpcOptions {
@@ -14,13 +15,109 @@ export interface DaemonRpcOptions {
 
 interface RpcRequest {
   id?: string | number;
-  method: 'ping' | 'execute' | 'queue';
+  method: 'ping' | 'execute' | 'queue' | 'cancel' | 'status';
   operation?: string;
   params?: unknown;
+  jobId?: string;
+  streamProgress?: boolean;
 }
 
 function send(socket: net.Socket, payload: unknown): void {
+  if (socket.destroyed || !socket.writable) return;
   socket.write(`${JSON.stringify(payload)}\n`);
+}
+
+interface DaemonJob {
+  id: string;
+  owner: string;
+  operation: string;
+  scope: string;
+  state: 'queued' | 'running' | 'draining' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
+  cancelRequested: boolean;
+  abortController: AbortController;
+  eventSeq: number;
+  progress?: {
+    jobId: string;
+    operation: string;
+    scope: string;
+    phase?: string;
+    done: number;
+    total: number;
+    persisted?: number;
+    metadataPending?: number;
+    failed?: number;
+    cancelled?: number;
+    inFlight?: number;
+    bufferedBytes?: number;
+  };
+  result?: unknown;
+  error?: { code?: string; message: string };
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  subscribers: Set<net.Socket>;
+  emitProgress?: (progress: { phase: string; done: number; total: number; persisted?: number; metadataPending?: number; failed?: number; cancelled?: number }) => void;
+}
+
+const daemonJobs = new Map<string, DaemonJob>();
+const pendingCancels = new Map<string, { owner: string; expiresAt: number }>();
+const JOB_TTL_MS = 60 * 60 * 1000;
+const PENDING_CANCEL_TTL_MS = 30_000;
+const PENDING_CANCEL_LIMIT = 1_000;
+
+function requestOwner(): string {
+  return `uid:${process.getuid?.() ?? 'unknown'}`;
+}
+
+function cleanupJobs(): void {
+  const now = Date.now();
+  for (const [id, job] of daemonJobs) {
+    if (job.finishedAt && now - job.finishedAt > JOB_TTL_MS) daemonJobs.delete(id);
+  }
+  for (const [id, tombstone] of pendingCancels) {
+    if (tombstone.expiresAt <= now) pendingCancels.delete(id);
+  }
+}
+
+function jobSummary(job: DaemonJob): Record<string, unknown> {
+  return {
+    jobId: job.id,
+    operation: job.operation,
+    scope: job.scope,
+    state: job.state,
+    cancelRequested: job.cancelRequested,
+    eventSeq: job.eventSeq,
+    progress: job.progress,
+    result: job.result,
+    error: job.error,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+  };
+}
+
+function classifyJobState(result: unknown, cancelled: boolean, failed: boolean): DaemonJob['state'] {
+  if (cancelled) return 'cancelled';
+  if (failed) return 'failed';
+  const value = result as {
+    partial?: boolean;
+    errors?: unknown[];
+    stats?: { errors?: number; failed?: number };
+    rebuildVector?: {
+      partial?: boolean;
+      ok?: boolean;
+      errors?: unknown[];
+      stats?: { errors?: number; failed?: number };
+    };
+  } | undefined;
+  const hasErrors = (value?.errors?.length ?? 0) > 0
+    || (value?.stats?.errors ?? 0) > 0
+    || (value?.stats?.failed ?? 0) > 0
+    || (value?.rebuildVector?.errors?.length ?? 0) > 0
+    || (value?.rebuildVector?.stats?.errors ?? 0) > 0
+    || (value?.rebuildVector?.stats?.failed ?? 0) > 0;
+  if (value?.partial || value?.rebuildVector?.partial || hasErrors) return 'partial';
+  return 'succeeded';
 }
 
 function safeLogValue(value: unknown, max = 500): string {
@@ -91,6 +188,9 @@ export async function startDaemonRpcServer(opts: DaemonRpcOptions = {}): Promise
     // 无处落地（跨 Node 版本行为无保证），且服务端后续 write 失败也无日志。
     socket.on('error', (err) => {
       logDaemon(`客户端连接异常：${err.message}`);
+    });
+    socket.on('close', () => {
+      for (const job of daemonJobs.values()) job.subscribers.delete(socket);
     });
     socket.on('data', (chunk) => {
       buffer += chunk;
@@ -193,11 +293,116 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
     send(socket, { id: req.id ?? null, ok: true, queue: coordinator.snapshot() });
     return;
   }
+  cleanupJobs();
+  const owner = requestOwner();
+  if (req.method === 'status') {
+    const jobId = req.jobId?.trim() ?? '';
+    const job = daemonJobs.get(jobId);
+    if (!job || job.owner !== owner) {
+      send(socket, { id: req.id ?? null, ok: false, error: { code: 'JOB_NOT_FOUND', message: `daemon job 不存在：${jobId}` } });
+      return;
+    }
+    send(socket, { id: req.id ?? null, ok: true, job: jobSummary(job) });
+    return;
+  }
+  if (req.method === 'cancel') {
+    const jobId = req.jobId?.trim() ?? '';
+    const job = daemonJobs.get(jobId);
+    if (!job) {
+      // execute 尚未到达事件循环时先登记短 TTL tombstone，消除“cancel 赢在 execute
+      // 注册前却返回 not_found”的竞态。execute 注册时会消费它并直接完成为 cancelled。
+      if (jobId && pendingCancels.size < PENDING_CANCEL_LIMIT) {
+        pendingCancels.set(jobId, { owner, expiresAt: Date.now() + PENDING_CANCEL_TTL_MS });
+        send(socket, { id: req.id ?? null, ok: true, state: 'pending', jobId });
+      } else {
+        if (jobId) {
+          send(socket, { id: req.id ?? null, ok: false, error: { code: 'PENDING_CANCEL_LIMIT', message: 'pending-cancel tombstone 已达上限，请稍后重试或确认 jobId' } });
+        } else {
+          send(socket, { id: req.id ?? null, ok: true, state: 'not_found', jobId });
+        }
+      }
+      return;
+    }
+    if (job.owner !== owner) {
+      send(socket, { id: req.id ?? null, ok: false, error: { code: 'JOB_NOT_FOUND', message: `daemon job 不存在：${jobId}` } });
+      return;
+    }
+    if (job.finishedAt) {
+      send(socket, { id: req.id ?? null, ok: true, state: 'already_finished', jobId, job: jobSummary(job) });
+      return;
+    }
+    job.cancelRequested = true;
+    job.state = 'draining';
+    job.abortController.abort();
+    send(socket, { id: req.id ?? null, ok: true, state: 'cancelling', jobId });
+    return;
+  }
   if (req.method !== 'execute' || !req.operation) {
     const hint = recoveryHint('DAEMON_BAD_REQUEST');
     logOperationFailure(req, { code: 'DAEMON_BAD_REQUEST', message: '需要 method=execute 和 operation' }, hint);
     send(socket, { id: req.id ?? null, ok: false, error: { code: 'DAEMON_BAD_REQUEST', message: '需要 method=execute 和 operation', hint } });
     return;
+  }
+  const stream = req.streamProgress === true;
+  const jobId = (req.jobId ?? '').trim();
+  let job: DaemonJob | undefined;
+  if (stream) {
+    if (!jobId) {
+      send(socket, { id: req.id ?? null, ok: false, error: { code: 'DAEMON_JOB_ID_REQUIRED', message: 'streamProgress=true 必须提供 jobId' } });
+      return;
+    }
+    if (daemonJobs.has(jobId)) {
+      send(socket, { id: req.id ?? null, ok: false, error: { code: 'DAEMON_JOB_EXISTS', message: `daemon job 已存在：${jobId}` } });
+      return;
+    }
+    const scope = scopeOf(req.params, req.operation);
+    job = {
+      id: jobId,
+      owner,
+      operation: req.operation,
+      scope,
+      state: 'queued',
+      cancelRequested: false,
+      abortController: new AbortController(),
+      eventSeq: 0,
+      createdAt: Date.now(),
+      subscribers: new Set([socket]),
+    };
+    daemonJobs.set(jobId, job);
+    const tombstone = pendingCancels.get(jobId);
+    if (tombstone && tombstone.owner === owner && tombstone.expiresAt > Date.now()) {
+      pendingCancels.delete(jobId);
+      job.cancelRequested = true;
+      job.state = 'cancelled';
+      job.finishedAt = Date.now();
+      job.result = { cancelled: true, jobId, reason: 'cancel requested before execute registration' };
+      send(socket, { id: req.id ?? null, ok: true, result: job.result, jobId, eventSeq: ++job.eventSeq });
+      return;
+    }
+    const emitProgress = (progress: { phase: string; done: number; total: number; persisted?: number; metadataPending?: number; failed?: number; cancelled?: number }): void => {
+      if (!job) return;
+      const metrics = getVectorizationMetrics();
+      job.progress = {
+        jobId: job.id,
+        operation: job.operation,
+        scope: job.scope,
+        phase: progress.phase,
+        done: progress.done,
+        total: progress.total,
+        persisted: progress.persisted ?? 0,
+        metadataPending: progress.metadataPending ?? 0,
+        failed: progress.failed ?? 0,
+        cancelled: progress.cancelled ?? 0,
+        inFlight: metrics.inFlightRequests,
+        bufferedBytes: metrics.bufferedVectorBytes,
+      };
+      job.eventSeq++;
+      for (const subscriber of job.subscribers) {
+        send(subscriber, { id: req.id ?? null, type: 'progress', jobId: job.id, eventSeq: job.eventSeq, progress: job.progress });
+      }
+    };
+    job.emitProgress = emitProgress;
+    emitProgress({ phase: 'queued', done: 0, total: 1 });
   }
   const operation: OperationRequest = { operation: req.operation, params: req.params };
   try {
@@ -211,21 +416,52 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
     // loadConfig 的热失效会让同一个长操作前后半段使用不同路径/授权。
     const outcome = await coordinator.submit(
       operation,
-      (params) => runWithConfigSnapshot(
-        requestConfig,
-        () => dispatchOperation({ operation: req.operation!, params }),
-      ),
+      (params) => {
+        if (job) {
+          if (job.cancelRequested) {
+            job.state = 'cancelled';
+            return { cancelled: true, jobId: job.id, reason: 'cancelled before handler started' };
+          }
+          job.state = 'running';
+          job.startedAt = Date.now();
+        }
+        return runWithConfigSnapshot(
+          requestConfig,
+          () => dispatchOperation(
+            { operation: req.operation!, params },
+            job ? { jobId: job.id, abortSignal: job.abortController.signal, onProgress: (p: any) => job.emitProgress?.(p) } : {},
+          ),
+        );
+      },
       scopesOf(req.params, req.operation),
     );
-    send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue });
+    if (job) {
+      job.result = outcome.result;
+      const value = outcome.result as { cancelled?: boolean; ok?: boolean; errors?: Array<{ type?: string }> } | undefined;
+      const cancelled = job.cancelRequested || value?.cancelled === true || value?.errors?.some((e) => e.type === 'cancelled') === true;
+      job.state = classifyJobState(outcome.result, cancelled, value?.ok === false);
+      job.finishedAt = Date.now();
+      job.eventSeq++;
+      send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue, jobId: job.id, eventSeq: job.eventSeq, final: true });
+    } else {
+      send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue });
+    }
   } catch (err) {
     const error = err as Error & { code?: string };
     const hint = recoveryHint(error.code);
     logOperationFailure(req, error, hint);
+    if (job) {
+      job.error = { code: error.code, message: error.message };
+      job.state = job.cancelRequested || error.code === 'IMPORT_CANCELLED' || error.code === 'RESTORE_CANCELLED' || error.code === 'REBUILD_CANCELLED'
+        ? 'cancelled'
+        : 'failed';
+      job.finishedAt = Date.now();
+    }
     send(socket, {
       id: req.id ?? null,
       ok: false,
       error: { code: error.code ?? 'DAEMON_OPERATION_FAILED', message: error.message, hint },
+      ...(job ? { jobId: job.id, eventSeq: ++job.eventSeq, final: true } : {}),
     });
   }
 }

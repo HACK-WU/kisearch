@@ -27,6 +27,11 @@ import YAML from 'yaml';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { validateConfigFields, type ConfigIssue } from './config-schema.js';
+import {
+  DEFAULT_EMBEDDING_SCHEDULER,
+  normalizeEmbeddingScheduler,
+  type EmbeddingSchedulerConfig,
+} from '../zvec-engine/embedding/batch-scheduler.js';
 
 // ─── 默认路径（方案 A：统一 ~/.ki/ 用户数据根，运行时数据不落源码仓库） ───
 
@@ -130,6 +135,7 @@ export interface EmbeddingConfig {
   dimension: number;     // 向量维度（必须 === collection.dimension，kisearch 固定 4096）
   apiKey?: string;       // API 密钥：支持明文（sk-xxx）或环境变量引用（${VAR_NAME}）；
                          // 缺省则不解析（KI 层 fail-loud），不做任何隐式 env 回退
+  scheduler?: EmbeddingSchedulerConfig;
 }
 
 export interface KiConfig {
@@ -153,6 +159,7 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
   baseURL: 'https://api.siliconflow.cn/v1',
   model: 'Qwen/Qwen3-Embedding-8B',
   dimension: 4096,
+  scheduler: { ...DEFAULT_EMBEDDING_SCHEDULER },
 };
 
 const DEFAULT_VECTOR_RESOURCES: VectorResourceConfig = {
@@ -494,6 +501,11 @@ function parseAndExpand(configFile: string): KiConfig {
     model: rawEmbedding.model ? String(rawEmbedding.model) : DEFAULT_EMBEDDING.model,
     dimension: rawEmbedding.dimension !== undefined ? Number(rawEmbedding.dimension) : DEFAULT_EMBEDDING.dimension,
     apiKey: resolveApiKey(rawEmbedding.apiKey),
+    scheduler: normalizeEmbeddingScheduler(
+      rawEmbedding.scheduler && typeof rawEmbedding.scheduler === 'object'
+        ? rawEmbedding.scheduler as Partial<EmbeddingSchedulerConfig>
+        : undefined,
+    ),
   };
 
   const rawVector = raw.vector && typeof raw.vector === 'object'
@@ -590,7 +602,7 @@ function buildDefaults(): KiConfig {
     dataDir,
     backupDir,
     vectorDir: path.join(os.homedir(), '.ki', 'vector'),
-    embedding: { ...DEFAULT_EMBEDDING },
+    embedding: { ...DEFAULT_EMBEDDING, scheduler: { ...DEFAULT_EMBEDDING_SCHEDULER } },
     vector: { ...DEFAULT_VECTOR_RESOURCES },
     scopeMode: 'default',
     scopes: {},

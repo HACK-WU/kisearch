@@ -55,41 +55,129 @@ export function shouldUseDaemonClient(): boolean {
   return !isDaemonOwner() && process.env.KI_DAEMON_CLIENT === '1';
 }
 
-export async function callDaemon<T>(operation: string, params: unknown, timeoutMs = 120_000): Promise<T> {
+export interface DaemonProgressEvent {
+  jobId: string;
+  eventSeq: number;
+  progress: {
+    jobId?: string;
+    operation?: string;
+    scope?: string;
+    phase?: string;
+    done: number;
+    total: number;
+    persisted?: number;
+    metadataPending?: number;
+    failed?: number;
+    cancelled?: number;
+    inFlight?: number;
+    bufferedBytes?: number;
+  };
+}
+
+export interface CallDaemonOptions {
+  /** 长任务启用多帧进度；jobId 必须由客户端在提交前生成。 */
+  streamProgress?: boolean;
+  jobId?: string;
+  onProgress?: (event: DaemonProgressEvent) => void;
+  abortSignal?: AbortSignal;
+}
+
+export function createDaemonJobId(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
+export interface DaemonCancelResponse {
+  state: 'pending' | 'cancelling' | 'already_finished' | 'not_found';
+  jobId: string;
+}
+
+export interface DaemonJobStatus {
+  jobId: string;
+  operation: string;
+  scope: string;
+  state: 'queued' | 'running' | 'draining' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
+  cancelRequested: boolean;
+  eventSeq: number;
+  progress?: DaemonProgressEvent['progress'];
+  result?: unknown;
+  error?: { code?: string; message: string };
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+export async function callDaemon<T>(
+  operation: string,
+  params: unknown,
+  timeoutMs = 120_000,
+  options: CallDaemonOptions = {},
+): Promise<T> {
   if (isDaemonOwner()) throw new Error('daemon owner 进程不能通过 RPC 回调自身');
   await ensureDaemon();
   const socketPath = getDaemonSocketPath();
   const id = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const jobId = options.streamProgress ? (options.jobId ?? createDaemonJobId()) : options.jobId;
   return new Promise<T>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = '';
+    let settled = false;
+    let cancelSent = false;
+    let lastEventSeq = 0;
     // timeoutMs <= 0 表示不设客户端超时，靠 socket 生命周期结束。
     // 长任务（import/restore/rebuild-vector/migrate-vector）的内部预算可达
     // 60s + N*10s（100 chunk ≈ 17 分钟），远超任何固定客户端超时；超时后
     // daemon 侧任务并不会取消，用户看到失败后重跑会撞 import.lock 进入死路。
     // 注意不能把“不超时”写成 setTimeout(fn, 0)（下一 tick 即触发）或
     // Number.MAX_SAFE_INTEGER（超 32 位被钳为 1ms），两者实测都在 ~3ms 超时。
-    const timer = timeoutMs > 0
-      ? setTimeout(() => {
+    let timer: NodeJS.Timeout | null = null;
+    const clearTimer = (): void => { if (timer) clearTimeout(timer); };
+    const onAbort = (): void => {
+      if (!jobId || cancelSent || settled) return;
+      cancelSent = true;
+      void cancelDaemonJob(jobId).catch((err) => {
+        process.stderr.write(`请求取消 daemon job 失败（${jobId}）：${(err as Error).message}\n`);
+      });
+    };
+    options.abortSignal?.addEventListener('abort', onAbort, { once: true });
+    if (options.abortSignal?.aborted) onAbort();
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      options.abortSignal?.removeEventListener('abort', onAbort);
+    };
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        finish();
         socket.destroy();
         reject(new Error(
           `daemon RPC 超时（${operation}，${Math.min(timeoutMs, MAX_TIMEOUT_MS)}ms）。`
           + '任务可能仍在 daemon 侧继续执行：请勿清理 import.lock 或重复提交，'
           + '可用 ki mcp --status 查看队列状态，或对该任务传 timeoutMs=0 取消客户端超时。',
         ));
-      }, Math.min(timeoutMs, MAX_TIMEOUT_MS))
-      : null;
-    const clearTimer = (): void => { if (timer) clearTimeout(timer); };
+      }, Math.min(timeoutMs, MAX_TIMEOUT_MS));
+    }
     socket.setEncoding('utf8');
-    socket.on('connect', () => socket.write(`${JSON.stringify({ id, method: 'execute', operation, params })}\n`));
+    socket.on('connect', () => socket.write(`${JSON.stringify({ id, method: 'execute', operation, params, jobId, streamProgress: options.streamProgress === true })}\n`));
     socket.on('data', (chunk) => {
       buffer += chunk;
-      const idx = buffer.indexOf('\n');
-      if (idx < 0) return;
-      clearTimer();
-      socket.end();
-      try {
-        const payload = JSON.parse(buffer.slice(0, idx)) as { ok: boolean; result?: T; queue?: { scope: string; queuedMs: number; runMs?: number; activeWorkers: number; maxWorkers: number }; error?: { message?: string; code?: string; hint?: string } };
+      for (;;) {
+        const idx = buffer.indexOf('\n');
+        if (idx < 0) return;
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        let payload: { ok: boolean; type?: string; result?: T; queue?: { scope: string; queuedMs: number; runMs?: number; activeWorkers: number; maxWorkers: number }; error?: { message?: string; code?: string; hint?: string }; jobId?: string; eventSeq?: number; progress?: { phase?: string; done: number; total: number }; final?: boolean };
+        try { payload = JSON.parse(line) as typeof payload; }
+        catch (err) { finish(); socket.destroy(); reject(err); return; }
+        if (payload.type === 'progress') {
+          if (payload.progress && payload.jobId && payload.eventSeq !== undefined && payload.eventSeq > lastEventSeq) {
+            lastEventSeq = payload.eventSeq;
+            try { options.onProgress?.({ jobId: payload.jobId, eventSeq: payload.eventSeq, progress: payload.progress }); } catch { /* UI 回调不得破坏 RPC */ }
+          }
+          continue;
+        }
+        finish();
+        socket.end();
         if (payload.ok) {
           if (payload.queue && payload.queue.queuedMs > 0) {
             const running = payload.queue.runMs !== undefined ? `，执行 ${payload.queue.runMs}ms` : '';
@@ -103,10 +191,11 @@ export async function callDaemon<T>(operation: string, params: unknown, timeoutM
             : (payload.error?.message ?? 'daemon RPC 失败');
           reject(Object.assign(new Error(message), { code: payload.error?.code }));
         }
-      } catch (err) { reject(err); }
+        return;
+      }
     });
     socket.on('error', (err) => {
-      clearTimer();
+      finish();
       // 无客户端超时的长任务靠这里感知 daemon 死亡：不能只说“无法连接”，
       // 否则用户不知道已提交的任务是否还在跑。
       reject(new Error(
@@ -114,7 +203,54 @@ export async function callDaemon<T>(operation: string, params: unknown, timeoutM
         + (timer === null ? '本次为无超时任务，连接中断前提交的操作可能已部分执行，重试前请先核对目标 scope 的当前状态。' : ''),
       ));
     });
+    socket.on('close', () => {
+      if (settled) return;
+      finish();
+      reject(new Error(
+        `daemon RPC 连接已关闭（${operation}）；请检查 ki mcp --status。`
+        + (timer === null ? '连接中断前任务可能已部分执行，重试前请先核对目标 scope 的当前状态。' : ''),
+      ));
+    });
   });
+}
+
+async function callDaemonControl<T>(method: 'cancel' | 'status', jobId: string): Promise<T> {
+  if (!jobId.trim()) throw new Error(`daemon ${method} 需要 jobId`);
+  if (isDaemonOwner()) throw new Error('daemon owner 进程不能通过 RPC 回调自身');
+  await ensureDaemon();
+  const socketPath = getDaemonSocketPath();
+  const id = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Promise<T>((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let buffer = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`daemon ${method} 超时（jobId=${jobId}）`));
+    }, PING_TIMEOUT_MS);
+    socket.setEncoding('utf8');
+    socket.on('connect', () => socket.write(`${JSON.stringify({ id, method, jobId })}\n`));
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      const idx = buffer.indexOf('\n');
+      if (idx < 0) return;
+      clearTimeout(timer);
+      socket.end();
+      try {
+        const payload = JSON.parse(buffer.slice(0, idx)) as { ok: boolean; state?: string; jobId?: string; job?: T; error?: { code?: string; message?: string } };
+        if (payload.ok) resolve((method === 'status' ? payload.job : { state: payload.state, jobId: payload.jobId }) as T);
+        else reject(Object.assign(new Error(payload.error?.message ?? `daemon ${method} 失败`), { code: payload.error?.code }));
+      } catch (err) { reject(err); }
+    });
+    socket.on('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+export function cancelDaemonJob(jobId: string): Promise<DaemonCancelResponse> {
+  return callDaemonControl<DaemonCancelResponse>('cancel', jobId);
+}
+
+export function getDaemonJobStatus(jobId: string): Promise<DaemonJobStatus> {
+  return callDaemonControl<DaemonJobStatus>('status', jobId);
 }
 
 export async function ensureDaemon(): Promise<void> {

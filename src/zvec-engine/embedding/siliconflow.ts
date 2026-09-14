@@ -11,7 +11,7 @@
  */
 
 import { EmbeddingConfigError, EmbeddingError } from '../errors.js';
-import type { EmbeddingProvider, EmbedOptions } from './provider.js';
+import type { EmbeddingAttemptEvent, EmbeddingProvider, EmbedOptions } from './provider.js';
 
 export interface SiliconFlowProviderConfig {
   /** 可选；缺省从 process.env.SILICONFLOW_API_KEY 读；二者都无则构造时抛 EmbeddingConfigError */
@@ -81,6 +81,7 @@ export class SiliconFlowProvider implements EmbeddingProvider {
     const batchSize = opts?.batchSize ?? DEFAULT_BATCH_SIZE;
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const onProgress = opts?.onProgress;
+    const onAttempt = opts?.onAttempt;
 
     const total = texts.length;
     const result: number[][] = new Array(total);
@@ -88,7 +89,7 @@ export class SiliconFlowProvider implements EmbeddingProvider {
 
     for (let start = 0; start < total; start += batchSize) {
       const batch = texts.slice(start, start + batchSize);
-      const vectors = await this.embedBatchWithRetry(batch, retries, timeoutMs);
+      const vectors = await this.embedBatchWithRetry(batch, retries, timeoutMs, onAttempt);
       for (let i = 0; i < vectors.length; i++) {
         result[start + i] = vectors[i];
       }
@@ -105,10 +106,12 @@ export class SiliconFlowProvider implements EmbeddingProvider {
     batch: string[],
     retries: number,
     timeoutMs: number,
+    onAttempt?: (event: EmbeddingAttemptEvent) => void,
   ): Promise<number[][]> {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
+        try { onAttempt?.({ kind: 'request', attempt: attempt + 1 }); } catch { /* 观测回调不得阻断请求 */ }
         return await this.embedBatchOnce(batch, timeoutMs);
       } catch (err) {
         const e = err as EmbeddingError;
@@ -121,6 +124,14 @@ export class SiliconFlowProvider implements EmbeddingProvider {
         // 指数退避 + Retry-After 优先
         const retryAfterMs = (e.data?.retryAfterMs as number | undefined);
         const backoff = retryAfterMs ?? Math.min(1000 * 2 ** attempt, 8000);
+        try {
+          onAttempt?.({
+            kind: 'retry',
+            attempt: attempt + 1,
+            retryAfterMs: backoff,
+            reason: e.message,
+          });
+        } catch { /* 观测回调不得阻断重试 */ }
         await sleep(backoff);
       }
     }

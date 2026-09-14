@@ -681,6 +681,84 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-09-14-import与restore向量化性能优": {
+      "id": "REQ-20260914-001",
+      "feature": "import与restore向量化性能优化",
+      "created": "2026-09-14 11:44:08",
+      "updated": "2026-09-14 14:49:56",
+      "status": "实施中",
+      "tags": [
+        "performance",
+        "refactor"
+      ],
+      "version": 14,
+      "depends_on": [
+        "REQ-20260910-001"
+      ],
+      "changelog": [
+        "初始创建",
+        "2026-09-14 11:46:57 v2: 记录 import 与 restore 向量化性能优化需求草案，补充瓶颈分析、方案空间、验收指标和待确认决策",
+        "2026-09-14 12:01:27 v3: 确认端到端 import/rebuild 目标、暂不预设业务内存/并发预算、CLI restore/rebuild 实时进度纳入范围；本轮不做重复文本判断与缓存，进入并行 Embedding demo 验证",
+        "2026-09-14 12:06:57 v4: 完成真实 Embedding 并行批量与预计算向量 zvec 写入 demo 验证；结论为有条件通过，进入技术设计",
+        "2026-09-14 12:14:34 v5: 确认性能护栏：每任务 Embedding 并发2、daemon全局在途4、每任务预取2批、向量缓冲64MiB/daemon128MiB；确认 Embedding 可乱序完成但 zvec 由单 writer 批量提交并保留 docId 映射",
+        "2026-09-14 12:36:24 v6: v6: 完成技术设计（总体设计+4个子需求）并冻结首版资源护栏与RPC进度方案",
+        "2026-09-14 12:42:01 v7: v7: 完成设计评审，0阻断，保留性能目标与provider依赖的实施前置项",
+        "2026-09-14 12:43:47 v8: v8: 完成 challenger 二次质疑，0高风险，登记取消竞态/limiter公平性/drain/RSS四项实施前风险",
+        "2026-09-14 12:45:00 v9: v9: 完成设计场景推演，覆盖正常/乱序/限流/背压/取消/断线/旧RPC，登记4项实施前中风险",
+        "2026-09-14 13:09:53 v10: 独立复审设计文档：确认0个高置信度阻断、2个疑似阻断和7个警告，补充取消竞态与失败drain状态契约",
+        "2026-09-14 13:25:39 v11: 按设计复审意见优化父设计与 S-01~S-04：补充终态守恒、metadataPending、FIFO limiter、RSS admission guard、job 注册/取消竞态、status RPC 与断线恢复契约",
+        "2026-09-14 13:28:15 v12: challenger 复核后继续收紧设计：eventSeq 改为 job 级单调、pending-cancel 增加 TTL/数量上限、metadata callback 整批 pending、unknown zvec outcome 先对账",
+        "2026-09-14 13:28:55 v13: 统一 S-01 流程图术语：全局 in-flight 改为全局逻辑调用槽，与 permit 含重试/退避的契约一致",
+        "2026-09-14 14:49:56 v14: 开始落地有界 Embedding 并行、单 writer、daemon 进度/取消与资源观测实现"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "demo/verify-report.md",
+          "type": "demo"
+        },
+        {
+          "path": "design/DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S01_性能基线与资源护栏_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S02_并行Embedding与批次合并_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S03_import与rebuild持久化接入_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/S04_CLI实时进度透传_DESIGN.md",
+          "type": "design"
+        },
+        {
+          "path": "design/design-review.md",
+          "type": "review"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
+        },
+        {
+          "path": "review/scenario-rehearsal.md",
+          "type": "rehearsal"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   },
   "id_counters": {
@@ -688,6 +766,7 @@
     "REQ-20260807": 2,
     "REQ-20260814": 1,
     "REQ-20260904": 1,
-    "REQ-20260910": 1
+    "REQ-20260910": 1,
+    "REQ-20260914": 1
   }
 }

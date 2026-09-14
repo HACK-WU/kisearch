@@ -20,6 +20,20 @@ import type { OperationRequest } from './operation-coordinator.js';
 
 type Handler = (params: any) => Promise<unknown> | unknown;
 
+export interface DaemonOperationContext {
+  jobId?: string;
+  abortSignal?: AbortSignal;
+  onProgress?: (progress: {
+    phase: 'queued' | 'scan' | 'vectorize' | 'persist' | 'restore' | 'rebuild';
+    done: number;
+    total: number;
+    persisted?: number;
+    metadataPending?: number;
+    failed?: number;
+    cancelled?: number;
+  }) => void;
+}
+
 const HANDLERS: Record<string, Handler> = {
   store: executeStore,
   'bulk-store': executeBulkStore,
@@ -45,7 +59,7 @@ const HANDLERS: Record<string, Handler> = {
   'rebuild-vector': (params) => rebuildScopeVectors(
     params.scope,
     { countScope: vectorCountScope },
-    params.options ?? {},
+    { ...(params.options ?? {}), abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
   ),
   'migrate-vector': (params) => migrateLegacyVectorLayout({
     yes: params.yes === true,
@@ -59,12 +73,14 @@ const HANDLERS: Record<string, Handler> = {
       timestamp: params.timestamp,
       backupDir: params.backupDir,
       snapshotFile: params.snapshotFile,
+      abortSignal: params.abortSignal,
+      onProgress: params.onProgress,
     });
     if (params.rebuildVector !== true) return restored;
     const rebuilt = await rebuildScopeVectors(
       params.scope,
       { countScope: vectorCountScope },
-      params.options ?? {},
+      { ...(params.options ?? {}), abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
     );
     return { ...restored, rebuildVector: rebuilt };
   },
@@ -79,9 +95,25 @@ const HANDLERS: Record<string, Handler> = {
   'wiki-backfill': (params) => backfillWiki(params.scope, { force: params.force === true }),
 };
 
-export async function dispatchOperation(request: OperationRequest): Promise<unknown> {
+export async function dispatchOperation(
+  request: OperationRequest,
+  context: DaemonOperationContext = {},
+): Promise<unknown> {
   const handler = HANDLERS[request.operation];
   if (!handler) throw Object.assign(new Error(`daemon 不支持操作：${request.operation}`), { code: 'DAEMON_OPERATION_UNSUPPORTED' });
+  // 这些长任务的取消/进度回调是 daemon 进程内能力，不能通过 JSON params 传递；
+  // 在 dispatch 边界注入，其他短操作保持原 handler 契约。
+  if (request.operation === 'import') {
+    return handler({ ...(request.params as Record<string, unknown>), jobId: context.jobId, abortSignal: context.abortSignal, onProgress: context.onProgress });
+  }
+  if (request.operation === 'rebuild-vector') {
+    const params = request.params as Record<string, any>;
+    return handler({ ...params, options: { ...(params.options ?? {}), abortSignal: context.abortSignal, onProgress: context.onProgress } });
+  }
+  if (request.operation === 'restore-snapshot') {
+    const params = request.params as Record<string, any>;
+    return handler({ ...params, abortSignal: context.abortSignal, onProgress: context.onProgress, options: { ...(params.options ?? {}), abortSignal: context.abortSignal, onProgress: context.onProgress } });
+  }
   return handler(request.params);
 }
 

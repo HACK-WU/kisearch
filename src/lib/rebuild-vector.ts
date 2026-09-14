@@ -85,7 +85,15 @@ export interface RebuildVectorOptions {
   tagsProvided?: boolean;
   /** 仅在批次边界检查；不强行打断正在进行的 embedding/zvec 批次。 */
   abortSignal?: AbortSignal;
-  onProgress?: (progress: { phase: 'rebuild'; done: number; total: number }) => void;
+  onProgress?: (progress: {
+    phase: 'rebuild';
+    done: number;
+    total: number;
+    persisted?: number;
+    metadataPending?: number;
+    failed?: number;
+    cancelled?: number;
+  }) => void;
 }
 
 /** relations-cache 的 groups 扁平结构（键 = 完整 groupPath） */
@@ -363,6 +371,10 @@ export async function rebuildScopeVectors(
   });
   const stats = emptyStats();
   const errors: { type: string; path: string; error: string }[] = [];
+  let cumulativePersisted = 0;
+  let cumulativeMetadataPending = 0;
+  let cumulativeFailed = 0;
+  let cumulativeCancelled = 0;
 
   // NEG：显式传入 --tags 但解析后为空（全为保留标签/空白）：
   //   - 无 --group 时拒绝执行（库层与 CLI 层一致，避免程序化调用静默降级为全量清空重建）；
@@ -496,9 +508,24 @@ export async function rebuildScopeVectors(
       checkCancelled(Math.min(b * VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
       const offset = b * VECTORIZE_BATCH_SIZE;
       const slice = allEntries.slice(offset, offset + VECTORIZE_BATCH_SIZE);
-      const res = await bulkStore({ scope, entries: slice });
+      const res = await bulkStore({ scope, entries: slice }, {
+        abortSignal: opts.abortSignal,
+        onProgress: (progress) => opts.onProgress?.({
+          phase: 'rebuild',
+          done: Math.min(allEntries.length, offset + (progress.done ?? 0)),
+          total: allEntries.length,
+          persisted: cumulativePersisted + (progress.persisted ?? 0),
+          metadataPending: cumulativeMetadataPending + (progress.metadataPending ?? 0),
+          failed: cumulativeFailed + (progress.failed ?? 0),
+          cancelled: cumulativeCancelled + (progress.cancelled ?? 0),
+        }),
+      });
       stats.succeeded += res.succeeded;
       stats.failed += res.failed;
+      cumulativePersisted += res.succeeded;
+      cumulativeMetadataPending += res.metadataPending ?? 0;
+      cumulativeFailed += res.failed;
+      cumulativeCancelled += res.cancelled ?? 0;
       // results[].index 为批内相对索引，聚合时加批偏移还原为全量 entries 索引
       for (const r of res.results) {
         aggResults.push({ ...r, index: r.index + offset });
@@ -510,6 +537,15 @@ export async function rebuildScopeVectors(
           `向量化批次 ${b + 1}/${totalBatches}`
         );
       }
+      opts.onProgress?.({
+        phase: 'rebuild',
+        done: Math.min(offset + slice.length, allEntries.length),
+        total: allEntries.length,
+        persisted: cumulativePersisted,
+        metadataPending: cumulativeMetadataPending,
+        failed: cumulativeFailed,
+        cancelled: cumulativeCancelled,
+      });
       checkCancelled(Math.min(offset + VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
     }
   }

@@ -1229,6 +1229,13 @@ embedding:                    # Embedding 提供方（OpenAI 兼容，实际提�
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 向量维度（必须与建库时一致）
   apiKey: ${SILICONFLOW_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量（变量名自定义）
+  scheduler:
+    batchSize: 64             # 每次逻辑 provider 调用的文本数
+    maxConcurrency: 2         # 单任务并发；默认保守值
+    maxGlobalConcurrency: 4   # daemon 全局逻辑调用槽（含重试/退避）
+    maxPrefetchBatches: 2
+    maxBufferedVectorBytes: 67108864
+    globalBufferedVectorBytes: 134217728
 
 scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
 
@@ -1256,6 +1263,7 @@ scopes:
 | `embedding.model` | 顶级 | 模型名称 |
 | `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
 | `embedding.apiKey` | 顶级 | API 密钥（**必填**）：支持明文（`sk-xxx`）或环境变量引用（`${VAR_NAME}`，变量名自定义）；不做任何隐式回退 |
+| `embedding.scheduler` | 顶级 | import/restore/rebuild 的有界 Embedding 并发与向量缓冲背压；默认单任务并发 2、daemon 全局 4 |
 | `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |

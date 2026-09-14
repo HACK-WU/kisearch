@@ -148,6 +148,7 @@ export function configFingerprint(config: KiConfig): string {
       baseURL: config.embedding.baseURL,
       model: config.embedding.model,
       dimension: config.embedding.dimension,
+      scheduler: config.embedding.scheduler,
     },
     vector: {
       maxOpenCollections: config.vector?.maxOpenCollections ?? 8,

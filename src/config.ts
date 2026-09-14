@@ -102,6 +102,13 @@ embedding:
   model: Qwen/Qwen3-Embedding-8B           # 模型名称
   dimension: 4096                          # 向量维度（必须与建库时一致）
   # apiKey: \${SILICONFLOW_API_KEY}          # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
+  scheduler:
+    batchSize: 64
+    maxConcurrency: 2
+    maxGlobalConcurrency: 4
+    maxPrefetchBatches: 2
+    maxBufferedVectorBytes: 67108864
+    globalBufferedVectorBytes: 134217728
 
 # ─── scope 护栏 ───
 # default: 未传 --scope 时静默落 default（任意 scope 自动创建）

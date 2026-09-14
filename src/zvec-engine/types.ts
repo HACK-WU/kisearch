@@ -11,6 +11,7 @@
  */
 
 import type { EmbeddingProvider } from './embedding/provider.js';
+import type { EmbeddingBatch, EmbeddingScheduler, BatchPersistOutcome } from './embedding/batch-scheduler.js';
 
 // ─── 基础标量 ───
 
@@ -154,6 +155,7 @@ export interface Hit {
 
 export type WriteErrorCode =
   | 'EMBEDDING_FAILED'
+  | 'EMBED_ITEM_MAPPING_INVALID'
   | 'ID_CONFLICT'
   | 'NOT_FOUND'
   | 'ZVEC_WRITE_ERROR'
@@ -162,7 +164,41 @@ export type WriteErrorCode =
 export interface WriteResult {
   ok: number;
   failed: number;
+  attempted?: number;
   errors?: Array<{ id: string; code: WriteErrorCode; reason: string }>;
+  /** provider/调度器因取消而未启动或丢弃的条目数。 */
+  cancelled?: number;
+  cancelledItems?: string[];
+  failedItems?: string[];
+  /** zvec 已成功但上层元数据回调未完成的条目数。 */
+  metadataPending?: number;
+  metadataPendingItems?: string[];
+  status?: 'succeeded' | 'partial' | 'failed' | 'cancelled';
+}
+
+export interface VectorWriteBatchPersistedEvent {
+  sequence: number;
+  items: Array<{ docId: string; inputIndex: number; memoryId?: string }>;
+  zvecPersisted: number;
+  failed: number;
+}
+
+export interface ZvecWriteOptions {
+  scheduler?: EmbeddingScheduler;
+  abortSignal?: AbortSignal;
+  onProgress?: (progress: {
+    phase: 'embedding' | 'vectorize' | 'persist';
+    done: number;
+    total: number;
+    persisted?: number;
+    failed?: number;
+    metadataPending?: number;
+    cancelled?: number;
+  }) => void;
+  onBatchPersisted?: (
+    event: VectorWriteBatchPersistedEvent,
+    batch: EmbeddingBatch<DocInput>,
+  ) => Promise<BatchPersistOutcome | void> | BatchPersistOutcome | void;
 }
 
 // ─── 集合信息（S-06 §4b） ───

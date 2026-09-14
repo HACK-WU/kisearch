@@ -119,7 +119,15 @@ export interface HandleDirectImportArgs {
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
   assets?: boolean;
   /** daemon HTTP job 使用：报告可观测进度；不影响 CLI 输出。 */
-  onProgress?: (progress: { phase: 'scan' | 'vectorize' | 'persist'; done: number; total: number }) => void;
+  onProgress?: (progress: {
+    phase: 'scan' | 'vectorize' | 'persist';
+    done: number;
+    total: number;
+    persisted?: number;
+    metadataPending?: number;
+    failed?: number;
+    cancelled?: number;
+  }) => void;
   /** daemon HTTP job 使用：在当前批次完成后安全中止，不强行打断 zvec/embedding 调用。 */
   abortSignal?: AbortSignal;
 }
@@ -675,6 +683,18 @@ export async function handleDirectImport(
     ? { ok: new Map<string, string>(), errors: [] }
     : await bulkVectorize(entries, scope, {
         timeoutMs: 60_000 + entries.length * 10_000,
+        abortSignal: args.abortSignal,
+        onVectorProgress: (progress) => {
+          args.onProgress?.({
+            phase: 'vectorize',
+            done: Math.min(entries.length, progress.done),
+            total: entries.length,
+            persisted: progress.persisted,
+            metadataPending: progress.metadataPending,
+            failed: progress.failed,
+            cancelled: progress.cancelled,
+          });
+        },
       });
   checkCancelled();
   args.onProgress?.({ phase: 'vectorize', done: entries.length, total: Math.max(entries.length, 1) });
@@ -682,7 +702,7 @@ export async function handleDirectImport(
   // 开始每个批次前再次检查，避免“已取消”仍继续写入全部辅助向量。
   checkCancelled();
   if (vector && pathEntries.length > 0) {
-    const pathResult = await bulkStorePaths(pathEntries);
+    const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
     logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
   }
 
@@ -703,7 +723,7 @@ export async function handleDirectImport(
     }
     if (tagEntries.length > 0) {
       try {
-        const tagResult = await vectorBulkStore({ scope, entries: tagEntries });
+        const tagResult = await vectorBulkStore({ scope, entries: tagEntries }, { abortSignal: args.abortSignal });
         // 聚合到 文件 → [tag memoryIds]（成功条目按 index 回推文件/标签）
         const newMap = new Map<string, string[]>();
         for (const item of tagResult.results) {
