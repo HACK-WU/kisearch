@@ -686,13 +686,13 @@
       "id": "REQ-20260914-001",
       "feature": "import与restore向量化性能优化",
       "created": "2026-09-14 11:44:08",
-      "updated": "2026-09-14 15:44:23",
+      "updated": "2026-09-14 17:05:02",
       "status": "实施中",
       "tags": [
         "performance",
         "refactor"
       ],
-      "version": 15,
+      "version": 17,
       "depends_on": [
         "REQ-20260910-001"
       ],
@@ -711,7 +711,8 @@
         "2026-09-14 13:28:15 v12: challenger 复核后继续收紧设计：eventSeq 改为 job 级单调、pending-cancel 增加 TTL/数量上限、metadata callback 整批 pending、unknown zvec outcome 先对账",
         "2026-09-14 13:28:55 v13: 统一 S-01 流程图术语：全局 in-flight 改为全局逻辑调用槽，与 permit 含重试/退避的契约一致",
         "2026-09-14 14:49:56 v14: 开始落地有界 Embedding 并行、单 writer、daemon 进度/取消与资源观测实现",
-        "2026-09-14 15:44:23 v15: 完成代码审查：发现长文本批次 30s 超时 P0 性能回归"
+        "2026-09-14 15:44:23 v15: 完成代码审查：发现长文本批次 30s 超时 P0 性能回归",
+        "2026-09-14 17:05:02 v17: 完成 MCP 查询性能优化的 code review 与 challenger 质疑"
       ],
       "commits": [],
       "branch": null,
@@ -758,6 +759,10 @@
         },
         {
           "path": "review/code-review.md",
+          "type": "review"
+        },
+        {
+          "path": "review/code-review-mcp-query-perf.md",
           "type": "review"
         }
       ],

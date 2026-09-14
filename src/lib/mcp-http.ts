@@ -23,10 +23,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
-import { getVectorResourceMetrics, getVectorizationMetrics, runWithVectorSource } from './vector-client.js';
+import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
-import { loadConfig, getConfigLoadIssue, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { mapWithConcurrency, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
@@ -691,12 +692,15 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 多 scope batch 只需占用它**实际涉及**的分片，不再归入全局屏障：
     // 旧写法把多 scope 请求当成全局独占，会在它排队期间冻结所有无关 scope 的调度。
     const occupied = needsGlobal ? [GLOBAL_SCOPE] : (onlyReadOnly ? [] : [...queueScopes]);
+    // O3：embedding 预计算在 submit 之前完成（无锁阶段），使网络等待不再占用 scope 窗口——
+    // 同 scope 串行时慢 embed 不再阻塞队列中的后续请求。结果经 AsyncLocalStorage 传递。
+    const precomputedVectors = await precomputeSearchQueryVectors(messages, requestConfig);
     await getSharedOperationCoordinator().submit(
       { operation: 'mcp-request', params: body },
-      () => runWithConfigSnapshot(requestConfig, () => runWithVectorSource(
+      () => runWithPrecomputedQueryVectors(precomputedVectors, () => runWithConfigSnapshot(requestConfig, () => runWithVectorSource(
         describeMcpSource(body),
         () => handleMcpPostInner(req, res, authScopes, body),
-      )),
+      ))),
       occupied,
     );
   }
@@ -807,6 +811,99 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   }
 
   return { httpServer, closeAllSessions };
+}
+
+/** 查询向量预计算并发上限：并发度等于对外部 embedding 的瞬时压力，无上限会把"并行化"变成对 provider 的突发压测 */
+const QUERY_PRECOMPUTE_CONCURRENCY = 4;
+/** 单个预计算超时（ms）：与 vector-client 的查询超时一致，超时即标记 failed 由工具侧直接降级 FTS，不再重复等待 */
+const QUERY_PRECOMPUTE_TIMEOUT_MS = 2_000;
+
+/**
+ * 从 MCP 请求体提取 ki_search 的查询参数（纯函数，供预计算与测试共用）。
+ *
+ * ⚠️ 与 `src/lib/mcp-tools/search.ts` 的工具 schema 耦合（工具名 `ki_search`、参数名
+ * `query` / `scope`）：参数改名会让预计算静默失效（不报错，只是失去优化），
+ * 故由 `test/query-vector-precompute.test.ts` 的守卫用例断言该契约。
+ */
+export function extractSearchQueryArgs(messages: unknown[]): { query: string; rawScope: string }[] {
+  const out: { query: string; rawScope: string }[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') continue;
+    const m = message as {
+      method?: unknown;
+      params?: { name?: unknown; arguments?: { query?: unknown; scope?: unknown } };
+    };
+    if (m.method !== 'tools/call' || m.params?.name !== 'ki_search') continue;
+    const args = m.params.arguments;
+    const query = typeof args?.query === 'string' ? args.query : '';
+    if (query.length === 0) continue;
+    out.push({ query, rawScope: typeof args?.scope === 'string' ? args.scope.trim() : '' });
+  }
+  return out;
+}
+
+/**
+ * O3：在 coordinator.submit **之前**为 ki_search 预计算查询向量（无锁阶段）。
+ *
+ * 目的（2026-09-14 实测）：embedding 网络调用原本位于 scope 占用窗口内，同 scope 串行时
+ * 各请求的网络等待互相叠加——一个慢 embed（外部并发抖动实测 2–6.5s）会拖住整批请求。
+ * 移到占用窗口之外后，慢 embed 只影响自己；检索仍按 scope 串行（保持既有并发语义）。
+ *
+ * 失败安全：
+ *   - 预计算失败只记录 `{ kind: 'failed' }`（工具侧据此直接降级 FTS，不再重复等待 2s 超时）；
+ *   - 无 Collection 的 scope 跳过（vectorSearch 会提前返回空，预计算纯属浪费外部调用）；
+ *   - 整体失败不影响请求本身——工具侧命中不到预计算即回退自身 embed。
+ */
+export async function precomputeSearchQueryVectors(
+  messages: unknown[],
+  cfg: KiConfig,
+): Promise<Map<string, PrecomputedQueryVector>> {
+  // 预计算是纯优化：任何异常（scope 解析 / 文件系统 / 配置读取）都不得影响请求本身
+  const result = new Map<string, PrecomputedQueryVector>();
+  try {
+    const queries = new Set<string>();
+    for (const { query, rawScope } of extractSearchQueryArgs(messages)) {
+      // scope 存在性检查与 vectorSearch 的过滤同源：全部缺失时跳过（避免为无效 scope 付费）
+      let scopes: string[];
+      try {
+        scopes = (rawScope.length > 0 ? rawScope.split(',') : ['']).map((s) => resolveScope(cfg, s.trim()));
+      } catch {
+        continue; // scope 非法由工具侧 fail-loud，预计算跳过
+      }
+      if (findMissingScopeCollections(scopes).length === scopes.length) continue;
+      queries.add(query);
+    }
+    if (queries.size === 0) return result;
+    const list = [...queries];
+    const outcomes = await mapWithConcurrency<string, PrecomputedQueryVector | undefined>(
+      list,
+      QUERY_PRECOMPUTE_CONCURRENCY,
+      async (query) => {
+        try {
+          const vector = await embedQueryOnce(query, undefined, {
+            timeoutMs: QUERY_PRECOMPUTE_TIMEOUT_MS,
+            retries: 0,
+          });
+          return { kind: 'vector', vector };
+        } catch (err) {
+          // 不可降级错误（4xx / 配置类）不写入标记：留给工具侧自行 embed 并 fail-loud，
+          // 与 CLI 路径（无预计算）保持同一语义——配置问题不得被静默降级掩盖。
+          if (!isQueryEmbedDegradable(err)) return undefined;
+          return {
+            kind: 'failed',
+            reason: `向量检索降级为关键词检索（查询 embedding 失败：${(err as Error).message}）`,
+          };
+        }
+      },
+    );
+    list.forEach((query, i) => {
+      const outcome = outcomes[i];
+      if (outcome !== undefined) result.set(query, outcome);
+    });
+  } catch {
+    /* 预计算失败静默：工具侧回退自身 embed */
+  }
+  return result;
 }
 
 /** 将 listen 错误翻译为面向用户的可诊断信息（NEG-04） */

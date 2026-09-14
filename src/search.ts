@@ -61,6 +61,10 @@ export type SearchResult =
       results: SearchHit[];
       /** 被跳过的 scope 及原因（多 scope 下未注册；或任意 scope 缺向量 Collection；无跳过时不返回） */
       skipped?: { scope: string; reason: string }[];
+      /** O1：语义侧降级为 FTS-only（查询 embedding 超时/网络失败）时置 true */
+      degraded?: boolean;
+      /** O1：降级原因（供调用方与用户诊断） */
+      degradedReason?: string;
     }
   | { ok: false; error: string; degraded?: boolean };
 
@@ -101,6 +105,8 @@ async function executeSearchLocal(params: {
     //  - 多 scope：strict 未注册 → 跳过+提示（容忍个别 scope 配置缺失，不阻塞其余检索）
     let scopes: string[];
     const skipped: { scope: string; reason: string }[] = [];
+    // O1：查询 embedding 降级为 FTS-only 时记录一次（两处 vectorSearch 调用共用）
+    let degradeReason: string | undefined;
     if (!multi) {
       // 单段但含空段（如 'a,'）时用归一化结果，与多 scope 解析语义一致；
       // 解析为空（未传/纯空白）才回退原始参数走缺省/必填校验（保持现状）
@@ -160,6 +166,7 @@ async function executeSearchLocal(params: {
         limit: params.limit ?? 10,
         threshold: params.threshold,
         tags: params.tags,
+        onDegrade: (reason) => { degradeReason ??= reason; },
       });
     } else {
       const tagUnion = new Map<string, number>();
@@ -185,6 +192,7 @@ async function executeSearchLocal(params: {
           limit: limit * tagNames.length,
           threshold: params.threshold,
           tags: tagNames,
+          onDegrade: (reason) => { degradeReason ??= reason; },
         });
         const byTag = new Map<string, VectorSearchResult[]>();
         for (const h of hits) {
@@ -289,9 +297,12 @@ async function executeSearchLocal(params: {
 
     // 响应结构：单 scope 保持现状（向后兼容）；多 scope 增量返回 scopes 与命中级 scope。
     // skipped 不再仅限多 scope：单 scope 的 Collection 缺失同样是漏召回，必须显式标记。
+    const degradeFields = degradeReason !== undefined
+      ? { degraded: true, degradedReason: degradeReason }
+      : {};
     return multi
-      ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}) }
-      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}) };
+      ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}), ...degradeFields }
+      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}), ...degradeFields };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

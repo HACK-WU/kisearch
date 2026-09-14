@@ -36,8 +36,14 @@ import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 
-/** 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection */
-const VECTOR_IDLE_CLOSE_MS = 3_000;
+/**
+ * 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection。
+ *
+ * 2026-09-14 并发查询实测：3s 过于激进——空闲后首个查询需重付 open（实测 355–418ms，
+ * 占冷查总延迟 20–40%），且频繁 close/open 放大与在途请求的竞态窗口。
+ * daemon 是向量库的唯一 owner，持锁本身不影响其他使用者，故放宽到 30s。
+ */
+const VECTOR_IDLE_CLOSE_MS = 30_000;
 import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
   createToken,

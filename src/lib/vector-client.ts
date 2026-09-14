@@ -37,6 +37,7 @@ import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
 import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
+import { getPrecomputedQueryVector } from './query-vector-precompute.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -184,8 +185,13 @@ export interface VectorTagInfo {
 export async function embedQueryOnce(
   query: string,
   provider: Pick<EmbeddingProvider, 'embed' | 'dimension'> = buildEmbedding(),
+  opts?: { timeoutMs?: number; retries?: number },
 ): Promise<number[]> {
-  const vectors = await provider.embed([query], { batchSize: 1 });
+  const vectors = await provider.embed([query], {
+    batchSize: 1,
+    ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts?.retries !== undefined ? { retries: opts.retries } : {}),
+  });
   const vector = vectors[0];
   if (!vector) throw new Error('查询 embedding 未返回向量');
   if (vector.length !== provider.dimension) {
@@ -217,6 +223,33 @@ const SCOPE_FIELD = 'scope';
 const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
+
+/**
+ * 查询路径 embedding 参数（O1，2026-09-14 并发实测）。
+ *
+ * 超时 2s：外部 provider 在并发下实测出现 2–6.5s 的慢响应（HTTP 200，非限流），
+ * 在线检索不接受这种长尾；超时即降级 FTS-only，而非继续等待。
+ * 0 重试：provider 默认 3 次重试 + 1/2/4s 指数退避，最坏 ~127s，对一次交互式
+ * 查询完全不可接受（重试语义保留给批量向量化路径）。
+ */
+const QUERY_EMBED_TIMEOUT_MS = 2_000;
+const QUERY_EMBED_RETRIES = 0;
+
+/**
+ * 查询 embedding 失败是否可降级（FTS-only）。
+ *
+ * 可降级 = 瞬时外部问题（超时 / 网络 / 429 / 5xx，即 nonRetryable !== true）；
+ * 不可降级 = 配置与请求类（EmbeddingConfigError、4xx、响应结构异常）——降级会
+ * 静默掩盖"apiKey 失效"这类必须暴露的问题，故保持原样抛出。
+ *
+ * 导出供 MCP HTTP 层预计算复用：两处判定必须同源，否则会出现
+ * "预计算标 failed → 工具侧静默降级" 与 "CLI 路径 fail-loud" 的语义分叉。
+ */
+export function isQueryEmbedDegradable(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; data?: { nonRetryable?: unknown } };
+  return e.name === 'EmbeddingError' && e.data?.nonRetryable !== true;
+}
 
 // ─── 撞锁重试 + 空闲释放锁（daemon owner 兜底） ───
 //
@@ -878,6 +911,11 @@ export async function vectorSearch(params: {
   threshold?: number;
   /** 测试/嵌入适配器注入；生产调用不传，默认使用配置中的 provider。 */
   embeddingProvider?: Pick<EmbeddingProvider, 'embed' | 'dimension'>;
+  /**
+   * 降级回调（O1）：embedding 因瞬时外部问题失败、改用 FTS-only 检索时同步调用一次。
+   * 调用方据此在响应上标注 degraded，避免"静默降级"被误认为语义检索正常。
+   */
+  onDegrade?: (reason: string) => void;
 }): Promise<VectorSearchResult[]> {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
@@ -891,12 +929,35 @@ export async function vectorSearch(params: {
   // 保证多 scope 搜索不会按 scope 数量重复调用 embedding 服务。
   const existingScopes = scopes.filter((scope) => scopeCollectionExists(scope));
   if (existingScopes.length === 0) return [];
-  const queryVector = await embedQueryOnce(params.query, params.embeddingProvider ?? buildEmbedding());
+  // 查询向量（O3 + O1）：
+  //   1) 复用 HTTP 层预计算结果——embedding 已移出 scope 占用窗口，慢 provider 不再
+  //      拖同 scope 队列；预计算已失败时直接降级，不再重复等待第二个超时；
+  //   2) 无预计算（CLI/stdio 等）现场 embed：短超时 + 0 重试（在线检索不接受 30s×3 长尾）；
+  //   3) 瞬时外部问题（超时/网络/429/5xx）失败 → FTS-only 降级，而非整次查询失败。
+  let queryVector: number[] | undefined;
+  let degradeReason: string | undefined;
+  const precomputed = getPrecomputedQueryVector(params.query);
+  if (precomputed?.kind === 'vector') {
+    queryVector = precomputed.vector;
+  } else if (precomputed?.kind === 'failed') {
+    degradeReason = precomputed.reason;
+  } else {
+    try {
+      queryVector = await embedQueryOnce(params.query, params.embeddingProvider ?? buildEmbedding(), {
+        timeoutMs: QUERY_EMBED_TIMEOUT_MS,
+        retries: QUERY_EMBED_RETRIES,
+      });
+    } catch (err) {
+      if (!isQueryEmbedDegradable(err)) throw err;
+      degradeReason = `向量检索降级为关键词检索（查询 embedding 失败：${(err as Error).message}）`;
+    }
+  }
+  if (degradeReason !== undefined) params.onDegrade?.(degradeReason);
   const perScope = await Promise.all(existingScopes.map(async (scope) => {
     const filter = buildScopeTagFilter([scope], tagList);
     try {
       return await withEngine(scope, (engine) => engine.hybridSearch({
-        vector: queryVector,
+        ...(queryVector !== undefined ? { vector: queryVector } : {}),
         fts: params.query,
         topk: params.limit ?? 10,
         filter,
@@ -915,7 +976,12 @@ export async function vectorSearch(params: {
       group: h.fields?.[GROUP_FIELD] !== undefined ? String(h.fields[GROUP_FIELD]) : undefined,
       scope: h.fields?.[SCOPE_FIELD] !== undefined ? String(h.fields[SCOPE_FIELD]) : undefined,
     }))
-    .filter((r) => params.threshold === undefined || r.score >= params.threshold);
+    // 降级（FTS-only）时跳过 threshold：FTS 分数尺度（BM25 量级）与混合 RRF 分数
+    // （~0.01–0.03 量级）不可比，套用用户按混合分数设定的阈值会造成不可预期的空结果；
+    // 宁可多返回，由上层 degraded 标记告知调用方。
+    .filter((r) => degradeReason !== undefined
+      || params.threshold === undefined
+      || r.score >= params.threshold);
   return mergeVectorSearchHits([normalized], params.limit ?? 10);
 }
 
