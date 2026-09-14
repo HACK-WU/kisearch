@@ -35,6 +35,12 @@ export interface SearchHit {
 
 export interface SearchResult {
   results?: SearchHit[];
+  /** O1：语义侧降级为关键词检索（查询 embedding 超时/网络失败）时为 true，此时 score 为 BM25 原始分 */
+  degraded?: boolean;
+  /** 降级原因，用于向用户解释分数口径变化 */
+  degradedReason?: string;
+  /** 被跳过的 scope（strict 未注册 / 无向量 Collection）——不展示即为静默漏召回 */
+  skipped?: { scope: string; reason: string }[];
   [k: string]: unknown;
 }
 

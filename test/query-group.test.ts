@@ -4,7 +4,8 @@
  * 覆盖：hot/warm/cold/emerging 分区展示、
  *       指定 Group 查询 Relations + 词云、空数据、
  *       relations-cache 结构损坏的加载边界 fail-loud（CACHE_SHAPE_INVALID）、
- *       Group 聚合分的均值口径（非求和）、非 full 模式的展示截断提示
+ *       Group 聚合分的均值口径（非求和）、非 full 模式的展示截断提示、
+ *       语义兜底的分数口径标注（降级 → BM25 前缀 + 说明）
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -13,6 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { formatFallbackHits } from '../src/query-group.js';
 
 // ─── 辅助 ───
 
@@ -666,5 +668,31 @@ describe('query-group 分区展示截断提示', () => {
     assert.ok(output.includes('热门索引 (Top 1):'), `未截断时标题应为原格式：${output.split('\n').filter((l) => l.includes('Top')).join(' | ')}`);
     assert.ok(!output.includes('本区共'), '未截断时不得附加本区总数');
     assert.ok(!output.includes('个未展示'), '未截断时不得出截断提示');
+  });
+});
+
+// ─── 语义兜底分数口径（--subtree / --groups 未命中时的通用搜索兜底）───
+
+/**
+ * 契约：降级（查询 embedding 超时/失败 → FTS-only）时 score 是 BM25 原值（量级可达几十），
+ * 与混合 RRF 分（~0.01–0.03）不可比，必须以 `BM25:` 前缀标注并附说明行；未降级时保持原
+ * `score:` 格式不变（不误伤存量输出）。任一侧改坏即刻红。
+ */
+describe('query-group 语义兜底分数口径', () => {
+  it('降级 → BM25 前缀 + 说明行 + 超长内容截断', () => {
+    const out = formatFallbackHits(
+      [{ score: 74.906, content: 'x'.repeat(130) }],
+      '向量检索降级为关键词检索（查询 embedding 失败：timeout）'
+    );
+    assert.ok(out.includes('[BM25: 74.91]'), `应以 BM25 标注口径，实际：${out}`);
+    assert.ok(out.includes('关键词降级检索'), '应附口径说明行');
+    assert.ok(out.includes('...'), '超过 120 字符的内容应截断');
+  });
+
+  it('未降级 → score 前缀且无降级痕迹（存量格式零变化）', () => {
+    const out = formatFallbackHits([{ score: 0.0328, content: '短内容' }], undefined);
+    assert.ok(out.includes('[score: 0.03]'), `未降级应保持原格式，实际：${out}`);
+    assert.ok(!out.includes('BM25'), '未降级不得出现 BM25 标注');
+    assert.ok(!out.includes('关键词降级'), '未降级不得出现降级说明');
   });
 });

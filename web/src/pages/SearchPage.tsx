@@ -46,6 +46,10 @@ export function SearchPage(): JSX.Element {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string } | null>(null);
+  /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
+  const [degradeReason, setDegradeReason] = useState<string | null>(null);
+  /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
+  const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
 
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
@@ -64,6 +68,8 @@ export function SearchPage(): JSX.Element {
     setLoading(true);
     setError(null);
     setResults(null);
+    setDegradeReason(null);
+    setSkippedScopes([]);
     try {
       // Tag 过滤语义：选中具体 tag 时精确过滤（不含 ki-search），"全部"才用默认 ki-search
       const searchTags = selectedTags.length > 0
@@ -84,6 +90,12 @@ export function SearchPage(): JSX.Element {
       const hits = (res.results ?? []) as Result[];
       setResults(hits);
       setTotal(hits.length);
+      // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
+      // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
+      setDegradeReason(
+        res.degraded === true ? (res.degradedReason ?? '查询向量计算失败') : null,
+      );
+      setSkippedScopes(Array.isArray(res.skipped) ? res.skipped : []);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -208,6 +220,33 @@ export function SearchPage(): JSX.Element {
       {/* 结果 */}
       {results !== null && (
         <section>
+          {/* 结果完整性提示：降级（分数口径变化）+ 跳过 scope（漏召回）。
+              两者后端都已返回，不展示即静默降级 / 静默漏召回。 */}
+          {(degradeReason !== null || skippedScopes.length > 0) && (
+            <div className="ki-banner" role="status" style={{ marginBottom: 12 }}>
+              <div
+                className="ki-banner__msg"
+                style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}
+              >
+                {degradeReason !== null && (
+                  <>
+                    <span>{degradeReason}</span>
+                    <span className="ki-cell-sub">
+                      本次分数为 BM25 关键词分（量级可达几十），与混合检索的 RRF 融合分（约 0.01–0.03）不可比，Threshold 对本次结果不生效。
+                    </span>
+                  </>
+                )}
+                {skippedScopes.length > 0 && (
+                  <>
+                    <span>已跳过 {skippedScopes.length} 个 scope，结果可能不完整</span>
+                    <span className="ki-cell-sub">
+                      {skippedScopes.map((s) => `${s.scope}：${s.reason}`).join('；')}
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           <div className="ki-results">
             <div className="ki-results__head">
               <span className="ki-results__title">搜索结果</span>
@@ -219,7 +258,16 @@ export function SearchPage(): JSX.Element {
               <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
                 <div>
                   <h3>未找到相关内容</h3>
-                  <p>建议：调整关键词 / 降低 threshold / 切换 tag 过滤。</p>
+                  <p>
+                    {degradeReason !== null
+                      // 降级时后端已跳过 threshold（BM25 尺度与混合 RRF 不可比），
+                      // 再建议"降低 threshold"既与上方提示条矛盾、调了也没用
+                      ? '建议：调整关键词 / 切换 tag 过滤 / 稍后重试（本次为关键词降级检索，Threshold 不生效）。'
+                      : skippedScopes.length > 0
+                        // 跳过 scope 时漏召回才是主因，threshold 不是当前症结
+                        ? '建议：调整关键词 / 切换 tag 过滤 / 检查上方被跳过的 scope。'
+                        : '建议：调整关键词 / 降低 threshold / 切换 tag 过滤。'}
+                  </p>
                 </div>
               </div>
             ) : (
@@ -256,10 +304,11 @@ export function SearchPage(): JSX.Element {
                   </div>
                   <div className="ki-qr-score">
                     {(r.score ?? 0).toFixed(3)}
+                    {/* 降级时 score 是 BM25 原值（可达几十），不 clamp 会算出 7000%+ 宽度撑出卡片 */}
                     <div className="ki-score-bar-bg">
                       <div
                         className="ki-score-bar"
-                        style={{ width: `${Math.round((r.score ?? 0) * 100)}%` }}
+                        style={{ width: `${Math.min(100, Math.max(0, Math.round((r.score ?? 0) * 100)))}%` }}
                       />
                     </div>
                   </div>

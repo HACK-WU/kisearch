@@ -23,7 +23,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
-import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
+import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource, QUERY_EMBED_TIMEOUT_MS } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
@@ -815,8 +815,9 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
 
 /** 查询向量预计算并发上限：并发度等于对外部 embedding 的瞬时压力，无上限会把"并行化"变成对 provider 的突发压测 */
 const QUERY_PRECOMPUTE_CONCURRENCY = 4;
-/** 单个预计算超时（ms）：与 vector-client 的查询超时一致，超时即标记 failed 由工具侧直接降级 FTS，不再重复等待 */
-const QUERY_PRECOMPUTE_TIMEOUT_MS = 2_000;
+// 预计算超时直接复用 vector-client 的 QUERY_EMBED_TIMEOUT_MS（不在此另立常量）：
+// 两者语义同一——在线检索愿意为 embedding 等待的上限。各自定义会静默分叉，且分叉后
+// 以较短者为准（预计算先超时 → 工具侧拿 failed 标记直接降级，不再走自己的兜底超时）。
 
 /**
  * 从 MCP 请求体提取 ki_search 的查询参数（纯函数，供预计算与测试共用）。
@@ -881,7 +882,7 @@ export async function precomputeSearchQueryVectors(
       async (query) => {
         try {
           const vector = await embedQueryOnce(query, undefined, {
-            timeoutMs: QUERY_PRECOMPUTE_TIMEOUT_MS,
+            timeoutMs: QUERY_EMBED_TIMEOUT_MS,
             retries: 0,
           });
           return { kind: 'vector', vector };

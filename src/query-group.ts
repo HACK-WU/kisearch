@@ -28,6 +28,30 @@ import type { ResolveResult } from './lib/group-resolve.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
+// ─── 语义兜底输出 ───
+
+/**
+ * 格式化"语义兜底"命中行（--subtree / --groups 未命中时的通用搜索兜底）。
+ *
+ * 降级（查询 embedding 超时/失败 → FTS-only）时 score 是 BM25 原值（量级可达几十），
+ * 与混合 RRF 分（~0.01–0.03）不可比。两处兜底共用本函数：口径不统一会让同一份输出里的
+ * 分数在两套量级间跳变（用户实测反馈的问题），故降级时显式改标注 `BM25:` 并附说明。
+ *
+ * 导出供测试直接断言（契约：降级 → `BM25:` 前缀 + 说明行；未降级 → `score:` 且无说明）。
+ */
+export function formatFallbackHits(
+  hits: { score: number; content: string }[],
+  degradeReason: string | undefined
+): string {
+  const label = degradeReason === undefined ? 'score' : 'BM25';
+  const lines = hits.map(
+    (r) => `├── [${label}: ${r.score.toFixed(2)}] ${r.content.slice(0, 120)}${r.content.length > 120 ? '...' : ''}`
+  );
+  return degradeReason === undefined
+    ? lines.join('\n')
+    : lines.join('\n') + '\n（注：本次为关键词降级检索，分数为 BM25 量级，与语义混合分不可比）';
+}
+
 // ─── 类型定义 ───
 
 interface GroupData {
@@ -782,12 +806,17 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
           try {
             const avail = await ensureVectorAvailable();
             if (avail.available) {
-              const semResults = await vectorSearch({ scope, query: rawPath, limit: 5, tags: 'ki-path' });
+              // 降级不阻断兜底，但分数口径会变（BM25 量级），必须随输出标注
+              let fallbackDegraded: string | undefined;
+              const semResults = await vectorSearch({
+                scope,
+                query: rawPath,
+                limit: 5,
+                tags: 'ki-path',
+                onDegrade: (reason) => { fallbackDegraded ??= reason; },
+              });
               if (semResults.length > 0) {
-                const fallbackLines = semResults.map(
-                  r => `├── [score: ${r.score.toFixed(2)}] ${r.content.slice(0, 120)}${r.content.length > 120 ? '...' : ''}`
-                );
-                baseOutput += `\n\n💡 语义匹配结果（来自通用搜索）：\n${fallbackLines.join('\n')}`;
+                baseOutput += `\n\n💡 语义匹配结果（来自通用搜索）：\n${formatFallbackHits(semResults, fallbackDegraded)}`;
               }
             }
           } catch { /* 语义兜底失败，静默降级 */ }
@@ -847,12 +876,17 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
             try {
               const avail = await ensureVectorAvailable();
               if (avail.available) {
-                const semResults = await vectorSearch({ scope, query: gp, limit: 5, tags: 'ki-path' });
+                // 降级不阻断兜底，但分数口径会变（BM25 量级），必须随输出标注
+                let fallbackDegraded: string | undefined;
+                const semResults = await vectorSearch({
+                  scope,
+                  query: gp,
+                  limit: 5,
+                  tags: 'ki-path',
+                  onDegrade: (reason) => { fallbackDegraded ??= reason; },
+                });
                 if (semResults.length > 0) {
-                  const fallbackLines = semResults.map(
-                    r => `├── [score: ${r.score.toFixed(2)}] ${r.content.slice(0, 120)}${r.content.length > 120 ? '...' : ''}`
-                  );
-                  results.push(baseOutput + `\n\n💡 语义匹配结果（来自通用搜索）：\n${fallbackLines.join('\n')}`);
+                  results.push(baseOutput + `\n\n💡 语义匹配结果（来自通用搜索）：\n${formatFallbackHits(semResults, fallbackDegraded)}`);
                   continue;
                 }
               }
