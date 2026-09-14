@@ -4,7 +4,7 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiSearch } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
@@ -50,6 +50,8 @@ export function SearchPage(): JSX.Element {
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
+  /** 供「清空」后把焦点交还输入框，用户可直接打下一次查询 */
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
@@ -103,6 +105,20 @@ export function SearchPage(): JSX.Element {
     }
   };
 
+  /**
+   * 一键清空：输入框 + 结果 + 提示条一起回初始态。
+   * 只清输入会留下"输入框空了、结果还是上一次的"错位状态，故一并重置并把焦点交还输入框。
+   */
+  const clearAll = (): void => {
+    setQuery('');
+    setResults(null);
+    setTotal(0);
+    setError(null);
+    setDegradeReason(null);
+    setSkippedScopes([]);
+    inputRef.current?.focus();
+  };
+
   const toggleTag = (tag: string): void => {
     setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
   };
@@ -126,6 +142,7 @@ export function SearchPage(): JSX.Element {
       >
         <div className="ki-search-bar">
           <input
+            ref={inputRef}
             className="ki-search-input"
             placeholder="输入自然语言查询，如：告警收敛策略是什么？"
             value={query}
@@ -134,6 +151,17 @@ export function SearchPage(): JSX.Element {
             data-ki-search-input
             aria-label="语义搜索"
           />
+          {/* type="button" 必须显式：位于 form 内，缺省为 submit 会误触发搜索。
+              loading 时禁用：在途 run() 完成后仍会 setResults，否则清空会被异步结果覆盖回填。 */}
+          <button
+            type="button"
+            className="ki-btn ki-btn--secondary"
+            style={{ height: 42, padding: '0 18px' }}
+            disabled={loading || (!query && results === null)}
+            onClick={clearAll}
+          >
+            清空
+          </button>
           <button className="ki-btn ki-btn--primary" style={{ height: 42, padding: '0 24px' }} disabled={loading || !query.trim()}>
             {loading ? '搜索中…' : '搜索'}
           </button>

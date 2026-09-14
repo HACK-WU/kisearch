@@ -34,6 +34,11 @@ export interface DocItem {
   path?: string;
   /** 文档级自定义标签（来自 relations-cache relation.tags） */
   tags?: string[];
+  /**
+   * 是否已向量化（KB 层登记的 memoryId/memoryIds 非空）→ 决定是否渲染 RAG 状态标签。
+   * undefined = 后端未提供该字段（旧版 daemon），同样不渲染标签。
+   */
+  vectorized?: boolean;
 }
 
 export interface DocListResponse {

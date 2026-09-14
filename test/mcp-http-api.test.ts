@@ -70,8 +70,11 @@ after(async () => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
+/** hot_relations 种子：字符串 = 仅文件名；对象 = 附带向量 ID（用于 vectorized 标志用例） */
+type SeedRel = string | { text: string; memoryId?: string; memoryIds?: string[] };
+
 /** 构造一个 scope 的 relations-cache，供 /api/doc/list 测试 */
-function seedRelationsCache(scope: string, groups: Record<string, string[]>): void {
+function seedRelationsCache(scope: string, groups: Record<string, SeedRel[]>): void {
   const cachePath = getRelationsCachePath(scope);
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
   const data: Record<string, unknown> = {
@@ -83,7 +86,10 @@ function seedRelationsCache(scope: string, groups: Record<string, string[]>): vo
   };
   for (const [group, rels] of Object.entries(groups)) {
     (data.groups as Record<string, unknown>)[group] = {
-      hot_relations: rels.map((r) => ({ id: `r-${r}`, text: r, score: 1, sourcePath: `docs/${r}.md` })),
+      hot_relations: rels.map((r) => {
+        const rel = typeof r === 'string' ? { text: r } : r;
+        return { id: `r-${rel.text}`, score: 1, sourcePath: `docs/${rel.text}.md`, ...rel };
+      }),
       keywords: [],
     };
   }
@@ -125,6 +131,25 @@ describe('/api/doc/list', () => {
     const filtered = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-test&q=告警`)).json();
     assert.equal(filtered.total, 2);
     assert.ok(filtered.docs.every((d: { name: string }) => d.name.includes('告警')));
+  });
+
+  it('vectorized：登记了向量 ID 的为 true（多值/单值皆可），未登记的为 false', async () => {
+    seedRelationsCache('doc-vec', {
+      告警: [
+        { text: '多值向量化', memoryIds: ['m1', 'm2'] },
+        { text: '单值向量化', memoryId: 'm3' },
+        { text: '空数组不算', memoryIds: [] },
+        '未向量化',
+      ],
+    });
+    const body = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-vec`)).json();
+    const byName = new Map<string, boolean>(
+      body.docs.map((d: { name: string; vectorized: boolean }) => [d.name, d.vectorized]),
+    );
+    assert.equal(byName.get('多值向量化'), true, 'memoryIds 非空 → 已向量化');
+    assert.equal(byName.get('单值向量化'), true, 'memoryId 非空 → 已向量化（旧链路）');
+    assert.equal(byName.get('空数组不算'), false, 'memoryIds 为空数组不得误判为已向量化');
+    assert.equal(byName.get('未向量化'), false, '无向量 ID → 未向量化');
   });
 });
 

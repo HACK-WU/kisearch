@@ -386,6 +386,11 @@ export function BrowsePage(): JSX.Element {
                         {(d.tags ?? []).map((t) => (
                           <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
                         ))}
+                        {/* 向量化状态：与总览（搜索页）的 RAG 状态层保持一致——已向量化才出标签，
+                            未向量化无标签即区分。旧版 daemon 不返回 vectorized 时同样不出标签 */}
+                        {d.vectorized === true && (
+                          <span className="ki-badge ki-badge--vec">RAG</span>
+                        )}
                       </div>
                     </div>
                     <span className="ki-cell-sub" style={{ alignSelf: 'center' }}>
