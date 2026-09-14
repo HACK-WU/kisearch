@@ -2,7 +2,7 @@
  * stage3-scale.network.mjs —— 阶段 3 真实 embedding 规模/资源基准。
  *
  * 覆盖：
- *   - 4 个 scope 的跨 scope 并发写入（3 轮，共 12 请求）
+ *   - 4 个 scope 的跨 scope 并发写入（6 轮，共 24 请求）
  *   - 同 scope 读写并发的排队观测
  *   - /healthz.vectorResources 的 maxOpenCollections 峰值
  *
@@ -16,6 +16,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import {
+  probeHealth,
+  readProcessResourceMetrics,
+  startIsolatedDaemon,
+  stopIsolatedDaemon,
+} from './isolated-daemon.mjs';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const KI_BIN = path.join(REPO_ROOT, 'bin', 'ki.mjs');
@@ -38,6 +44,29 @@ loadEnvFile();
 
 const API_KEY = process.env.GITNEXUS_EMBEDDING_API_KEY ?? process.env.SILICONFLOW_API_KEY;
 const SCOPES = ['stage3-a', 'stage3-b', 'stage3-c', 'stage3-d'];
+const CROSS_SCOPE_ROUNDS = 6;
+
+function parseJsonOutput(stdout) {
+  const first = stdout.indexOf('{');
+  const last = stdout.lastIndexOf('}');
+  if (first < 0 || last <= first) return null;
+  try { return JSON.parse(stdout.slice(first, last + 1)); } catch { return null; }
+}
+
+function summarizeOsResources(samples) {
+  const supported = samples.filter((sample) => sample.supported && sample.rssKb !== null);
+  if (supported.length === 0) return { supported: false, sampleCount: samples.length };
+  return {
+    supported: true,
+    sampleCount: samples.length,
+    peak: {
+      rssKb: Math.max(...supported.map((sample) => sample.rssKb)),
+      mmapCount: Math.max(...supported.map((sample) => sample.mmapCount)),
+      fdCount: Math.max(...supported.map((sample) => sample.fdCount)),
+    },
+    final: supported.at(-1),
+  };
+}
 
 test('阶段 3：真实 embedding 跨 scope / 同 scope 资源基准', {
   skip: API_KEY ? false : '缺少 embedding apiKey（SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY）',
@@ -95,21 +124,20 @@ test('阶段 3：真实 embedding 跨 scope / 同 scope 资源基准', {
       resolve({ status, signal, elapsedMs: Math.round(performance.now() - startedAt), stdout, stderr });
     });
   });
-  const stop = () => { runSync(['mcp', 'stop'], 30_000); };
+  const defaultDaemonBefore = await probeHealth(7423);
+  let isolatedHealth = null;
+  const expectedWrites = new Map(SCOPES.map((scope) => [scope, []]));
+  const osResourceSamples = [];
+  let resourceSampler = null;
 
   try {
-    const started = runSync(['mcp', '--http', '--daemon', '--port', String(port)], 60_000);
-    assert.equal(started.status, 0, `daemon 启动失败：${started.stderr}`);
-
-    let health;
-    for (let attempt = 0; attempt < 90; attempt++) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/healthz`);
-        if (response.ok) { health = await response.json(); break; }
-      } catch { /* 等待启动预检完成 */ }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    assert.equal(health?.ok, true, 'healthz 未在 90 秒内就绪');
+    isolatedHealth = await startIsolatedDaemon({ configPath, env, port });
+    assert.equal(isolatedHealth.ok, true, '隔离 daemon healthz 应就绪');
+    const sampleOsResources = () => {
+      osResourceSamples.push(readProcessResourceMetrics(isolatedHealth.pid));
+    };
+    sampleOsResources();
+    resourceSampler = setInterval(sampleOsResources, 250);
 
     for (const scope of SCOPES) {
       const inputPath = path.join(root, `${scope}.json`);
@@ -123,7 +151,7 @@ test('阶段 3：真实 embedding 跨 scope / 同 scope 资源基准', {
 
     const crossScopeWrites = [];
     const crossStartedAt = performance.now();
-    for (let round = 0; round < 3; round++) {
+    for (let round = 0; round < CROSS_SCOPE_ROUNDS; round++) {
       const batch = await Promise.all(SCOPES.map((scope) => run([
         'store', '--scope', scope, '--text', `${scope} 阶段3跨 scope 写入基准 ${round}`, '--tags', 'ki-search',
       ])));
@@ -133,15 +161,45 @@ test('阶段 3：真实 embedding 跨 scope / 同 scope 资源基准', {
         elapsedMs: result.elapsedMs,
         queued: /已排队执行/.test(result.stderr),
       })));
+      for (let index = 0; index < batch.length; index++) {
+        const result = batch[index];
+        const body = parseJsonOutput(result.stdout);
+        const detail = `scope=${SCOPES[index]} round=${round} status=${result.status} signal=${result.signal ?? 'null'}`
+          + ` stderr=${result.stderr} stdout=${result.stdout}`;
+        assert.equal(body?.ok, true, `跨 scope 写入应返回 ok：${detail}`);
+        assert.equal(typeof body.docId, 'string', `跨 scope 写入应返回 docId：${detail}`);
+        expectedWrites.get(SCOPES[index]).push({
+          text: `${SCOPES[index]} 阶段3跨 scope 写入基准 ${round}`,
+          docId: body.docId,
+        });
+      }
     }
     const crossWallMs = Math.round(performance.now() - crossStartedAt);
     assert.ok(crossScopeWrites.every((result) => result.status === 0), JSON.stringify(crossScopeWrites));
+    assert.equal(crossScopeWrites.length, SCOPES.length * CROSS_SCOPE_ROUNDS);
+
+    for (const scope of SCOPES) {
+      const recalled = await run([
+        'search', '--scope', scope, '--query', '阶段3跨 scope 写入基准', '--tags', 'ki-search', '--limit', '100',
+      ]);
+      const body = parseJsonOutput(recalled.stdout);
+      assert.equal(recalled.status, 0, `${scope} 记录守恒查询失败：${recalled.stderr}`);
+      assert.equal(body?.ok, true, `${scope} 记录守恒查询应成功：${recalled.stdout}`);
+      const results = body.results ?? [];
+      for (const expected of expectedWrites.get(scope)) {
+        assert.ok(
+          results.some((result) => result.memoryId === expected.docId && (result.content ?? '').includes(expected.text)),
+          `${scope} 缺少写入记录 ${expected.docId}：${JSON.stringify(body.results)}`,
+        );
+      }
+    }
 
     const sameScope = await Promise.all([
       run(['search', '--scope', SCOPES[0], '--query', '同 scope 读写顺序', '--limit', '1']),
       run(['store', '--scope', SCOPES[0], '--text', `阶段3同 scope 写入 ${Date.now()}`, '--tags', 'ki-search']),
     ]);
     assert.ok(sameScope.every((result) => result.status === 0), JSON.stringify(sameScope));
+    osResourceSamples.push(readProcessResourceMetrics(isolatedHealth.pid));
 
     const durations = crossScopeWrites.map((result) => result.elapsedMs).sort((a, b) => a - b);
     const p95Ms = durations[Math.max(0, Math.ceil(durations.length * 0.95) - 1)];
@@ -173,10 +231,25 @@ test('阶段 3：真实 embedding 跨 scope / 同 scope 资源基准', {
         statuses: sameScope.map((result) => result.status),
       },
       vectorResources: metrics,
+      osResources: summarizeOsResources(osResourceSamples),
     };
     t.diagnostic(`STAGE3_BENCHMARK ${JSON.stringify(report)}`);
   } finally {
-    stop();
-    fs.rmSync(root, { recursive: true, force: true });
+    let stopped;
+    let defaultDaemonAfter = null;
+    try {
+      if (resourceSampler) clearInterval(resourceSampler);
+      stopped = await stopIsolatedDaemon({ port, pid: isolatedHealth?.pid });
+      if (defaultDaemonBefore?.ok === true) {
+        defaultDaemonAfter = await probeHealth(7423);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    assert.equal(stopped?.exited, true, `隔离 daemon 未退出：${JSON.stringify(stopped)}`);
+    assert.equal(stopped?.portClosed, true, `隔离 daemon 端口仍可访问：${JSON.stringify(stopped)}`);
+    if (defaultDaemonBefore?.ok === true) {
+      assert.equal(defaultDaemonAfter?.ok, true, '隔离测试不应停止默认 7423 daemon');
+    }
   }
 });

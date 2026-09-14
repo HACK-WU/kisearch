@@ -31,6 +31,8 @@
     "test:e2e:import": "node --test test/e2e/import-cli.e2e.network.mjs",
     "test:e2e:bulk-import": "node --test test/e2e/e2e-bulk-import.test.mjs",
     "test:e2e:stage3": "node --test test/e2e/stage3-scale.network.mjs",
+    "test:e2e:restore-cancel": "node --test test/e2e/restore-cancel.network.mjs",
+    "test:e2e:daemon-routes": "node --test test/e2e/daemon-routes.network.mjs",
     "build:zvec-engine": "tsc -p tsconfig.src.json"
   },
   "keywords": [

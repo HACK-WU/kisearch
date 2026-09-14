@@ -3,8 +3,8 @@ id: REQ-20260910-001
 feature: CLI与MCP共享zvec守护进程
 status: 实施中
 created: 2026-09-10
-updated: 2026-09-11
-version: 23
+updated: 2026-09-14
+version: 29
 tags: [refactor, performance, mcp, integration]
 depends_on: []
 author: AI
@@ -423,6 +423,27 @@ P1-3 另做专项探针（隔离临时配置，实测已验证后清理）：①
 
 阶段 3当前决策：暂不实施 REQ-F01（更细分片）或 REQ-F02（服务型向量后端）。本轮正式写入基准证明跨 scope 已具备并发条件、同 scope 仍按单写者排队；但正式写入两轮 P95 也相差约 3.2 倍，尚不能据此证明单 scope 写吞吐已经成为后端扩展瓶颈。后续以固定数据规模的重复写入基准、持续队列等待、句柄/mmap/内存接近预算或稳定性退化作为进入 F01/F02 评估的触发条件。
 
+#### 6.4.4.1 阶段 3 高优先级补验（2026-09-14）
+
+- [x] E2E teardown 隔离：新增 `test/e2e/isolated-daemon.mjs`。测试进程直接持有隔离 HTTP 子进程，使用 healthz 返回的实际 daemon PID 发送 SIGTERM，超时才 SIGKILL，并同时确认 PID 与隔离端口退出；不再调用全局 `ki mcp stop`。若测试前 7423 健康，测试后增加存活断言。
+- [x] 24 请求真实 embedding 基准：4 个 scope × 6 轮，每轮 4 个 scope 并发提交，共 24 个写入请求；每条记录保存预期文本和 docId，测试结束通过 CLI 搜索以 docId+文本核对记录守恒。最新采样版运行 24/24 成功，墙钟 66546ms，P95 18866ms，吞吐 0.361 req/s，跨 scope 排队 0；同 scope 读写 2/2 成功且观察到 1 个排队请求；`maxOpenCollections=2` 时 `peakOpenCount=2`（`opened=25`、`closed=23`）。此前采样版运行 74631ms/P95 44548ms/0.322 req/s（跨 scope 排队 1），非采样版运行 28073ms/P95 5948ms/0.855 req/s；更早运行也显示同样的网络波动，当前不宣称生产 SLO。
+- [x] 真实 restore/rebuild 中途取消：新增 `test/e2e/restore-cancel.network.mjs` 与 `npm run test:e2e:restore-cancel`。401 条 fixture 形成 803 个向量条目；在 rebuild 阶段第一批 200 条完成后请求取消，返回 202，最终 `cancelled`、`cancelRequested=true`、`done=200/803`，满足批次边界；额外等待 1500ms 后状态、进度和 `finishedAt` 不变，队列 `activeWorkers=0` 且 `queues={}`。测试后默认 7423 仍健康。
+
+本轮真实运行中有一次 restore 隔离 daemon 启动预检超时，未进入业务断言；随后修正测试脚本响应体重复读取问题，并以受控前台子进程生命周期重跑通过。该次失败不计入产品取消结论，但保留在 round-2 报告的执行记录中。
+
+#### 6.4.4.2 阶段 3 稳定基线续测（2026-09-14）
+
+- [x] 固定规模重复基线：在同一台 Linux 主机、同一 embedding 配置和 `maxOpenCollections=2` 下连续追加 3 轮 `4 scope × 6 轮` 真实写入；每轮 24/24 成功、跨 scope 排队 0、同 scope 读写均有 1 个请求排队，且每轮均通过 CLI 搜索核对 24 条 docId+文本记录守恒。
+
+| 追加轮次 | 墙钟 | P95 | 吞吐 | OS 峰值 RSS / mmap / fd | engine open / close 累计耗时 |
+|----------|------|-----|------|-------------------------|------------------------------|
+| 续测 1 | 9345ms | 1696ms | 2.568 req/s | 663156KB / 760 / 146 | 5654ms / 1565ms |
+| 续测 2 | 8111ms | 1516ms | 2.959 req/s | 662964KB / 767 / 149 | 5676ms / 1616ms |
+| 续测 3 | 12265ms | 3053ms | 1.957 req/s | 689664KB / 655 / 144 | 7221ms / 2057ms |
+
+- [x] 多轮 OS 采样：三轮均实际采集 daemon `/proc` RSS、mmap 映射数和 fd 数；结合前两轮采样，当前已有 5 轮真实负载资源记录。资源量级在本机样本内相近，但尚未形成跨时间、固定网络条件下的容量趋势。
+- [ ] 稳定生产基线：本次续测已补齐固定规模和重复轮次证据，但 embedding 外部网络仍造成延迟波动，尚不能据此给出生产 P95/吞吐 SLO；embedding、RPC、排队、engine open/close 与 zvec 写入的细分耗时也尚未全部拆出。
+
 #### 6.4.5 首次整体验收（2026-09-11）
 
 - L1 静态检查：`npx tsc -p tsconfig.json --noEmit` exit 0；相关 daemon、HTTP API、配置、迁移、检索、restore、资源和 CLI 回归套件均通过，详见验收报告。
@@ -431,15 +452,22 @@ P1-3 另做专项探针（隔离临时配置，实测已验证后清理）：①
 - default scope 重建：用户执行 `ki restore default --rebuild-vector` 成功；随后 `ki scope list` 显示 `default` 的 KB 与 Vector 均为 ✓。此前失败命令 `ki restore ki-search default --rebuild-vector` 实际把 `ki-search`（错误拼写，真实注册名为 `kisearch`）当作 scope，第二个位置参数 `default` 未被当作 scope 或 Group 使用。
 - 首次整体验收结论为**有条件通过**：核心 daemon、scope 调度、fan-out、迁移、长任务接口和 Collection LRU 已有证据；20+ 混合请求稳定基线、真实大规模 restore 中途取消、OS 级 mmap/RSS/文件句柄指标尚未完成。另发现 `stage3-scale.network.mjs` 的 `mcp stop --config <隔离配置>` teardown 可能误停同机默认 7423 daemon；默认 daemon 已恢复，测试隔离逻辑需修复后才能宣称环境收尾完整。
 
-#### 6.4.6 当前进度与后续事项（2026-09-11）
+#### 6.4.6 当前进度与后续事项（2026-09-14）
 
-当前阶段进度：阶段 2 的 daemon、scope 调度、fan-out、迁移、长任务 API 和 Collection LRU 主路径已有回归与真实链路证据；阶段 3 已完成首轮真实 embedding 资源/并发观测；default scope 的独立向量重建已成功。整体仍保持“有条件通过”，不将单机小样本性能结果视为生产 SLO。
+当前阶段进度：阶段 2 的 daemon、scope 调度、fan-out、迁移、长任务 API 和 Collection LRU 主路径已有回归与真实链路证据；阶段 3 三项高优先级补验已完成：E2E teardown 隔离、24 请求真实 embedding 记录守恒、真实 restore/rebuild 中途取消；backup/export/wiki-backfill 三个低频 daemon 路由也已完成独立黑盒验证。default scope 的独立向量重建已成功。阶段 3固定规模重复基线和 OS 采样已追加 3 轮，整体仍保持“有条件通过”，原因是跨时间稳定生产 SLO 与资源容量趋势尚未建立，不将单机真实 embedding 运行结果直接视为生产 SLO。
+
+已完成的高优先级事项：
+
+1. **E2E teardown 隔离**：按隔离 daemon 实际 PID/端口清理，禁止全局 stop；测试前后默认 7423 存活性已实测确认。
+2. **20+ 真实 embedding 基准**：固定 4 scope × 6 轮共 24 个写入请求；跨 scope 全部成功，CLI 搜索按预期 docId+文本核对记录守恒，同 scope 读写排队现象和资源峰值均有诊断输出。
+3. **真实 restore/rebuild 取消**：401 条 fixture、803 个向量条目，在第一批边界取消并验证终态、稳定进度和空队列；没有观察到取消后的继续写入。
+4. **backup/export/wiki-backfill 黑盒链路**：隔离 scope 下 backup 快照 tar 内容、backup list、export Markdown、wiki-backfill 首次写回、幂等跳过和 `--force` 覆盖均已通过 daemon 路由验证，队列恢复为空。
+5. **OS 资源采样实现与真实负载证据**：`test/e2e/isolated-daemon.mjs` 已接入 Linux `/proc` 的 RSS、mmap 映射数和 fd 数采样；本次追加 3 轮真实运行峰值分别为 RSS=663156/662964/689664KB、mmap=760/767/655、fd=146/149/144；结合此前两轮采样（RSS=822288/759220KB、mmap=628/631、fd=143/150），已有 5 轮资源证据。当前只能说明本机样本资源量级，不能作为容量上限；endpoint 短时超时的失败仍保留在验收报告，未计为成功证据。
 
 后续事项按优先级排列：
 
-1. **高优先级**：修复 `test/e2e/stage3-scale.network.mjs` 的 teardown 隔离，必须按隔离 daemon 的明确 PID/端口/lock 停止，不能影响同机默认 7423 实例。
-2. **高优先级**：在修复 teardown 后，执行固定数据规模的 20+ 混合真实请求，核对同 scope 有序、跨 scope 并发和记录守恒。
-3. **高优先级**：用较大隔离快照验证 restore/rebuild 中途取消、批次边界语义和取消后无继续写入。
-4. **中优先级**：重复多轮真实 embedding 基准，拆分记录 embedding、RPC、排队、engine open/close 和 zvec 写入耗时，形成稳定趋势。
-5. **中优先级**：补采 daemon RSS、mmap 映射和文件描述符数量；补做 backup/export/wiki-backfill 独立黑盒场景。
-6. **暂不启动**：REQ-F01 更细粒度分片与 REQ-F02 服务型向量后端，继续等待稳定基线满足扩展触发条件。
+1. **中优先级**：补充可控 embedding 网络或本地回放条件，并在 daemon 侧拆分记录 embedding、RPC、排队、engine open/close 和 zvec 写入耗时，形成可比较的稳定生产趋势。
+2. **中优先级**：继续重复采集 OS RSS、mmap 映射和文件描述符趋势，结合多轮 embedding 性能数据判断资源预算；当前已有 5 轮真实峰值，但不将其视为容量上限或生产 SLO。
+3. **暂不启动**：REQ-F01 更细粒度分片与 REQ-F02 服务型向量后端，继续等待稳定基线满足扩展触发条件。
+
+本轮未运行 `npm run test:all`；既有 CLI 长耗时约束仍按分批套件执行，不能宣称全量测试通过。
