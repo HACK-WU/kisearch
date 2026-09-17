@@ -12,7 +12,6 @@ import { executeDocList, executeDocDelete } from '../doc.js';
 import { executeManageCreate, executeManageDeleteEmpty, executeManageDelete } from '../manage-index.js';
 import { rebuildScopeVectors } from './rebuild-vector.js';
 import { vectorCountScope } from './vector-client.js';
-import { migrateLegacyVectorLayout } from './vector-migrate.js';
 import { restoreSnapshotLocal } from './restore-snapshot.js';
 import { executeBackup, executeBackupList } from './backup.js';
 import { backfillWiki } from './wiki-sync.js';
@@ -61,10 +60,6 @@ const HANDLERS: Record<string, Handler> = {
     { countScope: vectorCountScope },
     { ...(params.options ?? {}), abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
   ),
-  'migrate-vector': (params) => migrateLegacyVectorLayout({
-    yes: params.yes === true,
-    resume: params.resume === true,
-  }),
   'restore-snapshot': async (params) => {
     if (params?.yes !== true) {
       throw Object.assign(new Error('daemon 还原操作必须显式确认 --yes'), { code: 'CONFIRMATION_REQUIRED' });

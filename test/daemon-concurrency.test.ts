@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { OperationCoordinator, GLOBAL_SCOPE, scopesOf } from '../src/lib/operation-coordinator.js';
+import { dispatchOperation, supportedOperations } from '../src/lib/daemon-dispatch.js';
 import { validateScope } from '../src/lib/scope.js';
 import { configFingerprint, daemonIdentityFingerprint, getScopeCollectionPath, VECTOR_LAYOUT_VERSION } from '../src/lib/scope-collection.js';
 
@@ -111,9 +112,6 @@ test('stage1：scope 枚举走只读通道，不被长写任务阻塞', async ()
   const coordinator = new OperationCoordinator(4);
   // scopesOf 对 scope-list 返回空集合 = 只读通道（不占用任何 scope）。
   assert.deepEqual(scopesOf({}, 'scope-list'), []);
-  // 存量迁移仍须全局独占。
-  assert.deepEqual(scopesOf({}, 'migrate-vector'), [GLOBAL_SCOPE]);
-
   const longWrite = coordinator.submit(
     { operation: 'import', params: { scope: 'a' } },
     async () => { await new Promise((resolve) => setTimeout(resolve, 80)); return 'done'; },
@@ -131,6 +129,14 @@ test('stage1：scope 枚举走只读通道，不被长写任务阻塞', async ()
   // ki scope list 是高频只读命令（前端 scope 下拉），自带 fastFail 撞锁降级；
   // 它绝不应该排在一次 import 后面等几分钟。
   assert.ok(elapsed < 300, `只读的 scope 枚举不应被写任务阻塞，实测 ${elapsed}ms`);
+});
+
+test('stage1：旧向量迁移不再暴露为 daemon operation', async () => {
+  assert.ok(!supportedOperations().includes('migrate-vector'));
+  await assert.rejects(
+    dispatchOperation({ operation: 'migrate-vector', params: { yes: true } }),
+    (error: any) => error?.code === 'DAEMON_OPERATION_UNSUPPORTED',
+  );
 });
 
 test('stage1：全局独占任务执行期间与所有分片互斥', async () => {

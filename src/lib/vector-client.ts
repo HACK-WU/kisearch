@@ -275,24 +275,6 @@ function touchEngineUse(): void {
 }
 
 /**
- * 显式持有/释放在途 engine 操作计数，供**不走 withEngine** 的调用方使用
- *（当前仅存量迁移 lib/vector-migrate.ts）。
- *
- * 必要性：idle-close 定时器以 `_inFlightOps === 0` 为放行条件，而它由
- * `setInterval` 触发、**不经过 OperationCoordinator**，因此即使迁移已占得全局
- * 独占队列，定时器仍会在迁移途中 `void closeEngine()`，与迁移直接发起的原生
- * ZVecOpen 并发 —— 触发下方 _engineOpTail 注释记载的同进程并发 open 永久阻塞
- *（实测约 62%）。迁移必须全程持有该计数。
- */
-export function beginExternalEngineOp(): void {
-  _inFlightOps++;
-}
-
-export function endExternalEngineOp(): void {
-  _inFlightOps = Math.max(0, _inFlightOps - 1);
-}
-
-/**
  * 启用向量库空闲释放锁（仅供常驻 MCP 层调用，CLI 勿用）。
  * 空闲超过 idleMs 后自动 closeEngine 释放 LOCK，让其他 MCP 实例 / CLI 能错开抢锁；
  * 下次向量调用时 getEngine 惰性 reopen（实测约 0.7s）。
@@ -469,7 +451,6 @@ async function enforceEngineLimit(excludeScope: string): Promise<void> {
 // 进程内 probe/open 串行化队尾：zvec 同进程并发 ZVecOpen 同一 dbPath 会以
 // 高概率（实测约 62%）触发原生竞态永久阻塞，故所有涉及原生 open 的操作
 //（probe / create / open）必须串行排队，禁止并发。
-// 已导出：存量迁移直接调用原生 ZvecEngine.*，不经 withEngine，必须自行入队。
 let _engineOpTail: Promise<unknown> = Promise.resolve();
 
 export function serializeEngineOp<T>(op: () => Promise<T>): Promise<T> {

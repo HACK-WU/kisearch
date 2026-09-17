@@ -124,7 +124,7 @@ export async function callDaemon<T>(
     let cancelSent = false;
     let lastEventSeq = 0;
     // timeoutMs <= 0 表示不设客户端超时，靠 socket 生命周期结束。
-    // 长任务（import/restore/rebuild-vector/migrate-vector）的内部预算可达
+    // 长任务（import/restore/rebuild-vector）的内部预算可达
     // 60s + N*10s（100 chunk ≈ 17 分钟），远超任何固定客户端超时；超时后
     // daemon 侧任务并不会取消，用户看到失败后重跑会撞 import.lock 进入死路。
     // 注意不能把“不超时”写成 setTimeout(fn, 0)（下一 tick 即触发）或

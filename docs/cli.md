@@ -80,18 +80,6 @@ ki import -s my-project --source /path/to/wiki --group wiki
 
 ---
 
-## `ki migrate-vector`（旧向量布局迁移）
-
-将旧版 `vectorDir` 根目录中的单 Collection 按文档的 `scope` 字段迁移到
-`vectorDir/collections/<scope>`。旧目录只读保留，不会删除或覆盖；迁移使用预计算向量，不需要重新调用 embedding 服务。
-
-```bash
-ki migrate-vector --yes             # 首次执行，创建按 scope Collection
-ki migrate-vector --yes --resume    # 从 collections/migration.json 断点续跑
-```
-
-不带 `--yes` 只返回确认提示且不创建新布局。迁移发现 scope 缺失、目标内容漂移或目标包含额外文档时会明确失败；续跑只补写缺失文档，完成后再按 scope 核对文档数和 doc id。
-
 ---
 
 ## `manage-index`
