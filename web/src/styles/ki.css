@@ -244,7 +244,12 @@ a:hover { text-decoration: underline; }
 .ki-content-inner { max-width: var(--ki-content-max-width); margin: 0 auto; display: grid; gap: var(--ki-space-5); }
 /* 浏览页：双栏填满视口、内部各自滚动，外层不滚动 */
 .ki-content--noscroll { overflow: hidden; }
-.ki-content--noscroll .ki-content-inner { height: 100%; align-content: start; }
+/* 页头占内容高度，双栏区吃掉剩余高度（而非由内容撑开），卡片高度从而不随条目数变化 */
+.ki-content--noscroll .ki-content-inner {
+  height: 100%;
+  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+}
 
 /* ══════════ 公共组件 ══════════ */
 
@@ -647,47 +652,33 @@ a:hover { text-decoration: underline; }
 .ki-score-bar-bg { width: 80px; height: 4px; background: var(--ki-color-bg-secondary); border-radius: 2px; margin-top: 4px; }
 .ki-score-bar { height: 4px; background: var(--ki-color-primary); border-radius: 2px; }
 
-/* 双栏布局 */
-.ki-split { display: grid; grid-template-columns: 300px 1fr; gap: var(--ki-space-5); align-items: start; min-height: 0; }
-/* 左右两栏均受视口高度约束、卡片内部独立滚动 */
-.ki-split__side {
-  max-height: calc(100vh - 140px);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.ki-split__side > .ki-card {
-  display: flex;
-  flex-direction: column;
-  max-height: inherit;
-  overflow: hidden;
-}
-.ki-split__side .ki-card__head {
-  flex-shrink: 0;
-}
-.ki-split__side .ki-card__body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-/* 右侧文档列表卡片同样受视口高度约束、内部独立滚动 */
+/* 双栏布局：两栏按可用高度填满（高度由容器驱动，不随内容多少变化），内容超出时卡片内部滚动 */
+.ki-split { display: grid; grid-template-columns: 300px 1fr; gap: var(--ki-space-5); align-items: stretch; min-height: 0; }
+.ki-split__side,
 .ki-split > section {
+  /* 上限兜底：容器高度异常时不让卡片无限高 */
   max-height: calc(100vh - 140px);
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
+.ki-split__side > .ki-card,
 .ki-split > section > .ki-card {
   display: flex;
   flex-direction: column;
+  /* 撑满所在栏高度：避免文档/目录很少时卡片塌成内容高度 */
+  flex: 1;
+  min-height: 0;
   max-height: inherit;
   overflow: hidden;
 }
+.ki-split__side .ki-card__head,
 .ki-split > section .ki-card__head,
 .ki-split > section .ki-card__head + div {
   flex-shrink: 0;
 }
+.ki-split__side .ki-card__body,
 .ki-split > section .ki-card__body {
   flex: 1;
   min-height: 0;
@@ -698,8 +689,10 @@ a:hover { text-decoration: underline; }
 /* 响应式 */
 @media (max-width: 1024px) {
   .ki-stats { grid-template-columns: repeat(2, 1fr); }
-  .ki-split { grid-template-columns: 1fr; }
-  .ki-split__side { position: static; }
+  /* 单列：Group 树占约 40% 高、文档列表吃掉剩余，两块仍各自内部滚动（高度依旧不随条目数变化） */
+  .ki-split { grid-template-columns: 1fr; grid-template-rows: 40% minmax(0, 1fr); }
+  .ki-split__side { position: static; max-height: none; }
+  .ki-split > section { max-height: none; }
 }
 @media (max-width: 640px) {
   .ki-content { padding: 16px; }
@@ -773,24 +766,28 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
   background: var(--ki-color-surface);
 }
-/* 左侧收起按钮（向内箭头） */
+/* 左侧收起按钮（描边箭头，hover 浮现圆角底） */
 .ki-drawer__close {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-sm);
   color: var(--ki-color-text-subtle);
-  font-size: 13px;
-  line-height: 1;
-  padding: 6px 4px 6px 6px;
+  padding: 0;
   cursor: pointer;
-  transition: color 0.15s;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
   flex-shrink: 0;
 }
-.ki-drawer__close:hover { color: var(--ki-color-accent); }
-.ki-drawer__close-icon { font-size: 16px; line-height: 1; }
-.ki-drawer__close-label { font-size: 13px; }
+.ki-drawer__close:hover {
+  background: var(--ki-color-hover);
+  border-color: var(--ki-color-border);
+  color: var(--ki-color-primary);
+}
+.ki-drawer__close-icon { width: 18px; height: 18px; display: block; }
 /* 本地文档链接导航历史：仅在存在上一级时显示 */
 .ki-drawer__back {
   display: inline-flex;
@@ -801,13 +798,14 @@ a:hover { text-decoration: underline; }
   color: var(--ki-color-text-subtle);
   font-size: 13px;
   line-height: 1;
-  padding: 6px 4px;
+  padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
   cursor: pointer;
-  transition: color 0.15s;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
   flex-shrink: 0;
   white-space: nowrap;
 }
-.ki-drawer__back:hover { color: var(--ki-color-primary); }
+.ki-drawer__back:hover { background: var(--ki-color-hover); color: var(--ki-color-primary); }
 .ki-drawer__back-label { font-size: 13px; }
 .ki-drawer__forward {
   display: inline-flex;
@@ -818,16 +816,17 @@ a:hover { text-decoration: underline; }
   color: var(--ki-color-text-subtle);
   font-size: 13px;
   line-height: 1;
-  padding: 6px 4px;
+  padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
   cursor: pointer;
-  transition: color 0.15s;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
   flex-shrink: 0;
   white-space: nowrap;
 }
-.ki-drawer__forward:hover { color: var(--ki-color-primary); }
+.ki-drawer__forward:hover { background: var(--ki-color-hover); color: var(--ki-color-primary); }
 .ki-drawer__forward-label { font-size: 13px; }
-/* 全屏态下箭头方向反转（向内指向左侧页面） */
-.ki-drawer--fullscreen .ki-drawer__close { flex-direction: row-reverse; }
+/* 上一级/下一级的描边箭头图标 */
+.ki-drawer__nav-icon { width: 15px; height: 15px; display: block; flex-shrink: 0; }
 .ki-drawer__title {
   font-weight: 600;
   font-size: var(--ki-font-size-lg);
@@ -899,14 +898,191 @@ a:hover { text-decoration: underline; }
 }
 .ki-drawer__fullscreen:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
 
-/* 全屏态：铺满视口（无侧边、无圆角），淡入过渡 */
+/* 全屏态：阅读器壳铺满视口；导航面板由内部工作区承载。 */
 .ki-drawer--fullscreen {
   width: 100vw;
   max-width: 100vw;
   box-shadow: none;
+  /* 切换全屏后如果因文档 key 重新挂载，直接显示正文，不重复播放抽屉滑入动画。 */
+  animation: none;
 }
 .ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
 .ki-drawer--fullscreen .ki-markdown--drawer { max-width: 100%; }
+
+/* 全屏阅读工作区：Group 树、文档列表与正文同处一个 overlay，避免被抽屉 scrim 遮挡。 */
+.ki-reader-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--ki-color-bg);
+}
+.ki-reader-navigation {
+  --ki-reader-group-width: 300px;
+  --ki-reader-docs-width: min(380px, 30vw);
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.ki-reader-nav {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  background: var(--ki-color-surface);
+  border-right: 1px solid var(--ki-color-border);
+  overflow: hidden;
+  transition: width 0.18s ease;
+}
+.ki-reader-nav--group { width: 300px; }
+.ki-reader-nav--docs { width: min(380px, 30vw); }
+.ki-reader-nav--collapsed {
+  width: 52px;
+  background: transparent;
+  border-right: 0;
+}
+.ki-reader-nav__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 62px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+}
+/* 头部按钮并排后标题区需可收缩：长副标题（如「搜索「关键词」 · N 条」）截断而非挤走按钮 */
+.ki-reader-nav__head > :first-child { min-width: 0; }
+.ki-reader-nav__head .ki-card__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ki-reader-nav__actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* 头部工具按钮（刷新 / 收起面板）：同尺寸同风格，与收起态入口按钮保持同一语言 */
+.ki-reader-nav__refresh,
+.ki-reader-nav__collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 7px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-reader-nav__refresh { padding: 0 9px 0 8px; font-size: var(--ki-font-size-xs); font-weight: 500; }
+.ki-reader-nav__collapse { width: 26px; }
+.ki-reader-nav__refresh:hover:not(:disabled),
+.ki-reader-nav__collapse:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-reader-nav__refresh:disabled { opacity: 0.55; cursor: default; }
+.ki-reader-nav__action-icon { width: 13px; height: 13px; display: block; flex-shrink: 0; }
+.ki-reader-nav__refresh:disabled .ki-reader-nav__action-icon { animation: ki-spin 0.9s linear infinite; }
+.ki-reader-nav__chevron { width: 14px; height: 14px; display: block; }
+.ki-reader-nav__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+}
+.ki-reader-nav__body--tree { padding: 12px 10px; }
+.ki-reader-nav__filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+}
+.ki-reader-nav__filters .ki-combobox { min-width: 0; flex: 1 1 100%; }
+.ki-reader-nav__filters .ki-form-input { min-width: 0; max-width: none !important; flex: 1 1 100% !important; }
+.ki-reader-nav__body .ki-doc-item { margin-bottom: 8px; }
+/* 收起态：窄栏内垂直顶部的一枚素净图标按钮（点击展开对应面板） */
+.ki-reader-nav__collapsed-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 14px auto 0;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 10px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.ki-reader-nav__collapsed-toggle:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+  transform: translateX(2px);
+}
+.ki-reader-nav__collapsed-mark { display: flex; align-items: center; justify-content: center; }
+.ki-reader-nav__icon { width: 18px; height: 18px; display: block; }
+.ki-reader-workspace__main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ki-color-surface);
+}
+.ki-reader-workspace__main .ki-drawer__body { min-width: 0; }
+
+/* 窄窗口：正文保持全宽，导航改为浮层，避免 Group + 文档列表把正文压成窄条。 */
+@media (max-width: 1100px) {
+  .ki-reader-navigation {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    width: 100%;
+    pointer-events: none;
+  }
+  .ki-reader-navigation .ki-reader-nav {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    pointer-events: auto;
+    box-shadow: var(--ki-shadow-2);
+  }
+  .ki-reader-navigation .ki-reader-nav--group {
+    left: 0;
+    width: var(--ki-reader-group-width);
+  }
+  .ki-reader-navigation .ki-reader-nav--docs {
+    left: var(--ki-reader-group-width);
+    width: var(--ki-reader-docs-width);
+  }
+  .ki-reader-navigation--group-collapsed .ki-reader-nav--group {
+    width: 52px;
+    box-shadow: none;
+  }
+  .ki-reader-navigation--group-collapsed .ki-reader-nav--docs {
+    left: 52px;
+  }
+  .ki-reader-navigation--docs-collapsed .ki-reader-nav--docs {
+    width: 52px;
+    box-shadow: none;
+  }
+  .ki-reader-workspace__main {
+    width: 100%;
+  }
+}
 
 /* 内容区 */
 .ki-drawer__body {
@@ -1070,6 +1246,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-tag-option--selected { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
 /* ── Combobox（Group/Tag 选择器） ── */
 .ki-combobox { position: relative; }
+/* 只选模式（selectOnly）：收起态输入框是「打开列表」入口（手型），展开后转为搜索框（文本光标） */
+.ki-combobox--select-only:not(:has(.ki-combobox__panel--open)) .ki-form-input { cursor: pointer; }
 .ki-combobox__input-wrap { position: relative; }
 .ki-combobox__input-wrap .ki-form-input { padding-right: 32px; }
 .ki-combobox__toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--ki-color-text-subtle); font-size: 12px; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: all var(--ki-motion-fast); }
@@ -1079,6 +1257,41 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-combobox__panel--open { display: flex; }
 .ki-combobox__tree { padding: 8px; max-height: 240px; overflow-y: auto; overflow-x: hidden; }
 .ki-combobox__footer { padding: 8px 12px; border-top: 1px solid var(--ki-color-border); }
+/* combobox 平铺选项列表（tag 筛选）：可滚动，当前值高亮 + ✓ */
+.ki-combobox__options {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ki-combobox__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-combobox__option:hover,
+.ki-combobox__option--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-combobox__option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-combobox__option-check { flex-shrink: 0; color: var(--ki-color-success); font-weight: 700; }
+.ki-combobox__empty { padding: 8px 9px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-combobox__toggle:disabled { cursor: default; opacity: 0.5; }
 /* Group 树节点（combobox 内） */
 .ki-gtree-dir { display: flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 5px; cursor: pointer; user-select: none; white-space: nowrap; line-height: 1.5; transition: background var(--ki-motion-fast); font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text); }
 .ki-gtree-dir:hover { background: var(--ki-color-hover); }

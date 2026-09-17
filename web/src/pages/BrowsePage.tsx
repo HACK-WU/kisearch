@@ -13,6 +13,7 @@ import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { TagSelect } from '@/components/TagSelect';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 
 const ICON_FOLDER = (
@@ -23,6 +24,39 @@ const ICON_FOLDER = (
       stroke="#5f97d6"
       strokeWidth="0.6"
     />
+  </svg>
+);
+
+/** 全屏阅读器导航图标（描边风格，与 Group 树文件夹图标统一） */
+const ICON_NAV_TREE = (
+  <svg className="ki-reader-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="16" y="16" width="6" height="6" rx="1.5" />
+    <rect x="2" y="16" width="6" height="6" rx="1.5" />
+    <rect x="9" y="2" width="6" height="6" rx="1.5" />
+    <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
+    <path d="M12 12V8" />
+  </svg>
+);
+
+const ICON_NAV_DOC = (
+  <svg className="ki-reader-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z" />
+    <path d="M15 2v5h5" />
+    <path d="M9 13h6" />
+    <path d="M9 17h5" />
+  </svg>
+);
+
+const ICON_NAV_COLLAPSE = (
+  <svg className="ki-reader-nav__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M14.5 6.5 9 12l5.5 5.5" />
+  </svg>
+);
+
+const ICON_NAV_REFRESH = (
+  <svg className="ki-reader-nav__action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+    <path d="M21 3v5h-5" />
   </svg>
 );
 
@@ -96,13 +130,16 @@ export function BrowsePage(): JSX.Element {
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  // 阅读器全屏时把 Browse 导航带入工作区；两块导航独立折叠，Group 默认折叠、文档默认展开。
+  const [readerFullscreen, setReaderFullscreen] = useState(false);
+  const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(true);
+  const [readerDocsCollapsed, setReaderDocsCollapsed] = useState(false);
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
   const [selectedTag, setSelectedTag] = useState('');
 
   const { data, isLoading } = useDocList(scope);
-  // 可用 tag 列表：来自 /api/doc/list 返回的 tags 字段（KB 层 relation.tags 去重），
-  // 而非 /api/tags（向量库）——文档列表过滤应基于持久化的 KB 层 tag
-  const availableTags = data?.tags ?? [];
+  // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
+  // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求
 
   // 选中 group 的完整文档（后端按 group 精确返回，不受 500 条全量分页截断影响）
   const groupQuery = useGroupDocs(scope, activeGroup || null, selectedTag || undefined);
@@ -226,6 +263,7 @@ export function BrowsePage(): JSX.Element {
   const closeDocument = useCallback((): void => {
     setHistory([]);
     setForwardHistory([]);
+    setReaderFullscreen(false);
     setViewing(null);
   }, []);
 
@@ -306,7 +344,8 @@ export function BrowsePage(): JSX.Element {
       return;
     }
     setActiveGroup(node.path);
-    closeDocument();
+    // 全屏阅读时保留当前阅读器，用户可以在左侧 Group 树和中间文档列表继续选文档。
+    if (!readerFullscreen) closeDocument();
   };
 
   const renderNode = (node: TreeNode): JSX.Element => {
@@ -330,6 +369,185 @@ export function BrowsePage(): JSX.Element {
     );
   };
 
+  const renderTreeBody = (): JSX.Element => (
+    <>
+      {isLoading ? (
+        <>
+          <div className="ki-skeleton" style={{ width: '100%', height: 28, marginBottom: 8 }} />
+          <div className="ki-skeleton" style={{ width: '80%', height: 28, marginBottom: 8 }} />
+          <div className="ki-skeleton" style={{ width: '90%', height: 28 }} />
+        </>
+      ) : tree.length === 0 ? (
+        <div className="ki-empty" style={{ padding: 24 }}>
+          <div>
+            <h3>空知识库</h3>
+            <p>该 scope 暂无 Group，可前往上传导入。</p>
+          </div>
+        </div>
+      ) : (
+        <div className="ki-tree-root">{tree.map(renderNode)}</div>
+      )}
+    </>
+  );
+
+  const renderDocumentFilters = (): JSX.Element => (
+    <>
+      <GroupPathSelect
+        scope={scope}
+        value={activeGroup}
+        onChange={(v) => { setActiveGroup(v); if (!readerFullscreen) closeDocument(); }}
+        selectOnly
+      />
+      <input
+        className="ki-form-input"
+        placeholder="按文件名/路径模糊搜索…"
+        style={{ maxWidth: 220, flex: '1 1 200px' }}
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        data-ki-search-input
+        aria-label="按文件名或路径搜索文档"
+      />
+      <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+    </>
+  );
+
+  const renderDocumentList = (): JSX.Element => (
+    <>
+      {isLoading || isSearchLoading ? (
+        <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
+      ) : shownDocs.length === 0 ? (
+        <div className="ki-empty" style={{ border: 'none' }}>
+          <div>
+            <h3>无匹配文档</h3>
+            <p>{isSearching ? '未找到包含该关键词的文件，换个关键词试试。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
+          </div>
+        </div>
+      ) : (
+        <>
+          {shownDocs.map((d) => (
+            <div
+              key={`${d.group}/${d.name}`}
+              className="ki-doc-item"
+              onClick={() => openDocument({ module: d.name, group: d.group, path: d.path })}
+            >
+              <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="ki-doc-item__name">{d.name}</div>
+                {d.path && <div className="ki-doc-item__path">{d.path}</div>}
+                <div className="ki-doc-item__meta">
+                  <span className="ki-badge ki-badge--kb">{d.group}</span>
+                  {(d.tags ?? []).map((t) => (
+                    <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
+                  ))}
+                  {d.vectorized === true && (
+                    <span className="ki-badge ki-badge--vec">RAG</span>
+                  )}
+                </div>
+              </div>
+              <span className="ki-cell-sub" style={{ alignSelf: 'center' }}>
+                查看原文 ›
+              </span>
+            </div>
+          ))}
+        </>
+      )}
+    </>
+  );
+
+  /** 全屏阅读工作区：导航面板在抽屉内部渲染，因此不会被 scrim 遮挡。 */
+  const fullscreenNavigation = (
+    <div
+      className={`ki-reader-navigation${readerGroupCollapsed ? ' ki-reader-navigation--group-collapsed' : ' ki-reader-navigation--group-open'}${readerDocsCollapsed ? ' ki-reader-navigation--docs-collapsed' : ' ki-reader-navigation--docs-open'}`}
+    >
+      <aside className={`ki-reader-nav ki-reader-nav--group${readerGroupCollapsed ? ' ki-reader-nav--collapsed' : ''}`}>
+        {readerGroupCollapsed ? (
+          <button
+            className="ki-reader-nav__collapsed-toggle"
+            onClick={() => {
+              // 展开 Group 树时一并展开文档列表，避免只回来半扇导航
+              setReaderGroupCollapsed(false);
+              setReaderDocsCollapsed(false);
+            }}
+            title="展开 Group 树"
+            aria-label="展开 Group 树"
+            type="button"
+          >
+            <span className="ki-reader-nav__collapsed-mark">{ICON_NAV_TREE}</span>
+          </button>
+        ) : (
+          <>
+            <div className="ki-reader-nav__head">
+              <div>
+                <div className="ki-card__title">Group 树</div>
+                <div className="ki-card__sub">{tree.length} 个目录</div>
+              </div>
+              <div className="ki-reader-nav__actions">
+                <button
+                  className="ki-reader-nav__refresh"
+                  onClick={() => { void queryClient.invalidateQueries(); }}
+                  disabled={fetching > 0}
+                  title="刷新 Group 与文档列表"
+                  type="button"
+                >
+                  {ICON_NAV_REFRESH}
+                  {fetching > 0 ? '刷新中' : '刷新'}
+                </button>
+                <button
+                  className="ki-reader-nav__collapse"
+                  onClick={() => setReaderGroupCollapsed(true)}
+                  title="收起 Group 树"
+                  aria-label="收起 Group 树"
+                  type="button"
+                >
+                  {ICON_NAV_COLLAPSE}
+                </button>
+              </div>
+            </div>
+            <div className="ki-reader-nav__body ki-reader-nav__body--tree">{renderTreeBody()}</div>
+          </>
+        )}
+      </aside>
+
+      <aside className={`ki-reader-nav ki-reader-nav--docs${readerDocsCollapsed ? ' ki-reader-nav--collapsed' : ''}`}>
+        {readerDocsCollapsed ? (
+          <button
+            className="ki-reader-nav__collapsed-toggle"
+            onClick={() => setReaderDocsCollapsed(false)}
+            title="展开文档列表"
+            aria-label="展开文档列表"
+            type="button"
+          >
+            <span className="ki-reader-nav__collapsed-mark">{ICON_NAV_DOC}</span>
+          </button>
+        ) : (
+          <>
+            <div className="ki-reader-nav__head">
+              <div>
+                <div className="ki-card__title">文档</div>
+                <div className="ki-card__sub">
+                  {isSearching ? `搜索「${q.trim()}」 · ${shownDocs.length} 条` : `${shownDocs.length} 条`}
+                </div>
+              </div>
+              <div className="ki-reader-nav__actions">
+                <button
+                  className="ki-reader-nav__collapse"
+                  onClick={() => setReaderDocsCollapsed(true)}
+                  title="收起文档列表"
+                  aria-label="收起文档列表"
+                  type="button"
+                >
+                  {ICON_NAV_COLLAPSE}
+                </button>
+              </div>
+            </div>
+            <div className="ki-reader-nav__filters">{renderDocumentFilters()}</div>
+            <div className="ki-reader-nav__body">{renderDocumentList()}</div>
+          </>
+        )}
+      </aside>
+    </div>
+  );
+
   return (
     <>
       <div className="ki-page-head" style={{ flexShrink: 0 }}>
@@ -339,7 +557,8 @@ export function BrowsePage(): JSX.Element {
         </div>
       </div>
 
-      <div className="ki-split" style={{ minHeight: 0, height: 'calc(100% - 60px)' }}>
+      {/* 高度由 .ki-content-inner 的 grid 行提供（见 ki.css），不在这里按内容估算 */}
+      <div className="ki-split">
         {/* 左：Group 树 */}
         <aside className="ki-split__side">
           <div className="ki-card">
@@ -364,22 +583,7 @@ export function BrowsePage(): JSX.Element {
               </div>
             </div>
             <div className="ki-card__body" style={{ padding: 12 }}>
-              {isLoading ? (
-                <>
-                  <div className="ki-skeleton" style={{ width: '100%', height: 28, marginBottom: 8 }} />
-                  <div className="ki-skeleton" style={{ width: '80%', height: 28, marginBottom: 8 }} />
-                  <div className="ki-skeleton" style={{ width: '90%', height: 28 }} />
-                </>
-              ) : tree.length === 0 ? (
-                <div className="ki-empty" style={{ padding: 24 }}>
-                  <div>
-                    <h3>空知识库</h3>
-                    <p>该 scope 暂无 Group，可前往上传导入。</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="ki-tree-root">{tree.map(renderNode)}</div>
-              )}
+              {renderTreeBody()}
             </div>
           </div>
         </aside>
@@ -410,8 +614,8 @@ export function BrowsePage(): JSX.Element {
               <GroupPathSelect
                 scope={scope}
                 value={activeGroup}
-                onChange={(v) => { setActiveGroup(v); closeDocument(); }}
-                placeholder="选择或输入 Group 路径…"
+                onChange={(v) => { setActiveGroup(v); if (!readerFullscreen) closeDocument(); }}
+                selectOnly
               />
               <input
                 className="ki-form-input"
@@ -422,62 +626,13 @@ export function BrowsePage(): JSX.Element {
                 data-ki-search-input
                 aria-label="按文件名或路径搜索文档"
               />
-              <select
-                className="ki-form-input ki-tag-filter"
-                style={{ maxWidth: 140 }}
-                value={selectedTag}
-                disabled={availableTags.length === 0}
-                onChange={(e) => setSelectedTag(e.target.value)}
-                title={availableTags.length === 0 ? '当前知识库暂无自定义 tag' : '按 tag 过滤文档'}
-              >
-                <option value="">{availableTags.length === 0 ? '暂无 tag' : '全部 tag'}</option>
-                {availableTags.map((t) => (
-                  <option key={t} value={t}>#{t}</option>
-                ))}
-              </select>
+              <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
               <span className="ki-cell-sub" style={{ marginLeft: 'auto' }}>
                 /api/doc/list
               </span>
             </div>
             <div className="ki-card__body" style={{ padding: 12, flex: 1, overflowY: 'auto' }}>
-              {isLoading || isSearchLoading ? (
-                <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
-              ) : shownDocs.length === 0 ? (
-                <div className="ki-empty" style={{ border: 'none' }}>
-                  <div>
-                    <h3>无匹配文档</h3>
-                    <p>{isSearching ? '未找到包含该关键词的文件，换个关键词试试。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
-                  </div>
-                </div>
-              ) : (
-                shownDocs.map((d) => (
-                  <div
-                    key={`${d.group}/${d.name}`}
-                    className="ki-doc-item"
-                    onClick={() => openDocument({ module: d.name, group: d.group, path: d.path })}
-                  >
-                    <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="ki-doc-item__name">{d.name}</div>
-                      {d.path && <div className="ki-doc-item__path">{d.path}</div>}
-                      <div className="ki-doc-item__meta">
-                        <span className="ki-badge ki-badge--kb">{d.group}</span>
-                        {(d.tags ?? []).map((t) => (
-                          <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
-                        ))}
-                        {/* 向量化状态：与总览（搜索页）的 RAG 状态层保持一致——已向量化才出标签，
-                            未向量化无标签即区分。旧版 daemon 不返回 vectorized 时同样不出标签 */}
-                        {d.vectorized === true && (
-                          <span className="ki-badge ki-badge--vec">RAG</span>
-                        )}
-                      </div>
-                    </div>
-                    <span className="ki-cell-sub" style={{ alignSelf: 'center' }}>
-                      查看原文 ›
-                    </span>
-                  </div>
-                ))
-              )}
+              {renderDocumentList()}
             </div>
           </div>
         </section>
@@ -496,6 +651,9 @@ export function BrowsePage(): JSX.Element {
           onBack={goBack}
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
+          fullscreen={readerFullscreen}
+          onFullscreenChange={setReaderFullscreen}
+          fullscreenNavigation={fullscreenNavigation}
         />
       )}
     </>

@@ -2,8 +2,27 @@
  * ModuleDrawer.tsx —— 原文查看抽屉（右侧滑出 + scrim + 复制）
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
+
+/** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
+const ICON_DRAWER_COLLAPSE = (
+  <svg className="ki-drawer__close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M9.5 6.5 15 12l-5.5 5.5" />
+  </svg>
+);
+
+const ICON_NAV_PREV = (
+  <svg className="ki-drawer__nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M14.5 6.5 9 12l5.5 5.5" />
+  </svg>
+);
+
+const ICON_NAV_NEXT = (
+  <svg className="ki-drawer__nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M9.5 6.5 15 12l-5.5 5.5" />
+  </svg>
+);
 
 interface ModuleDrawerProps {
   scope: string;
@@ -18,6 +37,11 @@ interface ModuleDrawerProps {
   onBack?: () => void;
   canGoForward?: boolean;
   onForward?: () => void;
+  /** 受控全屏状态；传入后由外层 BrowsePage 保留状态，切换文档不会丢失。 */
+  fullscreen?: boolean;
+  onFullscreenChange?: (fullscreen: boolean) => void;
+  /** 全屏时显示在阅读正文左侧的导航工作区（Group 树 + 文档列表）。 */
+  fullscreenNavigation?: ReactNode;
 }
 
 export function ModuleDrawer({
@@ -32,13 +56,22 @@ export function ModuleDrawer({
   onBack,
   canGoForward = false,
   onForward,
+  fullscreen: controlledFullscreen,
+  onFullscreenChange,
+  fullscreenNavigation,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [internalFullscreen, setInternalFullscreen] = useState(false);
+  const fullscreen = controlledFullscreen ?? internalFullscreen;
+
+  const updateFullscreen = useCallback((next: boolean): void => {
+    if (controlledFullscreen === undefined) setInternalFullscreen(next);
+    onFullscreenChange?.(next);
+  }, [controlledFullscreen, onFullscreenChange]);
 
   useEffect(() => {
     if (content !== null || !fetcher || !group) return;
@@ -79,17 +112,63 @@ export function ModuleDrawer({
     }
   }, [content]);
 
-  /** ESC 关闭 + body 滚动锁定 */
+  /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const handler = (e: KeyboardEvent): void => { if (e.key === 'Escape') onClose(); };
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      if (fullscreen) updateFullscreen(false);
+      else onClose();
+    };
     window.addEventListener('keydown', handler);
     return () => {
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [onClose]);
+  }, [fullscreen, onClose, updateFullscreen]);
+
+  const body = (
+    <div className="ki-drawer__body">
+      {copyFailed && (
+        <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
+      )}
+      {loading ? (
+        <div className="ki-drawer__status">
+          <div className="ki-skeleton" style={{ width: '60%', height: 20, marginBottom: 10 }} />
+          <div className="ki-skeleton" style={{ width: '100%', height: 14, marginBottom: 8 }} />
+          <div className="ki-skeleton" style={{ width: '90%', height: 14, marginBottom: 8 }} />
+          <div className="ki-skeleton" style={{ width: '75%', height: 14 }} />
+        </div>
+      ) : error ? (
+        <div className="ki-drawer__status">
+          <div className="ki-drawer__status-icon">⚠</div>
+          <h3>加载失败</h3>
+          <p>{error}</p>
+        </div>
+      ) : content === null ? (
+        <div className="ki-drawer__status">
+          <div className="ki-drawer__status-icon">📄</div>
+          <h3>无原文内容</h3>
+          <p>该文档暂无可预览的原文</p>
+        </div>
+      ) : (
+        <article className="ki-markdown ki-markdown--drawer">
+          <MarkdownPreview
+            text={content}
+            assetBase={group ? { scope, group } : undefined}
+            onLocalLink={onLocalLink}
+          />
+        </article>
+      )}
+    </div>
+  );
+
+  const foot = content ? (
+    <footer className="ki-drawer__foot">
+      <span className="ki-cell-sub">{(content.length / 1024).toFixed(1)} KB · Markdown</span>
+    </footer>
+  ) : null;
 
   return (
     <>
@@ -100,11 +179,11 @@ export function ModuleDrawer({
           <button
             className="ki-drawer__close"
             onClick={onClose}
-            title="关闭 (ESC)"
+            title="收起 (ESC)"
             type="button"
-            aria-label="关闭"
+            aria-label="收起"
           >
-            →<span className="ki-drawer__close-label">收起</span>
+            {ICON_DRAWER_COLLAPSE}
           </button>
           {canGoBack && onBack && (
             <button
@@ -114,7 +193,7 @@ export function ModuleDrawer({
               type="button"
               aria-label="返回上一级文档"
             >
-              ←<span className="ki-drawer__back-label">上一级</span>
+              {ICON_NAV_PREV}<span className="ki-drawer__back-label">上一级</span>
             </button>
           )}
           {canGoForward && onForward && (
@@ -125,7 +204,7 @@ export function ModuleDrawer({
               type="button"
               aria-label="前进到下一级文档"
             >
-              →<span className="ki-drawer__forward-label">下一级</span>
+              {ICON_NAV_NEXT}<span className="ki-drawer__forward-label">下一级</span>
             </button>
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -153,7 +232,7 @@ export function ModuleDrawer({
             )}
             <button
               className="ki-drawer__fullscreen"
-              onClick={() => setFullscreen((v) => !v)}
+              onClick={() => updateFullscreen(!fullscreen)}
               title={fullscreen ? '退出全屏' : '全屏查看'}
               type="button"
             >
@@ -162,46 +241,19 @@ export function ModuleDrawer({
           </div>
         </header>
 
-        {/* 内容区 */}
-        <div className="ki-drawer__body">
-          {copyFailed && (
-            <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
-          )}
-          {loading ? (
-            <div className="ki-drawer__status">
-              <div className="ki-skeleton" style={{ width: '60%', height: 20, marginBottom: 10 }} />
-              <div className="ki-skeleton" style={{ width: '100%', height: 14, marginBottom: 8 }} />
-              <div className="ki-skeleton" style={{ width: '90%', height: 14, marginBottom: 8 }} />
-              <div className="ki-skeleton" style={{ width: '75%', height: 14 }} />
+        {fullscreen && fullscreenNavigation ? (
+          <div className="ki-reader-workspace">
+            {fullscreenNavigation}
+            <div className="ki-reader-workspace__main">
+              {body}
+              {foot}
             </div>
-          ) : error ? (
-            <div className="ki-drawer__status">
-              <div className="ki-drawer__status-icon">⚠</div>
-              <h3>加载失败</h3>
-              <p>{error}</p>
-            </div>
-          ) : content === null ? (
-            <div className="ki-drawer__status">
-              <div className="ki-drawer__status-icon">📄</div>
-              <h3>无原文内容</h3>
-              <p>该文档暂无可预览的原文</p>
-            </div>
-          ) : (
-            <article className="ki-markdown ki-markdown--drawer">
-              <MarkdownPreview
-                text={content}
-                assetBase={group ? { scope, group } : undefined}
-                onLocalLink={onLocalLink}
-              />
-            </article>
-          )}
-        </div>
-
-        {/* 底部状态栏 */}
-        {content && (
-          <footer className="ki-drawer__foot">
-            <span className="ki-cell-sub">{(content.length / 1024).toFixed(1)} KB · Markdown</span>
-          </footer>
+          </div>
+        ) : (
+          <>
+            {body}
+            {foot}
+          </>
         )}
       </aside>
     </>
