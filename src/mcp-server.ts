@@ -398,7 +398,7 @@ function hasFlagValue(args: string[], name: string): boolean {
 }
 
 /**
- * 以守护进程方式重新拉起 HTTP 单例（detached + stdio 忽略，父进程立即退出）。
+ * 以守护进程方式重新拉起 HTTP 单例（detached + stdio 忽略，父进程负责回传预检报告）。
  * 与 bin/ki.mjs 的 daemon 启动路径一致：npx jiti <mcp-server.ts> --http --daemon ...
  * 返回子进程句柄，供 restart 就绪等待使用（探测子进程是否在启动阶段退出）。
  */
@@ -500,6 +500,17 @@ async function runRestartCommand(args: string[]): Promise<void> {
   // 复用 parseMcpArgs 的完整 token 校验链（--token > KI_MCP_TOKEN > 托管文件），仅用于验证不采信其返回值。
   if (!isLoopbackHost(host)) {
     parseMcpArgs(['--http', '--host', host, '--port', String(port)]);
+  }
+
+  // 重启前在父进程完成预检：embedding 外部服务失败重试 1 次后只告警，
+  // 同时让配置/目录等硬错误在停止旧实例前就 fail-loud，避免先停掉可用服务。
+  const preflight = await runHealthCheck(config, { embeddingFailure: 'warn' });
+  process.stderr.write(renderHealthReport(preflight) + '\n');
+  if (preflight.fail > 0) {
+    failJson(
+      '重启预检失败：存在 ❌ 硬失败项，旧实例未停止。请运行 `ki doctor` 排查配置或目录问题。',
+      'MCP_RESTART_PREFLIGHT_FAILED',
+    );
   }
 
   // 关闭现有实例（复用 stop 的身份校验 + SIGTERM 优雅退出 + SIGKILL 兜底 + lock 清理）
@@ -681,10 +692,12 @@ export async function startMcpServer(): Promise<void> {
   }
 
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
-  // stdio 协议占用 stdout，报告一律写 stderr；有失败项拒绝启动。
+  // stdio 协议占用 stdout，报告一律写 stderr；embedding 外部服务失败仅警告，配置/目录等硬失败仍拒绝启动。
   try {
     const config = loadConfig();
-    const report = await runHealthCheck(config);
+    const report = await runHealthCheck(config, {
+      embeddingFailure: 'warn',
+    });
     process.stderr.write(renderHealthReport(report) + '\n');
     if (report.fail > 0) {
       process.stderr.write(

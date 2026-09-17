@@ -9,8 +9,8 @@
  *     见 config-schema.ts）：字段不合法时 loadConfig 直接抛错，本检查项只在加载成功后报告
  *   - embedding 检查用 1 条最短文本（"test"）发一次真实请求，三合一验证
  *     URL 连通性 + 密钥有效性 + 维度匹配（复用 SiliconFlowProvider 现成错误语义）
- *   - 超时 8s（timeoutMs），重试 1 次（retries:1），容忍瞬时网络抖动（冷 DNS/TLS 握手/临时拥塞），
- *     避免常驻 MCP 因单次瞬断被启动预检拒绝；同时上限有界，网络确实不通时不会长时间卡住
+ *   - 超时 8s（timeoutMs），重试 1 次（retries:1），容忍瞬时网络抖动（冷 DNS/TLS 握手/临时拥塞）；
+ *     健康检查默认将 embedding 失败记为 fail，MCP 启动预检可显式降级为 warn，避免外部服务故障阻断 MCP
  *   - zvec Collection 用按 scope 根目录下的子目录判定（不 open，避开与常驻 server 的文件锁冲突）
  */
 
@@ -35,6 +35,20 @@ export interface HealthReport {
   fail: number;
 }
 
+export interface HealthCheckOptions {
+  /**
+   * embedding 探测失败的严重级别。doctor/API 默认 fail；MCP 启动预检使用 warn，
+   * 让关键词检索等不依赖 embedding 的能力仍可启动。
+   */
+  embeddingFailure?: 'fail' | 'warn';
+}
+
+interface EmbeddingCheckResult {
+  items: HealthItem[];
+  /** 仅网络/超时/可重试 HTTP 错误可在 MCP 启动预检中降级。 */
+  degradable: boolean;
+}
+
 /** 目录存在且可写检查 */
 function checkDir(name: string, dir: string): HealthItem {
   if (!fs.existsSync(dir)) {
@@ -52,7 +66,7 @@ function checkDir(name: string, dir: string): HealthItem {
  * embedding 三合一检查：发 1 条最短请求，按错误语义拆分为
  * URL 连通性 / 密钥有效性 / 维度匹配 三个报告项。
  */
-async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
+async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
   const emb = getEmbeddingConfig(config);
   const nameConn = 'URL 连通性';
   const nameKey = '密钥有效性';
@@ -65,11 +79,14 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
   // apiKey 缺失时无法发起请求，三项均标失败（根因见 apiKey 检查项）
   if (!effectiveApiKey) {
     const detail = '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用），跳过检查';
-    return [
-      { name: nameConn, status: 'fail', detail },
-      { name: nameKey, status: 'fail', detail },
-      { name: nameDim, status: 'fail', detail },
-    ];
+    return {
+      items: [
+        { name: nameConn, status: 'fail', detail },
+        { name: nameKey, status: 'fail', detail },
+        { name: nameDim, status: 'fail', detail },
+      ],
+      degradable: false,
+    };
   }
 
   let provider: SiliconFlowProvider;
@@ -83,26 +100,32 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
   } catch (err) {
     // 构造期错误（EmbeddingConfigError）：apiKey / baseURL 非法
     const detail = (err as Error).message;
-    return [
-      { name: nameConn, status: 'fail', detail },
-      { name: nameKey, status: 'fail', detail },
-      { name: nameDim, status: 'fail', detail },
-    ];
+    return {
+      items: [
+        { name: nameConn, status: 'fail', detail },
+        { name: nameKey, status: 'fail', detail },
+        { name: nameDim, status: 'fail', detail },
+      ],
+      degradable: false,
+    };
   }
 
   try {
     const vectors = await provider.embed(['test'], { timeoutMs: 8000, retries: 1 });
     const actualDim = vectors[0]?.length ?? 0;
     const dimOk = actualDim === emb.dimension;
-    return [
-      { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
-      { name: nameKey, status: 'pass', detail: `embedding 请求成功（维度 ${actualDim}）` },
-      {
-        name: nameDim,
-        status: dimOk ? 'pass' : 'fail',
-        detail: `config=${emb.dimension}, 实际=${actualDim}`,
-      },
-    ];
+    return {
+      items: [
+        { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
+        { name: nameKey, status: 'pass', detail: `embedding 请求成功（维度 ${actualDim}）` },
+        {
+          name: nameDim,
+          status: dimOk ? 'pass' : 'fail',
+          detail: `config=${emb.dimension}, 实际=${actualDim}`,
+        },
+      ],
+      degradable: false,
+    };
   } catch (err) {
     const e = err as Error & { code?: string; data?: Record<string, unknown> };
     const code = e.code ?? '';
@@ -110,37 +133,47 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
 
     // 维度不匹配：请求到达且鉴权通过，仅维度不符
     if (e.data && e.data.actualDim !== undefined) {
-      return [
-        { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
-        { name: nameKey, status: 'pass', detail: 'embedding 请求成功' },
-        {
-          name: nameDim,
-          status: 'fail',
-          detail: `config=${e.data.expectedDim ?? emb.dimension}, 实际=${e.data.actualDim}`,
-        },
-      ];
+      return {
+        items: [
+          { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
+          { name: nameKey, status: 'pass', detail: 'embedding 请求成功' },
+          {
+            name: nameDim,
+            status: 'fail',
+            detail: `config=${e.data.expectedDim ?? emb.dimension}, 实际=${e.data.actualDim}`,
+          },
+        ],
+        degradable: false,
+      };
     }
 
     // 401 / 403：连通但密钥无效
     if (code === 'HTTP_401' || code === 'HTTP_403') {
-      return [
-        { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
-        { name: nameKey, status: 'fail', detail: `密钥无效（${code}）` },
-        { name: nameDim, status: 'fail', detail: '未获取到向量，无法校验维度' },
-      ];
+      return {
+        items: [
+          { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
+          { name: nameKey, status: 'fail', detail: `密钥无效（${code}）` },
+          { name: nameDim, status: 'fail', detail: '未获取到向量，无法校验维度' },
+        ],
+        degradable: false,
+      };
     }
 
     // 其余（HTTP_* / TIMEOUT / NETWORK）：连通性失败
+    const retryDetail = e.data?.nonRetryable === true ? '未重试（错误不可重试）' : '已重试1次';
     const connDetail = code === 'TIMEOUT'
       ? `连接超时（>8s，已重试1次）：${emb.baseURL}/embeddings`
       : code === 'NETWORK'
-        ? `网络不可达 / DNS 解析失败：${emb.baseURL}`
-        : `请求失败（${code || 'ERROR'}）：${msg}`;
-    return [
-      { name: nameConn, status: 'fail', detail: connDetail },
-      { name: nameKey, status: 'fail', detail: '连通性失败，跳过' },
-      { name: nameDim, status: 'fail', detail: '连通性失败，跳过' },
-    ];
+        ? `网络不可达 / DNS 解析失败（${retryDetail}）：${emb.baseURL}`
+        : `请求失败（${code || 'ERROR'}，${retryDetail}）：${msg}`;
+    return {
+      items: [
+        { name: nameConn, status: 'fail', detail: connDetail },
+        { name: nameKey, status: 'fail', detail: '连通性失败，跳过' },
+        { name: nameDim, status: 'fail', detail: '连通性失败，跳过' },
+      ],
+      degradable: e.data?.nonRetryable !== true,
+    };
   }
 }
 
@@ -148,7 +181,7 @@ async function checkEmbedding(config: KiConfig): Promise<HealthItem[]> {
  * 执行完整健康检查，返回结构化报告。
  * 注：调用方需保证 config 已成功 loadConfig（解析失败会在 loadConfig 抛出）。
  */
-export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
+export async function runHealthCheck(config: KiConfig, options: HealthCheckOptions = {}): Promise<HealthReport> {
   const items: HealthItem[] = [];
 
   // 1. 配置文件存在且可解析（字段名/类型/取值校验在 loadConfig 阶段 fail-loud，
@@ -201,8 +234,14 @@ export async function runHealthCheck(config: KiConfig): Promise<HealthReport> {
   }
 
   // 6~8. embedding 连通性 / 密钥 / 维度（三合一请求）
-  const embItems = await checkEmbedding(config);
-  items.push(...embItems);
+  {
+    const embeddingResult = await checkEmbedding(config);
+    const embeddingFailureStatus = options.embeddingFailure ?? 'fail';
+    const normalizedEmbeddingItems = embeddingFailureStatus === 'warn' && embeddingResult.degradable
+      ? embeddingResult.items.map((item) => item.status === 'fail' ? { ...item, status: 'warn' as const } : item)
+      : embeddingResult.items;
+    items.push(...normalizedEmbeddingItems);
+  }
 
   // 9. zvec collection（目录非空判定，不 open）
   const collectionsRoot = getCollectionsRoot(config);

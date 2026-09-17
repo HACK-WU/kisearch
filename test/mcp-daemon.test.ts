@@ -109,6 +109,73 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
     assert.match(stderr, /ki mcp --http --host 0\.0\.0\.0/); // 前台复跑指引（-d 已剥离）
   });
 
+  it('embedding 网络失败重试后仅告警，HTTP daemon 仍能启动', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-embed-warn-'));
+    const port = randPort();
+    const configPath = path.join(home, '.ki', 'config.json');
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({
+        dataDir: path.join(home, '.ki/kb'),
+        vectorDir: path.join(home, '.ki/vector'),
+        backupDir: path.join(home, '.ki/backup'),
+        embedding: {
+          provider: 'siliconflow',
+          baseURL: 'https://127.0.0.1:1/v1',
+          model: 'test-model',
+          dimension: 1,
+          apiKey: 'test',
+        },
+        scopes: { default: {} },
+      }));
+      for (const dir of ['kb', 'vector', 'backup']) fs.mkdirSync(path.join(home, '.ki', dir), { recursive: true });
+
+      const result = runCli(
+        ['mcp', '--http', '--port', String(port), '-d'],
+        { HOME: home, KI_CONFIG_PATH: configPath },
+      );
+      assert.strictEqual(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
+      assert.match(result.stdout, /已在后台启动/);
+    } finally {
+      runCli(['mcp', 'stop', '--port', String(port)], { HOME: home, KI_CONFIG_PATH: configPath });
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('ki mcp restart 遇到 embedding 网络失败仍能就绪', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-restart-embed-warn-'));
+    const port = randPort();
+    const configPath = path.join(home, '.ki', 'config.json');
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      for (const dir of ['kb', 'vector', 'backup']) fs.mkdirSync(path.join(home, '.ki', dir), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({
+        dataDir: path.join(home, '.ki/kb'),
+        vectorDir: path.join(home, '.ki/vector'),
+        backupDir: path.join(home, '.ki/backup'),
+        embedding: {
+          provider: 'siliconflow',
+          baseURL: 'https://127.0.0.1:1/v1',
+          model: 'test-model',
+          dimension: 1,
+          apiKey: 'test',
+        },
+        scopes: { default: {} },
+      }));
+
+      const env = { HOME: home, KI_CONFIG_PATH: configPath };
+      const started = runCli(['mcp', '--http', '--port', String(port), '-d'], env);
+      assert.strictEqual(started.status, 0, `stdout=${started.stdout} stderr=${started.stderr}`);
+
+      const restarted = runCli(['mcp', 'restart', '--port', String(port)], env);
+      assert.strictEqual(restarted.status, 0, `stdout=${restarted.stdout} stderr=${restarted.stderr}`);
+      assert.match(restarted.stdout, /"ready": true/);
+    } finally {
+      runCli(['mcp', 'stop', '--port', String(port)], { HOME: home, KI_CONFIG_PATH: configPath });
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('回环正常启动 + -d → exit 0 且服务真实就绪（探测不误杀）', { skip: !process.env.SILICONFLOW_API_KEY && '需真实 embedding 密钥（预检含网络探测）' }, async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-ok-'));
     const port = randPort();

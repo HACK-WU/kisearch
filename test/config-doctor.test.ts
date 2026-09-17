@@ -650,6 +650,34 @@ describe('C. health-check —— runHealthCheck', () => {
     assert.strictEqual(itemOf(report, '配置文件')?.status, 'pass');
   });
 
+  it('embedding 网络失败可在 MCP 启动预检中降级为 warn，doctor 默认仍为 fail', async () => {
+    const config = baseConfig({
+      embedding: {
+        provider: 'siliconflow',
+        baseURL: 'https://127.0.0.1:1/v1',
+        model: 'test-model',
+        dimension: 1,
+        queryTimeoutMs: 3000,
+        apiKey: 'test',
+      },
+    });
+    const startupReport = await runHealthCheck(config, { embeddingFailure: 'warn' });
+    assert.strictEqual(itemOf(startupReport, 'URL 连通性')?.status, 'warn');
+    assert.strictEqual(itemOf(startupReport, '密钥有效性')?.status, 'warn');
+    assert.strictEqual(itemOf(startupReport, '维度匹配')?.status, 'warn');
+    assert.strictEqual(startupReport.fail, 0);
+
+    const doctorReport = await runHealthCheck(config);
+    assert.strictEqual(itemOf(doctorReport, 'URL 连通性')?.status, 'fail');
+
+    const invalidConfigReport = await runHealthCheck(
+      { ...config, embedding: { ...config.embedding, baseURL: 'http://invalid.example/v1' } },
+      { embeddingFailure: 'warn' },
+    );
+    assert.strictEqual(itemOf(invalidConfigReport, 'URL 连通性')?.status, 'fail');
+    assert.ok(invalidConfigReport.fail > 0);
+  });
+
   it('无 default scope → scopes.default warn', async () => {
     const report = await runHealthCheck(baseConfig({ scopes: {} }));
     assert.strictEqual(itemOf(report, 'scopes.default')?.status, 'warn');

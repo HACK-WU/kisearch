@@ -272,7 +272,7 @@ ki mcp token update <id> --scope all    # 修改 Token 授权 scope
 ki mcp token delete <id>                # 删除 Token（立即失效）
 ```
 
-> **启动预检**：HTTP daemon 启动前自动执行健康检查（等价 `ki doctor`），报告写入 stderr（不污染 stdio）。stdio 客户端只负责桥接并等待 daemon 就绪；daemon 不可用或配置不匹配时 fail-loud。
+> **启动预检**：HTTP daemon 启动前自动执行健康检查，报告写入 stderr（不污染 stdio）。embedding 连通性失败会重试 1 次，仍失败时记为 ⚠️ 警告并继续启动；配置文件、目录、apiKey 等硬错误仍 fail-loud。stdio 客户端只负责桥接并等待 daemon 就绪。
 
 ### MCP 客户端配置
 
