@@ -2,7 +2,7 @@
  * ModuleDrawer.tsx —— 原文查看抽屉（右侧滑出 + scrim + 复制）
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 
 /** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
@@ -21,6 +21,19 @@ const ICON_NAV_PREV = (
 const ICON_NAV_NEXT = (
   <svg className="ki-drawer__nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M9.5 6.5 15 12l-5.5 5.5" />
+  </svg>
+);
+
+/** 正文快速滚动按钮图标 */
+const ICON_SCROLL_TOP = (
+  <svg className="ki-scroll-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M6 14.5 12 8.5l6 6" />
+  </svg>
+);
+
+const ICON_SCROLL_BOTTOM = (
+  <svg className="ki-scroll-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M6 9.5 12 15.5l6-6" />
   </svg>
 );
 
@@ -67,8 +80,14 @@ export function ModuleDrawer({
   const [copyFailed, setCopyFailed] = useState(false);
   const [internalFullscreen, setInternalFullscreen] = useState(false);
   const fullscreen = controlledFullscreen ?? internalFullscreen;
+  /** 正文滚动容器 */
+  const bodyRef = useRef<HTMLDivElement>(null);
+  /** 全屏切换前记下的阅读位置（正文容器会换父节点被重建，切换后按此恢复） */
+  const savedScrollRef = useRef<number | null>(null);
 
   const updateFullscreen = useCallback((next: boolean): void => {
+    // 必须在切换前记录：重建后 ref 已指向新节点，读不到旧位置
+    savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
     if (controlledFullscreen === undefined) setInternalFullscreen(next);
     onFullscreenChange?.(next);
   }, [controlledFullscreen, onFullscreenChange]);
@@ -128,8 +147,56 @@ export function ModuleDrawer({
     };
   }, [fullscreen, onClose, updateFullscreen]);
 
+  /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
+  const [atTop, setAtTop] = useState(true);
+  const [atBottom, setAtBottom] = useState(true);
+
+  const syncScrollState = useCallback((): void => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    setAtTop(el.scrollTop <= 2);
+    // 内容不足一屏时 max<=0：视为同时处于顶与底，按钮组据此整体隐藏
+    setAtBottom(max <= 2 || el.scrollTop >= max - 2);
+  }, []);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    syncScrollState();
+    el.addEventListener('scroll', syncScrollState, { passive: true });
+    // 文档加载完成后（含图片 / Mermaid 撑高内容）与窗口尺寸变化时重新同步
+    window.addEventListener('resize', syncScrollState);
+    return () => {
+      el.removeEventListener('scroll', syncScrollState);
+      window.removeEventListener('resize', syncScrollState);
+    };
+    // fullscreen 切换会让正文容器换父节点并被重建，必须重新绑定到新元素
+  }, [syncScrollState, content, loading, fullscreen]);
+
+  /** 全屏切换后正文容器被重建，恢复到切换前的阅读位置（布局阶段同步执行，不闪回顶部） */
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    if (!el || savedScrollRef.current === null) return;
+    el.scrollTop = savedScrollRef.current;
+    savedScrollRef.current = null;
+    syncScrollState();
+  }, [fullscreen, syncScrollState]);
+
+  const scrollToTop = useCallback((): void => {
+    bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const scrollToBottom = useCallback((): void => {
+    const el = bodyRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, []);
+
+  /** 内容不足一屏时不渲染按钮，避免无意义的悬浮控件 */
+  const scrollable = !(atTop && atBottom);
+
   const body = (
-    <div className="ki-drawer__body">
+    <div className="ki-drawer__body" ref={bodyRef}>
       {copyFailed && (
         <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
       )}
@@ -254,6 +321,32 @@ export function ModuleDrawer({
             {body}
             {foot}
           </>
+        )}
+
+        {/* 正文快速滚动：仅在正文超出一屏时出现，已在顶/底的一侧置灰 */}
+        {content !== null && scrollable && (
+          <div className="ki-scroll-nav" role="group" aria-label="正文快速滚动">
+            <button
+              type="button"
+              className="ki-scroll-nav__btn"
+              onClick={scrollToTop}
+              disabled={atTop}
+              title="回到顶部"
+              aria-label="回到顶部"
+            >
+              {ICON_SCROLL_TOP}
+            </button>
+            <button
+              type="button"
+              className="ki-scroll-nav__btn"
+              onClick={scrollToBottom}
+              disabled={atBottom}
+              title="滑到底部"
+              aria-label="滑到底部"
+            >
+              {ICON_SCROLL_BOTTOM}
+            </button>
+          </div>
         )}
       </aside>
     </>

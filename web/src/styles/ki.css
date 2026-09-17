@@ -1122,6 +1122,39 @@ a:hover { text-decoration: underline; }
   font-size: 11px;
 }
 
+/* 正文快速滚动按钮：悬浮在正文区右下（抽屉底部状态栏之上），仅正文超出一屏时渲染 */
+.ki-scroll-nav {
+  position: absolute;
+  right: 20px;
+  bottom: 52px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ki-scroll-nav__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 50%;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  box-shadow: var(--ki-shadow-1);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast), opacity var(--ki-motion-fast);
+}
+.ki-scroll-nav__btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-scroll-nav__btn:disabled { opacity: 0.35; cursor: default; }
+.ki-scroll-nav__icon { width: 16px; height: 16px; display: block; }
+
 /* 遮罩层 */
 .ki-drawer__scrim {
   position: fixed;
