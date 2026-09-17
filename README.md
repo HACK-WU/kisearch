@@ -438,18 +438,18 @@ ki-memory-write（查重后写入并校验）
 ```bash
 # 一键安装本仓库全部 skill 到目标项目
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/kisearch -t /path/to/your-project
+  bash -s -- --repo HACK-WU/kisearch -t /path/to/your-project
 
 # 只安装指定 skill（如 ki-search）
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/kisearch -n ki-search -t /path/to/your-project
+  bash -s -- --repo HACK-WU/kisearch -n ki-search -t /path/to/your-project
 ```
 
 **安装三个 ki 配套 Skill**：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- install --repo HACK-WU/skills \
+  bash -s -- --repo HACK-WU/skills \
   -n ki-search-first,ki-memory-lookup,ki-memory-write \
   -t /path/to/your-project
 ```
