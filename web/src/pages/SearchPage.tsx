@@ -105,17 +105,9 @@ export function SearchPage(): JSX.Element {
     }
   };
 
-  /**
-   * 一键清空：输入框 + 结果 + 提示条一起回初始态。
-   * 只清输入会留下"输入框空了、结果还是上一次的"错位状态，故一并重置并把焦点交还输入框。
-   */
+  /** 只清空搜索输入，保留当前结果列表，方便用户继续查看或复制结果。 */
   const clearAll = (): void => {
     setQuery('');
-    setResults(null);
-    setTotal(0);
-    setError(null);
-    setDegradeReason(null);
-    setSkippedScopes([]);
     inputRef.current?.focus();
   };
 
