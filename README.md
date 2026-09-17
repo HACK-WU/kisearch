@@ -1,7 +1,7 @@
 # kisearch
 
 <p align="center">
-  <strong>AI Agent 知识索引系统 · RAG 语义检索 + 结构化知识索引的结合体</strong>
+  <strong>AI Agent 知识索引与长期记忆系统 · RAG 语义检索 + 结构化知识索引</strong>
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
 ## 📑 目录
 
 - [📖 项目介绍](#intro)
+- [🧠 Agent 长期记忆](#agent-memory)
 - [🆚 与常规 RAG 的差异](#why-not-rag)
 - [🧩 核心概念](#concepts)
 - [✨ 核心特性](#features)
@@ -34,13 +35,14 @@
 
 ## <a id="intro"></a>📖 项目介绍
 
-`kisearch`（CLI 命令：`ki`）为 AI Agent 提供**结构化知识索引 + 向量语义检索**能力，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
+`kisearch`（CLI 命令：`ki`）是面向 AI Agent 的**结构化知识索引与长期记忆系统**，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不仅能导入和检索项目文档，也允许 Agent 通过 MCP **写入、更新、组织、回忆和删除记忆**，让知识在不同会话之间持续积累。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
 
 > 底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） 
 
 ```
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
 交付层  kisearch：Group 树导航 · Relation 热缓存 · 原文全文交付
+记忆层  MCP 工具：Agent 写入 · 更新 · 回忆 · 组织 · 删除
 ```
 
 ![kisearch 架构](./assets/architecture.svg)
@@ -60,6 +62,39 @@ cd web && npm install && npm run build   # 构建前端产物（web/dist）
 ki mcp --http --web                      # 启动服务（提供静态页面 + /api/* 扩展路由）
 # 浏览器打开 http://127.0.0.1:7423/
 ```
+
+## <a id="agent-memory"></a>🧠 作为 AI Agent 的长期记忆系统
+
+知识库解决的是“有哪些资料可以查”，记忆系统解决的是“Agent 在不同会话之间需要记住什么、如何更新以及何时遗忘”。`kisearch` 使用同一套 Group / Relation / local KB / 向量索引，同时覆盖这两种场景：
+
+| 使用视角 | 典型内容 | 主要操作方式 |
+|---------|---------|-------------|
+| **知识库** | 外部 Wiki、项目文档、架构说明、API 资料 | `ki import`、`ki search`、MCP 查询工具 |
+| **Agent 记忆** | 用户偏好、项目约定、历史决策、排障结论、任务上下文 | Agent 通过 MCP 写入、更新、检索和删除 |
+
+MCP 工具形成了可持续的记忆闭环：
+
+| Agent 动作 | MCP 工具 | 作用 |
+|-----------|---------|------|
+| 回忆 | `ki_search`、`ki_query_group`、`ki_get_module_info` | 语义检索、按结构导航、读取原文 |
+| 记住 | `ki_sync_relation`、`ki_bulk_sync_relation` | 写入带 Group / Relation 的持久化结构化记忆 |
+| 更新 | `ki_sync_relation`、`ki_bulk_sync_relation` | 按稳定的 Group + Relation 覆盖更新已有记忆 |
+| 组织 | `ki_manage_index_create`、标签、scope | 建立记忆层级、分类和项目隔离 |
+| 遗忘 | `ki_delete_relation` | 删除指定 Relation 及其关联的 KB、缓存和向量数据 |
+
+典型使用流程：
+
+```text
+Agent 从当前对话或代码中提取稳定事实
+        ↓
+通过 ki_sync_relation 写入结构化记忆
+        ↓
+后续会话通过 ki_search / ki_query_group 回忆
+        ↓
+事实变化时覆盖更新；过期或错误时删除
+```
+
+这里的“记忆”是**可由 Agent 管理的持久化记忆基础设施**：系统负责存储、索引、检索和生命周期管理，是否值得记住、写入什么内容以及何时更新，仍由 Agent 的工作流或提示词决定。
 
 ## <a id="why-not-rag"></a>🆚 与常规 RAG 的差异
 
@@ -88,19 +123,20 @@ ki mcp --http --web                      # 启动服务（提供静态页面 + /
 | `Relation` | 某个 Group 下可被检索和命中的知识条目（含 memoryId / sourcePath） |
 | `module-info` | Relation 对应的 Markdown 原文说明 |
 | 标签（Tag） | `ki-search`（内容）/ `ki-path`（路径）/ `ki-relation`（关系）三层标签 |
-| 记忆库 | 跨会话持续积累的知识，带评分衰减与冷热治理 |
+| 记忆（Memory） | Agent 可跨会话持续积累、更新和删除的知识，带评分衰减与冷热治理 |
 
 ## <a id="features"></a>✨ 核心特性
 
 - **结构化知识索引**：Group 树导航、Relation 热缓存、关键词词云 —— 不是无序 chunk
+- **Agent 长期记忆**：通过 MCP 写入、更新、检索、组织和删除记忆，支持跨会话持续积累
 - **混合检索（Hybrid）**：语义向量 + BM25 全文 + RRF 融合排序；camelCase 符号（类名/方法名）可精确召回
 - **双路径查询**：索引直查（已知路径 → 原文）+ 语义检索（自然语言 → 向量 → 反查原文）
 - **原文交付**：search 结果按 memoryId 反查定位（group / relation），交付原文全文而非片段
 - **三层标签**：`ki-search` / `ki-relation` / `ki-path`，按需过滤提升准确率；默认搜全部且按标签限流（内容优先）
 - **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
 - **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
-- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 11 个 MCP 工具（stdio / HTTP 共享单例）
-- **MCP 安全约束**：工具集不含 scope / doc 级破坏性操作，仅 `ki_delete_relation` 可按 Group+Relation 删除单条知识条目
+- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 13 个 MCP 工具（stdio / HTTP 共享单例）
+- **MCP 安全约束**：不暴露 scope / doc 级联删除和 `--force` 操作；`ki_delete_relation` 仅按 Group+Relation 删除单条知识条目，`ki_manage_index_delete` 仅允许删除空 Group 节点
 
 ## <a id="quickstart"></a>🚀 快速开始
 
@@ -275,7 +311,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 > 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate --scope <scope>` 生成授权 Token，再用 `ki mcp token list` 查看明文填入上方 `<your-token>`。
 > HTTP 客户端应使用一致的连接 URL；本机 IDE 可以继续保留 stdio `command: ki mcp`，stdio 会桥接到同一 daemon，不会另开 zvec owner。
 
-### 暴露的工具（11 个）
+### 暴露的工具（13 个）
 
 | 工具 | 功能 | 对应路径 |
 |------|------|---------|
@@ -283,6 +319,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 | `ki_get_module_info` | 读取本地 KB Markdown 原文 | 索引直查 |
 | `ki_manage_index_create` | 创建 Group 节点 | — |
 | `ki_manage_index_list` | 列出所有 scope | — |
+| `ki_manage_index_delete` | 删除空 Group 节点（非空节点拒绝删除） | — |
 | `ki_sync_relation` | 写入单条 Relation（向量 + KB 双写，`vector=false` 非向量化） | 写入 |
 | `ki_bulk_sync_relation` | 批量写入 Relation（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | 写入 |
 | `ki_delete_relation` | 删除 Relation（四层清理） | — |
@@ -293,7 +330,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 | `ki_tag_list` | 列出 scope 下 tag 及文档数 | — |
 
 > `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（每个标签最多返回 `limit` 条，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
-> 工具集遵循零破坏性约束，不含 delete/force 操作。
+> MCP 工具不提供 scope / doc 级联删除和 `--force` 操作：`ki_delete_relation` 只能删除单条 Relation，`ki_manage_index_delete` 只能删除空 Group 节点；需要级联或强制操作时使用 CLI。
 
 ## <a id="kb-import"></a>📥 知识库导入
 
@@ -356,8 +393,45 @@ ki import --scope my-project --source /path/to/wiki --group Wiki
 |-------|------|---------|
 | [`skills/ki-search/SKILL.md`](./skills/ki-search/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
 | [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md) | 记忆系统行为总控 | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
+| [`ki-search-first`](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置 | 先查项目记忆，再进入代码、专家或解决方案路径 |
+| [`ki-memory-lookup`](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 查询已沉淀记忆 | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
+| [`ki-memory-write`](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-write) | 写入和维护 Agent 记忆 | 统一查重、格式校验、双写、刷新、校验与结账删除 |
 
 > 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
+
+#### ki 配套 Skills 最佳实践
+
+三个配套 Skill 共同构成“先查、再判断、后写入”的记忆工作流：
+
+```text
+ki-search-first
+        ↓
+ki-memory-lookup（按需查询既有记忆）
+        ↓
+完成分析或提炼记忆内容
+        ↓
+ki-memory-write（查重后写入并校验）
+```
+
+1. **`ki-search-first`：任何任务先查记忆**
+   - 先查询项目已有记忆，再决定是否需要读代码、查专家资产或查解决方案。
+   - 已定位到要修改的代码时，额外查询强关联，确认改动会牵动哪些模块。
+   - 记忆不可用或没有命中时应降级继续，不应阻塞主任务；但不能把“没有命中”当成“项目中不存在”。
+
+2. **`ki-memory-lookup`：查询只读，按记忆类型选路径**
+   - 专题记忆、接口信息、数据流和错误库优先使用语义检索；查询中带上功能模块名和关键代码符号。
+   - 强关联、决策记忆和待生效变更优先使用 `ki_query_group` 目录导航；需要列全量条目时必须使用 `mode="full"`。
+   - 同一 Group 需要读取多条内容时，使用 `ki_get_module_info` 的 `relations` 数组批量读取；同一批最多 10 条，并逐条核对返回结果。
+   - 该 Skill 只负责查询，不直接修改记忆；与代码实际不一致时，以代码为准。
+
+3. **`ki-memory-write`：统一写入，避免记忆退化**
+   - 写入前先查重：同一 Group 下已有相同 Relation 时更新，不重复创建。
+   - 持久化记忆统一使用 `ki_sync_relation` / `ki_bulk_sync_relation`，不要使用只写向量层的 `ki_store` / `ki_bulk_store`，避免产生孤儿向量。
+   - 写入内容使用纯文本描述和列表，不放 YAML frontmatter、Markdown 标题或表格；需要语义召回时，关键词必须是正文中真实出现的自然语言词汇。
+   - 写入后刷新 Group 视图并抽查落盘结果；`vector=false` 仅用于待生效变更台账，这类内容通过目录查询，不依赖语义检索。
+   - `ki_delete_relation` 对普通记忆仅在明确要求遗忘时使用；其余情况下优先覆盖更新保留演进历史。待生效变更必须在正式变更落地后再结账删除。
+
+> 实践建议：将稳定的项目约定、历史决策、接口信息、数据流、错误解法和跨模块关联写入记忆；不要把一次性诊断、短期上下文或未经确认的推测当作长期事实。
 
 **安装本仓库的 Skill**（基于 [`HACK-WU/skills`](https://github.com/HACK-WU/skills) 的 `skill-install.sh`，通过 `--repo` 指定本仓库）：
 
@@ -369,6 +443,15 @@ curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill
 # 只安装指定 skill（如 ki-search）
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
   bash -s -- install --repo HACK-WU/kisearch -n ki-search -t /path/to/your-project
+```
+
+**安装三个 ki 配套 Skill**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
+  bash -s -- install --repo HACK-WU/skills \
+  -n ki-search-first,ki-memory-lookup,ki-memory-write \
+  -t /path/to/your-project
 ```
 
 > 该安装器基于 `npx skills`（需 Node.js >= 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update`（更新）、`remove`（删除）、`list`（查看）子命令。安装后直接对话即可触发对应 skill。
