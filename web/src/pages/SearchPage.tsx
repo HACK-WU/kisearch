@@ -4,16 +4,20 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
-import { kiSearch } from '@/api/mcpClient';
-import { fetchTags } from '@/api/httpApi';
+import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
+import { fetchTags, getSearchConfig } from '@/api/httpApi';
+import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
 /** Threshold 步进（滑块与 −/+ 按钮共用） */
 const THRESHOLD_STEP = 0.005;
+const QUERY_TIMEOUT_MIN_SECONDS = 0.001;
+const QUERY_TIMEOUT_MAX_SECONDS = 60;
 
 /** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
 const stepThreshold = (cur: number, dir: 1 | -1): number => {
@@ -40,12 +44,18 @@ export function SearchPage(): JSX.Element {
   const scope = useScopeValue();
   const [query, setQuery] = useState('');
   const [threshold, setThreshold] = useState(0);
+  /** undefined 表示默认配置尚未读取；此时不传 timeout，避免硬编码值覆盖服务端配置。 */
+  const [queryTimeout, setQueryTimeout] = useState<string | undefined>();
+  const [queryTimeoutStatus, setQueryTimeoutStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const queryTimeoutTouched = useRef(false);
   const [limit, setLimit] = useState('10');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<Result[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string } | null>(null);
+  const [viewing, setViewing] = useState<DocumentView | null>(null);
+  const [history, setHistory] = useState<DocumentView[]>([]);
+  const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -56,6 +66,48 @@ export function SearchPage(): JSX.Element {
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const { data: docData } = useDocList(scope);
+
+  /** 手动打开搜索结果是新的导航起点。 */
+  const openDocument = useCallback((doc: DocumentView): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(doc);
+  }, []);
+
+  const closeDocument = useCallback((): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(null);
+  }, []);
+
+  /** 返回搜索结果抽屉中的上一级本地文档。 */
+  const goBack = useCallback((): void => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setHistory((prev) => prev.slice(0, -1));
+    if (viewing) setForwardHistory((prev) => [...prev, viewing]);
+    setViewing(previous);
+  }, [history, viewing]);
+
+  /** 前进到搜索结果抽屉中最近一次返回前的文档。 */
+  const goForward = useCallback((): void => {
+    const next = forwardHistory[forwardHistory.length - 1];
+    if (!next) return;
+    setForwardHistory((prev) => prev.slice(0, -1));
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setViewing(next);
+  }, [forwardHistory, viewing]);
+
+  /** 搜索结果抽屉也支持复用 Browse 页的本地文档链接解析。 */
+  const handleLocalLink = useCallback((href: string): boolean => {
+    const target = resolveDocumentLink(href, viewing?.path, viewing?.group, docData?.docs ?? []);
+    if (!target) return false;
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setForwardHistory([]);
+    setViewing({ module: target.name, group: target.group, path: target.path });
+    return true;
+  }, [docData?.docs, viewing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,8 +117,32 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, [scope]);
 
+  useEffect(() => {
+    let cancelled = false;
+    getSearchConfig().then((res) => {
+      if (cancelled || queryTimeoutTouched.current) return;
+      if (res.ok && Number.isFinite(res.timeout) && res.timeout > 0) {
+        setQueryTimeout(String(res.timeout));
+        setQueryTimeoutStatus('ready');
+      } else {
+        setQueryTimeoutStatus('error');
+      }
+    }).catch(() => {
+      if (!cancelled && !queryTimeoutTouched.current) setQueryTimeoutStatus('error');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const run = async (): Promise<void> => {
     if (!query.trim()) return;
+    // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
+    const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
+      ? Number(queryTimeout)
+      : undefined;
+    if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < QUERY_TIMEOUT_MIN_SECONDS || timeout > QUERY_TIMEOUT_MAX_SECONDS)) {
+      setError(`Timeout 必须是 ${QUERY_TIMEOUT_MIN_SECONDS}-${QUERY_TIMEOUT_MAX_SECONDS} 秒之间的数字`);
+      return;
+    }
     setLoading(true);
     setError(null);
     setResults(null);
@@ -82,6 +158,7 @@ export function SearchPage(): JSX.Element {
         tags: searchTags,
         threshold: threshold || undefined,
         limit: Number(limit) || 10,
+        ...(timeout !== undefined ? { timeout } : {}),
       });
       // 后端业务层错误（如向量库锁定）
       if ((res as Record<string, unknown>).ok === false) {
@@ -207,6 +284,27 @@ export function SearchPage(): JSX.Element {
             >+</button>
           </div>
           <div className="ki-query-option">
+            <span className="ki-form-label">Timeout</span>
+            <input
+              className="ki-form-input"
+              type="number"
+              min={QUERY_TIMEOUT_MIN_SECONDS}
+              max={QUERY_TIMEOUT_MAX_SECONDS}
+              step="any"
+              value={queryTimeout ?? ''}
+              placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
+              onChange={(e) => {
+                queryTimeoutTouched.current = true;
+                setQueryTimeoutStatus('ready');
+                setQueryTimeout(e.target.value);
+              }}
+              aria-label="查询 embedding 超时时间（秒）"
+              title={queryTimeoutStatus === 'error' ? '默认配置读取失败；留空时将由服务端配置决定' : undefined}
+              style={{ width: 76 }}
+            />
+            <span className="ki-form-suffix">s</span>
+          </div>
+          <div className="ki-query-option">
             <span className="ki-form-label">Limit</span>
             <select className="ki-form-select" style={{ width: 'auto', minWidth: 72 }} value={limit} onChange={(e) => setLimit(e.target.value)}>
               <option value="5">5</option>
@@ -295,7 +393,15 @@ export function SearchPage(): JSX.Element {
                 <div
                   key={i}
                   className="ki-qr-item"
-                  onClick={() => setViewing({ module: r.relation ?? r.group ?? 'doc', content: r.original, group: r.group })}
+                  onClick={() => {
+                    const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
+                    openDocument({
+                      module: r.relation ?? r.group ?? 'doc',
+                      content: r.original,
+                      group: r.group,
+                      path: doc?.path,
+                    });
+                  }}
                 >
                   <div className={`ki-qr-rank${i < 3 ? ' ki-qr-rank--top' : ''}`}>{i + 1}</div>
                   <div className="ki-qr-body">
@@ -341,11 +447,18 @@ export function SearchPage(): JSX.Element {
 
       {viewing && (
         <ModuleDrawer
+          key={`${scope}:${viewing.group ?? ''}:${viewing.module}`}
           scope={scope}
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
-          onClose={() => setViewing(null)}
+          onClose={closeDocument}
+          fetcher={kiGetModuleInfo}
+          onLocalLink={handleLocalLink}
+          canGoBack={history.length > 0}
+          onBack={goBack}
+          canGoForward={forwardHistory.length > 0}
+          onForward={goForward}
         />
       )}
     </>

@@ -13,6 +13,11 @@ interface ModuleDrawerProps {
   initialContent?: string;
   onClose: () => void;
   fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string }>;
+  onLocalLink?: (href: string) => boolean;
+  canGoBack?: boolean;
+  onBack?: () => void;
+  canGoForward?: boolean;
+  onForward?: () => void;
 }
 
 export function ModuleDrawer({
@@ -22,6 +27,11 @@ export function ModuleDrawer({
   initialContent,
   onClose,
   fetcher,
+  onLocalLink,
+  canGoBack = false,
+  onBack,
+  canGoForward = false,
+  onForward,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +106,28 @@ export function ModuleDrawer({
           >
             →<span className="ki-drawer__close-label">收起</span>
           </button>
+          {canGoBack && onBack && (
+            <button
+              className="ki-drawer__back"
+              onClick={onBack}
+              title="返回上一级文档"
+              type="button"
+              aria-label="返回上一级文档"
+            >
+              ←<span className="ki-drawer__back-label">上一级</span>
+            </button>
+          )}
+          {canGoForward && onForward && (
+            <button
+              className="ki-drawer__forward"
+              onClick={onForward}
+              title="前进到下一级文档"
+              type="button"
+              aria-label="前进到下一级文档"
+            >
+              →<span className="ki-drawer__forward-label">下一级</span>
+            </button>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="ki-drawer__title">{module}</div>
             <div className="ki-drawer__meta">
@@ -156,7 +188,11 @@ export function ModuleDrawer({
             </div>
           ) : (
             <article className="ki-markdown ki-markdown--drawer">
-              <MarkdownPreview text={content} assetBase={group ? { scope, group } : undefined} />
+              <MarkdownPreview
+                text={content}
+                assetBase={group ? { scope, group } : undefined}
+                onLocalLink={onLocalLink}
+              />
             </article>
           )}
         </div>

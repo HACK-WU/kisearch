@@ -108,12 +108,15 @@ ki mcp --http --web
 | 路由 | 方法 | 说明 |
 |------|------|------|
 | `/api/health` | GET | 健康报告（`runHealthCheck` doctor 逻辑，含 zvec 探活，10s 超时） |
+| `/api/search-config` | GET | 语义检索默认 `timeout`（秒），仅返回非敏感配置 |
 | `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
 | `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |
 | `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId` |
 | `/api/import/run` | POST | 触发导入（幂等追加到 `group`，异步 job，返回 `jobId`） |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
 | `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
+
+`/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 
 `/api/import/status` 的 `job` 会返回 `state`（`running`/`done`/`failed`/`cancelled`）、`phase`（`scan`/`vectorize`/`persist`）、`progress` 和 `cancelRequested`。服务重启后内存中的 job 状态不保留，需要重新提交或查看 daemon 日志。
 

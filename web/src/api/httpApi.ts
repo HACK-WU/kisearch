@@ -28,6 +28,13 @@ export interface HealthResponse {
   error?: string;
 }
 
+export interface SearchConfigResponse {
+  ok: boolean;
+  /** 语义检索 query embedding 默认超时（秒） */
+  timeout: number;
+  error?: string;
+}
+
 export interface DocItem {
   name: string;
   group: string;
@@ -131,6 +138,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getHealth(): Promise<HealthResponse> {
   return req<HealthResponse>('/api/health');
+}
+
+export async function getSearchConfig(): Promise<SearchConfigResponse> {
+  return req<SearchConfigResponse>('/api/search-config');
 }
 
 export async function getDocList(

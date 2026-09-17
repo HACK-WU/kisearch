@@ -14,43 +14,66 @@ import assert from 'node:assert/strict';
 import {
   getPrecomputedQueryVector,
   mapWithConcurrency,
+  queryVectorCacheKey,
   runWithPrecomputedQueryVectors,
 } from '../src/lib/query-vector-precompute.js';
 import { extractSearchQueryArgs } from '../src/lib/mcp-http.js';
 import { isQueryEmbedDegradable } from '../src/lib/vector-client.js';
+import { timeoutSecondsToMs } from '../src/lib/query-timeout.js';
+
+describe('query timeout 参数', () => {
+  it('秒级 timeout 转为毫秒并拒绝越界值', () => {
+    assert.equal(timeoutSecondsToMs(3), 3000);
+    assert.equal(timeoutSecondsToMs(0.5), 500);
+    assert.throws(() => timeoutSecondsToMs(0), /大于 0/);
+    assert.throws(() => timeoutSecondsToMs(0.0001), /至少 0.001/);
+    assert.throws(() => timeoutSecondsToMs(60.001), /不超过 60 秒/);
+  });
+});
 
 describe('query-vector-precompute · ALS 传递', () => {
   it('无上下文时返回 undefined（CLI / stdio 行为与改动前一致）', () => {
-    assert.equal(getPrecomputedQueryVector('q'), undefined);
+    assert.equal(getPrecomputedQueryVector('q', 3000), undefined);
   });
 
   it('上下文内命中向量与失败标记', () => {
     const entries = new Map([
-      ['q1', { kind: 'vector', vector: [1, 2, 3] }],
-      ['q2', { kind: 'failed', reason: 'embedding timeout' }],
+      [queryVectorCacheKey('q1', 3000), { kind: 'vector', vector: [1, 2, 3] }],
+      [queryVectorCacheKey('q2', 3000), { kind: 'failed', reason: 'embedding timeout' }],
     ]);
     runWithPrecomputedQueryVectors(entries, () => {
-      assert.deepEqual(getPrecomputedQueryVector('q1'), { kind: 'vector', vector: [1, 2, 3] });
-      assert.deepEqual(getPrecomputedQueryVector('q2'), { kind: 'failed', reason: 'embedding timeout' });
-      assert.equal(getPrecomputedQueryVector('q3'), undefined);
+      assert.deepEqual(getPrecomputedQueryVector('q1', 3000), { kind: 'vector', vector: [1, 2, 3] });
+      assert.deepEqual(getPrecomputedQueryVector('q2', 3000), { kind: 'failed', reason: 'embedding timeout' });
+      assert.equal(getPrecomputedQueryVector('q3', 3000), undefined);
+    });
+  });
+
+  it('同一 query 使用不同 timeout 时不复用预计算结果', () => {
+    const entries = new Map([
+      [queryVectorCacheKey('q', 3000), { kind: 'vector', vector: [3] }],
+      [queryVectorCacheKey('q', 10000), { kind: 'failed', reason: 'embedding timeout' }],
+    ]);
+    runWithPrecomputedQueryVectors(entries, () => {
+      assert.deepEqual(getPrecomputedQueryVector('q', 3000), { kind: 'vector', vector: [3] });
+      assert.deepEqual(getPrecomputedQueryVector('q', 10000), { kind: 'failed', reason: 'embedding timeout' });
     });
   });
 
   it('空 map 直通且不建立上下文', () => {
     runWithPrecomputedQueryVectors(new Map(), () => {
-      assert.equal(getPrecomputedQueryVector('q'), undefined);
+      assert.equal(getPrecomputedQueryVector('q', 3000), undefined);
     });
   });
 
   it('并发上下文相互隔离（跨 await 保持绑定）', async () => {
     const [a, b] = await Promise.all([
-      runWithPrecomputedQueryVectors(new Map([['q', { kind: 'vector', vector: [1] }]]), async () => {
+      runWithPrecomputedQueryVectors(new Map([[queryVectorCacheKey('q', 3000), { kind: 'vector', vector: [1] }]]), async () => {
         await new Promise((r) => setTimeout(r, 20));
-        return getPrecomputedQueryVector('q');
+        return getPrecomputedQueryVector('q', 3000);
       }),
-      runWithPrecomputedQueryVectors(new Map([['q', { kind: 'vector', vector: [2] }]]), async () => {
+      runWithPrecomputedQueryVectors(new Map([[queryVectorCacheKey('q', 3000), { kind: 'vector', vector: [2] }]]), async () => {
         await new Promise((r) => setTimeout(r, 5));
-        return getPrecomputedQueryVector('q');
+        return getPrecomputedQueryVector('q', 3000);
       }),
     ]);
     assert.deepEqual(a, { kind: 'vector', vector: [1] });
@@ -91,7 +114,7 @@ describe('mapWithConcurrency', () => {
 });
 
 // ─── 耦合守卫：ki_search 工具参数契约 ───
-// 预计算依赖「工具名 ki_search + 参数名 query/scope」，该契约定义在
+// 预计算依赖「工具名 ki_search + 参数名 query/scope/timeout」，该契约定义在
 // src/lib/mcp-tools/search.ts 的工具 schema。参数改名会让预计算静默失效（不报错、
 // 只是失去优化），故在此断言，改名时测试会失败并指向本注释。
 describe('extractSearchQueryArgs · 工具参数契约守卫', () => {
@@ -103,8 +126,8 @@ describe('extractSearchQueryArgs · 工具参数契约守卫', () => {
   });
 
   it('提取 ki_search 的 query 与 scope（参数名契约）', () => {
-    const out = extractSearchQueryArgs([call('ki_search', { query: '查询内容', scope: 'team-a,team-b' })]);
-    assert.deepEqual(out, [{ query: '查询内容', rawScope: 'team-a,team-b' }]);
+    const out = extractSearchQueryArgs([call('ki_search', { query: '查询内容', scope: 'team-a,team-b', timeout: 10 })]);
+    assert.deepEqual(out, [{ query: '查询内容', rawScope: 'team-a,team-b', timeout: 10 }]);
   });
 
   it('scope 缺省时返回空串（由调用方按 default 解析）', () => {

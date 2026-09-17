@@ -3,6 +3,7 @@
  *
  * 为可视化前端补齐 MCP 缺失能力（REQ-20260806-003，S-02/S-03）：
  *   GET  /api/health                ki doctor 健康报告（runHealthCheck）
+ *   GET  /api/search-config          语义检索默认 timeout（仅非敏感配置）
  *   GET  /api/doc/list              Group 路径 + 文档列表（支持 q 文件名模糊搜索）
  *   POST /api/import/upload         上传文件落盘受控目录（~/.ki/import-uploads/<uploadId>/）
  *   POST /api/import/run            触发导入（幂等追加，异步 job）
@@ -42,6 +43,7 @@ import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snap
 import { executeTagList } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { vectorCountScope } from './vector-client.js';
+import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -302,6 +304,9 @@ export async function handleApiRequest(
 
   try {
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
+    if (p === '/search-config' && req.method === 'GET') {
+      return void handleSearchConfig(res, requestConfig);
+    }
     if (p === '/tags' && req.method === 'GET') {
       // /api/tags 会打开/读取 zvec Collection，必须与同 scope 的写操作共用
       // coordinator；否则 API 读请求会绕过 daemon 的单写者调度。
@@ -388,6 +393,16 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
     ),
   ]);
   sendJson(res, 200, { ok: true, report });
+}
+
+// ─── GET /api/search-config ──────────────────────────
+
+/** 只暴露前端初始化语义检索控件所需的非敏感默认值。 */
+function handleSearchConfig(res: http.ServerResponse, config: KiConfig): void {
+  sendJson(res, 200, {
+    ok: true,
+    timeout: (config.embedding.queryTimeoutMs ?? DEFAULT_QUERY_EMBED_TIMEOUT_MS) / 1000,
+  });
 }
 
 // ─── GET /api/tags ──────────────────────────────────────

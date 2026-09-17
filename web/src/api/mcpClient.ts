@@ -137,7 +137,7 @@ export async function kiScopeList(): Promise<ScopeListResponse> {
 
 export async function kiSearch(
   query: string,
-  opts: { scope?: string; tags?: string[]; threshold?: number; limit?: number } = {},
+  opts: { scope?: string; tags?: string[]; threshold?: number; limit?: number; timeout?: number } = {},
 ): Promise<SearchResult> {
   return callTool<SearchResult>('ki_search', {
     query,
@@ -145,6 +145,7 @@ export async function kiSearch(
     ...(opts.tags && opts.tags.length > 0 ? { tags: opts.tags.join(',') } : {}),
     ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
     include_original: true,
   });
 }

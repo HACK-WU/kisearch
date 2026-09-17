@@ -767,6 +767,41 @@ a:hover { text-decoration: underline; }
 .ki-drawer__close:hover { color: var(--ki-color-accent); }
 .ki-drawer__close-icon { font-size: 16px; line-height: 1; }
 .ki-drawer__close-label { font-size: 13px; }
+/* 本地文档链接导航历史：仅在存在上一级时显示 */
+.ki-drawer__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ki-color-text-subtle);
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: color 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ki-drawer__back:hover { color: var(--ki-color-primary); }
+.ki-drawer__back-label { font-size: 13px; }
+.ki-drawer__forward {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ki-color-text-subtle);
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: color 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ki-drawer__forward:hover { color: var(--ki-color-primary); }
+.ki-drawer__forward-label { font-size: 13px; }
 /* 全屏态下箭头方向反转（向内指向左侧页面） */
 .ki-drawer--fullscreen .ki-drawer__close { flex-direction: row-reverse; }
 .ki-drawer__title {

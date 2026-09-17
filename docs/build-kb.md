@@ -42,6 +42,7 @@ embedding:
   apiKey: ${OPENAI_API_KEY}
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096
+  queryTimeoutMs: 3000  # 查询 embedding 超时（ms），默认 3 秒
 ```
 
 ### 3. 注册 scope

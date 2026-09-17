@@ -21,7 +21,7 @@ import { ZvecEngine } from '../dist/zvec-engine/index.js';
 import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 import { ensureVectorLayout, getScopeCollectionPath } from '../src/lib/scope-collection.js';
 import { vectorSearch, closeEngine } from '../src/lib/vector-client.js';
-import { runWithPrecomputedQueryVectors } from '../src/lib/query-vector-precompute.js';
+import { queryVectorCacheKey, runWithPrecomputedQueryVectors } from '../src/lib/query-vector-precompute.js';
 
 const DIM = 4;
 const SCOPE = 'team-a';
@@ -142,10 +142,29 @@ describe('vectorSearch · 查询 embedding 降级与预计算复用', () => {
     );
   });
 
+  it('显式 timeoutMs → 传给 query embedding provider', async () => {
+    const observed: number[] = [];
+    const provider = {
+      dimension: DIM,
+      embed: async (_texts: string[], opts?: { timeoutMs?: number }): Promise<number[][]> => {
+        observed.push(opts?.timeoutMs ?? -1);
+        return [[1, 0, 0, 0]];
+      },
+    };
+    await vectorSearch({
+      scopes: [SCOPE],
+      query: '显式 timeout',
+      limit: 5,
+      timeoutMs: 10000,
+      embeddingProvider: provider,
+    });
+    assert.deepEqual(observed, [10000]);
+  });
+
   it('预计算向量命中 → 不调用 provider.embed', async () => {
     const counter = { calls: 0 };
     const results = await runWithPrecomputedQueryVectors(
-      new Map([['预计算查询', { kind: 'vector', vector: [1, 0, 0, 0] as number[] }]]),
+      new Map([[queryVectorCacheKey('预计算查询', 3000), { kind: 'vector', vector: [1, 0, 0, 0] as number[] }]]),
       () => vectorSearch({
         scopes: [SCOPE],
         query: '预计算查询',
@@ -160,7 +179,7 @@ describe('vectorSearch · 查询 embedding 降级与预计算复用', () => {
     const counter = { calls: 0 };
     const reasons: string[] = [];
     const results = await runWithPrecomputedQueryVectors(
-      new Map([['降级路径', { kind: 'failed', reason: '预计算失败（模拟）' }]]),
+      new Map([[queryVectorCacheKey('降级路径', 3000), { kind: 'failed', reason: '预计算失败（模拟）' }]]),
       () => vectorSearch({
         scopes: [SCOPE],
         query: '降级路径',

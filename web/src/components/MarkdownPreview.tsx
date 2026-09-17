@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
+import { isLocalDocumentHref } from '@/lib/documentLinks';
 
 /** 附件寻址上下文：提供时相对路径图片重写为 /api/asset 路由；缺省时保持原 src（如写入页预览） */
 export interface AssetBase {
@@ -271,10 +272,36 @@ function replaceWithPlaceholder(img: HTMLImageElement): void {
 }
 
 /** Markdown 预览组件（dangerouslySetInnerHTML 渲染 + mermaid 图表挂载 + 附件占位块） */
-export function MarkdownPreview({ text, assetBase }: { text: string; assetBase?: AssetBase }): JSX.Element {
+export interface MarkdownPreviewProps {
+  text: string;
+  assetBase?: AssetBase;
+  /** 返回 true 表示已在当前应用内处理该本地文档链接，应阻止浏览器默认跳转。 */
+  onLocalLink?: (href: string) => boolean;
+}
+
+export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPreviewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const html = renderMarkdownHtml(text, assetBase);
+
+  // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；
+  // 用事件代理接入页面导航状态，同时保留外链、锚点和未解析链接的浏览器行为。
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !onLocalLink) return;
+    const handleClick = (event: MouseEvent): void => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest('a[href]') as HTMLAnchorElement | null;
+      if (!link || !root.contains(link)) return;
+      const href = link.getAttribute('href');
+      if (!href || !isLocalDocumentHref(href)) return;
+      if (onLocalLink(href)) event.preventDefault();
+    };
+    root.addEventListener('click', handleClick);
+    return () => root.removeEventListener('click', handleClick);
+  }, [onLocalLink]);
 
   // mermaid 代码块异步渲染（动态加载 mermaid，避免无图表时也加载大 chunk）
   useEffect(() => {

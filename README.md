@@ -135,6 +135,7 @@ embedding:
   provider: siliconflow       # apiKey 从环境变量 SILICONFLOW_API_KEY 读取
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 必须与建库时一致
+  queryTimeoutMs: 3000        # 查询 embedding 超时（ms），默认 3 秒
 scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
 ```
 
@@ -408,4 +409,3 @@ npx jiti src/search.ts --help   # 直接执行任意命令
 ## <a id="license"></a>📄 License
 
 MIT
-

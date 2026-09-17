@@ -18,6 +18,7 @@ import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './lib/query-timeout.js';
 
 /**
  * tag 优先级：默认搜全部时，ki-search（内容）优先，其次 ki-relation / ki-path
@@ -91,6 +92,8 @@ async function executeSearchLocal(params: {
   limit?: number;
   threshold?: number;
   tags?: string;
+  /** 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 按秒转换后传入。 */
+  timeoutMs?: number;
   /** REQ-09：是否返回 local KB 文件级原文（默认 false；CLI --original / MCP include_original 显式开启） */
   includeOriginal?: boolean;
 }): Promise<SearchResult> {
@@ -166,6 +169,7 @@ async function executeSearchLocal(params: {
         limit: params.limit ?? 10,
         threshold: params.threshold,
         tags: params.tags,
+        timeoutMs: params.timeoutMs,
         onDegrade: (reason) => { degradeReason ??= reason; },
       });
     } else {
@@ -192,6 +196,7 @@ async function executeSearchLocal(params: {
           limit: limit * tagNames.length,
           threshold: params.threshold,
           tags: tagNames,
+          timeoutMs: params.timeoutMs,
           onDegrade: (reason) => { degradeReason ??= reason; },
         });
         const byTag = new Map<string, VectorSearchResult[]>();
@@ -314,9 +319,19 @@ export async function executeSearch(params: {
   limit?: number;
   threshold?: number;
   tags?: string;
+  /** 查询 embedding 超时（ms）；未传时使用配置中的默认值。 */
+  timeoutMs?: number;
   includeOriginal?: boolean;
 }): Promise<SearchResult> {
-  if (shouldUseDaemonClient()) return callDaemon<SearchResult>('search', params);
+  if (shouldUseDaemonClient()) {
+    // CLI/stdio 通过 daemon 时也要使用调用方配置文件的默认值，不能因请求未显式
+    // 传 timeout 而悄悄回退到 daemon 启动时的另一份配置。
+    const config = loadConfig();
+    return callDaemon<SearchResult>('search', {
+      ...params,
+      timeoutMs: params.timeoutMs ?? config.embedding.queryTimeoutMs ?? DEFAULT_QUERY_EMBED_TIMEOUT_MS,
+    });
+  }
   return executeSearchLocal(params);
 }
 
@@ -334,6 +349,7 @@ program
   .option('--limit <limit>', '返回条数上限', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
   .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
+  .option('--timeout <seconds>', '查询 embedding 超时（秒，范围 0.001-60；未传则使用配置值）')
   .option('--original', '返回 local KB 文件级原文（默认不返回，仅返回向量匹配数据，REQ-09）')
   .action(async (query: string | undefined, opts) => {
     const finalQuery = query ?? opts.query;
@@ -343,12 +359,22 @@ program
     }
     // NEG-02：非法数值显式警告并回退（避免 NaN 静默丢光结果）
     const parsedThreshold = parseFloatArg(opts.threshold, undefined, '--threshold');
+    let timeoutMs: number | undefined;
+    if (opts.timeout !== undefined) {
+      try {
+        timeoutMs = timeoutSecondsToMs(Number(opts.timeout), '--timeout');
+      } catch (err) {
+        console.error(`错误: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
     const result = await executeSearch({
       scope: opts.scope,
       query: finalQuery,
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       threshold: parsedThreshold,
       tags: opts.tags,
+      timeoutMs,
       includeOriginal: opts.original === true,
     });
     console.log(JSON.stringify(result, null, 2));

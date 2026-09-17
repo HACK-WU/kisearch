@@ -38,6 +38,7 @@ import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
 import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
 import { getPrecomputedQueryVector } from './query-vector-precompute.js';
+import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -224,22 +225,10 @@ const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
 
-/**
- * 查询路径 embedding 参数（O1，2026-09-14 并发实测）。
- *
- * 超时 3s：外部 provider 在并发下实测出现 2–6.5s 的慢响应（HTTP 200，非限流）。
- * 2s 会把正常抖动也判成降级（表现为同一查询的分数在 0.03 与 BM25 几十之间来回跳），
- * 3s 覆盖抖动主体、仍拒绝 30s 级长尾（在线检索不接受）；超时即降级 FTS-only。
- *
- * 导出供 mcp-http.ts 的预计算直接引用（而非各自定义）：两处语义同一（在线检索的
- * embedding 等待上限），各自定义会静默分叉——预计算若更短，工具侧拿着 failed 标记
- * 直接降级，实际生效的变成较短的那个值，用户改这里将毫无效果。
- *
- * 0 重试：provider 默认 3 次重试 + 1/2/4s 指数退避，最坏 ~127s，对一次交互式
- * 查询完全不可接受（重试语义保留给批量向量化路径）。
- */
-export const QUERY_EMBED_TIMEOUT_MS = 3_000;
+/** 查询 embedding 固定 0 重试；超时由配置或请求级 timeout 决定。 */
 const QUERY_EMBED_RETRIES = 0;
+/** @deprecated 仅为旧调用方保留；查询运行时不再读取该常量。 */
+export const QUERY_EMBED_TIMEOUT_MS = DEFAULT_QUERY_EMBED_TIMEOUT_MS;
 
 /**
  * 查询 embedding 失败是否可降级（FTS-only）。
@@ -915,6 +904,8 @@ export async function vectorSearch(params: {
   limit?: number;
   tags?: string | string[]; // 数组：tag 值本身可能含逗号，join/split 往返会错拆；字符串：逗号分隔多 tag
   threshold?: number;
+  /** 查询 embedding 超时（ms）；未传时使用 embedding.queryTimeoutMs。 */
+  timeoutMs?: number;
   /** 测试/嵌入适配器注入；生产调用不传，默认使用配置中的 provider。 */
   embeddingProvider?: Pick<EmbeddingProvider, 'embed' | 'dimension'>;
   /**
@@ -935,6 +926,7 @@ export async function vectorSearch(params: {
   // 保证多 scope 搜索不会按 scope 数量重复调用 embedding 服务。
   const existingScopes = scopes.filter((scope) => scopeCollectionExists(scope));
   if (existingScopes.length === 0) return [];
+  const queryTimeoutMs = params.timeoutMs ?? config.embedding.queryTimeoutMs ?? DEFAULT_QUERY_EMBED_TIMEOUT_MS;
   // 查询向量（O3 + O1）：
   //   1) 复用 HTTP 层预计算结果——embedding 已移出 scope 占用窗口，慢 provider 不再
   //      拖同 scope 队列；预计算已失败时直接降级，不再重复等待第二个超时；
@@ -942,7 +934,7 @@ export async function vectorSearch(params: {
   //   3) 瞬时外部问题（超时/网络/429/5xx）失败 → FTS-only 降级，而非整次查询失败。
   let queryVector: number[] | undefined;
   let degradeReason: string | undefined;
-  const precomputed = getPrecomputedQueryVector(params.query);
+  const precomputed = getPrecomputedQueryVector(params.query, queryTimeoutMs);
   if (precomputed?.kind === 'vector') {
     queryVector = precomputed.vector;
   } else if (precomputed?.kind === 'failed') {
@@ -950,7 +942,7 @@ export async function vectorSearch(params: {
   } else {
     try {
       queryVector = await embedQueryOnce(params.query, params.embeddingProvider ?? buildEmbedding(), {
-        timeoutMs: QUERY_EMBED_TIMEOUT_MS,
+        timeoutMs: queryTimeoutMs,
         retries: QUERY_EMBED_RETRIES,
       });
     } catch (err) {

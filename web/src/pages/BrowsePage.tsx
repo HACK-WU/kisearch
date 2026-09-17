@@ -5,13 +5,15 @@
  * 原文：ki_get_module_info
  */
 
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
+import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 
 const ICON_FOLDER = (
   <svg className="ki-tree-icon" viewBox="0 0 16 16" fill="none">
@@ -90,7 +92,9 @@ export function BrowsePage(): JSX.Element {
   const fetching = useIsFetching();
   const [q, setQ] = useState('');
   const [activeGroup, setActiveGroup] = useState('');
-  const [viewing, setViewing] = useState<{ module: string; group: string } | null>(null);
+  const [viewing, setViewing] = useState<DocumentView | null>(null);
+  const [history, setHistory] = useState<DocumentView[]>([]);
+  const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
   const [selectedTag, setSelectedTag] = useState('');
@@ -184,6 +188,81 @@ export function BrowsePage(): JSX.Element {
   const shownDocs = q.trim().length > 0 ? searchDocs : activeDocs;
   const isSearching = q.trim().length > 0;
 
+  // 合并当前已知文档：全量列表 + 当前 Group 完整列表 + 当前搜索结果。
+  // group 查询不受全量列表 500 条上限影响，因此当前 Group 的本地链接始终优先可解析。
+  const knownDocs = useMemo(() => {
+    const byKey = new Map<string, DocItem>();
+    for (const doc of [...(data?.docs ?? []), ...groupDocs, ...searchDocs]) {
+      byKey.set(`${doc.group}\u0000${doc.name}`, doc);
+    }
+    return [...byKey.values()];
+  }, [data?.docs, groupDocs, searchDocs]);
+
+  /** 展开目标 Group 的父级，让链接跳转后的选中状态在树中可见。 */
+  const revealGroup = useCallback((group: string): void => {
+    setTree((prev) => {
+      const copy = prev.map((node) => ({ ...node }));
+      const walk = (nodes: TreeNode[]): void => {
+        for (const node of nodes) {
+          if (group === node.path || group.startsWith(`${node.path}/`)) {
+            node.open = node.children.length > 0;
+            walk(node.children);
+          }
+        }
+      };
+      walk(copy);
+      return copy;
+    });
+  }, []);
+
+  /** 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。 */
+  const openDocument = useCallback((doc: DocumentView): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(doc);
+  }, []);
+
+  /** 关闭抽屉后再次打开文档时从头开始记录导航历史。 */
+  const closeDocument = useCallback((): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(null);
+  }, []);
+
+  /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group。 */
+  const goBack = useCallback((): void => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setHistory((prev) => prev.slice(0, -1));
+    if (viewing) setForwardHistory((prev) => [...prev, viewing]);
+    setActiveGroup(previous.group ?? '');
+    if (previous.group) revealGroup(previous.group);
+    setViewing(previous);
+  }, [history, revealGroup, viewing]);
+
+  /** 前进到最近一次返回前的文档，并同步恢复其 Group。 */
+  const goForward = useCallback((): void => {
+    const next = forwardHistory[forwardHistory.length - 1];
+    if (!next) return;
+    setForwardHistory((prev) => prev.slice(0, -1));
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setActiveGroup(next.group ?? '');
+    if (next.group) revealGroup(next.group);
+    setViewing(next);
+  }, [forwardHistory, revealGroup, viewing]);
+
+  /** 在当前 Browse 页面内切换到 Markdown 链接指向的文档。 */
+  const handleLocalLink = useCallback((href: string): boolean => {
+    const target = resolveDocumentLink(href, viewing?.path, viewing?.group, knownDocs);
+    if (!target) return false;
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setForwardHistory([]);
+    setActiveGroup(target.group);
+    revealGroup(target.group);
+    setViewing({ module: target.name, group: target.group, path: target.path });
+    return true;
+  }, [knownDocs, revealGroup, viewing]);
+
   /** 切换节点展开/折叠（原地 mutate + 新数组引用触发渲染） */
   const toggleOpen = (path: string): void => {
     setTree((prev) => {
@@ -227,7 +306,7 @@ export function BrowsePage(): JSX.Element {
       return;
     }
     setActiveGroup(node.path);
-    setViewing(null);
+    closeDocument();
   };
 
   const renderNode = (node: TreeNode): JSX.Element => {
@@ -331,7 +410,7 @@ export function BrowsePage(): JSX.Element {
               <GroupPathSelect
                 scope={scope}
                 value={activeGroup}
-                onChange={(v) => { setActiveGroup(v); setViewing(null); }}
+                onChange={(v) => { setActiveGroup(v); closeDocument(); }}
                 placeholder="选择或输入 Group 路径…"
               />
               <input
@@ -375,7 +454,7 @@ export function BrowsePage(): JSX.Element {
                   <div
                     key={`${d.group}/${d.name}`}
                     className="ki-doc-item"
-                    onClick={() => setViewing({ module: d.name, group: d.group })}
+                    onClick={() => openDocument({ module: d.name, group: d.group, path: d.path })}
                   >
                     <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -406,11 +485,17 @@ export function BrowsePage(): JSX.Element {
 
       {viewing && (
         <ModuleDrawer
+          key={`${scope}:${viewing.group}:${viewing.module}`}
           scope={scope}
           module={viewing.module}
           group={viewing.group}
-          onClose={() => setViewing(null)}
+          onClose={closeDocument}
           fetcher={kiGetModuleInfo}
+          onLocalLink={handleLocalLink}
+          canGoBack={history.length > 0}
+          onBack={goBack}
+          canGoForward={forwardHistory.length > 0}
+          onForward={goForward}
         />
       )}
     </>
