@@ -101,6 +101,7 @@ embedding:
   baseURL: https://api.siliconflow.cn/v1   # API 端点（换成其他厂商端点即可对接其他提供商）
   model: Qwen/Qwen3-Embedding-8B           # 模型名称
   dimension: 4096                          # 向量维度（必须与建库时一致）
+  queryTimeoutMs: 3000                     # 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 可按请求覆盖，范围 1-60000
   # apiKey: \${SILICONFLOW_API_KEY}          # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
   scheduler:
     batchSize: 16                          # 每批文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数

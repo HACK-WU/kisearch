@@ -85,6 +85,7 @@ Embedding 提供商配置。
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
 | `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
+| `queryTimeoutMs` | `number` | `3000` | 查询 embedding 超时（ms），范围 `1-60000`；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `scheduler` | `object` | 见下表 | import/restore/rebuild 的有界 Embedding 调度与背压护栏 |
 
 `embedding.scheduler` 子字段：
@@ -112,6 +113,7 @@ embedding:
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096
   apiKey: ${SILICONFLOW_API_KEY}
+  queryTimeoutMs: 3000
   scheduler:
     batchSize: 16
     maxConcurrency: 25
@@ -233,6 +235,7 @@ embedding:
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096
   apiKey: ${SILICONFLOW_API_KEY}
+  queryTimeoutMs: 3000
 
 scopeMode: default
 

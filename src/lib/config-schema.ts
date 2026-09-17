@@ -14,6 +14,8 @@
  *   - 收集全部问题后一次性报告，避免用户「改一个报一个」挤牙膏
  */
 
+import { validateQueryTimeoutMs } from './query-timeout.js';
+
 // ─── 节点模型 ───
 
 /** 单条校验问题（path 为配置文件内的字段路径，如 scopes.monitor.wikiSync.enabled） */
@@ -138,6 +140,7 @@ const CONFIG_SCHEMA: ConfigNode = {
         model: { type: 'string' },
         dimension: { type: 'number', validate: positiveInt },
         apiKey: { type: 'string' },
+        queryTimeoutMs: { type: 'number', validate: validateQueryTimeoutMs },
         scheduler: {
           type: 'object',
           fields: {

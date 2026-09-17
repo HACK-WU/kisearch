@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeSearch } from '../../search.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
+import { timeoutSecondsToMs } from '../query-timeout.js';
 
 export function registerSearchTool(server: McpServer): void {
   server.tool(
@@ -13,6 +14,7 @@ export function registerSearchTool(server: McpServer): void {
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限'),
       threshold: z.number().min(0).max(1).optional().describe('相似度阈值（0-1）'),
       tags: z.string().optional().describe('过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）'),
+      timeout: z.number().positive().max(60).optional().describe('查询 embedding 超时（秒，最大 60；未传则使用配置值）'),
       include_original: z.boolean().optional().default(false).describe('是否返回 local KB 文件级原文（默认 false：仅返回向量匹配数据）'),
     },
     async (args) => {
@@ -24,6 +26,7 @@ export function registerSearchTool(server: McpServer): void {
             limit: args.limit,
             threshold: args.threshold,
             tags: args.tags,
+            timeoutMs: args.timeout === undefined ? undefined : timeoutSecondsToMs(args.timeout),
             includeOriginal: args.include_original,
           }),
           TOOL_TIMEOUT.WRITE,

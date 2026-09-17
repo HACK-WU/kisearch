@@ -23,6 +23,11 @@ export type PrecomputedQueryVector =
 
 const storage = new AsyncLocalStorage<Map<string, PrecomputedQueryVector>>();
 
+/** 同一 query 使用不同 timeout 时必须隔离预计算结果。 */
+export function queryVectorCacheKey(query: string, timeoutMs: number): string {
+  return JSON.stringify([timeoutMs, query]);
+}
+
 /** 在 ALS 上下文中执行 fn；entries 为空时零开销直通 */
 export function runWithPrecomputedQueryVectors<T>(
   entries: Map<string, PrecomputedQueryVector>,
@@ -31,9 +36,9 @@ export function runWithPrecomputedQueryVectors<T>(
   return entries.size === 0 ? fn() : storage.run(entries, fn);
 }
 
-/** 读取当前上下文里某个 query 的预计算结果（无上下文返回 undefined） */
-export function getPrecomputedQueryVector(query: string): PrecomputedQueryVector | undefined {
-  return storage.getStore()?.get(query);
+/** 读取当前上下文里某个 query + timeout 的预计算结果（无上下文返回 undefined） */
+export function getPrecomputedQueryVector(query: string, timeoutMs: number): PrecomputedQueryVector | undefined {
+  return storage.getStore()?.get(queryVectorCacheKey(query, timeoutMs));
 }
 
 /**

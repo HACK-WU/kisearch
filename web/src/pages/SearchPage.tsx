@@ -7,7 +7,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
-import { fetchTags } from '@/api/httpApi';
+import { fetchTags, getSearchConfig } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
@@ -16,6 +16,8 @@ import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 const THRESHOLD_MAX = 0.2;
 /** Threshold 步进（滑块与 −/+ 按钮共用） */
 const THRESHOLD_STEP = 0.005;
+const QUERY_TIMEOUT_MIN_SECONDS = 0.001;
+const QUERY_TIMEOUT_MAX_SECONDS = 60;
 
 /** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
 const stepThreshold = (cur: number, dir: 1 | -1): number => {
@@ -42,6 +44,10 @@ export function SearchPage(): JSX.Element {
   const scope = useScopeValue();
   const [query, setQuery] = useState('');
   const [threshold, setThreshold] = useState(0);
+  /** undefined 表示默认配置尚未读取；此时不传 timeout，避免硬编码值覆盖服务端配置。 */
+  const [queryTimeout, setQueryTimeout] = useState<string | undefined>();
+  const [queryTimeoutStatus, setQueryTimeoutStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const queryTimeoutTouched = useRef(false);
   const [limit, setLimit] = useState('10');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<Result[] | null>(null);
@@ -111,8 +117,32 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, [scope]);
 
+  useEffect(() => {
+    let cancelled = false;
+    getSearchConfig().then((res) => {
+      if (cancelled || queryTimeoutTouched.current) return;
+      if (res.ok && Number.isFinite(res.timeout) && res.timeout > 0) {
+        setQueryTimeout(String(res.timeout));
+        setQueryTimeoutStatus('ready');
+      } else {
+        setQueryTimeoutStatus('error');
+      }
+    }).catch(() => {
+      if (!cancelled && !queryTimeoutTouched.current) setQueryTimeoutStatus('error');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const run = async (): Promise<void> => {
     if (!query.trim()) return;
+    // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
+    const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
+      ? Number(queryTimeout)
+      : undefined;
+    if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < QUERY_TIMEOUT_MIN_SECONDS || timeout > QUERY_TIMEOUT_MAX_SECONDS)) {
+      setError(`Timeout 必须是 ${QUERY_TIMEOUT_MIN_SECONDS}-${QUERY_TIMEOUT_MAX_SECONDS} 秒之间的数字`);
+      return;
+    }
     setLoading(true);
     setError(null);
     setResults(null);
@@ -128,6 +158,7 @@ export function SearchPage(): JSX.Element {
         tags: searchTags,
         threshold: threshold || undefined,
         limit: Number(limit) || 10,
+        ...(timeout !== undefined ? { timeout } : {}),
       });
       // 后端业务层错误（如向量库锁定）
       if ((res as Record<string, unknown>).ok === false) {
@@ -259,6 +290,27 @@ export function SearchPage(): JSX.Element {
               disabled={threshold >= THRESHOLD_MAX}
               onClick={() => setThreshold((v) => stepThreshold(v, 1))}
             >+</button>
+          </div>
+          <div className="ki-query-option">
+            <span className="ki-form-label">Timeout</span>
+            <input
+              className="ki-form-input"
+              type="number"
+              min={QUERY_TIMEOUT_MIN_SECONDS}
+              max={QUERY_TIMEOUT_MAX_SECONDS}
+              step="any"
+              value={queryTimeout ?? ''}
+              placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
+              onChange={(e) => {
+                queryTimeoutTouched.current = true;
+                setQueryTimeoutStatus('ready');
+                setQueryTimeout(e.target.value);
+              }}
+              aria-label="查询 embedding 超时时间（秒）"
+              title={queryTimeoutStatus === 'error' ? '默认配置读取失败；留空时将由服务端配置决定' : undefined}
+              style={{ width: 76 }}
+            />
+            <span className="ki-form-suffix">s</span>
           </div>
           <div className="ki-query-option">
             <span className="ki-form-label">Limit</span>

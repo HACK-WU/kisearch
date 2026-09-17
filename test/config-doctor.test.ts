@@ -224,6 +224,16 @@ describe('A. lib/config —— YAML/JSON 双格式与 embedding 默认合并', (
     assert.strictEqual(emb.provider, 'siliconflow');
     assert.strictEqual(emb.model, 'Qwen/Qwen3-Embedding-8B');
     assert.strictEqual(emb.dimension, 4096);
+    assert.strictEqual(emb.queryTimeoutMs, 3000);
+  });
+
+  it('embedding.queryTimeoutMs 支持显式配置并拒绝非法值', () => {
+    const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data\nembedding:\n  queryTimeoutMs: 10000');
+    assert.strictEqual(cfg.embedding.queryTimeoutMs, 10000);
+    assert.throws(
+      () => writeAndLoad('config.yaml', 'dataDir: /abs/data\nembedding:\n  queryTimeoutMs: 0'),
+      /queryTimeoutMs.*1-60000/,
+    );
   });
 
   it('embedding 部分覆盖：仅改 model，其余保持默认', () => {
@@ -549,6 +559,7 @@ describe('B. config init —— 生成 YAML 模板', () => {
     assert.match(text, /^\s*default:\s*\{\}\s*$/m, '默认 scope 应为 default: {}');
     assert.match(text, /scopeMode:\s*default/);
     assert.match(text, /provider:\s*siliconflow/);
+    assert.match(text, /queryTimeoutMs:\s*3000/);
   });
 
   it('生成的配置加载后 default scope 不双层嵌套（回归）', () => {
@@ -616,6 +627,7 @@ describe('C. health-check —— runHealthCheck', () => {
         baseURL: 'https://api.siliconflow.cn/v1',
         model: 'Qwen/Qwen3-Embedding-8B',
         dimension: 4096,
+        queryTimeoutMs: 3000,
       },
       scopeMode: 'default',
       scopes: { default: {} },

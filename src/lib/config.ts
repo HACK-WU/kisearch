@@ -32,6 +32,7 @@ import {
   normalizeEmbeddingScheduler,
   type EmbeddingSchedulerConfig,
 } from '../zvec-engine/embedding/batch-scheduler.js';
+import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 
 // ─── 默认路径（方案 A：统一 ~/.ki/ 用户数据根，运行时数据不落源码仓库） ───
 
@@ -135,6 +136,8 @@ export interface EmbeddingConfig {
   dimension: number;     // 向量维度（必须 === collection.dimension，kisearch 固定 4096）
   apiKey?: string;       // API 密钥：支持明文（sk-xxx）或环境变量引用（${VAR_NAME}）；
                          // 缺省则不解析（KI 层 fail-loud），不做任何隐式 env 回退
+  /** 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 参数按秒覆盖本值。 */
+  queryTimeoutMs: number;
   scheduler?: EmbeddingSchedulerConfig;
 }
 
@@ -159,6 +162,7 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
   baseURL: 'https://api.siliconflow.cn/v1',
   model: 'Qwen/Qwen3-Embedding-8B',
   dimension: 4096,
+  queryTimeoutMs: DEFAULT_QUERY_EMBED_TIMEOUT_MS,
   scheduler: { ...DEFAULT_EMBEDDING_SCHEDULER },
 };
 
@@ -513,6 +517,9 @@ function parseAndExpand(configFile: string): KiConfig {
     model: rawEmbedding.model ? String(rawEmbedding.model) : DEFAULT_EMBEDDING.model,
     dimension: rawEmbedding.dimension !== undefined ? Number(rawEmbedding.dimension) : DEFAULT_EMBEDDING.dimension,
     apiKey: resolveApiKey(rawEmbedding.apiKey),
+    queryTimeoutMs: rawEmbedding.queryTimeoutMs !== undefined
+      ? Number(rawEmbedding.queryTimeoutMs)
+      : DEFAULT_EMBEDDING.queryTimeoutMs,
     scheduler,
   };
 

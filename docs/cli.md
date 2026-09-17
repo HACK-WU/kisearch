@@ -487,7 +487,7 @@ ki doc delete abc123 --scope my-project --yes
 语义检索知识库内容（**hybrid 混合检索**：向量语义 + 全文 BM25 两路召回，RRF 融合排序）。
 
 ```bash
-ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2]
+ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2] [--timeout <seconds>]
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -497,6 +497,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
+| `--timeout <seconds>` | 查询 embedding 等待超时；超时后降级为关键词检索，范围 `0.001-60` 秒 | 配置 `embedding.queryTimeoutMs`（未配置为 `3` 秒） |
 | `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`，REQ-09） |
 
 > 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
@@ -994,7 +995,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
 | `--status` | — | 只读诊断：探活 `/healthz` 并读取当前身份的 `~/.ki/mcp-http-<fingerprint>.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检） |
-| `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
+| `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/search-config`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
 
@@ -1152,6 +1153,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `limit` | number | 否 | 10 | 返回条数上限 |
 | `threshold` | number | 否 | — | 相似度阈值（0-1，过滤低分命中） |
 | `tags` | string | 否 | — | 过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合） |
+| `timeout` | number | 否 | 配置值 / 3 | 查询 embedding 等待超时（秒，范围 `0.001-60`）；超时后降级为关键词检索 |
 
 #### `ki_store`
 
@@ -1229,6 +1231,7 @@ embedding:                    # Embedding 提供方（OpenAI 兼容，实际提�
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 向量维度（必须与建库时一致）
   apiKey: ${SILICONFLOW_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量（变量名自定义）
+  queryTimeoutMs: 3000        # 查询 embedding 超时（ms）；timeout 参数可按请求覆盖，范围 1-60000
   scheduler:
     batchSize: 16             # 每次逻辑 provider 调用的文本数（单批约 18 万字符 ≈10s）
     maxConcurrency: 25        # 单任务并发；出现 429/超时优先下调
@@ -1263,6 +1266,7 @@ scopes:
 | `embedding.model` | 顶级 | 模型名称 |
 | `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
 | `embedding.apiKey` | 顶级 | API 密钥（**必填**）：支持明文（`sk-xxx`）或环境变量引用（`${VAR_NAME}`，变量名自定义）；不做任何隐式回退 |
+| `embedding.queryTimeoutMs` | 顶级 | 查询 embedding 超时（ms），默认 3000，范围 1-60000；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `embedding.scheduler` | 顶级 | import/restore/rebuild 的有界 Embedding 并发与向量缓冲背压；默认批大小 16、单任务并发 25、daemon 全局 25、单请求超时 60s |
 | `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |

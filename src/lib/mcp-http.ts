@@ -23,11 +23,12 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { readKiVersion } from './version-guard.js';
 import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
-import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource, QUERY_EMBED_TIMEOUT_MS } from './vector-client.js';
+import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
-import { mapWithConcurrency, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
+import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
+import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
@@ -162,6 +163,29 @@ export function findScopeViolation(body: unknown, scopes: string[]): string | nu
     }
   }
   return null;
+}
+
+/** 统一返回 MCP scope 越权响应；返回 true 表示请求已被拒绝。 */
+function rejectScopeViolationRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  body: unknown,
+  authScopes: string[] | null,
+): boolean {
+  if (authScopes === null) return false;
+  const violation = findScopeViolation(body, authScopes);
+  if (violation === null) return false;
+  // 响应体不下发具体 scope，避免被用于枚举探测；服务端日志保留诊断信息。
+  process.stderr.write(
+    `[kisearch] scope 越权拦截：来自 ${req.socket.remoteAddress ?? '未知'}，` +
+      `请求 scope "${violation}" 不在该 Token 授权范围内（授权：${authScopes.join(', ')}）。\n`,
+  );
+  sendJson(res, 403, {
+    jsonrpc: '2.0',
+    error: { code: -32002, message: 'Forbidden: 无权访问该 scope' },
+    id: extractJsonRpcId(body),
+  });
+  return true;
 }
 
 /** 提取 JSON-RPC 请求 id（供错误响应回填，兼容 batch 取首项） */
@@ -692,6 +716,9 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 多 scope batch 只需占用它**实际涉及**的分片，不再归入全局屏障：
     // 旧写法把多 scope 请求当成全局独占，会在它排队期间冻结所有无关 scope 的调度。
     const occupied = needsGlobal ? [GLOBAL_SCOPE] : (onlyReadOnly ? [] : [...queueScopes]);
+    // 预计算会触发外部 embedding，必须先完成与正式执行路径相同的 scope 鉴权，
+    // 防止无权请求利用 timeout=60 消耗 provider 资源。
+    if (rejectScopeViolationRequest(req, res, body, authScopes)) return;
     // O3：embedding 预计算在 submit 之前完成（无锁阶段），使网络等待不再占用 scope 窗口——
     // 同 scope 串行时慢 embed 不再阻塞队列中的后续请求。结果经 AsyncLocalStorage 传递。
     const precomputedVectors = await precomputeSearchQueryVectors(messages, requestConfig);
@@ -712,25 +739,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     body: unknown,
   ): Promise<void> {
 
-    // scope 越权校验：鉴权模式下（authScopes !== null），拦截 tools/call 的 scope 参数。
-    // 所有工具 scope 参数统一位于 arguments.scope 顶层（缺省 'default'），
-    // 在此统一校验，避免下沉到各工具导致鉴权入口分散（安全关键路径）。
-    if (authScopes !== null) {
-      const violation = findScopeViolation(body, authScopes);
-      if (violation !== null) {
-        // 越权日志：服务端留痕（含具体 scope 便于排查），但响应体不下发 scope 名，避免被用于枚举探测
-        process.stderr.write(
-          `[kisearch] scope 越权拦截：来自 ${req.socket.remoteAddress ?? '未知'}，` +
-            `请求 scope "${violation}" 不在该 Token 授权范围内（授权：${authScopes.join(', ')}）。\n`,
-        );
-        sendJson(res, 403, {
-          jsonrpc: '2.0',
-          error: { code: -32002, message: 'Forbidden: 无权访问该 scope' },
-          id: extractJsonRpcId(body),
-        });
-        return;
-      }
-    }
+    // scope 越权校验已在预计算前执行；这里再守一层，覆盖无状态请求与未来调用方。
+    if (rejectScopeViolationRequest(req, res, body, authScopes)) return;
 
     const sid = req.headers['mcp-session-id'];
     const sessionId = Array.isArray(sid) ? sid[0] : sid;
@@ -815,30 +825,31 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
 
 /** 查询向量预计算并发上限：并发度等于对外部 embedding 的瞬时压力，无上限会把"并行化"变成对 provider 的突发压测 */
 const QUERY_PRECOMPUTE_CONCURRENCY = 4;
-// 预计算超时直接复用 vector-client 的 QUERY_EMBED_TIMEOUT_MS（不在此另立常量）：
-// 两者语义同一——在线检索愿意为 embedding 等待的上限。各自定义会静默分叉，且分叉后
-// 以较短者为准（预计算先超时 → 工具侧拿 failed 标记直接降级，不再走自己的兜底超时）。
 
 /**
  * 从 MCP 请求体提取 ki_search 的查询参数（纯函数，供预计算与测试共用）。
  *
  * ⚠️ 与 `src/lib/mcp-tools/search.ts` 的工具 schema 耦合（工具名 `ki_search`、参数名
- * `query` / `scope`）：参数改名会让预计算静默失效（不报错，只是失去优化），
+ * `query` / `scope` / `timeout`）：参数改名会让预计算静默失效（不报错，只是失去优化），
  * 故由 `test/query-vector-precompute.test.ts` 的守卫用例断言该契约。
  */
-export function extractSearchQueryArgs(messages: unknown[]): { query: string; rawScope: string }[] {
-  const out: { query: string; rawScope: string }[] = [];
+export function extractSearchQueryArgs(messages: unknown[]): { query: string; rawScope: string; timeout?: unknown }[] {
+  const out: { query: string; rawScope: string; timeout?: unknown }[] = [];
   for (const message of messages) {
     if (!message || typeof message !== 'object') continue;
     const m = message as {
       method?: unknown;
-      params?: { name?: unknown; arguments?: { query?: unknown; scope?: unknown } };
+      params?: { name?: unknown; arguments?: { query?: unknown; scope?: unknown; timeout?: unknown } };
     };
     if (m.method !== 'tools/call' || m.params?.name !== 'ki_search') continue;
     const args = m.params.arguments;
     const query = typeof args?.query === 'string' ? args.query : '';
     if (query.length === 0) continue;
-    out.push({ query, rawScope: typeof args?.scope === 'string' ? args.scope.trim() : '' });
+    out.push({
+      query,
+      rawScope: typeof args?.scope === 'string' ? args.scope.trim() : '',
+      ...(args?.timeout !== undefined ? { timeout: args.timeout } : {}),
+    });
   }
   return out;
 }
@@ -851,7 +862,7 @@ export function extractSearchQueryArgs(messages: unknown[]): { query: string; ra
  * 移到占用窗口之外后，慢 embed 只影响自己；检索仍按 scope 串行（保持既有并发语义）。
  *
  * 失败安全：
- *   - 预计算失败只记录 `{ kind: 'failed' }`（工具侧据此直接降级 FTS，不再重复等待 2s 超时）；
+ *   - 预计算失败只记录 `{ kind: 'failed' }`（工具侧据此直接降级 FTS，不再重复等待同一 timeout）；
  *   - 无 Collection 的 scope 跳过（vectorSearch 会提前返回空，预计算纯属浪费外部调用）；
  *   - 整体失败不影响请求本身——工具侧命中不到预计算即回退自身 embed。
  */
@@ -862,8 +873,17 @@ export async function precomputeSearchQueryVectors(
   // 预计算是纯优化：任何异常（scope 解析 / 文件系统 / 配置读取）都不得影响请求本身
   const result = new Map<string, PrecomputedQueryVector>();
   try {
-    const queries = new Set<string>();
-    for (const { query, rawScope } of extractSearchQueryArgs(messages)) {
+    const queries = new Map<string, { query: string; timeoutMs: number }>();
+    for (const { query, rawScope, timeout } of extractSearchQueryArgs(messages)) {
+      let timeoutMs: number;
+      try {
+        timeoutMs = timeout === undefined
+          ? (cfg.embedding.queryTimeoutMs ?? DEFAULT_QUERY_EMBED_TIMEOUT_MS)
+          : timeoutSecondsToMs(timeout);
+      } catch {
+        // 工具 schema 会向调用方报告非法 timeout；预计算不能改变该错误语义。
+        continue;
+      }
       // scope 存在性检查与 vectorSearch 的过滤同源：全部缺失时跳过（避免为无效 scope 付费）
       let scopes: string[];
       try {
@@ -872,17 +892,17 @@ export async function precomputeSearchQueryVectors(
         continue; // scope 非法由工具侧 fail-loud，预计算跳过
       }
       if (findMissingScopeCollections(scopes).length === scopes.length) continue;
-      queries.add(query);
+      queries.set(queryVectorCacheKey(query, timeoutMs), { query, timeoutMs });
     }
     if (queries.size === 0) return result;
-    const list = [...queries];
-    const outcomes = await mapWithConcurrency<string, PrecomputedQueryVector | undefined>(
+    const list = [...queries.values()];
+    const outcomes = await mapWithConcurrency<{ query: string; timeoutMs: number }, PrecomputedQueryVector | undefined>(
       list,
       QUERY_PRECOMPUTE_CONCURRENCY,
-      async (query) => {
+      async ({ query, timeoutMs }) => {
         try {
           const vector = await embedQueryOnce(query, undefined, {
-            timeoutMs: QUERY_EMBED_TIMEOUT_MS,
+            timeoutMs,
             retries: 0,
           });
           return { kind: 'vector', vector };
@@ -897,9 +917,9 @@ export async function precomputeSearchQueryVectors(
         }
       },
     );
-    list.forEach((query, i) => {
+    list.forEach(({ query, timeoutMs }, i) => {
       const outcome = outcomes[i];
-      if (outcome !== undefined) result.set(query, outcome);
+      if (outcome !== undefined) result.set(queryVectorCacheKey(query, timeoutMs), outcome);
     });
   } catch {
     /* 预计算失败静默：工具侧回退自身 embed */

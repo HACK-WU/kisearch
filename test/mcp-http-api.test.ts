@@ -26,7 +26,7 @@ import { createMcpHttpServer, serveStatic } from '../src/lib/mcp-http.js';
 import { getRelationsCachePath } from '../src/lib/scope.js';
 import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
-import { loadConfig, getScopeDataDir } from '../src/lib/config.js';
+import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -103,6 +103,36 @@ describe('/api/health', () => {
     const body = await res.json();
     assert.equal(body.ok, true);
     assert.ok(body.report);
+  });
+});
+
+describe('/api/search-config', () => {
+  it('只返回语义检索默认 timeout（秒），不暴露 embedding 敏感配置', async () => {
+    const res = await fetch(`${handle!.base}/api/search-config`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: true, timeout: 3 });
+    assert.equal(Object.prototype.hasOwnProperty.call(body, 'apiKey'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(body, 'baseURL'), false);
+  });
+
+  it('配置文件中的 queryTimeoutMs 转为秒返回', async () => {
+    fs.writeFileSync(
+      process.env.KI_CONFIG_PATH!,
+      JSON.stringify({ scopeMode: 'default', embedding: { provider: 'mock', model: 'mock', queryTimeoutMs: 7500 } }),
+    );
+    resetConfigCache();
+    try {
+      const res = await fetch(`${handle!.base}/api/search-config`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true, timeout: 7.5 });
+    } finally {
+      fs.writeFileSync(
+        process.env.KI_CONFIG_PATH!,
+        JSON.stringify({ scopeMode: 'default', embedding: { provider: 'mock', model: 'mock' } }),
+      );
+      resetConfigCache();
+    }
   });
 });
 
