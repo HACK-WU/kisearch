@@ -13,6 +13,7 @@ interface ModuleDrawerProps {
   initialContent?: string;
   onClose: () => void;
   fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string }>;
+  onLocalLink?: (href: string) => boolean;
 }
 
 export function ModuleDrawer({
@@ -22,6 +23,7 @@ export function ModuleDrawer({
   initialContent,
   onClose,
   fetcher,
+  onLocalLink,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -156,7 +158,11 @@ export function ModuleDrawer({
             </div>
           ) : (
             <article className="ki-markdown ki-markdown--drawer">
-              <MarkdownPreview text={content} assetBase={group ? { scope, group } : undefined} />
+              <MarkdownPreview
+                text={content}
+                assetBase={group ? { scope, group } : undefined}
+                onLocalLink={onLocalLink}
+              />
             </article>
           )}
         </div>

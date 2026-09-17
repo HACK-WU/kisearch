@@ -4,11 +4,13 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
-import { kiSearch } from '@/api/mcpClient';
+import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
+import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { resolveDocumentLink } from '@/lib/documentLinks';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -45,7 +47,7 @@ export function SearchPage(): JSX.Element {
   const [results, setResults] = useState<Result[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string } | null>(null);
+  const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string; path?: string } | null>(null);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -56,6 +58,15 @@ export function SearchPage(): JSX.Element {
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const { data: docData } = useDocList(scope);
+
+  /** 搜索结果抽屉也支持复用 Browse 页的本地文档链接解析。 */
+  const handleLocalLink = useCallback((href: string): boolean => {
+    const target = resolveDocumentLink(href, viewing?.path, viewing?.group, docData?.docs ?? []);
+    if (!target) return false;
+    setViewing({ module: target.name, group: target.group, path: target.path });
+    return true;
+  }, [docData?.docs, viewing?.group, viewing?.path]);
 
   useEffect(() => {
     let cancelled = false;
@@ -303,7 +314,15 @@ export function SearchPage(): JSX.Element {
                 <div
                   key={i}
                   className="ki-qr-item"
-                  onClick={() => setViewing({ module: r.relation ?? r.group ?? 'doc', content: r.original, group: r.group })}
+                  onClick={() => {
+                    const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
+                    setViewing({
+                      module: r.relation ?? r.group ?? 'doc',
+                      content: r.original,
+                      group: r.group,
+                      path: doc?.path,
+                    });
+                  }}
                 >
                   <div className={`ki-qr-rank${i < 3 ? ' ki-qr-rank--top' : ''}`}>{i + 1}</div>
                   <div className="ki-qr-body">
@@ -349,11 +368,14 @@ export function SearchPage(): JSX.Element {
 
       {viewing && (
         <ModuleDrawer
+          key={`${scope}:${viewing.group ?? ''}:${viewing.module}`}
           scope={scope}
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
           onClose={() => setViewing(null)}
+          fetcher={kiGetModuleInfo}
+          onLocalLink={handleLocalLink}
         />
       )}
     </>
