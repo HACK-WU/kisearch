@@ -5,12 +5,14 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useScopeValue } from '@/lib/scopeContext';
+import { useSearchParams } from 'react-router-dom';
+import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
+import { scopeError } from '@/lib/validators';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -41,7 +43,17 @@ interface Result {
 }
 
 export function SearchPage(): JSX.Element {
-  const scope = useScopeValue();
+  const { scope, setScope } = useScope();
+  const [searchParams] = useSearchParams();
+  const requestedScope = searchParams.get('scope');
+  const requestedScopeApplied = useRef(false);
+  useEffect(() => {
+    if (requestedScopeApplied.current) return;
+    requestedScopeApplied.current = true;
+    if (requestedScope && !scopeError(requestedScope) && requestedScope !== scope) {
+      setScope(requestedScope);
+    }
+  }, [requestedScope, scope, setScope]);
   const [query, setQuery] = useState('');
   const [threshold, setThreshold] = useState(0);
   /** undefined 表示默认配置尚未读取；此时不传 timeout，避免硬编码值覆盖服务端配置。 */

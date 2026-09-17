@@ -1101,7 +1101,10 @@ export function ImportPage(): JSX.Element {
               </div>
             )}
             <div className="ki-empty__actions">
-              <Link className="ki-btn ki-btn--primary ki-btn--small" to="/search">
+              <Link
+                className="ki-btn ki-btn--primary ki-btn--small"
+                to={{ pathname: '/search', search: `?scope=${encodeURIComponent(scope)}` }}
+              >
                 前往搜索验证 →
               </Link>
             </div>
