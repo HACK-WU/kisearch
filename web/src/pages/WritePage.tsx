@@ -12,10 +12,13 @@ import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
-import { groupError, relationError, tagError } from '@/lib/validators';
+import { ScopePathSelect } from '@/components/ScopePathSelect';
+import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
 
 export function WritePage(): JSX.Element {
-  const scope = useScopeValue();
+  const currentScope = useScopeValue();
+  const [scope, setScope] = useState(currentScope);
+  useEffect(() => setScope(currentScope), [currentScope]);
   const [preview, setPreview] = useState(false);
   const [vector, setVector] = useState(true);
 
@@ -39,7 +42,8 @@ export function WritePage(): JSX.Element {
   // 实时校验 group / relation（空字符串时不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
   const relationErr = relation.trim() ? relationError(relation) : null;
-  const hasFormError = !!groupErr || !!relationErr;
+  const scopeErr = scope.trim() ? scopeError(scope) : 'Scope 不能为空';
+  const hasFormError = !!scopeErr || !!groupErr || !!relationErr;
 
   // 点击外部关闭 tag combobox
   useEffect(() => {
@@ -62,6 +66,10 @@ export function WritePage(): JSX.Element {
   const submit = async (): Promise<void> => {
     setError(null);
     setResult(null);
+    if (scopeErr) {
+      setError(scopeErr);
+      return;
+    }
     if (!group.trim() || !relation.trim() || !markdown.trim()) {
       setError('Group、Relation、Module Info 均不能为空');
       return;
@@ -135,6 +143,16 @@ export function WritePage(): JSX.Element {
       <div className="ki-content-inner ki-write-layout">
         <div className="ki-card">
           <div className="ki-card__body" style={{ padding: 28 }}>
+            <div className="ki-form-group" style={{ marginBottom: 12 }}>
+              <label className="ki-form-label">Scope（目标知识库）</label>
+              <ScopePathSelect
+                value={scope}
+                onChange={(value) => setScope(value.trim())}
+                placeholder="选择或输入 Scope 名称，如：kafka"
+                hint="默认使用当前 Scope；输入不存在的合法名称并回车确认，提交写入时自动新建。"
+                error={scopeErr}
+              />
+            </div>
             <div className="ki-form-row">
               <div className="ki-form-group">
                 <label className="ki-form-label">Group（文档分组）</label>

@@ -64,3 +64,16 @@ export function tagError(value: string): string | null {
   if (value.includes('..')) return 'Tag 不能包含 ..';
   return null;
 }
+
+/** Scope 名称校验错误文案（与后端 validateScope 对齐） */
+export function scopeError(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return 'Scope 不能为空';
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    return 'Scope 仅允许字母、数字、连字符（-）和下划线（_）';
+  }
+  if (trimmed === '__global__') {
+    return 'Scope 名称 __global__ 为系统保留字，请更换名称';
+  }
+  return null;
+}

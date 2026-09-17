@@ -9,7 +9,8 @@ import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
-import { groupError, tagError } from '@/lib/validators';
+import { ScopePathSelect } from '@/components/ScopePathSelect';
+import { groupError, scopeError, tagError } from '@/lib/validators';
 
 interface PendingFile {
   name: string;
@@ -285,7 +286,9 @@ interface DataTransferItemWithEntry {
 }
 
 export function ImportPage(): JSX.Element {
-  const scope = useScopeValue();
+  const currentScope = useScopeValue();
+  const [scope, setScope] = useState(currentScope);
+  useEffect(() => setScope(currentScope), [currentScope]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
@@ -316,6 +319,7 @@ export function ImportPage(): JSX.Element {
 
   // 实时校验 group（空字符串不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
+  const scopeErr = scope.trim() ? scopeError(scope) : 'Scope 不能为空';
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -710,6 +714,10 @@ export function ImportPage(): JSX.Element {
   };
 
   const start = async (): Promise<void> => {
+    if (scopeErr) {
+      setError(scopeErr);
+      return;
+    }
     if (files.length === 0) {
       setError('请先选择文件或目录');
       return;
@@ -798,6 +806,16 @@ export function ImportPage(): JSX.Element {
               accept={[...importPolicy.extensions, ...(importPolicy.assets ? importPolicy.assetExtensions : [])].join(',')}
               style={{ display: 'none' }}
               onChange={onFileChange}
+            />
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <label className="ki-form-label">Scope（目标知识库）</label>
+            <ScopePathSelect
+              value={scope}
+              onChange={(value) => setScope(value.trim())}
+              placeholder="选择或输入 Scope 名称，如：kafka"
+              hint="默认使用当前 Scope；输入不存在的合法名称并回车确认，提交导入时自动新建。"
+              error={scopeErr}
             />
           </div>
           <div style={{ marginTop: 8 }}>
