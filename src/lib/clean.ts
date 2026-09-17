@@ -39,6 +39,29 @@ export const CLEAN_VERSION = '1';
 /** 短示例保留：内容 ≤15 行（含开闭 fence 共 ≤17 行） */
 const SHORT_SAMPLE_MAX_LINES = 17;
 
+/** 删除无法组成 UTF-16 代理对的孤立 surrogate，避免 JSON/Embedding API 拒绝非法 Unicode。 */
+function stripUnpairedSurrogates(text: string): string {
+  let result = '';
+  let changed = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        result += text.slice(i, i + 2);
+        i += 1;
+      } else {
+        changed = true;
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      changed = true;
+    } else {
+      result += text[i];
+    }
+  }
+  return changed ? result : text;
+}
+
 /**
  * 按规则清洗 Markdown 文本。
  * @param text 原始文本
@@ -56,6 +79,7 @@ export function cleanMarkdownText(text: string, rules?: CleanRules): string {
 
     // ② 控制字符/替换符/零宽字符 + Unicode NFC 规范化
     t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFD\u200B-\u200F]/g, '');
+    t = stripUnpairedSurrogates(t);
     t = t.normalize('NFC');
 
     // ③ frontmatter 整块删除（含闭合边界校验：`---` 后须紧跟 \n 或 EOF）

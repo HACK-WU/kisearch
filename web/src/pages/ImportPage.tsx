@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportStatus, runImport, uploadFiles, fetchTags, type ImportJob } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { groupError, tagError } from '@/lib/validators';
 
@@ -15,14 +15,290 @@ interface PendingFile {
   name: string;
   size: number;
   /** File 引用缓存（上传时读取内容） */
-  file?: File;
+  file: File;
+  kind: 'document' | 'asset';
+}
+
+interface RawPendingFile {
+  name: string;
+  size: number;
+  file: File;
+}
+
+interface PendingSelection {
+  id: string;
+  kind: 'file' | 'directory';
+  name: string;
+  files: PendingFile[];
+  scannedFiles: number;
+  skippedFiles: number;
+  skippedBytes: number;
+}
+
+interface UploadPlan {
+  batches: PendingFile[][];
+  nextBatch: number;
+  currentBatch: number;
+  uploadId?: string;
+  uploadedFiles: number;
+  totalFiles: number;
+  totalBytes: number;
+}
+
+interface UploadStats {
+  batch: number;
+  totalBatches: number;
+  filesDone: number;
+  totalFiles: number;
+  bytesDone: number;
+  totalBytes: number;
+}
+
+const FALLBACK_IMPORT_CONFIG: ImportConfigResponse = {
+  ok: true,
+  scope: '',
+  extensions: ['.md'],
+  maxFileSize: 1024 * 1024,
+  assets: true,
+  assetExtensions: ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif'],
+  maxAssetSize: 5 * 1024 * 1024,
+  maxRequestBody: 16 * 1024 * 1024,
+};
+
+const MAX_UPLOAD_BATCH_FILES = 50;
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
+}
+
+function fileExtension(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+function normalizeRelativePath(value: string): string {
+  const segments: string[] = [];
+  for (const segment of value.replaceAll('\\', '/').split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (segments.length > 0) segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments.join('/');
+}
+
+function normalizeAssetReference(raw: string): string | null {
+  let value = raw.trim().replace(/\s+["'][^"']*["']\s*$/, '');
+  const angled = /^<([\s\S]*)>$/.exec(value);
+  if (angled) value = angled[1].trim();
+  value = value.replace(/#.*$/, '');
+  if (!value || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value) || value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('#')) return null;
+  try { value = decodeURIComponent(value); } catch { /* 使用原始路径 */ }
+  return value;
+}
+
+function extractLocalAssetRefs(markdown: string): string[] {
+  const refs: string[] = [];
+  const collect = (text: string): void => {
+    for (const match of text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+      const ref = normalizeAssetReference(match[1]);
+      if (ref) refs.push(ref);
+    }
+    for (const match of text.matchAll(/<img\b[^>]*?\ssrc\s*=\s*["']?([^"'\s>]+)["']?/gi)) {
+      const ref = normalizeAssetReference(match[1]);
+      if (ref) refs.push(ref);
+    }
+  };
+  let inFence = false;
+  let segment: string[] = [];
+  const flush = (): void => {
+    if (segment.length > 0) collect(segment.join('\n'));
+    segment = [];
+  };
+  for (const line of markdown.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      flush();
+      inFence = !inFence;
+    } else if (!inFence) {
+      segment.push(line);
+    }
+  }
+  flush();
+  return refs;
+}
+
+function toUploadBatches(files: PendingFile[], maxRequestBody: number): PendingFile[][] {
+  // JSON + Base64 会放大体积；保留后端 16MB 上限的一半作为安全余量。
+  const targetBytes = Math.max(512 * 1024, Math.min(8 * 1024 * 1024, Math.floor(maxRequestBody * 0.5)));
+  const batches: PendingFile[][] = [];
+  let current: PendingFile[] = [];
+  let currentBytes = 0;
+  for (const file of files) {
+    const estimatedBytes = Math.ceil(file.size / 3) * 4 + file.name.length + 128;
+    if (current.length > 0 && (current.length >= MAX_UPLOAD_BATCH_FILES || currentBytes + estimatedBytes > targetBytes)) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(file);
+    currentBytes += estimatedBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+async function classifyPendingFiles(
+  candidates: RawPendingFile[],
+  policy: ImportConfigResponse,
+  onProgress: (message: string) => void,
+  yieldToBrowser: () => Promise<void>,
+): Promise<{
+  included: PendingFile[];
+  stats: Map<string, { scannedFiles: number; skippedFiles: number; skippedBytes: number }>;
+}> {
+  const allowedDocs = new Set(policy.extensions.map((extension) => extension.toLowerCase()));
+  const allowedAssets = new Set(policy.assetExtensions.map((extension) => extension.toLowerCase()));
+  const docCandidates = candidates.filter((candidate) => allowedDocs.has(fileExtension(candidate.name)));
+  const assetCandidates = candidates.filter((candidate) => allowedAssets.has(fileExtension(candidate.name)));
+  const assetPaths = new Map<string, RawPendingFile>();
+  for (const candidate of assetCandidates) assetPaths.set(normalizeRelativePath(candidate.name), candidate);
+
+  const referencedAssets = new Set<RawPendingFile>();
+  if (policy.assets && assetCandidates.length > 0) {
+    for (const [index, document] of docCandidates.entries()) {
+      const markdown = await document.file.text();
+      const documentDir = document.name.includes('/') ? document.name.slice(0, document.name.lastIndexOf('/')) : '';
+      for (const ref of extractLocalAssetRefs(markdown)) {
+        const asset = assetPaths.get(normalizeRelativePath(`${documentDir}/${ref}`));
+        if (asset && allowedAssets.has(fileExtension(asset.name))) referencedAssets.add(asset);
+      }
+      if ((index + 1) % 20 === 0) {
+        onProgress(`正在分析 Markdown 引用 ${index + 1}/${docCandidates.length}…`);
+        await yieldToBrowser();
+      }
+    }
+  }
+
+  const stats = new Map<string, { scannedFiles: number; skippedFiles: number; skippedBytes: number }>();
+  const included: PendingFile[] = [];
+  for (const [index, candidate] of candidates.entries()) {
+    const topDirectory = candidate.name.split('/').filter(Boolean)[0];
+    const statKey = topDirectory || '__standalone__';
+    const current = stats.get(statKey) ?? { scannedFiles: 0, skippedFiles: 0, skippedBytes: 0 };
+    current.scannedFiles += 1;
+    const kind = allowedDocs.has(fileExtension(candidate.name))
+      ? 'document'
+      : (policy.assets && referencedAssets.has(candidate) ? 'asset' : null);
+    if (kind) {
+      included.push({ ...candidate, kind });
+    } else {
+      current.skippedFiles += 1;
+      current.skippedBytes += candidate.size;
+    }
+    stats.set(statKey, current);
+    if ((index + 1) % 100 === 0) {
+      onProgress(`正在筛选文件 ${index + 1}/${candidates.length}…`);
+      await yieldToBrowser();
+    }
+  }
+  return { included, stats };
+}
+
+function buildSelections(
+  included: PendingFile[],
+  stats: Map<string, { scannedFiles: number; skippedFiles: number; skippedBytes: number }>,
+): Omit<PendingSelection, 'id'>[] {
+  const directories = new Map<string, PendingFile[]>();
+  const standalone: PendingFile[] = [];
+  for (const file of included) {
+    const topDirectory = file.name.split('/').filter(Boolean)[0];
+    if (topDirectory && file.name.includes('/')) {
+      const group = directories.get(topDirectory) ?? [];
+      group.push(file);
+      directories.set(topDirectory, group);
+    } else {
+      standalone.push(file);
+    }
+  }
+  return [
+    ...[...directories.entries()].map(([name, files]) => ({
+      kind: 'directory' as const,
+      name,
+      files,
+      ...(stats.get(name) ?? { scannedFiles: files.length, skippedFiles: 0, skippedBytes: 0 }),
+    })),
+    ...standalone.map((file) => ({
+      kind: 'file' as const,
+      name: file.name,
+      files: [file],
+      scannedFiles: 1,
+      skippedFiles: 0,
+      skippedBytes: 0,
+    })),
+  ];
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+interface FileSystemEntryLike {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  file?: (success: (file: File) => void, error?: (error: DOMException) => void) => void;
+  createReader?: () => FileSystemDirectoryReaderLike;
+}
+
+interface FileSystemDirectoryReaderLike {
+  readEntries: (
+    success: (entries: FileSystemEntryLike[]) => void,
+    error?: (error: DOMException) => void,
+  ) => void;
+}
+
+interface FileSystemHandleLike {
+  kind: 'file' | 'directory';
+  name: string;
+  getFile?: () => Promise<File>;
+  values?: () => AsyncIterableIterator<FileSystemHandleLike>;
+}
+
+interface DirectoryPickerWindow extends Window {
+  showDirectoryPicker?: () => Promise<FileSystemHandleLike>;
+}
+
+interface DataTransferItemWithEntry {
+  getAsFile: DataTransferItem['getAsFile'];
+  webkitGetAsEntry?: () => FileSystemEntryLike | null;
 }
 
 export function ImportPage(): JSX.Element {
   const scope = useScopeValue();
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const [files, setFiles] = useState<PendingFile[]>([]);
+  const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
+  const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
+  const [selections, setSelections] = useState<PendingSelection[]>([]);
+  const selectionSeq = useRef(0);
+  const files = selections.flatMap((selection) => selection.files);
+  const selectedDocuments = files.filter((file) => file.kind === 'document');
+  const selectedAssets = files.filter((file) => file.kind === 'asset');
+  const skippedFiles = selections.reduce((sum, selection) => sum + selection.skippedFiles, 0);
+  const skippedBytes = selections.reduce((sum, selection) => sum + selection.skippedBytes, 0);
+  const totalSelectedBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const importPolicy = importConfigOrFallback;
   const [advOpen, setAdvOpen] = useState(false);
   const [chunkSize, setChunkSize] = useState('1000');
   const [chunkOverlap, setChunkOverlap] = useState('150');
@@ -47,6 +323,16 @@ export function ImportPage(): JSX.Element {
     fetchTags(scope).then((res) => {
       if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
     }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [scope]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getImportConfig(scope).then((config) => {
+      if (!cancelled) setImportConfig(config);
+    }).catch(() => {
+      // 配置接口不可用时保留默认 .md 策略，后端仍会做最终校验。
+    });
     return () => { cancelled = true; };
   }, [scope]);
 
@@ -82,10 +368,15 @@ export function ImportPage(): JSX.Element {
     setSelectedTags((prev) => prev.filter((t) => t !== tag));
   };
 
-  const [phase, setPhase] = useState<'idle' | 'uploading' | 'importing' | 'done' | 'failed'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'scanning' | 'uploading' | 'importing' | 'done' | 'failed'>('idle');
   const [job, setJob] = useState<ImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<{ name: string; error: string }[]>([]);
   const [progressText, setProgressText] = useState('');
+  const [uploadStats, setUploadStats] = useState<UploadStats | null>(null);
+  const [failedUploadBatch, setFailedUploadBatch] = useState<number | null>(null);
+  const uploadPlanRef = useRef<UploadPlan | null>(null);
 
   // 进度轮询（导入中每 2s）
   useEffect(() => {
@@ -96,6 +387,7 @@ export function ImportPage(): JSX.Element {
         if (!res.ok || !res.job) {
           clearInterval(timer);
           setPhase('failed');
+          setFailureStage('import');
           setError(res.error ?? '任务已失效，请重新导入');
           return;
         }
@@ -106,40 +398,153 @@ export function ImportPage(): JSX.Element {
         } else if (res.job.state === 'failed') {
           clearInterval(timer);
           setPhase('failed');
+          setFailureStage('import');
           setError(res.job.error ?? '导入失败');
+        } else if (res.job.state === 'cancelled') {
+          clearInterval(timer);
+          setPhase('failed');
+          setFailureStage('import');
+          setError('导入已取消');
         }
       } catch (e) {
-        setProgressText(`轮询出错：${(e as Error).message}`);
+        clearInterval(timer);
+        setPhase('failed');
+        setFailureStage('import');
+        setError(`查询导入状态失败：${e instanceof Error ? e.message : String(e)}`);
       }
     }, 2000);
     return () => clearInterval(timer);
   }, [phase, job?.id]);
 
-  const collectFiles = async (list: FileList, basePath = ''): Promise<void> => {
-    const loaded: PendingFile[] = [];
-    for (const f of Array.from(list)) {
-      const webkitRel = (f as File & { webkitRelativePath?: string }).webkitRelativePath;
-      const rel = basePath ? `${basePath}/${f.name}` : webkitRel || f.name;
-      loaded.push({ name: rel, size: f.size, file: f });
+  const nextSelectionId = (): string => `selection-${Date.now()}-${selectionSeq.current++}`;
+
+  const addSelections = (incoming: Omit<PendingSelection, 'id'>[]): void => {
+    const valid = incoming.filter((selection) => selection.files.length > 0);
+    if (valid.length === 0) return;
+    setSelections((prev) => [
+      ...prev,
+      ...valid.map((selection) => ({ ...selection, id: nextSelectionId() })),
+    ]);
+  };
+
+  /**
+   * 将原生目录选择器返回的 FileList 按顶层目录聚合。
+   * webkitRelativePath 是后端推导默认 Group 所需的相对路径，不能丢失。
+   */
+  const yieldToBrowser = (): Promise<void> => new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+
+  const collectSelectedFiles = async (list: FileList): Promise<void> => {
+    // 先让 React 绘制 scanning 状态，再处理 FileList；大目录每 100 个文件让出一次主线程。
+    const selectedFiles: RawPendingFile[] = Array.from(list).map((file) => ({
+      name: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+      size: file.size,
+      file,
+    }));
+    await collectRawFiles(selectedFiles);
+  };
+
+  const collectRawFiles = async (selectedFiles: RawPendingFile[]): Promise<void> => {
+    await yieldToBrowser();
+    const classified = await classifyPendingFiles(
+      selectedFiles,
+      importPolicy,
+      setProgressText,
+      yieldToBrowser,
+    );
+    const nextSelections = buildSelections(classified.included, classified.stats);
+    addSelections(nextSelections);
+    if (nextSelections.length === 0) {
+      setFailureStage('scan');
+      setError(`未发现可导入文件：请检查 Markdown 扩展名（${importPolicy.extensions.join(', ')}）以及 Markdown 中是否引用了有效附件`);
     }
-    setFiles((prev) => [...prev, ...loaded]);
+  };
+
+  const scanSelectedFiles = (list: FileList, message: string): void => {
+    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    setError(null);
+    setFailureStage(null);
+    setUploadErrors([]);
+    setProgressText(message);
+    setPhase('scanning');
+    void collectSelectedFiles(list).then(() => {
+      setProgressText('');
+      setPhase('idle');
+    }).catch((error) => {
+      setProgressText('');
+      setPhase('idle');
+      setFailureStage('scan');
+      setError(`读取文件列表失败：${error instanceof Error ? error.message : String(error)}`);
+    });
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
-    if (e.target.files) void collectFiles(e.target.files);
+    if (e.target.files) scanSelectedFiles(e.target.files, '正在读取文件列表…');
     e.target.value = '';
   };
 
-  /** 打开目录选择器：动态创建原生 input 绕开 React DOM 管理，解决 macOS webkitdirectory 被覆盖导致"打开"按钮不可点的问题 */
-  const openDirPicker = (): void => {
+  const readPickedDirectory = async (handle: FileSystemHandleLike, parentPath = ''): Promise<RawPendingFile[]> => {
+    const currentPath = parentPath ? `${parentPath}/${handle.name}` : handle.name;
+    if (handle.kind === 'file' && handle.getFile) {
+      const file = await handle.getFile();
+      return [{ name: currentPath, size: file.size, file }];
+    }
+    if (handle.kind !== 'directory' || !handle.values) return [];
+
+    const files: RawPendingFile[] = [];
+    for await (const child of handle.values()) {
+      files.push(...await readPickedDirectory(child, currentPath));
+      if (files.length > 0 && files.length % 100 === 0) await yieldToBrowser();
+    }
+    return files;
+  };
+
+  /**
+   * 打开目录选择器：优先使用 File System Access API，避免 Chromium 对
+   * input[webkitdirectory] 触发“是否将 N 个文件上传到此站点”的原生确认。
+   * 不支持该 API 的浏览器回退到 webkitdirectory input。
+   */
+  const openDirPicker = async (): Promise<void> => {
+    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
+    if (picker) {
+      let directory: FileSystemHandleLike;
+      try {
+        // 选择器打开期间不改变页面 loading；用户取消时页面保持原状态。
+        directory = await picker.call(window);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        setFailureStage('scan');
+        setError(`读取目录失败：${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      setError(null);
+      setFailureStage(null);
+      setUploadErrors([]);
+      setProgressText('正在读取目录…');
+      setPhase('scanning');
+      try {
+        await collectRawFiles(await readPickedDirectory(directory));
+        setProgressText('');
+        setPhase('idle');
+      } catch (error) {
+        setProgressText('');
+        setPhase('idle');
+        setFailureStage('scan');
+        setError(`读取目录失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+
+    // 兼容不支持 File System Access API 的浏览器。
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
     input.setAttribute('webkitdirectory', '');
-    input.setAttribute('directory', '');
     input.style.display = 'none';
     input.addEventListener('change', () => {
-      if (input.files) void collectFiles(input.files);
+      if (input.files) scanSelectedFiles(input.files, '正在读取目录…');
       input.remove();
     });
     // 取择也清理 DOM
@@ -148,23 +553,160 @@ export function ImportPage(): JSX.Element {
     input.click();
   };
 
+  const readDirectoryEntries = async (reader: FileSystemDirectoryReaderLike): Promise<FileSystemEntryLike[]> => {
+    const entries: FileSystemEntryLike[] = [];
+    while (true) {
+      const batch = await new Promise<FileSystemEntryLike[]>((resolve, reject) => {
+        reader.readEntries(resolve, reject);
+      });
+      if (batch.length === 0) return entries;
+      entries.push(...batch);
+    }
+  };
+
+  const readDroppedEntry = async (entry: FileSystemEntryLike, parentPath = ''): Promise<RawPendingFile[]> => {
+    const currentPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+    if (entry.isFile && entry.file) {
+      const file = await new Promise<File>((resolve, reject) => {
+        entry.file!(resolve, reject);
+      });
+      return [{ name: currentPath, size: file.size, file }];
+    }
+    if (!entry.isDirectory || !entry.createReader) return [];
+
+    const children = await readDirectoryEntries(entry.createReader());
+    const nested = await Promise.all(children.map((child) => readDroppedEntry(child, currentPath)));
+    return nested.flat();
+  };
+
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragOver(false);
-    const items = e.dataTransfer.items;
-    // 拖拽目录（webkitGetAsEntry 递归）——V1 简化：仅处理文件
-    const files: File[] = [];
-    for (const item of Array.from(items)) {
-      const f = item.getAsFile();
-      if (f) files.push(f);
-    }
-    const dt = new DataTransfer();
-    files.forEach((f) => dt.items.add(f));
-    if (dt.files.length > 0) void collectFiles(dt.files);
+    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    setError(null);
+    setFailureStage(null);
+    setUploadErrors([]);
+    setProgressText('正在读取拖拽目录…');
+    setPhase('scanning');
+    // DataTransferItem/FileList 在 drop 事件返回后可能被浏览器清空，先同步取出句柄。
+    const droppedItems = (Array.from(e.dataTransfer.items) as DataTransferItemWithEntry[]).map((item) => ({
+      entry: item.webkitGetAsEntry?.(),
+      file: item.getAsFile(),
+    }));
+    const fallbackFiles = Array.from(e.dataTransfer.files);
+    void (async () => {
+      try {
+        const candidates: RawPendingFile[] = [];
+        for (const { entry, file } of droppedItems) {
+          if (entry) {
+            const droppedFiles = await readDroppedEntry(entry);
+            candidates.push(...droppedFiles);
+            continue;
+          }
+          if (file) {
+            candidates.push({ name: file.name, size: file.size, file });
+          }
+        }
+        if (candidates.length === 0) candidates.push(...fallbackFiles.map((file) => ({ name: file.name, size: file.size, file })));
+        const classified = await classifyPendingFiles(candidates, importPolicy, setProgressText, yieldToBrowser);
+        const selectionsToAdd = buildSelections(classified.included, classified.stats);
+        addSelections(selectionsToAdd);
+        if (selectionsToAdd.length === 0) {
+          setFailureStage('scan');
+          setError(`未发现可导入文件：请检查 Markdown 扩展名（${importPolicy.extensions.join(', ')}）以及 Markdown 中是否引用了有效附件`);
+        }
+        setProgressText('');
+        setPhase('idle');
+      } catch (error) {
+        setProgressText('');
+        setPhase('idle');
+        setFailureStage('scan');
+        setError(`读取拖拽目录失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
   };
 
-  const removeFile = (name: string): void => {
-    setFiles((prev) => prev.filter((f) => f.name !== name));
+  const removeSelection = (id: string): void => {
+    setSelections((prev) => prev.filter((selection) => selection.id !== id));
+  };
+
+  const getErrorDetails = (error: unknown): string => {
+    const apiError = error as Error & { body?: { errors?: { name?: string; error?: string }[] } };
+    const details = apiError.body?.errors
+      ?.map((item) => `${item.name ?? '文件'}：${item.error ?? '未知错误'}`)
+      .join('\n');
+    return details ? `${apiError.message}\n${details}` : apiError.message;
+  };
+
+  const triggerImport = async (uploadId: string): Promise<void> => {
+    try {
+      const run = await runImport({
+        scope,
+        uploadId,
+        group: group.trim() || undefined,
+        chunkSize: chunkSize ? Number(chunkSize) : undefined,
+        chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
+        vector,
+        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
+      });
+      if (!run.ok || !run.jobId) {
+        setFailureStage('import');
+        setPhase('failed');
+        setError(run.error ?? '导入触发失败');
+        return;
+      }
+      setJob({ id: run.jobId, scope, state: 'running', startedAt: Date.now() });
+      setProgressText('导入中…');
+      setFailureStage(null);
+      setPhase('importing');
+    } catch (error) {
+      setFailureStage('import');
+      setPhase('failed');
+      setError(getErrorDetails(error));
+    }
+  };
+
+  const continueUpload = async (fromBatch: number): Promise<string | null> => {
+    const plan = uploadPlanRef.current;
+    if (!plan) return null;
+    setError(null);
+    setPhase('uploading');
+    setFailedUploadBatch(null);
+    try {
+      for (let index = fromBatch; index < plan.batches.length; index += 1) {
+        plan.currentBatch = index;
+        const batch = plan.batches[index];
+        const encoded: { name: string; content: string }[] = [];
+        for (const [fileIndex, file] of batch.entries()) {
+          setProgressText(`准备第 ${index + 1}/${plan.batches.length} 批：${fileIndex + 1}/${batch.length} 个文件…`);
+          encoded.push({ name: file.name, content: await fileToBase64(file.file) });
+        }
+        const response = await uploadFiles(scope, encoded, plan.uploadId);
+        if (!response.ok || !response.uploadId) throw new Error(response.error ?? '上传失败');
+        plan.uploadId = response.uploadId;
+        plan.nextBatch = index + 1;
+        plan.uploadedFiles += response.total ?? batch.length;
+        if (response.errors && response.errors.length > 0) {
+          setUploadErrors((previous) => [...previous, ...response.errors!]);
+        }
+        setUploadStats({
+          batch: index + 1,
+          totalBatches: plan.batches.length,
+          filesDone: plan.uploadedFiles,
+          totalFiles: plan.totalFiles,
+          bytesDone: Math.min(plan.totalBytes, plan.batches.slice(0, index + 1).flat().reduce((sum, item) => sum + item.size, 0)),
+          totalBytes: plan.totalBytes,
+        });
+        setProgressText(`已上传第 ${index + 1}/${plan.batches.length} 批（${plan.uploadedFiles}/${plan.totalFiles} 个文件）`);
+      }
+      return plan.uploadId ?? null;
+    } catch (error) {
+      setFailedUploadBatch(plan.currentBatch);
+      setFailureStage('upload');
+      setPhase('failed');
+      setError(`上传第 ${plan.currentBatch + 1}/${plan.batches.length} 批失败：${getErrorDetails(error)}`);
+      return null;
+    }
   };
 
   const start = async (): Promise<void> => {
@@ -177,59 +719,50 @@ export function ImportPage(): JSX.Element {
       setError(groupErr);
       return;
     }
-    setError(null);
-    setProgressText('上传中…');
-    setPhase('uploading');
-    try {
-      // 逐文件读取内容 → base64 上传
-      const uploads: { name: string; content: string }[] = [];
-      for (const f of files) {
-        if (!f.file) continue;
-        const text = await f.file.text();
-        uploads.push({ name: f.name, content: btoa(unescape(encodeURIComponent(text))) });
-      }
-      if (uploads.length === 0) {
-        setPhase('failed');
-        setError('无有效文件可上传');
-        return;
-      }
-      const up = await uploadFiles(scope, uploads);
-      if (!up.ok || !up.uploadId) {
-        setPhase('failed');
-        setError(up.error ?? '上传失败');
-        return;
-      }
-      if (up.errors && up.errors.length > 0) {
-        setError(`部分文件被拒绝：${up.errors.map((e) => `${e.name}（${e.error}）`).join('; ')}`);
-      }
-      setProgressText(`已上传 ${up.total ?? uploads.length} 个文件，触发导入…`);
-
-      const run = await runImport({
-        scope,
-        uploadId: up.uploadId,
-        group: group.trim() || undefined,
-        chunkSize: chunkSize ? Number(chunkSize) : undefined,
-        chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
-        vector,
-        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
-      });
-      if (!run.ok || !run.jobId) {
-        setPhase('failed');
-        setError(run.error ?? '导入触发失败');
-        return;
-      }
-      setJob({ id: run.jobId, scope, state: 'running', startedAt: Date.now() });
-      setProgressText('导入中…');
-      setPhase('importing');
-    } catch (e) {
-      setPhase('failed');
-      setError((e as Error).message);
+    if (selectedDocuments.length === 0) {
+      setFailureStage('scan');
+      setError('没有可导入的 Markdown 文件');
+      return;
     }
+    setError(null);
+    setFailureStage(null);
+    setUploadErrors([]);
+    setJob(null);
+    const batches = toUploadBatches(files, importPolicy.maxRequestBody);
+    const plan: UploadPlan = {
+      batches,
+      nextBatch: 0,
+      currentBatch: 0,
+      uploadedFiles: 0,
+      totalFiles: files.length,
+      totalBytes: totalSelectedBytes,
+    };
+    uploadPlanRef.current = plan;
+    setUploadStats({ batch: 0, totalBatches: batches.length, filesDone: 0, totalFiles: files.length, bytesDone: 0, totalBytes: totalSelectedBytes });
+    const uploadId = await continueUpload(0);
+    if (uploadId) await triggerImport(uploadId);
+  };
+
+  const retryUpload = async (): Promise<void> => {
+    if (failedUploadBatch === null) return;
+    const uploadId = await continueUpload(failedUploadBatch);
+    if (uploadId) await triggerImport(uploadId);
   };
 
   const result = job?.result as
-    | { stats?: { total?: number; imported?: number; vectorized?: number; errors?: number } }
+    | {
+        stats?: { total?: number; vectorized?: number; errors?: number };
+        errors?: { path?: string; error?: string }[];
+      }
     | undefined;
+  const importErrors = result?.errors ?? [];
+  const importPercent = job?.progress && job.progress.total > 0
+    ? Math.min(100, Math.round((job.progress.done / job.progress.total) * 100))
+    : null;
+  const uploadPercent = uploadStats && uploadStats.totalFiles > 0
+    ? Math.min(100, Math.round((uploadStats.filesDone / uploadStats.totalFiles) * 100))
+    : null;
+  const activePercent = phase === 'uploading' ? uploadPercent : importPercent;
 
   return (
     <>
@@ -254,15 +787,15 @@ export function ImportPage(): JSX.Element {
             onDrop={onDrop}
           >
             <div className="ki-dropzone__icon">⇪</div>
-            <div className="ki-dropzone__title">拖拽 Markdown 文件到此处，或点击选择</div>
+            <div className="ki-dropzone__title">拖拽 Markdown 文件或目录到此处，或点击选择</div>
             <div style={{ marginTop: 4, fontSize: 12 }}>
-              支持 .md / .markdown / .mdx，单个文件 ≤ 1MB
+              文档：{importPolicy.extensions.join(', ')}；Markdown 引用的图片附件会一并处理，其他文件自动跳过
             </div>
             <input
               ref={fileInput}
               type="file"
               multiple
-              accept=".md,.markdown,.mdx"
+              accept={[...importPolicy.extensions, ...(importPolicy.assets ? importPolicy.assetExtensions : [])].join(',')}
               style={{ display: 'none' }}
               onChange={onFileChange}
             />
@@ -375,20 +908,38 @@ export function ImportPage(): JSX.Element {
           </div>
 
           {/* 文件清单 */}
-          {files.length > 0 && (
+          {selections.length > 0 && (
             <div style={{ marginTop: 16 }}>
-              {files.map((f) => (
-                <div key={f.name} className="ki-file-item">
-                  <span className="ki-file-item__icon">📄</span>
-                  <div className="ki-file-item__meta">
-                    <div className="ki-file-item__name">{f.name}</div>
-                    <div className="ki-file-item__size">{Math.round(f.size / 1024)}KB</div>
+              <div className="ki-import-summary">
+                <span>待导入：{selectedDocuments.length} 个 Markdown</span>
+                <span>附件：{selectedAssets.length} 个</span>
+                {skippedFiles > 0 && <span className="ki-import-summary__skipped">已跳过：{skippedFiles} 个（{formatBytes(skippedBytes)}）</span>}
+                <span>大小：{formatBytes(totalSelectedBytes)}</span>
+              </div>
+              {selections.map((selection) => {
+                const totalSize = selection.files.reduce((sum, file) => sum + file.size, 0);
+                return (
+                  <div key={selection.id} className="ki-file-item">
+                    <span className="ki-file-item__icon">{selection.kind === 'directory' ? '📁' : '📄'}</span>
+                    <div className="ki-file-item__meta">
+                      <div className="ki-file-item__name">{selection.name}</div>
+                      {selection.kind === 'directory' ? (
+                        <div className="ki-file-item__size">
+                          目录 · {selection.files.filter((file) => file.kind === 'document').length} 个 Markdown
+                          {selection.files.some((file) => file.kind === 'asset') && ` · ${selection.files.filter((file) => file.kind === 'asset').length} 个附件`}
+                          {selection.skippedFiles > 0 && ` · 跳过 ${selection.skippedFiles} 个`}
+                          {' · '}{formatBytes(totalSize)}
+                        </div>
+                      ) : (
+                        <div className="ki-file-item__size">{selection.files[0]?.kind === 'asset' ? '附件' : 'Markdown'} · {formatBytes(totalSize)}</div>
+                      )}
+                    </div>
+                    <button className="ki-file-item__remove" onClick={() => removeSelection(selection.id)} title="移除">
+                      ✕
+                    </button>
                   </div>
-                  <button className="ki-file-item__remove" onClick={() => removeFile(f.name)} title="移除">
-                    ✕
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -448,9 +999,9 @@ export function ImportPage(): JSX.Element {
             <button
               className="ki-btn ki-btn--primary"
               onClick={() => void start()}
-              disabled={phase === 'importing' || files.length === 0}
+              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing' || files.length === 0}
             >
-              {phase === 'importing' ? '导入中…' : '开始导入'}
+              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
             <span className="ki-cell-sub">{progressText || '直导无需 AI · 无第三方依赖'}</span>
           </div>
@@ -458,37 +1009,79 @@ export function ImportPage(): JSX.Element {
       </div>
 
       {/* 进度 */}
-      {phase === 'importing' && (
+      {(phase === 'scanning' || phase === 'uploading' || phase === 'importing') && (
         <div className="ki-progress-block" style={{ marginTop: 16 }}>
           <div className="ki-progress-row">
-            <span className="ki-progress-label">{job?.state === 'done' ? '完成' : '导入中…'}</span>
+            <span className="ki-progress-label">
+              <span className="ki-spinner" aria-hidden="true" />
+              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : '导入中…'}
+            </span>
             <span className="ki-cell-sub">{progressText}</span>
           </div>
           <div className="ki-progress">
-            <div className="ki-progress__fill" style={{ width: job?.state === 'done' ? '100%' : '50%' }} />
+            <div
+              className={`ki-progress__fill${activePercent === null ? ' ki-progress__fill--indeterminate' : ''}`}
+              style={activePercent === null ? undefined : { width: `${activePercent}%` }}
+            />
           </div>
-          <div className="ki-progress-sub">{progressText}</div>
+          <div className="ki-progress-sub">
+            {phase === 'uploading' && uploadStats
+              ? `第 ${uploadStats.batch}/${uploadStats.totalBatches} 批 · ${uploadStats.filesDone}/${uploadStats.totalFiles} 个文件 · ${formatBytes(uploadStats.bytesDone)}/${formatBytes(uploadStats.totalBytes)}（${uploadPercent ?? 0}%）`
+              : phase === 'importing' && job?.progress
+                ? `${job.progress.done}/${job.progress.total} 个处理单元（${importPercent ?? 0}%）`
+                : progressText}
+          </div>
         </div>
       )}
 
       {error && (
         <div className="ki-empty" style={{ marginTop: 16 }}>
           <div>
-            <h3>导入失败</h3>
-            <p>{error}</p>
+            <h3>{failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败'}</h3>
+            <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{error}</p>
+            {failedUploadBatch !== null && uploadPlanRef.current && (
+              <div className="ki-empty__actions">
+                <button className="ki-btn ki-btn--primary ki-btn--small" onClick={() => void retryUpload()}>
+                  重试第 {failedUploadBatch + 1}/{uploadPlanRef.current.batches.length} 批
+                </button>
+              </div>
+            )}
           </div>
+        </div>
+      )}
+
+      {uploadErrors.length > 0 && (
+        <div className="ki-import-errors" style={{ marginTop: 16 }} role="alert">
+          <div className="ki-import-errors__title">部分文件未上传（{uploadErrors.length}）</div>
+          <ul>
+            {uploadErrors.map((item, index) => (
+              <li key={`${item.name}-${index}`}>{item.name}：{item.error}</li>
+            ))}
+          </ul>
         </div>
       )}
 
       {phase === 'done' && (
         <div className="ki-empty" style={{ marginTop: 16 }}>
           <div>
-            <h3>导入完成</h3>
+            <h3>{importErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
             <p>
               {result?.stats
-                ? `共导入 ${result.stats.imported ?? 0} 文件 / ${result.stats.vectorized ?? 0} 向量化，错误 ${result.stats.errors ?? 0}`
+                ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}`
                 : '导入已完成，可前往搜索验证。'}
             </p>
+            {importErrors.length > 0 && (
+              <div className="ki-import-errors" role="alert">
+                <div className="ki-import-errors__title">具体错误（{importErrors.length}）</div>
+                <ul>
+                  {importErrors.map((item, index) => (
+                    <li key={`${item.path ?? 'error'}-${index}`}>
+                      {item.path ? `${item.path}：` : ''}{item.error ?? '未知错误'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="ki-empty__actions">
               <Link className="ki-btn ki-btn--primary ki-btn--small" to="/search">
                 前往搜索验证 →

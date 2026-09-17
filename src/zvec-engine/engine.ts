@@ -524,11 +524,17 @@ export class ZvecEngine {
 
       const payloadDocs: WriteDocPayload[] = [];
       const payloadItems: Array<{ id: string; inputIndex: number }> = [];
+      let embeddingFailed = 0;
       for (let i = 0; i < batch.items.length; i++) {
         const item = batch.items[i];
         const vector = batch.vectors[i];
         if (!vector) {
-          allErrors.push({ id: item.docId, code: 'EMBEDDING_FAILED', reason: 'Embedding 未返回向量' });
+          allErrors.push({
+            id: item.docId,
+            code: 'EMBEDDING_FAILED',
+            reason: batch.itemErrors?.[i]?.message ?? 'Embedding 未返回向量',
+          });
+          embeddingFailed++;
           failed++;
           continue;
         }
@@ -537,7 +543,7 @@ export class ZvecEngine {
       }
       if (payloadDocs.length === 0) {
         options.onProgress?.({ phase: 'persist', done: persisted + failed, total: docs.length, persisted, failed, metadataPending });
-        return { persisted: 0, failed: batch.items.length };
+        return { persisted: 0, failed: embeddingFailed };
       }
 
       const writeResult = await this.proxy.send<WriteResultPayload>(mode, {
@@ -594,7 +600,7 @@ export class ZvecEngine {
       options.onProgress?.({ phase: 'persist', done: persisted + failed + metadataPending, total: docs.length, persisted, failed, metadataPending });
       return {
         persisted: zvecPersisted - batchMetadataPending,
-        failed: zvecFailed,
+        failed: embeddingFailed + zvecFailed,
         metadataPending: batchMetadataPending,
       };
     };

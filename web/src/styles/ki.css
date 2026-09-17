@@ -544,6 +544,26 @@ a:hover { text-decoration: underline; }
 /* 进度条 */
 .ki-progress { height: 6px; background: var(--ki-color-bg-secondary); border-radius: 3px; overflow: hidden; }
 .ki-progress__fill { height: 100%; background: var(--ki-color-primary); border-radius: 3px; transition: width 0.3s ease; }
+.ki-progress__fill--indeterminate {
+  width: 35%;
+  animation: ki-progress-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes ki-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  50% { transform: translateX(180%); }
+  100% { transform: translateX(300%); }
+}
+.ki-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ki-spin 0.7s linear infinite;
+}
 
 /* 拖拽区 */
 .ki-dropzone {
@@ -949,8 +969,27 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-progress-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .ki-progress-label { font-weight: 600; font-size: var(--ki-font-size-md); }
 .ki-progress-sub { margin-top: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-import-errors {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 30%, transparent);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-danger) 5%, transparent);
+  color: var(--ki-color-danger);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ki-import-errors__title { font-weight: 600; margin-bottom: 6px; }
+.ki-import-errors ul { margin: 0; padding-left: 20px; }
+.ki-import-errors li + li { margin-top: 4px; }
 .ki-file-item__status--ok { color: var(--ki-color-success); }
 .ki-file-item__status--err { color: var(--ki-color-danger); }
+.ki-import-summary {
+  display: flex; flex-wrap: wrap; gap: 8px 16px;
+  margin-bottom: 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.ki-import-summary__skipped { color: var(--ki-color-warning); }
 
 /* ── 写入页 ── */
 .ki-mode-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 8px; padding: 2px; border: 1px solid var(--ki-color-border); margin-bottom: 20px; }

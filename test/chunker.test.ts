@@ -57,6 +57,18 @@ describe('splitIntoChunks', () => {
     assert.strictEqual(chunks[0].text.length, 100);
   });
 
+  it('不会在 UTF-16 代理对中间切分', () => {
+    const text = 'a'.repeat(9) + '😀' + 'b'.repeat(9) + '🚀' + 'c'.repeat(9);
+    const chunks = splitIntoChunks(text, { chunkSize: 10, overlap: 0 });
+
+    for (const chunk of chunks) {
+      assert.doesNotMatch(chunk.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+      assert.doesNotMatch(chunk.text, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+    }
+    assert.ok(chunks.some((chunk) => chunk.text.includes('😀')));
+    assert.ok(chunks.some((chunk) => chunk.text.includes('🚀')));
+  });
+
   it('overlap 生效：相邻 chunk 有重叠内容', () => {
     const text = Array.from({ length: 10 }, (_, i) => `段落${i}内容填充，用于测试。`.repeat(2)).join('\n\n');
     const overlap = 20;

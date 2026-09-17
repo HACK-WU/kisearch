@@ -24,12 +24,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
 import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
-import { handleDirectImport, type ImportResult } from './import.js';
+import {
+  ASSET_EXTENSIONS,
+  DEFAULT_EXTENSIONS,
+  DEFAULT_MAX_ASSET_SIZE,
+  DEFAULT_MAX_FILE_SIZE_BYTES,
+  handleDirectImport,
+  type ImportResult,
+} from './import.js';
 import { rebuildScopeVectors, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
@@ -38,10 +45,6 @@ import { vectorCountScope } from './vector-client.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
-/** 上传文件扩展名白名单（对齐 config import.extensions 默认） */
-const ALLOWED_EXT = new Set(['.md', '.markdown', '.mdx']);
-/** 单文件大小上限（对齐 maxFileSizeBytes 默认 1MB） */
-const MAX_FILE_SIZE = 1024 * 1024;
 /** 请求体上限（对齐 mcp-http readJsonBody 的 16MB） */
 const MAX_BODY = 16 * 1024 * 1024;
 /** /api/doc/list 默认分页上限 */
@@ -52,6 +55,18 @@ const HEALTH_TIMEOUT_MS = 10_000;
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
   return path.join(os.homedir(), '.ki', 'import-uploads');
+}
+
+const UPLOAD_SCOPE_FILE = '.scope';
+const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function bindUploadScope(dir: string, scope: string): boolean {
+  const scopeFile = path.join(dir, UPLOAD_SCOPE_FILE);
+  if (fs.existsSync(scopeFile)) {
+    return fs.readFileSync(scopeFile, 'utf8').trim() === scope;
+  }
+  fs.writeFileSync(scopeFile, scope, 'utf8');
+  return true;
 }
 
 // ─── job 管理（内存 Map） ─────────────────────────────
@@ -276,7 +291,7 @@ export async function handleApiRequest(
   // query scope 越权校验：对带 scope 参数的只读接口（tags / doc/list / asset）生效；
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
-  if (authScopes !== null && (p === '/tags' || p === '/doc/list' || p === '/asset')) {
+  if (authScopes !== null && (p === '/tags' || p === '/doc/list' || p === '/asset' || p === '/import/config')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -326,6 +341,7 @@ export async function handleApiRequest(
       );
       return;
     }
+    if (p === '/import/config' && req.method === 'GET') return void (await handleImportConfig(res, url));
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
@@ -338,6 +354,24 @@ export async function handleApiRequest(
     const e = err as Error & { code?: string };
     sendJson(res, 400, { ok: false, error: e.message, code: e.code ?? 'API_ERROR' });
   }
+}
+
+// ─── GET /api/import/config ──────────────────────────
+
+async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<void> {
+  const requestConfig = loadConfig();
+  const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+  const importConfig = getScopeImportConfig(requestConfig, scope);
+  sendJson(res, 200, {
+    ok: true,
+    scope,
+    extensions: importConfig?.extensions ?? DEFAULT_EXTENSIONS,
+    maxFileSize: importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+    assets: importConfig?.assets !== false,
+    assetExtensions: ASSET_EXTENSIONS,
+    maxAssetSize: importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
+    maxRequestBody: MAX_BODY,
+  });
 }
 
 // ─── GET /api/health ──────────────────────────────────
@@ -532,6 +566,7 @@ async function handleImportUpload(
 ): Promise<void> {
   const body = (await readJsonBody(req)) as {
     scope?: string;
+    uploadId?: string;
     files?: { name?: string; content?: string; size?: number }[];
   } | undefined;
   // scope 越权校验：鉴权模式下校验 body.scope（缺省 'default'，与工具缺省值一致）
@@ -547,11 +582,37 @@ async function handleImportUpload(
     sendJson(res, 400, { ok: false, error: '缺少 files 数组（{ scope, files: [{ name, content }] }）' });
     return;
   }
-  const scope = resolveScope(loadConfig(), body.scope);
+  const requestConfig = loadConfig();
+  const scope = resolveScope(requestConfig, body.scope);
+  const importConfig = getScopeImportConfig(requestConfig, scope);
+  const allowedExtensions = importConfig?.extensions ?? DEFAULT_EXTENSIONS;
+  const allowedExt = new Set(allowedExtensions.map((extension) => extension.toLowerCase()));
+  const assetExt = new Set(ASSET_EXTENSIONS);
+  const assetsEnabled = importConfig?.assets !== false;
+  const maxFileSizeBytes = importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+  const maxAssetSizeBytes = importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;
 
-  const uploadId = crypto.randomUUID();
-  const dir = path.join(getUploadsRoot(), uploadId);
+  const requestedUploadId = body.uploadId?.trim() ?? '';
+  const uploadId = requestedUploadId || crypto.randomUUID();
+  if (requestedUploadId && !UPLOAD_ID_RE.test(requestedUploadId)) {
+    sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
+  const uploadsRoot = path.resolve(getUploadsRoot());
+  const dir = path.resolve(uploadsRoot, uploadId);
+  if (!dir.startsWith(uploadsRoot + path.sep)) {
+    sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
+  if (requestedUploadId && (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory())) {
+    sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
+    return;
+  }
   fs.mkdirSync(dir, { recursive: true });
+  if (!bindUploadScope(dir, scope)) {
+    sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
+    return;
+  }
 
   const saved: { name: string; path: string; size: number }[] = [];
   const errors: { name: string; error: string }[] = [];
@@ -562,12 +623,16 @@ async function handleImportUpload(
     try {
       if (!name) throw new Error('缺少文件名');
       const ext = path.extname(name).toLowerCase();
-      if (!ALLOWED_EXT.has(ext)) {
-        throw new Error(`不支持的扩展名（${ext || '(无)'}），仅允许 .md/.markdown/.mdx`);
+      const isDocument = allowedExt.has(ext);
+      const isAsset = assetsEnabled && assetExt.has(ext);
+      if (!isDocument && !isAsset) {
+        const assetHint = assetsEnabled ? `；附件允许 ${[...assetExt].join('/')}` : '';
+        throw new Error(`不支持的扩展名（${ext || '(无)'}），文档仅允许 ${[...allowedExt].join('/')}${assetHint}`);
       }
       const buf = Buffer.from(content, 'base64');
-      if (buf.length > MAX_FILE_SIZE) {
-        throw new Error(`文件超过大小上限（${Math.round(MAX_FILE_SIZE / 1024)}KB）`);
+      const maxBytes = isAsset ? maxAssetSizeBytes : maxFileSizeBytes;
+      if (buf.length > maxBytes) {
+        throw new Error(`文件超过大小上限（${Math.round(maxBytes / 1024)}KB）`);
       }
       const safeName = sanitizeFileName(name);
       const abs = path.join(dir, safeName);
@@ -584,10 +649,11 @@ async function handleImportUpload(
 
   // 全部失败则清理目录
   if (saved.length === 0) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (!requestedUploadId) fs.rmSync(dir, { recursive: true, force: true });
     sendJson(res, 400, {
       ok: false,
       error: '所有文件均校验失败',
+      uploadId: requestedUploadId ? uploadId : undefined,
       errors,
       scope,
     });
@@ -627,21 +693,30 @@ async function handleImportRun(
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
     return;
   }
+  const uploadId = body.uploadId.trim();
+  if (!UPLOAD_ID_RE.test(uploadId)) {
+    sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
   // scope 越权校验（body.scope 必填）
   if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
     rejectScopeViolation(res, body.scope, '/import/run');
     return;
   }
   const scope = resolveScope(requestConfig, body.scope);
-  const sourceDir = path.join(getUploadsRoot(), body.uploadId);
+  const sourceDir = path.join(getUploadsRoot(), uploadId);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
-    sendJson(res, 400, { ok: false, error: `uploadId 不存在（${body.uploadId}）` });
+    sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
     return;
   }
   // 安全：确认 sourceDir 在受控目录内
   const root = path.normalize(getUploadsRoot());
   if (!path.normalize(sourceDir).startsWith(root + path.sep)) {
     sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
+  if (!bindUploadScope(sourceDir, scope)) {
+    sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
     return;
   }
 

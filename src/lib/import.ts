@@ -172,7 +172,8 @@ function resolveGroupForSource(group: string, rel: string, scope: string): strin
 // ─── 直导（原文直导 + 切分）工具 ─────────────────────────
 
 /** 默认格式白名单：.md（REQ-08，可配置扩展 .markdown 等） */
-const DEFAULT_EXTENSIONS = ['.md'];
+export const DEFAULT_EXTENSIONS = ['.md'];
+export const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 
 /** 图片附件后缀白名单（REQ-20260904-001：仅本地相对路径引用会被复制进 KB） */
 export const ASSET_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif'];
@@ -461,7 +462,7 @@ export async function handleDirectImport(
   const cfg = loadConfig();
   const importCfg = getScopeImportConfig(cfg, scope);
   const extensions = importCfg?.extensions ?? DEFAULT_EXTENSIONS;
-  const maxFileSizeBytes = args.maxFileSizeBytes ?? importCfg?.maxFileSize ?? 1024 * 1024; // 默认 1MB（REQ-08）
+  const maxFileSizeBytes = args.maxFileSizeBytes ?? importCfg?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES; // 默认 1MB（REQ-08）
   // REQ-20260904-001：附件收集开关（--no-assets / config assets:false 关闭）与单附件上限（默认 5MB）
   const assetsEnabled = args.assets !== false && importCfg?.assets !== false;
   const maxAssetBytes = importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;

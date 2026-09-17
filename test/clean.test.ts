@@ -42,6 +42,11 @@ describe('cleanMarkdownText — frontmatter', () => {
 });
 
 describe('cleanMarkdownText — 去噪', () => {
+  it('删除孤立 surrogate，但保留合法代理对（避免 Embedding API 400 参数错误）', () => {
+    const out = cleanMarkdownText('\uDCCC 一句话 \uD83D\uDE00 \uDC00');
+    assert.equal(out, '一句话 😀');
+  });
+
   it('剥离 HTML 注释', () => {
     assert.strictEqual(cleanMarkdownText('正文<!-- 注释 -->结尾'), '正文结尾');
   });

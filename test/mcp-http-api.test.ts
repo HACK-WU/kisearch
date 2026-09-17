@@ -154,11 +154,33 @@ describe('/api/doc/list', () => {
 });
 
 describe('/api/import/upload', () => {
+  it('返回与 ki import 对齐的文档和附件策略', async () => {
+    const res = await fetch(`${handle!.base}/api/import/config?scope=up-test`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.deepEqual(body.extensions, ['.md']);
+    assert.equal(body.assets, true);
+    assert.ok(body.assetExtensions.includes('.png'));
+    assert.equal(body.maxFileSize, 1024 * 1024);
+    assert.equal(body.maxAssetSize, 5 * 1024 * 1024);
+    assert.ok(body.maxRequestBody >= 16 * 1024 * 1024);
+  });
+
   it('校验扩展名白名单（非 md 拒绝）', async () => {
     const res = await fetch(`${handle!.base}/api/import/upload`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: 'up-test', files: [{ name: 'evil.txt', content: Buffer.from('x').toString('base64') }] }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('扩展名与 ki import 默认配置一致（.markdown 未配置时拒绝）', async () => {
+    const res = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-test', files: [{ name: 'readme.markdown', content: Buffer.from('x').toString('base64') }] }),
     });
     assert.equal(res.status, 400);
   });
@@ -193,6 +215,33 @@ describe('/api/import/upload', () => {
     const abs = path.join(process.env.HOME!, '.ki', 'import-uploads', body.uploadId, 'docs', 'alarm.md');
     assert.ok(fs.existsSync(abs));
     assert.equal(fs.readFileSync(abs, 'utf-8'), '# 告警');
+
+    const append = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scope: 'up-test',
+        uploadId: body.uploadId,
+        files: [{ name: 'docs/alarm.png', content: Buffer.from('fake-png').toString('base64') }],
+      }),
+    });
+    assert.equal(append.status, 200);
+    const appendBody = await append.json();
+    assert.equal(appendBody.uploadId, body.uploadId);
+    assert.equal(appendBody.total, 1);
+    const assetAbs = path.join(process.env.HOME!, '.ki', 'import-uploads', body.uploadId, 'docs', 'alarm.png');
+    assert.ok(fs.existsSync(assetAbs));
+
+    const wrongScope = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scope: 'another-scope',
+        uploadId: body.uploadId,
+        files: [{ name: 'docs/other.md', content: Buffer.from('# other').toString('base64') }],
+      }),
+    });
+    assert.equal(wrongScope.status, 400);
   });
 });
 

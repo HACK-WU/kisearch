@@ -96,6 +96,85 @@ test('scheduler keeps same-batch text reuse without cross-batch cache', async ()
   assert.equal(result.persisted, 3);
 });
 
+test('400/20015 批次参数错误会逐条隔离，成功项继续持久化', async () => {
+  const calls: string[][] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      calls.push([...texts]);
+      if (texts.length > 1) {
+        throw Object.assign(new Error('SiliconFlow /embeddings HTTP 400: {"code":"20015","message":"The parameter is invalid."}'), {
+          code: 'HTTP_400',
+        });
+      }
+      if (texts[0] === 'bad') {
+        throw Object.assign(new Error('SiliconFlow /embeddings HTTP 400: {"code":"20015","message":"The parameter is invalid."}'), {
+          code: 'HTTP_400',
+        });
+      }
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 3,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+  });
+  let completed: EmbeddingBatch<string> | undefined;
+  const result = await runtime.schedule(provider, ['ok-1', 'bad', 'ok-2'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => {
+      completed = batch;
+      // 不返回显式统计时，scheduler 也必须按 null 向量准确统计部分失败。
+      return undefined;
+    },
+  });
+
+  assert.deepEqual(calls, [['ok-1', 'bad', 'ok-2'], ['ok-1'], ['bad'], ['ok-2']]);
+  assert.deepEqual(completed?.vectors, [[1, 2], null, [1, 2]]);
+  assert.match(completed?.itemErrors?.[1]?.message ?? '', /20015/);
+  assert.equal(result.persisted, 2);
+  assert.equal(result.failed, 1);
+  assert.equal(result.errors.length, 0);
+});
+
+test('超大 400/20015 批次不展开成无界单条请求', async () => {
+  let calls = 0;
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      calls++;
+      if (texts.length > 1) {
+        throw Object.assign(new Error('SiliconFlow /embeddings HTTP 400: {"code":"20015","message":"The parameter is invalid."}'), {
+          code: 'HTTP_400',
+        });
+      }
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 65,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+  });
+  let completed: EmbeddingBatch<string> | undefined;
+  const result = await runtime.schedule(provider, Array.from({ length: 65 }, (_, i) => `text-${i}`), {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => {
+      completed = batch;
+      return { persisted: 0, failed: batch.items.length };
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(completed?.error?.message.includes('20015'), true);
+  assert.equal(result.failed, 65);
+});
+
 test('scheduler stops launching new batches after cancellation and reports exact items', async () => {
   const active = { value: 0, peak: 0 };
   const controller = new AbortController();

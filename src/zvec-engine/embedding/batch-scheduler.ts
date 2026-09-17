@@ -7,7 +7,7 @@
  */
 
 import os from 'node:os';
-import type { EmbeddingProvider } from './provider.js';
+import type { EmbeddingAttemptEvent, EmbeddingProvider, EmbedOptions } from './provider.js';
 
 export interface EmbeddingSchedulerConfig {
   /** provider 单次逻辑调用的文本批大小 */
@@ -111,6 +111,8 @@ export interface EmbeddingBatch<T> {
   items: EmbeddingBatchItem<T>[];
   /** 与 items 一一对应；provider 整批失败时全部为 null。 */
   vectors: Array<number[] | null>;
+  /** 仅在批次被拆分隔离后使用；与 items 一一对应。 */
+  itemErrors?: Array<Error | undefined>;
   error?: Error;
 }
 
@@ -191,6 +193,17 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
+
+function isSplittableParameterError(error: Error): boolean {
+  const candidate = error as Error & { code?: string };
+  // SiliconFlow 20015 表示请求参数非法；批次中只要有一个坏文本，整批都会被拒绝。
+  // 只对这个明确的 provider 错误做逐条隔离，避免把认证/模型配置等 4xx 误当成可恢复错误。
+  return candidate.code === 'HTTP_400'
+    && /(?:20015|parameter is invalid)/i.test(error.message);
+}
+
+/** 参数错误隔离的请求上限，避免用户把 batchSize 调大后一次生成大量单条请求。 */
+const MAX_PARAMETER_ERROR_ISOLATION_ITEMS = 64;
 
 /** FIFO、支持 AbortSignal 的逻辑调用槽。 */
 class AsyncLimiter {
@@ -464,18 +477,19 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             }
             requestIndexForItem.push(requestIndex);
           }
-          let vectors: number[][];
+          let vectors: Array<number[] | null>;
+          let itemErrors: Array<Error | undefined> | undefined;
           let providerError: Error | undefined;
           try {
             // global request permit intentionally covers the complete logical provider call,
             // including provider-owned retry/backoff; release happens only in finally.
             this.metrics.inFlightRequests++;
-            vectors = await provider.embed(requestTexts, {
+            const embedOptions: EmbedOptions = {
               batchSize: requestTexts.length,
               // 超时由调度配置统一提供：provider 内部按本值起 AbortController，
               // 未传时回落到 provider 自身默认（30s）。
               timeoutMs: this.config.requestTimeoutMs,
-              onAttempt: (event) => {
+              onAttempt: (event: EmbeddingAttemptEvent) => {
                 if (event.kind === 'request') this.metrics.providerRequests++;
                 else {
                   this.metrics.retries++;
@@ -483,11 +497,43 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                   if (event.reason?.includes('timeout')) this.metrics.timeouts++;
                 }
               },
-            });
-            if (vectors.length !== requestTexts.length || vectors.some((v) => v.length !== provider.dimension)) {
-              throw new Error(`Embedding 返回数量/维度不匹配：期望 ${requestTexts.length}×${provider.dimension}，实际 ${vectors.length}`);
+            };
+            try {
+              const batchVectors = await provider.embed(requestTexts, embedOptions);
+              if (batchVectors.length !== requestTexts.length || batchVectors.some((v) => v.length !== provider.dimension)) {
+                throw new Error(`Embedding 返回数量/维度不匹配：期望 ${requestTexts.length}×${provider.dimension}，实际 ${batchVectors.length}`);
+              }
+              vectors = requestIndexForItem.map((index) => batchVectors[index]);
+            } catch (err) {
+              const batchError = err instanceof Error ? err : new Error(String(err));
+              if (
+                !isSplittableParameterError(batchError)
+                || requestTexts.length <= 1
+                || requestTexts.length > MAX_PARAMETER_ERROR_ISOLATION_ITEMS
+              ) {
+                throw batchError;
+              }
+
+              // 只隔离参数错误批次：成功的文本仍然可以落库，坏文本保留逐项错误。
+              const isolatedVectors: Array<number[] | null> = [];
+              const isolatedErrors: Array<Error | undefined> = [];
+              for (const text of requestTexts) {
+                try {
+                  const singleVectors = await provider.embed([text], { ...embedOptions, batchSize: 1 });
+                  if (singleVectors.length !== 1 || singleVectors[0].length !== provider.dimension) {
+                    throw new Error(`Embedding 返回数量/维度不匹配：期望 1×${provider.dimension}，实际 ${singleVectors.length}`);
+                  }
+                  isolatedVectors.push(singleVectors[0]);
+                  isolatedErrors.push(undefined);
+                } catch (singleErr) {
+                  const error = singleErr instanceof Error ? singleErr : new Error(String(singleErr));
+                  isolatedVectors.push(null);
+                  isolatedErrors.push(error);
+                }
+              }
+              vectors = requestIndexForItem.map((index) => isolatedVectors[index]);
+              itemErrors = requestIndexForItem.map((index) => isolatedErrors[index]);
             }
-            vectors = requestIndexForItem.map((index) => vectors[index]);
           } catch (err) {
             providerError = err instanceof Error ? err : new Error(String(err));
             vectors = [];
@@ -498,10 +544,12 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             batchIndex,
             items: batchItems,
             vectors: providerError ? batchItems.map(() => null) : vectors,
+            itemErrors: providerError ? undefined : itemErrors,
             error: providerError,
           };
           try {
             const outcome = await options.onBatchComplete(completed);
+            const itemFailureCount = completed.vectors.filter((vector) => vector === null).length;
             if (outcome) {
               result.persisted += outcome.persisted;
               result.failed += outcome.failed;
@@ -509,10 +557,11 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             } else if (providerError) {
               result.failed += batchItems.length;
             } else {
-              result.persisted += batchItems.length;
+              result.persisted += batchItems.length - itemFailureCount;
+              result.failed += itemFailureCount;
             }
             this.metrics.completedBatches++;
-            if (providerError) this.metrics.failedBatches++;
+            if (providerError || itemFailureCount > 0) this.metrics.failedBatches++;
             if (providerError) result.errors.push(providerError);
           } catch (err) {
             fatalError = err instanceof Error ? err : new Error(String(err));

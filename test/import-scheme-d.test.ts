@@ -154,6 +154,13 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(r.groups.includes(scope), `缺省 --group 顶层 .md 应落 scope name；实际=${JSON.stringify(r.groups)}`);
   });
 
+  it('--group 缺省时：上传目录名作为子 Group 根节点', () => {
+    const src = mkSource({ 'uploaded-wiki/a.md': '# A\n目录内容' });
+    const r = runImport(['--scope', scope, '--source', src, '--no-vector']);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.ok(r.groups.includes('uploaded-wiki'), `顶层目录名应作为 Group；实际=${JSON.stringify(r.groups)}`);
+  });
+
   it('单文件导入：--source 直接传 .md 文件', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-d-file-'));
     const file = path.join(dir, 'solo.md');

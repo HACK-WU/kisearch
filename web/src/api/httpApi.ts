@@ -70,6 +70,18 @@ export interface UploadResponse {
   error?: string;
 }
 
+export interface ImportConfigResponse {
+  ok: boolean;
+  scope: string;
+  extensions: string[];
+  maxFileSize: number;
+  assets: boolean;
+  assetExtensions: string[];
+  maxAssetSize: number;
+  maxRequestBody: number;
+  error?: string;
+}
+
 export interface RunImportResponse {
   ok: boolean;
   jobId?: string;
@@ -80,7 +92,7 @@ export interface RunImportResponse {
 export interface ImportJob {
   id: string;
   scope: string;
-  state: 'running' | 'done' | 'failed';
+  state: 'running' | 'done' | 'failed' | 'cancelled';
   phase?: string;
   progress?: { done: number; total: number };
   result?: Record<string, unknown>;
@@ -110,7 +122,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok || !body) {
     const err = (body as { error?: string } | undefined)?.error ?? `HTTP ${res.status}`;
-    throw new Error(err);
+    throw Object.assign(new Error(err), { status: res.status, body });
   }
   return body as T;
 }
@@ -134,14 +146,20 @@ export async function getDocList(
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 
+export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {
+  return req<ImportConfigResponse>(`/api/import/config?${new URLSearchParams({ scope }).toString()}`);
+}
+
 export async function uploadFiles(
   scope: string,
   files: { name: string; content: string }[],
+  uploadId?: string,
 ): Promise<UploadResponse> {
   return req<UploadResponse>('/api/import/upload', {
     method: 'POST',
     body: JSON.stringify({
       scope,
+      ...(uploadId ? { uploadId } : {}),
       files: files.map((f) => ({
         name: f.name,
         content: f.content,

@@ -28,6 +28,43 @@ export const MAX_CHUNKS_PER_FILE = 500;
 /** 分隔符优先级：优先在更干净的语义边界切断 */
 const BREAK_PATTERNS: string[] = ['\n\n', '\n', '。', '；'];
 
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * JavaScript 的 string.length/slice 按 UTF-16 code unit 工作。
+ * 切分点落在代理对中间时，必须把低代理一起放进前一个 chunk，
+ * 否则下一个 chunk 会以孤立低代理开头，部分 Embedding API 会拒绝该请求。
+ */
+function moveCutToCodePointBoundary(text: string, cut: number): number {
+  if (
+    cut > 0 &&
+    cut < text.length &&
+    isHighSurrogate(text.charCodeAt(cut - 1)) &&
+    isLowSurrogate(text.charCodeAt(cut))
+  ) {
+    return cut + 1;
+  }
+  return cut;
+}
+
+function moveStartToCodePointBoundary(text: string, start: number): number {
+  if (
+    start > 0 &&
+    start < text.length &&
+    isLowSurrogate(text.charCodeAt(start)) &&
+    isHighSurrogate(text.charCodeAt(start - 1))
+  ) {
+    return start + 1;
+  }
+  return start;
+}
+
 /**
  * 在 [start, start+chunkSize] 附近向后查找最合适的切分点。
  * @returns 切分位置（相对于整个文本）；找不到合适分隔符时返回硬切位置
@@ -73,17 +110,18 @@ export function splitIntoChunks(text: string, options: ChunkOptions = {}): Chunk
       chunks.push({ index, text: text.slice(pos) });
       break;
     }
-    const cut = findBreakPoint(text, pos, chunkSize);
+    const cut = moveCutToCodePointBoundary(text, findBreakPoint(text, pos, chunkSize));
     if (cut <= pos) {
       // 防御：切分点无进展时强制推进（硬切）
-      chunks.push({ index, text: text.slice(pos, pos + chunkSize) });
-      pos += chunkSize;
+      const hardCut = moveCutToCodePointBoundary(text, pos + chunkSize);
+      chunks.push({ index, text: text.slice(pos, hardCut) });
+      pos = hardCut;
     } else {
       chunks.push({ index, text: text.slice(pos, cut) });
       // overlap：下个 chunk 回退到 cut - overlap，与上一 chunk 尾部重叠
       // 保证推进：回退后的起点必须 > 当前 chunk 起点
       const nextStart = Math.max(pos + 1, cut - overlap);
-      pos = nextStart;
+      pos = moveStartToCodePointBoundary(text, nextStart);
     }
     index++;
   }
