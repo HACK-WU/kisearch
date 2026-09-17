@@ -46,7 +46,6 @@ const COMMANDS = {
   'restore': 'src/restore.ts',
   'export': 'src/export.ts',
   'wiki-backfill': 'src/wiki-backfill.ts',
-  'migrate-vector': 'src/migrate-vector.ts',
 };
 
 // 获取命令和参数
@@ -98,7 +97,6 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
   wiki-backfill     KB 历史关系全量写回 Wiki（幂等补齐）
-  migrate-vector    显式迁移旧单 Collection 到按 scope Collection（旧数据保留）
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
 
 全局参数：
@@ -114,7 +112,6 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki backup my-project
   ki restore my-project --from-snapshot --yes
   ki export my-project --output ./wiki-output
-  ki migrate-vector --yes
   ki manage-index --scope my-project --action create-root --root-name "我的项目"
   ki query-group --scope my-project
   ki search --scope my-project --query "用户登录流程"

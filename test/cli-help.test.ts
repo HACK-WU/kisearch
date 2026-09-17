@@ -105,16 +105,18 @@ describe('手写解析命令的 -h 不被当作 scope 参数', () => {
 });
 
 describe('已删除命令走未知命令分支', () => {
-  it('ki setup → 退出码 1，stderr 提示未知命令', () => {
-    try {
-      execFileSync('node', [CLI, 'setup'], {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      assert.fail('ki setup 应失败退出');
-    } catch (err: any) {
-      assert.strictEqual(err.status, 1, `stdout=${err.stdout} stderr=${err.stderr}`);
-      assert.match(err.stderr, /未知命令/, `stderr 应提示未知命令：${err.stderr}`);
-    }
-  });
+  for (const command of ['setup', 'migrate-vector']) {
+    it(`ki ${command} → 退出码 1，stderr 提示未知命令`, () => {
+      try {
+        execFileSync('node', [CLI, command], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        assert.fail(`ki ${command} 应失败退出`);
+      } catch (err: any) {
+        assert.strictEqual(err.status, 1, `stdout=${err.stdout} stderr=${err.stderr}`);
+        assert.match(err.stderr, /未知命令/, `stderr 应提示未知命令：${err.stderr}`);
+      }
+    });
+  }
 });

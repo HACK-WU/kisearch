@@ -250,7 +250,6 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 | `backup` | 备份 scope 目录快照 |
 | `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`；重建支持 `--group` 过滤 / `--tags` 打标的局部重建） |
 | `export` | 导出 KB 为 Wiki Markdown |
-| `migrate-vector` | 显式迁移旧单 Collection 到按 scope Collection（旧数据保留） |
 | `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
 
 > `ki <command> --help` 查看每个命令的完整参数。

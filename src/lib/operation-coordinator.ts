@@ -17,7 +17,7 @@ interface Pending {
   /**
    * 本任务占用的 scope 集合。
    * - 普通任务：其触及的 scope 列表（多 scope 检索 = 涉及的全部分片）
-   * - GLOBAL_SCOPE：需要独占全部 scope 的操作（如存量迁移）
+   * - GLOBAL_SCOPE：需要独占全部 scope 的操作（如全量一致性快照）
    * - 空数组：只读通道，不与任何 scope 互斥（如 scope 枚举，自带 fastFail 降级）
    */
   scopes: string[];
@@ -48,7 +48,7 @@ export class OperationCoordinator {
    * 全局独占任务的防饥饿宽限期（ms）。
    *
    * 全局任务要求 activeWorkers === 0 才能启动。若在它排队期间仍无限制地启动
-   * 新普通任务，持续写流量会让它永远等不到窗口（饥饿）—— 而客户端对迁移等
+   * 新普通任务，持续写流量会让它永远等不到窗口（饥饿）—— 而客户端对全局等
    * 长任务已取消超时，饥饿会表现为命令永久挂起，比队头阻塞更糟。
    * 宽限期内不冻结普通 scope（保住“无关 scope 不被拖慢”），超期后停止启动
    * 新的普通任务，让在跑任务自然收敛，全局任务随后独占执行。
@@ -193,7 +193,7 @@ function normalizeScopes(scopes: string | string[]): string[] {
  *
  * 与旧的单值 scopeOf 的区别：多 scope 请求返回其**涉及的全部分片**而非全局哨兵，
  * 因此只与这些分片互斥，不再冻结无关 scope。只有真正需要跨全部 scope 独占的
- * 操作（存量迁移）才归入 GLOBAL_SCOPE。
+ * 操作才归入 GLOBAL_SCOPE。
  */
 export function scopesOf(params: any, operation = ''): string[] {
   if (typeof params?.scope === 'string' && params.scope.trim()) {
@@ -203,8 +203,6 @@ export function scopesOf(params: any, operation = ''): string[] {
     const list = normalizeScopes(params.scopes);
     if (list.length > 0) return list;
   }
-  // 存量迁移会创建/读取所有 scope 的 Collection，必须独占。
-  if (operation === 'migrate-vector') return [GLOBAL_SCOPE];
   // scope 枚举只读，且自带 fastFail 撞锁降级（不应因向量锁挂起十余秒）；
   // 归入只读通道，不与任何 scope 的写操作互相阻塞。
   if (operation === 'scope-list') return [];

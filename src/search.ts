@@ -153,7 +153,7 @@ async function executeSearchLocal(params: {
     for (const missing of findMissingScopeCollections(scopes)) {
       skipped.push({
         scope: missing,
-        reason: '无向量 Collection（尚未导入或存量未迁移）；可执行 ki migrate-vector --yes 迁移旧布局，或 ki import 重新导入',
+        reason: '无向量 Collection（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入',
       });
     }
 
