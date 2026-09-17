@@ -10,7 +10,7 @@ import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
-import { resolveDocumentLink } from '@/lib/documentLinks';
+import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -47,7 +47,9 @@ export function SearchPage(): JSX.Element {
   const [results, setResults] = useState<Result[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [viewing, setViewing] = useState<{ module: string; content?: string; group?: string; path?: string } | null>(null);
+  const [viewing, setViewing] = useState<DocumentView | null>(null);
+  const [history, setHistory] = useState<DocumentView[]>([]);
+  const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -60,13 +62,46 @@ export function SearchPage(): JSX.Element {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const { data: docData } = useDocList(scope);
 
+  /** 手动打开搜索结果是新的导航起点。 */
+  const openDocument = useCallback((doc: DocumentView): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(doc);
+  }, []);
+
+  const closeDocument = useCallback((): void => {
+    setHistory([]);
+    setForwardHistory([]);
+    setViewing(null);
+  }, []);
+
+  /** 返回搜索结果抽屉中的上一级本地文档。 */
+  const goBack = useCallback((): void => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setHistory((prev) => prev.slice(0, -1));
+    if (viewing) setForwardHistory((prev) => [...prev, viewing]);
+    setViewing(previous);
+  }, [history, viewing]);
+
+  /** 前进到搜索结果抽屉中最近一次返回前的文档。 */
+  const goForward = useCallback((): void => {
+    const next = forwardHistory[forwardHistory.length - 1];
+    if (!next) return;
+    setForwardHistory((prev) => prev.slice(0, -1));
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setViewing(next);
+  }, [forwardHistory, viewing]);
+
   /** 搜索结果抽屉也支持复用 Browse 页的本地文档链接解析。 */
   const handleLocalLink = useCallback((href: string): boolean => {
     const target = resolveDocumentLink(href, viewing?.path, viewing?.group, docData?.docs ?? []);
     if (!target) return false;
+    if (viewing) setHistory((prev) => [...prev, viewing]);
+    setForwardHistory([]);
     setViewing({ module: target.name, group: target.group, path: target.path });
     return true;
-  }, [docData?.docs, viewing?.group, viewing?.path]);
+  }, [docData?.docs, viewing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,7 +351,7 @@ export function SearchPage(): JSX.Element {
                   className="ki-qr-item"
                   onClick={() => {
                     const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
-                    setViewing({
+                    openDocument({
                       module: r.relation ?? r.group ?? 'doc',
                       content: r.original,
                       group: r.group,
@@ -373,9 +408,13 @@ export function SearchPage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
-          onClose={() => setViewing(null)}
+          onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}
+          canGoBack={history.length > 0}
+          onBack={goBack}
+          canGoForward={forwardHistory.length > 0}
+          onForward={goForward}
         />
       )}
     </>

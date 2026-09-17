@@ -13,6 +13,14 @@ import type { DocItem } from '@/api/httpApi';
 
 const DOCUMENT_EXTENSIONS = /\.(?:md|markdown)$/i;
 
+/** 文档抽屉当前项/历史项；content 仅在搜索结果已有原文时复用。 */
+export interface DocumentView {
+  module: string;
+  group?: string;
+  path?: string;
+  content?: string;
+}
+
 /** Markdown 链接是否可能是知识库中的本地文档链接。 */
 export function isLocalDocumentHref(href: string): boolean {
   const value = href.trim();
