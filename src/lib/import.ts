@@ -48,7 +48,14 @@ import {
   bulkStorePaths,
   type PathVectorizeEntry,
 } from './path-vectorize.js';
-import { vectorBulkStore, vectorCountScope, vectorDeleteScope } from './vector-client.js';
+import { generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
+import {
+  resolveImportConflict,
+  validateImportConflictMode,
+  validateImportConflictSuffix,
+  type ImportConflictAction,
+  type ImportConflictMode,
+} from './import-conflict.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -94,6 +101,15 @@ export interface ImportStats {
   vector: boolean;
   /** 已复制进 KB 的本地图片附件数（REQ-20260904-001；--no-assets 或配置关闭时为 0） */
   assets: number;
+  /** 同一 Group 下不同 sourcePath 的真实同名冲突数量。 */
+  conflicts: number;
+}
+
+export interface ImportConflict {
+  path: string;
+  originalRelation: string;
+  relation: string;
+  action: ImportConflictAction;
 }
 
 export interface ImportResult {
@@ -102,6 +118,7 @@ export interface ImportResult {
   scope: string;
   stats: ImportStats;
   errors: { path: string; error: string }[];
+  conflicts: ImportConflict[];
   groups: string[];
   source: GroupIndexSource;
 }
@@ -128,6 +145,10 @@ export interface HandleDirectImportArgs {
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
   assets?: boolean;
+  /** 同一 Group 下不同 sourcePath 的同名处理策略，默认 suffix。 */
+  conflictMode?: ImportConflictMode;
+  /** 自动后缀模板，默认 _{n}。 */
+  conflictSuffix?: string;
   /** daemon HTTP job 使用：报告可观测进度；不影响 CLI 输出。 */
   onProgress?: (progress: {
     phase: 'scan' | 'vectorize' | 'persist';
@@ -377,6 +398,8 @@ export async function handleDirectImport(
   const chunkSize = args.chunkSize ?? 1000;
   const chunkOverlap = args.chunkOverlap ?? 150;
   const vector = args.vector !== false;
+  const conflictMode = validateImportConflictMode(args.conflictMode);
+  const conflictSuffix = validateImportConflictSuffix(args.conflictSuffix);
   // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则（批次 3 接入实际清洗）
   // 清洗开关与规则的**最终值**在读取 scope 配置后再定（见下方 cleanCfg 处）：
   // CLI 显式参数优先、配置补齐——rebuild 链路的清洗来源只有配置，两者必须同源。
@@ -502,11 +525,15 @@ export async function handleDirectImport(
     rel: string;
     groupPath: string;
     relation: string;
+    previousRelation?: Relation;
+    previousLocalText?: string;
     chunks: Chunk[];          // 清洗后切分结果（向量化输入）
     entries: ScanResultEntry[]; // 向量化条目（text=清洗后 chunk）
   }[] = [];
   const skipped: string[] = [];
-  const conflictSkipped: string[] = [];
+  const conflicts: ImportConflict[] = [];
+  /** 当前批次已接受的文件级 relation；避免同一批上传内重名漏判。 */
+  const plannedRelations = new Map<string, Relation[]>();
   /** 附件收集告警（未命中/超限/越界等，循环后汇总）与已落盘的唯一附件集合（REQ-20260904-001） */
   const assetWarnings: string[] = [];
   /** 用 Set 去重：同一附件被多篇 md 引用时仅计一次（复制为同名覆盖，计数语义 = 落盘文件数） */
@@ -529,21 +556,41 @@ export async function handleDirectImport(
     }
     const fileText = fs.readFileSync(absPath, 'utf-8');
     const groupPath = resolveGroupForSource(group, rel, scope);
-    const relation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
-    // relation 冲突检查（用户决策 O1 + 幂等修复）：
-    //   - 同 group 下 relation 名已存在 **且 sourcePath 不同**（真冲突：不同文件同名）→ 跳过 + 反馈
-    //   - 同 group 下 relation 名已存在 **且 sourcePath 相同**（幂等重导：同一文件重跑 import）→ 不跳过，允许覆盖更新
+    const originalRelation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
     const groupData = relationsCache0.groups[groupPath];
-    const existingRel = groupData?.hot_relations.find((r) => r.text === relation);
-    if (existingRel && existingRel.sourcePath !== rel) {
-      conflictSkipped.push(rel);
+    const currentBatchRelations = plannedRelations.get(groupPath) ?? [];
+    const resolution = resolveImportConflict({
+      relations: [...(groupData?.hot_relations ?? []), ...currentBatchRelations],
+      baseRelation: originalRelation,
+      sourcePath: rel,
+      mode: conflictMode,
+      suffix: conflictSuffix,
+    });
+    if (resolution.action === 'skip') {
+      conflicts.push({ path: rel, originalRelation, relation: resolution.relation, action: 'skip' });
       processedFileCount++;
       args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
-      logWarn(`relation 冲突已跳过（同 group "${groupPath}" 下已有 "${relation}"）：${rel}`);
+      logWarn(`relation 冲突已跳过（同 group "${groupPath}" 下已有 "${originalRelation}"）：${rel}`);
       continue;
     }
-    if (existingRel && existingRel.sourcePath === rel) {
-      // 幂等重导：同一文件已存在，允许覆盖（重新写入 local KB + 向量化）
+    const relation = resolution.relation;
+    const previousRelation = groupData?.hot_relations.find((item) => item.text === relation);
+    let previousLocalText = readLocalKb(scope, groupPath)[relation];
+    // 同一批次内显式 overwrite 的两个不同 sourcePath 会解析到同一个逻辑 relation。
+    // 后者应替换前者，不能让前者也进入向量化后变成无 relation 挂载的孤儿向量。
+    const replacedBatchRecord = resolution.action === 'overwrite'
+      ? fileRecords.find((item) => item.groupPath === groupPath && item.relation === relation)
+      : undefined;
+    if (replacedBatchRecord) {
+      previousLocalText = replacedBatchRecord.previousLocalText;
+      const replacedIndex = fileRecords.indexOf(replacedBatchRecord);
+      if (replacedIndex >= 0) fileRecords.splice(replacedIndex, 1);
+    }
+    if (resolution.conflicted) {
+      conflicts.push({ path: rel, originalRelation, relation, action: resolution.action as ImportConflictAction });
+    }
+    if (resolution.action === 'overwrite' && resolution.existing) {
+      // 同 sourcePath 幂等重导或显式覆盖：允许重新写入 local KB + 向量化。
       logWarn(`文件已存在，幂等重导覆盖（${rel}）`);
     }
     // 方案 D：第一步直接写 local KB（文件级原文，未清洗）
@@ -574,6 +621,7 @@ export async function handleDirectImport(
       text: textForVector,
       chunkSize,
       chunkOverlap,
+      relationName: relation,
     });
     if (chunks.length > MAX_CHUNKS_PER_FILE) {
       skipped.push(rel);
@@ -597,7 +645,29 @@ export async function handleDirectImport(
       for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
       assetWarnings.push(...assetResult.warnings);
     }
-    fileRecords.push({ rel, groupPath, relation, chunks, entries });
+    fileRecords.push({
+      rel,
+      groupPath,
+      relation,
+      previousRelation: previousRelation ? cloneRelation(previousRelation) : undefined,
+      previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
+      chunks,
+      entries,
+    });
+    const planned = plannedRelations.get(groupPath) ?? [];
+    const plannedIndex = planned.findIndex((item) => item.text === relation);
+    const plannedRelation: Relation = {
+      id: `planned_${groupPath}_${relation}`,
+      text: relation,
+      score: 0,
+      useCount: 0,
+      lastUsedTime: null,
+      isImported: true,
+      sourcePath: rel,
+    };
+    if (plannedIndex >= 0) planned[plannedIndex] = plannedRelation;
+    else planned.push(plannedRelation);
+    plannedRelations.set(groupPath, planned);
     processedFileCount++;
     // 进度 = 已处理文件数（O-01 文件数分母）。不传 detail（文件名）：避免 TTY \r 刷新时
     // 长路径残留叠加成乱码（bug-impact-analysis），进度条仅显示文件数 + 百分比。
@@ -607,46 +677,51 @@ export async function handleDirectImport(
   if (skipped.length > 0) {
     logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
   }
-  if (conflictSkipped.length > 0) {
-    logWarn(`跳过 ${conflictSkipped.length} 个文件（relation 冲突）：${conflictSkipped.join(', ')}`);
+  const skippedConflicts = conflicts.filter((item) => item.action === 'skip');
+  if (skippedConflicts.length > 0) {
+    logWarn(`跳过 ${skippedConflicts.length} 个文件（relation 冲突）：${skippedConflicts.map((item) => item.path).join(', ')}`);
   }
   if (assetWarnings.length > 0) {
     logWarn(`附件收集告警 ${assetWarnings.length} 条：${assetWarnings.slice(0, 10).join('；')}${assetWarnings.length > 10 ? ` ...等 ${assetWarnings.length} 条` : ''}`);
   }
   if (fileRecords.length === 0) {
-    throw new Error(`无可导入文件（全部被跳过：过大/超限/冲突 ${skipped.length + conflictSkipped.length} 个）`);
+    const skippedConflictCount = conflicts.filter((item) => item.action === 'skip').length;
+    // 纯 skip 冲突不是系统失败：返回结构化冲突明细，让 CLI/HTTP/Web 都能告诉用户
+    // 哪些文件被跳过；其他“没有可导入文件”场景继续 fail-loud。
+    if (skipped.length === 0 && skippedConflictCount > 0) {
+      releaseImportLock(scope);
+      lockAcquired = false;
+      return {
+        ok: true,
+        action: 'import',
+        scope,
+        stats: {
+          total: 0,
+          vectorized: 0,
+          errors: 0,
+          skipped: skippedConflictCount,
+          vector,
+          assets: 0,
+          conflicts: conflicts.length,
+        },
+        errors: [],
+        conflicts,
+        groups: [],
+        source: { dir: sourceDir, chunkSize, chunkOverlap },
+      };
+    }
+    throw new Error(`无可导入文件（全部被跳过：过大/超限/冲突 ${skipped.length + skippedConflictCount} 个）`);
   }
 
   // 汇总全部向量化条目（chunk 粒度，供 bulkVectorize）
   const entries: ScanResultEntry[] = fileRecords.flatMap((r) => r.entries);
-  logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${fileRecords.length} 个文件，跳过 ${skipped.length + conflictSkipped.length}）`);
+  logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${fileRecords.length} 个文件，跳过 ${skipped.length + conflicts.filter((item) => item.action === 'skip').length}）`);
 
   // 2) Phase 2~5
   const TOTAL = 5;
   const memoryMap = new Map<string, string>();
   checkCancelled();
   args.onProgress?.({ phase: 'vectorize', done: 0, total: Math.max(entries.length, 1) });
-
-  // ── 预构建路径向量条目（ki-relation 每个 chunk 一条 + ki-path 每 group 一条）──
-  const pathEntries: PathVectorizeEntry[] = [];
-  const groupSet = new Set<string>();
-  for (const e of entries) {
-    const groupPath = e.groupPath;
-    groupSet.add(groupPath);
-    pathEntries.push({
-      text: buildRelationContent(e.chunkRelation || deriveChunkRelation(e.path.split('#')[0], Number(e.path.split('#')[1])), groupPath),
-      tag: 'ki-relation',
-      scope,
-      group: groupPath,
-    });
-  }
-  for (const groupPath of groupSet) {
-    pathEntries.push({
-      text: buildGroupPathContent(groupPath),
-      tag: 'ki-path',
-      scope,
-    });
-  }
 
   // ── 预读 group-index（relations-cache 已在步骤 0 预读为 relationsCache0）──
   const groupIndexPath = getGroupIndexPath(scope);
@@ -657,21 +732,8 @@ export async function handleDirectImport(
   }
   const relationsCache = relationsCache0;
 
-  // ── Phase 2（向量化）串行于 Phase 3/4 之前（REQ-05 O-02/C-4：local KB 已前置，无并行进度条冲突）──
-  // 覆盖导入前置：scope 已存在向量（KB 与向量均已有数据）时，提示覆盖并先清空旧向量再重建，
-  // 与 rebuild-vector 语义一致（vectorDeleteScope → bulkVectorize），消除文件变更后的孤儿向量。
-  // 仅向量化模式执行；--no-vector 不动向量层。
-  if (vector) {
-    const existingVecCount = await vectorCountScope({ scope });
-    if (existingVecCount > 0) {
-      logWarn(`scope "${scope}" 已存在 ${existingVecCount} 条向量，导入将覆盖原数据（KB + 向量），旧向量先删除后重建`);
-      // 删除旧向量带动态进度展示（apt install 风格进度条，TTY 覆写 / 非 TTY 逐行）
-      const del = await vectorDeleteScope({ scope }, (deleted) => {
-        logProgress(deleted, existingVecCount, '删除旧向量');
-      });
-      logInfo(`已删除旧向量 ${del.deleted} 条，开始重建 ...`);
-    }
-  }
+  // ── Phase 2：先写新向量，成功后再清理受影响文档的旧向量 ──
+  // 关键不变量：不再清空整个 Scope；新向量失败时旧 relation/local KB/向量仍可恢复。
   logPhaseStart(2, TOTAL, '向量化 ...');
   // 非向量化模式（--no-vector）：跳过向量写入，memoryIds 为空（与 sync-relation 决策一致）
   const vectorizeResult = !vector
@@ -693,24 +755,26 @@ export async function handleDirectImport(
       });
   checkCancelled();
   args.onProgress?.({ phase: 'vectorize', done: entries.length, total: Math.max(entries.length, 1) });
-  // 取消请求在向量化批次完成后生效；路径向量和自定义标签属于后续独立写批次，
-  // 开始每个批次前再次检查，避免“已取消”仍继续写入全部辅助向量。
-  checkCancelled();
-  if (vector && pathEntries.length > 0) {
-    const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
-    logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
-  }
 
   // ── 文档级自定义 tag 向量写入（可选）：为每个成功导入文件写一条 tag 内容向量 ──
   // 机制对齐 sync-relation：text=文件原文、tags=自定义 tag（每个 tag 各一条），
   // 使 `ki search -t <tag>` 能召回导入文件。tag 向量 docId 回填到文件级 relation 的 memoryIds。
   let tagMemoryMap = new Map<string, string[]>();
+  const tagErrors: { path: string; error: string }[] = [];
+  const vectorCleanupErrors: { path: string; error: string }[] = [];
+  const failedRecords = new Set<typeof fileRecords[number]>();
+  for (const rec of fileRecords) {
+    if (vector && rec.entries.some((entry) => !vectorizeResult.ok.has(entry.path))) {
+      failedRecords.add(rec);
+    }
+  }
   checkCancelled();
   if (vector && customTags.length > 0) {
     logPhaseStart(2, TOTAL, `写入自定义标签向量（${customTags.join(', ')}）...`);
     const tagEntries: { text: string; tags: string; group: string }[] = [];
+    const tagRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
     // fileRecords 含清洗后原文（textForVector）用于向量化；local KB 存原始 fileText
-    for (const rec of fileRecords) {
+    for (const rec of tagRecords) {
       const origText = fs.readFileSync(sourceIsFile ? sourceDir : path.resolve(sourceDir, rec.rel), 'utf-8');
       for (const t of customTags) {
         tagEntries.push({ text: origText, tags: t, group: rec.groupPath });
@@ -722,21 +786,169 @@ export async function handleDirectImport(
         // 聚合到 文件 → [tag memoryIds]（成功条目按 index 回推文件/标签）
         const newMap = new Map<string, string[]>();
         for (const item of tagResult.results) {
-          if (!item.success || !item.memoryId) continue;
-          const rec = fileRecords[Math.floor(item.index / customTags.length)];
+          const rec = tagRecords[Math.floor(item.index / customTags.length)];
           if (!rec) continue;
-          const arr = newMap.get(rec.rel) ?? [];
-          arr.push(item.memoryId);
-          newMap.set(rec.rel, arr);
+          if (item.success && item.memoryId) {
+            const arr = newMap.get(rec.rel) ?? [];
+            arr.push(item.memoryId);
+            newMap.set(rec.rel, arr);
+          } else {
+            failedRecords.add(rec);
+            tagErrors.push({ path: rec.rel, error: `标签向量写入失败：${item.error || 'unknown error'}` });
+          }
         }
         tagMemoryMap = newMap;
         logInfo(`自定义标签向量写入完成：成功 ${tagResult.results.filter((r) => r.success).length}/${tagEntries.length}`);
       } catch (err) {
-        logWarn(`自定义标签向量写入失败（不影响导入）：${(err as Error).message}`);
+        for (const rec of tagRecords) {
+          failedRecords.add(rec);
+          tagErrors.push({ path: rec.rel, error: `标签向量写入失败：${(err as Error).message}` });
+        }
+        logWarn(`自定义标签向量写入失败：${(err as Error).message}`);
       }
     }
     logPhaseDone(2, TOTAL, `标签向量写入完成`);
   }
+
+  const allKnownVectorIds = new Set<string>();
+  for (const [groupPath, groupData] of Object.entries(relationsCache0.groups)) {
+    for (const relation of groupData.hot_relations) {
+      for (const id of relationMemoryIds(relation)) allKnownVectorIds.add(id);
+    }
+  }
+  // 同批次不同文件可能因内容/标签完全相同而共享确定性 docId；失败文件回滚时，
+  // 不能把仍被本批次成功文件使用的新 ID 一并删掉。
+  for (const rec of fileRecords) {
+    if (failedRecords.has(rec)) continue;
+    for (const entry of rec.entries) {
+      const id = vectorizeResult.ok.get(entry.path);
+      if (id) allKnownVectorIds.add(id);
+    }
+    for (const id of tagMemoryMap.get(rec.rel) ?? []) allKnownVectorIds.add(id);
+  }
+
+  // 回滚本批次内未完成向量化的文件：只删除本次新写入且不属于其他已有/成功文件的 ID。
+  for (const rec of failedRecords) {
+    const oldIds = new Set(relationMemoryIds(rec.previousRelation));
+    const newIds = [
+      ...rec.entries.map((entry) => vectorizeResult.ok.get(entry.path)).filter((id): id is string => !!id),
+      ...(tagMemoryMap.get(rec.rel) ?? []),
+    ];
+    const rollbackIds = newIds.filter((id) => !oldIds.has(id) && !allKnownVectorIds.has(id));
+    restoreLocalKb(scope, rec.groupPath, rec.relation, rec.previousLocalText);
+    await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`);
+  }
+
+  const activeFileRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
+  if (vector && activeFileRecords.length === 0) {
+    const failureDetails = [...vectorizeResult.errors, ...tagErrors]
+      .slice(0, 5)
+      .map((item) => `${item.path}: ${item.error}`)
+      .join('；');
+    throw new Error(
+      `本次导入的 ${fileRecords.length} 个文件均未完成向量化；旧文档已保留，请修复 embedding 后重试` +
+      (failureDetails ? `。失败详情：${failureDetails}` : ''),
+    );
+  }
+  const activeEntries = activeFileRecords.flatMap((rec) => rec.entries);
+  const activeEntryPaths = new Set(activeEntries.map((entry) => entry.path));
+  const activeMergedMap = new Map(
+    [...vectorizeResult.ok].filter(([entryPath]) => activeEntryPaths.has(entryPath)),
+  );
+
+  // 关系/路径辅助向量也先写新值，再进入旧向量清理；若某个 relation 的新辅助向量
+  // 写失败，则保留该 relation 的旧辅助向量，避免先删后写造成导航索引空洞。
+  checkCancelled();
+  const pathEntries: PathVectorizeEntry[] = [];
+  const groupSet = new Set<string>();
+  for (const e of activeEntries) {
+    const groupPath = e.groupPath;
+    groupSet.add(groupPath);
+    pathEntries.push({
+      text: buildRelationContent(e.chunkRelation || deriveChunkRelation(e.path.split('#')[0], Number(e.path.split('#')[1])), groupPath),
+      tag: 'ki-relation',
+      scope,
+      group: groupPath,
+    });
+  }
+  for (const groupPath of groupSet) {
+    pathEntries.push({ text: buildGroupPathContent(groupPath), tag: 'ki-path', scope });
+  }
+  const failedRelationPathTexts = new Set<string>();
+  const auxiliaryErrors: { path: string; error: string }[] = [];
+  if (vector && pathEntries.length > 0) {
+    const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
+    const relationPathTexts = new Set(pathEntries.filter((entry) => entry.tag === 'ki-relation').map((entry) => entry.text));
+    for (const item of pathResult.errors) {
+      if (relationPathTexts.has(item.text)) failedRelationPathTexts.add(item.text);
+      auxiliaryErrors.push({ path: item.text, error: `路径向量写入失败：${item.error}` });
+    }
+    logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
+  }
+
+  // 仅清理受影响 relation 的旧内容/标签向量；被其他 relation 共享的确定性 docId 不删除。
+  if (vector) {
+    const targetKeys = new Set(activeFileRecords.map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
+    const protectedVectorIds = new Set<string>();
+    const protectedPathIds = new Set<string>();
+    for (const [groupPath, groupData] of Object.entries(relationsCache0.groups)) {
+      for (const relation of groupData.hot_relations) {
+        const key = `${groupPath}\u0000${relation.text}`;
+        if (targetKeys.has(key)) continue;
+        for (const id of relationMemoryIds(relation)) protectedVectorIds.add(id);
+        for (let i = 1; i <= relationContentVectorCount(relation); i += 1) {
+          protectedPathIds.add(generateDocId(
+            buildRelationContent(`${relation.text}-${String(i).padStart(2, '0')}`, groupPath),
+            scope,
+            'ki-relation',
+          ));
+        }
+      }
+    }
+
+    const staleIds = new Set<string>();
+    for (const rec of activeFileRecords) {
+      const oldIds = relationMemoryIds(rec.previousRelation);
+      const newIds = new Set([
+        ...rec.entries.map((entry) => activeMergedMap.get(entry.path)).filter((id): id is string => !!id),
+        ...(tagMemoryMap.get(rec.rel) ?? []),
+      ]);
+      for (const id of oldIds) {
+        if (!newIds.has(id) && !protectedVectorIds.has(id)) staleIds.add(id);
+      }
+
+      const oldRelationName = rec.previousRelation?.text ?? rec.relation;
+      const relationPathTexts = new Set(
+        rec.entries
+          .map((entry) => entry.chunkRelation)
+          .filter((chunkRelation): chunkRelation is string => !!chunkRelation)
+          .map((chunkRelation) => buildRelationContent(chunkRelation, rec.groupPath)),
+      );
+      const relationPathWriteFailed = [...relationPathTexts].some((text) => failedRelationPathTexts.has(text));
+      const newPathIds = new Set(
+        rec.entries
+          .map((entry) => entry.chunkRelation)
+          .filter((chunkRelation): chunkRelation is string => !!chunkRelation)
+          .map((chunkRelation) => generateDocId(buildRelationContent(chunkRelation, rec.groupPath), scope, 'ki-relation')),
+      );
+      for (let i = 1; i <= relationContentVectorCount(rec.previousRelation); i += 1) {
+        if (relationPathWriteFailed) break;
+        const oldPathId = generateDocId(
+          buildRelationContent(`${oldRelationName}-${String(i).padStart(2, '0')}`, rec.groupPath),
+          scope,
+          'ki-relation',
+        );
+        if (!newPathIds.has(oldPathId) && !protectedPathIds.has(oldPathId)) staleIds.add(oldPathId);
+      }
+    }
+    // 旧向量清理是收尾动作：若底层只部分删除，仍要把新 relation/local KB
+    // 一起落盘，避免出现“KB 已更新但 cache 仍指向旧 memoryIds”的更大不一致；
+    // 未删除的旧 ID 会通过 errors 显式反馈，后续可重试清理。
+    await deleteVectorIds(scope, staleIds, '清理受影响文档旧向量', false, vectorCleanupErrors);
+  }
+
+  // 取消请求在向量化批次完成后生效。
+  checkCancelled();
 
   // ── Phase 3/4：Group 树 + relation-cache（串行，KB 写入近实时无并行损失）──
   checkCancelled();
@@ -746,7 +958,7 @@ export async function handleDirectImport(
     scope,
     sourceDir,
     group,
-    entries,
+    entries: activeEntries,
     memoryMap,
     groups: new Set<string>(group ? [group] : []),
   };
@@ -758,9 +970,9 @@ export async function handleDirectImport(
   phase4WriteRelations(ctx, relationsCache);
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
   // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
-  const mergedMap = vectorizeResult.ok;
+  const mergedMap = activeMergedMap;
   if (mergedMap.size > 0 || tagMemoryMap.size > 0 || customTags.length > 0) {
-    for (const rec of fileRecords) {
+    for (const rec of activeFileRecords) {
       // 该文件全部 chunk 的 memoryId（按 sourcePath 文件#N 匹配）
       const ids = rec.entries
         .map((e) => mergedMap.get(e.path))
@@ -796,7 +1008,8 @@ export async function handleDirectImport(
   setSource(scope, source);
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length}  errors=${vectorizeResult.errors.length}  assets=${assetCopied.size}${vector ? '' : '  [非向量化:仅写KB层]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
+  const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors];
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length + failedRecords.size}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [非向量化:仅写KB层]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
@@ -813,13 +1026,15 @@ export async function handleDirectImport(
     stats: {
       total: entries.length,
       vectorized: mergedMap.size,
-      errors: vectorizeResult.errors.length,
+      errors: importErrors.length,
       // skipped 合并：过大/超限/hook 失败 + relation 冲突（REQ-06：冲突计入 skipped）
-      skipped: skipped.length + conflictSkipped.length,
+      skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + failedRecords.size,
       vector,
       assets: assetCopied.size,
+      conflicts: conflicts.length,
     },
-    errors: vectorizeResult.errors,
+    errors: importErrors,
+    conflicts,
     groups: [...kbResult.groups].sort(),
     source,
   };
@@ -917,6 +1132,61 @@ function loadLocalKb(localKbPath: string): Record<string, unknown> {
   return readJson<Record<string, unknown>>(localKbPath) || {};
 }
 
+function readLocalKb(scope: string, groupPath: string): Record<string, unknown> {
+  return loadLocalKb(getLocalKbDir(scope, groupPath));
+}
+
+function cloneRelation(relation: Relation): Relation {
+  return {
+    ...relation,
+    ...(relation.memoryIds ? { memoryIds: [...relation.memoryIds] } : {}),
+    ...(relation.tags ? { tags: [...relation.tags] } : {}),
+  };
+}
+
+function relationMemoryIds(relation: Relation | undefined): string[] {
+  if (!relation) return [];
+  const ids = Array.isArray(relation.memoryIds) ? [...relation.memoryIds] : [];
+  if (ids.length === 0 && relation.memoryId) ids.push(relation.memoryId);
+  return [...new Set(ids)];
+}
+
+function relationContentVectorCount(relation: Relation | undefined): number {
+  if (!relation) return 0;
+  return Math.max(0, relationMemoryIds(relation).length - (relation.tags?.length ?? 0));
+}
+
+function restoreLocalKb(
+  scope: string,
+  groupPath: string,
+  relationText: string,
+  previousText: string | undefined,
+): void {
+  if (previousText !== undefined) {
+    writeLocalKb(scope, groupPath, relationText, previousText);
+  } else {
+    removeFromLocalKb(scope, groupPath, relationText);
+  }
+}
+
+async function deleteVectorIds(
+  scope: string,
+  ids: Iterable<string>,
+  label: string,
+  strict = true,
+  errors?: { path: string; error: string }[],
+): Promise<void> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return;
+  const result = await vectorDelete({ scope, ids: uniqueIds });
+  if (result.errors.length > 0) {
+    const message = `${label}失败：${result.errors.map((item) => `${item.id}: ${item.reason}`).join('; ')}`;
+    errors?.push({ path: '<vector-cleanup>', error: message });
+    if (strict) throw new Error(message);
+    logWarn(message);
+  }
+}
+
 function writeLocalKb(scope: string, groupPath: string, relationText: string, moduleInfo: string): void {
   const localKbPath = getLocalKbDir(scope, groupPath);
   fs.mkdirSync(path.dirname(localKbPath), { recursive: true });
@@ -963,8 +1233,9 @@ function phase4WriteRelations(
   for (const e of ctx.entries) {
     // 从 entry.path（文件#N）还原文件路径
     const fileKey = e.path.includes('#') ? e.path.split('#')[0] : e.path;
-    // 文件级 relation = deriveRelationText(fileKey)（basename 去扩展名）
-    const fileRelation = deriveRelationText(fileKey);
+    // 文件级 relation 优先取 entry 携带的逻辑名称；自动后缀时它可能不同于
+    // sourcePath 的 basename。旧/rebuild 条目没有该字段时回退到 basename。
+    const fileRelation = e.fileRelation ?? deriveRelationText(fileKey);
     fileRelMap.set(fileKey, { groupPath: e.groupPath, relation: fileRelation, sourcePath: fileKey });
   }
 

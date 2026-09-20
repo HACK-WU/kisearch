@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, scopeError, tagError } from '@/lib/validators';
@@ -78,6 +78,13 @@ function formatBytes(bytes: number): string {
 function fileExtension(name: string): string {
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+function conflictSuffixError(value: string): string | null {
+  const count = value.split('{n}').length - 1;
+  if (!value.trim() || count !== 1) return '后缀模板必须包含且只能包含一个 {n}';
+  if (value.includes('/') || value.includes('\\') || value.includes('..')) return '后缀模板不能包含 /、\\ 或 ..';
+  return null;
 }
 
 function normalizeRelativePath(value: string): string {
@@ -307,6 +314,8 @@ export function ImportPage(): JSX.Element {
   const [chunkOverlap, setChunkOverlap] = useState('150');
   const [vector, setVector] = useState(true);
   const [group, setGroup] = useState('');
+  const [conflictMode, setConflictMode] = useState<ImportConflictMode>('suffix');
+  const [conflictSuffix, setConflictSuffix] = useState('_{n}');
   const [dragOver, setDragOver] = useState(false);
 
   // tag 选择器状态（复用 WritePage 实现：combobox 选择已有 / 输入新建）
@@ -320,6 +329,7 @@ export function ImportPage(): JSX.Element {
   // 实时校验 group（空字符串不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
   const scopeErr = scope.trim() ? scopeError(scope) : 'Scope 不能为空';
+  const conflictSuffixErr = conflictMode === 'suffix' ? conflictSuffixError(conflictSuffix) : null;
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -652,6 +662,8 @@ export function ImportPage(): JSX.Element {
         chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
         vector,
         tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
+        conflictMode,
+        conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
       });
       if (!run.ok || !run.jobId) {
         setFailureStage('import');
@@ -727,6 +739,10 @@ export function ImportPage(): JSX.Element {
       setError(groupErr);
       return;
     }
+    if (conflictSuffixErr) {
+      setError(conflictSuffixErr);
+      return;
+    }
     if (selectedDocuments.length === 0) {
       setFailureStage('scan');
       setError('没有可导入的 Markdown 文件');
@@ -759,8 +775,9 @@ export function ImportPage(): JSX.Element {
 
   const result = job?.result as
     | {
-        stats?: { total?: number; vectorized?: number; errors?: number };
+        stats?: { total?: number; vectorized?: number; errors?: number; conflicts?: number };
         errors?: { path?: string; error?: string }[];
+        conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string }[];
       }
     | undefined;
   const importErrors = result?.errors ?? [];
@@ -828,6 +845,37 @@ export function ImportPage(): JSX.Element {
               hint="留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .."
               error={groupErr}
             />
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label className="ki-form-label">同名文档处理</label>
+            <div className="ki-form-row">
+              <div className="ki-form-group">
+                <select
+                  className="ki-form-input"
+                  value={conflictMode}
+                  onChange={(e) => setConflictMode(e.target.value as ImportConflictMode)}
+                >
+                  <option value="suffix">自动添加后缀（推荐）</option>
+                  <option value="overwrite">覆盖已有文档</option>
+                  <option value="skip">跳过同名文件</option>
+                </select>
+              </div>
+              <div className="ki-form-group">
+                <input
+                  className={`ki-form-input${conflictSuffixErr ? ' ki-form-input--error' : ''}`}
+                  value={conflictSuffix}
+                  disabled={conflictMode !== 'suffix'}
+                  onChange={(e) => setConflictSuffix(e.target.value)}
+                  placeholder="_{n}"
+                  aria-label="自动后缀模板"
+                />
+                {conflictSuffixErr && <div className="ki-form-error">{conflictSuffixErr}</div>}
+              </div>
+            </div>
+            <div className="ki-form-hint">
+              同一 sourcePath 重复导入始终幂等覆盖；不同 sourcePath 的同名文档按此策略处理。后缀中的 {'{n}'} 会从 1 递增。
+            </div>
           </div>
 
           {/* Tags（可选）：对本次导入的全部文件（目录/文件）生效 */}
@@ -1085,9 +1133,23 @@ export function ImportPage(): JSX.Element {
             <h3>{importErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
             <p>
               {result?.stats
-                ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}`
+                ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`
                 : '导入已完成，可前往搜索验证。'}
             </p>
+            {result?.conflicts && result.conflicts.length > 0 && (
+              <div className="ki-import-errors" role="status">
+                <div className="ki-import-errors__title">同名处理结果（{result.conflicts.length}）</div>
+                <ul>
+                  {result.conflicts.map((item, index) => (
+                    <li key={`${item.path ?? 'conflict'}-${index}`}>
+                      {item.path ?? '文件'}：{item.originalRelation ?? '文档'} → {item.relation ?? '未命名'}（{
+                        item.action === 'skip' ? '已跳过' : item.action === 'overwrite' ? '已覆盖' : '已加后缀'
+                      }）
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {importErrors.length > 0 && (
               <div className="ki-import-errors" role="alert">
                 <div className="ki-import-errors__title">具体错误（{importErrors.length}）</div>

@@ -769,6 +769,71 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-09-20-上传导入同名文件冲突与增量向量更新": {
+      "id": "REQ-20260920-001",
+      "feature": "上传导入同名文件冲突与增量向量更新",
+      "created": "2026-09-20 14:49:03",
+      "updated": "2026-09-20 15:30:00",
+      "status": "已完成",
+      "tags": [
+        "feat",
+        "import",
+        "vector",
+        "ux"
+      ],
+      "version": 3,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-09-20 14:50:25 v2: 生成 PM 需求分析报告",
+        "2026-09-20 15:30:00 v3: 完成实现与回归验证，归档实现报告"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "implementation-report.md",
+          "type": "report"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
+    },
+    "2026-09-20-知识库添加网站链接": {
+      "id": "REQ-20260920-002",
+      "feature": "知识库添加网站链接",
+      "created": "2026-09-20 15:05:52",
+      "updated": "2026-09-20 15:12:17",
+      "status": "草案",
+      "tags": [
+        "feat",
+        "integration",
+        "ux"
+      ],
+      "version": 3,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-09-20 15:09:47 v2: 完成网站链接功能的 PM 需求分析",
+        "2026-09-20 15:12:17 v3: 二次质疑后补充事务边界、DNS 重绑定、任务重启与正文抽取验收"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   },
   "id_counters": {
@@ -777,6 +842,7 @@
     "REQ-20260814": 1,
     "REQ-20260904": 1,
     "REQ-20260910": 1,
-    "REQ-20260914": 1
+    "REQ-20260914": 1,
+    "REQ-20260920": 2
   }
 }

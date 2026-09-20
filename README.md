@@ -181,7 +181,8 @@ scopeMode: default            # default: 自动创建 scope；strict: 必须显�
 
 ```bash
 # ① 导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分；幂等追加，
-#    重复执行即增量更新——修改/新增 source 目录文件后重新跑同命令即可）
+#    重复执行即增量更新；同名不同 sourcePath 默认自动生成 _1/_2 后缀）
+# 可选：--conflict-mode overwrite|skip|suffix --conflict-suffix '_{n}'
 ki import \
   --scope my-project \
   --source /path/to/wiki \
@@ -233,7 +234,7 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 
 | 命令 | 说明 |
 |------|------|
-| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--no-vector` 非向量化、`--no-assets` 关闭图片附件收集 |
+| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--conflict-mode/--conflict-suffix` 同名策略、`--no-vector` 非向量化、`--no-assets` 关闭图片附件收集 |
 | `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
 | `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |

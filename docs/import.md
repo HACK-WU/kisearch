@@ -4,7 +4,7 @@
 
 > 历史（2026-09-07）：由 `ki scan-kb import` 扁平化为 `ki import`——scan-kb 壳下仅存 `import` 一个子命令，层级冗余；且 `bin/ki.mjs` 的命令映射是单级扁平结构（会剥掉子命令名），与 commander 嵌套子命令不兼容。**scan-kb 已移除、不保留兼容别名**，旧调用 `ki scan-kb import ...` 会 fail-loud 报「未知命令」并列出全部可用命令。
 >
-> 历史（更早）：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义天然承载——重复执行 `ki import` 即同步变更（同文件覆盖更新、新文件导入、同名文件跳过），不再依赖 git。
+> 历史（更早）：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义天然承载——重复执行 `ki import` 即同步变更（同文件覆盖更新、新文件导入、同名文件按冲突策略处理），不再依赖 git。
 
 ---
 
@@ -20,6 +20,8 @@ ki import \
   [--chunk-size 1000] \
   [--chunk-overlap 150] \
   [--tags t1,t2] \
+  [--conflict-mode suffix] \
+  [--conflict-suffix _{n}] \
   [--no-vector]
 ```
 
@@ -31,6 +33,8 @@ ki import \
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
+| `--conflict-mode` | 否 | 同一 Group 下不同 `sourcePath` 的同名处理：`overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀，默认 `suffix` |
+| `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回；local KB 文件原文照写） |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
 | `--no-assets` | 否 | 关闭本地图片附件收集（等价 config `import.assets:false`；关闭后前端对图片引用显示占位块） |
@@ -41,8 +45,12 @@ ki import \
 `import` 以 `(groupPath, relation名)` 为主键做幂等判定：
 
 - **同 sourcePath 重导**（同一文件内容变更后重新导入）：覆盖更新（local KB + 向量重建）
-- **同名但 sourcePath 不同**（不同文件同名）：跳过，不重复导入
+- **同名但 sourcePath 不同**（不同文件同名）：按 `--conflict-mode` 处理；默认生成 `foo_1`、`foo_2`，目标名已占用时继续递增
 - **新文件**：正常导入
+
+同一 `sourcePath` 始终优先命中已有 relation，因此即使该文档此前通过自动后缀导入，重复导入也会覆盖原逻辑 relation，不会继续产生新后缀。自动后缀只改变逻辑 relation 名，不改写 `sourcePath`。
+
+向量更新为文档级增量：先写新内容/标签向量，确认成功后再清理受影响 relation 的旧向量；无关文档不参与删除。若本批导入的某个文件向量化失败，该文件回滚 local KB 并保留旧 relation/向量；全部文件失败时导入 fail-loud。
 
 因此：
 - 首次导入用 `--group <name>` 建根

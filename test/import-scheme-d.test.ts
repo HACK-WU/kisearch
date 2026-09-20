@@ -133,6 +133,81 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(rC.stats.total, 1, '同文件再次重导仍幂等（sourcePath 相同）');
   });
 
+  it('同 group 同名文件默认自动后缀，重复导入不继续递增', () => {
+    // deriveRelationText 会清理 Markdown 强调字符：foo.md 与 *foo*.md 都映射为 foo，
+    // 但 sourcePath 不同，正好覆盖真实冲突分支。
+    const src = mkSource({
+      'foo.md': '# 原文\n内容 A',
+      '*foo*.md': '# 新文\n内容 B',
+    });
+    const first = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector']);
+    assert.strictEqual(first.ok, true, JSON.stringify(first));
+    assert.strictEqual(first.stats.conflicts, 1, JSON.stringify(first));
+
+    const { getRelationsCachePath } = require('../src/lib/scope.js');
+    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
+    const relations = cache.groups.collision.hot_relations;
+    assert.deepStrictEqual(relations.map((x: any) => x.text).sort(), ['foo', 'foo_1']);
+
+    const second = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector']);
+    assert.strictEqual(second.ok, true, JSON.stringify(second));
+    assert.strictEqual(second.stats.conflicts, 0, '同 sourcePath 重导不能再次生成 foo_2');
+  });
+
+  it('CLI 参数透传自定义后缀与覆盖策略', () => {
+    const base = runImport(['--scope', scope, '--source', mkSource({ 'foo.md': '# 初始' }), '--group', 'cli-conflict', '--no-vector']);
+    assert.strictEqual(base.ok, true, JSON.stringify(base));
+
+    const suffixed = runImport([
+      '--scope', scope,
+      '--source', mkSource({ '*foo*.md': '# 副本' }),
+      '--group', 'cli-conflict',
+      '--conflict-mode', 'suffix',
+      '--conflict-suffix', '-副本_{n}',
+      '--no-vector',
+    ]);
+    assert.strictEqual(suffixed.ok, true, JSON.stringify(suffixed));
+    assert.strictEqual(suffixed.stats.conflicts, 1);
+    assert.strictEqual(suffixed.conflicts[0].relation, 'foo-副本_1');
+
+    const overwritten = runImport([
+      '--scope', scope,
+      '--source', mkSource({ '~foo~.md': '# 覆盖' }),
+      '--group', 'cli-conflict',
+      '--conflict-mode', 'overwrite',
+      '--no-vector',
+    ]);
+    assert.strictEqual(overwritten.ok, true, JSON.stringify(overwritten));
+    assert.strictEqual(overwritten.stats.conflicts, 1);
+    assert.strictEqual(overwritten.conflicts[0].action, 'overwrite');
+
+    const skipped = runImport([
+      '--scope', scope,
+      '--source', mkSource({ '**foo**.md': '# 跳过' }),
+      '--group', 'cli-conflict',
+      '--conflict-mode', 'skip',
+      '--no-vector',
+    ]);
+    assert.strictEqual(skipped.ok, true, JSON.stringify(skipped));
+    assert.strictEqual(skipped.stats.total, 0);
+    assert.strictEqual(skipped.stats.skipped, 1);
+    assert.strictEqual(skipped.conflicts[0].action, 'skip');
+  });
+
+  it('同一批次 overwrite：后者替换前者，不产生重复 relation', () => {
+    const result = runImport([
+      '--scope', scope,
+      '--source', mkSource({ 'foo.md': '# 前者', '*foo*.md': '# 后者' }),
+      '--group', 'overwrite-batch',
+      '--conflict-mode', 'overwrite',
+      '--no-vector',
+    ]);
+    assert.strictEqual(result.ok, true, JSON.stringify(result));
+    assert.strictEqual(result.stats.total, 1);
+    assert.strictEqual(result.stats.conflicts, 1);
+    assert.strictEqual(result.conflicts[0].action, 'overwrite');
+  });
+
   it('--group 多级路径落点：自动建父路径 + 子目录挂载', () => {
     const src = mkSource({
       'a.md': '# A\n内容A',

@@ -273,6 +273,50 @@ describe('/api/import/upload', () => {
     });
     assert.equal(wrongScope.status, 400);
   });
+
+  it('同一 uploadId 的重复路径只允许相同内容重试，不同内容不得覆盖', async () => {
+    const content = Buffer.from('# stable').toString('base64');
+    const changed = Buffer.from('# changed').toString('base64');
+    const first = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-duplicate', files: [{ name: 'docs/retry.md', content }] }),
+    });
+    assert.equal(first.status, 200);
+    const firstBody = await first.json();
+
+    const retry = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-duplicate', uploadId: firstBody.uploadId, files: [{ name: 'docs/retry.md', content }] }),
+    });
+    assert.equal(retry.status, 200, '相同内容的同 uploadId 重试应保持幂等');
+
+    const overwrite = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-duplicate', uploadId: firstBody.uploadId, files: [{ name: 'docs/retry.md', content: changed }] }),
+    });
+    assert.equal(overwrite.status, 400, '不同内容不得静默覆盖暂存文件');
+    const overwriteBody = await overwrite.json();
+    assert.match(overwriteBody.errors[0].error, /内容不同/);
+
+    const duplicateInRequest = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scope: 'up-duplicate-request',
+        files: [
+          { name: 'same.md', content },
+          { name: './same.md', content },
+        ],
+      }),
+    });
+    assert.equal(duplicateInRequest.status, 200, '部分成功响应仍应返回明确 errors');
+    const duplicateBody = await duplicateInRequest.json();
+    assert.equal(duplicateBody.total, 1);
+    assert.match(duplicateBody.errors[0].error, /重复相对路径/);
+  });
 });
 
 describe('/api/import/run + status', () => {
@@ -292,6 +336,79 @@ describe('/api/import/run + status', () => {
       body: JSON.stringify({ scope: 'x', uploadId: 'no-such-id' }),
     });
     assert.equal(res.status, 400);
+  });
+
+  it('run 透传非法冲突策略，并在 job 结果中 fail-loud', async () => {
+    const upload = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict', files: [{ name: 'a.md', content: Buffer.from('# a').toString('base64') }] }),
+    });
+    assert.equal(upload.status, 200);
+    const uploadBody = await upload.json();
+    const run = await fetch(`${handle!.base}/api/import/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict', uploadId: uploadBody.uploadId, vector: false, conflictMode: 'invalid' }),
+    });
+    assert.equal(run.status, 202);
+    const runBody = await run.json();
+
+    let statusBody: { job?: { state: string; error?: string } } = {};
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const status = await fetch(`${handle!.base}/api/import/status?jobId=${encodeURIComponent(runBody.jobId)}`);
+      statusBody = await status.json();
+      if (statusBody.job?.state !== 'running') break;
+    }
+    assert.equal(statusBody.job?.state, 'failed');
+    assert.match(statusBody.job?.error ?? '', /允许值/);
+  });
+
+  it('run 透传冲突策略，并在成功结果中返回冲突明细', async () => {
+    const firstUpload = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict-result', files: [{ name: 'foo.md', content: Buffer.from('# first').toString('base64') }] }),
+    });
+    const firstBody = await firstUpload.json();
+    const firstRun = await fetch(`${handle!.base}/api/import/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict-result', uploadId: firstBody.uploadId, group: 'api-group', vector: false }),
+    });
+    const firstRunBody = await firstRun.json();
+
+    const waitJob = async (jobId: string): Promise<{ state: string; result?: { stats?: { conflicts?: number }; conflicts?: { action?: string }[] }; error?: string }> => {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const status = await fetch(`${handle!.base}/api/import/status?jobId=${encodeURIComponent(jobId)}`);
+        const body = await status.json();
+        if (body.job?.state !== 'running') return body.job;
+      }
+      throw new Error('job 等待超时');
+    };
+
+    const firstJob = await waitJob(firstRunBody.jobId);
+    assert.equal(firstJob.state, 'done', firstJob.error);
+
+    const secondUpload = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict-result', files: [{ name: '*foo*.md', content: Buffer.from('# second').toString('base64') }] }),
+    });
+    const secondBody = await secondUpload.json();
+    const secondRun = await fetch(`${handle!.base}/api/import/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'run-conflict-result', uploadId: secondBody.uploadId, group: 'api-group', vector: false, conflictMode: 'suffix', conflictSuffix: '-copy_{n}' }),
+    });
+    const secondRunBody = await secondRun.json();
+    const secondJob = await waitJob(secondRunBody.jobId);
+
+    assert.equal(secondJob.state, 'done', secondJob.error);
+    assert.equal(secondJob.result?.stats?.conflicts, 1);
+    assert.equal(secondJob.result?.conflicts?.[0]?.action, 'suffix');
   });
 
   it('status jobId 不存在 → 404', async () => {

@@ -71,6 +71,8 @@ export function buildChunkEntries(params: {
   text: string;
   chunkSize: number;
   chunkOverlap: number;
+  /** 可选的文件级 relation 名；导入冲突自动后缀时与 fileKey basename 不同。 */
+  relationName?: string;
 }): ChunkEntriesResult {
   const chunks = splitIntoChunks(params.text, {
     chunkSize: params.chunkSize,
@@ -81,7 +83,10 @@ export function buildChunkEntries(params: {
     groupPath: params.groupPath,
     text: chunk.text,
     memoryId: null,
-    chunkRelation: deriveChunkRelation(params.fileKey, chunk.index),
+    chunkRelation: params.relationName
+      ? `${params.relationName}-${String(chunk.index).padStart(2, '0')}`
+      : deriveChunkRelation(params.fileKey, chunk.index),
+    fileRelation: params.relationName ?? deriveRelationText(params.fileKey),
   }));
   return { chunks, entries };
 }

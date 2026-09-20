@@ -38,6 +38,7 @@ import {
   handleDirectImport,
   type ImportResult,
 } from './import.js';
+import type { ImportConflictMode } from './import-conflict.js';
 import { rebuildScopeVectors, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
@@ -631,6 +632,7 @@ async function handleImportUpload(
 
   const saved: { name: string; path: string; size: number }[] = [];
   const errors: { name: string; error: string }[] = [];
+  const requestPaths = new Set<string>();
 
   for (const f of body.files) {
     const name = f.name ?? '';
@@ -650,12 +652,24 @@ async function handleImportUpload(
         throw new Error(`文件超过大小上限（${Math.round(maxBytes / 1024)}KB）`);
       }
       const safeName = sanitizeFileName(name);
+      if (requestPaths.has(safeName)) {
+        throw new Error(`当前请求包含重复相对路径：${safeName}`);
+      }
       const abs = path.join(dir, safeName);
       if (!abs.startsWith(dir + path.sep)) {
         throw new Error('非法路径');
       }
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, buf);
+      if (fs.existsSync(abs)) {
+        const existing = fs.readFileSync(abs);
+        if (!requestedUploadId || !existing.equals(buf)) {
+          throw new Error(`暂存文件已存在且内容不同：${safeName}；请使用新的 uploadId，或重试同一批次的相同内容`);
+        }
+        // 同一 uploadId 的相同内容重试是幂等操作，不重复覆盖已有文件。
+      } else {
+        fs.writeFileSync(abs, buf);
+      }
+      requestPaths.add(safeName);
       saved.push({ name: safeName, path: abs, size: buf.length });
     } catch (err) {
       errors.push({ name: name || '(未命名)', error: (err as Error).message });
@@ -703,6 +717,8 @@ async function handleImportRun(
     vector?: boolean;
     /** 文档级自定义标签（逗号分隔多个），对本次导入全部文件生效 */
     tags?: string;
+    conflictMode?: ImportConflictMode;
+    conflictSuffix?: string;
   } | undefined;
   if (!body || !body.scope || !body.uploadId) {
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
@@ -746,6 +762,8 @@ async function handleImportRun(
     chunkOverlap: body.chunkOverlap,
     vector: body.vector,
     tags: body.tags,
+    conflictMode: body.conflictMode,
+    conflictSuffix: body.conflictSuffix,
   }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
@@ -759,6 +777,8 @@ interface RunImportArgs {
   chunkOverlap?: number;
   vector?: boolean;
   tags?: string;
+  conflictMode?: ImportConflictMode;
+  conflictSuffix?: string;
 }
 
 async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
@@ -773,6 +793,8 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         chunkOverlap: args.chunkOverlap,
         vector: args.vector,
         tags: args.tags,
+        conflictMode: args.conflictMode,
+        conflictSuffix: args.conflictSuffix,
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };

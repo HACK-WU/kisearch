@@ -19,6 +19,8 @@ export interface ScanResultEntry {
   memoryId: string | null;
   /** 直导专用：chunk 的 relation 名（如 foo-01） */
   chunkRelation?: string;
+  /** 文件级 relation 名；自动后缀冲突时可能与 sourcePath 的 basename 不同。 */
+  fileRelation?: string;
 }
 
 function toPosix(input: string): string {

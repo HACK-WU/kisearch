@@ -38,6 +38,8 @@ ki import \
   [--chunk-size <chars>] \
   [--chunk-overlap <chars>] \
   [--tags <t1,t2>] \
+  [--conflict-mode <overwrite|skip|suffix>] \
+  [--conflict-suffix <template>] \
   [--no-vector] \
   [--no-assets]
 ```
@@ -50,6 +52,8 @@ ki import \
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--tags <t1,t2>` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复）。注意：不带 `--tags` 重导会清除该文件已有标签（导入为覆盖语义，区别于重建的只增不减） |
+| `--conflict-mode` | 否 | 同一 Group 下不同 `sourcePath` 的同名处理：`overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀；默认 `suffix` |
+| `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
 
 **示例：首次导入**
@@ -62,8 +66,10 @@ ki import -s my-project --source /path/to/wiki --group wiki
 
 **幂等语义**：
 - 同文件重导（sourcePath 相同）→ 覆盖更新
-- 同名不同文件（sourcePath 不同）→ 跳过
+- 同名不同文件（sourcePath 不同）→ 按 `--conflict-mode` 处理；默认生成 `foo_1`、`foo_2` 等后缀
 - 新文件 → 正常导入
+
+向量更新采用文档级增量策略：新向量写入成功后才清理受影响文档的旧内容/标签/关系辅助向量，Scope 内无关文档不会被清空；新向量全部失败时旧 KB、旧 relation 和旧向量保留。
 
 因此重复执行同命令即同步变更（追加新文档 / 更新已有文档）。
 
@@ -72,7 +78,8 @@ ki import -s my-project --source /path/to/wiki --group wiki
 {
   "ok": true,
   "scope": "my-project",
-  "stats": { "total": 15, "vectorized": 15, "errors": 0 },
+  "stats": { "total": 15, "vectorized": 15, "errors": 0, "skipped": 0, "conflicts": 0 },
+  "conflicts": [],
   "groups": ["wiki", "wiki/api"],
   "source": { "dir": "/path/to/wiki" }
 }
