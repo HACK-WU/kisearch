@@ -90,7 +90,7 @@ const ICON_FOLDER_SM = (
 );
 
 /** 递归 Group 树（点击节点选中并关闭）；activePath 用于高亮当前选中项 */
-function GroupTreeView({ nodes, onPick, activePath }: { nodes: GTreeNode[]; onPick: (n: GTreeNode) => void; activePath?: string }): JSX.Element {
+function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: GTreeNode[]; onPick: (n: GTreeNode) => void; activePath?: string; allowParentPick: boolean }): JSX.Element {
   const [tree, setTree] = useState<GTreeNode[]>(nodes);
   useEffect(() => setTree(nodes), [nodes]);
 
@@ -117,10 +117,20 @@ function GroupTreeView({ nodes, onPick, activePath }: { nodes: GTreeNode[]; onPi
       <div key={n.path}>
         <div
           className={`ki-gtree-dir${activePath && n.path === activePath ? ' ki-gtree-dir--active' : ''}`}
+          role="treeitem"
+          tabIndex={0}
+          aria-expanded={hasSub ? n.open : undefined}
+          aria-selected={activePath === n.path}
           onClick={(e) => {
             e.stopPropagation();
             if (hasSub) toggleOpen(n.path);
-            onPick(n);
+            if (!hasSub || allowParentPick) onPick(n);
+          }}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            if (hasSub) toggleOpen(n.path);
+            if (!hasSub || allowParentPick) onPick(n);
           }}
         >
           <span className="ki-gtree-arrow">{hasSub ? (n.open ? '▾' : '▸') : ''}</span>
@@ -273,7 +283,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
         </button>
       </div>
       <div className={`ki-combobox__panel${open ? ' ki-combobox__panel--open' : ''}`}>
-        <div className="ki-combobox__tree">
+        <div className="ki-combobox__tree" role="tree">
           {filtered.nodes.length === 0 ? (
             <div className="ki-cell-sub" style={{ padding: 6 }}>
               {selectOnly
@@ -281,7 +291,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
                 : '当前 scope 暂无 Group，可直接输入新建'}
             </div>
           ) : (
-            <GroupTreeView nodes={filtered.nodes} onPick={pick} activePath={selectOnly ? value : undefined} />
+            <GroupTreeView nodes={filtered.nodes} onPick={pick} activePath={selectOnly ? value : undefined} allowParentPick={!selectOnly} />
           )}
         </div>
         <div className="ki-combobox__footer">

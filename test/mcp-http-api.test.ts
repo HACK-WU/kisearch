@@ -161,6 +161,10 @@ describe('/api/doc/list', () => {
     const filtered = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-test&q=告警`)).json();
     assert.equal(filtered.total, 2);
     assert.ok(filtered.docs.every((d: { name: string }) => d.name.includes('告警')));
+
+    const pathFiltered = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-test&q=docs%2F%E5%91%8A%E8%AD%A6%E9%80%9A%E7%9F%A5`)).json();
+    assert.equal(pathFiltered.total, 1);
+    assert.equal(pathFiltered.docs[0].name, '告警通知');
   });
 
   it('vectorized：登记了向量 ID 的为 true（多值/单值皆可），未登记的为 false', async () => {

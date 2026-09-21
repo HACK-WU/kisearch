@@ -76,6 +76,7 @@ export function ModuleDrawer({
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [internalFullscreen, setInternalFullscreen] = useState(false);
@@ -103,7 +104,13 @@ export function ModuleDrawer({
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scope, module, group, content, fetcher]);
+  }, [scope, module, group, content, fetcher, loadAttempt]);
+
+  const retryLoad = useCallback((): void => {
+    setContent(null);
+    setError(null);
+    setLoadAttempt((attempt) => attempt + 1);
+  }, []);
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
@@ -212,6 +219,9 @@ export function ModuleDrawer({
           <div className="ki-drawer__status-icon">⚠</div>
           <h3>加载失败</h3>
           <p>{error}</p>
+          <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={retryLoad}>
+            重试
+          </button>
         </div>
       ) : content === null ? (
         <div className="ki-drawer__status">
@@ -240,7 +250,7 @@ export function ModuleDrawer({
   return (
     <>
       <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />
-      <aside className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`} aria-label="原文查看">
+      <aside className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`} role="dialog" aria-modal="true" aria-label="原文查看">
         {/* 头部 */}
         <header className="ki-drawer__head">
           <button

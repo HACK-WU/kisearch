@@ -538,11 +538,13 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   // tag 过滤辅助：tagRaw 为空则不过滤；否则匹配 relation.tags 中的某个 tag
   const matchTag = (d: { tags?: string[] }): boolean =>
     !tagRaw || (d.tags ?? []).some((t) => t.toLowerCase() === tagRaw);
+  const matchQuery = (d: { name: string; path?: string }): boolean =>
+    !q || d.name.toLowerCase().includes(q) || (d.path ?? '').toLowerCase().includes(q);
 
   // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响），确保选中任一节点都能取到完整文档
   if (groupRaw) {
     const groupDocs = all
-      .filter((d) => d.group === groupRaw && (!q || d.name.toLowerCase().includes(q)) && matchTag(d))
+      .filter((d) => d.group === groupRaw && matchQuery(d) && matchTag(d))
       .slice(0, limit);
     sendJson(res, 200, {
       ok: true,
@@ -560,7 +562,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   //   - 有搜索词(q)：返回跨组模糊匹配的文档（全局搜索场景，limit 放宽到 2000）
   //   - 无搜索词(q)：返回前 limit 条全部 docs（兼容既有 API 契约；BrowsePage 前端已改用 useGroupDocs 按组精确拉取）
   const SEARCH_LIMIT = 2000;
-  const filtered = (q ? all.filter((d) => d.name.toLowerCase().includes(q)) : all).filter(matchTag);
+  const filtered = all.filter(matchQuery).filter(matchTag);
   const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
   sendJson(res, 200, {
     ok: true,

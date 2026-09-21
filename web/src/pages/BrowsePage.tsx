@@ -7,6 +7,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
 import type { DocItem } from '@/api/httpApi';
@@ -130,6 +131,7 @@ export function BrowsePage(): JSX.Element {
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  const [searchQ, setSearchQ] = useState('');
   // 阅读器全屏时把 Browse 导航带入工作区；两块导航独立折叠，Group 默认折叠、文档默认展开。
   const [readerFullscreen, setReaderFullscreen] = useState(false);
   const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(true);
@@ -137,13 +139,30 @@ export function BrowsePage(): JSX.Element {
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
   const [selectedTag, setSelectedTag] = useState('');
 
-  const { data, isLoading } = useDocList(scope);
+  const { data, isLoading, isError, error, refetch } = useDocList(scope);
   // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
   // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求
 
   // 选中 group 的完整文档（后端按 group 精确返回，不受 500 条全量分页截断影响）
   const groupQuery = useGroupDocs(scope, activeGroup || null, selectedTag || undefined);
   const groupDocs = groupQuery.data?.docs ?? [];
+
+  // 切换 scope 后清理旧 scope 的筛选条件，避免旧 tag / 关键词在新 scope 中造成“无结果”误导。
+  useEffect(() => {
+    setQ('');
+    setSearchQ('');
+    setSelectedTag('');
+  }, [scope]);
+
+  // 搜索防抖：保留现有“跨 Group 搜索”语义，只减少逐字请求与列表闪烁。
+  useEffect(() => {
+    if (!q.trim()) {
+      setSearchQ('');
+      return;
+    }
+    const timer = window.setTimeout(() => setSearchQ(q.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [q]);
 
   // 浏览页：禁止外层 .ki-content 滚动，让双栏内部各自滚动
   useEffect(() => {
@@ -211,19 +230,29 @@ export function BrowsePage(): JSX.Element {
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
-    queryKey: ['docList', scope, 'search', q.trim(), selectedTag],
-    queryFn: () => getDocList(scope, { q: q.trim(), tag: selectedTag || undefined }),
-    enabled: q.trim().length > 0,
+    queryKey: ['docList', scope, 'search', searchQ, selectedTag],
+    queryFn: () => getDocList(scope, { q: searchQ, tag: selectedTag || undefined }),
+    enabled: searchQ.length > 0,
     staleTime: 10_000,
     retry: 1,
+    placeholderData: (previousData) => previousData,
   });
   const searchDocs = searchQuery.data?.docs ?? [];
-  // 搜索中（全局 q 请求在途）时展示 loading 态
-  const isSearchLoading = searchQuery.isLoading && q.trim().length > 0;
+  const isSearching = q.trim().length > 0;
+  const searchPending = isSearching && q.trim() !== searchQ;
+  const searchRefreshing = isSearching && (searchPending || searchQuery.isFetching);
+  // 首次搜索没有可复用的旧结果时展示 loading；后续输入保留上一次结果，避免列表闪烁。
+  const isSearchLoading = isSearching && !searchQuery.data && (searchPending || searchQuery.isLoading);
 
   // 展示列表：有搜索词时展示全局搜索结果，否则展示当前选中 group 文档
-  const shownDocs = q.trim().length > 0 ? searchDocs : activeDocs;
-  const isSearching = q.trim().length > 0;
+  const shownDocs = isSearching ? searchDocs : activeDocs;
+  const shownTotal = isSearching ? (searchQuery.data?.total ?? shownDocs.length) : (groupQuery.data?.total ?? activeDocs.length);
+  const searchTruncated = isSearching && searchQuery.data?.truncated === true;
+
+  const clearFilters = useCallback((): void => {
+    setQ('');
+    setSelectedTag('');
+  }, []);
 
   // 合并当前已知文档：全量列表 + 当前 Group 完整列表 + 当前搜索结果。
   // group 查询不受全量列表 500 条上限影响，因此当前 Group 的本地链接始终优先可解析。
@@ -355,7 +384,16 @@ export function BrowsePage(): JSX.Element {
       <Fragment key={node.path}>
         <div
           className={`ki-tree-dir${node.open && hasSub ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
+          role="treeitem"
+          tabIndex={0}
+          aria-expanded={hasSub ? node.open : undefined}
+          aria-selected={isActive}
           onClick={() => handleDirClick(node)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            handleDirClick(node);
+          }}
         >
           <span className="ki-tree-arrow">{hasSub ? (node.open ? '▾' : '▸') : ''}</span>
           {ICON_FOLDER}
@@ -377,15 +415,32 @@ export function BrowsePage(): JSX.Element {
           <div className="ki-skeleton" style={{ width: '80%', height: 28, marginBottom: 8 }} />
           <div className="ki-skeleton" style={{ width: '90%', height: 28 }} />
         </>
+      ) : isError ? (
+        <div className="ki-empty" style={{ padding: 24 }}>
+          <div>
+            <h3>Group 加载失败</h3>
+            <p>{error instanceof Error ? error.message : '暂时无法读取当前 Scope 的 Group。'}</p>
+            <div className="ki-empty__actions">
+              <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={() => void refetch()}>
+                重试
+              </button>
+            </div>
+          </div>
+        </div>
       ) : tree.length === 0 ? (
         <div className="ki-empty" style={{ padding: 24 }}>
           <div>
             <h3>空知识库</h3>
             <p>该 scope 暂无 Group，可前往上传导入。</p>
+            <div className="ki-empty__actions">
+              <Link className="ki-btn ki-btn--primary ki-btn--small" to="/import">
+                前往上传导入
+              </Link>
+            </div>
           </div>
         </div>
       ) : (
-        <div className="ki-tree-root">{tree.map(renderNode)}</div>
+        <div className="ki-tree-root" role="tree">{tree.map(renderNode)}</div>
       )}
     </>
   );
@@ -400,7 +455,7 @@ export function BrowsePage(): JSX.Element {
       />
       <input
         className="ki-form-input"
-        placeholder="按文件名/路径模糊搜索…"
+        placeholder="按文件名或路径搜索…"
         style={{ maxWidth: 220, flex: '1 1 200px' }}
         value={q}
         onChange={(e) => setQ(e.target.value)}
@@ -408,13 +463,35 @@ export function BrowsePage(): JSX.Element {
         aria-label="按文件名或路径搜索文档"
       />
       <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+      {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
+      {(q || selectedTag) && (
+        <button className="ki-btn ki-btn--ghost ki-btn--small" type="button" onClick={clearFilters}>
+          清除筛选
+        </button>
+      )}
     </>
   );
 
-  const renderDocumentList = (): JSX.Element => (
+  const renderDocumentList = (): JSX.Element => {
+    const listError = isSearching ? (searchQuery.isError ? searchQuery.error : null) : (groupQuery.isError ? groupQuery.error : null);
+    const retryList = isSearching ? searchQuery.refetch : groupQuery.refetch;
+    const listLoading = isSearching ? isSearchLoading : isLoading || groupQuery.isLoading;
+    return (
     <>
-      {isLoading || isSearchLoading ? (
+      {listLoading ? (
         <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
+      ) : listError ? (
+        <div className="ki-empty" style={{ border: 'none' }}>
+          <div>
+            <h3>文档列表加载失败</h3>
+            <p>{listError instanceof Error ? listError.message : '暂时无法读取文档列表。'}</p>
+            <div className="ki-empty__actions">
+              <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={() => void retryList()}>
+                重试
+              </button>
+            </div>
+          </div>
+        </div>
       ) : shownDocs.length === 0 ? (
         <div className="ki-empty" style={{ border: 'none' }}>
           <div>
@@ -428,7 +505,14 @@ export function BrowsePage(): JSX.Element {
             <div
               key={`${d.group}/${d.name}`}
               className="ki-doc-item"
+              role="button"
+              tabIndex={0}
               onClick={() => openDocument({ module: d.name, group: d.group, path: d.path })}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                openDocument({ module: d.name, group: d.group, path: d.path });
+              }}
             >
               <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -452,7 +536,8 @@ export function BrowsePage(): JSX.Element {
         </>
       )}
     </>
-  );
+    );
+  };
 
   /** 全屏阅读工作区：导航面板在抽屉内部渲染，因此不会被 scrim 遮挡。 */
   const fullscreenNavigation = (
@@ -525,7 +610,7 @@ export function BrowsePage(): JSX.Element {
               <div>
                 <div className="ki-card__title">文档</div>
                 <div className="ki-card__sub">
-                  {isSearching ? `搜索「${q.trim()}」 · ${shownDocs.length} 条` : `${shownDocs.length} 条`}
+                  {isSearching ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}` : `${shownTotal} 条`}
                 </div>
               </div>
               <div className="ki-reader-nav__actions">
@@ -595,7 +680,7 @@ export function BrowsePage(): JSX.Element {
               <span className="ki-card__title">文档</span>
               <span className="ki-card__sub">
                 {isSearching
-                  ? `搜索「${q.trim()}」 · ${shownDocs.length} 条`
+                  ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}`
                   : activeGroup
                     ? `${activeGroup} · ${activeDocs.length} 条`
                     : '选择左侧 Group 查看文档'}
@@ -619,7 +704,7 @@ export function BrowsePage(): JSX.Element {
               />
               <input
                 className="ki-form-input"
-                placeholder="按文件名/路径模糊搜索…"
+                placeholder="按文件名或路径搜索…"
                 style={{ maxWidth: 220, flex: '1 1 200px' }}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
@@ -627,9 +712,12 @@ export function BrowsePage(): JSX.Element {
                 aria-label="按文件名或路径搜索文档"
               />
               <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
-              <span className="ki-cell-sub" style={{ marginLeft: 'auto' }}>
-                /api/doc/list
-              </span>
+              {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
+              {(q || selectedTag) && (
+                <button className="ki-btn ki-btn--ghost ki-btn--small" type="button" onClick={clearFilters}>
+                  清除筛选
+                </button>
+              )}
             </div>
             <div className="ki-card__body" style={{ padding: 12, flex: 1, overflowY: 'auto' }}>
               {renderDocumentList()}
