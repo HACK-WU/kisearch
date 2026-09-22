@@ -7,6 +7,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import webPackage from '../../package.json';
 
 // ─── 类型（对齐 ki 后端返回结构） ─────────────────────
 
@@ -67,7 +68,7 @@ async function getClient(): Promise<Client> {
     const transport = new StreamableHTTPClientTransport(
       new URL('/mcp', window.location.origin),
     );
-    const c = new Client({ name: 'ki-web', version: '0.1.0' });
+    const c = new Client({ name: 'ki-web', version: webPackage.version });
     await c.connect(transport);
     client = c;
     return c;

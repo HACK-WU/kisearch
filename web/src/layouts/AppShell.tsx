@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useHealth } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
+import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
 
@@ -116,7 +117,7 @@ export function AppShell(): JSX.Element {
         <div className="ki-sidebar__spacer" />
 
         <div className="ki-sidebar__footer">
-          <div className="ki-sidebar__footer-version">ki v0.1.0 · MCP 7423</div>
+          <div className="ki-sidebar__footer-version">ki v{webPackage.version} · MCP 7423</div>
           <div className="ki-sidebar__footer-row">
             <button className="ki-icon-link" onClick={toggle} title="切换主题" aria-label="切换主题">
               <svg viewBox="0 0 16 16" fill="currentColor" style={{ display: theme === 'dark' ? 'none' : '' }}>
