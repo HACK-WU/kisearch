@@ -57,6 +57,7 @@
     "src/**/*",
     "_template/**/*",
     "dist/zvec-engine/**/*",
+    "web/dist/**/*",
     "src/zvec-engine/**/*",
     "README.md",
     "LICENSE"

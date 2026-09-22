@@ -40,15 +40,40 @@ for f in bin/ki.mjs src/mcp-server.ts README.md package.json; do
 done
 echo "  ✅ 关键文件检查通过"
 
-# 4. 运行测试
+# 4. 安装依赖并构建运行时产物
+echo "==> 安装根目录依赖..."
+npm ci --ignore-scripts
+
+echo "==> 构建 zvec-engine..."
+npm run build:zvec-engine
+
+echo "==> 安装 Web 依赖..."
+npm --prefix web ci --ignore-scripts
+
+echo "==> 构建 Web 前端..."
+npm --prefix web run build
+
+for f in dist/zvec-engine/index.js web/dist/index.html; do
+  if [ ! -f "$f" ]; then
+    echo "错误: 构建产物 $f 不存在"
+    exit 1
+  fi
+done
+echo "  ✅ 构建产物检查通过"
+
+# 5. 运行测试
 echo "==> 运行测试..."
 if ! npm test 2>&1 | tail -3; then
   echo "错误: 测试未通过，拒绝发布"
   exit 1
 fi
+if ! npm run test:zvec-engine; then
+  echo "错误: zvec-engine 测试未通过，拒绝发布"
+  exit 1
+fi
 echo "  ✅ 测试通过"
 
-# 5. 打包（npm pack 根据 package.json files 字段打包）
+# 6. 打包（npm pack 根据 package.json files 字段打包）
 echo "==> 打包 ${TARBALL}..."
 npm pack
 
@@ -62,7 +87,7 @@ tar -tzf "${TARBALL}" | head -20 || true
 echo "  ... (共 $(tar -tzf "${TARBALL}" | wc -l | tr -d ' ') 个文件)"
 echo "==> 打包文件大小: $(du -h ${TARBALL} | cut -f1)"
 
-# 6. 创建/覆盖 git tag
+# 7. 创建/覆盖 git tag
 TAG="v${VERSION}"
 if git tag -l "$TAG" | grep -q "$TAG"; then
   echo "==> tag ${TAG} 已存在，覆盖..."
@@ -72,14 +97,14 @@ fi
 echo "==> 创建 tag: ${TAG}"
 git tag --no-sign "$TAG" -m "Release ${TAG}"
 
-# 7. 推送 tag
+# 8. 推送 tag
 echo "==> 推送 tag 到远程..."
 git push origin "$TAG" --force
 
-# 8. 创建 GitHub Release 并上传 tarball
+# 9. 创建 GitHub Release 并上传 tarball
 RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 
-\`ki mcp\` 启动 MCP Server，暴露 8 个工具（query_group / get_module_info / search / manage_index / sync_relation / store / bulk_store）。
+\`ki mcp\` 启动 MCP Server，暴露 13 个工具（查询、写入、批量同步、索引管理、Scope/Tag 管理等）。
 
 ### 安装
 
@@ -99,7 +124,7 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
     echo "==> Release ${TAG} 已存在，删除旧版本..."
     gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
     # 重新创建 tag（被 gh 删掉了）
-    git tag --no-sign "$TAG" -m "Release ${TAG}"
+    git tag --no-sign --force "$TAG" -m "Release ${TAG}"
     git push origin "$TAG" --force
   fi
 
@@ -136,6 +161,6 @@ else
   echo "    npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
 fi
 
-# 9. 提示清理
+# 10. 提示清理
 echo ""
 echo "==> 发布完成后可手动清理: rm -f ${TARBALL}"
