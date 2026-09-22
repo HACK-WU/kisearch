@@ -14,12 +14,15 @@ import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { parseContentTags } from './constants.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId, type FtsStoreEntry } from './fts-client.js';
+import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 
 interface FtsRelation {
   text: string;
   memoryId?: string | null;
   memoryIds?: string[];
   ftsIds?: string[];
+  ftsLocators?: FtsLocator[];
+  sourcePath?: string;
   tags?: string[];
 }
 
@@ -34,7 +37,9 @@ export interface FtsRebuildResult {
 }
 
 function hasDenseRelation(rel: FtsRelation): boolean {
-  return (rel.memoryIds?.length ?? 0) > 0 || !!rel.memoryId;
+  // 新版导入显式写入 memoryIds=[] 表示无 dense；即使旧兼容字段 memoryId 残留，
+  // 也不能把该 Relation 跳过，否则历史 FTS-only 文档无法重建全文索引。
+  return Array.isArray(rel.memoryIds) ? rel.memoryIds.length > 0 : !!rel.memoryId;
 }
 
 /** 重建 scope 中所有没有 dense memoryId 的 relation（可安全重复执行）。 */
@@ -49,7 +54,7 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
   const chunkOverlap = source?.chunkOverlap ?? 150;
   const cleanEnabled = cleanConfig?.enabled !== false;
   const allEntries: FtsStoreEntry[] = [];
-  const records: { group: string; relation: FtsRelation; oldIds: string[]; entryStart: number; entryEnd: number }[] = [];
+  const records: { group: string; relation: FtsRelation; original: string; oldIds: string[]; entryStart: number; entryEnd: number; chunks: Array<{ index: number; text: string }> }[] = [];
   const errors: FtsRebuildResult['errors'] = [];
 
   for (const [group, groupData] of Object.entries(cache.groups ?? {})) {
@@ -79,7 +84,7 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
         }
         text = hookResult.text;
       }
-      const { entries } = buildChunkEntries({
+      const { chunks, entries } = buildChunkEntries({
         fileKey: relation.text,
         groupPath: group,
         text,
@@ -97,9 +102,11 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
       records.push({
         group,
         relation,
+        original,
         oldIds: relation.ftsIds ?? [],
         entryStart,
         entryEnd: allEntries.length,
+        chunks,
       });
     }
   }
@@ -117,6 +124,21 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
     indexed += newIds.length;
     const complete = newIds.length === expected.length;
     record.relation.ftsIds = [...new Set(complete ? newIds : [...record.oldIds, ...newIds])];
+    const chunkRanges = buildChunkLineRanges(
+      record.original,
+      record.chunks,
+    );
+    const tagCount = Math.max(1, parseContentTags(record.relation.tags?.join(',')).length + 1);
+    const newLocators: FtsLocator[] = expected.flatMap((id, index) => {
+      const chunk = record.chunks[Math.floor(index / tagCount)];
+      const range = chunk ? chunkRanges.get(chunk.index) : undefined;
+      return range ? [{ ftsId: id, chunkIndex: chunk.index, sourcePath: record.relation.sourcePath, ...range }] : [];
+    }).filter((locator) => storedIds.has(locator.ftsId));
+    const locatorMap = new Map<string, FtsLocator>();
+    for (const locator of complete ? newLocators : [...(record.relation.ftsLocators ?? []), ...newLocators]) {
+      locatorMap.set(locator.ftsId, locator);
+    }
+    record.relation.ftsLocators = [...locatorMap.values()];
     if (complete) {
       const staleIds = record.oldIds.filter((id) => !newIds.includes(id));
       if (staleIds.length > 0) {

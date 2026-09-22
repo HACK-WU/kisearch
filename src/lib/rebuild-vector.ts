@@ -665,7 +665,10 @@ export async function rebuildScopeVectors(
       if (!denseWritten || !rel.ftsIds || rel.ftsIds.length === 0) continue;
       try {
         const deleted = await ftsDeleteByIds({ scope, ids: rel.ftsIds });
-        if (deleted.failed === 0) delete rel.ftsIds;
+        if (deleted.failed === 0) {
+          delete rel.ftsIds;
+          delete rel.ftsLocators;
+        }
         else errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: `旧 FTS-only 索引清理失败 ${deleted.failed} 条` });
       } catch (err) {
         errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: (err as Error).message });

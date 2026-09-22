@@ -15,6 +15,7 @@ import {
   MAX_USE_COUNT,
   type PartitionConfig,
 } from './constants.js';
+import type { FtsLocator } from './original-locator.js';
 
 // ─── 类型定义 ───
 
@@ -34,6 +35,8 @@ export interface Relation {
   memoryIds?: string[];
   /** FTS-only Collection 中对应的文档 ID；仅 --no-vector / fulltext 写入链路使用。 */
   ftsIds?: string[];
+  /** FTS ID 到 local KB 原文行范围的定位元数据；历史关系可能缺失。 */
+  ftsLocators?: FtsLocator[];
   /** 文档级自定义标签（如 ['api', 'auth']）。持久化到 KB 层，供 rebuild-vector/restore 恢复 tag 向量。
    *  缺省 undefined 或 [] 表示无自定义 tag（仅有默认的 ki-search）。 */
   tags?: string[];

@@ -126,6 +126,30 @@ describe('getRelationMap', () => {
     assert.ok(map.has('m1'));
   });
 
+  it('FTS-only 的 ftsIds 可反查 Group/Relation 与原文定位元数据', () => {
+    setupConfig();
+    writeCache('default', {
+      'fts/group': {
+        hot_relations: [{
+          id: 'r-fts',
+          text: '全文文档',
+          memoryIds: [],
+          sourcePath: 'docs/fulltext.md',
+          ftsIds: ['fts-1'],
+          ftsLocators: [{ ftsId: 'fts-1', sourcePath: 'docs/fulltext.md', chunkIndex: 2, lineStart: 42, lineEnd: 44 }],
+        }],
+      },
+    });
+
+    const map = getRelationMap('default');
+    assert.deepEqual(map.get('fts-1'), {
+      group: 'fts/group',
+      relation: '全文文档',
+      sourcePath: 'docs/fulltext.md',
+      ftsLocator: { ftsId: 'fts-1', sourcePath: 'docs/fulltext.md', chunkIndex: 2, lineStart: 42, lineEnd: 44 },
+    });
+  });
+
   it('relations-cache.json 不存在 → 空 Map（不抛错）', () => {
     setupConfig();
     const map = getRelationMap('default');

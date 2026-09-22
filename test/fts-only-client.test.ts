@@ -43,6 +43,8 @@ test('FTS-only client writes/searches/reopens/deletes without embedding', async 
 
   const publicSearch = await fullTextSearch({ scope, query: 'Kafka rebalance', limit: 5 });
   assert.equal(publicSearch[0]?.memoryId, stored.ids[0]);
+  assert.equal(publicSearch[0]?.indexType, 'fts');
+  assert.equal(publicSearch[0]?.ftsId, stored.ids[0]);
   assert.equal(publicSearch[0]?.group, 'docs/kafka');
 
   await closeFtsEngine(scope);
@@ -56,7 +58,7 @@ test('FTS-only client writes/searches/reopens/deletes without embedding', async 
   fs.mkdirSync(groupDir, { recursive: true });
   fs.writeFileSync(path.join(groupDir, 'index.json'), JSON.stringify({ recovered: '恢复后的 Kafka offset 文档' }));
   fs.writeFileSync(path.join(scopeDir, 'relations-cache.json'), JSON.stringify({
-    groups: { 'docs/recovered': { hot_relations: [{ text: 'recovered', memoryIds: [] }] } },
+    groups: { 'docs/recovered': { hot_relations: [{ text: 'recovered', memoryIds: [], memoryId: 'stale-dense-id' }] } },
   }));
   const rebuilt = await rebuildFtsOnlyScope(scope);
   assert.equal(rebuilt.errors.length, 0);

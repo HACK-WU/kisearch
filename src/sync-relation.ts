@@ -789,7 +789,12 @@ async function executeBulkSyncRelationLocal(params: {
           previousIds: itemPriorFtsIds[i],
         });
         const rel = cache.groups[results[i].group]?.hot_relations.find((r) => r.text === results[i].relation);
-        if (rel) rel.ftsIds = fullText.ids;
+        if (rel) {
+          rel.ftsIds = fullText.ids;
+          // FTS-only 是明确的无 dense 状态；清理旧的兼容字段，避免文档列表/重建链路误判为已向量化。
+          delete rel.memoryId;
+          delete rel.memoryIds;
+        }
         results[i].fullTextStored = fullText.stored;
         if (fullText.reason) results[i].fullTextReason = fullText.reason;
       }
@@ -1024,7 +1029,12 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
           previousIds: previousFtsIds,
         })
       : undefined;
-    if (fts && relRec) relRec.ftsIds = fts.ids;
+    if (fts && relRec) {
+      relRec.ftsIds = fts.ids;
+      // FTS-only 是明确的无 dense 状态；清理旧的兼容字段，避免文档列表/重建链路误判为已向量化。
+      delete relRec.memoryId;
+      delete relRec.memoryIds;
+    }
 
     // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘。
     writeJson(cachePath, cache as unknown as Record<string, unknown>);
@@ -1032,7 +1042,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
     // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，
     // 但把写入结果透出到返回值（vectorStored/vectorReason），避免部分写入被静默吞掉。
-    // 非向量化模式（vector=false）：跳过 embed 与 memoryId 回写，仅 KB 层。
+    // 非向量化模式（vector=false）：FTS ID 已由 fullTextWriteBack 回写；此处只跳过
+    // dense embedding 与 memoryId 回写，不应再描述为“仅写 KB 层”。
     const vec = params.vector === false
       ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
       : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath, tags: params.tags });

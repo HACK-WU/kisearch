@@ -173,6 +173,7 @@ describe('/api/doc/list', () => {
         { text: '多值向量化', memoryIds: ['m1', 'm2'] },
         { text: '单值向量化', memoryId: 'm3' },
         { text: '空数组不算', memoryIds: [] },
+        { text: '空数组覆盖陈旧单值', memoryIds: [], memoryId: 'stale-m3' },
         '未向量化',
       ],
     });
@@ -183,6 +184,7 @@ describe('/api/doc/list', () => {
     assert.equal(byName.get('多值向量化'), true, 'memoryIds 非空 → 已向量化');
     assert.equal(byName.get('单值向量化'), true, 'memoryId 非空 → 已向量化（旧链路）');
     assert.equal(byName.get('空数组不算'), false, 'memoryIds 为空数组不得误判为已向量化');
+    assert.equal(byName.get('空数组覆盖陈旧单值'), false, '显式空 memoryIds 应覆盖陈旧 memoryId');
     assert.equal(byName.get('未向量化'), false, '无向量 ID → 未向量化');
   });
 

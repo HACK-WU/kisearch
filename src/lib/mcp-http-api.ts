@@ -230,7 +230,8 @@ function buildDocList(scope: string): DocListCache['docs'] {
         group,
         // 已向量化判据：KB 层登记的向量 ID 非空（文件级导入为多值 memoryIds，旧链路为单值 memoryId）。
         // 只读同一份 relations-cache，故不引入额外 I/O，缓存失效条件（mtime+size）也不变。
-        vectorized: (rel.memoryIds?.length ?? 0) > 0 || !!rel.memoryId,
+        // 显式 memoryIds 优先：空数组代表 FTS-only/无 dense，即使旧 memoryId 残留也不能误判。
+        vectorized: Array.isArray(rel.memoryIds) ? rel.memoryIds.length > 0 : !!rel.memoryId,
         fullTextIndexed: (rel.ftsIds?.length ?? 0) > 0,
         ...(rel.sourcePath ? { path: rel.sourcePath } : {}),
         ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),

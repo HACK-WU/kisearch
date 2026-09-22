@@ -44,7 +44,12 @@ import { ftsSearch as ftsOnlySearch } from './fts-client.js';
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
 export interface VectorSearchResult {
-  memoryId: string;    // = zvec Hit.id（doc id，sha256(text+scope+tag) 截 32）
+  /** 兼容字段：dense 结果是 memory/doc ID；FTS-only 结果暂复用 ftsId，调用方应看 indexType/ftsId。 */
+  memoryId: string;
+  /** 结果的索引来源；FTS-only 命中不应被误解为 dense 向量。 */
+  indexType?: 'dense' | 'fts';
+  /** FTS-only Collection 的稳定 ID；仅 indexType=fts 时存在。 */
+  ftsId?: string;
   content: string;
   score: number;       // 越大越相关（基座已归一化）
   tag?: string;
@@ -997,6 +1002,7 @@ export async function fullTextSearch(params: {
     }));
     return hits.map((hit) => ({
       memoryId: hit.id,
+      indexType: 'dense' as const,
       content: hit.text ?? String(hit.fields?.[FTS_FIELD] ?? ''),
       score: hit.score,
       tag: hit.fields?.[TAG_FIELD] !== undefined ? String(hit.fields[TAG_FIELD]) : undefined,
@@ -1011,6 +1017,8 @@ export async function fullTextSearch(params: {
       const hits = await ftsOnlySearch({ scope, query: params.query, limit, tag });
       return hits.map((hit) => ({
         memoryId: hit.ftsId,
+        indexType: 'fts' as const,
+        ftsId: hit.ftsId,
         content: hit.content,
         score: hit.score,
         tag: hit.tag,

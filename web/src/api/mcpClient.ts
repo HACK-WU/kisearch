@@ -23,11 +23,18 @@ export interface ScopeInfo {
 export interface SearchHit {
   group?: string;
   relation?: string;
+  sourcePath?: string;
   score?: number;
+  indexType?: 'dense' | 'fts';
+  ftsId?: string;
+  ftsIds?: string[];
   original?: string;
   originalRetrieved?: boolean;
   deduplicated?: boolean;
   content?: string;
+  originalExcerpt?: string;
+  matches?: Array<{ lineStart: number; lineEnd: number; excerpt: string }>;
+  totalLines?: number;
   memoryId?: string;
   /** 本条命中向量的 tag（多 tag 文档去重后只保留一条命中，此字段仅含其一） */
   tag?: string;
@@ -38,6 +45,7 @@ export interface SearchHit {
 
 export interface SearchResult {
   results?: SearchHit[];
+  total?: number;
   /** O1：语义侧降级为关键词检索（查询 embedding 超时/网络失败）时为 true，此时 score 为 BM25 原始分 */
   degraded?: boolean;
   /** 降级原因，用于向用户解释分数口径变化 */

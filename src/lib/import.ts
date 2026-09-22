@@ -41,6 +41,7 @@ import { deriveGroupPath, type ScanResultEntry } from './ai-results.js';
 export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
 import { bulkVectorize } from './batch-vectorize.js';
 import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
+import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 import { acquireImportLock, releaseImportLock, clearImportLock, writeInterruptMark } from './interrupt.js';
 import {
   buildGroupPathContent,
@@ -866,6 +867,7 @@ export async function handleDirectImport(
   const fullTextErrors: { path: string; error: string }[] = [];
   let fullTextIndexed = 0;
   const fullTextIdsByKey = new Map<string, string[]>();
+  const fullTextLocatorsByKey = new Map<string, FtsLocator[]>();
   if (!vector && activeFileRecords.length > 0) {
     const ftsEntries = activeFileRecords.flatMap((rec) => rec.entries.flatMap((entry) => [
       { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' },
@@ -876,15 +878,31 @@ export async function handleDirectImport(
       const storedIds = new Set(ftsResult.ids);
       fullTextIndexed = ftsResult.ids.length;
       for (const rec of activeFileRecords) {
-        const expected = rec.entries.flatMap((entry) => [
-          getFtsDocId({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' }),
-          ...customTags.map((tag) => getFtsDocId({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
+        const chunkRanges = buildChunkLineRanges(
+          // local KB 保存的就是这份未清洗原文；这里读取 source 文件，避免把清洗文本误当原文。
+          fs.readFileSync(sourceIsFile ? sourceDir : path.resolve(sourceDir, rec.rel), 'utf-8'),
+          rec.chunks,
+        );
+        const expectedEntries = rec.entries.flatMap((entry, entryIndex) => [
+          { entryIndex, entry, fts: { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' as const } },
+          ...customTags.map((tag) => ({ entryIndex, entry, fts: { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag } })),
         ]);
+        const expected = expectedEntries.map(({ fts }) => getFtsDocId(fts));
         const newIds = expected.filter((id) => storedIds.has(id));
         const oldIds = rec.previousRelation?.ftsIds ?? [];
         const complete = newIds.length === expected.length;
         // 只有新索引完整时才清理旧索引；部分失败保留旧 ID，避免覆盖导入丢召回。
         fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...new Set(complete ? newIds : [...oldIds, ...newIds])]);
+        const newLocators: FtsLocator[] = expectedEntries.flatMap(({ entryIndex }, index) => {
+          const range = chunkRanges.get(rec.chunks[entryIndex].index);
+          if (!range) return [];
+          const id = expected[index];
+          return [{ ftsId: id, sourcePath: rec.rel, chunkIndex: rec.chunks[entryIndex].index, ...range }];
+        }).filter((locator) => storedIds.has(locator.ftsId));
+        const oldLocators = rec.previousRelation?.ftsLocators ?? [];
+        const locatorMap = new Map<string, FtsLocator>();
+        for (const locator of complete ? newLocators : [...oldLocators, ...newLocators]) locatorMap.set(locator.ftsId, locator);
+        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...locatorMap.values()]);
         if (complete) {
           const staleIds = oldIds.filter((id) => !newIds.includes(id));
           if (staleIds.length > 0) {
@@ -907,17 +925,21 @@ export async function handleDirectImport(
     // 以前的 FTS-only 文档；删除失败则保留 ftsIds，避免缓存宣称已清理。
     for (const rec of activeFileRecords) {
       const oldIds = rec.previousRelation?.ftsIds ?? [];
+      const oldLocators = rec.previousRelation?.ftsLocators ?? [];
       if (oldIds.length === 0) continue;
       try {
         const deleted = await ftsDeleteByIds({ scope, ids: oldIds });
         if (deleted.failed > 0) {
           fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
+          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators);
           fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败 ${deleted.failed} 条` });
         } else {
           fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
+          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
         }
       } catch (err) {
         fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
+        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators);
         fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败：${(err as Error).message}` });
       }
     }
@@ -1038,7 +1060,9 @@ export async function handleDirectImport(
   for (const rec of activeFileRecords) {
     const rel = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
     const ftsIds = fullTextIdsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
+    const ftsLocators = fullTextLocatorsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
     if (rel && ftsIds) rel.ftsIds = ftsIds;
+    if (rel && ftsLocators) rel.ftsLocators = ftsLocators;
   }
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
   // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
@@ -1192,6 +1216,7 @@ function upsertRelation(
   if (Array.isArray(memoryIds)) {
     rel.memoryIds = memoryIds;
     if (memoryIds.length > 0) rel.memoryId = memoryIds[0]; // 兼容单值消费方（取第一个）
+    else delete rel.memoryId;
   }
   if (sourcePath) rel.sourcePath = sourcePath;
   // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
@@ -1215,6 +1240,7 @@ function cloneRelation(relation: Relation): Relation {
     ...relation,
     ...(relation.memoryIds ? { memoryIds: [...relation.memoryIds] } : {}),
     ...(relation.ftsIds ? { ftsIds: [...relation.ftsIds] } : {}),
+    ...(relation.ftsLocators ? { ftsLocators: relation.ftsLocators.map((locator) => ({ ...locator })) } : {}),
     ...(relation.tags ? { tags: [...relation.tags] } : {}),
   };
 }

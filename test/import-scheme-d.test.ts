@@ -89,6 +89,12 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(rel, '文件级 relation a 应存在');
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时 memoryIds 为空');
     assert.ok(Array.isArray(rel.ftsIds) && rel.ftsIds.length > 0, '--no-vector 时应登记 FTS-only 文档 ID');
+    assert.ok(Array.isArray(rel.ftsLocators) && rel.ftsLocators.length === rel.ftsIds.length, '--no-vector 时应登记 FTS ID 对应的原文定位元数据');
+    assert.deepEqual(
+      rel.ftsLocators[0],
+      { ftsId: rel.ftsIds[0], sourcePath: 'a.md', chunkIndex: 1, lineStart: 1, lineEnd: 2 },
+      'FTS locator 应指向原文的 1-based 行范围',
+    );
     assert.strictEqual(rel.sourcePath, 'a.md', 'sourcePath 无 #N');
   });
 

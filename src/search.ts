@@ -16,6 +16,7 @@ import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, cl
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
+import { locateOriginalMatches, totalOriginalLines, type FtsLocator, type OriginalMatch } from './lib/original-locator.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './lib/query-timeout.js';
@@ -41,6 +42,8 @@ export interface SearchHit extends VectorSearchResult {
   group?: string;
   /** 文件级 relation（方案 D：basename 去扩展名，可能缺失） */
   relation?: string;
+  /** local KB/导入源相对路径（可能缺失） */
+  sourcePath?: string;
   /** REQ-09：原文是否成功获取 */
   originalRetrieved?: boolean;
   /** REQ-09：原文内容（local KB 文件级原文，未清洗；获取失败时缺失） */
@@ -51,6 +54,14 @@ export interface SearchHit extends VectorSearchResult {
   deduplicated?: boolean;
   /** 文档级自定义标签全量（来自 relations-cache relation.tags 反查；缺省无自定义 tag） */
   tags?: string[];
+  /** 文档级聚合后的 FTS ID；单条命中时通常只有一个。 */
+  ftsIds?: string[];
+  /** 全文检索对应的原文命中行片段。 */
+  matches?: OriginalMatch[];
+  /** 便于 MCP 直接展示的多个命中片段拼接文本。 */
+  originalExcerpt?: string;
+  /** 完整原文的总行数。 */
+  totalLines?: number;
 }
 
 export type SearchResult =
@@ -68,6 +79,8 @@ export type SearchResult =
       degradedReason?: string;
       /** 当前检索模式；缺省为 hybrid，fulltext 表示未调用 embedding。 */
       mode?: 'hybrid' | 'fulltext';
+      /** 当前返回的文档结果数。fulltext 模式按文档聚合后计数。 */
+      total?: number;
     }
   | { ok: false; error: string; degraded?: boolean };
 
@@ -86,6 +99,39 @@ export function fetchOriginal(scope: string, group: string, relation: string): {
   } catch {
     return { original: '', hint: '原文不可用：本地 KB 读取异常' };
   }
+}
+
+function mergeOriginalMatches(first?: OriginalMatch[], second?: OriginalMatch[]): OriginalMatch[] {
+  const all = [...(first ?? []), ...(second ?? [])]
+    .sort((a, b) => a.lineStart - b.lineStart || a.lineEnd - b.lineEnd);
+  const merged: OriginalMatch[] = [];
+  for (const match of all) {
+    const previous = merged.at(-1);
+    if (previous && match.lineStart <= previous.lineEnd + 1) {
+      previous.lineEnd = Math.max(previous.lineEnd, match.lineEnd);
+      const lines = new Map<number, string>();
+      for (const line of previous.excerpt.split('\n')) {
+        const separator = line.indexOf(' | ');
+        if (separator > 0) lines.set(Number(line.slice(0, separator)), line);
+      }
+      for (const line of match.excerpt.split('\n')) {
+        const separator = line.indexOf(' | ');
+        if (separator > 0) lines.set(Number(line.slice(0, separator)), line);
+      }
+      previous.excerpt = [...lines.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([, line]) => line)
+        .join('\n');
+    } else {
+      merged.push({ ...match });
+    }
+  }
+  return merged;
+}
+
+function buildOriginalExcerpt(matches?: OriginalMatch[]): string | undefined {
+  if (!matches || matches.length === 0) return undefined;
+  return matches.map((match) => match.excerpt).join('\n…\n');
 }
 
 async function executeSearchLocal(params: {
@@ -174,7 +220,9 @@ async function executeSearchLocal(params: {
       raw = await fullTextSearch({
         scopes,
         query: params.query,
-        limit: params.limit ?? 10,
+        // FTS 返回的是 chunk，先多取候选，再在本层按文档聚合并执行最终 limit，
+        // 避免同一文档的多个 chunk 占满 MCP 的文档结果名额。
+        limit: Math.max((params.limit ?? 10) * 10, 50),
         tags: params.tags,
       });
     } else if (params.tags) {
@@ -245,42 +293,98 @@ async function executeSearchLocal(params: {
       // 多 scope 命中标注来源（单 scope 保持现状不标注）；只标注确定归属，不猜测（与反查/原文路径同源）
       if (multi && hitScope) hit.scope = hitScope;
       const map = hitScope ? relationMaps.get(hitScope) : undefined;
-      const meta = map?.get(r.memoryId);
+      const lookupId = r.ftsId ?? r.memoryId;
+      const meta = map?.get(lookupId);
       if (meta) {
         hit.group = meta.group;
         hit.relation = meta.relation;
+        if (meta.sourcePath) hit.sourcePath = meta.sourcePath;
         // 附加文档全量自定义标签（tag 字段仅是本条命中的向量 tag，多 tag 文档会去重丢标签）
         if (meta.tags && meta.tags.length > 0) hit.tags = meta.tags;
       }
-      // REQ-09：原文召回（显式开启才执行）——命中任一 chunk memoryId → 返回文件级原文；多 chunk 命中去重
+      if (r.ftsId) hit.ftsIds = [r.ftsId];
+      // 原文召回：includeOriginal 返回完整原文；fulltext 模式即使未请求完整原文，
+      // 也必须读取 local KB 生成命中片段和行号，避免 MCP 只能看到清洗 chunk。
       // 原文不可用（含 relation 反查缺失）时降级：以向量文档 content 兜底，并提示没有原文。
       // 多 scope：按命中所属 scope 的本地 KB 取原文（跨 scope 不错配）
-      if (includeOriginal) {
-        if (meta?.group && meta.relation && hitScope) {
-          const fetched = fetchOriginal(hitScope, meta.group, meta.relation);
-          if (fetched?.original) {
-            hit.originalRetrieved = true;
-            hit.original = fetched.original;
-          } else {
-            hit.originalRetrieved = false;
-            // 兜底：返回向量文档作为原文，并提示无原文（REQ 原文不可用降级）
-            hit.original = r.content;
-            hit.originalHint = fetched?.hint ?? '原文不可用：已降级返回向量文档';
+      if (includeOriginal || isFullText) {
+        const originalGroup = meta?.group ?? hit.group;
+        const originalRelation = meta?.relation ?? hit.relation;
+        const fetched = originalGroup && originalRelation && hitScope
+          ? fetchOriginal(hitScope, originalGroup, originalRelation)
+          : null;
+        if (fetched?.original) {
+          hit.originalRetrieved = true;
+          if (includeOriginal) hit.original = fetched.original;
+          if (isFullText) {
+            const locator: FtsLocator | undefined = meta?.ftsLocator;
+            const matches = locateOriginalMatches(fetched.original, params.query, {
+              fallbackText: r.content,
+              ...(locator ? { range: locator } : {}),
+            });
+            hit.matches = matches;
+            hit.totalLines = totalOriginalLines(fetched.original);
+            if (matches.length > 0) {
+              hit.originalExcerpt = matches.map((match) => match.excerpt).join('\n…\n');
+            } else {
+              hit.originalHint = '原文存在，但无法从当前查询/清洗 chunk 复核精确命中行；未伪造行号';
+            }
           }
         } else {
-          // relation 反查缺失：无 local KB 定位，无法取文件级原文 → 向量文档兜底
           hit.originalRetrieved = false;
-          hit.original = r.content;
-          hit.originalHint = '原文不可用：无法定位本地 KB 原文，已降级返回向量文档';
+          // fulltext 模式保留清洗 chunk 作为结果主体；includeOriginal 兼容旧行为也继续返回兜底内容。
+          if (includeOriginal) hit.original = r.content;
+          hit.originalHint = fetched?.hint ?? '原文不可用：无法定位 local KB 原文';
+          if (isFullText) hit.matches = [];
         }
       }
       return hit;
     });
 
+    // fulltext：按文档聚合 chunk/tag 命中。一个文档保留最高分，同时合并所有可复核的
+    // FTS ID 与原文命中行区间；最终 limit 在聚合后执行。
+    if (isFullText) {
+      const grouped = new Map<string, SearchHit>();
+      for (const hit of results) {
+        const key = hit.group && hit.relation
+          ? `${hit.scope ?? ''}|${hit.group}|${hit.relation}`
+          : `${hit.scope ?? ''}|${hit.indexType ?? 'unknown'}|${hit.ftsId ?? hit.memoryId}`;
+        const previous = grouped.get(key);
+        if (!previous) {
+          grouped.set(key, hit);
+          continue;
+        }
+        const previousScore = previous.score ?? 0;
+        const currentScore = hit.score ?? 0;
+        if (currentScore > previousScore) {
+          hit.ftsIds = [...new Set([...(previous.ftsIds ?? []), ...(hit.ftsIds ?? [])])];
+          hit.matches = mergeOriginalMatches(previous.matches, hit.matches);
+          hit.originalExcerpt = buildOriginalExcerpt(hit.matches);
+          if (previous.original && !hit.original) hit.original = previous.original;
+          if (previous.originalRetrieved && !hit.originalRetrieved) hit.originalRetrieved = true;
+          if (!hit.totalLines) hit.totalLines = previous.totalLines;
+          hit.deduplicated = true;
+          grouped.set(key, hit);
+        } else {
+          previous.ftsIds = [...new Set([...(previous.ftsIds ?? []), ...(hit.ftsIds ?? [])])];
+          previous.matches = mergeOriginalMatches(previous.matches, hit.matches);
+          previous.originalExcerpt = buildOriginalExcerpt(previous.matches);
+          previous.deduplicated = true;
+          if (!previous.original && hit.original) previous.original = hit.original;
+          if (hit.originalRetrieved) previous.originalRetrieved = true;
+          if (!previous.totalLines) previous.totalLines = hit.totalLines;
+        }
+      }
+      results.length = 0;
+      results.push(...grouped.values());
+      results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+      results.splice(params.limit ?? 10);
+    }
+
     // Multi-tag 去重：同一 (scope, group, relation) 因多 tag 写入产生多条向量命中 → 保留 score 最高的一条。
     // 多 scope 时 key 含 scope：不同 scope 的同名文档是不同知识，不得互相去重。
     //（sync-relation 为每个自定义 tag 各写一个 content 向量，搜索时同一文档会重复返回）
-    {
+    if (!isFullText) {
       const best = new Map<string, SearchHit>();
       for (const hit of results) {
         const key = hit.group && hit.relation ? `${hit.scope ?? ''}|${hit.group}|${hit.relation}` : '';
@@ -298,8 +402,8 @@ async function executeSearchLocal(params: {
       }
     }
     
-    // REQ-09：同一文件多 chunk 命中去重（保留首个命中，其余 original 置空避免重复返回）
-    if (includeOriginal) {
+    // 非全文模式保持原有 include_original 的完整原文去重行为；全文模式已在上方聚合。
+    if (includeOriginal && !isFullText) {
       const seen = new Set<string>();
       for (const hit of results) {
         const key = hit.group && hit.relation ? `${hit.scope ?? ''}/${hit.group}/${hit.relation}` : '';
@@ -321,8 +425,8 @@ async function executeSearchLocal(params: {
       ? { degraded: true, degradedReason: degradeReason }
       : {};
     return multi
-      ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
-      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
+      ? { ok: true, scope: scopes[0], scopes, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
+      : { ok: true, scope: scopes[0], results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

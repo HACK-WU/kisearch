@@ -1,7 +1,7 @@
 /**
- * relation-map.ts —— memoryId → { group, relation } 反查映射（带 TTL 缓存）
+ * relation-map.ts —— dense memoryId / FTS ID → { group, relation } 反查映射（带 TTL 缓存）
  *
- * 用途：ki search 命中向量层结果后，按 memoryId 反查 relations-cache.json，
+ * 用途：ki search 命中索引层结果后，按 dense memoryId 或 FTS ID 反查 relations-cache.json，
  * 给每条结果附加所属 Group、文件级 relation 名（方案 D：原文经 original 字段召回，此处仅定位）。
  * 批次 3（REQ-05/09）：keywords 与 isFullText 字段已删除。
  *
@@ -19,14 +19,19 @@
 import fs from 'node:fs';
 import { getRelationsCachePath } from './scope.js';
 import type { Relation } from './scoring.js';
+import type { FtsLocator } from './original-locator.js';
 
 export interface RelationMapEntry {
   /** 所属 Group 路径 */
   group: string;
   /** 文件级 relation 名（relations-cache 的 hot_relation.text，文件名去扩展名） */
   relation: string;
+  /** local KB/导入源的相对文件路径；旧 sync-relation 资产可能没有。 */
+  sourcePath?: string;
   /** 文档级自定义标签（来自 relation.tags，缺省/空数组无自定义 tag） */
   tags?: string[];
+  /** FTS-only 命中对应的原文 chunk 行范围（历史数据可能没有）。 */
+  ftsLocator?: FtsLocator;
 }
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
@@ -42,7 +47,7 @@ interface ScopeCacheEntry {
 const cache = new Map<string, ScopeCacheEntry>();
 
 /**
- * 获取指定 scope 的 memoryId 反查映射。
+ * 获取指定 scope 的索引 ID 反查映射。
  *
  * @param scope 项目隔离标识
  * @param ttlMs 缓存有效期（默认 10 分钟；测试可注入小值验证过期重建）
@@ -91,20 +96,30 @@ function buildRelationMap(cachePath: string): Map<string, RelationMapEntry> {
       const hot = gd?.hot_relations || [];
       for (const rel of hot) {
         if (!rel) continue;
+        const baseEntry = {
+          group,
+          relation: rel.text,
+          ...(rel.sourcePath ? { sourcePath: rel.sourcePath } : {}),
+          ...(rel.tags?.length ? { tags: rel.tags } : {}),
+        };
         // 方案 D：优先多值 memoryIds（文件级 relation 全部 chunk memoryId → 同一文件级 relation）
         if (Array.isArray(rel.memoryIds) && rel.memoryIds.length > 0) {
           for (const mid of rel.memoryIds) {
-            if (mid && !map.has(mid)) {
-              map.set(mid, rel.tags?.length ? { group, relation: rel.text, tags: rel.tags } : { group, relation: rel.text });
-            }
+            if (mid && !map.has(mid)) map.set(mid, baseEntry);
           }
-          continue;
+        } else if (rel.memoryId) {
+          // 回退旧数据：单值 memoryId
+          map.set(rel.memoryId, baseEntry);
         }
-        // 回退旧数据：单值 memoryId
-        if (rel.memoryId) {
-          map.set(rel.memoryId, rel.tags?.length
-            ? { group, relation: rel.text, tags: rel.tags }
-            : { group, relation: rel.text });
+
+        // FTS-only 关系独立于 dense memoryIds，必须始终建立第二套反查映射。
+        const locatorById = new Map((rel.ftsLocators ?? []).map((locator) => [locator.ftsId, locator]));
+        for (const ftsId of rel.ftsIds ?? []) {
+          if (!ftsId || map.has(ftsId)) continue;
+          map.set(ftsId, {
+            ...baseEntry,
+            ...(locatorById.has(ftsId) ? { ftsLocator: locatorById.get(ftsId) } : {}),
+          });
         }
       }
     }

@@ -413,6 +413,49 @@ describe('sync-relation relation 名安全校验', () => {
 // ─── executeBulkSyncRelation 纯函数测试（非向量化模式，离线可测） ───
 
 describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
+  it('从已有 dense relation 切换到 FTS-only 时清理旧 dense ID', async () => {
+    const switchScope = `switch-novec-${Date.now()}`;
+    const { initScope, readJson, writeJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath, getKbDir } = await import('../src/lib/scope.js');
+
+    try {
+      registerTestScope(switchScope);
+      initScope(switchScope);
+      const cachePath = getRelationsCachePath(switchScope);
+      const cache = readJson<any>(cachePath)!;
+      cache.groups['项目根/切换'] = {
+        hot_relations: [{
+          id: 'rel_dense',
+          text: '切换文档',
+          score: 0,
+          useCount: 0,
+          lastUsedTime: null,
+          isImported: true,
+          memoryId: 'stale-dense-id',
+          memoryIds: ['stale-dense-id'],
+        }],
+      };
+      writeJson(cachePath, cache);
+
+      const { executeBulkSyncRelation } = await import('../src/sync-relation.js');
+      const result = await executeBulkSyncRelation({
+        scope: switchScope,
+        vector: false,
+        items: [{ group: '项目根/切换', relation: '切换文档', module_info: '# FTS-only 文档\n\n正文' }],
+      });
+      assert.equal(result.ok, true);
+
+      const updated = readJson<any>(cachePath)!;
+      const rel = updated.groups['项目根/切换'].hot_relations.find((item: any) => item.text === '切换文档');
+      assert.ok(rel?.ftsIds?.length > 0);
+      assert.equal(rel.memoryId, undefined);
+      assert.equal(rel.memoryIds, undefined);
+    } finally {
+      const kbDir = getKbDir(switchScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
   it('批量写入多条 Relation 到 cache + 本地 KB（一次落盘）', async () => {
     const bulkScope = `bulk-novec-${Date.now()}`;
     const { initScope, readJson } = await import('../src/lib/store.js');
