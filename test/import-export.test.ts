@@ -11,6 +11,7 @@ import { registerTestScope, cleanupTestConfig } from './test-config.js';
 process.env.KI_DAEMON_OWNER = '1';
 const { handleDirectImport } = await import('../src/lib/import.js');
 const { handleExport } = await import('../src/export.js');
+const { closeFtsEngine } = await import('../src/lib/fts-client.js');
 
 const workspaceTemp = path.resolve(process.cwd(), 'temp');
 
@@ -22,7 +23,8 @@ function mkSource(): string {
 }
 
 describe('import → export 同名后缀消费链路', () => {
-  after(() => {
+  after(async () => {
+    await closeFtsEngine();
     cleanupTestConfig();
   });
 

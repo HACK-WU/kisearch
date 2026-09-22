@@ -839,12 +839,15 @@ export function extractSearchQueryArgs(messages: unknown[]): { query: string; ra
     if (!message || typeof message !== 'object') continue;
     const m = message as {
       method?: unknown;
-      params?: { name?: unknown; arguments?: { query?: unknown; scope?: unknown; timeout?: unknown } };
+      params?: { name?: unknown; arguments?: { query?: unknown; scope?: unknown; timeout?: unknown; mode?: unknown } };
     };
     if (m.method !== 'tools/call' || m.params?.name !== 'ki_search') continue;
     const args = m.params.arguments;
     const query = typeof args?.query === 'string' ? args.query : '';
     if (query.length === 0) continue;
+    // fulltext 分支明确要求不向量化查询；预计算层必须与工具层保持同一语义，
+    // 否则即使 executeSearch 走 FTS-only，HTTP 入口仍会提前调用 embedding。
+    if (args?.mode === 'fulltext') continue;
     out.push({
       query,
       rawScope: typeof args?.scope === 'string' ? args.scope.trim() : '',

@@ -46,6 +46,8 @@ export interface DocItem {
    * undefined = 后端未提供该字段（旧版 daemon），同样不渲染标签。
    */
   vectorized?: boolean;
+  /** 是否登记了独立 FTS-only 索引（通常对应 --no-vector 导入）。 */
+  fullTextIndexed?: boolean;
 }
 
 export interface DocListResponse {

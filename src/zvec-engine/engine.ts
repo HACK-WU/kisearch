@@ -69,7 +69,7 @@ const EMBED_BATCH_SIZE = 64;
 
 export class ZvecEngine {
   private readonly proxy: ZvecEngineProxy;
-  private readonly embedding: EmbeddingProvider;
+  private readonly embedding?: EmbeddingProvider;
   private readonly dbPath: string;
   private schema: PersistedSchema;
   private routerCtx: RouterContext;
@@ -78,7 +78,7 @@ export class ZvecEngine {
 
   private constructor(
     proxy: ZvecEngineProxy,
-    embedding: EmbeddingProvider,
+    embedding: EmbeddingProvider | undefined,
     dbPath: string,
     schema: PersistedSchema,
   ) {
@@ -207,8 +207,8 @@ export class ZvecEngine {
     return {
       name: info.name,
       dimension: info.dimension,
-      metric: info.metric as 'COSINE',
-      denseDataType: info.denseDataType as 'FP32' | 'FP16',
+      ...(info.metric ? { metric: info.metric as 'COSINE' } : {}),
+      ...(info.denseDataType ? { denseDataType: info.denseDataType as 'FP32' | 'FP16' } : {}),
       docCount: info.docCount,
       scalarFields: info.scalarFields,
       fts: info.fts,
@@ -251,12 +251,12 @@ export class ZvecEngine {
   }
 
   async update(docs: DocInput[], options?: ZvecWriteOptions): Promise<WriteResult> {
-    // Z-03 / v6 契约：zvec updateSync 要求 dense vector 必填；
-    // "仅传 fields 只改标量"在 zvec 0.6.0 下不可实现，须提供 vector 或 text（重嵌）。
+    // Z-03 / v6 契约：更新必须提供 text（FTS-only）或 vector/text（hybrid）；
+    // scalar-only update 无法保证索引同步。
     for (const d of docs) {
       if (d.vector === undefined && d.text === undefined) {
         throw new InconsistentUpdateError(
-          `update doc "${d.id}": dense vector is required (provide vector or text to re-embed; scalar-only update is not supported by zvec)`,
+          `update doc "${d.id}": dense vector or text is required (provide text, or vector for hybrid collection; scalar-only update is not supported)`,
           { data: { id: d.id } },
         );
       }
@@ -342,7 +342,7 @@ export class ZvecEngine {
     const needsEmbed: DocInput[] = [];
     const noEmbed: DocInput[] = [];
     for (const d of docs) {
-      if (d.text !== undefined && d.vector === undefined) {
+      if (d.text !== undefined && d.vector === undefined && this.schema.denseField && this.embedding) {
         needsEmbed.push(d);
       } else {
         noEmbed.push(d);
@@ -378,6 +378,7 @@ export class ZvecEngine {
       const uniqueTexts = order;
       try {
         // 传 batchSize 使 provider 不再二次细分，令失败粒度恰好等于本批
+        if (!this.embedding) throw new InvalidDocInputError('embedding provider is required for vectorized writes');
         const vectors = await this.embedding.embed(uniqueTexts, { batchSize: EMBED_BATCH_SIZE });
         const vectorByText = new Map<string, number[]>();
         for (let i = 0; i < vectors.length; i++) {
@@ -414,8 +415,14 @@ export class ZvecEngine {
         });
         continue;
       }
-      // 校验：vector 维度
-      if (vector !== undefined && vector.length !== this.schema.dimension) {
+      // 校验：FTS-only collection 不接受 dense vector；hybrid collection 校验维度。
+      if (vector !== undefined && this.schema.dimension === undefined) {
+        throw new InvalidDocInputError(
+          `doc "${d.id}" provides a vector but collection has no dense vector field`,
+          { data: { id: d.id } },
+        );
+      }
+      if (vector !== undefined && this.schema.dimension !== undefined && vector.length !== this.schema.dimension) {
         throw new DimensionMismatchError(
           `doc "${d.id}" vector dimension ${vector.length} !== collection dimension ${this.schema.dimension}`,
           { data: { id: d.id, expected: this.schema.dimension, actual: vector.length } },
@@ -485,7 +492,13 @@ export class ZvecEngine {
       if (mode !== 'update' && vector === undefined && doc.text === undefined) {
         throw new InvalidDocInputError(`doc "${doc.id}" must provide at least one of text/vector`);
       }
-      if (vector !== undefined && vector.length !== this.schema.dimension) {
+      if (vector !== undefined && this.schema.dimension === undefined) {
+        throw new InvalidDocInputError(
+          `doc "${doc.id}" provides a vector but collection has no dense vector field`,
+          { data: { id: doc.id } },
+        );
+      }
+      if (vector !== undefined && this.schema.dimension !== undefined && vector.length !== this.schema.dimension) {
         throw new DimensionMismatchError(
           `doc "${doc.id}" vector dimension ${vector.length} !== collection dimension ${this.schema.dimension}`,
           { data: { id: doc.id, expected: this.schema.dimension, actual: vector.length } },
@@ -607,6 +620,7 @@ export class ZvecEngine {
 
     const scheduler = options.scheduler;
     if (!scheduler) throw new Error('内部错误：调度器未提供');
+    if (!this.embedding) throw new InvalidDocInputError('embedding provider is required for vectorized writes');
     const scheduleOutcome = await scheduler.schedule(this.embedding, needsEmbed, {
       getText: (doc) => doc.text!,
       getDocId: (doc) => doc.id,
@@ -677,6 +691,9 @@ export class ZvecEngine {
 
     // 需要 embed 的：主线程 embed → Float32Array
     if (routed.needsEmbed && routed.embedTexts) {
+      if (!this.embedding) {
+        throw new InvalidSchemaError('query embedding is unavailable for this collection');
+      }
       const vectors = await this.embedding.embed(routed.embedTexts);
       const vector = Float32Array.from(vectors[0]);
       if (routed.kind === 'query') {

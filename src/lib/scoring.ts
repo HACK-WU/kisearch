@@ -32,6 +32,8 @@ export interface Relation {
   /** 方案 D（REQ-20260807-001）新增：文件级 relation 的全部 chunk memoryId（多值）；
    *  导入链路使用多值；sync-relation 等旧链路仍用单值 memoryId */
   memoryIds?: string[];
+  /** FTS-only Collection 中对应的文档 ID；仅 --no-vector / fulltext 写入链路使用。 */
+  ftsIds?: string[];
   /** 文档级自定义标签（如 ['api', 'auth']）。持久化到 KB 层，供 rebuild-vector/restore 恢复 tag 向量。
    *  缺省 undefined 或 [] 表示无自定义 tag（仅有默认的 ki-search）。 */
   tags?: string[];

@@ -34,6 +34,7 @@ import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, cl
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { closeFtsEngine, ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './lib/fts-client.js';
 
 // 向后兼容 re-export：parseContentTags 已统一提取到 lib/constants.js，
 // 保留本模块导出供既有测试/外部依赖引用。
@@ -320,8 +321,8 @@ function syncBatch(
     results,
     total: items.length,
     failed,
-    // 非向量化模式透出：批量模式当前不做向量写入；--no-vector 时明确标注（供调用方感知）
-    ...(vector === false ? { vector: false, vectorNote: '非向量化模式（--no-vector），仅写 KB 层' } : {}),
+    // --no-vector 改写 FTS-only Collection，不调用 embedding；仍保留 vector=false 供旧调用方识别。
+    ...(vector === false ? { vector: false, vectorNote: 'FTS-only 模式（--no-vector），不写 dense 向量，支持全文检索' } : {}),
   });
 }
 
@@ -332,7 +333,7 @@ export interface SyncRelationParams {
   group: string;
   relation: string;
   moduleInfo: string;
-  /** 是否写入向量层（ki-search / ki-relation）。false = 非向量化（仅 KB 层，不产生 memoryId） */
+  /** 是否写入向量层（ki-search / ki-relation）。false = 不写 dense，改写入 FTS-only Collection。 */
   vector?: boolean;
   /** 文档内容的自定义标签（逗号分隔多个）。ki-search 始终默认写入；自定义 tags 额外各写一条内容向量 */
   tags?: string;
@@ -355,6 +356,8 @@ export interface BulkSyncResultItem {
   evicted: string | null;
   vectorStored?: boolean;
   vectorReason?: string;
+  fullTextStored?: boolean;
+  fullTextReason?: string;
   wikiSynced?: boolean;
   wikiFile?: string;
   wikiReason?: string;
@@ -374,10 +377,48 @@ export type BulkSyncRelationResult =
       skipped: number;
       results: BulkSyncResultItem[];
       vectorStored: boolean;
+      fullTextStored?: boolean;
       /** Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），按出现顺序收集 */
       hints?: string[];
     }
   | { ok: false; error: string };
+
+/**
+ * 写入独立 FTS-only Collection。该路径不创建 embedding provider，也不触碰
+ * hybrid collection；只有整条内容完整写入后才清理旧 FTS ID。
+ */
+async function fullTextWriteBack(params: {
+  scope: string;
+  group: string;
+  relation: string;
+  moduleInfo: string;
+  tags?: string;
+  previousIds?: string[];
+}): Promise<{ stored: boolean; ids: string[]; reason?: string }> {
+  const customTags = parseContentTags(params.tags);
+  const entries = [
+    { text: params.moduleInfo, scope: params.scope, group: params.group, relation: params.relation, tag: 'ki-search' },
+    ...customTags.map((tag) => ({ text: params.moduleInfo, scope: params.scope, group: params.group, relation: params.relation, tag })),
+  ];
+  try {
+    const result = await ftsBulkStore(entries);
+    const stored = new Set(result.ids);
+    const newIds = entries.map((entry) => getFtsDocId(entry)).filter((id) => stored.has(id));
+    const complete = newIds.length === entries.length;
+    const retainedIds = [...new Set(complete ? newIds : [...(params.previousIds ?? []), ...newIds])];
+    if (complete) {
+      const staleIds = (params.previousIds ?? []).filter((id) => !newIds.includes(id));
+      if (staleIds.length > 0) {
+        const deleted = await ftsDeleteByIds({ scope: params.scope, ids: staleIds });
+        if (deleted.failed > 0) return { stored: true, ids: retainedIds, reason: `旧全文索引清理失败 ${deleted.failed} 条` };
+      }
+    }
+    if (!complete) return { stored: false, ids: retainedIds, reason: `全文索引部分写入成功（${newIds.length}/${entries.length}）` };
+    return { stored: true, ids: retainedIds };
+  } catch (err) {
+    return { stored: false, ids: [...(params.previousIds ?? [])], reason: `全文索引写入失败：${(err as Error).message}` };
+  }
+}
 
 /**
  * 批量同步 Relation（向量化模式）：一次 embedding HTTP + 一次 worker upsert，
@@ -390,7 +431,7 @@ export type BulkSyncRelationResult =
  *   4. 一次 writeJson 落盘 cache
  *   5. 各自 wiki 写回（文件路径不同，天然无冲突）
  *
- * 非向量化模式（vector=false）：跳过步骤 2-3，仅 KB 层（与单条 --no-vector 一致）。
+ * FTS-only 模式（vector=false）：跳过 embedding，步骤 2-3 改写独立全文 Collection。
  */
 async function executeBulkSyncRelationLocal(params: {
   scope?: string;
@@ -438,6 +479,7 @@ async function executeBulkSyncRelationLocal(params: {
 
     // 记录每条 item 的 customTags（用于回写 relRec.tags 和透出 contentTags）
     const itemCustomTags: string[][] = [];
+    const itemPriorFtsIds: string[][] = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -507,6 +549,7 @@ async function executeBulkSyncRelationLocal(params: {
           if (resolved.hint) hints.push(resolved.hint);
         }
 
+        itemPriorFtsIds[i] = [...(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
 
         // 文档级自定义 tag 持久化到 KB 层（与单条模式一致）
@@ -538,7 +581,7 @@ async function executeBulkSyncRelationLocal(params: {
           group: resolvedGroup,
           relation,
           evicted: result.evicted,
-          contentTags: vector ? ['ki-search', ...customTags] : [],
+          contentTags: ['ki-search', ...customTags],
         });
       } catch (err) {
         // 单条 syncSingleRelation 异常不中断整个批量（对齐 syncBatch 的容错策略）
@@ -732,6 +775,27 @@ async function executeBulkSyncRelationLocal(params: {
       }
     }
 
+    let fullTextStored = false;
+    if (!vector) {
+      const activeResults = results.filter((item) => !item.skipped);
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].skipped) continue;
+        const fullText = await fullTextWriteBack({
+          scope,
+          group: results[i].group,
+          relation: results[i].relation,
+          moduleInfo: items[i].module_info,
+          tags: items[i].tags,
+          previousIds: itemPriorFtsIds[i],
+        });
+        const rel = cache.groups[results[i].group]?.hot_relations.find((r) => r.text === results[i].relation);
+        if (rel) rel.ftsIds = fullText.ids;
+        results[i].fullTextStored = fullText.stored;
+        if (fullText.reason) results[i].fullTextReason = fullText.reason;
+      }
+      fullTextStored = activeResults.length > 0 && activeResults.every((_, i) => results.filter((item) => !item.skipped)[i]?.fullTextStored === true);
+    }
+
     // ─── 阶段 4：一次 writeJson 落盘 cache ───
     writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
@@ -758,6 +822,7 @@ async function executeBulkSyncRelationLocal(params: {
     const skippedCount = results.filter((r) => r.skipped).length;
     const succeeded = results.length - skippedCount;
 
+    if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
     return {
       ok: true,
       scope,
@@ -767,6 +832,7 @@ async function executeBulkSyncRelationLocal(params: {
       skipped: skippedCount,
       results,
       vectorStored,
+      ...(vector ? {} : { fullTextStored }),
       ...(hints.length > 0 ? { hints } : {}),
     };
   } catch (err) {
@@ -785,7 +851,7 @@ export async function executeBulkSyncRelation(params: {
 }
 
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
@@ -934,6 +1000,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       }
     }
 
+    const previousFtsIds = [...(cache.groups[group]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
     const result = syncSingleRelation(cache, scope, group, relation, moduleInfo);
 
     // 文档级自定义 tag 持久化到 KB 层（relation.tags）：
@@ -947,7 +1014,19 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       else delete relRec.tags; // 无 tag 时移除字段（避免残留）
     }
 
-    // WAL 持久化
+    const fts = params.vector === false
+      ? await fullTextWriteBack({
+          scope,
+          group,
+          relation,
+          moduleInfo,
+          tags: params.tags,
+          previousIds: previousFtsIds,
+        })
+      : undefined;
+    if (fts && relRec) relRec.ftsIds = fts.ids;
+
+    // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘。
     writeJson(cachePath, cache as unknown as Record<string, unknown>);
 
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
@@ -955,7 +1034,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     // 但把写入结果透出到返回值（vectorStored/vectorReason），避免部分写入被静默吞掉。
     // 非向量化模式（vector=false）：跳过 embed 与 memoryId 回写，仅 KB 层。
     const vec = params.vector === false
-      ? { stored: false, reason: '非向量化模式（--no-vector），跳过向量写入，无 memoryId' }
+      ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
       : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath, tags: params.tags });
 
     // Wiki 写回（容错，失败不阻塞）
@@ -974,10 +1053,10 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       wikiSynced = false;
     }
 
-    // 透出实际写入的内容标签：向量化时始终为「ki-search + 自定义 tags」；
-    // 非向量化时透出 []（空数组语义 = 未写向量，无内容标签）。
-    const contentTags = params.vector === false ? [] : ['ki-search', ...customTags];
+    // 透出实际写入的内容标签：两种模式都写入 ki-search；差别仅在底层索引类型。
+    const contentTags = ['ki-search', ...customTags];
 
+    if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
     return {
       ok: true,
       scope,
@@ -987,6 +1066,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       vectorStored: vec.stored,
       contentTags,
       ...(vec.reason ? { vectorReason: vec.reason } : {}),
+      ...(fts ? { fullTextStored: fts.stored, ...(fts.reason ? { fullTextReason: fts.reason } : {}) } : {}),
       ...(wikiSynced !== undefined ? { wikiSynced } : {}),
       ...(wikiFile ? { wikiFile } : {}),
       ...(wikiReason ? { wikiReason } : {}),
@@ -1015,7 +1095,7 @@ program
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')
   .option('--tags <tags>', '文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 api,auth）')
-  .option('--no-vector', '非向量化模式：仅写 KB 层（relations-cache + local KB + Wiki），不写向量（不产生 memoryId，无法被 ki search 召回）')
+  .option('--no-vector', 'FTS-only 模式：不调用 embedding，不写 dense 向量；写入独立全文 Collection，可被 fulltext 检索')
   .action(async (opts) => {
     // REQ-10：超长 module-info（>1000 字符）输出警告，不自动切分（保持单条关系语义）
     if (opts.moduleInfo && opts.moduleInfo.length > 1000) {

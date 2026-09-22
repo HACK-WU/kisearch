@@ -34,6 +34,7 @@ import {
 } from './vector-client.js';
 import { logInfo, logProgress, logWarn } from './progress.js';
 import { parseContentTags } from './constants.js';
+import { ftsDeleteByIds } from './fts-client.js';
 
 /** 向量化分批大小（与 import 链路 bulkVectorize 对齐：批间输出进度，避免单次 upsert 无中间态） */
 const VECTORIZE_BATCH_SIZE = 200;
@@ -655,6 +656,22 @@ export async function rebuildScopeVectors(
 
   // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
   stats.updatedMemoryId = updateMemoryIds(groups, allEntries, aggResults);
+  // FTS-only 文档若本次成功重建出 dense，清理旧全文索引并移除独立 ID，避免
+  // 同一 relation 同时出现在两套索引中。部分向量化失败时保留 ftsIds，保证全文可用。
+  for (const [groupPath, group] of Object.entries(groups)) {
+    if (!isInGroupScope(groupPath, groupFilter)) continue;
+    for (const rel of group.hot_relations ?? []) {
+      const denseWritten = (rel.memoryIds?.length ?? 0) > 0 || !!rel.memoryId;
+      if (!denseWritten || !rel.ftsIds || rel.ftsIds.length === 0) continue;
+      try {
+        const deleted = await ftsDeleteByIds({ scope, ids: rel.ftsIds });
+        if (deleted.failed === 0) delete rel.ftsIds;
+        else errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: `旧 FTS-only 索引清理失败 ${deleted.failed} 条` });
+      } catch (err) {
+        errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: (err as Error).message });
+      }
+    }
+  }
   fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
   opts.onProgress?.({ phase: 'rebuild', done: allEntries.length, total: Math.max(allEntries.length, 1) });
   logInfo(`向量重建完成，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);

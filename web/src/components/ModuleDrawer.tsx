@@ -37,12 +37,94 @@ const ICON_SCROLL_BOTTOM = (
   </svg>
 );
 
+const DOC_HIGHLIGHT_CLASS = 'ki-doc-highlight';
+const DOC_HIGHLIGHT_ACTIVE_CLASS = 'ki-doc-highlight--active';
+
+function escapeHighlightRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 与全文列表高亮保持一致：下划线/标点是 FTS 常见词边界，中文连续文本保留为整体。 */
+function splitHighlightTerms(query: string): string[] {
+  return query.trim().split(/[\s_.,，。:：;；!?！？()[\]{}-]+/).filter(Boolean);
+}
+
+function buildHighlightPattern(query: string): RegExp | null {
+  const terms = splitHighlightTerms(query)
+    .sort((a, b) => b.length - a.length)
+    .map(escapeHighlightRegExp);
+  return terms.length > 0 ? new RegExp(`(${terms.join('|')})`, 'gi') : null;
+}
+
+function clearDocumentHighlights(root: HTMLElement): void {
+  for (const mark of Array.from(root.querySelectorAll<HTMLElement>(`mark.${DOC_HIGHLIGHT_CLASS}`))) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    mark.remove();
+  }
+}
+
+/** 在已安全渲染的 Markdown 文本节点上包裹 mark，不拼接原始 HTML。 */
+function applyDocumentHighlights(root: HTMLElement, query: string): number {
+  clearDocumentHighlights(root);
+  const pattern = buildHighlightPattern(query);
+  if (!pattern) return 0;
+
+  const textNodes: Text[] = [];
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const text = node as Text;
+    const parent = text.parentElement;
+    if (text.nodeValue && parent && !parent.closest('script,style,svg')) textNodes.push(text);
+    node = walker.nextNode();
+  }
+
+  let count = 0;
+  for (const textNode of textNodes) {
+    const value = textNode.nodeValue ?? '';
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let lastIndex = 0;
+    let matched = false;
+    const fragment = root.ownerDocument.createDocumentFragment();
+    while ((match = pattern.exec(value)) !== null) {
+      matched = true;
+      if (match.index > lastIndex) fragment.appendChild(root.ownerDocument.createTextNode(value.slice(lastIndex, match.index)));
+      const mark = root.ownerDocument.createElement('mark');
+      mark.className = DOC_HIGHLIGHT_CLASS;
+      mark.textContent = match[0];
+      fragment.appendChild(mark);
+      count += 1;
+      lastIndex = match.index + match[0].length;
+    }
+    if (!matched) continue;
+    if (lastIndex < value.length) fragment.appendChild(root.ownerDocument.createTextNode(value.slice(lastIndex)));
+    textNode.replaceWith(fragment);
+  }
+  return count;
+}
+
+function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: ScrollBehavior): void {
+  const marks = Array.from(body.querySelectorAll<HTMLElement>(`mark.${DOC_HIGHLIGHT_CLASS}`));
+  marks.forEach((mark, markIndex) => mark.classList.toggle(DOC_HIGHLIGHT_ACTIVE_CLASS, markIndex === index));
+  const target = marks[index];
+  if (!target) return;
+  const bodyRect = body.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const top = body.scrollTop + targetRect.top - bodyRect.top - (body.clientHeight - targetRect.height) / 2;
+  body.scrollTo({ top: Math.max(0, top), behavior });
+}
+
 interface ModuleDrawerProps {
   scope: string;
   module: string;
   /** Group 路径（fetcher 需要时传入） */
   group?: string;
   initialContent?: string;
+  /** 全文检索上下文；缺省时为普通阅读，不显示命中导航。 */
+  highlightQuery?: string;
   onClose: () => void;
   fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string }>;
   onLocalLink?: (href: string) => boolean;
@@ -62,6 +144,7 @@ export function ModuleDrawer({
   module,
   group,
   initialContent,
+  highlightQuery,
   onClose,
   fetcher,
   onLocalLink,
@@ -81,10 +164,20 @@ export function ModuleDrawer({
   const [copyFailed, setCopyFailed] = useState(false);
   const [internalFullscreen, setInternalFullscreen] = useState(false);
   const fullscreen = controlledFullscreen ?? internalFullscreen;
+  const [highlightEnabled, setHighlightEnabled] = useState(Boolean(highlightQuery?.trim()));
+  const [highlightCount, setHighlightCount] = useState(0);
+  const [highlightIndex, setHighlightIndex] = useState(0);
+  const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
   /** 正文滚动容器 */
   const bodyRef = useRef<HTMLDivElement>(null);
   /** 全屏切换前记下的阅读位置（正文容器会换父节点被重建，切换后按此恢复） */
   const savedScrollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setHighlightEnabled(Boolean(highlightQuery?.trim()));
+    setHighlightIndex(0);
+    highlightScrollBehavior.current = 'auto';
+  }, [highlightQuery]);
 
   const updateFullscreen = useCallback((next: boolean): void => {
     // 必须在切换前记录：重建后 ref 已指向新节点，读不到旧位置
@@ -111,6 +204,54 @@ export function ModuleDrawer({
     setError(null);
     setLoadAttempt((attempt) => attempt + 1);
   }, []);
+
+  /** 内容渲染后把全文上下文应用到 Markdown 文本节点，并自动定位首个命中。 */
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const body = bodyRef.current;
+      const root = body?.querySelector<HTMLElement>('.ki-markdown--drawer');
+      if (!body || !root) {
+        setHighlightCount(0);
+        return;
+      }
+      const count = highlightEnabled && highlightQuery?.trim()
+        ? applyDocumentHighlights(root, highlightQuery)
+        : (clearDocumentHighlights(root), 0);
+      setHighlightCount(count);
+      setHighlightIndex((current) => count === 0 ? 0 : Math.min(current, count - 1));
+      if (count > 0) {
+        window.requestAnimationFrame(() => {
+          focusDocumentHighlight(body, Math.min(highlightIndex, count - 1), highlightScrollBehavior.current);
+          highlightScrollBehavior.current = 'auto';
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [content, loading, fullscreen, highlightEnabled, highlightQuery]);
+
+  /** 当前命中变化时更新 active 状态并滚动到目标。 */
+  useEffect(() => {
+    if (!highlightEnabled || highlightCount === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      const body = bodyRef.current;
+      if (!body) return;
+      focusDocumentHighlight(body, highlightIndex, highlightScrollBehavior.current);
+      highlightScrollBehavior.current = 'auto';
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [highlightEnabled, highlightCount, highlightIndex, fullscreen]);
+
+  const cancelHighlights = useCallback((): void => {
+    highlightScrollBehavior.current = 'auto';
+    setHighlightEnabled(false);
+    setHighlightIndex(0);
+  }, []);
+
+  const focusNextHighlight = useCallback((): void => {
+    if (highlightCount === 0) return;
+    highlightScrollBehavior.current = 'smooth';
+    setHighlightIndex((current) => (current + 1) % highlightCount);
+  }, [highlightCount]);
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
@@ -296,6 +437,27 @@ export function ModuleDrawer({
               )}
             </div>
           </div>
+          {highlightEnabled && highlightCount > 0 && (
+            <div className="ki-drawer__highlight" role="group" aria-label="全文命中导航">
+              <span className="ki-drawer__highlight-count">{highlightIndex + 1}/{highlightCount}</span>
+              <button
+                className="ki-drawer__highlight-btn"
+                type="button"
+                onClick={cancelHighlights}
+                title="取消正文高亮"
+              >
+                取消高亮
+              </button>
+              <button
+                className="ki-drawer__highlight-btn"
+                type="button"
+                onClick={focusNextHighlight}
+                title="跳转到下一个命中"
+              >
+                下一个命中
+              </button>
+            </div>
+          )}
           <div className="ki-drawer__actions">
             {content && (
               <button

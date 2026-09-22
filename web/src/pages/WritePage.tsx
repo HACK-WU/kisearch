@@ -296,7 +296,7 @@ export function WritePage(): JSX.Element {
             <div className="ki-vec-switch" style={{ marginTop: 12 }}>
               <div className="ki-vec-switch__label">
                 <span className="ki-vec-switch__title">向量化</span>
-                <span className="ki-vec-switch__desc">写入向量库，可被语义搜索；关闭则仅写入 KB 文本</span>
+                <span className="ki-vec-switch__desc">写入 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
               </div>
               <div
                 className={`ki-switch${vector ? ' ki-switch--on' : ''}`}

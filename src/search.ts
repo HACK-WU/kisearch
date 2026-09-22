@@ -12,7 +12,7 @@
 import { Command } from 'commander';
 import { validateScope, parseScopes, getLocalKbDir } from './lib/scope.js';
 import { loadConfig, resolveScope, getScopeMode } from './lib/config.js';
-import { vectorSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections } from './lib/vector-client.js';
+import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
@@ -66,6 +66,8 @@ export type SearchResult =
       degraded?: boolean;
       /** O1：降级原因（供调用方与用户诊断） */
       degradedReason?: string;
+      /** 当前检索模式；缺省为 hybrid，fulltext 表示未调用 embedding。 */
+      mode?: 'hybrid' | 'fulltext';
     }
   | { ok: false; error: string; degraded?: boolean };
 
@@ -96,6 +98,7 @@ async function executeSearchLocal(params: {
   timeoutMs?: number;
   /** REQ-09：是否返回 local KB 文件级原文（默认 false；CLI --original / MCP include_original 显式开启） */
   includeOriginal?: boolean;
+  mode?: 'hybrid' | 'fulltext';
 }): Promise<SearchResult> {
   try {
     // scope 解析（支持逗号分隔多 scope）：去空格/去重/保序，逐个字符集校验（非法快速失败）
@@ -136,21 +139,26 @@ async function executeSearchLocal(params: {
       scopes = effective;
     }
 
-    // 向量服务可用性检测（以首个 scope 触发中断标记前置检测引导）
-    const avail = await ensureVectorAvailable(scopes[0]);
-    if (!avail.available) {
-      return {
-        ok: false,
-        error: `向量检索暂不可用（${avail.reason || '未检测到向量服务'}）`,
-        degraded: true,
-      };
+    const isFullText = params.mode === 'fulltext';
+
+    // 全文模式不依赖 embedding provider，也不要求 hybrid Collection 存在。
+    if (!isFullText) {
+      // 向量服务可用性检测（以首个 scope 触发中断标记前置检测引导）
+      const avail = await ensureVectorAvailable(scopes[0]);
+      if (!avail.available) {
+        return {
+          ok: false,
+          error: `向量检索暂不可用（${avail.reason || '未检测到向量服务'}）`,
+          degraded: true,
+        };
+      }
     }
 
     // Collection 缺失检测（REQ-11 降级标记）：vectorSearch 的 fan-out 会静默跳过
     // 「已解析为合法 scope、但 Collection 目录不存在或为空」的分片（避免查询意外
     // 创建新库）。不上报就是静默漏召回：存量未迁移或目录被外部删除都会表现为
     // “搜不到”且零可诊断信息，故在此显式记录并给出出路。
-    for (const missing of findMissingScopeCollections(scopes)) {
+    for (const missing of isFullText ? [] : findMissingScopeCollections(scopes)) {
       skipped.push({
         scope: missing,
         reason: '无向量 Collection（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入',
@@ -162,7 +170,14 @@ async function executeSearchLocal(params: {
     // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
     // 多 scope：各 Collection fan-out 后应用层合并，query vector 在 fan-out 前只生成一次。
     let raw: VectorSearchResult[];
-    if (params.tags) {
+    if (isFullText) {
+      raw = await fullTextSearch({
+        scopes,
+        query: params.query,
+        limit: params.limit ?? 10,
+        tags: params.tags,
+      });
+    } else if (params.tags) {
       raw = await vectorSearch({
         scopes,
         query: params.query,
@@ -306,8 +321,8 @@ async function executeSearchLocal(params: {
       ? { degraded: true, degradedReason: degradeReason }
       : {};
     return multi
-      ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}), ...degradeFields }
-      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}), ...degradeFields };
+      ? { ok: true, scope: scopes[0], scopes, results, ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
+      : { ok: true, scope: scopes[0], results, ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -322,6 +337,7 @@ export async function executeSearch(params: {
   /** 查询 embedding 超时（ms）；未传时使用配置中的默认值。 */
   timeoutMs?: number;
   includeOriginal?: boolean;
+  mode?: 'hybrid' | 'fulltext';
 }): Promise<SearchResult> {
   if (shouldUseDaemonClient()) {
     // CLI/stdio 通过 daemon 时也要使用调用方配置文件的默认值，不能因请求未显式
@@ -330,6 +346,7 @@ export async function executeSearch(params: {
     return callDaemon<SearchResult>('search', {
       ...params,
       timeoutMs: params.timeoutMs ?? config.embedding.queryTimeoutMs ?? DEFAULT_QUERY_EMBED_TIMEOUT_MS,
+      mode: params.mode,
     });
   }
   return executeSearchLocal(params);
@@ -351,6 +368,7 @@ program
   .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
   .option('--timeout <seconds>', '查询 embedding 超时（秒，范围 0.001-60；未传则使用配置值）')
   .option('--original', '返回 local KB 文件级原文（默认不返回，仅返回向量匹配数据，REQ-09）')
+  .option('--mode <mode>', '检索模式：hybrid 或 fulltext', 'hybrid')
   .action(async (query: string | undefined, opts) => {
     const finalQuery = query ?? opts.query;
     if (!finalQuery) {
@@ -376,6 +394,7 @@ program
       tags: opts.tags,
       timeoutMs,
       includeOriginal: opts.original === true,
+      mode: opts.mode === 'fulltext' ? 'fulltext' : 'hybrid',
     });
     console.log(JSON.stringify(result, null, 2));
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出

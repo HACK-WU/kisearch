@@ -29,6 +29,7 @@ import { vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from '
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { getSource } from './lib/scope.js';
+import { ftsDeleteByIds } from './lib/fts-client.js';
 
 // ─── 类型 ───
 
@@ -43,6 +44,7 @@ interface GroupData {
     memoryId?: string;
     /** 多值：文档内容向量（多 tag 各一）的全部 docId，供 delete 精确清理（与 scoring.ts Relation.memoryIds 一致） */
     memoryIds?: string[];
+    ftsIds?: string[];
   }>;
   keywords: string[];
 }
@@ -65,6 +67,7 @@ interface DeleteResult {
   memRemoved: boolean;
   memMethod: 'memoryId' | 'search' | 'skip' | 'none';
   memMemoryId?: string;
+  fullTextRemoved: boolean;
   reason?: string;
 }
 
@@ -117,6 +120,7 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       wikiRemoved: false,
       memRemoved: false,
       memMethod: 'none',
+      fullTextRemoved: true,
     };
 
     // 1. 从 relations-cache.json 删除（若存在）
@@ -164,6 +168,12 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     if (memOutcome.reason) {
       result.reason = `${result.reason || ''} ${memOutcome.reason}`.trim();
     }
+    const ftsIds = rel?.ftsIds ?? [];
+    const ftsOutcome = await ftsDeleteByIds({ scope, ids: ftsIds });
+    result.fullTextRemoved = ftsOutcome.failed === 0;
+    if (ftsOutcome.failed > 0) {
+      result.reason = `${result.reason || ''} FTS-only 索引删除失败：${ftsOutcome.failed} 条`.trim();
+    }
 
     // 持久化 cache
     writeJson(cachePath, cache as unknown as Record<string, unknown>);
@@ -198,6 +208,8 @@ export interface DeleteGroupResult {
   nodeRemoved: boolean;
   /** 向量是否已清理（false = 存在残留孤儿向量，需 rebuild 或后续重删）；无向量可删时为 true */
   vectorRemoved: boolean;
+  /** FTS-only 文档是否已清理。 */
+  fullTextRemoved: boolean;
   reason?: string;
 }
 
@@ -249,6 +261,7 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       wikiMoved: false,
       nodeRemoved: false,
       vectorRemoved: true,
+      fullTextRemoved: true,
     };
 
     // 1. 删除该 group 下所有 relation 的向量（聚合 memoryIds）
@@ -268,6 +281,20 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       } catch (err) {
         result.vectorRemoved = false;
         result.reason = `向量删除失败: ${(err as Error).message}`;
+      }
+    }
+
+    const ftsIds = relations.flatMap((r) => r.ftsIds ?? []);
+    if (ftsIds.length > 0) {
+      try {
+        const fts = await ftsDeleteByIds({ scope, ids: ftsIds });
+        if (fts.failed > 0) {
+          result.fullTextRemoved = false;
+          result.reason = `${result.reason || ''} FTS-only 索引删除失败：${fts.failed} 条`.trim();
+        }
+      } catch (err) {
+        result.fullTextRemoved = false;
+        result.reason = `${result.reason || ''} FTS-only 索引删除失败: ${(err as Error).message}`.trim();
       }
     }
 

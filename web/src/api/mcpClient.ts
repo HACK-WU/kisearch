@@ -27,6 +27,8 @@ export interface SearchHit {
   original?: string;
   originalRetrieved?: boolean;
   deduplicated?: boolean;
+  content?: string;
+  memoryId?: string;
   /** 本条命中向量的 tag（多 tag 文档去重后只保留一条命中，此字段仅含其一） */
   tag?: string;
   /** 文档级自定义标签全量（来自 relations-cache relation.tags 反查） */
@@ -40,6 +42,7 @@ export interface SearchResult {
   degraded?: boolean;
   /** 降级原因，用于向用户解释分数口径变化 */
   degradedReason?: string;
+  mode?: 'hybrid' | 'fulltext';
   /** 被跳过的 scope（strict 未注册 / 无向量 Collection）——不展示即为静默漏召回 */
   skipped?: { scope: string; reason: string }[];
   [k: string]: unknown;
@@ -138,7 +141,7 @@ export async function kiScopeList(): Promise<ScopeListResponse> {
 
 export async function kiSearch(
   query: string,
-  opts: { scope?: string; tags?: string[]; threshold?: number; limit?: number; timeout?: number } = {},
+  opts: { scope?: string; tags?: string[]; threshold?: number; limit?: number; timeout?: number; mode?: 'hybrid' | 'fulltext' } = {},
 ): Promise<SearchResult> {
   return callTool<SearchResult>('ki_search', {
     query,
@@ -147,6 +150,7 @@ export async function kiSearch(
     ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
+    ...(opts.mode ? { mode: opts.mode } : {}),
     include_original: true,
   });
 }

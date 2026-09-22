@@ -37,26 +37,22 @@ const SCALAR_DATA_TYPE_MAP: Record<ScalarFieldDef['dataType'], ZVecDataType> = {
 
 export function buildCollectionSchema(config: ZvecEngineConfig): ZVecCollectionSchema {
   const { name, denseField, dimension, metric, denseDataType, scalarFields, fts } = config.collection;
-
-  const vectorDataType =
-    denseDataType === 'FP16' ? ZVecDataType.VECTOR_FP16 : ZVecDataType.VECTOR_FP32;
-
-  const hnswParams: ZVecHnswIndexParams = {
-    indexType: ZVecIndexType.HNSW,
-    metricType: metric === 'COSINE' ? ZVecMetricType.COSINE : ZVecMetricType.UNDEFINED,
-  };
-  if (hnswParams.metricType === ZVecMetricType.UNDEFINED) {
-    throw new InvalidSchemaError(`unsupported metric: ${metric} (only COSINE is supported)`);
+  const vectors: ZVecVectorSchema[] = [];
+  if (denseField !== undefined || dimension !== undefined || metric !== undefined) {
+    if (!denseField || typeof dimension !== 'number' || !Number.isInteger(dimension) || dimension <= 0 || !metric) {
+      throw new InvalidSchemaError('hybrid collection requires denseField, positive dimension and metric');
+    }
+    const denseDimension = dimension as number;
+    const vectorDataType = denseDataType === 'FP16' ? ZVecDataType.VECTOR_FP16 : ZVecDataType.VECTOR_FP32;
+    const hnswParams: ZVecHnswIndexParams = {
+      indexType: ZVecIndexType.HNSW,
+      metricType: metric === 'COSINE' ? ZVecMetricType.COSINE : ZVecMetricType.UNDEFINED,
+    };
+    if (hnswParams.metricType === ZVecMetricType.UNDEFINED) {
+      throw new InvalidSchemaError(`unsupported metric: ${metric} (only COSINE is supported)`);
+    }
+    vectors.push({ name: denseField, dataType: vectorDataType, dimension: denseDimension, indexParams: hnswParams });
   }
-
-  const vectors: ZVecVectorSchema[] = [
-    {
-      name: denseField,
-      dataType: vectorDataType,
-      dimension,
-      indexParams: hnswParams,
-    },
-  ];
 
   const fields: ZVecFieldSchema[] = scalarFields.map((sf) => {
     const isFtsField = fts !== undefined && fts.field === sf.name;
@@ -77,7 +73,7 @@ export function buildCollectionSchema(config: ZvecEngineConfig): ZVecCollectionS
     };
   });
 
-  return new ZVecCollectionSchema({ name, vectors, fields });
+  return new ZVecCollectionSchema({ name, ...(vectors.length > 0 ? { vectors } : {}), fields });
 }
 
 function buildFtsIndexParams(fts: FtsConfig): ZVecFtsIndexParams {

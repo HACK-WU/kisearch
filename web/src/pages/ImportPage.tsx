@@ -1049,7 +1049,7 @@ export function ImportPage(): JSX.Element {
           <div className="ki-vec-switch" style={{ marginTop: 12 }}>
             <div className="ki-vec-switch__label">
               <span className="ki-vec-switch__title">向量化</span>
-              <span className="ki-vec-switch__desc">生成向量写入 zvec 集合，可被语义搜索；关闭则仅写入 KB 文本</span>
+              <span className="ki-vec-switch__desc">生成 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
             </div>
             <div
               className={`ki-switch${vector ? ' ki-switch--on' : ''}`}

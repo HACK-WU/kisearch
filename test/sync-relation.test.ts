@@ -447,14 +447,16 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
         assert.strictEqual(result.failed, 0);
         assert.strictEqual(result.results.length, 2);
         assert.strictEqual(result.vectorStored, false);
-        // 非向量化时 contentTags 为空数组
-        assert.deepStrictEqual(result.results[0].contentTags, []);
+        // 非向量化时改写入 FTS-only Collection，仍有默认全文标签
+        assert.deepStrictEqual(result.results[0].contentTags, ['ki-search']);
+        assert.strictEqual(result.results[0].fullTextStored, true);
       }
 
       // 验证 cache 写入
       const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
       assert.ok(cache.groups['项目根/模块A']);
       assert.ok(cache.groups['项目根/模块B']);
+      assert.ok(cache.groups['项目根/模块A'].hot_relations[0].ftsIds?.length > 0, 'FTS-only relation 应登记 ftsIds');
 
       // 验证本地 KB 写入
       const kbA = readJson<any>(getLocalKbDir(bulkScope, '项目根/模块A'))!;
@@ -548,8 +550,9 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
 
       assert.strictEqual(result.ok, true);
       if (result.ok) {
-        // 非向量化时 contentTags 仍为空（因为没写向量）
-        assert.deepStrictEqual(result.results[0].contentTags, []);
+        // 非向量化时 contentTags 表示 FTS-only 的全文标签，不再为空
+        assert.deepStrictEqual(result.results[0].contentTags, ['ki-search', 'api', 'auth']);
+        assert.strictEqual(result.results[0].fullTextStored, true);
       }
 
       // tags 持久化到 cache
@@ -559,6 +562,7 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       );
       assert.ok(rel);
       assert.deepStrictEqual(rel.tags, ['api', 'auth']);
+      assert.ok(rel.ftsIds?.length > 0, '带标签 FTS-only relation 应登记全部 ftsIds');
     } finally {
       const kbDir = getKbDir(bulkScope);
       if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });

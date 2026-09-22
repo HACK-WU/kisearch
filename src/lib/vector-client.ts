@@ -39,6 +39,7 @@ import { interruptGuidance } from './interrupt.js';
 import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
 import { getPrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
+import { ftsSearch as ftsOnlySearch } from './fts-client.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -962,6 +963,64 @@ export async function vectorSearch(params: {
       || params.threshold === undefined
       || r.score >= params.threshold);
   return mergeVectorSearchHits([normalized], params.limit ?? 10);
+}
+
+/**
+ * 纯全文检索：不调用 embedding，只 fan-out 查询 hybrid Collection 的 FTS 索引
+ * 与独立的 FTS-only Collection。两类结果统一为 VectorSearchResult，供上层沿用
+ * Group/Relation/原文反查与去重逻辑。
+ */
+export async function fullTextSearch(params: {
+  scope?: string;
+  scopes?: string[];
+  query: string;
+  limit?: number;
+  tags?: string | string[];
+}): Promise<VectorSearchResult[]> {
+  const config = loadConfig();
+  const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
+  if (scopes.length === 0) throw new Error('scope 不能为空：至少传入一个 scope');
+  const limit = params.limit ?? 10;
+  const tagList = Array.isArray(params.tags)
+    ? params.tags
+    : params.tags
+      ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
+      : undefined;
+
+  const hybridScopes = scopes.filter((scope) => scopeCollectionExists(scope));
+  const hybridHits = await Promise.all(hybridScopes.map(async (scope) => {
+    const filter = buildScopeTagFilter([scope], tagList);
+    const hits = await withEngine(scope, (engine) => engine.ftsSearch({
+      match: params.query,
+      topk: limit,
+      filter,
+    }));
+    return hits.map((hit) => ({
+      memoryId: hit.id,
+      content: hit.text ?? String(hit.fields?.[FTS_FIELD] ?? ''),
+      score: hit.score,
+      tag: hit.fields?.[TAG_FIELD] !== undefined ? String(hit.fields[TAG_FIELD]) : undefined,
+      group: hit.fields?.[GROUP_FIELD] !== undefined ? String(hit.fields[GROUP_FIELD]) : undefined,
+      scope: hit.fields?.[SCOPE_FIELD] !== undefined ? String(hit.fields[SCOPE_FIELD]) : scope,
+    } satisfies VectorSearchResult));
+  }));
+
+  const ftsOnlyHits = await Promise.all(scopes.flatMap((scope) => {
+    const requestedTags = tagList && tagList.length > 0 ? tagList : [undefined];
+    return requestedTags.map(async (tag) => {
+      const hits = await ftsOnlySearch({ scope, query: params.query, limit, tag });
+      return hits.map((hit) => ({
+        memoryId: hit.ftsId,
+        content: hit.content,
+        score: hit.score,
+        tag: hit.tag,
+        group: hit.group,
+        scope: hit.scope ?? scope,
+      } satisfies VectorSearchResult));
+    });
+  }));
+
+  return mergeVectorSearchHits([...hybridHits, ...ftsOnlyHits], limit);
 }
 
 // ─── 存储（替代 memStore / memBulkStore） ───

@@ -11,7 +11,7 @@ import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
 import type { DocItem } from '@/api/httpApi';
-import { kiGetModuleInfo } from '@/api/mcpClient';
+import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { TagSelect } from '@/components/TagSelect';
@@ -60,6 +60,31 @@ const ICON_NAV_REFRESH = (
     <path d="M21 3v5h-5" />
   </svg>
 );
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function highlightMatch(text: string, query: string): JSX.Element {
+  const terms = query.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
+  if (terms.length === 0) return <>{text}</>;
+  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
+  return <>{text.split(pattern).map((part, index) =>
+    terms.some((term) => new RegExp(`^${term}$`, 'i').test(part))
+      ? <mark key={index} className="ki-search-hit-mark">{part}</mark>
+      : <Fragment key={index}>{part}</Fragment>
+  )}</>;
+}
+
+function makeSnippet(content: string, query: string, maxLength = 320): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  const firstTerm = query.trim().split(/\s+/).find(Boolean)?.toLowerCase() ?? '';
+  const index = firstTerm ? normalized.toLowerCase().indexOf(firstTerm) : -1;
+  const start = index > 80 ? index - 80 : 0;
+  const end = Math.min(normalized.length, start + maxLength);
+  return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
+}
 
 /** Group 树节点：按路径段递归聚合 */
 interface TreeNode {
@@ -244,6 +269,23 @@ export function BrowsePage(): JSX.Element {
   // 首次搜索没有可复用的旧结果时展示 loading；后续输入保留上一次结果，避免列表闪烁。
   const isSearchLoading = isSearching && !searchQuery.data && (searchPending || searchQuery.isLoading);
 
+  // 文档列表搜索之外，按同一关键词查询正文；结果独立展示，避免把“文件名命中”
+  // 与“正文命中”混成一个排序口径。仅使用 FTS-only/hybrid 的全文分支，不调用 embedding。
+  const fullTextQuery = useQuery<SearchResult>({
+    queryKey: ['fullTextSearch', scope, searchQ, selectedTag],
+    queryFn: () => kiSearch(searchQ, {
+      scope,
+      tags: selectedTag ? [selectedTag] : ['ki-search'],
+      limit: 20,
+      mode: 'fulltext',
+    }),
+    enabled: searchQ.length > 0,
+    staleTime: 10_000,
+    retry: 1,
+    placeholderData: (previousData) => previousData,
+  });
+  const fullTextHits = fullTextQuery.data?.results ?? [];
+
   // 展示列表：有搜索词时展示全局搜索结果，否则展示当前选中 group 文档
   const shownDocs = isSearching ? searchDocs : activeDocs;
   const shownTotal = isSearching ? (searchQuery.data?.total ?? shownDocs.length) : (groupQuery.data?.total ?? activeDocs.length);
@@ -326,7 +368,12 @@ export function BrowsePage(): JSX.Element {
     setForwardHistory([]);
     setActiveGroup(target.group);
     revealGroup(target.group);
-    setViewing({ module: target.name, group: target.group, path: target.path });
+    setViewing({
+      module: target.name,
+      group: target.group,
+      path: target.path,
+      highlightQuery: viewing?.highlightQuery,
+    });
     return true;
   }, [knownDocs, revealGroup, viewing]);
 
@@ -455,12 +502,12 @@ export function BrowsePage(): JSX.Element {
       />
       <input
         className="ki-form-input"
-        placeholder="按文件名或路径搜索…"
-        style={{ maxWidth: 220, flex: '1 1 200px' }}
+        placeholder="按文件名、路径或正文搜索…"
+        style={{ maxWidth: 250, flex: '1 1 220px' }}
         value={q}
         onChange={(e) => setQ(e.target.value)}
         data-ki-search-input
-        aria-label="按文件名或路径搜索文档"
+        aria-label="按文件名、路径或正文搜索文档"
       />
       <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
       {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
@@ -478,6 +525,44 @@ export function BrowsePage(): JSX.Element {
     const listLoading = isSearching ? isSearchLoading : isLoading || groupQuery.isLoading;
     return (
     <>
+      {isSearching && (
+        <div className="ki-browse-fulltext" aria-live="polite">
+          <div className="ki-browse-fulltext__head">
+            <span>正文命中</span>
+            <span className="ki-card__sub">
+              {fullTextQuery.isFetching ? '搜索中…' : `${fullTextHits.length} 条`}
+            </span>
+          </div>
+          {fullTextQuery.isError ? (
+            <div className="ki-browse-fulltext__empty">正文检索暂时失败，可重试或继续查看文件名命中。</div>
+          ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
+            <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
+          ) : (
+            fullTextHits.map((hit: SearchHit, index) => {
+              const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
+              const group = hit.group ?? known?.group ?? '';
+              const relation = hit.relation ?? known?.name ?? '';
+              return (
+                <button
+                  type="button"
+                  className="ki-browse-fulltext__item"
+                  key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
+                  onClick={() => {
+                    if (!relation || !group) return;
+                    openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ });
+                  }}
+                >
+                  <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
+                  <span className="ki-browse-fulltext__path">{group}</span>
+                  <span className="ki-browse-fulltext__snippet">
+                    {highlightMatch(makeSnippet(hit.original ?? hit.content ?? '', searchQ), searchQ)}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
       {listLoading ? (
         <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
       ) : listError ? (
@@ -507,11 +592,21 @@ export function BrowsePage(): JSX.Element {
               className="ki-doc-item"
               role="button"
               tabIndex={0}
-              onClick={() => openDocument({ module: d.name, group: d.group, path: d.path })}
+              onClick={() => openDocument({
+                module: d.name,
+                group: d.group,
+                path: d.path,
+                highlightQuery: isSearching ? searchQ : undefined,
+              })}
               onKeyDown={(e) => {
                 if (e.key !== 'Enter' && e.key !== ' ') return;
                 e.preventDefault();
-                openDocument({ module: d.name, group: d.group, path: d.path });
+                openDocument({
+                  module: d.name,
+                  group: d.group,
+                  path: d.path,
+                  highlightQuery: isSearching ? searchQ : undefined,
+                });
               }}
             >
               <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
@@ -525,6 +620,9 @@ export function BrowsePage(): JSX.Element {
                   ))}
                   {d.vectorized === true && (
                     <span className="ki-badge ki-badge--vec">RAG</span>
+                  )}
+                  {d.fullTextIndexed === true && (
+                    <span className="ki-badge ki-badge--fts">全文</span>
                   )}
                 </div>
               </div>
@@ -704,12 +802,12 @@ export function BrowsePage(): JSX.Element {
               />
               <input
                 className="ki-form-input"
-                placeholder="按文件名或路径搜索…"
-                style={{ maxWidth: 220, flex: '1 1 200px' }}
+                placeholder="按文件名、路径或正文搜索…"
+                style={{ maxWidth: 250, flex: '1 1 220px' }}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 data-ki-search-input
-                aria-label="按文件名或路径搜索文档"
+                aria-label="按文件名、路径或正文搜索文档"
               />
               <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
               {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
@@ -732,6 +830,7 @@ export function BrowsePage(): JSX.Element {
           scope={scope}
           module={viewing.module}
           group={viewing.group}
+          highlightQuery={viewing.highlightQuery}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}

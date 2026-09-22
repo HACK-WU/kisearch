@@ -189,7 +189,7 @@ ki import \
   --group Wiki \
   --chunk-size 1000 \
   --chunk-overlap 150
-  # 可选：--tags <t1,t2> 为导入文件打标（可被 ki search -t <tag> 召回；--no-vector 时仅持久化到 relation.tags）
+  # 可选：--tags <t1,t2> 为导入文件打标（可被 ki search -t <tag> 召回；--no-vector 时写入 FTS-only 标签索引）
 
 # ② 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
@@ -234,11 +234,11 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 
 | 命令 | 说明 |
 |------|------|
-| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--conflict-mode/--conflict-suffix` 同名策略、`--no-vector` 非向量化、`--no-assets` 关闭图片附件收集 |
+| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--conflict-mode/--conflict-suffix` 同名策略、`--no-vector` FTS-only 全文索引、`--no-assets` 关闭图片附件收集 |
 | `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
 | `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
-| `sync-relation` | 写入 Relation + 本地 KB（单条/批量向量化，支持 `--no-vector` 非向量化） |
+| `sync-relation` | 写入 Relation + 本地 KB（单条/批量 dense 向量化；`--no-vector` 改写独立 FTS-only 全文索引） |
 | `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
 | `search` | 语义检索（zvec 混合检索，输出含原文定位字段） |
 | `store` | 向量化存储单条知识 |

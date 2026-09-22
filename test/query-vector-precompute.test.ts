@@ -160,6 +160,13 @@ describe('extractSearchQueryArgs · 工具参数契约守卫', () => {
     ]);
     assert.deepEqual(out.map((x) => x.query), ['a', 'b']);
   });
+
+  it('fulltext 模式跳过查询向量预计算', () => {
+    assert.deepEqual(
+      extractSearchQueryArgs([call('ki_search', { query: '正文关键词', scope: 's1', mode: 'fulltext' })]),
+      [],
+    );
+  });
 });
 
 // ─── 降级判定契约（mcp-http 预计算与 vectorSearch 共用同一实现）───

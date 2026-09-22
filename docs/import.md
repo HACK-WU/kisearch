@@ -35,7 +35,7 @@ ki import \
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
 | `--conflict-mode` | 否 | 同一 Group 下不同 `sourcePath` 的同名处理：`overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀，默认 `suffix` |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
-| `--no-vector` | 否 | 非向量化模式：仅写 KB 层，跳过向量写入（不产生 memoryId，无法被 `ki search` 召回；local KB 文件原文照写） |
+| `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；清洗后的 chunk 写入独立全文 Collection，`ki search --mode fulltext` 可召回；local KB 文件原文照写 |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
 | `--no-assets` | 否 | 关闭本地图片附件收集（等价 config `import.assets:false`；关闭后前端对图片引用显示占位块） |
 | `--clean-rules` | 否 | 覆盖内置清洗规则开关：`bom,frontmatter,htmlComment,mermaid,codePath,codeBlock` |

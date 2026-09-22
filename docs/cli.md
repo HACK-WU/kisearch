@@ -54,7 +54,7 @@ ki import \
 | `--tags <t1,t2>` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复）。注意：不带 `--tags` 重导会清除该文件已有标签（导入为覆盖语义，区别于重建的只增不减） |
 | `--conflict-mode` | 否 | 同一 Group 下不同 `sourcePath` 的同名处理：`overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀；默认 `suffix` |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
-| `--no-vector` | 否 | 非向量化模式：仅写 KB 层（relations-cache + local KB + Group 树），跳过向量写入（不产生 memoryId，无法被 `ki search` 召回，仅 `query-group`/`get-module-info` 可访问） |
+| `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；写入独立全文 Collection，使用 `ki search --mode fulltext` 召回。`memoryId` 仍为空，语义 hybrid 检索不会召回该文档 |
 
 **示例：首次导入**
 
@@ -479,10 +479,10 @@ ki doc delete abc123 --scope my-project --yes
 
 ## `search`
 
-语义检索知识库内容（**hybrid 混合检索**：向量语义 + 全文 BM25 两路召回，RRF 融合排序）。
+检索知识库内容（默认 **hybrid 混合检索**；`fulltext` 模式只查全文索引，不调用 embedding）。
 
 ```bash
-ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2] [--timeout <seconds>]
+ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>] [--tags t1,t2] [--mode hybrid|fulltext] [--timeout <seconds>]
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -492,6 +492,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | `--limit <n>` | 返回条数上限 | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
+| `--mode <mode>` | 检索模式：`hybrid`（默认）或 `fulltext`（仅全文，不调用 embedding） | `hybrid` |
 | `--timeout <seconds>` | 查询 embedding 等待超时；超时后降级为关键词检索，范围 `0.001-60` 秒 | 配置 `embedding.queryTimeoutMs`（未配置为 `3` 秒） |
 | `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`，REQ-09） |
 
@@ -819,7 +820,7 @@ ki sync-relation \
 
 > **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
-> **非向量化模式（`--no-vector`）**：仅写 KB 层（relations-cache + local KB + Wiki 写回），**跳过向量写入**——不调用 embedding API、不产生 `memoryId`，写入的关系**无法被 `ki search` 召回**（只能通过 `query-group` / `get-module-info` 访问）。单条与批量模式均支持：
+> **FTS-only 模式（`--no-vector`）**：写 KB 层并把正文写入独立全文 Collection，**不调用 embedding API、不写 dense 向量**——使用 `ki search --mode fulltext` 召回；语义 hybrid 检索仍不会召回该文档。单条与批量模式均支持：
 > ```bash
 > # 单条非向量化
 > ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --no-vector
@@ -836,7 +837,7 @@ ki sync-relation \
 > ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --tags "api,auth"
 > ```
 > - 内部保留标签（`ki-search` / `ki-relation` / `ki-path`）会被过滤，不可作为自定义标签
-> - 返回值透出 `contentTags`（向量化时为 `["ki-search","api","auth"]`；无自定义标签则为 `["ki-search"]`；非向量化（`--no-vector`）为 `[]`）
+> - 返回值透出 `contentTags`（dense 与 FTS-only 两种模式均为 `["ki-search", ...自定义标签]`）
 > - **重复同步**同一 relation 时，若自定义标签变化（如 `api` 改为 `auth`），旧标签的内容向量会被自动清理，避免残留
 > - MCP 工具 `ki_sync_relation` 同样支持入参 `tags`（逗号分隔字符串）
 
@@ -1030,7 +1031,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
-| `ki_search` | 读 | 语义检索（hybrid 混合检索，输出 group/relation 定位字段） | `search` |
+| `ki_search` | 读 | 检索（默认 hybrid；支持 `mode=fulltext` 仅全文且不调用 embedding，输出 group/relation 定位字段） | `search` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
 | `ki_sync_relation` | 写 | 写入单条 Relation + 模块说明（可非向量化） | `sync-relation` |
 | `ki_bulk_sync_relation` | 写 | 批量写入 Relation + 模块说明（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | `sync-relation --input` |
@@ -1149,6 +1150,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `threshold` | number | 否 | — | 相似度阈值（0-1，过滤低分命中） |
 | `tags` | string | 否 | — | 过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合） |
 | `timeout` | number | 否 | 配置值 / 3 | 查询 embedding 等待超时（秒，范围 `0.001-60`）；超时后降级为关键词检索 |
+| `mode` | `hybrid \| fulltext` | 否 | `hybrid` | `fulltext` 只查询全文索引，不调用 embedding；`hybrid` 为语义 + BM25 混合检索 |
 
 #### `ki_store`
 

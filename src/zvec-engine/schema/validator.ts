@@ -45,24 +45,33 @@ export function validateCreateConfig(
     );
   }
 
-  // V-02 维度铁律
-  if (dimension !== config.embedding.dimension) {
-    throw new DimensionMismatchError(
-      `collection.dimension (${dimension}) !== embedding.dimension (${config.embedding.dimension})`,
-      { data: { collectionDim: dimension, embeddingDim: config.embedding.dimension } },
-    );
-  }
+  const hasDense = denseField !== undefined || dimension !== undefined || metric !== undefined;
+  if (hasDense) {
+    if (!denseField || typeof dimension !== 'number' || !Number.isInteger(dimension) || dimension <= 0 || !metric) {
+      throw new InvalidSchemaError('hybrid collection requires denseField, positive dimension and metric');
+    }
+    const denseDimension = dimension as number;
+    // V-02 维度铁律
+    if (!config.embedding || denseDimension !== config.embedding.dimension) {
+      throw new DimensionMismatchError(
+        `collection.dimension (${denseDimension}) !== embedding.dimension (${config.embedding?.dimension ?? 'missing'})`,
+        { data: { collectionDim: denseDimension, embeddingDim: config.embedding?.dimension } },
+      );
+    }
 
-  // V-03 metric 限定
-  if (metric !== 'COSINE') {
-    throw new InvalidSchemaError(
-      `collection.metric must be 'COSINE', got: ${metric}`,
-      { data: { metric } },
-    );
+    // V-03 metric 限定
+    if (metric !== 'COSINE') {
+      throw new InvalidSchemaError(
+        `collection.metric must be 'COSINE', got: ${metric}`,
+        { data: { metric } },
+      );
+    }
+  } else if (config.embedding) {
+    throw new InvalidSchemaError('FTS-only collection must not configure an embedding provider');
   }
 
   // V-06 字段重名
-  const seen = new Set<string>([denseField]);
+  const seen = new Set<string>(denseField ? [denseField] : []);
   for (const sf of scalarFields) {
     if (seen.has(sf.name)) {
       throw new InvalidSchemaError(
@@ -111,7 +120,8 @@ export function validateOpenConfig(
   persistedSchema: PersistedSchema,
 ): void {
   // O-02 embedding 维度 vs 持久化维度
-  if (config.embedding.dimension !== persistedSchema.dimension) {
+  if (config.embedding && persistedSchema.dimension !== undefined
+      && config.embedding.dimension !== persistedSchema.dimension) {
     throw new DimensionMismatchError(
       `embedding.dimension (${config.embedding.dimension}) !== persisted dimension (${persistedSchema.dimension})`,
       { data: { embeddingDim: config.embedding.dimension, persistedDim: persistedSchema.dimension } },
@@ -119,7 +129,7 @@ export function validateOpenConfig(
   }
 
   // O-03 持久化 metric 限定
-  if (persistedSchema.metric !== 'COSINE') {
+  if (persistedSchema.metric !== undefined && persistedSchema.metric !== 'COSINE') {
     throw new SchemaMismatchError(
       `persisted metric must be 'COSINE', got: ${persistedSchema.metric}`,
       { data: { metric: persistedSchema.metric } },

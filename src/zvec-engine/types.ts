@@ -43,30 +43,32 @@ export interface ZvecEngineConfig {
   dbPath: string;
   collection: {
     name: string;
-    denseField: string;
-    dimension: number;
-    metric: 'COSINE';
+    /** Hybrid collection 才提供 dense schema；FTS-only collection 省略。 */
+    denseField?: string;
+    dimension?: number;
+    metric?: 'COSINE';
     denseDataType?: 'FP32' | 'FP16';
     scalarFields: ScalarFieldDef[];
     fts?: FtsConfig;
   };
-  embedding: EmbeddingProvider;
+  /** FTS-only collection 不需要 embedding provider。 */
+  embedding?: EmbeddingProvider;
 }
 
 export interface ZvecEngineOpenConfig {
   dbPath: string;
   collectionName: string;
-  embedding: EmbeddingProvider;
+  embedding?: EmbeddingProvider;
   readOnly?: boolean;
   schemaAssert?: SchemaAssert;
 }
 
 export interface PersistedSchema {
   name: string;
-  denseField: string;
-  dimension: number;
-  metric: string;
-  denseDataType: string;
+  denseField?: string;
+  dimension?: number;
+  metric?: string;
+  denseDataType?: string;
   scalarFields: ScalarFieldDef[];
   fts?: FtsConfig;
 }
@@ -205,9 +207,9 @@ export interface ZvecWriteOptions {
 
 export interface CollectionInfo {
   name: string;
-  dimension: number;
-  metric: 'COSINE';
-  denseDataType: 'FP32' | 'FP16';
+  dimension?: number;
+  metric?: 'COSINE';
+  denseDataType?: 'FP32' | 'FP16';
   docCount: number;
   scalarFields: ScalarFieldDef[];
   fts?: FtsConfig;

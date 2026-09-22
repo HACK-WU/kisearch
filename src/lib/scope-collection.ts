@@ -196,6 +196,39 @@ export function getScopeCollectionPath(config: KiConfig, scope: string): string 
   return target;
 }
 
+/** FTS-only Collection 根目录；与 hybrid Collection 分开，避免 schema/锁/生命周期互相污染。 */
+export function getFtsCollectionsRoot(config: KiConfig): string {
+  return path.join(config.vectorDir, 'fts-collections');
+}
+
+/** scope → FTS-only Collection dbPath。 */
+export function getScopeFtsCollectionPath(config: KiConfig, scope: string): string {
+  validateScope(scope);
+  const root = path.resolve(getFtsCollectionsRoot(config));
+  const target = path.resolve(root, scope);
+  if (target !== path.join(root, scope) || !target.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`FTS-only Collection 路径越界：${scope}`);
+  }
+  let targetStat: fs.Stats;
+  try {
+    targetStat = fs.lstatSync(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return target;
+    throw err;
+  }
+  try {
+    const rootReal = fs.existsSync(root) ? fs.realpathSync(root) : root;
+    const targetReal = fs.realpathSync(target);
+    if (!targetReal.startsWith(`${rootReal}${path.sep}`)) {
+      throw new Error(`FTS-only Collection 符号链接越界：${scope}`);
+    }
+  } catch (err) {
+    if (targetStat.isSymbolicLink()) throw new Error(`FTS-only Collection 符号链接无效：${scope}`);
+    throw err;
+  }
+  return target;
+}
+
 /** 布局元数据文件，供 daemon 握手和错误诊断使用。 */
 export function getLayoutPath(config: KiConfig): string {
   return path.join(getCollectionsRoot(config), 'layout.json');

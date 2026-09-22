@@ -49,6 +49,8 @@ import {
   type PathVectorizeEntry,
 } from './path-vectorize.js';
 import { generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
+import { closeFtsEngine } from './fts-client.js';
 import {
   resolveImportConflict,
   validateImportConflictMode,
@@ -97,12 +99,14 @@ export interface ImportStats {
   errors: number;
   /** 被跳过的文件数（过大 / chunk 超限），结构化输出可观测（体验修复） */
   skipped: number;
-  /** 是否写入向量层（false = 非向量化模式 --no-vector，仅 KB 层） */
+  /** 是否写入 dense 向量层（false = --no-vector FTS-only 模式） */
   vector: boolean;
   /** 已复制进 KB 的本地图片附件数（REQ-20260904-001；--no-assets 或配置关闭时为 0） */
   assets: number;
   /** 同一 Group 下不同 sourcePath 的真实同名冲突数量。 */
   conflicts: number;
+  /** 写入 FTS-only Collection 的 chunk 文档数（--no-vector 模式）。 */
+  fullTextIndexed: number;
 }
 
 export interface ImportConflict {
@@ -135,7 +139,7 @@ export interface HandleDirectImportArgs {
   chunkOverlap?: number;
   /** 单文件大小上限（字节），超限跳过并告警；默认 1MB（config `import.maxFileSize` 可配） */
   maxFileSizeBytes?: number;
-  /** 非向量化模式：仅写 KB 层（relations-cache + local KB），跳过向量写入；默认 true */
+  /** FTS-only 模式开关：false 时跳过 dense/embedding，写入独立全文 Collection；默认 true */
   vector?: boolean;
   /** 清洗总开关（false = --no-clean，关闭全部清洗含 hooks）；默认 true */
   cleanEnabled?: boolean;
@@ -703,6 +707,7 @@ export async function handleDirectImport(
           vector,
           assets: 0,
           conflicts: conflicts.length,
+          fullTextIndexed: 0,
         },
         errors: [],
         conflicts,
@@ -735,7 +740,7 @@ export async function handleDirectImport(
   // ── Phase 2：先写新向量，成功后再清理受影响文档的旧向量 ──
   // 关键不变量：不再清空整个 Scope；新向量失败时旧 relation/local KB/向量仍可恢复。
   logPhaseStart(2, TOTAL, '向量化 ...');
-  // 非向量化模式（--no-vector）：跳过向量写入，memoryIds 为空（与 sync-relation 决策一致）
+  // --no-vector：跳过 dense/embedding，memoryIds 为空；正文索引在后续 FTS-only 阶段写入。
   const vectorizeResult = !vector
     ? { ok: new Map<string, string>(), errors: [] }
     : await bulkVectorize(entries, scope, {
@@ -856,6 +861,68 @@ export async function handleDirectImport(
     [...vectorizeResult.ok].filter(([entryPath]) => activeEntryPaths.has(entryPath)),
   );
 
+  // --no-vector 不再意味着“只写 KB”：清洗后的 chunk 写入独立 FTS-only
+  // Collection。FTS ID 与 hybrid memoryId 分离，避免给 no-vector 文档伪造 dense 向量。
+  const fullTextErrors: { path: string; error: string }[] = [];
+  let fullTextIndexed = 0;
+  const fullTextIdsByKey = new Map<string, string[]>();
+  if (!vector && activeFileRecords.length > 0) {
+    const ftsEntries = activeFileRecords.flatMap((rec) => rec.entries.flatMap((entry) => [
+      { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' },
+      ...customTags.map((tag) => ({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
+    ]));
+    try {
+      const ftsResult = await ftsBulkStore(ftsEntries);
+      const storedIds = new Set(ftsResult.ids);
+      fullTextIndexed = ftsResult.ids.length;
+      for (const rec of activeFileRecords) {
+        const expected = rec.entries.flatMap((entry) => [
+          getFtsDocId({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' }),
+          ...customTags.map((tag) => getFtsDocId({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
+        ]);
+        const newIds = expected.filter((id) => storedIds.has(id));
+        const oldIds = rec.previousRelation?.ftsIds ?? [];
+        const complete = newIds.length === expected.length;
+        // 只有新索引完整时才清理旧索引；部分失败保留旧 ID，避免覆盖导入丢召回。
+        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...new Set(complete ? newIds : [...oldIds, ...newIds])]);
+        if (complete) {
+          const staleIds = oldIds.filter((id) => !newIds.includes(id));
+          if (staleIds.length > 0) {
+            const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
+            if (deleted.failed > 0) fullTextErrors.push({ path: rec.rel, error: `旧全文索引清理失败 ${deleted.failed} 条` });
+          }
+        } else {
+          fullTextErrors.push({ path: rec.rel, error: `全文索引部分写入成功（${newIds.length}/${expected.length}）` });
+        }
+      }
+      if (ftsResult.failed > 0 && fullTextErrors.length === 0) {
+        fullTextErrors.push({ path: '<batch>', error: `全文索引写入失败 ${ftsResult.failed} 条` });
+      }
+    } catch (err) {
+      fullTextErrors.push({ path: '<fts>', error: `全文索引写入失败：${(err as Error).message}` });
+    }
+  }
+  if (vector && activeFileRecords.length > 0) {
+    // 文档从 --no-vector 切换回 hybrid 时，先成功写入 dense，再清理该 relation
+    // 以前的 FTS-only 文档；删除失败则保留 ftsIds，避免缓存宣称已清理。
+    for (const rec of activeFileRecords) {
+      const oldIds = rec.previousRelation?.ftsIds ?? [];
+      if (oldIds.length === 0) continue;
+      try {
+        const deleted = await ftsDeleteByIds({ scope, ids: oldIds });
+        if (deleted.failed > 0) {
+          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
+          fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败 ${deleted.failed} 条` });
+        } else {
+          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
+        }
+      } catch (err) {
+        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
+        fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败：${(err as Error).message}` });
+      }
+    }
+  }
+
   // 关系/路径辅助向量也先写新值，再进入旧向量清理；若某个 relation 的新辅助向量
   // 写失败，则保留该 relation 的旧辅助向量，避免先删后写造成导航索引空洞。
   checkCancelled();
@@ -968,6 +1035,11 @@ export async function handleDirectImport(
 
   logPhaseStart(4, TOTAL, `写入元数据（${ctx.entries.length} 条 relations）...`);
   phase4WriteRelations(ctx, relationsCache);
+  for (const rec of activeFileRecords) {
+    const rel = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+    const ftsIds = fullTextIdsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
+    if (rel && ftsIds) rel.ftsIds = ftsIds;
+  }
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
   // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
   const mergedMap = activeMergedMap;
@@ -1008,8 +1080,8 @@ export async function handleDirectImport(
   setSource(scope, source);
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
-  const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors];
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  skipped=${skipped.length + failedRecords.size}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [非向量化:仅写KB层]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
+  const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
@@ -1032,6 +1104,7 @@ export async function handleDirectImport(
       vector,
       assets: assetCopied.size,
       conflicts: conflicts.length,
+      fullTextIndexed,
     },
     errors: importErrors,
     conflicts,
@@ -1039,6 +1112,7 @@ export async function handleDirectImport(
     source,
   };
   } finally {
+    if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
     // 任意失败（配置/扫描/向量化/元数据写入）都必须释放 import.lock，
     // 否则下一次导入会被误判为“仍有任务运行”。取消路径已提前清锁，
     // 这里通过 lockAcquired 保证幂等；成功路径 releaseImportLock 同样会置 false。
@@ -1140,6 +1214,7 @@ function cloneRelation(relation: Relation): Relation {
   return {
     ...relation,
     ...(relation.memoryIds ? { memoryIds: [...relation.memoryIds] } : {}),
+    ...(relation.ftsIds ? { ftsIds: [...relation.ftsIds] } : {}),
     ...(relation.tags ? { tags: [...relation.tags] } : {}),
   };
 }

@@ -12,7 +12,7 @@ export function registerSyncRelationTool(server: McpServer): void {
       group: z.string().describe('Group 路径（支持 / 层级嵌套）'),
       relation: z.string().describe('Relation 名称'),
       module_info: z.string().describe('本地 KB Markdown 内容'),
-      vector: z.boolean().optional().default(true).describe('是否写入向量层（ki-search/ki-relation）。false=非向量化：仅写 KB 层（不产生 memoryId，无法被 ki search 召回）'),
+      vector: z.boolean().optional().default(true).describe('是否写入 dense 向量层。false=FTS-only：不调用 embedding，写入独立全文 Collection'),
       tags: z.string().optional().describe('文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 "api,auth"）'),
     },
     async (args) => {

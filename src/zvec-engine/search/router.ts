@@ -25,9 +25,9 @@ const DEFAULT_TOPK = 10;
 const MAX_TEXT_LEN = 10_000;
 
 export interface RouterContext {
-  denseField: string;
+  denseField?: string;
   ftsField?: string;
-  dimension: number;
+  dimension?: number;
 }
 
 export interface RoutedSearch {
@@ -59,9 +59,15 @@ export function routeSearch(req: AnySearchReq, ctx: RouterContext): RoutedSearch
   }
 
   if (hasVector) {
+    if (!ctx.denseField || ctx.dimension === undefined) {
+      throw new InvalidSearchError('collection has no dense vector field');
+    }
     validateVectorDimension(hybrid.vector!, ctx.dimension);
   }
   if (hasQueryText) {
+    if (!ctx.denseField || ctx.dimension === undefined) {
+      throw new InvalidSearchError('queryText requires a collection with a dense vector field');
+    }
     validateTextLength(hybrid.queryText!);
   }
   if (hasFts) {
@@ -72,6 +78,9 @@ export function routeSearch(req: AnySearchReq, ctx: RouterContext): RoutedSearch
   }
 
   if (hasFts && (hasQueryText || hasVector)) {
+    if (!ctx.denseField) {
+      throw new InvalidSearchError('hybrid search requires a collection with a dense vector field');
+    }
     // hybrid 两路
     return {
       kind: 'multiQuery',
@@ -89,7 +98,7 @@ export function routeSearch(req: AnySearchReq, ctx: RouterContext): RoutedSearch
         topk: req.topk ?? DEFAULT_TOPK,
         rerankRrf: hybrid.rerank?.type === 'weighted' ? undefined : { rankConstant: hybrid.rerank?.rankConstant ?? 60 },
         rerankWeighted: hybrid.rerank?.type === 'weighted'
-          ? { weights: weightsToArray(hybrid.rerank.weights, [ctx.denseField, ctx.ftsField!]) }
+            ? { weights: weightsToArray(hybrid.rerank.weights, [ctx.denseField, ctx.ftsField!]) }
           : undefined,
         outputFields: req.outputFields,
         includeVector: req.includeVector ?? false,
@@ -101,6 +110,9 @@ export function routeSearch(req: AnySearchReq, ctx: RouterContext): RoutedSearch
   }
 
   if (hasQueryText || hasVector) {
+    if (!ctx.denseField) {
+      throw new InvalidSearchError('vector search requires a collection with a dense vector field');
+    }
     // 单路向量
     return {
       kind: 'query',

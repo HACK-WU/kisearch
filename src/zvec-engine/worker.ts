@@ -52,7 +52,7 @@ if (!parentPort) {
 // ─── 全局状态 ───
 
 let collection: ZVecCollection | null = null;
-let denseFieldName = 'dense';
+let denseFieldName: string | undefined;
 let ftsFieldName: string | undefined;
 
 const port = parentPort;
@@ -250,16 +250,20 @@ function buildInfoResult(): InfoResultPayload {
     }
   }
 
-  const denseDataType = denseVec?.dataType === ZVecDataType.VECTOR_FP16 ? 'FP16' : 'FP32';
+  const denseDataType = denseVec
+    ? (denseVec.dataType === ZVecDataType.VECTOR_FP16 ? 'FP16' : 'FP32')
+    : undefined;
   const metricNum = (denseVec?.indexParams as { metricType?: number } | undefined)?.metricType;
-  const metric = metricNum === 3 ? 'COSINE' : metricNum === 2 ? 'IP' : metricNum === 1 ? 'L2' : 'COSINE';
+  const metric = denseVec
+    ? (metricNum === 3 ? 'COSINE' : metricNum === 2 ? 'IP' : metricNum === 1 ? 'L2' : 'COSINE')
+    : undefined;
 
   return {
     name: schema.name,
-    denseField: denseVec?.name ?? denseFieldName,
-    dimension: denseVec?.dimension ?? 0,
+    ...(denseVec?.name ? { denseField: denseVec.name } : {}),
+    ...(denseVec?.dimension !== undefined ? { dimension: denseVec.dimension } : {}),
     metric,
-    denseDataType,
+    ...(denseDataType ? { denseDataType } : {}),
     scalarFields,
     fts: ftsConfig,
     docCount: c.stats.docCount,
@@ -332,7 +336,7 @@ async function handleWrite(
 
 function toZvecDocInput(d: WritePayload['docs'][number]): ZVecDocInput {
   const vectors: Record<string, ZVecVector> = {};
-  if (d.vector !== undefined) {
+  if (d.vector !== undefined && denseFieldName !== undefined) {
     vectors[denseFieldName] = d.vector;
   }
   const fields: Record<string, unknown> = { ...(d.fields ?? {}) };
@@ -462,7 +466,7 @@ function toRawHit(
     out.distance = doc.score;   // COSINE 返回 distance（越小越相似）
   }
   if (includeVector) {
-    const v = doc.vectors?.[denseFieldName];
+    const v = denseFieldName === undefined ? undefined : doc.vectors?.[denseFieldName];
     if (v instanceof Float32Array) {
       out.vector = v;
     } else if (Array.isArray(v)) {
@@ -483,7 +487,7 @@ function toDocPayload(doc: ZVecDoc, includeVector: boolean): DocPayload {
   }
   const out: DocPayload = { id: doc.id, fields, text };
   if (includeVector) {
-    const v = doc.vectors?.[denseFieldName];
+    const v = denseFieldName === undefined ? undefined : doc.vectors?.[denseFieldName];
     if (v instanceof Float32Array) {
       out.vector = v;
     } else if (Array.isArray(v)) {

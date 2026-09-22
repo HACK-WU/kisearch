@@ -35,6 +35,8 @@ import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable, checkDiskSpace, estimateDirSize, PreflightError } from './lib/preflight.js';
 import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { extractScopeSnapshot } from './lib/safe-tar.js';
+import { rebuildFtsOnlyScope } from './lib/fts-rebuild.js';
+import { closeFtsEngine } from './lib/fts-client.js';
 import { logProgress } from './lib/progress.js';
 
 // ─── 工具 ───
@@ -271,15 +273,19 @@ async function restoreFromSnapshot(
     }
   }
 
+  // 快照不包含 vectorDir；无 dense 的 --no-vector 文档仍应在 restore 后可全文检索。
+  const fullText = await rebuildFtsOnlyScope(scope);
+
   output({
     ok: true,
     action: 'restore_snapshot',
     scope,
     snapshot: snapshotFile,
     restoredAt: new Date().toISOString(),
+    fullText,
     // KB 已还原；向量文档不随快照还原，未指定 --rebuild-vector 时提示重建
     hint: opts.rebuildVector
-      ? undefined
+      ? (fullText.errors.length > 0 ? `部分 FTS-only 索引未恢复：${fullText.errors[0]?.error}` : undefined)
       : `KB 已还原。向量文档不随快照还原，如需语义检索请执行：ki restore ${scope} --rebuild-vector`,
   });
 }
@@ -579,6 +585,7 @@ async function main() {
     cliAbortSignal = undefined;
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则 worker 线程持引用导致进程无法退出
     await closeEngine();
+    await closeFtsEngine();
   }
 }
 

@@ -14,6 +14,7 @@ import { validateScope } from './scope.js';
 import { backupScopeSnapshot } from './backup.js';
 import { checkWritable, checkDiskSpace } from './preflight.js';
 import { extractScopeSnapshot } from './safe-tar.js';
+import { rebuildFtsOnlyScope, type FtsRebuildResult } from './fts-rebuild.js';
 
 export interface RestoreSnapshotOptions {
   timestamp?: string;
@@ -30,6 +31,7 @@ export interface RestoreSnapshotResult {
   scope: string;
   snapshot: string;
   restoredAt: string;
+  fullText?: FtsRebuildResult;
 }
 
 function ensureTarAvailable(): void {
@@ -145,11 +147,16 @@ export async function restoreSnapshotLocal(
     }
   }
 
+  // 快照不包含 vectorDir；无 dense 的 --no-vector 文档仍应在 restore 后可全文检索。
+  // 该步骤不调用 embedding，失败只作为结构化告警返回，不回滚已成功还原的 KB。
+  const fullText = await rebuildFtsOnlyScope(scope);
+
   return {
     ok: true,
     action: 'restore_snapshot',
     scope,
     snapshot: snapshot.file,
     restoredAt: new Date().toISOString(),
+    fullText,
   };
 }

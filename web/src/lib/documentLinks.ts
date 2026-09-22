@@ -19,6 +19,8 @@ export interface DocumentView {
   group?: string;
   path?: string;
   content?: string;
+  /** 从全文检索/浏览正文命中打开时，传递到阅读器的高亮查询词。 */
+  highlightQuery?: string;
 }
 
 /** Markdown 链接是否可能是知识库中的本地文档链接。 */

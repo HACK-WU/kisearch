@@ -4,7 +4,7 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
@@ -20,6 +20,40 @@ const THRESHOLD_MAX = 0.2;
 const THRESHOLD_STEP = 0.005;
 const QUERY_TIMEOUT_MIN_SECONDS = 0.001;
 const QUERY_TIMEOUT_MAX_SECONDS = 60;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function splitSearchTerms(query: string): string[] {
+  return query.trim().split(/[\s_.,，。:：;；!?！？()[\]{}-]+/).filter(Boolean);
+}
+
+/** 全文检索结果中高亮查询词；按 FTS 常见分隔符拆分，兼容中文连续查询与英文多词查询。 */
+function highlightMatch(text: string, query: string): JSX.Element {
+  const terms = splitSearchTerms(query).map(escapeRegExp);
+  if (terms.length === 0) return <>{text}</>;
+  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
+  return <>{text.split(pattern).map((part, index) =>
+    terms.some((term) => new RegExp(`^${term}$`, 'i').test(part))
+      ? <mark key={index} className="ki-search-hit-mark">{part}</mark>
+      : <Fragment key={index}>{part}</Fragment>
+  )}</>;
+}
+
+/** 将全文结果裁剪到命中词附近，避免整篇原文的开头把命中位置挤出可视区域。 */
+function makeSearchSnippet(content: string, query: string, maxLength = 480): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  const lower = normalized.toLowerCase();
+  const firstMatch = splitSearchTerms(query)
+    .map((term) => lower.indexOf(term.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0] ?? -1;
+  const start = firstMatch > 120 ? firstMatch - 120 : 0;
+  const end = Math.min(normalized.length, start + maxLength);
+  return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
+}
 
 /** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
 const stepThreshold = (cur: number, dir: 1 | -1): number => {
@@ -61,8 +95,12 @@ export function SearchPage(): JSX.Element {
   const [queryTimeoutStatus, setQueryTimeoutStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const queryTimeoutTouched = useRef(false);
   const [limit, setLimit] = useState('10');
+  const [fullTextOnly, setFullTextOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<Result[] | null>(null);
+  /** 与当前结果绑定的查询词/模式；输入框清空或修改后，结果仍保持原查询的高亮口径。 */
+  const [resultQuery, setResultQuery] = useState('');
+  const [resultMode, setResultMode] = useState<'hybrid' | 'fulltext' | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState<DocumentView | null>(null);
@@ -117,7 +155,12 @@ export function SearchPage(): JSX.Element {
     if (!target) return false;
     if (viewing) setHistory((prev) => [...prev, viewing]);
     setForwardHistory([]);
-    setViewing({ module: target.name, group: target.group, path: target.path });
+    setViewing({
+      module: target.name,
+      group: target.group,
+      path: target.path,
+      highlightQuery: viewing?.highlightQuery,
+    });
     return true;
   }, [docData?.docs, viewing]);
 
@@ -170,6 +213,7 @@ export function SearchPage(): JSX.Element {
         tags: searchTags,
         threshold: threshold || undefined,
         limit: Number(limit) || 10,
+        mode: fullTextOnly ? 'fulltext' : 'hybrid',
         ...(timeout !== undefined ? { timeout } : {}),
       });
       // 后端业务层错误（如向量库锁定）
@@ -181,6 +225,8 @@ export function SearchPage(): JSX.Element {
       const hits = (res.results ?? []) as Result[];
       setResults(hits);
       setTotal(hits.length);
+      setResultQuery(query.trim());
+      setResultMode(fullTextOnly ? 'fulltext' : 'hybrid');
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -277,13 +323,14 @@ export function SearchPage(): JSX.Element {
               max={THRESHOLD_MAX}
               step={THRESHOLD_STEP}
               value={threshold}
+              disabled={fullTextOnly}
               onChange={(e) => setThreshold(Number(e.target.value))}
             />
             <button
               type="button"
               className="ki-step-btn"
               aria-label="降低阈值"
-              disabled={threshold <= 0}
+              disabled={fullTextOnly || threshold <= 0}
               onClick={() => setThreshold((v) => stepThreshold(v, -1))}
             >−</button>
             <span className="ki-threshold-val">{threshold.toFixed(3)}</span>
@@ -291,7 +338,7 @@ export function SearchPage(): JSX.Element {
               type="button"
               className="ki-step-btn"
               aria-label="提高阈值"
-              disabled={threshold >= THRESHOLD_MAX}
+              disabled={fullTextOnly || threshold >= THRESHOLD_MAX}
               onClick={() => setThreshold((v) => stepThreshold(v, 1))}
             >+</button>
           </div>
@@ -304,6 +351,7 @@ export function SearchPage(): JSX.Element {
               max={QUERY_TIMEOUT_MAX_SECONDS}
               step="any"
               value={queryTimeout ?? ''}
+              disabled={fullTextOnly}
               placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
               onChange={(e) => {
                 queryTimeoutTouched.current = true;
@@ -323,6 +371,20 @@ export function SearchPage(): JSX.Element {
               <option value="10">10</option>
               <option value="20">20</option>
             </select>
+          </div>
+          <div className="ki-query-option">
+            <span className="ki-form-label">全文</span>
+            <button
+              type="button"
+              className={`ki-switch${fullTextOnly ? ' ki-switch--on' : ''}`}
+              role="switch"
+              aria-checked={fullTextOnly}
+              aria-label="仅进行全文检索"
+              onClick={() => setFullTextOnly((value) => !value)}
+            >
+              <div className="ki-switch__knob" />
+            </button>
+            <span className="ki-form-suffix">{fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}</span>
           </div>
         </div>
       </form>
@@ -412,6 +474,7 @@ export function SearchPage(): JSX.Element {
                       content: r.original,
                       group: r.group,
                       path: doc?.path,
+                      highlightQuery: resultMode === 'fulltext' ? resultQuery : undefined,
                     });
                   }}
                 >
@@ -422,8 +485,14 @@ export function SearchPage(): JSX.Element {
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
                       <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
                     </div>
-                    {/* 原文 / 向量内容 */}
-                    <div className="ki-qr-content">{r.original ?? r.content ?? r.relation ?? '(无内容)'}</div>
+                    {/* 原文 / 向量内容；仅全文模式高亮，避免把语义近似结果误标成精确命中 */}
+                    <div className="ki-qr-content">
+                      {resultMode === 'fulltext' ? (() => {
+                        // 全文命中的 content 通常是命中 chunk；original 是文件级原文，优先展示前者。
+                        const matchedContent = r.content ?? r.original ?? r.relation ?? '(无内容)';
+                        return highlightMatch(makeSearchSnippet(matchedContent, resultQuery), resultQuery);
+                      })() : r.original ?? r.content ?? r.relation ?? '(无内容)'}
+                    </div>
                     {/* meta：标签 + 向量数据 */}
                     <div className="ki-qr-meta">
                       <span className="ki-badge ki-badge--vec">RAG</span>
@@ -464,6 +533,7 @@ export function SearchPage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
+          highlightQuery={viewing.highlightQuery}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}

@@ -78,7 +78,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(kb['api'].includes('title: API'));
   });
 
-  it('--no-vector：memoryIds 为空，local KB 仍写入', () => {
+  it('--no-vector：memoryIds 为空、ftsIds 已登记，local KB 仍写入', () => {
     const src = mkSource({ 'a.md': '# A\n内容' });
     const r = runImport(['--scope', scope, '--source', src, '--group', 'wiki', '--no-vector']);
     assert.strictEqual(r.ok, true);
@@ -88,6 +88,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const rel = cache.groups['wiki'].hot_relations.find((x: any) => x.text === 'a');
     assert.ok(rel, '文件级 relation a 应存在');
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时 memoryIds 为空');
+    assert.ok(Array.isArray(rel.ftsIds) && rel.ftsIds.length > 0, '--no-vector 时应登记 FTS-only 文档 ID');
     assert.strictEqual(rel.sourcePath, 'a.md', 'sourcePath 无 #N');
   });
 

@@ -188,7 +188,7 @@ function sanitizeFileName(name: string): string {
 interface DocListCache {
   scope: string;
   /** vectorized：KB 层登记的向量 ID 是否非空（供前端区分已/未向量化文档） */
-  docs: { name: string; group: string; path?: string; tags?: string[]; vectorized: boolean }[];
+  docs: { name: string; group: string; path?: string; tags?: string[]; vectorized: boolean; fullTextIndexed: boolean }[];
   mtimeMs: number;
   size: number;
   builtAt: number;
@@ -213,6 +213,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
         text?: string; sourcePath?: string; tags?: string[];
         /** 向量 ID：导入链路写多值 memoryIds，sync-relation 等旧链路写单值 memoryId */
         memoryId?: string; memoryIds?: string[];
+        ftsIds?: string[];
       }[];
     }>;
   };
@@ -230,6 +231,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
         // 已向量化判据：KB 层登记的向量 ID 非空（文件级导入为多值 memoryIds，旧链路为单值 memoryId）。
         // 只读同一份 relations-cache，故不引入额外 I/O，缓存失效条件（mtime+size）也不变。
         vectorized: (rel.memoryIds?.length ?? 0) > 0 || !!rel.memoryId,
+        fullTextIndexed: (rel.ftsIds?.length ?? 0) > 0,
         ...(rel.sourcePath ? { path: rel.sourcePath } : {}),
         ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),
       });
