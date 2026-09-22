@@ -16,7 +16,14 @@ import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, cl
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
-import { locateOriginalMatches, totalOriginalLines, type FtsLocator, type OriginalMatch } from './lib/original-locator.js';
+import {
+  DEFAULT_ORIGINAL_MATCH_LIMIT,
+  locateOriginalMatches,
+  selectTopOriginalMatches,
+  totalOriginalLines,
+  type FtsLocator,
+  type OriginalMatch,
+} from './lib/original-locator.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './lib/query-timeout.js';
@@ -58,6 +65,10 @@ export interface SearchHit extends VectorSearchResult {
   ftsIds?: string[];
   /** 全文检索对应的原文命中行片段。 */
   matches?: OriginalMatch[];
+  /** 当前文档在完整原文中可复核的命中区域总数。 */
+  matchCount?: number;
+  /** 命中区域总数超过返回上限时为 true。 */
+  matchesTruncated?: boolean;
   /** 便于 MCP 直接展示的多个命中片段拼接文本。 */
   originalExcerpt?: string;
   /** 完整原文的总行数。 */
@@ -342,7 +353,7 @@ async function executeSearchLocal(params: {
     });
 
     // fulltext：按文档聚合 chunk/tag 命中。一个文档保留最高分，同时合并所有可复核的
-    // FTS ID 与原文命中行区间；最终 limit 在聚合后执行。
+    // FTS ID 与原文命中行区间；最终文档 limit 与每文档命中区域 limit 都在聚合后执行。
     if (isFullText) {
       const grouped = new Map<string, SearchHit>();
       for (const hit of results) {
@@ -374,6 +385,19 @@ async function executeSearchLocal(params: {
           if (hit.originalRetrieved) previous.originalRetrieved = true;
           if (!previous.totalLines) previous.totalLines = hit.totalLines;
         }
+      }
+      for (const hit of grouped.values()) {
+        const allMatches = mergeOriginalMatches(hit.matches);
+        const selectedMatches = selectTopOriginalMatches(
+          allMatches,
+          params.query,
+          DEFAULT_ORIGINAL_MATCH_LIMIT,
+          { fallbackText: hit.content },
+        );
+        hit.matches = selectedMatches;
+        hit.matchCount = allMatches.length;
+        hit.matchesTruncated = allMatches.length > selectedMatches.length;
+        hit.originalExcerpt = buildOriginalExcerpt(selectedMatches);
       }
       results.length = 0;
       results.push(...grouped.values());

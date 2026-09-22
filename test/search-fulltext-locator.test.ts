@@ -16,13 +16,15 @@ describe('executeSearch fulltext 原文定位', () => {
     const entries = [
       { scope, group: 'group/a', relation: 'doc-a', text: 'FTS-only Collection first hit', tag: 'ki-search' },
       { scope, group: 'group/a', relation: 'doc-a', text: 'FTS-only Collection second hit', tag: 'ki-search' },
+      { scope, group: 'group/a', relation: 'doc-a', text: 'FTS-only Collection third hit', tag: 'ki-search' },
+      { scope, group: 'group/a', relation: 'doc-a', text: 'FTS-only Collection fourth hit', tag: 'ki-search' },
       { scope, group: 'group/b', relation: 'doc-b', text: 'FTS-only Collection another document', tag: 'ki-search' },
       { scope, group: 'group/c', relation: 'doc-c', text: 'FTS-only Collection missing original', tag: 'ki-search' },
     ];
     const stored = await ftsBulkStore(entries);
 
     writeJson(getLocalKbDir(scope, 'group/a'), {
-      'doc-a': '# Doc A\n\nFTS-only Collection first hit\n\n无关内容\n\nFTS-only Collection second hit',
+      'doc-a': '# Doc A\n\nFTS-only Collection first hit\n\n无关内容\n\nFTS-only Collection second hit\n\nFTS-only Collection third hit\n\nFTS-only Collection fourth hit',
     });
     writeJson(getLocalKbDir(scope, 'group/b'), {
       'doc-b': '# Doc B\n\nFTS-only Collection another document',
@@ -35,13 +37,13 @@ describe('executeSearch fulltext 原文定位', () => {
             id: 'a',
             text: 'doc-a',
             memoryIds: [],
-            ftsIds: stored.ids.slice(0, 2),
-            ftsLocators: stored.ids.slice(0, 2).map((ftsId, index) => ({
+            ftsIds: stored.ids.slice(0, 4),
+            ftsLocators: stored.ids.slice(0, 4).map((ftsId, index) => ({
               ftsId,
               sourcePath: 'doc-a.md',
               chunkIndex: index + 1,
-              lineStart: index === 0 ? 3 : 7,
-              lineEnd: index === 0 ? 3 : 7,
+              lineStart: [3, 7, 9, 11][index],
+              lineEnd: [3, 7, 9, 11][index],
             })),
           }],
         },
@@ -50,8 +52,8 @@ describe('executeSearch fulltext 原文定位', () => {
             id: 'b',
             text: 'doc-b',
             memoryIds: [],
-            ftsIds: [stored.ids[2]],
-            ftsLocators: [{ ftsId: stored.ids[2], sourcePath: 'doc-b.md', chunkIndex: 1, lineStart: 3, lineEnd: 3 }],
+            ftsIds: [stored.ids[4]],
+            ftsLocators: [{ ftsId: stored.ids[4], sourcePath: 'doc-b.md', chunkIndex: 1, lineStart: 3, lineEnd: 3 }],
           }],
         },
         'group/c': {
@@ -59,8 +61,8 @@ describe('executeSearch fulltext 原文定位', () => {
             id: 'c',
             text: 'doc-c',
             memoryIds: [],
-            ftsIds: [stored.ids[3]],
-            ftsLocators: [{ ftsId: stored.ids[3], sourcePath: 'doc-c.md', chunkIndex: 1, lineStart: 1, lineEnd: 1 }],
+            ftsIds: [stored.ids[5]],
+            ftsLocators: [{ ftsId: stored.ids[5], sourcePath: 'doc-c.md', chunkIndex: 1, lineStart: 1, lineEnd: 1 }],
           }],
         },
       },
@@ -92,12 +94,20 @@ describe('executeSearch fulltext 原文定位', () => {
     assert.equal(docA.group, 'group/a');
     assert.equal(docB.group, 'group/b');
     assert.equal(docA.indexType, 'fts');
-    assert.equal(docA.ftsIds?.length, 2, '同一文档的两个 FTS chunk 应聚合');
-    assert.deepEqual(docA.matches?.map((match) => [match.lineStart, match.lineEnd]), [[3, 3], [7, 7]]);
+    assert.equal(docA.ftsIds?.length, 4, '同一文档的多个 FTS chunk 应聚合');
+    assert.deepEqual(docA.matches?.map((match) => [match.lineStart, match.lineEnd]), [[3, 3], [7, 7], [9, 9]]);
+    assert.equal(docA.matchCount, 4, 'matchCount 应保留文档的完整命中区域数');
+    assert.equal(docA.matchesTruncated, true, '超过默认前 3 个区域时应标记截断');
     assert.match(docA.originalExcerpt ?? '', /3 \| FTS-only Collection first hit/);
     assert.match(docA.originalExcerpt ?? '', /7 \| FTS-only Collection second hit/);
+    assert.match(docA.originalExcerpt ?? '', /9 \| FTS-only Collection third hit/);
+    assert.doesNotMatch(docA.originalExcerpt ?? '', /11 \| FTS-only Collection fourth hit/);
     assert.equal(docA.original, undefined, '默认只返回命中片段，不返回完整原文');
+    assert.equal(docB.matchCount, 1, '单个命中区域应保留准确计数');
+    assert.equal(docB.matchesTruncated, false, '未超过前 3 个区域时不应标记截断');
     assert.deepEqual(docC.matches, [], '缺失原文时不返回伪造的行号片段');
+    assert.equal(docC.matchCount, 0, '缺失原文时可复核命中区域数应为 0');
+    assert.equal(docC.matchesTruncated, false, '缺失原文时不应报告截断');
     assert.match(docC.originalHint ?? '', /原文不可用/);
   });
 });

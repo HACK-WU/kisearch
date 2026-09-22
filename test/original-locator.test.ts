@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildChunkLineRanges, locateOriginalMatches, totalOriginalLines } from '../src/lib/original-locator.js';
+import {
+  buildChunkLineRanges,
+  locateOriginalMatches,
+  selectTopOriginalMatches,
+  totalOriginalLines,
+} from '../src/lib/original-locator.js';
 
 describe('original-locator', () => {
   it('清洗后的 chunk 可以通过稳定正文锚点定位到原文行范围', () => {
@@ -29,5 +34,21 @@ describe('original-locator', () => {
   it('查询词和 fallback chunk 都无法在原文复核时不返回伪造行号', () => {
     const matches = locateOriginalMatches('只剩不可匹配内容', '不存在的词', { fallbackText: 'cleaned chunk' });
     assert.deepEqual(matches, []);
+  });
+
+  it('优先保留命中率最高的前 N 个区域，并按原文行号输出', () => {
+    const matches = locateOriginalMatches([
+      '低相关内容',
+      'FTS-only Collection 精确命中',
+      '间隔',
+      'FTS-only Collection 另一个命中',
+      '间隔',
+      'FTS-only Collection 精确命中且再次出现 Collection',
+      '间隔',
+      'FTS-only Collection 第四个命中',
+    ].join('\n'), 'FTS-only Collection');
+
+    const selected = selectTopOriginalMatches(matches, 'FTS-only Collection', 2);
+    assert.deepEqual(selected.map((match) => [match.lineStart, match.lineEnd]), [[2, 2], [6, 6]]);
   });
 });

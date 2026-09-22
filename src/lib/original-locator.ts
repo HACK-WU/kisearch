@@ -27,6 +27,9 @@ export interface OriginalMatch extends SourceLineRange {
   excerpt: string;
 }
 
+/** 每个文档默认返回的原文命中区域上限。 */
+export const DEFAULT_ORIGINAL_MATCH_LIMIT = 3;
+
 function lineNumberAt(text: string, offset: number): number {
   let line = 1;
   for (let i = 0; i < offset; i += 1) {
@@ -110,6 +113,86 @@ function extractTerms(text: string): string[] {
     if (token.length >= 2) terms.add(token);
   }
   return [...terms].sort((a, b) => b.length - a.length);
+}
+
+function stripExcerptLineNumbers(excerpt: string): string {
+  return excerpt.replace(/^\d+ \| /gm, '');
+}
+
+function countOccurrences(text: string, term: string): number {
+  if (!term) return 0;
+  let count = 0;
+  let offset = 0;
+  while (offset < text.length) {
+    const index = text.indexOf(term, offset);
+    if (index < 0) break;
+    count += 1;
+    offset = index + Math.max(1, term.length);
+  }
+  return count;
+}
+
+/**
+ * 从一个文档的全部候选区域中选择最相关的前 N 个区域。
+ *
+ * 排名优先级：完整查询短语、查询词覆盖率、查询词出现次数、命中密度、
+ * 区域长度，最后用原文行号保证结果稳定。返回值按原文行号排序，便于
+ * MCP 消费方和前端按“下一个命中”顺序跳转。
+ */
+export function selectTopOriginalMatches(
+  matches: OriginalMatch[],
+  query: string,
+  limit = DEFAULT_ORIGINAL_MATCH_LIMIT,
+  options: { fallbackText?: string } = {},
+): OriginalMatch[] {
+  if (matches.length === 0) return [];
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : DEFAULT_ORIGINAL_MATCH_LIMIT;
+  const normalizedQuery = normalizeLine(query).toLocaleLowerCase();
+  const queryTerms = extractTerms(query);
+  const normalizedMatches = matches.map((match) => ({
+    match,
+    text: normalizeLine(stripExcerptLineNumbers(match.excerpt)).toLocaleLowerCase(),
+  }));
+  const hasQueryTerm = queryTerms.some((term) => {
+    const normalizedTerm = term.toLocaleLowerCase();
+    return normalizedMatches.some(({ text }) => text.includes(normalizedTerm));
+  });
+  const rankingTerms = hasQueryTerm || !options.fallbackText
+    ? queryTerms
+    : extractTerms(options.fallbackText).slice(0, 12);
+
+  const ranked = normalizedMatches.map(({ match, text }) => {
+    const exactPhrase = normalizedQuery.length >= 2 && text.includes(normalizedQuery) ? 1 : 0;
+    const matchedTerms = rankingTerms.filter((term) => text.includes(term.toLocaleLowerCase()));
+    const occurrences = matchedTerms.reduce(
+      (total, term) => total + countOccurrences(text, term.toLocaleLowerCase()),
+      0,
+    );
+    const density = occurrences / Math.max(1, text.length);
+    return {
+      match,
+      exactPhrase,
+      coverage: matchedTerms.length,
+      occurrences,
+      density,
+      span: match.lineEnd - match.lineStart + 1,
+    };
+  });
+
+  ranked.sort((a, b) => (
+    b.exactPhrase - a.exactPhrase
+      || b.coverage - a.coverage
+      || b.occurrences - a.occurrences
+      || b.density - a.density
+      || a.span - b.span
+      || a.match.lineStart - b.match.lineStart
+      || a.match.lineEnd - b.match.lineEnd
+  ));
+
+  return ranked
+    .slice(0, safeLimit)
+    .map(({ match }) => match)
+    .sort((a, b) => a.lineStart - b.lineStart || a.lineEnd - b.lineEnd);
 }
 
 function findMatchingLineNumbers(lines: string[], terms: string[], range?: SourceLineRange): number[] {

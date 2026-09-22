@@ -34,6 +34,10 @@ export interface SearchHit {
   content?: string;
   originalExcerpt?: string;
   matches?: Array<{ lineStart: number; lineEnd: number; excerpt: string }>;
+  /** 全文模式下当前文档可复核的命中区域总数。 */
+  matchCount?: number;
+  /** 全文模式下是否因默认的前 3 个区域上限而截断。 */
+  matchesTruncated?: boolean;
   totalLines?: number;
   memoryId?: string;
   /** 本条命中向量的 tag（多 tag 文档去重后只保留一条命中，此字段仅含其一） */
