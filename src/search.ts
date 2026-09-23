@@ -17,12 +17,14 @@ import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { readJson } from './lib/store.js';
 import {
+  createOriginalLocator,
   DEFAULT_ORIGINAL_MATCH_LIMIT,
-  locateOriginalMatches,
   selectTopOriginalMatches,
-  totalOriginalLines,
   type FtsLocator,
   type OriginalMatch,
+  type OriginalMatchRankingContext,
+  type OriginalLocator,
+  type SourceLineRange,
 } from './lib/original-locator.js';
 import { parseIntArg, parseFloatArg } from './lib/cli-args.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -65,14 +67,22 @@ export interface SearchHit extends VectorSearchResult {
   ftsIds?: string[];
   /** 全文检索对应的原文命中行片段。 */
   matches?: OriginalMatch[];
-  /** 当前文档在完整原文中可复核的命中区域总数。 */
+  /** 当前文档已复核的命中区域数；matchCountComplete=false 时是已知下界。 */
   matchCount?: number;
-  /** 命中区域总数超过返回上限时为 true。 */
+  /** 命中区域数是否完整；无法可靠定位 fallback，或候选池饱和且仍可能有额外 fallback 时为 false。 */
+  matchCountComplete?: boolean;
+  /** 命中区域超过返回上限，或计数不完整且可能仍有未返回区域时为 true。 */
   matchesTruncated?: boolean;
   /** 便于 MCP 直接展示的多个命中片段拼接文本。 */
   originalExcerpt?: string;
   /** 完整原文的总行数。 */
   totalLines?: number;
+}
+
+function fullTextDocumentKey(hit: Pick<SearchHit, 'scope' | 'group' | 'relation' | 'indexType' | 'ftsId' | 'memoryId'>): string {
+  return hit.group && hit.relation
+    ? JSON.stringify([hit.scope ?? '', hit.group, hit.relation])
+    : JSON.stringify([hit.scope ?? '', hit.indexType ?? 'unknown', hit.ftsId ?? hit.memoryId]);
 }
 
 export type SearchResult =
@@ -227,13 +237,15 @@ async function executeSearchLocal(params: {
     // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
     // 多 scope：各 Collection fan-out 后应用层合并，query vector 在 fan-out 前只生成一次。
     let raw: VectorSearchResult[];
+    let fullTextCandidateLimit = 0;
     if (isFullText) {
+      fullTextCandidateLimit = Math.max((params.limit ?? 10) * 10, 50);
       raw = await fullTextSearch({
         scopes,
         query: params.query,
         // FTS 返回的是 chunk，先多取候选，再在本层按文档聚合并执行最终 limit，
         // 避免同一文档的多个 chunk 占满 MCP 的文档结果名额。
-        limit: Math.max((params.limit ?? 10) * 10, 50),
+        limit: fullTextCandidateLimit,
         tags: params.tags,
       });
     } else if (params.tags) {
@@ -294,6 +306,13 @@ async function executeSearchLocal(params: {
     // 命中缺 scope 字段时单 scope 兜底到唯一检索 scope。
     //（getRelationMap 带 TTL+mtime 缓存：首次构建 O(N)，后续 O(1)）
     const includeOriginal = params.includeOriginal === true;
+    const originalFetchByDocument = new Map<string, ReturnType<typeof fetchOriginal>>();
+    const originalLocatorByDocument = new Map<string, OriginalLocator>();
+    const directMatchesByDocument = new Map<string, OriginalMatch[]>();
+    const inferredRangeByChunk = new Map<string, SourceLineRange | undefined>();
+    const unmappedChunkByDocument = new Set<string>();
+    const fallbackMatchByDocument = new Set<string>();
+    const rankingContextsByHit = new Map<SearchHit, OriginalMatchRankingContext[]>();
     const relationMaps = new Map<string, ReturnType<typeof getRelationMap>>(
       scopes.map((s) => [s, getRelationMap(s)]),
     );
@@ -314,6 +333,7 @@ async function executeSearchLocal(params: {
         if (meta.tags && meta.tags.length > 0) hit.tags = meta.tags;
       }
       if (r.ftsId) hit.ftsIds = [r.ftsId];
+      const documentKey = fullTextDocumentKey(hit);
       // 原文召回：includeOriginal 返回完整原文；fulltext 模式即使未请求完整原文，
       // 也必须读取 local KB 生成命中片段和行号，避免 MCP 只能看到清洗 chunk。
       // 原文不可用（含 relation 反查缺失）时降级：以向量文档 content 兜底，并提示没有原文。
@@ -321,20 +341,66 @@ async function executeSearchLocal(params: {
       if (includeOriginal || isFullText) {
         const originalGroup = meta?.group ?? hit.group;
         const originalRelation = meta?.relation ?? hit.relation;
-        const fetched = originalGroup && originalRelation && hitScope
-          ? fetchOriginal(hitScope, originalGroup, originalRelation)
-          : null;
+        let fetched: ReturnType<typeof fetchOriginal>;
+        if (originalFetchByDocument.has(documentKey)) {
+          fetched = originalFetchByDocument.get(documentKey) ?? null;
+        } else {
+          fetched = originalGroup && originalRelation && hitScope
+            ? fetchOriginal(hitScope, originalGroup, originalRelation)
+            : null;
+          originalFetchByDocument.set(documentKey, fetched);
+        }
         if (fetched?.original) {
           hit.originalRetrieved = true;
           if (includeOriginal) hit.original = fetched.original;
           if (isFullText) {
             const locator: FtsLocator | undefined = meta?.ftsLocator;
-            const matches = locateOriginalMatches(fetched.original, params.query, {
-              fallbackText: r.content,
-              ...(locator ? { range: locator } : {}),
-            });
+            let sourceLocator = originalLocatorByDocument.get(documentKey);
+            if (!sourceLocator) {
+              sourceLocator = createOriginalLocator(fetched.original);
+              originalLocatorByDocument.set(documentKey, sourceLocator);
+              directMatchesByDocument.set(documentKey, sourceLocator.locate(params.query));
+            }
+            const directMatches = directMatchesByDocument.get(documentKey) ?? [];
+            // FTS-only 优先使用持久化 locator；其他索引从 chunk 锚点推导范围，
+            // 让字面查询命中之外的 fallback 仍关联到产生它的 chunk。若 direct 命中且
+            // 全局候选池已饱和，则不对每个无 locator chunk 再搜索原文，完整性显式降级。
+            const chunkKey = JSON.stringify([documentKey, r.content]);
+            let inferredRange = locator;
+            const canInferRange = !locator && (directMatches.length === 0 || raw.length < fullTextCandidateLimit);
+            if (!inferredRange && canInferRange && inferredRangeByChunk.has(chunkKey)) {
+              inferredRange = inferredRangeByChunk.get(chunkKey);
+            } else if (!inferredRange && canInferRange) {
+              inferredRange = sourceLocator.locateChunkRange(r.content);
+              inferredRangeByChunk.set(chunkKey, inferredRange);
+            }
+            if (!locator && (!canInferRange || !inferredRange)) unmappedChunkByDocument.add(documentKey);
+            let matches: OriginalMatch[];
+            let rankingFallbackUsed = false;
+            if (inferredRange) {
+              const directChunkMatches = sourceLocator.locate(params.query, { range: inferredRange });
+              if (directChunkMatches.length > 0) {
+                matches = directChunkMatches;
+              } else {
+                matches = sourceLocator.locate(params.query, {
+                  fallbackText: r.content,
+                  range: inferredRange,
+                  fallbackOnly: true,
+                });
+                rankingFallbackUsed = matches.length > 0;
+              }
+            } else if (directMatches.length > 0) {
+              matches = directMatches;
+            } else {
+              matches = sourceLocator.locate(params.query, { fallbackText: r.content });
+              rankingFallbackUsed = matches.length > 0;
+            }
             hit.matches = matches;
-            hit.totalLines = totalOriginalLines(fetched.original);
+            if (rankingFallbackUsed) {
+              fallbackMatchByDocument.add(documentKey);
+              rankingContextsByHit.set(hit, [{ matches, fallbackText: r.content, score: r.score }]);
+            }
+            hit.totalLines = sourceLocator.totalLines;
             if (matches.length > 0) {
               hit.originalExcerpt = matches.map((match) => match.excerpt).join('\n…\n');
             } else {
@@ -356,10 +422,15 @@ async function executeSearchLocal(params: {
     // FTS ID 与原文命中行区间；最终文档 limit 与每文档命中区域 limit 都在聚合后执行。
     if (isFullText) {
       const grouped = new Map<string, SearchHit>();
+      const rankingContextsByDocument = new Map<string, OriginalMatchRankingContext[]>();
       for (const hit of results) {
-        const key = hit.group && hit.relation
-          ? `${hit.scope ?? ''}|${hit.group}|${hit.relation}`
-          : `${hit.scope ?? ''}|${hit.indexType ?? 'unknown'}|${hit.ftsId ?? hit.memoryId}`;
+        const key = fullTextDocumentKey(hit);
+        const contexts = rankingContextsByHit.get(hit) ?? [];
+        if (contexts.length > 0) {
+          const documentContexts = rankingContextsByDocument.get(key);
+          if (documentContexts) documentContexts.push(...contexts);
+          else rankingContextsByDocument.set(key, [...contexts]);
+        }
         const previous = grouped.get(key);
         if (!previous) {
           grouped.set(key, hit);
@@ -387,16 +458,33 @@ async function executeSearchLocal(params: {
         }
       }
       for (const hit of grouped.values()) {
-        const allMatches = mergeOriginalMatches(hit.matches);
+        const key = fullTextDocumentKey(hit);
+        const originalLocator = originalLocatorByDocument.get(key);
+        const directMatches = directMatchesByDocument.get(key) ?? [];
+        const candidateMatches = mergeOriginalMatches(hit.matches);
+        // 合并完整原文直查与 chunk-specific fallback：直查覆盖所有字面命中，
+        // fallback 补足清洗/分词差异；候选池饱和且存在额外 fallback 时只可确认下界。
+        const allMatches = mergeOriginalMatches(directMatches, candidateMatches);
         const selectedMatches = selectTopOriginalMatches(
           allMatches,
           params.query,
           DEFAULT_ORIGINAL_MATCH_LIMIT,
-          { fallbackText: hit.content },
+          { fallbackContexts: rankingContextsByDocument.get(key) },
         );
         hit.matches = selectedMatches;
         hit.matchCount = allMatches.length;
-        hit.matchesTruncated = allMatches.length > selectedMatches.length;
+        const candidateAddsUnverifiedRegions = candidateMatches.some((candidate) => (
+          !directMatches.some((direct) => candidate.lineStart >= direct.lineStart && candidate.lineEnd <= direct.lineEnd)
+        ));
+        hit.matchCountComplete = Boolean(originalLocator)
+          && !unmappedChunkByDocument.has(key)
+          && (raw.length < fullTextCandidateLimit || (
+            directMatches.length > 0
+            && !candidateAddsUnverifiedRegions
+            && !fallbackMatchByDocument.has(key)
+          ));
+        hit.matchesTruncated = allMatches.length > selectedMatches.length
+          || (Boolean(originalLocator) && !hit.matchCountComplete);
         hit.originalExcerpt = buildOriginalExcerpt(selectedMatches);
       }
       results.length = 0;
@@ -411,7 +499,7 @@ async function executeSearchLocal(params: {
     if (!isFullText) {
       const best = new Map<string, SearchHit>();
       for (const hit of results) {
-        const key = hit.group && hit.relation ? `${hit.scope ?? ''}|${hit.group}|${hit.relation}` : '';
+        const key = hit.group && hit.relation ? fullTextDocumentKey(hit) : '';
         if (!key) continue;
         const prev = best.get(key);
         if (!prev || (hit.score ?? 0) > (prev.score ?? 0)) {
@@ -430,7 +518,7 @@ async function executeSearchLocal(params: {
     if (includeOriginal && !isFullText) {
       const seen = new Set<string>();
       for (const hit of results) {
-        const key = hit.group && hit.relation ? `${hit.scope ?? ''}/${hit.group}/${hit.relation}` : '';
+        const key = hit.group && hit.relation ? fullTextDocumentKey(hit) : '';
         if (key && seen.has(key)) {
           // 同一文件多 chunk 命中：原文已在前一条返回，本条省略 original；
           // originalRetrieved 保持 true（非失败），并标注 deduplicated 供消费方区分

@@ -34,9 +34,11 @@ export interface SearchHit {
   content?: string;
   originalExcerpt?: string;
   matches?: Array<{ lineStart: number; lineEnd: number; excerpt: string }>;
-  /** 全文模式下当前文档可复核的命中区域总数。 */
+  /** 全文模式下已复核的命中区域数；不完整时为已知下界。 */
   matchCount?: number;
-  /** 全文模式下是否因默认的前 3 个区域上限而截断。 */
+  /** 全文模式下 matchCount 是否为完整计数。 */
+  matchCountComplete?: boolean;
+  /** 全文模式下是否达到区域上限，或计数不完整而保守标记可能截断。 */
   matchesTruncated?: boolean;
   totalLines?: number;
   memoryId?: string;

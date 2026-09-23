@@ -49,6 +49,53 @@ describe('original-locator', () => {
     ].join('\n'), 'FTS-only Collection');
 
     const selected = selectTopOriginalMatches(matches, 'FTS-only Collection', 2);
-    assert.deepEqual(selected.map((match) => [match.lineStart, match.lineEnd]), [[2, 2], [6, 6]]);
+    assert.deepEqual(selected.map((match) => [match.lineStart, match.lineEnd]), [[2, 2], [4, 4]]);
+  });
+
+  it('命中密度优先于低密度区域中的总出现次数', () => {
+    const matches = [
+      { lineStart: 1, lineEnd: 1, excerpt: `1 | ${'alpha beta '.repeat(8)}${'unrelated '.repeat(30)}` },
+      { lineStart: 20, lineEnd: 20, excerpt: '20 | alpha beta / alpha beta' },
+    ];
+
+    const selected = selectTopOriginalMatches(matches, 'alpha beta', 1);
+    assert.deepEqual(selected.map((match) => match.lineStart), [20]);
+  });
+
+  it('fallback 区域使用产生它的 chunk 文本评分，而非其他 chunk 的内容', () => {
+    const matches = [
+      { lineStart: 1, lineEnd: 1, excerpt: '1 | apple' },
+      { lineStart: 10, lineEnd: 10, excerpt: '10 | alpha beta alpha beta' },
+    ];
+    const fallbackContexts = [
+      { matches: [matches[0]], fallbackText: 'apple', score: 99 },
+      { matches: [matches[1]], fallbackText: 'alpha beta', score: 1 },
+    ];
+
+    const selected = selectTopOriginalMatches(matches, 'absent query', 1, {
+      fallbackText: 'apple',
+      fallbackContexts,
+    });
+    assert.deepEqual(selected.map((match) => match.lineStart), [10]);
+  });
+
+  it('英文查询词和完整短语不把更长 token 中的子串算作命中', () => {
+    const matches = [
+      { lineStart: 1, lineEnd: 1, excerpt: '1 | catapult' },
+      { lineStart: 2, lineEnd: 2, excerpt: '2 | cat landed' },
+    ];
+
+    const selected = selectTopOriginalMatches(matches, 'cat', 1);
+    assert.deepEqual(selected.map((match) => match.lineStart), [2]);
+    assert.deepEqual(
+      locateOriginalMatches('catapult\ncat', 'cat').map((match) => match.lineStart),
+      [2],
+      '完整计数扫描也必须遵守英文 token 边界',
+    );
+    assert.deepEqual(
+      locateOriginalMatches('C+++\nC++', 'C++').map((match) => match.lineStart),
+      [2],
+      '以标点结尾的技术 token 也必须拒绝更长子串',
+    );
   });
 });

@@ -27,15 +27,41 @@ export interface OriginalMatch extends SourceLineRange {
   excerpt: string;
 }
 
+/** 仅用于内部排序：将每个候选原文区域关联回产生它的 FTS chunk。 */
+export interface OriginalMatchRankingContext {
+  matches: OriginalMatch[];
+  fallbackText: string;
+  score?: number;
+}
+
+export interface OriginalLocator {
+  /** 整个文档解析一次，后续按 query / 行范围定位时复用行数组。 */
+  locate(query: string, options?: { fallbackText?: string; range?: SourceLineRange; fallbackOnly?: boolean }): OriginalMatch[];
+  /** 用 chunk 中的原文锚点推导行范围，复用预计算的行偏移。 */
+  locateChunkRange(chunkText: string): SourceLineRange | undefined;
+  totalLines: number;
+}
+
 /** 每个文档默认返回的原文命中区域上限。 */
 export const DEFAULT_ORIGINAL_MATCH_LIMIT = 3;
 
-function lineNumberAt(text: string, offset: number): number {
-  let line = 1;
-  for (let i = 0; i < offset; i += 1) {
-    if (text.charCodeAt(i) === 10) line += 1;
+function buildLineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) starts.push(i + 1);
   }
-  return line;
+  return starts;
+}
+
+function lineNumberAt(lineStarts: number[], offset: number): number {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (lineStarts[middle] <= offset) low = middle + 1;
+    else high = middle - 1;
+  }
+  return high + 1;
 }
 
 function normalizeLine(text: string): string {
@@ -46,7 +72,7 @@ function normalizeLine(text: string): string {
  * 为一个清洗后的 chunk 寻找原文行范围。
  * 只在存在可复核的原文锚点时返回范围；找不到时返回 undefined，避免伪造行号。
  */
-function locateChunkRange(original: string, chunkText: string): SourceLineRange | undefined {
+function locateChunkRange(original: string, chunkText: string, lineStarts: number[]): SourceLineRange | undefined {
   const lines = chunkText
     .split(/\r?\n/)
     .map(normalizeLine)
@@ -63,8 +89,8 @@ function locateChunkRange(original: string, chunkText: string): SourceLineRange 
     if (offset < 0) offset = original.indexOf(candidate);
     if (offset >= 0) {
       matchedRanges.push({
-        lineStart: lineNumberAt(original, offset),
-        lineEnd: lineNumberAt(original, offset + candidate.length - 1),
+        lineStart: lineNumberAt(lineStarts, offset),
+        lineEnd: lineNumberAt(lineStarts, offset + candidate.length - 1),
       });
       searchFrom = offset + candidate.length;
     }
@@ -98,8 +124,9 @@ export function buildChunkLineRanges(
   chunks: Array<{ index: number; text: string }>,
 ): Map<number, SourceLineRange> {
   const result = new Map<number, SourceLineRange>();
+  const lineStarts = buildLineStarts(original);
   for (const chunk of chunks) {
-    const range = locateChunkRange(original, chunk.text);
+    const range = locateChunkRange(original, chunk.text, lineStarts);
     if (range) result.set(chunk.index, range);
   }
   return result;
@@ -119,62 +146,112 @@ function stripExcerptLineNumbers(excerpt: string): string {
   return excerpt.replace(/^\d+ \| /gm, '');
 }
 
+function isAsciiTokenCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[A-Za-z0-9_+#]/.test(character);
+}
+
 function countOccurrences(text: string, term: string): number {
   if (!term) return 0;
+  const startsWithAsciiWord = isAsciiTokenCharacter(term[0]);
+  const endsWithAsciiWord = isAsciiTokenCharacter(term[term.length - 1]);
   let count = 0;
   let offset = 0;
   while (offset < text.length) {
     const index = text.indexOf(term, offset);
     if (index < 0) break;
-    count += 1;
+    const before = text[index - 1];
+    const after = text[index + term.length];
+    if ((!startsWithAsciiWord || !isAsciiTokenCharacter(before)) && (!endsWithAsciiWord || !isAsciiTokenCharacter(after))) count += 1;
     offset = index + Math.max(1, term.length);
   }
   return count;
 }
 
+function normalizeForRanking(text: string): string {
+  return normalizeLine(text).normalize('NFC').toLowerCase();
+}
+
+/** ASCII 单词按 token 边界匹配，避免把 `catapult` 算成命中 `cat`。 */
+function containsTerm(text: string, term: string): boolean {
+  if (!term) return false;
+  let offset = 0;
+  while (offset < text.length) {
+    const index = text.indexOf(term, offset);
+    if (index < 0) return false;
+    const before = text[index - 1];
+    const after = text[index + term.length];
+    const startsWithAsciiWord = isAsciiTokenCharacter(term[0]);
+    const endsWithAsciiWord = isAsciiTokenCharacter(term[term.length - 1]);
+    if ((!startsWithAsciiWord || !isAsciiTokenCharacter(before)) && (!endsWithAsciiWord || !isAsciiTokenCharacter(after))) return true;
+    offset = index + Math.max(term.length, 1);
+  }
+  return false;
+}
+
+function compareContextQuality(
+  a: { coverage: number; density: number; occurrences: number; contextScore: number },
+  b: { coverage: number; density: number; occurrences: number; contextScore: number },
+): number {
+  return b.coverage - a.coverage
+    || b.density - a.density
+    || b.occurrences - a.occurrences
+    || b.contextScore - a.contextScore;
+}
+
 /**
  * 从一个文档的全部候选区域中选择最相关的前 N 个区域。
  *
- * 排名优先级：完整查询短语、查询词覆盖率、查询词出现次数、命中密度、
- * 区域长度，最后用原文行号保证结果稳定。返回值按原文行号排序，便于
+ * 排名优先级：完整查询短语、查询词覆盖率、命中密度、区域紧密度、出现次数，
+ * 最后用原文行号保证结果稳定。返回值按原文行号排序，便于
  * MCP 消费方和前端按“下一个命中”顺序跳转。
  */
 export function selectTopOriginalMatches(
   matches: OriginalMatch[],
   query: string,
   limit = DEFAULT_ORIGINAL_MATCH_LIMIT,
-  options: { fallbackText?: string } = {},
+  options: { fallbackText?: string; fallbackContexts?: OriginalMatchRankingContext[] } = {},
 ): OriginalMatch[] {
   if (matches.length === 0) return [];
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : DEFAULT_ORIGINAL_MATCH_LIMIT;
-  const normalizedQuery = normalizeLine(query).toLocaleLowerCase();
+  const normalizedQuery = normalizeForRanking(query);
   const queryTerms = extractTerms(query);
   const normalizedMatches = matches.map((match) => ({
     match,
-    text: normalizeLine(stripExcerptLineNumbers(match.excerpt)).toLocaleLowerCase(),
+    text: normalizeForRanking(stripExcerptLineNumbers(match.excerpt)),
   }));
-  const hasQueryTerm = queryTerms.some((term) => {
-    const normalizedTerm = term.toLocaleLowerCase();
-    return normalizedMatches.some(({ text }) => text.includes(normalizedTerm));
-  });
-  const rankingTerms = hasQueryTerm || !options.fallbackText
-    ? queryTerms
-    : extractTerms(options.fallbackText).slice(0, 12);
-
   const ranked = normalizedMatches.map(({ match, text }) => {
-    const exactPhrase = normalizedQuery.length >= 2 && text.includes(normalizedQuery) ? 1 : 0;
-    const matchedTerms = rankingTerms.filter((term) => text.includes(term.toLocaleLowerCase()));
-    const occurrences = matchedTerms.reduce(
-      (total, term) => total + countOccurrences(text, term.toLocaleLowerCase()),
-      0,
-    );
-    const density = occurrences / Math.max(1, text.length);
+    const exactPhrase = normalizedQuery.length >= 2 && containsTerm(text, normalizedQuery) ? 1 : 0;
+    const matchedQueryTerms = queryTerms.filter((term) => containsTerm(text, normalizeForRanking(term)));
+    const applicableContexts = matchedQueryTerms.length === 0
+      ? (options.fallbackContexts ?? []).filter((context) => context.matches.some((contextMatch) => (
+        contextMatch.lineStart <= match.lineEnd && contextMatch.lineEnd >= match.lineStart
+      )))
+      : [];
+    const fallbackTerms = applicableContexts.length > 0
+      ? applicableContexts.map((context) => ({
+        terms: extractTerms(context.fallbackText).slice(0, 12),
+        score: context.score ?? 0,
+      }))
+      : matchedQueryTerms.length === 0 && options.fallbackText
+        ? [{ terms: extractTerms(options.fallbackText).slice(0, 12), score: 0 }]
+        : [{ terms: matchedQueryTerms, score: 0 }];
+    const variants = fallbackTerms.map(({ terms, score }) => {
+      const normalizedTerms = terms.map(normalizeForRanking);
+      const matchedTerms = normalizedTerms.filter((term) => containsTerm(text, term));
+      const occurrences = matchedTerms.reduce((total, term) => total + countOccurrences(text, term), 0);
+      return {
+        coverage: matchedTerms.length,
+        occurrences,
+        density: occurrences / Math.max(1, text.length),
+        contextScore: score,
+      };
+    });
+    variants.sort(compareContextQuality);
+    const best = variants[0] ?? { coverage: 0, occurrences: 0, density: 0, contextScore: 0 };
     return {
       match,
       exactPhrase,
-      coverage: matchedTerms.length,
-      occurrences,
-      density,
+      ...best,
       span: match.lineEnd - match.lineStart + 1,
     };
   });
@@ -182,9 +259,10 @@ export function selectTopOriginalMatches(
   ranked.sort((a, b) => (
     b.exactPhrase - a.exactPhrase
       || b.coverage - a.coverage
-      || b.occurrences - a.occurrences
       || b.density - a.density
       || a.span - b.span
+      || b.occurrences - a.occurrences
+      || b.contextScore - a.contextScore
       || a.match.lineStart - b.match.lineStart
       || a.match.lineEnd - b.match.lineEnd
   ));
@@ -198,9 +276,11 @@ export function selectTopOriginalMatches(
 function findMatchingLineNumbers(lines: string[], terms: string[], range?: SourceLineRange): number[] {
   const start = Math.max(1, range?.lineStart ?? 1);
   const end = Math.min(lines.length, range?.lineEnd ?? lines.length);
+  const normalizedTerms = terms.map(normalizeForRanking);
   const matched: number[] = [];
   for (let line = start; line <= end; line += 1) {
-    if (terms.some((term) => lines[line - 1].includes(term))) matched.push(line);
+    const normalizedLine = normalizeForRanking(lines[line - 1]);
+    if (normalizedTerms.some((term) => containsTerm(normalizedLine, term))) matched.push(line);
   }
   return matched;
 }
@@ -218,14 +298,13 @@ function toWindows(lines: number[]): Array<SourceLineRange> {
 /**
  * 在原文中定位查询词；fallbackText 用于查询词经过分词/清洗后与原文不完全一致的旧索引。
  */
-export function locateOriginalMatches(
-  original: string,
+function locateOriginalMatchesInLines(
+  lines: string[],
   query: string,
-  options: { fallbackText?: string; range?: SourceLineRange } = {},
+  options: { fallbackText?: string; range?: SourceLineRange; fallbackOnly?: boolean } = {},
 ): OriginalMatch[] {
-  const lines = original.split(/\r?\n/);
   const queryTerms = extractTerms(query);
-  let matched = findMatchingLineNumbers(lines, queryTerms, options.range);
+  let matched = options.fallbackOnly ? [] : findMatchingLineNumbers(lines, queryTerms, options.range);
 
   if (matched.length === 0 && options.fallbackText) {
     const fallbackTerms = extractTerms(options.fallbackText).slice(0, 12);
@@ -240,6 +319,25 @@ export function locateOriginalMatches(
       .map((line, index) => `${lineStart + index} | ${line}`)
       .join('\n'),
   }));
+}
+
+/** 缓存拆分行数组与行偏移，供同一文档的多个 FTS chunk 复用。 */
+export function createOriginalLocator(original: string): OriginalLocator {
+  const lines = original.split(/\r?\n/);
+  const lineStarts = buildLineStarts(original);
+  return {
+    totalLines: lines.length,
+    locate: (query, options = {}) => locateOriginalMatchesInLines(lines, query, options),
+    locateChunkRange: (chunkText) => locateChunkRange(original, chunkText, lineStarts),
+  };
+}
+
+export function locateOriginalMatches(
+  original: string,
+  query: string,
+  options: { fallbackText?: string; range?: SourceLineRange; fallbackOnly?: boolean } = {},
+): OriginalMatch[] {
+  return createOriginalLocator(original).locate(query, options);
 }
 
 export function totalOriginalLines(original: string): number {
