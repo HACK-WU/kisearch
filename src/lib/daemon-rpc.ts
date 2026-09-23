@@ -176,9 +176,12 @@ export async function startDaemonRpcServer(opts: DaemonRpcOptions = {}): Promise
   const config = loadConfig();
   ensureVectorLayout(config);
   const socketPath = getDaemonSocketPath();
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(path.dirname(socketPath), 0o700); } catch { /* 权限设置失败由后续连接错误暴露 */ }
-  await removeStaleSocket(socketPath);
+  const isWindows = process.platform === 'win32';
+  if (!isWindows) {
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(path.dirname(socketPath), 0o700); } catch { /* 权限设置失败由后续连接错误暴露 */ }
+    await removeStaleSocket(socketPath);
+  }
   const coordinator = getSharedOperationCoordinator();
   const server = net.createServer((socket) => {
     socket.setEncoding('utf8');
@@ -222,7 +225,7 @@ export async function startDaemonRpcServer(opts: DaemonRpcOptions = {}): Promise
   await new Promise<void>((resolve, reject) => {
     const onListenError = (err: Error) => reject(err);
     server.once('error', onListenError);
-    server.listen(socketPath, () => {
+    server.listen({ path: socketPath, readableAll: false, writableAll: false }, () => {
       // listen 成功后必须摘掉这个一次性 reject：否则后续的服务器级错误
       //（EMFILE、socket 文件被外部删除等）会被一个已 settle 的 reject 静默吞掉。
       server.removeListener('error', onListenError);
@@ -232,10 +235,15 @@ export async function startDaemonRpcServer(opts: DaemonRpcOptions = {}): Promise
   server.on('error', (err) => {
     logDaemon(`daemon RPC 服务器错误：${err.message}`);
   });
-  try { fs.chmodSync(socketPath, 0o600); } catch { /* 权限设置失败由启动检查暴露 */ }
+  if (!isWindows) {
+    try { fs.chmodSync(socketPath, 0o600); } catch { /* 权限设置失败由启动检查暴露 */ }
+  }
   const cleanup = () => {
     opts.onShutdown?.();
-    try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
+    // Named pipes are released by Windows when their server handle closes.
+    if (!isWindows) {
+      try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
+    }
   };
   server.once('close', cleanup);
   return server;

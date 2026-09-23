@@ -24,6 +24,11 @@ function runCli(args: string[], envExtra: Record<string, string | undefined> = {
     if (v === undefined) delete env[k];
     else env[k] = v;
   }
+  // Node resolves os.homedir() from USERPROFILE on Windows, not HOME. Mirror
+  // isolated HOME fixtures so tests never read or write the real user's .ki data.
+  if (process.platform === 'win32' && envExtra.HOME !== undefined) {
+    env.USERPROFILE = envExtra.HOME;
+  }
   try {
     const stdout = execFileSync('node', [CLI, ...args], {
       encoding: 'utf-8',

@@ -181,6 +181,9 @@ try {
   });
 
   if (isDaemon) {
+    // Windows cold starts can spend longer loading jiti before argument/config
+    // validation exits; a 3s probe reports success for failures that arrive just after it.
+    const startupFailureProbeMs = process.platform === 'win32' ? 10_000 : 3_000;
     // 启动期存活探测（bug 修复）：token 缺失/参数非法/端口冲突等 fail-loud
     // 发生在子进程启动早期（parseMcpArgs/预检阶段）。此前父进程 spawn 后
     // 立即打印"已在后台启动"，子进程随后退出 → 假成功（实测：非回环无
@@ -191,7 +194,7 @@ try {
       const timer = setTimeout(() => {
         child.removeAllListeners('exit');
         resolve(null);
-      }, 3000);
+      }, startupFailureProbeMs);
       child.on('exit', (code) => {
         clearTimeout(timer);
         resolve({ code });
