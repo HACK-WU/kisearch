@@ -37,6 +37,8 @@ interface PendingSelection {
 }
 
 interface UploadPlan {
+  scope: string;
+  selectionSnapshot: PendingSelection[];
   batches: PendingFile[][];
   nextBatch: number;
   currentBatch: number;
@@ -385,20 +387,30 @@ export function ImportPage(): JSX.Element {
   const [phase, setPhase] = useState<'idle' | 'scanning' | 'uploading' | 'importing' | 'done' | 'failed'>('idle');
   const [job, setJob] = useState<ImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | null>(null);
+  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | 'cancelled' | null>(null);
   const [uploadErrors, setUploadErrors] = useState<{ name: string; error: string }[]>([]);
   const [progressText, setProgressText] = useState('');
   const [uploadStats, setUploadStats] = useState<UploadStats | null>(null);
   const [failedUploadBatch, setFailedUploadBatch] = useState<number | null>(null);
   const uploadPlanRef = useRef<UploadPlan | null>(null);
+  const canRetryUpload = (): boolean => {
+    const plan = uploadPlanRef.current;
+    return !!plan && plan.scope === scope && plan.selectionSnapshot === selections;
+  };
 
   // 进度轮询（导入中每 2s）
   useEffect(() => {
     if (phase !== 'importing' || !job) return;
+    let active = true;
+    let checking = false;
     const timer = setInterval(async () => {
+      if (!active || checking) return;
+      checking = true;
       try {
         const res = await getImportStatus(job.id);
+        if (!active) return;
         if (!res.ok || !res.job) {
+          active = false;
           clearInterval(timer);
           setPhase('failed');
           setFailureStage('import');
@@ -407,27 +419,38 @@ export function ImportPage(): JSX.Element {
         }
         setJob(res.job);
         if (res.job.state === 'done') {
+          active = false;
           clearInterval(timer);
+          setProgressText('');
           setPhase('done');
         } else if (res.job.state === 'failed') {
+          active = false;
           clearInterval(timer);
           setPhase('failed');
           setFailureStage('import');
           setError(res.job.error ?? '导入失败');
         } else if (res.job.state === 'cancelled') {
+          active = false;
           clearInterval(timer);
           setPhase('failed');
-          setFailureStage('import');
+          setFailureStage('cancelled');
           setError('导入已取消');
         }
       } catch (e) {
+        if (!active) return;
+        active = false;
         clearInterval(timer);
         setPhase('failed');
         setFailureStage('import');
         setError(`查询导入状态失败：${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        checking = false;
       }
     }, 2000);
-    return () => clearInterval(timer);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [phase, job?.id]);
 
   const nextSelectionId = (): string => `selection-${Date.now()}-${selectionSeq.current++}`;
@@ -726,6 +749,7 @@ export function ImportPage(): JSX.Element {
   };
 
   const start = async (): Promise<void> => {
+    setFailureStage(null);
     if (scopeErr) {
       setError(scopeErr);
       return;
@@ -754,6 +778,8 @@ export function ImportPage(): JSX.Element {
     setJob(null);
     const batches = toUploadBatches(files, importPolicy.maxRequestBody);
     const plan: UploadPlan = {
+      scope,
+      selectionSnapshot: selections,
       batches,
       nextBatch: 0,
       currentBatch: 0,
@@ -768,7 +794,7 @@ export function ImportPage(): JSX.Element {
   };
 
   const retryUpload = async (): Promise<void> => {
-    if (failedUploadBatch === null) return;
+    if (failureStage !== 'upload' || failedUploadBatch === null || !canRetryUpload()) return;
     const uploadId = await continueUpload(failedUploadBatch);
     if (uploadId) await triggerImport(uploadId);
   };
@@ -788,6 +814,23 @@ export function ImportPage(): JSX.Element {
     ? Math.min(100, Math.round((uploadStats.filesDone / uploadStats.totalFiles) * 100))
     : null;
   const activePercent = phase === 'uploading' ? uploadPercent : importPercent;
+  const errorStatus = failureStage === 'scan'
+    ? '读取失败'
+    : failureStage === 'upload'
+      ? '上传失败'
+      : failureStage === 'cancelled'
+        ? '导入已取消'
+        : failureStage === 'import'
+          ? '导入失败'
+          : '输入有误';
+  const retryUploadPlan = uploadPlanRef.current;
+  const buttonStatus = error
+    ? errorStatus
+    : phase === 'done'
+      ? '导入完成'
+      : phase === 'failed'
+        ? errorStatus
+        : progressText || '直导无需 AI · 无第三方依赖';
 
   return (
     <>
@@ -1069,7 +1112,7 @@ export function ImportPage(): JSX.Element {
             >
               {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
-            <span className="ki-cell-sub">{progressText || '直导无需 AI · 无第三方依赖'}</span>
+            <span className="ki-cell-sub">{buttonStatus}</span>
           </div>
         </div>
       </div>
@@ -1103,12 +1146,12 @@ export function ImportPage(): JSX.Element {
       {error && (
         <div className="ki-empty" style={{ marginTop: 16 }}>
           <div>
-            <h3>{failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败'}</h3>
+            <h3>{errorStatus}</h3>
             <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{error}</p>
-            {failedUploadBatch !== null && uploadPlanRef.current && (
+            {failureStage === 'upload' && failedUploadBatch !== null && retryUploadPlan && canRetryUpload() && (
               <div className="ki-empty__actions">
                 <button className="ki-btn ki-btn--primary ki-btn--small" onClick={() => void retryUpload()}>
-                  重试第 {failedUploadBatch + 1}/{uploadPlanRef.current.batches.length} 批
+                  重试第 {failedUploadBatch + 1}/{retryUploadPlan.batches.length} 批
                 </button>
               </div>
             )}
@@ -1127,7 +1170,7 @@ export function ImportPage(): JSX.Element {
         </div>
       )}
 
-      {phase === 'done' && (
+      {phase === 'done' && !error && (
         <div className="ki-empty" style={{ marginTop: 16 }}>
           <div>
             <h3>{importErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
