@@ -640,7 +640,7 @@ describe('C. health-check —— runHealthCheck', () => {
     return report.items.find((i) => i.name === name);
   }
 
-  it('scopes.default 存在 → pass；无 apiKey → embedding 三项与 apiKey fail', async () => {
+  it('无 apiKey：doctor 报失败，MCP 启动预检只告警', async () => {
     const report = await runHealthCheck(baseConfig());
     assert.strictEqual(itemOf(report, 'scopes.default')?.status, 'pass');
     assert.strictEqual(itemOf(report, 'apiKey')?.status, 'fail');
@@ -648,6 +648,20 @@ describe('C. health-check —— runHealthCheck', () => {
     assert.strictEqual(itemOf(report, '密钥有效性')?.status, 'fail');
     assert.strictEqual(itemOf(report, '维度匹配')?.status, 'fail');
     assert.strictEqual(itemOf(report, '配置文件')?.status, 'pass');
+
+    const startupReport = await runHealthCheck(baseConfig(), { embeddingFailure: 'warn' });
+    assert.strictEqual(itemOf(startupReport, 'apiKey')?.status, 'warn');
+    assert.strictEqual(itemOf(startupReport, 'URL 连通性')?.status, 'warn');
+    assert.strictEqual(itemOf(startupReport, '密钥有效性')?.status, 'warn');
+    assert.strictEqual(itemOf(startupReport, '维度匹配')?.status, 'warn');
+    assert.strictEqual(startupReport.fail, 0);
+
+    const hardFailureReport = await runHealthCheck(
+      baseConfig({ dataDir: path.join(goodDir, 'missing-data-dir') }),
+      { embeddingFailure: 'warn' },
+    );
+    assert.strictEqual(itemOf(hardFailureReport, 'dataDir')?.status, 'fail');
+    assert.ok(hardFailureReport.fail > 0, 'embedding 告警不得掩盖目录硬失败');
   });
 
   it('embedding 网络失败可在 MCP 启动预检中降级为 warn，doctor 默认仍为 fail', async () => {

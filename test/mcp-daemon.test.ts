@@ -142,6 +142,42 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
     }
   });
 
+  it('未配置 embedding.apiKey 时 HTTP + web daemon 仍能启动', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-no-embed-key-'));
+    const port = randPort();
+    const configPath = path.join(home, '.ki', 'config.json');
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({
+        dataDir: path.join(home, '.ki/kb'),
+        vectorDir: path.join(home, '.ki/vector'),
+        backupDir: path.join(home, '.ki/backup'),
+        embedding: {
+          provider: 'siliconflow',
+          baseURL: 'https://api.siliconflow.cn/v1',
+          model: 'test-model',
+          dimension: 1,
+        },
+        scopes: { default: {} },
+      }));
+      for (const dir of ['kb', 'vector', 'backup']) fs.mkdirSync(path.join(home, '.ki', dir), { recursive: true });
+
+      const result = runCli(
+        ['mcp', '--http', '--web', '--port', String(port), '-d'],
+        {
+          HOME: home,
+          KI_CONFIG_PATH: configPath,
+          SILICONFLOW_API_KEY: undefined,
+        },
+      );
+      assert.strictEqual(result.status, 0, `stdout=${result.stdout} stderr=${result.stderr}`);
+      assert.match(result.stdout, /已在后台启动/);
+    } finally {
+      runCli(['mcp', 'stop', '--port', String(port)], { HOME: home, KI_CONFIG_PATH: configPath });
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('ki mcp restart 遇到 embedding 网络失败仍能就绪', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-restart-embed-warn-'));
     const port = randPort();
