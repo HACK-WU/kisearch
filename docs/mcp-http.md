@@ -173,7 +173,7 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 
 1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
 2. 检查升级前遗留的 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的旧版直连 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid；新版本 stdio 是 daemon 桥，不会产生这类 zvec owner 冲突。
-3. 通过守卫后执行启动预检，再 `listen`。embedding 连通性探测超时/网络失败会重试 1 次，仍失败时记录为 ⚠️ 警告并继续启动；配置文件、目录、apiKey 等硬错误仍 fail-loud。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
+3. 通过守卫后执行启动预检，再 `listen`。embedding 网络/可重试服务故障会重试 1 次，仍失败时记录为 ⚠️ 警告并继续启动；未配置 `embedding.apiKey` 也只告警并继续。配置文件、目录、无效密钥或维度不匹配等硬错误仍 fail-loud。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
 4. 成功监听后写按身份派生的 `~/.ki/mcp-http-<fingerprint>.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
 因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程——且不要求这些环境都能通过预检。

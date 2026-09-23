@@ -45,7 +45,7 @@ export interface HealthCheckOptions {
 
 interface EmbeddingCheckResult {
   items: HealthItem[];
-  /** 仅网络/超时/可重试 HTTP 错误可在 MCP 启动预检中降级。 */
+  /** 缺少 apiKey 或可重试的网络/HTTP 故障，可在 MCP 启动预检中降级。 */
   degradable: boolean;
 }
 
@@ -76,7 +76,7 @@ async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
   // 不做隐式 env 回退：提供商由 baseURL 自由配置，固定厂商密钥变量不应跨厂商注入。
   const effectiveApiKey = emb.apiKey;
 
-  // apiKey 缺失时无法发起请求，三项均标失败（根因见 apiKey 检查项）
+  // apiKey 缺失时无法发起请求；MCP 启动可降级提示，但 doctor/API 仍如实报失败。
   if (!effectiveApiKey) {
     const detail = '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用），跳过检查';
     return {
@@ -85,7 +85,7 @@ async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
         { name: nameKey, status: 'fail', detail },
         { name: nameDim, status: 'fail', detail },
       ],
-      degradable: false,
+      degradable: true,
     };
   }
 
@@ -225,18 +225,23 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
   items.push(checkDir('backupDir', config.backupDir));
   items.push(checkDir('vectorDir', getVectorDir(config)));
 
-  // 5. apiKey：仅取配置 embedding.apiKey（明文 / ${ENV_VAR}），不做隐式 env 回退
+  // 5. apiKey：仅取配置 embedding.apiKey（明文 / ${ENV_VAR}），不做隐式 env 回退。
+  // MCP 启动时缺少 key 只告警；doctor/API 默认仍按硬失败诊断。
+  const embeddingFailureStatus = options.embeddingFailure ?? 'fail';
   const embForKey = getEmbeddingConfig(config);
   if (embForKey.apiKey) {
     items.push({ name: 'apiKey', status: 'pass', detail: '已从配置 embedding.apiKey 解析' });
   } else {
-    items.push({ name: 'apiKey', status: 'fail', detail: '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用）' });
+    items.push({
+      name: 'apiKey',
+      status: embeddingFailureStatus === 'warn' ? 'warn' : 'fail',
+      detail: '未配置 embedding.apiKey（明文或 ${VAR_NAME} 引用）',
+    });
   }
 
   // 6~8. embedding 连通性 / 密钥 / 维度（三合一请求）
   {
     const embeddingResult = await checkEmbedding(config);
-    const embeddingFailureStatus = options.embeddingFailure ?? 'fail';
     const normalizedEmbeddingItems = embeddingFailureStatus === 'warn' && embeddingResult.degradable
       ? embeddingResult.items.map((item) => item.status === 'fail' ? { ...item, status: 'warn' as const } : item)
       : embeddingResult.items;

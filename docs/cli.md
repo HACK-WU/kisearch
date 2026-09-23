@@ -1271,7 +1271,7 @@ scopes:
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 
-> `apiKey` 为必填项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的 `SILICONFLOW_API_KEY`），以免在非硅基流动提供商下误用密钥。若仍想用 `SILICONFLOW_API_KEY`，显式写 `apiKey: ${SILICONFLOW_API_KEY}` 即可。
+> `apiKey` 是向量化功能的必需项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的 `SILICONFLOW_API_KEY`），以免在非硅基流动提供商下误用密钥。若仍想用 `SILICONFLOW_API_KEY`，显式写 `apiKey: ${SILICONFLOW_API_KEY}` 即可。缺少 key 时 MCP 仍会启动并提示警告；`ki doctor` 仍报告配置失败，向量化导入会报错，`sync-relation` 会返回 `vectorStored:false` 和 `vectorReason`。
 >
 > ⚠️ **向后不兼容变更**：旧版仅靠环境变量 `SILICONFLOW_API_KEY`（未写 `embedding.apiKey`）的配置，升级后需在配置文件显式声明 `apiKey`。
 
@@ -1311,7 +1311,7 @@ ki doctor
 
 > 字段校验失败（`CONFIG_FIELD_INVALID`）时报告不会输出，而是直接打印错误清单并以退出码 `1` 结束；错误项内已含字段路径与相近字段建议，修正后重跑即可。
 
-> `ki mcp` 在启动前会自动执行健康检查，报告写入 stderr（不污染 stdio 协议）；embedding 连通性失败重试 1 次后按 ⚠️ 警告处理并继续启动，其他 ❌ 硬失败项仍拒绝启动。`ki doctor` 保持严格诊断语义，embedding 失败仍以 ❌ 退出码 1 报告。
+> `ki mcp` 在启动前会自动执行健康检查，报告写入 stderr（不污染 stdio 协议）；embedding 网络/可重试服务故障在重试 1 次后、以及未配置 `embedding.apiKey` 时，按 ⚠️ 警告处理并继续启动。配置文件、目录、无效密钥或维度不匹配等硬失败仍拒绝启动。`ki doctor` 保持严格诊断语义，缺少 key 或 embedding 检查失败仍以 ❌ 退出码 1 报告。
 
 ---
 

@@ -168,7 +168,8 @@ dataDir: $HOME/.ki/kb       # KB 源数据目录
 backupDir: $HOME/.ki/backup  # 备份目录
 vectorDir: $HOME/.ki/vector  # zvec 向量库（所有 scope 共享，按 metadata 隔离）
 embedding:
-  provider: siliconflow       # apiKey 从环境变量 SILICONFLOW_API_KEY 读取
+  provider: siliconflow
+  apiKey: ${SILICONFLOW_API_KEY} # 显式引用环境变量；不做隐式回退
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 必须与建库时一致
   queryTimeoutMs: 3000        # 查询 embedding 超时（ms），默认 3 秒
@@ -273,7 +274,7 @@ ki mcp token update <id> --scope all    # 修改 Token 授权 scope
 ki mcp token delete <id>                # 删除 Token（立即失效）
 ```
 
-> **启动预检**：HTTP daemon 启动前自动执行健康检查，报告写入 stderr（不污染 stdio）。embedding 连通性失败会重试 1 次，仍失败时记为 ⚠️ 警告并继续启动；配置文件、目录、apiKey 等硬错误仍 fail-loud。stdio 客户端只负责桥接并等待 daemon 就绪。
+> **启动预检**：HTTP daemon 启动前自动执行健康检查，报告写入 stderr（不污染 stdio）。embedding 网络/服务暂时不可用（重试 1 次后）或未配置 `embedding.apiKey` 时记为 ⚠️ 警告并继续启动；配置文件、目录、无效密钥等硬错误仍 fail-loud。`ki doctor` 对缺失 key 仍报错；启用向量化的导入/关系写入会返回向量失败信息。stdio 客户端只负责桥接并等待 daemon 就绪。
 
 ### MCP 客户端配置
 
