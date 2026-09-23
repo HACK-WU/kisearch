@@ -3,10 +3,10 @@
  * 前端不启动/关闭服务，仅检测 + 手动指引。
  */
 
-import { useHealth } from '@/lib/hooks';
+import { useHttpReadiness } from '@/lib/hooks';
 
 export function HealthBanner(): JSX.Element | null {
-  const { data, isError, isPending, refetch } = useHealth();
+  const { data, isError, isPending, refetch } = useHttpReadiness();
 
   if (isPending) return null;
   if (isError || !data?.ok) {

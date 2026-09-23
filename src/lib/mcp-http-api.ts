@@ -53,8 +53,11 @@ import { isFtsOnlyIndexedRelation } from './scoring.js';
 const MAX_BODY = 16 * 1024 * 1024;
 /** /api/doc/list 默认分页上限 */
 const DOC_LIST_LIMIT = 500;
-/** /api/health 超时（runHealthCheck 含 zvec 探活） */
-const HEALTH_TIMEOUT_MS = 10_000;
+/**
+ * /api/health 超时（runHealthCheck 含 zvec 探活）。Embedding 健康检查最多
+ * 8s × 2 次尝试；留出重试及本地检查的收尾时间，避免把外部超时误报成 HTTP 不可用。
+ */
+const HEALTH_TIMEOUT_MS = 20_000;
 
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
@@ -390,16 +393,21 @@ async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<v
 
 async function handleHealth(res: http.ServerResponse): Promise<void> {
   const config = loadConfig();
-  const report = await Promise.race([
-    runHealthCheck(config),
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error('health check timeout')),
-        HEALTH_TIMEOUT_MS,
-      ),
-    ),
-  ]);
-  sendJson(res, 200, { ok: true, report });
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const report = await Promise.race([
+      runHealthCheck(config),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('health check timeout')),
+          HEALTH_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    sendJson(res, 200, { ok: true, report });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 // ─── GET /api/search-config ──────────────────────────

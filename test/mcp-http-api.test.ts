@@ -30,7 +30,11 @@ import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 process.env.HOME = tmpHome;
+// Node on Windows resolves os.homedir() from USERPROFILE, not HOME.
+process.env.USERPROFILE = tmpHome;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'ki-config.json');
 fs.writeFileSync(
   process.env.KI_CONFIG_PATH,
@@ -67,6 +71,10 @@ before(async () => {
 
 after(async () => {
   await handle?.close();
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
@@ -425,7 +433,8 @@ describe('/api/import/run + status', () => {
     const secondUpload = await fetch(`${handle!.base}/api/import/upload`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope: 'run-conflict-result', files: [{ name: '*foo*.md', content: Buffer.from('# second').toString('base64') }] }),
+      // `~` is valid on Windows; deriveRelationText strips it so this still conflicts with foo.md.
+      body: JSON.stringify({ scope: 'run-conflict-result', files: [{ name: '~foo~.md', content: Buffer.from('# second').toString('base64') }] }),
     });
     const secondBody = await secondUpload.json();
     const secondRun = await fetch(`${handle!.base}/api/import/run`, {

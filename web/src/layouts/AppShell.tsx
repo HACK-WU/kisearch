@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { useHealth } from '@/lib/hooks';
+import { isVectorHealthCheck, useHealth, useHttpReadiness, useVectorAvailability } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import webPackage from '../../package.json';
 
@@ -38,16 +38,43 @@ function useTheme(): { theme: string; toggle: () => void } {
 }
 
 function ServiceBadge(): JSX.Element {
-  const { data, isError, isLoading } = useHealth();
+  const health = useHealth();
+  const readiness = useHttpReadiness();
+  const vectorAvailability = useVectorAvailability();
   let dot = 'ki-dot--muted';
   let text = '检测中…';
-  if (!isLoading) {
-    if (isError || !data?.ok) {
+  let title: string | undefined;
+  if (!readiness.isPending) {
+    const data = health.data;
+    const failedItems = data?.report?.items.filter((item) => item.status === 'fail') ?? [];
+    const failCount = data?.report?.fail ?? 0;
+    const onlyVectorFailures = failCount > 0
+      && failedItems.length === failCount
+      && failedItems.every((item) => isVectorHealthCheck(item.name));
+    if (readiness.isError || !readiness.data?.ok) {
       dot = 'ki-dot--err';
       text = 'MCP HTTP 未就绪';
-    } else if ((data.report?.fail ?? 0) > 0) {
+    } else if (data && failCount > 0 && !onlyVectorFailures) {
       dot = 'ki-dot--err';
       text = 'MCP HTTP 已就绪 · 健康异常';
+    } else if (vectorAvailability.status === 'unavailable') {
+      dot = 'ki-dot--warn';
+      text = 'MCP HTTP 已就绪 · 向量不可用';
+      title = vectorAvailability.reason;
+    } else if (health.isPending) {
+      dot = 'ki-dot--muted';
+      text = 'MCP HTTP 已就绪 · 检查向量中';
+    } else if (health.isError || !data?.ok) {
+      dot = 'ki-dot--warn';
+      text = 'MCP HTTP 已就绪 · 向量检查失败';
+      title = health.error instanceof Error ? health.error.message : undefined;
+    } else if (vectorAvailability.status === 'unknown') {
+      dot = 'ki-dot--warn';
+      text = 'MCP HTTP 已就绪 · 向量状态未知';
+      title = vectorAvailability.reason;
+    } else if (vectorAvailability.status === 'checking') {
+      dot = 'ki-dot--muted';
+      text = 'MCP HTTP 已就绪 · 检查向量中';
     } else if ((data.report?.warn ?? 0) > 0) {
       dot = 'ki-dot--warn';
       text = 'MCP HTTP 已就绪 · 有告警';
@@ -57,7 +84,7 @@ function ServiceBadge(): JSX.Element {
     }
   }
   return (
-    <span className="ki-service-badge">
+    <span className="ki-service-badge" title={title}>
       <span className={`ki-dot ${dot}`} />
       <span>{text}</span>
     </span>

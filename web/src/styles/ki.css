@@ -499,6 +499,8 @@ a:hover { text-decoration: underline; }
 }
 .ki-switch--on { background: var(--ki-color-primary); }
 .ki-switch--on .ki-switch__knob { transform: translateX(20px); }
+.ki-switch:disabled { cursor: not-allowed; opacity: 0.55; }
+.ki-vector-status-hint { color: var(--ki-color-warning); }
 
 /* 分段控件（tabs） */
 .ki-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 8px; padding: 2px; border: 1px solid var(--ki-color-border); }

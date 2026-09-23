@@ -9,7 +9,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
-import { useDocList } from '@/lib/hooks';
+import { useDocList, useVectorAvailability } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
@@ -110,6 +110,9 @@ export function SearchPage(): JSX.Element {
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
+  const fullTextSearch = !vectorAvailable || fullTextOnly;
   /** 供「清空」后把焦点交还输入框，用户可直接打下一次查询 */
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -213,7 +216,7 @@ export function SearchPage(): JSX.Element {
         tags: searchTags,
         threshold: threshold || undefined,
         limit: Number(limit) || 10,
-        mode: fullTextOnly ? 'fulltext' : 'hybrid',
+        mode: fullTextSearch ? 'fulltext' : 'hybrid',
         ...(timeout !== undefined ? { timeout } : {}),
       });
       // 后端业务层错误（如向量库锁定）
@@ -226,7 +229,7 @@ export function SearchPage(): JSX.Element {
       setResults(hits);
       setTotal(hits.length);
       setResultQuery(query.trim());
-      setResultMode(fullTextOnly ? 'fulltext' : 'hybrid');
+      setResultMode(fullTextSearch ? 'fulltext' : 'hybrid');
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -323,14 +326,14 @@ export function SearchPage(): JSX.Element {
               max={THRESHOLD_MAX}
               step={THRESHOLD_STEP}
               value={threshold}
-              disabled={fullTextOnly}
+              disabled={fullTextSearch}
               onChange={(e) => setThreshold(Number(e.target.value))}
             />
             <button
               type="button"
               className="ki-step-btn"
               aria-label="降低阈值"
-              disabled={fullTextOnly || threshold <= 0}
+              disabled={fullTextSearch || threshold <= 0}
               onClick={() => setThreshold((v) => stepThreshold(v, -1))}
             >−</button>
             <span className="ki-threshold-val">{threshold.toFixed(3)}</span>
@@ -338,7 +341,7 @@ export function SearchPage(): JSX.Element {
               type="button"
               className="ki-step-btn"
               aria-label="提高阈值"
-              disabled={fullTextOnly || threshold >= THRESHOLD_MAX}
+              disabled={fullTextSearch || threshold >= THRESHOLD_MAX}
               onClick={() => setThreshold((v) => stepThreshold(v, 1))}
             >+</button>
           </div>
@@ -351,7 +354,7 @@ export function SearchPage(): JSX.Element {
               max={QUERY_TIMEOUT_MAX_SECONDS}
               step="any"
               value={queryTimeout ?? ''}
-              disabled={fullTextOnly}
+              disabled={fullTextSearch}
               placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
               onChange={(e) => {
                 queryTimeoutTouched.current = true;
@@ -376,15 +379,25 @@ export function SearchPage(): JSX.Element {
             <span className="ki-form-label">全文</span>
             <button
               type="button"
-              className={`ki-switch${fullTextOnly ? ' ki-switch--on' : ''}`}
+              className={`ki-switch${fullTextSearch ? ' ki-switch--on' : ''}`}
               role="switch"
-              aria-checked={fullTextOnly}
+              aria-checked={fullTextSearch}
               aria-label="仅进行全文检索"
+              disabled={!vectorAvailable}
+              title={vectorAvailability.reason}
               onClick={() => setFullTextOnly((value) => !value)}
             >
               <div className="ki-switch__knob" />
             </button>
-            <span className="ki-form-suffix">{fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}</span>
+            <span className={`ki-form-suffix${!vectorAvailable ? ' ki-vector-status-hint' : ''}`}>
+              {!vectorAvailable
+                ? vectorAvailability.status === 'unavailable'
+                  ? '向量不可用，仅全文检索'
+                  : vectorAvailability.status === 'checking'
+                    ? '正在检查向量，暂用全文检索'
+                    : '无法确认向量状态，暂用全文检索'
+                : fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}
+            </span>
           </div>
         </div>
       </form>
@@ -395,7 +408,15 @@ export function SearchPage(): JSX.Element {
           <div>
             <div style={{ fontSize: 32, marginBottom: 8 }}>⌕</div>
             <h3>输入查询开始搜索</h3>
-            <p>混合检索当前 scope 的知识库内容，命中结果可定位原文。</p>
+            <p>{!fullTextSearch
+              ? '混合检索当前 scope 的知识库内容，命中结果可定位原文。'
+              : vectorAvailable
+                ? '仅全文检索已开启，查询不调用 embedding。'
+              : vectorAvailability.status === 'unavailable'
+                ? '向量服务不可用，当前仅使用全文索引检索。'
+                : vectorAvailability.status === 'checking'
+                  ? '正在检查向量服务，检查完成前仅使用全文索引检索。'
+                  : '无法确认向量服务状态，当前仅使用全文索引检索。'}</p>
           </div>
         </div>
       )}

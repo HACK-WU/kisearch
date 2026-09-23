@@ -8,6 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useVectorAvailability } from '@/lib/hooks';
 import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
@@ -17,10 +18,16 @@ import { groupError, relationError, scopeError, tagError } from '@/lib/validator
 
 export function WritePage(): JSX.Element {
   const currentScope = useScopeValue();
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
   const [scope, setScope] = useState(currentScope);
   useEffect(() => setScope(currentScope), [currentScope]);
   const [preview, setPreview] = useState(false);
-  const [vector, setVector] = useState(true);
+  const [vector, setVector] = useState(false);
+
+  useEffect(() => {
+    if (!vectorAvailable) setVector(false);
+  }, [vectorAvailable]);
 
   // relation 表单
   const [group, setGroup] = useState('');
@@ -82,9 +89,10 @@ export function WritePage(): JSX.Element {
       return;
     }
     setSubmitting(true);
+    const vectorEnabled = vectorAvailable && vector;
     try {
-      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: selectedTags });
-      setResult(`写入成功${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`);
+      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector: vectorEnabled, tags: selectedTags });
+      setResult(`写入成功${vectorEnabled ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`);
       setGroup('');
       setRelation('');
       setMarkdown('');
@@ -298,15 +306,27 @@ export function WritePage(): JSX.Element {
                 <span className="ki-vec-switch__title">向量化</span>
                 <span className="ki-vec-switch__desc">写入 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
               </div>
-              <div
-                className={`ki-switch${vector ? ' ki-switch--on' : ''}`}
+              <button
+                type="button"
+                className={`ki-switch${vectorAvailable && vector ? ' ki-switch--on' : ''}`}
                 role="switch"
-                aria-checked={vector}
+                aria-checked={vectorAvailable && vector}
+                disabled={!vectorAvailable}
+                title={vectorAvailability.reason}
                 onClick={() => setVector((v) => !v)}
               >
                 <div className="ki-switch__knob" />
-              </div>
+              </button>
             </div>
+            {!vectorAvailable && (
+              <div className="ki-form-hint ki-vector-status-hint" role="status" aria-live="polite">
+                ⚠ {vectorAvailability.status === 'unavailable'
+                  ? `向量不可用，已禁用向量化${vectorAvailability.reason ? `：${vectorAvailability.reason}` : ''}`
+                  : vectorAvailability.status === 'checking'
+                    ? '正在检查向量可用性，检查完成前向量化保持禁用。'
+                    : `无法确认向量可用性，已禁用向量化${vectorAvailability.reason ? `：${vectorAvailability.reason}` : ''}`}
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 20 }}>
               <button

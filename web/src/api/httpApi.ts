@@ -28,6 +28,11 @@ export interface HealthResponse {
   error?: string;
 }
 
+export interface HttpReadinessResponse {
+  ok: boolean;
+  name?: string;
+}
+
 export interface SearchConfigResponse {
   ok: boolean;
   /** 语义检索 query embedding 默认超时（秒） */
@@ -142,6 +147,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getHealth(): Promise<HealthResponse> {
   return req<HealthResponse>('/api/health');
+}
+
+/** 只确认 MCP HTTP 进程可响应；不执行 embedding 等外部健康诊断。 */
+export async function getHttpReadiness(): Promise<HttpReadinessResponse> {
+  return req<HttpReadinessResponse>('/healthz');
 }
 
 export async function getSearchConfig(): Promise<SearchConfigResponse> {
