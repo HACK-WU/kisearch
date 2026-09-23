@@ -21,6 +21,7 @@ import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
 import { readKiVersion, startVersionGuard } from './lib/version-guard.js';
 import { SERVICE_NAME } from './lib/constants.js';
+import { jitiCliPath } from './lib/jiti-cli.mjs';
 import { detectUnknownFlags, parseIntArg, failJson } from './lib/cli-args.js';
 import {
   startHttpMcpServer,
@@ -399,12 +400,13 @@ function hasFlagValue(args: string[], name: string): boolean {
 
 /**
  * 以守护进程方式重新拉起 HTTP 单例（detached + stdio 忽略，父进程负责回传预检报告）。
- * 与 bin/ki.mjs 的 daemon 启动路径一致：npx jiti <mcp-server.ts> --http --daemon ...
+ * 与 bin/ki.mjs 的 daemon 启动路径一致：当前 Node 进程直接执行本地 jiti CLI，
+ * 避免 Windows 下无法 spawn npx.cmd。
  * 返回子进程句柄，供 restart 就绪等待使用（探测子进程是否在启动阶段退出）。
  */
 function spawnMcpDaemon(args: string[]): ChildProcess {
   const mcpServerPath = fileURLToPath(import.meta.url);
-  const child = spawn('npx', ['jiti', mcpServerPath, ...args], {
+  const child = spawn(process.execPath, [jitiCliPath, mcpServerPath, ...args], {
     detached: true,
     stdio: 'ignore',
     env: process.env,

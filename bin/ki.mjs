@@ -16,6 +16,7 @@ import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { jitiCliPath } from '../src/lib/jiti-cli.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -169,9 +170,10 @@ try {
   // 行为，导致关闭终端后服务不退出、成为继续占用 HTTP 端口/RPC socket/zvec 锁的孤儿。
   if (isDaemon) childEnv.KI_DAEMON_DETACHED = '1';
 
-  // 使用 jiti 执行 TypeScript 脚本（spawn 异步 + 信号转发）
+  // 使用当前 Node 进程直接执行本地 jiti CLI，避免 Windows 下无法 spawn npx.cmd。
+  // spawn 异步 + 信号转发保持原有行为。
   // cwd 设为用户当前目录，确保相对路径参数（如 --results）正确解析
-  const child = spawn('npx', ['jiti', scriptPath, ...scriptArgs], {
+  const child = spawn(process.execPath, [jitiCliPath, scriptPath, ...scriptArgs], {
     stdio: isDaemon ? 'ignore' : 'inherit',
     detached: isDaemon,
     cwd: process.cwd(),
