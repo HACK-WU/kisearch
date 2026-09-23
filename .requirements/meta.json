@@ -834,6 +834,57 @@
       "role": "standalone",
       "parent_id": null,
       "child_ids": []
+    },
+    "2026-09-23-FTS-only文档索引状态展示": {
+      "id": "REQ-20260923-001",
+      "feature": "FTS-only文档索引状态展示",
+      "created": "2026-09-23 14:29:32",
+      "updated": "2026-09-23 17:19:00",
+      "status": "已完成",
+      "tags": [
+        "feature",
+        "search",
+        "ux"
+      ],
+      "version": 12,
+      "depends_on": [],
+      "changelog": [
+        "初始创建",
+        "2026-09-23 14:32:00 v2: 完成初版需求分析（待用户确认）",
+        "2026-09-23 14:34:42 v3: 复核补充首页按文档计数及部分索引/中断场景",
+        "2026-09-23 14:36:19 v4: 明确首页计数粒度及不向量化误读场景",
+        "2026-09-23 14:41:12 v5: 用户确认首页统计口径并将系统徽标命名为 FTS",
+        "2026-09-23 14:52:06 v6: 开始直接实施：FTS 徽标、索引完整状态和 Scope 计数",
+        "2026-09-23 15:39:06 v7: 实现完成：FTS 状态展示、索引生命周期与目标回归测试通过",
+        "2026-09-23 15:39:06 v8: 登记代码审查报告",
+        "2026-09-23 15:39:06 v9: 登记二次质疑报告",
+        "2026-09-23 15:39:07 v10: 归档实现报告",
+        "2026-09-23 16:36:27 v11: 复审发现 dense→FTS 残留与 legacy 完整性 fallback 两项 P1，标记为修复/用户确认前不可合入；记录失败/取消缓存和测试覆盖 P2",
+        "2026-09-23 17:19:00 v12: 修复 dense→FTS 与旧 FTS 清理残留、导入取消状态和 Web 终态缓存；补转换/删除失败/partial/rebuild/回滚测试。用户确认保留 legacy fallback，复审与 challenger 无未解决 P0/P1"
+      ],
+      "commits": [],
+      "branch": null,
+      "docs": [
+        {
+          "path": "requirement.md",
+          "type": "requirement"
+        },
+        {
+          "path": "review/code-review.md",
+          "type": "review"
+        },
+        {
+          "path": "review/challenge-report.md",
+          "type": "review"
+        },
+        {
+          "path": "report.md",
+          "type": "report"
+        }
+      ],
+      "role": "standalone",
+      "parent_id": null,
+      "child_ids": []
     }
   },
   "id_counters": {
@@ -843,6 +894,7 @@
     "REQ-20260904": 1,
     "REQ-20260910": 1,
     "REQ-20260914": 1,
-    "REQ-20260920": 2
+    "REQ-20260920": 2,
+    "REQ-20260923": 1
   }
 }

@@ -189,6 +189,30 @@ describe('B. scope —— list 并集 & 向量层降级（无 apiKey）', () => 
     // 向量层不可用 → 所有 vector 标记为 false
     assert.strictEqual(byName.get('projA')!.vector, false);
   });
+
+  it('Scope 汇总只计完整 FTS-only 文档 relation，兼容旧数据且不按 FTS ID 数计数', async () => {
+    const { dataDir } = makeWorkspace({ scopesYaml: '  fts-scope: {}' });
+    const scopeDir = makeKbScope(dataDir, 'fts-scope');
+    fs.writeFileSync(path.join(scopeDir, 'relations-cache.json'), JSON.stringify({
+      groups: {
+        docs: {
+          hot_relations: [
+            { text: 'complete', memoryIds: [], ftsIds: ['fts-a', 'fts-b'], ftsIndexComplete: true },
+            { text: 'legacy', memoryIds: [], ftsIds: ['fts-legacy'] },
+            { text: 'partial', memoryIds: [], ftsIds: ['fts-partial'], ftsIndexComplete: false },
+            { text: 'dense', memoryIds: ['dense-1'], ftsIds: ['stale-fts'], ftsIndexComplete: true },
+            { text: 'empty', memoryIds: [], ftsIds: [] },
+          ],
+        },
+      },
+    }), 'utf-8');
+
+    const result = await executeScopeList();
+    const scope = result.scopes.find((entry) => entry.scope === 'fts-scope');
+    assert.ok(scope);
+    assert.equal(scope.wikiCount, 5, 'KB 文档数仍按 relation 数统计');
+    assert.equal(scope.ftsOnlyDocCount, 2, '只计完整 FTS-only relation；legacy 回退兼容，每个文档只计一次');
+  });
 });
 
 describe('B. scope —— delete 护栏', () => {

@@ -210,14 +210,25 @@ export async function ftsDeleteByFilter(params: {
 }
 
 /** 删除 FTS-only collection 中已登记的文档 ID；NOT_FOUND 视为幂等成功。 */
-export async function ftsDeleteByIds(params: { scope: string; ids: string[] }): Promise<{ deleted: number; failed: number }> {
+export async function ftsDeleteByIds(params: { scope: string; ids: string[] }): Promise<{ deleted: number; failed: number; failedIds: string[] }> {
   const scope = resolveScope(loadConfig(), params.scope);
   const ids = [...new Set(params.ids.filter(Boolean))];
-  if (ids.length === 0 || !collectionExists(scope)) return { deleted: 0, failed: 0 };
+  if (ids.length === 0 || !collectionExists(scope)) return { deleted: 0, failed: 0, failedIds: [] };
   return withEngine(scope, async (engine) => {
     const result = await engine.delete(ids);
-    const failed = result.errors?.filter((error) => error.code !== 'NOT_FOUND').length ?? 0;
-    return { deleted: Math.max(0, result.ok), failed };
+    const reportedErrors = result.errors ?? [];
+    const failedErrors = reportedErrors.filter((error) => error.code !== 'NOT_FOUND');
+    // 如底层只报告失败总数而未给出逐 ID 错误，保守保留本次全部待删 ID，避免
+    // 调用方丢失对潜在残留文档的追踪能力。
+    const hasUnattributedFailures = result.failed > reportedErrors.length || failedErrors.some((error) => !error.id);
+    const failedIds = hasUnattributedFailures
+      ? ids
+      : [...new Set(failedErrors.map((error) => error.id).filter(Boolean))];
+    return {
+      deleted: Math.max(0, result.ok),
+      failed: hasUnattributedFailures ? result.failed : failedIds.length,
+      failedIds,
+    };
   });
 }
 

@@ -668,6 +668,7 @@ export async function rebuildScopeVectors(
         if (deleted.failed === 0) {
           delete rel.ftsIds;
           delete rel.ftsLocators;
+          delete rel.ftsIndexComplete;
         }
         else errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: `旧 FTS-only 索引清理失败 ${deleted.failed} 条` });
       } catch (err) {

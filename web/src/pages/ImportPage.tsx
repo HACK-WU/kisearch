@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
@@ -296,6 +297,7 @@ interface DataTransferItemWithEntry {
 
 export function ImportPage(): JSX.Element {
   const currentScope = useScopeValue();
+  const queryClient = useQueryClient();
   const [scope, setScope] = useState(currentScope);
   useEffect(() => setScope(currentScope), [currentScope]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -403,6 +405,10 @@ export function ImportPage(): JSX.Element {
     if (phase !== 'importing' || !job) return;
     let active = true;
     let checking = false;
+    const invalidateImportQueries = (targetScope: string): void => {
+      void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
+      void queryClient.invalidateQueries({ queryKey: ['docList', targetScope] });
+    };
     const timer = setInterval(async () => {
       if (!active || checking) return;
       checking = true;
@@ -412,26 +418,31 @@ export function ImportPage(): JSX.Element {
         if (!res.ok || !res.job) {
           active = false;
           clearInterval(timer);
+          invalidateImportQueries(scope);
           setPhase('failed');
           setFailureStage('import');
           setError(res.error ?? '任务已失效，请重新导入');
           return;
         }
         setJob(res.job);
+        const targetScope = res.job.scope || scope;
         if (res.job.state === 'done') {
           active = false;
           clearInterval(timer);
           setProgressText('');
+          invalidateImportQueries(targetScope);
           setPhase('done');
         } else if (res.job.state === 'failed') {
           active = false;
           clearInterval(timer);
+          invalidateImportQueries(targetScope);
           setPhase('failed');
           setFailureStage('import');
           setError(res.job.error ?? '导入失败');
         } else if (res.job.state === 'cancelled') {
           active = false;
           clearInterval(timer);
+          invalidateImportQueries(targetScope);
           setPhase('failed');
           setFailureStage('cancelled');
           setError('导入已取消');
@@ -440,6 +451,7 @@ export function ImportPage(): JSX.Element {
         if (!active) return;
         active = false;
         clearInterval(timer);
+        invalidateImportQueries(scope);
         setPhase('failed');
         setFailureStage('import');
         setError(`查询导入状态失败：${e instanceof Error ? e.message : String(e)}`);
@@ -451,7 +463,7 @@ export function ImportPage(): JSX.Element {
       active = false;
       clearInterval(timer);
     };
-  }, [phase, job?.id]);
+  }, [phase, job?.id, queryClient, scope]);
 
   const nextSelectionId = (): string => `selection-${Date.now()}-${selectionSeq.current++}`;
 

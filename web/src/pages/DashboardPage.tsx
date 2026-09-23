@@ -203,6 +203,14 @@ export function DashboardPage(): JSX.Element {
                         <div className="ki-badge-group">
                           {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
                           {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
+                          {s.ftsOnlyDocCount > 0 && (
+                            <span
+                              className="ki-badge ki-badge--fts"
+                              title="完整建立 FTS-only 索引的文档数（按文档计）"
+                            >
+                              FTS {s.ftsOnlyDocCount}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td style={{ textAlign: 'right' }}>

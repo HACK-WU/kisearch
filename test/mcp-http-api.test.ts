@@ -71,7 +71,7 @@ after(async () => {
 });
 
 /** hot_relations 种子：字符串 = 仅文件名；对象 = 附带向量 ID（用于 vectorized 标志用例） */
-type SeedRel = string | { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[] };
+type SeedRel = string | { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean };
 
 /** 构造一个 scope 的 relations-cache，供 /api/doc/list 测试 */
 function seedRelationsCache(scope: string, groups: Record<string, SeedRel[]>): void {
@@ -188,21 +188,27 @@ describe('/api/doc/list', () => {
     assert.equal(byName.get('未向量化'), false, '无向量 ID → 未向量化');
   });
 
-  it('fullTextIndexed：登记了 ftsIds 的文档返回全文索引标志', async () => {
+  it('fullTextIndexed：完整状态、旧数据兼容、部分状态与 dense relation 判定正确', async () => {
     seedRelationsCache('doc-fts', {
-      全文: [
-        { text: '已建立全文索引', ftsIds: ['fts-1', 'fts-2'] },
-        { text: '空全文索引', ftsIds: [] },
-        '未建立全文索引',
+      状态: [
+        { text: '完整索引', memoryIds: [], ftsIds: ['fts-1', 'fts-2'], ftsIndexComplete: true },
+        { text: '部分索引', memoryIds: [], ftsIds: ['fts-partial'], ftsIndexComplete: false },
+        { text: '旧数据索引', memoryIds: [], ftsIds: ['fts-legacy'] },
+        { text: '空索引', memoryIds: [], ftsIds: [] },
+        { text: 'dense 文档残留 FTS ID', memoryIds: ['dense-1'], ftsIds: ['stale-fts'], ftsIndexComplete: true },
+        '未登记索引',
       ],
     });
     const body = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-fts`)).json();
     const byName = new Map<string, boolean | undefined>(
       body.docs.map((d: { name: string; fullTextIndexed?: boolean }) => [d.name, d.fullTextIndexed]),
     );
-    assert.equal(byName.get('已建立全文索引'), true, 'ftsIds 非空 → 已建立全文索引');
-    assert.equal(byName.get('空全文索引'), false, 'ftsIds 为空 → 未建立全文索引');
-    assert.equal(byName.get('未建立全文索引'), false, '无 ftsIds → 未建立全文索引');
+    assert.equal(byName.get('完整索引'), true, '完整状态和 FTS IDs 均有效');
+    assert.equal(byName.get('部分索引'), false, '明确部分状态不得显示为完整 FTS-only 索引');
+    assert.equal(byName.get('旧数据索引'), true, '旧数据缺少完整状态时按非空 ftsIds 兼容');
+    assert.equal(byName.get('空索引'), false, '空 ftsIds 不显示 FTS');
+    assert.equal(byName.get('dense 文档残留 FTS ID'), false, 'dense relation 不作为 FTS-only 文档');
+    assert.equal(byName.get('未登记索引'), false, '无 ftsIds 不显示 FTS');
   });
 });
 

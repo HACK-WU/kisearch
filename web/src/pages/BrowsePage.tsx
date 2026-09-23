@@ -622,7 +622,9 @@ export function BrowsePage(): JSX.Element {
                     <span className="ki-badge ki-badge--vec">RAG</span>
                   )}
                   {d.fullTextIndexed === true && (
-                    <span className="ki-badge ki-badge--fts">全文</span>
+                    <span className="ki-badge ki-badge--fts" title="FTS-only：不生成 dense 向量，通过正文检索">
+                      FTS
+                    </span>
                   )}
                 </div>
               </div>

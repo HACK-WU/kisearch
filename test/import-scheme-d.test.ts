@@ -89,6 +89,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(rel, '文件级 relation a 应存在');
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时 memoryIds 为空');
     assert.ok(Array.isArray(rel.ftsIds) && rel.ftsIds.length > 0, '--no-vector 时应登记 FTS-only 文档 ID');
+    assert.strictEqual(rel.ftsIndexComplete, true, '完整写入后应登记 FTS-only 完整状态');
     assert.ok(Array.isArray(rel.ftsLocators) && rel.ftsLocators.length === rel.ftsIds.length, '--no-vector 时应登记 FTS ID 对应的原文定位元数据');
     assert.deepEqual(
       rel.ftsLocators[0],
@@ -96,6 +97,51 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
       'FTS locator 应指向原文的 1-based 行范围',
     );
     assert.strictEqual(rel.sourcePath, 'a.md', 'sourcePath 无 #N');
+  });
+
+  it('--no-vector：FTS Collection 写入失败时不能登记为完整索引', () => {
+    const failedScope = `scheme-d-fts-fail-${Date.now()}`;
+    registerTestScope(failedScope);
+    const { initScope, readJson, writeJson } = require('../src/lib/store.js');
+    const { loadConfig } = require('../src/lib/config.js');
+    const { getScopeFtsCollectionPath } = require('../src/lib/scope-collection.js');
+    const { getLocalKbDir, getRelationsCachePath } = require('../src/lib/scope.js');
+    initScope(failedScope);
+    const cachePath = getRelationsCachePath(failedScope);
+    const cacheSeed = readJson<any>(cachePath)!;
+    cacheSeed.groups.wiki = {
+      hot_relations: [{
+        id: 'rel_existing_fts',
+        text: 'failed',
+        score: 0.5,
+        useCount: 1,
+        lastUsedTime: Date.now(),
+        isImported: true,
+        sourcePath: 'failed.md',
+        memoryIds: [],
+        ftsIds: ['old-fts-id'],
+        ftsIndexComplete: true,
+      }],
+      keywords: [],
+    };
+    writeJson(cachePath, cacheSeed);
+    writeJson(getLocalKbDir(failedScope, 'wiki'), { failed: '# Existing FTS document\n\nOld body' });
+
+    const collectionPath = getScopeFtsCollectionPath(loadConfig(), failedScope);
+    fs.mkdirSync(path.dirname(collectionPath), { recursive: true });
+    // 用普通文件占据 Collection 目录位置，令 FTS 引擎创建稳定失败；不影响其他测试 Scope。
+    fs.writeFileSync(collectionPath, 'not a collection directory');
+
+    const src = mkSource({ 'failed.md': '# 未完成索引\n\nFTS 写入故障' });
+    const result = runImport(['--scope', failedScope, '--source', src, '--group', 'wiki', '--no-vector']);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.ok(result.stats.errors > 0, '应将 FTS Collection 写入失败反馈到导入结果');
+
+    const updatedCache = JSON.parse(fs.readFileSync(getRelationsCachePath(failedScope), 'utf-8'));
+    const relation = updatedCache.groups.wiki.hot_relations.find((item: any) => item.text === 'failed');
+    assert.ok(relation);
+    assert.deepEqual(relation.ftsIds, ['old-fts-id'], '失败时保留旧 FTS ID，避免误删既有索引');
+    assert.equal(relation.ftsIndexComplete, false, '写入失败不得持久化完整状态');
   });
 
   it('非 md 文件跳过 + 汇总提示', () => {

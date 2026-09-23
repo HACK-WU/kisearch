@@ -18,6 +18,8 @@ export interface ScopeInfo {
   vector: boolean;
   registered: boolean;
   wikiCount: number;
+  /** 未向量化且 FTS-only 索引完整的文档数（按文档，不按 chunk/ID）。 */
+  ftsOnlyDocCount: number;
 }
 
 export interface SearchHit {

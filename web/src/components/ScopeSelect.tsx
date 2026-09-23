@@ -15,7 +15,7 @@ export function ScopeSelect(): JSX.Element {
 
   const options: ScopeEntry[] = scopes.some((item) => item.scope === scope)
     ? scopes
-    : [{ scope, kb: false, vector: false, registered: false, wikiCount: 0 }, ...scopes];
+    : [{ scope, kb: false, vector: false, registered: false, wikiCount: 0, ftsOnlyDocCount: 0 }, ...scopes];
   const normalizedFilter = filter.trim().toLowerCase();
   const filteredScopes = normalizedFilter
     ? options.filter((item) => item.scope.toLowerCase().includes(normalizedFilter))

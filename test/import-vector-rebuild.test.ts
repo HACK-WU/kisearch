@@ -16,12 +16,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
-import { getLocalKbDir, getRelationsCachePath } from '../src/lib/scope.js';
+import { getKbDir, getLocalKbDir, getRelationsCachePath } from '../src/lib/scope.js';
 import { generateDocId } from '../src/lib/vector-client.js';
+import { isFtsOnlyIndexedRelation } from '../src/lib/scoring.js';
 
 const vectorClient = await import('../src/lib/vector-client.js');
 const batchVectorize = await import('../src/lib/batch-vectorize.js');
 const pathVectorize = await import('../src/lib/path-vectorize.js');
+const ftsClient = await import('../src/lib/fts-client.js');
 
 type VectorDeleteCall = { scope: string; ids: string[] };
 type VectorBulkEntry = { text: string; tags?: string; group?: string };
@@ -29,15 +31,20 @@ type VectorBulkEntry = { text: string; tags?: string; group?: string };
 let vectorizeMode: 'success' | 'fail' | 'partial' = 'success';
 let vectorizeCalls: { paths: string[]; sequence: number }[] = [];
 let vectorDeleteCalls: VectorDeleteCall[] = [];
+let vectorDeleteFailureIds = new Set<string>();
 let vectorEvents: string[] = [];
 let vectorizeSequence = 0;
 let pathStoreCalls = 0;
+let ftsWriteMode: 'success' | 'partial' = 'success';
+let ftsDeleteFailureIds = new Set<string>();
+let ftsDeleteCalls: string[][] = [];
 
 // 这些 patch 在 import 模块加载前完成，隔离真实 embedding / zvec，只验证导入编排契约。
 (vectorClient as any).vectorDelete = async (params: { scope: string; ids: string[] }) => {
   vectorDeleteCalls.push({ scope: params.scope, ids: [...params.ids] });
   vectorEvents.push(`delete:${params.ids.join(',')}`);
-  return { deleted: params.ids.length, errors: [] };
+  const errors = params.ids.filter((id) => vectorDeleteFailureIds.has(id)).map((id) => ({ id, code: 'ZVEC_WRITE_ERROR', reason: 'mock delete failure' }));
+  return { deleted: params.ids.length - errors.length, errors };
 };
 (vectorClient as any).vectorDeleteScope = async () => {
   throw new Error('不得调用已废弃的 Scope 级向量清空接口');
@@ -84,7 +91,19 @@ let pathStoreCalls = 0;
   };
 };
 
+(ftsClient as any).ftsBulkStore = async (entries: { scope: string; group: string; relation: string; tag?: string; text: string }[]) => {
+  const ids = entries.map((entry) => ftsClient.getFtsDocId(entry));
+  return { ids: ftsWriteMode === 'partial' ? ids.slice(0, Math.max(0, ids.length - 1)) : ids, failed: ftsWriteMode === 'partial' ? 1 : 0 };
+};
+(ftsClient as any).ftsDeleteByIds = async (params: { scope: string; ids: string[] }) => {
+  ftsDeleteCalls.push([...params.ids]);
+  const failedIds = params.ids.filter((id) => ftsDeleteFailureIds.has(id));
+  return { deleted: params.ids.length - failedIds.length, failed: failedIds.length, failedIds };
+};
+
 const { handleDirectImport } = await import('../src/lib/import.js');
+const { rebuildFtsOnlyScope } = await import('../src/lib/fts-rebuild.js');
+const testScopes = new Set<string>();
 
 function mkSource(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-vr-'));
@@ -100,9 +119,13 @@ function resetMocks(): void {
   vectorizeMode = 'success';
   vectorizeCalls = [];
   vectorDeleteCalls = [];
+  vectorDeleteFailureIds = new Set();
   vectorEvents = [];
   vectorizeSequence = 0;
   pathStoreCalls = 0;
+  ftsWriteMode = 'success';
+  ftsDeleteFailureIds = new Set();
+  ftsDeleteCalls = [];
 }
 
 function readJsonFile<T>(filePath: string): T {
@@ -112,6 +135,7 @@ function readJsonFile<T>(filePath: string): T {
 function newScope(label: string): string {
   const scope = `import-vec-${label}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   registerTestScope(scope);
+  testScopes.add(scope);
   return scope;
 }
 
@@ -121,6 +145,10 @@ describe('import 增量向量更新', () => {
   });
 
   after(() => {
+    for (const scope of testScopes) {
+      const kbDir = getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
     cleanupTestConfig();
   });
 
@@ -210,6 +238,208 @@ describe('import 增量向量更新', () => {
     assert.equal(vectorizeCalls.length, beforeWrites);
     assert.equal(vectorDeleteCalls.length, beforeDeletes);
     fs.rmSync(src, { recursive: true, force: true });
+  });
+
+  it('从 FTS-only 覆盖切换到 dense 后清除 FTS-only 状态', async () => {
+    const scope = newScope('fts-to-dense');
+    const src = mkSource({ 'switch.md': '# 切换文档\n\n先全文索引，再写入 dense。' });
+    const ftsImport = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false });
+    assert.equal(ftsImport.ok, true);
+    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const beforeRelation = before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch');
+    assert.equal(beforeRelation?.ftsIndexComplete, true);
+    assert.ok(beforeRelation?.ftsIds?.length);
+    const priorFtsIds = [...beforeRelation!.ftsIds!];
+    ftsDeleteCalls = [];
+
+    const denseImport = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: true });
+    assert.equal(denseImport.ok, true);
+    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const afterRelation = after.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch');
+    assert.ok(afterRelation?.memoryIds?.length);
+    assert.deepEqual(afterRelation?.ftsIds, [], 'dense 切换后旧 FTS-only ID 应清空');
+    assert.equal(afterRelation?.ftsIndexComplete, undefined, 'dense relation 不保留 FTS-only 完整状态');
+    assert.ok(ftsDeleteCalls.some((ids) => priorFtsIds.every((id) => ids.includes(id))), '切换 dense 时应删除旧 FTS 文档');
+
+    const { closeFtsEngine } = await import('../src/lib/fts-client.js');
+    await closeFtsEngine(scope);
+    fs.rmSync(src, { recursive: true, force: true });
+  });
+
+  it('从 dense 覆盖切换到 FTS-only 后删除旧 dense 内容与路径向量', async () => {
+    const scope = newScope('dense-to-fts');
+    const original = mkSource({ 'switch.md': '# 切换文档\n\n旧 dense 正文。' });
+    const updated = mkSource({ 'switch.md': '# 切换文档\n\n新 FTS 正文。' });
+    const denseImport = await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
+    assert.equal(denseImport.ok, true);
+    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch')!.memoryIds!];
+    vectorDeleteCalls = [];
+
+    const ftsImport = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
+    assert.equal(ftsImport.ok, true);
+    assert.ok(vectorDeleteCalls.some((call) => oldIds.every((id) => call.ids.includes(id))), 'FTS 完整写入后应清理旧 dense 内容 ID');
+    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'switch');
+    assert.deepEqual(relation?.memoryIds, []);
+    assert.equal(relation?.memoryId, undefined);
+    assert.ok(relation?.ftsIds?.length);
+    assert.equal(relation?.ftsIndexComplete, true);
+    fs.rmSync(original, { recursive: true, force: true });
+    fs.rmSync(updated, { recursive: true, force: true });
+  });
+
+  it('dense 删除失败时保留旧 IDs，不能把混合索引误显示为 FTS-only', async () => {
+    const scope = newScope('dense-to-fts-delete-fail');
+    const original = mkSource({ 'switch.md': '# 切换文档\n\n旧 dense 正文。' });
+    const updated = mkSource({ 'switch.md': '# 切换文档\n\n新 FTS 正文。' });
+    await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
+    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch')!.memoryIds!];
+    vectorDeleteFailureIds = new Set(oldIds);
+
+    const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
+    assert.equal(result.ok, true);
+    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'switch');
+    assert.deepEqual(relation?.memoryIds, oldIds, '未删除的 dense IDs 必须保留以便后续清理');
+    assert.equal(relation?.ftsIndexComplete, true, 'FTS 内容自身完整，但混合索引不应被状态 helper 误识别为 FTS-only');
+    assert.equal(isFtsOnlyIndexedRelation(relation!), false);
+    fs.rmSync(original, { recursive: true, force: true });
+    fs.rmSync(updated, { recursive: true, force: true });
+    vectorDeleteFailureIds = new Set();
+  });
+
+  it('旧 FTS ID 清理失败时保留失败 ID 并标记未完成', async () => {
+    const scope = newScope('fts-delete-fail');
+    const original = mkSource({ 'same.md': '# 文档\n\n旧 FTS 内容。' });
+    const updated = mkSource({ 'same.md': '# 文档\n\n替换后的 FTS 内容。' });
+    await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: false });
+    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'same')!.ftsIds!];
+    ftsDeleteFailureIds = new Set(oldIds);
+
+    const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
+    assert.equal(result.ok, true);
+    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
+    assert.equal(relation?.ftsIndexComplete, false);
+    assert.ok(oldIds.every((id) => relation?.ftsIds?.includes(id)), '删除失败的旧 FTS IDs 必须继续可追踪');
+    assert.ok(relation?.ftsIds?.some((id) => !oldIds.includes(id)), '新 FTS IDs 也必须登记');
+    fs.rmSync(original, { recursive: true, force: true });
+    fs.rmSync(updated, { recursive: true, force: true });
+    ftsDeleteFailureIds = new Set();
+  });
+
+  it('同批 FTS 部分写入不宣称完整，并保留已写入 ID', async () => {
+    const scope = newScope('fts-partial-write');
+    const src = mkSource({ 'partial.md': '# 部分写入\n\n正文。' });
+    ftsWriteMode = 'partial';
+    const result = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false, tags: 'api' });
+    assert.equal(result.ok, true);
+    const cache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const relation = cache.groups.TestWiki.hot_relations.find((item) => item.text === 'partial');
+    assert.equal(relation?.ftsIndexComplete, false);
+    assert.equal(relation?.ftsIds?.length, 1, '部分写入成功的 ID 仍应登记，供后续清理/重建');
+    ftsWriteMode = 'success';
+    fs.rmSync(src, { recursive: true, force: true });
+  });
+
+  it('FTS 重建清理旧 ID 失败时保留残留 ID 与 incomplete 状态', async () => {
+    const scope = newScope('rebuild-fts-delete-fail');
+    const { initScope } = await import('../src/lib/store.js');
+    try {
+      initScope(scope);
+      const cachePath = getRelationsCachePath(scope);
+      const cache = readJsonFile<any>(cachePath);
+      cache.groups.TestWiki = {
+        hot_relations: [{
+          id: 'rel_rebuild_fts',
+          text: 'rebuild-me',
+          score: 0,
+          useCount: 0,
+          lastUsedTime: null,
+          isImported: true,
+          memoryIds: [],
+          ftsIds: ['old-rebuild-fts-id'],
+          ftsIndexComplete: true,
+        }],
+        keywords: [],
+      };
+      fs.writeFileSync(cachePath, JSON.stringify(cache));
+      const localKbPath = getLocalKbDir(scope, 'TestWiki');
+      fs.mkdirSync(path.dirname(localKbPath), { recursive: true });
+      fs.writeFileSync(localKbPath, JSON.stringify({ 'rebuild-me': 'Rebuilt FTS source text.' }));
+      ftsDeleteFailureIds = new Set(['old-rebuild-fts-id']);
+
+      const result = await rebuildFtsOnlyScope(scope, 'TestWiki');
+      assert.equal(result.errors.length, 1);
+      const updated = readJsonFile<any>(cachePath).groups.TestWiki.hot_relations[0];
+      assert.equal(updated.ftsIndexComplete, false);
+      assert.ok(updated.ftsIds.includes('old-rebuild-fts-id'));
+      assert.ok(updated.ftsIds.some((id: string) => id !== 'old-rebuild-fts-id'));
+    } finally {
+      ftsDeleteFailureIds = new Set();
+      const { getKbDir } = await import('../src/lib/scope.js');
+      const kbDir = getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('扫描开始后立即取消时不改变未覆盖文档的原文与旧 FTS 状态', async () => {
+    const scope = newScope('cancel-before-write');
+    const original = mkSource({ 'same.md': '# 原文\n\n旧内容。' });
+    const updated = mkSource({ 'same.md': '# 新原文\n\n新内容。' });
+    await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: false });
+    const abort = new AbortController();
+
+    await assert.rejects(
+      () => handleDirectImport({
+        scope,
+        sourceDir: updated,
+        group: 'TestWiki',
+        vector: false,
+        abortSignal: abort.signal,
+        onProgress: (progress) => {
+          if (progress.phase === 'scan' && progress.done === 0) abort.abort();
+        },
+      }),
+      /导入已取消/,
+    );
+    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    assert.equal(after.groups.TestWiki.hot_relations.find((item) => item.text === 'same')?.ftsIndexComplete, true);
+    assert.match(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, /旧内容/);
+    fs.rmSync(original, { recursive: true, force: true });
+    fs.rmSync(updated, { recursive: true, force: true });
+  });
+
+  it('dense 覆盖失败并回滚原文时恢复旧 FTS 完整状态', async () => {
+    const scope = newScope('fts-dense-rollback');
+    const src = mkSource({ 'rollback.md': '# 原文\n\n旧 FTS 正文' });
+    const original = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false });
+    assert.equal(original.ok, true);
+    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const beforeRelation = before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'rollback');
+    assert.equal(beforeRelation?.ftsIndexComplete, true);
+    const beforeLocalText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).rollback;
+
+    try {
+      vectorizeMode = 'fail';
+      await assert.rejects(
+        () => handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: true }),
+        /均未完成向量化/,
+      );
+      const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+      const afterRelation = after.groups.TestWiki.hot_relations.find((relation) => relation.text === 'rollback');
+      assert.equal(afterRelation?.ftsIndexComplete, true);
+      assert.deepEqual(afterRelation?.ftsIds, beforeRelation?.ftsIds, '回滚时旧 FTS IDs 必须不变');
+      assert.equal(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).rollback, beforeLocalText, '回滚时 local KB 原文必须恢复');
+    } finally {
+      const { closeFtsEngine } = await import('../src/lib/fts-client.js');
+      await closeFtsEngine(scope);
+      vectorizeMode = 'success';
+      fs.rmSync(src, { recursive: true, force: true });
+    }
   });
 
   it('导入进度回调报告 scan/vectorize/persist 三个阶段', async () => {

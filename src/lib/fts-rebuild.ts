@@ -13,6 +13,7 @@ import { getLocalKbDir, getRelationsCachePath, getSource } from './scope.js';
 import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { parseContentTags } from './constants.js';
+import { writeJson } from './store.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId, type FtsStoreEntry } from './fts-client.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 
@@ -21,6 +22,7 @@ interface FtsRelation {
   memoryId?: string | null;
   memoryIds?: string[];
   ftsIds?: string[];
+  ftsIndexComplete?: boolean;
   ftsLocators?: FtsLocator[];
   sourcePath?: string;
   tags?: string[];
@@ -56,11 +58,16 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
   const allEntries: FtsStoreEntry[] = [];
   const records: { group: string; relation: FtsRelation; original: string; oldIds: string[]; entryStart: number; entryEnd: number; chunks: Array<{ index: number; text: string }> }[] = [];
   const errors: FtsRebuildResult['errors'] = [];
+  let completionStateChanged = false;
 
   for (const [group, groupData] of Object.entries(cache.groups ?? {})) {
     if (groupFilter && group !== groupFilter && !group.startsWith(`${groupFilter}/`)) continue;
     for (const relation of groupData.hot_relations ?? []) {
       if (!relation.text || hasDenseRelation(relation)) continue;
+      if (relation.ftsIndexComplete !== false) {
+        relation.ftsIndexComplete = false;
+        completionStateChanged = true;
+      }
       const localKbPath = getLocalKbDir(scope, group);
       let localKb: Record<string, string>;
       try {
@@ -111,6 +118,9 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
     }
   }
 
+  // 若本地原文缺失，或后续 FTS 写入抛错，不能继续沿用快照/旧 cache 中的成功状态。
+  if (completionStateChanged) writeJson(cachePath, cache as unknown as Record<string, unknown>);
+
   if (allEntries.length === 0) {
     return { indexed: 0, relations: records.length, errors };
   }
@@ -122,8 +132,8 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
     const expected = allEntries.slice(record.entryStart, record.entryEnd).map(getFtsDocId);
     const newIds = expected.filter((id) => storedIds.has(id));
     indexed += newIds.length;
-    const complete = newIds.length === expected.length;
-    record.relation.ftsIds = [...new Set(complete ? newIds : [...record.oldIds, ...newIds])];
+    let complete = newIds.length === expected.length;
+    let trackedIds = complete ? [...newIds] : [...record.oldIds, ...newIds];
     const chunkRanges = buildChunkLineRanges(
       record.original,
       record.chunks,
@@ -135,21 +145,35 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
       return range ? [{ ftsId: id, chunkIndex: chunk.index, sourcePath: record.relation.sourcePath, ...range }] : [];
     }).filter((locator) => storedIds.has(locator.ftsId));
     const locatorMap = new Map<string, FtsLocator>();
-    for (const locator of complete ? newLocators : [...(record.relation.ftsLocators ?? []), ...newLocators]) {
-      locatorMap.set(locator.ftsId, locator);
-    }
-    record.relation.ftsLocators = [...locatorMap.values()];
     if (complete) {
       const staleIds = record.oldIds.filter((id) => !newIds.includes(id));
       if (staleIds.length > 0) {
-        const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
-        if (deleted.failed > 0) errors.push({ group: record.group, relation: record.relation.text, error: `旧全文索引清理失败 ${deleted.failed} 条` });
+        try {
+          const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
+          if (deleted.failed > 0) {
+            complete = false;
+            trackedIds = [...newIds, ...deleted.failedIds];
+            errors.push({ group: record.group, relation: record.relation.text, error: `旧全文索引清理失败 ${deleted.failed} 条` });
+          }
+        } catch (err) {
+          complete = false;
+          trackedIds = [...newIds, ...staleIds];
+          errors.push({ group: record.group, relation: record.relation.text, error: `旧全文索引清理失败：${(err as Error).message}` });
+        }
       }
-    } else {
+    }
+    if (newIds.length !== expected.length) {
       errors.push({ group: record.group, relation: record.relation.text, error: `全文索引部分写入成功（${newIds.length}/${expected.length}）` });
     }
+    record.relation.ftsIndexComplete = complete;
+    const trackedIdSet = new Set(trackedIds);
+    record.relation.ftsIds = [...trackedIdSet];
+    for (const locator of [...(record.relation.ftsLocators ?? []), ...newLocators]) {
+      if (trackedIdSet.has(locator.ftsId)) locatorMap.set(locator.ftsId, locator);
+    }
+    record.relation.ftsLocators = [...locatorMap.values()];
   }
   if (stored.failed > 0) errors.push({ group: '<batch>', relation: '<fts>', error: `全文索引写入失败 ${stored.failed} 条` });
-  fs.writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}\n`);
+  writeJson(cachePath, cache as unknown as Record<string, unknown>);
   return { indexed, relations: records.length, errors };
 }

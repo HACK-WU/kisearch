@@ -45,6 +45,7 @@ import { executeTagList } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
+import { isFtsOnlyIndexedRelation } from './scoring.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -214,6 +215,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
         /** 向量 ID：导入链路写多值 memoryIds，sync-relation 等旧链路写单值 memoryId */
         memoryId?: string; memoryIds?: string[];
         ftsIds?: string[];
+        ftsIndexComplete?: boolean;
       }[];
     }>;
   };
@@ -225,6 +227,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
       const key = `${group}\u0000${rel.text}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const ftsOnlyIndexed = isFtsOnlyIndexedRelation(rel);
       docs.push({
         name: rel.text,
         group,
@@ -232,7 +235,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
         // 只读同一份 relations-cache，故不引入额外 I/O，缓存失效条件（mtime+size）也不变。
         // 显式 memoryIds 优先：空数组代表 FTS-only/无 dense，即使旧 memoryId 残留也不能误判。
         vectorized: Array.isArray(rel.memoryIds) ? rel.memoryIds.length > 0 : !!rel.memoryId,
-        fullTextIndexed: (rel.ftsIds?.length ?? 0) > 0,
+        fullTextIndexed: ftsOnlyIndexed,
         ...(rel.sourcePath ? { path: rel.sourcePath } : {}),
         ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),
       });

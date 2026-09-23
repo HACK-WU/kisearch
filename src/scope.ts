@@ -21,6 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { listAllScopes, getKbDir, getRelationsCachePath, validateScope } from './lib/scope.js';
 import { loadConfig, removeScopeFromConfigFile } from './lib/config.js';
+import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
   vectorListScopes,
   vectorCountScope,
@@ -64,23 +65,30 @@ export interface ScopeEntry {
   registered: boolean; // 在 config.scopes 中注册
   /** KB 层文档数（relations-cache 的 hot_relations 总数 = 文件级 relation 数；无 cache 时为 0） */
   wikiCount: number;
+  /** 完整登记在 FTS-only Collection 且没有 dense 向量的文档数。 */
+  ftsOnlyDocCount: number;
 }
 
-/** 统计 scope 的 KB 层文档数（读 relations-cache 的 hot_relations 总数） */
-function countWikiDocs(scope: string): number {
+/** 统计 Scope 的 KB 文档数与完整 FTS-only 文档数（每个 relation 计一次）。 */
+function countScopeDocs(scope: string): { wikiCount: number; ftsOnlyDocCount: number } {
   const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) return 0;
+  if (!fs.existsSync(cachePath)) return { wikiCount: 0, ftsOnlyDocCount: 0 };
   try {
     const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
-      groups?: Record<string, { hot_relations?: unknown[] }>;
+      groups?: Record<string, { hot_relations?: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>[] }>;
     };
-    let n = 0;
+    let wikiCount = 0;
+    let ftsOnlyDocCount = 0;
     for (const g of Object.values(cache.groups || {})) {
-      n += (g?.hot_relations?.length ?? 0);
+      const relations = g?.hot_relations ?? [];
+      wikiCount += relations.length;
+      for (const relation of relations) {
+        if (isFtsOnlyIndexedRelation(relation)) ftsOnlyDocCount += 1;
+      }
     }
-    return n;
+    return { wikiCount, ftsOnlyDocCount };
   } catch {
-    return 0; // 损坏 cache 视为 0
+    return { wikiCount: 0, ftsOnlyDocCount: 0 }; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
   }
 }
 
@@ -117,13 +125,16 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
   }
 
   const all = new Set<string>([...kbScopes, ...vectorScopes, ...Object.keys(config.scopes)]);
-  const scopes: ScopeEntry[] = [...all].sort().map((s) => ({
-    scope: s,
-    kb: kbScopes.has(s),
-    vector: vectorScopes.has(s),
-    registered: Object.prototype.hasOwnProperty.call(config.scopes, s),
-    wikiCount: kbScopes.has(s) ? countWikiDocs(s) : 0,
-  }));
+  const scopes: ScopeEntry[] = [...all].sort().map((s) => {
+    const docCounts = kbScopes.has(s) ? countScopeDocs(s) : { wikiCount: 0, ftsOnlyDocCount: 0 };
+    return {
+      scope: s,
+      kb: kbScopes.has(s),
+      vector: vectorScopes.has(s),
+      registered: Object.prototype.hasOwnProperty.call(config.scopes, s),
+      ...docCounts,
+    };
+  });
 
   return {
     ok: true,
