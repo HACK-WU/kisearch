@@ -46,7 +46,7 @@ export interface DocItem {
    * undefined = 后端未提供该字段（旧版 daemon），同样不渲染标签。
    */
   vectorized?: boolean;
-  /** 是否登记了独立 FTS-only 索引（通常对应 --no-vector 导入）。 */
+  /** 是否有完整的 FTS-only 索引（旧 relation 缺少完整状态时以非空 ftsIds 兼容判定）。 */
   fullTextIndexed?: boolean;
 }
 

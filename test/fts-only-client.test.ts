@@ -22,7 +22,8 @@ fs.writeFileSync(configPath, JSON.stringify({
 }));
 process.env.KI_CONFIG_PATH = configPath;
 
-const { ftsBulkStore, ftsDeleteByIds, ftsDeleteByFilter, ftsSearch, closeFtsEngine } = await import('../src/lib/fts-client.js');
+const ftsClient = await import('../src/lib/fts-client.js');
+const { ftsBulkStore, ftsDeleteByIds, ftsDeleteByFilter, ftsSearch, closeFtsEngine } = ftsClient;
 const { fullTextSearch } = await import('../src/lib/vector-client.js');
 const { rebuildFtsOnlyScope } = await import('../src/lib/fts-rebuild.js');
 
@@ -63,11 +64,38 @@ test('FTS-only client writes/searches/reopens/deletes without embedding', async 
   const rebuilt = await rebuildFtsOnlyScope(scope);
   assert.equal(rebuilt.errors.length, 0);
   assert.ok(rebuilt.indexed > 0);
+  const rebuiltCache = JSON.parse(fs.readFileSync(path.join(scopeDir, 'relations-cache.json'), 'utf-8'));
+  assert.equal(rebuiltCache.groups['docs/recovered'].hot_relations[0].ftsIndexComplete, true);
   assert.equal((await ftsSearch({ scope, query: '恢复 Kafka', limit: 5 }))[0]?.relation, 'recovered');
 
   const deleted = await ftsDeleteByIds({ scope, ids: stored.ids });
   assert.equal(deleted.failed, 0);
+  assert.deepEqual(deleted.failedIds, []);
   assert.equal((await ftsSearch({ scope, query: 'rebalance', limit: 5 })).length, 0);
   await ftsDeleteByFilter({ scope });
   await closeFtsEngine(scope);
+});
+
+test('FTS rebuild clears complete status when the local source is missing', async () => {
+  const scope = 'fts-client-missing-source';
+  const scopeDir = path.join(root, 'kb', scope);
+  fs.mkdirSync(scopeDir, { recursive: true });
+  const cachePath = path.join(scopeDir, 'relations-cache.json');
+  fs.writeFileSync(cachePath, JSON.stringify({
+    groups: {
+      docs: {
+        hot_relations: [{
+          text: 'missing',
+          memoryIds: [],
+          ftsIds: ['old-fts-id'],
+          ftsIndexComplete: true,
+        }],
+      },
+    },
+  }));
+
+  const result = await rebuildFtsOnlyScope(scope);
+  assert.equal(result.errors.length, 1);
+  const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+  assert.equal(cache.groups.docs.hot_relations[0].ftsIndexComplete, false);
 });

@@ -35,11 +35,27 @@ export interface Relation {
   memoryIds?: string[];
   /** FTS-only Collection 中对应的文档 ID；仅 --no-vector / fulltext 写入链路使用。 */
   ftsIds?: string[];
+  /** 新写入的 FTS-only 索引是否覆盖了该文档的全部预期 FTS entries；undefined 表示旧数据。 */
+  ftsIndexComplete?: boolean;
   /** FTS ID 到 local KB 原文行范围的定位元数据；历史关系可能缺失。 */
   ftsLocators?: FtsLocator[];
   /** 文档级自定义标签（如 ['api', 'auth']）。持久化到 KB 层，供 rebuild-vector/restore 恢复 tag 向量。
    *  缺省 undefined 或 [] 表示无自定义 tag（仅有默认的 ki-search）。 */
   tags?: string[];
+}
+
+/**
+ * 判断 relation 是否可作为完整的 FTS-only 文档展示。
+ * 旧版关系没有 ftsIndexComplete，保持兼容：非空 ftsIds 视为已登记索引。
+ */
+export function isFtsOnlyIndexedRelation(
+  relation: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>,
+): boolean {
+  const vectorized = Array.isArray(relation.memoryIds)
+    ? relation.memoryIds.length > 0
+    : !!relation.memoryId;
+  if (vectorized || (relation.ftsIds?.length ?? 0) === 0) return false;
+  return relation.ftsIndexComplete === undefined || relation.ftsIndexComplete === true;
 }
 
 // ─── 评分计算 ───

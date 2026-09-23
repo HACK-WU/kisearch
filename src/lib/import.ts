@@ -522,6 +522,10 @@ export async function handleDirectImport(
     throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
   }
 
+  // 仅在文件通过所有可跳过的前置处理、即将覆盖 local KB 时才失效旧状态；
+  // 这样取消或跳过未触碰文件不会留下永久 incomplete。
+  const ftsCompletionBeforeImport = new Map<string, boolean | undefined>();
+
   logInfo(`扫描到 ${files.length} 个文件（chunkSize=${chunkSize}, overlap=${chunkOverlap}）`);
 
   // 1) 方案 D 逐文件：前置检查 → 写 local KB 文件原文 → 清洗 → 切分 → 构造向量化条目
@@ -594,23 +598,26 @@ export async function handleDirectImport(
     if (resolution.conflicted) {
       conflicts.push({ path: rel, originalRelation, relation, action: resolution.action as ImportConflictAction });
     }
+    const previousRelationSnapshot = previousRelation ? cloneRelation(previousRelation) : undefined;
+    const previousFtsKey = `${groupPath}\u0000${relation}`;
+    if (previousRelationSnapshot && ftsCompletionBeforeImport.has(previousFtsKey)) {
+      const previousCompletion = ftsCompletionBeforeImport.get(previousFtsKey);
+      if (previousCompletion === undefined) delete previousRelationSnapshot.ftsIndexComplete;
+      else previousRelationSnapshot.ftsIndexComplete = previousCompletion;
+    }
     if (resolution.action === 'overwrite' && resolution.existing) {
       // 同 sourcePath 幂等重导或显式覆盖：允许重新写入 local KB + 向量化。
       logWarn(`文件已存在，幂等重导覆盖（${rel}）`);
     }
-    // 方案 D：第一步直接写 local KB（文件级原文，未清洗）
-    writeLocalKb(scope, groupPath, relation, fileText);
-
     // 清洗（方案 D：清洗只作用于向量化输入；local KB 存原文）
-    // 执行顺序：内置规则 → 外部 hooks（REQ-07）；hook 全失败 → P-7 回滚 local KB + skipped
+    // 执行顺序：内置规则 → 外部 hooks（REQ-07）；hook 全失败时保留旧 local KB。
     let textForVector = cleanEnabled ? cleanMarkdownText(fileText, cleanRules) : fileText;
     if (cleanEnabled && cleanHooks.length > 0) {
       const hookResult = await runCleanHooks(textForVector, cleanHooks);
       if (!hookResult.ok) {
-        // P-7：所有 hooks 均失败 → 不写入向量 + local KB 回滚（删除已写原文），文件计入 skipped
+        // P-7：所有 hooks 均失败 → 不写入向量，也不覆盖旧 local KB，文件计入 skipped。
         skipped.push(rel);
-        logWarn(`清洗 hook 失败已跳过（${rel}）：${hookResult.failedHooks.join(', ')}，已回滚 local KB`);
-        removeFromLocalKb(scope, groupPath, relation);
+        logWarn(`清洗 hook 失败已跳过（${rel}）：${hookResult.failedHooks.join(', ')}，未覆盖旧 local KB`);
         processedFileCount++;
         args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
         continue;
@@ -631,11 +638,25 @@ export async function handleDirectImport(
     if (chunks.length > MAX_CHUNKS_PER_FILE) {
       skipped.push(rel);
       logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
-      removeFromLocalKb(scope, groupPath, relation); // 超限同样回滚（保持一致性）
+      // chunk 超限发生在覆盖之前，旧 local KB 与索引状态均保持不变。
       processedFileCount++;
       args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
       continue;
     }
+    // 文件已通过所有可跳过的前置处理，即将覆盖 local KB。旧 FTS relation 先持久化
+    // incomplete，防止进程在原文变更后中断仍把旧索引展示为完整。
+    if (previousRelationSnapshot?.ftsIds?.length) {
+      if (!ftsCompletionBeforeImport.has(previousFtsKey)) {
+        ftsCompletionBeforeImport.set(previousFtsKey, previousRelationSnapshot.ftsIndexComplete);
+      }
+      const cached = relationsCache0.groups[groupPath]?.hot_relations.find((item) => item.text === relation);
+      if (cached) {
+        cached.ftsIndexComplete = false;
+        writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+      }
+    }
+    // 方案 D：文件级原文（未清洗）仅在检查通过后写入。
+    writeLocalKb(scope, groupPath, relation, fileText);
     // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
     if (assetsEnabled) {
       const assetResult = collectAndCopyAssets({
@@ -654,7 +675,7 @@ export async function handleDirectImport(
       rel,
       groupPath,
       relation,
-      previousRelation: previousRelation ? cloneRelation(previousRelation) : undefined,
+      previousRelation: previousRelationSnapshot,
       previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
       chunks,
       entries,
@@ -845,6 +866,20 @@ export async function handleDirectImport(
     await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`);
   }
 
+  // 向量化失败的文件已恢复旧 local KB，且其旧 FTS ID 未被清理；恢复原完成标记。
+  // 活跃文件仍保持 incomplete，直到 Phase 4 持久化本次最终 dense/FTS 状态。
+  let ftsStatusRestored = false;
+  for (const rec of failedRecords) {
+    const previous = rec.previousRelation;
+    if (!previous?.ftsIds?.length) continue;
+    const relation = relationsCache0.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+    if (!relation) continue;
+    if (previous.ftsIndexComplete === undefined) delete relation.ftsIndexComplete;
+    else relation.ftsIndexComplete = previous.ftsIndexComplete;
+    ftsStatusRestored = true;
+  }
+  if (ftsStatusRestored) writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+
   const activeFileRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
   if (vector && activeFileRecords.length === 0) {
     const failureDetails = [...vectorizeResult.errors, ...tagErrors]
@@ -868,7 +903,25 @@ export async function handleDirectImport(
   let fullTextIndexed = 0;
   const fullTextIdsByKey = new Map<string, string[]>();
   const fullTextLocatorsByKey = new Map<string, FtsLocator[]>();
+  const fullTextCompleteByKey = new Map<string, boolean>();
   if (!vector && activeFileRecords.length > 0) {
+    // 先按未完成处理；FTS 批次失败、或只写入了部分 entries 时不能沿用旧成功状态。
+    // 对覆盖已有 Relation 的情况，先原子持久化 false：进程若在 FTS 写入后、Phase 4 前中断，
+    // 页面也不会继续把可能已部分覆盖的旧索引显示为完整。新 Relation 尚未登记，无需预写。
+    const persistedCache = readJson<RelationsCache>(relationsCachePath);
+    if (!persistedCache) throw new Error(`relations-cache.json 不存在：${relationsCachePath}`);
+    let completionInvalidated = false;
+    for (const rec of activeFileRecords) {
+      fullTextCompleteByKey.set(`${rec.groupPath}\u0000${rec.relation}`, false);
+      const cached = persistedCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+      if (cached) {
+        cached.ftsIndexComplete = false;
+        completionInvalidated = true;
+      }
+      const inMemory = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+      if (inMemory) inMemory.ftsIndexComplete = false;
+    }
+    if (completionInvalidated) writeJson(relationsCachePath, persistedCache as unknown as Record<string, unknown>);
     const ftsEntries = activeFileRecords.flatMap((rec) => rec.entries.flatMap((entry) => [
       { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' },
       ...customTags.map((tag) => ({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
@@ -890,9 +943,8 @@ export async function handleDirectImport(
         const expected = expectedEntries.map(({ fts }) => getFtsDocId(fts));
         const newIds = expected.filter((id) => storedIds.has(id));
         const oldIds = rec.previousRelation?.ftsIds ?? [];
-        const complete = newIds.length === expected.length;
-        // 只有新索引完整时才清理旧索引；部分失败保留旧 ID，避免覆盖导入丢召回。
-        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...new Set(complete ? newIds : [...oldIds, ...newIds])]);
+        let complete = newIds.length === expected.length;
+        let trackedIds = complete ? [...newIds] : [...oldIds, ...newIds];
         const newLocators: FtsLocator[] = expectedEntries.flatMap(({ entryIndex }, index) => {
           const range = chunkRanges.get(rec.chunks[entryIndex].index);
           if (!range) return [];
@@ -900,18 +952,34 @@ export async function handleDirectImport(
           return [{ ftsId: id, sourcePath: rec.rel, chunkIndex: rec.chunks[entryIndex].index, ...range }];
         }).filter((locator) => storedIds.has(locator.ftsId));
         const oldLocators = rec.previousRelation?.ftsLocators ?? [];
-        const locatorMap = new Map<string, FtsLocator>();
-        for (const locator of complete ? newLocators : [...oldLocators, ...newLocators]) locatorMap.set(locator.ftsId, locator);
-        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...locatorMap.values()]);
         if (complete) {
           const staleIds = oldIds.filter((id) => !newIds.includes(id));
           if (staleIds.length > 0) {
-            const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
-            if (deleted.failed > 0) fullTextErrors.push({ path: rec.rel, error: `旧全文索引清理失败 ${deleted.failed} 条` });
+            try {
+              const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
+              if (deleted.failed > 0) {
+                complete = false;
+                trackedIds = [...newIds, ...deleted.failedIds];
+                fullTextErrors.push({ path: rec.rel, error: `旧全文索引清理失败 ${deleted.failed} 条` });
+              }
+            } catch (err) {
+              complete = false;
+              trackedIds = [...newIds, ...staleIds];
+              fullTextErrors.push({ path: rec.rel, error: `旧全文索引清理失败：${(err as Error).message}` });
+            }
           }
-        } else {
+        }
+        if (newIds.length !== expected.length) {
           fullTextErrors.push({ path: rec.rel, error: `全文索引部分写入成功（${newIds.length}/${expected.length}）` });
         }
+        fullTextCompleteByKey.set(`${rec.groupPath}\u0000${rec.relation}`, complete);
+        const trackedIdSet = new Set(trackedIds);
+        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...trackedIdSet]);
+        const locatorMap = new Map<string, FtsLocator>();
+        for (const locator of [...oldLocators, ...newLocators]) {
+          if (trackedIdSet.has(locator.ftsId)) locatorMap.set(locator.ftsId, locator);
+        }
+        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, [...locatorMap.values()]);
       }
       if (ftsResult.failed > 0 && fullTextErrors.length === 0) {
         fullTextErrors.push({ path: '<batch>', error: `全文索引写入失败 ${ftsResult.failed} 条` });
@@ -930,8 +998,9 @@ export async function handleDirectImport(
       try {
         const deleted = await ftsDeleteByIds({ scope, ids: oldIds });
         if (deleted.failed > 0) {
-          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
-          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators);
+          const remainingIds = deleted.failedIds.length > 0 ? deleted.failedIds : oldIds;
+          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, remainingIds);
+          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators.filter((locator) => remainingIds.includes(locator.ftsId)));
           fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败 ${deleted.failed} 条` });
         } else {
           fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
@@ -975,9 +1044,17 @@ export async function handleDirectImport(
     logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
   }
 
-  // 仅清理受影响 relation 的旧内容/标签向量；被其他 relation 共享的确定性 docId 不删除。
-  if (vector) {
-    const targetKeys = new Set(activeFileRecords.map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
+  // 仅清理受影响 relation 的旧内容/标签/路径向量；FTS-only 覆盖只在新 FTS 完整后
+  // 执行 dense 清理。被其他 relation 共享的确定性 docId 不删除。
+  const denseIdsAfterCleanup = new Map<string, string[]>();
+  for (const rec of activeFileRecords) {
+    denseIdsAfterCleanup.set(`${rec.groupPath}\u0000${rec.relation}`, relationMemoryIds(rec.previousRelation));
+  }
+  {
+    const cleanupRecords = activeFileRecords.filter((rec) =>
+      vector || fullTextCompleteByKey.get(`${rec.groupPath}\u0000${rec.relation}`) === true,
+    );
+    const targetKeys = new Set(cleanupRecords.map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
     const protectedVectorIds = new Set<string>();
     const protectedPathIds = new Set<string>();
     for (const [groupPath, groupData] of Object.entries(relationsCache0.groups)) {
@@ -996,12 +1073,14 @@ export async function handleDirectImport(
     }
 
     const staleIds = new Set<string>();
-    for (const rec of activeFileRecords) {
+    for (const rec of cleanupRecords) {
       const oldIds = relationMemoryIds(rec.previousRelation);
-      const newIds = new Set([
-        ...rec.entries.map((entry) => activeMergedMap.get(entry.path)).filter((id): id is string => !!id),
-        ...(tagMemoryMap.get(rec.rel) ?? []),
-      ]);
+      const newIds = vector
+        ? new Set([
+            ...rec.entries.map((entry) => activeMergedMap.get(entry.path)).filter((id): id is string => !!id),
+            ...(tagMemoryMap.get(rec.rel) ?? []),
+          ])
+        : new Set<string>();
       for (const id of oldIds) {
         if (!newIds.has(id) && !protectedVectorIds.has(id)) staleIds.add(id);
       }
@@ -1014,11 +1093,12 @@ export async function handleDirectImport(
           .map((chunkRelation) => buildRelationContent(chunkRelation, rec.groupPath)),
       );
       const relationPathWriteFailed = [...relationPathTexts].some((text) => failedRelationPathTexts.has(text));
-      const newPathIds = new Set(
+      const newPathIds = new Set(vector ?
         rec.entries
           .map((entry) => entry.chunkRelation)
           .filter((chunkRelation): chunkRelation is string => !!chunkRelation)
-          .map((chunkRelation) => generateDocId(buildRelationContent(chunkRelation, rec.groupPath), scope, 'ki-relation')),
+          .map((chunkRelation) => generateDocId(buildRelationContent(chunkRelation, rec.groupPath), scope, 'ki-relation'))
+        : [],
       );
       for (let i = 1; i <= relationContentVectorCount(rec.previousRelation); i += 1) {
         if (relationPathWriteFailed) break;
@@ -1033,7 +1113,16 @@ export async function handleDirectImport(
     // 旧向量清理是收尾动作：若底层只部分删除，仍要把新 relation/local KB
     // 一起落盘，避免出现“KB 已更新但 cache 仍指向旧 memoryIds”的更大不一致；
     // 未删除的旧 ID 会通过 errors 显式反馈，后续可重试清理。
-    await deleteVectorIds(scope, staleIds, '清理受影响文档旧向量', false, vectorCleanupErrors);
+    const failedVectorIds = new Set(await deleteVectorIds(scope, staleIds, '清理受影响文档旧向量', false, vectorCleanupErrors));
+    if (!vector) {
+      for (const rec of cleanupRecords) {
+        const key = `${rec.groupPath}\u0000${rec.relation}`;
+        const oldIds = relationMemoryIds(rec.previousRelation);
+        // 仅保留未删除且不再被其他 relation 引用的 ID；共享 ID 从当前 relation 脱挂，
+        // 但由其实际所有者继续追踪。FTS 不完整的文档不进入 cleanupRecords，保留全部旧 ID。
+        denseIdsAfterCleanup.set(key, oldIds.filter((id) => failedVectorIds.has(id) && !protectedVectorIds.has(id)));
+      }
+    }
   }
 
   // 取消请求在向量化批次完成后生效。
@@ -1063,6 +1152,17 @@ export async function handleDirectImport(
     const ftsLocators = fullTextLocatorsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
     if (rel && ftsIds) rel.ftsIds = ftsIds;
     if (rel && ftsLocators) rel.ftsLocators = ftsLocators;
+    if (rel && vector) {
+      if (rel.ftsIds?.length) rel.ftsIndexComplete = false;
+      else delete rel.ftsIndexComplete;
+    }
+    else if (rel) rel.ftsIndexComplete = fullTextCompleteByKey.get(`${rec.groupPath}\u0000${rec.relation}`) ?? false;
+    if (rel && !vector) {
+      const remainingDenseIds = denseIdsAfterCleanup.get(`${rec.groupPath}\u0000${rec.relation}`) ?? [];
+      rel.memoryIds = remainingDenseIds;
+      if (remainingDenseIds.length > 0) rel.memoryId = remainingDenseIds[0];
+      else delete rel.memoryId;
+    }
   }
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
   // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
@@ -1276,16 +1376,28 @@ async function deleteVectorIds(
   label: string,
   strict = true,
   errors?: { path: string; error: string }[],
-): Promise<void> {
+): Promise<string[]> {
   const uniqueIds = [...new Set(ids)].filter(Boolean);
-  if (uniqueIds.length === 0) return;
-  const result = await vectorDelete({ scope, ids: uniqueIds });
-  if (result.errors.length > 0) {
-    const message = `${label}失败：${result.errors.map((item) => `${item.id}: ${item.reason}`).join('; ')}`;
+  if (uniqueIds.length === 0) return [];
+  let result: Awaited<ReturnType<typeof vectorDelete>>;
+  try {
+    result = await vectorDelete({ scope, ids: uniqueIds });
+  } catch (err) {
+    const message = `${label}失败：${(err as Error).message}`;
+    errors?.push({ path: '<vector-cleanup>', error: message });
+    if (strict) throw new Error(message);
+    logWarn(message);
+    return uniqueIds;
+  }
+  const failedErrors = result.errors.filter((item) => item.code !== 'NOT_FOUND');
+  const failedIds = failedErrors.map((item) => item.id);
+  if (failedErrors.length > 0) {
+    const message = `${label}失败：${failedErrors.map((item) => `${item.id}: ${item.reason}`).join('; ')}`;
     errors?.push({ path: '<vector-cleanup>', error: message });
     if (strict) throw new Error(message);
     logWarn(message);
   }
+  return failedIds;
 }
 
 function writeLocalKb(scope: string, groupPath: string, relationText: string, moduleInfo: string): void {

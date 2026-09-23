@@ -321,7 +321,13 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
       // 本组件渲染的是**导入的外部不可信 wiki**，故取 strict。
       // 代价：图表内 HTML 标签会被转义为文本、`click` 交互失效——知识 wiki 的图表只用于展示，可接受。
       // 注：'loose' 是前端初始脚手架提交（c56d68b「对齐 demo」）带入的，无注释/无测试锁定，非故意围栏。
-      mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'default',
+        securityLevel: 'strict',
+        // 避免 Mermaid 解析失败时将错误图插入 document.body。
+        suppressErrorRendering: true,
+      });
       const blocks = root.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
       const renderAll = async (): Promise<void> => {
         for (const block of Array.from(blocks)) {

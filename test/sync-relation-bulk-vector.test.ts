@@ -38,6 +38,8 @@ let mockAvailable = true;
 let mockBulkResults: MockVecResult[] = [];
 let mockBulkCalls: { entries: { text: string; tags?: string; group?: string }[] }[] = [];
 let mockDeleteCalls: { ids: string[] }[] = [];
+let mockDeleteFailures = new Set<string>();
+let ftsDeleteCalls: string[][] = [];
 
 async function loadModulesWithMock() {
   vectorClientModule = await import('../src/lib/vector-client.js');
@@ -62,8 +64,21 @@ async function loadModulesWithMock() {
 
   (vectorClientModule as any).vectorDelete = async (params: any) => {
     mockDeleteCalls.push(params);
-    return { deleted: params.ids.length, errors: [] };
+    const errors = params.ids.filter((id: string) => mockDeleteFailures.has(id)).map((id: string) => ({ id, code: 'ZVEC_WRITE_ERROR', reason: 'mock delete failure' }));
+    return { deleted: params.ids.length - errors.length, errors };
   };
+
+  const ftsClientModule = await import('../src/lib/fts-client.js');
+  (ftsClientModule as any).ftsBulkStore = async (entries: { scope: string; group: string; relation: string; tag?: string; text: string }[]) => ({
+    ids: entries.map((entry) => ftsClientModule.getFtsDocId(entry)),
+    failed: 0,
+  });
+  (ftsClientModule as any).ftsDeleteByIds = async (params: { scope: string; ids: string[] }) => {
+    ftsDeleteCalls.push([...params.ids]);
+    const failedIds = params.ids.filter((id) => mockDeleteFailures.has(`fts:${id}`));
+    return { deleted: params.ids.length - failedIds.length, failed: failedIds.length, failedIds };
+  };
+  (ftsClientModule as any).closeFtsEngine = async () => {};
 
   syncModule = await import('../src/sync-relation.js');
   storeModule = await import('../src/lib/store.js');
@@ -104,6 +119,49 @@ after(() => {
 });
 
 describe('executeBulkSyncRelation 向量化路径', () => {
+  it('更新旧 FTS-only Relation 时 dense 不可用也持久化 incomplete 状态', async () => {
+    const scope = `bulk-vec-fts-fail-${Date.now()}`;
+    registerTestScope(scope);
+    storeModule.initScope(scope);
+    try {
+      const group = '项目根/向量';
+      const relation = '旧 FTS 文档';
+      const cachePath = scopeModule.getRelationsCachePath(scope);
+      const cache: any = storeModule.readJson(cachePath)!;
+      cache.groups[group] = {
+        hot_relations: [{
+          id: 'rel_fts_old',
+          text: relation,
+          score: 0.5,
+          useCount: 1,
+          lastUsedTime: Date.now(),
+          isImported: false,
+          memoryIds: [],
+          ftsIds: ['old-fts-id'],
+          ftsIndexComplete: true,
+        }],
+        keywords: [],
+      };
+      storeModule.writeJson(cachePath, cache);
+
+      mockAvailable = false;
+      const result = await syncModule.executeBulkSyncRelation({
+        scope,
+        vector: true,
+        items: [{ group, relation, module_info: '更新后的正文' }],
+      });
+      assert.equal(result.ok, true);
+      const updated = storeModule.readJson<any>(cachePath)!;
+      const updatedRelation = updated.groups[group].hot_relations.find((item: any) => item.text === relation);
+      assert.deepEqual(updatedRelation.ftsIds, ['old-fts-id'], 'dense 失败时保留旧 FTS ID 以免意外删除');
+      assert.equal(updatedRelation.ftsIndexComplete, false, 'local KB 已更新且 dense 未成功时不得沿用旧 FTS 完整状态');
+    } finally {
+      mockAvailable = true;
+      const kbDir = scopeModule.getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
   it('向量全成功：memoryId/memoryIds 回写 + 旧 tag 向量清理 + 顶层 vectorStored', async () => {
     const scope = `bulk-vec-ok-${Date.now()}`;
     registerTestScope(scope);
@@ -349,6 +407,113 @@ describe('executeBulkSyncRelation 向量化路径', () => {
       assert.ok(Array.isArray(result.hints) && result.hints.length >= 1, '应透出路径解析提示');
       assert.match(result.hints![0], /未匹配到任何 Group|可用的顶层 Group|可用顶层 Group/);
     } finally {
+      const kbDir = scopeModule.getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sync-relation 从 dense 切换到 FTS-only', () => {
+  it('批量同步在完整 FTS 写入后清理旧 dense IDs', async () => {
+    const scope = `bulk-dense-to-fts-${Date.now()}`;
+    registerTestScope(scope);
+    storeModule.initScope(scope);
+    try {
+      const group = '项目根/转换';
+      const relation = '待转全文';
+      seedRelationWithOldVectors(scope, group, relation, ['old-content', 'old-tag']);
+      mockDeleteCalls = [];
+      mockDeleteFailures = new Set();
+      const result = await syncModule.executeBulkSyncRelation({
+        scope,
+        vector: false,
+        items: [{ group, relation, module_info: '新的全文正文' }],
+      });
+      assert.equal(result.ok, true);
+      assert.ok(mockDeleteCalls.some((call) => ['old-content', 'old-tag'].every((id) => call.ids.includes(id))));
+      const cache = storeModule.readJson<any>(scopeModule.getRelationsCachePath(scope))!;
+      const updated = cache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      assert.deepEqual(updated.memoryIds, []);
+      assert.equal(updated.memoryId, undefined);
+      assert.equal(updated.ftsIndexComplete, true);
+    } finally {
+      const kbDir = scopeModule.getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('单条同步删除 dense 失败时保留未删 ID，FTS-only 状态不成立', async () => {
+    const scope = `single-dense-to-fts-fail-${Date.now()}`;
+    registerTestScope(scope);
+    storeModule.initScope(scope);
+    try {
+      const group = '项目根/转换';
+      const relation = '待转全文';
+      seedRelationWithOldVectors(scope, group, relation, ['old-content']);
+      mockDeleteFailures = new Set(['old-content']);
+      const result = await syncModule.executeSyncRelation({
+        scope,
+        group,
+        relation,
+        moduleInfo: '新的全文正文',
+        vector: false,
+      });
+      assert.equal(result.ok, true);
+      if (result.ok) assert.match(result.fullTextReason ?? '', /dense 索引清理失败/);
+      const cache = storeModule.readJson<any>(scopeModule.getRelationsCachePath(scope))!;
+      const updated = cache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      assert.deepEqual(updated.memoryIds, ['old-content']);
+      assert.equal(updated.ftsIndexComplete, true);
+    } finally {
+      mockDeleteFailures = new Set();
+      const kbDir = scopeModule.getKbDir(scope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('批量同步清理旧 FTS 失败时保留失败 ID 并报告未完成', async () => {
+    const scope = `bulk-fts-cleanup-fail-${Date.now()}`;
+    registerTestScope(scope);
+    storeModule.initScope(scope);
+    try {
+      const group = '项目根/转换';
+      const relation = '旧 FTS 文档';
+      const cachePath = scopeModule.getRelationsCachePath(scope);
+      const cache: any = storeModule.readJson(cachePath)!;
+      cache.groups[group] = {
+        hot_relations: [{
+          id: 'rel_old_fts',
+          text: relation,
+          score: 0,
+          useCount: 0,
+          lastUsedTime: null,
+          isImported: false,
+          memoryIds: [],
+          ftsIds: ['old-fts-doc-id'],
+          ftsIndexComplete: true,
+        }],
+        keywords: [],
+      };
+      storeModule.writeJson(cachePath, cache);
+      mockDeleteFailures = new Set(['fts:old-fts-doc-id']);
+
+      const result = await syncModule.executeBulkSyncRelation({
+        scope,
+        vector: false,
+        items: [{ group, relation, module_info: '更新后的 FTS 正文' }],
+      });
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.results[0].fullTextStored, false);
+        assert.match(result.results[0].fullTextReason ?? '', /旧全文索引清理失败/);
+      }
+      const updatedCache = storeModule.readJson<any>(cachePath)!;
+      const updated = updatedCache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      assert.equal(updated.ftsIndexComplete, false);
+      assert.ok(updated.ftsIds.includes('old-fts-doc-id'));
+      assert.ok(updated.ftsIds.some((id: string) => id !== 'old-fts-doc-id'));
+    } finally {
+      mockDeleteFailures = new Set();
       const kbDir = scopeModule.getKbDir(scope);
       if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
     }

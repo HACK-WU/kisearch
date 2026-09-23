@@ -93,6 +93,29 @@ function generateNextId(cache: RelationsCache): string {
   return `rel_${String(maxNum + 1).padStart(3, '0')}`;
 }
 
+function relationDenseIds(relation: Relation | undefined): string[] {
+  if (!relation) return [];
+  const ids = Array.isArray(relation.memoryIds) ? [...relation.memoryIds] : relation.memoryId ? [relation.memoryId] : [];
+  return [...new Set(ids.filter(Boolean))];
+}
+
+function setRelationDenseIds(relation: Relation, ids: string[]): void {
+  relation.memoryIds = [...new Set(ids.filter(Boolean))];
+  if (relation.memoryIds.length > 0) relation.memoryId = relation.memoryIds[0];
+  else delete relation.memoryId;
+}
+
+function referencedDenseIds(cache: RelationsCache, excludedKeys: Set<string>): Set<string> {
+  const ids = new Set<string>();
+  for (const [group, groupData] of Object.entries(cache.groups ?? {})) {
+    for (const relation of groupData.hot_relations ?? []) {
+      if (excludedKeys.has(`${group}\u0000${relation.text}`)) continue;
+      for (const id of relationDenseIds(relation)) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 // ─── Group 树自动补建 ───
 
 /**
@@ -405,16 +428,30 @@ async function fullTextWriteBack(params: {
     const stored = new Set(result.ids);
     const newIds = entries.map((entry) => getFtsDocId(entry)).filter((id) => stored.has(id));
     const complete = newIds.length === entries.length;
-    const retainedIds = [...new Set(complete ? newIds : [...(params.previousIds ?? []), ...newIds])];
+    let trackedIds = [...new Set(complete ? newIds : [...(params.previousIds ?? []), ...newIds])];
     if (complete) {
       const staleIds = (params.previousIds ?? []).filter((id) => !newIds.includes(id));
       if (staleIds.length > 0) {
-        const deleted = await ftsDeleteByIds({ scope: params.scope, ids: staleIds });
-        if (deleted.failed > 0) return { stored: true, ids: retainedIds, reason: `旧全文索引清理失败 ${deleted.failed} 条` };
+        try {
+          const deleted = await ftsDeleteByIds({ scope: params.scope, ids: staleIds });
+          if (deleted.failed > 0) {
+            return {
+              stored: false,
+              ids: [...new Set([...newIds, ...deleted.failedIds])],
+              reason: `旧全文索引清理失败 ${deleted.failed} 条`,
+            };
+          }
+        } catch (err) {
+          return {
+            stored: false,
+            ids: [...new Set([...newIds, ...staleIds])],
+            reason: `旧全文索引清理失败：${(err as Error).message}`,
+          };
+        }
       }
     }
-    if (!complete) return { stored: false, ids: retainedIds, reason: `全文索引部分写入成功（${newIds.length}/${entries.length}）` };
-    return { stored: true, ids: retainedIds };
+    if (!complete) return { stored: false, ids: trackedIds, reason: `全文索引部分写入成功（${newIds.length}/${entries.length}）` };
+    return { stored: true, ids: trackedIds };
   } catch (err) {
     return { stored: false, ids: [...(params.previousIds ?? [])], reason: `全文索引写入失败：${(err as Error).message}` };
   }
@@ -465,6 +502,30 @@ async function executeBulkSyncRelationLocal(params: {
     // （对齐单条模式 executeSyncRelation:809-819 的 resolveGroupPath 逻辑）
     const groupIndex = readGroupIndex(scope);
 
+    // syncSingleRelation 会逐条覆盖 local KB。先一次性持久化目标旧 FTS
+    // relation 的失效状态，避免批量同步中途失败时旧索引仍显示为完整。
+    let ftsStatusInvalidated = false;
+    for (const item of items) {
+      const relation = String(item.relation || '');
+      let group = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      if (!String(item.module_info || '').trim() || !relation || !group || isUnsafeRelationName(relation)) continue;
+      if (groupIndex) {
+        try {
+          const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
+          if (resolved.matched) group = resolved.resolvedPath;
+        } catch {
+          // 正式写入路径负责返回解析错误；预失效阶段只处理可确定的现有 relation。
+          continue;
+        }
+      }
+      const existing = cache.groups[group]?.hot_relations.find((entry) => entry.text === relation);
+      if (existing?.ftsIds?.length) {
+        existing.ftsIndexComplete = false;
+        ftsStatusInvalidated = true;
+      }
+    }
+    if (ftsStatusInvalidated) writeJson(cachePath, cache as unknown as Record<string, unknown>);
+
     // 向量 entries 收集：每条 item 产出 [ki-relation, ki-search, ...customTags] 个 entry
     // 用 sliceStart/sliceEnd 记录每条 item 在 entries 数组中的区间，用于后续结果拆分
     interface EntryMeta {
@@ -480,6 +541,7 @@ async function executeBulkSyncRelationLocal(params: {
     // 记录每条 item 的 customTags（用于回写 relRec.tags 和透出 contentTags）
     const itemCustomTags: string[][] = [];
     const itemPriorFtsIds: string[][] = [];
+    const itemPriorDenseIds: string[][] = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -550,6 +612,7 @@ async function executeBulkSyncRelationLocal(params: {
         }
 
         itemPriorFtsIds[i] = [...(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
+        itemPriorDenseIds[i] = relationDenseIds(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation));
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
 
         // 文档级自定义 tag 持久化到 KB 层（与单条模式一致）
@@ -693,6 +756,9 @@ async function executeBulkSyncRelationLocal(params: {
             const groupData = cache.groups[group];
             const rel = groupData?.hot_relations.find((r) => r.text === relation);
             if (rel) {
+              // 保留旧 FTS ID 时显式维持 incomplete；只有旧 ID 已清空才移除状态。
+              if (rel.ftsIds?.length) rel.ftsIndexComplete = false;
+              else delete rel.ftsIndexComplete;
               const allOk = itemContentAllOk.get(itemIdx) ?? true;
               if (allOk) {
                 // 本次内容向量全部写入成功，才清理旧 tag 向量（对齐单条模式 #M1 数据守恒）。
@@ -778,6 +844,7 @@ async function executeBulkSyncRelationLocal(params: {
     let fullTextStored = false;
     if (!vector) {
       const activeResults = results.filter((item) => !item.skipped);
+      const denseCleanupItems: { index: number; key: string; ids: string[] }[] = [];
       for (let i = 0; i < results.length; i++) {
         if (results[i].skipped) continue;
         const fullText = await fullTextWriteBack({
@@ -791,12 +858,46 @@ async function executeBulkSyncRelationLocal(params: {
         const rel = cache.groups[results[i].group]?.hot_relations.find((r) => r.text === results[i].relation);
         if (rel) {
           rel.ftsIds = fullText.ids;
-          // FTS-only 是明确的无 dense 状态；清理旧的兼容字段，避免文档列表/重建链路误判为已向量化。
-          delete rel.memoryId;
-          delete rel.memoryIds;
+          rel.ftsIndexComplete = fullText.stored;
+          if (fullText.stored) {
+            denseCleanupItems.push({
+              index: i,
+              key: `${results[i].group}\u0000${results[i].relation}`,
+              ids: itemPriorDenseIds[i] ?? [],
+            });
+          }
         }
         results[i].fullTextStored = fullText.stored;
         if (fullText.reason) results[i].fullTextReason = fullText.reason;
+      }
+      const cleanupKeys = new Set(denseCleanupItems.map((item) => item.key));
+      const protectedIds = referencedDenseIds(cache, cleanupKeys);
+      const candidates = [...new Set(denseCleanupItems.flatMap((item) => item.ids).filter((id) => !protectedIds.has(id)))];
+      let failedDenseIds = new Set<string>();
+      if (candidates.length > 0) {
+        try {
+          const deleted = await vectorDelete({ scope, ids: candidates });
+          const errors = (deleted.errors ?? []).filter((item) => item.code !== 'NOT_FOUND');
+          failedDenseIds = new Set(errors.map((item) => item.id));
+          if ((deleted.errors?.length ?? 0) > 0 && errors.length === 0) failedDenseIds = new Set(candidates);
+        } catch {
+          failedDenseIds = new Set(candidates);
+        }
+      }
+      for (const item of denseCleanupItems) {
+        const rel = cache.groups[results[item.index].group]?.hot_relations.find((entry) => entry.text === results[item.index].relation);
+        if (!rel) continue;
+        const remaining = item.ids.filter((id) => failedDenseIds.has(id) && !protectedIds.has(id));
+        setRelationDenseIds(rel, remaining);
+        if (remaining.length > 0) {
+          const reason = `旧 dense 索引清理失败 ${remaining.length} 条`;
+          results[item.index].fullTextReason = [results[item.index].fullTextReason, reason].filter(Boolean).join('；');
+        }
+      }
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].skipped || denseCleanupItems.some((item) => item.index === i)) continue;
+        const rel = cache.groups[results[i].group]?.hot_relations.find((entry) => entry.text === results[i].relation);
+        if (rel) setRelationDenseIds(rel, itemPriorDenseIds[i] ?? []);
       }
       fullTextStored = activeResults.length > 0 && activeResults.every((_, i) => results.filter((item) => !item.skipped)[i]?.fullTextStored === true);
     }
@@ -1005,7 +1106,15 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       }
     }
 
-    const previousFtsIds = [...(cache.groups[group]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
+    const existingRelation = cache.groups[group]?.hot_relations.find((r) => r.text === relation);
+    const previousFtsIds = [...(existingRelation?.ftsIds ?? [])];
+    const previousDenseIds = relationDenseIds(existingRelation);
+    if (existingRelation && previousFtsIds.length > 0) {
+      // syncSingleRelation 会先覆盖 local KB。先持久化失效状态，避免进程在 dense
+      // 写入失败/中断后，让旧 FTS ID 因 legacy fallback 继续被误报为完整。
+      existingRelation.ftsIndexComplete = false;
+      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    }
     const result = syncSingleRelation(cache, scope, group, relation, moduleInfo);
 
     // 文档级自定义 tag 持久化到 KB 层（relation.tags）：
@@ -1031,9 +1140,34 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       : undefined;
     if (fts && relRec) {
       relRec.ftsIds = fts.ids;
-      // FTS-only 是明确的无 dense 状态；清理旧的兼容字段，避免文档列表/重建链路误判为已向量化。
-      delete relRec.memoryId;
-      delete relRec.memoryIds;
+      relRec.ftsIndexComplete = fts.stored;
+      if (fts.stored) {
+        const key = `${group}\u0000${relation}`;
+        const protectedIds = referencedDenseIds(cache, new Set([key]));
+        const candidates = previousDenseIds.filter((id) => !protectedIds.has(id));
+        let failedIds = new Set<string>();
+        if (candidates.length > 0) {
+          try {
+            const deleted = await vectorDelete({ scope, ids: candidates });
+            const errors = deleted.errors.filter((item) => item.code !== 'NOT_FOUND');
+            failedIds = new Set(errors.map((item) => item.id));
+            if (deleted.errors.length > 0 && errors.length === 0) failedIds = new Set(candidates);
+          } catch {
+            failedIds = new Set(candidates);
+          }
+        }
+        const remainingIds = candidates.filter((id) => failedIds.has(id));
+        setRelationDenseIds(relRec, remainingIds);
+        if (remainingIds.length > 0) {
+          fts.reason = [fts.reason, `旧 dense 索引清理失败 ${remainingIds.length} 条`].filter(Boolean).join('；');
+        }
+      } else {
+        // 新 FTS 未完整写入时保留旧 dense 数据，保证原内容仍可检索并可重试清理。
+        setRelationDenseIds(relRec, previousDenseIds);
+      }
+    } else if (relRec && !relRec.ftsIds?.length) {
+      // 没有 FTS ID 时清除无效的完整状态；若旧 FTS ID 尚存，保留前置写入的 false。
+      delete relRec.ftsIndexComplete;
     }
 
     // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘。

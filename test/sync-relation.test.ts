@@ -71,6 +71,25 @@ describe('sync-relation 单条模式', () => {
     assert.strictEqual(result.evicted, null);
   });
 
+  it('单条 --no-vector 写入后标记完整 FTS-only 状态', async () => {
+    const result = runSync([
+      '--scope', scope,
+      '--group', '项目根/FTS状态',
+      '--relation', '单条全文文档',
+      '--module-info', '# 单条全文文档\n\n正文内容',
+      '--no-vector',
+    ]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+
+    const { readJson } = await import('../src/lib/store.js');
+    const { getRelationsCachePath } = await import('../src/lib/scope.js');
+    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const relation = cache.groups['项目根/FTS状态'].hot_relations.find((item: any) => item.text === '单条全文文档');
+    assert.ok(relation?.ftsIds?.length > 0);
+    assert.equal(relation.ftsIndexComplete, true);
+    assert.equal(relation.memoryId, undefined);
+  });
+
   it('Relation 已写入 relations-cache.json', async () => {
     const { readJson } = await import('../src/lib/store.js');
     const { getRelationsCachePath } = await import('../src/lib/scope.js');
@@ -500,6 +519,7 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       assert.ok(cache.groups['项目根/模块A']);
       assert.ok(cache.groups['项目根/模块B']);
       assert.ok(cache.groups['项目根/模块A'].hot_relations[0].ftsIds?.length > 0, 'FTS-only relation 应登记 ftsIds');
+      assert.strictEqual(cache.groups['项目根/模块A'].hot_relations[0].ftsIndexComplete, true, '完整写入后应登记 FTS-only 完整状态');
 
       // 验证本地 KB 写入
       const kbA = readJson<any>(getLocalKbDir(bulkScope, '项目根/模块A'))!;
@@ -606,6 +626,7 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       assert.ok(rel);
       assert.deepStrictEqual(rel.tags, ['api', 'auth']);
       assert.ok(rel.ftsIds?.length > 0, '带标签 FTS-only relation 应登记全部 ftsIds');
+      assert.strictEqual(rel.ftsIndexComplete, true, '带标签 FTS entries 完整写入后应标记 complete');
     } finally {
       const kbDir = getKbDir(bulkScope);
       if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
