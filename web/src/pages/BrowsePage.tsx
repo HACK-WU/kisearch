@@ -16,7 +16,18 @@ import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { TagSelect } from '@/components/TagSelect';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
-import { buildGroupTree, firstGroupWithDocuments, isGroupSelectable, type GroupTreeNode as TreeNode } from '@/lib/groupTree';
+import {
+  buildGroupTree,
+  countDocs,
+  findGroupNode,
+  firstGroupWithDocuments,
+  isGroupSelectable,
+  revealGroupPath,
+  toggleNodeOpen,
+  withAllOpen,
+  withDefaultOpen,
+  type GroupTreeNode as TreeNode,
+} from '@/lib/groupTree';
 
 const ICON_FOLDER = (
   <svg className="ki-tree-icon" viewBox="0 0 16 16" fill="none">
@@ -87,17 +98,15 @@ function makeSnippet(content: string, query: string, maxLength = 320): string {
   return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
 }
 
-/** 默认展开一级，子级折叠 */
-function setDefaultOpen(nodes: TreeNode[], depth = 0): void {
-  for (const n of nodes) {
-    n.open = depth === 0;
-    setDefaultOpen(n.children, depth + 1);
+/** 树节点无障碍名称：显式给出，避免 treeitem 按内容取名时把箭头按钮文案与计数混进来 */
+function treeNodeLabel(node: TreeNode, totalDocs: number): string {
+  const parts = [node.name];
+  if (node.children.length > 0 && node.count > 0) {
+    parts.push(`本组 ${node.count} 条`, `含子组共 ${totalDocs} 条`);
+  } else {
+    parts.push(`${totalDocs} 条`);
   }
-}
-
-/** 子树文档总数（父目录显示含子级计数，直接使用后端返回的 count 字段） */
-function countDocs(node: TreeNode): number {
-  return node.count + node.children.reduce((s, c) => s + countDocs(c), 0);
+  return parts.join('，');
 }
 
 export function BrowsePage(): JSX.Element {
@@ -152,33 +161,37 @@ export function BrowsePage(): JSX.Element {
   }, []);
 
   // ── Group 树构建（仅在 groups 数据变化时重建，activeGroup 变化不触发重建）──
-  // 分离原因：activeGroup 变化时若重建树 + setDefaultOpen，会导致非一级节点被折叠。
+  // 分离原因：activeGroup 变化时若重建树 + 默认展开，会导致非一级节点被折叠。
   useEffect(() => {
     const rawGroups = data?.groups;
     if (!rawGroups?.length) {
       setTree([]);
       return;
     }
-    const t = buildGroupTree(rawGroups);
-    setDefaultOpen(t);
-    setTree(t);
+    const base = withDefaultOpen(buildGroupTree(rawGroups));
+    setTree(base);
     // 默认选中第一个有自身文档的 Group，包括有子级的父 Group。
     setActiveGroup((prev) => {
-      if (prev) {
-        // 已有选中且仍在树中 → 保留（避免重复请求）
-        const stack = [...t];
-        while (stack.length) {
-          const n = stack.pop()!;
-          if (n.path === prev) return prev;
-          stack.push(...n.children);
-        }
-      }
-      return firstGroupWithDocuments(t) || (t.length > 0 ? t[0].path : '');
+      // 已有选中且仍在树中 → 保留（避免重复请求）
+      if (prev && findGroupNode(base, prev)) return prev;
+      return firstGroupWithDocuments(base) || (base.length > 0 ? base[0].path : '');
     });
   }, [data?.groups]); // ← 仅依赖 groups，不依赖 activeGroup
 
+  // 选中项变化（含首次默认选中、链接跳转）后展开其祖先链，保证高亮在树中可见。
+  // revealGroupPath 幂等：已可见时返回原引用，不会触发额外渲染。
+  useEffect(() => {
+    if (!activeGroup) return;
+    setTree((prev) => revealGroupPath(prev, activeGroup));
+  }, [activeGroup, data?.groups]);
+
   // 树节点 count 始终使用 /api/doc/list 返回的未筛选文档数；groupDocs 可能受 tag 过滤。
   const activeDocs = groupDocs;
+  // 当前选中 Group 的「本组文档数」（未筛选口径），用于 tag 筛选下的文案说明。
+  const activeGroupNode = useMemo(
+    () => (activeGroup ? findGroupNode(tree, activeGroup) : null),
+    [activeGroup, tree],
+  );
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
@@ -233,23 +246,6 @@ export function BrowsePage(): JSX.Element {
     return [...byKey.values()];
   }, [data?.docs, groupDocs, searchDocs]);
 
-  /** 展开目标 Group 的父级，让链接跳转后的选中状态在树中可见。 */
-  const revealGroup = useCallback((group: string): void => {
-    setTree((prev) => {
-      const copy = prev.map((node) => ({ ...node }));
-      const walk = (nodes: TreeNode[]): void => {
-        for (const node of nodes) {
-          if (group === node.path || group.startsWith(`${node.path}/`)) {
-            node.open = node.children.length > 0;
-            walk(node.children);
-          }
-        }
-      };
-      walk(copy);
-      return copy;
-    });
-  }, []);
-
   /** 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。 */
   const openDocument = useCallback((doc: DocumentView): void => {
     setHistory([]);
@@ -265,27 +261,25 @@ export function BrowsePage(): JSX.Element {
     setViewing(null);
   }, []);
 
-  /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group。 */
+  /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goBack = useCallback((): void => {
     const previous = history[history.length - 1];
     if (!previous) return;
     setHistory((prev) => prev.slice(0, -1));
     if (viewing) setForwardHistory((prev) => [...prev, viewing]);
     setActiveGroup(previous.group ?? '');
-    if (previous.group) revealGroup(previous.group);
     setViewing(previous);
-  }, [history, revealGroup, viewing]);
+  }, [history, viewing]);
 
-  /** 前进到最近一次返回前的文档，并同步恢复其 Group。 */
+  /** 前进到最近一次返回前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goForward = useCallback((): void => {
     const next = forwardHistory[forwardHistory.length - 1];
     if (!next) return;
     setForwardHistory((prev) => prev.slice(0, -1));
     if (viewing) setHistory((prev) => [...prev, viewing]);
     setActiveGroup(next.group ?? '');
-    if (next.group) revealGroup(next.group);
     setViewing(next);
-  }, [forwardHistory, revealGroup, viewing]);
+  }, [forwardHistory, viewing]);
 
   /** 在当前 Browse 页面内切换到 Markdown 链接指向的文档。 */
   const handleLocalLink = useCallback((href: string): boolean => {
@@ -294,7 +288,6 @@ export function BrowsePage(): JSX.Element {
     if (viewing) setHistory((prev) => [...prev, viewing]);
     setForwardHistory([]);
     setActiveGroup(target.group);
-    revealGroup(target.group);
     setViewing({
       module: target.name,
       group: target.group,
@@ -302,51 +295,43 @@ export function BrowsePage(): JSX.Element {
       highlightQuery: viewing?.highlightQuery,
     });
     return true;
-  }, [knownDocs, revealGroup, viewing]);
+  }, [knownDocs, viewing]);
 
-  /** 切换节点展开/折叠（原地 mutate + 新数组引用触发渲染） */
+  /** 切换节点展开/折叠（纯函数：返回新树，不改写旧 state 内的节点） */
   const toggleOpen = (path: string): void => {
-    setTree((prev) => {
-      const walk = (nodes: TreeNode[]): boolean => {
-        for (const n of nodes) {
-          if (n.path === path) {
-            n.open = !n.open;
-            return true;
-          }
-          if (walk(n.children)) return true;
-        }
-        return false;
-      };
-      walk(prev);
-      return [...prev];
-    });
+    setTree((prev) => toggleNodeOpen(prev, path));
   };
 
-  /** 展开/折叠全部 */
+  /** 展开/折叠全部（纯函数） */
   const setAllOpen = (open: boolean): void => {
-    setTree((prev) => {
-      const walk = (nodes: TreeNode[]): void => {
-        for (const n of nodes) {
-          if (n.children.length > 0) n.open = open;
-          walk(n.children);
-        }
-      };
-      walk(prev);
-      return [...prev];
-    });
+    setTree((prev) => withAllOpen(prev, open));
   };
 
   /**
-   * 目录点击：
-   * - 有自身文档的父 Group：展开并选中，读取本组文档
-   * - 无自身文档的父目录：仅展开/折叠
+   * 目录点击（鼠标 / 触屏）：
+   * - 有自身文档的父 Group：选中并读取本组文档；折叠时顺带展开，已展开时不反向折叠（折叠交给箭头按钮）
+   * - 无自身文档的父目录：仅展开/折叠（本组没有文档可读）
    * - 叶子 Group：选中并读取本组文档
    */
   const handleDirClick = (node: TreeNode): void => {
+    if (!isGroupSelectable(node)) {
+      if (node.children.length > 0) toggleOpen(node.path);
+      return;
+    }
+    if (node.children.length > 0 && !node.open) toggleOpen(node.path);
+    setActiveGroup(node.path);
+    // 全屏阅读时保留当前阅读器，用户可以在左侧 Group 树和中间文档列表继续选文档。
+    if (!readerFullscreen) closeDocument();
+  };
+
+  /**
+   * 目录键盘激活（Enter / Space）：保留「展开/折叠 + 选中」的传统树语义，
+   * 让键盘用户在节点上也能收起子组（箭头按钮已移出 Tab 序列）。
+   */
+  const handleDirKeyActivate = (node: TreeNode): void => {
     if (node.children.length > 0) toggleOpen(node.path);
     if (!isGroupSelectable(node)) return;
     setActiveGroup(node.path);
-    // 全屏阅读时保留当前阅读器，用户可以在左侧 Group 树和中间文档列表继续选文档。
     if (!readerFullscreen) closeDocument();
   };
 
@@ -354,12 +339,14 @@ export function BrowsePage(): JSX.Element {
     const hasSub = node.children.length > 0;
     const isActive = node.path === activeGroup;
     const totalDocs = countDocs(node);
+    const countLabel = hasSub ? `本组 ${node.count} 条；含子组共 ${totalDocs} 条` : `本组 ${node.count} 条`;
     return (
       <Fragment key={node.path}>
         <div
           className={`ki-tree-dir${node.open && hasSub ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
           role="treeitem"
           tabIndex={0}
+          aria-label={treeNodeLabel(node, totalDocs)}
           aria-expanded={hasSub ? node.open : undefined}
           aria-selected={isActive}
           onClick={() => handleDirClick(node)}
@@ -367,26 +354,23 @@ export function BrowsePage(): JSX.Element {
             if (e.target !== e.currentTarget) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
-            handleDirClick(node);
+            handleDirKeyActivate(node);
           }}
         >
           {hasSub ? (
             <button
               className="ki-tree-arrow"
               type="button"
-              aria-label={`${node.open ? '折叠' : '展开'} ${node.name}`}
-              aria-expanded={node.open}
+              tabIndex={-1}
+              aria-hidden="true"
               onClick={(e) => { e.stopPropagation(); toggleOpen(node.path); }}
             >
               {node.open ? '▾' : '▸'}
             </button>
-          ) : <span className="ki-tree-arrow" />}
+          ) : <span className="ki-tree-arrow" aria-hidden="true" />}
           {ICON_FOLDER}
           <span className="ki-tree-dir__label">{node.name}</span>
-          <span
-            className="ki-cell-sub"
-            title={hasSub ? `本组 ${node.count} 条；含子组共 ${totalDocs} 条` : `本组 ${node.count} 条`}
-          >
+          <span className="ki-cell-sub" title={countLabel}>
             {hasSub && node.count > 0 ? `${node.count} / ${totalDocs}` : totalDocs}
           </span>
         </div>
@@ -430,7 +414,7 @@ export function BrowsePage(): JSX.Element {
           </div>
         </div>
       ) : (
-        <div className="ki-tree-root" role="tree">{tree.map(renderNode)}</div>
+        <div className="ki-tree-root" role="tree" aria-label="Group 树">{tree.map(renderNode)}</div>
       )}
     </>
   );
@@ -492,7 +476,14 @@ export function BrowsePage(): JSX.Element {
         <div className="ki-empty" style={{ border: 'none' }}>
           <div>
             <h3>无匹配文档</h3>
-            <p>{isSearching ? '文件名或路径暂无命中；可查看下方正文命中，或换个关键词。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
+            {/* 树计数是未筛选口径，tag 过滤下为空时必须说明，避免被读成「该 Group 没有文档」 */}
+            <p>
+              {isSearching
+                ? '文件名或路径暂无命中；可查看下方正文命中，或换个关键词。'
+                : selectedTag && activeGroupNode && activeGroupNode.count > 0
+                  ? `该 Group 在当前 tag（#${selectedTag}）筛选下无文档；本组共 ${activeGroupNode.count} 条，可清除 tag 筛选查看。`
+                  : '该 Group 暂无文档，或选择其他 Group 查看。'}
+            </p>
           </div>
         </div>
       ) : (
@@ -663,7 +654,9 @@ export function BrowsePage(): JSX.Element {
               <div>
                 <div className="ki-card__title">文档</div>
                 <div className="ki-card__sub">
-                  {isSearching ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}` : `${shownTotal} 条`}
+                  {isSearching
+                    ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}`
+                    : `${shownTotal} 条${selectedTag ? `（tag: ${selectedTag}）` : ''}`}
                 </div>
               </div>
               <div className="ki-reader-nav__actions">
@@ -735,7 +728,7 @@ export function BrowsePage(): JSX.Element {
                 {isSearching
                   ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}`
                   : activeGroup
-                    ? `${activeGroup} · ${activeDocs.length} 条`
+                    ? `${activeGroup} · ${activeDocs.length} 条${selectedTag ? `（tag: ${selectedTag}）` : ''}`
                     : '选择左侧 Group 查看文档'}
               </span>
             </div>

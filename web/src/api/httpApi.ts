@@ -50,6 +50,15 @@ export interface DocItem {
   fullTextIndexed?: boolean;
 }
 
+/**
+ * 单个 Group 的完整路径与本组文档数（不含子 Group）。
+ * count 由后端按精确 group 名统计，不受 docs 分页 limit 截断影响。
+ */
+export interface DocGroup {
+  name: string;
+  count: number;
+}
+
 export interface DocListResponse {
   ok: boolean;
   scope: string;
@@ -57,7 +66,7 @@ export interface DocListResponse {
   total: number;
   truncated?: boolean;
   /** 完整 group 列表 + 文档数量（不受 docs 分页 limit 影响），用于构建 Group 树 */
-  groups?: { name: string; count: number }[];
+  groups?: DocGroup[];
   /** 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用） */
   tags?: string[];
   error?: string;
