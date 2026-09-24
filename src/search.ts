@@ -15,6 +15,7 @@ import { loadConfig, resolveScope, getScopeMode } from './lib/config.js';
 import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
+import { hiddenEditIndexIds } from './lib/relation-edit-draft.js';
 import { readJson } from './lib/store.js';
 import {
   createOriginalLocator,
@@ -236,10 +237,27 @@ async function executeSearchLocal(params: {
     // 不传 tags（默认搜全部）→ 按 tag 分查：每个 tag 最多取 limit 条（组内按 score 降序），
     // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
     // 多 scope：各 Collection fan-out 后应用层合并，query vector 在 fan-out 前只生成一次。
+    const hiddenByScope = new Map(scopes.map((scope) => [scope, hiddenEditIndexIds(scope)]));
+    const hiddenTotal = [...hiddenByScope.values()].reduce((sum, ids) => sum + ids.size, 0);
+    const HIDDEN_HEADROOM_CAP = 1_000;
+    const hiddenHeadroom = Math.min(HIDDEN_HEADROOM_CAP, hiddenTotal);
+    // 待隐藏 ID 超过补位上限时，被过滤的候选可能挤掉真实结果，导致返回条数少于 limit。
+    // 这是无法在本层完全消除的近似（检索 topk 有界），但必须显式上报，避免静默漏召回。
+    const hiddenOverflow = hiddenTotal > HIDDEN_HEADROOM_CAP;
+    if (hiddenOverflow) {
+      skipped.push({
+        scope: scopes.join(','),
+        reason: `有 ${hiddenTotal} 条索引处于编辑中间态，超出 ${HIDDEN_HEADROOM_CAP} 条补位上限；结果可能少于 limit，请稍后重试`,
+      });
+    }
+    const isVisibleHit = (hit: VectorSearchResult): boolean => {
+      const hitScope = hit.scope ?? (scopes.length === 1 ? scopes[0] : undefined);
+      return !hitScope || !hiddenByScope.get(hitScope)?.has(hit.ftsId ?? hit.memoryId);
+    };
     let raw: VectorSearchResult[];
     let fullTextCandidateLimit = 0;
     if (isFullText) {
-      fullTextCandidateLimit = Math.max((params.limit ?? 10) * 10, 50);
+      fullTextCandidateLimit = Math.max((params.limit ?? 10) * 10, 50) + hiddenHeadroom;
       raw = await fullTextSearch({
         scopes,
         query: params.query,
@@ -252,7 +270,7 @@ async function executeSearchLocal(params: {
       raw = await vectorSearch({
         scopes,
         query: params.query,
-        limit: params.limit ?? 10,
+        limit: (params.limit ?? 10) + hiddenHeadroom,
         threshold: params.threshold,
         tags: params.tags,
         timeoutMs: params.timeoutMs,
@@ -279,14 +297,14 @@ async function executeSearchLocal(params: {
         const hits = await vectorSearch({
           scopes,
           query: params.query,
-          limit: limit * tagNames.length,
+          limit: limit * tagNames.length + hiddenHeadroom,
           threshold: params.threshold,
           tags: tagNames,
           timeoutMs: params.timeoutMs,
           onDegrade: (reason) => { degradeReason ??= reason; },
         });
         const byTag = new Map<string, VectorSearchResult[]>();
-        for (const h of hits) {
+        for (const h of hits.filter(isVisibleHit)) {
           const tag = h.tag ?? '';
           const group = byTag.get(tag);
           if (group) group.push(h);
@@ -300,6 +318,10 @@ async function executeSearchLocal(params: {
         raw = perTag.flatMap((p) => p.hits);
       }
     }
+
+    // 编辑发布期间，新索引尚未成为正式版本；清理失败的旧索引也不应继续召回。
+    // 草稿清单先于 zvec 写入持久化，故读路径可按 ID 排除两类中间态。
+    raw = raw.filter(isVisibleHit);
 
     // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文。
     // 多 scope：按命中所属 scope 选对应 relation-map（跨 scope 不错配）；
@@ -366,7 +388,7 @@ async function executeSearchLocal(params: {
             // 让字面查询命中之外的 fallback 仍关联到产生它的 chunk。若 direct 命中且
             // 全局候选池已饱和，则不对每个无 locator chunk 再搜索原文，完整性显式降级。
             const chunkKey = JSON.stringify([documentKey, r.content]);
-            let inferredRange = locator;
+            let inferredRange: SourceLineRange | undefined = locator;
             const canInferRange = !locator && (directMatches.length === 0 || raw.length < fullTextCandidateLimit);
             if (!inferredRange && canInferRange && inferredRangeByChunk.has(chunkKey)) {
               inferredRange = inferredRangeByChunk.get(chunkKey);

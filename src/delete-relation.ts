@@ -621,6 +621,7 @@ async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDe
         cacheRemoved: false,
         kbRemoved: false,
         wikiRemoved: false,
+        fullTextRemoved: false,
         memRemoved: false,
         memMethod: 'none',
         reason: outcome.error,

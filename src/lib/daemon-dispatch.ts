@@ -2,6 +2,7 @@ import { executeStore } from '../store.js';
 import { executeBulkStore } from '../bulk-store.js';
 import { executeSearch } from '../search.js';
 import { executeSyncRelation, executeBulkSyncRelation } from '../sync-relation.js';
+import { executeEditRelation } from '../edit-relation.js';
 import { executeDeleteRelation, executeDeleteGroup, executeBatchDelete } from '../delete-relation.js';
 import { handleDirectImport } from './import.js';
 import { executeScopeList, executeScopeDelete, executeScopeClear } from '../scope.js';
@@ -38,6 +39,7 @@ const HANDLERS: Record<string, Handler> = {
   'bulk-store': executeBulkStore,
   search: executeSearch,
   'sync-relation': executeSyncRelation,
+  'edit-relation': executeEditRelation,
   'bulk-sync-relation': executeBulkSyncRelation,
   'delete-relation': executeDeleteRelation,
   'delete-group': executeDeleteGroup,

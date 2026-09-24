@@ -33,6 +33,8 @@ export interface Relation {
   /** 方案 D（REQ-20260807-001）新增：文件级 relation 的全部 chunk memoryId（多值）；
    *  导入链路使用多值；sync-relation 等旧链路仍用单值 memoryId */
   memoryIds?: string[];
+  /** ki_edit_relation 最近一次发布时的内容 chunk 数，用于后续清理旧路径向量。 */
+  editChunkCount?: number;
   /** FTS-only Collection 中对应的文档 ID；仅 --no-vector / fulltext 写入链路使用。 */
   ftsIds?: string[];
   /** 新写入的 FTS-only 索引是否覆盖了该文档的全部预期 FTS entries；undefined 表示旧数据。 */
