@@ -148,7 +148,7 @@ provider:
 
 > **记忆失实处理边界**：更新动作仅针对 `${scope}-memory`（项目记忆），**主动更新**即可；`${scope}` 知识库与实际代码不符时仍按"禁忌 13"执行——需用户**明确授权**后方可写入，不得擅自修改。
 
-**写入方式**：项目记忆/代码片段 → 单条（1~2 条）用 `ki_sync_relation`；**批量（≥3 条）用 `ki_bulk_sync_relation` 批量写入（一次 embed + 一次向量写入，比多次逐条调用快 N 倍）**。**批量时建议分批调用，每批 ≤5 条**（MCP 单次 `items` 硬上限 50 条）——一次性组织大量文档数据耗时、占上下文、易出错，分批次服务端总耗时几乎不变但组织成本更低、单批失败只重试该批。超长 >1000 字符会收到警告，建议拆分。用户画像/近期工作 → 直接更新 AGENTS.md（覆盖/追加）；写入后刷新缓存。
+**写入方式**：项目记忆/代码片段 → 单条（1~2 条）用 `ki_sync_relation`；**批量（≥3 条）用 `ki_bulk_sync_relation` 批量写入（一次 embed + 一次向量写入，比多次逐条调用快 N 倍）**。**批量时建议分批调用，每批 ≤5 条**（MCP 单次 `items` 硬上限 50 条）——一次性组织大量文档数据耗时、占上下文、易出错，分批次服务端总耗时几乎不变但组织成本更低、单批失败只重试该批。超长 >1000 字符会收到警告，建议拆分。**修订已有长 Relation 的局部内容**用 `ki_edit_relation`（`edit` 按行改多轮 → `view` 轮询 → `finish` 提交）：避免为了改几行重写整篇正文；注意 finish 是异步的，且会把正文覆盖写回源文件（wikiSync 目标目录为空时还会自动补齐历史关系）。用户画像/近期工作 → 直接更新 AGENTS.md（覆盖/追加）；写入后刷新缓存。
 
 **近期工作（AGENTS.md）格式**：
 
@@ -234,7 +234,7 @@ provider:
 
 ### 写入片段
 
-- 追加写入（单条）：`ki_sync_relation(scope: "${scope}-memory", group: "工具库", relation: "日期时间", module_info: "<描述+符号+位置>")`，新片段追加到已有 Relation 末尾
+- 写入（单条）：`ki_sync_relation(scope: "${scope}-memory", group: "工具库", relation: "日期时间", module_info: "<描述+符号+位置>")`。⚠️ **`module_info` 是该 Relation 的完整正文，不是增量片段**——实现是整篇覆盖（无追加语义；2026-09-24 实测：只传新片段会把原内容整体替换掉）。追加新片段必须先 `ki_get_module_info` 取回当前正文，拼上 `<新片段>` 后整篇写入
 - **批量写入（≥3 条或多文档）**：用 `ki_bulk_sync_relation(scope: "${scope}-memory", items: [{ group, relation, module_info, tags? }])`，一次 embed + 一次向量写入，比多次逐条调用快 N 倍；**建议分批调用，每批 ≤5 条**（一次性组织大量文档耗时易错，分批服务端总耗时几乎不变）
 - **写入前查重**：先 `ki_get_module_info` 获取 Relation 当前内容，若已存在相同 `符号` 的片段 → 更新而非追加
 - 写入后刷新缓存：`ki_query_group(scope: "${scope}-memory", mode: "full")`

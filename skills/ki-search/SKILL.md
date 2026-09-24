@@ -30,6 +30,7 @@ description: 代码知识库检索行为规则。当用户问题涉及代码知�
 写入 KB（仅用户明确授权后）:
   1~2 条 → ki_sync_relation 逐条写
   ≥3 条  → ki_sync_relation --input 批量写（CLI）
+  改已有长文档的几行 → ki_edit_relation（edit → view 轮询 → finish），不要整篇重写
 ```
 
 ---
@@ -131,6 +132,7 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 |------|------|
 | 1~2 | `ki_sync_relation(scope, group, relation, module_info)` |
 | ≥3 | `ki_bulk_sync_relation(scope, items)` 批量写（MCP，一次 embed + 一次向量写入） |
+| 已有长文档只改几行 | `ki_edit_relation`（`edit` 多轮改行 → `view` 轮询 → `finish` 提交；finish 异步且会覆盖写回源文件，避免整篇重写） |
 
 写入后必须刷新全景缓存。
 

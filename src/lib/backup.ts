@@ -134,7 +134,12 @@ export function backupScopeSnapshot(
   const scopeDirName = path.basename(scopeDataDir);
 
   try {
-    execFileSync('tar', ['-czf', targetFile, '-C', scopeDirParent, scopeDirName], {
+    // 排除编辑草稿目录（.relation-edits）：草稿是"尚未生效/正在生效"的中间态，
+    // 快照原样还原会让草稿复活——其 baseRevision 与还原后的正文未必匹配，甚至
+    // 触发中断恢复把已还原的正文回滚成 baseContent。正文本身在 index.json 里，
+    // 快照价值不受影响（restore 侧也会兜底清空该目录，覆盖历史快照）。
+    execFileSync('tar', ['-czf', targetFile, '--exclude', `${scopeDirName}/.relation-edits`,
+      '-C', scopeDirParent, scopeDirName], {
       stdio: 'ignore',
     });
   } catch (err) {

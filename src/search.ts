@@ -410,6 +410,20 @@ async function executeSearchLocal(params: {
                   fallbackOnly: true,
                 });
                 rankingFallbackUsed = matches.length > 0;
+                // 锚点范围可能只覆盖 chunk 的一小部分（清洗在行内删掉了路径/行号等，
+                // 只有仍与原文连续的片段能当锚点）：此时范围外仍可能有该 chunk 的原文命中，
+                // 硬过滤会让"原文有内容却查不到行号"。范围跨度小于 chunk 自身行数即视为
+                // 不可信锚点，放开范围用 chunk 词项在整篇原文兜底，并把该 chunk 标记为
+                // 未映射（matchCountComplete 因此降级，避免静默声称计数完整）。
+                const chunkLineCount = r.content.split('\n').length;
+                if (matches.length === 0 && chunkLineCount > inferredRange.lineEnd - inferredRange.lineStart + 1) {
+                  const wideMatches = sourceLocator.locate(params.query, { fallbackText: r.content, fallbackOnly: true });
+                  if (wideMatches.length > 0) {
+                    matches = wideMatches;
+                    rankingFallbackUsed = true;
+                    unmappedChunkByDocument.add(documentKey);
+                  }
+                }
               }
             } else if (directMatches.length > 0) {
               matches = directMatches;
@@ -494,6 +508,9 @@ async function executeSearchLocal(params: {
           { fallbackContexts: rankingContextsByDocument.get(key) },
         );
         hit.matches = selectedMatches;
+        // 逐条 chunk 的原始提示在聚合补齐命中后不再成立，否则会出现
+        // "matches 有行号 + originalHint 说无法复核" 的自相矛盾响应。
+        if (selectedMatches.length > 0) delete hit.originalHint;
         hit.matchCount = allMatches.length;
         const candidateAddsUnverifiedRegions = candidateMatches.some((candidate) => (
           !directMatches.some((direct) => candidate.lineStart >= direct.lineStart && candidate.lineEnd <= direct.lineEnd)

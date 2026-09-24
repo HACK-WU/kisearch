@@ -30,6 +30,7 @@ import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { getSource } from './lib/scope.js';
 import { ftsDeleteByIds } from './lib/fts-client.js';
+import { activeDrafts } from './lib/relation-edit-draft.js';
 
 // ─── 类型 ───
 
@@ -122,6 +123,16 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       memMethod: 'none',
       fullTextRemoved: true,
     };
+
+    // 在途编辑草稿卫兵（fail-loud）：草稿的 baseRevision 绑定当前正文，Relation 一旦被删，
+    // 草稿永远无法 finish（只能手工删文件），其登记的索引 ID 也会一直挂在搜索隐藏集里。
+    const pendingDrafts = activeDrafts(scope)
+      .filter((draft) => draft.group === resolvedGroup && draft.relation === relation);
+    if (pendingDrafts.length > 0) {
+      return { ok: false, error: `Relation 有 ${pendingDrafts.length} 条未结束的编辑草稿`
+        + `（${pendingDrafts.map((draft) => `${draft.editId}:${draft.status}`).join(', ')}）`
+        + '；请先用 ki_edit_relation 的 cancel 或 finish 收口后再删除' };
+    }
 
     // 1. 从 relations-cache.json 删除（若存在）
     if (relIdx >= 0 && groupData) {
@@ -254,6 +265,15 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       (k) => k === resolvedGroup || k.startsWith(`${resolvedGroup}/`)
     );
     const relations = cascadeKeys.flatMap((k) => cache.groups[k]?.hot_relations ?? []);
+
+    // 同上：目录级级联删除前先确认没有在途草稿，避免留下无法收口的孤儿草稿。
+    const pendingDirDrafts = activeDrafts(scope)
+      .filter((draft) => draft.group === resolvedGroup || draft.group.startsWith(`${resolvedGroup}/`));
+    if (pendingDirDrafts.length > 0) {
+      return { ok: false, error: `该 group 下有 ${pendingDirDrafts.length} 条未结束的编辑草稿`
+        + `（${pendingDirDrafts.map((draft) => `${draft.group}/${draft.relation}:${draft.status}`).join(', ')}）`
+        + '；请先 cancel 或 finish 后再删除' };
+    }
     const result: DeleteGroupResult = {
       group: resolvedGroup,
       deleted: false,

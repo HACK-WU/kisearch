@@ -6,7 +6,10 @@ import { withTimeout, TOOL_TIMEOUT } from './util.js';
 export function registerEditRelationTool(server: McpServer): void {
   server.tool(
     'ki_edit_relation',
-    '局部修改已有的大 Relation：edit 可多轮、每轮同时修改多个不重叠行区间；view 查看草稿；finish 完成后才一次性更新向量/全文索引并清理旧索引；cancel 放弃未发布草稿。小 Relation 建议直接用 ki_sync_relation 提交完整正文，更简单高效。行号从 1 开始且包含 end_line，以当前草稿版本为准。',
+    '局部修改已有的大 Relation：edit 可多轮、每轮同时修改多个不重叠行区间（行号从 1 开始且包含 end_line，以当前草稿版本为准）；view 查看草稿/发布状态；finish 提交终稿并一次性更新向量/全文索引、清理旧索引；cancel 放弃尚未开始发布的草稿。'
+    + '注意：finish 是异步的——返回 queued 后必须用 view 轮询到 published/failed（超时重试请沿用同一 request_id；view 的 published=true 表示正文已生效，finish 此时只做旧索引清理）。'
+    + 'finish 会用草稿正文覆盖写回该 Relation 的源文件（若该 Group 配置了 wikiSync，会重写其 frontmatter 与正文，目标目录为空时还会自动补齐历史关系）。'
+    + '小 Relation 建议直接用 ki_sync_relation 提交完整正文，更简单高效。',
     {
       action: z.enum(['edit', 'view', 'finish', 'cancel']).describe('edit 修改草稿；view 查询草稿/发布状态；finish 提交最终正文；cancel 放弃尚未发布的草稿'),
       scope: z.string().optional().default('default').describe('项目隔离标识'),

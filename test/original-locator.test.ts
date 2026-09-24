@@ -31,6 +31,29 @@ describe('original-locator', () => {
     assert.equal(totalOriginalLines(original), 5);
   });
 
+  it('全部候选行都被清洗改写且原文有空行时，返回 undefined 而不是空行锚点', () => {
+    // 表格行内引用了「路径:行号」，清洗会删掉 src/... 与 :120 → chunk 行不再与原文连续，
+    // 逐行 indexOf 全部失配。历史实现此处回退比较「骨架」，而原文空行骨架为 '' →
+    // `候选.includes('')` 恒真 → 返回指向空行（第 2 行）的伪造行号。
+    const original = [
+      '# 部署手册',
+      '',
+      '| 服务 | 入口 |',
+      '| --- | --- |',
+      '| 网关 | src/gateway/server.ts:120 |',
+      '| 用户 | src/user/handler.ts:88 |',
+    ].join('\n');
+    const cleanedChunk = '| 网关 |  |\n| 用户 |  |';
+    assert.equal(
+      buildChunkLineRanges(original, [{ index: 1, text: cleanedChunk }]).get(1),
+      undefined,
+      '没有任何可复核锚点时必须返回 undefined',
+    );
+    // 对照：chunk 中仍有与原文连续的行时照常返回真实范围（表头行在原文里没被改写）
+    const ranged = buildChunkLineRanges(original, [{ index: 1, text: '| 服务 | 入口 |\n| 网关 |  |' }]);
+    assert.deepEqual(ranged.get(1), { lineStart: 3, lineEnd: 3 });
+  });
+
   it('查询词和 fallback chunk 都无法在原文复核时不返回伪造行号', () => {
     const matches = locateOriginalMatches('只剩不可匹配内容', '不存在的词', { fallbackText: 'cleaned chunk' });
     assert.deepEqual(matches, []);
