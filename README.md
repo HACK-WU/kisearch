@@ -78,7 +78,7 @@ MCP 工具形成了可持续的记忆闭环：
 |-----------|---------|------|
 | 回忆 | `ki_search`、`ki_query_group`、`ki_get_module_info` | 语义检索、按结构导航、读取原文 |
 | 记住 | `ki_sync_relation`、`ki_bulk_sync_relation` | 写入带 Group / Relation 的持久化结构化记忆 |
-| 更新 | `ki_sync_relation`、`ki_bulk_sync_relation` | 按稳定的 Group + Relation 覆盖更新已有记忆 |
+| 更新 | `ki_sync_relation`、`ki_bulk_sync_relation`、`ki_edit_relation` | 短文档整篇覆盖；大 Relation 可多轮按行修改，完成后再更新索引 |
 | 组织 | `ki_manage_index_create`、标签、scope | 建立记忆层级、分类和项目隔离 |
 | 遗忘 | `ki_delete_relation` | 删除指定 Relation 及其关联的 KB、缓存和向量数据 |
 
@@ -322,6 +322,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 | `ki_manage_index_list` | 列出所有 scope | — |
 | `ki_manage_index_delete` | 删除空 Group 节点（非空节点拒绝删除） | — |
 | `ki_sync_relation` | 写入单条 Relation（向量 + KB 双写，`vector=false` 非向量化） | 写入 |
+| `ki_edit_relation` | 对已有大 Relation 多轮、多区域按行编辑草稿；`finish` 后才更新向量或全文索引 | 更新 |
 | `ki_bulk_sync_relation` | 批量写入 Relation（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | 写入 |
 | `ki_delete_relation` | 删除 Relation（四层清理） | — |
 | `ki_search` | 语义检索，输出 group/relation 定位字段 | 语义检索 |

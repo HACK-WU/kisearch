@@ -111,7 +111,8 @@ export interface RebuildVectorOptions {
 
 /** relations-cache 的 groups 扁平结构（键 = 完整 groupPath） */
 interface CacheGroup {
-  hot_relations?: { text: string; memoryId?: string | null; memoryIds?: string[]; tags?: string[] }[];
+  hot_relations?: { text: string; memoryId?: string | null; memoryIds?: string[]; tags?: string[];
+    ftsIds?: string[]; ftsLocators?: Array<{ ftsId: string; lineStart: number; lineEnd: number; sourcePath?: string; chunkIndex?: number }>; ftsIndexComplete?: boolean }[];
   keywords?: string[];
 }
 
