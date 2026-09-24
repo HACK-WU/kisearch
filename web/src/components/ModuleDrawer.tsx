@@ -77,7 +77,8 @@ function applyDocumentHighlights(root: HTMLElement, query: string): number {
   while (node) {
     const text = node as Text;
     const parent = text.parentElement;
-    if (text.nodeValue && parent && !parent.closest('script,style,svg')) textNodes.push(text);
+    // 页面生成的复制控件不是原文，不能参与命中计数/自动定位。
+    if (text.nodeValue && parent && !parent.closest('script,style,svg,button,[aria-live]')) textNodes.push(text);
     node = walker.nextNode();
   }
 
@@ -403,30 +404,36 @@ export function ModuleDrawer({
           >
             {ICON_DRAWER_COLLAPSE}
           </button>
-          {canGoBack && onBack && (
-            <button
-              className="ki-drawer__back"
-              onClick={onBack}
-              title="返回上一级文档"
-              type="button"
-              aria-label="返回上一级文档"
-            >
-              {ICON_NAV_PREV}<span className="ki-drawer__back-label">上一级</span>
-            </button>
-          )}
-          {canGoForward && onForward && (
-            <button
-              className="ki-drawer__forward"
-              onClick={onForward}
-              title="前进到下一级文档"
-              type="button"
-              aria-label="前进到下一级文档"
-            >
-              {ICON_NAV_NEXT}<span className="ki-drawer__forward-label">下一级</span>
-            </button>
-          )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="ki-drawer__title">{module}</div>
+          <div className="ki-drawer__identity">
+            <div className="ki-drawer__title-row">
+              <div className="ki-drawer__title" title={module}>{module}</div>
+              {(canGoBack && onBack || canGoForward && onForward) && (
+                <div className="ki-drawer__nav">
+                  {canGoBack && onBack && (
+                    <button
+                      className="ki-drawer__back"
+                      onClick={onBack}
+                      title="返回上一级文档"
+                      type="button"
+                      aria-label="返回上一级文档"
+                    >
+                      {ICON_NAV_PREV}<span className="ki-drawer__back-label">上一级</span>
+                    </button>
+                  )}
+                  {canGoForward && onForward && (
+                    <button
+                      className="ki-drawer__forward"
+                      onClick={onForward}
+                      title="前进到下一级文档"
+                      type="button"
+                      aria-label="前进到下一级文档"
+                    >
+                      {ICON_NAV_NEXT}<span className="ki-drawer__forward-label">下一级</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="ki-drawer__meta">
               <span className="ki-badge ki-badge--kb" style={{ fontSize: 11 }}>{scope}</span>
               {group && (

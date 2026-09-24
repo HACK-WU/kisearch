@@ -717,6 +717,18 @@ a:hover { text-decoration: underline; }
   background: var(--ki-color-surface); cursor: pointer; transition: border-color var(--ki-motion-fast);
 }
 .ki-doc-item:hover { border-color: color-mix(in srgb, var(--ki-color-primary) 30%, transparent); }
+.ki-doc-item--current {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 68%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 5%, var(--ki-color-surface));
+  box-shadow: inset 3px 0 var(--ki-color-primary);
+}
+.ki-doc-item__title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-doc-item__title-row .ki-doc-item__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-doc-item__current-label {
+  flex-shrink: 0; padding: 2px 6px; border-radius: 4px;
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  color: var(--ki-color-primary); font-size: 10px; line-height: 1.4;
+}
 .ki-doc-item:focus-visible,
 .ki-tree-dir:focus-visible,
 .ki-gtree-dir:focus-visible {
@@ -848,7 +860,12 @@ a:hover { text-decoration: underline; }
 .ki-drawer__forward-label { font-size: 13px; }
 /* 上一级/下一级的描边箭头图标 */
 .ki-drawer__nav-icon { width: 15px; height: 15px; display: block; flex-shrink: 0; }
+.ki-drawer__identity { flex: 1 1 auto; min-width: 0; }
+.ki-drawer__title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-drawer__nav { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .ki-drawer__title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-weight: 600;
   font-size: var(--ki-font-size-lg);
   line-height: 1.3;
@@ -880,6 +897,7 @@ a:hover { text-decoration: underline; }
   gap: 4px;
   flex-shrink: 0;
   margin-left: auto;
+  align-self: flex-start;
 }
 .ki-drawer__highlight {
   display: inline-flex;
@@ -887,6 +905,7 @@ a:hover { text-decoration: underline; }
   gap: 4px;
   flex-shrink: 0;
   margin-left: auto;
+  align-self: flex-start;
 }
 .ki-drawer__highlight-count {
   min-width: 34px;
@@ -1235,6 +1254,38 @@ a:hover { text-decoration: underline; }
 .ki-markdown ul, .ki-markdown ol { padding-left: 20px; margin: 8px 0; }
 .ki-markdown code { font-family: var(--ki-font-mono); font-size: 12px; background: var(--ki-color-bg-muted); padding: 1px 5px; border-radius: 4px; }
 .ki-markdown pre { background: var(--ki-color-bg); padding: 12px; border-radius: var(--ki-radius-sm); overflow-x: auto; font-family: var(--ki-font-mono); font-size: 12px; margin: 8px 0; }
+.ki-markdown .ki-code-block {
+  position: relative;
+  margin: 8px 0;
+  padding-right: 72px;
+  background: var(--ki-color-bg);
+  border-radius: var(--ki-radius-sm);
+}
+.ki-markdown .ki-code-block > pre { margin: 0; background: transparent; }
+.ki-markdown .ki-code-block > .ki-mermaid { margin: 0; }
+.ki-code-copy {
+  position: absolute; z-index: 1; top: 8px; right: 8px;
+  padding: 4px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
+  font: inherit; font-size: 11px; line-height: 1.4; cursor: pointer;
+}
+.ki-code-copy:hover:not(:disabled), .ki-code-copy:focus-visible {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+}
+.ki-code-copy:disabled { cursor: default; opacity: 0.75; }
+.ki-code-copy[data-copy-state="success"] { color: var(--ki-color-success); }
+.ki-code-copy[data-copy-state="error"] { color: var(--ki-color-danger, #d93025); }
+.ki-code-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ki-markdown details {
+  margin: 10px 0; padding: 8px 12px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+}
+.ki-markdown details > summary {
+  color: var(--ki-color-text); cursor: pointer; font-weight: 500;
+}
+.ki-markdown details[open] > summary { margin-bottom: 8px; }
+.ki-markdown details > :last-child { margin-bottom: 0; }
 .ki-markdown blockquote { border-left: 3px solid var(--ki-color-primary); padding-left: 12px; color: var(--ki-color-text-muted); margin: 8px 0; }
 .ki-mermaid { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); padding: 12px; margin: 8px 0; overflow-x: auto; }
 .ki-mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
