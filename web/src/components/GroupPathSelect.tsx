@@ -6,17 +6,9 @@
  * 收起时显示当前 Group；从树中点选即生效，不进入「确认 / 新建」流程。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDocList } from '@/lib/hooks';
-import { buildGroupTree, isGroupSelectable, type GroupTreeNode as GTreeNode } from '@/lib/groupTree';
-
-/** 默认展开一层 */
-function setDefaultOpen(nodes: GTreeNode[], depth = 0): void {
-  for (const n of nodes) {
-    n.open = depth === 0;
-    setDefaultOpen(n.children, depth + 1);
-  }
-}
+import { buildGroupTree, isGroupSelectable, toggleNodeOpen, withDefaultOpen, type GroupTreeNode as GTreeNode } from '@/lib/groupTree';
 
 function isPathInTree(nodes: GTreeNode[], path: string): boolean {
   for (const n of nodes) {
@@ -58,60 +50,65 @@ function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: 
   const [tree, setTree] = useState<GTreeNode[]>(nodes);
   useEffect(() => setTree(nodes), [nodes]);
 
+  /** 切换展开态（纯函数，不改写旧节点） */
   const toggleOpen = (path: string): void => {
-    setTree((prev) => {
-      const walk = (items: GTreeNode[]): boolean => {
-        for (const n of items) {
-          if (n.path === path) {
-            n.open = !n.open;
-            return true;
-          }
-          if (walk(n.children)) return true;
-        }
-        return false;
-      };
-      walk(prev);
-      return [...prev];
-    });
+    setTree((prev) => toggleNodeOpen(prev, path));
+  };
+
+  /**
+   * 点击/激活节点：
+   * - 可选节点：直接选中（面板随即关闭，无需再切换展开态）
+   * - 不可选父目录（浏览场景的纯目录）：仅展开/折叠
+   */
+  const activate = (n: GTreeNode): void => {
+    if (isGroupSelectable(n, allowParentPick)) {
+      onPick(n);
+      return;
+    }
+    if (n.children.length > 0) toggleOpen(n.path);
   };
 
   const render = (n: GTreeNode): JSX.Element => {
     const hasSub = n.children.length > 0;
+    const selectable = isGroupSelectable(n, allowParentPick);
+    const label = hasSub && n.count > 0
+      ? `${n.name}，本组 ${n.count} 条文档，点击选中；箭头可展开子组`
+      : `${n.name}，本组 ${n.count} 条文档`;
     return (
       <div key={n.path}>
         <div
           className={`ki-gtree-dir${activePath && n.path === activePath ? ' ki-gtree-dir--active' : ''}`}
           role="treeitem"
           tabIndex={0}
-          title={hasSub && n.count > 0 ? `本组 ${n.count} 条文档，点击选中；箭头可展开子组` : undefined}
+          title={label}
+          aria-label={label}
           aria-expanded={hasSub ? n.open : undefined}
           aria-selected={activePath === n.path}
           onClick={(e) => {
             e.stopPropagation();
-            if (hasSub) toggleOpen(n.path);
-            if (isGroupSelectable(n, allowParentPick)) onPick(n);
+            activate(n);
           }}
           onKeyDown={(e) => {
             if (e.target !== e.currentTarget) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
-            if (hasSub) toggleOpen(n.path);
-            if (isGroupSelectable(n, allowParentPick)) onPick(n);
+            activate(n);
           }}
         >
           {hasSub ? (
             <button
               className="ki-gtree-arrow"
               type="button"
-              aria-label={`${n.open ? '折叠' : '展开'} ${n.name}`}
-              aria-expanded={n.open}
+              tabIndex={-1}
+              aria-hidden="true"
               onClick={(e) => { e.stopPropagation(); toggleOpen(n.path); }}
             >
               {n.open ? '▾' : '▸'}
             </button>
-          ) : <span className="ki-gtree-arrow" />}
+          ) : <span className="ki-gtree-arrow" aria-hidden="true" />}
           {ICON_FOLDER_SM}
           <span className="ki-gtree-label">{n.name}</span>
+          {!selectable && <span className="ki-cell-sub">仅目录</span>}
         </div>
         {hasSub && n.open && <div className="ki-gtree-group">{n.children.map(render)}</div>}
       </div>
@@ -150,9 +147,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
   const [tree, setTree] = useState<GTreeNode[]>([]);
   useEffect(() => {
     // 用完整 groups 列表构建树（不受 docs 500 条分页截断影响；空 Group 也能显示）
-    const t = buildGroupTree(docData?.groups ?? []);
-    setDefaultOpen(t);
-    setTree(t);
+    setTree(withDefaultOpen(buildGroupTree(docData?.groups ?? [])));
   }, [docData]);
 
   // 点击外部关闭（同时清空搜索词，收起态输入框回到当前 Group）
@@ -188,8 +183,12 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setOpen(false);
   };
 
-  /** 只选模式下按关键字过滤后的树；非只选模式恒为原树（filter 始终为空） */
-  const filtered = filterGroupTree(tree, selectOnly ? filter : '');
+  /** 只选模式下按关键字过滤后的树；非只选模式恒为原树（filter 始终为空）。
+   *  memo 化：否则每次渲染都重建节点对象，子组件同步本地展开态的 effect 会被反复触发。 */
+  const filtered = useMemo(
+    () => filterGroupTree(tree, selectOnly ? filter : ''),
+    [tree, filter, selectOnly],
+  );
   const searching = selectOnly && filter.trim().length > 0;
 
   /**
@@ -259,7 +258,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
         </button>
       </div>
       <div className={`ki-combobox__panel${open ? ' ki-combobox__panel--open' : ''}`}>
-        <div className="ki-combobox__tree" role="tree">
+        <div className="ki-combobox__tree" role="tree" aria-label="Group 树">
           {filtered.nodes.length === 0 ? (
             <div className="ki-cell-sub" style={{ padding: 6 }}>
               {selectOnly
