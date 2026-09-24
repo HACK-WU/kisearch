@@ -8,43 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useDocList } from '@/lib/hooks';
-
-interface GTreeNode {
-  name: string;
-  path: string;
-  children: GTreeNode[];
-  open: boolean;
-}
-
-/** 从 groups 列表（完整 group 路径 + count）构建递归树（全路径节点，唯一顶层折叠） */
-function buildGroupTree(groups: { name: string }[]): GTreeNode[] {
-  const roots: GTreeNode[] = [];
-  const map = new Map<string, GTreeNode>();
-  const getNode = (path: string): GTreeNode => {
-    let n = map.get(path);
-    if (!n) {
-      n = { name: path.split('/').pop() || path, path, children: [], open: false };
-      map.set(path, n);
-    }
-    return n;
-  };
-  for (const g of groups) {
-    const segs = g.name.split('/').filter(Boolean);
-    if (segs.length === 0) continue;
-    let prev: GTreeNode | null = null;
-    for (let i = 0; i < segs.length; i++) {
-      const node = getNode(segs.slice(0, i + 1).join('/'));
-      if (prev) {
-        if (!prev.children.some((c) => c.path === node.path)) prev.children.push(node);
-      } else if (!roots.some((r) => r.path === node.path)) {
-        roots.push(node);
-      }
-      prev = node;
-    }
-  }
-  if (roots.length === 1 && roots[0].children.length > 0) return roots[0].children;
-  return roots;
-}
+import { buildGroupTree, isGroupSelectable, type GroupTreeNode as GTreeNode } from '@/lib/groupTree';
 
 /** 默认展开一层 */
 function setDefaultOpen(nodes: GTreeNode[], depth = 0): void {
@@ -119,21 +83,33 @@ function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: 
           className={`ki-gtree-dir${activePath && n.path === activePath ? ' ki-gtree-dir--active' : ''}`}
           role="treeitem"
           tabIndex={0}
+          title={hasSub && n.count > 0 ? `本组 ${n.count} 条文档，点击选中；箭头可展开子组` : undefined}
           aria-expanded={hasSub ? n.open : undefined}
           aria-selected={activePath === n.path}
           onClick={(e) => {
             e.stopPropagation();
             if (hasSub) toggleOpen(n.path);
-            if (!hasSub || allowParentPick) onPick(n);
+            if (isGroupSelectable(n, allowParentPick)) onPick(n);
           }}
           onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
             if (hasSub) toggleOpen(n.path);
-            if (!hasSub || allowParentPick) onPick(n);
+            if (isGroupSelectable(n, allowParentPick)) onPick(n);
           }}
         >
-          <span className="ki-gtree-arrow">{hasSub ? (n.open ? '▾' : '▸') : ''}</span>
+          {hasSub ? (
+            <button
+              className="ki-gtree-arrow"
+              type="button"
+              aria-label={`${n.open ? '折叠' : '展开'} ${n.name}`}
+              aria-expanded={n.open}
+              onClick={(e) => { e.stopPropagation(); toggleOpen(n.path); }}
+            >
+              {n.open ? '▾' : '▸'}
+            </button>
+          ) : <span className="ki-gtree-arrow" />}
           {ICON_FOLDER_SM}
           <span className="ki-gtree-label">{n.name}</span>
         </div>
