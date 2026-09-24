@@ -24,6 +24,7 @@ import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { contentRevision } from './lib/relation-edit-draft.js';
 
 // ─── 类型定义 ───
 
@@ -55,7 +56,7 @@ export interface GetModuleInfoParams {
 }
 
 export type GetModuleInfoResult =
-  | { ok: true; scope: string; content: string; hint?: string }
+  | { ok: true; scope: string; content: string; revision: string; totalLines: number; hint?: string }
   | { ok: false; error: string; hint?: string };
 
 /**
@@ -181,6 +182,8 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
       ok: true,
       scope,
       content: markdown,
+      revision: contentRevision(markdown),
+      totalLines: markdown.split(/\r?\n/).length,
       ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
     };
   } catch (err) {

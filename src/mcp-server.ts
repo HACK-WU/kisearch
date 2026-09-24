@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerQueryGroupTool } from './lib/mcp-tools/query-group.js';
 import { registerGetModuleInfoTool } from './lib/mcp-tools/get-module-info.js';
 import { registerSyncRelationTool } from './lib/mcp-tools/sync-relation.js';
+import { registerEditRelationTool } from './lib/mcp-tools/edit-relation.js';
 import { registerBulkSyncRelationTool } from './lib/mcp-tools/bulk-sync-relation.js';
 import { registerManageIndexTools } from './lib/mcp-tools/manage-index.js';
 import { registerSearchTool } from './lib/mcp-tools/search.js';
@@ -68,6 +69,7 @@ export function buildKiMcpServer(authScopes: string[] | null = null): McpServer 
   registerQueryGroupTool(server);
   registerGetModuleInfoTool(server);
   registerSyncRelationTool(server);
+  registerEditRelationTool(server);
   registerBulkSyncRelationTool(server);
   registerManageIndexTools(server, authScopes);
   registerSearchTool(server);

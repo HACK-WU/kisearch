@@ -1034,6 +1034,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_search` | 读 | 检索（默认 hybrid；支持 `mode=fulltext` 仅全文且不调用 embedding，输出 group/relation 定位字段） | `search` |
 | `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
 | `ki_sync_relation` | 写 | 写入单条 Relation + 模块说明（可非向量化） | `sync-relation` |
+| `ki_edit_relation` | 写 | 对已有大 Relation 多轮局部修改，完成后一次性更新索引 | 仅 MCP |
 | `ki_bulk_sync_relation` | 写 | 批量写入 Relation + 模块说明（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | `sync-relation --input` |
 | `ki_store` | 写 | 向量化存储单条知识 | `store` |
 | `ki_bulk_store` | 写 | 批量向量化存储知识 | `bulk-store` |
@@ -1092,6 +1093,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `relation` | string | 二选一 | Relation 名称（单条查询） |
 | `relations` | string[] | 二选一 | 同 Group 下批量查询（**≤10 条**，超限报错）；逐条返回 `results`（含 `matchedRelation` 近似命中名），部分失败不影响其他条目；Group 解析与 localKB 读取只做一次 |
 
+单条查询成功时还返回 `revision`（正文 SHA-256）与 `totalLines`，供 `ki_edit_relation` 进行多轮行号编辑。
+
 #### `ki_sync_relation`
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -1102,6 +1105,17 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `module_info` | string | 是 | 本地 KB Markdown 内容 |
 | `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层，无 memoryId、不可被 `ki_search` 召回） |
 | `tags` | string | 否 | 文档内容自定义标签（逗号分隔多个，叠加在默认 `ki-search` 之上，如 `"api,auth"`） |
+
+#### `ki_edit_relation`
+
+适合修改已有**大 Relation**；短文档直接用 `ki_sync_relation` 提交完整正文更简单。草稿与正式 KB、Wiki、dense 向量和 FTS-only 全文索引隔离；只有 `finish` 才对最终正文建索引并清理旧 ID。行号从 1 开始，`end_line` 包含在修改范围内，Wiki 文件额外的 frontmatter 不计入行号。
+
+1. 调用 `ki_get_module_info` 取得正式正文和 `revision`。
+2. 首次 `edit` 传 `scope`、精确 `group`、`relation`、`expected_revision` 与非空 `edits`；返回 `editId` 和草稿 `revision`。每项修改包含 `start_line`、`end_line`、`new_text`，同批区域必须互不重叠，均按本次调用前的同一草稿行号定位。`new_text` 为空字符串表示删除该行区间。
+3. 后续 `edit` 传 `edit_id` 与最新草稿 `expected_revision`；`view` 可用可选的 `start_line` / `end_line` 查看局部正文。版本冲突、越界或重叠时，整次修改不生效。
+4. 最终调用 `finish`，传 `edit_id`、最新 `expected_revision` 和调用方生成的 `request_id`。工具立即返回 `queued`；用 `view` 查询 `running`、`published` 或 `failed`。失败后沿用同一 `request_id` 重试，已发布但旧索引清理失败时只重试清理。未开始发布的草稿可用 `cancel` 放弃。
+
+`finish` 会沿用文档原有的 dense 或 FTS-only 模式；导入文档保持 chunk、标签及原文行号定位。`view` 返回 `wikiSynced` / `wikiReason` 以报告可选 Wiki 写回状态。
 
 #### `ki_bulk_sync_relation`
 
