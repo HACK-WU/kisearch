@@ -630,4 +630,177 @@ describe('ki_edit_relation', () => {
     assert.equal(deleted.ok, true, JSON.stringify(deleted));
     if (deleted.ok) assert.equal(deleted.result.deleted, true);
   });
+
+  it('终态草稿残留在活动目录时不阻断删除（在途仍阻断）', async () => {
+    const scope = 'edit_delete_guard_terminal';
+    seed(scope, 'O', 'body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'O',
+      expectedRevision: draftModule.contentRevision('body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    const draft = draftModule.loadDraft(scope, created.editId as string);
+    const { executeDeleteRelation } = await import('../src/delete-relation.js');
+
+    const blocked = await executeDeleteRelation({ scope, group: 'Docs', relation: 'O' });
+    assert.equal(blocked.ok, false, '在途（editing）草稿必须阻断删除');
+    if (!blocked.ok) assert.match(blocked.error, /未结束的编辑草稿/);
+
+    // 模拟“归档时 unlink 失败”的历史现场：活动目录里留一份终态副本
+    const activePath = draftModule.draftPath(scope, draft.editId);
+    draft.status = 'published';
+    draft.publishedRevision = draft.revision;
+    fs.writeFileSync(activePath, JSON.stringify(draft), 'utf8');
+    assert.deepEqual(draftModule.activeDrafts(scope), [], '终态残留不得计为在途草稿');
+
+    const deleted = await executeDeleteRelation({ scope, group: 'Docs', relation: 'O' });
+    assert.equal(deleted.ok, true, `终态残留不应阻断删除：${JSON.stringify(deleted)}`);
+  });
+
+  it('归档超过保留上限时只裁剪 archive 内最旧条目并告警', async () => {
+    const scope = 'edit_archive_retention';
+    const keep = draftModule.ARCHIVED_DRAFT_RETENTION;
+    const archiveDir = path.join(path.dirname(draftModule.draftPath(scope, '00000000-0000-4000-8000-000000000000')), 'archive');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const names: string[] = [];
+    for (let i = 0; i <= keep; i += 1) {
+      const name = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}.json`;
+      const file = path.join(archiveDir, name);
+      fs.writeFileSync(file, JSON.stringify({ editId: name.replace(/\.json$/, ''), scope, status: 'published' }), 'utf8');
+      const t = new Date(Date.now() - (keep + 1 - i) * 1000); // i 越小越旧
+      fs.utimesSync(file, t, t);
+      names.push(name);
+    }
+    // 活动目录放一份哨兵草稿，验证裁剪不碰活动目录
+    const sentinel = draftModule.createDraft({ scope, group: 'Docs', relation: 'Sentinel',
+      baseRevision: 'r0', baseMetadataRevision: 'm0', baseContent: 'a', content: 'a' });
+    const captured: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
+      captured.push(String(chunk));
+      return originalWrite(chunk as string, ...(rest as []));
+    }) as typeof process.stderr.write;
+    try {
+      const archived = draftModule.createDraft({ scope, group: 'Docs', relation: 'Retention',
+        baseRevision: 'r0', baseMetadataRevision: 'm0', baseContent: 'a', content: 'a' });
+      archived.status = 'cancelled';
+      draftModule.saveDraft(archived); // 归档 → 触发裁剪
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    const remaining = fs.readdirSync(archiveDir).sort();
+    assert.equal(remaining.length, keep, '归档数量必须收敛到保留上限');
+    assert.ok(!remaining.includes(names[0]), '最旧的归档必须被清理');
+    assert.ok(remaining.includes(names[names.length - 1]), '最新的归档必须保留');
+    assert.ok(fs.existsSync(draftModule.draftPath(scope, sentinel.editId)), '活动目录草稿不得被裁剪');
+    assert.match(captured.join(''), /已清理最旧的 \d+ 条/, `必须显式告警：${captured.join('')}`);
+  });
+
+  it('daemon RPC 超时不得低于工具层超时（cancel 走 BULK）', async () => {
+    const { editRelationRpcTimeoutMs } = await import('../src/edit-relation.js');
+    const { TOOL_TIMEOUT } = await import('../src/lib/mcp-tools/util.js');
+    assert.ok(editRelationRpcTimeoutMs('cancel') > TOOL_TIMEOUT.BULK,
+      `cancel 的 RPC 超时必须严格大于工具层 ${TOOL_TIMEOUT.BULK}（等值会赛跑），当前 ${editRelationRpcTimeoutMs('cancel')}`);
+    for (const action of ['edit', 'view', 'finish'] as const) {
+      assert.ok(editRelationRpcTimeoutMs(action) > TOOL_TIMEOUT.WRITE,
+        `${action} 的 RPC 超时必须严格大于工具层 ${TOOL_TIMEOUT.WRITE}`);
+    }
+  });
+
+  it('归档时 unlink 失败不抛错：终态落在 archive 且显式告警', async () => {
+    const scope = 'edit_archive_unlink_failure';
+    seed(scope, 'P', 'body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'P',
+      expectedRevision: draftModule.contentRevision('body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    const draft = draftModule.loadDraft(scope, created.editId as string);
+    // 注入 unlink 失败：把活动路径换成同名目录（unlinkSync 对目录抛 EISDIR/EPERM）。
+    // 注：目录形态下 readJson 会抛 EISDIR，故此处只断言“不抛错 + 终态入 archive + 告警 ”，
+    // 不经过 loadDraft（活动路径不可读的回落属另一条路径）。
+    const activePath = draftModule.draftPath(scope, draft.editId);
+    fs.rmSync(activePath, { force: true });
+    fs.mkdirSync(activePath);
+    draft.status = 'cancelled';
+    const captured: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
+      captured.push(String(chunk));
+      return originalWrite(chunk as string, ...(rest as []));
+    }) as typeof process.stderr.write;
+    try {
+      draftModule.saveDraft(draft); // 旧实现在此抛错并导致调用方失败态覆盖终态
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    const archiveDir = path.join(path.dirname(activePath), 'archive');
+    const archivedRaw = fs.readFileSync(path.join(archiveDir, `${draft.editId}.json`), 'utf8');
+    assert.equal(JSON.parse(archivedRaw).status, 'cancelled', 'archive 必须是终态');
+    assert.match(captured.join(''), /未能删除活动目录副本/);
+    assert.deepEqual(draftModule.activeDrafts(scope), [], '残留不得被当作在途草稿');
+  });
+
+  it('另一进程发布窗口内的心跳租约阻止 view 回滚正文，过期后才恢复', async () => {
+    const scope = 'edit_publish_lease';
+    seed(scope, 'Q2', 'old body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'Q2',
+      expectedRevision: draftModule.contentRevision('old body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    const draft = draftModule.loadDraft(scope, created.editId as string);
+    // 构造“另一进程发布到一半”的现场：草稿仍在 running 且已登记暂存 ID、KB 已换、cache 未写
+    draft.status = 'running';
+    draft.newDenseIds = ['staged-lease-1'];
+    draft.newDenseContentIds = ['staged-lease-1'];
+    draft.oldDenseIds = ['old-dense-Q2'];
+    draftModule.saveDraft(draft);
+    const kbPath = scopePath.getLocalKbDir(scope, 'Docs');
+    const kb = store.readJson<Record<string, string>>(kbPath)!;
+    kb.Q2 = draft.content;
+    store.writeJson(kbPath, kb);
+
+    // ① 心跳在有效期内：view 必须按“发布中”处理，不得回滚、不得标 failed
+    draftModule.beginPublishLease(scope, draft.editId);
+    const viewing = await edit.executeEditRelationLocal({ action: 'view', scope, editId: draft.editId });
+    assert.equal(viewing.status, 'running', '不得把跨进程发布中的草稿判成中断');
+    assert.equal(viewing.publishInFlight, true);
+    assert.equal(viewing.error, undefined);
+    assert.equal(store.readJson<Record<string, string>>(kbPath)?.Q2, draft.content, 'KB 不得被回滚');
+
+    // ② 心跳过期（发布方崩溃残留）：回到原有恢复逻辑——回滚正文并提示重试 finish
+    const leasePath = draftModule.publishLeasePath(scope, draft.editId);
+    const stale = new Date(Date.now() - draftModule.PUBLISH_LEASE_GRACE_MS - 5_000);
+    fs.utimesSync(leasePath, stale, stale);
+    assert.equal(draftModule.isPublishLeaseActive(scope, draft.editId), false);
+    const recovered = await edit.executeEditRelationLocal({ action: 'view', scope, editId: draft.editId });
+    assert.equal(recovered.status, 'failed');
+    assert.match(String(recovered.error), /发布任务已中断/);
+    assert.equal(store.readJson<Record<string, string>>(kbPath)?.Q2, 'old body', '过期后应回滚到 baseContent');
+    draftModule.endPublishLease(scope, draft.editId);
+  });
+
+  it('发布正常结束后心跳被清除，且不会被当作草稿', async () => {
+    const scope = 'edit_publish_lease_cleanup';
+    seed(scope, 'Q3', 'old body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'Q3',
+      expectedRevision: draftModule.contentRevision('old body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'lease-Q3' });
+    await waitForStatus(scope, created.editId as string, 'published');
+    assert.equal(fs.existsSync(draftModule.publishLeasePath(scope, created.editId as string)), false,
+      '发布结束必须清除心跳');
+    assert.deepEqual(draftModule.activeDrafts(scope), [], '心跳文件不得被当作在途草稿');
+  });
+
+  it('混合态索引模式判定：完整 FTS 优先，完整性未知时按 dense', async () => {
+    const { relationIndexMode } = await import('../src/lib/relation-edit-live.js');
+    const { isFtsOnlyIndexedRelation } = await import('../src/lib/scoring.js');
+    const mixed = {
+      id: 'rel_x', text: 'R', score: 0, useCount: 0, lastUsedTime: null, isImported: false,
+      memoryIds: ['dense-1'], ftsIds: ['fts-1'], ftsIndexComplete: true,
+    };
+    assert.equal(relationIndexMode(mixed), 'fts', '完整 FTS 索引优先（避免无 apiKey 的 scope 被逼做 embedding）');
+    assert.equal(isFtsOnlyIndexedRelation(mixed), false, '展示口径按“已有向量”判（两侧差异见源码注释）');
+    assert.equal(relationIndexMode({ ...mixed, ftsIndexComplete: undefined }), 'dense',
+      'FTS 完整性未知且有 dense 时按 dense，避免把向量文档误降级成全文');
+  });
 });

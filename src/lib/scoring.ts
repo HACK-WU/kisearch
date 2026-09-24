@@ -49,6 +49,10 @@ export interface Relation {
 /**
  * 判断 relation 是否可作为完整的 FTS-only 文档展示。
  * 旧版关系没有 ftsIndexComplete，保持兼容：非空 ftsIds 视为已登记索引。
+ *
+ * 与写路径口径 `relation-edit-live.relationIndexMode` 的差异见那里的注释：混合态
+ * （同时有 memoryIds 与完整 FTS 索引）下本函数返回 false（展示为已向量化），
+ * 写路径判 'fts'。两侧都非缺陷，改任一侧前先读那处说明。
  */
 export function isFtsOnlyIndexedRelation(
   relation: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>,

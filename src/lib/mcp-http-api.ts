@@ -200,7 +200,14 @@ interface DocListCache {
 
 const docListCache = new Map<string, DocListCache>();
 
-/** 读取 relations-cache 并聚合文件级文档（Group 路径 + 文档名） */
+/**
+ * 读取 relations-cache 并聚合文件级文档（Group 路径 + 文档名）。
+ *
+ * 前提：本列表只读 relations-cache，**不按 ID 去向量/FTS 索引取内容**，因此不需要复用
+ * `hiddenEditIndexIds` 的编辑中间态过滤——草稿期间 KB 原文不变、cache 要么是发布前要么
+ * 是发布后的自洽状态，这里展示的就是该 Relation 的已发布状态（也本就应当可见）。
+ * 若将来这里要展示“索引内实际条目数”或按 ID 探活，必须同时接入隐藏集过滤。
+ */
 function buildDocList(scope: string): DocListCache['docs'] {
   const cachePath = getRelationsCachePath(scope);
   if (!fs.existsSync(cachePath)) return [];
