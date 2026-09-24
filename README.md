@@ -135,7 +135,7 @@ Agent 从当前对话或代码中提取稳定事实
 - **三层标签**：`ki-search` / `ki-relation` / `ki-path`，按需过滤提升准确率；默认搜全部且按标签限流（内容优先）
 - **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
 - **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
-- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 13 个 MCP 工具（stdio / HTTP 共享单例）
+- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 14 个 MCP 工具（stdio / HTTP 共享单例）
 - **MCP 安全约束**：不暴露 scope / doc 级联删除和 `--force` 操作；`ki_delete_relation` 仅按 Group+Relation 删除单条知识条目，`ki_manage_index_delete` 仅允许删除空 Group 节点
 
 ## <a id="quickstart"></a>🚀 快速开始
@@ -312,7 +312,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 > 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate --scope <scope>` 生成授权 Token，再用 `ki mcp token list` 查看明文填入上方 `<your-token>`。
 > HTTP 客户端应使用一致的连接 URL；本机 IDE 可以继续保留 stdio `command: ki mcp`，stdio 会桥接到同一 daemon，不会另开 zvec owner。
 
-### 暴露的工具（13 个）
+### 暴露的工具（14 个）
 
 | 工具 | 功能 | 对应路径 |
 |------|------|---------|

@@ -128,6 +128,35 @@ export function saveDraft(draft: RelationEditDraft): void {
   if (archived) {
     try { fs.unlinkSync(draftPath(draft.scope, draft.editId)); }
     catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+    pruneArchivedDrafts(draft.scope);
+  }
+}
+
+/**
+ * 已结束草稿（published/cancelled）的归档保留上限。
+ * 每条草稿含 baseContent + content 两份正文副本，不设上限会随编辑次数无界增长；
+ * 正文已落 local KB，归档仅作状态审计，故按 updatedAt 保留最新 N 条并显式告警清理。
+ */
+export const ARCHIVED_DRAFT_RETENTION = 200;
+
+function pruneArchivedDrafts(scope: string): void {
+  const dir = path.join(draftDir(scope), 'archive');
+  let names: string[];
+  try { names = fs.readdirSync(dir).filter((name) => /^[a-f0-9-]{36}\.json$/i.test(name)); }
+  catch { return; }
+  if (names.length <= ARCHIVED_DRAFT_RETENTION) return;
+  const entries = names.map((name) => {
+    const file = path.join(dir, name);
+    let updatedAt = 0;
+    try { updatedAt = fs.statSync(file).mtimeMs; } catch { /* 并发删除：按最旧处理 */ }
+    return { file, updatedAt };
+  }).sort((a, b) => b.updatedAt - a.updatedAt);
+  let deleted = 0;
+  for (const entry of entries.slice(ARCHIVED_DRAFT_RETENTION)) {
+    try { fs.unlinkSync(entry.file); deleted += 1; } catch { /* 并发删除/权限问题不阻断归档写入 */ }
+  }
+  if (deleted > 0) {
+    process.stderr.write(`提示：编辑草稿归档超过 ${ARCHIVED_DRAFT_RETENTION} 条，已清理最旧的 ${deleted} 条（正文已落 local KB，归档仅作状态审计）\n`);
   }
 }
 
@@ -150,7 +179,9 @@ function activeDraftFiles(dir: string): string[] {
  * 取得尚未发布的新 ID、或已发布但清理失败的旧 ID；供搜索隐藏中间态。
  *
  * 无活动草稿时立即返回空集：这是绝大多数检索的常态，必须零 relations-cache 开销。
- * 有草稿时按「目录名 + mtime + 文件清单」做进程内缓存，草稿未变则复用上次结果。
+ * 有草稿时按「文件清单 + 草稿 mtime + relations-cache 身份」做进程内缓存。
+ * cache 身份必须参与：隐藏集会把 cache 已引用的 ID 剔除，只按草稿 mtime 缓存会在
+ * import/sync 等入口改写 cache 后长期陈旧（被隐藏 docId 已被合法引用却继续漏召回）。
  */
 export function hiddenEditIndexIds(scope: string): Set<string> {
   const dir = draftDir(scope);
@@ -159,7 +190,7 @@ export function hiddenEditIndexIds(scope: string): Set<string> {
     hiddenCache.delete(scope);
     return new Set<string>();
   }
-  const stamp = `${files.join(',')}@${draftDirMtime(dir, files)}`;
+  const stamp = `${files.join(',')}@${draftDirMtime(dir, files)}#${relationsCacheIdentity(scope)}`;
   const cached = hiddenCache.get(scope);
   if (cached?.stamp === stamp) return new Set(cached.ids);
 
@@ -191,6 +222,39 @@ export function hiddenEditIndexIds(scope: string): Set<string> {
   } catch { /* 本地 cache 损坏由正式读链路报告，索引隐藏保持保守状态 */ }
   hiddenCache.set(scope, { stamp, ids: hidden });
   return new Set(hidden);
+}
+
+export interface ActiveDraftRef {
+  editId: string;
+  group: string;
+  relation: string;
+  status: RelationEditStatus;
+}
+
+/**
+ * scope 内所有尚未结束的草稿（不含 archive）。
+ * 删除类入口在破坏性操作前用它 fail-loud：否则在途草稿会因目标 Relation 消失而永远
+ * 无法 finish（只能手工删文件），其登记的索引 ID 也会一直挂在搜索隐藏集里。
+ */
+export function activeDrafts(scope: string): ActiveDraftRef[] {
+  const dir = draftDir(scope);
+  const result: ActiveDraftRef[] = [];
+  for (const name of activeDraftFiles(dir)) {
+    try {
+      const draft = readJson<RelationEditDraft>(path.join(dir, name));
+      if (!draft || draft.scope !== scope) continue;
+      result.push({ editId: draft.editId, group: draft.group, relation: draft.relation, status: draft.status });
+    } catch { /* 损坏草稿由 view/finish fail-loud，删除入口不因其整体失败 */ }
+  }
+  return result;
+}
+
+/** relations-cache 的轻量身份（mtime + size）；缺失时返回 none，仍按草稿变化失效。 */
+function relationsCacheIdentity(scope: string): string {
+  try {
+    const stat = fs.statSync(path.join(getKbDir(scope), 'relations-cache.json'));
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch { return 'none'; }
 }
 
 /** 活动草稿文件的最大 mtime；作为缓存失效依据（内容变更即变，删除由文件清单覆盖）。 */

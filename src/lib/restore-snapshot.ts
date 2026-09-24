@@ -137,6 +137,11 @@ export async function restoreSnapshotLocal(
     throw new Error(`tar 解压失败：${(err as Error).message}\n目标为空（全新导入，无现有数据丢失），请检查快照文件是否完整`);
   }
 
+  // 草稿是"中间态快照"：历史快照（或本程序旧版本的快照）可能带着与还原后正文不再匹配
+  // 的草稿，留下会让 view/finish 走"正式正文已变化"的拒绝，甚至触发中断恢复回滚正文。
+  // 草稿可由用户重建，故直接清空该目录（backup 侧另有 --exclude，这里覆盖旧快照）。
+  fs.rmSync(path.join(scopeDataDir, '.relation-edits'), { recursive: true, force: true });
+
   opts.onProgress?.({ phase: 'restore', done: 1, total: 1 });
   // 解压成功后才删除移开的旧目录；删除失败不影响还原结果，仅留下可人工清理的残留。
   if (stashed) {

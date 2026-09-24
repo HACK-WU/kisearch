@@ -102,19 +102,13 @@ function locateChunkRange(original: string, chunkText: string, lineStarts: numbe
     };
   }
 
-  // 清洗可能只改变了空白或 Markdown 标记。逐行按“原文包含清洗行”匹配，
-  // 仍然只返回有证据的范围。
-  const originalLines = original.split(/\r?\n/);
-  const candidate = candidates[0];
-  if (!candidate) return undefined;
-  const normalizedCandidate = candidate.replace(/[\s`*_>#-]/g, '');
-  if (normalizedCandidate.length < 2) return undefined;
-  for (let i = 0; i < originalLines.length; i += 1) {
-    const normalizedOriginal = normalizeLine(originalLines[i]).replace(/[\s`*_>#-]/g, '');
-    if (normalizedOriginal.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedOriginal)) {
-      return { lineStart: i + 1, lineEnd: i + 1 };
-    }
-  }
+  // 这里曾有一个「逐行骨架包含」回退分支（把候选行与原文行去掉 Markdown/空白标记后
+  // 互相比较），意图是兜住"清洗只改了标记"的行。实测该分支净有害：原文的空行/装饰行
+  // （`---`、`###`）骨架为 ''，而 `候选.includes('')` 恒真 → 任何"全部候选行都没在原文
+  // 命中"的 chunk 都会拿到一个指向空行的伪造行号（真实语料扫描 1503 文档 / 7476 chunk：
+  // 44 次返回伪造空行、0 次命中真实内容行，且伪造出的 range 还会抑制 search 的
+  // unmappedChunk 降级信号）。按本函数契约——找不到就返回 undefined，绝不伪造行号——
+  // 删除该分支；"清洗只改空白/标记"的行本来就由上面的 indexOf 匹配覆盖。
   return undefined;
 }
 

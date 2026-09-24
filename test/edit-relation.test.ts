@@ -528,4 +528,106 @@ describe('ki_edit_relation', () => {
     preexistingDenseIds = new Set();
     failDense = false;
   });
+
+  it('正文已发布但登记为不可重试失败时，finish 仍可收口清理旧索引（不再与 cancel 互相拒绝）', async () => {
+    const scope = 'edit_published_nonretryable';
+    seed(scope, 'K', 'old body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'K',
+      expectedRevision: draftModule.contentRevision('old body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    // 索引写入期间外部入口写入同一正文 → 确定性失败；草稿的新 ID 在写入前已登记。
+    afterDenseWrite = () => {
+      const kb = store.readJson<Record<string, string>>(scopePath.getLocalKbDir(scope, 'Docs'))!;
+      kb.K = 'edited body';
+      store.writeJson(scopePath.getLocalKbDir(scope, 'Docs'), kb);
+      afterDenseWrite = undefined;
+    };
+    await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'published-K' });
+    const failed = await waitForStatus(scope, created.editId as string, 'failed');
+    assert.equal(failed.retryable, false);
+    const draft = draftModule.loadDraft(scope, created.editId as string);
+    assert.ok(draft.newDenseContentIds?.length);
+    // 外部入口以同正文重写 → cache 指向草稿登记的新 ID → recognize 判定成立（正文已生效）
+    const cache = store.readJson<any>(scopePath.getRelationsCachePath(scope))!;
+    cache.groups.Docs.hot_relations[0].memoryIds = draft.newDenseContentIds;
+    cache.groups.Docs.hot_relations[0].memoryId = draft.newDenseContentIds![0];
+    store.writeJson(scopePath.getRelationsCachePath(scope), cache);
+
+    const cancel = await edit.executeEditRelationLocal({ action: 'cancel', scope, editId: created.editId as string });
+    assert.equal(cancel.ok, false);
+    assert.match(String(cancel.error), /正文已经发布/);
+    const viewed = await edit.executeEditRelationLocal({ action: 'view', scope, editId: created.editId as string });
+    assert.equal(viewed.published, true, 'view 必须暴露"正文已生效"供调用方选择 finish');
+
+    const before = denseDeletes.length;
+    const retried = await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'published-K' });
+    assert.equal(retried.ok, true, `已发布草稿必须能 finish 收口：${JSON.stringify(retried)}`);
+    await waitForStatus(scope, created.editId as string, 'published');
+    assert.ok(denseDeletes.slice(before).flat().includes('old-dense-K'), '必须完成旧索引清理');
+    assert.equal(draftModule.hiddenEditIndexIds(scope).has('old-dense-K'), false);
+  });
+
+  it('chunk 超限属于确定性失败（retryable=false），且仍可取消收口', async () => {
+    const scope = 'edit_chunk_limit';
+    seed(scope, 'L', 'small body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'L',
+      expectedRevision: draftModule.contentRevision('small body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'x'.repeat(600_000) }] });
+    assert.equal(created.ok, true);
+    await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'chunk-limit' });
+    const failed = await waitForStatus(scope, created.editId as string, 'failed');
+    assert.match(failed.error ?? '', /chunk 数超过/);
+    assert.equal(failed.retryable, false, '超限重跑必然再失败，必须标记为不可重试');
+    const retried = await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'chunk-limit' });
+    assert.equal(retried.ok, false);
+    assert.match(String(retried.error), /不可重试/);
+    const cancelled = await edit.executeEditRelationLocal({ action: 'cancel', scope, editId: created.editId as string });
+    assert.equal(cancelled.status, 'cancelled');
+  });
+
+  it('relations-cache 被外部改写后隐藏集立即重算（缓存 key 含 cache 身份）', async () => {
+    const scope = 'edit_hidden_cache';
+    seed(scope, 'M', 'body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'M',
+      expectedRevision: draftModule.contentRevision('body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    failDense = true;
+    await edit.executeEditRelationLocal({ action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'hidden-M' });
+    await waitForStatus(scope, created.editId as string, 'failed');
+    failDense = false;
+    const draft = draftModule.loadDraft(scope, created.editId as string);
+    const stagedId = draft.newDenseContentIds![0];
+    assert.equal(draftModule.hiddenEditIndexIds(scope).has(stagedId), true, '未发布的新 ID 必须被隐藏');
+    // 外部入口（import/sync）以同正文重写 cache 并合法引用该 ID
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const cache = store.readJson<any>(scopePath.getRelationsCachePath(scope))!;
+    cache.groups.Docs.hot_relations[0].memoryIds = [stagedId];
+    cache.groups.Docs.hot_relations[0].memoryId = stagedId;
+    store.writeJson(scopePath.getRelationsCachePath(scope), cache);
+    assert.equal(draftModule.hiddenEditIndexIds(scope).has(stagedId), false,
+      'cache 已引用的 ID 必须立即解除隐藏（不能等草稿文件 mtime 变化）');
+  });
+
+  it('存在未结束草稿时拒绝删除该 Relation，取消后可正常删除', async () => {
+    const scope = 'edit_delete_guard';
+    seed(scope, 'N', 'body', 'dense');
+    const created = await edit.executeEditRelationLocal({ action: 'edit', scope, group: 'Docs', relation: 'N',
+      expectedRevision: draftModule.contentRevision('body'),
+      edits: [{ start_line: 1, end_line: 1, new_text: 'edited body' }] });
+    const { executeDeleteRelation } = await import('../src/delete-relation.js');
+    const blocked = await executeDeleteRelation({ scope, group: 'Docs', relation: 'N' });
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.match(blocked.error, /未结束的编辑草稿/);
+    assert.equal(store.readJson<Record<string, string>>(scopePath.getLocalKbDir(scope, 'Docs'))?.N, 'body',
+      '被拒绝时不得删除任何数据');
+    await edit.executeEditRelationLocal({ action: 'cancel', scope, editId: created.editId as string });
+    const deleted = await executeDeleteRelation({ scope, group: 'Docs', relation: 'N' });
+    assert.equal(deleted.ok, true, JSON.stringify(deleted));
+    if (deleted.ok) assert.equal(deleted.result.deleted, true);
+  });
 });

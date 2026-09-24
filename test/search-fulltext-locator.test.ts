@@ -51,6 +51,10 @@ describe('executeSearch fulltext 原文定位', () => {
       { scope, group: 'group/e', relation: 'doc-fallback-ranking', text: 'needle focus-d context', tag: 'fallback-ranking-test' },
       { scope, group: 'a|b', relation: 'c', text: 'pipe key collision marker first', tag: 'collision-test' },
       { scope, group: 'a', relation: 'b|c', text: 'pipe key collision marker second', tag: 'collision-test' },
+      // 锚点范围被截断的文档（chunk 内容在第 3-4 行，缓存 locator 只覆盖第 1 行）
+      { scope, group: 'group/f', relation: 'doc-truncated', text: 'alpha beta gamma\nsecond line content', tag: 'truncated-test' },
+      // per-chunk 无命中、但原文存在字面命中的文档（校验提示与命中不自相矛盾）
+      { scope, group: 'group/g', relation: 'doc-hint', text: 'alpha beta gamma', tag: 'hint-test' },
     ];
     const stored = await ftsBulkStore(entries);
     assert.equal(stored.failed, 0, '所有 FTS fixture 必须成功写入');
@@ -72,12 +76,20 @@ describe('executeSearch fulltext 原文定位', () => {
     });
     writeJson(getLocalKbDir(scope, 'a|b'), { c: 'pipe key collision marker first' });
     writeJson(getLocalKbDir(scope, 'a'), { 'b|c': 'pipe key collision marker second' });
+    writeJson(getLocalKbDir(scope, 'group/f'), {
+      'doc-truncated': ['# Setup Doc', '', 'alpha beta gamma', 'second line content'].join('\n'),
+    });
+    writeJson(getLocalKbDir(scope, 'group/g'), {
+      'doc-hint': ['# Hint Doc', '', 'alpha beta gamma'].join('\n'),
+    });
     const overflowStart = 6;
     const fallbackStart = overflowStart + overflowCount;
     const smallFallbackIndex = fallbackStart + overflowCount;
     const rankingStart = smallFallbackIndex + 1;
     const pipeAIndex = rankingStart + 4;
     const pipeBIndex = pipeAIndex + 1;
+    const truncatedIndex = pipeBIndex + 1;
+    const hintIndex = truncatedIndex + 1;
     writeJson(getRelationsCachePath(scope), {
       scope,
       groups: {
@@ -158,6 +170,19 @@ describe('executeSearch fulltext 原文定位', () => {
           hot_relations: [{
             id: 'pipe-b', text: 'b|c', memoryIds: [], ftsIds: [stored.ids[pipeBIndex]],
             ftsLocators: [{ ftsId: stored.ids[pipeBIndex], sourcePath: 'b|c.md', chunkIndex: 1, lineStart: 1, lineEnd: 1 }],
+          }],
+        },
+        'group/f': {
+          hot_relations: [{
+            id: 'truncated', text: 'doc-truncated', memoryIds: [], ftsIds: [stored.ids[truncatedIndex]],
+            // 报错形态：清洗只留下一处可复核锚点（第 1 行标题），chunk 正文其实在第 3-4 行
+            ftsLocators: [{ ftsId: stored.ids[truncatedIndex], sourcePath: 'doc-truncated.md', chunkIndex: 1, lineStart: 1, lineEnd: 1 }],
+          }],
+        },
+        'group/g': {
+          hot_relations: [{
+            id: 'hint', text: 'doc-hint', memoryIds: [], ftsIds: [stored.ids[hintIndex]],
+            ftsLocators: [{ ftsId: stored.ids[hintIndex], sourcePath: 'doc-hint.md', chunkIndex: 1, lineStart: 1, lineEnd: 1 }],
           }],
         },
       },
@@ -291,5 +316,35 @@ describe('executeSearch fulltext 原文定位', () => {
       result.results.map((hit) => [hit.group, hit.relation]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
       [['a', 'b|c'], ['a|b', 'c']],
     );
+  });
+
+  it('锚点范围被截断时放开范围兜底，并显式降级计数完整性', async () => {
+    const { executeSearch } = await import('../src/search.js');
+    const result = await executeSearch({ scope, query: 'alpha beta gamma', mode: 'fulltext', limit: 1, tags: 'truncated-test' });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+
+    const hit = result.results.find((item) => item.relation === 'doc-truncated');
+    assert.ok(hit, `必须返回被测文档：${JSON.stringify(result.results.map((item) => item.relation))}`);
+    assert.deepEqual(
+      hit.matches?.map((match) => [match.lineStart, match.lineEnd]),
+      [[3, 4]],
+      '锚点只覆盖第 1 行时，仍应在整篇原文按 chunk 词项兜底定位到内容所在的两行（相邻行合并为一个窗口）',
+    );
+    assert.equal(hit.matchCountComplete, false, '兜底区域未经 chunk 锚点复核，计数完整性必须显式降级');
+    assert.equal(hit.matchesTruncated, true);
+  });
+
+  it('聚合补齐命中后不再保留"无法复核命中行"的矛盾提示', async () => {
+    const { executeSearch } = await import('../src/search.js');
+    const result = await executeSearch({ scope, query: 'alpha beta gamma', mode: 'fulltext', limit: 1, tags: 'hint-test' });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+
+    const hit = result.results.find((item) => item.relation === 'doc-hint');
+    assert.ok(hit);
+    assert.deepEqual(hit.matches?.map((match) => match.lineStart), [3]);
+    assert.equal(hit.matchCount, 1);
+    assert.equal(hit.originalHint, undefined, '已有可复核命中行时不得同时返回"无法复核"提示');
   });
 });

@@ -78,6 +78,8 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
     indexedText = cleanMarkdownText(indexedText, cleanCfg?.rules);
     if (cleanCfg?.hooks?.length) {
       const hooked = await runCleanHooks(indexedText, cleanCfg.hooks);
+      // 外部命令（hook）可能因超时/资源瞬时失败，保留 retryable=true 让调用方沿用
+      // request_id 重试；真正的确定性失败（超限、无可索引内容）见下方 nonRetryable。
       if (!hooked.ok) throw new Error(`清洗 hook 失败：${hooked.failedHooks.join(', ')}`);
       indexedText = hooked.text;
     }
@@ -87,8 +89,10 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
       text: indexedText, chunkSize: source?.chunkSize ?? 1000, chunkOverlap: source?.chunkOverlap ?? 150,
       relationName: draft.relation })
     : { chunks: [{ index: 1, text: indexedText }], entries: [{ text: indexedText, chunkRelation: draft.relation }] };
-  if (chunks.chunks.length > MAX_CHUNKS_PER_FILE) throw new Error(`编辑后 chunk 数超过 ${MAX_CHUNKS_PER_FILE}，请拆分文档`);
-  if (chunks.chunks.length === 0) throw new Error('编辑后无可索引内容');
+  // 超限、空正文对同一份草稿是确定性失败（重跑必然再次失败），标为非可重试，
+  // 避免调用方按「沿用 request_id 重试」空转。
+  if (chunks.chunks.length > MAX_CHUNKS_PER_FILE) nonRetryable(`编辑后 chunk 数超过 ${MAX_CHUNKS_PER_FILE}，请拆分文档`);
+  if (chunks.chunks.length === 0) nonRetryable('编辑后无可索引内容');
 
   const denseEntries: IndexEntry[] = [];
   const denseContentIds: string[] = [];
@@ -104,7 +108,9 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
       ftsEntries.push({ text: entry.text, scope: draft.scope, group: draft.group, relation: draft.relation, tag });
     }
   }
-  // 导入的 dense 文档沿用文件级 tag 向量；内容 chunk 与自定义标签的粒度不变。
+  // 导入的 dense 文档沿用文件级 tag 向量（与 ki import 一致）；非导入文档没有文件级
+  // 形态，只能按 chunk 写 tag 向量——这与 ki_sync_relation 的文件级 tag 写入有意不同。
+  // 两条链路互相覆盖时会各自把对方的旧 ID 纳入清理（自愈；代价是一次性重写）。
   if (mode === 'dense' && imported) {
     for (const tag of tags) {
       denseEntries.push({ text: draft.content, tags: tag });
@@ -142,7 +148,10 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
       imported ? 1 : 0,
       (relation.memoryIds?.length ?? 0) + (relation.ftsIds?.length ?? 0),
     );
-    const upperBound = Math.min(relation.editChunkCount ?? fallbackBound, MAX_CHUNKS_PER_FILE);
+    // editChunkCount 只由本模块发布时写入：Relation 被 import/sync 重写后它不会更新，
+    // 只取它会漏枚举（旧路径向量既不删除也不隐藏，成为永久孤儿）。取两者最大值兜住
+    // 陈旧值；过估无害——候选先经 vectorFetchDocs 探测，只把确实存在的纳入清理清单。
+    const upperBound = Math.min(Math.max(relation.editChunkCount ?? 0, fallbackBound), MAX_CHUNKS_PER_FILE);
     const candidates: string[] = [];
     if (upperBound <= 1) {
       // 单 chunk：历史上写入的是无后缀路径向量（仅非导入文档走此形态）。

@@ -87,14 +87,25 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
         baseRevision: draft.baseRevision, totalLines: lines.length, lineStart: first, lineEnd: last,
         content: lines.slice(first - 1, last).join('\n'), ...(draft.error ? { error: draft.error } : {}),
         ...(draft.retryable !== undefined ? { retryable: draft.retryable } : {}),
+        // published=true 表示正文已生效（中断恢复或外部入口写入后由 recognize 补登记），
+        // 此时 finish 只清理旧索引；requestId 供调用方在超时后原样重试 finish。
+        published: Boolean(draft.publishedRevision),
+        ...(draft.requestId ? { requestId: draft.requestId } : {}),
         ...(draft.wikiSynced !== undefined ? { wikiSynced: draft.wikiSynced } : {}),
         ...(draft.wikiReason ? { wikiReason: draft.wikiReason } : {}),
       };
     }
     if (params.action === 'cancel') {
       if (draft.status === 'failed' && !isRelationEditJobActive(draft.editId)) recognizePublishedDraft(draft);
-      if (draft.status === 'queued' || draft.status === 'running' || (draft.status === 'failed' && draft.publishedRevision)) {
-        throw new Error('发布已开始，不能直接取消；请 view 查询并重试 finish 清理索引');
+      if (draft.status === 'queued' || draft.status === 'running') {
+        throw new Error('发布已开始，不能直接取消；请 view 查询发布状态，或沿用原 request_id 重试 finish');
+      }
+      if (draft.status === 'failed' && draft.publishedRevision) {
+        // 正文已经发布（上一次发布在写回草稿前中断，由上面的 recognize 补登记）。
+        // cancel 的语义是"放弃尚未发布的内容"，此时内容已生效，只能 finish 清理旧索引。
+        // 注意该状态下 finish 必须放行（见下方 retryable 判定），否则两个入口互相拒绝，
+        // 草稿只能靠手工删除文件才能脱身。
+        throw new Error('正文已经发布，不能取消；请沿用原 request_id 重试 finish 清理旧索引');
       }
       if (draft.status === 'published') throw new Error('Relation 已发布，不能取消');
       if (draft.status === 'failed') await discardUnpublishedIndex(draft);
@@ -105,14 +116,22 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
     if (params.action === 'finish') {
       if (!params.expectedRevision || draft.revision !== params.expectedRevision) throw new Error('草稿版本冲突：请 view 最新草稿后重试');
       if (!params.requestId) throw new Error('finish 需要 request_id，以支持超时后幂等查询与重试');
-      if (draft.status === 'published') return { ok: true, action: 'finish', scope, editId: draft.editId, status: draft.status };
+      if (draft.status === 'published') {
+        // 幂等返回：附带本次发布记录的 request_id / wiki 结果，便于超时后确认归属与副作用。
+        return { ok: true, action: 'finish', scope, editId: draft.editId, status: draft.status,
+          ...(draft.requestId ? { requestId: draft.requestId } : {}),
+          ...(draft.wikiSynced !== undefined ? { wikiSynced: draft.wikiSynced } : {}),
+          ...(draft.wikiReason ? { wikiReason: draft.wikiReason } : {}) };
+      }
       if (draft.status === 'cancelled') throw new Error('已取消草稿不能发布');
       if ((draft.status === 'queued' || draft.status === 'running') && isRelationEditJobActive(draft.editId)) {
         return { ok: true, action: 'finish', scope, editId: draft.editId, status: draft.status };
       }
       // 确定性失败（正文/元数据在编辑期间变化、chunk 超限等）重试必然再失败，
       // 直接拒绝并提示重建草稿，避免调用方按「沿用 request_id 重试」空转。
-      if (draft.status === 'failed' && draft.retryable === false) {
+      // 例外：正文已经发布（publishedRevision 已登记）时 finish 只做旧索引清理，
+      // 与"重试必然再失败"无关，必须放行——否则该状态下 finish/cancel 双双拒绝。
+      if (draft.status === 'failed' && draft.retryable === false && !draft.publishedRevision) {
         throw new Error(`上次发布为不可重试失败（${draft.error ?? '未知原因'}）；请重新创建草稿`);
       }
       if (draft.requestId && draft.requestId !== params.requestId && draft.status !== 'editing') {
