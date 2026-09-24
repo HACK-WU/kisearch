@@ -523,6 +523,7 @@ export function BrowsePage(): JSX.Element {
     const listError = isSearching ? (searchQuery.isError ? searchQuery.error : null) : (groupQuery.isError ? groupQuery.error : null);
     const retryList = isSearching ? searchQuery.refetch : groupQuery.refetch;
     const listLoading = isSearching ? isSearchLoading : isLoading || groupQuery.isLoading;
+    const isCurrentDocument = (doc: DocItem): boolean => viewing?.group === doc.group && viewing.module === doc.name;
     return (
     <>
       {isSearching && (
@@ -589,9 +590,10 @@ export function BrowsePage(): JSX.Element {
           {shownDocs.map((d) => (
             <div
               key={`${d.group}/${d.name}`}
-              className="ki-doc-item"
+              className={`ki-doc-item${isCurrentDocument(d) ? ' ki-doc-item--current' : ''}`}
               role="button"
               tabIndex={0}
+              aria-current={isCurrentDocument(d) ? 'page' : undefined}
               onClick={() => openDocument({
                 module: d.name,
                 group: d.group,
@@ -611,7 +613,10 @@ export function BrowsePage(): JSX.Element {
             >
               <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="ki-doc-item__name">{d.name}</div>
+                <div className="ki-doc-item__title-row">
+                  <div className="ki-doc-item__name">{d.name}</div>
+                  {isCurrentDocument(d) && <span className="ki-doc-item__current-label">正在阅读</span>}
+                </div>
                 {d.path && <div className="ki-doc-item__path">{d.path}</div>}
                 <div className="ki-doc-item__meta">
                   <span className="ki-badge ki-badge--kb">{d.group}</span>

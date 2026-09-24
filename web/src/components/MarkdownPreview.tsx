@@ -14,8 +14,8 @@
  *   而非静默破图或空白）
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { marked } from 'marked';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Marked, Renderer, type Token, type TokenizerAndRendererExtension } from 'marked';
 import { isLocalDocumentHref } from '@/lib/documentLinks';
 
 /** 附件寻址上下文：提供时相对路径图片重写为 /api/asset 路由；缺省时保持原 src（如写入页预览） */
@@ -27,6 +27,16 @@ export interface AssetBase {
 /** HTML 属性转义（防 alt/src/title 中的引号破坏属性边界） */
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** 代码文本转义：代码高亮前先确保不可信内容只能作为文本节点显示。 */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/** 复制代码时移除末尾全部 CR/LF（包括作者保留的末尾空行），避免终端粘贴后立即提交命令。 */
+export function normalizeCodeForCopy(source: string): string {
+  return source.replace(/[\r\n]+$/, '');
 }
 
 /** 是否为外部或不可寻址 URL（scheme / 协议相对 / posix 绝对路径）：保持原样不重写 */
@@ -176,9 +186,150 @@ function extractAttr(attrs: string, name: string): string {
   return bare ? bare[1] : '';
 }
 
+interface SafeDetailsToken {
+  type: string;
+  raw: string;
+  open: boolean;
+  summaryTokens: Token[];
+  bodyTokens: Token[];
+}
+
+interface MarkdownLine {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** 拆出带源码偏移的行，供 details tokenizer 精确消费原文。 */
+function markdownLines(source: string): MarkdownLine[] {
+  const lines: MarkdownLine[] = [];
+  let start = 0;
+  while (start < source.length) {
+    const newline = source.indexOf('\n', start);
+    const end = newline < 0 ? source.length : newline + 1;
+    const contentEnd = newline < 0 ? end : newline;
+    lines.push({ start, end, text: source.slice(start, contentEnd).replace(/\r$/, '') });
+    start = end;
+  }
+  return lines;
+}
+
+function fenceMarker(line: string): { char: '`' | '~'; length: number } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (!match) return null;
+  return { char: match[1][0] as '`' | '~', length: match[1].length };
+}
+
+function isFenceClose(line: string, fence: { char: '`' | '~'; length: number }): boolean {
+  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+  return Boolean(match && match[1][0] === fence.char && match[1].length >= fence.length);
+}
+
+const DETAILS_CLOSE_LINE = /^ {0,3}<\/details\s*>[ \t]*$/i;
+
+function parseDetailsOpening(line: string): { attributes: string; summary?: string } | null {
+  const match = /^ {0,3}<details\b([^>]*)>(.*)$/i.exec(line);
+  if (!match) return null;
+  const remainder = match[2].trim();
+  if (!remainder) return { attributes: match[1] };
+  const summary = /^<summary\b[^>]*>([\s\S]*?)<\/summary>$/i.exec(remainder);
+  return summary ? { attributes: match[1], summary: summary[1] } : null;
+}
+
+function hasOpenAttribute(attributes: string): boolean {
+  const attribute = /(?:^|\s)([^\s=/>]+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/g;
+  for (const match of attributes.matchAll(attribute)) {
+    if (match[1].toLowerCase() === 'open') return true;
+  }
+  return false;
+}
+
+/** 将 GitHub 常见的 details 块收敛为安全 token；不透传其原始 HTML 属性。 */
+function safeDetailsExtension(): TokenizerAndRendererExtension {
+  return {
+    name: 'kiSafeDetails',
+    level: 'block',
+    tokenizer(source) {
+      const firstNewline = source.indexOf('\n');
+      const firstContentEnd = firstNewline < 0 ? source.length : firstNewline;
+      const first: MarkdownLine = {
+        start: 0,
+        end: firstNewline < 0 ? source.length : firstNewline + 1,
+        text: source.slice(0, firstContentEnd).replace(/\r$/, ''),
+      };
+      const opening = parseDetailsOpening(first.text);
+      if (!opening) return undefined;
+
+      const lines = markdownLines(source);
+      let depth = 1;
+      let fence: { char: '`' | '~'; length: number } | null = null;
+      let closing: MarkdownLine | undefined;
+      for (const line of lines.slice(1)) {
+        if (fence) {
+          if (isFenceClose(line.text, fence)) fence = null;
+          continue;
+        }
+        const marker = fenceMarker(line.text);
+        if (marker) {
+          fence = marker;
+          continue;
+        }
+        if (parseDetailsOpening(line.text)) depth += 1;
+        else if (DETAILS_CLOSE_LINE.test(line.text) && --depth === 0) {
+          closing = line;
+          break;
+        }
+      }
+      // 不完整标签不生成控件；后续原始 HTML 仍由现有白名单策略处理。
+      if (!closing) return undefined;
+
+      const bodyStart = first.end;
+      const bodyEnd = closing.start;
+      const bodySource = source.slice(bodyStart, bodyEnd);
+      let summary = opening.summary;
+      let contentSource = bodySource;
+      if (summary === undefined) {
+        const bodyLines = markdownLines(bodySource);
+        const summaryLine = bodyLines.find((line) => line.text.trim().length > 0);
+        const summaryMatch = summaryLine && /^\s*<summary\b[^>]*>([\s\S]*?)<\/summary>\s*$/i.exec(summaryLine.text);
+        if (summaryMatch && summaryLine) {
+          summary = summaryMatch[1];
+          contentSource = bodySource.slice(0, summaryLine.start) + bodySource.slice(summaryLine.end);
+        }
+      }
+      summary ??= 'Details';
+      const raw = source.slice(0, closing.end);
+
+      return {
+        type: 'kiSafeDetails',
+        raw,
+        open: hasOpenAttribute(opening.attributes),
+        summaryTokens: this.lexer.inlineTokens(summary),
+        bodyTokens: this.lexer.blockTokens(contentSource),
+      };
+    },
+    renderer(token) {
+      const details = token as SafeDetailsToken;
+      const open = details.open ? ' open' : '';
+      const summary = this.parser.parseInline(details.summaryTokens);
+      const body = this.parser.parse(details.bodyTokens);
+      return `<details${open}><summary>${summary}</summary>\n${body}</details>\n`;
+    },
+  };
+}
+
 /** 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃 */
 function buildRenderer(base?: AssetBase) {
-  const renderer = new marked.Renderer();
+  const renderer = new Renderer();
+  renderer.code = ({ text, lang }) => {
+    const language = lang?.trim().split(/\s+/, 1)[0];
+    const languageClass = language ? ` class="language-${escapeAttr(language)}"` : '';
+    return '<div class="ki-code-block">'
+      + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
+      + `<pre><code${languageClass}>${escapeHtml(text)}</code></pre>`
+      + '<span class="ki-code-copy-status" aria-live="polite"></span>'
+      + '</div>\n';
+  };
   renderer.image = ({ href, title, text }) => {
     const raw = href ?? '';
     // scheme 白名单：javascript: 在 <img src> 中虽不执行（实测），但仍拦下以免留下误导性死图；
@@ -226,7 +377,9 @@ function buildRenderer(base?: AssetBase) {
 
 /** 渲染 Markdown 为 HTML 字符串（GFM：表格/删除线/任务列表；breaks 单换行转 <br>） */
 export function renderMarkdownHtml(md: string, base?: AssetBase): string {
-  return marked.parse(encodeImageSpaces(md), { renderer: buildRenderer(base), gfm: true, breaks: true }) as string;
+  const parser = new Marked({ renderer: buildRenderer(base), gfm: true, breaks: true });
+  parser.use({ extensions: [safeDetailsExtension()] });
+  return parser.parse(encodeImageSpaces(md), { async: false }) as string;
 }
 
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null;
@@ -271,6 +424,29 @@ function replaceWithPlaceholder(img: HTMLImageElement): void {
   img.replaceWith(wrap);
 }
 
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch { /* insecure context / permission denial: try the compatible fallback */ }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  let copied = false;
+  try {
+    textarea.select();
+    copied = document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+  if (!copied) throw new Error('浏览器未能复制文本');
+}
+
 /** Markdown 预览组件（dangerouslySetInnerHTML 渲染 + mermaid 图表挂载 + 附件占位块） */
 export interface MarkdownPreviewProps {
   text: string;
@@ -282,7 +458,10 @@ export interface MarkdownPreviewProps {
 export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPreviewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
-  const html = renderMarkdownHtml(text, assetBase);
+  const html = useMemo(
+    () => renderMarkdownHtml(text, assetBase),
+    [text, assetBase?.scope, assetBase?.group],
+  );
 
   // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；
   // 用事件代理接入页面导航状态，同时保留外链、锚点和未解析链接的浏览器行为。
@@ -302,6 +481,56 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     root.addEventListener('click', handleClick);
     return () => root.removeEventListener('click', handleClick);
   }, [onLocalLink]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const timers = new Set<number>();
+    let disposed = false;
+    const handleCopy = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const button = target.closest<HTMLButtonElement>('[data-ki-copy-code]');
+      if (!button || !root.contains(button)) return;
+      const codeBlock = button.closest<HTMLElement>('.ki-code-block');
+      const source = codeBlock?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
+        ?? codeBlock?.querySelector('pre code')?.textContent;
+      if (source === undefined) return;
+      const status = codeBlock?.querySelector<HTMLElement>('.ki-code-copy-status');
+
+      button.disabled = true;
+      void copyText(normalizeCodeForCopy(source)).then(() => {
+        button.textContent = '已复制';
+        button.setAttribute('aria-label', '代码已复制');
+        button.dataset.copyState = 'success';
+        if (status) status.textContent = '代码已复制';
+      }).catch(() => {
+        button.textContent = '复制失败';
+        button.setAttribute('aria-label', '复制失败，请手动选择文本');
+        button.dataset.copyState = 'error';
+        if (status) status.textContent = '复制失败，请手动选择文本';
+      }).finally(() => {
+        if (disposed) return;
+        const timer = window.setTimeout(() => {
+          timers.delete(timer);
+          if (!button.isConnected) return;
+          button.textContent = '复制';
+          button.setAttribute('aria-label', '复制代码');
+          delete button.dataset.copyState;
+          button.disabled = false;
+          if (status) status.textContent = '';
+        }, 1800);
+        timers.add(timer);
+      });
+    };
+    root.addEventListener('click', handleCopy);
+    return () => {
+      disposed = true;
+      root.removeEventListener('click', handleCopy);
+      for (const timer of timers) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, [html]);
 
   // mermaid 代码块异步渲染（动态加载 mermaid，避免无图表时也加载大 chunk）
   useEffect(() => {
@@ -339,6 +568,7 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
             const { svg } = await mermaid.render(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, code);
             const wrap = document.createElement('div');
             wrap.className = 'ki-mermaid';
+            wrap.dataset.copyText = code;
             wrap.innerHTML = svg;
             pre.replaceWith(wrap);
           } catch {
