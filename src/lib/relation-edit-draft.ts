@@ -126,10 +126,66 @@ export function saveDraft(draft: RelationEditDraft): void {
   draft.updatedAt = new Date().toISOString();
   writeJson(file, draft as unknown as Record<string, unknown>);
   if (archived) {
-    try { fs.unlinkSync(draftPath(draft.scope, draft.editId)); }
-    catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+    try {
+      fs.unlinkSync(draftPath(draft.scope, draft.editId));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // 归档副本已写入，活动路径留下的是**过期状态**。旧实现直接抛错：调用方的失败态
+        // 回写会覆盖终态，形成同 editId 双份不一致（archive=published / 活动=failed）。
+        // 现改为把同一终态补写到活动路径让两处一致（loadDraft 优先读活动路径），
+        // 并显式告警、不抛错——归档副本已可用，不该让收尾动作失败。
+        try { writeJson(draftPath(draft.scope, draft.editId), draft as unknown as Record<string, unknown>); }
+        catch { /* 活动路径不可写（如被外部替换为目录）：loadDraft 会回落到 archive */ }
+        process.stderr.write(
+          `提示：编辑草稿 ${draft.editId} 已归档，但未能删除活动目录副本（${(err as Error).message}）；`
+          + `已同步终态，可人工清理 ${draftDir(draft.scope)} 下的残留\n`,
+        );
+      }
+    }
     pruneArchivedDrafts(draft.scope);
+    endPublishLease(draft.scope, draft.editId); // 终态草稿不再需要发布心跳
   }
+}
+
+/** 发布心跳文件路径：kb/{scope}/.relation-edits/{editId}.publish（与草稿同目录，文件名不匹配草稿正则）。 */
+export function publishLeasePath(scope: string, editId: string): string {
+  assertEditId(editId);
+  return path.join(draftDir(scope), `${editId}.publish`);
+}
+
+/**
+ * 发布心跳有效期。临界区（KB 写 → cache 写）本身只有毫秒级，60s 是"容忍发布方崩溃后
+ * 延迟恢复"的上界：租约过期前另一进程的 view 不做中断恢复，过期后按原有逻辑回滚。
+ *
+ * 只按 mtime 判定、不看 pid：pid 会被系统复用，用 pid 存活性判断会引入"陈旧租约永久生效"
+ * 的新失败模式；纯新鲜度判定天然自愈（最长多等一个有效期）。
+ */
+export const PUBLISH_LEASE_GRACE_MS = 60_000;
+
+/**
+ * 置位发布心跳（覆盖写，发布方每个临界区只写一次，**从不阻塞发布**）。
+ * 写失败也照常发布：代价是退回"单 owner"假设，而不是让发布失败。
+ */
+export function beginPublishLease(scope: string, editId: string): void {
+  try {
+    fs.mkdirSync(draftDir(scope), { recursive: true });
+    fs.writeFileSync(publishLeasePath(scope, editId),
+      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`, 'utf8');
+  } catch { /* 心跳写失败不阻断发布；跨进程误判由租约过期兜底 */ }
+}
+
+/** 清除发布心跳（幂等）。失败仅留下一个会自然过期的文件，不影响任何判定。 */
+export function endPublishLease(scope: string, editId: string): void {
+  try { fs.unlinkSync(publishLeasePath(scope, editId)); }
+  catch { /* ENOENT 或权限问题：残留由 PUBLISH_LEASE_GRACE_MS 过期兜底 */ }
+}
+
+/** 该草稿是否有仍在有效期内的发布心跳（另一进程据此判断"发布者可能活着"）。 */
+export function isPublishLeaseActive(scope: string, editId: string): boolean {
+  try {
+    const stat = fs.statSync(publishLeasePath(scope, editId));
+    return Date.now() - stat.mtimeMs < PUBLISH_LEASE_GRACE_MS;
+  } catch { return false; }
 }
 
 /**
@@ -243,6 +299,11 @@ export function activeDrafts(scope: string): ActiveDraftRef[] {
     try {
       const draft = readJson<RelationEditDraft>(path.join(dir, name));
       if (!draft || draft.scope !== scope) continue;
+      // 终态（published/cancelled）只可能作为活动目录里的残留出现：saveDraft 归档时
+      // unlink 失败，或进程在写 archive 前被杀。它们没有在途发布，不能阻断删除类入口
+      // ——否则用户会被引导去做已经完成过的 cancel/finish，形成新的死循环。
+      // ⚠️ failed/queued/running 仍然必须阻断（在途草稿被删即无法收口）。
+      if (draft.status === 'published' || draft.status === 'cancelled') continue;
       result.push({ editId: draft.editId, group: draft.group, relation: draft.relation, status: draft.status });
     } catch { /* 损坏草稿由 view/finish fail-loud，删除入口不因其整体失败 */ }
   }

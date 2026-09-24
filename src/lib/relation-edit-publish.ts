@@ -11,7 +11,8 @@ import { buildRelationContent } from './path-vectorize.js';
 import { generateDocId, vectorBulkStore, vectorDelete, vectorFetchDocs } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { writeBackToWiki } from './wiki-sync.js';
-import { contentRevision, metadataRevision, loadDraft, saveDraft, type RelationEditDraft } from './relation-edit-draft.js';
+import { beginPublishLease, contentRevision, endPublishLease, metadataRevision, loadDraft, saveDraft,
+  type RelationEditDraft } from './relation-edit-draft.js';
 import { readLiveRelation, relationIndexMode } from './relation-edit-live.js';
 
 type IndexEntry = { text: string; tags: string; group?: string };
@@ -222,36 +223,54 @@ function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void
     indexMode: relationIndexMode(relation) }) !== draft.baseMetadataRevision) {
     throw new Error('发布前 Relation 标签、来源或索引模式已变化，拒绝覆盖；请重新创建草稿');
   }
-  const priorContent = kb[draft.relation];
-  kb[draft.relation] = draft.content;
-  writeJson(kbPath, kb);
-  if (plan.mode === 'dense') {
-    relation.memoryIds = plan.denseContentIds;
-    relation.memoryId = plan.denseContentIds[0];
-    delete relation.ftsIds;
-    delete relation.ftsLocators;
-    delete relation.ftsIndexComplete;
-  } else {
-    relation.ftsIds = plan.ftsIds;
-    relation.ftsLocators = plan.ftsLocators;
-    relation.ftsIndexComplete = true;
-    delete relation.memoryIds;
-    delete relation.memoryId;
-  }
-  relation.editChunkCount = plan.chunkCount;
+  // 进入跨进程发布临界区：置位心跳租约，让另一进程的 view 中断恢复不会把这一瞬
+  // （KB 已换、cache 未换）误判成崩溃残留、把刚写上的正文回滚掉。租约只被恢复判据读取，
+  // 从不阻塞发布（写失败也照常发布，代价是退回单 owner 假设）。
+  beginPublishLease(draft.scope, draft.editId);
   try {
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
-  } catch (err) {
-    // 正常异常立即补偿；进程被强杀的窗口由 recoverInterruptedPublication 处理。
-    kb[draft.relation] = priorContent;
+    const priorContent = kb[draft.relation];
+    kb[draft.relation] = draft.content;
     writeJson(kbPath, kb);
-    throw err;
+    if (plan.mode === 'dense') {
+      relation.memoryIds = plan.denseContentIds;
+      relation.memoryId = plan.denseContentIds[0];
+      delete relation.ftsIds;
+      delete relation.ftsLocators;
+      delete relation.ftsIndexComplete;
+    } else {
+      relation.ftsIds = plan.ftsIds;
+      relation.ftsLocators = plan.ftsLocators;
+      relation.ftsIndexComplete = true;
+      delete relation.memoryIds;
+      delete relation.memoryId;
+    }
+    relation.editChunkCount = plan.chunkCount;
+    try {
+      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    } catch (err) {
+      // 正常异常立即补偿；进程被强杀的窗口由 recoverInterruptedPublication 处理。
+      kb[draft.relation] = priorContent;
+      writeJson(kbPath, kb);
+      throw err;
+    }
+    draft.publishedRevision = draft.revision;
+    saveDraft(draft);
+  } finally {
+    endPublishLease(draft.scope, draft.editId);
   }
-  draft.publishedRevision = draft.revision;
-  saveDraft(draft);
 }
 
-/** 重启后发现“KB 已换、cache 仍是旧 ID”时，先恢复旧正文再重试发布。 */
+/**
+ * 重启后发现“KB 已换、cache 仍是旧 ID”时，先恢复旧正文再重试发布。
+ *
+ * 本函数只做判据判定，**自身不含互斥**；跨进程误判由调用方把关：
+ * - 同进程：调用方 view 先查 `activeJobs`，发布任务在跑时不会走到这里；
+ * - 跨进程：调用方 view 先查 `isPublishLeaseActive`（发布方在 [KB 写, cache 写] 临界区
+ *   内置位的心跳，见 relation-edit-draft.beginPublishLease），未过期即视为发布者存活、
+ *   跳过恢复。缺了这道把关，另一进程会把“KB 已写、cache 未写”这一瞬误判成中断并回滚 KB，
+ *   而发布方之后只再写 cache → 终态 KB 旧、cache/索引新，草稿被标 published 掩盖中间态。
+ * - 发布方自己的重试路径（`runFinish`）**不需要**这道把关：它本来就是来接管上次崩溃现场的。
+ */
 export function recoverInterruptedPublication(draft: RelationEditDraft): boolean {
   if (draft.publishedRevision || !(draft.newDenseIds?.length || draft.newFtsIds?.length)) return false;
   const kbPath = getLocalKbDir(draft.scope, draft.group);

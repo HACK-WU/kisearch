@@ -4,6 +4,7 @@ import {
   applyLineEdits,
   contentRevision,
   createDraft,
+  isPublishLeaseActive,
   loadDraft,
   saveDraft,
   type RelationLineEdit,
@@ -69,7 +70,14 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
     const draft = loadDraft(scope, params.editId);
     sameTarget(draft, params.group, params.relation);
     if (params.action === 'view') {
-      if ((draft.status === 'queued' || draft.status === 'running') && !isRelationEditJobActive(draft.editId)) {
+      const statusInFlight = draft.status === 'queued' || draft.status === 'running';
+      const jobActive = isRelationEditJobActive(draft.editId);
+      // 心跳租约未过期 ⇒ 可能有**另一 owner 进程**正在发布临界区内（本进程 activeJobs
+      // 看不到它）。此时绝不能按“中断”处理：回滚 KB 会把刚写上的正文打回旧稿，并把草稿
+      // 误标 failed 诱使调用方重试、造成双发布。保持原状态返回，等发布方收尾或租约过期
+      // （PUBLISH_LEASE_GRACE_MS，≤60s）后自然回到原有恢复逻辑。
+      const publishInFlight = statusInFlight && !jobActive && isPublishLeaseActive(draft.scope, draft.editId);
+      if (statusInFlight && !jobActive && !publishInFlight) {
         recoverInterruptedPublication(draft);
         recognizePublishedDraft(draft);
         draft.status = 'failed';
@@ -90,6 +98,9 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
         // published=true 表示正文已生效（中断恢复或外部入口写入后由 recognize 补登记），
         // 此时 finish 只清理旧索引；requestId 供调用方在超时后原样重试 finish。
         published: Boolean(draft.publishedRevision),
+        // publishInFlight：另一 owner 进程正在发布临界区内（心跳租约未过期、本进程无任务）。
+        // 调用方应按"发布中"继续轮询，而不是当失败去重试 finish。
+        ...(publishInFlight ? { publishInFlight: true } : {}),
         ...(draft.requestId ? { requestId: draft.requestId } : {}),
         ...(draft.wikiSynced !== undefined ? { wikiSynced: draft.wikiSynced } : {}),
         ...(draft.wikiReason ? { wikiReason: draft.wikiReason } : {}),
@@ -151,7 +162,23 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
   }
 }
 
+/**
+ * daemon RPC 客户端超时（按 action 区分）。
+ *
+ * 不变量：RPC 超时必须 ≥ MCP 工具层 `withTimeout` 的上界（edit/view/finish 用
+ * TOOL_TIMEOUT.WRITE=60s，cancel 用 BULK=300s），否则工具层永远等不到结构化结果、
+ * 先收到传输层错误。历史上这里直接用了 callDaemon 的默认 120s：cancel 恰恰要做重活
+ * （删除最多 MAX_CHUNKS_PER_FILE 条旧索引），300s 的预算在 daemon 路径上永远拿不到。
+ */
+export function editRelationRpcTimeoutMs(action: EditRelationParams['action']): number {
+  // 取"严格大于"工具层：等值会与工具层超时赛跑，谁先触发不确定（RPC 先触发时调用方
+  // 拿到的是传输层错误而非可判定的工具超时）。留 30s 余量让工具层成为唯一出口。
+  return action === 'cancel' ? 330_000 : 120_000;
+}
+
 export async function executeEditRelation(params: EditRelationParams): Promise<Record<string, unknown>> {
-  if (shouldUseDaemonClient()) return callDaemon<Record<string, unknown>>('edit-relation', params);
+  if (shouldUseDaemonClient()) {
+    return callDaemon<Record<string, unknown>>('edit-relation', params, editRelationRpcTimeoutMs(params.action));
+  }
   return executeEditRelationLocal(params);
 }
