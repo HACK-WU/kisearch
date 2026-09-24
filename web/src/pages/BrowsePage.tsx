@@ -16,6 +16,7 @@ import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { TagSelect } from '@/components/TagSelect';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
+import { buildGroupTree, firstGroupWithDocuments, isGroupSelectable, type GroupTreeNode as TreeNode } from '@/lib/groupTree';
 
 const ICON_FOLDER = (
   <svg className="ki-tree-icon" viewBox="0 0 16 16" fill="none">
@@ -84,52 +85,6 @@ function makeSnippet(content: string, query: string, maxLength = 320): string {
   const start = index > 80 ? index - 80 : 0;
   const end = Math.min(normalized.length, start + maxLength);
   return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
-}
-
-/** Group 树节点：按路径段递归聚合 */
-interface TreeNode {
-  name: string;
-  path: string;
-  /** 后端返回的文档数量（不受分页截断影响） */
-  count: number;
-  children: TreeNode[];
-  open: boolean;
-}
-
-/** 从 group 列表（含文档数量）构建递归层级树；根目录只有一个文件夹时上提一级（不显示该层） */
-function buildTreeFromGroups(groups: { name: string; count: number }[]): TreeNode[] {
-  const roots: TreeNode[] = [];
-  const map = new Map<string, TreeNode>();
-  const getNode = (path: string): TreeNode => {
-    let n = map.get(path);
-    if (!n) {
-      n = { name: path.split('/').pop() || path, path, count: 0, children: [], open: false };
-      map.set(path, n);
-    }
-    return n;
-  };
-  for (const g of groups) {
-    const segs = g.name.split('/').filter(Boolean);
-    if (segs.length === 0) continue;
-    let prev: TreeNode | null = null;
-    for (let i = 0; i < segs.length; i++) {
-      const node = getNode(segs.slice(0, i + 1).join('/'));
-      if (prev) {
-        if (!prev.children.some((c) => c.path === node.path)) prev.children.push(node);
-      } else if (!roots.some((r) => r.path === node.path)) {
-        roots.push(node);
-      }
-      prev = node;
-    }
-    // 叶子节点：直接挂载后端返回的文档数量
-    prev!.count = g.count;
-  }
-  // 唯一顶层目录：上提其子级（根目录只有一层时不显示该层）
-  if (roots.length === 1) {
-    const only = roots[0];
-    if (only.children.length > 0) return only.children;
-  }
-  return roots;
 }
 
 /** 默认展开一级，子级折叠 */
@@ -204,10 +159,10 @@ export function BrowsePage(): JSX.Element {
       setTree([]);
       return;
     }
-    const t = buildTreeFromGroups(rawGroups);
+    const t = buildGroupTree(rawGroups);
     setDefaultOpen(t);
     setTree(t);
-    // 默认选中第一个叶子 group（无子级），页面加载即显示该 group 文档
+    // 默认选中第一个有自身文档的 Group，包括有子级的父 Group。
     setActiveGroup((prev) => {
       if (prev) {
         // 已有选中且仍在树中 → 保留（避免重复请求）
@@ -218,39 +173,11 @@ export function BrowsePage(): JSX.Element {
           stack.push(...n.children);
         }
       }
-      const findFirstLeaf = (nodes: TreeNode[]): string => {
-        for (const n of nodes) {
-          if (n.children.length === 0) return n.path;
-          const leaf = findFirstLeaf(n.children);
-          if (leaf) return leaf;
-        }
-        return '';
-      };
-      return findFirstLeaf(t) || (t.length > 0 ? t[0].path : '');
+      return firstGroupWithDocuments(t) || (t.length > 0 ? t[0].path : '');
     });
   }, [data?.groups]); // ← 仅依赖 groups，不依赖 activeGroup
 
-  // ── 选中 group 文档回填（groupDocs 就绪时写入对应树节点，不重建树）──
-  useEffect(() => {
-    if (!activeGroup || groupDocs.length === 0) return;
-    setTree((prev) => {
-      const walk = (nodes: TreeNode[]): boolean => {
-        for (const n of nodes) {
-          if (n.path === activeGroup) {
-            n.count = groupDocs.length; // 用实际返回的文档数更新 count
-            return true;
-          }
-          if (walk(n.children)) return true;
-        }
-        return false;
-      };
-      const copy = prev.map((n) => ({ ...n }));
-      walk(copy);
-      return copy;
-    });
-  }, [activeGroup, groupDocs]);
-
-  // 当前选中组文档（直接使用 useGroupDocs 返回值，无需再从树中取）
+  // 树节点 count 始终使用 /api/doc/list 返回的未筛选文档数；groupDocs 可能受 tag 过滤。
   const activeDocs = groupDocs;
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
@@ -411,14 +338,13 @@ export function BrowsePage(): JSX.Element {
 
   /**
    * 目录点击：
-   * - 父目录（有子级）：仅展开/折叠，不选中、不请求文档
-   * - 叶子 group：选中并请求该 group 完整文档
+   * - 有自身文档的父 Group：展开并选中，读取本组文档
+   * - 无自身文档的父目录：仅展开/折叠
+   * - 叶子 Group：选中并读取本组文档
    */
   const handleDirClick = (node: TreeNode): void => {
-    if (node.children.length > 0) {
-      toggleOpen(node.path);
-      return;
-    }
+    if (node.children.length > 0) toggleOpen(node.path);
+    if (!isGroupSelectable(node)) return;
     setActiveGroup(node.path);
     // 全屏阅读时保留当前阅读器，用户可以在左侧 Group 树和中间文档列表继续选文档。
     if (!readerFullscreen) closeDocument();
@@ -427,6 +353,7 @@ export function BrowsePage(): JSX.Element {
   const renderNode = (node: TreeNode): JSX.Element => {
     const hasSub = node.children.length > 0;
     const isActive = node.path === activeGroup;
+    const totalDocs = countDocs(node);
     return (
       <Fragment key={node.path}>
         <div
@@ -437,15 +364,31 @@ export function BrowsePage(): JSX.Element {
           aria-selected={isActive}
           onClick={() => handleDirClick(node)}
           onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
             handleDirClick(node);
           }}
         >
-          <span className="ki-tree-arrow">{hasSub ? (node.open ? '▾' : '▸') : ''}</span>
+          {hasSub ? (
+            <button
+              className="ki-tree-arrow"
+              type="button"
+              aria-label={`${node.open ? '折叠' : '展开'} ${node.name}`}
+              aria-expanded={node.open}
+              onClick={(e) => { e.stopPropagation(); toggleOpen(node.path); }}
+            >
+              {node.open ? '▾' : '▸'}
+            </button>
+          ) : <span className="ki-tree-arrow" />}
           {ICON_FOLDER}
           <span className="ki-tree-dir__label">{node.name}</span>
-          <span className="ki-cell-sub">{countDocs(node)}</span>
+          <span
+            className="ki-cell-sub"
+            title={hasSub ? `本组 ${node.count} 条；含子组共 ${totalDocs} 条` : `本组 ${node.count} 条`}
+          >
+            {hasSub && node.count > 0 ? `${node.count} / ${totalDocs}` : totalDocs}
+          </span>
         </div>
         {hasSub && node.open && (
           <div className="ki-tree-group">{node.children.map(renderNode)}</div>
@@ -527,41 +470,8 @@ export function BrowsePage(): JSX.Element {
     return (
     <>
       {isSearching && (
-        <div className="ki-browse-fulltext" aria-live="polite">
-          <div className="ki-browse-fulltext__head">
-            <span>正文命中</span>
-            <span className="ki-card__sub">
-              {fullTextQuery.isFetching ? '搜索中…' : `${fullTextHits.length} 条`}
-            </span>
-          </div>
-          {fullTextQuery.isError ? (
-            <div className="ki-browse-fulltext__empty">正文检索暂时失败，可重试或继续查看文件名命中。</div>
-          ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
-            <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
-          ) : (
-            fullTextHits.map((hit: SearchHit, index) => {
-              const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
-              const group = hit.group ?? known?.group ?? '';
-              const relation = hit.relation ?? known?.name ?? '';
-              return (
-                <button
-                  type="button"
-                  className="ki-browse-fulltext__item"
-                  key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
-                  onClick={() => {
-                    if (!relation || !group) return;
-                    openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ });
-                  }}
-                >
-                  <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
-                  <span className="ki-browse-fulltext__path">{group}</span>
-                  <span className="ki-browse-fulltext__snippet">
-                    {highlightMatch(makeSnippet(hit.original ?? hit.content ?? '', searchQ), searchQ)}
-                  </span>
-                </button>
-              );
-            })
-          )}
+        <div className="ki-browse-filename-head">
+          文件名/路径命中 · {searchRefreshing ? '搜索中…' : `${shownTotal} 条`}
         </div>
       )}
       {listLoading ? (
@@ -582,7 +492,7 @@ export function BrowsePage(): JSX.Element {
         <div className="ki-empty" style={{ border: 'none' }}>
           <div>
             <h3>无匹配文档</h3>
-            <p>{isSearching ? '未找到包含该关键词的文件，换个关键词试试。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
+            <p>{isSearching ? '文件名或路径暂无命中；可查看下方正文命中，或换个关键词。' : '该 Group 暂无文档，或选择其他 Group 查看。'}</p>
           </div>
         </div>
       ) : (
@@ -639,6 +549,44 @@ export function BrowsePage(): JSX.Element {
             </div>
           ))}
         </>
+      )}
+      {isSearching && (
+        <div className="ki-browse-fulltext" aria-live="polite">
+          <div className="ki-browse-fulltext__head">
+            <span>正文命中</span>
+            <span className="ki-card__sub">
+              {fullTextQuery.isFetching ? '搜索中…' : `${fullTextHits.length} 条`}
+            </span>
+          </div>
+          {fullTextQuery.isError ? (
+            <div className="ki-browse-fulltext__empty">正文检索暂时失败，可重试或继续查看文件名命中。</div>
+          ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
+            <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
+          ) : (
+            fullTextHits.map((hit: SearchHit, index) => {
+              const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
+              const group = hit.group ?? known?.group ?? '';
+              const relation = hit.relation ?? known?.name ?? '';
+              return (
+                <button
+                  type="button"
+                  className="ki-browse-fulltext__item"
+                  key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
+                  onClick={() => {
+                    if (!relation || !group) return;
+                    openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ });
+                  }}
+                >
+                  <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
+                  <span className="ki-browse-fulltext__path">{group}</span>
+                  <span className="ki-browse-fulltext__snippet">
+                    {highlightMatch(makeSnippet(hit.original ?? hit.content ?? '', searchQ), searchQ)}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
       )}
     </>
     );
