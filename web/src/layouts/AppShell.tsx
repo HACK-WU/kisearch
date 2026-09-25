@@ -2,10 +2,12 @@
  * AppShell.tsx —— 应用布局（对齐 demo：ki-sidebar 分组导航 + ki-topbar 服务徽标）
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useHealth } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
+import { ChatPanel } from '@/chat/ChatPanel';
+import { createChatStore } from '@/chat/chatStore';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -65,6 +67,13 @@ function ServiceBadge(): JSX.Element {
 }
 
 export function AppShell(): JSX.Element {
+  // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
+  //   因此 store 在此创建一次；ChatPanel 只是视图，不持有业务状态（否则关面板会丢内容并连带 abort）
+  const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
+  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
+  const chatStore = chatStoreRef.current;
+  const [chatOpen, setChatOpen] = useState(true);
+
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
 
@@ -155,6 +164,15 @@ export function AppShell(): JSX.Element {
           </button>
           <span className="ki-topbar__title">ki 知识库</span>
           <div className="ki-topbar__spacer" />
+          {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
+          <button
+            className="ki-topbar__toggle"
+            onClick={() => setChatOpen((v) => !v)}
+            title="显示/隐藏 AI 对话面板"
+            aria-pressed={chatOpen}
+          >
+            ◨
+          </button>
           <ScopeSelect />
           <ServiceBadge />
         </header>
@@ -165,6 +183,9 @@ export function AppShell(): JSX.Element {
           </div>
         </main>
       </div>
+
+      {/* ════════ 右侧对话面板（常驻所有页面；关闭 = 隐藏不卸载，见 D15）════════ */}
+      <ChatPanel store={chatStore} open={chatOpen} />
     </div>
   );
 }

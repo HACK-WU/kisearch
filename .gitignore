@@ -32,3 +32,7 @@ knowledge-indexer-*.tgz
 .workbuddy/
 CodeWikiHub/
 .qoder/repowiki/
+
+# ---- 并行交付脚手架（见 skills/delivery-slicing「测试与脚手架的归属」）----
+# mock 套件 / 预检脚本 / 桩标记模式；不进版本控制（模板可从 skill 重生）
+.delivery/
