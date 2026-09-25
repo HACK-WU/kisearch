@@ -1,6 +1,6 @@
 # 文件所有权 · SR-01 后端检索与生成链
 
-> 代码基线 code_base：`{FROZEN}`　｜　契约基线 contract_base：`{FROZEN}`　｜　批次：第 1 批
+> 代码基线 code_base：`freeze/REQ-20260924-001`　｜　契约基线 contract_base：`freeze/REQ-20260924-001`　｜　批次：第 1 批
 > 类型：新增型 + 挂载型
 
 ## 机器可读块（供预检脚本直接读取，**勿手抄进脚本**）
@@ -8,8 +8,8 @@
 ```yaml
 slice: SR-01
 branch: feat/sr-01-backend
-code_base: {FROZEN}
-contract_base: {FROZEN}
+code_base: freeze/REQ-20260924-001
+contract_base: freeze/REQ-20260924-001
 exclusive:
   - src/lib/chat/
   - src/lib/config.ts

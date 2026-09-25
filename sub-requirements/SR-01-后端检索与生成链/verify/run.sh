@@ -7,8 +7,8 @@ SLICE="SR-01"
 # ★ 两个基线不可混用：
 #   CODE_BASE    = 从哪算改动 → 越界检查用它（单批 = 冻结点；分批 = 上批合入后）
 #   CONTRACT_BASE = 本包实现的是哪版契约 → 仅记录，供拼接期门⑤ 比对
-CODE_BASE="{FROZEN}"
-CONTRACT_BASE="{FROZEN}"
+CODE_BASE="freeze/REQ-20260924-001"
+CONTRACT_BASE="freeze/REQ-20260924-001"
 OWNED_PATTERNS=(
   "src/lib/chat/"
   "src/lib/config.ts"

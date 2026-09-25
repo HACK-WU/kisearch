@@ -1,8 +1,8 @@
 # 砖头索引与进度看板
 
 > 需求：`REQ-20260924-001` Web 侧边栏 AI 对话模块
-> 骨架基线（**冻结 commit**）：`{FROZEN}` ← **待骨架提交后填入**
-> 契约基线 `contract_base`：`{FROZEN}`（= 骨架 commit；未修订时不变）
+> 骨架基线（**冻结 commit**）：`freeze/REQ-20260924-001` ← **待骨架提交后填入**
+> 契约基线 `contract_base`：`freeze/REQ-20260924-001`（= 骨架 commit；未修订时不变）
 > 串行预估：**约 4 天**（粗估，本阶段给出）　｜　批次数：**1**
 > 创建：2026-09-25
 
@@ -10,7 +10,7 @@
 
 | 批次 | 砖头 | 代码基线 `code_base` | 契约基线 `contract_base` | 状态 |
 |:---:|---|---|---|---|
-| 第 1 批 | SR-01 · SR-02 | `{FROZEN}`（单批 = 冻结点） | `{FROZEN}` | 待开工 |
+| 第 1 批 | SR-01 · SR-02 | `freeze/REQ-20260924-001`（单批 = 冻结点） | `freeze/REQ-20260924-001` | 待开工 |
 
 > 单批次场景：`code_base` = `contract_base` = 冻结点 commit。
 > 若未来分多批：第 N 批 `code_base` = 上一批合入后的 commit，`contract_base` 不变（见 `delivery-slicing` 阶段 3.2b）。

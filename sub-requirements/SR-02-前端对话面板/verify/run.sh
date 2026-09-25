@@ -3,8 +3,8 @@
 set -euo pipefail
 
 SLICE="SR-02"
-CODE_BASE="{FROZEN}"
-CONTRACT_BASE="{FROZEN}"
+CODE_BASE="freeze/REQ-20260924-001"
+CONTRACT_BASE="freeze/REQ-20260924-001"
 OWNED_PATTERNS=(
   "web/src/chat/"
   "web/src/api/chatApi.ts"

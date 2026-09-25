@@ -10,7 +10,7 @@
 
 - 必须在**独立工作副本**中工作，**不得与他人共享同一工作目录**
 - 分支：`feat/sr-02-frontend`
-- **代码基线 `code_base` = `{FROZEN}`**；工作前 `git rev-parse HEAD` 确认起点
+- **代码基线 `code_base` = `freeze/REQ-20260924-001`**；工作前 `git rev-parse HEAD` 确认起点
 
 ## 1. 你的砖头
 
