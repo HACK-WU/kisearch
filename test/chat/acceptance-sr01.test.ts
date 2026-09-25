@@ -12,16 +12,29 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-// ★ 测试隔离：把数据目录指到临时目录。
-//   依据 chat-store 契约：chatDirFor 的基准来自 loadConfig().dataDir（KI_DATA_DIR 可覆盖）
-//   —— 不做隔离，R23/R24 会写真实用户目录 ~/.ki/chat/
-const TMP_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'ki-chat-acc-sr01-'));
-process.env.KI_DATA_DIR = TMP_DATA_DIR;
-after(() => rmSync(TMP_DATA_DIR, { recursive: true, force: true }));
+// ★ 测试隔离：用【临时 config】显式指定 dataDir 与 chatDir。
+//
+// ⚠️ 为什么不用 `KI_DATA_DIR`：实测证明它【不生效】——
+//    `config.ts` 的 `chatDir` 是两处独立硬编码 `os.homedir()`，既不从 `dataDir` 派生、
+//    也不读任何 env；且 `KI_DATA_DIR` 本机也被既有 config 覆盖。
+//    → 曾导致本测试写入真实用户目录 `~/.ki/chat/`（已清理）。
+//
+// 本文件在【独立进程】运行，且 `loadConfig()` 首次调用发生在 `it` 内部，
+// 故顶层的 env 设置必然早于首次加载。
+// （同款做法见 `test/chat/permissions-sr01.test.ts`，交叉验证 3/3 次干净。）
+const TMP_ROOT = mkdtempSync(path.join(tmpdir(), 'ki-chat-acc-sr01-'));
+const TMP_CONFIG = path.join(TMP_ROOT, 'config.yaml');
+writeFileSync(
+  TMP_CONFIG,
+  `dataDir: ${path.join(TMP_ROOT, 'data')}\nchatDir: ${path.join(TMP_ROOT, 'chat')}\n`,
+  'utf-8',
+);
+process.env.KI_CONFIG_PATH = TMP_CONFIG;
+after(() => rmSync(TMP_ROOT, { recursive: true, force: true }));
 
 import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
 import { toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
