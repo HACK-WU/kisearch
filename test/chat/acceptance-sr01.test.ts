@@ -10,12 +10,27 @@
  * 运行：`npx jiti test/chat/acceptance-sr01.test.ts`
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+// ★ 测试隔离：把数据目录指到临时目录。
+//   依据 chat-store 契约：chatDirFor 的基准来自 loadConfig().dataDir（KI_DATA_DIR 可覆盖）
+//   —— 不做隔离，R23/R24 会写真实用户目录 ~/.ki/chat/
+const TMP_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'ki-chat-acc-sr01-'));
+process.env.KI_DATA_DIR = TMP_DATA_DIR;
+after(() => rmSync(TMP_DATA_DIR, { recursive: true, force: true }));
 
 import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
 import { toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
-import { truncateAfterAndEdit, replaceLastAssistant } from '../../src/lib/chat/chat-store.js';
+import {
+  truncateAfterAndEdit,
+  replaceLastAssistant,
+  createConversation,
+  appendMessage,
+} from '../../src/lib/chat/chat-store.js';
 import { mockSearchResult, mockSearchResultWithoutLines } from '../../.delivery/mocks/mock-search.mjs';
 
 const conv = {
@@ -86,13 +101,24 @@ describe('SR-01 验收 · N17 检索不可用必须明示', () => {
 });
 
 describe('SR-01 验收 · R23/R24 重新生成与编辑重发', () => {
+  // ★ 前置修正（骨架缺陷）：R23/R24 是 **store 级写操作**（签名 (scope, id, …) → 走磁盘），
+  //   原骨架却直接传内存里的 `conv`（从未落盘）→ 任何遵守契约的实现都必抛 ConversationNotFound。
+  //   此处补"先建出真实会话"的前置。**断言判定标准一个都没改**（2 / 1 / 1 不变）。
+  let convId = '';
+  before(async () => {
+    const c = await createConversation('kisearch', { title: 'acc-sr01' });
+    convId = c.id;
+    await appendMessage('kisearch', convId, { id: 'm1', role: 'user', content: 'first', at: '' });
+    await appendMessage('kisearch', convId, { id: 'm2', role: 'assistant', content: 'answer', at: '' });
+  });
+
   it('R23：重新生成不新增 user 消息；messageCount 不变', async () => {
-    const r = await replaceLastAssistant('kisearch', conv.id, { id: 'm3', role: 'assistant', content: 'new', at: '' });
-    assert.equal(r.messageCount, conv.messageCount, '重新生成后 messageCount 应不变');
+    const r = await replaceLastAssistant('kisearch', convId, { id: 'm3', role: 'assistant', content: 'new', at: '' });
+    assert.equal(r.messageCount, 2, '重新生成后 messageCount 应不变（= 前置建立的 2 条）');
   });
 
   it('R24：编辑 user 消息 → 原子截断其后全部消息并返回 discardedCount', async () => {
-    const { conv: after, discardedCount } = await truncateAfterAndEdit('kisearch', conv.id, 'm1', 'edited');
+    const { conv: after, discardedCount } = await truncateAfterAndEdit('kisearch', convId, 'm1', 'edited');
     assert.equal(discardedCount, 1, 'm1 之后有 1 条消息应被丢弃');
     assert.equal(after.messages.length, 1, '截断后只应剩被编辑的那条');
   });
