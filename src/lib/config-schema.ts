@@ -185,6 +185,32 @@ const CONFIG_SCHEMA: ConfigNode = {
         },
       },
     },
+    // 【新增】llm 段（REQ-20260924-001 · S01 §3 + §9.1）
+    // ⚠️ 整段可选：旧配置无 llm 段必须正常加载（回归点）。
+    //    段内 baseURL/model/apiKey 也不做「必填」校验 —— 缺失是**可预期的产品状态**
+    //    （由 GET /api/chat/config 返回 enabled:false 表达），而非配置错误。
+    //    若在此处 fail-loud，未使用对话功能的用户升级后在 doctor 会变红。
+    llm: {
+      type: 'object',
+      fields: {
+        baseURL: { type: 'string' },
+        model: { type: 'string' },
+        apiKey: { type: 'string' },
+        maxTokens: { type: 'number', validate: positiveInt },
+        temperature: { type: 'number' },
+        requestTimeoutMs: { type: 'number', validate: positiveInt },
+        firstByteTimeoutMs: { type: 'number', validate: positiveInt },
+        defaultSystemPrompt: { type: 'string' },
+        supportsImages: { type: 'boolean' },
+        maxImagesPerMessage: { type: 'number', validate: positiveInt },
+        maxImageBytes: { type: 'number', validate: positiveInt },
+        // ── v2（D13）──
+        supportsTools: { type: 'boolean' },
+        kbDisclosureAck: { type: 'boolean' },
+      },
+    },
+    // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）
+    chatDir: { type: 'string' },
   },
 };
 
