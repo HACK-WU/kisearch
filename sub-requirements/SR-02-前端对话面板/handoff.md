@@ -18,6 +18,20 @@
 - **包位置**：`sub-requirements/SR-02-前端对话面板/`
 - **先按顺序读**：`slice.md` → `ownership.md` → `out-of-scope.md` → `contract/`
 
+## 1.5 文档位置（**先读这段，否则找不到文件**）
+
+本包内引用的 `design/...`、`api/...` 路径是**相对需求目录**的，而需求目录**不在工作副本里**（它在 `CodeWikiHub/` 下，被 `.gitignore` 忽略）。用下列任一方式定位：
+
+```text
+方式 A（绝对路径，总是可用）：
+  /Users/wuyongping/projects/knowledge-indexer/CodeWikiHub/kisearch/requirements/2026-09-24-Web侧边栏AI对话模块/
+
+方式 B（若工作副本里有 CodeWikiHub 符号链接）：
+  <工作副本根>/CodeWikiHub/kisearch/requirements/2026-09-24-Web侧边栏AI对话模块/
+```
+
+> **该目录不在版本控制内**：它是**设计产物**，改动不通过 git 管理，也**不属于本窗口的写入范围** —— 只读参考。
+
 ## 2. 契约（**只读**）
 
 | 内容 | 位置 |

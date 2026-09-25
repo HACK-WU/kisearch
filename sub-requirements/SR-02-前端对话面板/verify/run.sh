@@ -27,7 +27,11 @@ echo "④ 数据走向预演（用 mock SSE 驱动，本窗口期应【绿】）
 npx jiti test/chat/data-flow.test.ts
 
 echo "⑤ 越界检查（从 CODE_BASE 算起）"
-git diff --name-only "${CODE_BASE}..HEAD" | while read -r f; do
+# ★ 排除【流程产物】：砖头包 / 脚手架不属于任何砖头的独占写，
+#   它们常因流程修补而在冻结点之后被改动 → 不排除会把正常的流程提交误判成越界
+git diff --name-only "${CODE_BASE}..HEAD" \
+  | { grep -vE '^(sub-requirements/|\.delivery/)' || true; } \
+  | while read -r f; do
   [[ -z "$f" ]] && continue
   ok=0
   for p in "${OWNED_PATTERNS[@]}"; do [[ "$f" == "$p"* ]] && ok=1; done
