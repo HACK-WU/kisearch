@@ -15,7 +15,11 @@ exclusive:
   - web/src/api/chatApi.ts
   - web/src/api/chatContract.ts
   - web/src/layouts/AppShell.tsx
+  # ★ 仅【追加】ki-chat-* 段；不得修改既有的任何规则（该文件 1475 行，全站共用）
+  - web/src/styles/ki.css
   - test/chat/acceptance-sr02.test.ts
+  # ★ 新增：来源引用端到端（真实事件序 + 分块边界落在帧中间）
+  - test/chat/e2e-sr02-sources.test.ts
 interface:
   - web/src/api/chatContract.ts
   - web/src/chat/chatStore.ts
