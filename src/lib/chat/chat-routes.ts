@@ -62,6 +62,7 @@ import {
   SYSTEM_PROMPT_MAX_LEN,
   appendMessage,
   archiveConversation,
+  chatRootDir,
   createConversation,
   deleteAllConversations,
   deleteConversation,
@@ -205,8 +206,10 @@ async function resolveConversationInScopes(
     return null;
   }
 
-  const cfg = ctx.configSnapshot as KiConfig;
-  const root = cfg.chatDir ?? path.join(process.env.HOME ?? '', '.ki', 'chat');
+  // 路径基准**单一来源**：优先用请求级配置快照的 chatDir（与 runWithConfigSnapshot 语义一致），
+  // 快照缺失时回退到 chatRootDir()（同样来自 loadConfig，不硬编码 ~/.ki）。
+  const cfg = ctx.configSnapshot as KiConfig | undefined;
+  const root = cfg?.chatDir ?? chatRootDir();
 
   // ★ 遍历范围必须是**磁盘上的全部 scope**，而不是 `authScopes`。
   //

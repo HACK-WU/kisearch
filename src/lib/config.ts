@@ -71,6 +71,24 @@ export function resolveDefaultDataPaths(includeEnv = false): ResolvedDefaultPath
   return { dataDir, backupDir: path.join(home, '.ki', 'backup') };
 }
 
+/**
+ * 会话存储根目录的默认值（REQ-20260924-001 · S02 §3.1）。
+ *
+ * ★ **基准派生自 `dataDir`**（与 `dataDir` 平级，即其父目录下），**不得硬编码 `~/.ki`**。
+ * 理由（注意：`vectorDir` 也硬编码了 homedir，**不是**同源先例 —— 此处不重复既有债务）：
+ * 1. **修真实用户问题**：硬编码会绕过 config 链路 → 用户配置 `dataDir` 后
+ *    chat 数据**不跟随**，会话落在与该实例无关的目录里。
+ *    （默认 `dataDir` = `~/.ki/kb` → `chatDir` = `~/.ki/chat`，这只是同源推导的**结果**）
+ * 2. **让测试可隔离**：基准走 `loadConfig()` 链路后，测试只需用 `KI_CONFIG_PATH`
+ *    指向含 `chatDir:` 的临时配置即可隔离，无需污染真实 `~/.ki/chat/`。
+ *
+ * 与 `dataDir` **同口径**：**运行时不做 env 回退**（见 `resolveDefaultDataPaths` 注释
+ * 与 docs/cli.md），故此处不引入 `KI_CHAT_DIR`，避免造出不对称语义。
+ */
+export function resolveDefaultChatDir(dataDir: string): string {
+  return path.join(path.dirname(dataDir), DEFAULT_CHAT_DIR_NAME);
+}
+
 // ─── 类型 ───
 
 export interface WikiSyncConfig {
@@ -537,11 +555,12 @@ function parseAndExpand(configFile: string): KiConfig {
     ? expandPath(String(raw.vectorDir), configDir)
     : path.join(os.homedir(), '.ki', 'vector');
 
-  // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1），默认 ~/.ki/chat。
+  // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）。
   // 独立于 kb/ 与 vectorDir：快照恢复/删除 Group 只操作 kb/，会话因此天然免疫（D4）。
+  // ★ 默认值派生自 `dataDir`（见 resolveDefaultChatDir），不硬编码 `~/.ki`。
   const chatDir = raw.chatDir
     ? expandPath(String(raw.chatDir), configDir)
-    : path.join(os.homedir(), '.ki', DEFAULT_CHAT_DIR_NAME);
+    : resolveDefaultChatDir(dataDir);
 
   // 【新增】llm：模型配置段（REQ-20260924-001 · S01 §3 + §9.1）。
   // ⚠️ 不给默认模型（D8）：缺失时留 undefined，由 resolveLlmStatus 判「未就绪」返回
@@ -694,8 +713,8 @@ function buildDefaults(): KiConfig {
     scopeMode: 'default',
     scopes: {},
     // llm 刻意不给默认值（D8）：无配置即"未配置"，由 resolveLlmStatus 判 CHAT_DISABLED。
-    // chatDir 给默认值（会话目录是纯本地路径，无需用户配置即可工作）。
-    chatDir: path.join(os.homedir(), '.ki', DEFAULT_CHAT_DIR_NAME),
+    // chatDir 给默认值（会话目录是纯本地路径，无需用户配置即可工作），★ 基准派生自 dataDir。
+    chatDir: resolveDefaultChatDir(dataDir),
   };
 }
 

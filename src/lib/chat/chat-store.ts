@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readJson, writeJson } from '../store.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveDefaultChatDir } from '../config.js';
 import { validateScope } from '../scope.js';
 import type { ConversationFile, ChatMessage, ConversationSummary } from './chat-contract.js';
 
@@ -95,9 +95,22 @@ export function withConvLock<T>(id: string, fn: () => T | Promise<T>): Promise<T
  */
 export function chatDirFor(scope: string): string {
   validateScope(scope);
+  return path.join(chatRootDir(), scope);
+}
+
+/**
+ * 会话存储**根目录**（全部 scope 的父目录，即 `{chatDir}/`）。
+ *
+ * 单独导出（而非各处重复推导）是为了消除"路径基准"的多处副本 ——
+ * `chat-routes` 的按 `:id` 跨 scope 查找需要根目录，而 `chatDirFor` 需要 scope 子目录，
+ * 二者必须**同源**，否则会出现"查找用 A 基准、读写用 B 基准"的分裂 bug。
+ */
+export function chatRootDir(): string {
   const cfg = loadConfig();
-  const root = cfg.chatDir ?? path.join(process.env.HOME ?? '', '.ki', 'chat');
-  return path.join(root, scope);
+  // `loadConfig()` 的 `parseAndExpand` 与 `buildDefaults()` 都保证 `chatDir` 非空，
+  // 故此处的回退只是**纵深防御**；且复用 `resolveDefaultChatDir` 这一**唯一推导处**，
+  // 不在此重写一遍 `dirname(dataDir)`（否则两处推导会各自漂移）。
+  return cfg.chatDir ?? resolveDefaultChatDir(cfg.dataDir);
 }
 
 /** 会话文件路径 */
