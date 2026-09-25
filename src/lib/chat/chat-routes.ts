@@ -73,6 +73,8 @@ import {
   truncateAfterAndEdit,
 } from './chat-store.js';
 import { runToolLoop } from './retrieval/tool-loop.js';
+import { KB_SEARCH_TOOL_NAME } from './retrieval/retrieval-skill.js';
+import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 
 /** 路由上下文（由 `mcp-http-api.ts` 注入，避免本模块反向依赖它） */
 export interface ChatRouteContext {
@@ -165,9 +167,11 @@ function scopeAllowed(authScopes: string[] | null, scope: string): boolean {
  * 服务端记日志（含具体 scope 便于排查）、响应体脱敏（不下发 scope 名，防枚举探测））。
  */
 function rejectScopeViolation(res: ServerResponse, scope: string, via: string): void {
-  process.stderr.write(
-    `[kisearch] scope 越权拦截（/api/chat${via}）：请求 scope "${scope}" 不在该 Token 授权范围内。\n`,
-  );
+  // 服务端记日志含具体 scope（便于排查）；响应体脱敏（不下发 scope 名，防枚举探测）
+  chatLog(CHAT_LOG_EVENTS.SCOPE_FORBIDDEN, {
+    code: 'SCOPE_FORBIDDEN',
+    detail: `请求 scope "${scope}" 不在该 Token 授权范围内（/api/chat${via}）`,
+  });
   sendErr(res, 403, 'SCOPE_FORBIDDEN', 'Forbidden: 无权访问该 scope');
 }
 
@@ -255,7 +259,11 @@ async function resolveConversationInScopes(
 
   if (authorized.length > 1) {
     // 数据异常：同 id 出现在多个**已授权** scope → fail-loud（不静默取其一，api/conversations.md）
-    process.stderr.write(`[kisearch] 会话 id 冲突：${id} 存在于多个授权 scope（${authorized.map((f) => f.scope).join(', ')}）\n`);
+    chatLog(CHAT_LOG_EVENTS.CONV_ID_CONFLICT, {
+      convId: id,
+      code: 'API_ERROR',
+      detail: `会话 id 冲突：存在于多个授权 scope（${authorized.map((f) => f.scope).join(', ')}）`,
+    });
     sendErr(res, 500, 'API_ERROR', `会话 id 冲突：${id} 存在于多个 scope`);
     return null;
   }
@@ -862,9 +870,43 @@ async function runGeneration(
       if (ev.type === 'content') { content += ev.text; writeSseEvent(res, ev); continue; }
       if (ev.type === 'usage') { usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, ...(ev.reasoningTokens !== undefined ? { reasoningTokens: ev.reasoningTokens } : {}) }; writeSseEvent(res, ev); continue; }
       if (ev.type === 'sources') { sources = ev.sources; writeSseEvent(res, ev); continue; }
-      if (ev.type === 'tool_start' || ev.type === 'tool_end' || ev.type === 'degraded') { writeSseEvent(res, ev); continue; }
+      if (ev.type === 'tool_start') { writeSseEvent(res, ev); continue; }
+      if (ev.type === 'tool_end') {
+        // ★ 必打事件 ② 工具调用异常（§1.3）：检索/工具执行失败时落日志
+        if (ev.error !== undefined) {
+          chatLog(CHAT_LOG_EVENTS.TOOL_ERROR, {
+            convId, msgId: messageId ?? undefined,
+            tool: KB_SEARCH_TOOL_NAME,
+            code: 'TOOL_ERROR',
+            detail: ev.error,
+          });
+        }
+        writeSseEvent(res, ev);
+        continue;
+      }
+      if (ev.type === 'degraded') {
+        // ★ 必打事件 ④ 检索降级触发（§1.3）：三类 reason
+        chatLog(CHAT_LOG_EVENTS.RETRIEVAL_DEGRADED, {
+          convId, msgId: messageId ?? undefined,
+          reason: ev.reason,
+          code: ev.reason.toUpperCase().replace(/-/g, '_'),
+          detail: ev.message,
+        }, 'info');
+        writeSseEvent(res, ev);
+        continue;
+      }
       if (ev.type === 'aborted') { abortedFlag = true; break; }
-      if (ev.type === 'error') { streamError = { code: ev.code, error: ev.error, ...(ev.retryable !== undefined ? { retryable: ev.retryable } : {}) }; break; }
+      if (ev.type === 'error') {
+        streamError = { code: ev.code, error: ev.error, ...(ev.retryable !== undefined ? { retryable: ev.retryable } : {}) };
+        // ★ 必打事件 ① 上游调用失败（§1.3）：原文仅入 daemon 日志，不回传浏览器
+        chatLog(CHAT_LOG_EVENTS.UPSTREAM_ERROR, {
+          convId, msgId: messageId ?? undefined,
+          code: ev.code,
+          retryable: ev.retryable,
+          detail: ev.error,
+        });
+        break;
+      }
       if (ev.type === 'done') {
         finishReason = ev.finishReason;
         if (ev.sources && ev.sources.length > 0) sources = ev.sources;
@@ -874,6 +916,17 @@ async function runGeneration(
   } catch (err) {
     if (!ac.signal.aborted) {
       streamError = mapThrowToStreamError(err);
+      // ★ 必打事件 ① 上游调用失败（§1.3）：异常路径同样落日志
+      //   上游 HTTP 状态若在错误对象上则一并记录（契约要求"含 HTTP 状态"）
+      const status = (err as { status?: number; httpStatus?: number });
+      chatLog(CHAT_LOG_EVENTS.UPSTREAM_ERROR, {
+        convId, msgId: messageId ?? undefined,
+        code: streamError.code,
+        retryable: streamError.retryable,
+        ...(typeof status.status === 'number' ? { status: status.status }
+          : typeof status.httpStatus === 'number' ? { status: status.httpStatus } : {}),
+        detail: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -925,7 +978,14 @@ async function runGeneration(
       error: '会话写入失败',
       retryable: true,
     });
-    process.stderr.write(`[kisearch] chat 落盘失败 convId=${convId}: ${(err as Error).message}\n`);
+    // ★ 必打事件 ③ 会话落盘失败（§1.3）；detail 经脱敏+截断（兜底防正文/片段外泄）
+    chatLog(CHAT_LOG_EVENTS.WRITE_FAILED, {
+      convId,
+      msgId: messageId ?? undefined,
+      code: CHAT_ERROR_CODES.CHAT_WRITE_FAILED,
+      retryable: true,
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
 
   res.end();
