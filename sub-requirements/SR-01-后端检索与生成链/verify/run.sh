@@ -21,7 +21,10 @@ OWNED_PATTERNS=(
 STUB_PATTERN="${STUB_PATTERN:-STUB:SR-01:}"
 
 echo "① 编译（主干必须常绿）"
-npx tsc -p tsconfig.src.json --noEmit
+# ★ 必须用 tsconfig.json（include: src/**/*.ts），**不是** tsconfig.src.json：
+#   后者的 include 只含 src/zvec-engine/**、rootDir=src/zvec-engine →
+#   对 src/lib/chat/** 覆盖为 0（实测 --listFiles 匹配数 = 0），编译检查会【假绿】
+npx tsc -p tsconfig.json --noEmit
 
 echo "② 本砖头组契约测试（★ 只跑本组，不跑他组）"
 npx jiti test/chat/contract-sr01.test.ts

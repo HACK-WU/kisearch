@@ -64,7 +64,14 @@ export function withConvLock<T>(id: string, fn: () => T | Promise<T>): Promise<T
 // 路径与读
 // ─────────────────────────────────────────────────────────────
 
-/** `{chatDir}/{scope}/`；`chatDir` 默认 `~/.ki/chat`（独立于 `kb/`，见 D4） */
+/**
+ * `{config.dataDir}/chat/{scope}/`（独立于 `kb/`，见 D4）。
+ *
+ * ★ **基准必须来自 `loadConfig()`**（与 `getKbDir` 同源），**不得硬编码 `~/.ki`**：
+ * · 硬编码会绕过 config 链路 → 用户配了 `KI_DATA_DIR` 或 `dataDir` 时 chat 数据**不跟随**
+ * · 且会让测试**无法隔离**（没有 env 入口 → 测试只能写真实用户目录）
+ * 落到 `~/.ki/chat/{scope}` 只是"默认 dataDir = `~/.ki/kb`"的结果，不是写死的值。
+ */
 export function chatDirFor(scope: string): string {
   throw new Error(`STUB:SR-01:chatDirFor`);
 }
