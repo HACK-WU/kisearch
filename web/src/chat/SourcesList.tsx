@@ -31,7 +31,7 @@ export function SourcesList({ sources, onOpen }: SourcesListProps) {
   if (!sources || sources.length === 0) return null;
 
   return (
-    <details className="ki-chat-sources" data-stub="SR-02:SourcesList">
+    <details className="ki-chat-sources">
       <summary>引用 {sources.length} 处</summary>
       <ul>
         {sources.map((s, i) => (

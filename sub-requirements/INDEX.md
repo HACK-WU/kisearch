@@ -20,7 +20,7 @@
 | 砖头 | 类型 | 独占写（前缀） | 状态 | 开工 | 完成 |
 |------|------|--------------|:---:|:---:|:---:|
 | **SR-01** 后端检索与生成链 | 新增型 + 挂载型 | `src/lib/chat/` · `src/lib/config.ts` · `src/lib/mcp-http-api.ts` · `test/chat/contract-sr01.test.ts` · `test/chat/acceptance-sr01.test.ts` | 待开始 | — | — |
-| **SR-02** 前端对话面板 | 新增型 + 挂载型 | `web/src/chat/` · `web/src/api/chatApi.ts` · `web/src/api/chatContract.ts` · `web/src/layouts/AppShell.tsx` · `test/chat/acceptance-sr02.test.ts` | 待开始 | — | — |
+| **SR-02** 前端对话面板 | 新增型 + 挂载型 | `web/src/chat/` · `web/src/api/chatApi.ts` · `web/src/api/chatContract.ts` · `web/src/layouts/AppShell.tsx` · `test/chat/acceptance-sr02.test.ts` | 已完成 | 2026-09-25 | 2026-09-25 |
 
 > **并发写风险**：本表可能被覆盖——它是**可读看板不是权威来源**。权威状态在各包 `slice.md` 顶部的状态标记。批次边界**重扫各包 slice.md 重建本表**。
 
@@ -35,7 +35,7 @@
 | 前置门① 验证 | 2026-09-25 | **通过**（长流 48.5s / 工具往返 3 轮），见 `design/gate1-verification.md` |
 | 冻结点 | （待提交） | — |
 | SR-01 完成 | — | — |
-| SR-02 完成 | — | — |
+| SR-02 完成 | 2026-09-25 | ①–④ 除 data-flow（SR-01 桩）外全绿 |
 | 拼接完成 | — | — |
 
 **串行预估对照**：约 4 天（粗估）。拼接期按实际耗时对比，写入拼接报告「周期对比」节。

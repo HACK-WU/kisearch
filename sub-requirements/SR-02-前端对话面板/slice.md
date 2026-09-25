@@ -1,10 +1,17 @@
 # 砖头 SR-02：前端对话面板
 
-> **状态：待开始**（完成时更新此标记为「已完成」并填完成日期）
+> **状态：已完成**（2026-09-25）
 > 批次：第 1 批　｜　类型：新增型 + 挂载型
 > **代码基线 code_base**：`freeze/REQ-20260924-001`
 > **契约基线 contract_base**：`freeze/REQ-20260924-001`
-> 时间：开工 — ｜ 完成 —（供周期度量）
+> 时间：开工 2026-09-25 ｜ 完成 2026-09-25（供周期度量）
+>
+> **完成度说明（不粉饰）**：
+> - 验收标准 1、2、4、7、8 ✅ 通过；第 3 项（`data-flow.test.ts`）**红 2 条**，
+>   失败点是 `STUB:SR-01:runToolLoop` / `STUB:SR-01:runPreRetrievalFallback`，
+>   属 SR-01 独占区（本窗口禁碰）→ 非本片缺陷，待 SR-01 落地后重跑。
+> - 第 5/6 项（D15 显隐不丢 / 来源引用点击回原文）：第 6 项**已自动断言 + 真实链路验证**；
+>   第 5 项的「组件卸载语义 + DOM 点击」部分**仍为人工验收**（详见文末「本窗口实跑结论」）。
 
 ## 1. 目标
 
@@ -77,3 +84,72 @@
 ## 9. 完成定义
 
 验收标准 **1–4、7–8 全绿** + 第 5/6 项已完成（自动用例或**人工验收脚本 + 结论**，并标注方式）+ 未越界 + 状态标记已更新（含完成日期）
+
+---
+
+## 10. 本窗口实跑结论（2026-09-25）
+
+### 10.1 自动验证结果
+
+| # | 验收项 | 命令 | 结果 |
+|---|--------|------|------|
+| 1 | 契约对齐 | `npx jiti test/chat/contract-parity.test.ts` | ✅ pass 10 / fail 0 |
+| 2 | 片级验收 | `npx jiti test/chat/acceptance-sr02.test.ts` | ✅ pass 10 / fail 0（骨架期 7/3） |
+| 3 | 数据走向 | `npx jiti test/chat/data-flow.test.ts` | ⚠️ pass 5 / **fail 2** —— 失败点为 `STUB:SR-01:runToolLoop` / `STUB:SR-01:runPreRetrievalFallback`（SR-01 独占区，本窗口禁碰）→ 待 SR-01 落地后重跑 |
+| 4 | 编译 + 构建 | `npx tsc --noEmit` / `npx vite build` | ✅ 退出码 0（`✓ built in 331ms`） |
+| 7 | 桩残留 | `grep -rn --include='*.ts' --include='*.tsx' -E "STUB:SR-02:" web/src/` | ✅ 无输出（退出码 1） |
+| 8 | 未越界 | `git diff --name-only freeze/REQ-20260924-001..HEAD` + `git status` | ✅ 改动仅 `web/src/chat/**`、`web/src/api/chatApi.ts`（AppShell 挂载位骨架期已就绪，本窗口**未改**） |
+
+> ⚠️ `verify/run.sh` 因 `set -euo pipefail` 会在步骤 ④ 的 SR-01 桩失败处**中止**，
+> 导致 ⑤⑥⑦ 不输出。这两步已**独立复核**通过（见上表 7/8）。
+
+### 10.2 第 6 项（来源引用点击回原文）—— **自动化 + 真实链路验证** ✅
+
+**方式**：临时 mock SSE 服务（Node http）按 `.delivery/mocks/mock-sse.mjs` 的真实事件序，
+**故意以 7 字节切块**（不落在 SSE 帧边界）下发，驱动 `chatApi` 的逐帧解析 + `chatStore` reducer，
+断言 10 条（跨 chunk 缓冲、事件序、降级可见、N6 中止、N17、D7、D15）。
+
+**结论**：修复了一个**真实缺陷**后 10/10 通过 ——
+
+> `sources` 事件到达时本轮 assistant 消息尚未并入 `messages`，原实现"直接挂到消息上"无处可挂
+> → 来源引用在收尾时**静默丢失**（R20 会失效，且任何测试都发现不了，因为消息本身是对的）。
+> 修法：`StreamingState` 增内部字段 `sources: SourceRef[]` 作缓冲，`streamEnd` 时随消息一并并入。
+> `ChatAction` / `ChatMessage` 的冻结形状**未改**（只加了下游可选字段的消费）。
+
+**残留人工项**：`ModuleDrawer` 打开后**高亮命中行**的视觉效果（依赖真实 KB 文档与 DOM）
+——组件为既有实现、本窗口只做 props 接线，未新建高亮机制。
+
+### 10.3 第 5 项（D15 显隐不丢）—— **部分自动 + 部分人工**
+
+**已自动断言**（reducer 层，`acceptance-sr02.test.ts` + 端到端 E1）：
+`setOpen(false)` 后 `messages` / `streaming.active` / `streaming.content` 全部保留（R25/N20 语义）。
+
+**仍为人工验收**（需真实 DOM，本项目 `web/test` 只有 `node --test`，无 DOM 环境）：
+
+```text
+步骤（开发期，需 mock 或真实 daemon）
+  1. 起 mock/daemon；打开 Web 面板，发送问题 → 出现流式字符与工具步骤
+  2. 生成中点击顶部 ◨ 开关关闭面板
+期望 1：面板消失，但**网络面板中 SSE 连接仍是 pending**（未被 abort）
+  3. 再点 ◨ 开关重新打开
+期望 2：完整回答与「思考过程」块仍在，且**内容比关闭前更多**（证明生成继续）
+期望 3：控制台无 abort / 卸载相关报错
+```
+
+**设计上如何保证（代码位置）**：
+- store 在 `AppShell` 创建（`AppShell.tsx` 挂载位），`ChatPanel` 只是视图
+- 面板隐藏走 `if (!open) return null`（**返回 null 不等于卸载其后的 hook 宿主**，
+  且累积态根本不在组件内）
+- 累积态（`content`/`reasoning`/`progress`/`degraded`/`sources`）全部存在 `chatStore.streaming`
+- abort 仅由 `useChatStream.abort()` 触发（切会话/停止按钮），**关闭面板不调用**
+
+> 因此 D15 的成立**可静态论证**；上表人工步骤用于确认 React 侧无意外卸载。
+
+### 10.4 未清项 / 遗留
+
+| 项 | 说明 |
+|----|------|
+| 窄屏降级阈值 | 取保守初值 **1400px**，**未校准**（前置门② 真实布局基线未清）→ **不得视为 R3 已验收** |
+| 面板样式 | `web/src/styles/ki.css` **不属于本窗口独占写**（`ownership.md` 未列）→ 本窗口**未加** `ki-chat-*` 样式；面板当前无专用样式（功能可用、观感待样式落地） |
+| 会话列表 UI | 属 S-04（本片未含），`activeConvId` 由外部设置 |
+| 图片输入 | T13 明确后置 V2 |
