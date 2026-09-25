@@ -71,6 +71,24 @@ export function resolveDefaultDataPaths(includeEnv = false): ResolvedDefaultPath
   return { dataDir, backupDir: path.join(home, '.ki', 'backup') };
 }
 
+/**
+ * 会话存储根目录的默认值（REQ-20260924-001 · S02 §3.1）。
+ *
+ * ★ **基准派生自 `dataDir`**（与 `dataDir` 平级，即其父目录下），**不得硬编码 `~/.ki`**。
+ * 理由（注意：`vectorDir` 也硬编码了 homedir，**不是**同源先例 —— 此处不重复既有债务）：
+ * 1. **修真实用户问题**：硬编码会绕过 config 链路 → 用户配置 `dataDir` 后
+ *    chat 数据**不跟随**，会话落在与该实例无关的目录里。
+ *    （默认 `dataDir` = `~/.ki/kb` → `chatDir` = `~/.ki/chat`，这只是同源推导的**结果**）
+ * 2. **让测试可隔离**：基准走 `loadConfig()` 链路后，测试只需用 `KI_CONFIG_PATH`
+ *    指向含 `chatDir:` 的临时配置即可隔离，无需污染真实 `~/.ki/chat/`。
+ *
+ * 与 `dataDir` **同口径**：**运行时不做 env 回退**（见 `resolveDefaultDataPaths` 注释
+ * 与 docs/cli.md），故此处不引入 `KI_CHAT_DIR`，避免造出不对称语义。
+ */
+export function resolveDefaultChatDir(dataDir: string): string {
+  return path.join(path.dirname(dataDir), DEFAULT_CHAT_DIR_NAME);
+}
+
 // ─── 类型 ───
 
 export interface WikiSyncConfig {
@@ -129,6 +147,46 @@ export interface VectorResourceConfig {
   maxOpenCollections?: number;
 }
 
+/**
+ * 模型配置段（REQ-20260924-001 · S01 §3 + §9.1）。
+ *
+ * ⚠️ **无内置默认模型**（D8）：用户必须自填 baseURL / model / apiKey；
+ * 缺任一项即由 `resolveLlmStatus` 判为未就绪（`enabled:false` + `CHAT_DISABLED`），
+ * 不落任何默认模型（否则会把第三方服务与计费绑定到项目上）。
+ */
+export interface LlmConfig {
+  /** 必填，OpenAI 兼容地址（如 https://host/compatible-mode/v1） */
+  baseURL: string;
+  /** 必填，用户自填，不预置默认（D8） */
+  model: string;
+  /** 必填，**已解析**（支持 ${ENV_VAR} 引用，与 embedding.apiKey 同款解析） */
+  apiKey: string;
+  /** 默认不传（不下发 max_tokens）：该上游 reasoning token 与 max_tokens 关系不确定，设小值有截断答案风险 */
+  maxTokens?: number;
+  /** 默认 0.7 */
+  temperature?: number;
+  /** 默认 300000（D13 后重估，见 S01 §9.2）；旧配置 180000 写法仍可加载 */
+  requestTimeoutMs?: number;
+  /** 默认 30000，仅约束"建立连接并收到首个 chunk" */
+  firstByteTimeoutMs?: number;
+  /** 可选，新建会话的初始提示词 */
+  defaultSystemPrompt?: string;
+  /** 默认 false：模型是否支持图片输入（用户手填，不自动探测 —— D11，本期不实现，字段保留） */
+  supportsImages?: boolean;
+  /** 默认 4：单条消息最多携带图片数（本期不实现，字段保留） */
+  maxImagesPerMessage?: number;
+  /** 默认 4MB：单图原始大小上限（本期不实现，字段保留） */
+  maxImageBytes?: number;
+  // ── v2（D13）────────────────────────────────
+  /** 默认 true：模型是否支持 function calling（T10）。false → 走预检索降级（S07 §3.7） */
+  supportsTools?: boolean;
+  /** 默认 false：用户是否已确认"知识库内容外发"（T12）。false → 面板阻塞发送（S07 §3.8） */
+  kbDisclosureAck?: boolean;
+}
+
+/** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
+export const DEFAULT_CHAT_DIR_NAME = 'chat';
+
 export interface EmbeddingConfig {
   provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
@@ -150,6 +208,8 @@ export interface KiConfig {
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
   vector?: VectorResourceConfig;         // Collection handle/worker 资源治理
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
+  llm?: LlmConfig;                       // 【新增】模型配置段（REQ-20260924-001）；缺失 = 未配置（fail-loud）
+  chatDir?: string;                      // 【新增】会话存储根目录（默认 ~/.ki/chat，独立于 kb/）
   /** 字段校验告警（废弃字段 / null scope 条目等）：不阻断加载，由 ki doctor 报告 */
   _fieldWarnings?: ConfigIssue[];
   _configPath?: string;                  // 配置文件路径（内部）
@@ -495,6 +555,37 @@ function parseAndExpand(configFile: string): KiConfig {
     ? expandPath(String(raw.vectorDir), configDir)
     : path.join(os.homedir(), '.ki', 'vector');
 
+  // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）。
+  // 独立于 kb/ 与 vectorDir：快照恢复/删除 Group 只操作 kb/，会话因此天然免疫（D4）。
+  // ★ 默认值派生自 `dataDir`（见 resolveDefaultChatDir），不硬编码 `~/.ki`。
+  const chatDir = raw.chatDir
+    ? expandPath(String(raw.chatDir), configDir)
+    : resolveDefaultChatDir(dataDir);
+
+  // 【新增】llm：模型配置段（REQ-20260924-001 · S01 §3 + §9.1）。
+  // ⚠️ 不给默认模型（D8）：缺失时留 undefined，由 resolveLlmStatus 判「未就绪」返回
+  // enabled:false + CHAT_DISABLED（GET /api/chat/config 仍返回 200 + ok:true）。
+  // apiKey 复用 resolveApiKey 预解析（与 embedding.apiKey 同款）：支持 ${ENV} 且集中一处解析规则。
+  let llm: LlmConfig | undefined;
+  if (raw.llm && typeof raw.llm === 'object' && !Array.isArray(raw.llm)) {
+    const rl = raw.llm as Record<string, unknown>;
+    llm = {
+      baseURL: rl.baseURL ? String(rl.baseURL) : '',
+      model: rl.model ? String(rl.model) : '',
+      apiKey: resolveApiKey(rl.apiKey) ?? '',
+      maxTokens: rl.maxTokens !== undefined ? Number(rl.maxTokens) : undefined,
+      temperature: rl.temperature !== undefined ? Number(rl.temperature) : undefined,
+      requestTimeoutMs: rl.requestTimeoutMs !== undefined ? Number(rl.requestTimeoutMs) : undefined,
+      firstByteTimeoutMs: rl.firstByteTimeoutMs !== undefined ? Number(rl.firstByteTimeoutMs) : undefined,
+      defaultSystemPrompt: rl.defaultSystemPrompt !== undefined ? String(rl.defaultSystemPrompt) : undefined,
+      supportsImages: rl.supportsImages !== undefined ? Boolean(rl.supportsImages) : undefined,
+      maxImagesPerMessage: rl.maxImagesPerMessage !== undefined ? Number(rl.maxImagesPerMessage) : undefined,
+      maxImageBytes: rl.maxImageBytes !== undefined ? Number(rl.maxImageBytes) : undefined,
+      supportsTools: rl.supportsTools !== undefined ? Boolean(rl.supportsTools) : undefined,
+      kbDisclosureAck: rl.kbDisclosureAck !== undefined ? Boolean(rl.kbDisclosureAck) : undefined,
+    };
+  }
+
   // 【新增】embedding：与默认合并，允许部分覆盖
   const rawEmbedding = (raw.embedding && typeof raw.embedding === 'object')
     ? raw.embedding as Record<string, unknown>
@@ -603,7 +694,7 @@ function parseAndExpand(configFile: string): KiConfig {
   }
 
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp, llm, chatDir,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };
@@ -621,6 +712,9 @@ function buildDefaults(): KiConfig {
     vector: { ...DEFAULT_VECTOR_RESOURCES },
     scopeMode: 'default',
     scopes: {},
+    // llm 刻意不给默认值（D8）：无配置即"未配置"，由 resolveLlmStatus 判 CHAT_DISABLED。
+    // chatDir 给默认值（会话目录是纯本地路径，无需用户配置即可工作），★ 基准派生自 dataDir。
+    chatDir: resolveDefaultChatDir(dataDir),
   };
 }
 
