@@ -48,11 +48,12 @@ git diff --name-only "${CODE_BASE}..HEAD" \
 done
 
 echo "⑦ 桩残留自检（★ 必备：不依赖测试是否覆盖到）"
-if hits=$(git grep -n -E "$STUB_PATTERN" -- 'src/' 2>&1); then
+# ★ 用 grep 扫【工作区文件系统】而非 git grep：
+#   git grep 只扫【已跟踪文件】，而实现期的桩正是【新建未提交】的 →
+#   会漏扫 → 扫描恒为空 → 【假绿】（这条是实测发现的，比不扫更危险）
+hits=$(grep -rn --include='*.ts' --include='*.tsx' -E "$STUB_PATTERN" src/ 2>/dev/null || true)
+if [[ -n "$hits" ]]; then
   echo "❌ 桩残留（接口未实现）："; echo "$hits"; exit 1
-else
-  rc=$?
-  [[ $rc -eq 1 ]] || { echo "❌ 扫描失败（git 退出码 ${rc}）——不得当作「无残留」"; exit 1; }
 fi
 
 echo "⑧ 预检自跑（若已生成预检脚本）"

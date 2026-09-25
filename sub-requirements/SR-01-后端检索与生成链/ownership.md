@@ -21,7 +21,6 @@ interface:
   - src/lib/chat/chat-contract.ts
   - src/lib/chat/chat-routes.ts
   - src/lib/chat/llm-client.ts
-  - src/lib/mcp-http-api.ts
 readonly:
   - src/search.ts
   - src/lib/store.ts
