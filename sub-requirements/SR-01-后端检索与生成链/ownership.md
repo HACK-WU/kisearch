@@ -17,6 +17,8 @@ exclusive:
   - src/lib/mcp-http-api.ts
   - test/chat/contract-sr01.test.ts
   - test/chat/acceptance-sr01.test.ts
+  # ★ 权限用例（P1–P7 + 7 条对照）：slice.md §3 第 5 项要求"落成独立文件"
+  - test/chat/permissions-sr01.test.ts
 interface:
   - src/lib/chat/chat-contract.ts
   - src/lib/chat/chat-routes.ts

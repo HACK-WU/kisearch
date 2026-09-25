@@ -16,6 +16,7 @@ OWNED_PATTERNS=(
   "src/lib/mcp-http-api.ts"
   "test/chat/contract-sr01.test.ts"
   "test/chat/acceptance-sr01.test.ts"
+  "test/chat/permissions-sr01.test.ts"
 )
 # 桩标记来源与 premerge-check.sh 同源（.delivery/stub-pattern）
 STUB_PATTERN="${STUB_PATTERN:-STUB:SR-01:}"
@@ -41,7 +42,7 @@ npx jiti test/chat/contract-parity.test.ts
 echo "⑥ 越界检查（从 CODE_BASE 算起，不是契约基线）"
 # ★ 排除【流程产物】：砖头包 / 脚手架不属于任何砖头的独占写，
 #   它们常因流程修补而在冻结点之后被改动 → 不排除会把正常的流程提交误判成越界
-git diff --name-only "${CODE_BASE}..HEAD" \
+git -c core.quotePath=false diff --name-only "${CODE_BASE}..HEAD" \
   | { grep -vE '^(sub-requirements/|\.delivery/)' || true; } \
   | while read -r f; do
   [[ -z "$f" ]] && continue
