@@ -16,6 +16,7 @@ OWNED_PATTERNS=(
   "src/lib/mcp-http-api.ts"
   "test/chat/contract-sr01.test.ts"
   "test/chat/acceptance-sr01.test.ts"
+  "test/chat/permissions-sr01.test.ts"
 )
 # 桩标记来源与 premerge-check.sh 同源（.delivery/stub-pattern）
 STUB_PATTERN="${STUB_PATTERN:-STUB:SR-01:}"
@@ -38,10 +39,20 @@ npx jiti test/chat/data-flow.test.ts
 echo "⑤ 契约对齐（共享，应保持绿）"
 npx jiti test/chat/contract-parity.test.ts
 
-echo "⑥ 越界检查（从 CODE_BASE 算起，不是契约基线）"
-# ★ 排除【流程产物】：砖头包 / 脚手架不属于任何砖头的独占写，
-#   它们常因流程修补而在冻结点之后被改动 → 不排除会把正常的流程提交误判成越界
-git diff --name-only "${CODE_BASE}..HEAD" \
+echo "⑥ 越界检查（只看【本分支独有】的提交，不是契约基线）"
+# ★ 为什么不是 `diff ${CODE_BASE}..HEAD`：窗口为了拿包修补会 merge 主干，
+#   而主干上的【流程修补】可能触及任意文件（例：修 chat-store.ts 的注释）→
+#   直接 diff 会把它算进"本窗口的改动" → 【误报】。
+#   正确口径 = 本分支独有、且【非合并】的提交所触及的文件。
+MAIN_BRANCH="${MAIN_BRANCH:-feat/sidebar-ai-chat}"
+if git rev-parse --verify "$MAIN_BRANCH" >/dev/null 2>&1; then
+  OWN_FILES=$(git -c core.quotePath=false log --no-merges --name-only --format= "${MAIN_BRANCH}..HEAD" \
+              | sed '/^$/d' | sort -u || true)
+else
+  echo "  ⚠️ 找不到主干分支 ${MAIN_BRANCH} → 退化为 diff ${CODE_BASE}..HEAD（可能含主干修补，留意误报）"
+  OWN_FILES=$(git -c core.quotePath=false diff --name-only "${CODE_BASE}..HEAD")
+fi
+printf '%s\n' "$OWN_FILES" \
   | { grep -vE '^(sub-requirements/|\.delivery/)' || true; } \
   | while read -r f; do
   [[ -z "$f" ]] && continue

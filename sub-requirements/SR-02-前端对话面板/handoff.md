@@ -12,6 +12,18 @@
 - 分支：`feat/sr-02-frontend`
 - **代码基线 `code_base` = `freeze/REQ-20260924-001`**；工作前 `git rev-parse HEAD` 确认起点
 
+## 0.5 环境前提（**实测所得，遇到报错先看这里**）
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `ERR_INVALID_URL` / fetch 拒绝相对路径 | Node 的 `fetch` **不支持相对 URL**（浏览器支持），而 `chatApi` 传的是同源相对路径（浏览器语义） | 测试内加**仅在测试中**的 fetch 垫片补 origin；**不要把被测代码改成绝对路径**——那会掩盖"同源相对路径"这个约定 |
+| 生成中点"关闭面板"后内容丢失 | 流式累积态被放进了组件内（组件卸载即丢） | **硬约束**：累积态（content/reasoning/progress/degraded/**sources**）全在 `AppShell` 级 `chatStore`；「关闭」= 隐藏不卸载（`if (!open) return null`） |
+| 测试"停在中途看状态"却看到被清空 | 停在中间事件时**不能收尾**（还在收 `streamEnd` 就会清掉刚要看的东西） | 用 `stopAtEvent` 停在目标事件，**不触发 `streamEnd`** |
+| 测试全绿但来源引用其实丢了 | 分块边界若**整帧**，`readSseEvents` 的**跨块缓冲分支永不执行** → 假绿 | 构造 SSE 流时**刻意让分块不对齐帧边界**（现有实现用 `CHUNK_SIZE = 7`，**不得"优化"成整数**） |
+| 起 daemon 失败 / socket 被占 | `~/.ki/run/daemon-*.sock` 可能被他人实例占用 | 不要杀别人的进程；前端开发期用 `.delivery/mocks/mock-sse.mjs` 即可，**不必起 daemon** |
+
+> **单窗口期的预期红**：`data-flow.test.ts` 是**跨砖头**的，SR-01 未完成时部分用例会红 —— 那是预期，**不要去改 `src/**`**。
+
 ## 1. 你的砖头
 
 - **目标**：Web 任意页面右侧的常驻可收起 AI 对话面板（多轮 / 流式 / 来源引用 / 会话管理），**关闭不丢内容、不中止生成**

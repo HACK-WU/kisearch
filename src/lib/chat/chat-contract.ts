@@ -9,7 +9,8 @@
  *   1. 本文件在骨架期【冻结】，实现期**一字不改**；变更须回 design 并走批次边界
  *   2. 前端有同形状副本 `web/src/api/chatContract.ts`（两端是独立 package，无法互相 import）
  *      → 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 机械保证
- *   3. 所有 stub 实现以 `STUB:SR-01:*` 标记（供桩残留扫描）
+ *   3. 所有 stub 实现带「桩标记」，供桩残留扫描（标记模式见 `.delivery/stub-pattern`）
+ *      ⚠️ **本注释刻意不写完整字面量**：契约文件若含完整模式串，会被桩残留扫描命中 → 自我误报
  *
  * @see design/S07_检索与工具调用_DESIGN.md
  */

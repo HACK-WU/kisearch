@@ -13,6 +13,18 @@
 - **代码基线 `code_base` = `freeze/REQ-20260924-001`**（单批 = 冻结点；分批时第 N 批 = 上一批合入后的 commit）
 - 工作前先 `git rev-parse HEAD` 确认起点正确
 
+## 0.5 环境前提（**实测所得，遇到报错先看这里**）
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `MODULE_NOT_FOUND: dist/zvec-engine/index.js` | 独立工作副本**不含构建产物**，而 `src/lib/vector-client.ts` 运行时**必需**它 | 先跑 `npx tsc -p tsconfig.src.json` 生成（这本来就是验收第 ① 项） |
+| 起 daemon 失败 / socket 被占 | `~/.ki/run/daemon-*.sock` 可能被**他人实例**占用（同机多副本场景常见） | **不要杀别人的进程**。改用**进程内探针**调 `handleApiRequest`（生产同一入口），反而能精确注入 `clientAddr` / `resolveTokenScopes` |
+| 测试里换 env 不生效 | `loadConfig()` 的**缓存键只含 `explicitPath`（函数参数）**，**不含 `KI_CONFIG_PATH` / `KI_DATA_DIR`** | 换 env 前确保 `loadConfig()` 尚未被调用；或改写同路径借 mtime/size 失效 |
+| 相对路径 `fetch` 报 `ERR_INVALID_URL` | Node 的 `fetch` 不支持相对 URL（浏览器支持） | 测试内加 fetch 垫片补 origin；**不要把被测代码改成绝对路径**——那会掩盖"同源相对路径"这个约定 |
+
+> **单窗口期的预期红**：`test/chat/e2e-sr02-sources.test.ts` / 前端相关测试不由你跑；
+> `data-flow.test.ts` 是**跨砖头**的，另一片未完成时部分用例会红 —— 那是预期，**不要去改 `src/**` 让它变绿**，逐条确认归属即可。
+
 ## 1. 你的砖头
 
 - **目标**：让 daemon 具备「检索问答 + 流式生成 + 会话落盘」的完整后端能力
