@@ -20,9 +20,12 @@ exclusive:
   # ★ 权限用例（P1–P7 + 7 条对照）：slice.md §3 第 5 项要求"落成独立文件"
   - test/chat/permissions-sr01.test.ts
 interface:
+  # ★ 只有【形状 SSOT】属于此列表 —— 门② 对它的语义是「零 diff = 契约未漂移」。
+  #   桩文件（chat-routes / llm-client / chat-store / retrieval/*）【不列入】：
+  #   它们的【实现体必然要改】（那是本窗口的工作），列进来会被门② 必然误判。
+  #   桩的【导出签名】受保护由别处保证：契约测试 contract-sr01.test.ts（16 项）
+  #   + contract-snapshot.md §3「桩签名」面。
   - src/lib/chat/chat-contract.ts
-  - src/lib/chat/chat-routes.ts
-  - src/lib/chat/llm-client.ts
 readonly:
   - src/search.ts
   - src/lib/store.ts

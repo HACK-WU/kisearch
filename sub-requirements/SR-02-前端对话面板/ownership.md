@@ -21,9 +21,10 @@ exclusive:
   # ★ 新增：来源引用端到端（真实事件序 + 分块边界落在帧中间）
   - test/chat/e2e-sr02-sources.test.ts
 interface:
+  # ★ 同 SR-01：只有【形状副本】属于此列表（门② 语义 = 零 diff = 契约未漂移）。
+  #   组件/store 等桩文件【不列入】—— 它们的实现体必然要改；
+  #   其类型形状受保护由 contract-snapshot.md §1「冻结的代码面」+ parity 测试保证。
   - web/src/api/chatContract.ts
-  - web/src/chat/chatStore.ts
-  - web/src/chat/ChatPanel.tsx
 readonly:
   - src/lib/chat/chat-contract.ts
   - .delivery/mocks/
