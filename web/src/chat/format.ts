@@ -5,7 +5,10 @@
  * （需要 JSX 转换）。本文件是**纯 TS、无副作用**，可直接单测。
  */
 
-import type { DegradedReason, SourceRef } from '@/api/chatContract';
+// ⚠️ 必须用**相对路径**：本模块被 node 侧验收测试（jiti）直接 import，
+//    而 jiti 不认 `@/` 别名 —— 值导入（非 type-only）用别名会在测试环境解析失败。
+//    `acceptance-sr02.test.ts` 正是通过本模块读取 `DEGRADED_LABELS` 的。
+import type { SourceRef } from '../api/chatContract';
 
 /**
  * 行号区间显示。
@@ -24,12 +27,12 @@ export function formatLineRange(ref: Pick<SourceRef, 'lineStart' | 'lineEnd'>): 
  *
  * ★ 契约：`degraded` **必须可见，不得静默**（N17）——用户看不到标记就会把
  *   "没检索"当成"检索了但没找到"。
+ *
+ * ★ **唯一来源 = `chatContract.ts`**（该文件自述"前端唯一来源，避免多处硬编码不一致"）。
+ *   本处改为**再导出**，消除此前的第二份副本（两份逐字相同 → 任一侧改动都会静默漂移）。
+ *   保留从本模块导出的形式，以免改动既有 import 点（`SourcesList` / `acceptance-sr02`）。
  */
-export const DEGRADED_LABELS: Record<DegradedReason, string> = {
-  'tools-unsupported': '本次未使用工具检索',
-  'retrieval-unavailable': '本次未检索',
-  'semantic-degraded': '语义检索降级为全文',
-};
+export { DEGRADED_LABELS } from '../api/chatContract';
 
 /** 来源引用的标题（`group / doc / 行号`），行号缺失时省略该段 */
 export function sourceRefTitle(ref: SourceRef): string {

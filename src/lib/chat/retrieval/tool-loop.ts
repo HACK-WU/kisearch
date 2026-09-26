@@ -193,6 +193,14 @@ async function* toolLoopPath(
   let usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
   let finishReason = 'stop';
   let roundsExhausted = false;
+  /**
+   * `degraded` 是否已发出。
+   *
+   * ★ 契约要求 `degraded` **至多一次**（`CHAT_EVENT_ORDER_RULES.degradedAtMostOnce`）。
+   *   本循环有两条可能来源（语义侧降级 / 检索失败），共用此闸门 → 取**最先触发者**。
+   *   原先只有语义侧一条，且未加闸门；补上检索失败分支后闸门成为必需。
+   */
+  let degradedSent = false;
   const llmOpts = {
     baseURL: runtime.baseURL,
     apiKey: runtime.apiKey,
@@ -251,7 +259,9 @@ async function* toolLoopPath(
         return;
       }
       if (err instanceof LlmTimeoutError) {
-        yield { type: 'error', code: err.phase === 'first-byte' ? 'LLM_TIMEOUT' : 'LLM_TIMEOUT', error: err.message, retryable: true };
+        // first-byte 超时与整体超时对用户是同一类故障 → 统一用 `LLM_TIMEOUT`
+        // （**不引入新错误码**：错误码是前端的映射依据，新增码会造成映射缺项）
+        yield { type: 'error', code: 'LLM_TIMEOUT', error: err.message, retryable: true };
         return;
       }
       if (err instanceof ChatDisabledError) {
@@ -263,6 +273,15 @@ async function* toolLoopPath(
         return;
       }
       yield { type: 'error', code: 'LLM_UPSTREAM_ERROR', error: (err as Error).message, retryable: true };
+      return;
+    }
+
+    // ★ 建连阶段被中止的二次判定。
+    //   `streamChat` 在 signal 已中止时是**静默 return（不抛）**（见 `llm-client.ts` 的 catch），
+    //   若此处不补判，会落到下面的"无工具调用 → break" → `finalize({aborted:false})` → 发 `done`，
+    //   用户在"等首字节"阶段点停止将拿不到 `aborted`，落盘也会写 `aborted:false`。
+    if (isAborted(input.signal)) {
+      yield { type: 'aborted', messageId };
       return;
     }
 
@@ -325,7 +344,12 @@ async function* toolLoopPath(
           tool_call_id: call.id,
           content: JSON.stringify({ error: errText }),
         });
-        // ★ 检索不可用：不中断生成，但按 N17 明示（degraded 至多一次）
+        // ★ 检索不可用：不中断生成，但按 N17 **明示**（原先注释这么写、实现却没有发事件 →
+        //   用户会把"没检索"当成"检索了但没找到"）。受 `degradedSent` 闸门约束，至多一次。
+        if (!degradedSent) {
+          degradedSent = true;
+          yield { type: 'degraded', reason: 'retrieval-unavailable', message: '本次未检索' };
+        }
         continue;
       }
 
@@ -342,8 +366,9 @@ async function* toolLoopPath(
       const refs = toSourceRefs(result);
       if (refs.length > 0) roundSources.push(...refs);
 
-      // 语义侧降级透传（不让用户误以为用了语义检索）
-      if (result.degraded === true) {
+      // 语义侧降级透传（不让用户误以为用了语义检索）—— 同样受至多一次的闸门约束
+      if (result.degraded === true && !degradedSent) {
+        degradedSent = true;
         yield { type: 'degraded', reason: 'semantic-degraded', message: '语义检索降级为全文' };
       }
     }

@@ -19,6 +19,10 @@ exclusive:
   - test/chat/acceptance-sr01.test.ts
   # ★ 权限用例（P1–P7 + 7 条对照）：slice.md §3 第 5 项要求"落成独立文件"
   - test/chat/permissions-sr01.test.ts
+  # ★ 路由级端到端（2026-09-26 修复期新增）：编辑重发/重新生成的**落盘**正确性。
+  #   存在的理由：缺陷发生在 route 与 store 原语的「接线处」，store 级单测与形状断言
+  #   （contract / parity）结构性覆盖不到 —— 只有真实 HTTP + 真实落盘才能抓到。
+  - test/chat/e2e-sr01-edit.test.ts
 interface:
   # ★ 只有【形状 SSOT】属于此列表 —— 门② 对它的语义是「零 diff = 契约未漂移」。
   #   桩文件（chat-routes / llm-client / chat-store / retrieval/*）【不列入】：

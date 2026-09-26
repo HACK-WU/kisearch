@@ -17,6 +17,8 @@ OWNED_PATTERNS=(
   "test/chat/contract-sr01.test.ts"
   "test/chat/acceptance-sr01.test.ts"
   "test/chat/permissions-sr01.test.ts"
+  # ★ 路由级端到端（2026-09-26 修复期新增）：编辑重发/重新生成的**落盘**正确性
+  "test/chat/e2e-sr01-edit.test.ts"
 )
 # 桩标记来源与 premerge-check.sh 同源（.delivery/stub-pattern）
 STUB_PATTERN="${STUB_PATTERN:-STUB:SR-01:}"
@@ -38,6 +40,11 @@ npx jiti test/chat/data-flow.test.ts
 
 echo "⑤ 契约对齐（共享，应保持绿）"
 npx jiti test/chat/contract-parity.test.ts
+
+echo "⑤b 路由级端到端：编辑重发/重新生成（★ 真实 HTTP + 真实落盘，抓「接线处」缺陷）"
+# ★ 为什么单列：本片缺陷（edit 走 replaceLastAssistant 吃掉 user 消息）发生在
+#   route 与两个 store 原语的**接线处** —— acceptance 的 store 级单测与形状断言都覆盖不到。
+npx jiti test/chat/e2e-sr01-edit.test.ts
 
 echo "⑥ 越界检查（只看【本分支独有】的提交，不是契约基线）"
 # ★ 为什么不是 `diff ${CODE_BASE}..HEAD`：窗口为了拿包修补会 merge 主干，

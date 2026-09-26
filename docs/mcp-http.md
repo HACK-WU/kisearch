@@ -125,6 +125,38 @@ ki mcp --http --web
 - `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
 - 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。
 
+### `/api/chat/*`（侧边栏 AI 对话）
+
+需在配置文件的 `llm` 段填写 `baseURL` / `model` / `apiKey`（见 [`docs/configuration.md`](./configuration.md#llm)）。**未配置时接口仍可访问**：`GET /api/chat/config` 返回 `200 + enabled:false`，生成类接口返回 `503 CHAT_DISABLED`。会话文件落在 `{chatDir}/{scope}/`，与 `kb/` **完全分离**。
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/chat/config` | GET | 对话可用性：`enabled` / `model` / `baseURLHost` / `requestTimeoutMs` / `supportsTools` / `retrievalEnabled` / `ackRequired` / `maxToolRounds`。**不含 `apiKey` 与完整 URL 路径**；未就绪时仍 200 |
+| `/api/chat/config/ack` | POST | 隐私确认（`{"ack":true}`，幂等）→ 原子写落盘 `llm.kbDisclosureAck: true` 并即时生效。**不支持取消确认**（撤销入口在配置文件） |
+| `/api/chat/conversations` | GET | 会话列表（`?scope=&archived=0\|1&limit=&cursor=`），按 `(updatedAt, id)` 倒序；损坏文件该条标 `corrupted:true`、其余正常返回 |
+| `/api/chat/conversations` | POST | 新建会话（`{scope, title?, systemPrompt?}`；title ≤48 字、systemPrompt ≤4000 字） |
+| `/api/chat/conversations` | DELETE | 清空该 scope 全部会话（`?scope=`，幂等；**绝不触碰 `kb/`**） |
+| `/api/chat/conversations/:id` | GET | 会话详情（含消息） |
+| `/api/chat/conversations/:id` | PATCH | 改 `title` / `systemPrompt`；无任何可改字段 → 400 |
+| `/api/chat/conversations/:id` | DELETE | 物理删除（级联删该会话的本地图片；**绝不动 `kb/`**） |
+| `/api/chat/conversations/:id/archive` | POST | 归档 / 恢复（`{archived:boolean}`，幂等） |
+| `/api/chat/conversations/:id/messages` | POST | 发消息（**SSE**） |
+| `/api/chat/conversations/:id/regenerate` | POST | 重新生成（**SSE**；不新增 user 消息、`messageCount` 不变） |
+| `/api/chat/conversations/:id/messages/:msgId` | PATCH | 编辑并重发（**SSE**；服务端在同一把会话锁内原子截断其后全部消息；只能编辑 user 消息） |
+
+**SSE 事件序**（前端按 `data.type` 分派，**不使用** SSE `event:` 字段）：
+
+```text
+meta → [tool_start → tool_end]* → reasoning* → content* → sources? → usage? → done
+```
+
+- `done.warning`：`tool-rounds-exhausted`（已达检索轮次上限）/ `conversation-too-long`（建议新建会话）。
+- `degraded.reason`：`tools-unsupported`（上游不支持工具调用）/ `retrieval-unavailable`（检索不可用）/ `semantic-degraded`（语义检索降级为全文）。**至多一条**，且必须向用户可见（N17 禁止静默降级）。
+- 中止：客户端 abort → 服务端落盘已生成部分并回 `aborted`；`content` 为空则不落盘（不产生空气泡）。
+- 错误分层：流建立**前**失败 → HTTP 状态码（`403 DISCLOSURE_REQUIRED` / `503 CHAT_DISABLED` / `409 CONVERSATION_GENERATING` / `404 CONVERSATION_NOT_FOUND`）；流建立**后**失败 → `error` 事件（不抛）。
+- 鉴权与其他 `/api/*` 一致；**访问他 scope 的会话返回 403 而非 404**（防状态码探测枚举）。
+- 同一会话**同时只允许一次生成**，并发请求返回 `409 CONVERSATION_GENERATING`。
+
 ## 状态自查（`ki mcp --status`）
 
 用于确认「当前是否只有一个持锁进程」以及各 IDE 是否连到同一实例：

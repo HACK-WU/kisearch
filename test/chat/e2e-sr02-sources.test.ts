@@ -20,6 +20,13 @@
  *
  * 运行：`npx jiti test/chat/e2e-sr02-sources.test.ts`
  *
+ * ═══ 覆盖范围（2026-09-26 扩展）═══
+ * 除"来源引用生命周期 + SSE 跨块解析"外，另补三组**只能靠交错时序/终态断言**才抓得到的用例：
+ *   · 并发/交错时序（流令牌守门）—— 旧流迟来的 `streamEnd` 不得重置新流累积态
+ *   · N6 中止标记 —— 收尾后消息必须带 `aborted:true`，与"正常完成"可区分
+ *   · N17 降级标记留存 —— 生成结束后标记仍可见（且不写进冻结的 `ChatMessage` 形状）
+ * 这三组均为**纯 reducer 驱动**（无需 DOM / 网络），因此可在无 DOM 环境下回归。
+ *
  * @see design/S03 §9.2 · api/retrieval.md §1.1 · contract-snapshot.md §6
  */
 
@@ -352,6 +359,143 @@ describe('SR-02 端到端 · D15 隐藏不丢（store 语义 + 真实内容）',
     assert.equal(closed.streaming.active, true, '关闭面板不得中止生成（N20）');
     assert.equal(closed.streaming.content, mid.streaming.content, '关闭面板不得丢已生成内容');
     assert.equal(closed.streaming.sources.length, mid.streaming.sources.length);
+  });
+});
+
+describe('SR-02 端到端 · ★ 并发/交错时序（流令牌守门）', () => {
+  it('★ 旧流迟来的 streamEnd 不得重置新流累积态（否则新回答整段丢失）', () => {
+    // 时序：新流 meta(seq=2) → 旧流 finally 的 streamEnd(seq=1) → 新流 content → 新流 streamEnd(seq=2)
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-old', seq: 1 });
+    s = chatReducer(s, { type: 'streamContent', text: '旧流残留' });
+
+    s = chatReducer(s, { type: 'streamStart', messageId: 'm-new', seq: 2 });
+    // ★ 旧流被 abort 后其 finally 此刻才执行 —— 必须被忽略
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+    assert.equal(s.streaming.active, true, '旧流不得收尾新流');
+    assert.equal(s.streaming.messageId, 'm-new');
+
+    s = chatReducer(s, { type: 'streamContent', text: '这是新回答的正文' });
+    s = chatReducer(s, { type: 'streamEnd', seq: 2 });
+    assert.ok(
+      s.messages.some((m) => m.content === '这是新回答的正文'),
+      '新流正文必须保留（修复前此处为 messages: []）',
+    );
+  });
+
+  it('不带令牌的 streamEnd 仍可收尾（向后兼容纯 reducer 单测）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm9' });
+    s = chatReducer(s, { type: 'streamContent', text: '部分' });
+    s = chatReducer(s, { type: 'streamEnd' });
+    assert.equal(s.streaming.active, false);
+    assert.ok(s.messages.some((m) => m.content.includes('部分')));
+  });
+
+  it('★ 迟到且携带旧令牌的 streamStart 不得复位守门（否则旧流 streamEnd 会再次通过）', () => {
+    // 流2 已开始并产出内容（seq=2）
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-new', seq: 2 });
+    s = chatReducer(s, { type: 'streamContent', text: '新流内容' });
+
+    // 旧流迟到的 meta（seq=1）→ 必须被忽略：否则 streaming.seq 被写回 1，
+    // 旧流的 streamEnd{seq:1} 就会重新通过守门，又回到"新回答整段丢失"的原始缺陷
+    s = chatReducer(s, { type: 'streamStart', messageId: 'm-old', seq: 1 });
+    assert.equal(s.streaming.seq, 2, '旧 seq 不得覆写当前令牌');
+    assert.equal(s.streaming.messageId, 'm-new');
+    assert.equal(s.streaming.content, '新流内容', '旧 streamStart 不得清空新流累积内容');
+
+    // 旧流的收尾仍被拦下
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+    assert.equal(s.streaming.active, true, '旧流仍不得收尾');
+
+    // 当前流正常收尾
+    s = chatReducer(s, { type: 'streamEnd', seq: 2 });
+    assert.ok(s.messages.some((m) => m.content === '新流内容'));
+  });
+
+  it('★ 切会话后旧流的 streamEnd 被忽略（不得把旧流内容并入新会话）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-old', seq: 5 });
+    s = chatReducer(s, { type: 'streamContent', text: '旧流内容' });
+
+    // 切会话：streaming 被重置为 seq=undefined
+    s = chatReducer(s, { type: 'setActiveConv', convId: 'c-2' });
+    // 旧流的 finally 此刻才执行 → 必须被 store 令牌拦下
+    s = chatReducer(s, { type: 'streamEnd', seq: 5 });
+
+    assert.deepEqual(s.messages, [], '切会话后不得把旧流内容并入新会话');
+    assert.equal(s.streaming.active, false);
+    assert.equal(s.activeConvId, 'c-2');
+  });
+});
+
+describe('SR-02 端到端 · ★ N6 中止标记（原先不可达）', () => {
+  it('aborted → 收尾后消息带 aborted:true，且可与"正常完成"区分', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-ab', seq: 1 });
+    s = chatReducer(s, { type: 'streamContent', text: '半截回答' });
+    s = chatReducer(s, { type: 'streamAborted' });
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+
+    const msg = s.messages.at(-1)!;
+    assert.equal(msg.aborted, true, '「已中止」标记必须落到消息上（N6）');
+    assert.ok(msg.content.includes('半截回答'), '已生成部分不得丢弃');
+  });
+
+  it('正常完成 → aborted 不为 true（两者外观可区分）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-ok', seq: 1 });
+    s = chatReducer(s, { type: 'streamContent', text: '完整回答' });
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+    assert.notEqual(s.messages.at(-1)!.aborted, true);
+  });
+});
+
+describe('SR-02 端到端 · ★ N17 降级标记留存（原先生成结束即消失）', () => {
+  it('生成结束后标记仍可见，且**不写进冻结的 ChatMessage 形状**', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-deg', seq: 1 });
+    s = chatReducer(s, {
+      type: 'streamDegraded',
+      mark: { reason: 'tools-unsupported', label: '本次未使用工具检索' },
+    });
+    s = chatReducer(s, { type: 'streamContent', text: '降级回答' });
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+
+    assert.equal(s.streaming.degraded, null, '流式态已清空');
+    assert.equal(s.degradedByMessage['m-deg']?.label, '本次未使用工具检索', '标记必须留存');
+    assert.ok(!('degraded' in s.messages.at(-1)!), '不得写进冻结的 ChatMessage 形状');
+  });
+
+  it('切会话清空标记表（不串到别的会话）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm1', seq: 1 });
+    s = chatReducer(s, {
+      type: 'streamDegraded',
+      mark: { reason: 'retrieval-unavailable', label: '本次未检索' },
+    });
+    s = chatReducer(s, { type: 'streamContent', text: 'x' });
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+    assert.ok(s.degradedByMessage['m1']);
+
+    const swapped = chatReducer(s, { type: 'setActiveConv', convId: 'c-2' });
+    assert.deepEqual(swapped.degradedByMessage, {});
+  });
+});
+
+describe('SR-02 端到端 · ★ 契约字段落地（原先零消费）', () => {
+  it('done.warning → notice 提示，且新流开始时清空（不跨轮残留）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm1', seq: 1 });
+    s = chatReducer(s, { type: 'notice', text: '会话过长，建议新建会话' });
+    assert.equal(s.notice, '会话过长，建议新建会话');
+
+    s = chatReducer(s, { type: 'streamStart', messageId: 'm2', seq: 2 });
+    assert.equal(s.notice, null, '一次性提示不得跨轮残留');
+  });
+
+  it('streamMessageId 只改 id、不动累积内容（把 meta 预估 id 校正为落盘真实 id）', () => {
+    let s = chatReducer(INITIAL_CHAT_STATE, { type: 'streamStart', messageId: 'm-est', seq: 1 });
+    s = chatReducer(s, { type: 'streamContent', text: '正文' });
+    s = chatReducer(s, { type: 'streamMessageId', messageId: 'm-real' });
+
+    assert.equal(s.streaming.messageId, 'm-real');
+    assert.equal(s.streaming.content, '正文');
+
+    s = chatReducer(s, { type: 'streamEnd', seq: 1 });
+    assert.equal(s.messages.at(-1)!.id, 'm-real', '收尾后的消息 id 必须是服务端真实 id');
   });
 });
 

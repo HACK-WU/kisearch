@@ -19,16 +19,23 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { getChatConfig } from '@/api/chatApi';
-import type { ChatConfigOk, ChatMessage, SourceRef } from '@/api/chatContract';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ackDisclosure,
+  createConversation,
+  getChatConfig,
+  getConversation,
+  listConversations,
+} from '@/api/chatApi';
+import type { ChatConfigOk, ChatMessage, ConversationSummary, SourceRef } from '@/api/chatContract';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
-import type { ChatStore, ProgressStep } from './chatStore';
-import { useChatStream } from './useChatStream';
+import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 import { SourcesList } from './SourcesList';
+import { clearStreamError, getStreamError, useChatStream } from './useChatStream';
+import { ConversationList } from './ConversationList';
 
 export interface ChatPanelProps {
   store: ChatStore;
@@ -60,8 +67,113 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   /** 用户手动展开过的「思考块」消息 id（不因新 chunk 强制收起，见 S05 §3.1） */
   const [reasoningExpanded, setReasoningExpanded] = useState<Record<string, boolean>>({});
   /** 来源引用点击后打开的原文（R20） */
-  const [viewing, setViewing] = useState<{ module: string; group: string } | null>(null);
+  const [viewing, setViewing] = useState<{
+    module: string;
+    group: string;
+    /** 命中片段 → 复用 ModuleDrawer 既有的 `highlightQuery`（不新建高亮机制） */
+    query: string;
+  } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // ── 会话列表与当前会话（P0-3：历史会话管理）──
+  const [convs, setConvs] = useState<ConversationSummary[]>([]);
+  const [convLoading, setConvLoading] = useState(true);
+  const [convError, setConvError] = useState<string | null>(null);
+  /** T12 确认请求进行中（防重复点击） */
+  const [ackBusy, setAckBusy] = useState(false);
+  /**
+   * 发送 / 建会话的并发闸门。
+   *
+   * ★ 为什么需要 `sendLockRef`：`blocked` 是**渲染期快照**，而 `streaming.active` 要到
+   *   `streamStart`（在 `await createNewConversation()` **之后**）才变 true ——
+   *   中间这段"网络往返窗口"内连点两次发送，会各自建出一条会话（首屏无会话时尤其明显）。
+   * ★ `creatingRef` 存**在途 promise**（而非布尔）：并发调用直接复用同一次创建，天然去重。
+   */
+  const sendLockRef = useRef(false);
+  const creatingRef = useRef<Promise<string> | null>(null);
+
+  /**
+   * 切换会话：**必须先 abort 进行中的流**（设计：abort 时机 = 切会话 / 删会话 / daemon 退出）。
+   */
+  const openConversation = useCallback(
+    async (id: string): Promise<void> => {
+      const s = store.getState();
+      if (s.activeConvId === id && s.messages.length > 0) return;
+      stream.abort();
+      store.dispatch({ type: 'setActiveConv', convId: id });
+      const d = await getConversation(id);
+      // 取数期间用户可能又切走了 → 只在仍是目标会话时落状态
+      if (store.getState().activeConvId === id) {
+        store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+      }
+    },
+    [store, stream],
+  );
+
+  /** 新建会话并切过去（首次发送时若当前无会话会调用）。**并发调用复用同一次创建**。 */
+  const createNewConversation = useCallback((): Promise<string> => {
+    if (creatingRef.current) return creatingRef.current;
+
+    const pending = (async (): Promise<string> => {
+      const r = await createConversation(scope, {});
+      const id = r.conv.id;
+      stream.abort();
+      store.dispatch({ type: 'setActiveConv', convId: id });
+      setConvs((prev) => [
+        {
+          id,
+          scope,
+          title: r.conv.title,
+          archived: false,
+          updatedAt: r.conv.updatedAt,
+          messageCount: 0,
+          lastMessagePreview: '',
+          corrupted: false,
+        },
+        ...prev,
+      ]);
+      return id;
+    })().finally(() => {
+      creatingRef.current = null;
+    });
+
+    creatingRef.current = pending;
+    return pending;
+  }, [scope, store, stream]);
+
+  /** 仅重取列表（发送完成后刷新标题/预览，不改变选中） */
+  const refreshConversations = useCallback(async (): Promise<void> => {
+    setConvLoading(true);
+    try {
+      const r = await listConversations(scope, { limit: 50 });
+      setConvs(r.items);
+      setConvError(null);
+    } catch (err) {
+      setConvError(err instanceof Error ? err.message : '会话列表读取失败');
+    } finally {
+      setConvLoading(false);
+    }
+  }, [scope]);
+
+  /**
+   * 生成结束后**以服务端落盘为准**重取当前会话。
+   *
+   * 作用有二：① 把乐观 user 消息的临时 id（`local-user-*`）换成服务端真实 id，
+   * 否则后续「编辑重发 / 重新生成」无法定位该消息；② 中止场景对齐尾部若干 chunk。
+   * 重取失败时**保留本地内容**（S03 §5：不因重取失败丢内容）。
+   */
+  const reloadActive = useCallback(
+    async (convId: string): Promise<void> => {
+      try {
+        const d = await getConversation(convId);
+        if (store.getState().activeConvId !== convId) return;
+        store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+      } catch {
+        /* 保留本地内容 */
+      }
+    },
+    [store],
+  );
 
   // ── 配置：面板可用性 / 模型名 / 是否需要隐私确认（T12）──
   useEffect(() => {
@@ -81,6 +193,31 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
       alive = false;
     };
   }, []);
+
+  // ── 首次进入 / 切 scope：拉会话列表并自动选中最近一条 ──
+  //   ★ **不自动新建**：否则每次进页面都会产生一个空会话（列表很快被空会话淹没）。
+  //     新建改为「首次发送时惰性创建」（见 handleSend），空会话不落盘。
+  useEffect(() => {
+    let alive = true;
+    setConvLoading(true);
+    void (async () => {
+      try {
+        const r = await listConversations(scope, { limit: 50 });
+        if (!alive) return;
+        setConvs(r.items);
+        setConvError(null);
+        const pick = r.items.find((c) => !c.corrupted);
+        if (pick) await openConversation(pick.id);
+      } catch (err) {
+        if (alive) setConvError(err instanceof Error ? err.message : '会话列表读取失败');
+      } finally {
+        if (alive) setConvLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [scope, openConversation]);
 
   // ── 自动滚底（仅面板展开时）──
   useEffect(() => {
@@ -130,16 +267,96 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   if (!open) return null;
   if (fullscreenReader) return null;
 
+  /** 本轮生成失败的错误态（N4 / S03 §5「连接中断 + 重试入口」）：按 convId 索引的模块级错误槽 */
+  const streamError = getStreamError(state.activeConvId);
+
   const handleSend = (): void => {
     const text = draft.trim();
-    if (!text || blocked) return;
+    // `sendLockRef` 覆盖"await 期间连点"的窗口（`blocked` 只是渲染期快照）
+    if (!text || blocked || sendLockRef.current) return;
+    sendLockRef.current = true;
     setDraft(''); // 清空输入框（失败时可按错误块重试，见 N4）
-    void stream.send(state.activeConvId ?? '', text);
+    void (async () => {
+      try {
+        // ★ 惰性建会话：当前无会话时先建一条。
+        //   原先直接用 `state.activeConvId ?? ''` → 打到 /conversations//messages（必然失败）。
+        const convId = store.getState().activeConvId ?? (await createNewConversation());
+        const persisted = await stream.send(convId, text);
+        // ★ 只有收到 `done`（服务端确已落盘）才"以服务端为准"重取：
+        //   error / aborted / 中断路径下服务端可能没有新内容 → 重取会把刚渲染的回答**覆盖成旧的**
+        //   （用户看到回答凭空消失且无提示）。失败路径改由错误槽 + 重试入口承担。
+        if (persisted) await reloadActive(convId);
+        void refreshConversations();
+      } catch (err) {
+        setConvError(err instanceof Error ? err.message : '发送失败');
+      } finally {
+        sendLockRef.current = false;
+      }
+    })();
+  };
+
+  /** 停止生成：本地保留已生成部分并标记「已中止」（服务端对齐由下次重取完成） */
+  const handleStop = (): void => {
+    stream.abort();
+  };
+
+  /**
+   * 重试本轮生成（N4）。
+   *
+   * 用 `regenerate` 而非重发文本：用户消息在**上游调用前**就已落盘（route 的锁内前置写），
+   * 故重新生成 = 对最后一条 user 重新作答，不会重复插入 user 消息。
+   */
+  const handleRetry = (): void => {
+    const convId = store.getState().activeConvId;
+    if (!convId) return;
+    clearStreamError(convId);
+    void (async () => {
+      try {
+        const persisted = await stream.regenerate(convId);
+        if (persisted) await reloadActive(convId);
+      } catch (err) {
+        setConvError(err instanceof Error ? err.message : '重试失败');
+      }
+    })();
+  };
+
+  const handleSelectConversation = (id: string): void => {
+    void openConversation(id).catch((err: unknown) => {
+      setConvError(err instanceof Error ? err.message : '切换会话失败');
+    });
+  };
+
+  const handleCreateConversation = (): void => {
+    void createNewConversation().catch((err: unknown) => {
+      setConvError(err instanceof Error ? err.message : '新建会话失败');
+    });
+  };
+
+  /**
+   * T12 隐私确认：调用 API-13 落盘 `llm.kbDisclosureAck: true` → 刷新配置解除阻塞。
+   * 契约：该接口幂等；错误码透传（`ChatApiError.code`），失败时保留阻塞并提示。
+   */
+  const handleAck = (): void => {
+    if (ackBusy) return;
+    setAckBusy(true);
+    void (async () => {
+      try {
+        await ackDisclosure();
+        const cfg = await getChatConfig();
+        setConfig(cfg);
+        setConfigError(null);
+      } catch (err) {
+        setConfigError(err instanceof Error ? err.message : '确认失败，请重试');
+      } finally {
+        setAckBusy(false);
+      }
+    })();
   };
 
   const handleOpenSource = (ref: SourceRef): void => {
-    // 复用既有 ModuleDrawer 的高亮定位能力（R20 要求"不新建高亮机制"）
-    setViewing({ module: ref.doc, group: ref.group });
+    // 复用既有 ModuleDrawer 的高亮定位能力（R20 要求"不新建高亮机制"）：
+    // 把引用摘要作为 `highlightQuery` 传入 → 打开原文即定位/高亮命中片段。
+    setViewing({ module: ref.doc, group: ref.group, query: ref.snippet });
   };
 
   return (
@@ -153,6 +370,17 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
           <span>AI 对话</span>
           {config?.model ? <span className="ki-chat-panel__model">{config.model}</span> : null}
         </header>
+
+        {/* 会话管理：列表（最近）+ 新建 + 刷新（P0-3：历史会话管理） */}
+        <ConversationList
+          items={convs}
+          activeId={state.activeConvId}
+          loading={convLoading}
+          error={convError}
+          onSelect={handleSelectConversation}
+          onCreate={handleCreateConversation}
+          onRefresh={() => void refreshConversations()}
+        />
 
         {/* 未配置模型 → fail-loud（R12/N3：不静默失败、不伪装成"模型没答"） */}
         {config && !config.enabled ? (
@@ -178,6 +406,8 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
             <MessageBubble
               key={m.id}
               message={m}
+              // N17：降级标记随消息留存（不进冻结的 ChatMessage，见 chatStore.degradedByMessage）
+              degraded={state.degradedByMessage[m.id] ?? null}
               onOpenSource={handleOpenSource}
               reasoning={
                 m.id === state.streaming.messageId ? state.streaming.reasoning : undefined
@@ -201,9 +431,37 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
         </div>
 
         <footer className="ki-chat-panel__foot">
+          {/* 本轮生成失败（N4 / S03 §5）：保留已生成内容并给出重试入口，不静默 */}
+          {streamError ? (
+            <div className="ki-chat-panel__notice ki-chat-panel__notice--err" role="alert">
+              <span>{streamError.message}</span>
+              {streamError.retryable ? (
+                <button type="button" className="ki-chat-panel__ack" onClick={handleRetry}>
+                  重试
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* `done.warning` 落地（S03 §5：会话过长 / 检索轮次耗尽 —— 原先前端零消费） */}
+          {state.notice ? (
+            <div className="ki-chat-panel__notice ki-chat-panel__notice--info" role="status">
+              {state.notice}
+            </div>
+          ) : null}
+
+          {/* T12：既阻塞也**给出解除入口** —— 只阻塞不给出口会让面板在 ackRequired 下永久不可用 */}
           {config?.ackRequired ? (
             <div className="ki-chat-panel__notice" role="alert">
-              提问内容与检索到的知识库片段将发送至外部模型服务，确认后方可发送。
+              <span>提问内容与检索到的知识库片段将发送至外部模型服务，确认后方可发送。</span>
+              <button
+                type="button"
+                className="ki-chat-panel__ack"
+                onClick={handleAck}
+                disabled={ackBusy}
+              >
+                {ackBusy ? '确认中…' : '我已知悉，同意'}
+              </button>
             </div>
           ) : null}
 
@@ -224,7 +482,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
           />
 
           {state.streaming.active ? (
-            <button type="button" className="ki-chat-panel__btn" onClick={() => stream.abort()}>
+            <button type="button" className="ki-chat-panel__btn" onClick={handleStop}>
               停止
             </button>
           ) : (
@@ -245,10 +503,12 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
       {/* 来源引用点击 → 打开原文并高亮（复用既有 ModuleDrawer） */}
       {viewing ? (
         <ModuleDrawer
-          key={`${scope}:${viewing.group}:${viewing.module}`}
+          // key 含 query：同一文档的不同引用片段能重新挂载 → 重新定位/高亮
+          key={`${scope}:${viewing.group}:${viewing.module}:${viewing.query}`}
           scope={scope}
           module={viewing.module}
           group={viewing.group}
+          highlightQuery={viewing.query}
           onClose={() => setViewing(null)}
           fetcher={kiGetModuleInfo}
         />
@@ -260,12 +520,15 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 /** 单条已落盘消息（user / assistant 分支） */
 function MessageBubble({
   message,
+  degraded,
   reasoning,
   reasoningOpen,
   onToggleReasoning,
   onOpenSource,
 }: {
   message: ChatMessage;
+  /** N17：本条的降级标记（来自 store.degradedByMessage；生成结束后仍保留，回看历史可见） */
+  degraded?: DegradedMark | null;
   reasoning?: string;
   reasoningOpen: boolean;
   onToggleReasoning: (next: boolean) => void;
@@ -274,6 +537,13 @@ function MessageBubble({
   const isUser = message.role === 'user';
   return (
     <div className={`ki-chat-msg ki-chat-msg--${message.role}`}>
+      {/* N17：降级标记必须可见，不得静默（气泡顶部，与生成中的 StreamingBubble 位置一致） */}
+      {!isUser && degraded ? (
+        <div className="ki-chat-msg__degraded" role="status">
+          {degraded.label}
+        </div>
+      ) : null}
+
       {!isUser && reasoning ? (
         <ReasoningBlock text={reasoning} streaming={false} open={reasoningOpen} onToggle={onToggleReasoning} />
       ) : null}

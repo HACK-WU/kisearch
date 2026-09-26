@@ -24,12 +24,17 @@ import type { ChatEvent } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 
 export interface ChatStreamApi {
-  /** 发消息（API-08） */
-  send(convId: string, text: string): Promise<void>;
-  /** 重新生成（API-11，不新增 user 消息） */
-  regenerate(convId: string): Promise<void>;
-  /** 编辑并重发（API-12，后端原子截断） */
-  editAndResend(convId: string, msgId: string, text: string): Promise<void>;
+  /**
+   * 发消息（API-08）。
+   *
+   * @returns 是否收到 `done`（= 服务端已落盘）。**调用方据此决定能否"以服务端为准"重取**：
+   *          为 `false`（error / aborted / 中断）时服务端内容可能缺失，重取会覆盖掉本地已渲染内容。
+   */
+  send(convId: string, text: string): Promise<boolean>;
+  /** 重新生成（API-11，不新增 user 消息）；返回语义同 `send` */
+  regenerate(convId: string): Promise<boolean>;
+  /** 编辑并重发（API-12，后端原子截断）；返回语义同 `send` */
+  editAndResend(convId: string, msgId: string, text: string): Promise<boolean>;
   /** 中止当前生成（N6：保留已生成部分并标记「已中止」） */
   abort(): void;
   /** 是否存在活跃流 */
@@ -66,6 +71,17 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
   const ctrlRef = useRef<AbortController | null>(null);
   /** 已被主动 abort 的流 —— 用于区分"用户中止"与"网络中断"（N6 vs §5 流中断） */
   const abortedRef = useRef<Set<AbortController>>(new Set());
+  /**
+   * ★ 流序号令牌 —— **"谁有权收尾"的唯一依据**。
+   *
+   * 为什么必须有：`abort()` 只让**旧流**的读取中断，而旧流 `consume` 的 `finally`
+   * 是**后续微/宏任务**才执行的（`dispatch` 同步改变不了它的触发时机；若旧流正卡在
+   * `runKbSearch` 这类不接收 signal 的等待里，还会被显著推迟）。旧流 finally 里的
+   * `streamEnd` 会把**新流**的 `streaming` 重置为初始态（`messageId=null`），
+   * 于是新流后续的 `content` 在收尾时被 `finalizeStream` 整段丢弃（实测：`messages: []`）。
+   * 场景：检索进行中切会话 / 点重新生成。
+   */
+  const seqRef = useRef(0);
 
   /** 卸载或 AppShell 销毁时中止流（daemon 退出/页面关闭路径） */
   useEffect(() => {
@@ -90,18 +106,40 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       convId: string,
       ctrl: AbortController,
       makeStream: (signal: AbortSignal) => AsyncGenerator<ChatEvent>,
-    ): Promise<void> => {
+      mySeq: number,
+    ): Promise<boolean> => {
       let finishReason: string | undefined;
       let abortedEvent = false;
+      /**
+       * 是否收到 `done`（= 服务端**已落盘**）。
+       *
+       * ★ 调用方据此决定"能否以服务端为准重取"：`error` / `aborted` / 中断路径下服务端
+       *   可能没有（或只有部分）新内容，此时重取会把刚渲染出来的回答**覆盖成旧的** —— 
+       *   用户会看到回答"凭空消失"且无任何提示。
+       */
+      let sawDone = false;
 
       errorsByConv.delete(convId);
 
       try {
         for await (const ev of makeStream(ctrl.signal)) {
-          applyEvent(store, ev);
+          applyEvent(store, ev, mySeq);
 
-          if (ev.type === 'done') finishReason = ev.finishReason;
+          if (ev.type === 'done') {
+            finishReason = ev.finishReason;
+            sawDone = true;
+          }
           if (ev.type === 'aborted') abortedEvent = true;
+          // ★ 流内 `error` 事件必须落进错误槽（N4）。
+          //   原先只被 `applyEvent` 当"无操作"丢弃 → `LLM_TIMEOUT` / `LLM_UPSTREAM_ERROR` /
+          //   `CHAT_WRITE_FAILED` 等失败对用户**完全不可见**（错误槽只在 JS 异常路径被写）。
+          if (ev.type === 'error') {
+            errorsByConv.set(convId, {
+              code: ev.code,
+              message: ev.error,
+              retryable: ev.retryable !== false,
+            });
+          }
 
           // `done` / `aborted` / `error` 是终态事件：收到即结束本轮
           if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') break;
@@ -121,11 +159,24 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
         abortedRef.current.delete(ctrl);
         if (ctrlRef.current === ctrl) ctrlRef.current = null;
 
-        store.dispatch({ type: 'streamEnd' });
-        void userAborted;
-        void abortedEvent;
+        // ★ 只有"当前流"有权收尾（**双层判定**，缺一不可）：
+        //   ① hook 令牌：被新流取代的旧流在此返回，否则它的 streamEnd 会把**新流**的
+        //      streaming 重置为初始态（messageId=null），新流后续 content 收尾时被整段丢弃。
+        //   ② store 令牌：切会话会把 streaming 重置为 `seq: undefined`，
+        //      此时这条流的收尾动作（含下面的 aborted 标记）不得再落到新会话的状态上。
+        const stillCurrent = seqRef.current === mySeq && store.getState().streaming.seq === mySeq;
+        if (!stillCurrent) return false;
+
+        // N6 兜底：用户主动中止但 `aborted` 事件未达（如中途网络中断）→ 在此补标记，
+        //   保证「已中止」与「正常完成」在 UI 上可区分。
+        if (userAborted && !abortedEvent) store.dispatch({ type: 'streamAborted' });
+
+        // 带令牌收尾：reducer 会校验它仍是"当前流"（双保险，见 chatStore 的 streamEnd 守门）
+        store.dispatch({ type: 'streamEnd', seq: mySeq });
         void finishReason;
       }
+
+      return sawDone;
     },
     [store],
   );
@@ -133,8 +184,11 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
   /** 统一入口：先 abort 旧流（单写者），再起新流 */
   const run = useCallback(
     (convId: string, messageId: string, makeStream: (signal: AbortSignal) => AsyncGenerator<ChatEvent>) => {
+      // ★ 先取令牌：流内所有动作（`streamStart` 与最终 `streamEnd`）都要带上它，
+      //   `streamEnd` 会据此校验"只有当前流能收尾"（见 seqRef 注释）
+      const mySeq = ++seqRef.current;
       // 单写者：新流开始前必须中止旧流（切会话 / 重新生成 / 编辑重发均适用）
-      store.dispatch({ type: 'streamStart', messageId });
+      store.dispatch({ type: 'streamStart', messageId, seq: mySeq });
       const prev = ctrlRef.current;
       if (prev) {
         abortedRef.current.add(prev);
@@ -142,7 +196,7 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       }
       const ctrl = new AbortController();
       ctrlRef.current = ctrl;
-      return consume(convId, ctrl, makeStream);
+      return consume(convId, ctrl, makeStream, mySeq);
     },
     [consume, store],
   );
@@ -152,7 +206,7 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
     const tempId = () => `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
     return {
-      async send(convId: string, text: string): Promise<void> {
+      async send(convId: string, text: string): Promise<boolean> {
         const placeholder = tempId();
         // 乐观显示 user 消息（不落盘乐观，只做 UI 立即反馈；失败的可重试入口在错误槽）
         const cur = store.getState();
@@ -163,15 +217,15 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
             { id: `local-user-${placeholder}`, role: 'user', content: text, at: new Date().toISOString() },
           ],
         });
-        await run(convId, placeholder, (signal) => streamMessage(convId, text, signal));
+        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal));
       },
 
-      async regenerate(convId: string): Promise<void> {
-        await run(convId, tempId(), (signal) => streamRegenerate(convId, signal));
+      async regenerate(convId: string): Promise<boolean> {
+        return run(convId, tempId(), (signal) => streamRegenerate(convId, signal));
       },
 
-      async editAndResend(convId: string, msgId: string, text: string): Promise<void> {
-        await run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal));
+      async editAndResend(convId: string, msgId: string, text: string): Promise<boolean> {
+        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal));
       },
 
       abort(): void {
@@ -198,11 +252,12 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
  * 拆成独立纯函数：事件分派表是本 hook 的核心知识，独立后可被直接阅读与（未来）单测，
  * 不必经过 React 渲染或网络环境。
  */
-function applyEvent(store: ChatStore, ev: ChatEvent): void {
+function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number): void {
   switch (ev.type) {
     case 'meta':
       // `meta` 给出真实 messageId 与（API-12）被丢弃轮数；重置为后端 id
-      store.dispatch({ type: 'streamStart', messageId: ev.messageId });
+      // ★ 必须带上令牌：否则 `streaming.seq` 会被清成 undefined，收尾守门随即失效
+      store.dispatch({ type: 'streamStart', messageId: ev.messageId, seq: mySeq });
       return;
 
     case 'tool_start':
@@ -237,18 +292,30 @@ function applyEvent(store: ChatStore, ev: ChatEvent): void {
       return;
 
     case 'done':
+      // ★ 先用服务端落盘后的**真实 messageId** 校正本地 id：`meta` 给的是预估值
+      //   （`conv.seq + messages.length + 1`），与落盘后的 `m{seq}` 可能不同。
+      //   不校正会让本地消息 id 与磁盘不一致（重取/刷新后错位、来源引用挂不上去）。
+      if (ev.messageId) store.dispatch({ type: 'streamMessageId', messageId: ev.messageId });
       // `done.sources` 是落盘来源的权威副本（`sources` 事件可能因故未达）
       if (ev.sources && ev.sources.length > 0) {
         store.dispatch({ type: 'streamSources', sources: ev.sources });
       }
+      // `done.warning` 必须落地：它是"本轮回答可能不完整"的唯一通道（S03 §5）
+      store.dispatch({ type: 'notice', text: warningNotice(ev.warning) });
       return;
 
-    // usage / aborted / error 不改变累积态：
+    case 'aborted':
+      // ★ N6：标记"本轮被中止" → 收尾时写进消息的 `aborted`，UI 显示「已中止」
+      //   （原先该事件落进下面的无操作分支 → 标记永远不显示，中止与正常完成外观相同）
+      store.dispatch({ type: 'streamAborted' });
+      // 中止路径同样给出**服务端落盘后的真实 id**（有内容落盘时）；空串表示未落盘 → 跳过
+      if (ev.messageId) store.dispatch({ type: 'streamMessageId', messageId: ev.messageId });
+      return;
+
+    // usage / error 不改变累积态：
     // · usage → 由 done 后重取会话详情获得（落盘字段）
-    // · aborted → 已生成部分保留即可（N6），标记在收尾时统一处理
     // · error  → 走错误槽（见 consume 的 catch / API 层抛出）
     case 'usage':
-    case 'aborted':
     case 'error':
       return;
   }
@@ -274,6 +341,22 @@ function toolEndStep(hits: number, error?: string): ProgressStep {
  */
 function degradedMark(reason: DegradedMark['reason'], message: string): DegradedMark {
   return { reason, label: message || DEGRADED_LABELS[reason] };
+}
+
+/**
+ * `done.warning` → 用户可见提示（S03 §5：会话过长 → 输入区上方提示「建议新建会话」）。
+ *
+ * 为什么必须有：该字段是"本轮回答可能不完整"的**唯一通道** —— 后端已产出，
+ * 前端不消费即等于零反馈（原实现即如此，warning 连路由层都没透传）。
+ */
+function warningNotice(
+  warning: 'tool-rounds-exhausted' | 'conversation-too-long' | undefined,
+): string | null {
+  if (warning === 'tool-rounds-exhausted') {
+    return '已达检索轮次上限，本轮回答可能未覆盖全部相关信息';
+  }
+  if (warning === 'conversation-too-long') return '会话过长，建议新建会话';
+  return null;
 }
 
 /** 供视图层读取/清除本轮错误（N4 的重试入口与错误块） */

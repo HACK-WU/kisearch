@@ -863,7 +863,7 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
  *  2. rename 会用临时文件的权限覆盖目标，而配置可能含 apiKey 明文；
  *     原本 0600 的文件被改成默认 0644 就是密钥泄露，故必须显式沿用原 mode。
  */
-function atomicWriteConfig(configPath: string, content: string): void {
+export function atomicWriteConfig(configPath: string, content: string): void {
   const tmp = `${configPath}.tmp-${process.pid}`;
   let mode: number | undefined;
   try {

@@ -52,7 +52,7 @@ import {
   toChatConfigOk,
   type LlmStatus,
 } from './llm-client.js';
-import { loadConfig, type KiConfig } from '../config.js';
+import { loadConfig, atomicWriteConfig, resetConfigCache, type KiConfig } from '../config.js';
 import { validateScope, ScopeError } from '../scope.js';
 import {
   ConversationNotFoundError,
@@ -461,7 +461,12 @@ export async function handleConfigAck(req: IncomingMessage, res: ServerResponse)
     const out = path.extname(configPath).toLowerCase() === '.json'
       ? JSON.stringify(doc, null, 2) + '\n'
       : YAML.stringify(doc);
-    fs.writeFileSync(configPath, out, 'utf-8');
+    // ★ 复用 config.ts 的原子写（临时文件 + rename + 沿用原 mode）：
+    //   ① 直接 writeFileSync 会让并发 daemon 有机会读到**半截文件**（解析失败 → 被当成"配置坏了"）；
+    //   ② 配置含 apiKey 明文，rename 不带原 mode 会把 0600 降级为默认权限（密钥泄露）。
+    atomicWriteConfig(configPath, out);
+    // 本次确认应立即生效：清掉配置缓存，避免后续 `loadConfig()` 仍拿到 kbDisclosureAck=false 的旧快照
+    resetConfigCache();
   } catch (err) {
     if (err instanceof ChatWriteFailedError) throw err;
     throw new ChatWriteFailedError(err);
@@ -849,6 +854,13 @@ async function runGeneration(
   let messageId: string | null = null;
   let abortedFlag = false;
   let streamError: { code: string; error: string; retryable?: boolean } | null = null;
+  /**
+   * tool-loop 在 `done` 事件里给出的 warning（`tool-rounds-exhausted` / `conversation-too-long`）。
+   *
+   * ★ 必须透传：路由会用落盘后的真实 `messageId` **重建** `done`，若此处不接住，
+   *   tool-loop 的 warning 会被重建过程静默丢弃（前端失去"已达工具轮次上限"的提示依据）。
+   */
+  let streamWarning: 'tool-rounds-exhausted' | 'conversation-too-long' | undefined;
 
   try {
     const events = runToolLoop({
@@ -910,6 +922,8 @@ async function runGeneration(
       if (ev.type === 'done') {
         finishReason = ev.finishReason;
         if (ev.sources && ev.sources.length > 0) sources = ev.sources;
+        // ★ 接住 tool-loop 的 warning，供落盘后重建 done 时透传（见 streamWarning 声明）
+        streamWarning = ev.warning;
         break;
       }
     }
@@ -953,18 +967,28 @@ async function runGeneration(
       if (!convNow) throw new ConversationNotFoundError(convId);
 
       const assistant = buildAssistantMessage({ content, sources, usage, finishReason, aborted: false, totalMs });
-      const saved = mode === 'regenerate' || mode === 'edit'
+      // ★ 只有「重新生成」才替换最后一条 assistant。
+      //
+      //   · regenerate：会话尾部是 […, u, a]，语义是"替换 a" → messageCount 不变（R23）
+      //   · edit：前置写 `truncateAfterAndEdit` 已把尾部截断为 […, u']（末条是 user）。
+      //     若此处仍走 `replaceLastAssistant`，它会从**更早那条 assistant**（如 a1）起
+      //     截断到末尾 → 把刚保留的 u' 一并删除（P0：用户消息静默消失，实测 [u1,a1,u2] → [u1,a2]）
+      //     → **必须 append**。
+      const saved = mode === 'regenerate'
         ? await replaceLastAssistant(scope, convId, assistant)
         : await appendMessage(scope, convId, assistant);
 
       const savedId = saved.messages.at(-1)?.id ?? messageId ?? '';
       const tooLong = saved.messages.length > CONVERSATION_TOO_LONG;
+      // ★ 优先透传 tool-loop 的 warning（它已按"轮次耗尽 > 会话过长"排优先级）；
+      //   路由自身只补一层"按落盘后真实条数判定"的会话过长兜底。
+      const warning = streamWarning ?? (tooLong ? ('conversation-too-long' as const) : undefined);
       writeSseEvent(res, {
         type: 'done',
         messageId: savedId,
         finishReason,
         sources,
-        ...(tooLong ? { warning: 'conversation-too-long' as const } : {}),
+        ...(warning ? { warning } : {}),
       });
     } else {
       // 空终答：不落 assistant（避免空消息）；仍以 done 收尾保证事件序完整

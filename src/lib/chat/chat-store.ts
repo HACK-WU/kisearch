@@ -479,21 +479,22 @@ export async function replaceLastAssistant(
     const conv = readJson<ConversationFile>(convPath(scope, id));
     if (!conv) throw new ConversationNotFoundError(id);
 
-    // 从尾部向前找最后一条 assistant
     const messages = conv.messages;
-    const lastAssistantIdx = (() => {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i]!.role === 'assistant') return i;
-      }
-      return -1;
-    })();
-
     const stamped: ChatMessage = { ...msg, id: newMessageId(conv.seq + 1) };
-    if (lastAssistantIdx >= 0) {
-      // 物理截断到最后一条 assistant 之前，再追加新回答 → messageCount 不变
-      messages.splice(lastAssistantIdx, messages.length - lastAssistantIdx, stamped);
+
+    // ★ 判定依据必须是「**末条本身是否为 assistant**」，而不是"会话里存在哪条 assistant"。
+    //
+    //   原实现是"向前找最后一条 assistant 的 index，再 splice 到末尾"——
+    //   当末条是 user 时（首次生成失败/中止，assistant 从未落盘），它会从**更早那条**
+    //   assistant 起把中间消息连同末条 user 一并删除：
+    //       [u1, a1, u2] → splice(1, 2, a') → [u1, a']     ← u2 与 a1 被吃掉
+    //   而本函数的文档语义恰是"末尾是 user → 等价继续生成，直接追加"。两者不一致即为缺陷。
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'assistant') {
+      // 末条即 assistant → 原位替换（messageCount 不变，R23）
+      messages[messages.length - 1] = stamped;
     } else {
-      // 末尾是 user（首次生成中途失败）→ 等价"继续生成"，直接追加
+      // 末条是 user（或空会话）→ 等价"继续生成"，直接追加（**不删除既有消息**）
       messages.push(stamped);
     }
 
