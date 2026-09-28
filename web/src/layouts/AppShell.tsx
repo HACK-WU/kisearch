@@ -4,8 +4,11 @@
 
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useHealth } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
+import { DocumentEditor } from '@/components/DocumentEditor';
+import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -67,6 +70,8 @@ function ServiceBadge(): JSX.Element {
 export function AppShell(): JSX.Element {
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
+  const queryClient = useQueryClient();
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
   // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
@@ -87,6 +92,8 @@ export function AppShell(): JSX.Element {
   }, []);
 
   return (
+    <DocumentEditorProvider value={{ isOpen: editorRequest !== null, open: setEditorRequest }}>
+    <>
     <div className="ki-shell">
       {/* ════════ 侧边栏 ════════ */}
       <aside className={`ki-sidebar${sidebarHidden ? ' ki-sidebar--hidden' : ''}`}>
@@ -166,5 +173,21 @@ export function AppShell(): JSX.Element {
         </main>
       </div>
     </div>
+    {editorRequest && (
+      <DocumentEditor
+        key={`${editorRequest.scope}/${editorRequest.group}/${editorRequest.relation}`}
+        scope={editorRequest.scope}
+        group={editorRequest.group}
+        relation={editorRequest.relation}
+        readerSelection={editorRequest.readerSelection}
+        onSaved={(content, result) => {
+          editorRequest.onSaved?.(content, result);
+          void queryClient.invalidateQueries({ queryKey: ['docList', editorRequest.scope] });
+        }}
+        onClose={() => setEditorRequest(null)}
+      />
+    )}
+    </>
+    </DocumentEditorProvider>
   );
 }

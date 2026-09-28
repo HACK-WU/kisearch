@@ -46,6 +46,7 @@ import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
+import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -307,7 +308,8 @@ export async function handleApiRequest(
   // query scope 越权校验：对带 scope 参数的只读接口（tags / doc/list / asset）生效；
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
-  if (authScopes !== null && (p === '/tags' || p === '/doc/list' || p === '/asset' || p === '/import/config')) {
+  if (authScopes !== null && req.method === 'GET'
+    && (p === '/tags' || p === '/doc/list' || p === '/doc/edit' || p === '/asset' || p === '/import/config')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -348,6 +350,57 @@ export async function handleApiRequest(
       );
       return;
     }
+    if (p === '/doc/edit' && req.method === 'GET') {
+      const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      const group = url.searchParams.get('group') ?? '';
+      const relation = url.searchParams.get('relation') ?? '';
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-edit-read', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, () => {
+          try {
+            sendJson(res, 200, readDocumentForEdit({ scope, group, relation }));
+          } catch (error) {
+            sendDocEditError(res, error);
+          }
+        }),
+        [scope],
+      );
+      return;
+    }
+    if (p === '/doc/edit' && req.method === 'POST') {
+      const body = await readJsonBody(req) as Record<string, unknown> | undefined;
+      const scope = resolveScope(requestConfig, typeof body?.scope === 'string' ? body.scope : '');
+      if (authScopes !== null && !scopeAllowed(authScopes, scope)) {
+        rejectScopeViolation(res, scope, p);
+        return;
+      }
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-edit-write', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, async () => {
+          try {
+            if (typeof body?.group !== 'string' || typeof body.relation !== 'string'
+              || typeof body.content !== 'string' || typeof body.expectedRevision !== 'string') {
+              sendJson(res, 400, { ok: false, code: 'DOC_EDIT_INVALID', error: '缺少编辑参数' });
+              return;
+            }
+            const result = await saveDocumentEdit({
+              scope, group: body.group, relation: body.relation,
+              content: body.content, expectedRevision: body.expectedRevision,
+              expectedSourceRevision: typeof body.expectedSourceRevision === 'string' ? body.expectedSourceRevision : undefined,
+              vectorize: body.vectorize === true,
+              editId: typeof body.editId === 'string' ? body.editId : undefined,
+            });
+            docListCache.delete(scope);
+            sendJson(res, 200, result);
+          } catch (error) {
+            docListCache.delete(scope);
+            sendDocEditError(res, error);
+          }
+        }),
+        [scope],
+      );
+      return;
+    }
     if (p === '/asset' && req.method === 'GET') {
       // 附件复制与 scope delete 可能同时操作 assets 目录；读请求也要经过
       // 同一 scope 队列，避免读到半写文件或已删除目录。
@@ -373,6 +426,15 @@ export async function handleApiRequest(
     const e = err as Error & { code?: string };
     sendJson(res, 400, { ok: false, error: e.message, code: e.code ?? 'API_ERROR' });
   }
+}
+
+function sendDocEditError(res: http.ServerResponse, error: unknown): void {
+  if (error instanceof DocumentEditError) {
+    sendJson(res, error.status, { ok: false, code: error.code, error: error.message,
+      ...(error.details ? { details: error.details } : {}) });
+    return;
+  }
+  sendJson(res, 500, { ok: false, code: 'DOC_EDIT_FAILED', error: (error as Error).message });
 }
 
 // ─── GET /api/import/config ──────────────────────────

@@ -4,6 +4,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
+import { findAnchorBlocks } from '@/lib/kiLinks';
+import { useDocumentEditor } from '@/lib/documentEditorContext';
 
 /** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
 const ICON_DRAWER_COLLAPSE = (
@@ -203,6 +205,8 @@ interface ModuleDrawerProps {
   fallbackContent?: string;
   /** 全文检索上下文；缺省时为普通阅读，不显示命中导航。 */
   highlightQuery?: string;
+  targetAnchor?: string;
+  editable?: boolean;
   onClose: () => void;
   fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string; error?: string; hint?: string }>;
   onLocalLink?: (href: string) => boolean;
@@ -227,6 +231,8 @@ export function ModuleDrawer({
   initialContent,
   fallbackContent,
   highlightQuery,
+  targetAnchor,
+  editable = false,
   onClose,
   fetcher,
   onLocalLink,
@@ -244,10 +250,13 @@ export function ModuleDrawer({
   const [error, setError] = useState<string | null>(null);
   const showingFallback = content === null && error !== null && Boolean(fallbackContent);
   const displayedContent = content ?? (showingFallback ? fallbackContent ?? null : null);
+  const [anchorWarning, setAnchorWarning] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const [savedNotice, setSavedNotice] = useState('');
+  const editor = useDocumentEditor();
   const [internalFullscreen, setInternalFullscreen] = useState(false);
   const fullscreen = controlledFullscreen ?? internalFullscreen;
   const [highlightEnabled, setHighlightEnabled] = useState(Boolean(highlightQuery?.trim()));
@@ -299,6 +308,33 @@ export function ModuleDrawer({
     return () => window.cancelAnimationFrame(frame);
   // 全屏切换会重建正文容器；重新为新 DOM 标记标题供大纲跳转使用。
   }, [collectOutlineHeadings, loading, fullscreen]);
+
+  useEffect(() => {
+    if (!targetAnchor || content === null || loading) return;
+    const frame = window.requestAnimationFrame(() => {
+      const body = bodyRef.current;
+      const root = body?.querySelector<HTMLElement>('.ki-markdown--drawer');
+      if (!body || !root) return;
+      const blocks = findAnchorBlocks(root);
+      const matches = blocks.filter((block) => block.anchor === targetAnchor);
+      if (matches.length !== 1) {
+        setAnchorWarning(matches.length === 0 ? '目标段落已变化或不存在' : '目标段落不唯一，未自动定位');
+        return;
+      }
+      setAnchorWarning(null);
+      const element = matches[0].element;
+      let details = element.closest('details');
+      while (details) {
+        details.open = true;
+        details = details.parentElement?.closest('details') ?? null;
+      }
+      const top = body.scrollTop + element.getBoundingClientRect().top - body.getBoundingClientRect().top - 24;
+      body.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+      element.classList.add('ki-anchor-target');
+      window.setTimeout(() => element.classList.remove('ki-anchor-target'), 2400);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [targetAnchor, content, loading, fullscreen]);
 
   const updateOutlineCollapsed = useCallback((collapsed: boolean): void => {
     if (controlledOutlineCollapsed === undefined) setInternalOutlineCollapsed(collapsed);
@@ -427,12 +463,30 @@ export function ModuleDrawer({
     }
   }, [displayedContent]);
 
+  const openEditor = useCallback((): void => {
+    const selection = window.getSelection();
+    const root = bodyRef.current?.querySelector('.ki-markdown--drawer');
+    const selected = selection?.anchorNode && root?.contains(selection.anchorNode)
+      ? selection.toString().trim() : '';
+    if (!group) return;
+    editor.open({
+      scope, group, relation: module, readerSelection: selected || undefined,
+      onSaved: (next, result) => {
+        setContent(next);
+        const indexed = result.vectorStored ? '向量索引已更新'
+          : result.fullTextUpdated ? '全文索引已更新' : '索引未变化';
+        setSavedNotice(`文档已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
+      },
+    });
+  }, [editor, group, module, scope]);
+
   /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
+      if (editor.isOpen) return;
       if (fullscreen) updateFullscreen(false);
       else onClose();
     };
@@ -441,7 +495,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [fullscreen, onClose, updateFullscreen]);
+  }, [editor.isOpen, fullscreen, onClose, updateFullscreen]);
 
   /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
   const [atTop, setAtTop] = useState(true);
@@ -493,6 +547,8 @@ export function ModuleDrawer({
 
   const body = (
     <div className="ki-drawer__body" ref={bodyRef}>
+      {savedNotice && <div className="ki-drawer__copy-failed" role="status">{savedNotice}</div>}
+      {anchorWarning && <div className="ki-drawer__copy-failed" role="status">{anchorWarning}。文档已打开，请重新选择位置。</div>}
       {copyFailed && (
         <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
       )}
@@ -630,6 +686,9 @@ export function ModuleDrawer({
             </div>
           )}
           <div className="ki-drawer__actions">
+            {editable && group && content !== null && (
+              <button className="ki-drawer__copy" type="button" onClick={openEditor}>编辑 / 添加跳转</button>
+            )}
             {displayedContent && (
               <button
                 className={`ki-drawer__copy${copied ? ' ki-drawer__copy--done' : ''}`}

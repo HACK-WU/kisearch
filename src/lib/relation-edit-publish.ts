@@ -73,7 +73,7 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
   const cleanCfg = getScopeCleanConfig(config, draft.scope);
   const imported = !!relation.sourcePath;
   const chunked = imported || draft.content.length > 5_000 || (relation.editChunkCount ?? 0) > 1;
-  const mode = relationIndexMode(relation);
+  const mode = draft.targetMode ?? relationIndexMode(relation);
   let indexedText = draft.content;
   if (chunked && cleanCfg?.enabled !== false) {
     indexedText = cleanMarkdownText(indexedText, cleanCfg?.rules);
@@ -396,10 +396,12 @@ async function runFinish(editId: string, scope: string): Promise<void> {
       }
       publishLocalKbAndCache(draft, plan);
     }
-    const wiki = writeBackToWiki(scope, draft.group, draft.relation, draft.content);
-    draft.wikiSynced = wiki.synced;
-    if (!wiki.synced) draft.wikiReason = wiki.reason;
-    else delete draft.wikiReason;
+    if (!draft.skipWikiWriteback) {
+      const wiki = writeBackToWiki(scope, draft.group, draft.relation, draft.content);
+      draft.wikiSynced = wiki.synced;
+      if (!wiki.synced) draft.wikiReason = wiki.reason;
+      else delete draft.wikiReason;
+    }
     await cleanupOldIds(draft);
     draft.status = 'published';
     delete draft.error;
@@ -414,6 +416,19 @@ async function runFinish(editId: string, scope: string): Promise<void> {
       saveDraft(draft);
     } catch { /* 尽力而为：无法持久化失败态时保持运行中状态，由 view 的中断恢复兜底 */ }
   }
+}
+
+/** 已在同 scope OperationCoordinator 内的 HTTP 编辑请求直接发布，避免重复入队自等待。 */
+export async function finishRelationEditNow(draft: RelationEditDraft): Promise<RelationEditDraft> {
+  if (activeJobs.has(draft.editId)) throw new Error('编辑发布已在进行中');
+  const task = runFinish(draft.editId, draft.scope);
+  activeJobs.set(draft.editId, task);
+  try {
+    await task;
+  } finally {
+    activeJobs.delete(draft.editId);
+  }
+  return loadDraft(draft.scope, draft.editId);
 }
 
 /** 排进同 scope 队列，工具调用立即返回；任务结果通过 view 查询。 */
