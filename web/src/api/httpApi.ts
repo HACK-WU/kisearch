@@ -72,6 +72,31 @@ export interface DocListResponse {
   error?: string;
 }
 
+export interface EditableDocument {
+  ok: true;
+  scope: string;
+  group: string;
+  relation: string;
+  content: string;
+  revision: string;
+  sourceConfigured: boolean;
+  sourceRevision?: string;
+  sourceError?: string;
+  warning?: string;
+  indexMode: 'fts' | 'dense';
+}
+
+export interface SaveDocumentResponse {
+  ok: true;
+  revision: string;
+  sourceConfigured: boolean;
+  sourceWritten: boolean;
+  fullTextUpdated: boolean;
+  vectorStored: boolean;
+  indexedAs: 'fts' | 'dense' | 'unchanged';
+  warning?: string;
+}
+
 export interface UploadFile {
   name: string;
   path?: string;
@@ -168,6 +193,23 @@ export async function getDocList(
   // 按自定义 tag 过滤（relation.tags 精确匹配）
   if (opts.tag) params.set('tag', opts.tag);
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
+}
+
+export async function getEditableDocument(scope: string, group: string, relation: string): Promise<EditableDocument> {
+  return req<EditableDocument>(`/api/doc/edit?${new URLSearchParams({ scope, group, relation }).toString()}`);
+}
+
+export async function saveEditableDocument(args: {
+  scope: string;
+  group: string;
+  relation: string;
+  content: string;
+  expectedRevision: string;
+  expectedSourceRevision?: string;
+  vectorize?: boolean;
+  editId?: string;
+}): Promise<SaveDocumentResponse> {
+  return req<SaveDocumentResponse>('/api/doc/edit', { method: 'POST', body: JSON.stringify(args) });
 }
 
 export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {

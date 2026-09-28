@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Marked, Renderer, type Token, type TokenizerAndRendererExtension } from 'marked';
 import { isLocalDocumentHref } from '@/lib/documentLinks';
+import { deepLink, parseKiLink } from '@/lib/kiLinks';
 
 /** 附件寻址上下文：提供时相对路径图片重写为 /api/asset 路由；缺省时保持原 src（如写入页预览） */
 export interface AssetBase {
@@ -344,6 +345,13 @@ function buildRenderer(base?: AssetBase) {
   renderer.link = function ({ href, title, tokens, text }) {
     const url = href ?? '';
     const inner = this.parser?.parseInline(tokens) ?? escapeAttr(text ?? '');
+    if (url.startsWith('ki-link:')) {
+      const target = parseKiLink(url);
+      if (!target) return `${inner}${blockedLinkMark(url)}`;
+      const destination = target.type === 'external' ? target.url : deepLink(target);
+      const t = title ? ` title="${escapeAttr(title)}"` : '';
+      return `<a class="ki-jump-link" href="${escapeAttr(destination)}" target="_blank" rel="noopener noreferrer"${t}>${inner}</a>`;
+    }
     if (!isSafeLinkUrl(url)) return `${inner}${blockedLinkMark(url)}`;
     const t = title ? ` title="${escapeAttr(title)}"` : '';
     // 外部链接开新页并断 opener（防 window.opener 反向操控来源页）；站内相对链接不加 target
