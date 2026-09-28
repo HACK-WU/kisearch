@@ -106,6 +106,8 @@ export function SearchPage(): JSX.Element {
   const [viewing, setViewing] = useState<DocumentView | null>(null);
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
+  const [readerFullscreen, setReaderFullscreen] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(false);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -128,6 +130,8 @@ export function SearchPage(): JSX.Element {
   const closeDocument = useCallback((): void => {
     setHistory([]);
     setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(false);
     setViewing(null);
   }, []);
 
@@ -541,6 +545,13 @@ export function SearchPage(): JSX.Element {
           onBack={goBack}
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
+          fullscreen={readerFullscreen}
+          onFullscreenChange={(fullscreen) => {
+            setReaderFullscreen(fullscreen);
+            if (!fullscreen) setReaderOutlineCollapsed(false);
+          }}
+          outlineCollapsed={readerOutlineCollapsed}
+          onOutlineCollapsedChange={setReaderOutlineCollapsed}
         />
       )}
     </>

@@ -987,6 +987,85 @@ a:hover { text-decoration: underline; }
 .ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
 .ki-drawer--fullscreen .ki-markdown--drawer { max-width: 100%; }
 
+/* 全屏阅读器右上角的大纲：半透明浮层，普通抽屉不会挂载该组件。 */
+.ki-document-outline {
+  position: absolute;
+  top: 82px;
+  right: 20px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  width: min(260px, calc(100% - 40px));
+  max-height: calc(100% - 98px);
+  overflow: hidden;
+  background: var(--ki-color-surface);
+  background: color-mix(in srgb, var(--ki-color-surface) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-border) 68%, transparent);
+  border-radius: 12px;
+  box-shadow: var(--ki-shadow-2);
+  backdrop-filter: blur(10px);
+}
+.ki-document-outline--collapsed { width: 42px; }
+.ki-document-outline--collapsed .ki-document-outline__toggle {
+  justify-content: center;
+  padding: 0;
+}
+.ki-document-outline--collapsed .ki-document-outline__toggle-icon { display: none; }
+.ki-document-outline__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 38px;
+  width: 100%;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.ki-document-outline__toggle:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-document-outline__icon { width: 16px; height: 16px; flex-shrink: 0; }
+.ki-document-outline__toggle-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.ki-document-outline__title { flex: 1; font-size: 12px; font-weight: 600; }
+.ki-document-outline__list {
+  overflow-y: auto;
+  max-height: calc(100vh - 112px);
+  margin: 0;
+  padding: 4px 6px 8px;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+.ki-document-outline__item {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding-top: 5px;
+  padding-right: 8px;
+  padding-bottom: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ki-document-outline__item:hover,
+.ki-document-outline__item:focus-visible {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+  outline: none;
+}
 /* 全屏阅读工作区：Group 树、文档列表与正文同处一个 overlay，避免被抽屉 scrim 遮挡。 */
 .ki-reader-workspace {
   display: flex;
@@ -1160,6 +1239,14 @@ a:hover { text-decoration: underline; }
   .ki-reader-workspace__main {
     width: 100%;
   }
+
+  .ki-document-outline {
+    top: 70px;
+    right: 12px;
+    width: min(220px, calc(100% - 24px));
+    max-height: calc(100% - 82px);
+  }
+  .ki-document-outline--collapsed { width: 42px; }
 }
 
 /* 内容区 */

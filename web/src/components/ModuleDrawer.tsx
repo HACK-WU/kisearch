@@ -37,6 +37,29 @@ const ICON_SCROLL_BOTTOM = (
   </svg>
 );
 
+const ICON_OUTLINE = (
+  <svg className="ki-document-outline__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M8 6h12" />
+    <path d="M8 12h12" />
+    <path d="M8 18h12" />
+    <path d="M3.5 6h.01" />
+    <path d="M3.5 12h.01" />
+    <path d="M3.5 18h.01" />
+  </svg>
+);
+
+const ICON_OUTLINE_COLLAPSE = (
+  <svg className="ki-document-outline__toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m15 6-6 6 6 6" />
+  </svg>
+);
+
+const ICON_OUTLINE_EXPAND = (
+  <svg className="ki-document-outline__toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m9 6 6 6-6 6" />
+  </svg>
+);
+
 const DOC_HIGHLIGHT_CLASS = 'ki-doc-highlight';
 const DOC_HIGHLIGHT_ACTIVE_CLASS = 'ki-doc-highlight--active';
 
@@ -118,6 +141,58 @@ function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: S
   body.scrollTo({ top: Math.max(0, top), behavior });
 }
 
+interface OutlineHeading {
+  id: string;
+  level: number;
+  label: string;
+}
+
+interface DocumentOutlineProps {
+  headings: OutlineHeading[];
+  collapsed: boolean;
+  onToggle: () => void;
+  onNavigate: (id: string) => void;
+}
+
+function DocumentOutline({ headings, collapsed, onToggle, onNavigate }: DocumentOutlineProps): JSX.Element {
+  return (
+    <nav
+      className={`ki-document-outline${collapsed ? ' ki-document-outline--collapsed' : ''}`}
+      aria-label="文档大纲"
+    >
+      <button
+        className="ki-document-outline__toggle"
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? '展开文档大纲' : '折叠文档大纲'}
+        title={collapsed ? '展开文档大纲' : '折叠文档大纲'}
+      >
+        {ICON_OUTLINE}
+        {!collapsed && <span className="ki-document-outline__title">大纲</span>}
+        {collapsed ? ICON_OUTLINE_EXPAND : ICON_OUTLINE_COLLAPSE}
+      </button>
+      {!collapsed && (
+        <ol className="ki-document-outline__list">
+          {headings.map((heading) => (
+            <li key={heading.id}>
+              <button
+                className="ki-document-outline__item"
+                type="button"
+                onClick={() => onNavigate(heading.id)}
+                title={heading.label}
+                style={{ paddingLeft: `${8 + Math.max(0, heading.level - 1) * 14}px` }}
+              >
+                {heading.label}
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+    </nav>
+  );
+}
+
 interface ModuleDrawerProps {
   scope: string;
   module: string;
@@ -136,6 +211,9 @@ interface ModuleDrawerProps {
   /** 受控全屏状态；传入后由外层 BrowsePage 保留状态，切换文档不会丢失。 */
   fullscreen?: boolean;
   onFullscreenChange?: (fullscreen: boolean) => void;
+  /** 受控大纲折叠状态；传入后由外层页面保留同一全屏会话内的选择。 */
+  outlineCollapsed?: boolean;
+  onOutlineCollapsedChange?: (collapsed: boolean) => void;
   /** 全屏时显示在阅读正文左侧的导航工作区（Group 树 + 文档列表）。 */
   fullscreenNavigation?: ReactNode;
 }
@@ -155,6 +233,8 @@ export function ModuleDrawer({
   onForward,
   fullscreen: controlledFullscreen,
   onFullscreenChange,
+  outlineCollapsed: controlledOutlineCollapsed,
+  onOutlineCollapsedChange,
   fullscreenNavigation,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
@@ -168,6 +248,9 @@ export function ModuleDrawer({
   const [highlightEnabled, setHighlightEnabled] = useState(Boolean(highlightQuery?.trim()));
   const [highlightCount, setHighlightCount] = useState(0);
   const [highlightIndex, setHighlightIndex] = useState(0);
+  const [outlineHeadings, setOutlineHeadings] = useState<OutlineHeading[]>([]);
+  const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(false);
+  const outlineCollapsed = controlledOutlineCollapsed ?? internalOutlineCollapsed;
   const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
   /** 正文滚动容器 */
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -179,6 +262,58 @@ export function ModuleDrawer({
     setHighlightIndex(0);
     highlightScrollBehavior.current = 'auto';
   }, [highlightQuery]);
+
+  /** 从实际渲染的标题生成当前文档大纲；只有全屏时才收集，普通抽屉不显示。 */
+  const collectOutlineHeadings = useCallback((): void => {
+    if (!fullscreen || content === null) {
+      setOutlineHeadings([]);
+      return;
+    }
+    const root = bodyRef.current?.querySelector<HTMLElement>('.ki-markdown--drawer');
+    if (!root) {
+      setOutlineHeadings([]);
+      return;
+    }
+    const headings = Array.from(root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))
+      .map((heading, index) => {
+        const id = `ki-outline-${index}`;
+        heading.dataset.kiOutlineTarget = id;
+        return {
+          id,
+          level: Number(heading.tagName.slice(1)),
+          label: heading.textContent?.trim() ?? '',
+        };
+      })
+      .filter((heading) => heading.label.length > 0);
+    setOutlineHeadings(headings);
+  }, [content, fullscreen]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(collectOutlineHeadings);
+    return () => window.cancelAnimationFrame(frame);
+  }, [collectOutlineHeadings, loading]);
+
+  const updateOutlineCollapsed = useCallback((collapsed: boolean): void => {
+    if (controlledOutlineCollapsed === undefined) setInternalOutlineCollapsed(collapsed);
+    onOutlineCollapsedChange?.(collapsed);
+  }, [controlledOutlineCollapsed, onOutlineCollapsedChange]);
+
+  // 退出全屏后清除折叠状态，下一次进入全屏按需求默认展开。
+  useEffect(() => {
+    if (!fullscreen) updateOutlineCollapsed(false);
+  }, [fullscreen, updateOutlineCollapsed]);
+
+  const scrollToOutlineHeading = useCallback((id: string): void => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const target = Array.from(body.querySelectorAll<HTMLElement>('[data-ki-outline-target]'))
+      .find((heading) => heading.dataset.kiOutlineTarget === id);
+    if (!target) return;
+    const bodyRect = body.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = body.scrollTop + targetRect.top - bodyRect.top - 20;
+    body.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, []);
 
   const updateFullscreen = useCallback((next: boolean): void => {
     // 必须在切换前记录：重建后 ref 已指向新节点，读不到旧位置
@@ -392,7 +527,12 @@ export function ModuleDrawer({
   return (
     <>
       <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />
-      <aside className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`} role="dialog" aria-modal="true" aria-label="原文查看">
+      <aside
+        className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}${fullscreen && outlineHeadings.length > 0 && !outlineCollapsed ? ' ki-drawer--outline-open' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="原文查看"
+      >
         {/* 头部 */}
         <header className="ki-drawer__head">
           <button
@@ -486,6 +626,15 @@ export function ModuleDrawer({
             </button>
           </div>
         </header>
+
+        {fullscreen && outlineHeadings.length > 0 && (
+          <DocumentOutline
+            headings={outlineHeadings}
+            collapsed={outlineCollapsed}
+            onToggle={() => updateOutlineCollapsed(!outlineCollapsed)}
+            onNavigate={scrollToOutlineHeading}
+          />
+        )}
 
         {fullscreen && fullscreenNavigation ? (
           <div className="ki-reader-workspace">
