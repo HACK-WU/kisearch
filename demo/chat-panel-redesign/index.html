@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>kisearch · AI 对话面板重设计 demo</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   token 全部沿用项目 web/src/styles/ki.css 的 --ki-* 体系（同源），
+   面板专属 token 以 --ki-chat-* 命名，便于后续并入 ki.css。
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: light;
+  --ki-color-bg: #fafafa;
+  --ki-color-bg-secondary: #f5f5f7;
+  --ki-color-bg-muted: #f3f4f6;
+  --ki-color-surface: #ffffff;
+  --ki-color-surface-hover: #ffffff;
+  --ki-color-surface-muted: rgba(0, 0, 0, 0.05);
+  --ki-color-border: rgba(0, 0, 0, 0.06);
+  --ki-color-border-strong: rgba(0, 0, 0, 0.1);
+  --ki-color-text: #1d1d1f;
+  --ki-color-text-muted: #636366;
+  --ki-color-text-subtle: #98989d;
+  --ki-color-primary: #0071e3;
+  --ki-color-primary-hover: #0077ed;
+  --ki-color-primary-active: #005bb5;
+  --ki-color-success: #34c759;
+  --ki-color-warning: #ff9500;
+  --ki-color-danger: #ff3b30;
+  --ki-color-info: #5ac8fa;
+  --ki-color-purple: #af52de;
+  --ki-color-hover: rgba(0, 0, 0, 0.04);
+  --ki-color-hover-strong: rgba(0, 0, 0, 0.06);
+  --ki-color-scrollbar: rgba(0, 0, 0, 0.12);
+  --ki-space-1: 4px; --ki-space-2: 8px; --ki-space-3: 12px;
+  --ki-space-4: 16px; --ki-space-5: 20px; --ki-space-6: 24px; --ki-space-8: 32px;
+  --ki-radius-sm: 8px; --ki-radius-md: 12px; --ki-radius-lg: 16px;
+  --ki-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', sans-serif;
+  --ki-font-mono: 'SF Mono', Menlo, Monaco, monospace;
+  --ki-font-size-xs: 11px; --ki-font-size-sm: 12px; --ki-font-size-md: 13px;
+  --ki-font-size-lg: 15px; --ki-font-size-xl: 17px;
+  --ki-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --ki-shadow-2: 0 4px 24px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.06);
+  --ki-motion-fast: 150ms;
+
+  /* ── 面板专属 ── */
+  --ki-chat-width: 392px;
+  --ki-chat-min: 320px;
+  --ki-chat-max: 560px;
+  --ki-chat-head-h: 46px;
+  --ki-chat-line: 1.65;
+  --ki-chat-bubble-r: 14px;
+  --ki-chat-timeline-x: 10px;
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+  --ki-color-bg: #1a1a1e;
+  --ki-color-bg-secondary: #222226;
+  --ki-color-bg-muted: #28282c;
+  --ki-color-surface: #2c2c30;
+  --ki-color-surface-hover: #333338;
+  --ki-color-surface-muted: rgba(255, 255, 255, 0.06);
+  --ki-color-border: rgba(255, 255, 255, 0.08);
+  --ki-color-border-strong: rgba(255, 255, 255, 0.14);
+  --ki-color-text: #e5e5ea;
+  --ki-color-text-muted: #aeaeb2;
+  --ki-color-text-subtle: #6c6c70;
+  --ki-color-primary: #2997ff;
+  --ki-color-primary-hover: #3da4ff;
+  --ki-color-primary-active: #1e8bef;
+  --ki-color-success: #30d158;
+  --ki-color-warning: #ff9f0a;
+  --ki-color-danger: #ff453a;
+  --ki-color-info: #64d2ff;
+  --ki-color-purple: #bf5af2;
+  --ki-color-hover: rgba(255, 255, 255, 0.06);
+  --ki-color-hover-strong: rgba(255, 255, 255, 0.08);
+  --ki-color-scrollbar: rgba(255, 255, 255, 0.15);
+  --ki-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --ki-shadow-2: 0 8px 32px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+/* [hidden] 必须压过组件自身的 display（.empty 是 display:flex，否则隐藏失效） */
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { scroll-behavior: smooth; }
+/* 键盘可达性：统一焦点环（风格审计项：missing focus ring） */
+:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+body {
+  font-family: var(--ki-font-family);
+  font-size: var(--ki-font-size-md);
+  line-height: var(--ki-chat-line);
+  background: var(--ki-color-bg);
+  color: var(--ki-color-text);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; }
+input, textarea { font: inherit; color: inherit; }
+::selection { background: color-mix(in srgb, var(--ki-color-primary) 30%, transparent); }
+
+/* ── 宿主页面（模拟 ki-main，只为看面板在真实布局里的样子）── */
+.host { display: flex; flex-direction: column; min-height: 100dvh; height: 100dvh; }
+.host__bar {
+  height: var(--ki-chat-head-h); flex: none; display: flex; align-items: center; gap: var(--ki-space-3);
+  padding: 0 var(--ki-space-5); border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary); font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.host__brand { font-weight: 600; color: var(--ki-color-text); font-size: var(--ki-font-size-lg); letter-spacing: -0.2px; }
+.host__crumb { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.host__spacer { flex: 1; }
+.host__btn {
+  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.host__btn:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.shell { display: flex; flex: 1; min-height: 0; }
+.main { flex: 1; min-width: 0; padding: var(--ki-space-6); overflow: auto; }
+.main h2 { font-size: var(--ki-font-size-xl); margin-bottom: var(--ki-space-3); letter-spacing: -0.3px; }
+.main p { color: var(--ki-color-text-muted); max-width: 62ch; margin-bottom: var(--ki-space-3); }
+.skel { height: 12px; border-radius: 6px; background: var(--ki-color-surface-muted); margin: var(--ki-space-3) 0; }
+.skel.w60 { width: 60%; } .skel.w80 { width: 80%; } .skel.w40 { width: 40%; }
+.card {
+  margin-top: var(--ki-space-5); padding: var(--ki-space-4); border-radius: var(--ki-radius-md);
+  border: 1px solid var(--ki-color-border); background: var(--ki-color-surface); box-shadow: var(--ki-shadow-1);
+}
+.card h3 { font-size: var(--ki-font-size-md); margin-bottom: var(--ki-space-2); }
+.card code { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); color: var(--ki-color-info); }
+
+/* ═══════════════ 面板骨架：head / stream / composer ═══════════════ */
+.panel {
+  position: relative; flex: none; display: flex; flex-direction: column;
+  width: var(--ki-chat-width); min-width: var(--ki-chat-min); max-width: var(--ki-chat-max);
+  background: var(--ki-color-bg-secondary);
+  border-left: 1px solid var(--ki-color-border);
+}
+/* 宽度固定 392px（拖宽本期不做：见 PM 报告 P3 决议） */
+
+/* ── head：标题 + 会话切换器 + 工具 ── */
+.head {
+  flex: none; height: var(--ki-chat-head-h); display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-3) 0 var(--ki-space-4);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.head__title { font-size: var(--ki-font-size-lg); font-weight: 600; letter-spacing: -0.2px; flex: none; }
+.head__tools { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.iconbtn {
+  width: 28px; height: 28px; border-radius: var(--ki-radius-sm); display: grid; place-items: center;
+  color: var(--ki-color-text-subtle); transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.iconbtn:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.iconbtn:active { background: var(--ki-color-hover-strong); }
+.iconbtn[aria-expanded="true"] { background: var(--ki-color-surface); color: var(--ki-color-text); box-shadow: var(--ki-shadow-1); }
+.iconbtn svg { width: 16px; height: 16px; }
+
+/* 会话切换器触发器（取代原「会话（N）」折叠条） */
+.convchip {
+  display: flex; align-items: center; gap: var(--ki-space-2); max-width: 55%;
+  padding: 4px 8px; border-radius: 999px; border: 1px solid transparent;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm);
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast);
+}
+.convchip:hover, .convchip[aria-expanded="true"] {
+  background: var(--ki-color-surface); border-color: var(--ki-color-border); color: var(--ki-color-text);
+}
+.convchip__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convchip__count { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/* ── 会话切换浮层（popover）── */
+.pop {
+  position: absolute; z-index: 20; top: calc(var(--ki-chat-head-h) - 4px); left: var(--ki-space-3); right: var(--ki-space-3);
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-md); box-shadow: var(--ki-shadow-2); overflow: hidden;
+  opacity: 0; transform: translateY(-6px) scale(0.985); pointer-events: none;
+  transition: opacity var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.pop[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
+.pop__search { display: flex; align-items: center; gap: var(--ki-space-2); padding: var(--ki-space-2) var(--ki-space-3); border-bottom: 1px solid var(--ki-color-border); }
+.pop__search input {
+  flex: 1; min-width: 0; border: none; outline: none; background: none;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text);
+}
+.pop__search input::placeholder { color: var(--ki-color-text-subtle); }
+.pop__list { max-height: 260px; overflow: auto; padding: var(--ki-space-1); }
+.conv {
+  display: flex; align-items: center; gap: var(--ki-space-2); cursor: pointer;
+  width: 100%; text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
+  border-radius: var(--ki-radius-sm); transition: background var(--ki-motion-fast);
+}
+/* ★ 行本身不能用 <button>：button 内嵌 button 属非法嵌套，解析器会把操作按钮拆到行外 */
+.conv[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.conv[aria-disabled="true"] .conv__name { text-decoration: line-through; }
+.conv__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.conv:hover { background: var(--ki-color-hover); }
+.conv[aria-current="true"] { background: var(--ki-color-surface-muted); }
+.conv[aria-current="true"] .conv__name { color: var(--ki-color-primary); }
+.conv__name { font-size: var(--ki-font-size-sm); color: var(--ki-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv__meta { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); flex: none; }
+.conv__time { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.pop__foot {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3); border-top: 1px solid var(--ki-color-border);
+}
+.pop__new {
+  display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+  background: var(--ki-color-primary); color: #fff; font-size: var(--ki-font-size-sm);
+  transition: background var(--ki-motion-fast);
+}
+.pop__new:hover { background: var(--ki-color-primary-hover); }
+.pop__new:active { background: var(--ki-color-primary-active); }
+.pop__hint { margin-left: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.pop__err {
+  display: flex; align-items: center; gap: var(--ki-space-2); padding: var(--ki-space-2) var(--ki-space-3);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-danger); background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent);
+}
+.pop__empty { padding: var(--ki-space-6) var(--ki-space-4); text-align: center; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
+
+/* ── 会话项：名称 / 元信息 / 行内操作（重命名 · 归档 · 删除）── */
+.pop__group {
+  padding: var(--ki-space-2) var(--ki-space-3) 4px; font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle); letter-spacing: 0.3px;
+}
+.pop__group:not(:first-child) { border-top: 1px solid var(--ki-color-border); margin-top: var(--ki-space-1); }
+.conv__acts {
+  flex: none; display: flex; gap: 1px; align-self: center;
+  opacity: 0; transition: opacity var(--ki-motion-fast);
+}
+.conv:hover .conv__acts, .conv:focus-within .conv__acts { opacity: 1; }
+.conv__act {
+  width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+  color: var(--ki-color-text-subtle); transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.conv__act:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.conv__act--del:hover { color: var(--ki-color-danger); background: color-mix(in srgb, var(--ki-color-danger) 14%, transparent); }
+.conv__act svg { width: 13px; height: 13px; }
+/* 重命名：行内输入（不用 prompt 弹窗）*/
+.conv__input {
+  flex: 1; min-width: 0; width: 100%;
+  border: 1px solid var(--ki-color-primary); border-radius: 6px; background: var(--ki-color-bg);
+  padding: 2px 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); outline: none;
+}
+/* 删除二次确认：整行替换（负向场景：误删即丢整段会话）*/
+.conv--row { flex-wrap: wrap; }
+.conv__confirm {
+  flex: 1 0 100%; display: flex; align-items: center; gap: var(--ki-space-2);
+  margin-top: 4px; padding: 4px var(--ki-space-2); border-radius: 6px;
+  background: color-mix(in srgb, var(--ki-color-danger) 12%, transparent);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-danger);
+}
+.conv__confirm b { font-weight: 500; color: var(--ki-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv__confirm .btn-sm { height: 20px; font-size: var(--ki-font-size-xs); }
+.conv__confirm .btn-sm--danger { background: var(--ki-color-danger); color: #fff; }
+.conv__confirm .btn-sm--danger:hover { background: color-mix(in srgb, var(--ki-color-danger) 85%, #fff); }
+/* 读取中：骨架行形状与真实列表项一致（风格审计项：loading 用 skeleton 而非转圈） */
+.pop__skel { padding: var(--ki-space-3); display: flex; flex-direction: column; gap: var(--ki-space-3); }
+.pop__skel i { display: block; height: 11px; border-radius: 6px; background: var(--ki-color-surface-muted); animation: ki-shimmer 1.3s ease-in-out infinite; }
+.pop__skel i:nth-child(2) { width: 72%; } .pop__skel i:nth-child(3) { width: 55%; }
+
+/* ── 生成期上下文条（scope / 模型 / 已用 token 等，替代原来散在头部的 chip）── */
+.ctx {
+  flex: none; display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 6px var(--ki-space-4); border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ctx__item { display: flex; align-items: center; gap: 4px; }
+.ctx__item b { font-weight: 500; color: var(--ki-color-text-muted); font-family: var(--ki-font-mono); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ki-color-success); flex: none; }
+.dot--warn { background: var(--ki-color-warning); }
+.dot--off { background: var(--ki-color-text-subtle); }
+
+/* ═══════════════ stream：消息流 ═══════════════ */
+.stream { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--ki-space-4) var(--ki-space-4) var(--ki-space-6); }
+.stream::-webkit-scrollbar { width: 8px; }
+.stream::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 4px; }
+.stream::-webkit-scrollbar-track { background: transparent; }
+
+.turn { display: flex; flex-direction: column; gap: var(--ki-space-2); margin-bottom: var(--ki-space-5); }
+.turn--user { align-items: flex-end; }
+
+/* user：右侧气泡 */
+.bubble {
+  max-width: 88%; padding: 9px var(--ki-space-3); border-radius: var(--ki-chat-bubble-r);
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text);
+  font-size: var(--ki-font-size-md); line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  border: 1px solid var(--ki-color-border);
+}
+/* assistant：无气泡平铺（工程风：让长回答与代码块占满可读宽度） */
+.answer { font-size: var(--ki-font-size-md); line-height: var(--ki-chat-line); min-width: 0; }
+.answer p { margin-bottom: var(--ki-space-3); text-wrap: pretty; }
+.answer p:last-child { margin-bottom: 0; }
+.answer code {
+  font-family: var(--ki-font-mono); font-size: 12px; padding: 1px 5px; border-radius: 5px;
+  background: var(--ki-color-surface-muted); color: var(--ki-color-info);
+}
+.answer pre {
+  font-family: var(--ki-font-mono); font-size: 12px; line-height: 1.6;
+  padding: var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted); border: 1px solid var(--ki-color-border);
+  overflow-x: auto; margin: var(--ki-space-2) 0 var(--ki-space-3);
+}
+.answer ul { padding-left: var(--ki-space-5); margin-bottom: var(--ki-space-3); }
+.cite {
+  display: inline-grid; place-items: center; vertical-align: 1px;
+  min-width: 16px; height: 16px; padding: 0 4px; margin: 0 2px;
+  border-radius: 5px; background: color-mix(in srgb, var(--ki-color-primary) 16%, transparent);
+  color: var(--ki-color-primary); font-family: var(--ki-font-mono); font-size: 10px; font-weight: 600;
+  transition: background var(--ki-motion-fast);
+}
+.cite:hover { background: var(--ki-color-primary); color: #fff; }
+
+/* 消息元信息行（角色 / 时间 / 状态徽标） */
+.meta { display: flex; align-items: center; gap: var(--ki-space-2); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.meta__role { font-weight: 600; color: var(--ki-color-text-muted); letter-spacing: 0.2px; }
+.badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 999px;
+  font-size: var(--ki-font-size-xs); border: 1px solid transparent;
+}
+.badge--abort { color: var(--ki-color-warning); border-color: color-mix(in srgb, var(--ki-color-warning) 40%, transparent); background: color-mix(in srgb, var(--ki-color-warning) 10%, transparent); }
+.badge--degrade { color: var(--ki-color-purple); border-color: color-mix(in srgb, var(--ki-color-purple) 38%, transparent); background: color-mix(in srgb, var(--ki-color-purple) 10%, transparent); }
+.turn--user .meta { flex-direction: row-reverse; }
+
+/* 消息级操作条：hover 浮现（"像聊天应用"的关键） */
+.acts {
+  display: flex; gap: 2px; margin-top: var(--ki-space-1);
+  opacity: 0; transform: translateY(-2px); transition: opacity var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.turn:hover .acts, .turn:focus-within .acts { opacity: 1; transform: none; }
+/* 最后一条回答的操作条常驻：可发现性（hover-only 对触屏与首次使用者不友好） */
+.turn:last-child .acts { opacity: 1; transform: none; }
+.act {
+  display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px;
+  border-radius: var(--ki-radius-sm); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.act:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.act svg { width: 13px; height: 13px; }
+.turn--user .acts { justify-content: flex-end; }
+
+/* ── 来源条：编号 chip + hover 预览（取代「§ 引用 N 处」折叠）── */
+.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--ki-space-3); }
+.sources__label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); align-self: center; margin-right: 2px; }
+.src {
+  position: relative; display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; padding: 0 8px 0 5px; border-radius: 999px;
+  border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted);
+  transition: border-color var(--ki-motion-fast), color var(--ki-motion-fast), background var(--ki-motion-fast);
+}
+.src:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); background: var(--ki-color-surface-hover); }
+.src__no {
+  display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%;
+  background: color-mix(in srgb, var(--ki-color-primary) 18%, transparent);
+  font-family: var(--ki-font-mono); font-size: 9px; font-weight: 700; color: var(--ki-color-primary);
+}
+.src__doc { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src__lines { font-family: var(--ki-font-mono); color: var(--ki-color-text-subtle); }
+/* hover 预览浮层：不占位，替代折叠 */
+.src__pop {
+  position: absolute; bottom: calc(100% + 8px); left: 0; width: min(300px, 82vw);
+  padding: var(--ki-space-2) var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border-strong);
+  box-shadow: var(--ki-shadow-2); opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity var(--ki-motion-fast), transform var(--ki-motion-fast); z-index: 15;
+}
+.src:hover .src__pop, .src:focus-visible .src__pop { opacity: 1; pointer-events: auto; transform: none; }
+.src__pop b { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); margin-bottom: 3px; }
+.src__pop em { display: block; font-style: normal; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-bottom: var(--ki-space-2); }
+.src__pop q { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); line-height: 1.55; }
+.src__pop mark { background: color-mix(in srgb, var(--ki-color-warning) 32%, transparent); color: var(--ki-color-text); border-radius: 2px; padding: 0 1px; }
+.src__pop u { display: block; margin-top: var(--ki-space-2); text-decoration: none; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
+
+/* ── 生成期时间线（取代 reasoning <details> + progress 文本行）── */
+.tl {
+  position: relative; margin-bottom: var(--ki-space-3); padding-left: var(--ki-space-5);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.tl::before {
+  content: ''; position: absolute; left: calc(var(--ki-chat-timeline-x) - 1px); top: 6px; bottom: 6px;
+  width: 1px; background: var(--ki-color-border-strong);
+}
+.tl__node { position: relative; display: flex; align-items: center; gap: var(--ki-space-2); padding: 3px 0; }
+.tl__node::before {
+  content: ''; position: absolute; left: calc(var(--ki-space-5) * -1 + var(--ki-chat-timeline-x) - 4px);
+  top: 9px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--ki-color-bg-secondary); border: 1.5px solid var(--ki-color-text-subtle);
+}
+.tl__node--done::before { background: var(--ki-color-text-subtle); border-color: transparent; }
+.tl__node--run::before { background: var(--ki-color-primary); border-color: transparent; animation: ki-chat-pulse 1.1s ease-in-out infinite; }
+.tl__node--warn::before { background: var(--ki-color-warning); border-color: transparent; }
+.tl__node--think::before { background: var(--ki-color-purple); border-color: transparent; }
+@keyframes ki-chat-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ki-color-primary) 55%, transparent); } 60% { box-shadow: 0 0 0 5px transparent; } }
+.tl__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl__stat { margin-left: auto; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); flex: none; }
+/* 思考正文：时间线内的低饱和缩进块，可点收（不再是页面上多出来的一条折叠栏） */
+.tl__reason {
+  margin: 2px 0 4px; padding: var(--ki-space-2) var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-purple) 8%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--ki-color-purple) 45%, transparent);
+  font-size: var(--ki-font-size-sm); line-height: 1.6; color: var(--ki-color-text-muted);
+  max-height: 168px; overflow: auto; white-space: pre-wrap;
+}
+.tl__toggle { font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); padding: 2px 0; }
+.tl__toggle:hover { text-decoration: underline; }
+
+/* ── 空态 / 骨架 ── */
+.empty { display: flex; flex-direction: column; align-items: center; gap: var(--ki-space-3); padding: var(--ki-space-8) var(--ki-space-4); text-align: center; }
+.empty__ic {
+  width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); color: var(--ki-color-text-subtle);
+}
+.empty__ic svg { width: 22px; height: 22px; }
+.empty__t { font-size: var(--ki-font-size-lg); color: var(--ki-color-text); }
+.empty__d { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); max-width: 30ch; }
+.empty__hints { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: var(--ki-space-1); }
+.q {
+  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted);
+  transition: border-color var(--ki-motion-fast), color var(--ki-motion-fast), background var(--ki-motion-fast);
+}
+.q:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); background: var(--ki-color-surface); }
+.loading { display: flex; flex-direction: column; gap: var(--ki-space-3); padding: var(--ki-space-4) 0; }
+.shimmer { height: 11px; border-radius: 6px; background: var(--ki-color-surface-muted); animation: ki-shimmer 1.3s ease-in-out infinite; }
+.shimmer.w70 { width: 70%; } .shimmer.w90 { width: 90%; } .shimmer.w50 { width: 50%; }
+@keyframes ki-shimmer { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+/* ═══════════════ composer：输入区 ═══════════════ */
+.dock { flex: none; display: flex; flex-direction: column; gap: var(--ki-space-2); padding: var(--ki-space-2) var(--ki-space-4) var(--ki-space-4); position: relative; }
+/* ★ dock 内所有块必须禁止被 flex 压缩：压缩后 alert 文案会溢出到卡片外（实测 bug） */
+.dock > * { flex: none; }
+/* 滚动到底按钮 */
+.jumbottom {
+  position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px;
+  border-radius: 999px; background: var(--ki-color-surface); border: 1px solid var(--ki-color-border-strong);
+  box-shadow: var(--ki-shadow-1); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted);
+}
+.jumbottom:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+
+/* 分级提示：alert（需处理）/ notice（自动淡出）——不再与 hint 挤同一行 */
+.alert {
+  display: flex; align-items: flex-start; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); line-height: 1.5;
+}
+.alert--err { color: var(--ki-color-danger); background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ki-color-danger) 26%, transparent); }
+.alert--ack { color: var(--ki-color-text); background: var(--ki-color-surface); border: 1px solid var(--ki-color-border-strong); }
+.alert__ic { flex: none; margin-top: 1px; }
+.alert__ic svg { width: 14px; height: 14px; display: block; }
+.alert__body { flex: 1; min-width: 0; }
+.alert__body b { display: block; font-size: var(--ki-font-size-sm); margin-bottom: 2px; }
+.alert__body span { color: var(--ki-color-text-muted); }
+.alert__body code { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); word-break: break-all; }
+.alert__act { flex: none; display: flex; gap: var(--ki-space-2); align-items: center; }
+.btn-sm {
+  height: 24px; padding: 0 10px; border-radius: 999px; font-size: var(--ki-font-size-xs);
+  background: var(--ki-color-primary); color: #fff; transition: background var(--ki-motion-fast);
+}
+.btn-sm:hover { background: var(--ki-color-primary-hover); }
+.btn-sm[disabled] { opacity: 0.5; cursor: not-allowed; }
+.btn-sm--ghost { background: none; color: var(--ki-color-text-muted); border: 1px solid var(--ki-color-border-strong); }
+.btn-sm--ghost:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.notice {
+  display: flex; align-items: center; gap: var(--ki-space-2); padding: 6px var(--ki-space-3);
+  border-radius: var(--ki-radius-sm); font-size: var(--ki-font-size-sm);
+  color: var(--ki-color-warning); background: color-mix(in srgb, var(--ki-color-warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 22%, transparent);
+  animation: ki-fade-in var(--ki-motion-fast) ease-out both;
+}
+.notice__x { margin-left: auto; color: inherit; opacity: 0.6; }
+.notice__x:hover { opacity: 1; }
+@keyframes ki-fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+/* 输入卡片 */
+.composer {
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-chat-bubble-r);
+  background: var(--ki-color-surface); transition: border-color var(--ki-motion-fast), box-shadow var(--ki-motion-fast);
+}
+.composer:focus-within { border-color: var(--ki-color-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 18%, transparent); }
+.composer__ta {
+  display: block; width: 100%; border: none; outline: none; background: none; resize: none;
+  padding: var(--ki-space-3) var(--ki-space-3) var(--ki-space-2);
+  font-size: var(--ki-font-size-md); line-height: 1.6; color: var(--ki-color-text); min-height: 46px; max-height: 176px;
+}
+.composer__ta::placeholder { color: var(--ki-color-text-subtle); }
+.composer__bar { display: flex; align-items: center; gap: var(--ki-space-2); padding: 0 var(--ki-space-2) var(--ki-space-2) var(--ki-space-3); }
+.composer__tools { display: flex; gap: 2px; }
+.composer__right { margin-left: auto; display: flex; align-items: center; gap: var(--ki-space-2); }
+.counter { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.counter--over { color: var(--ki-color-danger); }
+.send {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+  border-radius: 999px; background: var(--ki-color-primary); color: #fff; font-size: var(--ki-font-size-sm); font-weight: 500;
+  transition: background var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.send:hover:not([disabled]) { background: var(--ki-color-primary-hover); }
+.send:active:not([disabled]) { background: var(--ki-color-primary-active); transform: scale(0.97); }
+.send[disabled] {
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle);
+  border: 1px solid var(--ki-color-border); cursor: not-allowed;
+}
+.send svg { width: 14px; height: 14px; }
+.stop { background: var(--ki-color-surface-muted); color: var(--ki-color-text); border: 1px solid var(--ki-color-border-strong); }
+.stop:hover:not([disabled]) { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.kbd {
+  padding: 1px 5px; border-radius: 4px; border: 1px solid var(--ki-color-border-strong);
+  background: var(--ki-color-bg-muted); font-family: var(--ki-font-mono); font-size: 10px; color: var(--ki-color-text-subtle);
+}
+
+/* ── 回原文抽屉（来源点击后的高亮定位，仅演示遮罩）── */
+.mask { position: fixed; inset: 0; background: rgba(0,0,0,0.28); opacity: 0; pointer-events: none; transition: opacity var(--ki-motion-fast); z-index: 30; }
+.mask[data-open="true"] { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 92vw); z-index: 31;
+  background: var(--ki-color-surface); border-left: 1px solid var(--ki-color-border-strong); box-shadow: var(--ki-shadow-2);
+  transform: translateX(101%); transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex; flex-direction: column;
+}
+.drawer[data-open="true"] { transform: none; }
+.drawer__head { flex: none; height: 52px; display: flex; align-items: center; gap: var(--ki-space-3); padding: 0 var(--ki-space-4); border-bottom: 1px solid var(--ki-color-border); }
+.drawer__head b { font-size: var(--ki-font-size-md); }
+.drawer__head span { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.drawer__body { flex: 1; overflow: auto; padding: var(--ki-space-4); font-size: var(--ki-font-size-md); line-height: 1.7; color: var(--ki-color-text-muted); }
+.drawer__body p { margin-bottom: var(--ki-space-3); }
+.drawer__body mark { background: color-mix(in srgb, var(--ki-color-warning) 34%, transparent); color: var(--ki-color-text); border-radius: 2px; padding: 0 2px; outline: 2px solid color-mix(in srgb, var(--ki-color-warning) 40%, transparent); }
+
+/* ── demo 控制条（非产品 UI）── */
+.demo { display: flex; align-items: center; gap: var(--ki-space-2); }
+.demo__label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.toggle { display: flex; border: 1px solid var(--ki-color-border-strong); border-radius: 999px; overflow: hidden; }
+.toggle button { padding: 4px 9px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.toggle button[aria-pressed="true"] { background: var(--ki-color-primary); color: #fff; }
+
+/* ── 响应式：窄屏 → 浮层抽屉（覆盖原 1400px 初值口径）── */
+@media (max-width: 1100px) {
+  .panel { position: fixed; top: var(--ki-chat-head-h); right: 0; bottom: 0; width: min(420px, 100%); max-width: none; z-index: 25; box-shadow: var(--ki-shadow-2); }
+}
+@media (max-width: 640px) {
+  .panel { top: 0; width: 100%; border-left: none; }
+  .convchip { max-width: 40%; }
+}
+</style>
+</head>
+<body>
+<div class="host">
+  <!-- ══ 宿主顶栏（模拟 AppShell 顶部：只为看面板在真实页面里的比例）══ -->
+  <header class="host__bar">
+    <span class="host__brand">kisearch</span>
+    <span class="host__crumb">/browse · scope: kisearch</span>
+    <span class="host__spacer"></span>
+    <span class="demo">
+      <span class="demo__label">主题</span>
+      <span class="toggle" id="themeToggle">
+        <button data-theme-set="light" aria-pressed="false">浅色</button>
+        <button data-theme-set="dark" aria-pressed="true">暗色</button>
+      </span>
+      <span class="demo__label">状态</span>
+      <span class="toggle" id="stateToggle">
+        <button data-state="idle" aria-pressed="true">空闲</button>
+        <button data-state="streaming" aria-pressed="false">生成中</button>
+        <button data-state="error" aria-pressed="false">失败</button>
+        <button data-state="ack" aria-pressed="false">待确认</button>
+        <button data-state="empty" aria-pressed="false">空会话</button>
+      </span>
+    </span>
+    <button class="host__btn" id="panelToggle">隐藏面板</button>
+  </header>
+
+  <div class="shell">
+    <!-- ══ 主内容（既有页面，占位）══ -->
+    <main class="main">
+      <h2>Group 树 / 文档列表</h2>
+      <p>这是既有页面的占位区。面板作为 <code>ki-shell</code> 的 flex 子项插在 <code>ki-main</code> 之后，主内容区保持 <code>flex:1; min-width:0</code> 不受挤压。</p>
+      <div class="skel w80"></div><div class="skel w60"></div><div class="skel w90"></div><div class="skel w40"></div>
+      <div class="card">
+        <h3>验证点</h3>
+        <p><code>hover 来源 chip</code> 出预览不占位 ｜ <code>hover 消息</code> 出操作条 ｜ <code>会话项 hover</code> 出重命名/归档/删除 ｜ 窗口 &lt; 1100px 面板变浮层</p>
+      </div>
+    </main>
+
+    <!-- ══════════════ AI 对话面板 ══════════════ -->
+    <aside class="panel" id="panel" aria-label="AI 对话面板">
+
+      <!-- 顶栏：标题 + 会话切换器（取代原「会话（N）」折叠条）+ 工具 -->
+      <header class="head">
+        <span class="head__title">AI 对话</span>
+        <button class="convchip" id="convChip" aria-expanded="false" aria-controls="convPop">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"/></svg>
+          <span class="convchip__name" id="convName">replaceLastAssistant 为什么吃消息</span>
+          <span class="convchip__count" id="convCount">6</span>
+          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6.5 8 10.5 12 6.5"/></svg>
+        </button>
+        <span class="head__tools">
+          <button class="iconbtn" title="新会话" id="btnNew"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
+          <button class="iconbtn" title="复制本会话记录" id="btnCopyConv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M10.5 3.5H3.9A1.4 1.4 0 0 0 2.5 4.9v6.6"/></svg></button>
+          <button class="iconbtn" title="收起面板" id="btnCollapse"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3l5 5-5 5"/></svg></button>
+        </span>
+      </header>
+
+      <!-- 会话上下文条：scope / 模型 / 工具轮次 / 隐私状态 -->
+      <div class="ctx">
+        <span class="ctx__item"><span class="dot"></span><b>Qwen3-235B</b></span>
+        <span class="ctx__item">·</span>
+        <span class="ctx__item">工具 <b>2/3</b></span>
+        <span class="ctx__item">·</span>
+        <span class="ctx__item">检索 <b>hybrid</b></span>
+        <span class="ctx__item" id="ctxAck" hidden>·</span>
+        <span class="ctx__item" id="ctxAckText" hidden style="color:var(--ki-color-warning)">外发未确认</span>
+      </div>
+
+      <!-- 会话切换浮层 -->
+      <div class="pop" id="convPop" role="dialog" aria-label="会话列表" data-open="false">
+        <div class="pop__search">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--ki-color-text-subtle)"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/></svg>
+          <input type="search" placeholder="搜索会话标题 / 内容" id="convSearch" />
+        </div>
+        <div class="pop__list" id="convList"></div>
+        <div class="pop__foot">
+          <span class="pop__new" id="popNew"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v10M3 8h10"/></svg>新建会话</span>
+          <span class="pop__hint">最近 50 条 · 归档会话在配置页查看</span>
+        </div>
+      </div>
+
+      <!-- 消息流 -->
+      <div class="stream" id="stream">
+        <!-- 空态（新会话首屏：把提问引导放到注意力中心，而不是留白）-->
+        <div class="empty" id="emptyView" hidden>
+          <span class="empty__ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.6 4.2A1.6 1.6 0 0 1 4.2 2.6h7.6a1.6 1.6 0 0 1 1.6 1.6v5a1.6 1.6 0 0 1-1.6 1.6H7.4L4.2 13.4v-2.6H4.2a1.6 1.6 0 0 1-1.6-1.6z"/></svg></span>
+          <div>
+            <div class="empty__t">这个知识库还没有被问过</div>
+            <div class="empty__d">问它任何关于 kisearch 代码的问题，回答会带上可点击回原文的知识库来源。</div>
+          </div>
+          <div class="empty__hints">
+            <button class="q" data-q="daemon 的写锁和 OperationCoordinator 是什么关系？">daemon 写锁与 OperationCoordinator 的关系</button>
+            <button class="q" data-q="scopeMode=strict 时未注册 scope 会怎样？">strict 模式下未注册 scope 会怎样</button>
+            <button class="q" data-q="chatDir 为什么派生自 dataDir 而不是硬编码？">chatDir 为何派生自 dataDir</button>
+          </div>
+        </div>
+
+        <div id="convView">
+        <!-- user -->
+        <section class="turn turn--user">
+          <div class="bubble">编辑重发为什么把上一条 user 消息吃掉了？replaceLastAssistant 的判定是不是有问题</div>
+          <div class="meta"><span>14:47</span></div>
+          <div class="acts">
+            <button class="act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3.2" y="2.5" width="7" height="9" rx="1.4"/><path d="M5.8 13.5h6a1.4 1.4 0 0 0 1.4-1.4V5.5"/></svg>复制</button>
+            <button class="act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M11.2 2.8 13.2 4.8 5.4 12.6H3.4v-2z"/></svg>编辑重发</button>
+          </div>
+        </section>
+
+        <!-- assistant：已完成态（含时间线收起后的形态 + 来源 chip） -->
+        <section class="turn">
+          <div class="meta">
+            <span class="meta__role">kisearch</span>
+            <span>14:47</span>
+            <span class="badge badge--degrade" title="本次检索降级">
+              <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v3.4M8 11h.01"/><circle cx="8" cy="8" r="5.6"/></svg>
+              本次未检索
+            </span>
+          </div>
+
+          <div class="tl">
+            <div class="tl__node tl__node--done"><span class="tl__label">检索知识库</span><span class="tl__stat">hybrid · 0 命中 · 214ms</span></div>
+            <div class="tl__node tl__node--think"><span class="tl__label">思考</span><span class="tl__stat">2.1s</span></div>
+            <button class="tl__toggle" id="reasonToggle">展开思考（仅本次内存，刷新即失）</button>
+          </div>
+
+          <div class="answer">
+            <p>根因在落盘那一步，不在截断那一步。<code>mode === 'edit'</code> 与 regenerate 共用了 <code>replaceLastAssistant</code><span class="cite" data-src="0">1</span>，而该函数是「向前找最后一条 assistant，再 splice 到末尾」——前置截断 <code>truncateAfterAndEdit</code><span class="cite" data-src="1">2</span> 刚把尾部裁成 <code>[…, u']</code>，它就顺着更早的 <code>a1</code> 把 <code>u'</code> 一起删了。</p>
+            <pre>[u1, a1, u2'] --splice(1,2,a')--&gt; [u1, a']   ← u2' 永久消失</pre>
+            <p>判定依据要换成「<b>末条本身是不是 assistant</b>」：是就原位替换（<code>messageCount</code> 不变），否则直接追加。edit 则根本不该走这条路，走 <code>appendMessage</code>。</p>
+            <ul>
+              <li>改判后 regenerate 在「末条是 user」的同类吃掉中间消息缺陷一并消失</li>
+              <li>两条分支各恰好消费 1 个 <code>seq</code>，与旧 splice 路径等价</li>
+            </ul>
+          </div>
+
+          <div class="sources">
+            <span class="sources__label">来源</span>
+            <button class="src" data-open-drawer="1">
+              <span class="src__no">1</span><span class="src__doc">chat-store.ts</span><span class="src__lines">L471-499</span>
+              <span class="src__pop">
+                <b>src/lib/chat/chat-store.ts</b>
+                <em>replaceLastAssistant · L471-499</em>
+                <q>从尾部向前找最后一条 assistant … <mark>messages.splice(lastAssistantIdx, …)</mark>；末尾是 user（首次生成中途失败）→ 等价"继续生成"，直接追加</q>
+                <u>打开原文并定位 →</u>
+              </span>
+            </button>
+            <button class="src" data-open-drawer="1">
+              <span class="src__no">2</span><span class="src__doc">chat-store.ts</span><span class="src__lines">L520-545</span>
+              <span class="src__pop">
+                <b>src/lib/chat/chat-store.ts</b>
+                <em>truncateAfterAndEdit · L520-545</em>
+                <q>编辑并重发专用（R24 / API-12 / N21）—— 原子截断。契约：必须在<mark>同一把会话锁内</mark>完成"截断 + 替换 + 落盘"</q>
+                <u>打开原文并定位 →</u>
+              </span>
+            </button>
+          </div>
+
+          <div class="acts">
+            <button class="act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3.2" y="2.5" width="7" height="9" rx="1.4"/><path d="M5.8 13.5h6a1.4 1.4 0 0 0 1.4-1.4V5.5"/></svg>复制</button>
+            <button class="act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.6V5h-2.4"/></svg>重新生成</button>
+            <button class="act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 8h10M9.6 4.6 13 8l-3.4 3.4"/></svg>以此为上下文继续</button>
+          </div>
+        </section>
+        </div><!-- /convView -->
+      </div>
+
+      <!-- ══ 输入区 ══ -->
+      <div class="dock">
+        <button class="jumbottom" id="jumpBottom" hidden>
+          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v8M4.8 7.8 8 11l3.2-3.2"/></svg>回到底部
+        </button>
+
+        <!-- 分级提示位：alert（需处理）+ notice（可关/自动淡出）-->
+        <div id="slotAck" hidden>
+          <div class="alert alert--ack">
+            <span class="alert__ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v3.6M8 5.2h.01"/></svg></span>
+            <span class="alert__body">
+              <b>内容将发送至外部模型服务</b>
+              <span>你的提问与检索到的知识库片段都会发给 <code>api.siliconflow.cn</code>。</span>
+            </span>
+            <span class="alert__act">
+              <button class="btn-sm btn-sm--ghost">查看配置</button>
+              <button class="btn-sm" id="btnAck">我已知悉</button>
+            </span>
+          </div>
+        </div>
+        <div id="slotErr" hidden>
+          <div class="alert alert--err">
+            <span class="alert__ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 5v3.6M8 11h.01"/><circle cx="8" cy="8" r="5.8"/></svg></span>
+            <span class="alert__body"><b>生成中断</b><span>上游 30s 未返回首个字节，已生成的内容保留在上方。</span></span>
+            <span class="alert__act"><button class="btn-sm btn-sm--ghost" id="btnDismissErr">忽略</button><button class="btn-sm">重试</button></span>
+          </div>
+        </div>
+        <div id="slotNotice" hidden>
+          <div class="notice">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2.6 14 13H2z"/><path d="M8 6.8v2.6M8 10.8h.01"/></svg>
+            会话过长，建议新建会话
+            <button class="notice__x" id="btnDismissNotice" aria-label="关闭提示">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="composer">
+          <textarea class="composer__ta" id="ta" rows="2" maxlength="4000"
+            placeholder="问点什么，Enter 发送 / Shift+Enter 换行"></textarea>
+          <div class="composer__bar">
+            <span class="composer__tools">
+              <button class="iconbtn" title="图片输入本期未实现（T13 后置 V2）" disabled style="opacity:.35;cursor:not-allowed"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.4" y="3.4" width="11.2" height="9.2" rx="1.6"/><circle cx="6" cy="7" r="1.2"/><path d="m3.4 11.6 3.2-2.8 2.4 2 2-1.6 3.6 3"/></svg></button>
+            </span>
+            <span class="composer__right">
+              <span class="counter" id="counter">0/4000</span>
+              <button class="send" id="btnSend" disabled>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 12.5V3.8M4.6 7.2 8 3.8l3.4 3.4"/><path d="M3 13.4h10"/></svg>
+                发送
+              </button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- 回原文抽屉（来源点击）-->
+<div class="mask" id="mask" data-open="false"></div>
+<div class="drawer" id="drawer" data-open="false" role="dialog" aria-label="原文">
+  <header class="drawer__head">
+    <b>src/lib/chat/chat-store.ts</b><span>L471-499</span>
+    <span class="head__spacer" style="flex:1"></span>
+    <button class="iconbtn" id="drawerClose"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+  </header>
+  <div class="drawer__body">
+    <p>从尾部向前找最后一条 assistant：</p>
+    <pre style="font-family:var(--ki-font-mono);font-size:12px;background:var(--ki-color-bg-muted);padding:10px;border-radius:8px;overflow:auto">const lastAssistantIdx = (() => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === '<mark>assistant</mark>') return i;
+  }
+  return -1;
+})();
+messages.<mark>splice(lastAssistantIdx, messages.length - lastAssistantIdx, stamped)</mark>;</pre>
+    <p>当末条是 user 时，它会从<mark>更早那条 assistant</mark>起把中间消息连同末条 user 一并删除。</p>
+  </div>
+</div>
+
+<script>
+/* ═════════ demo 专用：仅演示视觉与状态，不接任何真实后端 ═════════ */
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+/* ── 会话切换器 ── */
+const CONVS = [
+  { id: 'c1', name: 'replaceLastAssistant 为什么吃消息', n: 6, at: '14:47', cur: true },
+  { id: 'c2', name: '上传导入的跨页面任务怎么编排', n: 12, at: '昨天' },
+  { id: 'c3', name: 'ki daemon 的 OperationCoordinator 排队口径', n: 24, at: '昨天' },
+  { id: 'c4', name: 'chunk fallback 时 lineStart 为什么是 0', n: 4, at: '9-26' },
+  { id: 'c6', name: '旧版 embedding 迁移笔记', n: 8, at: '9-20', archived: true },
+  { id: 'c5', name: '（已损坏）c-2f91…json 解析失败', n: 0, at: '9-25', broken: true },
+];
+// 重命名会把用户输入写回列表，这里必须转义（真实实现由 React 自动转义）
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let renamingId = null, confirmingId = null;
+
+const ICON = {
+  rename: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M11.2 2.8 13.2 4.8 5.4 12.6H3.4v-2z"/></svg>',
+  archive: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.4" y="3.4" width="11.2" height="3" rx="1"/><path d="M3.6 6.6v5a1.2 1.2 0 0 0 1.2 1.2h6.4a1.2 1.2 0 0 0 1.2-1.2v-5M6.4 9.4h3.2"/></svg>',
+  unarchive: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.4" y="3.4" width="11.2" height="3" rx="1"/><path d="M3.6 6.6v5a1.2 1.2 0 0 0 1.2 1.2h6.4a1.2 1.2 0 0 0 1.2-1.2v-5M8 12V8.6M6.4 10.2 8 8.6l1.6 1.6"/></svg>',
+  del: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.4 5h9.2M6.4 5V3.6h3.2V5M4.6 5l.7 8h5.4l.7-8"/></svg>',
+};
+function convRow(c, kw) {
+  const acts = c.broken
+    ? `<button class="conv__act conv__act--del" data-act="del" title="删除损坏会话（不可恢复）">${ICON.del}</button>`
+    : `<button class="conv__act" data-act="rename" title="重命名">${ICON.rename}</button>
+       <button class="conv__act" data-act="arch" title="${c.archived ? '恢复会话' : '归档会话'}">${c.archived ? ICON.unarchive : ICON.archive}</button>
+       <button class="conv__act conv__act--del" data-act="del" title="删除会话">${ICON.del}</button>`;
+  const main = renamingId === c.id
+    ? `<input class="conv__input" value="${esc(c.name)}" data-rename="${c.id}" aria-label="会话名称" />`
+    : `<span class="conv__main"><span class="conv__name">${esc(c.name)}</span><span class="conv__time">${c.broken ? '文件损坏' : c.at}</span></span>`;
+  const confirm = confirmingId === c.id
+    ? `<span class="conv__confirm">删除后不可恢复<b>${esc(c.name)}</b>
+         <button class="btn-sm btn-sm--danger" data-act="del-yes">确认删除</button>
+         <button class="btn-sm btn-sm--ghost" data-act="del-no">取消</button></span>`
+    : '';
+  return `<div class="conv${confirmingId === c.id ? ' conv--row' : ''}" data-id="${c.id}" role="menuitem" tabindex="0" aria-label="${esc(c.name)}，${c.n} 条，${c.archived ? '已归档' : '最近'}" ${c.broken ? 'aria-disabled="true" title="该会话文件已损坏，无法打开"' : ''} aria-current="${!!c.cur}">
+    ${main}<span class="conv__meta">${c.n} 条</span>
+    <span class="conv__acts">${acts}</span>${confirm}</div>`;
+}
+function renderConvs(kw = '') {
+  const box = $('#convList');
+  const hit = (c) => !kw || c.name.toLowerCase().includes(kw.toLowerCase());
+  const live = CONVS.filter((c) => !c.archived && hit(c));
+  const arch = CONVS.filter((c) => c.archived && hit(c));
+  box.innerHTML = (live.length + arch.length)
+    ? [live.length ? `<div class="pop__group">最近</div>${live.map((c) => convRow(c, kw)).join('')}` : '',
+       arch.length ? `<div class="pop__group">已归档（${arch.length}）</div>${arch.map((c) => convRow(c, kw)).join('')}` : ''].join('')
+    : `<div class="pop__empty">${kw ? '没有匹配的会话' : '还没有会话，发送第一条消息即可开始'}</div>`;
+  if (renamingId) {
+    const i = box.querySelector('[data-rename]');
+    if (i) { i.focus(); i.select(); }
+    renamingId = null;
+  }
+}
+renderConvs();
+const pop = $('#convPop');
+function closePop() { pop.dataset.open = 'false'; $('#convChip').setAttribute('aria-expanded', 'false'); }
+$('#convChip').addEventListener('click', () => {
+  const open = pop.dataset.open !== 'true';
+  pop.dataset.open = String(open);
+  $('#convChip').setAttribute('aria-expanded', String(open));
+  if (open) {
+    // 演示读取态：骨架行 → 列表（真实实现接 listConversations 的 loading）
+    $('#convList').innerHTML = '<div class="pop__skel"><i></i><i></i><i></i></div>';
+    setTimeout(() => { renderConvs($('#convSearch').value); $('#convSearch').focus(); }, 420);
+  }
+});
+$('#convSearch').addEventListener('input', (e) => renderConvs(e.target.value));
+document.addEventListener('click', (e) => {
+  if (!pop.contains(e.target) && !$('#convChip').contains(e.target)) closePop();
+});
+function findConv(id) { return CONVS.find((c) => c.id === id); }
+function selectConv(c) {
+  CONVS.forEach((x) => x.cur = x.id === c.id);
+  $('#convName').textContent = c.name;
+  $('#convCount').textContent = c.n;
+  confirmingId = null;
+  renderConvs($('#convSearch').value);
+  closePop();
+}
+// 删除当前会话后必须把 activeConvId 归零（否则提问会写进已不存在的会话）
+function clearActive() {
+  $('#convName').textContent = '未选择会话';
+  $('#convCount').textContent = '0';
+  showEmpty(true);
+}
+$('#convList').addEventListener('click', (e) => {
+  const actBtn = e.target.closest('[data-act]');
+  const row = e.target.closest('.conv');
+  if (!row) return;
+  const c = findConv(row.dataset.id); if (!c) return;
+  if (actBtn) {
+    const act = actBtn.dataset.act;
+    if (act === 'rename') { renamingId = c.id; renderConvs($('#convSearch').value); }
+    else if (act === 'arch') { c.archived = !c.archived; renderConvs($('#convSearch').value); }
+    else if (act === 'del') { confirmingId = c.id; renderConvs($('#convSearch').value); }
+    else if (act === 'del-no') { confirmingId = null; renderConvs($('#convSearch').value); }
+    else if (act === 'del-yes') {
+      const i = CONVS.indexOf(c);
+      CONVS.splice(i, 1);
+      if (c.cur) { const next = CONVS.find((x) => !x.archived && !x.broken); next ? selectConv(next) : (clearActive(), renderConvs($('#convSearch').value)); }
+      else renderConvs($('#convSearch').value);
+    }
+    e.stopPropagation();
+    return;
+  }
+  if (row.getAttribute('aria-disabled') === 'true' || confirmingId === c.id || renamingId === c.id) return;
+  selectConv(c);
+});
+// 重命名：Enter 保存 / Esc 取消（对应 API-05 PATCH）
+$('#convList').addEventListener('keydown', (e) => {
+  const i = e.target.closest('[data-rename]'); if (!i) return;
+  if (e.key === 'Enter') { const c = findConv(i.dataset.rename); if (c && i.value.trim()) c.name = i.value.trim(); renderConvs($('#convSearch').value); e.preventDefault(); }
+  else if (e.key === 'Escape') { renderConvs($('#convSearch').value); e.stopPropagation(); }
+});
+$('#convList').addEventListener('focusout', (e) => {
+  const i = e.target.closest('[data-rename]'); if (!i) return;
+  const c = findConv(i.dataset.rename);
+  if (c && i.value.trim() && i.value.trim() !== c.name) { c.name = i.value.trim(); renderConvs($('#convSearch').value); }
+});
+// 键盘导航：↑↓ 在会话项间移动，Enter/Space 选中，Esc 关闭
+$('#convList').addEventListener('keydown', (e) => {
+  if (e.target.closest('[data-rename]')) return;
+  const row = e.target.closest('.conv'); if (!row) return;
+  if ((e.key === 'Enter' || e.key === ' ') && row.getAttribute('aria-disabled') !== 'true') {
+    e.preventDefault(); const c = findConv(row.dataset.id); if (c) selectConv(c);
+  }
+});
+pop.addEventListener('keydown', (e) => {
+  const rows = Array.from(pop.querySelectorAll('.conv:not([aria-disabled="true"])'));
+  const at = rows.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); (rows[at + 1] || rows[0]).focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); (rows[at - 1] || rows[rows.length - 1]).focus(); }
+  else if (e.key === 'Escape') { closePop(); $('#convChip').focus(); }
+});
+const newConv = () => {
+  const c = { id: 'c' + (CONVS.length + 1) + Date.now().toString(36), name: '新会话 · 刚才的结论再验证一遍', n: 0, at: '刚刚' };
+  CONVS.unshift(c); showEmpty(false); selectConv(c);
+};
+$('#popNew').addEventListener('click', newConv);
+$('#btnNew').addEventListener('click', newConv);
+
+/* ── 思考块展开（保留既有"手动展开过就不强制收起"语义）── */
+$('#reasonToggle')?.addEventListener('click', () => {
+  const tl = $('#reasonToggle');
+  if (tl.dataset.on === '1') { tl.dataset.on = '0'; tl.textContent = '展开思考（仅本次内存，刷新即失）'; tl.previousElementSibling?.remove(); return; }
+  const body = document.createElement('div');
+  body.className = 'tl__reason';
+  body.textContent = '先确认 edit 与 regenerate 的落盘语义差异：regenerate 尾部是 […, u, a]，要替换 a；edit 经前置截断后尾部是 […, u\']，必须 append。两者共用 replaceLastAssistant 时，splice 起点是"最后一条 assistant"，于是 u\' 落在被删区间内…';
+  tl.after(body);
+  tl.dataset.on = '1';
+  tl.textContent = '收起思考';
+});
+
+/* ── 回原文抽屉（事件委托：innerHTML 重建后仍生效）── */
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.src, .cite')) { $('#drawer').dataset.open = 'true'; $('#mask').dataset.open = 'true'; }
+});
+$('#drawerClose').addEventListener('click', closeDrawer);
+$('#mask').addEventListener('click', closeDrawer);
+function closeDrawer() { $('#drawer').dataset.open = 'false'; $('#mask').dataset.open = 'false'; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); pop.dataset.open = 'false'; } });
+
+const panel = $('#panel');
+
+/* ── 输入区：计数 / 自动增高 / 禁用态 ── */
+const ta = $('#ta'), counter = $('#counter'), btnSend = $('#btnSend');
+const MAX = 4000;
+function syncComposer() {
+  const len = ta.value.length;
+  counter.textContent = `${len}/${MAX}`;
+  counter.classList.toggle('counter--over', len > MAX * 0.9);
+  // 生成中：主按钮是「停止」，必须始终可点（见 setBusy）
+  if (ta.dataset.busy === '1') btnSend.disabled = false;
+  else btnSend.disabled = !ta.value.trim() || ta.dataset.blocked === '1';
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(176, ta.scrollHeight) + 'px';
+}
+ta.addEventListener('input', syncComposer);
+ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (ta.dataset.busy !== '1') send(); } });
+
+/* ── 面板隐藏（隐藏 ≠ 卸载：内容保留）── */
+$('#btnCollapse').addEventListener('click', hide);
+$('#panelToggle').addEventListener('click', () => { panel.hidden = !panel.hidden; $('#panelToggle').textContent = panel.hidden ? '显示面板' : '隐藏面板'; });
+function hide() { panel.style.display = 'none'; $('#panelToggle').textContent = '显示面板'; }
+
+/* ── 状态机演示：空闲 / 生成中 / 失败 / 待确认 ── */
+const stream = $('#stream'), convView = $('#convView');
+const showEmpty = (on) => { $('#emptyView').hidden = !on; convView.hidden = on; };
+function setState(name) {
+  showEmpty(name === 'empty');
+  $$('#stateToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.state === name)));
+  $('#slotErr').hidden = name !== 'error';
+  $('#slotAck').hidden = name !== 'ack';
+  $('#slotNotice').hidden = true;
+  $('#ctxAck').hidden = name !== 'ack';
+  $('#ctxAckText').hidden = name !== 'ack';
+  ta.dataset.blocked = name === 'ack' ? '1' : '';
+  ta.placeholder = name === 'ack' ? '需先确认内容外发' : '问点什么，Enter 发送 / Shift+Enter 换行';
+  syncComposer();
+  if (name === 'streaming') runStream();
+}
+$$('#stateToggle button').forEach((b) => b.addEventListener('click', () => setState(b.dataset.state)));
+$('#btnAck').addEventListener('click', () => { $('#slotAck').hidden = true; $('#ctxAck').hidden = true; $('#ctxAckText').hidden = true; ta.dataset.blocked = ''; ta.placeholder = '问点什么，Enter 发送 / Shift+Enter 换行'; syncComposer(); });
+$('#btnDismissErr').addEventListener('click', () => { $('#slotErr').hidden = true; });
+$('#btnDismissNotice').addEventListener('click', () => { $('#slotNotice').hidden = true; });
+
+const ANSWER = '编辑重发要走 appendMessage：前置截断后末条已经是 user，此时再走「替换最后一条 assistant」就会把它一起吃掉。判定依据改成「末条本身是不是 assistant」后，regenerate 的同类缺陷也一并消失。';
+const SEND_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 12.5V3.8M4.6 7.2 8 3.8l3.4 3.4"/><path d="M3 13.4h10"/></svg>';
+const STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="4.5" y="4.5" width="7" height="7" rx="1.4"/></svg>';
+let liveIv = null, liveTurn = null;
+
+// 生成中：主按钮必须变成「停止」（N6 的可操作入口），且始终可点
+function setBusy(on) {
+  ta.dataset.busy = on ? '1' : '';
+  btnSend.classList.toggle('stop', on);
+  btnSend.innerHTML = (on ? STOP_ICON : SEND_ICON) + (on ? '停止' : '发送');
+  btnSend.disabled = false;
+}
+function addNode(tl, cls, label, stat) {
+  const n = document.createElement('div');
+  n.className = 'tl__node ' + cls;
+  n.innerHTML = '<span class="tl__label"></span><span class="tl__stat"></span>';
+  n.querySelector('.tl__label').textContent = label;
+  n.querySelector('.tl__stat').textContent = stat;
+  tl.append(n);
+  return n;
+}
+function runStream() {
+  stream.querySelector('.turn--live')?.remove();
+  const turn = document.createElement('section');
+  turn.className = 'turn turn--live';
+  turn.innerHTML = `
+    <div class="meta"><span class="meta__role">kisearch</span><span>刚刚</span></div>
+    <div class="tl"></div>
+    <div class="answer"><p></p></div>`;
+  convView.append(turn);
+  stream.scrollTop = stream.scrollHeight;
+  liveTurn = turn;
+  const tl = turn.querySelector('.tl'), p = turn.querySelector('.answer p');
+  const nSearch = addNode(tl, 'tl__node--run', '检索知识库…（语义）', '—');
+  let step = 0, i = 0, nThink = null, nAnswer = null;
+  setBusy(true);
+  liveIv = setInterval(() => {
+    if (step === 0) {
+      nSearch.className = 'tl__node tl__node--done';
+      nSearch.querySelector('.tl__label').textContent = '检索知识库';
+      nSearch.querySelector('.tl__stat').textContent = 'hybrid · 4 命中 · 182ms';
+      nThink = addNode(tl, 'tl__node--run', '思考中…', '1.3s');
+      nThink.classList.add('tl__node--think');
+      step = 1;
+    } else if (step === 1) {
+      nThink.className = 'tl__node tl__node--think';
+      nThink.querySelector('.tl__label').textContent = '思考';
+      nAnswer = addNode(tl, 'tl__node--run', '正在回答…', '0 字');
+      step = 2;
+    } else {
+      const shown = ++i * 3;
+      p.textContent = ANSWER.slice(0, shown);
+      if (nAnswer) nAnswer.querySelector('.tl__stat').textContent = Math.min(shown, ANSWER.length) + ' 字';
+      stream.scrollTop = stream.scrollHeight;
+      if (shown >= ANSWER.length) finish(false);
+    }
+  }, 260);
+}
+// 收尾：done 正常结束 / aborted 用户停止（保留已生成内容 + 可见「已中止」徽标）
+function finish(aborted) {
+  clearInterval(liveIv); liveIv = null;
+  const turn = liveTurn; if (!turn) { setBusy(false); return; }
+  turn.querySelectorAll('.tl__node--run').forEach((n) => {
+    n.className = 'tl__node tl__node--done';
+    n.querySelector('.tl__label').textContent = n.querySelector('.tl__label').textContent.replace('…', '').replace('中', '');
+  });
+  if (aborted) {
+    const b = document.createElement('span');
+    b.className = 'badge badge--abort';
+    b.textContent = '已中止';
+    turn.querySelector('.meta').append(b);
+  } else {
+    const p = turn.querySelector('.answer p');
+    p.innerHTML = ANSWER + ' <span class="cite">2</span>';
+    const s = document.createElement('div');
+    s.className = 'sources';
+    s.innerHTML = '<span class="sources__label">来源</span><button class="src"><span class="src__no">2</span><span class="src__doc">chat-store.ts</span><span class="src__lines">L520-545</span></button>';
+    turn.append(s);
+    $('#slotNotice').hidden = false;   // 演示 done.warning 落地
+  }
+  liveTurn = null;
+  setBusy(false);
+  syncComposer();
+  $$('#stateToggle button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.state === 'idle')));
+}
+function send() {
+  const text = ta.value.trim(); if (!text) return;
+  const u = document.createElement('section');
+  u.className = 'turn turn--user';
+  u.innerHTML = `<div class="bubble"></div><div class="meta"><span>刚刚</span></div>`;
+  u.querySelector('.bubble').textContent = text;
+  convView.append(u); ta.value = '';
+  showEmpty(false);
+  stream.scrollTop = stream.scrollHeight;
+  runStream();
+}
+$('#btnSend').addEventListener('click', () => { liveIv ? finish(true) : send(); });
+$('#jumpBottom').addEventListener('click', () => { stream.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' }); });
+stream.addEventListener('scroll', () => {
+  $('#jumpBottom').hidden = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 80;
+});
+
+/* ── 主题切换 ── */
+$$('#themeToggle button').forEach((b) => b.addEventListener('click', () => {
+  document.documentElement.dataset.theme = b.dataset.themeSet;
+  $$('#themeToggle button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+}));
+
+// 空态引导语：点击填入输入框
+$$('.q').forEach((b) => b.addEventListener('click', () => { ta.value = b.dataset.q; syncComposer(); ta.focus(); }));
+
+// 消息级操作条：复制 / 编辑重发 / 重新生成（真实实现对应 copy、API-12、API-11）
+document.addEventListener('click', (e) => {
+  const act = e.target.closest('.act'); if (!act) return;
+  const turn = act.closest('.turn'); if (!turn) return;
+  const label = act.textContent.trim();
+  const body = turn.querySelector('.bubble, .answer');
+  const text = body ? body.innerText : '';
+  if (label === '复制') {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => flash(act, '已复制')).catch(() => flash(act, '复制失败'));
+    else flash(act, '不可用');
+  } else if (label === '编辑重发') {
+    ta.value = text; syncComposer(); ta.focus(); stream.scrollTop = stream.scrollHeight;
+  } else {
+    runStream();
+  }
+});
+function flash(btn, txt) {
+  const old = btn.innerHTML;
+  btn.textContent = txt;
+  setTimeout(() => { btn.innerHTML = old; }, 1200);
+}
+
+syncComposer();
+</script>
+</body>
+</html>
