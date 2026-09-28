@@ -3,12 +3,13 @@
  */
 
 import { useEffect, useState } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useHealth } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
+import { ImportPage, type ImportTaskSummary } from '@/pages/ImportPage';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -68,9 +69,12 @@ function ServiceBadge(): JSX.Element {
 }
 
 export function AppShell(): JSX.Element {
+  const location = useLocation();
+  const importVisible = location.pathname === '/import';
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
+  const [importTask, setImportTask] = useState<ImportTaskSummary | null>(null);
   const queryClient = useQueryClient();
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
@@ -162,12 +166,21 @@ export function AppShell(): JSX.Element {
           </button>
           <span className="ki-topbar__title">ki 知识库</span>
           <div className="ki-topbar__spacer" />
+          {importTask && (
+            <Link to="/import" className="ki-import-task-link" aria-live="polite">
+              {importTask.phase === 'done' ? '✓' : importTask.phase === 'failed' || importTask.phase === 'unknown' ? '!' : '↻'}
+              {' '}{importTask.scope} · {importTask.text}
+            </Link>
+          )}
           <ScopeSelect />
           <ServiceBadge />
         </header>
 
         <main className="ki-content">
           <div className="ki-content-inner">
+            <div style={{ display: importVisible ? 'contents' : 'none' }}>
+              <ImportPage onTaskChange={setImportTask} />
+            </div>
             <Outlet />
           </div>
         </main>

@@ -214,6 +214,16 @@ a:hover { text-decoration: underline; }
 .ki-topbar__toggle:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
 .ki-topbar__title { font-size: 1.2rem; font-weight: 700; color: var(--ki-color-text); letter-spacing: -0.3px; }
 .ki-topbar__spacer { flex: 1; }
+.ki-import-task-link {
+  display: inline-block; max-width: min(32vw, 360px); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1;
+  padding: 6px 10px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text);
+  font-size: var(--ki-font-size-sm);
+}
+.ki-import-task-link:hover, .ki-import-task-link:focus-visible {
+  color: var(--ki-color-primary); outline-color: var(--ki-color-primary);
+}
 
 /* 顶栏 Scope 选择器：只允许选择已有项，搜索框仅用于过滤 */
 .ki-scope-picker { position: relative; min-width: 220px; }

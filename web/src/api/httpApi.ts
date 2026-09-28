@@ -106,11 +106,22 @@ export interface UploadFile {
 export interface UploadResponse {
   ok: boolean;
   uploadId?: string;
+  jobId?: string;
   scope?: string;
   files?: UploadFile[];
   total?: number;
   errors?: { name: string; error: string }[];
   error?: string;
+}
+
+export interface UploadStatusResponse {
+  ok: boolean;
+  uploadId: string;
+  scope: string;
+  state: 'uploading' | 'importing' | 'done' | 'failed';
+  jobId?: string;
+  active: boolean;
+  errors: { name: string; error: string }[];
 }
 
 export interface ImportConfigResponse {
@@ -219,13 +230,20 @@ export async function getImportConfig(scope: string): Promise<ImportConfigRespon
 export async function uploadFiles(
   scope: string,
   files: { name: string; content: string }[],
-  uploadId?: string,
+  uploadId: string,
+  batchIndex: number,
+  batchCount: number,
+  finalize?: Omit<Parameters<typeof runImport>[0], 'scope' | 'uploadId'>,
 ): Promise<UploadResponse> {
   return req<UploadResponse>('/api/import/upload', {
     method: 'POST',
+    headers: { 'X-Ki-Upload-Id': uploadId },
     body: JSON.stringify({
       scope,
-      ...(uploadId ? { uploadId } : {}),
+      uploadId,
+      batchIndex,
+      batchCount,
+      ...(finalize ? { finalize } : {}),
       files: files.map((f) => ({
         name: f.name,
         content: f.content,
@@ -258,6 +276,10 @@ export async function runImport(args: {
 
 export async function getImportStatus(jobId: string): Promise<StatusResponse> {
   return req<StatusResponse>(`/api/import/status?jobId=${encodeURIComponent(jobId)}`);
+}
+
+export async function getImportUploadStatus(scope: string, uploadId: string): Promise<UploadStatusResponse> {
+  return req<UploadStatusResponse>(`/api/import/upload-status?${new URLSearchParams({ scope, uploadId }).toString()}`);
 }
 
 // ─── Tag 相关 ───────────────────────────────────────────

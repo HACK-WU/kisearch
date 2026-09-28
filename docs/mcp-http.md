@@ -111,8 +111,9 @@ ki mcp --http --web
 | `/api/search-config` | GET | 语义检索默认 `timeout`（秒），仅返回非敏感配置 |
 | `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
 | `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |
-| `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId`；同一相对路径不同内容不得静默覆盖，同 `uploadId` 同内容重试幂等 |
-| `/api/import/run` | POST | 触发导入（幂等追加到 `group`，异步 job，返回 `jobId`）；支持 `conflictMode: overwrite|skip|suffix` 与 `conflictSuffix`（默认 `_{n}`） |
+| `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`）；分批上传可传 `batchIndex`/`batchCount`，最后一批传 `finalize` 后由后端启动导入并返回 `jobId`；同内容重试幂等 |
+| `/api/import/upload-status` | GET | 按 `scope`、`uploadId` 查询上传会话状态与 `jobId`，用于标签页重开后找回已启动的导入任务 |
+| `/api/import/run` | POST | 兼容原有两步调用：显式触发导入（异步 job，返回 `jobId`）；同一 `uploadId` 重试返回已有任务，不重复启动 |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
 | `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
 
@@ -121,6 +122,10 @@ ki mcp --http --web
 `/api/import/status` 的 `job` 会返回 `state`（`running`/`done`/`failed`/`cancelled`）、`phase`（`scan`/`vectorize`/`persist`）、`progress` 和 `cancelRequested`。服务重启后内存中的 job 状态不保留，需要重新提交或查看 daemon 日志。
 
 导入完成结果中的 `stats.conflicts` 和 `conflicts[]` 会报告同名文件的原 relation、最终 relation 及动作；向量更新只清理受影响文档，无关 Scope 文档不会被全量清空。
+
+Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，每批发送 `{scope, uploadId, batchIndex, batchCount, files}`，最后一批额外发送 `finalize: {group?, chunkSize?, chunkOverlap?, vector?, tags?, conflictMode?, conflictSuffix?}`。服务端确认所有批次后启动导入，在最后一批的响应里返回 `jobId`；重复提交同一 `uploadId` 不会产生第二个导入任务。标签页重开时，前端先用 `/api/import/upload-status` 查询 `uploadId`：已生成 `jobId` 则继续查询导入结果，尚未传完则清除本地任务记录，由用户重新选择文件。旧客户端仍可先调用 `/api/import/upload`，再调用 `/api/import/run`。
+
+上传中站内切页不会取消任务；关闭或刷新标签页后，未传完的文件需要重新选择并上传。尚未启动导入的暂存目录在空闲满 24 小时后，于**下一次新上传**时惰性清理，不做定时扫描。已启动导入的上传目录会登记为源目录，后续编辑/同步可能使用，因此不参与这项清理。`/api/import/status` 的 job 仍是进程内状态，服务重启后可能无法查询，客户端应显示“状态待确认”。
 
 - `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
 - 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。

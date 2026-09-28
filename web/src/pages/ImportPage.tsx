@@ -1,14 +1,14 @@
 /**
  * ImportPage.tsx —— 上传导入（对齐 demo：拖拽区 + 文件清单 + 切分高级选项 + 向量化 switch + 进度条）
  *
- * scope 必选（default 兜底）→ 选文件/目录 → upload → run → 轮询 status → 进度/结果
+ * scope 必选（default 兜底）→ 选文件/目录 → 分批 upload（最后一批启动导入）→ 轮询 status → 进度/结果
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportConfig, getImportStatus, runImport, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, scopeError, tagError } from '@/lib/validators';
@@ -39,11 +39,20 @@ interface PendingSelection {
 
 interface UploadPlan {
   scope: string;
+  finalize: {
+    group?: string;
+    chunkSize?: number;
+    chunkOverlap?: number;
+    vector: boolean;
+    tags?: string;
+    conflictMode: ImportConflictMode;
+    conflictSuffix?: string;
+  };
   selectionSnapshot: PendingSelection[];
   batches: PendingFile[][];
   nextBatch: number;
   currentBatch: number;
-  uploadId?: string;
+  uploadId: string;
   uploadedFiles: number;
   totalFiles: number;
   totalBytes: number;
@@ -295,7 +304,44 @@ interface DataTransferItemWithEntry {
   webkitGetAsEntry?: () => FileSystemEntryLike | null;
 }
 
-export function ImportPage(): JSX.Element {
+export interface ImportTaskSummary {
+  phase: 'scanning' | 'uploading' | 'importing' | 'done' | 'failed' | 'unknown';
+  scope: string;
+  text: string;
+}
+
+const LAST_IMPORT_JOB_KEY = 'ki-last-import-job';
+
+interface ImportCredential {
+  uploadId?: string;
+  jobId?: string;
+  scope?: string;
+}
+
+function readImportCredential(): ImportCredential | null {
+  try {
+    const saved = localStorage.getItem(LAST_IMPORT_JOB_KEY);
+    // 浏览器拒绝本地存储或内容不是 JSON 时，按"无待恢复任务"处理。
+    return saved ? (JSON.parse(saved) as ImportCredential) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 只清除仍属于本次任务的凭据：迟到的恢复流程不得误删用户新发起任务的凭据。 */
+function clearImportCredentialIf(owner: { uploadId?: string; jobId?: string }): void {
+  const current = readImportCredential();
+  if (!current) return;
+  if (owner.uploadId !== undefined && current.uploadId !== owner.uploadId) return;
+  if (owner.jobId !== undefined && current.jobId !== owner.jobId) return;
+  try {
+    localStorage.removeItem(LAST_IMPORT_JOB_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskSummary | null) => void }): JSX.Element {
   const currentScope = useScopeValue();
   const queryClient = useQueryClient();
   const [scope, setScope] = useState(currentScope);
@@ -386,15 +432,130 @@ export function ImportPage(): JSX.Element {
     setSelectedTags((prev) => prev.filter((t) => t !== tag));
   };
 
-  const [phase, setPhase] = useState<'idle' | 'scanning' | 'uploading' | 'importing' | 'done' | 'failed'>('idle');
+  const [phase, setPhase] = useState<'idle' | ImportTaskSummary['phase']>('idle');
   const [job, setJob] = useState<ImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | 'cancelled' | null>(null);
+  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | 'cancelled' | 'unknown' | null>(null);
   const [uploadErrors, setUploadErrors] = useState<{ name: string; error: string }[]>([]);
   const [progressText, setProgressText] = useState('');
   const [uploadStats, setUploadStats] = useState<UploadStats | null>(null);
   const [failedUploadBatch, setFailedUploadBatch] = useState<number | null>(null);
   const uploadPlanRef = useRef<UploadPlan | null>(null);
+  const startingRef = useRef(false);
+  /** 任务代际：用户发起新任务时自增，使在途的恢复流程作废，避免旧任务迟到覆盖新任务状态 */
+  const taskGenRef = useRef(0);
+
+  useEffect(() => {
+    onTaskChange?.(phase === 'idle' ? null : {
+      phase,
+      scope: job?.scope ?? uploadPlanRef.current?.scope ?? scope,
+      text: phase === 'done'
+        ? uploadErrors.length > 0 || (Array.isArray(job?.result?.errors) && job.result.errors.length > 0)
+          ? '导入完成，部分文件失败' : '导入完成'
+        : phase === 'failed' ? (failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败')
+          : phase === 'unknown' ? '任务状态待确认'
+            : phase === 'importing' && job?.progress?.total
+              ? `导入中 ${job.progress.done}/${job.progress.total}`
+              : progressText || (phase === 'importing' ? '导入中…' : '上传中…'),
+    });
+  }, [phase, failureStage, progressText, uploadErrors, job?.scope, job?.progress?.done, job?.progress?.total, job?.result, scope, onTaskChange]);
+
+  useEffect(() => {
+    let active = true;
+    const credential = readImportCredential();
+    if (!credential) return;
+    const { uploadId, jobId, scope: savedScope } = credential;
+    if (!savedScope || (!uploadId && !jobId)) return;
+    const generation = taskGenRef.current;
+    /** 恢复流程的每一步落地前都要过这道闸：标签页卸载、或用户已发起新任务 → 立即作废。 */
+    const isStale = (): boolean => !active || taskGenRef.current !== generation;
+    const pause = (ms: number): Promise<void> => new Promise((resolve) => { window.setTimeout(resolve, ms); });
+    /** 任务确认未被后端接受时把 UI 交还用户：停在 idle 态，不得留在"上传中"锁死整页。 */
+    const releaseToIdle = (): void => {
+      setPhase('idle');
+      setProgressText('');
+      setUploadErrors([]);
+    };
+    let recoveredJobId = jobId;
+    const recover = async (): Promise<void> => {
+      if (uploadId) {
+        let status: Awaited<ReturnType<typeof getImportUploadStatus>> | null = null;
+        for (let attempt = 0; !isStale(); attempt += 1) {
+          try {
+            status = await getImportUploadStatus(savedScope, uploadId);
+            break;
+          } catch (statusError) {
+            if ((statusError as { status?: number }).status !== 404 || jobId || attempt >= 8) throw statusError;
+            // 最后一批可能已完整抵达，但后端还在解析请求体；给它短暂时间写入会话与 jobId。
+            await pause(250);
+          }
+        }
+        if (isStale()) return;
+        // 服务端仍在接收该 uploadId 的请求：等它落定，最多 30s，避免无界自旋。
+        let tick = 0;
+        while (!isStale() && status?.active && !status.jobId && tick < 60) {
+          tick += 1;
+          setScope(savedScope);
+          setProgressText('确认上传状态…');
+          setPhase('uploading');
+          await pause(500);
+          if (isStale()) return;
+          status = await getImportUploadStatus(savedScope, uploadId);
+          setUploadErrors(status.errors);
+        }
+        recoveredJobId = status?.jobId ?? jobId;
+        if (!recoveredJobId) {
+          if (isStale()) return;
+          if (status?.active) {
+            // 到上限仍未落定：真实状态未知，保留凭据供下次进入时再认，且不得停在"上传中"。
+            setPhase('unknown');
+            setFailureStage('unknown');
+            setError('上传状态确认超时，请稍后重新进入本页确认导入是否已启动');
+            return;
+          }
+          clearImportCredentialIf({ uploadId });
+          releaseToIdle();
+          return;
+        }
+        if (!jobId) {
+          // 回写找回的 jobId：后续终态清理与再次重开都以它为准。
+          if (isStale()) return;
+          try { localStorage.setItem(LAST_IMPORT_JOB_KEY, JSON.stringify({ uploadId, jobId: recoveredJobId, scope: savedScope })); } catch { /* ignore */ }
+        }
+      }
+      if (!recoveredJobId) return;
+      if (isStale()) return;
+      const result = await getImportStatus(recoveredJobId);
+      if (isStale() || !result.job) return;
+      if (result.job.state === 'done' || result.job.state === 'failed' || result.job.state === 'cancelled') {
+        clearImportCredentialIf({ jobId: recoveredJobId });
+      }
+      setJob(result.job);
+      setScope(savedScope);
+      setPhase(result.job.state === 'done' ? 'done' : result.job.state === 'running' ? 'importing' : 'failed');
+      if (result.job.state === 'failed') {
+        setFailureStage('import');
+        setError(result.job.error ?? '导入失败');
+      } else if (result.job.state === 'cancelled') {
+        setFailureStage('cancelled');
+        setError('导入已取消');
+      }
+    };
+    void recover().catch((recoverError) => {
+      if (isStale()) return;
+      // 只有"从未被后端接受"的任务才静默清凭据并交还 UI；一旦拿到过 jobId，
+      // 查不到结果必须呈现"状态待确认"——不得把未知说成失败，也不得装作什么都没发生。
+      if ((recoverError as { status?: number }).status === 404 && !recoveredJobId) {
+        clearImportCredentialIf({ uploadId });
+        releaseToIdle();
+        return;
+      }
+      setPhase('unknown');
+      setFailureStage('unknown');
+      setError('无法确认上次导入结果，请检查知识库后再决定是否重新上传');
+    });
+    return () => { active = false; };
+  }, []);
   const canRetryUpload = (): boolean => {
     const plan = uploadPlanRef.current;
     return !!plan && plan.scope === scope && plan.selectionSnapshot === selections;
@@ -408,6 +569,7 @@ export function ImportPage(): JSX.Element {
     const invalidateImportQueries = (targetScope: string): void => {
       void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
       void queryClient.invalidateQueries({ queryKey: ['docList', targetScope] });
+      void queryClient.invalidateQueries({ queryKey: ['fullTextSearch', targetScope] });
     };
     const timer = setInterval(async () => {
       if (!active || checking) return;
@@ -431,11 +593,14 @@ export function ImportPage(): JSX.Element {
           clearInterval(timer);
           setProgressText('');
           invalidateImportQueries(targetScope);
+          clearImportCredentialIf({ jobId: job.id });
           setPhase('done');
+          window.dispatchEvent(new CustomEvent('ki-import-completed', { detail: { scope: targetScope } }));
         } else if (res.job.state === 'failed') {
           active = false;
           clearInterval(timer);
           invalidateImportQueries(targetScope);
+          clearImportCredentialIf({ jobId: job.id });
           setPhase('failed');
           setFailureStage('import');
           setError(res.job.error ?? '导入失败');
@@ -443,6 +608,7 @@ export function ImportPage(): JSX.Element {
           active = false;
           clearInterval(timer);
           invalidateImportQueries(targetScope);
+          clearImportCredentialIf({ jobId: job.id });
           setPhase('failed');
           setFailureStage('cancelled');
           setError('导入已取消');
@@ -452,9 +618,9 @@ export function ImportPage(): JSX.Element {
         active = false;
         clearInterval(timer);
         invalidateImportQueries(scope);
-        setPhase('failed');
-        setFailureStage('import');
-        setError(`查询导入状态失败：${e instanceof Error ? e.message : String(e)}`);
+        setPhase('unknown');
+        setFailureStage('unknown');
+        setError(`无法确认导入状态：${e instanceof Error ? e.message : String(e)}`);
       } finally {
         checking = false;
       }
@@ -687,34 +853,12 @@ export function ImportPage(): JSX.Element {
     return details ? `${apiError.message}\n${details}` : apiError.message;
   };
 
-  const triggerImport = async (uploadId: string): Promise<void> => {
-    try {
-      const run = await runImport({
-        scope,
-        uploadId,
-        group: group.trim() || undefined,
-        chunkSize: chunkSize ? Number(chunkSize) : undefined,
-        chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
-        vector,
-        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
-        conflictMode,
-        conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
-      });
-      if (!run.ok || !run.jobId) {
-        setFailureStage('import');
-        setPhase('failed');
-        setError(run.error ?? '导入触发失败');
-        return;
-      }
-      setJob({ id: run.jobId, scope, state: 'running', startedAt: Date.now() });
-      setProgressText('导入中…');
-      setFailureStage(null);
-      setPhase('importing');
-    } catch (error) {
-      setFailureStage('import');
-      setPhase('failed');
-      setError(getErrorDetails(error));
-    }
+  const trackImport = (jobId: string, targetScope: string, uploadId: string): void => {
+    setJob({ id: jobId, scope: targetScope, state: 'running', startedAt: Date.now() });
+    try { localStorage.setItem(LAST_IMPORT_JOB_KEY, JSON.stringify({ uploadId, jobId, scope: targetScope })); } catch { /* ignore */ }
+    setProgressText('导入中…');
+    setFailureStage(null);
+    setPhase('importing');
   };
 
   const continueUpload = async (fromBatch: number): Promise<string | null> => {
@@ -732,13 +876,22 @@ export function ImportPage(): JSX.Element {
           setProgressText(`准备第 ${index + 1}/${plan.batches.length} 批：${fileIndex + 1}/${batch.length} 个文件…`);
           encoded.push({ name: file.name, content: await fileToBase64(file.file) });
         }
-        const response = await uploadFiles(scope, encoded, plan.uploadId);
+        const response = await uploadFiles(
+          plan.scope,
+          encoded,
+          plan.uploadId,
+          index,
+          plan.batches.length,
+          index === plan.batches.length - 1 ? plan.finalize : undefined,
+        );
         if (!response.ok || !response.uploadId) throw new Error(response.error ?? '上传失败');
-        plan.uploadId = response.uploadId;
         plan.nextBatch = index + 1;
         plan.uploadedFiles += response.total ?? batch.length;
         if (response.errors && response.errors.length > 0) {
-          setUploadErrors((previous) => [...previous, ...response.errors!]);
+          setUploadErrors((previous) => {
+            const known = new Set(previous.map((item) => `${item.name}\0${item.error}`));
+            return [...previous, ...response.errors!.filter((item) => !known.has(`${item.name}\0${item.error}`))];
+          });
         }
         setUploadStats({
           batch: index + 1,
@@ -749,8 +902,12 @@ export function ImportPage(): JSX.Element {
           totalBytes: plan.totalBytes,
         });
         setProgressText(`已上传第 ${index + 1}/${plan.batches.length} 批（${plan.uploadedFiles}/${plan.totalFiles} 个文件）`);
+        if (index === plan.batches.length - 1) {
+          if (!response.jobId) throw new Error('文件已上传，但导入任务状态不明，请核查后再重试');
+          return response.jobId;
+        }
       }
-      return plan.uploadId ?? null;
+      return null;
     } catch (error) {
       setFailedUploadBatch(plan.currentBatch);
       setFailureStage('upload');
@@ -761,6 +918,9 @@ export function ImportPage(): JSX.Element {
   };
 
   const start = async (): Promise<void> => {
+    if (startingRef.current || phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    startingRef.current = true;
+    try {
     setFailureStage(null);
     if (scopeErr) {
       setError(scopeErr);
@@ -788,9 +948,22 @@ export function ImportPage(): JSX.Element {
     setFailureStage(null);
     setUploadErrors([]);
     setJob(null);
+    // 新任务接管 UI：作废仍在途的恢复流程，防止旧任务的迟到写入覆盖本次任务状态。
+    taskGenRef.current += 1;
+    try { localStorage.removeItem(LAST_IMPORT_JOB_KEY); } catch { /* ignore */ }
     const batches = toUploadBatches(files, importPolicy.maxRequestBody);
     const plan: UploadPlan = {
       scope,
+      uploadId: crypto.randomUUID(),
+      finalize: {
+        group: group.trim() || undefined,
+        chunkSize: chunkSize ? Number(chunkSize) : undefined,
+        chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
+        vector,
+        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
+        conflictMode,
+        conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
+      },
       selectionSnapshot: selections,
       batches,
       nextBatch: 0,
@@ -800,15 +973,24 @@ export function ImportPage(): JSX.Element {
       totalBytes: totalSelectedBytes,
     };
     uploadPlanRef.current = plan;
+    try { localStorage.setItem(LAST_IMPORT_JOB_KEY, JSON.stringify({ uploadId: plan.uploadId, scope: plan.scope })); } catch { /* ignore */ }
     setUploadStats({ batch: 0, totalBatches: batches.length, filesDone: 0, totalFiles: files.length, bytesDone: 0, totalBytes: totalSelectedBytes });
-    const uploadId = await continueUpload(0);
-    if (uploadId) await triggerImport(uploadId);
+    const jobId = await continueUpload(0);
+    if (jobId) trackImport(jobId, scope, plan.uploadId);
+    } finally {
+      startingRef.current = false;
+    }
   };
 
   const retryUpload = async (): Promise<void> => {
-    if (failureStage !== 'upload' || failedUploadBatch === null || !canRetryUpload()) return;
-    const uploadId = await continueUpload(failedUploadBatch);
-    if (uploadId) await triggerImport(uploadId);
+    if (startingRef.current || failureStage !== 'upload' || failedUploadBatch === null || !canRetryUpload()) return;
+    startingRef.current = true;
+    try {
+      const jobId = await continueUpload(failedUploadBatch);
+      if (jobId) trackImport(jobId, uploadPlanRef.current!.scope, uploadPlanRef.current!.uploadId);
+    } finally {
+      startingRef.current = false;
+    }
   };
 
   const result = job?.result as
@@ -832,6 +1014,8 @@ export function ImportPage(): JSX.Element {
       ? '上传失败'
       : failureStage === 'cancelled'
         ? '导入已取消'
+        : failureStage === 'unknown'
+          ? '任务状态待确认'
         : failureStage === 'import'
           ? '导入失败'
           : '输入有误';
@@ -1185,7 +1369,7 @@ export function ImportPage(): JSX.Element {
       {phase === 'done' && !error && (
         <div className="ki-empty" style={{ marginTop: 16 }}>
           <div>
-            <h3>{importErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
+            <h3>{importErrors.length > 0 || uploadErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
             <p>
               {result?.stats
                 ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`

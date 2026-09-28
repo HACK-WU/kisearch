@@ -63,11 +63,88 @@ function getUploadsRoot(): string {
 }
 
 const UPLOAD_SCOPE_FILE = '.scope';
+const UPLOAD_SESSION_FILE = '.upload-session.json';
+const UPLOAD_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface UploadSession {
+  scope: string;
+  updatedAt: number;
+  state: 'uploading' | 'importing' | 'done' | 'failed';
+  batchCount?: number;
+  completedBatches?: number[];
+  jobId?: string;
+  errors?: { name: string; error: string }[];
+}
+
+function readUploadSession(dir: string): UploadSession | null {
+  const file = path.join(dir, UPLOAD_SESSION_FILE);
+  if (!fs.existsSync(file)) return null;
+  if (!fs.lstatSync(file).isFile()) throw new Error('非法上传任务元数据');
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')) as UploadSession;
+  if (!value || typeof value.scope !== 'string' || !Number.isFinite(value.updatedAt)) {
+    throw new Error('上传任务元数据损坏');
+  }
+  return value;
+}
+
+function writeUploadSession(dir: string, session: UploadSession): void {
+  const file = path.join(dir, UPLOAD_SESSION_FILE);
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(session), 'utf8');
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.rmSync(temporary, { force: true });
+  }
+}
+
+const activeUploadRequests = new Map<string, number>();
+let uploadCleanupRunning = false;
+
+/** 新上传触发一次惰性清理；先原子移出受控目录，再异步删除，避免阻塞请求。 */
+async function cleanupExpiredUploads(): Promise<void> {
+  if (uploadCleanupRunning) return;
+  uploadCleanupRunning = true;
+  try {
+    const root = getUploadsRoot();
+    const entries = await fs.promises.readdir(root, { withFileTypes: true });
+    const now = Date.now();
+    for (const entry of entries) {
+      if (entry.isDirectory() && /^\.expired-[0-9a-f-]{36}-[0-9a-f-]{36}$/i.test(entry.name)) {
+        try { await fs.promises.rm(path.join(root, entry.name), { recursive: true, force: true }); } catch { /* retry later */ }
+        continue;
+      }
+      if (!entry.isDirectory() || !UPLOAD_ID_RE.test(entry.name) || activeUploadRequests.has(entry.name)) continue;
+      const dir = path.join(root, entry.name);
+      try {
+        const scopeFile = path.join(dir, UPLOAD_SCOPE_FILE);
+        const scopeStat = fs.lstatSync(scopeFile);
+        if (!scopeStat.isFile()) continue;
+        const session = readUploadSession(dir);
+        // 完成导入后，此目录会登记为 source.dir，后续编辑/同步仍需读取原文件。
+        if (session?.jobId) continue;
+        const updatedAt = session?.updatedAt ?? scopeStat.mtimeMs;
+        if (now - updatedAt < UPLOAD_IDLE_TTL_MS) continue;
+        // rename 与状态复核之间无 await；同一进程内的上传/导入无法插入。
+        const quarantine = path.join(root, `.expired-${entry.name}-${crypto.randomUUID()}`);
+        fs.renameSync(dir, quarantine);
+        await fs.promises.rm(quarantine, { recursive: true, force: true });
+      } catch {
+        // 清理失败不阻断新上传；下次新上传再尝试。
+      }
+    }
+  } catch {
+    // 暂存根目录不存在或不可读时不影响上传接口的正常错误处理。
+  } finally {
+    uploadCleanupRunning = false;
+  }
+}
 
 function bindUploadScope(dir: string, scope: string): boolean {
   const scopeFile = path.join(dir, UPLOAD_SCOPE_FILE);
   if (fs.existsSync(scopeFile)) {
+    if (!fs.lstatSync(scopeFile).isFile()) return false;
     return fs.readFileSync(scopeFile, 'utf8').trim() === scope;
   }
   fs.writeFileSync(scopeFile, scope, 'utf8');
@@ -150,6 +227,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
       }
     });
     req.on('error', reject);
+    req.on('aborted', () => reject(new Error('request aborted')));
   });
 }
 
@@ -415,6 +493,7 @@ export async function handleApiRequest(
     }
     if (p === '/import/config' && req.method === 'GET') return void (await handleImportConfig(res, url));
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
+    if (p === '/import/upload-status' && req.method === 'GET') return void handleImportUploadStatus(res, url, authScopes);
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
     if (p === '/import/cancel' && req.method === 'POST') return void (await handleImportCancel(req, res, authScopes));
@@ -657,9 +736,32 @@ async function handleImportUpload(
   res: http.ServerResponse,
   authScopes: string[] | null,
 ): Promise<void> {
+  const headerId = req.headers['x-ki-upload-id'];
+  const activeId = typeof headerId === 'string' && UPLOAD_ID_RE.test(headerId) ? headerId : null;
+  if (activeId) activeUploadRequests.set(activeId, (activeUploadRequests.get(activeId) ?? 0) + 1);
+  try {
+    await processImportUpload(req, res, authScopes, activeId);
+  } finally {
+    if (activeId) {
+      const remaining = (activeUploadRequests.get(activeId) ?? 1) - 1;
+      if (remaining > 0) activeUploadRequests.set(activeId, remaining);
+      else activeUploadRequests.delete(activeId);
+    }
+  }
+}
+
+async function processImportUpload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  headerId: string | null,
+): Promise<void> {
   const body = (await readJsonBody(req)) as {
     scope?: string;
     uploadId?: string;
+    batchIndex?: number;
+    batchCount?: number;
+    finalize?: Omit<RunImportArgs, 'scope' | 'sourceDir'>;
     files?: { name?: string; content?: string; size?: number }[];
   } | undefined;
   // scope 越权校验：鉴权模式下校验 body.scope（缺省 'default'，与工具缺省值一致）
@@ -687,8 +789,17 @@ async function handleImportUpload(
 
   const requestedUploadId = body.uploadId?.trim() ?? '';
   const uploadId = requestedUploadId || crypto.randomUUID();
-  if (requestedUploadId && !UPLOAD_ID_RE.test(requestedUploadId)) {
+  if ((requestedUploadId && !UPLOAD_ID_RE.test(requestedUploadId)) || (headerId && headerId !== uploadId)) {
     sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
+  const batched = body.batchIndex !== undefined || body.batchCount !== undefined || body.finalize !== undefined;
+  if (batched && (!requestedUploadId || !Number.isSafeInteger(body.batchIndex)
+    || !Number.isSafeInteger(body.batchCount) || body.batchCount! < 1 || body.batchCount! > 10_000
+    || body.batchIndex! < 0 || body.batchIndex! >= body.batchCount!
+    || (body.finalize !== undefined && (typeof body.finalize !== 'object' || body.finalize === null
+      || body.batchIndex !== body.batchCount! - 1)))) {
+    sendJson(res, 400, { ok: false, error: '非法上传批次或最终提交参数' });
     return;
   }
   const uploadsRoot = path.resolve(getUploadsRoot());
@@ -697,15 +808,39 @@ async function handleImportUpload(
     sendJson(res, 400, { ok: false, error: '非法 uploadId' });
     return;
   }
-  if (requestedUploadId && (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory())) {
+  const exists = fs.existsSync(dir);
+  if (requestedUploadId && !batched && (!exists || !fs.statSync(dir).isDirectory())) {
     sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
     return;
   }
+  if (batched && !exists && body.batchIndex !== 0) {
+    sendJson(res, 400, { ok: false, error: '上传任务不存在；请从第一批重新上传' });
+    return;
+  }
   fs.mkdirSync(dir, { recursive: true });
+  if (!fs.lstatSync(dir).isDirectory()) {
+    sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
   if (!bindUploadScope(dir, scope)) {
     sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
     return;
   }
+  if (!exists) void cleanupExpiredUploads();
+  let session = readUploadSession(dir) ?? { scope, updatedAt: Date.now(), state: 'uploading' as const };
+  if (session.scope !== scope || (session.batchCount !== undefined && session.batchCount !== body.batchCount)) {
+    sendJson(res, 400, { ok: false, error: '上传任务参数与已有批次不一致' });
+    return;
+  }
+  if (Date.now() - session.updatedAt >= UPLOAD_IDLE_TTL_MS && exists && session.state === 'uploading') {
+    sendJson(res, 410, { ok: false, error: '上传任务已过期，请重新选择文件上传' });
+    return;
+  }
+  if (session.jobId) {
+    sendJson(res, 200, { ok: true, uploadId, scope, jobId: session.jobId, total: 0, errors: session.errors });
+    return;
+  }
+  if (batched && session.batchCount === undefined) session.batchCount = body.batchCount;
 
   const saved: { name: string; path: string; size: number }[] = [];
   const errors: { name: string; error: string }[] = [];
@@ -766,13 +901,83 @@ async function handleImportUpload(
     return;
   }
 
+  session.updatedAt = Date.now();
+  if (errors.length > 0) {
+    const known = new Set((session.errors ?? []).map((item) => `${item.name}\0${item.error}`));
+    const unique = errors.filter((item) => {
+      const key = `${item.name}\0${item.error}`;
+      if (known.has(key)) return false;
+      known.add(key);
+      return true;
+    });
+    session.errors = [...(session.errors ?? []), ...unique];
+  }
+  if (batched) {
+    session.completedBatches = [...new Set([...(session.completedBatches ?? []), body.batchIndex!])];
+  }
+  writeUploadSession(dir, session);
+
+  let jobId: string | undefined;
+  if (body.finalize) {
+    if (session.completedBatches?.length !== session.batchCount) {
+      sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入', uploadId });
+      return;
+    }
+    const job = createJob(scope, 'import');
+    session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
+    try { writeUploadSession(dir, session); } catch (error) { jobs.delete(job.id); throw error; }
+    void runImportJob(job, {
+      scope,
+      sourceDir: dir,
+      group: body.finalize.group,
+      chunkSize: body.finalize.chunkSize,
+      chunkOverlap: body.finalize.chunkOverlap,
+      vector: body.finalize.vector,
+      tags: body.finalize.tags,
+      conflictMode: body.finalize.conflictMode,
+      conflictSuffix: body.finalize.conflictSuffix,
+    }, requestConfig);
+    jobId = job.id;
+  }
+
   sendJson(res, 200, {
     ok: true,
     uploadId,
     scope,
     files: saved,
     total: saved.length,
+    jobId,
     errors: errors.length > 0 ? errors : undefined,
+  });
+}
+
+/** 仅供页面重开后找回已经由后端接受的导入任务；未完成上传不提供续传。 */
+function handleImportUploadStatus(res: http.ServerResponse, url: URL, authScopes: string[] | null): void {
+  const uploadId = url.searchParams.get('uploadId') ?? '';
+  const scope = url.searchParams.get('scope') ?? '';
+  if (!UPLOAD_ID_RE.test(uploadId) || !scope) {
+    sendJson(res, 400, { ok: false, error: '缺少或非法 scope/uploadId' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scope)) {
+    rejectScopeViolation(res, scope, '/import/upload-status');
+    return;
+  }
+  const dir = path.join(getUploadsRoot(), uploadId);
+  const scopeFile = path.join(dir, UPLOAD_SCOPE_FILE);
+  if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory() || !fs.existsSync(scopeFile)
+    || !fs.lstatSync(scopeFile).isFile() || fs.readFileSync(scopeFile, 'utf8').trim() !== scope) {
+    sendJson(res, 404, { ok: false, error: '上传任务不存在' });
+    return;
+  }
+  const session = readUploadSession(dir);
+  if (!session || session.scope !== scope) {
+    sendJson(res, 404, { ok: false, error: '上传任务不存在' });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true, uploadId, scope, state: session.state,
+    jobId: session.jobId, active: activeUploadRequests.has(uploadId), errors: session.errors ?? [],
   });
 }
 
@@ -828,7 +1033,31 @@ async function handleImportRun(
     return;
   }
 
+  let session = readUploadSession(sourceDir) ?? { scope, updatedAt: Date.now(), state: 'uploading' as const };
+  if (session.scope !== scope) {
+    sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
+    return;
+  }
+  if (session.jobId) {
+    if (!jobs.has(session.jobId)) {
+      sendJson(res, 409, { ok: false, error: '导入任务状态已失效，请重新上传' });
+      return;
+    }
+    sendJson(res, 202, { ok: true, jobId: session.jobId, scope });
+    return;
+  }
+  if (session.batchCount !== undefined && session.completedBatches?.length !== session.batchCount) {
+    sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入' });
+    return;
+  }
+  if (Date.now() - session.updatedAt >= UPLOAD_IDLE_TTL_MS) {
+    sendJson(res, 410, { ok: false, error: '上传任务已过期，请重新上传' });
+    return;
+  }
+
   const job = createJob(scope, 'import');
+  session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
+  try { writeUploadSession(sourceDir, session); } catch (error) { jobs.delete(job.id); throw error; }
   void runImportJob(job, {
     scope,
     sourceDir,
@@ -888,6 +1117,16 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
     job.error = (err as Error).message;
   } finally {
     job.finishedAt = Date.now();
+    try {
+      const session = readUploadSession(args.sourceDir);
+      if (session?.jobId === job.id) {
+        writeUploadSession(args.sourceDir, {
+          ...session,
+          state: job.state === 'done' ? 'done' : 'failed',
+          updatedAt: Date.now(),
+        });
+      }
+    } catch { /* job 的最终结果仍保留在内存 Map，元数据下次再处理 */ }
   }
 }
 

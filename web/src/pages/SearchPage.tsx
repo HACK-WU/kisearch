@@ -172,10 +172,17 @@ export function SearchPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
-    fetchTags(scope).then((res) => {
-      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const refreshTags = (): void => {
+      fetchTags(scope).then((res) => {
+        if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+      }).catch(() => {});
+    };
+    const onImportCompleted = (event: Event): void => {
+      if ((event as CustomEvent<{ scope: string }>).detail?.scope === scope) refreshTags();
+    };
+    refreshTags();
+    window.addEventListener('ki-import-completed', onImportCompleted);
+    return () => { cancelled = true; window.removeEventListener('ki-import-completed', onImportCompleted); };
   }, [scope]);
 
   useEffect(() => {
