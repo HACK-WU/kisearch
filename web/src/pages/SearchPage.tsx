@@ -66,6 +66,8 @@ interface Result {
   relation?: string;
   score?: number;
   original?: string;
+  /** true 时 original 为完整 local KB 原文；false 时 original 仅是命中 chunk 回退。 */
+  originalRetrieved?: boolean;
   /** 向量文档内容 */
   content?: string;
   /** 命中向量对应的标签（多 tag 文档去重后仅其一） */
@@ -107,7 +109,7 @@ export function SearchPage(): JSX.Element {
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [readerFullscreen, setReaderFullscreen] = useState(false);
-  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -131,7 +133,7 @@ export function SearchPage(): JSX.Element {
     setHistory([]);
     setForwardHistory([]);
     setReaderFullscreen(false);
-    setReaderOutlineCollapsed(false);
+    setReaderOutlineCollapsed(true);
     setViewing(null);
   }, []);
 
@@ -475,7 +477,10 @@ export function SearchPage(): JSX.Element {
                     const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
                     openDocument({
                       module: r.relation ?? r.group ?? 'doc',
-                      content: r.original,
+                      // 原文未取到时 original 是命中 chunk 回退；不把片段当整篇文档，
+                      // 让 ModuleDrawer 通过 ki_get_module_info 获取完整标题结构。
+                      content: r.originalRetrieved === true ? r.original : undefined,
+                      fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
                       group: r.group,
                       path: doc?.path,
                       highlightQuery: resultMode === 'fulltext' ? resultQuery : undefined,
@@ -537,6 +542,7 @@ export function SearchPage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
+          fallbackContent={viewing.fallbackContent}
           highlightQuery={viewing.highlightQuery}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
@@ -548,7 +554,7 @@ export function SearchPage(): JSX.Element {
           fullscreen={readerFullscreen}
           onFullscreenChange={(fullscreen) => {
             setReaderFullscreen(fullscreen);
-            if (!fullscreen) setReaderOutlineCollapsed(false);
+            setReaderOutlineCollapsed(!fullscreen);
           }}
           outlineCollapsed={readerOutlineCollapsed}
           onOutlineCollapsedChange={setReaderOutlineCollapsed}

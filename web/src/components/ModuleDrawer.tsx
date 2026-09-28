@@ -199,10 +199,12 @@ interface ModuleDrawerProps {
   /** Group 路径（fetcher 需要时传入） */
   group?: string;
   initialContent?: string;
+  /** 完整原文不可用时展示的搜索命中片段。 */
+  fallbackContent?: string;
   /** 全文检索上下文；缺省时为普通阅读，不显示命中导航。 */
   highlightQuery?: string;
   onClose: () => void;
-  fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string }>;
+  fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string; error?: string; hint?: string }>;
   onLocalLink?: (href: string) => boolean;
   canGoBack?: boolean;
   onBack?: () => void;
@@ -223,6 +225,7 @@ export function ModuleDrawer({
   module,
   group,
   initialContent,
+  fallbackContent,
   highlightQuery,
   onClose,
   fetcher,
@@ -239,6 +242,8 @@ export function ModuleDrawer({
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
+  const showingFallback = content === null && error !== null && Boolean(fallbackContent);
+  const displayedContent = content ?? (showingFallback ? fallbackContent ?? null : null);
   const [loading, setLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
@@ -249,7 +254,7 @@ export function ModuleDrawer({
   const [highlightCount, setHighlightCount] = useState(0);
   const [highlightIndex, setHighlightIndex] = useState(0);
   const [outlineHeadings, setOutlineHeadings] = useState<OutlineHeading[]>([]);
-  const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(false);
+  const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(!fullscreen);
   const outlineCollapsed = controlledOutlineCollapsed ?? internalOutlineCollapsed;
   const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
   /** 正文滚动容器 */
@@ -263,9 +268,10 @@ export function ModuleDrawer({
     highlightScrollBehavior.current = 'auto';
   }, [highlightQuery]);
 
-  /** 从实际渲染的标题生成当前文档大纲；只有全屏时才收集，普通抽屉不显示。 */
+  /** 从实际渲染的标题生成当前文档大纲，普通抽屉也保留折叠入口。 */
   const collectOutlineHeadings = useCallback((): void => {
-    if (!fullscreen || content === null) {
+    // 命中片段只用于回源失败时保底阅读，不代表完整文档结构，不能据此生成大纲。
+    if (content === null) {
       setOutlineHeadings([]);
       return;
     }
@@ -286,22 +292,18 @@ export function ModuleDrawer({
       })
       .filter((heading) => heading.label.length > 0);
     setOutlineHeadings(headings);
-  }, [content, fullscreen]);
+  }, [content]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(collectOutlineHeadings);
     return () => window.cancelAnimationFrame(frame);
-  }, [collectOutlineHeadings, loading]);
+  // 全屏切换会重建正文容器；重新为新 DOM 标记标题供大纲跳转使用。
+  }, [collectOutlineHeadings, loading, fullscreen]);
 
   const updateOutlineCollapsed = useCallback((collapsed: boolean): void => {
     if (controlledOutlineCollapsed === undefined) setInternalOutlineCollapsed(collapsed);
     onOutlineCollapsedChange?.(collapsed);
   }, [controlledOutlineCollapsed, onOutlineCollapsedChange]);
-
-  // 退出全屏后清除折叠状态，下一次进入全屏按需求默认展开。
-  useEffect(() => {
-    if (!fullscreen) updateOutlineCollapsed(false);
-  }, [fullscreen, updateOutlineCollapsed]);
 
   const scrollToOutlineHeading = useCallback((id: string): void => {
     const body = bodyRef.current;
@@ -319,17 +321,27 @@ export function ModuleDrawer({
     // 必须在切换前记录：重建后 ref 已指向新节点，读不到旧位置
     savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
     if (controlledFullscreen === undefined) setInternalFullscreen(next);
+    updateOutlineCollapsed(!next);
     onFullscreenChange?.(next);
-  }, [controlledFullscreen, onFullscreenChange]);
+  }, [controlledFullscreen, onFullscreenChange, updateOutlineCollapsed]);
 
   useEffect(() => {
-    if (content !== null || !fetcher || !group) return;
+    if (content !== null || !fetcher) return;
+    if (!group) {
+      setError('无法定位完整文档');
+      return;
+    }
     setLoading(true);
     setError(null);
     fetcher(scope, group, module)
       .then((res) => {
         if (res.content) setContent(res.content);
-        else setError('未找到原文内容');
+        else {
+          const details = [res.error, res.hint]
+            .filter((detail): detail is string => typeof detail === 'string' && detail.trim().length > 0)
+            .join('；');
+          setError(details || '未找到原文内容');
+        }
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
@@ -363,7 +375,7 @@ export function ModuleDrawer({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [content, loading, fullscreen, highlightEnabled, highlightQuery]);
+  }, [displayedContent, loading, fullscreen, highlightEnabled, highlightQuery]);
 
   /** 当前命中变化时更新 active 状态并滚动到目标。 */
   useEffect(() => {
@@ -390,15 +402,15 @@ export function ModuleDrawer({
   }, [highlightCount]);
 
   const handleCopy = useCallback(async () => {
-    if (!content) return;
+    if (!displayedContent) return;
     // 优先用 Clipboard API（需 HTTPS 或 localhost）；失败回退到 execCommand
     try {
       if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(content);
+        await navigator.clipboard.writeText(displayedContent);
       } else {
         // fallback：旧版 textarea + execCommand（兼容非安全上下文）
         const ta = document.createElement('textarea');
-        ta.value = content;
+        ta.value = displayedContent;
         ta.style.position = 'fixed';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
@@ -413,7 +425,7 @@ export function ModuleDrawer({
       setCopyFailed(true);
       setTimeout(() => setCopyFailed(false), 2500);
     }
-  }, [content]);
+  }, [displayedContent]);
 
   /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
@@ -456,7 +468,7 @@ export function ModuleDrawer({
       window.removeEventListener('resize', syncScrollState);
     };
     // fullscreen 切换会让正文容器换父节点并被重建，必须重新绑定到新元素
-  }, [syncScrollState, content, loading, fullscreen]);
+  }, [syncScrollState, displayedContent, loading, fullscreen]);
 
   /** 全屏切换后正文容器被重建，恢复到切换前的阅读位置（布局阶段同步执行，不闪回顶部） */
   useLayoutEffect(() => {
@@ -491,7 +503,7 @@ export function ModuleDrawer({
           <div className="ki-skeleton" style={{ width: '90%', height: 14, marginBottom: 8 }} />
           <div className="ki-skeleton" style={{ width: '75%', height: 14 }} />
         </div>
-      ) : error ? (
+      ) : error && displayedContent === null ? (
         <div className="ki-drawer__status">
           <div className="ki-drawer__status-icon">⚠</div>
           <h3>加载失败</h3>
@@ -500,27 +512,39 @@ export function ModuleDrawer({
             重试
           </button>
         </div>
-      ) : content === null ? (
+      ) : displayedContent === null ? (
         <div className="ki-drawer__status">
           <div className="ki-drawer__status-icon">📄</div>
           <h3>无原文内容</h3>
           <p>该文档暂无可预览的原文</p>
         </div>
       ) : (
-        <article className="ki-markdown ki-markdown--drawer">
-          <MarkdownPreview
-            text={content}
-            assetBase={group ? { scope, group } : undefined}
-            onLocalLink={onLocalLink}
-          />
-        </article>
+        <>
+          {showingFallback && (
+            <div className="ki-drawer__status" role="status" style={{ padding: '12px 16px' }}>
+              <p>完整原文暂不可用（{error}），当前显示搜索命中片段。</p>
+              {group && (
+                <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={retryLoad}>
+                  重试加载全文
+                </button>
+              )}
+            </div>
+          )}
+          <article className="ki-markdown ki-markdown--drawer">
+            <MarkdownPreview
+              text={displayedContent}
+              assetBase={group ? { scope, group } : undefined}
+              onLocalLink={onLocalLink}
+            />
+          </article>
+        </>
       )}
     </div>
   );
 
-  const foot = content ? (
+  const foot = displayedContent ? (
     <footer className="ki-drawer__foot">
-      <span className="ki-cell-sub">{(content.length / 1024).toFixed(1)} KB · Markdown</span>
+      <span className="ki-cell-sub">{(displayedContent.length / 1024).toFixed(1)} KB · Markdown</span>
     </footer>
   ) : null;
 
@@ -528,7 +552,7 @@ export function ModuleDrawer({
     <>
       <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />
       <aside
-        className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}${fullscreen && outlineHeadings.length > 0 && !outlineCollapsed ? ' ki-drawer--outline-open' : ''}`}
+        className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label="原文查看"
@@ -606,7 +630,7 @@ export function ModuleDrawer({
             </div>
           )}
           <div className="ki-drawer__actions">
-            {content && (
+            {displayedContent && (
               <button
                 className={`ki-drawer__copy${copied ? ' ki-drawer__copy--done' : ''}`}
                 onClick={handleCopy}
@@ -627,7 +651,7 @@ export function ModuleDrawer({
           </div>
         </header>
 
-        {fullscreen && outlineHeadings.length > 0 && (
+        {outlineHeadings.length > 0 && (
           <DocumentOutline
             headings={outlineHeadings}
             collapsed={outlineCollapsed}
@@ -652,7 +676,7 @@ export function ModuleDrawer({
         )}
 
         {/* 正文快速滚动：仅在正文超出一屏时出现，已在顶/底的一侧置灰 */}
-        {content !== null && scrollable && (
+        {displayedContent !== null && scrollable && (
           <div className="ki-scroll-nav" role="group" aria-label="正文快速滚动">
             <button
               type="button"

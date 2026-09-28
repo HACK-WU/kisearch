@@ -67,6 +67,8 @@ export interface SearchResult {
 export interface ModuleInfoResult {
   ok?: boolean;
   content?: string;
+  error?: string;
+  hint?: string;
   [k: string]: unknown;
 }
 

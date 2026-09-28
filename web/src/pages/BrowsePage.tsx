@@ -123,7 +123,7 @@ export function BrowsePage(): JSX.Element {
   const [searchQ, setSearchQ] = useState('');
   // 阅读器全屏时把 Browse 导航带入工作区；两块导航独立折叠，Group 默认折叠、文档默认展开。
   const [readerFullscreen, setReaderFullscreen] = useState(false);
-  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(true);
   const [readerDocsCollapsed, setReaderDocsCollapsed] = useState(false);
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
@@ -259,7 +259,7 @@ export function BrowsePage(): JSX.Element {
     setHistory([]);
     setForwardHistory([]);
     setReaderFullscreen(false);
-    setReaderOutlineCollapsed(false);
+    setReaderOutlineCollapsed(true);
     setViewing(null);
   }, []);
 
@@ -791,7 +791,7 @@ export function BrowsePage(): JSX.Element {
           fullscreen={readerFullscreen}
           onFullscreenChange={(fullscreen) => {
             setReaderFullscreen(fullscreen);
-            if (!fullscreen) setReaderOutlineCollapsed(false);
+            setReaderOutlineCollapsed(!fullscreen);
           }}
           outlineCollapsed={readerOutlineCollapsed}
           onOutlineCollapsedChange={setReaderOutlineCollapsed}

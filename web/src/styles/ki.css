@@ -987,7 +987,7 @@ a:hover { text-decoration: underline; }
 .ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
 .ki-drawer--fullscreen .ki-markdown--drawer { max-width: 100%; }
 
-/* 全屏阅读器右上角的大纲：半透明浮层，普通抽屉不会挂载该组件。 */
+/* 阅读器右上角的大纲：普通态与全屏态共用半透明浮层，覆盖正文不收窄布局。 */
 .ki-document-outline {
   position: absolute;
   top: 82px;
