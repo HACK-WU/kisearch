@@ -2,7 +2,7 @@
  * DashboardPage.tsx —— 总览（对齐 demo：服务横幅 + 统计卡 + scope 表格 + 健康列表）
  */
 
-import { useHealth, useScopeList, useDocList } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useScopeList, useDocList, type HealthSummary } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
 import { HealthBanner } from '@/components/HealthBanner';
 import type { HealthReport, HealthItem } from '@/api/httpApi';
@@ -17,7 +17,7 @@ function badgeCell(ok: boolean | undefined, label: string, cls: string): JSX.Ele
   );
 }
 
-function HealthList({ report }: { report?: HealthReport }): JSX.Element {
+function HealthList({ report, failure }: { report?: HealthReport; failure: HealthSummary }): JSX.Element {
   const items = report?.items ?? [];
   const pass = items.filter((i) => i.status === 'pass').length;
   const warn = items.filter((i) => i.status === 'warn').length;
@@ -46,8 +46,8 @@ function HealthList({ report }: { report?: HealthReport }): JSX.Element {
         {items.length === 0 ? (
           <div className="ki-empty" style={{ padding: 24 }}>
             <div>
-              <h3>暂无健康数据</h3>
-              <p>服务健康检查未返回结果。</p>
+              <h3>{failure.level === 'ok' ? '暂无健康数据' : failure.label}</h3>
+              <p>{failure.detail || '服务健康检查未返回结果。'}</p>
             </div>
           </div>
         ) : (
@@ -66,7 +66,8 @@ function HealthList({ report }: { report?: HealthReport }): JSX.Element {
 
 export function DashboardPage(): JSX.Element {
   const { data: scopes, isLoading } = useScopeList();
-  const { data: health } = useHealth();
+  const { data: health, error: healthError, isPending: healthPending } = useHealth();
+  const healthSummary = summarizeHealth(health, healthError, healthPending);
   const scope = useScopeValue();
 
   const list = scopes?.scopes ?? [];
@@ -226,7 +227,7 @@ export function DashboardPage(): JSX.Element {
       </section>
 
       {/* 健康状态 */}
-      <HealthList report={health?.report} />
+      <HealthList report={health?.report} failure={healthSummary} />
     </>
   );
 }

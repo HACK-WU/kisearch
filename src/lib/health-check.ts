@@ -9,8 +9,11 @@
  *     见 config-schema.ts）：字段不合法时 loadConfig 直接抛错，本检查项只在加载成功后报告
  *   - embedding 检查用 1 条最短文本（"test"）发一次真实请求，三合一验证
  *     URL 连通性 + 密钥有效性 + 维度匹配（复用 SiliconFlowProvider 现成错误语义）
- *   - 超时 8s（timeoutMs），重试 1 次（retries:1），容忍瞬时网络抖动（冷 DNS/TLS 握手/临时拥塞）；
- *     健康检查默认将 embedding 失败记为 fail，MCP 启动预检可显式降级为 warn，避免外部服务故障阻断 MCP
+ *   - 探测预算默认 8s ×(1+1 次重试)，可经 options.embeddingProbe 按调用方收紧；
+ *     健康检查默认将 embedding 失败记为 fail，MCP 启动预检与 /api/health 显式降级为 warn，
+ *     避免外部服务故障阻断 MCP / 误报服务不可用。401/403、配置非法、维度不符属
+ *     non-degradable，任何调用方都保持 fail（真配置错误不被告警掩盖）。
+ *   - 给本检查套请求级 deadline 的调用方，须用 healthCheckWorstCaseMs() 推导预算上界
  *   - zvec Collection 用按 scope 根目录下的子目录判定（不 open，避开与常驻 server 的文件锁冲突）
  */
 
@@ -35,12 +38,40 @@ export interface HealthReport {
   fail: number;
 }
 
+/** embedding 探测单次超时默认值（ms） */
+export const EMBED_PROBE_TIMEOUT_MS = 8_000;
+/** embedding 探测重试次数默认值 */
+export const EMBED_PROBE_RETRIES = 1;
+/** 探测重试的指数退避基数（与 SiliconFlowProvider.embedBatchWithRetry 同源） */
+const EMBED_PROBE_BACKOFF_MS = 1_000;
+
+/**
+ * runHealthCheck 的最坏耗时上界（仅 embedding 探测一项可能慢，其余为本地文件检查）。
+ * 给本检查套外层预算的调用方（如 /api/health）必须用本函数取值，否则两层预算会各自漂移——
+ * 曾经外层 10s < 内层 17s，导致慢子检查把整份报告一起丢掉。
+ */
+export function healthCheckWorstCaseMs(
+  timeoutMs = EMBED_PROBE_TIMEOUT_MS,
+  retries = EMBED_PROBE_RETRIES,
+): number {
+  let total = timeoutMs * (retries + 1);
+  for (let attempt = 0; attempt < retries; attempt++) {
+    total += Math.min(EMBED_PROBE_BACKOFF_MS * 2 ** attempt, 8_000);
+  }
+  return total;
+}
+
 export interface HealthCheckOptions {
   /**
-   * embedding 探测失败的严重级别。doctor/API 默认 fail；MCP 启动预检使用 warn，
-   * 让关键词检索等不依赖 embedding 的能力仍可启动。
+   * embedding 探测失败的严重级别。doctor 默认 fail；MCP 启动预检与 /api/health 使用 warn，
+   * 让关键词检索等不依赖 embedding 的能力仍可启动/上报。
    */
   embeddingFailure?: 'fail' | 'warn';
+  /**
+   * embedding 探测的时间预算。受外层请求预算约束的调用方（/api/health）应收紧，
+   * 使最坏耗时落在自身 deadline 之内。缺省 8s ×(1+1 次重试)。
+   */
+  embeddingProbe?: { timeoutMs: number; retries: number };
 }
 
 interface EmbeddingCheckResult {
@@ -66,7 +97,10 @@ function checkDir(name: string, dir: string): HealthItem {
  * embedding 三合一检查：发 1 条最短请求，按错误语义拆分为
  * URL 连通性 / 密钥有效性 / 维度匹配 三个报告项。
  */
-async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
+async function checkEmbedding(
+  config: KiConfig,
+  probe: { timeoutMs: number; retries: number },
+): Promise<EmbeddingCheckResult> {
   const emb = getEmbeddingConfig(config);
   const nameConn = 'URL 连通性';
   const nameKey = '密钥有效性';
@@ -111,7 +145,10 @@ async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
   }
 
   try {
-    const vectors = await provider.embed(['test'], { timeoutMs: 8000, retries: 1 });
+    const vectors = await provider.embed(['test'], {
+      timeoutMs: probe.timeoutMs,
+      retries: probe.retries,
+    });
     const actualDim = vectors[0]?.length ?? 0;
     const dimOk = actualDim === emb.dimension;
     return {
@@ -160,9 +197,14 @@ async function checkEmbedding(config: KiConfig): Promise<EmbeddingCheckResult> {
     }
 
     // 其余（HTTP_* / TIMEOUT / NETWORK）：连通性失败
-    const retryDetail = e.data?.nonRetryable === true ? '未重试（错误不可重试）' : '已重试1次';
+    // 文案必须回显实际预算：/api/health 与 doctor 用的是两套预算，
+    // 写死数值会让两处结论看起来互相矛盾。
+    const retryDetail = e.data?.nonRetryable === true
+      ? '未重试（错误不可重试）'
+      : probe.retries > 0 ? `已重试${probe.retries}次` : '未重试';
+    const probeSec = probe.timeoutMs / 1000;
     const connDetail = code === 'TIMEOUT'
-      ? `连接超时（>8s，已重试1次）：${emb.baseURL}/embeddings`
+      ? `连接超时（>${probeSec}s，${retryDetail}）：${emb.baseURL}/embeddings`
       : code === 'NETWORK'
         ? `网络不可达 / DNS 解析失败（${retryDetail}）：${emb.baseURL}`
         : `请求失败（${code || 'ERROR'}，${retryDetail}）：${msg}`;
@@ -241,7 +283,9 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
 
   // 6~8. embedding 连通性 / 密钥 / 维度（三合一请求）
   {
-    const embeddingResult = await checkEmbedding(config);
+    const probe = options.embeddingProbe
+      ?? { timeoutMs: EMBED_PROBE_TIMEOUT_MS, retries: EMBED_PROBE_RETRIES };
+    const embeddingResult = await checkEmbedding(config, probe);
     const normalizedEmbeddingItems = embeddingFailureStatus === 'warn' && embeddingResult.degradable
       ? embeddingResult.items.map((item) => item.status === 'fail' ? { ...item, status: 'warn' as const } : item)
       : embeddingResult.items;

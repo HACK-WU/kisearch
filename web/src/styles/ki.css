@@ -273,6 +273,8 @@ a:hover { text-decoration: underline; }
   background: var(--ki-color-bg);
   color: var(--ki-color-text-muted);
 }
+/* 徽标宽度固定，健康原因文案超长时截断（完整文案在 title 提示与总览卡片里） */
+.ki-service-badge__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ki-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .ki-dot--ok { background: var(--ki-color-success); }
 .ki-dot--warn { background: var(--ki-color-warning); }

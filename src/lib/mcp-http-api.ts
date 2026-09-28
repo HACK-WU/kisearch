@@ -28,7 +28,7 @@ import path from 'node:path';
 import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
 import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
-import { runHealthCheck } from './health-check.js';
+import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import {
   ASSET_EXTENSIONS,
@@ -54,8 +54,17 @@ import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './docu
 const MAX_BODY = 16 * 1024 * 1024;
 /** /api/doc/list 默认分页上限 */
 const DOC_LIST_LIMIT = 500;
-/** /api/health 超时（runHealthCheck 含 zvec 探活） */
-const HEALTH_TIMEOUT_MS = 10_000;
+/**
+ * /api/health 的 embedding 探测预算：单次 4s、不重试。
+ * 该模型慢的形态是悬挂而非瞬时抖动，重试几乎不增加成功率，只会顶破请求 deadline。
+ */
+const HEALTH_PROBE = { timeoutMs: 4_000, retries: 0 };
+/**
+ * /api/health 整体 deadline：由探测预算推导最坏耗时再加本地检查余量。
+ * 必须经 healthCheckWorstCaseMs 派生——写死数值曾让外层 10s < 内层 17s，
+ * 一个慢子检查就能把整份健康报告换成一条 400。
+ */
+const HEALTH_TIMEOUT_MS = healthCheckWorstCaseMs(HEALTH_PROBE.timeoutMs, HEALTH_PROBE.retries) + 3_000;
 
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
@@ -502,8 +511,10 @@ export async function handleApiRequest(
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
-    const e = err as Error & { code?: string };
-    sendJson(res, 400, { ok: false, error: e.message, code: e.code ?? 'API_ERROR' });
+    // status 允许 handler 表达「服务在、但这个检查暂时给不出结果」（503），
+    // 而不是一律压成 400 客户端错误。
+    const e = err as Error & { code?: string; status?: number };
+    sendJson(res, e.status ?? 400, { ok: false, error: e.message, code: e.code ?? 'API_ERROR' });
   }
 }
 
@@ -538,15 +549,23 @@ async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<v
 
 async function handleHealth(res: http.ServerResponse): Promise<void> {
   const config = loadConfig();
+  let timer: NodeJS.Timeout | undefined;
+  // 不复用 mcp-tools/util 的 withTimeout：它抛 ToolTimeoutError，文案面向 MCP 工具调用，
+  // 原样进 API 响应会让前端显示「工具 … 执行超过 …」。定时器仍需显式清理，否则每次
+  // 探活都会在 daemon 里留一个挂到 deadline 的句柄。
   const report = await Promise.race([
-    runHealthCheck(config),
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error('health check timeout')),
+    runHealthCheck(config, { embeddingFailure: 'warn', embeddingProbe: HEALTH_PROBE }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(Object.assign(
+          new Error(`健康检查未在 ${HEALTH_TIMEOUT_MS / 1000}s 内完成`),
+          { code: 'HEALTH_CHECK_TIMEOUT', status: 503 },
+        )),
         HEALTH_TIMEOUT_MS,
-      ),
-    ),
-  ]);
+      );
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
   sendJson(res, 200, { ok: true, report });
 }
 

@@ -105,6 +105,22 @@ describe('/api/health', () => {
     assert.equal(body.ok, true);
     assert.ok(body.report);
   });
+
+  it('embedding 探测不可执行时降级为 warn，不得让 /api/health 变成服务异常', async () => {
+    // 本用例配置无 apiKey → 探测跳过。这里必须仍是 200 + 完整报告：
+    // 曾经外层 10s deadline 小于探测最坏耗时，慢 embedding 会让接口回 400，
+    // 前端据此把正常运行的 daemon 报成「MCP HTTP 未就绪」。
+    const res = await fetch(`${handle!.base}/api/health`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const embNames = ['URL 连通性', '密钥有效性', '维度匹配'];
+    const embItems = body.report.items.filter((i: { name: string }) => embNames.includes(i.name));
+    assert.equal(embItems.length, 3);
+    assert.ok(
+      embItems.every((i: { status: string }) => i.status === 'warn'),
+      `embedding 不可用只该告警，实际：${JSON.stringify(embItems)}`,
+    );
+  });
 });
 
 describe('/api/search-config', () => {

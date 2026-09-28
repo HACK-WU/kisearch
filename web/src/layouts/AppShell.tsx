@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useHealth } from '@/lib/hooks';
+import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
@@ -41,29 +41,22 @@ function useTheme(): { theme: string; toggle: () => void } {
   return { theme, toggle: () => setTheme(theme === 'dark' ? 'light' : 'dark') };
 }
 
+const DOT_CLASS: Record<HealthLevel, string> = {
+  checking: 'ki-dot--muted',
+  unreachable: 'ki-dot--err',
+  slow: 'ki-dot--warn',
+  fail: 'ki-dot--err',
+  warn: 'ki-dot--warn',
+  ok: 'ki-dot--ok',
+};
+
 function ServiceBadge(): JSX.Element {
-  const { data, isError, isLoading } = useHealth();
-  let dot = 'ki-dot--muted';
-  let text = '检测中…';
-  if (!isLoading) {
-    if (isError || !data?.ok) {
-      dot = 'ki-dot--err';
-      text = 'MCP HTTP 未就绪';
-    } else if ((data.report?.fail ?? 0) > 0) {
-      dot = 'ki-dot--err';
-      text = 'MCP HTTP 已就绪 · 健康异常';
-    } else if ((data.report?.warn ?? 0) > 0) {
-      dot = 'ki-dot--warn';
-      text = 'MCP HTTP 已就绪 · 有告警';
-    } else {
-      dot = 'ki-dot--ok';
-      text = 'MCP HTTP 已就绪';
-    }
-  }
+  const { data, error, isPending } = useHealth();
+  const s = summarizeHealth(data, error, isPending);
   return (
-    <span className="ki-service-badge">
-      <span className={`ki-dot ${dot}`} />
-      <span>{text}</span>
+    <span className="ki-service-badge" title={s.detail || s.label}>
+      <span className={`ki-dot ${DOT_CLASS[s.level]}`} />
+      <span className="ki-service-badge__text">{s.label}</span>
     </span>
   );
 }

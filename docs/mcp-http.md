@@ -107,7 +107,7 @@ ki mcp --http --web
 
 | 路由 | 方法 | 说明 |
 |------|------|------|
-| `/api/health` | GET | 健康报告（`runHealthCheck` doctor 逻辑，含 zvec 探活，10s 超时） |
+| `/api/health` | GET | 健康报告（复用 `runHealthCheck` doctor 逻辑，含 zvec 探活）。embedding 探测按 4s 单次预算收紧、网络类失败记 warn，整体 deadline 由探测预算派生 |
 | `/api/search-config` | GET | 语义检索默认 `timeout`（秒），仅返回非敏感配置 |
 | `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
 | `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |

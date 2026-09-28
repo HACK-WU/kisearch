@@ -26,6 +26,7 @@ export interface HealthResponse {
   ok: boolean;
   report?: HealthReport;
   error?: string;
+  code?: string;
 }
 
 export interface SearchConfigResponse {
