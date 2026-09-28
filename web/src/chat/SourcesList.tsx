@@ -1,24 +1,24 @@
 /**
- * SourcesList —— 来源引用列表（R20）
+ * SourcesList —— 来源引用（R20）
  *
  * ═══ 契约 ═══
- * · 位置：assistant 消息**下方**；折叠态「引用 N 处」，展开显示 `group / 文档名 / 行号区间 / 摘要`
- * · 点击 → 打开原文并**高亮命中**：复用既有能力
- *   （`ModuleDrawer.tsx` + `MarkdownPreview.tsx` + `SearchPage.tsx` 已实现"正文命中高亮 +
- *   首个命中定位 + 循环下一个命中"），**不新建高亮机制**
+ * · 位置：assistant 消息**下方**；点击 → 打开原文并**高亮命中**（复用 `ModuleDrawer`
+ *   既有的 `highlightQuery`，**不新建高亮机制**）
  * · 空值：`sources` 为空或 undefined → **渲染 `null`**（不显示"引用 0 处"）
  * · 行号：`lineStart === 0` → 只显示文档名（格式化逻辑在 `format.ts`，可单测）
  * · 原文已不可用（文档被删/重导覆盖）→ 打开时提示「原文已不可用」，**不报错、不隐藏该条引用**
  * · 副作用：无（点击由上游 `onOpen` 承担）
  *
- * ═══ 骨架期说明 ═══
- * 在首屏渲染路径上 → 渲染占位（不抛错）；交互（点击打开）由 `onOpen` 实现方承担。
+ * ═══ 为什么是 chip 而不是折叠列表 ═══
+ * 上一版是 `<details>`「§ 引用 N 处」，摘要要点开才看得到，与思考块、会话列表叠成三层折叠。
+ * 现改为**编号 chip**：文档名与行号直接可见，摘要走悬停/聚焦预览浮层（不占对话流空间）。
  *
- * @see design/S03_前端对话面板与流式对话_DESIGN.md §9.2 · requirement.md R20
+ * ⚠️ chip 用 `<button>` 承载（要可点击、可键盘聚焦），预览是其**子元素 span**，
+ *    不得在 chip 内再放按钮 —— 交互元素不可嵌套。
  */
 
 import type { SourceRef } from '@/api/chatContract';
-import { formatLineRange, sourceRefTitle } from './format';
+import { formatLineRange } from './format';
 
 export interface SourcesListProps {
   sources: SourceRef[];
@@ -26,30 +26,34 @@ export interface SourcesListProps {
   onOpen?: (ref: SourceRef) => void;
 }
 
-export function SourcesList({ sources, onOpen }: SourcesListProps) {
+export function SourcesList({ sources, onOpen }: SourcesListProps): JSX.Element | null {
   // 空值契约：无来源时不渲染（不显示"引用 0 处"）
   if (!sources || sources.length === 0) return null;
 
   return (
-    <details className="ki-chat-sources">
-      <summary>引用 {sources.length} 处</summary>
-      <ul>
-        {sources.map((s, i) => (
-          <li key={`${s.group}/${s.doc}/${s.lineStart}/${i}`}>
-            <button
-              type="button"
-              title={sourceRefTitle(s)}
-              onClick={onOpen ? () => onOpen(s) : undefined}
-            >
-              <span className="ki-chat-sources__doc">{s.doc}</span>
-              {formatLineRange(s) ? (
-                <span className="ki-chat-sources__lines">{formatLineRange(s)}</span>
-              ) : null}
-            </button>
-            {s.snippet ? <p className="ki-chat-sources__snippet">{s.snippet}</p> : null}
-          </li>
-        ))}
-      </ul>
-    </details>
+    <div className="ki-chat-srcs">
+      <span className="ki-chat-srcs__label">来源</span>
+      {sources.map((s, i) => (
+        <button
+          key={`${s.group}/${s.doc}/${s.lineStart}/${i}`}
+          type="button"
+          className="ki-chat-src"
+          onClick={onOpen ? () => onOpen(s) : undefined}
+        >
+          <span className="ki-chat-src__no">{i + 1}</span>
+          <span className="ki-chat-src__doc">{s.doc}</span>
+          {formatLineRange(s) ? <span className="ki-chat-src__lines">{formatLineRange(s)}</span> : null}
+
+          {/* 悬停 / 键盘聚焦时的摘要预览：绝对定位，不撑开对话流；
+              纯装饰信息 → aria-hidden，避免把摘要塞进按钮的可访问名称里 */}
+          <span className="ki-chat-src__pop" role="tooltip" aria-hidden="true">
+            <b>{s.doc}</b>
+            <em>{s.group}{formatLineRange(s) ? ` · ${formatLineRange(s)}` : ''}</em>
+            {s.snippet ? <q>{s.snippet}</q> : null}
+            <u>打开原文并定位</u>
+          </span>
+        </button>
+      ))}
+    </div>
   );
 }
