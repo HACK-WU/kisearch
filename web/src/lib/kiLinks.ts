@@ -4,7 +4,28 @@ export type KiLinkTarget =
   | { v: 1; type: 'document'; scope: string; group: string; relation: string; anchor?: string };
 
 const PREFIX = 'ki-link:';
-const ANCHOR_PATTERN = /^(?:p|h)-[0-9a-f]{16}$/;
+const ANCHOR_PATTERN = /^(?:p|h|li|td|th)-[0-9a-f]{16}$/;
+
+/** 可作为跳转落点的块级元素：标题、段落之外，列表项与表格单元格也能选中。 */
+export const ANCHOR_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,td,th';
+/** 只有标题与段落，供编辑器锚点下拉使用，避免长表格把列表撑爆。 */
+export const HEAD_PARA_SELECTOR = 'h1,h2,h3,h4,h5,h6,p';
+
+export type AnchorKind = 'p' | 'h' | 'li' | 'td' | 'th';
+
+/** 块元素对应的锚点类型；六级标题共用 h 前缀。 */
+export function anchorKind(element: Element): AnchorKind {
+  const tag = element.tagName.toLowerCase();
+  if (tag === 'p') return 'p';
+  if (tag.startsWith('h')) return 'h';
+  return tag as AnchorKind;
+}
+
+/** 从选区里的任意节点向上找到最近的落点块。 */
+export function anchorBlock(node: Node): HTMLElement | null {
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
+  return element?.closest<HTMLElement>(ANCHOR_SELECTOR) ?? null;
+}
 
 export function encodeKiLink(target: KiLinkTarget): string {
   // encodeURIComponent 不编码圆括号；Markdown 链接目的地会被未编码的 ')' 提前截断。
@@ -43,7 +64,7 @@ export function deepLink(target: Extract<KiLinkTarget, { type: 'document' }>): s
 }
 
 /** 基于可见块文本生成稳定 ID；重复同文段时阅读器拒绝猜测落点。 */
-export function paragraphAnchor(kind: 'p' | 'h', text: string): string {
+export function paragraphAnchor(kind: AnchorKind, text: string): string {
   const value = text.replace(/\s+/g, ' ').trim().normalize('NFC');
   let a = 2166136261;
   let b = 0x9e3779b9;
@@ -54,11 +75,13 @@ export function paragraphAnchor(kind: 'p' | 'h', text: string): string {
   return `${kind}-${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`;
 }
 
-export function findAnchorBlocks(root: ParentNode): { anchor: string; label: string; element: HTMLElement }[] {
-  return Array.from(root.querySelectorAll<HTMLElement>('h1,h2,h3,h4,h5,h6,p'))
+export function findAnchorBlocks(
+  root: ParentNode, selector: string = ANCHOR_SELECTOR,
+): { anchor: string; label: string; element: HTMLElement }[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(selector))
     .map((element) => {
       const label = element.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-      return { anchor: paragraphAnchor(element.tagName.toLowerCase() === 'p' ? 'p' : 'h', label), label, element };
+      return { anchor: paragraphAnchor(anchorKind(element), label), label, element };
     })
     .filter((entry) => entry.label.length > 0);
 }

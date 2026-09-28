@@ -1,0 +1,13 @@
+[drawer-buttons] 编辑文档|复制
+[open-editor] clicked
+[draft-length] 5093
+[editor] {"selects":1,"typeValue":"external","typeOpts":"external,self,other","buttons":"插入或替换跳转|移除选中跳转"}
+[set-self] self
+[selects-after-type] self,
+[load-anchors-click] clicked
+[anchor-options] 20
+[editor-notice] 无
+PASS 编辑器段落锚点下拉仍可用且只出 h/p :: count=20 非h/p= 样例=h-54941acfa5d63eab
+PASS 未保存：知识库正文与 revision 未变 :: revision=04522d65369d len=5093 hasLink=false
+
+汇总 2/2 通过

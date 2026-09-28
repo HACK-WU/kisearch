@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getDocList, getEditableDocument, saveEditableDocument, type DocItem, type EditableDocument, type SaveDocumentResponse } from '@/api/httpApi';
 import { MarkdownPreview, renderMarkdownHtml } from '@/components/MarkdownPreview';
-import { encodeKiLink, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
+import { encodeKiLink, findAnchorBlocks, HEAD_PARA_SELECTOR, type KiLinkTarget } from '@/lib/kiLinks';
 
 interface Props {
   scope: string;
@@ -136,7 +136,7 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
         : targetDoc ? (await getEditableDocument(scope, targetDoc.group, targetDoc.name)).content : '';
       if (!targetContent) { setMessage('请先选择目标文档'); return; }
       const parsed = new DOMParser().parseFromString(renderMarkdownHtml(targetContent), 'text/html');
-      const blocks = findAnchorBlocks(parsed.body);
+      const blocks = findAnchorBlocks(parsed.body, HEAD_PARA_SELECTOR);
       const counts = new Map<string, number>();
       blocks.forEach(({ anchor: id }) => counts.set(id, (counts.get(id) ?? 0) + 1));
       setAnchors(blocks.filter(({ anchor: id }) => counts.get(id) === 1).map(({ anchor: id, label: text }) => ({ anchor: id, label: text })));
