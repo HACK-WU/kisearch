@@ -105,6 +105,8 @@ export function SearchPage(): JSX.Element {
   const [resultMode, setResultMode] = useState<'hybrid' | 'fulltext' | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** 错误码（如 VECTOR_DIMENSION_MISMATCH）：与导入页共用同一判定口径，不再靠错误串猜 */
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [viewing, setViewing] = useState<DocumentView | null>(null);
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
@@ -214,6 +216,7 @@ export function SearchPage(): JSX.Element {
     }
     setLoading(true);
     setError(null);
+    setErrorCode(null);
     setResults(null);
     setDegradeReason(null);
     setSkippedScopes([]);
@@ -230,10 +233,11 @@ export function SearchPage(): JSX.Element {
         mode: searchMode,
         ...(timeout !== undefined ? { timeout } : {}),
       });
-      // 后端业务层错误（如向量库锁定）
+      // 后端业务层错误（如向量库锁定 / 维度不匹配）
       if ((res as Record<string, unknown>).ok === false) {
         const errMsg = (res as Record<string, unknown>).error as string | undefined;
         setError(errMsg ?? '搜索服务暂不可用');
+        setErrorCode((res.code as string | undefined) ?? null);
         return;
       }
       const hits = (res.results ?? []) as Result[];
@@ -414,21 +418,35 @@ export function SearchPage(): JSX.Element {
         </div>
       )}
 
-      {error && (
-        <div className="ki-empty" style={{ padding: 40 }}>
-          <div>
-            <h3>搜索失败</h3>
-            <p>{error}</p>
-            {!fullTextOnly && /embedding\.dimension|persisted dimension|VECTOR_DIMENSION_MISMATCH/.test(error) && (
-              <div className="ki-empty__actions">
-                <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
-                  使用全文搜索重试
-                </button>
-              </div>
-            )}
+      {error && (() => {
+        // 维度不匹配判定：优先用后端 code（单一真源）；文案兜底必须包含 zvec 原生文案
+        // "vector dimension mismatch: expected X, got Y" —— 旧正则只认写入路径的
+        // "embedding.dimension ... persisted dimension"，于是检索页只显示一行英文报错，
+        // 而导入页（走维度状态接口）却能给出"请先重建向量"的指引，两页口径分叉。
+        const dimensionMismatch = errorCode === 'VECTOR_DIMENSION_MISMATCH'
+          || /embedding\.dimension|persisted dimension|VECTOR_DIMENSION_MISMATCH|vector dimension mismatch/.test(error);
+        return (
+          <div className="ki-empty" style={{ padding: 40 }}>
+            <div>
+              <h3>搜索失败</h3>
+              <p>{error}</p>
+              {dimensionMismatch && (
+                <p style={{ color: '#d4380d' }}>
+                  scope「{scope}」的旧向量集合维度与当前 embedding 配置不一致，语义检索不可用。
+                  请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>，完成后刷新页面再检索。全文检索仍可使用。
+                </p>
+              )}
+              {!fullTextOnly && dimensionMismatch && (
+                <div className="ki-empty__actions">
+                  <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
+                    使用全文搜索重试
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 结果 */}
       {results !== null && (

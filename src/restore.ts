@@ -317,6 +317,12 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 
 const args = process.argv.slice(2);
 
+/**
+ * 重建失败时回显的逐条错误上限（避免整库重建失败时刷出上万行）。
+ * 第一条（通用迁移文案）单独作为 error 字段，其余明细进 errors 数组。
+ */
+const MAX_REPORTED_REBUILD_ERRORS = 10;
+
 /** 帮助文本：-h/--help 与缺省 scope 时共用 */
 const RESTORE_HELP = `ki restore - 从快照还原 scope
 
@@ -483,11 +489,23 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
     } catch { /* 清除失败不阻断 */ }
   }
   if (!result.ok) {
+    // 失败时只回 errors[0] 会把可诊断信息全部丢掉：跨维度迁移的第一条是通用提示
+    // （"新维度向量未全部写入…请修复 embedding"），真实逐条原因在 errors[1..] 与 stats 里。
+    // 实测该行为让「batchSize=32 超过服务商单请求上限 25」这类配置问题完全无从定位
+    // （用户只看到"请修复 embedding"，而 provider 与密钥其实都正常）。
+    const reportedErrors = result.errors.slice(0, MAX_REPORTED_REBUILD_ERRORS);
     output({
       ok: false,
       action: 'rebuild_vector',
       scope: scopeName,
-      error: result.errors[0]?.error ?? '重建向量失败',
+      error: reportedErrors[0]?.error ?? '重建向量失败',
+      stats: result.stats,
+      errors: reportedErrors.length > 1 ? reportedErrors.slice(1) : undefined,
+      errorsTotal: result.errors.length,
+      hint:
+        'errors 只有一条通用文案且 stats.failed>0 时，优先核对 embedding provider：连通性 / 密钥 / '
+        + '单请求条数上限（服务商常限制每次请求的 inputs 数；运行时已支持自动降批，'
+        + '仍建议把 embedding.scheduler.batchSize 配到上限内）。执行 ki doctor 可复现同款探测。',
     });
     process.exit(1);
   }

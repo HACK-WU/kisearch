@@ -569,7 +569,8 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
   // 原样进 API 响应会让前端显示「工具 … 执行超过 …」。定时器仍需显式清理，否则每次
   // 探活都会在 daemon 里留一个挂到 deadline 的句柄。
   const report = await Promise.race([
-    runHealthCheck(config, { embeddingFailure: 'warn', embeddingProbe: HEALTH_PROBE, checkCollectionDimensions: false }),
+    // 高频轮询接口：批大小探测（一次真实批量 embedding 请求）与预算都不适合放在这里。
+    runHealthCheck(config, { embeddingFailure: 'warn', embeddingProbe: HEALTH_PROBE, checkCollectionDimensions: false, checkEmbeddingBatchSize: false }),
     new Promise<never>((_, reject) => {
       timer = setTimeout(
         () => reject(Object.assign(

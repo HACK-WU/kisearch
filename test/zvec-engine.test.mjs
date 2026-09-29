@@ -237,6 +237,10 @@ test('S-06: probe 被持锁的 db → locked=true', async (t) => {
   assert.equal(result.exists, true);
   assert.equal(result.locked, true);
   assert.equal(result.healthy, true);
+  // 隐性契约（回归防线）：probe 判定 locked 后**必须允许本进程退出**。
+  // probe 的 worker 此刻仍卡在原生 ZVecOpen 内，不能 terminate（会让已到手的 flock
+  // 永久滞留在进程里），但必须 unref，否则本进程要等持锁方释放才退出
+  // ——表现为 `ki doctor` / 本测试"卡住不退出"（实测 >90s）。
 });
 
 test('S-06: open 不存在 → CollectionNotFoundError', async () => {

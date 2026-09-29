@@ -152,14 +152,36 @@ export function getVectorOpSource(): string | undefined {
 }
 
 /**
+ * 诊断路径的"不重试"标注：标注后 probeWithRetry 只探一次。
+ *
+ * 场景：`ki doctor` / MCP 启动预检要逐个 scope 做维度诊断，若 Collection 被常驻实例
+ * （或残留 LOCK）持有，旧行为每个 scope 白等 3 次重试（3s 探测 + 2s 间隔 ≈ 15s）；
+ * 15 个 scope 就是数分钟静默输出——`ki doctor` / `ki mcp restart` 看起来像卡死。
+ * 诊断只需要"现在能不能读"，一次探测足够。
+ */
+const vectorFastFailStorage = new AsyncLocalStorage<boolean>();
+
+/** 标注：fn 执行期间向量 probe 不重试（仅用于诊断类只读路径） */
+export function runWithVectorFastFail<T>(fn: () => T): T {
+  return vectorFastFailStorage.run(true, fn);
+}
+
+/** 当前异步链是否处于"不重试"标注下；诊断/测试用 */
+export function isVectorFastFail(): boolean {
+  return vectorFastFailStorage.getStore() === true;
+}
+
+/**
  * probe 带撞锁重试：检测到 locked 时等待外部维护进程释放后重试。
  * 正常 CLI/stdio/HTTP 请求均由 daemon 内部调度，不会互相抢锁；重试仅作为
  * daemon 启动期间或显式维护模式的兜底，最多 LOCK_RETRY_MAX 次。
  */
 async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
+  // 诊断路径（runWithVectorFastFail）只探一次：占用判定不需要重试，重试只表现为"卡住"
+  const maxRetries = isVectorFastFail() ? 0 : LOCK_RETRY_MAX;
   for (let attempt = 0; ; attempt++) {
     const probe = await ZvecEngine.probe(dbPath);
-    if (!probe.locked || attempt >= LOCK_RETRY_MAX) {
+    if (!probe.locked || attempt >= maxRetries) {
       return probe;
     }
     // 撞锁日志附带来源（HTTP 端点/MCP 工具名；CLI 路径未标注则无来源段）
@@ -384,6 +406,7 @@ export function getVectorizationMetrics(): VectorizationMetrics {
     retries: 0,
     rateLimited: 0,
     timeouts: 0,
+    batchLimitDowngrades: 0,
   };
   for (const runtime of schedulerRuntimes.values()) {
     const current = runtime.getMetrics();
@@ -735,6 +758,33 @@ function isWorkerUnavailable(err: unknown): boolean {
   );
 }
 
+/**
+ * 维度不匹配存在两种文案变体，必须都识别（否则前端两页口径分叉）：
+ *   - 写入路径（engine.upsert 前置校验）：`embedding.dimension (1024) !== persisted dimension (4096)`
+ *   - 检索路径（search/router 原生校验）：`vector dimension mismatch: expected 4096, got 1024`
+ * 导出供前端/上层按语义判断，避免各自维护字符串匹配。
+ */
+export function isVectorDimensionMismatchMessage(message: string): boolean {
+  return /embedding\.dimension \(\d+\) !== persisted dimension \(\d+\)/.test(message)
+    || /vector dimension mismatch: expected \d+, got \d+/.test(message);
+}
+
+/**
+ * 把维度不匹配归一化为带 code + 迁移指引的错误；非维度问题返回 undefined。
+ *
+ * 旧实现只归一化写入路径变体，检索路径的原生文案会裸抛到 HTTP 层：响应里 code 退化成
+ * API_ERROR，前端只能靠字符串猜——于是"导入页提示先重建向量、搜索页只显示一行英文报错"。
+ */
+function classifyVectorDimensionMismatch(err: unknown, scope: string): Error | undefined {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!isVectorDimensionMismatchMessage(message)) return undefined;
+  if ((err as { code?: string } | null)?.code === 'VECTOR_DIMENSION_MISMATCH') return undefined;
+  return Object.assign(
+    new Error(`${message}；scope "${scope}" 的旧向量集合需要迁移。请执行 ki restore ${scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`),
+    { code: 'VECTOR_DIMENSION_MISMATCH' },
+  );
+}
+
 /** 为一次 withEngine 调用预占租约，覆盖首次打开和 worker 自愈重试。 */
 function reserveEngineLease(scope: string): EngineMeta {
   const meta = _engineMeta.get(scope) ?? { lastUsedAt: Date.now(), activeUses: 0, ready: false };
@@ -772,11 +822,7 @@ async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<
       return await op(engine);
     } catch (err) {
       if (!isWorkerUnavailable(err)) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (/embedding\.dimension \(\d+\) !== persisted dimension \(\d+\)/.test(message)) {
-          throw Object.assign(new Error(`${message}；scope "${scope}" 的旧向量集合需要迁移。请执行 ki restore ${scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`), { code: 'VECTOR_DIMENSION_MISMATCH' });
-        }
-        throw err;
+        throw classifyVectorDimensionMismatch(err, scope) ?? err;
       }
       // worker 已不可用（如 state=closed）：重置后重开重试一次
       // 只重置当前 scope；不同 scope 的 worker 允许并行，不能因一个分片
@@ -956,7 +1002,10 @@ export async function vectorSearch(params: {
         filter,
       }));
     } catch (err) {
-      throw new Error(`scope "${scope}" 检索失败：${(err as Error).message}`);
+      // 保留底层 code（如 VECTOR_DIMENSION_MISMATCH）：HTTP 层按 code 回给前端，
+      // 这里若丢掉，检索页就只能靠错误串猜，与导入页的口径会分叉。
+      const cause = err as Error & { code?: string };
+      throw Object.assign(new Error(`scope "${scope}" 检索失败：${cause.message}`), { code: cause.code });
     }
   }));
   const hits: Hit[] = perScope.flat();

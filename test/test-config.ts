@@ -82,6 +82,16 @@ export function getTestEnv(): Record<string, string | undefined> {
 export const testConfigPath = TEST_CONFIG_PATH;
 
 /**
+ * 本进程是否注入了测试用 embedding 密钥。
+ *
+ * 未注入时测试配置**不含 embedding 段**（见 buildTestConfig），任何依赖向量化的用例都会以
+ * `embedding.apiKey 未配置` 失败——这属环境缺失而非代码回归，用例应显式 skip 而不是判失败。
+ */
+export const hasTestEmbeddingKey = Boolean(
+  process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY,
+);
+
+/**
  * 清理临时配置文件（在 after() 中调用）
  */
 export function cleanupTestConfig(): void {

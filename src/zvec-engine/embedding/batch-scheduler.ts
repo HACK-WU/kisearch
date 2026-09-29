@@ -166,6 +166,11 @@ export interface EmbeddingSchedulerMetrics {
   retries: number;
   rateLimited: number;
   timeouts: number;
+  /**
+   * provider 反馈「批次超限」后自适应下调请求批大小的次数（进程内学习，一次即够）。
+   * >0 表示配置的 batchSize 超过服务商单请求上限——过去这类配置会静默让每批 4xx 失败。
+   */
+  batchLimitDowngrades: number;
 }
 
 interface Waiter<T> {
@@ -197,9 +202,34 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 function isSplittableParameterError(error: Error): boolean {
   const candidate = error as Error & { code?: string };
   // SiliconFlow 20015 表示请求参数非法；批次中只要有一个坏文本，整批都会被拒绝。
-  // 只对这个明确的 provider 错误做逐条隔离，避免把认证/模型配置等 4xx 误当成可恢复错误。
+  // 只对明确的 provider 参数类错误做逐条隔离，避免把认证/模型配置等 4xx 误当成可恢复错误。
+  // 补充（DashScope 兼容模式等）：invalid_parameter_error / "batch size is invalid" 同样属
+  // 参数类；批次超限会先被 parseProviderBatchLimit 降批，不会退化到逐条隔离。
   return candidate.code === 'HTTP_400'
-    && /(?:20015|parameter is invalid)/i.test(error.message);
+    && /(?:20015|parameter is invalid|invalidparameter|batch size is invalid|batch size is too large)/i.test(error.message);
+}
+
+/**
+ * 解析 provider 声明的「单请求文本数上限」。
+ *
+ * 背景（实测）：阿里云百炼兼容模式等服务商对单请求 inputs 数量有硬上限（该端点为 25），
+ * 超限即返回 400 invalid_parameter_error：
+ *   `batch size is invalid, it should not be larger than 25`
+ * 这是**配置与服务商能力的差异**，不是文本内容问题：
+ *   - 若按"整批失败"处理，跨维度迁移会因部分批失败而整体回滚（用户看到"重建没生效"）；
+ *   - 若只按"逐条隔离"处理，一条 32 条的批会退化成 32 次单条请求（整库重建请求数放大 30 倍）。
+ * 故先解析上限，把后续请求降到上限内——一次 400 即完成自愈。
+ *
+ * 只对明确的参数类 4xx（HTTP_400）解析，避免从认证/模型/网络类报错里误读数字。
+ */
+export function parseProviderBatchLimit(error: Error): number | undefined {
+  const code = (error as Error & { code?: string }).code;
+  if (code !== 'HTTP_400') return undefined;
+  const matched = /should not be larger than (\d+)/i.exec(error.message)
+    ?? /(?:at most|maximum of|no more than|max(?:imum)?)\s+(\d+)\s*(?:inputs?|texts?|items?|sentences?|strings?)/i.exec(error.message);
+  if (!matched) return undefined;
+  const limit = Number(matched[1]);
+  return Number.isInteger(limit) && limit >= 1 ? limit : undefined;
 }
 
 /** 参数错误隔离的请求上限，避免用户把 batchSize 调大后一次生成大量单条请求。 */
@@ -320,7 +350,29 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
     retries: 0,
     rateLimited: 0,
     timeouts: 0,
+    batchLimitDowngrades: 0,
   };
+
+  /**
+   * 由 provider 反馈学到的单请求文本数上限（进程内记忆）。
+   * 实际请求切分大小 = min(配置 batchSize, 已学上限)，因此同一进程内只需撞一次 400。
+   */
+  private learnedBatchLimit = 0;
+
+  /** 当前生效的单请求文本数上限（learnedBatchLimit=0 表示仅受配置 batchSize 约束）。 */
+  effectiveRequestLimit(): number {
+    return this.learnedBatchLimit > 0
+      ? Math.min(this.config.batchSize, this.learnedBatchLimit)
+      : this.config.batchSize;
+  }
+
+  /** 记录 provider 声明上限；只在比已知上限更小时下调并计数。 */
+  private learnBatchLimit(limit: number): void {
+    if (!Number.isInteger(limit) || limit < 1) return;
+    if (this.learnedBatchLimit > 0 && this.learnedBatchLimit <= limit) return;
+    this.learnedBatchLimit = limit;
+    this.metrics.batchLimitDowngrades++;
+  }
 
   constructor(config?: Partial<EmbeddingSchedulerConfig>) {
     this.config = normalizeEmbeddingScheduler(config);
@@ -463,20 +515,6 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
           this.metrics.submittedBatches++;
           this.metrics.bufferedVectorBytes += bytes;
           bufferCounted = true;
-          const requestTexts: string[] = [];
-          const requestIndexByKey = new Map<string, number>();
-          const requestIndexForItem: number[] = [];
-          for (const item of batchItems) {
-            const text = options.getText(item.item);
-            const key = options.dedupeKey?.(item.item) ?? `__item_${item.inputIndex}`;
-            let requestIndex = requestIndexByKey.get(key);
-            if (requestIndex === undefined) {
-              requestIndex = requestTexts.length;
-              requestIndexByKey.set(key, requestIndex);
-              requestTexts.push(text);
-            }
-            requestIndexForItem.push(requestIndex);
-          }
           let vectors: Array<number[] | null>;
           let itemErrors: Array<Error | undefined> | undefined;
           let providerError: Error | undefined;
@@ -484,8 +522,7 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             // global request permit intentionally covers the complete logical provider call,
             // including provider-owned retry/backoff; release happens only in finally.
             this.metrics.inFlightRequests++;
-            const embedOptions: EmbedOptions = {
-              batchSize: requestTexts.length,
+            const embedOptionsBase: Omit<EmbedOptions, 'batchSize'> = {
               // 超时由调度配置统一提供：provider 内部按本值起 AbortController，
               // 未传时回落到 provider 自身默认（30s）。
               timeoutMs: this.config.requestTimeoutMs,
@@ -498,42 +535,81 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                 }
               },
             };
-            try {
-              const batchVectors = await provider.embed(requestTexts, embedOptions);
-              if (batchVectors.length !== requestTexts.length || batchVectors.some((v) => v.length !== provider.dimension)) {
-                throw new Error(`Embedding 返回数量/维度不匹配：期望 ${requestTexts.length}×${provider.dimension}，实际 ${batchVectors.length}`);
-              }
-              vectors = requestIndexForItem.map((index) => batchVectors[index]);
-            } catch (err) {
-              const batchError = err instanceof Error ? err : new Error(String(err));
-              if (
-                !isSplittableParameterError(batchError)
-                || requestTexts.length <= 1
-                || requestTexts.length > MAX_PARAMETER_ERROR_ISOLATION_ITEMS
-              ) {
-                throw batchError;
-              }
-
-              // 只隔离参数错误批次：成功的文本仍然可以落库，坏文本保留逐项错误。
-              const isolatedVectors: Array<number[] | null> = [];
-              const isolatedErrors: Array<Error | undefined> = [];
-              for (const text of requestTexts) {
-                try {
-                  const singleVectors = await provider.embed([text], { ...embedOptions, batchSize: 1 });
-                  if (singleVectors.length !== 1 || singleVectors[0].length !== provider.dimension) {
-                    throw new Error(`Embedding 返回数量/维度不匹配：期望 1×${provider.dimension}，实际 ${singleVectors.length}`);
-                  }
-                  isolatedVectors.push(singleVectors[0]);
-                  isolatedErrors.push(undefined);
-                } catch (singleErr) {
-                  const error = singleErr instanceof Error ? singleErr : new Error(String(singleErr));
-                  isolatedVectors.push(null);
-                  isolatedErrors.push(error);
+            // 批内按 effectiveRequestLimit() 切子片：服务商声明单请求上限（如 25）时自动降批重发，
+            // 而不是让这一批 4xx 硬失败——否则跨维度迁移会因部分批失败而整体回滚。
+            const collected: Array<number[] | null> = new Array(batchItems.length).fill(null);
+            const collectedErrors: Array<Error | undefined> = new Array(batchItems.length);
+            let isolatedAny = false;
+            let offset = 0;
+            while (offset < batchItems.length) {
+              const size = Math.min(this.effectiveRequestLimit(), batchItems.length - offset);
+              const slice = batchItems.slice(offset, offset + size);
+              const requestTexts: string[] = [];
+              const requestIndexByKey = new Map<string, number>();
+              const requestIndexForItem: number[] = [];
+              for (const item of slice) {
+                const text = options.getText(item.item);
+                const key = options.dedupeKey?.(item.item) ?? `__item_${item.inputIndex}`;
+                let requestIndex = requestIndexByKey.get(key);
+                if (requestIndex === undefined) {
+                  requestIndex = requestTexts.length;
+                  requestIndexByKey.set(key, requestIndex);
+                  requestTexts.push(text);
                 }
+                requestIndexForItem.push(requestIndex);
               }
-              vectors = requestIndexForItem.map((index) => isolatedVectors[index]);
-              itemErrors = requestIndexForItem.map((index) => isolatedErrors[index]);
+              try {
+                const batchVectors = await provider.embed(requestTexts, { ...embedOptionsBase, batchSize: requestTexts.length });
+                if (batchVectors.length !== requestTexts.length || batchVectors.some((v) => v.length !== provider.dimension)) {
+                  throw new Error(`Embedding 返回数量/维度不匹配：期望 ${requestTexts.length}×${provider.dimension}，实际 ${batchVectors.length}`);
+                }
+                for (let j = 0; j < slice.length; j++) collected[offset + j] = batchVectors[requestIndexForItem[j]];
+                offset += size;
+              } catch (err) {
+                const batchError = err instanceof Error ? err : new Error(String(err));
+                // ① provider 声明批次上限且小于本次请求：记住上限并降批重发本片，
+                //    不消耗逐条隔离额度（否则 32 条会退化成 32 次单条请求）。
+                const declaredLimit = parseProviderBatchLimit(batchError);
+                if (declaredLimit !== undefined && declaredLimit < size) {
+                  this.learnBatchLimit(declaredLimit);
+                  continue;
+                }
+                if (
+                  !isSplittableParameterError(batchError)
+                  || requestTexts.length <= 1
+                  || requestTexts.length > MAX_PARAMETER_ERROR_ISOLATION_ITEMS
+                ) {
+                  throw batchError;
+                }
+
+                // ② 只隔离参数错误批次：成功的文本仍然可以落库，坏文本保留逐项错误。
+                isolatedAny = true;
+                const isolatedVectors: Array<number[] | null> = [];
+                const isolatedErrors: Array<Error | undefined> = [];
+                for (const text of requestTexts) {
+                  try {
+                    const singleVectors = await provider.embed([text], { ...embedOptionsBase, batchSize: 1 });
+                    if (singleVectors.length !== 1 || singleVectors[0].length !== provider.dimension) {
+                      throw new Error(`Embedding 返回数量/维度不匹配：期望 1×${provider.dimension}，实际 ${singleVectors.length}`);
+                    }
+                    isolatedVectors.push(singleVectors[0]);
+                    isolatedErrors.push(undefined);
+                  } catch (singleErr) {
+                    const error = singleErr instanceof Error ? singleErr : new Error(String(singleErr));
+                    isolatedVectors.push(null);
+                    isolatedErrors.push(error);
+                  }
+                }
+                for (let j = 0; j < slice.length; j++) {
+                  const requestIndex = requestIndexForItem[j];
+                  collected[offset + j] = isolatedVectors[requestIndex];
+                  collectedErrors[offset + j] = isolatedErrors[requestIndex];
+                }
+                offset += size;
+              }
             }
+            vectors = collected;
+            if (isolatedAny) itemErrors = collectedErrors;
           } catch (err) {
             providerError = err instanceof Error ? err : new Error(String(err));
             vectors = [];

@@ -22,7 +22,8 @@ import { SiliconFlowProvider } from '../../dist/zvec-engine/index.js';
 import type { KiConfig } from './config.js';
 import { getVectorDir, getEmbeddingConfig, runWithConfigSnapshot } from './config.js';
 import { getCollectionsRoot } from './scope-collection.js';
-import { getVectorDimensionStatus } from './vector-client.js';
+import { getVectorDimensionStatus, runWithVectorFastFail } from './vector-client.js';
+import { DEFAULT_EMBEDDING_SCHEDULER, parseProviderBatchLimit } from '../zvec-engine/embedding/batch-scheduler.js';
 
 export type HealthStatus = 'pass' | 'warn' | 'fail';
 
@@ -50,12 +51,15 @@ const EMBED_PROBE_BACKOFF_MS = 1_000;
  * runHealthCheck 的最坏耗时上界（仅 embedding 探测一项可能慢，其余为本地文件检查）。
  * 给本检查套外层预算的调用方（如 /api/health）必须用本函数取值，否则两层预算会各自漂移——
  * 曾经外层 10s < 内层 17s，导致慢子检查把整份报告一起丢掉。
+ *
+ * @param batchProbeTimeoutMs 批大小探测的额外预算；调用方传 0（或不跑该探测）时不计入。
  */
 export function healthCheckWorstCaseMs(
   timeoutMs = EMBED_PROBE_TIMEOUT_MS,
   retries = EMBED_PROBE_RETRIES,
+  batchProbeTimeoutMs = 0,
 ): number {
-  let total = timeoutMs * (retries + 1);
+  let total = timeoutMs * (retries + 1) + Math.max(0, batchProbeTimeoutMs);
   for (let attempt = 0; attempt < retries; attempt++) {
     total += Math.min(EMBED_PROBE_BACKOFF_MS * 2 ** attempt, 8_000);
   }
@@ -75,8 +79,28 @@ export interface HealthCheckOptions {
   embeddingProbe?: { timeoutMs: number; retries: number };
   /** HTTP 健康接口不能在迁移切换窗口打开 Collection；doctor 保留完整诊断。 */
   checkCollectionDimensions?: boolean;
+  /**
+   * 逐 Collection 维度诊断的数量上限。
+   *
+   * 该诊断是 **O(scope)** 操作（每个 scope 要开一次 Collection，被占用时还要等探测超时），
+   * 放在启动/重启路径上会让 1000 个 scope 的实例"启动即阻塞数分钟"。因此：
+   *   - 启动/重启预检：不传（配合 checkCollectionDimensions:false 全跳过）；
+   *   - 诊断命令（ki doctor）：传一个小值做抽样，并在报告里显式说明被截断；
+   *   - 不传时保持旧语义（全量逐项），仅用于确实需要全量诊断的调用方。
+   */
+  collectionDimensionScopeLimit?: number;
   /** 启动预检提示维度冲突，但允许全文搜索与迁移命令继续可用。 */
   collectionDimensionFailure?: 'fail' | 'warn';
+  /**
+   * 是否按配置 batchSize 发一次真实批量请求（默认 true）。
+   * 高频轮询型调用方（/api/health）应显式关闭：它既没有诊断语境，也吃不起这次网络往返。
+   */
+  checkEmbeddingBatchSize?: boolean;
+  /**
+   * 逐项进度回调（done/total/label）。长耗时阶段（embedding 批量探测、逐 Collection
+   * 维度诊断）通过它输出进度，避免 `ki mcp restart` 这类前台命令静默数分钟像卡死。
+   */
+  onProgress?: (done: number, total: number, label: string) => void;
 }
 
 interface EmbeddingCheckResult {
@@ -225,6 +249,65 @@ async function checkEmbedding(
 }
 
 /**
+ * 批大小探测：按配置的 `embedding.scheduler.batchSize` 发一次真实批量请求。
+ *
+ * 为什么必须单独探：三合一检查只发 1 条 `"test"`，**永远发现不了服务商的单请求条数上限**。
+ * 实测故障（2026-09-29）：batchSize=32 而服务商上限 25，每个满批都 400
+ * `invalid_parameter_error: batch size is invalid, it should not be larger than 25`，
+ * 而 `ki doctor` 报 ✅ embedding —— 用户只看到导入/重建"部分条目向量化失败"或
+ * 跨维度迁移整体回滚，看不到真实原因。
+ */
+async function checkEmbeddingBatchSize(
+  config: KiConfig,
+  probe: { timeoutMs: number },
+  failureStatus: HealthStatus,
+): Promise<HealthItem> {
+  const name = '批大小探测';
+  const emb = getEmbeddingConfig(config);
+  const batchSize = emb.scheduler?.batchSize ?? DEFAULT_EMBEDDING_SCHEDULER.batchSize;
+  if (!emb.apiKey) {
+    return { name, status: 'warn', detail: `未配置 embedding.apiKey，跳过（配置值 batchSize=${batchSize}）` };
+  }
+  if (batchSize <= 1) {
+    return { name, status: 'pass', detail: `batchSize=${batchSize}（逐条请求，无批次上限风险）` };
+  }
+  let provider: SiliconFlowProvider;
+  try {
+    provider = new SiliconFlowProvider({
+      baseURL: emb.baseURL,
+      model: emb.model,
+      dimension: emb.dimension,
+      apiKey: emb.apiKey,
+    });
+  } catch (err) {
+    return { name, status: failureStatus, detail: `无法构造 provider，跳过批大小探测：${(err as Error).message}` };
+  }
+  // 上限探到 100 条即止：足够暴露常见服务商上限（10/20/25/64），又不至于把探测本身变成压测。
+  const inputs = Array.from({ length: Math.min(batchSize, 100) }, (_, i) => `batch-size probe ${i + 1}`);
+  try {
+    // 探测本身不重试：这是配置类问题，重试只会把同一个 400 再打一遍。
+    const vectors = await provider.embed(inputs, { batchSize: inputs.length, timeoutMs: probe.timeoutMs, retries: 0 });
+    if (vectors.length !== inputs.length) {
+      return { name, status: failureStatus, detail: `batchSize=${batchSize} 请求返回数量不匹配（期望 ${inputs.length}，实际 ${vectors.length}）` };
+    }
+    return { name, status: 'pass', detail: `batchSize=${batchSize} 的单请求被服务商接受（返回 ${vectors.length} 条向量）` };
+  } catch (err) {
+    const message = (err as Error).message;
+    const declared = parseProviderBatchLimit(err as Error);
+    if (declared !== undefined) {
+      return {
+        name,
+        status: failureStatus,
+        detail: `batchSize=${batchSize} 超过服务商单请求上限 ${declared}（${message}）；`
+          + `修复：把 embedding.scheduler.batchSize 下调到 ≤ ${declared}（或删除该字段使用默认 ${DEFAULT_EMBEDDING_SCHEDULER.batchSize}），`
+          + '然后重跑导入/重建。注：运行时已能自动降批自愈，但显式配置正确可避免每轮多一次失败请求',
+      };
+    }
+    return { name, status: failureStatus, detail: `按配置 batchSize=${batchSize} 的批量请求失败：${message}` };
+  }
+}
+
+/**
  * 执行完整健康检查，返回结构化报告。
  * 注：调用方需保证 config 已成功 loadConfig（解析失败会在 loadConfig 抛出）。
  */
@@ -297,6 +380,14 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
     items.push(...normalizedEmbeddingItems);
   }
 
+  // 8b. 批大小探测：单条 "test" 探不到服务商单请求条数上限（batchSize=32 vs 上限 25 的实测故障）
+  if (options.checkEmbeddingBatchSize !== false) {
+    const probe = options.embeddingProbe
+      ?? { timeoutMs: EMBED_PROBE_TIMEOUT_MS, retries: EMBED_PROBE_RETRIES };
+    options.onProgress?.(1, 1, '批大小探测');
+    items.push(await checkEmbeddingBatchSize(config, { timeoutMs: probe.timeoutMs }, embeddingFailureStatus));
+  }
+
   // 9. zvec collection（存在性为目录判定；可选维度诊断会打开 Collection）
   const collectionsRoot = getCollectionsRoot(config);
   let collectionScopes: string[] = [];
@@ -317,9 +408,19 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
     });
   }
   // provider 输出与配置一致，不能证明旧 Collection schema 也一致。
-  for (const scope of options.checkCollectionDimensions === false ? [] : collectionScopes) {
+  const allDimensionScopes = options.checkCollectionDimensions === false ? [] : collectionScopes;
+  const dimensionLimit = options.collectionDimensionScopeLimit ?? allDimensionScopes.length;
+  const dimensionScopes = allDimensionScopes.slice(0, Math.max(0, dimensionLimit));
+  const daemonOwner = process.env.KI_DAEMON_OWNER === '1';
+  for (let i = 0; i < dimensionScopes.length; i++) {
+    const scope = dimensionScopes[i];
+    options.onProgress?.(i + 1, dimensionScopes.length, `Collection 维度 (${scope})`);
     try {
-      const status = await runWithConfigSnapshot(config, () => getVectorDimensionStatus(scope));
+      // 诊断路径关闭撞锁重试（runWithVectorFastFail）：被占用的 Collection 一次探测即判占用，
+      // 旧行为每 scope 白等 ≈15s（3s 探测 + 2s 间隔 ×3），8 个 scope ≈2 分钟静默输出。
+      const status = await runWithVectorFastFail(
+        () => runWithConfigSnapshot(config, () => getVectorDimensionStatus(scope)),
+      );
       items.push({
         name: `Collection 维度 (${scope})`,
         status: status.compatible ? 'pass' : (options.collectionDimensionFailure ?? 'fail'),
@@ -328,8 +429,28 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
           : `配置 ${status.configured} 维，集合 ${status.persisted} 维；请执行 ki restore ${scope} --rebuild-vector --yes`,
       });
     } catch (error) {
-      items.push({ name: `Collection 维度 (${scope})`, status: 'warn', detail: `暂无法读取集合维度：${(error as Error).message}` });
+      const err = error as Error & { name?: string };
+      const locked = err.name === 'CollectionLockedException' || /被其他进程占用/.test(err.message);
+      items.push({
+        name: `Collection 维度 (${scope})`,
+        status: 'warn',
+        detail: locked
+          ? daemonOwner
+            ? '向量库被占用（本进程是 daemon owner，说明存在残留 LOCK），本次跳过维度诊断；建议 ki mcp restart 后重试'
+            : '向量库被运行中的 kisearch 实例占用，本次跳过维度诊断（停止该实例后重跑本命令即可；不影响全文检索）'
+          : `暂无法读取集合维度：${err.message}`,
+      });
     }
+  }
+  // 抽样截断必须显式说明：否则"报告全绿"会被误读为"所有 scope 都体检过"
+  if (allDimensionScopes.length > dimensionScopes.length) {
+    items.push({
+      name: 'Collection 维度 (抽样)',
+      status: 'warn',
+      detail: `共 ${allDimensionScopes.length} 个 scope，本次只诊断前 ${dimensionScopes.length} 个`
+        + '（逐 scope 诊断是 O(scope) 操作，启动/重启路径不做全量）；'
+        + '其余 scope 在写入/检索时会按需拦截并给出 ki restore <scope> --rebuild-vector 指引',
+    });
   }
 
   // 10. scopes.default

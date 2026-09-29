@@ -104,7 +104,16 @@ export type SearchResult =
       /** 当前返回的文档结果数。fulltext 模式按文档聚合后计数。 */
       total?: number;
     }
-  | { ok: false; error: string; degraded?: boolean };
+  | {
+      ok: false;
+      error: string;
+      degraded?: boolean;
+      /**
+       * 结构化错误码（如 VECTOR_DIMENSION_MISMATCH）。前端据此显示与导入页一致的
+       * 处置指引——只给文案会让前端退回字符串匹配，检索页与导入页口径分叉。
+       */
+      code?: string;
+    };
 
 /** REQ-09：从 local KB 按 (group, relation) 取文件级原文；失败返回 null + hint */
 export function fetchOriginal(scope: string, group: string, relation: string): { original: string; hint?: string } | null {
@@ -579,7 +588,9 @@ async function executeSearchLocal(params: {
       ? { ok: true, scope: scopes[0], scopes, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
       : { ok: true, scope: scopes[0], results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const e = err as Error & { code?: string };
+    // 保留 code：HTTP/MCP 两条出口都按 code 透传，前端才能区分"维度不匹配需重建"与普通失败
+    return { ok: false, error: e.message, ...(e.code ? { code: e.code } : {}) };
   }
 }
 

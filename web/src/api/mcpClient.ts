@@ -61,6 +61,8 @@ export interface SearchResult {
   mode?: 'hybrid' | 'fulltext';
   /** 被跳过的 scope（strict 未注册 / 无向量 Collection）——不展示即为静默漏召回 */
   skipped?: { scope: string; reason: string }[];
+  /** 结构化错误码（ok=false 时），如 VECTOR_DIMENSION_MISMATCH */
+  code?: string;
   [k: string]: unknown;
 }
 

@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
@@ -319,7 +319,12 @@ describe('知识缺失路径', () => {
 // ─── 导入路径: ki import --source 直导 ───
 
 describe('导入路径', () => {
-  it('ki import --source 直导完整链路', async () => {
+  it('ki import --source 直导完整链路', async (t) => {
+    if (!hasTestEmbeddingKey) {
+      // 向量化用例需要真实 embedding 密钥（测试配置未注入时不写 embedding 段，见 test-config.ts）
+      t.skip('未注入 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入链路');
+      return;
+    }
     const scope = await makeScopeInit('integration-import');
     const sourceDir = makeTempDir('ki-int-source');
 
