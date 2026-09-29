@@ -9,6 +9,7 @@ import { contentRevision, createDraft, loadDraft, saveDraft, type RelationEditDr
 import { readLiveRelation, relationIndexMode } from './relation-edit-live.js';
 import type { Relation } from './scoring.js';
 import { discardUnpublishedIndex, finishRelationEditNow } from './relation-edit-publish.js';
+import { assertNoPendingVectorMigration } from './vector-client.js';
 
 interface RelationRecord {
   text: string;
@@ -160,6 +161,7 @@ function writeSourceAtomically(file: string, content: string, expectedContent: s
 }
 
 export async function saveDocumentEdit(input: EditDocumentInput) {
+  assertNoPendingVectorMigration(input.scope);
   const doc = loadDocument(input);
   if (!input.expectedRevision || typeof input.content !== 'string' || !input.content.trim()) {
     reject(400, 'DOC_EDIT_INVALID', '保存需要非空正文和 expectedRevision');

@@ -39,11 +39,11 @@ import {
   type ImportResult,
 } from './import.js';
 import type { ImportConflictMode } from './import-conflict.js';
-import { rebuildScopeVectors, type RebuildVectorResult } from './rebuild-vector.js';
+import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
-import { vectorCountScope } from './vector-client.js';
+import { getVectorDimensionStatus, vectorCollectionDimension, vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
@@ -500,7 +500,15 @@ export async function handleApiRequest(
       );
       return;
     }
-    if (p === '/import/config' && req.method === 'GET') return void (await handleImportConfig(res, url));
+    if (p === '/import/config' && req.method === 'GET') {
+      const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      await getSharedOperationCoordinator().submit(
+        { operation: 'import-config', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleImportConfig(res, url)),
+        [scope],
+      );
+      return;
+    }
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
     if (p === '/import/upload-status' && req.method === 'GET') return void handleImportUploadStatus(res, url, authScopes);
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
@@ -533,6 +541,12 @@ async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<v
   const requestConfig = loadConfig();
   const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
   const importConfig = getScopeImportConfig(requestConfig, scope);
+  let vectorDimension: { configured: number; persisted?: number; compatible: boolean | null; error?: string };
+  try {
+    vectorDimension = await getVectorDimensionStatus(scope);
+  } catch (error) {
+    vectorDimension = { configured: requestConfig.embedding.dimension, compatible: null, error: (error as Error).message };
+  }
   sendJson(res, 200, {
     ok: true,
     scope,
@@ -542,6 +556,7 @@ async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<v
     assetExtensions: ASSET_EXTENSIONS,
     maxAssetSize: importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
     maxRequestBody: MAX_BODY,
+    vectorDimension,
   });
 }
 
@@ -554,7 +569,7 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
   // 原样进 API 响应会让前端显示「工具 … 执行超过 …」。定时器仍需显式清理，否则每次
   // 探活都会在 daemon 里留一个挂到 deadline 的句柄。
   const report = await Promise.race([
-    runHealthCheck(config, { embeddingFailure: 'warn', embeddingProbe: HEALTH_PROBE }),
+    runHealthCheck(config, { embeddingFailure: 'warn', embeddingProbe: HEALTH_PROBE, checkCollectionDimensions: false }),
     new Promise<never>((_, reject) => {
       timer = setTimeout(
         () => reject(Object.assign(
@@ -1214,7 +1229,8 @@ interface RestoreJobArgs {
   backupDir?: string;
   snapshotFile?: string;
   rebuildVector: boolean;
-  rebuildOptions?: Record<string, unknown>;
+  rebuildOptions?: RebuildVectorOptions;
+  yes: boolean;
   rebuildOnly: boolean;
 }
 
@@ -1231,6 +1247,7 @@ async function handleRestoreRun(
     snapshotFile?: string;
     rebuildVector?: boolean;
     rebuildOnly?: boolean;
+    yes?: boolean;
   } | undefined;
   if (!body?.scope) {
     sendJson(res, 400, { ok: false, error: '缺少 scope' });
@@ -1251,6 +1268,8 @@ async function handleRestoreRun(
     snapshotFile: body.snapshotFile ? path.resolve(body.snapshotFile) : undefined,
     rebuildVector,
     rebuildOnly,
+    yes: body.yes === true,
+    rebuildOptions: { yes: body.yes === true },
   };
   void runRestoreJob(job, args, requestConfig);
   sendJson(res, 202, {
@@ -1267,6 +1286,13 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
     const result = await getSharedOperationCoordinator().submit(
       { operation: args.rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', params: { ...args, jobId: job.id } },
       async () => runWithConfigSnapshot(requestConfig, async () => {
+        // 复合操作必须在覆盖 KB 前拒绝未确认的跨维度迁移。
+        if (!args.rebuildOnly && args.rebuildVector && !args.yes) {
+          const persisted = await vectorCollectionDimension(args.scope);
+          if (persisted !== undefined && persisted !== requestConfig.embedding.dimension) {
+            return { ok: false, error: `Collection 维度 ${persisted} 与配置 ${requestConfig.embedding.dimension} 不一致；跨维度还原需显式 yes: true，旧 KB 尚未覆盖` };
+          }
+        }
         let restored: RestoreSnapshotResult | undefined;
         if (!args.rebuildOnly) {
           job.phase = 'restore';
@@ -1312,7 +1338,8 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
       || value?.rebuildVector?.ok === false;
     job.state = cancelled ? 'cancelled' : failed ? 'failed' : 'done';
     if (failed && !job.error) {
-      job.error = value?.errors?.[0]?.error
+      job.error = value?.error
+        ?? value?.errors?.[0]?.error
         ?? value?.rebuildVector?.errors?.[0]?.error
         ?? 'restore/rebuild 失败';
     }

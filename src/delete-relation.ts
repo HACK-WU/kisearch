@@ -25,7 +25,7 @@ import {
   validateScope,
 } from './lib/scope.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
-import { vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { getSource } from './lib/scope.js';
@@ -90,6 +90,7 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
     const scope = resolveScope(loadConfig(), params.scope);
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
 
     const cachePath = getRelationsCachePath(scope);
     const cache = readJson<RelationsCache>(cachePath);
@@ -237,6 +238,7 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
     const { group } = params;
     const scope = resolveScope(loadConfig(), params.scope);
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
 
     const cachePath = getRelationsCachePath(scope);
     const cache = readJson<RelationsCache>(cachePath);
@@ -293,10 +295,9 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
     if (cleanIds.length > 0) {
       try {
         const del = await vectorDelete({ scope, ids: cleanIds });
-        const realErrors = (del.errors ?? []).filter((e) => e.code !== 'NOT_FOUND');
-        if (realErrors.length > 0) {
+        if (del.failedIds.length > 0) {
           result.vectorRemoved = false;
-          result.reason = `向量删除失败：${realErrors.length} 个 doc 写入错误（${realErrors.map((e) => e.id).join(', ')}）`;
+          result.reason = `向量删除失败：${del.failedIds.length} 个 doc 未确认删除（${del.failedIds.join(', ')}）`;
         }
       } catch (err) {
         result.vectorRemoved = false;

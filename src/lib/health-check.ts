@@ -20,8 +20,9 @@
 import fs from 'fs';
 import { SiliconFlowProvider } from '../../dist/zvec-engine/index.js';
 import type { KiConfig } from './config.js';
-import { getVectorDir, getEmbeddingConfig } from './config.js';
+import { getVectorDir, getEmbeddingConfig, runWithConfigSnapshot } from './config.js';
 import { getCollectionsRoot } from './scope-collection.js';
+import { getVectorDimensionStatus } from './vector-client.js';
 
 export type HealthStatus = 'pass' | 'warn' | 'fail';
 
@@ -72,6 +73,10 @@ export interface HealthCheckOptions {
    * 使最坏耗时落在自身 deadline 之内。缺省 8s ×(1+1 次重试)。
    */
   embeddingProbe?: { timeoutMs: number; retries: number };
+  /** HTTP 健康接口不能在迁移切换窗口打开 Collection；doctor 保留完整诊断。 */
+  checkCollectionDimensions?: boolean;
+  /** 启动预检提示维度冲突，但允许全文搜索与迁移命令继续可用。 */
+  collectionDimensionFailure?: 'fail' | 'warn';
 }
 
 interface EmbeddingCheckResult {
@@ -292,16 +297,17 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
     items.push(...normalizedEmbeddingItems);
   }
 
-  // 9. zvec collection（目录非空判定，不 open）
+  // 9. zvec collection（存在性为目录判定；可选维度诊断会打开 Collection）
   const collectionsRoot = getCollectionsRoot(config);
-  let collectionCreated = false;
+  let collectionScopes: string[] = [];
   try {
-    collectionCreated = fs.existsSync(collectionsRoot) && fs.readdirSync(collectionsRoot, { withFileTypes: true })
-      .some((entry) => entry.isDirectory());
+    collectionScopes = fs.existsSync(collectionsRoot)
+      ? fs.readdirSync(collectionsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+      : [];
   } catch {
-    collectionCreated = false;
+    collectionScopes = [];
   }
-  if (collectionCreated) {
+  if (collectionScopes.length > 0) {
     items.push({ name: 'zvec collection', status: 'pass', detail: 'collection 已创建' });
   } else {
     items.push({
@@ -309,6 +315,21 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
       status: 'warn',
       detail: '按 scope 的 Collection 尚未创建（执行 ki store/import 后自动创建）',
     });
+  }
+  // provider 输出与配置一致，不能证明旧 Collection schema 也一致。
+  for (const scope of options.checkCollectionDimensions === false ? [] : collectionScopes) {
+    try {
+      const status = await runWithConfigSnapshot(config, () => getVectorDimensionStatus(scope));
+      items.push({
+        name: `Collection 维度 (${scope})`,
+        status: status.compatible ? 'pass' : (options.collectionDimensionFailure ?? 'fail'),
+        detail: status.compatible
+          ? `配置 ${status.configured} 维，集合 ${status.persisted ?? '未创建'}`
+          : `配置 ${status.configured} 维，集合 ${status.persisted} 维；请执行 ki restore ${scope} --rebuild-vector --yes`,
+      });
+    } catch (error) {
+      items.push({ name: `Collection 维度 (${scope})`, status: 'warn', detail: `暂无法读取集合维度：${(error as Error).message}` });
+    }
   }
 
   // 10. scopes.default

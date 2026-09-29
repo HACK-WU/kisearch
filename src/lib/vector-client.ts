@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
@@ -36,7 +37,7 @@ import type { ZvecWriteOptions } from '../zvec-engine/types.js';
 import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
-import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
+import { ensureVectorLayout, getCollectionsRoot, getScopeCollectionPath, getVectorMigrationMarkerPath, listVectorMigrationBackups } from './scope-collection.js';
 import { getPrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { ftsSearch as ftsOnlySearch } from './fts-client.js';
@@ -587,6 +588,7 @@ function buildOpenConfig(scope: string): ZvecEngineOpenConfig {
  */
 export function getEngine(scope = 'default'): Promise<ZvecEngine> {
   validateScope(scope);
+  assertNoPendingVectorMigration(scope);
   const normalizedScope = scope;
   // 每次引擎访问刷新空闲计时（空闲释放锁依据）；CLI 未启用时无副作用
   touchEngineUse();
@@ -769,7 +771,13 @@ async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<
       }
       return await op(engine);
     } catch (err) {
-      if (!isWorkerUnavailable(err)) throw err;
+      if (!isWorkerUnavailable(err)) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/embedding\.dimension \(\d+\) !== persisted dimension \(\d+\)/.test(message)) {
+          throw Object.assign(new Error(`${message}；scope "${scope}" 的旧向量集合需要迁移。请执行 ki restore ${scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`), { code: 'VECTOR_DIMENSION_MISMATCH' });
+        }
+        throw err;
+      }
       // worker 已不可用（如 state=closed）：重置后重开重试一次
       // 只重置当前 scope；不同 scope 的 worker 允许并行，不能因一个分片
       // 的自愈重连而关闭其他 scope 正在执行的请求。
@@ -1169,20 +1177,55 @@ export async function vectorBulkStore(params: {
 
 // ─── 删除（供 sync-relation / delete-relation 后续使用） ───
 
+/** vectorDelete 结果：errors/failed 只计真实失败，NOT_FOUND 视为幂等成功。 */
+export interface VectorDeleteResult {
+  deleted: number;
+  /** 真实失败条数（不含 NOT_FOUND） */
+  failed: number;
+  /** 真实失败的 doc id；底层未逐条归因时为本次全部待删 id（保守） */
+  failedIds: string[];
+  /** 本就不存在的 doc id（幂等成功，但管理面需要如实回显） */
+  notFoundIds: string[];
+  errors: { id: string; code: string; reason: string }[];
+}
+
 /**
- * 按 doc id 删除。
+ * 把引擎逐条删除结果归一化为 VectorDeleteResult（纯函数，供实现与测试共用）。
+ *
+ * NOT_FOUND（doc 本就不存在）视为幂等成功：删除的目标状态就是"它不存在"，
+ * 误报失败会让调用方保留本应清掉的 memoryId（缓存谎称文档已向量化）。
+ * 归一化集中在此处，调用方直接用 failed/failedIds，不再各自过滤。
  */
+export function normalizeVectorDeleteResult(
+  ids: string[],
+  reported: { ok: number; failed?: number; errors?: { id: string; code: string; reason: string }[] },
+): VectorDeleteResult {
+  const reportedErrors = reported.errors ?? [];
+  const realErrors = reportedErrors.filter((e) => e.code !== 'NOT_FOUND');
+  // 底层只给失败总数、或未把失败归因到具体 id 时，保守认为全部待删 id 都可能残留，
+  // 让调用方继续追踪，而不是静默丢弃引用。
+  const unattributed = (reported.failed ?? 0) > reportedErrors.length || realErrors.some((e) => !e.id);
+  const failedIds = unattributed ? [...new Set(ids)] : [...new Set(realErrors.map((e) => e.id).filter(Boolean))];
+  return {
+    deleted: Math.max(0, reported.ok),
+    failed: unattributed ? (reported.failed ?? failedIds.length) : failedIds.length,
+    failedIds,
+    notFoundIds: reportedErrors.filter((e) => e.code === 'NOT_FOUND').map((e) => e.id),
+    errors: realErrors,
+  };
+}
+
+/** 按 doc id 删除 dense 向量（空 ids 短路，不触碰引擎）。 */
 export async function vectorDelete(params: {
   scope: string;
   ids: string[];
-}): Promise<{ deleted: number; errors: { id: string; code: string; reason: string }[] }> {
+}): Promise<VectorDeleteResult> {
   // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
   const scope = resolveScope(loadConfig(), params.scope);
-  const result = await withEngine(scope, (engine) => engine.delete(params.ids));
-  return {
-    deleted: result.ok,
-    errors: (result.errors ?? []).map((e) => ({ id: e.id, code: e.code, reason: e.reason })),
-  };
+  const ids = [...new Set(params.ids.filter(Boolean))];
+  if (ids.length === 0) return normalizeVectorDeleteResult(ids, { ok: 0, failed: 0 });
+  const reported = await withEngine(scope, (engine) => engine.delete(ids));
+  return normalizeVectorDeleteResult(ids, reported);
 }
 
 // ─── 管理面（scope / doc 命令；绕过 strict 白名单，仅做字符校验） ───
@@ -1209,6 +1252,7 @@ function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
 
 /** 只读路径使用：不存在/空 Collection 视为空 scope，避免查询意外创建新库。 */
 function scopeCollectionExists(scope: string): boolean {
+  assertNoPendingVectorMigration(scope);
   const config = loadConfig();
   const dbPath = getScopeCollectionPath(config, scope);
   try {
@@ -1217,6 +1261,52 @@ function scopeCollectionExists(scope: string): boolean {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw err;
   }
+}
+
+/**
+ * 迁移目录切换跨多次 rename，并非原子完成；未完成事务必须显式恢复后才允许读写。
+ *
+ * 两种中断形态都要拦住：
+ *  1. 事务标记仍在（正常崩溃窗口：标记先于 rename 写入，最后一步才删除）；
+ *  2. 标记已丢失但 live Collection 不见了、migration-backups 里仍有该 scope 的旧集合
+ *     （标记被外部清理 / 手工挪动目录）——此时放任 getEngine 会在原址创建空库，
+ *     用户以为迁移完成，实际旧数据全在备份目录里静默沉睡。
+ */
+export function assertNoPendingVectorMigration(scope: string): void {
+  const config = loadConfig();
+  const markerPath = getVectorMigrationMarkerPath(config, scope);
+  if (fs.existsSync(markerPath)) {
+    let recoveryHint = '';
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as { backupPath?: unknown; cacheBackupPath?: unknown };
+      const backup = typeof marker.backupPath === 'string' ? `；旧集合备份：${marker.backupPath}` : '';
+      const cache = typeof marker.cacheBackupPath === 'string' ? `；relations-cache 备份：${marker.cacheBackupPath}` : '';
+      recoveryHint = `${backup}${cache}`;
+    } catch {
+      recoveryHint = '；事务标记也无法读取，请检查该文件内容及 migration-backups 目录';
+    }
+    throw Object.assign(new Error(
+      `scope "${scope}" 的向量迁移未完成（${markerPath}）；所有检索与写入暂时停止${recoveryHint}。`
+      + `请执行 ki restore ${scope} --rebuild-vector --yes 自动回退并重试；若事务标记损坏，请先根据备份人工恢复`
+    ), { code: 'VECTOR_MIGRATION_INTERRUPTED' });
+  }
+
+  // 标记缺失但备份仍在：仅当 live Collection 确实不见时才判定为迁移可能中断。
+  let liveExists = true;
+  try {
+    liveExists = fs.statSync(getScopeCollectionPath(config, scope)).isDirectory();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') liveExists = false;
+    else throw err;
+  }
+  if (liveExists) return;
+  const backups = listVectorMigrationBackups(config, scope);
+  if (backups.length === 0) return;
+  throw Object.assign(new Error(
+    `scope "${scope}" 的向量集合目录缺失，但 migration-backups 中存在旧集合备份：${backups.join(', ')}；`
+    + '迁移可能中断，禁止自动创建空库以免掩盖旧数据。'
+    + `请执行 ki restore ${scope} --rebuild-vector --yes 自动回退并重试`
+  ), { code: 'VECTOR_MIGRATION_INTERRUPTED' });
 }
 
 /**
@@ -1344,6 +1434,34 @@ export async function vectorCollectionDimension(scope: string): Promise<number |
   validateScope(scope);
   if (!scopeCollectionExists(scope)) return undefined;
   return withEngine(scope, async (engine) => (await engine.info()).dimension);
+}
+
+export interface VectorDimensionStatus {
+  scope: string;
+  configured: number;
+  persisted?: number;
+  compatible: boolean;
+}
+
+/** 对同一 scope 的所有 dense 写入入口提供一致的迁移诊断。 */
+export async function getVectorDimensionStatus(scope: string): Promise<VectorDimensionStatus> {
+  const config = loadConfig();
+  const normalizedScope = resolveScope(config, scope);
+  const persisted = await vectorCollectionDimension(normalizedScope);
+  return {
+    scope: normalizedScope,
+    configured: config.embedding.dimension,
+    persisted,
+    compatible: persisted === undefined || persisted === config.embedding.dimension,
+  };
+}
+
+export async function assertVectorDimensionCompatible(scope: string): Promise<void> {
+  const status = await getVectorDimensionStatus(scope);
+  if (status.compatible) return;
+  throw Object.assign(new Error(
+    `embedding.dimension (${status.configured}) !== persisted dimension (${status.persisted})；scope "${status.scope}" 的旧向量集合需要迁移。请执行 ki restore ${status.scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`
+  ), { code: 'VECTOR_DIMENSION_MISMATCH' });
 }
 
 /**

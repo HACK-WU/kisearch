@@ -30,7 +30,7 @@ import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
-import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
@@ -485,6 +485,8 @@ async function executeBulkSyncRelationLocal(params: {
     }
 
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
+    if (vector) await assertVectorDimensionCompatible(scope);
     ensureScopeDir(scope);
 
     const cachePath = getRelationsCachePath(scope);
@@ -877,9 +879,8 @@ async function executeBulkSyncRelationLocal(params: {
       if (candidates.length > 0) {
         try {
           const deleted = await vectorDelete({ scope, ids: candidates });
-          const errors = (deleted.errors ?? []).filter((item) => item.code !== 'NOT_FOUND');
-          failedDenseIds = new Set(errors.map((item) => item.id));
-          if ((deleted.errors?.length ?? 0) > 0 && errors.length === 0) failedDenseIds = new Set(candidates);
+          // vectorDelete 已把 NOT_FOUND 视为幂等成功，并只在无法逐条归因时保守返回全部 id
+          failedDenseIds = new Set(deleted.failedIds);
         } catch {
           failedDenseIds = new Set(candidates);
         }
@@ -1085,6 +1086,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     }
 
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
+    if (params.vector !== false) await assertVectorDimensionCompatible(scope);
     ensureScopeDir(scope);
 
     const cachePath = getRelationsCachePath(scope);
@@ -1149,9 +1152,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
         if (candidates.length > 0) {
           try {
             const deleted = await vectorDelete({ scope, ids: candidates });
-            const errors = deleted.errors.filter((item) => item.code !== 'NOT_FOUND');
-            failedIds = new Set(errors.map((item) => item.id));
-            if (deleted.errors.length > 0 && errors.length === 0) failedIds = new Set(candidates);
+            // 同上：NOT_FOUND 属幂等成功，不再误判为"清理失败"而保留陈旧 memoryId
+            failedIds = new Set(deleted.failedIds);
           } catch {
             failedIds = new Set(candidates);
           }

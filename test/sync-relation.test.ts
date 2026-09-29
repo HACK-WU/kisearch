@@ -467,8 +467,11 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       const updated = readJson<any>(cachePath)!;
       const rel = updated.groups['项目根/切换'].hot_relations.find((item: any) => item.text === '切换文档');
       assert.ok(rel?.ftsIds?.length > 0);
-      assert.equal(rel.memoryId, undefined);
-      assert.equal(rel.memoryIds, undefined);
+      // 「无 dense」的规范表示是 memoryIds: []（import 同口径），消费侧一律按长度判定
+      // （relation-edit-live.relationIndexMode / scoring.isFtsOnlyIndexedRelation）。
+      // 这里断言的是不变量：不再被标记为已向量化，而不是某个字段是否缺席。
+      assert.equal(rel.memoryId, undefined, '切到 FTS-only 后单值 memoryId 必须清除');
+      assert.equal((rel.memoryIds ?? []).length, 0, '切到 FTS-only 后不得残留 dense docId 引用');
     } finally {
       const kbDir = getKbDir(switchScope);
       if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });

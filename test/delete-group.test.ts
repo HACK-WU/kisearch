@@ -29,8 +29,10 @@ const pathSearch = await import('../src/lib/path-search.js');
 
 // ─── mock 状态 ───
 let deleteCalls: { scope: string; ids: string[] }[] = [];
-let mockDeleteResult: { deleted: number; errors: { id: string; code: string; reason: string }[] } = {
-  deleted: 0,
+// mock 模拟引擎原始返回（含 NOT_FOUND），归一化交给生产的 normalizeVectorDeleteResult，
+// 避免测试自造结果形状与真实契约漂移。
+let mockDeleteResult: { ok: number; errors: { id: string; code: string; reason: string }[] } = {
+  ok: 0,
   errors: [],
 };
 let mockDeleteThrows: Error | null = null;
@@ -39,7 +41,7 @@ let mockDeleteThrows: Error | null = null;
 (vectorClient as any).vectorDelete = async (params: { scope: string; ids: string[] }) => {
   deleteCalls.push({ scope: params.scope, ids: params.ids });
   if (mockDeleteThrows) throw mockDeleteThrows;
-  return mockDeleteResult;
+  return vectorClient.normalizeVectorDeleteResult(params.ids, mockDeleteResult);
 };
 
 // patch searchPath：向量语义兜底返回 null（降级），避免「未匹配」用例触发真实引擎初始化
@@ -107,7 +109,7 @@ after(() => {
 
 beforeEach(() => {
   deleteCalls = [];
-  mockDeleteResult = { deleted: 0, errors: [] };
+  mockDeleteResult = { ok: 0, errors: [] };
   mockDeleteThrows = null;
 });
 
@@ -130,7 +132,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
     fs.writeFileSync(path.join(sourceDir, 'wiki', 'a.md'), '# 内容', 'utf-8');
 
-    mockDeleteResult = { deleted: 1, errors: [] };
+    mockDeleteResult = { ok: 1, errors: [] };
 
     const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
 
@@ -178,7 +180,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     fs.mkdirSync(path.join(sourceDir, 'wiki', 'docs'), { recursive: true });
     fs.writeFileSync(path.join(sourceDir, 'wiki', 'docs', 'b.md'), '# b', 'utf-8');
 
-    mockDeleteResult = { deleted: 3, errors: [] };
+    mockDeleteResult = { ok: 3, errors: [] };
 
     const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
 
@@ -235,7 +237,7 @@ describe('executeDeleteGroup：目录级删除', () => {
 
     // NOT_FOUND：deleted 计数不含该 doc，但 errors 只含 NOT_FOUND
     mockDeleteResult = {
-      deleted: 0,
+      ok: 0,
       errors: [{ id: 'mem-gone', code: 'NOT_FOUND', reason: 'not found' }],
     };
 
@@ -259,7 +261,7 @@ describe('executeDeleteGroup：目录级删除', () => {
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
 
     mockDeleteResult = {
-      deleted: 0,
+      ok: 0,
       errors: [{ id: 'mem-bad', code: 'ZVEC_WRITE_ERROR', reason: 'io error' }],
     };
 

@@ -201,8 +201,9 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, []);
 
-  const run = async (): Promise<void> => {
+  const run = async (modeOverride?: 'fulltext'): Promise<void> => {
     if (!query.trim()) return;
+    const searchMode = modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
     // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
     const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
       ? Number(queryTimeout)
@@ -224,9 +225,9 @@ export function SearchPage(): JSX.Element {
       const res = await kiSearch(query.trim(), {
         scope,
         tags: searchTags,
-        threshold: threshold || undefined,
+        threshold: searchMode === 'fulltext' ? undefined : threshold || undefined,
         limit: Number(limit) || 10,
-        mode: fullTextOnly ? 'fulltext' : 'hybrid',
+        mode: searchMode,
         ...(timeout !== undefined ? { timeout } : {}),
       });
       // 后端业务层错误（如向量库锁定）
@@ -239,7 +240,7 @@ export function SearchPage(): JSX.Element {
       setResults(hits);
       setTotal(hits.length);
       setResultQuery(query.trim());
-      setResultMode(fullTextOnly ? 'fulltext' : 'hybrid');
+      setResultMode(searchMode);
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -418,6 +419,13 @@ export function SearchPage(): JSX.Element {
           <div>
             <h3>搜索失败</h3>
             <p>{error}</p>
+            {!fullTextOnly && /embedding\.dimension|persisted dimension|VECTOR_DIMENSION_MISMATCH/.test(error) && (
+              <div className="ki-empty__actions">
+                <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
+                  使用全文搜索重试
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

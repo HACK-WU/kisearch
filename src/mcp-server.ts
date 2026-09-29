@@ -506,7 +506,7 @@ async function runRestartCommand(args: string[]): Promise<void> {
 
   // 重启前在父进程完成预检：embedding 外部服务失败重试 1 次后只告警，
   // 同时让配置/目录等硬错误在停止旧实例前就 fail-loud，避免先停掉可用服务。
-  const preflight = await runHealthCheck(config, { embeddingFailure: 'warn' });
+  const preflight = await runHealthCheck(config, { embeddingFailure: 'warn', collectionDimensionFailure: 'warn' });
   process.stderr.write(renderHealthReport(preflight) + '\n');
   if (preflight.fail > 0) {
     failJson(
@@ -699,6 +699,7 @@ export async function startMcpServer(): Promise<void> {
     const config = loadConfig();
     const report = await runHealthCheck(config, {
       embeddingFailure: 'warn',
+      collectionDimensionFailure: 'warn',
     });
     process.stderr.write(renderHealthReport(report) + '\n');
     if (report.fail > 0) {

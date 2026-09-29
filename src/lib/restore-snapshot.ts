@@ -15,6 +15,7 @@ import { backupScopeSnapshot } from './backup.js';
 import { checkWritable, checkDiskSpace } from './preflight.js';
 import { extractScopeSnapshot } from './safe-tar.js';
 import { rebuildFtsOnlyScope, type FtsRebuildResult } from './fts-rebuild.js';
+import { assertNoPendingVectorMigration } from './vector-client.js';
 
 export interface RestoreSnapshotOptions {
   timestamp?: string;
@@ -78,6 +79,7 @@ export async function restoreSnapshotLocal(
   checkCancelled();
   opts.onProgress?.({ phase: 'restore', done: 0, total: 1 });
   validateScope(scope);
+  assertNoPendingVectorMigration(scope);
   ensureTarAvailable();
   const config = loadConfig();
   const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);

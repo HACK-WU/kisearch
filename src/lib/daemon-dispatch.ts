@@ -77,7 +77,7 @@ const HANDLERS: Record<string, Handler> = {
     const rebuilt = await rebuildScopeVectors(
       params.scope,
       { countScope: vectorCountScope },
-      { ...(params.options ?? {}), abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
+      { ...(params.options ?? {}), yes: true, abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
     );
     return { ...restored, rebuildVector: rebuilt };
   },

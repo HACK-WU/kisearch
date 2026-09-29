@@ -139,12 +139,16 @@ async function executeDocDeleteLocal(params: {
       return { ok: true, scope: params.scope, requested: params.ids.length, deleted: 0, errors: [] };
     }
     const res = await vectorDelete({ scope: params.scope, ids: inScopeIds });
+    // 管理面按 id 逐条回显：NOT_FOUND 在向量层属幂等成功，但用户需要知道它没删到东西
     return {
       ok: true,
       scope: params.scope,
       requested: params.ids.length,
       deleted: res.deleted,
-      errors: res.errors,
+      errors: [
+        ...res.errors,
+        ...res.notFoundIds.map((id) => ({ id, reason: 'doc 不存在（未删除任何内容）' })),
+      ],
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

@@ -260,4 +260,102 @@ export function ensureVectorLayout(config: KiConfig): void {
 export function removeScopeCollection(config: KiConfig, scope: string): void {
   const target = getScopeCollectionPath(config, scope);
   fs.rmSync(target, { recursive: true, force: true });
+  // scope 已整体删除：其迁移备份/暂存/事务标记一并清理，否则残留的
+  // migration-backups/<scope>-<uuid> 会让同名 scope 重建时被误判为迁移中断。
+  purgeVectorMigrationArtifacts(config, scope);
+}
+
+// ─── 跨维度迁移事务产物 ───
+
+/** 迁移事务标记：存在即表示上一次跨维度切换未走完，禁止常规读写。 */
+export function getVectorMigrationMarkerPath(config: KiConfig, scope: string): string {
+  validateScope(scope);
+  return path.join(config.vectorDir, 'migration-pending', `${scope}.json`);
+}
+
+/** 旧 Collection 备份根目录（迁移成功后仍保留，供人工回退）。 */
+export function getVectorMigrationBackupsRoot(config: KiConfig): string {
+  return path.join(config.vectorDir, 'migration-backups');
+}
+
+/** 新维度暂存 Collection 根目录（迁移失败/中断时残留，可安全清理）。 */
+export function getVectorMigrationStagingRoot(config: KiConfig): string {
+  return path.join(config.vectorDir, 'migration-staging');
+}
+
+/** 迁移备份/暂存条目名格式：`<scope>-<uuid>`（scope 可含 `-`，故必须校验 UUID 尾段）。 */
+const MIGRATION_ENTRY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function listMigrationEntries(root: string, scope: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  const prefix = `${scope}-`;
+  return names
+    .filter((name) => name.startsWith(prefix) && MIGRATION_ENTRY_PATTERN.test(name.slice(prefix.length)))
+    .map((name) => path.join(root, name))
+    .sort();
+}
+
+/** 某 scope 现存的旧 Collection 备份目录（按名称稳定排序）。 */
+export function listVectorMigrationBackups(config: KiConfig, scope: string): string[] {
+  return listMigrationEntries(getVectorMigrationBackupsRoot(config), scope);
+}
+
+/** 迁移事务涉及的全部路径（按 migrationId 派生，唯一来源）。 */
+export interface VectorMigrationPaths {
+  /** 新维度暂存 Collection 的根（其下 collections/<scope> 为实际集合） */
+  stageRoot: string;
+  /** 暂存集合目录（切换后成为 live） */
+  stageCollectionPath: string;
+  /** 当前 live 集合目录（切换前） */
+  liveCollectionPath: string;
+  /** 旧集合备份目录（切换后保留，供人工回退） */
+  backupPath: string;
+  /** 与旧集合配套的 relations-cache 备份 */
+  cacheBackupPath: string;
+  /** 事务标记 */
+  markerPath: string;
+}
+
+/**
+ * 按当前配置与 migrationId 派生迁移路径。
+ *
+ * 写入标记与回退校验必须用同一函数：否则配置（vectorDir）变更后，
+ * 回退会拿新路径去比对标记里的旧路径，得出"路径不符"的错误拒绝。
+ */
+export function getVectorMigrationPaths(config: KiConfig, scope: string, migrationId: string): VectorMigrationPaths {
+  if (!MIGRATION_ENTRY_PATTERN.test(migrationId)) {
+    throw new Error(`migrationId 格式非法：${migrationId}`);
+  }
+  const entry = `${scope}-${migrationId}`;
+  const stageRoot = path.join(getVectorMigrationStagingRoot(config), entry);
+  // 暂存集合与 live 集合共用同一 scope 命名规则，仅 vectorDir 不同。
+  const stageCollectionPath = getScopeCollectionPath({ ...config, vectorDir: stageRoot }, scope);
+  return {
+    stageRoot,
+    stageCollectionPath,
+    liveCollectionPath: getScopeCollectionPath(config, scope),
+    backupPath: path.join(getVectorMigrationBackupsRoot(config), entry),
+    cacheBackupPath: path.join(getVectorMigrationBackupsRoot(config), `${entry}.relations-cache.json`),
+    markerPath: getVectorMigrationMarkerPath(config, scope),
+  };
+}
+
+/**
+ * 删除某 scope 的迁移标记与暂存/备份目录。
+ * scope 整体删除时调用，避免同名 scope 重建后被历史产物误判为迁移中断。
+ */
+export function purgeVectorMigrationArtifacts(config: KiConfig, scope: string): void {
+  fs.rmSync(getVectorMigrationMarkerPath(config, scope), { force: true });
+  for (const entry of listMigrationEntries(getVectorMigrationBackupsRoot(config), scope)) {
+    fs.rmSync(entry, { recursive: true, force: true });
+    fs.rmSync(`${entry}.relations-cache.json`, { force: true });
+  }
+  for (const entry of listMigrationEntries(getVectorMigrationStagingRoot(config), scope)) {
+    fs.rmSync(entry, { recursive: true, force: true });
+  }
 }
