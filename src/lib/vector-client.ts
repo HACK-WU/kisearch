@@ -1339,6 +1339,13 @@ export async function vectorCountScope(params: { scope: string; tags?: string[] 
   return withEngine(params.scope, (engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
 }
 
+/** 返回 scope 持久化 Collection 的 dense 维度；FTS-only 或不存在时返回 undefined。 */
+export async function vectorCollectionDimension(scope: string): Promise<number | undefined> {
+  validateScope(scope);
+  if (!scopeCollectionExists(scope)) return undefined;
+  return withEngine(scope, async (engine) => (await engine.info()).dimension);
+}
+
 /**
  * 删除指定 scope（可选 tag）下的全部文档。循环处理以覆盖 > LIST_ALL_LIMIT 的情况。
  * onProgress 可选：每批删除后回调（deleted 累计值），用于导入覆盖场景的动态进度展示。

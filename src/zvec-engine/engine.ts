@@ -349,6 +349,20 @@ export class ZvecEngine {
       }
     }
 
+    // Open 阶段允许 embedding 配置与持久化 schema 暂时不同，以支持 FTS/读取/删除；
+    // 但任何需要 dense embedding 的写入必须在调用 provider 前拒绝维度不匹配。
+    if (
+      needsEmbed.length > 0
+      && this.schema.dimension !== undefined
+      && this.embedding
+      && this.embedding.dimension !== this.schema.dimension
+    ) {
+      throw new DimensionMismatchError(
+        `embedding.dimension (${this.embedding.dimension}) !== persisted dimension (${this.schema.dimension})`,
+        { data: { embeddingDim: this.embedding.dimension, persistedDim: this.schema.dimension } },
+      );
+    }
+
     const allErrors: Array<{ id: string; code: WriteErrorCode; reason: string }> = [];
 
     // 新调度路径：provider 批次可并行，批次完成后进入同一 writer 链；
@@ -693,6 +707,12 @@ export class ZvecEngine {
     if (routed.needsEmbed && routed.embedTexts) {
       if (!this.embedding) {
         throw new InvalidSchemaError('query embedding is unavailable for this collection');
+      }
+      if (this.schema.dimension !== undefined && this.embedding.dimension !== this.schema.dimension) {
+        throw new DimensionMismatchError(
+          `embedding.dimension (${this.embedding.dimension}) !== persisted dimension (${this.schema.dimension})`,
+          { data: { embeddingDim: this.embedding.dimension, persistedDim: this.schema.dimension } },
+        );
       }
       const vectors = await this.embedding.embed(routed.embedTexts);
       const vector = Float32Array.from(vectors[0]);

@@ -29,6 +29,7 @@ import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
 import { getSource } from './scope.js';
 import {
   vectorBulkStore,
+  vectorCollectionDimension,
   vectorDeleteScope,
   type VectorBulkStoreResult,
 } from './vector-client.js';
@@ -397,6 +398,8 @@ export function mergeRebuildTags(
 export interface RebuildDeps {
   bulkStore?: typeof vectorBulkStore;
   deleteScope?: typeof vectorDeleteScope;
+  /** 读取旧 Collection 维度，确保重建修改数据前发现配置不兼容。 */
+  collectionDimension?: (scope: string) => Promise<number | undefined>;
   /**
    * 进度展示用：全量重建清空前统计旧向量总数（CLI 注入真实实现）。
    * 省略时跳过统计，删除旧向量无进度条（测试注入 mock 时不得触碰真实引擎）。
@@ -425,6 +428,7 @@ export async function rebuildScopeVectors(
   const startedAt = Date.now();
   const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const deleteScope = deps.deleteScope ?? vectorDeleteScope;
+  const collectionDimension = deps.collectionDimension ?? vectorCollectionDimension;
   const countScope = deps.countScope;
 
   const groupFilter = opts.groupFilter?.trim() || undefined;
@@ -514,6 +518,39 @@ export async function rebuildScopeVectors(
         errors: [{ type: 'group', path: groupFilter, error: `--group 指定的 Group 不存在：${groupFilter}` }],
       };
     }
+  }
+
+  // 若当前 embedding 维度与现存 Collection 不同，必须在清理或打标前拒绝：
+  // 全量重建不能先删旧向量，局部重建也不能先改 relations-cache 再因写入失败。
+  let persistedDimension: number | undefined;
+  try {
+    persistedDimension = await collectionDimension(scope);
+  } catch (err) {
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{
+        type: 'dimension',
+        path: scope,
+        error: `读取旧 Collection 维度失败，未执行重建：${(err as Error).message}`,
+      }],
+    };
+  }
+  const embeddingDimension = config.embedding.dimension;
+  if (persistedDimension !== undefined && embeddingDimension !== persistedDimension) {
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{
+        type: 'dimension',
+        path: scope,
+        error: `embedding.dimension (${embeddingDimension}) !== persisted dimension (${persistedDimension})；未执行重建，旧向量及 relations-cache 均未更改。更改维度需先迁移/重建 Collection schema`,
+      }],
+    };
   }
 
   // 2. --tags 打标：先合并写 rel.tags，再收集（使本次重建包含新标签的向量）
