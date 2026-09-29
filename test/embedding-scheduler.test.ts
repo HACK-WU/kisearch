@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   EmbeddingSchedulerRuntime,
   normalizeEmbeddingScheduler,
+  parseProviderBatchLimit,
   type EmbeddingBatch,
 } from '../src/zvec-engine/embedding/batch-scheduler.ts';
 import type { EmbeddingProvider } from '../src/zvec-engine/embedding/provider.ts';
@@ -288,4 +289,58 @@ test('调度器把配置的 requestTimeoutMs 透传给 provider（默认 60s，�
     () => normalizeEmbeddingScheduler({ requestTimeoutMs: 600_001 }),
     /requestTimeoutMs 不能大于 600000/,
   );
+});
+
+// ─── 服务商单请求条数上限（回归：batchSize=32 vs 上限 25 让跨维度迁移整体回滚） ───
+
+/** DashScope 兼容模式（阿里云百炼）超限时的真实报错 */
+const DASHSCOPE_BATCH_LIMIT_ERROR =
+  'SiliconFlow /embeddings HTTP 400: <400> InternalError.Algo.InvalidParameter: '
+  + 'Value error, batch size is invalid, it should not be larger than 25.: input.contents';
+
+test('parseProviderBatchLimit 只从参数类 4xx 解析单请求上限', () => {
+  const mk = (message: string, code = 'HTTP_400'): Error => Object.assign(new Error(message), { code });
+  assert.equal(parseProviderBatchLimit(mk(DASHSCOPE_BATCH_LIMIT_ERROR)), 25);
+  assert.equal(parseProviderBatchLimit(mk('maximum of 10 inputs per request')), 10);
+  // 非 4xx / 非参数类报错不得误读数字（避免把认证、网络类错误当成"降批可解"）
+  assert.equal(parseProviderBatchLimit(mk(DASHSCOPE_BATCH_LIMIT_ERROR, 'TIMEOUT')), undefined);
+  assert.equal(parseProviderBatchLimit(mk('connect ECONNREFUSED 127.0.0.1:25')), undefined);
+  assert.equal(parseProviderBatchLimit(mk('SiliconFlow /embeddings HTTP 400: {"code":"20015"}')), undefined);
+});
+
+test('服务商上限小于配置 batchSize 时自动降批：全部落库且不退化成逐条请求', async () => {
+  const requestSizes: number[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      requestSizes.push(texts.length);
+      if (texts.length > 25) {
+        throw Object.assign(new Error(DASHSCOPE_BATCH_LIMIT_ERROR), { code: 'HTTP_400' });
+      }
+      return texts.map((text) => [text.length, 0]);
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 32,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+  });
+  const result = await runtime.schedule(provider, Array.from({ length: 100 }, (_, i) => `text-${i}`), {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.items.length, failed: 0 }),
+  });
+
+  // 第一次按配置 32 发出并撞 400，之后一律不超过服务商上限
+  assert.equal(requestSizes[0], 32);
+  assert.equal(requestSizes.slice(1).every((size) => size <= 25), true);
+  // 关键：不是"逐条隔离"（那会把 100 条放大成 100 次请求），而是整片降到上限内重发
+  assert.equal(requestSizes.filter((size) => size === 1).length, 0);
+  assert.equal(result.persisted, 100);
+  assert.equal(result.failed, 0);
+  assert.equal(result.errors.length, 0);
+  // 进程内学习一次即可，后续任务不再重复撞 400
+  assert.equal(runtime.getMetrics().batchLimitDowngrades, 1);
+  assert.equal(runtime.effectiveRequestLimit(), 25);
 });

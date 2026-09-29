@@ -65,7 +65,12 @@ async function loadModulesWithMock() {
   (vectorClientModule as any).vectorDelete = async (params: any) => {
     mockDeleteCalls.push(params);
     const errors = params.ids.filter((id: string) => mockDeleteFailures.has(id)).map((id: string) => ({ id, code: 'ZVEC_WRITE_ERROR', reason: 'mock delete failure' }));
-    return { deleted: params.ids.length - errors.length, errors };
+    // 模拟引擎原始返回，归一化复用生产实现，保持与真实契约一致
+    return vectorClientModule.normalizeVectorDeleteResult(params.ids, {
+      ok: params.ids.length - errors.length,
+      failed: errors.length,
+      errors,
+    });
   };
 
   const ftsClientModule = await import('../src/lib/fts-client.js');

@@ -317,6 +317,12 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 
 const args = process.argv.slice(2);
 
+/**
+ * 重建失败时回显的逐条错误上限（避免整库重建失败时刷出上万行）。
+ * 第一条（通用迁移文案）单独作为 error 字段，其余明细进 errors 数组。
+ */
+const MAX_REPORTED_REBUILD_ERRORS = 10;
+
 /** 帮助文本：-h/--help 与缺省 scope 时共用 */
 const RESTORE_HELP = `ki restore - 从快照还原 scope
 
@@ -324,7 +330,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   ki restore <scope> --list             列出可用备份（显式 flag，与 backup --list 一致）
   ki restore <scope>                    列出可用备份（无参兼容）
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
-  ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
+  ki restore <scope> --rebuild-vector [--yes]  从 KB 重建 scope 向量；跨维度迁移需 --yes
 
 选项：
   --list              列出可用备份（显式）
@@ -334,7 +340,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   --tags <t1,t2>      重建打标：为重建范围内文档附加自定义标签（与已有标签合并去重，只增不减；需与 --rebuild-vector 配合）
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
-  --yes               跳过确认直接执行（破坏性）
+  --yes               确认快照还原或跨维度全量重建（破坏性；旧集合保留备份）
   -h, --help          显示帮助`;
 
 // -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
@@ -406,7 +412,7 @@ const rebuildTagsRaw = extractValuedFlag('--tags');
 // NEG：记录用户是否显式传入了 --group/--tags（值缺失/空/全保留标签时不得静默降级为全量重建）
 const groupFlagProvided = args.some((a) => a === '--group' || a.startsWith('--group='));
 const tagsFlagProvided = args.some((a) => a === '--tags' || a.startsWith('--tags='));
-const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided };
+const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided, yes: skipYes };
 if (rebuildGroupRaw && rebuildGroupRaw.trim()) rebuildOpts.groupFilter = rebuildGroupRaw.trim();
 if (rebuildTagsRaw && parseContentTags(rebuildTagsRaw).length > 0) rebuildOpts.tags = rebuildTagsRaw;
 
@@ -483,11 +489,23 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
     } catch { /* 清除失败不阻断 */ }
   }
   if (!result.ok) {
+    // 失败时只回 errors[0] 会把可诊断信息全部丢掉：跨维度迁移的第一条是通用提示
+    // （"新维度向量未全部写入…请修复 embedding"），真实逐条原因在 errors[1..] 与 stats 里。
+    // 实测该行为让「batchSize=32 超过服务商单请求上限 25」这类配置问题完全无从定位
+    // （用户只看到"请修复 embedding"，而 provider 与密钥其实都正常）。
+    const reportedErrors = result.errors.slice(0, MAX_REPORTED_REBUILD_ERRORS);
     output({
       ok: false,
       action: 'rebuild_vector',
       scope: scopeName,
-      error: result.errors[0]?.error ?? '重建向量失败',
+      error: reportedErrors[0]?.error ?? '重建向量失败',
+      stats: result.stats,
+      errors: reportedErrors.length > 1 ? reportedErrors.slice(1) : undefined,
+      errorsTotal: result.errors.length,
+      hint:
+        'errors 只有一条通用文案且 stats.failed>0 时，优先核对 embedding provider：连通性 / 密钥 / '
+        + '单请求条数上限（服务商常限制每次请求的 inputs 数；运行时已支持自动降批，'
+        + '仍建议把 embedding.scheduler.batchSize 配到上限内）。执行 ki doctor 可复现同款探测。',
     });
     process.exit(1);
   }
@@ -501,6 +519,8 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
         ? { group: opts.groupFilter, tags: result.stats.mergedTags.length > 0 ? result.stats.mergedTags : undefined }
         : undefined,
     stats: result.stats,
+    migrationBackup: result.migrationBackup,
+    migrationCacheBackup: result.migrationCacheBackup,
     errors: result.errors.length > 0 ? result.errors : undefined,
     hint:
       result.errors.length > 0

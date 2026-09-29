@@ -26,6 +26,7 @@ export interface HealthResponse {
   ok: boolean;
   report?: HealthReport;
   error?: string;
+  code?: string;
 }
 
 export interface SearchConfigResponse {
@@ -72,6 +73,31 @@ export interface DocListResponse {
   error?: string;
 }
 
+export interface EditableDocument {
+  ok: true;
+  scope: string;
+  group: string;
+  relation: string;
+  content: string;
+  revision: string;
+  sourceConfigured: boolean;
+  sourceRevision?: string;
+  sourceError?: string;
+  warning?: string;
+  indexMode: 'fts' | 'dense';
+}
+
+export interface SaveDocumentResponse {
+  ok: true;
+  revision: string;
+  sourceConfigured: boolean;
+  sourceWritten: boolean;
+  fullTextUpdated: boolean;
+  vectorStored: boolean;
+  indexedAs: 'fts' | 'dense' | 'unchanged';
+  warning?: string;
+}
+
 export interface UploadFile {
   name: string;
   path?: string;
@@ -81,11 +107,22 @@ export interface UploadFile {
 export interface UploadResponse {
   ok: boolean;
   uploadId?: string;
+  jobId?: string;
   scope?: string;
   files?: UploadFile[];
   total?: number;
   errors?: { name: string; error: string }[];
   error?: string;
+}
+
+export interface UploadStatusResponse {
+  ok: boolean;
+  uploadId: string;
+  scope: string;
+  state: 'uploading' | 'importing' | 'done' | 'failed';
+  jobId?: string;
+  active: boolean;
+  errors: { name: string; error: string }[];
 }
 
 export interface ImportConfigResponse {
@@ -97,6 +134,7 @@ export interface ImportConfigResponse {
   assetExtensions: string[];
   maxAssetSize: number;
   maxRequestBody: number;
+  vectorDimension?: { configured: number; persisted?: number; compatible: boolean | null; error?: string };
   error?: string;
 }
 
@@ -170,6 +208,23 @@ export async function getDocList(
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 
+export async function getEditableDocument(scope: string, group: string, relation: string): Promise<EditableDocument> {
+  return req<EditableDocument>(`/api/doc/edit?${new URLSearchParams({ scope, group, relation }).toString()}`);
+}
+
+export async function saveEditableDocument(args: {
+  scope: string;
+  group: string;
+  relation: string;
+  content: string;
+  expectedRevision: string;
+  expectedSourceRevision?: string;
+  vectorize?: boolean;
+  editId?: string;
+}): Promise<SaveDocumentResponse> {
+  return req<SaveDocumentResponse>('/api/doc/edit', { method: 'POST', body: JSON.stringify(args) });
+}
+
 export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {
   return req<ImportConfigResponse>(`/api/import/config?${new URLSearchParams({ scope }).toString()}`);
 }
@@ -177,13 +232,20 @@ export async function getImportConfig(scope: string): Promise<ImportConfigRespon
 export async function uploadFiles(
   scope: string,
   files: { name: string; content: string }[],
-  uploadId?: string,
+  uploadId: string,
+  batchIndex: number,
+  batchCount: number,
+  finalize?: Omit<Parameters<typeof runImport>[0], 'scope' | 'uploadId'>,
 ): Promise<UploadResponse> {
   return req<UploadResponse>('/api/import/upload', {
     method: 'POST',
+    headers: { 'X-Ki-Upload-Id': uploadId },
     body: JSON.stringify({
       scope,
-      ...(uploadId ? { uploadId } : {}),
+      uploadId,
+      batchIndex,
+      batchCount,
+      ...(finalize ? { finalize } : {}),
       files: files.map((f) => ({
         name: f.name,
         content: f.content,
@@ -216,6 +278,10 @@ export async function runImport(args: {
 
 export async function getImportStatus(jobId: string): Promise<StatusResponse> {
   return req<StatusResponse>(`/api/import/status?jobId=${encodeURIComponent(jobId)}`);
+}
+
+export async function getImportUploadStatus(scope: string, uploadId: string): Promise<UploadStatusResponse> {
+  return req<UploadStatusResponse>(`/api/import/upload-status?${new URLSearchParams({ scope, uploadId }).toString()}`);
 }
 
 // ─── Tag 相关 ───────────────────────────────────────────

@@ -415,9 +415,18 @@ function spawnMcpDaemon(args: string[]): ChildProcess {
   return child;
 }
 
-/** restart 就绪等待参数：jiti 冷启动 + 预检有成本，30s 内未就绪按"仍在启动"处理（不判死，对齐"慢失败按成功"决策） */
-const RESTART_READY_TIMEOUT_MS = 30_000;
+/**
+ * restart 就绪等待参数：jiti 冷启动（编译 TS）+ 启动预检（真实 embedding 探测 + 逐 Collection
+ * 维度诊断）实测可达 1~2 分钟，故窗口默认 120s，并每 5s 输出心跳——旧实现静默轮询 30s，
+ * 用户看到的是"命令挂住不动"。可用 KI_RESTART_READY_TIMEOUT_MS 覆盖。
+ */
+const RESTART_READY_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.KI_RESTART_READY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+})();
 const RESTART_POLL_INTERVAL_MS = 300;
+/** 就绪等待期间的心跳间隔：避免前台命令静默数分钟被误认为卡死 */
+const RESTART_READY_HEARTBEAT_MS = 5_000;
 
 /**
  * 等待重启后的新实例就绪（healthz ok）。
@@ -431,6 +440,7 @@ async function waitForRestartReady(child: ChildProcess, host: string, port: numb
   child.on('error', (err) => { spawnError.msg = err.message; });
 
   const start = Date.now();
+  let lastHeartbeat = start;
   while (Date.now() - start < RESTART_READY_TIMEOUT_MS) {
     if (spawnError.msg) {
       failJson(
@@ -447,10 +457,35 @@ async function waitForRestartReady(child: ChildProcess, host: string, port: numb
       );
     }
     const info = await fetchHealthz(probeHost(host), port, 1500);
-    if (info?.ok === true && info.name === SERVICE_NAME) return true;
+    if (info?.ok === true && info.name === SERVICE_NAME) {
+      process.stderr.write(`新实例已就绪（pid ${info.pid}，用时 ${Math.round((Date.now() - start) / 1000)}s）。\n`);
+      return true;
+    }
+    if (Date.now() - lastHeartbeat >= RESTART_READY_HEARTBEAT_MS) {
+      lastHeartbeat = Date.now();
+      process.stderr.write(
+        `  等待新实例就绪… ${Math.round((Date.now() - start) / 1000)}s`
+        + '（冷启动需编译 TS + 启动预检，属正常慢启动，非卡死）\n',
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
   }
   return false;
+}
+
+/**
+ * 预检进度输出（单行覆盖写 stderr）：健康检查里的长耗时阶段（embedding 批量探测、
+ * 逐 Collection 维度诊断）必须可见，否则 `ki doctor` / `ki mcp restart` 会静默数分钟。
+ * 非 TTY（重定向/日志采集）不刷行，避免把日志塞满控制字符。
+ */
+function reportHealthProgress(done: number, total: number, label: string): void {
+  if (total <= 0 || !process.stderr.isTTY) return;
+  process.stderr.write(`\r  [${done}/${total}] ${label}`.padEnd(78).slice(0, 78));
+}
+
+/** 结束进度行（清掉残影，让后续报告从行首开始打印） */
+function finishHealthProgress(): void {
+  if (process.stderr.isTTY) process.stderr.write(`\r${' '.repeat(78)}\r`);
 }
 
 /**
@@ -506,7 +541,18 @@ async function runRestartCommand(args: string[]): Promise<void> {
 
   // 重启前在父进程完成预检：embedding 外部服务失败重试 1 次后只告警，
   // 同时让配置/目录等硬错误在停止旧实例前就 fail-loud，避免先停掉可用服务。
-  const preflight = await runHealthCheck(config, { embeddingFailure: 'warn' });
+  // ⚠️ 这里**不做**逐 Collection 维度诊断（checkCollectionDimensions:false）：它是 O(scope)
+  // 操作（每个 scope 开一次 Collection），1000 个 scope 会让"重启"变成分钟级阻塞，
+  // 且旧实例仍在运行时每个持锁 scope 还要等探测超时。维度冲突在写入/检索时会按需拦截并给出
+  // ki restore <scope> --rebuild-vector 指引；需要全量体检请单独跑 ki doctor。
+  process.stderr.write('重启预检中（配置 / embedding；不含逐 scope 维度诊断）…\n');
+  const preflight = await runHealthCheck(config, {
+    embeddingFailure: 'warn',
+    collectionDimensionFailure: 'warn',
+    checkCollectionDimensions: false,
+    onProgress: reportHealthProgress,
+  });
+  finishHealthProgress();
   process.stderr.write(renderHealthReport(preflight) + '\n');
   if (preflight.fail > 0) {
     failJson(
@@ -695,11 +741,19 @@ export async function startMcpServer(): Promise<void> {
 
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
   // stdio 协议占用 stdout，报告一律写 stderr；embedding 外部服务失败仅警告，配置/目录等硬失败仍拒绝启动。
+  // ⚠️ 不做逐 Collection 维度诊断（O(scope)：1000 个 scope 会让启动阻塞数分钟，且开机对每个
+  // Collection 做 probe/open 正是历史上批量撞锁/泄漏 flock 的放大器）。维度冲突改为按需拦截：
+  // 写入/检索命中时返回 VECTOR_DIMENSION_MISMATCH + 重建指引，前端两个页面也按该状态提示。
   try {
     const config = loadConfig();
     const report = await runHealthCheck(config, {
       embeddingFailure: 'warn',
+      collectionDimensionFailure: 'warn',
+      checkCollectionDimensions: false,
+      // 启动预检是最长的启动阶段（真实 embedding 探测），输出进度便于运维判断"慢"而非"卡"
+      onProgress: reportHealthProgress,
     });
+    finishHealthProgress();
     process.stderr.write(renderHealthReport(report) + '\n');
     if (report.fail > 0) {
       process.stderr.write(

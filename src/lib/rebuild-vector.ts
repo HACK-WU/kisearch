@@ -7,7 +7,8 @@
  *   - ki-relation 关系向量：每条 relation 一条（relation名 + Group路径 + 关键词）
  *   - ki-path     路径向量：每个 Group 一条（Group路径 + 关键词）
  *
- * 重建前清空 scope 旧向量（vectorDeleteScope），保证结果与 KB 一致（幂等可重跑）。
+ * 同维度重建前清空 scope 旧向量（vectorDeleteScope）；跨维度时写入暂存 Collection，
+ * 完整写入并校验后才切换目录，旧 Collection 留在 migration-backups 供恢复。
  * 内容向量（ki-search）的 docId 回写 relations-cache.json 的 rel.memoryId，
  * 防止 delete-relation 等命令产生悬空引用（与 import 的 writeRelations 语义一致）。
  *
@@ -22,14 +23,19 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, getScopeDataDir, getScopeCleanConfig } from './config.js';
+import { randomUUID } from 'node:crypto';
+import { loadConfig, getScopeDataDir, getScopeCleanConfig, runWithConfigSnapshot } from './config.js';
+import { getVectorMigrationMarkerPath, getVectorMigrationPaths } from './scope-collection.js';
 import { buildGroupPathContent, buildRelationContent } from './path-vectorize.js';
 import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
 import { getSource } from './scope.js';
 import {
   vectorBulkStore,
+  vectorCollectionDimension,
   vectorDeleteScope,
+  closeEngine,
+  getEngine,
   type VectorBulkStoreResult,
 } from './vector-client.js';
 import { logInfo, logProgress, logWarn } from './progress.js';
@@ -83,6 +89,10 @@ export interface RebuildVectorResult {
   partial: boolean;
   stats: RebuildVectorStats;
   errors: { type: string; path: string; error: string }[];
+  /** 跨维度迁移成功后保留的旧 Collection 目录，供人工回退。 */
+  migrationBackup?: string;
+  /** 与旧 Collection 配套的 relations-cache 备份。 */
+  migrationCacheBackup?: string;
 }
 
 /** 重建选项（对应 CLI 的 --group / --tags） */
@@ -93,6 +103,8 @@ export interface RebuildVectorOptions {
   tags?: string;
   /** CLI 层是否显式传入了 --tags（NEG：原始值非空但解析后为空时提示保留标签被过滤） */
   tagsProvided?: boolean;
+  /** 跨维度全量重建会替换旧 Collection，必须显式确认。 */
+  yes?: boolean;
   /** 仅在批次边界检查；不强行打断正在进行的 embedding/zvec 批次。 */
   abortSignal?: AbortSignal;
   /** 切分参数覆盖；缺省读 group-index.source（导入时持久化），再缺省 1000/150 */
@@ -116,6 +128,88 @@ interface CacheGroup {
   keywords?: string[];
 }
 
+/**
+ * 集合与缓存的切换跨多次 rename，中途崩溃会留下"半切换"现场。
+ * 下次显式重建时先按事务标记恢复旧集合与配套缓存，再按当前配置重试。
+ * 标记属不可信的本地状态：其中记录的每条路径都必须与"当前配置 + 已校验 scope +
+ * migrationId"派生出的路径一致，否则宁可拒绝自动回退。
+ */
+async function rollbackPendingVectorMigration(
+  scope: string,
+  config: ReturnType<typeof loadConfig>,
+  scopeDir: string,
+): Promise<boolean> {
+  const markerProbePath = getVectorMigrationMarkerPath(config, scope);
+  if (!fs.existsSync(markerProbePath)) return false;
+
+  let marker: Record<string, unknown>;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerProbePath, 'utf-8')) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`事务标记损坏，无法自动回退：${markerProbePath}；${(error as Error).message}`);
+  }
+  const migrationId = marker.migrationId;
+  if (marker.scope !== scope || typeof migrationId !== 'string') {
+    throw new Error(`事务标记 scope 或 migrationId 无效，拒绝自动回退：${markerProbePath}`);
+  }
+
+  // 与写入侧同一派生函数：vectorDir 若已变更，这里算出的路径与标记不符 → 拒绝自动回退，
+  // 避免把旧 vectorDir 的集合改名到新位置（那才是真正的数据错位）。
+  const paths = getVectorMigrationPaths(config, scope, migrationId);
+  const { stageRoot, stageCollectionPath, liveCollectionPath, backupPath, cacheBackupPath, markerPath } = paths;
+  const stageConfig = { ...config, vectorDir: stageRoot };
+  const cachePath = path.join(scopeDir, 'relations-cache.json');
+  const expectedPaths: Record<string, string> = {
+    backupPath,
+    cacheBackupPath,
+    cachePath,
+    liveCollectionPath,
+    stageCollectionPath,
+  };
+  for (const [key, expected] of Object.entries(expectedPaths)) {
+    if (path.resolve(String(marker[key] ?? '')) !== path.resolve(expected)) {
+      throw new Error(`事务标记路径 ${key} 与当前配置不符，拒绝自动回退：${markerPath}`);
+    }
+  }
+
+  await closeEngine(scope);
+  const hasOldCollectionBackup = fs.existsSync(backupPath);
+  if (hasOldCollectionBackup) {
+    if (!fs.existsSync(cacheBackupPath)) {
+      throw new Error(`旧 Collection 备份存在但 relations-cache 备份缺失，拒绝自动回退：${backupPath}`);
+    }
+    if (fs.existsSync(liveCollectionPath)) {
+      if (fs.existsSync(stageCollectionPath)) {
+        throw new Error(`迁移目录状态不明确（live 与 stage 同时存在），拒绝自动回退：${markerPath}`);
+      }
+      fs.mkdirSync(path.dirname(stageCollectionPath), { recursive: true, mode: 0o700 });
+      fs.renameSync(liveCollectionPath, stageCollectionPath);
+    }
+    fs.renameSync(backupPath, liveCollectionPath);
+  } else if (!fs.existsSync(liveCollectionPath)) {
+    throw new Error(`旧 Collection 与旧集合备份均不存在，拒绝自动回退：${markerPath}`);
+  }
+
+  if (fs.existsSync(cacheBackupPath)) {
+    const cacheRestoreTemp = path.join(scopeDir, `.relations-cache-recovery-${migrationId}.tmp`);
+    fs.copyFileSync(cacheBackupPath, cacheRestoreTemp, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(cacheRestoreTemp, 0o600);
+    fs.renameSync(cacheRestoreTemp, cachePath);
+  } else if (hasOldCollectionBackup) {
+    // 上面已拦住这种组合；此处保留显式判断，防止将来调整顺序时丢掉这条不变量。
+    throw new Error(`relations-cache 备份缺失，拒绝自动回退：${cacheBackupPath}`);
+  }
+
+  fs.rmSync(markerPath);
+  try {
+    fs.rmSync(stageRoot, { recursive: true, force: true });
+  } catch (error) {
+    logWarn(`旧迁移暂存目录清理失败（可稍后手动清理）：${stageRoot}；${(error as Error).message}`);
+  }
+  logWarn(`检测到未完成的向量迁移，已自动恢复旧 Collection 与 relations-cache；现将按当前配置重新执行：${scope}`);
+  return true;
+}
+
 /** groupPath 是否在过滤子树内（自身或子孙）；未指定过滤时全部命中 */
 export function isInGroupScope(groupPath: string, groupFilter?: string): boolean {
   if (!groupFilter) return true;
@@ -134,7 +228,7 @@ export function isInGroupScope(groupPath: string, groupFilter?: string): boolean
  * @param scopeDir scope 数据目录
  * @param groupFilter 可选：仅收集该 Group 子树下的 index.json（目录不存在时返回空）
  */
-export function collectContentEntries(scopeDir: string, groupFilter?: string): RebuildVectorEntry[] {
+export function collectContentEntries(scopeDir: string, groupFilter?: string, strict = false): RebuildVectorEntry[] {
   const entries: RebuildVectorEntry[] = [];
   if (!fs.existsSync(scopeDir)) return entries;
 
@@ -153,11 +247,18 @@ export function collectContentEntries(scopeDir: string, groupFilter?: string): R
       let content: Record<string, unknown> = {};
       try {
         content = JSON.parse(fs.readFileSync(indexFile, 'utf-8')) as Record<string, unknown>;
-      } catch {
+        if (!content || typeof content !== 'object' || Array.isArray(content)) {
+          throw new Error('顶层必须是对象');
+        }
+      } catch (error) {
+        if (strict) throw new Error(`读取 ${indexFile} 失败：${(error as Error).message}`);
         /* 单个 index.json 解析失败跳过 */
       }
       for (const [k, v] of Object.entries(content)) {
         if (k === 'version' || k === 'updatedAt') continue;
+        if (strict && typeof v !== 'string') {
+          throw new Error(`迁移来源 ${indexFile} 的关系 "${k}" 不是文本`);
+        }
         entries.push({
           text: String(v),
           tags: CONTENT_TAG,
@@ -397,6 +498,8 @@ export function mergeRebuildTags(
 export interface RebuildDeps {
   bulkStore?: typeof vectorBulkStore;
   deleteScope?: typeof vectorDeleteScope;
+  /** 读取旧 Collection 维度，确保重建修改数据前发现配置不兼容。 */
+  collectionDimension?: (scope: string) => Promise<number | undefined>;
   /**
    * 进度展示用：全量重建清空前统计旧向量总数（CLI 注入真实实现）。
    * 省略时跳过统计，删除旧向量无进度条（测试注入 mock 时不得触碰真实引擎）。
@@ -425,6 +528,7 @@ export async function rebuildScopeVectors(
   const startedAt = Date.now();
   const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const deleteScope = deps.deleteScope ?? vectorDeleteScope;
+  const collectionDimension = deps.collectionDimension ?? vectorCollectionDimension;
   const countScope = deps.countScope;
 
   const groupFilter = opts.groupFilter?.trim() || undefined;
@@ -469,6 +573,18 @@ export async function rebuildScopeVectors(
 
   const config = loadConfig();
   const scopeDir = getScopeDataDir(config, scope);
+
+  try {
+    await rollbackPendingVectorMigration(scope, config, scopeDir);
+  } catch (error) {
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{ type: 'migration-recovery', path: scope, error: `检测到未完成的向量迁移，自动回退未完成；所有 scope 读写仍受保护。请检查迁移事务标记及其记录的备份路径：${(error as Error).message}` }],
+    };
+  }
 
   if (!fs.existsSync(scopeDir)) {
     return { ok: false, scope, partial, stats, errors: [{ type: 'scope', path: scopeDir, error: 'scope 数据目录不存在' }] };
@@ -516,6 +632,39 @@ export async function rebuildScopeVectors(
     }
   }
 
+  // 在清理或打标前确认维度。跨维度只能通过显式确认的全量重建迁移 schema。
+  let persistedDimension: number | undefined;
+  try {
+    persistedDimension = await collectionDimension(scope);
+  } catch (err) {
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{
+        type: 'dimension',
+        path: scope,
+        error: `读取旧 Collection 维度失败，未执行重建：${(err as Error).message}`,
+      }],
+    };
+  }
+  const embeddingDimension = config.embedding.dimension;
+  const needsMigration = persistedDimension !== undefined && embeddingDimension !== persistedDimension;
+  if (needsMigration && (partial || opts.yes !== true)) {
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{
+        type: 'dimension',
+        path: scope,
+        error: `embedding.dimension (${embeddingDimension}) !== persisted dimension (${persistedDimension})；旧向量及 relations-cache 均未更改。${partial ? '跨维度迁移仅支持全量重建，请去掉 --group/--tags 后添加 --yes' : `确认替换旧向量集合后，请执行 ki restore ${scope} --rebuild-vector --yes`}`,
+      }],
+    };
+  }
+
   // 2. --tags 打标：先合并写 rel.tags，再收集（使本次重建包含新标签的向量）
   const { taggedRelations } = mergeRebuildTags(groups, cliTags, groupFilter);
   stats.taggedRelations = taggedRelations;
@@ -530,7 +679,12 @@ export async function rebuildScopeVectors(
   const cleanEnabled = cleanCfg?.enabled !== false;
   const cleanHooks = cleanCfg?.hooks ?? [];
 
-  const rawContentEntries = collectContentEntries(scopeDir, groupFilter);
+  let rawContentEntries: RebuildVectorEntry[];
+  try {
+    rawContentEntries = collectContentEntries(scopeDir, groupFilter, needsMigration);
+  } catch (error) {
+    return { ok: false, scope, partial, stats, errors: [{ type: 'migration-source', path: scopeDir, error: `迁移前读取 KB 失败，旧集合未更改：${(error as Error).message}` }] };
+  }
   const contentEntries = await buildContentChunkEntries(rawContentEntries, {
     cleanEnabled,
     cleanRules: cleanCfg?.rules,
@@ -539,6 +693,16 @@ export async function rebuildScopeVectors(
     chunkOverlap,
     abortSignal: opts.abortSignal,
   });
+  if (needsMigration) {
+    const rebuiltRelations = new Set(contentEntries.map((entry) => `${entry.groupPath ?? ''}\u0000${entry.relationName ?? ''}`));
+    for (const [groupPath, group] of Object.entries(groups)) {
+      for (const rel of group.hot_relations ?? []) {
+        if (!rel.memoryId && (rel.memoryIds?.length ?? 0) === 0) continue;
+        if (rebuiltRelations.has(`${groupPath}\u0000${rel.text}`)) continue;
+        return { ok: false, scope, partial, stats, errors: [{ type: 'migration-source', path: `${groupPath}/${rel.text}`, error: '旧缓存引用了向量，但 KB 原文无法生成对应内容向量；已保留旧集合和缓存，请先修复 index.json/清洗配置' }] };
+      }
+    }
+  }
   const relationEntries = collectRelationEntries(contentEntries);
   const pathEntries = collectPathEntries(contentEntries);
   const tagEntries = collectTagEntries(scope, groups, groupFilter);
@@ -555,10 +719,32 @@ export async function rebuildScopeVectors(
     `收集到 ${allEntries.length} 个条目（内容 ${stats.content} / 关系 ${stats.relation} / 路径 ${stats.path} / 标签 ${stats.tag}）`
   );
 
+  const migrationId = needsMigration ? randomUUID() : '';
+  const migrationPaths = needsMigration ? getVectorMigrationPaths(config, scope, migrationId) : null;
+  const stageRoot = migrationPaths?.stageRoot ?? '';
+  const stageConfig = migrationPaths ? { ...config, vectorDir: migrationPaths.stageRoot } : config;
+  const stageCollectionPath = migrationPaths?.stageCollectionPath ?? '';
+  const liveCollectionPath = migrationPaths?.liveCollectionPath ?? '';
+  const backupPath = migrationPaths?.backupPath ?? '';
+  const cacheBackupPath = migrationPaths?.cacheBackupPath ?? '';
+  const pendingPath = migrationPaths?.markerPath ?? '';
+  const cacheTempPath = needsMigration ? path.join(scopeDir, `.relations-cache-${migrationId}.tmp`) : '';
+  let migrationCommitted = false;
+  let markerCreated = false;
+  let cacheSwitched = false;
+  let preserveStage = false;
+
+  try {
+    if (needsMigration) {
+      // 旧 Collection 保持原位；新维度写入独立目录。scope/标签/docId 仍使用原始值。
+      await closeEngine(scope);
+      await runWithConfigSnapshot(stageConfig, () => getEngine(scope));
+    }
+
   // 4. 清空旧向量：仅全量重建执行（保证结果与 KB 一致）；
   //    局部重建跳过（幂等覆盖匹配子集，其他向量不受影响）。失败则中止，避免新旧混杂。
   //    注入 countScope 时（CLI 路径）先统计旧向量总数，删除过程输出进度条。
-  if (!partial) {
+  if (!partial && !needsMigration) {
     try {
       checkCancelled();
       let existingCount: number | undefined;
@@ -603,7 +789,7 @@ export async function rebuildScopeVectors(
       checkCancelled(Math.min(b * VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
       const offset = b * VECTORIZE_BATCH_SIZE;
       const slice = allEntries.slice(offset, offset + VECTORIZE_BATCH_SIZE);
-      const res = await bulkStore({ scope, entries: slice }, {
+      const storeBatch = () => bulkStore({ scope, entries: slice }, {
         abortSignal: opts.abortSignal,
         onProgress: (progress) => opts.onProgress?.({
           phase: 'rebuild',
@@ -615,6 +801,9 @@ export async function rebuildScopeVectors(
           cancelled: cumulativeCancelled + (progress.cancelled ?? 0),
         }),
       });
+      const res = needsMigration
+        ? await runWithConfigSnapshot(stageConfig, storeBatch)
+        : await storeBatch();
       stats.succeeded += res.succeeded;
       stats.failed += res.failed;
       cumulativePersisted += res.succeeded;
@@ -657,8 +846,61 @@ export async function rebuildScopeVectors(
 
   // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
   stats.updatedMemoryId = updateMemoryIds(groups, allEntries, aggResults);
+  if (needsMigration) {
+    // 有任一条失败/取消时不切换；当前运行中的旧集合与缓存仍完整。
+    if (errors.length > 0 || stats.failed > 0 || cumulativeMetadataPending > 0 || cumulativeCancelled > 0) {
+      return {
+        ok: false, scope, partial, stats,
+        errors: [{ type: 'migration', path: scope, error: '新维度向量未全部写入，已保留旧 Collection 和 relations-cache；请修复 embedding 后重试' }, ...errors],
+      };
+    }
+    checkCancelled(allEntries.length, Math.max(allEntries.length, 1));
+    const stagedDimension = await runWithConfigSnapshot(stageConfig, () => vectorCollectionDimension(scope));
+    if (stagedDimension !== embeddingDimension) {
+      return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `新 Collection 维度校验失败：期望 ${embeddingDimension}，实际 ${stagedDimension}` }] };
+    }
+    // 先写好缓存临时文件；切换目录后只需原子 rename，失败时可恢复旧集合。
+    fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    await closeEngine(scope);
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(backupPath), 0o700);
+    fs.mkdirSync(path.dirname(pendingPath), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(pendingPath), 0o700);
+    try {
+      fs.writeFileSync(pendingPath, JSON.stringify({ scope, migrationId, backupPath, cacheBackupPath, cachePath, liveCollectionPath, stageCollectionPath }), { flag: 'wx', mode: 0o600 });
+      markerCreated = true;
+      fs.copyFileSync(cachePath, cacheBackupPath, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(cacheBackupPath, 0o600);
+      fs.renameSync(liveCollectionPath, backupPath);
+      fs.renameSync(stageCollectionPath, liveCollectionPath);
+      fs.renameSync(cacheTempPath, cachePath);
+      cacheSwitched = true;
+      migrationCommitted = true;
+      // 到这里新维度集合与配套缓存已提交。FTS-only 清理属派生索引维护，
+      // 放到标记清除之后执行：中断时同维度重建可安全重试。
+      fs.rmSync(pendingPath);
+    } catch (error) {
+      if (migrationCommitted) throw error;
+      try {
+        if (fs.existsSync(backupPath)) {
+          if (fs.existsSync(liveCollectionPath)) fs.renameSync(liveCollectionPath, stageCollectionPath);
+          fs.renameSync(backupPath, liveCollectionPath);
+        }
+        if (cacheSwitched) {
+          fs.copyFileSync(cacheBackupPath, cacheTempPath);
+          fs.renameSync(cacheTempPath, cachePath);
+        }
+        if (markerCreated) fs.rmSync(pendingPath);
+      } catch (rollbackError) {
+        preserveStage = true;
+        return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `切换新 Collection 失败且自动回退失败：${(error as Error).message}；${(rollbackError as Error).message}。旧集合备份：${backupPath}；事务标记：${pendingPath}` }] };
+      }
+      return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `切换新 Collection 失败，已恢复旧集合：${(error as Error).message}` }] };
+    }
+  }
   // FTS-only 文档若本次成功重建出 dense，清理旧全文索引并移除独立 ID，避免
-  // 同一 relation 同时出现在两套索引中。部分向量化失败时保留 ftsIds，保证全文可用。
+  // 同一 relation 同时出现在两套索引中。跨维度迁移已先提交 dense/cache 并清除事务标记；
+  // 清理中断时旧 FTS 数据仍是可重试的冗余索引，不会破坏新旧 Collection/cache 配对。
   for (const [groupPath, group] of Object.entries(groups)) {
     if (!isInGroupScope(groupPath, groupFilter)) continue;
     for (const rel of group.hot_relations ?? []) {
@@ -670,16 +912,47 @@ export async function rebuildScopeVectors(
           delete rel.ftsIds;
           delete rel.ftsLocators;
           delete rel.ftsIndexComplete;
+        } else {
+          const remainingIds = new Set(deleted.failedIds);
+          rel.ftsIds = rel.ftsIds.filter((id) => remainingIds.has(id));
+          rel.ftsLocators = (rel.ftsLocators ?? []).filter((locator) => remainingIds.has(locator.ftsId));
+          if (rel.ftsIds.length === 0) {
+            delete rel.ftsIds;
+            delete rel.ftsLocators;
+            delete rel.ftsIndexComplete;
+          }
+          errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: `旧 FTS-only 索引清理失败 ${deleted.failed} 条` });
         }
-        else errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: `旧 FTS-only 索引清理失败 ${deleted.failed} 条` });
       } catch (err) {
         errors.push({ type: 'fts-cleanup', path: `${groupPath}/${rel.text}`, error: (err as Error).message });
       }
     }
   }
-  fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
+  // 迁移时上方已原子提交 memoryIds；FTS-only 清理后再更新缓存。
+  if (needsMigration) {
+    fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(cacheTempPath, cachePath);
+  } else {
+    fs.writeFileSync(cachePath, JSON.stringify(rc, null, 2), 'utf-8');
+  }
   opts.onProgress?.({ phase: 'rebuild', done: allEntries.length, total: Math.max(allEntries.length, 1) });
   logInfo(`向量重建完成，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
-  return { ok: true, scope, partial, stats, errors };
+  return { ok: true, scope, partial, stats, errors, ...(needsMigration ? { migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath } : {}) };
+  } catch (error) {
+    if (!needsMigration) throw error;
+    if (migrationCommitted) {
+      const pending = fs.existsSync(pendingPath);
+      return { ok: false, scope, partial, stats, migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath, errors: [{ type: 'migration-post-commit', path: scope, error: pending
+        ? `新 Collection 已切换，但事务标记未能清除：${(error as Error).message}；请再次执行 ki restore ${scope} --rebuild-vector --yes，命令会先自动恢复旧集合再重试。旧集合备份：${backupPath}；缓存备份：${cacheBackupPath}`
+        : `新 Collection 与 relations-cache 已切换；后续 FTS 清理或缓存整理失败：${(error as Error).message}。请执行 ki restore ${scope} --rebuild-vector 重试清理，旧集合与缓存备份保留在 ${backupPath} 和 ${cacheBackupPath}` }] };
+    }
+    return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `新维度重建失败，旧 Collection 和 relations-cache 未更改：${(error as Error).message}` }] };
+  } finally {
+    if (needsMigration) {
+      await closeEngine(scope);
+      if (fs.existsSync(cacheTempPath)) fs.rmSync(cacheTempPath, { force: true });
+      if (!preserveStage && fs.existsSync(stageRoot)) fs.rmSync(stageRoot, { recursive: true, force: true });
+    }
+  }
 }

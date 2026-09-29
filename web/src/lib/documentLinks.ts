@@ -19,8 +19,12 @@ export interface DocumentView {
   group?: string;
   path?: string;
   content?: string;
+  /** 搜索未取到全文时保留命中片段，完整文档加载失败后仍可阅读。 */
+  fallbackContent?: string;
   /** 从全文检索/浏览正文命中打开时，传递到阅读器的高亮查询词。 */
   highlightQuery?: string;
+  /** 新页深链接的目标段落/标题 ID。 */
+  anchor?: string;
 }
 
 /** Markdown 链接是否可能是知识库中的本地文档链接。 */

@@ -44,7 +44,12 @@ let ftsDeleteCalls: string[][] = [];
   vectorDeleteCalls.push({ scope: params.scope, ids: [...params.ids] });
   vectorEvents.push(`delete:${params.ids.join(',')}`);
   const errors = params.ids.filter((id) => vectorDeleteFailureIds.has(id)).map((id) => ({ id, code: 'ZVEC_WRITE_ERROR', reason: 'mock delete failure' }));
-  return { deleted: params.ids.length - errors.length, errors };
+  // 模拟引擎原始返回，归一化复用生产实现，保持与真实契约一致
+  return vectorClient.normalizeVectorDeleteResult(params.ids, {
+    ok: params.ids.length - errors.length,
+    failed: errors.length,
+    errors,
+  });
 };
 (vectorClient as any).vectorDeleteScope = async () => {
   throw new Error('不得调用已废弃的 Scope 级向量清空接口');

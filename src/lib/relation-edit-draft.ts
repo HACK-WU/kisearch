@@ -33,6 +33,10 @@ export interface RelationEditDraft {
   baseContent: string;
   content: string;
   revision: string;
+  /** 在线编辑保存时的目标索引模式；既有 MCP 草稿缺省沿用当前 Relation 模式。 */
+  targetMode?: 'dense' | 'fts';
+  /** 源文件已由调用方按真实 sourcePath 处理，发布时不得走通用 Wiki 写回。 */
+  skipWikiWriteback?: boolean;
   status: RelationEditStatus;
   requestId?: string;
   error?: string;
@@ -91,6 +95,8 @@ export function createDraft(params: {
   baseMetadataRevision: string;
   baseContent: string;
   content: string;
+  targetMode?: 'dense' | 'fts';
+  skipWikiWriteback?: boolean;
 }): RelationEditDraft {
   const now = new Date().toISOString();
   const draft: RelationEditDraft = {
@@ -104,6 +110,8 @@ export function createDraft(params: {
     baseContent: params.baseContent,
     content: params.content,
     revision: contentRevision(params.content),
+    ...(params.targetMode ? { targetMode: params.targetMode } : {}),
+    ...(params.skipWikiWriteback ? { skipWikiWriteback: true } : {}),
     status: 'editing',
     createdAt: now,
     updatedAt: now,

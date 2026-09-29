@@ -335,3 +335,42 @@ test('TC-REQ-01-56: send 非 open 状态 → WorkerUnavailableError', async (t) 
     WorkerUnavailableError,
   );
 });
+
+test('embedding 单请求上限（provider 声明 25）触发时自动降批，不把整批判失败', async (t) => {
+  // 回归场景：engine 内置 embed 路径固定按 64 条切分，而服务商（阿里云百炼兼容模式）上限 25
+  // → 整批 400，64 条全判 EMBEDDING_FAILED（批量导入/FTS-only 写入会大面积失败）。
+  // 期望：命中该类 4xx 后按 provider 声明上限降批重发，全部落库且无失败项。
+  const DECLARED_LIMIT = 25;
+  const requestSizes = [];
+  const rejectingProvider = {
+    dimension: DIM,
+    async embed(texts) {
+      requestSizes.push(texts.length);
+      if (texts.length > DECLARED_LIMIT) {
+        throw Object.assign(
+          new Error(
+            'SiliconFlow /embeddings HTTP 400: <400> InternalError.Algo.InvalidParameter: '
+            + 'Value error, batch size is invalid, it should not be larger than 25.: input.contents',
+          ),
+          { code: 'HTTP_400' },
+        );
+      }
+      return texts.map((text) => hashVector(text));
+    },
+  };
+
+  const engine = await ZvecEngine.create(
+    makeConfig(makeDbPath('zvec-batchlimit-'), { embedding: rejectingProvider }),
+  );
+  t.after(() => engine.close());
+
+  const docs = Array.from({ length: 70 }, (_, i) => ({ id: `bl-${i}`, text: `batch limit doc ${i}` }));
+  const result = await engine.upsert(docs);
+
+  assert.equal(result.failed, 0, '不得因批次超限把文档判失败');
+  assert.equal(result.errors?.length ?? 0, 0);
+  // 首次按 64 切分被拒（证明该路径确实会撞上限），随后自动降到 ≤25
+  assert.equal(requestSizes[0], 64);
+  assert.equal(requestSizes.slice(1).every((size) => size <= DECLARED_LIMIT), true);
+  assert.equal((await engine.listIds()).length, 70, '降批后全部文档应可检索');
+});

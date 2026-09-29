@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
@@ -126,7 +126,12 @@ describe('scope 物理隔离', () => {
     assert.strictEqual(idxA.groups.wiki['to-delete'], undefined);
   });
 
-  it('ki import 直导在不同 scope 下隔离', async () => {
+  it('ki import 直导在不同 scope 下隔离', async (t) => {
+    if (!hasTestEmbeddingKey) {
+      // 向量化导入需要真实 embedding 密钥（测试配置未注入时不写 embedding 段，见 test-config.ts）
+      t.skip('未注入 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入隔离用例');
+      return;
+    }
     const sA = await mkScope('iso-scan-a');
     const sB = await mkScope('iso-scan-b');
     const src = mkTmp('iso-src');

@@ -16,6 +16,17 @@ const { normalizeCodeForCopy, renderMarkdownHtml } = await vite.ssrLoadModule('/
 after(async () => vite.close());
 
 describe('MarkdownPreview safe interactive Markdown', () => {
+  it('renders Markdown headings while ignoring heading-looking text inside fenced code', () => {
+    const html = renderMarkdownHtml(
+      '# 第一章\n\n## 第二节\n\n```md\n# 代码中的文本\n```',
+    );
+
+    assert.match(html, /<h1>第一章<\/h1>/);
+    assert.match(html, /<h2>第二节<\/h2>/);
+    assert.equal((html.match(/<h[1-6][^>]*>/g) ?? []).length, 2);
+    assert.match(html, /# 代码中的文本/);
+  });
+
   it('renders foldable details and summary while preserving Markdown in the body', () => {
     const html = renderMarkdownHtml(
       '<details>\n<summary>答案与解析</summary>\n\n**答案：** B\n</details>\n\n后续内容',

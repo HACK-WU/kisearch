@@ -14,7 +14,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import {
   collectContentEntries,
@@ -29,7 +28,9 @@ import {
 } from '../src/lib/rebuild-vector.js';
 import { resetConfigCache } from '../src/lib/config.js';
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rebuild-vec-'));
+const workspaceTemp = path.join(process.cwd(), 'temp');
+fs.mkdirSync(workspaceTemp, { recursive: true });
+const tmpRoot = fs.mkdtempSync(path.join(workspaceTemp, 'rebuild-vec-'));
 
 /** 构造 scope 数据目录：Group 树 index.json + relations-cache.json（与已还原 KB 同构） */
 function makeScopeDir(scopeDir: string): void {
@@ -669,6 +670,48 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
     assert.strictEqual(result.ok, false);
     assert.strictEqual(result.errors[0].type, 'cleanup');
     assert.match(result.errors[0].error, /清空旧向量失败/);
+  });
+
+  it('配置维度与持久化维度不匹配时，在清空旧向量前拒绝重建', async () => {
+    const s = setupScope('rs-dimension-mismatch');
+    fs.appendFileSync(
+      s.configPath,
+      '\nembedding:\n  provider: siliconflow\n  baseURL: https://example.invalid/v1\n  model: dimension-test-model\n  apiKey: test-key\n  dimension: 1024\n',
+    );
+    useConfig(s.configPath);
+
+    let deleteCalls = 0;
+    let bulkCalls = 0;
+    const result = await rebuildScopeVectors('rs-dimension-mismatch', {
+      collectionDimension: async () => 4096,
+      deleteScope: (async () => { deleteCalls++; return { deleted: 0 }; }) as never,
+      bulkStore: (async () => { bulkCalls++; return { total: 0, succeeded: 0, failed: 0, results: [] }; }) as never,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0]?.type, 'dimension');
+    assert.match(result.errors[0]?.error ?? '', /1024.*4096/);
+    assert.equal(deleteCalls, 0);
+    assert.equal(bulkCalls, 0);
+  });
+
+  it('无法读取持久化维度时，在清空旧向量前返回失败', async () => {
+    const s = setupScope('rs-dimension-read-failed');
+    useConfig(s.configPath);
+
+    let deleteCalls = 0;
+    let bulkCalls = 0;
+    const result = await rebuildScopeVectors('rs-dimension-read-failed', {
+      collectionDimension: async () => { throw new Error('collection is locked'); },
+      deleteScope: (async () => { deleteCalls++; return { deleted: 0 }; }) as never,
+      bulkStore: (async () => { bulkCalls++; return { total: 0, succeeded: 0, failed: 0, results: [] }; }) as never,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0]?.type, 'dimension');
+    assert.match(result.errors[0]?.error ?? '', /读取旧 Collection 维度失败.*collection is locked/);
+    assert.equal(deleteCalls, 0);
+    assert.equal(bulkCalls, 0);
   });
 
   it('部分向量化失败 → ok:true 且 errors 报告失败条目', async () => {

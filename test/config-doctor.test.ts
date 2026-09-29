@@ -18,6 +18,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import net from 'node:net';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
@@ -38,6 +39,9 @@ import {
   runHealthCheck,
   statusIcon,
   renderHealthReport,
+  healthCheckWorstCaseMs,
+  EMBED_PROBE_TIMEOUT_MS,
+  EMBED_PROBE_RETRIES,
   type HealthReport,
 } from '../src/lib/health-check.js';
 import { validateConfigFields } from '../src/lib/config-schema.js';
@@ -717,5 +721,78 @@ describe('C. health-check —— runHealthCheck', () => {
   it('_configPath 缺失 → 配置文件 fail', async () => {
     const report = await runHealthCheck(baseConfig({ _configPath: undefined }));
     assert.strictEqual(itemOf(report, '配置文件')?.status, 'fail');
+  });
+});
+
+// ─── D. 探测预算与超时对齐（根因回归）───
+// /api/health 曾把外层 deadline 写死 10s，而内层探测最坏 17s：一个慢 embedding
+// 探测就能把整份健康报告换成一条 400，前端据此误报「MCP HTTP 未就绪」。
+
+describe('D. health-check —— 探测预算与超时对齐', () => {
+  let dir: string;
+  let sink: net.Server;
+  let sinkURL: string;
+
+  const itemOf = (report: HealthReport, name: string) =>
+    report.items.find((i) => i.name === name);
+
+  before(async () => {
+    dir = fs.mkdtempSync(path.join(tmpDir, 'probe-'));
+    // 只接连接、永不回话的本地端点：稳定复现 TIMEOUT，不依赖外网
+    sink = net.createServer(() => { /* 故意不响应 */ });
+    await new Promise<void>((resolve) => sink.listen(0, '127.0.0.1', () => resolve()));
+    sinkURL = `https://127.0.0.1:${(sink.address() as net.AddressInfo).port}`;
+  });
+
+  after(() => {
+    sink.close();
+  });
+
+  function probeConfig(): KiConfig {
+    return {
+      dataDir: dir,
+      backupDir: dir,
+      vectorDir: dir,
+      embedding: {
+        provider: 'siliconflow',
+        baseURL: sinkURL,
+        model: 'probe-model',
+        dimension: 4096,
+        queryTimeoutMs: 3000,
+        apiKey: 'probe-key',
+      },
+      scopeMode: 'default',
+      scopes: { default: {} },
+      _configPath: path.join(dir, 'config.yaml'),
+    };
+  }
+
+  it('healthCheckWorstCaseMs = 单次×(1+重试) + 指数退避', () => {
+    assert.strictEqual(healthCheckWorstCaseMs(4_000, 0), 4_000);
+    assert.strictEqual(healthCheckWorstCaseMs(8_000, 1), 17_000);
+    assert.strictEqual(healthCheckWorstCaseMs(1_000, 3), 11_000);
+    assert.strictEqual(
+      healthCheckWorstCaseMs(),
+      healthCheckWorstCaseMs(EMBED_PROBE_TIMEOUT_MS, EMBED_PROBE_RETRIES),
+    );
+  });
+
+  it('embeddingProbe 生效：超时项回显实际预算，retries:0 不谎称重试', async () => {
+    const report = await runHealthCheck(probeConfig(), {
+      embeddingProbe: { timeoutMs: 300, retries: 0 },
+    });
+    const conn = itemOf(report, 'URL 连通性');
+    assert.strictEqual(conn?.status, 'fail', 'doctor 语义下探测失败仍是硬失败');
+    assert.match(conn?.detail ?? '', />0\.3s/, '预算须来自 embeddingProbe');
+    assert.doesNotMatch(conn?.detail ?? '', /已重试/);
+  });
+
+  it('/api/health 语义：探测超时降级 warn，不得抬高 fail 计数', async () => {
+    const report = await runHealthCheck(probeConfig(), {
+      embeddingFailure: 'warn',
+      embeddingProbe: { timeoutMs: 300, retries: 0 },
+    });
+    assert.strictEqual(itemOf(report, 'URL 连通性')?.status, 'warn');
+    assert.strictEqual(report.fail, 0, '超时若计入 fail，前端仍会显示服务异常');
   });
 });

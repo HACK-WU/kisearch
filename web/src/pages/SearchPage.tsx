@@ -66,6 +66,8 @@ interface Result {
   relation?: string;
   score?: number;
   original?: string;
+  /** true 时 original 为完整 local KB 原文；false 时 original 仅是命中 chunk 回退。 */
+  originalRetrieved?: boolean;
   /** 向量文档内容 */
   content?: string;
   /** 命中向量对应的标签（多 tag 文档去重后仅其一） */
@@ -103,9 +105,13 @@ export function SearchPage(): JSX.Element {
   const [resultMode, setResultMode] = useState<'hybrid' | 'fulltext' | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** 错误码（如 VECTOR_DIMENSION_MISMATCH）：与导入页共用同一判定口径，不再靠错误串猜 */
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [viewing, setViewing] = useState<DocumentView | null>(null);
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
+  const [readerFullscreen, setReaderFullscreen] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
@@ -128,6 +134,8 @@ export function SearchPage(): JSX.Element {
   const closeDocument = useCallback((): void => {
     setHistory([]);
     setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
     setViewing(null);
   }, []);
 
@@ -166,10 +174,17 @@ export function SearchPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
-    fetchTags(scope).then((res) => {
-      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const refreshTags = (): void => {
+      fetchTags(scope).then((res) => {
+        if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+      }).catch(() => {});
+    };
+    const onImportCompleted = (event: Event): void => {
+      if ((event as CustomEvent<{ scope: string }>).detail?.scope === scope) refreshTags();
+    };
+    refreshTags();
+    window.addEventListener('ki-import-completed', onImportCompleted);
+    return () => { cancelled = true; window.removeEventListener('ki-import-completed', onImportCompleted); };
   }, [scope]);
 
   useEffect(() => {
@@ -188,8 +203,9 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, []);
 
-  const run = async (): Promise<void> => {
+  const run = async (modeOverride?: 'fulltext'): Promise<void> => {
     if (!query.trim()) return;
+    const searchMode = modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
     // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
     const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
       ? Number(queryTimeout)
@@ -200,6 +216,7 @@ export function SearchPage(): JSX.Element {
     }
     setLoading(true);
     setError(null);
+    setErrorCode(null);
     setResults(null);
     setDegradeReason(null);
     setSkippedScopes([]);
@@ -211,22 +228,23 @@ export function SearchPage(): JSX.Element {
       const res = await kiSearch(query.trim(), {
         scope,
         tags: searchTags,
-        threshold: threshold || undefined,
+        threshold: searchMode === 'fulltext' ? undefined : threshold || undefined,
         limit: Number(limit) || 10,
-        mode: fullTextOnly ? 'fulltext' : 'hybrid',
+        mode: searchMode,
         ...(timeout !== undefined ? { timeout } : {}),
       });
-      // 后端业务层错误（如向量库锁定）
+      // 后端业务层错误（如向量库锁定 / 维度不匹配）
       if ((res as Record<string, unknown>).ok === false) {
         const errMsg = (res as Record<string, unknown>).error as string | undefined;
         setError(errMsg ?? '搜索服务暂不可用');
+        setErrorCode((res.code as string | undefined) ?? null);
         return;
       }
       const hits = (res.results ?? []) as Result[];
       setResults(hits);
       setTotal(hits.length);
       setResultQuery(query.trim());
-      setResultMode(fullTextOnly ? 'fulltext' : 'hybrid');
+      setResultMode(searchMode);
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -400,14 +418,35 @@ export function SearchPage(): JSX.Element {
         </div>
       )}
 
-      {error && (
-        <div className="ki-empty" style={{ padding: 40 }}>
-          <div>
-            <h3>搜索失败</h3>
-            <p>{error}</p>
+      {error && (() => {
+        // 维度不匹配判定：优先用后端 code（单一真源）；文案兜底必须包含 zvec 原生文案
+        // "vector dimension mismatch: expected X, got Y" —— 旧正则只认写入路径的
+        // "embedding.dimension ... persisted dimension"，于是检索页只显示一行英文报错，
+        // 而导入页（走维度状态接口）却能给出"请先重建向量"的指引，两页口径分叉。
+        const dimensionMismatch = errorCode === 'VECTOR_DIMENSION_MISMATCH'
+          || /embedding\.dimension|persisted dimension|VECTOR_DIMENSION_MISMATCH|vector dimension mismatch/.test(error);
+        return (
+          <div className="ki-empty" style={{ padding: 40 }}>
+            <div>
+              <h3>搜索失败</h3>
+              <p>{error}</p>
+              {dimensionMismatch && (
+                <p style={{ color: '#d4380d' }}>
+                  scope「{scope}」的旧向量集合维度与当前 embedding 配置不一致，语义检索不可用。
+                  请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>，完成后刷新页面再检索。全文检索仍可使用。
+                </p>
+              )}
+              {!fullTextOnly && dimensionMismatch && (
+                <div className="ki-empty__actions">
+                  <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
+                    使用全文搜索重试
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 结果 */}
       {results !== null && (
@@ -471,7 +510,10 @@ export function SearchPage(): JSX.Element {
                     const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
                     openDocument({
                       module: r.relation ?? r.group ?? 'doc',
-                      content: r.original,
+                      // 原文未取到时 original 是命中 chunk 回退；不把片段当整篇文档，
+                      // 让 ModuleDrawer 通过 ki_get_module_info 获取完整标题结构。
+                      content: r.originalRetrieved === true ? r.original : undefined,
+                      fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
                       group: r.group,
                       path: doc?.path,
                       highlightQuery: resultMode === 'fulltext' ? resultQuery : undefined,
@@ -533,6 +575,7 @@ export function SearchPage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
+          fallbackContent={viewing.fallbackContent}
           highlightQuery={viewing.highlightQuery}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
@@ -541,6 +584,13 @@ export function SearchPage(): JSX.Element {
           onBack={goBack}
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
+          fullscreen={readerFullscreen}
+          onFullscreenChange={(fullscreen) => {
+            setReaderFullscreen(fullscreen);
+            setReaderOutlineCollapsed(!fullscreen);
+          }}
+          outlineCollapsed={readerOutlineCollapsed}
+          onOutlineCollapsedChange={setReaderOutlineCollapsed}
         />
       )}
     </>

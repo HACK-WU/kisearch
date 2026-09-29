@@ -5,10 +5,10 @@
  * 原文：ki_get_module_info
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
-import { useScopeValue } from '@/lib/scopeContext';
+import { Link, useSearchParams } from 'react-router-dom';
+import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
@@ -110,7 +110,8 @@ function treeNodeLabel(node: TreeNode, totalDocs: number): string {
 }
 
 export function BrowsePage(): JSX.Element {
-  const scope = useScopeValue();
+  const { scope, setScope } = useScope();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   // 全局在途请求数：> 0 时刷新按钮置为「刷新中…」并禁用，避免重复点击
   const fetching = useIsFetching();
@@ -123,10 +124,36 @@ export function BrowsePage(): JSX.Element {
   const [searchQ, setSearchQ] = useState('');
   // 阅读器全屏时把 Browse 导航带入工作区；两块导航独立折叠，Group 默认折叠、文档默认展开。
   const [readerFullscreen, setReaderFullscreen] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(true);
   const [readerDocsCollapsed, setReaderDocsCollapsed] = useState(false);
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
   const [selectedTag, setSelectedTag] = useState('');
+  const appliedDirectTarget = useRef('');
+
+  const directTarget = searchParams.toString();
+  useEffect(() => {
+    if (!directTarget) {
+      appliedDirectTarget.current = '';
+      return;
+    }
+    if (appliedDirectTarget.current === directTarget) return;
+    const params = new URLSearchParams(directTarget);
+    const targetScope = params.get('scope');
+    const group = params.get('group');
+    const relation = params.get('relation');
+    if (!targetScope || !group || !relation) {
+      appliedDirectTarget.current = '';
+      return;
+    }
+    if (scope !== targetScope) {
+      setScope(targetScope);
+      return;
+    }
+    setActiveGroup(group);
+    setViewing({ group, module: relation, anchor: params.get('anchor') ?? undefined });
+    appliedDirectTarget.current = directTarget;
+  }, [directTarget, scope, setScope]);
 
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
   // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
@@ -258,6 +285,7 @@ export function BrowsePage(): JSX.Element {
     setHistory([]);
     setForwardHistory([]);
     setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
     setViewing(null);
   }, []);
 
@@ -779,6 +807,8 @@ export function BrowsePage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           highlightQuery={viewing.highlightQuery}
+          targetAnchor={viewing.anchor}
+          editable
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}
@@ -787,7 +817,12 @@ export function BrowsePage(): JSX.Element {
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
           fullscreen={readerFullscreen}
-          onFullscreenChange={setReaderFullscreen}
+          onFullscreenChange={(fullscreen) => {
+            setReaderFullscreen(fullscreen);
+            setReaderOutlineCollapsed(!fullscreen);
+          }}
+          outlineCollapsed={readerOutlineCollapsed}
+          onOutlineCollapsedChange={setReaderOutlineCollapsed}
           fullscreenNavigation={fullscreenNavigation}
         />
       )}

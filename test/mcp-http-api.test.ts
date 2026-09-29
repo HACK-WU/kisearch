@@ -16,6 +16,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -103,6 +104,22 @@ describe('/api/health', () => {
     const body = await res.json();
     assert.equal(body.ok, true);
     assert.ok(body.report);
+  });
+
+  it('embedding 探测不可执行时降级为 warn，不得让 /api/health 变成服务异常', async () => {
+    // 本用例配置无 apiKey → 探测跳过。这里必须仍是 200 + 完整报告：
+    // 曾经外层 10s deadline 小于探测最坏耗时，慢 embedding 会让接口回 400，
+    // 前端据此把正常运行的 daemon 报成「MCP HTTP 未就绪」。
+    const res = await fetch(`${handle!.base}/api/health`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const embNames = ['URL 连通性', '密钥有效性', '维度匹配'];
+    const embItems = body.report.items.filter((i: { name: string }) => embNames.includes(i.name));
+    assert.equal(embItems.length, 3);
+    assert.ok(
+      embItems.every((i: { status: string }) => i.status === 'warn'),
+      `embedding 不可用只该告警，实际：${JSON.stringify(embItems)}`,
+    );
   });
 });
 
@@ -213,6 +230,98 @@ describe('/api/doc/list', () => {
 });
 
 describe('/api/import/upload', () => {
+  it('最后一批在后端启动导入，重复提交返回同一个 jobId', async () => {
+    const uploadId = crypto.randomUUID();
+    const send = (batchIndex: number, finalize = false): Promise<Response> => fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Ki-Upload-Id': uploadId },
+      body: JSON.stringify({
+        scope: 'up-auto-finalize', uploadId, batchIndex, batchCount: 2,
+        files: [{ name: `part-${batchIndex}.md`, content: Buffer.from(`# Part ${batchIndex}`).toString('base64') }],
+        ...(finalize ? { finalize: { group: 'auto', vector: false } } : {}),
+      }),
+    });
+
+    const first = await send(0);
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).jobId, undefined);
+    const pendingStatus = await fetch(`${handle!.base}/api/import/upload-status?${new URLSearchParams({ scope: 'up-auto-finalize', uploadId })}`);
+    assert.equal(pendingStatus.status, 200);
+    assert.equal((await pendingStatus.json()).state, 'uploading');
+    const final = await send(1, true);
+    assert.equal(final.status, 200);
+    const completed = await final.json();
+    assert.ok(completed.jobId);
+    const recovered = await fetch(`${handle!.base}/api/import/upload-status?${new URLSearchParams({ scope: 'up-auto-finalize', uploadId })}`);
+    assert.equal(recovered.status, 200);
+    assert.equal((await recovered.json()).jobId, completed.jobId, '丢失最后一批响应后可通过 uploadId 找回任务');
+    const wrongScope = await fetch(`${handle!.base}/api/import/upload-status?${new URLSearchParams({ scope: 'another-scope', uploadId })}`);
+    assert.equal(wrongScope.status, 404);
+    assert.equal((await (await send(1, true)).json()).jobId, completed.jobId);
+
+    const legacyRun = await fetch(`${handle!.base}/api/import/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-auto-finalize', uploadId, vector: false }),
+    });
+    assert.equal(legacyRun.status, 202);
+    assert.equal((await legacyRun.json()).jobId, completed.jobId);
+  });
+
+  it('批次未齐或过早提交时不启动导入', async () => {
+    const uploadId = crypto.randomUUID();
+    const res = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ki-Upload-Id': uploadId },
+      body: JSON.stringify({
+        scope: 'up-incomplete', uploadId, batchIndex: 0, batchCount: 2,
+        files: [{ name: 'part.md', content: Buffer.from('# Part').toString('base64') }],
+        finalize: { vector: false },
+      }),
+    });
+    assert.equal(res.status, 400, '非最后一批不可提交导入');
+
+    const secondId = crypto.randomUUID();
+    const missingFirst = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ki-Upload-Id': secondId },
+      body: JSON.stringify({
+        scope: 'up-incomplete', uploadId: secondId, batchIndex: 1, batchCount: 2,
+        files: [{ name: 'last.md', content: Buffer.from('# Last').toString('base64') }],
+        finalize: { vector: false },
+      }),
+    });
+    assert.equal(missingFirst.status, 400);
+  });
+
+  it('下一次新上传顺手清理过期暂存目录', async () => {
+    const root = path.join(process.env.HOME!, '.ki', 'import-uploads');
+    const oldId = crypto.randomUUID();
+    const oldDir = path.join(root, oldId);
+    fs.mkdirSync(oldDir, { recursive: true });
+    fs.writeFileSync(path.join(oldDir, '.scope'), 'up-old');
+    fs.writeFileSync(path.join(oldDir, '.upload-session.json'), JSON.stringify({
+      scope: 'up-old', state: 'uploading', updatedAt: Date.now() - 25 * 60 * 60 * 1000,
+    }));
+    const importedDir = path.join(root, crypto.randomUUID());
+    fs.mkdirSync(importedDir, { recursive: true });
+    fs.writeFileSync(path.join(importedDir, '.scope'), 'up-imported');
+    fs.writeFileSync(path.join(importedDir, 'source.md'), '# source');
+    fs.writeFileSync(path.join(importedDir, '.upload-session.json'), JSON.stringify({
+      scope: 'up-imported', state: 'done', jobId: crypto.randomUUID(),
+      updatedAt: Date.now() - 25 * 60 * 60 * 1000,
+    }));
+    const res = await fetch(`${handle!.base}/api/import/upload`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'up-new', files: [{ name: 'new.md', content: Buffer.from('# New').toString('base64') }] }),
+    });
+    assert.equal(res.status, 200);
+    const newBody = await res.json();
+    for (let attempt = 0; attempt < 50 && fs.existsSync(oldDir); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(fs.existsSync(oldDir), false);
+    assert.equal(fs.existsSync(path.join(root, newBody.uploadId, 'new.md')), true);
+    assert.equal(fs.existsSync(path.join(importedDir, 'source.md')), true, '已导入文件作为源目录保留');
+  });
+
   it('返回与 ki import 对齐的文档和附件策略', async () => {
     const res = await fetch(`${handle!.base}/api/import/config?scope=up-test`);
     assert.equal(res.status, 200);

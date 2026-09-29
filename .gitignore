@@ -28,6 +28,7 @@ knowledge-indexer-*.tgz
 # 本地配置（可能含明文 apiKey，防止误提交）
 .ki/config.yaml
 .ki/config.json
+config.dev.yaml
 
 .workbuddy/
 CodeWikiHub/

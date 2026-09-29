@@ -3,9 +3,13 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
-import { useHealth } from '@/lib/hooks';
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
+import { DocumentEditor } from '@/components/DocumentEditor';
+import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
+import { ImportPage, type ImportTaskSummary } from '@/pages/ImportPage';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import webPackage from '../../package.json';
@@ -39,29 +43,22 @@ function useTheme(): { theme: string; toggle: () => void } {
   return { theme, toggle: () => setTheme(theme === 'dark' ? 'light' : 'dark') };
 }
 
+const DOT_CLASS: Record<HealthLevel, string> = {
+  checking: 'ki-dot--muted',
+  unreachable: 'ki-dot--err',
+  slow: 'ki-dot--warn',
+  fail: 'ki-dot--err',
+  warn: 'ki-dot--warn',
+  ok: 'ki-dot--ok',
+};
+
 function ServiceBadge(): JSX.Element {
-  const { data, isError, isLoading } = useHealth();
-  let dot = 'ki-dot--muted';
-  let text = '检测中…';
-  if (!isLoading) {
-    if (isError || !data?.ok) {
-      dot = 'ki-dot--err';
-      text = 'MCP HTTP 未就绪';
-    } else if ((data.report?.fail ?? 0) > 0) {
-      dot = 'ki-dot--err';
-      text = 'MCP HTTP 已就绪 · 健康异常';
-    } else if ((data.report?.warn ?? 0) > 0) {
-      dot = 'ki-dot--warn';
-      text = 'MCP HTTP 已就绪 · 有告警';
-    } else {
-      dot = 'ki-dot--ok';
-      text = 'MCP HTTP 已就绪';
-    }
-  }
+  const { data, error, isPending } = useHealth();
+  const s = summarizeHealth(data, error, isPending);
   return (
-    <span className="ki-service-badge">
-      <span className={`ki-dot ${dot}`} />
-      <span>{text}</span>
+    <span className="ki-service-badge" title={s.detail || s.label}>
+      <span className={`ki-dot ${DOT_CLASS[s.level]}`} />
+      <span className="ki-service-badge__text">{s.label}</span>
     </span>
   );
 }
@@ -74,8 +71,13 @@ export function AppShell(): JSX.Element {
   const chatStore = chatStoreRef.current;
   const [chatOpen, setChatOpen] = useState(true);
 
+  const location = useLocation();
+  const importVisible = location.pathname === '/import';
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
+  const [importTask, setImportTask] = useState<ImportTaskSummary | null>(null);
+  const queryClient = useQueryClient();
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
   // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
@@ -96,6 +98,8 @@ export function AppShell(): JSX.Element {
   }, []);
 
   return (
+    <DocumentEditorProvider value={{ isOpen: editorRequest !== null, open: setEditorRequest }}>
+    <>
     <div className="ki-shell">
       {/* ════════ 侧边栏 ════════ */}
       <aside className={`ki-sidebar${sidebarHidden ? ' ki-sidebar--hidden' : ''}`}>
@@ -173,12 +177,21 @@ export function AppShell(): JSX.Element {
           >
             ◨
           </button>
+          {importTask && (
+            <Link to="/import" className="ki-import-task-link" aria-live="polite">
+              {importTask.phase === 'done' ? '✓' : importTask.phase === 'failed' || importTask.phase === 'unknown' ? '!' : '↻'}
+              {' '}{importTask.scope} · {importTask.text}
+            </Link>
+          )}
           <ScopeSelect />
           <ServiceBadge />
         </header>
 
         <main className="ki-content">
           <div className="ki-content-inner">
+            <div style={{ display: importVisible ? 'contents' : 'none' }}>
+              <ImportPage onTaskChange={setImportTask} />
+            </div>
             <Outlet />
           </div>
         </main>
@@ -187,5 +200,21 @@ export function AppShell(): JSX.Element {
       {/* ════════ 右侧对话面板（常驻所有页面；关闭 = 隐藏不卸载，见 D15）════════ */}
       <ChatPanel store={chatStore} open={chatOpen} />
     </div>
+    {editorRequest && (
+      <DocumentEditor
+        key={`${editorRequest.scope}/${editorRequest.group}/${editorRequest.relation}`}
+        scope={editorRequest.scope}
+        group={editorRequest.group}
+        relation={editorRequest.relation}
+        readerSelection={editorRequest.readerSelection}
+        onSaved={(content, result) => {
+          editorRequest.onSaved?.(content, result);
+          void queryClient.invalidateQueries({ queryKey: ['docList', editorRequest.scope] });
+        }}
+        onClose={() => setEditorRequest(null)}
+      />
+    )}
+    </>
+    </DocumentEditorProvider>
   );
 }
