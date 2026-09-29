@@ -4,12 +4,14 @@
 
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
-import { ImportPage, type ImportTaskSummary } from '@/pages/ImportPage';
+import { ImportPage } from '@/pages/ImportPage';
+import { useScopeValue } from '@/lib/scopeContext';
+import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -20,6 +22,7 @@ const NAV_MAIN = [
   { to: '/search', label: '语义搜索', icon: '⌕' },
   { to: '/import', label: '上传导入', icon: '⇪' },
   { to: '/write', label: '知识写入', icon: '✎' },
+  { to: '/tasks', label: '后台任务', icon: '◷' },
 ];
 
 function useTheme(): { theme: string; toggle: () => void } {
@@ -67,8 +70,40 @@ export function AppShell(): JSX.Element {
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
-  const [importTask, setImportTask] = useState<ImportTaskSummary | null>(null);
   const queryClient = useQueryClient();
+  const scope = useScopeValue();
+  const taskQuery = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => getTasks(200),
+    refetchInterval: (query) => query.state.data?.tasks.some((task) => task.state === 'queued' || task.state === 'running') ? 3_000 : 15_000,
+    staleTime: 0,
+    retry: false,
+  });
+  const dimensionQuery = useQuery({
+    queryKey: ['vectorDimensionStatus', scope],
+    queryFn: () => getVectorDimensionStatus(scope),
+    refetchInterval: 15_000,
+    staleTime: 5_000,
+    retry: false,
+  });
+  const activeTasks = taskQuery.data?.tasks.filter((task) => task.state === 'queued' || task.state === 'running') ?? [];
+  const failedTasks = taskQuery.data?.tasks.filter((task) => task.state === 'failed' || task.state === 'unknown') ?? [];
+  const partialTasks = taskQuery.data?.tasks.filter((task) => task.state === 'partial') ?? [];
+  const taskStatus = activeTasks.length > 0
+    ? `${activeTasks.length} 个任务运行中${failedTasks.length ? ` · ${failedTasks.length} 个失败/未知` : ''}${partialTasks.length ? ` · ${partialTasks.length} 个部分完成` : ''}`
+    : failedTasks.length > 0
+      ? `${failedTasks.length} 个任务失败或状态未知`
+      : partialTasks.length > 0
+        ? `${partialTasks.length} 个任务部分完成`
+      : taskQuery.error
+        ? '任务状态暂不可用'
+        : '后台任务';
+  const taskTone = activeTasks.length > 0 ? 'running' : failedTasks.length > 0 || taskQuery.error ? 'failed' : partialTasks.length > 0 ? 'partial' : 'idle';
+
+  const refreshDimension = async (): Promise<void> => {
+    await refreshVectorDimensionStatus(scope);
+    await queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
+  };
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
   // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
@@ -159,20 +194,38 @@ export function AppShell(): JSX.Element {
           </button>
           <span className="ki-topbar__title">ki 知识库</span>
           <div className="ki-topbar__spacer" />
-          {importTask && (
-            <Link to="/import" className="ki-import-task-link" aria-live="polite">
-              {importTask.phase === 'done' ? '✓' : importTask.phase === 'failed' || importTask.phase === 'unknown' ? '!' : '↻'}
-              {' '}{importTask.scope} · {importTask.text}
-            </Link>
-          )}
+          <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
+            {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : '◷'}</span>}
+            <span>{taskStatus}</span>
+          </Link>
           <ScopeSelect />
           <ServiceBadge />
         </header>
 
         <main className="ki-content">
           <div className="ki-content-inner">
+            {dimensionQuery.data?.status.state === 'mismatch' && dimensionQuery.data.status.persisted !== undefined ? (
+              <div className="ki-vector-dimension-banner" role="alert">
+                <span className="ki-vector-dimension-banner__icon" aria-hidden="true">!</span>
+                <div className="ki-vector-dimension-banner__copy">
+                  <b>当前知识库的语义向量不可用</b>
+                  <span>{scope}：当前 embedding 为 {dimensionQuery.data.status.configured} 维，旧向量集合为 {dimensionQuery.data.status.persisted} 维。</span>
+                  <code>ki restore {scope} --rebuild-vector --yes</code>
+                </div>
+                <button className="ki-btn ki-btn--secondary" onClick={() => void refreshDimension()}>重新检查</button>
+              </div>
+            ) : dimensionQuery.data?.status.state === 'unknown' || dimensionQuery.error ? (
+              <div className="ki-vector-dimension-banner ki-vector-dimension-banner--unknown" role="status">
+                <span className="ki-vector-dimension-banner__icon" aria-hidden="true">?</span>
+                <div className="ki-vector-dimension-banner__copy">
+                  <b>暂无法确认向量维度</b>
+                  <span>{scope} · {dimensionQuery.data?.status.error ?? '维度快照缺失或已过期'}</span>
+                </div>
+                <button className="ki-btn ki-btn--secondary" onClick={() => void refreshDimension()} disabled={dimensionQuery.isFetching}>重新检查</button>
+              </div>
+            ) : null}
             <div style={{ display: importVisible ? 'contents' : 'none' }}>
-              <ImportPage onTaskChange={setImportTask} />
+              <ImportPage />
             </div>
             <Outlet />
           </div>

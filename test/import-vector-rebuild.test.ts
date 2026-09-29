@@ -28,13 +28,15 @@ const ftsClient = await import('../src/lib/fts-client.js');
 type VectorDeleteCall = { scope: string; ids: string[] };
 type VectorBulkEntry = { text: string; tags?: string; group?: string };
 
-let vectorizeMode: 'success' | 'fail' | 'partial' = 'success';
+let vectorizeMode: 'success' | 'fail' | 'partial' | 'stop' = 'success';
 let vectorizeCalls: { paths: string[]; sequence: number }[] = [];
 let vectorDeleteCalls: VectorDeleteCall[] = [];
 let vectorDeleteFailureIds = new Set<string>();
 let vectorEvents: string[] = [];
 let vectorizeSequence = 0;
 let pathStoreCalls = 0;
+let pathStoreMode: 'success' | 'stop' = 'success';
+let tagVectorStoreCalls = 0;
 let ftsWriteMode: 'success' | 'partial' = 'success';
 let ftsDeleteFailureIds = new Set<string>();
 let ftsDeleteCalls: string[][] = [];
@@ -58,6 +60,7 @@ let ftsDeleteCalls: string[][] = [];
   throw new Error('不得通过 Scope 向量数量决定局部导入删除范围');
 };
 (vectorClient as any).vectorBulkStore = async (params: { scope: string; entries: VectorBulkEntry[] }) => {
+  tagVectorStoreCalls++;
   const results = params.entries.map((entry, index) => {
     const memoryId = entry.tags === 'ki-relation' || entry.tags === 'ki-path'
       ? generateDocId(entry.text, params.scope, entry.tags)
@@ -76,6 +79,24 @@ let ftsDeleteCalls: string[][] = [];
       errors: entries.map((entry) => ({ path: entry.path, error: 'mock embedding failure' })),
     };
   }
+  if (vectorizeMode === 'stop') {
+    const ok = new Map<string, string>();
+    if (entries[0]) ok.set(entries[0].path, 'system-partial-id');
+    return {
+      ok,
+      errors: [
+        ...(entries[1] ? [{ path: entries[1].path, error: 'mock provider failure' }] : []),
+        ...(entries[2] ? [{ path: entries[2].path, error: 'systemic failure left this item unprocessed' }] : []),
+      ],
+      notProcessed: Math.max(0, entries.length - 2),
+      stopReason: {
+        kind: 'provider-unavailable',
+        code: 'HTTP_503',
+        phase: 'embedding',
+        reason: 'mock provider unavailable',
+      },
+    };
+  }
   const ok = new Map<string, string>();
   const errors: { path: string; error: string }[] = [];
   for (const [index, entry] of entries.entries()) {
@@ -90,8 +111,23 @@ let ftsDeleteCalls: string[][] = [];
 };
 (pathVectorize as any).bulkStorePaths = async (entries: { text: string }[]) => {
   pathStoreCalls += entries.length;
+  if (pathStoreMode === 'stop') {
+    const succeeded = entries.slice(0, 1);
+    const failed = entries.slice(1, 2);
+    return {
+      ok: new Map(succeeded.map((entry: any) => [entry.text, generateDocId(entry.text, entry.scope, entry.tag)])),
+      errors: failed.map((entry) => ({ text: entry.text, error: 'mock path persistence failure' })),
+      notProcessed: Math.max(0, entries.length - succeeded.length - failed.length),
+      stopReason: {
+        kind: 'collection-unwritable',
+        code: 'ZVEC_WRITE_ERROR',
+        phase: 'persist',
+        reason: 'mock path collection unavailable',
+      },
+    };
+  }
   return {
-    ok: new Map(entries.map((entry) => [entry.text, `path-${entry.text}`])),
+    ok: new Map(entries.map((entry: any) => [entry.text, generateDocId(entry.text, entry.scope, entry.tag)])),
     errors: [],
   };
 };
@@ -128,6 +164,8 @@ function resetMocks(): void {
   vectorEvents = [];
   vectorizeSequence = 0;
   pathStoreCalls = 0;
+  pathStoreMode = 'success';
+  tagVectorStoreCalls = 0;
   ftsWriteMode = 'success';
   ftsDeleteFailureIds = new Set();
   ftsDeleteCalls = [];
@@ -214,6 +252,112 @@ describe('import 增量向量更新', () => {
     fs.rmSync(updated, { recursive: true, force: true });
   });
 
+  it('系统性 embedding 故障停止后续阶段并回滚本批次新增内容', async () => {
+    // 上一个用例会切换到“全部向量失败”模式；这个用例的基线导入必须正常完成。
+    vectorizeMode = 'success';
+    pathStoreMode = 'success';
+    const scope = newScope('system-stop');
+    const original = mkSource({ 'same.md': '# 原文\n\n旧版本。' });
+    const updated = mkSource({
+      'same.md': '# 原文\n\n新版本。',
+      'new.md': '# 新文档\n\n需要回滚。',
+      'later.md': '# 未处理文档\n\n不得继续向量化。',
+    });
+    await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
+    const beforeCache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const oldRelation = beforeCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
+    const oldIds = [...(oldRelation?.memoryIds ?? [])];
+    const oldText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
+
+    vectorizeMode = 'stop';
+    vectorizeCalls = [];
+    vectorDeleteCalls = [];
+    vectorDeleteFailureIds = new Set(['system-partial-id']);
+    pathStoreCalls = 0;
+    tagVectorStoreCalls = 0;
+    try {
+      await assert.rejects(
+        () => handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true, tags: 'api' }),
+        (error: Error & { code?: string; stopReason?: { code?: string }; stats?: { succeeded?: number; failed?: number; notProcessed?: number } }) => {
+          assert.equal(error.code, 'VECTORIZATION_STOPPED');
+          assert.equal(error.stopReason?.code, 'HTTP_503');
+          assert.equal(error.stats?.succeeded, 1);
+          assert.equal(error.stats?.failed, 1);
+          assert.equal(error.stats?.notProcessed, 1);
+          assert.equal(error.stats?.partialCommitted, 1, '补偿删除失败必须计入仍提交的新向量数');
+          assert.match(error.message, /scope .*embedding 阶段/);
+          return true;
+        },
+      );
+
+      assert.equal(vectorizeCalls.length, 1, '系统故障后不得继续发起后续 embedding 批次');
+      assert.equal(tagVectorStoreCalls, 0, '正文 embedding 停止后跳过自定义标签向量阶段');
+      assert.equal(pathStoreCalls, 0, '正文 embedding 停止后跳过关系/路径向量阶段');
+      const afterText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki'));
+      assert.equal(afterText.same, oldText, '覆盖文档恢复为导入前原文');
+      assert.equal(afterText.new, undefined, '新文件原文被清理');
+      assert.equal(afterText.later, undefined, '未处理文件原文被清理');
+      const afterCache = readJsonFile<typeof beforeCache>(getRelationsCachePath(scope));
+      const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
+      assert.deepEqual(afterRelation?.memoryIds, oldIds, '旧 relation 与向量 ID 保持可用');
+      assert.equal(afterCache.groups.TestWiki.hot_relations.some((item) => item.text === 'new' || item.text === 'later'), false);
+      assert.equal(vectorDeleteCalls.some((call) => call.ids.some((id) => oldIds.includes(id))), false, '回滚不得删除旧向量');
+      assert.ok(vectorDeleteCalls.some((call) => call.ids.includes('system-partial-id')), '批次已提交的新向量应执行补偿删除');
+    } finally {
+      vectorizeMode = 'success';
+      vectorDeleteFailureIds = new Set();
+      fs.rmSync(original, { recursive: true, force: true });
+      fs.rmSync(updated, { recursive: true, force: true });
+    }
+  });
+
+  it('关系/路径持久化系统故障回滚正文新向量，并保留旧 FTS 索引', async () => {
+    vectorizeMode = 'success';
+    pathStoreMode = 'success';
+    const scope = newScope('path-system-stop');
+    const original = mkSource({ 'same.md': '# 文档\n\n旧全文版本。' });
+    const updated = mkSource({ 'same.md': '# 文档\n\n新的 dense 版本。' });
+    const first = await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: false });
+    assert.equal(first.ok, true);
+    const beforeCache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const oldRelation = beforeCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
+    const oldFtsIds = [...(oldRelation?.ftsIds ?? [])];
+    const oldText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
+
+    vectorizeCalls = [];
+    vectorDeleteCalls = [];
+    ftsDeleteCalls = [];
+    pathStoreCalls = 0;
+    pathStoreMode = 'stop';
+    try {
+      await assert.rejects(
+        () => handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true }),
+        (error: Error & { code?: string; stopReason?: { code?: string }; stats?: { succeeded?: number; notProcessed?: number } }) => {
+          assert.equal(error.code, 'VECTORIZATION_STOPPED');
+          assert.equal(error.stopReason?.code, 'ZVEC_WRITE_ERROR');
+          assert.equal(error.stats?.succeeded, 1);
+          assert.equal(error.stats?.notProcessed, 0);
+          return true;
+        },
+      );
+
+      assert.equal(vectorizeCalls.length, 1);
+      assert.ok(pathStoreCalls > 0, '关系/路径阶段确实触发了系统性持久化故障');
+      assert.deepEqual(ftsDeleteCalls, [], '路径阶段未完成前不得清理旧 FTS ID');
+      assert.equal(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, oldText);
+      const afterCache = readJsonFile<typeof beforeCache>(getRelationsCachePath(scope));
+      const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
+      assert.deepEqual(afterRelation?.ftsIds, oldFtsIds);
+      assert.equal(afterRelation?.ftsIndexComplete, true);
+      assert.equal((afterRelation?.memoryIds ?? []).length, 0, '失败的 dense 覆盖不得留下新向量引用');
+      assert.ok(vectorDeleteCalls.some((call) => call.ids.some((id) => id.startsWith('content-'))), '正文新向量应被补偿删除');
+    } finally {
+      pathStoreMode = 'success';
+      fs.rmSync(original, { recursive: true, force: true });
+      fs.rmSync(updated, { recursive: true, force: true });
+    }
+  });
+
   it('部分失败且新 docId 被多个文件共享：回滚失败文件时不删除成功文件仍使用的 ID', async () => {
     const scope = newScope('shared-id');
     const src = mkSource({
@@ -246,6 +390,8 @@ describe('import 增量向量更新', () => {
   });
 
   it('从 FTS-only 覆盖切换到 dense 后清除 FTS-only 状态', async () => {
+    vectorizeMode = 'success';
+    pathStoreMode = 'success';
     const scope = newScope('fts-to-dense');
     const src = mkSource({ 'switch.md': '# 切换文档\n\n先全文索引，再写入 dense。' });
     const ftsImport = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false });

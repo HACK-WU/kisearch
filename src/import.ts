@@ -24,6 +24,9 @@ import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
 import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { logProgress } from './lib/progress.js';
+import { createTaskReporter } from './lib/task-registry.js';
+import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
+import { closeFtsEngine } from './lib/fts-client.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -88,16 +91,45 @@ program
       if (useDaemon) process.once('SIGINT', onDaemonSignal);
       let result: unknown;
       try {
-        result = !useDaemon
-          ? await handleDirectImport(importParams)
+        if (!useDaemon) {
+          const task = createTaskReporter(requestConfig, { id: daemonJobId, source: 'cli', operation: 'import', scope });
+          task.update({ state: 'running', startedAt: Date.now() });
+          try { await refreshVectorDimensionSnapshot(requestConfig, scope); } catch { /* diagnostics never block the import */ }
+          try {
+            result = await handleDirectImport({
+              ...importParams,
+              onInterrupt: () => task.finish('cancelled'),
+              onProgress: (progress) => task.progress(progress),
+            });
+            const stats = (result as { stats?: { errors?: number; vectorized?: number } }).stats;
+            task.finish((stats?.errors ?? 0) > 0 ? 'partial' : 'succeeded', {
+              error: (stats?.errors ?? 0) > 0 ? `${stats?.errors} 项导入处理有错误` : undefined,
+              partialCommitted: stats?.vectorized,
+            });
+          } catch (error) {
+            const e = error as Error & { code?: string; stats?: { partialCommitted?: number } };
+            task.finish(e.code === 'IMPORT_CANCELLED' ? 'cancelled' : 'failed', {
+              error: e.message,
+              recoveryHint: e.code === 'VECTORIZATION_STOPPED' ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。' : undefined,
+              partialCommitted: e.stats?.partialCommitted,
+            });
+            throw error;
+        } finally {
+            try { await refreshVectorDimensionSnapshot(requestConfig, scope); } catch { /* task result remains authoritative */ }
+            // 直连 CLI 是短进程；释放全文 Collection，避免 --no-vector 导入完成后
+            // 因持有 SQLite/native 句柄而一直不退出。daemon 分支保留共享引擎。
+            try { await closeFtsEngine(scope); } catch { /* best effort */ }
+          }
+        } else {
           // timeoutMs=0：导入内部向量化预算为 60s + N*10s（100 chunk ≈ 17 分钟），
           // 固定客户端超时会在任务完成前误报失败；daemon 死亡由 socket error 兜底感知。
-          : await callDaemon('import', importParams, 0, {
+          result = await callDaemon('import', importParams, 0, {
             streamProgress: true,
             jobId: daemonJobId,
             abortSignal: daemonAbort?.signal,
             onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `import ${event.progress.phase ?? 'running'}`),
           });
+        }
       } finally {
         if (useDaemon) process.removeListener('SIGINT', onDaemonSignal);
       }

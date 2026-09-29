@@ -8,6 +8,7 @@
 
 import os from 'node:os';
 import type { EmbeddingAttemptEvent, EmbeddingProvider, EmbedOptions } from './provider.js';
+import { classifyVectorizationStop, type VectorizationStopReason } from '../errors.js';
 
 export interface EmbeddingSchedulerConfig {
   /** provider 单次逻辑调用的文本批大小 */
@@ -131,10 +132,14 @@ export interface EmbeddingScheduleResult {
   metadataPending: number;
   failed: number;
   cancelled: number;
+  /** Entries never started because a systemic failure stopped scheduling. */
+  notProcessed: number;
   cancelledItems: EmbeddingBatchItem<unknown>[];
+  notProcessedItems: EmbeddingBatchItem<unknown>[];
   failedItems: EmbeddingBatchItem<unknown>[];
   errors: Error[];
   fatalError?: Error;
+  stopReason?: VectorizationStopReason;
 }
 
 export interface EmbeddingScheduler {
@@ -199,7 +204,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function isSplittableParameterError(error: Error): boolean {
+export function isSplittableParameterError(error: Error): boolean {
   const candidate = error as Error & { code?: string };
   // SiliconFlow 20015 表示请求参数非法；批次中只要有一个坏文本，整批都会被拒绝。
   // 只对明确的 provider 参数类错误做逐条隔离，避免把认证/模型配置等 4xx 误当成可恢复错误。
@@ -453,7 +458,9 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
       metadataPending: 0,
       failed: 0,
       cancelled: 0,
+      notProcessed: 0,
       cancelledItems: [],
+      notProcessedItems: [],
       failedItems: [],
       errors: [],
     };
@@ -471,7 +478,16 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
     }
     let nextBatch = 0;
     let fatalError: Error | undefined;
+    let consecutiveParameterFailures = 0;
     const workerCount = Math.min(this.config.maxConcurrency, this.config.maxPrefetchBatches, Math.max(1, batches.length));
+
+    const markNotProcessed = (): void => {
+      for (; nextBatch < batches.length; nextBatch++) {
+        const rest = batches[nextBatch].map((entry) => entry as EmbeddingBatchItem<unknown>);
+        result.notProcessedItems.push(...rest);
+        result.notProcessed += rest.length;
+      }
+    };
 
     const cancelRemaining = (): void => {
       for (; nextBatch < batches.length; nextBatch++) {
@@ -485,7 +501,8 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
     const worker = async (): Promise<void> => {
       while (true) {
         if (fatalError || options.abortSignal?.aborted) {
-          cancelRemaining();
+          if (fatalError) markNotProcessed();
+          else cancelRemaining();
           return;
         }
         const batchIndex = nextBatch++;
@@ -508,6 +525,11 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
           if (options.abortSignal?.aborted) {
             result.cancelledItems.push(...batchItems.map((entry) => entry as EmbeddingBatchItem<unknown>));
             result.cancelled += batchItems.length;
+            continue;
+          }
+          if (fatalError) {
+            result.notProcessedItems.push(...batchItems.map((entry) => entry as EmbeddingBatchItem<unknown>));
+            result.notProcessed += batchItems.length;
             continue;
           }
 
@@ -564,6 +586,7 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                   throw new Error(`Embedding 返回数量/维度不匹配：期望 ${requestTexts.length}×${provider.dimension}，实际 ${batchVectors.length}`);
                 }
                 for (let j = 0; j < slice.length; j++) collected[offset + j] = batchVectors[requestIndexForItem[j]];
+                consecutiveParameterFailures = 0;
                 offset += size;
               } catch (err) {
                 const batchError = err instanceof Error ? err : new Error(String(err));
@@ -574,16 +597,34 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                   this.learnBatchLimit(declaredLimit);
                   continue;
                 }
-                if (
-                  !isSplittableParameterError(batchError)
-                  || requestTexts.length <= 1
-                  || requestTexts.length > MAX_PARAMETER_ERROR_ISOLATION_ITEMS
-                ) {
+                if (!isSplittableParameterError(batchError)) {
                   throw batchError;
                 }
 
                 // ② 只隔离参数错误批次：成功的文本仍然可以落库，坏文本保留逐项错误。
+                // 单条请求已明确证明该文本无效，直接记为条目错误并继续后续文本/批次。
+                // 超过隔离上限时不展开成大量单条 HTTP 请求；当前逻辑子批逐项失败后继续。
                 isolatedAny = true;
+                if (requestTexts.length > MAX_PARAMETER_ERROR_ISOLATION_ITEMS) throw batchError;
+                if (requestTexts.length === 1) {
+                  if (++consecutiveParameterFailures >= 2) {
+                    // 连续单条 400 既可能是坏内容，也可能是全局 model/参数故障。
+                    // 用固定、不会落库的探针区分；探针成功则继续处理有效输入。
+                    try {
+                      const probe = await provider.embed(['ki vector health check'], { ...embedOptionsBase, batchSize: 1 });
+                      if (probe.length !== 1 || probe[0].length !== provider.dimension) throw new Error('Embedding 探针维度不匹配');
+                      consecutiveParameterFailures = 0;
+                    } catch {
+                      throw batchError;
+                    }
+                  }
+                  for (let j = 0; j < slice.length; j++) {
+                    collected[offset + j] = null;
+                    collectedErrors[offset + j] = batchError;
+                  }
+                  offset += size;
+                  continue;
+                }
                 const isolatedVectors: Array<number[] | null> = [];
                 const isolatedErrors: Array<Error | undefined> = [];
                 for (const text of requestTexts) {
@@ -600,6 +641,8 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                     isolatedErrors.push(error);
                   }
                 }
+                if (isolatedVectors.every((vector) => vector === null)) throw batchError;
+                consecutiveParameterFailures = 0;
                 for (let j = 0; j < slice.length; j++) {
                   const requestIndex = requestIndexForItem[j];
                   collected[offset + j] = isolatedVectors[requestIndex];
@@ -612,6 +655,12 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             if (isolatedAny) itemErrors = collectedErrors;
           } catch (err) {
             providerError = err instanceof Error ? err : new Error(String(err));
+            // Provider retry policy is exhausted: stop allocating work immediately.
+            // Other batches already in flight are drained and their writes are retained.
+            if (!fatalError) {
+              fatalError = providerError;
+              result.stopReason = classifyVectorizationStop(providerError, 'embedding');
+            }
             vectors = [];
           } finally {
             this.metrics.inFlightRequests = Math.max(0, this.metrics.inFlightRequests - 1);
@@ -641,12 +690,13 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             if (providerError) result.errors.push(providerError);
           } catch (err) {
             fatalError = err instanceof Error ? err : new Error(String(err));
+            result.stopReason ??= classifyVectorizationStop(fatalError, 'persist');
             result.errors.push(fatalError);
             this.metrics.failedBatches++;
             // 当前批次已经拿到 provider 结果但尚未完成持久化回调；按未确认处理。
             result.failedItems.push(...batchItems.map((entry) => entry as EmbeddingBatchItem<unknown>));
             result.failed += batchItems.length;
-            cancelRemaining();
+            markNotProcessed();
             return;
           }
         } catch (err) {
@@ -657,11 +707,12 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             this.metrics.cancelledItems += batchItems.length;
           } else {
             fatalError = e;
+            result.stopReason ??= classifyVectorizationStop(fatalError, 'persist');
             result.errors.push(e);
             result.failedItems.push(...batchItems.map((entry) => entry as EmbeddingBatchItem<unknown>));
             result.failed += batchItems.length;
             this.metrics.failedBatches++;
-            cancelRemaining();
+            markNotProcessed();
           }
           return;
         } finally {

@@ -38,6 +38,10 @@ import { extractScopeSnapshot } from './lib/safe-tar.js';
 import { rebuildFtsOnlyScope } from './lib/fts-rebuild.js';
 import { closeFtsEngine } from './lib/fts-client.js';
 import { logProgress } from './lib/progress.js';
+import { createTaskReporter } from './lib/task-registry.js';
+import type { TaskReporter } from './lib/task-registry.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
+import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
 
 // ─── 工具 ───
 
@@ -46,8 +50,7 @@ function output(result: Record<string, unknown>): void {
 }
 
 function fail(msg: string): never {
-  output({ ok: false, error: msg });
-  process.exit(1);
+  throw new Error(msg);
 }
 
 let cliAbortSignal: AbortSignal | undefined;
@@ -198,9 +201,7 @@ async function restoreFromSnapshot(
     checkDiskSpace(scopeDirParent, snapSize * 5);
   } catch (err) {
     if (err instanceof PreflightError) {
-      output({ ok: false, error: err.message, code: err.code });
-      await closeEngine();
-      process.exit(1);
+      throw err;
     }
     throw err;
   }
@@ -225,16 +226,11 @@ async function restoreFromSnapshot(
     try {
       preRestoreSnapshot = backupScopeSnapshot(safetyBackupDir, scope, scopeDataDir);
     } catch (err) {
-      output({
-        ok: false,
-        error:
+      throw Object.assign(new Error(
           `还原前安全网快照创建失败：${(err as Error).message}\n` +
           `为避免不可逆的数据丢失，已中止还原（未删除任何现有数据）。\n` +
           `请修复上述问题（如磁盘空间 / 目录权限 / tar 可用性）后重试。`,
-        code: 'SAFETY_SNAPSHOT_FAILED',
-      });
-      await closeEngine();
-      process.exit(1);
+      ), { code: 'SAFETY_SNAPSHOT_FAILED' });
     }
   }
 
@@ -252,9 +248,6 @@ async function restoreFromSnapshot(
       process.stderr.write(`tar 解压失败，尝试从还原前快照自动恢复...\n`);
       try {
         extractScopeSnapshot(preRestoreSnapshot, scopeDataDir);
-        fail(
-          `tar 解压失败：${(err as Error).message}\n已自动从还原前快照恢复原始数据`
-        );
       } catch (recoverErr) {
         fail(
           `tar 解压失败且自动恢复也失败：\n` +
@@ -264,6 +257,7 @@ async function restoreFromSnapshot(
             `  请手动执行：ki restore ${scope} --from-snapshot --timestamp <ts>`
         );
       }
+      fail(`tar 解压失败：${(err as Error).message}\n已自动从还原前快照恢复原始数据`);
     } else {
       // CH-2 下：preRestoreSnapshot 为空仅出现于目标目录原本不存在（等价全新导入），
       // 此时无现有数据可丢失，无需安全网。
@@ -464,23 +458,66 @@ function validateRebuildOptsOrExit(): void {
 // ─── 向量重建（--rebuild-vector）───
 
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
-async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
+async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}, compositeTask?: TaskReporter): Promise<void> {
   const effectiveOpts = { ...opts, abortSignal: opts.abortSignal ?? cliAbortSignal };
   const { abortSignal: _abortSignal, ...rpcOpts } = effectiveOpts;
   const jobId = createDaemonJobId();
+  const useDaemon = shouldUseDaemonClient();
+  const requestConfig = loadConfig();
+  const task = useDaemon ? undefined : compositeTask ?? createTaskReporter(requestConfig, {
+    id: jobId,
+    source: 'cli',
+    operation: 'rebuild-vector',
+    scope: scopeName,
+  });
+  task?.update({ state: 'running', phase: 'rebuild', startedAt: Date.now() });
+  if (!useDaemon) {
+    try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* diagnostics never block rebuild */ }
+  }
   // 注入真实 countScope：全量重建清空旧向量前统计总数，删除过程输出进度条
-  const result = shouldUseDaemonClient()
-    // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
-    ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
-      scope: scopeName,
-      options: rpcOpts,
-    }, 0, {
-      streamProgress: true,
-      jobId,
-      abortSignal: _abortSignal,
-      onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `rebuild ${event.progress.phase ?? 'running'}`),
-    })
-    : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, effectiveOpts);
+  let result: Awaited<ReturnType<typeof rebuildScopeVectors>>;
+  try {
+    result = useDaemon
+      // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
+      ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
+        scope: scopeName,
+        options: rpcOpts,
+      }, 0, {
+        streamProgress: true,
+        jobId,
+        abortSignal: _abortSignal,
+        onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `rebuild ${event.progress.phase ?? 'running'}`),
+      })
+      : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, {
+        ...effectiveOpts,
+        onProgress: (progress) => {
+          effectiveOpts.onProgress?.(progress);
+          task?.progress({ phase: progress.phase, done: progress.done, total: progress.total });
+        },
+      });
+  } catch (error) {
+    const e = error as Error & { code?: string; stats?: { partialCommitted?: number } };
+    task?.finish(e.code === 'REBUILD_CANCELLED' ? 'cancelled' : 'failed', {
+      error: e.message,
+      recoveryHint: e.code === 'VECTORIZATION_STOPPED' ? '检查 embedding 配置、鉴权与服务状态；确认后重新执行重建。' : undefined,
+      partialCommitted: e.stats?.partialCommitted,
+    });
+    if (!useDaemon) {
+      try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* best effort */ }
+    }
+    throw error;
+  }
+  task?.finish(
+    !result.ok ? 'failed' : result.errors.length > 0 ? 'partial' : 'succeeded',
+    {
+      error: !result.ok ? result.errors[0]?.error : result.errors.length > 0 ? result.errors[0]?.error : undefined,
+      recoveryHint: !result.ok ? '检查任务详情中的失败阶段，修复问题后重新执行重建。' : undefined,
+      partialCommitted: result.partialCommitted ?? (result.ok ? result.stats.succeeded : undefined),
+    },
+  );
+  if (!useDaemon) {
+    try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* best effort */ }
+  }
   // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
   if (result.ok && !result.partial) {
     try {
@@ -507,7 +544,8 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
         + '单请求条数上限（服务商常限制每次请求的 inputs 数；运行时已支持自动降批，'
         + '仍建议把 embedding.scheduler.batchSize 配到上限内）。执行 ki doctor 可复现同款探测。',
     });
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   output({
     ok: true,
@@ -577,19 +615,38 @@ async function main() {
             error: rebuilt.errors[0]?.error ?? '重建向量失败',
             restore: daemonResult,
           });
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         output(daemonResult);
         return;
       }
-      await restoreFromSnapshot(scope, {
-        timestamp,
-        yes: skipYes,
-        backupDir: backupDirOverride,
-        snapshotFile: snapshotFileArg,
-        rebuildVector,
-      });
-      if (rebuildVector) await rebuildAndReport(scope, rebuildOpts);
+      if (!skipYes) {
+        await restoreFromSnapshot(scope, {
+          timestamp, yes: false, backupDir: backupDirOverride, snapshotFile: snapshotFileArg, rebuildVector,
+        });
+        return;
+      }
+      const compositeTask = skipYes ? createTaskReporter(loadConfig(), {
+        source: 'cli', operation: rebuildVector ? 'restore-snapshot+rebuild-vector' : 'restore-snapshot', scope,
+      }) : undefined;
+      compositeTask?.update({ state: 'running', phase: 'restore', startedAt: Date.now() });
+      try {
+        await withScopeWriteLock(scope, 'restore-snapshot', async () => {
+          await restoreFromSnapshot(scope, {
+            timestamp,
+            yes: skipYes,
+            backupDir: backupDirOverride,
+            snapshotFile: snapshotFileArg,
+            rebuildVector,
+          });
+          if (rebuildVector) await rebuildAndReport(scope, rebuildOpts, compositeTask);
+          else compositeTask?.finish('succeeded');
+        });
+      } catch (error) {
+        compositeTask?.finish('failed', { error: (error as Error).message });
+        throw error;
+      }
     } else if (rebuildVector) {
       // 独立调用：对已还原的 KB 仅重建向量（支持 --group/--tags 局部重建）
       await rebuildAndReport(scope, rebuildOpts);
@@ -599,7 +656,7 @@ async function main() {
     }
   } catch (err) {
     output(toErrorPayload(err));
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     if (shouldUseDaemonClient()) process.removeListener('SIGINT', onInterrupt);
     cliAbortSignal = undefined;

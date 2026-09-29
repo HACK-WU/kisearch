@@ -14,6 +14,50 @@ export interface ZvecEngineErrorOptions {
   cause?: unknown;
 }
 
+/** Typed systemic failure that tells callers to stop all remaining vector batches. */
+export type VectorizationStopKind =
+  | 'dimension'
+  | 'configuration'
+  | 'authentication'
+  | 'provider-unavailable'
+  | 'resource'
+  | 'collection-unwritable'
+  | 'metadata'
+  | 'unknown';
+
+export interface VectorizationStopReason {
+  kind: VectorizationStopKind;
+  code: string;
+  phase: 'embedding' | 'persist';
+  reason: string;
+}
+
+export function classifyVectorizationStop(
+  error: Error,
+  phase: VectorizationStopReason['phase'],
+): VectorizationStopReason {
+  const candidate = error as Error & { code?: string; data?: Record<string, unknown> };
+  const code = candidate.code ?? error.name ?? 'UNKNOWN';
+  const status = typeof candidate.data?.status === 'number'
+    ? candidate.data.status
+    : Number(/^HTTP_(\d{3})$/.exec(code)?.[1] ?? 0);
+  let kind: VectorizationStopKind;
+  if (error.name === 'DimensionMismatchError' || candidate.data?.expectedDim !== undefined || code === 'VECTOR_DIMENSION_MISMATCH') {
+    kind = 'dimension';
+  } else if (status === 401 || status === 403 || /AUTH|API_KEY|CREDENTIAL/i.test(code)) {
+    kind = 'authentication';
+  } else if (code === 'VECTORIZE_RESOURCE_ADMISSION') {
+    kind = 'resource';
+  } else if (phase === 'persist') {
+    kind = code === 'METADATA_PERSIST_FAILED' ? 'metadata' : 'collection-unwritable';
+  } else if (code === 'NETWORK' || code === 'TIMEOUT' || status === 429 || status >= 500) {
+    kind = 'provider-unavailable';
+  } else {
+    kind = 'configuration';
+  }
+  return { kind, code, phase, reason: error.message };
+}
+
 export class ZvecEngineError extends Error {
   readonly code?: string;
   readonly data?: Record<string, unknown>;

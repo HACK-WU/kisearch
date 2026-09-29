@@ -38,6 +38,7 @@ import {
   getEngine,
   type VectorBulkStoreResult,
 } from './vector-client.js';
+import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 import { logInfo, logProgress, logWarn } from './progress.js';
 import { parseContentTags } from './constants.js';
 import { ftsDeleteByIds } from './fts-client.js';
@@ -75,6 +76,8 @@ export interface RebuildVectorStats {
   tag: number;
   succeeded: number;
   failed: number;
+  /** 系统性向量故障后未尝试的条目。 */
+  notProcessed?: number;
   updatedMemoryId: number;
   /** --tags 打标：本次实际新增标签的 relation 数（未传 --tags 为 0） */
   taggedRelations: number;
@@ -89,6 +92,9 @@ export interface RebuildVectorResult {
   partial: boolean;
   stats: RebuildVectorStats;
   errors: { type: string; path: string; error: string }[];
+  /** 系统性故障仍使用失败终态；该字段标出未能回滚的已提交数量。 */
+  partialCommitted?: number;
+  stopReason?: VectorizationStopReason;
   /** 跨维度迁移成功后保留的旧 Collection 目录，供人工回退。 */
   migrationBackup?: string;
   /** 与旧 Collection 配套的 relations-cache 备份。 */
@@ -518,6 +524,15 @@ export async function rebuildScopeVectors(
   deps: RebuildDeps = {},
   opts: RebuildVectorOptions = {}
 ): Promise<RebuildVectorResult> {
+  const { withScopeWriteLock } = await import('./scope-write-lock.js');
+  return withScopeWriteLock(scope, 'rebuild-vector', () => rebuildScopeVectorsUnlocked(scope, deps, opts));
+}
+
+async function rebuildScopeVectorsUnlocked(
+  scope: string,
+  deps: RebuildDeps = {},
+  opts: RebuildVectorOptions = {}
+): Promise<RebuildVectorResult> {
   const checkCancelled = (done = 0, total = 1): void => {
     opts.onProgress?.({ phase: 'rebuild', done, total });
     if (opts.abortSignal?.aborted) {
@@ -552,6 +567,8 @@ export async function rebuildScopeVectors(
   let cumulativeMetadataPending = 0;
   let cumulativeFailed = 0;
   let cumulativeCancelled = 0;
+  let cumulativeNotProcessed = 0;
+  let vectorizationStop: VectorizationStopReason | undefined;
 
   // NEG：显式传入 --tags 但解析后为空（全为保留标签/空白）：
   //   - 无 --group 时拒绝执行（库层与 CLI 层一致，避免程序化调用静默降级为全量清空重建）；
@@ -651,6 +668,9 @@ export async function rebuildScopeVectors(
   }
   const embeddingDimension = config.embedding.dimension;
   const needsMigration = persistedDimension !== undefined && embeddingDimension !== persistedDimension;
+  // Any full rebuild over an existing dense collection is staged. This protects
+  // same-dimension rebuilds from deleting the live collection before embedding succeeds.
+  const needsStaging = !partial && persistedDimension !== undefined;
   if (needsMigration && (partial || opts.yes !== true)) {
     return {
       ok: false,
@@ -681,7 +701,7 @@ export async function rebuildScopeVectors(
 
   let rawContentEntries: RebuildVectorEntry[];
   try {
-    rawContentEntries = collectContentEntries(scopeDir, groupFilter, needsMigration);
+    rawContentEntries = collectContentEntries(scopeDir, groupFilter, needsStaging);
   } catch (error) {
     return { ok: false, scope, partial, stats, errors: [{ type: 'migration-source', path: scopeDir, error: `迁移前读取 KB 失败，旧集合未更改：${(error as Error).message}` }] };
   }
@@ -693,7 +713,7 @@ export async function rebuildScopeVectors(
     chunkOverlap,
     abortSignal: opts.abortSignal,
   });
-  if (needsMigration) {
+  if (needsStaging) {
     const rebuiltRelations = new Set(contentEntries.map((entry) => `${entry.groupPath ?? ''}\u0000${entry.relationName ?? ''}`));
     for (const [groupPath, group] of Object.entries(groups)) {
       for (const rel of group.hot_relations ?? []) {
@@ -719,8 +739,8 @@ export async function rebuildScopeVectors(
     `收集到 ${allEntries.length} 个条目（内容 ${stats.content} / 关系 ${stats.relation} / 路径 ${stats.path} / 标签 ${stats.tag}）`
   );
 
-  const migrationId = needsMigration ? randomUUID() : '';
-  const migrationPaths = needsMigration ? getVectorMigrationPaths(config, scope, migrationId) : null;
+  const migrationId = needsStaging ? randomUUID() : '';
+  const migrationPaths = needsStaging ? getVectorMigrationPaths(config, scope, migrationId) : null;
   const stageRoot = migrationPaths?.stageRoot ?? '';
   const stageConfig = migrationPaths ? { ...config, vectorDir: migrationPaths.stageRoot } : config;
   const stageCollectionPath = migrationPaths?.stageCollectionPath ?? '';
@@ -728,15 +748,15 @@ export async function rebuildScopeVectors(
   const backupPath = migrationPaths?.backupPath ?? '';
   const cacheBackupPath = migrationPaths?.cacheBackupPath ?? '';
   const pendingPath = migrationPaths?.markerPath ?? '';
-  const cacheTempPath = needsMigration ? path.join(scopeDir, `.relations-cache-${migrationId}.tmp`) : '';
+  const cacheTempPath = needsStaging ? path.join(scopeDir, `.relations-cache-${migrationId}.tmp`) : '';
   let migrationCommitted = false;
   let markerCreated = false;
   let cacheSwitched = false;
   let preserveStage = false;
 
   try {
-    if (needsMigration) {
-      // 旧 Collection 保持原位；新维度写入独立目录。scope/标签/docId 仍使用原始值。
+    if (needsStaging) {
+      // 旧 Collection 保持原位；全量结果先写入独立目录，维度迁移和同维重建共用切换事务。
       await closeEngine(scope);
       await runWithConfigSnapshot(stageConfig, () => getEngine(scope));
     }
@@ -744,7 +764,7 @@ export async function rebuildScopeVectors(
   // 4. 清空旧向量：仅全量重建执行（保证结果与 KB 一致）；
   //    局部重建跳过（幂等覆盖匹配子集，其他向量不受影响）。失败则中止，避免新旧混杂。
   //    注入 countScope 时（CLI 路径）先统计旧向量总数，删除过程输出进度条。
-  if (!partial && !needsMigration) {
+  if (!partial && !needsStaging) {
     try {
       checkCancelled();
       let existingCount: number | undefined;
@@ -755,6 +775,9 @@ export async function rebuildScopeVectors(
           ? (deleted) => logProgress(deleted, existingCount!, '删除旧向量')
           : undefined
       );
+      if ((del.remaining ?? 0) > 0) {
+        throw new Error(`清理后仍残留至少 ${del.remaining} 条旧向量`);
+      }
       if (existingCount !== undefined && existingCount > 0) {
         logInfo(`已删除旧向量 ${del.deleted} 条`);
       }
@@ -801,7 +824,7 @@ export async function rebuildScopeVectors(
           cancelled: cumulativeCancelled + (progress.cancelled ?? 0),
         }),
       });
-      const res = needsMigration
+      const res = needsStaging
         ? await runWithConfigSnapshot(stageConfig, storeBatch)
         : await storeBatch();
       stats.succeeded += res.succeeded;
@@ -810,6 +833,9 @@ export async function rebuildScopeVectors(
       cumulativeMetadataPending += res.metadataPending ?? 0;
       cumulativeFailed += res.failed;
       cumulativeCancelled += res.cancelled ?? 0;
+      cumulativeNotProcessed += res.notProcessed ?? 0;
+      stats.notProcessed = cumulativeNotProcessed;
+      if (res.stopReason) vectorizationStop = res.stopReason;
       // results[].index 为批内相对索引，聚合时加批偏移还原为全量 entries 索引
       for (const r of res.results) {
         aggResults.push({ ...r, index: r.index + offset });
@@ -830,6 +856,19 @@ export async function rebuildScopeVectors(
         failed: cumulativeFailed,
         cancelled: cumulativeCancelled,
       });
+      if (vectorizationStop) {
+        const remaining = allEntries.slice(offset + slice.length);
+        cumulativeNotProcessed += remaining.length;
+        stats.notProcessed = cumulativeNotProcessed;
+        for (const entry of remaining) {
+          errors.push({
+            type: 'not-processed',
+            path: entry.text.slice(0, 60),
+            error: `系统性向量故障后未处理：${vectorizationStop.reason}`,
+          });
+        }
+        break;
+      }
       checkCancelled(Math.min(offset + VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
     }
   }
@@ -846,18 +885,23 @@ export async function rebuildScopeVectors(
 
   // 6. memoryId 回写（内容向量 + 自定义 tag 向量按 (group,relation) 聚合回填；relation/path 向量不关联 cache）
   stats.updatedMemoryId = updateMemoryIds(groups, allEntries, aggResults);
-  if (needsMigration) {
+  if (needsStaging) {
     // 有任一条失败/取消时不切换；当前运行中的旧集合与缓存仍完整。
     if (errors.length > 0 || stats.failed > 0 || cumulativeMetadataPending > 0 || cumulativeCancelled > 0) {
       return {
         ok: false, scope, partial, stats,
-        errors: [{ type: 'migration', path: scope, error: '新维度向量未全部写入，已保留旧 Collection 和 relations-cache；请修复 embedding 后重试' }, ...errors],
+        errors: [
+          ...(vectorizationStop ? [{ type: 'vectorization-stop', path: scope, error: `${vectorizationStop.code}: ${vectorizationStop.reason}` }] : []),
+          { type: 'migration', path: scope, error: '全量新 Collection 未全部写入或存在未完成项，旧 Collection 和 relations-cache 已保留；请修复向量服务后重试' },
+          ...errors,
+        ],
+        ...(vectorizationStop ? { stopReason: vectorizationStop, partialCommitted: 0 } : {}),
       };
     }
     checkCancelled(allEntries.length, Math.max(allEntries.length, 1));
     const stagedDimension = await runWithConfigSnapshot(stageConfig, () => vectorCollectionDimension(scope));
     if (stagedDimension !== embeddingDimension) {
-      return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `新 Collection 维度校验失败：期望 ${embeddingDimension}，实际 ${stagedDimension}` }] };
+      return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `暂存 Collection 维度校验失败：期望 ${embeddingDimension}，实际 ${stagedDimension}` }] };
     }
     // 先写好缓存临时文件；切换目录后只需原子 rename，失败时可恢复旧集合。
     fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
@@ -929,7 +973,7 @@ export async function rebuildScopeVectors(
     }
   }
   // 迁移时上方已原子提交 memoryIds；FTS-only 清理后再更新缓存。
-  if (needsMigration) {
+  if (needsStaging) {
     fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
     fs.renameSync(cacheTempPath, cachePath);
   } else {
@@ -938,18 +982,45 @@ export async function rebuildScopeVectors(
   opts.onProgress?.({ phase: 'rebuild', done: allEntries.length, total: Math.max(allEntries.length, 1) });
   logInfo(`向量重建完成，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
-  return { ok: true, scope, partial, stats, errors, ...(needsMigration ? { migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath } : {}) };
+  if (vectorizationStop && !partial && !needsStaging) {
+    let cleanupRemaining = 0;
+    try {
+      const cleanup = await deleteScope({ scope });
+      cleanupRemaining = cleanup.remaining ?? 0;
+      if (cleanupRemaining > 0) errors.push({ type: 'vector-cleanup', path: scope, error: '失败任务的新建向量仍有残留，请检查存储服务后重试清理' });
+    } catch (cleanupError) {
+      errors.push({ type: 'vector-cleanup', path: scope, error: `清理失败任务新建的向量集合失败：${(cleanupError as Error).message}` });
+    }
+    return {
+      ok: false,
+      scope,
+      partial,
+      stats,
+      errors: [{ type: 'vectorization-stop', path: scope, error: `${vectorizationStop.code}: ${vectorizationStop.reason}` }, ...errors],
+      partialCommitted: errors.some((item) => item.type === 'vector-cleanup') ? (cleanupRemaining || stats.succeeded) : 0,
+      stopReason: vectorizationStop,
+    };
+  }
+  return {
+    ok: !vectorizationStop,
+    scope,
+    partial,
+    stats,
+    errors,
+    ...(vectorizationStop ? { stopReason: vectorizationStop, partialCommitted: partial ? stats.succeeded : 0 } : {}),
+    ...(needsStaging ? { migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath } : {}),
+  };
   } catch (error) {
-    if (!needsMigration) throw error;
+    if (!needsStaging) throw error;
     if (migrationCommitted) {
       const pending = fs.existsSync(pendingPath);
-      return { ok: false, scope, partial, stats, migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath, errors: [{ type: 'migration-post-commit', path: scope, error: pending
+      return { ok: false, scope, partial, stats, partialCommitted: stats.succeeded, migrationBackup: backupPath, migrationCacheBackup: cacheBackupPath, errors: [{ type: 'migration-post-commit', path: scope, error: pending
         ? `新 Collection 已切换，但事务标记未能清除：${(error as Error).message}；请再次执行 ki restore ${scope} --rebuild-vector --yes，命令会先自动恢复旧集合再重试。旧集合备份：${backupPath}；缓存备份：${cacheBackupPath}`
         : `新 Collection 与 relations-cache 已切换；后续 FTS 清理或缓存整理失败：${(error as Error).message}。请执行 ki restore ${scope} --rebuild-vector 重试清理，旧集合与缓存备份保留在 ${backupPath} 和 ${cacheBackupPath}` }] };
     }
-    return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `新维度重建失败，旧 Collection 和 relations-cache 未更改：${(error as Error).message}` }] };
+    return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `暂存重建失败，旧 Collection 和 relations-cache 未更改：${(error as Error).message}` }] };
   } finally {
-    if (needsMigration) {
+    if (needsStaging) {
       await closeEngine(scope);
       if (fs.existsSync(cacheTempPath)) fs.rmSync(cacheTempPath, { force: true });
       if (!preserveStage && fs.existsSync(stageRoot)) fs.rmSync(stageRoot, { recursive: true, force: true });

@@ -28,6 +28,7 @@ import { getRelationsCachePath } from '../src/lib/scope.js';
 import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
 import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
+import { createTaskReporter, getTaskRecord } from '../src/lib/task-registry.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -120,6 +121,57 @@ describe('/api/health', () => {
       embItems.every((i: { status: string }) => i.status === 'warn'),
       `embedding 不可用只该告警，实际：${JSON.stringify(embItems)}`,
     );
+  });
+});
+
+describe('/api/tasks 与 /api/vector/status', () => {
+  it('跨调用读取任务进度，心跳过期显示 unknown，维度 GET 只读快照', async () => {
+    const config = loadConfig();
+    const taskId = `api-task-${crypto.randomUUID()}`;
+    const reporter = createTaskReporter(config, {
+      id: taskId,
+      source: 'cli',
+      operation: 'restore --rebuild-vector',
+      scope: 'api_task_scope',
+    });
+    reporter.progress({ phase: 'queued', done: 0, total: 5 });
+    assert.equal(getTaskRecord(config, taskId)?.state, 'queued', '排队进度不能提前标记为运行中');
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    reporter.progress({ phase: 'embedding', done: 2, total: 5, persisted: 2, notProcessed: 3 });
+    reporter.update({ error: 'Bearer hidden-token api_key=hidden-key source=/srv/private/upload/doc.md' });
+    const taskFile = path.join(config.dataDir, '.ki-tasks', `${taskId}.json`);
+
+    try {
+      const listResponse = await fetch(`${handle!.base}/api/tasks?limit=10`);
+      assert.equal(listResponse.status, 200);
+      const listBody = await listResponse.json() as any;
+      const listed = listBody.tasks.find((task: any) => task.id === taskId);
+      assert.equal(listed.state, 'running');
+      assert.equal(listed.progress.notProcessed, 3);
+
+      const expired = JSON.parse(fs.readFileSync(taskFile, 'utf8'));
+      expired.heartbeatAt = Date.now() - 31_000;
+      fs.writeFileSync(taskFile, JSON.stringify(expired));
+      const detailResponse = await fetch(`${handle!.base}/api/tasks/${taskId}`);
+      assert.equal(detailResponse.status, 200);
+      const detailBody = await detailResponse.json() as any;
+      assert.equal(detailBody.task.state, 'unknown');
+      assert.doesNotMatch(JSON.stringify(detailBody), /hidden-token|hidden-key|\/srv\/private\/upload/);
+      assert.equal(getTaskRecord(config, taskId)?.state, 'unknown');
+
+      const agedOut = JSON.parse(fs.readFileSync(taskFile, 'utf8'));
+      agedOut.heartbeatAt = Date.now() - 60 * 60 * 1000 - 1;
+      fs.writeFileSync(taskFile, JSON.stringify(agedOut));
+      const expiredResponse = await fetch(`${handle!.base}/api/tasks/${taskId}`);
+      assert.equal(expiredResponse.status, 404);
+      assert.equal(getTaskRecord(config, taskId), null);
+
+      const dimensionResponse = await fetch(`${handle!.base}/api/vector/status?scope=api_task_scope`);
+      assert.equal(dimensionResponse.status, 200);
+      assert.equal((await dimensionResponse.json() as any).status.state, 'unknown');
+    } finally {
+      reporter.stop();
+    }
   });
 });
 
@@ -530,6 +582,13 @@ describe('/api/import/run + status', () => {
 
     const firstJob = await waitJob(firstRunBody.jobId);
     assert.equal(firstJob.state, 'done', firstJob.error);
+    const taskResponse = await fetch(`${handle!.base}/api/tasks/${firstRunBody.jobId}`);
+    assert.equal(taskResponse.status, 200);
+    const taskBody = await taskResponse.json() as any;
+    assert.equal(taskBody.task.source, 'web');
+    assert.equal(taskBody.task.operation, 'import');
+    assert.equal(taskBody.task.scope, 'run-conflict-result');
+    assert.equal(taskBody.task.state, 'succeeded');
 
     const secondUpload = await fetch(`${handle!.base}/api/import/upload`, {
       method: 'POST',
@@ -796,6 +855,54 @@ describe('/api/* 鉴权（对外绑定 + 本地豁免）', () => {
       assert.equal(res.status, 200);
     } finally {
       await srv.close();
+    }
+  });
+});
+
+describe('/api/tasks scope 授权', () => {
+  it('列表先按 scope 过滤，详情对无权任务返回统一 404', async () => {
+    const config = loadConfig();
+    const allowedScope = `tasks-auth-${crypto.randomUUID().slice(0, 8)}`;
+    const deniedScope = `tasks-denied-${crypto.randomUUID().slice(0, 8)}`;
+    const allowedTaskId = `task-${crypto.randomUUID()}`;
+    const deniedTaskId = `task-${crypto.randomUUID()}`;
+    const allowed = createTaskReporter(config, {
+      id: allowedTaskId, source: 'cli', operation: 'import', scope: allowedScope,
+    });
+    const denied = createTaskReporter(config, {
+      id: deniedTaskId, source: 'web', operation: 'restore', scope: deniedScope,
+    });
+    allowed.finish('succeeded');
+    denied.finish('failed', { error: 'private failure' });
+
+    const { httpServer, closeAllSessions } = createMcpHttpServer({
+      authEnabled: true,
+      buildServer: buildTestServer,
+      webDir: null,
+      resolveClientAddr: () => '192.168.1.10',
+      resolveTokenScopes: (token) => token === 'scoped-token' ? [allowedScope] : undefined,
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const addr = httpServer.address() as AddressInfo;
+    const base = `http://127.0.0.1:${addr.port}`;
+    const headers = { Authorization: 'Bearer scoped-token' };
+    try {
+      const list = await fetch(`${base}/api/tasks?limit=1`, { headers });
+      assert.equal(list.status, 200);
+      const body = await list.json() as any;
+      assert.equal(body.total, 1);
+      assert.equal(body.tasks.length, 1);
+      assert.equal(body.tasks[0].scope, allowedScope);
+
+      const hidden = await fetch(`${base}/api/tasks/${deniedTaskId}`, { headers });
+      assert.equal(hidden.status, 404);
+      assert.equal((await hidden.json() as any).code, 'TASK_NOT_FOUND');
+
+      const vectorStatus = await fetch(`${base}/api/vector/status?scope=${deniedScope}`, { headers });
+      assert.equal(vectorStatus.status, 403);
+    } finally {
+      await closeAllSessions();
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     }
   });
 });

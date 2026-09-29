@@ -23,10 +23,11 @@ import {
   InvalidSchemaError,
   WorkerCrashedError,
   ZvecEngineError,
+  classifyVectorizationStop,
 } from './errors.js';
 import { compileFilter, buildAllowedFields } from './filter/compiler.js';
 import type { EmbeddingProvider } from './embedding/provider.js';
-import { parseProviderBatchLimit } from './embedding/batch-scheduler.js';
+import { isSplittableParameterError, parseProviderBatchLimit } from './embedding/batch-scheduler.js';
 import { ZvecEngineProxy } from './proxy.js';
 import { routeSearch, type RouterContext } from './search/router.js';
 import { toHit } from './search/normalize.js';
@@ -388,6 +389,8 @@ export class ZvecEngine {
     // 不把已能成功的文本判失败（与 batch-scheduler 的降批策略同源）。
     let effectiveEmbedBatchSize = EMBED_BATCH_SIZE;
     const embeddedVectors = new Map<string, number[]>();
+    const notProcessedDocs: DocInput[] = [];
+    let stopReason: WriteResult['stopReason'];
     for (let start = 0; start < needsEmbed.length; ) {
       const size = Math.min(effectiveEmbedBatchSize, needsEmbed.length - start);
       const batch = needsEmbed.slice(start, start + size);
@@ -418,17 +421,25 @@ export class ZvecEngine {
         }
         start += size;
       } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
         // provider 声明了更小的单请求上限：降批重试本片（不改判失败），下一次循环用新的批大小
-        const declaredLimit = parseProviderBatchLimit(err as Error);
+        const declaredLimit = parseProviderBatchLimit(error);
         if (declaredLimit !== undefined && declaredLimit < size) {
           effectiveEmbedBatchSize = declaredLimit;
           continue;
         }
-        const reason = (err as Error).message;
+        const reason = error.message;
         for (const d of batch) {
           allErrors.push({ id: d.id, code: 'EMBEDDING_FAILED', reason });
         }
         start += size;
+        // 明确属于单条内容参数错误时，沿用既有逐批隔离行为；其余错误视为
+        // provider/配置等系统性故障，停止发起后续批次并明确标记未处理项。
+        if (!isSplittableParameterError(error)) {
+          stopReason = classifyVectorizationStop(error, 'embedding');
+          notProcessedDocs.push(...needsEmbed.slice(start));
+          break;
+        }
       }
     }
 
@@ -437,9 +448,13 @@ export class ZvecEngine {
     const embedFailedIds = new Set(
       allErrors.filter((e) => e.code === 'EMBEDDING_FAILED').map((e) => e.id),
     );
+    const notProcessedIds = new Set([
+      ...notProcessedDocs.map((doc) => doc.id),
+      ...(stopReason ? noEmbed.map((doc) => doc.id) : []),
+    ]);
     const toWrite: WriteDocPayload[] = [];
     for (const d of [...needsEmbed, ...noEmbed]) {
-      if (embedFailedIds.has(d.id)) continue;
+      if (embedFailedIds.has(d.id) || notProcessedIds.has(d.id)) continue;
       const vector = embeddedVectors.get(d.id) ?? d.vector;
       // 校验：写入路径必须至少有 vector 或 text（upsert/insert）
       // update 模式的输入校验由 update() 入口负责（Z-03：缺 dense vector 抛 InconsistentUpdateError）
@@ -497,9 +512,23 @@ export class ZvecEngine {
       reason: e.reason,
     }));
     const merged = [...allErrors, ...zvecErrors];
+    const failed = writeResult.failed + allErrors.length;
+    const notProcessedItems = [...notProcessedIds];
+    const systemicWriteError = zvecErrors.find((error) => error.code === 'ZVEC_WRITE_ERROR');
+    if (systemicWriteError && !stopReason) {
+      stopReason = classifyVectorizationStop(
+        Object.assign(new Error(systemicWriteError.reason || 'zvec collection write failed'), { code: 'ZVEC_WRITE_ERROR' }),
+        'persist',
+      );
+    }
     return {
       ok: writeResult.ok,
-      failed: writeResult.failed + allErrors.length,
+      failed,
+      attempted: docs.length - notProcessedItems.length,
+      notProcessed: notProcessedItems.length,
+      notProcessedItems: notProcessedItems.length > 0 ? notProcessedItems : undefined,
+      status: stopReason ? 'failed' : writeResult.ok === docs.length ? 'succeeded' : writeResult.ok > 0 ? 'partial' : failed > 0 ? 'failed' : 'succeeded',
+      stopReason,
       errors: merged.length > 0 ? merged : undefined,
     };
   }
@@ -641,8 +670,11 @@ export class ZvecEngine {
           persisted -= batchMetadataPending;
         }
       }
-      if (zvecFailed > 0) {
-        fatalWriteError = Object.assign(new Error(`zvec 批次持久化失败（成功 ${zvecPersisted}，失败 ${zvecFailed}），已停止后续批次`), {
+      const systemicWriteError = (writeResult.errors ?? []).find((error) => error.code === 'ZVEC_WRITE_ERROR');
+      if (systemicWriteError) {
+        fatalWriteError = Object.assign(new Error(
+          systemicWriteError.reason || `zvec 批次持久化失败（成功 ${zvecPersisted}，失败 ${zvecFailed}），已停止后续批次`,
+        ), {
           code: 'ZVEC_WRITE_ERROR',
         });
       }
@@ -674,8 +706,15 @@ export class ZvecEngine {
       // scheduler 已把 writer 失败转换为 failure-drain 结果；这里继续汇总，
       // 让调用方拿到逐项 failed/cancelled，而不是丢失批次级诊断。
     }
+    // 最后一批没有后续 writer 回调触发 fatalWriteError 守门时，也要把系统性
+    // zvec 失败写入任务终态；否则结果会被误报为普通部分成功。
+    if (fatalWriteError) {
+      scheduleOutcome.fatalError ??= fatalWriteError;
+      scheduleOutcome.stopReason ??= classifyVectorizationStop(fatalWriteError, 'persist');
+    }
 
     const cancelledItems = scheduleOutcome.cancelledItems.map((item) => item.docId);
+    const notProcessedItems = scheduleOutcome.notProcessedItems.map((item) => item.docId);
     // noEmbed 文档不需要 provider；仍沿用同一 zvec writer 进行一次持久化。
     if (!scheduleOutcome.fatalError && !options.abortSignal?.aborted && noEmbed.length > 0) {
       const noEmbedPayload = noEmbed.map((doc) => validateAndBuild(doc, doc.vector));
@@ -688,6 +727,13 @@ export class ZvecEngine {
       for (const error of noEmbedResult.errors ?? []) {
         allErrors.push({ id: error.id, code: error.code as WriteErrorCode, reason: error.reason });
       }
+      const systemicWriteError = (noEmbedResult.errors ?? []).find((error) => error.code === 'ZVEC_WRITE_ERROR');
+      if (systemicWriteError) {
+        scheduleOutcome.fatalError ??= Object.assign(new Error(systemicWriteError.reason || 'zvec collection write failed'), {
+          code: 'ZVEC_WRITE_ERROR',
+        });
+        scheduleOutcome.stopReason ??= classifyVectorizationStop(scheduleOutcome.fatalError, 'persist');
+      }
     }
 
     if (scheduleOutcome.fatalError) {
@@ -697,21 +743,28 @@ export class ZvecEngine {
     const failedItems = scheduleOutcome.failedItems.map((item) => item.docId);
     const totalFailed = failed + Math.max(0, allErrors.length - failed - metadataPending);
     const ok = Math.max(0, persisted);
-    const status: WriteResult['status'] = cancelled > 0
+    const notProcessed = scheduleOutcome.notProcessed + (scheduleOutcome.stopReason ? noEmbed.length : 0);
+    if (scheduleOutcome.stopReason) notProcessedItems.push(...noEmbed.map((doc) => doc.id));
+    const status: WriteResult['status'] = scheduleOutcome.stopReason
+      ? 'failed'
+      : cancelled > 0
       ? (ok > 0 ? 'partial' : 'cancelled')
       : ok === docs.length ? 'succeeded' : ok > 0 ? 'partial' : 'failed';
-    options.onProgress?.({ phase: 'persist', done: Math.min(docs.length, ok + metadataPending + totalFailed + cancelled), total: docs.length, persisted: ok, failed: totalFailed, metadataPending, cancelled });
+    options.onProgress?.({ phase: 'persist', done: Math.min(docs.length, ok + metadataPending + totalFailed + cancelled + notProcessed), total: docs.length, persisted: ok, failed: totalFailed, metadataPending, cancelled });
     return {
       ok,
-      failed: Math.max(0, docs.length - ok - metadataPending - cancelled),
+      failed: Math.max(0, docs.length - ok - metadataPending - cancelled - notProcessed),
       attempted: scheduleOutcome.attempted,
       errors: allErrors.length > 0 ? allErrors : undefined,
       cancelled,
       cancelledItems,
+      notProcessed,
+      notProcessedItems,
       failedItems,
       metadataPending,
       metadataPendingItems,
       status,
+      stopReason: scheduleOutcome.stopReason,
     };
   }
 

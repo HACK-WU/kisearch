@@ -71,6 +71,14 @@ export async function restoreSnapshotLocal(
   scope: string,
   opts: RestoreSnapshotOptions = {},
 ): Promise<RestoreSnapshotResult> {
+  const { withScopeWriteLock } = await import('./scope-write-lock.js');
+  return withScopeWriteLock(scope, 'restore-snapshot', () => restoreSnapshotLocalUnlocked(scope, opts));
+}
+
+async function restoreSnapshotLocalUnlocked(
+  scope: string,
+  opts: RestoreSnapshotOptions = {},
+): Promise<RestoreSnapshotResult> {
   const checkCancelled = () => {
     if (opts.abortSignal?.aborted) {
       throw Object.assign(new Error('还原已取消（当前 restore 批次尚未开始写入）'), { code: 'RESTORE_CANCELLED' });

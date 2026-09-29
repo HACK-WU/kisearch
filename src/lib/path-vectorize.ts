@@ -12,6 +12,7 @@
  */
 
 import { vectorStore, vectorBulkStore, vectorSearch, vectorDelete } from './vector-client.js';
+import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 
 // ─── 类型 ───
 
@@ -36,6 +37,9 @@ export interface PathVectorizeResult {
   /** text → docId（成功条目） */
   ok: Map<string, string>;
   errors: { text: string; error: string }[];
+  stopReason?: VectorizationStopReason;
+  failed?: number;
+  notProcessed?: number;
 }
 
 // ─── 文本构建 ───
@@ -79,6 +83,9 @@ export async function bulkStorePaths(
 ): Promise<PathVectorizeResult> {
   const ok = new Map<string, string>();
   const errors: { text: string; error: string }[] = [];
+  let failed = 0;
+  let stopReason: VectorizationStopReason | undefined;
+  let notProcessed = 0;
 
   if (entries.length === 0) return { ok, errors };
 
@@ -90,7 +97,10 @@ export async function bulkStorePaths(
     byScope.set(entry.scope, list);
   }
 
-  for (const [scope, scopeEntries] of byScope) {
+  const scopeGroups = [...byScope.values()];
+  for (const [scopeIndex, scopeEntries] of scopeGroups.entries()) {
+    const scope = scopeEntries[0]?.scope;
+    if (!scope) continue;
     try {
       const result = await vectorBulkStore({
         scope,
@@ -105,15 +115,31 @@ export async function bulkStorePaths(
           errors.push({ text: entry.text, error: item.error || 'unknown' });
         }
       }
+      failed += result.failed;
+      if (result.stopReason) {
+        stopReason = result.stopReason;
+        notProcessed += (result.notProcessed ?? 0)
+          + scopeGroups.slice(scopeIndex + 1).reduce((sum, pending) => sum + pending.length, 0);
+        break;
+      }
     } catch (err) {
       const errMsg = `[path-vectorize] bulk-store 失败: ${(err as Error).message}`;
       for (const entry of scopeEntries) {
         errors.push({ text: entry.text, error: errMsg });
       }
+      failed += scopeEntries.length;
+      stopReason = {
+        kind: 'collection-unwritable',
+        code: (err as Error & { code?: string }).code ?? 'PATH_VECTORIZE_FAILED',
+        phase: 'persist',
+        reason: (err as Error).message,
+      };
+      notProcessed += [...byScope.values()].reduce((sum, pending) => sum + pending.length, 0) - scopeEntries.length;
+      break;
     }
   }
 
-  return { ok, errors };
+  return { ok, errors, failed, ...(stopReason ? { stopReason, notProcessed } : {}) };
 }
 
 // ─── 单条存储 ───

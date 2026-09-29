@@ -16,6 +16,7 @@
 
 import type { ScanResultEntry } from './ai-results.js';
 import { vectorStore, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { classifyVectorizationStop, type VectorizationStopReason } from '../zvec-engine/errors.js';
 import { logProgress } from './progress.js';
 
 const VECTORIZE_TAG = 'ki-search';
@@ -24,6 +25,11 @@ export interface BatchVectorizeResult {
   /** path → docId（成功条目） */
   ok: Map<string, string>;
   errors: { path: string; error: string }[];
+  /** 实际尝试后失败的条目数；不含取消或未处理条目。 */
+  failed?: number;
+  /** 系统性故障会停止后续批次；单条内容错误不设置此字段。 */
+  stopReason?: VectorizationStopReason;
+  notProcessed?: number;
 }
 
 export interface BatchVectorizeOptions {
@@ -141,7 +147,7 @@ export async function bulkVectorize(
   const ok = new Map<string, string>();
   const errors: { path: string; error: string }[] = [];
 
-  if (entries.length === 0) return { ok, errors };
+  if (entries.length === 0) return { ok, errors, failed: 0, notProcessed: 0 };
 
   // REQ-05 O-03：分批提交（200 条/批）+ 批间进度反馈（引擎内部批量 embed 无中间态，分批后用户可感知进度）
   const totalBatches = Math.ceil(entries.length / VECTORIZE_BATCH_SIZE);
@@ -149,6 +155,8 @@ export async function bulkVectorize(
   let cumulativeMetadataPending = 0;
   let cumulativeFailed = 0;
   let cumulativeCancelled = 0;
+  let notProcessed = 0;
+  let stopReason: VectorizationStopReason | undefined;
   for (let b = 0; b < totalBatches && !options.abortSignal?.aborted; b++) {
     const slice = entries.slice(b * VECTORIZE_BATCH_SIZE, (b + 1) * VECTORIZE_BATCH_SIZE);
     let currentProgress = { persisted: 0, metadataPending: 0, failed: 0, cancelled: 0 };
@@ -189,8 +197,16 @@ export async function bulkVectorize(
           errors.push({ path: entry.path, error: item.error || 'unknown error' });
         }
       }
+      if (result.stopReason) {
+        stopReason = result.stopReason;
+        const remaining = entries.slice((b + 1) * VECTORIZE_BATCH_SIZE);
+        notProcessed += (result.notProcessed ?? 0) + remaining.length;
+        for (const entry of remaining) {
+          errors.push({ path: entry.path, error: `系统性向量故障后未处理：${stopReason.reason}` });
+        }
+      }
       options.onVectorProgress?.({
-        done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
+        done: Math.max(0, Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE) - (result.notProcessed ?? 0)),
         total: entries.length,
         persisted: cumulativePersisted,
         metadataPending: cumulativeMetadataPending,
@@ -203,6 +219,14 @@ export async function bulkVectorize(
         errors.push({ path: entry.path, error: errMsg });
       }
       cumulativeFailed += slice.length;
+      const failure = err instanceof Error ? err : new Error(String(err));
+      const embeddingSetupFailure = /embedding\.(?:apiKey|model|baseURL|dimension)|EmbeddingConfig|provider 配置/i.test(failure.message);
+      stopReason = classifyVectorizationStop(failure, embeddingSetupFailure ? 'embedding' : 'persist');
+      const remaining = entries.slice((b + 1) * VECTORIZE_BATCH_SIZE);
+      notProcessed += remaining.length;
+      for (const entry of remaining) {
+        errors.push({ path: entry.path, error: `系统性向量故障后未处理：${stopReason.reason}` });
+      }
       options.onVectorProgress?.({
         done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
         total: entries.length,
@@ -214,8 +238,9 @@ export async function bulkVectorize(
     }
     // 批间进度（仅多批时输出，避免单批场景刷屏）
     if (totalBatches > 1) {
-      logProgress(Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
+      logProgress(Math.max(0, Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length) - (stopReason ? notProcessed : 0)), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
     }
+    if (stopReason) break;
   }
 
   if (options.abortSignal?.aborted && errors.length === 0) {
@@ -228,5 +253,5 @@ export async function bulkVectorize(
     options.onProgress(completed, errors.length);
   }
 
-  return { ok, errors };
+  return { ok, errors, failed: cumulativeFailed, stopReason, notProcessed };
 }

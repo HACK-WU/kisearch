@@ -172,8 +172,74 @@ test('超大 400/20015 批次不展开成无界单条请求', async () => {
   });
 
   assert.equal(calls, 1);
-  assert.equal(completed?.error?.message.includes('20015'), true);
+  assert.match(completed?.error?.message ?? '', /20015/);
   assert.equal(result.failed, 65);
+  assert.equal(result.stopReason?.kind, 'configuration');
+});
+
+test('单条 400/20015 内容错误不会阻断后续批次', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      if (texts[0] === 'bad') throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['bad', 'good'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.vectors.filter(Boolean).length, failed: batch.vectors.filter((v) => !v).length }),
+  });
+  assert.deepEqual(seen, ['bad', 'good']);
+  assert.equal(result.failed, 1);
+  assert.equal(result.persisted, 1);
+  assert.equal(result.notProcessed, 0);
+  assert.equal(result.stopReason, undefined);
+});
+
+test('连续单条 400/20015 在第二次后止损，不继续请求后续批次', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['a', 'b', 'c'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: () => ({ persisted: 0, failed: 1 }),
+  });
+  assert.deepEqual(seen, ['a', 'b', 'ki vector health check']);
+  assert.equal(result.notProcessed, 1);
+  assert.equal(result.stopReason?.kind, 'configuration');
+});
+
+test('连续两条坏内容但探针有效时，继续处理第三条合法内容', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      if (texts[0].startsWith('bad')) throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['bad1', 'bad2', 'good'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.vectors.filter(Boolean).length, failed: batch.vectors.filter((v) => !v).length }),
+  });
+  assert.deepEqual(seen, ['bad1', 'bad2', 'ki vector health check', 'good']);
+  assert.equal(result.failed, 2);
+  assert.equal(result.persisted, 1);
+  assert.equal(result.stopReason, undefined);
 });
 
 test('scheduler stops launching new batches after cancellation and reports exact items', async () => {
@@ -203,6 +269,42 @@ test('scheduler stops launching new batches after cancellation and reports exact
   assert.equal(result.persisted, 2);
   assert.equal(result.cancelled, 4);
   assert.deepEqual(result.cancelledItems.map((item) => item.docId), ['c', 'd', 'e', 'f']);
+});
+
+test('scheduler stops on exhausted provider failure and reports unstarted entries separately', async () => {
+  let calls = 0;
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed() {
+      calls++;
+      throw Object.assign(new Error('provider unavailable'), { code: 'NETWORK' });
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 2,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+    maxBufferedVectorBytes: 1024,
+    globalBufferedVectorBytes: 1024,
+  });
+  const delivered: string[][] = [];
+  const result = await runtime.schedule(provider, ['a', 'b', 'c', 'd', 'e', 'f'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete(batch) {
+      delivered.push(batch.items.map((item) => item.docId));
+      return { persisted: 0, failed: batch.items.length };
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(delivered, [['a', 'b']]);
+  assert.equal(result.failed, 2);
+  assert.equal(result.cancelled, 0);
+  assert.equal(result.notProcessed, 4);
+  assert.deepEqual(result.notProcessedItems.map((item) => item.docId), ['c', 'd', 'e', 'f']);
+  assert.equal(result.stopReason?.kind, 'provider-unavailable');
 });
 
 test('scheduler rejects a buffer smaller than one estimated batch before provider call', async () => {

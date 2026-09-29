@@ -53,6 +53,20 @@ const collectionSchema = (dimension: number) => ({
   fts: { field: 'content', tokenizer: 'jieba' },
 });
 
+/** This suite verifies migration and rollback, not host memory admission policy. */
+async function withHealthyMemoryAdmission<T>(run: () => Promise<T>): Promise<T> {
+  const original = process.memoryUsage;
+  Object.defineProperty(process, 'memoryUsage', {
+    configurable: true,
+    value: () => ({ ...original(), rss: 1 }),
+  });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, 'memoryUsage', { configurable: true, value: original });
+  }
+}
+
 /** 建一个"按旧维度持久化"的 scope：KB + relations-cache + 旧维度集合（含 1 条 legacy 向量）。 */
 async function makeOldScope(scope: string): Promise<string> {
   const config = loadConfig();
@@ -162,7 +176,7 @@ test(
       // ── C：--yes 全量重建完成 schema 切换，旧集合保留 ──
       const successCache = await makeOldScope('migration_success');
       const successBefore = fs.readFileSync(successCache, 'utf8');
-      const migrated = await rebuildScopeVectors('migration_success', {}, { yes: true });
+      const migrated = await withHealthyMemoryAdmission(() => rebuildScopeVectors('migration_success', {}, { yes: true }));
       assert.equal(migrated.ok, true, migrated.errors.map((e) => e.error).join('; '));
       assert.equal((await getVectorDimensionStatus('migration_success')).persisted, NEW_DIMENSION);
       assert.ok(migrated.migrationBackup && fs.existsSync(migrated.migrationBackup), '旧集合应保留在 migration-backups');
@@ -187,9 +201,12 @@ test(
       const failureCache = await makeOldScope('migration_failure');
       const failureBefore = fs.readFileSync(failureCache, 'utf8');
       failEmbedding = true;
-      const failed = await rebuildScopeVectors('migration_failure', {}, { yes: true });
+      const failed = await withHealthyMemoryAdmission(() => rebuildScopeVectors('migration_failure', {}, { yes: true }));
       failEmbedding = false;
       assert.equal(failed.ok, false);
+      assert.ok(failed.stopReason, '暂存向量化失败应把结构化停止原因传到调用方');
+      assert.equal(failed.errors[0]?.type, 'vectorization-stop');
+      assert.equal(failed.partialCommitted, 0, '未切换的暂存向量不能算已提交');
       assert.equal((await getVectorDimensionStatus('migration_failure')).persisted, OLD_DIMENSION, '失败后仍是旧维度');
       assert.equal(fs.readFileSync(failureCache, 'utf8'), failureBefore, '失败后缓存不得改');
       assert.equal(fs.existsSync(path.join(root, 'vector', 'migration-pending', 'migration_failure.json')), false, '失败不得留事务标记');
@@ -239,7 +256,7 @@ test(
       );
 
       // 重跑 --yes：先自动回退旧集合与配套缓存，再按当前配置完成迁移
-      const recovered = await rebuildScopeVectors('migration_interrupted', {}, { yes: true });
+      const recovered = await withHealthyMemoryAdmission(() => rebuildScopeVectors('migration_interrupted', {}, { yes: true }));
       assert.equal(recovered.ok, true, recovered.errors.map((e) => e.error).join('; '));
       assert.equal(fs.existsSync(paths.markerPath), false, '完成后应清除事务标记');
       assert.equal((await getVectorDimensionStatus('migration_interrupted')).persisted, NEW_DIMENSION);

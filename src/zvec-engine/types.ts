@@ -12,6 +12,7 @@
 
 import type { EmbeddingProvider } from './embedding/provider.js';
 import type { EmbeddingBatch, EmbeddingScheduler, BatchPersistOutcome } from './embedding/batch-scheduler.js';
+import type { VectorizationStopReason } from './errors.js';
 
 // ─── 基础标量 ───
 
@@ -171,11 +172,15 @@ export interface WriteResult {
   /** provider/调度器因取消而未启动或丢弃的条目数。 */
   cancelled?: number;
   cancelledItems?: string[];
+  /** 已确认系统性错误后未尝试的条目，不等同于失败或用户取消。 */
+  notProcessed?: number;
+  notProcessedItems?: string[];
   failedItems?: string[];
   /** zvec 已成功但上层元数据回调未完成的条目数。 */
   metadataPending?: number;
   metadataPendingItems?: string[];
   status?: 'succeeded' | 'partial' | 'failed' | 'cancelled';
+  stopReason?: VectorizationStopReason;
 }
 
 export interface VectorWriteBatchPersistedEvent {

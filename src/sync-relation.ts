@@ -31,7 +31,9 @@ import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import type { VectorizationStopReason } from './zvec-engine/errors.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { closeFtsEngine, ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './lib/fts-client.js';
@@ -400,11 +402,12 @@ export type BulkSyncRelationResult =
       skipped: number;
       results: BulkSyncResultItem[];
       vectorStored: boolean;
+      stopReason?: VectorizationStopReason;
       fullTextStored?: boolean;
       /** Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），按出现顺序收集 */
       hints?: string[];
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; scope?: string; total?: number; succeeded?: number; failed?: number; skipped?: number; results?: BulkSyncResultItem[]; vectorStored?: boolean; stopReason?: VectorizationStopReason };
 
 /**
  * 写入独立 FTS-only Collection。该路径不创建 embedding provider，也不触碰
@@ -702,10 +705,17 @@ async function executeBulkSyncRelationLocal(params: {
 
     // ─── 阶段 2：批量向量写入（一次 embedding HTTP + 一次 worker upsert） ───
     let vectorStored = false;
+    let vectorizationStopReason: VectorizationStopReason | undefined;
     if (vector && filteredEntries.length > 0) {
       try {
         const avail = await ensureVectorAvailable();
         if (!avail.available) {
+          vectorizationStopReason = {
+            kind: 'provider-unavailable',
+            code: 'VECTOR_UNAVAILABLE',
+            phase: 'embedding',
+            reason: avail.reason || '向量服务不可用',
+          };
           // 向量服务不可用：所有 item 标记向量未写入，但不阻塞 KB 层
           for (let i = 0; i < results.length; i++) {
             if (results[i].skipped) continue;
@@ -715,6 +725,7 @@ async function executeBulkSyncRelationLocal(params: {
           }
         } else {
           const bulkResult = await vectorBulkStore({ scope, entries: filteredEntries });
+          vectorizationStopReason = bulkResult.stopReason;
 
           // ─── 阶段 3：拆分结果 + 回写 memoryId/memoryIds ───
           // 按 itemIdx 分组：每个 item 的 content entries 的 memoryId 收集为 memoryIds，
@@ -834,6 +845,12 @@ async function executeBulkSyncRelationLocal(params: {
       } catch (err) {
         // 向量批量写入异常：不阻塞 KB 层，标记所有未跳过 item
         const reason = (err as Error).message;
+        vectorizationStopReason = {
+          kind: 'unknown',
+          code: (err as Error & { code?: string }).code ?? (err as Error).name ?? 'UNKNOWN',
+          phase: 'embedding',
+          reason,
+        };
         for (let i = 0; i < results.length; i++) {
           if (results[i].skipped) continue;
           if (results[i].vectorReason) continue; // 已被去重标记，不再覆盖
@@ -930,8 +947,7 @@ async function executeBulkSyncRelationLocal(params: {
     const succeeded = results.length - skippedCount;
 
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
-    return {
-      ok: true,
+    const response = {
       scope,
       total: items.length,
       succeeded,
@@ -942,6 +958,15 @@ async function executeBulkSyncRelationLocal(params: {
       ...(vector ? {} : { fullTextStored }),
       ...(hints.length > 0 ? { hints } : {}),
     };
+    if (vectorizationStopReason) {
+      return {
+        ok: false,
+        error: `批量向量化已停止（${vectorizationStopReason.code}）：${vectorizationStopReason.reason}`,
+        ...response,
+        stopReason: vectorizationStopReason,
+      };
+    }
+    return { ok: true, ...response };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -954,7 +979,11 @@ export async function executeBulkSyncRelation(params: {
 }): Promise<BulkSyncRelationResult> {
   // timeoutMs=0：批量回写逐条向量化，条目多时远超固定客户端超时。
   if (shouldUseDaemonClient()) return callDaemon<BulkSyncRelationResult>('bulk-sync-relation', params, 0);
-  return executeBulkSyncRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'bulk-sync-relation', () => executeBulkSyncRelationLocal(params));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 export type SyncRelationResult =
@@ -1225,7 +1254,11 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
 
 export async function executeSyncRelation(params: SyncRelationParams): Promise<SyncRelationResult> {
   if (shouldUseDaemonClient()) return callDaemon<SyncRelationResult>('sync-relation', params);
-  return executeSyncRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'sync-relation', () => executeSyncRelationLocal(params));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 // ─── CLI ───

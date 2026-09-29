@@ -52,6 +52,7 @@ import {
 import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { closeFtsEngine } from './fts-client.js';
+import { classifyVectorizationStop, type VectorizationStopReason } from '../zvec-engine/errors.js';
 import {
   resolveImportConflict,
   validateImportConflictMode,
@@ -166,6 +167,8 @@ export interface HandleDirectImportArgs {
   }) => void;
   /** daemon HTTP job 使用：在当前批次完成后安全中止，不强行打断 zvec/embedding 调用。 */
   abortSignal?: AbortSignal;
+  /** 直连 CLI 在同步退出前落下取消任务终态。 */
+  onInterrupt?: () => void;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -396,6 +399,13 @@ export function readFileToChunks(absPath: string, chunkSize: number, chunkOverla
 export async function handleDirectImport(
   args: HandleDirectImportArgs
 ): Promise<ImportResult> {
+  const { withScopeWriteLock } = await import('./scope-write-lock.js');
+  return withScopeWriteLock(args.scope, 'import', () => handleDirectImportUnlocked(args));
+}
+
+async function handleDirectImportUnlocked(
+  args: HandleDirectImportArgs
+): Promise<ImportResult> {
   const scope = args.scope;
   const sourceDir = path.resolve(args.sourceDir);
   // group 缺省时传空串，由 resolveGroupForSource 根据 source 类型（目录/单文件）推断
@@ -481,6 +491,7 @@ export async function handleDirectImport(
         // 中断路径同步清锁（N4：避免 SIGTERM 后 import.lock 残留）；保留中断标记供引导（不清标记）
         clearImportLock(scope);
         lockAcquired = false;
+        args.onInterrupt?.();
       } catch { /* 标记/锁清理失败不阻断退出 */ }
       process.exit(130);
     };
@@ -784,7 +795,7 @@ export async function handleDirectImport(
         },
       });
   checkCancelled();
-  args.onProgress?.({ phase: 'vectorize', done: entries.length, total: Math.max(entries.length, 1) });
+  args.onProgress?.({ phase: 'vectorize', done: Math.max(0, entries.length - (vectorizeResult.notProcessed ?? 0)), total: Math.max(entries.length, 1) });
 
   // ── 文档级自定义 tag 向量写入（可选）：为每个成功导入文件写一条 tag 内容向量 ──
   // 机制对齐 sync-relation：text=文件原文、tags=自定义 tag（每个 tag 各一条），
@@ -793,13 +804,38 @@ export async function handleDirectImport(
   const tagErrors: { path: string; error: string }[] = [];
   const vectorCleanupErrors: { path: string; error: string }[] = [];
   const failedRecords = new Set<typeof fileRecords[number]>();
+  let systemStopReason: VectorizationStopReason | undefined = vectorizeResult.stopReason;
+  let systemStopStats: {
+    scope: string;
+    phase: 'embedding' | 'persist';
+    total: number;
+    succeeded: number;
+    failed: number;
+    notProcessed: number;
+    partialCommitted: number;
+  } | undefined;
+  const partialCommittedIds = new Set<string>();
+  if (systemStopReason) {
+    const notProcessed = vectorizeResult.notProcessed ?? 0;
+    systemStopStats = {
+      scope,
+      phase: vectorizeResult.stopReason?.phase ?? 'embedding',
+      total: entries.length,
+      succeeded: vectorizeResult.ok.size,
+      failed: vectorizeResult.failed ?? Math.max(0, vectorizeResult.errors.length - notProcessed),
+      notProcessed,
+      partialCommitted: 0,
+    };
+    for (const rec of fileRecords) failedRecords.add(rec);
+  }
   for (const rec of fileRecords) {
+    if (systemStopReason) break;
     if (vector && rec.entries.some((entry) => !vectorizeResult.ok.has(entry.path))) {
       failedRecords.add(rec);
     }
   }
   checkCancelled();
-  if (vector && customTags.length > 0) {
+  if (vector && !systemStopReason && customTags.length > 0) {
     logPhaseStart(2, TOTAL, `写入自定义标签向量（${customTags.join(', ')}）...`);
     const tagEntries: { text: string; tags: string; group: string }[] = [];
     const tagRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
@@ -828,12 +864,36 @@ export async function handleDirectImport(
           }
         }
         tagMemoryMap = newMap;
+        if (tagResult.stopReason) {
+          systemStopReason = tagResult.stopReason;
+          systemStopStats = {
+            scope,
+            phase: tagResult.stopReason.phase,
+            total: tagEntries.length,
+            succeeded: tagResult.succeeded,
+            failed: tagResult.failed,
+            notProcessed: tagResult.notProcessed ?? 0,
+            partialCommitted: 0,
+          };
+          for (const rec of fileRecords) failedRecords.add(rec);
+        }
         logInfo(`自定义标签向量写入完成：成功 ${tagResult.results.filter((r) => r.success).length}/${tagEntries.length}`);
       } catch (err) {
+        systemStopReason = classifyVectorizationStop(err as Error, 'embedding');
+        systemStopStats = {
+          scope,
+          phase: 'embedding',
+          total: tagEntries.length,
+          succeeded: 0,
+          failed: tagEntries.length,
+          notProcessed: 0,
+          partialCommitted: 0,
+        };
         for (const rec of tagRecords) {
           failedRecords.add(rec);
           tagErrors.push({ path: rec.rel, error: `标签向量写入失败：${(err as Error).message}` });
         }
+        for (const rec of fileRecords) failedRecords.add(rec);
         logWarn(`自定义标签向量写入失败：${(err as Error).message}`);
       }
     }
@@ -866,7 +926,9 @@ export async function handleDirectImport(
     ];
     const rollbackIds = newIds.filter((id) => !oldIds.has(id) && !allKnownVectorIds.has(id));
     restoreLocalKb(scope, rec.groupPath, rec.relation, rec.previousLocalText);
-    await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`);
+    for (const id of await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`, false, vectorCleanupErrors)) {
+      partialCommittedIds.add(id);
+    }
   }
 
   // 向量化失败的文件已恢复旧 local KB，且其旧 FTS ID 未被清理；恢复原完成标记。
@@ -882,6 +944,20 @@ export async function handleDirectImport(
     ftsStatusRestored = true;
   }
   if (ftsStatusRestored) writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+
+  if (systemStopReason) {
+    const stats = systemStopStats ?? {
+      scope,
+      phase: 'embedding' as const,
+      total: entries.length,
+      succeeded: vectorizeResult.ok.size,
+      failed: vectorizeResult.failed ?? Math.max(0, vectorizeResult.errors.length - (vectorizeResult.notProcessed ?? 0)),
+      notProcessed: vectorizeResult.notProcessed ?? 0,
+      partialCommitted: 0,
+    };
+    stats.partialCommitted = partialCommittedIds.size;
+    throw makeVectorizationStopError(systemStopReason, stats);
+  }
 
   const activeFileRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
   if (vector && activeFileRecords.length === 0) {
@@ -991,32 +1067,6 @@ export async function handleDirectImport(
       fullTextErrors.push({ path: '<fts>', error: `全文索引写入失败：${(err as Error).message}` });
     }
   }
-  if (vector && activeFileRecords.length > 0) {
-    // 文档从 --no-vector 切换回 hybrid 时，先成功写入 dense，再清理该 relation
-    // 以前的 FTS-only 文档；删除失败则保留 ftsIds，避免缓存宣称已清理。
-    for (const rec of activeFileRecords) {
-      const oldIds = rec.previousRelation?.ftsIds ?? [];
-      const oldLocators = rec.previousRelation?.ftsLocators ?? [];
-      if (oldIds.length === 0) continue;
-      try {
-        const deleted = await ftsDeleteByIds({ scope, ids: oldIds });
-        if (deleted.failed > 0) {
-          const remainingIds = deleted.failedIds.length > 0 ? deleted.failedIds : oldIds;
-          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, remainingIds);
-          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators.filter((locator) => remainingIds.includes(locator.ftsId)));
-          fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败 ${deleted.failed} 条` });
-        } else {
-          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
-          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
-        }
-      } catch (err) {
-        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
-        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators);
-        fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败：${(err as Error).message}` });
-      }
-    }
-  }
-
   // 关系/路径辅助向量也先写新值，再进入旧向量清理；若某个 relation 的新辅助向量
   // 写失败，则保留该 relation 的旧辅助向量，避免先删后写造成导航索引空洞。
   checkCancelled();
@@ -1039,12 +1089,91 @@ export async function handleDirectImport(
   const auxiliaryErrors: { path: string; error: string }[] = [];
   if (vector && pathEntries.length > 0) {
     const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
+    if (pathResult.stopReason) {
+      const priorVectorIds = new Set<string>();
+      const priorPathIds = new Set<string>();
+      for (const [groupPath, groupData] of Object.entries(relationsCache0.groups)) {
+        priorPathIds.add(generateDocId(buildGroupPathContent(groupPath), scope, 'ki-path'));
+        for (const relation of groupData.hot_relations) {
+          for (const id of relationMemoryIds(relation)) priorVectorIds.add(id);
+          for (let i = 1; i <= relationContentVectorCount(relation); i += 1) {
+            priorPathIds.add(generateDocId(
+              buildRelationContent(`${relation.text}-${String(i).padStart(2, '0')}`, groupPath),
+              scope,
+              'ki-relation',
+            ));
+          }
+        }
+      }
+      const cleanupFailures = new Set<string>();
+      for (const id of partialCommittedIds) cleanupFailures.add(id);
+      for (const rec of activeFileRecords) {
+        restoreLocalKb(scope, rec.groupPath, rec.relation, rec.previousLocalText);
+        const newIds = [
+          ...rec.entries.map((entry) => activeMergedMap.get(entry.path)).filter((id): id is string => !!id),
+          ...(tagMemoryMap.get(rec.rel) ?? []),
+        ].filter((id) => !priorVectorIds.has(id));
+        for (const id of await deleteVectorIds(scope, newIds, `回滚文档 ${rec.rel} 的新向量`, false, vectorCleanupErrors)) {
+          cleanupFailures.add(id);
+        }
+        const previous = rec.previousRelation;
+        if (previous?.ftsIds?.length) {
+          const relation = relationsCache0.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+          if (relation) {
+            if (previous.ftsIndexComplete === undefined) delete relation.ftsIndexComplete;
+            else relation.ftsIndexComplete = previous.ftsIndexComplete;
+          }
+        }
+      }
+      const rollbackPathIds = [...new Set(pathEntries
+        .filter((entry) => pathResult.ok.has(entry.text))
+        .map((entry) => generateDocId(entry.text, scope, entry.tag)))]
+        .filter((id) => !priorPathIds.has(id));
+      for (const id of await deleteVectorIds(scope, rollbackPathIds, '回滚本次路径向量', false, vectorCleanupErrors)) {
+        cleanupFailures.add(id);
+      }
+      writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+      throw makeVectorizationStopError(pathResult.stopReason, {
+        scope,
+        phase: pathResult.stopReason.phase,
+        total: pathEntries.length,
+        succeeded: pathResult.ok.size,
+        failed: pathResult.failed ?? Math.max(0, pathResult.errors.length - (pathResult.notProcessed ?? 0)),
+        notProcessed: pathResult.notProcessed ?? Math.max(0, pathEntries.length - pathResult.ok.size - pathResult.errors.length),
+        partialCommitted: cleanupFailures.size,
+      });
+    }
     const relationPathTexts = new Set(pathEntries.filter((entry) => entry.tag === 'ki-relation').map((entry) => entry.text));
     for (const item of pathResult.errors) {
       if (relationPathTexts.has(item.text)) failedRelationPathTexts.add(item.text);
       auxiliaryErrors.push({ path: item.text, error: `路径向量写入失败：${item.error}` });
     }
     logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
+  }
+
+  if (vector && activeFileRecords.length > 0) {
+    // 正文、标签和路径辅助向量均收束后，再清理旧 FTS-only 索引。
+    for (const rec of activeFileRecords) {
+      const oldIds = rec.previousRelation?.ftsIds ?? [];
+      const oldLocators = rec.previousRelation?.ftsLocators ?? [];
+      if (oldIds.length === 0) continue;
+      try {
+        const deleted = await ftsDeleteByIds({ scope, ids: oldIds });
+        if (deleted.failed > 0) {
+          const remainingIds = deleted.failedIds.length > 0 ? deleted.failedIds : oldIds;
+          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, remainingIds);
+          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators.filter((locator) => remainingIds.includes(locator.ftsId)));
+          fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败 ${deleted.failed} 条` });
+        } else {
+          fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
+          fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, []);
+        }
+      } catch (err) {
+        fullTextIdsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldIds);
+        fullTextLocatorsByKey.set(`${rec.groupPath}\u0000${rec.relation}`, oldLocators);
+        fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败：${(err as Error).message}` });
+      }
+    }
   }
 
   // 仅清理受影响 relation 的旧内容/标签/路径向量；FTS-only 覆盖只在新 FTS 完整后
@@ -1371,6 +1500,20 @@ function restoreLocalKb(
   } else {
     removeFromLocalKb(scope, groupPath, relationText);
   }
+}
+
+function makeVectorizationStopError(
+  stopReason: VectorizationStopReason,
+  stats: { scope: string; phase: 'embedding' | 'persist'; total: number; succeeded: number; failed: number; notProcessed: number; partialCommitted: number },
+): Error & { code: string; stopReason: VectorizationStopReason; stats: typeof stats } {
+  const error = new Error(
+    `scope "${stats.scope}" ${stats.phase} 阶段因系统性向量故障停止（${stopReason.kind}/${stopReason.code}）：${stopReason.reason}；`
+    + `成功 ${stats.succeeded}，失败 ${stats.failed}，未处理 ${stats.notProcessed}，补偿未完成 ${stats.partialCommitted}`
+  ) as Error & { code: string; stopReason: VectorizationStopReason; stats: typeof stats };
+  error.code = 'VECTORIZATION_STOPPED';
+  error.stopReason = stopReason;
+  error.stats = stats;
+  return error;
 }
 
 async function deleteVectorIds(

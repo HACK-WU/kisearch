@@ -21,6 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { listAllScopes, getKbDir, getRelationsCachePath, validateScope } from './lib/scope.js';
 import { loadConfig, removeScopeFromConfigFile } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
   vectorListScopes,
@@ -203,7 +204,9 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
 
 export async function executeScopeDelete(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<ScopeDeleteResult>('scope-delete', params);
-  return executeScopeDeleteLocal(params);
+  try {
+    return await withScopeWriteLock(params.scope, 'scope-delete', () => executeScopeDeleteLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── 纯函数：scope clear ───
@@ -250,7 +253,9 @@ async function executeScopeClearLocal(params: { scope: string; tags?: string[]; 
 
 export async function executeScopeClear(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
   if (shouldUseDaemonClient()) return callDaemon<ScopeClearResult>('scope-clear', params);
-  return executeScopeClearLocal(params);
+  try {
+    return await withScopeWriteLock(params.scope, 'scope-clear', () => executeScopeClearLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── 辅助 ───

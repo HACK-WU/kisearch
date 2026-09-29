@@ -34,6 +34,7 @@ import {
 import type { EmbeddingProvider } from '../zvec-engine/embedding/provider.js';
 import { EmbeddingSchedulerRuntime, type EmbeddingSchedulerConfig, type EmbeddingSchedulerMetrics } from '../zvec-engine/embedding/batch-scheduler.js';
 import type { ZvecWriteOptions } from '../zvec-engine/types.js';
+import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
@@ -84,8 +85,11 @@ export interface VectorBulkStoreResult {
   metadataPendingItems?: string[];
   cancelled?: number;
   cancelledItems?: number;
+  notProcessed?: number;
+  notProcessedItems?: string[];
   failedItems?: string[];
   status?: 'succeeded' | 'partial' | 'failed' | 'cancelled';
+  stopReason?: VectorizationStopReason;
 }
 
 export interface VectorBulkStoreOptions {
@@ -1179,6 +1183,7 @@ export async function vectorBulkStore(params: {
     errorById.set(e.id, e.reason);
   }
   const cancelledIds = new Set(result.cancelledItems ?? []);
+  const notProcessedIds = new Set(result.notProcessedItems ?? []);
   const failedIds = new Set(result.failedItems ?? []);
   const metadataPendingIds = new Set(result.metadataPendingItems ?? []);
   const results: BulkStoreItemResult[] = docs.map((d, i) => {
@@ -1186,11 +1191,14 @@ export async function vectorBulkStore(params: {
     if (cancelledIds.has(d.id)) {
       return { index: i, success: false, error: '向量化已取消，条目尚未提交' };
     }
+    if (notProcessedIds.has(d.id)) {
+      return { index: i, success: false, error: result.stopReason?.reason ?? '系统性向量故障，条目尚未尝试' };
+    }
     if (metadataPendingIds.has(d.id)) {
       return { index: i, success: false, error: 'zvec 已写入但元数据尚未完成，请重试元数据回写' };
     }
     if (failedIds.has(d.id)) {
-      return { index: i, success: false, error: '批次持久化失败，后续批次已停止' };
+      return { index: i, success: false, error: err ?? result.stopReason?.reason ?? '批次持久化失败，后续批次已停止' };
     }
     return err
       ? { index: i, success: false, error: err }
@@ -1199,10 +1207,13 @@ export async function vectorBulkStore(params: {
 
   const succeeded = results.filter((item) => item.success).length;
   const cancelled = results.filter((item) => cancelledIds.has(docs[item.index].id)).length;
+  const notProcessed = results.filter((item) => notProcessedIds.has(docs[item.index].id)).length;
   const metadataPending = results.filter((item) => metadataPendingIds.has(docs[item.index].id)).length;
-  const failed = results.length - succeeded - cancelled - metadataPending;
-  const attempted = results.length - cancelled;
-  const status: VectorBulkStoreResult['status'] = cancelled > 0
+  const failed = results.length - succeeded - cancelled - metadataPending - notProcessed;
+  const attempted = results.length - cancelled - notProcessed;
+  const status: VectorBulkStoreResult['status'] = result.stopReason
+    ? 'failed'
+    : cancelled > 0
     ? (succeeded > 0 ? 'partial' : 'cancelled')
     : failed > 0 || metadataPending > 0
       ? (succeeded > 0 ? 'partial' : 'failed')
@@ -1219,8 +1230,11 @@ export async function vectorBulkStore(params: {
     metadataPendingItems: result.metadataPendingItems,
     cancelled,
     cancelledItems: result.cancelled,
+    notProcessed,
+    notProcessedItems: result.notProcessedItems,
     failedItems: result.failedItems,
     status,
+    stopReason: result.stopReason,
   };
 }
 
@@ -1520,7 +1534,7 @@ export async function assertVectorDimensionCompatible(scope: string): Promise<vo
 export async function vectorDeleteScope(
   params: { scope: string; tags?: string[] },
   onProgress?: (deleted: number) => void
-): Promise<{ deleted: number }> {
+): Promise<{ deleted: number; remaining?: number }> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return { deleted: 0 };
   const filter = buildScopeTagFilter([params.scope], params.tags);
@@ -1537,6 +1551,7 @@ export async function vectorDeleteScope(
       if (res.ok === 0) break;
       if (ids.length < LIST_ALL_LIMIT) break;
     }
-    return { deleted: total };
+    const remaining = (await engine.listIds(filter, LIST_ALL_LIMIT)).length;
+    return { deleted: total, remaining };
   });
 }

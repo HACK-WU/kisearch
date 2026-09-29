@@ -14,6 +14,7 @@ import { executeManageCreate, executeManageDeleteEmpty, executeManageDelete } fr
 import { rebuildScopeVectors } from './rebuild-vector.js';
 import { vectorCountScope } from './vector-client.js';
 import { restoreSnapshotLocal } from './restore-snapshot.js';
+import { withScopeWriteLock } from './scope-write-lock.js';
 import { executeBackup, executeBackupList } from './backup.js';
 import { backfillWiki } from './wiki-sync.js';
 import type { OperationRequest } from './operation-coordinator.js';
@@ -66,6 +67,7 @@ const HANDLERS: Record<string, Handler> = {
     if (params?.yes !== true) {
       throw Object.assign(new Error('daemon 还原操作必须显式确认 --yes'), { code: 'CONFIRMATION_REQUIRED' });
     }
+    return withScopeWriteLock(params.scope, 'restore-snapshot', async () => {
     const restored = await restoreSnapshotLocal(params.scope, {
       timestamp: params.timestamp,
       backupDir: params.backupDir,
@@ -80,6 +82,7 @@ const HANDLERS: Record<string, Handler> = {
       { ...(params.options ?? {}), yes: true, abortSignal: params.abortSignal ?? params.options?.abortSignal, onProgress: params.onProgress ?? params.options?.onProgress },
     );
     return { ...restored, rebuildVector: rebuilt };
+    });
   },
   backup: (params) => executeBackup({ scope: params.scope }),
   'backup-list': (params) => executeBackupList(params.scope),

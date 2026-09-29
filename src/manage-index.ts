@@ -15,6 +15,7 @@ import { writeJson, readJson, readGroupIndex } from './lib/store.js';
 import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
 import type { GroupIndex } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
 import { assertNoPendingVectorMigration, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -140,7 +141,9 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
 
 export async function executeManageCreate(params: ManageCreateParams): Promise<ManageCreateResult> {
   if (shouldUseDaemonClient()) return callDaemon<ManageCreateResult>('manage-create', params);
-  return executeManageCreateLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'manage-create', () => executeManageCreateLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 export type ListScopesResult = {
@@ -307,7 +310,9 @@ async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): P
 
 export async function executeManageDeleteEmpty(params: ManageDeleteEmptyParams): Promise<ManageDeleteEmptyResult> {
   if (shouldUseDaemonClient()) return callDaemon<ManageDeleteEmptyResult>('manage-delete-empty', params);
-  return executeManageDeleteEmptyLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'manage-delete-empty', () => executeManageDeleteEmptyLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 export type ManageDeleteResult =
@@ -400,7 +405,9 @@ export async function executeManageDelete(params: {
   force?: boolean;
 }): Promise<ManageDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<ManageDeleteResult>('manage-delete', params);
-  return executeManageDeleteLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'manage-delete', () => executeManageDeleteLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── 级联清理：删除 Group 时同步清理 relations-cache + local-kb + 向量 ───

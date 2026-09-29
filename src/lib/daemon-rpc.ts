@@ -8,6 +8,8 @@ import { getSharedOperationCoordinator, scopesOf, scopeOf, type OperationRequest
 import { dispatchOperation, supportedOperations } from './daemon-dispatch.js';
 import { getVectorizationMetrics } from './vector-client.js';
 import { readKiVersion } from './version-guard.js';
+import { createTaskReporter, type TaskReporter, type TaskState } from './task-registry.js';
+import { refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 
 export interface DaemonRpcOptions {
   onShutdown?: () => void;
@@ -57,6 +59,7 @@ interface DaemonJob {
   finishedAt?: number;
   subscribers: Set<net.Socket>;
   emitProgress?: (progress: { phase: string; done: number; total: number; persisted?: number; metadataPending?: number; failed?: number; cancelled?: number }) => void;
+  taskReporter?: TaskReporter;
 }
 
 const daemonJobs = new Map<string, DaemonJob>();
@@ -346,6 +349,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
   const stream = req.streamProgress === true;
   const jobId = (req.jobId ?? '').trim();
   let job: DaemonJob | undefined;
+  let requestConfig: ReturnType<typeof loadConfig> | undefined;
   if (stream) {
     if (!jobId) {
       send(socket, { id: req.id ?? null, ok: false, error: { code: 'DAEMON_JOB_ID_REQUIRED', message: 'streamProgress=true 必须提供 jobId' } });
@@ -356,6 +360,25 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       return;
     }
     const scope = scopeOf(req.params, req.operation);
+    try {
+      requestConfig = loadConfig();
+      assertDaemonIdentityCurrent(requestConfig);
+    } catch (error) {
+      const e = error as Error & { code?: string };
+      send(socket, { id: req.id ?? null, ok: false, error: { code: e.code ?? 'DAEMON_OPERATION_FAILED', message: e.message } });
+      return;
+    }
+    let taskReporter: TaskReporter;
+    try {
+      taskReporter = createTaskReporter(requestConfig, { id: jobId, source: 'cli', operation: req.operation, scope });
+    } catch {
+      send(socket, {
+        id: req.id ?? null,
+        ok: false,
+        error: { code: 'TASK_REGISTRY_UNAVAILABLE', message: '后台任务状态登记失败，操作未启动。请检查数据目录权限后重试。' },
+      });
+      return;
+    }
     job = {
       id: jobId,
       owner,
@@ -367,6 +390,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       eventSeq: 0,
       createdAt: Date.now(),
       subscribers: new Set([socket]),
+      taskReporter,
     };
     daemonJobs.set(jobId, job);
     const tombstone = pendingCancels.get(jobId);
@@ -376,6 +400,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       job.state = 'cancelled';
       job.finishedAt = Date.now();
       job.result = { cancelled: true, jobId, reason: 'cancel requested before execute registration' };
+      job.taskReporter?.finish('cancelled');
       send(socket, { id: req.id ?? null, ok: true, result: job.result, jobId, eventSeq: ++job.eventSeq });
       return;
     }
@@ -396,6 +421,15 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         inFlight: metrics.inFlightRequests,
         bufferedBytes: metrics.bufferedVectorBytes,
       };
+      job.taskReporter?.progress({
+        phase: progress.phase,
+        done: progress.done,
+        total: progress.total,
+        persisted: progress.persisted,
+        metadataPending: progress.metadataPending,
+        failed: progress.failed,
+        cancelled: progress.cancelled,
+      });
       job.eventSeq++;
       for (const subscriber of job.subscribers) {
         send(subscriber, { id: req.id ?? null, type: 'progress', jobId: job.id, eventSeq: job.eventSeq, progress: job.progress });
@@ -408,7 +442,8 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
   try {
     // 身份漂移必须在**入队之前**拒绝：漂移后 daemon 的路径解析与内存句柄不一致，
     // 排队执行只会把数据写到错误位置。放在 try 内以复用统一的错误响应与失败日志。
-    const requestConfig = loadConfig();
+    requestConfig ??= loadConfig();
+    const executionConfig = requestConfig;
     // 身份检查与快照必须基于同一次读取；否则配置恰好在两次 loadConfig 之间
     // 变化时，可能出现“用旧配置做守卫、用新配置执行”的裂缝。
     assertDaemonIdentityCurrent(requestConfig);
@@ -424,14 +459,24 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
           }
           job.state = 'running';
           job.startedAt = Date.now();
+          job.taskReporter?.update({ state: 'running', startedAt: job.startedAt });
         }
-        return runWithConfigSnapshot(
-          requestConfig,
-          () => dispatchOperation(
-            { operation: req.operation!, params },
-            job ? { jobId: job.id, abortSignal: job.abortController.signal, onProgress: (p: any) => job.emitProgress?.(p) } : {},
-          ),
-        );
+        return runWithConfigSnapshot(executionConfig, async () => {
+          const tracksVectorStatus = ['import', 'rebuild-vector', 'restore-snapshot'].includes(req.operation!);
+          if (tracksVectorStatus) {
+            try { await refreshVectorDimensionSnapshot(executionConfig, scopeOf(params, req.operation)); } catch { /* diagnostics never block the operation */ }
+          }
+          try {
+            return await dispatchOperation(
+              { operation: req.operation!, params },
+              job ? { jobId: job.id, abortSignal: job.abortController.signal, onProgress: (p: any) => job.emitProgress?.(p) } : {},
+            );
+          } finally {
+            if (tracksVectorStatus) {
+              try { await refreshVectorDimensionSnapshot(executionConfig, scopeOf(params, req.operation)); } catch { /* operation outcome remains authoritative */ }
+            }
+          }
+        });
       },
       scopesOf(req.params, req.operation),
     );
@@ -439,8 +484,26 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       job.result = outcome.result;
       const value = outcome.result as { cancelled?: boolean; ok?: boolean; errors?: Array<{ type?: string }> } | undefined;
       const cancelled = job.cancelRequested || value?.cancelled === true || value?.errors?.some((e) => e.type === 'cancelled') === true;
-      job.state = classifyJobState(outcome.result, cancelled, value?.ok === false);
+      const nestedFailed = (outcome.result as { rebuildVector?: { ok?: boolean } } | undefined)?.rebuildVector?.ok === false;
+      job.state = classifyJobState(outcome.result, cancelled, value?.ok === false || nestedFailed);
       job.finishedAt = Date.now();
+      const taskState: TaskState = job.state === 'succeeded' || job.state === 'partial' || job.state === 'failed' || job.state === 'cancelled'
+        ? job.state
+        : 'failed';
+      const resultValue = outcome.result as {
+        error?: string;
+        errors?: Array<{ error?: string }>;
+        stats?: { succeeded?: number; partialCommitted?: number };
+        rebuildVector?: { error?: string; errors?: Array<{ error?: string }>; stats?: { succeeded?: number; partialCommitted?: number } };
+      } | undefined;
+      job.taskReporter?.finish(taskState, {
+        error: job.error?.message ?? resultValue?.error ?? resultValue?.errors?.[0]?.error
+          ?? resultValue?.rebuildVector?.error ?? resultValue?.rebuildVector?.errors?.[0]?.error,
+        partialCommitted: (resultValue as any)?.partialCommitted ?? (resultValue?.rebuildVector as any)?.partialCommitted
+          ?? (taskState === 'succeeded' || taskState === 'partial'
+            ? resultValue?.stats?.succeeded ?? resultValue?.rebuildVector?.stats?.succeeded : undefined),
+        recoveryHint: taskState === 'failed' ? '检查命令输出中的失败阶段与恢复建议，修复问题后重试。' : undefined,
+      });
       job.eventSeq++;
       send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue, jobId: job.id, eventSeq: job.eventSeq, final: true });
     } else {
@@ -456,6 +519,11 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         ? 'cancelled'
         : 'failed';
       job.finishedAt = Date.now();
+      job.taskReporter?.finish(job.state, {
+        error: error.message,
+        recoveryHint: job.state === 'failed' ? recoveryHint(error.code) : undefined,
+        partialCommitted: (error as Error & { stats?: { partialCommitted?: number } }).stats?.partialCommitted,
+      });
     }
     send(socket, {
       id: req.id ?? null,

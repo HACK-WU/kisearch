@@ -597,6 +597,7 @@ describe('D. rebuildScopeVectors 主流程（mock 向量层）', () => {
       tag: 0,
       succeeded: 6,
       failed: 0,
+      notProcessed: 0,
       updatedMemoryId: 2,
       taggedRelations: 0,
       mergedTags: [],

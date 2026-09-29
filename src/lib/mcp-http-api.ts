@@ -43,10 +43,13 @@ import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResul
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
-import { getVectorDimensionStatus, vectorCollectionDimension, vectorCountScope } from './vector-client.js';
+import { vectorCollectionDimension, vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
+import { createTaskReporter, getTaskRecord, listTaskRecords, type TaskReporter } from './task-registry.js';
+import { withScopeWriteLock } from './scope-write-lock.js';
+import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -175,13 +178,14 @@ interface Job {
   finishedAt?: number;
   cancelRequested: boolean;
   abortController: AbortController;
+  taskReporter: TaskReporter;
 }
 
 const jobs = new Map<string, Job>();
 const MAX_JOBS = 50;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1h
 
-function createJob(scope: string, operation: Job['operation']): Job {
+function createJob(scope: string, operation: Job['operation'], config: KiConfig): Job {
   // 清理过期 job，防止 Map 无界增长
   const now = Date.now();
   for (const [id, j] of jobs) {
@@ -192,14 +196,24 @@ function createJob(scope: string, operation: Job['operation']): Job {
     const oldest = [...jobs.values()].filter((j) => j.finishedAt).sort((a, b) => a.finishedAt! - b.finishedAt!)[0];
     if (oldest) jobs.delete(oldest.id);
   }
+  const id = crypto.randomUUID();
+  let taskReporter: TaskReporter;
+  try {
+    taskReporter = createTaskReporter(config, { id, source: 'web', operation, scope });
+  } catch {
+    throw Object.assign(new Error('后台任务状态登记失败，任务未启动。请检查数据目录权限后重试。'), {
+      code: 'TASK_REGISTRY_UNAVAILABLE', status: 503,
+    });
+  }
   const job: Job = {
-    id: crypto.randomUUID(),
+    id,
     scope,
     operation,
     state: 'running',
     startedAt: now,
     cancelRequested: false,
     abortController: new AbortController(),
+    taskReporter,
   };
   jobs.set(job.id, job);
   return job;
@@ -396,7 +410,7 @@ export async function handleApiRequest(
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
   if (authScopes !== null && req.method === 'GET'
-    && (p === '/tags' || p === '/doc/list' || p === '/doc/edit' || p === '/asset' || p === '/import/config')) {
+    && (p === '/tags' || p === '/doc/list' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/vector/status')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -406,6 +420,44 @@ export async function handleApiRequest(
   }
 
   try {
+    if (p === '/tasks' && req.method === 'GET') {
+      const requestedLimit = Number(url.searchParams.get('limit') ?? 50);
+      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(200, Math.floor(requestedLimit))) : 50;
+      const visible = listTaskRecords(requestConfig)
+        .filter((task) => authScopes === null || scopeAllowed(authScopes, task.scope));
+      sendJson(res, 200, { ok: true, tasks: visible.slice(0, limit), total: visible.length, retainedForMs: 60 * 60 * 1000 });
+      return;
+    }
+    if (p.startsWith('/tasks/') && req.method === 'GET') {
+      const id = decodeURIComponent(p.slice('/tasks/'.length));
+      const task = getTaskRecord(requestConfig, id);
+      if (!task || (authScopes !== null && !scopeAllowed(authScopes, task.scope))) {
+        sendJson(res, 404, { ok: false, code: 'TASK_NOT_FOUND', error: '任务不存在或已过期' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, task });
+      return;
+    }
+    if (p === '/vector/status' && req.method === 'GET') {
+      const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      sendJson(res, 200, { ok: true, status: readVectorDimensionSnapshot(requestConfig, scope) });
+      return;
+    }
+    if (p === '/vector/status/refresh' && req.method === 'POST') {
+      const body = await readJsonBody(req) as { scope?: string } | undefined;
+      const scope = resolveScope(requestConfig, body?.scope ?? '');
+      if (authScopes !== null && !scopeAllowed(authScopes, scope)) {
+        rejectScopeViolation(res, scope, p);
+        return;
+      }
+      const result = await getSharedOperationCoordinator().submit(
+        { operation: 'vector-status-refresh', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, () => refreshVectorDimensionSnapshot(requestConfig, scope)),
+        [scope],
+      );
+      sendJson(res, 200, { ok: true, status: result.result });
+      return;
+    }
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
     if (p === '/search-config' && req.method === 'GET') {
       return void handleSearchConfig(res, requestConfig);
@@ -463,7 +515,7 @@ export async function handleApiRequest(
       }
       await getSharedOperationCoordinator().submit(
         { operation: 'doc-edit-write', params: { scope } },
-        () => runWithConfigSnapshot(requestConfig, async () => {
+        () => runWithConfigSnapshot(requestConfig, async () => withScopeWriteLock(scope, 'doc-edit-write', async () => {
           try {
             if (typeof body?.group !== 'string' || typeof body.relation !== 'string'
               || typeof body.content !== 'string' || typeof body.expectedRevision !== 'string') {
@@ -483,7 +535,7 @@ export async function handleApiRequest(
             docListCache.delete(scope);
             sendDocEditError(res, error);
           }
-        }),
+        })),
         [scope],
       );
       return;
@@ -504,7 +556,7 @@ export async function handleApiRequest(
       const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
       await getSharedOperationCoordinator().submit(
         { operation: 'import-config', params: { scope } },
-        () => runWithConfigSnapshot(requestConfig, () => handleImportConfig(res, url)),
+        () => runWithConfigSnapshot(requestConfig, () => handleImportConfig(res, url, requestConfig)),
         [scope],
       );
       return;
@@ -537,13 +589,18 @@ function sendDocEditError(res: http.ServerResponse, error: unknown): void {
 
 // ─── GET /api/import/config ──────────────────────────
 
-async function handleImportConfig(res: http.ServerResponse, url: URL): Promise<void> {
-  const requestConfig = loadConfig();
+async function handleImportConfig(res: http.ServerResponse, url: URL, requestConfig: KiConfig): Promise<void> {
   const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
   const importConfig = getScopeImportConfig(requestConfig, scope);
   let vectorDimension: { configured: number; persisted?: number; compatible: boolean | null; error?: string };
   try {
-    vectorDimension = await getVectorDimensionStatus(scope);
+    const snapshot = await refreshVectorDimensionSnapshot(requestConfig, scope);
+    vectorDimension = {
+      configured: snapshot.configured,
+      ...(snapshot.persisted !== undefined ? { persisted: snapshot.persisted } : {}),
+      compatible: snapshot.state === 'unknown' ? null : snapshot.state === 'compatible',
+      ...(snapshot.error ? { error: snapshot.error } : {}),
+    };
   } catch (error) {
     vectorDimension = { configured: requestConfig.embedding.dimension, compatible: null, error: (error as Error).message };
   }
@@ -958,9 +1015,13 @@ async function processImportUpload(
       sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入', uploadId });
       return;
     }
-    const job = createJob(scope, 'import');
+    const job = createJob(scope, 'import', requestConfig);
     session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
-    try { writeUploadSession(dir, session); } catch (error) { jobs.delete(job.id); throw error; }
+    try { writeUploadSession(dir, session); } catch (error) {
+      job.taskReporter.finish('failed', { error: '上传任务状态登记失败' });
+      jobs.delete(job.id);
+      throw error;
+    }
     void runImportJob(job, {
       scope,
       sourceDir: dir,
@@ -1090,9 +1151,13 @@ async function handleImportRun(
     return;
   }
 
-  const job = createJob(scope, 'import');
+  const job = createJob(scope, 'import', requestConfig);
   session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
-  try { writeUploadSession(sourceDir, session); } catch (error) { jobs.delete(job.id); throw error; }
+  try { writeUploadSession(sourceDir, session); } catch (error) {
+    job.taskReporter.finish('failed', { error: '上传任务状态登记失败' });
+    jobs.delete(job.id);
+    throw error;
+  }
   void runImportJob(job, {
     scope,
     sourceDir,
@@ -1126,7 +1191,11 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
   try {
     const result = await getSharedOperationCoordinator().submit(
       { operation: 'import', params: { ...args, jobId: job.id } },
-      () => runWithConfigSnapshot(requestConfig, () => handleDirectImport({
+      () => runWithConfigSnapshot(requestConfig, async () => {
+        job.taskReporter.update({ state: 'running', startedAt: Date.now() });
+        try { await refreshVectorDimensionSnapshot(requestConfig, args.scope); } catch { /* 诊断失败不阻断导入 */ }
+        try {
+          return await handleDirectImport({
         scope: args.scope,
         sourceDir: args.sourceDir,
         group: args.group,
@@ -1139,17 +1208,42 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };
+          job.taskReporter.progress({
+            phase: progress.phase,
+            done: progress.done,
+            total: progress.total,
+            persisted: progress.persisted,
+            metadataPending: progress.metadataPending,
+            failed: progress.failed,
+            cancelled: progress.cancelled,
+          });
         },
         abortSignal: job.abortController.signal,
-      })),
+          });
+        } finally {
+          try { await refreshVectorDimensionSnapshot(requestConfig, args.scope); } catch { /* keep the operation result authoritative */ }
+        }
+      }),
       args.scope,
     ).then((outcome) => outcome.result as ImportResult);
     job.state = 'done';
     job.result = result;
     job.phase = 'persist';
+    job.taskReporter.finish(result.stats.errors > 0 ? 'partial' : 'succeeded', {
+      error: result.stats.errors > 0 ? result.errors[0]?.error ?? `${result.stats.errors} 项导入处理有错误` : undefined,
+      partialCommitted: result.stats.vectorized,
+    });
   } catch (err) {
     job.state = (err as Error & { code?: string }).code === 'IMPORT_CANCELLED' ? 'cancelled' : 'failed';
     job.error = (err as Error).message;
+    const details = err as Error & { code?: string; stats?: { partialCommitted?: number } };
+    job.taskReporter.finish(job.state === 'cancelled' ? 'cancelled' : 'failed', {
+      error: job.error,
+      recoveryHint: details.code === 'VECTORIZATION_STOPPED'
+        ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。'
+        : undefined,
+      partialCommitted: details.stats?.partialCommitted,
+    });
   } finally {
     job.finishedAt = Date.now();
     try {
@@ -1261,7 +1355,7 @@ async function handleRestoreRun(
   const scope = resolveScope(requestConfig, body.scope);
   const rebuildOnly = body.rebuildOnly === true;
   const rebuildVector = rebuildOnly || body.rebuildVector === true;
-  const job = createJob(scope, rebuildOnly ? 'rebuild-vector' : 'restore-snapshot');
+  const job = createJob(scope, rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', requestConfig);
   const args: RestoreJobArgs = {
     scope,
     timestamp: body.timestamp,
@@ -1286,7 +1380,11 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
   try {
     const result = await getSharedOperationCoordinator().submit(
       { operation: args.rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', params: { ...args, jobId: job.id } },
-      async () => runWithConfigSnapshot(requestConfig, async () => {
+      async () => runWithConfigSnapshot(requestConfig, async () => withScopeWriteLock(args.scope, 'restore-snapshot', async () => {
+        job.taskReporter.update({ state: 'running', startedAt: Date.now() });
+        if (args.rebuildVector) {
+          try { await refreshVectorDimensionSnapshot(requestConfig, args.scope); } catch { /* diagnostic is advisory */ }
+        }
         // 复合操作必须在覆盖 KB 前拒绝未确认的跨维度迁移。
         if (!args.rebuildOnly && args.rebuildVector && !args.yes) {
           const persisted = await vectorCollectionDimension(args.scope);
@@ -1306,6 +1404,7 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
             onProgress: (progress) => {
               job.phase = progress.phase;
               job.progress = { done: progress.done, total: progress.total };
+              job.taskReporter.progress({ phase: progress.phase, done: progress.done, total: progress.total });
             },
           });
           if (job.abortController.signal.aborted) {
@@ -1324,11 +1423,12 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
             onProgress: (progress) => {
               job.phase = progress.phase;
               job.progress = { done: progress.done, total: progress.total };
+              job.taskReporter.progress({ phase: progress.phase, done: progress.done, total: progress.total });
             },
           },
         );
         return restored ? { restore: restored, rebuildVector: rebuilt } : rebuilt;
-      }),
+      })),
       args.scope,
     );
     const value = result.result as any;
@@ -1344,11 +1444,29 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
         ?? value?.rebuildVector?.errors?.[0]?.error
         ?? 'restore/rebuild 失败';
     }
+    const partialCommitted = value?.partialCommitted ?? value?.rebuildVector?.partialCommitted
+      ?? (!failed ? value?.stats?.succeeded ?? value?.rebuildVector?.stats?.succeeded : undefined);
+    const hasPartial = !failed && (
+      (value?.errors?.length ?? 0) > 0 || (value?.rebuildVector?.errors?.length ?? 0) > 0
+    );
+    job.taskReporter.finish(cancelled ? 'cancelled' : failed ? 'failed' : hasPartial ? 'partial' : 'succeeded', {
+      error: failed ? job.error : hasPartial ? job.error ?? '部分条目处理失败' : undefined,
+      recoveryHint: failed ? '检查任务详情中的失败阶段与恢复建议，修复问题后重新执行。' : undefined,
+      partialCommitted,
+    });
   } catch (err) {
     const code = (err as Error & { code?: string }).code;
     job.state = code === 'RESTORE_CANCELLED' || code === 'REBUILD_CANCELLED' ? 'cancelled' : 'failed';
     job.error = (err as Error).message;
+    job.taskReporter.finish(job.state === 'cancelled' ? 'cancelled' : 'failed', {
+      error: job.error,
+      recoveryHint: code === 'VECTORIZATION_STOPPED' ? '检查 embedding 配置、鉴权与服务状态；确认后重试。' : undefined,
+      partialCommitted: (err as Error & { stats?: { partialCommitted?: number } }).stats?.partialCommitted,
+    });
   } finally {
+    if (args.rebuildVector) {
+      try { await refreshVectorDimensionSnapshot(requestConfig, args.scope); } catch { /* task result remains authoritative */ }
+    }
     job.finishedAt = Date.now();
   }
 }

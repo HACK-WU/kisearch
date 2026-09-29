@@ -24,11 +24,13 @@ import { loadConfig, resolveScope } from './lib/config.js';
 import { vectorBulkStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { BulkStoreItemResult } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 
 // ─── 纯函数（供 MCP / CLI 共享） ───
 
 export type BulkStoreResult =
   | { ok: true; scope: string; total: number; succeeded: number; failed: number; results: BulkStoreItemResult[] }
+  | { ok: false; error: string; scope: string; total: number; attempted?: number; succeeded: number; failed: number; notProcessed?: number; cancelled?: number; results: BulkStoreItemResult[]; stopReason: NonNullable<Awaited<ReturnType<typeof vectorBulkStore>>['stopReason']> }
   | { ok: false; error: string };
 
 async function executeBulkStoreLocal(params: {
@@ -73,6 +75,15 @@ async function executeBulkStoreLocal(params: {
     }
 
     const result = await vectorBulkStore({ scope, entries });
+    if (result.stopReason) {
+      return {
+        ok: false,
+        error: `批量向量化已停止：${result.stopReason.reason}`,
+        scope,
+        ...result,
+        stopReason: result.stopReason,
+      };
+    }
     return { ok: true, scope, ...result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -88,7 +99,12 @@ export async function executeBulkStore(params: {
   const normalized = { ...params, inputFile: path.resolve(params.inputFile) };
   // timeoutMs=0：批量写入逐条向量化，条目多时远超固定客户端超时。
   if (shouldUseDaemonClient()) return callDaemon<BulkStoreResult>('bulk-store', normalized, 0);
-  return executeBulkStoreLocal(normalized);
+  try {
+    const scope = resolveScope(loadConfig(), normalized.scope);
+    return await withScopeWriteLock(scope, 'bulk-store', () => executeBulkStoreLocal(normalized));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 // ─── CLI ───

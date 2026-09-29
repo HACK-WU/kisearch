@@ -28,6 +28,7 @@ import { resolveGroupPath } from './lib/group-resolve.js';
 import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { getSource } from './lib/scope.js';
 import { ftsDeleteByIds } from './lib/fts-client.js';
 import { activeDrafts } from './lib/relation-edit-draft.js';
@@ -199,7 +200,9 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
 
 export async function executeDeleteRelation(params: DeleteRelationParams): Promise<DeleteRelationOutcome> {
   if (shouldUseDaemonClient()) return callDaemon<DeleteRelationOutcome>('delete-relation', params);
-  return executeDeleteRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'delete-relation', () => executeDeleteRelationLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── 目录级删除（REQ-11） ───
@@ -364,7 +367,9 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
 
 export async function executeDeleteGroup(params: DeleteGroupParams): Promise<DeleteGroupOutcome> {
   if (shouldUseDaemonClient()) return callDaemon<DeleteGroupOutcome>('delete-group', params);
-  return executeDeleteGroupLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'delete-group', () => executeDeleteGroupLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 /**
@@ -656,7 +661,9 @@ async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDe
 
 export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<BatchDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<BatchDeleteResult>('batch-delete', { scope, items });
-  return executeBatchDeleteLocal(scope, items);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), scope), 'batch-delete', () => executeBatchDeleteLocal(scope, items));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── CLI ───

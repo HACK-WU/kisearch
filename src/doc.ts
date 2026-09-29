@@ -27,6 +27,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 const PREVIEW_LEN = 200;
@@ -157,7 +158,9 @@ async function executeDocDeleteLocal(params: {
 
 export async function executeDocDelete(params: { scope: string; ids: string[]; yes: boolean }): Promise<DocDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<DocDeleteResult>('doc-delete', params);
-  return executeDocDeleteLocal(params);
+  try {
+    return await withScopeWriteLock(params.scope, 'doc-delete', () => executeDocDeleteLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── CLI ───

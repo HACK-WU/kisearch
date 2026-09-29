@@ -689,4 +689,5 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
     }
   });
+
 });

@@ -365,6 +365,43 @@ describe('CLI 纯函数 · executeBulkStore', () => {
     assert.equal(mockBulkCalls[0].entries.length, 2);
   });
 
+  it('系统性向量停止返回失败和可恢复的逐项统计', async () => {
+    mockBulkResult = {
+      total: 4,
+      attempted: 2,
+      succeeded: 1,
+      failed: 1,
+      notProcessed: 2,
+      results: [
+        { index: 0, memoryId: 'id1', success: true },
+        { index: 1, error: 'upstream unavailable', success: false },
+        { index: 2, error: 'not attempted', success: false },
+        { index: 3, error: 'not attempted', success: false },
+      ],
+      stopReason: {
+        kind: 'provider-unavailable',
+        code: 'HTTP_503',
+        phase: 'embedding',
+        reason: 'embedding service unavailable',
+      },
+    };
+    fs.writeFileSync(tmpInput, JSON.stringify([
+      { text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'd' },
+    ]), 'utf-8');
+
+    const r = await bulkStoreModule.executeBulkStore({ scope: 'test', inputFile: tmpInput });
+    assert.equal(r.ok, false);
+    if (!r.ok && 'stopReason' in r) {
+      assert.equal(r.stopReason.code, 'HTTP_503');
+      assert.equal(r.total, 4);
+      assert.equal(r.succeeded, 1);
+      assert.equal(r.notProcessed, 2);
+    } else {
+      assert.fail('系统性停止必须以失败和统计返回');
+    }
+    mockBulkResult = { total: 1, succeeded: 1, failed: 0, results: [{ index: 0, memoryId: 'mock_bulk_id', success: true }] };
+  });
+
   it('文件不存在返回 ok=false', async () => {
     const r = await bulkStoreModule.executeBulkStore({
       scope: 'test',

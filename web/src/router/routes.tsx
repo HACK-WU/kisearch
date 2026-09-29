@@ -4,6 +4,7 @@ import { DashboardPage } from '@/pages/DashboardPage';
 import { BrowsePage } from '@/pages/BrowsePage';
 import { SearchPage } from '@/pages/SearchPage';
 import { WritePage } from '@/pages/WritePage';
+import { TasksPage } from '@/pages/TasksPage';
 
 export function AppRoutes(): JSX.Element {
   return (
@@ -14,6 +15,7 @@ export function AppRoutes(): JSX.Element {
         <Route path="search" element={<SearchPage />} />
         <Route path="import" element={null} />
         <Route path="write" element={<WritePage />} />
+        <Route path="tasks" element={<TasksPage />} />
       </Route>
     </Routes>
   );
