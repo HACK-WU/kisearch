@@ -324,7 +324,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   ki restore <scope> --list             列出可用备份（显式 flag，与 backup --list 一致）
   ki restore <scope>                    列出可用备份（无参兼容）
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
-  ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
+  ki restore <scope> --rebuild-vector [--yes]  从 KB 重建 scope 向量；跨维度迁移需 --yes
 
 选项：
   --list              列出可用备份（显式）
@@ -334,7 +334,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   --tags <t1,t2>      重建打标：为重建范围内文档附加自定义标签（与已有标签合并去重，只增不减；需与 --rebuild-vector 配合）
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
-  --yes               跳过确认直接执行（破坏性）
+  --yes               确认快照还原或跨维度全量重建（破坏性；旧集合保留备份）
   -h, --help          显示帮助`;
 
 // -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
@@ -406,7 +406,7 @@ const rebuildTagsRaw = extractValuedFlag('--tags');
 // NEG：记录用户是否显式传入了 --group/--tags（值缺失/空/全保留标签时不得静默降级为全量重建）
 const groupFlagProvided = args.some((a) => a === '--group' || a.startsWith('--group='));
 const tagsFlagProvided = args.some((a) => a === '--tags' || a.startsWith('--tags='));
-const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided };
+const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided, yes: skipYes };
 if (rebuildGroupRaw && rebuildGroupRaw.trim()) rebuildOpts.groupFilter = rebuildGroupRaw.trim();
 if (rebuildTagsRaw && parseContentTags(rebuildTagsRaw).length > 0) rebuildOpts.tags = rebuildTagsRaw;
 
@@ -501,6 +501,8 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
         ? { group: opts.groupFilter, tags: result.stats.mergedTags.length > 0 ? result.stats.mergedTags : undefined }
         : undefined,
     stats: result.stats,
+    migrationBackup: result.migrationBackup,
+    migrationCacheBackup: result.migrationCacheBackup,
     errors: result.errors.length > 0 ? result.errors : undefined,
     hint:
       result.errors.length > 0

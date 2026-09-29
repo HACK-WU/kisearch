@@ -8,7 +8,7 @@ import { MAX_CHUNKS_PER_FILE } from './chunker.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 import { buildRelationContent } from './path-vectorize.js';
-import { generateDocId, vectorBulkStore, vectorDelete, vectorFetchDocs } from './vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, generateDocId, vectorBulkStore, vectorDelete, vectorFetchDocs } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { writeBackToWiki } from './wiki-sync.js';
 import { beginPublishLease, contentRevision, endPublishLease, metadataRevision, loadDraft, saveDraft,
@@ -199,8 +199,7 @@ export async function discardUnpublishedIndex(draft: RelationEditDraft): Promise
   const fts = (draft.newFtsIds ?? []).filter((id) => !previous.has(id) && !active.has(id));
   if (dense.length > 0) {
     const result = await vectorDelete({ scope: draft.scope, ids: dense });
-    const failed = result.errors.filter((item) => item.code !== 'NOT_FOUND');
-    if (failed.length) throw new Error(`草稿向量清理失败：${failed.map((item) => item.id).join(',')}`);
+    if (result.failedIds.length) throw new Error(`草稿向量清理失败：${result.failedIds.join(',')}`);
   }
   if (fts.length > 0) {
     const result = await ftsDeleteByIds({ scope: draft.scope, ids: fts });
@@ -310,7 +309,7 @@ async function cleanupOldIds(draft: RelationEditDraft): Promise<void> {
   const errors: string[] = [];
   if (oldDense.length > 0) {
     const deleted = await vectorDelete({ scope: draft.scope, ids: oldDense });
-    errors.push(...deleted.errors.filter((item) => item.code !== 'NOT_FOUND').map((item) => `${item.id}: ${item.reason}`));
+    errors.push(...deleted.errors.map((item) => `${item.id}: ${item.reason}`));
   }
   if (oldFts.length > 0) {
     const deleted = await ftsDeleteByIds({ scope: draft.scope, ids: oldFts });
@@ -320,6 +319,7 @@ async function cleanupOldIds(draft: RelationEditDraft): Promise<void> {
 }
 
 async function runFinish(editId: string, scope: string): Promise<void> {
+  assertNoPendingVectorMigration(scope);
   const draft = loadDraft(scope, editId);
   draft.status = 'running';
   saveDraft(draft);
@@ -359,6 +359,7 @@ async function runFinish(editId: string, scope: string): Promise<void> {
         nonRetryable('Relation 标签、来源或索引模式已变化，拒绝覆盖；请重新创建草稿');
       }
       const plan = await buildIndexPlan(draft, live.relation);
+      if (plan.mode === 'dense') await assertVectorDimensionCompatible(scope);
       // docId 按正文、scope、tag 生成，可能已被 ki_store 等非 Relation 写入口占用。
       // 仅首次提交前记录既存 ID；重试时重新扫描会把本草稿的部分写入误认成外部数据。
       if (plan.mode === 'dense' && draft.preexistingDenseIds === undefined) {

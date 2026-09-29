@@ -49,7 +49,7 @@ import {
   bulkStorePaths,
   type PathVectorizeEntry,
 } from './path-vectorize.js';
-import { generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { closeFtsEngine } from './fts-client.js';
 import {
@@ -450,6 +450,9 @@ export async function handleDirectImport(
     });
   };
   checkCancelled();
+  assertNoPendingVectorMigration(scope);
+  // 上传后的本地 KB/缓存修改前一次性拒绝维度冲突，避免每个文件重复失败。
+  if (vector) await assertVectorDimensionCompatible(scope);
 
   // 单文件导入支持：sourceDir 可为单个 .md 文件（缺省 group 时用 scope name）
   const sourceIsFile = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isFile();
@@ -1389,10 +1392,11 @@ async function deleteVectorIds(
     logWarn(message);
     return uniqueIds;
   }
-  const failedErrors = result.errors.filter((item) => item.code !== 'NOT_FOUND');
-  const failedIds = failedErrors.map((item) => item.id);
-  if (failedErrors.length > 0) {
-    const message = `${label}失败：${failedErrors.map((item) => `${item.id}: ${item.reason}`).join('; ')}`;
+  // vectorDelete 已把 NOT_FOUND 归一化为幂等成功，这里直接用 failedIds
+  const failedErrors = result.errors;
+  const failedIds = result.failedIds;
+  if (failedIds.length > 0) {
+    const message = `${label}失败：${failedErrors.map((item) => `${item.id}: ${item.reason}`).join('; ') || `${failedIds.length} 条未确认删除`}`;
     errors?.push({ path: '<vector-cleanup>', error: message });
     if (strict) throw new Error(message);
     logWarn(message);

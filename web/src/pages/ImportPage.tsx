@@ -392,6 +392,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
   useEffect(() => {
     let cancelled = false;
+    setImportConfig(null);
     getImportConfig(scope).then((config) => {
       if (!cancelled) setImportConfig(config);
     }).catch(() => {
@@ -926,6 +927,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setError(scopeErr);
       return;
     }
+    const checkedConfig = vector && importConfig?.scope !== scope
+      ? await getImportConfig(scope).catch(() => null)
+      : importConfig;
+    if (vector) {
+      const dimension = checkedConfig?.vectorDimension;
+      if (!dimension) {
+        setError('无法确认当前向量集合维度，请刷新页面后重试；也可关闭向量化，仅导入全文索引。');
+        return;
+      }
+      if (dimension.compatible !== true) {
+        setError(dimension.compatible === false
+          ? `当前 embedding 为 ${dimension.configured} 维，scope "${scope}" 的旧向量集合为 ${dimension.persisted} 维。请先执行 ki restore ${scope} --rebuild-vector --yes，完成后刷新页面再导入。`
+          : `暂无法读取 scope "${scope}" 的向量集合维度：${dimension.error ?? '未知原因'}。请稍后重试。`);
+        return;
+      }
+    }
     if (files.length === 0) {
       setError('请先选择文件或目录');
       return;
@@ -951,7 +968,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     // 新任务接管 UI：作废仍在途的恢复流程，防止旧任务的迟到写入覆盖本次任务状态。
     taskGenRef.current += 1;
     try { localStorage.removeItem(LAST_IMPORT_JOB_KEY); } catch { /* ignore */ }
-    const batches = toUploadBatches(files, importPolicy.maxRequestBody);
+    const batches = toUploadBatches(files, (checkedConfig ?? importPolicy).maxRequestBody);
     const plan: UploadPlan = {
       scope,
       uploadId: crypto.randomUUID(),
@@ -1285,6 +1302,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           </div>
 
           {/* 向量化开关 */}
+          {vector && importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
+            <div className="ki-form-error" role="alert" style={{ marginTop: 12 }}>
+              当前 embedding 为 {importConfig.vectorDimension.configured} 维，旧向量集合为 {importConfig.vectorDimension.persisted} 维。
+              请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>；完成后刷新页面再导入。全文检索仍可使用。
+            </div>
+          )}
           <div className="ki-vec-switch" style={{ marginTop: 12 }}>
             <div className="ki-vec-switch__label">
               <span className="ki-vec-switch__title">向量化</span>

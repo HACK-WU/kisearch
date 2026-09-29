@@ -134,6 +134,7 @@ export interface ImportConfigResponse {
   assetExtensions: string[];
   maxAssetSize: number;
   maxRequestBody: number;
+  vectorDimension?: { configured: number; persisted?: number; compatible: boolean | null; error?: string };
   error?: string;
 }
 

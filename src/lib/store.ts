@@ -13,6 +13,7 @@ import { walWrite } from './wal.js';
 import { getKbDir, getGroupIndexPath, getRelationsCachePath, validateScope, migrateGroupIndex } from './scope.js';
 import { loadConfig, getScopeMode } from './config.js';
 import { CURRENT_DATA_VERSION, TEMPLATE_DIR } from './constants.js';
+import { assertNoPendingVectorMigration } from './vector-client.js';
 
 // ─── JSON 读写 ───
 
@@ -49,10 +50,39 @@ export function readJson<T = Record<string, unknown>>(filePath: string): T | nul
 }
 
 /**
+ * 反查 KB 文件所属 scope。
+ *
+ * 不能只遍历 `config.scopes`：非 strict 模式下未注册的 scope 会隐式落在
+ * `dataDir/<scope>`，只按注册表匹配会漏掉这批目录的写入护栏。
+ * 因此按「KB 根目录 + 一级子目录名」推导，覆盖注册与未注册两类 scope。
+ */
+function scopeOfKbPath(filePath: string): string | null {
+  const absolutePath = path.resolve(filePath);
+  const config = loadConfig();
+  const roots = new Set<string>([path.resolve(config.dataDir)]);
+  for (const scopeConfig of Object.values(config.scopes)) {
+    // kbDir 覆盖时 scope 目录是 `<kbDir>/kb/<scope>`，根目录取 `<kbDir>/kb`
+    if (scopeConfig?.kbDir) roots.add(path.resolve(path.join(scopeConfig.kbDir, 'kb')));
+  }
+  for (const root of roots) {
+    if (absolutePath === root || !absolutePath.startsWith(`${root}${path.sep}`)) continue;
+    const relative = path.relative(root, absolutePath);
+    const first = relative.split(path.sep)[0];
+    if (!first || !/^[a-zA-Z0-9_-]+$/.test(first)) return null;
+    return first;
+  }
+  return null;
+}
+
+/**
  * WAL 写入 JSON 文件
  * 自动添加 version 字段和 updatedAt 时间戳
  */
 export function writeJson(filePath: string, data: Record<string, unknown>): void {
+  // 落盘前复核迁移事务状态：长任务可能在启动后才出现未完成迁移标记（跨进程写入），
+  // 此时继续写 KB/缓存会让 migration-backups 里的备份不再对应当前数据。
+  const scope = scopeOfKbPath(filePath);
+  if (scope) assertNoPendingVectorMigration(scope);
   const enriched = {
     ...data,
     version: data.version ?? CURRENT_DATA_VERSION,
@@ -228,6 +258,7 @@ export function ensureScopeDir(scope: string): void {
  */
 export function initScope(scope: string): void {
   validateScope(scope);
+  assertNoPendingVectorMigration(scope);
   const kbDir = getKbDir(scope);
 
   // 创建目录

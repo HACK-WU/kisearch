@@ -52,7 +52,12 @@ before(async () => {
     denseDeletes.push([...params.ids]);
     const errors = params.ids.filter((id) => failedDenseDeletes.has(id))
       .map((id) => ({ id, code: 'WRITE_ERROR', reason: 'mock cleanup failure' }));
-    return { deleted: params.ids.length - errors.length, errors };
+    // 模拟引擎原始返回，归一化复用生产实现，保持与真实契约一致
+    return vectorClient.normalizeVectorDeleteResult(params.ids, {
+      ok: params.ids.length - errors.length,
+      failed: errors.length,
+      errors,
+    });
   };
   ftsClient = await import('../src/lib/fts-client.js');
   (ftsClient as any).ftsBulkStore = async (entries: Array<{ text: string; tag?: string; scope: string; group: string; relation: string }>) => {

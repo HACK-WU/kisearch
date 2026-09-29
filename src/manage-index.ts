@@ -16,7 +16,7 @@ import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope,
 import type { GroupIndex } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath, getDirectChildren } from './lib/group-resolve.js';
-import { vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { assertNoPendingVectorMigration, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 辅助函数 ───
@@ -86,6 +86,7 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
 
     if (!scope) return { ok: false, error: '此操作需要 scope 参数' };
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
 
     const data = readGroupIndex(scope);
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
@@ -194,6 +195,7 @@ async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): P
 
     if (!scope) return { ok: false, error: '此操作需要 scope 参数' };
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
     if (!name) return { ok: false, error: 'delete 需要 name 参数' };
     if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
 
@@ -327,6 +329,7 @@ async function executeManageDeleteLocal(params: {
     if (!name) return { ok: false, error: 'delete 需要 --name 参数' };
     const resolvedScope = resolveScope(loadConfig(), params.scope);
     validateScope(resolvedScope);
+    assertNoPendingVectorMigration(resolvedScope);
     const data = readGroupIndex(resolvedScope);
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
 

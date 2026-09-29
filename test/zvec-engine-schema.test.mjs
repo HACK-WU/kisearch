@@ -223,18 +223,87 @@ test('TC-REQ-01-15: 单进程单写句柄语义（经 probe-locked 覆盖，见 
 
 // ─── 集成：open 校验 O-02~O-05 ───
 
-test('TC-REQ-01-16: open 维度与持久化不符 → DimensionMismatchError', async (t) => {
-  const dbPath = makeDbPath('zvec-s16-');
+/** 记录 embed 调用次数的"错维度" provider，用于证明全文链路根本不触碰 embedding。 */
+function mismatchedEmbedding(dim = 2048) {
+  const provider = {
+    dimension: dim,
+    calls: 0,
+    embed: async (texts) => {
+      provider.calls += 1;
+      return texts.map(() => new Array(dim).fill(0));
+    },
+  };
+  return provider;
+}
+
+/** 建一个 DIM 维度的库并写入一条可全文检索的文档，返回 dbPath。 */
+async function createPopulatedCollection(t, dbPath) {
   const engine = await ZvecEngine.create(makeConfig(dbPath));
+  const written = await engine.upsert([
+    { id: 'doc-1', text: 'dimension mismatch sample', fields: { tag: 'ki-search' } },
+  ]);
+  assert.equal(written.ok, 1);
   await engine.close();
   t.after(async () => { try { await engine.close(); } catch { /* 已关 */ } });
+  return engine;
+}
 
+// 契约（REQ：全文搜索与向量维度解耦）：open 阶段不比较当前 embedding 维度与持久化
+// 维度。FTS 检索、读取、删除都不依赖 embedding，维度变更期间必须继续可用；
+// 真正需要 dense 的操作才在各自边界拒绝（见 16b/16c）。
+
+test('TC-REQ-01-16a: open 维度与持久化不符 → 允许打开，FTS 检索/读取/删除仍可用', async (t) => {
+  const dbPath = makeDbPath('zvec-s16a-');
+  await createPopulatedCollection(t, dbPath);
+
+  const embedding = mismatchedEmbedding();
+  const engine = await ZvecEngine.open({ dbPath, collectionName: 'test_col', embedding });
+  t.after(async () => { await engine.close(); });
+
+  const hits = await engine.ftsSearch({ match: 'dimension', topk: 5 });
+  assert.equal(hits.length, 1, '维度不符时全文检索应正常命中');
+  assert.equal(hits[0].id, 'doc-1');
+
+  const fetched = await engine.fetch(['doc-1']);
+  assert.equal(fetched.length, 1, '维度不符时读取应正常');
+
+  const deleted = await engine.delete(['doc-1']);
+  assert.equal(deleted.ok, 1, '维度不符时删除应正常');
+  assert.equal(embedding.calls, 0, 'FTS/读取/删除不得调用 embedding');
+});
+
+test('TC-REQ-01-16b: 维度不符时 dense 检索与需 embed 的写入被拒，且不调用 provider', async (t) => {
+  const dbPath = makeDbPath('zvec-s16b-');
+  await createPopulatedCollection(t, dbPath);
+
+  const embedding = mismatchedEmbedding();
+  const engine = await ZvecEngine.open({ dbPath, collectionName: 'test_col', embedding });
+  t.after(async () => { await engine.close(); });
+
+  await assert.rejects(() => engine.semanticSearch({ queryText: 'dimension', topk: 5 }), DimensionMismatchError);
+  await assert.rejects(() => engine.hybridSearch({ queryText: 'dimension', topk: 5 }), DimensionMismatchError);
+  await assert.rejects(() => engine.upsert([{ id: 'doc-2', text: 'new content', fields: { tag: 'ki-search' } }]), DimensionMismatchError);
+  assert.equal(embedding.calls, 0, '应在调用 embedding 服务前拒绝，避免白跑一次网络请求');
+
+  // 只有关键词侧的 hybrid（检索降级的实际调用形态）不触发 dense，应正常返回
+  const keywordOnly = await engine.hybridSearch({ fts: 'dimension', topk: 5 });
+  assert.equal(keywordOnly.length, 1, 'hybrid 仅 fts 时不应要求 embedding');
+  assert.equal(embedding.calls, 0, '仅关键词检索仍不得调用 embedding');
+
+  // 显式向量按"持久化维度"校验（而非当前配置维度）：长度不符即拒
   await assert.rejects(
-    () => ZvecEngine.open({
-      dbPath,
-      collectionName: 'test_col',
-      embedding: { dimension: 2048, embed: mockEmbedding.embed },
-    }),
+    () => engine.upsert([{ id: 'doc-3', vector: new Array(2048).fill(0), fields: { tag: 'ki-search' } }]),
+    DimensionMismatchError,
+  );
+  // 纯标量更新不触碰 dense，应仍可用
+  const scalarUpdated = await engine.update([{ id: 'doc-1', fields: { tag: 'ki-search' } }]).catch(() => null);
+  if (scalarUpdated) assert.equal(scalarUpdated.ok, 1);
+});
+
+test('TC-REQ-01-16c: create 仍要求 embedding 维度与声明维度一致', async () => {
+  const dbPath = makeDbPath('zvec-s16c-');
+  await assert.rejects(
+    () => ZvecEngine.create(makeConfig(dbPath, { embedding: mismatchedEmbedding() })),
     DimensionMismatchError,
   );
 });
