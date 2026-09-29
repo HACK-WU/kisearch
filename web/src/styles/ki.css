@@ -1099,23 +1099,22 @@ a:hover { text-decoration: underline; }
 .ki-editor__head, .ki-editor__foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--ki-color-border); }
 .ki-editor__head small { display: block; color: var(--ki-color-text-subtle); margin-top: 3px; }
 .ki-editor__foot { border-top: 1px solid var(--ki-color-border); border-bottom: 0; }
-.ki-editor__vector { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
-.ki-editor__layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; min-height: 0; flex: 1; }
+.ki-editor__status { white-space: nowrap; }
+.ki-editor__actions { display: flex; align-items: center; gap: 12px; min-width: 0; margin-left: auto; }
+.ki-editor__vector-control { display: flex; flex: 0 1 420px; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
+.ki-editor__vector { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; font-size: 12px; }
+.ki-editor__vector-error { display: flex; align-items: flex-start; gap: 8px; width: min(100%, 420px); box-sizing: border-box; padding: 8px 10px; border: 1px solid #e7a5a5; border-radius: 6px; background: #fff2f2; color: #8a1d1d; font-size: 13px; line-height: 1.4; }
+.ki-editor__vector-error-icon { display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: #a22; color: #fff; font-size: 12px; font-weight: 700; }
+.ki-editor__layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; flex: 1; }
 .ki-editor__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .ki-editor__tabs { display: flex; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--ki-color-border); }
-.ki-editor__tabs button, .ki-editor__results button { border: 0; border-radius: 6px; padding: 7px 10px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
-.ki-editor__tabs button.is-active, .ki-editor__results button.is-active { background: var(--ki-color-hover); font-weight: 600; }
+.ki-editor__tabs button { border: 0; border-radius: 6px; padding: 7px 10px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.ki-editor__tabs button.is-active { background: var(--ki-color-hover); font-weight: 600; }
 .ki-editor__textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 18px; background: transparent; color: inherit; font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .ki-editor__preview { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
-.ki-editor__links { display: flex; flex-direction: column; align-items: stretch; gap: 10px; min-height: 0; overflow: auto; padding: 15px; border-left: 1px solid var(--ki-color-border); }
-.ki-editor__links h3, .ki-editor__links p { margin: 0; }
-.ki-editor__links p { font-size: 12px; color: var(--ki-color-text-subtle); }
-.ki-editor__links label { display: grid; gap: 5px; font-size: 12px; }
-.ki-editor__links input, .ki-editor__links select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--ki-color-border); border-radius: 6px; background: var(--ki-color-surface); color: inherit; }
-.ki-editor__results { display: grid; max-height: 150px; overflow: auto; }
 .ki-editor__notice, .ki-editor__error { padding: 8px 18px; background: color-mix(in srgb, var(--ki-color-primary) 12%, var(--ki-color-surface)); font-size: 13px; }
 .ki-editor__error { color: #a22; background: #fff2f2; }
-@media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__layout { grid-template-columns: 1fr; grid-template-rows: minmax(260px,1fr) minmax(180px,35%); } .ki-editor__links { border-left: 0; border-top: 1px solid var(--ki-color-border); } }
+@media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__foot { flex-wrap: wrap; align-items: flex-start; } .ki-editor__status { flex: 1 1 100%; } .ki-editor__actions { flex: 1 1 100%; } .ki-editor__vector-control { flex: 1 1 0; } }
 /* 复制失败提示条：独立于加载错误，正文保留 */
 .ki-drawer__copy-failed {
   position: sticky;

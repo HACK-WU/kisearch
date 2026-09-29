@@ -258,7 +258,9 @@ export function ModuleDrawer({
   const [copyFailed, setCopyFailed] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
   const [readerLinkSelection, setReaderLinkSelection] = useState<ReaderLinkSelection | null>(null);
+  const [readerLinkComposerOpen, setReaderLinkComposerOpen] = useState(false);
   const [selectionWarning, setSelectionWarning] = useState('');
+  const selectionWarningTimer = useRef<number | undefined>(undefined);
   const editor = useDocumentEditor();
   const [internalFullscreen, setInternalFullscreen] = useState(false);
   const fullscreen = controlledFullscreen ?? internalFullscreen;
@@ -273,6 +275,25 @@ export function ModuleDrawer({
   const bodyRef = useRef<HTMLDivElement>(null);
   /** 全屏切换前记下的阅读位置（正文容器会换父节点被重建，切换后按此恢复） */
   const savedScrollRef = useRef<number | null>(null);
+
+  const clearSelectionWarning = useCallback((): void => {
+    window.clearTimeout(selectionWarningTimer.current);
+    selectionWarningTimer.current = undefined;
+    setSelectionWarning('');
+  }, []);
+
+  const showSelectionWarning = useCallback((message: string): void => {
+    window.clearTimeout(selectionWarningTimer.current);
+    setSelectionWarning(message);
+    selectionWarningTimer.current = window.setTimeout(() => {
+      setSelectionWarning('');
+      selectionWarningTimer.current = undefined;
+    }, 3000);
+  }, []);
+
+  useEffect(() => () => {
+    window.clearTimeout(selectionWarningTimer.current);
+  }, []);
 
   useEffect(() => {
     setHighlightEnabled(Boolean(highlightQuery?.trim()));
@@ -360,6 +381,7 @@ export function ModuleDrawer({
     // 必须在切换前记录：重建后 ref 已指向新节点，读不到旧位置
     savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
     setReaderLinkSelection(null);
+    setReaderLinkComposerOpen(false);
     if (controlledFullscreen === undefined) setInternalFullscreen(next);
     updateOutlineCollapsed(!next);
     onFullscreenChange?.(next);
@@ -467,34 +489,49 @@ export function ModuleDrawer({
     }
   }, [displayedContent]);
 
-  /** 在当前阅读页选中单个文本块中的文字，直接打开跳转操作。 */
-  const captureReaderSelection = useCallback((): void => {
-    if (!editable || !group || content === null || editor.isOpen) return;
+  /** 暂存当前阅读页选区；只有点击“添加链接”后才打开跳转面板。 */
+  const captureReaderSelection = useCallback((explicitAction = false): ReaderLinkSelection | null => {
+    if (!editable || !group || content === null || editor.isOpen || readerLinkComposerOpen) return null;
     const root = bodyRef.current?.querySelector<HTMLElement>('.ki-markdown--drawer');
     const selected = window.getSelection();
     const text = selected?.toString().trim() ?? '';
-    if (!root || !selected?.rangeCount || !text) return;
+    if (!root || !selected?.rangeCount || !text) {
+      setReaderLinkSelection(null);
+      if (explicitAction) showSelectionWarning('请先选中正文中的文字，再点击“添加链接”');
+      return null;
+    }
     const range = selected.getRangeAt(0);
-    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+      setReaderLinkSelection(null);
+      if (explicitAction) showSelectionWarning('请在正文中选中要添加链接的文字');
+      return null;
+    }
     const start = anchorBlock(range.startContainer);
     const end = anchorBlock(range.endContainer);
     if (!start || start !== end || !root.contains(start)) {
       setReaderLinkSelection(null);
-      setSelectionWarning('请只选中同一标题、段落、列表项或表格单元格中的文字');
-      return;
+      showSelectionWarning('请只选中同一标题、段落、列表项或表格单元格中的文字');
+      return null;
     }
     if (Array.from(start.querySelectorAll('a,code')).some((node) => range.intersectsNode(node))) {
       setReaderLinkSelection(null);
-      setSelectionWarning('已有链接或代码中的文字，请使用“编辑文档”处理');
-      return;
+      showSelectionWarning('已有链接或代码中的文字，请使用“编辑文档”处理');
+      return null;
     }
     const rect = range.getBoundingClientRect();
-    setReaderLinkSelection({ text, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } });
-    setSelectionWarning('');
-  }, [content, editable, editor.isOpen, group]);
+    const selection = { text, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } };
+    setReaderLinkSelection(selection);
+    clearSelectionWarning();
+    return selection;
+  }, [clearSelectionWarning, content, editable, editor.isOpen, group, readerLinkComposerOpen, showSelectionWarning]);
+
+  const openReaderLinkComposer = useCallback((): void => {
+    if (!captureReaderSelection(true)) return;
+    setReaderLinkComposerOpen(true);
+  }, [captureReaderSelection]);
 
   useEffect(() => {
-    if (readerLinkSelection || !editable || content === null) return;
+    if (readerLinkComposerOpen || !editable || content === null || editor.isOpen) return;
     let timer: number | undefined;
     const handler = (): void => {
       window.clearTimeout(timer);
@@ -502,10 +539,11 @@ export function ModuleDrawer({
     };
     document.addEventListener('selectionchange', handler);
     return () => { window.clearTimeout(timer); document.removeEventListener('selectionchange', handler); };
-  }, [captureReaderSelection, content, editable, readerLinkSelection]);
+  }, [captureReaderSelection, content, editable, editor.isOpen, readerLinkComposerOpen]);
 
   const openEditor = useCallback((): void => {
     setReaderLinkSelection(null);
+    setReaderLinkComposerOpen(false);
     const selection = window.getSelection();
     const root = bodyRef.current?.querySelector('.ki-markdown--drawer');
     const selected = selection?.anchorNode && root?.contains(selection.anchorNode)
@@ -528,7 +566,7 @@ export function ModuleDrawer({
     document.body.style.overflow = 'hidden';
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
-      if (editor.isOpen || readerLinkSelection) return;
+      if (editor.isOpen || readerLinkComposerOpen) return;
       if (fullscreen) updateFullscreen(false);
       else onClose();
     };
@@ -537,7 +575,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [editor.isOpen, fullscreen, onClose, readerLinkSelection, updateFullscreen]);
+  }, [editor.isOpen, fullscreen, onClose, readerLinkComposerOpen, updateFullscreen]);
 
   /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
   const [atTop, setAtTop] = useState(true);
@@ -629,7 +667,7 @@ export function ModuleDrawer({
               )}
             </div>
           )}
-          <article className="ki-markdown ki-markdown--drawer" onMouseUp={captureReaderSelection} onKeyUp={captureReaderSelection}>
+          <article className="ki-markdown ki-markdown--drawer" onMouseUp={() => { captureReaderSelection(); }} onKeyUp={() => { captureReaderSelection(); }}>
             <MarkdownPreview
               text={displayedContent}
               assetBase={group ? { scope, group } : undefined}
@@ -730,6 +768,15 @@ export function ModuleDrawer({
           )}
           <div className="ki-drawer__actions">
             {editable && group && content !== null && (
+              <button
+                className="ki-drawer__copy"
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={openReaderLinkComposer}
+                title="为选中文字添加跳转链接"
+              >添加链接</button>
+            )}
+            {editable && group && content !== null && (
               <button className="ki-drawer__copy" type="button" onClick={openEditor}>编辑文档</button>
             )}
             {displayedContent && (
@@ -803,7 +850,7 @@ export function ModuleDrawer({
           </div>
         )}
       </aside>
-      {readerLinkSelection && content !== null && group && (
+      {readerLinkComposerOpen && readerLinkSelection && content !== null && group && (
         <ReaderLinkComposer
           scope={scope}
           group={group}
@@ -813,12 +860,13 @@ export function ModuleDrawer({
           onSaved={(next, result) => {
             setContent(next);
             setReaderLinkSelection(null);
+            setReaderLinkComposerOpen(false);
             const indexed = result.vectorStored ? '向量索引已更新'
               : result.fullTextUpdated ? '全文索引已更新' : '索引未变化';
             setSavedNotice(`跳转链接已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
           }}
           onPartialSaved={(next, warning) => { setContent(next); setSavedNotice(warning); }}
-          onClose={() => { setReaderLinkSelection(null); window.getSelection()?.removeAllRanges(); }}
+          onClose={() => { setReaderLinkSelection(null); setReaderLinkComposerOpen(false); window.getSelection()?.removeAllRanges(); }}
         />
       )}
     </>
