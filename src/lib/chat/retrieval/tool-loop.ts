@@ -134,7 +134,30 @@ function buildUpstreamMessages(input: ToolLoopInput): ChatTurn[] {
     // ★ 只取 role + content：ChatMessage 本身不含 reasoning，此处再做一次显式白名单
     msgs.push({ role: m.role, content: m.content });
   }
-  msgs.push({ role: 'user', content: input.userText });
+  // ★ 路由的三种 mode 都会**先把本轮 user 文本落进 conv.messages**，再把它作为 userText 传进来：
+  //     - append-user：锁内 appendMessage 先落盘，再 `conv: convAfterPrep` + `userText`
+  //     - regenerate：conv 末条本就是那条 user（重新生成不新增 user 消息）
+  //     - edit：truncateAfterAndEdit 后 conv 末条是编辑后的该条 user
+  //   若此处无条件再 push 一次，上游就会出现**两条相同的 user 消息**（且构成连续同角色
+  //   `user,user` —— 部分 OpenAI 兼容上游会因此直接 400，另一些会令模型复述提问）。
+  //   故仅在 conv 末条**不是**本轮这条 user 文本时才追加；这同时兼容「conv 未含本轮 user」
+  //   的调用形状（既有 store/skill 级单测就是这么构造 conv 的）。
+  //
+  // ★ 本函数守住的不变量：**返回数组的末条恒为本轮 user 消息**（两条分支都成立——
+  //   命中守卫时由 conv 末条提供，未命中时由下方 push 提供）。
+  //   `degradedPath` 的 `messages.splice(messages.length - 1, 0, …)`（本文件下方）依赖它把
+  //   检索上下文插到「本轮 user 之前」；改动本函数时必须同时看那处，否则注入位置会错位。
+  //   回归用例见 `test/chat/multi-turn-context.test.ts`（含降级路径）。
+  //
+  // 已知限制（可接受）：判据用「content 全等」。若某调用方传入的 conv **不含**本轮 user，
+  //   而历史末条恰好是**文本完全相同**的旧消息，则本轮不再追加——此时上游末条仍是同一段文本，
+  //   语义等价（差别仅在该文本归属哪一轮）。路由的三条链路（append-user / regenerate / edit）
+  //   都已先把本轮 user 落进 conv，不会走到这个形态。
+  const last = input.conv.messages[input.conv.messages.length - 1];
+  const alreadyIncluded = last !== undefined && last.role === 'user' && last.content === input.userText;
+  if (!alreadyIncluded) {
+    msgs.push({ role: 'user', content: input.userText });
+  }
   return msgs;
 }
 
@@ -438,6 +461,9 @@ async function* degradedPath(
   if (retrievalOk && projection) {
     const contextText = buildAutoRetrievalContext(JSON.stringify(projection));
     // 插到本轮 user 之前（保持 system 在最前）
+    // ★ 这里依赖 `buildUpstreamMessages` 的不变量「返回数组末条恒为本轮 user 消息」
+    //   （见该函数注释）。若哪天该不变量被改动，此处 `length - 1` 会把检索上下文插到
+    //   历史消息中间——`test/chat/multi-turn-context.test.ts` 有对应用例守着。
     messages.splice(messages.length - 1, 0, { role: 'user', content: contextText });
   } else if (!retrievalOk) {
     // 4. 检索本身失败 → **不注错**，靠 skill 反幻觉规则 2 保证模型前置「本次未检索」
