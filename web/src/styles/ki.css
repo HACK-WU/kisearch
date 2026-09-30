@@ -1981,8 +1981,18 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-reason__toggle {
   align-self: flex-start; padding: 2px 0; border: none; background: none; cursor: pointer;
   font: inherit; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary);
+  display: inline-flex; align-items: center; gap: 6px;
 }
 .ki-chat-reason__toggle:hover { text-decoration: underline; }
+/* 生成中的加载动画（替代旧「· N 字」计数，2026-09-30 用户裁决） */
+.ki-chat-reason__spin {
+  width: 10px; height: 10px; flex: none;
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ki-spin 0.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .ki-chat-reason__spin { animation-duration: 1.6s; } }
 .ki-chat-reason__body {
   /* S05 §3.1：最大高度 + 内部滚动；纯文本等宽换行 */
   max-height: 240px;
@@ -2630,6 +2640,8 @@ select.ki-chat-cfg__ta--select {
    D8. 消息入场 / 头像 / 用户气泡（走查 #6/#9：移植 demo D3 段）
    ════════════════════════════════════════════════════════════════ */
 .ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1) both; }
+/* 刚从流式气泡收尾重挂载的消息：跳过入场动画（流式内容无缝接续，防"完成后闪一下"） */
+.ki-chat-msg--instant { animation: none; }
 @keyframes ki-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 /* 用户气泡：ki.css 基线是中性灰底，叠品牌色浅罩 + 右下收角（demo D3 同款） */
 .ki-chat-msg--user .ki-chat-msg__body {

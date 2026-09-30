@@ -54,6 +54,11 @@ export interface StreamingState {
   seq: number | undefined;
   /** 本次 assistant 消息 id（`meta` 事件给出） */
   messageId: string | null;
+  /**
+   * 本轮开始时间（ISO）。流式气泡在消息列表里以**虚拟消息**渲染（与完成态同一组件），
+   * 时间戳用它 → 收尾后由 finalizeStream 的落盘时间接管，同一分钟内显示不变。
+   */
+  startedAt: string;
   content: string;
   /** 思考内容 —— **仅内存，不落盘**（D7）；刷新/切会话即失 */
   reasoning: string;
@@ -122,6 +127,14 @@ export interface ChatUiState {
    */
   progressByMessage: Record<string, ProgressStep[]>;
   /**
+   * **已完成消息的思考分段**（键 = `messageId`，值 = 收尾时的 `streaming.reasoningSegs`）。
+   *
+   * 为什么必须有：统一渲染路径后（2026-09-30 用户裁决："生成中看到的东西完成后一点都不能变"），
+   * 思考块在收尾时不得消失。与 `progressByMessage` 同款**仅内存**留存——
+   * 思考内容本就不落盘（D7），刷新/切会话后回看只剩工具行，口径不变。
+   */
+  reasoningSegsByMessage: Record<string, StreamingState['reasoningSegs']>;
+  /**
    * 一次性提示文案（当前为 `done.warning` 的落地，如「会话过长，建议新建会话」）。
    *
    * 为什么要有：`done.warning`（`tool-rounds-exhausted` / `conversation-too-long`）是
@@ -129,6 +142,14 @@ export interface ChatUiState {
    * 生命周期：`streamStart` / 切会话时清空（属"本轮"提示，不跨轮残留）。
    */
   notice: string | null;
+  /**
+   * 刚从流式收尾并入 messages 的那条消息 id（`streamEnd` 写入，`streamStart`/切会话清空）。
+   *
+   * 为什么要有：收尾瞬间 StreamingBubble 卸载、MessageItem 以**另一棵组件树**重挂载同一内容，
+   * 而 `.ki-chat-msg` 的 `ki-msg-in` 入场动画会随挂载重播 → 用户看到回答完成后"闪一下"。
+   * 该 id 命中的消息跳过入场动画（内容无缝接续）；历史回看新插入的消息不受影响、照常播放。
+   */
+  lastStreamedId: string | null;
 }
 
 /** 初始值（面板默认展开，T1：默认态可后续调整并记忆用户选择） */
@@ -140,6 +161,7 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
     active: false,
     seq: undefined,
     messageId: null,
+    startedAt: '',
     content: '',
     reasoning: '',
     reasoningSegs: [],
@@ -150,7 +172,9 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
   },
   degradedByMessage: {},
   progressByMessage: {},
+  reasoningSegsByMessage: {},
   notice: null,
+  lastStreamedId: null,
 };
 
 /** 动作（视图层只通过这些动作改状态） */
@@ -158,8 +182,8 @@ export type ChatAction =
   | { type: 'setOpen'; open: boolean }
   | { type: 'setActiveConv'; convId: string | null }
   | { type: 'setMessages'; messages: ChatMessage[] }
-  /** `seq`：本轮流序号（可选，见 `StreamingState.seq`） */
-  | { type: 'streamStart'; messageId: string; seq?: number }
+  /** `seq`：本轮流序号（可选，见 `StreamingState.seq`）；`at`：本轮开始时间（调用方注入，reducer 保持纯净） */
+  | { type: 'streamStart'; messageId: string; seq?: number; at?: string }
   | { type: 'streamContent'; text: string }
   | { type: 'streamReasoning'; text: string }
   | { type: 'streamProgress'; step: ProgressStep }
@@ -200,7 +224,9 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         streaming: INITIAL_CHAT_STATE.streaming,
         degradedByMessage: {},
         progressByMessage: {},
+        reasoningSegsByMessage: {},
         notice: null,
+        lastStreamedId: null,
       };
     case 'reset':
       return { ...INITIAL_CHAT_STATE, open: state.open };
@@ -231,10 +257,15 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
       return {
         ...state,
         notice: null,
+        lastStreamedId: null,
         streaming: {
           active: true,
           seq: action.seq,
           messageId: action.messageId,
+          // meta 事件会再次 streamStart 校正 id：已开始的轮保留原开始时间（时间戳不跳）
+          startedAt: state.streaming.active && state.streaming.startedAt
+            ? state.streaming.startedAt
+            : (action.at ?? state.streaming.startedAt),
           content: '',
           reasoning: '',
           reasoningSegs: [],
@@ -317,8 +348,11 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
 
     case 'streamMessageId':
       // 用服务端真实 id 覆盖 `meta` 的预估值；**只改 id，不动内容/累积态**
+      // 同步预置免动画标记：id 校正使列表 key 变化、气泡重挂载一次，
+      // 不带 instant 会重播入场动画（统一渲染路径下这是唯一的极端 remount 点）
       return {
         ...state,
+        lastStreamedId: action.messageId,
         streaming: { ...state.streaming, messageId: action.messageId },
       };
 
@@ -335,11 +369,18 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
       return {
         ...state,
         messages: finalizeStream(state.messages, state.streaming),
+        // ★ 刚收尾的消息 id 记下来：ChatPanel 据此跳过入场动画（防"完成后闪一下"）；
+        //   无内容时 finalizeStream 不产生消息 → 一并清空
+        lastStreamedId: state.streaming.content && state.streaming.messageId
+          ? state.streaming.messageId
+          : null,
         // ★ N17：降级标记随消息**留存**（不进冻结的 ChatMessage，理由见 degradedByMessage 注释）。
         //   原先只落在 streaming.degraded，streamEnd 一清空 → 生成结束后回看历史看不到标记。
         degradedByMessage: retainDegraded(state.degradedByMessage, state.streaming),
         // ★ 同理留存工具步骤：生成结束后痕迹不消失（原位渲染在消息顶部，见 ChatPanel）
         progressByMessage: retainProgress(state.progressByMessage, state.streaming),
+        // 统一渲染路径（2026-09-30）：思考分段同机制留存 → 收尾后思考块不消失
+        reasoningSegsByMessage: retainReasoningSegs(state.reasoningSegsByMessage, state.streaming),
         streaming: INITIAL_CHAT_STATE.streaming,
       };
   }
@@ -391,6 +432,24 @@ function retainProgress(
   const { progress, messageId, content } = streaming;
   if (!progress.length || !messageId || !content) return prev;
   return { ...prev, [messageId]: progress };
+}
+
+/**
+ * 收尾时把本轮思考分段留存到 `reasoningSegsByMessage`（键 = messageId）。
+ *
+ * `closed` 统一置 true：生成已结束，思考块标签从"思考中"变"思考过程"是**语义修正**，
+ * 不影响块的位置与高度（无视觉跳变）。判据与 retainProgress 同款（无内容不产生消息）。
+ */
+function retainReasoningSegs(
+  prev: Record<string, StreamingState['reasoningSegs']>,
+  streaming: StreamingState,
+): Record<string, StreamingState['reasoningSegs']> {
+  const { reasoningSegs, messageId, content } = streaming;
+  if (!reasoningSegs.length || !messageId || !content) return prev;
+  return {
+    ...prev,
+    [messageId]: reasoningSegs.map((s) => ({ ...s, closed: true })),
+  };
 }
 
 /** 把本轮来源引用挂到指定 messageId 上；id 为空或无匹配时不改消息（来源仍由 done 事件兜底） */

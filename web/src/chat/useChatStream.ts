@@ -188,7 +188,7 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       //   `streamEnd` 会据此校验"只有当前流能收尾"（见 seqRef 注释）
       const mySeq = ++seqRef.current;
       // 单写者：新流开始前必须中止旧流（切会话 / 重新生成 / 编辑重发均适用）
-      store.dispatch({ type: 'streamStart', messageId, seq: mySeq });
+      store.dispatch({ type: 'streamStart', messageId, seq: mySeq, at: new Date().toISOString() });
       const prev = ctrlRef.current;
       if (prev) {
         abortedRef.current.add(prev);

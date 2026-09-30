@@ -123,9 +123,17 @@ function resolveRuntime(): LoopRuntime {
   };
 }
 
-/** 本轮 assistant 消息 id（`meta` 与 `done` 共用同一 id） */
+/**
+ * 本轮 assistant 消息 id（`meta` 与 `done` 共用同一 id）。
+ *
+ * ★ 必须与 `appendMessage` 锁内的 id 归一化同规则：`m{conv.seq + 1}`。
+ *   旧实现用 `seq + messages.length + 1` 预估——`seq` 本身就是最后一条消息的序号，
+ *   两者几乎必然不同 → 前端 `done` 校正 id 时列表 key 跳变、刚渲染的气泡整棵
+ *   重挂载（收尾"闪一下"的根因之一）。落盘若被并发写入抢先，`done` 仍带真实
+ *   `savedId` 兜底校正。
+ */
 function messageIdFor(conv: ConversationFile): string {
-  return newMessageId(conv.seq + conv.messages.length + 1);
+  return newMessageId(conv.seq + 1);
 }
 
 /**

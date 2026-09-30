@@ -577,6 +577,34 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 
   const draftChars = Array.from(draft).length;
 
+  /**
+   * 统一渲染路径（2026-09-30 用户裁决："生成中看到的东西，完成后位置、样式什么都不要变"）。
+   *
+   * 流式气泡不再是独立组件 + 独立 JSX 槽位，而是以**虚拟消息**追加进同一消息数组：
+   * 同组件、同列表位置、同 key —— `streamEnd` 时只是数据源从 `streaming` 切到
+   * 落盘消息与内存留存（progress/reasoningSegs/degraded，内容逐字相同），
+   * React 原地复用 DOM：零重挂载、零元素增减。
+   */
+  const st = state.streaming;
+  const bubbles: Array<{ message: ChatMessage; live: boolean; idx: number }> = state.messages
+    .map((m, idx) => ({ message: m, live: false, idx }))
+    // 重新生成 / 编辑重发：同 id 旧消息让位给虚拟气泡（收尾时 finalizeStream 原位替换）
+    .filter((b) => !(st.active && b.message.id === st.messageId));
+  if (st.active) {
+    bubbles.push({
+      message: {
+        id: st.messageId ?? '__pending__',
+        role: 'assistant',
+        content: st.content,
+        at: st.startedAt,
+        aborted: st.aborted,
+        ...(st.sources.length > 0 ? { sources: st.sources } : {}),
+      },
+      live: true,
+      idx: state.messages.length,
+    });
+  }
+
   return (
     <>
       <aside
@@ -705,17 +733,24 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
             </div>
           ) : null}
 
-          {state.messages.map((m, i) => (
+          {bubbles.map(({ message: m, live, idx }) => (
             <MessageBubble
               key={m.id}
               message={m}
-              // N17：降级标记随消息留存（不进冻结的 ChatMessage，见 chatStore.degradedByMessage）
-              degraded={state.degradedByMessage[m.id] ?? null}
-              // 检索痕迹留存（2026-09-30 二次修正）：生成刚结束走内存态，刷新/切会话走落盘的 message.progress；
-              // 渲染在消息**顶部原位**（与流式气泡同位），收尾不跳位、不消失
-              progress={state.progressByMessage[m.id] ?? chatProgressToSteps(m.progress)}
+              live={live}
+              // 兜底：meta/done 校正真实 id 引发重挂载时不播入场动画（防"闪一下"）
+              instant={m.id === state.lastStreamedId}
+              // N17：降级标记随消息留存（不进冻结的 ChatMessage，见 chatStore.degradedByMessage）；
+              // 生成中直读 streaming.degraded，收尾后同一数据经 degradedByMessage 留存 → 显示无缝
+              degraded={live ? st.degraded : state.degradedByMessage[m.id] ?? null}
+              // 检索痕迹留存（2026-09-30 二次修正）：生成中直读 streaming，刚结束走内存态，
+              // 刷新/切会话走落盘的 message.progress；渲染在正文原位（interleave），收尾不跳位、不消失
+              progress={live ? st.progress : state.progressByMessage[m.id] ?? chatProgressToSteps(m.progress)}
+              // 思考分段（统一渲染路径）：生成中直读 streaming，收尾后走内存留存；
+              // 思考不落盘（D7），刷新后历史消息无此数据 → 只剩工具行（口径不变）
+              reasoningSegs={live ? st.reasoningSegs : state.reasoningSegsByMessage[m.id]}
               // R24：编辑重发会原子截断该消息之后的全部消息 → 明示条数
-              discardCount={state.messages.length - i - 1}
+              discardCount={state.messages.length - idx - 1}
               onOpenSource={handleOpenSource}
               onCopy={() => handleCopy(m)}
               copyState={
@@ -732,28 +767,12 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               onEditChange={(text) => setEditing((e) => (e ? { ...e, text } : e))}
               onEditSubmit={(text) => handleEditResend(m.id, text)}
               onEditCancel={() => setEditing(null)}
-              reasoning={m.id === state.streaming.messageId ? state.streaming.reasoning : undefined}
               reasoningOpen={Boolean(reasoningExpanded[m.id])}
               onToggleReasoning={(next) =>
                 setReasoningExpanded((prev) => ({ ...prev, [m.id]: next }))
               }
             />
           ))}
-
-          {/* 生成中：降级标记（N17 必须可见）+ 时间线（R11a 每一秒都有反馈）+ 正文 */}
-          {state.streaming.active ? (
-            <StreamingBubble
-              content={state.streaming.content}
-              reasoningSegs={state.streaming.reasoningSegs}
-              progress={state.streaming.progress}
-              degradedLabel={state.streaming.degraded?.label ?? null}
-              reasoningOpen={Boolean(reasoningExpanded[state.streaming.messageId ?? ''])}
-              onToggleReasoning={(next) => {
-                const id = state.streaming.messageId ?? '';
-                setReasoningExpanded((prev) => ({ ...prev, [id]: next }));
-              }}
-            />
-          ) : null}
         </div>
 
         {/* ── 输入区：分级提示 + composer 卡片 ── */}
@@ -892,10 +911,11 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 /** 单条已落盘消息（user / assistant 分支 + 消息级操作条） */
 function MessageBubble({
   message,
+  live,
   degraded,
   progress,
+  reasoningSegs,
   discardCount,
-  reasoning,
   reasoningOpen,
   onToggleReasoning,
   onOpenSource,
@@ -909,15 +929,19 @@ function MessageBubble({
   onEditChange,
   onEditSubmit,
   onEditCancel,
+  instant,
 }: {
   message: ChatMessage;
+  /** 生成中的虚拟消息（store.streaming 直读）：与完成态共用本组件，收尾仅换数据源 */
+  live?: boolean;
   /** N17：本条的降级标记（来自 store.degradedByMessage；生成结束后仍保留，回看历史可见） */
   degraded?: DegradedMark | null;
-  /** 本条的检索过程（原位渲染在正文上方；生成结束后不消失，与流式期间同一位置） */
+  /** 本条的检索过程（原位渲染在正文流中；生成结束后不消失，与流式期间同一位置） */
   progress?: ProgressStep[];
+  /** 本条的思考分段（live 直读 streaming；收尾后走 reasoningSegsByMessage 内存留存） */
+  reasoningSegs?: Array<{ afterChars: number; text: string; closed: boolean }>;
   /** R24：编辑重发将截断其后的消息条数（0 表示无截断） */
   discardCount: number;
-  reasoning?: string;
   reasoningOpen: boolean;
   onToggleReasoning: (next: boolean) => void;
   onOpenSource: (ref: SourceRef) => void;
@@ -935,15 +959,18 @@ function MessageBubble({
   onEditChange: (text: string) => void;
   onEditSubmit: (text: string) => void;
   onEditCancel: () => void;
+  /** 刚从流式收尾重挂载的消息：跳过入场动画（防"完成后闪一下"，见 chatStore.lastStreamedId） */
+  instant?: boolean;
 }): JSX.Element {
   const isUser = message.role === 'user';
   return (
-    <div className={`ki-chat-msg ki-chat-msg--${message.role}`}>
+    <div className={`ki-chat-msg ki-chat-msg--${message.role}${live ? ' ki-chat-msg--streaming' : ''}${instant ? ' ki-chat-msg--instant' : ''}`}>
       {/* 元信息行：角色 / 时间 / 状态徽标（原先只有气泡，看不出谁说的、什么时候、是否完整） */}
       <div className="ki-chat-msg__meta">
         {!isUser ? <span className="ki-chat-avatar" aria-hidden="true">k</span> : null}
         {!isUser ? <span className="ki-chat-msg__role">kisearch</span> : null}
-        <span className="ki-chat-msg__at">{formatMsgTime(message.at)}</span>
+        {/* startedAt 未注入（如纯 reducer 场景）时兜底"刚刚"；落盘消息恒为真实时间 */}
+        <span className="ki-chat-msg__at">{formatMsgTime(message.at) || '刚刚'}</span>
         {message.aborted ? <span className="ki-chat-msg__badge ki-chat-msg__badge--abort">已中止</span> : null}
         {!isUser && degraded ? (
           <span className="ki-chat-msg__badge ki-chat-msg__badge--degrade">{degraded.label}</span>
@@ -953,10 +980,6 @@ function MessageBubble({
       {/* N17：降级标记必须可见，不得静默 */}
       {!isUser && degraded ? (
         <div className="ki-chat-msg__degraded" role="status">{degraded.label}</div>
-      ) : null}
-
-      {!isUser && reasoning ? (
-        <ReasoningBlock text={reasoning} streaming={false} open={reasoningOpen} onToggle={onToggleReasoning} />
       ) : null}
 
       {isUser && editing !== null ? (
@@ -992,16 +1015,25 @@ function MessageBubble({
           <p className="ki-chat-msg__text">{message.content}</p>
         </div>
       ) : (
-        /* 检索痕迹 interleave（2026-09-30 三次修正，用户裁决）：调用发生在哪句话之后，
-           就插在哪句话下面——按各行 afterChars 把正文切段，段间插时间线行。
-           历史只渲染 tool 行（think/answer 是生成中的瞬态，不该留存成"思考中…"） */
-        <InterleavedAnswer content={message.content} nodes={progress ? buildTimeline(progress).filter((n) => n.kind === 'tool') : []} />
+        /* 统一渲染路径（2026-09-30 四次修正，用户裁决："完成后什么都不要变"）：
+           生成中与完成态走同一个 AnswerFlow——正文段、思考块、检索行按 afterChars
+           锚点交错；收尾仅数据源从 streaming 换为留存（内容逐字相同），DOM 原地复用 */
+        <AnswerFlow
+          content={message.content}
+          steps={progress ?? []}
+          segs={reasoningSegs ?? []}
+          live={Boolean(live)}
+          reasoningOpen={reasoningOpen}
+          onToggleReasoning={onToggleReasoning}
+        />
       )}
 
       {/* 来源引用（R20）：空数组时 SourcesList 自身渲染 null */}
       {!isUser ? <SourcesList sources={message.sources ?? []} onOpen={onOpenSource} /> : null}
 
-      {/* 消息级操作条：最后一条常驻可见，其余 hover / 键盘聚焦时出现 */}
+      {/* 消息级操作条：最后一条常驻可见，其余 hover / 键盘聚焦时出现；
+          生成中的回答不出现（2026-09-30 用户裁决），收尾后随完成态一并显示 */}
+      {live && !isUser ? null : (
       <div className="ki-chat-msg__acts">
         <button type="button" className="ki-chat-act" onClick={onCopy}>
           {copyState === 'copied' ? '已复制'
@@ -1032,6 +1064,7 @@ function MessageBubble({
           >重新生成</button>
         ) : null}
       </div>
+      )}
     </div>
   );
 }
@@ -1113,11 +1146,52 @@ function mergeInterleaveItems(nodes: TimelineNode[], segs: Array<{ afterChars: n
   return out;
 }
 
-/** 已落盘 assistant 回答：正文段与检索行交错渲染（历史行不带 --run，不脉冲） */
-function InterleavedAnswer({ content, nodes }: { content: string; nodes: TimelineNode[] }): JSX.Element {
+/**
+ * assistant 回答主体 —— **生成中与完成态的唯一渲染路径**（统一渲染路径重构）。
+ *
+ * 正文段、思考块、检索痕迹按 afterChars 锚点交错（用户裁决：在哪句话之后发生，
+ * 就显示在哪句话下面）。live（生成中）与完成态**结构完全一致**，仅两处语义差：
+ * · aria 标记（role=status 播报只属于进行中的反馈）
+ * · 无任何内容时的占位行（N10 不得出现无反馈空白，只在 live 出现）
+ * 收尾时数据源从 streaming 换为内存留存（内容逐字相同）→ DOM 原地复用，零增减。
+ */
+function AnswerFlow({
+  content,
+  steps,
+  segs,
+  live,
+  reasoningOpen,
+  onToggleReasoning,
+}: {
+  content: string;
+  steps: ProgressStep[];
+  segs: Array<{ afterChars: number; text: string; closed: boolean }>;
+  live: boolean;
+  reasoningOpen: boolean;
+  onToggleReasoning: (next: boolean) => void;
+}): JSX.Element {
+  const items = mergeInterleaveItems(buildTimeline(steps), segs);
+  if (items.length === 0) {
+    if (live && !content) {
+      return (
+        <div className="ki-chat-tl" role="status" aria-live="polite">
+          <div className="ki-chat-tl__node ki-chat-tl__node--run">
+            <span className="ki-chat-tl__label">正在连接模型…</span>
+          </div>
+        </div>
+      );
+    }
+    return content ? (
+      <div className="ki-chat-msg__body">
+        <MarkdownPreview text={content} />
+      </div>
+    ) : <></>;
+  }
+  const liveAttrs: { role?: 'status'; 'aria-live'?: 'polite' } =
+    live ? { role: 'status', 'aria-live': 'polite' } : {};
   return (
     <>
-      {interleaveSegments(content, nodes).map((seg, i) => (
+      {interleaveSegments(content, items).map((seg, i) => (
         'text' in seg
           ? (
             <div key={i} className="ki-chat-msg__body">
@@ -1125,9 +1199,31 @@ function InterleavedAnswer({ content, nodes }: { content: string; nodes: Timelin
             </div>
           )
           : (
-            <div key={i} className="ki-chat-tl">
-              {seg.items.map((n) => <ToolRow key={n.key} n={n as TimelineNode} />)}
-            </div>
+            <Fragment key={i}>
+              {seg.items.map((it) => (
+                it.kind === 'reason'
+                  ? (
+                    <ReasoningBlock
+                      key={it.key}
+                      text={it.text}
+                      streaming={!it.closed}
+                      open={reasoningOpen}
+                      onToggle={onToggleReasoning}
+                    />
+                  )
+                  : (
+                    <div key={it.key} className="ki-chat-tl" {...liveAttrs}>
+                      {it.kind === 'tool'
+                        ? <ToolRow n={it} />
+                        : (
+                          <div className={`ki-chat-tl__node ki-chat-tl__node--${it.kind}${it.running ? ' ki-chat-tl__node--run' : ''}`}>
+                            <span className="ki-chat-tl__label">{it.label}</span>
+                          </div>
+                        )}
+                    </div>
+                  )
+              ))}
+            </Fragment>
           )
       ))}
     </>
@@ -1290,98 +1386,6 @@ function JsonCode({ obj }: { obj: Record<string, string | number | boolean> }): 
   );
 }
 
-/** 生成中的临时气泡（内容全部来自 store.streaming，**不落盘**） */
-function StreamingBubble({
-  content,
-  reasoningSegs,
-  progress,
-  degradedLabel,
-  reasoningOpen,
-  onToggleReasoning,
-}: {
-  content: string;
-  /** 思考分段（含 interleave 锚点；store 按"正文输出/工具调用"切段） */
-  reasoningSegs: Array<{ afterChars: number; text: string; closed: boolean }>;
-  progress: ProgressStep[];
-  degradedLabel: string | null;
-  reasoningOpen: boolean;
-  onToggleReasoning: (next: boolean) => void;
-}): JSX.Element {
-  const nodes = buildTimeline(progress);
-  const items = mergeInterleaveItems(nodes, reasoningSegs);
-
-  return (
-    <div className="ki-chat-msg ki-chat-msg--assistant ki-chat-msg--streaming">
-      <div className="ki-chat-msg__meta">
-        <span className="ki-chat-avatar" aria-hidden="true">k</span>
-        <span className="ki-chat-msg__role">kisearch</span>
-        <span className="ki-chat-msg__at">刚刚</span>
-        {degradedLabel ? (
-          <span className="ki-chat-msg__badge ki-chat-msg__badge--degrade">{degradedLabel}</span>
-        ) : null}
-      </div>
-
-      {/* N17：降级标记必须可见，不得静默 */}
-      {degradedLabel ? (
-        <div className="ki-chat-msg__degraded" role="status">{degradedLabel}</div>
-      ) : null}
-
-      {/* R11a + interleave（2026-09-30 用户裁决，二次扩展）：**思考过程与检索痕迹同机制**——
-          在哪想的就在哪显示（按 afterChars 锚点插入正文流），不再恒占消息顶部 */}
-      {items.length === 0 ? (
-        /* 尚无任何进展时也要有兜底文案（N10 不得出现无反馈空白） */
-        <div className="ki-chat-tl" role="status" aria-live="polite">
-          <div className="ki-chat-tl__node ki-chat-tl__node--run">
-            <span className="ki-chat-tl__label">正在连接模型…</span>
-          </div>
-        </div>
-      ) : (
-        interleaveSegments(content, items).map((seg, i) => (
-          'text' in seg
-            ? (
-              <div key={i} className="ki-chat-msg__body">
-                <MarkdownPreview text={seg.text} />
-              </div>
-            )
-            : (
-              <Fragment key={i}>
-                {seg.items.map((it) => (
-                  it.kind === 'reason'
-                    ? (
-                      <ReasoningBlock
-                        key={it.key}
-                        text={it.text}
-                        streaming={!it.closed}
-                        open={reasoningOpen}
-                        onToggle={onToggleReasoning}
-                      />
-                    )
-                    : (
-                      <div key={it.key} className="ki-chat-tl" role="status" aria-live="polite">
-                        {it.kind === 'tool'
-                          ? <ToolRow n={it} />
-                          : (
-                            <div className={`ki-chat-tl__node ki-chat-tl__node--${it.kind}${it.running ? ' ki-chat-tl__node--run' : ''}`}>
-                              <span className="ki-chat-tl__label">{it.label}</span>
-                            </div>
-                          )}
-                      </div>
-                    )
-                ))}
-              </Fragment>
-            )
-        ))
-      )}
-
-      {items.length === 0 && content ? (
-        <div className="ki-chat-msg__body">
-          <MarkdownPreview text={content} />
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 /**
  * 思考块（S05）—— 受控展开，默认收起，正文纯文本等宽（不做 Markdown 渲染）。
  *
@@ -1403,8 +1407,6 @@ function ReasoningBlock({
   const TRUNCATE_AT = 20000;
   const truncated = text.length > TRUNCATE_AT;
   const shown = truncated ? text.slice(0, TRUNCATE_AT) : text;
-  // 字数用 Array.from 计，避免 emoji/代理对按 UTF-16 单元重复计数
-  const chars = Array.from(text).length;
 
   return (
     <div className="ki-chat-reason">
@@ -1415,7 +1417,9 @@ function ReasoningBlock({
         title="思考内容仅本次会话可见，留存于页面内存，不写入记录"
         onClick={() => onToggle(!open)}
       >
-        {open ? '收起' : '展开'}{streaming ? '思考中' : '思考过程'} · {chars} 字
+        {/* 不显示字数（2026-09-30 用户裁决）：生成中只挂加载动画，完成后标题保持干净 */}
+        {open ? '收起' : '展开'}{streaming ? '思考中' : '思考过程'}
+        {streaming ? <span className="ki-chat-reason__spin" aria-hidden="true" /> : null}
       </button>
       {open ? (
         <div className="ki-chat-reason__body">
