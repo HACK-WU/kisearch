@@ -1,7 +1,7 @@
 /**
  * ImportPage.tsx —— 上传导入（对齐 demo：拖拽区 + 文件清单 + 切分高级选项 + 向量化 switch + 进度条）
  *
- * scope 必选（default 兜底）→ 选文件/目录 → 分批 upload（最后一批启动导入）→ 轮询 status → 进度/结果
+ * 明确选择本次目标 Scope → 选文件/目录 → 分批 upload（最后一批启动导入）→ 轮询 status → 进度/结果
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -344,8 +344,8 @@ function clearImportCredentialIf(owner: { uploadId?: string; jobId?: string }): 
 export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskSummary | null) => void }): JSX.Element {
   const currentScope = useScopeValue();
   const queryClient = useQueryClient();
-  const [scope, setScope] = useState(currentScope);
-  useEffect(() => setScope(currentScope), [currentScope]);
+  const [scope, setScope] = useState('');
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
@@ -378,12 +378,16 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
   // 实时校验 group（空字符串不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
-  const scopeErr = scope.trim() ? scopeError(scope) : 'Scope 不能为空';
+  const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
   const conflictSuffixErr = conflictMode === 'suffix' ? conflictSuffixError(conflictSuffix) : null;
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
     let cancelled = false;
+    if (!scope) {
+      setAvailableTags([]);
+      return () => { cancelled = true; };
+    }
     fetchTags(scope).then((res) => {
       if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
     }).catch(() => {});
@@ -393,6 +397,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   useEffect(() => {
     let cancelled = false;
     setImportConfig(null);
+    if (!scope) return () => { cancelled = true; };
     getImportConfig(scope).then((config) => {
       if (!cancelled) setImportConfig(config);
     }).catch(() => {
@@ -583,6 +588,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           clearInterval(timer);
           invalidateImportQueries(scope);
           setPhase('failed');
+          setScopeConfirmed(false);
           setFailureStage('import');
           setError(res.error ?? '任务已失效，请重新导入');
           return;
@@ -596,6 +602,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           invalidateImportQueries(targetScope);
           clearImportCredentialIf({ jobId: job.id });
           setPhase('done');
+          setScopeConfirmed(false);
+          void fetchTags(targetScope).then((tags) => {
+            if (tags.ok) setAvailableTags(tags.tags.map((tag) => tag.tag));
+          }).catch(() => {});
           window.dispatchEvent(new CustomEvent('ki-import-completed', { detail: { scope: targetScope } }));
         } else if (res.job.state === 'failed') {
           active = false;
@@ -603,6 +613,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           invalidateImportQueries(targetScope);
           clearImportCredentialIf({ jobId: job.id });
           setPhase('failed');
+          setScopeConfirmed(false);
           setFailureStage('import');
           setError(res.job.error ?? '导入失败');
         } else if (res.job.state === 'cancelled') {
@@ -611,6 +622,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           invalidateImportQueries(targetScope);
           clearImportCredentialIf({ jobId: job.id });
           setPhase('failed');
+          setScopeConfirmed(false);
           setFailureStage('cancelled');
           setError('导入已取消');
         }
@@ -913,6 +925,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setFailedUploadBatch(plan.currentBatch);
       setFailureStage('upload');
       setPhase('failed');
+      // Retry remains tied to this immutable upload plan, but a new start requires a fresh target confirmation.
+      setScopeConfirmed(false);
       setError(`上传第 ${plan.currentBatch + 1}/${plan.batches.length} 批失败：${getErrorDetails(error)}`);
       return null;
     }
@@ -923,6 +937,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     startingRef.current = true;
     try {
     setFailureStage(null);
+    if (!scopeConfirmed) {
+      setError('请先明确选择本次导入目标 Scope');
+      return;
+    }
     if (scopeErr) {
       setError(scopeErr);
       return;
@@ -1037,6 +1055,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           ? '导入失败'
           : '输入有误';
   const retryUploadPlan = uploadPlanRef.current;
+  const completedScope = job?.scope || uploadPlanRef.current?.scope || scope;
   const buttonStatus = error
     ? errorStatus
     : phase === 'done'
@@ -1050,7 +1069,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       <div className="ki-page-head">
         <div>
           <h1>上传导入</h1>
-          <p>目标：{scope} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
+          <p>目标：{scopeConfirmed ? scope : '请选择并确认本次导入的 Scope'} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
         </div>
       </div>
 
@@ -1085,20 +1104,32 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <label className="ki-form-label">Scope（目标知识库）</label>
             <ScopePathSelect
               value={scope}
-              onChange={(value) => setScope(value.trim())}
-              placeholder="选择或输入 Scope 名称，如：kafka"
-              hint="默认使用当前 Scope；输入不存在的合法名称并回车确认，提交导入时自动新建。"
+              confirmed={scopeConfirmed}
+              currentScope={currentScope}
+              onChange={(value, confirmed) => {
+                if (value !== scope) {
+                  setGroup('');
+                  setAvailableTags([]);
+                  setSelectedTags([]);
+                }
+                setScope(value.trim());
+                setScopeConfirmed(confirmed);
+              }}
+              placeholder="按名称筛选已有 Scope，如：kafka"
+              hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
               error={scopeErr}
+              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
             />
           </div>
           <div style={{ marginTop: 8 }}>
             <label className="ki-form-label">Group 路径（可选，导入根目录）</label>
             <GroupPathSelect
-              scope={scope}
+              scope={scope || currentScope}
               value={group}
               onChange={setGroup}
+              disabled={!scopeConfirmed}
               placeholder="选择或输入 Group 路径，如：wiki/我的文档"
-              hint="留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .."
+              hint={scopeConfirmed ? "留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .." : '请先确认本次导入目标 Scope，再选择 Group 路径。'}
               error={groupErr}
             />
           </div>
@@ -1327,7 +1358,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <button
               className="ki-btn ki-btn--primary"
               onClick={() => void start()}
-              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing' || files.length === 0}
+              disabled={!scopeConfirmed || phase === 'scanning' || phase === 'uploading' || phase === 'importing' || files.length === 0}
             >
               {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
@@ -1426,8 +1457,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             )}
             <div className="ki-empty__actions">
               <Link
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(completedScope)}` }}
+              >查看目标 Scope →</Link>
+              <Link
                 className="ki-btn ki-btn--primary ki-btn--small"
-                to={{ pathname: '/search', search: `?scope=${encodeURIComponent(scope)}` }}
+                to={{ pathname: '/search', search: `?scope=${encodeURIComponent(completedScope)}` }}
               >
                 前往搜索验证 →
               </Link>

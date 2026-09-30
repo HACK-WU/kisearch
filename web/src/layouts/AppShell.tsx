@@ -2,7 +2,7 @@
  * AppShell.tsx —— 应用布局（对齐 demo：ki-sidebar 分组导航 + ki-topbar 服务徽标）
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
@@ -72,6 +72,7 @@ export function AppShell(): JSX.Element {
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
   const queryClient = useQueryClient();
   const scope = useScopeValue();
+  const lastDimensionTaskFinish = useRef(Date.now());
   const taskQuery = useQuery({
     queryKey: ['tasks'],
     queryFn: () => getTasks(200),
@@ -81,11 +82,28 @@ export function AppShell(): JSX.Element {
   });
   const dimensionQuery = useQuery({
     queryKey: ['vectorDimensionStatus', scope],
-    queryFn: () => getVectorDimensionStatus(scope),
-    refetchInterval: 15_000,
-    staleTime: 5_000,
+    queryFn: async () => {
+      const current = await getVectorDimensionStatus(scope);
+      const { checkedAt, staleAfterMs, state } = current.status;
+      // 快照缺失或过期时检查一次；真正检查失败的近期快照留给用户手动重试。
+      if (state === 'unknown' && (checkedAt === undefined || Date.now() - checkedAt >= staleAfterMs)) {
+        return refreshVectorDimensionStatus(scope);
+      }
+      return current;
+    },
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
+  useEffect(() => {
+    const latestFinish = Math.max(0, ...(taskQuery.data?.tasks ?? [])
+      .filter((task) => task.scope === scope && ['import', 'rebuild-vector', 'restore-snapshot'].includes(task.operation))
+      .map((task) => task.finishedAt ?? 0));
+    if (latestFinish <= lastDimensionTaskFinish.current) return;
+    lastDimensionTaskFinish.current = latestFinish;
+    void queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
+  }, [taskQuery.data, scope, queryClient]);
   const activeTasks = taskQuery.data?.tasks.filter((task) => task.state === 'queued' || task.state === 'running') ?? [];
   const failedTasks = taskQuery.data?.tasks.filter((task) => task.state === 'failed' || task.state === 'unknown') ?? [];
   const partialTasks = taskQuery.data?.tasks.filter((task) => task.state === 'partial') ?? [];

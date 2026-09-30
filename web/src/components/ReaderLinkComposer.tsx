@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { getDocList, getEditableDocument, saveEditableDocument, type DocItem, type SaveDocumentResponse } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
+import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { anchorBlock, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
 import { externalTarget, insertReaderLink } from '@/lib/readerLinks';
 
@@ -48,6 +49,7 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
   const [saveLocked, setSaveLocked] = useState(false);
   const [retryReady, setRetryReady] = useState(false);
   const [query, setQuery] = useState('');
+  const [pickerGroup, setPickerGroup] = useState('');
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
   const [docsTruncated, setDocsTruncated] = useState(false);
@@ -87,7 +89,11 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
     let active = true;
     const timer = window.setTimeout(() => {
       setDocsLoading(true);
-      void getDocList(scope, query.trim() ? { q: query.trim() } : {}).then((result) => {
+      const filters = {
+        ...(pickerGroup ? { group: pickerGroup } : {}),
+        ...(query.trim() ? { q: query.trim() } : {}),
+      };
+      void getDocList(scope, filters).then((result) => {
         if (!active) return;
         setDocs(result.docs);
         setDocsTruncated(Boolean(result.truncated));
@@ -96,7 +102,7 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
       }).finally(() => { if (active) setDocsLoading(false); });
     }, query.trim() ? 300 : 0);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [pickerOpen, query, scope]);
+  }, [pickerOpen, pickerGroup, query, scope]);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -247,10 +253,14 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
   };
 
   const currentDoc: DocItem = { group, name: relation };
-  const list = [currentDoc, ...docs.filter((doc) => doc.group !== group || doc.name !== relation)];
-  const visibleList = query.trim()
-    ? list.filter((doc) => `${doc.group} ${doc.name}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-    : list;
+  const list = [
+    ...(pickerGroup && pickerGroup !== group ? [] : [currentDoc]),
+    ...docs.filter((doc) => doc.group !== group || doc.name !== relation),
+  ];
+  const visibleList = list.filter((doc) =>
+    (!pickerGroup || doc.group === pickerGroup)
+    && (!query.trim() || `${doc.group} ${doc.name}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  );
 
   return createPortal(<>
     {!pickerOpen && <section ref={panelRef} className="ki-reader-link-panel" style={panelStyle} aria-label="为选中文字添加跳转">
@@ -260,7 +270,7 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
       <input id="ki-reader-external-url" type="url" value={externalUrl} onChange={(event) => { setExternalUrl(event.target.value); setMessage(''); }} placeholder="https://example.com" disabled={busy || retryReady || saveLocked} />
       <button className="ki-btn ki-btn--primary" type="button" onClick={addExternal} disabled={busy || saveLocked}>{busy ? '保存中…' : retryReady ? '重试保存' : '添加外部链接'}</button>
       <div className="ki-reader-link-panel__or">或</div>
-      <button className="ki-btn ki-btn--secondary" type="button" onClick={() => { setPickerOpen(true); setMessage(''); }} disabled={busy || retryReady || saveLocked}>选择知识库文档或段落</button>
+      <button className="ki-btn ki-btn--secondary" type="button" onClick={() => { setPickerGroup(''); setQuery(''); setPickerOpen(true); setMessage(''); }} disabled={busy || retryReady || saveLocked}>选择知识库文档或段落</button>
       {message && <p className="ki-reader-link__error" role="status">{message}</p>}
     </section>}
     {pickerOpen && <div className="ki-reader-link-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPickerOpen(false); }}>
@@ -271,6 +281,18 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
         </header>
         <div className="ki-reader-link-dialog__body">
           <aside className="ki-reader-link-dialog__docs" aria-label="知识库文档">
+            <div className="ki-reader-link-dialog__group-filter-head">
+              <span className="ki-reader-link-dialog__filter-label">按 Group 浏览</span>
+              {pickerGroup && <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={() => { setPickerGroup(''); setMessage(''); }}>全部 Group</button>}
+            </div>
+            <div className="ki-reader-link-dialog__group-filter">
+              <GroupPathSelect
+                scope={scope}
+                value={pickerGroup}
+                onChange={(value) => { setPickerGroup(value); setMessage(''); }}
+                selectOnly
+              />
+            </div>
             <label htmlFor="ki-reader-doc-search">查找文档</label>
             <input ref={searchRef} id="ki-reader-doc-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文档名称或路径" disabled={busy || retryReady || saveLocked} />
             <div className="ki-reader-link-dialog__doc-list">

@@ -132,6 +132,7 @@ export function BrowsePage(): JSX.Element {
   const appliedDirectTarget = useRef('');
 
   const directTarget = searchParams.toString();
+  const { data, isLoading, isError, error, refetch } = useDocList(scope);
   useEffect(() => {
     if (!directTarget) {
       appliedDirectTarget.current = '';
@@ -142,7 +143,7 @@ export function BrowsePage(): JSX.Element {
     const targetScope = params.get('scope');
     const group = params.get('group');
     const relation = params.get('relation');
-    if (!targetScope || !group || !relation) {
+    if (!targetScope) {
       appliedDirectTarget.current = '';
       return;
     }
@@ -150,12 +151,29 @@ export function BrowsePage(): JSX.Element {
       setScope(targetScope);
       return;
     }
-    setActiveGroup(group);
-    setViewing({ group, module: relation, anchor: params.get('anchor') ?? undefined });
+    if (!group && !relation && data?.scope !== targetScope) return;
+    if (group && relation) {
+      setActiveGroup(group);
+      setViewing({ group, module: relation, anchor: params.get('anchor') ?? undefined });
+    } else {
+      // scope / scope+group 是浏览入口：前者显示默认 Group，后者显示指定 Group；都不打开命中文档。
+      setViewing(null);
+      setHistory([]);
+      setForwardHistory([]);
+      setReaderFullscreen(false);
+      if (group) {
+        setActiveGroup(group);
+      } else if (data?.scope === targetScope) {
+        const base = withDefaultOpen(buildGroupTree(data.groups ?? []));
+        setActiveGroup(firstGroupWithDocuments(base) || (base.length > 0 ? base[0].path : ''));
+      }
+      setQ('');
+      setSearchQ('');
+      setSelectedTag('');
+    }
     appliedDirectTarget.current = directTarget;
-  }, [directTarget, scope, setScope]);
+  }, [directTarget, scope, setScope, data?.scope, data?.groups]);
 
-  const { data, isLoading, isError, error, refetch } = useDocList(scope);
   // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
   // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求
 

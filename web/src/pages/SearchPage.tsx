@@ -5,7 +5,7 @@
  */
 
 import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
@@ -78,8 +78,65 @@ interface Result {
   memoryId?: string;
 }
 
+interface SearchHistoryEntry {
+  query: string;
+  mode: 'hybrid' | 'fulltext';
+  /** 空数组表示使用默认 ki-search 标签。 */
+  selectedTags: string[];
+  threshold: number;
+  limit: number;
+  timeout?: number;
+  savedAt: number;
+}
+
+const SEARCH_HISTORY_LIMIT = 10;
+
+function searchHistoryKey(scope: string): string {
+  return `ki-search-history:${encodeURIComponent(scope)}`;
+}
+
+function readSearchHistory(scope: string): SearchHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(searchHistoryKey(scope));
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is SearchHistoryEntry => {
+      if (!item || typeof item !== 'object') return false;
+      const entry = item as Partial<SearchHistoryEntry>;
+      return typeof entry.query === 'string'
+        && entry.query.trim().length > 0
+        && (entry.mode === 'hybrid' || entry.mode === 'fulltext')
+        && Array.isArray(entry.selectedTags)
+        && entry.selectedTags.every((tag) => typeof tag === 'string')
+        && typeof entry.threshold === 'number'
+        && Number.isFinite(entry.threshold)
+        && entry.threshold >= 0
+        && entry.threshold <= THRESHOLD_MAX
+        && typeof entry.limit === 'number'
+        && Number.isInteger(entry.limit)
+        && entry.limit > 0
+        && typeof entry.savedAt === 'number'
+        && Number.isFinite(entry.savedAt)
+        && (entry.timeout === undefined || (typeof entry.timeout === 'number' && Number.isFinite(entry.timeout) && entry.timeout >= QUERY_TIMEOUT_MIN_SECONDS && entry.timeout <= QUERY_TIMEOUT_MAX_SECONDS));
+    }).slice(0, SEARCH_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writeSearchHistory(scope: string, entries: SearchHistoryEntry[]): boolean {
+  try {
+    localStorage.setItem(searchHistoryKey(scope), JSON.stringify(entries.slice(0, SEARCH_HISTORY_LIMIT)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function SearchPage(): JSX.Element {
   const { scope, setScope } = useScope();
+  const activeScopeRef = useRef(scope);
+  activeScopeRef.current = scope;
   const [searchParams] = useSearchParams();
   const requestedScope = searchParams.get('scope');
   const requestedScopeApplied = useRef(false);
@@ -122,7 +179,29 @@ export function SearchPage(): JSX.Element {
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [recentSearches, setRecentSearches] = useState<SearchHistoryEntry[]>([]);
+  const [historyScope, setHistoryScope] = useState<string | null>(null);
+  const [historyStorageWarning, setHistoryStorageWarning] = useState('');
   const { data: docData } = useDocList(scope);
+
+  useEffect(() => {
+    setHistoryScope(scope);
+    setRecentSearches(readSearchHistory(scope));
+    setHistoryStorageWarning('');
+    setResults(null);
+    setTotal(0);
+    setResultQuery('');
+    setResultMode(null);
+    setError(null);
+    setErrorCode(null);
+    setDegradeReason(null);
+    setSkippedScopes([]);
+    setViewing(null);
+    setHistory([]);
+    setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
+  }, [scope]);
 
   /** 手动打开搜索结果是新的导航起点。 */
   const openDocument = useCallback((doc: DocumentView): void => {
@@ -203,13 +282,20 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, []);
 
-  const run = async (modeOverride?: 'fulltext'): Promise<void> => {
-    if (!query.trim()) return;
-    const searchMode = modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
+  const run = async (modeOverride?: 'fulltext', replay?: SearchHistoryEntry): Promise<void> => {
+    const searchQuery = replay?.query ?? query.trim();
+    if (!searchQuery) return;
+    const searchMode = replay?.mode ?? modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
+    const searchScope = scope;
+    const historyTags = replay?.selectedTags ?? selectedTags;
+    const searchThreshold = replay?.threshold ?? threshold;
+    const searchLimit = replay?.limit ?? (Number(limit) || 10);
     // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
-    const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
-      ? Number(queryTimeout)
-      : undefined;
+    const timeout = replay
+      ? replay.timeout
+      : queryTimeoutTouched.current && queryTimeout !== undefined
+        ? Number(queryTimeout)
+        : undefined;
     if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < QUERY_TIMEOUT_MIN_SECONDS || timeout > QUERY_TIMEOUT_MAX_SECONDS)) {
       setError(`Timeout 必须是 ${QUERY_TIMEOUT_MIN_SECONDS}-${QUERY_TIMEOUT_MAX_SECONDS} 秒之间的数字`);
       return;
@@ -222,17 +308,18 @@ export function SearchPage(): JSX.Element {
     setSkippedScopes([]);
     try {
       // Tag 过滤语义：选中具体 tag 时精确过滤（不含 ki-search），"全部"才用默认 ki-search
-      const searchTags = selectedTags.length > 0
-        ? selectedTags          // 仅用户选中的 tag（精确过滤）
+      const searchTags = historyTags.length > 0
+        ? historyTags           // 仅用户选中的 tag（精确过滤）
         : ['ki-search'];        // 默认全部（ki-search）
-      const res = await kiSearch(query.trim(), {
-        scope,
+      const res = await kiSearch(searchQuery, {
+        scope: searchScope,
         tags: searchTags,
-        threshold: searchMode === 'fulltext' ? undefined : threshold || undefined,
-        limit: Number(limit) || 10,
+        threshold: searchMode === 'fulltext' ? undefined : searchThreshold || undefined,
+        limit: searchLimit,
         mode: searchMode,
         ...(timeout !== undefined ? { timeout } : {}),
       });
+      if (activeScopeRef.current !== searchScope) return;
       // 后端业务层错误（如向量库锁定 / 维度不匹配）
       if ((res as Record<string, unknown>).ok === false) {
         const errMsg = (res as Record<string, unknown>).error as string | undefined;
@@ -243,8 +330,27 @@ export function SearchPage(): JSX.Element {
       const hits = (res.results ?? []) as Result[];
       setResults(hits);
       setTotal(hits.length);
-      setResultQuery(query.trim());
+      setResultQuery(searchQuery);
       setResultMode(searchMode);
+      const historyEntry: SearchHistoryEntry = {
+        query: searchQuery,
+        mode: searchMode,
+        selectedTags: [...historyTags],
+        threshold: searchThreshold,
+        limit: searchLimit,
+        ...(timeout !== undefined ? { timeout } : {}),
+        savedAt: Date.now(),
+      };
+      const previous = readSearchHistory(searchScope);
+      const identity = (entry: SearchHistoryEntry): string => JSON.stringify([entry.query, entry.mode, entry.selectedTags]);
+      const nextHistory = [historyEntry, ...previous.filter((entry) => identity(entry) !== identity(historyEntry))]
+        .slice(0, SEARCH_HISTORY_LIMIT);
+      const historySaved = writeSearchHistory(searchScope, nextHistory);
+      if (activeScopeRef.current === searchScope) {
+        setRecentSearches(nextHistory);
+        setHistoryScope(searchScope);
+        setHistoryStorageWarning(historySaved ? '' : '搜索已完成，但浏览器无法保存本地检索历史。');
+      }
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -252,10 +358,36 @@ export function SearchPage(): JSX.Element {
       );
       setSkippedScopes(Array.isArray(res.skipped) ? res.skipped : []);
     } catch (e) {
-      setError((e as Error).message);
+      if (activeScopeRef.current === searchScope) setError((e as Error).message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const replaySearch = (entry: SearchHistoryEntry): void => {
+    setQuery(entry.query);
+    setSelectedTags([...entry.selectedTags]);
+    setThreshold(entry.threshold);
+    setLimit(String(entry.limit));
+    setFullTextOnly(entry.mode === 'fulltext');
+    setQueryTimeout(entry.timeout === undefined ? undefined : String(entry.timeout));
+    queryTimeoutTouched.current = entry.timeout !== undefined;
+    setQueryTimeoutStatus('ready');
+    void run(undefined, entry);
+  };
+
+  const removeRecentSearch = (entry: SearchHistoryEntry): void => {
+    const identity = (item: SearchHistoryEntry): string => JSON.stringify([item.query, item.mode, item.selectedTags]);
+    const next = recentSearches.filter((item) => identity(item) !== identity(entry));
+    const historySaved = writeSearchHistory(scope, next);
+    setRecentSearches(next);
+    setHistoryStorageWarning(historySaved ? '' : '无法更新本地检索历史，请检查浏览器存储设置。');
+  };
+
+  const clearRecentSearches = (): void => {
+    const historySaved = writeSearchHistory(scope, []);
+    setRecentSearches([]);
+    setHistoryStorageWarning(historySaved ? '' : '无法清除浏览器中的检索历史，请检查浏览器存储设置。');
   };
 
   /** 只清空搜索输入，保留当前结果列表，方便用户继续查看或复制结果。 */
@@ -405,6 +537,35 @@ export function SearchPage(): JSX.Element {
             <span className="ki-form-suffix">{fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}</span>
           </div>
         </div>
+        {historyScope === scope && recentSearches.length > 0 && (
+          <section className="ki-search-history" aria-label="最近检索记录">
+            <span className="ki-search-history__label">最近检索</span>
+            <div className="ki-search-history__list">
+              {recentSearches.map((entry) => (
+                <div className="ki-search-history__item" key={`${entry.query}:${entry.mode}:${entry.savedAt}`}>
+                  <button
+                    type="button"
+                    className="ki-search-history__query"
+                    onClick={() => replaySearch(entry)}
+                    disabled={loading}
+                    title={`${entry.query} · ${entry.mode === 'fulltext' ? '仅全文' : '语义 + 全文'}${entry.selectedTags.length > 0 ? ` · ${entry.selectedTags.join(', ')}` : ' · 默认标签'}`}
+                    aria-label={`重跑检索：${entry.query}`}
+                  >{entry.query}</button>
+                  <button
+                    type="button"
+                    className="ki-search-history__remove"
+                    onClick={() => removeRecentSearch(entry)}
+                    disabled={loading}
+                    aria-label={`删除检索记录：${entry.query}`}
+                    title="删除这条记录"
+                  >×</button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={clearRecentSearches} disabled={loading}>清空历史</button>
+          </section>
+        )}
+        {historyStorageWarning && <div className="ki-form-hint" role="status">{historyStorageWarning}</div>}
       </form>
 
       {/* 空状态引导 */}
@@ -526,6 +687,14 @@ export function SearchPage(): JSX.Element {
                     <div className="ki-qr-title">
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
                       <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
+                      {r.group && (
+                        <Link
+                          className="ki-qr-group-browse"
+                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}` }}
+                          onClick={(event) => event.stopPropagation()}
+                          aria-label={`浏览 Group ${r.group} 中的文档`}
+                        >浏览此 Group ↗</Link>
+                      )}
                     </div>
                     {/* 原文 / 向量内容；仅全文模式高亮，避免把语义近似结果误标成精确命中 */}
                     <div className="ki-qr-content">

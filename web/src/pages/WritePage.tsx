@@ -7,6 +7,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
@@ -17,8 +19,9 @@ import { groupError, relationError, scopeError, tagError } from '@/lib/validator
 
 export function WritePage(): JSX.Element {
   const currentScope = useScopeValue();
-  const [scope, setScope] = useState(currentScope);
-  useEffect(() => setScope(currentScope), [currentScope]);
+  const queryClient = useQueryClient();
+  const [scope, setScope] = useState('');
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [preview, setPreview] = useState(false);
   const [vector, setVector] = useState(true);
 
@@ -37,13 +40,14 @@ export function WritePage(): JSX.Element {
 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [savedTarget, setSavedTarget] = useState<{ scope: string; group: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // 实时校验 group / relation（空字符串时不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
   const relationErr = relation.trim() ? relationError(relation) : null;
-  const scopeErr = scope.trim() ? scopeError(scope) : 'Scope 不能为空';
-  const hasFormError = !!scopeErr || !!groupErr || !!relationErr;
+  const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
+  const hasFormError = !scopeConfirmed || !scope.trim() || !!scopeErr || !!groupErr || !!relationErr;
 
   // 点击外部关闭 tag combobox
   useEffect(() => {
@@ -57,6 +61,10 @@ export function WritePage(): JSX.Element {
   // 加载可用 tag 列表
   useEffect(() => {
     let cancelled = false;
+    if (!scope) {
+      setAvailableTags([]);
+      return () => { cancelled = true; };
+    }
     fetchTags(scope).then((res) => {
       if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
     }).catch(() => {});
@@ -66,6 +74,11 @@ export function WritePage(): JSX.Element {
   const submit = async (): Promise<void> => {
     setError(null);
     setResult(null);
+    setSavedTarget(null);
+    if (!scopeConfirmed) {
+      setError('请先明确选择本次写入目标 Scope');
+      return;
+    }
     if (scopeErr) {
       setError(scopeErr);
       return;
@@ -83,8 +96,17 @@ export function WritePage(): JSX.Element {
     }
     setSubmitting(true);
     try {
-      await kiSyncRelation({ scope, group: group.trim(), relation: relation.trim(), content: markdown, vector, tags: selectedTags });
+      const target = { scope, group: group.trim() };
+      await kiSyncRelation({ scope: target.scope, group: target.group, relation: relation.trim(), content: markdown, vector, tags: selectedTags });
+      void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
+      void queryClient.invalidateQueries({ queryKey: ['docList', target.scope] });
+      void queryClient.invalidateQueries({ queryKey: ['fullTextSearch', target.scope] });
+      void fetchTags(target.scope).then((res) => {
+        if (res.ok) setAvailableTags(res.tags.map((tag) => tag.tag));
+      }).catch(() => {});
       setResult(`写入成功${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`);
+      setSavedTarget(target);
+      setScopeConfirmed(false);
       setGroup('');
       setRelation('');
       setMarkdown('');
@@ -94,6 +116,7 @@ export function WritePage(): JSX.Element {
       setPreview(false);
     } catch (e) {
       setError((e as Error).message);
+      setScopeConfirmed(false);
     } finally {
       setSubmitting(false);
     }
@@ -120,6 +143,8 @@ export function WritePage(): JSX.Element {
   };
 
   const reset = (): void => {
+    setScope('');
+    setScopeConfirmed(false);
     setGroup('');
     setRelation('');
     setMarkdown('');
@@ -128,6 +153,7 @@ export function WritePage(): JSX.Element {
     setTagInputErr(null);
     setPreview(false);
     setResult(null);
+    setSavedTarget(null);
     setError(null);
   };
 
@@ -136,205 +162,224 @@ export function WritePage(): JSX.Element {
       <div className="ki-page-head">
         <div>
           <h1>知识写入</h1>
-          <p>sync-relation · 目标 scope：{scope}</p>
+          <p>sync-relation · 目标 scope：{scopeConfirmed ? scope : '尚未确认'}</p>
         </div>
       </div>
 
-      <div className="ki-content-inner ki-write-layout">
-        <div className="ki-card">
-          <div className="ki-card__body" style={{ padding: 28 }}>
-            <div className="ki-form-group" style={{ marginBottom: 12 }}>
-              <label className="ki-form-label">Scope（目标知识库）</label>
-              <ScopePathSelect
-                value={scope}
-                onChange={(value) => setScope(value.trim())}
-                placeholder="选择或输入 Scope 名称，如：kafka"
-                hint="默认使用当前 Scope；输入不存在的合法名称并回车确认，提交写入时自动新建。"
-                error={scopeErr}
+      <div className="ki-card ki-write-layout">
+        <div className="ki-card__body" style={{ padding: 28 }}>
+          <div className="ki-form-group" style={{ marginBottom: 12 }}>
+            <label className="ki-form-label">Scope（目标知识库）</label>
+            <ScopePathSelect
+              value={scope}
+              confirmed={scopeConfirmed}
+              currentScope={currentScope}
+              onChange={(value, confirmed) => {
+                if (value !== scope) {
+                  setGroup('');
+                  setAvailableTags([]);
+                  setSelectedTags([]);
+                }
+                setResult(null);
+                setSavedTarget(null);
+                setError(null);
+                setScope(value.trim());
+                setScopeConfirmed(confirmed);
+              }}
+              placeholder="按名称筛选已有 Scope，如：kafka"
+              hint="每次保存前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
+              error={scopeErr}
+              disabled={submitting}
+            />
+          </div>
+          <div className="ki-form-row">
+            <div className="ki-form-group">
+              <label className="ki-form-label">Group（文档分组）</label>
+              <GroupPathSelect
+                scope={scope || currentScope}
+                value={group}
+                onChange={setGroup}
+                disabled={!scopeConfirmed}
+                placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
+                hint={scopeConfirmed ? "斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .." : '请先确认本次写入目标 Scope，再选择 Group。'}
+                error={groupErr}
               />
             </div>
-            <div className="ki-form-row">
-              <div className="ki-form-group">
-                <label className="ki-form-label">Group（文档分组）</label>
-                <GroupPathSelect
-                  scope={scope}
-                  value={group}
-                  onChange={setGroup}
-                  placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
-                  hint="斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .."
-                  error={groupErr}
-                />
-              </div>
-              <div className="ki-form-group">
-                <label className="ki-form-label">文档名称（Relation）</label>
-                <input
-                  className={`ki-form-input${relationErr ? ' ki-form-input--error' : ''}`}
-                  placeholder="如：告警收敛策略"
-                  value={relation}
-                  onChange={(e) => setRelation(e.target.value)}
-                  aria-invalid={relationErr ? true : undefined}
-                />
-                {relationErr ? (
-                  <div className="ki-form-error">{relationErr}</div>
-                ) : (
-                  <div className="ki-form-hint">同 Group 内唯一；浏览页按此名显示文档。禁止包含 / / \ 和 ..</div>
-                )}
-              </div>
-            </div>
             <div className="ki-form-group">
-              <div className="ki-label-row">
-                <label className="ki-form-label" style={{ marginBottom: 0 }}>
-                  Module Info（Markdown 正文）
-                </label>
+              <label className="ki-form-label">文档名称（Relation）</label>
+              <input
+                className={`ki-form-input${relationErr ? ' ki-form-input--error' : ''}`}
+                placeholder="如：告警收敛策略"
+                value={relation}
+                onChange={(e) => setRelation(e.target.value)}
+                aria-invalid={relationErr ? true : undefined}
+              />
+              {relationErr ? (
+                <div className="ki-form-error">{relationErr}</div>
+              ) : (
+                <div className="ki-form-hint">同 Group 内唯一；浏览页按此名显示文档。禁止包含 / / \ 和 ..</div>
+              )}
+            </div>
+          </div>
+          <div className="ki-form-group">
+            <div className="ki-label-row">
+              <label className="ki-form-label" style={{ marginBottom: 0 }}>
+                Module Info（Markdown 正文）
+              </label>
+              <button
+                type="button"
+                className={`ki-preview-btn${preview ? ' ki-preview-btn--active' : ''}`}
+                onClick={() => setPreview((v) => !v)}
+              >
+                {preview ? '编辑' : '预览'}
+              </button>
+            </div>
+            <div className="ki-md-editor">
+              {preview ? (
+                <div className="ki-md-preview" style={{ height: 320 }}>
+                  <div className="ki-markdown">
+                    <MarkdownPreview text={markdown || '（空）'} />
+                  </div>
+                </div>
+              ) : (
+                <textarea
+                  className="ki-form-textarea"
+                  style={{ height: 320 }}
+                  placeholder="## 标题&#10;&#10;正文…"
+                  value={markdown}
+                  onChange={(e) => setMarkdown(e.target.value)}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* 自定义标签（可选） */}
+          <div className="ki-form-group" style={{ marginTop: 14 }}>
+            <label className="ki-form-label">Tags</label>
+            {/* combobox：输入框 + 下拉 */}
+            <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
+              <div className="ki-combobox__input-wrap">
+                <input
+                  className={`ki-form-input${tagInputErr ? ' ki-form-input--error' : ''}`}
+                  style={{ width: '100%', boxSizing: 'border-box' }}
+                  placeholder="选择已有 tag 或输入新建，回车确认"
+                  value={tagInput}
+                  onChange={(e) => { setTagInput(e.target.value); if (tagInputErr) setTagInputErr(null); }}
+                  onFocus={() => setTagOpen(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
+                  }}
+                  autoComplete="off"
+                  aria-invalid={tagInputErr ? true : undefined}
+                />
                 <button
                   type="button"
-                  className={`ki-preview-btn${preview ? ' ki-preview-btn--active' : ''}`}
-                  onClick={() => setPreview((v) => !v)}
+                  className={`ki-combobox__toggle${tagOpen ? ' ki-combobox__toggle--open' : ''}`}
+                  tabIndex={-1}
+                  onClick={(e) => { e.stopPropagation(); setTagOpen((v) => !v); }}
                 >
-                  {preview ? '编辑' : '预览'}
+                  {tagOpen ? '▴' : '▾'}
                 </button>
               </div>
-              <div className="ki-md-editor">
-                {preview ? (
-                  <div className="ki-md-preview" style={{ height: 320 }}>
-                    <div className="ki-markdown">
-                      <MarkdownPreview text={markdown || '（空）'} />
-                    </div>
-                  </div>
-                ) : (
-                  <textarea
-                    className="ki-form-textarea"
-                    style={{ height: 320 }}
-                    placeholder="## 标题&#10;&#10;正文…"
-                    value={markdown}
-                    onChange={(e) => setMarkdown(e.target.value)}
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* 自定义标签（可选） */}
-            <div className="ki-form-group" style={{ marginTop: 14 }}>
-              <label className="ki-form-label">Tags</label>
-              {/* combobox：输入框 + 下拉 */}
-              <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
-                <div className="ki-combobox__input-wrap">
-                  <input
-                    className={`ki-form-input${tagInputErr ? ' ki-form-input--error' : ''}`}
-                    style={{ width: '100%', boxSizing: 'border-box' }}
-                    placeholder="选择已有 tag 或输入新建，回车确认"
-                    value={tagInput}
-                    onChange={(e) => { setTagInput(e.target.value); if (tagInputErr) setTagInputErr(null); }}
-                    onFocus={() => setTagOpen(true)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); addTagFromInput(); }
-                    }}
-                    autoComplete="off"
-                    aria-invalid={tagInputErr ? true : undefined}
-                  />
-                  <button
-                    type="button"
-                    className={`ki-combobox__toggle${tagOpen ? ' ki-combobox__toggle--open' : ''}`}
-                    tabIndex={-1}
-                    onClick={(e) => { e.stopPropagation(); setTagOpen((v) => !v); }}
-                  >
-                    {tagOpen ? '▴' : '▾'}
-                  </button>
-                </div>
-                {tagOpen && (
-                  <div className="ki-combobox__panel ki-combobox__panel--open">
-                    <div className="ki-combobox__tree" style={{ padding: '6px 8px', maxHeight: 180, overflowY: 'auto' }}>
-                      {availableTags.length === 0 && !tagInput ? (
-                        <div className="ki-cell-sub" style={{ padding: 6 }}>暂无已有 tag</div>
-                      ) : (
-                        <>
-                          {availableTags
-                            .filter((t) => !tagInput || t.includes(tagInput.toLowerCase()))
-                            .map((t) => (
-                              <span
-                                key={t}
-                                className={`ki-tag-option${selectedTags.includes(t) ? ' ki-tag-option--selected' : ''}`}
-                                onClick={() => toggleTag(t)}
-                              >
-                                {selectedTags.includes(t) ? '✓ ' : '+ '}{t}
-                              </span>
-                            ))
-                          }
-                          {tagInput && !availableTags.some((t) => t === tagInput.toLowerCase()) && !selectedTags.includes(tagInput.toLowerCase()) && (
-                            <span className="ki-tag-option" onClick={addTagFromInput} style={{ color: 'var(--ki-color-primary)' }}>
-                              ✚ 新建：{tagInput.trim()}
+              {tagOpen && (
+                <div className="ki-combobox__panel ki-combobox__panel--open">
+                  <div className="ki-combobox__tree" style={{ padding: '6px 8px', maxHeight: 180, overflowY: 'auto' }}>
+                    {availableTags.length === 0 && !tagInput ? (
+                      <div className="ki-cell-sub" style={{ padding: 6 }}>暂无已有 tag</div>
+                    ) : (
+                      <>
+                        {availableTags
+                          .filter((t) => !tagInput || t.includes(tagInput.toLowerCase()))
+                          .map((t) => (
+                            <span
+                              key={t}
+                              className={`ki-tag-option${selectedTags.includes(t) ? ' ki-tag-option--selected' : ''}`}
+                              onClick={() => toggleTag(t)}
+                            >
+                              {selectedTags.includes(t) ? '✓ ' : '+ '}{t}
                             </span>
-                          )}
-                        </>
-                      )}
-                    </div>
-                    <div className="ki-combobox__footer">
-                      <span className="ki-cell-sub">输入后按回车确认；新建 tag 将自动加入</span>
-                    </div>
+                          ))
+                        }
+                        {tagInput && !availableTags.some((t) => t === tagInput.toLowerCase()) && !selectedTags.includes(tagInput.toLowerCase()) && (
+                          <span className="ki-tag-option" onClick={addTagFromInput} style={{ color: 'var(--ki-color-primary)' }}>
+                            ✚ 新建：{tagInput.trim()}
+                          </span>
+                        )}
+                      </>
+                    )}
                   </div>
-                )}
-              </div>
-              {/* 已选 tag pills（独立行） */}
-              {selectedTags.length > 0 && (
-                <div className="ki-tag-pills" style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {selectedTags.map((t) => (
-                    <span key={t} className="ki-tag-pill">
-                      {t}
-                      <span className="ki-tag-pill__x" onClick={() => removeTag(t)}>✕</span>
-                    </span>
-                  ))}
+                  <div className="ki-combobox__footer">
+                    <span className="ki-cell-sub">输入后按回车确认；新建 tag 将自动加入</span>
+                  </div>
                 </div>
               )}
-              {tagInputErr ? (
-                <div className="ki-form-error">{tagInputErr}</div>
-              ) : (
-                <div className="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车创建。禁止包含 , / \ 和 ..</div>
-              )}
             </div>
-
-            {/* 是否向量化 */}
-            <div className="ki-vec-switch" style={{ marginTop: 12 }}>
-              <div className="ki-vec-switch__label">
-                <span className="ki-vec-switch__title">向量化</span>
-                <span className="ki-vec-switch__desc">写入 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
-              </div>
-              <div
-                className={`ki-switch${vector ? ' ki-switch--on' : ''}`}
-                role="switch"
-                aria-checked={vector}
-                onClick={() => setVector((v) => !v)}
-              >
-                <div className="ki-switch__knob" />
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 20 }}>
-              <button
-                className="ki-btn ki-btn--primary"
-                onClick={() => void submit()}
-                disabled={submitting || hasFormError}
-              >
-                {submitting ? '保存中…' : '保存'}
-              </button>
-              <button className="ki-btn ki-btn--secondary" onClick={reset}>
-                清空
-              </button>
-              {result && (
-                <span className="ki-cell-sub" style={{ color: 'var(--ki-color-success)' }}>
-                  ✅ {result}
-                </span>
-              )}
-            </div>
-
-            {error && (
-              <div className="ki-empty" style={{ marginTop: 16 }}>
-                <div>
-                  <h3>写入失败</h3>
-                  <p>{error}</p>
-                </div>
+            {/* 已选 tag pills（独立行） */}
+            {selectedTags.length > 0 && (
+              <div className="ki-tag-pills" style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {selectedTags.map((t) => (
+                  <span key={t} className="ki-tag-pill">
+                    {t}
+                    <span className="ki-tag-pill__x" onClick={() => removeTag(t)}>✕</span>
+                  </span>
+                ))}
               </div>
             )}
+            {tagInputErr ? (
+              <div className="ki-form-error">{tagInputErr}</div>
+            ) : (
+              <div className="ki-form-hint">点击选择已有 tag，或输入新 tag 后回车创建。禁止包含 , / \ 和 ..</div>
+            )}
           </div>
+
+          {/* 是否向量化 */}
+          <div className="ki-vec-switch" style={{ marginTop: 12 }}>
+            <div className="ki-vec-switch__label">
+              <span className="ki-vec-switch__title">向量化</span>
+              <span className="ki-vec-switch__desc">写入 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
+            </div>
+            <div
+              className={`ki-switch${vector ? ' ki-switch--on' : ''}`}
+              role="switch"
+              aria-checked={vector}
+              onClick={() => setVector((v) => !v)}
+            >
+              <div className="ki-switch__knob" />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 20 }}>
+            <button
+              className="ki-btn ki-btn--primary"
+              onClick={() => void submit()}
+              disabled={submitting || hasFormError}
+            >
+              {submitting ? '保存中…' : '保存'}
+            </button>
+            <button className="ki-btn ki-btn--secondary" onClick={reset}>
+              清空
+            </button>
+            {result && (
+              <span className="ki-cell-sub" style={{ color: 'var(--ki-color-success)' }}>
+                ✅ {result}
+              </span>
+            )}
+            {savedTarget && (
+              <Link
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(savedTarget.scope)}&group=${encodeURIComponent(savedTarget.group)}` }}
+              >查看写入位置 →</Link>
+            )}
+          </div>
+
+          {error && (
+            <div className="ki-empty" style={{ marginTop: 16 }}>
+              <div>
+                <h3>写入失败</h3>
+                <p>{error}</p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </>
