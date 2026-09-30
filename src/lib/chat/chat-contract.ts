@@ -33,6 +33,38 @@ export interface SourceRef {
 }
 
 /**
+ * 检索过程步骤（**步骤级摘要**，落盘进 `ChatMessage.progress`）。
+ *
+ * 为什么要有：工具步骤原先只活在 `streaming.progress`（内存），`streamEnd` 一清空就没了 ——
+ * 用户生成中看着"正在检索知识库…"，生成完（甚至没刷新页面）就什么都不剩，无法自证
+ * AI 到底检索了几次（真机走查 #11）。
+ *
+ * ⚠️ 与 `ChatMessage` 的两条结构性不变量不冲突：
+ *   · **不是 reasoning**：只记工具名 / 模式 / 命中数 / 是否报错，不含思考文本；
+ *   · **不是检索原始结果**：**不含查询串与片段正文**（N22 只允许投影后的 `sources`）。
+ *
+ * 形状与 SSE 的 `tool_start` / `tool_end` 事件对齐，便于前端复用同一套文案渲染。
+ */
+export interface ChatProgressStep {
+  phase: 'start' | 'end';
+  /**
+   * 本步发生时**已发出的正文字符数**（interleave 锚点）：
+   * 渲染时把正文按各行的 afterChars 切段，调用痕迹插在"哪句话之后"就显示在哪句话下面。
+   * 旧数据无此字段 → 视为 0（集中在正文前，维持旧行为）。
+   */
+  afterChars?: number;
+  /** 工具名（如 `kb_search`） */
+  name?: string;
+  /** 检索模式（`tool_start` 带） */
+  mode?: string;
+  /** 命中条数（`tool_end` 带） */
+  hits?: number;
+  durationMs?: number;
+  /** 工具报错文本（仅失败步骤；这是"说人话"的失败原因，不含片段正文） */
+  error?: string;
+}
+
+/**
  * 会话消息。
  *
  * ⚠️ 两条结构性不变量（不得违反）：
@@ -51,6 +83,8 @@ export interface ChatMessage {
   usage?: { promptTokens: number; completionTokens: number; reasoningTokens?: number };
   /** S-02 §9.1：来源引用（v2 新增） */
   sources?: SourceRef[];
+  /** 检索过程步骤摘要（生成结束后仍可回看；见 `ChatProgressStep` 的边界说明） */
+  progress?: ChatProgressStep[];
 }
 
 /** 会话文件（S-02 §3.2） */
@@ -162,8 +196,12 @@ export interface ChatConfigOk {
 // ─────────────────────────────────────────────────────────────
 
 export const CHAT_BUDGET = {
-  /** 工具调用轮次上限（T11） */
-  maxToolRounds: 3,
+  /**
+   * 工具调用轮次上限（T11 原为 3；**2026-09-30 用户裁决取消约束** → Infinity）。
+   * 一句一检的长节奏不该被截断；防失控由模型自然停手 / 用户中止 / 请求超时兜底。
+   * ⚠️ Infinity 经 JSON 序列化为 null：消费方只做展示/比较，不做算术（见 retrieval-skill 规则 4）。
+   */
+  maxToolRounds: Number.POSITIVE_INFINITY,
   /** 单次检索返回条数上限（T11） */
   maxHitsPerCall: 5,
   /** 进上游上下文时单片段截断长度（S07 §3.4） */

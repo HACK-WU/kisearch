@@ -22,7 +22,14 @@ import type { ChatMessage, SourceRef } from '@/api/chatContract';
 
 /** 生成期间的动态反馈条目（按时间序，供 R11a 展示） */
 export type ProgressStep =
-  | { kind: 'tool'; phase: 'start' | 'end'; label: string }
+  /**
+   * 工具步骤。走查 #4：除 label 外透传事件摘要字段（name/mode/query/hits/durationMs/error），
+   * 供时间线行做「动作名 + 工具胶囊 + 状态」双轨展示与展开卡片；
+   * ⚠️ 只放**摘要**，不放响应正文（批次 3 边界，见 .plans/2026-09-30-demo-parity-fix 护栏 #2）。
+   */
+  | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; hits?: number; durationMs?: number; error?: string;
+      /** interleave 锚点：本步发生时已发出的正文字符数（reducer 统一捕获，渲染方不必传） */
+      afterChars?: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'answering' };
 
@@ -50,6 +57,14 @@ export interface StreamingState {
   content: string;
   /** 思考内容 —— **仅内存，不落盘**（D7）；刷新/切会话即失 */
   reasoning: string;
+  /**
+   * 思考分段（interleave 锚点，2026-09-30 用户裁决：思考过程也要"在哪想的就在哪显示"）。
+   *
+   * 切段规则：连续 reasoning 增量并入同段；一旦正文输出或工具调用发生 → 封段，
+   * 之后的思考是新一段（afterChars = 封段前已发出的正文长度）。
+   * 与 `reasoning` 并存：`reasoning` 保持全量串（"正在思考"判据等既有语义不变）。
+   */
+  reasoningSegs: Array<{ afterChars: number; text: string; closed: boolean }>;
   /** 工具步骤 + 生成中状态（R11a：每一秒都要有可见反馈） */
   progress: ProgressStep[];
   /** 降级标记 */
@@ -96,6 +111,17 @@ export interface ChatUiState {
    */
   degradedByMessage: Record<string, DegradedMark>;
   /**
+   * 每条 assistant 消息的**工具步骤**（键 = messageId）。
+   *
+   * 生成结束后 MCP 调用痕迹必须留存（用户可回看"检索了几次 / 有没有真调工具"）。
+   * 2026-09-30 二次修正：撤销的只是「跳到底部」的呈现 —— 现在渲染在**消息顶部原位**
+   * （与流式气泡同一位置），收尾不跳位、不消失。
+   *
+   * 为什么不进 `ChatMessage`：契约冻结（骨架期一字不改），与 `degradedByMessage` 同款
+   * **旁挂 map** 方案。**仅内存**；刷新/切会话后由落盘的 `message.progress` 还原。
+   */
+  progressByMessage: Record<string, ProgressStep[]>;
+  /**
    * 一次性提示文案（当前为 `done.warning` 的落地，如「会话过长，建议新建会话」）。
    *
    * 为什么要有：`done.warning`（`tool-rounds-exhausted` / `conversation-too-long`）是
@@ -116,12 +142,14 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
     messageId: null,
     content: '',
     reasoning: '',
+    reasoningSegs: [],
     progress: [],
     degraded: null,
     aborted: false,
     sources: [],
   },
   degradedByMessage: {},
+  progressByMessage: {},
   notice: null,
 };
 
@@ -171,6 +199,7 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         messages: [],
         streaming: INITIAL_CHAT_STATE.streaming,
         degradedByMessage: {},
+        progressByMessage: {},
         notice: null,
       };
     case 'reset':
@@ -208,6 +237,7 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
           messageId: action.messageId,
           content: '',
           reasoning: '',
+          reasoningSegs: [],
           progress: [],
           degraded: null,
           aborted: false,
@@ -218,22 +248,45 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
 
     case 'streamContent':
       // 增量追加（SSE 逐帧语义）；单写者由 useChatStream 保证
+      // 正文开始输出 → 封当前思考段（之后的思考属于新位置，见 reasoningSegs）
       return {
         ...state,
-        streaming: { ...state.streaming, content: state.streaming.content + action.text },
+        streaming: {
+          ...state.streaming,
+          content: state.streaming.content + action.text,
+          reasoningSegs: closeLastReasoningSeg(state.streaming.reasoningSegs),
+        },
       };
 
     case 'streamReasoning':
       // D7：只进内存态，不落盘、不写进 messages
+      // 同时按锚点续段/起段：未封尾段 → 追加；否则以当前正文长度起新段（interleave 用）
       return {
         ...state,
-        streaming: { ...state.streaming, reasoning: state.streaming.reasoning + action.text },
+        streaming: {
+          ...state.streaming,
+          reasoning: state.streaming.reasoning + action.text,
+          reasoningSegs: appendReasoningSeg(state.streaming.reasoningSegs, action.text, state.streaming.content.length),
+        },
       };
 
     case 'streamProgress':
+      // ★ tool 步骤在此统一捕获 afterChars = 当前已渲染正文长度（"在哪句话之后调的"），
+      //   渲染层据此把调用痕迹插回正文原位（interleave），而不是全部堆在消息顶部。
+      //   落盘还原路径由服务端 progress.afterChars 提供，两路口径一致（同一事件流同一时刻）。
       return {
         ...state,
-        streaming: { ...state.streaming, progress: [...state.streaming.progress, action.step] },
+        streaming: {
+          ...state.streaming,
+          progress: [
+            ...state.streaming.progress,
+            action.step.kind === 'tool'
+              ? { ...action.step, afterChars: state.streaming.content.length }
+              : action.step,
+          ],
+          // 工具调用发生 → 同样封当前思考段（调用后的思考是新一段）
+          reasoningSegs: closeLastReasoningSeg(state.streaming.reasoningSegs),
+        },
       };
 
     case 'streamDegraded':
@@ -285,6 +338,8 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         // ★ N17：降级标记随消息**留存**（不进冻结的 ChatMessage，理由见 degradedByMessage 注释）。
         //   原先只落在 streaming.degraded，streamEnd 一清空 → 生成结束后回看历史看不到标记。
         degradedByMessage: retainDegraded(state.degradedByMessage, state.streaming),
+        // ★ 同理留存工具步骤：生成结束后痕迹不消失（原位渲染在消息顶部，见 ChatPanel）
+        progressByMessage: retainProgress(state.progressByMessage, state.streaming),
         streaming: INITIAL_CHAT_STATE.streaming,
       };
   }
@@ -299,6 +354,43 @@ function retainDegraded(
   // 无内容 → `finalizeStream` 不会产生消息，标记无处可挂
   if (!degraded || !messageId || !content) return prev;
   return { ...prev, [messageId]: degraded };
+}
+
+/** reasoning 增量续段：尾段未封 → 追加；否则以当前正文长度为锚起新段 */
+function appendReasoningSeg(
+  segs: StreamingState['reasoningSegs'],
+  text: string,
+  afterChars: number,
+): StreamingState['reasoningSegs'] {
+  const last = segs[segs.length - 1];
+  if (last && !last.closed) {
+    return [...segs.slice(0, -1), { ...last, text: last.text + text }];
+  }
+  return [...segs, { afterChars, text, closed: false }];
+}
+
+/** 正文输出 / 工具调用发生时封住尾段（之后的 reasoning 属于新锚点） */
+function closeLastReasoningSeg(
+  segs: StreamingState['reasoningSegs'],
+): StreamingState['reasoningSegs'] {
+  const last = segs[segs.length - 1];
+  if (!last || last.closed) return segs;
+  return [...segs.slice(0, -1), { ...last, closed: true }];
+}
+
+/**
+ * 收尾时把本轮工具步骤留存到 `progressByMessage`（键 = messageId）。
+ *
+ * 与 `retainDegraded` 同款判据：无内容 → `finalizeStream` 不产生消息，步骤无处可挂；
+ * 无步骤 → 无需留存（省内存，也让"没有工具调用的普通问答"不产生空条目）。
+ */
+function retainProgress(
+  prev: Record<string, ProgressStep[]>,
+  streaming: StreamingState,
+): Record<string, ProgressStep[]> {
+  const { progress, messageId, content } = streaming;
+  if (!progress.length || !messageId || !content) return prev;
+  return { ...prev, [messageId]: progress };
 }
 
 /** 把本轮来源引用挂到指定 messageId 上；id 为空或无匹配时不改消息（来源仍由 done 事件兜底） */

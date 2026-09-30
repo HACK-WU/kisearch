@@ -613,5 +613,16 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     }
   }, [html]);
 
-  return <div ref={rootRef} dangerouslySetInnerHTML={{ __html: html }} data-mermaid={ready ? 'done' : undefined} />;
+  // `ki-markdown`：Markdown 排版的样式钩子（`ki.css` §markdown，含列表缩进 / 代码块 / 引用 / 标题）。
+  // 此前只有部分调用方在外层自行套了这个类（DocumentEditor / ModuleDrawer），**对话消息两处漏套** →
+  // 列表 marker 的 padding-left 被全局 reset 清成 0、代码块与引用无样式（真机走查 #8）。
+  // 由组件自身带上，避免以后再有调用方漏掉这一层。
+  return (
+    <div
+      ref={rootRef}
+      className="ki-markdown"
+      dangerouslySetInnerHTML={{ __html: html }}
+      data-mermaid={ready ? 'done' : undefined}
+    />
+  );
 }

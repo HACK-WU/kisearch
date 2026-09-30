@@ -13,7 +13,15 @@
  * @see api/INDEX.md · api/retrieval.md
  */
 
-import type { ChatConfigOk, ChatEvent, ConversationFile, ConversationSummary } from '@/api/chatContract';
+import type {
+  ChatConfigOk,
+  ChatEvent,
+  ConversationFile,
+  ConversationSummary,
+  PromptConfig,
+  PromptConfigOk,
+  PromptConfigSaveOk,
+} from '@/api/chatContract';
 
 /** chat 接口基础路径（导出以便其他模块复用，避免多处硬编码） */
 export const CHAT_API_BASE = '/api/chat';
@@ -24,6 +32,8 @@ export class ChatApiError extends Error {
     public readonly status: number,
     public readonly code: string | undefined,
     message: string,
+    /** 字段级错误（如配置校验失败 `PROMPT_CONFIG_INVALID`）：供 UI 定位到具体输入项 */
+    public readonly details?: { field: string; message: string }[],
   ) {
     super(message);
     this.name = 'ChatApiError';
@@ -47,7 +57,7 @@ async function toApiError(res: Response): Promise<ChatApiError> {
     /* 非 JSON（如 404 HTML）：保留 HTTP 状态即可 */
   }
   const message = body?.error ?? `HTTP ${res.status}`;
-  return new ChatApiError(res.status, body?.code, message);
+  return new ChatApiError(res.status, body?.code, message, body?.details);
 }
 
 /**
@@ -66,6 +76,31 @@ async function reqJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const jsonBody = (data: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(data) });
+
+// ─── 对话配置层（提示词 / Skill / 工具开关）─────────────────
+
+/**
+ * `GET /api/chat/prompt-config` —— 一次拿全 `config` / `defaults` / `limits` / `toolGroups` / `issue`。
+ *
+ * · `defaults` 让「恢复默认」不必在前端复制一份默认文案
+ * · `limits` 与 `toolGroups` 让前端不硬编码字数上限与工具名（SSOT 在服务端）
+ * · `issue` 非 null 表示配置文件有问题且已回退默认（**界面必须提示，不得静默**）
+ */
+export async function getPromptConfig(): Promise<PromptConfigOk> {
+  return reqJson<PromptConfigOk>(`${CHAT_API_BASE}/prompt-config`);
+}
+
+/**
+ * `PUT /api/chat/prompt-config` —— **整体替换**保存（非逐字段合并，避免"删掉的 skill 又回来了"）。
+ *
+ * 校验失败抛 `ChatApiError(400, 'PROMPT_CONFIG_INVALID')`；字段级原因读 `err.details`。
+ */
+export async function savePromptConfig(config: PromptConfig): Promise<PromptConfigSaveOk> {
+  return reqJson<PromptConfigSaveOk>(`${CHAT_API_BASE}/prompt-config`, {
+    method: 'PUT',
+    body: JSON.stringify(config),
+  });
+}
 
 // ─── 配置（API-01 / API-13）────────────────────────────────
 

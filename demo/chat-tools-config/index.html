@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>kisearch · 对话工具配置 demo（增量）</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230071e3'/%3E%3Cstop offset='1' stop-color='%235ac8fa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='22' font-family='Helvetica,Arial' font-size='16' font-weight='700' fill='white' text-anchor='middle'%3Ek%3C/text%3E%3C/svg%3E" />
 <!-- ★ ki.css 原样内联：来源 web/src/styles/ki.css（零构建单文件要求）。
        要改样式请改源文件，再重新生成本块。 -->
 <style>
@@ -2330,10 +2331,11 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 </style>
 <style>
 /* ═══════════════════════════════════════════════════════════════
-   本 demo 只声明【三处新增】，面板与消息的外观全部来自 ki.css：
+   本 demo 声明【三处新增 + 一段精修】，面板与消息的外观来自 ki.css：
      A. .ki-chat-tl__stat / --tool / --tool-fail   工具调用行（R12）
      B. .ki-chat-tool*                              工具调用展开区（R12）
      C. .ki-chat-cfg*                               配置层（R4/R5/R6）
+     D. 视觉精修段（2026-09-30 走查）               只追加、不改上方 ki.css 源内联段
    令牌沿用 --ki-*；面板内 token 按既有做法声明在面板块内
    ═══════════════════════════════════════════════════════════════ */
 
@@ -2343,10 +2345,20 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   font-size: var(--ki-font-size-xs);
   font-variant-numeric: tabular-nums;
 }
+/* 动作名 + 内部工具名双轨：动作名给人看，工具名给核对用（第四轮修正：原直出 ki_search 对用户不可读） */
+.ki-chat-tl__act { flex: 0 0 auto; }
+.ki-chat-tl__tool {
+  flex: 0 0 auto; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+/* 动作名与工具名之间补分隔点：原来 5 段信息连成一片（第四轮补充） */
+.ki-chat-tl__tool::before { content: '·'; margin-right: 5px; color: var(--ki-color-border-strong); }
 .ki-chat-tl__node--tool { cursor: pointer; border-radius: var(--ki-radius-sm); }
 .ki-chat-tl__node--tool:hover { background: var(--ki-color-hover); }
 .ki-chat-tl__node--tool::before { background: var(--ki-color-success); }
 .ki-chat-tl__node--tool.ki-chat-tl__node--tool-fail::before { background: var(--ki-color-warning); }
+/* 运行中：复用既有 ki-chat-pulse，与 --run 变体同源（第四轮修正：补齐中间态） */
+.ki-chat-tl__node--tool.ki-chat-tl__node--run::before { background: var(--ki-color-primary); animation: ki-chat-pulse 1.1s ease-in-out infinite; }
 .ki-chat-tl__chev { margin-left: auto; color: var(--ki-color-text-subtle); transition: transform 160ms; }
 .ki-chat-tl__node--tool[aria-expanded="true"] .ki-chat-tl__chev { transform: rotate(90deg); }
 
@@ -2399,6 +2411,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 
 /* ── C. 配置层：叠在面板之上（与会话浮层同为 panel-scoped，不新增 app 级层）── */
 .ki-chat-cfg {
+  /* 面板级令牌：开关滑块是唯一无法用既有 --ki-* 表达的值（第四轮修正：集中声明，勿散落） */
+  --ki-chat-cfg-knob: #fff;
   position: absolute; inset: 0; z-index: 20;
   display: flex; flex-direction: column;
   background: var(--ki-color-surface);
@@ -2417,32 +2431,83 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-cfg__field { margin-bottom: var(--ki-space-4); }
 .ki-chat-cfg__row { display: flex; align-items: baseline; gap: var(--ki-space-2); }
 .ki-chat-cfg__label { font-weight: 500; margin-bottom: 6px; display: block; }
+.ki-chat-cfg__badge { margin-left: var(--ki-space-2); font-style: normal; font-weight: 400; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
 .ki-chat-cfg__reset { margin-left: auto; color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del, .ki-chat-cfg__reset { flex: 0 0 auto; white-space: nowrap; }   /* 底栏文字钮不得被压缩（第四轮修正：原实现"恢复默认"被压成空方框） */
 .ki-chat-cfg__reset:hover { text-decoration: underline; }
 .ki-chat-cfg__hint { margin: 6px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.6; }
 .ki-chat-cfg__ta {
-  width: 100%; min-height: 96px; resize: vertical;
-  font: inherit; font-size: var(--ki-font-size-sm); line-height: 1.6; color: var(--ki-color-text);
+  width: 100%; min-height: 132px; resize: vertical;   /* 第四轮补充：96px 太矮，编辑区像一条缝 */
+  font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6; color: var(--ki-color-text);
   background: var(--ki-color-bg-secondary);
   border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
   padding: 9px 11px; transition: border-color 160ms;
 }
 .ki-chat-cfg__ta:focus { outline: none; border-color: var(--ki-color-primary); }
 .ki-chat-cfg__ta[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__ta--name { min-height: auto; height: 36px; font-size: var(--ki-font-size-lg); font-weight: 500; padding: 0 11px; }  /* 详情层：名称输入（第四轮补充：原 28px 高 / 12px 字，看不清） */
+.ki-chat-cfg__ta--select { min-height: auto; }                                     /* 作用域下拉：复用输入框外观 */
 .ki-chat-cfg__foot { display: flex; align-items: center; margin-top: 6px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-chat-cfg__err { margin-left: auto; color: var(--ki-color-danger); }
 .ki-chat-cfg__group { margin: var(--ki-space-3) 0 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-chat-cfg__group--danger { color: var(--ki-color-warning); }
-.ki-chat-cfg__tool { display: flex; align-items: center; gap: var(--ki-space-2); padding: 7px 0; border-bottom: 1px solid var(--ki-color-border); }
-.ki-chat-cfg__tool-name { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); }
+.ki-chat-cfg__tool { display: flex; align-items: center; gap: var(--ki-space-2); padding: 7px 0; border-bottom: 1px solid var(--ki-color-border); min-width: 0; }
+.ki-chat-cfg__tool-main { min-width: 0; flex: 1; }
+.ki-chat-cfg__tool-name { display: block; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-chat-cfg__tool-desc { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); margin-top: 2px; }
+.ki-chat-cfg__tool-sp { flex: 1; min-width: var(--ki-space-2); }
 .ki-chat-cfg__bar {
   flex: 0 0 auto; display: flex; align-items: center; gap: var(--ki-space-2);
   padding: var(--ki-space-2) var(--ki-space-3);
   border-top: 1px solid var(--ki-color-border); background: var(--ki-color-bg-secondary);
 }
+/* 保存反馈：保存中 spinner + 顶部细条（第四轮修正：补齐文档承诺的保存态，不再只有 toast） */
+.ki-chat-cfg__bar .ki-chat-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"] { opacity: .75; cursor: default; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"]::after {
+  content: ''; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  animation: ki-chat-cfg-spin 0.7s linear infinite;
+}
+@keyframes ki-chat-cfg-spin { to { transform: rotate(360deg); } }
+.ki-chat-cfg__savedbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 30;
+  background: var(--ki-color-success);
+  transform: scaleX(0); transform-origin: left; transition: transform 220ms ease;
+}
+.ki-chat-cfg__savedbar[data-open="true"] { transform: scaleX(1); }
+
+/* ── 编辑 / 新增 模态框（第四轮：模态化；第九轮：升为 app 级页面居中）──
+   复用确认卡的 mask + card 范式，卡片放大：宽 720、高 72vh。
+   高度必须**定死**：否则框体由内容高度决定（内容少就矮），永远显小；定高后内部编辑区才能真正撑开。 */
+.ki-chat-cfg__modal {
+  width: min(720px, 100%);
+  height: min(72vh, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow: hidden; display: flex; flex-direction: column; box-shadow: var(--ki-shadow-2);
+}
+/* 滚动放在内容区：卡片自身 overflow:auto 会因 1px 舍入差冒出多余滚动条，且会把底部按钮一起滚走 */
+.ki-chat-cfg__modal-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.ki-chat-cfg__modal h4 { font-size: var(--ki-font-size-lg); margin-bottom: var(--ki-space-3); }
+.ki-chat-cfg__modal .ki-chat-cfg__field { margin-bottom: var(--ki-space-3); }
+/* 编辑态与预览态都撑满内容区的剩余高度 */
+#mEditWrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#mEditWrap[hidden] { display: none; }            /* 显式声明：display:flex 会覆盖浏览器对 [hidden] 的 display:none */
+.ki-chat-cfg__modal .ki-chat-cfg__view { flex: 1; min-height: 0; max-height: none; }   /* 覆盖原详情层的 320px 上限，改由 flex 撑满 */
+.ki-chat-cfg__modal .ki-chat-cfg__ta { flex: 1; min-height: 160px; }
+.ki-chat-cfg__modal .ki-chat-cfg__ta--name { flex: 0 0 auto; min-height: auto; }   /* 名称仍是单行 36px */
+.ki-chat-cfg__modal .ki-chat-cfg__reset { margin-left: 0; }         /* 底部按钮区左起，不再靠 auto 推到右边 */
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: var(--ki-space-2); padding-top: var(--ki-space-3); border-top: 1px solid var(--ki-color-border); }
+.ki-chat-cfg__ta[readonly] { color: var(--ki-color-text-muted); background: var(--ki-color-surface-muted); }   /* 内置条目名称：可见但不可改 */
 .ki-chat-cfg__scope { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
-.ki-chat-cfg__mask { position: absolute; inset: 0; background: rgba(0, 0, 0, .28); display: grid; place-items: center; padding: var(--ki-space-4); }
+/* ★ app 级全屏模态遮罩（第七轮补充：用户要求编辑框居中于整个页面，不再局限在 380px 面板内）
+   - fixed + inset:0 覆盖整个视口；z-index 1200 高于面板常驻态与窄屏浮层（990）
+   - 危险确认卡复用本类（append 到 body）→ 两者都是页面级模态，DOM 靠后者在上
+   ⚠️ 落地时应把这类层改为 app 级命名（如 .ki-modal），不再挂在 ki-chat-cfg 前缀下 */
+.ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, .32); display: grid; place-items: center; padding: var(--ki-space-4); }
+/* hidden 必须显式声明：本类的 display:grid 会覆盖浏览器对 [hidden] 的 display:none，
+   导致编辑模态框从页面加载起就一直显示空表单（用户截图抓到的 bug） */
+.ki-chat-cfg__mask[hidden] { display: none; }
 .ki-chat-cfg__card { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: var(--ki-space-4); }
 .ki-chat-cfg__card h4 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-md); }
 .ki-chat-cfg__card p { margin: 0 0 var(--ki-space-3); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); line-height: 1.6; }
@@ -2456,7 +2521,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-cfg__toast[data-open="true"] { opacity: 1; transform: translate(-50%, 0); }
 /* 开关：既有 ki.css 未定义，属本方案新增控件 */
 .ki-chat-cfg__sw { width: 36px; height: 20px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface-muted); position: relative; cursor: pointer; flex: 0 0 auto; }
-.ki-chat-cfg__sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 160ms; }
+.ki-chat-cfg__sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ki-chat-cfg-knob); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 160ms; }
 .ki-chat-cfg__sw[aria-checked="true"] { background: var(--ki-color-primary); border-color: var(--ki-color-primary); }
 .ki-chat-cfg__sw[aria-checked="true"]::after { transform: translateX(16px); }
 .ki-chat-cfg__sw--danger { border-color: var(--ki-color-warning); }
@@ -2469,9 +2534,10 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .ki-main p { color: var(--ki-color-text-muted); max-width: 60ch; line-height: 1.7; }
 :focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: var(--ki-radius-sm); }
 /* ── 列表层条目卡片（提示词 / Skill）── */
-.ki-chat-cfg__list { display: grid; gap: var(--ki-space-2); }
+/* grid 列必须 minmax(0,1fr)：否则 grid 项 min-width:auto 会被摘要长文本撑开（第四轮修正：消除层内横向滚动 113px） */
+.ki-chat-cfg__list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-2); }
 .ki-chat-cfg__item {
-  display: flex; align-items: center; gap: var(--ki-space-2); width: 100%;
+  display: flex; align-items: center; gap: var(--ki-space-2); width: 100%; min-width: 0;
   text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
   background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-sm); color: var(--ki-color-text);
@@ -2495,15 +2561,13 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .ki-chat-cfg__add:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
 .ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
 .ki-chat-cfg__del:hover { text-decoration: underline; }
-/* ── 详情层：返回 / 分段（预览|编辑）/ 只读视图 / 元信息 ── */
+/* ── 模态框内：分段（预览|编辑）/ 只读视图 / 元信息（原详情层的 crumb/back/dname 随模态框改造移除）── */
 .ki-chat-cfg__page[hidden] { display: none; }
-.ki-chat-cfg__crumb { display: flex; align-items: center; gap: var(--ki-space-2); margin-bottom: var(--ki-space-3); }
-.ki-chat-cfg__back { color: var(--ki-color-primary); font-size: var(--ki-font-size-sm); padding: 2px 4px; }
-.ki-chat-cfg__back:hover { text-decoration: underline; }
-.ki-chat-cfg__dname { font-weight: 500; }
-.ki-chat-cfg__seg { display: inline-flex; border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm); overflow: hidden; margin-bottom: var(--ki-space-3); }
-.ki-chat-cfg__segb { padding: 5px 12px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); transition: background 160ms; }
-.ki-chat-cfg__segb[aria-selected="true"] { background: var(--ki-color-surface-muted); color: var(--ki-color-text); font-weight: 500; }
+/* 分段控件：胶囊轨道 + 滑块（第四轮补充：原选中态只有 rgba(0,0,0,.05)，看不出选了哪个） */
+.ki-chat-cfg__seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--ki-color-surface-muted); border-radius: 999px; margin-bottom: var(--ki-space-4); }
+.ki-chat-cfg__segb { padding: 6px 16px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); border: 0; background: transparent; border-radius: 999px; transition: background 160ms, color 160ms, box-shadow 160ms; }
+.ki-chat-cfg__segb:hover { color: var(--ki-color-text); }
+.ki-chat-cfg__segb[aria-selected="true"] { background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500; box-shadow: 0 1px 2px rgba(0, 0, 0, .10); }
 .ki-chat-cfg__view {
   margin: 0; white-space: pre-wrap; word-break: break-word;
   font-size: var(--ki-font-size-sm); line-height: 1.7; color: var(--ki-color-text);
@@ -2516,29 +2580,260 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .ki-chat-cfg__del:hover { text-decoration: underline; }
 .ki-chat-cfg__entry {
   display: inline-flex; align-items: center; gap: 4px;
+  flex: 0 0 auto; white-space: nowrap;   /* 面板头空间已满：不得被压缩折行（第四轮修正：原 flex-shrink:1 会把「配置」压成两行） */
   height: 26px; padding: 0 9px;
   border: 1px solid var(--ki-color-border-strong); border-radius: 999px;
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs);
   transition: background 160ms, color 160ms, border-color 160ms, transform 160ms;
 }
+.ki-chat-cfg__entry svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .ki-chat-cfg__entry:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
 .ki-chat-cfg__entry:active { transform: scale(0.96); }
+
+/* ── 面板消息区左右留白收窄（第四轮补充）──
+   380px 面板下左右各 16px 白边偏浪费（用户反馈"回复没有紧靠左边"）；消息容器左边缘 17→13px，内容宽 +8px。
+   ⚠️ 落地时需同步改 web/src/styles/ki.css:1852 的 .ki-chat-panel__body padding（16px → 12px） */
+.ki-chat-panel__body { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+/* 面板四段左右留白统一为 12px：head 原本左16/右12 不对称，ctx/foot 原为 16，与消息区不一致
+   （用户反馈"输入框两边没占满"）。⚠️ 落地时同步改 ki.css:1770 / 1811 / 2215 */
+.ki-chat-panel__head, .ki-chat-ctx { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+
+/* ── 输入区左右贴边 + 圆角 8px（用户口径）──
+   用户指的"输入框左右有空隙"是**卡片外侧**：foot 的 12px 内距让 composer 卡片离面板边缘还有 12px。
+   现在 foot 左右归零 → 卡片贴边；卡片内部留 8px（textarea 与 bar 同一内距，否则文字与「发送」错位）。
+   ⚠️ 落地时同步改 ki.css:2215 (foot padding) / 2266 (border-radius) / 2276 (ta padding) / 2284 (bar padding) */
+.ki-chat-panel__foot { padding-left: 0; padding-right: 0; }
+.ki-chat-composer { border-radius: 8px; }
+.ki-chat-composer__ta { padding: var(--ki-space-3) var(--ki-space-2) var(--ki-space-2); }
+.ki-chat-composer__bar { padding: 0 var(--ki-space-2) var(--ki-space-2); }
+
+/* ── 时间线贴左：取消左侧 20px 占位（第四轮补充）──
+   原设计用 padding-left: var(--ki-space-5)（ki.css:1948）+ 绝对定位圆点与竖轴线（1951/1958）在左侧造时间轴；
+   380px 面板下这 20px 让「工具行 + 展开卡片」整块内缩，与正文/来源不在一条左边缘上。
+   改为：圆点降级为 flex 首项（行内、垂直居中），撤掉竖轴线占位 → 工具行、卡片、正文、来源全部左对齐。
+   ⚠️ 落地需同步改 ki.css:1946-1977 的时间线定义（这是对既有设计语言的改动，需评审确认） */
+.ki-chat-tl { padding-left: 0; }
+.ki-chat-tl::before { content: none; }                                   /* 撤掉竖轴线 */
+.ki-chat-tl__node::before { position: static; left: auto; top: auto; }   /* 圆点作为行内首项，由 align-items 居中 */
+
+/* ════════════════════════════════════════════════════════════════
+   D. 视觉精修段（2026-09-30 ui-designer 走查）
+   ────────────────────────────────────────────────────────────────
+   只追加、不改上方 ki.css 源内联段；全部复用 --ki-* 令牌。
+   覆盖：顶栏品牌区与主题分段器 / 主区占位页 / 消息入场与用户气泡 /
+   来源悬停预览 / 工具展开动效 / 配置层分组层级与列表图标块 /
+   模态框头栏与入场 / 按压反馈与减少动效
+   ⚠️ 落地：pop 预览、item 图标块、分组头属产品视觉 → 同步进
+     ki.css / ChatPanel.tsx；主题分段器与主区占位为 demo 外壳专用，不进源文件
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── D0 全局细节：主题切换过渡、选区色、按压反馈 ── */
+body { transition: background-color .25s ease, color .25s ease; }
+::selection { background: color-mix(in srgb, var(--ki-color-primary) 22%, transparent); }
+.ki-chat-btn { transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, transform 120ms ease; }
+.ki-chat-btn:active:not(:disabled) { transform: scale(.96); }
+.ki-chat-iconbtn { transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, transform 120ms ease; }
+.ki-chat-iconbtn:active { transform: scale(.92); }
+
+/* ── D1 顶栏：品牌块 + 主题分段切换器（demo 外壳专用） ── */
+.ki-topbar { transition: background-color .25s ease, border-color .25s ease; }
+.ki-topbar__brand { display: flex; align-items: center; gap: var(--ki-space-2); min-width: 0; }
+.ki-seg {
+  display: inline-flex; gap: 2px; padding: 3px; flex: 0 0 auto;
+  border: 1px solid var(--ki-color-border); border-radius: 999px;
+  background: var(--ki-color-surface-muted);
+}
+.ki-seg button {
+  border: 0; background: transparent; cursor: pointer; font: inherit;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+  padding: 3px 12px; border-radius: 999px;
+  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.ki-seg button:hover { color: var(--ki-color-text); }
+.ki-seg button[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .14);
+}
+
+/* ── D2 主区占位页：树内徽标靠右；文档项内容纵向列（.ki-doc-item 本体是 flex row） ── */
+.ki-main .ki-tree-dir .ki-badge { margin-left: auto; }
+.ki-doc-item__main { flex: 1; min-width: 0; }
+/* 双栏填满视口（浏览页设计意图）：.ki-main 已是 flex column，split 吃掉剩余高度 */
+.ki-main { gap: var(--ki-space-5); }
+.ki-main .ki-split { flex: 1; min-height: 0; }
+.ki-main .ki-split__side, .ki-main .ki-split > section { max-height: none; }
+.ki-page-head code { font-family: var(--ki-font-mono); font-size: .92em; color: var(--ki-color-text-muted); }
+
+/* ── D3 消息：入场动效、用户气泡品牌化、头像与行内代码 ── */
+.ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1) both; }
+@keyframes ki-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* ki.css 用户气泡是中性灰底；加一层品牌色浅罩 + 右下收角，更像"我说的话" */
+.ki-chat-msg--user .ki-chat-msg__body {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 24%, transparent);
+  border-bottom-right-radius: 5px;
+}
+.ki-chat-avatar {
+  width: 18px; height: 18px; border-radius: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--ki-color-primary), var(--ki-color-purple));
+  color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center;
+}
+.ki-chat-msg__body p { line-height: var(--ki-chat-line); }
+.ki-chat-msg__body code {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  background: var(--ki-color-surface-muted); border: 1px solid var(--ki-color-border);
+  border-radius: 4px; padding: .5px 5px;
+}
+
+/* ── D4 工具调用：内部工具名做成代码小胶囊，展开区带入场 ── */
+.ki-chat-tl__tool { padding: 1px 6px; border-radius: 5px; background: var(--ki-color-surface-muted); }
+.ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease both; }
+@keyframes ki-tool-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* ── D5 配置层：列表图标块 / 条目抬升 / 分组分节头 / 工具行 hover / 入场时序 ── */
+.ki-chat-cfg__item { transition: background 160ms, border-color 160ms, box-shadow 160ms, transform 160ms; }
+.ki-chat-cfg__item:hover { transform: translateY(-1px); box-shadow: var(--ki-shadow-1); }
+.ki-chat-cfg__item-ic { width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0; display: grid; place-items: center; }
+.ki-chat-cfg__item-ic svg { width: 14px; height: 14px; }
+.ki-chat-cfg__item-ic--prompt { background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); color: var(--ki-color-primary); }
+.ki-chat-cfg__item-ic--skill { background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); color: var(--ki-color-purple); }
+.ki-chat-cfg__item-meta--mod { color: var(--ki-color-primary); }
+.ki-chat-cfg__group {
+  display: flex; align-items: center; gap: 6px;
+  margin: var(--ki-space-4) 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); font-weight: 600; color: var(--ki-color-text-muted);
+  letter-spacing: .2px;
+}
+.ki-chat-cfg__group-n { margin-left: auto; font-weight: 400; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
+.ki-chat-cfg__group-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 16%, transparent);
+}
+.ki-chat-cfg__group--danger { color: var(--ki-color-warning); border-bottom-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border)); }
+.ki-chat-cfg__group--danger .ki-chat-cfg__group-dot {
+  background: var(--ki-color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-warning) 16%, transparent);
+}
+.ki-chat-cfg__tool { margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; transition: background 160ms; }
+.ki-chat-cfg__tool:hover { background: var(--ki-color-hover); }
+.ki-chat-cfg__sw { transition: background 160ms ease, border-color 160ms ease; }
+.ki-chat-cfg__sw:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+.ki-chat-cfg__label { color: var(--ki-color-text-muted); }
+select.ki-chat-cfg__ta--select {
+  appearance: none; -webkit-appearance: none; padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2398989d' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+}
+/* 配置层打开时按块渐入（动效响应"打开"这个操作，不是页面加载装饰） */
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__head { animation: ki-cfg-in .22s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field { animation: ki-cfg-in .26s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(2) { animation-delay: 45ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(3) { animation-delay: 90ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(4) { animation-delay: 135ms; }
+@keyframes ki-cfg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── D6 模态框 / 确认卡：遮罩柔化 + 卡片入场 + 三段结构 ── */
+.ki-chat-cfg__mask { background: rgba(15, 20, 32, .45); backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
+@keyframes ki-mask-in { from { opacity: 0; } }
+.ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1) both; }
+@keyframes ki-card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+.ki-chat-cfg__modal { padding: 0; border-radius: var(--ki-radius-lg); box-shadow: 0 24px 72px rgba(15, 27, 52, .28); }
+.ki-chat-cfg__modal .ki-chat-cfg__modal-body { padding: var(--ki-space-4) var(--ki-space-5); }
+/* modal-body 是 flex column：inline-flex 的分段器会被 stretch 拉成全宽轨道，收回内容宽 */
+.ki-chat-cfg__seg { align-self: flex-start; }
+.ki-chat-cfg__modal-head {
+  display: flex; align-items: flex-start; gap: var(--ki-space-2); flex-shrink: 0;
+  padding: var(--ki-space-4) var(--ki-space-5) var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-cfg__modal-head h4 { margin: 0; font-size: var(--ki-font-size-lg); font-weight: 600; letter-spacing: -.2px; }
+.ki-chat-cfg__modal-head .ki-chat-iconbtn { margin-left: auto; }
+.ki-chat-cfg__modal-sub { margin: 3px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: 0; padding: var(--ki-space-3) var(--ki-space-5); }
+
+/* ── D7 减少动效偏好：关掉本段入场动画，保留状态反馈 ── */
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-msg, .ki-chat-tool:not([hidden]),
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__head,
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field,
+  .ki-chat-cfg__mask, .ki-chat-cfg__card { animation: none; }
+}
 </style>
 </head>
 <body>
 <header class="ki-topbar">
-  <span class="ki-topbar__title">ki 知识库</span>
+  <span class="ki-topbar__brand">
+    <span class="ki-logo" aria-hidden="true">k</span>
+    <span class="ki-topbar__title">ki 知识库</span>
+  </span>
   <span class="ki-topbar__spacer"></span>
-  <span role="group" aria-label="主题" style="display:flex;gap:4px;align-items:center">
-    <button type="button" id="themeLight" aria-pressed="true" style="padding:4px 8px">浅色</button>
-    <button type="button" id="themeDark" aria-pressed="false" style="padding:4px 8px">暗色</button>
+  <span role="group" aria-label="主题" class="ki-seg">
+    <button type="button" id="themeLight" aria-pressed="true">浅色</button>
+    <button type="button" id="themeDark" aria-pressed="false">暗色</button>
   </span>
 </header>
 
 <div class="ki-shell">
   <main class="ki-main">
-    <h2>Group 树 / 文档列表</h2>
-    <p>既有页面占位。本次只在右侧对话面板内做增量：新增一个 ⚙ 按钮、一个配置层、工具调用行的展开区。面板与消息外观全部来自 <code>web/src/styles/ki.css</code>，未做任何改写。</p>
+    <div class="ki-page-head">
+      <div>
+        <h1>知识库浏览</h1>
+        <p>既有页面占位（让面板处在真实产品语境里）。本 demo 的增量只在右侧对话面板内：⚙ 配置入口、配置层、工具调用行与展开区；面板与消息外观全部来自 <code>web/src/styles/ki.css</code>，未改写源样式段。</p>
+      </div>
+      <span class="ki-badge ki-badge--vec">demo</span>
+    </div>
+    <div class="ki-split">
+      <aside class="ki-split__side">
+        <div class="ki-card">
+          <div class="ki-card__head"><span class="ki-card__title">Group 树</span><span class="ki-card__sub">2 scopes</span></div>
+          <div class="ki-card__body">
+            <div class="ki-tree-root">
+              <div class="ki-tree-dir ki-tree-dir--active" tabindex="0"><span class="ki-tree-arrow">▾</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">kisearch</span><span class="ki-badge">38</span></div>
+              <div class="ki-tree-group">
+                <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">▾</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">docs</span><span class="ki-heat ki-heat--hot">热</span></div>
+                <div class="ki-tree-group">
+                  <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">·</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">deploy</span></div>
+                </div>
+                <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">▸</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">wiki</span><span class="ki-heat ki-heat--cold">冷</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+      <section>
+        <div class="ki-card">
+          <div class="ki-card__head"><span class="ki-card__title">文档列表</span><span class="ki-card__sub">docs · 3 条命中</span></div>
+          <div class="ki-card__body">
+            <div class="ki-doc-item ki-doc-item--current">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">健康检查超时的派生链</span><span class="ki-doc-item__current-label">当前</span></div>
+                <div class="ki-doc-item__path">docs/health-check.md</div>
+                <div class="ki-doc-item__snippet">外层 deadline 由探测预算 + 本地余量推导；任一子检查超时会把整份报告换成 400……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--vec">vec</span><span class="ki-badge">今天更新</span></div>
+              </div>
+            </div>
+            <div class="ki-doc-item">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">chat-routes 的 SSE 与错误语义</span></div>
+                <div class="ki-doc-item__path">docs/chat-routes.md</div>
+                <div class="ki-doc-item__snippet">SSE 响应头在前置写成功之后才发，流建立前的错误仍以 HTTP 状态表达……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--kb">kb</span><span class="ki-badge">3 天前</span></div>
+              </div>
+            </div>
+            <div class="ki-doc-item">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">交付切片与合流约定</span></div>
+                <div class="ki-doc-item__path">docs/delivery-slicing.md</div>
+                <div class="ki-doc-item__snippet">砖头包要求目录互斥、契约只读、自包含可交接；合流按 DAG 分批、主干常绿……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--fts">fts</span><span class="ki-badge">上周</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <!-- ══════ 既有 AI 对话面板（结构与类名对齐 web/src/chat/ChatPanel.tsx）══════ -->
@@ -2580,19 +2875,22 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
     <div class="ki-chat-panel__body">
       <div class="ki-chat-msg ki-chat-msg--user">
         <div class="ki-chat-msg__meta"><span class="ki-chat-msg__at">00:24</span></div>
-        <div class="ki-chat-msg__text">健康检查超时被误报为服务未就绪，根因是什么？</div>
+        <!-- 补 __body 包裹层：ki.css 的用户气泡样式挂在 .ki-chat-msg--user .ki-chat-msg__body 上，此前缺失导致消息渲染成裸文本 -->
+        <div class="ki-chat-msg__body"><div class="ki-chat-msg__text">健康检查超时被误报为服务未就绪，根因是什么？</div></div>
       </div>
 
       <div class="ki-chat-msg ki-chat-msg--assistant">
         <div class="ki-chat-msg__meta">
+          <span class="ki-chat-avatar" aria-hidden="true">k</span>
           <span class="ki-chat-msg__role">kisearch</span>
           <span class="ki-chat-msg__at">00:24</span>
         </div>
 
         <div class="ki-chat-tl" role="status" aria-live="polite">
-          <!-- ★ 新增：工具调用行（复用既有 tl__node 的时间线圆点与排版） -->
+          <!-- ★ 新增：工具调用行（复用既有 tl__node 的时间线圆点与排版）——文案双轨：动作名给人看、工具名给核对 -->
           <div class="ki-chat-tl__node ki-chat-tl__node--tool" role="button" tabindex="0" aria-expanded="false" data-tool="1">
-            <span class="ki-chat-tl__label">ki_search</span>
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
             <span class="ki-chat-tl__stat">hybrid · 3 命中 · 552ms</span>
             <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
           </div>
@@ -2640,8 +2938,9 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 
           <!-- ★ 新增：失败的工具调用（默认展开，不静默消失） -->
           <div class="ki-chat-tl__node ki-chat-tl__node--tool ki-chat-tl__node--tool-fail" role="button" tabindex="0" aria-expanded="true" data-tool="2">
-            <span class="ki-chat-tl__label">ki_search</span>
-            <span class="ki-chat-tl__stat">失败 · 参数不是合法 JSON</span>
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
+            <span class="ki-chat-tl__stat">失败 · 入参不是合法 JSON</span>
             <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
           </div>
           <div class="ki-chat-tool" id="tool2">
@@ -2651,10 +2950,31 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
             </section>
             <section class="ki-chat-tool__sec">
               <div class="ki-chat-tool__label">错误<em>未发起检索</em></div>
-              <p class="ki-chat-tool__note ki-chat-tool__note--warn">参数不是合法 JSON：上游传回的 arguments 被截断了。该轮已如实告知用户，未用模型自身知识作答。</p>
+              <p class="ki-chat-tool__note ki-chat-tool__note--warn">参数不是合法 JSON：上游传回的 arguments 被截断了。这一轮没有检索结果，回答未引用知识库。</p>
             </section>
           </div>
 
+          <!-- ★ 运行中态：代表时间上最后发生的一次调用（默认收起，与其他行一致 —— U7 要求的是"展开态不被强制收起"，不是"默认展开"） -->
+          <div class="ki-chat-tl__node ki-chat-tl__node--tool ki-chat-tl__node--run" role="button" tabindex="0" aria-expanded="false" data-tool="0">
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
+            <span class="ki-chat-tl__stat">hybrid · 检索中…</span>
+            <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
+          </div>
+          <div class="ki-chat-tool" id="tool0" hidden>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">入参<em>已发送</em></div>
+              <pre class="ki-chat-tool__code">{
+  <span class="k">"query"</span>: <span class="s">"知识库检索 混合模式 命中排序"</span>,
+  <span class="k">"mode"</span>: <span class="s">"hybrid"</span>,
+  <span class="k">"limit"</span>: <span class="n">5</span>
+}</pre>
+            </section>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">响应<em>等待中</em></div>
+              <p class="ki-chat-tool__note">工具调用进行中 —— 手动展开后不会因流式推进被强制收起（U7）。</p>
+            </section>
+          </div>
           <div class="ki-chat-tl__node ki-chat-tl__node--think"><span class="ki-chat-tl__label">思考</span><span class="ki-chat-tl__stat">2.1s</span></div>
         </div>
 
@@ -2669,8 +2989,8 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 
         <div class="ki-chat-srcs">
           <span class="ki-chat-srcs__label">来源</span>
-          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">1</span><span class="ki-chat-src__doc">chat-routes.ts</span><span class="ki-chat-src__lines">L76-98</span></button>
-          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">2</span><span class="ki-chat-src__doc">health-check.ts</span><span class="ki-chat-src__lines">L601-640</span></button>
+          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">1</span><span class="ki-chat-src__doc">chat-routes.ts</span><span class="ki-chat-src__lines">L76-98</span><span class="ki-chat-src__pop"><b>chat-routes.ts</b><em>docs · L76-98 · 0.72</em><q>外层 deadline 由探测预算推导时漏加了本地检查余量，慢子检查会把整份健康报告换成 400……</q><u>点击打开原文</u></span></button>
+          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">2</span><span class="ki-chat-src__doc">health-check.ts</span><span class="ki-chat-src__lines">L601-640</span><span class="ki-chat-src__pop"><b>health-check.ts</b><em>docs · L601-640 · 0.68</em><q>健康检查 worst case 由探测预算 + 本地余量推导，余量缺省 1.5s……</q><u>点击打开原文</u></span></button>
         </div>
       </div>
     </div>
@@ -2681,13 +3001,14 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
         <div class="ki-chat-composer__bar">
           <span class="ki-chat-composer__hint">Enter 发送 · Shift+Enter 换行</span>
           <span class="ki-chat-composer__count">0 / 8000</span>
-          <button type="button" class="ki-chat-btn ki-chat-btn--ghost">发送</button>
+          <button type="button" class="ki-chat-btn" id="sendBtn" disabled>发送</button>
         </div>
       </div>
     </footer>
 
     <!-- ══════ ★ 新增：对话配置层（panel-scoped，与会话浮层同为面板内层）══════ -->
-    <section class="ki-chat-cfg" id="cfg" data-open="false" role="dialog" aria-modal="true" aria-label="对话配置">
+    <section class="ki-chat-cfg" id="cfg" data-open="false" role="dialog" aria-modal="true" aria-label="对话配置" inert>
+      <div class="ki-chat-cfg__savedbar" id="savedbar" data-open="false"></div>
       <header class="ki-chat-cfg__head">
         <span class="ki-chat-cfg__title">对话配置</span>
         <span class="ki-chat-cfg__spacer"></span>
@@ -2701,10 +3022,10 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
         <div class="ki-chat-cfg__page" id="pageList">
         <div class="ki-chat-cfg__field">
           <label class="ki-chat-cfg__label" for="scopeSel">作用域</label>
-          <select id="scopeSel" class="ki-chat-cfg__ta" style="min-height:auto">
+          <select id="scopeSel" class="ki-chat-cfg__ta ki-chat-cfg__ta--select">
             <option>全局（所有 scope）</option>
-            <option>仅当前 scope：kisearch</option>
-            <option>仅本会话</option>
+            <option>仅当前 scope：kisearch（待确认）</option>
+            <option>仅本会话（待确认）</option>
           </select>
           <p class="ki-chat-cfg__hint">保存后对<strong>下一次提问</strong>生效，无需重启服务。</p>
         </div>
@@ -2718,53 +3039,39 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
           <span class="ki-chat-cfg__label">Skill</span>
           <div class="ki-chat-cfg__list" id="listSkill"></div>
           <button type="button" class="ki-chat-cfg__add" id="skillAdd">＋ 新增 skill</button>
-          <p class="ki-chat-cfg__hint">点条目先看预览，再点「编辑」修改；新增 / 删除在这里操作。</p>
+          <p class="ki-chat-cfg__hint">点条目或「新增 skill」都会弹出编辑框：先看预览，再切到「编辑」修改；删除在编辑框里。</p>
         </div>
 
         <div class="ki-chat-cfg__field">
-          <span class="ki-chat-cfg__label">工具与权限</span>
-          <p class="ki-chat-cfg__group">只读</p>
-          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-name">ki_search</span><span style="flex:1"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_search"></button></div>
-          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-name">ki_query_group</span><span style="flex:1"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_query_group"></button></div>
-          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-name">ki_get_module_info</span><span style="flex:1"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_get_module_info"></button></div>
+          <span class="ki-chat-cfg__label">工具与权限<em class="ki-chat-cfg__badge">批次 2 生效</em></span>
+          <p class="ki-chat-cfg__hint">本批只保存开关，工具暴露在批次 2 落地；白名单只接受真实注册的 14 个工具名。</p>
 
-          <p class="ki-chat-cfg__group ki-chat-cfg__group--danger">写入 · 危险</p>
-          <div class="ki-chat-cfg__tool">
-            <span><span class="ki-chat-cfg__tool-name">ki_store</span><div class="ki-chat-cfg__tool-desc">向知识库写入向量</div></span>
-            <span style="flex:1"></span>
-            <button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_store" data-danger="写入向量会改变当前 scope 的知识库内容"></button>
-          </div>
-          <div class="ki-chat-cfg__tool">
-            <span><span class="ki-chat-cfg__tool-name">ki_delete_relation</span><div class="ki-chat-cfg__tool-desc">删除关系及其关联数据</div></span>
-            <span style="flex:1"></span>
-            <button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_delete_relation" data-danger="删除关系、缓存、KB 原文与向量，不可撤销"></button>
-          </div>
-          <p class="ki-chat-cfg__hint">危险工具默认关闭；开启后 AI 可在当前 scope 内改动知识库。</p>
+          <p class="ki-chat-cfg__group"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>只读<span class="ki-chat-cfg__group-n">6 个 · 默认开</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_search</span><span class="ki-chat-cfg__tool-desc">混合 / 字面检索知识库</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_search"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_query_group</span><span class="ki-chat-cfg__tool-desc">查看 Group 树结构</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_query_group"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_get_module_info</span><span class="ki-chat-cfg__tool-desc">读取指定文档原文</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_get_module_info"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_tag_list</span><span class="ki-chat-cfg__tool-desc">列出标签</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_tag_list"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_scope_list</span><span class="ki-chat-cfg__tool-desc">列出 scope 清单</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_scope_list"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_list</span><span class="ki-chat-cfg__tool-desc">列出索引配置</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_manage_index_list"></button></div>
+
+          <p class="ki-chat-cfg__group ki-chat-cfg__group--danger"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>写入<span class="ki-chat-cfg__group-n">6 个 · 危险 · 默认关</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_store</span><span class="ki-chat-cfg__tool-desc">写入向量</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_store" data-danger="写入向量会改变当前 scope 的知识库内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_bulk_store</span><span class="ki-chat-cfg__tool-desc">批量写入向量</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_bulk_store" data-danger="批量写入可一次改动大量知识库内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_sync_relation</span><span class="ki-chat-cfg__tool-desc">写入 / 更新关系与 KB 内容</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_sync_relation" data-danger="写入关系会改变当前 scope 的 KB 内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_bulk_sync_relation</span><span class="ki-chat-cfg__tool-desc">批量写入关系</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_bulk_sync_relation" data-danger="批量写入关系可一次改动大量 KB 内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_edit_relation</span><span class="ki-chat-cfg__tool-desc">编辑既有关系（覆盖原内容）</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_edit_relation" data-danger="编辑关系会覆盖原内容，不可逐字撤销"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_create</span><span class="ki-chat-cfg__tool-desc">在 Group 树中新建节点</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_manage_index_create" data-danger="会在当前 scope 的 Group 树中新建节点"></button></div>
+
+          <p class="ki-chat-cfg__group ki-chat-cfg__group--danger"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>删除<span class="ki-chat-cfg__group-n">2 个 · 最危险 · 默认关</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_delete_relation</span><span class="ki-chat-cfg__tool-desc">删除关系及其关联数据</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_delete_relation" data-danger="删除关系、缓存、KB 原文与向量，不可撤销"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_delete</span><span class="ki-chat-cfg__tool-desc">删除 Group 节点及其下内容</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_manage_index_delete" data-danger="删除 Group 节点及其下全部内容，不可撤销"></button></div>
+
+          <p class="ki-chat-cfg__hint">危险工具默认关闭，开启需二次确认；开启后 AI 可在当前 scope 内改动知识库。</p>
         </div>
         </div><!-- /pageList -->
-
-        <!-- ── 详情层：预览 / 编辑 ── -->
-        <div class="ki-chat-cfg__page" id="pageDetail" hidden>
-          <div class="ki-chat-cfg__crumb">
-            <button type="button" class="ki-chat-cfg__back" id="dBack">‹ 返回</button>
-            <span class="ki-chat-cfg__dname" id="dName">基础提示词</span>
-          </div>
-          <div class="ki-chat-cfg__seg" role="tablist" aria-label="查看方式">
-            <button type="button" class="ki-chat-cfg__segb" data-view="preview" aria-selected="true">预览</button>
-            <button type="button" class="ki-chat-cfg__segb" data-view="edit" aria-selected="false">编辑</button>
-          </div>
-          <pre class="ki-chat-cfg__view" id="dView"></pre>
-          <div id="dEditWrap" hidden>
-            <textarea class="ki-chat-cfg__ta" id="dEdit" spellcheck="false"></textarea>
-            <div class="ki-chat-cfg__foot"><span id="dCount">0 字</span><span class="ki-chat-cfg__err" id="dErr"></span></div>
-          </div>
-          <p class="ki-chat-cfg__meta" id="dMeta"></p>
-        </div>
       </div>
 
       <div class="ki-chat-cfg__bar">
-        <button type="button" class="ki-chat-cfg__reset" id="dReset" hidden>恢复默认</button>
-        <button type="button" class="ki-chat-cfg__del" id="dDel" hidden>删除此 skill</button>
         <span class="ki-chat-cfg__spacer"></span>
         <span class="ki-chat-cfg__scope" id="scopeNote">作用域：全局 · 下一次提问生效</span>
         <button type="button" class="ki-chat-btn ki-chat-btn--ghost" id="cfgCancel">取消</button>
@@ -2772,8 +3079,53 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
       </div>
 
       <div class="ki-chat-cfg__toast" id="toast" data-open="false" role="status">已保存</div>
+
     </section>
   </aside>
+</div>
+
+<!-- ══════ ★ 编辑 / 新增 模态框 —— app 级层：居中于整个页面（不再局限在 380px 对话面板内）
+     新增 skill / 编辑 skill / 编辑提示词共用；名称内置只读、非内置可改；底部按类型显示恢复默认与删除。
+     必须挂在 body 下：配置层 #cfg 带 z-index 会形成层叠上下文，挂在它内部则再高的 z-index 也升不出面板 -->
+<div class="ki-chat-cfg__mask" id="editModal" hidden>
+  <div class="ki-chat-cfg__card ki-chat-cfg__modal" role="dialog" aria-modal="true" aria-label="编辑条目">
+    <div class="ki-chat-cfg__modal-head">
+      <div>
+        <h4 id="mTitle">编辑</h4>
+        <p class="ki-chat-cfg__modal-sub" id="mSub"></p>
+      </div>
+      <button type="button" class="ki-chat-iconbtn" id="mClose" aria-label="关闭编辑">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </div>
+
+    <div class="ki-chat-cfg__modal-body">
+      <div class="ki-chat-cfg__field">
+        <label class="ki-chat-cfg__label" for="mName">名称</label>
+        <input class="ki-chat-cfg__ta ki-chat-cfg__ta--name" id="mName" type="text" maxlength="40" placeholder="给这个 skill 起个名字">
+      </div>
+
+      <div class="ki-chat-cfg__seg" role="tablist" aria-label="查看方式">
+        <button type="button" class="ki-chat-cfg__segb" data-view="preview" aria-selected="true">预览</button>
+        <button type="button" class="ki-chat-cfg__segb" data-view="edit" aria-selected="false">编辑</button>
+      </div>
+
+      <pre class="ki-chat-cfg__view" id="mPreview"></pre>
+      <div id="mEditWrap" hidden>
+        <textarea class="ki-chat-cfg__ta" id="mBody" spellcheck="false" placeholder="写清这个 skill 什么时候用、按什么顺序调用哪些工具。例：先 ki_search 找片段，命中不足时再看结构；每次回答都要附来源。"></textarea>
+        <div class="ki-chat-cfg__foot"><span id="mCount">0 / 8000 字</span><span class="ki-chat-cfg__err" id="mErr"></span></div>
+      </div>
+      <p class="ki-chat-cfg__meta" id="mMeta"></p>
+    </div><!-- /modal-body -->
+
+    <div class="ki-chat-cfg__card-acts">
+      <button type="button" class="ki-chat-cfg__reset" id="mReset" hidden>恢复默认</button>
+      <button type="button" class="ki-chat-cfg__del" id="mDel" hidden>删除</button>
+      <span class="ki-chat-cfg__spacer"></span>
+      <button type="button" class="ki-chat-btn ki-chat-btn--ghost" id="mCancel">取消</button>
+      <button type="button" class="ki-chat-btn" id="mOk">保存</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -2809,15 +3161,80 @@ $('#reasonToggle').onclick = () => {
   body.hidden = open;
 };
 
-/* ★ 新增交互 2：配置层开关 */
+/* ★ 新增交互 2：配置层开关（第四轮修正：快照回滚 / 清残留确认卡 / Esc 分层 / 焦点陷阱） */
+
+/* toast：顶部短反馈 —— 原实现调用了 5 次但从未定义（点保存即抛 ReferenceError，等于"没反应"） */
+let toastTimer = null;
+function toast(text) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.dataset.open = 'true';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.dataset.open = 'false'; }, 1800);
+}
+
+/* 作用域底栏提示与下拉联动（第四轮修正：消除"两处作用域"各说各话） */
+function syncScopeNote() {
+  $('#scopeNote').textContent = '作用域：' + String($('#scopeSel').value).replace(/（.*?）/g, '') + ' · 下一次提问生效';
+}
+
+let pendingConfirm = null;   // 当前打开的危险确认卡（同一时刻最多一张）
+let listSnapshot = null;     // 列表态快照：点「取消」时回滚
+const FOCUSABLE = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+
+const snapshotListState = () => ({
+  scope: $('#scopeSel').value,
+  switches: $$('.ki-chat-cfg__sw').map((sw) => sw.getAttribute('aria-checked')),
+});
+function applyListState(s) {
+  if (!s) return;
+  $('#scopeSel').value = s.scope;
+  $$('.ki-chat-cfg__sw').forEach((sw, i) => { if (s.switches[i] != null) sw.setAttribute('aria-checked', s.switches[i]); });
+  syncScopeNote();
+}
+function clearConfirm() {
+  if (pendingConfirm) { pendingConfirm.remove(); pendingConfirm = null; }
+}
+
 const openCfg = (on) => {
+  if (on) {
+    listSnapshot = snapshotListState();
+    showList();                                   // 每次打开都落在列表层
+  } else {
+    clearConfirm();                               // 关层必须清卡，否则残留到下次打开
+    if (!$('#editModal').hidden) closeEditModal();        // 编辑模态框随层一起关
+    showList();
+    applyListState(listSnapshot);                  // 取消 = 回滚未保存的列表态改动
+  }
   $('#cfg').dataset.open = String(on);
+  $('#cfg').inert = !on;   /* 关闭态必须 inert：否则 Tab 会掉进不可见的层里（实测第 9 次 Tab 起进入层内控件） */
   (on ? $('#cfgClose') : $('#cfgOpen')).focus();
 };
 $('#cfgOpen').onclick = () => openCfg(true);
 $('#cfgClose').onclick = () => openCfg(false);
 $('#cfgCancel').onclick = () => openCfg(false);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#cfg').dataset.open === 'true') openCfg(false); });
+$('#scopeSel').onchange = syncScopeNote;
+
+/* Esc 分层：确认卡 → 编辑模态框 → 配置层（原实现任何一层都直接关整层，并留下孤儿确认卡） */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('#cfg').dataset.open !== 'true') return;
+  if (pendingConfirm) { pendingConfirm.remove(); pendingConfirm = null; $('#cfgClose').focus(); return; }
+  if (!$('#editModal').hidden) { tryCloseEditModal(); return; }
+  openCfg(false);
+});
+
+/* 焦点陷阱：Tab 在最上层内循环（确认卡 > 编辑模态框 > 配置层） */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || $('#cfg').dataset.open !== 'true') return;
+  const openMask = Array.from(document.querySelectorAll('.ki-chat-cfg__mask')).find((m) => !m.hidden);
+  const scope = pendingConfirm || openMask || $('#cfg');
+  const items = Array.from(scope.querySelectorAll(FOCUSABLE)).filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1], active = document.activeElement;
+  if (!scope.contains(active)) { e.preventDefault(); first.focus(); return; }
+  if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+});
 
 /* ★ 配置数据（demo 内存态；真实实现持久化到配置 / 磁盘）*/
 const ITEMS = {
@@ -2834,7 +3251,13 @@ ITEMS.promptBase.content = ITEMS.promptBase.def;
 ITEMS.skillKb.content = ITEMS.skillKb.def;
 ITEMS.promptBase.at = ITEMS.skillKb.at = '默认';
 
-let seq = 0, detailId = null, view = 'preview';
+/* D5：列表条目的类型图标块（提示词=文本线 / skill=手册） */
+const ITEM_IC = {
+  prompt: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3.5 4.5h9M3.5 8h9M3.5 11.5h5"/></svg>',
+  skill: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 4.2C6.5 3.1 4.3 2.9 2.8 3.4v8c1.5-.5 3.7-.3 5.2.8 1.5-1.1 3.7-1.3 5.2-.8v-8C11.7 2.9 9.5 3.1 8 4.2zm0 0v8"/></svg>',
+};
+
+let seq = 0, view = 'preview';
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function renderLists() {
@@ -2844,125 +3267,244 @@ function renderLists() {
     const el = document.createElement('button');
     el.type = 'button';
     el.className = 'ki-chat-cfg__item';
+    const mod = it.at !== '默认';
     el.innerHTML =
-      '<span class="ki-chat-cfg__item-main">'
+      '<span class="ki-chat-cfg__item-ic ki-chat-cfg__item-ic--' + it.group + '">' + ITEM_IC[it.group] + '</span>'
+      + '<span class="ki-chat-cfg__item-main">'
       + '<span class="ki-chat-cfg__item-name">' + esc(it.name) + '</span>'
       + '<span class="ki-chat-cfg__item-prev">' + esc(String(it.content).slice(0, 42)) + '</span>'
       + '</span>'
-      + '<span class="ki-chat-cfg__item-meta">' + (it.at === '默认' ? '默认' : '已修改') + '</span>'
+      + '<span class="ki-chat-cfg__item-meta' + (mod ? ' ki-chat-cfg__item-meta--mod' : '') + '">' + String(it.content).length + ' 字 · ' + (mod ? '已修改' : '默认') + '</span>'
       + '<svg class="ki-chat-cfg__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12"/></svg>';
-    el.onclick = () => openDetail(id);
+    el.onclick = () => openEditModal(id);          // 点条目 → 编辑模态框（第四轮补充：原为页内详情层）
     groups[it.group].appendChild(el);
   }
 }
 
 function showList() {
-  detailId = null; view = 'preview';
   renderLists();
-  $('#pageList').hidden = false; $('#pageDetail').hidden = true;
-  $('#dReset').hidden = true; $('#dDel').hidden = true; $('#scopeNote').hidden = false;
+  $('#scopeNote').hidden = false;
+  syncScopeNote();                                // 底栏提示跟随当前作用域选择
 }
 
-function renderDetail() {
-  const it = ITEMS[detailId];
-  $('#dName').textContent = it.name;
+/* ══════ ★ 编辑 / 新增 模态框（第四轮补充：替代原页内详情层；新增 skill、编辑 skill、编辑提示词共用）══════ */
+let modalId = null;                                    // 当前编辑的条目 id；'__new__' = 新增 skill
+const NEW_SKILL = { group: 'skill', name: '未命名 skill', max: 8000, builtin: false, def: '', content: '', at: '新建' };
+
+const curItem = () => (modalId === '__new__' ? NEW_SKILL : ITEMS[modalId]);
+const curMax = () => (modalId === '__new__' ? 8000 : ITEMS[modalId].max);
+
+function openEditModal(id) {
+  const isNew = (id === '__new__');
+  if (isNew) { NEW_SKILL.content = ''; NEW_SKILL.name = '未命名 skill'; NEW_SKILL.at = '新建'; }
+  const it = isNew ? NEW_SKILL : ITEMS[id];
+  modalId = id;
+  view = isNew ? 'edit' : 'preview';
+
+  $('#mTitle').textContent = isNew ? '新增 skill' : (it.group === 'prompt' ? '编辑提示词' : '编辑 skill');
+  $('#mSub').textContent = isNew ? '新建 skill · 保存后写入当前作用域'
+    : (it.group === 'prompt' ? '系统提示词' : '对话 skill') + ' · ' + (it.builtin ? '内置 · 可恢复默认内容' : '自定义');
+  $('#mName').value = it.name;
+  $('#mName').readOnly = it.builtin;                   // 内置条目名称只读，非内置 skill 可改
+  $('#mName').removeAttribute('aria-invalid');
+  $('#mBody').value = it.content;                      // 只在此处灌入，切分段不重置（否则会吞掉用户输入）
+  $('#mReset').hidden = !it.builtin;                   // 仅内置条目有"默认内容"可恢复
+  $('#mDel').hidden = (isNew || it.builtin || it.group !== 'skill');
+  $('#mErr').textContent = ''; $('#mErr').dataset.kind = '';
+
+  renderModal();
+  $('#editModal').hidden = false;
+  if (isNew) {
+    const n = $('#mName');
+    n.focus();
+    n.setSelectionRange(n.value.length, n.value.length);   // 光标置尾，不全选（全选反显"看不清字"）
+  } else {
+    $('.ki-chat-cfg__segb[aria-selected="true"]').focus();
+  }
+}
+
+function renderModal() {
+  const it = curItem();
   $$('.ki-chat-cfg__segb').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
-  $('#dView').textContent = it.content || '（空）';
-  $('#dView').hidden = view !== 'preview';
-  $('#dEditWrap').hidden = view !== 'edit';
-  if (view === 'edit') { $('#dEdit').value = it.content; refreshD(); }
-  $('#dMeta').textContent = String(it.content).length + ' 字 · ' + (it.at === '默认' ? '内置默认内容' : '上次修改 ' + it.at);
-  $('#dReset').hidden = view !== 'edit';
+  $('#mPreview').textContent = it.content || '（还没有内容 —— 切到「编辑」写点什么）';
+  $('#mPreview').hidden = view !== 'preview';
+  $('#mEditWrap').hidden = view !== 'edit';
+  $('#mMeta').textContent = String(it.content).length + ' 字 · ' + (it.at === '默认' ? '内置默认内容' : '上次修改 ' + it.at);
+  $('#mMeta').hidden = view === 'edit';                // 编辑态已有字数计数，不再重复显示
+  refreshM();
 }
 
-function openDetail(id) {
-  detailId = id; view = 'preview'; renderDetail();
-  $('#pageList').hidden = true; $('#pageDetail').hidden = false;
-  $('#dReset').hidden = true;
-  $('#dDel').hidden = ITEMS[id].builtin || ITEMS[id].group !== 'skill';
-  $('#scopeNote').hidden = true;
+function refreshM() {
+  const ta = $('#mBody'), n = ta.value.length, max = curMax(), over = n > max;
+  $('#mCount').textContent = n + ' / ' + max + ' 字';
+  ta.setAttribute('aria-invalid', String(over));
+  const err = $('#mErr');
+  if (over) { err.textContent = '超出 ' + (n - max) + ' 字'; err.dataset.kind = 'len'; }
+  else if (err.dataset.kind === 'len') { err.textContent = ''; err.dataset.kind = ''; }
 }
-function switchView(v) { view = v; renderDetail(); }
 
-/* 编辑态字数校验 */
-function refreshD() {
-  const it = ITEMS[detailId], el = $('#dEdit'), n = el.value.length, over = n > it.max;
-  $('#dCount').textContent = n + ' / ' + it.max + ' 字';
-  el.setAttribute('aria-invalid', String(over));
-  $('#dErr').textContent = over ? '超出 ' + (n - it.max) + ' 字' : '';
+function closeEditModal() {
+  $('#editModal').hidden = true;
+  modalId = null;
+  $('#skillAdd').focus();      // 焦点收回列表：否则焦点留在被隐藏的控件上，键盘用户会"丢焦点"
 }
-$('#dEdit').oninput = refreshD;
 
-/* 分段：预览 / 编辑 */
-$$('.ki-chat-cfg__segb').forEach((b) => { b.onclick = () => { view = b.dataset.view; renderDetail(); }; });
+/* 有未保存修改时先问一句（防误点遮罩 / Esc 丢内容）；「取消」按钮不走这里（语义就是放弃） */
+function tryCloseEditModal() {
+  const cur = (modalId === '__new__') ? '' : ITEMS[modalId].content;
+  const dirty = !$('#mEditWrap').hidden && $('#mBody').value !== cur;
+  if (dirty) askConfirm('未保存的修改', '关闭将丢弃这次编辑。', () => closeEditModal());
+  else closeEditModal();
+}
 
-/* 返回：编辑态有未保存修改 → 提示丢弃 */
-$('#dBack').onclick = () => {
-  const it = ITEMS[detailId];
-  const changed = view === 'edit' && $('#dEdit').value !== it.content;
-  const go = () => { view = 'preview'; showList(); };
-  if (changed) askConfirm('返回将丢弃未保存的修改。', go); else go();
+$('#mBody').oninput = refreshM;
+$$('.ki-chat-cfg__segb').forEach((b) => { b.onclick = () => { view = b.dataset.view; renderModal(); }; });
+$('#mCancel').onclick = () => closeEditModal();
+$('#mClose').onclick = tryCloseEditModal;          /* D6：头部关闭钮与取消同语义（脏时先问） */
+$('#editModal').onclick = (e) => { if (e.target === $('#editModal')) tryCloseEditModal(); };
+
+/* 保存（新增 / 编辑共用）：名称非空 + 同名检查 + 字数上限，全部在保存前拦 */
+$('#mOk').onclick = () => {
+  const isNew = (modalId === '__new__');
+  const it = isNew ? null : ITEMS[modalId];
+  const group = isNew ? 'skill' : it.group;
+  const max = curMax();
+  const name = ($('#mName').value || '').trim();
+  const body = $('#mBody').value;
+  const err = $('#mErr');
+  $('#mName').removeAttribute('aria-invalid');
+
+  if (!name) {
+    err.textContent = '名称不能为空'; err.dataset.kind = 'name';
+    $('#mName').setAttribute('aria-invalid', 'true'); $('#mName').focus(); return;
+  }
+  if (Object.entries(ITEMS).some(([id, x]) => id !== modalId && x.group === group && x.name === name)) {
+    err.textContent = '已有同名条目，请换一个名字'; err.dataset.kind = 'dup';
+    $('#mName').setAttribute('aria-invalid', 'true'); $('#mName').focus(); return;
+  }
+  if (body.length > max) { err.textContent = '超出 ' + max + ' 字，请先删减'; err.dataset.kind = 'len'; return; }
+
+  if (isNew) {
+    const id = 'skill-' + (++seq);
+    ITEMS[id] = { group: 'skill', name, max: 8000, builtin: false, def: '', content: body, at: '新建' };
+    closeEditModal(); renderLists();
+    flashSaved('已新增「' + name + '」· 下一次提问生效');
+    return;
+  }
+  it.name = name; it.content = body; it.at = '刚刚';
+  closeEditModal(); renderLists();
+  flashSaved('已保存 · 下一次提问生效');
 };
 
-/* 确认卡（危险开关 / 删除 skill 通用） */
-function askConfirm(text, onYes) {
+/* 恢复默认（仅内置条目）/ 删除（仅非内置 skill） */
+$('#mReset').onclick = () => {
+  const it = curItem();
+  askConfirm('恢复默认', '将丢弃当前修改，恢复为内置默认内容。', () => {
+    it.content = it.def; it.at = '默认';
+    $('#mBody').value = it.def;
+    renderModal(); renderLists();
+    toast('已恢复默认');
+  });
+};
+$('#mDel').onclick = () => {
+  const it = curItem();
+  if (!it || it.builtin) return;
+  askConfirm('删除 skill', '「' + it.name + '」将被删除，此操作不可撤销。', () => {
+    const nm = it.name;
+    delete ITEMS[modalId];
+    closeEditModal(); renderLists();
+    toast('已删除「' + nm + '」');
+  });
+};
+
+/* 确认卡（危险开关 / 删除 skill 通用；第四轮修正：可被 Esc 关闭、关层时清理、焦点归位、标题按场景） */
+function askConfirm(title, text, onYes) {
+  clearConfirm();
+  const opener = document.activeElement;
   const wrap = document.createElement('div');
   wrap.className = 'ki-chat-cfg__mask';
   wrap.innerHTML = '<div class="ki-chat-cfg__card" role="alertdialog" aria-modal="true">'
-    + '<h4>确认操作</h4><p>' + esc(text) + '</p>'
+    + '<h4>' + esc(title) + '</h4><p>' + esc(text) + '</p>'
     + '<div class="ki-chat-cfg__card-acts">'
     + '<button type="button" class="ki-chat-btn ki-chat-btn--ghost" data-ans="no">取消</button>'
     + '<button type="button" class="ki-chat-btn ki-chat-btn--danger" data-ans="yes">确认</button>'
     + '</div></div>';
-  $('#cfg').appendChild(wrap);
+  document.body.appendChild(wrap);      // 确认卡也是页面级模态：挂在 body 才能盖在编辑模态框之上（原挂 #cfg 会被配置层的层叠上下文困住）
+  pendingConfirm = wrap;
   wrap.querySelector('[data-ans="no"]').focus();
   wrap.onclick = (e) => {
     const ans = e.target.dataset ? e.target.dataset.ans : null;
-    if (!ans) return;
-    if (ans === 'yes') onYes();
+    const blank = e.target === wrap;     // 点遮罩空白 = 取消（默认不执行危险操作，不留无响应区）
+    if (!ans && !blank) return;
     wrap.remove();
+    pendingConfirm = null;
+    if (ans === 'yes') onYes();
+    else if (opener && opener.focus) opener.focus();
   };
 }
 $$('.ki-chat-cfg__sw').forEach((sw) => {
   sw.onclick = () => {
     if (sw.getAttribute('aria-checked') === 'true') { sw.setAttribute('aria-checked', 'false'); return; }
-    if (sw.dataset.danger) { askConfirm(sw.dataset.danger + '。受影响范围：当前 scope（kisearch）。', () => sw.setAttribute('aria-checked', 'true')); return; }
+    if (sw.dataset.danger) {
+      askConfirm('开启危险工具', sw.dataset.danger + '。受影响范围：当前 scope（kisearch）。', () => {
+        sw.setAttribute('aria-checked', 'true');
+        sw.focus();
+      });
+      return;
+    }
     sw.setAttribute('aria-checked', 'true');
   };
 });
 
-/* 新增 / 删除 skill */
-$('#skillAdd').onclick = () => {
-  const id = 'skill-' + (++seq);
-  ITEMS[id] = { group: 'skill', name: '未命名 skill', max: 8000, builtin: false, def: '', content: '', at: '新建' };
-  openDetail(id); switchView('edit');
-};
-$('#dDel').onclick = () => {
-  const it = ITEMS[detailId];
-  if (!it || it.builtin) return;
-  askConfirm('删除 skill「' + it.name + '」？此操作不可撤销。', () => { delete ITEMS[detailId]; toast('已删除'); showList(); });
-};
+/* 新增 skill：打开空白的编辑模态框（不再是"先建条目再跳详情层"） */
+$('#skillAdd').onclick = () => openEditModal('__new__');
 
-/* 恢复默认（详情态） */
-$('#dReset').onclick = () => {
-  const it = ITEMS[detailId];
-  askConfirm('将丢弃当前修改，恢复为内置默认内容。', () => { it.content = it.def; it.at = '默认'; renderDetail(); renderLists(); toast('已恢复默认'); });
-};
+/* 保存反馈：顶部细条 + toast（列表态保存与模态框保存共用） */
+function flashSaved(text) {
+  const bar = $('#savedbar');
+  bar.dataset.open = 'true';
+  setTimeout(() => { bar.dataset.open = 'false'; }, 1200);
+  toast(text || '已保存 · 下一次提问生效');
+}
 
-/* 保存：详情态存该条目；列表态存作用域 / 工具开关 */
+/* 列表态保存：作用域 / 工具开关（第四轮修正：保存中 → 已保存 的完整反馈） */
+function busySave(done) {
+  const btn = $('#cfgSave');
+  btn.dataset.busy = 'true'; btn.disabled = true; btn.textContent = '保存中';
+  setTimeout(() => {
+    btn.dataset.busy = 'false'; btn.disabled = false; btn.textContent = '保存';
+    done();
+    flashSaved();
+  }, 420);
+}
 $('#cfgSave').onclick = () => {
-  if (detailId) {
-    const it = ITEMS[detailId];
-    if (view === 'edit') it.content = $('#dEdit').value;
-    if (String(it.content).length > it.max) { toast('超出字数上限，请先调整'); return; }
-    it.at = '刚刚'; renderLists(); toast('已保存 · 下一次提问生效'); showList();
-    return;
-  }
-  toast('已保存 · 下一次提问生效');
+  busySave(() => { listSnapshot = snapshotListState(); });   // 保存后当前状态成为新基线
 };
+
+/* ★ composer 细节（D 段）：自动行高 / 字数实时更新 / 发送按钮随输入启停。
+   此前字数恒为 0、发送恒为可用，输入区是"死"的，演示可信度打折 */
+const cTa = $('.ki-chat-composer__ta');
+const cCnt = $('.ki-chat-composer__count');
+const cSend = $('#sendBtn');
+function syncComposer() {
+  cTa.style.height = 'auto';
+  cTa.style.height = Math.min(cTa.scrollHeight, 176) + 'px';   /* 与 ki.css composer__ta max-height 一致 */
+  const n = cTa.value.length;
+  cCnt.textContent = n + ' / 8000';
+  cCnt.classList.toggle('ki-chat-composer__count--over', n > 8000);
+  cSend.disabled = !cTa.value.trim();
+}
+cTa.oninput = syncComposer;
+cTa.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!cSend.disabled) cSend.click(); }
+});
+cSend.onclick = () => { cTa.value = ''; syncComposer(); cTa.focus(); };   /* demo：仅复位输入态，不接后端 */
 
 /* ★ 初始化渲染（上一版漏了这一行 → 列表容器是空的，默认 skill 与基础提示词卡片都没出现）*/
 renderLists();
+syncScopeNote();
+/* 工具名很长会省略号截断：补 title，悬停可看完整名 */
+$$('.ki-chat-cfg__tool-name').forEach((el) => { el.title = el.textContent; });
 </script>
 </body>
 </html>

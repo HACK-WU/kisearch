@@ -43,6 +43,7 @@ import {
   CHAT_ERROR_CODES,
   type ChatEvent,
   type ChatMessage,
+  type ChatProgressStep,
   type ConversationFile,
   type SourceRef,
 } from './chat-contract.js';
@@ -75,6 +76,17 @@ import {
 import { runToolLoop } from './retrieval/tool-loop.js';
 import { KB_SEARCH_TOOL_NAME } from './retrieval/retrieval-skill.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
+import {
+  MAX_SKILLS,
+  MCP_TOOL_GROUPS,
+  PROMPT_MAX_CHARS,
+  PromptConfigError,
+  SKILL_MAX_CHARS,
+  SKILL_NAME_MAX_CHARS,
+  defaultPromptConfig,
+  readPromptConfig,
+  savePromptConfig,
+} from './prompt-config.js';
 
 /** 路由上下文（由 `mcp-http-api.ts` 注入，避免本模块反向依赖它） */
 export interface ChatRouteContext {
@@ -94,6 +106,13 @@ const MESSAGE_MAX_LEN = 20000;
 
 /** 会话消息数告警阈值（S02 §5：超过则 done 带 warning） */
 const CONVERSATION_TOO_LONG = 500;
+
+/**
+ * 对话配置（提示词 / Skill / 工具开关）校验失败码。
+ * ★ **本地常量**：`chat-contract.ts` 骨架期冻结（护栏 #1），本批一字不改它 ——
+ *   登记为「待并入契约」，批次 2 走 design-craft 时统一并入 `CHAT_ERROR_CODES`。
+ */
+const PROMPT_CONFIG_INVALID = 'PROMPT_CONFIG_INVALID';
 
 // ─────────────────────────────────────────────────────────────
 // 错误载体
@@ -315,6 +334,12 @@ export async function handleChatRoutes(
       return true;
     }
 
+    // ── 批次 1 新增（编号待并入 api/INDEX.md）GET/PUT /api/chat/prompt-config ──
+    if (segs.length === 1 && segs[0] === 'prompt-config') {
+      if (method === 'GET') { await handlePromptConfigGet(res, ctx); return true; }
+      if (method === 'PUT') { await handlePromptConfigPut(req, res, ctx); return true; }
+    }
+
     // ── API-02/14 /api/chat/conversations ──
     if (segs.length === 1 && segs[0] === 'conversations') {
       if (method === 'GET') { await handleConversationList(res, url, ctx); return true; }
@@ -474,6 +499,74 @@ export async function handleConfigAck(req: IncomingMessage, res: ServerResponse)
 
   // 幂等：重复确认结果一致
   sendOk(res, 200, { kbDisclosureAck: true });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 对话配置层（批次 1）：提示词 / Skill / 工具开关
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * `GET /api/chat/prompt-config` —— 读对话配置。
+ *
+ * 一次返回四块，让前端不必硬编码任何默认值或上限：
+ *   · `config`   当前生效配置（文件损坏时 = 默认值）
+ *   · `defaults` 内置默认（供前端「恢复默认」直接回填文案）
+ *   · `limits`   服务端强制的上限（前端字数提示读这里，**上限的 SSOT 在服务端**）
+ *   · `issue`    非 null = 配置源有问题且**已回退默认**（fail-loud：界面须如实提示，不得静默）
+ *
+ * 为什么读失败仍返回 200：本接口在生成链路之外（界面读取），回退默认 + 明示 issue
+ * 比直接 500 更有用 —— 用户还能进界面看到问题并改回来。
+ */
+export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteContext): Promise<void> {
+  const cfg = snapshotConfig(ctx);
+  const { config, issue } = readPromptConfig(cfg);
+  sendOk(res, 200, {
+    config: config as unknown as Record<string, unknown>,
+    defaults: defaultPromptConfig() as unknown as Record<string, unknown>,
+    limits: {
+      promptMaxChars: PROMPT_MAX_CHARS,
+      skillMaxChars: SKILL_MAX_CHARS,
+      skillNameMaxChars: SKILL_NAME_MAX_CHARS,
+      maxSkills: MAX_SKILLS,
+    },
+    // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
+    // 前端自己写一份分组清单必然会随工具增减而漂移
+    toolGroups: MCP_TOOL_GROUPS,
+    issue,
+  });
+}
+
+/**
+ * `PUT /api/chat/prompt-config` —— 校验后整体保存。
+ *
+ * · 入参即 `PromptConfig` 形状（`{ prompt, skills, tools }`）：**整体替换**而非逐字段合并 ——
+ *   合并语义会带来"删掉的 skill 又回来了"这类歧义；整体替换语义单一、可控
+ * · 校验失败 → 400 `PROMPT_CONFIG_INVALID` + `details`（**一次性列全**），且**不落盘**
+ * · 落盘失败 → 500 `CHAT_WRITE_FAILED`（与会话写入同一口径：**不返回部分成功**）
+ * · 幂等：同一份输入重复提交结果一致（时间戳除外，由服务端打）
+ */
+export async function handlePromptConfigPut(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const cfg = snapshotConfig(ctx);
+  const body = await readJsonBody(req);
+  let saved: ReturnType<typeof savePromptConfig>;
+  try {
+    saved = savePromptConfig(cfg, body);
+  } catch (err) {
+    if (err instanceof PromptConfigError) {
+      throw new ChatApiError(
+        400,
+        PROMPT_CONFIG_INVALID,
+        err.message,
+        err.issues.map((i) => ({ field: i.path, message: i.message })),
+      );
+    }
+    throw new ChatApiError(500, CHAT_ERROR_CODES.CHAT_WRITE_FAILED, `对话配置写入失败：${(err as Error).message}`);
+  }
+  sendOk(res, 200, { config: saved as unknown as Record<string, unknown> });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -851,6 +944,8 @@ async function runGeneration(
   let usage: ChatMessage['usage'];
   let finishReason = 'stop';
   let sources: SourceRef[] = [];
+  // 走查 #11：检索过程步骤摘要（随 assistant 消息落盘，生成结束后仍可回看）
+  let progress: ChatProgressStep[] = [];
   let messageId: string | null = null;
   let abortedFlag = false;
   let streamError: { code: string; error: string; retryable?: boolean } | null = null;
@@ -882,7 +977,13 @@ async function runGeneration(
       if (ev.type === 'content') { content += ev.text; writeSseEvent(res, ev); continue; }
       if (ev.type === 'usage') { usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, ...(ev.reasoningTokens !== undefined ? { reasoningTokens: ev.reasoningTokens } : {}) }; writeSseEvent(res, ev); continue; }
       if (ev.type === 'sources') { sources = ev.sources; writeSseEvent(res, ev); continue; }
-      if (ev.type === 'tool_start') { writeSseEvent(res, ev); continue; }
+      if (ev.type === 'tool_start') {
+        // ★ 落盘摘要只记工具名与模式（**不落 query**：用户问题已在 user 消息里，N22 最小化）
+        // afterChars = 此刻已发出的正文长度 → 前端据此把调用痕迹插在"哪句话之后"（interleave 锚点）
+        progress.push({ phase: 'start', name: ev.name, mode: ev.mode, afterChars: content.length });
+        writeSseEvent(res, ev);
+        continue;
+      }
       if (ev.type === 'tool_end') {
         // ★ 必打事件 ② 工具调用异常（§1.3）：检索/工具执行失败时落日志
         if (ev.error !== undefined) {
@@ -893,6 +994,13 @@ async function runGeneration(
             detail: ev.error,
           });
         }
+        progress.push({
+          phase: 'end',
+          hits: ev.hits,
+          durationMs: ev.durationMs,
+          afterChars: content.length,
+          ...(ev.error !== undefined ? { error: ev.error } : {}),
+        });
         writeSseEvent(res, ev);
         continue;
       }
@@ -954,7 +1062,7 @@ async function runGeneration(
       // 中止：**content 为空则不落盘**（避免空气泡污染会话与列表预览，S02 §5）
       if (content.trim().length > 0) {
         const saved = await appendMessage(scope, convId, buildAssistantMessage({
-          content, sources, usage, finishReason: 'aborted', aborted: true, totalMs,
+          content, sources, usage, finishReason: 'aborted', aborted: true, totalMs, progress,
         }));
         const savedId = saved.messages.at(-1)?.id ?? messageId ?? '';
         writeSseEvent(res, { type: 'aborted', messageId: savedId });
@@ -966,7 +1074,7 @@ async function runGeneration(
       const convNow = await readConversation(scope, convId);
       if (!convNow) throw new ConversationNotFoundError(convId);
 
-      const assistant = buildAssistantMessage({ content, sources, usage, finishReason, aborted: false, totalMs });
+      const assistant = buildAssistantMessage({ content, sources, usage, finishReason, aborted: false, totalMs, progress });
       // ★ 只有「重新生成」才替换最后一条 assistant。
       //
       //   · regenerate：会话尾部是 […, u, a]，语义是"替换 a" → messageCount 不变（R23）
@@ -1027,6 +1135,8 @@ function buildAssistantMessage(p: {
   finishReason: string;
   aborted: boolean;
   totalMs: number;
+  /** 检索过程步骤摘要（走查 #11；为空则不落该字段） */
+  progress?: ChatProgressStep[];
 }): ChatMessage {
   const msg: ChatMessage = {
     id: '',
@@ -1038,6 +1148,8 @@ function buildAssistantMessage(p: {
   };
   if (p.aborted) msg.aborted = true;
   if (p.usage) msg.usage = p.usage;
+  // 走查 #11：检索过程随消息落盘（无步骤则不落该字段，与 sources 的约定一致）
+  if (p.progress && p.progress.length > 0) msg.progress = p.progress;
   // ★ N22：只落投影后的引用（无来源则不落该字段，与 SSE 语义一致）
   if (p.sources.length > 0) msg.sources = p.sources;
   return msg;

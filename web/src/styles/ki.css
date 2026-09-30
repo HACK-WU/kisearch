@@ -1426,6 +1426,8 @@ a:hover { text-decoration: underline; }
   max-width: 100%;
   line-height: 1.75;
 }
+/* MarkdownPreview 现在自带 `.ki-markdown` 内层 → 阅读器的 1.75 行高不能被内层默认 1.7 盖掉 */
+.ki-markdown--drawer .ki-markdown { line-height: inherit; }
 
 /* 状态展示（loading / error / empty） */
 .ki-drawer__status {
@@ -2056,12 +2058,21 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-msg:hover .ki-chat-msg__acts,
 .ki-chat-msg:focus-within .ki-chat-msg__acts,
 .ki-chat-msg:last-child .ki-chat-msg__acts { opacity: 1; transform: none; }
+/* 消息操作（复制 / 重新生成 / 编辑重发）：给可见边界与足够点击区。
+   原实现 border:none + background:transparent + 24px 高 → 视觉上等同裸文字、点击区偏小
+   （真机走查 #9；11px 灰字 + 36×24 实测） */
 .ki-chat-act {
-  display: inline-flex; align-items: center; height: 24px; padding: 0 7px;
-  border: none; border-radius: var(--ki-radius-sm); background: transparent;
-  color: var(--ki-color-text-subtle); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
-  transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+  display: inline-flex; align-items: center; height: 28px; padding: 0 10px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
+  font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease,
+    border-color var(--ki-motion-fast) ease;
 }
+.ki-chat-act:hover {
+  background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-border-strong);
+}
+.ki-chat-act:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
 .ki-chat-act:hover:not(:disabled) { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
 .ki-chat-act:disabled { opacity: 0.45; cursor: not-allowed; }
 
@@ -2316,4 +2327,404 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 @keyframes ki-chat-overlay-in {
   from { transform: translateX(100%); }
   to   { transform: translateX(0); }
+}
+/* ── C. 配置层：叠在面板之上（与会话浮层同为 panel-scoped，不新增 app 级层）── */
+.ki-chat-cfg {
+  /* 面板级令牌：开关滑块是唯一无法用既有 --ki-* 表达的值（第四轮修正：集中声明，勿散落） */
+  --ki-chat-cfg-knob: #fff;
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: var(--ki-color-surface);
+  opacity: 0; pointer-events: none; transform: translateY(6px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.ki-chat-cfg[data-open="true"] { opacity: 1; pointer-events: auto; transform: none; }
+.ki-chat-cfg__head {
+  height: var(--ki-chat-head-h, 46px); flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-3); border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-cfg__title { font-weight: 500; }
+.ki-chat-cfg__spacer { flex: 1; }
+.ki-chat-cfg__body { flex: 1; overflow: auto; padding: var(--ki-space-4) var(--ki-space-3); }
+.ki-chat-cfg__field { margin-bottom: var(--ki-space-4); }
+.ki-chat-cfg__row { display: flex; align-items: baseline; gap: var(--ki-space-2); }
+.ki-chat-cfg__label { font-weight: 500; margin-bottom: 6px; display: block; }
+.ki-chat-cfg__badge { margin-left: var(--ki-space-2); font-style: normal; font-weight: 400; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+.ki-chat-cfg__reset { margin-left: auto; color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del, .ki-chat-cfg__reset { flex: 0 0 auto; white-space: nowrap; }   /* 底栏文字钮不得被压缩（第四轮修正：原实现"恢复默认"被压成空方框） */
+.ki-chat-cfg__reset:hover { text-decoration: underline; }
+.ki-chat-cfg__hint { margin: 6px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.6; }
+.ki-chat-cfg__ta {
+  width: 100%; min-height: 132px; resize: vertical;   /* 第四轮补充：96px 太矮，编辑区像一条缝 */
+  font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6; color: var(--ki-color-text);
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 9px 11px; transition: border-color 160ms;
+}
+.ki-chat-cfg__ta:focus { outline: none; border-color: var(--ki-color-primary); }
+.ki-chat-cfg__ta[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__ta--name { min-height: auto; height: 36px; font-size: var(--ki-font-size-lg); font-weight: 500; padding: 0 11px; }  /* 详情层：名称输入（第四轮补充：原 28px 高 / 12px 字，看不清） */
+.ki-chat-cfg__ta--select { min-height: auto; }                                     /* 作用域下拉：复用输入框外观 */
+.ki-chat-cfg__foot { display: flex; align-items: center; margin-top: 6px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__err { margin-left: auto; color: var(--ki-color-danger); }
+.ki-chat-cfg__group { margin: var(--ki-space-3) 0 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__group--danger { color: var(--ki-color-warning); }
+.ki-chat-cfg__tool { display: flex; align-items: center; gap: var(--ki-space-2); padding: 7px 0; border-bottom: 1px solid var(--ki-color-border); min-width: 0; }
+.ki-chat-cfg__tool-main { min-width: 0; flex: 1; }
+.ki-chat-cfg__tool-name { display: block; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-cfg__tool-desc { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); margin-top: 2px; }
+.ki-chat-cfg__tool-sp { flex: 1; min-width: var(--ki-space-2); }
+.ki-chat-cfg__bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border-top: 1px solid var(--ki-color-border); background: var(--ki-color-bg-secondary);
+}
+/* 保存反馈：保存中 spinner + 顶部细条（第四轮修正：补齐文档承诺的保存态，不再只有 toast） */
+.ki-chat-cfg__bar .ki-chat-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"] { opacity: .75; cursor: default; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"]::after {
+  content: ''; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  animation: ki-chat-cfg-spin 0.7s linear infinite;
+}
+@keyframes ki-chat-cfg-spin { to { transform: rotate(360deg); } }
+.ki-chat-cfg__savedbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 30;
+  background: var(--ki-color-success);
+  transform: scaleX(0); transform-origin: left; transition: transform 220ms ease;
+}
+.ki-chat-cfg__savedbar[data-open="true"] { transform: scaleX(1); }
+
+/* ── 编辑 / 新增 模态框（第四轮：模态化；第九轮：升为 app 级页面居中）──
+   复用确认卡的 mask + card 范式，卡片放大：宽 720、高 72vh。
+   高度必须**定死**：否则框体由内容高度决定（内容少就矮），永远显小；定高后内部编辑区才能真正撑开。 */
+.ki-chat-cfg__modal {
+  width: min(720px, 100%);
+  height: min(72vh, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow: hidden; display: flex; flex-direction: column; box-shadow: var(--ki-shadow-2);
+}
+/* 滚动放在内容区：卡片自身 overflow:auto 会因 1px 舍入差冒出多余滚动条，且会把底部按钮一起滚走 */
+.ki-chat-cfg__modal-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.ki-chat-cfg__modal h4 { font-size: var(--ki-font-size-lg); margin-bottom: var(--ki-space-3); }
+.ki-chat-cfg__modal .ki-chat-cfg__field { margin-bottom: var(--ki-space-3); }
+/* 编辑态与预览态都撑满内容区的剩余高度
+   （走查 P0#2：原规则是 demo 的 #mEditWrap id 选择器，React 落地用 .ki-chat-cfg__editwrap
+   类未命中 → 编辑态 textarea 固定 160px 不撑满。改为类选择器，两种写法兼容 demo 与 React） */
+.ki-chat-cfg__editwrap, #mEditWrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ki-chat-cfg__editwrap[hidden], #mEditWrap[hidden] { display: none; }   /* 显式声明：display:flex 会覆盖浏览器对 [hidden] 的 display:none */
+.ki-chat-cfg__modal .ki-chat-cfg__view { flex: 1; min-height: 0; max-height: none; }   /* 覆盖原详情层的 320px 上限，改由 flex 撑满 */
+.ki-chat-cfg__modal .ki-chat-cfg__ta { flex: 1; min-height: 160px; }
+.ki-chat-cfg__modal .ki-chat-cfg__ta--name { flex: 0 0 auto; min-height: auto; }   /* 名称仍是单行 36px */
+.ki-chat-cfg__modal .ki-chat-cfg__reset { margin-left: 0; }         /* 底部按钮区左起，不再靠 auto 推到右边 */
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: var(--ki-space-2); padding-top: var(--ki-space-3); border-top: 1px solid var(--ki-color-border); }
+.ki-chat-cfg__ta[readonly] { color: var(--ki-color-text-muted); background: var(--ki-color-surface-muted); }   /* 内置条目名称：可见但不可改 */
+.ki-chat-cfg__scope { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+/* ★ app 级全屏模态遮罩（第七轮补充：用户要求编辑框居中于整个页面，不再局限在 380px 面板内）
+   - fixed + inset:0 覆盖整个视口；z-index 1200 高于面板常驻态与窄屏浮层（990）
+   - 危险确认卡复用本类（append 到 body）→ 两者都是页面级模态，DOM 靠后者在上
+   ⚠️ 落地时应把这类层改为 app 级命名（如 .ki-modal），不再挂在 ki-chat-cfg 前缀下 */
+.ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, .32); display: grid; place-items: center; padding: var(--ki-space-4); }
+/* hidden 必须显式声明：本类的 display:grid 会覆盖浏览器对 [hidden] 的 display:none，
+   导致编辑模态框从页面加载起就一直显示空表单（用户截图抓到的 bug） */
+.ki-chat-cfg__mask[hidden] { display: none; }
+.ki-chat-cfg__card { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: var(--ki-space-4); }
+.ki-chat-cfg__card h4 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-md); }
+.ki-chat-cfg__card p { margin: 0 0 var(--ki-space-3); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); line-height: 1.6; }
+.ki-chat-cfg__card-acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
+.ki-chat-cfg__toast {
+  position: absolute; left: 50%; bottom: 68px; transform: translate(-50%, 6px);
+  background: var(--ki-color-text); color: var(--ki-color-bg);
+  padding: 6px 12px; border-radius: 999px; font-size: var(--ki-font-size-xs);
+  opacity: 0; transition: opacity 180ms, transform 180ms;
+}
+.ki-chat-cfg__toast[data-open="true"] { opacity: 1; transform: translate(-50%, 0); }
+/* 开关：既有 ki.css 未定义，属本方案新增控件 */
+.ki-chat-cfg__sw { width: 36px; height: 20px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface-muted); position: relative; cursor: pointer; flex: 0 0 auto; }
+.ki-chat-cfg__sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ki-chat-cfg-knob); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 160ms; }
+.ki-chat-cfg__sw[aria-checked="true"] { background: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__sw[aria-checked="true"]::after { transform: translateX(16px); }
+.ki-chat-cfg__sw--danger { border-color: var(--ki-color-warning); }
+
+/* demo 外壳（仅用于把面板放进真实页面语境，复用既有外壳类） */
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--ki-color-bg); color: var(--ki-color-text); font-family: var(--ki-font-family); font-size: var(--ki-font-size-md); }
+.ki-shell { flex: 1; min-height: 0; }
+.ki-main { padding: var(--ki-space-6); }
+.ki-main h2 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-xl); }
+.ki-main p { color: var(--ki-color-text-muted); max-width: 60ch; line-height: 1.7; }
+:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: var(--ki-radius-sm); }
+/* ── 列表层条目卡片（提示词 / Skill）── */
+/* grid 列必须 minmax(0,1fr)：否则 grid 项 min-width:auto 会被摘要长文本撑开（第四轮修正：消除层内横向滚动 113px） */
+.ki-chat-cfg__list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-2); }
+.ki-chat-cfg__item {
+  display: flex; align-items: center; gap: var(--ki-space-2); width: 100%; min-width: 0;
+  text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
+  background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); color: var(--ki-color-text);
+  transition: background 160ms, border-color 160ms;
+}
+.ki-chat-cfg__item:hover { background: var(--ki-color-hover); border-color: var(--ki-color-border-strong); }
+.ki-chat-cfg__item-main { min-width: 0; flex: 1; }
+.ki-chat-cfg__item-name { display: block; font-weight: 500; }
+.ki-chat-cfg__item-prev {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); margin-top: 2px;
+}
+.ki-chat-cfg__item-meta { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+/* 尺寸必须写进 CSS：本组件由 React 渲染，`<svg>` 容易漏 width/height 属性 →
+   退回 SVG 默认 300px 宽，会把 .ki-chat-cfg__item-main 挤成 0 并撑破容器（真机走查发现） */
+.ki-chat-cfg__chev { color: var(--ki-color-text-subtle); flex: 0 0 auto; width: 12px; height: 12px; }
+.ki-chat-cfg__add {
+  width: 100%; margin-top: var(--ki-space-2); padding: 8px;
+  border: 1px dashed var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm);
+  transition: background 160ms, color 160ms, border-color 160ms;
+}
+.ki-chat-cfg__add:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del:hover { text-decoration: underline; }
+/* ── 模态框内：分段（预览|编辑）/ 只读视图 / 元信息（原详情层的 crumb/back/dname 随模态框改造移除）── */
+.ki-chat-cfg__page[hidden] { display: none; }
+/* 分段控件：胶囊轨道 + 滑块（第四轮补充：原选中态只有 rgba(0,0,0,.05)，看不出选了哪个） */
+.ki-chat-cfg__seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--ki-color-surface-muted); border-radius: 999px; margin-bottom: var(--ki-space-4); }
+.ki-chat-cfg__segb { padding: 6px 16px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); border: 0; background: transparent; border-radius: 999px; transition: background 160ms, color 160ms, box-shadow 160ms; }
+.ki-chat-cfg__segb:hover { color: var(--ki-color-text); }
+.ki-chat-cfg__segb[aria-selected="true"] { background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500; box-shadow: 0 1px 2px rgba(0, 0, 0, .10); }
+.ki-chat-cfg__view {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-size: var(--ki-font-size-sm); line-height: 1.7; color: var(--ki-color-text);
+  background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); padding: var(--ki-space-3);
+  max-height: 320px; overflow: auto;
+}
+.ki-chat-cfg__meta { margin: var(--ki-space-2) 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; }
+.ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del:hover { text-decoration: underline; }
+.ki-chat-cfg__entry {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex: 0 0 auto; white-space: nowrap;   /* 面板头空间已满：不得被压缩折行（第四轮修正：原 flex-shrink:1 会把「配置」压成两行） */
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: 999px;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs);
+  transition: background 160ms, color 160ms, border-color 160ms, transform 160ms;
+}
+.ki-chat-cfg__entry svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.ki-chat-cfg__entry:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__entry:active { transform: scale(0.96); }
+
+/* ── 面板消息区左右留白收窄（第四轮补充）──
+   380px 面板下左右各 16px 白边偏浪费（用户反馈"回复没有紧靠左边"）；消息容器左边缘 17→13px，内容宽 +8px。
+   ⚠️ 落地时需同步改 web/src/styles/ki.css:1852 的 .ki-chat-panel__body padding（16px → 12px） */
+.ki-chat-panel__body { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+/* 面板四段左右留白统一为 12px：head 原本左16/右12 不对称，ctx/foot 原为 16，与消息区不一致
+   （用户反馈"输入框两边没占满"）。⚠️ 落地时同步改 ki.css:1770 / 1811 / 2215 */
+.ki-chat-panel__head, .ki-chat-ctx { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+
+/* ── 输入区左右贴边 + 圆角 8px（用户口径）──
+   用户指的"输入框左右有空隙"是**卡片外侧**：foot 的 12px 内距让 composer 卡片离面板边缘还有 12px。
+   现在 foot 左右归零 → 卡片贴边；卡片内部留 8px（textarea 与 bar 同一内距，否则文字与「发送」错位）。
+   ⚠️ 落地时同步改 ki.css:2215 (foot padding) / 2266 (border-radius) / 2276 (ta padding) / 2284 (bar padding) */
+.ki-chat-panel__foot { padding-left: 0; padding-right: 0; }
+.ki-chat-composer { border-radius: 8px; }
+.ki-chat-composer__ta { padding: var(--ki-space-3) var(--ki-space-2) var(--ki-space-2); }
+.ki-chat-composer__bar { padding: 0 var(--ki-space-2) var(--ki-space-2); }
+
+/* ── 时间线贴左：取消左侧 20px 占位（第四轮补充）──
+   原设计用 padding-left: var(--ki-space-5)（ki.css:1948）+ 绝对定位圆点与竖轴线（1951/1958）在左侧造时间轴；
+   380px 面板下这 20px 让「工具行 + 展开卡片」整块内缩，与正文/来源不在一条左边缘上。
+   改为：圆点降级为 flex 首项（行内、垂直居中），撤掉竖轴线占位 → 工具行、卡片、正文、来源全部左对齐。
+   ⚠️ 落地需同步改 ki.css:1946-1977 的时间线定义（这是对既有设计语言的改动，需评审确认） */
+.ki-chat-tl { padding-left: 0; }
+.ki-chat-tl::before { content: none; }                                   /* 撤掉竖轴线 */
+.ki-chat-tl__node::before { position: static; left: auto; top: auto; }   /* 圆点作为行内首项，由 align-items 居中 */
+
+/* ════════════════════════════════════════════════════════════════
+   D. 视觉精修段（2026-09-30 ui-designer 走查）
+   ────────────────────────────────────────────────────────────────
+   只追加、不改上方 ki.css 源内联段；全部复用 --ki-* 令牌。
+   覆盖：顶栏品牌区与主题分段器 / 主区占位页 / 消息入场与用户气泡 /
+   来源悬停预览 / 工具展开动效 / 配置层分组层级与列表图标块 /
+   模态框头栏与入场 / 按压反馈与减少动效
+   ⚠️ 落地：pop 预览、item 图标块、分组头属产品视觉 → 同步进
+     ki.css / ChatPanel.tsx；主题分段器与主区占位为 demo 外壳专用，不进源文件
+   ════════════════════════════════════════════════════════════════ */
+
+.ki-chat-cfg__item { transition: background 160ms, border-color 160ms, box-shadow 160ms, transform 160ms; }
+.ki-chat-cfg__item:hover { transform: translateY(-1px); box-shadow: var(--ki-shadow-1); }
+.ki-chat-cfg__item-ic { width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0; display: grid; place-items: center; }
+.ki-chat-cfg__item-ic svg { width: 14px; height: 14px; }
+.ki-chat-cfg__item-ic--prompt { background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); color: var(--ki-color-primary); }
+.ki-chat-cfg__item-ic--skill { background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); color: var(--ki-color-purple); }
+.ki-chat-cfg__item-meta--mod { color: var(--ki-color-primary); }
+.ki-chat-cfg__group {
+  display: flex; align-items: center; gap: 6px;
+  margin: var(--ki-space-4) 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); font-weight: 600; color: var(--ki-color-text-muted);
+  letter-spacing: .2px;
+}
+.ki-chat-cfg__group-n { margin-left: auto; font-weight: 400; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
+.ki-chat-cfg__group-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 16%, transparent);
+}
+.ki-chat-cfg__group--danger { color: var(--ki-color-warning); border-bottom-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border)); }
+.ki-chat-cfg__group--danger .ki-chat-cfg__group-dot {
+  background: var(--ki-color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-warning) 16%, transparent);
+}
+.ki-chat-cfg__tool { margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; transition: background 160ms; }
+.ki-chat-cfg__tool:hover { background: var(--ki-color-hover); }
+.ki-chat-cfg__sw { transition: background 160ms ease, border-color 160ms ease; }
+.ki-chat-cfg__sw:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+.ki-chat-cfg__label { color: var(--ki-color-text-muted); }
+select.ki-chat-cfg__ta--select {
+  appearance: none; -webkit-appearance: none; padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2398989d' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+}
+/* 配置层打开时按块渐入（动效响应"打开"这个操作，不是页面加载装饰） */
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__head { animation: ki-cfg-in .22s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field { animation: ki-cfg-in .26s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(2) { animation-delay: 45ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(3) { animation-delay: 90ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(4) { animation-delay: 135ms; }
+@keyframes ki-cfg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── D6 模态框 / 确认卡：遮罩柔化 + 卡片入场 + 三段结构 ── */
+.ki-chat-cfg__mask { background: rgba(15, 20, 32, .45); backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
+@keyframes ki-mask-in { from { opacity: 0; } }
+.ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1) both; }
+@keyframes ki-card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+.ki-chat-cfg__modal { padding: 0; border-radius: var(--ki-radius-lg); box-shadow: 0 24px 72px rgba(15, 27, 52, .28); }
+.ki-chat-cfg__modal .ki-chat-cfg__modal-body { padding: var(--ki-space-4) var(--ki-space-5); }
+/* modal-body 是 flex column：inline-flex 的分段器会被 stretch 拉成全宽轨道，收回内容宽 */
+.ki-chat-cfg__seg { align-self: flex-start; }
+.ki-chat-cfg__modal-head {
+  display: flex; align-items: flex-start; gap: var(--ki-space-2); flex-shrink: 0;
+  padding: var(--ki-space-4) var(--ki-space-5) var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-cfg__modal-head h4 { margin: 0; font-size: var(--ki-font-size-lg); font-weight: 600; letter-spacing: -.2px; }
+.ki-chat-cfg__modal-head .ki-chat-iconbtn { margin-left: auto; }
+.ki-chat-cfg__modal-sub { margin: 3px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: 0; padding: var(--ki-space-3) var(--ki-space-5); }
+
+/* ── D7 减少动效偏好：关掉本段入场动画，保留状态反馈 ── */
+
+/* ── 配置层：尊重"减少动效"偏好（只取 demo D7 里属于配置层的部分）── */
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__head,
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field,
+  .ki-chat-cfg__mask,
+  .ki-chat-cfg__card { animation: none; }
+}
+
+/* 历史消息里的检索过程折叠块已撤销（2026-09-30 用户裁决）：
+   过程只在生成期间于流式气泡中原位显示，收尾不再"跳"到消息底部（避免整页抖动）。
+   原 .ki-chat-tl--history / .ki-chat-tl__sum 规则随之移除。 */
+
+/* ════════════════════════════════════════════════════════════════
+   D8. 消息入场 / 头像 / 用户气泡（走查 #6/#9：移植 demo D3 段）
+   ════════════════════════════════════════════════════════════════ */
+.ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1) both; }
+@keyframes ki-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* 用户气泡：ki.css 基线是中性灰底，叠品牌色浅罩 + 右下收角（demo D3 同款） */
+.ki-chat-msg--user .ki-chat-msg__body {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 24%, transparent);
+  border-bottom-right-radius: 5px;
+}
+.ki-chat-avatar {
+  width: 18px; height: 18px; border-radius: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--ki-color-primary), var(--ki-color-purple));
+  color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center;
+}
+.ki-chat-msg__body p { line-height: 1.65; }
+.ki-chat-msg__body code {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  background: var(--ki-color-surface-muted); border: 1px solid var(--ki-color-border);
+  border-radius: 4px; padding: .5px 5px;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   D9. 工具时间线行 + 展开卡片（走查 #4：移植 demo A/B 段，R12 摘要版）
+   ⚠️ 卡片只渲染既有摘要字段（name/mode/hits/durationMs/error + 流式 query），
+      完整入参/响应 JSON 归批次 3（待定 #9 未拍板，见台账护栏 #2）
+   ════════════════════════════════════════════════════════════════ */
+.ki-chat-tl__stat {
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+/* 动作名 + 内部工具名双轨：动作名给人看，工具名给核对用（demo 第四轮口径） */
+.ki-chat-tl__act { flex: 0 0 auto; }
+.ki-chat-tl__tool {
+  flex: 0 0 auto; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  padding: 1px 6px; border-radius: 5px; background: var(--ki-color-surface-muted);
+}
+.ki-chat-tl__tool::before { content: '·'; margin-right: 5px; color: var(--ki-color-border-strong); }
+.ki-chat-tl__node--tool { cursor: pointer; border-radius: var(--ki-radius-sm); }
+.ki-chat-tl__node--tool:hover { background: var(--ki-color-hover); }
+.ki-chat-tl__node--tool::before { background: var(--ki-color-success); }
+.ki-chat-tl__node--tool.ki-chat-tl__node--tool-fail::before { background: var(--ki-color-warning); }
+.ki-chat-tl__node--tool.ki-chat-tl__node--run::before { background: var(--ki-color-primary); animation: ki-chat-pulse 1.1s ease-in-out infinite; }
+.ki-chat-tl__chev { margin-left: auto; color: var(--ki-color-text-subtle); transition: transform 160ms; }
+.ki-chat-tl__node--tool[aria-expanded="true"] .ki-chat-tl__chev { transform: rotate(90deg); }
+.ki-chat-tool {
+  margin: 4px 0 6px;
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  padding: var(--ki-space-2) var(--ki-space-3);
+  max-height: 300px; overflow: auto;
+}
+.ki-chat-tool[hidden] { display: none; }
+.ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease both; }
+@keyframes ki-tool-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.ki-chat-tool__sec + .ki-chat-tool__sec {
+  margin-top: var(--ki-space-2);
+  padding-top: var(--ki-space-2);
+  border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-tool__label {
+  display: flex; align-items: baseline; gap: var(--ki-space-2);
+  margin-bottom: 5px;
+  font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text);
+}
+.ki-chat-tool__label em {
+  margin-left: auto; font-style: normal; font-weight: 400;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.ki-chat-tool__code {
+  margin: 0; padding: var(--ki-space-2);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border); border-radius: 6px;
+  overflow: auto; white-space: pre;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); line-height: 1.75;
+  color: var(--ki-color-text);
+}
+.ki-chat-tool__code .k { color: var(--ki-color-primary); }
+.ki-chat-tool__code .s { color: var(--ki-color-success); }
+.ki-chat-tool__code .n { color: var(--ki-color-warning); font-variant-numeric: tabular-nums; }
+.ki-chat-tool__note { margin: 6px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); line-height: 1.65; }
+.ki-chat-tool__note--warn { color: var(--ki-color-warning); }
+.ki-chat-tool__err {
+  margin: 0; padding: var(--ki-space-2);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-warning); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-all;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); line-height: 1.75;
+  color: var(--ki-color-text);
+}
+/* D8/D9 的 reduced-motion 关闭必须放在两段**之后**：媒体查询不加特异性，
+   放前面会被后置的 animation 简写覆盖（自评审 F3 实测抓出） */
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-msg,
+  .ki-chat-tool:not([hidden]),
+  .ki-chat-tl__node--tool.ki-chat-tl__node--run::before { animation: none; }
 }

@@ -42,6 +42,12 @@ export interface McpToolGroup {
   /** 危险组：默认关闭，开启需二次确认 */
   danger: boolean;
   names: readonly string[];
+  /**
+   * 工具短描述（走查 #7：配置层工具行要能看出这个工具干什么）。
+   * 文案是**给人看的 UI 摘要**（非 AI 侧注册说明），SSOT 在此、随 toolGroups 下发，
+   * 前端不复制一份（与决策 #10 同理）。
+   */
+  descs: Readonly<Record<string, string>>;
 }
 
 export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
@@ -50,18 +56,38 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
     label: '只读',
     danger: false,
     names: ['ki_search', 'ki_query_group', 'ki_get_module_info', 'ki_tag_list', 'ki_scope_list', 'ki_manage_index_list'],
+    descs: {
+      ki_search: '混合 / 字面检索知识库',
+      ki_query_group: '查看 Group 树结构',
+      ki_get_module_info: '读取指定文档原文',
+      ki_tag_list: '列出标签',
+      ki_scope_list: '列出 scope 清单',
+      ki_manage_index_list: '列出索引配置',
+    },
   },
   {
     key: 'write',
     label: '写入',
     danger: true,
     names: ['ki_store', 'ki_bulk_store', 'ki_sync_relation', 'ki_bulk_sync_relation', 'ki_edit_relation', 'ki_manage_index_create'],
+    descs: {
+      ki_store: '写入向量',
+      ki_bulk_store: '批量写入向量',
+      ki_sync_relation: '写入 / 更新关系与 KB 内容',
+      ki_bulk_sync_relation: '批量写入关系',
+      ki_edit_relation: '编辑既有关系（覆盖原内容）',
+      ki_manage_index_create: '在 Group 树中新建节点',
+    },
   },
   {
     key: 'delete',
     label: '删除',
     danger: true,
     names: ['ki_delete_relation', 'ki_manage_index_delete'],
+    descs: {
+      ki_delete_relation: '删除关系及其关联数据',
+      ki_manage_index_delete: '删除 Group 节点及其下内容',
+    },
   },
 ];
 

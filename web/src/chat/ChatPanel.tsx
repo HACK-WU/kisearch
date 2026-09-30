@@ -28,7 +28,7 @@
  * @see demo/chat-panel-redesign/index.html（视觉基准 demo，token 与状态以此为准）
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ackDisclosure,
   archiveConversation,
@@ -39,15 +39,16 @@ import {
   listConversations,
   patchConversation,
 } from '@/api/chatApi';
-import type { ChatConfigOk, ChatMessage, ConversationSummary, SourceRef } from '@/api/chatContract';
+import type { ChatConfigOk, ChatMessage, ChatProgressStep, ConversationSummary, SourceRef } from '@/api/chatContract';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 import { SourcesList } from './SourcesList';
-import { clearStreamError, getStreamError, useChatStream } from './useChatStream';
+import { clearStreamError, getStreamError, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
 import { ConversationList } from './ConversationList';
+import { PromptConfigLayer } from './PromptConfigLayer';
 
 export interface ChatPanelProps {
   store: ChatStore;
@@ -105,6 +106,8 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   const [sendError, setSendError] = useState<string | null>(null);
   /** 会话切换器浮层开合（瞬时 UI 态，不进 store） */
   const [convPopOpen, setConvPopOpen] = useState(false);
+  /** 对话配置层开合（纯瞬时 UI 态，符合本文件"不得累积业务态"的约束） */
+  const [cfgOpen, setCfgOpen] = useState(false);
   const chipRef = useRef<HTMLDivElement>(null);
   /** T12 确认请求进行中（防重复点击） */
   const [ackBusy, setAckBusy] = useState(false);
@@ -361,6 +364,10 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     if (!draft.trim()) return '请输入内容';
     return null;
   }, [config, configError, draft, state.streaming.active]);
+
+  // 走查 #5：空草稿的「请输入内容」已由 placeholder 承担；提示行若重复显示，
+  // 视觉上就成了"两个输入框"错觉（用户截图）。提示行只在**真阻塞**时让位给原因。
+  const hint = !blocked || blocked === '请输入内容' ? 'Enter 发送 · Shift+Enter 换行' : blocked;
 
   /** 切首页以外的窄屏 → 浮层态（阈值初值 1400，待基线校准） */
   const [narrow, setNarrow] = useState(false);
@@ -626,6 +633,22 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
             </button>
+            {/* 对话配置入口（.ki-chat-cfg__entry 由配置层样式提供；面板头空间紧，样式类已禁压缩折行） */}
+            <button
+              type="button"
+              className="ki-chat-cfg__entry"
+              title="对话配置"
+              aria-haspopup="dialog"
+              aria-expanded={cfgOpen}
+              onClick={() => setCfgOpen(true)}
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+                <path d="M2.6 5.4h10.8M2.6 10.6h10.8" />
+                <circle cx="6.2" cy="5.4" r="1.7" />
+                <circle cx="9.8" cy="10.6" r="1.7" />
+              </svg>
+              <span>配置</span>
+            </button>
           </span>
         </header>
 
@@ -688,6 +711,9 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               message={m}
               // N17：降级标记随消息留存（不进冻结的 ChatMessage，见 chatStore.degradedByMessage）
               degraded={state.degradedByMessage[m.id] ?? null}
+              // 检索痕迹留存（2026-09-30 二次修正）：生成刚结束走内存态，刷新/切会话走落盘的 message.progress；
+              // 渲染在消息**顶部原位**（与流式气泡同位），收尾不跳位、不消失
+              progress={state.progressByMessage[m.id] ?? chatProgressToSteps(m.progress)}
               // R24：编辑重发会原子截断该消息之后的全部消息 → 明示条数
               discardCount={state.messages.length - i - 1}
               onOpenSource={handleOpenSource}
@@ -718,7 +744,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
           {state.streaming.active ? (
             <StreamingBubble
               content={state.streaming.content}
-              reasoning={state.streaming.reasoning}
+              reasoningSegs={state.streaming.reasoningSegs}
               progress={state.streaming.progress}
               degradedLabel={state.streaming.degraded?.label ?? null}
               reasoningOpen={Boolean(reasoningExpanded[state.streaming.messageId ?? ''])}
@@ -821,7 +847,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               }}
             />
             <div className="ki-chat-composer__bar">
-              <span className="ki-chat-composer__hint">{blocked ?? 'Enter 发送 · Shift+Enter 换行'}</span>
+              <span className="ki-chat-composer__hint">{hint}</span>
               <span className={`ki-chat-composer__count${draftChars > MAX_SEND_CHARS * 0.9 ? ' ki-chat-composer__count--over' : ''}`}>
                 {draftChars}/{MAX_SEND_CHARS}
               </span>
@@ -842,6 +868,8 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
             </div>
           </div>
         </footer>
+        {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
+        {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
       </aside>
 
       {/* 来源引用点击 → 打开原文并高亮（复用既有 ModuleDrawer） */}
@@ -865,6 +893,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 function MessageBubble({
   message,
   degraded,
+  progress,
   discardCount,
   reasoning,
   reasoningOpen,
@@ -884,6 +913,8 @@ function MessageBubble({
   message: ChatMessage;
   /** N17：本条的降级标记（来自 store.degradedByMessage；生成结束后仍保留，回看历史可见） */
   degraded?: DegradedMark | null;
+  /** 本条的检索过程（原位渲染在正文上方；生成结束后不消失，与流式期间同一位置） */
+  progress?: ProgressStep[];
   /** R24：编辑重发将截断其后的消息条数（0 表示无截断） */
   discardCount: number;
   reasoning?: string;
@@ -910,6 +941,7 @@ function MessageBubble({
     <div className={`ki-chat-msg ki-chat-msg--${message.role}`}>
       {/* 元信息行：角色 / 时间 / 状态徽标（原先只有气泡，看不出谁说的、什么时候、是否完整） */}
       <div className="ki-chat-msg__meta">
+        {!isUser ? <span className="ki-chat-avatar" aria-hidden="true">k</span> : null}
         {!isUser ? <span className="ki-chat-msg__role">kisearch</span> : null}
         <span className="ki-chat-msg__at">{formatMsgTime(message.at)}</span>
         {message.aborted ? <span className="ki-chat-msg__badge ki-chat-msg__badge--abort">已中止</span> : null}
@@ -954,15 +986,16 @@ function MessageBubble({
             >保存并重发</button>
           </div>
         </div>
-      ) : (
+      ) : isUser ? (
         <div className="ki-chat-msg__body">
-          {isUser ? (
-            // 用户输入是纯文本：不渲染 Markdown（避免把用户输入的 markdown 当富文本执行）
-            <p className="ki-chat-msg__text">{message.content}</p>
-          ) : (
-            <MarkdownPreview text={message.content} />
-          )}
+          {/* 用户输入是纯文本：不渲染 Markdown（避免把用户输入的 markdown 当富文本执行） */}
+          <p className="ki-chat-msg__text">{message.content}</p>
         </div>
+      ) : (
+        /* 检索痕迹 interleave（2026-09-30 三次修正，用户裁决）：调用发生在哪句话之后，
+           就插在哪句话下面——按各行 afterChars 把正文切段，段间插时间线行。
+           历史只渲染 tool 行（think/answer 是生成中的瞬态，不该留存成"思考中…"） */
+        <InterleavedAnswer content={message.content} nodes={progress ? buildTimeline(progress).filter((n) => n.kind === 'tool') : []} />
       )}
 
       {/* 来源引用（R20）：空数组时 SourcesList 自身渲染 null */}
@@ -1020,38 +1053,267 @@ function formatMsgTime(iso: string): string {
  * 三分支联合不能直接取 `.label` —— 只有 tool 分支带 label，另两支按 kind 给固定文案；
  * tool 的 `start` 阶段算「进行中」，`end` 与其余分支按已完成/进行中呈现。
  */
-function progressNodes(steps: ProgressStep[]): Array<{ key: string; label: string; running: boolean; kind: 'tool' | 'think' | 'answer' }> {
-  return steps.map((s, i) => {
-    if (s.kind === 'tool') {
-      return { key: `t${i}`, label: s.label, running: s.phase === 'start', kind: 'tool' as const };
+/** 落盘的步骤摘要 → 时间线步骤（刷新 / 切会话后仍能在原位回看检索过程） */
+function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): ProgressStep[] | undefined {
+  if (!steps || steps.length === 0) return undefined;
+  // 复用 useChatStream 的同一套文案函数 → "生成中看到的"与"刷新后回看的"措辞一致；
+  // 摘要字段（name/mode/hits/durationMs/error）一并透传，供时间线行与卡片渲染
+  return steps.map((s) =>
+    s.phase === 'end'
+      ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs }), afterChars: s.afterChars }
+      : { ...toolStartStep(s.mode ?? 'hybrid', s.name), afterChars: s.afterChars },
+  );
+}
+
+/**
+ * 正文按 interleave 锚点切段、段间插时间线行（用户裁决：调用在哪句话之后，就显示在哪句话下面）。
+ * 锚点越界防御性 clamp；同锚点的行合并进同一组；旧数据无锚点 = 0（集中在正文前，维持旧行为）。
+ */
+/** interleave 可插项目：时间线行（tool/think/answer）或思考分段 */
+type InterleaveItem =
+  | TimelineNode
+  | { key: string; kind: 'reason'; afterChars?: number; text: string; closed: boolean };
+
+/**
+ * 正文按 interleave 锚点切段、段间插痕迹行/思考块。
+ * 锚点越界防御性 clamp；同锚点合并进同一组（保持传入相对序）；无锚点 = 0（集中在正文前）。
+ */
+function interleaveSegments(content: string, items: InterleaveItem[]): Array<{ text: string } | { items: InterleaveItem[] }> {
+  if (items.length === 0) return content ? [{ text: content }] : [];
+  const groups = new Map<number, InterleaveItem[]>();
+  for (const n of items) {
+    const pos = Math.max(0, Math.min(n.afterChars ?? 0, content.length));
+    const arr = groups.get(pos);
+    if (arr) arr.push(n);
+    else groups.set(pos, [n]);
+  }
+  const segs: Array<{ text: string } | { items: InterleaveItem[] }> = [];
+  let cursor = 0;
+  for (const pos of [...groups.keys()].sort((a, b) => a - b)) {
+    if (pos > cursor) segs.push({ text: content.slice(cursor, pos) });
+    segs.push({ items: groups.get(pos)! });
+    cursor = pos;
+  }
+  if (cursor < content.length) segs.push({ text: content.slice(cursor) });
+  return segs;
+}
+
+/** 时间线行与思考分段按锚点归并（两者各自按时间序；同锚点思考在前——先思考后调用） */
+function mergeInterleaveItems(nodes: TimelineNode[], segs: Array<{ afterChars: number; text: string; closed: boolean }>): InterleaveItem[] {
+  const out: InterleaveItem[] = [];
+  let ni = 0;
+  let si = 0;
+  while (ni < nodes.length || si < segs.length) {
+    if (si >= segs.length || (ni < nodes.length && (nodes[ni].afterChars ?? 0) < (segs[si].afterChars ?? 0))) {
+      out.push(nodes[ni++]);
+    } else {
+      out.push({ key: `rs${si}`, kind: 'reason', ...segs[si++] });
     }
-    if (s.kind === 'reasoning') return { key: `r${i}`, label: '思考中…', running: true, kind: 'think' as const };
-    return { key: `a${i}`, label: '正在回答…', running: true, kind: 'answer' as const };
-  });
+  }
+  return out;
+}
+
+/** 已落盘 assistant 回答：正文段与检索行交错渲染（历史行不带 --run，不脉冲） */
+function InterleavedAnswer({ content, nodes }: { content: string; nodes: TimelineNode[] }): JSX.Element {
+  return (
+    <>
+      {interleaveSegments(content, nodes).map((seg, i) => (
+        'text' in seg
+          ? (
+            <div key={i} className="ki-chat-msg__body">
+              <MarkdownPreview text={seg.text} />
+            </div>
+          )
+          : (
+            <div key={i} className="ki-chat-tl">
+              {seg.items.map((n) => <ToolRow key={n.key} n={n as TimelineNode} />)}
+            </div>
+          )
+      ))}
+    </>
+  );
+}
+
+/** 时间线节点（demo D9 行结构）：tool 的 start/end 合并为一行，end 未到时保持 running */
+interface TimelineNode {
+  key: string;
+  kind: 'tool' | 'think' | 'answer';
+  running: boolean;
+  label: string;
+  name?: string;
+  mode?: string;
+  query?: string;
+  hits?: number;
+  durationMs?: number;
+  error?: string;
+  /** interleave 锚点：本行发生在已发出正文的第几个字符后（缺省 = 0，即正文之前） */
+  afterChars?: number;
+}
+
+function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
+  const out: TimelineNode[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.kind === 'tool') {
+      if (s.phase === 'start') {
+        const next = steps[i + 1];
+        const end = next && next.kind === 'tool' && next.phase === 'end' ? next : undefined;
+        if (end) i += 1;
+        out.push({
+          key: `t${i}`, kind: 'tool', running: !end, label: s.label,
+          name: s.name ?? end?.name, mode: s.mode ?? end?.mode, query: s.query,
+          hits: end?.hits, durationMs: end?.durationMs, error: end?.error,
+          // 行位置以 start 时刻为准（"说完哪句去查的"）
+          afterChars: s.afterChars ?? end?.afterChars,
+        });
+      } else {
+        // 质疑 C2：end 若与 start 之间被插入了非 tool 步骤（事件乱序），前向配对会失败 →
+        // start 行永久停在"检索中…"。兜底：回看最近一个未完成的 tool 行并入。
+        const prev = out[out.length - 1];
+        if (prev && prev.kind === 'tool' && prev.running && prev.hits === undefined && !prev.error) {
+          prev.running = false;
+          prev.name = prev.name ?? s.name;
+          prev.mode = prev.mode ?? s.mode;
+          prev.hits = s.hits;
+          prev.durationMs = s.durationMs;
+          prev.error = s.error;
+        } else {
+          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, hits: s.hits, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
+        }
+      }
+    } else if (s.kind === 'reasoning') {
+      out.push({ key: `r${i}`, kind: 'think', running: true, label: '思考中…' });
+    } else {
+      out.push({ key: `a${i}`, kind: 'answer', running: true, label: '正在回答…' });
+    }
+  }
+  return out;
+}
+
+/** 时间线工具行（demo D9）：动作名 + 工具胶囊 + 状态 + 展开卡；无摘要字段时退化为纯文本行 */
+function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const hasDetail = Boolean(n.name || n.mode || n.query || n.hits !== undefined || n.error);
+  if (!hasDetail) {
+    // 退化行（无摘要字段的旧数据）：不带 --tool 类 —— 否则 D9 的 cursor:pointer + hover
+    // 会暗示可点击，而它其实没有展开内容
+    return (
+      <div className={`ki-chat-tl__node${n.running ? ' ki-chat-tl__node--run' : ''}`}>
+        <span className="ki-chat-tl__label">{n.label}</span>
+      </div>
+    );
+  }
+  const stat = n.error
+    ? '失败'
+    : n.running
+      ? `${n.mode ? `${n.mode} · ` : ''}检索中…`
+      : n.hits !== undefined
+        ? `${n.mode ? `${n.mode} · ` : ''}${n.hits} 命中${n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}`
+        : n.label;
+  const toggle = (): void => setOpen((v) => !v);
+  return (
+    <>
+      <div
+        className={`ki-chat-tl__node ki-chat-tl__node--tool${n.running ? ' ki-chat-tl__node--run' : ''}${n.error ? ' ki-chat-tl__node--tool-fail' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        title={open ? '收起调用详情' : '展开调用详情'}
+        onClick={toggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+      >
+        <span className="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+        {n.name ? <span className="ki-chat-tl__tool">{n.name}</span> : null}
+        <span className="ki-chat-tl__stat">{stat}</span>
+        <svg className="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <path d="M6.5 4 10.5 8 6.5 12" />
+        </svg>
+      </div>
+      {open ? <ToolCard n={n} /> : null}
+    </>
+  );
+}
+
+/**
+ * 展开卡片（demo D9 B 段）：只渲染**既有摘要字段** —— 入参（query/mode）、响应（hits/耗时）、错误。
+ * ⚠️ 完整入参/响应 JSON 属批次 3（待定 #9 未拍板），此处不伪造（台账护栏 #2）。
+ */
+function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
+  const args: Record<string, string> = {};
+  if (n.query) args.query = n.query;
+  if (n.mode) args.mode = n.mode;
+  const resp: Record<string, string | number | boolean> = {};
+  if (n.hits !== undefined) { resp.ok = !n.error; resp.hits = n.hits; }
+  return (
+    <div className="ki-chat-tool">
+      {Object.keys(args).length > 0 ? (
+        <section className="ki-chat-tool__sec">
+          <div className="ki-chat-tool__label">入参{n.mode ? <em>mode {n.mode}</em> : null}</div>
+          <JsonCode obj={args} />
+        </section>
+      ) : null}
+      {n.hits !== undefined && !n.error ? (
+        <section className="ki-chat-tool__sec">
+          <div className="ki-chat-tool__label">响应<em>{n.hits} 命中{n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}</em></div>
+          <JsonCode obj={resp} />
+        </section>
+      ) : null}
+      {n.error ? (
+        <section className="ki-chat-tool__sec">
+          <div className="ki-chat-tool__label">错误<em>未产生检索结果</em></div>
+          <pre className="ki-chat-tool__err">{n.error}</pre>
+          <p className="ki-chat-tool__note ki-chat-tool__note--warn">这一步没有检索结果，回答未引用其内容。</p>
+        </section>
+      ) : null}
+      {n.running ? <p className="ki-chat-tool__note">本步骤进行中，完成后回写命中与耗时。</p> : null}
+    </div>
+  );
+}
+
+/** 扁平 JSON 着色渲染（demo ki-chat-tool__code 的 .k/.s/.n 同款） */
+function JsonCode({ obj }: { obj: Record<string, string | number | boolean> }): JSX.Element {
+  const entries = Object.entries(obj);
+  return (
+    <pre className="ki-chat-tool__code">
+      {'{\n'}
+      {entries.map(([k, v], i) => (
+        <span key={k}>
+          {'  '}<span className="k">&quot;{k}&quot;</span>:{' '}
+          {typeof v === 'number' || typeof v === 'boolean'
+            ? <span className="n">{String(v)}</span>
+            : <span className="s">&quot;{v}&quot;</span>}
+          {i < entries.length - 1 ? ',' : ''}{'\n'}
+        </span>
+      ))}
+      {'}'}
+    </pre>
+  );
 }
 
 /** 生成中的临时气泡（内容全部来自 store.streaming，**不落盘**） */
 function StreamingBubble({
   content,
-  reasoning,
+  reasoningSegs,
   progress,
   degradedLabel,
   reasoningOpen,
   onToggleReasoning,
 }: {
   content: string;
-  reasoning: string;
+  /** 思考分段（含 interleave 锚点；store 按"正文输出/工具调用"切段） */
+  reasoningSegs: Array<{ afterChars: number; text: string; closed: boolean }>;
   progress: ProgressStep[];
   degradedLabel: string | null;
   reasoningOpen: boolean;
   onToggleReasoning: (next: boolean) => void;
 }): JSX.Element {
-  const nodes = progressNodes(progress);
-  const showThinking = reasoning !== '' && nodes.length === 0;
+  const nodes = buildTimeline(progress);
+  const items = mergeInterleaveItems(nodes, reasoningSegs);
 
   return (
     <div className="ki-chat-msg ki-chat-msg--assistant ki-chat-msg--streaming">
       <div className="ki-chat-msg__meta">
+        <span className="ki-chat-avatar" aria-hidden="true">k</span>
         <span className="ki-chat-msg__role">kisearch</span>
         <span className="ki-chat-msg__at">刚刚</span>
         {degradedLabel ? (
@@ -1064,31 +1326,54 @@ function StreamingBubble({
         <div className="ki-chat-msg__degraded" role="status">{degradedLabel}</div>
       ) : null}
 
-      {/* R11a：生成期每一步都要有可见反馈 —— 时间线取代了原先的单行 progress 文本 */}
-      <div className="ki-chat-tl" role="status" aria-live="polite">
-        {nodes.map((n) => (
-          <div key={n.key} className={`ki-chat-tl__node ki-chat-tl__node--${n.kind}${n.running ? ' ki-chat-tl__node--run' : ''}`}>
-            <span className="ki-chat-tl__label">{n.label}</span>
-          </div>
-        ))}
-        {showThinking ? (
-          <div className="ki-chat-tl__node ki-chat-tl__node--think ki-chat-tl__node--run">
-            <span className="ki-chat-tl__label">正在思考…</span>
-          </div>
-        ) : null}
-        {/* 尚无任何进展时也要有兜底文案（N10 不得出现无反馈空白） */}
-        {nodes.length === 0 && !showThinking ? (
+      {/* R11a + interleave（2026-09-30 用户裁决，二次扩展）：**思考过程与检索痕迹同机制**——
+          在哪想的就在哪显示（按 afterChars 锚点插入正文流），不再恒占消息顶部 */}
+      {items.length === 0 ? (
+        /* 尚无任何进展时也要有兜底文案（N10 不得出现无反馈空白） */
+        <div className="ki-chat-tl" role="status" aria-live="polite">
           <div className="ki-chat-tl__node ki-chat-tl__node--run">
             <span className="ki-chat-tl__label">正在连接模型…</span>
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : (
+        interleaveSegments(content, items).map((seg, i) => (
+          'text' in seg
+            ? (
+              <div key={i} className="ki-chat-msg__body">
+                <MarkdownPreview text={seg.text} />
+              </div>
+            )
+            : (
+              <Fragment key={i}>
+                {seg.items.map((it) => (
+                  it.kind === 'reason'
+                    ? (
+                      <ReasoningBlock
+                        key={it.key}
+                        text={it.text}
+                        streaming={!it.closed}
+                        open={reasoningOpen}
+                        onToggle={onToggleReasoning}
+                      />
+                    )
+                    : (
+                      <div key={it.key} className="ki-chat-tl" role="status" aria-live="polite">
+                        {it.kind === 'tool'
+                          ? <ToolRow n={it} />
+                          : (
+                            <div className={`ki-chat-tl__node ki-chat-tl__node--${it.kind}${it.running ? ' ki-chat-tl__node--run' : ''}`}>
+                              <span className="ki-chat-tl__label">{it.label}</span>
+                            </div>
+                          )}
+                      </div>
+                    )
+                ))}
+              </Fragment>
+            )
+        ))
+      )}
 
-      {reasoning ? (
-        <ReasoningBlock text={reasoning} streaming open={reasoningOpen} onToggle={onToggleReasoning} />
-      ) : null}
-
-      {content ? (
+      {items.length === 0 && content ? (
         <div className="ki-chat-msg__body">
           <MarkdownPreview text={content} />
         </div>

@@ -79,8 +79,12 @@ export const ANTI_HALLUCINATION_RULES = [
   '1. 若检索结果为空，必须明确回答「知识库中未找到相关内容」，不得用你自己的知识冒充知识库内容。',
   '2. 若检索过程不可用（工具报错 / 未检索），必须明确说明「本次未检索」，不得静默按普通对话作答。',
   '3. 回答中引用知识库内容时，须与返回片段一致，不得改写、扩写或推测原文未写的细节。',
-  // ★ 次数取自 CHAT_BUDGET.maxToolRounds（SSOT），不得各写一个数（文件头"硬性规则 4"）
-  `4. 检索次数有限（最多 ${CHAT_BUDGET.maxToolRounds} 次）；若 ${CHAT_BUDGET.maxToolRounds} 次仍无相关结果，直接如实说明，不要继续尝试。`,
+  // ★ 次数上限与 CHAT_BUDGET.maxToolRounds（SSOT）同源，不得各写一个数（文件头"硬性规则 4"）。
+  //   2026-09-30 用户裁决取消轮次约束（Infinity）→ 提示词不再向模型宣称次数限制；
+  //   若未来恢复有限值，自动回到"最多 N 次"措辞。
+  Number.isFinite(CHAT_BUDGET.maxToolRounds)
+    ? `4. 检索次数有限（最多 ${CHAT_BUDGET.maxToolRounds} 次）；若 ${CHAT_BUDGET.maxToolRounds} 次仍无相关结果，直接如实说明，不要继续尝试。`
+    : '4. 检索按需进行；若多次检索仍无相关结果，直接如实说明，不要反复尝试。',
 ];
 
 /**
@@ -107,16 +111,24 @@ export const RETRIEVAL_SKILL_PROMPT: string = [
 ].join('\n');
 
 /**
- * 组装 system 消息：`[检索 skill, 会话自定义 prompt]`。
+ * 组装 system 消息：`[注入块…, 会话自定义 prompt]`。
  *
- * · 顺序不可颠倒：skill 在前，保证反幻觉规则**优先于**用户自定义提示词
- * · 空值：会话 `systemPrompt` 为空时只返回 skill 一段（不留空 system 消息）
+ * · 顺序不可颠倒：注入块在前，保证反幻觉规则**优先于**用户自定义提示词
+ * · 空值：会话 `systemPrompt` 为空时只返回注入块（不留空 system 消息）
+ *
+ * @param skillBlocks 注入块。批次 1 起由对话配置层产出
+ *   （见 `prompt-config.ts::promptConfigSystemBlocks`：内置 skill → 基础提示词 → 用户 skill）。
+ *   **默认值 = 既有单一内置检索 skill 块** —— 未传该参数的既有调用方、以及「从未配置过」
+ *   的运行时，行为因此**逐字不变**（护栏 #3）。
  */
-export function buildSystemMessages(convSystemPrompt: string): Array<{ role: 'system'; content: string }> {
-  const msgs: Array<{ role: 'system'; content: string }> = [
-    { role: 'system', content: RETRIEVAL_SKILL_PROMPT },
-  ];
-  // 空值：不留空 system 消息（契约测试断言 every(content.trim().length > 0)）
+export function buildSystemMessages(
+  convSystemPrompt: string,
+  skillBlocks: readonly string[] = [RETRIEVAL_SKILL_PROMPT],
+): Array<{ role: 'system'; content: string }> {
+  // 空块不发：契约测试断言 every(content.trim().length > 0)
+  const msgs: Array<{ role: 'system'; content: string }> = skillBlocks
+    .filter((t) => typeof t === 'string' && t.trim().length > 0)
+    .map((content) => ({ role: 'system' as const, content }));
   if (convSystemPrompt && convSystemPrompt.trim().length > 0) {
     msgs.push({ role: 'system', content: convSystemPrompt });
   }

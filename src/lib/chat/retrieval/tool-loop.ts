@@ -68,6 +68,7 @@ import {
   KB_SEARCH_TOOL_NAME,
 } from './retrieval-skill.js';
 import { parseToolCallArguments, runKbSearch } from './kb-search-tool.js';
+import { promptConfigSystemBlocks, readPromptConfig } from '../prompt-config.js';
 import { toToolProjection, toSourceRefs } from './projection.js';
 
 export interface ToolLoopInput {
@@ -94,6 +95,11 @@ interface LoopRuntime {
   supportsTools: boolean;
   enabled: boolean;
   reason: string | null;
+  /**
+   * system 注入块（批次 1：由对话配置层产出）。
+   * 放进 runtime 而非 `ToolLoopInput`，理由与其余运行期字段一致：**不改冻结的输入签名**。
+   */
+  systemBlocks: readonly string[];
 }
 
 function resolveRuntime(): LoopRuntime {
@@ -112,6 +118,8 @@ function resolveRuntime(): LoopRuntime {
     supportsTools: status.supportsTools,
     enabled: status.enabled,
     reason: status.reason,
+    // 从未配置过 prompt-config.json → 默认配置 → 块恰为 [RETRIEVAL_SKILL_PROMPT]（与改动前逐字一致）
+    systemBlocks: promptConfigSystemBlocks(readPromptConfig(cfg).config),
   };
 }
 
@@ -125,9 +133,9 @@ function messageIdFor(conv: ConversationFile): string {
  *
  * 历史消息的 `sources` / `timing` / `usage` 一律不参与（它们是给人看的，不是上游输入）。
  */
-function buildUpstreamMessages(input: ToolLoopInput): ChatTurn[] {
+function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly string[]): ChatTurn[] {
   const msgs: ChatTurn[] = [];
-  for (const m of buildSystemMessages(input.convSystemPrompt)) {
+  for (const m of buildSystemMessages(input.convSystemPrompt, systemBlocks)) {
     msgs.push({ role: 'system', content: m.content });
   }
   for (const m of input.conv.messages) {
@@ -205,7 +213,7 @@ async function* toolLoopPath(
   runtime: LoopRuntime,
   messageId: string,
 ): AsyncGenerator<ChatEvent> {
-  const messages = buildUpstreamMessages(input);
+  const messages = buildUpstreamMessages(input, runtime.systemBlocks);
   const maxRounds = runtime.maxToolRounds;
 
   let round = 0;
@@ -371,7 +379,7 @@ async function* toolLoopPath(
         //   用户会把"没检索"当成"检索了但没找到"）。受 `degradedSent` 闸门约束，至多一次。
         if (!degradedSent) {
           degradedSent = true;
-          yield { type: 'degraded', reason: 'retrieval-unavailable', message: '本次未检索' };
+          yield { type: 'degraded', reason: 'retrieval-unavailable', message: '本次检索未成功' };
         }
         continue;
       }
@@ -453,11 +461,11 @@ async function* degradedPath(
   yield {
     type: 'degraded',
     reason: retrievalOk ? ctx.reason : 'retrieval-unavailable',
-    message: retrievalOk ? '本次未使用工具检索' : '本次未检索',
+    message: retrievalOk ? '本次未使用工具检索' : '本次检索未成功',
   };
 
   // 2. 投影后作为上下文注入（拼在本轮 user 消息之前），并让模型作答
-  const messages = buildUpstreamMessages(input);
+  const messages = buildUpstreamMessages(input, runtime.systemBlocks);
   if (retrievalOk && projection) {
     const contextText = buildAutoRetrievalContext(JSON.stringify(projection));
     // 插到本轮 user 之前（保持 system 在最前）

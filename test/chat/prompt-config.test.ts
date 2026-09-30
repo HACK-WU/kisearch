@@ -246,3 +246,41 @@ describe('注入顺序', () => {
     assert.deepEqual(promptConfigSystemBlocks(cfg2), [RETRIEVAL_SKILL_PROMPT, '基础提示词', '先给结论']);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+
+describe('接入后：buildSystemMessages 使用配置产出的注入块（工作项 3）', () => {
+  it('未配置（默认配置）→ 与既有单参调用**逐字一致**（护栏 #3）', () => {
+    const legacy = buildSystemMessages('会话提示');
+    const wired = buildSystemMessages('会话提示', promptConfigSystemBlocks(defaultPromptConfig()));
+    assert.deepEqual(wired, legacy, '接入配置层后，未配置时的上游 messages 必须一字不差');
+  });
+
+  it('注入顺序：内置 skill → 基础提示词 → 用户 skill → 会话 prompt', () => {
+    const cfg = defaultPromptConfig();
+    cfg.prompt.content = '基础提示词内容';
+    cfg.skills.push({
+      id: 'user-a', name: 'A', content: '用户 skill A', builtin: false, enabled: true, at: cfg.prompt.at,
+    });
+    const msgs = buildSystemMessages('会话提示', promptConfigSystemBlocks(cfg));
+    assert.deepEqual(
+      msgs.map((m) => m.content),
+      [RETRIEVAL_SKILL_PROMPT, '基础提示词内容', '用户 skill A', '会话提示'],
+      '反幻觉规则（内置 skill）必须仍在最前，会话 prompt 仍在最后',
+    );
+    assert.ok(msgs.every((m) => m.role === 'system' && m.content.trim().length > 0), '不留空 system 消息');
+  });
+
+  it('停用的 skill 与纯空白块都不出现在注入结果里', () => {
+    const cfg = defaultPromptConfig();
+    cfg.skills.push(
+      { id: 'off', name: '停用', content: '不该出现', builtin: false, enabled: false, at: cfg.prompt.at },
+      { id: 'blank', name: '空白', content: '   ', builtin: false, enabled: true, at: cfg.prompt.at },
+    );
+    assert.deepEqual(buildSystemMessages('', promptConfigSystemBlocks(cfg)).map((m) => m.content), [RETRIEVAL_SKILL_PROMPT]);
+  });
+
+  it('显式传空块数组 → 只剩会话 prompt（调用方保留"清空注入"的能力）', () => {
+    assert.deepEqual(buildSystemMessages('仅会话提示', []).map((m) => m.content), ['仅会话提示']);
+  });
+});

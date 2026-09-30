@@ -26,6 +26,18 @@ export interface SourceRef {
   snippet: string;
 }
 
+/** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
+export interface ChatProgressStep {
+  phase: 'start' | 'end';
+  /** 本步发生时已发出的正文字符数（interleave 锚点，与后端契约对齐；旧数据缺省 = 0） */
+  afterChars?: number;
+  name?: string;
+  mode?: string;
+  hits?: number;
+  durationMs?: number;
+  error?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -37,6 +49,8 @@ export interface ChatMessage {
   usage?: { promptTokens: number; completionTokens: number; reasoningTokens?: number };
   /** 来源引用（刷新后仍可展示） */
   sources?: SourceRef[];
+  /** 检索过程步骤摘要（走查 #11：落盘 → 刷新/切会话后仍可回看"检索了几次"） */
+  progress?: ChatProgressStep[];
 }
 
 export interface ConversationFile {
@@ -119,6 +133,67 @@ export interface ChatConfigOk {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 3b. 对话配置层（提示词 / Skill / 工具开关）—— 与 `src/lib/chat/prompt-config.ts` 对齐
+//
+// ⚠️ 上限（字数 / 条数）与工具分组**都不在此硬编码**：一律用 `GET /prompt-config`
+//    返回的 `limits` / `toolGroups`。工具名的 SSOT 在服务端（`src/lib/mcp-tools/`），
+//    前端另写一份清单必然会随工具增减而漂移。
+// ─────────────────────────────────────────────────────────────
+
+export interface PromptSkill {
+  id: string;
+  name: string;
+  content: string;
+  /** 内置条目：可改内容、可禁用、**不可删除**（服务端强校验，前端据此隐藏删除入口） */
+  builtin: boolean;
+  enabled: boolean;
+  /** 最后修改时间（ISO）；未改过时等于内置默认时间戳 */
+  at: string;
+}
+
+export interface PromptConfig {
+  version: 1;
+  prompt: { content: string; at: string };
+  skills: PromptSkill[];
+  /** 工具名 → 是否暴露给 AI。**批次 2 才生效**，本批只存 —— UI 必须标注，勿让用户以为已生效 */
+  tools: Record<string, boolean>;
+}
+
+export interface PromptConfigLimits {
+  promptMaxChars: number;
+  skillMaxChars: number;
+  skillNameMaxChars: number;
+  maxSkills: number;
+}
+
+/** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
+export interface PromptToolGroup {
+  key: 'read' | 'write' | 'delete';
+  label: string;
+  danger: boolean;
+  names: string[];
+  /** 工具短描述（走查 #7；服务端 `MCP_TOOL_GROUPS.descs` 下发，UI 文案非工具契约。
+   *  可选：旧版 daemon 响应无此字段，前端必须容忍缺失而不是假设一定有 */
+  descs?: Record<string, string>;
+}
+
+export interface PromptConfigOk {
+  ok: true;
+  config: PromptConfig;
+  /** 内置默认（「恢复默认」直接回填用，前端不复制一份默认文案） */
+  defaults: PromptConfig;
+  limits: PromptConfigLimits;
+  toolGroups: PromptToolGroup[];
+  /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
+  issue: string | null;
+}
+
+export interface PromptConfigSaveOk {
+  ok: true;
+  config: PromptConfig;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 4. 降级提示文案（前端唯一来源，避免多处硬编码不一致）
 // ─────────────────────────────────────────────────────────────
 
@@ -129,6 +204,8 @@ export interface ChatConfigOk {
  */
 export const DEGRADED_LABELS: Record<DegradedReason, string> = {
   'tools-unsupported': '本次未使用工具检索',
-  'retrieval-unavailable': '本次未检索',
+  // 原为「本次未检索」—— 与实际语义不符：该 reason 表示"检索请求未成功"（可能已调用多次后失败），
+  // 说"未检索"会让用户以为压根没搜，且与「已达检索轮次上限」并列时看似自相矛盾（真机走查 #10）
+  'retrieval-unavailable': '本次检索未成功',
   'semantic-degraded': '语义检索降级为全文',
 };

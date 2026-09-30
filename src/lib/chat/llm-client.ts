@@ -51,7 +51,12 @@ export interface LlmStatus {
 /** v2 默认预算（SSOT = chat-contract 的 CHAT_BUDGET；此处只取所需两项，避免循环 import 语义混淆） */
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_TOOL_ROUNDS = 3;
+/**
+ * 工具轮次上限（2026-09-30 用户裁决**取消约束**：一句一检的长节奏不该被"已达检索轮次上限"截断）。
+ * Infinity → tool-loop 的 reachedLimit 恒 false，「拿掉 tools 再调一次」分支与
+ * `tool-rounds-exhausted` warning 均不再触发；循环仍受模型自然停手 / 用户中止 / 超时保护。
+ */
+const DEFAULT_MAX_TOOL_ROUNDS = Number.POSITIVE_INFINITY;
 
 /** 未就绪时的统一形状（v2 字段仍需返回，前端据以统一渲染禁用态） */
 function notReady(reason: string, maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS): LlmStatus {

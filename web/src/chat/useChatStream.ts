@@ -263,14 +263,14 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number): void {
     case 'tool_start':
       store.dispatch({
         type: 'streamProgress',
-        step: toolStartStep(ev.mode),
+        step: toolStartStep(ev.mode, ev.name, ev.query),
       });
       return;
 
     case 'tool_end':
       store.dispatch({
         type: 'streamProgress',
-        step: toolEndStep(ev.hits, ev.error),
+        step: toolEndStep(ev.hits, ev.error, { durationMs: ev.durationMs }),
       });
       return;
 
@@ -322,15 +322,20 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number): void {
 }
 
 /** `tool_start` → 生成中状态文案（R11a：检索往返期间必须有可见进展） */
-function toolStartStep(mode: string): ProgressStep {
+/* 导出：ChatPanel 还原"落盘的历史步骤"时复用同一套文案，否则刷新前后会出现两套措辞 */
+export function toolStartStep(mode: string, name?: string, query?: string): ProgressStep {
   const label = mode === 'fulltext' ? '正在检索知识库…（全文）' : '正在检索知识库…（语义）';
-  return { kind: 'tool', phase: 'start', label };
+  return { kind: 'tool', phase: 'start', label, name, query, mode };
 }
 
 /** `tool_end` → 命中数或失败原因（必须成对，否则前端永久停留"正在检索…"） */
-function toolEndStep(hits: number, error?: string): ProgressStep {
+export function toolEndStep(
+  hits: number,
+  error?: string,
+  extra?: { name?: string; mode?: string; durationMs?: number },
+): ProgressStep {
   const label = error ? `检索失败：${error}` : `已检索：命中 ${hits} 条`;
-  return { kind: 'tool', phase: 'end', label };
+  return { kind: 'tool', phase: 'end', label, hits, error, ...extra };
 }
 
 /**

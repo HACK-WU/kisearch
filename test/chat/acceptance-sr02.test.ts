@@ -42,7 +42,7 @@ describe('SR-02 验收 · N17 降级必须可见', () => {
     }
   });
 
-  it('"本次未检索"与"未使用工具检索"是不同文案（用户可区分）', () => {
+  it('"检索未成功"与"未使用工具检索"是不同文案（用户可区分）', () => {
     assert.notEqual(DEGRADED_LABELS['retrieval-unavailable'], DEGRADED_LABELS['tools-unsupported']);
   });
 });
