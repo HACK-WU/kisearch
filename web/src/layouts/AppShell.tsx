@@ -13,6 +13,8 @@ import { ImportPage } from '@/pages/ImportPage';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { Icon } from '@/components/icons';
+import { ChatPanel } from '@/chat/ChatPanel';
+import { createChatStore } from '@/chat/chatStore';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -66,6 +68,14 @@ function ServiceBadge(): JSX.Element {
 }
 
 export function AppShell(): JSX.Element {
+  // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
+  //   因此 store 在此创建一次；ChatPanel 只是视图，不持有业务状态（否则关面板会丢内容并连带 abort）
+  const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
+  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
+  const chatStore = chatStoreRef.current;
+  const [chatOpen, setChatOpen] = useState(true);
+  const chatToggleRef = useRef<HTMLButtonElement>(null);
+
   const location = useLocation();
   const importVisible = location.pathname === '/import';
   const currentLabel = NAV_MAIN.find((item) =>
@@ -252,6 +262,22 @@ export function AppShell(): JSX.Element {
             工作空间 <span className="ki-breadcrumb__sep">/</span> <strong>{currentLabel}</strong>
           </div>
           <div className="ki-topbar__spacer" />
+          {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
+          <button
+            type="button"
+            className="ki-topbar__chat-toggle"
+            ref={chatToggleRef}
+            onClick={() => setChatOpen((v) => !v)}
+            title={chatOpen ? '收起 AI 对话' : '打开 AI 对话'}
+            aria-label="AI 对话"
+            aria-pressed={chatOpen}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M20 11.5a8 8 0 0 1-8 8H5l-3 3V11.5a9 9 0 0 1 18 0Z" />
+              <path d="M7 11h.01M11 11h.01M15 11h.01" strokeWidth="3" />
+            </svg>
+            <span className="ki-topbar__chat-label">AI 对话</span>
+          </button>
           <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
             {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}
             <span>{taskStatus}</span>
@@ -301,6 +327,12 @@ export function AppShell(): JSX.Element {
           </div>
         </main>
       </div>
+
+      {/* ════════ 右侧对话面板（常驻所有页面；关闭 = 隐藏不卸载，见 D15）════════ */}
+      <ChatPanel store={chatStore} open={chatOpen} onClose={() => {
+        setChatOpen(false);
+        chatToggleRef.current?.focus();
+      }} />
     </div>
     {editorRequest && (
       <DocumentEditor

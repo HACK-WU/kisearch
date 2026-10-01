@@ -390,6 +390,57 @@ export function renderMarkdownHtml(md: string, base?: AssetBase): string {
   return parser.parse(encodeImageSpaces(md), { async: false }) as string;
 }
 
+/** A complete top-level Markdown token. Inline links are resolved by the full-document lexer. */
+export interface MarkdownBlock {
+  key: string;
+  start: number;
+  end: number;
+  raw: string;
+  references: string;
+  html: string;
+  complete: boolean;
+}
+
+/** Parse the whole document before rendering individual blocks; never split Markdown source. */
+export function renderMarkdownBlocks(md: string, previous: readonly MarkdownBlock[] = []): MarkdownBlock[] {
+  const parser = new Marked({ renderer: buildRenderer(), gfm: true, breaks: true });
+  parser.use({ extensions: [safeDetailsExtension()] });
+  const input = encodeImageSpaces(md).replace(/\r\n?|\r/g, '\n');
+  // Preprocessing only expands image-path spaces and normalizes newlines. Preserve raw SSE offsets.
+  const offsets: number[] = [];
+  let original = 0;
+  for (let i = 0; i < input.length;) {
+    offsets[i] = original;
+    if (md[original] === ' ' && input.slice(i, i + 3) === '%20') {
+      offsets[i + 1] = original; offsets[i + 2] = original;
+      i += 3; original += 1;
+    } else if (md[original] === '\r' && input[i] === '\n') {
+      i += 1; original += md[original + 1] === '\n' ? 2 : 1;
+    } else { i += 1; original += 1; }
+  }
+  offsets[input.length] = md.length;
+  const tokens = parser.lexer(input);
+  const references = JSON.stringify(tokens.links);
+  const cache = new Map(previous.map((b) => [b.key, b]));
+  let cursor = 0;
+  return tokens.map((token) => {
+    const found = input.indexOf(token.raw, cursor);
+    const startAt = found >= 0 ? found : cursor;
+    const start = offsets[startAt] ?? md.length;
+    cursor = startAt + token.raw.length;
+    const key = `${start}:${token.type}`;
+    const old = cache.get(key);
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(token.raw);
+    const lines = token.raw.trimEnd().split('\n');
+    const closing = fence && new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \t]*$`);
+    const complete = !fence || (lines.length > 1 && Boolean(closing?.test(lines[lines.length - 1])));
+    // Reuse completed HTML so Mermaid/details DOM survives unrelated subsequent chunks.
+    const html = old?.raw === token.raw && old.references === references
+      ? old.html : parser.parser([token]);
+    return { key, start, end: offsets[cursor] ?? md.length, raw: token.raw, references, html, complete };
+  });
+}
+
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null;
 function loadMermaid(): Promise<typeof import('mermaid')> {
   mermaidPromise ??= import('mermaid');
@@ -458,17 +509,20 @@ async function copyText(text: string): Promise<void> {
 /** Markdown 预览组件（dangerouslySetInnerHTML 渲染 + mermaid 图表挂载 + 附件占位块） */
 export interface MarkdownPreviewProps {
   text: string;
+  /** Already sanitized by renderMarkdownBlocks; only trusted callers supply this. */
+  renderedHtml?: string;
+  deferMermaid?: boolean;
   assetBase?: AssetBase;
   /** 返回 true 表示已在当前应用内处理该本地文档链接，应阻止浏览器默认跳转。 */
   onLocalLink?: (href: string) => boolean;
 }
 
-export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPreviewProps): JSX.Element {
+export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, deferMermaid = false }: MarkdownPreviewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const html = useMemo(
-    () => renderMarkdownHtml(text, assetBase),
-    [text, assetBase?.scope, assetBase?.group],
+    () => renderedHtml ?? renderMarkdownHtml(text, assetBase),
+    [text, renderedHtml, assetBase?.scope, assetBase?.group],
   );
 
   // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；
@@ -543,7 +597,7 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
   // mermaid 代码块异步渲染（动态加载 mermaid，避免无图表时也加载大 chunk）
   useEffect(() => {
     const root = rootRef.current;
-    if (!root || !html.includes('language-mermaid')) return;
+    if (!root || deferMermaid || !html.includes('language-mermaid')) return;
     let cancelled = false;
     setReady(false);
     void loadMermaid().then((mod) => {
@@ -590,7 +644,7 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     return () => {
       cancelled = true;
     };
-  }, [html]);
+  }, [html, deferMermaid]);
 
   // 附件缺失 fail-loud：加载/解码失败的 img 替换为可见占位块（REQ-20260904-001）。
   // 以 decode() 结果判定而非 naturalWidth：Firefox 对无固有尺寸的 SVG 返回 naturalWidth=0 且 complete=true，
@@ -613,5 +667,16 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     }
   }, [html]);
 
-  return <div ref={rootRef} dangerouslySetInnerHTML={{ __html: html }} data-mermaid={ready ? 'done' : undefined} />;
+  // `ki-markdown`：Markdown 排版的样式钩子（`ki.css` §markdown，含列表缩进 / 代码块 / 引用 / 标题）。
+  // 此前只有部分调用方在外层自行套了这个类（DocumentEditor / ModuleDrawer），**对话消息两处漏套** →
+  // 列表 marker 的 padding-left 被全局 reset 清成 0、代码块与引用无样式（真机走查 #8）。
+  // 由组件自身带上，避免以后再有调用方漏掉这一层。
+  return (
+    <div
+      ref={rootRef}
+      className="ki-markdown"
+      dangerouslySetInnerHTML={{ __html: html }}
+      data-mermaid={ready ? 'done' : undefined}
+    />
+  );
 }

@@ -28,7 +28,15 @@ knowledge-indexer-*.tgz
 # 本地配置（可能含明文 apiKey，防止误提交）
 .ki/config.yaml
 .ki/config.json
+config.dev.yaml
 
 .workbuddy/
 CodeWikiHub/
 .qoder/repowiki/
+
+# ---- 并行交付脚手架（见 skills/delivery-slicing「测试与脚手架的归属」）----
+# mock 套件 / 预检脚本 / 桩标记模式；不进版本控制（模板可从 skill 重生）
+.delivery/
+
+# ---- 设计风格工具库（ui-designer 技能安装，本地辅助，不进版本控制）----
+ui-tools/

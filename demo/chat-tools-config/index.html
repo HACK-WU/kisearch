@@ -1,0 +1,3510 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>kisearch · 对话工具配置 demo（增量）</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230071e3'/%3E%3Cstop offset='1' stop-color='%235ac8fa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='22' font-family='Helvetica,Arial' font-size='16' font-weight='700' fill='white' text-anchor='middle'%3Ek%3C/text%3E%3C/svg%3E" />
+<!-- ★ ki.css 原样内联：来源 web/src/styles/ki.css（零构建单文件要求）。
+       要改样式请改源文件，再重新生成本块。 -->
+<style>
+/* =========================================================
+   ki Web 前端 demo —— 共享样式（所有页面引用）
+   风格对齐 zvec-studio（tokens.css / AppShell.css）
+   Token 与 ui-design.md 方案一一对应
+   零构建：纯 CSS，浏览器直接加载
+   ========================================================= */
+
+:root {
+  color-scheme: light;
+  /* ── 背景/表面 ── */
+  --ki-color-bg: #fafafa;
+  --ki-color-bg-secondary: #f5f5f7;
+  --ki-color-surface: #ffffff;
+  --ki-color-border: rgba(0, 0, 0, 0.06);
+  --ki-color-border-strong: rgba(0, 0, 0, 0.1);
+  /* ── 文本 ── */
+  --ki-color-text: #1d1d1f;
+  --ki-color-text-muted: #636366;
+  --ki-color-text-subtle: #98989d;
+  /* ── 品牌/功能色 ── */
+  --ki-color-primary: #0071e3;
+  --ki-color-primary-hover: #0077ed;
+  --ki-color-primary-active: #005bb5;
+  --ki-color-success: #34c759;
+  --ki-color-warning: #ff9500;
+  --ki-color-danger: #ff3b30;
+  --ki-color-info: #5ac8fa;
+  --ki-color-purple: #af52de;
+  /* ── 间距 ── */
+  --ki-space-1: 4px;
+  --ki-space-2: 8px;
+  --ki-space-3: 12px;
+  --ki-space-4: 16px;
+  --ki-space-5: 20px;
+  --ki-space-6: 24px;
+  --ki-space-8: 32px;
+  /* ── 圆角 ── */
+  --ki-radius-sm: 8px;
+  --ki-radius-md: 12px;
+  --ki-radius-lg: 16px;
+  /* ── 字体 ── */
+  --ki-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+    'Helvetica Neue', 'PingFang SC', sans-serif;
+  --ki-font-mono: 'SF Mono', Menlo, Monaco, monospace;
+  --ki-font-size-xs: 11px;
+  --ki-font-size-sm: 12px;
+  --ki-font-size-md: 13px;
+  --ki-font-size-lg: 15px;
+  --ki-font-size-xl: 17px;
+  --ki-font-size-heading: 20px;
+  --ki-font-size-2xl: 28px;
+  /* ── 布局 ── */
+  --ki-header-height: 52px;
+  --ki-sidebar-width: 232px;
+  --ki-content-max-width: 1440px;
+  /* ── 交互态 ── */
+  --ki-color-hover: rgba(0, 0, 0, 0.04);
+  --ki-color-hover-strong: rgba(0, 0, 0, 0.06);
+  --ki-color-surface-muted: rgba(0, 0, 0, 0.05);
+  --ki-color-bg-muted: #f3f4f6;
+  --ki-color-scrollbar: rgba(0, 0, 0, 0.12);
+  /* ── 阴影 ── */
+  --ki-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --ki-shadow-2: 0 4px 24px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.06);
+  /* ── 动效 ── */
+  --ki-motion-fast: 150ms;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --ki-color-bg: #1a1a1e;
+  --ki-color-bg-secondary: #222226;
+  --ki-color-surface: #2c2c30;
+  --ki-color-border: rgba(255, 255, 255, 0.08);
+  --ki-color-border-strong: rgba(255, 255, 255, 0.14);
+  --ki-color-text: #e5e5ea;
+  --ki-color-text-muted: #aeaeb2;
+  --ki-color-text-subtle: #6c6c70;
+  --ki-color-primary: #2997ff;
+  --ki-color-primary-hover: #3da4ff;
+  --ki-color-primary-active: #1e8bef;
+  --ki-color-success: #30d158;
+  --ki-color-warning: #ff9f0a;
+  --ki-color-danger: #ff453a;
+  --ki-color-info: #64d2ff;
+  --ki-color-purple: #bf5af2;
+  --ki-color-hover: rgba(255, 255, 255, 0.06);
+  --ki-color-hover-strong: rgba(255, 255, 255, 0.08);
+  --ki-color-surface-muted: rgba(255, 255, 255, 0.06);
+  --ki-color-bg-muted: #28282c;
+  --ki-color-scrollbar: rgba(255, 255, 255, 0.15);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--ki-font-family);
+  font-size: var(--ki-font-size-md);
+  background: var(--ki-color-bg);
+  color: var(--ki-color-text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+a { color: var(--ki-color-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ══════════ 布局壳 ══════════ */
+.ki-shell { display: flex; height: 100vh; overflow: hidden; }
+
+/* ── 侧边栏 ── */
+.ki-sidebar {
+  width: var(--ki-sidebar-width);
+  min-width: var(--ki-sidebar-width);
+  background: var(--ki-color-bg-secondary);
+  border-right: 1px solid var(--ki-color-border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  user-select: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: margin-left 0.25s ease, opacity 0.2s ease;
+}
+.ki-sidebar::-webkit-scrollbar { width: 0; }
+.ki-sidebar--hidden { margin-left: calc(var(--ki-sidebar-width) * -1); opacity: 0; pointer-events: none; }
+
+.ki-sidebar__header {
+  height: var(--ki-header-height);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.ki-logo {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--ki-color-primary), #5ac8fa);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 14px;
+  flex-shrink: 0;
+}
+.ki-sidebar__title {
+  font-size: 17px; font-weight: 700; letter-spacing: -0.3px;
+  color: var(--ki-color-text);
+}
+
+.ki-sidebar__section { padding: 0 12px; margin-top: 16px; }
+.ki-sidebar__section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 8px; margin-bottom: 4px;
+}
+.ki-sidebar__section-label {
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  color: var(--ki-color-text-subtle);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+
+.ki-nav-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: var(--ki-radius-sm);
+  cursor: pointer; transition: background var(--ki-motion-fast);
+  font-size: var(--ki-font-size-md); color: var(--ki-color-text-muted);
+  font-weight: 500; text-decoration: none; border: none; background: none;
+  width: 100%; text-align: left; margin-bottom: 2px;
+}
+.ki-nav-item:hover { background: var(--ki-color-hover); text-decoration: none; }
+.ki-nav-item--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-nav-item__icon { width: 18px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.ki-nav-item__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-nav-item__ext { font-size: 10px; font-weight: 600; color: var(--ki-color-text-subtle); background: var(--ki-color-surface-muted); padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
+
+.ki-sidebar__spacer { flex: 1; }
+.ki-sidebar__footer { padding: 12px; border-top: 1px solid var(--ki-color-border); flex-shrink: 0; }
+.ki-sidebar__footer-version { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); padding: 0 4px 8px; font-family: var(--ki-font-mono); }
+.ki-sidebar__footer-row { display: flex; align-items: center; gap: 4px; }
+.ki-icon-link {
+  width: 28px; height: 28px; border-radius: var(--ki-radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ki-color-text-subtle); cursor: pointer;
+  transition: all var(--ki-motion-fast); border: none; background: none;
+}
+.ki-icon-link:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text-muted); }
+.ki-icon-link svg { width: 15px; height: 15px; }
+
+/* ── 主区域 ── */
+.ki-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.ki-topbar {
+  height: var(--ki-header-height);
+  display: flex; align-items: center;
+  padding: 0 24px; border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface); gap: 12px; flex-shrink: 0;
+}
+.ki-topbar__toggle {
+  background: none; border: none; cursor: pointer; font-size: 16px;
+  color: var(--ki-color-text-muted); padding: 4px 6px;
+  border-radius: var(--ki-radius-sm); line-height: 1;
+  transition: background var(--ki-motion-fast);
+}
+.ki-topbar__toggle:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ki-topbar__title { font-size: 1.2rem; font-weight: 700; color: var(--ki-color-text); letter-spacing: -0.3px; }
+.ki-topbar__spacer { flex: 1; }
+.ki-import-task-link {
+  display: inline-block; max-width: min(32vw, 360px); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1;
+  padding: 6px 10px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text);
+  font-size: var(--ki-font-size-sm);
+}
+.ki-import-task-link:hover, .ki-import-task-link:focus-visible {
+  color: var(--ki-color-primary); outline-color: var(--ki-color-primary);
+}
+
+/* 顶栏 Scope 选择器：只允许选择已有项，搜索框仅用于过滤 */
+.ki-scope-picker { position: relative; min-width: 220px; }
+.ki-scope-picker__input-wrap { position: relative; }
+.ki-scope-picker__input { width: 100%; box-sizing: border-box; height: 36px; padding: 7px 34px 7px 10px; cursor: text; }
+.ki-scope-picker__input:hover, .ki-scope-picker__input--open { border-color: var(--ki-color-primary); }
+.ki-scope-picker__input:disabled { cursor: wait; opacity: 0.7; }
+.ki-scope-picker__toggle { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 4px 6px; border: 0; border-radius: 4px; background: none; color: var(--ki-color-text-subtle); cursor: pointer; line-height: 1; }
+.ki-scope-picker__toggle:hover, .ki-scope-picker__toggle--open { background: var(--ki-color-hover); color: var(--ki-color-primary); }
+.ki-scope-picker__toggle:disabled { cursor: wait; opacity: 0.7; }
+.ki-scope-picker__panel {
+  position: absolute; top: calc(100% + 4px); left: 0; right: auto; z-index: 120; width: 100%;
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  box-shadow: var(--ki-shadow-2); overflow: hidden;
+}
+.ki-scope-picker__options { max-height: 300px; overflow-y: auto; padding: 5px; }
+.ki-scope-picker__option {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px;
+  border: 0; border-radius: 5px; background: none; color: var(--ki-color-text); cursor: pointer; font: inherit; text-align: left;
+}
+.ki-scope-picker__option:hover, .ki-scope-picker__option--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); }
+.ki-scope-picker__check { color: var(--ki-color-success); font-weight: 700; }
+.ki-scope-picker__empty { padding: 10px 9px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
+
+.ki-content { flex: 1; overflow-y: auto; padding: 24px; }
+.ki-content::-webkit-scrollbar { width: 6px; }
+.ki-content::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
+.ki-content-inner { max-width: var(--ki-content-max-width); margin: 0 auto; display: grid; gap: var(--ki-space-5); }
+/* 浏览页：双栏填满视口、内部各自滚动，外层不滚动 */
+.ki-content--noscroll { overflow: hidden; }
+/* 页头占内容高度，双栏区吃掉剩余高度（而非由内容撑开），卡片高度从而不随条目数变化 */
+.ki-content--noscroll .ki-content-inner {
+  height: 100%;
+  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* ══════════ 公共组件 ══════════ */
+
+/* 服务状态徽标 */
+.ki-service-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  width: 220px; box-sizing: border-box; white-space: nowrap;
+  font-size: var(--ki-font-size-sm); font-weight: 600;
+  padding: 4px 10px; border-radius: 20px;
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg);
+  color: var(--ki-color-text-muted);
+}
+/* 徽标宽度固定，健康原因文案超长时截断（完整文案在 title 提示与总览卡片里） */
+.ki-service-badge__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ki-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ki-dot--ok { background: var(--ki-color-success); }
+.ki-dot--warn { background: var(--ki-color-warning); }
+.ki-dot--err { background: var(--ki-color-danger); }
+.ki-dot--muted { background: var(--ki-color-text-subtle); opacity: 0.4; }
+.ki-dot--blue { background: var(--ki-color-primary); }
+.ki-dot--green { background: var(--ki-color-success); }
+.ki-dot--purple { background: var(--ki-color-purple); }
+.ki-dot--orange { background: var(--ki-color-warning); }
+.ki-dot--teal { background: var(--ki-color-info); }
+.ki-dot--gray { background: var(--ki-color-text-subtle); opacity: 0.35; }
+
+/* 页头 */
+.ki-page-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ki-space-3); }
+.ki-page-head h1 { font-size: var(--ki-font-size-heading); letter-spacing: -0.3px; }
+.ki-page-head p { color: var(--ki-color-text-subtle); margin-top: 2px; }
+
+/* 服务横幅 */
+.ki-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--ki-space-3);
+  padding: 12px 16px; border-radius: var(--ki-radius-md);
+  background: color-mix(in srgb, var(--ki-color-warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 20%, transparent);
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-md);
+}
+.ki-banner--ok {
+  background: color-mix(in srgb, var(--ki-color-success) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ki-color-success) 20%, transparent);
+}
+.ki-banner--err {
+  background: color-mix(in srgb, var(--ki-color-danger) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ki-color-danger) 20%, transparent);
+}
+.ki-banner__msg { display: flex; align-items: center; gap: 8px; }
+.ki-banner__actions { display: flex; gap: var(--ki-space-2); flex-shrink: 0; }
+
+/* 按钮 */
+.ki-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 16px; border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-md); font-weight: 600; line-height: 1;
+  transition: all var(--ki-motion-fast); border: none; white-space: nowrap;
+}
+.ki-btn--primary { background: var(--ki-color-primary); color: #fff; }
+.ki-btn--primary:hover { background: var(--ki-color-primary-hover); }
+.ki-btn--secondary { background: var(--ki-color-surface); color: var(--ki-color-text); border: 1px solid var(--ki-color-border-strong); }
+.ki-btn--secondary:hover { background: var(--ki-color-bg-secondary); }
+.ki-btn--danger { background: var(--ki-color-danger); color: #fff; }
+.ki-btn--danger:hover { opacity: 0.9; }
+.ki-btn--small { height: 26px; padding: 0 10px; font-size: var(--ki-font-size-sm); }
+.ki-btn--ghost { background: none; color: var(--ki-color-text-muted); }
+.ki-btn--ghost:hover { background: var(--ki-color-hover); }
+.ki-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ki-btn--loading::before {
+  content: ''; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent;
+  animation: ki-spin 0.7s linear infinite;
+}
+@keyframes ki-spin { to { transform: rotate(360deg); } }
+
+/* 统计卡 */
+.ki-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.ki-stat-card {
+  background: var(--ki-color-surface); border-radius: var(--ki-radius-md);
+  padding: 20px; border: 1px solid var(--ki-color-border);
+  transition: border-color var(--ki-motion-fast), box-shadow var(--ki-motion-fast);
+}
+.ki-stat-card:hover { border-color: color-mix(in srgb, var(--ki-color-primary) 25%, transparent); box-shadow: var(--ki-shadow-1); }
+.ki-stat-label {
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+  font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px;
+  margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+}
+.ki-stat-value {
+  font-size: var(--ki-font-size-2xl); font-weight: 700;
+  letter-spacing: -1px; line-height: 1; display: flex; align-items: baseline; gap: 6px;
+}
+.ki-stat-value--primary { color: var(--ki-color-primary); }
+.ki-stat-sub { font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text-subtle); letter-spacing: 0; }
+
+/* 骨架屏 */
+.ki-skeleton { position: relative; overflow: hidden; background: var(--ki-color-bg-muted); border-radius: 4px; }
+.ki-skeleton::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, var(--ki-color-hover-strong), transparent);
+  animation: ki-shimmer 1.2s infinite;
+}
+@keyframes ki-shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+
+/* 卡片 */
+.ki-card {
+  background: var(--ki-color-surface); border-radius: var(--ki-radius-md);
+  border: 1px solid var(--ki-color-border); overflow: hidden;
+}
+.ki-card__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-card__title { font-size: var(--ki-font-size-lg); font-weight: 600; }
+.ki-card__sub { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-card__body { padding: 20px; }
+
+/* 表格 */
+.ki-table { width: 100%; border-collapse: collapse; }
+.ki-table th {
+  text-align: left; padding: 10px 20px;
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  color: var(--ki-color-text-subtle); text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--ki-color-border); background: var(--ki-color-bg);
+}
+.ki-table td { padding: 12px 20px; font-size: var(--ki-font-size-md); border-bottom: 1px solid var(--ki-color-border); vertical-align: middle; }
+.ki-table tr:last-child td { border-bottom: none; }
+.ki-table tbody tr { transition: background var(--ki-motion-fast); cursor: pointer; }
+.ki-table tbody tr:hover td { background: color-mix(in srgb, var(--ki-color-primary) 1.5%, transparent); }
+
+.ki-scope-name { display: flex; align-items: center; gap: 10px; }
+.ki-scope-name__dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.ki-scope-name__text { font-weight: 600; }
+.ki-scope-name__path { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); font-family: var(--ki-font-mono); }
+
+.ki-badge {
+  display: inline-flex; padding: 1px 7px; border-radius: 4px;
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text-muted);
+}
+.ki-badge--kb { background: color-mix(in srgb, var(--ki-color-purple) 8%, transparent); color: var(--ki-color-purple); }
+.ki-badge--vec { background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent); color: var(--ki-color-primary); }
+.ki-badge--off { background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle); }
+.ki-badge--fts { background: color-mix(in srgb, var(--ki-color-warning, #d97706) 10%, transparent); color: var(--ki-color-warning, #b45309); }
+.ki-badge-group { display: flex; gap: 4px; flex-wrap: wrap; }
+
+.ki-num { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); }
+.ki-cell-sub { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+.ki-row-actions { display: flex; gap: 4px; opacity: 0; transition: opacity var(--ki-motion-fast); }
+.ki-table tr:hover .ki-row-actions { opacity: 1; }
+.ki-mini-btn {
+  padding: 3px 8px; border-radius: 5px; font-size: var(--ki-font-size-xs); font-weight: 500;
+  cursor: pointer; border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  transition: all var(--ki-motion-fast); font-family: var(--ki-font-family);
+}
+.ki-mini-btn:hover { background: var(--ki-color-bg-secondary); }
+.ki-mini-btn--danger { color: var(--ki-color-danger); border-color: color-mix(in srgb, var(--ki-color-danger) 20%, transparent); }
+.ki-mini-btn--danger:hover { background: color-mix(in srgb, var(--ki-color-danger) 8%, transparent); }
+
+/* 表单 */
+.ki-form-group { margin-bottom: 16px; }
+.ki-form-label {
+  font-size: var(--ki-font-size-sm); font-weight: 600;
+  color: var(--ki-color-text-subtle); text-transform: uppercase;
+  letter-spacing: 0.3px; margin-bottom: 8px; display: block;
+}
+.ki-form-input, .ki-form-textarea, .ki-form-select {
+  width: 100%;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  padding: 8px 12px; font-size: var(--ki-font-size-md);
+  font-family: var(--ki-font-family); color: var(--ki-color-text);
+  background: var(--ki-color-bg); outline: none;
+  transition: border-color var(--ki-motion-fast);
+}
+.ki-form-textarea { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); height: 140px; resize: vertical; }
+.ki-form-select {
+  appearance: none; padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+  background-size: 12px; cursor: pointer;
+}
+.ki-form-input:focus, .ki-form-textarea:focus, .ki-form-select:focus {
+  border-color: var(--ki-color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+}
+
+/* 新建 Group 输入框独特样式（绿色边框 + 淡绿背景，区别于已有 Group 的蓝色） */
+.ki-form-input--new {
+  border-color: var(--ki-color-success);
+  background: color-mix(in srgb, var(--ki-color-success) 6%, transparent);
+}
+.ki-form-input--new:focus {
+  border-color: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 25%, transparent);
+}
+/* 回车确认后的 Group 输入框（更深的绿 + 实心边框，配合右侧 ✓ 图标） */
+.ki-form-input--confirmed {
+  border-color: var(--ki-color-success);
+  border-width: 2px;
+  background: color-mix(in srgb, var(--ki-color-success) 14%, transparent);
+}
+/* 确认态右侧 ✓ 图标（位于 toggle 左侧，避免重叠） */
+.ki-combobox__confirm {
+  position: absolute;
+  right: 34px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ki-color-success);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.ki-form-input--error, .ki-form-textarea--error { border-color: var(--ki-color-danger); }
+.ki-form-error { font-size: var(--ki-font-size-xs); color: var(--ki-color-danger); margin-top: 4px; }
+.ki-form-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 4px; }
+.ki-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ki-checkbox-label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); font-weight: 500; cursor: pointer; }
+
+/* 向量化开关（toggle switch） */
+.ki-vec-switch {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 10px; border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md); background: var(--ki-color-surface);
+  transition: border-color var(--ki-motion-fast);
+}
+.ki-vec-switch:hover { border-color: var(--ki-color-border-strong); }
+.ki-vec-switch__label { display: block; }
+.ki-vec-switch__title { display: block; font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
+.ki-vec-switch__desc { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 1px; }
+.ki-switch {
+  position: relative; flex-shrink: 0;
+  width: 44px; height: 24px; border-radius: 12px;
+  background: var(--ki-color-border-strong); cursor: pointer;
+  transition: background var(--ki-motion-fast); padding: 0; border: 0;
+  appearance: none; -webkit-appearance: none; display: inline-block;
+  overflow: hidden; -webkit-user-select: none; user-select: none;
+}
+.ki-switch__knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; box-shadow: var(--ki-shadow-1);
+  transition: transform var(--ki-motion-fast);
+  pointer-events: none;
+}
+.ki-switch--on { background: var(--ki-color-primary); }
+.ki-switch--on .ki-switch__knob { transform: translateX(20px); }
+
+/* 分段控件（tabs） */
+.ki-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 8px; padding: 2px; border: 1px solid var(--ki-color-border); }
+.ki-tab {
+  padding: 6px 14px; font-size: var(--ki-font-size-sm); font-weight: 500;
+  color: var(--ki-color-text-muted); border-radius: 6px; cursor: pointer;
+  transition: all var(--ki-motion-fast); border: none; background: none;
+  font-family: var(--ki-font-family);
+}
+.ki-tab:hover { color: var(--ki-color-text); }
+.ki-tab--active { background: var(--ki-color-primary); color: white; }
+
+/* 健康检查 */
+.ki-health-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-md);
+}
+.ki-health-item:last-child { border-bottom: none; }
+.ki-health-item__icon { width: 20px; flex-shrink: 0; text-align: center; font-size: 13px; }
+.ki-health-item__name { font-weight: 500; min-width: 130px; }
+.ki-health-item__detail { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
+.ki-health-summary { display: flex; gap: 16px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-health-summary b { font-weight: 700; }
+
+/* 空状态 */
+.ki-empty {
+  display: grid; place-items: center; padding: 48px 20px;
+  text-align: center; border: 1px dashed var(--ki-color-border);
+  border-radius: var(--ki-radius-md); color: var(--ki-color-text-subtle);
+}
+.ki-empty h3 { margin-bottom: 6px; color: var(--ki-color-text); font-weight: 600; }
+.ki-empty__actions { margin-top: 16px; display: flex; gap: var(--ki-space-2); }
+
+/* Toast */
+.ki-toast {
+  position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+  background: var(--ki-color-text); color: var(--ki-color-surface);
+  padding: 10px 18px; border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-md); font-weight: 500;
+  box-shadow: var(--ki-shadow-2); opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease; z-index: 999;
+}
+.ki-toast--show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Dialog */
+.ki-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4);
+  display: none; align-items: center; justify-content: center; z-index: 998;
+}
+.ki-overlay--show { display: flex; }
+.ki-dialog {
+  background: var(--ki-color-surface); border-radius: var(--ki-radius-md);
+  width: min(520px, calc(100vw - 40px)); max-height: 80vh; overflow-y: auto;
+  box-shadow: var(--ki-shadow-2); display: flex; flex-direction: column;
+}
+.ki-dialog__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-dialog__title { font-size: var(--ki-font-size-lg); font-weight: 600; }
+.ki-dialog__close { background: none; border: none; font-size: 16px; color: var(--ki-color-text-subtle); cursor: pointer; padding: 4px; border-radius: 6px; }
+.ki-dialog__close:hover { background: var(--ki-color-hover); }
+.ki-dialog__body { padding: 20px; font-size: var(--ki-font-size-md); }
+.ki-dialog__foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--ki-color-border); }
+
+/* 危险区域 */
+.ki-danger-zone {
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 20%, transparent);
+  border-radius: var(--ki-radius-md); padding: 20px; margin-top: 24px;
+}
+.ki-danger-zone__title { font-size: var(--ki-font-size-md); font-weight: 600; color: var(--ki-color-danger); margin-bottom: 12px; }
+
+/* 进度条 */
+.ki-progress { height: 6px; background: var(--ki-color-bg-secondary); border-radius: 3px; overflow: hidden; }
+.ki-progress__fill { height: 100%; background: var(--ki-color-primary); border-radius: 3px; transition: width 0.3s ease; }
+.ki-progress__fill--indeterminate {
+  width: 35%;
+  animation: ki-progress-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes ki-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  50% { transform: translateX(180%); }
+  100% { transform: translateX(300%); }
+}
+.ki-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ki-spin 0.7s linear infinite;
+}
+
+/* 拖拽区 */
+.ki-dropzone {
+  border: 1.5px dashed var(--ki-color-border-strong); border-radius: var(--ki-radius-md);
+  padding: 40px 20px; text-align: center; color: var(--ki-color-text-subtle);
+  background: var(--ki-color-bg); cursor: pointer; transition: all var(--ki-motion-fast);
+}
+.ki-dropzone:hover, .ki-dropzone--over { border-color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 3%, transparent); }
+.ki-dropzone__icon { font-size: 28px; margin-bottom: 8px; }
+.ki-dropzone__title { font-weight: 600; color: var(--ki-color-text-muted); }
+
+/* 文件清单 */
+.ki-file-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border); margin-bottom: 8px;
+  background: var(--ki-color-surface);
+}
+.ki-file-item__icon { font-size: 16px; flex-shrink: 0; }
+.ki-file-item__meta { flex: 1; min-width: 0; }
+.ki-file-item__name { font-weight: 500; font-size: var(--ki-font-size-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-file-item__size { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-file-item__status { font-size: var(--ki-font-size-xs); font-weight: 600; }
+.ki-file-item__status--ok { color: var(--ki-color-success); }
+.ki-file-item__status--err { color: var(--ki-color-danger); }
+.ki-file-item__remove { background: none; border: none; color: var(--ki-color-text-subtle); cursor: pointer; font-size: 14px; padding: 4px; border-radius: 4px; }
+.ki-file-item__remove:hover { color: var(--ki-color-danger); background: var(--ki-color-danger-bg, rgba(255, 59, 48, 0.1)); }
+
+/* 热度标签 */
+.ki-heat { display: inline-flex; padding: 1px 7px; border-radius: 4px; font-size: var(--ki-font-size-xs); font-weight: 600; }
+.ki-heat--hot { background: color-mix(in srgb, var(--ki-color-danger) 8%, transparent); color: var(--ki-color-danger); }
+.ki-heat--warm { background: color-mix(in srgb, var(--ki-color-warning) 8%, transparent); color: var(--ki-color-warning); }
+.ki-heat--cold { background: color-mix(in srgb, var(--ki-color-info) 8%, transparent); color: var(--ki-color-info); }
+
+/* 搜索结果 */
+.ki-qr-item {
+  padding: 14px 20px; border-bottom: 1px solid var(--ki-color-border);
+  display: flex; align-items: flex-start; gap: 16px; transition: background 0.1s; cursor: pointer;
+}
+.ki-qr-item:last-child { border-bottom: none; }
+.ki-qr-item:hover { background: var(--ki-color-bg); }
+.ki-qr-rank {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--ki-color-bg-secondary); display: flex; align-items: center; justify-content: center;
+  font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text-muted); flex-shrink: 0;
+}
+.ki-qr-rank--top { background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent); color: var(--ki-color-primary); }
+.ki-qr-body { flex: 1; min-width: 0; }
+/* 搜索结果：文档名称 + Group 路径行 */
+.ki-qr-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ki-qr-name { font-size: var(--ki-font-size-md); font-weight: 600; color: var(--ki-color-text); }
+.ki-qr-content { font-size: var(--ki-font-size-md); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ki-qr-meta { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ki-badge--tag { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
+.ki-memoryid { font-family: var(--ki-font-mono); font-size: 11px; color: var(--ki-color-text-muted); }
+.ki-qr-score { font-size: 16px; font-weight: 700; letter-spacing: -0.5px; font-family: var(--ki-font-mono); flex-shrink: 0; }
+.ki-score-bar-bg { width: 80px; height: 4px; background: var(--ki-color-bg-secondary); border-radius: 2px; margin-top: 4px; }
+.ki-score-bar { height: 4px; background: var(--ki-color-primary); border-radius: 2px; }
+
+/* 双栏布局：两栏按可用高度填满（高度由容器驱动，不随内容多少变化），内容超出时卡片内部滚动 */
+.ki-split { display: grid; grid-template-columns: 300px 1fr; gap: var(--ki-space-5); align-items: stretch; min-height: 0; }
+.ki-split__side,
+.ki-split > section {
+  /* 上限兜底：容器高度异常时不让卡片无限高 */
+  max-height: calc(100vh - 140px);
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ki-split__side > .ki-card,
+.ki-split > section > .ki-card {
+  display: flex;
+  flex-direction: column;
+  /* 撑满所在栏高度：避免文档/目录很少时卡片塌成内容高度 */
+  flex: 1;
+  min-height: 0;
+  max-height: inherit;
+  overflow: hidden;
+}
+.ki-split__side .ki-card__head,
+.ki-split > section .ki-card__head,
+.ki-split > section .ki-card__head + div {
+  flex-shrink: 0;
+}
+.ki-split__side .ki-card__body,
+.ki-split > section .ki-card__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 响应式 */
+@media (max-width: 1024px) {
+  .ki-stats { grid-template-columns: repeat(2, 1fr); }
+  /* 单列：Group 树占约 40% 高、文档列表吃掉剩余，两块仍各自内部滚动（高度依旧不随条目数变化） */
+  .ki-split { grid-template-columns: 1fr; grid-template-rows: 40% minmax(0, 1fr); }
+  .ki-split__side { position: static; max-height: none; }
+  .ki-split > section { max-height: none; }
+}
+@media (max-width: 640px) {
+  .ki-content { padding: 16px; }
+  .ki-stats { grid-template-columns: 1fr; }
+  .ki-form-row { grid-template-columns: 1fr; }
+  .ki-table th:nth-child(3), .ki-table td:nth-child(3),
+  .ki-table th:nth-child(4), .ki-table td:nth-child(4) { display: none; }
+}
+
+/* ══════════ 页面级补充样式（对齐 demo 各页 <style>） ══════════ */
+
+/* ── 浏览页：文档项 / Group 树 / 抽屉 ── */
+.ki-filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ki-doc-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 14px; border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border); margin-bottom: 8px;
+  background: var(--ki-color-surface); cursor: pointer; transition: border-color var(--ki-motion-fast);
+}
+.ki-doc-item:hover { border-color: color-mix(in srgb, var(--ki-color-primary) 30%, transparent); }
+.ki-doc-item--current {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 68%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 5%, var(--ki-color-surface));
+  box-shadow: inset 3px 0 var(--ki-color-primary);
+}
+.ki-doc-item__title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-doc-item__title-row .ki-doc-item__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-doc-item__current-label {
+  flex-shrink: 0; padding: 2px 6px; border-radius: 4px;
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  color: var(--ki-color-primary); font-size: 10px; line-height: 1.4;
+}
+.ki-doc-item:focus-visible,
+.ki-tree-dir:focus-visible,
+.ki-gtree-dir:focus-visible {
+  outline: 2px solid var(--ki-color-primary);
+  outline-offset: 2px;
+}
+.ki-doc-item__name { font-weight: 600; font-size: var(--ki-font-size-md); color: var(--ki-color-text); }
+.ki-doc-item__path { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); font-family: var(--ki-font-mono); margin-top: 2px; }
+.ki-doc-item__snippet { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); margin-top: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.5; }
+.ki-doc-item__meta { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ki-filter-context {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+  color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs);
+  white-space: nowrap;
+}
+
+.ki-tree-root { display: flex; flex-direction: column; gap: 1px; }
+.ki-tree-root > .ki-tree-dir { font-size: var(--ki-font-size-lg); font-weight: 700; padding: 7px 8px; margin-top: 4px; }
+.ki-tree-root > .ki-tree-dir:first-child { margin-top: 0; }
+.ki-tree-group { padding-left: 14px; margin-left: 9px; border-left: 1px solid var(--ki-color-border); display: flex; flex-direction: column; gap: 2px; margin-top: 4px; margin-bottom: 2px; animation: ki-tree-expand 0.15s ease; }
+@keyframes ki-tree-expand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ki-tree-group > .ki-tree-dir { font-size: var(--ki-font-size-md); font-weight: 600; padding: 4px 8px; }
+.ki-tree-group .ki-tree-group > .ki-tree-dir { font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text-muted); }
+.ki-tree-dir { display: flex; align-items: center; gap: 6px; border-radius: 5px; cursor: pointer; user-select: none; white-space: nowrap; line-height: 1.5; transition: background var(--ki-motion-fast); color: var(--ki-color-text); }
+.ki-tree-dir:hover { background: var(--ki-color-hover); }
+.ki-tree-dir--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); }
+.ki-tree-arrow { width: 20px; font-size: 9px; color: var(--ki-color-text-subtle); flex-shrink: 0; text-align: center; }
+.ki-tree-dir button.ki-tree-arrow,
+.ki-gtree-dir button.ki-gtree-arrow {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 20px; padding: 0; border: 0; background: transparent;
+  cursor: pointer;
+}
+.ki-tree-dir button.ki-tree-arrow:focus-visible,
+.ki-gtree-dir button.ki-gtree-arrow:focus-visible {
+  outline: 2px solid var(--ki-color-primary); outline-offset: 1px; border-radius: 3px;
+}
+.ki-tree-icon { width: 16px; height: 16px; flex-shrink: 0; }
+.ki-tree-dir__label { overflow: hidden; text-overflow: ellipsis; }
+.ki-tree-dir .ki-heat { margin-left: auto; }
+
+/* ══════════ 原文抽屉（右侧滑出） ══════════ */
+.ki-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(680px, 88vw);
+  height: 100vh;
+  background: var(--ki-color-surface);
+  box-shadow: -4px 0 24px rgba(0,0,0,0.1), -2px 0 8px rgba(0,0,0,0.06);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  /* 入场动画：从右滑入，避免 right 偏移导致的首次渲染抖动 */
+  animation: ki-drawer-in 0.25s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes ki-drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+/* 头部：双行布局 */
+.ki-drawer__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+  background: var(--ki-color-surface);
+}
+/* 左侧收起按钮（描边箭头，hover 浮现圆角底） */
+.ki-drawer__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-sm);
+  color: var(--ki-color-text-subtle);
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+  flex-shrink: 0;
+}
+.ki-drawer__close:hover {
+  background: var(--ki-color-hover);
+  border-color: var(--ki-color-border);
+  color: var(--ki-color-primary);
+}
+.ki-drawer__close-icon { width: 18px; height: 18px; display: block; }
+/* 本地文档链接导航历史：仅在存在上一级时显示 */
+.ki-drawer__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ki-color-text-subtle);
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ki-drawer__back:hover { background: var(--ki-color-hover); color: var(--ki-color-primary); }
+.ki-drawer__back-label { font-size: 13px; }
+.ki-drawer__forward {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ki-color-text-subtle);
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ki-drawer__forward:hover { background: var(--ki-color-hover); color: var(--ki-color-primary); }
+.ki-drawer__forward-label { font-size: 13px; }
+/* 上一级/下一级的描边箭头图标 */
+.ki-drawer__nav-icon { width: 15px; height: 15px; display: block; flex-shrink: 0; }
+.ki-drawer__identity { flex: 1 1 auto; min-width: 0; }
+.ki-drawer__title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-drawer__nav { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.ki-drawer__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  font-size: var(--ki-font-size-lg);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 元信息行：scope badge + group 路径 */
+.ki-drawer__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ki-color-text-subtle);
+}
+.ki-drawer__sep { opacity: 0.4; }
+.ki-drawer__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+/* 头部右侧操作区 */
+.ki-drawer__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+  align-self: flex-start;
+}
+.ki-drawer__highlight {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+  align-self: flex-start;
+}
+.ki-drawer__highlight-count {
+  min-width: 34px;
+  color: var(--ki-color-warning, #b45309);
+  font-size: 11px;
+  font-family: var(--ki-font-mono);
+  text-align: center;
+}
+.ki-drawer__highlight-btn {
+  padding: 5px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-drawer__highlight-btn:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-drawer__copy {
+  background: none;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  font-size: 12px;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  padding: 5px 10px;
+  transition: all 0.15s;
+}
+.ki-drawer__copy:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-drawer__copy--done { color: var(--ki-color-success); border-color: var(--ki-color-success); }
+
+.ki-jump-link { text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.ki-anchor-target { background: color-mix(in srgb, var(--ki-color-primary) 18%, transparent); border-radius: 4px; transition: background 2.4s ease; }
+.ki-reader-link-panel {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: min(320px, calc(100vw - 24px));
+  padding: 15px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 12px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  box-shadow: 0 16px 44px rgba(15, 27, 52, .24);
+}
+.ki-reader-link-panel__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ki-reader-link-panel__head strong { font-size: 14px; }
+.ki-reader-link-panel__head button, .ki-reader-link-dialog__head > button {
+  border: 0; background: transparent; color: var(--ki-color-text-subtle); font-size: 22px; cursor: pointer;
+}
+.ki-reader-link-panel__quote {
+  overflow: hidden; margin: 0; padding: 8px 10px; border-radius: 7px;
+  background: var(--ki-color-bg); color: var(--ki-color-text-subtle);
+  font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-reader-link-panel label { font-size: 12px; font-weight: 600; }
+.ki-reader-link-panel input, .ki-reader-link-dialog__docs input {
+  width: 100%; min-width: 0; padding: 9px 11px; border: 1px solid var(--ki-color-border);
+  border-radius: 8px; background: var(--ki-color-surface); color: var(--ki-color-text);
+}
+.ki-reader-link-panel > .ki-btn { width: 100%; }
+.ki-reader-link-panel__or { display: flex; align-items: center; gap: 10px; color: var(--ki-color-text-subtle); font-size: 12px; }
+.ki-reader-link-panel__or::before, .ki-reader-link-panel__or::after { content: ''; flex: 1; height: 1px; background: var(--ki-color-border); }
+.ki-reader-link__error { margin: 0; color: #b23838; font-size: 12px; line-height: 1.45; }
+.ki-reader-link-overlay {
+  position: fixed; inset: 0; z-index: 1150; display: grid; place-items: center;
+  padding: 16px; background: rgba(12, 20, 35, .58); backdrop-filter: blur(2px);
+}
+.ki-reader-link-dialog {
+  display: flex; flex-direction: column; width: min(1080px, 100%); height: min(800px, calc(100vh - 32px));
+  overflow: hidden; border-radius: 16px; background: var(--ki-color-surface); color: var(--ki-color-text);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, .28);
+}
+.ki-reader-link-dialog__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 20px 24px; border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-reader-link-dialog__head small { color: var(--ki-color-primary); font-size: 11px; font-weight: 700; }
+.ki-reader-link-dialog__head h2 { margin: 4px 0; font-size: 20px; }
+.ki-reader-link-dialog__head p { margin: 0; color: var(--ki-color-text-subtle); font-size: 12px; }
+.ki-reader-link-dialog__body { display: grid; grid-template-columns: 310px minmax(0, 1fr); min-height: 0; flex: 1; }
+.ki-reader-link-dialog__docs { display: flex; flex-direction: column; min-height: 0; padding: 15px 10px; border-right: 1px solid var(--ki-color-border); }
+.ki-reader-link-dialog__docs label { margin: 0 5px 7px; font-size: 12px; color: var(--ki-color-text-subtle); }
+.ki-reader-link-dialog__doc-list { min-height: 0; margin-top: 12px; overflow-y: auto; }
+.ki-reader-link-dialog__doc-list button {
+  display: block; width: 100%; margin-bottom: 4px; padding: 9px 11px; border: 1px solid transparent;
+  border-radius: 8px; background: transparent; color: var(--ki-color-text); text-align: left; cursor: pointer;
+}
+.ki-reader-link-dialog__doc-list button:hover, .ki-reader-link-dialog__doc-list button.is-active {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 25%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 9%, var(--ki-color-surface));
+}
+.ki-reader-link-dialog__doc-list button strong, .ki-reader-link-dialog__doc-list button small { display: block; }
+.ki-reader-link-dialog__doc-list button strong { font-size: 13px; }
+.ki-reader-link-dialog__doc-list button small { margin-top: 3px; color: var(--ki-color-text-subtle); font-size: 11px; }
+.ki-reader-link-dialog__hint { padding: 12px; color: var(--ki-color-text-subtle); font-size: 12px; }
+.ki-reader-link-dialog__target { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ki-reader-link-dialog__target-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 15px 22px; border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-reader-link-dialog__target-head small { color: var(--ki-color-text-subtle); font-size: 11px; }
+.ki-reader-link-dialog__target-head h3 { margin: 4px 0 0; font-size: 18px; }
+.ki-reader-link-dialog__outline-wrap { position: relative; flex: none; }
+.ki-reader-link-dialog__outline-button {
+  padding: 7px 11px; border: 1px solid var(--ki-color-border); border-radius: 8px;
+  background: var(--ki-color-surface); color: var(--ki-color-text); font-size: 12px; cursor: pointer;
+}
+.ki-reader-link-dialog__outline-button:hover, .ki-reader-link-dialog__outline-button[aria-expanded='true'] {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+}
+.ki-reader-link-dialog__outline {
+  position: absolute; top: calc(100% + 7px); right: 0; z-index: 2; width: 220px; max-height: 270px;
+  overflow-y: auto; padding: 6px; border: 1px solid var(--ki-color-border); border-radius: 9px;
+  background: var(--ki-color-surface); box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+}
+.ki-reader-link-dialog__outline button {
+  display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ki-color-text); font-size: 12px; text-align: left; cursor: pointer;
+}
+.ki-reader-link-dialog__outline button:hover { background: var(--ki-color-hover); }
+.ki-reader-link-dialog__outline p { margin: 8px; color: var(--ki-color-text-subtle); font-size: 12px; }
+.ki-reader-link-dialog__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 28px 36px; }
+.ki-reader-link-dialog__guide {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 22px; padding: 9px 12px; border-radius: 8px;
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  color: var(--ki-color-text-subtle); font-size: 12px;
+}
+.ki-reader-link-dialog__guide button { flex: none; border: 0; background: transparent; color: var(--ki-color-primary); font-weight: 600; cursor: pointer; }
+.ki-reader-link-dialog__preview { max-width: 680px; margin: 0 auto; line-height: 1.8; user-select: text; }
+.ki-reader-link-dialog__preview .ki-reader-link-target {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  border-radius: 4px;
+}
+.ki-reader-link-dialog__preview h1, .ki-reader-link-dialog__preview h2, .ki-reader-link-dialog__preview h3,
+.ki-reader-link-dialog__preview p { scroll-margin-top: 20px; }
+.ki-reader-link-dialog__selection {
+  display: flex; align-items: center; justify-content: space-between; gap: 15px;
+  min-height: 64px; padding: 10px 20px; border-top: 1px solid var(--ki-color-border);
+}
+.ki-reader-link-dialog__selection div { min-width: 0; }
+.ki-reader-link-dialog__selection strong, .ki-reader-link-dialog__selection small { display: block; }
+.ki-reader-link-dialog__selection strong { font-size: 12px; }
+.ki-reader-link-dialog__selection small { overflow: hidden; margin-top: 4px; color: var(--ki-color-text-subtle); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ki-reader-link-dialog__selection button { flex: none; }
+.ki-reader-link-dialog__foot {
+  display: flex; justify-content: space-between; gap: 12px; padding: 10px 20px;
+  border-top: 1px solid var(--ki-color-border); color: var(--ki-color-text-subtle); font-size: 11px;
+}
+@media (max-width: 750px) {
+  .ki-reader-link-overlay { padding: 0; }
+  .ki-reader-link-dialog { width: 100%; height: 100%; border-radius: 0; }
+  .ki-reader-link-dialog__body { grid-template-columns: 1fr; grid-template-rows: minmax(170px, 30%) minmax(0, 1fr); }
+  .ki-reader-link-dialog__docs { border-right: 0; border-bottom: 1px solid var(--ki-color-border); }
+  .ki-reader-link-dialog__doc-list { display: flex; gap: 6px; overflow-x: auto; }
+  .ki-reader-link-dialog__doc-list button { min-width: 175px; }
+  .ki-reader-link-dialog__scroll { padding: 12px 17px 24px; }
+  .ki-reader-link-dialog__guide { align-items: flex-start; flex-direction: column; }
+}
+.ki-editor-overlay { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; background: rgba(12, 20, 35, .58); }
+.ki-editor { width: min(1180px, 100%); height: min(850px, 100%); display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; background: var(--ki-color-surface); color: var(--ki-color-text); box-shadow: 0 20px 70px rgba(0,0,0,.28); }
+.ki-editor__head, .ki-editor__foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--ki-color-border); }
+.ki-editor__head small { display: block; color: var(--ki-color-text-subtle); margin-top: 3px; }
+.ki-editor__foot { border-top: 1px solid var(--ki-color-border); border-bottom: 0; }
+.ki-editor__status { white-space: nowrap; }
+.ki-editor__actions { display: flex; align-items: center; gap: 12px; min-width: 0; margin-left: auto; }
+.ki-editor__vector-control { display: flex; flex: 0 1 420px; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
+.ki-editor__vector { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; font-size: 12px; }
+.ki-editor__vector-error { display: flex; align-items: flex-start; gap: 8px; width: min(100%, 420px); box-sizing: border-box; padding: 8px 10px; border: 1px solid #e7a5a5; border-radius: 6px; background: #fff2f2; color: #8a1d1d; font-size: 13px; line-height: 1.4; }
+.ki-editor__vector-error-icon { display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: #a22; color: #fff; font-size: 12px; font-weight: 700; }
+.ki-editor__layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; flex: 1; }
+.ki-editor__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ki-editor__tabs { display: flex; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--ki-color-border); }
+.ki-editor__tabs button { border: 0; border-radius: 6px; padding: 7px 10px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.ki-editor__tabs button.is-active { background: var(--ki-color-hover); font-weight: 600; }
+.ki-editor__textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 18px; background: transparent; color: inherit; font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.ki-editor__preview { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
+.ki-editor__notice, .ki-editor__error { padding: 8px 18px; background: color-mix(in srgb, var(--ki-color-primary) 12%, var(--ki-color-surface)); font-size: 13px; }
+.ki-editor__error { color: #a22; background: #fff2f2; }
+@media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__foot { flex-wrap: wrap; align-items: flex-start; } .ki-editor__status { flex: 1 1 100%; } .ki-editor__actions { flex: 1 1 100%; } .ki-editor__vector-control { flex: 1 1 0; } }
+/* 复制失败提示条：独立于加载错误，正文保留 */
+.ki-drawer__copy-failed {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 0 12px;
+  padding: 8px 14px;
+  background: var(--ki-color-danger-bg, #fdecec);
+  color: var(--ki-color-danger, #d93025);
+  border: 1px solid rgba(217, 48, 37, 0.25);
+  border-radius: var(--ki-radius-sm);
+  font-size: 12px;
+}
+/* 全屏切换按钮 */
+.ki-drawer__fullscreen {
+  background: none;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  font-size: 12px;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  padding: 5px 10px;
+  transition: all 0.15s;
+}
+.ki-drawer__fullscreen:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+
+/* 全屏态：阅读器壳铺满视口；导航面板由内部工作区承载。 */
+.ki-drawer--fullscreen {
+  width: 100vw;
+  max-width: 100vw;
+  box-shadow: none;
+  /* 切换全屏后如果因文档 key 重新挂载，直接显示正文，不重复播放抽屉滑入动画。 */
+  animation: none;
+}
+.ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
+.ki-drawer--fullscreen .ki-markdown--drawer { max-width: 100%; }
+
+/* 阅读器右上角的大纲：普通态与全屏态共用半透明浮层，覆盖正文不收窄布局。 */
+.ki-document-outline {
+  position: absolute;
+  top: 82px;
+  right: 20px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  width: min(260px, calc(100% - 40px));
+  max-height: calc(100% - 98px);
+  overflow: hidden;
+  background: var(--ki-color-surface);
+  background: color-mix(in srgb, var(--ki-color-surface) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-border) 68%, transparent);
+  border-radius: 12px;
+  box-shadow: var(--ki-shadow-2);
+  backdrop-filter: blur(10px);
+}
+.ki-document-outline--collapsed { width: 42px; }
+.ki-document-outline--collapsed .ki-document-outline__toggle {
+  justify-content: center;
+  padding: 0;
+}
+.ki-document-outline--collapsed .ki-document-outline__toggle-icon { display: none; }
+.ki-document-outline__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 38px;
+  width: 100%;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.ki-document-outline__toggle:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-document-outline__icon { width: 16px; height: 16px; flex-shrink: 0; }
+.ki-document-outline__toggle-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.ki-document-outline__title { flex: 1; font-size: 12px; font-weight: 600; }
+.ki-document-outline__list {
+  overflow-y: auto;
+  max-height: calc(100vh - 112px);
+  margin: 0;
+  padding: 4px 6px 8px;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+.ki-document-outline__item {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding-top: 5px;
+  padding-right: 8px;
+  padding-bottom: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ki-document-outline__item:hover,
+.ki-document-outline__item:focus-visible {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+  outline: none;
+}
+/* 全屏阅读工作区：Group 树、文档列表与正文同处一个 overlay，避免被抽屉 scrim 遮挡。 */
+.ki-reader-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--ki-color-bg);
+}
+.ki-reader-navigation {
+  --ki-reader-group-width: 300px;
+  --ki-reader-docs-width: min(380px, 30vw);
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.ki-reader-nav {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  background: var(--ki-color-surface);
+  border-right: 1px solid var(--ki-color-border);
+  overflow: hidden;
+  transition: width 0.18s ease;
+}
+.ki-reader-nav--group { width: 300px; }
+.ki-reader-nav--docs { width: min(380px, 30vw); }
+.ki-reader-nav--collapsed {
+  width: 52px;
+  background: transparent;
+  border-right: 0;
+}
+.ki-reader-nav__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 62px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+}
+/* 头部按钮并排后标题区需可收缩：长副标题（如「搜索「关键词」 · N 条」）截断而非挤走按钮 */
+.ki-reader-nav__head > :first-child { min-width: 0; }
+.ki-reader-nav__head .ki-card__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ki-reader-nav__actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* 头部工具按钮（刷新 / 收起面板）：同尺寸同风格，与收起态入口按钮保持同一语言 */
+.ki-reader-nav__refresh,
+.ki-reader-nav__collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 7px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-reader-nav__refresh { padding: 0 9px 0 8px; font-size: var(--ki-font-size-xs); font-weight: 500; }
+.ki-reader-nav__collapse { width: 26px; }
+.ki-reader-nav__refresh:hover:not(:disabled),
+.ki-reader-nav__collapse:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-reader-nav__refresh:disabled { opacity: 0.55; cursor: default; }
+.ki-reader-nav__action-icon { width: 13px; height: 13px; display: block; flex-shrink: 0; }
+.ki-reader-nav__refresh:disabled .ki-reader-nav__action-icon { animation: ki-spin 0.9s linear infinite; }
+.ki-reader-nav__chevron { width: 14px; height: 14px; display: block; }
+.ki-reader-nav__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+}
+.ki-reader-nav__body--tree { padding: 12px 10px; }
+.ki-reader-nav__filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+}
+.ki-reader-nav__filters .ki-combobox { min-width: 0; flex: 1 1 100%; }
+.ki-reader-nav__filters .ki-form-input { min-width: 0; max-width: none !important; flex: 1 1 100% !important; }
+.ki-reader-nav__body .ki-doc-item { margin-bottom: 8px; }
+/* 收起态：窄栏内垂直顶部的一枚素净图标按钮（点击展开对应面板） */
+.ki-reader-nav__collapsed-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 14px auto 0;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 10px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.ki-reader-nav__collapsed-toggle:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+  transform: translateX(2px);
+}
+.ki-reader-nav__collapsed-mark { display: flex; align-items: center; justify-content: center; }
+.ki-reader-nav__icon { width: 18px; height: 18px; display: block; }
+.ki-reader-workspace__main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ki-color-surface);
+}
+.ki-reader-workspace__main .ki-drawer__body { min-width: 0; }
+
+/* 窄窗口：正文保持全宽，导航改为浮层，避免 Group + 文档列表把正文压成窄条。 */
+@media (max-width: 1100px) {
+  .ki-reader-navigation {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    width: 100%;
+    pointer-events: none;
+  }
+  .ki-reader-navigation .ki-reader-nav {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    pointer-events: auto;
+    box-shadow: var(--ki-shadow-2);
+  }
+  .ki-reader-navigation .ki-reader-nav--group {
+    left: 0;
+    width: var(--ki-reader-group-width);
+  }
+  .ki-reader-navigation .ki-reader-nav--docs {
+    left: var(--ki-reader-group-width);
+    width: var(--ki-reader-docs-width);
+  }
+  .ki-reader-navigation--group-collapsed .ki-reader-nav--group {
+    width: 52px;
+    box-shadow: none;
+  }
+  .ki-reader-navigation--group-collapsed .ki-reader-nav--docs {
+    left: 52px;
+  }
+  .ki-reader-navigation--docs-collapsed .ki-reader-nav--docs {
+    width: 52px;
+    box-shadow: none;
+  }
+  .ki-reader-workspace__main {
+    width: 100%;
+  }
+
+  .ki-document-outline {
+    top: 70px;
+    right: 12px;
+    width: min(220px, calc(100% - 24px));
+    max-height: calc(100% - 82px);
+  }
+  .ki-document-outline--collapsed { width: 42px; }
+}
+
+/* 内容区 */
+.ki-drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 28px;
+  scroll-behavior: smooth;
+}
+/* 抽屉内 Markdown 阅读宽度约束 */
+.ki-markdown--drawer {
+  max-width: 100%;
+  line-height: 1.75;
+}
+
+/* 状态展示（loading / error / empty） */
+.ki-drawer__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--ki-color-text-muted);
+}
+.ki-drawer__status-icon { font-size: 32px; margin-bottom: 12px; opacity: 0.7; }
+.ki-drawer__status h3 { font-size: 15px; font-weight: 500; color: var(--ki-color-text-subtle); margin-bottom: 6px; }
+.ki-drawer__status p { font-size: 13px; max-width: 280px; }
+
+/* 底部状态栏 */
+.ki-drawer__foot {
+  display: flex;
+  align-items: center;
+  padding: 8px 20px;
+  border-top: 1px solid var(--ki-color-border);
+  flex-shrink: 0;
+  background: var(--ki-color-bg-muted);
+  font-size: 11px;
+}
+
+/* 正文快速滚动按钮：悬浮在正文区右下（抽屉底部状态栏之上），仅正文超出一屏时渲染 */
+.ki-scroll-nav {
+  position: absolute;
+  right: 20px;
+  bottom: 52px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ki-scroll-nav__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 50%;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  box-shadow: var(--ki-shadow-1);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast), opacity var(--ki-motion-fast);
+}
+.ki-scroll-nav__btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-scroll-nav__btn:disabled { opacity: 0.35; cursor: default; }
+.ki-scroll-nav__icon { width: 16px; height: 16px; display: block; }
+.ki-doc-highlight {
+  padding: 0 2px;
+  border-radius: 2px;
+  background: var(--ki-color-warning-bg, #fff0c2);
+  color: inherit;
+  scroll-margin: 120px;
+}
+.ki-doc-highlight--active {
+  outline: 2px solid color-mix(in srgb, var(--ki-color-warning, #d97706) 55%, transparent);
+  outline-offset: 1px;
+}
+
+/* 遮罩层 */
+.ki-drawer__scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 999;
+  animation: ki-scrim-in 0.2s ease both;
+}
+@keyframes ki-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+.ki-drawer__scrim--show { display: block; }
+.ki-markdown { line-height: 1.7; font-size: var(--ki-font-size-md); }
+.ki-markdown h1 { font-size: 20px; margin: 16px 0 8px; }
+.ki-markdown h2 { font-size: 17px; margin: 14px 0 6px; }
+.ki-markdown h3 { font-size: 15px; margin: 12px 0 4px; }
+.ki-markdown p { margin: 8px 0; }
+.ki-markdown ul, .ki-markdown ol { padding-left: 20px; margin: 8px 0; }
+.ki-markdown code { font-family: var(--ki-font-mono); font-size: 12px; background: var(--ki-color-bg-muted); padding: 1px 5px; border-radius: 4px; }
+.ki-markdown pre { background: var(--ki-color-bg); padding: 12px; border-radius: var(--ki-radius-sm); overflow-x: auto; font-family: var(--ki-font-mono); font-size: 12px; margin: 8px 0; }
+.ki-markdown .ki-code-block {
+  position: relative;
+  margin: 8px 0;
+  padding-right: 72px;
+  background: var(--ki-color-bg);
+  border-radius: var(--ki-radius-sm);
+}
+.ki-markdown .ki-code-block > pre { margin: 0; background: transparent; }
+.ki-markdown .ki-code-block > .ki-mermaid { margin: 0; }
+.ki-code-copy {
+  position: absolute; z-index: 1; top: 8px; right: 8px;
+  padding: 4px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
+  font: inherit; font-size: 11px; line-height: 1.4; cursor: pointer;
+}
+.ki-code-copy:hover:not(:disabled), .ki-code-copy:focus-visible {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+}
+.ki-code-copy:disabled { cursor: default; opacity: 0.75; }
+.ki-code-copy[data-copy-state="success"] { color: var(--ki-color-success); }
+.ki-code-copy[data-copy-state="error"] { color: var(--ki-color-danger, #d93025); }
+.ki-code-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ki-markdown details {
+  margin: 10px 0; padding: 8px 12px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+}
+.ki-markdown details > summary {
+  color: var(--ki-color-text); cursor: pointer; font-weight: 500;
+}
+.ki-markdown details[open] > summary { margin-bottom: 8px; }
+.ki-markdown details > :last-child { margin-bottom: 0; }
+.ki-markdown blockquote { border-left: 3px solid var(--ki-color-primary); padding-left: 12px; color: var(--ki-color-text-muted); margin: 8px 0; }
+.ki-mermaid { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); padding: 12px; margin: 8px 0; overflow-x: auto; }
+.ki-mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+/* 附件缺失占位块（REQ-20260904-001：fail-loud，明确告知图片未导入 + 原始路径，而非静默破图/空白） */
+.ki-asset-missing {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  margin: 8px 0; padding: 8px 12px;
+  border: 1px dashed var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+}
+.ki-asset-missing__icon { font-size: 14px; }
+.ki-asset-missing__text { font-family: var(--ki-font-mono); font-size: 12px; word-break: break-all; }
+.ki-asset-missing__alt { color: var(--ki-color-text-subtle); font-size: 12px; }
+/* 被 scheme 白名单拦下的链接标记（XSS 防线，fail-loud：不静默吞掉，hover 可见拦截原因与原文 URL） */
+.ki-link-blocked {
+  margin-left: 3px; padding: 0 3px;
+  font-size: 11px; line-height: 1.4;
+  color: var(--ki-color-text-muted);
+  border: 1px dashed var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  cursor: help;
+}
+.ki-markdown img { max-width: 100%; height: auto; border-radius: var(--ki-radius-sm); }
+
+/* ── 搜索页 ── */
+.ki-search-form { background: var(--ki-color-surface); border-radius: var(--ki-radius-md); border: 1px solid var(--ki-color-border); padding: 16px; }
+.ki-search-bar { display: flex; gap: 8px; }
+.ki-search-input { flex: 1; border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm); padding: 10px 14px; font-size: var(--ki-font-size-lg); font-family: var(--ki-font-family); color: var(--ki-color-text); background: var(--ki-color-bg); outline: none; transition: border-color var(--ki-motion-fast); }
+.ki-search-input:focus { border-color: var(--ki-color-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 10%, transparent); }
+.ki-query-options { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.ki-query-option { display: flex; align-items: center; gap: 8px; font-size: var(--ki-font-size-sm); }
+.ki-query-option .ki-form-label { margin-bottom: 0; text-transform: none; letter-spacing: 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-browse-filename-head { padding: 0 4px 8px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600; }
+.ki-browse-fulltext { margin-top: 12px; border: 1px solid var(--ki-color-border); border-radius: 8px; background: var(--ki-color-bg-secondary); overflow: hidden; }
+.ki-browse-fulltext__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--ki-color-border); font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
+.ki-browse-fulltext__item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--ki-color-border); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.ki-browse-fulltext__item:last-child { border-bottom: 0; }
+.ki-browse-fulltext__item:hover { background: var(--ki-color-hover); }
+.ki-browse-fulltext__title { font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
+.ki-browse-fulltext__path { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
+.ki-browse-fulltext__snippet { margin-top: 6px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.55; }
+.ki-browse-fulltext__empty { padding: 12px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-search-hit-mark { padding: 0 2px; border-radius: 2px; background: var(--ki-color-warning-bg, #fff0c2); color: inherit; }
+.ki-results { background: var(--ki-color-surface); border-radius: var(--ki-radius-md); border: 1px solid var(--ki-color-border); overflow: hidden; }
+.ki-results__head { padding: 16px 20px; border-bottom: 1px solid var(--ki-color-border); display: flex; align-items: center; justify-content: space-between; }
+.ki-results__title { font-size: var(--ki-font-size-md); font-weight: 600; }
+.ki-results__meta { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-tag-select { display: flex; gap: 6px; flex-wrap: wrap; }
+.ki-tag-chip { padding: 3px 10px; font-size: var(--ki-font-size-sm); border-radius: 20px; border: 1px solid var(--ki-color-border); background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer; transition: all var(--ki-motion-fast); }
+.ki-tag-chip:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-tag-chip--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primary); }
+.ki-step-btn {
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); color: var(--ki-color-text);
+  font-size: 14px; line-height: 1; cursor: pointer;
+  transition: border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+  user-select: none;
+}
+.ki-step-btn:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 40px; text-align: center; }
+
+/* ── 导入页 ── */
+.ki-adv-toggle { background: none; border: none; color: var(--ki-color-primary); font-size: var(--ki-font-size-sm); cursor: pointer; padding: 0; }
+.ki-adv-body { margin-top: 12px; padding: 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); background: var(--ki-color-bg); }
+.ki-progress-block { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: 16px 20px; }
+.ki-progress-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.ki-progress-label { font-weight: 600; font-size: var(--ki-font-size-md); }
+.ki-progress-sub { margin-top: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-import-errors {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 30%, transparent);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-danger) 5%, transparent);
+  color: var(--ki-color-danger);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ki-import-errors__title { font-weight: 600; margin-bottom: 6px; }
+.ki-import-errors ul { margin: 0; padding-left: 20px; }
+.ki-import-errors li + li { margin-top: 4px; }
+.ki-file-item__status--ok { color: var(--ki-color-success); }
+.ki-file-item__status--err { color: var(--ki-color-danger); }
+.ki-import-summary {
+  display: flex; flex-wrap: wrap; gap: 8px 16px;
+  margin-bottom: 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.ki-import-summary__skipped { color: var(--ki-color-warning); }
+
+/* ── 写入页 ── */
+.ki-mode-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: 8px; padding: 2px; border: 1px solid var(--ki-color-border); margin-bottom: 20px; }
+.ki-mode-tab { flex: 1; padding: 6px 12px; font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text-muted); border-radius: 6px; cursor: pointer; transition: all var(--ki-motion-fast); border: none; background: none; font-family: var(--ki-font-family); }
+.ki-mode-tab:hover { color: var(--ki-color-text); }
+.ki-mode-tab--active { background: var(--ki-color-primary); color: #fff; }
+.ki-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ki-md-editor { position: relative; margin-top: 8px; }
+.ki-preview-btn { padding: 3px 12px; border-radius: 5px; font-size: var(--ki-font-size-xs); font-weight: 600; cursor: pointer; border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface); color: var(--ki-color-text-muted); transition: all var(--ki-motion-fast); font-family: var(--ki-font-family); flex-shrink: 0; }
+.ki-preview-btn:hover { background: var(--ki-color-bg-secondary); }
+.ki-preview-btn--active { background: var(--ki-color-primary); border-color: var(--ki-color-primary); color: #fff; }
+.ki-md-preview { border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); padding: 12px 14px; background: var(--ki-color-bg); line-height: 1.7; overflow-y: auto; font-size: var(--ki-font-size-sm); }
+.ki-tag-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.ki-tag-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent); color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); font-weight: 600; border: 1px solid color-mix(in srgb, var(--ki-color-primary) 15%, transparent); }
+.ki-tag-pill__x { cursor: pointer; opacity: 0.6; padding: 0 2px; }
+.ki-tag-pill__x:hover { opacity: 1; }
+.ki-tag-option { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; margin: 2px; border-radius: 999px; font-size: var(--ki-font-size-sm); cursor: pointer; border: 1px solid var(--ki-color-border); background: var(--ki-color-surface); color: var(--ki-color-text-muted); transition: all var(--ki-motion-fast); }
+.ki-tag-option:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-tag-option--selected { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+/* ── Combobox（Group/Tag 选择器） ── */
+.ki-combobox { position: relative; }
+/* 只选模式（selectOnly）：收起态输入框是「打开列表」入口（手型），展开后转为搜索框（文本光标） */
+.ki-combobox--select-only:not(:has(.ki-combobox__panel--open)) .ki-form-input { cursor: pointer; }
+.ki-combobox__input-wrap { position: relative; }
+.ki-combobox__input-wrap .ki-form-input { padding-right: 32px; }
+.ki-combobox__toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--ki-color-text-subtle); font-size: 12px; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: all var(--ki-motion-fast); }
+.ki-combobox__toggle:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-combobox__toggle--open { color: var(--ki-color-primary); }
+.ki-combobox__panel { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100; background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2); display: none; flex-direction: column; }
+.ki-combobox__panel--open { display: flex; }
+.ki-combobox__tree { padding: 8px; max-height: 240px; overflow-y: auto; overflow-x: hidden; }
+.ki-combobox__footer { padding: 8px 12px; border-top: 1px solid var(--ki-color-border); }
+/* combobox 平铺选项列表（tag 筛选）：可滚动，当前值高亮 + ✓ */
+.ki-combobox__options {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ki-combobox__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-combobox__option:hover,
+.ki-combobox__option--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+}
+.ki-combobox__option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-combobox__option-check { flex-shrink: 0; color: var(--ki-color-success); font-weight: 700; }
+.ki-combobox__empty { padding: 8px 9px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-combobox__toggle:disabled { cursor: default; opacity: 0.5; }
+/* Group 树节点（combobox 内） */
+.ki-gtree-dir { display: flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 5px; cursor: pointer; user-select: none; white-space: nowrap; line-height: 1.5; transition: background var(--ki-motion-fast); font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text); }
+.ki-gtree-dir:hover { background: var(--ki-color-hover); }
+.ki-gtree-dir--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); }
+.ki-gtree-arrow { width: 20px; font-size: 9px; color: var(--ki-color-text-subtle); flex-shrink: 0; text-align: center; }
+.ki-gtree-icon { width: 15px; height: 15px; flex-shrink: 0; }
+.ki-gtree-label { overflow: hidden; text-overflow: ellipsis; }
+.ki-gtree-group { padding-left: 13px; margin-left: 8px; border-left: 1px solid var(--ki-color-border); display: flex; flex-direction: column; gap: 1px; margin-top: 2px; margin-bottom: 2px; }
+.ki-write-layout { max-width: 1100px; width: 100%; }
+.ki-write-layout .ki-card__body { padding: 28px 32px; }
+.ki-write-layout .ki-mode-tabs { margin-bottom: 24px; }
+.ki-write-layout .ki-mode-tab { padding: 9px 16px; font-size: var(--ki-font-size-md); }
+.ki-write-layout .ki-form-label { font-size: var(--ki-font-size-md); margin-bottom: 10px; }
+.ki-write-layout .ki-form-input, .ki-write-layout .ki-form-textarea, .ki-write-layout .ki-form-select { padding: 10px 14px; font-size: var(--ki-font-size-md); }
+.ki-write-layout .ki-form-hint { font-size: var(--ki-font-size-sm); margin-top: 6px; }
+.ki-write-layout .ki-preview-btn { padding: 6px 16px; font-size: var(--ki-font-size-sm); }
+
+/* ════════════════════════════════════════════════════════════════
+   AI 对话面板（SR-02）
+   ────────────────────────────────────────────────────────────────
+   约定（见 SR-02 ownership.md / contract-snapshot.md §7）：
+   · 本段为【纯追加】段，**不得修改上方任何既有规则**（全站共用）
+   · 全部复用既有设计令牌（--ki-color-* / --ki-space-* / --ki-radius-*）；
+     面板专属量以 --ki-chat-* 前缀声明在 .ki-chat-panel 上，随主题自动生效
+   · 块内顺序：令牌 → 容器/头部/上下文条 → 横幅 → 消息流 → 消息 →
+     时间线 → 思考块 → 来源 chip → 操作条 → 编辑重发 → 会话切换器 →
+     输入区/提示分级 → 窄屏浮层
+   · 2026-09-26 首版把会话列表 / 来源 / 思考块做成 <details> 折叠条；
+     走查结论「折叠感重、不像聊天应用」→ 2026-09-28 整段改为
+     浮层 + chip + 时间线（视觉基准见 demo/chat-panel-redesign/index.html）
+   ──────────────────────────────────────────────────────────────── */
+
+/* ── 面板容器：ki-shell 的第三个 flex 子项（插在 ki-main 之后）── */
+.ki-chat-panel {
+  /* 面板专属令牌（集中声明，避免散落硬编码） */
+  --ki-chat-head-h: 46px;
+  --ki-chat-line: 1.65;
+  --ki-chat-bubble-r: 14px;
+  --ki-chat-timeline-x: 10px;
+
+  width: 380px;                 /* S03 §3.2：常驻态宽度；360~420px 区间 */
+  min-width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;            /* 会话浮层的定位基准（浮层要横跨整块面板，不能贴在窄胶囊下） */
+  background: var(--ki-color-bg-secondary);
+  border-left: 1px solid var(--ki-color-border);
+  overflow: hidden;
+}
+
+/* ── 头部：标题 + 会话胶囊（切换器触发）+ 新建 ── */
+.ki-chat-panel__head {
+  height: var(--ki-chat-head-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-3) 0 var(--ki-space-4);
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-lg);
+  font-weight: 600;
+}
+.ki-chat-panel__title { flex-shrink: 0; letter-spacing: -0.2px; }
+.ki-chat-panel__tools { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+
+.ki-chat-iconbtn {
+  width: 28px; height: 28px; border: none; border-radius: var(--ki-radius-sm);
+  display: grid; place-items: center; background: transparent;
+  color: var(--ki-color-text-subtle); cursor: pointer;
+  transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+}
+.ki-chat-iconbtn:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-chat-iconbtn svg { width: 16px; height: 16px; }
+
+/* 会话胶囊 + 浮层的定位容器 */
+.ki-chat-chipwrap { margin-left: var(--ki-space-2); min-width: 0; flex: 1; }
+.ki-chat-chip {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  max-width: 100%; padding: 4px var(--ki-space-2);
+  border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-sm); font-weight: 400; cursor: pointer;
+  transition: background var(--ki-motion-fast) ease, border-color var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+}
+.ki-chat-chip:hover, .ki-chat-chip[aria-expanded="true"] {
+  background: var(--ki-color-surface); border-color: var(--ki-color-border); color: var(--ki-color-text);
+}
+.ki-chat-chip__ic, .ki-chat-chip__caret { flex-shrink: 0; width: 13px; height: 13px; }
+.ki-chat-chip__caret { width: 11px; height: 11px; }
+.ki-chat-chip__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-chip__count {
+  flex-shrink: 0; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+
+/* ── 上下文条：模型 / 状态（取代原先挂在标题右侧的只读模型名）── */
+.ki-chat-ctx {
+  flex-shrink: 0; display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 6px var(--ki-space-4); border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-chat-ctx__model { font-family: var(--ki-font-mono); color: var(--ki-color-text-muted); }
+.ki-chat-ctx__sep { opacity: 0.6; }
+.ki-chat-ctx__dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ki-color-success);
+}
+.ki-chat-ctx__dot--warn { background: var(--ki-color-warning); }
+.ki-chat-ctx__dot--off { background: var(--ki-color-text-subtle); }
+
+/* ── 横幅：未配置模型 / 服务未就绪（fail-loud，N3/R12 不得静默）── */
+.ki-chat-panel__banner {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--ki-space-3) var(--ki-space-4);
+  background: var(--ki-color-bg-muted);
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-sm);
+  color: var(--ki-color-text-muted);
+}
+.ki-chat-panel__banner--err {
+  background: color-mix(in srgb, var(--ki-color-danger) 12%, transparent);
+  color: var(--ki-color-danger);
+}
+.ki-chat-panel__path {
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  word-break: break-all;
+}
+.ki-chat-panel__reason { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/* ── 消息区：唯一滚动容器（底部留白，避免来源 chip 被输入区裁半）── */
+.ki-chat-panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--ki-space-4) var(--ki-space-4) var(--ki-space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ki-space-5);
+  overscroll-behavior: contain;
+}
+.ki-chat-panel__body::-webkit-scrollbar { width: 8px; }
+.ki-chat-panel__body::-webkit-scrollbar-thumb {
+  background: var(--ki-color-scrollbar);
+  border-radius: 4px;
+}
+
+/* ── 空态：新会话首屏给出提问引导（不留一片空白）── */
+.ki-chat-empty {
+  margin: auto var(--ki-space-2);
+  display: flex; flex-direction: column; align-items: center; gap: var(--ki-space-3);
+  text-align: center;
+}
+.ki-chat-empty__ic {
+  width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border);
+  color: var(--ki-color-text-subtle);
+}
+.ki-chat-empty__ic svg { width: 22px; height: 22px; }
+.ki-chat-empty__t { font-size: var(--ki-font-size-lg); color: var(--ki-color-text); }
+.ki-chat-empty__d { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); max-width: 30ch; }
+.ki-chat-empty__hints { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.ki-chat-q {
+  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong);
+  background: transparent; color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  transition: border-color var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, background var(--ki-motion-fast) ease;
+}
+.ki-chat-q:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); background: var(--ki-color-surface); }
+
+/* ── 消息：user 右对齐气泡，assistant 左对齐平铺（长回答与代码块要占满可读宽度）── */
+.ki-chat-msg { display: flex; flex-direction: column; gap: var(--ki-space-2); }
+.ki-chat-msg--user { align-items: flex-end; }
+.ki-chat-msg--assistant { align-items: stretch; }
+/* 生成中的气泡：角色名高亮，与已完成消息一眼可辨 */
+.ki-chat-msg--streaming .ki-chat-msg__role { color: var(--ki-color-primary); }
+.ki-chat-msg__at { font-family: var(--ki-font-mono); }
+.ki-chat-msg__body { min-width: 0; width: 100%; }
+.ki-chat-msg--user .ki-chat-msg__body {
+  width: auto;
+  max-width: 88%;
+  padding: 9px var(--ki-space-3);
+  background: var(--ki-color-surface-muted);
+  color: var(--ki-color-text);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-chat-bubble-r);
+  /* 用户输入为纯文本：保留换行与长串折行 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ki-chat-msg__text { font-size: var(--ki-font-size-md); line-height: var(--ki-chat-line); }
+
+/* 元信息行：角色 / 时间 / 状态徽标 */
+.ki-chat-msg__meta {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-chat-msg__role { font-weight: 600; color: var(--ki-color-text-muted); letter-spacing: 0.2px; }
+.ki-chat-msg__badge {
+  display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px;
+  font-size: var(--ki-font-size-xs); border: 1px solid transparent;
+}
+.ki-chat-msg__badge--abort {
+  color: var(--ki-color-warning);
+  border-color: color-mix(in srgb, var(--ki-color-warning) 40%, transparent);
+  background: color-mix(in srgb, var(--ki-color-warning) 10%, transparent);
+}
+.ki-chat-msg__badge--degrade {
+  color: var(--ki-color-purple);
+  border-color: color-mix(in srgb, var(--ki-color-purple) 38%, transparent);
+  background: color-mix(in srgb, var(--ki-color-purple) 10%, transparent);
+}
+
+/* ── 降级标记：必须可见，不得静默（N17）——正文旁的兜底说明，与徽标同源 ── */
+.ki-chat-msg__degraded {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ki-space-1);
+  padding: 2px var(--ki-space-2);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-warning) 16%, transparent);
+  color: var(--ki-color-warning);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 500;
+}
+
+/* ── 生成期时间线（R11a 每一秒都有反馈 / N10 不得无反馈空白）──
+   取代原先的单行 progress 文本：检索 → 思考 → 作答 各占一节点，进行中带脉冲 */
+.ki-chat-tl {
+  position: relative; display: flex; flex-direction: column;
+  padding-left: var(--ki-space-5);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.ki-chat-tl::before {
+  content: ''; position: absolute; left: calc(var(--ki-chat-timeline-x) - 1px);
+  top: 6px; bottom: 6px; width: 1px; background: var(--ki-color-border-strong);
+}
+.ki-chat-tl__node {
+  position: relative; display: flex; align-items: center; gap: var(--ki-space-2); padding: 3px 0;
+}
+.ki-chat-tl__node::before {
+  content: ''; position: absolute; left: calc(var(--ki-space-5) * -1 + var(--ki-chat-timeline-x) - 4px);
+  top: 9px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--ki-color-text-subtle);
+}
+.ki-chat-tl__node--think::before { background: var(--ki-color-purple); }
+.ki-chat-tl__node--answer::before { background: var(--ki-color-primary); }
+.ki-chat-tl__node--run::before {
+  background: var(--ki-color-primary);
+  animation: ki-chat-pulse 1.1s ease-in-out infinite;
+}
+.ki-chat-tl__node--think.ki-chat-tl__node--run::before { background: var(--ki-color-purple); }
+@keyframes ki-chat-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ki-color-primary) 55%, transparent); }
+  60% { box-shadow: 0 0 0 5px transparent; }
+}
+.ki-chat-tl__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 思考块（S05）：受控展开，默认收起，正文纯文本等宽（不做 Markdown 渲染）──
+   不再是 <details>：面板里已有会话浮层与来源预览，再加折叠条就是"三层折叠" */
+.ki-chat-reason { display: flex; flex-direction: column; gap: var(--ki-space-1); min-width: 0; }
+.ki-chat-reason__toggle {
+  align-self: flex-start; padding: 2px 0; border: none; background: none; cursor: pointer;
+  font: inherit; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary);
+}
+.ki-chat-reason__toggle:hover { text-decoration: underline; }
+.ki-chat-reason__body {
+  /* S05 §3.1：最大高度 + 内部滚动；纯文本等宽换行 */
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border-radius: var(--ki-radius-sm);
+  border-left: 2px solid color-mix(in srgb, var(--ki-color-purple) 45%, transparent);
+  background: color-mix(in srgb, var(--ki-color-purple) 8%, transparent);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.6;
+  color: var(--ki-color-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ki-chat-reason__truncated {
+  margin-top: var(--ki-space-2);
+  padding-top: var(--ki-space-2);
+  border-top: 1px dashed var(--ki-color-border);
+  color: var(--ki-color-warning);
+  font-family: var(--ki-font-family);
+  font-style: italic;
+}
+
+/* ── 来源引用（R20）：编号 chip + 悬停摘要预览（取代「§ 引用 N 处」折叠）──
+   ★ 预览的定位基准是**整行**而不是 chip：chip 会随换行落到右侧，
+     以 chip 为基准的 300px 浮层会溢出面板宽度被 overflow 裁掉 */
+.ki-chat-srcs { position: relative; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: var(--ki-space-1); }
+.ki-chat-srcs__label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-chat-src {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; padding: 0 var(--ki-space-2) 0 5px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: 999px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  transition: border-color var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+}
+.ki-chat-src:hover, .ki-chat-src:focus-visible { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-chat-src__no {
+  display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%;
+  background: color-mix(in srgb, var(--ki-color-primary) 18%, transparent);
+  font-family: var(--ki-font-mono); font-size: 9px; font-weight: 700; color: var(--ki-color-primary);
+}
+.ki-chat-src__doc { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-src__lines { font-family: var(--ki-font-mono); color: var(--ki-color-text-subtle); }
+/* 预览浮层：绝对定位 → 不撑开对话流；chip 内不能再放交互元素，故整块是文本 */
+.ki-chat-src__pop {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 12;
+  width: min(300px, 100%); padding: var(--ki-space-2) var(--ki-space-3);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2);
+  text-align: left; white-space: normal;
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity var(--ki-motion-fast) ease, transform var(--ki-motion-fast) ease;
+}
+.ki-chat-src:hover .ki-chat-src__pop, .ki-chat-src:focus-visible .ki-chat-src__pop {
+  opacity: 1; transform: none;
+}
+.ki-chat-src__pop b { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); margin-bottom: 3px; word-break: break-all; }
+.ki-chat-src__pop em {
+  display: block; font-style: normal; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-bottom: var(--ki-space-2);
+}
+.ki-chat-src__pop q { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); line-height: 1.55; }
+.ki-chat-src__pop u { display: block; margin-top: var(--ki-space-2); text-decoration: none; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
+
+/* ── 消息级操作条：hover / 键盘聚焦浮现；最后一条常驻（可发现性）── */
+.ki-chat-msg__acts {
+  display: flex; gap: 2px; margin-top: var(--ki-space-1);
+  opacity: 0; transform: translateY(-2px);
+  transition: opacity var(--ki-motion-fast) ease, transform var(--ki-motion-fast) ease;
+}
+.ki-chat-msg:hover .ki-chat-msg__acts,
+.ki-chat-msg:focus-within .ki-chat-msg__acts,
+.ki-chat-msg:last-child .ki-chat-msg__acts { opacity: 1; transform: none; }
+.ki-chat-act {
+  display: inline-flex; align-items: center; height: 24px; padding: 0 7px;
+  border: none; border-radius: var(--ki-radius-sm); background: transparent;
+  color: var(--ki-color-text-subtle); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+}
+.ki-chat-act:hover:not(:disabled) { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.ki-chat-act:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── 编辑重发（R24）：就地编辑 + 明示"将丢弃其后 N 条"，不做静默截断 ── */
+.ki-chat-edit {
+  width: 100%; display: flex; flex-direction: column; gap: var(--ki-space-2);
+  padding: var(--ki-space-3); border-radius: var(--ki-chat-bubble-r);
+  border: 1px solid var(--ki-color-primary); background: var(--ki-color-surface);
+}
+.ki-chat-edit__ta {
+  width: 100%; border: none; outline: none; resize: vertical; background: transparent;
+  color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6;
+}
+.ki-chat-edit__warn { font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+.ki-chat-edit__acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
+
+/* ── 通用小按钮（浮层底部 / 确认行 / 提示条动作）── */
+.ki-chat-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 26px; padding: 0 10px; border: none; border-radius: 999px;
+  background: var(--ki-color-primary); color: #fff;
+  font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  transition: background var(--ki-motion-fast) ease;
+}
+.ki-chat-btn:hover:not(:disabled) { background: var(--ki-color-primary-hover); }
+.ki-chat-btn:active:not(:disabled) { background: var(--ki-color-primary-active); }
+.ki-chat-btn:disabled {
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle);
+  border: 1px solid var(--ki-color-border); cursor: not-allowed;
+}
+.ki-chat-btn--ghost {
+  background: transparent; color: var(--ki-color-text-muted);
+  border: 1px solid var(--ki-color-border-strong);
+}
+.ki-chat-btn--ghost:hover:not(:disabled) { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-chat-btn--danger { background: var(--ki-color-danger); color: #fff; }
+.ki-chat-btn--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ki-color-danger) 85%, #fff); }
+
+/* ── 会话切换器浮层（取代头部折叠条）── */
+.ki-chat-convpop {
+  /* 锚定在面板头部之下、横跨整块面板（定位基准 = .ki-chat-panel） */
+  position: absolute; z-index: 20;
+  top: calc(var(--ki-chat-head-h) + 2px); left: var(--ki-space-2); right: var(--ki-space-2);
+  /* 面板矮时也要露出底部的「新建/刷新」：整体受面板高度约束，列表内部再滚 */
+  max-height: calc(100% - var(--ki-chat-head-h) - var(--ki-space-3));
+  display: flex; flex-direction: column;
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2); overflow: hidden;
+}
+.ki-chat-convpop__search {
+  display: flex; align-items: center; padding: var(--ki-space-2) var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-convpop__search input {
+  width: 100%; min-width: 0; border: none; outline: none; background: none;
+  color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-sm);
+}
+.ki-chat-convpop__search input::placeholder { color: var(--ki-color-text-subtle); }
+.ki-chat-convpop__body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--ki-space-1); }
+.ki-chat-convpop__group {
+  padding: var(--ki-space-2) var(--ki-space-3) 4px;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); letter-spacing: 0.3px;
+}
+.ki-chat-convpop__group:not(:first-child) {
+  border-top: 1px solid var(--ki-color-border); margin-top: var(--ki-space-1);
+}
+.ki-chat-convpop__err {
+  padding: var(--ki-space-2) var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-danger);
+  background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent);
+}
+.ki-chat-convpop__empty {
+  padding: var(--ki-space-6) var(--ki-space-4); text-align: center;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+}
+/* 读取态：骨架行形状与真实行一致（不用转圈） */
+.ki-chat-convpop__skel { padding: var(--ki-space-3); display: flex; flex-direction: column; gap: var(--ki-space-3); }
+.ki-chat-convpop__skel i {
+  display: block; height: 11px; border-radius: 6px;
+  background: var(--ki-color-surface-muted); animation: ki-chat-shimmer 1.3s ease-in-out infinite;
+}
+.ki-chat-convpop__skel i:nth-child(2) { width: 72%; }
+.ki-chat-convpop__skel i:nth-child(3) { width: 55%; }
+@keyframes ki-chat-shimmer { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+.ki-chat-convpop__foot {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3); border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-convpop__hint { margin-left: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/* 会话行：★ 必须是 div —— button 内嵌 button 会被 HTML 解析器拆到行外 */
+.ki-chat-conv {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  width: 100%; padding: var(--ki-space-2) var(--ki-space-3);
+  border-radius: var(--ki-radius-sm); text-align: left; cursor: pointer;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text);
+  transition: background var(--ki-motion-fast) ease;
+}
+.ki-chat-conv:hover { background: var(--ki-color-hover); }
+.ki-chat-conv:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-chat-conv[aria-current="true"] { background: var(--ki-color-surface-muted); }
+.ki-chat-conv[aria-current="true"] .ki-chat-conv__name { color: var(--ki-color-primary); }
+.ki-chat-conv[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.ki-chat-conv[aria-disabled="true"] .ki-chat-conv__name { text-decoration: line-through; }
+.ki-chat-conv--row { flex-wrap: wrap; }
+.ki-chat-conv__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ki-chat-conv__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-conv__time { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-chat-conv__count {
+  flex-shrink: 0; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-chat-conv__acts {
+  flex-shrink: 0; display: flex; gap: 1px;
+  opacity: 0; transition: opacity var(--ki-motion-fast) ease;
+}
+.ki-chat-conv:hover .ki-chat-conv__acts, .ki-chat-conv:focus-within .ki-chat-conv__acts { opacity: 1; }
+.ki-chat-conv__act {
+  width: 22px; height: 22px; border: none; border-radius: 6px; background: transparent;
+  display: grid; place-items: center; color: var(--ki-color-text-subtle); cursor: pointer;
+  transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease;
+}
+.ki-chat-conv__act:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.ki-chat-conv__act--del:hover { color: var(--ki-color-danger); background: color-mix(in srgb, var(--ki-color-danger) 14%, transparent); }
+.ki-chat-conv__act svg { width: 13px; height: 13px; }
+.ki-chat-conv__input {
+  flex: 1; min-width: 0; padding: 2px 6px; border-radius: 6px;
+  border: 1px solid var(--ki-color-primary); background: var(--ki-color-bg);
+  color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-sm); outline: none;
+}
+/* 删除二次确认：就地展开（误删即丢整段会话），不用 window.confirm */
+.ki-chat-conv__confirm {
+  flex: 1 0 100%; display: flex; align-items: center; gap: var(--ki-space-2);
+  margin-top: 4px; padding: 4px var(--ki-space-2); border-radius: 6px;
+  background: color-mix(in srgb, var(--ki-color-danger) 12%, transparent);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-danger);
+}
+.ki-chat-conv__confirm b {
+  font-weight: 500; color: var(--ki-color-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── 输入区：分级提示 + composer 卡片 ──
+   ★ dock 内每个块都 flex:none —— 被压缩会让 alert 文案溢出到卡片外 */
+.ki-chat-panel__foot {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-4) var(--ki-space-4);
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-chat-panel__foot > * { flex-shrink: 0; }
+
+.ki-chat-jump {
+  position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+  height: 26px; padding: 0 10px; border: 1px solid var(--ki-color-border-strong);
+  border-radius: 999px; background: var(--ki-color-surface); box-shadow: var(--ki-shadow-1);
+  color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+}
+.ki-chat-jump:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+
+/* 提示分级：err=本轮失败（N4，带重试）/ ack=T12 隐私确认（带入口）/ notice=一次性轻提示 */
+.ki-chat-alert {
+  display: flex; align-items: flex-start; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3); border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); line-height: 1.5;
+}
+.ki-chat-alert--err {
+  color: var(--ki-color-danger);
+  background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 26%, transparent);
+}
+.ki-chat-alert--ack {
+  color: var(--ki-color-text);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border-strong);
+}
+.ki-chat-alert__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ki-chat-alert__body b { font-size: var(--ki-font-size-sm); }
+.ki-chat-alert__body span { color: var(--ki-color-text-muted); }
+.ki-chat-alert__body code {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle); word-break: break-all;
+}
+.ki-chat-alert__acts { flex-shrink: 0; display: flex; align-items: center; gap: var(--ki-space-2); }
+.ki-chat-alert--notice {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  color: var(--ki-color-warning);
+  background: color-mix(in srgb, var(--ki-color-warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 22%, transparent);
+}
+.ki-chat-alert__x {
+  margin-left: auto; border: none; background: none; cursor: pointer;
+  color: inherit; font-size: 14px; line-height: 1; opacity: 0.65;
+}
+.ki-chat-alert__x:hover { opacity: 1; }
+
+.ki-chat-composer {
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-chat-bubble-r);
+  background: var(--ki-color-surface);
+  transition: border-color var(--ki-motion-fast) ease, box-shadow var(--ki-motion-fast) ease;
+}
+.ki-chat-composer:focus-within {
+  border-color: var(--ki-color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 18%, transparent);
+}
+.ki-chat-composer__ta {
+  display: block; width: 100%; border: none; outline: none; resize: none; background: none;
+  padding: var(--ki-space-3) var(--ki-space-3) var(--ki-space-2);
+  color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6;
+  min-height: 46px; max-height: 176px;
+}
+.ki-chat-composer__ta::placeholder { color: var(--ki-color-text-subtle); }
+.ki-chat-composer__ta:disabled { opacity: 0.5; cursor: not-allowed; }
+.ki-chat-composer__bar {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-2) var(--ki-space-2) var(--ki-space-3);
+}
+.ki-chat-composer__hint {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-chat-composer__count {
+  flex-shrink: 0; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-chat-composer__count--over { color: var(--ki-color-danger); }
+/* 主按钮：32px 高，禁用态必须与可用态一眼可辨（不能只靠透明度） */
+.ki-chat-composer__bar .ki-chat-btn { height: 30px; padding: 0 var(--ki-space-4); font-size: var(--ki-font-size-md); font-weight: 500; }
+.ki-chat-btn--stop {
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text);
+  border: 1px solid var(--ki-color-border-strong);
+}
+.ki-chat-btn--stop:hover:not(:disabled) { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+
+/* ── 窄屏降级：浮层抽屉（阈值 1400px 为初值，待前置门② 基线校准）──
+   z-index 990：高于内容、**低于** .ki-drawer(1000) —— 与既有阅读器不争层级 */
+.ki-chat-panel--overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 92vw);
+  min-width: 0;
+  z-index: 990;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.12), -2px 0 8px rgba(0, 0, 0, 0.06);
+  animation: ki-chat-overlay-in 0.25s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes ki-chat-overlay-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+</style>
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   本 demo 声明【三处新增 + 一段精修】，面板与消息的外观来自 ki.css：
+     A. .ki-chat-tl__stat / --tool / --tool-fail   工具调用行（R12）
+     B. .ki-chat-tool*                              工具调用展开区（R12）
+     C. .ki-chat-cfg*                               配置层（R4/R5/R6）
+     D. 视觉精修段（2026-09-30 走查）               只追加、不改上方 ki.css 源内联段
+   令牌沿用 --ki-*；面板内 token 按既有做法声明在面板块内
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── A. 工具调用行：复用既有 .ki-chat-tl__node（含时间线圆点与排版）── */
+.ki-chat-tl__stat {
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+/* 动作名 + 内部工具名双轨：动作名给人看，工具名给核对用（第四轮修正：原直出 ki_search 对用户不可读） */
+.ki-chat-tl__act { flex: 0 0 auto; }
+.ki-chat-tl__tool {
+  flex: 0 0 auto; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+/* 动作名与工具名之间补分隔点：原来 5 段信息连成一片（第四轮补充） */
+.ki-chat-tl__tool::before { content: '·'; margin-right: 5px; color: var(--ki-color-border-strong); }
+.ki-chat-tl__node--tool { cursor: pointer; border-radius: var(--ki-radius-sm); }
+.ki-chat-tl__node--tool:hover { background: var(--ki-color-hover); }
+.ki-chat-tl__node--tool::before { background: var(--ki-color-success); }
+.ki-chat-tl__node--tool.ki-chat-tl__node--tool-fail::before { background: var(--ki-color-warning); }
+/* 运行中：复用既有 ki-chat-pulse，与 --run 变体同源（第四轮修正：补齐中间态） */
+.ki-chat-tl__node--tool.ki-chat-tl__node--run::before { background: var(--ki-color-primary); animation: ki-chat-pulse 1.1s ease-in-out infinite; }
+.ki-chat-tl__chev { margin-left: auto; color: var(--ki-color-text-subtle); transition: transform 160ms; }
+.ki-chat-tl__node--tool[aria-expanded="true"] .ki-chat-tl__chev { transform: rotate(90deg); }
+
+/* ── B. 工具调用展开区：卡片 + 分节（入参 JSON / 响应命中行 / 说明）── */
+.ki-chat-tool {
+  margin: 4px 0 6px;
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  padding: var(--ki-space-2) var(--ki-space-3);
+  max-height: 300px; overflow: auto;
+}
+.ki-chat-tool[hidden] { display: none; }
+.ki-chat-tool__sec + .ki-chat-tool__sec {
+  margin-top: var(--ki-space-2);
+  padding-top: var(--ki-space-2);
+  border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-tool__label {
+  display: flex; align-items: baseline; gap: var(--ki-space-2);
+  margin-bottom: 5px;
+  font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text);
+}
+.ki-chat-tool__label em {
+  margin-left: auto; font-style: normal; font-weight: 400;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.ki-chat-tool__code {
+  margin: 0; padding: var(--ki-space-2);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border); border-radius: 6px;
+  overflow: auto; white-space: pre;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); line-height: 1.75;
+  color: var(--ki-color-text);
+}
+.ki-chat-tool__code .k { color: var(--ki-color-primary); }
+.ki-chat-tool__code .s { color: var(--ki-color-success); }
+.ki-chat-tool__code .n { color: var(--ki-color-warning); font-variant-numeric: tabular-nums; }
+.ki-chat-tool__note { margin: 6px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); line-height: 1.65; }
+.ki-chat-tool__note--warn { color: var(--ki-color-warning); }
+.ki-chat-tool__err {
+  margin: 0; padding: var(--ki-space-2);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-warning); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-all;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); line-height: 1.75;
+  color: var(--ki-color-text);
+}
+
+/* ── C. 配置层：叠在面板之上（与会话浮层同为 panel-scoped，不新增 app 级层）── */
+.ki-chat-cfg {
+  /* 面板级令牌：开关滑块是唯一无法用既有 --ki-* 表达的值（第四轮修正：集中声明，勿散落） */
+  --ki-chat-cfg-knob: #fff;
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: var(--ki-color-surface);
+  opacity: 0; pointer-events: none; transform: translateY(6px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.ki-chat-cfg[data-open="true"] { opacity: 1; pointer-events: auto; transform: none; }
+.ki-chat-cfg__head {
+  height: var(--ki-chat-head-h, 46px); flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-3); border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-cfg__title { font-weight: 500; }
+.ki-chat-cfg__spacer { flex: 1; }
+.ki-chat-cfg__body { flex: 1; overflow: auto; padding: var(--ki-space-4) var(--ki-space-3); }
+.ki-chat-cfg__field { margin-bottom: var(--ki-space-4); }
+.ki-chat-cfg__row { display: flex; align-items: baseline; gap: var(--ki-space-2); }
+.ki-chat-cfg__label { font-weight: 500; margin-bottom: 6px; display: block; }
+.ki-chat-cfg__badge { margin-left: var(--ki-space-2); font-style: normal; font-weight: 400; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+.ki-chat-cfg__reset { margin-left: auto; color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del, .ki-chat-cfg__reset { flex: 0 0 auto; white-space: nowrap; }   /* 底栏文字钮不得被压缩（第四轮修正：原实现"恢复默认"被压成空方框） */
+.ki-chat-cfg__reset:hover { text-decoration: underline; }
+.ki-chat-cfg__hint { margin: 6px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.6; }
+.ki-chat-cfg__ta {
+  width: 100%; min-height: 132px; resize: vertical;   /* 第四轮补充：96px 太矮，编辑区像一条缝 */
+  font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6; color: var(--ki-color-text);
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 9px 11px; transition: border-color 160ms;
+}
+.ki-chat-cfg__ta:focus { outline: none; border-color: var(--ki-color-primary); }
+.ki-chat-cfg__ta[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__ta--name { min-height: auto; height: 36px; font-size: var(--ki-font-size-lg); font-weight: 500; padding: 0 11px; }  /* 详情层：名称输入（第四轮补充：原 28px 高 / 12px 字，看不清） */
+.ki-chat-cfg__ta--select { min-height: auto; }                                     /* 作用域下拉：复用输入框外观 */
+.ki-chat-cfg__foot { display: flex; align-items: center; margin-top: 6px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__err { margin-left: auto; color: var(--ki-color-danger); }
+.ki-chat-cfg__group { margin: var(--ki-space-3) 0 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__group--danger { color: var(--ki-color-warning); }
+.ki-chat-cfg__tool { display: flex; align-items: center; gap: var(--ki-space-2); padding: 7px 0; border-bottom: 1px solid var(--ki-color-border); min-width: 0; }
+.ki-chat-cfg__tool-main { min-width: 0; flex: 1; }
+.ki-chat-cfg__tool-name { display: block; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-cfg__tool-desc { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); margin-top: 2px; }
+.ki-chat-cfg__tool-sp { flex: 1; min-width: var(--ki-space-2); }
+.ki-chat-cfg__bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border-top: 1px solid var(--ki-color-border); background: var(--ki-color-bg-secondary);
+}
+/* 保存反馈：保存中 spinner + 顶部细条（第四轮修正：补齐文档承诺的保存态，不再只有 toast） */
+.ki-chat-cfg__bar .ki-chat-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"] { opacity: .75; cursor: default; }
+.ki-chat-cfg__bar .ki-chat-btn[data-busy="true"]::after {
+  content: ''; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  animation: ki-chat-cfg-spin 0.7s linear infinite;
+}
+@keyframes ki-chat-cfg-spin { to { transform: rotate(360deg); } }
+.ki-chat-cfg__savedbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 30;
+  background: var(--ki-color-success);
+  transform: scaleX(0); transform-origin: left; transition: transform 220ms ease;
+}
+.ki-chat-cfg__savedbar[data-open="true"] { transform: scaleX(1); }
+
+/* ── 编辑 / 新增 模态框（第四轮：模态化；第九轮：升为 app 级页面居中）──
+   复用确认卡的 mask + card 范式，卡片放大：宽 720、高 72vh。
+   高度必须**定死**：否则框体由内容高度决定（内容少就矮），永远显小；定高后内部编辑区才能真正撑开。 */
+.ki-chat-cfg__modal {
+  width: min(720px, 100%);
+  height: min(72vh, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow: hidden; display: flex; flex-direction: column; box-shadow: var(--ki-shadow-2);
+}
+/* 滚动放在内容区：卡片自身 overflow:auto 会因 1px 舍入差冒出多余滚动条，且会把底部按钮一起滚走 */
+.ki-chat-cfg__modal-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.ki-chat-cfg__modal h4 { font-size: var(--ki-font-size-lg); margin-bottom: var(--ki-space-3); }
+.ki-chat-cfg__modal .ki-chat-cfg__field { margin-bottom: var(--ki-space-3); }
+/* 编辑态与预览态都撑满内容区的剩余高度 */
+#mEditWrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#mEditWrap[hidden] { display: none; }            /* 显式声明：display:flex 会覆盖浏览器对 [hidden] 的 display:none */
+.ki-chat-cfg__modal .ki-chat-cfg__view { flex: 1; min-height: 0; max-height: none; }   /* 覆盖原详情层的 320px 上限，改由 flex 撑满 */
+.ki-chat-cfg__modal .ki-chat-cfg__ta { flex: 1; min-height: 160px; }
+.ki-chat-cfg__modal .ki-chat-cfg__ta--name { flex: 0 0 auto; min-height: auto; }   /* 名称仍是单行 36px */
+.ki-chat-cfg__modal .ki-chat-cfg__reset { margin-left: 0; }         /* 底部按钮区左起，不再靠 auto 推到右边 */
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: var(--ki-space-2); padding-top: var(--ki-space-3); border-top: 1px solid var(--ki-color-border); }
+.ki-chat-cfg__ta[readonly] { color: var(--ki-color-text-muted); background: var(--ki-color-surface-muted); }   /* 内置条目名称：可见但不可改 */
+.ki-chat-cfg__scope { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+/* ★ app 级全屏模态遮罩（第七轮补充：用户要求编辑框居中于整个页面，不再局限在 380px 面板内）
+   - fixed + inset:0 覆盖整个视口；z-index 1200 高于面板常驻态与窄屏浮层（990）
+   - 危险确认卡复用本类（append 到 body）→ 两者都是页面级模态，DOM 靠后者在上
+   ⚠️ 落地时应把这类层改为 app 级命名（如 .ki-modal），不再挂在 ki-chat-cfg 前缀下 */
+.ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, .32); display: grid; place-items: center; padding: var(--ki-space-4); }
+/* hidden 必须显式声明：本类的 display:grid 会覆盖浏览器对 [hidden] 的 display:none，
+   导致编辑模态框从页面加载起就一直显示空表单（用户截图抓到的 bug） */
+.ki-chat-cfg__mask[hidden] { display: none; }
+.ki-chat-cfg__card { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: var(--ki-space-4); }
+.ki-chat-cfg__card h4 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-md); }
+.ki-chat-cfg__card p { margin: 0 0 var(--ki-space-3); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); line-height: 1.6; }
+.ki-chat-cfg__card-acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
+.ki-chat-cfg__toast {
+  position: absolute; left: 50%; bottom: 68px; transform: translate(-50%, 6px);
+  background: var(--ki-color-text); color: var(--ki-color-bg);
+  padding: 6px 12px; border-radius: 999px; font-size: var(--ki-font-size-xs);
+  opacity: 0; transition: opacity 180ms, transform 180ms;
+}
+.ki-chat-cfg__toast[data-open="true"] { opacity: 1; transform: translate(-50%, 0); }
+/* 开关：既有 ki.css 未定义，属本方案新增控件 */
+.ki-chat-cfg__sw { width: 36px; height: 20px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface-muted); position: relative; cursor: pointer; flex: 0 0 auto; }
+.ki-chat-cfg__sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ki-chat-cfg-knob); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 160ms; }
+.ki-chat-cfg__sw[aria-checked="true"] { background: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__sw[aria-checked="true"]::after { transform: translateX(16px); }
+.ki-chat-cfg__sw--danger { border-color: var(--ki-color-warning); }
+
+/* demo 外壳（仅用于把面板放进真实页面语境，复用既有外壳类） */
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--ki-color-bg); color: var(--ki-color-text); font-family: var(--ki-font-family); font-size: var(--ki-font-size-md); }
+.ki-shell { flex: 1; min-height: 0; }
+.ki-main { padding: var(--ki-space-6); }
+.ki-main h2 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-xl); }
+.ki-main p { color: var(--ki-color-text-muted); max-width: 60ch; line-height: 1.7; }
+:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: var(--ki-radius-sm); }
+/* ── 列表层条目卡片（提示词 / Skill）── */
+/* grid 列必须 minmax(0,1fr)：否则 grid 项 min-width:auto 会被摘要长文本撑开（第四轮修正：消除层内横向滚动 113px） */
+.ki-chat-cfg__list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-2); }
+.ki-chat-cfg__item {
+  display: flex; align-items: center; gap: var(--ki-space-2); width: 100%; min-width: 0;
+  text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
+  background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); color: var(--ki-color-text);
+  transition: background 160ms, border-color 160ms;
+}
+.ki-chat-cfg__item:hover { background: var(--ki-color-hover); border-color: var(--ki-color-border-strong); }
+.ki-chat-cfg__item-main { min-width: 0; flex: 1; }
+.ki-chat-cfg__item-name { display: block; font-weight: 500; }
+.ki-chat-cfg__item-prev {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); margin-top: 2px;
+}
+.ki-chat-cfg__item-meta { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.ki-chat-cfg__chev { color: var(--ki-color-text-subtle); flex: 0 0 auto; }
+.ki-chat-cfg__add {
+  width: 100%; margin-top: var(--ki-space-2); padding: 8px;
+  border: 1px dashed var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm);
+  transition: background 160ms, color 160ms, border-color 160ms;
+}
+.ki-chat-cfg__add:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del:hover { text-decoration: underline; }
+/* ── 模态框内：分段（预览|编辑）/ 只读视图 / 元信息（原详情层的 crumb/back/dname 随模态框改造移除）── */
+.ki-chat-cfg__page[hidden] { display: none; }
+/* 分段控件：胶囊轨道 + 滑块（第四轮补充：原选中态只有 rgba(0,0,0,.05)，看不出选了哪个） */
+.ki-chat-cfg__seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--ki-color-surface-muted); border-radius: 999px; margin-bottom: var(--ki-space-4); }
+.ki-chat-cfg__segb { padding: 6px 16px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); border: 0; background: transparent; border-radius: 999px; transition: background 160ms, color 160ms, box-shadow 160ms; }
+.ki-chat-cfg__segb:hover { color: var(--ki-color-text); }
+.ki-chat-cfg__segb[aria-selected="true"] { background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500; box-shadow: 0 1px 2px rgba(0, 0, 0, .10); }
+.ki-chat-cfg__view {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-size: var(--ki-font-size-sm); line-height: 1.7; color: var(--ki-color-text);
+  background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); padding: var(--ki-space-3);
+  max-height: 320px; overflow: auto;
+}
+.ki-chat-cfg__meta { margin: var(--ki-space-2) 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; }
+.ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__del:hover { text-decoration: underline; }
+.ki-chat-cfg__entry {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex: 0 0 auto; white-space: nowrap;   /* 面板头空间已满：不得被压缩折行（第四轮修正：原 flex-shrink:1 会把「配置」压成两行） */
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: 999px;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs);
+  transition: background 160ms, color 160ms, border-color 160ms, transform 160ms;
+}
+.ki-chat-cfg__entry svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.ki-chat-cfg__entry:hover { background: var(--ki-color-hover); color: var(--ki-color-text); border-color: var(--ki-color-primary); }
+.ki-chat-cfg__entry:active { transform: scale(0.96); }
+
+/* ── 面板消息区左右留白收窄（第四轮补充）──
+   380px 面板下左右各 16px 白边偏浪费（用户反馈"回复没有紧靠左边"）；消息容器左边缘 17→13px，内容宽 +8px。
+   ⚠️ 落地时需同步改 web/src/styles/ki.css:1852 的 .ki-chat-panel__body padding（16px → 12px） */
+.ki-chat-panel__body { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+/* 面板四段左右留白统一为 12px：head 原本左16/右12 不对称，ctx/foot 原为 16，与消息区不一致
+   （用户反馈"输入框两边没占满"）。⚠️ 落地时同步改 ki.css:1770 / 1811 / 2215 */
+.ki-chat-panel__head, .ki-chat-ctx { padding-left: var(--ki-space-3); padding-right: var(--ki-space-3); }
+
+/* ── 输入区左右贴边 + 圆角 8px（用户口径）──
+   用户指的"输入框左右有空隙"是**卡片外侧**：foot 的 12px 内距让 composer 卡片离面板边缘还有 12px。
+   现在 foot 左右归零 → 卡片贴边；卡片内部留 8px（textarea 与 bar 同一内距，否则文字与「发送」错位）。
+   ⚠️ 落地时同步改 ki.css:2215 (foot padding) / 2266 (border-radius) / 2276 (ta padding) / 2284 (bar padding) */
+.ki-chat-panel__foot { padding-left: 0; padding-right: 0; }
+.ki-chat-composer { border-radius: 8px; }
+.ki-chat-composer__ta { padding: var(--ki-space-3) var(--ki-space-2) var(--ki-space-2); }
+.ki-chat-composer__bar { padding: 0 var(--ki-space-2) var(--ki-space-2); }
+
+/* ── 时间线贴左：取消左侧 20px 占位（第四轮补充）──
+   原设计用 padding-left: var(--ki-space-5)（ki.css:1948）+ 绝对定位圆点与竖轴线（1951/1958）在左侧造时间轴；
+   380px 面板下这 20px 让「工具行 + 展开卡片」整块内缩，与正文/来源不在一条左边缘上。
+   改为：圆点降级为 flex 首项（行内、垂直居中），撤掉竖轴线占位 → 工具行、卡片、正文、来源全部左对齐。
+   ⚠️ 落地需同步改 ki.css:1946-1977 的时间线定义（这是对既有设计语言的改动，需评审确认） */
+.ki-chat-tl { padding-left: 0; }
+.ki-chat-tl::before { content: none; }                                   /* 撤掉竖轴线 */
+.ki-chat-tl__node::before { position: static; left: auto; top: auto; }   /* 圆点作为行内首项，由 align-items 居中 */
+
+/* ════════════════════════════════════════════════════════════════
+   D. 视觉精修段（2026-09-30 ui-designer 走查）
+   ────────────────────────────────────────────────────────────────
+   只追加、不改上方 ki.css 源内联段；全部复用 --ki-* 令牌。
+   覆盖：顶栏品牌区与主题分段器 / 主区占位页 / 消息入场与用户气泡 /
+   来源悬停预览 / 工具展开动效 / 配置层分组层级与列表图标块 /
+   模态框头栏与入场 / 按压反馈与减少动效
+   ⚠️ 落地：pop 预览、item 图标块、分组头属产品视觉 → 同步进
+     ki.css / ChatPanel.tsx；主题分段器与主区占位为 demo 外壳专用，不进源文件
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── D0 全局细节：主题切换过渡、选区色、按压反馈 ── */
+body { transition: background-color .25s ease, color .25s ease; }
+::selection { background: color-mix(in srgb, var(--ki-color-primary) 22%, transparent); }
+.ki-chat-btn { transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, transform 120ms ease; }
+.ki-chat-btn:active:not(:disabled) { transform: scale(.96); }
+.ki-chat-iconbtn { transition: background var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, transform 120ms ease; }
+.ki-chat-iconbtn:active { transform: scale(.92); }
+
+/* ── D1 顶栏：品牌块 + 主题分段切换器（demo 外壳专用） ── */
+.ki-topbar { transition: background-color .25s ease, border-color .25s ease; }
+.ki-topbar__brand { display: flex; align-items: center; gap: var(--ki-space-2); min-width: 0; }
+.ki-seg {
+  display: inline-flex; gap: 2px; padding: 3px; flex: 0 0 auto;
+  border: 1px solid var(--ki-color-border); border-radius: 999px;
+  background: var(--ki-color-surface-muted);
+}
+.ki-seg button {
+  border: 0; background: transparent; cursor: pointer; font: inherit;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+  padding: 3px 12px; border-radius: 999px;
+  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.ki-seg button:hover { color: var(--ki-color-text); }
+.ki-seg button[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .14);
+}
+
+/* ── D2 主区占位页：树内徽标靠右；文档项内容纵向列（.ki-doc-item 本体是 flex row） ── */
+.ki-main .ki-tree-dir .ki-badge { margin-left: auto; }
+.ki-doc-item__main { flex: 1; min-width: 0; }
+/* 双栏填满视口（浏览页设计意图）：.ki-main 已是 flex column，split 吃掉剩余高度 */
+.ki-main { gap: var(--ki-space-5); }
+.ki-main .ki-split { flex: 1; min-height: 0; }
+.ki-main .ki-split__side, .ki-main .ki-split > section { max-height: none; }
+.ki-page-head code { font-family: var(--ki-font-mono); font-size: .92em; color: var(--ki-color-text-muted); }
+
+/* ── D3 消息：入场动效、用户气泡品牌化、头像与行内代码 ── */
+.ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1) both; }
+@keyframes ki-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* ki.css 用户气泡是中性灰底；加一层品牌色浅罩 + 右下收角，更像"我说的话" */
+.ki-chat-msg--user .ki-chat-msg__body {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 24%, transparent);
+  border-bottom-right-radius: 5px;
+}
+.ki-chat-avatar {
+  width: 18px; height: 18px; border-radius: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--ki-color-primary), var(--ki-color-purple));
+  color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center;
+}
+.ki-chat-msg__body p { line-height: var(--ki-chat-line); }
+.ki-chat-msg__body code {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  background: var(--ki-color-surface-muted); border: 1px solid var(--ki-color-border);
+  border-radius: 4px; padding: .5px 5px;
+}
+
+/* ── D4 工具调用：内部工具名做成代码小胶囊，展开区带入场 ── */
+.ki-chat-tl__tool { padding: 1px 6px; border-radius: 5px; background: var(--ki-color-surface-muted); }
+.ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease both; }
+@keyframes ki-tool-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* ── D5 配置层：列表图标块 / 条目抬升 / 分组分节头 / 工具行 hover / 入场时序 ── */
+.ki-chat-cfg__item { transition: background 160ms, border-color 160ms, box-shadow 160ms, transform 160ms; }
+.ki-chat-cfg__item:hover { transform: translateY(-1px); box-shadow: var(--ki-shadow-1); }
+.ki-chat-cfg__item-ic { width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0; display: grid; place-items: center; }
+.ki-chat-cfg__item-ic svg { width: 14px; height: 14px; }
+.ki-chat-cfg__item-ic--prompt { background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); color: var(--ki-color-primary); }
+.ki-chat-cfg__item-ic--skill { background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); color: var(--ki-color-purple); }
+.ki-chat-cfg__item-meta--mod { color: var(--ki-color-primary); }
+.ki-chat-cfg__group {
+  display: flex; align-items: center; gap: 6px;
+  margin: var(--ki-space-4) 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); font-weight: 600; color: var(--ki-color-text-muted);
+  letter-spacing: .2px;
+}
+.ki-chat-cfg__group-n { margin-left: auto; font-weight: 400; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
+.ki-chat-cfg__group-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 16%, transparent);
+}
+.ki-chat-cfg__group--danger { color: var(--ki-color-warning); border-bottom-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border)); }
+.ki-chat-cfg__group--danger .ki-chat-cfg__group-dot {
+  background: var(--ki-color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-warning) 16%, transparent);
+}
+.ki-chat-cfg__tool { margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; transition: background 160ms; }
+.ki-chat-cfg__tool:hover { background: var(--ki-color-hover); }
+.ki-chat-cfg__sw { transition: background 160ms ease, border-color 160ms ease; }
+.ki-chat-cfg__sw:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+.ki-chat-cfg__label { color: var(--ki-color-text-muted); }
+select.ki-chat-cfg__ta--select {
+  appearance: none; -webkit-appearance: none; padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2398989d' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+}
+/* 配置层打开时按块渐入（动效响应"打开"这个操作，不是页面加载装饰） */
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__head { animation: ki-cfg-in .22s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field { animation: ki-cfg-in .26s ease both; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(2) { animation-delay: 45ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(3) { animation-delay: 90ms; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(4) { animation-delay: 135ms; }
+@keyframes ki-cfg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── D6 模态框 / 确认卡：遮罩柔化 + 卡片入场 + 三段结构 ── */
+.ki-chat-cfg__mask { background: rgba(15, 20, 32, .45); backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
+@keyframes ki-mask-in { from { opacity: 0; } }
+.ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1) both; }
+@keyframes ki-card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+.ki-chat-cfg__modal { padding: 0; border-radius: var(--ki-radius-lg); box-shadow: 0 24px 72px rgba(15, 27, 52, .28); }
+.ki-chat-cfg__modal .ki-chat-cfg__modal-body { padding: var(--ki-space-4) var(--ki-space-5); }
+/* modal-body 是 flex column：inline-flex 的分段器会被 stretch 拉成全宽轨道，收回内容宽 */
+.ki-chat-cfg__seg { align-self: flex-start; }
+.ki-chat-cfg__modal-head {
+  display: flex; align-items: flex-start; gap: var(--ki-space-2); flex-shrink: 0;
+  padding: var(--ki-space-4) var(--ki-space-5) var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-chat-cfg__modal-head h4 { margin: 0; font-size: var(--ki-font-size-lg); font-weight: 600; letter-spacing: -.2px; }
+.ki-chat-cfg__modal-head .ki-chat-iconbtn { margin-left: auto; }
+.ki-chat-cfg__modal-sub { margin: 3px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: 0; padding: var(--ki-space-3) var(--ki-space-5); }
+
+/* ── D7 减少动效偏好：关掉本段入场动画，保留状态反馈 ── */
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-msg, .ki-chat-tool:not([hidden]),
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__head,
+  .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field,
+  .ki-chat-cfg__mask, .ki-chat-cfg__card { animation: none; }
+}
+</style>
+</head>
+<body>
+<header class="ki-topbar">
+  <span class="ki-topbar__brand">
+    <span class="ki-logo" aria-hidden="true">k</span>
+    <span class="ki-topbar__title">ki 知识库</span>
+  </span>
+  <span class="ki-topbar__spacer"></span>
+  <span role="group" aria-label="主题" class="ki-seg">
+    <button type="button" id="themeLight" aria-pressed="true">浅色</button>
+    <button type="button" id="themeDark" aria-pressed="false">暗色</button>
+  </span>
+</header>
+
+<div class="ki-shell">
+  <main class="ki-main">
+    <div class="ki-page-head">
+      <div>
+        <h1>知识库浏览</h1>
+        <p>既有页面占位（让面板处在真实产品语境里）。本 demo 的增量只在右侧对话面板内：⚙ 配置入口、配置层、工具调用行与展开区；面板与消息外观全部来自 <code>web/src/styles/ki.css</code>，未改写源样式段。</p>
+      </div>
+      <span class="ki-badge ki-badge--vec">demo</span>
+    </div>
+    <div class="ki-split">
+      <aside class="ki-split__side">
+        <div class="ki-card">
+          <div class="ki-card__head"><span class="ki-card__title">Group 树</span><span class="ki-card__sub">2 scopes</span></div>
+          <div class="ki-card__body">
+            <div class="ki-tree-root">
+              <div class="ki-tree-dir ki-tree-dir--active" tabindex="0"><span class="ki-tree-arrow">▾</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">kisearch</span><span class="ki-badge">38</span></div>
+              <div class="ki-tree-group">
+                <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">▾</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">docs</span><span class="ki-heat ki-heat--hot">热</span></div>
+                <div class="ki-tree-group">
+                  <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">·</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">deploy</span></div>
+                </div>
+                <div class="ki-tree-dir" tabindex="0"><span class="ki-tree-arrow">▸</span><svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5c0-.6.4-1 1-1h2.8L7 4.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V5z"/></svg><span class="ki-tree-dir__label">wiki</span><span class="ki-heat ki-heat--cold">冷</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+      <section>
+        <div class="ki-card">
+          <div class="ki-card__head"><span class="ki-card__title">文档列表</span><span class="ki-card__sub">docs · 3 条命中</span></div>
+          <div class="ki-card__body">
+            <div class="ki-doc-item ki-doc-item--current">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">健康检查超时的派生链</span><span class="ki-doc-item__current-label">当前</span></div>
+                <div class="ki-doc-item__path">docs/health-check.md</div>
+                <div class="ki-doc-item__snippet">外层 deadline 由探测预算 + 本地余量推导；任一子检查超时会把整份报告换成 400……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--vec">vec</span><span class="ki-badge">今天更新</span></div>
+              </div>
+            </div>
+            <div class="ki-doc-item">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">chat-routes 的 SSE 与错误语义</span></div>
+                <div class="ki-doc-item__path">docs/chat-routes.md</div>
+                <div class="ki-doc-item__snippet">SSE 响应头在前置写成功之后才发，流建立前的错误仍以 HTTP 状态表达……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--kb">kb</span><span class="ki-badge">3 天前</span></div>
+              </div>
+            </div>
+            <div class="ki-doc-item">
+              <div class="ki-doc-item__main">
+                <div class="ki-doc-item__title-row"><span class="ki-doc-item__name">交付切片与合流约定</span></div>
+                <div class="ki-doc-item__path">docs/delivery-slicing.md</div>
+                <div class="ki-doc-item__snippet">砖头包要求目录互斥、契约只读、自包含可交接；合流按 DAG 分批、主干常绿……</div>
+                <div class="ki-doc-item__meta"><span class="ki-badge ki-badge--fts">fts</span><span class="ki-badge">上周</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ══════ 既有 AI 对话面板（结构与类名对齐 web/src/chat/ChatPanel.tsx）══════ -->
+  <aside class="ki-chat-panel" aria-label="AI 对话面板">
+    <header class="ki-chat-panel__head">
+      <span class="ki-chat-panel__title">AI 对话</span>
+      <div class="ki-chat-chipwrap">
+        <button type="button" class="ki-chat-chip" aria-expanded="false">
+          <svg class="ki-chat-chip__ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
+          <span class="ki-chat-chip__name">健康检查超时被误报</span>
+          <span class="ki-chat-chip__count">4</span>
+          <svg class="ki-chat-chip__caret" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5" /></svg>
+        </button>
+      </div>
+      <span class="ki-chat-panel__tools">
+        <!-- 既有：新建会话 -->
+        <button type="button" class="ki-chat-iconbtn" title="新建会话" aria-label="新建会话">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+        </button>
+        <!-- ★ 新增（唯一结构改动）：对话配置入口（滑块图标 + 文字，与"动作类"图标钮区分） -->
+        <button type="button" class="ki-chat-cfg__entry" id="cfgOpen" aria-haspopup="dialog">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+            <path d="M2.6 5.4h10.8M2.6 10.6h10.8" />
+            <circle cx="6.2" cy="5.4" r="1.7" />
+            <circle cx="9.8" cy="10.6" r="1.7" />
+          </svg>
+          <span>配置</span>
+        </button>
+      </span>
+    </header>
+
+    <div class="ki-chat-ctx">
+      <span class="ki-chat-ctx__dot"></span>
+      <span class="ki-chat-ctx__model">qwen3.8-flash</span>
+      <span class="ki-chat-ctx__sep">·</span>
+      <span>工具检索就绪</span>
+    </div>
+
+    <div class="ki-chat-panel__body">
+      <div class="ki-chat-msg ki-chat-msg--user">
+        <div class="ki-chat-msg__meta"><span class="ki-chat-msg__at">00:24</span></div>
+        <!-- 补 __body 包裹层：ki.css 的用户气泡样式挂在 .ki-chat-msg--user .ki-chat-msg__body 上，此前缺失导致消息渲染成裸文本 -->
+        <div class="ki-chat-msg__body"><div class="ki-chat-msg__text">健康检查超时被误报为服务未就绪，根因是什么？</div></div>
+      </div>
+
+      <div class="ki-chat-msg ki-chat-msg--assistant">
+        <div class="ki-chat-msg__meta">
+          <span class="ki-chat-avatar" aria-hidden="true">k</span>
+          <span class="ki-chat-msg__role">kisearch</span>
+          <span class="ki-chat-msg__at">00:24</span>
+        </div>
+
+        <div class="ki-chat-tl" role="status" aria-live="polite">
+          <!-- ★ 新增：工具调用行（复用既有 tl__node 的时间线圆点与排版）——文案双轨：动作名给人看、工具名给核对 -->
+          <div class="ki-chat-tl__node ki-chat-tl__node--tool" role="button" tabindex="0" aria-expanded="false" data-tool="1">
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
+            <span class="ki-chat-tl__stat">hybrid · 3 命中 · 552ms</span>
+            <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
+          </div>
+          <div class="ki-chat-tool" id="tool1" hidden>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">入参<em>mode hybrid · limit 5</em></div>
+              <pre class="ki-chat-tool__code">{
+  <span class="k">"query"</span>: <span class="s">"健康检查超时 误报 未就绪"</span>,
+  <span class="k">"mode"</span>: <span class="s">"hybrid"</span>,
+  <span class="k">"limit"</span>: <span class="n">5</span>
+}</pre>
+            </section>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">响应<em>3 条 · 12.4 KB</em></div>
+              <pre class="ki-chat-tool__code">{
+  <span class="k">"ok"</span>: <span class="n">true</span>,
+  <span class="k">"scope"</span>: <span class="s">"default"</span>,
+  <span class="k">"results"</span>: [
+    {
+      <span class="k">"group"</span>: <span class="s">"docs"</span>,
+      <span class="k">"relation"</span>: <span class="s">"chat-routes.md"</span>,
+      <span class="k">"lineStart"</span>: <span class="n">76</span>, <span class="k">"lineEnd"</span>: <span class="n">98</span>,
+      <span class="k">"score"</span>: <span class="n">0.72</span>,
+      <span class="k">"snippet"</span>: <span class="s">"外层 deadline 由探测预算推导时漏加了本地检查余量…"</span>
+    },
+    {
+      <span class="k">"group"</span>: <span class="s">"docs"</span>,
+      <span class="k">"relation"</span>: <span class="s">"health-check.md"</span>,
+      <span class="k">"lineStart"</span>: <span class="n">601</span>, <span class="k">"lineEnd"</span>: <span class="n">640</span>,
+      <span class="k">"score"</span>: <span class="n">0.68</span>,
+      <span class="k">"snippet"</span>: <span class="s">"健康检查 worst case 由探测预算 + 本地余量推导…"</span>
+    },
+    {
+      <span class="k">"group"</span>: <span class="s">"docs"</span>,
+      <span class="k">"relation"</span>: <span class="s">"chat-routes.md"</span>,
+      <span class="k">"lineStart"</span>: <span class="n">112</span>, <span class="k">"lineEnd"</span>: <span class="n">140</span>,
+      <span class="k">"score"</span>: <span class="n">0.61</span>,
+      <span class="k">"snippet"</span>: <span class="s">"SSE 响应头在前置写成功之后才发，流建立前的错误仍以 HTTP 状态表达…"</span>
+    }
+  ]
+}</pre>
+            </section>
+            <p class="ki-chat-tool__note">响应为 MCP 工具原始返回（JSON）· 长响应默认折叠到前 3 条</p>
+          </div>
+
+          <!-- ★ 新增：失败的工具调用（默认展开，不静默消失） -->
+          <div class="ki-chat-tl__node ki-chat-tl__node--tool ki-chat-tl__node--tool-fail" role="button" tabindex="0" aria-expanded="true" data-tool="2">
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
+            <span class="ki-chat-tl__stat">失败 · 入参不是合法 JSON</span>
+            <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
+          </div>
+          <div class="ki-chat-tool" id="tool2">
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">入参<em>已被上游截断</em></div>
+              <pre class="ki-chat-tool__err">{"query": "健康检查超时</pre>
+            </section>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">错误<em>未发起检索</em></div>
+              <p class="ki-chat-tool__note ki-chat-tool__note--warn">参数不是合法 JSON：上游传回的 arguments 被截断了。这一轮没有检索结果，回答未引用知识库。</p>
+            </section>
+          </div>
+
+          <!-- ★ 运行中态：代表时间上最后发生的一次调用（默认收起，与其他行一致 —— U7 要求的是"展开态不被强制收起"，不是"默认展开"） -->
+          <div class="ki-chat-tl__node ki-chat-tl__node--tool ki-chat-tl__node--run" role="button" tabindex="0" aria-expanded="false" data-tool="0">
+            <span class="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+            <span class="ki-chat-tl__tool">ki_search</span>
+            <span class="ki-chat-tl__stat">hybrid · 检索中…</span>
+            <svg class="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12" /></svg>
+          </div>
+          <div class="ki-chat-tool" id="tool0" hidden>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">入参<em>已发送</em></div>
+              <pre class="ki-chat-tool__code">{
+  <span class="k">"query"</span>: <span class="s">"知识库检索 混合模式 命中排序"</span>,
+  <span class="k">"mode"</span>: <span class="s">"hybrid"</span>,
+  <span class="k">"limit"</span>: <span class="n">5</span>
+}</pre>
+            </section>
+            <section class="ki-chat-tool__sec">
+              <div class="ki-chat-tool__label">响应<em>等待中</em></div>
+              <p class="ki-chat-tool__note">工具调用进行中 —— 手动展开后不会因流式推进被强制收起（U7）。</p>
+            </section>
+          </div>
+          <div class="ki-chat-tl__node ki-chat-tl__node--think"><span class="ki-chat-tl__label">思考</span><span class="ki-chat-tl__stat">2.1s</span></div>
+        </div>
+
+        <div class="ki-chat-reason">
+          <button type="button" class="ki-chat-reason__toggle" id="reasonToggle" aria-expanded="false">展开思考（仅本次内存，刷新即失）</button>
+          <div class="ki-chat-reason__body" id="reasonBody" hidden>先看超时是怎么派生的：外层 deadline 由探测预算推导，漏加了本地检查余量……</div>
+        </div>
+
+        <div class="ki-chat-msg__body">
+          <p>根因在 <code>chat-routes.ts</code> 的超时派生：外层 deadline 由探测预算推导时漏加了本地检查余量，慢子检查会把整份健康报告换成 400，前端据此判定「服务未就绪」。</p>
+        </div>
+
+        <div class="ki-chat-srcs">
+          <span class="ki-chat-srcs__label">来源</span>
+          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">1</span><span class="ki-chat-src__doc">chat-routes.ts</span><span class="ki-chat-src__lines">L76-98</span><span class="ki-chat-src__pop"><b>chat-routes.ts</b><em>docs · L76-98 · 0.72</em><q>外层 deadline 由探测预算推导时漏加了本地检查余量，慢子检查会把整份健康报告换成 400……</q><u>点击打开原文</u></span></button>
+          <button type="button" class="ki-chat-src"><span class="ki-chat-src__no">2</span><span class="ki-chat-src__doc">health-check.ts</span><span class="ki-chat-src__lines">L601-640</span><span class="ki-chat-src__pop"><b>health-check.ts</b><em>docs · L601-640 · 0.68</em><q>健康检查 worst case 由探测预算 + 本地余量推导，余量缺省 1.5s……</q><u>点击打开原文</u></span></button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="ki-chat-panel__foot">
+      <div class="ki-chat-composer">
+        <textarea class="ki-chat-composer__ta" rows="1" placeholder="追问…"></textarea>
+        <div class="ki-chat-composer__bar">
+          <span class="ki-chat-composer__hint">Enter 发送 · Shift+Enter 换行</span>
+          <span class="ki-chat-composer__count">0 / 8000</span>
+          <button type="button" class="ki-chat-btn" id="sendBtn" disabled>发送</button>
+        </div>
+      </div>
+    </footer>
+
+    <!-- ══════ ★ 新增：对话配置层（panel-scoped，与会话浮层同为面板内层）══════ -->
+    <section class="ki-chat-cfg" id="cfg" data-open="false" role="dialog" aria-modal="true" aria-label="对话配置" inert>
+      <div class="ki-chat-cfg__savedbar" id="savedbar" data-open="false"></div>
+      <header class="ki-chat-cfg__head">
+        <span class="ki-chat-cfg__title">对话配置</span>
+        <span class="ki-chat-cfg__spacer"></span>
+        <button type="button" class="ki-chat-iconbtn" id="cfgClose" aria-label="关闭配置">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg>
+        </button>
+      </header>
+
+      <div class="ki-chat-cfg__body">
+        <!-- ── 列表层 ── -->
+        <div class="ki-chat-cfg__page" id="pageList">
+        <div class="ki-chat-cfg__field">
+          <label class="ki-chat-cfg__label" for="scopeSel">作用域</label>
+          <select id="scopeSel" class="ki-chat-cfg__ta ki-chat-cfg__ta--select">
+            <option>全局（所有 scope）</option>
+            <option>仅当前 scope：kisearch（待确认）</option>
+            <option>仅本会话（待确认）</option>
+          </select>
+          <p class="ki-chat-cfg__hint">保存后对<strong>下一次提问</strong>生效，无需重启服务。</p>
+        </div>
+
+        <div class="ki-chat-cfg__field">
+          <span class="ki-chat-cfg__label">提示词</span>
+          <div class="ki-chat-cfg__list" id="listPrompt"></div>
+        </div>
+
+        <div class="ki-chat-cfg__field">
+          <span class="ki-chat-cfg__label">Skill</span>
+          <div class="ki-chat-cfg__list" id="listSkill"></div>
+          <button type="button" class="ki-chat-cfg__add" id="skillAdd">＋ 新增 skill</button>
+          <p class="ki-chat-cfg__hint">点条目或「新增 skill」都会弹出编辑框：先看预览，再切到「编辑」修改；删除在编辑框里。</p>
+        </div>
+
+        <div class="ki-chat-cfg__field">
+          <span class="ki-chat-cfg__label">工具与权限<em class="ki-chat-cfg__badge">批次 2 生效</em></span>
+          <p class="ki-chat-cfg__hint">本批只保存开关，工具暴露在批次 2 落地；白名单只接受真实注册的 14 个工具名。</p>
+
+          <p class="ki-chat-cfg__group"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>只读<span class="ki-chat-cfg__group-n">6 个 · 默认开</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_search</span><span class="ki-chat-cfg__tool-desc">混合 / 字面检索知识库</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_search"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_query_group</span><span class="ki-chat-cfg__tool-desc">查看 Group 树结构</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_query_group"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_get_module_info</span><span class="ki-chat-cfg__tool-desc">读取指定文档原文</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_get_module_info"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_tag_list</span><span class="ki-chat-cfg__tool-desc">列出标签</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_tag_list"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_scope_list</span><span class="ki-chat-cfg__tool-desc">列出 scope 清单</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_scope_list"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_list</span><span class="ki-chat-cfg__tool-desc">列出索引配置</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw" role="switch" aria-checked="true" aria-label="ki_manage_index_list"></button></div>
+
+          <p class="ki-chat-cfg__group ki-chat-cfg__group--danger"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>写入<span class="ki-chat-cfg__group-n">6 个 · 危险 · 默认关</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_store</span><span class="ki-chat-cfg__tool-desc">写入向量</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_store" data-danger="写入向量会改变当前 scope 的知识库内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_bulk_store</span><span class="ki-chat-cfg__tool-desc">批量写入向量</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_bulk_store" data-danger="批量写入可一次改动大量知识库内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_sync_relation</span><span class="ki-chat-cfg__tool-desc">写入 / 更新关系与 KB 内容</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_sync_relation" data-danger="写入关系会改变当前 scope 的 KB 内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_bulk_sync_relation</span><span class="ki-chat-cfg__tool-desc">批量写入关系</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_bulk_sync_relation" data-danger="批量写入关系可一次改动大量 KB 内容"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_edit_relation</span><span class="ki-chat-cfg__tool-desc">编辑既有关系（覆盖原内容）</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_edit_relation" data-danger="编辑关系会覆盖原内容，不可逐字撤销"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_create</span><span class="ki-chat-cfg__tool-desc">在 Group 树中新建节点</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_manage_index_create" data-danger="会在当前 scope 的 Group 树中新建节点"></button></div>
+
+          <p class="ki-chat-cfg__group ki-chat-cfg__group--danger"><span class="ki-chat-cfg__group-dot" aria-hidden="true"></span>删除<span class="ki-chat-cfg__group-n">2 个 · 最危险 · 默认关</span></p>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_delete_relation</span><span class="ki-chat-cfg__tool-desc">删除关系及其关联数据</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_delete_relation" data-danger="删除关系、缓存、KB 原文与向量，不可撤销"></button></div>
+          <div class="ki-chat-cfg__tool"><span class="ki-chat-cfg__tool-main"><span class="ki-chat-cfg__tool-name">ki_manage_index_delete</span><span class="ki-chat-cfg__tool-desc">删除 Group 节点及其下内容</span></span><span class="ki-chat-cfg__tool-sp"></span><button type="button" class="ki-chat-cfg__sw ki-chat-cfg__sw--danger" role="switch" aria-checked="false" aria-label="ki_manage_index_delete" data-danger="删除 Group 节点及其下全部内容，不可撤销"></button></div>
+
+          <p class="ki-chat-cfg__hint">危险工具默认关闭，开启需二次确认；开启后 AI 可在当前 scope 内改动知识库。</p>
+        </div>
+        </div><!-- /pageList -->
+      </div>
+
+      <div class="ki-chat-cfg__bar">
+        <span class="ki-chat-cfg__spacer"></span>
+        <span class="ki-chat-cfg__scope" id="scopeNote">作用域：全局 · 下一次提问生效</span>
+        <button type="button" class="ki-chat-btn ki-chat-btn--ghost" id="cfgCancel">取消</button>
+        <button type="button" class="ki-chat-btn" id="cfgSave">保存</button>
+      </div>
+
+      <div class="ki-chat-cfg__toast" id="toast" data-open="false" role="status">已保存</div>
+
+    </section>
+  </aside>
+</div>
+
+<!-- ══════ ★ 编辑 / 新增 模态框 —— app 级层：居中于整个页面（不再局限在 380px 对话面板内）
+     新增 skill / 编辑 skill / 编辑提示词共用；名称内置只读、非内置可改；底部按类型显示恢复默认与删除。
+     必须挂在 body 下：配置层 #cfg 带 z-index 会形成层叠上下文，挂在它内部则再高的 z-index 也升不出面板 -->
+<div class="ki-chat-cfg__mask" id="editModal" hidden>
+  <div class="ki-chat-cfg__card ki-chat-cfg__modal" role="dialog" aria-modal="true" aria-label="编辑条目">
+    <div class="ki-chat-cfg__modal-head">
+      <div>
+        <h4 id="mTitle">编辑</h4>
+        <p class="ki-chat-cfg__modal-sub" id="mSub"></p>
+      </div>
+      <button type="button" class="ki-chat-iconbtn" id="mClose" aria-label="关闭编辑">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </div>
+
+    <div class="ki-chat-cfg__modal-body">
+      <div class="ki-chat-cfg__field">
+        <label class="ki-chat-cfg__label" for="mName">名称</label>
+        <input class="ki-chat-cfg__ta ki-chat-cfg__ta--name" id="mName" type="text" maxlength="40" placeholder="给这个 skill 起个名字">
+      </div>
+
+      <div class="ki-chat-cfg__seg" role="tablist" aria-label="查看方式">
+        <button type="button" class="ki-chat-cfg__segb" data-view="preview" aria-selected="true">预览</button>
+        <button type="button" class="ki-chat-cfg__segb" data-view="edit" aria-selected="false">编辑</button>
+      </div>
+
+      <pre class="ki-chat-cfg__view" id="mPreview"></pre>
+      <div id="mEditWrap" hidden>
+        <textarea class="ki-chat-cfg__ta" id="mBody" spellcheck="false" placeholder="写清这个 skill 什么时候用、按什么顺序调用哪些工具。例：先 ki_search 找片段，命中不足时再看结构；每次回答都要附来源。"></textarea>
+        <div class="ki-chat-cfg__foot"><span id="mCount">0 / 8000 字</span><span class="ki-chat-cfg__err" id="mErr"></span></div>
+      </div>
+      <p class="ki-chat-cfg__meta" id="mMeta"></p>
+    </div><!-- /modal-body -->
+
+    <div class="ki-chat-cfg__card-acts">
+      <button type="button" class="ki-chat-cfg__reset" id="mReset" hidden>恢复默认</button>
+      <button type="button" class="ki-chat-cfg__del" id="mDel" hidden>删除</button>
+      <span class="ki-chat-cfg__spacer"></span>
+      <button type="button" class="ki-chat-btn ki-chat-btn--ghost" id="mCancel">取消</button>
+      <button type="button" class="ki-chat-btn" id="mOk">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+const setTheme = (t) => {
+  document.documentElement.dataset.theme = t;
+  $('#themeLight').setAttribute('aria-pressed', String(t === 'light'));
+  $('#themeDark').setAttribute('aria-pressed', String(t === 'dark'));
+};
+$('#themeLight').onclick = () => setTheme('light');
+$('#themeDark').onclick = () => setTheme('dark');
+
+/* ★ 新增交互 1：工具调用行展开/收起 */
+$$('.ki-chat-tl__node--tool').forEach((row) => {
+  const body = document.getElementById('tool' + row.dataset.tool);
+  const toggle = () => {
+    const open = row.getAttribute('aria-expanded') === 'true';
+    row.setAttribute('aria-expanded', String(!open));
+    body.hidden = open;
+  };
+  row.onclick = toggle;
+  row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
+});
+
+/* 既有：思考块展开（沿用既有类与文案口径） */
+$('#reasonToggle').onclick = () => {
+  const btn = $('#reasonToggle'), body = $('#reasonBody');
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', String(!open));
+  btn.textContent = open ? '展开思考（仅本次内存，刷新即失）' : '收起思考（仅本次内存，刷新即失）';
+  body.hidden = open;
+};
+
+/* ★ 新增交互 2：配置层开关（第四轮修正：快照回滚 / 清残留确认卡 / Esc 分层 / 焦点陷阱） */
+
+/* toast：顶部短反馈 —— 原实现调用了 5 次但从未定义（点保存即抛 ReferenceError，等于"没反应"） */
+let toastTimer = null;
+function toast(text) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.dataset.open = 'true';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.dataset.open = 'false'; }, 1800);
+}
+
+/* 作用域底栏提示与下拉联动（第四轮修正：消除"两处作用域"各说各话） */
+function syncScopeNote() {
+  $('#scopeNote').textContent = '作用域：' + String($('#scopeSel').value).replace(/（.*?）/g, '') + ' · 下一次提问生效';
+}
+
+let pendingConfirm = null;   // 当前打开的危险确认卡（同一时刻最多一张）
+let listSnapshot = null;     // 列表态快照：点「取消」时回滚
+const FOCUSABLE = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+
+const snapshotListState = () => ({
+  scope: $('#scopeSel').value,
+  switches: $$('.ki-chat-cfg__sw').map((sw) => sw.getAttribute('aria-checked')),
+});
+function applyListState(s) {
+  if (!s) return;
+  $('#scopeSel').value = s.scope;
+  $$('.ki-chat-cfg__sw').forEach((sw, i) => { if (s.switches[i] != null) sw.setAttribute('aria-checked', s.switches[i]); });
+  syncScopeNote();
+}
+function clearConfirm() {
+  if (pendingConfirm) { pendingConfirm.remove(); pendingConfirm = null; }
+}
+
+const openCfg = (on) => {
+  if (on) {
+    listSnapshot = snapshotListState();
+    showList();                                   // 每次打开都落在列表层
+  } else {
+    clearConfirm();                               // 关层必须清卡，否则残留到下次打开
+    if (!$('#editModal').hidden) closeEditModal();        // 编辑模态框随层一起关
+    showList();
+    applyListState(listSnapshot);                  // 取消 = 回滚未保存的列表态改动
+  }
+  $('#cfg').dataset.open = String(on);
+  $('#cfg').inert = !on;   /* 关闭态必须 inert：否则 Tab 会掉进不可见的层里（实测第 9 次 Tab 起进入层内控件） */
+  (on ? $('#cfgClose') : $('#cfgOpen')).focus();
+};
+$('#cfgOpen').onclick = () => openCfg(true);
+$('#cfgClose').onclick = () => openCfg(false);
+$('#cfgCancel').onclick = () => openCfg(false);
+$('#scopeSel').onchange = syncScopeNote;
+
+/* Esc 分层：确认卡 → 编辑模态框 → 配置层（原实现任何一层都直接关整层，并留下孤儿确认卡） */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('#cfg').dataset.open !== 'true') return;
+  if (pendingConfirm) { pendingConfirm.remove(); pendingConfirm = null; $('#cfgClose').focus(); return; }
+  if (!$('#editModal').hidden) { tryCloseEditModal(); return; }
+  openCfg(false);
+});
+
+/* 焦点陷阱：Tab 在最上层内循环（确认卡 > 编辑模态框 > 配置层） */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || $('#cfg').dataset.open !== 'true') return;
+  const openMask = Array.from(document.querySelectorAll('.ki-chat-cfg__mask')).find((m) => !m.hidden);
+  const scope = pendingConfirm || openMask || $('#cfg');
+  const items = Array.from(scope.querySelectorAll(FOCUSABLE)).filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1], active = document.activeElement;
+  if (!scope.contains(active)) { e.preventDefault(); first.focus(); return; }
+  if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+});
+
+/* ★ 配置数据（demo 内存态；真实实现持久化到配置 / 磁盘）*/
+const ITEMS = {
+  promptBase: {
+    group: 'prompt', name: '基础提示词', max: 4000, builtin: true,
+    def: '你是 kisearch 的知识库助手。回答前先用工具检索；找不到就说「知识库中未找到」，不要用自身知识冒充。',
+  },
+  skillKb: {
+    group: 'skill', name: '知识库检索', max: 8000, builtin: true,
+    def: '可用工具：\n- ki_search(query, mode) 检索知识库；字面片段用 fulltext，概念问题用 hybrid\n- ki_query_group() 列出知识结构\n- ki_get_module_info(path) 读取指定文档原文\n\n使用顺序：先 ki_search 找片段；命中不足时再看结构；每次回答都要附带来源。',
+  },
+};
+ITEMS.promptBase.content = ITEMS.promptBase.def;
+ITEMS.skillKb.content = ITEMS.skillKb.def;
+ITEMS.promptBase.at = ITEMS.skillKb.at = '默认';
+
+/* D5：列表条目的类型图标块（提示词=文本线 / skill=手册） */
+const ITEM_IC = {
+  prompt: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3.5 4.5h9M3.5 8h9M3.5 11.5h5"/></svg>',
+  skill: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 4.2C6.5 3.1 4.3 2.9 2.8 3.4v8c1.5-.5 3.7-.3 5.2.8 1.5-1.1 3.7-1.3 5.2-.8v-8C11.7 2.9 9.5 3.1 8 4.2zm0 0v8"/></svg>',
+};
+
+let seq = 0, view = 'preview';
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function renderLists() {
+  const groups = { prompt: $('#listPrompt'), skill: $('#listSkill') };
+  Object.values(groups).forEach((g) => (g.innerHTML = ''));
+  for (const [id, it] of Object.entries(ITEMS)) {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'ki-chat-cfg__item';
+    const mod = it.at !== '默认';
+    el.innerHTML =
+      '<span class="ki-chat-cfg__item-ic ki-chat-cfg__item-ic--' + it.group + '">' + ITEM_IC[it.group] + '</span>'
+      + '<span class="ki-chat-cfg__item-main">'
+      + '<span class="ki-chat-cfg__item-name">' + esc(it.name) + '</span>'
+      + '<span class="ki-chat-cfg__item-prev">' + esc(String(it.content).slice(0, 42)) + '</span>'
+      + '</span>'
+      + '<span class="ki-chat-cfg__item-meta' + (mod ? ' ki-chat-cfg__item-meta--mod' : '') + '">' + String(it.content).length + ' 字 · ' + (mod ? '已修改' : '默认') + '</span>'
+      + '<svg class="ki-chat-cfg__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 4 10.5 8 6.5 12"/></svg>';
+    el.onclick = () => openEditModal(id);          // 点条目 → 编辑模态框（第四轮补充：原为页内详情层）
+    groups[it.group].appendChild(el);
+  }
+}
+
+function showList() {
+  renderLists();
+  $('#scopeNote').hidden = false;
+  syncScopeNote();                                // 底栏提示跟随当前作用域选择
+}
+
+/* ══════ ★ 编辑 / 新增 模态框（第四轮补充：替代原页内详情层；新增 skill、编辑 skill、编辑提示词共用）══════ */
+let modalId = null;                                    // 当前编辑的条目 id；'__new__' = 新增 skill
+const NEW_SKILL = { group: 'skill', name: '未命名 skill', max: 8000, builtin: false, def: '', content: '', at: '新建' };
+
+const curItem = () => (modalId === '__new__' ? NEW_SKILL : ITEMS[modalId]);
+const curMax = () => (modalId === '__new__' ? 8000 : ITEMS[modalId].max);
+
+function openEditModal(id) {
+  const isNew = (id === '__new__');
+  if (isNew) { NEW_SKILL.content = ''; NEW_SKILL.name = '未命名 skill'; NEW_SKILL.at = '新建'; }
+  const it = isNew ? NEW_SKILL : ITEMS[id];
+  modalId = id;
+  view = isNew ? 'edit' : 'preview';
+
+  $('#mTitle').textContent = isNew ? '新增 skill' : (it.group === 'prompt' ? '编辑提示词' : '编辑 skill');
+  $('#mSub').textContent = isNew ? '新建 skill · 保存后写入当前作用域'
+    : (it.group === 'prompt' ? '系统提示词' : '对话 skill') + ' · ' + (it.builtin ? '内置 · 可恢复默认内容' : '自定义');
+  $('#mName').value = it.name;
+  $('#mName').readOnly = it.builtin;                   // 内置条目名称只读，非内置 skill 可改
+  $('#mName').removeAttribute('aria-invalid');
+  $('#mBody').value = it.content;                      // 只在此处灌入，切分段不重置（否则会吞掉用户输入）
+  $('#mReset').hidden = !it.builtin;                   // 仅内置条目有"默认内容"可恢复
+  $('#mDel').hidden = (isNew || it.builtin || it.group !== 'skill');
+  $('#mErr').textContent = ''; $('#mErr').dataset.kind = '';
+
+  renderModal();
+  $('#editModal').hidden = false;
+  if (isNew) {
+    const n = $('#mName');
+    n.focus();
+    n.setSelectionRange(n.value.length, n.value.length);   // 光标置尾，不全选（全选反显"看不清字"）
+  } else {
+    $('.ki-chat-cfg__segb[aria-selected="true"]').focus();
+  }
+}
+
+function renderModal() {
+  const it = curItem();
+  $$('.ki-chat-cfg__segb').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
+  $('#mPreview').textContent = it.content || '（还没有内容 —— 切到「编辑」写点什么）';
+  $('#mPreview').hidden = view !== 'preview';
+  $('#mEditWrap').hidden = view !== 'edit';
+  $('#mMeta').textContent = String(it.content).length + ' 字 · ' + (it.at === '默认' ? '内置默认内容' : '上次修改 ' + it.at);
+  $('#mMeta').hidden = view === 'edit';                // 编辑态已有字数计数，不再重复显示
+  refreshM();
+}
+
+function refreshM() {
+  const ta = $('#mBody'), n = ta.value.length, max = curMax(), over = n > max;
+  $('#mCount').textContent = n + ' / ' + max + ' 字';
+  ta.setAttribute('aria-invalid', String(over));
+  const err = $('#mErr');
+  if (over) { err.textContent = '超出 ' + (n - max) + ' 字'; err.dataset.kind = 'len'; }
+  else if (err.dataset.kind === 'len') { err.textContent = ''; err.dataset.kind = ''; }
+}
+
+function closeEditModal() {
+  $('#editModal').hidden = true;
+  modalId = null;
+  $('#skillAdd').focus();      // 焦点收回列表：否则焦点留在被隐藏的控件上，键盘用户会"丢焦点"
+}
+
+/* 有未保存修改时先问一句（防误点遮罩 / Esc 丢内容）；「取消」按钮不走这里（语义就是放弃） */
+function tryCloseEditModal() {
+  const cur = (modalId === '__new__') ? '' : ITEMS[modalId].content;
+  const dirty = !$('#mEditWrap').hidden && $('#mBody').value !== cur;
+  if (dirty) askConfirm('未保存的修改', '关闭将丢弃这次编辑。', () => closeEditModal());
+  else closeEditModal();
+}
+
+$('#mBody').oninput = refreshM;
+$$('.ki-chat-cfg__segb').forEach((b) => { b.onclick = () => { view = b.dataset.view; renderModal(); }; });
+$('#mCancel').onclick = () => closeEditModal();
+$('#mClose').onclick = tryCloseEditModal;          /* D6：头部关闭钮与取消同语义（脏时先问） */
+$('#editModal').onclick = (e) => { if (e.target === $('#editModal')) tryCloseEditModal(); };
+
+/* 保存（新增 / 编辑共用）：名称非空 + 同名检查 + 字数上限，全部在保存前拦 */
+$('#mOk').onclick = () => {
+  const isNew = (modalId === '__new__');
+  const it = isNew ? null : ITEMS[modalId];
+  const group = isNew ? 'skill' : it.group;
+  const max = curMax();
+  const name = ($('#mName').value || '').trim();
+  const body = $('#mBody').value;
+  const err = $('#mErr');
+  $('#mName').removeAttribute('aria-invalid');
+
+  if (!name) {
+    err.textContent = '名称不能为空'; err.dataset.kind = 'name';
+    $('#mName').setAttribute('aria-invalid', 'true'); $('#mName').focus(); return;
+  }
+  if (Object.entries(ITEMS).some(([id, x]) => id !== modalId && x.group === group && x.name === name)) {
+    err.textContent = '已有同名条目，请换一个名字'; err.dataset.kind = 'dup';
+    $('#mName').setAttribute('aria-invalid', 'true'); $('#mName').focus(); return;
+  }
+  if (body.length > max) { err.textContent = '超出 ' + max + ' 字，请先删减'; err.dataset.kind = 'len'; return; }
+
+  if (isNew) {
+    const id = 'skill-' + (++seq);
+    ITEMS[id] = { group: 'skill', name, max: 8000, builtin: false, def: '', content: body, at: '新建' };
+    closeEditModal(); renderLists();
+    flashSaved('已新增「' + name + '」· 下一次提问生效');
+    return;
+  }
+  it.name = name; it.content = body; it.at = '刚刚';
+  closeEditModal(); renderLists();
+  flashSaved('已保存 · 下一次提问生效');
+};
+
+/* 恢复默认（仅内置条目）/ 删除（仅非内置 skill） */
+$('#mReset').onclick = () => {
+  const it = curItem();
+  askConfirm('恢复默认', '将丢弃当前修改，恢复为内置默认内容。', () => {
+    it.content = it.def; it.at = '默认';
+    $('#mBody').value = it.def;
+    renderModal(); renderLists();
+    toast('已恢复默认');
+  });
+};
+$('#mDel').onclick = () => {
+  const it = curItem();
+  if (!it || it.builtin) return;
+  askConfirm('删除 skill', '「' + it.name + '」将被删除，此操作不可撤销。', () => {
+    const nm = it.name;
+    delete ITEMS[modalId];
+    closeEditModal(); renderLists();
+    toast('已删除「' + nm + '」');
+  });
+};
+
+/* 确认卡（危险开关 / 删除 skill 通用；第四轮修正：可被 Esc 关闭、关层时清理、焦点归位、标题按场景） */
+function askConfirm(title, text, onYes) {
+  clearConfirm();
+  const opener = document.activeElement;
+  const wrap = document.createElement('div');
+  wrap.className = 'ki-chat-cfg__mask';
+  wrap.innerHTML = '<div class="ki-chat-cfg__card" role="alertdialog" aria-modal="true">'
+    + '<h4>' + esc(title) + '</h4><p>' + esc(text) + '</p>'
+    + '<div class="ki-chat-cfg__card-acts">'
+    + '<button type="button" class="ki-chat-btn ki-chat-btn--ghost" data-ans="no">取消</button>'
+    + '<button type="button" class="ki-chat-btn ki-chat-btn--danger" data-ans="yes">确认</button>'
+    + '</div></div>';
+  document.body.appendChild(wrap);      // 确认卡也是页面级模态：挂在 body 才能盖在编辑模态框之上（原挂 #cfg 会被配置层的层叠上下文困住）
+  pendingConfirm = wrap;
+  wrap.querySelector('[data-ans="no"]').focus();
+  wrap.onclick = (e) => {
+    const ans = e.target.dataset ? e.target.dataset.ans : null;
+    const blank = e.target === wrap;     // 点遮罩空白 = 取消（默认不执行危险操作，不留无响应区）
+    if (!ans && !blank) return;
+    wrap.remove();
+    pendingConfirm = null;
+    if (ans === 'yes') onYes();
+    else if (opener && opener.focus) opener.focus();
+  };
+}
+$$('.ki-chat-cfg__sw').forEach((sw) => {
+  sw.onclick = () => {
+    if (sw.getAttribute('aria-checked') === 'true') { sw.setAttribute('aria-checked', 'false'); return; }
+    if (sw.dataset.danger) {
+      askConfirm('开启危险工具', sw.dataset.danger + '。受影响范围：当前 scope（kisearch）。', () => {
+        sw.setAttribute('aria-checked', 'true');
+        sw.focus();
+      });
+      return;
+    }
+    sw.setAttribute('aria-checked', 'true');
+  };
+});
+
+/* 新增 skill：打开空白的编辑模态框（不再是"先建条目再跳详情层"） */
+$('#skillAdd').onclick = () => openEditModal('__new__');
+
+/* 保存反馈：顶部细条 + toast（列表态保存与模态框保存共用） */
+function flashSaved(text) {
+  const bar = $('#savedbar');
+  bar.dataset.open = 'true';
+  setTimeout(() => { bar.dataset.open = 'false'; }, 1200);
+  toast(text || '已保存 · 下一次提问生效');
+}
+
+/* 列表态保存：作用域 / 工具开关（第四轮修正：保存中 → 已保存 的完整反馈） */
+function busySave(done) {
+  const btn = $('#cfgSave');
+  btn.dataset.busy = 'true'; btn.disabled = true; btn.textContent = '保存中';
+  setTimeout(() => {
+    btn.dataset.busy = 'false'; btn.disabled = false; btn.textContent = '保存';
+    done();
+    flashSaved();
+  }, 420);
+}
+$('#cfgSave').onclick = () => {
+  busySave(() => { listSnapshot = snapshotListState(); });   // 保存后当前状态成为新基线
+};
+
+/* ★ composer 细节（D 段）：自动行高 / 字数实时更新 / 发送按钮随输入启停。
+   此前字数恒为 0、发送恒为可用，输入区是"死"的，演示可信度打折 */
+const cTa = $('.ki-chat-composer__ta');
+const cCnt = $('.ki-chat-composer__count');
+const cSend = $('#sendBtn');
+function syncComposer() {
+  cTa.style.height = 'auto';
+  cTa.style.height = Math.min(cTa.scrollHeight, 176) + 'px';   /* 与 ki.css composer__ta max-height 一致 */
+  const n = cTa.value.length;
+  cCnt.textContent = n + ' / 8000';
+  cCnt.classList.toggle('ki-chat-composer__count--over', n > 8000);
+  cSend.disabled = !cTa.value.trim();
+}
+cTa.oninput = syncComposer;
+cTa.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!cSend.disabled) cSend.click(); }
+});
+cSend.onclick = () => { cTa.value = ''; syncComposer(); cTa.focus(); };   /* demo：仅复位输入态，不接后端 */
+
+/* ★ 初始化渲染（上一版漏了这一行 → 列表容器是空的，默认 skill 与基础提示词卡片都没出现）*/
+renderLists();
+syncScopeNote();
+/* 工具名很长会省略号截断：补 title，悬停可看完整名 */
+$$('.ki-chat-cfg__tool-name').forEach((el) => { el.title = el.textContent; });
+</script>
+</body>
+</html>

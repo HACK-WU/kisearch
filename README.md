@@ -51,6 +51,8 @@
 
 kisearch 自带可视化前端 `web`，由 `ki mcp --http --web` 一并提供：浏览器打开 `http://127.0.0.1:7423/` 即可查看**总览**（scope / KB / 向量 / 注册 / 当前 scope 等状态）、**知识库浏览**（Group 树 + 文档列表 + 文件名模糊搜索）、**语义搜索**、**上传导入**、**知识写入**五个页面，便于在知识导入后验证写入效果、排查检索异常。
 
+此外，任意页面右侧提供**常驻可收起的 AI 对话面板**：多轮问答、流式输出、模型自主调用检索并给出**可点击回原文的来源引用**、历史会话管理，且**关闭面板不丢内容、不中止生成**。该能力需在配置文件的 `llm` 段填写模型（`baseURL` / `model` / `apiKey`），未配置时面板显示「未配置模型」而其余功能不受影响 —— 详见 [`docs/configuration.md`](./docs/configuration.md#llm) 与 [`docs/mcp-http.md`](./docs/mcp-http.md#apichat侧边栏-ai-对话)。
+
 ![kisearch Web 前端 · 总览](assets/overview.png)
 
 > 底层向量引擎 [zvec](https://github.com/alibaba/zvec) 的独立可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio) 仍可作为向量层的辅助调试工具单独使用（`zvec-studio --port 7861`），本项目内置前端不集成跳转入口。
@@ -378,9 +380,9 @@ ki import --scope my-project --source /path/to/wiki --group Wiki
 | 文档 | 内容 |
 |------|------|
 | [`docs/cli.md`](./docs/cli.md) | CLI 命令完整参考（含 search 输出字段说明） |
-| [`docs/configuration.md`](./docs/configuration.md) | 配置文件说明（数据目录/Embedding/scope 映射/导入清洗） |
+| [`docs/configuration.md`](./docs/configuration.md) | 配置文件说明（数据目录/Embedding/对话模型 `llm`/会话目录 `chatDir`/scope 映射/导入清洗） |
 | [`docs/architecture.md`](./docs/architecture.md) | 架构与协作关系 |
-| [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式 |
+| [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式（含 `/api/*` 扩展路由与 `/api/chat/*` 对话接口） |
 | [`docs/vector-engine-mem.md`](./docs/vector-engine-mem.md) | 向量引擎（zvec）设计说明 |
 | [`docs/tags-design.md`](./docs/tags-design.md) | 三层标签设计 |
 | [`docs/error-handling.md`](./docs/error-handling.md) | 异常处理与恢复 |

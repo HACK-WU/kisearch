@@ -43,6 +43,8 @@ import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResul
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
+// chat 模块（REQ-20260924-001）—— 单行挂载，见下方 if 链末尾
+import { handleChatRoutes } from './chat/chat-routes.js';
 import { vectorCollectionDimension, vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
@@ -573,6 +575,10 @@ export async function handleApiRequest(
     if (p.startsWith('/tasks/') && req.method === 'GET') return void handleTaskDetail(res, p.slice('/tasks/'.length), requestConfig, authScopes);
     if (p === '/vector/status' && req.method === 'GET') return void handleVectorStatus(res, url, requestConfig);
     if (p === '/vector/status/refresh' && req.method === 'POST') return void (await handleVectorStatusRefresh(req, res, requestConfig));
+    // ════════ chat 模块（REQ-20260924-001 · SR-01 独占挂载点）════════
+    // 单行挂载：/api/chat/* 全部路由由 chat-routes.ts 内部处理（本文件已 1065 行，不再逐条加分支）
+    // 越权白名单：API-02/04/14（带 scope 参数的 GET）仍须登记在上方只读接口列表
+    if (await handleChatRoutes(req, res, url, { authScopes, configSnapshot: requestConfig })) return;
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
     // status 允许 handler 表达「服务在、但这个检查暂时给不出结果」（503），
