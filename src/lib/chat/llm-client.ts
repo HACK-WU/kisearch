@@ -7,7 +7,7 @@
  * · ★ **不变量**：`reasoning` 永不进入 `messages`（N12）——实测单次思考可达 2635 字，
  *   误回传同时放大成本与延迟，并诱导模型复述自己的推理
  * · 空值：上游缺 `reasoning_content` 字段 → 按普通流处理（**不视为异常**，避免误伤非 reasoning 模型）
- * · 错误：上游 4xx/5xx → `LlmUpstreamError`；连续 >10 块 JSON 解析失败 → 同上
+ * · 错误：上游 4xx/5xx、SSE/JSON 显式错误、无终态 EOF → `LlmUpstreamError`；连续 >10 块 JSON 解析失败 → 同上
  * · 超时：双层 —— `firstByteTimeoutMs` 只约束"建立连接并收到首个 chunk"；
  *   `requestTimeoutMs` 约束整体（**不约束工具轮次**，工具预算见 tool-loop）
  * · 中止：接受 `AbortSignal`；中止后**返回已累积内容**，由调用方落盘为 `aborted:true`
@@ -269,9 +269,21 @@ export async function* streamChat(
   if (llm.maxTokens !== undefined) body.max_tokens = llm.maxTokens;
   // ⚠️ 不传 max_tokens 是默认行为（S01 §3：该上游 reasoning token 与 max_tokens 关系不确定）
 
-  let resp: Response;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  /** tool_calls 只在正常结束或用户中止时交给调用方；错误流不执行半截工具。 */
+  const toolAcc = new Map<number, { id: string; name: string; arguments: string }>();
+  let finishReason = 'stop';
+  let sawTerminal = false;
+  const usageState: { value: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | null } = { value: null };
+  const markFirstChunk = (): void => {
+    if (sawFirstChunk) return;
+    sawFirstChunk = true;
+    if (firstByteTimer) clearTimeout(firstByteTimer);
+    firstByteTimer = undefined;
+  };
+
   try {
-    resp = await fetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
+    const resp = await fetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${llm.apiKey}`,
@@ -281,97 +293,99 @@ export async function* streamChat(
       body: JSON.stringify(body),
       signal: local.signal,
     });
-  } catch (err) {
-    clearTimers();
-    if (opts?.signal) opts.signal.removeEventListener?.('abort', onExternalAbort);
-    if (timedOut) throw new LlmTimeoutError(timedOut);
-    if (opts?.signal?.aborted) return;             // 用户中止：静默结束，由调用方落盘已累积内容
-    throw new LlmUpstreamError(`上游连接失败：${(err as Error).message}`, true);
-  }
+    if (!resp.body) throw new LlmUpstreamError('上游未返回流式响应体', true);
+    reader = resp.body.getReader();
 
-  if (!resp.ok) {
-    clearTimers();
-    if (opts?.signal) opts.signal.removeEventListener?.('abort', onExternalAbort);
-    const text = await resp.text().catch(() => '');
-    if (looksLikeToolsUnsupported(resp.status, text)) {
-      throw new ToolsUnsupportedError(`上游不支持 function calling（HTTP ${resp.status}）：${truncate(text, 200)}`);
-    }
-    throw mapUpstreamError(resp.status, text);
-  }
-  if (!resp.body) {
-    clearTimers();
-    throw new LlmUpstreamError('上游未返回流式响应体（可能返回了非 SSE JSON 错误体）', true);
-  }
-
-  // ── 逐块解析 SSE ──
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-  let parseFailures = 0;
-
-  /** ★ tool_calls 按 index 累积（首块给 id/name，后续拼 arguments 片段） */
-  const toolAcc = new Map<number, { id: string; name: string; arguments: string }>();
-  let finishReason = 'stop';
-  let usageEmitted: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | null = null;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!sawFirstChunk) {
-        sawFirstChunk = true;
-        if (firstByteTimer) {
-          clearTimeout(firstByteTimer);
-          firstByteTimer = undefined;
-        }
+    // 错误正文同样受整体/首块超时和外部中止保护，且不无限读取错误页面。
+    if (!resp.ok || /application\/(?:[\w.+-]*\+)?json/i.test(resp.headers.get('content-type') ?? '')) {
+      const text = await readBoundedErrorBody(reader, markFirstChunk);
+      if (looksLikeToolsUnsupported(resp.ok ? 400 : resp.status, text)) {
+        throw new ToolsUnsupportedError(`上游不支持 function calling：${truncate(text, 200)}`);
       }
-      buffer += decoder.decode(value, { stream: true });
+      if (!resp.ok) throw mapUpstreamError(resp.status, text);
+      throw new LlmUpstreamError(`上游返回非 SSE JSON 响应：${truncate(text, 200)}`, true);
+    }
 
-      // SSE 以空行分帧；上游可能用 \n\n 或 \r\n\r\n
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let parseFailures = 0;
+    let sawDone = false;
+    const consumeFrame = (frame: string): LlmStreamPart[] => {
+      const payload = extractDataPayload(frame);
+      if (payload === null) return [];
+      if (payload.trim() === '[DONE]') {
+        sawTerminal = true;
+        sawDone = true;
+        return [];
+      }
+      let chunk: UpstreamChunk;
+      try {
+        chunk = JSON.parse(payload) as UpstreamChunk;
+      } catch {
+        parseFailures += 1;
+        if (parseFailures > MAX_PARSE_FAILURES) {
+          throw new LlmUpstreamError(`上游 chunk 连续解析失败超过 ${MAX_PARSE_FAILURES} 次`, false);
+        }
+        return [];
+      }
+      parseFailures = 0;
+      // 显式错误必须在 JSON.parse 的 catch 之外处理，避免被当作可忽略的坏帧。
+      if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) {
+        throw new LlmUpstreamError('上游 chunk 不是合法对象', false);
+      }
+      if (chunk.error != null) {
+        const detail = typeof chunk.error === 'string' ? chunk.error : JSON.stringify(chunk.error);
+        if (looksLikeToolsUnsupported(400, detail)) throw new ToolsUnsupportedError(truncate(detail, 200));
+        throw new LlmUpstreamError(`上游流返回错误：${truncate(detail, 200)}`, true);
+      }
+      const emitted = handleChunk(chunk, toolAcc);
+      if (emitted.finishReason) {
+        finishReason = emitted.finishReason;
+        sawTerminal = true;
+      }
+      if (emitted.usage) usageState.value = emitted.usage;
+      return emitted.parts;
+    };
+
+    while (!sawDone) {
+      const { done, value } = await reader.read();
+      if (!done) markFirstChunk();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
       let sep = findFrameBoundary(buffer);
-      while (sep !== -1) {
+      while (sep !== -1 && !sawDone) {
         const frame = buffer.slice(0, sep.index);
         buffer = buffer.slice(sep.index + sep.length);
-        const payload = extractDataPayload(frame);
-        if (payload !== null) {
-          if (payload === '[DONE]') {
-            // 上游流结束标记
-          } else {
-            try {
-              const chunk = JSON.parse(payload) as UpstreamChunk;
-              const emitted = handleChunk(chunk, toolAcc);
-              for (const part of emitted.parts) yield part;
-              if (emitted.finishReason) finishReason = emitted.finishReason;
-              if (emitted.usage) usageEmitted = emitted.usage;
-            } catch {
-              parseFailures += 1;
-              if (parseFailures > MAX_PARSE_FAILURES) {
-                throw new LlmUpstreamError(
-                  `上游 chunk 连续解析失败超过 ${MAX_PARSE_FAILURES} 次（可能返回了非 SSE 内容）`,
-                  false,
-                );
-              }
-            }
-          }
-        }
+        for (const part of consumeFrame(frame)) yield part;
         sep = findFrameBoundary(buffer);
       }
+      if (done) {
+        // 兼容终帧未带空行的上游；UTF-8 decoder 也必须 flush。
+        if (!sawDone && buffer.trim()) {
+          for (const part of consumeFrame(buffer)) yield part;
+        }
+        break;
+      }
+    }
+    if (!sawTerminal) {
+      throw new LlmUpstreamError('上游流提前结束：未收到 finish_reason 或 [DONE]', true);
     }
   } catch (err) {
-    clearTimers();
-    if (opts?.signal) opts.signal.removeEventListener?.('abort', onExternalAbort);
-    if (err instanceof LlmUpstreamError) throw err;
-    if (err instanceof ToolsUnsupportedError) throw err;
     if (timedOut) throw new LlmTimeoutError(timedOut);
-    if (opts?.signal?.aborted || local.signal.aborted) {
-      // 中止：把已累积的 tool_calls 交出去，内容由调用方落盘为 aborted:true
+    if (opts?.signal?.aborted) {
       if (toolAcc.size > 0) yield { type: 'tool_calls', calls: sortedCalls(toolAcc) };
       return;
     }
-    throw new LlmUpstreamError(`读取上游流失败：${(err as Error).message}`, true);
+    if (err instanceof LlmUpstreamError || err instanceof ToolsUnsupportedError) throw err;
+    throw new LlmUpstreamError(`上游请求失败：${(err as Error).message}`, true);
   } finally {
     clearTimers();
-    if (opts?.signal) opts.signal.removeEventListener?.('abort', onExternalAbort);
+    if (opts?.signal) opts.signal.removeEventListener('abort', onExternalAbort);
+    // 包括 DONE 后上游仍保持连接、消费方提前 return 和异常解析的路径。
+    local.abort();
+    if (reader) {
+      try { await reader.cancel(); } catch { /* 已中止/关闭的 reader 无须重复报错 */ }
+      reader.releaseLock();
+    }
   }
 
   // 回合结束：先补发已累积的 tool_calls，再给 done
@@ -380,12 +394,30 @@ export async function* streamChat(
     // finish_reason 由上游给出（通常 'tool_calls'）；若上游缺省则按有工具调用判定
     if (finishReason === 'stop') finishReason = 'tool_calls';
   }
-  if (usageEmitted) yield { type: 'usage', ...usageEmitted };
+  if (usageState.value) yield { type: 'usage', ...usageState.value };
   yield { type: 'done', finishReason };
+}
+
+/** 错误体最多读取 16 KiB；异常页可能很大或持续输出，不能阻塞错误收尾。 */
+async function readBoundedErrorBody(reader: ReadableStreamDefaultReader<Uint8Array>, onChunk: () => void): Promise<string> {
+  const decoder = new TextDecoder('utf-8');
+  const limit = 16 * 1024;
+  let bytes = 0;
+  let text = '';
+  while (bytes < limit) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onChunk();
+    const part = value.subarray(0, limit - bytes);
+    bytes += part.byteLength;
+    text += decoder.decode(part, { stream: true });
+  }
+  return text + decoder.decode();
 }
 
 /** 上游 chunk 的最小形状（只声明用到的字段） */
 interface UpstreamChunk {
+  error?: unknown;
   choices?: Array<{
     delta?: {
       content?: string | null;

@@ -89,7 +89,7 @@ export type DegradedReason = 'tools-unsupported' | 'retrieval-unavailable' | 'se
 export type RetrievalMode = 'fulltext' | 'hybrid';
 
 export type ChatEvent =
-  | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number }
+  | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
   | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string }
   | { type: 'sources'; sources: SourceRef[] }

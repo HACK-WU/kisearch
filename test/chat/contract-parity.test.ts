@@ -48,6 +48,9 @@ function extractTypeUnion(src: string, name: string): string[] {
 }
 
 describe('契约对齐 · SSE 事件协议', () => {
+  it('meta 两侧都携带可选的已提交 userMessageId，失败/停止无需推算或重取 id', () => {
+    for (const p of [BACK, FRONT]) assert.match(read(p), /type: 'meta';[^\n]+userMessageId\?: string/);
+  });
   it('CHAT_EVENT_TYPES 两侧完全一致（11 类事件）', () => {
     const b = extractStringArray(read(BACK), 'CHAT_EVENT_TYPES');
     const f = extractStringArray(read(FRONT), 'CHAT_EVENT_TYPES');

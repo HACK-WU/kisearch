@@ -212,6 +212,13 @@ function requireScope(ctx: ChatRouteContext, scope: string, via: string, res: Se
   return true;
 }
 
+/** 全局配置（包括内容外发确认）只能由本地或全局授权身份写入。 */
+function requireGlobalConfigWrite(res: ServerResponse, ctx: ChatRouteContext): boolean {
+  if (ctx.authScopes === null || ctx.authScopes.includes(ALL_SCOPES)) return true;
+  sendErr(res, 403, 'SCOPE_FORBIDDEN', 'Forbidden: 无权修改全局对话配置');
+  return false;
+}
+
 /**
  * ★ P2：按 `:id` 定位会话 —— **只在授权 scope 内遍历**，越权一律 403（不 404）。
  *
@@ -330,6 +337,7 @@ export async function handleChatRoutes(
     }
     // ── API-13 POST /api/chat/config/ack ──
     if (segs.length === 2 && segs[0] === 'config' && segs[1] === 'ack' && method === 'POST') {
+      if (!requireGlobalConfigWrite(res, ctx)) return true;
       await handleConfigAck(req, res);
       return true;
     }
@@ -550,6 +558,7 @@ export async function handlePromptConfigPut(
   res: ServerResponse,
   ctx: ChatRouteContext,
 ): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
   const cfg = snapshotConfig(ctx);
   const body = await readJsonBody(req);
   let saved: ReturnType<typeof savePromptConfig>;
@@ -891,12 +900,28 @@ interface GenerationSpec {
  * ⚠️ 响应头在**前置写成功之后**才发（流建立前的错误仍能以 HTTP 状态表达）。
  */
 async function runGeneration(
-  req: IncomingMessage,
+  _req: IncomingMessage,
   res: ServerResponse,
   spec: GenerationSpec,
 ): Promise<void> {
   const { scope, convId, mode } = spec;
+  // 资格的检查与登记之间不能 await；覆盖前置写、生成与落盘的完整生命周期。
+  if (generating.has(convId)) {
+    sendErr(res, 409, CHAT_ERROR_CODES.CONVERSATION_GENERATING, '该会话正在生成中，请先停止或等待完成');
+    return;
+  }
+  generating.add(convId);
+  const ac = new AbortController();
+  const onResponseClose = (): void => {
+    if (!res.writableEnded) ac.abort();
+  };
+  res.once('close', onResponseClose);
+  if (res.destroyed) ac.abort();
+
+  try {
   let discardedCount: number | undefined;
+  let userText = spec.userText;
+  let replaceAnswer = false;
 
   // ── ① 锁内前置写（锁随本次 RMW 结束即释放，生成不持锁）──
   let convAfterPrep: ConversationFile | null = null;
@@ -914,16 +939,23 @@ async function runGeneration(
     discardedCount = r.discardedCount;
     convAfterPrep = r.conv;
   } else {
-    // regenerate：不新增 user 消息（R23），仅读取当前态
-    convAfterPrep = await readConversation(scope, convId);
+    // 磁盘旧答保留到提交；上游上下文只保留到本轮 user，防止旧答污染。
+    const current = await readConversation(scope, convId);
+    if (current) {
+      let lastUserIndex = current.messages.length - 1;
+      while (lastUserIndex >= 0 && current.messages[lastUserIndex]!.role !== 'user') lastUserIndex -= 1;
+      if (lastUserIndex < 0) {
+        throw new ChatApiError(400, CHAT_ERROR_CODES.CONVERSATION_INVALID, '会话无可重新生成的对象（无 user 消息）');
+      }
+      userText = current.messages[lastUserIndex]!.content;
+      replaceAnswer = current.messages.at(-1)?.role === 'assistant';
+      convAfterPrep = { ...current, messages: current.messages.slice(0, lastUserIndex + 1) };
+    }
   }
 
   if (!convAfterPrep) {
     throw new ConversationNotFoundError(convId);
   }
-
-  // 标记生成中（P5：同会话互斥）—— 必须在 SSE 建立前登记，避免并发请求挤入
-  generating.add(convId);
 
   // ── ② 建立 SSE 响应（此后错误只能以事件下发）──
   res.writeHead(200, {
@@ -933,12 +965,6 @@ async function runGeneration(
     'X-Accel-Buffering': 'no',
   });
 
-  const ac = new AbortController();
-  req.on('close', () => ac.abort());
-
-  // ★ 无论走哪条退出路径（正常/中止/错误/抛异常）都必须清除生成标记，
-  //   否则该会话会永久卡在 409 CONVERSATION_GENERATING（P5）。
-  try {
   const t0 = Date.now();
   let content = '';
   let usage: ChatMessage['usage'];
@@ -961,7 +987,7 @@ async function runGeneration(
     const events = runToolLoop({
       scope,
       conv: convAfterPrep,
-      userText: spec.userText,
+      userText,
       convSystemPrompt: convAfterPrep.systemPrompt,
       signal: ac.signal,
     });
@@ -970,7 +996,11 @@ async function runGeneration(
       // meta 补 discardedCount（API-12 契约：仅编辑重发时带）
       if (ev.type === 'meta') {
         messageId = ev.messageId;
-        writeSseEvent(res, discardedCount !== undefined ? { ...ev, discardedCount } : ev);
+        writeSseEvent(res, {
+          ...ev,
+          userMessageId: convAfterPrep.messages.at(-1)?.id,
+          ...(discardedCount !== undefined ? { discardedCount } : {}),
+        });
         continue;
       }
       if (ev.type === 'reasoning') { writeSseEvent(res, ev); continue; }
@@ -1036,7 +1066,9 @@ async function runGeneration(
       }
     }
   } catch (err) {
-    if (!ac.signal.aborted) {
+    if (ac.signal.aborted) {
+      abortedFlag = true;
+    } else {
       streamError = mapThrowToStreamError(err);
       // ★ 必打事件 ① 上游调用失败（§1.3）：异常路径同样落日志
       //   上游 HTTP 状态若在错误对象上则一并记录（契约要求"含 HTTP 状态"）
@@ -1061,9 +1093,12 @@ async function runGeneration(
     } else if (abortedFlag) {
       // 中止：**content 为空则不落盘**（避免空气泡污染会话与列表预览，S02 §5）
       if (content.trim().length > 0) {
-        const saved = await appendMessage(scope, convId, buildAssistantMessage({
+        const partial = buildAssistantMessage({
           content, sources, usage, finishReason: 'aborted', aborted: true, totalMs, progress,
-        }));
+        });
+        const saved = replaceAnswer
+          ? await replaceLastAssistant(scope, convId, partial)
+          : await appendMessage(scope, convId, partial);
         const savedId = saved.messages.at(-1)?.id ?? messageId ?? '';
         writeSseEvent(res, { type: 'aborted', messageId: savedId });
       } else {
@@ -1082,7 +1117,7 @@ async function runGeneration(
       //     若此处仍走 `replaceLastAssistant`，它会从**更早那条 assistant**（如 a1）起
       //     截断到末尾 → 把刚保留的 u' 一并删除（P0：用户消息静默消失，实测 [u1,a1,u2] → [u1,a2]）
       //     → **必须 append**。
-      const saved = mode === 'regenerate'
+      const saved = replaceAnswer
         ? await replaceLastAssistant(scope, convId, assistant)
         : await appendMessage(scope, convId, assistant);
 
@@ -1122,7 +1157,8 @@ async function runGeneration(
 
   res.end();
   } finally {
-    // ★ P5 释放：所有退出路径都清标记
+    // 包含前置落盘失败、客户端断开等退出路径。
+    res.off('close', onResponseClose);
     generating.delete(convId);
   }
 }

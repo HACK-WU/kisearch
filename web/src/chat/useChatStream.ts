@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
+import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
 import type { ChatEvent } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
@@ -46,6 +46,8 @@ export interface StreamError {
   code: string;
   message: string;
   retryable: boolean;
+  /** False means the request failed before server prep was confirmed. */
+  accepted?: boolean;
 }
 
 /**
@@ -107,6 +109,9 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       ctrl: AbortController,
       makeStream: (signal: AbortSignal) => AsyncGenerator<ChatEvent>,
       mySeq: number,
+      onMeta?: () => void,
+      replacingId?: string,
+      optimisticUserId?: string,
     ): Promise<boolean> => {
       let finishReason: string | undefined;
       let abortedEvent = false;
@@ -119,11 +124,34 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
        */
       let sawDone = false;
 
-      errorsByConv.delete(convId);
+      const isCurrent = () => seqRef.current === mySeq &&
+        store.getState().activeConvId === convId && store.getState().streaming.seq === mySeq;
+      let sawTerminal = false;
+      let sawMeta = false;
+      let requestRejected = false;
 
       try {
         for await (const ev of makeStream(ctrl.signal)) {
-          applyEvent(store, ev, mySeq);
+          // Aborting fetch does not discard frames already decoded into the generator buffer.
+          if (!isCurrent() || ctrl.signal.aborted) break;
+          if (ev.type === 'meta') {
+            sawMeta = true;
+            onMeta?.();
+            if (optimisticUserId && ev.userMessageId) {
+              store.dispatch({ type: 'setMessages', messages: store.getState().messages.map((m) =>
+                m.id === optimisticUserId ? { ...m, id: ev.userMessageId! } : m) });
+            }
+            // Coordinate only the accepted optimistic user, never overwrite assistant/stream buffers.
+            if (optimisticUserId && !ev.userMessageId) void getConversation(convId).then(({ conv }) => {
+              if (seqRef.current !== mySeq || store.getState().activeConvId !== convId) return;
+              const user = conv.messages.filter((m) => m.role === 'user').at(-1);
+              if (!user) return;
+              const messages = store.getState().messages;
+              const idx = messages.findIndex((m) => m.id === optimisticUserId && m.content === user.content);
+              if (idx >= 0) store.dispatch({ type: 'setMessages', messages: messages.map((m, i) => i === idx ? user : m) });
+            }).catch(() => { /* Keep local content; a later reload can reconcile user ids. */ });
+          }
+          applyEvent(store, ev, mySeq, replacingId);
 
           if (ev.type === 'done') {
             finishReason = ev.finishReason;
@@ -138,19 +166,29 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
               code: ev.code,
               message: ev.error,
               retryable: ev.retryable !== false,
+              accepted: sawMeta,
             });
           }
 
           // `done` / `aborted` / `error` 是终态事件：收到即结束本轮
-          if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') break;
+          if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') {
+            sawTerminal = true;
+            break;
+          }
+        }
+        if (isCurrent() && !ctrl.signal.aborted && !sawTerminal) {
+          errorsByConv.set(convId, { code: 'STREAM_INTERRUPTED', message: '连接中断，回答尚未保存，请重试', retryable: true, accepted: sawMeta });
         }
       } catch (err) {
+        const status = (err as { status?: number })?.status;
+        requestRejected = typeof status === 'number' && status >= 400 && status < 500;
         // §5 流中断：保留已渲染内容 + 标记「连接中断」+ 给重试入口（N4）
-        if (!ctrl.signal.aborted) {
+        if (isCurrent() && !ctrl.signal.aborted) {
           errorsByConv.set(convId, {
             code: 'STREAM_INTERRUPTED',
             message: err instanceof Error ? err.message : '连接中断，请重试',
             retryable: true,
+            accepted: sawMeta,
           });
         }
       } finally {
@@ -164,8 +202,18 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
         //      streaming 重置为初始态（messageId=null），新流后续 content 收尾时被整段丢弃。
         //   ② store 令牌：切会话会把 streaming 重置为 `seq: undefined`，
         //      此时这条流的收尾动作（含下面的 aborted 标记）不得再落到新会话的状态上。
-        const stillCurrent = seqRef.current === mySeq && store.getState().streaming.seq === mySeq;
+        const stillCurrent = isCurrent();
         if (!stillCurrent) return false;
+
+        if (errorsByConv.has(convId)) store.dispatch({ type: 'streamFailed' });
+        if (!sawMeta && optimisticUserId) {
+          const failure = errorsByConv.get(convId);
+          errorsByConv.set(convId, requestRejected && failure
+            ? { ...failure, retryable: false, accepted: false }
+            : { code: 'REQUEST_UNCONFIRMED', message: '提问保存状态待确认，请重新打开会话核对', retryable: false, accepted: false });
+          // A lost response is not proof that prep failed: do not silently remove an accepted user.
+          if (requestRejected) store.dispatch({ type: 'setMessages', messages: store.getState().messages.filter((m) => m.id !== optimisticUserId) });
+        }
 
         // N6 兜底：用户主动中止但 `aborted` 事件未达（如中途网络中断）→ 在此补标记，
         //   保证「已中止」与「正常完成」在 UI 上可区分。
@@ -183,12 +231,13 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
 
   /** 统一入口：先 abort 旧流（单写者），再起新流 */
   const run = useCallback(
-    (convId: string, messageId: string, makeStream: (signal: AbortSignal) => AsyncGenerator<ChatEvent>) => {
+    (convId: string, messageId: string, makeStream: (signal: AbortSignal) => AsyncGenerator<ChatEvent>, onMeta?: () => void, replacingId?: string, optimisticUserId?: string) => {
       // ★ 先取令牌：流内所有动作（`streamStart` 与最终 `streamEnd`）都要带上它，
       //   `streamEnd` 会据此校验"只有当前流能收尾"（见 seqRef 注释）
       const mySeq = ++seqRef.current;
       // 单写者：新流开始前必须中止旧流（切会话 / 重新生成 / 编辑重发均适用）
-      store.dispatch({ type: 'streamStart', messageId, seq: mySeq, at: new Date().toISOString() });
+      errorsByConv.delete(convId);
+      store.dispatch({ type: 'streamStart', messageId, seq: mySeq, replacingId, at: new Date().toISOString() });
       const prev = ctrlRef.current;
       if (prev) {
         abortedRef.current.add(prev);
@@ -196,7 +245,7 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       }
       const ctrl = new AbortController();
       ctrlRef.current = ctrl;
-      return consume(convId, ctrl, makeStream, mySeq);
+      return consume(convId, ctrl, makeStream, mySeq, onMeta, replacingId, optimisticUserId);
     },
     [consume, store],
   );
@@ -217,15 +266,27 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
             { id: `local-user-${placeholder}`, role: 'user', content: text, at: new Date().toISOString() },
           ],
         });
-        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal));
+        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal), undefined, undefined, `local-user-${placeholder}`);
       },
 
       async regenerate(convId: string): Promise<boolean> {
-        return run(convId, tempId(), (signal) => streamRegenerate(convId, signal));
+        const current = store.getState().messages;
+        const messages = current.some((m) => m.id.startsWith('local-assistant-'))
+          ? current.filter((m) => !m.id.startsWith('local-assistant-')) : current;
+        if (messages !== current) store.dispatch({ type: 'setMessages', messages });
+        const last = messages[messages.length - 1];
+        return run(convId, tempId(), (signal) => streamRegenerate(convId, signal), undefined, last?.role === 'assistant' ? last.id : undefined);
       },
 
       async editAndResend(convId: string, msgId: string, text: string): Promise<boolean> {
-        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal));
+        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal), () => {
+          // meta is emitted only after the server commits the edit/truncation.
+          const messages = store.getState().messages;
+          const idx = messages.findIndex((m) => m.id === msgId && m.role === 'user');
+          if (idx >= 0) store.dispatch({ type: 'setMessages', messages: [
+            ...messages.slice(0, idx), { ...messages[idx]!, content: text },
+          ] });
+        });
       },
 
       abort(): void {
@@ -252,12 +313,12 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
  * 拆成独立纯函数：事件分派表是本 hook 的核心知识，独立后可被直接阅读与（未来）单测，
  * 不必经过 React 渲染或网络环境。
  */
-function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number): void {
+function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?: string): void {
   switch (ev.type) {
     case 'meta':
       // `meta` 给出真实 messageId 与（API-12）被丢弃轮数；重置为后端 id
       // ★ 必须带上令牌：否则 `streaming.seq` 会被清成 undefined，收尾守门随即失效
-      store.dispatch({ type: 'streamStart', messageId: ev.messageId, seq: mySeq });
+      store.dispatch({ type: 'streamStart', messageId: ev.messageId, seq: mySeq, replacingId });
       return;
 
     case 'tool_start':
@@ -297,7 +358,7 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number): void {
       //   不校正会让本地消息 id 与磁盘不一致（重取/刷新后错位、来源引用挂不上去）。
       if (ev.messageId) store.dispatch({ type: 'streamMessageId', messageId: ev.messageId });
       // `done.sources` 是落盘来源的权威副本（`sources` 事件可能因故未达）
-      if (ev.sources && ev.sources.length > 0) {
+      if (ev.sources) {
         store.dispatch({ type: 'streamSources', sources: ev.sources });
       }
       // `done.warning` 必须落地：它是"本轮回答可能不完整"的唯一通道（S03 §5）

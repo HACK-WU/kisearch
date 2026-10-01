@@ -93,6 +93,9 @@ describe('GET /api/chat/prompt-config', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json?.ok, true);
     assert.deepEqual(r.json?.config, r.json?.defaults, '未配置时 config 应等于内置默认');
+    const config = r.json?.config as { prompt: { content: string }; skills: Array<{ content: string }> };
+    assert.ok(config.prompt.content.trim().length > 0, '基础规则必须在编辑器中可见');
+    assert.ok(config.skills[0].content.length > 1000, '返回场景检索 skill，而非旧的简短模板');
     assert.equal(r.json?.issue, null);
     assert.ok(!fs.existsSync(configFile()), '读接口不得创建配置文件');
   });
@@ -229,7 +232,7 @@ describe('PUT /api/chat/prompt-config', () => {
     const def = got.json?.defaults as typeof cfg;
     // 注意：不能整体 deepEqual —— `at` 由服务端打本次写入时间（有意区分"改过"与"没改过"），
     // 前端「恢复默认」的判定也应比较内容而不是整对象（口径见 plan.md 决策 #7）。
-    assert.equal(cfg.prompt.content, def.prompt.content, '基础提示词应回到默认（空）');
+    assert.equal(cfg.prompt.content, def.prompt.content, '基础提示词应回到当前默认规则');
     assert.deepEqual(cfg.skills.map((s) => [s.id, s.content]), def.skills.map((s) => [s.id, s.content]));
     assert.deepEqual(cfg.tools, def.tools, '工具开关应回到默认（只读开、写删关）');
   });

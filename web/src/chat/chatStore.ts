@@ -29,9 +29,11 @@ export type ProgressStep =
    */
   | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; hits?: number; durationMs?: number; error?: string;
       /** interleave 锚点：本步发生时已发出的正文字符数（reducer 统一捕获，渲染方不必传） */
-      afterChars?: number }
+      afterChars?: number; order?: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'answering' };
+
+export interface ReasoningSegment { afterChars: number; text: string; closed: boolean; order?: number }
 
 /** 降级标记（**必须可见，不得静默** —— N17） */
 export interface DegradedMark {
@@ -43,6 +45,7 @@ export interface DegradedMark {
 export interface StreamingState {
   /** 是否正在生成 */
   active: boolean;
+  failed?: boolean;
   /**
    * 本轮流序号（由 `useChatStream` 的令牌注入，`streamStart` 时写入）。
    *
@@ -54,6 +57,8 @@ export interface StreamingState {
   seq: number | undefined;
   /** 本次 assistant 消息 id（`meta` 事件给出） */
   messageId: string | null;
+  /** Existing answer hidden while regenerating; retained if no replacement content arrives. */
+  replacingId?: string;
   /**
    * 本轮开始时间（ISO）。流式气泡在消息列表里以**虚拟消息**渲染（与完成态同一组件），
    * 时间戳用它 → 收尾后由 finalizeStream 的落盘时间接管，同一分钟内显示不变。
@@ -69,7 +74,7 @@ export interface StreamingState {
    * 之后的思考是新一段（afterChars = 封段前已发出的正文长度）。
    * 与 `reasoning` 并存：`reasoning` 保持全量串（"正在思考"判据等既有语义不变）。
    */
-  reasoningSegs: Array<{ afterChars: number; text: string; closed: boolean }>;
+  reasoningSegs: ReasoningSegment[];
   /** 工具步骤 + 生成中状态（R11a：每一秒都要有可见反馈） */
   progress: ProgressStep[];
   /** 降级标记 */
@@ -183,7 +188,7 @@ export type ChatAction =
   | { type: 'setActiveConv'; convId: string | null }
   | { type: 'setMessages'; messages: ChatMessage[] }
   /** `seq`：本轮流序号（可选，见 `StreamingState.seq`）；`at`：本轮开始时间（调用方注入，reducer 保持纯净） */
-  | { type: 'streamStart'; messageId: string; seq?: number; at?: string }
+  | { type: 'streamStart'; messageId: string; seq?: number; at?: string; replacingId?: string }
   | { type: 'streamContent'; text: string }
   | { type: 'streamReasoning'; text: string }
   | { type: 'streamProgress'; step: ProgressStep }
@@ -191,6 +196,7 @@ export type ChatAction =
   | { type: 'streamSources'; sources: SourceRef[] }
   /** 本轮被中止（收到 `aborted` 事件，或用户 abort 而事件未达）→ 收尾时写进消息标记（N6） */
   | { type: 'streamAborted' }
+  | { type: 'streamFailed' }
   /**
    * 校正本轮 assistant 消息 id（`done` / `aborted` 事件携带**服务端落盘后的真实 id**）。
    * `meta` 给的是预估值，与落盘后的 `m{seq}` 可能不同 → 不校正会造成本地/磁盘 id 错位。
@@ -262,6 +268,7 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
           active: true,
           seq: action.seq,
           messageId: action.messageId,
+          replacingId: action.replacingId,
           // meta 事件会再次 streamStart 校正 id：已开始的轮保留原开始时间（时间戳不跳）
           startedAt: state.streaming.active && state.streaming.startedAt
             ? state.streaming.startedAt
@@ -297,7 +304,7 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         streaming: {
           ...state.streaming,
           reasoning: state.streaming.reasoning + action.text,
-          reasoningSegs: appendReasoningSeg(state.streaming.reasoningSegs, action.text, state.streaming.content.length),
+          reasoningSegs: appendReasoningSeg(state.streaming.reasoningSegs, action.text, state.streaming.content.length, state.streaming.progress.length + state.streaming.reasoningSegs.length),
         },
       };
 
@@ -312,7 +319,7 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
           progress: [
             ...state.streaming.progress,
             action.step.kind === 'tool'
-              ? { ...action.step, afterChars: state.streaming.content.length }
+              ? { ...action.step, afterChars: state.streaming.content.length, order: state.streaming.progress.length + state.streaming.reasoningSegs.length }
               : action.step,
           ],
           // 工具调用发生 → 同样封当前思考段（调用后的思考是新一段）
@@ -337,6 +344,9 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         streaming: { ...state.streaming, sources: action.sources },
         messages: attachSources(state.messages, state.streaming.messageId, action.sources),
       };
+
+    case 'streamFailed':
+      return { ...state, streaming: { ...state.streaming, failed: true } };
 
     case 'streamAborted':
       // N6：把"本轮被中止"记进累积态 → 收尾时随消息一起落进 `ChatMessage.aborted`
@@ -394,7 +404,7 @@ function retainDegraded(
   const { degraded, messageId, content } = streaming;
   // 无内容 → `finalizeStream` 不会产生消息，标记无处可挂
   if (!degraded || !messageId || !content) return prev;
-  return { ...prev, [messageId]: degraded };
+  return { ...prev, [streaming.failed && !streaming.aborted ? `local-assistant-${messageId}-${streaming.seq ?? 0}` : messageId]: degraded };
 }
 
 /** reasoning 增量续段：尾段未封 → 追加；否则以当前正文长度为锚起新段 */
@@ -402,12 +412,13 @@ function appendReasoningSeg(
   segs: StreamingState['reasoningSegs'],
   text: string,
   afterChars: number,
+  order: number,
 ): StreamingState['reasoningSegs'] {
   const last = segs[segs.length - 1];
   if (last && !last.closed) {
     return [...segs.slice(0, -1), { ...last, text: last.text + text }];
   }
-  return [...segs, { afterChars, text, closed: false }];
+  return [...segs, { afterChars, text, closed: false, order }];
 }
 
 /** 正文输出 / 工具调用发生时封住尾段（之后的 reasoning 属于新锚点） */
@@ -431,7 +442,7 @@ function retainProgress(
 ): Record<string, ProgressStep[]> {
   const { progress, messageId, content } = streaming;
   if (!progress.length || !messageId || !content) return prev;
-  return { ...prev, [messageId]: progress };
+  return { ...prev, [streaming.failed && !streaming.aborted ? `local-assistant-${messageId}-${streaming.seq ?? 0}` : messageId]: progress };
 }
 
 /**
@@ -448,7 +459,7 @@ function retainReasoningSegs(
   if (!reasoningSegs.length || !messageId || !content) return prev;
   return {
     ...prev,
-    [messageId]: reasoningSegs.map((s) => ({ ...s, closed: true })),
+    [streaming.failed && !streaming.aborted ? `local-assistant-${messageId}-${streaming.seq ?? 0}` : messageId]: reasoningSegs.map((s) => ({ ...s, closed: true })),
   };
 }
 
@@ -469,7 +480,7 @@ function attachSources(
  * 把合并做成纯函数可以让"先关面板再结束"与"一直开着"走完全相同的代码路径。
  */
 function finalizeStream(messages: ChatMessage[], streaming: StreamingState): ChatMessage[] {
-  const { messageId, content, sources, aborted } = streaming;
+  const { messageId, content, sources, aborted, failed } = streaming;
   // 无内容 → 不新增消息（对齐 messages.md：中止且 content 为空时不落盘空气泡）
   if (!content) return messages;
   if (!messageId) return messages;
@@ -477,13 +488,18 @@ function finalizeStream(messages: ChatMessage[], streaming: StreamingState): Cha
   // 来源引用随消息一起并入（★ 否则 sources 事件的内容会在收尾时丢失，R20 失效）
   const merged: SourceRef[] | undefined = sources.length > 0 ? sources : undefined;
 
-  const existing = messages.findIndex((m) => m.id === messageId);
+  // Error content is useful evidence, but is not part of the persisted conversation memory.
+  const localOnly = failed && !aborted;
+  const finalId = localOnly ? `local-assistant-${messageId}-${streaming.seq ?? 0}` : messageId;
+  const existing = localOnly ? -1 : messages.findIndex((m) => m.id === messageId || m.id === streaming.replacingId);
   if (existing >= 0) {
     // 重新生成：替换原 assistant 消息内容（来源与中止标记同步覆盖）
     const next = messages.slice();
     next[existing] = {
-      ...next[existing]!,
+      id: messageId,
+      role: 'assistant',
       content,
+      at: streaming.startedAt ?? new Date().toISOString(),
       aborted,
       ...(merged ? { sources: merged } : {}),
     };
@@ -493,7 +509,7 @@ function finalizeStream(messages: ChatMessage[], streaming: StreamingState): Cha
   return [
     ...messages,
     {
-      id: messageId,
+      id: finalId,
       role: 'assistant',
       content,
       at: new Date().toISOString(),

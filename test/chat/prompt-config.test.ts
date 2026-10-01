@@ -1,9 +1,7 @@
 /**
  * prompt-config 单测（对话配置层 · 批次 1）
  *
- * ★ 本文件最重要的用例是「兼容性」组：拿**新注入路径**（promptConfigSystemBlocks）
- *   与**既有实现**（retrieval-skill.buildSystemMessages）做逐字比对 ——
- *   未配置时二者必须完全一致，否则就是在"加功能"的同时静默改了线上行为。
+ * 验证页面默认值与模型 system 注入同源，并保留已保存的用户内容与空值。
  *
  * 其余覆盖：默认值 / 读写往返 / 校验（超长·未知名·内置不可删·重复）/
  *          服务端强制 builtin / 损坏文件回退 / 原子写保留权限 / 注入顺序。
@@ -19,6 +17,7 @@ import {
   MAX_SKILLS,
   MCP_TOOL_NAMES,
   PROMPT_MAX_CHARS,
+  SKILL_MAX_CHARS,
   PromptConfigError,
   defaultPromptConfig,
   normalizePromptConfig,
@@ -27,7 +26,7 @@ import {
   readPromptConfig,
   savePromptConfig,
 } from '../../src/lib/chat/prompt-config.js';
-import { RETRIEVAL_SKILL_PROMPT, buildSystemMessages } from '../../src/lib/chat/retrieval/retrieval-skill.js';
+import { DEFAULT_CHAT_PROMPT, RETRIEVAL_SKILL_PROMPT, buildSystemMessages } from '../../src/lib/chat/retrieval/retrieval-skill.js';
 import type { KiConfig } from '../../src/lib/config.js';
 
 let root = '';
@@ -45,15 +44,15 @@ after(() => {
 
 // ─────────────────────────────────────────────────────────────
 
-describe('兼容性（★ 未配置时行为逐字一致）', () => {
-  it('默认配置的注入块 === 既有 buildSystemMessages 的 system 内容（逐字）', () => {
+describe('默认内容同源', () => {
+  it('配置默认值与 buildSystemMessages 默认值相同', () => {
     const legacy = buildSystemMessages('').map((m) => m.content);
     assert.deepEqual(
       promptConfigSystemBlocks(defaultPromptConfig()),
       legacy,
-      '未配置时注入块必须与既有实现逐字一致',
+      '配置页面与上游注入必须使用同一份默认内容',
     );
-    assert.deepEqual(legacy, [RETRIEVAL_SKILL_PROMPT], '前置：既有实现只发内置检索 skill 一段');
+    assert.deepEqual(legacy, [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]);
   });
 
   it('会话 prompt 非空时：新路径 = 注入块 + 会话 prompt（顺序不变）', () => {
@@ -87,12 +86,30 @@ describe('默认值', () => {
     assert.ok(MCP_TOOL_NAMES.includes('ki_bulk_sync_relation'));
   });
 
-  it('默认基础提示词为空（现在没有这条配置，默认也不该多注入一段）', () => {
-    assert.equal(defaultPromptConfig().prompt.content, '');
+  it('基础规则和场景 skill 均非空，且可在配置编辑器中保存', () => {
+    const defaults = defaultPromptConfig();
+    assert.equal(defaults.prompt.content, DEFAULT_CHAT_PROMPT);
+    assert.ok(DEFAULT_CHAT_PROMPT.trim().length > 0 && DEFAULT_CHAT_PROMPT.length <= PROMPT_MAX_CHARS);
+    assert.ok(RETRIEVAL_SKILL_PROMPT.length <= SKILL_MAX_CHARS);
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig(defaults, issues);
+    assert.deepEqual(issues, []);
   });
 });
 
 describe('读写往返', () => {
+  it('已有配置：有意清空基础提示词、自定义内置 skill、禁用状态与其他 skill 不被新默认覆盖', () => {
+    const input = defaultPromptConfig();
+    input.prompt.content = '';
+    input.skills[0]!.content = '用户自己写的检索策略';
+    input.skills[0]!.enabled = false;
+    input.skills.push({ id: 'custom', name: '自定义', content: '保留我的风格', builtin: false, enabled: true, at: input.prompt.at });
+    const saved = savePromptConfig(cfg, input);
+    const read = readPromptConfig(cfg).config;
+    assert.deepEqual(read, saved);
+    assert.deepEqual(promptConfigSystemBlocks(read), ['保留我的风格']);
+  });
+
   it('save → read 内容一致；落盘路径为 {chatDir}/prompt-config.json', () => {
     const input = {
       prompt: { content: '你是 kisearch 的知识库助手。' },
@@ -250,7 +267,7 @@ describe('注入顺序', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('接入后：buildSystemMessages 使用配置产出的注入块（工作项 3）', () => {
-  it('未配置（默认配置）→ 与既有单参调用**逐字一致**（护栏 #3）', () => {
+  it('未配置（默认配置）→ 与默认单参调用逐字一致', () => {
     const legacy = buildSystemMessages('会话提示');
     const wired = buildSystemMessages('会话提示', promptConfigSystemBlocks(defaultPromptConfig()));
     assert.deepEqual(wired, legacy, '接入配置层后，未配置时的上游 messages 必须一字不差');
@@ -277,7 +294,7 @@ describe('接入后：buildSystemMessages 使用配置产出的注入块（工�
       { id: 'off', name: '停用', content: '不该出现', builtin: false, enabled: false, at: cfg.prompt.at },
       { id: 'blank', name: '空白', content: '   ', builtin: false, enabled: true, at: cfg.prompt.at },
     );
-    assert.deepEqual(buildSystemMessages('', promptConfigSystemBlocks(cfg)).map((m) => m.content), [RETRIEVAL_SKILL_PROMPT]);
+    assert.deepEqual(buildSystemMessages('', promptConfigSystemBlocks(cfg)).map((m) => m.content), [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]);
   });
 
   it('显式传空块数组 → 只剩会话 prompt（调用方保留"清空注入"的能力）', () => {

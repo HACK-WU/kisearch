@@ -8,7 +8,7 @@
  * 数据流：`usePromptConfig` 拉配置 → 层内持有**草稿** → 底栏「保存」整体替换提交。
  * 因此「取消」= 直接关闭并丢弃草稿，天然是回滚（无需快照对比）。
  *
- * ⚠️ 工具开关**本批只存不生效**：界面上必须标注「批次 2 生效」，不得让用户以为已经生效。
+ * ⚠️ 工具开关**本批只存不生效**：界面上必须标注「尚未接入」，不得让用户以为已经生效。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -199,9 +199,9 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 工具与权限
-                <em className="ki-chat-cfg__badge">批次 2 生效</em>
+                <em className="ki-chat-cfg__badge">尚未接入</em>
               </span>
-              <p className="ki-chat-cfg__hint">本批只保存开关，工具在下一批才暴露给 AI。</p>
+              <p className="ki-chat-cfg__hint">这里只保存工具偏好；当前 AI 仅使用知识库检索，尚未接入这些工具权限。</p>
               {toolEntries.map((g) => (
                 <div key={g.key}>
                   <p className={`ki-chat-cfg__group${g.danger ? ' ki-chat-cfg__group--danger' : ''}`}>
@@ -230,7 +230,7 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
                           if (next && g.danger) {
                             setConfirm({
                               title: '开启危险工具',
-                              text: `${r.name} 会改动当前 scope 的知识库内容。本批尚未生效，此处仅记录开关。`,
+                              text: `${r.name} 会改动当前 scope 的知识库内容。当前尚未接入，此处仅记录工具偏好。`,
                               onYes: apply,
                             });
                             return;

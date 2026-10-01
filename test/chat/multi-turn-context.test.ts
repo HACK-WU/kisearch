@@ -138,7 +138,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
 
   it('★ 第 2 轮 → 历史按序带上，本轮 user 仍恰好一次，且无连续同角色', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2')]), 'Q2');
-    assert.deepEqual(rolesOf(cap), ['system', 'user', 'assistant', 'user']);
+    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user']);
     assert.equal(countOf(cap, 'Q1'), 1, '历史中的 Q1 应保留一次');
     assert.equal(countOf(cap, 'A1'), 1, '历史中的 A1 应保留一次');
     assert.equal(countOf(cap, 'Q2'), 1, `本轮 user 应恰好 1 次，实际 ${countOf(cap, 'Q2')} 次`);
@@ -150,7 +150,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
       convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2'), a('m4', 'A2'), u('m5', 'Q3')]),
       'Q3',
     );
-    assert.deepEqual(rolesOf(cap), ['system', 'user', 'assistant', 'user', 'assistant', 'user']);
+    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user', 'assistant', 'user']);
     assert.deepEqual(
       cap.messages.filter((m) => m.role !== 'system').map((m) => m.content),
       ['Q1', 'A1', 'Q2', 'A2', 'Q3'],
@@ -162,7 +162,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
 
   it('兼容形状：conv 未含本轮 user（store/skill 级单测的构造方式）→ 仍会追加，且只追加一次', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1'), a('m2', 'A1')]), 'Q2');
-    assert.deepEqual(rolesOf(cap), ['system', 'user', 'assistant', 'user']);
+    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user']);
     assert.equal(countOf(cap, 'Q2'), 1, '兼容形状下本轮 user 也应恰好一次');
     assert.deepEqual(consecutiveSameRole(cap), []);
   });
@@ -183,9 +183,10 @@ describe('多轮上下文 · 上游 messages 形状', () => {
   it('systemPrompt 非空 → skill 在前、会话 prompt 在后（反幻觉规则不被用户 prompt 覆盖）', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1')], '我的自定义系统提示'), 'Q1');
     const sys = cap.messages.filter((m) => m.role === 'system');
-    assert.equal(sys.length, 2, `期望 skill + 会话 prompt 两条 system，实际 ${sys.length} 条`);
+    assert.equal(sys.length, 3, `期望 skill + 基础规则 + 会话 prompt 三条 system，实际 ${sys.length} 条`);
     assert.ok(sys[0].content.includes('检索知识库'), 'system[0] 应为检索 skill（反幻觉规则）');
-    assert.equal(sys[1].content, '我的自定义系统提示', 'system[1] 应为会话级 prompt');
+    assert.ok(sys[1].content.includes('何时使用知识库检索 skill'), 'system[1] 应为基础规则');
+    assert.equal(sys[2].content, '我的自定义系统提示', 'system[2] 应为会话级 prompt');
     assert.equal(countOf(cap, 'Q1'), 1);
   });
 });
@@ -236,7 +237,7 @@ describe('多轮上下文 · 降级路径（预检索）的上游 messages 形�
 
     // ④ 历史仍在且顺序不变（注入不得打乱 system → 历史 → 本轮）
     assert.deepEqual(
-      cap.messages.slice(1, 3).map((m) => m.content),
+      cap.messages.filter((m) => m.role !== 'system').slice(0, 2).map((m) => m.content),
       ['Q1', 'A1'],
       '历史应保持 Q1→A1 顺序',
     );

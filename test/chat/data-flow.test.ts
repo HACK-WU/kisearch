@@ -19,8 +19,25 @@
  * 运行：`npx jiti test/chat/data-flow.test.ts`
  */
 
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { startRetrievalUpstream } from './fixtures/retrieval-upstream.js';
+
+const root = mkdtempSync(path.join(tmpdir(), 'ki-chat-data-flow-'));
+const configPath = path.join(root, 'config.yaml');
+const previousConfig = process.env.KI_CONFIG_PATH;
+process.env.KI_CONFIG_PATH = configPath;
+let closeUpstream: (() => Promise<void>) | undefined;
+before(async () => { closeUpstream = await startRetrievalUpstream(root, configPath); });
+after(async () => {
+  await closeUpstream?.();
+  rmSync(root, { recursive: true, force: true });
+  if (previousConfig === undefined) delete process.env.KI_CONFIG_PATH;
+  else process.env.KI_CONFIG_PATH = previousConfig;
+});
 
 import type { ChatEvent } from '../../src/lib/chat/chat-contract.js';
 import { CHAT_EVENT_ORDER_RULES } from '../../src/lib/chat/chat-contract.js';
@@ -30,7 +47,7 @@ import {
   degradedFlow,
   retrievalUnavailableFlow,
   abortedFlow,
-} from '../../.delivery/mocks/mock-sse.mjs';
+} from './fixtures/mock-sse.js';
 
 /** 从 mock 事件序中提取规则违反项（骨架期用于校准断言；实现期用于校验真实事件） */
 function validateOrder(events: ChatEvent[]): string[] {
@@ -86,12 +103,16 @@ describe('数据走向预演 · 真实链路（骨架期为红）', () => {
     messageCount: 0, lastMessagePreview: '', messages: [],
   };
 
-  it('正常链路：事件序自洽 + 产出 sources', async () => {
+  it('真实工具循环：隔离知识库不可用时配对工具事件、明确降级、正常终答', async () => {
     const events: ChatEvent[] = [];
-    for await (const e of runToolLoop({ scope: 'kisearch', conv, userText: 'ki_search 怎么用', convSystemPrompt: '' })) {
+    for await (const e of runToolLoop({ scope: 'unregistered-fixture', conv, userText: 'ki_search 怎么用', convSystemPrompt: '' })) {
       events.push(e);
     }
     assert.deepEqual(validateOrder(events), []);
+    assert.ok(events.some((e) => e.type === 'tool_start'));
+    assert.ok(events.some((e) => e.type === 'tool_end'));
+    assert.ok(events.some((e) => e.type === 'degraded'));
+    assert.equal(events.at(-1)?.type, 'done');
   });
 
   it('降级链路：产出 degraded 事件', async () => {

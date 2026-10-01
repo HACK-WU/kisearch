@@ -28,7 +28,7 @@
  * @see demo/chat-panel-redesign/index.html（视觉基准 demo，token 与状态以此为准）
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ackDisclosure,
   archiveConversation,
@@ -43,8 +43,9 @@ import type { ChatConfigOk, ChatMessage, ChatProgressStep, ConversationSummary, 
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
-import { MarkdownPreview } from '@/components/MarkdownPreview';
-import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
+import { MarkdownPreview, renderMarkdownBlocks, type MarkdownBlock } from '@/components/MarkdownPreview';
+import type { ChatStore, DegradedMark, ProgressStep, ReasoningSegment } from './chatStore';
+import { buildTimeline, mergeInterleaveItems, layoutAnswerFlow, type TimelineNode } from './answerFlow';
 import { SourcesList } from './SourcesList';
 import { clearStreamError, getStreamError, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
 import { ConversationList } from './ConversationList';
@@ -54,6 +55,8 @@ export interface ChatPanelProps {
   store: ChatStore;
   /** 由 AppShell 控制（对应顶部开关按钮，D15） */
   open: boolean;
+  /** 仅隐藏面板，保留当前对话、草稿与进行中的生成。 */
+  onClose: () => void;
 }
 
 /**
@@ -74,7 +77,7 @@ const EMPTY_HINTS = [
   'daemon 的写锁和 OperationCoordinator 是什么关系？',
 ];
 
-export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
+export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element | null {
   const scope = useScopeValue();
   const stream = useChatStream(store);
 
@@ -84,8 +87,8 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   const [config, setConfig] = useState<ChatConfigOk | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
-  /** 用户手动展开过的「思考块」消息 id（不因新 chunk 强制收起，见 S05 §3.1） */
-  const [reasoningExpanded, setReasoningExpanded] = useState<Record<string, boolean>>({});
+  /** 按消息 id + 思考段 key 独立保存展开态，不因新 chunk 强制收起（S05 §3.1）。 */
+  const [reasoningExpanded, setReasoningExpanded] = useState<Record<string, Record<string, boolean>>>({});
   /** 来源引用点击后打开的原文（R20） */
   const [viewing, setViewing] = useState<{
     module: string;
@@ -127,6 +130,11 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
    */
   const sendLockRef = useRef(false);
   const creatingRef = useRef<Promise<string> | null>(null);
+  const creatingScopeRef = useRef<string | null>(null);
+  const selectionSeqRef = useRef(0);
+  const operationSeqRef = useRef(0);
+  const [readyScope, setReadyScope] = useState<string | null>(null);
+  const [openingConv, setOpeningConv] = useState(false);
   /**
    * 当前 scope 的镜像 ref —— 用于丢弃"上一个 scope 的迟到响应"。
    *
@@ -134,7 +142,26 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
    *   覆盖到新 scope 上，用户就能从浮层点开别的 scope 的会话（后端按 id 跨 scope 解析）。
    */
   const scopeRef = useRef(scope);
-  useEffect(() => { scopeRef.current = scope; }, [scope]);
+  scopeRef.current = scope;
+  useLayoutEffect(() => {
+    selectionSeqRef.current += 1;
+    operationSeqRef.current += 1;
+    sendLockRef.current = false;
+    creatingRef.current = null;
+    creatingScopeRef.current = null;
+    stream.abort();
+    store.dispatch({ type: 'setActiveConv', convId: null });
+    setReadyScope(null);
+    setOpeningConv(false);
+    setConvs([]);
+    setArchivedConvs([]);
+    setEditing(null);
+    setViewing(null);
+    setDraft('');
+    setSendError(null);
+    setConvError(null);
+    setAtBottom(true);
+  }, [scope, store, stream]);
 
   /** 列表 + 已归档合并（浮层分组与当前会话名都从这份取） */
   const allConvs = useMemo(() => [...convs, ...archivedConvs], [convs, archivedConvs]);
@@ -165,14 +192,22 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
    */
   const openConversation = useCallback(
     async (id: string): Promise<void> => {
+      const reqScope = scopeRef.current;
+      const selection = ++selectionSeqRef.current;
       const s = store.getState();
-      if (s.activeConvId === id && s.messages.length > 0) return;
+      if (s.activeConvId === id && s.messages.length > 0 && !s.messages.some((m) => m.id.startsWith('local-user-'))) return;
       stream.abort();
       store.dispatch({ type: 'setActiveConv', convId: id });
-      const d = await getConversation(id);
-      // 取数期间用户可能又切走了 → 只在仍是目标会话时落状态
-      if (store.getState().activeConvId === id) {
-        store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+      setOpeningConv(true);
+      try {
+        const d = await getConversation(id);
+        // A late history response cannot replace a new stream or a different selection.
+        if (scopeRef.current === reqScope && selectionSeqRef.current === selection && store.getState().activeConvId === id && !store.getState().streaming.active) {
+          store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+          clearStreamError(id);
+        }
+      } finally {
+        if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setOpeningConv(false);
       }
     },
     [store, stream]
@@ -180,13 +215,22 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 
   /** 新建会话并切过去（首次发送时若当前无会话会调用）。**并发调用复用同一次创建**。 */
   const createNewConversation = useCallback((): Promise<string> => {
-    if (creatingRef.current) return creatingRef.current;
+    if (creatingRef.current && creatingScopeRef.current === scope) return creatingRef.current;
+    const reqScope = scope;
+    const selection = ++selectionSeqRef.current;
+    creatingScopeRef.current = reqScope;
+    // A pending manual creation must not leave the previous conversation writable.
+    stream.abort();
+    store.dispatch({ type: 'setActiveConv', convId: null });
+    setOpeningConv(true);
 
     const pending = (async (): Promise<string> => {
       const r = await createConversation(scope, {});
       const id = r.conv.id;
+      if (scopeRef.current !== reqScope || selectionSeqRef.current !== selection) throw new Error('已切换会话，请重新发送');
       stream.abort();
       store.dispatch({ type: 'setActiveConv', convId: id });
+      setReadyScope(reqScope);
       setConvs((prev) => [
         {
           id,
@@ -202,7 +246,8 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
       ]);
       return id;
     })().finally(() => {
-      creatingRef.current = null;
+      if (creatingRef.current === pending) creatingRef.current = null;
+      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setOpeningConv(false);
     });
 
     creatingRef.current = pending;
@@ -254,8 +299,9 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   const reloadActive = useCallback(
     async (convId: string): Promise<void> => {
       try {
+        const snapshot = store.getState().messages;
         const d = await getConversation(convId);
-        if (store.getState().activeConvId !== convId) return;
+        if (store.getState().activeConvId !== convId || store.getState().streaming.active || store.getState().messages !== snapshot) return;
         store.dispatch({ type: 'setMessages', messages: d.conv.messages });
       } catch {
         /* 保留本地内容 */
@@ -293,13 +339,15 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   useEffect(() => {
     let alive = true;
     setConvLoading(true);
+    let selection = selectionSeqRef.current;
     // 切 scope：两个列表都属于旧 scope，先清空再取 —— 否则浮层里能点开旧 scope 的会话
     setConvs([]);
     setArchivedConvs([]);
     void (async () => {
       try {
         const r = await listConversations(scope, { limit: 50 });
-        if (!alive) return;
+        if (!alive || scopeRef.current !== scope || selectionSeqRef.current !== selection) return;
+        setReadyScope(scope);
         setConvs(r.items);
         setConvError(null);
         const pick = r.items.find((c) => !c.corrupted) ?? null;
@@ -307,9 +355,13 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
           stream.abort();
           store.dispatch({ type: 'setActiveConv', convId: pick?.id ?? null });
         }
-        if (pick) await openConversation(pick.id);
+        if (pick) {
+          selection = selectionSeqRef.current + 1;
+          await openConversation(pick.id);
+        }
       } catch (err) {
-        if (!alive) return;
+        if (!alive || scopeRef.current !== scope || selectionSeqRef.current !== selection) return;
+        setReadyScope(scope);
         setConvError(err instanceof Error ? err.message : '会话列表读取失败');
         // ★ 拉取失败同样必须归零 activeConvId：否则它停留在**上一个 scope** 的会话上，
         //   下一次提问被写进旧 scope 的会话文件（落盘不可逆），检索也按旧 scope 执行。
@@ -325,13 +377,26 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     // stream 只在 abort 时使用（引用稳定），列入依赖以避免闭包过期
   }, [scope, openConversation, store, stream]);
 
-  // ── 自动滚底：仅在用户本就贴着底部时跟随（否则会把用户正在看的历史拽走）──
+  // Keep the user's sticky-bottom intent separate from programmatic growth/scroll events.
+  const stickyBottomRef = useRef(true);
   useEffect(() => {
-    if (!open) return;
+    stickyBottomRef.current = atBottom;
+    if (!open || !atBottom) return;
     const el = listRef.current;
-    if (!el || !atBottom) return;
-    el.scrollTop = el.scrollHeight;
-  }, [open, atBottom, state.messages.length, state.streaming.content, state.streaming.progress.length]);
+    if (!el) return;
+    let frame = 0;
+    const follow = () => {
+      if (!stickyBottomRef.current) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (stickyBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+    };
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(follow);
+    if (el.firstElementChild) observer?.observe(el.firstElementChild);
+    follow();
+    return () => { observer?.disconnect(); cancelAnimationFrame(frame); };
+  }, [open, atBottom, state.activeConvId]);
 
   // ── 浮层：点击外部 / Esc 关闭 ──
   //   ★ Esc 必须挂在 document：点完胶囊后焦点仍留在按钮上，而浮层的 onKeyDown 只覆盖
@@ -360,10 +425,13 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     if (!config.enabled) return '未配置模型';
     // T12：ackRequired 时**阻塞发送**并给出确认入口（不静默降级为"不检索"）
     if (config.ackRequired) return '需先确认内容外发';
+    if (readyScope !== scope) return '正在切换知识库…';
+    if (openingConv) return '正在准备会话…';
     if (state.streaming.active) return '生成中…';
+    if (state.messages.some((m) => m.id.startsWith('local-user-'))) return '提问保存状态待确认，请重新打开会话';
     if (!draft.trim()) return '请输入内容';
     return null;
-  }, [config, configError, draft, state.streaming.active]);
+  }, [config, configError, draft, readyScope, scope, openingConv, state.streaming.active, state.messages]);
 
   // 走查 #5：空草稿的「请输入内容」已由 placeholder 承担；提示行若重复显示，
   // 视觉上就成了"两个输入框"错觉（用户截图）。提示行只在**真阻塞**时让位给原因。
@@ -405,6 +473,9 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     // `sendLockRef` 覆盖"await 期间连点"的窗口（`blocked` 只是渲染期快照）
     if (!text || blocked || sendLockRef.current) return;
     sendLockRef.current = true;
+    const operation = ++operationSeqRef.current;
+    const reqScope = scope;
+    setSendError(null);
     setDraft(''); // 清空输入框（失败时可按错误块重试，见 N4）
     setAtBottom(true); // 新提问必须把视图带回底部（用户此前往上翻过历史时也要跟随）
     void (async () => {
@@ -412,16 +483,21 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
         // ★ 惰性建会话：当前无会话时先建一条。
         //   原先直接用 `state.activeConvId ?? ''` → 打到 /conversations//messages（必然失败）。
         const convId = store.getState().activeConvId ?? (await createNewConversation());
+        if (scopeRef.current !== reqScope || operationSeqRef.current !== operation) return;
         const persisted = await stream.send(convId, text);
         // ★ 只有收到 `done`（服务端确已落盘）才"以服务端为准"重取：
         //   error / aborted / 中断路径下服务端可能没有新内容 → 重取会把刚渲染的回答**覆盖成旧的**
         //   （用户看到回答凭空消失且无提示）。失败路径改由错误槽 + 重试入口承担。
         if (persisted) await reloadActive(convId);
+        else if (getStreamError(convId)?.accepted === false && scopeRef.current === reqScope && operationSeqRef.current === operation) setDraft((cur) => cur || text);
         void refreshConversations();
       } catch (err) {
-        setSendError(err instanceof Error ? err.message : '发送失败');
+        if (scopeRef.current === reqScope && operationSeqRef.current === operation) {
+          setSendError(err instanceof Error ? err.message : '发送失败');
+          setDraft((cur) => cur || text);
+        }
       } finally {
-        sendLockRef.current = false;
+        if (operationSeqRef.current === operation) sendLockRef.current = false;
       }
     })();
   };
@@ -445,14 +521,15 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     clearStreamError(convId);
     setSendError(null);
     sendLockRef.current = true;
+    const operation = ++operationSeqRef.current;
     void (async () => {
       try {
         const persisted = await stream.regenerate(convId);
         if (persisted) await reloadActive(convId);
       } catch (err) {
-        setSendError(err instanceof Error ? err.message : '重新生成失败');
+        if (operationSeqRef.current === operation) setSendError(err instanceof Error ? err.message : '重新生成失败');
       } finally {
-        sendLockRef.current = false;
+        if (operationSeqRef.current === operation) sendLockRef.current = false;
       }
     })();
   };
@@ -468,15 +545,16 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
     if (!convId || idx < 0 || !text.trim() || sendLockRef.current) return;
     setEditing(null);
     sendLockRef.current = true;
+    const operation = ++operationSeqRef.current;
     void (async () => {
       try {
         const persisted = await stream.editAndResend(convId, msgId, text.trim());
         if (persisted) await reloadActive(convId);
         void refreshConversations();
       } catch (err) {
-        setSendError(err instanceof Error ? err.message : '编辑重发失败');
+        if (operationSeqRef.current === operation) setSendError(err instanceof Error ? err.message : '编辑重发失败');
       } finally {
-        sendLockRef.current = false;
+        if (operationSeqRef.current === operation) sendLockRef.current = false;
       }
     })();
   };
@@ -536,15 +614,23 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
 
   const handleSelectConversation = (id: string): void => {
     setConvPopOpen(false);
-    void openConversation(id).catch((err: unknown) => {
-      setConvError(err instanceof Error ? err.message : '切换会话失败');
+    setConvError(null);
+    const reqScope = scope;
+    const pending = openConversation(id);
+    const selection = selectionSeqRef.current;
+    void pending.catch((err: unknown) => {
+      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setConvError(err instanceof Error ? err.message : '切换会话失败');
     });
   };
 
   const handleCreateConversation = (): void => {
     setConvPopOpen(false);
-    void createNewConversation().catch((err: unknown) => {
-      setConvError(err instanceof Error ? err.message : '新建会话失败');
+    setConvError(null);
+    const reqScope = scope;
+    const pending = createNewConversation();
+    const selection = selectionSeqRef.current;
+    void pending.catch((err: unknown) => {
+      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setConvError(err instanceof Error ? err.message : '新建会话失败');
     });
   };
 
@@ -589,7 +675,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
   const bubbles: Array<{ message: ChatMessage; live: boolean; idx: number }> = state.messages
     .map((m, idx) => ({ message: m, live: false, idx }))
     // 重新生成 / 编辑重发：同 id 旧消息让位给虚拟气泡（收尾时 finalizeStream 原位替换）
-    .filter((b) => !(st.active && b.message.id === st.messageId));
+    .filter((b) => !(st.active && (b.message.id === st.messageId || b.message.id === st.replacingId)));
   if (st.active) {
     bubbles.push({
       message: {
@@ -677,6 +763,21 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               </svg>
               <span>配置</span>
             </button>
+            <button
+              type="button"
+              className="ki-chat-iconbtn"
+              title="关闭 AI 对话"
+              aria-label="关闭 AI 对话"
+              onClick={() => {
+                setConvPopOpen(false);
+                setCfgOpen(false);
+                onClose();
+              }}
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                <path d="m4 4 8 8M12 4l-8 8" />
+              </svg>
+            </button>
           </span>
         </header>
 
@@ -715,9 +816,13 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
           ref={listRef}
           onScroll={(e) => {
             const el = e.currentTarget;
-            setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+            // Content growth is observed separately; only an actual scroll changes sticky intent.
+            const next = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            stickyBottomRef.current = next;
+            setAtBottom(next);
           }}
         >
+          <div className="ki-chat-panel__content">
           {state.messages.length === 0 && !state.streaming.active ? (
             <div className="ki-chat-empty">
               <span className="ki-chat-empty__ic" aria-hidden="true">
@@ -767,12 +872,16 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               onEditChange={(text) => setEditing((e) => (e ? { ...e, text } : e))}
               onEditSubmit={(text) => handleEditResend(m.id, text)}
               onEditCancel={() => setEditing(null)}
-              reasoningOpen={Boolean(reasoningExpanded[m.id])}
-              onToggleReasoning={(next) =>
-                setReasoningExpanded((prev) => ({ ...prev, [m.id]: next }))
+              reasoningExpanded={reasoningExpanded[m.id] ?? {}}
+              onToggleReasoning={(segmentKey, next) =>
+                setReasoningExpanded((prev) => ({
+                  ...prev,
+                  [m.id]: { ...prev[m.id], [segmentKey]: next },
+                }))
               }
             />
           ))}
+          </div>
         </div>
 
         {/* ── 输入区：分级提示 + composer 卡片 ── */}
@@ -781,12 +890,18 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
             <button
               type="button"
               className="ki-chat-jump"
+              aria-label="回到底部"
+              title="回到底部"
               onClick={() => {
                 const el = listRef.current;
                 if (el) el.scrollTop = el.scrollHeight;
                 setAtBottom(true);
               }}
-            >回到底部</button>
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14m-6-6 6 6 6-6" />
+              </svg>
+            </button>
           )}
 
           {/* 本轮生成失败（N4 / S03 §5）：保留已生成内容并给出重试入口，不静默 */}
@@ -859,7 +974,7 @@ export function ChatPanel({ store, open }: ChatPanelProps): JSX.Element | null {
               /* ⚠️ 不标记 data-ki-search-input：否则 AppShell 的 Ctrl+F 会聚焦到这里而非页面搜索框 */
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault();
                   handleSend();
                 }
@@ -916,7 +1031,7 @@ function MessageBubble({
   progress,
   reasoningSegs,
   discardCount,
-  reasoningOpen,
+  reasoningExpanded,
   onToggleReasoning,
   onOpenSource,
   onCopy,
@@ -939,11 +1054,11 @@ function MessageBubble({
   /** 本条的检索过程（原位渲染在正文流中；生成结束后不消失，与流式期间同一位置） */
   progress?: ProgressStep[];
   /** 本条的思考分段（live 直读 streaming；收尾后走 reasoningSegsByMessage 内存留存） */
-  reasoningSegs?: Array<{ afterChars: number; text: string; closed: boolean }>;
+  reasoningSegs?: ReasoningSegment[];
   /** R24：编辑重发将截断其后的消息条数（0 表示无截断） */
   discardCount: number;
-  reasoningOpen: boolean;
-  onToggleReasoning: (next: boolean) => void;
+  reasoningExpanded: Record<string, boolean>;
+  onToggleReasoning: (segmentKey: string, next: boolean) => void;
   onOpenSource: (ref: SourceRef) => void;
   onCopy: () => void;
   /** 复制反馈态（非安全上下文下 clipboard 不可用，也要给出原因，不能点了没反应） */
@@ -971,6 +1086,8 @@ function MessageBubble({
         {!isUser ? <span className="ki-chat-msg__role">kisearch</span> : null}
         {/* startedAt 未注入（如纯 reducer 场景）时兜底"刚刚"；落盘消息恒为真实时间 */}
         <span className="ki-chat-msg__at">{formatMsgTime(message.at) || '刚刚'}</span>
+        {message.id.startsWith('local-assistant-') ? <span className="ki-chat-msg__badge ki-chat-msg__badge--abort">未保存的部分回答</span> : null}
+        {isUser && message.id.startsWith('local-user-') && canEdit ? <span className="ki-chat-msg__badge ki-chat-msg__badge--abort">保存状态待确认</span> : null}
         {message.aborted ? <span className="ki-chat-msg__badge ki-chat-msg__badge--abort">已中止</span> : null}
         {!isUser && degraded ? (
           <span className="ki-chat-msg__badge ki-chat-msg__badge--degrade">{degraded.label}</span>
@@ -992,7 +1109,7 @@ function MessageBubble({
             onChange={(e) => onEditChange(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Escape') onEditCancel();
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onEditSubmit(e.currentTarget.value);
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229 && (e.metaKey || e.ctrlKey)) onEditSubmit(e.currentTarget.value);
             }}
           />
           {/* R24 验收：截断前明示"将丢弃其后 N 条"，不做静默截断 */}
@@ -1023,7 +1140,7 @@ function MessageBubble({
           steps={progress ?? []}
           segs={reasoningSegs ?? []}
           live={Boolean(live)}
-          reasoningOpen={reasoningOpen}
+          reasoningExpanded={reasoningExpanded}
           onToggleReasoning={onToggleReasoning}
         />
       )}
@@ -1046,10 +1163,10 @@ function MessageBubble({
             type="button"
             className="ki-chat-act"
             // 乐观 user 消息的临时 id（local-user-*）服务端不存在，
-            // 直接发起 API-12 必然 404 —— 等本轮落盘重取回填真实 id 后才可编辑
+            // 直接发起 API-12 必然 404；meta 确认真实 id 或重取历史后才可编辑。
             disabled={!canEdit || message.id.startsWith('local-user-')}
             title={
-              message.id.startsWith('local-user-') ? '本轮结束后才能编辑重发'
+              message.id.startsWith('local-user-') ? (canEdit ? '保存状态待确认，请重新打开会话' : '提问确认后可编辑重发')
                 : !canEdit ? '生成中不可编辑'
                 : '编辑后重发（会丢弃其后消息）'
             }
@@ -1099,54 +1216,6 @@ function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): Pr
 }
 
 /**
- * 正文按 interleave 锚点切段、段间插时间线行（用户裁决：调用在哪句话之后，就显示在哪句话下面）。
- * 锚点越界防御性 clamp；同锚点的行合并进同一组；旧数据无锚点 = 0（集中在正文前，维持旧行为）。
- */
-/** interleave 可插项目：时间线行（tool/think/answer）或思考分段 */
-type InterleaveItem =
-  | TimelineNode
-  | { key: string; kind: 'reason'; afterChars?: number; text: string; closed: boolean };
-
-/**
- * 正文按 interleave 锚点切段、段间插痕迹行/思考块。
- * 锚点越界防御性 clamp；同锚点合并进同一组（保持传入相对序）；无锚点 = 0（集中在正文前）。
- */
-function interleaveSegments(content: string, items: InterleaveItem[]): Array<{ text: string } | { items: InterleaveItem[] }> {
-  if (items.length === 0) return content ? [{ text: content }] : [];
-  const groups = new Map<number, InterleaveItem[]>();
-  for (const n of items) {
-    const pos = Math.max(0, Math.min(n.afterChars ?? 0, content.length));
-    const arr = groups.get(pos);
-    if (arr) arr.push(n);
-    else groups.set(pos, [n]);
-  }
-  const segs: Array<{ text: string } | { items: InterleaveItem[] }> = [];
-  let cursor = 0;
-  for (const pos of [...groups.keys()].sort((a, b) => a - b)) {
-    if (pos > cursor) segs.push({ text: content.slice(cursor, pos) });
-    segs.push({ items: groups.get(pos)! });
-    cursor = pos;
-  }
-  if (cursor < content.length) segs.push({ text: content.slice(cursor) });
-  return segs;
-}
-
-/** 时间线行与思考分段按锚点归并（两者各自按时间序；同锚点思考在前——先思考后调用） */
-function mergeInterleaveItems(nodes: TimelineNode[], segs: Array<{ afterChars: number; text: string; closed: boolean }>): InterleaveItem[] {
-  const out: InterleaveItem[] = [];
-  let ni = 0;
-  let si = 0;
-  while (ni < nodes.length || si < segs.length) {
-    if (si >= segs.length || (ni < nodes.length && (nodes[ni].afterChars ?? 0) < (segs[si].afterChars ?? 0))) {
-      out.push(nodes[ni++]);
-    } else {
-      out.push({ key: `rs${si}`, kind: 'reason', ...segs[si++] });
-    }
-  }
-  return out;
-}
-
-/**
  * assistant 回答主体 —— **生成中与完成态的唯一渲染路径**（统一渲染路径重构）。
  *
  * 正文段、思考块、检索痕迹按 afterChars 锚点交错（用户裁决：在哪句话之后发生，
@@ -1160,46 +1229,41 @@ function AnswerFlow({
   steps,
   segs,
   live,
-  reasoningOpen,
+  reasoningExpanded,
   onToggleReasoning,
 }: {
   content: string;
   steps: ProgressStep[];
-  segs: Array<{ afterChars: number; text: string; closed: boolean }>;
+  segs: ReasoningSegment[];
   live: boolean;
-  reasoningOpen: boolean;
-  onToggleReasoning: (next: boolean) => void;
+  reasoningExpanded: Record<string, boolean>;
+  onToggleReasoning: (segmentKey: string, next: boolean) => void;
 }): JSX.Element {
+  const previousBlocks = useRef<MarkdownBlock[]>([]);
+  const blocks = useMemo(() => {
+    const next = renderMarkdownBlocks(content, previousBlocks.current);
+    previousBlocks.current = next;
+    return next;
+  }, [content]);
   const items = mergeInterleaveItems(buildTimeline(steps), segs);
-  if (items.length === 0) {
-    if (live && !content) {
-      return (
-        <div className="ki-chat-tl" role="status" aria-live="polite">
-          <div className="ki-chat-tl__node ki-chat-tl__node--run">
-            <span className="ki-chat-tl__label">正在连接模型…</span>
-          </div>
-        </div>
-      );
-    }
-    return content ? (
-      <div className="ki-chat-msg__body">
-        <MarkdownPreview text={content} />
-      </div>
-    ) : <></>;
-  }
+  if (live && !content && items.length === 0) return (
+    <div className="ki-chat-tl" role="status" aria-live="polite">
+      <div className="ki-chat-tl__node ki-chat-tl__node--run"><span className="ki-chat-tl__label">正在连接模型…</span></div>
+    </div>
+  );
   const liveAttrs: { role?: 'status'; 'aria-live'?: 'polite' } =
     live ? { role: 'status', 'aria-live': 'polite' } : {};
   return (
     <>
-      {interleaveSegments(content, items).map((seg, i) => (
-        'text' in seg
+      {layoutAnswerFlow(blocks, items).map((seg) => (
+        seg.kind === 'markdown'
           ? (
-            <div key={i} className="ki-chat-msg__body">
-              <MarkdownPreview text={seg.text} />
+            <div key={seg.block.key} className="ki-chat-msg__body">
+              <MarkdownPreview text={seg.block.raw} renderedHtml={seg.block.html} deferMermaid={live && !seg.block.complete} />
             </div>
           )
           : (
-            <Fragment key={i}>
+            <Fragment key={seg.key}>
               {seg.items.map((it) => (
                 it.kind === 'reason'
                   ? (
@@ -1207,8 +1271,8 @@ function AnswerFlow({
                       key={it.key}
                       text={it.text}
                       streaming={!it.closed}
-                      open={reasoningOpen}
-                      onToggle={onToggleReasoning}
+                      open={Boolean(reasoningExpanded[it.key])}
+                      onToggle={(next) => onToggleReasoning(it.key, next)}
                     />
                   )
                   : (
@@ -1228,62 +1292,6 @@ function AnswerFlow({
       ))}
     </>
   );
-}
-
-/** 时间线节点（demo D9 行结构）：tool 的 start/end 合并为一行，end 未到时保持 running */
-interface TimelineNode {
-  key: string;
-  kind: 'tool' | 'think' | 'answer';
-  running: boolean;
-  label: string;
-  name?: string;
-  mode?: string;
-  query?: string;
-  hits?: number;
-  durationMs?: number;
-  error?: string;
-  /** interleave 锚点：本行发生在已发出正文的第几个字符后（缺省 = 0，即正文之前） */
-  afterChars?: number;
-}
-
-function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
-  const out: TimelineNode[] = [];
-  for (let i = 0; i < steps.length; i++) {
-    const s = steps[i];
-    if (s.kind === 'tool') {
-      if (s.phase === 'start') {
-        const next = steps[i + 1];
-        const end = next && next.kind === 'tool' && next.phase === 'end' ? next : undefined;
-        if (end) i += 1;
-        out.push({
-          key: `t${i}`, kind: 'tool', running: !end, label: s.label,
-          name: s.name ?? end?.name, mode: s.mode ?? end?.mode, query: s.query,
-          hits: end?.hits, durationMs: end?.durationMs, error: end?.error,
-          // 行位置以 start 时刻为准（"说完哪句去查的"）
-          afterChars: s.afterChars ?? end?.afterChars,
-        });
-      } else {
-        // 质疑 C2：end 若与 start 之间被插入了非 tool 步骤（事件乱序），前向配对会失败 →
-        // start 行永久停在"检索中…"。兜底：回看最近一个未完成的 tool 行并入。
-        const prev = out[out.length - 1];
-        if (prev && prev.kind === 'tool' && prev.running && prev.hits === undefined && !prev.error) {
-          prev.running = false;
-          prev.name = prev.name ?? s.name;
-          prev.mode = prev.mode ?? s.mode;
-          prev.hits = s.hits;
-          prev.durationMs = s.durationMs;
-          prev.error = s.error;
-        } else {
-          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, hits: s.hits, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
-        }
-      }
-    } else if (s.kind === 'reasoning') {
-      out.push({ key: `r${i}`, kind: 'think', running: true, label: '思考中…' });
-    } else {
-      out.push({ key: `a${i}`, kind: 'answer', running: true, label: '正在回答…' });
-    }
-  }
-  return out;
 }
 
 /** 时间线工具行（demo D9）：动作名 + 工具胶囊 + 状态 + 展开卡；无摘要字段时退化为纯文本行 */
@@ -1439,7 +1447,13 @@ function ReasoningBlock({
  * 这里只订阅、不引入外部状态库（避免为单个 store 增加依赖）。
  */
 function useSyncExternalStoreCompat(store: ChatStore) {
-  const [, force] = useState(0);
-  useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
-  return store.getState();
+  const subscribe = useCallback((listener: () => void) => {
+    let frame = 0;
+    const unsubscribe = store.subscribe(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; listener(); });
+    });
+    return () => { unsubscribe(); cancelAnimationFrame(frame); };
+  }, [store]);
+  return useSyncExternalStore(subscribe, store.getState, store.getState);
 }

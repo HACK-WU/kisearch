@@ -185,7 +185,12 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
 
           <div className="ki-chat-cfg__card-acts">
             {canReset && (
-              <button type="button" className="ki-chat-cfg__reset" onClick={props.onReset}>恢复默认</button>
+              <button type="button" className="ki-chat-btn ki-chat-btn--ghost ki-chat-cfg__reset" onClick={props.onReset}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7" />
+                </svg>
+                恢复默认
+              </button>
             )}
             {canDelete && (
               <button type="button" className="ki-chat-cfg__del" onClick={props.onDelete}>删除</button>

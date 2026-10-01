@@ -212,6 +212,24 @@ a:hover { text-decoration: underline; }
   transition: background var(--ki-motion-fast);
 }
 .ki-topbar__toggle:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ki-topbar__chat-toggle {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex-shrink: 0; height: 32px; padding: 0 10px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-sm); font-weight: 500; white-space: nowrap;
+  cursor: pointer; transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-topbar__chat-toggle:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ki-topbar__chat-toggle[aria-pressed="true"] {
+  color: var(--ki-color-primary);
+  border-color: color-mix(in srgb, var(--ki-color-primary) 22%, transparent);
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+}
+@media (max-width: 1100px) {
+  .ki-topbar__chat-toggle { width: 32px; padding: 0; }
+  .ki-topbar__chat-label { display: none; }
+}
 .ki-topbar__title { font-size: 1.2rem; font-weight: 700; color: var(--ki-color-text); letter-spacing: -0.3px; }
 .ki-topbar__spacer { flex: 1; }
 .ki-import-task-link {
@@ -2022,6 +2040,34 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
      以 chip 为基准的 300px 浮层会溢出面板宽度被 overflow 裁掉 */
 .ki-chat-srcs { position: relative; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: var(--ki-space-1); }
 .ki-chat-srcs__label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-chat-srcs__toggle {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 4px; border: 0; background: transparent;
+  color: var(--ki-color-primary); font: inherit; font-size: var(--ki-font-size-xs);
+  cursor: pointer;
+}
+.ki-chat-srcs__toggle:hover { text-decoration: underline; }
+.ki-chat-srcs__toggle svg { width: 14px; height: 14px; }
+.ki-chat-srcs__dropdown {
+  flex-basis: 100%; min-width: 0; max-height: 240px; overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-chat-srcs__row {
+  width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs);
+  text-align: left; cursor: pointer;
+}
+.ki-chat-srcs__row:hover { background: var(--ki-color-hover); }
+.ki-chat-srcs__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-chat-srcs__row .ki-chat-src__no, .ki-chat-srcs__row .ki-chat-src__lines { flex-shrink: 0; }
+.ki-chat-srcs__detail { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.ki-chat-srcs__doc, .ki-chat-srcs__path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-srcs__doc { color: var(--ki-color-text); }
+.ki-chat-srcs__path { color: var(--ki-color-text-subtle); }
 .ki-chat-src {
   display: inline-flex; align-items: center; gap: 5px;
   height: 24px; padding: 0 var(--ki-space-2) 0 5px;
@@ -2240,12 +2286,14 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-panel__foot > * { flex-shrink: 0; }
 
 .ki-chat-jump {
-  position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
-  height: 26px; padding: 0 10px; border: 1px solid var(--ki-color-border-strong);
-  border-radius: 999px; background: var(--ki-color-surface); box-shadow: var(--ki-shadow-1);
-  color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
+  position: absolute; top: -48px; right: var(--ki-space-4); z-index: 2;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; padding: 0; border: 1px solid var(--ki-color-border-strong);
+  border-radius: 50%; background: var(--ki-color-surface); box-shadow: var(--ki-shadow-1);
+  color: var(--ki-color-text-muted); cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
 }
-.ki-chat-jump:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+.ki-chat-jump:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
 
 /* 提示分级：err=本轮失败（N4，带重试）/ ack=T12 隐私确认（带入口）/ notice=一次性轻提示 */
 .ki-chat-alert {
@@ -2286,11 +2334,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-composer {
   border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-chat-bubble-r);
   background: var(--ki-color-surface);
-  transition: border-color var(--ki-motion-fast) ease, box-shadow var(--ki-motion-fast) ease;
-}
-.ki-chat-composer:focus-within {
-  border-color: var(--ki-color-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 18%, transparent);
 }
 .ki-chat-composer__ta {
   display: block; width: 100%; border: none; outline: none; resize: none; background: none;
@@ -2298,6 +2341,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6;
   min-height: 46px; max-height: 176px;
 }
+.ki-chat-composer__ta:focus-visible { outline: none; }
 .ki-chat-composer__ta::placeholder { color: var(--ki-color-text-subtle); }
 .ki-chat-composer__ta:disabled { opacity: 0.5; cursor: not-allowed; }
 .ki-chat-composer__bar {
@@ -2620,7 +2664,13 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-cfg__modal-head h4 { margin: 0; font-size: var(--ki-font-size-lg); font-weight: 600; letter-spacing: -.2px; }
 .ki-chat-cfg__modal-head .ki-chat-iconbtn { margin-left: auto; }
 .ki-chat-cfg__modal-sub { margin: 3px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
-.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: 0; padding: var(--ki-space-3) var(--ki-space-5); }
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts { margin-top: 0; padding: var(--ki-space-3) var(--ki-space-5); align-items: center; }
+.ki-chat-cfg__modal .ki-chat-cfg__card-acts .ki-chat-btn {
+  height: 32px; min-width: 64px; padding: 0 12px;
+  border-radius: var(--ki-radius-sm); font-size: var(--ki-font-size-sm);
+}
+.ki-chat-cfg__modal .ki-chat-cfg__reset { gap: 6px; color: var(--ki-color-text-muted); }
+.ki-chat-cfg__modal .ki-chat-cfg__reset:hover { color: var(--ki-color-text); text-decoration: none; }
 
 /* ── D7 减少动效偏好：关掉本段入场动画，保留状态反馈 ── */
 
@@ -2739,4 +2789,12 @@ select.ki-chat-cfg__ta--select {
   .ki-chat-msg,
   .ki-chat-tool:not([hidden]),
   .ki-chat-tl__node--tool.ki-chat-tl__node--run::before { animation: none; }
+}
+
+/* Inner content keeps message spacing while ResizeObserver tracks all rendered growth. */
+.ki-chat-panel__content {
+  display: flex; flex-direction: column; gap: var(--ki-space-5); min-height: 100%;
+  flex-shrink: 0;
+  /* Keep the latest streamed text above the composer instead of against its edge. */
+  padding-bottom: var(--ki-space-8);
 }

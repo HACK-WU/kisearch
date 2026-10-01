@@ -16,7 +16,7 @@ import { CHAT_BUDGET } from '../../src/lib/chat/chat-contract.js';
 import { parseToolCallArguments } from '../../src/lib/chat/retrieval/kb-search-tool.js';
 import { toToolProjection, toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
 import { buildSystemMessages, RETRIEVAL_SKILL_PROMPT, KB_SEARCH_TOOL } from '../../src/lib/chat/retrieval/retrieval-skill.js';
-import { mockSearchResult, mockSearchResultWithoutLines } from '../../.delivery/mocks/mock-search.mjs';
+import { mockSearchResult, mockSearchResultWithoutLines } from './fixtures/mock-search.js';
 
 describe('SR-01 契约 · 检索工具参数解析', () => {
   it('limit 超上限 → 钳制到 maxHitsPerCall（不报错）', () => {
@@ -105,6 +105,6 @@ describe('SR-01 契约 · 检索 skill（与工具 schema 同源）', () => {
 });
 
 describe('SR-01 契约 · 预算常量', () => {
-  it('轮次上限 = 3（T11 拍板）', () => assert.equal(CHAT_BUDGET.maxToolRounds, 3));
-  it('整体超时 = 300s（D13 后重估）', () => assert.equal(CHAT_BUDGET.requestTimeoutMs, 300_000));
+  it('2026-09-30 用户决策取消固定工具轮次上限', () => assert.equal(CHAT_BUDGET.maxToolRounds, Number.POSITIVE_INFINITY));
+  it('单次上游请求默认超时 = 300s', () => assert.equal(CHAT_BUDGET.requestTimeoutMs, 300_000));
 });

@@ -118,7 +118,7 @@ function resolveRuntime(): LoopRuntime {
     supportsTools: status.supportsTools,
     enabled: status.enabled,
     reason: status.reason,
-    // 从未配置过 prompt-config.json → 默认配置 → 块恰为 [RETRIEVAL_SKILL_PROMPT]（与改动前逐字一致）
+    // 页面与运行时使用同一配置：未保存时采用默认 skill + 基础规则，已保存时保持用户配置。
     systemBlocks: promptConfigSystemBlocks(readPromptConfig(cfg).config),
   };
 }
@@ -150,9 +150,9 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
     // ★ 只取 role + content：ChatMessage 本身不含 reasoning，此处再做一次显式白名单
     msgs.push({ role: m.role, content: m.content });
   }
-  // ★ 路由的三种 mode 都会**先把本轮 user 文本落进 conv.messages**，再把它作为 userText 传进来：
+  // ★ 路由的三种 mode 都会让 conv.messages 以本轮 user 结束，再传入相同 userText：
   //     - append-user：锁内 appendMessage 先落盘，再 `conv: convAfterPrep` + `userText`
-  //     - regenerate：conv 末条本就是那条 user（重新生成不新增 user 消息）
+  //     - regenerate：仅为生成构造截至末条 user 的快照，旧回答留在磁盘直到提交
   //     - edit：truncateAfterAndEdit 后 conv 末条是编辑后的该条 user
   //   若此处无条件再 push 一次，上游就会出现**两条相同的 user 消息**（且构成连续同角色
   //   `user,user` —— 部分 OpenAI 兼容上游会因此直接 400，另一些会令模型复述提问）。
@@ -168,7 +168,7 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
   // 已知限制（可接受）：判据用「content 全等」。若某调用方传入的 conv **不含**本轮 user，
   //   而历史末条恰好是**文本完全相同**的旧消息，则本轮不再追加——此时上游末条仍是同一段文本，
   //   语义等价（差别仅在该文本归属哪一轮）。路由的三条链路（append-user / regenerate / edit）
-  //   都已先把本轮 user 落进 conv，不会走到这个形态。
+  //   都已让生成快照包含本轮 user，不会走到这个形态。
   const last = input.conv.messages[input.conv.messages.length - 1];
   const alreadyIncluded = last !== undefined && last.role === 'user' && last.content === input.userText;
   if (!alreadyIncluded) {
@@ -185,6 +185,26 @@ function toolMessageContent(projection: ReturnType<typeof toToolProjection>): st
 /** 判断 signal 是否已中止 */
 function isAborted(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
+}
+
+/** 取消仍须交出已获得引用，供路由保存部分回答时保持出处。 */
+function* abortedEvents(messageId: string, sources: SourceRef[], usage?: { promptTokens: number; completionTokens: number; reasoningTokens?: number }): Generator<ChatEvent> {
+  if (sources.length > 0) yield { type: 'sources', sources };
+  if (usage) yield { type: 'usage', ...usage };
+  yield { type: 'aborted', messageId };
+}
+
+/** 停止等待只读工具；底层作业仍受 coordinator 管理，迟到结果不再消费。 */
+function awaitWithAbort<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work();
+  if (signal.aborted) return Promise.reject(new Error('已停止'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error('已停止'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    // 两个分支均注册，底层作业在中止后失败也不会产生未处理拒绝。
+    Promise.resolve().then(() => signal.aborted ? Promise.reject(new Error('已停止')) : work()).then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 /**
@@ -225,9 +245,8 @@ async function* toolLoopPath(
   const maxRounds = runtime.maxToolRounds;
 
   let round = 0;
-  // ⚠️ 本函数**不聚合 content/reasoning**：二者已通过事件流出，由调用方（chat-routes）
-  //    边收边转发并聚合落盘。理由：① reasoning 不落盘（D7），聚合无意义；
-  //    ② content 聚合在调用方，才能与"aborted 时落已产出部分"共用同一份缓冲。
+  // 路由聚合整个回答以落盘；本模块仅聚合单次上游响应正文供工具续轮使用。
+  // reasoning 始终只转发，不参与上游 messages。
   let sources: SourceRef[] = [];
   let usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
   let finishReason = 'stop';
@@ -250,7 +269,7 @@ async function* toolLoopPath(
 
   while (true) {
     if (isAborted(input.signal)) {
-      yield { type: 'aborted', messageId };
+      yield* abortedEvents(messageId, sources, usage);
       return;
     }
 
@@ -259,6 +278,7 @@ async function* toolLoopPath(
     if (reachedLimit) roundsExhausted = true;
 
     let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let roundContent = '';
 
     try {
       for await (const part of streamChat(messages, {
@@ -274,6 +294,7 @@ async function* toolLoopPath(
             yield { type: 'reasoning', text: part.text };
             break;
           case 'content':
+            roundContent += part.text;
             yield { type: 'content', text: part.text };
             break;
           case 'usage':
@@ -308,7 +329,7 @@ async function* toolLoopPath(
         return;
       }
       if (isAborted(input.signal)) {
-        yield { type: 'aborted', messageId };
+        yield* abortedEvents(messageId, sources, usage);
         return;
       }
       yield { type: 'error', code: 'LLM_UPSTREAM_ERROR', error: (err as Error).message, retryable: true };
@@ -320,7 +341,7 @@ async function* toolLoopPath(
     //   若此处不补判，会落到下面的"无工具调用 → break" → `finalize({aborted:false})` → 发 `done`，
     //   用户在"等首字节"阶段点停止将拿不到 `aborted`，落盘也会写 `aborted:false`。
     if (isAborted(input.signal)) {
-      yield { type: 'aborted', messageId };
+      yield* abortedEvents(messageId, sources, usage);
       return;
     }
 
@@ -335,11 +356,13 @@ async function* toolLoopPath(
       type: 'function' as const,
       function: { name: c.name, arguments: c.arguments },
     }));
-    messages.push({ role: 'assistant', content: '', tool_calls: assistantToolCalls });
-
-    const roundSources: SourceRef[] = [];
+    messages.push({ role: 'assistant', content: roundContent, tool_calls: assistantToolCalls });
 
     for (const call of pendingCalls) {
+      if (isAborted(input.signal)) {
+        yield* abortedEvents(messageId, sources, usage);
+        return;
+      }
       // 参数解析失败 → 该调用记为错误（不中断生成，模型可见失败并自行说明）
       let parsed = null as null | { query: string; mode?: 'fulltext' | 'hybrid'; limit?: number };
       let parseError: string | null = null;
@@ -369,11 +392,16 @@ async function* toolLoopPath(
       let result: Awaited<ReturnType<typeof runKbSearch>> | null = null;
       let runError: string | null = null;
       try {
-        result = await runKbSearch(input.scope, parsed!);
+        result = await awaitWithAbort(() => runKbSearch(input.scope, parsed!), input.signal);
       } catch (err) {
         runError = (err as Error).message;
       }
       const durationMs = Date.now() - startedAt;
+      if (isAborted(input.signal)) {
+        yield { type: 'tool_end', hits: 0, durationMs, error: '已停止' };
+        yield* abortedEvents(messageId, sources, usage);
+        return;
+      }
 
       if (runError || !result || result.ok !== true) {
         const errText = runError ?? (result && result.ok === false ? result.error : '检索失败');
@@ -403,7 +431,7 @@ async function* toolLoopPath(
 
       // ★ 硬约束 2：只累积投影后的来源引用（原始结果不落盘、不回传）
       const refs = toSourceRefs(result);
-      if (refs.length > 0) roundSources.push(...refs);
+      if (refs.length > 0) sources = dedupeSources([...sources, ...refs]);
 
       // 语义侧降级透传（不让用户误以为用了语义检索）—— 同样受至多一次的闸门约束
       if (result.degraded === true && !degradedSent) {
@@ -411,8 +439,6 @@ async function* toolLoopPath(
         yield { type: 'degraded', reason: 'semantic-degraded', message: '语义检索降级为全文' };
       }
     }
-
-    if (roundSources.length > 0) sources = dedupeSources([...sources, ...roundSources]);
 
     round += 1;
   }
@@ -439,16 +465,23 @@ async function* degradedPath(
   let usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
   let finishReason = 'stop';
 
+  if (isAborted(input.signal)) {
+    yield* abortedEvents(messageId, sources, usage);
+    return;
+  }
+  const startedAt = Date.now();
+  yield { type: 'tool_start', name: KB_SEARCH_TOOL_NAME, query: input.userText, mode: 'hybrid' };
+
   // 1. daemon 代跑一次检索（query = userText，mode = hybrid，limit = 5）
   let projection = null as ReturnType<typeof toToolProjection> | null;
   let retrievalOk = false;
 
   try {
-    const result = await runKbSearch(input.scope, {
+    const result = await awaitWithAbort(() => runKbSearch(input.scope, {
       query: input.userText,
       mode: 'hybrid',
       limit: CHAT_BUDGET.maxHitsPerCall,
-    });
+    }), input.signal);
     if (result.ok === true) {
       projection = toToolProjection(result);
       sources = toSourceRefs(result);
@@ -458,12 +491,17 @@ async function* degradedPath(
     retrievalOk = false;
   }
 
+  if (isAborted(input.signal)) {
+    yield { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '已停止' };
+    yield* abortedEvents(messageId, sources, usage);
+    return;
+  }
+
   // ★ 无论走哪条分支都发 tool_start → tool_end 成对（前端不会永久停留在"正在检索…"）
   //   且在模型不支持工具时也如实反映"daemon 代跑了一次检索"
-  yield { type: 'tool_start', name: KB_SEARCH_TOOL_NAME, query: input.userText, mode: 'hybrid' };
   yield retrievalOk
-    ? { type: 'tool_end', hits: projection!.hits.length, durationMs: 0 }
-    : { type: 'tool_end', hits: 0, durationMs: 0, error: '检索不可用' };
+    ? { type: 'tool_end', hits: projection!.hits.length, durationMs: Date.now() - startedAt }
+    : { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '检索不可用' };
 
   // 3. degraded 明示（至多一次；N17 不得静默）
   yield {
@@ -519,18 +557,25 @@ async function* degradedPath(
       }
     } catch (err) {
       if (isAborted(input.signal)) {
-        yield { type: 'aborted', messageId };
+        yield* abortedEvents(messageId, sources, usage);
         return;
       }
-      // 上游失败：已产出的内容与已明示的 degraded 保留，以 done 收尾（不静默）
-      finishReason = 'error';
+      // 降级描述检索能力，不代表上游失败可以冒充正常完成。
+      const code = err instanceof LlmTimeoutError
+        ? 'LLM_TIMEOUT'
+        : err instanceof ChatDisabledError ? 'CHAT_DISABLED' : 'LLM_UPSTREAM_ERROR';
+      const retryable = err instanceof ChatDisabledError
+        ? false
+        : (err as { retryable?: boolean }).retryable !== false;
+      yield { type: 'error', code, error: (err as Error).message, retryable };
+      return;
     }
   } else {
     // 模型不可用：不发 content（上游接不上，也不编造回答）；事件序仍完整
     finishReason = 'stop';
   }
 
-  yield* finalize({ sources, usage, finishReason, messageId, aborted: false, roundsExhausted: false, conversationTooLong: false });
+  yield* finalize({ sources, usage, finishReason, messageId, aborted: isAborted(input.signal), roundsExhausted: false, conversationTooLong: false });
 }
 
 /** 收尾事件：sources?（无来源不发，且至多一次）→ usage? → done */
@@ -578,7 +623,8 @@ function dedupeSources(refs: SourceRef[]): SourceRef[] {
     seen.add(key);
     out.push(r);
   }
-  return out.slice(0, CHAT_BUDGET.maxHitsPerCall);
+  // 单次命中数在 projection 层限制；最终引用集合不能丢弃后续轮次的来源。
+  return out;
 }
 
 /**

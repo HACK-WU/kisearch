@@ -223,18 +223,20 @@ async function* readSseEvents(res: Response, signal?: AbortSignal): AsyncGenerat
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let exhausted = false;
 
   try {
     while (true) {
       if (signal?.aborted) break;
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) { exhausted = true; break; }
 
       buffer += decoder.decode(value, { stream: true });
 
       // 统一换行后按空行切帧
       let sep = findFrameEnd(buffer);
       while (sep) {
+        if (signal?.aborted) return;
         const raw = buffer.slice(0, sep.index);
         buffer = buffer.slice(sep.next);
         const payload = extractDataPayload(raw);
@@ -247,12 +249,15 @@ async function* readSseEvents(res: Response, signal?: AbortSignal): AsyncGenerat
     }
 
     // 流结束时冲刷残留帧（后端未以空行收尾时的兜底）
+    if (signal?.aborted) return;
     const tail = extractDataPayload(buffer);
     if (tail !== null) {
       const ev = parseEvent(tail);
       if (ev) yield ev;
     }
   } finally {
+    // Early return (terminal event or abort) must also cancel the unread body.
+    if (!exhausted) { try { await reader.cancel(); } catch { /* fetch may already have aborted */ } }
     // 中止或正常结束都要释放读锁，避免连接悬挂
     try {
       reader.releaseLock();

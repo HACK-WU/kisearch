@@ -128,7 +128,7 @@ export type RetrievalMode = 'fulltext' | 'hybrid';
 
 /** SSE 事件（判别联合，前端按 `type` 分派） */
 export type ChatEvent =
-  | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number }
+  | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
   | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string }
   | { type: 'sources'; sources: SourceRef[] }

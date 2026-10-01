@@ -33,8 +33,8 @@ writeFileSync(
   `dataDir: ${path.join(TMP_ROOT, 'data')}\nchatDir: ${path.join(TMP_ROOT, 'chat')}\n`,
   'utf-8',
 );
+const previousConfig = process.env.KI_CONFIG_PATH;
 process.env.KI_CONFIG_PATH = TMP_CONFIG;
-after(() => rmSync(TMP_ROOT, { recursive: true, force: true }));
 
 import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
 import { toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
@@ -44,7 +44,17 @@ import {
   createConversation,
   appendMessage,
 } from '../../src/lib/chat/chat-store.js';
-import { mockSearchResult, mockSearchResultWithoutLines } from '../../.delivery/mocks/mock-search.mjs';
+import { mockSearchResult, mockSearchResultWithoutLines } from './fixtures/mock-search.js';
+import { startRetrievalUpstream } from './fixtures/retrieval-upstream.js';
+
+let closeUpstream: (() => Promise<void>) | undefined;
+before(async () => { closeUpstream = await startRetrievalUpstream(TMP_ROOT, TMP_CONFIG); });
+after(async () => {
+  await closeUpstream?.();
+  rmSync(TMP_ROOT, { recursive: true, force: true });
+  if (previousConfig === undefined) delete process.env.KI_CONFIG_PATH;
+  else process.env.KI_CONFIG_PATH = previousConfig;
+});
 
 const conv = {
   version: 1 as const, id: 'c-acc-0001', scope: 'kisearch', title: 't', systemPrompt: '',
@@ -66,6 +76,7 @@ describe('SR-01 验收 · R18/R19 检索问答', () => {
   it('R18：回答前执行检索，且 scope 由 daemon 注入（模型不可指定）', async () => {
     const events = await collect(runToolLoop({ scope: 'kisearch', conv, userText: 'ki_search 用法', convSystemPrompt: '' }));
     assert.ok(events.some((e) => e.type === 'tool_start'), '应出现 tool_start');
+    assert.ok(events.findIndex((e) => e.type === 'tool_end') < events.findIndex((e) => e.type === 'content'), '检索返回后才输出最终回答');
   });
 
   it('N23：工具 schema 不含 scope 参数（跨 scope 检索被结构性禁止）', async () => {
@@ -74,10 +85,12 @@ describe('SR-01 验收 · R18/R19 检索问答', () => {
     assert.ok(!props.includes('scope'));
   });
 
-  it('R21：工具轮次不超过 maxToolRounds（超限强制作答，不无限循环）', async () => {
-    const events = await collect(runToolLoop({ scope: 'kisearch', conv, userText: 'x', convSystemPrompt: '' }));
+  it('2026-09-30 决策：第四次工具调用仍被执行，不受旧三轮上限截断', async () => {
+    const events = await collect(runToolLoop({ scope: 'kisearch', conv, userText: 'four rounds', convSystemPrompt: '' }));
     const rounds = events.filter((e) => e.type === 'tool_start').length;
-    assert.ok(rounds <= 3, `工具轮次 ${rounds} 超过上限 3`);
+    assert.equal(rounds, 4, '四次确定性工具请求应全部执行');
+    assert.equal(events.at(-1)?.type, 'done', '完成全部工具后正常回答');
+    assert.ok(!events.some((e) => e.warning === 'tool-rounds-exhausted'));
   });
 });
 

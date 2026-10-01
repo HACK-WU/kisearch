@@ -70,6 +70,7 @@ export function AppShell(): JSX.Element {
   if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
   const chatStore = chatStoreRef.current;
   const [chatOpen, setChatOpen] = useState(true);
+  const chatToggleRef = useRef<HTMLButtonElement>(null);
 
   const location = useLocation();
   const importVisible = location.pathname === '/import';
@@ -170,12 +171,19 @@ export function AppShell(): JSX.Element {
           <div className="ki-topbar__spacer" />
           {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
           <button
-            className="ki-topbar__toggle"
+            type="button"
+            className="ki-topbar__chat-toggle"
+            ref={chatToggleRef}
             onClick={() => setChatOpen((v) => !v)}
-            title="显示/隐藏 AI 对话面板"
+            title={chatOpen ? '收起 AI 对话' : '打开 AI 对话'}
+            aria-label="AI 对话"
             aria-pressed={chatOpen}
           >
-            ◨
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M20 11.5a8 8 0 0 1-8 8H5l-3 3V11.5a9 9 0 0 1 18 0Z" />
+              <path d="M7 11h.01M11 11h.01M15 11h.01" strokeWidth="3" />
+            </svg>
+            <span className="ki-topbar__chat-label">AI 对话</span>
           </button>
           {importTask && (
             <Link to="/import" className="ki-import-task-link" aria-live="polite">
@@ -198,7 +206,10 @@ export function AppShell(): JSX.Element {
       </div>
 
       {/* ════════ 右侧对话面板（常驻所有页面；关闭 = 隐藏不卸载，见 D15）════════ */}
-      <ChatPanel store={chatStore} open={chatOpen} />
+      <ChatPanel store={chatStore} open={chatOpen} onClose={() => {
+        setChatOpen(false);
+        chatToggleRef.current?.focus();
+      }} />
     </div>
     {editorRequest && (
       <DocumentEditor

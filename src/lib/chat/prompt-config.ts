@@ -5,12 +5,10 @@
  *   落盘：`{chatDir}/prompt-config.json`（chatDir 派生自 dataDir，与 `kb/` 分离
  *   → 快照恢复 / 删除 Group 都不会碰到它；测试可用 `KI_CONFIG_PATH` 指向临时 chatDir 隔离）。
  *
- * ★═══ 最重要的兼容性不变量 ═══★
- *   **配置文件不存在时，注入到 system 的内容必须与引入本模块之前逐字一致。**
- *   达成方式（两条，缺一不可）：
- *     ① 基础提示词默认**为空**（现在没有这条 → 默认也不该多注入一段）
- *     ② 内置 skill 的默认 content **就是**既有 `RETRIEVAL_SKILL_PROMPT`（同一字符串，不另写一份）
- *   回归由 `test/chat/prompt-config.test.ts` 的「兼容性」用例守着。
+ * ★═══ 默认值与兼容性 ═══★
+ *   页面默认/恢复默认与模型注入共用检索 skill + 基础规则两份内容。
+ *   配置文件不存在时采用新版默认；已经保存的用户内容、空值及禁用状态仍按文件读取，
+ *   不因升级覆盖用户配置。回归由 test/chat/prompt-config.test.ts 守着。
  *
  * ★═══ 本批边界（勿越界）═══★
  *   · 工具开关**只存不生效** —— 真正生效在批次 2（暴露 MCP 工具给 AI）时接上；
@@ -23,7 +21,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { atomicWriteConfig, resolveDefaultChatDir, type KiConfig } from '../config.js';
-import { RETRIEVAL_SKILL_PROMPT } from './retrieval/retrieval-skill.js';
+import { DEFAULT_CHAT_PROMPT, RETRIEVAL_SKILL_PROMPT } from './retrieval/retrieval-skill.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
 
@@ -152,13 +150,12 @@ const BUILTIN_AT = '1970-01-01T00:00:00.000Z';
 export function defaultPromptConfig(): PromptConfig {
   return {
     version: 1,
-    // ★ 默认**为空**：现在没有这条配置，默认也不该多注入一段（兼容性不变量 ①）
-    prompt: { content: '', at: BUILTIN_AT },
+    prompt: { content: DEFAULT_CHAT_PROMPT, at: BUILTIN_AT },
     skills: [
       {
         id: 'builtin-retrieval',
         name: '知识库检索',
-        // ★ 直接复用既有常量：不另写一份文案，保证"未配置时注入逐字一致"（兼容性不变量 ②）
+        // 页面与模型注入共用默认内容，避免文案漂移。
         content: RETRIEVAL_SKILL_PROMPT,
         builtin: true,
         enabled: true,
@@ -367,8 +364,7 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
  *
  * · 顺序理由：内置 skill 含反幻觉规则，必须**先于**用户配置出现（既有约定：skill 在前）
  * · 空块不发（调用方据此不留空 system 消息 —— 与既有契约测试口径一致）
- * · 未配置时：内置 skill = `RETRIEVAL_SKILL_PROMPT`、基础提示词为空、无其他 skill
- *   → 产出恰为 `[RETRIEVAL_SKILL_PROMPT]`，与改动前逐字一致
+ * · 未配置时：产出 [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]，与默认构造器同源。
  */
 export function promptConfigSystemBlocks(cfg: PromptConfig): string[] {
   const blocks: string[] = [];

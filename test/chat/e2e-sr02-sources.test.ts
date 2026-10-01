@@ -43,7 +43,7 @@ import {
   degradedFlow,
   retrievalUnavailableFlow,
   abortedFlow,
-} from '../../.delivery/mocks/mock-sse.mjs';
+} from './fixtures/mock-sse.js';
 
 /**
  * ★ 分块大小 7 字节 —— 刻意取一个**必定落在 SSE 帧中间**的值。
@@ -54,8 +54,8 @@ import {
  */
 const CHUNK_SIZE = 7;
 
-/** mock 服务端口（取非常用端口，避免与本机 daemon 7423 冲突） */
-const PORT = 7489;
+/** 操作系统分配隔离端口，重复/并行运行不会抢占固定端口。 */
+let PORT = 0;
 
 /**
  * ★ 相对 URL 垫片（仅测试用，**不改变被测代码**）。
@@ -196,10 +196,13 @@ before(async () => {
     res.end(JSON.stringify({ ok: false, error: 'not found', code: 'NOT_FOUND' }));
   });
 
-  await new Promise<void>((resolve) => server.listen(PORT, '127.0.0.1', () => resolve()));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  PORT = (server.address() as AddressInfo).port;
 });
 
 after(async () => {
+  globalThis.fetch = NATIVE_FETCH;
+  server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
