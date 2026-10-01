@@ -6,6 +6,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
+import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
 
 /** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
@@ -70,13 +71,13 @@ function escapeHighlightRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** 与全文列表高亮保持一致：下划线/标点是 FTS 常见词边界，中文连续文本保留为整体。 */
-function splitHighlightTerms(query: string): string[] {
-  return query.trim().split(/[\s_.,，。:：;；!?！？()[\]{}-]+/).filter(Boolean);
-}
-
-function buildHighlightPattern(query: string): RegExp | null {
-  const terms = splitHighlightTerms(query)
+/**
+ * 正文高亮词表：与结果列表（lib/searchText）共用同一套切词（中文 2~4 字滑窗 + 停用词），
+ * 并按**全文文本**自适应剔除泛词——否则「什么需要注册中心」这类无空格中文长句会拆不出词（0 命中），
+ * 或是「注册」这种泛词在一篇讲服务注册的文档里铺满几十处高亮（实测 39 处 → 泛词剔除后 ~24 处）。
+ */
+function buildHighlightPattern(query: string, text: string): RegExp | null {
+  const terms = selectHighlightTerms(query, text)
     .sort((a, b) => b.length - a.length)
     .map(escapeHighlightRegExp);
   return terms.length > 0 ? new RegExp(`(${terms.join('|')})`, 'gi') : null;
@@ -94,8 +95,6 @@ function clearDocumentHighlights(root: HTMLElement): void {
 /** 在已安全渲染的 Markdown 文本节点上包裹 mark，不拼接原始 HTML。 */
 function applyDocumentHighlights(root: HTMLElement, query: string): number {
   clearDocumentHighlights(root);
-  const pattern = buildHighlightPattern(query);
-  if (!pattern) return 0;
 
   const textNodes: Text[] = [];
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -107,6 +106,10 @@ function applyDocumentHighlights(root: HTMLElement, query: string): number {
     if (text.nodeValue && parent && !parent.closest('script,style,svg,button,[aria-live]')) textNodes.push(text);
     node = walker.nextNode();
   }
+
+  // 词表按全文自适应（先收集文本再建 pattern）：泛词剔除依赖整篇的出现频次
+  const pattern = buildHighlightPattern(query, textNodes.map((text) => text.nodeValue ?? '').join('\n'));
+  if (!pattern) return 0;
 
   let count = 0;
   for (const textNode of textNodes) {
@@ -221,8 +224,12 @@ interface ModuleDrawerProps {
   /** 受控大纲折叠状态；传入后由外层页面保留同一全屏会话内的选择。 */
   outlineCollapsed?: boolean;
   onOutlineCollapsedChange?: (collapsed: boolean) => void;
-  /** 全屏时显示在阅读正文左侧的导航工作区（Group 树 + 文档列表）。 */
+  /** 全屏时显示在阅读正文左侧的导航工作区（Group 树）。 */
   fullscreenNavigation?: ReactNode;
+  /** 全屏时显示在头部中央的工具区（如全库搜索框）。 */
+  fullscreenToolbar?: ReactNode;
+  /** 常驻模式（浏览页双栏的右栏）：不渲染遮罩与 dialog 语义，容器改为内联定位，隐藏关闭按钮。 */
+  inline?: boolean;
 }
 
 export function ModuleDrawer({
@@ -246,6 +253,8 @@ export function ModuleDrawer({
   outlineCollapsed: controlledOutlineCollapsed,
   onOutlineCollapsedChange,
   fullscreenNavigation,
+  fullscreenToolbar,
+  inline = false,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -257,8 +266,11 @@ export function ModuleDrawer({
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
+  const savedNoticeTimer = useRef<number | undefined>(undefined);
   const [readerLinkSelection, setReaderLinkSelection] = useState<ReaderLinkSelection | null>(null);
   const [readerLinkComposerOpen, setReaderLinkComposerOpen] = useState(false);
+  /** 「添加链接」待选模式：点按钮后等待用户在正文中选中片段，选中即自动弹面板（用户要求的新顺序） */
+  const [linkArmed, setLinkArmed] = useState(false);
   const [selectionWarning, setSelectionWarning] = useState('');
   const selectionWarningTimer = useRef<number | undefined>(undefined);
   const editor = useDocumentEditor();
@@ -268,13 +280,30 @@ export function ModuleDrawer({
   const [highlightCount, setHighlightCount] = useState(0);
   const [highlightIndex, setHighlightIndex] = useState(0);
   const [outlineHeadings, setOutlineHeadings] = useState<OutlineHeading[]>([]);
-  const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(!fullscreen);
+  /** 非受控兜底：大纲默认折叠（与两个页面的受控初值一致），需要时手动展开 */
+  const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(true);
+  /** 全屏正文宽度：默认铺满（用户 2026-10-02 要求）；切「居中」时收窄到 770px 阅读轴 */
+  const [fullscreenWide, setFullscreenWide] = useState(true);
+
   const outlineCollapsed = controlledOutlineCollapsed ?? internalOutlineCollapsed;
   const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
   /** 正文滚动容器 */
   const bodyRef = useRef<HTMLDivElement>(null);
   /** 全屏切换前记下的阅读位置（正文容器会换父节点被重建，切换后按此恢复） */
   const savedScrollRef = useRef<number | null>(null);
+
+  /**
+   * 保存成功提示：3.5s 后自动消失。
+   * 原先各处只 setSavedNotice、从不清除 → 提示会一直挂在正文上方（用户反馈「显示时间太长了，并不会自动消失」）。
+   */
+  const showSavedNotice = useCallback((message: string): void => {
+    window.clearTimeout(savedNoticeTimer.current);
+    setSavedNotice(message);
+    savedNoticeTimer.current = window.setTimeout(() => {
+      setSavedNotice('');
+      savedNoticeTimer.current = undefined;
+    }, 3500);
+  }, []);
 
   const clearSelectionWarning = useCallback((): void => {
     window.clearTimeout(selectionWarningTimer.current);
@@ -293,6 +322,7 @@ export function ModuleDrawer({
 
   useEffect(() => () => {
     window.clearTimeout(selectionWarningTimer.current);
+    window.clearTimeout(savedNoticeTimer.current);
   }, []);
 
   useEffect(() => {
@@ -510,12 +540,13 @@ export function ModuleDrawer({
     const end = anchorBlock(range.endContainer);
     if (!start || start !== end || !root.contains(start)) {
       setReaderLinkSelection(null);
-      showSelectionWarning('请只选中同一标题、段落、列表项或表格单元格中的文字');
+      // 仅在「点击按钮校验」时报错；待选模式下用户拖选经过不合法区域属正常过程，静默等待
+      if (explicitAction) showSelectionWarning('请只选中同一标题、段落、列表项或表格单元格中的文字');
       return null;
     }
     if (Array.from(start.querySelectorAll('a,code')).some((node) => range.intersectsNode(node))) {
       setReaderLinkSelection(null);
-      showSelectionWarning('已有链接或代码中的文字，请使用“编辑文档”处理');
+      if (explicitAction) showSelectionWarning('已有链接或代码中的文字，请使用“编辑文档”处理');
       return null;
     }
     const rect = range.getBoundingClientRect();
@@ -525,25 +556,49 @@ export function ModuleDrawer({
     return selection;
   }, [clearSelectionWarning, content, editable, editor.isOpen, group, readerLinkComposerOpen, showSelectionWarning]);
 
+  /**
+   * 「添加链接」按钮（用户要求的新顺序：**先点按钮，再选片段**）：
+   * ① 若已选好片段 → 直接打开设置面板（保留「先选后点」的顺手路径）；
+   * ② 未选 → 进入待选模式（按钮高亮为「选择片段…」），随后在正文中选中片段即自动弹出面板；
+   * ③ 待选模式下再点一次 → 取消。
+   */
   const openReaderLinkComposer = useCallback((): void => {
-    if (!captureReaderSelection(true)) return;
-    setReaderLinkComposerOpen(true);
-  }, [captureReaderSelection]);
+    if (captureReaderSelection(true)) {
+      setReaderLinkComposerOpen(true);
+      setLinkArmed(false);
+      return;
+    }
+    if (linkArmed) {
+      setLinkArmed(false);
+      clearSelectionWarning();
+      return;
+    }
+    setLinkArmed(true);
+    showSelectionWarning('已进入「添加链接」模式：在正文中选中片段即自动弹出设置面板；再点一次按钮可取消');
+  }, [captureReaderSelection, clearSelectionWarning, linkArmed, showSelectionWarning]);
 
   useEffect(() => {
     if (readerLinkComposerOpen || !editable || content === null || editor.isOpen) return;
     let timer: number | undefined;
     const handler = (): void => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(captureReaderSelection, 100);
+      timer = window.setTimeout(() => {
+        const captured = captureReaderSelection();
+        // 待选模式：在正文中选中合法片段即自动打开设置面板（用户要求：不必再点一次按钮）
+        if (captured && linkArmed) {
+          setReaderLinkComposerOpen(true);
+          setLinkArmed(false);
+        }
+      }, 100);
     };
     document.addEventListener('selectionchange', handler);
     return () => { window.clearTimeout(timer); document.removeEventListener('selectionchange', handler); };
-  }, [captureReaderSelection, content, editable, editor.isOpen, readerLinkComposerOpen]);
+  }, [captureReaderSelection, content, editable, editor.isOpen, linkArmed, readerLinkComposerOpen]);
 
   const openEditor = useCallback((): void => {
     setReaderLinkSelection(null);
     setReaderLinkComposerOpen(false);
+    setLinkArmed(false);
     const selection = window.getSelection();
     const root = bodyRef.current?.querySelector('.ki-markdown--drawer');
     const selected = selection?.anchorNode && root?.contains(selection.anchorNode)
@@ -555,10 +610,10 @@ export function ModuleDrawer({
         setContent(next);
         const indexed = result.vectorStored ? '向量索引已更新'
           : result.fullTextUpdated ? '全文索引已更新' : '索引未变化';
-        setSavedNotice(`文档已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
+        showSavedNotice(`文档已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
       },
     });
-  }, [editor, group, module, scope]);
+  }, [editor, group, module, scope, showSavedNotice]);
 
   /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
@@ -567,6 +622,8 @@ export function ModuleDrawer({
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
       if (editor.isOpen || readerLinkComposerOpen) return;
+      // 待选模式优先退出，避免用户被留在「选择片段…」状态里
+      if (linkArmed) { setLinkArmed(false); clearSelectionWarning(); return; }
       if (fullscreen) updateFullscreen(false);
       else onClose();
     };
@@ -575,7 +632,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [editor.isOpen, fullscreen, onClose, readerLinkComposerOpen, updateFullscreen]);
+  }, [clearSelectionWarning, editor.isOpen, fullscreen, linkArmed, onClose, readerLinkComposerOpen, updateFullscreen]);
 
   /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
   const [atTop, setAtTop] = useState(true);
@@ -626,7 +683,10 @@ export function ModuleDrawer({
   const scrollable = !(atTop && atBottom);
 
   const body = (
-    <div className="ki-drawer__body" ref={bodyRef}>
+    <div
+      className={`ki-drawer__body${fullscreen && !fullscreenWide ? ' ki-drawer__body--narrow' : ''}`}
+      ref={bodyRef}
+    >
       {savedNotice && <div className="ki-drawer__copy-failed" role="status">{savedNotice}</div>}
       {selectionWarning && <div className="ki-drawer__copy-failed" role="status">{selectionWarning}</div>}
       {anchorWarning && <div className="ki-drawer__copy-failed" role="status">{anchorWarning}。文档已打开，请重新选择位置。</div>}
@@ -687,11 +747,11 @@ export function ModuleDrawer({
 
   return (
     <>
-      <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />
+      {!inline && <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />}
       <aside
-        className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}`}
-        role="dialog"
-        aria-modal="true"
+        className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}${inline ? ' ki-drawer--inline' : ''}`}
+        role={inline ? undefined : 'dialog'}
+        aria-modal={inline ? undefined : true}
         aria-label="原文查看"
       >
         {/* 头部 */}
@@ -745,36 +805,51 @@ export function ModuleDrawer({
               )}
             </div>
           </div>
-          {highlightEnabled && highlightCount > 0 && (
-            <div className="ki-drawer__highlight" role="group" aria-label="全文命中导航">
-              <span className="ki-drawer__highlight-count">{highlightIndex + 1}/{highlightCount}</span>
-              <button
-                className="ki-drawer__highlight-btn"
-                type="button"
-                onClick={cancelHighlights}
-                title="取消正文高亮"
-              >
-                取消高亮
-              </button>
-              <button
-                className="ki-drawer__highlight-btn"
-                type="button"
-                onClick={focusNextHighlight}
-                title="跳转到下一个命中"
-              >
-                下一个命中
-              </button>
-            </div>
-          )}
+          {fullscreen && fullscreenToolbar ? (
+            <div className="ki-drawer__fs-toolbar">{fullscreenToolbar}</div>
+          ) : null}
           <div className="ki-drawer__actions">
+            {/* 全文命中导航：紧贴复制按钮左侧（用户反馈：原孤立在标题区右侧视觉割裂） */}
+            {fullscreen && (
+              <div className="ki-segmented ki-reader-width" role="group" aria-label="正文宽度">
+                <button type="button" aria-pressed={!fullscreenWide} onClick={() => setFullscreenWide(false)}>
+                  居中
+                </button>
+                <button type="button" aria-pressed={fullscreenWide} onClick={() => setFullscreenWide(true)}>
+                  铺满
+                </button>
+              </div>
+            )}
+            {highlightEnabled && highlightCount > 0 && (
+              <div className="ki-drawer__highlight" role="group" aria-label="全文命中导航">
+                <span className="ki-drawer__highlight-count">{highlightIndex + 1}/{highlightCount}</span>
+                <button
+                  className="ki-drawer__highlight-btn"
+                  type="button"
+                  onClick={cancelHighlights}
+                  title="取消正文高亮"
+                >
+                  取消高亮
+                </button>
+                <button
+                  className="ki-drawer__highlight-btn"
+                  type="button"
+                  onClick={focusNextHighlight}
+                  title="跳转到下一个命中"
+                >
+                  下一个命中
+                </button>
+              </div>
+            )}
             {editable && group && content !== null && (
               <button
-                className="ki-drawer__copy"
+                className={`ki-drawer__copy${linkArmed ? ' ki-drawer__copy--armed' : ''}`}
                 type="button"
+                aria-pressed={linkArmed}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={openReaderLinkComposer}
-                title="为选中文字添加跳转链接"
-              >添加链接</button>
+                title={linkArmed ? '已进入添加链接模式：在正文中选中片段（再点一次取消）' : '点击后在正文中选中片段，自动弹出链接设置'}
+              >{linkArmed ? '选择片段…' : '添加链接'}</button>
             )}
             {editable && group && content !== null && (
               <button className="ki-drawer__copy" type="button" onClick={openEditor}>编辑文档</button>
@@ -863,9 +938,9 @@ export function ModuleDrawer({
             setReaderLinkComposerOpen(false);
             const indexed = result.vectorStored ? '向量索引已更新'
               : result.fullTextUpdated ? '全文索引已更新' : '索引未变化';
-            setSavedNotice(`跳转链接已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
+            showSavedNotice(`跳转链接已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
           }}
-          onPartialSaved={(next, warning) => { setContent(next); setSavedNotice(warning); }}
+          onPartialSaved={(next, warning) => { setContent(next); showSavedNotice(warning); }}
           onClose={() => { setReaderLinkSelection(null); setReaderLinkComposerOpen(false); window.getSelection()?.removeAllRanges(); }}
         />
       )}

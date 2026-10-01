@@ -42,7 +42,8 @@ export interface TaskReporter {
   stop(): void;
 }
 
-const TASK_TTL_MS = 60 * 60 * 1000;
+/** 任务记录保留时长；`/api/tasks` 用它作为 retainedForMs 返回给前端。 */
+export const TASK_TTL_MS = 60 * 60 * 1000;
 const STALE_AFTER_MS = 30 * 1000;
 const HEARTBEAT_INTERVAL_MS = 5 * 1000;
 const MAX_TASK_FILES = 2_000;

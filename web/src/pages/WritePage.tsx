@@ -22,6 +22,8 @@ export function WritePage(): JSX.Element {
   const queryClient = useQueryClient();
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默写到旧 scope */
+  const [scopeDraft, setScopeDraft] = useState('');
   const [preview, setPreview] = useState(false);
   const [vector, setVector] = useState(true);
 
@@ -48,6 +50,20 @@ export function WritePage(): JSX.Element {
   const relationErr = relation.trim() ? relationError(relation) : null;
   const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
   const hasFormError = !scopeConfirmed || !scope.trim() || !!scopeErr || !!groupErr || !!relationErr;
+  /**
+   * 保存被阻塞的原因：按钮保持可点（点击后由 submit() 给出具体错误），
+   * 同时把原因写在按钮旁——否则按钮灰着，用户不知道卡在哪。
+   */
+  /** 新建 Scope 草稿未确认（且与已确认目标不同）——先提示回车确认，避免写到旧 scope */
+  const pendingScope = scopeDraft.trim();
+  const scopeDraftDirty = pendingScope.length > 0 && pendingScope !== scope;
+  const saveBlockedReason = scopeDraftDirty
+    ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
+    : !scopeConfirmed
+      ? '请先在上方确认目标 Scope'
+      : hasFormError
+        ? '请补全必填项后再保存'
+        : null;
 
   // 点击外部关闭 tag combobox
   useEffect(() => {
@@ -161,15 +177,23 @@ export function WritePage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
+          <div className="ki-eyebrow">AUTHORING / 04</div>
           <h1>知识写入</h1>
           <p>sync-relation · 目标 scope：{scopeConfirmed ? scope : '尚未确认'}</p>
         </div>
       </div>
 
-      <div className="ki-card ki-write-layout">
-        <div className="ki-card__body" style={{ padding: 28 }}>
+      <div className="ki-write-split">
+        {/* 左：元数据卡（Scope / Group / 文档名 / Tags / 向量化 / 操作） */}
+        <div className="ki-card">
+        <div className="ki-card__head">
+          <span className="ki-panel-heading">
+            <span className="ki-panel-kicker">DOCUMENT</span>
+            <span className="ki-card__title">文档信息</span>
+          </span>
+        </div>
+        <div className="ki-card__body">
           <div className="ki-form-group" style={{ marginBottom: 12 }}>
-            <label className="ki-form-label">Scope（目标知识库）</label>
             <ScopePathSelect
               value={scope}
               confirmed={scopeConfirmed}
@@ -187,6 +211,7 @@ export function WritePage(): JSX.Element {
                 setScopeConfirmed(confirmed);
               }}
               placeholder="按名称筛选已有 Scope，如：kafka"
+              onDraftChange={setScopeDraft}
               hint="每次保存前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
               error={scopeErr}
               disabled={submitting}
@@ -199,9 +224,8 @@ export function WritePage(): JSX.Element {
                 scope={scope || currentScope}
                 value={group}
                 onChange={setGroup}
-                disabled={!scopeConfirmed}
                 placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
-                hint={scopeConfirmed ? "斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .." : '请先确认本次写入目标 Scope，再选择 Group。'}
+                hint={scopeConfirmed ? "斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .." : '下拉来自当前 Scope；保存前需确认上方目标 Scope。'}
                 error={groupErr}
               />
             </div>
@@ -221,40 +245,8 @@ export function WritePage(): JSX.Element {
               )}
             </div>
           </div>
-          <div className="ki-form-group">
-            <div className="ki-label-row">
-              <label className="ki-form-label" style={{ marginBottom: 0 }}>
-                Module Info（Markdown 正文）
-              </label>
-              <button
-                type="button"
-                className={`ki-preview-btn${preview ? ' ki-preview-btn--active' : ''}`}
-                onClick={() => setPreview((v) => !v)}
-              >
-                {preview ? '编辑' : '预览'}
-              </button>
-            </div>
-            <div className="ki-md-editor">
-              {preview ? (
-                <div className="ki-md-preview" style={{ height: 320 }}>
-                  <div className="ki-markdown">
-                    <MarkdownPreview text={markdown || '（空）'} />
-                  </div>
-                </div>
-              ) : (
-                <textarea
-                  className="ki-form-textarea"
-                  style={{ height: 320 }}
-                  placeholder="## 标题&#10;&#10;正文…"
-                  value={markdown}
-                  onChange={(e) => setMarkdown(e.target.value)}
-                />
-              )}
-            </div>
-          </div>
-
           {/* 自定义标签（可选） */}
-          <div className="ki-form-group" style={{ marginTop: 14 }}>
+          <div className="ki-form-group">
             <label className="ki-form-label">Tags</label>
             {/* combobox：输入框 + 下拉 */}
             <div className="ki-combobox" ref={tagRef} style={{ width: '100%' }}>
@@ -352,13 +344,19 @@ export function WritePage(): JSX.Element {
             <button
               className="ki-btn ki-btn--primary"
               onClick={() => void submit()}
-              disabled={submitting || hasFormError}
+              disabled={submitting}
+              title={saveBlockedReason ?? undefined}
             >
               {submitting ? '保存中…' : '保存'}
             </button>
             <button className="ki-btn ki-btn--secondary" onClick={reset}>
               清空
             </button>
+            {!submitting && saveBlockedReason && (
+              <span className="ki-cell-sub" style={{ color: 'var(--ki-color-warning)' }}>
+                {saveBlockedReason}
+              </span>
+            )}
             {result && (
               <span className="ki-cell-sub" style={{ color: 'var(--ki-color-success)' }}>
                 ✅ {result}
@@ -380,6 +378,39 @@ export function WritePage(): JSX.Element {
               </div>
             </div>
           )}
+        </div>
+        </div>
+
+        {/* 右：正文编辑卡（编辑 / 预览双态） */}
+        <div className="ki-card">
+          <div className="ki-card__head">
+            <span className="ki-panel-heading">
+              <span className="ki-panel-kicker">MARKDOWN</span>
+              <span className="ki-card__title">正文</span>
+            </span>
+            <div className="ki-segmented" role="group" aria-label="正文视图">
+              <button type="button" aria-pressed={!preview} onClick={() => setPreview(false)}>编辑</button>
+              <button type="button" aria-pressed={preview} onClick={() => setPreview(true)}>预览</button>
+            </div>
+          </div>
+          <div className="ki-card__body">
+            <div className="ki-md-editor">
+              {preview ? (
+                <div className="ki-md-preview ki-md-preview--tall">
+                  <div className="ki-markdown">
+                    <MarkdownPreview text={markdown || '（空）'} />
+                  </div>
+                </div>
+              ) : (
+                <textarea
+                  className="ki-form-textarea ki-form-textarea--tall"
+                  placeholder="## 标题&#10;&#10;正文…"
+                  value={markdown}
+                  onChange={(e) => setMarkdown(e.target.value)}
+                />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </>

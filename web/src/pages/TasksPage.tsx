@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { getTask, getTasks, type TaskRecord, type TaskState } from '@/api/tasksApi';
+import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
 
@@ -38,6 +40,32 @@ function sourceLabel(source: TaskRecord['source']): string {
   return '后台服务';
 }
 
+/** 进度百分比；无总数时返回 null（不渲染进度条，与 demo 不确定态一致） */
+function progressPercent(task: TaskRecord): number | null {
+  const progress = task.progress;
+  if (!progress || progress.total <= 0) return null;
+  return Math.min(100, Math.round((progress.done / progress.total) * 100));
+}
+
+/** 任务进度条（v2 §7-4：列表行与详情均显示；失败/未知转 danger、部分完成转 warn） */
+function TaskProgressBar({ task, large = false }: { task: TaskRecord; large?: boolean }): JSX.Element | null {
+  const percent = progressPercent(task);
+  if (percent === null) return null;
+  const tone = task.state === 'failed' || task.state === 'unknown' ? 'danger' : task.state === 'partial' ? 'warn' : 'accent';
+  return (
+    <div
+      className={`ki-task-bar${large ? ' ki-task-bar--lg' : ''}`}
+      role="progressbar"
+      aria-valuenow={percent}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label="任务进度"
+    >
+      <i className={`ki-task-bar__fill ki-task-bar__fill--${tone}`} style={{ width: `${percent}%` }} />
+    </div>
+  );
+}
+
 function TaskDetail({ id }: { id: string }): JSX.Element {
   const { data, isPending, error } = useQuery({
     queryKey: ['task', id],
@@ -54,7 +82,7 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
     <aside className="ki-task-detail">
       <div className="ki-task-detail__head">
         <div>
-          <span className="ki-card__sub">任务详情</span>
+          <span className="ki-panel-kicker">DETAIL</span>
           <h2>{task ? (OPERATION_LABEL[task.operation] ?? task.operation) : '任务'}</h2>
         </div>
         <span className={`ki-task-state ki-task-state--${task?.state ?? 'unknown'}`}>
@@ -74,12 +102,16 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
             <div><dt>结束时间</dt><dd>{timeLabel(task.finishedAt)}</dd></div>
             {task.partialCommitted !== undefined && <div><dt>已提交条目</dt><dd>{task.partialCommitted}</dd></div>}
           </dl>
+          <TaskProgressBar task={task} large />
           {task.error && <p className="ki-task-error">{task.error}</p>}
           {task.recoveryHint && <p className="ki-task-recovery">{task.recoveryHint}</p>}
           {task.state === 'unknown' && <p className="ki-task-muted">任务来源已失去心跳；请查看启动任务的终端确认最终结果。</p>}
         </>
       ) : null}
       <code className="ki-task-id">{id}</code>
+      <Link className="ki-btn ki-btn--secondary ki-btn--small ki-task-goto" to="/import">
+        前往导入页处理 →
+      </Link>
     </aside>
   );
 }
@@ -108,6 +140,7 @@ export function TasksPage(): JSX.Element {
     <div className="ki-tasks-page">
       <div className="ki-page-head">
         <div>
+          <div className="ki-eyebrow">JOBS / 05</div>
           <h1>后台任务</h1>
           <p>查看网页导入、CLI 导入与向量重建 · 最近任务保留 1 小时</p>
         </div>
@@ -126,7 +159,10 @@ export function TasksPage(): JSX.Element {
       <div className="ki-task-workspace">
         <section className="ki-card ki-task-list-card">
           <div className="ki-card__head">
-            <span className="ki-card__title">任务记录</span>
+            <span className="ki-panel-heading">
+              <span className="ki-panel-kicker">TASKS</span>
+              <span className="ki-card__title">任务记录</span>
+            </span>
             <div className="ki-task-filters" role="tablist" aria-label="任务筛选">
               {([['all', '全部'], ['running', '进行中'], ['failed', '失败'], ['recent', '最近结束']] as const).map(([key, label]) => (
                 <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => setFilter(key)}>
@@ -147,6 +183,7 @@ export function TasksPage(): JSX.Element {
                 <span className="ki-task-row__main">
                   <b>{OPERATION_LABEL[task.operation] ?? task.operation}</b>
                   <span>{task.scope} · {sourceLabel(task.source)} · {taskProgress(task)}</span>
+                  <TaskProgressBar task={task} />
                   {task.error && <small>{task.error}</small>}
                 </span>
                 <time>{timeLabel(task.startedAt ?? task.createdAt)}</time>
@@ -156,7 +193,9 @@ export function TasksPage(): JSX.Element {
         </section>
         {selectedId ? <TaskDetail id={selectedId} /> : (
           <aside className="ki-task-detail ki-task-detail--empty">
-            <span className="ki-task-detail__icon">◷</span>
+            <span className="ki-task-detail__icon">
+              <Icon name="clock" />
+            </span>
             <h2>选择一个任务</h2>
             <p>任务详情会显示阶段、进度、错误摘要和恢复建议。</p>
           </aside>

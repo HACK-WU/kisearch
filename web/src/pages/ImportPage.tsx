@@ -1,5 +1,5 @@
 /**
- * ImportPage.tsx —— 上传导入（对齐 demo：拖拽区 + 文件清单 + 切分高级选项 + 向量化 switch + 进度条）
+ * ImportPage.tsx —— 上传导入（对齐 v2 demo P3：双栏——主表单 ｜ 当前任务轨 380px）
  *
  * 明确选择本次目标 Scope → 选文件/目录 → 分批 upload（最后一批启动导入）→ 轮询 status → 进度/结果
  */
@@ -8,9 +8,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
+import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
 
 interface PendingFile {
@@ -347,6 +348,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  /** 「开始导入」被阻塞时的引导目标：未确认 Scope → Scope 区；未选文件 → 拖拽区 */
+  const scopeFieldRef = useRef<HTMLDivElement>(null);
+  const dropzoneRef = useRef<HTMLDivElement>(null);
+  const [attention, setAttention] = useState<'scope' | 'files' | null>(null);
+  /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默按旧 scope 导入 */
+  const [scopeDraft, setScopeDraft] = useState('');
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
   const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
@@ -374,6 +381,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [tagInput, setTagInput] = useState('');
   const [tagInputErr, setTagInputErr] = useState<string | null>(null);
   const [tagOpen, setTagOpen] = useState(false);
+  // 取消导入（POST /api/import/cancel）的请求状态
+  const [cancelState, setCancelState] = useState<'idle' | 'pending' | 'requested' | 'failed'>('idle');
+  const [cancelError, setCancelError] = useState('');
   const tagRef = useRef<HTMLDivElement>(null);
 
   // 实时校验 group（空字符串不报错，避免初次进入显示错误）
@@ -1056,28 +1066,90 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           : '输入有误';
   const retryUploadPlan = uploadPlanRef.current;
   const completedScope = job?.scope || uploadPlanRef.current?.scope || scope;
+  /**
+   * 「开始导入」被阻塞的原因。不靠「按钮灰掉」表达——按钮保持可点，
+   * 点了会把原因说出来并滚动定位到对应字段（否则用户只看到一片灰，无从下手）。
+   */
+  /** 「新建 Scope」输入框里有未确认草稿（且与已确认目标不同）——必须先回车，否则会导入到旧 scope */
+  const pendingScope = scopeDraft.trim();
+  const scopeDraftDirty = pendingScope.length > 0 && pendingScope !== scope;
+  const runBlockedReason = scopeDraftDirty
+    ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
+    : !scopeConfirmed
+      ? '请先在上方确认目标 Scope，再开始导入'
+      : files.length === 0
+        ? '请先选择要导入的 Markdown 文件或目录'
+        : null;
+  /** 点击「开始导入」：被阻塞则引导定位，否则真正开跑 */
+  const runClick = (): void => {
+    const target = scopeDraftDirty || !scopeConfirmed ? 'scope' : files.length === 0 ? 'files' : null;
+    if (target) {
+      (target === 'scope' ? scopeFieldRef : dropzoneRef).current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+      setAttention(target);
+      window.setTimeout(() => setAttention(null), 1300);
+      return;
+    }
+    void start();
+  };
   const buttonStatus = error
     ? errorStatus
     : phase === 'done'
       ? '导入完成'
       : phase === 'failed'
         ? errorStatus
-        : progressText || '直导无需 AI · 无第三方依赖';
+        : runBlockedReason ?? (progressText || '直导无需 AI · 无第三方依赖');
+
+  // 右轨常显（对齐 demo：打开即双栏）；阶段徽标复用任务状态色
+  const trackLabel = phase === 'idle' ? '等待开始' : phase === 'scanning' ? '读取目录中' : phase === 'uploading' ? '上传中' : phase === 'importing' ? '导入中' : phase === 'done' ? '导入完成' : phase === 'unknown' ? '待确认' : '导入失败';
+  const trackTone = phase === 'idle' ? 'cancelled' : phase === 'scanning' ? 'partial' : phase === 'uploading' || phase === 'importing' ? 'running' : phase === 'done' ? 'succeeded' : phase === 'unknown' ? 'unknown' : 'failed';
+  // 取消导入（POST /api/import/cancel）：服务端在当前批次完成后停止后续写入
+  const requestCancel = async (): Promise<void> => {
+    const jobId = job?.id;
+    if (!jobId) {
+      setCancelState('failed');
+      setCancelError('任务尚未建立：上传完成后、进入导入阶段即可取消');
+      return;
+    }
+    setCancelState('pending');
+    setCancelError('');
+    try {
+      await cancelImport(jobId);
+      setCancelState('requested');
+    } catch (err) {
+      setCancelState('failed');
+      setCancelError(err instanceof Error ? err.message : '取消请求失败');
+    }
+  };
 
   return (
     <>
       <div className="ki-page-head">
         <div>
+          <div className="ki-eyebrow">INGEST / 03</div>
           <h1>上传导入</h1>
           <p>目标：{scopeConfirmed ? scope : '请选择并确认本次导入的 Scope'} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
         </div>
       </div>
 
+      <div className="ki-import-layout">
       <div className="ki-card">
+        <div className="ki-card__head">
+          <span className="ki-card__title">
+            <span className="ki-track-kicker">UPLOAD</span>
+            <span style={{ display: 'block', marginTop: 2 }}>导入设置</span>
+          </span>
+          <span className="ki-card__sub">
+            {scopeConfirmed ? `${scope}${group ? ` / ${group}` : ''}` : '目标待确认'}
+          </span>
+        </div>
         <div className="ki-card__body" style={{ padding: 20 }}>
           {/* 拖拽区 */}
           <div
-            className={`ki-dropzone${dragOver ? ' ki-dropzone--over' : ''}`}
+            ref={dropzoneRef}
+            className={`ki-dropzone${dragOver ? ' ki-dropzone--over' : ''}${attention === 'files' ? ' ki-attention' : ''}`}
             onClick={() => fileInput.current?.click()}
             onDragOver={(e) => {
               e.preventDefault();
@@ -1086,10 +1158,37 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
           >
-            <div className="ki-dropzone__icon">⇪</div>
+            <div className="ki-dropzone__icon">
+              <Icon name="upload" />
+            </div>
             <div className="ki-dropzone__title">拖拽 Markdown 文件或目录到此处，或点击选择</div>
-            <div style={{ marginTop: 4, fontSize: 12 }}>
+            <div className="ki-dropzone__hint">
               文档：{importPolicy.extensions.join(', ')}；Markdown 引用的图片附件会一并处理，其他文件自动跳过
+            </div>
+            <div className="ki-dropzone__actions">
+              <button
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (fileInput.current) {
+                    fileInput.current.value = '';
+                    fileInput.current.click();
+                  }
+                }}
+              >
+                选择文件
+              </button>
+              <button
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openDirPicker();
+                }}
+              >
+                选择目录
+              </button>
             </div>
             <input
               ref={fileInput}
@@ -1100,38 +1199,40 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               onChange={onFileChange}
             />
           </div>
-          <div style={{ marginTop: 8 }}>
-            <label className="ki-form-label">Scope（目标知识库）</label>
-            <ScopePathSelect
-              value={scope}
-              confirmed={scopeConfirmed}
-              currentScope={currentScope}
-              onChange={(value, confirmed) => {
-                if (value !== scope) {
-                  setGroup('');
-                  setAvailableTags([]);
-                  setSelectedTags([]);
-                }
-                setScope(value.trim());
-                setScopeConfirmed(confirmed);
-              }}
-              placeholder="按名称筛选已有 Scope，如：kafka"
-              hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
-              error={scopeErr}
-              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
-            />
-          </div>
-          <div style={{ marginTop: 8 }}>
-            <label className="ki-form-label">Group 路径（可选，导入根目录）</label>
-            <GroupPathSelect
-              scope={scope || currentScope}
-              value={group}
-              onChange={setGroup}
-              disabled={!scopeConfirmed}
-              placeholder="选择或输入 Group 路径，如：wiki/我的文档"
-              hint={scopeConfirmed ? "留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .." : '请先确认本次导入目标 Scope，再选择 Group 路径。'}
-              error={groupErr}
-            />
+          {/* Scope 与 Group 竖排（各占整行），不走左右两列 */}
+          <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div ref={scopeFieldRef} className={attention === 'scope' ? 'ki-attention' : undefined}>
+              <ScopePathSelect
+                value={scope}
+                confirmed={scopeConfirmed}
+                currentScope={currentScope}
+                onChange={(value, confirmed) => {
+                  if (value !== scope) {
+                    setGroup('');
+                    setAvailableTags([]);
+                    setSelectedTags([]);
+                  }
+                  setScope(value.trim());
+                  setScopeConfirmed(confirmed);
+                }}
+                placeholder="按名称筛选已有 Scope，如：kafka"
+                onDraftChange={setScopeDraft}
+                hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
+                error={scopeErr}
+                disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
+              />
+            </div>
+            <div>
+              <label className="ki-form-label">Group 路径（可选，导入根目录）</label>
+              <GroupPathSelect
+                scope={scope || currentScope}
+                value={group}
+                onChange={setGroup}
+                placeholder="选择或输入 Group 路径，如：wiki/我的文档"
+                hint={scopeConfirmed ? "留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .." : '下拉来自当前 Scope；开始导入前需确认上方目标 Scope。'}
+                error={groupErr}
+              />
+            </div>
           </div>
 
           <div style={{ marginTop: 12 }}>
@@ -1225,15 +1326,35 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 </div>
               )}
             </div>
-            {/* 已选 tag pills（独立行） */}
-            {selectedTags.length > 0 && (
-              <div className="ki-tag-pills" style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {selectedTags.map((t) => (
-                  <span key={t} className="ki-tag-pill">
+            {/* Tags 芯片（对齐 demo .chips：已有标签点击即选中/取消；新建的标签也在其中，点击移除） */}
+            {(availableTags.length > 0 || selectedTags.length > 0) && (
+              <div className="ki-chips" style={{ marginTop: 8 }} role="group" aria-label="文档标签">
+                {availableTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`ki-chip${selectedTags.includes(t) ? ' ki-chip--on' : ''}`}
+                    onClick={() => toggleTag(t)}
+                    aria-pressed={selectedTags.includes(t)}
+                  >
                     {t}
-                    <span className="ki-tag-pill__x" onClick={() => removeTag(t)}>✕</span>
-                  </span>
+                  </button>
                 ))}
+                {selectedTags
+                  .filter((t) => !availableTags.includes(t))
+                  .map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      className="ki-chip ki-chip--on"
+                      onClick={() => removeTag(t)}
+                      title="移除此标签"
+                      aria-pressed={true}
+                    >
+                      {t}
+                      <span className="ki-chip__x" aria-hidden="true">✕</span>
+                    </button>
+                  ))}
               </div>
             )}
             {tagInputErr ? (
@@ -1243,37 +1364,28 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             )}
           </div>
 
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-            <button className="ki-btn ki-btn--secondary ki-btn--small" onClick={openDirPicker}>
-              上传目录
-            </button>
-            <button
-              className="ki-btn ki-btn--secondary ki-btn--small"
-              onClick={() => {
-                if (fileInput.current) {
-                  fileInput.current.value = '';
-                  fileInput.current.click();
-                }
-              }}
-            >
-              上传文件
-            </button>
-          </div>
-
           {/* 文件清单 */}
           {selections.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div className="ki-import-summary">
-                <span>待导入：{selectedDocuments.length} 个 Markdown</span>
-                <span>附件：{selectedAssets.length} 个</span>
-                {skippedFiles > 0 && <span className="ki-import-summary__skipped">已跳过：{skippedFiles} 个（{formatBytes(skippedBytes)}）</span>}
-                <span>大小：{formatBytes(totalSelectedBytes)}</span>
+                <span>待导入：<b>{selectedDocuments.length}</b> 个 Markdown</span>
+                <span>附件：<b>{selectedAssets.length}</b> 个</span>
+                {skippedFiles > 0 && (
+                  <span className="ki-import-summary__skipped">
+                    已跳过：<b>{skippedFiles}</b> 个（<b>{formatBytes(skippedBytes)}</b>）
+                  </span>
+                )}
+                <span>大小：<b>{formatBytes(totalSelectedBytes)}</b></span>
               </div>
               {selections.map((selection) => {
                 const totalSize = selection.files.reduce((sum, file) => sum + file.size, 0);
                 return (
                   <div key={selection.id} className="ki-file-item">
-                    <span className="ki-file-item__icon">{selection.kind === 'directory' ? '📁' : '📄'}</span>
+                    <span
+                      className={`ki-file-item__icon${selection.kind === 'directory' ? ' ki-file-item__icon--dir' : ''}`}
+                    >
+                      <Icon name={selection.kind === 'directory' ? 'folder' : 'file'} className="ki-icon ki-icon--sm" />
+                    </span>
                     <div className="ki-file-item__meta">
                       <div className="ki-file-item__name">{selection.name}</div>
                       {selection.kind === 'directory' ? (
@@ -1357,19 +1469,32 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <div style={{ display: 'flex', gap: 8, marginTop: 20, alignItems: 'center' }}>
             <button
               className="ki-btn ki-btn--primary"
-              onClick={() => void start()}
-              disabled={!scopeConfirmed || phase === 'scanning' || phase === 'uploading' || phase === 'importing' || files.length === 0}
+              onClick={runClick}
+              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
+              title={runBlockedReason ?? undefined}
             >
               {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
-            <span className="ki-cell-sub">{buttonStatus}</span>
+            <span
+              className="ki-cell-sub"
+              style={runBlockedReason ? { color: 'var(--ki-color-warning)' } : undefined}
+            >
+              {buttonStatus}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* 进度 */}
-      {(phase === 'scanning' || phase === 'uploading' || phase === 'importing') && (
-        <div className="ki-progress-block" style={{ marginTop: 16 }}>
+      <aside className="ki-import-track" aria-label="当前任务">
+        {/* 卡 1：导入进度（idle 也常显，对齐 demo） */}
+        <div className="ki-progress-block">
+          <div className="ki-track-head">
+            <span className="ki-track-kicker">PROGRESS</span>
+            <span className={`ki-task-state ki-task-state--${trackTone}`}>{trackLabel}</span>
+          </div>
+          <div className="ki-track-title">导入进度</div>
+          {(phase === 'scanning' || phase === 'uploading' || phase === 'importing') ? (
+          <>
           <div className="ki-progress-row">
             <span className="ki-progress-label">
               <span className="ki-spinner" aria-hidden="true" />
@@ -1390,11 +1515,32 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 ? `${job.progress.done}/${job.progress.total} 个处理单元（${importPercent ?? 0}%）`
                 : progressText}
           </div>
+          <div className="ki-progress-actions">
+            {cancelState === 'requested' ? (
+              <span className="ki-cell-sub">已请求取消：当前批次完成后停止后续写入</span>
+            ) : (
+              <button
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                type="button"
+                disabled={!job?.id || cancelState === 'pending'}
+                title={job?.id ? '请求取消导入（当前批次完成后停止）' : '上传完成后、进入导入阶段即可取消'}
+                onClick={() => void requestCancel()}
+              >
+                {cancelState === 'pending' ? '请求中…' : '取消导入'}
+              </button>
+            )}
+            {cancelState === 'failed' && <span className="ki-cell-sub">取消失败：{cancelError}</span>}
+          </div>
+          </>
+          ) : (
+            <p className="ki-cell-sub" style={{ marginTop: 8 }}>
+              {phase === 'idle' ? '等待开始：选择文件并确认 Scope 后点击「开始导入」。' : phase === 'done' ? '本次导入已结束，结果见下方「结果摘要」。' : '本次导入未完成，可在主区修正后重试。'}
+            </p>
+          )}
         </div>
-      )}
 
       {error && (
-        <div className="ki-empty" style={{ marginTop: 16 }}>
+        <div className="ki-empty">
           <div>
             <h3>{errorStatus}</h3>
             <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{error}</p>
@@ -1410,7 +1556,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       )}
 
       {uploadErrors.length > 0 && (
-        <div className="ki-import-errors" style={{ marginTop: 16 }} role="alert">
+        <div className="ki-import-errors" role="alert">
           <div className="ki-import-errors__title">部分文件未上传（{uploadErrors.length}）</div>
           <ul>
             {uploadErrors.map((item, index) => (
@@ -1420,11 +1566,20 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         </div>
       )}
 
-      {phase === 'done' && !error && (
-        <div className="ki-empty" style={{ marginTop: 16 }}>
-          <div>
-            <h3>{importErrors.length > 0 || uploadErrors.length > 0 ? '导入完成，但有部分错误' : '导入完成'}</h3>
-            <p>
+        {/* 卡 2：结果摘要（对齐 demo LAST RUN） */}
+        <div className="ki-progress-block">
+          <div className="ki-track-head">
+            <span className="ki-track-kicker">LAST RUN</span>
+            {phase === 'done' && !error && (
+              <span className="ki-task-state ki-task-state--succeeded">
+                {importErrors.length > 0 || uploadErrors.length > 0 ? '完成（有错误）' : '已完成'}
+              </span>
+            )}
+          </div>
+          <div className="ki-track-title">结果摘要</div>
+          {phase === 'done' && !error ? (
+            <>
+              <p className="ki-cell-sub" style={{ marginTop: 8 }}>
               {result?.stats
                 ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`
                 : '导入已完成，可前往搜索验证。'}
@@ -1455,7 +1610,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 </ul>
               </div>
             )}
-            <div className="ki-empty__actions">
+            <div className="ki-track-actions">
               <Link
                 className="ki-btn ki-btn--secondary ki-btn--small"
                 to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(completedScope)}` }}
@@ -1467,9 +1622,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 前往搜索验证 →
               </Link>
             </div>
-          </div>
+            </>
+          ) : (
+            <p className="ki-cell-sub" style={{ marginTop: 8 }}>完成一次导入后，这里显示处理分片、向量化、同名冲突与错误数。</p>
+          )}
         </div>
-      )}
+      </aside>
+      </div>
     </>
   );
 }

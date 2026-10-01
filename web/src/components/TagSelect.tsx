@@ -74,7 +74,7 @@ export function TagSelect({ scope, value, onChange, width = 140 }: TagSelectProp
       <div className="ki-combobox__input-wrap">
         <input
           className="ki-form-input"
-          placeholder={disabled ? '暂无 tag' : open ? '搜索 tag…' : '全部 tag'}
+          placeholder={disabled ? '暂无 tag' : open ? '搜索 tag…' : '全部标签'}
           value={open ? filter : value}
           disabled={disabled}
           onChange={(e) => {
@@ -110,7 +110,7 @@ export function TagSelect({ scope, value, onChange, width = 140 }: TagSelectProp
               className={`ki-combobox__option${value ? '' : ' ki-combobox__option--active'}`}
               onClick={() => pick('')}
             >
-              <span className="ki-combobox__option-label">全部 tag</span>
+              <span className="ki-combobox__option-label">全部标签</span>
               {!value && <span className="ki-combobox__option-check">✓</span>}
             </button>
           )}

@@ -68,28 +68,32 @@ export interface ScopeEntry {
   wikiCount: number;
   /** 完整登记在 FTS-only Collection 且没有 dense 向量的文档数。 */
   ftsOnlyDocCount: number;
+  /** 有 FTS 索引的文档数（含 dense+FTS 混合）；用于「FTS 层是否已建立」的运行态判断。 */
+  ftsDocCount: number;
 }
 
 /** 统计 Scope 的 KB 文档数与完整 FTS-only 文档数（每个 relation 计一次）。 */
-function countScopeDocs(scope: string): { wikiCount: number; ftsOnlyDocCount: number } {
+function countScopeDocs(scope: string): { wikiCount: number; ftsOnlyDocCount: number; ftsDocCount: number } {
   const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) return { wikiCount: 0, ftsOnlyDocCount: 0 };
+  if (!fs.existsSync(cachePath)) return { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
   try {
     const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
       groups?: Record<string, { hot_relations?: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>[] }>;
     };
     let wikiCount = 0;
     let ftsOnlyDocCount = 0;
+    let ftsDocCount = 0;
     for (const g of Object.values(cache.groups || {})) {
       const relations = g?.hot_relations ?? [];
       wikiCount += relations.length;
       for (const relation of relations) {
+        if ((relation.ftsIds?.length ?? 0) > 0 && relation.ftsIndexComplete !== false) ftsDocCount += 1;
         if (isFtsOnlyIndexedRelation(relation)) ftsOnlyDocCount += 1;
       }
     }
-    return { wikiCount, ftsOnlyDocCount };
+    return { wikiCount, ftsOnlyDocCount, ftsDocCount };
   } catch {
-    return { wikiCount: 0, ftsOnlyDocCount: 0 }; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
+    return { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 }; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
   }
 }
 
@@ -127,7 +131,7 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
 
   const all = new Set<string>([...kbScopes, ...vectorScopes, ...Object.keys(config.scopes)]);
   const scopes: ScopeEntry[] = [...all].sort().map((s) => {
-    const docCounts = kbScopes.has(s) ? countScopeDocs(s) : { wikiCount: 0, ftsOnlyDocCount: 0 };
+    const docCounts = kbScopes.has(s) ? countScopeDocs(s) : { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
     return {
       scope: s,
       kb: kbScopes.has(s),

@@ -1,8 +1,8 @@
 /**
- * AppShell.tsx —— 应用布局（对齐 demo：ki-sidebar 分组导航 + ki-topbar 服务徽标）
+ * AppShell.tsx —— 应用布局（对齐 v2 demo：品牌区 + 分组导航（SVG 图标）+ 面包屑顶栏 + 服务徽标）
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
@@ -12,17 +12,18 @@ import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/docume
 import { ImportPage } from '@/pages/ImportPage';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
+import { Icon } from '@/components/icons';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
 
 const NAV_MAIN = [
-  { to: '/', label: '总览', icon: '◧', end: true },
-  { to: '/browse', label: '知识库浏览', icon: '☰' },
-  { to: '/search', label: '语义搜索', icon: '⌕' },
-  { to: '/import', label: '上传导入', icon: '⇪' },
-  { to: '/write', label: '知识写入', icon: '✎' },
-  { to: '/tasks', label: '后台任务', icon: '◷' },
+  { to: '/', label: '总览', icon: 'grid', end: true },
+  { to: '/browse', label: '知识库浏览', icon: 'book' },
+  { to: '/search', label: '语义搜索', icon: 'search' },
+  { to: '/import', label: '上传导入', icon: 'upload' },
+  { to: '/write', label: '知识写入', icon: 'edit' },
+  { to: '/tasks', label: '后台任务', icon: 'clock' },
 ];
 
 function useTheme(): { theme: string; toggle: () => void } {
@@ -67,6 +68,9 @@ function ServiceBadge(): JSX.Element {
 export function AppShell(): JSX.Element {
   const location = useLocation();
   const importVisible = location.pathname === '/import';
+  const currentLabel = NAV_MAIN.find((item) =>
+    item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
+  )?.label ?? '总览';
   const { theme, toggle } = useTheme();
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
@@ -105,8 +109,40 @@ export function AppShell(): JSX.Element {
     void queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
   }, [taskQuery.data, scope, queryClient]);
   const activeTasks = taskQuery.data?.tasks.filter((task) => task.state === 'queued' || task.state === 'running') ?? [];
-  const failedTasks = taskQuery.data?.tasks.filter((task) => task.state === 'failed' || task.state === 'unknown') ?? [];
   const partialTasks = taskQuery.data?.tasks.filter((task) => task.state === 'partial') ?? [];
+  /** `${scope}\u0000${operation}` → 最近一次 succeeded 的完成时间（用于自动消除被覆盖的旧失败） */
+  const latestSuccessByScopeOp = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const task of taskQuery.data?.tasks ?? []) {
+      if (task.state !== 'succeeded') continue;
+      const key = `${task.scope}\u0000${task.operation}`;
+      map.set(key, Math.max(map.get(key) ?? 0, task.finishedAt ?? 0));
+    }
+    return map;
+  }, [taskQuery.data?.tasks]);
+  /** 手动忽略：按 scope 记住忽略时间戳（localStorage）；该时间戳之前的失败不再进入徽章 */
+  const [dismissTick, setDismissTick] = useState(0);
+  const dismissKey = `ki.taskFailedDismissedAt.${scope}`;
+  const dismissedFailedAt = useMemo(() => {
+    try { return Number(localStorage.getItem(dismissKey)) || 0; } catch { return 0; }
+  }, [dismissKey, dismissTick]);
+  const dismissFailedNotice = (): void => {
+    try { localStorage.setItem(dismissKey, String(Date.now())); } catch { /* 存储不可用时不影响本次会话内的重新计算 */ }
+    setDismissTick((n) => n + 1);
+  };
+  /**
+   * 失败任务（进入顶栏徽章的口径，用户 2026-10-02 要求两条消解规则）：
+   * ① 自动消除：同 scope + 同 operation 已有更新的 succeeded 记录 → 旧失败不再提示；
+   * ② 手动忽略：忽略时间戳之前的失败不再提示（其后的新失败仍会重新亮起）。
+   * 仅从顶栏徽章消解；任务页保留完整历史用于追溯。
+   */
+  const failedTasks = (taskQuery.data?.tasks ?? []).filter((task) => {
+    if (task.state !== 'failed' && task.state !== 'unknown') return false;
+    const latestSuccess = latestSuccessByScopeOp.get(`${task.scope}\u0000${task.operation}`) ?? 0;
+    if (latestSuccess > (task.finishedAt ?? 0)) return false;
+    if ((task.finishedAt ?? 0) <= dismissedFailedAt) return false;
+    return true;
+  });
   const taskStatus = activeTasks.length > 0
     ? `${activeTasks.length} 个任务运行中${failedTasks.length ? ` · ${failedTasks.length} 个失败/未知` : ''}${partialTasks.length ? ` · ${partialTasks.length} 个部分完成` : ''}`
     : failedTasks.length > 0
@@ -130,7 +166,8 @@ export function AppShell(): JSX.Element {
     const handler = (e: KeyboardEvent): void => {
       const isFind = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F');
       if (!isFind) return;
-      if (document.querySelector('.ki-drawer')) return; // 抽屉打开：保留浏览器默认查找
+      // 覆盖层抽屉打开：保留浏览器默认查找；常驻阅读区（inline）不算，Ctrl+F 仍聚焦应用内搜索框
+      if (document.querySelector('.ki-drawer:not(.ki-drawer--inline)')) return;
       const target = document.querySelector<HTMLInputElement>('[data-ki-search-input]');
       if (!target) return; // 当前页无应用内搜索框，保留浏览器默认
       e.preventDefault();
@@ -148,13 +185,16 @@ export function AppShell(): JSX.Element {
       {/* ════════ 侧边栏 ════════ */}
       <aside className={`ki-sidebar${sidebarHidden ? ' ki-sidebar--hidden' : ''}`}>
         <div className="ki-sidebar__header">
-          <div className="ki-logo">ki</div>
-          <span className="ki-sidebar__title">ki 知识库</span>
+          <div className="ki-logo" aria-hidden="true">ki</div>
+          <span className="ki-sidebar__brand">
+            <span className="ki-sidebar__title">ki 知识库</span>
+            <span className="ki-sidebar__subtitle">KNOWLEDGE INDEXER</span>
+          </span>
         </div>
 
         <nav className="ki-sidebar__section">
           <div className="ki-sidebar__section-head">
-            <span className="ki-sidebar__section-label">导航</span>
+            <span className="ki-sidebar__section-label">工作空间</span>
           </div>
           {NAV_MAIN.map((item) => (
             <NavLink
@@ -165,7 +205,7 @@ export function AppShell(): JSX.Element {
                 `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`
               }
             >
-              <span className="ki-nav-item__icon">{item.icon}</span>
+              <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
               <span className="ki-nav-item__name">{item.label}</span>
             </NavLink>
           ))}
@@ -174,15 +214,11 @@ export function AppShell(): JSX.Element {
         <div className="ki-sidebar__spacer" />
 
         <div className="ki-sidebar__footer">
-          <div className="ki-sidebar__footer-version">ki v{webPackage.version} · MCP 7423</div>
+          <strong className="ki-sidebar__footer-title">本地工作区</strong>
+          <span className="ki-sidebar__footer-meta">ki v{webPackage.version} · MCP 7423</span>
           <div className="ki-sidebar__footer-row">
             <button className="ki-icon-link" onClick={toggle} title="切换主题" aria-label="切换主题">
-              <svg viewBox="0 0 16 16" fill="currentColor" style={{ display: theme === 'dark' ? 'none' : '' }}>
-                <path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm.5-9.5a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zm0 11a.5.5 0 1 1-1 0v-1a.5.5 0 0 1 1 0v1zM4.146 4.146a.5.5 0 0 1 .708 0l.707.708a.5.5 0 1 1-.708.707l-.707-.707a.5.5 0 0 1 0-.708zm6.292 6.293a.5.5 0 0 1 .708 0l.707.707a.5.5 0 0 1-.707.708l-.708-.708a.5.5 0 0 1 0-.707zM2.5 8.5a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zm11 0a.5.5 0 0 1 0-1h1a.5.5 0 0 1 0 1h-1zM4.146 11.854a.5.5 0 0 1 0-.708l.708-.707a.5.5 0 0 1 .707.707l-.707.708a.5.5 0 0 1-.708 0zm6.293-6.293a.5.5 0 0 1 0-.707l.707-.708a.5.5 0 0 1 .708.708l-.708.707a.5.5 0 0 1-.707 0z" />
-              </svg>
-              <svg viewBox="0 0 16 16" fill="currentColor" style={{ display: theme === 'dark' ? '' : 'none' }}>
-                <path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z" />
-              </svg>
+              <Icon name={theme === 'dark' ? 'moon' : 'sun'} />
             </button>
             <a
               className="ki-icon-link"
@@ -204,18 +240,34 @@ export function AppShell(): JSX.Element {
       <div className="ki-main">
         <header className="ki-topbar">
           <button
-            className="ki-topbar__toggle"
+            className="ki-icon-button"
             onClick={() => setSidebarHidden((v) => !v)}
             title="收起/展开侧边栏"
+            aria-label="收起或展开侧边栏"
+            aria-expanded={!sidebarHidden}
           >
-            {sidebarHidden ? '☰' : '◁'}
+            <Icon name={sidebarHidden ? 'menu' : 'chevron-left'} />
           </button>
-          <span className="ki-topbar__title">ki 知识库</span>
+          <div className="ki-breadcrumb">
+            工作空间 <span className="ki-breadcrumb__sep">/</span> <strong>{currentLabel}</strong>
+          </div>
           <div className="ki-topbar__spacer" />
           <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
-            {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : '◷'}</span>}
+            {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}
             <span>{taskStatus}</span>
           </Link>
+          {/* 手动忽略失败提示：独立按钮（徽章本体是 Link，button 不能嵌进去） */}
+          {failedTasks.length > 0 && (
+            <button
+              className="ki-global-task-dismiss"
+              type="button"
+              onClick={dismissFailedNotice}
+              title="忽略失败提示；之后出现的新失败会再次提醒，任务页仍可查历史"
+              aria-label="忽略失败提示"
+            >
+              ×
+            </button>
+          )}
           <ScopeSelect />
           <ServiceBadge />
         </header>

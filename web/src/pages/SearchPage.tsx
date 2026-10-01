@@ -4,15 +4,17 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { GroupTreePanel } from '@/components/GroupTreePanel';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
+import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -20,40 +22,6 @@ const THRESHOLD_MAX = 0.2;
 const THRESHOLD_STEP = 0.005;
 const QUERY_TIMEOUT_MIN_SECONDS = 0.001;
 const QUERY_TIMEOUT_MAX_SECONDS = 60;
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function splitSearchTerms(query: string): string[] {
-  return query.trim().split(/[\s_.,，。:：;；!?！？()[\]{}-]+/).filter(Boolean);
-}
-
-/** 全文检索结果中高亮查询词；按 FTS 常见分隔符拆分，兼容中文连续查询与英文多词查询。 */
-function highlightMatch(text: string, query: string): JSX.Element {
-  const terms = splitSearchTerms(query).map(escapeRegExp);
-  if (terms.length === 0) return <>{text}</>;
-  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
-  return <>{text.split(pattern).map((part, index) =>
-    terms.some((term) => new RegExp(`^${term}$`, 'i').test(part))
-      ? <mark key={index} className="ki-search-hit-mark">{part}</mark>
-      : <Fragment key={index}>{part}</Fragment>
-  )}</>;
-}
-
-/** 将全文结果裁剪到命中词附近，避免整篇原文的开头把命中位置挤出可视区域。 */
-function makeSearchSnippet(content: string, query: string, maxLength = 480): string {
-  const normalized = content.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxLength) return normalized;
-  const lower = normalized.toLowerCase();
-  const firstMatch = splitSearchTerms(query)
-    .map((term) => lower.indexOf(term.toLowerCase()))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0] ?? -1;
-  const start = firstMatch > 120 ? firstMatch - 120 : 0;
-  const end = Math.min(normalized.length, start + maxLength);
-  return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
-}
 
 /** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
 const stepThreshold = (cur: number, dir: 1 | -1): number => {
@@ -404,6 +372,7 @@ export function SearchPage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
+          <div className="ki-eyebrow">RETRIEVAL / 02</div>
           <h1>语义搜索</h1>
           <p>向量 + BM25 混合检索 · 原文内容 + Group 路径</p>
         </div>
@@ -433,13 +402,17 @@ export function SearchPage(): JSX.Element {
           <button
             type="button"
             className="ki-btn ki-btn--secondary"
-            style={{ height: 42, padding: '0 18px' }}
+            style={{ padding: '0 18px' }}
             disabled={loading || (!query && results === null)}
             onClick={clearAll}
           >
             清空
           </button>
-          <button className="ki-btn ki-btn--primary" style={{ height: 42, padding: '0 24px' }} disabled={loading || !query.trim()}>
+          <div className="ki-segmented ki-search-mode" role="group" aria-label="检索模式">
+            <button type="button" aria-pressed={!fullTextOnly} onClick={() => setFullTextOnly(false)}>混合</button>
+            <button type="button" aria-pressed={fullTextOnly} onClick={() => setFullTextOnly(true)}>全文</button>
+          </div>
+          <button className="ki-btn ki-btn--primary" style={{ padding: '0 24px' }} disabled={loading || !query.trim()}>
             {loading ? '搜索中…' : '搜索'}
           </button>
         </div>
@@ -521,20 +494,6 @@ export function SearchPage(): JSX.Element {
               <option value="10">10</option>
               <option value="20">20</option>
             </select>
-          </div>
-          <div className="ki-query-option">
-            <span className="ki-form-label">全文</span>
-            <button
-              type="button"
-              className={`ki-switch${fullTextOnly ? ' ki-switch--on' : ''}`}
-              role="switch"
-              aria-checked={fullTextOnly}
-              aria-label="仅进行全文检索"
-              onClick={() => setFullTextOnly((value) => !value)}
-            >
-              <div className="ki-switch__knob" />
-            </button>
-            <span className="ki-form-suffix">{fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}</span>
           </div>
         </div>
         {historyScope === scope && recentSearches.length > 0 && (
@@ -641,7 +600,10 @@ export function SearchPage(): JSX.Element {
           )}
           <div className="ki-results">
             <div className="ki-results__head">
-              <span className="ki-results__title">搜索结果</span>
+              <span className="ki-panel-heading">
+                <span className="ki-panel-kicker">RESULTS</span>
+                <span className="ki-results__title">检索结果</span>
+              </span>
               <span className="ki-results__meta">
                 {total} 条结果{loading ? ' · 搜索中…' : ''}
               </span>
@@ -753,10 +715,19 @@ export function SearchPage(): JSX.Element {
           onBack={goBack}
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
+          fullscreenNavigation={
+            <GroupTreePanel
+              scope={scope}
+              activeGroup={viewing.group}
+              activeDocName={viewing.module}
+              onOpenDoc={({ group, name, path }) => openDocument({ module: name, group, path })}
+            />
+          }
           fullscreen={readerFullscreen}
           onFullscreenChange={(fullscreen) => {
             setReaderFullscreen(fullscreen);
-            setReaderOutlineCollapsed(!fullscreen);
+            // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）
+            setReaderOutlineCollapsed(true);
           }}
           outlineCollapsed={readerOutlineCollapsed}
           onOutlineCollapsedChange={setReaderOutlineCollapsed}

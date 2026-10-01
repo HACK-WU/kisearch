@@ -110,7 +110,24 @@ interface EmbeddingCheckResult {
 }
 
 /** 目录存在且可写检查 */
-function checkDir(name: string, dir: string): HealthItem {
+/** 人类可读容量；用于数据目录剩余空间提示（demo 同款「剩余 42.6 GB」口径）。 */
+function formatBytes(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+/** 磁盘剩余/总量；statfs 不可用（老内核、特殊文件系统）时返回 undefined，不让检查失败。 */
+function freeSpaceHint(dir: string): string | undefined {
+  try {
+    const stat = fs.statfsSync(dir);
+    return `剩余 ${formatBytes(stat.bavail * stat.bsize)} / ${formatBytes(stat.blocks * stat.bsize)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function checkDir(name: string, dir: string, options: { freeSpace?: boolean } = {}): HealthItem {
   if (!fs.existsSync(dir)) {
     return { name, status: 'fail', detail: `${dir} 不存在` };
   }
@@ -119,7 +136,8 @@ function checkDir(name: string, dir: string): HealthItem {
   } catch {
     return { name, status: 'fail', detail: `${dir} 无写权限` };
   }
-  return { name, status: 'pass', detail: `${dir} 存在且可写` };
+  const free = options.freeSpace ? freeSpaceHint(dir) : undefined;
+  return { name, status: 'pass', detail: `${dir} 存在且可写${free ? `，${free}` : ''}` };
 }
 
 /**
@@ -351,7 +369,7 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
   }
 
   // 2~4. 目录存在且可写
-  items.push(checkDir('dataDir', config.dataDir));
+  items.push(checkDir('dataDir', config.dataDir, { freeSpace: true }));
   items.push(checkDir('backupDir', config.backupDir));
   items.push(checkDir('vectorDir', getVectorDir(config)));
 

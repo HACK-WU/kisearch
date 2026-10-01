@@ -167,7 +167,19 @@ export interface StatusResponse {
 
 // ─── 基础 fetch 封装 ──────────────────────────────────
 
+/**
+ * 最近一次成功请求的往返耗时（ms）。
+ * 总览「MCP HTTP 服务」健康项用它展示「最近一次响应 N ms」（demo 同款口径）。
+ */
+let lastRttMs: number | null = null;
+
+/** 读取最近一次请求耗时；null = 尚无成功请求 */
+export function getLastRttMs(): number | null {
+  return lastRttMs;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const startedAt = performance.now();
   const res = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -182,6 +194,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     const err = (body as { error?: string } | undefined)?.error ?? `HTTP ${res.status}`;
     throw Object.assign(new Error(err), { status: res.status, body });
   }
+  lastRttMs = Math.max(1, Math.round(performance.now() - startedAt));
   return body as T;
 }
 
@@ -227,6 +240,20 @@ export async function saveEditableDocument(args: {
 
 export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {
   return req<ImportConfigResponse>(`/api/import/config?${new URLSearchParams({ scope }).toString()}`);
+}
+
+/** 请求取消导入任务：服务端在当前 embedding/zvec 批次完成后停止后续写入（POST /api/import/cancel） */
+export async function cancelImport(jobId: string): Promise<{ ok: boolean; jobId: string; state: string; message?: string }> {
+  const res = await fetch('/api/import/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jobId }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; jobId?: string; state?: string; message?: string; error?: string };
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error ?? `取消请求失败（HTTP ${res.status}）`);
+  }
+  return { ok: true, jobId: data.jobId ?? jobId, state: data.state ?? 'cancelling', message: data.message };
 }
 
 export async function uploadFiles(

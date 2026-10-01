@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { getDocList, getEditableDocument, saveEditableDocument, type DocItem, type SaveDocumentResponse } from '@/api/httpApi';
+import { getEditableDocument, saveEditableDocument, type DocItem, type SaveDocumentResponse } from '@/api/httpApi';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
-import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { GroupTreePanel } from '@/components/GroupTreePanel';
 import { anchorBlock, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
 import { externalTarget, insertReaderLink } from '@/lib/readerLinks';
 
@@ -48,11 +48,6 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
   const [busy, setBusy] = useState(false);
   const [saveLocked, setSaveLocked] = useState(false);
   const [retryReady, setRetryReady] = useState(false);
-  const [query, setQuery] = useState('');
-  const [pickerGroup, setPickerGroup] = useState('');
-  const [docs, setDocs] = useState<DocItem[]>([]);
-  const [docsLoading, setDocsLoading] = useState(false);
-  const [docsTruncated, setDocsTruncated] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<DocItem>({ group, name: relation });
   const [targetContent, setTargetContent] = useState<string | null>(currentContent);
   const [targetLoading, setTargetLoading] = useState(false);
@@ -61,7 +56,6 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({ left: 12, top: 12, visibility: 'hidden' });
   const panelRef = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const pendingSaveRef = useRef<PendingSave | null>(null);
@@ -78,31 +72,6 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
       ? below : Math.max(12, selection.rect.top - height - 10);
     setPanelStyle({ left, top, visibility: 'visible' });
   }, [pickerOpen, selection.rect]);
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-    searchRef.current?.focus();
-  }, [pickerOpen]);
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-    let active = true;
-    const timer = window.setTimeout(() => {
-      setDocsLoading(true);
-      const filters = {
-        ...(pickerGroup ? { group: pickerGroup } : {}),
-        ...(query.trim() ? { q: query.trim() } : {}),
-      };
-      void getDocList(scope, filters).then((result) => {
-        if (!active) return;
-        setDocs(result.docs);
-        setDocsTruncated(Boolean(result.truncated));
-      }).catch((error: Error) => {
-        if (active) setMessage(`查找文档失败：${error.message}`);
-      }).finally(() => { if (active) setDocsLoading(false); });
-    }, query.trim() ? 300 : 0);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [pickerOpen, pickerGroup, query, scope]);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -252,16 +221,6 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
     if (pendingSaveRef.current) void commitTarget(pendingSaveRef.current.target);
   };
 
-  const currentDoc: DocItem = { group, name: relation };
-  const list = [
-    ...(pickerGroup && pickerGroup !== group ? [] : [currentDoc]),
-    ...docs.filter((doc) => doc.group !== group || doc.name !== relation),
-  ];
-  const visibleList = list.filter((doc) =>
-    (!pickerGroup || doc.group === pickerGroup)
-    && (!query.trim() || `${doc.group} ${doc.name}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-  );
-
   return createPortal(<>
     {!pickerOpen && <section ref={panelRef} className="ki-reader-link-panel" style={panelStyle} aria-label="为选中文字添加跳转">
       <div className="ki-reader-link-panel__head"><strong>为选中文字添加跳转</strong><button type="button" onClick={onClose} aria-label="关闭">×</button></div>
@@ -270,7 +229,7 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
       <input id="ki-reader-external-url" type="url" value={externalUrl} onChange={(event) => { setExternalUrl(event.target.value); setMessage(''); }} placeholder="https://example.com" disabled={busy || retryReady || saveLocked} />
       <button className="ki-btn ki-btn--primary" type="button" onClick={addExternal} disabled={busy || saveLocked}>{busy ? '保存中…' : retryReady ? '重试保存' : '添加外部链接'}</button>
       <div className="ki-reader-link-panel__or">或</div>
-      <button className="ki-btn ki-btn--secondary" type="button" onClick={() => { setPickerGroup(''); setQuery(''); setPickerOpen(true); setMessage(''); }} disabled={busy || retryReady || saveLocked}>选择知识库文档或段落</button>
+      <button className="ki-btn ki-btn--secondary" type="button" onClick={() => { setPickerOpen(true); setMessage(''); }} disabled={busy || retryReady || saveLocked}>选择知识库文档或段落</button>
       {message && <p className="ki-reader-link__error" role="status">{message}</p>}
     </section>}
     {pickerOpen && <div className="ki-reader-link-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPickerOpen(false); }}>
@@ -280,31 +239,18 @@ export function ReaderLinkComposer({ scope, group, relation, currentContent, sel
           <button type="button" onClick={() => setPickerOpen(false)} disabled={busy} aria-label="关闭选择器">×</button>
         </header>
         <div className="ki-reader-link-dialog__body">
+          {/* 目录选择复用全屏阅读器的「知识目录」树：同样的层级、展开/折叠与当前文档高亮 */}
           <aside className="ki-reader-link-dialog__docs" aria-label="知识库文档">
-            <div className="ki-reader-link-dialog__group-filter-head">
-              <span className="ki-reader-link-dialog__filter-label">按 Group 浏览</span>
-              {pickerGroup && <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={() => { setPickerGroup(''); setMessage(''); }}>全部 Group</button>}
-            </div>
-            <div className="ki-reader-link-dialog__group-filter">
-              <GroupPathSelect
-                scope={scope}
-                value={pickerGroup}
-                onChange={(value) => { setPickerGroup(value); setMessage(''); }}
-                selectOnly
-              />
-            </div>
-            <label htmlFor="ki-reader-doc-search">查找文档</label>
-            <input ref={searchRef} id="ki-reader-doc-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文档名称或路径" disabled={busy || retryReady || saveLocked} />
-            <div className="ki-reader-link-dialog__doc-list">
-              {docsLoading && <p className="ki-reader-link-dialog__hint">正在查找文档…</p>}
-              {!docsLoading && !visibleList.length && <p className="ki-reader-link-dialog__hint">没有匹配的文档</p>}
-              {visibleList.map((doc) => <button key={`${doc.group}/${doc.name}`} type="button"
-                className={selectedDoc.group === doc.group && selectedDoc.name === doc.name ? 'is-active' : ''}
-                onClick={() => { setSelectedDoc(doc); setPosition(null); setMessage(''); }} disabled={busy || retryReady || saveLocked}>
-                <strong>{doc.name}{doc.group === group && doc.name === relation ? ' · 当前文档' : ''}</strong><small>{doc.group}</small>
-              </button>)}
-              {docsTruncated && <p className="ki-reader-link-dialog__hint">文档较多，可输入关键词继续查找。</p>}
-            </div>
+            <GroupTreePanel
+              scope={scope}
+              activeGroup={group}
+              activeDocName={relation}
+              onOpenDoc={(doc) => {
+                setSelectedDoc({ group: doc.group, name: doc.name, path: doc.path });
+                setPosition(null);
+                setMessage('');
+              }}
+            />
           </aside>
           <div className="ki-reader-link-dialog__target">
             <div className="ki-reader-link-dialog__target-head">

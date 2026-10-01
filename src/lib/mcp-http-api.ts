@@ -47,7 +47,7 @@ import { vectorCollectionDimension, vectorCountScope } from './vector-client.js'
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
-import { createTaskReporter, getTaskRecord, listTaskRecords, type TaskReporter } from './task-registry.js';
+import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 
@@ -569,6 +569,10 @@ export async function handleApiRequest(
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
     if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
+    if (p === '/tasks' && req.method === 'GET') return void handleTaskList(res, url, requestConfig, authScopes);
+    if (p.startsWith('/tasks/') && req.method === 'GET') return void handleTaskDetail(res, p.slice('/tasks/'.length), requestConfig, authScopes);
+    if (p === '/vector/status' && req.method === 'GET') return void handleVectorStatus(res, url, requestConfig);
+    if (p === '/vector/status/refresh' && req.method === 'POST') return void (await handleVectorStatusRefresh(req, res, requestConfig));
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
     // status 允许 handler 表达「服务在、但这个检查暂时给不出结果」（503），
@@ -640,6 +644,54 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
     }),
   ]).finally(() => clearTimeout(timer));
   sendJson(res, 200, { ok: true, report });
+}
+
+// ─── GET /api/tasks ───────────────────────────────────
+
+/**
+ * 任务记录列表（task-registry 落盘的任务文件）。
+ * 前端顶栏任务徽标、任务页、总览健康项共用；按 scope 授权过滤。
+ */
+function handleTaskList(res: http.ServerResponse, url: URL, config: KiConfig, authScopes: string[] | null): void {
+  const raw = Number(url.searchParams.get('limit') ?? '100');
+  const limit = Number.isFinite(raw) ? Math.min(Math.max(1, Math.floor(raw)), 500) : 100;
+  let tasks = listTaskRecords(config, limit);
+  if (authScopes !== null) tasks = tasks.filter((task) => scopeAllowed(authScopes, task.scope));
+  sendJson(res, 200, { ok: true, tasks, total: tasks.length, retainedForMs: TASK_TTL_MS });
+}
+
+/** 单个任务详情；记录已被 TTL 清理时返回 404，由前端提示重新发起。 */
+function handleTaskDetail(res: http.ServerResponse, id: string, config: KiConfig, authScopes: string[] | null): void {
+  if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
+    sendJson(res, 400, { ok: false, error: '任务 id 非法' });
+    return;
+  }
+  const task = getTaskRecord(config, id);
+  if (!task) {
+    sendJson(res, 404, { ok: false, error: 'task not found（记录可能已过期清理）' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, task.scope)) {
+    rejectScopeViolation(res, task.scope, '/tasks');
+    return;
+  }
+  sendJson(res, 200, { ok: true, task });
+}
+
+// ─── GET/POST /api/vector/status ──────────────────────
+
+/** 只读最近一次确认的向量维度快照（不打开 zvec）；缺失/过期返回 unknown，由前端决定是否刷新。 */
+function handleVectorStatus(res: http.ServerResponse, url: URL, config: KiConfig): void {
+  const scope = resolveScope(config, url.searchParams.get('scope') ?? '');
+  sendJson(res, 200, { ok: true, status: readVectorDimensionSnapshot(config, scope) });
+}
+
+/** 真实探测 zvec 集合维度并落盘快照（前端「重新检查」或快照过期时调用）。 */
+async function handleVectorStatusRefresh(req: http.IncomingMessage, res: http.ServerResponse, config: KiConfig): Promise<void> {
+  const body = (await readJsonBody(req)) as { scope?: string } | undefined;
+  const scope = resolveScope(config, typeof body?.scope === 'string' ? body.scope : '');
+  const status = await refreshVectorDimensionSnapshot(config, scope);
+  sendJson(res, 200, { ok: true, status });
 }
 
 // ─── GET /api/search-config ──────────────────────────

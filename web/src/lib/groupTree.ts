@@ -117,10 +117,15 @@ export function toggleNodeOpen(nodes: GroupTreeNode[], path: string): GroupTreeN
   });
 }
 
-/** 全部展开/折叠（新树；状态未变时返回原引用） */
+/**
+ * 全部展开/折叠（新树；状态未变时返回原引用）。
+ * 作用于**所有节点**（含只有文档的叶子 Group）：叶子折叠后其文档列表隐藏，
+ * 与单目录点击、demo「折叠全部目录」的行为保持一致。
+ * 此前跳过叶子节点（`children.length === 0` 直接 return null），
+ * 导致树里全是叶子目录时点「折叠全部」毫无反应。
+ */
 export function withAllOpen(nodes: GroupTreeNode[], open: boolean): GroupTreeNode[] {
   return rewriteTree(nodes, (node, children) => {
-    if (node.children.length === 0) return null;
     if (node.open === open && children === node.children) return null;
     return { ...node, open, children };
   });

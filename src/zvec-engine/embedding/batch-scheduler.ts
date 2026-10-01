@@ -10,6 +10,15 @@ import os from 'node:os';
 import type { EmbeddingAttemptEvent, EmbeddingProvider, EmbedOptions } from './provider.js';
 import { classifyVectorizationStop, type VectorizationStopReason } from '../errors.js';
 
+/**
+ * 内存背压水位（RSS admission guard，口径见 waitForMemory 注释）。
+ * 高水位 = 触发暂停；低水位 = 恢复放行，两档留出滞回区间避免抖振。
+ */
+const RSS_GUARD_PROCESS_RATIO_HIGH = 0.10;
+const RSS_GUARD_FREE_RATIO_LOW = 0.03;
+const RSS_GUARD_PROCESS_RATIO_LOW = 0.07;
+const RSS_GUARD_FREE_RATIO_RECOVER = 0.06;
+
 export interface EmbeddingSchedulerConfig {
   /** provider 单次逻辑调用的文本批大小 */
   batchSize: number;
@@ -389,17 +398,32 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
     return { ...this.metrics };
   }
 
-  /** RSS admission guard：连续 3 次超过 70% 时停止发起新批次，低于 60% 连续 3 次恢复。 */
+  /**
+   * RSS admission guard：内存压力背压（连续 3 次采样进入高水位 → 停止发新批次；连续 3 次回到低水位 → 恢复）。
+   *
+   * 判定口径（2026-10-02 修正）：原实现为 `rss > os.freemem() × 0.7` 触发 / `rss < os.freemem() × 0.6` 恢复，
+   * 分子是**单进程占用**、分母是**整机空闲内存**——两者语义错配，且 macOS 的 os.freemem() 只统计完全空闲页
+   * （不含 cached/inactive），机器正常使用中常落到百兆级。实测事故：daemon 375MB vs 恢复线 211MB，
+   * 永远不满足恢复条件 → embedding 连续 30s 被按住 → `VECTORIZE_RESOURCE_ADMISSION` 失败，
+   * 与 daemon 自身是否泄漏无关（别的进程多吃内存也会把它按住）。
+   *
+   * 现口径：**高水位（暂停）** = 本进程占整机内存 ≥10% **且** 系统空闲 ≤3%（自己也大、整机也紧张）；
+   *        **低水位（恢复）** = 本进程 <7% **或** 系统空闲回升 >6%（任一缓解即放行）。
+   * 即：只在"自己确实是大户且整机确实缺内存"时才刹车，不再被其他进程的占用牵连误杀。
+   */
   private async waitForMemory(signal?: AbortSignal): Promise<void> {
     let highSamples = 0;
     let recoveredSamples = 0;
     let guardSamples = 0;
     let paused = false;
     while (true) {
+      const total = os.totalmem();
       const rss = process.memoryUsage().rss;
-      const available = os.freemem();
+      const free = os.freemem();
       if (!paused) {
-        if (available > 0 && rss > available * 0.7) highSamples++;
+        const highPressure =
+          rss > total * RSS_GUARD_PROCESS_RATIO_HIGH && free < total * RSS_GUARD_FREE_RATIO_LOW;
+        if (highPressure) highSamples++;
         else highSamples = 0;
         if (highSamples < 3) {
           if (highSamples === 0) return;
@@ -409,13 +433,15 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
         paused = true;
       } else {
         guardSamples++;
-        if (available > 0 && rss < available * 0.6) recoveredSamples++;
+        const lowPressure =
+          rss < total * RSS_GUARD_PROCESS_RATIO_LOW || free > total * RSS_GUARD_FREE_RATIO_RECOVER;
+        if (lowPressure) recoveredSamples++;
         else recoveredSamples = 0;
         if (recoveredSamples >= 3) return;
       }
       if (guardSamples >= 120) {
         throw Object.assign(new Error(
-          `Embedding 因 RSS admission guard 暂停超过 30s（rss=${rss}，available=${available}）；` +
+          `Embedding 因内存压力（RSS admission guard）暂停超过 30s（rss=${rss}，total=${total}，free=${free}）；` +
           '请降低并发/批大小或释放 daemon 资源后重试',
         ), { code: 'VECTORIZE_RESOURCE_ADMISSION' });
       }

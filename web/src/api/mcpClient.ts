@@ -20,6 +20,8 @@ export interface ScopeInfo {
   wikiCount: number;
   /** 未向量化且 FTS-only 索引完整的文档数（按文档，不按 chunk/ID）。 */
   ftsOnlyDocCount: number;
+  /** 有 FTS 索引的文档数（含 dense+FTS 混合）；旧版 daemon 不返回该字段。 */
+  ftsDocCount?: number;
 }
 
 export interface SearchHit {

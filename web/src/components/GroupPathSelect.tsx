@@ -38,9 +38,9 @@ const ICON_FOLDER_SM = (
   <svg className="ki-gtree-icon" viewBox="0 0 16 16" fill="none">
     <path
       d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z"
-      fill="#7db3ef"
-      stroke="#5f97d6"
-      strokeWidth="0.6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
     />
   </svg>
 );

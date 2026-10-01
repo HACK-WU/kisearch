@@ -13,9 +13,10 @@ import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/li
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
-import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { TagSelect } from '@/components/TagSelect';
+import { Icon } from '@/components/icons';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
+import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import {
   buildGroupTree,
   countDocs,
@@ -29,14 +30,23 @@ import {
   type GroupTreeNode as TreeNode,
 } from '@/lib/groupTree';
 
+/** 树内所有 Group 是否都已展开（决定折叠按钮当前动作与图标；demo 为单按钮切换） */
+function isAllOpen(nodes: TreeNode[]): boolean {
+  return nodes.every((node) => node.open && isAllOpen(node.children));
+}
+
 const ICON_FOLDER = (
-  <svg className="ki-tree-icon" viewBox="0 0 16 16" fill="none">
-    <path
-      d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z"
-      fill="#7db3ef"
-      stroke="#5f97d6"
-      strokeWidth="0.6"
-    />
+  <svg
+    className="ki-tree-icon"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.3"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M1.6 3.7c0-.6.5-1.1 1.1-1.1h2.9l1.6 1.7h5.7c.6 0 1.1.5 1.1 1.1v6.9c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1V3.7z" />
   </svg>
 );
 
@@ -48,15 +58,6 @@ const ICON_NAV_TREE = (
     <rect x="9" y="2" width="6" height="6" rx="1.5" />
     <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
     <path d="M12 12V8" />
-  </svg>
-);
-
-const ICON_NAV_DOC = (
-  <svg className="ki-reader-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z" />
-    <path d="M15 2v5h5" />
-    <path d="M9 13h6" />
-    <path d="M9 17h5" />
   </svg>
 );
 
@@ -73,30 +74,7 @@ const ICON_NAV_REFRESH = (
   </svg>
 );
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
-function highlightMatch(text: string, query: string): JSX.Element {
-  const terms = query.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
-  if (terms.length === 0) return <>{text}</>;
-  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
-  return <>{text.split(pattern).map((part, index) =>
-    terms.some((term) => new RegExp(`^${term}$`, 'i').test(part))
-      ? <mark key={index} className="ki-search-hit-mark">{part}</mark>
-      : <Fragment key={index}>{part}</Fragment>
-  )}</>;
-}
-
-function makeSnippet(content: string, query: string, maxLength = 320): string {
-  const normalized = content.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxLength) return normalized;
-  const firstTerm = query.trim().split(/\s+/).find(Boolean)?.toLowerCase() ?? '';
-  const index = firstTerm ? normalized.toLowerCase().indexOf(firstTerm) : -1;
-  const start = index > 80 ? index - 80 : 0;
-  const end = Math.min(normalized.length, start + maxLength);
-  return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
-}
 
 /** 树节点无障碍名称：显式给出，避免 treeitem 按内容取名时把箭头按钮文案与计数混进来 */
 function treeNodeLabel(node: TreeNode, totalDocs: number): string {
@@ -113,8 +91,29 @@ export function BrowsePage(): JSX.Element {
   const { scope, setScope } = useScope();
   const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  // 全局在途请求数：> 0 时刷新按钮置为「刷新中…」并禁用，避免重复点击
-  const fetching = useIsFetching();
+  /**
+   * 本页相关查询的在途状态（scope 列表 / 文档列表 / 全文检索）——只驱动刷新按钮的「刷新中」反馈。
+   * 不能用全局 useIsFetching()：任务、健康检查等常驻轮询会把它长期抬为 > 0，
+   * 导致刷新按钮常年禁用、点了毫无反应。也不禁用按钮：请求期间允许重复点击（React Query 自动去重）。
+   */
+  const fetching =
+    useIsFetching({
+      predicate: (query) => ['scopeList', 'docList', 'fullTextSearch'].includes(String(query.queryKey[0])),
+    }) > 0;
+  /** 手动刷新窗口：本地请求 ~70ms，旋转一闪而过等于没反馈，故保证至少转 600ms */
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+
+  /** 点击刷新：失效本页查询，并在最小反馈时长内保持旋转 */
+  const refreshNow = (): void => {
+    if (manualRefreshing) return;
+    setManualRefreshing(true);
+    void Promise.all([
+      queryClient.invalidateQueries(),
+      new Promise((resolve) => setTimeout(resolve, 600)),
+    ]).finally(() => setManualRefreshing(false));
+  };
+  /** 旋转/「刷新中」的判定：本页查询在途 或 手动刷新窗口内 */
+  const busy = fetching || manualRefreshing;
   const [q, setQ] = useState('');
   const [activeGroup, setActiveGroup] = useState('');
   const [viewing, setViewing] = useState<DocumentView | null>(null);
@@ -122,13 +121,28 @@ export function BrowsePage(): JSX.Element {
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [searchQ, setSearchQ] = useState('');
-  // 阅读器全屏时把 Browse 导航带入工作区；两块导航独立折叠，Group 默认折叠、文档默认展开。
+  /**
+   * 文档打开来源：树点击 → 就地渲染在右侧阅读区（inline）；
+   * 检索结果点击 → 右侧抽屉滑出、结果列表保持可见（与语义检索页一致）。
+   */
+  const [viewingSource, setViewingSource] = useState<'tree' | 'search'>('tree');
+  // 阅读器全屏时把 Browse 导航（Group 树）带入工作区；默认折叠，可从收起态展开。
+  // 文档列表卡已按用户决策移除——全屏阅读以树选文档即可，列表与正文重复。
   const [readerFullscreen, setReaderFullscreen] = useState(false);
   const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
-  const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(true);
-  const [readerDocsCollapsed, setReaderDocsCollapsed] = useState(false);
+  /** 全屏工作区的知识目录：默认展开（用户 2026-10-02 要求）；收起后只留一个展开按钮 */
+  const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(false);
   // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
   const [selectedTag, setSelectedTag] = useState('');
+  // 树内文档叶子：按 Group 缓存已加载文档（全量列表优先，被 500 条截断的 Group 懒加载补齐）
+  const [docsByGroup, setDocsByGroup] = useState<Record<string, DocItem[]>>({});
+  const loadedGroupsRef = useRef<Set<string>>(new Set());
+  // 正文宽度：默认铺满；≥1480px 提供「居中 / 铺满」切换（对齐浏览 demo）
+  const [readerWide, setReaderWide] = useState(true);
+  /** 知识目录折叠：收起后左列变成窄条，正文拿到全部宽度（用户 2026-10-02 要求） */
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  // 窄屏：点树内文档后阅读区以覆盖层展开（CSS 仅在 ≤959px 生效），「返回目录」关闭
+  const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
   const appliedDirectTarget = useRef('');
 
   const directTarget = searchParams.toString();
@@ -230,14 +244,6 @@ export function BrowsePage(): JSX.Element {
     setTree((prev) => revealGroupPath(prev, activeGroup));
   }, [activeGroup, data?.groups]);
 
-  // 树节点 count 始终使用 /api/doc/list 返回的未筛选文档数；groupDocs 可能受 tag 过滤。
-  const activeDocs = groupDocs;
-  // 当前选中 Group 的「本组文档数」（未筛选口径），用于 tag 筛选下的文案说明。
-  const activeGroupNode = useMemo(
-    () => (activeGroup ? findGroupNode(tree, activeGroup) : null),
-    [activeGroup, tree],
-  );
-
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
     queryKey: ['docList', scope, 'search', searchQ, selectedTag],
@@ -249,10 +255,6 @@ export function BrowsePage(): JSX.Element {
   });
   const searchDocs = searchQuery.data?.docs ?? [];
   const isSearching = q.trim().length > 0;
-  const searchPending = isSearching && q.trim() !== searchQ;
-  const searchRefreshing = isSearching && (searchPending || searchQuery.isFetching);
-  // 首次搜索没有可复用的旧结果时展示 loading；后续输入保留上一次结果，避免列表闪烁。
-  const isSearchLoading = isSearching && !searchQuery.data && (searchPending || searchQuery.isLoading);
 
   // 文档列表搜索之外，按同一关键词查询正文；结果独立展示，避免把“文件名命中”
   // 与“正文命中”混成一个排序口径。仅使用 FTS-only/hybrid 的全文分支，不调用 embedding。
@@ -271,11 +273,6 @@ export function BrowsePage(): JSX.Element {
   });
   const fullTextHits = fullTextQuery.data?.results ?? [];
 
-  // 展示列表：有搜索词时展示全局搜索结果，否则展示当前选中 group 文档
-  const shownDocs = isSearching ? searchDocs : activeDocs;
-  const shownTotal = isSearching ? (searchQuery.data?.total ?? shownDocs.length) : (groupQuery.data?.total ?? activeDocs.length);
-  const searchTruncated = isSearching && searchQuery.data?.truncated === true;
-
   const clearFilters = useCallback((): void => {
     setQ('');
     setSelectedTag('');
@@ -292,11 +289,58 @@ export function BrowsePage(): JSX.Element {
   }, [data?.docs, groupDocs, searchDocs]);
 
   /** 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。 */
-  const openDocument = useCallback((doc: DocumentView): void => {
+  const openDocument = useCallback((doc: DocumentView, source: 'tree' | 'search' = 'tree'): void => {
+    setViewingSource(source);
     setHistory([]);
     setForwardHistory([]);
     setViewing(doc);
   }, []);
+
+  /**
+   * 默认打开第一篇：数据就绪、有文档、且用户尚未打开任何文档时，自动展示第一篇内容。
+   * 只有文档数为 0 时才显示「从左侧目录选择文档开始阅读」的真实空白页（用户要求）。
+   * autoOpenRef 保证每个 scope 只自动打开一次——用户主动关闭后不再抢回焦点。
+   */
+  const autoOpenRef = useRef(false);
+  useEffect(() => {
+    autoOpenRef.current = false;
+  }, [scope]);
+  useEffect(() => {
+    if (autoOpenRef.current || isLoading || viewing || isSearching) return;
+    const first = knownDocs[0];
+    if (!first) return;
+    autoOpenRef.current = true;
+    openDocument({ module: first.name, group: first.group, path: first.path });
+  }, [isLoading, isSearching, knownDocs, openDocument, scope, viewing]);
+
+  // ── 树内文档叶子 ──
+  // 首层数据：/api/doc/list 的全量列表（≤500 条按 Group 分组）
+  useEffect(() => {
+    const map: Record<string, DocItem[]> = {};
+    for (const doc of data?.docs ?? []) {
+      (map[doc.group] ??= []).push(doc);
+    }
+    setDocsByGroup(map);
+    loadedGroupsRef.current = new Set(Object.keys(map));
+  }, [data?.docs]);
+
+  /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录） */
+  const ensureGroupDocs = useCallback((group: string): void => {
+    if (!group || loadedGroupsRef.current.has(group)) return;
+    loadedGroupsRef.current.add(group);
+    void queryClient
+      .fetchQuery({
+        queryKey: ['docList', scope, 'group', group, ''],
+        queryFn: () => getDocList(scope, { group }),
+        staleTime: 30_000,
+      })
+      .then((res) => {
+        setDocsByGroup((prev) => ({ ...prev, [group]: res.docs ?? [] }));
+      })
+      .catch(() => {
+        loadedGroupsRef.current.delete(group);
+      });
+  }, [scope, queryClient]);
 
   /** 关闭抽屉后再次打开文档时从头开始记录导航历史。 */
   const closeDocument = useCallback((): void => {
@@ -346,28 +390,34 @@ export function BrowsePage(): JSX.Element {
   /** 切换节点展开/折叠（纯函数：返回新树，不改写旧 state 内的节点） */
   const toggleOpen = (path: string): void => {
     setTree((prev) => toggleNodeOpen(prev, path));
+    ensureGroupDocs(path);
   };
+
+  /** 递归收集树中全部 Group 路径（展开全部时批量补文档叶子） */
+  const collectGroupPaths = (nodes: TreeNode[]): string[] =>
+    nodes.flatMap((n) => [n.path, ...collectGroupPaths(n.children)]);
 
   /** 展开/折叠全部（纯函数） */
   const setAllOpen = (open: boolean): void => {
     setTree((prev) => withAllOpen(prev, open));
+    if (open) collectGroupPaths(tree).forEach((path) => ensureGroupDocs(path));
   };
 
+  /** 树卡头计数：恒为树内文档总数（搜索不再改写目录，命中数以右侧结果面板为准） */
+  const visibleDocCount =
+    tree.reduce((sum, node) => sum + countDocs(node), 0);
+  /** 全部 Group 已展开 → 折叠按钮呈现「折叠」动作（单按钮切换，对齐 demo） */
+  const allExpanded = tree.length > 0 && isAllOpen(tree);
+
   /**
-   * 目录点击（鼠标 / 触屏）：
-   * - 有自身文档的父 Group：选中并读取本组文档；折叠时顺带展开，已展开时不反向折叠（折叠交给箭头按钮）
-   * - 无自身文档的父目录：仅展开/折叠（本组没有文档可读）
-   * - 叶子 Group：选中并读取本组文档
+   * 目录点击（鼠标 / 触屏）：切换展开/折叠并选中本组（对齐 demo：点击文件夹即收起/展开其下内容）。
+   * 叶子 Group（只有文档、无子组）同样可折叠——此前只对有子组的节点生效，导致「点了没反应」。
    */
   const handleDirClick = (node: TreeNode): void => {
-    if (!isGroupSelectable(node)) {
-      if (node.children.length > 0) toggleOpen(node.path);
-      return;
-    }
-    if (node.children.length > 0 && !node.open) toggleOpen(node.path);
-    setActiveGroup(node.path);
-    // 全屏阅读时保留当前阅读器，用户可以在左侧 Group 树和中间文档列表继续选文档。
-    if (!readerFullscreen) closeDocument();
+    const willOpen = !node.open;
+    toggleOpen(node.path);
+    if (willOpen) ensureGroupDocs(node.path);
+    if (isGroupSelectable(node)) setActiveGroup(node.path);
   };
 
   /**
@@ -375,25 +425,39 @@ export function BrowsePage(): JSX.Element {
    * 让键盘用户在节点上也能收起子组（箭头按钮已移出 Tab 序列）。
    */
   const handleDirKeyActivate = (node: TreeNode): void => {
-    if (node.children.length > 0) toggleOpen(node.path);
+    const willOpen = !node.open;
+    toggleOpen(node.path);
+    if (willOpen) ensureGroupDocs(node.path);
     if (!isGroupSelectable(node)) return;
     setActiveGroup(node.path);
-    if (!readerFullscreen) closeDocument();
   };
 
-  const renderNode = (node: TreeNode): JSX.Element => {
+  // 搜索命中集（后端跨组检索结果）：仅用于过滤树内文档叶子，不隐藏目录本身
+  const matchedDocKeys = useMemo(
+    () => (isSearching ? new Set(searchDocs.map((d) => `${d.group}\u0000${d.name}`)) : null),
+    [isSearching, searchDocs],
+  );
+
+  /** hideSelf=true 时跳过本行、只渲染其子内容（全屏展平单根目录用） */
+  const renderNode = (node: TreeNode, hideSelf = false): JSX.Element => {
     const hasSub = node.children.length > 0;
     const isActive = node.path === activeGroup;
     const totalDocs = countDocs(node);
     const countLabel = hasSub ? `本组 ${node.count} 条；含子组共 ${totalDocs} 条` : `本组 ${node.count} 条`;
+    const nodeDocs = node.open
+      ? (docsByGroup[node.path] ?? []).filter((d) =>
+          (!selectedTag || (d.tags ?? []).includes(selectedTag)) &&
+          (!matchedDocKeys || matchedDocKeys.has(`${d.group}\u0000${d.name}`)))
+      : [];
     return (
       <Fragment key={node.path}>
+        {!hideSelf && (
         <div
-          className={`ki-tree-dir${node.open && hasSub ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
+          className={`ki-tree-dir${node.open ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
           role="treeitem"
           tabIndex={0}
           aria-label={treeNodeLabel(node, totalDocs)}
-          aria-expanded={hasSub ? node.open : undefined}
+          aria-expanded={node.open}
           aria-selected={isActive}
           onClick={() => handleDirClick(node)}
           onKeyDown={(e) => {
@@ -403,31 +467,52 @@ export function BrowsePage(): JSX.Element {
             handleDirKeyActivate(node);
           }}
         >
-          {hasSub ? (
-            <button
-              className="ki-tree-arrow"
-              type="button"
-              tabIndex={-1}
-              aria-hidden="true"
-              onClick={(e) => { e.stopPropagation(); toggleOpen(node.path); }}
-            >
-              {node.open ? '▾' : '▸'}
-            </button>
-          ) : <span className="ki-tree-arrow" aria-hidden="true" />}
+          <button
+            className="ki-tree-arrow"
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            onClick={(e) => { e.stopPropagation(); toggleOpen(node.path); }}
+          >
+            {node.open ? '▾' : '▸'}
+          </button>
           {ICON_FOLDER}
           <span className="ki-tree-dir__label">{node.name}</span>
           <span className="ki-cell-sub" title={countLabel}>
             {hasSub && node.count > 0 ? `${node.count} / ${totalDocs}` : totalDocs}
           </span>
         </div>
-        {hasSub && node.open && (
-          <div className="ki-tree-group">{node.children.map(renderNode)}</div>
+        )}
+        {node.open && (hasSub || nodeDocs.length > 0) && (
+          <div className="ki-tree-group">
+            {nodeDocs.map((doc) => (
+              <button
+                key={`${doc.group}\u0000${doc.name}`}
+                type="button"
+                className={`ki-tree-doc${viewing?.group === doc.group && viewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
+                onClick={() => {
+                  // 检索态下从树打开文档也走抽屉，避免把结果列表顶掉
+                  openDocument(
+                    { module: doc.name, group: doc.group, path: doc.path },
+                    isSearching ? 'search' : 'tree',
+                  );
+                  setMobileReaderOpen(true);
+                }}
+                title={doc.path ?? `${doc.group} / ${doc.name}`}
+              >
+                <Icon name="file" className="ki-icon ki-icon--sm" />
+                <span className="ki-tree-doc__name">{doc.name}</span>
+              </button>
+            ))}
+            {node.children.map((child) => renderNode(child))}
+          </div>
         )}
       </Fragment>
     );
   };
 
-  const renderTreeBody = (): JSX.Element => (
+  /** flattenRoot=true 时展平唯一根目录（scope 已确定，根行只是冗余壳；用户要求） */
+  const renderTreeBody = (flattenRoot = false): JSX.Element => (
     <>
       {isLoading ? (
         <>
@@ -460,212 +545,166 @@ export function BrowsePage(): JSX.Element {
           </div>
         </div>
       ) : (
-        <div className="ki-tree-root" role="tree" aria-label="Group 树">{tree.map(renderNode)}</div>
+        <div className="ki-tree-root" role="tree" aria-label="Group 树">
+          {flattenRoot && tree.length === 1
+            ? renderNode({ ...tree[0], open: true }, true)
+            : tree.map((node) => renderNode(node))}
+        </div>
       )}
     </>
   );
 
-  const renderDocumentFilters = (): JSX.Element => (
-    <>
-      <GroupPathSelect
-        scope={scope}
-        value={activeGroup}
-        onChange={(v) => { setActiveGroup(v); if (!readerFullscreen) closeDocument(); }}
-        selectOnly
-      />
-      <input
-        className="ki-form-input"
-        placeholder="按文件名、路径或正文搜索…"
-        style={{ maxWidth: 250, flex: '1 1 220px' }}
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        data-ki-search-input
-        aria-label="按文件名、路径或正文搜索文档"
-      />
-      <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
-      {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
-      {(q || selectedTag) && (
-        <button className="ki-btn ki-btn--ghost ki-btn--small" type="button" onClick={clearFilters}>
-          清除筛选
-        </button>
-      )}
-    </>
-  );
-
-  const renderDocumentList = (): JSX.Element => {
-    const listError = isSearching ? (searchQuery.isError ? searchQuery.error : null) : (groupQuery.isError ? groupQuery.error : null);
-    const retryList = isSearching ? searchQuery.refetch : groupQuery.refetch;
-    const listLoading = isSearching ? isSearchLoading : isLoading || groupQuery.isLoading;
-    const isCurrentDocument = (doc: DocItem): boolean => viewing?.group === doc.group && viewing.module === doc.name;
+  /**
+   * 全文检索结果面板——展示在右侧主区，与语义检索页同构（RESULTS kicker + 标题 + meta + 结果项点击打开）。
+   * 交互约定：结果只在主区出现，左侧目录保持原样（仅叠加命中高亮，不筛选、不换标题、不替换树）。
+   */
+  const renderSearchResults = (): JSX.Element => {
+    const total = searchDocs.length + fullTextHits.length;
+    const searching = searchQuery.isFetching || fullTextQuery.isFetching;
+    const failed = searchQuery.isError && fullTextQuery.isError;
     return (
-    <>
-      {isSearching && (
-        <div className="ki-browse-filename-head">
-          文件名/路径命中 · {searchRefreshing ? '搜索中…' : `${shownTotal} 条`}
+      <div className="ki-browse-results" aria-live="polite">
+        <div className="ki-results__head">
+          <span className="ki-panel-heading">
+            <span className="ki-panel-kicker">RESULTS</span>
+            <span className="ki-results__title">检索结果</span>
+          </span>
+          <span className="ki-results__meta">
+            「{searchQ || q.trim()}」 · {searching ? '搜索中…' : `${total} 条`}
+          </span>
         </div>
-      )}
-      {listLoading ? (
-        <div className="ki-skeleton" style={{ width: '100%', height: 60 }} />
-      ) : listError ? (
-        <div className="ki-empty" style={{ border: 'none' }}>
-          <div>
-            <h3>文档列表加载失败</h3>
-            <p>{listError instanceof Error ? listError.message : '暂时无法读取文档列表。'}</p>
-            <div className="ki-empty__actions">
-              <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={() => void retryList()}>
-                重试
-              </button>
+        {failed ? (
+          <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
+            <div>
+              <h3>检索暂时失败</h3>
+              <p>文档列表与正文检索是两条独立链路；可稍后重试，或直接用左侧目录浏览。</p>
             </div>
           </div>
-        </div>
-      ) : shownDocs.length === 0 ? (
-        <div className="ki-empty" style={{ border: 'none' }}>
-          <div>
-            <h3>无匹配文档</h3>
-            {/* 树计数是未筛选口径，tag 过滤下为空时必须说明，避免被读成「该 Group 没有文档」 */}
-            <p>
-              {isSearching
-                ? '文件名或路径暂无命中；可查看下方正文命中，或换个关键词。'
-                : selectedTag && activeGroupNode && activeGroupNode.count > 0
-                  ? `该 Group 在当前 tag（#${selectedTag}）筛选下无文档；本组共 ${activeGroupNode.count} 条，可清除 tag 筛选查看。`
-                  : '该 Group 暂无文档，或选择其他 Group 查看。'}
-            </p>
-          </div>
-        </div>
-      ) : (
-        <>
-          {shownDocs.map((d) => (
-            <div
-              key={`${d.group}/${d.name}`}
-              className={`ki-doc-item${isCurrentDocument(d) ? ' ki-doc-item--current' : ''}`}
-              role="button"
-              tabIndex={0}
-              aria-current={isCurrentDocument(d) ? 'page' : undefined}
-              onClick={() => openDocument({
-                module: d.name,
-                group: d.group,
-                path: d.path,
-                highlightQuery: isSearching ? searchQ : undefined,
-              })}
-              onKeyDown={(e) => {
-                if (e.key !== 'Enter' && e.key !== ' ') return;
-                e.preventDefault();
-                openDocument({
-                  module: d.name,
-                  group: d.group,
-                  path: d.path,
-                  highlightQuery: isSearching ? searchQ : undefined,
-                });
-              }}
-            >
-              <span className="ki-scope-name__dot ki-dot--blue" style={{ marginTop: 3 }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="ki-doc-item__title-row">
-                  <div className="ki-doc-item__name">{d.name}</div>
-                  {isCurrentDocument(d) && <span className="ki-doc-item__current-label">正在阅读</span>}
-                </div>
-                {d.path && <div className="ki-doc-item__path">{d.path}</div>}
-                <div className="ki-doc-item__meta">
-                  <span className="ki-badge ki-badge--kb">{d.group}</span>
-                  {(d.tags ?? []).map((t) => (
-                    <span key={t} className="ki-badge ki-badge--tag">#{t}</span>
-                  ))}
-                  {d.vectorized === true && (
-                    <span className="ki-badge ki-badge--vec">RAG</span>
-                  )}
-                  {d.fullTextIndexed === true && (
-                    <span className="ki-badge ki-badge--fts" title="FTS-only：不生成 dense 向量，通过正文检索">
-                      FTS
-                    </span>
-                  )}
-                </div>
-              </div>
-              <span className="ki-cell-sub" style={{ alignSelf: 'center' }}>
-                查看原文 ›
-              </span>
+        ) : total === 0 && !searching ? (
+          <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
+            <div>
+              <h3>未找到相关内容</h3>
+              <p>建议：调整关键词 / 切换 tag 过滤；正文检索只覆盖已建立 FTS 索引的文档。</p>
             </div>
-          ))}
-        </>
-      )}
-      {isSearching && (
-        <div className="ki-browse-fulltext" aria-live="polite">
-          <div className="ki-browse-fulltext__head">
-            <span>正文命中</span>
-            <span className="ki-card__sub">
-              {fullTextQuery.isFetching ? '搜索中…' : `${fullTextHits.length} 条`}
-            </span>
           </div>
-          {fullTextQuery.isError ? (
-            <div className="ki-browse-fulltext__empty">正文检索暂时失败，可重试或继续查看文件名命中。</div>
-          ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
-            <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
-          ) : (
-            fullTextHits.map((hit: SearchHit, index) => {
-              const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
-              const group = hit.group ?? known?.group ?? '';
-              const relation = hit.relation ?? known?.name ?? '';
-              return (
-                <button
-                  type="button"
-                  className="ki-browse-fulltext__item"
-                  key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
-                  onClick={() => {
-                    if (!relation || !group) return;
-                    openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ });
-                  }}
-                >
-                  <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
-                  <span className="ki-browse-fulltext__path">{group}</span>
-                  <span className="ki-browse-fulltext__snippet">
-                    {highlightMatch(makeSnippet(hit.original ?? hit.content ?? '', searchQ), searchQ)}
+        ) : (
+          <div className="ki-browse-results__list">
+            {searchDocs.length > 0 && (
+              <section className="ki-browse-results__group">
+                <div className="ki-browse-results__group-head">
+                  文件名命中
+                  <span className="ki-card__sub">
+                    {searchQuery.isFetching ? '搜索中…' : `${searchDocs.length} 条`}
                   </span>
-                </button>
-              );
-            })
-          )}
-        </div>
-      )}
-    </>
+                </div>
+                {searchDocs.map((doc) => (
+                  <button
+                    type="button"
+                    className="ki-browse-fulltext__item"
+                    key={`name:${doc.group}\u0000${doc.name}`}
+                    onClick={() => {
+                      // 带上 highlightQuery：正文若含该词，打开后自动高亮并出现「取消高亮 / 下一个命中」导航
+                      openDocument(
+                        { module: doc.name, group: doc.group, path: doc.path, highlightQuery: searchQ },
+                        'search',
+                      );
+                    }}
+                  >
+                    <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
+                    <span className="ki-browse-fulltext__path">{doc.group}</span>
+                  </button>
+                ))}
+              </section>
+            )}
+            <section className="ki-browse-results__group">
+              <div className="ki-browse-results__group-head">
+                正文命中
+                <span className="ki-card__sub">
+                  {fullTextQuery.isFetching ? '搜索中…' : `${fullTextHits.length} 条`}
+                </span>
+              </div>
+              {fullTextQuery.isError ? (
+                <div className="ki-browse-fulltext__empty">正文检索暂时失败，可继续查看文件名命中。</div>
+              ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
+                <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
+              ) : (
+                fullTextHits.map((hit: SearchHit, index) => {
+                  const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
+                  const group = hit.group ?? known?.group ?? '';
+                  const relation = hit.relation ?? known?.name ?? '';
+                  return (
+                    <button
+                      type="button"
+                      className="ki-browse-fulltext__item"
+                      key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
+                      onClick={() => {
+                        if (!relation || !group) return;
+                        openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ }, 'search');
+                      }}
+                    >
+                      <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
+                      <span className="ki-browse-fulltext__path">{group}</span>
+                      <span className="ki-browse-fulltext__snippet">
+                        {/* 与语义检索页全文模式同口径：命中 chunk（content）优先于文件级原文（original），
+                            否则整篇原文的开头会把命中位置挤出片段，高亮看起来「消失」 */}
+                        {highlightMatch(makeSearchSnippet(hit.content ?? hit.original ?? '', searchQ), searchQ)}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </section>
+          </div>
+        )}
+      </div>
     );
   };
 
   /** 全屏阅读工作区：导航面板在抽屉内部渲染，因此不会被 scrim 遮挡。 */
+  /** 全屏导航面板；收起/展开入口由抽屉统一提供（ModuleDrawer 的 nav-collapse），此处只渲染内容 */
   const fullscreenNavigation = (
     <div
-      className={`ki-reader-navigation${readerGroupCollapsed ? ' ki-reader-navigation--group-collapsed' : ' ki-reader-navigation--group-open'}${readerDocsCollapsed ? ' ki-reader-navigation--docs-collapsed' : ' ki-reader-navigation--docs-open'}`}
+      className={`ki-reader-navigation${readerGroupCollapsed ? ' ki-reader-navigation--group-collapsed' : ' ki-reader-navigation--group-open'}`}
     >
       <aside className={`ki-reader-nav ki-reader-nav--group${readerGroupCollapsed ? ' ki-reader-nav--collapsed' : ''}`}>
         {readerGroupCollapsed ? (
           <button
             className="ki-reader-nav__collapsed-toggle"
-            onClick={() => {
-              // 展开 Group 树时一并展开文档列表，避免只回来半扇导航
-              setReaderGroupCollapsed(false);
-              setReaderDocsCollapsed(false);
-            }}
+            onClick={() => setReaderGroupCollapsed(false)}
             title="展开 Group 树"
             aria-label="展开 Group 树"
             type="button"
           >
             <span className="ki-reader-nav__collapsed-mark">{ICON_NAV_TREE}</span>
+            <span className="ki-reader-nav__collapsed-label">知识目录</span>
           </button>
         ) : (
           <>
             <div className="ki-reader-nav__head">
               <div>
-                <div className="ki-card__title">Group 树</div>
-                <div className="ki-card__sub">{tree.length} 个目录</div>
+                <div className="ki-card__title">知识目录</div>
+                <div className="ki-card__sub">{visibleDocCount} 篇</div>
               </div>
               <div className="ki-reader-nav__actions">
                 <button
                   className="ki-reader-nav__refresh"
-                  onClick={() => { void queryClient.invalidateQueries(); }}
-                  disabled={fetching > 0}
+                  onClick={refreshNow}
                   title="刷新 Group 与文档列表"
                   type="button"
                 >
-                  {ICON_NAV_REFRESH}
-                  {fetching > 0 ? '刷新中' : '刷新'}
+                  <span className={busy ? 'ki-icon--spin' : undefined}>{ICON_NAV_REFRESH}</span>
+                  {busy ? '刷新中' : '刷新'}
+                </button>
+                {/* 折叠 / 展开全部目录（用户要的入口） */}
+                <button
+                  className="ki-icon-button ki-icon-button--sm"
+                  data-action={allExpanded ? 'collapse' : 'expand'}
+                  onClick={() => setAllOpen(!allExpanded)}
+                  title={allExpanded ? '折叠全部目录' : '展开全部目录'}
+                  aria-label={allExpanded ? '折叠全部目录' : '展开全部目录'}
+                  type="button"
+                >
+                  <Icon name={allExpanded ? 'collapse' : 'expand'} />
                 </button>
                 <button
                   className="ki-reader-nav__collapse"
@@ -678,172 +717,212 @@ export function BrowsePage(): JSX.Element {
                 </button>
               </div>
             </div>
-            <div className="ki-reader-nav__body ki-reader-nav__body--tree">{renderTreeBody()}</div>
+            <div className="ki-reader-nav__body ki-reader-nav__body--tree">{renderTreeBody(true)}</div>
           </>
         )}
       </aside>
 
-      <aside className={`ki-reader-nav ki-reader-nav--docs${readerDocsCollapsed ? ' ki-reader-nav--collapsed' : ''}`}>
-        {readerDocsCollapsed ? (
-          <button
-            className="ki-reader-nav__collapsed-toggle"
-            onClick={() => setReaderDocsCollapsed(false)}
-            title="展开文档列表"
-            aria-label="展开文档列表"
-            type="button"
-          >
-            <span className="ki-reader-nav__collapsed-mark">{ICON_NAV_DOC}</span>
-          </button>
-        ) : (
-          <>
-            <div className="ki-reader-nav__head">
-              <div>
-                <div className="ki-card__title">文档</div>
-                <div className="ki-card__sub">
-                  {isSearching
-                    ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}`
-                    : `${shownTotal} 条${selectedTag ? `（tag: ${selectedTag}）` : ''}`}
-                </div>
-              </div>
-              <div className="ki-reader-nav__actions">
-                <button
-                  className="ki-reader-nav__collapse"
-                  onClick={() => setReaderDocsCollapsed(true)}
-                  title="收起文档列表"
-                  aria-label="收起文档列表"
-                  type="button"
-                >
-                  {ICON_NAV_COLLAPSE}
-                </button>
-              </div>
-            </div>
-            <div className="ki-reader-nav__filters">{renderDocumentFilters()}</div>
-            <div className="ki-reader-nav__body">{renderDocumentList()}</div>
-          </>
-        )}
-      </aside>
     </div>
   );
+
+  /**
+   * 文档阅读器：inline = 就地渲染在右侧阅读区（树入口）；
+   * 抽屉 = 覆盖式滑出、结果列表留在主区（检索结果入口，与语义检索页一致）。
+   */
+  const renderViewer = (asDrawer: boolean): JSX.Element | null => {
+    if (!viewing) return null;
+    return (
+      <ModuleDrawer
+        key={`${asDrawer ? 'drawer' : 'inline'}:${scope}:${viewing.group}:${viewing.module}`}
+        inline={!asDrawer}
+        scope={scope}
+        module={viewing.module}
+        group={viewing.group}
+        highlightQuery={viewing.highlightQuery}
+        targetAnchor={viewing.anchor}
+        editable
+        onClose={closeDocument}
+        fetcher={kiGetModuleInfo}
+        onLocalLink={handleLocalLink}
+        canGoBack={history.length > 0}
+        onBack={goBack}
+        canGoForward={forwardHistory.length > 0}
+        onForward={goForward}
+        fullscreen={readerFullscreen}
+        onFullscreenChange={(fullscreen) => {
+          setReaderFullscreen(fullscreen);
+          // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）
+          setReaderOutlineCollapsed(true);
+        }}
+        outlineCollapsed={readerOutlineCollapsed}
+        onOutlineCollapsedChange={setReaderOutlineCollapsed}
+        fullscreenNavigation={fullscreenNavigation}
+      />
+    );
+  };
+
+  /**
+   * 检索态下主区**恒为结果列表**（搜索结果要像语义检索页那样展示，不能被之前的阅读态顶掉——
+   * 用户实测：先打开着文档再搜索时，主区仍是旧文档，看不到结果）。
+   * 此时无论从结果还是从树打开文档，都走右侧抽屉，结果列表不被打断。
+   * 非检索态：树入口就地阅读（保持原浏览体验）。
+   */
+  const showingResults = isSearching;
+  const readingInline = viewing !== null && !showingResults;
 
   return (
     <>
       <div className="ki-page-head" style={{ flexShrink: 0 }}>
         <div>
+          <div className="ki-eyebrow">LIBRARY / 01</div>
           <h1>知识库浏览</h1>
           <p>Group 树 · 文档列表 · 原文查看</p>
         </div>
       </div>
 
       {/* 高度由 .ki-content-inner 的 grid 行提供（见 ki.css），不在这里按内容估算 */}
-      <div className="ki-split">
+      <div className={`ki-split${treeCollapsed ? ' ki-split--tree-collapsed' : ''}`}>
         {/* 左：Group 树 */}
         <aside className="ki-split__side">
+          {treeCollapsed ? (
+            <div className="ki-tree-collapsed">
+              <button
+                type="button"
+                className="ki-icon-button ki-icon-button--sm"
+                onClick={() => setTreeCollapsed(false)}
+                title="展开知识目录"
+                aria-label="展开知识目录"
+              >
+                <Icon name="expand" />
+              </button>
+              <span className="ki-tree-collapsed__label">知识目录</span>
+            </div>
+          ) : (
           <div className="ki-card">
             <div className="ki-card__head">
-              <span className="ki-card__title">Group 树</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="ki-card__sub">{tree.length} 个目录</span>
+              <span className="ki-panel-heading">
+                <span className="ki-panel-kicker">LIBRARY INDEX</span>
+                <span className="ki-card__title">知识目录</span>
+              </span>
+              <div className="ki-card__actions">
+                <span className="ki-card__sub">{visibleDocCount} 篇</span>
                 <button
-                  className="ki-mini-btn"
-                  onClick={() => { void queryClient.invalidateQueries(); }}
-                  disabled={fetching > 0}
+                  className="ki-icon-button ki-icon-button--sm"
+                  onClick={refreshNow}
                   title="重新拉取 scope 与文档列表（导入完成后无需重启服务，点此即可看到新 Group）"
+                  aria-label={busy ? '刷新中' : '刷新目录'}
+                  aria-busy={busy}
                 >
-                  {fetching > 0 ? '刷新中…' : '刷新'}
+                  <Icon name="refresh" className={busy ? 'ki-icon ki-icon--spin' : undefined} />
                 </button>
-                <button className="ki-mini-btn" onClick={() => setAllOpen(true)} title="展开全部目录">
-                  展开全部
+                <button
+                  className="ki-icon-button ki-icon-button--sm"
+                  data-action={allExpanded ? 'collapse' : 'expand'}
+                  onClick={() => setAllOpen(!allExpanded)}
+                  title={allExpanded ? '折叠全部目录' : '展开全部目录'}
+                  aria-label={allExpanded ? '折叠全部目录' : '展开全部目录'}
+                >
+                  <Icon name={allExpanded ? 'collapse' : 'expand'} />
                 </button>
-                <button className="ki-mini-btn" onClick={() => setAllOpen(false)} title="折叠全部目录">
-                  折叠全部
+                <button
+                  className="ki-icon-button ki-icon-button--sm"
+                  onClick={() => setTreeCollapsed(true)}
+                  title="收起知识目录"
+                  aria-label="收起知识目录"
+                >
+                  <Icon name="chevron-left" />
                 </button>
               </div>
             </div>
+            {/* 目录状态行（对齐 demo .tree-meta）：搜索不改写目录，恒为「全部文档 · N 篇」 */}
+            <div className="ki-tree-meta" role="status" aria-live="polite">
+              全部文档
+              <strong> · {visibleDocCount} 篇</strong>
+            </div>
             <div className="ki-card__body" style={{ padding: 12 }}>
-              {renderTreeBody()}
+              {/* 同样展平唯一的根目录（scope 已由顶栏确定，根行是重复信息） */}
+              {renderTreeBody(true)}
             </div>
           </div>
+          )}
         </aside>
 
-        {/* 右：文档列表 */}
-        <section>
-          <div className="ki-card">
-            <div className="ki-card__head">
-              <span className="ki-card__title">文档</span>
-              <span className="ki-card__sub">
-                {isSearching
-                  ? `搜索「${q.trim()}」${searchRefreshing ? ' · 搜索中…' : ` · ${shownTotal} 条${searchTruncated ? '（仅展示前 2000 条）' : ''}`}`
-                  : activeGroup
-                    ? `${activeGroup} · ${activeDocs.length} 条${selectedTag ? `（tag: ${selectedTag}）` : ''}`
-                    : '选择左侧 Group 查看文档'}
-              </span>
-            </div>
-            <div
-              style={{
-                padding: '16px 20px',
-                borderBottom: '1px solid var(--ki-color-border)',
-                display: 'flex',
-                gap: 10,
-                alignItems: 'center',
-                flexWrap: 'wrap',
-              }}
-            >
-              <GroupPathSelect
-                scope={scope}
-                value={activeGroup}
-                onChange={(v) => { setActiveGroup(v); if (!readerFullscreen) closeDocument(); }}
-                selectOnly
-              />
-              <input
-                className="ki-form-input"
-                placeholder="按文件名、路径或正文搜索…"
-                style={{ maxWidth: 250, flex: '1 1 220px' }}
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                data-ki-search-input
-                aria-label="按文件名、路径或正文搜索文档"
-              />
-              <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
-              {isSearching && <span className="ki-filter-context">搜索范围：当前 Scope 全部 Group</span>}
-              {(q || selectedTag) && (
-                <button className="ki-btn ki-btn--ghost ki-btn--small" type="button" onClick={clearFilters}>
-                  清除筛选
+        {/* 右：文档内容（常驻阅读区，对齐 demo：右侧专注展示正文） */}
+        <section className={`ki-browse-reader${mobileReaderOpen ? ' ki-browse-reader--mobile-open' : ''}`}>
+          <div className="ki-card ki-browse-reader__card">
+            {/* 阅读区头部（对齐 demo .reader-head：左「文档内容」标签，右侧整组搜索/标签/清除/宽度） */}
+            <div className="ki-reader-toolbar">
+              <span className="ki-reader-toolbar__label">文档内容</span>
+              <div className="ki-reader-tools">
+                {/* 检索组（搜索框 + Tags + 清除）整组居中，对齐全屏头部 .ki-drawer__fs-toolbar 的检索组 */}
+                <div className="ki-reader-filters">
+                  <label className="ki-reader-search">
+                    <Icon name="search" className="ki-icon ki-icon--sm ki-reader-search__icon" />
+                    <input
+                      className="ki-form-input ki-reader-toolbar__search"
+                      placeholder="搜索全库文档…（结果在此处展示）"
+                      value={q}
+                      onChange={(e) => setQ(e.target.value)}
+                      data-ki-search-input
+                      aria-label="搜索全部目录与文档，结果显示在右侧内容区"
+                    />
+                    <button
+                      type="button"
+                      className="ki-reader-search__clear"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => setQ('')}
+                      title="清空检索词"
+                      aria-label="清空检索词"
+                    >
+                      <Icon name="x" className="ki-icon ki-icon--sm" />
+                    </button>
+                  </label>
+                  <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+                  <button
+                    className="ki-btn ki-btn--secondary ki-btn--small"
+                    type="button"
+                    onClick={clearFilters}
+                    disabled={!q && !selectedTag}
+                    title="清空检索词与标签筛选"
+                  >
+                    清空
+                  </button>
+                </div>
+                <div className="ki-segmented ki-reader-width" role="group" aria-label="正文宽度">
+                  <button type="button" aria-pressed={!readerWide} onClick={() => setReaderWide(false)}>居中</button>
+                  <button type="button" aria-pressed={readerWide} onClick={() => setReaderWide(true)}>铺满</button>
+                </div>
+                <button
+                  className="ki-icon-button ki-reader-back"
+                  type="button"
+                  onClick={() => setMobileReaderOpen(false)}
+                  title="返回目录"
+                  aria-label="返回目录"
+                >
+                  <Icon name="chevron-left" />
                 </button>
-              )}
+              </div>
             </div>
-            <div className="ki-card__body" style={{ padding: 12, flex: 1, overflowY: 'auto' }}>
-              {renderDocumentList()}
+            <div className={`ki-browse-reader__body${readerWide ? ' ki-browse-reader__body--wide' : ''}`}>
+              {showingResults ? (
+                renderSearchResults()
+              ) : readingInline ? (
+                renderViewer(false)
+              ) : (
+                <div className="ki-empty" style={{ padding: 64 }}>
+                  <div>
+                    <h3>从左侧目录选择文档开始阅读</h3>
+                    <p>展开目录，点击文档名即可在此处连续阅读；用上方搜索框检索时，结果会显示在这里，点击结果从右侧抽屉打开原文。</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </section>
       </div>
 
-      {viewing && (
-        <ModuleDrawer
-          key={`${scope}:${viewing.group}:${viewing.module}`}
-          scope={scope}
-          module={viewing.module}
-          group={viewing.group}
-          highlightQuery={viewing.highlightQuery}
-          targetAnchor={viewing.anchor}
-          editable
-          onClose={closeDocument}
-          fetcher={kiGetModuleInfo}
-          onLocalLink={handleLocalLink}
-          canGoBack={history.length > 0}
-          onBack={goBack}
-          canGoForward={forwardHistory.length > 0}
-          onForward={goForward}
-          fullscreen={readerFullscreen}
-          onFullscreenChange={(fullscreen) => {
-            setReaderFullscreen(fullscreen);
-            setReaderOutlineCollapsed(!fullscreen);
-          }}
-          outlineCollapsed={readerOutlineCollapsed}
-          onOutlineCollapsedChange={setReaderOutlineCollapsed}
-          fullscreenNavigation={fullscreenNavigation}
-        />
-      )}
+      {/* 检索结果点开的文档：右侧抽屉（与语义检索页一致），结果列表保持可见 */}
+      {viewing && viewingSource === 'search' && renderViewer(true)}
     </>
   );
 }
