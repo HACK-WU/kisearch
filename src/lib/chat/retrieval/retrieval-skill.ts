@@ -94,7 +94,7 @@ export const RETRIEVAL_SKILL_PROMPT: string = [
   '',
   '一、工具与边界',
   `可用工具：${KB_SEARCH_TOOL_NAME}(query, mode, limit)，只读当前会话 scope；不传 scope、不跨库。limit 为 1–${CHAT_BUDGET.maxHitsPerCall}，默认 ${CHAT_BUDGET.maxHitsPerCall}。`,
-  `每条返回 group、doc、lines、snippet；片段最多 ${CHAT_BUDGET.snippetChars} 字，可能被截断。total 是命中数，不是全库文档数。工具没有翻页、读取整篇原文、目录遍历或写入功能；不得调用未提供的 MCP 工具。`,
+  `工具返回实际检索 JSON（results、total、文档位置、原文/命中片段等，以实际字段为准），不按字段或片段删减；总长度超过 ${CHAT_BUDGET.maxToolResponseChars} 字符时会截断并明确标记。截断后内容可能不完整、JSON 可能不闭合，不能推断未展示部分。total 是检索命中数，不是全库文档数。工具没有翻页、主动读取指定整篇原文、目录遍历或写入功能；不得调用未提供的 MCP 工具。`,
   '',
   '二、检索前：确定对象与证据缺口',
   '结合当前用户输入和本会话已有消息，确定对象、问题与已知条件；追问中的「它 / 上面 / 继续」继承明确对象，用户的最新纠正优先。无法判断对象时，只问一个必要的澄清问题。',

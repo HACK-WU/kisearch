@@ -17,7 +17,7 @@
  *           │    · 发 {type:'tool_start', name, query, mode}
  *           │    · runKbSearch（★ 内部入队）
  *           │    · 发 {type:'tool_end', hits, durationMs}
- *           │    · 投影 → 追加 assistant(tool_calls) + tool(projection) 消息
+ *           │    · 有界返回 → 追加 assistant(tool_calls) + tool(response) 消息
  *           │    · round += 1 → 继续 loop
  *           └─ 无 tool_calls（或达上限）→ 结束
  * 4. 落盘 assistant 消息（content + sources）
@@ -25,9 +25,9 @@
  *
  * ═══ 四条硬约束 ═══
  * 1. **`reasoning` 绝不进 `messages`**（N12）
- * 2. **`sources` 只落来源引用，原始检索结果不落盘/不回传**（N22）
+ * 2. **`sources` 只落来源引用，工具返回总长度最多 10000 字符，页面与模型共用**（N22）
  * 3. **达 `maxRounds` 后强制作答**（N19）—— 不发错误，直接进入"无 tool_calls"分支
- * 4. **`tool` 消息内容必须是瘦身投影**（原始结果会显著放大上下文）
+ * 4. **`tool` 消息内容必须是有界工具返回**（原始结果会显著放大上下文）
  *
  * ═══ 通用语义契约 ═══
  * · 前置：`llm.supportsTools !== false`；隐私已确认（`kbDisclosureAck === true`）
@@ -69,7 +69,8 @@ import {
 } from './retrieval-skill.js';
 import { parseToolCallArguments, runKbSearch } from './kb-search-tool.js';
 import { promptConfigSystemBlocks, readPromptConfig } from '../prompt-config.js';
-import { toToolProjection, toSourceRefs } from './projection.js';
+import { toSourceRefs } from './projection.js';
+import { serializeToolResponse } from './tool-response.js';
 
 export interface ToolLoopInput {
   scope: string;
@@ -177,10 +178,6 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
   return msgs;
 }
 
-/** 把工具调用投影文本序列化为 tool 消息内容（★ 硬约束 4：必须是瘦身投影） */
-function toolMessageContent(projection: ReturnType<typeof toToolProjection>): string {
-  return JSON.stringify(projection);
-}
 
 /** 判断 signal 是否已中止 */
 function isAborted(signal?: AbortSignal): boolean {
@@ -379,11 +376,12 @@ async function* toolLoopPath(
 
       if (parseError) {
         // 解析失败：发 tool_end 带 error（★ 抛错也必须发，否则前端永久停留在"正在检索…"）
-        yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError };
+        const response = serializeToolResponse({ error: parseError });
+        yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError, response };
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: JSON.stringify({ error: parseError }),
+          content: response.text,
         });
         continue;
       }
@@ -405,11 +403,12 @@ async function* toolLoopPath(
 
       if (runError || !result || result.ok !== true) {
         const errText = runError ?? (result && result.ok === false ? result.error : '检索失败');
-        yield { type: 'tool_end', hits: 0, durationMs, error: errText };
+        const response = serializeToolResponse(result ?? { error: errText });
+        yield { type: 'tool_end', hits: 0, durationMs, error: errText, response };
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: JSON.stringify({ error: errText }),
+          content: response.text,
         });
         // ★ 检索不可用：不中断生成，但按 N17 **明示**（原先注释这么写、实现却没有发事件 →
         //   用户会把"没检索"当成"检索了但没找到"）。受 `degradedSent` 闸门约束，至多一次。
@@ -420,16 +419,16 @@ async function* toolLoopPath(
         continue;
       }
 
-      // 成功：投影 → tool 消息（★ 硬约束 4：瘦身投影，绝不回传原始结果）
-      const projection = toToolProjection(result);
-      yield { type: 'tool_end', hits: projection.hits.length, durationMs };
+      // 页面与模型共用实际返回文本，仅施加总字符预算。
+      const response = serializeToolResponse(result);
+      yield { type: 'tool_end', hits: result.results.length, durationMs, response };
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
-        content: toolMessageContent(projection),
+        content: response.text,
       });
 
-      // ★ 硬约束 2：只累积投影后的来源引用（原始结果不落盘、不回传）
+      // ★ 硬约束 2：单独累积来源引用，用于文档定位；工具返回另存为有界文本
       const refs = toSourceRefs(result);
       if (refs.length > 0) sources = dedupeSources([...sources, ...refs]);
 
@@ -473,7 +472,8 @@ async function* degradedPath(
   yield { type: 'tool_start', name: KB_SEARCH_TOOL_NAME, query: input.userText, mode: 'hybrid' };
 
   // 1. daemon 代跑一次检索（query = userText，mode = hybrid，limit = 5）
-  let projection = null as ReturnType<typeof toToolProjection> | null;
+  let response: ReturnType<typeof serializeToolResponse> | undefined;
+  let hits = 0;
   let retrievalOk = false;
 
   try {
@@ -482,8 +482,9 @@ async function* degradedPath(
       mode: 'hybrid',
       limit: CHAT_BUDGET.maxHitsPerCall,
     }), input.signal);
+    response = serializeToolResponse(result);
     if (result.ok === true) {
-      projection = toToolProjection(result);
+      hits = result.results.length;
       sources = toSourceRefs(result);
       retrievalOk = true;
     }
@@ -500,8 +501,8 @@ async function* degradedPath(
   // ★ 无论走哪条分支都发 tool_start → tool_end 成对（前端不会永久停留在"正在检索…"）
   //   且在模型不支持工具时也如实反映"daemon 代跑了一次检索"
   yield retrievalOk
-    ? { type: 'tool_end', hits: projection!.hits.length, durationMs: Date.now() - startedAt }
-    : { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '检索不可用' };
+    ? { type: 'tool_end', hits, durationMs: Date.now() - startedAt, response }
+    : { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '检索不可用', ...(response ? { response } : {}) };
 
   // 3. degraded 明示（至多一次；N17 不得静默）
   yield {
@@ -510,17 +511,18 @@ async function* degradedPath(
     message: retrievalOk ? '本次未使用工具检索' : '本次检索未成功',
   };
 
-  // 2. 投影后作为上下文注入（拼在本轮 user 消息之前），并让模型作答
+  // 2. 实际返回作为上下文注入（拼在本轮 user 消息之前），并让模型作答
   const messages = buildUpstreamMessages(input, runtime.systemBlocks);
-  if (retrievalOk && projection) {
-    const contextText = buildAutoRetrievalContext(JSON.stringify(projection));
+  if (response) {
+    const contextText = buildAutoRetrievalContext(response.text);
     // 插到本轮 user 之前（保持 system 在最前）
     // ★ 这里依赖 `buildUpstreamMessages` 的不变量「返回数组末条恒为本轮 user 消息」
     //   （见该函数注释）。若哪天该不变量被改动，此处 `length - 1` 会把检索上下文插到
     //   历史消息中间——`test/chat/multi-turn-context.test.ts` 有对应用例守着。
     messages.splice(messages.length - 1, 0, { role: 'user', content: contextText });
-  } else if (!retrievalOk) {
-    // 4. 检索本身失败 → **不注错**，靠 skill 反幻觉规则 2 保证模型前置「本次未检索」
+  }
+  if (!retrievalOk) {
+    // 4. 检索本身失败 → 在实际返回之外注入明确的失败提示
     messages.splice(messages.length - 1, 0, {
       role: 'user',
       content: '【提示】本次检索不可用，请在回答开头明确说明「本次未检索」，不要用自身知识冒充知识库内容。',
@@ -623,7 +625,7 @@ function dedupeSources(refs: SourceRef[]): SourceRef[] {
     seen.add(key);
     out.push(r);
   }
-  // 单次命中数在 projection 层限制；最终引用集合不能丢弃后续轮次的来源。
+  // 单次命中数在工具请求参数中限制；最终引用集合不能丢弃后续轮次的来源。
   return out;
 }
 
@@ -637,9 +639,9 @@ function dedupeSources(refs: SourceRef[]): SourceRef[] {
  *
  * 行为：
  * 1. daemon 代跑一次检索（`query = userText`，`mode = hybrid`，`limit = 5`）
- * 2. 投影后作为**上下文注入**（拼在本轮 user 消息之前）
+ * 2. 实际返回作为**上下文注入**（拼在本轮 user 消息之前）
  * 3. 发 `{type:'degraded', reason:'tools-unsupported'|'retrieval-unavailable'}`
- * 4. 检索本身失败 → **不注错**，改发 `reason:'retrieval-unavailable'`，
+ * 4. 检索本身失败 → 保留实际错误返回，改发 `reason:'retrieval-unavailable'`，
  *    并由 skill 反幻觉规则 2 保证模型前置「本次未检索」
  */
 export async function* runPreRetrievalFallback(input: ToolLoopInput): AsyncGenerator<ChatEvent> {

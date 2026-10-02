@@ -198,3 +198,16 @@ describe('actual SSE parser with controlled HTTP body', () => {
     } finally { globalThis.fetch = priorFetch; }
   });
 });
+
+it('preserves actual tool response text through SSE consumption and stream completion', async () => {
+  const response = { text: '{"ok":true,"results":[{"originalExcerpt":"完整正文"}]}', originalChars: 50, truncated: false };
+  const { store, api } = setup({ streamMessage: async function* () {
+    yield { type: 'meta', messageId: 'm2' };
+    yield { type: 'tool_start', name: 'kb_search', mode: 'hybrid', query: 'question' };
+    yield { type: 'tool_end', hits: 1, durationMs: 3, response };
+    yield { type: 'content', text: 'answer' };
+    yield { type: 'done', messageId: 'm2', sources: [] };
+  } });
+  assert.equal(await api.send('A', 'question'), true);
+  assert.deepEqual(store.getState().progressByMessage.m2[1].response, response);
+});

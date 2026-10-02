@@ -19,7 +19,7 @@
 // 1. 数据模型（S-02 §3.2 + §9.1）
 // ─────────────────────────────────────────────────────────────
 
-/** 来源引用：**唯一允许落盘**的检索产物（S07 §3.5） */
+/** 来源引用：可点击定位的检索产物（S07 §3.5） */
 export interface SourceRef {
   group: string;
   /** = SearchHit.relation（文档名） */
@@ -32,6 +32,13 @@ export interface SourceRef {
   snippet: string;
 }
 
+/** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
+export interface ChatToolResponse {
+  text: string;
+  originalChars: number;
+  truncated: boolean;
+}
+
 /**
  * 检索过程步骤（**步骤级摘要**，落盘进 `ChatMessage.progress`）。
  *
@@ -40,8 +47,8 @@ export interface SourceRef {
  * AI 到底检索了几次（真机走查 #11）。
  *
  * ⚠️ 与 `ChatMessage` 的两条结构性不变量不冲突：
- *   · **不是 reasoning**：只记工具名 / 模式 / 命中数 / 是否报错，不含思考文本；
- *   · **不是检索原始结果**：**不含查询串与片段正文**（N22 只允许投影后的 `sources`）。
+ *   · **不是 reasoning**：工具调用信息与有界返回，不含思考文本；
+ *   · **返回正文有界**：保留实际工具返回，仅超过 10000 字符时截断。
  *
  * 形状与 SSE 的 `tool_start` / `tool_end` 事件对齐，便于前端复用同一套文案渲染。
  */
@@ -59,6 +66,8 @@ export interface ChatProgressStep {
   mode?: string;
   /** 命中条数（`tool_end` 带） */
   hits?: number;
+  /** 有界工具返回；旧记录缺失时仅展示摘要。 */
+  response?: ChatToolResponse;
   durationMs?: number;
   /** 工具报错文本（仅失败步骤；这是"说人话"的失败原因，不含片段正文） */
   error?: string;
@@ -69,7 +78,7 @@ export interface ChatProgressStep {
  *
  * ⚠️ 两条结构性不变量（不得违反）：
  *   - **不含 `reasoning`**（D7 不落盘；且它是上游 messages 的来源，从结构上保证"思考永不回传"）
- *   - **不含检索原始结果**（N22）；只落投影后的 `sources`
+ *   - 不落无界检索原始结果；`progress.response` 最多 10000 字符，`sources` 用于定位
  */
 export interface ChatMessage {
   id: string;
@@ -130,7 +139,7 @@ export type RetrievalMode = 'fulltext' | 'hybrid';
 export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
   | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
-  | { type: 'tool_end'; hits: number; durationMs: number; error?: string }
+  | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }
   | { type: 'reasoning'; text: string }
@@ -204,7 +213,9 @@ export const CHAT_BUDGET = {
   maxToolRounds: Number.POSITIVE_INFINITY,
   /** 单次检索返回条数上限（T11） */
   maxHitsPerCall: 5,
-  /** 进上游上下文时单片段截断长度（S07 §3.4） */
+  /** 工具返回总长度上限；不按字段或单条片段裁剪。 */
+  maxToolResponseChars: 10000,
+  /** 旧投影兼容函数的单片段截断长度（S07 §3.4） */
   snippetChars: 300,
   /** `sources[].snippet` 落盘截断长度（S07 §3.5） */
   sourceSnippetChars: 200,

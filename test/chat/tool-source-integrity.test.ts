@@ -13,9 +13,12 @@ it('keeps later-round sources and deduplicates sources shared between rounds', a
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-citation-integrity-'));
   const previousConfig = process.env.KI_CONFIG_PATH;
   let requests = 0;
+  const captured: { messages: { role: string; content: string }[] }[] = [];
   const server = createServer((req, res) => {
     void (async () => {
-      for await (const _chunk of req) { /* consume the real request */ }
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      captured.push(JSON.parse(body));
       requests += 1;
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const chunk = requests <= 2
@@ -40,6 +43,18 @@ it('keeps later-round sources and deduplicates sources shared between rounds', a
     const events: ChatEvent[] = [];
     for await (const event of runToolLoop({ scope: 'default', conv, userText: 'question', convSystemPrompt: '' })) events.push(event);
     assert.equal(requests, 3);
+    const ends = events.filter((event) => event.type === 'tool_end');
+    const toolBodies = captured[2].messages.filter((message) => message.role === 'tool');
+    assert.equal(ends.length, 2);
+    for (let i = 0; i < ends.length; i++) {
+      const response = ends[i].response!;
+      assert.equal(response.text, toolBodies[i].content, 'UI and model receive exactly the same text');
+      const raw = JSON.parse(response.text);
+      assert.equal(raw.scope, 'default');
+      assert.equal(raw.results.length, 5);
+      assert.equal(raw.results[0].originalExcerpt, i === 0 ? 'evidence a' : 'evidence e');
+      assert.equal(response.truncated, false);
+    }
     const sources = events.find((event) => event.type === 'sources');
     assert.ok(sources?.type === 'sources');
     assert.deepEqual(sources.sources.map((source) => source.doc), ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']);

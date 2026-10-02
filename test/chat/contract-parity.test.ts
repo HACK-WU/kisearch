@@ -68,7 +68,7 @@ describe('契约对齐 · SSE 事件协议', () => {
 });
 
 describe('契约对齐 · 数据模型', () => {
-  for (const name of ['SourceRef', 'ChatMessage', 'ConversationFile', 'ConversationSummary', 'ChatConfigOk']) {
+  for (const name of ['SourceRef', 'ChatToolResponse', 'ChatProgressStep', 'ChatMessage', 'ConversationFile', 'ConversationSummary', 'ChatConfigOk']) {
     it(`${name} 字段集合两侧一致`, () => {
       assert.deepEqual(extractInterfaceFields(read(FRONT), name), extractInterfaceFields(read(BACK), name));
     });

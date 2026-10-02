@@ -1,3 +1,4 @@
+import type { ChatToolResponse } from '@/api/chatContract';
 import type { MarkdownBlock } from '@/components/MarkdownPreview';
 import type { ProgressStep, ReasoningSegment } from './chatStore';
 
@@ -50,6 +51,7 @@ export interface TimelineNode {
   mode?: string;
   query?: string;
   hits?: number;
+  response?: ChatToolResponse;
   durationMs?: number;
   error?: string;
   /** interleave 锚点：本行发生在已发出正文的第几个字符后（缺省 = 0，即正文之前） */
@@ -70,7 +72,7 @@ export function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
         out.push({
           key: `t${startIndex}`, kind: 'tool', running: !end, label: s.label,
           name: s.name ?? end?.name, mode: s.mode ?? end?.mode, query: s.query,
-          hits: end?.hits, durationMs: end?.durationMs, error: end?.error,
+          hits: end?.hits, response: end?.response, durationMs: end?.durationMs, error: end?.error,
           // 行位置以 start 时刻为准（"说完哪句去查的"）
           afterChars: s.afterChars ?? end?.afterChars, order: s.order,
         });
@@ -83,10 +85,11 @@ export function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
           prev.name = prev.name ?? s.name;
           prev.mode = prev.mode ?? s.mode;
           prev.hits = s.hits;
+          prev.response = s.response;
           prev.durationMs = s.durationMs;
           prev.error = s.error;
         } else {
-          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, hits: s.hits, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
+          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, hits: s.hits, response: s.response, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
         }
       }
     } else if (s.kind === 'reasoning') {

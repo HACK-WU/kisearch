@@ -69,3 +69,12 @@ describe('complete Markdown parse with trace layout at legal block boundaries', 
     assert.deepEqual(items.map((i) => i.kind === 'reason' ? i.text : i.kind), ['before', 'tool', 'after']);
   });
 });
+
+it('retains actual tool responses when merging paired or orphan end events', () => {
+  const response = { text: '{"results":[{"originalExcerpt":"complete"}]}', originalChars: 47, truncated: false };
+  const start = { kind: 'tool', phase: 'start', label: 'search' };
+  const end = { kind: 'tool', phase: 'end', label: 'hits', hits: 1, response };
+  assert.deepEqual(buildTimeline([start, end])[0].response, response);
+  assert.deepEqual(buildTimeline([end])[0].response, response);
+  assert.equal(buildTimeline([start, { ...end, response: undefined }])[0].response, undefined);
+});

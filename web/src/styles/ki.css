@@ -3275,7 +3275,7 @@ select.ki-chat-cfg__ta--select {
   border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-sm);
   padding: var(--ki-space-2) var(--ki-space-3);
-  max-height: 300px; overflow: auto;
+  max-height: 300px; overflow: auto; overscroll-behavior: contain;
 }
 .ki-chat-tool[hidden] { display: none; }
 .ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease both; }
@@ -3302,6 +3302,10 @@ select.ki-chat-cfg__ta--select {
   overflow: auto; white-space: pre;
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); line-height: 1.75;
   color: var(--ki-color-text);
+}
+.ki-chat-tool__code--response {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .ki-chat-tool__code .k { color: var(--ki-color-primary); }
 .ki-chat-tool__code .s { color: var(--ki-color-success); }

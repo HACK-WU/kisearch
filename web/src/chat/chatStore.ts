@@ -18,16 +18,16 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md §9.3 · S05 §9.2
  */
 
-import type { ChatMessage, SourceRef } from '@/api/chatContract';
+import type { ChatMessage, ChatToolResponse, SourceRef } from '@/api/chatContract';
 
 /** 生成期间的动态反馈条目（按时间序，供 R11a 展示） */
 export type ProgressStep =
   /**
    * 工具步骤。走查 #4：除 label 外透传事件摘要字段（name/mode/query/hits/durationMs/error），
    * 供时间线行做「动作名 + 工具胶囊 + 状态」双轨展示与展开卡片；
-   * ⚠️ 只放**摘要**，不放响应正文（批次 3 边界，见 .plans/2026-09-30-demo-parity-fix 护栏 #2）。
+   * 实际返回正文由后端统一限制为最多 10000 字符，生成与历史共用。
    */
-  | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; hits?: number; durationMs?: number; error?: string;
+  | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; hits?: number; durationMs?: number; error?: string; response?: ChatToolResponse;
       /** interleave 锚点：本步发生时已发出的正文字符数（reducer 统一捕获，渲染方不必传） */
       afterChars?: number; order?: number }
   | { kind: 'reasoning'; text: string }

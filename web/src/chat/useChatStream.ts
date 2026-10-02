@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
-import type { ChatEvent } from '@/api/chatContract';
+import type { ChatEvent, ChatToolResponse } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 
 export interface ChatStreamApi {
@@ -331,7 +331,7 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
     case 'tool_end':
       store.dispatch({
         type: 'streamProgress',
-        step: toolEndStep(ev.hits, ev.error, { durationMs: ev.durationMs }),
+        step: toolEndStep(ev.hits, ev.error, { durationMs: ev.durationMs, response: ev.response }),
       });
       return;
 
@@ -393,7 +393,7 @@ export function toolStartStep(mode: string, name?: string, query?: string): Prog
 export function toolEndStep(
   hits: number,
   error?: string,
-  extra?: { name?: string; mode?: string; durationMs?: number },
+  extra?: { name?: string; mode?: string; durationMs?: number; response?: ChatToolResponse },
 ): ProgressStep {
   const label = error ? `检索失败：${error}` : `已检索：命中 ${hits} 条`;
   return { kind: 'tool', phase: 'end', label, hits, error, ...extra };

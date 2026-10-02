@@ -173,9 +173,14 @@ describe('generation integrity through real HTTP', { concurrency: false }, () =>
   it('tool continuation remembers the text already shown to the user', async () => {
     reset('tool');
     const conv = await createConversation('default', {});
-    await (await post(conv.id, 'messages', '两个问题')).text();
+    const text = await (await post(conv.id, 'messages', '两个问题')).text();
     const toolAssistant = captured[1].messages.find((m) => m.tool_calls);
     assert.equal(toolAssistant?.content, '第一项确认：7。');
+    const end = text.split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6))).find((event) => event.type === 'tool_end');
+    const toolBody = captured[1].messages.find((m) => m.role === 'tool');
+    assert.equal(end.response.text, toolBody?.content);
+    assert.match(JSON.parse(end.response.text).error, /query/);
+    assert.deepEqual((await disk(conv.id)).messages.at(-1)?.progress?.find((p) => p.phase === 'end')?.response, end.response);
     assert.equal((await disk(conv.id)).messages.at(-1)?.content, '第一项确认：7。新回答');
   });
 

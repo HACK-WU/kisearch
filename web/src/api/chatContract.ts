@@ -27,6 +27,13 @@ export interface SourceRef {
 }
 
 /** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
+/** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
+export interface ChatToolResponse {
+  text: string;
+  originalChars: number;
+  truncated: boolean;
+}
+
 export interface ChatProgressStep {
   phase: 'start' | 'end';
   /** 本步发生时已发出的正文字符数（interleave 锚点，与后端契约对齐；旧数据缺省 = 0） */
@@ -34,6 +41,8 @@ export interface ChatProgressStep {
   name?: string;
   mode?: string;
   hits?: number;
+  /** 有界工具返回；旧记录缺失时仅展示摘要。 */
+  response?: ChatToolResponse;
   durationMs?: number;
   error?: string;
 }
@@ -91,7 +100,7 @@ export type RetrievalMode = 'fulltext' | 'hybrid';
 export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
   | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
-  | { type: 'tool_end'; hits: number; durationMs: number; error?: string }
+  | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }
   | { type: 'reasoning'; text: string }

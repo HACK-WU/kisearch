@@ -1210,7 +1210,7 @@ function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): Pr
   // 摘要字段（name/mode/hits/durationMs/error）一并透传，供时间线行与卡片渲染
   return steps.map((s) =>
     s.phase === 'end'
-      ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs }), afterChars: s.afterChars }
+      ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs, response: s.response }), afterChars: s.afterChars }
       : { ...toolStartStep(s.mode ?? 'hybrid', s.name), afterChars: s.afterChars },
   );
 }
@@ -1297,7 +1297,7 @@ function AnswerFlow({
 /** 时间线工具行（demo D9）：动作名 + 工具胶囊 + 状态 + 展开卡；无摘要字段时退化为纯文本行 */
 function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const hasDetail = Boolean(n.name || n.mode || n.query || n.hits !== undefined || n.error);
+  const hasDetail = Boolean(n.name || n.mode || n.query || n.hits !== undefined || n.error || n.response);
   if (!hasDetail) {
     // 退化行（无摘要字段的旧数据）：不带 --tool 类 —— 否则 D9 的 cursor:pointer + hover
     // 会暗示可点击，而它其实没有展开内容
@@ -1339,15 +1339,12 @@ function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
 }
 
 /**
- * 展开卡片（demo D9 B 段）：只渲染**既有摘要字段** —— 入参（query/mode）、响应（hits/耗时）、错误。
- * ⚠️ 完整入参/响应 JSON 属批次 3（待定 #9 未拍板），此处不伪造（台账护栏 #2）。
+ * 展开卡片：原样展示后端统一限长的实际返回文本；旧记录明确标记正文缺失。
  */
 function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
   const args: Record<string, string> = {};
   if (n.query) args.query = n.query;
   if (n.mode) args.mode = n.mode;
-  const resp: Record<string, string | number | boolean> = {};
-  if (n.hits !== undefined) { resp.ok = !n.error; resp.hits = n.hits; }
   return (
     <div className="ki-chat-tool">
       {Object.keys(args).length > 0 ? (
@@ -1356,10 +1353,16 @@ function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
           <JsonCode obj={args} />
         </section>
       ) : null}
-      {n.hits !== undefined && !n.error ? (
+      {n.response ? (
         <section className="ki-chat-tool__sec">
           <div className="ki-chat-tool__label">响应<em>{n.hits} 命中{n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}</em></div>
-          <JsonCode obj={resp} />
+          {n.response.truncated ? <p className="ki-chat-tool__note ki-chat-tool__note--warn">原返回 {n.response.originalChars} 字符，超过 10000 字符已截断。AI 收到相同内容。</p> : null}
+          <pre className="ki-chat-tool__code ki-chat-tool__code--response">{n.response.text}</pre>
+        </section>
+      ) : n.hits !== undefined && !n.error ? (
+        <section className="ki-chat-tool__sec">
+          <div className="ki-chat-tool__label">响应摘要</div>
+          <p className="ki-chat-tool__note">命中 {n.hits} 条。旧记录未保存工具返回正文。</p>
         </section>
       ) : null}
       {n.error ? (

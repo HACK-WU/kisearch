@@ -1027,6 +1027,7 @@ async function runGeneration(
         progress.push({
           phase: 'end',
           hits: ev.hits,
+          ...(ev.response ? { response: ev.response } : {}),
           durationMs: ev.durationMs,
           afterChars: content.length,
           ...(ev.error !== undefined ? { error: ev.error } : {}),
