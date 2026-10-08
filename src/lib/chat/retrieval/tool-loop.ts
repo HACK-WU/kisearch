@@ -1,12 +1,11 @@
 /**
- * 工具调用循环（S07 §3.4 / §3.7）
+ * 工具调用循环（批次 2：注册表驱动的通用工具循环）
  *
- * 本模块是 **D13 的核心：检索问答的编排者**。产出物是 SSE 事件流，
- * 由 `chat-routes.ts` 原样转发（路由层不做业务判断）。
+ * 本模块是生成编排者。产出物是 SSE 事件流，由 `chat-routes.ts` 原样转发。
  *
- * ═══ 流程（实现须严格按此顺序）═══
+ * ═══ 流程 ═══
  * ```text
- * 1. 构造 messages：system(检索 skill + 会话 systemPrompt) + 历史(仅 content) + 本轮 user
+ * 1. 构造 messages：system(注入块 + 会话 systemPrompt) + 历史(仅 content) + 本轮 user
  * 2. round = 0
  * 3. loop:
  *     上游流 →
@@ -14,8 +13,8 @@
  *       ├─ reasoning 流 → 转发 {type:'reasoning'}（**不落盘**）
  *       └─ 回合结束：
  *           ├─ 有 tool_calls 且 round < maxRounds →
- *           │    · 发 {type:'tool_start', name, query, mode}
- *           │    · runKbSearch（★ 内部入队）
+ *           │    · 发 {type:'tool_start', name, query?/mode?/args?}
+ *           │    · 注册表 handler 执行（★ 内部排队 + 超时）
  *           │    · 发 {type:'tool_end', hits, durationMs}
  *           │    · 有界返回 → 追加 assistant(tool_calls) + tool(response) 消息
  *           │    · round += 1 → 继续 loop
@@ -23,34 +22,39 @@
  * 4. 落盘 assistant 消息（content + sources）
  * ```
  *
- * ═══ 四条硬约束 ═══
+ * ═══ 批次 2 关键变化（决策 D1~D5）═══
+ * · 工具面 = 注册表（14 个真实 MCP 工具）∩ PromptConfig.tools 开关；
+ *   默认只读 6 个，写 6 / 删 2 需配置层显式开启。
+ * · kb_search 退役（D4）：检索由 ki_search 承担，命中仍投影 sources（R7 不退化）。
+ * · 降级路径反转（D2）：不支持工具 / 上游不可用时**纯聊天 + 明示**，不再预检索。
+ * · 契约泛化（D5）：tool_start 的 query/mode 改可选，非检索工具带 args 摘要。
+ *
+ * ═══ 四条硬约束（沿用）═══
  * 1. **`reasoning` 绝不进 `messages`**（N12）
  * 2. **`sources` 只落来源引用，工具返回总长度最多 10000 字符，页面与模型共用**（N22）
- * 3. **达 `maxRounds` 后强制作答**（N19）—— 不发错误，直接进入"无 tool_calls"分支
+ * 3. **达 `maxRounds` 后强制作答**（N19）—— 拿掉 tools 再调一次，不是截断
  * 4. **`tool` 消息内容必须是有界工具返回**（原始结果会显著放大上下文）
  *
  * ═══ 通用语义契约 ═══
  * · 前置：`llm.supportsTools !== false`；隐私已确认（`kbDisclosureAck === true`）
  * · 后置：产出以 `done` 或 `error` 结尾的完整事件序（见 chat-contract 的 `CHAT_EVENT_ORDER_RULES`）
  * · 空值：检索无命中 → 不发 `sources`（**不发空数组**），由 skill 反幻觉规则引导模型如实作答
- * · 错误：检索抛错 → **不中断生成**，发 `{type:'tool_end', error}` 后继续（模型可见失败并自行说明）
+ * · 错误：工具抛错 → **不中断生成**，发 `{type:'tool_end', error}` 后继续（模型可见失败并自行说明）；
+ *   检索类工具失败额外发一次 `degraded`（N17 明示，至多一次）；其他工具失败不升级为 degraded
  * · 中止：`signal` 触发 → 发 `{type:'aborted'}`，已累积内容由调用方落盘（`aborted:true`）
- * · 幂等：非幂等
- * · 并发：同会话由 `chat-store` 的会话锁串行；**生成期间不持锁**
- * · 事务：单会话单次落盘
- * · 副作用：检索（只读，入 coordinator）+ 上游调用 + 最终落盘
+ * · 并发：同会话由 `chat-store` 的会话锁串行；**生成期间不持锁**；工具执行经 coordinator 与同 scope 读写互斥
+ * · 副作用：工具执行（读/写经 coordinator 排队）+ 上游调用 + 最终落盘
  *
- * ═══ ★ 实现级发现（前置门① 实测，必须照此实现 —— `gate1-verification.md` §2）═══
+ * ═══ ★ 实现级发现（前置门① 实测，必须照此实现）═══
  * a. **一次响应的 N 个 `tool_calls` 必须回 N 条 `tool` 消息**（各自 `tool_call_id` 一一对应）。
- *    漏一个 → 模型认为"工具没答完" → 继续请求 → 表现为**循环不收敛**。实测首轮返回 2 个。
  * b. **单次往返不够，必须有循环**（实测模型在已有结果时仍连续 3 轮请求工具）。
- * c. ★ **「强制作答」= 拿掉 `tools` 参数再调一次**，**不是截断**：
- *    截断会得到**空终答**（达上限前每轮 content 均为 0 字，模型还没产出就结束）。
+ * c. ★ **「强制作答」= 拿掉 `tools` 参数再调一次**，**不是截断**。
  *
- * @see design/S07_检索与工具调用_DESIGN.md
+ * @see .plans/2026-10-08-chat-mcp-tools-batch2/plan.md
  */
 
 import { CHAT_BUDGET, type ChatEvent, type ConversationFile, type SourceRef } from '../chat-contract.js';
+import type { SearchResult } from '../../../search.js';
 import {
   streamChat,
   resolveLlmStatus,
@@ -61,14 +65,9 @@ import {
 } from '../llm-client.js';
 import { loadConfig } from '../../config.js';
 import { newMessageId } from '../chat-store.js';
-import {
-  buildSystemMessages,
-  buildAutoRetrievalContext,
-  KB_SEARCH_TOOL,
-  KB_SEARCH_TOOL_NAME,
-} from './retrieval-skill.js';
-import { parseToolCallArguments, runKbSearch } from './kb-search-tool.js';
+import { buildSystemMessages } from './retrieval-skill.js';
 import { promptConfigSystemBlocks, readPromptConfig } from '../prompt-config.js';
+import { enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
 import { toSourceRefs } from './projection.js';
 import { serializeToolResponse } from './tool-response.js';
 
@@ -101,12 +100,18 @@ interface LoopRuntime {
    * 放进 runtime 而非 `ToolLoopInput`，理由与其余运行期字段一致：**不改冻结的输入签名**。
    */
   systemBlocks: readonly string[];
+  /**
+   * 启用的工具入口（批次 2：注册表 ∩ `PromptConfig.tools` 开关）。
+   * 生成期间工具面固定（配置变更从下一次提问生效 —— 与批次 1「保存后下一次提问生效」口径一致）。
+   */
+  toolEntries: readonly ChatMcpToolEntry[];
 }
 
 function resolveRuntime(): LoopRuntime {
   const cfg = loadConfig();
   const status = resolveLlmStatus(cfg, cfg._configPath ?? '');
   const llm = cfg.llm;
+  const promptConfig = readPromptConfig(cfg).config;
   return {
     baseURL: llm?.baseURL ?? '',
     apiKey: llm?.apiKey ?? '',
@@ -120,7 +125,9 @@ function resolveRuntime(): LoopRuntime {
     enabled: status.enabled,
     reason: status.reason,
     // 页面与运行时使用同一配置：未保存时采用默认 skill + 基础规则，已保存时保持用户配置。
-    systemBlocks: promptConfigSystemBlocks(readPromptConfig(cfg).config),
+    systemBlocks: promptConfigSystemBlocks(promptConfig),
+    // ★ 工具开关首次被消费（批次 2）：默认只读 6 个；用户关掉的即时生效于下一次提问
+    toolEntries: enabledChatToolEntries(promptConfig.tools),
   };
 }
 
@@ -220,12 +227,10 @@ export async function* runToolLoop(input: ToolLoopInput): AsyncGenerator<ChatEve
   // ★ meta 必须是首帧（CHAT_EVENT_ORDER_RULES）
   yield { type: 'meta', conversationId: input.conv.id, messageId, model: runtime.model || 'unknown' };
 
-  // 上游不可用（未配置模型）：**不静默按普通对话作答**（N17）——
-  // 退化为"预检索一次 + degraded 明示"，保证事件序完整且用户知情。
+  // 上游不可用（未配置模型）或模型不支持工具：**不静默按普通对话作答**（N17）——
+  // 纯聊天 + degraded 明示，保证事件序完整且用户知情（批次 2 决策 D2）。
   if (!runtime.enabled || !runtime.supportsTools) {
-    yield* degradedPath(input, runtime, messageId, {
-      reason: !runtime.enabled ? 'retrieval-unavailable' : 'tools-unsupported',
-    });
+    yield* pureChatPath(input, runtime, messageId, !runtime.enabled ? 'retrieval-unavailable' : 'tools-unsupported');
     return;
   }
 
@@ -240,6 +245,9 @@ async function* toolLoopPath(
 ): AsyncGenerator<ChatEvent> {
   const messages = buildUpstreamMessages(input, runtime.systemBlocks);
   const maxRounds = runtime.maxToolRounds;
+  // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
+  //   属用户显式配置、非故障，不发 degraded）
+  const toolDefs = runtime.toolEntries.map((e) => e.def);
 
   let round = 0;
   // 路由聚合整个回答以落盘；本模块仅聚合单次上游响应正文供工具续轮使用。
@@ -279,7 +287,7 @@ async function* toolLoopPath(
 
     try {
       for await (const part of streamChat(messages, {
-        tools: reachedLimit ? undefined : [KB_SEARCH_TOOL],
+        tools: reachedLimit || toolDefs.length === 0 ? undefined : toolDefs,
         signal: input.signal,
         requestTimeoutMs: runtime.requestTimeoutMs,
         firstByteTimeoutMs: runtime.firstByteTimeoutMs,
@@ -310,9 +318,9 @@ async function* toolLoopPath(
         }
       }
     } catch (err) {
-      // ★ 实现细节 c 的触发点之一：上游明确不支持 tools → 预检索降级
+      // ★ 实现细节 c 的触发点之一：上游明确不支持 tools → 纯聊天降级（批次 2 决策 D2）
       if (err instanceof ToolsUnsupportedError) {
-        yield* degradedPath(input, runtime, messageId, { reason: 'tools-unsupported' });
+        yield* pureChatPath(input, runtime, messageId, 'tools-unsupported');
         return;
       }
       if (err instanceof LlmTimeoutError) {
@@ -322,7 +330,7 @@ async function* toolLoopPath(
         return;
       }
       if (err instanceof ChatDisabledError) {
-        yield* degradedPath(input, runtime, messageId, { reason: 'retrieval-unavailable' });
+        yield* pureChatPath(input, runtime, messageId, 'retrieval-unavailable');
         return;
       }
       if (isAborted(input.signal)) {
@@ -360,37 +368,50 @@ async function* toolLoopPath(
         yield* abortedEvents(messageId, sources, usage);
         return;
       }
+
+      // 未知工具（模型幻觉出未暴露的工具名）：也必须回 tool 消息（实现细节 a），
+      // 让模型可见失败并自行改道，不得静默丢调用 → 否则循环不收敛。
+      const entry = getChatTool(call.name);
+      if (!entry) {
+        const errText = `未知工具 ${call.name || '(未命名)'}：不在本次暴露的工具列表中，请仅使用系统提供的工具`;
+        const response = serializeToolResponse({ error: errText });
+        yield { type: 'tool_start', name: call.name || 'unknown', ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}) };
+        yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
+        messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
+        continue;
+      }
+
       // 参数解析失败 → 该调用记为错误（不中断生成，模型可见失败并自行说明）
-      let parsed = null as null | { query: string; mode?: 'fulltext' | 'hybrid'; limit?: number };
+      let parsed: ChatToolArgs | null = null;
       let parseError: string | null = null;
       try {
-        parsed = parseToolCallArguments(call.arguments);
+        parsed = entry.parse(call.arguments);
       } catch (err) {
         parseError = (err as Error).message;
       }
 
-      const query = parsed?.query ?? '';
-      const mode = parsed?.mode ?? 'hybrid';
+      const desc = parsed ? entry.describe(parsed) : {};
+      yield {
+        type: 'tool_start',
+        name: entry.name,
+        ...(desc.query !== undefined ? { query: desc.query } : {}),
+        ...(desc.mode !== undefined ? { mode: desc.mode } : {}),
+        ...(desc.args ? { args: desc.args } : {}),
+      };
 
-      yield { type: 'tool_start', name: call.name || KB_SEARCH_TOOL_NAME, query, mode };
-
-      if (parseError) {
-        // 解析失败：发 tool_end 带 error（★ 抛错也必须发，否则前端永久停留在"正在检索…"）
-        const response = serializeToolResponse({ error: parseError });
-        yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError, response };
-        messages.push({
-          role: 'tool',
-          tool_call_id: call.id,
-          content: response.text,
-        });
+      if (parseError || !parsed) {
+        // 解析失败：发 tool_end 带 error（★ 抛错也必须发，否则前端永久停留在"正在调用…"）
+        const response = serializeToolResponse({ error: parseError ?? '参数解析失败' });
+        yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError ?? '参数解析失败', response };
+        messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
         continue;
       }
 
       const startedAt = Date.now();
-      let result: Awaited<ReturnType<typeof runKbSearch>> | null = null;
+      let result: unknown = null;
       let runError: string | null = null;
       try {
-        result = await awaitWithAbort(() => runKbSearch(input.scope, parsed!), input.signal);
+        result = await awaitWithAbort(() => entry.run(input.scope, parsed!), input.signal);
       } catch (err) {
         runError = (err as Error).message;
       }
@@ -401,41 +422,44 @@ async function* toolLoopPath(
         return;
       }
 
-      if (runError || !result || result.ok !== true) {
-        const errText = runError ?? (result && result.ok === false ? result.error : '检索失败');
-        const response = serializeToolResponse(result ?? { error: errText });
-        yield { type: 'tool_end', hits: 0, durationMs, error: errText, response };
-        messages.push({
-          role: 'tool',
-          tool_call_id: call.id,
-          content: response.text,
-        });
-        // ★ 检索不可用：不中断生成，但按 N17 **明示**（原先注释这么写、实现却没有发事件 →
-        //   用户会把"没检索"当成"检索了但没找到"）。受 `degradedSent` 闸门约束，至多一次。
-        if (!degradedSent) {
+      // 结果归一：底层 execute 多以 {ok:false,error} 表示业务失败（不抛）→ 统一提取为 runError
+      let hits = 0;
+      if (!runError && result !== null && typeof result === 'object') {
+        const r = result as { ok?: unknown; error?: unknown; results?: unknown[] };
+        if (r.ok === false) {
+          runError = typeof r.error === 'string' && r.error.length > 0 ? r.error : '工具执行失败';
+        } else if (Array.isArray(r.results)) {
+          hits = r.results.length;
+        }
+      }
+
+      // 页面与模型共用实际返回文本，仅施加总字符预算。
+      // ★ 失败也序列化**原始结果**（ok:false 的 JSON 含 error/code/details，模型可见失败详情；
+      //   与旧行为一致），仅当执行抛错（result 为空）时退化为 {error} 摘要。
+      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' });
+      yield { type: 'tool_end', hits, durationMs, ...(runError ? { error: runError } : {}), response };
+      messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
+
+      if (runError) {
+        // ★ 检索类工具失败：按 N17 **明示**（degraded 至多一次闸门）。
+        //   其他工具失败由模型可见的 tool_end.error 承载，不升级为 degraded。
+        if (entry.producesSources === true && !degradedSent) {
           degradedSent = true;
           yield { type: 'degraded', reason: 'retrieval-unavailable', message: '本次检索未成功' };
         }
         continue;
       }
 
-      // 页面与模型共用实际返回文本，仅施加总字符预算。
-      const response = serializeToolResponse(result);
-      yield { type: 'tool_end', hits: result.results.length, durationMs, response };
-      messages.push({
-        role: 'tool',
-        tool_call_id: call.id,
-        content: response.text,
-      });
-
-      // ★ 硬约束 2：单独累积来源引用，用于文档定位；工具返回另存为有界文本
-      const refs = toSourceRefs(result);
-      if (refs.length > 0) sources = dedupeSources([...sources, ...refs]);
-
-      // 语义侧降级透传（不让用户误以为用了语义检索）—— 同样受至多一次的闸门约束
-      if (result.degraded === true && !degradedSent) {
-        degradedSent = true;
-        yield { type: 'degraded', reason: 'semantic-degraded', message: '语义检索降级为全文' };
+      if (entry.producesSources === true) {
+        const sr = result as SearchResult;
+        // ★ 硬约束 2：来源引用单独累积（仅检索类工具，R7 不退化）
+        const refs = toSourceRefs(sr);
+        if (refs.length > 0) sources = dedupeSources([...sources, ...refs]);
+        // 语义侧降级透传（不让用户误以为用了语义检索）—— 同样受至多一次的闸门约束
+        if (sr && sr.ok === true && sr.degraded === true && !degradedSent) {
+          degradedSent = true;
+          yield { type: 'degraded', reason: 'semantic-degraded', message: '语义检索降级为全文' };
+        }
       }
     }
 
@@ -453,81 +477,44 @@ async function* toolLoopPath(
   });
 }
 
-/** 预检索降级路径：daemon 代跑一次检索 + 明示（T10） */
-async function* degradedPath(
+/**
+ * 纯聊天降级路径（批次 2 决策 D2，**反转** S07 §3.7 / T10 的预检索方案）。
+ *
+ * 触发条件（任一）：
+ * · `llm.supportsTools === false`（用户手填）
+ * · 上游返回工具不支持类错误（`ToolsUnsupportedError`）
+ * · LLM 未配置 / `ChatDisabledError`（`retrieval-unavailable`，无 content）
+ *
+ * 行为：
+ * 1. 发 `degraded` 明示（N17 不得静默；**不发 tool_start/tool_end** —— 本次没有任何工具执行）
+ * 2. 注入一条 system 提示，让模型在回答开头说明「本次未检索知识库」
+ * 3. 不带 tools 调上游，按纯对话作答
+ */
+async function* pureChatPath(
   input: ToolLoopInput,
   runtime: LoopRuntime,
   messageId: string,
-  ctx: { reason: 'tools-unsupported' | 'retrieval-unavailable' },
+  reason: 'tools-unsupported' | 'retrieval-unavailable',
 ): AsyncGenerator<ChatEvent> {
-  let sources: SourceRef[] = [];
   let usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
   let finishReason = 'stop';
 
-  if (isAborted(input.signal)) {
-    yield* abortedEvents(messageId, sources, usage);
-    return;
-  }
-  const startedAt = Date.now();
-  yield { type: 'tool_start', name: KB_SEARCH_TOOL_NAME, query: input.userText, mode: 'hybrid' };
-
-  // 1. daemon 代跑一次检索（query = userText，mode = hybrid，limit = 5）
-  let response: ReturnType<typeof serializeToolResponse> | undefined;
-  let hits = 0;
-  let retrievalOk = false;
-
-  try {
-    const result = await awaitWithAbort(() => runKbSearch(input.scope, {
-      query: input.userText,
-      mode: 'hybrid',
-      limit: CHAT_BUDGET.maxHitsPerCall,
-    }), input.signal);
-    response = serializeToolResponse(result);
-    if (result.ok === true) {
-      hits = result.results.length;
-      sources = toSourceRefs(result);
-      retrievalOk = true;
-    }
-  } catch {
-    retrievalOk = false;
-  }
-
-  if (isAborted(input.signal)) {
-    yield { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '已停止' };
-    yield* abortedEvents(messageId, sources, usage);
-    return;
-  }
-
-  // ★ 无论走哪条分支都发 tool_start → tool_end 成对（前端不会永久停留在"正在检索…"）
-  //   且在模型不支持工具时也如实反映"daemon 代跑了一次检索"
-  yield retrievalOk
-    ? { type: 'tool_end', hits, durationMs: Date.now() - startedAt, response }
-    : { type: 'tool_end', hits: 0, durationMs: Date.now() - startedAt, error: '检索不可用', ...(response ? { response } : {}) };
-
-  // 3. degraded 明示（至多一次；N17 不得静默）
   yield {
     type: 'degraded',
-    reason: retrievalOk ? ctx.reason : 'retrieval-unavailable',
-    message: retrievalOk ? '本次未使用工具检索' : '本次检索未成功',
+    reason,
+    message: reason === 'tools-unsupported'
+      ? '本次模型不支持工具调用，按纯对话回答（未检索知识库）'
+      : '模型不可用，本次未检索',
   };
 
-  // 2. 实际返回作为上下文注入（拼在本轮 user 消息之前），并让模型作答
   const messages = buildUpstreamMessages(input, runtime.systemBlocks);
-  if (response) {
-    const contextText = buildAutoRetrievalContext(response.text);
-    // 插到本轮 user 之前（保持 system 在最前）
-    // ★ 这里依赖 `buildUpstreamMessages` 的不变量「返回数组末条恒为本轮 user 消息」
-    //   （见该函数注释）。若哪天该不变量被改动，此处 `length - 1` 会把检索上下文插到
-    //   历史消息中间——`test/chat/multi-turn-context.test.ts` 有对应用例守着。
-    messages.splice(messages.length - 1, 0, { role: 'user', content: contextText });
-  }
-  if (!retrievalOk) {
-    // 4. 检索本身失败 → 在实际返回之外注入明确的失败提示
-    messages.splice(messages.length - 1, 0, {
-      role: 'user',
-      content: '【提示】本次检索不可用，请在回答开头明确说明「本次未检索」，不要用自身知识冒充知识库内容。',
-    });
-  }
+  // 系统提示插在既有 system 块之后、历史消息之前（无 system 块时置顶）
+  let sysCount = 0;
+  while (sysCount < messages.length && messages[sysCount].role === 'system') sysCount += 1;
+  messages.splice(sysCount, 0, {
+    role: 'system',
+    content: '【提示】本次对话未接入知识库工具。请正常回答用户问题，并在回答开头简要说明「本次未检索知识库」；不得假装有检索结果，不得虚构知识库内容。',
+  });
 
   if (runtime.enabled && runtime.baseURL && runtime.apiKey && runtime.model) {
     try {
@@ -559,10 +546,10 @@ async function* degradedPath(
       }
     } catch (err) {
       if (isAborted(input.signal)) {
-        yield* abortedEvents(messageId, sources, usage);
+        yield* abortedEvents(messageId, [], usage);
         return;
       }
-      // 降级描述检索能力，不代表上游失败可以冒充正常完成。
+      // 降级描述能力缺失，不代表上游失败可以冒充正常完成。
       const code = err instanceof LlmTimeoutError
         ? 'LLM_TIMEOUT'
         : err instanceof ChatDisabledError ? 'CHAT_DISABLED' : 'LLM_UPSTREAM_ERROR';
@@ -577,7 +564,7 @@ async function* degradedPath(
     finishReason = 'stop';
   }
 
-  yield* finalize({ sources, usage, finishReason, messageId, aborted: isAborted(input.signal), roundsExhausted: false, conversationTooLong: false });
+  yield* finalize({ sources: [], usage, finishReason, messageId, aborted: isAborted(input.signal), roundsExhausted: false, conversationTooLong: false });
 }
 
 /** 收尾事件：sources?（无来源不发，且至多一次）→ usage? → done */
@@ -627,28 +614,4 @@ function dedupeSources(refs: SourceRef[]): SourceRef[] {
   }
   // 单次命中数在工具请求参数中限制；最终引用集合不能丢弃后续轮次的来源。
   return out;
-}
-
-/**
- * 预检索降级路径（T10 已拍板：**预检索一次 + 明示**）。
- *
- * 触发条件（任一）：
- * · `llm.supportsTools === false`（用户手填）
- * · 上游首次返回工具不支持类错误（`ToolsUnsupportedError`）
- * · 工具循环连续 2 轮检索均抛错（检索不可用）
- *
- * 行为：
- * 1. daemon 代跑一次检索（`query = userText`，`mode = hybrid`，`limit = 5`）
- * 2. 实际返回作为**上下文注入**（拼在本轮 user 消息之前）
- * 3. 发 `{type:'degraded', reason:'tools-unsupported'|'retrieval-unavailable'}`
- * 4. 检索本身失败 → 保留实际错误返回，改发 `reason:'retrieval-unavailable'`，
- *    并由 skill 反幻觉规则 2 保证模型前置「本次未检索」
- */
-export async function* runPreRetrievalFallback(input: ToolLoopInput): AsyncGenerator<ChatEvent> {
-  const runtime = resolveRuntime();
-  const messageId = messageIdFor(input.conv);
-  yield { type: 'meta', conversationId: input.conv.id, messageId, model: runtime.model || 'unknown' };
-  yield* degradedPath(input, runtime, messageId, {
-    reason: runtime.supportsTools ? 'retrieval-unavailable' : 'tools-unsupported',
-  });
 }

@@ -13,7 +13,7 @@ export async function startRetrievalUpstream(root: string, configPath: string) {
     const targetRounds = question === 'four rounds' ? 4 : 1;
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     if (body.tools?.length && toolReplies < targetRounds) {
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${toolReplies}`, type: 'function', function: { name: 'kb_search', arguments: JSON.stringify({ query: 'fixture query', mode: 'fulltext' }) } }] }, finish_reason: 'tool_calls' }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${toolReplies}`, type: 'function', function: { name: 'ki_search', arguments: JSON.stringify({ query: 'fixture query', mode: 'fulltext' }) } }] }, finish_reason: 'tool_calls' }] })}\n\n`);
     } else {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '确定性本地回答' }, finish_reason: 'stop' }] })}\n\n`);
     }

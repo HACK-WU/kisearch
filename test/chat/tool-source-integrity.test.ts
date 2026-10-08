@@ -22,7 +22,7 @@ it('keeps later-round sources and deduplicates sources shared between rounds', a
       requests += 1;
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const chunk = requests <= 2
-        ? { choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${requests}`, type: 'function', function: { name: 'kb_search', arguments: JSON.stringify({ query: requests === 1 ? 'first' : 'second' }) } }] }, finish_reason: 'tool_calls' }] }
+        ? { choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${requests}`, type: 'function', function: { name: 'ki_search', arguments: JSON.stringify({ query: requests === 1 ? 'first' : 'second' }) } }] }, finish_reason: 'tool_calls' }] }
         : { choices: [{ delta: { content: 'answer citing i' }, finish_reason: 'stop' }] };
       res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
     })().catch((error) => res.destroy(error));
@@ -36,7 +36,7 @@ it('keeps later-round sources and deduplicates sources shared between rounds', a
     // Only search execution is substituted; loop, projection, sources and HTTP parsing are real.
     const jiti = createJiti(import.meta.url, {
       moduleCache: false,
-      alias: { './kb-search-tool.js': fileURLToPath(new URL('./fixtures/generation-search.ts', import.meta.url)) },
+      alias: { '../mcp-tool-registry.js': fileURLToPath(new URL('./fixtures/generation-search.ts', import.meta.url)) },
     });
     const { runToolLoop } = await jiti.import<typeof import('../../src/lib/chat/retrieval/tool-loop.js')>('../../src/lib/chat/retrieval/tool-loop.ts');
     const conv = { version: 1 as const, id: 'c-citations', scope: 'default', title: '', systemPrompt: '', archived: false, archivedAt: null, createdAt: '', updatedAt: '', seq: 1, messageCount: 1, lastMessagePreview: '', messages: [{ id: 'm1', role: 'user' as const, content: 'question', at: '' }] };

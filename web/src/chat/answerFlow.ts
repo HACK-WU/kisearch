@@ -50,6 +50,8 @@ export interface TimelineNode {
   name?: string;
   mode?: string;
   query?: string;
+  /** 批次 2：非检索类工具的参数摘要（生成中可见；落盘不含，刷新后无） */
+  args?: string;
   hits?: number;
   response?: ChatToolResponse;
   durationMs?: number;
@@ -72,6 +74,7 @@ export function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
         out.push({
           key: `t${startIndex}`, kind: 'tool', running: !end, label: s.label,
           name: s.name ?? end?.name, mode: s.mode ?? end?.mode, query: s.query,
+          args: s.args ?? end?.args,
           hits: end?.hits, response: end?.response, durationMs: end?.durationMs, error: end?.error,
           // 行位置以 start 时刻为准（"说完哪句去查的"）
           afterChars: s.afterChars ?? end?.afterChars, order: s.order,
@@ -84,12 +87,13 @@ export function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
           prev.running = false;
           prev.name = prev.name ?? s.name;
           prev.mode = prev.mode ?? s.mode;
+          prev.args = prev.args ?? s.args;
           prev.hits = s.hits;
           prev.response = s.response;
           prev.durationMs = s.durationMs;
           prev.error = s.error;
         } else {
-          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, hits: s.hits, response: s.response, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
+          out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, args: s.args, hits: s.hits, response: s.response, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
         }
       }
     } else if (s.kind === 'reasoning') {

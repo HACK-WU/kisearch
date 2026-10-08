@@ -14,11 +14,13 @@ it('normal and fallback tool waits cancel promptly, pair progress, and do not re
   const previousConfig = process.env.KI_CONFIG_PATH;
   const jiti = createJiti(import.meta.url, {
     moduleCache: false,
-    alias: { './kb-search-tool.js': fileURLToPath(new URL('./fixtures/generation-search.ts', import.meta.url)) },
+    alias: { '../mcp-tool-registry.js': fileURLToPath(new URL('./fixtures/generation-search.ts', import.meta.url)) },
   });
   const { waitingSearch } = await jiti.import<typeof import('./fixtures/generation-search.js')>('./fixtures/generation-search.ts');
   let requests = 0;
   let citationMode = false;
+  // 引用阶段用独立计数（阶段 2 纯聊天也消耗一次上游请求，全局 requests 不再对齐该阶段）
+  let citedRequests = 0;
   let releaseModel = (): void => {};
   let modelGate = Promise.resolve();
   const server = createServer((req, res) => {
@@ -29,17 +31,18 @@ it('normal and fallback tool waits cancel promptly, pair progress, and do not re
         requests += 1;
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         if (citationMode) {
-          const citationFrames = requests === 2
-            ? [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-first', type: 'function', function: { name: 'kb_search', arguments: '{"query":"first"}' } }] }, finish_reason: 'tool_calls' }] }]
+          citedRequests += 1;
+          const citationFrames = citedRequests === 1
+            ? [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-first', type: 'function', function: { name: 'ki_search', arguments: '{"query":"first"}' } }] }, finish_reason: 'tool_calls' }] }]
             : [{ choices: [{ delta: { content: '引用文档 a 的部分回答' } }] }];
           res.write(citationFrames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
-          if (requests > 2) await modelGate;
+          if (citedRequests > 1) await modelGate;
           res.end('data: [DONE]\n\n');
           return;
         }
         const frames = [
           { choices: [{ delta: { content: '已产生正文' } }] },
-          { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-wait', type: 'function', function: { name: 'kb_search', arguments: '{"query":"wait"}' } }] }, finish_reason: 'tool_calls' }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-wait', type: 'function', function: { name: 'ki_search', arguments: '{"query":"wait"}' } }] }, finish_reason: 'tool_calls' }] },
         ];
         res.end(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n');
         return;
@@ -89,22 +92,18 @@ it('normal and fallback tool waits cancel promptly, pair progress, and do not re
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(requests, 1, 'late search must not make another upstream request');
 
-    // The fallback also starts progress before the tool finishes and pairs it on cancel.
+    // The fallback (supportsTools: false) is a pure-chat path since batch 2 (D2):
+    // no tool execution happens, so nothing can hang — verify the shape instead.
     fs.writeFileSync(configPath, `${configText}  supportsTools: false\n`);
     waitingSearch.entered = false;
-    const fallbackCtrl = new AbortController();
     const events: ChatEvent[] = [];
-    const input = { scope: 'default', conv: saved!, userText: 'wait', convSystemPrompt: '', signal: fallbackCtrl.signal };
-    const consuming = (async () => {
-      for await (const event of loops.runToolLoop(input)) events.push(event);
-    })();
-    await waitFor(() => waitingSearch.entered);
-    fallbackCtrl.abort();
-    await consuming;
-    assert.deepEqual(events.map((event) => event.type), ['meta', 'tool_start', 'tool_end', 'aborted']);
-    assert.equal(events[2].type === 'tool_end' && events[2].error, '已停止');
-    waitingSearch.release!();
-    assert.equal(requests, 1);
+    const input = { scope: 'default', conv: saved!, userText: 'wait', convSystemPrompt: '', signal: new AbortController().signal };
+    for await (const event of loops.runToolLoop(input)) events.push(event);
+    assert.ok(!events.some((event) => event.type === 'tool_start' || event.type === 'tool_end'), '纯聊天路径不得出现工具事件');
+    assert.equal(events.find((event) => event.type === 'degraded')?.reason, 'tools-unsupported');
+    assert.equal(events.at(-1)?.type, 'done');
+    assert.equal(waitingSearch.entered, false, '纯聊天路径不得执行任何检索');
+    assert.equal(requests, 2, '纯聊天路径恰好再发 1 次上游请求');
 
     citationMode = true;
     fs.writeFileSync(configPath, configText);

@@ -13,26 +13,28 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CHAT_BUDGET } from '../../src/lib/chat/chat-contract.js';
-import { parseToolCallArguments } from '../../src/lib/chat/retrieval/kb-search-tool.js';
 import { toToolProjection, toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
-import { buildSystemMessages, RETRIEVAL_SKILL_PROMPT, KB_SEARCH_TOOL } from '../../src/lib/chat/retrieval/retrieval-skill.js';
+import { buildSystemMessages, RETRIEVAL_SKILL_PROMPT } from '../../src/lib/chat/retrieval/retrieval-skill.js';
+import { CHAT_MCP_TOOLS, getChatTool } from '../../src/lib/chat/mcp-tool-registry.js';
 import { mockSearchResult, mockSearchResultWithoutLines } from './fixtures/mock-search.js';
 
-describe('SR-01 契约 · 检索工具参数解析', () => {
+describe('SR-01 契约 · 检索工具参数解析（批次 2：ki_search 注册表）', () => {
+  const parseKiSearch = (raw: string): Record<string, unknown> => getChatTool('ki_search')!.parse(raw) as Record<string, unknown>;
+
   it('limit 超上限 → 钳制到 maxHitsPerCall（不报错）', () => {
-    const a = parseToolCallArguments(JSON.stringify({ query: 'x', limit: 99 }));
+    const a = parseKiSearch(JSON.stringify({ query: 'x', limit: 99 }));
     assert.equal(a.limit, CHAT_BUDGET.maxHitsPerCall);
   });
 
   it('mode 非法 → 回落 hybrid（模型无需懂枚举）', () => {
-    const a = parseToolCallArguments(JSON.stringify({ query: 'x', mode: 'semantic' }));
+    const a = parseKiSearch(JSON.stringify({ query: 'x', mode: 'semantic' }));
     assert.equal(a.mode, 'hybrid');
   });
 
   it('非法 JSON → 抛错（不静默空查询）', () => {
     // ⚠️ 断言必须排除「未实现桩错误」——否则骨架期桩抛错也会让本用例通过（**假绿**）
     assert.throws(
-      () => parseToolCallArguments('{not json'),
+      () => parseKiSearch('{not json'),
       (e: unknown) => e instanceof Error && !e.message.startsWith('STUB:'),
       '应抛解析错误，而非 STUB 未实现错误（后者即假绿）',
     );
@@ -40,7 +42,7 @@ describe('SR-01 契约 · 检索工具参数解析', () => {
 
   it('缺 query → 抛错', () => {
     assert.throws(
-      () => parseToolCallArguments('{}'),
+      () => parseKiSearch('{}'),
       (e: unknown) => e instanceof Error && !e.message.startsWith('STUB:'),
       '应抛参数校验错误，而非 STUB 未实现错误（后者即假绿）',
     );
@@ -97,9 +99,13 @@ describe('SR-01 契约 · 检索 skill（与工具 schema 同源）', () => {
     assert.match(RETRIEVAL_SKILL_PROMPT, /本次未检索/);
   });
 
-  it('工具 schema：不暴露 scope（N23 禁止跨 scope）', () => {
-    const props = Object.keys((KB_SEARCH_TOOL.function.parameters as { properties: Record<string, unknown> }).properties);
-    assert.ok(!props.includes('scope'));
+  it('工具 schema：不暴露 scope（N23 禁止跨 scope）—— 14 个工具全量校验（批次 2）', () => {
+    for (const entry of CHAT_MCP_TOOLS) {
+      const props = Object.keys((entry.def.function.parameters as { properties: Record<string, unknown> }).properties ?? {});
+      assert.ok(!props.includes('scope'), `${entry.name} 不得暴露 scope 参数`);
+    }
+    const ki = getChatTool('ki_search')!;
+    const props = Object.keys((ki.def.function.parameters as { properties: Record<string, unknown> }).properties);
     assert.deepEqual(props.sort(), ['limit', 'mode', 'query']);
   });
 });

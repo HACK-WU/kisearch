@@ -1390,7 +1390,7 @@ function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): Pr
   return steps.map((s) =>
     s.phase === 'end'
       ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs, response: s.response }), afterChars: s.afterChars }
-      : { ...toolStartStep(s.mode ?? 'hybrid', s.name), afterChars: s.afterChars },
+      : { ...toolStartStep(s.mode, s.name), afterChars: s.afterChars },
   );
 }
 
@@ -1524,12 +1524,15 @@ function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
   const args: Record<string, string> = {};
   if (n.query) args.query = n.query;
   if (n.mode) args.mode = n.mode;
+  const hasQuery = Object.keys(args).length > 0;
+  const hasArgs = hasQuery || Boolean(n.args);
   return (
     <div className="ki-chat-tool">
-      {Object.keys(args).length > 0 ? (
+      {hasArgs ? (
         <section className="ki-chat-tool__sec">
           <div className="ki-chat-tool__label">入参{n.mode ? <em>mode {n.mode}</em> : null}</div>
-          <JsonCode obj={args} />
+          {hasQuery ? <JsonCode obj={args} /> : null}
+          {n.args ? <pre className="ki-chat-tool__code">{n.args}</pre> : null}
         </section>
       ) : null}
       {n.response ? (

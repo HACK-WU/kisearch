@@ -663,7 +663,28 @@ export async function executeBatchDelete(scope: string | undefined, items: Batch
   if (shouldUseDaemonClient()) return callDaemon<BatchDeleteResult>('batch-delete', { scope, items });
   try {
     return await withScopeWriteLock(resolveScope(loadConfig(), scope), 'batch-delete', () => executeBatchDeleteLocal(scope, items));
-  } catch (error) { return { ok: false, error: (error as Error).message }; }
+  } catch (error) {
+    // BatchDeleteResult 无 error 字段（既有类型约束）：整体失败时按逐条失败落形，
+    // 错误信息进每条 DeleteResult.reason —— 与上方单条失败分支同款形状
+    const message = (error as Error).message;
+    return {
+      ok: false,
+      results: items.map((item) => ({
+        relation: item.relation,
+        group: item.group,
+        deleted: false,
+        cacheRemoved: false,
+        kbRemoved: false,
+        wikiRemoved: false,
+        fullTextRemoved: false,
+        memRemoved: false,
+        memMethod: 'none' as const,
+        reason: message,
+      })),
+      total: items.length,
+      failed: items.length,
+    };
+  }
 }
 
 // ─── CLI ───

@@ -37,7 +37,7 @@ const server = createServer((req, res) => {
       if (mode === 'tool' && captured.length === 1) {
         frame({ choices: [{ delta: { content: '第一项确认：7。' } }] });
         // Invalid query returns a tool error without requiring a real KB fixture.
-        frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'kb_search', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] });
+        frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'ki_search', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] });
       } else {
         if (mode !== 'empty') frame({ choices: [{ delta: { content: mode === 'partial' ? '部分回答' : '新回答' } }] });
         else res.flushHeaders();

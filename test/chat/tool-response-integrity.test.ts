@@ -15,7 +15,7 @@ it('preserves the same actual bounded response in SSE, model input and reloaded 
   const previousConfig = process.env.KI_CONFIG_PATH;
   const configPath = path.join(tmp, 'config.yaml');
   process.env.KI_CONFIG_PATH = configPath;
-  const jiti = createJiti(import.meta.url, { moduleCache: false, alias: { './kb-search-tool.js': fileURLToPath(new URL('./fixtures/response-search.ts', import.meta.url)) } });
+  const jiti = createJiti(import.meta.url, { moduleCache: false, alias: { '../mcp-tool-registry.js': fileURLToPath(new URL('./fixtures/response-search.ts', import.meta.url)) } });
   const { handleChatRoutes } = await jiti.import<typeof import('../../src/lib/chat/chat-routes.js')>('../../src/lib/chat/chat-routes.ts');
   const { loadConfig, resetConfigCache } = await jiti.import<typeof import('../../src/lib/config.js')>('../../src/lib/config.ts');
   let captured: { messages: { role: string; content: string }[] }[] = [];
@@ -30,7 +30,7 @@ it('preserves the same actual bounded response in SSE, model input and reloaded 
         const body = JSON.parse(raw);
         captured.push(body);
         const call = supportsTools && !body.messages.some((m: { role: string }) => m.role === 'tool');
-        const delta = call ? { tool_calls: [{ index: 0, id: 'call-response', type: 'function', function: { name: 'kb_search', arguments: JSON.stringify({ query }) } }] } : { content: 'answer' };
+        const delta = call ? { tool_calls: [{ index: 0, id: 'call-response', type: 'function', function: { name: 'ki_search', arguments: JSON.stringify({ query }) } }] } : { content: 'answer' };
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.end(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: call ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`);
       } else {
@@ -53,18 +53,27 @@ it('preserves the same actual bounded response in SSE, model input and reloaded 
         assert.equal(stream.status, 200);
         const events = (await stream.text()).split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
         assert.equal(events.at(-1).type, 'done');
-        const end = events.find((event) => event.type === 'tool_end');
         const expected = serializeToolResponse(await runKbSearch('default', { query }));
-        assert.deepEqual(end.response, expected);
-        assert.ok(Array.from(end.response.text).length <= 10000);
         if (supportsTools) {
+          const end = events.find((event) => event.type === 'tool_end');
+          assert.deepEqual(end!.response, expected);
+          assert.ok(Array.from(end!.response.text).length <= 10000);
           assert.equal(captured.at(-1)!.messages.find((m) => m.role === 'tool')?.content, expected.text);
         } else {
-          assert.ok(captured[0].messages.some((m) => m.content.includes(expected.text)));
+          // 批次 2（D2）：不支持工具 → 纯聊天。不检索、不发任何工具事件、不注入检索结果。
+          assert.ok(!events.some((event) => event.type === 'tool_start' || event.type === 'tool_end'), '纯聊天路径不得出现工具事件');
+          const degraded = events.find((event) => event.type === 'degraded');
+          assert.equal(degraded!.reason, 'tools-unsupported');
+          assert.ok(!captured[0].messages.some((m) => m.content.includes(expected.text)), '不得把检索结果注入纯聊天路径');
+          assert.ok(captured[0].messages.some((m) => m.role === 'system' && m.content.includes('本次未检索知识库')), '应注入「未检索」system 提示');
         }
         const history = await fetch(`${base}/api/chat/conversations/${conv.id}`);
         const saved = await history.json() as { conv: { messages: { progress?: { phase: string; response?: unknown }[] }[] } };
-        assert.deepEqual(saved.conv.messages.at(-1)?.progress?.find((p) => p.phase === 'end')?.response, expected);
+        if (supportsTools) {
+          assert.deepEqual(saved.conv.messages.at(-1)?.progress?.find((p) => p.phase === 'end')?.response, expected);
+        } else {
+          assert.equal(saved.conv.messages.at(-1)?.progress, undefined, '纯聊天路径不落盘工具步骤');
+        }
       }
     }
   } finally {

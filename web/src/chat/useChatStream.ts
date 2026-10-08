@@ -340,7 +340,7 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
     case 'tool_start':
       store.dispatch({
         type: 'streamProgress',
-        step: toolStartStep(ev.mode, ev.name, ev.query),
+        step: toolStartStep(ev.mode, ev.name, ev.query, ev.args),
       });
       return;
 
@@ -398,21 +398,39 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
   }
 }
 
-/** `tool_start` → 生成中状态文案（R11a：检索往返期间必须有可见进展） */
+/** `tool_start` → 生成中状态文案（R11a：工具往返期间必须有可见进展） */
 /* 导出：ChatPanel 还原"落盘的历史步骤"时复用同一套文案，否则刷新前后会出现两套措辞 */
-export function toolStartStep(mode: string, name?: string, query?: string): ProgressStep {
-  const label = mode === 'fulltext' ? '正在检索知识库…（全文）' : '正在检索知识库…（语义）';
-  return { kind: 'tool', phase: 'start', label, name, query, mode };
+export function toolStartStep(mode: string | undefined, name?: string, query?: string, args?: string): ProgressStep {
+  // 检索类工具（ki_search，带 mode）沿用检索文案；其余工具按工具名展示（批次 2 泛化）
+  const label = mode !== undefined
+    ? (mode === 'fulltext' ? '正在检索知识库…（全文）' : '正在检索知识库…（语义）')
+    : `正在调用 ${name ?? '工具'}…`;
+  return {
+    kind: 'tool',
+    phase: 'start',
+    label,
+    ...(name !== undefined ? { name } : {}),
+    ...(query !== undefined ? { query } : {}),
+    ...(mode !== undefined ? { mode } : {}),
+    ...(args !== undefined && args !== '' ? { args } : {}),
+  };
 }
 
-/** `tool_end` → 命中数或失败原因（必须成对，否则前端永久停留"正在检索…"） */
+/** `tool_end` → 结果或失败原因（必须成对，否则前端永久停留在"正在调用…"） */
 export function toolEndStep(
   hits: number,
   error?: string,
   extra?: { name?: string; mode?: string; durationMs?: number; response?: ChatToolResponse },
 ): ProgressStep {
-  const label = error ? `检索失败：${error}` : `已检索：命中 ${hits} 条`;
-  return { kind: 'tool', phase: 'end', label, hits, error, ...extra };
+  // 检索类（带 mode 的落盘还原）保留命中数措辞；其余工具给通用完成态
+  const label = error
+    ? `调用失败：${error}`
+    : extra?.mode !== undefined
+      ? `已检索：命中 ${hits} 条`
+      : hits > 0
+        ? `已完成：${hits} 条结果`
+        : '已完成';
+  return { kind: 'tool', phase: 'end', label, hits, ...(error !== undefined ? { error } : {}), ...extra };
 }
 
 /**
