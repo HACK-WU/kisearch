@@ -878,7 +878,8 @@ a:hover { text-decoration: underline; }
 .ki-score-bar { height: 4px; background: var(--ki-color-primary); border-radius: var(--ki-radius-track); }
 
 /* 双栏布局：两栏按可用高度填满（高度由容器驱动，不随内容多少变化），内容超出时卡片内部滚动 */
-.ki-split { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: var(--ki-space-4); align-items: stretch; min-height: 0; }
+/* 栏间距收紧到 12px（与 .ki-content-inner 纵向节奏一致；原先 16px 在宽屏下显得空） */
+.ki-split { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: var(--ki-space-3); align-items: stretch; min-height: 0; }
 /* 知识目录折叠：左列收成窄条（56px），正文拿到全部宽度 */
 .ki-split--tree-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
 .ki-tree-collapsed {
