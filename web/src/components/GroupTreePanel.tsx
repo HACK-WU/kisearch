@@ -4,12 +4,15 @@
  * 点击文档叶子回调 onOpenDoc；样式复用浏览页树的全部类名（对齐 demo .tree-panel）。
  */
 
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { DocItem } from '@/api/httpApi';
-import { useDocList } from '@/lib/hooks';
+import { useDocList, useGroupDocs } from '@/lib/hooks';
+import { revealTreeRow } from '@/lib/treeReveal';
 import {
   buildGroupTree,
   countDocs,
+  findGroupNode,
+  revealGroupPath,
   toggleNodeOpen,
   withAllOpen,
   withDefaultOpen,
@@ -37,12 +40,20 @@ const ICON_FOLDER = (
   </svg>
 );
 
+export interface DirectoryScrollPosition {
+  scope: string;
+  group: string;
+  left: number;
+}
+
 export interface GroupTreePanelProps {
   scope: string;
   /** 当前阅读的 Group（行高亮） */
   activeGroup?: string;
   /** 当前阅读的文档名（叶子高亮） */
   activeDocName?: string;
+  /** Reader remounts when its document changes; keep horizontal context for same-group navigation. */
+  scrollPositionRef?: MutableRefObject<DirectoryScrollPosition | null>;
   /** 点击文档叶子 */
   onOpenDoc: (doc: { group: string; name: string; path?: string }) => void;
 }
@@ -51,12 +62,36 @@ export function GroupTreePanel({
   scope,
   activeGroup,
   activeDocName,
+  scrollPositionRef,
   onOpenDoc,
 }: GroupTreePanelProps): JSX.Element {
   const { data, isLoading } = useDocList(scope);
+  const activeGroupDocs = useGroupDocs(scope, activeGroup || null);
   const docs = data?.docs ?? [];
   /** 展开态保存在本地树：首次由 groups 构建，之后文档刷新不重置用户的展开选择 */
   const [userTree, setUserTree] = useState<GroupTreeNode[] | null>(null);
+  const treeScope = useRef(scope);
+  const treeGroups = useRef(data?.groups);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const revealedTarget = useRef('');
+  const startingScrollPosition = useRef(scrollPositionRef?.current);
+
+  useEffect(() => {
+    const scopeChanged = treeScope.current !== scope;
+    const groupsChanged = treeGroups.current !== data?.groups;
+    treeScope.current = scope;
+    treeGroups.current = data?.groups;
+    setUserTree((previous) => {
+      const base = scopeChanged || groupsChanged || !previous
+        ? withDefaultOpen(buildGroupTree(data?.groups ?? [])) : previous;
+      if (!activeGroup) return base;
+      const revealed = revealGroupPath(base, activeGroup);
+      const target = findGroupNode(revealed, activeGroup);
+      return activeDocName && target && !target.open
+        ? toggleNodeOpen(revealed, activeGroup) : revealed;
+    });
+    revealedTarget.current = '';
+  }, [scope, activeGroup, activeDocName, data?.groups]);
 
   const tree = useMemo(() => {
     if (userTree) return userTree;
@@ -70,8 +105,40 @@ export function GroupTreePanel({
       list.push(doc);
       map.set(doc.group, list);
     }
+    if (activeGroup && activeGroupDocs.data?.scope === scope) {
+      map.set(activeGroup, activeGroupDocs.data.docs);
+    }
+    // The reader supplies the current document's identity. Keep its navigation leaf
+    // even when the list API caps the group; this does not change counts or stored data.
+    const current = activeGroup && activeDocName ? { group: activeGroup, name: activeDocName } : undefined;
+    if (current) {
+      const groupDocs = map.get(current.group) ?? [];
+      if (!groupDocs.some((doc) => doc.name === current.name)) map.set(current.group, [...groupDocs, current]);
+    }
     return map;
-  }, [docs]);
+  }, [docs, scope, activeGroup, activeDocName, activeGroupDocs.data]);
+
+  useEffect(() => {
+    // Wait until the group settles: its documents can move the fallback leaf down.
+    if (!activeGroup || activeGroupDocs.isFetching) return;
+    const key = JSON.stringify([scope, activeGroup, activeDocName]);
+    if (revealedTarget.current === key) return;
+    const frame = requestAnimationFrame(() => {
+      const container = bodyRef.current;
+      if (!container) return;
+      const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-ki-group]'));
+      const row = rows.find((item) => item.dataset.kiGroup === activeGroup
+        && (activeDocName ? item.dataset.kiDocument === activeDocName : !item.dataset.kiDocument));
+      if (!row) return;
+      const saved = startingScrollPosition.current;
+      const preserveHorizontal = saved?.scope === scope && saved.group === activeGroup;
+      if (preserveHorizontal) container.scrollLeft = saved.left;
+      revealTreeRow(container, row, preserveHorizontal);
+      if (scrollPositionRef) scrollPositionRef.current = { scope, group: activeGroup, left: container.scrollLeft };
+      revealedTarget.current = key;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [scope, activeGroup, activeDocName, activeGroupDocs.isFetching, tree, docsByGroup, scrollPositionRef]);
 
   const toggleOpen = (path: string): void => setUserTree(toggleNodeOpen(tree, path));
   const allExpanded = tree.length > 0 && isAllOpen(tree);
@@ -88,6 +155,7 @@ export function GroupTreePanel({
         <div
           className={`ki-tree-dir${node.open ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
           role="treeitem"
+          data-ki-group={node.path}
           tabIndex={0}
           aria-expanded={node.open}
           aria-label={`${node.name}，共 ${total} 篇`}
@@ -122,6 +190,8 @@ export function GroupTreePanel({
                 key={`${doc.group}\u0000${doc.name}`}
                 type="button"
                 className={`ki-tree-doc${activeGroup === doc.group && activeDocName === doc.name ? ' ki-tree-doc--active' : ''}`}
+                data-ki-group={doc.group}
+                data-ki-document={doc.name}
                 onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path })}
                 title={doc.path ?? `${doc.group} / ${doc.name}`}
               >
@@ -159,7 +229,16 @@ export function GroupTreePanel({
       <div className="ki-tree-meta" role="status" aria-live="polite">
         全部文档 <strong>· {totalDocs} 篇</strong>
       </div>
-      <div className="ki-reader-nav__body ki-reader-nav__body--tree" style={{ padding: 12 }}>
+      <div
+        ref={bodyRef}
+        className="ki-reader-nav__body ki-reader-nav__body--tree"
+        style={{ padding: 12 }}
+        onScroll={(event) => {
+          if (scrollPositionRef && activeGroup) {
+            scrollPositionRef.current = { scope, group: activeGroup, left: event.currentTarget.scrollLeft };
+          }
+        }}
+      >
         {/* 单根目录（如 consul）展平：scope 已确定，根行只是冗余壳（用户要求） */}
         {tree.length === 1
           ? renderNode({ ...tree[0], open: true }, true)

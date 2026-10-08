@@ -223,8 +223,6 @@ export function DashboardPage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
-          <div className="ki-eyebrow">OVERVIEW / 01</div>
-          <h1>总览</h1>
           <p>知识库全貌 · 服务状态 · 健康度</p>
         </div>
         <div className="ki-page-head__summary">

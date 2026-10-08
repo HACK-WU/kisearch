@@ -58,9 +58,9 @@
   --ki-font-size-xl: 17px;
   --ki-font-size-heading: 20px;
   --ki-font-size-2xl: 28px;
-  /* ── 布局（顶栏 63px / 侧栏 224px 对齐 v2 demo 实测值） ── */
+  /* ── 布局：紧凑侧栏，标题与公共操作共用内容区 ── */
   --ki-header-height: 63px;
-  --ki-sidebar-width: 224px;
+  --ki-sidebar-width: 196px;
   --ki-content-max-width: 1600px;
   /* ── 交互态 ── */
   --ki-color-hover: rgba(26, 58, 41, 0.045);
@@ -137,7 +137,7 @@ a:hover { text-decoration: underline; }
 /* ══════════ 布局壳 ══════════ */
 .ki-shell { display: flex; height: 100vh; overflow: hidden; }
 
-/* ── 侧边栏（对齐 v2 demo：桌面 224px / 600–959 窄轨 72px） ── */
+/* ── 侧边栏：桌面 196px / 600–959 窄轨 72px ── */
 .ki-sidebar {
   width: var(--ki-sidebar-width);
   min-width: var(--ki-sidebar-width);
@@ -159,8 +159,8 @@ a:hover { text-decoration: underline; }
 .ki-sidebar__header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
+  gap: 8px;
+  padding: 0 8px;
   margin-bottom: 32px;
   flex-shrink: 0;
 }
@@ -181,7 +181,7 @@ a:hover { text-decoration: underline; }
 .ki-sidebar__subtitle {
   display: block; margin-top: 3px;
   color: var(--ki-color-text-muted);
-  font: var(--ki-font-size-xs)/1.2 var(--ki-font-mono);
+  font: 9px/1.2 var(--ki-font-mono);
   letter-spacing: 0.06em;
 }
 
@@ -231,7 +231,7 @@ a:hover { text-decoration: underline; }
   border-top: 1px solid var(--ki-color-border); flex-shrink: 0;
 }
 .ki-sidebar__footer-title { display: block; font-size: var(--ki-font-size-sm); font-weight: 650; color: var(--ki-color-text); }
-.ki-sidebar__footer-meta { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font: var(--ki-font-size-xs) var(--ki-font-mono); }
+.ki-sidebar__footer-meta { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font: 10px var(--ki-font-mono); }
 .ki-sidebar__footer-row { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
 .ki-icon-link {
   width: 28px; height: 28px; border-radius: var(--ki-radius-sm);
@@ -257,13 +257,17 @@ a:hover { text-decoration: underline; }
 /* ── 主区域 ── */
 .ki-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-/* 顶栏：63px，对齐 demo（icon-button + 面包屑 + 任务 pill + Scope + 服务徽标） */
+/* 标题操作行：直接放在内容区，不另占一块带边框的顶栏。 */
 .ki-topbar {
-  height: var(--ki-header-height);
   display: flex; align-items: center;
-  padding: 0 20px; border-bottom: 1px solid var(--ki-color-border);
-  background: var(--ki-color-surface); gap: 12px; flex-shrink: 0;
+  gap: 12px; flex-shrink: 0; flex-wrap: wrap;
 }
+.ki-workspace-header { justify-content: space-between; }
+.ki-workspace-header__heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-workspace-title { font-size: 24px; line-height: 1.35; font-weight: 680; letter-spacing: -0.04em; }
+.ki-workspace-header__actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.ki-workspace-header__actions .ki-scope-picker { min-width: 180px; width: 180px; }
+.ki-workspace-header__actions .ki-service-badge { width: 170px; }
 .ki-icon-button {
   display: inline-grid; place-items: center;
   width: 34px; height: 34px; padding: 0; flex-shrink: 0;
@@ -337,7 +341,7 @@ a:hover { text-decoration: underline; }
 .ki-content { flex: 1; overflow-y: auto; padding: 16px; }
 .ki-content::-webkit-scrollbar { width: 6px; }
 .ki-content::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
-.ki-content-inner { max-width: var(--ki-content-max-width); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-5); }
+.ki-content-inner { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-3); }
 /* 浏览页：双栏填满视口、内部各自滚动，外层不滚动 */
 .ki-content--noscroll { overflow: hidden; }
 /* 列式 flex：横幅/页头按内容高度，末块（双栏区）吃掉剩余高度。
@@ -380,10 +384,9 @@ a:hover { text-decoration: underline; }
 .ki-dot--gray { background: var(--ki-color-text-subtle); opacity: 0.35; }
 
 /* 页头 */
-/* 页头（对齐 demo .page-intro：eyebrow + H1 32px + 副标题 + 右侧摘要） */
-.ki-page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
-.ki-page-head h1 { font-size: 32px; font-weight: 680; line-height: 1.25; letter-spacing: -0.055em; }
-.ki-page-head p { margin-top: 8px; max-width: 72ch; color: var(--ki-color-text-muted); }
+/* 各页仅保留说明与独有操作，标题由 AppShell 统一显示。 */
+.ki-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ki-page-head p { max-width: 72ch; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-eyebrow {
   margin-bottom: 8px; color: var(--ki-color-primary);
   font: 700 var(--ki-font-size-xs)/1.3 var(--ki-font-mono);
@@ -875,7 +878,7 @@ a:hover { text-decoration: underline; }
 .ki-score-bar { height: 4px; background: var(--ki-color-primary); border-radius: var(--ki-radius-track); }
 
 /* 双栏布局：两栏按可用高度填满（高度由容器驱动，不随内容多少变化），内容超出时卡片内部滚动 */
-.ki-split { display: grid; grid-template-columns: 300px 1fr; gap: var(--ki-space-5); align-items: stretch; min-height: 0; }
+.ki-split { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: var(--ki-space-4); align-items: stretch; min-height: 0; }
 /* 知识目录折叠：左列收成窄条（56px），正文拿到全部宽度 */
 .ki-split--tree-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
 .ki-tree-collapsed {
@@ -915,14 +918,11 @@ a:hover { text-decoration: underline; }
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+.ki-split__side .ki-card__body { overflow-x: auto; }
 
 /* 响应式 */
 @media (max-width: 1024px) {
   .ki-stats { grid-template-columns: repeat(2, 1fr); }
-  /* 单列：Group 树占约 40% 高、文档列表吃掉剩余，两块仍各自内部滚动（高度依旧不随条目数变化） */
-  .ki-split { grid-template-columns: 1fr; grid-template-rows: 40% minmax(0, 1fr); }
-  .ki-split__side { position: static; max-height: none; }
-  .ki-split > section { max-height: none; }
 }
 @media (max-width: 640px) {
   .ki-content { padding: 16px; }
@@ -977,7 +977,7 @@ a:hover { text-decoration: underline; }
   white-space: nowrap;
 }
 
-.ki-tree-root { display: flex; flex-direction: column; gap: 1px; }
+.ki-tree-root { display: flex; flex-direction: column; gap: 1px; width: max-content; min-width: 100%; }
 .ki-tree-root > .ki-tree-dir { font-size: var(--ki-font-size-lg); font-weight: 700; padding: 7px 8px; margin-top: 4px; }
 .ki-tree-root > .ki-tree-dir:first-child { margin-top: 0; }
 .ki-tree-group { padding-left: 14px; margin-left: 9px; border-left: 1px solid var(--ki-color-border); display: flex; flex-direction: column; gap: 2px; margin-top: 4px; margin-bottom: 2px; animation: ki-tree-expand 0.15s ease; }
@@ -1002,7 +1002,7 @@ a:hover { text-decoration: underline; }
   outline: 2px solid var(--ki-color-primary); outline-offset: 1px; border-radius: 3px;
 }
 .ki-tree-icon { width: 16px; height: 16px; flex-shrink: 0; color: var(--ki-color-primary); }
-.ki-tree-dir__label { overflow: hidden; text-overflow: ellipsis; }
+.ki-tree-dir__label { flex-shrink: 0; }
 .ki-tree-dir .ki-heat { margin-left: auto; }
 
 /* ══════════ 原文抽屉（右侧滑出） ══════════ */
@@ -1041,15 +1041,19 @@ a:hover { text-decoration: underline; }
 }
 .ki-tree-doc .ki-icon { color: var(--ki-color-text-subtle); }
 .ki-tree-doc--active .ki-icon { color: var(--ki-color-primary); }
-.ki-tree-doc__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-tree-doc__name { flex: 1 0 auto; white-space: nowrap; }
 
 .ki-browse-reader { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.ki-split__side .ki-card__head { min-height: 52px; padding: 0 12px; gap: 6px; }
+.ki-split__side .ki-panel-kicker { display: none; }
+.ki-split__side .ki-panel-heading .ki-card__title { margin-top: 0; font-size: 15px; }
 .ki-browse-reader__card { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 /* 阅读区头部（demo .reader-head：space-between —— 左标签，右侧工具组） */
 .ki-reader-toolbar {
   position: relative;
+  container-type: inline-size; container-name: reader;
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0;
-  min-height: 62px; padding: 0 20px; border-bottom: 1px solid var(--ki-color-border);
+  min-height: 52px; padding: 8px 12px; border-bottom: 1px solid var(--ki-color-border);
 }
 .ki-reader-toolbar__label { flex: none; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600; }
 .ki-reader-tools { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 1; min-width: 0; }
@@ -1062,7 +1066,7 @@ a:hover { text-decoration: underline; }
   flex: 1 1 auto; min-width: 0;
   display: flex; align-items: center; justify-content: center; gap: 12px;
 }
-.ki-reader-filters .ki-reader-search { flex: 0 1 420px; min-width: 150px; max-width: none; }
+.ki-reader-filters .ki-reader-search { flex: 1 1 260px; min-width: 150px; max-width: 420px; }
 /* 清空按钮：仅在有检索词时出现（框内右侧） */
 .ki-reader-search__clear {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
@@ -1135,13 +1139,25 @@ a:hover { text-decoration: underline; }
     padding: 8px; background: var(--ki-color-bg);
   }
   .ki-split { grid-template-rows: minmax(0, 1fr); }
+  .ki-split:not(.ki-split--tree-collapsed) { grid-template-columns: minmax(0, 1fr); }
 }
 
-@media (max-width: 1479px) { .ki-reader-width { display: none; } }
+/* 阅读区随目录与 AI 面板收缩，按实际容器宽度折叠辅助工具。 */
+@container reader (max-width: 720px) {
+  .ki-reader-toolbar__label, .ki-reader-tools .ki-reader-width { display: none; }
+  .ki-reader-tools, .ki-reader-filters { gap: 8px; }
+}
+@container reader (max-width: 440px) {
+  .ki-reader-filters { flex-wrap: wrap; justify-content: flex-start; }
+  .ki-reader-filters .ki-reader-search { flex-basis: 100%; max-width: none; }
+}
+@media (max-width: 800px) {
+  .ki-drawer__actions .ki-reader-width { display: none; }
+}
 
 /* 常驻模式（浏览页双栏右栏）：取消固定定位/遮罩/入场动画，作为面板内嵌 */
 .ki-drawer--inline {
-  position: static;
+  position: relative;
   width: auto;
   height: 100%;
   box-shadow: none;
@@ -1700,7 +1716,7 @@ a:hover { text-decoration: underline; }
   overscroll-behavior: contain;
   padding: 12px;
 }
-.ki-reader-nav__body--tree { padding: 12px 10px; }
+.ki-reader-nav__body--tree { padding: 12px 10px; overflow-x: auto; }
 .ki-reader-nav__filters {
   display: flex;
   gap: 8px;
@@ -2250,7 +2266,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-bar__fill--warn { background: var(--ki-color-warning); }
 .ki-task-bar--lg { height: 6px; margin-top: 0; }
 @media (max-width: 1100px) {
-  .ki-topbar { gap: 8px; padding: 0 14px; }
+  .ki-topbar { gap: 8px; }
   .ki-scope-picker { min-width: 150px; }
   .ki-service-badge { width: 140px; }
   .ki-global-task-link { max-width: 160px; }
@@ -3034,12 +3050,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-chat-cfg__sw[aria-checked="true"]::after { transform: translateX(16px); }
 .ki-chat-cfg__sw--danger { border-color: var(--ki-color-warning); }
 
-/* demo 外壳（仅用于把面板放进真实页面语境，复用既有外壳类） */
-body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--ki-color-bg); color: var(--ki-color-text); font-family: var(--ki-font-family); font-size: var(--ki-font-size-md); }
-.ki-shell { flex: 1; min-height: 0; }
-.ki-main { padding: var(--ki-space-6); }
-.ki-main h2 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-xl); }
-.ki-main p { color: var(--ki-color-text-muted); max-width: 60ch; line-height: 1.7; }
+/* 对话面板样式不改写 body、主布局或 Markdown 标题。 */
 :focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: var(--ki-radius-sm); }
 /* ── 列表层条目卡片（提示词 / Skill）── */
 /* grid 列必须 minmax(0,1fr)：否则 grid 项 min-width:auto 会被摘要长文本撑开（第四轮修正：消除层内横向滚动 113px） */

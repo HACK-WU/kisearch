@@ -1128,8 +1128,6 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     <>
       <div className="ki-page-head">
         <div>
-          <div className="ki-eyebrow">INGEST / 03</div>
-          <h1>上传导入</h1>
           <p>目标：{scopeConfirmed ? scope : '请选择并确认本次导入的 Scope'} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
         </div>
       </div>

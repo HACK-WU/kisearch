@@ -17,6 +17,7 @@ import { TagSelect } from '@/components/TagSelect';
 import { Icon } from '@/components/icons';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
+import { revealTreeRow } from '@/lib/treeReveal';
 import {
   buildGroupTree,
   countDocs,
@@ -144,6 +145,9 @@ export function BrowsePage(): JSX.Element {
   // 窄屏：点树内文档后阅读区以覆盖层展开（CSS 仅在 ≤959px 生效），「返回目录」关闭
   const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
   const appliedDirectTarget = useRef('');
+  const directoryRef = useRef<HTMLDivElement>(null);
+  const fullscreenDirectoryRef = useRef<HTMLDivElement>(null);
+  const revealedDirectoryTarget = useRef('');
 
   const directTarget = searchParams.toString();
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
@@ -167,15 +171,23 @@ export function BrowsePage(): JSX.Element {
     }
     if (!group && !relation && data?.scope !== targetScope) return;
     if (group && relation) {
+      setTreeCollapsed(false);
       setActiveGroup(group);
+      setViewingSource('tree');
+      setMobileReaderOpen(true);
+      setQ('');
+      setSearchQ('');
+      setSelectedTag('');
       setViewing({ group, module: relation, anchor: params.get('anchor') ?? undefined });
     } else {
       // scope / scope+group 是浏览入口：前者显示默认 Group，后者显示指定 Group；都不打开命中文档。
       setViewing(null);
+      setMobileReaderOpen(false);
       setHistory([]);
       setForwardHistory([]);
       setReaderFullscreen(false);
       if (group) {
+        setTreeCollapsed(false);
         setActiveGroup(group);
       } else if (data?.scope === targetScope) {
         const base = withDefaultOpen(buildGroupTree(data.groups ?? []));
@@ -241,8 +253,33 @@ export function BrowsePage(): JSX.Element {
   // revealGroupPath 幂等：已可见时返回原引用，不会触发额外渲染。
   useEffect(() => {
     if (!activeGroup) return;
-    setTree((prev) => revealGroupPath(prev, activeGroup));
-  }, [activeGroup, data?.groups]);
+    setTree((prev) => {
+      const revealed = revealGroupPath(prev, activeGroup);
+      const target = findGroupNode(revealed, activeGroup);
+      return target && !target.open ? toggleNodeOpen(revealed, activeGroup) : revealed;
+    });
+  }, [activeGroup, data?.groups, viewing?.group, viewing?.module, readerFullscreen]);
+
+  // Wait for ancestor expansion and document loading, then reveal once per navigation.
+  useEffect(() => {
+    const directoryCollapsed = readerFullscreen ? readerGroupCollapsed : treeCollapsed;
+    if (!activeGroup || directoryCollapsed) return;
+    const documentName = viewing?.group === activeGroup ? viewing.module : '';
+    if (documentName && groupQuery.isFetching) return;
+    const key = JSON.stringify([scope, activeGroup, documentName, readerFullscreen, directoryCollapsed]);
+    if (revealedDirectoryTarget.current === key) return;
+    const frame = requestAnimationFrame(() => {
+      const container = readerFullscreen ? fullscreenDirectoryRef.current : directoryRef.current;
+      if (!container) return;
+      const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-ki-group]'));
+      const row = rows.find((item) => item.dataset.kiGroup === activeGroup
+        && (documentName ? item.dataset.kiDocument === documentName : !item.dataset.kiDocument));
+      if (!row) return;
+      revealTreeRow(container, row);
+      revealedDirectoryTarget.current = key;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [scope, activeGroup, viewing, readerFullscreen, treeCollapsed, readerGroupCollapsed, groupQuery.isFetching, tree, docsByGroup]);
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
@@ -307,11 +344,14 @@ export function BrowsePage(): JSX.Element {
   }, [scope]);
   useEffect(() => {
     if (autoOpenRef.current || isLoading || viewing || isSearching) return;
+    // A document deep link is applied in another effect in this same render.
+    // Do not let the default first-document selection overwrite it.
+    if (searchParams.get('scope') && searchParams.get('group') && searchParams.get('relation')) return;
     const first = knownDocs[0];
     if (!first) return;
     autoOpenRef.current = true;
     openDocument({ module: first.name, group: first.group, path: first.path });
-  }, [isLoading, isSearching, knownDocs, openDocument, scope, viewing]);
+  }, [isLoading, isSearching, knownDocs, openDocument, scope, viewing, searchParams]);
 
   // ── 树内文档叶子 ──
   // 首层数据：/api/doc/list 的全量列表（≤500 条按 Group 分组）
@@ -323,6 +363,17 @@ export function BrowsePage(): JSX.Element {
     setDocsByGroup(map);
     loadedGroupsRef.current = new Set(Object.keys(map));
   }, [data?.docs]);
+
+  // Deep links select a group without the manual expansion callback. Feed that
+  // group's query into the tree too, including the known current document if capped.
+  useEffect(() => {
+    if (!activeGroup || groupQuery.data?.scope !== scope) return;
+    const docs = groupQuery.data.docs;
+    const current = viewing?.group === activeGroup ? viewing.module : '';
+    const visibleDocs = current && !docs.some((doc) => doc.name === current)
+      ? [...docs, { group: activeGroup, name: current }] : docs;
+    setDocsByGroup((previous) => ({ ...previous, [activeGroup]: visibleDocs }));
+  }, [scope, activeGroup, data?.docs, groupQuery.data, viewing?.group, viewing?.module]);
 
   /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录） */
   const ensureGroupDocs = useCallback((group: string): void => {
@@ -455,6 +506,7 @@ export function BrowsePage(): JSX.Element {
         <div
           className={`ki-tree-dir${node.open ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
           role="treeitem"
+          data-ki-group={node.path}
           tabIndex={0}
           aria-label={treeNodeLabel(node, totalDocs)}
           aria-expanded={node.open}
@@ -490,6 +542,8 @@ export function BrowsePage(): JSX.Element {
                 key={`${doc.group}\u0000${doc.name}`}
                 type="button"
                 className={`ki-tree-doc${viewing?.group === doc.group && viewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
+                data-ki-group={doc.group}
+                data-ki-document={doc.name}
                 onClick={() => {
                   // 检索态下从树打开文档也走抽屉，避免把结果列表顶掉
                   openDocument(
@@ -717,7 +771,7 @@ export function BrowsePage(): JSX.Element {
                 </button>
               </div>
             </div>
-            <div className="ki-reader-nav__body ki-reader-nav__body--tree">{renderTreeBody(true)}</div>
+            <div ref={fullscreenDirectoryRef} className="ki-reader-nav__body ki-reader-nav__body--tree">{renderTreeBody(true)}</div>
           </>
         )}
       </aside>
@@ -774,8 +828,6 @@ export function BrowsePage(): JSX.Element {
     <>
       <div className="ki-page-head" style={{ flexShrink: 0 }}>
         <div>
-          <div className="ki-eyebrow">LIBRARY / 01</div>
-          <h1>知识库浏览</h1>
           <p>Group 树 · 文档列表 · 原文查看</p>
         </div>
       </div>
@@ -839,7 +891,7 @@ export function BrowsePage(): JSX.Element {
               全部文档
               <strong> · {visibleDocCount} 篇</strong>
             </div>
-            <div className="ki-card__body" style={{ padding: 12 }}>
+            <div ref={directoryRef} className="ki-card__body" style={{ padding: 12 }}>
               {/* 同样展平唯一的根目录（scope 已由顶栏确定，根行是重复信息） */}
               {renderTreeBody(true)}
             </div>

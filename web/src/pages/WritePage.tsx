@@ -177,8 +177,6 @@ export function WritePage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
-          <div className="ki-eyebrow">AUTHORING / 04</div>
-          <h1>知识写入</h1>
           <p>sync-relation · 目标 scope：{scopeConfirmed ? scope : '尚未确认'}</p>
         </div>
       </div>

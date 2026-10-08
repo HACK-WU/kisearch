@@ -140,8 +140,6 @@ export function TasksPage(): JSX.Element {
     <div className="ki-tasks-page">
       <div className="ki-page-head">
         <div>
-          <div className="ki-eyebrow">JOBS / 05</div>
-          <h1>后台任务</h1>
           <p>查看网页导入、CLI 导入与向量重建 · 最近任务保留 1 小时</p>
         </div>
         <button className="ki-btn ki-btn--secondary" onClick={() => void query.refetch()} disabled={query.isFetching}>

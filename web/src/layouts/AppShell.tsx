@@ -1,5 +1,5 @@
 /**
- * AppShell.tsx —— 应用布局（对齐 v2 demo：品牌区 + 分组导航（SVG 图标）+ 面包屑顶栏 + 服务徽标）
+ * AppShell.tsx —— 应用布局（对齐 v2 demo：品牌区 + 分组导航（SVG 图标）+ 共用标题操作区 + 服务徽标）
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -73,7 +73,7 @@ export function AppShell(): JSX.Element {
   const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
   if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
   const chatStore = chatStoreRef.current;
-  const [chatOpen, setChatOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
   const chatToggleRef = useRef<HTMLButtonElement>(null);
 
   const location = useLocation();
@@ -248,58 +248,58 @@ export function AppShell(): JSX.Element {
 
       {/* ════════ 主区域 ════════ */}
       <div className="ki-main">
-        <header className="ki-topbar">
-          <button
-            className="ki-icon-button"
-            onClick={() => setSidebarHidden((v) => !v)}
-            title="收起/展开侧边栏"
-            aria-label="收起或展开侧边栏"
-            aria-expanded={!sidebarHidden}
-          >
-            <Icon name={sidebarHidden ? 'menu' : 'chevron-left'} />
-          </button>
-          <div className="ki-breadcrumb">
-            工作空间 <span className="ki-breadcrumb__sep">/</span> <strong>{currentLabel}</strong>
-          </div>
-          <div className="ki-topbar__spacer" />
-          {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
-          <button
-            type="button"
-            className="ki-topbar__chat-toggle"
-            ref={chatToggleRef}
-            onClick={() => setChatOpen((v) => !v)}
-            title={chatOpen ? '收起 AI 对话' : '打开 AI 对话'}
-            aria-label="AI 对话"
-            aria-pressed={chatOpen}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M20 11.5a8 8 0 0 1-8 8H5l-3 3V11.5a9 9 0 0 1 18 0Z" />
-              <path d="M7 11h.01M11 11h.01M15 11h.01" strokeWidth="3" />
-            </svg>
-            <span className="ki-topbar__chat-label">AI 对话</span>
-          </button>
-          <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
-            {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}
-            <span>{taskStatus}</span>
-          </Link>
-          {/* 手动忽略失败提示：独立按钮（徽章本体是 Link，button 不能嵌进去） */}
-          {failedTasks.length > 0 && (
-            <button
-              className="ki-global-task-dismiss"
-              type="button"
-              onClick={dismissFailedNotice}
-              title="忽略失败提示；之后出现的新失败会再次提醒，任务页仍可查历史"
-              aria-label="忽略失败提示"
-            >
-              ×
-            </button>
-          )}
-          <ScopeSelect />
-          <ServiceBadge />
-        </header>
-
         <main className="ki-content">
           <div className="ki-content-inner">
+            <header className="ki-topbar ki-workspace-header">
+              <div className="ki-workspace-header__heading">
+                <button
+                  className="ki-icon-button"
+                  onClick={() => setSidebarHidden((v) => !v)}
+                  title="收起/展开侧边栏"
+                  aria-label="收起或展开侧边栏"
+                  aria-expanded={!sidebarHidden}
+                >
+                  <Icon name={sidebarHidden ? 'menu' : 'chevron-left'} />
+                </button>
+                <h1 className="ki-workspace-title">{currentLabel}</h1>
+              </div>
+              <div className="ki-workspace-header__actions">
+                {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
+                <button
+                  type="button"
+                  className="ki-topbar__chat-toggle"
+                  ref={chatToggleRef}
+                  onClick={() => setChatOpen((v) => !v)}
+                  title={chatOpen ? '收起 AI 对话' : '打开 AI 对话'}
+                  aria-label="AI 对话"
+                  aria-pressed={chatOpen}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M20 11.5a8 8 0 0 1-8 8H5l-3 3V11.5a9 9 0 0 1 18 0Z" />
+                    <path d="M7 11h.01M11 11h.01M15 11h.01" strokeWidth="3" />
+                  </svg>
+                  <span className="ki-topbar__chat-label">AI 对话</span>
+                </button>
+                <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
+                  {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}
+                  <span>{taskStatus}</span>
+                </Link>
+                {/* 手动忽略失败提示：独立按钮（徽章本体是 Link，button 不能嵌进去） */}
+                {failedTasks.length > 0 && (
+                  <button
+                    className="ki-global-task-dismiss"
+                    type="button"
+                    onClick={dismissFailedNotice}
+                    title="忽略失败提示；之后出现的新失败会再次提醒，任务页仍可查历史"
+                    aria-label="忽略失败提示"
+                  >
+                    ×
+                  </button>
+                )}
+                <ScopeSelect />
+                <ServiceBadge />
+              </div>
+            </header>
             {dimensionQuery.data?.status.state === 'mismatch' && dimensionQuery.data.status.persisted !== undefined ? (
               <div className="ki-vector-dimension-banner" role="alert">
                 <span className="ki-vector-dimension-banner__icon" aria-hidden="true">!</span>

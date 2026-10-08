@@ -11,7 +11,7 @@ import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
-import { GroupTreePanel } from '@/components/GroupTreePanel';
+import { GroupTreePanel, type DirectoryScrollPosition } from '@/components/GroupTreePanel';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
@@ -133,6 +133,7 @@ export function SearchPage(): JSX.Element {
   /** 错误码（如 VECTOR_DIMENSION_MISMATCH）：与导入页共用同一判定口径，不再靠错误串猜 */
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [viewing, setViewing] = useState<DocumentView | null>(null);
+  const directoryScrollRef = useRef<DirectoryScrollPosition | null>(null);
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
   const [readerFullscreen, setReaderFullscreen] = useState(false);
@@ -172,7 +173,8 @@ export function SearchPage(): JSX.Element {
   }, [scope]);
 
   /** 手动打开搜索结果是新的导航起点。 */
-  const openDocument = useCallback((doc: DocumentView): void => {
+  const openDocument = useCallback((doc: DocumentView, preserveDirectoryPosition = false): void => {
+    if (!preserveDirectoryPosition) directoryScrollRef.current = null;
     setHistory([]);
     setForwardHistory([]);
     setViewing(doc);
@@ -372,8 +374,6 @@ export function SearchPage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
-          <div className="ki-eyebrow">RETRIEVAL / 02</div>
-          <h1>语义搜索</h1>
           <p>向量 + BM25 混合检索 · 原文内容 + Group 路径</p>
         </div>
       </div>
@@ -648,14 +648,16 @@ export function SearchPage(): JSX.Element {
                     {/* 文档名称 + Group 路径 */}
                     <div className="ki-qr-title">
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
-                      <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
+                      <span className="ki-badge ki-badge--kb" title={[r.group, r.relation].filter(Boolean).join('/')}>
+                        {[r.group, r.relation].filter(Boolean).join('/') || '(无文档路径)'}
+                      </span>
                       {r.group && (
                         <Link
                           className="ki-qr-group-browse"
-                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}` }}
+                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}${r.relation ? `&relation=${encodeURIComponent(r.relation)}` : ''}` }}
                           onClick={(event) => event.stopPropagation()}
-                          aria-label={`浏览 Group ${r.group} 中的文档`}
-                        >浏览此 Group ↗</Link>
+                          aria-label={r.relation ? `在目录中定位文档 ${r.group}/${r.relation}` : `浏览 Group ${r.group} 中的文档`}
+                        >{r.relation ? '定位文档 ↗' : '浏览此 Group ↗'}</Link>
                       )}
                     </div>
                     {/* 原文 / 向量内容；仅全文模式高亮，避免把语义近似结果误标成精确命中 */}
@@ -720,7 +722,8 @@ export function SearchPage(): JSX.Element {
               scope={scope}
               activeGroup={viewing.group}
               activeDocName={viewing.module}
-              onOpenDoc={({ group, name, path }) => openDocument({ module: name, group, path })}
+              scrollPositionRef={directoryScrollRef}
+              onOpenDoc={({ group, name, path }) => openDocument({ module: name, group, path }, true)}
             />
           }
           fullscreen={readerFullscreen}
