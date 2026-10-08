@@ -1919,6 +1919,7 @@ a:hover { text-decoration: underline; }
 .ki-markdown p { margin: 8px 0; }
 .ki-markdown ul, .ki-markdown ol { padding-left: 20px; margin: 8px 0; }
 .ki-markdown code { font-family: var(--ki-font-mono); font-size: 12px; background: var(--ki-color-bg-muted); padding: 1px 5px; border-radius: 4px; }
+.ki-markdown pre code { background: transparent; padding: 0; border-radius: 0; }
 .ki-markdown pre { background: var(--ki-color-bg); padding: 12px; border-radius: var(--ki-radius-sm); overflow-x: auto; font-family: var(--ki-font-mono); font-size: 12px; margin: 8px 0; }
 .ki-markdown .ki-code-block {
   position: relative;
