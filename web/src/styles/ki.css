@@ -3347,3 +3347,84 @@ select.ki-chat-cfg__ta--select {
   /* Keep the latest streamed text above the composer instead of against its edge. */
   padding-bottom: var(--ki-space-8);
 }
+
+/* ════════════════════════════════════════════════════════════════
+   独立对话页（REQ-20261008-001 · requirements/2026-10-08-独立对话页面/design/ui-design.md）
+   ────────────────────────────────────────────────────────────────
+   纯追加、不改上方任何既有规则；复用 --ki-* 令牌；新增量以 --ki-chatpage-* 声明。
+   结构：ChatPanel variant="page" → aside.ki-chat-panel--page（grid 双栏）
+         ├─ .ki-chatpage__side（左：ConversationList inline 常驻会话列表）
+         └─ .ki-chatpage__main（右：ctx / 消息流 / 输入区，对话列 880px 居中）
+   ════════════════════════════════════════════════════════════════ */
+:root {
+  --ki-chatpage-side-w: 260px;
+  --ki-chatpage-main-max: 880px;
+}
+
+/* ChatPage 宿主：撑起 ki-content--noscroll 高度链（:last-child flex:1 由既有规则提供） */
+.ki-chatpage-host { display: flex; min-height: 0; }
+
+/* ── page 容器：覆盖 dock 的 380px 固定宽与左边线，改 grid 双栏 ── */
+.ki-chat-panel--page {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+  border-left: none;
+  display: grid;
+  grid-template-columns: var(--ki-chatpage-side-w) minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--ki-color-surface);
+}
+
+/* ── 左栏：常驻会话列表（inline 变体覆盖浮层定位与卡片样式）── */
+.ki-chatpage__side {
+  display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-chat-convpop--inline {
+  position: static;
+  flex: 1; min-height: 0; max-height: none;
+  border: none; border-radius: 0; box-shadow: none;
+  background: transparent;
+}
+/* 左栏 260px 比浮层（380px）窄：foot 按钮禁止折行，低价值排序 hint 省略 */
+.ki-chat-convpop--inline .ki-chat-convpop__foot { flex-wrap: wrap; }
+.ki-chat-convpop--inline .ki-chat-convpop__foot .ki-chat-btn { white-space: nowrap; }
+.ki-chat-convpop--inline .ki-chat-convpop__hint { display: none; }
+
+/* ── 右栏：对话主区 ── */
+.ki-chatpage__main { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--ki-color-bg-secondary); }
+.ki-chatpage__ctx-spacer { flex: 1; }
+.ki-chatpage__convbtn { display: none; }
+.ki-chatpage__mask { display: none; }
+
+/* 对话列限宽 880 居中（消息列与输入区各行；jump 浮钮除外，它是绝对定位） */
+.ki-chat-panel--page .ki-chat-panel__content { max-width: var(--ki-chatpage-main-max); margin-left: auto; margin-right: auto; width: 100%; }
+.ki-chat-panel--page .ki-chat-panel__foot > *:not(.ki-chat-jump) { max-width: var(--ki-chatpage-main-max); margin-left: auto; margin-right: auto; width: 100%; }
+/* jump 对齐 880 列右缘（foot 全宽时不得贴到屏幕右边缘） */
+.ki-chat-panel--page .ki-chat-jump { right: max(var(--ki-space-4), calc((100% - var(--ki-chatpage-main-max)) / 2 + var(--ki-space-1))); }
+/* 空态在宽列下更舒展 */
+.ki-chat-panel--page .ki-chat-empty { padding: var(--ki-space-8) 0; }
+
+/* ── 窄屏（<1024px）：左栏转覆盖式抽屉（样式与 demo §CP 段一致）── */
+@media (max-width: 1023px) {
+  .ki-chat-panel--page { grid-template-columns: minmax(0, 1fr); }
+  .ki-chatpage__side {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 990;
+    width: min(300px, 86vw);
+    border-right: 1px solid var(--ki-color-border-strong);
+    box-shadow: var(--ki-shadow-2);
+    transform: translateX(-103%);
+    transition: transform 220ms cubic-bezier(.4, 0, .2, 1);
+  }
+  .ki-chatpage__side[data-open="true"] { transform: none; }
+  .ki-chatpage__convbtn { display: inline-grid; }
+  .ki-chatpage__mask[data-open="true"] {
+    display: block; position: fixed; inset: 0; z-index: 980;
+    background: rgba(15, 20, 32, .35);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ki-chatpage__side { transition: none; }
+}

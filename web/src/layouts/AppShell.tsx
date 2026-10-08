@@ -15,6 +15,7 @@ import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from
 import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
+import { ChatStoreContext } from '@/chat/chatStoreContext';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -23,6 +24,8 @@ const NAV_MAIN = [
   { to: '/', label: '总览', icon: 'grid', end: true },
   { to: '/browse', label: '知识库浏览', icon: 'book' },
   { to: '/search', label: '语义搜索', icon: 'search' },
+  // REQ-20261008-001：独立对话页入口（用户拍板 Q1：位于「语义搜索」之下）
+  { to: '/chat', label: 'AI 对话', icon: 'chat' },
   { to: '/import', label: '上传导入', icon: 'upload' },
   { to: '/write', label: '知识写入', icon: 'edit' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
@@ -78,6 +81,26 @@ export function AppShell(): JSX.Element {
 
   const location = useLocation();
   const importVisible = location.pathname === '/import';
+  const isChatRoute = location.pathname.startsWith('/chat');
+  /**
+   * Q4/Q5（REQ-20261008-001 用户拍板）：处于独立对话页时右侧面板**自动收起**，
+   * 离开时**恢复进入前的开/关先态**。先态只在进入 /chat 那一刻记录一次；
+   * 用户在 /chat 手动再开面板不打扰（离开仍恢复进入前状态）。
+   */
+  const chatOpenBeforeRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (isChatRoute) {
+      if (chatOpenBeforeRef.current === null) {
+        chatOpenBeforeRef.current = chatOpen;
+        if (chatOpen) setChatOpen(false);
+      }
+    } else if (chatOpenBeforeRef.current !== null) {
+      if (chatOpenBeforeRef.current) setChatOpen(true);
+      chatOpenBeforeRef.current = null;
+    }
+    // chatOpen 不列依赖：先态只记一次，避免面板自身的开/关把先态覆盖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isChatRoute]);
   const currentLabel = NAV_MAIN.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? '总览';
@@ -189,6 +212,7 @@ export function AppShell(): JSX.Element {
   }, []);
 
   return (
+    <ChatStoreContext.Provider value={chatStore}>
     <DocumentEditorProvider value={{ isOpen: editorRequest !== null, open: setEditorRequest }}>
     <>
     <div className="ki-shell">
@@ -350,5 +374,6 @@ export function AppShell(): JSX.Element {
     )}
     </>
     </DocumentEditorProvider>
+    </ChatStoreContext.Provider>
   );
 }

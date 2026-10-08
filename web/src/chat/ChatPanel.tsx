@@ -29,6 +29,7 @@
  */
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   ackDisclosure,
   archiveConversation,
@@ -57,6 +58,13 @@ export interface ChatPanelProps {
   open: boolean;
   /** 仅隐藏面板，保留当前对话、草稿与进行中的生成。 */
   onClose: () => void;
+  /**
+   * 呈现变体（REQ-20261008-001）：
+   * · `dock`（默认）：右侧 380px 常驻面板（窄屏转浮层），头部含标题/会话胶囊/关闭钮
+   * · `page`：独立对话页（/chat）——双栏（左：常驻会话列表；右：对话区限宽 880px 居中），
+   *   头部裁掉（页面 H1 已承担），配置入口移至上下文条；会话深链 /chat/:convId 由本组件同步
+   */
+  variant?: 'dock' | 'page';
 }
 
 /**
@@ -70,16 +78,13 @@ const CHAT_DOCK_MIN_VIEWPORT = 1400;
 
 const MAX_SEND_CHARS = 20000;
 
-/** 空态提问引导（点击填入输入框）；措辞对齐知识库问答的真实用法 */
-const EMPTY_HINTS = [
-  '这个知识库的写入链路是怎么走的？',
-  'scopeMode=strict 时未注册 scope 会怎样？',
-  'daemon 的写锁和 OperationCoordinator 是什么关系？',
-];
-
-export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element | null {
+export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelProps): JSX.Element | null {
+  const isPage = variant === 'page';
   const scope = useScopeValue();
   const stream = useChatStream(store);
+  // ── 会话深链（page 专属，URL 契约见 REQ-20261008-001 design/ui-design.md §2.4）──
+  const { convId: urlConvId } = useParams<{ convId?: string }>();
+  const navigate = useNavigate();
 
   // ── 订阅常驻 store（订阅式而非快照：流式推进需要组件重渲染）──
   const state = useSyncExternalStoreCompat(store);
@@ -111,6 +116,8 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
   const [convPopOpen, setConvPopOpen] = useState(false);
   /** 对话配置层开合（纯瞬时 UI 态，符合本文件"不得累积业务态"的约束） */
   const [cfgOpen, setCfgOpen] = useState(false);
+  /** 左栏会话抽屉开合（page 窄屏 <1024px 专用，瞬时 UI 态） */
+  const [sideOpen, setSideOpen] = useState(false);
   const chipRef = useRef<HTMLDivElement>(null);
   /** T12 确认请求进行中（防重复点击） */
   const [ackBusy, setAckBusy] = useState(false);
@@ -213,6 +220,24 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
     [store, stream]
   );
 
+  /**
+   * page 深链守卫（challenger 质疑修复，REQ-20261008-001）：会话必须属于**当前 scope**。
+   * 深链 /chat/:convId 绕过了"从当前 scope 列表选"的天然约束，直接按 id 打开会把
+   * 其他 scope 的会话载入——随后提问写进旧 scope 的会话文件、检索也按旧 scope 执行
+   * （S03 §5 明确要防的事故）。守卫失败抛错，由调用方落 convError 并提示。
+   * （多一次 getConversation：深链是低频路径，换取判定准确性）
+   */
+  const openConversationGuarded = useCallback(
+    async (id: string): Promise<void> => {
+      const d = await getConversation(id);
+      if (d.conv.scope !== scopeRef.current) {
+        throw new Error(`该会话属于 ${d.conv.scope}，与当前知识库（${scopeRef.current}）不同，已拒绝打开`);
+      }
+      await openConversation(id);
+    },
+    [openConversation]
+  );
+
   /** 新建会话并切过去（首次发送时若当前无会话会调用）。**并发调用复用同一次创建**。 */
   const createNewConversation = useCallback((): Promise<string> => {
     if (creatingRef.current && creatingScopeRef.current === scope) return creatingRef.current;
@@ -270,6 +295,19 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
       if (scopeRef.current === reqScope) setConvLoading(false);
     }
   }, [scope]);
+
+  /**
+   * dock 重新打开时刷新会话列表（challenger 质疑#3 修复，REQ-20261008-001）：
+   * 独立页（page 实例）里的重命名/归档/删除/新建只更新了 page 自己的列表 state，
+   * dock 这份会陈旧——双实例各自组件 state 的固有代价（store 只共享会话内容，
+   * 列表是组件级）。跳过挂载首次（初始 effect 已拉取，避免重复请求）。
+   */
+  const dockReopenRef = useRef(false);
+  useEffect(() => {
+    if (isPage) return;
+    if (!dockReopenRef.current) { dockReopenRef.current = true; return; }
+    if (open) void refreshConversations();
+  }, [isPage, open, refreshConversations]);
 
   /**
    * 拉取已归档会话（API-02 `archived=1`）。
@@ -351,13 +389,36 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
         setConvs(r.items);
         setConvError(null);
         const pick = r.items.find((c) => !c.corrupted) ?? null;
-        if (store.getState().activeConvId !== pick?.id) {
-          stream.abort();
-          store.dispatch({ type: 'setActiveConv', convId: pick?.id ?? null });
-        }
-        if (pick) {
-          selection = selectionSeqRef.current + 1;
-          await openConversation(pick.id);
+        if (isPage) {
+          // page（/chat）选中口径：**URL 深链 > 现状保留 > 最近一条**（URL 契约 §2.4）。
+          // 不得套用 dock 的"强制对齐最近一条"——否则深链进入 /chat/:convId 会被改写成别的会话。
+          const current = store.getState().activeConvId;
+          const target = urlConvId ?? current ?? pick?.id ?? null;
+          if (target && target !== current) {
+            selection = selectionSeqRef.current + 1;
+            try {
+              // 深链入口必须过 scope 守卫（质疑#2：防把其他 scope 会话打开并写入）
+              await openConversationGuarded(target);
+            } catch (openErr) {
+              // 深链 id 无效（已删除/跨 scope）：回落列表态并提示（契约：无效 id 回落 /chat）
+              if (urlConvId) navigate('/chat', { replace: true });
+              // ★ 必须在此就地落错误：守卫在 openConversation 之前 throw 时 selectionSeqRef
+              //   未递增，外层 catch 的序号校验会把 setConvError 丢弃（用户看不到拒绝原因）
+              if (scopeRef.current === scope) setConvError(openErr instanceof Error ? openErr.message : '打开会话失败');
+              return;
+            }
+          } else if (!target) {
+            store.dispatch({ type: 'setActiveConv', convId: null });
+          }
+        } else {
+          if (store.getState().activeConvId !== pick?.id) {
+            stream.abort();
+            store.dispatch({ type: 'setActiveConv', convId: pick?.id ?? null });
+          }
+          if (pick) {
+            selection = selectionSeqRef.current + 1;
+            await openConversation(pick.id);
+          }
         }
       } catch (err) {
         if (!alive || scopeRef.current !== scope || selectionSeqRef.current !== selection) return;
@@ -374,8 +435,15 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
     return () => {
       alive = false;
     };
-    // stream 只在 abort 时使用（引用稳定），列入依赖以避免闭包过期
-  }, [scope, openConversation, store, stream]);
+    // stream 只在 abort 时使用（引用稳定），列入依赖以避免闭包过期。
+    // urlConvId 故意不列依赖：本 effect 只在挂载/切 scope 时按"当时的 URL"做初始选中，
+    // URL 后续变化由下方「URL → store」专用 effect 承接（防双重打开）。
+    // ★ navigate 也故意不列依赖：react-router v7 的 navigate 引用**随导航变化**（实测），
+    //   列入会死循环——「选中会话 → store→URL 导航 → navigate 变 → 本 effect 重跑 →
+    //   setConvs([]) 清空列表 → 异步完成时序号已变被丢弃 → 列表永远为空」。
+    //   本 effect 的 navigate 调用以执行期闭包为准即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, openConversation, openConversationGuarded, store, stream, isPage]);
 
   // Keep the user's sticky-bottom intent separate from programmatic growth/scroll events.
   const stickyBottomRef = useRef(true);
@@ -417,6 +485,42 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
       document.removeEventListener('keydown', onKey);
     };
   }, [convPopOpen]);
+
+  // ── page 窄屏抽屉：Esc 关闭（点击遮罩关闭在 JSX onClick 上）──
+  useEffect(() => {
+    if (!sideOpen) return;
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') setSideOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [sideOpen]);
+
+  // ── 会话深链同步（page 专属；dock 无任何 URL 语义，现有行为零变化）──
+  // ⚠️ 必须位于下方 `if (!open) return null` 早退**之前**：open 切换时 hooks 数量
+  //   必须恒定（Rules of Hooks），守卫写在回调内部而不是不写 hook。
+  // store → URL：当前会话变化即写回地址栏。用 replace：会话切换是"状态定位"而非"页面跳转"，
+  //   每次切换都 push 会让后退键变成"逐条回放任一会话"。
+  useEffect(() => {
+    if (!isPage) return;
+    const active = state.activeConvId;
+    if (active === (urlConvId ?? null)) return;
+    navigate(active ? `/chat/${active}` : '/chat', { replace: true });
+  }, [isPage, state.activeConvId, urlConvId, navigate]);
+
+  // URL → store：用户改地址栏 / 前进后退 / 外部深链进入。
+  // 列表未就绪（readyScope !== scope）时跳过——初始 effect 已按"当时的 URL"做选中，避免双重打开。
+  useEffect(() => {
+    if (!isPage || !urlConvId) return;
+    if (readyScope !== scope) return;
+    if (urlConvId === store.getState().activeConvId) return;
+    // 深链入口必须过 scope 守卫（质疑#2）；守卫拒绝（跨 scope/已删除）→ 提示并回落列表态，
+    // store→URL effect 随后会把地址栏归位到当前真实会话
+    void openConversationGuarded(urlConvId).catch((err: unknown) => {
+      setConvError(err instanceof Error ? err.message : '切换会话失败');
+      navigate('/chat', { replace: true });
+    });
+    // openConversationGuarded 是同文件回调（执行期解析，闭包无 TDZ）；此处只对 urlConvId 就绪态响应
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPage, urlConvId, readyScope, scope]);
 
   // ── 发送可用性：enabled / 隐私确认 / 生成中 / 空白输入 ──
   const blocked = useMemo(() => {
@@ -463,7 +567,8 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
 
   // ★ 硬约束：隐藏而非卸载（返回 null 不触发组件卸载，store 状态与进行中的流均保留）
   if (!open) return null;
-  if (fullscreenReader) return null;
+  // page 是主内容而非浮层：全屏阅读器打开时无需为它让位（阅读器自身是 fixed 全屏覆盖）
+  if (!isPage && fullscreenReader) return null;
 
   /** 本轮生成失败的错误态（N4 / S03 §5「连接中断 + 重试入口」）：按 convId 索引的模块级错误槽 */
   const streamError = getStreamError(state.activeConvId);
@@ -691,15 +796,9 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
     });
   }
 
-  return (
-    <>
-      <aside
-        className={`ki-chat-panel${narrow ? ' ki-chat-panel--overlay' : ''}`}
-        aria-label="AI 对话面板"
-        data-narrow={narrow ? 'true' : 'false'}
-      >
-        {/* ── 头部：标题 + 会话胶囊（切换器触发）+ 新建 ── */}
-        <header className="ki-chat-panel__head">
+  /* ── dock 头部：标题 + 会话胶囊（切换器触发）+ 新建/配置/关闭（page 不渲染：页面 H1 与左栏已承担） ── */
+  const dockHeader = (
+    <header className="ki-chat-panel__head">
           <span className="ki-chat-panel__title">AI 对话</span>
           <div className="ki-chat-chipwrap" ref={chipRef}>
             <button
@@ -779,21 +878,56 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
               </svg>
             </button>
           </span>
-        </header>
+    </header>
+  );
 
-        {/* ── 上下文条：模型 / 状态（取代原先只读地挂在标题右侧的模型名）── */}
-        <div className="ki-chat-ctx">
-          <span className={`ki-chat-ctx__dot${config && !config.enabled ? ' ki-chat-ctx__dot--off' : config?.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
-          <span className="ki-chat-ctx__model">{config?.model ?? '未配置模型'}</span>
-          {config && config.enabled ? (
-            <>
-              <span className="ki-chat-ctx__sep">·</span>
-              <span>
-                {state.streaming.active ? '生成中' : config.ackRequired ? '外发未确认' : config.supportsTools ? '工具检索就绪' : '预检索模式'}
-              </span>
-            </>
-          ) : null}
-        </div>
+  /* ── 主列：上下文条 + 横幅 + 消息流 + 输入区（dock / page 共用；page 在 ctx 注入抽屉钮与配置入口） ── */
+  const mainColumn = (
+    <>
+      {/* ── 上下文条：模型 / 状态（取代原先只读地挂在标题右侧的模型名）── */}
+      <div className="ki-chat-ctx">
+        {isPage ? (
+          <button
+            type="button"
+            className="ki-chat-iconbtn ki-chatpage__convbtn"
+            title="会话列表"
+            aria-label="打开会话列表"
+            onClick={() => setSideOpen(true)}
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
+          </button>
+        ) : null}
+        <span className={`ki-chat-ctx__dot${config && !config.enabled ? ' ki-chat-ctx__dot--off' : config?.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
+        <span className="ki-chat-ctx__model">{config?.model ?? '未配置模型'}</span>
+        {config && config.enabled ? (
+          <>
+            <span className="ki-chat-ctx__sep">·</span>
+            <span>
+              {state.streaming.active ? '生成中' : config.ackRequired ? '外发未确认' : config.supportsTools ? '工具检索就绪' : '预检索模式'}
+            </span>
+          </>
+        ) : null}
+        {isPage ? (
+          <>
+            <span className="ki-chatpage__ctx-spacer" />
+            <button
+              type="button"
+              className="ki-chat-cfg__entry"
+              title="对话配置"
+              aria-haspopup="dialog"
+              aria-expanded={cfgOpen}
+              onClick={() => setCfgOpen(true)}
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+                <path d="M2.6 5.4h10.8M2.6 10.6h10.8" />
+                <circle cx="6.2" cy="5.4" r="1.7" />
+                <circle cx="9.8" cy="10.6" r="1.7" />
+              </svg>
+              <span>配置</span>
+            </button>
+          </>
+        ) : null}
+      </div>
 
         {/* 未配置模型 → fail-loud（R12/N3：不静默失败、不伪装成"模型没答"） */}
         {config && !config.enabled ? (
@@ -830,11 +964,6 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
               </span>
               <p className="ki-chat-empty__t">在任意页面提问</p>
               <p className="ki-chat-empty__d">回答会附带知识库来源，点击可回原文并高亮命中片段。</p>
-              <div className="ki-chat-empty__hints">
-                {EMPTY_HINTS.map((h) => (
-                  <button key={h} type="button" className="ki-chat-q" onClick={() => { setDraft(h); }}>{h}</button>
-                ))}
-              </div>
             </div>
           ) : null}
 
@@ -1001,10 +1130,60 @@ export function ChatPanel({ store, open, onClose }: ChatPanelProps): JSX.Element
               )}
             </div>
           </div>
-        </footer>
-        {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
-        {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
-      </aside>
+      </footer>
+    </>
+  );
+
+  /* ── page 左栏：常驻会话列表（inline 变体；搜索/重命名/归档/删除二次确认全部复用浮层版能力） ── */
+  const sideList = (
+    <ConversationList
+      variant="inline"
+      open
+      items={allConvs}
+      activeId={state.activeConvId}
+      loading={convLoading}
+      error={convError}
+      onClose={() => undefined}
+      onSelect={(id) => { handleSelectConversation(id); setSideOpen(false); }}
+      onCreate={() => { handleCreateConversation(); setSideOpen(false); }}
+      onRefresh={() => void refreshConversations()}
+      onRename={handleRename}
+      onArchive={handleArchive}
+      onDelete={handleDelete}
+    />
+  );
+
+  return (
+    <>
+      {isPage ? (
+        <aside className="ki-chat-panel ki-chat-panel--page" aria-label="AI 对话页面">
+          <div className="ki-chatpage__side" data-open={sideOpen ? 'true' : 'false'}>
+            {sideList}
+          </div>
+          <div
+            className="ki-chatpage__mask"
+            data-open={sideOpen ? 'true' : 'false'}
+            onClick={() => setSideOpen(false)}
+            aria-hidden="true"
+          />
+          <section className="ki-chatpage__main">
+            {mainColumn}
+            {/* ── 对话配置层：absolute inset:0 相对 .ki-chat-panel，page 下覆盖整个双栏区 ── */}
+            {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
+          </section>
+        </aside>
+      ) : (
+        <aside
+          className={`ki-chat-panel${narrow ? ' ki-chat-panel--overlay' : ''}`}
+          aria-label="AI 对话面板"
+          data-narrow={narrow ? 'true' : 'false'}
+        >
+          {dockHeader}
+          {mainColumn}
+          {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
+          {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
+        </aside>
+      )}
 
       {/* 来源引用点击 → 打开原文并高亮（复用既有 ModuleDrawer） */}
       {viewing ? (

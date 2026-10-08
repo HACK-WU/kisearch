@@ -17,7 +17,7 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md §9.1
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
 import type { ChatEvent, ChatToolResponse } from '@/api/chatContract';
@@ -60,6 +60,20 @@ export interface StreamError {
 const errorsByConv = new Map<string, StreamError>();
 
 /**
+ * 当前活跃流的 AbortController（模块级单例，单写者：同一时刻至多一个）。
+ *
+ * ★ 为什么是模块级而非 hook 实例级：ChatPanel 宽体变体（REQ-20261008-001）后
+ *   同一 store 会被 dock / page 两个组件实例同时挂载，二者的 `useChatStream`
+ *   各持一个实例级 ctrlRef —— 后果是 page 实例的「停止」停不掉 dock 实例发起的流
+ *   （反之亦然）。提升为模块级后，任意实例的 `abort()` 都能中止当前流；
+ *   「谁有权收尾」仍由 store 的 `streaming.seq` 全局令牌把关（见 consume 的双层判定），
+ *   实例级 `seqRef` 只负责本实例内"旧流不得收新流的尾"。
+ */
+const activeCtrlBox: { current: AbortController | null } = { current: null };
+/** 已被主动 abort 的流（模块级，理由同上）——区分"用户中止"与"网络中断"（N6 vs §5） */
+const abortedCtrls = new Set<AbortController>();
+
+/**
  * 消费 SSE 事件并更新 store。**事件分派规则见 `chatContract.ts` 的 `ChatEvent` 联合类型**。
  *
  * 实现要点（勿省）：
@@ -69,10 +83,8 @@ const errorsByConv = new Map<string, StreamError>();
  * · `reasoning` → 只进内存态的 `reasoning` 字段（**不落盘**，D7）
  */
 export function useChatStream(store: ChatStore): ChatStreamApi {
-  /** 当前活跃流的 AbortController（单写者：同一时刻至多一个） */
-  const ctrlRef = useRef<AbortController | null>(null);
-  /** 已被主动 abort 的流 —— 用于区分"用户中止"与"网络中断"（N6 vs §5 流中断） */
-  const abortedRef = useRef<Set<AbortController>>(new Set());
+  /** 本实例发起的流的 ctrl —— 卸载时只中止"自己的"流（见下方卸载 effect 注释） */
+  const myCtrlRef = useRef<AbortController | null>(null);
   /**
    * ★ 流序号令牌 —— **"谁有权收尾"的唯一依据**。
    *
@@ -85,17 +97,18 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
    */
   const seqRef = useRef(0);
 
-  /** 卸载或 AppShell 销毁时中止流（daemon 退出/页面关闭路径） */
-  useEffect(() => {
-    return () => {
-      const ctrl = ctrlRef.current;
-      if (ctrl) {
-        abortedRef.current.add(ctrl);
-        ctrl.abort();
-        ctrlRef.current = null;
-      }
-    };
-  }, []);
+  /**
+   * 卸载语义（2026-10-08 challenger 质疑修正，REQ-20261008-001）：
+   *
+   * **组件卸载不中止流**。`consume` 的读取循环（async 生成器）不受 React 卸载影响，
+   * 会继续把事件 dispatch 进 AppShell 级 store —— 这是 N2「切路由不断流」的实现基础：
+   * 独立页（page 实例）发起的生成，离开 /chat 后照旧推进，dock 面板或重进页面
+   * 都能继续看到流式状态；旧语义（卸载即 abort，即使是"只 abort 本实例发起的"）
+   * 会把 page 实例随路由卸载时其发起的流误杀。
+   * 页面真正关闭（浏览器）时由浏览器断连兜底（后端按连接中断收尾），无需在此 abort。
+   *
+   * 注：myCtrlRef 不再驱动卸载清理，仅用于"本实例发起的流"的身份辨识（保留备查）。
+   */
 
   /**
    * 消费一条事件流：事件 → store。
@@ -193,9 +206,10 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
         }
       } finally {
         // 无论成功/失败/中止，都必须收尾（否则 streaming.active 永久为 true）
-        const userAborted = abortedRef.current.has(ctrl);
-        abortedRef.current.delete(ctrl);
-        if (ctrlRef.current === ctrl) ctrlRef.current = null;
+        const userAborted = abortedCtrls.has(ctrl);
+        abortedCtrls.delete(ctrl);
+        if (activeCtrlBox.current === ctrl) activeCtrlBox.current = null;
+        if (myCtrlRef.current === ctrl) myCtrlRef.current = null;
 
         // ★ 只有"当前流"有权收尾（**双层判定**，缺一不可）：
         //   ① hook 令牌：被新流取代的旧流在此返回，否则它的 streamEnd 会把**新流**的
@@ -238,13 +252,14 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       // 单写者：新流开始前必须中止旧流（切会话 / 重新生成 / 编辑重发均适用）
       errorsByConv.delete(convId);
       store.dispatch({ type: 'streamStart', messageId, seq: mySeq, replacingId, at: new Date().toISOString() });
-      const prev = ctrlRef.current;
+      const prev = activeCtrlBox.current;
       if (prev) {
-        abortedRef.current.add(prev);
+        abortedCtrls.add(prev);
         prev.abort();
       }
       const ctrl = new AbortController();
-      ctrlRef.current = ctrl;
+      activeCtrlBox.current = ctrl;
+      myCtrlRef.current = ctrl;
       return consume(convId, ctrl, makeStream, mySeq, onMeta, replacingId, optimisticUserId);
     },
     [consume, store],
@@ -290,12 +305,13 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
       },
 
       abort(): void {
-        const ctrl = ctrlRef.current;
+        // 模块级：任意实例可中止当前流（跨实例「停止」，见 activeCtrlBox 注释）
+        const ctrl = activeCtrlBox.current;
         // 空值契约：无活跃流时静默无操作
         if (!ctrl) return;
-        abortedRef.current.add(ctrl);
+        abortedCtrls.add(ctrl);
         ctrl.abort();
-        ctrlRef.current = null;
+        activeCtrlBox.current = null;
       },
 
       isStreaming(): boolean {

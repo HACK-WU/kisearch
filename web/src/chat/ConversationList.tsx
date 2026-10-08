@@ -29,6 +29,11 @@ export interface ConversationListProps {
   activeId: string | null;
   loading: boolean;
   error: string | null;
+  /**
+   * 呈现变体：`popover`（默认，面板头部浮层）/ `inline`（独立对话页左栏常驻，REQ-20261008-001）。
+   * inline 时 `open` 视为恒 true（调用方不再控制开合），Esc/点击外部关闭逻辑不生效。
+   */
+  variant?: 'popover' | 'inline';
   /** 切换会话（上层负责「先 abort 进行中的流，再切」） */
   onSelect: (id: string) => void;
   /** 新建会话并切换过去 */
@@ -90,7 +95,8 @@ const IconTrash = () => (
 );
 
 export function ConversationList(props: ConversationListProps): JSX.Element | null {
-  const { open, items, activeId, loading, error } = props;
+  const { open, items, activeId, loading, error, variant = 'popover' } = props;
+  const inline = variant === 'inline';
   const [keyword, setKeyword] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
@@ -110,7 +116,7 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
     if (open) { setRenamingId(null); setConfirmingId(null); }
   }, [open]);
 
-  if (!open) return null;
+  if (!open && !inline) return null;
 
   const rowsOf = (list: ConversationSummary[]) => list.map((c) => {
     const active = c.id === activeId;
@@ -216,11 +222,11 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
   return (
     <div
       ref={rootRef}
-      className="ki-chat-convpop"
+      className={`ki-chat-convpop${inline ? ' ki-chat-convpop--inline' : ''}`}
       role="dialog"
       aria-label="会话列表"
       onKeyDown={(e) => {
-        if (e.key === 'Escape') { props.onClose(); return; }
+        if (e.key === 'Escape') { if (!inline) props.onClose(); return; }
         // 重命名进行中不抢焦点：方向键会让输入框 blur，从而静默提交一次改名
         if (renamingId) return;
         if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
