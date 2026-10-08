@@ -23,7 +23,17 @@ const {
   withAllOpen,
   withDefaultOpen,
 } = await vite.ssrLoadModule('/src/lib/groupTree.ts');
+const { documentViewForScope } = await vite.ssrLoadModule('/src/lib/documentLinks.ts');
 after(async () => vite.close());
+
+describe('scope-bound document viewer', () => {
+  const doc = { scope: 'scope-a', group: 'k8s', module: 'README' };
+
+  it('does not expose a document selected in another scope', () => {
+    assert.equal(documentViewForScope('scope-b', doc), null);
+    assert.equal(documentViewForScope('scope-a', doc), doc);
+  });
+});
 
 describe('document-bearing parent Groups', () => {
   const groups = [
