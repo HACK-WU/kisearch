@@ -1299,6 +1299,18 @@ export async function vectorDelete(params: {
 const LIST_ALL_LIMIT = 10_000;
 
 /**
+ * S0-1（REQ-20260930-002）：倍增扫描的硬上限。
+ * listIds 无 offset 分页（zvec querySync 仅 topk+filter），取全只能倍增 limit 重查；
+ * 超过本上限时：计数路径 fail-loud（拒绝低报值作为破坏性操作预告），
+ * 标签扫描返回 truncated:true（明确标记不完整）。1.28M 覆盖目标规模（100 万 chunk）。
+ * 导出供 tag.ts CLI 对 --scan-limit 显式值做同源 clamp。
+ */
+export const SCAN_HARD_CAP = 1_280_000;
+
+/** 标签扫描分批 fetch 的批大小（避免一次取回全部文档的峰值内存）。 */
+const TAG_FETCH_BATCH = 5_000;
+
+/**
  * 构建 scope + tag 过滤：scope 单值必等 / 多值 OR；tags 非空时多 tag 以 OR 组合。
  * tags 为空/未传 → 不按 tag 过滤（覆盖该（些）scope 下全部 tag）。
  */
@@ -1452,8 +1464,14 @@ export async function vectorListScopes(scanLimit: number = LIST_ALL_LIMIT): Prom
 
 /**
  * 枚举指定 scope 下出现过的所有 tag（distinct + 计数）。
- * 引擎无 distinct/group-by：一次 listIds(scope) + fetch，内存按 tag 字段分组计数。
- * 受 scanLimit 约束（默认 10000）——大库下 truncated:true 表示为"已扫描范围内"的近似结果。
+ * 引擎无 distinct/group-by：listIds(scope) + fetch，内存按 tag 字段分组计数。
+ *
+ * S0-1（2026-10-08）：默认不再固定 10,000 上限近似——listIds 无 offset 分页，
+ * 采用倍增 limit 重查直到取全（10k → 20k → … ≤ SCAN_HARD_CAP）；达到硬上限时
+ * truncated:true 表示"已扫描范围内"的近似结果（标签可能漏）。
+ * 显式传入 scanLimit 视为硬上限不倍增（CLI 成本控制的既有逃生口）。
+ * 内容向量默认带 ki-search tag（vectorStore/vectorBulkStore 的 DEFAULT_TAG），
+ * 故本扫描天然 O(全库)，无法用 tag 过滤缩小范围。
  */
 export async function vectorListTags(params: {
   scope: string;
@@ -1461,19 +1479,26 @@ export async function vectorListTags(params: {
 }): Promise<{ tags: VectorTagInfo[]; scanned: number; truncated: boolean }> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return { tags: [], scanned: 0, truncated: false };
-  const limit = params.scanLimit ?? LIST_ALL_LIMIT;
   const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: params.scope };
   return withEngine(params.scope, async (engine) => {
-    const ids = await engine.listIds(scopeCond, limit);
-    const truncated = ids.length >= limit;
+    let limit = params.scanLimit ?? LIST_ALL_LIMIT;
+    let ids = await engine.listIds(scopeCond, limit);
+    let truncated = ids.length >= limit;
+    while (!params.scanLimit && truncated && limit < SCAN_HARD_CAP) {
+      limit = Math.min(limit * 2, SCAN_HARD_CAP);
+      ids = await engine.listIds(scopeCond, limit);
+      truncated = ids.length >= limit;
+    }
     if (ids.length === 0) return { tags: [], scanned: 0, truncated };
-    const docs = await engine.fetch(ids, false);
     const counts = new Map<string, number>();
-    for (const d of docs) {
-      const raw = d.fields?.[TAG_FIELD];
-      const tag = raw !== undefined && raw !== null ? String(raw) : '';
-      if (tag.length === 0) continue;
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    for (let i = 0; i < ids.length; i += TAG_FETCH_BATCH) {
+      const docs = await engine.fetch(ids.slice(i, i + TAG_FETCH_BATCH), false);
+      for (const d of docs) {
+        const raw = d.fields?.[TAG_FIELD];
+        const tag = raw !== undefined && raw !== null ? String(raw) : '';
+        if (tag.length === 0) continue;
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
     }
     const tags: VectorTagInfo[] = [...counts.entries()]
       .map(([tag, count]) => ({ tag, count }))
@@ -1483,13 +1508,41 @@ export async function vectorListTags(params: {
 }
 
 /**
- * 统计指定 scope（可选 tag）下文档数（listIds 长度，受 LIST_ALL_LIMIT 约束）。
+ * 统计指定 scope（可选 tag）下文档数。
+ *
+ * S0-1（2026-10-08）：不再受 LIST_ALL_LIMIT 封顶低报——
+ * - 无 tags：布局 v2 起 Collection 按 scope 独立（scope-collection.ts），且所有写入
+ *   链路（vectorStore/vectorBulkStore）恒写 SCOPE_FIELD，故 info().docCount 即该
+ *   scope 全部向量数，与 vectorDeleteScope({scope}) 循环删除的实际目标一致，O(1)。
+ *   （异常态防御性口径：若 Collection 被外部工具污染混入异 scope/缺 SCOPE_FIELD 的
+ *   doc，docCount 会按整个 Collection 计——预告偏高是安全方向，实删数以
+ *   vectorDeleteScope 返回值为准。）
+ * - 带 tags：listIds 无 offset 分页，倍增 limit 取全；达到 SCAN_HARD_CAP 仍取不全时
+ *   fail-loud 抛错——破坏性操作预告（scope clear --tags）不得以低报值放行。
  */
 export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return 0;
+  if (!params.tags || params.tags.length === 0) {
+    return withEngine(params.scope, async (engine) => (await engine.info()).docCount);
+  }
   const filter = buildScopeTagFilter([params.scope], params.tags);
-  return withEngine(params.scope, (engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
+  return withEngine(params.scope, async (engine) => {
+    let limit = LIST_ALL_LIMIT;
+    let ids = await engine.listIds(filter, limit);
+    while (ids.length >= limit && limit < SCAN_HARD_CAP) {
+      limit = Math.min(limit * 2, SCAN_HARD_CAP);
+      ids = await engine.listIds(filter, limit);
+    }
+    if (ids.length >= limit) {
+      throw new Error(
+        `scope "${params.scope}" 按 tag 过滤的向量数超过 ${SCAN_HARD_CAP}，无法精确计数；` +
+        `请缩小 tag 范围后分批操作，或对确认类命令（如 ki scope clear --tags）显式加 --yes ` +
+        `跳过预告计数直接执行（实际删除数以执行结果为准）`,
+      );
+    }
+    return ids.length;
+  });
 }
 
 /** 返回 scope 持久化 Collection 的 dense 维度；FTS-only 或不存在时返回 undefined。 */

@@ -823,6 +823,9 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   const tagRaw = (url.searchParams.get('tag') ?? '').toLowerCase();
   const limitRaw = url.searchParams.get('limit');
   const limit = limitRaw ? Math.min(Math.max(parseInt(limitRaw, 10) || 0, 1), DOC_LIST_LIMIT) : DOC_LIST_LIMIT;
+  // S0-2（REQ-20260930-002）：服务端分页 offset（与 limit 组合翻页；非法/负值按 0）
+  const offsetRaw = url.searchParams.get('offset');
+  const offset = Math.max(parseInt(offsetRaw ?? '0', 10) || 0, 0);
 
   const all = buildDocList(scope);
   // Group 树需要完整 group 集合 + 每组文档数量，不受 docs 分页 limit 影响
@@ -845,17 +848,19 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   const matchQuery = (d: { name: string; path?: string }): boolean =>
     !q || d.name.toLowerCase().includes(q) || (d.path ?? '').toLowerCase().includes(q);
 
-  // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响），确保选中任一节点都能取到完整文档
+  // 指定 group 时按 [offset, offset+limit) 分页返回该 group 文档（S0-2 修复：
+  // 旧行为 slice 后以截断长度冒充 total 且恒 truncated:false，单 Group >500 篇静默丢失）
   if (groupRaw) {
-    const groupDocs = all
-      .filter((d) => d.group === groupRaw && matchQuery(d) && matchTag(d))
-      .slice(0, limit);
+    const groupMatched = all
+      .filter((d) => d.group === groupRaw && matchQuery(d) && matchTag(d));
+    const docs = groupMatched.slice(offset, offset + limit);
     sendJson(res, 200, {
       ok: true,
       scope,
-      docs: groupDocs,
-      total: groupDocs.length,
-      truncated: false,
+      docs,
+      offset,
+      total: groupMatched.length,
+      truncated: offset + docs.length < groupMatched.length,
       groups,
       tags,
     });
@@ -868,12 +873,14 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   const SEARCH_LIMIT = 2000;
   const filtered = all.filter(matchQuery).filter(matchTag);
   const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
+  const docs = filtered.slice(offset, offset + searchLimit);
   sendJson(res, 200, {
     ok: true,
     scope,
-    docs: filtered.slice(0, searchLimit),
+    docs,
+    offset,
     total: filtered.length,
-    truncated: filtered.length > searchLimit,
+    truncated: offset + docs.length < filtered.length,
     groups,
     tags,
   });

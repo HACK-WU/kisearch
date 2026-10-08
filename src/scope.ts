@@ -73,9 +73,40 @@ export interface ScopeEntry {
 }
 
 /** 统计 Scope 的 KB 文档数与完整 FTS-only 文档数（每个 relation 计一次）。 */
-function countScopeDocs(scope: string): { wikiCount: number; ftsOnlyDocCount: number; ftsDocCount: number } {
+interface ScopeDocCounts { wikiCount: number; ftsOnlyDocCount: number; ftsDocCount: number; }
+
+const EMPTY_SCOPE_DOC_COUNTS: ScopeDocCounts = { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
+
+/**
+ * scope 文档计数缓存（S0-3 前置，REQ-20260930-002）：
+ * relations-cache 的 mtime+size 身份戳失效（与 mcp-http-api docListCache、relation-map 同模式），
+ * daemon 内重复 ki_scope_list / Web Dashboard 刷新不再逐 scope 全量 parse 关系缓存。
+ * 仅进程内缓存、不落盘：ki_scope_list 走只读队列，落盘会在读路径引入与 import 的
+ * 写竞争，且磁盘缓存格式属批次 2（per-Group 拆分 manifest）的职责——阶段 0 不为
+ * JSON 路径新增长效机制。
+ */
+const scopeDocCountCache = new Map<string, { mtimeMs: number; size: number; counts: ScopeDocCounts }>();
+
+function countScopeDocs(scope: string): ScopeDocCounts {
   const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) return { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(cachePath);
+  } catch {
+    // 文件不存在/不可访问：清缓存并按 0 计（与旧 existsSync 语义一致）
+    scopeDocCountCache.delete(cachePath);
+    return EMPTY_SCOPE_DOC_COUNTS;
+  }
+  const cached = scopeDocCountCache.get(cachePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.counts;
+  }
+  const counts = computeScopeDocCounts(cachePath);
+  scopeDocCountCache.set(cachePath, { mtimeMs: stat.mtimeMs, size: stat.size, counts });
+  return counts;
+}
+
+function computeScopeDocCounts(cachePath: string): ScopeDocCounts {
   try {
     const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
       groups?: Record<string, { hot_relations?: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>[] }>;
@@ -93,7 +124,7 @@ function countScopeDocs(scope: string): { wikiCount: number; ftsOnlyDocCount: nu
     }
     return { wikiCount, ftsOnlyDocCount, ftsDocCount };
   } catch {
-    return { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 }; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
+    return EMPTY_SCOPE_DOC_COUNTS; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
   }
 }
 
@@ -233,11 +264,14 @@ async function executeScopeClearLocal(params: { scope: string; tags?: string[]; 
       return { ok: false, error: `向量服务暂不可用（${avail.reason || '未检测到向量服务'}），拒绝清理以免两层不一致` };
     }
 
-    const vectorCount = await vectorCountScope({ scope: params.scope, tags: params.tags });
     // KB 目录仅在未按 tag 过滤时清理（tag 是向量层概念，KB 层无 tag）
     const kbWillClear = !params.tags && kbDirExists(params.scope);
 
     if (!params.yes) {
+      // 计数仅服务破坏性操作预告；vectorCountScope 带 tags 超过 SCAN_HARD_CAP 会
+      // fail-loud（S0-1：拒绝低报值作为确认依据）。--yes 路径不做计数——实际删除
+      // 数由 vectorDeleteScope 循环删除返回，超大库确认后不应被计数失败阻断。
+      const vectorCount = await vectorCountScope({ scope: params.scope, tags: params.tags });
       return {
         ok: false,
         error: `破坏性操作需 --yes 确认：将清除向量 ${vectorCount} 条${kbWillClear ? ' + KB 目录内容' : ''}`,

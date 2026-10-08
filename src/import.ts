@@ -19,7 +19,6 @@ import path from 'path';
 import { loadConfig, resolveScope, runWithConfigSnapshot } from './lib/config.js';
 
 import { handleDirectImport } from './lib/import.js';
-import { autoBackup } from './lib/backup.js';
 import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
 import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -135,20 +134,6 @@ program
       }
       await closeEngine();
       output(result as unknown as Record<string, unknown>);
-
-      // 自动备份（失败不阻断）：导入成功后触发，保证首次导入也生成 scope 快照。
-      try {
-        const backupResult = shouldUseDaemonClient()
-          ? await callDaemon<Record<string, unknown>>('backup', { scope }, 0)
-          : autoBackup(loadConfig(), scope);
-        const snapshot = (backupResult as { snapshotPath?: string; snapshotBackup?: string }).snapshotPath
-          ?? (backupResult as { snapshotBackup?: string }).snapshotBackup;
-        if ((backupResult as { ok?: boolean }).ok && snapshot) {
-          process.stderr.write(`自动备份完成：${snapshot}\n`);
-        }
-      } catch (backupErr) {
-        process.stderr.write(`警告：自动备份失败 — ${(backupErr as Error).message}\n`);
-      }
     } catch (err) {
       await closeEngine();
       output({ ok: false, error: (err as Error).message });

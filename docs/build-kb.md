@@ -160,7 +160,7 @@ ki import \
 }
 ```
 
-> **自动备份**：导入成功后，系统会自动创建 scope 快照备份（输出到 stderr）。备份文件保存在 `~/.ki/backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原。
+> **备份说明**：导入不会自动备份。如需快照，请在导入前（或任一时间点）手动执行 `ki backup <scope>`；备份文件保存在 `~/.ki/backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原（`ki restore`）。
 
 ---
 

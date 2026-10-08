@@ -279,6 +279,44 @@ describe('/api/doc/list', () => {
     assert.equal(byName.get('dense 文档残留 FTS ID'), false, 'dense relation 不作为 FTS-only 文档');
     assert.equal(byName.get('未登记索引'), false, '无 ftsIds 不显示 FTS');
   });
+
+  it('S0-2：单 Group >500 篇分页——total 为真实匹配数、truncated 与剩余页一致、offset 翻页取全', async () => {
+    const GROUP_TOTAL = 505;
+    seedRelationsCache('doc-page', {
+      大组: Array.from({ length: GROUP_TOTAL }, (_, i) => `分页文档-${String(i).padStart(3, '0')}`),
+    });
+
+    // 首页：旧行为 total=截断长度(500) 且恒 truncated:false → 静默丢 5 篇；修复后 total=505
+    const first = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-page&group=大组`)).json();
+    assert.equal(first.total, GROUP_TOTAL, 'total 必须是真实匹配数而非截断页长度');
+    assert.equal(first.docs.length, 500, '默认页大小 500');
+    assert.equal(first.truncated, true, '还有剩余页时 truncated:true');
+    assert.equal(first.offset, 0);
+
+    // 翻页取全：offset=500 取剩余 5 篇
+    const second = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-page&group=大组&offset=500`)).json();
+    assert.equal(second.docs.length, 5, '剩余页应含 5 篇');
+    assert.equal(second.truncated, false, '取完最后一页 truncated:false');
+    assert.equal(second.total, GROUP_TOTAL);
+    const names = [...first.docs, ...second.docs].map((d: { name: string }) => d.name);
+    assert.equal(new Set(names).size, GROUP_TOTAL, '两页聚合后应覆盖全部 505 篇且无重复');
+
+    // 自定义 limit + offset 组合
+    const mid = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-page&group=大组&limit=100&offset=100`)).json();
+    assert.equal(mid.docs.length, 100);
+    assert.equal(mid.truncated, true);
+    assert.equal(mid.total, GROUP_TOTAL);
+    assert.equal(mid.docs[0].name, '分页文档-100', 'offset 窗口起点正确');
+
+    // 无 group 路径同样分页一致（旧行为 total 本就正确，此处锁回归）
+    const allFirst = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-page`)).json();
+    assert.equal(allFirst.total, GROUP_TOTAL);
+    assert.equal(allFirst.docs.length, 500);
+    assert.equal(allFirst.truncated, true);
+    const allSecond = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-page&offset=500`)).json();
+    assert.equal(allSecond.docs.length, 5);
+    assert.equal(allSecond.truncated, false);
+  });
 });
 
 describe('/api/import/upload', () => {

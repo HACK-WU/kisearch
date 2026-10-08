@@ -11,8 +11,9 @@
  *   - tag 是文档上的标量字段，无独立生命周期；本命令仅用于发现某 scope 下用过哪些 tag，
  *     便于后续 ki search / ki doc list --tags 精确过滤
  *   - 只读：删除某 tag 下内容请用 ki doc delete / ki scope clear --tags
- *   - 引擎无 distinct：一次扫描 + 内存去重计数，受 --scan-limit 约束（默认 10000），
- *     超限时 truncated:true 表示结果为"已扫描范围内"的近似值
+ *   - 引擎无 distinct：扫描 + 内存去重计数。S0-1（2026-10-08）起默认倍增 limit 取全
+ *     （不再固定 10000 近似），超硬上限时 truncated:true 表示近似值；
+ *     --scan-limit <n> 显式指定时仍视为硬上限（成本控制逃生口）
  */
 
 import { Command } from 'commander';
@@ -20,6 +21,7 @@ import {
   vectorListTags,
   ensureVectorAvailable,
   closeEngine,
+  SCAN_HARD_CAP,
   type VectorTagInfo,
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
@@ -65,12 +67,16 @@ program
   .command('list')
   .description('列出指定 scope 下用过的 tag（含文档数，按数量降序）')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('--scan-limit <n>', '扫描上限（超出则结果为近似，truncated:true）', '10000')
+  .option('--scan-limit <n>', '扫描上限（显式指定则为硬上限，结果为近似 truncated:true；缺省取全）')
   .action(async (opts) => {
     const scope = resolveScope(loadConfig(), opts.scope);
+    // 缺省不传 → 不下传 → vectorListTags 倍增取全；显式传入才解析（无效输入回落取全）
+    const scanLimit = opts.scanLimit !== undefined
+      ? parseIntArg(opts.scanLimit, 0, '--scan-limit', { min: 1, max: SCAN_HARD_CAP })
+      : 0;
     const result = await executeTagList({
       scope,
-      scanLimit: parseIntArg(opts.scanLimit, 10000, '--scan-limit', { min: 1 }),
+      ...(scanLimit > 0 ? { scanLimit } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();

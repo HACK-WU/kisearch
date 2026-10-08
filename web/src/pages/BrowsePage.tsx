@@ -9,7 +9,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
-import { useDocList, useGroupDocs, getDocList, type DocListResponse } from '@/lib/hooks';
+import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
@@ -375,14 +375,15 @@ export function BrowsePage(): JSX.Element {
     setDocsByGroup((previous) => ({ ...previous, [activeGroup]: visibleDocs }));
   }, [scope, activeGroup, data?.docs, groupQuery.data, viewing?.group, viewing?.module]);
 
-  /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录） */
+  /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录）
+   *  S0-2：改用 fetchGroupDocsAll 翻页取全，单 Group >500 篇不再被首页截断 */
   const ensureGroupDocs = useCallback((group: string): void => {
     if (!group || loadedGroupsRef.current.has(group)) return;
     loadedGroupsRef.current.add(group);
     void queryClient
       .fetchQuery({
         queryKey: ['docList', scope, 'group', group, ''],
-        queryFn: () => getDocList(scope, { group }),
+        queryFn: () => fetchGroupDocsAll(scope, group),
         staleTime: 30_000,
       })
       .then((res) => {

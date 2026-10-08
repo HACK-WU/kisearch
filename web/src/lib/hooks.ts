@@ -3,12 +3,12 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { getDocList, getHealth, type DocListResponse, type HealthResponse } from '@/api/httpApi';
+import { getDocList, fetchGroupDocsAll, getHealth, type DocListResponse, type HealthResponse } from '@/api/httpApi';
 import { kiScopeList, type ScopeListResponse } from '@/api/mcpClient';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
-export { getDocList, getHealth };
+export { getDocList, fetchGroupDocsAll, getHealth };
 
 /** 服务健康状态（仅加载时查一次，避免频繁触发 zvec 探活） */
 export function useHealth() {
@@ -101,11 +101,11 @@ export function useDocList(scope: string) {
   });
 }
 
-/** 指定 group 的完整文档列表（不受 500 条全量分页截断影响），可选 tag 过滤 */
+/** 指定 group 的完整文档列表（S0-2：服务端分页翻页取全，单 Group >500 篇不漏），可选 tag 过滤 */
 export function useGroupDocs(scope: string, group: string | null, tag?: string) {
   return useQuery<DocListResponse>({
     queryKey: ['docList', scope, 'group', group ?? '', tag ?? ''],
-    queryFn: () => getDocList(scope, { group: group ?? '', tag: tag }),
+    queryFn: () => fetchGroupDocsAll(scope, group ?? '', tag),
     enabled: !!group,
     staleTime: 30_000,
     retry: 1,

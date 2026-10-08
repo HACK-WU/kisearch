@@ -66,6 +66,8 @@ export interface DocListResponse {
   docs: DocItem[];
   total: number;
   truncated?: boolean;
+  /** 服务端分页：本页起始偏移（S0-2；旧 daemon 不返回该字段） */
+  offset?: number;
   /** 完整 group 列表 + 文档数量（不受 docs 分页 limit 影响），用于构建 Group 树 */
   groups?: DocGroup[];
   /** 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用） */
@@ -210,15 +212,42 @@ export async function getSearchConfig(): Promise<SearchConfigResponse> {
 
 export async function getDocList(
   scope: string,
-  opts: { q?: string; group?: string; tag?: string } = {},
+  opts: { q?: string; group?: string; tag?: string; offset?: number } = {},
 ): Promise<DocListResponse> {
   const params = new URLSearchParams({ scope });
   if (opts.q) params.set('q', opts.q);
-  // 指定 group 时返回该 group 全部文档（不受 500 条分页截断影响）
+  // 指定 group 时按 [offset, offset+limit) 分页返回该 group 文档（S0-2 服务端分页）
   if (opts.group) params.set('group', opts.group);
   // 按自定义 tag 过滤（relation.tags 精确匹配）
   if (opts.tag) params.set('tag', opts.tag);
+  // 服务端分页偏移（与 limit 组合翻页；缺省 0 = 第一页）
+  if (opts.offset !== undefined && opts.offset > 0) params.set('offset', String(opts.offset));
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
+}
+
+/**
+ * 取全指定 Group 的文档（S0-2）：按 offset 翻页聚合到 truncated:false 或取完 total。
+ * 安全护栏 GROUP_DOCS_MAX_PAGES 防御 total 异常膨胀导致的无限循环（500 × 1000 = 50 万篇封顶）。
+ */
+const GROUP_DOCS_MAX_PAGES = 1000;
+
+export async function fetchGroupDocsAll(
+  scope: string,
+  group: string,
+  tag?: string,
+): Promise<DocListResponse> {
+  const first = await getDocList(scope, { group, tag });
+  if (!first.truncated || first.docs.length === 0) return first;
+  const total = Math.max(first.total, first.docs.length);
+  const docs = [...first.docs];
+  let offset = docs.length;
+  for (let page = 1; page < GROUP_DOCS_MAX_PAGES && docs.length < total; page++) {
+    const next = await getDocList(scope, { group, tag, offset });
+    if (next.docs.length === 0) break;
+    docs.push(...next.docs);
+    offset += next.docs.length;
+  }
+  return { ...first, docs, truncated: docs.length < total };
 }
 
 export async function getEditableDocument(scope: string, group: string, relation: string): Promise<EditableDocument> {

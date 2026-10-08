@@ -213,6 +213,44 @@ describe('B. scope —— list 并集 & 向量层降级（无 apiKey）', () => 
     assert.equal(scope.wikiCount, 5, 'KB 文档数仍按 relation 数统计');
     assert.equal(scope.ftsOnlyDocCount, 2, '只计完整 FTS-only relation；legacy 回退兼容，每个文档只计一次');
   });
+
+  it('S0-3：scope 计数缓存命中后 relations-cache 变更 → 计数刷新无漂移', async () => {
+    const { dataDir } = makeWorkspace({ scopesYaml: '  count-cache: {}' });
+    const scopeDir = makeKbScope(dataDir, 'count-cache');
+    const rcPath = path.join(scopeDir, 'relations-cache.json');
+    const writeCache = (names: string[]) => fs.writeFileSync(rcPath, JSON.stringify({
+      groups: { docs: { hot_relations: names.map((n) => ({ text: n })) } },
+    }), 'utf-8');
+
+    writeCache(['d1', 'd2']);
+    const entry1 = (await executeScopeList()).scopes.find((s) => s.scope === 'count-cache')!;
+    assert.equal(entry1.wikiCount, 2);
+
+    // 第二次调用走缓存命中路径；随后文件变更（size 变化）→ 计数必须重算
+    await executeScopeList();
+    writeCache(['d1', 'd2', 'd3', 'd4']);
+    const entry3 = (await executeScopeList()).scopes.find((s) => s.scope === 'count-cache')!;
+    assert.equal(entry3.wikiCount, 4, 'relations-cache 变更后计数不得停留在缓存旧值');
+  });
+
+  it('S0-3：不同工作区同名 scope 计数互不串台（缓存键含文件路径）', async () => {
+    const ws1 = makeWorkspace({ scopesYaml: '  dup-scope: {}' });
+    const dir1 = makeKbScope(ws1.dataDir, 'dup-scope');
+    fs.writeFileSync(path.join(dir1, 'relations-cache.json'), JSON.stringify({
+      groups: { g: { hot_relations: [{ text: 'a' }, { text: 'b' }] } },
+    }), 'utf-8');
+    const r1 = await executeScopeList();
+    assert.equal(r1.scopes.find((s) => s.scope === 'dup-scope')!.wikiCount, 2);
+
+    // 同名 scope、新工作区（不同 dataDir → 不同文件路径）：即便时间接近也不得读旧缓存
+    const ws2 = makeWorkspace({ scopesYaml: '  dup-scope: {}' });
+    const dir2 = makeKbScope(ws2.dataDir, 'dup-scope');
+    fs.writeFileSync(path.join(dir2, 'relations-cache.json'), JSON.stringify({
+      groups: { g: { hot_relations: [{ text: 'a' }, { text: 'b' }, { text: 'c' }] } },
+    }), 'utf-8');
+    const r2 = await executeScopeList();
+    assert.equal(r2.scopes.find((s) => s.scope === 'dup-scope')!.wikiCount, 3, '同名 scope 换工作区后计数不得串台');
+  });
 });
 
 describe('B. scope —— delete 护栏', () => {
