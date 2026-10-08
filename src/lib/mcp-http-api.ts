@@ -36,6 +36,7 @@ import {
   DEFAULT_MAX_ASSET_SIZE,
   DEFAULT_MAX_FILE_SIZE_BYTES,
   handleDirectImport,
+  type HandleDirectImportArgs,
   type ImportResult,
 } from './import.js';
 import type { ImportConflictMode } from './import-conflict.js';
@@ -1235,6 +1236,9 @@ async function handleImportRun(
     tags: body.tags,
     conflictMode: body.conflictMode,
     conflictSuffix: body.conflictSuffix,
+    // S0-3：Web 端不提供预算覆盖（预算来自 scope 配置/默认值）；
+    // 超限时 IMPORT_BUDGET_EXCEEDED 经 job 终态 error 透出
+    budget: undefined,
   }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
@@ -1250,6 +1254,8 @@ interface RunImportArgs {
   tags?: string;
   conflictMode?: ImportConflictMode;
   conflictSuffix?: string;
+  /** S0-3：Web 端预算覆盖入口（当前不暴露给前端，预留保持 CLI/Web 同构） */
+  budget?: HandleDirectImportArgs['budget'];
 }
 
 async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
@@ -1270,6 +1276,7 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         tags: args.tags,
         conflictMode: args.conflictMode,
         conflictSuffix: args.conflictSuffix,
+        budget: args.budget,
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };

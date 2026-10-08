@@ -26,10 +26,19 @@ import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
+
+// S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
+// 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
+const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 });
+eventLoopHistogram.enable();
+function eventLoopUtilDelayMs(): number {
+  return eventLoopHistogram.mean / 1e6; // ns → ms；无样本时 HdrHistogram 返回 0
+}
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
 let apiHandlerPromise: Promise<typeof import('./mcp-http-api.js')> | null = null;
@@ -546,6 +555,24 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         queue: getSharedOperationCoordinator().snapshot(),
         vectorResources: getVectorResourceMetrics(),
         vectorization: getVectorizationMetrics(),
+        // S0-4（REQ-20260930-002）：进程资源证据——导入成功输出后 CPU/内存仍高时，
+        // 先看这里归因（不预设结论）：rss/heap 区分 native 泄漏 vs JS 堆，
+        // cpuUserMs/systemMs 可对比两次采样得增量速率，activeHandles 判断是否有挂起句柄。
+        process: (() => {
+          const mem = process.memoryUsage(); // 单次快照，四字段同源一致
+          const cpu = process.cpuUsage();
+          return {
+            rssBytes: mem.rss,
+            heapUsedBytes: mem.heapUsed,
+            heapTotalBytes: mem.heapTotal,
+            externalBytes: mem.external,
+            cpuUserMs: cpu.user,
+            cpuSystemMs: cpu.system,
+            activeHandles: process.getActiveResourcesCount?.() ?? null,
+            eventLoopDelayMs: Math.round(eventLoopUtilDelayMs() * 100) / 100,
+            uptimeMs: Math.round(process.uptime() * 1000),
+          };
+        })(),
         ...(authEnabled ? { authFailures } : {}),
       });
       return;

@@ -60,6 +60,7 @@ import {
   type ImportConflictAction,
   type ImportConflictMode,
 } from './import-conflict.js';
+import { resolveImportBudget, preflightImportBudget, budgetViolationMessage, IMPORT_BUDGET_EXCEEDED, type ImportBudget } from './import-budget.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -155,6 +156,8 @@ export interface HandleDirectImportArgs {
   conflictMode?: ImportConflictMode;
   /** 自动后缀模板，默认 _{n}。 */
   conflictSuffix?: string;
+  /** 整批预算覆盖（S0-3，REQ-20260930-002）：显式参数 > scope 配置 import.batch > 默认值 */
+  budget?: ImportBudget;
   /** daemon HTTP job 使用：报告可观测进度；不影响 CLI 输出。 */
   onProgress?: (progress: {
     phase: 'scan' | 'vectorize' | 'persist';
@@ -534,6 +537,47 @@ async function handleDirectImportUnlocked(
   const relationsCache0 = readJson<RelationsCache>(relationsCachePath0);
   if (!relationsCache0) {
     throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+  }
+
+  // S0-3（REQ-20260930-002）：整批预算预检——读取任何文件内容/写入 KB 之前，
+  // 仅凭文件清单 + stat 做三项检查（文件数/总字节/预计 chunk 数），超限 fail-loud。
+  // 预估 chunk 用原始字节数上界近似（清洗只删不增），真实 chunk 数由扫描阶段产出。
+  {
+    // 先解析预算：bytes/chunks 两项均被显式关闭时跳过 stat 循环
+    //（文件数检查仅用 files.length，大目录免白白付一轮 stat）
+    const budget = resolveImportBudget(args.budget, importCfg?.batch);
+    const needStat = budget.maxBatchBytes !== undefined || budget.maxBatchChunks !== undefined;
+    let preflightBytes = 0;
+    let preflightChunks = 0;
+    if (needStat) {
+      for (const rel of files) {
+        const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
+        try {
+          const size = fs.statSync(absPath).size;
+          preflightBytes += size;
+          preflightChunks += Math.ceil(size / chunkSize) + 1;
+        } catch (err) {
+          // collect 与 stat 之间的瞬态删除：不计入字节，扫描阶段会以既有口径
+          //（单文件跳过/报错）处理——预检不为竞态窗口整批 fail
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw new Error(`文件不可读：${absPath}（${(err as Error).message}）`);
+        }
+      }
+    }
+    const preflight = preflightImportBudget({
+      files,
+      totalBytes: preflightBytes,
+      estimatedChunks: preflightChunks,
+      budget,
+    });
+    if (!preflight.ok) {
+      const err = new Error(budgetViolationMessage(preflight));
+      (err as Error & { code?: string }).code = IMPORT_BUDGET_EXCEEDED;
+      throw err;
+    }
+    if (needStat) {
+      logInfo(`整批预算预检通过：files=${preflight.stats.fileCount} bytes=${preflight.stats.totalBytes} estChunks=${preflight.stats.estimatedChunks}`);
+    }
   }
 
   // 仅在文件通过所有可跳过的前置处理、即将覆盖 local KB 时才失效旧状态；

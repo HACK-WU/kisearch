@@ -10,6 +10,7 @@ import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
+import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
@@ -151,6 +152,20 @@ export function BrowsePage(): JSX.Element {
 
   const directTarget = searchParams.toString();
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
+
+  // S0-6：列表加载中时查本 scope 是否有运行中的导入任务（同 scope 读请求会排在
+  // import 之后）——有则骨架屏改为「等待导入队列」说明，而非无说明骨架条。
+  // 仅 isLoading 时启用；动态轮询：无命中 2s（快速出现提示）/已命中 5s（刷进度），
+  // 加载完成后停止（不为常驻轮询加负载）。
+  const importTaskQuery = useQuery<TaskRecord | null, Error>({
+    queryKey: ['scopeImportTask', scope],
+    queryFn: async () => scopeImportRunning((await getTasks(100)).tasks, scope),
+    enabled: isLoading,
+    refetchInterval: (query) => (query.state.data ? 5000 : 2000),
+    staleTime: 0,
+    retry: 1,
+  });
+  const importTask = isLoading ? importTaskQuery.data ?? null : null;
   useEffect(() => {
     if (!directTarget) {
       appliedDirectTarget.current = '';
@@ -571,6 +586,19 @@ export function BrowsePage(): JSX.Element {
     <>
       {isLoading ? (
         <>
+          {importTask ? (
+            <div className="ki-empty" style={{ padding: 16, marginBottom: 8 }} role="status">
+              <h3>正在等待导入队列</h3>
+              <p>
+                当前 Scope 有导入任务进行中
+                {importTask.progress && importTask.progress.total > 0
+                  ? `（已处理 ${importTask.progress.done}/${importTask.progress.total}）`
+                  : ''}
+                ，文档列表将在导入批次间隙或完成后加载。
+              </p>
+              <p className="ki-cell-sub">可先访问其他 Scope，或到「任务」页查看导入进度。</p>
+            </div>
+          ) : null}
           <div className="ki-skeleton" style={{ width: '100%', height: 28, marginBottom: 8 }} />
           <div className="ki-skeleton" style={{ width: '80%', height: 28, marginBottom: 8 }} />
           <div className="ki-skeleton" style={{ width: '90%', height: 28 }} />

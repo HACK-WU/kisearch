@@ -52,6 +52,9 @@ program
   .option('--conflict-mode <mode>', '同名文档处理策略：overwrite / skip / suffix（默认 suffix）')
   .option('--conflict-suffix <template>', '自动后缀模板，必须包含 {n}（默认 _{n}）')
   .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
+  .option('--max-batch-files <n>', '整批最大文件数（S0-3 预算；默认 20000，≤0 显式关闭该项限制）')
+  .option('--max-batch-bytes <n>', '整批最大总字节数（S0-3 预算；默认 4GiB，≤0 显式关闭该项限制）')
+  .option('--max-batch-chunks <n>', '整批最大预计 chunk 数（S0-3 预算；默认 300000，≤0 显式关闭该项限制）')
   .action(async (opts) => {
     const requestConfig = loadConfig();
     return runWithConfigSnapshot(requestConfig, async () => {
@@ -65,6 +68,26 @@ program
       // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则
       const cleanEnabled = opts.clean !== false;
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
+      // S0-3 整批预算覆盖（未传的项交给 resolveImportBudget 走 config/默认）
+      const parseBudgetFlag = (name: string, raw: unknown): number | undefined => {
+        if (raw === undefined) return undefined;
+        const s = String(raw).trim();
+        if (s === '' || !Number.isFinite(Number(s))) {
+          // 无效输入告警后回落：该项交给 resolveImportBudget 走 scope 配置/默认预算
+          // （注意不是"不限制"——显式关闭请传 ≤0 数值）
+          process.stderr.write(`警告：${name} 取值无效（${String(raw)}），该项已忽略，改用 config/默认预算\n`);
+          return undefined;
+        }
+        return Number(s);
+      };
+      const budgetFiles = parseBudgetFlag('--max-batch-files', opts.maxBatchFiles);
+      const budgetBytes = parseBudgetFlag('--max-batch-bytes', opts.maxBatchBytes);
+      const budgetChunks = parseBudgetFlag('--max-batch-chunks', opts.maxBatchChunks);
+      const budget = {
+        ...(budgetFiles !== undefined ? { maxBatchFiles: budgetFiles } : {}),
+        ...(budgetBytes !== undefined ? { maxBatchBytes: budgetBytes } : {}),
+        ...(budgetChunks !== undefined ? { maxBatchChunks: budgetChunks } : {}),
+      };
 
       const importParams = {
         scope,
@@ -79,6 +102,7 @@ program
         assets: opts.assets !== false,
         conflictMode: opts.conflictMode,
         conflictSuffix: opts.conflictSuffix,
+        budget,
       };
       const daemonJobId = createDaemonJobId();
       const useDaemon = shouldUseDaemonClient();

@@ -118,6 +118,12 @@ export interface CleanConfig {
 export interface ImportConfig {
   extensions?: string[];                  // 格式白名单（默认 [.md]）
   maxFileSize?: number;                   // 单文件大小上限（字节，默认 1MB）
+  /** 整批预算（S0-3，REQ-20260930-002）：文件数/总字节/预计 chunk 数，超限在写入前拒绝 */
+  batch?: {
+    maxBatchFiles?: number;
+    maxBatchBytes?: number;
+    maxBatchChunks?: number;
+  };
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端显示占位块） */
   assets?: boolean;
   /** 单附件大小上限（字节，REQ-20260904-001，默认 5MB；超限跳过该附件并告警，不阻断导入） */
@@ -670,13 +676,29 @@ function parseAndExpand(configFile: string): KiConfig {
             hooks: Array.isArray(c.hooks) ? (c.hooks as unknown[]).map(String) : undefined,
           };
         }
-        // 【新增】import 配置（REQ-08）
+        // 【新增】import 配置（REQ-08；batch 为 S0-3 增补）
         let imp: ImportConfig | undefined;
         if (s.import && typeof s.import === 'object') {
           const im = s.import as Record<string, unknown>;
+          // batch 数值防御：NaN/Infinity/非法字符串/空串一律视为未配置（回落默认预算），
+          // 不得进入 resolveImportBudget 的 ≤0=显式关闭分支（否则笔误会静默拆掉护栏；
+          // 显式关闭仍用数值 0 / 负数表达）
+          const batchNum = (v: unknown): number | undefined => {
+            if (v === undefined || v === null) return undefined;
+            if (typeof v === 'string' && v.trim() === '') return undefined;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : undefined;
+          };
           imp = {
             extensions: Array.isArray(im.extensions) ? (im.extensions as unknown[]).map(String) : undefined,
             maxFileSize: im.maxFileSize !== undefined ? Number(im.maxFileSize) : undefined,
+            ...(im.batch && typeof im.batch === 'object' ? {
+              batch: {
+                maxBatchFiles: batchNum((im.batch as Record<string, unknown>).maxBatchFiles),
+                maxBatchBytes: batchNum((im.batch as Record<string, unknown>).maxBatchBytes),
+                maxBatchChunks: batchNum((im.batch as Record<string, unknown>).maxBatchChunks),
+              },
+            } : {}),
           };
         }
         scopes[name] = {
