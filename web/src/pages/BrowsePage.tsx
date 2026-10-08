@@ -15,7 +15,12 @@ import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { TagSelect } from '@/components/TagSelect';
 import { Icon } from '@/components/icons';
-import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
+import {
+  documentViewForScope,
+  resolveDocumentLink,
+  type DocumentView,
+  type ScopedDocumentView,
+} from '@/lib/documentLinks';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
@@ -117,9 +122,12 @@ export function BrowsePage(): JSX.Element {
   const busy = fetching || manualRefreshing;
   const [q, setQ] = useState('');
   const [activeGroup, setActiveGroup] = useState('');
-  const [viewing, setViewing] = useState<DocumentView | null>(null);
-  const [history, setHistory] = useState<DocumentView[]>([]);
-  const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
+  const [viewing, setViewing] = useState<ScopedDocumentView | null>(null);
+  // Scope 切换的清理在 effect 中执行，首帧仍可能持有旧 viewing；渲染守卫必须同步生效，
+  // 以免 ModuleDrawer 用新 scope 请求旧 Group/Relation。
+  const currentViewing = documentViewForScope(scope, viewing);
+  const [history, setHistory] = useState<ScopedDocumentView[]>([]);
+  const [forwardHistory, setForwardHistory] = useState<ScopedDocumentView[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [searchQ, setSearchQ] = useState('');
   /**
@@ -145,11 +153,14 @@ export function BrowsePage(): JSX.Element {
   // 窄屏：点树内文档后阅读区以覆盖层展开（CSS 仅在 ≤959px 生效），「返回目录」关闭
   const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
   const appliedDirectTarget = useRef('');
+  const previousScopeRef = useRef(scope);
   const directoryRef = useRef<HTMLDivElement>(null);
   const fullscreenDirectoryRef = useRef<HTMLDivElement>(null);
   const revealedDirectoryTarget = useRef('');
 
   const directTarget = searchParams.toString();
+  const hasDirectDocumentTarget = searchParams.get('scope') === scope
+    && Boolean(searchParams.get('group') && searchParams.get('relation'));
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
   useEffect(() => {
     if (!directTarget) {
@@ -178,7 +189,7 @@ export function BrowsePage(): JSX.Element {
       setQ('');
       setSearchQ('');
       setSelectedTag('');
-      setViewing({ group, module: relation, anchor: params.get('anchor') ?? undefined });
+      setViewing({ scope, group, module: relation, anchor: params.get('anchor') ?? undefined });
     } else {
       // scope / scope+group 是浏览入口：前者显示默认 Group，后者显示指定 Group；都不打开命中文档。
       setViewing(null);
@@ -207,12 +218,23 @@ export function BrowsePage(): JSX.Element {
   const groupQuery = useGroupDocs(scope, activeGroup || null, selectedTag || undefined);
   const groupDocs = groupQuery.data?.docs ?? [];
 
-  // 切换 scope 后清理旧 scope 的筛选条件，避免旧 tag / 关键词在新 scope 中造成“无结果”误导。
+  // 切换 scope 后清理旧 scope 的页面状态。阅读器必须先卸载：它按传入 scope 拉取正文，
+  // 若沿用旧 Group/Relation，会对新 scope 发出一次必然失败的请求。
   useEffect(() => {
+    if (previousScopeRef.current === scope) return;
+    previousScopeRef.current = scope;
     setQ('');
     setSearchQ('');
     setSelectedTag('');
-  }, [scope]);
+    // 深链接的 effect 会在同一轮提交里设置目标文档；不要在这里把它清掉。
+    if (hasDirectDocumentTarget) return;
+    setViewing(null);
+    setHistory([]);
+    setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
+    setMobileReaderOpen(false);
+  }, [hasDirectDocumentTarget, scope]);
 
   // 搜索防抖：保留现有“跨 Group 搜索”语义，只减少逐字请求与列表闪烁。
   useEffect(() => {
@@ -258,13 +280,13 @@ export function BrowsePage(): JSX.Element {
       const target = findGroupNode(revealed, activeGroup);
       return target && !target.open ? toggleNodeOpen(revealed, activeGroup) : revealed;
     });
-  }, [activeGroup, data?.groups, viewing?.group, viewing?.module, readerFullscreen]);
+  }, [activeGroup, currentViewing?.group, currentViewing?.module, data?.groups, readerFullscreen]);
 
   // Wait for ancestor expansion and document loading, then reveal once per navigation.
   useEffect(() => {
     const directoryCollapsed = readerFullscreen ? readerGroupCollapsed : treeCollapsed;
     if (!activeGroup || directoryCollapsed) return;
-    const documentName = viewing?.group === activeGroup ? viewing.module : '';
+    const documentName = currentViewing?.group === activeGroup ? currentViewing.module : '';
     if (documentName && groupQuery.isFetching) return;
     const key = JSON.stringify([scope, activeGroup, documentName, readerFullscreen, directoryCollapsed]);
     if (revealedDirectoryTarget.current === key) return;
@@ -279,7 +301,7 @@ export function BrowsePage(): JSX.Element {
       revealedDirectoryTarget.current = key;
     });
     return () => cancelAnimationFrame(frame);
-  }, [scope, activeGroup, viewing, readerFullscreen, treeCollapsed, readerGroupCollapsed, groupQuery.isFetching, tree, docsByGroup]);
+  }, [scope, activeGroup, currentViewing, readerFullscreen, treeCollapsed, readerGroupCollapsed, groupQuery.isFetching, tree, docsByGroup]);
 
   // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
   const searchQuery = useQuery<DocListResponse>({
@@ -324,14 +346,13 @@ export function BrowsePage(): JSX.Element {
     }
     return [...byKey.values()];
   }, [data?.docs, groupDocs, searchDocs]);
-
   /** 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。 */
   const openDocument = useCallback((doc: DocumentView, source: 'tree' | 'search' = 'tree'): void => {
     setViewingSource(source);
     setHistory([]);
     setForwardHistory([]);
-    setViewing(doc);
-  }, []);
+    setViewing({ ...doc, scope });
+  }, [scope]);
 
   /**
    * 默认打开第一篇：数据就绪、有文档、且用户尚未打开任何文档时，自动展示第一篇内容。
@@ -343,7 +364,7 @@ export function BrowsePage(): JSX.Element {
     autoOpenRef.current = false;
   }, [scope]);
   useEffect(() => {
-    if (autoOpenRef.current || isLoading || viewing || isSearching) return;
+    if (autoOpenRef.current || isLoading || currentViewing || isSearching) return;
     // A document deep link is applied in another effect in this same render.
     // Do not let the default first-document selection overwrite it.
     if (searchParams.get('scope') && searchParams.get('group') && searchParams.get('relation')) return;
@@ -351,7 +372,7 @@ export function BrowsePage(): JSX.Element {
     if (!first) return;
     autoOpenRef.current = true;
     openDocument({ module: first.name, group: first.group, path: first.path });
-  }, [isLoading, isSearching, knownDocs, openDocument, scope, viewing, searchParams]);
+  }, [currentViewing, isLoading, isSearching, knownDocs, openDocument, scope, searchParams]);
 
   // ── 树内文档叶子 ──
   // 首层数据：/api/doc/list 的全量列表（≤500 条按 Group 分组）
@@ -369,11 +390,11 @@ export function BrowsePage(): JSX.Element {
   useEffect(() => {
     if (!activeGroup || groupQuery.data?.scope !== scope) return;
     const docs = groupQuery.data.docs;
-    const current = viewing?.group === activeGroup ? viewing.module : '';
+    const current = currentViewing?.group === activeGroup ? currentViewing.module : '';
     const visibleDocs = current && !docs.some((doc) => doc.name === current)
       ? [...docs, { group: activeGroup, name: current }] : docs;
     setDocsByGroup((previous) => ({ ...previous, [activeGroup]: visibleDocs }));
-  }, [scope, activeGroup, data?.docs, groupQuery.data, viewing?.group, viewing?.module]);
+  }, [scope, activeGroup, currentViewing?.group, currentViewing?.module, data?.docs, groupQuery.data]);
 
   /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录）
    *  S0-2：改用 fetchGroupDocsAll 翻页取全，单 Group >500 篇不再被首页截断 */
@@ -408,36 +429,37 @@ export function BrowsePage(): JSX.Element {
     const previous = history[history.length - 1];
     if (!previous) return;
     setHistory((prev) => prev.slice(0, -1));
-    if (viewing) setForwardHistory((prev) => [...prev, viewing]);
+    if (currentViewing) setForwardHistory((prev) => [...prev, currentViewing]);
     setActiveGroup(previous.group ?? '');
     setViewing(previous);
-  }, [history, viewing]);
+  }, [currentViewing, history]);
 
   /** 前进到最近一次返回前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goForward = useCallback((): void => {
     const next = forwardHistory[forwardHistory.length - 1];
     if (!next) return;
     setForwardHistory((prev) => prev.slice(0, -1));
-    if (viewing) setHistory((prev) => [...prev, viewing]);
+    if (currentViewing) setHistory((prev) => [...prev, currentViewing]);
     setActiveGroup(next.group ?? '');
     setViewing(next);
-  }, [forwardHistory, viewing]);
+  }, [currentViewing, forwardHistory]);
 
   /** 在当前 Browse 页面内切换到 Markdown 链接指向的文档。 */
   const handleLocalLink = useCallback((href: string): boolean => {
-    const target = resolveDocumentLink(href, viewing?.path, viewing?.group, knownDocs);
+    const target = resolveDocumentLink(href, currentViewing?.path, currentViewing?.group, knownDocs);
     if (!target) return false;
-    if (viewing) setHistory((prev) => [...prev, viewing]);
+    if (currentViewing) setHistory((prev) => [...prev, currentViewing]);
     setForwardHistory([]);
     setActiveGroup(target.group);
     setViewing({
+      scope,
       module: target.name,
       group: target.group,
       path: target.path,
-      highlightQuery: viewing?.highlightQuery,
+      highlightQuery: currentViewing?.highlightQuery,
     });
     return true;
-  }, [knownDocs, viewing]);
+  }, [currentViewing, knownDocs, scope]);
 
   /** 切换节点展开/折叠（纯函数：返回新树，不改写旧 state 内的节点） */
   const toggleOpen = (path: string): void => {
@@ -542,7 +564,7 @@ export function BrowsePage(): JSX.Element {
               <button
                 key={`${doc.group}\u0000${doc.name}`}
                 type="button"
-                className={`ki-tree-doc${viewing?.group === doc.group && viewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
+                className={`ki-tree-doc${currentViewing?.group === doc.group && currentViewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
                 data-ki-group={doc.group}
                 data-ki-document={doc.name}
                 onClick={() => {
@@ -785,16 +807,16 @@ export function BrowsePage(): JSX.Element {
    * 抽屉 = 覆盖式滑出、结果列表留在主区（检索结果入口，与语义检索页一致）。
    */
   const renderViewer = (asDrawer: boolean): JSX.Element | null => {
-    if (!viewing) return null;
+    if (!currentViewing) return null;
     return (
       <ModuleDrawer
-        key={`${asDrawer ? 'drawer' : 'inline'}:${scope}:${viewing.group}:${viewing.module}`}
+        key={`${asDrawer ? 'drawer' : 'inline'}:${scope}:${currentViewing.group}:${currentViewing.module}`}
         inline={!asDrawer}
         scope={scope}
-        module={viewing.module}
-        group={viewing.group}
-        highlightQuery={viewing.highlightQuery}
-        targetAnchor={viewing.anchor}
+        module={currentViewing.module}
+        group={currentViewing.group}
+        highlightQuery={currentViewing.highlightQuery}
+        targetAnchor={currentViewing.anchor}
         editable
         onClose={closeDocument}
         fetcher={kiGetModuleInfo}
@@ -823,7 +845,7 @@ export function BrowsePage(): JSX.Element {
    * 非检索态：树入口就地阅读（保持原浏览体验）。
    */
   const showingResults = isSearching;
-  const readingInline = viewing !== null && !showingResults;
+  const readingInline = currentViewing !== null && !showingResults;
 
   return (
     <>
@@ -975,7 +997,7 @@ export function BrowsePage(): JSX.Element {
       </div>
 
       {/* 检索结果点开的文档：右侧抽屉（与语义检索页一致），结果列表保持可见 */}
-      {viewing && viewingSource === 'search' && renderViewer(true)}
+      {currentViewing && viewingSource === 'search' && renderViewer(true)}
     </>
   );
 }

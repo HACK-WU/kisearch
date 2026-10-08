@@ -27,6 +27,19 @@ export interface DocumentView {
   anchor?: string;
 }
 
+/** 带所属 scope 的阅读项；跨 scope 复用同一页面时必须用它隔离旧选择。 */
+export interface ScopedDocumentView extends DocumentView {
+  scope: string;
+}
+
+/** 只有文档属于当前 scope 时才允许阅读器挂载，避免以新 scope 查询旧文档定位。 */
+export function documentViewForScope(
+  scope: string,
+  viewing: ScopedDocumentView | null,
+): ScopedDocumentView | null {
+  return viewing?.scope === scope ? viewing : null;
+}
+
 /** Markdown 链接是否可能是知识库中的本地文档链接。 */
 export function isLocalDocumentHref(href: string): boolean {
   const value = href.trim();
