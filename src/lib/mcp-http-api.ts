@@ -40,6 +40,7 @@ import {
   type ImportResult,
 } from './import.js';
 import type { ImportConflictMode } from './import-conflict.js';
+import { readImportIncompleteStatus } from './import-retry.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList } from '../tag.js';
@@ -1167,6 +1168,11 @@ async function handleImportRun(
     tags?: string;
     conflictMode?: ImportConflictMode;
     conflictSuffix?: string;
+    /**
+     * R2（REQ-20261009-001）：只重试这些文件（相对源目录 = 暂存目录的路径）。
+     * 前端「重试未完成 N 篇」用同一 `uploadId` 重跑，不必重新上传。
+     */
+    onlyRelPaths?: string[];
   } | undefined;
   if (!body || !body.scope || !body.uploadId) {
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
@@ -1204,7 +1210,38 @@ async function handleImportRun(
     sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
     return;
   }
-  if (session.jobId) {
+  // R2：只重试未完成子集时**不复用**上次 job（它已终态）——同一 uploadId 开新 job；
+  // 常规路径保持原语义（幂等返回既有 jobId / 任务失效提示）
+  // P2（review）：条数上限——避免超大数组进入过滤/去重与 JSON 响应
+  const MAX_ONLY_REL_PATHS = 50000;
+  if (Array.isArray(body.onlyRelPaths) && body.onlyRelPaths.length > MAX_ONLY_REL_PATHS) {
+    sendJson(res, 400, { ok: false, error: `onlyRelPaths 条数超限（${body.onlyRelPaths.length} > ${MAX_ONLY_REL_PATHS}）` });
+    return;
+  }
+  const retryOnly = Array.isArray(body.onlyRelPaths)
+    ? body.onlyRelPaths.filter((p): p is string => typeof p === 'string' && p.length > 0 && p.length <= 4096 && !path.isAbsolute(p) && !p.split(/[\\/]/).includes('..'))
+    : [];
+  // 声明了 onlyRelPaths 但过滤后为空 = 调用方请求非法 → fail-loud；
+  // 否则会静默落回「复用既有 job」分支，调用方以为重试已启动（复审 P2）
+  if (Array.isArray(body.onlyRelPaths) && body.onlyRelPaths.length > 0 && retryOnly.length === 0) {
+    sendJson(res, 400, { ok: false, error: 'onlyRelPaths 非法（必须是相对源目录的路径，不可含 .. 或绝对路径）' });
+    return;
+  }
+  const isSubsetRetry = retryOnly.length > 0;
+  // R2 复审 P1：子集重试时请求未显式给出的参数回落到该 scope 的未完成清单（上次导入的实际
+  // 口径），避免「刷新页面后重试」用前端表单默认值改写 group/切分/标签/向量化口径
+  // P2（review）：清单「损坏」与「没有清单」必须区分——损坏时 fail-loud，
+  // 否则会静默退化成"用前端表单参数重试"，与上次口径不符且用户无感知。
+  const retryStatus = isSubsetRetry ? readImportIncompleteStatus(scope) : null;
+  if (retryStatus?.corrupted) {
+    sendJson(res, 400, {
+      ok: false,
+      error: '未完成清单损坏（.ki-import-incomplete.json 无法解析）：请删除该文件后重新导入，或重新上传整批再导入',
+    });
+    return;
+  }
+  const retryParams = retryStatus?.record?.params;
+  if (session.jobId && !isSubsetRetry) {
     if (!jobs.has(session.jobId)) {
       sendJson(res, 409, { ok: false, error: '导入任务状态已失效，请重新上传' });
       return;
@@ -1233,13 +1270,15 @@ async function handleImportRun(
     sourceDir,
     // group 缺省 → undefined → handleDirectImport 按推断落点（与 CLI 语义一致，REQ-01）；
     // 不再用 scope 兜底（子目录会落 <scope>/<sub>，与 CLI 缺省落 <sub> 不一致）
-    group: body.group?.trim() || undefined,
-    chunkSize: body.chunkSize,
-    chunkOverlap: body.chunkOverlap,
-    vector: body.vector,
-    tags: body.tags,
-    conflictMode: body.conflictMode,
-    conflictSuffix: body.conflictSuffix,
+    group: body.group?.trim() || retryParams?.group || undefined,
+    chunkSize: body.chunkSize ?? retryParams?.chunkSize,
+    chunkOverlap: body.chunkOverlap ?? retryParams?.chunkOverlap,
+    vector: body.vector ?? retryParams?.vector,
+    tags: body.tags ?? retryParams?.tags,
+    conflictMode: body.conflictMode ?? (retryParams?.conflictMode as ImportConflictMode | undefined),
+    conflictSuffix: body.conflictSuffix ?? retryParams?.conflictSuffix,
+    // R2：「重试未完成 N 篇」只处理名单内文件（已完成文件不重传/不重算 embedding）
+    ...(isSubsetRetry ? { onlyRelPaths: retryOnly } : {}),
     // S0-3：Web 端不提供预算覆盖（预算来自 scope 配置/默认值）；
     // 超限时 IMPORT_BUDGET_EXCEEDED 经 job 终态 error 透出
     budget: undefined,
@@ -1258,6 +1297,8 @@ interface RunImportArgs {
   tags?: string;
   conflictMode?: ImportConflictMode;
   conflictSuffix?: string;
+  /** R2：只重试未完成子集（相对源目录路径） */
+  onlyRelPaths?: string[];
   /** S0-3：Web 端预算覆盖入口（当前不暴露给前端，预留保持 CLI/Web 同构） */
   budget?: HandleDirectImportArgs['budget'];
 }
@@ -1280,6 +1321,7 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         tags: args.tags,
         conflictMode: args.conflictMode,
         conflictSuffix: args.conflictSuffix,
+        onlyRelPaths: args.onlyRelPaths,
         budget: args.budget,
         onProgress: (progress) => {
           job.phase = progress.phase;
@@ -1305,8 +1347,15 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
     job.state = 'done';
     job.result = result;
     job.phase = 'persist';
-    job.taskReporter.finish(result.stats.errors > 0 ? 'partial' : 'succeeded', {
-      error: result.stats.errors > 0 ? result.errors[0]?.error ?? `${result.stats.errors} 项导入处理有错误` : undefined,
+    // R1（REQ-20261009-001，Q2 同口径）：部分成功 → 任务态 partial（与 CLI 同源），
+    // 但 `job.state` 保持 'done'（前端按 state 分支渲染完成态；不新增状态值以守契约）。
+    // 未完成清单随 result.incomplete 下发，供前端展示与"重试未完成"使用。
+    const partialFiles = result.stats?.files;
+    job.taskReporter.finish(result.partial || result.stats.errors > 0 ? 'partial' : 'succeeded', {
+      error: result.partial
+        ? `完成 ${partialFiles?.completed ?? '?'} / 未完成 ${partialFiles?.incomplete ?? '?'} 个文件`
+        : result.stats.errors > 0 ? result.errors[0]?.error ?? `${result.stats.errors} 项导入处理有错误` : undefined,
+      recoveryHint: result.partial ? '未完成文件可在修复 embedding 后重试导入；已完成部分已可用。' : undefined,
       partialCommitted: result.stats.vectorized,
     });
   } catch (err) {

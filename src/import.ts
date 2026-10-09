@@ -15,8 +15,10 @@
  */
 
 import { Command } from 'commander';
+import fs from 'fs';
 import path from 'path';
 import { loadConfig, resolveScope, runWithConfigSnapshot } from './lib/config.js';
+import { readImportIncompleteStatus } from './lib/import-retry.js';
 
 import { handleDirectImport } from './lib/import.js';
 import { closeEngine } from './lib/vector-client.js';
@@ -41,7 +43,9 @@ program
   .showHelpAfterError()
   .description('导入：--source 直导外部 Wiki（无 AI，自动切分；幂等追加到目标 group）')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .requiredOption('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）')
+  // 非 requiredOption：`--retry-incomplete` 允许省略 --source（沿用上次导入记录的源目录），
+  // 缺省校验移到 action 内（见下方「必须提供 --source」），以便给出更准确的提示
+  .option('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）；--retry-incomplete 时可省略')
   .option('--group <group>', '目标 Group 落点（不存在时自动新建，含父路径）。缺省时目录导入按顶层子目录名各建根节点，单文档导入用 scope name')
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150）')
@@ -55,16 +59,56 @@ program
   .option('--max-batch-files <n>', '整批最大文件数（S0-3 预算；默认 20000，≤0 显式关闭该项限制）')
   .option('--max-batch-bytes <n>', '整批最大总字节数（S0-3 预算；默认 4GiB，≤0 显式关闭该项限制）')
   .option('--max-batch-chunks <n>', '整批最大预计 chunk 数（S0-3 预算；默认 300000，≤0 显式关闭该项限制）')
+  .option('--retry-incomplete', 'R2：只重试上次未完成的文件（读 <scope>/.ki-import-incomplete.json；可省略 --source，沿用那次导入的源目录与参数）')
   .action(async (opts) => {
     const requestConfig = loadConfig();
     return runWithConfigSnapshot(requestConfig, async () => {
     try {
       const scope = resolveScope(requestConfig, opts.scope);
-      const sourceDir = path.resolve(String(opts.source));
-      const group = opts.group ? String(opts.group).trim() : '';
-      const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : undefined;
-      const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : undefined;
-      const vector = opts.vector !== false;
+      // ── R2：未完成清单重试模式（只重试失败/未处理文件）──
+      // 清单由部分成功导入写入 scope 目录；--source/参数缺省时沿用那次导入的记录，
+      // 以保证重试与首次口径一致（切分/向量化/标签/冲突策略）。
+      // P2（review）：清单「损坏」与「不存在」必须区分（否则会把损坏说成"没有待办"）；
+      // 跨源覆盖留下的备份清单也在这里给出出路。
+      const retryStatus = opts.retryIncomplete ? readImportIncompleteStatus(scope) : null;
+      if (opts.retryIncomplete && retryStatus?.corrupted) {
+        throw new Error(
+          `scope "${scope}" 的未完成清单损坏（<scope>/.ki-import-incomplete.json 无法解析）。`
+          + '请删除该文件后重新导入；或显式指定 --source 全量重导。',
+        );
+      }
+      const retryRecord = retryStatus?.record ?? null;
+      if (opts.retryIncomplete && !retryRecord) {
+        const backupHint = retryStatus?.previous
+          ? ` 另发现跨源覆盖前的备份清单（源 ${retryStatus.previous.sourceDir}，${retryStatus.previous.items.length} 项）：如需重试请先把它改名回 .ki-import-incomplete.json。`
+          : '';
+        throw new Error(
+          `scope "${scope}" 没有待重试的未完成清单（<scope>/.ki-import-incomplete.json 不存在）。`
+          + `请先按常规方式执行一次导入；若上次全部成功，则无需重试。${backupHint}`,
+        );
+      }
+      if (opts.retryIncomplete && retryRecord!.items.length === 0) {
+        throw new Error(`scope "${scope}" 的未完成清单为空，无需重试`);
+      }
+      if (!opts.retryIncomplete && !opts.source) {
+        throw new Error('必须提供 --source <sourceDir>（或使用 --retry-incomplete 沿用上次导入的源目录）');
+      }
+      const sourceOpt = opts.source ? String(opts.source)
+        : (retryRecord!.sourceDir ?? '');
+      const sourceDir = path.resolve(sourceOpt);
+      if (opts.retryIncomplete) {
+        if (!fs.existsSync(sourceDir)) {
+          throw new Error(`上次导入的源目录已不存在：${sourceDir}；请用 --source 显式指定当前源目录后重试`);
+        }
+        process.stderr.write(
+          `重试未完成：${retryRecord!.items.length} 个文件（清单 ${new Date(retryRecord!.createdAt).toLocaleString()}；源 ${sourceDir}）\n`,
+        );
+      }
+      const group = opts.group ? String(opts.group).trim() : (retryRecord?.params.group ?? '');
+      const chunkSize = opts.chunkSize ? Number(opts.chunkSize) : retryRecord?.params.chunkSize;
+      const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : retryRecord?.params.chunkOverlap;
+      // --no-vector 才是显式关闭；未显式传时沿用上次导入的向量化口径
+      const vector = opts.vector === false ? false : (retryRecord?.params.vector ?? (opts.vector !== false));
       // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则
       const cleanEnabled = opts.clean !== false;
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);
@@ -98,11 +142,13 @@ program
         vector,
         cleanEnabled,
         cleanRules,
-        tags: opts.tags,
+        tags: opts.tags ?? retryRecord?.params.tags,
         assets: opts.assets !== false,
-        conflictMode: opts.conflictMode,
-        conflictSuffix: opts.conflictSuffix,
+        conflictMode: opts.conflictMode ?? retryRecord?.params.conflictMode,
+        conflictSuffix: opts.conflictSuffix ?? retryRecord?.params.conflictSuffix,
         budget,
+        // R2：只重试未完成子集（名单外的文件本轮不处理）
+        ...(retryRecord ? { onlyRelPaths: retryRecord.items.map((item) => item.path) } : {}),
       };
       const daemonJobId = createDaemonJobId();
       const useDaemon = shouldUseDaemonClient();
@@ -124,9 +170,13 @@ program
               onInterrupt: () => task.finish('cancelled'),
               onProgress: (progress) => task.progress(progress),
             });
-            const stats = (result as { stats?: { errors?: number; vectorized?: number } }).stats;
-            task.finish((stats?.errors ?? 0) > 0 ? 'partial' : 'succeeded', {
-              error: (stats?.errors ?? 0) > 0 ? `${stats?.errors} 项导入处理有错误` : undefined,
+            const stats = (result as { stats?: { errors?: number; vectorized?: number; files?: { completed: number; incomplete: number } } }).stats;
+            const partial = Boolean((result as { partial?: boolean }).partial) || (stats?.errors ?? 0) > 0;
+            task.finish(partial ? 'partial' : 'succeeded', {
+              error: partial
+                ? `完成 ${stats?.files?.completed ?? '?'} / 未完成 ${stats?.files?.incomplete ?? '?'} 个文件`
+                : undefined,
+              recoveryHint: partial ? '未完成文件可在修复 embedding 后重试导入；已完成部分已可用。' : undefined,
               partialCommitted: stats?.vectorized,
             });
           } catch (error) {
@@ -157,6 +207,43 @@ program
         if (useDaemon) process.removeListener('SIGINT', onDaemonSignal);
       }
       await closeEngine();
+      // R1（REQ-20261009-001，Q2 同口径）：部分成功 = **成功**（退出码 0、JSON ok:true），
+      // 但必须把「完成 N / 未完成 M」与未完成清单显式告警到 stderr（fail-loud：不静默）。
+      {
+        const r = result as {
+          partial?: boolean;
+          stopReason?: { kind: string; code: string; phase: string; reason: string };
+          cancelled?: true;
+          incomplete?: { path: string; group: string; relation: string; reason: string }[];
+          stats?: { files?: { total: number; completed: number; incomplete: number } };
+        };
+        if (r.partial) {
+          const files = r.stats?.files;
+          process.stderr.write(
+            `\n⚠️  部分成功：完成 ${files?.completed ?? '?'} / 未完成 ${files?.incomplete ?? '?'} 个文件`
+            + `（共 ${files?.total ?? '?'}；已完成部分已可浏览与检索）\n`,
+          );
+          if (r.stopReason) {
+            process.stderr.write(`   停止原因：${r.stopReason.kind}/${r.stopReason.code}（${r.stopReason.phase}）：${r.stopReason.reason}\n`);
+          }
+          if (r.cancelled) process.stderr.write('   本次收到取消请求：已提交完成部分，未完成部分未写入\n');
+          const list = r.incomplete ?? [];
+          for (const item of list.slice(0, 20)) {
+            process.stderr.write(`   - ${item.path}（${item.group}/${item.relation}）：${item.reason}\n`);
+          }
+          if (list.length > 20) {
+            process.stderr.write(`   …另有 ${list.length - 20} 个未完成文件，详见 JSON 输出 incomplete 字段\n`);
+          }
+          process.stderr.write('   下一步：修复 embedding 后重试导入（已完成文件不会被重复向量化）\n');
+        } else if (r.stopReason) {
+          // 辅助向量降级（P0-2/P1-1）：正文已全部提交（无未完成文件），故不打印「部分成功」块；
+          // 但仍要说清"为什么有错误"与重建出路，避免用户只能自己去读 JSON 的 errors 数组。
+          process.stderr.write(
+            `\nℹ️  辅助向量未完成（${r.stopReason.kind}/${r.stopReason.code}）：文档正文已全部提交可用；`
+            + '标签向量 / 关系路径向量可用 `ki rebuild-vector` 重建。\n',
+          );
+        }
+      }
       output(result as unknown as Record<string, unknown>);
     } catch (err) {
       await closeEngine();

@@ -6,9 +6,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
@@ -461,6 +461,82 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   /** 任务代际：用户发起新任务时自增，使在途的恢复流程作废，避免旧任务迟到覆盖新任务状态 */
   const taskGenRef = useRef(0);
 
+  /**
+   * R3（REQ-20261009-001）：离开导入页再回来时清空「本批暂存」。
+   *
+   * 本页在 AppShell 常驻（`display:none` 隐藏而非卸载），此前切走再切回会保留上一批的
+   * 文件选择 / 上传统计 / 错误卡 / 进度文案（用户反馈"上传导入中的数据没有清空"）。
+   * 边界（已与用户确认）：**在途任务不打断**——scanning / uploading / importing / unknown
+   * 原样保留（进度继续、可继续查看）；只有回到 idle / done / failed 这类终态时才清空。
+   * 高级参数（切分、向量化开关、tag、Scope/Group 目标）属"偏好"而非"本批暂存"，保留。
+   */
+  const location = useLocation();
+  const onImportRoute = location.pathname === '/import';
+  const wasOnImportRoute = useRef(onImportRoute);
+  useEffect(() => {
+    const wasOn = wasOnImportRoute.current;
+    wasOnImportRoute.current = onImportRoute;
+    if (!onImportRoute || wasOn) return;
+    if (phase !== 'idle' && phase !== 'done' && phase !== 'failed') return;
+    /**
+     * R2（REQ-20261009-001）与 R3 的边界：**部分成功不是「本批暂存」，而是「待处置结果」**。
+     * `partial`（或结果里仍有未完成清单）时保留 `job`、localStorage 凭据（uploadId）与
+     * `uploadPlanRef`（原批次参数），并保持 `phase` 不变——否则切页回来时「重试未完成 N 篇」
+     * 与结果摘要一并消失（任务中心只承载任务台账，没有该清单与重试入口），用户只能重新
+     * 上传整批。
+     * `uploadErrors` 同样保留：这些文件**从未到达服务端**，不在 incomplete 清单里，
+     * 「重试未完成」不会覆盖它们，清掉就再没有任何提示。
+     * 其余与本批文件选择/上传进度相关的暂存照 R3 清空。
+     */
+    const jobResult = job?.result as { partial?: boolean; incomplete?: unknown[] } | undefined;
+    const keepPartialResult = Boolean(jobResult?.partial)
+      || (Array.isArray(jobResult?.incomplete) && jobResult.incomplete.length > 0);
+    if (keepPartialResult) {
+      // `phase === 'done'` 的结果区以 `!error` 为渲染条件：清掉可能残留的上传错误文案，
+      // 别让它把「部分成功」结果卡顶掉；失败态（phase === 'failed'）则保留错误原文。
+      if (phase !== 'failed') {
+        setError(null);
+        setFailureStage(null);
+      }
+      // 释放本批文件引用：重试只需要 uploadId / scope / finalize 与清单本身；批次级
+      // 「重试上传」入口已随 failedUploadBatch 一并清空，故 batches/selectionSnapshot 不再需要。
+      const keptPlan = uploadPlanRef.current;
+      if (keptPlan) {
+        uploadPlanRef.current = { ...keptPlan, selectionSnapshot: [], batches: [] };
+      }
+      setSelections([]);
+      setUploadStats(null);
+      setFailedUploadBatch(null);
+      setProgressText('');
+      setScopeDraft('');
+      return;
+    }
+    // 凭据要先按「当前任务的 uploadId/jobId」清（清空 plan/job 后就取不到了）
+    clearImportCredentialIf({ uploadId: uploadPlanRef.current?.uploadId, jobId: job?.id });
+    uploadPlanRef.current = null;
+    setSelections([]);
+    setUploadStats(null);
+    setUploadErrors([]);
+    setFailedUploadBatch(null);
+    setError(null);
+    setFailureStage(null);
+    setProgressText('');
+    setJob(null);
+    setScopeDraft('');
+    setPhase('idle');
+  }, [onImportRoute, phase, job?.id, job?.result]);
+
+  /**
+   * P2（review）：任务进入终态后复位「取消请求」状态——否则顶部会同时出现
+   * 「已请求取消：当前批次完成后停止后续写入」与结果区的「已完成 / 部分成功」，
+   * 用户无法判断任务到底结束了没有。
+   */
+  useEffect(() => {
+    if (phase !== 'done' && phase !== 'failed') return;
+    setCancelState((prev) => (prev === 'idle' ? prev : 'idle'));
+    setCancelError('');
+  }, [phase]);
+
   useEffect(() => {
     onTaskChange?.(phase === 'idle' ? null : {
       phase,
@@ -543,7 +619,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       if (isStale()) return;
       const result = await getImportStatus(recoveredJobId);
       if (isStale() || !result.job) return;
-      if (result.job.state === 'done' || result.job.state === 'failed' || result.job.state === 'cancelled') {
+      // R2（REQ-20261009-001）：部分成功的 done 任务**保留凭据**——「重试未完成 N 篇」
+      // 需要同一 uploadId（暂存目录仍在服务端）；否则刷新页面后重试入口就失效了。
+      const recoveredPartial = Boolean((result.job.result as { partial?: boolean } | undefined)?.partial);
+      if ((result.job.state === 'done' && !recoveredPartial)
+        || result.job.state === 'failed' || result.job.state === 'cancelled') {
         clearImportCredentialIf({ jobId: recoveredJobId });
       }
       setJob(result.job);
@@ -610,7 +690,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           clearInterval(timer);
           setProgressText('');
           invalidateImportQueries(targetScope);
-          clearImportCredentialIf({ jobId: job.id });
+          // R2（REQ-20261009-001）：部分成功时**保留凭据**——「重试未完成」需要同一
+          // uploadId（暂存目录仍在服务端），刷新/重进页面也能恢复该入口；全量成功才清理
+          const donePartial = Boolean((res.job.result as { partial?: boolean } | undefined)?.partial);
+          if (!donePartial) clearImportCredentialIf({ jobId: job.id });
           setPhase('done');
           setScopeConfirmed(false);
           void fetchTags(targetScope).then((tags) => {
@@ -1040,9 +1123,20 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
   const result = job?.result as
     | {
-        stats?: { total?: number; vectorized?: number; errors?: number; conflicts?: number };
+        stats?: {
+          total?: number; vectorized?: number; errors?: number; conflicts?: number;
+          /** R2：文件级完成度（CLI/Web 同源口径） */
+          files?: { total?: number; completed?: number; incomplete?: number; scanned?: number; skipped?: number };
+        };
         errors?: { path?: string; error?: string }[];
         conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string }[];
+        /** R1/R2：部分成功语义（REQ-20261009-001） */
+        partial?: boolean;
+        incomplete?: { path?: string; group?: string; relation?: string; reason?: string }[];
+        stopReason?: { kind?: string; code?: string; phase?: string; reason?: string };
+        cancelled?: boolean;
+        /** R2：本次是「只重试子集」时的过滤账目（missing=已找不到，invalid=非法路径被忽略） */
+        retryFilter?: { requested?: number; matched?: number; missing?: string[]; invalid?: string[] };
       }
     | undefined;
   const importErrors = result?.errors ?? [];
@@ -1066,6 +1160,64 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           : '输入有误';
   const retryUploadPlan = uploadPlanRef.current;
   const completedScope = job?.scope || uploadPlanRef.current?.scope || scope;
+
+  /**
+   * R2（REQ-20261009-001）：「重试未完成 N 篇」。
+   * 部分成功后，未完成清单随任务结果下发（`job.result.incomplete`）；重试**复用同一 uploadId**
+   * 直接调 /api/import/run + `onlyRelPaths`——不必重新上传，已完成文件不重算 embedding
+   * （守 #3：无 `_1` 副本、已完成 `memoryId` 不变）。
+   */
+  const incompleteItems = result?.incomplete ?? [];
+  const partialFiles = result?.stats?.files;
+  const showPartial = Boolean(result?.partial) && incompleteItems.length > 0;
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  // 同帧双击必须靠 ref 挡（state 更新是异步的，两次点击都会通过 state 判定）
+  const retryRef = useRef(false);
+  const startRetry = async (): Promise<void> => {
+    if (retryRef.current || retrying || phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    const plan = uploadPlanRef.current;
+    // 刷新/重进页面后 plan 已不在内存，但凭据仍指向同一 uploadId（R2 部分成功时特意保留）
+    const uploadId = plan?.uploadId ?? readImportCredential()?.uploadId;
+    if (!uploadId) {
+      setRetryError('重试入口已失效：请重新选择文件后再导入');
+      return;
+    }
+    const paths = incompleteItems.map((item) => item.path).filter((p): p is string => Boolean(p));
+    if (paths.length === 0) {
+      setRetryError('没有可重试的未完成文件');
+      return;
+    }
+    const retryScope = plan?.scope ?? completedScope ?? scope;
+    const retryFinalize = plan?.finalize ?? {
+      group: group.trim() || undefined,
+      chunkSize: chunkSize ? Number(chunkSize) : undefined,
+      chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
+      vector,
+      tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
+      conflictMode,
+      conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
+    };
+    // 校验段无 await，故在此处置位即可挡住同帧双击（后面的早退分支不会污染置位）
+    retryRef.current = true;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const response = await runImport({
+        scope: retryScope,
+        uploadId,
+        ...retryFinalize,
+        onlyRelPaths: paths,
+      });
+      if (!response.ok || !response.jobId) throw new Error(response.error ?? '重试启动失败');
+      trackImport(response.jobId, retryScope, uploadId);
+    } catch (retryFailure) {
+      setRetryError(`重试未完成失败：${retryFailure instanceof Error ? retryFailure.message : String(retryFailure)}`);
+    } finally {
+      retryRef.current = false;
+      setRetrying(false);
+    }
+  };
   /**
    * 「开始导入」被阻塞的原因。不靠「按钮灰掉」表达——按钮保持可点，
    * 点了会把原因说出来并滚动定位到对应字段（否则用户只看到一片灰，无从下手）。
@@ -1556,6 +1708,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       {uploadErrors.length > 0 && (
         <div className="ki-import-errors" role="alert">
           <div className="ki-import-errors__title">部分文件未上传（{uploadErrors.length}）</div>
+          <p className="ki-cell-sub" style={{ marginTop: 4 }}>
+            这些文件没有到达服务端，不在「未完成清单」里——「重试未完成」不会覆盖它们，需重新选择后再导入。
+          </p>
           <ul>
             {uploadErrors.map((item, index) => (
               <li key={`${item.name}-${index}`}>{item.name}：{item.error}</li>
@@ -1569,8 +1724,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <div className="ki-track-head">
             <span className="ki-track-kicker">LAST RUN</span>
             {phase === 'done' && !error && (
-              <span className="ki-task-state ki-task-state--succeeded">
-                {importErrors.length > 0 || uploadErrors.length > 0 ? '完成（有错误）' : '已完成'}
+              <span className={`ki-task-state ki-task-state--${showPartial ? 'partial' : 'succeeded'}`}>
+                {showPartial
+                  ? `部分成功（完成 ${partialFiles?.completed ?? '?'} / 未完成 ${partialFiles?.incomplete ?? incompleteItems.length}）`
+                  : importErrors.length > 0 || uploadErrors.length > 0 ? '完成（有错误）' : '已完成'}
               </span>
             )}
           </div>
@@ -1581,7 +1738,47 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               {result?.stats
                 ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`
                 : '导入已完成，可前往搜索验证。'}
+              {typeof partialFiles?.scanned === 'number'
+                ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}）`
+                : ''}
             </p>
+            {showPartial && (
+              <div className="ki-import-errors" role="alert">
+                <div className="ki-import-errors__title">
+                  部分成功：已完成 {partialFiles?.completed ?? '?'} 篇，未完成 {partialFiles?.incomplete ?? incompleteItems.length} 篇
+                </div>
+                <p className="ki-cell-sub" style={{ marginTop: 4 }}>
+                  已完成的部分已提交，可正常浏览与检索；未完成的部分未写入。
+                  {result?.stopReason?.reason ? `停止原因：${result.stopReason.reason}。` : ''}
+                </p>
+                <ul>
+                  {incompleteItems.slice(0, 10).map((item, index) => (
+                    <li key={`${item.path ?? 'incomplete'}-${index}`}>
+                      {item.path ?? '文件'}{item.group ? `（${item.group}）` : ''}：{item.reason ?? '未完成'}
+                    </li>
+                  ))}
+                  {incompleteItems.length > 10 && <li>…另有 {incompleteItems.length - 10} 个未完成文件</li>}
+                </ul>
+                {result?.retryFilter && (result.retryFilter.missing?.length || result.retryFilter.invalid?.length) ? (
+                  <p className="ki-cell-sub" style={{ marginTop: 6 }}>
+                    本次只重试了清单中可用的文件
+                    {typeof result.retryFilter.matched === 'number' ? `（命中 ${result.retryFilter.matched} 篇）` : ''}
+                    {result.retryFilter.missing?.length ? `；${result.retryFilter.missing.length} 篇在当前暂存目录已找不到（已跳过）` : ''}
+                    {result.retryFilter.invalid?.length ? `；${result.retryFilter.invalid.length} 条非法路径已忽略` : ''}
+                    。
+                  </p>
+                ) : null}
+                <div className="ki-track-actions">
+                  <button
+                    type="button"
+                    className="ki-btn ki-btn--primary ki-btn--small"
+                    onClick={() => void startRetry()}
+                    disabled={retrying}
+                  >{retrying ? '重试启动中…' : `重试未完成 ${incompleteItems.length} 篇`}</button>
+                </div>
+                {retryError && <p className="ki-field-error" role="alert" style={{ marginTop: 6 }}>{retryError}</p>}
+              </div>
+            )}
             {result?.conflicts && result.conflicts.length > 0 && (
               <div className="ki-import-errors" role="status">
                 <div className="ki-import-errors__title">同名处理结果（{result.conflicts.length}）</div>

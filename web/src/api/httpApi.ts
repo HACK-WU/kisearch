@@ -325,6 +325,11 @@ export async function runImport(args: {
   conflictMode?: ImportConflictMode;
   /** 自动后缀模板，必须包含 {n} */
   conflictSuffix?: string;
+  /**
+   * R2（REQ-20261009-001）：只重试这些文件（相对暂存目录的路径）。
+   * 用同一 uploadId 重跑未完成子集——不必重新上传，已完成文件不重算 embedding。
+   */
+  onlyRelPaths?: string[];
 }): Promise<RunImportResponse> {
   return req<RunImportResponse>('/api/import/run', {
     method: 'POST',

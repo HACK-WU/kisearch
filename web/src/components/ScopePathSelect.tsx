@@ -1,7 +1,8 @@
 /**
  * ScopePathSelect.tsx —— 显式选择本次操作的目标 Scope（单输入框 + 模式切换）。
  * 「选择已有 Scope」：输入即筛选列表，点选即设为本次目标；
- * 「新建 Scope」：输入名称回车（或点确认）创建。
+ * 「新建 Scope」：输入名称后**回车 / 输入框失焦 / 点「创建」按钮**三者等价（R4，
+ * REQ-20261009-001——此前只有回车一条路径，用户感知为"必须强制回车"）。
  * 父组件只在点选已有项或确认合法新名称后收到 (value, true)。
  */
 
@@ -82,10 +83,20 @@ export function ScopePathSelect({
   const alreadyExists = scopes.some((item) => item.scope === trimmedNewScope);
   const filteredScopes = scopes.filter((item) => item.scope.toLocaleLowerCase().includes(scopeFilter.trim().toLocaleLowerCase()));
   const confirmBlocked = disabled || newScopeListRefreshPending || scopeListFailed || isLoading || isFetching || !trimmedNewScope || !!newScopeError || alreadyExists;
+  /**
+   * 显式动作（点「创建」/输入框失焦）的阻塞条件（R4）：只拦「名字本身不可用」与
+   * 「列表读不到」，**不拦列表刷新中**——切到「新建」会触发一次 refetch，若把
+   * isFetching/newScopeListRefreshPending 也算阻塞，用户输入后立刻失焦会被静默忽略
+   * （正是本次要修掉的"看不到反应"体验）。
+   */
+  const explicitConfirmBlocked = disabled || scopeListFailed || !trimmedNewScope || !!newScopeError || alreadyExists;
+  /** 已确认过的名称：让「失焦 + 点按钮」连击成为幂等空操作 */
+  const confirmedNameRef = useRef('');
 
   const chooseMode = (next: 'existing' | 'new'): void => {
     setMode(next);
     // 切换模式一律重置该模式的输入（未确认的草稿即丢弃），列表按目标模式开合
+    confirmedNameRef.current = '';
     onDraftChange?.('');
     setScopeFilter(value && confirmed ? value : '');
     setListOpen(next === 'existing');
@@ -101,8 +112,16 @@ export function ScopePathSelect({
     }
   };
 
-  const confirmNewScope = (): void => {
-    if (confirmBlocked) return;
+  /**
+   * 确认新建 Scope。
+   * @param explicit 显式动作（点「创建」按钮 / 输入框失焦）——用较宽松的阻塞条件，
+   *   且与回车路径共用同一幂等守卫（失焦后紧跟点击按钮会连击两次）。
+   */
+  const confirmNewScope = (explicit = false): void => {
+    if (disabled || !trimmedNewScope) return;
+    if (confirmedNameRef.current === trimmedNewScope) return;
+    if (explicit ? explicitConfirmBlocked : confirmBlocked) return;
+    confirmedNameRef.current = trimmedNewScope;
     onChange(trimmedNewScope, true);
     onDraftChange?.('');
     setListOpen(false);
@@ -134,7 +153,7 @@ export function ScopePathSelect({
           className={`ki-btn ki-btn--small${mode === 'new' ? ' ki-btn--primary' : ' ki-btn--secondary'}`}
           aria-pressed={mode === 'new'}
           onClick={() => chooseMode('new')}
-          title="新建 Scope（输入名称回车创建）"
+          title="新建 Scope（输入名称后回车 / 失焦 / 点「创建」均可）"
           disabled={disabled}
         >新建 Scope</button>
       </div>
@@ -146,7 +165,7 @@ export function ScopePathSelect({
           className={`ki-form-input${inputVerified ? ' ki-form-input--verified' : ''}`}
           placeholder={
             mode === 'new'
-              ? '输入新 Scope 名称，回车确认'
+              ? '输入新 Scope 名称（回车 / 失焦 / 点右侧「创建」）'
               : placeholder ?? '按名称筛选已有 Scope，如：kafka'
           }
           value={inputValue}
@@ -154,6 +173,8 @@ export function ScopePathSelect({
           onFocus={() => { if (mode === 'existing' && !listOpen) setListOpen(true); }}
           onChange={(e) => {
             if (mode === 'new') {
+              // 名称一改，上一次的"已确认"即作废（否则改名后无法再创建）
+              confirmedNameRef.current = '';
               setNewScope(e.target.value);
               onDraftChange?.(e.target.value);
               return;
@@ -166,8 +187,29 @@ export function ScopePathSelect({
             e.preventDefault();
             confirmNewScope();
           }}
+          onBlur={() => {
+            // R4：失焦即确认（仅「新建」模式、名称可用时）。点「创建」按钮会先触发
+            // 本回调再触发 onClick——confirmNewScope 内部的同名幂等守卫负责去重。
+            if (mode !== 'new') return;
+            confirmNewScope(true);
+          }}
         />
         </div>
+
+        {mode === 'new' && (
+          <button
+            type="button"
+            className="ki-btn ki-btn--small ki-btn--primary"
+            style={{ alignSelf: 'flex-start' }}
+            onClick={() => confirmNewScope(true)}
+            disabled={explicitConfirmBlocked}
+            title={
+              explicitConfirmBlocked && trimmedNewScope
+                ? (newScopeError ?? (alreadyExists ? `Scope ${trimmedNewScope} 已存在` : 'Scope 列表未就绪'))
+                : `以「${trimmedNewScope || '新名称'}」为目标 Scope`
+            }
+          >创建</button>
+        )}
 
       {mode === 'existing' && listOpen && (
         <div className="ki-scope-target__panel">
@@ -219,7 +261,7 @@ export function ScopePathSelect({
       {error ? <div className="ki-form-error">{error}</div> : null}
 
       <div className="ki-form-hint">
-        {hint ?? '「已有」点选即设目标；「新建」输入名称回车创建。'}
+        {hint ?? '「已有」点选即设目标；「新建」输入名称后回车、失焦或点「创建」均可。'}
       </div>
     </div>
   );

@@ -277,33 +277,37 @@ describe('import 增量向量更新', () => {
     pathStoreCalls = 0;
     tagVectorStoreCalls = 0;
     try {
-      await assert.rejects(
-        () => handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true, tags: 'api' }),
-        (error: Error & { code?: string; stopReason?: { code?: string }; stats?: { succeeded?: number; failed?: number; notProcessed?: number } }) => {
-          assert.equal(error.code, 'VECTORIZATION_STOPPED');
-          assert.equal(error.stopReason?.code, 'HTTP_503');
-          assert.equal(error.stats?.succeeded, 1);
-          assert.equal(error.stats?.failed, 1);
-          assert.equal(error.stats?.notProcessed, 1);
-          assert.equal(error.stats?.partialCommitted, 1, '补偿删除失败必须计入仍提交的新向量数');
-          assert.match(error.message, /scope .*embedding 阶段/);
-          return true;
-        },
+      // R1（REQ-20261009-001，用户拍板 Q1）：系统性停止**不再**全批回滚抛错——
+      // 文件级完成的部分（same.md 的 chunk 已成功）提交并可用，未完成文件进清单。
+      const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true, tags: 'api' });
+      assert.equal(result.partial, true, '部分成功必须显式标记');
+      assert.equal(result.stopReason?.code, 'HTTP_503');
+      assert.equal(result.stopReason?.phase, 'embedding');
+      assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0 }, '完成 1 / 未完成 2（文件级）');
+      // mock 的 stop 模式：entries[0]（扫描序首个 = later.md）成功、其余报错/未处理
+      assert.deepEqual(
+        result.incomplete.map((item) => item.path).sort(),
+        ['new.md', 'same.md'],
+        '未完成清单只含未完成文件（已成功的 later.md 不得出现）',
       );
+      assert.equal(result.incomplete.some((item) => item.path === 'later.md'), false, '已成功文件不得进未完成清单');
 
       assert.equal(vectorizeCalls.length, 1, '系统故障后不得继续发起后续 embedding 批次');
       assert.equal(tagVectorStoreCalls, 0, '正文 embedding 停止后跳过自定义标签向量阶段');
       assert.equal(pathStoreCalls, 0, '正文 embedding 停止后跳过关系/路径向量阶段');
       const afterText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki'));
-      assert.equal(afterText.same, oldText, '覆盖文档恢复为导入前原文');
-      assert.equal(afterText.new, undefined, '新文件原文被清理');
-      assert.equal(afterText.later, undefined, '未处理文件原文被清理');
+      assert.equal(afterText.same, oldText, '未完成文件（same.md）恢复为导入前原文');
+      assert.equal(afterText.new, undefined, '未完成文件原文被清理');
+      assert.match(String(afterText.later), /不得继续向量化/, '已完成文件（later.md）原文提交保留');
       const afterCache = loadCacheShape(scope) as typeof beforeCache;
       const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
-      assert.deepEqual(afterRelation?.memoryIds, oldIds, '旧 relation 与向量 ID 保持可用');
-      assert.equal(afterCache.groups.TestWiki.hot_relations.some((item) => item.text === 'new' || item.text === 'later'), false);
+      assert.deepEqual(afterRelation?.memoryIds, oldIds, '未完成文件不触碰旧 relation（旧向量保持可用）');
+      assert.equal(afterCache.groups.TestWiki.hot_relations.some((item) => item.text === 'new'), false, '未完成文件不得写入元数据');
+      const laterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'later');
+      assert.deepEqual(laterRelation?.memoryIds, ['system-partial-id'], '已完成文件提交其新向量 ID（可检索）');
       assert.equal(vectorDeleteCalls.some((call) => call.ids.some((id) => oldIds.includes(id))), false, '回滚不得删除旧向量');
-      assert.ok(vectorDeleteCalls.some((call) => call.ids.includes('system-partial-id')), '批次已提交的新向量应执行补偿删除');
+      assert.equal(vectorDeleteCalls.some((call) => call.ids.includes('system-partial-id')), false,
+        '已完成文件的向量不得被回滚删除（未完成文件的新向量才回滚）');
     } finally {
       vectorizeMode = 'success';
       vectorDeleteFailureIds = new Set();
@@ -312,7 +316,7 @@ describe('import 增量向量更新', () => {
     }
   });
 
-  it('关系/路径持久化系统故障回滚正文新向量，并保留旧 FTS 索引', async () => {
+  it('关系/路径持久化系统故障降级：正文照常提交，仅辅助索引缺失（R1 / P1-1）', async () => {
     vectorizeMode = 'success';
     pathStoreMode = 'success';
     const scope = newScope('path-system-stop');
@@ -331,27 +335,36 @@ describe('import 增量向量更新', () => {
     pathStoreCalls = 0;
     pathStoreMode = 'stop';
     try {
-      await assert.rejects(
-        () => handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true }),
-        (error: Error & { code?: string; stopReason?: { code?: string }; stats?: { succeeded?: number; notProcessed?: number } }) => {
-          assert.equal(error.code, 'VECTORIZATION_STOPPED');
-          assert.equal(error.stopReason?.code, 'ZVEC_WRITE_ERROR');
-          assert.equal(error.stats?.succeeded, 1);
-          assert.equal(error.stats?.notProcessed, 0);
-          return true;
-        },
+      // P1-1（REQ-20261009-001）：辅助向量阶段停止**不再整批回滚**——正文向量与原文照常提交，
+      // 只有关系/路径辅助向量缺失（显式记账 + 提示 `ki rebuild-vector` 补建）。
+      const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true });
+      assert.equal(result.ok, true, '辅助向量缺失不再抛错');
+      assert.equal(result.partial, false, '辅助向量缺失不产生未完成文件');
+      assert.equal(result.stats.files.incomplete, 0);
+      assert.ok(pathStoreCalls > 0, '关系/路径阶段确实触发了系统性持久化故障');
+      assert.equal(
+        result.errors.some((item) => item.path === '<ki-path/ki-relation>' && /辅助向量/.test(item.error)),
+        true,
+        '辅助向量缺失必须显式记账（含重建出路）',
       );
 
       assert.equal(vectorizeCalls.length, 1);
-      assert.ok(pathStoreCalls > 0, '关系/路径阶段确实触发了系统性持久化故障');
-      assert.deepEqual(ftsDeleteCalls, [], '路径阶段未完成前不得清理旧 FTS ID');
-      assert.equal(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, oldText);
+      const newText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
+      assert.notEqual(newText, oldText, '正文（local KB）照常提交新版本');
+      assert.match(String(newText), /新的 dense 版本/);
       const afterCache = loadCacheShape(scope) as typeof beforeCache;
       const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
-      assert.deepEqual(afterRelation?.ftsIds, oldFtsIds);
-      assert.equal(afterRelation?.ftsIndexComplete, true);
-      assert.equal((afterRelation?.memoryIds ?? []).length, 0, '失败的 dense 覆盖不得留下新向量引用');
-      assert.ok(vectorDeleteCalls.some((call) => call.ids.some((id) => id.startsWith('content-'))), '正文新向量应被补偿删除');
+      assert.ok((afterRelation?.memoryIds ?? []).length > 0, '正文向量提交并挂载（可检索）');
+      assert.equal(
+        vectorDeleteCalls.some((call) => call.ids.some((id) => id.startsWith('content-'))),
+        false,
+        '不得回滚删除本次正文向量',
+      );
+      assert.equal(
+        ftsDeleteCalls.some((ids) => ids.some((id) => oldFtsIds.includes(id))),
+        true,
+        '切换到 dense 模式后旧 FTS ID 照常清理',
+      );
     } finally {
       pathStoreMode = 'success';
       fs.rmSync(original, { recursive: true, force: true });

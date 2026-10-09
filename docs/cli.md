@@ -41,13 +41,15 @@ ki import \
   [--conflict-mode <overwrite|skip|suffix>] \
   [--conflict-suffix <template>] \
   [--no-vector] \
-  [--no-assets]
+  [--no-assets] \
+  [--retry-incomplete]
 ```
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `-s, --scope` | 否 | 项目隔离标识 |
-| `--source` | 是 | Markdown 目录绝对路径 |
+| `--source` | 是（`--retry-incomplete` 时可省略） | Markdown 目录绝对路径；重试模式下缺省沿用上次导入记录的源目录 |
+| `--retry-incomplete` | 否 | 只重试上次未完成的文件：读 `<scope>/.ki-import-incomplete.json`，只处理清单内文件；已完成文件不重传、不重算 embedding、不产生 `_1` 副本。详见 [ki import 详解](./import.md#部分成功可用与只重试未完成req-20261009-001) |
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
@@ -71,6 +73,15 @@ ki import -s my-project --source /path/to/wiki --group wiki
 
 向量更新采用文档级增量策略：新向量写入成功后才清理受影响文档的旧内容/标签/关系辅助向量，Scope 内无关文档不会被清空；新向量全部失败时旧 KB、旧 relation 和旧向量保留。
 
+**系统性故障下的提交语义（REQ-20261009-001）**：提交粒度为**文件级**——已成功的文件照常提交可用，失败/未处理的文件进入未完成清单（`result.partial:true`、`stats.files{total,completed,incomplete,scanned,skipped}`、`incomplete[]`），**退出码仍为 0**（stderr 有警告块）；全部未完成时仍是 fail-loud（`ok:false`）。辅助向量（`--tags` 的标签向量、关系/路径导航向量）失败属**降级**：照常提交正文，只在 `errors[]` 记账并提示 `ki rebuild-vector`，不产生未完成文件。只重试未完成部分：
+
+```bash
+ki import --scope my-project --retry-incomplete          # 沿用上次源目录与参数
+ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已移动时
+```
+
+详见 [ki import 详解](./import.md#部分成功可用与只重试未完成req-20261009-001)。
+
 因此重复执行同命令即同步变更（追加新文档 / 更新已有文档）。
 
 输出：
@@ -78,7 +89,10 @@ ki import -s my-project --source /path/to/wiki --group wiki
 {
   "ok": true,
   "scope": "my-project",
-  "stats": { "total": 15, "vectorized": 15, "errors": 0, "skipped": 0, "conflicts": 0 },
+  "stats": { "total": 15, "vectorized": 15, "errors": 0, "skipped": 0, "conflicts": 0,
+             "files": { "total": 3, "completed": 3, "incomplete": 0, "scanned": 3, "skipped": 0 } },
+  "partial": false,
+  "incomplete": [],
   "conflicts": [],
   "groups": ["wiki", "wiki/api"],
   "source": { "dir": "/path/to/wiki" }

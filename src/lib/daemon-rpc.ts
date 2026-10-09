@@ -100,7 +100,14 @@ function jobSummary(job: DaemonJob): Record<string, unknown> {
 }
 
 function classifyJobState(result: unknown, cancelled: boolean, failed: boolean): DaemonJob['state'] {
-  if (cancelled) return 'cancelled';
+  // R1（REQ-20261009-001）：import 在 D2 之后的「取消」= 已提交完成部分 + 未完成清单，
+  // 结果同时带 ok:true + partial:true + cancelled:true。此时终态必须是 partial（与 CLI/Web 同口径），
+  // 不能落成 cancelled——否则任务中心显示「已取消」，与导入页的「部分成功」结论相反，
+  // 且下方 partialCommitted 记账分支不成立（该次提交量会丢失在台账之外）。
+  if (cancelled) {
+    const cancelValue = result as { ok?: boolean; partial?: boolean } | undefined;
+    return cancelValue?.ok === true && cancelValue.partial === true ? 'partial' : 'cancelled';
+  }
   if (failed) return 'failed';
   const value = result as {
     partial?: boolean;
@@ -493,15 +500,16 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       const resultValue = outcome.result as {
         error?: string;
         errors?: Array<{ error?: string }>;
-        stats?: { succeeded?: number; partialCommitted?: number };
+        stats?: { succeeded?: number; vectorized?: number; partialCommitted?: number };
         rebuildVector?: { error?: string; errors?: Array<{ error?: string }>; stats?: { succeeded?: number; partialCommitted?: number } };
       } | undefined;
       job.taskReporter?.finish(taskState, {
         error: job.error?.message ?? resultValue?.error ?? resultValue?.errors?.[0]?.error
           ?? resultValue?.rebuildVector?.error ?? resultValue?.rebuildVector?.errors?.[0]?.error,
+        // import 结果的提交量口径是 stats.vectorized（向量化条目数）；rebuild 仍是 succeeded。
         partialCommitted: (resultValue as any)?.partialCommitted ?? (resultValue?.rebuildVector as any)?.partialCommitted
           ?? (taskState === 'succeeded' || taskState === 'partial'
-            ? resultValue?.stats?.succeeded ?? resultValue?.rebuildVector?.stats?.succeeded : undefined),
+            ? resultValue?.stats?.succeeded ?? resultValue?.stats?.vectorized ?? resultValue?.rebuildVector?.stats?.succeeded : undefined),
         recoveryHint: taskState === 'failed' ? '检查命令输出中的失败阶段与恢复建议，修复问题后重试。' : undefined,
       });
       job.eventSeq++;

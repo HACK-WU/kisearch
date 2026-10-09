@@ -2794,7 +2794,10 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 }
 .ki-chat-conv__acts {
   flex-shrink: 0; display: flex; gap: 1px;
-  opacity: 0; transition: opacity var(--ki-motion-fast) ease;
+  /* R5（REQ-20261009-001）：原来 opacity:0 + 仅 hover 显示 → 重命名/归档/删除三个入口
+     "看不见就等于没有"（用户反馈找不到删除会话）。改为常驻可见但低强调，
+     hover / 键盘聚焦时提升为完整强调色（删除按钮 hover 变红，见下方规则）。 */
+  opacity: .5; transition: opacity var(--ki-motion-fast) ease;
 }
 .ki-chat-conv:hover .ki-chat-conv__acts, .ki-chat-conv:focus-within .ki-chat-conv__acts { opacity: 1; }
 .ki-chat-conv__act {

@@ -122,6 +122,30 @@
 
 恢复：检查 `--group` 参数。缺省不传时落到 `default` group。
 
+### `scope "X" 没有待重试的未完成清单` / `未完成清单为空，无需重试`
+
+原因：`ki import --retry-incomplete` 找不到 `<scope>/.ki-import-incomplete.json`（上次导入全部成功，或从未部分成功过）。
+
+恢复：按常规方式执行一次导入（`ki import --scope X --source <dir>`）；若上次已全部成功，无需重试。若提示里带「跨源覆盖前的备份清单」，说明上一批（另一源目录）的未完成项被保留为 `.ki-import-incomplete.prev.json`——如需重试，先把它改名回主清单文件名。
+
+### `scope "X" 的未完成清单损坏`（`... 无法解析`）
+
+原因：`<scope>/.ki-import-incomplete.json` 内容不是合法 JSON（手工编辑、写入被截断、磁盘问题）。清单是「只重试未完成部分」的唯一凭据，损坏时**不会**被静默当成"没有待办"。
+
+恢复：删除该文件后重新导入（幂等追加）；或直接 `ki import --scope X --source <原目录>` 全量重导。HTTP 端同样以 400 明确拒绝，不会退化成"用前端表单参数重试"。
+
+### `上次导入的源目录已不存在：<dir>`
+
+原因：清单记录的原源目录被移动/删除。
+
+恢复：用 `--source` 显式指定当前源目录后重试：`ki import --scope X --source <new-dir> --retry-incomplete`。
+
+### `重试清单中的 N 个文件在当前源目录均不存在`
+
+原因：清单内文件已全部被删除或改名（`retryFilter.missing` 会列出具体路径）。
+
+恢复：确认 `--source` 指向原目录；若文件确已移除，删除清单即可（`rm <scope>/.ki-import-incomplete.json`）。
+
 ### `Access denied to scope: <scope>`
 
 原因：scope 未在 `~/.ki/config.yaml` 的 `scopes.definitions` 中注册。
