@@ -12,7 +12,7 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { normalizeCodeForCopy, renderMarkdownHtml } = await vite.ssrLoadModule('/src/components/MarkdownPreview.tsx');
+const { isBlankMermaidSvg, normalizeCodeForCopy, renderMarkdownHtml } = await vite.ssrLoadModule('/src/components/MarkdownPreview.tsx');
 after(async () => vite.close());
 
 describe('MarkdownPreview safe interactive Markdown', () => {
@@ -83,6 +83,30 @@ describe('MarkdownPreview safe interactive Markdown', () => {
     assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
     assert.doesNotMatch(html, /<img src=x/);
     assert.match(html, /class="language-mermaid"/);
+  });
+
+  it('labels each code block toolbar with its language, falling back to 代码', () => {
+    const html = renderMarkdownHtml('```bash\necho hi\n```\n\n```\nplain\n```');
+
+    assert.match(html, /<div class="ki-code-block__bar"><span class="ki-code-lang">bash<\/span>/);
+    assert.match(html, /<div class="ki-code-block__bar"><span class="ki-code-lang">代码<\/span>/);
+    // 工具条替代了旧的绝对定位浮层：按钮收在工具条内，其后紧随 pre（内容区拿到完整宽度）
+    assert.match(html, /<\/button><\/div><pre><code class="language-bash">/);
+  });
+
+  it('drops empty fenced code blocks instead of rendering a bare copy button（走查 2026-10-09）', () => {
+    const html = renderMarkdownHtml('```\n```\n\n```text\n   \n```\n\n有内容\n');
+
+    assert.equal((html.match(/data-ki-copy-code/g) ?? []).length, 0);
+    assert.doesNotMatch(html, /ki-code-block/);
+    assert.match(html, /有内容/);
+  });
+
+  it('treats graphic-less mermaid output as blank so the source block is kept', () => {
+    // 语法成立但无节点：mermaid 返回只有外壳的 svg（不抛错）→ 判定为空白
+    assert.equal(isBlankMermaidSvg('<svg id="x" width="100%"><style>#x{font-family:sans-serif;}</style><g></g></svg>'), true);
+    assert.equal(isBlankMermaidSvg('<svg id="y"><defs></defs></svg>'), true);
+    assert.equal(isBlankMermaidSvg('<svg id="z"><g><path d="M0 0L1 1"></path><text>hi</text></g></svg>'), false);
   });
 
   it('removes only trailing line breaks from copied code, preserving internal lines and spaces', () => {

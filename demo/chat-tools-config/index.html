@@ -1527,15 +1527,29 @@ a:hover { text-decoration: underline; }
 .ki-markdown .ki-code-block {
   position: relative;
   margin: 8px 0;
-  padding-right: 72px;
   background: var(--ki-color-bg);
   border-radius: var(--ki-radius-sm);
+  overflow: hidden;
+}
+/* 顶部工具条（左语言名 / 右常驻复制按钮）。按钮不再用绝对定位浮层 —— 与之配套的
+   `padding-right: 72px` 曾作用于**整列高度**：按钮下方同样被占用，内容区与横向滚动条
+   被永久挤窄（真机走查 2026-10-09；短行被迫出现滚动条、滚动条右侧留 72px 断口）。 */
+.ki-markdown .ki-code-block__bar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--ki-space-2);
+  padding: 3px 6px 3px 12px;
+  background: var(--ki-color-bg-muted);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-markdown .ki-code-lang {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--ki-font-mono); font-size: 11px; color: var(--ki-color-text-subtle);
 }
 .ki-markdown .ki-code-block > pre { margin: 0; background: transparent; }
-.ki-markdown .ki-code-block > .ki-mermaid { margin: 0; }
+/* 图块随代码块一起铺满（融合为同一张卡片，而不是卡片里再嵌一个带边框的白盒） */
+.ki-markdown .ki-code-block > .ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; padding: 12px; }
 .ki-code-copy {
-  position: absolute; z-index: 1; top: 8px; right: 8px;
-  padding: 4px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  flex: none;
+  padding: 3px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
   background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
   font: inherit; font-size: 11px; line-height: 1.4; cursor: pointer;
 }

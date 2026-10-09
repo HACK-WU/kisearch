@@ -323,10 +323,18 @@ function safeDetailsExtension(): TokenizerAndRendererExtension {
 function buildRenderer(base?: AssetBase) {
   const renderer = new Renderer();
   renderer.code = ({ text, lang }) => {
+    // 空内容块（``` 立即闭合、或只有空白字符）不产出容器：否则只会渲染出"灰底空框 + 一个复制按钮"
+    // （真机走查 2026-10-09 实测：整块 195px 高、除按钮外零内容像素，点复制得到空串）。
+    if (!text.trim()) return '';
     const language = lang?.trim().split(/\s+/, 1)[0];
     const languageClass = language ? ` class="language-${escapeAttr(language)}"` : '';
+    // 顶部工具条（左语言名 / 右常驻复制按钮）。按钮此前是绝对定位浮层，靠容器 `padding-right: 72px` 让位——
+    // 那条内边距作用于**整列高度**，按钮下方同样被占用，内容区与横向滚动条被永久挤窄（走查 2026-10-09）。
     return '<div class="ki-code-block">'
+      + '<div class="ki-code-block__bar">'
+      + `<span class="ki-code-lang">${language ? escapeHtml(language) : '代码'}</span>`
       + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
+      + '</div>'
       + `<pre><code${languageClass}>${escapeHtml(text)}</code></pre>`
       + '<span class="ki-code-copy-status" aria-live="polite"></span>'
       + '</div>\n';
@@ -445,6 +453,19 @@ let mermaidPromise: Promise<typeof import('mermaid')> | null = null;
 function loadMermaid(): Promise<typeof import('mermaid')> {
   mermaidPromise ??= import('mermaid');
   return mermaidPromise;
+}
+
+/**
+ * mermaid 输出是否"只有外壳、没有图元"。
+ *
+ * 语法成立但没有任何节点的图（如仅 `graph TD`）不会抛错，`mermaid.render` 返回的 svg 里
+ * 只有 `<style>`/`<defs>`/空 `<g>`——直接替换 `pre` 会留下"灰底空框 + 复制按钮"，
+ * 源码被静默吞掉（真机走查 2026-10-09 的空白块即此类形态）。故判定为空白时保留源码块。
+ *
+ * 用标签名判定而非解析 DOM：纯字符串可单测，且 `post`/`text-align` 等样式文本不含尖括号形式，不会误命中。
+ */
+export function isBlankMermaidSvg(svg: string): boolean {
+  return !/<(?:path|rect|circle|ellipse|line|polyline|polygon|text|foreignObject|image)\b/i.test(svg);
 }
 
 /** 占位块展示用的原始路径：/api/asset 路由还原 path 参数，其余原样 */
@@ -628,6 +649,11 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
           if (!pre) continue;
           try {
             const { svg } = await mermaid.render(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, code);
+            // 无图元的空白图不替换：保留源码块，避免"空白框 + 复制按钮"把源码静默吞掉
+            if (isBlankMermaidSvg(svg)) {
+              console.warn('[ki] mermaid 渲染结果为空（无图元），已保留源码块');
+              continue;
+            }
             const wrap = document.createElement('div');
             wrap.className = 'ki-mermaid';
             wrap.dataset.copyText = code;
