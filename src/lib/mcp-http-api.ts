@@ -486,18 +486,21 @@ export async function handleApiRequest(
       return;
     }
     if (p === '/doc/list' && req.method === 'GET') {
-      // 文档列表虽然不打开 zvec，但会读取 relations-cache/local KB；必须与
-      // 同 scope 的 import/sync/delete 共用队列，避免返回删除或写回中间态。
+      // 文档列表不打开 zvec，只读 relations-cache/local KB。
+      // REQ-20261009-003 S-01：以 `read` 类型入队——只与「元数据提交窗口」互斥，
+      // 不再被同 scope 的导入/向量化长任务拖住（现场：导入期间 25s 超时 → 恢复后 22ms）。
       const scopeRaw = url.searchParams.get('scope') ?? '';
       const effectiveScope = resolveScope(requestConfig, scopeRaw);
       await getSharedOperationCoordinator().submit(
         { operation: 'doc-list-api', params: { scope: effectiveScope } },
         () => runWithConfigSnapshot(requestConfig, () => handleDocList(res, url)),
         [effectiveScope],
+        'read',
       );
       return;
     }
     if (p === '/doc/edit' && req.method === 'GET') {
+      // REQ-20261009-003 S-01：读取待编辑原文同样不打开 zvec，走 read 通道。
       const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
       const group = url.searchParams.get('group') ?? '';
       const relation = url.searchParams.get('relation') ?? '';
@@ -511,6 +514,7 @@ export async function handleApiRequest(
           }
         }),
         [scope],
+        'read',
       );
       return;
     }
@@ -1343,6 +1347,9 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         }
       }),
       args.scope,
+      // S-01（REQ-20261009-003）：**不传 kind** —— 由 coordinator 的 `kindForOperation`
+      // 按 operation 名推导为 `engine-only`（与 daemon 入口同源、单一真相）。
+      // 本入口此前漏标，导致 Web 端导入期间 `/doc/list` 仍与导入串行（现场 25s 超时）。
     ).then((outcome) => outcome.result as ImportResult);
     job.state = 'done';
     job.result = result;

@@ -486,6 +486,11 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         });
       },
       scopesOf(req.params, req.operation),
+      // S-01（REQ-20261009-003）：**不传 kind** —— 由 coordinator 的 `kindForOperation`
+      // 按 operation 名推导（`import` → engine-only，其余 write）。导入的元数据写已全部
+      // 包在 runMetadataCommit 窗口内，故其向量化长尾不阻塞同 scope 的纯元数据读。
+      // ★ 勿在此硬编码 `req.operation === 'import' ? ... : ...`：两处入口各写一份判断，
+      //   正是上一次漏改（HTTP 端未标）的成因。
     );
     if (job) {
       job.result = outcome.result;

@@ -9,10 +9,17 @@
  * 对发往上游的 messages 做形状断言。
  *
  * 断言：
- *   ① 带 refs → system 组内含引用块（文档名 + 片段原文 + 编号 + 软提示措辞）
- *   ② 无 refs → 不注入（既有行为零变化）
+ *   ① 带 refs → **末条 user** = 问题 + 引用附录（文档名 + 片段原文 + 编号 + 软提示措辞）
+ *   ② 无 refs → 不追加（既有行为零变化）
  *   ③ ★ 不变量「返回数组末条恒为本轮 user」仍成立（degradedPath 的 splice 依赖它）
- *   ④ 引用块落在 system 组内、历史消息之前（不混进历史、不改变交替契约）
+ *   ④ ★ 引用**不得**留在 system 组（2026-10-09 修订的回归锚点，见下）
+ *
+ * ═══ 2026-10-09 修订（bug 修复）═══
+ * 原实现把引用渲染成**独立 system 消息**（放在 system 组、历史之前）。实测该位置会
+ * 让上游把这条 system 块误认为"最新的用户输入"——thinking 里反复出现
+ * "最后一条 user 是空的 / 最后一条是 assistant / 没有新的 user 消息"，
+ * 最终答非所问（用户实测：问「什么是Deployment 对象」却重复回答了上一轮
+ * 「这个命令的含义是啥」）。改为附在**本轮 user 消息末尾**后，对照实验恢复正常。
  */
 
 import { after, before, describe, it } from 'node:test';
@@ -109,19 +116,25 @@ async function runTurn(conv: ConversationFile, userText: string, refs?: ChatRef[
 }
 
 const systemTexts = (m: Captured): string[] => m.messages.filter((x) => x.role === 'system').map((x) => x.content);
-const refsBlockOf = (m: Captured): string | undefined => systemTexts(m).find((t) => t.includes('用户指定的参考资料'));
-const firstNonSystemIndex = (m: Captured): number => m.messages.findIndex((x) => x.role !== 'system');
+/** 引用附录自 2026-10-09 起并入**末条 user 消息**（不再占用 system 组） */
+const lastUserContent = (m: Captured): string => m.messages.at(-1)?.content ?? '';
+const refsBlockOf = (m: Captured): string | undefined => {
+  const t = lastUserContent(m);
+  return t.includes('用户指定的参考资料') ? t : undefined;
+};
 
 const REF_A: ChatRef = { group: 'k8s', doc: '01-概述', text: 'Pod 是 Kubernetes 的最小调度单元。' };
 const REF_B: ChatRef = { group: 'k8s/基础', doc: '02-容器', text: '容器共享同一网络命名空间。' };
 
 // ─── 用例 ───
 
-describe('用户引用 · 上游 system 注入', () => {
-  it('★ 带引用 → system 组含引用块（文档名 + 片段原文 + 编号 + 软提示措辞）', async () => {
+describe('用户引用 · 上游注入（并入本轮 user）', () => {
+  it('★ 带引用 → 末条 user = 问题 + 引用附录（问题在最前）', async () => {
     const cap = await runTurn(convOf([u('m1', '这段什么意思？')]), '这段什么意思？', [REF_A]);
+    const content = lastUserContent(cap);
+    assert.ok(content.startsWith('这段什么意思？'), `问题必须在最前（在后会被引用正文淹没），实际开头：${content.slice(0, 40)}`);
     const block = refsBlockOf(cap);
-    assert.ok(block, `应注入引用块，实际 system 块 ${systemTexts(cap).length} 个`);
+    assert.ok(block, '应把引用附录并入末条 user');
     assert.ok(block.includes('k8s / 01-概述'), '应含 group / doc 定位');
     assert.ok(block.includes(REF_A.text), '应含用户选中的片段原文');
     assert.ok(block.includes('引用 1：'), '应用编号围栏');
@@ -129,9 +142,15 @@ describe('用户引用 · 上游 system 注入', () => {
     assert.ok(/检索工具/.test(block), '应保留继续检索全库的许可（软提示 ≠ 硬限定）');
   });
 
-  it('无引用 → 不注入引用块（既有行为零变化）', async () => {
+  it('★ 引用不得留在 system 组（修订回归锚点）', async () => {
+    const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [REF_A]);
+    assert.equal(systemTexts(cap).find((t) => t.includes('用户指定的参考资料')), undefined,
+      '引用块若留在 system 组，实测上游会把它当成"最新的用户输入"→ 答非所问');
+  });
+
+  it('无引用 → 末条 user 与原文全等（既有行为零变化）', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1');
-    assert.equal(refsBlockOf(cap), undefined, '不得凭空注入引用块');
+    assert.equal(lastUserContent(cap), 'Q1', '不得凭空追加引用附录');
     assert.ok(systemTexts(cap).length > 0, '既有 system 块（检索 skill 等）仍应存在');
   });
 
@@ -139,14 +158,18 @@ describe('用户引用 · 上游 system 注入', () => {
     const cap = await runTurn(convOf([u('m1', '本轮问题')]), '本轮问题', [REF_A, REF_B]);
     const last = cap.messages.at(-1)!;
     assert.equal(last.role, 'user', `末条应为 user，实际 ${last.role}`);
-    assert.equal(last.content, '本轮问题');
+    assert.ok(last.content.startsWith('本轮问题'), '末条应是本轮问题（带引用附录）');
   });
 
-  it('引用块落在 system 组内、历史消息之前', async () => {
+  it('★ 命中守卫分支（conv 末条即本轮 user）不得出现两条相同 user', async () => {
+    // append-user / regenerate / edit 三条链路都会让 conv 以本轮 user 结束 ——
+    // 此时引用附录只能**就地并入该条**，不能追加新消息（否则上游出现连续 user，令模型复述提问）
     const conv = convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2')]);
     const cap = await runTurn(conv, 'Q2', [REF_A]);
-    const idx = cap.messages.findIndex((x) => x.content.includes('用户指定的参考资料'));
-    assert.ok(idx >= 0 && idx < firstNonSystemIndex(cap), `引用块应在历史之前（块 idx=${idx}，首条非 system idx=${firstNonSystemIndex(cap)}）`);
+    const users = cap.messages.filter((x) => x.role === 'user');
+    assert.equal(users.length, 2, `user 条数应为 2（历史 1 + 本轮 1），实际 ${users.length}`);
+    assert.ok(users.at(-1)!.content.includes('用户指定的参考资料'), '本轮那条应带引用附录');
+    assert.ok(!users[0]!.content.includes('用户指定的参考资料'), '历史那条不得被污染');
   });
 
   it('多条引用按序编号且内容齐全', async () => {

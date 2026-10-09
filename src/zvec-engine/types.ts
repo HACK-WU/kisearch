@@ -216,6 +216,8 @@ export interface CollectionInfo {
   metric?: 'COSINE';
   denseDataType?: 'FP32' | 'FP16';
   docCount: number;
+  /** 各向量字段的索引完成度（0~1）；S-02 暴露，用于判定"索引是否已建" */
+  indexCompleteness?: Record<string, number>;
   scalarFields: ScalarFieldDef[];
   fts?: FtsConfig;
   locked?: boolean;

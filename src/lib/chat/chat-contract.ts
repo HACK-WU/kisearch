@@ -14,6 +14,8 @@
  *        · **REQ-20261009-002（2026-10-09）** —— 新增 `ChatRef` 与 `ChatMessage.refs?`
  *          （用户手动引用文档片段，软提示注入；不改 `ki_search` 工具面），见
  *          `CodeWikiHub/kisearch/requirements/2026-10-09-全屏阅读与AI对话协同及文档引用/`。
+ *          **修订（同日·bug 修复）**：`ChatRef` 的注入方式由「独立 system 块」改为
+ *          「附在本轮 user 消息末尾」——形状未动（字段/常量不变），前端副本无需改代码。
  *        其余形状未动；前端副本与 contract-parity 已同步）
  *   2. 前端有同形状副本 `web/src/api/chatContract.ts`（两端是独立 package，无法互相 import）
  *      → 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 机械保证
@@ -48,8 +50,11 @@ export interface SourceRef {
  *   `ChatRef` = **用户指定**（前端产出，带用户选中的原文片段；后端**不读原文**）。
  *
  * · 上送：随 `POST /conversations/:id/messages` 请求体的 `refs` 数组
- * · 生效：软提示 —— tool-loop 注入一条 system 块（"优先依据以下内容作答"），
- *   模型仍可检索全库；**不改** `ki_search` 工具面（避免放宽参数失控面）
+ * · 生效：软提示 —— tool-loop 把引用附录附在**本轮 user 消息末尾**（"优先依据以下内容作答"），
+ *   模型仍可检索全库；**不改** `ki_search` 工具面（避免放宽参数失控面）。
+ *   ★ 2026-10-09 修订：原为「注入一条 system 块」，实测上游会把该 system 块误认为
+ *   最新的用户输入（thinking 出现"最后一条 user 是空的"），导致答非所问；
+ *   改为并入本轮 user 后对照实验正常（详见 `retrieval/tool-loop.ts` 的 `renderRefsBlock`）
  * · 落盘：写进 user 消息的 `refs`，供刷新 / 切会话后回显
  */
 export interface ChatRef {
@@ -64,7 +69,7 @@ export interface ChatRef {
 export const CHAT_REF_MAX_COUNT = 5;
 /** 单条引用文本上限（字符）；超长由前端截断并提示 */
 export const CHAT_REF_TEXT_MAX = 2000;
-/** 全部引用文本合计上限（字符）：注入 system 块前的总预算保护 */
+/** 全部引用文本合计上限（字符）：并入本轮 user 消息前的总预算保护 */
 export const CHAT_REF_TOTAL_MAX = 6000;
 
 /** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */

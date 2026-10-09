@@ -82,8 +82,14 @@ export interface ToolLoopInput {
   /**
    * 用户手动引用的文档片段（REQ-20261009-002 需求 B；可选）。
    *
-   * 生效方式 = **软提示**：作为一条 system 块注入（"优先依据以下内容作答"），
+   * 生效方式 = **软提示**：附在**本轮 user 消息末尾**（"优先依据以下内容作答"），
    * 模型仍可调用检索工具查全库 —— 不限定检索范围、不动工具面。
+   *
+   * ★ 2026-10-09 修订：原实现作为**独立 system 块**注入 system 组（历史之前），
+   *   实测上游（qwen3.8-flash）会把该块误认为"最新的用户输入"——thinking 里反复出现
+   *   "最后一条 user 是空的 / 最后一条是 assistant / 没有新的 user 消息"，进而答非所问、
+   *   复述上一轮问题。对照实验（同历史同问题，仅改引用块位置）：原位必错、并入本轮 user 正常。
+   *   详见 `renderRefsBlock` 的注释。
    */
   refs?: readonly ChatRef[];
   signal?: AbortSignal;
@@ -157,12 +163,19 @@ function messageIdFor(conv: ConversationFile): string {
  * 历史消息的 `sources` / `timing` / `usage` 一律不参与（它们是给人看的，不是上游输入）。
  */
 /**
- * 渲染「用户指定引用」的 system 块（REQ-20261009-002 需求 B）。
+ * 渲染「用户指定引用」的附录块（REQ-20261009-002 需求 B）。
  *
  * · 语义 = **软提示**（用户拍板 Q1）：优先依据这些片段作答，但**不禁用检索** ——
  *   不足以回答时仍可调用工具查全库并说明补充来源。与"硬限定只在引用内检索"是两回事。
- * · 空值：无引用返回 `null`，不注入空块（下游契约要求每个 system 块非空）
+ * · 空值：无引用返回 `null`（调用方不得拼出空附录）
  * · 内容不做改写：片段是用户从知识库选中的原文，加编号围栏原样引用
+ *
+ * ★ 2026-10-09 修订：本块**不再作为独立 system 消息**，而是附在**本轮 user 消息末尾**
+ *   （见 `withRefsBlock`）。原因：作为 system 块放在 system 组（历史之前）时，上游会把
+ *   它当作"最新的用户输入" —— thinking 里反复出现"最后一条 user 是空的 / 最后一条是
+ *   assistant / 没有新的 user 消息"，最终答非所问（用户实测：问「什么是Deployment 对象」
+ *   却重复回答了上一轮「这个命令的含义是啥」）。对照实验（同历史同问题，仅改引用块位置）：
+ *   原位必错、并入本轮 user 正常。证据脚本 `temp/repro-refs-placement*.ts`。
  */
 function renderRefsBlock(refs: readonly ChatRef[] | undefined): string | null {
   if (!refs || refs.length === 0) return null;
@@ -184,11 +197,9 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
   for (const m of buildSystemMessages(input.convSystemPrompt, systemBlocks)) {
     msgs.push({ role: 'system', content: m.content });
   }
-  // ★ 引用块必须落在 system 组内、历史消息之前：本函数的不变量是
-  //   「返回数组末条恒为本轮 user」（见下方注释，degradedPath 的 splice 依赖它），
-  //   插到别处会破坏该不变量。
-  const refsBlock = renderRefsBlock(input.refs);
-  if (refsBlock) msgs.push({ role: 'system', content: refsBlock });
+  // ★ 引用**不进 system 组**：它随本轮 user 消息一起下发（见 `withRefsBlock` 与
+  //   `renderRefsBlock` 的 2026-10-09 修订说明）。本函数的不变量仍是
+  //   「返回数组末条恒为本轮 user」（degradedPath 的 splice 依赖它）。
   for (const m of input.conv.messages) {
     // ★ 只取 role + content：ChatMessage 本身不含 reasoning，此处再做一次显式白名单
     msgs.push({ role: m.role, content: m.content });
@@ -214,10 +225,27 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
   //   都已让生成快照包含本轮 user，不会走到这个形态。
   const last = input.conv.messages[input.conv.messages.length - 1];
   const alreadyIncluded = last !== undefined && last.role === 'user' && last.content === input.userText;
+  // 引用附录只加在**本轮 user** 上：命中守卫时就地替换该条（它必然是数组末条），
+  // 不得再追加一条 —— 否则上游会出现两条相同 user（部分上游直接 400，另一些令模型复述提问）。
+  const userContent = withRefsBlock(input.userText, input.refs);
   if (!alreadyIncluded) {
-    msgs.push({ role: 'user', content: input.userText });
+    msgs.push({ role: 'user', content: userContent });
+  } else {
+    msgs[msgs.length - 1] = { role: 'user', content: userContent };
   }
   return msgs;
+}
+
+/**
+ * 把引用附录拼到本轮 user 消息末尾（**问题在前、引用附后**）。
+ *
+ * ★ 顺序不可颠倒：对照实验里把引用放在问题之前时，引用正文会"淹没"问题 ——
+ *   模型 thinking 直接说"用户只给了参考资料、没有提问"，仍会答偏。
+ * · 空值：无引用时原样返回 `userText`（不追加任何分隔符，既有行为零变化）
+ */
+function withRefsBlock(userText: string, refs: readonly ChatRef[] | undefined): string {
+  const block = renderRefsBlock(refs);
+  return block === null ? userText : `${userText}\n\n---\n${block}`;
 }
 
 

@@ -267,6 +267,8 @@ function buildInfoResult(): InfoResultPayload {
     scalarFields,
     fts: ftsConfig,
     docCount: c.stats.docCount,
+    // REQ-20261009-003 S-02：接出索引完成度（0~1），用于"索引到底建没建"的可观测判定
+    indexCompleteness: c.stats.indexCompleteness ?? {},
     locked: false,
   };
 }

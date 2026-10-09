@@ -444,6 +444,13 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
         status: status.compatible ? 'pass' : (options.collectionDimensionFailure ?? 'fail'),
         detail: status.compatible
           ? `配置 ${status.configured} 维，集合 ${status.persisted ?? '未创建'}`
+            // REQ-20261009-003 S-02：暴露索引完成度（0 = 未建索引、检索走暴力扫描）
+            + (status.indexCompleteness && Object.values(status.indexCompleteness).some((v) => Number.isFinite(v))
+              ? `；索引完成度 ${Object.entries(status.indexCompleteness)
+                .filter(([, v]) => Number.isFinite(v))
+                .map(([f, v]) => `${f}=${v.toFixed(2)}`).join(', ')}`
+                + (Object.values(status.indexCompleteness).some((v) => Number.isFinite(v) && v < 1) ? '（未完全建索引）' : '')
+              : '')
           : `配置 ${status.configured} 维，集合 ${status.persisted} 维；请执行 ki restore ${scope} --rebuild-vector --yes`,
       });
     } catch (error) {

@@ -218,6 +218,7 @@ export class ZvecEngine {
       ...(info.metric ? { metric: info.metric as 'COSINE' } : {}),
       ...(info.denseDataType ? { denseDataType: info.denseDataType as 'FP32' | 'FP16' } : {}),
       docCount: info.docCount,
+      ...(info.indexCompleteness ? { indexCompleteness: info.indexCompleteness } : {}),
       scalarFields: info.scalarFields,
       fts: info.fts,
       locked: false,

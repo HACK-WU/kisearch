@@ -11,6 +11,8 @@ export interface VectorDimensionSnapshot {
   state: VectorDimensionSnapshotState;
   configured: number;
   persisted?: number;
+  /** 各向量字段索引完成度（0~1）；REQ-20261009-003 S-02 —— 0 表示索引未建（检索走暴力扫描） */
+  indexCompleteness?: Record<string, number>;
   checkedAt?: number;
   error?: string;
   staleAfterMs: number;
@@ -68,6 +70,7 @@ export async function refreshVectorDimensionSnapshot(
       state: status.compatible ? 'compatible' : 'mismatch',
       configured: status.configured,
       ...(status.persisted !== undefined ? { persisted: status.persisted } : {}),
+      ...(status.indexCompleteness ? { indexCompleteness: status.indexCompleteness } : {}),
       checkedAt: Date.now(),
       staleAfterMs: SNAPSHOT_TTL_MS,
     };
@@ -118,6 +121,8 @@ export function readVectorDimensionSnapshot(
       state,
       configured: config.embedding.dimension,
       ...(persisted !== undefined ? { persisted } : {}),
+      // S-02：索引完成度随快照返回（此前重建对象时会丢失该字段）
+      ...(stored.indexCompleteness ? { indexCompleteness: stored.indexCompleteness } : {}),
       checkedAt: stored.checkedAt,
       staleAfterMs: SNAPSHOT_TTL_MS,
     };

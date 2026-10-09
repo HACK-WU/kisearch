@@ -1547,9 +1547,26 @@ export async function vectorCountScope(params: { scope: string; tags?: string[] 
 
 /** 返回 scope 持久化 Collection 的 dense 维度；FTS-only 或不存在时返回 undefined。 */
 export async function vectorCollectionDimension(scope: string): Promise<number | undefined> {
+  return (await vectorCollectionDiagnostics(scope)).dimension;
+}
+
+/**
+ * 一次打开集合，返回诊断所需的只读信息（REQ-20261009-003 S-02）。
+ * `indexCompleteness`：各向量字段的索引完成度（0 = 全部停留在 flat 缓冲、检索退化为暴力扫描；1 = 已建好）。
+ * 现网实测：不调 `optimize()` 时恒为 0（见 requirements/2026-10-09-导入完成口径与索引整理阶段/review/exp-1-indexing-cpu.md）。
+ */
+export async function vectorCollectionDiagnostics(
+  scope: string,
+): Promise<{ dimension?: number; indexCompleteness?: Record<string, number> }> {
   validateScope(scope);
-  if (!scopeCollectionExists(scope)) return undefined;
-  return withEngine(scope, async (engine) => (await engine.info()).dimension);
+  if (!scopeCollectionExists(scope)) return {};
+  return withEngine(scope, async (engine) => {
+    const info = await engine.info();
+    return {
+      dimension: info.dimension,
+      ...(info.indexCompleteness ? { indexCompleteness: info.indexCompleteness } : {}),
+    };
+  });
 }
 
 export interface VectorDimensionStatus {
@@ -1557,18 +1574,22 @@ export interface VectorDimensionStatus {
   configured: number;
   persisted?: number;
   compatible: boolean;
+  /** 索引完成度（0~1）；S-02 暴露，用于"索引到底建没建"的诊断与展示 */
+  indexCompleteness?: Record<string, number>;
 }
 
 /** 对同一 scope 的所有 dense 写入入口提供一致的迁移诊断。 */
 export async function getVectorDimensionStatus(scope: string): Promise<VectorDimensionStatus> {
   const config = loadConfig();
   const normalizedScope = resolveScope(config, scope);
-  const persisted = await vectorCollectionDimension(normalizedScope);
+  const diagnostics = await vectorCollectionDiagnostics(normalizedScope);
+  const persisted = diagnostics.dimension;
   return {
     scope: normalizedScope,
     configured: config.embedding.dimension,
     persisted,
     compatible: persisted === undefined || persisted === config.embedding.dimension,
+    ...(diagnostics.indexCompleteness ? { indexCompleteness: diagnostics.indexCompleteness } : {}),
   };
 }
 

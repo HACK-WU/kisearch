@@ -127,6 +127,12 @@ export interface DocPayload {
 
 export interface InfoResultPayload extends PersistedSchema {
   docCount: number;
+  /**
+   * 各向量字段的索引完成度（0~1）。
+   * 0 = 全部停留在 flat 缓冲（未建索引，检索退化为暴力扫描）；1 = 已全部建好。
+   * REQ-20261009-003 S-02：不调 optimize() 时恒为 0（实验 1 实测）。
+   */
+  indexCompleteness?: Record<string, number>;
   locked: false;
 }
 

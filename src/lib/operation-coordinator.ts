@@ -5,6 +5,37 @@ export interface OperationRequest {
   params: unknown;
 }
 
+/**
+ * 任务类型（REQ-20261009-003 S-01 队列分层）：
+ * - `write`（默认）：普通任务（含短写与其它引擎操作），与同 scope 的其它任务互斥。
+ * - `engine-only`：**长引擎任务**（如导入），其元数据写入全部包在 `runMetadataCommit`
+ *   窗口内。它仍与其它 write/engine-only 互斥，但 **不阻塞 `read` 任务**——
+ *   这正是"导入期间仍可浏览"的关键。
+ *   ⚠️ 只有真正满足"元数据写全在提交窗口内"的任务才能用它；否则读会与元数据写并发。
+ * - `read`：**纯元数据读**（不打开 zvec），与同 scope 的 `write` 任务、以及
+ *   「元数据提交窗口」互斥，但可旁路 `engine-only` 长任务。仅当确知不触碰引擎时使用；
+ *   `/tags` 这类会打开 zvec 的读仍须用 `write`。
+ */
+export type TaskKind = 'write' | 'read' | 'engine-only';
+
+/**
+ * 按 operation 名推导任务类型（S-01 的**默认规则**，kind 的唯一真相）。
+ * - `import` → `engine-only`：导入的元数据写全部包在 `runMetadataCommit` 窗口内，
+ *   其向量化长尾不应阻塞同 scope 的纯元数据读（`/doc/list`、`/doc/edit` GET）。
+ * - 其余 → `write`（保守：未见"元数据写全部入窗"的操作一律不得旁路读，
+ *   如 rebuild-vector / restore-snapshot / sync-relation）。
+ *
+ * ★ 为什么 `submit` 的缺省值走本函数、而不是硬编码 `'write'`：真实入口有两个 ——
+ *   `daemon-rpc` 与 `mcp-http-api` 的 `runImportJob`。靠"每个入口记得传 kind"已经
+ *   出过一次事故：daemon 入口标了 engine-only，HTTP 入口漏标，而现场报障链路
+ *   （`/api/doc/list` 25s 超时）正是 HTTP。改为按 operation 推导后，任何入口
+ *   （含未来新增）漏传参数都不会退回"读被导入阻塞"的旧语义。
+ * 回归锚点：`test/coordinator-read-lane.test.ts` 用例 ⑨。
+ */
+export function kindForOperation(operation: string | undefined): TaskKind {
+  return operation === 'import' ? 'engine-only' : 'write';
+}
+
 export interface OperationResult<T = unknown> {
   result: T;
   queue: { scope: string; queuedMs: number; runMs: number; activeWorkers: number; maxWorkers: number };
@@ -21,6 +52,8 @@ interface Pending {
    * - 空数组：只读通道，不与任何 scope 互斥（如 scope 枚举，自带 fastFail 降级）
    */
   scopes: string[];
+  /** 任务类型：`read` = 纯元数据读，只与「元数据提交窗口」互斥（S-01） */
+  kind: TaskKind;
   enqueuedAt: number;
   resolve: (value: OperationResult) => void;
   reject: (reason: unknown) => void;
@@ -59,6 +92,18 @@ export class OperationCoordinator {
   private readonly queue: Pending[] = [];
   /** scope → 在跑任务数。同一 scope 计数 >0 时该 scope 的新任务不得启动。 */
   private readonly running = new Map<string, number>();
+  /**
+   * scope → 其中 `engine-only`（长引擎任务）的在跑数（REQ-20261009-003 S-01）。
+   * `read` 任务可旁路这部分占用，但仍须等待非 engine-only 的写任务与提交窗口。
+   */
+  private readonly runningEngineOnly = new Map<string, number>();
+  /**
+   * 正在提交元数据的 scope → 嵌套深度（REQ-20261009-003 S-01）。
+   * 只有 `read` 类型任务在该窗口内等待；窗口由 `runMetadataCommit`（异步）与
+   * `withMetadataCommitSync`（同步，用于回滚等路径）包裹，通常秒级。
+   * 用计数而非 Set：窗口可嵌套（Phase 4 的异步窗口内含同步窗口），内层退出不得提前放开。
+   */
+  private readonly committing = new Map<string, number>();
   private globalRunning = false;
   private activeWorkers = 0;
 
@@ -74,12 +119,55 @@ export class OperationCoordinator {
     request: OperationRequest,
     handler: Handler,
     scopes: string | string[] = scopesOf(request.params, request.operation),
+    // 缺省 kind 按 operation 名推导（见 `kindForOperation`）——不依赖调用点记得传参；
+    // 需要 read 语义的调用点（`/doc/list` 等）仍须显式传 `'read'`。
+    kind: TaskKind = kindForOperation(request.operation),
   ): Promise<OperationResult> {
     const normalized = normalizeScopes(scopes);
     return new Promise((resolve, reject) => {
-      this.queue.push({ request, handler, scopes: normalized, enqueuedAt: Date.now(), resolve, reject });
+      this.queue.push({ request, handler, scopes: normalized, kind, enqueuedAt: Date.now(), resolve, reject });
       this.pump();
     });
+  }
+
+  /**
+   * **元数据提交窗口**（REQ-20261009-003 S-01）：窗口内同 scope 的 `read` 任务等待到窗口结束，
+   * 避免读到"多文件半新半旧"的跨文件中间态；引擎类长任务（向量化/索引整理）既不占用
+   * 该窗口、也不受它影响 —— 这是"导入期间仍可浏览"的关键。
+   * 可重入：嵌套调用按深度计数，内层退出不提前放开。
+   */
+  async runMetadataCommit<T>(scope: string, run: () => Promise<T> | T): Promise<T> {
+    this.enterCommit(scope);
+    try {
+      return await run();
+    } finally {
+      this.exitCommit(scope);
+    }
+  }
+
+  /**
+   * 同步版提交窗口：包裹**同步**的元数据写（如失败回滚路径里的 `restoreLocalKb` /
+   * `persistTouchedGroups`）。这些写虽短，但若不入窗口，读就会与"删 KB / 重落分片"并发 —
+   * 正是"列表里在、点开 404"的来源（challenger 质疑 C1）。
+   */
+  withMetadataCommitSync<T>(scope: string, run: () => T): T {
+    this.enterCommit(scope);
+    try {
+      return run();
+    } finally {
+      this.exitCommit(scope);
+    }
+  }
+
+  private enterCommit(scope: string): void {
+    this.committing.set(scope, (this.committing.get(scope) ?? 0) + 1);
+  }
+
+  private exitCommit(scope: string): void {
+    const left = (this.committing.get(scope) ?? 1) - 1;
+    if (left > 0) this.committing.set(scope, left);
+    else this.committing.delete(scope);
+    this.pump();
   }
 
   snapshot(): { activeWorkers: number; maxWorkers: number; queues: Record<string, number> } {
@@ -99,6 +187,15 @@ export class OperationCoordinator {
     if (item.scopes.includes(GLOBAL_SCOPE)) return this.activeWorkers > 0;
     // 只读通道不与任何 scope 互斥，仅受 maxWorkers 上限约束。
     if (item.scopes.length === 0) return false;
+    // S-01（REQ-20261009-003）：纯元数据读
+    //   ① 与「元数据提交窗口」互斥（避免跨文件"半新半旧"）；
+    //   ② 与**非 engine-only** 的写任务互斥（doc/edit、delete、sync 等短写仍须串行，
+    //      否则读会与元数据写并发 —— 正是"列表里在、点开 404"的来源）；
+    //   ③ 可旁路 engine-only 长任务（导入的向量化长尾），读不再等整段导入。
+    if (item.kind === 'read') {
+      return item.scopes.some((scope) => (this.committing.get(scope) ?? 0) > 0
+        || (this.running.get(scope) ?? 0) - (this.runningEngineOnly.get(scope) ?? 0) > 0);
+    }
     return item.scopes.some((scope) => (this.running.get(scope) ?? 0) > 0);
   }
 
@@ -108,7 +205,12 @@ export class OperationCoordinator {
       this.globalRunning = true;
       return;
     }
-    for (const scope of item.scopes) this.running.set(scope, (this.running.get(scope) ?? 0) + 1);
+    for (const scope of item.scopes) {
+      this.running.set(scope, (this.running.get(scope) ?? 0) + 1);
+      if (item.kind === 'engine-only') {
+        this.runningEngineOnly.set(scope, (this.runningEngineOnly.get(scope) ?? 0) + 1);
+      }
+    }
   }
 
   private release(item: Pending): void {
@@ -121,6 +223,11 @@ export class OperationCoordinator {
       const left = (this.running.get(scope) ?? 0) - 1;
       if (left > 0) this.running.set(scope, left);
       else this.running.delete(scope);
+      if (item.kind === 'engine-only') {
+        const leftEngine = (this.runningEngineOnly.get(scope) ?? 0) - 1;
+        if (leftEngine > 0) this.runningEngineOnly.set(scope, leftEngine);
+        else this.runningEngineOnly.delete(scope);
+      }
     }
   }
 

@@ -26,6 +26,8 @@ import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js'
 import { parseContentTags, type PartitionConfig } from './constants.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasNoRelationsData, type LegacyRelationsCacheShape } from './group-cache.js';
 import { writeImportIncomplete, clearImportIncomplete, readImportIncompleteStatus, backupImportIncomplete } from './import-retry.js';
+// S-01（REQ-20261009-003）：静态导入协调器 —— 回滚等**同步**路径需要同步版元数据提交窗口
+import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 import {
@@ -955,6 +957,12 @@ async function handleDirectImportUnlocked(
   // D7（批次 2）：flush 组级原文缓冲——每组一次 loadLocalKb+合并+writeJson
   //（替代逐篇读改写；O(文档数)→O(组数) 落盘）。回滚路径（hook 失败等）不走缓冲、
   // 已即时写回，此 flush 只含最终接受导入的文件。
+  //
+  // S-01（REQ-20261009-003）已知残留中间态：本 flush 不在「元数据提交窗口」内，
+  // 因此从这一刻到 Phase 4 提交 relations 分片之间，**覆盖导入的文档可能出现
+  // "正文已新、列表元数据仍旧"**（用户拍板选项 b 时接受的形态）。
+  // 反向的"列表里有、点开 404"不会发生：正常路径不删 KB，删除只出现在回滚路径，
+  // 且回滚会同步落盘分片（见 restoreLocalKb / persistTouchedGroups 调用点）。
   for (const [groupPath, relations] of pendingKbWrites) {
     if (relations.size === 0) continue;
     const localKbPath = getLocalKbDir(scope, groupPath);
@@ -1539,11 +1547,16 @@ async function handleDirectImportUnlocked(
       }
     }
   }
-  writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
-  // 批次 2（W1）：元数据落盘改 per-Group 分片——旧布局先惰性迁移，再批写全量组
-  //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
-  migrateLegacyRelationsCache(scope);
-  persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
+  // S-01（REQ-20261009-003）：**元数据提交窗口**——只在真实落盘这几行挡同 scope 的读任务；
+  // 向量化长尾（Phase 2）与 Group 树构建（Phase 3）不挡读。目的：读不再等整段导入，
+  // 同时避免"列表里在、点开 404"这类跨文件中间态（选项 b）。
+  await getSharedOperationCoordinator().runMetadataCommit(scope, () => {
+    writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
+    // 批次 2（W1）：元数据落盘改 per-Group 分片——旧布局先惰性迁移，再批写全量组
+    //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
+    migrateLegacyRelationsCache(scope);
+    persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
+  });
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
@@ -1801,11 +1814,15 @@ function restoreLocalKb(
   relationText: string,
   previousText: string | undefined,
 ): void {
-  if (previousText !== undefined) {
-    writeLocalKb(scope, groupPath, relationText, previousText);
-  } else {
-    removeFromLocalKb(scope, groupPath, relationText);
-  }
+  // S-01（REQ-20261009-003）：回滚会**删除 KB 条目**，必须落在「元数据提交窗口」内——
+  // 否则读（已可旁路导入长任务）可能与删除并发，出现"列表里在、点开 404"（challenger 质疑 C1）。
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+    if (previousText !== undefined) {
+      writeLocalKb(scope, groupPath, relationText, previousText);
+    } else {
+      removeFromLocalKb(scope, groupPath, relationText);
+    }
+  });
 }
 
 function makeVectorizationStopError(
@@ -1870,7 +1887,13 @@ function writeLocalKb(scope: string, groupPath: string, relationText: string, mo
  * 路径向量回滚）对该组全部失效。现统一委托 group-cache.persistCacheShape（单一实现）。
  */
 function persistTouchedGroups(scope: string, cache: RelationsCache, touchedGroups: Set<string>): void {
-  persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+  // S-01（REQ-20261009-003）：分片落盘必须落在「元数据提交窗口」内——
+  // 覆盖两条路径：① 正常路径（Phase 4 已在外层开窗，此处靠重入计数）；② **失败回滚路径**
+  //（此前未开窗，且读已可旁路 engine-only 长任务 → 可能与"重落分片/删 KB"并发，
+  //  出现"列表里在、点开 404"；challenger 质疑 C1）。
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+    persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+  });
 }
 
 /** 从 local KB 删除单条记录（P-7 hook 失败回滚用）；返回是否真的删了 */
