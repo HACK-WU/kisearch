@@ -41,9 +41,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import YAML from 'yaml';
 import {
   CHAT_ERROR_CODES,
+  CHAT_REF_MAX_COUNT,
+  CHAT_REF_TEXT_MAX,
+  CHAT_REF_TOTAL_MAX,
   type ChatEvent,
   type ChatMessage,
   type ChatProgressStep,
+  type ChatRef,
   type ConversationFile,
   type SourceRef,
 } from './chat-contract.js';
@@ -788,6 +792,61 @@ function requireMessageText(body: { text?: unknown }): string {
 }
 
 /**
+ * 解析并校验请求体的 `refs`（用户手动引用的文档片段，REQ-20261009-002 需求 B）。
+ *
+ * 口径（与契约里的 `CHAT_REF_*` 常量同源）：
+ *   · 缺省 / null / 空数组 → `undefined`（视为未引用，不报错）
+ *   · 条数、单条长度、合计长度超限 → 400 `MESSAGE_INVALID`（fail-loud，不静默截断）
+ *   · 元素形状不符（缺 group/doc/text 或非字符串）→ 400
+ *
+ * ⚠️ 不校验 group/doc 是否属于本 scope：`text` 由前端提供、后端**不读原文**，
+ *   不存在越权读取；跨 scope 泄漏由前端「切 scope 清空引用」保证（需求 R10）。
+ */
+/** 导出仅为测试可直测（纯函数，无副作用）；生产路径见 handleConversationMessages。 */
+export function parseRefs(body: { refs?: unknown }): ChatRef[] | undefined {
+  const raw = body?.refs;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'refs 必须是数组');
+  }
+  if (raw.length === 0) return undefined;
+  if (raw.length > CHAT_REF_MAX_COUNT) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容`);
+  }
+  const refs: ChatRef[] = [];
+  let total = 0;
+  for (const item of raw) {
+    const r = item as Partial<ChatRef> | null;
+    if (!r || typeof r.group !== 'string' || typeof r.doc !== 'string' || typeof r.text !== 'string') {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'refs 每项必须含 group / doc / text 三个字符串字段');
+    }
+    // 元数据字段长度上限（code review P1）：只查类型会让恶意请求塞入超长 group/doc——
+    // 落盘进会话 JSON（磁盘膨胀）+ 原样进 system 块（token 成本）。与 KB 路径段同量级即可。
+    const g = r.group.trim();
+    const d = r.doc.trim();
+    if (!g || !d) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, '引用必须指明 group 与文档名');
+    }
+    if (g.length > 255 || d.length > 255) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `引用的 group / 文档名过长（各 ≤255 字符）`);
+    }
+    const content = r.text.trim();
+    if (content.length === 0) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `引用「${d}」的内容为空`);
+    }
+    if (content.length > CHAT_REF_TEXT_MAX) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `单条引用不得超过 ${CHAT_REF_TEXT_MAX} 字（「${d}」）`);
+    }
+    total += content.length;
+    refs.push({ group: g, doc: d, text: content });
+  }
+  if (total > CHAT_REF_TOTAL_MAX) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `全部引用合计不得超过 ${CHAT_REF_TOTAL_MAX} 字`);
+  }
+  return refs;
+}
+
+/**
  * API-08 `POST /api/chat/conversations/:id/messages` —— 发消息（SSE）
  *
  * · 非幂等（每次写一条 user 消息）
@@ -800,8 +859,10 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/messages`, res);
   if (!hit) return;
 
-  const body = (await readJsonBody(req)) as { text?: unknown };
+  const body = (await readJsonBody(req)) as { text?: unknown; refs?: unknown };
   const text = requireMessageText(body);
+  // 用户手动引用的文档片段（可选）：形状 / 条数 / 长度校验见 parseRefs
+  const refs = parseRefs(body);
 
   // ② 生成前置（P4 隐私 / CHAT_DISABLED / P5 会话忙）
   const ready = requireGenerationReady(res, ctx, id);
@@ -812,6 +873,7 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
     convId: id,
     userText: text,
     mode: 'append-user',
+    refs,
   });
 }
 
@@ -886,6 +948,11 @@ interface GenerationSpec {
   userText: string;
   mode: 'append-user' | 'regenerate' | 'edit';
   msgId?: string;
+  /**
+   * 用户手动引用的文档片段（REQ-20261009-002）。
+   * 仅 `append-user` 分支消费；`regenerate` / `edit` 从落盘的 user 消息里读回（见下）。
+   */
+  refs?: ChatRef[];
 }
 
 /**
@@ -932,6 +999,8 @@ async function runGeneration(
       role: 'user',
       content: spec.userText,
       at: new Date().toISOString(),
+      // 引用随 user 消息落盘 → 刷新 / 切会话后仍可回显（需求 R11）
+      ...(spec.refs && spec.refs.length > 0 ? { refs: spec.refs } : {}),
     });
   } else if (mode === 'edit') {
     const r = await truncateAfterAndEdit(scope, convId, spec.msgId!, spec.userText);
@@ -985,11 +1054,16 @@ async function runGeneration(
   let streamWarning: 'tool-rounds-exhausted' | 'conversation-too-long' | undefined;
 
   try {
+    // 引用来源：append-user 用请求传入的；regenerate / edit 从落盘的末条 user 读回
+    // （否则「重新生成」会静默丢掉用户此前指定过的上下文）
+    const effectiveRefs =
+      spec.refs && spec.refs.length > 0 ? spec.refs : convAfterPrep.messages.at(-1)?.refs;
     const events = runToolLoop({
       scope,
       conv: convAfterPrep,
       userText,
       convSystemPrompt: convAfterPrep.systemPrompt,
+      refs: effectiveRefs,
       signal: ac.signal,
     });
 

@@ -2,7 +2,7 @@
  * AppShell.tsx —— 应用布局（对齐 v2 demo：品牌区 + 分组导航（SVG 图标）+ 共用标题操作区 + 服务徽标）
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
@@ -76,7 +76,21 @@ export function AppShell(): JSX.Element {
   const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
   if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
   const chatStore = chatStoreRef.current;
-  const [chatOpen, setChatOpen] = useState(false);
+  /**
+   * 面板开合态：REQ-20261009-002 起收敛到 store（`chatStore.open` 此前是无人消费的死状态），
+   * 使全屏阅读器内的「AI 对话」开关与顶栏开关共享同一份状态 —— 两者分处不同组件树分支，
+   * props 够不着。
+   *
+   * 只订阅 `open` 一个字段：流式推进时 getSnapshot 恒等，AppShell 不随每个 chunk 重渲染。
+   * ⚠️ AppShell 是 `ChatStoreContext.Provider` 本身，不能消费该 context，故直接读 store。
+   */
+  const chatOpen = useSyncExternalStore(chatStore.subscribe, () => chatStore.getState().open);
+  const setChatOpen = useCallback(
+    (next: boolean) => {
+      chatStore.dispatch({ type: 'setOpen', open: next });
+    },
+    [chatStore],
+  );
   const chatToggleRef = useRef<HTMLButtonElement>(null);
 
   const location = useLocation();
@@ -91,16 +105,17 @@ export function AppShell(): JSX.Element {
   useEffect(() => {
     if (isChatRoute) {
       if (chatOpenBeforeRef.current === null) {
-        chatOpenBeforeRef.current = chatOpen;
-        if (chatOpen) setChatOpen(false);
+        // 用 getState 读先态：闭包里的 chatOpen 可能滞后，且避免把它列入依赖
+        // （先态只记一次，不被面板自身的开/关覆盖）
+        const wasOpen = chatStore.getState().open;
+        chatOpenBeforeRef.current = wasOpen;
+        if (wasOpen) setChatOpen(false);
       }
     } else if (chatOpenBeforeRef.current !== null) {
       if (chatOpenBeforeRef.current) setChatOpen(true);
       chatOpenBeforeRef.current = null;
     }
-    // chatOpen 不列依赖：先态只记一次，避免面板自身的开/关把先态覆盖
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isChatRoute]);
+  }, [isChatRoute, chatStore, setChatOpen]);
   const currentLabel = NAV_MAIN.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? '总览';
@@ -215,7 +230,9 @@ export function AppShell(): JSX.Element {
     <ChatStoreContext.Provider value={chatStore}>
     <DocumentEditorProvider value={{ isOpen: editorRequest !== null, open: setEditorRequest }}>
     <>
-    <div className="ki-shell">
+    {/* data-chat-open：全屏阅读器让位的唯一依据（REQ-20261009-002 需求 A，
+        规则见 ki.css「E. 全屏阅读器与 AI 面板共存」段）——纯 CSS 派生，不做跨组件通信 */}
+    <div className="ki-shell" data-chat-open={chatOpen ? 'true' : 'false'}>
       {/* ════════ 侧边栏 ════════ */}
       <aside className={`ki-sidebar${sidebarHidden ? ' ki-sidebar--hidden' : ''}`}>
         <div className="ki-sidebar__header">
@@ -293,7 +310,7 @@ export function AppShell(): JSX.Element {
                   type="button"
                   className="ki-topbar__chat-toggle"
                   ref={chatToggleRef}
-                  onClick={() => setChatOpen((v) => !v)}
+                  onClick={() => setChatOpen(!chatOpen)}
                   title={chatOpen ? '收起 AI 对话' : '打开 AI 对话'}
                   aria-label="AI 对话"
                   aria-pressed={chatOpen}

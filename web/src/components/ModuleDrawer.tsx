@@ -228,6 +228,14 @@ interface ModuleDrawerProps {
   fullscreenNavigation?: ReactNode;
   /** 全屏时显示在头部中央的工具区（如全库搜索框）。 */
   fullscreenToolbar?: ReactNode;
+  /**
+   * 全屏时显示在头部动作区最前的动作节点（如「AI 对话」开关）。
+   *
+   * REQ-20261009-002 需求 A：全屏层（z-index 1000）会盖住顶栏开关，面板未打开时
+   * 用户在全屏中没有任何 AI 入口 → 由页面注入一个开关。
+   * 本组件不依赖 chat 模块，节点由调用方提供（保持 components 与 chat 解耦）。
+   */
+  fullscreenActions?: ReactNode;
   /** 常驻模式（浏览页双栏的右栏）：不渲染遮罩与 dialog 语义，容器改为内联定位，隐藏关闭按钮。 */
   inline?: boolean;
 }
@@ -254,6 +262,7 @@ export function ModuleDrawer({
   onOutlineCollapsedChange,
   fullscreenNavigation,
   fullscreenToolbar,
+  fullscreenActions,
   inline = false,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
@@ -753,6 +762,10 @@ export function ModuleDrawer({
         role={inline ? undefined : 'dialog'}
         aria-modal={inline ? undefined : true}
         aria-label="原文查看"
+        /* 当前正文的文档身份：供「加入引用」在正文里划选时判定引用的是哪一篇
+           （REQ-20261009-002 需求 B；消费方见 chat/ChatPanel.tsx 的划选监听） */
+        data-ki-doc-group={group ?? ''}
+        data-ki-doc-name={module}
       >
         {/* 头部 */}
         <header className="ki-drawer__head">
@@ -809,6 +822,9 @@ export function ModuleDrawer({
             <div className="ki-drawer__fs-toolbar">{fullscreenToolbar}</div>
           ) : null}
           <div className="ki-drawer__actions">
+            {/* 全屏专属动作（如「AI 对话」开关）：REQ-20261009-002 —— 全屏层会盖住顶栏开关，
+                面板未打开时用户在全屏中没有任何 AI 入口 */}
+            {fullscreen ? fullscreenActions : null}
             {/* 全文命中导航：紧贴复制按钮左侧（用户反馈：原孤立在标题区右侧视觉割裂） */}
             {fullscreen && (
               <div className="ki-segmented ki-reader-width" role="group" aria-label="正文宽度">

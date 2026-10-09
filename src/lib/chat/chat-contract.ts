@@ -7,9 +7,13 @@
  *
  * ⚠️ 契约约束（实现方必读）：
  *   1. 本文件在骨架期【冻结】，实现期**一字不改**；变更须回 design 并走批次边界
- *      （唯一已批准的批次边界变更：**批次 2（2026-10-08）** —— `tool_start` 的
- *        `query`/`mode` 改**可选**、新增可选 `args`，承载非检索类 MCP 工具；
- *        决策 D5，见 `.plans/2026-10-08-chat-mcp-tools-batch2/plan.md`。
+ *      （已批准的批次边界变更：
+ *        · **批次 2（2026-10-08）** —— `tool_start` 的 `query`/`mode` 改**可选**、新增可选
+ *          `args`，承载非检索类 MCP 工具；决策 D5，
+ *          见 `.plans/2026-10-08-chat-mcp-tools-batch2/plan.md`。
+ *        · **REQ-20261009-002（2026-10-09）** —— 新增 `ChatRef` 与 `ChatMessage.refs?`
+ *          （用户手动引用文档片段，软提示注入；不改 `ki_search` 工具面），见
+ *          `CodeWikiHub/kisearch/requirements/2026-10-09-全屏阅读与AI对话协同及文档引用/`。
  *        其余形状未动；前端副本与 contract-parity 已同步）
  *   2. 前端有同形状副本 `web/src/api/chatContract.ts`（两端是独立 package，无法互相 import）
  *      → 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 机械保证
@@ -35,6 +39,33 @@ export interface SourceRef {
   /** ≤200 字，供刷新后展示引用摘要 */
   snippet: string;
 }
+
+/**
+ * 用户手动引用的知识库文档片段（REQ-20261009-002 需求 B）。
+ *
+ * ⚠️ 与 `SourceRef` 的分工（语义不同，不可混用）：
+ *   `SourceRef` = **检索产物**（后端产出，带 chunk 映射出的行号与 ≤200 字摘要）；
+ *   `ChatRef` = **用户指定**（前端产出，带用户选中的原文片段；后端**不读原文**）。
+ *
+ * · 上送：随 `POST /conversations/:id/messages` 请求体的 `refs` 数组
+ * · 生效：软提示 —— tool-loop 注入一条 system 块（"优先依据以下内容作答"），
+ *   模型仍可检索全库；**不改** `ki_search` 工具面（避免放宽参数失控面）
+ * · 落盘：写进 user 消息的 `refs`，供刷新 / 切会话后回显
+ */
+export interface ChatRef {
+  group: string;
+  /** 文档名（= relation） */
+  doc: string;
+  /** 用户选中的片段原文（前端按 CHAT_REF_TEXT_MAX 截断；后端对总量做预算校验） */
+  text: string;
+}
+
+/** 单次提问的引用条数上限（前端据此禁用「加入」，后端据此拒绝超限请求） */
+export const CHAT_REF_MAX_COUNT = 5;
+/** 单条引用文本上限（字符）；超长由前端截断并提示 */
+export const CHAT_REF_TEXT_MAX = 2000;
+/** 全部引用文本合计上限（字符）：注入 system 块前的总预算保护 */
+export const CHAT_REF_TOTAL_MAX = 6000;
 
 /** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
 export interface ChatToolResponse {
@@ -98,6 +129,11 @@ export interface ChatMessage {
   sources?: SourceRef[];
   /** 检索过程步骤摘要（生成结束后仍可回看；见 `ChatProgressStep` 的边界说明） */
   progress?: ChatProgressStep[];
+  /**
+   * 用户在本轮提问时**手动引用**的文档片段（REQ-20261009-002）。
+   * 仅 user 消息写入；assistant 的检索来源仍在 `sources` —— 两者语义不同，不得互相替代。
+   */
+  refs?: ChatRef[];
 }
 
 /** 会话文件（S-02 §3.2） */

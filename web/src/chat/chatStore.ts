@@ -18,7 +18,7 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md §9.3 · S05 §9.2
  */
 
-import type { ChatMessage, ChatToolResponse, SourceRef } from '@/api/chatContract';
+import type { ChatMessage, ChatRef, ChatToolResponse, SourceRef } from '@/api/chatContract';
 
 /** 生成期间的动态反馈条目（按时间序，供 R11a 展示） */
 export type ProgressStep =
@@ -105,6 +105,15 @@ export interface ChatUiState {
   activeConvId: string | null;
   /** 已落盘的消息（当前会话） */
   messages: ChatMessage[];
+  /**
+   * 输入框里待发送的**用户手动引用**（REQ-20261009-002 需求 B，会话级）。
+   *
+   * · 生命周期：当前会话内持续有效；切会话（`setActiveConv`）时清空；
+   *   切 scope 由 ChatPanel 的 scope effect 清空（与 `draft` 同处处理）
+   * · 为什么放 store 而非组件 state：dock 与 /chat page 是**两个同时挂载的实例**，
+   *   组件 state 不共享 —— 会出现"面板里加了、独立页看不见"
+   */
+  pendingRefs: ChatRef[];
   /** 生成中累积态 */
   streaming: StreamingState;
   /**
@@ -157,9 +166,15 @@ export interface ChatUiState {
   lastStreamedId: string | null;
 }
 
-/** 初始值（面板默认展开，T1：默认态可后续调整并记忆用户选择） */
+/**
+ * 初始值（面板默认**关闭**：用户定案「由用户点击『AI 对话』打开」）。
+ *
+ * REQ-20261009-002：`open` 此前是无任何消费者的死状态（AppShell 另有一份 useState），
+ * 现收敛到 store —— 全屏阅读器内的开关（`ChatToggleButton`）与顶栏开关分别位于两个
+ * 组件树分支、props 够不着，必须共享同一份开合态。`reset` 保留用户当前选择。
+ */
 export const INITIAL_CHAT_STATE: ChatUiState = {
-  open: true,
+  open: false,
   activeConvId: null,
   messages: [],
   streaming: {
@@ -180,6 +195,7 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
   reasoningSegsByMessage: {},
   notice: null,
   lastStreamedId: null,
+  pendingRefs: [],
 };
 
 /** 动作（视图层只通过这些动作改状态） */
@@ -187,6 +203,8 @@ export type ChatAction =
   | { type: 'setOpen'; open: boolean }
   | { type: 'setActiveConv'; convId: string | null }
   | { type: 'setMessages'; messages: ChatMessage[] }
+  /** 整体替换待发送引用（加入 / 删除 / 清空共用：UI 侧算好新数组，reducer 保持纯净） */
+  | { type: 'setRefs'; refs: ChatRef[] }
   /** `seq`：本轮流序号（可选，见 `StreamingState.seq`）；`at`：本轮开始时间（调用方注入，reducer 保持纯净） */
   | { type: 'streamStart'; messageId: string; seq?: number; at?: string; replacingId?: string }
   | { type: 'streamContent'; text: string }
@@ -233,7 +251,12 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         reasoningSegsByMessage: {},
         notice: null,
         lastStreamedId: null,
+        // ⚠️ 引用**不在此处清空**：`setActiveConv` 同样被「首次发送时惰性建会话」调用，
+        //    在这里清会让"刚加入引用就发送"的第一条消息把引用标签清掉（实测缺陷）。
+        //    清空职责改由**用户主动切会话**的路径（`ChatPanel.openConversation`）与切 scope 承担。
       };
+    case 'setRefs':
+      return { ...state, pendingRefs: action.refs };
     case 'reset':
       return { ...INITIAL_CHAT_STATE, open: state.open };
 

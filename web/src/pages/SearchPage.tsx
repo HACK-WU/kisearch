@@ -12,6 +12,7 @@ import { fetchTags, getSearchConfig } from '@/api/httpApi';
 import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupTreePanel, type DirectoryScrollPosition } from '@/components/GroupTreePanel';
+import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
@@ -727,6 +728,7 @@ export function SearchPage(): JSX.Element {
             />
           }
           fullscreen={readerFullscreen}
+          fullscreenActions={<ChatToggleButton />}
           onFullscreenChange={(fullscreen) => {
             setReaderFullscreen(fullscreen);
             // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）

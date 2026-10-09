@@ -9,6 +9,10 @@
  *
  * 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 保证（**骨架期为红**）。
  * 改动任一侧 → 该测试变绿前不得交付。
+ *
+ * 已登记的批次边界变更（与后端 `chat-contract.ts` 头部同源）：
+ *   · 批次 2（2026-10-08）：`tool_start` 的 `query`/`mode` 改可选、新增可选 `args`
+ *   · REQ-20261009-002（2026-10-09）：新增 `ChatRef` 与 `ChatMessage.refs?`（用户手动引用）
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -26,7 +30,27 @@ export interface SourceRef {
   snippet: string;
 }
 
-/** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
+/**
+ * 用户手动引用的知识库文档片段（REQ-20261009-002 需求 B）—— 与后端同形状副本。
+ *
+ * 与 `SourceRef` 的分工：`SourceRef` 是检索产物（后端产出）；`ChatRef` 是用户指定
+ * （前端产出，带选中的原文片段，后端不读原文）。
+ */
+export interface ChatRef {
+  group: string;
+  /** 文档名（= relation） */
+  doc: string;
+  /** 用户选中的片段原文（按 CHAT_REF_TEXT_MAX 截断后上送） */
+  text: string;
+}
+
+/** 单次提问的引用条数上限（UI 据此禁用「加入」） */
+export const CHAT_REF_MAX_COUNT = 5;
+/** 单条引用文本上限（字符）：超出时前端截断并提示 */
+export const CHAT_REF_TEXT_MAX = 2000;
+/** 全部引用文本合计上限（字符，与后端一致） */
+export const CHAT_REF_TOTAL_MAX = 6000;
+
 /** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
 export interface ChatToolResponse {
   text: string;
@@ -34,6 +58,7 @@ export interface ChatToolResponse {
   truncated: boolean;
 }
 
+/** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
 export interface ChatProgressStep {
   phase: 'start' | 'end';
   /** 本步发生时已发出的正文字符数（interleave 锚点，与后端契约对齐；旧数据缺省 = 0） */
@@ -60,6 +85,8 @@ export interface ChatMessage {
   sources?: SourceRef[];
   /** 检索过程步骤摘要（走查 #11：落盘 → 刷新/切会话后仍可回看"检索了几次"） */
   progress?: ChatProgressStep[];
+  /** 用户本轮提问手动引用的文档片段（仅 user 消息；与 assistant 的 `sources` 语义不同） */
+  refs?: ChatRef[];
 }
 
 export interface ConversationFile {

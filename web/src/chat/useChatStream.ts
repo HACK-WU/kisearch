@@ -20,7 +20,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
-import type { ChatEvent, ChatToolResponse } from '@/api/chatContract';
+import type { ChatEvent, ChatRef, ChatToolResponse } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 
 export interface ChatStreamApi {
@@ -30,7 +30,7 @@ export interface ChatStreamApi {
    * @returns 是否收到 `done`（= 服务端已落盘）。**调用方据此决定能否"以服务端为准"重取**：
    *          为 `false`（error / aborted / 中断）时服务端内容可能缺失，重取会覆盖掉本地已渲染内容。
    */
-  send(convId: string, text: string): Promise<boolean>;
+  send(convId: string, text: string, refs?: readonly ChatRef[]): Promise<boolean>;
   /** 重新生成（API-11，不新增 user 消息）；返回语义同 `send` */
   regenerate(convId: string): Promise<boolean>;
   /** 编辑并重发（API-12，后端原子截断）；返回语义同 `send` */
@@ -270,18 +270,22 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
     const tempId = () => `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
     return {
-      async send(convId: string, text: string): Promise<boolean> {
+      async send(convId: string, text: string, refs?: readonly ChatRef[]): Promise<boolean> {
         const placeholder = tempId();
         // 乐观显示 user 消息（不落盘乐观，只做 UI 立即反馈；失败的可重试入口在错误槽）
+        // 引用一并乐观挂上：发出后立即可见"这一问带着哪些引用"（REQ-20261009-002）
         const cur = store.getState();
         store.dispatch({
           type: 'setMessages',
           messages: [
             ...cur.messages,
-            { id: `local-user-${placeholder}`, role: 'user', content: text, at: new Date().toISOString() },
+            {
+              id: `local-user-${placeholder}`, role: 'user', content: text, at: new Date().toISOString(),
+              ...(refs && refs.length > 0 ? { refs: [...refs] } : {}),
+            },
           ],
         });
-        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal), undefined, undefined, `local-user-${placeholder}`);
+        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal, refs), undefined, undefined, `local-user-${placeholder}`);
       },
 
       async regenerate(convId: string): Promise<boolean> {

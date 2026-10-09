@@ -40,10 +40,12 @@ import {
   listConversations,
   patchConversation,
 } from '@/api/chatApi';
-import type { ChatConfigOk, ChatMessage, ChatProgressStep, ConversationSummary, SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ConversationSummary, type SourceRef } from '@/api/chatContract';
 import { useScopeValue } from '@/lib/scopeContext';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { ChatToggleButton } from './ChatToggleButton';
+import { ReaderLinkComposer } from '@/components/ReaderLinkComposer';
 import { MarkdownPreview, renderMarkdownBlocks, type MarkdownBlock } from '@/components/MarkdownPreview';
 import type { ChatStore, DegradedMark, ProgressStep, ReasoningSegment } from './chatStore';
 import { buildTimeline, mergeInterleaveItems, layoutAnswerFlow, type TimelineNode } from './answerFlow';
@@ -116,6 +118,73 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [convPopOpen, setConvPopOpen] = useState(false);
   /** 对话配置层开合（纯瞬时 UI 态，符合本文件"不得累积业务态"的约束） */
   const [cfgOpen, setCfgOpen] = useState(false);
+  /** 引用选择器开合（纯瞬时 UI 态，REQ-20261009-002 需求 B） */
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+  /**
+   * 「加入引用」待选模式（用户走查修正：**不再弹模态框**，直接在正在读的正文里划选）。
+   *
+   * 范式与文档编辑器「添加链接」一致：先点按钮 → 再选内容 → 自动加入。
+   * ⚠️ 本状态与下方 effect 都必须在 `if (!open) return null` **早退之前**（Rules of Hooks）。
+   */
+  const [refArmed, setRefArmed] = useState(false);
+
+  /**
+   * 引用相关轻提示（**3s 自动消失**）。
+   *
+   * 为什么不复用 store 的 `notice`：那是"需要用户处置"的**常驻**提示（`done.warning` 的
+   * 「本轮回答可能不完整」也走它），自动消失会让用户错过；而「已加入引用」只是即时反馈
+   * —— 用户走查反馈：该提示不会自动消失，一直挡在输入框上方。
+   */
+  const [refToast, setRefToast] = useState('');
+  useEffect(() => {
+    if (!refToast) return;
+    const t = window.setTimeout(() => setRefToast(''), 3000);
+    return () => window.clearTimeout(t);
+  }, [refToast]);
+
+  useEffect(() => {
+    if (!refArmed) return;
+    const onUp = (): void => {
+      const sel = window.getSelection();
+      const raw = sel?.toString().trim() ?? '';
+      if (!raw) return;
+      const anchor = sel?.anchorNode ?? null;
+      const el = anchor instanceof Element ? anchor : (anchor?.parentElement ?? null);
+      // 选区必须落在阅读器正文里：在面板内选字、或在别处选字，都不算引用
+      const drawer = el?.closest('.ki-drawer') ?? null;
+      if (!drawer) return;
+      const doc = drawer.getAttribute('data-ki-doc-name') ?? '';
+      const grp = drawer.getAttribute('data-ki-doc-group') ?? '';
+      if (!doc) return;
+      const cur = store.getState().pendingRefs;
+      if (cur.length >= CHAT_REF_MAX_COUNT) {
+        setRefToast(`一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容，请先移除一条`);
+        return;
+      }
+      const text = raw.length > CHAT_REF_TEXT_MAX ? raw.slice(0, CHAT_REF_TEXT_MAX) : raw;
+      // 总量守卫：只限条数与单条长度时，5 × 2000 可合法凑出 10000 字，而后端
+      // `CHAT_REF_TOTAL_MAX`（6000）会直接 400 —— 必须在前端拦住并说明原因，避免"操作合法但发送必失败"
+      const usedChars = cur.reduce((n, r) => n + r.text.length, 0);
+      if (usedChars + text.length > CHAT_REF_TOTAL_MAX) {
+        setRefToast(`引用内容合计不得超过 ${CHAT_REF_TOTAL_MAX} 字（当前 ${usedChars} 字），请先移除部分引用`);
+        return;
+      }
+      if (cur.some((r) => r.group === grp && r.doc === doc && r.text === text)) {
+        setRefToast(`这段内容已在引用中：${doc}`);
+        return;
+      }
+      store.dispatch({ type: 'setRefs', refs: [...cur, { group: grp, doc, text }] });
+      setRefToast(
+        raw.length > CHAT_REF_TEXT_MAX
+          ? `已加入引用（超长已截断至 ${CHAT_REF_TEXT_MAX} 字）：${doc}`
+          : `已加入引用：${doc}（${text.length} 字）`,
+      );
+      setRefArmed(false);
+      sel?.removeAllRanges();
+    };
+    document.addEventListener('mouseup', onUp);
+    return () => document.removeEventListener('mouseup', onUp);
+  }, [refArmed, store, setRefToast]);
   /** 左栏会话抽屉开合（page 窄屏 <1024px 专用，瞬时 UI 态） */
   const [sideOpen, setSideOpen] = useState(false);
   const chipRef = useRef<HTMLDivElement>(null);
@@ -165,6 +234,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     setEditing(null);
     setViewing(null);
     setDraft('');
+    // 引用随 scope 清空（REQ-20261009-002 R10：绝不把 A scope 的文档名带入 B scope）
+    store.dispatch({ type: 'setRefs', refs: [] });
     setSendError(null);
     setConvError(null);
     setAtBottom(true);
@@ -205,6 +276,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       if (s.activeConvId === id && s.messages.length > 0 && !s.messages.some((m) => m.id.startsWith('local-user-'))) return;
       stream.abort();
       store.dispatch({ type: 'setActiveConv', convId: id });
+      // 用户主动切会话 → 引用清空（需求 R10：引用属当前对话框）。
+      // 与「首次发送惰性建会话」区分：后者不清（见 chatStore.setActiveConv 处的说明）
+      store.dispatch({ type: 'setRefs', refs: [] });
       setOpeningConv(true);
       try {
         const d = await getConversation(id);
@@ -551,19 +625,11 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   }, []);
 
   /**
-   * 全屏阅读器打开时自动收起面板（避免空间/层级冲突）。
-   *
-   * 这里只读取"是否存在 `.ki-drawer--fullscreen`"并隐藏 UI ——
-   * **不触碰 ModuleDrawer 自身**（既有组件，改动会影响 5 个页面，属越界）。
+   * REQ-20261009-002（需求 A）：此处原先会轮询检测 `.ki-drawer--fullscreen` 并把整个面板
+   * 藏起来（理由"避免空间与层级冲突"）。该行为已按用户拍板**移除**：
+   * 全屏阅读器改为让出面板宽度、两者并排（见 ki.css「E. 全屏阅读器与 AI 面板共存」段），
+   * 面板开合完全由用户意图决定。轮询随之删除——它还会带来最多 500ms 的"开了又自己关"抖动。
    */
-  const [fullscreenReader, setFullscreenReader] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const check = (): void => setFullscreenReader(Boolean(document.querySelector('.ki-drawer--fullscreen')));
-    check();
-    const timer = window.setInterval(check, 500);
-    return () => window.clearInterval(timer);
-  }, [open]);
 
   /**
    * 输入区随内容自动增高（用户反馈：多行草稿时高度不涨，最新一行把顶部内容滚出可视区）。
@@ -609,11 +675,38 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
 
   // ★ 硬约束：隐藏而非卸载（返回 null 不触发组件卸载，store 状态与进行中的流均保留）
   if (!open) return null;
-  // page 是主内容而非浮层：全屏阅读器打开时无需为它让位（阅读器自身是 fixed 全屏覆盖）
-  if (!isPage && fullscreenReader) return null;
 
   /** 本轮生成失败的错误态（N4 / S03 §5「连接中断 + 重试入口」）：按 convId 索引的模块级错误槽 */
   const streamError = getStreamError(state.activeConvId);
+
+  /**
+   * 加入一条引用（选择器回调）：同 group/doc/text 视为重复，不重复加入。
+   *
+   * ⚠️ 必须是**普通函数而非 useCallback**：本组件在 `if (!open) return null` 早退之后
+   * 不允许再出现 hook（Rules of Hooks）—— 这两处曾误包 useCallback，导致
+   * 「点开面板的瞬间整页崩」（React #310：Rendered more hooks than during the previous render），
+   * 因为 open=false 时早退不执行它们、open=true 时执行，hook 数量前后不一致。
+   */
+  const handleAddRef = (ref: ChatRef): void => {
+    const cur = store.getState().pendingRefs;
+    if (cur.length >= CHAT_REF_MAX_COUNT) return;
+    if (cur.some((r) => r.group === ref.group && r.doc === ref.doc && r.text === ref.text)) return;
+    // 总量守卫（与正文划选路径同口径）：三条限制必须两两相容，
+    // 不能出现"UI 放行、后端 400"的组合
+    const usedChars = cur.reduce((n, r) => n + r.text.length, 0);
+    if (usedChars + ref.text.length > CHAT_REF_TOTAL_MAX) {
+      setRefToast(`引用内容合计不得超过 ${CHAT_REF_TOTAL_MAX} 字（当前 ${usedChars} 字），请先移除部分引用`);
+      return;
+    }
+    store.dispatch({ type: 'setRefs', refs: [...cur, ref] });
+    // 成功反馈与「正文划选」路径保持一致（否则两条入口一个提示一个静默）
+    setRefToast(`已加入引用：${ref.doc}（${ref.text.length} 字）`);
+  };
+
+  /** 移除一条待发送引用（需求 B：已加入的引用必须可单独删除） */
+  const handleRemoveRef = (index: number): void => {
+    store.dispatch({ type: 'setRefs', refs: store.getState().pendingRefs.filter((_, i) => i !== index) });
+  };
 
   const handleSend = (): void => {
     const text = draft.trim();
@@ -622,6 +715,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     sendLockRef.current = true;
     const operation = ++operationSeqRef.current;
     const reqScope = scope;
+    // 引用快照：本轮用「点发送那一刻」的引用（异步等待期间用户可能仍在增删）
+    const reqRefs = store.getState().pendingRefs;
     setSendError(null);
     setDraft(''); // 清空输入框（失败时可按错误块重试，见 N4）
     setAtBottom(true); // 新提问必须把视图带回底部（用户此前往上翻过历史时也要跟随）
@@ -631,7 +726,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         //   原先直接用 `state.activeConvId ?? ''` → 打到 /conversations//messages（必然失败）。
         const convId = store.getState().activeConvId ?? (await createNewConversation());
         if (scopeRef.current !== reqScope || operationSeqRef.current !== operation) return;
-        const persisted = await stream.send(convId, text);
+        // ★ 引用**发送后不清空**：Q3 拍板「当前对话框内有效」= 同一会话的多轮提问持续携带，
+        //   直到用户主动删除，或切换会话 / 切换 scope（清空点见 chatStore.setActiveConv 与本文件 scope effect）
+        const persisted = await stream.send(convId, text, reqRefs);
         // ★ 只有收到 `done`（服务端确已落盘）才"以服务端为准"重取：
         //   error / aborted / 中断路径下服务端可能没有新内容 → 重取会把刚渲染的回答**覆盖成旧的**
         //   （用户看到回答凭空消失且无提示）。失败路径改由错误槽 + 重试入口承担。
@@ -1136,6 +1233,53 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           ) : null}
 
           <div className="ki-chat-composer">
+            {/* 引用区（REQ-20261009-002 需求 B）：入口常驻可见，已加入的以标签呈现、点标签即移除。
+                交互范式对齐文档编辑器「添加链接」：先点按钮 → **在当前打开的文档正文里划选** → 自动加入。
+                （用户走查修正：不再先弹模态框；仅当没有打开的文档时才回退到选择器弹层） */}
+            {/* 轻提示：3s 自动消失（用户走查反馈：原提示不会自动消失，一直挡在输入框上方） */}
+            {refToast ? (
+              <div className="ki-chat-refbar__toast" role="status">{refToast}</div>
+            ) : null}
+            <div className="ki-chat-refbar">
+              {state.pendingRefs.map((r, i) => (
+                <button
+                  key={`${r.group}/${r.doc}/${i}`}
+                  type="button"
+                  className="ki-chat-refbar__chip"
+                  onClick={() => handleRemoveRef(i)}
+                  title={`移除引用：${r.group} / ${r.doc}\n${r.text.slice(0, 60)}${r.text.length > 60 ? '…' : ''}`}
+                >
+                  <span className="ki-chat-refbar__no">{i + 1}</span>
+                  <span className="ki-chat-refbar__doc">{r.doc}</span>
+                  <span className="ki-chat-refbar__x" aria-hidden="true">✕</span>
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`ki-chat-refbar__add${refArmed ? ' ki-chat-refbar__add--armed' : ''}`}
+                onClick={() => {
+                  if (refArmed) {
+                    setRefArmed(false);
+                    return;
+                  }
+                  // 有打开的文档 → 直接在正文里划选（用户口径）；没有可划选的内容时才回退到选择器弹层
+                  if (document.querySelector('.ki-drawer')) {
+                    setRefArmed(true);
+                    setRefToast('在正文中划选要引用的内容（再点按钮取消）');
+                  } else {
+                    setRefPickerOpen(true);
+                  }
+                }}
+                disabled={!(config?.enabled ?? false) || state.pendingRefs.length >= CHAT_REF_MAX_COUNT}
+                title={
+                  state.pendingRefs.length >= CHAT_REF_MAX_COUNT
+                    ? `一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容`
+                    : refArmed
+                      ? '点击取消引用模式'
+                      : '点击后，在打开的文档正文里划选要引用的内容'
+                }
+              >{refArmed ? '在正文中划选…' : '+ 加入引用'}</button>
+            </div>
             <textarea
               className="ki-chat-composer__ta"
               ref={bindComposer}
@@ -1228,6 +1372,20 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         </aside>
       )}
 
+      {/* 引用选择器（需求 B）：**复用「添加链接」的文档选择模态（ReaderLinkComposer mode="ref"）**
+          ——用户拍板不另起炉灶；portal 到 body，双栏选择器放不进 380px 面板。
+          initialDoc 取当前正在读的原文，用户不必再从树里找一遍 */}
+      {refPickerOpen ? (
+        <ReaderLinkComposer
+          mode="ref"
+          scope={scope}
+          currentRefs={state.pendingRefs}
+          initialDoc={viewing ? { group: viewing.group, doc: viewing.module } : undefined}
+          onAddRef={handleAddRef}
+          onClose={() => setRefPickerOpen(false)}
+        />
+      ) : null}
+
       {/* 来源引用点击 → 打开原文并高亮（复用既有 ModuleDrawer） */}
       {viewing ? (
         <ModuleDrawer
@@ -1237,6 +1395,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           module={viewing.module}
           group={viewing.group}
           highlightQuery={viewing.query}
+          fullscreenActions={<ChatToggleButton />}
           onClose={() => setViewing(null)}
           fetcher={kiGetModuleInfo}
         />
@@ -1352,6 +1511,18 @@ function MessageBubble({
         <div className="ki-chat-msg__body">
           {/* 用户输入是纯文本：不渲染 Markdown（避免把用户输入的 markdown 当富文本执行） */}
           <p className="ki-chat-msg__text">{message.content}</p>
+          {/* 本轮提问引用的文档片段（REQ-20261009-002 R11）：刷新 / 切回会话后仍可见 */}
+          {message.refs && message.refs.length > 0 ? (
+            <ul className="ki-chat-refs" aria-label={`本轮引用了 ${message.refs.length} 段内容`}>
+              {message.refs.map((r, i) => (
+                <li key={`${r.group}/${r.doc}/${i}`} className="ki-chat-refs__item" title={r.text}>
+                  <span className="ki-chat-refs__no">{i + 1}</span>
+                  <span className="ki-chat-refs__doc">{r.doc}</span>
+                  <span className="ki-chat-refs__group">{r.group}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : (
         /* 统一渲染路径（2026-09-30 四次修正，用户裁决："完成后什么都不要变"）：

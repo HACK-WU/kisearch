@@ -14,6 +14,7 @@ import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
 import type { DocItem } from '@/api/httpApi';
 import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { TagSelect } from '@/components/TagSelect';
 import { Icon } from '@/components/icons';
 import {
@@ -854,6 +855,7 @@ export function BrowsePage(): JSX.Element {
         canGoForward={forwardHistory.length > 0}
         onForward={goForward}
         fullscreen={readerFullscreen}
+        fullscreenActions={<ChatToggleButton />}
         onFullscreenChange={(fullscreen) => {
           setReaderFullscreen(fullscreen);
           // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）

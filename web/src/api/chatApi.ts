@@ -16,6 +16,7 @@
 import type {
   ChatConfigOk,
   ChatEvent,
+  ChatRef,
   ConversationFile,
   ConversationSummary,
   PromptConfig,
@@ -339,10 +340,12 @@ export async function* streamMessage(
   convId: string,
   text: string,
   signal?: AbortSignal,
+  refs?: readonly ChatRef[],
 ): AsyncGenerator<ChatEvent> {
   yield* postSse(
     `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages`,
-    { text },
+    // 空引用不写字段：后端 parseRefs 对「缺省」与「空数组」等价处理
+    refs && refs.length > 0 ? { text, refs } : { text },
     signal,
   );
 }

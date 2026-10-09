@@ -3432,3 +3432,163 @@ select.ki-chat-cfg__ta--select {
 @media (prefers-reduced-motion: reduce) {
   .ki-chatpage__side { transition: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════
+   E. 全屏阅读器与 AI 面板共存（REQ-20261009-002 需求 A）
+   ────────────────────────────────────────────────────────────────
+   拍板口径：共存策略 = 并排让位 —— 面板打开时全屏阅读器让出面板宽度，
+   两者并排、互不遮挡；窄屏（不足以并排）降级为「面板浮层覆盖正文，可一键关闭」。
+   · 覆盖的既有行为：ChatPanel 原先在全屏时 `return null` 自我隐藏（已移除）；
+     现在开合完全由用户意图决定。
+   · ⚠️ 阈值 1400px 必须与 `web/src/chat/ChatPanel.tsx` 的
+     `CHAT_DOCK_MIN_VIEWPORT` 保持同步（面板在 <1400px 时转为浮层态）。
+   · ⚠️ 面板宽度 380px 与 `.ki-chat-panel` 的 width/min-width 硬编码一致，
+     改其一须同步另一处（本段按约定为纯追加，不回改上方既有规则）。
+   ════════════════════════════════════════════════════════════════ */
+.ki-shell { --ki-chat-dock-w: 380px; }
+
+/* ── 宽屏：阅读器让位（面板常驻并排）── */
+@media (min-width: 1400px) {
+  /* 覆盖 `.ki-drawer--fullscreen` 的 width/max-width:100vw；
+     ⚠️ `left: 0` 必须显式声明：非 inline 的全屏阅读器只有 `.ki-drawer` 的 right:0 +
+     `.ki-drawer--fullscreen` 的 width:100vw，**没有 left** —— 只把 width 改成 auto 会让
+     fixed 元素退化为 shrink-to-fit（实测宽度塌成 0）。声明 left 后 left/right 双向约束
+     下 width:auto 才等于「视口 − 面板宽」。 */
+  .ki-shell[data-chat-open="true"] .ki-drawer--fullscreen {
+    left: 0;
+    right: var(--ki-chat-dock-w);
+    width: auto;
+    max-width: none;
+  }
+  /* 面板打开时**保留**全屏导航（用户走查反馈：「全屏打开 AI 对话后左边的知识目录没了」）。
+     导航是阅读时的定位手段，强制隐藏等于逼用户二选一 —— 这是本段的方案失误，已撤除。
+     宽度交由用户自行权衡：导航自带「收起 Group 树」（.ki-reader-nav__collapse）
+     与大纲折叠，需要更多正文宽度时自行收起即可。 */
+  .ki-shell[data-chat-open="true"] .ki-reader-navigation { display: flex; }
+}
+
+/* ── 窄屏：面板是浮层，必须浮在全屏阅读器之上才可见 ──
+   阅读器 z-index 1000；面板浮层既有 990 属「与阅读器不争层级」的旧口径
+   （其注释即写明"刻意低于 .ki-drawer"），本需求下窄屏无法并排，只能靠覆盖
+   （可一键关闭）保证面板与入口都可用。
+   ⚠️ 已知取舍：该提升在**非全屏**的窄屏下同样生效 —— 面板浮层会盖住
+   `.ki-drawer`(1000) 而非被它盖住。这与本需求方向一致（用户主动打开面板时
+   面板应在最上层），故不额外引入"是否全屏"的 JS 判定来收窄范围。 */
+@media (max-width: 1399.98px) {
+  .ki-shell[data-chat-open="true"] .ki-chat-panel--overlay { z-index: 1010; }
+}
+
+/* ── 全屏动作区内的 AI 开关：打开态用主色描边，与「添加链接」的激活态同款语义 ── */
+.ki-drawer__chat--on {
+  border-color: var(--ki-color-primary);
+  color: var(--ki-color-primary);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   F. AI 输入框引用文档片段（REQ-20261009-002 需求 B）
+   ────────────────────────────────────────────────────────────────
+   · 引用区在 composer 内顶部：入口常驻可发现，已加入的以标签呈现、点标签即移除
+   · 选择器 portal 到 body（380px 面板放不下双栏），z-index 1150 与既有
+     `.ki-reader-link-overlay` 同档，低于 1200 的编辑/配置模态
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── 引用区（composer 内）── */
+/* 轻提示的定位锚点：composer 自身需成为 positioning context，
+   否则 `.ki-chat-refbar__toast` 的 absolute 会相对面板定位（跑到错误位置） */
+.ki-chat-composer { position: relative; }
+.ki-chat-refbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3) 0;
+}
+.ki-chat-refbar__chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  height: 24px; padding: 0 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary); font: inherit; font-size: var(--ki-font-size-xs);
+}
+.ki-chat-refbar__chip:hover { background: color-mix(in srgb, var(--ki-color-primary) 18%, transparent); }
+.ki-chat-refbar__no { flex-shrink: 0; font-family: var(--ki-font-mono); opacity: .75; }
+.ki-chat-refbar__doc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-refbar__x { flex-shrink: 0; opacity: .7; }
+.ki-chat-refbar__add {
+  height: 24px; padding: 0 10px; border-radius: 999px; cursor: pointer;
+  border: 1px dashed var(--ki-color-border-strong); background: none;
+  color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs);
+}
+.ki-chat-refbar__add:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-chat-refbar__add:disabled { opacity: .5; cursor: not-allowed; }
+/* 待选态（已进入"在正文中划选"模式）：实心描边 + 主色，与「添加链接」的激活态同款语义 */
+.ki-chat-refbar__add--armed {
+  border-style: solid;
+  border-color: var(--ki-color-primary);
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+}
+/* 引用轻提示：3s 自动消失，且**绝对定位、不参与布局** ——
+   用户反馈一：作为 composer 内独立一行会把输入框撑高 → 改浮层；
+   用户反馈二：白底描边横贯整行「丑」→ 收成胶囊气泡（宽度随内容自适应、靠左与按钮对齐）；
+   用户反馈三：深底白字「看着像黑色」→ 回到最初的配色语言：`primary-soft` 浅绿软底 +
+   主色绿字（与 armed 按钮和引用标签激活态同族，亮色、暗色主题各自有变量），仅保留轻阴影。 */
+.ki-chat-refbar__toast {
+  position: absolute; z-index: 1;
+  left: var(--ki-space-3);
+  bottom: calc(100% + 8px);
+  width: max-content; max-width: calc(100% - 24px);
+  padding: 6px 12px; border-radius: 999px;
+  background: var(--ki-color-primary-soft); color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs); font-weight: 600;
+  box-shadow: var(--ki-shadow-1);
+  pointer-events: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  animation: ki-refbar-toast-in .18s ease;
+}
+@keyframes ki-refbar-toast-in {
+  from { opacity: 0; transform: translateY(3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-refbar__toast { animation: none; }
+}
+
+/* ── 用户气泡里的引用回显（刷新 / 切回会话后仍可见，R11）── */
+.ki-chat-refs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
+.ki-chat-refs__item {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 1px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  color: var(--ki-color-primary); font-size: var(--ki-font-size-xs);
+}
+.ki-chat-refs__no { font-family: var(--ki-font-mono); opacity: .75; }
+.ki-chat-refs__doc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-chat-refs__group { opacity: .6; font-size: 11px; }
+
+/* ── 引用选择器（ReaderLinkComposer mode="ref"）在 link 壳内的专属块 ──
+   壳（遮罩/头部/双栏/预览/底部确认/说明行）全部复用 `.ki-reader-link-dialog*`；
+   此处只保留 ref 特有的两个块：左栏顶部搜索条 + 搜索结果列表。
+   （`__hint` 保留供结果列表"未找到"空态使用。） */
+.ki-reader-link-dialog__docs > .ki-chat-refpicker__tree-search {
+  /* 覆盖基类为横向 flex 设计的 flex:1/max-width，在竖排 aside 里保持自身高度、铺满栏宽 */
+  flex: none; width: 100%; max-width: none;
+  margin: 0 0 10px; padding: 0 2px;
+}
+.ki-chat-refpicker__results {
+  margin: 0; padding: var(--ki-space-2); list-style: none;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ki-chat-refpicker__result-count {
+  padding: 2px 4px 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+}
+.ki-chat-refpicker__result {
+  display: block; width: 100%; padding: 8px 10px; text-align: left;
+  border: 1px solid transparent; border-radius: var(--ki-radius-sm);
+  background: none; cursor: pointer; font: inherit;
+}
+.ki-chat-refpicker__result:hover { background: var(--ki-color-hover-strong); }
+.ki-chat-refpicker__result--active { background: var(--ki-color-primary-soft); border-color: var(--ki-color-primary); }
+.ki-chat-refpicker__result--active .ki-chat-refpicker__result-name { color: var(--ki-color-primary); }
+.ki-chat-refpicker__result-name {
+  display: block; font-size: var(--ki-font-size-md); font-weight: 600; color: var(--ki-color-text);
+  overflow-wrap: anywhere;
+}
+.ki-chat-refpicker__result-group { display: block; margin-top: 1px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-refpicker__hint { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }

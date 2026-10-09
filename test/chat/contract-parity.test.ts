@@ -47,6 +47,13 @@ function extractTypeUnion(src: string, name: string): string[] {
   return [...m![1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!).sort();
 }
 
+/** 提取 `export const NAME = 123;` 的数值 */
+function extractConstNumber(src: string, name: string): number {
+  const m = src.match(new RegExp(`export const ${name}\\s*=\\s*(\\d+)`));
+  assert.ok(m, `未找到常量 ${name}`);
+  return Number(m![1]);
+}
+
 describe('契约对齐 · SSE 事件协议', () => {
   it('meta 两侧都携带可选的已提交 userMessageId，失败/停止无需推算或重取 id', () => {
     for (const p of [BACK, FRONT]) assert.match(read(p), /type: 'meta';[^\n]+userMessageId\?: string/);
@@ -68,7 +75,7 @@ describe('契约对齐 · SSE 事件协议', () => {
 });
 
 describe('契约对齐 · 数据模型', () => {
-  for (const name of ['SourceRef', 'ChatToolResponse', 'ChatProgressStep', 'ChatMessage', 'ConversationFile', 'ConversationSummary', 'ChatConfigOk']) {
+  for (const name of ['SourceRef', 'ChatRef', 'ChatToolResponse', 'ChatProgressStep', 'ChatMessage', 'ConversationFile', 'ConversationSummary', 'ChatConfigOk']) {
     it(`${name} 字段集合两侧一致`, () => {
       assert.deepEqual(extractInterfaceFields(read(FRONT), name), extractInterfaceFields(read(BACK), name));
     });
@@ -86,6 +93,14 @@ describe('契约对齐 · 数据模型', () => {
     for (const p of [BACK, FRONT]) {
       const fields = extractInterfaceFields(read(p), 'ChatConfigOk');
       for (const k of need) assert.ok(fields.includes(k), `${p} 缺少 ${k}`);
+    }
+  });
+
+  it('CHAT_REF_* 上限常量两侧一致（REQ-20261009-002）', () => {
+    for (const name of ['CHAT_REF_MAX_COUNT', 'CHAT_REF_TEXT_MAX', 'CHAT_REF_TOTAL_MAX']) {
+      const b = extractConstNumber(read(BACK), name);
+      const f = extractConstNumber(read(FRONT), name);
+      assert.equal(f, b, `${name} 两侧不一致（front=${f} back=${b}）`);
     }
   });
 });
