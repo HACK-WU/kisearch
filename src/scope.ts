@@ -32,6 +32,7 @@ import {
 } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { removeScopeCollection } from './lib/scope-collection.js';
+import { getRelationsCacheIdentity, loadCacheShape, onScopeRelationsInvalidated } from './lib/group-cache.js';
 
 // ─── KB 目录辅助 ───
 
@@ -78,37 +79,56 @@ interface ScopeDocCounts { wikiCount: number; ftsOnlyDocCount: number; ftsDocCou
 const EMPTY_SCOPE_DOC_COUNTS: ScopeDocCounts = { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
 
 /**
- * scope 文档计数缓存（S0-3 前置，REQ-20260930-002）：
- * relations-cache 的 mtime+size 身份戳失效（与 mcp-http-api docListCache、relation-map 同模式），
+ * scope 文档计数缓存（S0-3 前置，REQ-20260930-002；批次 2 R6 身份升级）：
+ * 身份戳改布局感知三元组（新布局 = manifest mtime/size/revision，旧布局 = 旧文件
+ * mtime/size + revision=-1），任何写路径（含分片写 bump）变化即失效。
  * daemon 内重复 ki_scope_list / Web Dashboard 刷新不再逐 scope 全量 parse 关系缓存。
  * 仅进程内缓存、不落盘：ki_scope_list 走只读队列，落盘会在读路径引入与 import 的
  * 写竞争，且磁盘缓存格式属批次 2（per-Group 拆分 manifest）的职责——阶段 0 不为
  * JSON 路径新增长效机制。
  */
-const scopeDocCountCache = new Map<string, { mtimeMs: number; size: number; counts: ScopeDocCounts }>();
+const scopeDocCountCache = new Map<string, { mtimeMs: number; size: number; revision: number; counts: ScopeDocCounts }>();
+
+// 批次 2（D3）写后主动失效：写路径落盘即丢弃本 scope 计数缓存（跨进程由身份三元组兜底）
+onScopeRelationsInvalidated((scope) => {
+  scopeDocCountCache.delete(getRelationsCachePath(scope));
+});
 
 function countScopeDocs(scope: string): ScopeDocCounts {
+  // 布局感知身份（R6）：新布局 manifest / 旧布局单文件 / 均无 = null
+  const identity = getRelationsCacheIdentity(scope);
   const cachePath = getRelationsCachePath(scope);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(cachePath);
-  } catch {
-    // 文件不存在/不可访问：清缓存并按 0 计（与旧 existsSync 语义一致）
+  if (!identity) {
+    // 两布局均无数据：清缓存并按 0 计（与旧 existsSync 语义一致）
     scopeDocCountCache.delete(cachePath);
     return EMPTY_SCOPE_DOC_COUNTS;
   }
   const cached = scopeDocCountCache.get(cachePath);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+  if (
+    cached
+    && cached.mtimeMs === identity.mtimeMs
+    && cached.size === identity.size
+    && cached.revision === identity.revision
+  ) {
     return cached.counts;
   }
-  const counts = computeScopeDocCounts(cachePath);
-  scopeDocCountCache.set(cachePath, { mtimeMs: stat.mtimeMs, size: stat.size, counts });
+  const counts = computeScopeDocCounts(scope);
+  scopeDocCountCache.set(cachePath, { ...identity, counts });
   return counts;
 }
 
-function computeScopeDocCounts(cachePath: string): ScopeDocCounts {
-  try {
-    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
+/**
+ * 计算 scope 文档计数（**不做静默降级**）。
+ *
+ * 第二轮审查 P2：原实现整体 catch → 返回 0 计数，损坏与"空库"不可区分。
+ * 现改为抛错，由调用方决定可见性（`executeScopeListLocal` 逐 scope 兜底并告警，
+ * 避免单个损坏 scope 让整个 scope 列表不可用；`ScopeEntry` 契约不含错误字段，
+ * 故不在响应里加字段）。
+ */
+function computeScopeDocCounts(scope: string): ScopeDocCounts {
+  {
+    // 批次 2（R6）：双轨读（新布局分片聚合 / 旧布局旧文件）
+    const cache = loadCacheShape(scope) as {
       groups?: Record<string, { hot_relations?: Partial<Pick<Relation, 'memoryId' | 'memoryIds' | 'ftsIds' | 'ftsIndexComplete'>>[] }>;
     };
     let wikiCount = 0;
@@ -123,8 +143,6 @@ function computeScopeDocCounts(cachePath: string): ScopeDocCounts {
       }
     }
     return { wikiCount, ftsOnlyDocCount, ftsDocCount };
-  } catch {
-    return EMPTY_SCOPE_DOC_COUNTS; // 损坏 cache 视为 0，与既有 wikiCount 语义一致
   }
 }
 
@@ -162,7 +180,16 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
 
   const all = new Set<string>([...kbScopes, ...vectorScopes, ...Object.keys(config.scopes)]);
   const scopes: ScopeEntry[] = [...all].sort().map((s) => {
-    const docCounts = kbScopes.has(s) ? countScopeDocs(s) : { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
+    // 逐 scope 兜底：单个 scope 的 relations 元数据损坏不应让整个 scope 列表不可用，
+    // 但必须留下可见告警（不再静默当成 0 条）
+    let docCounts = { wikiCount: 0, ftsOnlyDocCount: 0, ftsDocCount: 0 };
+    if (kbScopes.has(s)) {
+      try {
+        docCounts = countScopeDocs(s);
+      } catch (err) {
+        console.warn(`⚠️ scope "${s}" 的 relations 元数据读取失败，计数暂按 0 计：${(err as Error).message}`);
+      }
+    }
     return {
       scope: s,
       kb: kbScopes.has(s),
@@ -314,7 +341,17 @@ program
   .description('列出所有 scope（两层并集，标注所在层）')
   .option('--json', '以 JSON 格式输出（脚本解析用）', false)
   .action(async (opts) => {
-    const result = await executeScopeList();
+    // 结构化错误处理：relations 元数据损坏（manifest 无法解析）时 executeScopeList 会
+    // fail-loud 抛错，裸抛会变成 unhandled rejection（堆栈 + 退出码 1，用户看不到出路）。
+    let result: Awaited<ReturnType<typeof executeScopeList>>;
+    try {
+      result = await executeScopeList();
+    } catch (err) {
+      console.error(JSON.stringify({ ok: false, error: (err as Error).message }));
+      await closeEngine();
+      process.exitCode = 1;
+      return;
+    }
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
       await closeEngine();

@@ -51,7 +51,11 @@ kisearch/
 ├── kb/                          # 运行时数据目录
 │   ├── {scope}/                 # 每个 scope 独立目录
 │   │   ├── group-index.json     # Group 树索引 + source 块
-│   │   ├── relations-cache.json # Relation 缓存（评分/分区，存储不设上限）
+│   │   ├── relations/           # Relation 缓存（v3 per-Group 分片布局）
+│   │   │   ├── manifest.json    # scope 级元数据 + revision（缓存身份锚）
+│   │   │   └── {groupPath}/     # 每个 Group 一份分片（与 KB 原文同构路径）
+│   │   │       └── cache.json   # 该组 Relation（评分/分区，含 memoryIds/sourcePath）
+│   │   ├── relations-cache.json.bak  # 旧布局单文件（迁移后保留，可手动回退）
 │   │   ├── scan-index.json      # 扫描状态账本（已废弃，批次 3 移除 scan 子命令）
 │   │   └── {group}/             # 本地 KB 原文
 │   │       └── index.json       # 模块说明原文
@@ -64,7 +68,8 @@ kisearch/
 | 文件 | 作用 | 备份优先级 |
 |------|------|-----------|
 | `group-index.json` | Group 树结构索引 + source 块 | **必须** |
-| `relations-cache.json` | Relation 缓存（含 memoryIds/sourcePath） | **必须** |
+| `relations/`（manifest + 各组分片） | Relation 缓存（含 memoryIds/sourcePath）；v3 分片布局，整目录随快照打包/还原 | **必须** |
+| `relations-cache.json.bak` | 旧布局单文件残留（迁移后保留）；回退材料，非运行必需 | 建议 |
 | `scan-index.json` | 扫描状态账本 | 建议 |
 | `{group}/index.json` | 本地 KB 原文 | 建议 |
 
@@ -112,7 +117,7 @@ tar -czf kisearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz kisearch/kb/
 
 **备份内容**：
 - 所有 scope 的 `group-index.json`
-- 所有 scope 的 `relations-cache.json`
+- 所有 scope 的 relations 元数据：`.relations/manifest.json` + `.relations/<groupPath>/cache.json`（迁移前为单文件 `relations-cache.json`）
 - 所有 scope 的 `scan-index.json`
 - 所有 scope 的本地 KB 原文
 
@@ -207,9 +212,10 @@ ki import --scope {scope} --source /path/to/wiki --group wiki
 ki restore {scope} --from-snapshot --yes
 ```
 
-### 场景 2：relations-cache.json 损坏
+### 场景 2：relations 元数据损坏
 
-**症状**：Relation 查询失败，报 JSON 解析错误
+**症状**：Relation 查询失败，报 JSON 解析错误（新布局下为 `.relations/<groupPath>/cache.json`
+或 `.relations/manifest.json` 损坏；旧布局为 `relations-cache.json` 损坏）
 
 **恢复步骤**：
 ```bash

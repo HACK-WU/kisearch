@@ -22,6 +22,7 @@ import {
   type GroupIndex,
 } from './lib/scope.js';
 import { generateMarkdown } from './lib/markdown-gen.js';
+import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './lib/group-cache.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable } from './lib/preflight.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -143,10 +144,24 @@ interface RelationsCache {
 }
 
 function readRelationsCache(scope: string): RelationsCache {
+  // 批次 2（R3）：双轨读——新布局走分片聚合；仅旧布局存在读旧单文件。
+  const all = readAllGroupCaches(scope);
+  if (all.size > 0) {
+    const groups: Record<string, { hot_relations: RelationEntry[] }> = {};
+    for (const [groupPath, data] of all) {
+      groups[groupPath] = { hot_relations: data.hot_relations as unknown as RelationEntry[] };
+    }
+    return { version: 1, scope, groups };
+  }
   const cachePath = getRelationsCachePath(scope);
+  // 批次 2 审查 P2：新布局已初始化但 0 组是合法空库（组被删空/模板 scope 迁移后），
+  // 原实现会误报"未导入"。仅两布局皆无数据才视为未初始化。
+  if (hasShardedLayout(scope)) {
+    return { version: 1, scope, groups: {} };
+  }
   if (!fs.existsSync(cachePath)) {
     fail(
-      `relations-cache.json 不存在：${cachePath}\n请先执行 import 导入数据`
+      `relations 元数据不存在（${getRelationsManifestPath(scope)} / ${cachePath}）\n请先执行 import 导入数据`
     );
   }
 

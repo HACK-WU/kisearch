@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { writeJson, readJson, readGroupIndex } from './lib/store.js';
 import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
+import { hasShardedLayout, listGroupPaths, loadGroupCache, deleteGroupCache, deleteGroupCacheBatch, buildGroupMatchContext } from './lib/group-cache.js';
 import type { GroupIndex } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
@@ -93,8 +94,8 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
 
     const indexPath = getGroupIndexPath(scope);
-    const cachePath = getRelationsCachePath(scope);
-    const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
+    // 批次 2（W9）：resolveGroupPath 上下文改轻量键枚举（只读，不触发任何写）
+    const groupsData = buildGroupMatchContext(listGroupPaths(scope));
 
     if (!name) return { ok: false, error: 'create 需要 name 参数' };
     if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
@@ -206,9 +207,12 @@ async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): P
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
 
     const indexPath = getGroupIndexPath(scope);
+    // 批次 2（W9）：双轨读——新布局键枚举 + 按需读级联组计数（O(级联)，不聚合全库 relation）
     const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<{ groups?: Record<string, { hot_relations?: unknown[] }> }>(cachePath);
-    const groupsData = (cache?.groups as Record<string, unknown>) || {};
+    const sharded = hasShardedLayout(scope);
+    const legacyCache = sharded ? null : readJson<{ groups?: Record<string, { hot_relations?: unknown[] }> }>(cachePath);
+    const groupKeys = sharded ? listGroupPaths(scope) : Object.keys(legacyCache?.groups ?? {});
+    const groupsData = buildGroupMatchContext(groupKeys);
 
     const parentPath = (parent || '').replace(/^\/+|\/+$/g, '');
     let container = findContainer(data.groups, parentPath);
@@ -252,14 +256,15 @@ async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): P
       };
     }
 
-    // 检查 relations：cache 中本节点及子路径下不能有任何 relation
+    // 检查 relations：本节点及子路径下不能有任何 relation（批次 2：双轨计数）
     const prefix = fullPath + '/';
-    const relatedKeys = Object.keys(cache?.groups || {}).filter(
+    const relatedKeys = groupKeys.filter(
       (k) => k === fullPath || k.startsWith(prefix),
     );
-    const relationCount = relatedKeys.reduce(
-      (n, k) => n + (cache?.groups?.[k]?.hot_relations?.length || 0), 0,
-    );
+    const relationCount = relatedKeys.reduce((n, k) => {
+      if (sharded) return n + (loadGroupCache(scope, k)?.hot_relations.length || 0);
+      return n + (legacyCache?.groups?.[k]?.hot_relations?.length || 0);
+    }, 0);
     if (relationCount > 0) {
       return {
         ok: false,
@@ -297,9 +302,16 @@ async function executeManageDeleteEmptyLocal(params: ManageDeleteEmptyParams): P
     }
 
     // 顺带清理 cache 中无 relation 的空壳 key（上面已确认 relationCount === 0）
-    if (cache?.groups && relatedKeys.length > 0) {
-      for (const k of relatedKeys) delete cache.groups[k];
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    if (relatedKeys.length > 0) {
+      if (sharded) {
+        // 新布局：批量删分片（幂等；目录不存在时 no-op）。
+        // 第二轮审查 P2：原逐组调用会 N 次 bump manifest + N 次失效广播，
+        // 违反「批内共享一次 bump」（batch 版本共享一次）
+        deleteGroupCacheBatch(scope, relatedKeys);
+      } else if (legacyCache?.groups) {
+        for (const k of relatedKeys) delete legacyCache.groups[k];
+        writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
+      }
     }
 
     return { ok: true, scope, path: fullPath, ...(hint ? { hint } : {}) };
@@ -339,8 +351,8 @@ async function executeManageDeleteLocal(params: {
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
 
     const indexPath = getGroupIndexPath(resolvedScope);
-    const cachePath = getRelationsCachePath(resolvedScope);
-    const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
+    // 批次 2（W9）：resolveGroupPath 上下文改轻量键枚举（占位值须为真值对象，见 buildGroupMatchContext）
+    const groupsData = buildGroupMatchContext(listGroupPaths(resolvedScope));
     let parentPath = (params.parent || '').replace(/^\/+|\/+$/g, '');
     let container = findContainer(data.groups, parentPath);
     let hint: string | undefined;
@@ -439,8 +451,10 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
     errors: [],
   };
 
+  // 批次 2（W9）：双轨读——新布局键枚举 + 仅读级联组（O(级联)）
   const cachePath = getRelationsCachePath(scope);
-  const cache = readJson<{
+  const sharded = hasShardedLayout(scope);
+  const legacyCache = sharded ? null : readJson<{
     version: number;
     scope: string;
     groups: Record<string, {
@@ -448,24 +462,27 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
       keywords: string[];
     }>;
   }>(cachePath);
-
-  if (!cache || !cache.groups) {
+  if (!sharded && (!legacyCache || !legacyCache.groups)) {
     return result;
   }
 
   // 前缀匹配：groupPath 本身 + 所有子 Group（如 "工具库" 匹配 "工具库/Redis"、"工具库/加密与哈希" 等）
   const prefix = groupPath + '/';
+  const allKeys = sharded ? listGroupPaths(scope) : Object.keys(legacyCache!.groups);
   const keysToDelete: string[] = [];
-  for (const key of Object.keys(cache.groups)) {
+  for (const key of allKeys) {
     if (key === groupPath || key.startsWith(prefix)) {
       keysToDelete.push(key);
     }
   }
+  if (keysToDelete.length === 0) return result;
 
   // 收集所有 memoryIds，一次批量 vectorDelete；无向量 id 的 relation 计入 memSkipped
   const idsToDelete = new Set<string>();
   for (const key of keysToDelete) {
-    const groupData = cache.groups[key];
+    const groupData = sharded
+      ? loadGroupCache(scope, key)
+      : (legacyCache!.groups[key] as { hot_relations?: Array<{ text: string; memoryId?: string }> } | undefined);
     if (!groupData?.hot_relations) continue;
     for (const rel of groupData.hot_relations) {
       const relationIds = Array.isArray((rel as { memoryIds?: unknown }).memoryIds)
@@ -513,15 +530,21 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
     }
   }
 
-  // 从 relations-cache 中删除所有匹配的 group key
-  for (const key of keysToDelete) {
-    delete cache.groups[key];
-    result.cacheGroupsRemoved.push(key);
+  // 从 relations 元数据中删除所有匹配的 group key（批次 2：双轨删除）
+  if (sharded) {
+    // 新布局：deleteGroupCache(resolvedGroup) 目录递归一次覆盖全部前缀键（幂等）
+    deleteGroupCache(scope, groupPath);
+    for (const key of keysToDelete) result.cacheGroupsRemoved.push(key);
+  } else {
+    for (const key of keysToDelete) {
+      delete legacyCache!.groups[key];
+      result.cacheGroupsRemoved.push(key);
+    }
   }
 
-  // 持久化 cache
-  if (keysToDelete.length > 0) {
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+  // 持久化 cache（旧布局整写；新布局已由 deleteGroupCache 落盘）
+  if (!sharded && keysToDelete.length > 0) {
+    writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
   }
 
   return result;
@@ -585,9 +608,15 @@ program
 
       const indexPath = getGroupIndexPath(resolvedScope);
 
-      // 读取 relations-cache 用于 resolveGroupPath
-      const cachePath = getRelationsCachePath(resolvedScope);
-      const groupsData = readJson<Record<string, unknown>>(cachePath)?.groups as Record<string, unknown> || {};
+      // resolveGroupPath 上下文：双轨（批次 2 审查 P1-5——原实现只读旧单文件，
+      // 新布局下 groupsData 恒空，create/delete 的路径自动补全静默失效）
+      const cliSharded = hasShardedLayout(resolvedScope);
+      const cliLegacyCache = cliSharded
+        ? null
+        : readJson<{ groups?: Record<string, unknown> }>(getRelationsCachePath(resolvedScope));
+      const groupsData = buildGroupMatchContext(
+        cliSharded ? listGroupPaths(resolvedScope) : Object.keys(cliLegacyCache?.groups ?? {}),
+      );
 
       switch (action) {
         // ─── 创建节点 ───

@@ -808,4 +808,39 @@ describe('ki_edit_relation', () => {
     assert.equal(relationIndexMode({ ...mixed, ftsIndexComplete: undefined }), 'dense',
       'FTS 完整性未知且有 dense 时按 dense，避免把向量文档误降级成全文');
   });
+
+  it('新布局（分片）scope 可编辑：readLiveRelation 必须布局感知（审查 P0-1）', async () => {
+    // 回归背景：readLiveRelation 原实现直读旧单文件；惰性迁移改名 .bak 后恒抛
+    // 「Relation 不存在」，导致 ki_edit_relation / Web 在线编辑 / 发布 finish 全链路失效。
+    // 既有用例全部以旧布局种子运行，故未能拦截。
+    const gc = await import('../src/lib/group-cache.js');
+    const scope = 'edit_sharded';
+    seed(scope, 'ShardedDoc', 'line1\nline2', 'fts');
+    // 触发惰性迁移（等价于任一写路径首次写该 scope）
+    const migrated = gc.migrateLegacyRelationsCache(scope);
+    assert.equal(migrated, 1, '前置：旧布局已迁移为分片');
+    assert.ok(gc.hasShardedLayout(scope), '前置：新布局已就位');
+    assert.ok(!fs.existsSync(scopePath.getRelationsCachePath(scope)), '前置：旧单文件已改名 .bak');
+
+    const created = await edit.executeEditRelationLocal({
+      action: 'edit', scope, group: 'Docs', relation: 'ShardedDoc',
+      expectedRevision: draftModule.contentRevision('line1\nline2'),
+      edits: [{ start_line: 2, end_line: 2, new_text: 'line2-edited' }],
+    });
+    assert.equal(created.ok, true, `新布局必须可编辑：${JSON.stringify(created)}`);
+    assert.equal(created.editsApplied, 1);
+
+    // 发布路径同样经过 readLiveRelation（finish → runFinish 内的多处调用）
+    await edit.executeEditRelationLocal({
+      action: 'finish', scope, editId: created.editId as string,
+      expectedRevision: created.revision as string, requestId: 'sharded-publish',
+    });
+    const published = await waitForStatus(scope, created.editId as string, 'published');
+    assert.equal(published.status, 'published', '新布局下发布必须能跑完');
+
+    const kb = store.readJson<Record<string, string>>(scopePath.getLocalKbDir(scope, 'Docs'))!;
+    assert.equal(kb.ShardedDoc, 'line1\nline2-edited', '正文已落 KB');
+    assert.equal(gc.loadGroupCache(scope, 'Docs')?.hot_relations.find((r) => r.text === 'ShardedDoc')
+      ?.ftsIndexComplete, true, '元数据落分片');
+  });
 });

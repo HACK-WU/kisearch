@@ -17,6 +17,7 @@ import path from 'path';
 import os from 'os';
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
 import { getKbDir, getLocalKbDir, getRelationsCachePath } from '../src/lib/scope.js';
+import { loadCacheShape } from '../src/lib/group-cache.js';
 import { generateDocId } from '../src/lib/vector-client.js';
 import { isFtsOnlyIndexedRelation } from '../src/lib/scoring.js';
 
@@ -229,7 +230,7 @@ describe('import 增量向量更新', () => {
     const updated = mkSource({ 'same.md': '# 原文\n\n新版本。' });
 
     const first = await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
-    const oldRelationCache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const oldRelationCache = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> };
     const oldRelation = oldRelationCache.groups.TestWiki.hot_relations.find((relation) => relation.text === 'same');
     assert.ok(oldRelation?.memoryIds?.length);
     const oldLocalText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
@@ -241,7 +242,7 @@ describe('import 增量向量更新', () => {
       /均未完成向量化/,
     );
 
-    const afterCache = readJsonFile<typeof oldRelationCache>(getRelationsCachePath(scope));
+    const afterCache = loadCacheShape(scope) as typeof oldRelationCache;
     const afterRelation = afterCache.groups.TestWiki.hot_relations.find((relation) => relation.text === 'same');
     assert.deepEqual(afterRelation?.memoryIds, oldRelation?.memoryIds);
     assert.equal(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, oldLocalText);
@@ -264,7 +265,7 @@ describe('import 增量向量更新', () => {
       'later.md': '# 未处理文档\n\n不得继续向量化。',
     });
     await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
-    const beforeCache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const beforeCache = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> };
     const oldRelation = beforeCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
     const oldIds = [...(oldRelation?.memoryIds ?? [])];
     const oldText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
@@ -297,7 +298,7 @@ describe('import 增量向量更新', () => {
       assert.equal(afterText.same, oldText, '覆盖文档恢复为导入前原文');
       assert.equal(afterText.new, undefined, '新文件原文被清理');
       assert.equal(afterText.later, undefined, '未处理文件原文被清理');
-      const afterCache = readJsonFile<typeof beforeCache>(getRelationsCachePath(scope));
+      const afterCache = loadCacheShape(scope) as typeof beforeCache;
       const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
       assert.deepEqual(afterRelation?.memoryIds, oldIds, '旧 relation 与向量 ID 保持可用');
       assert.equal(afterCache.groups.TestWiki.hot_relations.some((item) => item.text === 'new' || item.text === 'later'), false);
@@ -319,7 +320,7 @@ describe('import 增量向量更新', () => {
     const updated = mkSource({ 'same.md': '# 文档\n\n新的 dense 版本。' });
     const first = await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: false });
     assert.equal(first.ok, true);
-    const beforeCache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const beforeCache = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const oldRelation = beforeCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
     const oldFtsIds = [...(oldRelation?.ftsIds ?? [])];
     const oldText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same;
@@ -345,7 +346,7 @@ describe('import 增量向量更新', () => {
       assert.ok(pathStoreCalls > 0, '关系/路径阶段确实触发了系统性持久化故障');
       assert.deepEqual(ftsDeleteCalls, [], '路径阶段未完成前不得清理旧 FTS ID');
       assert.equal(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, oldText);
-      const afterCache = readJsonFile<typeof beforeCache>(getRelationsCachePath(scope));
+      const afterCache = loadCacheShape(scope) as typeof beforeCache;
       const afterRelation = afterCache.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
       assert.deepEqual(afterRelation?.ftsIds, oldFtsIds);
       assert.equal(afterRelation?.ftsIndexComplete, true);
@@ -396,7 +397,7 @@ describe('import 增量向量更新', () => {
     const src = mkSource({ 'switch.md': '# 切换文档\n\n先全文索引，再写入 dense。' });
     const ftsImport = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false });
     assert.equal(ftsImport.ok, true);
-    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const before = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const beforeRelation = before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch');
     assert.equal(beforeRelation?.ftsIndexComplete, true);
     assert.ok(beforeRelation?.ftsIds?.length);
@@ -405,7 +406,7 @@ describe('import 增量向量更新', () => {
 
     const denseImport = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: true });
     assert.equal(denseImport.ok, true);
-    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const afterRelation = after.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch');
     assert.ok(afterRelation?.memoryIds?.length);
     assert.deepEqual(afterRelation?.ftsIds, [], 'dense 切换后旧 FTS-only ID 应清空');
@@ -423,14 +424,14 @@ describe('import 增量向量更新', () => {
     const updated = mkSource({ 'switch.md': '# 切换文档\n\n新 FTS 正文。' });
     const denseImport = await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
     assert.equal(denseImport.ok, true);
-    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const before = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> };
     const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch')!.memoryIds!];
     vectorDeleteCalls = [];
 
     const ftsImport = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
     assert.equal(ftsImport.ok, true);
     assert.ok(vectorDeleteCalls.some((call) => oldIds.every((id) => call.ids.includes(id))), 'FTS 完整写入后应清理旧 dense 内容 ID');
-    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'switch');
     assert.deepEqual(relation?.memoryIds, []);
     assert.equal(relation?.memoryId, undefined);
@@ -445,13 +446,13 @@ describe('import 增量向量更新', () => {
     const original = mkSource({ 'switch.md': '# 切换文档\n\n旧 dense 正文。' });
     const updated = mkSource({ 'switch.md': '# 切换文档\n\n新 FTS 正文。' });
     await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: true });
-    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const before = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[] }[] }> };
     const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'switch')!.memoryIds!];
     vectorDeleteFailureIds = new Set(oldIds);
 
     const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
     assert.equal(result.ok, true);
-    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'switch');
     assert.deepEqual(relation?.memoryIds, oldIds, '未删除的 dense IDs 必须保留以便后续清理');
     assert.equal(relation?.ftsIndexComplete, true, 'FTS 内容自身完整，但混合索引不应被状态 helper 误识别为 FTS-only');
@@ -466,13 +467,13 @@ describe('import 增量向量更新', () => {
     const original = mkSource({ 'same.md': '# 文档\n\n旧 FTS 内容。' });
     const updated = mkSource({ 'same.md': '# 文档\n\n替换后的 FTS 内容。' });
     await handleDirectImport({ scope, sourceDir: original, group: 'TestWiki', vector: false });
-    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[] }[] }> }>(getRelationsCachePath(scope));
+    const before = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[] }[] }> };
     const oldIds = [...before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'same')!.ftsIds!];
     ftsDeleteFailureIds = new Set(oldIds);
 
     const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: false });
     assert.equal(result.ok, true);
-    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const relation = after.groups.TestWiki.hot_relations.find((item) => item.text === 'same');
     assert.equal(relation?.ftsIndexComplete, false);
     assert.ok(oldIds.every((id) => relation?.ftsIds?.includes(id)), '删除失败的旧 FTS IDs 必须继续可追踪');
@@ -488,7 +489,7 @@ describe('import 增量向量更新', () => {
     ftsWriteMode = 'partial';
     const result = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false, tags: 'api' });
     assert.equal(result.ok, true);
-    const cache = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const cache = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const relation = cache.groups.TestWiki.hot_relations.find((item) => item.text === 'partial');
     assert.equal(relation?.ftsIndexComplete, false);
     assert.equal(relation?.ftsIds?.length, 1, '部分写入成功的 ID 仍应登记，供后续清理/重建');
@@ -525,7 +526,8 @@ describe('import 增量向量更新', () => {
 
       const result = await rebuildFtsOnlyScope(scope, 'TestWiki');
       assert.equal(result.errors.length, 1);
-      const updated = readJsonFile<any>(cachePath).groups.TestWiki.hot_relations[0];
+      // 批次 2：rebuild 落盘改分片（触达组），断言布局无关读
+      const updated = loadCacheShape(scope).groups.TestWiki.hot_relations[0];
       assert.equal(updated.ftsIndexComplete, false);
       assert.ok(updated.ftsIds.includes('old-rebuild-fts-id'));
       assert.ok(updated.ftsIds.some((id: string) => id !== 'old-rebuild-fts-id'));
@@ -557,7 +559,7 @@ describe('import 增量向量更新', () => {
       }),
       /导入已取消/,
     );
-    const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIndexComplete?: boolean }[] }> };
     assert.equal(after.groups.TestWiki.hot_relations.find((item) => item.text === 'same')?.ftsIndexComplete, true);
     assert.match(readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).same, /旧内容/);
     fs.rmSync(original, { recursive: true, force: true });
@@ -569,7 +571,7 @@ describe('import 增量向量更新', () => {
     const src = mkSource({ 'rollback.md': '# 原文\n\n旧 FTS 正文' });
     const original = await handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: false });
     assert.equal(original.ok, true);
-    const before = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+    const before = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
     const beforeRelation = before.groups.TestWiki.hot_relations.find((relation) => relation.text === 'rollback');
     assert.equal(beforeRelation?.ftsIndexComplete, true);
     const beforeLocalText = readJsonFile<Record<string, string>>(getLocalKbDir(scope, 'TestWiki')).rollback;
@@ -580,7 +582,7 @@ describe('import 增量向量更新', () => {
         () => handleDirectImport({ scope, sourceDir: src, group: 'TestWiki', vector: true }),
         /均未完成向量化/,
       );
-      const after = readJsonFile<{ groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> }>(getRelationsCachePath(scope));
+      const after = loadCacheShape(scope) as { groups: Record<string, { hot_relations: { text: string; ftsIds?: string[]; ftsIndexComplete?: boolean }[] }> };
       const afterRelation = after.groups.TestWiki.hot_relations.find((relation) => relation.text === 'rollback');
       assert.equal(afterRelation?.ftsIndexComplete, true);
       assert.deepEqual(afterRelation?.ftsIds, beforeRelation?.ftsIds, '回滚时旧 FTS IDs 必须不变');

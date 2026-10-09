@@ -317,6 +317,44 @@ describe('/api/doc/list', () => {
     assert.equal(allSecond.docs.length, 5);
     assert.equal(allSecond.truncated, false);
   });
+
+  it('批次 2 R7：新布局（relations/ 分片，无旧单文件）doc/list 正常——旧实现恒空', async () => {
+    const { writeGroupCacheBatch } = await import('../src/lib/group-cache.js');
+    writeGroupCacheBatch('doc-sharded', new Map([
+      ['g1', {
+        version: 1, scope: 'doc-sharded',
+        hot_relations: [
+          { id: 'r-甲', text: '分片文档甲', score: 1, sourcePath: 'docs/甲.md', memoryIds: ['m-1'] },
+          { id: 'r-乙', text: '分片文档乙', score: 1, ftsIds: ['f-1'], ftsIndexComplete: true },
+        ],
+        keywords: [],
+      }],
+      ['g2/sub', {
+        version: 1, scope: 'doc-sharded',
+        hot_relations: [{ id: 'r-丙', text: '深层文档丙', score: 1, memoryIds: ['m-3'], tags: ['t1'] }],
+        keywords: [],
+      }],
+    ]));
+
+    // 新布局下旧单文件不存在（writeGroupCacheBatch 已把 '{}' 旧壳迁移为 .bak）
+    // ——旧 buildDocList 锚定旧文件恒返回空列表（Browse 全空），修复后正常聚合
+    const list = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-sharded`)).json();
+    assert.equal(list.ok, true);
+    assert.equal(list.total, 3, '新布局 doc/list 不再恒空');
+    const byName = new Set(list.docs.map((d: { name: string }) => d.name));
+    assert.ok(byName.has('分片文档甲'));
+    assert.ok(byName.has('深层文档丙'));
+    const jia = list.docs.find((d: { name: string }) => d.name === '分片文档甲');
+    assert.equal(jia.group, 'g1');
+    assert.equal(jia.vectorized, true);
+    assert.equal(jia.fullTextIndexed, false);
+
+    // group 精确过滤 + tags 聚合路径
+    const g2 = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-sharded&group=g2/sub`)).json();
+    assert.equal(g2.total, 1);
+    assert.equal(g2.docs[0].name, '深层文档丙');
+    assert.ok((g2.tags as string[]).includes('t1'), '新布局 tags 聚合同步正常');
+  });
 });
 
 describe('/api/import/upload', () => {

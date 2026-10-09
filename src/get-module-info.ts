@@ -20,6 +20,7 @@ import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { hasShardedLayout, listGroupPaths, loadGroupCache, loadPartitionConfig, writeGroupCache, buildGroupMatchContext } from './lib/group-cache.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
@@ -95,15 +96,29 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     validateScope(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+    // 批次 2（R1，S0-5 核心收益点）：单文档读取改单组读——新布局只读目标组分片
+    //（树匹配用 listGroupPaths 轻量枚举键，不聚合全量 relation），评分回写只写该组。
+    // 旧布局保持整读整写（兼容期行为不变）。
+    const hasSharded = hasShardedLayout(scope);
+    let groupsContext: Record<string, unknown>;
+    let partitionConfig: PartitionConfig;
+    if (hasSharded) {
+      const keys = listGroupPaths(scope);
+      // 占位值须为真值对象（resolveGroupPath 用 truthy 判断；传 null 会让树/cache 不同步时
+      // 的“直接匹配”兜底分支失效——批次 2 审查 P1-2）
+      groupsContext = buildGroupMatchContext(keys);
+      partitionConfig = loadPartitionConfig(scope);
+    } else {
+      const cache = readJson<RelationsCache>(getRelationsCachePath(scope));
+      if (!cache) {
+        return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+      }
+      groupsContext = cache.groups;
+      partitionConfig = cache.partition_config || DEFAULT_PARTITION_CONFIG;
     }
 
     const groupIndex = readGroupIndex(scope);
-    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups, scope);
+    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, groupsContext, scope);
 
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到有效路径`, hint: resolved.hint };
@@ -113,7 +128,11 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     const hints: string[] = [];
     if (resolved.hint) hints.push(resolved.hint);
 
-    const groupData = cache.groups[resolvedGroup];
+    // R1：新布局按 resolvedGroup 精确读目标组分片；旧布局读整文件中该组（兼容）
+    // R1：按 resolvedGroup 精确读目标组（新布局=单组分片；旧布局=整文件中该组）
+    const groupData: GroupData | null = hasSharded
+      ? loadGroupCache(scope, resolvedGroup)
+      : (groupsContext[resolvedGroup] as GroupData | undefined) ?? null;
     if (!groupData) {
       return {
         ok: false,
@@ -171,12 +190,39 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     // 更新评分（recordUse）
     const now = Date.now();
     const updatedRel = recordUse(rel, now);
-    const config = cache!.partition_config || DEFAULT_PARTITION_CONFIG;
-    updatedRel.score = calculateScore(updatedRel.useCount, updatedRel.lastUsedTime, now, config.halfLifeHours);
+    updatedRel.score = calculateScore(updatedRel.useCount, updatedRel.lastUsedTime, now, partitionConfig.halfLifeHours);
 
     const relIdx = groupData.hot_relations.findIndex((r) => r.id === rel.id);
     groupData.hot_relations[relIdx] = updatedRel;
-    writeJson(cachePath, cache! as unknown as Record<string, unknown>);
+    // R1（S0-5 核心收益）：评分回写只写该组分片（三步曲：bump→WAL→失效）；
+    // 旧布局保持整文件回写（兼容期行为不变）。
+    //
+    // 第二轮审查 P2：布局在本函数 `await resolveGroupPath`（含向量兜底，窗口可达秒级）
+    // 期间可能被另一进程惰性迁移——按入口快照写会把评分回写进已改名 `.bak` 的旧文件，
+    // 此后无人读（静默丢失）。这里按**写入时刻**的布局重判。
+    const writeShard = (): void => {
+      writeGroupCache(scope, resolvedGroup, {
+        version: 1,
+        scope,
+        hot_relations: groupData.hot_relations,
+        keywords: groupData.keywords ?? [],
+        updatedAt: null,
+      });
+    };
+    if (hasShardedLayout(scope)) {
+      writeShard();
+    } else {
+      // 旧布局：读改写完整 cache（partition_config 等顶层字段不可丢）
+      const legacyPath = getRelationsCachePath(scope);
+      const fullCache = readJson<RelationsCache>(legacyPath);
+      if (fullCache) {
+        fullCache.groups[resolvedGroup] = groupData;
+        writeJson(legacyPath, fullCache as unknown as Record<string, unknown>);
+      } else {
+        // 旧文件已在本轮 await 期间被迁移（改名 .bak）→ 补写分片
+        writeShard();
+      }
+    }
 
     return {
       ok: true,
@@ -268,21 +314,34 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     validateScope(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+    // 批次 2（R1 批量）：单组读（同单条模式——批量本就限定同一 Group）
+    const batchSharded = hasShardedLayout(scope);
+    let batchGroupsContext: Record<string, unknown>;
+    let batchPartitionConfig: PartitionConfig;
+    if (batchSharded) {
+      const keys = listGroupPaths(scope);
+      batchGroupsContext = buildGroupMatchContext(keys);
+      batchPartitionConfig = loadPartitionConfig(scope);
+    } else {
+      const cache = readJson<RelationsCache>(getRelationsCachePath(scope));
+      if (!cache) {
+        return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+      }
+      batchGroupsContext = cache.groups;
+      batchPartitionConfig = cache.partition_config || DEFAULT_PARTITION_CONFIG;
     }
 
     // Group 路径解析：批量只做一次（省 N-1 次向量语义兜底调用）
     const groupIndex = readGroupIndex(scope);
-    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups, scope);
+    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, batchGroupsContext, scope);
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到有效路径`, hint: resolved.hint };
     }
     const resolvedGroup = resolved.resolvedPath;
 
-    const groupData = cache.groups[resolvedGroup];
+    const groupData: GroupData | null = batchSharded
+      ? loadGroupCache(scope, resolvedGroup)
+      : (batchGroupsContext[resolvedGroup] as GroupData | undefined) ?? null;
     if (!groupData) {
       return {
         ok: false,
@@ -307,7 +366,7 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     const now = Date.now();
-    const config = cache.partition_config || DEFAULT_PARTITION_CONFIG;
+    const config = batchPartitionConfig;
     const results: BatchRelationResult[] = [];
     let scoreUpdated = false;
 
@@ -356,7 +415,21 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     if (scoreUpdated) {
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+      if (batchSharded) {
+        writeGroupCache(scope, resolvedGroup, {
+          version: 1,
+          scope,
+          hot_relations: groupData.hot_relations,
+          keywords: groupData.keywords ?? [],
+          updatedAt: null,
+        });
+      } else {
+        const fullCache = readJson<RelationsCache>(getRelationsCachePath(scope));
+        if (fullCache) {
+          fullCache.groups[resolvedGroup] = groupData;
+          writeJson(getRelationsCachePath(scope), fullCache as unknown as Record<string, unknown>);
+        }
+      }
     }
 
     const failed = results.filter((r) => !r.ok).length;

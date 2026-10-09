@@ -212,7 +212,7 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
     }
   });
 
-  it('回环正常启动 + -d → exit 0 且服务真实就绪（探测不误杀）', { skip: !process.env.SILICONFLOW_API_KEY && '需真实 embedding 密钥（预检含网络探测）' }, async () => {
+  it('回环正常启动 + -d → exit 0 且服务真实就绪（探测不误杀）', { skip: !(process.env.DASHSCOPE_API_KEY || process.env.SILICONFLOW_API_KEY) && '需真实 embedding 密钥（预检含网络探测）' }, async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dmn-ok-'));
     const port = randPort();
     try {
@@ -227,7 +227,7 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
           baseURL: 'https://api.siliconflow.cn/v1',
           model: 'Qwen/Qwen3-Embedding-8B',
           dimension: 4096,
-          apiKey: '${SILICONFLOW_API_KEY}',
+          apiKey: process.env.DASHSCOPE_API_KEY ? '${DASHSCOPE_API_KEY}' : '${SILICONFLOW_API_KEY}',
         },
         scopes: { default: {} },
       }));

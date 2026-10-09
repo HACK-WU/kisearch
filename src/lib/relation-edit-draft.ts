@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getKbDir } from './scope.js';
+import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
 import { readJson, writeJson } from './store.js';
 import type { FtsLocator } from './original-locator.js';
 
@@ -227,6 +228,11 @@ function pruneArchivedDrafts(scope: string): void {
 /** 活动草稿目录 mtime 快照；命中则复用上次结果，避免每次检索重解析全部草稿。 */
 const hiddenCache = new Map<string, { stamp: string; ids: Set<string> }>();
 
+// 批次 2（D3）写后主动失效：写路径落盘即丢弃隐藏集缓存（跨进程由 stamp 里的身份三元组兜底）
+onScopeRelationsInvalidated((scope) => {
+  hiddenCache.delete(scope);
+});
+
 /** 目录内活动草稿文件（排除 archive）的名称排序快照；空表示无活动草稿。 */
 function activeDraftFiles(dir: string): string[] {
   let names: string[];
@@ -274,16 +280,14 @@ export function hiddenEditIndexIds(scope: string): Set<string> {
     } catch { /* 损坏草稿由 view/finish fail-loud，搜索不因其整体失败 */ }
   }
   try {
-    const cache = readJson<{ groups?: Record<string, { hot_relations?: Array<{ memoryId?: string; memoryIds?: string[]; ftsIds?: string[] }> }> }>(
-      path.join(getKbDir(scope), 'relations-cache.json'),
-    );
-    for (const group of Object.values(cache?.groups ?? {})) {
+    // 批次 2（R9）：双轨全量读（新布局分片聚合 / 旧布局旧文件）
+    for (const group of readAllGroupCaches(scope).values()) {
       for (const relation of group.hot_relations ?? []) {
         for (const id of relation.memoryIds?.length ? relation.memoryIds : relation.memoryId ? [relation.memoryId] : []) hidden.delete(id);
         for (const id of relation.ftsIds ?? []) hidden.delete(id);
       }
     }
-  } catch { /* 本地 cache 损坏由正式读链路报告，索引隐藏保持保守状态 */ }
+  } catch { /* 本地 relations 数据损坏由正式读链路报告，索引隐藏保持保守状态 */ }
   hiddenCache.set(scope, { stamp, ids: hidden });
   return new Set(hidden);
 }
@@ -318,12 +322,12 @@ export function activeDrafts(scope: string): ActiveDraftRef[] {
   return result;
 }
 
-/** relations-cache 的轻量身份（mtime + size）；缺失时返回 none，仍按草稿变化失效。 */
+/** relations 数据的轻量身份（批次 2 R9：布局感知三元组）；缺失时返回 none，仍按草稿变化失效。 */
 function relationsCacheIdentity(scope: string): string {
   try {
-    const stat = fs.statSync(path.join(getKbDir(scope), 'relations-cache.json'));
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch { return 'none'; }
+    const identity = getRelationsCacheIdentity(scope);
+    return identity ? `${identity.mtimeMs}:${identity.size}:${identity.revision}` : 'none';
+  } catch { return 'corrupt'; }
 }
 
 /** 活动草稿文件的最大 mtime；作为缓存失效依据（内容变更即变，删除由文件清单覆盖）。 */

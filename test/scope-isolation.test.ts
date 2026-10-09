@@ -129,7 +129,7 @@ describe('scope 物理隔离', () => {
   it('ki import 直导在不同 scope 下隔离', async (t) => {
     if (!hasTestEmbeddingKey) {
       // 向量化导入需要真实 embedding 密钥（测试配置未注入时不写 embedding 段，见 test-config.ts）
-      t.skip('未注入 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入隔离用例');
+      t.skip('未注入 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入隔离用例');
       return;
     }
     const sA = await mkScope('iso-scan-a');
@@ -143,17 +143,14 @@ describe('scope 物理隔离', () => {
     assert.strictEqual(rA.ok, true);
     assert.strictEqual(rA.stats.total, 1);
 
-    // scope B: 应无任何数据（initScope 会创建空 cache，groups 应为空）
-    const { readJson } = await import('../src/lib/store.js');
-    const { getRelationsCachePath } = await import('../src/lib/scope.js');
-    const rcB = readJson<any>(getRelationsCachePath(sB));
-    assert.ok(rcB !== null);
-    assert.strictEqual(Object.keys(rcB.groups || {}).length, 0, 'scope B 不应有任何 Group');
+    // scope B: 应无任何数据（initScope 会创建空 cache/分片，groups 应为空）
+    // 批次 2：断言改布局无关读原语（import 已写新布局分片）
+    const { readAllGroupCaches } = await import('../src/lib/group-cache.js');
+    assert.strictEqual(readAllGroupCaches(sB).size, 0, 'scope B 不应有任何 Group');
 
-    // scope A: relations-cache 已写入
-    const rcA = readJson<any>(getRelationsCachePath(sA));
-    assert.ok(rcA !== null);
-    assert.ok(rcA.groups['wiki'] !== undefined);
-    assert.strictEqual(rcA.groups['wiki'].hot_relations.length, 1);
+    // scope A: 元数据已写入
+    const rcA = readAllGroupCaches(sA);
+    assert.ok(rcA.get('wiki') !== undefined);
+    assert.strictEqual(rcA.get('wiki')!.hot_relations.length, 1);
   });
 });

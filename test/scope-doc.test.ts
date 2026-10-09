@@ -251,6 +251,39 @@ describe('B. scope —— list 并集 & 向量层降级（无 apiKey）', () => 
     const r2 = await executeScopeList();
     assert.equal(r2.scopes.find((s) => s.scope === 'dup-scope')!.wikiCount, 3, '同名 scope 换工作区后计数不得串台');
   });
+
+  it('批次 2 R6：新布局（relations/ 分片）计数正确 + bump revision 后计数刷新', async () => {
+    const { writeGroupCacheBatch, writeGroupCache } = await import('../src/lib/group-cache.js');
+    const { dataDir } = makeWorkspace({ scopesYaml: '  sharded-count: {}' });
+    makeKbScope(dataDir, 'sharded-count');
+    const rel = (n: string, fts?: boolean) => ({
+      id: `r-${n}`, text: n, score: 1,
+      ...(fts ? { ftsIds: [`f-${n}`], ftsIndexComplete: true } : { memoryIds: [`m-${n}`] }),
+    });
+
+    // 新布局：不写旧单文件，直接种分片
+    writeGroupCacheBatch('sharded-count', new Map([
+      ['g1', { version: 1, scope: 'sharded-count', hot_relations: [rel('a'), rel('b'), rel('f1', true)] as never, keywords: [] }],
+      ['g2', { version: 1, scope: 'sharded-count', hot_relations: [rel('f2', true)] as never, keywords: [] }],
+    ]));
+    const r1 = await executeScopeList();
+    const e1 = r1.scopes.find((s) => s.scope === 'sharded-count')!;
+    assert.equal(e1.kb, true, '新布局 scope 必须被 listAllScopes 识别（listGroupPaths 同族缺口回归）');
+    assert.equal(e1.wikiCount, 4, '新布局计数不再恒 0');
+    assert.equal(e1.ftsDocCount, 2);
+    assert.equal(e1.ftsOnlyDocCount, 2);
+
+    // 二次调用走缓存命中；随后 bump revision（写原语）→ 计数必须重算
+    await executeScopeList();
+    writeGroupCache('sharded-count', 'g1', {
+      version: 1, scope: 'sharded-count',
+      hot_relations: [rel('a'), rel('b'), rel('f1', true), rel('c')] as never,
+      keywords: [], updatedAt: null,
+    });
+    const r2 = await executeScopeList();
+    const e2 = r2.scopes.find((s) => s.scope === 'sharded-count')!;
+    assert.equal(e2.wikiCount, 5, 'revision bump 后计数不得停留在缓存旧值');
+  });
 });
 
 describe('B. scope —— delete 护栏', () => {

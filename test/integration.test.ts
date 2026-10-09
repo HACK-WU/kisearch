@@ -322,7 +322,7 @@ describe('导入路径', () => {
   it('ki import --source 直导完整链路', async (t) => {
     if (!hasTestEmbeddingKey) {
       // 向量化用例需要真实 embedding 密钥（测试配置未注入时不写 embedding 段，见 test-config.ts）
-      t.skip('未注入 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入链路');
+      t.skip('未注入 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入链路');
       return;
     }
     const scope = await makeScopeInit('integration-import');
@@ -344,11 +344,12 @@ describe('导入路径', () => {
     assert.ok(importResult.groups.includes('wiki'));
     assert.ok(importResult.groups.includes('wiki/监控'));
 
-    // 验证 relations-cache 已写入（方案 D：文件级 relation + memoryIds 多值）
-    const { readJson } = await import('../src/lib/store.js');
-    const { getRelationsCachePath } = await import('../src/lib/scope.js');
-    const cache = readJson<any>(getRelationsCachePath(scope))!;
-    const deployRel = cache.groups['wiki'].hot_relations.find((r: any) => r.text === '部署');
+    // 验证 relations 元数据已写入（方案 D：文件级 relation + memoryIds 多值）
+    // 批次 2：导入会做惰性迁移 → 必须按布局感知读取（旧单文件已被改名 .bak）
+    const { loadGroupCache } = await import('../src/lib/group-cache.js');
+    const groupData = loadGroupCache(scope, 'wiki');
+    assert.ok(groupData, 'wiki 组元数据应已写入（新布局分片）');
+    const deployRel = groupData!.hot_relations.find((r) => r.text === '部署');
     assert.ok(deployRel, '部署.md 应按文件级 relation（basename 去扩展名）命名');
     assert.strictEqual(deployRel.sourcePath, '部署.md');
     assert.strictEqual(deployRel.isImported, true);

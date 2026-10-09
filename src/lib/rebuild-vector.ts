@@ -26,6 +26,8 @@ import path from 'path';
 import { randomUUID } from 'node:crypto';
 import { loadConfig, getScopeDataDir, getScopeCleanConfig, runWithConfigSnapshot } from './config.js';
 import { getVectorMigrationMarkerPath, getVectorMigrationPaths } from './scope-collection.js';
+import type { Relation } from './scoring.js';
+import { hasShardedLayout, loadCacheShape, writeGroupCacheBatch, getRelationsRoot as getRelationsRootPath, type GroupCacheDoc } from './group-cache.js';
 import { buildGroupPathContent, buildRelationContent } from './path-vectorize.js';
 import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
@@ -127,10 +129,28 @@ export interface RebuildVectorOptions {
   }) => void;
 }
 
-/** relations-cache 的 groups 扁平结构（键 = 完整 groupPath） */
+/** 批次 2（R5）：rc 内存形状 → 分片批写 Map（全量组） */
+function shardedGroupsFromRc(scope: string, rc: { groups?: Record<string, CacheGroup> }): Map<string, GroupCacheDoc> {
+  const docs = new Map<string, GroupCacheDoc>();
+  for (const [groupPath, group] of Object.entries(rc.groups ?? {})) {
+    docs.set(groupPath, {
+      version: 1,
+      scope,
+      hot_relations: group.hot_relations ?? [],
+      keywords: [],
+      updatedAt: null,
+    });
+  }
+  return docs;
+}
+
+/**
+ * relations 元数据的 groups 扁平结构（键 = 完整 groupPath）。
+ * hot_relations 必须用 Relation（而非宽松结构体）：它与 GroupCacheDoc 的字段是同一份数据，
+ * 宽松类型会在分片批写处丢失字段契约（批次 2 审查中 tsc -p tsconfig.json 报 TS2322）。
+ */
 interface CacheGroup {
-  hot_relations?: { text: string; memoryId?: string | null; memoryIds?: string[]; tags?: string[];
-    ftsIds?: string[]; ftsLocators?: Array<{ ftsId: string; lineStart: number; lineEnd: number; sourcePath?: string; chunkIndex?: number }>; ftsIndexComplete?: boolean }[];
+  hot_relations?: Relation[];
   keywords?: string[];
 }
 
@@ -168,7 +188,7 @@ async function rollbackPendingVectorMigration(
   const expectedPaths: Record<string, string> = {
     backupPath,
     cacheBackupPath,
-    cachePath,
+    ...(marker.layout === 'sharded' ? {} : { cachePath }),
     liveCollectionPath,
     stageCollectionPath,
   };
@@ -196,7 +216,20 @@ async function rollbackPendingVectorMigration(
     throw new Error(`旧 Collection 与旧集合备份均不存在，拒绝自动回退：${markerPath}`);
   }
 
-  if (fs.existsSync(cacheBackupPath)) {
+  // 批次 2（R5）：分片布局的备份是目录（marker.layout='sharded'）——rename 回原位；
+  // 半写分片（批写中途崩溃）先删。旧布局保持 temp+rename 恢复。
+  const markerSharded = marker.layout === 'sharded';
+  if (markerSharded) {
+    const relationsRoot = getRelationsRootPath(scope);
+    if (fs.existsSync(relationsRoot)) {
+      fs.rmSync(relationsRoot, { recursive: true, force: true });
+    }
+    if (fs.existsSync(cacheBackupPath)) {
+      fs.renameSync(cacheBackupPath, relationsRoot);
+    } else if (hasOldCollectionBackup) {
+      throw new Error(`relations 分片备份缺失，拒绝自动回退：${cacheBackupPath}`);
+    }
+  } else if (fs.existsSync(cacheBackupPath)) {
     const cacheRestoreTemp = path.join(scopeDir, `.relations-cache-recovery-${migrationId}.tmp`);
     fs.copyFileSync(cacheBackupPath, cacheRestoreTemp, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(cacheRestoreTemp, 0o600);
@@ -606,8 +639,10 @@ async function rebuildScopeVectorsUnlocked(
   if (!fs.existsSync(scopeDir)) {
     return { ok: false, scope, partial, stats, errors: [{ type: 'scope', path: scopeDir, error: 'scope 数据目录不存在' }] };
   }
+  // 批次 2（R5）：布局感知——新布局（.relations/ 分片）或旧布局（单文件）任一存在即可
   const cachePath = path.join(scopeDir, 'relations-cache.json');
-  if (!fs.existsSync(cachePath)) {
+  const sharded = hasShardedLayout(scope);
+  if (!sharded && !fs.existsSync(cachePath)) {
     return {
       ok: false,
       scope,
@@ -631,8 +666,10 @@ async function rebuildScopeVectorsUnlocked(
     }
   }
 
-  // 1. 读取 relations-cache；--group 需存在（目录或 cache 任一侧命中）
-  const rc = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as { groups?: Record<string, CacheGroup> };
+  // 1. 读取 relations 元数据（批次 2：双轨）；--group 需存在（目录或 cache 任一侧命中）
+  const rc = (sharded
+    ? loadCacheShape(scope)
+    : JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as { groups?: Record<string, CacheGroup> }) as { groups?: Record<string, CacheGroup> } & Record<string, unknown>;
   const groups = rc.groups ?? {};
   if (groupFilter) {
     const groupAbs = path.join(scopeDir, ...groupFilter.split('/'));
@@ -904,20 +941,35 @@ async function rebuildScopeVectorsUnlocked(
       return { ok: false, scope, partial, stats, errors: [{ type: 'migration', path: scope, error: `暂存 Collection 维度校验失败：期望 ${embeddingDimension}，实际 ${stagedDimension}` }] };
     }
     // 先写好缓存临时文件；切换目录后只需原子 rename，失败时可恢复旧集合。
-    fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    // 批次 2（R5）：新布局无单文件 temp——分片元数据在 collection 切换成功后
+    // 批写（writeGroupCacheBatch 全量组），旧分片先整目录 rename 备份（O(1)），
+    // 失败/崩溃回退 = rename 回目录，与旧文件事务同构。
+    if (!sharded) {
+      fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    }
     await closeEngine(scope);
     fs.mkdirSync(path.dirname(backupPath), { recursive: true, mode: 0o700 });
     fs.chmodSync(path.dirname(backupPath), 0o700);
     fs.mkdirSync(path.dirname(pendingPath), { recursive: true, mode: 0o700 });
     fs.chmodSync(path.dirname(pendingPath), 0o700);
     try {
-      fs.writeFileSync(pendingPath, JSON.stringify({ scope, migrationId, backupPath, cacheBackupPath, cachePath, liveCollectionPath, stageCollectionPath }), { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync(pendingPath, JSON.stringify({ scope, migrationId, backupPath, cacheBackupPath, cachePath, liveCollectionPath, stageCollectionPath, ...(sharded ? { layout: 'sharded' } : {}) }), { flag: 'wx', mode: 0o600 });
       markerCreated = true;
-      fs.copyFileSync(cachePath, cacheBackupPath, fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(cacheBackupPath, 0o600);
+      if (sharded) {
+        // 分片备份：.relations/ 整目录 rename 到 cacheBackupPath（崩溃恢复锚点）
+        fs.renameSync(getRelationsRootPath(scope), cacheBackupPath);
+      } else {
+        fs.copyFileSync(cachePath, cacheBackupPath, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(cacheBackupPath, 0o600);
+      }
       fs.renameSync(liveCollectionPath, backupPath);
       fs.renameSync(stageCollectionPath, liveCollectionPath);
-      fs.renameSync(cacheTempPath, cachePath);
+      if (sharded) {
+        // 切换成功：重建分片（全量组批写；失败走 catch 回退——旧分片目录在备份位）
+        writeGroupCacheBatch(scope, shardedGroupsFromRc(scope, rc));
+      } else {
+        fs.renameSync(cacheTempPath, cachePath);
+      }
       cacheSwitched = true;
       migrationCommitted = true;
       // 到这里新维度集合与配套缓存已提交。FTS-only 清理属派生索引维护，
@@ -930,7 +982,15 @@ async function rebuildScopeVectorsUnlocked(
           if (fs.existsSync(liveCollectionPath)) fs.renameSync(liveCollectionPath, stageCollectionPath);
           fs.renameSync(backupPath, liveCollectionPath);
         }
-        if (cacheSwitched) {
+        if (sharded) {
+          // 分片回退：若批写已产生新分片目录则删半写，旧分片目录 rename 回原位
+          if (fs.existsSync(getRelationsRootPath(scope))) {
+            fs.rmSync(getRelationsRootPath(scope), { recursive: true, force: true });
+          }
+          if (fs.existsSync(cacheBackupPath)) {
+            fs.renameSync(cacheBackupPath, getRelationsRootPath(scope));
+          }
+        } else if (cacheSwitched) {
           fs.copyFileSync(cacheBackupPath, cacheTempPath);
           fs.renameSync(cacheTempPath, cachePath);
         }
@@ -973,7 +1033,10 @@ async function rebuildScopeVectorsUnlocked(
     }
   }
   // 迁移时上方已原子提交 memoryIds；FTS-only 清理后再更新缓存。
-  if (needsStaging) {
+  // 批次 2：新布局全量组批写（幂等重写收敛）；旧布局保持 temp+rename / 直写。
+  if (sharded) {
+    writeGroupCacheBatch(scope, shardedGroupsFromRc(scope, rc));
+  } else if (needsStaging) {
     fs.writeFileSync(cacheTempPath, JSON.stringify(rc, null, 2), { encoding: 'utf-8', mode: 0o600 });
     fs.renameSync(cacheTempPath, cachePath);
   } else {

@@ -23,6 +23,7 @@ let vectorClientModule: typeof import('../src/lib/vector-client.js');
 let syncModule: typeof import('../src/sync-relation.js');
 let storeModule: typeof import('../src/lib/store.js');
 let scopeModule: typeof import('../src/lib/scope.js');
+let gcModule: typeof import('../src/lib/group-cache.js');
 
 // ─── Mock 状态 ───
 
@@ -88,6 +89,16 @@ async function loadModulesWithMock() {
   syncModule = await import('../src/sync-relation.js');
   storeModule = await import('../src/lib/store.js');
   scopeModule = await import('../src/lib/scope.js');
+  gcModule = await import('../src/lib/group-cache.js');
+}
+
+/**
+ * 布局感知读某组元数据：新布局 = 该组分片（键经 `项目根/` 归一化）；
+ * 旧布局 = 旧单文件里的原样键。断言一律走它——写路径会惰性迁移，直读旧文件在
+ * 新布局下恒为 null（批次 2 布局改造后必须按布局读）。
+ */
+function readGroupMeta(scope: string, group: string): { hot_relations: any[]; keywords: string[] } {
+  return (gcModule.loadGroupCache(scope, group) as any) ?? { hot_relations: [], keywords: [] };
 }
 
 /** 在指定 group 预置一个带旧向量的 relation（模拟「更新已有 relation」场景） */
@@ -156,8 +167,8 @@ describe('executeBulkSyncRelation 向量化路径', () => {
         items: [{ group, relation, module_info: '更新后的正文' }],
       });
       assert.equal(result.ok, true);
-      const updated = storeModule.readJson<any>(cachePath)!;
-      const updatedRelation = updated.groups[group].hot_relations.find((item: any) => item.text === relation);
+      const updatedRelation = readGroupMeta(scope, group).hot_relations.find((item) => item.text === relation);
+      assert.ok(updatedRelation, '同步后应能在当前布局读到该 relation');
       assert.deepEqual(updatedRelation.ftsIds, ['old-fts-id'], 'dense 失败时保留旧 FTS ID 以免意外删除');
       assert.equal(updatedRelation.ftsIndexComplete, false, 'local KB 已更新且 dense 未成功时不得沿用旧 FTS 完整状态');
     } finally {
@@ -207,8 +218,7 @@ describe('executeBulkSyncRelation 向量化路径', () => {
       );
 
       // memoryId（ki-search 主条 = index 1）与 memoryIds（ki-search + api）回写
-      const cache: any = storeModule.readJson(scopeModule.getRelationsCachePath(scope))!;
-      const rel = cache.groups['项目根/向量'].hot_relations.find((r: any) => r.text === '向量关系');
+      const rel = readGroupMeta(scope, '项目根/向量').hot_relations.find((r) => r.text === '向量关系');
       assert.ok(rel);
       assert.strictEqual(rel.memoryId, 'mock_1');
       assert.deepStrictEqual(rel.memoryIds, ['mock_1', 'mock_2']);
@@ -250,8 +260,7 @@ describe('executeBulkSyncRelation 向量化路径', () => {
       assert.strictEqual(mockDeleteCalls.length, 0, '部分失败时不应清理旧向量');
 
       // 成功条目回写（ki-search 的 mock_1；api 失败不进 memoryIds）
-      const cache: any = storeModule.readJson(scopeModule.getRelationsCachePath(scope))!;
-      const rel = cache.groups['项目根/向量'].hot_relations.find((r: any) => r.text === '向量关系');
+      const rel = readGroupMeta(scope, '项目根/向量').hot_relations.find((r) => r.text === '向量关系');
       assert.ok(rel);
       assert.strictEqual(rel.memoryId, 'c1');
       assert.deepStrictEqual(rel.memoryIds, ['c1']);
@@ -349,8 +358,7 @@ describe('executeBulkSyncRelation 向量化路径', () => {
       assert.strictEqual(result.vectorStored, true);
 
       // cache 中只保留一条（后一条的内容向量）
-      const cache: any = storeModule.readJson(scopeModule.getRelationsCachePath(scope))!;
-      const rels = cache.groups['项目根/重复'].hot_relations.filter((r: any) => r.text === '同一关系');
+      const rels = readGroupMeta(scope, '项目根/重复').hot_relations.filter((r) => r.text === '同一关系');
       assert.strictEqual(rels.length, 1);
       assert.strictEqual(rels[0].memoryId, 'mock_1');
       assert.deepStrictEqual(rels[0].memoryIds, ['mock_1']);
@@ -382,8 +390,7 @@ describe('executeBulkSyncRelation 向量化路径', () => {
       assert.match(result.results[0].vectorReason ?? '', /向量不可用/);
 
       // KB 层仍写入（cache + 本地 KB）
-      const cache: any = storeModule.readJson(scopeModule.getRelationsCachePath(scope))!;
-      assert.ok(cache.groups['项目根/正常'], '向量不可用不应阻塞 KB 层');
+      assert.ok(readGroupMeta(scope, '项目根/正常').hot_relations.length > 0, '向量不可用不应阻塞 KB 层');
       const kb = storeModule.readJson(scopeModule.getLocalKbDir(scope, '项目根/正常'));
       assert.ok(kb && kb['正常关系']);
     } finally {
@@ -436,8 +443,8 @@ describe('sync-relation 从 dense 切换到 FTS-only', () => {
       });
       assert.equal(result.ok, true);
       assert.ok(mockDeleteCalls.some((call) => ['old-content', 'old-tag'].every((id) => call.ids.includes(id))));
-      const cache = storeModule.readJson<any>(scopeModule.getRelationsCachePath(scope))!;
-      const updated = cache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      const updated = readGroupMeta(scope, group).hot_relations.find((item) => item.text === relation);
+      assert.ok(updated, '同步后应能在当前布局读到该 relation');
       assert.deepEqual(updated.memoryIds, []);
       assert.equal(updated.memoryId, undefined);
       assert.equal(updated.ftsIndexComplete, true);
@@ -465,8 +472,8 @@ describe('sync-relation 从 dense 切换到 FTS-only', () => {
       });
       assert.equal(result.ok, true);
       if (result.ok) assert.match(result.fullTextReason ?? '', /dense 索引清理失败/);
-      const cache = storeModule.readJson<any>(scopeModule.getRelationsCachePath(scope))!;
-      const updated = cache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      const updated = readGroupMeta(scope, group).hot_relations.find((item) => item.text === relation);
+      assert.ok(updated, '同步后应能在当前布局读到该 relation');
       assert.deepEqual(updated.memoryIds, ['old-content']);
       assert.equal(updated.ftsIndexComplete, true);
     } finally {
@@ -512,8 +519,8 @@ describe('sync-relation 从 dense 切换到 FTS-only', () => {
         assert.equal(result.results[0].fullTextStored, false);
         assert.match(result.results[0].fullTextReason ?? '', /旧全文索引清理失败/);
       }
-      const updatedCache = storeModule.readJson<any>(cachePath)!;
-      const updated = updatedCache.groups[group].hot_relations.find((item: any) => item.text === relation);
+      const updated = readGroupMeta(scope, group).hot_relations.find((item) => item.text === relation);
+      assert.ok(updated, '同步后应能在当前布局读到该 relation');
       assert.equal(updated.ftsIndexComplete, false);
       assert.ok(updated.ftsIds.includes('old-fts-doc-id'));
       assert.ok(updated.ftsIds.some((id: string) => id !== 'old-fts-doc-id'));

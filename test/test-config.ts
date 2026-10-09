@@ -19,10 +19,54 @@ const TEST_CONFIG_PATH = path.join(TEST_CONFIG_DIR, 'config.json');
 // 初始化空配置
 // vectorDir 指向临时目录，隔离测试向量库（避免污染 ~/.ki/vector，并保证离线优雅降级）
 //
-// embedding：apiKey 仅从环境变量 SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY 读取
-// （外部注入，测试配置本身不写死任何密钥；未注入时走 fail-loud，向量化相关用例需跳过）。
+// embedding：优先从当前用户的真实 ki 配置（~/.ki/config.yaml）继承 provider/baseURL/
+// model/dimension（例如 dashscope——实际提供商由 baseURL 决定，provider 字段只是标签），
+// 密钥只从环境变量读取（外部注入，测试配置本身不写死任何密钥；未注入时走 fail-loud，
+// 向量化相关用例需跳过）。历史默认 siliconflow 仅在用户无配置时兜底。
+function readUserEmbedding(): Partial<{
+  provider: string; baseURL: string; model: string; dimension: number; scheduler: Record<string, unknown>;
+}> {
+  const candidates = [
+    path.join(os.homedir(), '.ki', 'config.yaml'),
+    path.join(os.homedir(), '.ki', 'config.json'),
+  ];
+  for (const cfgPath of candidates) {
+    try {
+      const raw = fs.readFileSync(cfgPath, 'utf-8');
+      // 轻量解析：只取 embedding 块的几个标量字段（避免引入 yaml 依赖）
+      const embMatch = raw.match(/^embedding:\s*$/m);
+      if (!embMatch) continue;
+      const after = raw.slice(embMatch.index! + embMatch[0].length);
+      const block = after.split(/^\S/m)[0];
+      const field = (name: string): string | undefined =>
+        block.match(new RegExp(`^\\s+${name}:\\s*(\\S+)`, 'm'))?.[1];
+      const apiKey = field('apiKey');
+      // 密钥仅注入进程 env（内存传递，测试配置文件只写 ${VAR} 引用）；
+      // 无密钥或纯 ${VAR} 引用则不继承（沿用 env 已有密钥变量）
+      if (apiKey && !apiKey.startsWith('${')) {
+        process.env.DASHSCOPE_API_KEY ??= apiKey;
+      }
+      return {
+        provider: field('provider'),
+        baseURL: field('baseURL'),
+        model: field('model'),
+        dimension: field('dimension') ? parseInt(field('dimension')!, 10) : undefined,
+        ...(block.match(/^\s+scheduler:\s*$/m) ? {
+          scheduler: {
+            ...(field('batchSize') ? { batchSize: parseInt(field('batchSize')!, 10) } : {}),
+            ...(field('maxConcurrency') ? { maxConcurrency: parseInt(field('maxConcurrency')!, 10) } : {}),
+          },
+        } : {}),
+      };
+    } catch { /* 无该文件或不可读 → 下一个候选 */ }
+  }
+  return {};
+}
 function buildTestConfig(): Record<string, unknown> {
-  const embKey = process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY;
+  // 优先继承用户真实配置（dashscope 等实际提供商；provider 字段是标签，baseURL 决定真实端点）
+  const userEmb = readUserEmbedding();
+  // 密钥优先级：用户配置注入的 DASHSCOPE_API_KEY（真实提供商）> 旧 SILICONFLOW 注入 > GITNEXUS
+  const embKey = process.env.DASHSCOPE_API_KEY || process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY;
   const baseConfig: Record<string, unknown> = {
     dataDir: path.join(PROJECT_ROOT, 'kb'),
     vectorDir: path.join(TEST_CONFIG_DIR, 'vector'),
@@ -30,13 +74,17 @@ function buildTestConfig(): Record<string, unknown> {
     backupDir: path.join(TEST_CONFIG_DIR, 'backup'),
     scopes: {},
   };
-  if (embKey) {
+  if (embKey && userEmb.baseURL) {
+    const keyVar = process.env.DASHSCOPE_API_KEY ? 'DASHSCOPE_API_KEY'
+      : process.env.SILICONFLOW_API_KEY ? 'SILICONFLOW_API_KEY'
+      : 'GITNEXUS_EMBEDDING_API_KEY';
     baseConfig.embedding = {
-      provider: 'siliconflow',
-      baseURL: 'https://api.siliconflow.cn/v1',
-      model: process.env.GITNEXUS_EMBEDDING_MODEL ?? 'Qwen/Qwen3-Embedding-8B',
-      dimension: parseInt(process.env.GITNEXUS_EMBEDDING_DIMS ?? '4096', 10),
-      apiKey: '${SILICONFLOW_API_KEY}', // loadConfig 会从进程环境解析
+      provider: userEmb.provider ?? 'openai-compatible',
+      baseURL: userEmb.baseURL,
+      model: userEmb.model ?? 'Qwen/Qwen3-Embedding-8B',
+      dimension: userEmb.dimension ?? parseInt(process.env.GITNEXUS_EMBEDDING_DIMS ?? '4096', 10),
+      apiKey: `\${${keyVar}}`,
+      ...(userEmb.scheduler ? { scheduler: userEmb.scheduler } : {}),
     };
   }
   return baseConfig;
@@ -88,8 +136,18 @@ export const testConfigPath = TEST_CONFIG_PATH;
  * `embedding.apiKey 未配置` 失败——这属环境缺失而非代码回归，用例应显式 skip 而不是判失败。
  */
 export const hasTestEmbeddingKey = Boolean(
-  process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY,
+  process.env.DASHSCOPE_API_KEY || process.env.SILICONFLOW_API_KEY || process.env.GITNEXUS_EMBEDDING_API_KEY,
 );
+
+/**
+ * 当前测试配置实际引用的密钥环境变量名（供测试子进程显式透传/判定用）。
+ * 与 buildTestConfig 的 keyVar 优先级一致：用户真实提供商（DASHSCOPE）优先。
+ */
+export function embeddingKeyVar(): string {
+  return process.env.DASHSCOPE_API_KEY ? 'DASHSCOPE_API_KEY'
+    : process.env.SILICONFLOW_API_KEY ? 'SILICONFLOW_API_KEY'
+    : 'GITNEXUS_EMBEDDING_API_KEY';
+}
 
 /**
  * 清理临时配置文件（在 after() 中调用）

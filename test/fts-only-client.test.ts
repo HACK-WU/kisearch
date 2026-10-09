@@ -26,6 +26,9 @@ const ftsClient = await import('../src/lib/fts-client.js');
 const { ftsBulkStore, ftsDeleteByIds, ftsDeleteByFilter, ftsSearch, closeFtsEngine } = ftsClient;
 const { fullTextSearch } = await import('../src/lib/vector-client.js');
 const { rebuildFtsOnlyScope } = await import('../src/lib/fts-rebuild.js');
+// 批次 2：rebuildFtsOnlyScope 会做惰性迁移（旧单文件 → .relations/ 分片），
+// 断言必须按布局感知读，不能直读 relations-cache.json。
+const { loadGroupCache } = await import('../src/lib/group-cache.js');
 
 test('FTS-only client writes/searches/reopens/deletes without embedding', async () => {
   const scope = 'fts-client-test';
@@ -64,8 +67,9 @@ test('FTS-only client writes/searches/reopens/deletes without embedding', async 
   const rebuilt = await rebuildFtsOnlyScope(scope);
   assert.equal(rebuilt.errors.length, 0);
   assert.ok(rebuilt.indexed > 0);
-  const rebuiltCache = JSON.parse(fs.readFileSync(path.join(scopeDir, 'relations-cache.json'), 'utf-8'));
-  assert.equal(rebuiltCache.groups['docs/recovered'].hot_relations[0].ftsIndexComplete, true);
+  const rebuiltGroup = loadGroupCache(scope, 'docs/recovered');
+  assert.ok(rebuiltGroup, '重建后应能按布局读到该组元数据');
+  assert.equal(rebuiltGroup!.hot_relations[0].ftsIndexComplete, true);
   assert.equal((await ftsSearch({ scope, query: '恢复 Kafka', limit: 5 }))[0]?.relation, 'recovered');
 
   const deleted = await ftsDeleteByIds({ scope, ids: stored.ids });
@@ -96,6 +100,7 @@ test('FTS rebuild clears complete status when the local source is missing', asyn
 
   const result = await rebuildFtsOnlyScope(scope);
   assert.equal(result.errors.length, 1);
-  const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
-  assert.equal(cache.groups.docs.hot_relations[0].ftsIndexComplete, false);
+  const group = loadGroupCache(scope, 'docs');
+  assert.ok(group, '重建后应能按布局读到该组元数据');
+  assert.equal(group!.hot_relations[0].ftsIndexComplete, false);
 });

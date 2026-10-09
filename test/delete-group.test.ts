@@ -144,10 +144,10 @@ describe('executeDeleteGroup：目录级删除', () => {
     assert.equal(res.wikiMoved, true);
     assert.equal(res.nodeRemoved, true);
 
-    // cache 键已删
-    const cache = JSON.parse(fs.readFileSync(path.join(getKbDir(s), 'relations-cache.json'), 'utf-8'));
-    assert.equal(cache.groups['wiki'], undefined);
-    assert.equal(cache.groups['wiki/docs'], undefined);
+    // cache 键已删（批次 2：布局无关断言——删除后新布局分片目录整棵移除）
+    const { readAllGroupCaches } = await import('../src/lib/group-cache.js');
+    assert.equal(readAllGroupCaches(s).get('wiki'), undefined);
+    assert.equal(readAllGroupCaches(s).get('wiki/docs'), undefined);
 
     // KB 目录已删
     assert.equal(fs.existsSync(path.join(getKbDir(s), 'wiki')), false);
@@ -189,12 +189,14 @@ describe('executeDeleteGroup：目录级删除', () => {
     assert.equal(res.deleted, true);
     assert.equal(res.relationCount, 3);
 
-    const cache = JSON.parse(fs.readFileSync(path.join(getKbDir(s), 'relations-cache.json'), 'utf-8'));
-    assert.equal(cache.groups['wiki'], undefined);
-    assert.equal(cache.groups['wiki/docs'], undefined);
-    assert.equal(cache.groups['wiki/docs/sub'], undefined);
+    // 批次 2：布局无关断言（级联组键全删、无关组保留）
+    const { readAllGroupCaches: readAllAfter } = await import('../src/lib/group-cache.js');
+    const after = readAllAfter(s);
+    assert.equal(after.get('wiki'), undefined);
+    assert.equal(after.get('wiki/docs'), undefined);
+    assert.equal(after.get('wiki/docs/sub'), undefined);
     // 无关 group 保留
-    assert.notEqual(cache.groups['other'], undefined);
+    assert.notEqual(after.get('other'), undefined);
 
     // 聚合删除 3 个 memoryIds
     assert.equal(deleteCalls.length, 1);

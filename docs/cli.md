@@ -1516,6 +1516,27 @@ exportedAt: 2026-06-16T22:30:00.000Z
 用户输入账号密码后进入认证流程，服务端校验成功后返回 token。
 ```
 
+## `migrate-relation-cache`（存储布局迁移）
+
+把旧布局单文件 `<scope>/relations-cache.json` 显式迁移为 v3 per-Group 分片布局
+（`.relations/<groupPath>/cache.json` + `.relations/manifest.json`）。
+
+```bash
+# 迁移单个 scope
+ki migrate-relation-cache <scope>
+
+# 迁移全部 scope（KB 层 ∪ config 注册）
+ki migrate-relation-cache --all
+```
+
+**说明**：
+
+- 写路径本身已带**惰性迁移**（任一正式写路径首次写该 scope 时自动转换）；本命令用于显式批量触发（迁移检查、批量运维、备份后统一转换）
+- **幂等**：已迁移的 scope 直接跳过（`alreadySharded:true`）
+- 旧文件改名 `relations-cache.json.bak` 保留（不自动删除）
+- 输出迁移前统计（组数/relation 数）供守恒核对
+- **回退**：**停机后**手动把 `.bak` 改回原名，再删除 `<scope>/.relations/` 目录（顺序不能颠倒）；回滚会丢弃迁移之后的全部写入
+
 **目录结构**：
 ```
 wiki-output/
@@ -1529,7 +1550,7 @@ wiki-output/
 ```
 
 **特性**：
-- 仅使用 scope 本地数据（group-index.json + relations-cache.json + local KB index.json）
+- 仅使用 scope 本地数据（group-index.json + relations 元数据（`.relations/` 分片 + manifest，迁移前为 `relations-cache.json`）+ local KB index.json）
 - 不依赖外部向量服务（使用内置 zvec 引擎）
 - 自动处理 YAML 特殊字符
 

@@ -49,6 +49,7 @@ import { handleChatRoutes } from './chat/chat-routes.js';
 import { vectorCollectionDimension, vectorCountScope } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
+import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
@@ -297,10 +298,17 @@ interface DocListCache {
   docs: { name: string; group: string; path?: string; tags?: string[]; vectorized: boolean; fullTextIndexed: boolean }[];
   mtimeMs: number;
   size: number;
+  /** 批次 2（R7）：布局感知身份三元组的 revision 成员（新布局 manifest revision / 旧布局 -1） */
+  revision: number;
   builtAt: number;
 }
 
 const docListCache = new Map<string, DocListCache>();
+
+// 批次 2（D3）写后主动失效：写路径落盘即丢弃本 scope 列表缓存（跨进程由身份三元组兜底）
+onScopeRelationsInvalidated((scope) => {
+  docListCache.delete(scope);
+});
 
 /**
  * 读取 relations-cache 并聚合文件级文档（Group 路径 + 文档名）。
@@ -311,29 +319,25 @@ const docListCache = new Map<string, DocListCache>();
  * 若将来这里要展示“索引内实际条目数”或按 ID 探活，必须同时接入隐藏集过滤。
  */
 function buildDocList(scope: string): DocListCache['docs'] {
-  const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) return [];
-  const stat = fs.statSync(cachePath);
+  // 批次 2（R7）：身份与数据均布局感知——旧实现锚定旧单文件，新布局下恒空（Browse
+  // 列表静默丢失全部文档）。现身份 = 布局感知三元组（manifest/旧文件任一），数据 =
+  // readAllGroupCaches 双轨聚合。
+  const identity = getRelationsCacheIdentity(scope);
+  if (!identity) return [];
   const cached = docListCache.get(scope);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+  if (
+    cached
+    && cached.mtimeMs === identity.mtimeMs
+    && cached.size === identity.size
+    && cached.revision === identity.revision
+  ) {
     return cached.docs;
   }
 
-  const raw = fs.readFileSync(cachePath, 'utf-8');
-  const data = JSON.parse(raw) as {
-    groups?: Record<string, {
-      hot_relations?: {
-        text?: string; sourcePath?: string; tags?: string[];
-        /** 向量 ID：导入链路写多值 memoryIds，sync-relation 等旧链路写单值 memoryId */
-        memoryId?: string; memoryIds?: string[];
-        ftsIds?: string[];
-        ftsIndexComplete?: boolean;
-      }[];
-    }>;
-  };
+  const groups = readAllGroupCaches(scope);
   const docs: DocListCache['docs'] = [];
   const seen = new Set<string>();
-  for (const [group, groupData] of Object.entries(data.groups ?? {})) {
+  for (const [group, groupData] of groups) {
     for (const rel of groupData.hot_relations ?? []) {
       if (!rel.text) continue;
       const key = `${group}\u0000${rel.text}`;
@@ -354,7 +358,7 @@ function buildDocList(scope: string): DocListCache['docs'] {
     }
   }
 
-  docListCache.set(scope, { scope, docs, mtimeMs: stat.mtimeMs, size: stat.size, builtAt: Date.now() });
+  docListCache.set(scope, { scope, docs, mtimeMs: identity.mtimeMs, size: identity.size, revision: identity.revision, builtAt: Date.now() });
   return docs;
 }
 

@@ -83,7 +83,8 @@ describe('sync-relation 单条模式', () => {
 
     const { readJson } = await import('../src/lib/store.js');
     const { getRelationsCachePath } = await import('../src/lib/scope.js');
-    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    const cache = loadCacheShape(scope) as any;
     const relation = cache.groups['项目根/FTS状态'].hot_relations.find((item: any) => item.text === '单条全文文档');
     assert.ok(relation?.ftsIds?.length > 0);
     assert.equal(relation.ftsIndexComplete, true);
@@ -94,7 +95,8 @@ describe('sync-relation 单条模式', () => {
     const { readJson } = await import('../src/lib/store.js');
     const { getRelationsCachePath } = await import('../src/lib/scope.js');
 
-    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    const cache = loadCacheShape(scope) as any;
     const groupData = cache.groups['项目根/监控/告警中心'];
     assert.ok(groupData);
     assert.ok(groupData.hot_relations.length >= 1);
@@ -109,6 +111,8 @@ describe('sync-relation 单条模式', () => {
     const { readJson } = await import('../src/lib/store.js');
     const { getLocalKbDir } = await import('../src/lib/scope.js');
 
+    // 批次 2 审查修复：旧布局 scope 的组键**保持原样**（不剥 项目根/ 前缀，见 normalizeGroupKeyForWrite）——
+    // 本地 KB 与元数据条目同键，故 KB 断言必须用传入的组名（与 HEAD 行为一致）
     const localKb = readJson<any>(getLocalKbDir(scope, '项目根/监控/告警中心'))!;
     assert.ok(localKb['告警规则CRUD流程']);
     assert.ok(localKb['告警规则CRUD流程'].includes('告警规则CRUD'));
@@ -126,7 +130,8 @@ describe('sync-relation 单条模式', () => {
       '--module-info', '# 聚合策略配置\n\n## 概述\n配置告警聚合策略，包括时间窗口和分组规则。',
     ]);
 
-    const cache1 = readJson<any>(getRelationsCachePath(scope))!;
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    const cache1 = loadCacheShape(scope) as any;
     const count1 = cache1.groups['项目根/监控/告警中心'].hot_relations.length;
 
     // 再次写入同一 Relation（内容更新）
@@ -137,7 +142,7 @@ describe('sync-relation 单条模式', () => {
       '--module-info', '# 聚合策略配置\n\n## 概述\n配置告警聚合策略，包括时间窗口和分组规则。支持去重。',
     ]);
 
-    const cache2 = readJson<any>(getRelationsCachePath(scope))!;
+    const cache2 = loadCacheShape(scope) as any;
     const count2 = cache2.groups['项目根/监控/告警中心'].hot_relations.length;
 
     // 数量不应增加
@@ -179,8 +184,9 @@ describe('sync-relation 存储不设上限', () => {
         ]);
       }
 
-      // 验证：3 条全部保留，evicted 恒为 null
-      const updatedCache = readJson<any>(cachePath)!;
+      // 验证：3 条全部保留，evicted 恒为 null（批次 2：断言改布局无关读，键经清洗归一）
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const updatedCache = loadCacheShape(evictionScope) as any;
       const groupData = updatedCache.groups['项目根/测试'];
       assert.strictEqual(groupData.hot_relations.length, 3, '存储层不应有上限，3 条应全部保留');
       for (const name of ['功能A描述', '功能B描述', '功能C描述']) {
@@ -236,7 +242,8 @@ describe('sync-relation 批量模式', () => {
       assert.strictEqual(result.results.length, 2);
 
       // 验证写入
-      const cache = readJson<any>(getRelationsCachePath(batchScope))!;
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(batchScope) as any;
       assert.ok(cache.groups['项目根/部署/前端']);
       assert.ok(cache.groups['项目根/部署/后端']);
 
@@ -377,7 +384,8 @@ describe('sync-relation relation 名安全校验', () => {
       '--relation', '写不进去/的关系',
       '--module-info', '# x\n\n## 概述\n不应写入。',
     ]);
-    const cache = readJson<any>(getRelationsCachePath(scope))!;
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    const cache = loadCacheShape(scope) as any;
     const groupData = cache.groups['项目根/监控/告警中心'];
     const found = (groupData?.hot_relations || []).find(
       (r: any) => r.text === '写不进去/的关系'
@@ -415,7 +423,8 @@ describe('sync-relation relation 名安全校验', () => {
       assert.strictEqual(result.total, 2);
       assert.strictEqual(result.failed, 1, '非法 relation 应计入 failed');
 
-      const cache = readJson<any>(getRelationsCachePath(guardScope))!;
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(guardScope) as any;
       assert.ok(cache.groups['项目根/正常'], '合法条目应写入');
       assert.strictEqual(cache.groups['项目根/非法'], undefined, '非法条目不应写入');
 
@@ -464,7 +473,9 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       });
       assert.equal(result.ok, true);
 
-      const updated = readJson<any>(cachePath)!;
+      // 批次 2 第二轮审查 P0 后：键原样（不剥 `项目根/`），断言用传入的组键
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const updated = loadCacheShape(switchScope) as any;
       const rel = updated.groups['项目根/切换'].hot_relations.find((item: any) => item.text === '切换文档');
       assert.ok(rel?.ftsIds?.length > 0);
       // 「无 dense」的规范表示是 memoryIds: []（import 同口径），消费侧一律按长度判定
@@ -518,7 +529,8 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       }
 
       // 验证 cache 写入
-      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(bulkScope) as any;
       assert.ok(cache.groups['项目根/模块A']);
       assert.ok(cache.groups['项目根/模块B']);
       assert.ok(cache.groups['项目根/模块A'].hot_relations[0].ftsIds?.length > 0, 'FTS-only relation 应登记 ftsIds');
@@ -581,7 +593,8 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       }
 
       // 合法条目写入，非法条目未写入
-      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(bulkScope) as any;
       assert.ok(cache.groups['项目根/正常'], '合法条目应写入');
       assert.strictEqual(cache.groups['项目根/空'], undefined, '空内容条目不应写入');
       assert.strictEqual(cache.groups['项目根/非法'], undefined, '非法条目不应写入');
@@ -622,7 +635,8 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
       }
 
       // tags 持久化到 cache
-      const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(bulkScope) as any;
       const rel = cache.groups['项目根/带标签'].hot_relations.find(
         (r: any) => r.text === '带标签关系'
       );
@@ -681,7 +695,8 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
         assert.ok(result.failed >= 1, '异常条目应计入 failed');
         assert.ok(result.skipped >= 1, '异常条目应被标记 skipped');
         // 正常条目写入 cache
-        const cache = readJson<any>(getRelationsCachePath(bulkScope))!;
+        const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(bulkScope) as any;
         assert.ok(cache.groups['项目根/正常'], '正常条目应写入');
       }
     } finally {

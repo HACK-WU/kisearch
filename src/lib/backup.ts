@@ -17,6 +17,7 @@ import { execFileSync } from 'child_process';
 import { getBackupDir, getScopeDataDir, loadConfig } from './config.js';
 import type { KiConfig } from './config.js';
 import { checkWritable, checkDiskSpace, estimateDirSize } from './preflight.js';
+import { getRelationsManifestPath } from './group-cache.js';
 
 // ─── 类型 ───
 
@@ -39,8 +40,14 @@ export function executeBackup(params: BackupOperationParams): BackupResult & { s
   const { scope } = params;
   const scopeDataDir = getScopeDataDir(config, scope);
   if (!fs.existsSync(scopeDataDir)) throw new Error(`scope 数据目录不存在：${scopeDataDir}`);
+  // 批次 2 审查 P0-2 修复：原判定只看旧单文件 relations-cache.json，而惰性迁移会把它
+  // 改名 `.bak`（新布局 scope 只剩去 `.relations/manifest.json`）→ ki backup / daemon
+  // backup / Web 备份全部误报"尚未初始化"。改为两布局任一存在即算已初始化。
   const rcPath = path.join(scopeDataDir, 'relations-cache.json');
-  if (!fs.existsSync(rcPath)) throw new Error(`scope "${scope}" 尚未初始化（缺少 relations-cache.json），请先执行 import`);
+  const manifestPath = getRelationsManifestPath(scope);
+  if (!fs.existsSync(rcPath) && !fs.existsSync(manifestPath)) {
+    throw new Error(`scope "${scope}" 尚未初始化（缺少 relations-cache.json 与 ${path.basename(path.dirname(manifestPath))}/manifest.json），请先执行 import`);
+  }
   const snapshotPath = backupScopeSnapshot(config.backupDir, scope, scopeDataDir);
   return {
     ok: true,

@@ -1,5 +1,6 @@
-import { getLocalKbDir, getRelationsCachePath } from './scope.js';
+import { getLocalKbDir } from './scope.js';
 import { readJson } from './store.js';
+import { loadGroupCache } from './group-cache.js';
 import type { Relation } from './scoring.js';
 import { isUnsafeRelationName } from './wiki-sync.js';
 import { contentRevision, metadataRevision } from './relation-edit-draft.js';
@@ -36,8 +37,12 @@ export function readLiveRelation(scope: string, group: string, relation: string)
     throw new Error('group 必须是已有 Group 的精确路径，且不能包含空段、点段或反斜杠');
   }
   if (!relation || isUnsafeRelationName(relation)) throw new Error('relation 名称无效');
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(getRelationsCachePath(scope));
-  const record = cache?.groups?.[group]?.hot_relations?.find((item) => item.text === relation);
+  // 批次 2 审查 P0-1 修复：原实现在此直读旧单文件 `relations-cache.json`，惰性迁移把该
+  // 文件改名 `.bak` 后恒返回 null → ki_edit_relation / Web 在线编辑 / 发布 finish 全线报
+  // 「Relation 不存在」。改走 layout 感知的 loadGroupCache（新布局=目标组分片，旧布局=旧文件）。
+  // 错误文案必须保持不变：relation-edit-publish 按 `includes('Relation 不存在')` 分支。
+  const groupData = loadGroupCache(scope, group);
+  const record = groupData?.hot_relations.find((item) => item.text === relation);
   if (!record) throw new Error(`Relation 不存在：${group}/${relation}；ki_edit_relation 只修改已有 Relation`);
   const kb = readJson<Record<string, string>>(getLocalKbDir(scope, group));
   const content = kb?.[relation];

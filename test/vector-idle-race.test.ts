@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const hasKey = !!process.env.SILICONFLOW_API_KEY;
+const hasKey = !!(process.env.DASHSCOPE_API_KEY || process.env.SILICONFLOW_API_KEY);
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-idle-race-'));
 const configPath = path.join(tmpDir, 'config.json');
@@ -34,7 +34,7 @@ fs.writeFileSync(configPath, JSON.stringify({
     baseURL: 'https://api.siliconflow.cn/v1',
     model: 'Qwen/Qwen3-Embedding-8B',
     dimension: 4096,
-    apiKey: '${SILICONFLOW_API_KEY}',
+    apiKey: process.env.DASHSCOPE_API_KEY ? '${DASHSCOPE_API_KEY}' : '${SILICONFLOW_API_KEY}',
   },
   scopes: { default: {} },
 }), 'utf-8');

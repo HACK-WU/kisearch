@@ -353,7 +353,10 @@ export function purgeVectorMigrationArtifacts(config: KiConfig, scope: string): 
   fs.rmSync(getVectorMigrationMarkerPath(config, scope), { force: true });
   for (const entry of listMigrationEntries(getVectorMigrationBackupsRoot(config), scope)) {
     fs.rmSync(entry, { recursive: true, force: true });
-    fs.rmSync(`${entry}.relations-cache.json`, { force: true });
+    // 批次 2 审查 P1-1 修复：分片布局下缓存备份是**目录**（rebuild-vector 把
+    // <scope>/.relations/ 整目录 rename 到此），非递归 rmSync 会抛 ERR_FS_EISDIR，
+    // 导致 ki scope delete 在"已删 KB/配置/向量"之后报失败。必须 recursive。
+    fs.rmSync(`${entry}.relations-cache.json`, { recursive: true, force: true });
   }
   for (const entry of listMigrationEntries(getVectorMigrationStagingRoot(config), scope)) {
     fs.rmSync(entry, { recursive: true, force: true });

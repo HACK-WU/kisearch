@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadConfig, getScopeWikiSync } from './config.js';
-import { getLocalKbDir, getRelationsCachePath, getSource } from './scope.js';
+import { getLocalKbDir, getSource } from './scope.js';
+import { loadGroupCache, readAllGroupCaches } from './group-cache.js';
 import { readJson, writeJson } from './store.js';
 import { contentRevision, createDraft, loadDraft, saveDraft, type RelationEditDraft } from './relation-edit-draft.js';
 import { readLiveRelation, relationIndexMode } from './relation-edit-live.js';
@@ -51,8 +52,9 @@ function validateIdentity(input: DocumentIdentity): void {
 
 function loadDocument(identity: DocumentIdentity): { relation: RelationRecord; content: string; kbPath: string } {
   validateIdentity(identity);
-  const cache = readJson<RelationCache>(getRelationsCachePath(identity.scope));
-  const relation = cache?.groups?.[identity.group]?.hot_relations?.find((item) => item.text === identity.relation);
+  // 批次 2（W6/R12）：单组读双轨（文档编辑器加载只需目标组）
+  const relation = loadGroupCache(identity.scope, identity.group)
+    ?.hot_relations.find((item) => item.text === identity.relation);
   if (!relation) reject(404, 'DOC_NOT_FOUND', '文档不存在');
   const kbPath = getLocalKbDir(identity.scope, identity.group);
   const content = readJson<Record<string, string>>(kbPath)?.[identity.relation];
@@ -78,8 +80,8 @@ function resolveSource(identity: DocumentIdentity, relation: RelationRecord): st
     || rel.split('/').some((part) => !part || part === '.' || part === '..')) {
     reject(409, 'SOURCE_MISMATCH', '文档缺少可唯一定位的源文件路径');
   }
-  const cache = readJson<RelationCache>(getRelationsCachePath(identity.scope));
-  const owners = Object.values(cache?.groups ?? {}).flatMap((entry) => entry.hot_relations ?? [])
+  // 批次 2（W6）：全量读双轨（sourcePath owner 唯一性判定需枚举全部 relation）
+  const owners = [...readAllGroupCaches(identity.scope).values()].flatMap((entry) => entry.hot_relations)
     .filter((item) => item.sourcePath?.replace(/\\/g, '/') === rel);
   if (owners.length !== 1) reject(409, 'SOURCE_MISMATCH', `源文件被 ${owners.length} 个 KB 文档引用，不能唯一写回`);
   const stem = path.posix.basename(rel).replace(/\.(?:md|markdown)$/i, '');

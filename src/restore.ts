@@ -24,6 +24,7 @@ import {
   getBackupDir,
 } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
+import { readAllGroupCaches, hasShardedLayout, notifyScopeRelationsInvalidated } from './lib/group-cache.js';
 import { rebuildScopeVectors, type RebuildVectorOptions } from './lib/rebuild-vector.js';
 import { parseContentTags } from './lib/constants.js';
 import {
@@ -90,26 +91,33 @@ function ensureTarAvailable(): void {
  * 汇总即将被覆盖的 scope 目录信息，供二次确认时展示。
  * 尽力而为：任何读取失败都降级为「未知」，不阻断流程。
  */
-function summarizeScopeDir(scopeDataDir: string): string {
+function summarizeScopeDir(scope: string, scopeDataDir: string): string {
   if (!fs.existsSync(scopeDataDir)) {
     return '   目标目录当前不存在（等价于全新导入）';
   }
   const lines: string[] = [];
 
-  // 关系条目数：统计 relations-cache.json 各 Group 的 hot_relations
+  // 关系条目数：统计 relations 元数据（批次 2 审查 P1-6——原实现只读旧单文件，
+  // 新布局 scope 的"现有数据规模"一行会静默消失，破坏 NEG-11 覆盖前可见性）
   try {
-    const rcPath = path.join(scopeDataDir, 'relations-cache.json');
-    if (fs.existsSync(rcPath)) {
-      const rc = JSON.parse(fs.readFileSync(rcPath, 'utf-8')) as {
-        groups?: Record<string, { hot_relations?: unknown[] }>;
-      };
-      const groups = rc.groups || {};
-      const groupCount = Object.keys(groups).length;
+    const groups = readAllGroupCaches(scope);
+    if (groups.size > 0 || hasShardedLayout(scope)) {
       let relCount = 0;
-      for (const g of Object.values(groups)) {
-        relCount += g.hot_relations?.length || 0;
+      for (const g of groups.values()) relCount += g.hot_relations?.length || 0;
+      lines.push(`   现有数据：${groups.size} 个 Group、${relCount} 条 Relation`);
+    } else {
+      const rcPath = path.join(scopeDataDir, 'relations-cache.json');
+      if (fs.existsSync(rcPath)) {
+        const rc = JSON.parse(fs.readFileSync(rcPath, 'utf-8')) as {
+          groups?: Record<string, { hot_relations?: unknown[] }>;
+        };
+        const legacyGroups = rc.groups || {};
+        let relCount = 0;
+        for (const g of Object.values(legacyGroups)) {
+          relCount += g.hot_relations?.length || 0;
+        }
+        lines.push(`   现有数据：${Object.keys(legacyGroups).length} 个 Group、${relCount} 条 Relation`);
       }
-      lines.push(`   现有数据：${groupCount} 个 Group、${relCount} 条 Relation`);
     }
   } catch {
     /* 忽略统计失败 */
@@ -210,7 +218,7 @@ async function restoreFromSnapshot(
   if (!opts.yes) {
     previewAndRequireYes(
       `⚠️  即将删除并覆盖目录：${scopeDataDir}\n` +
-        `${summarizeScopeDir(scopeDataDir)}\n` +
+        `${summarizeScopeDir(scope, scopeDataDir)}\n` +
         `   还原来源：${snapshotPath}\n` +
         `   还原快照：${snapshotFile}\n` +
         `   ⚠️  此操作不可逆（还原前会自动创建安全网快照）\n`
@@ -266,6 +274,12 @@ async function restoreFromSnapshot(
       );
     }
   }
+
+  // 批次 2（W7 对齐，第二轮审查 P2）：快照已覆盖 scope 目录（含 `.relations/` 分片与
+  // manifest），进程内缓存必须立即失效——原实现只在 daemon 路径
+  //（lib/restore-snapshot.ts）接线，CLI 路径仅靠身份三元组兜底（多一次全量重读，
+  // 且同进程内若已缓存则依赖下次 stat 才发现）
+  notifyScopeRelationsInvalidated(scope);
 
   // 快照不包含 vectorDir；无 dense 的 --no-vector 文档仍应在 restore 后可全文检索。
   const fullText = await rebuildFtsOnlyScope(scope);

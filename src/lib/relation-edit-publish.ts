@@ -1,6 +1,7 @@
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { loadConfig, getScopeCleanConfig } from './config.js';
 import { getSource, getLocalKbDir, getRelationsCachePath } from './scope.js';
+import { readAllGroupCaches, hasShardedLayout, loadGroupCache, writeGroupCache } from './group-cache.js';
 import { readJson, writeJson } from './store.js';
 import type { Relation } from './scoring.js';
 import { buildChunkEntries } from './chunk-entries.js';
@@ -177,10 +178,10 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
 }
 
 function otherReferences(scope: string, targetGroup?: string, targetRelation?: string): Set<string> {
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(getRelationsCachePath(scope));
+  // 批次 2（W5）：全量读双轨（本函数真正需要全量——枚举除目标外全部 relation 的 ID 引用）
   const ids = new Set<string>();
-  for (const [group, data] of Object.entries(cache?.groups ?? {})) {
-    for (const relation of data.hot_relations ?? []) {
+  for (const [group, data] of readAllGroupCaches(scope)) {
+    for (const relation of data.hot_relations) {
       if (targetGroup !== undefined && group === targetGroup && relation.text === targetRelation) continue;
       for (const id of relationDenseIds(relation)) ids.add(id);
       for (const id of relation.ftsIds ?? []) ids.add(id);
@@ -209,11 +210,17 @@ export async function discardUnpublishedIndex(draft: RelationEditDraft): Promise
 
 function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void {
   const kbPath = getLocalKbDir(draft.scope, draft.group);
-  const cachePath = getRelationsCachePath(draft.scope);
   const kb = readJson<Record<string, string>>(kbPath);
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(cachePath);
-  const relation = cache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
-  if (!kb || !cache || !relation) throw new Error('发布前 Relation 已不存在');
+  // 批次 2（W5）：单组读双轨——新布局只读目标组分片（发布临界区语义不变：
+  // KB 写→分片写，均为 WAL 单文件原子；写失败补偿回滚 KB 同旧）
+  const sharded = hasShardedLayout(draft.scope);
+  const cachePath = getRelationsCachePath(draft.scope);
+  const legacyCache = sharded ? null : readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(cachePath);
+  const groupDoc = sharded ? loadGroupCache(draft.scope, draft.group) : null;
+  const relation = sharded
+    ? groupDoc?.hot_relations.find((item) => item.text === draft.relation)
+    : legacyCache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
+  if (!kb || !relation || (sharded ? !groupDoc : !legacyCache)) throw new Error('发布前 Relation 已不存在');
   const currentRevision = contentRevision(kb[draft.relation] ?? '');
   if (currentRevision !== draft.baseRevision) {
     throw new Error('正式正文在编辑期间已变化，拒绝覆盖；请重新创建草稿');
@@ -245,7 +252,17 @@ function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void
     }
     relation.editChunkCount = plan.chunkCount;
     try {
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+      if (sharded) {
+        writeGroupCache(draft.scope, draft.group, {
+          version: 1,
+          scope: draft.scope,
+          hot_relations: groupDoc!.hot_relations,
+          keywords: groupDoc!.keywords ?? [],
+          updatedAt: null,
+        });
+      } else {
+        writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
+      }
     } catch (err) {
       // 正常异常立即补偿；进程被强杀的窗口由 recoverInterruptedPublication 处理。
       kb[draft.relation] = priorContent;
@@ -275,8 +292,9 @@ export function recoverInterruptedPublication(draft: RelationEditDraft): boolean
   const kbPath = getLocalKbDir(draft.scope, draft.group);
   const kb = readJson<Record<string, string>>(kbPath);
   if (!kb || contentRevision(kb[draft.relation] ?? '') !== draft.revision) return false;
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(getRelationsCachePath(draft.scope));
-  const relation = cache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
+  // 批次 2（W5）：单组读双轨（判据用）
+  const relation = loadGroupCache(draft.scope, draft.group)
+    ?.hot_relations.find((item) => item.text === draft.relation);
   if (!relation || cacheHasPublishedIds(draft, relation)) return false;
   kb[draft.relation] = draft.baseContent;
   writeJson(kbPath, kb);

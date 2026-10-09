@@ -15,7 +15,6 @@ import path from 'path';
 
 import {
   getGroupIndexPath,
-  getRelationsCachePath,
   getLocalKbDir,
   getAssetsDir,
   setSource,
@@ -25,6 +24,7 @@ import {
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
 import { parseContentTags, type PartitionConfig } from './constants.js';
+import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasNoRelationsData, type LegacyRelationsCacheShape } from './group-cache.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 import {
@@ -533,10 +533,20 @@ async function handleDirectImportUnlocked(
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
   }
 
-  const relationsCachePath0 = getRelationsCachePath(scope);
-  const relationsCache0 = readJson<RelationsCache>(relationsCachePath0);
-  if (!relationsCache0) {
-    throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+  // 批次 2（W1）：预读改双轨（loadCurrentLayoutCache 统一入口）——新布局从分片聚合
+  // 重建内存结构；旧布局读旧单文件（随后写入时惰性迁移）。内存结构 RelationsCache
+  // 形状不变，全流程（冲突检测/upsert/回填）无需改动。
+  let relationsCache0: RelationsCache;
+  try {
+    // 双轨读统一入口（group-cache.loadCacheShape）：新布局分片聚合 / 旧布局旧单文件。
+    // 第二轮审查 P1：原实现自带一份手抄双读，与公共兼容层构成第二套语义（易漂移）。
+    relationsCache0 = loadCacheShape(scope) as unknown as RelationsCache;
+  } catch (err) {
+    // 兼容旧报错文案（scope 未初始化的既有提示）；「数据在但读失败（损坏）」原样透出
+    if (hasNoRelationsData(scope)) {
+      throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+    }
+    throw err;
   }
 
   // S0-3（REQ-20260930-002）：整批预算预检——读取任何文件内容/写入 KB 之前，
@@ -599,6 +609,18 @@ async function handleDirectImportUnlocked(
   }[] = [];
   const skipped: string[] = [];
   const conflicts: ImportConflict[] = [];
+  /** D7：组级原文写缓冲（groupPath → relation → 原文）；扫描循环内只进缓冲，
+   *  扫描结束后每组一次 loadLocalKb+合并+writeJson 落盘（O(文档数)→O(组数)）。
+   *  键在循环前由 ensureGroupBuffer 预建，避免热路径重复判空。 */
+  const pendingKbWrites = new Map<string, Map<string, string>>();
+  const ensureGroupBuffer = (groupPath: string): Map<string, string> => {
+    let buf = pendingKbWrites.get(groupPath);
+    if (!buf) {
+      buf = new Map<string, string>();
+      pendingKbWrites.set(groupPath, buf);
+    }
+    return buf;
+  };
   /** 当前批次已接受的文件级 relation；避免同一批上传内重名漏判。 */
   const plannedRelations = new Map<string, Relation[]>();
   /** 附件收集告警（未命中/超限/越界等，循环后汇总）与已落盘的唯一附件集合（REQ-20260904-001） */
@@ -710,11 +732,18 @@ async function handleDirectImportUnlocked(
       const cached = relationsCache0.groups[groupPath]?.hot_relations.find((item) => item.text === relation);
       if (cached) {
         cached.ftsIndexComplete = false;
-        writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+        // 批次 2：incomplete 预标记立即落盘（中断安全语义保持；新布局=分片批写，
+        // 旧布局=整文件回退），不并入批末。
+        persistTouchedGroups(scope, relationsCache0, new Set([groupPath]));
       }
     }
     // 方案 D：文件级原文（未清洗）仅在检查通过后写入。
-    writeLocalKb(scope, groupPath, relation, fileText);
+    // D7（批次 2）：写入组级内存缓冲——同组 N 篇聚合为每 KB index.json 一次落盘
+    //（原逐篇读改写整个 index.json，111 篇的组 = 111 次读改写 4.5MB）。
+    // 中断安全性：缓冲在 hook 失败/chunk 超限回滚点**之后**才并入，被跳过文件不进缓冲；
+    // 进程中断时本批缓冲丢失 → local KB 保持导入前状态，与旧"逐篇写"的已写部分
+    // 相比少了部分推进，但幂等重导语义不变（重跑全量覆盖）。
+    ensureGroupBuffer(groupPath).set(relation, fileText);
     // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
     if (assetsEnabled) {
       const assetResult = collectAndCopyAssets({
@@ -802,15 +831,29 @@ async function handleDirectImportUnlocked(
   const entries: ScanResultEntry[] = fileRecords.flatMap((r) => r.entries);
   logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${fileRecords.length} 个文件，跳过 ${skipped.length + conflicts.filter((item) => item.action === 'skip').length}）`);
 
+  // D7（批次 2）：flush 组级原文缓冲——每组一次 loadLocalKb+合并+writeJson
+  //（替代逐篇读改写；O(文档数)→O(组数) 落盘）。回滚路径（hook 失败等）不走缓冲、
+  // 已即时写回，此 flush 只含最终接受导入的文件。
+  for (const [groupPath, relations] of pendingKbWrites) {
+    if (relations.size === 0) continue;
+    const localKbPath = getLocalKbDir(scope, groupPath);
+    fs.mkdirSync(path.dirname(localKbPath), { recursive: true });
+    const localKb = loadLocalKb(localKbPath);
+    for (const [relationText, content] of relations) {
+      localKb[relationText] = content;
+    }
+    writeJson(localKbPath, localKb);
+  }
+  pendingKbWrites.clear();
+
   // 2) Phase 2~5
   const TOTAL = 5;
   const memoryMap = new Map<string, string>();
   checkCancelled();
   args.onProgress?.({ phase: 'vectorize', done: 0, total: Math.max(entries.length, 1) });
 
-  // ── 预读 group-index（relations-cache 已在步骤 0 预读为 relationsCache0）──
+  // ── 预读 group-index（relations 元数据已在步骤 0 预读为 relationsCache0）──
   const groupIndexPath = getGroupIndexPath(scope);
-  const relationsCachePath = getRelationsCachePath(scope);
   const groupIndex = readGroupIndex(scope);
   if (!groupIndex) {
     throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
@@ -978,6 +1021,7 @@ async function handleDirectImportUnlocked(
   // 向量化失败的文件已恢复旧 local KB，且其旧 FTS ID 未被清理；恢复原完成标记。
   // 活跃文件仍保持 incomplete，直到 Phase 4 持久化本次最终 dense/FTS 状态。
   let ftsStatusRestored = false;
+  const restoredGroups = new Set<string>();
   for (const rec of failedRecords) {
     const previous = rec.previousRelation;
     if (!previous?.ftsIds?.length) continue;
@@ -986,8 +1030,10 @@ async function handleDirectImportUnlocked(
     if (previous.ftsIndexComplete === undefined) delete relation.ftsIndexComplete;
     else relation.ftsIndexComplete = previous.ftsIndexComplete;
     ftsStatusRestored = true;
+    restoredGroups.add(rec.groupPath);
   }
-  if (ftsStatusRestored) writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+  // 批次 2：中断安全回写改分片——只写被触达的组（旧布局则保持旧写整文件的回退语义）
+  if (ftsStatusRestored) persistTouchedGroups(scope, relationsCache0, restoredGroups);
 
   if (systemStopReason) {
     const stats = systemStopStats ?? {
@@ -1031,20 +1077,23 @@ async function handleDirectImportUnlocked(
     // 先按未完成处理；FTS 批次失败、或只写入了部分 entries 时不能沿用旧成功状态。
     // 对覆盖已有 Relation 的情况，先原子持久化 false：进程若在 FTS 写入后、Phase 4 前中断，
     // 页面也不会继续把可能已部分覆盖的旧索引显示为完整。新 Relation 尚未登记，无需预写。
-    const persistedCache = readJson<RelationsCache>(relationsCachePath);
-    if (!persistedCache) throw new Error(`relations-cache.json 不存在：${relationsCachePath}`);
+    // 批次 2：persistedCache 改双轨读（新布局=分片聚合，旧布局=旧文件）；
+    // 预写改分片单组写（persistTouchedGroups）。
+    const persistedCache = loadCacheShape(scope) as unknown as RelationsCache;
     let completionInvalidated = false;
+    const invalidatedGroups = new Set<string>();
     for (const rec of activeFileRecords) {
       fullTextCompleteByKey.set(`${rec.groupPath}\u0000${rec.relation}`, false);
       const cached = persistedCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
       if (cached) {
         cached.ftsIndexComplete = false;
         completionInvalidated = true;
+        invalidatedGroups.add(rec.groupPath);
       }
       const inMemory = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
       if (inMemory) inMemory.ftsIndexComplete = false;
     }
-    if (completionInvalidated) writeJson(relationsCachePath, persistedCache as unknown as Record<string, unknown>);
+    if (completionInvalidated) persistTouchedGroups(scope, persistedCache, invalidatedGroups);
     const ftsEntries = activeFileRecords.flatMap((rec) => rec.entries.flatMap((entry) => [
       { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' },
       ...customTags.map((tag) => ({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
@@ -1176,7 +1225,12 @@ async function handleDirectImportUnlocked(
       for (const id of await deleteVectorIds(scope, rollbackPathIds, '回滚本次路径向量', false, vectorCleanupErrors)) {
         cleanupFailures.add(id);
       }
-      writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+      // 批次 2：路径向量回滚回写改分片（触达组集合 = pathEntries 涉及的组；
+      // PathVectorizeEntry 的组字段名是 group——上方段内已对 relationsCache0 做了
+      // ftsIndexComplete/内存恢复，此处必须真正落盘触达组）
+      persistTouchedGroups(scope, relationsCache0, new Set(
+        pathEntries.map((e) => e.group).filter((g): g is string => typeof g === 'string')
+      ));
       throw makeVectorizationStopError(pathResult.stopReason, {
         scope,
         phase: pathResult.stopReason.phase,
@@ -1365,7 +1419,10 @@ async function handleDirectImportUnlocked(
     }
   }
   writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
-  writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+  // 批次 2（W1）：元数据落盘改 per-Group 分片——旧布局先惰性迁移，再批写全量组
+  //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
+  migrateLegacyRelationsCache(scope);
+  persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
@@ -1597,6 +1654,18 @@ function writeLocalKb(scope: string, groupPath: string, relationText: string, mo
   const localKb = loadLocalKb(localKbPath);
   localKb[relationText] = moduleInfo;
   writeJson(localKbPath, localKb);
+}
+
+/**
+ * 批次 2 helper：把内存 cache 中「被触达的组」落到当前布局（中断安全预写/回写专用）。
+ *
+ * 第二轮审查 P1 修复：原实现是本函数的手抄副本，且**未做 Map 键归一**——新布局下
+ * 若触达组键与分片键写法不一致（历史 `项目根/` 前缀），`cache.groups[groupPath]`
+ * 取不到值 → `continue` 静默跳过落盘，import 的三个中断安全点（FTS 预标记 / 失败回滚 /
+ * 路径向量回滚）对该组全部失效。现统一委托 group-cache.persistCacheShape（单一实现）。
+ */
+function persistTouchedGroups(scope: string, cache: RelationsCache, touchedGroups: Set<string>): void {
+  persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
 }
 
 /** 从 local KB 删除单条记录（P-7 hook 失败回滚用）；返回是否真的删了 */

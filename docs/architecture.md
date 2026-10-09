@@ -38,7 +38,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     GI["group-index.json<br/>Group 树索引 + source 块"]
-    RC["relations-cache.json<br/>Relation 缓存 / 分区<br/>（含 memoryIds / sourcePath）"]
+    RC["relations/ 分片布局<br/>manifest.json + <groupPath>/cache.json<br/>（Relation 缓存 / 分区，含 memoryIds / sourcePath）"]
     KB["kb/<scope>/<group>/index.json<br/>本地 KB 原文"]
     SI["scan-index.json<br/>[旧流程] 外部知识库扫描状态账本"]
     SP["scan-pending.json<br/>[旧流程] 扫描断点（临时）"]
@@ -54,11 +54,32 @@ flowchart LR
 | 文件 | 角色 | 读写方 | 生命周期 |
 |------|------|--------|---------|
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
-| `relations-cache.json` | Relation 缓存（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath` | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+| `.relations/<groupPath>/cache.json` | Relation 缓存分片（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath`；per-Group 一份 | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
+| `.relations/manifest.json` | scope 级元数据：`partition_config` + `revision`（缓存失效身份锚，每次写递增） | 存储原语自动维护 | 永久 |
+| ~~`relations-cache.json`~~ | 旧布局单文件（v3 前）；首次写自动迁移为分片布局，原名改名 `.bak` 保留 | 迁移/回退用 | 过渡期保留 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 | `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | **已无生产/消费方**（随 incremental 流程移除，`src/` 零引用） | 遗留文件，可删 |
 | `scan-pending.json` | [旧流程] 扫描断点 | **已无生产/消费方**（同上） | 遗留文件，可删 |
 
+> **存储布局（2026-10-09 v3，per-Group 分片）**：Relation 元数据从 scope 级单文件
+> `relations-cache.json` 拆分为 `<scope>/.relations/<groupPath>/cache.json`（每组一份）
+> + `<scope>/.relations/manifest.json`（scope 级字段与 revision 缓存身份锚）。分片根用
+> 点号保留名 `.relations/`：local-kb 的组目录是 `<scope>/<groupPath>/index.json`，若根目录叫
+> `relations/`，一个名为 `relations` 的顶层组会在删除时连根带走全部元数据。收益：
+> 读单篇文档只读写该组分片（原为整份 scope 缓存）。**兼容期双读**：新布局优先，
+> 仅旧文件时读旧并保持旧写；任一正式写路径首写该 scope 时自动迁移（旧文件改名
+> `.bak` 保留，可手动回退）。显式批量迁移：`ki migrate-relation-cache <scope>` /
+> `--all`（幂等）。对外 API/CLI/MCP 契约零变化。
+>
+> **键不变量（2026-10-09 第二轮审查 P0 修复）**：组键**原样**作为分片路径段——同一个
+> `groupPath` 同时是 ①`group-index.json` 的树节点路径 ②本地 KB 目录
+>（`kb/<scope>/<groupPath>/index.json`）③分片目录。任何单侧改写（早期实现无条件剥
+> 历史 `项目根/` 前缀）都会让三者分叉，导致 `ki export` 静默导出 0 条、
+> `query-group` 报「暂无 Relations」、`delete-*` 收集不到 relation（向量/FTS 残留）
+> 与分片残留；且剥前缀是**非单射**映射（`项目根/X` 与 `X` 会撞同一分片互相覆盖）。
+> 唯一合法的前缀剥离时机是 `store.ts` 的 `roots → groups` 迁移——那里树里的 `项目根`
+> 节点被提升掉，`renameGroupCacheShards` 会把分片键一起改名（单文件与分片两种布局都覆盖）。
+>
 > **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
 >
 > **分区守恒不变量（2026-09-04 修复）**：展示侧截断只改变条目所属分区，不会让条目消失——热区溢出回流常温/冷区、常温溢出回流冷区，`hot + warm + cold` 恒等于全量（唯一例外：显式配置 `maxColdCount` 时的冷区末端截断）。修复前规模 ≥ 34 时被截断条目会在**所有 mode 下都查不到**（且被兜底标记为 `[冷]` 却筛不到）。`warmPercent` 以热区之外的候选池为基准；Group 聚合分取组内 Relation 评分的**均值**（非求和，避免规模压倒活跃度）。
@@ -85,7 +106,7 @@ flowchart LR
 - `chunkSize` / `chunkOverlap`：切分参数持久化（缺失时回退默认值）
 - ~~`rootName` / `commit`~~：已彻底移除（rootName 概念废弃、incremental 废弃后不再保留，无向后兼容读取）
 
-### `relations-cache.json` 的 `memoryIds` / `sourcePath`
+### relations 元数据的 `memoryIds` / `sourcePath`
 
 关联字段写入 `hot_relations` 每条 relation（方案 D：`ki import` 为**文件级 relation**，挂该文件全部 chunk 的 memoryIds 多值）：
 
@@ -138,7 +159,7 @@ flowchart LR
     EXT[外部 Markdown 知识库] --> IMP[ki import --source<br/>原文直导 + 自动切分]
     IMP --> VEC[zvec 引擎向量化<br/>content = chunk 原文]
     IMP --> GI2[group-index.json<br/>Group 树 + source 块]
-    IMP --> RC2[relations-cache.json<br/>含 memoryIds / sourcePath]
+    IMP --> RC2[.relations/<groupPath>/cache.json + manifest.json<br/>含 memoryIds / sourcePath]
     IMP --> KB2[本地 KB 原文]
 ```
 

@@ -83,9 +83,9 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const r = runImport(['--scope', scope, '--source', src, '--group', 'wiki', '--no-vector']);
     assert.strictEqual(r.ok, true);
 
-    const { getRelationsCachePath } = require('../src/lib/scope.js');
-    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
-    const rel = cache.groups['wiki'].hot_relations.find((x: any) => x.text === 'a');
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const groups = readAllGroupCaches(scope);
+    const rel = groups.get('wiki')!.hot_relations.find((x: any) => x.text === 'a');
     assert.ok(rel, '文件级 relation a 应存在');
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时 memoryIds 为空');
     assert.ok(Array.isArray(rel.ftsIds) && rel.ftsIds.length > 0, '--no-vector 时应登记 FTS-only 文档 ID');
@@ -137,8 +137,9 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.ok(result.stats.errors > 0, '应将 FTS Collection 写入失败反馈到导入结果');
 
-    const updatedCache = JSON.parse(fs.readFileSync(getRelationsCachePath(failedScope), 'utf-8'));
-    const relation = updatedCache.groups.wiki.hot_relations.find((item: any) => item.text === 'failed');
+    // 批次 2：断言改走布局无关读原语（旧布局种子经惰性迁移后落在分片）
+    const { readAllGroupCaches: readAllAfterImport } = require('../src/lib/group-cache.js');
+    const relation = readAllAfterImport(failedScope).get('wiki')!.hot_relations.find((item: any) => item.text === 'failed');
     assert.ok(relation);
     assert.deepEqual(relation.ftsIds, ['old-fts-id'], '失败时保留旧 FTS ID，避免误删既有索引');
     assert.equal(relation.ftsIndexComplete, false, '写入失败不得持久化完整状态');
@@ -197,9 +198,8 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(first.ok, true, JSON.stringify(first));
     assert.strictEqual(first.stats.conflicts, 1, JSON.stringify(first));
 
-    const { getRelationsCachePath } = require('../src/lib/scope.js');
-    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
-    const relations = cache.groups.collision.hot_relations;
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const relations = readAllGroupCaches(scope).get('collision')!.hot_relations;
     assert.deepStrictEqual(relations.map((x: any) => x.text).sort(), ['foo', 'foo_1']);
 
     const second = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector']);
@@ -330,9 +330,8 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const r = runImport(['--scope', scope, '--source', src, '--group', 'tagkb-a', '--no-vector', '--tags', 'Alpha, beta ,alpha']);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
 
-    const { getRelationsCachePath } = require('../src/lib/scope.js');
-    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
-    const rel = cache.groups['tagkb-a'].hot_relations.find((x: any) => x.text === 't1');
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const rel = readAllGroupCaches(scope).get('tagkb-a')!.hot_relations.find((x: any) => x.text === 't1');
     assert.ok(rel, '文件级 relation t1 应存在');
     assert.deepStrictEqual(rel.tags, ['alpha', 'beta'], '去空/去重/小写化后持久化');
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时仍无 memoryIds');
@@ -346,9 +345,8 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const r2 = runImport(['--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector']);
     assert.strictEqual(r2.ok, true);
 
-    const { getRelationsCachePath } = require('../src/lib/scope.js');
-    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
-    const rel = cache.groups['tagkb-b'].hot_relations.find((x: any) => x.text === 't2');
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const rel = readAllGroupCaches(scope).get('tagkb-b')!.hot_relations.find((x: any) => x.text === 't2');
     assert.strictEqual(rel.tags, undefined, '不带 --tags 重导应清除已有标签');
   });
 
@@ -364,9 +362,8 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const r = JSON.parse(res.stdout);
     assert.strictEqual(r.ok, true);
 
-    const { getRelationsCachePath } = require('../src/lib/scope.js');
-    const cache = JSON.parse(fs.readFileSync(getRelationsCachePath(scope), 'utf-8'));
-    const rel = cache.groups['tagkb-c'].hot_relations.find((x: any) => x.text === 't3');
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const rel = readAllGroupCaches(scope).get('tagkb-c')!.hot_relations.find((x: any) => x.text === 't3');
     assert.strictEqual(rel.tags, undefined, '保留标签被过滤，不打标');
     assert.match(res.stderr, /无有效标签/, '应输出警告提示');
   });

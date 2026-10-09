@@ -696,3 +696,32 @@ describe('query-group 语义兜底分数口径', () => {
     assert.ok(!out.includes('关键词降级'), '未降级不得出现降级说明');
   });
 });
+
+// ─── 新布局（分片）加载边界（批次 2 审查修复）───
+
+describe('query-group 新布局分片损坏 fail-loud', () => {
+  it('分片损坏 → 报错（不静默成空树），且提示指向 .relations 而非已不存在的旧文件', async () => {
+    const gc = await import('../src/lib/group-cache.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
+    const brokenScope = `shape-sharded-${Date.now()}`;
+    registerTestScope(brokenScope);
+    try {
+      gc.writeGroupCache(brokenScope, 'g1', {
+        version: 1, scope: brokenScope,
+        hot_relations: [{ id: 'r1', text: 'doc1', score: 1, useCount: 0, lastUsedTime: 0 }] as never,
+        keywords: [],
+      });
+      // 破坏分片：缺 hot_relations 数组
+      fs.writeFileSync(gc.getGroupCachePath(brokenScope, 'g1'),
+        JSON.stringify({ version: 1, scope: brokenScope, keywords: [] }), 'utf-8');
+
+      const output = runQueryGroup(['--scope', brokenScope, '--mode', 'hot']);
+      assert.ok(output.includes('Group 分片结构损坏'), `应 fail-loud，实际：${output.slice(0, 300)}`);
+      assert.ok(output.includes('.relations'), '应指向新布局分片路径');
+      assert.ok(!output.includes('CACHE_SHAPE_INVALID'), '损坏被结构校验吞掉即视为静默降级');
+    } finally {
+      const kbDir = getKbDir(brokenScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});

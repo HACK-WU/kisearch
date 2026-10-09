@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getSource, getRelationsCachePath, getLocalKbDir } from './scope.js';
+import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './group-cache.js';
 import { loadConfig, getScopeWikiSync } from './config.js';
 import { generateMarkdown } from './markdown-gen.js';
 
@@ -212,24 +213,28 @@ export function backfillWiki(scope: string, opts: { force?: boolean } = {}): Wik
     };
   }
 
-  // relations-cache 不存在 → scope 尚无任何数据
-  const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) {
+  // 批次 2（W8）：全量读双轨（backfill 天然全量；本函数只读 relations 不写元数据）
+  const all = (() => {
+    try {
+      return readAllGroupCaches(scope);
+    } catch (err) {
+      return err as Error;
+    }
+  })();
+  if (all instanceof Error) {
+    return { ok: false, action: 'wiki-backfill', scope, error: `relations 元数据解析失败：${(all as Error).message}`, stats, skipped };
+  }
+  // 批次 2 审查 P2：判定必须布局感知，否则「已迁移但 0 组」的空 scope 会被误判为未初始化
+  // （命令从"幂等成功、0 补齐"变成失败，且文案指向已不存在的旧文件）。
+  if (all.size === 0 && !hasShardedLayout(scope) && !fs.existsSync(getRelationsCachePath(scope))) {
     return {
       ok: false, action: 'wiki-backfill', scope,
-      error: `relations-cache 不存在（${cachePath}）：scope 尚无数据可补齐`,
+      error: `relations 元数据不存在（${getRelationsManifestPath(scope)} / ${getRelationsCachePath(scope)}）：scope 尚无数据可补齐`,
       stats, skipped,
     };
   }
 
-  let cache: { groups?: Record<string, { hot_relations?: Array<{ text: string }> }> };
-  try {
-    cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
-  } catch {
-    return { ok: false, action: 'wiki-backfill', scope, error: `relations-cache 解析失败：${cachePath}`, stats, skipped };
-  }
-
-  for (const [groupPath, groupData] of Object.entries(cache.groups ?? {})) {
+  for (const [groupPath, groupData] of all) {
     const relations = groupData?.hot_relations ?? [];
     if (relations.length === 0) continue;
     const localKb = readLocalKbIndex(scope, groupPath);

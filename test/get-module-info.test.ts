@@ -282,3 +282,37 @@ describe('get-module-info 批量模式（--relation 逗号分隔多条）', () =
     assert.ok(result.error.includes('上限'));
   });
 });
+
+// ─── 新布局 + 树外组兜底（批次 2 审查修复）───
+
+describe('get-module-info 新布局分片与树外组解析', () => {
+  it('relations 有该组、group-index 树缺该组时仍能解析并返回正文（占位值必须真值）', async () => {
+    const gc = await import('../src/lib/group-cache.js');
+    const { getLocalKbDir, getGroupIndexPath, getKbDir } = await import('../src/lib/scope.js');
+    const { writeJson } = await import('../src/lib/store.js');
+    const s = `getmod-sharded-${Date.now()}`;
+    registerTestScope(s);
+    try {
+      // 新布局分片（组在 relations 里，且不在树里）
+      gc.writeGroupCache(s, 'wiki/deploy', {
+        version: 1, scope: s,
+        hot_relations: [{ id: 'r1', text: 'DeployDoc', score: 0, useCount: 0, lastUsedTime: null, isImported: true }] as never,
+        keywords: [],
+      });
+      const kbPath = getLocalKbDir(s, 'wiki/deploy');
+      fs.mkdirSync(path.dirname(kbPath), { recursive: true });
+      writeJson(kbPath, { DeployDoc: '# Deploy\n\n部署正文' });
+      // 树里只有父节点 wiki，没有 wiki/deploy
+      writeJson(getGroupIndexPath(s), {
+        version: 1, scope: s, groups: { wiki: {} }, updatedAt: new Date().toISOString(),
+      });
+
+      const output = runGetModuleInfo(['--scope', s, '--group', 'deploy', '--relation', 'DeployDoc']);
+      assert.ok(output.includes('部署正文'), `树外组应能被 relations 键兜底解析，实际输出：${output.slice(0, 300)}`);
+      assert.ok(!output.includes('未匹配到有效路径'), '不得报路径未匹配');
+    } finally {
+      const kbDir = getKbDir(s);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});

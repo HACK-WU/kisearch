@@ -21,7 +21,7 @@
 └─────────────────────────────────────────────────────┘
           ↓
 ┌─────────────────────────────────────────────────────┐
-│  Layer 2: Relations 缓存 (relations-cache.json)    │
+│  Layer 2: Relations 元数据 (.relations/ 分片+manifest) │
 │  - 热门 Relation 列表 + 评分                        │
 │  - 冷热分区：hot / warm / cold / emerging         │
 └─────────────────────────────────────────────────────┘
@@ -57,7 +57,7 @@ ki manage-index --action list-scopes
 
 **注意**：
 - `list-scopes` **不需要** `--scope` 参数
-- 仅返回符合 scope 命名规则的已初始化 scope（存在 `relations-cache.json`）
+- 仅返回符合 scope 命名规则的已初始化 scope（存在 `relations-cache.json` 或 `.relations/manifest.json`）
 - 同时返回每个 scope 的顶层 Group 名称列表，方便快速了解 scope 内容
 
 ---

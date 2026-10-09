@@ -54,7 +54,7 @@
 
 ## 二类：数据文件缺失或损坏
 
-### `relations-cache.json` 不存在
+### relations 元数据不存在（`relations-cache.json` / `.relations/manifest.json`）
 
 影响：`sync-relation.ts`、`get-module-info.ts`
 
@@ -62,14 +62,14 @@
 
 > `query-group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
 
-### `relations-cache.json` 结构损坏（`CACHE_SHAPE_INVALID`）
+### relations 元数据结构损坏（`CACHE_SHAPE_INVALID`）
 
 影响：`query-group.ts`（CLI 与 `ki_query_group` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
 
 典型现象：
 
 ```
-❌ CACHE_SHAPE_INVALID: relations-cache.json 结构校验失败：/root/.ki/kb/<scope>/relations-cache.json（共 2 个 Group 损坏）
+❌ CACHE_SHAPE_INVALID: relations 元数据结构校验失败：/root/.ki/kb/<scope>/.relations/manifest.json（共 2 个 Group 损坏）
   - 工具库/Redis：hot_relations 缺失或不是数组
   - 部署运维：hot_relations 缺失或不是数组
 建议：先执行 ki restore <scope> --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）

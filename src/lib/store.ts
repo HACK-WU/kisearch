@@ -11,6 +11,9 @@ import fs from 'fs';
 import path from 'path';
 import { walWrite } from './wal.js';
 import { getKbDir, getGroupIndexPath, getRelationsCachePath, validateScope, migrateGroupIndex } from './scope.js';
+// 循环依赖说明：group-cache 依赖本模块的 readJson/writeJson（函数声明，已提升），
+// 本模块只在运行时调用 group-cache 的分片改名原语，不存在模块初始化期互相取值。
+import { hasShardedLayout, listGroupPaths, renameGroupCacheShards } from './group-cache.js';
 import { loadConfig, getScopeMode } from './config.js';
 import { CURRENT_DATA_VERSION, TEMPLATE_DIR } from './constants.js';
 import { assertNoPendingVectorMigration } from './vector-client.js';
@@ -125,14 +128,27 @@ export function readGroupIndex(scope: string): import('./scope.js').GroupIndex |
 const LEGACY_ROOT_PREFIX = '项目根/';
 
 /**
- * 迁移 relations-cache.json 中以 "项目根/" 开头的旧 group key
+ * 迁移 relations 元数据中以 "项目根/" 开头的旧 group key
  * 例如 "项目根/API/配置" → "API/配置"
+ *
+ * 与 `migrateGroupIndex`（树把 `项目根` 虚拟根提升为顶层）**成对执行**：只有树里
+ * `项目根` 节点消失时，键才允许改名，否则「分片键 = 树路径」的不变量即被破坏
+ * （第二轮审查 P0）。因此本函数是全局唯一的键剥离点，且同时覆盖两种布局：
+ *   ① 旧布局：改写 `<scope>/relations-cache.json` 的 groups 键；
+ *   ② 新布局：把 `<scope>/.relations/项目根/X/` 改名到 `.../X/`
+ *      （先于树被读取就已惰性迁移到新布局的场景——分片落在旧键上）。
  */
 function migrateRelationsCacheKeys(scope: string): void {
   const cachePath = getRelationsCachePath(scope);
   const cache = readJson<Record<string, unknown>>(cachePath);
-  if (!cache || typeof cache.groups !== 'object' || !cache.groups) return;
+  if (cache && typeof cache.groups === 'object' && cache.groups) {
+    migrateLegacyCacheFileKeys(scope, cache, cachePath);
+  }
+  migrateShardedKeys(scope);
+}
 
+/** ① 旧布局单文件：`项目根/X` → `X`（新键已存在时按 text 合并） */
+function migrateLegacyCacheFileKeys(scope: string, cache: Record<string, unknown>, cachePath: string): void {
   const groups = cache.groups as Record<string, unknown>;
   const keysToRename: Array<{ oldKey: string; newKey: string }> = [];
 
@@ -186,6 +202,31 @@ function migrateRelationsCacheKeys(scope: string): void {
     ? `${keysToRename.length} 个重命名，${mergedCount} 个合并`
     : `${keysToRename.length} 个 group key 去掉 "项目根/" 前缀`;
   console.warn(`已自动迁移 relations-cache.json：${detail}（scope: ${scope}）`);
+}
+
+/**
+ * ② 新布局分片：`项目根/X` → `X`（与树提升配对）。
+ *
+ * 场景：某 scope 的 relations 元数据先被写路径惰性迁移到新布局（此时树还是
+ * `roots` 旧格式、或树里 `项目根` 节点尚在），随后首次读取 group-index 触发
+ * `roots → groups` 提升——若不在此刻把分片键一起改名，树变成 `X` 而分片仍是
+ * `项目根/X`，即第二轮审查 P0 的分叉（方向相反的同一种病）。
+ * 早于本次修复的版本依赖旧文件路径（`migrateLegacyCacheFileKeys`）兜底，
+ * 而那时旧文件已改名 `.bak`，等于漏迁移。
+ */
+function migrateShardedKeys(scope: string): void {
+  if (!hasShardedLayout(scope)) return;
+  const renames: Array<{ from: string; to: string }> = [];
+  for (const groupPath of listGroupPaths(scope)) {
+    if (!groupPath.startsWith(LEGACY_ROOT_PREFIX)) continue;
+    const to = groupPath.slice(LEGACY_ROOT_PREFIX.length);
+    if (!to) continue;
+    renames.push({ from: groupPath, to });
+  }
+  const moved = renameGroupCacheShards(scope, renames);
+  if (moved > 0) {
+    console.warn(`已自动迁移 relations 分片：${moved} 个 group key 去掉 "项目根/" 前缀（scope: ${scope}）`);
+  }
 }
 
 /**

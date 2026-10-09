@@ -21,10 +21,13 @@ import path from 'path';
 import { readJson, writeJson } from './lib/store.js';
 import {
   getRelationsCachePath,
+  getGroupIndexPath,
+  getKbDir,
   getLocalKbDir,
   validateScope,
 } from './lib/scope.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, hasNoRelationsData, listGroupPaths, loadGroupCache, deleteGroupCache, buildGroupMatchContext, isRelationsRootPath, type LegacyRelationsCacheShape } from './lib/group-cache.js';
 import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
@@ -93,14 +96,18 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     validateScope(scope);
     assertNoPendingVectorMigration(scope);
 
+    // 批次 2（W3）：双轨读（loadCacheShape；resolveGroupPath 需完整键上下文，删除低频全量可接受）
     const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在' };
+    let cache: RelationsCache;
+    try {
+      cache = loadCacheShape(scope) as unknown as RelationsCache;
+    } catch (err) {
+      // 第二轮审查 P2：只把「两布局皆无数据」报成未初始化；损坏必须原样透出
+      return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
     }
 
     // 解析 Group 路径（支持模糊补全）
-    const groupIndex = readJson<Record<string, unknown>>(cachePath.replace('relations-cache.json', 'group-index.json'));
+    const groupIndex = readJson<Record<string, unknown>>(getGroupIndexPath(scope));
     const resolved = await resolveGroupPath(group, groupIndex as any, cache.groups, scope);
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到任何节点` };
@@ -188,8 +195,11 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       result.reason = `${result.reason || ''} FTS-only 索引删除失败：${ftsOutcome.failed} 条`.trim();
     }
 
-    // 持久化 cache
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    // 持久化 cache（批次 2：触达组写——仅元数据实际变化时落盘；原为无条件整文件重写）
+    if (result.cacheRemoved) {
+      migrateLegacyRelationsCache(scope);
+      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([resolvedGroup]));
+    }
 
     result.deleted = result.cacheRemoved;
     return { ok: true, scope, result };
@@ -243,15 +253,30 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
     validateScope(scope);
     assertNoPendingVectorMigration(scope);
 
+    // 批次 2（W4）：双轨读——新布局 listGroupPaths 枚举键做 resolve 上下文 + 仅读级联
+    // 组分片收集 relations（O(级联组)，不为删一个小组读全库）；旧布局整文件读。
     const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在' };
+    const sharded = hasShardedLayout(scope);
+    let groupsContext: Record<string, unknown>;
+    let cascadeKeys: string[];
+    let relations: import('./lib/scoring.js').Relation[];
+    if (sharded) {
+      // 值必须是真值对象（resolveGroupPath 用真值判断命中）；传 null 会让
+      // 「relations 有该组、树里缺该组」的兜底静默失效（第二轮审查 P1）
+      groupsContext = buildGroupMatchContext(listGroupPaths(scope));
+    } else {
+      let cache: RelationsCache;
+      try {
+        cache = loadCacheShape(scope) as unknown as RelationsCache;
+      } catch (err) {
+        return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
+      }
+      groupsContext = cache.groups;
     }
 
-    const groupIndexPath = cachePath.replace('relations-cache.json', 'group-index.json');
+    const groupIndexPath = getGroupIndexPath(scope);
     const groupIndex = readJson<Record<string, unknown>>(groupIndexPath);
-    const resolved = await resolveGroupPath(group, groupIndex as any, cache.groups, scope);
+    const resolved = await resolveGroupPath(group, groupIndex as any, groupsContext, scope);
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到任何节点` };
     }
@@ -263,13 +288,21 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       return { ok: false, error: `Group "${group}" 解析为空路径，拒绝执行目录删除` };
     }
 
-    // 级联收集：relations-cache 的 groups 是平铺完整路径键（'wiki' 与 'wiki/docs' 互为独立键），
+    // 级联收集：relation 元数据键是平铺完整路径（'wiki' 与 'wiki/docs' 互为独立键/目录），
     // 删除目录 group 必须连带全部子 group（前缀 = resolvedGroup + '/'），否则树节点已删
     // 而 cache/KB/向量残留，形成查不到却删不掉的幽灵数据
-    const cascadeKeys = Object.keys(cache.groups).filter(
-      (k) => k === resolvedGroup || k.startsWith(`${resolvedGroup}/`)
-    );
-    const relations = cascadeKeys.flatMap((k) => cache.groups[k]?.hot_relations ?? []);
+    if (sharded) {
+      cascadeKeys = listGroupPaths(scope).filter(
+        (k) => k === resolvedGroup || k.startsWith(`${resolvedGroup}/`)
+      );
+      relations = cascadeKeys.flatMap((k) => loadGroupCache(scope, k)?.hot_relations ?? []);
+    } else {
+      const cache = groupsContext as RelationsCache['groups'];
+      cascadeKeys = Object.keys(cache).filter(
+        (k) => k === resolvedGroup || k.startsWith(`${resolvedGroup}/`)
+      );
+      relations = cascadeKeys.flatMap((k) => cache[k]?.hot_relations ?? []);
+    }
 
     // 同上：目录级级联删除前先确认没有在途草稿，避免留下无法收口的孤儿草稿。
     const pendingDirDrafts = activeDrafts(scope)
@@ -322,19 +355,35 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       }
     }
 
-    // 2. 从 relations-cache 删除整个 group（含全部子 group 的平铺键）
-    for (const key of cascadeKeys) {
-      delete cache.groups[key];
-    }
+    // 2. 删除该 group（含全部子 group）的 relation 元数据
+    //    批次 2：新布局分片目录天然对齐级联语义——<RELATIONS_ROOT_DIR>/<group>/ 递归删除 = 自身
+    //    分片 + 全部子组分片（deleteGroupCache 内含三步曲 bump→删→失效）；
+    //    旧布局保持整文件键删除 + 回退写。
 
     // 3. 删除本地 KB（递归删除该 group 子树目录：自身与全部子 group 的 index.json）
+    //    护栏（批次 2 审查 P1-8）：若组名与分片根保留名同名，kbGroupDir 就是分片根目录，
+    //    递归删除会连 manifest 与所有组的分片一起删掉 —— 该情形只删本组的 index.json。
     const localKbPath = getLocalKbDir(scope, resolvedGroup);
     const kbGroupDir = path.dirname(localKbPath);
-    if (fs.existsSync(kbGroupDir)) {
+    if (isRelationsRootPath(scope, kbGroupDir)) {
       try {
-        fs.rmSync(kbGroupDir, { recursive: true, force: true });
+        if (fs.existsSync(localKbPath)) fs.unlinkSync(localKbPath);
       } catch (err) {
         result.reason = `${result.reason || ''} KB 删除失败: ${(err as Error).message}`.trim();
+      }
+    } else if (fs.existsSync(kbGroupDir)) {
+      // 双重护栏（第二轮审查 P2）：除空路径与保留名外，再确认目标仍在 kb/<scope>/ 之下——
+      // 组键来自树/分片键集合（不可由单次调用注入），此处为纵深防御，避免未来某条
+      // 写路径把越界键带进来时直接递归删除 scope 之外的目录
+      const outside = path.relative(getKbDir(scope), kbGroupDir);
+      if (!outside || outside.startsWith('..') || path.isAbsolute(outside)) {
+        result.reason = `${result.reason || ''} KB 路径越界，拒绝递归删除: ${kbGroupDir}`.trim();
+      } else {
+        try {
+          fs.rmSync(kbGroupDir, { recursive: true, force: true });
+        } catch (err) {
+          result.reason = `${result.reason || ''} KB 删除失败: ${(err as Error).message}`.trim();
+        }
       }
     }
 
@@ -354,8 +403,21 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
       result.nodeRemoved = true;
     }
 
-    // 持久化
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    // 持久化（批次 2：元数据删除与 group-index 分开落盘）
+    if (sharded) {
+      // 无条件调用：分片目录不存在时内部 no-op（含 bump 前置条件判定）。
+      // 原实现以 cascadeKeys 非空为守卫，第二轮审查实测「树键与分片键不一致」时
+      // cascadeKeys 为空 → 分片残留成幽灵组。
+      deleteGroupCache(scope, resolvedGroup);
+    } else {
+      // 旧布局：整文件读改写（不走 persistCacheShape——它的"空组集=无事可做"
+      // 早退会吞掉"删除后组集合变空"的落盘）
+      const cache = loadCacheShape(scope) as unknown as RelationsCache;
+      for (const key of cascadeKeys) {
+        delete cache.groups[key];
+      }
+      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    }
     writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
 
     result.deleted = true;
