@@ -565,6 +565,48 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     return () => window.clearInterval(timer);
   }, [open]);
 
+  /**
+   * 输入区随内容自动增高（用户反馈：多行草稿时高度不涨，最新一行把顶部内容滚出可视区）。
+   *
+   * · 先归零再按 `scrollHeight` 设高：高度随内容**可增可减**（不归零则删行后收不回去）；
+   *   上下限仍由 ki.css 的 `min-height: 46px / max-height: 176px` 钳制，超限后转为内部滚动。
+   *   ⚠️ 上限只认 ki.css（此处不硬编码）；demo/chat-tools-config/index.html 的 `syncComposer`
+   *   把 176 写死在 JS 里，改 ki.css 的 max-height 时须同步该 demo，否则两处高度上限漂移。
+   * · 挂载即校准：`open` 重开 / 全屏阅读器收起时 textarea 会重新挂到 DOM，此刻 draft 可能
+   *   已有多行 → 用 ref 回调在挂载瞬间补一次（否则要等下一次输入才撑开）。
+   * · 宽度变化（dock ↔ 窄屏浮层、page 变体、窗口缩放）会改变折行数 → ResizeObserver 兜底；
+   *   回调里只比较宽度：改高度同样会触发回调，不比宽度会自激循环。
+   */
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const taRoRef = useRef<ResizeObserver | null>(null);
+  const syncComposerHeight = useCallback(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, []);
+  const bindComposer = useCallback((el: HTMLTextAreaElement | null) => {
+    // 重挂载/卸载：先断旧观察器，避免观察已移除的节点
+    taRoRef.current?.disconnect();
+    taRoRef.current = null;
+    taRef.current = el;
+    if (!el) return;
+    syncComposerHeight();
+    if (typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      syncComposerHeight();
+    });
+    ro.observe(el);
+    taRoRef.current = ro;
+  }, [syncComposerHeight]);
+  // 内容驱动（含程序化改草稿：发送后清空、发送失败回填、切 scope 重置）
+  useLayoutEffect(() => {
+    syncComposerHeight();
+  }, [draft, syncComposerHeight]);
+
   // ★ 硬约束：隐藏而非卸载（返回 null 不触发组件卸载，store 状态与进行中的流均保留）
   if (!open) return null;
   // page 是主内容而非浮层：全屏阅读器打开时无需为它让位（阅读器自身是 fixed 全屏覆盖）
@@ -1096,6 +1138,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           <div className="ki-chat-composer">
             <textarea
               className="ki-chat-composer__ta"
+              ref={bindComposer}
               value={draft}
               maxLength={MAX_SEND_CHARS}
               placeholder={blocked ?? '输入问题，Enter 发送（Shift+Enter 换行）'}
