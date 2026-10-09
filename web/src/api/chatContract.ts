@@ -99,7 +99,12 @@ export type RetrievalMode = 'fulltext' | 'hybrid';
 
 export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
-  | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
+  /**
+   * 工具调用开始（批次 2 泛化）：
+   * · 检索类工具（ki_search）带 `query` + `mode`；其余工具带 `args`（参数摘要）
+   * · 三者均**可选** —— 渲染按存在性分支，不得假设必有
+   */
+  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }
@@ -164,7 +169,7 @@ export interface PromptConfig {
   version: 1;
   prompt: { content: string; at: string };
   skills: PromptSkill[];
-  /** 工具名 → 是否暴露给 AI。**批次 2 才生效**，本批只存 —— UI 必须标注，勿让用户以为已生效 */
+  /** 工具名 → 是否暴露给 AI（批次 2 起真实生效：保存后下一次提问即生效） */
   tools: Record<string, boolean>;
 }
 
@@ -212,7 +217,8 @@ export interface PromptConfigSaveOk {
  * ⚠️ **必须可见，不得静默**（N17）：用户看不到标记就会把"没检索"当成"检索了但没找到"。
  */
 export const DEGRADED_LABELS: Record<DegradedReason, string> = {
-  'tools-unsupported': '本次未使用工具检索',
+  // 批次 2（D2）：不支持工具 → 纯聊天（不再预检索），如实告知
+  'tools-unsupported': '本次未检索知识库（模型不支持工具调用，按纯对话回答）',
   // 原为「本次未检索」—— 与实际语义不符：该 reason 表示"检索请求未成功"（可能已调用多次后失败），
   // 说"未检索"会让用户以为压根没搜，且与「已达检索轮次上限」并列时看似自相矛盾（真机走查 #10）
   'retrieval-unavailable': '本次检索未成功',

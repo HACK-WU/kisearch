@@ -7,6 +7,10 @@
  *
  * ⚠️ 契约约束（实现方必读）：
  *   1. 本文件在骨架期【冻结】，实现期**一字不改**；变更须回 design 并走批次边界
+ *      （唯一已批准的批次边界变更：**批次 2（2026-10-08）** —— `tool_start` 的
+ *        `query`/`mode` 改**可选**、新增可选 `args`，承载非检索类 MCP 工具；
+ *        决策 D5，见 `.plans/2026-10-08-chat-mcp-tools-batch2/plan.md`。
+ *        其余形状未动；前端副本与 contract-parity 已同步）
  *   2. 前端有同形状副本 `web/src/api/chatContract.ts`（两端是独立 package，无法互相 import）
  *      → 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 机械保证
  *   3. 所有 stub 实现带「桩标记」，供桩残留扫描（标记模式见 `.delivery/stub-pattern`）
@@ -60,7 +64,7 @@ export interface ChatProgressStep {
    * 旧数据无此字段 → 视为 0（集中在正文前，维持旧行为）。
    */
   afterChars?: number;
-  /** 工具名（如 `kb_search`） */
+  /** 工具名（如 `ki_search`） */
   name?: string;
   /** 检索模式（`tool_start` 带） */
   mode?: string;
@@ -138,7 +142,13 @@ export type RetrievalMode = 'fulltext' | 'hybrid';
 /** SSE 事件（判别联合，前端按 `type` 分派） */
 export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
-  | { type: 'tool_start'; name: string; query: string; mode: RetrievalMode }
+  /**
+   * 工具调用开始（批次 2 泛化，D5）：
+   * · 检索类工具（ki_search）带 `query` + `mode`（旧行为）
+   * · 其余工具带 `args`（服务端生成的参数摘要，大字段已排除）
+   * · `query`/`mode`/`args` 均可选 —— 前端按存在性渲染，不得假设必有
+   */
+  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }

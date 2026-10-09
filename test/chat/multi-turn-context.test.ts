@@ -25,7 +25,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { runToolLoop } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { resetConfigCache } from '../../src/lib/config.js';
+import type { ChatEvent } from '../../src/lib/chat/chat-contract.js';
 
 // ─── mock 上游：捕获请求体 ───
 
@@ -191,56 +193,60 @@ describe('多轮上下文 · 上游 messages 形状', () => {
   });
 });
 
-describe('多轮上下文 · 降级路径（预检索）的上游 messages 形状', () => {
+describe('多轮上下文 · 纯聊天降级路径（批次 2 决策 D2）的上游 messages 形状', () => {
   /**
-   * 为什么单列：`degradedPath` 用 `messages.splice(messages.length - 1, 0, …)` 把检索上下文
-   * 插到「本轮 user 之前」——它**依赖 `buildUpstreamMessages` 的末条不变量**。
-   * 本用例是该耦合的唯一守护：若守卫改成"末条是 user 就跳过"之类会吃掉本轮提问的写法，
-   * 或 splice 位置被改坏，这里会立刻变红。
-   *
-   * 本用例的配置把 embedding 指向不可达地址（127.0.0.1:1）。**注意**：这并不必然让
-   * `retrievalOk=false` —— master 的 `62b2190` 已把全文检索与 embedding 解耦，FTS 通道可用
-   * 即判「检索可用」（语义侧降级由 note 表达）。故 `!retrievalOk` 那条分支在本环境**不易触发**，
-   * 本用例对**两条分支都成立的结构性不变量**做断言（分支归属由注入文案识别）。
+   * 批次 2 反转：`supportsTools=false` 时**不再预检索**（旧 `runPreRetrievalFallback` 已退役），
+   * 改为注入一条「本次未检索知识库」system 提示后按纯对话作答。
+   * 本用例守护的结构性不变量：注入不得打乱 system → 历史 → 本轮 user 的消息序，
+   * 也不得吃掉或复制本轮提问。
    */
-  it('★ 注入的检索上下文紧邻本轮 user 之前，且本轮 user 恰好一次（守住 splice 依赖的不变量）', async () => {
-    captured = [];
-    for await (const _ev of runPreRetrievalFallback({
-      scope: 'default',
-      conv: convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2')]),
-      userText: 'Q2',
-      convSystemPrompt: '',
-      signal: new AbortController().signal,
-    })) { /* 事件序 / 降级标记由 data-flow / acceptance-sr01 覆盖 */ }
+  it('★ 注入「未检索」提示不打乱消息序；本轮 user 仍恰好一次且为末条', async () => {
+    const original = fs.readFileSync(cfgPath, 'utf8');
+    // before() 写出的 config 末行无换行 → 必须前置 \n 追加，否则破坏 YAML
+    fs.writeFileSync(cfgPath, `${original}\n  supportsTools: false\n`);
+    resetConfigCache();
+    try {
+      captured = [];
+      const events: ChatEvent[] = [];
+      for await (const ev of runToolLoop({
+        scope: 'default',
+        conv: convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2')]),
+        userText: 'Q2',
+        convSystemPrompt: '',
+        signal: new AbortController().signal,
+      })) events.push(ev);
 
-    assert.equal(captured.length, 1, `降级路径应恰好发出 1 次上游请求，实际 ${captured.length} 次`);
-    const cap = captured[0];
+      assert.equal(captured.length, 1, `降级路径应恰好发出 1 次上游请求，实际 ${captured.length} 次`);
+      const cap = captured[0];
 
-    // ① 不变量：末条恒为本轮 user（splice 的插入位置依赖它）
-    const last = cap.messages[cap.messages.length - 1];
-    assert.equal(last.role, 'user', '末条必须是本轮 user 消息');
-    assert.equal(last.content, 'Q2', '末条内容应为本轮提问原文');
+      // ① 不变量：末条恒为本轮 user（历史构造依赖它）
+      const last = cap.messages[cap.messages.length - 1];
+      assert.equal(last.role, 'user', '末条必须是本轮 user 消息');
+      assert.equal(last.content, 'Q2', '末条内容应为本轮提问原文');
 
-    // ② 守卫不得把本轮提问吃掉
-    assert.equal(countOf(cap, 'Q2'), 1, `本轮 user 应恰好一次，实际 ${countOf(cap, 'Q2')} 次`);
+      // ② 守卫不得把本轮提问吃掉、也不得复制
+      assert.equal(countOf(cap, 'Q2'), 1, `本轮 user 应恰好一次，实际 ${countOf(cap, 'Q2')} 次`);
 
-    // ③ 注入的检索上下文紧邻本轮 user 之前（不是插进历史中间）
-    const injected = cap.messages[cap.messages.length - 2];
-    assert.equal(injected.role, 'user', '注入的上下文应在末条之前一位');
-    // 两条分支各自的指定文案：retrievalOk → 【自动检索结果】；!retrievalOk → 【提示】本次检索不可用
-    const isAutoResult = injected.content.includes('自动检索结果');
-    const isUnavailableHint = injected.content.includes('本次检索不可用');
-    assert.ok(
-      isAutoResult || isUnavailableHint,
-      `注入内容应为两支之一的指定文案，实际：${injected.content.slice(0, 80)}`,
-    );
+      // ③ 注入的「未检索」提示是 system 消息，且不打乱 user/assistant 交替
+      const hint = cap.messages.find((m) => m.role === 'system' && m.content.includes('本次未检索知识库'));
+      assert.ok(hint, '应注入「本次未检索知识库」system 提示');
+      assert.deepEqual(consecutiveSameRole(cap), [], '注入不得造成连续同角色消息');
 
-    // ④ 历史仍在且顺序不变（注入不得打乱 system → 历史 → 本轮）
-    assert.deepEqual(
-      cap.messages.filter((m) => m.role !== 'system').slice(0, 2).map((m) => m.content),
-      ['Q1', 'A1'],
-      '历史应保持 Q1→A1 顺序',
-    );
-    assert.equal(cap.messages[0].role, 'system', 'system 仍在最前');
+      // ④ 历史仍在且顺序不变
+      assert.deepEqual(
+        cap.messages.filter((m) => m.role !== 'system').slice(0, 2).map((m) => m.content),
+        ['Q1', 'A1'],
+        '历史应保持 Q1→A1 顺序',
+      );
+      assert.equal(cap.messages[0].role, 'system', 'system 仍在最前');
+
+      // ⑤ 事件面：纯聊天 —— degraded(tools-unsupported)、无工具事件、done 收尾
+      assert.ok(!events.some((e) => e.type === 'tool_start' || e.type === 'tool_end'), '纯聊天路径不得出现工具事件');
+      assert.equal(events.find((e) => e.type === 'degraded')?.reason, 'tools-unsupported');
+      assert.equal(events.at(-1)?.type, 'done');
+    } finally {
+      fs.writeFileSync(cfgPath, original);
+      resetConfigCache();
+    }
   });
 });

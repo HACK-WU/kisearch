@@ -12,7 +12,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -36,7 +36,8 @@ writeFileSync(
 const previousConfig = process.env.KI_CONFIG_PATH;
 process.env.KI_CONFIG_PATH = TMP_CONFIG;
 
-import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { runToolLoop } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { resetConfigCache } from '../../src/lib/config.js';
 import { toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
 import {
   truncateAfterAndEdit,
@@ -80,9 +81,11 @@ describe('SR-01 验收 · R18/R19 检索问答', () => {
   });
 
   it('N23：工具 schema 不含 scope 参数（跨 scope 检索被结构性禁止）', async () => {
-    const { KB_SEARCH_TOOL } = await import('../../src/lib/chat/retrieval/retrieval-skill.js');
-    const props = Object.keys((KB_SEARCH_TOOL.function.parameters as any).properties ?? {});
-    assert.ok(!props.includes('scope'));
+    const { CHAT_MCP_TOOLS } = await import('../../src/lib/chat/mcp-tool-registry.js');
+    for (const entry of CHAT_MCP_TOOLS) {
+      const props = Object.keys((entry.def.function.parameters as any).properties ?? {});
+      assert.ok(!props.includes('scope'), `${entry.name} 不得暴露 scope`);
+    }
   });
 
   it('2026-09-30 决策：第四次工具调用仍被执行，不受旧三轮上限截断', async () => {
@@ -120,9 +123,21 @@ describe('SR-01 验收 · N17 检索不可用必须明示', () => {
     assert.doesNotThrow(() => toSourceRefs(mockSearchResult('empty')));
   });
 
-  it('检索不可用 → 产出 degraded 事件（不得静默按普通对话作答）', async () => {
-    const events = await collect(runPreRetrievalFallback({ scope: 'kisearch', conv, userText: 'x', convSystemPrompt: '' }));
-    assert.ok(events.some((e) => e.type === 'degraded'), '必须发 degraded 事件');
+  it('检索/工具不可用 → 产出 degraded 事件（不得静默按普通对话作答）', async () => {
+    // 批次 2（D2）：预检索降级（runPreRetrievalFallback）已退役；
+    // 用 supportsTools=false 触发纯聊天降级路径，验证 degraded 明示仍在。
+    const original = readFileSync(TMP_CONFIG, 'utf-8');
+    // fixture 写出的 config 末行无换行 → 必须前置 \n 追加，否则落在同一行破坏 YAML
+    writeFileSync(TMP_CONFIG, `${original}\n  supportsTools: false\n`);
+    resetConfigCache();
+    try {
+      const events = await collect(runToolLoop({ scope: 'kisearch', conv, userText: 'x', convSystemPrompt: '' }));
+      assert.ok(events.some((e) => e.type === 'degraded'), '必须发 degraded 事件');
+      assert.ok(!events.some((e) => e.type === 'tool_start' || e.type === 'tool_end'), '降级路径不得执行工具');
+    } finally {
+      writeFileSync(TMP_CONFIG, original);
+      resetConfigCache();
+    }
   });
 });
 

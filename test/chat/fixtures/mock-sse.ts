@@ -7,7 +7,7 @@ const done = (sources: typeof source[] = []): ChatEvent => ({ type: 'done', mess
 export function retrievalAnswerFlow(): ChatEvent[] {
   return [
     meta(),
-    { type: 'tool_start', name: 'kb_search', query: 'ki_search', mode: 'fulltext' },
+    { type: 'tool_start', name: 'ki_search', query: 'ki_search', mode: 'fulltext' },
     { type: 'tool_end', hits: 1, durationMs: 2 },
     { type: 'reasoning', text: '根据已检索的知识回答。' },
     { type: 'content', text: '（mock）根据知识库，' },
@@ -23,9 +23,9 @@ export function degradedFlow(): ChatEvent[] {
 }
 
 export function retrievalUnavailableFlow(): ChatEvent[] {
-  return [meta(), { type: 'tool_start', name: 'kb_search', query: 'x', mode: 'fulltext' },
+  return [meta(), { type: 'tool_start', name: 'ki_search', query: 'x', mode: 'fulltext' },
     { type: 'tool_end', hits: 0, durationMs: 2, error: '检索不可用' },
-    { type: 'degraded', reason: 'retrieval-unavailable', message: '本次检索不可用' },
+    { type: 'degraded', reason: 'retrieval-unavailable', message: '本次检索未成功' },
     { type: 'content', text: '（mock）无法检索，已明确提示' }, done()];
 }
 

@@ -74,7 +74,6 @@ import {
   truncateAfterAndEdit,
 } from './chat-store.js';
 import { runToolLoop } from './retrieval/tool-loop.js';
-import { KB_SEARCH_TOOL_NAME } from './retrieval/retrieval-skill.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
   MAX_SKILLS,
@@ -974,6 +973,8 @@ async function runGeneration(
   let progress: ChatProgressStep[] = [];
   let messageId: string | null = null;
   let abortedFlag = false;
+  // 批次 2：最近一次 tool_start 的工具名（tool_end 事件本身不带 name，日志用）
+  let lastToolName: string | null = null;
   let streamError: { code: string; error: string; retryable?: boolean } | null = null;
   /**
    * tool-loop 在 `done` 事件里给出的 warning（`tool-rounds-exhausted` / `conversation-too-long`）。
@@ -1008,8 +1009,10 @@ async function runGeneration(
       if (ev.type === 'usage') { usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, ...(ev.reasoningTokens !== undefined ? { reasoningTokens: ev.reasoningTokens } : {}) }; writeSseEvent(res, ev); continue; }
       if (ev.type === 'sources') { sources = ev.sources; writeSseEvent(res, ev); continue; }
       if (ev.type === 'tool_start') {
-        // ★ 落盘摘要只记工具名与模式（**不落 query**：用户问题已在 user 消息里，N22 最小化）
+        // ★ 落盘摘要只记工具名与模式（**不落 query/args**：用户问题已在 user 消息里，N22 最小化；
+        //   args 是展示用摘要，落盘口径维持决策 #13 的"步骤级摘要"不变）
         // afterChars = 此刻已发出的正文长度 → 前端据此把调用痕迹插在"哪句话之后"（interleave 锚点）
+        lastToolName = ev.name;
         progress.push({ phase: 'start', name: ev.name, mode: ev.mode, afterChars: content.length });
         writeSseEvent(res, ev);
         continue;
@@ -1019,7 +1022,7 @@ async function runGeneration(
         if (ev.error !== undefined) {
           chatLog(CHAT_LOG_EVENTS.TOOL_ERROR, {
             convId, msgId: messageId ?? undefined,
-            tool: KB_SEARCH_TOOL_NAME,
+            tool: lastToolName ?? undefined,
             code: 'TOOL_ERROR',
             detail: ev.error,
           });

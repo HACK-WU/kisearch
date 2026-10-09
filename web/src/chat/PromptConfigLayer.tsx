@@ -8,7 +8,8 @@
  * 数据流：`usePromptConfig` 拉配置 → 层内持有**草稿** → 底栏「保存」整体替换提交。
  * 因此「取消」= 直接关闭并丢弃草稿，天然是回滚（无需快照对比）。
  *
- * ⚠️ 工具开关**本批只存不生效**：界面上必须标注「尚未接入」，不得让用户以为已经生效。
+ * ⚠️ 工具开关**批次 2 起真实生效**：保存后下一次提问即按开关暴露工具给 AI；
+ *   写入/删除组开启需二次确认（开启 = 授权 AI 直接执行该类操作）。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -199,9 +200,8 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 工具与权限
-                <em className="ki-chat-cfg__badge">尚未接入</em>
               </span>
-              <p className="ki-chat-cfg__hint">这里只保存工具偏好；当前 AI 仅使用知识库检索，尚未接入这些工具权限。</p>
+              <p className="ki-chat-cfg__hint">保存后下一次提问生效：开启的工具将真实暴露给 AI。默认只开只读工具；写入 / 删除开启即授权 AI 执行，请谨慎。</p>
               {toolEntries.map((g) => (
                 <div key={g.key}>
                   <p className={`ki-chat-cfg__group${g.danger ? ' ki-chat-cfg__group--danger' : ''}`}>
@@ -230,7 +230,7 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
                           if (next && g.danger) {
                             setConfirm({
                               title: '开启危险工具',
-                              text: `${r.name} 会改动当前 scope 的知识库内容。当前尚未接入，此处仅记录工具偏好。`,
+                              text: `${r.name} 会改动当前 scope 的知识库内容。开启后 AI 可在对话中直接执行该操作，请谨慎。`,
                               onYes: apply,
                             });
                             return;

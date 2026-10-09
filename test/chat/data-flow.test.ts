@@ -21,7 +21,7 @@
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startRetrievalUpstream } from './fixtures/retrieval-upstream.js';
@@ -41,7 +41,8 @@ after(async () => {
 
 import type { ChatEvent } from '../../src/lib/chat/chat-contract.js';
 import { CHAT_EVENT_ORDER_RULES } from '../../src/lib/chat/chat-contract.js';
-import { runToolLoop, runPreRetrievalFallback } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { runToolLoop } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { resetConfigCache } from '../../src/lib/config.js';
 import {
   retrievalAnswerFlow,
   degradedFlow,
@@ -115,11 +116,24 @@ describe('数据走向预演 · 真实链路（骨架期为红）', () => {
     assert.equal(events.at(-1)?.type, 'done');
   });
 
-  it('降级链路：产出 degraded 事件', async () => {
-    const events: ChatEvent[] = [];
-    for await (const e of runPreRetrievalFallback({ scope: 'kisearch', conv, userText: 'x', convSystemPrompt: '' })) {
-      events.push(e);
+  it('降级链路：产出 degraded 事件（批次 2 D2：纯聊天，不执行工具）', async () => {
+    // runPreRetrievalFallback 已退役；翻转 supportsTools=false 触发纯聊天降级路径
+    const original = readFileSync(configPath, 'utf-8');
+    // fixture 写出的 config 末行无换行 → 前置 \n 追加
+    writeFileSync(configPath, `${original}\n  supportsTools: false\n`);
+    resetConfigCache();
+    try {
+      const events: ChatEvent[] = [];
+      for await (const e of runToolLoop({ scope: 'kisearch', conv, userText: 'x', convSystemPrompt: '' })) {
+        events.push(e);
+      }
+      assert.ok(events.some((e) => e.type === 'degraded'));
+      assert.ok(!events.some((e) => e.type === 'tool_start' || e.type === 'tool_end'), '纯聊天降级不执行工具');
+      assert.deepEqual(validateOrder(events), []);
+      assert.equal(events.at(-1)?.type, 'done');
+    } finally {
+      writeFileSync(configPath, original);
+      resetConfigCache();
     }
-    assert.ok(events.some((e) => e.type === 'degraded'));
   });
 });
