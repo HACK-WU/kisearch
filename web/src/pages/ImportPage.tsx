@@ -354,6 +354,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [attention, setAttention] = useState<'scope' | 'files' | null>(null);
   /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默按旧 scope 导入 */
   const [scopeDraft, setScopeDraft] = useState('');
+  /**
+   * 表单代际：离开导入页再回来时自增，作为 `ScopePathSelect` 的 key 强制重建。
+   * 该组件输入框显示的是内部 `scopeFilter`（非 value），只清父组件的 scope 状态会留下
+   * 上一次的 Scope 文本 —— 正是"框里有值但未确认"的误导态来源（Q4，2026-10-10）。
+   */
+  const [formEpoch, setFormEpoch] = useState(0);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
   const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
@@ -468,7 +474,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * 文件选择 / 上传统计 / 错误卡 / 进度文案（用户反馈"上传导入中的数据没有清空"）。
    * 边界（已与用户确认）：**在途任务不打断**——scanning / uploading / importing / unknown
    * 原样保留（进度继续、可继续查看）；只有回到 idle / done / failed 这类终态时才清空。
-   * 高级参数（切分、向量化开关、tag、Scope/Group 目标）属"偏好"而非"本批暂存"，保留。
+   * Q4（2026-10-10 用户拍板）：Scope / Group / 同名策略 / tags / 切分参数**一并清空**
+   * （此前当"偏好"保留，会造成"输入框已填好上次的 Scope 与同名策略、却没确认"的误导态）。
    */
   const location = useLocation();
   const onImportRoute = location.pathname === '/import';
@@ -522,8 +529,26 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setFailureStage(null);
     setProgressText('');
     setJob(null);
-    setScopeDraft('');
     setPhase('idle');
+    /**
+     * Q4（2026-10-10 用户拍板）：Scope / Group / 同名策略 / tags / 切分参数**不再是「偏好」保留项**。
+     * 此前只清「本批暂存」，这些输入跨页保留，导致「每次导入前重新确认 Scope」的提示与
+     * 「输入框已填好上次的 Scope + 同名策略」并存——用户会把上一批的目标当成本批目标。
+     * 清空动作只在此终态分支执行：部分成功分支（见上）必须保留 scope/uploadId 供「重试未完成」。
+     */
+    setScope('');
+    setScopeConfirmed(false);
+    setFormEpoch((epoch) => epoch + 1);
+    setGroup('');
+    setConflictMode('suffix');
+    setConflictSuffix('_{n}');
+    setSelectedTags([]);
+    setTagInput('');
+    setTagInputErr(null);
+    setChunkSize('1000');
+    setChunkOverlap('150');
+    setVector(true);
+    setScopeDraft('');
   }, [onImportRoute, phase, job?.id, job?.result]);
 
   /**
@@ -1353,6 +1378,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div ref={scopeFieldRef} className={attention === 'scope' ? 'ki-attention' : undefined}>
               <ScopePathSelect
+                key={formEpoch}
                 value={scope}
                 confirmed={scopeConfirmed}
                 currentScope={currentScope}

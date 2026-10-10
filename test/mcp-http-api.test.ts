@@ -585,6 +585,21 @@ describe('/api/import/upload', () => {
   });
 });
 
+describe('/api/vector/status/refresh', () => {
+  it('引擎可用时正常刷新：200 + status，且不出现 degraded 标记（R8 接线）', async () => {
+    const res = await fetch(`${handle!.base}/api/vector/status/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'vector-refresh-ok' }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { ok: boolean; status?: { scope?: string }; degraded?: unknown };
+    assert.equal(body.ok, true);
+    assert.ok(body.status, '应返回 status 快照');
+    assert.equal(body.degraded, undefined, '未超时时不得出现降级标记（避免误标 stale）');
+  });
+});
+
 describe('/api/import/run + status', () => {
   it('run 缺参数 → 400', async () => {
     const res = await fetch(`${handle!.base}/api/import/run`, {

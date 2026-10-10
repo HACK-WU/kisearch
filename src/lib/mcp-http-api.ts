@@ -55,6 +55,7 @@ import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './docu
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
+import { withTimeoutFallback } from './timeout.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -73,6 +74,12 @@ const HEALTH_PROBE = { timeoutMs: 4_000, retries: 0 };
  * 一个慢子检查就能把整份健康报告换成一条 400。
  */
 const HEALTH_TIMEOUT_MS = healthCheckWorstCaseMs(HEALTH_PROBE.timeoutMs, HEALTH_PROBE.retries) + 3_000;
+
+/**
+ * 辅助读超时上限（R8，REQ-20261009-003）：引擎繁忙时应尽快给出"未知/陈旧"，
+ * 而不是让请求无限挂住 —— 现场二就是一个挂住的辅助请求把该 scope 的队列槽占死 >10 分钟。
+ */
+const VECTOR_STATUS_REFRESH_TIMEOUT_MS = 5_000;
 
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
@@ -460,10 +467,32 @@ export async function handleApiRequest(
       }
       const result = await getSharedOperationCoordinator().submit(
         { operation: 'vector-status-refresh', params: { scope } },
-        () => runWithConfigSnapshot(requestConfig, () => refreshVectorDimensionSnapshot(requestConfig, scope)),
+        // ★ R8：超时必须在 **handler 内部** 完成 —— coordinator 的 release() 在 handler
+        //   返回之后才执行；若只在 HTTP 响应层超时，submit 不会 resolve，该 scope 的
+        //   队列槽仍被占死（现场二即此形态），元数据读会继续排队。
+        () => runWithConfigSnapshot(requestConfig, async () => {
+          const outcome = await withTimeoutFallback(
+            refreshVectorDimensionSnapshot(requestConfig, scope),
+            () => readVectorDimensionSnapshot(requestConfig, scope),
+            VECTOR_STATUS_REFRESH_TIMEOUT_MS,
+          );
+          if (!outcome.timedOut) return { status: outcome.value };
+          process.stderr.write(
+            `[kisearch][api:/vector/status/refresh] 引擎未在 ${VECTOR_STATUS_REFRESH_TIMEOUT_MS / 1000}s 内响应`
+            + `（等待 ${outcome.waitedMs}ms），已返回上次快照并放行该 scope 队列；底层探测仍在后台继续。\n`,
+          );
+          // ★ 降级必须"语义诚实"：把 state 置为 unknown —— 本次并未确认成功。
+          //   若原样返回上次的 compatible，前端（只读 state）会把它当成"刚刚刷新成功"。
+          //   其余字段（checkedAt / persisted / indexCompleteness）保留，表示"上次已知"。
+          return {
+            status: { ...outcome.value, state: 'unknown' as const },
+            degraded: { reason: 'timeout' as const, waitedMs: outcome.waitedMs },
+          };
+        }),
         [scope],
       );
-      sendJson(res, 200, { ok: true, status: result.result });
+      const payload = result.result as { status: unknown; degraded?: { reason: string; waitedMs: number } };
+      sendJson(res, 200, { ok: true, ...payload });
       return;
     }
     if (p === '/health' && req.method === 'GET') return void (await handleHealth(res));
