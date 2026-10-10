@@ -588,19 +588,25 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   }, [phase]);
 
   useEffect(() => {
+    // S-02/S-03（REQ-20261009-003）：两级完成口径下的轨道文案 ——「已完成 · 可用」与
+    // 「已优化」分开表述；整理未完成（失败/超时降级）时给出可重试线索，**不谎报失败**。
+    const doneIndexSuffix = job?.indexState === 'indexing' ? ' · 索引整理中…'
+      : job?.indexState === 'optimized' ? ' · 索引已优化'
+        : job?.indexState === 'available' ? ' · 索引整理未完成（可重试）'
+          : '';
     onTaskChange?.(phase === 'idle' ? null : {
       phase,
       scope: job?.scope ?? uploadPlanRef.current?.scope ?? scope,
       text: phase === 'done'
-        ? uploadErrors.length > 0 || (Array.isArray(job?.result?.errors) && job.result.errors.length > 0)
-          ? '导入完成，部分文件失败' : '导入完成'
+        ? (uploadErrors.length > 0 || (Array.isArray(job?.result?.errors) && job.result.errors.length > 0)
+          ? `导入完成，部分文件失败${doneIndexSuffix}` : `导入完成${doneIndexSuffix}`)
         : phase === 'failed' ? (failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败')
           : phase === 'unknown' ? '任务状态待确认'
             : phase === 'importing' && job?.progress?.total
               ? `导入中 ${job.progress.done}/${job.progress.total}`
               : progressText || (phase === 'importing' ? '导入中…' : '上传中…'),
     });
-  }, [phase, failureStage, progressText, uploadErrors, job?.scope, job?.progress?.done, job?.progress?.total, job?.result, scope, onTaskChange]);
+  }, [phase, failureStage, progressText, uploadErrors, job?.scope, job?.progress?.done, job?.progress?.total, job?.result, job?.indexState, scope, onTaskChange]);
 
   useEffect(() => {
     let active = true;
@@ -707,9 +713,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     return !!plan && plan.scope === scope && plan.selectionSnapshot === selections;
   };
 
-  // 进度轮询（导入中每 2s）
+  // 进度轮询（导入中每 2s；**索引整理期间继续轮询**）
   useEffect(() => {
-    if (phase !== 'importing' || !job) return;
+    // S-02（REQ-20261009-003）：`state` 已是 'done' 但 `indexState === 'indexing'` 时仍需轮询
+    // ——「已完成 · 可用」与「索引已优化」分两级呈现（刷新/重进页面后也能继续跟进）。
+    const indexingAfterDone = phase === 'done' && job?.indexState === 'indexing';
+    if ((phase !== 'importing' && !indexingAfterDone) || !job) return;
     let active = true;
     let checking = false;
     const invalidateImportQueries = (targetScope: string): void => {
@@ -736,20 +745,35 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         setJob(res.job);
         const targetScope = res.job.scope || scope;
         if (res.job.state === 'done') {
-          active = false;
-          clearInterval(timer);
+          // S-02/S-03（REQ-20261009-003）：**两级完成口径**。
+          // ★ 第一级「可用」必须在**这一刻**完成（不是等整理结束）：元数据已提交，
+          //   结果区要立刻渲染、缓存要失效、事件要广播——否则用户会一直看到"导入中…"，
+          //   正是本需求要消除的"把可用推迟"。
+          // ★ 第二级：`indexState === 'indexing'` 期间**继续轮询**（不 clearInterval）；
+          //   落到 `optimized` / `available`（失败/超时降级）才收尾。
+          // ★ 一次性副作用只做一次：靠 `wasDone`（来自 effect 依赖里的 phase）判定，
+          //   因为 setPhase('done') 会重跑本 effect（重新建 interval）——若不加这道闸，
+          //   每次 tick 都会重复失效缓存 + 重复广播事件。
+          const indexing = res.job.indexState === 'indexing';
+          const wasDone = phase === 'done';
           setProgressText('');
-          invalidateImportQueries(targetScope);
-          // R2（REQ-20261009-001）：部分成功时**保留凭据**——「重试未完成」需要同一
-          // uploadId（暂存目录仍在服务端），刷新/重进页面也能恢复该入口；全量成功才清理
-          const donePartial = Boolean((res.job.result as { partial?: boolean } | undefined)?.partial);
-          if (!donePartial) clearImportCredentialIf({ jobId: job.id });
+          if (!wasDone) {
+            invalidateImportQueries(targetScope);
+            // R2（REQ-20261009-001）：部分成功时**保留凭据**——「重试未完成」需要同一
+            // uploadId（暂存目录仍在服务端），刷新/重进页面也能恢复该入口；全量成功才清理
+            const donePartial = Boolean((res.job.result as { partial?: boolean } | undefined)?.partial);
+            if (!donePartial) clearImportCredentialIf({ jobId: job.id });
+            void fetchTags(targetScope).then((tags) => {
+              if (tags.ok) setAvailableTags(tags.tags.map((tag) => tag.tag));
+            }).catch(() => {});
+            window.dispatchEvent(new CustomEvent('ki-import-completed', { detail: { scope: targetScope } }));
+          }
           setPhase('done');
           setScopeConfirmed(false);
-          void fetchTags(targetScope).then((tags) => {
-            if (tags.ok) setAvailableTags(tags.tags.map((tag) => tag.tag));
-          }).catch(() => {});
-          window.dispatchEvent(new CustomEvent('ki-import-completed', { detail: { scope: targetScope } }));
+          if (!indexing) {
+            active = false;
+            clearInterval(timer);
+          }
         } else if (res.job.state === 'failed') {
           active = false;
           clearInterval(timer);
@@ -1899,6 +1923,18 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                   : importErrors.length > 0 || uploadErrors.length > 0 ? '完成（有错误）' : '已完成'}
               </span>
             )}
+            {/* S-02/S-03（REQ-20261009-003）：索引整理（二级口径）——「文档可用」与「索引已优化」
+                是两件事，必须分开呈现，且不得让用户把"整理中"误读成"导入没完成"。 */}
+            {phase === 'done' && !error && job?.indexState && job.indexState !== 'skipped' && (
+              <span
+                className={`ki-task-state ki-task-state--${job.indexState === 'optimized' ? 'succeeded' : job.indexState === 'indexing' ? 'running' : 'partial'}`}
+                title={job.indexMaintenanceDegraded?.reason ?? undefined}
+              >
+                {job.indexState === 'indexing'
+                  ? '索引整理中…'
+                  : job.indexState === 'optimized' ? '索引已优化' : '索引整理未完成（可重试）'}
+              </span>
+            )}
           </div>
           <div className="ki-track-title">结果摘要</div>
           {phase === 'done' && !error ? (
@@ -1911,6 +1947,18 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}${partialFiles.unchanged ? ` / 其中未变跳过重算 ${partialFiles.unchanged}` : ''}）`
                 : ''}
             </p>
+            {/* S-02/S-03：两级完成口径的说明文案（整理期文档照常可用；失败只降级、不谎报导入失败） */}
+            {job?.indexState === 'indexing' && (
+              <p className="ki-cell-sub" style={{ marginTop: 4 }}>
+                ⏳ 引擎正在后台整理索引（限核执行）：文档已可用，浏览与检索不受影响；整理完成后此处会显示「索引已优化」。
+              </p>
+            )}
+            {job?.indexState === 'available' && (
+              <p className="ki-cell-sub" style={{ marginTop: 4 }}>
+                文档已可用；索引整理未完成（{job.indexMaintenanceDegraded?.degraded ?? 'error'}）——可在服务端执行
+                {' '}<code>ki index-optimize -s {job.scope}</code> 重试（不需要重新导入）。
+              </p>
+            )}
             {showPartial && (
               <div className="ki-import-errors" role="alert">
                 <div className="ki-import-errors__title">

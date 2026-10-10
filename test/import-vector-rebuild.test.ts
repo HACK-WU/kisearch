@@ -283,7 +283,8 @@ describe('import 增量向量更新', () => {
       assert.equal(result.partial, true, '部分成功必须显式标记');
       assert.equal(result.stopReason?.code, 'HTTP_503');
       assert.equal(result.stopReason?.phase, 'embedding');
-      assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0 }, '完成 1 / 未完成 2（文件级）');
+      // unchanged: 增量导入（REQ-20261010-001）新增字段：本用例无"内容未变"文件 ⇒ 0
+      assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0 }, '完成 1 / 未完成 2（文件级）');
       // mock 的 stop 模式：entries[0]（扫描序首个 = later.md）成功、其余报错/未处理
       assert.deepEqual(
         result.incomplete.map((item) => item.path).sort(),

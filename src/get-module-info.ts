@@ -21,6 +21,8 @@ import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { hasShardedLayout, listGroupPaths, loadGroupCache, loadPartitionConfig, writeGroupCache, buildGroupMatchContext } from './lib/group-cache.js';
+// S-04 I2 补口（2026-10-10）：本文件是**读详情**路径，但会回写评分（元数据）→ 必须入提交窗口
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
@@ -209,20 +211,26 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
         updatedAt: null,
       });
     };
-    if (hasShardedLayout(scope)) {
-      writeShard();
-    } else {
-      // 旧布局：读改写完整 cache（partition_config 等顶层字段不可丢）
-      const legacyPath = getRelationsCachePath(scope);
-      const fullCache = readJson<RelationsCache>(legacyPath);
-      if (fullCache) {
-        fullCache.groups[resolvedGroup] = groupData;
-        writeJson(legacyPath, fullCache as unknown as Record<string, unknown>);
-      } else {
-        // 旧文件已在本轮 await 期间被迁移（改名 .bak）→ 补写分片
+    // ★ S-04 I2 补口（2026-10-10）：评分回写属**元数据写**，必须入「元数据提交窗口」。
+    // 本函数是**读详情**路径（工具调用本身串行），但自 I4 起 `read` 通道任务可与写任务
+    // 并行 ⇒ 窗外写会让并发读看到"半新半旧"（跨文件不一致）。
+    // 窗口只包住写本身（毫秒级），**不含**上面的 `await resolveGroupPath`（可达秒级）。
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+      if (hasShardedLayout(scope)) {
         writeShard();
+      } else {
+        // 旧布局：读改写完整 cache（partition_config 等顶层字段不可丢）
+        const legacyPath = getRelationsCachePath(scope);
+        const fullCache = readJson<RelationsCache>(legacyPath);
+        if (fullCache) {
+          fullCache.groups[resolvedGroup] = groupData;
+          writeJson(legacyPath, fullCache as unknown as Record<string, unknown>);
+        } else {
+          // 旧文件已在本轮 await 期间被迁移（改名 .bak）→ 补写分片
+          writeShard();
+        }
       }
-    }
+    });
 
     return {
       ok: true,
@@ -415,21 +423,24 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     if (scoreUpdated) {
-      if (batchSharded) {
-        writeGroupCache(scope, resolvedGroup, {
-          version: 1,
-          scope,
-          hot_relations: groupData.hot_relations,
-          keywords: groupData.keywords ?? [],
-          updatedAt: null,
-        });
-      } else {
-        const fullCache = readJson<RelationsCache>(getRelationsCachePath(scope));
-        if (fullCache) {
-          fullCache.groups[resolvedGroup] = groupData;
-          writeJson(getRelationsCachePath(scope), fullCache as unknown as Record<string, unknown>);
+      // ★ S-04 I2 补口（见上处说明）：批量查询的评分回写同样入窗
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        if (batchSharded) {
+          writeGroupCache(scope, resolvedGroup, {
+            version: 1,
+            scope,
+            hot_relations: groupData.hot_relations,
+            keywords: groupData.keywords ?? [],
+            updatedAt: null,
+          });
+        } else {
+          const fullCache = readJson<RelationsCache>(getRelationsCachePath(scope));
+          if (fullCache) {
+            fullCache.groups[resolvedGroup] = groupData;
+            writeJson(getRelationsCachePath(scope), fullCache as unknown as Record<string, unknown>);
+          }
         }
-      }
+      });
     }
 
     const failed = results.filter((r) => !r.ok).length;

@@ -29,6 +29,8 @@ import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasNoRe
 import { writeImportIncomplete, clearImportIncomplete, readImportIncompleteStatus, backupImportIncomplete } from './import-retry.js';
 // S-01（REQ-20261009-003）：静态导入协调器 —— 回滚等**同步**路径需要同步版元数据提交窗口
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
+// S-02：导入收尾**异步**入队一次索引整理（不等待 —— 「可用」不得被整理推迟）
+import { scheduleIndexMaintenance } from './index-maintenance.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 import {
@@ -192,6 +194,13 @@ export interface ImportResult {
   conflicts: ImportConflict[];
   groups: string[];
   source: GroupIndexSource;
+  /**
+   * S-02（REQ-20261009-003）：索引整理入队结果。
+   * **不等整理完成**——"可用"在元数据提交那一刻即成立；是否需要等待由调用方决定
+   *（CLI 等待并打印阶段；HTTP job 保持 open 至整理落定）。
+   * 可选：早退路径（无文件 / 全部未变）不产生整理，故不返回该字段。
+   */
+  indexMaintenance?: { scheduled: boolean; merged: boolean };
 }
 
 export interface HandleDirectImportArgs {
@@ -1703,25 +1712,24 @@ async function handleDirectImportUnlocked(
   // S-01（REQ-20261009-003）：**元数据提交窗口**——只在真实落盘这几行挡同 scope 的读任务；
   // 向量化长尾（Phase 2）与 Group 树构建（Phase 3）不挡读。目的：读不再等整段导入，
   // 同时避免"列表里在、点开 404"这类跨文件中间态（选项 b）。
+  // S-04 I2（REQ-20261009-003）：Phase 5 的 source 块同属元数据，提前进窗原子写——
+  // 否则它是"窗口外的第三处写"，并发读可看到半新半旧（group-index 与分片不同步）。
+  const source: GroupIndexSource = { dir: sourceDir, chunkSize, chunkOverlap };
   await getSharedOperationCoordinator().runMetadataCommit(scope, () => {
     writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
     // 批次 2（W1）：元数据落盘改 per-Group 分片——旧布局先惰性迁移，再批写全量组
     //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
     migrateLegacyRelationsCache(scope);
     persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
+    setSource(scope, source);
   });
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
 
   // Phase 5: 记录 source（含切分参数持久化 H-18；不再依赖 git commit——增量由幂等追加承载）
+  // ★ S-04 I2：实际写入已提前到 Phase 4 的「元数据提交窗口」内（见上），此处仅保留阶段日志。
   logPhaseStart(5, TOTAL, '记录 source ...');
-  const source: GroupIndexSource = {
-    dir: sourceDir,
-    chunkSize,
-    chunkOverlap,
-  };
-  setSource(scope, source);
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
   const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
@@ -1800,6 +1808,14 @@ async function handleDirectImportUnlocked(
     clearImportIncomplete(scope);
   }
 
+  // S-02 / R4（REQ-20261009-003）：元数据已提交 = **「可用」此刻成立**；索引整理**异步入队**，
+  // 不在此等待（"可用"不得被整理推迟 = 护栏 2）。仅当本批确实写了 dense 向量时入队：
+  // 全量 unchanged / 跳过 / FTS-only 的导入没有新增 dense 数据，整理是空转。
+  // 是否等待由调用方决定（CLI 等；HTTP job 保持 open）。
+  const indexMaintenance = (vector && mergedMap.size > 0)
+    ? scheduleIndexMaintenance(scope, { reason: 'import' })
+    : { accepted: false, merged: false };
+
   return {
     ok: true,
     action: 'import',
@@ -1840,6 +1856,8 @@ async function handleDirectImportUnlocked(
     conflicts,
     groups: [...kbResult.groups].sort(),
     source,
+    /** S-02：只报告"是否入队"，不等整理完成 */
+    indexMaintenance: { scheduled: indexMaintenance.accepted, merged: indexMaintenance.merged },
   };
   } finally {
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);

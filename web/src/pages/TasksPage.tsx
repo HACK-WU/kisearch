@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { getTask, getTasks, type TaskRecord, type TaskState } from '@/api/tasksApi';
+import { getTask, getTasks, type TaskRecord, type TaskState, type TaskIndexReadiness } from '@/api/tasksApi';
 import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
@@ -22,6 +22,41 @@ const OPERATION_LABEL: Record<string, string> = {
   'restore-snapshot': '快照还原',
 };
 
+/**
+ * S-02/R2（REQ-20261009-003）：阶段中文映射 —— 复用既有 `phase` 字段（**不新增状态枚举**），
+ * 新增 `indexing` / `optimized` / `available` / `skipped` 四值（两级完成口径）。
+ * 任务中心必须显示中文：不能把英文枚举直接露给用户（`phase` 未知时原样回显，便于排障）。
+ */
+const PHASE_LABEL: Record<string, string> = {
+  scan: '扫描',
+  vectorize: '向量化',
+  persist: '写入',
+  restore: '恢复',
+  rebuild: '重建',
+  indexing: '索引整理中',
+  optimized: '已优化',
+  available: '可用（索引未整理）',
+  skipped: '未触发索引整理',
+};
+
+function phaseLabel(phase?: string): string {
+  if (!phase) return '—';
+  return PHASE_LABEL[phase] ?? phase;
+}
+
+/**
+ * S-03/R6（REQ-20261009-003）：索引就绪判据文案（A11 交叉口径）。
+ * ★ `unknown`（读取失败/超时）**不得**显示成"未建"——两者对用户的操作指引完全相反：
+ *   未建 → 去整理（`ki index-optimize`）；未知 → 稍后重试诊断（别动引擎）。
+ */
+function indexReadinessLabel(readiness?: TaskIndexReadiness): string {
+  if (!readiness) return '—';
+  if (readiness.unknown) return '未知（读取超时/失败，稍后重试）';
+  return readiness.denseIndexed
+    ? `已建（dense ${readiness.completeness?.dense ?? 1}）`
+    : '未建（可执行 ki index-optimize 整理）';
+}
+
 function timeLabel(value?: number): string {
   if (!value) return '—';
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' }).format(value);
@@ -29,9 +64,10 @@ function timeLabel(value?: number): string {
 
 function taskProgress(task: TaskRecord): string {
   const progress = task.progress;
-  if (!progress || progress.total <= 0) return task.phase ?? '等待开始';
+  if (!progress || progress.total <= 0) return task.phase ? phaseLabel(task.phase) : '等待开始';
   const percent = Math.min(100, Math.round((progress.done / progress.total) * 100));
-  return `${progress.phase ?? task.phase ?? '处理中'} · ${percent}%（${progress.done}/${progress.total}）`;
+  const phase = progress.phase ? phaseLabel(progress.phase) : task.phase ? phaseLabel(task.phase) : '处理中';
+  return `${phase} · ${percent}%（${progress.done}/${progress.total}）`;
 }
 
 function sourceLabel(source: TaskRecord['source']): string {
@@ -96,7 +132,9 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
           <dl className="ki-task-detail__grid">
             <div><dt>来源</dt><dd>{sourceLabel(task.source)}</dd></div>
             <div><dt>知识库</dt><dd>{task.scope}</dd></div>
-            <div><dt>阶段</dt><dd>{task.phase ?? '—'}</dd></div>
+            <div><dt>阶段</dt><dd>{phaseLabel(task.phase)}</dd></div>
+            {/* S-03/R6：索引就绪（A11 交叉口径）——"索引是否真的建了"不必再开引擎诊断 */}
+            <div><dt>索引</dt><dd>{indexReadinessLabel(task.indexReadiness)}</dd></div>
             <div><dt>进度</dt><dd>{taskProgress(task)}</dd></div>
             <div><dt>开始时间</dt><dd>{timeLabel(task.startedAt ?? task.createdAt)}</dd></div>
             <div><dt>结束时间</dt><dd>{timeLabel(task.finishedAt)}</dd></div>

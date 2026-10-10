@@ -332,8 +332,16 @@ export class ZvecEngine {
     await this.proxy.send('dropIndex', { field });
   }
 
-  async optimize(): Promise<void> {
-    await this.proxy.send('optimize', {});
+  /**
+   * 触发索引整理（optimize）。
+   *
+   * S-01（REQ-20261009-003）：改走原生**异步** `optimize(options)`（原实现走同步
+   * `optimizeSync()`，阻塞 worker 线程且无法限核）。
+   * @param options.concurrency 整理线程数（未传 = 引擎自动）。实验 1 实测：
+   *        `concurrency:1` ≈ 1.0 核；不传（自动）峰值可达 4.3 核。
+   */
+  async optimize(options?: { concurrency?: number }): Promise<void> {
+    await this.proxy.send('optimize', options?.concurrency !== undefined ? { concurrency: options.concurrency } : {});
   }
 
   // ─── 内部：写入编排 ───

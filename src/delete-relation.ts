@@ -30,6 +30,8 @@ import { resolveGroupPath } from './lib/group-resolve.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, hasNoRelationsData, listGroupPaths, loadGroupCache, deleteGroupCache, buildGroupMatchContext, isRelationsRootPath, type LegacyRelationsCacheShape } from './lib/group-cache.js';
 import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+// S-04（REQ-20261009-003）：元数据删除需与同进程读任务互斥（提交窗口）
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { getSource } from './lib/scope.js';
@@ -143,25 +145,34 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
         + '；请先用 ki_edit_relation 的 cancel 或 finish 收口后再删除' };
     }
 
-    // 1. 从 relations-cache.json 删除（若存在）
+    // 1. 从 relations-cache.json 删除（内存）
     if (relIdx >= 0 && groupData) {
       groupData.hot_relations.splice(relIdx, 1);
       result.cacheRemoved = true;
     }
 
-    // 2. 从本地 KB index.json 删除
-    const localKbPath = getLocalKbDir(scope, resolvedGroup);
+    // 2. 元数据删除（S-04 I1/I2，REQ-20261009-003）：**分片先落（列表先消失）→ 紧邻删 KB（详情后消失）**，
+    //    两次写整段在「元数据提交窗口」内，**中间不夹引擎 I/O**（wiki 移动 / 向量删除 / FTS 删除全部移到窗后）。
+    //    反序（KB 先删、分片后落）会让并发读稳定看到"列表里在、点开 404"——已用隔离 scope 实测复现
+    //    （temp/verify-h2-delete-window.ts，见 design/design-review.md）。
     try {
-      if (fs.existsSync(localKbPath)) {
-        const localKb = readJson<Record<string, string>>(localKbPath);
-        if (localKb && relation in localKb) {
-          delete localKb[relation];
-          writeJson(localKbPath, localKb);
-          result.kbRemoved = true;
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        if (result.cacheRemoved) {
+          migrateLegacyRelationsCache(scope);
+          persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([resolvedGroup]));
         }
-      }
+        const localKbPath = getLocalKbDir(scope, resolvedGroup);
+        if (fs.existsSync(localKbPath)) {
+          const localKb = readJson<Record<string, string>>(localKbPath);
+          if (localKb && relation in localKb) {
+            delete localKb[relation];
+            writeJson(localKbPath, localKb);
+            result.kbRemoved = true;
+          }
+        }
+      });
     } catch (err) {
-      result.reason = `KB 删除失败: ${(err as Error).message}`;
+      result.reason = `元数据删除失败: ${(err as Error).message}`;
     }
 
     // 3. 将 wiki .md 文件移入回收站（不再物理删除）
@@ -195,12 +206,7 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       result.reason = `${result.reason || ''} FTS-only 索引删除失败：${ftsOutcome.failed} 条`.trim();
     }
 
-    // 持久化 cache（批次 2：触达组写——仅元数据实际变化时落盘；原为无条件整文件重写）
-    if (result.cacheRemoved) {
-      migrateLegacyRelationsCache(scope);
-      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([resolvedGroup]));
-    }
-
+    // 注：cache 分片落盘已上移到第 2 步的「元数据提交窗口」内（S-04 I1/I2：分片先落 → KB 后删）。
     result.deleted = result.cacheRemoved;
     return { ok: true, scope, result };
   } catch (err) {
@@ -360,31 +366,50 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
     //    分片 + 全部子组分片（deleteGroupCache 内含三步曲 bump→删→失效）；
     //    旧布局保持整文件键删除 + 回退写。
 
-    // 3. 删除本地 KB（递归删除该 group 子树目录：自身与全部子 group 的 index.json）
-    //    护栏（批次 2 审查 P1-8）：若组名与分片根保留名同名，kbGroupDir 就是分片根目录，
-    //    递归删除会连 manifest 与所有组的分片一起删掉 —— 该情形只删本组的 index.json。
-    const localKbPath = getLocalKbDir(scope, resolvedGroup);
-    const kbGroupDir = path.dirname(localKbPath);
-    if (isRelationsRootPath(scope, kbGroupDir)) {
-      try {
-        if (fs.existsSync(localKbPath)) fs.unlinkSync(localKbPath);
-      } catch (err) {
-        result.reason = `${result.reason || ''} KB 删除失败: ${(err as Error).message}`.trim();
-      }
-    } else if (fs.existsSync(kbGroupDir)) {
-      // 双重护栏（第二轮审查 P2）：除空路径与保留名外，再确认目标仍在 kb/<scope>/ 之下——
-      // 组键来自树/分片键集合（不可由单次调用注入），此处为纵深防御，避免未来某条
-      // 写路径把越界键带进来时直接递归删除 scope 之外的目录
-      const outside = path.relative(getKbDir(scope), kbGroupDir);
-      if (!outside || outside.startsWith('..') || path.isAbsolute(outside)) {
-        result.reason = `${result.reason || ''} KB 路径越界，拒绝递归删除: ${kbGroupDir}`.trim();
-      } else {
-        try {
-          fs.rmSync(kbGroupDir, { recursive: true, force: true });
-        } catch (err) {
-          result.reason = `${result.reason || ''} KB 删除失败: ${(err as Error).message}`.trim();
+    // 3. 元数据删除（S-04 I1/I2，REQ-20261009-003）：**分片先落（列表先消失）→ 再删 KB 子树（详情后消失）**，
+    //    两次写整段在「元数据提交窗口」内、中间不夹引擎 I/O（向量/FTS 删除已在第 1 步完成，
+    //    它们发生在元数据可见性变化**之前**，不产生"列表里在、点开 404"）。
+    //    反序（原实现 KB :383 → 分片 :411）会让并发读看到列表仍有、详情已 404。
+    try {
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        // 3a. 分片（列表）
+        if (sharded) {
+          // 无条件调用：分片目录不存在时内部 no-op（含 bump 前置条件判定）。
+          // 原实现以 cascadeKeys 非空为守卫，第二轮审查实测「树键与分片键不一致」时
+          // cascadeKeys 为空 → 分片残留成幽灵组。
+          deleteGroupCache(scope, resolvedGroup);
+        } else {
+          // 旧布局：整文件读改写（不走 persistCacheShape——它的"空组集=无事可做"
+          // 早退会吞掉"删除后组集合变空"的落盘）
+          const cache = loadCacheShape(scope) as unknown as RelationsCache;
+          for (const key of cascadeKeys) {
+            delete cache.groups[key];
+          }
+          writeJson(cachePath, cache as unknown as Record<string, unknown>);
         }
-      }
+
+        // 3b. 本地 KB（详情）——递归删除该 group 子树目录：自身与全部子 group 的 index.json
+        //     护栏（批次 2 审查 P1-8）：若组名与分片根保留名同名，kbGroupDir 就是分片根目录，
+        //     递归删除会连 manifest 与所有组的分片一起删掉 —— 该情形只删本组的 index.json。
+        const localKbPath = getLocalKbDir(scope, resolvedGroup);
+        const kbGroupDir = path.dirname(localKbPath);
+        if (isRelationsRootPath(scope, kbGroupDir)) {
+          if (fs.existsSync(localKbPath)) fs.unlinkSync(localKbPath);
+        } else if (fs.existsSync(kbGroupDir)) {
+          // 双重护栏（第二轮审查 P2）：除空路径与保留名外，再确认目标仍在 kb/<scope>/ 之下——
+          // 组键来自树/分片键集合（不可由单次调用注入），此处为纵深防御，避免未来某条
+          // 写路径把越界键带进来时直接递归删除 scope 之外的目录
+          const outside = path.relative(getKbDir(scope), kbGroupDir);
+          if (!outside || outside.startsWith('..') || path.isAbsolute(outside)) {
+            result.reason = `${result.reason || ''} KB 路径越界，拒绝递归删除: ${kbGroupDir}`.trim();
+          } else {
+            fs.rmSync(kbGroupDir, { recursive: true, force: true });
+          }
+        }
+      });
+    } catch (err) {
+      // 失败不再中断后续清理（与原语义一致）：最坏是"列表已无、详情仍在"（良性方向）
+      result.reason = `${result.reason || ''} 元数据删除失败: ${(err as Error).message}`.trim();
     }
 
     // 4. 将该 group 的 wiki 目录移入回收站
@@ -401,22 +426,6 @@ async function executeDeleteGroupLocal(params: DeleteGroupParams): Promise<Delet
     // 5. 删除 group-index 树节点
     if (removeGroupNode(groupIndex as unknown as { groups: Record<string, unknown> }, resolvedGroup)) {
       result.nodeRemoved = true;
-    }
-
-    // 持久化（批次 2：元数据删除与 group-index 分开落盘）
-    if (sharded) {
-      // 无条件调用：分片目录不存在时内部 no-op（含 bump 前置条件判定）。
-      // 原实现以 cascadeKeys 非空为守卫，第二轮审查实测「树键与分片键不一致」时
-      // cascadeKeys 为空 → 分片残留成幽灵组。
-      deleteGroupCache(scope, resolvedGroup);
-    } else {
-      // 旧布局：整文件读改写（不走 persistCacheShape——它的"空组集=无事可做"
-      // 早退会吞掉"删除后组集合变空"的落盘）
-      const cache = loadCacheShape(scope) as unknown as RelationsCache;
-      for (const key of cascadeKeys) {
-        delete cache.groups[key];
-      }
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
     }
     writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
 

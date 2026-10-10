@@ -47,6 +47,7 @@ const COMMANDS = {
   'export': 'src/export.ts',
   'wiki-backfill': 'src/wiki-backfill.ts',
   'migrate-relation-cache': 'src/migrate-relation-cache.ts',
+  'index-optimize': 'src/index-optimize.ts',
 };
 
 // 获取命令和参数

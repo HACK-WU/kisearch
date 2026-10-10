@@ -252,17 +252,23 @@ function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void
     }
     relation.editChunkCount = plan.chunkCount;
     try {
-      if (sharded) {
-        writeGroupCache(draft.scope, draft.group, {
-          version: 1,
-          scope: draft.scope,
-          hot_relations: groupDoc!.hot_relations,
-          keywords: groupDoc!.keywords ?? [],
-          updatedAt: null,
-        });
-      } else {
-        writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
-      }
+      // S-04 I2 补口（2026-10-10）：缓存/分片落盘必须入「元数据提交窗口」—— 自 I4 起读与写
+      // 任务**并行**，窗外写会让读看到"KB 已新、列表仍旧"的**跨文件**不一致。
+      // 本路径顺序本就正确（① KB 写 → ② 分片写 ⇒ I1 安全，中间态 = 已接受形态），
+      // 这里补的是 I2；窗口只包住本组缓存写（毫秒级），对读的影响是极短排队。
+      getSharedOperationCoordinator().withMetadataCommitSync(draft.scope, () => {
+        if (sharded) {
+          writeGroupCache(draft.scope, draft.group, {
+            version: 1,
+            scope: draft.scope,
+            hot_relations: groupDoc!.hot_relations,
+            keywords: groupDoc!.keywords ?? [],
+            updatedAt: null,
+          });
+        } else {
+          writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
+        }
+      });
     } catch (err) {
       // 正常异常立即补偿；进程被强杀的窗口由 recoverInterruptedPublication 处理。
       kb[draft.relation] = priorContent;

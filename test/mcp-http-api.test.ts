@@ -660,7 +660,16 @@ describe('/api/import/run + status', () => {
     });
     const firstRunBody = await firstRun.json();
 
-    const waitJob = async (jobId: string): Promise<{ state: string; result?: { stats?: { conflicts?: number }; conflicts?: { action?: string }[] }; error?: string }> => {
+    const waitJob = async (jobId: string): Promise<{
+      state: string;
+      result?: { stats?: { conflicts?: number }; conflicts?: { action?: string }[] };
+      error?: string;
+      // S-02/S-03（REQ-20261009-003）：两级完成口径（新增字段）
+      usable?: boolean;
+      indexState?: string;
+      indexMaintenance?: { scheduled: boolean; merged: boolean };
+      indexReadiness?: unknown;
+    }> => {
       // FTS-only 首次创建 zvec Collection 需要启动独立 worker，允许 2s 冷启动窗口。
       for (let attempt = 0; attempt < 200; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -673,6 +682,13 @@ describe('/api/import/run + status', () => {
 
     const firstJob = await waitJob(firstRunBody.jobId);
     assert.equal(firstJob.state, 'done', firstJob.error);
+    // S-02/S-03（REQ-20261009-003）：两级完成口径 —— `vector:false` 时不产生 dense 数据 ⇒
+    // 「可用」立刻成立、整理标记 skipped、入队结果显式为 false（不新增状态值，纯新增字段）
+    assert.equal(firstJob.usable, true, '元数据提交即「可用」成立');
+    assert.equal(firstJob.indexState, 'skipped', 'vector:false ⇒ 无 dense 写入，不触发索引整理');
+    assert.deepEqual(firstJob.indexMaintenance, { scheduled: false, merged: false });
+    // S-03/R6：未触发整理 ⇒ 不读就绪判据（省一次引擎往返），字段保持缺省
+    assert.equal(firstJob.indexReadiness, undefined);
     const taskResponse = await fetch(`${handle!.base}/api/tasks/${firstRunBody.jobId}`);
     assert.equal(taskResponse.status, 200);
     const taskBody = await taskResponse.json() as any;
@@ -680,6 +696,8 @@ describe('/api/import/run + status', () => {
     assert.equal(taskBody.task.operation, 'import');
     assert.equal(taskBody.task.scope, 'run-conflict-result');
     assert.equal(taskBody.task.state, 'succeeded');
+    // R2：阶段口径随两级完成口径一起下发（复用既有 phase 字段，不新增状态枚举）
+    assert.equal(taskBody.task.phase, 'skipped');
 
     const secondUpload = await fetch(`${handle!.base}/api/import/upload`, {
       method: 'POST',

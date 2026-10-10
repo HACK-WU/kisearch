@@ -89,7 +89,7 @@ export type WorkerRequest =
   | { id: string; kind: 'listIds';     payload: { filterSql?: string; limit: number } }
   | { id: string; kind: 'query';       payload: QueryPayload }
   | { id: string; kind: 'multiQuery';  payload: MultiQueryPayload }
-  | { id: string; kind: 'optimize';    payload: Record<string, never> }
+  | { id: string; kind: 'optimize';    payload: { concurrency?: number } }
   | { id: string; kind: 'createIndex'; payload: { field: string; indexParam: unknown } }
   | { id: string; kind: 'dropIndex';   payload: { field: string } };
 

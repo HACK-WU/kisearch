@@ -28,6 +28,8 @@ import { logProgress } from './lib/progress.js';
 import { createTaskReporter } from './lib/task-registry.js';
 import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
 import { closeFtsEngine } from './lib/fts-client.js';
+// S-02：导入收尾的索引整理"等待 + 展示"（入队在 handleDirectImport 内部完成）
+import { whenIndexMaintenanceIdle, getIndexMaintenanceState, readIndexReadiness } from './lib/index-maintenance.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -172,6 +174,42 @@ program
             });
             const stats = (result as { stats?: { errors?: number; vectorized?: number; files?: { completed: number; incomplete: number } } }).stats;
             const partial = Boolean((result as { partial?: boolean }).partial) || (stats?.errors ?? 0) > 0;
+            // ── S-02（REQ-20261009-003）：两级完成口径 ──
+            // 元数据一提交，**「可用」即刻成立**：台账立刻写终态值 + phase=indexing；
+            // 索引整理已由 `handleDirectImport` 内部**异步入队**（`indexMaintenance.scheduled`），
+            // 此处只负责"等待 + 展示 + 降级文案"，且**整理失败不得算成导入失败**（护栏 3）。
+            const maint = (result as { indexMaintenance?: { scheduled?: boolean } }).indexMaintenance;
+            const optimizeTimeoutMs = (requestConfig as unknown as {
+              vector?: { optimize?: { timeoutMs?: number } };
+            }).vector?.optimize?.timeoutMs ?? 600_000;
+            task.update({ state: partial ? 'partial' : 'succeeded', phase: maint?.scheduled ? 'indexing' : 'available' });
+            if (maint?.scheduled) {
+              process.stdout.write('⏳ 索引整理中…（本知识库检索可能变慢；文档浏览/编辑不受影响）\n');
+              await whenIndexMaintenanceIdle(optimizeTimeoutMs);
+              const last = getIndexMaintenanceState().last;
+              // S-03/R6：就绪判据写入任务台账（任务中心/详情可直接核对"索引是否真的建了"）
+              const readiness = await readIndexReadiness(scope);
+              task.update({ indexReadiness: readiness });
+              if (last && last.scope === scope) {
+                if (last.ok) {
+                  // A11 交叉核对：整理成功但**没有** dense 实体 = 信号与实物矛盾，必须说出来（不静默）
+                  process.stdout.write(
+                    `✅ 索引已优化（${(last.wallMs / 1000).toFixed(1)}s）`
+                    + `${readiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
+                  );
+                  task.update({ phase: 'optimized' });
+                } else {
+                  process.stdout.write(
+                    `⚠️  索引整理未完成（${last.degraded ?? 'error'}）：${last.reason ?? ''}\n`
+                    + `   文档已可用；重试：ki index-optimize -s ${scope}\n`,
+                  );
+                  task.update({
+                    phase: 'available',
+                    recoveryHint: `索引整理未完成（${last.degraded ?? 'error'}）；可执行 ki index-optimize -s ${scope} 重试`,
+                  });
+                }
+              }
+            }
             task.finish(partial ? 'partial' : 'succeeded', {
               error: partial
                 ? `完成 ${stats?.files?.completed ?? '?'} / 未完成 ${stats?.files?.incomplete ?? '?'} 个文件`

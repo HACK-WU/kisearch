@@ -40,6 +40,13 @@ import {
   type ImportResult,
 } from './import.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
+// S-02/S-03：两级完成口径 —— 整理等待/状态 + A11 就绪判据
+import {
+  whenIndexMaintenanceIdle,
+  getIndexMaintenanceState,
+  readIndexReadiness,
+  type IndexReadiness,
+} from './index-maintenance.js';
 import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus } from './import-retry.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
@@ -48,7 +55,7 @@ import { executeTagList, type TagListResult } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 // chat 模块（REQ-20260924-001）—— 单行挂载，见下方 if 链末尾
 import { handleChatRoutes } from './chat/chat-routes.js';
-import { vectorCollectionDimension, vectorCountScope } from './vector-client.js';
+import { vectorCollectionDimension, vectorCountScope, optimizeVectorIndex } from './vector-client.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
@@ -189,7 +196,7 @@ interface Job {
   scope: string;
   operation: 'import' | 'restore-snapshot' | 'rebuild-vector';
   state: 'running' | 'done' | 'failed' | 'cancelled';
-  phase?: 'scan' | 'vectorize' | 'persist' | 'restore' | 'rebuild';
+  phase?: 'scan' | 'vectorize' | 'persist' | 'restore' | 'rebuild' | 'indexing' | 'optimized' | 'available';
   progress?: { done: number; total: number };
   result?: ImportResult | RestoreSnapshotResult | RebuildVectorResult | Record<string, unknown>;
   error?: string;
@@ -198,6 +205,18 @@ interface Job {
   cancelRequested: boolean;
   abortController: AbortController;
   taskReporter: TaskReporter;
+  /**
+   * S-02/S-03（REQ-20261009-003）：两级完成口径（纯新增字段，既有契约不变）。
+   *   - `usable`：元数据提交那一刻即 true —— **「可用」不被索引整理推迟**（护栏 2）；
+   *   - `indexState`：`indexing` →（`optimized` | `available` | `skipped`），前端在
+   *     `indexing` 期间**继续轮询**（`state` 仍在导入结果可用那一刻置 'done'，不改契约）；
+   *   - `indexReadiness`：A11 交叉判据（索引实体 ∨ 引擎信号），整理落定后核对。
+   */
+  usable?: boolean;
+  indexState?: 'indexing' | 'optimized' | 'available' | 'skipped';
+  indexMaintenance?: { scheduled: boolean; merged: boolean };
+  indexMaintenanceDegraded?: { degraded?: string; reason?: string };
+  indexReadiness?: IndexReadiness;
 }
 
 const jobs = new Map<string, Job>();
@@ -622,6 +641,7 @@ export async function handleApiRequest(
     if (p.startsWith('/tasks/') && req.method === 'GET') return void handleTaskDetail(res, p.slice('/tasks/'.length), requestConfig, authScopes);
     if (p === '/vector/status' && req.method === 'GET') return void handleVectorStatus(res, url, requestConfig);
     if (p === '/vector/status/refresh' && req.method === 'POST') return void (await handleVectorStatusRefresh(req, res, requestConfig));
+    if (p === '/vector/optimize' && req.method === 'POST') return void (await handleVectorOptimize(req, res, authScopes, requestConfig));
     // ════════ chat 模块（REQ-20260924-001 · SR-01 独占挂载点）════════
     // 单行挂载：/api/chat/* 全部路由由 chat-routes.ts 内部处理（本文件已 1065 行，不再逐条加分支）
     // 越权白名单：API-02/04/14（带 scope 参数的 GET）仍须登记在上方只读接口列表
@@ -729,6 +749,53 @@ function handleTaskDetail(res: http.ServerResponse, id: string, config: KiConfig
     return;
   }
   sendJson(res, 200, { ok: true, task });
+}
+
+// ─── POST /api/vector/optimize（S-01，REQ-20261009-003）──────────────────────
+
+/**
+ * 触发索引整理（optimize）= **重试入口**。
+ *
+ * 语义要点：
+ *   - 在 **daemon 进程内**执行 ⇒ 不受"daemon 持锁导致 CLI 无法整理"的影响（与 `ki index-optimize` 互补）；
+ *   - 经 coordinator 以 **`engine-only`** 入队（`kindForOperation('vector-optimize')` 已登记，
+ *     且此处**显式传参**双保险）⇒ 与写任务互斥、**被 read 旁路**（不阻塞页面）；
+ *   - 超时 = **中断**：由 `optimizeVectorIndex` 内部判定并返回 `degraded`，handler 照常 resolve
+ *     ⇒ 队列槽不会被整理占死（R8 的教训：超时必须包在 handler 内的**同一 promise 链**上）；
+ *   - 失败返回 `ok:false` + `degraded`（不判失败任务、不引导重建/清库）。
+ */
+async function handleVectorOptimize(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  config: KiConfig,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as
+    | { scope?: string; concurrency?: number; timeoutMs?: number }
+    | undefined;
+  // scope 越权校验：鉴权模式下校验 body.scope（缺省 'default'，与工具缺省一致）
+  if (authScopes !== null) {
+    const rawScope = body?.scope;
+    const effectiveScope = rawScope && rawScope.trim() ? rawScope.trim() : 'default';
+    if (!scopeAllowed(authScopes, effectiveScope)) {
+      rejectScopeViolation(res, effectiveScope, '/vector/optimize');
+      return;
+    }
+  }
+  const scope = resolveScope(config, typeof body?.scope === 'string' ? body.scope : '');
+  const result = await getSharedOperationCoordinator().submit(
+    { operation: 'vector-optimize', params: { scope } },
+    () => runWithConfigSnapshot(config, () => optimizeVectorIndex(scope, {
+      ...(typeof body?.concurrency === 'number' ? { concurrency: body.concurrency } : {}),
+      ...(typeof body?.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
+    })),
+    [scope],
+    // ★ 显式传 kind：不依赖 `kindForOperation` 推导（评审 #1：新 operation 缺省落 write 会把读挡回去）
+    'engine-only',
+  );
+  const outcome = result.result as Awaited<ReturnType<typeof optimizeVectorIndex>>;
+  // outcome 自身含 ok（联合类型），勿再重复声明
+  sendJson(res, 200, { action: 'vector-optimize', scope, ...outcome });
 }
 
 // ─── GET/POST /api/vector/status ──────────────────────
@@ -1506,8 +1573,44 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
     // R1（REQ-20261009-001，Q2 同口径）：部分成功 → 任务态 partial（与 CLI 同源），
     // 但 `job.state` 保持 'done'（前端按 state 分支渲染完成态；不新增状态值以守契约）。
     // 未完成清单随 result.incomplete 下发，供前端展示与"重试未完成"使用。
+    const partialState = result.partial || result.stats.errors > 0 ? 'partial' : 'succeeded';
+    // ── S-02/S-03（REQ-20261009-003）：两级完成口径 ──
+    // ①「可用」**此刻**成立：`usable=true` + 台账立刻写终态值 + phase 进入 `indexing`；
+    // ② 索引整理已在 `handleDirectImport` 内**异步入队**，job **保持存活**至整理落定
+    //    （`finishedAt` 在 finally 里赋值 ⇒ 反映"整件事"的结束时刻）；
+    // ③ `state` 仍在"导入结果可用"那一刻置 'done' —— **不改既有契约**，前端只要在
+    //    `indexState === 'indexing'` 时继续轮询即可，无需理解新的状态值。
+    const maint = result.indexMaintenance;
+    job.usable = true;
+    job.indexMaintenance = maint;
+    job.indexState = maint?.scheduled ? 'indexing' : (args.vector === false ? 'skipped' : 'available');
+    job.taskReporter.update({ state: partialState, phase: job.indexState });
+    if (maint?.scheduled) {
+      await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
+      const st = getIndexMaintenanceState();
+      // 只认**本 scope** 的结果：`last` 可能属于并发整理的其他 scope（全局串行，非错误）
+      const settled = st.last?.scope === args.scope ? st.last : undefined;
+      if (settled?.ok === true) {
+        job.indexState = 'optimized';
+        job.taskReporter.update({ phase: 'optimized' });
+      } else {
+        // 失败/超时/未知一律降级为「可用」——**不判失败、不丢数据、不引导重建**（护栏 3）
+        job.indexState = 'available';
+        if (settled) job.indexMaintenanceDegraded = { degraded: settled.degraded, reason: settled.reason };
+        job.taskReporter.update({
+          phase: 'available',
+          ...(settled
+            ? { recoveryHint: `索引整理未完成（${settled.degraded ?? 'error'}）；文档已可用，可执行 ki index-optimize -s ${args.scope} 重试` }
+            : {}),
+        });
+      }
+      // S-03 / A11：交叉判据（索引实体 ∨ 引擎信号）——整理落定后核对"索引是否真的建了"；
+      // R6：同时写入任务台账（任务中心/详情可直接核对，不必开引擎诊断）
+      job.indexReadiness = await readIndexReadiness(args.scope);
+      job.taskReporter.update({ indexReadiness: job.indexReadiness });
+    }
     const partialFiles = result.stats?.files;
-    job.taskReporter.finish(result.partial || result.stats.errors > 0 ? 'partial' : 'succeeded', {
+    job.taskReporter.finish(partialState, {
       error: result.partial
         ? `完成 ${partialFiles?.completed ?? '?'} / 未完成 ${partialFiles?.incomplete ?? '?'} 个文件`
         : result.stats.errors > 0 ? result.errors[0]?.error ?? `${result.stats.errors} 项导入处理有错误` : undefined,
@@ -1593,6 +1696,14 @@ async function handleImportStatus(res: http.ServerResponse, url: URL, authScopes
       error: job.error,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
+      // ── S-02/S-03（REQ-20261009-003）：两级完成口径（纯新增字段，既有字段语义不变）──
+      // 前端：`usable === true` 即渲染「已完成 · 可用」；`indexState === 'indexing'` 期间显示
+      //「索引整理中…」并**继续轮询**；转为 `optimized` 显示「已优化」，`available` 显示重试引导。
+      usable: job.usable,
+      indexState: job.indexState,
+      indexMaintenance: job.indexMaintenance,
+      ...(job.indexMaintenanceDegraded ? { indexMaintenanceDegraded: job.indexMaintenanceDegraded } : {}),
+      ...(job.indexReadiness ? { indexReadiness: job.indexReadiness } : {}),
     },
   });
 }

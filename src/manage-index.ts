@@ -517,20 +517,11 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
     }
   }
 
-  // 删除 local-kb 的 index.json 文件
-  for (const key of keysToDelete) {
-    const localKbPath = getLocalKbDir(scope, key);
-    try {
-      if (fs.existsSync(localKbPath)) {
-        fs.unlinkSync(localKbPath);
-        result.localKbFilesRemoved.push(key);
-      }
-    } catch (err) {
-      result.errors.push(`local-kb 删除失败 ${key}: ${(err as Error).message}`);
-    }
-  }
-
-  // 从 relations 元数据中删除所有匹配的 group key（批次 2：双轨删除）
+  // S-04 I1（REQ-20261009-003）：**分片先删（列表先消失）→ 再删 local KB（详情后消失）**。
+  // 原实现反序（KB 先删）会让并发读看到"列表里在、点开 404"。本命令为 CLI 专属
+  //（MCP 只暴露空节点删除），无同进程并发读者，故只修顺序、不入提交窗口。
+  //
+  // ① 从 relations 元数据中删除所有匹配的 group key（批次 2：双轨删除）
   if (sharded) {
     // 新布局：deleteGroupCache(resolvedGroup) 目录递归一次覆盖全部前缀键（幂等）
     deleteGroupCache(scope, groupPath);
@@ -545,6 +536,19 @@ async function cascadeDeleteGroupData(scope: string, groupPath: string): Promise
   // 持久化 cache（旧布局整写；新布局已由 deleteGroupCache 落盘）
   if (!sharded && keysToDelete.length > 0) {
     writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
+  }
+
+  // ② 删除 local-kb 的 index.json 文件
+  for (const key of keysToDelete) {
+    const localKbPath = getLocalKbDir(scope, key);
+    try {
+      if (fs.existsSync(localKbPath)) {
+        fs.unlinkSync(localKbPath);
+        result.localKbFilesRemoved.push(key);
+      }
+    } catch (err) {
+      result.errors.push(`local-kb 删除失败 ${key}: ${(err as Error).message}`);
+    }
   }
 
   return result;

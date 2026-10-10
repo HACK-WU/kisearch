@@ -12,6 +12,19 @@ export interface TaskProgress {
   metadataPending?: number;
 }
 
+/**
+ * S-03/R6（REQ-20261009-003）：索引就绪判据（A11 交叉口径）。
+ *   - `denseIndexed`：主判据（dense 索引实体 ≥1）；
+ *   - `completeness`：引擎自报信号（**仅参考**——该信号曾恒为 0，单看会误判"从未建"）；
+ *   - `unknown`：读取失败/超时 ⇒ **≠ 未建**（文案必须区分，N9 同源语义）。
+ */
+export interface TaskIndexReadiness {
+  denseIndexed: boolean;
+  completeness?: { dense?: number; fts?: number; scalar?: number };
+  unknown?: boolean;
+  reason?: string;
+}
+
 export interface TaskRecord {
   id: string;
   source: TaskSource;
@@ -28,6 +41,8 @@ export interface TaskRecord {
   heartbeatAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** S-03/R6：索引就绪判据（导入类任务在整理落定后写入；缺失 = 本次未产生整理） */
+  indexReadiness?: TaskIndexReadiness;
 }
 
 export interface TasksResponse {

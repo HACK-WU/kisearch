@@ -33,7 +33,11 @@ export type TaskKind = 'write' | 'read' | 'engine-only';
  * 回归锚点：`test/coordinator-read-lane.test.ts` 用例 ⑨。
  */
 export function kindForOperation(operation: string | undefined): TaskKind {
-  return operation === 'import' ? 'engine-only' : 'write';
+  // S-01/S-04（REQ-20261009-003 评审 #1）：**必须在此登记**新 operation，
+  // 否则它会缺省落到 `write`（与 read 互斥）——索引整理会把刚放开的读又挡回去。
+  // 登记依据：该类任务的元数据写全部包在提交窗口内（import），或本就不碰元数据
+  //（vector-optimize 只调引擎 optimize）。
+  return operation === 'import' || operation === 'vector-optimize' ? 'engine-only' : 'write';
 }
 
 export interface OperationResult<T = unknown> {
@@ -187,14 +191,16 @@ export class OperationCoordinator {
     if (item.scopes.includes(GLOBAL_SCOPE)) return this.activeWorkers > 0;
     // 只读通道不与任何 scope 互斥，仅受 maxWorkers 上限约束。
     if (item.scopes.length === 0) return false;
-    // S-01（REQ-20261009-003）：纯元数据读
+    // S-01（REQ-20261009-003）→ S-04 I4（REQ-20261009-003 / Q6 拍板）：纯元数据读
     //   ① 与「元数据提交窗口」互斥（避免跨文件"半新半旧"）；
-    //   ② 与**非 engine-only** 的写任务互斥（doc/edit、delete、sync 等短写仍须串行，
-    //      否则读会与元数据写并发 —— 正是"列表里在、点开 404"的来源）；
-    //   ③ 可旁路 engine-only 长任务（导入的向量化长尾），读不再等整段导入。
+    //   ② **与其它一切在跑任务并行**（写任务、engine-only 长任务、任何挂住的请求）——
+    //      现场二"一个挂住的请求把整库读挡死 >10 分钟"即由此消除；
+    //   ③ 并发安全的前提是**写侧不变量 I1**（分片可见 ⇒ KB 可取）：
+    //      新增/更新 = KB 先写、分片后写；**删除 = 分片先删、KB 后删**（`delete-relation.ts`
+    //      与 `manage-index.ts` 已按此顺序修复），且两次写紧邻、整段在提交窗口内（I2）。
+    //      回归：`test/read-write-concurrency.test.ts`（含旧顺序对照臂，必须检出 DIR E）。
     if (item.kind === 'read') {
-      return item.scopes.some((scope) => (this.committing.get(scope) ?? 0) > 0
-        || (this.running.get(scope) ?? 0) - (this.runningEngineOnly.get(scope) ?? 0) > 0);
+      return item.scopes.some((scope) => (this.committing.get(scope) ?? 0) > 0);
     }
     return item.scopes.some((scope) => (this.running.get(scope) ?? 0) > 0);
   }

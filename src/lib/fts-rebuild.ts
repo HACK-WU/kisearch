@@ -16,6 +16,8 @@ import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { parseContentTags } from './constants.js';
 import { writeJson } from './store.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId, type FtsStoreEntry } from './fts-client.js';
+// S-04 I2 补口（REQ-20261009-003）：本文件的两处分片落盘必须入「元数据提交窗口」
+import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 
 interface FtsRelation {
@@ -136,7 +138,14 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
   // 批次 2：预写改触达组（中断安全语义保持——预写必须立即落盘）
   if (completionStateChanged) {
     migrateLegacyRelationsCache(scope);
-    persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+    // S-04 I2 补口（2026-10-10）：分片落盘必须落在「元数据提交窗口」内 —— 自 I4 起读与
+    // 写任务**并行**，窗外的分片写会让读看到半新半旧（跨文件不一致）。
+    // 窗口只包住"本组分片写"（毫秒级），对读的影响是**极短排队**，不是阻塞。
+    // 本路径**不写 KB**（只读原文重建 FTS）且不删 Relation ⇒ I1（分片可见 ⇒ KB 可取）
+    // 天然不适用；此处补的是 I2（两次元数据写不得跨窗）。
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+    });
   }
 
   if (allEntries.length === 0) {
@@ -197,7 +206,12 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
     const finalTouched = new Set(records.map((r) => r.group));
     if (finalTouched.size > 0) {
       migrateLegacyRelationsCache(scope);
-      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, finalTouched);
+      // 同上（S-04 I2 补口）：最终落盘同样入窗。★ 顺序不变 —— FTS 写入/清理在前
+      //（`ftsBulkStore` / `ftsDeleteByIds`），分片状态（ftsIds/ftsIndexComplete）在后，
+      // 保证"分片说完整 ⇒ 引擎里真的有"。
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, finalTouched);
+      });
     }
   }
   return { indexed, relations: records.length, errors };

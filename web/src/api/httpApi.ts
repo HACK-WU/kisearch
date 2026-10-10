@@ -164,6 +164,23 @@ export interface ImportJob {
   error?: string;
   startedAt: number;
   finishedAt?: number;
+  /**
+   * S-02/S-03（REQ-20261009-003）：**两级完成口径**（后端纯新增字段）。
+   *   - `usable`：元数据提交那一刻即 true ⇒「文档立即可用」，**不被索引整理推迟**；
+   *   - `indexState`：`indexing` →（`optimized` | `available` | `skipped`）。
+   *     `indexing` 期间前端**必须继续轮询**（`state` 已是 'done'），落到 `optimized` 才收尾；
+   *   - `indexReadiness`：A11 交叉判据（索引实体 ∨ 引擎信号），`unknown` = 读取失败≠未建。
+   */
+  usable?: boolean;
+  indexState?: 'indexing' | 'optimized' | 'available' | 'skipped';
+  indexMaintenance?: { scheduled: boolean; merged: boolean };
+  indexMaintenanceDegraded?: { degraded?: string; reason?: string };
+  indexReadiness?: {
+    denseIndexed: boolean;
+    completeness?: { dense?: number; fts?: number; scalar?: number };
+    unknown?: boolean;
+    reason?: string;
+  };
 }
 
 export interface StatusResponse {

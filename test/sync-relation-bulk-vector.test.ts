@@ -5,7 +5,8 @@
  *   - 全成功：memoryId/memoryIds 回写、旧 tag 向量清理（stale）、顶层 vectorStored 语义
  *   - 部分失败：不删旧向量（数据守恒，避免「删旧丢新」）、逐条/顶层 vectorStored 语义
  *   - 同批重复 relation：后一条覆盖前一条，前一条不独立写向量（M1）
- *   - 向量服务不可用：KB 层不阻塞，逐条 vectorStored=false
+ *   - 向量服务不可用：**批量止损 fail-loud**（ok:false + stopReason=VECTOR_UNAVAILABLE，
+ *     `025976d` 起的契约），但 **KB 层照常提交**、逐条 vectorStored=false、hints 照样透出
  *   - hints 透出：Group 路径解析提示（自动补全 / 未匹配）
  *
  * Mock 策略：先 import vector-client 模块再 patch 导出函数，
@@ -166,7 +167,12 @@ describe('executeBulkSyncRelation 向量化路径', () => {
         vector: true,
         items: [{ group, relation, module_info: '更新后的正文' }],
       });
-      assert.equal(result.ok, true);
+      // ★ 陈旧期望修复（2026-10-10，code review P2-2）：`025976d「feat(vector): 批量故障
+      // 止损与全局任务状态」` 之后，**向量服务不可用 = 系统性停止** ⇒ 批量整体 fail-loud
+      // （ok:false + stopReason），但 **KB 层照常提交**（下面继续断言落盘状态）。
+      // 原断言 `ok:true` 属止损特性之前的契约，本文件未随之更新（非产品回归）。
+      assert.equal(result.ok, false);
+      assert.equal(result.stopReason?.code, 'VECTOR_UNAVAILABLE');
       const updatedRelation = readGroupMeta(scope, group).hot_relations.find((item) => item.text === relation);
       assert.ok(updatedRelation, '同步后应能在当前布局读到该 relation');
       assert.deepEqual(updatedRelation.ftsIds, ['old-fts-id'], 'dense 失败时保留旧 FTS ID 以免意外删除');
@@ -383,8 +389,10 @@ describe('executeBulkSyncRelation 向量化路径', () => {
         ],
       });
 
-      assert.strictEqual(result.ok, true);
-      if (!result.ok) return;
+      // ★ 陈旧期望修复（2026-10-10，code review P2-2）：`025976d` 批量止损 ⇒ 向量不可用
+      // 时批量整体 ok:false（fail-loud），但**逐条明细 + KB 落盘仍必须给出**（本用例主旨）。
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.stopReason?.code, 'VECTOR_UNAVAILABLE');
       assert.strictEqual(result.vectorStored, false);
       assert.strictEqual(result.results[0].vectorStored, false);
       assert.match(result.results[0].vectorReason ?? '', /向量不可用/);
@@ -414,8 +422,10 @@ describe('executeBulkSyncRelation 向量化路径', () => {
         ],
       });
 
-      assert.strictEqual(result.ok, true);
-      if (!result.ok) return;
+      // ★ 陈旧期望修复（2026-10-10，code review P2-2）：同 `025976d` 批量止损 —— hints
+      // 属诊断信息，必须在 ok:false 的失败返回里**照样透出**（否则用户只看到失败、看不到原因）。
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.stopReason?.code, 'VECTOR_UNAVAILABLE');
       assert.ok(Array.isArray(result.hints) && result.hints.length >= 1, '应透出路径解析提示');
       assert.match(result.hints![0], /未匹配到任何 Group|可用的顶层 Group|可用顶层 Group/);
     } finally {

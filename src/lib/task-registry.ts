@@ -17,6 +17,20 @@ export interface TaskProgress {
   metadataPending?: number;
 }
 
+/**
+ * S-03/R6（REQ-20261009-003）：索引就绪判据（A11 交叉口径），与 `index-maintenance.ts`
+ * 的 `IndexReadiness` **结构同构**（此处不复用其类型：registry 是零引擎依赖的落盘层）。
+ *   - `denseIndexed`：主判据 —— dense 索引实体 ≥1；
+ *   - `completeness`：引擎自报信号（**仅参考**：该信号曾恒为 0，单看会误判"从未建"）；
+ *   - `unknown`：读取失败/超时 ⇒ **≠ 未建**（与 N9 同源语义，展示文案必须区分）。
+ */
+export interface TaskIndexReadiness {
+  denseIndexed: boolean;
+  completeness?: { dense?: number; fts?: number; scalar?: number };
+  unknown?: boolean;
+  reason?: string;
+}
+
 export interface TaskRecord {
   id: string;
   source: TaskSource;
@@ -33,10 +47,12 @@ export interface TaskRecord {
   heartbeatAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** S-03/R6：索引就绪判据（导入类任务在整理落定后写入；缺失 = 本次未产生整理） */
+  indexReadiness?: TaskIndexReadiness;
 }
 
 export interface TaskReporter {
-  update(patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt'>>): void;
+  update(patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>>): void;
   progress(progress: TaskProgress): void;
   finish(state: Exclude<TaskState, 'queued' | 'running' | 'unknown'>, options?: { error?: string; recoveryHint?: string; partialCommitted?: number }): void;
   stop(): void;
@@ -185,7 +201,7 @@ export function createTaskReporter(
     lastWriteWarningAt = Date.now();
     process.stderr.write(`[ki] 任务状态暂不能更新：${sanitizedText((error as Error)?.message, 180) ?? 'unknown'}\n`);
   };
-  const update = (patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt'>>): boolean => {
+  const update = (patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>>): boolean => {
     if (stopped) return false;
     const updated: TaskRecord = {
       ...record,
@@ -194,6 +210,17 @@ export function createTaskReporter(
       ...(patch.error !== undefined ? { error: safeErrorSummary(patch.error) } : {}),
       ...(patch.recoveryHint !== undefined ? { recoveryHint: sanitizedText(patch.recoveryHint, 240) } : {}),
       ...(patch.progress !== undefined ? { progress: normalizeProgress(patch.progress) } : {}),
+      // S-03/R6：就绪判据同样过卫生化（`reason` 可能来自引擎/超时错误文本）
+      ...(patch.indexReadiness !== undefined
+        ? {
+            indexReadiness: {
+              ...patch.indexReadiness,
+              ...(patch.indexReadiness.reason !== undefined
+                ? { reason: sanitizedText(patch.indexReadiness.reason, 180) }
+                : {}),
+            },
+          }
+        : {}),
       updatedAt: Date.now(),
       heartbeatAt: Date.now(),
     };
@@ -206,7 +233,7 @@ export function createTaskReporter(
       return false;
     }
   };
-  let pendingFinish: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt'>> | undefined;
+  let pendingFinish: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>> | undefined;
   let pendingFinishRetries = 0;
   const timer = setInterval(() => {
     if (pendingFinish) {

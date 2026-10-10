@@ -7,7 +7,9 @@
  *   ③ 「元数据提交窗口」（runMetadataCommit）内读任务等待，窗口结束立刻放行（选项 b）；
  *   ④ 其他 scope 完全不受影响；
  *   ⑤ read 仍受 maxWorkers 上限约束（不绕过并发保护）；
- *   ⑥ read 与"短写"任务互斥（P0 修复：不得与 doc/edit 这类元数据写并发）；
+ *   ⑥ ★ S-04 I4（2026-10-10，Q6 拍板）：read 与"短写"**并行**（不再互斥）——前提是
+ *      写侧不变量 I1 已落实（分片可见 ⇒ KB 可取；删除路径改为分片先删、KB 后删），
+ *      并发读回归见 `test/read-write-concurrency.test.ts`（含旧顺序对照臂）；
  *   ⑦ engine-only 长任务不阻塞 read（导入场景）。
  *   ⑧ 提交窗口可重入：内层（同步）窗口退出不提前放开读。
  *   ⑨ ★ P0 回归：**未显式传 kind** 的 import 自动判为 engine-only —— 真实入口
@@ -93,14 +95,18 @@ test('⑤ read 任务仍受 maxWorkers 上限约束（不绕过并发保护）',
   await long;
 });
 
-test('⑥ read 与"短写"任务互斥（P0 修复：不得与 doc/edit 并发）', async () => {
+test('⑥ read 与"短写"并行（S-04 I4：不再互斥；安全由写侧不变量保证）', async () => {
   const c = new OperationCoordinator(4, 5_000);
   const scope = 's6';
   const write = c.submit(req(scope, 'doc-edit-write'), () => sleep(400), [scope], 'write');
   await sleep(30);
   const t0 = Date.now();
   await c.submit(req(scope, 'doc-list-api'), () => 'r', [scope], 'read');
-  assert.ok(Date.now() - t0 >= 300, '读必须等短写结束（否则可能读到"列表里在、点开 404"）');
+  const waitMs = Date.now() - t0;
+  // I4（Q6 拍板）：读不再等短写 —— 现场二"一个挂住的请求把整库读挡死 >10 分钟"由此消除。
+  // 并发安全由 I1/I2 保证：删除类路径已改为「分片先删 → KB 后删」、两次写紧邻入窗；
+  // 并发读回归见 test/read-write-concurrency.test.ts（对照臂必须检出 DIR E）。
+  assert.ok(waitMs < 120, `read 应立即执行（I4：只与提交窗口互斥），实际 ${waitMs}ms`);
   await write;
 });
 

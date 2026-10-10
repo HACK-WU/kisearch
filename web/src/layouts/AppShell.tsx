@@ -129,7 +129,11 @@ export function AppShell(): JSX.Element {
   const taskQuery = useQuery({
     queryKey: ['tasks'],
     queryFn: () => getTasks(200),
-    refetchInterval: (query) => query.state.data?.tasks.some((task) => task.state === 'queued' || task.state === 'running') ? 3_000 : 15_000,
+    // S-02/R5（REQ-20261009-003）：索引整理期间同样按 3s 刷新 —— 否则顶栏「索引整理中」
+    // 会一直挂到 15s 才切到「已优化/可用」，用户以为卡住了。
+    refetchInterval: (query) => query.state.data?.tasks.some(
+      (task) => task.state === 'queued' || task.state === 'running' || task.phase === 'indexing',
+    ) ? 3_000 : 15_000,
     staleTime: 0,
     retry: false,
   });
@@ -158,6 +162,12 @@ export function AppShell(): JSX.Element {
     void queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
   }, [taskQuery.data, scope, queryClient]);
   const activeTasks = taskQuery.data?.tasks.filter((task) => task.state === 'queued' || task.state === 'running') ?? [];
+  /**
+   * S-02/R5（REQ-20261009-003）**索引整理中**的任务：`state` 已是终态（导入结果可用），
+   * 但 `phase === 'indexing'` ⇒ 引擎仍在后台整理索引。此处单独成列（不混入 `activeTasks`
+   * 的"运行中"计数）：文档已可用，只是检索可能略慢，必须让用户看得见**在等什么**。
+   */
+  const indexingTasks = (taskQuery.data?.tasks ?? []).filter((task) => task.phase === 'indexing');
   const partialTasks = taskQuery.data?.tasks.filter((task) => task.state === 'partial') ?? [];
   /** `${scope}\u0000${operation}` → 最近一次 succeeded 的完成时间（用于自动消除被覆盖的旧失败） */
   const latestSuccessByScopeOp = useMemo(() => {
@@ -196,12 +206,15 @@ export function AppShell(): JSX.Element {
     ? `${activeTasks.length} 个任务运行中${failedTasks.length ? ` · ${failedTasks.length} 个失败/未知` : ''}${partialTasks.length ? ` · ${partialTasks.length} 个部分完成` : ''}`
     : failedTasks.length > 0
       ? `${failedTasks.length} 个任务失败或状态未知`
-      : partialTasks.length > 0
-        ? `${partialTasks.length} 个任务部分完成`
+      // R5：整理期提示 —— 明确"文档已可用、只是在整理索引"，避免被误读为导入未完成
+      : indexingTasks.length > 0
+        ? `索引整理中 · 文档已可用（${indexingTasks[0].scope}）`
+        : partialTasks.length > 0
+          ? `${partialTasks.length} 个任务部分完成`
       : taskQuery.error
         ? '任务状态暂不可用'
         : '后台任务';
-  const taskTone = activeTasks.length > 0 ? 'running' : failedTasks.length > 0 || taskQuery.error ? 'failed' : partialTasks.length > 0 ? 'partial' : 'idle';
+  const taskTone = activeTasks.length > 0 || indexingTasks.length > 0 ? 'running' : failedTasks.length > 0 || taskQuery.error ? 'failed' : partialTasks.length > 0 ? 'partial' : 'idle';
 
   const refreshDimension = async (): Promise<void> => {
     try {

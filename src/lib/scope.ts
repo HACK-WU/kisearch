@@ -286,5 +286,12 @@ export function setSource(scope: string, source: GroupIndexSource): void {
   };
   data.updatedAt = new Date().toISOString();
 
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  // S-04 I3（REQ-20261009-003）：**原子写** —— tmp + rename。
+  // 原实现为裸 fs.writeFileSync：跨进程读者（CLI query-group / get-module-info / import）
+  // 可能在写入中途读到**截断的 JSON** 并 CORRUPT_JSON fail-loud。
+  // 此处不引 store.writeJson 以避免 scope.ts ↔ store.ts 循环依赖，语义与其一致
+  //（同目录 tmp + 同文件系统 rename）。
+  const tmpPath = `${filePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmpPath, filePath);
 }

@@ -151,6 +151,14 @@ export interface McpConfig {
 export interface VectorResourceConfig {
   /** daemon 进程最多同时保留的 Collection handle；未配置时使用保守默认值。 */
   maxOpenCollections?: number;
+  /** 索引整理（S-01，REQ-20261009-003）：导入收尾异步触发 optimize 的口径 */
+  optimize?: {
+    enabled?: boolean;
+    /** 整理线程数；未配置 = 引擎自动（实验 1：1 ≈ 1.0 核） */
+    concurrency?: number;
+    /** 等待上限；超时按"中断"处理（默认 600000） */
+    timeoutMs?: number;
+  };
 }
 
 /**
@@ -234,6 +242,9 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
 
 const DEFAULT_VECTOR_RESOURCES: VectorResourceConfig = {
   maxOpenCollections: 8,
+  // S-01：默认自动整理。**concurrency 默认 1**（设计 D5：实验 1 实测 1 ≈ 1.0 核；
+  // 不传（引擎自动）峰值可达 4.3 核，与"整理不得打满 CPU"的诉求相悖）
+  optimize: { enabled: true, concurrency: 1, timeoutMs: 600_000 },
 };
 
 /** 请求级配置快照，贯穿 daemon/HTTP 请求的排队与执行链。 */
@@ -623,10 +634,21 @@ function parseAndExpand(configFile: string): KiConfig {
   const rawVector = raw.vector && typeof raw.vector === 'object'
     ? raw.vector as Record<string, unknown>
     : {};
+  const rawOptimize = rawVector.optimize && typeof rawVector.optimize === 'object'
+    ? rawVector.optimize as Record<string, unknown>
+    : {};
   const vector: VectorResourceConfig = {
     maxOpenCollections: rawVector.maxOpenCollections !== undefined
       ? Number(rawVector.maxOpenCollections)
       : DEFAULT_VECTOR_RESOURCES.maxOpenCollections,
+    // S-01（REQ-20261009-003）：索引整理口径（缺省沿用 DEFAULT_VECTOR_RESOURCES.optimize）
+    optimize: {
+      enabled: rawOptimize.enabled !== undefined ? rawOptimize.enabled !== false : true,
+      ...(rawOptimize.concurrency !== undefined ? { concurrency: Number(rawOptimize.concurrency) } : {}),
+      timeoutMs: rawOptimize.timeoutMs !== undefined
+        ? Number(rawOptimize.timeoutMs)
+        : DEFAULT_VECTOR_RESOURCES.optimize?.timeoutMs,
+    },
   };
 
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'

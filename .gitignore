@@ -40,3 +40,4 @@ CodeWikiHub/
 
 # ---- 设计风格工具库（ui-designer 技能安装，本地辅助，不进版本控制）----
 ui-tools/
+.plans/

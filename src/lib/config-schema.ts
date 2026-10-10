@@ -170,6 +170,18 @@ const CONFIG_SCHEMA: ConfigNode = {
       type: 'object',
       fields: {
         maxOpenCollections: { type: 'number', validate: positiveInt },
+        // S-01（REQ-20261009-003）：索引整理（optimize）——见 ki index-optimize / 导入收尾
+        optimize: {
+          type: 'object',
+          fields: {
+            /** 导入收尾是否自动触发索引整理（默认 true） */
+            enabled: { type: 'boolean' },
+            /** 整理线程数（0 = 引擎自动；1 ≈ 1 核，实验 1 实测） */
+            concurrency: { type: 'number', validate: positiveInt },
+            /** 整理等待上限，超过即判定"超时 = 中断"（默认 600000） */
+            timeoutMs: { type: 'number', validate: positiveInt },
+          },
+        },
       },
     },
     mcp: {

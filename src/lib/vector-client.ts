@@ -43,6 +43,8 @@ import { ensureVectorLayout, getCollectionsRoot, getScopeCollectionPath, getVect
 import { getPrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { ftsSearch as ftsOnlySearch } from './fts-client.js';
+// S-01：索引整理的"超时 = 中断"语义（复用 R8 落地的超时原语）
+import { withTimeoutFallback } from './timeout.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -1141,6 +1143,62 @@ export async function vectorStore(params: {
     throw new Error(`向量存储失败: ${reason}`);
   }
   return { docId };
+}
+
+/**
+ * 触发索引整理（optimize）——S-01（REQ-20261009-003）。
+ *
+ * 语义（勿改，均有设计依据）：
+ *   - 经 `withEngine` 在目标 scope 的 collection 上调用**原生异步** `optimize({concurrency})`；
+ *   - **超时 = 中断**：超过 `timeoutMs` 即返回 `degraded:'timeout'`——原生无 abort API，
+ *     进程退出会终止 worker，故**不声称"底层继续跑完"**；可观测靠 readiness/indexState，
+ *     恢复靠重试入口（`ki index-optimize` / `POST /api/vector/optimize`）；
+ *   - 引擎不可用（锁被占/损坏）按 `degraded:'unavailable'` 区分，便于上层给不同文案；
+ *   - 本函数**不抛错**：整理属"可失败的辅助动作"，失败不得判导入任务失败（N4/N8/N9）。
+ */
+export interface OptimizeIndexOptions {
+  /** 整理线程数；未传 = 引擎自动（实验 1：1 ≈ 1.0 核，自动峰值可达 4.3 核） */
+  concurrency?: number;
+  /** 等待上限（默认 600s）；超时按"中断"处理 */
+  timeoutMs?: number;
+}
+
+export type OptimizeIndexOutcome =
+  | { ok: true; wallMs: number }
+  | { ok: false; degraded: 'timeout' | 'unavailable' | 'error'; reason: string; waitedMs: number };
+
+export async function optimizeVectorIndex(
+  scope: string,
+  options: OptimizeIndexOptions = {},
+): Promise<OptimizeIndexOutcome> {
+  const { concurrency, timeoutMs = 600_000 } = options;
+  const startedAt = Date.now();
+  // ★ 必须包在 async IIFE 内：`withEngine` 可能在返回 Promise **之前**同步抛错
+  //   （如 scope 校验失败），裸 `.catch()` 接不住 ⇒ 违反本函数"不抛错"的契约。
+  const work = (async () => {
+    try {
+      await withEngine(scope, (engine) => engine.optimize(concurrency !== undefined ? { concurrency } : undefined));
+      return { ok: true as const, error: undefined as string | undefined };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  })();
+  const outcome = await withTimeoutFallback(
+    work,
+    () => ({ ok: false as const, error: `索引整理未在 ${timeoutMs}ms 内完成（已中断等待）` }),
+    timeoutMs,
+  );
+  const waitedMs = Date.now() - startedAt;
+  if (outcome.timedOut) {
+    return { ok: false, degraded: 'timeout', reason: outcome.value.error ?? 'timeout', waitedMs };
+  }
+  if (!outcome.value.ok) {
+    const reason = outcome.value.error ?? 'unknown';
+    // 锁被占 / 集合损坏 ⇒ 归为 unavailable（上层文案与"真实错误"区分开）
+    const unavailable = /LOCKED|锁|被其他进程占用|CORRUPT|NOT_FOUND/i.test(reason);
+    return { ok: false, degraded: unavailable ? 'unavailable' : 'error', reason, waitedMs };
+  }
+  return { ok: true, wallMs: waitedMs };
 }
 
 /**

@@ -37,6 +37,8 @@ import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { closeFtsEngine, ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './lib/fts-client.js';
+// S-04 I2 补口（2026-10-10）：分片落盘必须入「元数据提交窗口」
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 
 // 向后兼容 re-export：parseContentTags 已统一提取到 lib/constants.js，
 // 保留本模块导出供既有测试/外部依赖引用。
@@ -367,7 +369,7 @@ function syncBatch(
 
   // 统一 WAL 持久化（批次 2：惰性迁移 + 触达组批写，一次 bump+失效）
   migrateLegacyRelationsCache(scope);
-  persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups));
 
   output({
     ok: true,
@@ -570,7 +572,7 @@ async function executeBulkSyncRelationLocal(params: {
     if (ftsStatusInvalidated) {
       // 批次 2：预失效改触达组批写（含惰性迁移）
       migrateLegacyRelationsCache(scope);
-      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, ftsInvalidatedGroups);
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, ftsInvalidatedGroups));
     }
 
     // 向量 entries 收集：每条 item 产出 [ki-relation, ki-search, ...customTags] 个 entry
@@ -965,7 +967,7 @@ async function executeBulkSyncRelationLocal(params: {
 
     // ─── 阶段 4：落盘 cache（批次 2：惰性迁移 + 触达组批写）───
     migrateLegacyRelationsCache(scope);
-    persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, bulkTouchedGroups);
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, bulkTouchedGroups));
 
     // ─── 阶段 5：各自 wiki 写回（文件路径不同，无冲突） ───
     for (let i = 0; i < items.length; i++) {
@@ -1119,7 +1121,7 @@ async function vectorWriteBack(params: {
               rel.memoryId = searchItem.memoryId;
             }
             migrateLegacyRelationsCache(scope);
-            persistCacheShape(scope, latestCache as unknown as LegacyRelationsCacheShape, new Set([group]));
+            getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, latestCache as unknown as LegacyRelationsCacheShape, new Set([group])));
           }
         }
       } catch {
@@ -1192,7 +1194,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       // 写入失败/中断后，让旧 FTS ID 因 legacy fallback 继续被误报为完整。
       existingRelation.ftsIndexComplete = false;
       migrateLegacyRelationsCache(scope);
-      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group]));
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group])));
     }
     const result = syncSingleRelation(cache, scope, group, relation, moduleInfo);
 
@@ -1250,7 +1252,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
 
     // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘（批次 2：惰性迁移+触达组批写）。
     migrateLegacyRelationsCache(scope);
-    persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group]));
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group])));
 
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
     // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，

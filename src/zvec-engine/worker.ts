@@ -143,9 +143,26 @@ async function dispatch(req: WorkerRequest): Promise<unknown> {
       return handleQuery(req.payload as QueryPayload);
     case 'multiQuery':
       return handleMultiQuery(req.payload as MultiQueryPayload);
-    case 'optimize':
-      ensureCollection().optimizeSync();
+    case 'optimize': {
+      // S-01（REQ-20261009-003）：改原生**异步** optimize(options)，支持限核
+      //（原实现 optimizeSync 阻塞 worker 且无法限核）。
+      // 说明（勿误读为 actor 串行）：本文件消息循环是 `void handleRequest(req)`
+      // **并发派发**，await 原生异步 optimize 期间其它消息仍会被处理 ⇒ 同 collection
+      // 的查询/写入**不会被本调用挡在消息队列外**。实际争用程度取决于原生内部实现
+      //（实验 1 测的是 sync 版：233ms 的 optimize 期间 `info()` 延迟 212ms），
+      // 异步版需实测（见 S-01「整理期检索延迟」验收项）。
+      const p = req.payload as { concurrency?: number };
+      const coll = ensureCollection();
+      // ★ 未传 concurrency 时必须走**零参调用**：实测 `optimize(undefined)` 会被原生拒绝
+      //   （`Collection.optimize(): Expected 0 to 1 argument. Argument must be an OptimizeOptions object.`）
+      //   —— 这正是"默认路径"（未配置 concurrency）必踩的坑，由 S-02 端到端验收捕获。
+      if (p.concurrency !== undefined) {
+        await coll.optimize({ concurrency: p.concurrency });
+      } else {
+        await coll.optimize();
+      }
       return null;
+    }
     case 'createIndex': {
       const p = req.payload as { field: string; indexParam: unknown };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
