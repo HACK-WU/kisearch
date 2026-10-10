@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
+import { findLockHolder, formatLockHolder } from './lock-holder.js';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
 // 编译后的 worker.js，源码目录无法直接运行；故 dist 是运行时必需品，
 // 源码变更后需 npx tsc -p tsconfig.src.json（npm run build）重建。
@@ -123,10 +124,18 @@ export interface VectorAvailableResult {
 
 /**
  * 向量库被占用时的可操作处置提示（NEG-10）。
+ *
+ * 优先反查**真实持锁进程**（Linux `/proc/locks`，见 `lock-holder.ts`）：现场定位
+ * "谁占着"过去只能靠用户自己 ps/lsof（实际撞见过一个挂住的临时脚本持锁 40 分钟），
+ * 提示里直接给出 PID/进程名可省掉这一跳。查不到时自动降级为原文案，不影响报错语义。
+ *
+ * 导出：供测试与其它撞锁路径复用同一文案（撞锁是异常慢路径，可承受一次 `/proc` 读取）。
  */
-function lockedHint(dbPath: string): string {
+export function lockedHint(dbPath: string): string {
+  const holder = findLockHolder(path.join(dbPath, 'LOCK'));
   return (
     `向量库被其他进程占用或存在崩溃残留（${dbPath}）。\n` +
+    (holder ? `${formatLockHolder(holder)}\n` : '') +
     `  处置方式：\n` +
     `  1) 若有 ki mcp/server 常驻进程在运行，请先停止它；\n` +
     `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
@@ -190,8 +199,14 @@ async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
     }
     // 撞锁日志附带来源（HTTP 端点/MCP 工具名；CLI 路径未标注则无来源段）
     const source = vectorSourceStorage.getStore();
+    // 首次重试就把持锁者带出来：用户第一眼看到的往往正是这条刷屏日志（见 lib/lock-holder.ts）。
+    // 只查一次（attempt===0），避免每条重试都读 /proc；查不到时日志保持原样。
+    const holder = attempt === 0 ? findLockHolder(path.join(dbPath, 'LOCK')) : null;
+    const holderNote = holder
+      ? `（持锁进程 PID ${holder.pid} (${holder.name})${holder.self ? '，本进程' : ''}）`
+      : '';
     process.stderr.write(
-      `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
+      `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用${holderNote}，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
     );
     await sleep(LOCK_RETRY_INTERVAL_MS);
   }

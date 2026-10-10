@@ -456,13 +456,20 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
     } catch (error) {
       const err = error as Error & { name?: string };
       const locked = err.name === 'CollectionLockedException' || /被其他进程占用/.test(err.message);
+      // 撞锁文案里可能已反查到真实持锁进程（见 lib/lock-holder.ts）——附在后面，
+      // 省掉"用户自己 ps/lsof 找谁占着"这一跳；查不到时保持原样。
+      const holderLine = locked
+        ? err.message.split('\n').find((line) => line.includes('持锁进程：'))?.trim().replace(/^●\s*/, '')
+        : undefined;
       items.push({
         name: `Collection 维度 (${scope})`,
         status: 'warn',
         detail: locked
           ? daemonOwner
             ? '向量库被占用（本进程是 daemon owner，说明存在残留 LOCK），本次跳过维度诊断；建议 ki mcp restart 后重试'
+              + (holderLine ? `；${holderLine}` : '')
             : '向量库被运行中的 kisearch 实例占用，本次跳过维度诊断（停止该实例后重跑本命令即可；不影响全文检索）'
+              + (holderLine ? `；${holderLine}` : '')
           : `暂无法读取集合维度：${err.message}`,
       });
     }
