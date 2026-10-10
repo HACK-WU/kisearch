@@ -100,6 +100,23 @@ function conflictSuffixError(value: string): string | null {
   return null;
 }
 
+/**
+ * R1（REQ-20261010-001）：剥离被选目录的顶层段，让 Web 与 CLI 的 `sourcePath` / 组落点口径一致。
+ *
+ * 目录导入（拖拽 / 目录选择器 / webkitdirectory 回退）的相对路径形如 `<目录名>/a/b.md`，
+ * 而 CLI `ki import --source <目录>` 是相对该目录内部（`a/b.md`）——不剥离会让"同一目录
+ * 二次导入"被当成全新文档（实测：scope ai-docs 文档从 1859 翻倍到 3741）。
+ * 「选择文件」的 name 只有文件名（无 `/`），原样返回。
+ *
+ * 剥离点在上传载荷构造处（见 continueUpload）：扫描分组、附件相对引用解析仍用带目录名的
+ * 原始 name，只有发给后端的 rel 变扁平。
+ */
+function stripTopSegment(name: string): string {
+  const normalized = name.replaceAll('\\', '/');
+  const slash = normalized.indexOf('/');
+  return slash < 0 ? normalized : normalized.slice(slash + 1);
+}
+
 function normalizeRelativePath(value: string): string {
   const segments: string[] = [];
   for (const segment of value.replaceAll('\\', '/').split('/')) {
@@ -395,7 +412,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   // 实时校验 group（空字符串不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
   const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
-  const conflictSuffixErr = conflictMode === 'suffix' ? conflictSuffixError(conflictSuffix) : null;
+  // 后缀模板只在「自动添加后缀」模式生效：增量导入对同名（含不同来源）**一律覆盖**
+  // （用户 2026-10-10 拍板），覆盖/跳过也都不使用后缀
+  const suffixInUse = conflictMode === 'suffix';
+  const conflictSuffixErr = suffixInUse ? conflictSuffixError(conflictSuffix) : null;
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -540,7 +560,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setScopeConfirmed(false);
     setFormEpoch((epoch) => epoch + 1);
     setGroup('');
-    setConflictMode('suffix');
+    setConflictMode('incremental');
     setConflictSuffix('_{n}');
     setSelectedTags([]);
     setTagInput('');
@@ -775,7 +795,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
   /**
    * 将原生目录选择器返回的 FileList 按顶层目录聚合。
-   * webkitRelativePath 是后端推导默认 Group 所需的相对路径，不能丢失。
+   * webkitRelativePath 用于：① 本页选择项分组展示；② 附件相对引用解析。
+   * 发给后端的 rel 另经 `stripTopSegment` 剥离顶层目录段（R1：与 CLI 口径一致）。
    */
   const yieldToBrowser = (): Promise<void> => new Promise((resolve) => {
     window.requestAnimationFrame(() => resolve());
@@ -1005,7 +1026,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         const encoded: { name: string; content: string }[] = [];
         for (const [fileIndex, file] of batch.entries()) {
           setProgressText(`准备第 ${index + 1}/${plan.batches.length} 批：${fileIndex + 1}/${batch.length} 个文件…`);
-          encoded.push({ name: file.name, content: await fileToBase64(file.file) });
+          // R1：rel 剥离被选目录顶层段（与 CLI 同口径），否则同一目录二次导入会产生副本
+          encoded.push({ name: stripTopSegment(file.name), content: await fileToBase64(file.file) });
         }
         const response = await uploadFiles(
           plan.scope,
@@ -1115,7 +1137,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         vector,
         tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
         conflictMode,
-        conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
+        conflictSuffix: suffixInUse ? conflictSuffix : undefined,
       },
       selectionSnapshot: selections,
       batches,
@@ -1151,7 +1173,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         stats?: {
           total?: number; vectorized?: number; errors?: number; conflicts?: number;
           /** R2：文件级完成度（CLI/Web 同源口径） */
-          files?: { total?: number; completed?: number; incomplete?: number; scanned?: number; skipped?: number };
+          files?: { total?: number; completed?: number; incomplete?: number; scanned?: number; skipped?: number; unchanged?: number };
         };
         errors?: { path?: string; error?: string }[];
         conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string }[];
@@ -1221,7 +1243,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       vector,
       tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
       conflictMode,
-      conflictSuffix: conflictMode === 'suffix' ? conflictSuffix : undefined,
+      conflictSuffix: suffixInUse ? conflictSuffix : undefined,
     };
     // 校验段无 await，故在此处置位即可挡住同帧双击（后面的早退分支不会污染置位）
     retryRef.current = true;
@@ -1405,7 +1427,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 value={group}
                 onChange={setGroup}
                 placeholder="选择或输入 Group 路径，如：wiki/我的文档"
-                hint={scopeConfirmed ? "留空则使用 scope 名称作为根路径；选择后导入的文件将写入该路径下，并保留其相对目录结构。禁止包含 \\ 和 .." : '下拉来自当前 Scope；开始导入前需确认上方目标 Scope。'}
+                hint={scopeConfirmed ? "留空则按文件所在子目录各建根节点（根目录下的散文件归 scope 名称）；选择后文件写入该路径下并保留相对目录结构。禁止包含 \\ 和 .." : '下拉来自当前 Scope；开始导入前需确认上方目标 Scope。'}
                 error={groupErr}
               />
             </div>
@@ -1420,7 +1442,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                   value={conflictMode}
                   onChange={(e) => setConflictMode(e.target.value as ImportConflictMode)}
                 >
-                  <option value="suffix">自动添加后缀（推荐）</option>
+                  <option value="incremental">增量导入（推荐：内容未变的文件不重算）</option>
+                  <option value="suffix">自动添加后缀</option>
                   <option value="overwrite">覆盖已有文档</option>
                   <option value="skip">跳过同名文件</option>
                 </select>
@@ -1438,7 +1461,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               </div>
             </div>
             <div className="ki-form-hint">
-              同一 sourcePath 重复导入始终幂等覆盖；不同 sourcePath 的同名文档按此策略处理。后缀中的 {'{n}'} 会从 1 递增。
+              增量导入：同一文件内容未变则跳过重算（不重切分、不重算向量），内容变了照常覆盖，同名不同来源**也直接覆盖**；只有「自动添加后缀」会为同名文档生成副本（后缀中的 {'{n}'} 从 1 递增）。
             </div>
           </div>
 
@@ -1765,7 +1788,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`
                 : '导入已完成，可前往搜索验证。'}
               {typeof partialFiles?.scanned === 'number'
-                ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}）`
+                ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}${partialFiles.unchanged ? ` / 其中未变跳过重算 ${partialFiles.unchanged}` : ''}）`
                 : ''}
             </p>
             {showPartial && (

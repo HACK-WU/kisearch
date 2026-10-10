@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_IMPORT_CONFLICT_MODE,
   resolveImportConflict,
   validateImportConflictMode,
   validateImportConflictSuffix,
@@ -46,12 +47,58 @@ describe('import conflict resolution', () => {
     assert.equal(resolveImportConflict({ relations, baseRelation: 'foo', sourcePath: 'new/foo.md', mode: 'suffix' }).relation, 'foo_2');
   });
 
+  it('R3: 默认策略为增量导入（CLI 与 Web 同默认）', () => {
+    assert.equal(validateImportConflictMode(undefined), 'incremental');
+    assert.equal(DEFAULT_IMPORT_CONFLICT_MODE, 'incremental');
+  });
+
   it('validates mode and suffix template', () => {
-    assert.equal(validateImportConflictMode(undefined), 'suffix');
+    assert.equal(validateImportConflictMode(undefined), 'incremental');
     assert.equal(validateImportConflictSuffix(undefined), `_{n}`);
     assert.throws(() => validateImportConflictMode('merge'), /允许值/);
     assert.throws(() => validateImportConflictSuffix('副本'), /必须包含/);
     assert.throws(() => validateImportConflictSuffix('../_{n}'), /不能包含/);
+  });
+});
+
+describe('R2（REQ-20261010-001）：同批重复 rel 交给策略、不再静默覆盖', () => {
+  // 现场：剥离顶层目录段后「多目录同拖」→ a/foo.md 与 b/foo.md 剥后同为 foo.md
+  const batch = [relation('foo', 'a/foo.md')];
+
+  it('增量导入（默认）对同名不同来源 = 直接覆盖（不留后缀副本）', () => {
+    const result = resolveImportConflict({
+      relations: [], batchRelations: batch, baseRelation: 'foo', sourcePath: 'b/foo.md',
+    });
+    assert.equal(result.relation, 'foo');
+    assert.equal(result.action, 'overwrite');
+    assert.equal(result.conflictFromBatch, true);
+  });
+
+  it('skip 会真的跳过后者（此前被幂等覆盖分支截胡）', () => {
+    const result = resolveImportConflict({
+      relations: [], batchRelations: batch, baseRelation: 'foo', sourcePath: 'b/foo.md', mode: 'skip',
+    });
+    assert.equal(result.action, 'skip');
+    assert.equal(result.conflictFromBatch, true);
+  });
+
+  it('overwrite 仍解析到同一 relation，并标记 conflictFromBatch（调用方据此丢弃前者）', () => {
+    const result = resolveImportConflict({
+      relations: [], batchRelations: batch, baseRelation: 'foo', sourcePath: 'b/foo.md', mode: 'overwrite',
+    });
+    assert.equal(result.relation, 'foo');
+    assert.equal(result.action, 'overwrite');
+    assert.equal(result.conflictFromBatch, true);
+  });
+
+  it('与库中已有 sourcePath 相同仍走幂等覆盖（重导更新语义不受影响）', () => {
+    const result = resolveImportConflict({
+      relations: [relation('foo', 'a/foo.md')], batchRelations: [{ ...relation('foo_1', 'a/foo.md') }],
+      baseRelation: 'foo', sourcePath: 'a/foo.md', mode: 'skip',
+    });
+    assert.equal(result.action, 'overwrite');
+    assert.equal(result.relation, 'foo');
+    assert.equal(result.conflictFromBatch, false);
   });
 });
 

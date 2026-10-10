@@ -53,7 +53,7 @@ program
   .option('--tags <tags>', '文档级自定义标签（逗号分隔多个）：向量模式写内容向量，FTS-only 模式写全文标签索引；均持久化到 relation.tags')
   .option('--no-clean', '关闭全部数据清洗（含外部 hooks，等价 config clean.enabled:false）')
   .option('--no-assets', '关闭本地图片附件收集（等价 config import.assets:false；关闭后前端对图片引用显示占位块）')
-  .option('--conflict-mode <mode>', '同名文档处理策略：overwrite / skip / suffix（默认 suffix）')
+  .option('--conflict-mode <mode>', '同名文档处理策略：incremental（内容未变则跳过重算，默认）/ overwrite / skip / suffix')
   .option('--conflict-suffix <template>', '自动后缀模板，必须包含 {n}（默认 _{n}）')
   .option('--clean-rules <rules>', '覆盖内置清洗规则开关，逗号分隔：bom,frontmatter,htmlComment,mermaid,codePath,codeBlock（不传用 config/默认）')
   .option('--max-batch-files <n>', '整批最大文件数（S0-3 预算；默认 20000，≤0 显式关闭该项限制）')

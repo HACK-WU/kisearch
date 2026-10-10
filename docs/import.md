@@ -33,7 +33,7 @@ ki import \
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
-| `--conflict-mode` | 否 | 同一 Group 下不同 `sourcePath` 的同名处理：`overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀，默认 `suffix` |
+| `--conflict-mode` | 否 | 同名文档处理策略，默认 **`incremental`**（增量导入：同 `sourcePath` 且内容未变则跳过重算；同名不同 `sourcePath` 与同批重复 rel 一律**直接覆盖**）；另有 `overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀 |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；清洗后的 chunk 写入独立全文 Collection，`ki search --mode fulltext` 可召回；local KB 文件原文照写 |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
@@ -45,9 +45,12 @@ ki import \
 
 `import` 以 `(groupPath, relation名)` 为主键做幂等判定：
 
-- **同 sourcePath 重导**（同一文件内容变更后重新导入）：覆盖更新（local KB + 向量重建）
-- **同名但 sourcePath 不同**（不同文件同名）：按 `--conflict-mode` 处理；默认生成 `foo_1`、`foo_2`，目标名已占用时继续递增
+- **同 sourcePath 重导 + 内容未变**（默认 `incremental`）：**跳过重算**——不重切分、不调 embedding、不写向量、不重写原文；附件仍复制（同名先删后写）。判定全部本地计算：由本次清洗+切分结果推导的 dense docId 与全文 id 集合须与库中 `memoryIds`/`ftsIds` 完全一致（切分参数或清洗规则变化会被自动识别为「变了」）；不校验向量是否真实存在（丢失时用 `ki restore --rebuild-vector` 兜底）
+- **同 sourcePath 重导 + 内容已变**：覆盖更新（local KB + 向量重建）
+- **同名但 sourcePath 不同**（不同文件同名）：按 `--conflict-mode` 处理——默认（`incremental`）与 `overwrite` 都是**直接覆盖**（后者胜出，不留副本）；`suffix` 生成 `foo_1`、`foo_2`（目标名已占用时继续递增）；`skip` 跳过后者
 - **新文件**：正常导入
+
+> **入口路径口径**：Web 导入页（拖拽 / 目录选择器 / 目录回退）在上传前会**剥离被选目录的顶层段**，使 `sourcePath` 与 CLI `--source <目录>` 保持一致——同一目录无论从哪个入口导入，都是同一次幂等更新（否则会被当作全新文档，实测出现过文档翻倍）。
 
 同一 `sourcePath` 始终优先命中已有 relation，因此即使该文档此前通过自动后缀导入，重复导入也会覆盖原逻辑 relation，不会继续产生新后缀。自动后缀只改变逻辑 relation 名，不改写 `sourcePath`。
 
@@ -60,7 +63,7 @@ ki import \
 - **已成功的文件**照常提交（local KB + 向量 + 元数据三处一致），导入结束后即可 `ki search` / `ki query-group` / Web 文档列表看到；
 - **失败或未处理的文件**不写元数据、不留在文档列表，进入「未完成清单」；
 - **全部文件都未完成**时仍是 fail-loud（`ok:false`），不做"零提交假成功"；
-- 结果里新增 `partial`、`stats.files{total,completed,incomplete,scanned,skipped}`（恒等式 `completed + incomplete + skipped = scanned`）、`incomplete[]{path,group,relation,reason}`、`stopReason`（取消时 `cancelled:true`）；只重试子集时另有 `retryFilter{requested,matched,missing,invalid}`（`requested`=净化去重后的清单条数、`matched`=源目录命中并纳入本轮处理的条数、`missing`=源文件已删除/改名、`invalid`=被拒绝的非法路径：绝对路径 / 含 `..` / 空值或超长）；
+- 结果里新增 `partial`、`stats.files{total,completed,incomplete,scanned,skipped,unchanged}`（`unchanged` 是增量导入下「内容未变、跳过重算」的文件数，属 `completed` 的子集，恒等式不变）（恒等式 `completed + incomplete + skipped = scanned`）、`incomplete[]{path,group,relation,reason}`、`stopReason`（取消时 `cancelled:true`）；只重试子集时另有 `retryFilter{requested,matched,missing,invalid}`（`requested`=净化去重后的清单条数、`matched`=源目录命中并纳入本轮处理的条数、`missing`=源文件已删除/改名、`invalid`=被拒绝的非法路径：绝对路径 / 含 `..` / 空值或超长）；
 - **CLI 部分成功 = 退出码 0 + stderr 警告块**（与 Web 任务 `partial` 同口径）；脚本要严格判定可读 JSON 的 `partial` 字段。
 
 **未完成清单落盘**：部分成功时写入 `<scope>/.ki-import-incomplete.json`（含源目录、原批次参数、未完成项与停止原因）；全部完成时自动删除。它让「重试」跨进程/跨会话可用。

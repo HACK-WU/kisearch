@@ -129,6 +129,12 @@ export interface ImportStats {
     scanned: number;
     /** 未进入最终处理的文件数（过大 / chunk 超限 / hook 失败 / 冲突跳过 / 同批覆盖替换） */
     skipped: number;
+    /**
+     * R3（REQ-20261010-001）：增量导入下「内容未变、跳过重算」的文件数。
+     * 它是 completed 的**子集**（数据本就完整在位，无需重做），故不单独占一项，
+     * 恒等式 `completed + incomplete + skipped = scanned` 仍然成立。
+     */
+    unchanged: number;
   };
 }
 
@@ -440,10 +446,60 @@ export function collectAndCopyAssets(opts: {
       continue;
     }
     fs.mkdirSync(path.dirname(dst), { recursive: true });
+    // REQ-20261010-001（用户要求）：同名附件先删除再写入——`copyFileSync` 虽有截断覆盖语义，
+    // 但目标是只读文件、软链或早先写入的目录时会失败/跟随软链；先删后拷让"替换"确定的成立。
+    if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
     fs.copyFileSync(abs, dst); // 幂等重导：同名覆盖
     copied.push(rel);
   }
   return { copied, warnings };
+}
+
+/**
+ * R3（REQ-20261010-001）：判定某文件「内容未变」——可安全跳过切分 / embedding / 写入。
+ *
+ * 判据（全部本地计算，不调用 embedding）：
+ *   1. local KB 原文与本次读到的原文逐字符相同（local KB 存原文，原文一致才谈得上未变）；
+ *   2. 由「本次清洗 + 切分结果」推导的 docId 集合与 `relation.memoryIds` **完全一致**——
+ *      chunk 内容向量（tag `ki-search`）+ 自定义标签向量（tag=<tag>，text=**文件原文**）。
+ *      id 集合一致本身即蕴含"清洗与切分结果一致"，故切分参数/清洗规则变化会被自动识别为"变了"；
+ *   3. FTS 侧不处于未完成态（`ftsIndexComplete === false` 时需重做以修复全文索引）；
+ *      FTS **id 集合不参与比对**（`ftsIds` 只在 --no-vector 模式写入，见函数末尾说明）；
+ *   4. 仅向量模式启用（`--no-vector` 的全文口径另行处理，暂不跳过）。
+ *
+ * 已知取舍（用户 2026-10-10 拍板）：不校验向量是否真的存在 —— `memoryIds` 一致即认为索引可用，
+ * 向量丢失的场景由 `ki restore --rebuild-vector` 兜底。
+ *
+ * 降级行为：若上一次导入的**标签向量**写失败（memoryIds 缺 tag id），集合对不上 → 判定"变了"
+ * → 本次重做全部（浪费一次，但不丢数据、可自愈）。
+ */
+function isContentUnchanged(args: {
+  fileText: string;
+  previousLocalText?: string;
+  previousRelation?: Relation;
+  entries: { text: string }[];
+  /** 本次导入的自定义标签：标签变了集合就对不上 → 视为"变了"并重做 */
+  tags: string[];
+  scope: string;
+}): boolean {
+  const previous = args.previousRelation;
+  if (!previous) return false;
+  if (typeof args.previousLocalText !== 'string' || args.previousLocalText !== args.fileText) return false;
+  if (previous.ftsIndexComplete === false) return false;
+  const stored = new Set(relationMemoryIds(previous));
+  if (stored.size === 0) return false;
+  const expected = new Set<string>();
+  for (const entry of args.entries) expected.add(generateDocId(entry.text, args.scope, 'ki-search'));
+  for (const tag of args.tags) expected.add(generateDocId(args.fileText, args.scope, tag));
+  if (expected.size !== stored.size) return false;
+  for (const id of expected) if (!stored.has(id)) return false;
+  // 全文索引为何**不**纳入 id 集合比对（challenger 质疑 2026-10-10 的处置）：
+  // `ftsIds` 只在 `--no-vector`（FTS-only）模式写入，向量模式下恒为空 —— 若把它纳入判据，
+  // 判定永远不成立、增量导入整体失效（实测：二次导入 unchanged 由 2 变 0）。
+  // 而 FTS-only 模式本就不启用跳过（本函数只在 `vector` 为真时被调用），所以不存在
+  // "跳过导致全文索引长期不修"的路径；上一个 FTS-only 导入留下的 relation 因 memoryIds 为空
+  // 必然判"变了" → 会正常重做并转成 dense。
+  return true;
 }
 
 /** 读取文件内容并按参数切分；未超限返回单 chunk */
@@ -485,6 +541,8 @@ async function handleDirectImportUnlocked(
   }
 
   let processedFileCount = 0;
+  /** R3（REQ-20261010-001）：增量导入跳过重算的文件数（内容未变；计入 completed，单列可观测） */
+  let unchangedFileCount = 0;
   let totalFileCount = 0;
   let cleanedUp = false;
   let lockAcquired = false;
@@ -768,8 +826,11 @@ async function handleDirectImportUnlocked(
     const originalRelation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
     const groupData = relationsCache0.groups[groupPath];
     const currentBatchRelations = plannedRelations.get(groupPath) ?? [];
+    // R2（REQ-20261010-001）：库中已有关系与本批已计划关系**分开传**——本批重复 rel 不再
+    // 走「同 sourcePath 幂等覆盖」，而是当作撞名交给用户所选策略（否则 skip/suffix 失效）。
     const resolution = resolveImportConflict({
-      relations: [...(groupData?.hot_relations ?? []), ...currentBatchRelations],
+      relations: groupData?.hot_relations ?? [],
+      batchRelations: currentBatchRelations,
       baseRelation: originalRelation,
       sourcePath: rel,
       mode: conflictMode,
@@ -863,8 +924,8 @@ async function handleDirectImportUnlocked(
     // 中断安全性：缓冲在 hook 失败/chunk 超限回滚点**之后**才并入，被跳过文件不进缓冲；
     // 进程中断时本批缓冲丢失 → local KB 保持导入前状态，与旧"逐篇写"的已写部分
     // 相比少了部分推进，但幂等重导语义不变（重跑全量覆盖）。
-    ensureGroupBuffer(groupPath).set(relation, fileText);
-    // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
+    // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚。
+    // R3：置于「内容未变」判定**之前** —— 正文未变但引用的图片已改时，附件仍会替换（同名先删后写）。
     if (assetsEnabled) {
       const assetResult = collectAndCopyAssets({
         // 单文件导入时 sourceDir 是文件路径，源根应取其所在目录（否则同级图片全部判为越界）
@@ -878,6 +939,24 @@ async function handleDirectImportUnlocked(
       for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
       assetWarnings.push(...assetResult.warnings);
     }
+    // R3（REQ-20261010-001）：增量导入——内容未变则跳过切分 / embedding / 写入 / 原文重写
+    // （附件已按上面照常复制）。计完成而非跳过：该文件的数据本就完整在位。
+    if (conflictMode === 'incremental' && vector
+      && isContentUnchanged({
+        fileText,
+        previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
+        previousRelation: previousRelationSnapshot,
+        entries,
+        tags: customTags,
+        scope,
+      })) {
+      unchangedFileCount += 1;
+      logInfo(`内容未变，增量跳过重算（${rel}）`);
+      processedFileCount++;
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
+      continue;
+    }
+    ensureGroupBuffer(groupPath).set(relation, fileText);
     fileRecords.push({
       rel,
       groupPath,
@@ -917,6 +996,46 @@ async function handleDirectImportUnlocked(
   if (assetWarnings.length > 0) {
     logWarn(`附件收集告警 ${assetWarnings.length} 条：${assetWarnings.slice(0, 10).join('；')}${assetWarnings.length > 10 ? ` ...等 ${assetWarnings.length} 条` : ''}`);
   }
+  if (unchangedFileCount > 0) {
+    logInfo(`增量导入：${unchangedFileCount} 个文件内容未变，已跳过重算（不重切分 / 不重算 embedding / 不重写向量与原文）`);
+  }
+  // R3：整批都未变（且没有其他待处理文件）不是"无可导入文件"，而是增量导入的正常终态——必须成功返回。
+  // 该分支**不做任何写入**（含不更新 group-index.source、不写 local KB/向量/元数据）——
+  // 这正是增量导入"零重算"的含义；files.total 因此为 0，而 completed = 未变文件数。
+  if (fileRecords.length === 0 && unchangedFileCount > 0) {
+    releaseImportLock(scope);
+    lockAcquired = false;
+    return {
+      ok: true,
+      action: 'import',
+      scope,
+      stats: {
+        total: 0,
+        vectorized: 0,
+        errors: 0,
+        skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length,
+        vector,
+        assets: assetCopied.size,
+        conflicts: conflicts.length,
+        // 整批未变时无任何写入，全文索引自然为 0
+        fullTextIndexed: 0,
+        files: {
+          total: 0,
+          completed: unchangedFileCount,
+          incomplete: 0,
+          scanned: effectiveFiles.length,
+          skipped: Math.max(0, effectiveFiles.length - unchangedFileCount),
+          unchanged: unchangedFileCount,
+        },
+      },
+      partial: false,
+      incomplete: [],
+      errors: [],
+      conflicts,
+      groups: [],
+      source: { dir: sourceDir, chunkSize, chunkOverlap },
+    };
+  }
   if (fileRecords.length === 0) {
     const skippedConflictCount = conflicts.filter((item) => item.action === 'skip').length;
     // 纯 skip 冲突不是系统失败：返回结构化冲突明细，让 CLI/HTTP/Web 都能告诉用户
@@ -937,7 +1056,7 @@ async function handleDirectImportUnlocked(
           assets: 0,
           conflicts: conflicts.length,
           fullTextIndexed: 0,
-          files: { total: 0, completed: 0, incomplete: 0, scanned: 0, skipped: 0 },
+          files: { total: 0, completed: 0, incomplete: 0, scanned: 0, skipped: 0, unchanged: 0 },
         },
         partial: false,
         incomplete: [],
@@ -1572,7 +1691,7 @@ async function handleDirectImportUnlocked(
   logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
 
   const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  unchanged=${unchangedFileCount}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
@@ -1664,11 +1783,13 @@ async function handleDirectImportUnlocked(
       // R1：文件级完成度（CLI/Web 展示「完成 N / 未完成 M」的唯一口径）
       files: {
         total: fileRecords.length,
-        completed: fileRecords.length - failedRecords.size,
+        // R3：增量跳过的文件数据本就完整在位 —— 计入 completed（否则会破坏 R1 的恒等式）
+        completed: fileRecords.length - failedRecords.size + unchangedFileCount,
         incomplete: failedRecords.size,
         // P2（review）：补分母与跳过数，使「扫描 = 完成 + 未完成 + 跳过」可自洽核算
         scanned: effectiveFiles.length,
-        skipped: Math.max(0, effectiveFiles.length - fileRecords.length),
+        skipped: Math.max(0, effectiveFiles.length - fileRecords.length - unchangedFileCount),
+        unchanged: unchangedFileCount,
       },
     },
     /** R1：部分成功（提交了已完成文件，但仍有未完成文件） */

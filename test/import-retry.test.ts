@@ -97,7 +97,7 @@ describe('R2：只重试未完成子集', () => {
       vectorizePathCalls = [];
       const first = await handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true });
       assert.equal(first.partial, true);
-      assert.deepEqual(first.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0 });
+      assert.deepEqual(first.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0 });
       assert.deepEqual(first.incomplete.map((i) => i.path).sort(), ['b.md', 'c.md']);
 
       const record = readImportIncomplete(scope);
@@ -121,7 +121,7 @@ describe('R2：只重试未完成子集', () => {
       });
 
       // ① 只处理名单内文件（文件级分母 = 2，不是 3）
-      assert.deepEqual(retry.stats.files, { total: 2, completed: 2, incomplete: 0, scanned: 2, skipped: 0 });
+      assert.deepEqual(retry.stats.files, { total: 2, completed: 2, incomplete: 0, scanned: 2, skipped: 0, unchanged: 0 });
       assert.equal(retry.partial, false);
       assert.deepEqual(retry.retryFilter, { requested: 2, matched: 2, missing: [] });
 
@@ -160,7 +160,7 @@ describe('R2：只重试未完成子集', () => {
         scope, sourceDir: src, group: 'G', vector: true, onlyRelPaths: ['a.md', 'b.md'],
       });
       assert.deepEqual(partialHit.retryFilter, { requested: 2, matched: 1, missing: ['a.md'] });
-      assert.deepEqual(partialHit.stats.files, { total: 1, completed: 1, incomplete: 0, scanned: 1, skipped: 0 });
+      assert.deepEqual(partialHit.stats.files, { total: 1, completed: 1, incomplete: 0, scanned: 1, skipped: 0, unchanged: 0 });
 
       // 全部不存在 → fail-loud（不静默当成"无事可做"）
       await assert.rejects(

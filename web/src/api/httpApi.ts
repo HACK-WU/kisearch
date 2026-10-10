@@ -150,7 +150,7 @@ export interface RunImportResponse {
 /**
  * 同名文档处理策略（REQ-20261010-001）。
  * `incremental`（默认）= 增量导入：同 sourcePath 重复导入时内容未变则跳过重算，
- * 内容变了照常覆盖；对"同名不同 sourcePath"的兜底行为与 `suffix` 相同。
+ * 内容变了照常覆盖；同名不同 sourcePath（或同批重复 rel）**一律直接覆盖**，不生成后缀副本。
  */
 export type ImportConflictMode = 'incremental' | 'overwrite' | 'skip' | 'suffix';
 
