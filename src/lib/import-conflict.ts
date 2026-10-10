@@ -2,8 +2,11 @@
  * import-conflict.ts —— 文档导入同名冲突策略。
  *
  * 冲突边界：同一 Group 下的 relation 名称。
- * 判定优先级（2026-10-10 REQ-20261010-001 R2 修订）：
- *   1. 与**库中已有**关系同 sourcePath → 幂等覆盖（重导更新语义，优先级最高）；
+ * 判定优先级（2026-10-10 REQ-20261010-001 R2/R4 修订）：
+ *   1. 与**库中已有**关系同 sourcePath（按 sourcePath 判定，**不比对内容**）：
+ *      - `skip` 策略 → **跳过**（库中已有就什么都不做；用户 2026-10-10 拍板，
+ *        此前无条件走幂等覆盖，导致选"跳过"仍全量重算）；
+ *      - 其余策略（incremental / overwrite / suffix）→ 幂等覆盖（重导更新语义）；
  *   2. **本批内**重复 rel **不算幂等覆盖**，与"同名不同来源"同等对待 → 交给所选
  *      策略处理（此前它会命中 ①，使 skip / suffix 全部失效，且"覆盖"是用户没选过的
  *      行为）。注：旧实现并未因此产生孤儿向量——import.ts 命中 overwrite 时会丢弃
@@ -31,7 +34,11 @@ export interface ImportConflictResolution {
   relation: string;
   /** create 表示无冲突；其他 action 表示命中了已有 sourcePath 或同名 relation。 */
   action: 'create' | ImportConflictAction;
-  /** 是否为不同 sourcePath 的真实同名冲突。 */
+  /**
+   * 是否计入冲突明细（import.ts 据此 push 进结果里的 `conflicts`）——两种计入来源：
+   * ① 不同 sourcePath 的真实同名冲突；② `skip` 策略下被跳过的**同源**文件
+   * （不是撞名，但同样要让用户在结果里看到"这些文件没被处理"）。
+   */
   conflicted: boolean;
   /**
    * 本次的"名字/来源冲突"是否来自**本批已计划项**（同一次导入内）——包含两种：
@@ -87,6 +94,13 @@ export function resolveImportConflict(args: {
   // 原 relation，而不是继续生成 _2、_3。
   const sameSource = args.relations.find((relation) => relation.sourcePath === args.sourcePath);
   if (sameSource) {
+    // R4（用户 2026-10-10 拍板）：「跳过同名文件」= 库中已有就**什么都不做**（字面语义）。
+    // 此前本分支无条件返回 overwrite，导致用户选 skip 重导同一目录时全部文件重新
+    // 切分 + embedding（实测 scope consul：854 个 chunk 重算、17~23s，与首次同量），
+    // 用户看到的就是"选了跳过却没生效、和首次一样慢"。判定只按 sourcePath，不比对内容。
+    if (mode === 'skip') {
+      return { relation: sameSource.text, action: 'skip', conflicted: true, conflictFromBatch: false, existing: sameSource };
+    }
     return { relation: sameSource.text, action: 'overwrite', conflicted: false, conflictFromBatch: false, existing: sameSource };
   }
 

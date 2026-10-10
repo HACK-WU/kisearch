@@ -700,6 +700,54 @@ describe('/api/import/run + status', () => {
     assert.equal(secondJob.result?.conflicts?.[0]?.action, 'suffix');
   });
 
+  it('R4：同目录二次导入 + conflictMode skip → 零处理单元（全部"已存在"跳过，带 skipReason）', async () => {
+    const scope = 'run-conflict-skip';
+    const files = [
+      { name: 'a.md', content: Buffer.from('# A\n旧正文').toString('base64') },
+      { name: 'b.md', content: Buffer.from('# B\n内容B').toString('base64') },
+    ];
+    // FTS-only 首次创建 zvec Collection 需独立 worker 冷启动，给足等待窗口
+    const waitJob = async (jobId: string): Promise<any> => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const status = await fetch(`${handle!.base}/api/import/status?jobId=${encodeURIComponent(jobId)}`);
+        const body = await status.json();
+        if (body.job?.state !== 'running') return body.job;
+      }
+      throw new Error('job 等待超时');
+    };
+    const importOnce = async (conflictMode?: string): Promise<any> => {
+      const upload = await fetch(`${handle!.base}/api/import/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, files }),
+      });
+      const uploadBody = await upload.json();
+      const run = await fetch(`${handle!.base}/api/import/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, uploadId: uploadBody.uploadId, vector: false, ...(conflictMode ? { conflictMode } : {}) }),
+      });
+      const runBody = await run.json();
+      return waitJob(runBody.jobId);
+    };
+
+    const first = await importOnce();
+    assert.equal(first.state, 'done', first.error);
+    assert.equal(first.result?.stats?.total, 2);
+
+    // 用户现场：同一目录（同名同 sourcePath）二次导入，选「跳过同名文件」
+    const second = await importOnce('skip');
+    assert.equal(second.state, 'done', second.error);
+    assert.equal(second.result?.stats?.total, 0, 'skip 重导不得产出处理单元');
+    assert.equal(second.result?.stats?.vectorized, 0);
+    assert.deepEqual(
+      second.result?.conflicts?.map((item: any) => [item.action, item.skipReason]),
+      [['skip', 'already-imported'], ['skip', 'already-imported']],
+    );
+    assert.deepEqual(second.result?.stats?.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0 });
+  });
+
   it('status jobId 不存在 → 404', async () => {
     const res = await fetch(`${handle!.base}/api/import/status?jobId=no-such-job`);
     assert.equal(res.status, 404);

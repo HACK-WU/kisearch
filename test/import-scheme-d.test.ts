@@ -187,14 +187,16 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(rC.stats.total, 1, '同文件再次重导仍幂等（sourcePath 相同）');
   });
 
-  it('同 group 同名文件默认自动后缀，重复导入不继续递增', () => {
+  it('suffix 策略：同 group 同名文件自动加后缀，重复导入不继续递增', () => {
     // deriveRelationText 会清理 Markdown 强调字符：foo.md 与 *foo*.md 都映射为 foo，
     // 但 sourcePath 不同，正好覆盖真实冲突分支。
+    // 注：默认策略自 R3（REQ-20261010-001 D9）起是 incremental——同批撞名按覆盖处理、
+    // 不生成后缀副本，本用例验证的是 suffix 的命名口径，故显式指定策略。
     const src = mkSource({
       'foo.md': '# 原文\n内容 A',
       '*foo*.md': '# 新文\n内容 B',
     });
-    const first = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector']);
+    const first = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector', '--conflict-mode', 'suffix']);
     assert.strictEqual(first.ok, true, JSON.stringify(first));
     assert.strictEqual(first.stats.conflicts, 1, JSON.stringify(first));
 
@@ -202,9 +204,21 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const relations = readAllGroupCaches(scope).get('collision')!.hot_relations;
     assert.deepStrictEqual(relations.map((x: any) => x.text).sort(), ['foo', 'foo_1']);
 
-    const second = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector']);
+    const second = runImport(['--scope', scope, '--source', src, '--group', 'collision', '--no-vector', '--conflict-mode', 'suffix']);
     assert.strictEqual(second.ok, true, JSON.stringify(second));
     assert.strictEqual(second.stats.conflicts, 0, '同 sourcePath 重导不能再次生成 foo_2');
+  });
+
+  it('默认策略（incremental）：同批同名按覆盖处理，不生成后缀副本', () => {
+    const src = mkSource({ 'foo.md': '# 原文', '*foo*.md': '# 新文' });
+    const r = runImport(['--scope', scope, '--source', src, '--group', 'collision-default', '--no-vector']);
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.stats.total, 1, '后者替换前者，只留一篇');
+    assert.strictEqual(r.stats.conflicts, 1);
+
+    const { readAllGroupCaches } = require('../src/lib/group-cache.js');
+    const relations = readAllGroupCaches(scope).get('collision-default')!.hot_relations;
+    assert.deepStrictEqual(relations.map((x: any) => x.text), ['foo'], '默认策略不生成 foo_1');
   });
 
   it('CLI 参数透传自定义后缀与覆盖策略', () => {
@@ -245,6 +259,43 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(skipped.stats.total, 0);
     assert.strictEqual(skipped.stats.skipped, 1);
     assert.strictEqual(skipped.conflicts[0].action, 'skip');
+  });
+
+  it('R4：--conflict-mode skip 重导同一目录 = 零处理（全部"已存在"），改过正文不更新、新增文件仍导入', () => {
+    const src = mkSource({ 'a.md': '# A\n旧正文', 'b.md': '# B\n内容B' });
+    const first = runImport(['--scope', scope, '--source', src, '--group', 'skipkb', '--no-vector']);
+    assert.strictEqual(first.ok, true, JSON.stringify(first));
+    assert.strictEqual(first.stats.total, 2, '首次导入 2 篇');
+
+    // 第二次：同目录 + 跳过同名 → 两篇此前都已导入 → 一个处理单元都不该有
+    const skipArgs = ['--scope', scope, '--source', src, '--group', 'skipkb', '--no-vector', '--conflict-mode', 'skip'];
+    const second = runImport(skipArgs);
+    assert.strictEqual(second.ok, true, JSON.stringify(second));
+    assert.strictEqual(second.stats.total, 0, 'skip 重导不得产出任何处理单元');
+    assert.strictEqual(second.stats.vectorized, 0);
+    assert.strictEqual(second.stats.skipped, 2);
+    assert.deepStrictEqual(
+      second.conflicts.map((item: any) => [item.action, item.skipReason]),
+      [['skip', 'already-imported'], ['skip', 'already-imported']],
+      '跳过成因应标为 already-imported（区别于同名的 same-name）',
+    );
+    assert.deepStrictEqual(second.stats.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0 });
+
+    // 正文改过也不重算（skip 不比对内容）——要更新请用 incremental / overwrite
+    fs.writeFileSync(path.join(src, 'a.md'), '# A\n新正文');
+    const third = runImport(skipArgs);
+    assert.strictEqual(third.ok, true, JSON.stringify(third));
+    assert.strictEqual(third.stats.total, 0, 'skip 下改过正文的文件同样不重算（口径：只按 sourcePath 判定）');
+    const { getLocalKbDir } = require('../src/lib/scope.js');
+    const kb = JSON.parse(fs.readFileSync(getLocalKbDir(scope, 'skipkb'), 'utf-8'));
+    assert.ok(kb['a'].includes('旧正文'), 'skip 不更新已存在文档的正文');
+
+    // 新增文件仍被导入：skip 的完整语义 = "只导入新文件"
+    fs.writeFileSync(path.join(src, 'c.md'), '# C\n新增');
+    const fourth = runImport(skipArgs);
+    assert.strictEqual(fourth.ok, true, JSON.stringify(fourth));
+    assert.strictEqual(fourth.stats.total, 1, '只有新增文件被处理');
+    assert.deepStrictEqual(fourth.stats.files, { total: 1, completed: 1, incomplete: 0, scanned: 3, skipped: 2, unchanged: 0 });
   });
 
   it('同一批次 overwrite：后者替换前者，不产生重复 relation', () => {

@@ -1231,7 +1231,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           files?: { total?: number; completed?: number; incomplete?: number; scanned?: number; skipped?: number; unchanged?: number };
         };
         errors?: { path?: string; error?: string }[];
-        conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string }[];
+        conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string; skipReason?: string }[];
         /** R1/R2：部分成功语义（REQ-20261009-001） */
         partial?: boolean;
         incomplete?: { path?: string; group?: string; relation?: string; reason?: string }[];
@@ -1242,6 +1242,29 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       }
     | undefined;
   const importErrors = result?.errors ?? [];
+  /**
+   * R4（2026-10-10）：「同名处理」摘要要区分 skip 的两种成因——
+   * ① `already-imported`：本文件此前已导入（同 sourcePath），跳过 = 不重算；
+   * ② 其他：同 Group 内同名但来源不同，才是真正的"同名冲突"。
+   * 旧文案把两者都写成「同名冲突 N 个」，会让"重导同一目录"的正常跳过看起来像撞名。
+   */
+  const conflictSummary = (() => {
+    const items = result?.conflicts ?? [];
+    if (items.length === 0) return '';
+    const count = (predicate: (item: { action?: string; skipReason?: string }) => boolean): number =>
+      items.filter(predicate).length;
+    const alreadyImported = count((item) => item.action === 'skip' && item.skipReason === 'already-imported');
+    const sameNameSkipped = count((item) => item.action === 'skip' && item.skipReason !== 'already-imported');
+    const overwritten = count((item) => item.action === 'overwrite');
+    const suffixed = count((item) => item.action === 'suffix');
+    const parts = [
+      alreadyImported > 0 ? `已存在跳过 ${alreadyImported} 个` : '',
+      sameNameSkipped > 0 ? `同名跳过 ${sameNameSkipped} 个` : '',
+      overwritten > 0 ? `同名覆盖 ${overwritten} 个` : '',
+      suffixed > 0 ? `另存后缀 ${suffixed} 个` : '',
+    ].filter(Boolean);
+    return parts.length > 0 ? `，${parts.join('，')}` : '';
+  })();
   const importPercent = job?.progress && job.progress.total > 0
     ? Math.min(100, Math.round((job.progress.done / job.progress.total) * 100))
     : null;
@@ -1502,7 +1525,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                   <option value="incremental">增量导入（推荐：内容未变的文件不重算）</option>
                   <option value="suffix">自动添加后缀</option>
                   <option value="overwrite">覆盖已有文档</option>
-                  <option value="skip">跳过同名文件</option>
+                  <option value="skip">跳过同名文件（已存在的一律不动，只导入新文件）</option>
                 </select>
               </div>
               <div className="ki-form-group">
@@ -1517,8 +1540,17 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 {conflictSuffixErr && <div className="ki-form-error">{conflictSuffixErr}</div>}
               </div>
             </div>
+            {/* 策略说明随所选策略切换：`skip` 的代价（改过的正文也不会更新）必须就地可见——
+                「跳过」的字面语义容易让用户以为"内容变了会同步"，实际只按 sourcePath 判定。
+                另：此前的固定文案里混入了 Markdown 粗体 `**`，在 JSX 文本里会原样显示成星号。 */}
             <div className="ki-form-hint">
-              增量导入：同一文件内容未变则跳过重算（不重切分、不重算向量），内容变了照常覆盖，同名不同来源**也直接覆盖**；只有「自动添加后缀」会为同名文档生成副本（后缀中的 {'{n}'} 从 1 递增）。
+              {conflictMode === 'skip'
+                ? '跳过同名：库中已存在的文档一律不处理（不改正文、不重算向量、不复制附件），只导入新文件。⚠️ 正文改过的也不会更新——需要同步修改请改用「增量导入」或「覆盖已有文档」。'
+                : conflictMode === 'incremental'
+                  ? '增量导入：同一文件内容未变则跳过重算（不重切分、不重算向量），内容变了照常更新；同名不同来源直接覆盖。'
+                  : conflictMode === 'overwrite'
+                    ? '覆盖已有文档：同名的已有文档一律用本次内容覆盖（不比对内容，全部重新切分与向量化）。'
+                    : `自动添加后缀：同名的已有文档保留不动，本次文件另存为 foo_1、foo_2…（后缀中的 {'{n}'} 从 1 递增）。`}
             </div>
           </div>
 
@@ -1873,7 +1905,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <>
               <p className="ki-cell-sub" style={{ marginTop: 8 }}>
               {result?.stats
-                ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${result.stats.conflicts ? `，同名冲突 ${result.stats.conflicts} 个` : ''}`
+                ? `已处理 ${result.stats.total ?? 0} 个分片 / ${result.stats.vectorized ?? 0} 个向量化，错误 ${result.stats.errors ?? 0}${conflictSummary}`
                 : '导入已完成，可前往搜索验证。'}
               {typeof partialFiles?.scanned === 'number'
                 ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}${partialFiles.unchanged ? ` / 其中未变跳过重算 ${partialFiles.unchanged}` : ''}）`
@@ -1920,13 +1952,14 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               <div className="ki-import-errors" role="status">
                 <div className="ki-import-errors__title">同名处理结果（{result.conflicts.length}）</div>
                 <ul>
-                  {result.conflicts.map((item, index) => (
+                  {result.conflicts.slice(0, 10).map((item, index) => (
                     <li key={`${item.path ?? 'conflict'}-${index}`}>
-                      {item.path ?? '文件'}：{item.originalRelation ?? '文档'} → {item.relation ?? '未命名'}（{
-                        item.action === 'skip' ? '已跳过' : item.action === 'overwrite' ? '已覆盖' : '已加后缀'
-                      }）
+                      {item.path ?? '文件'}：{item.action === 'skip' && item.skipReason === 'already-imported'
+                        ? '已存在，跳过（不重算）'
+                        : `${item.originalRelation ?? '文档'} → ${item.relation ?? '未命名'}（${item.action === 'skip' ? '同名，已跳过' : item.action === 'overwrite' ? '已覆盖' : '已加后缀'}）`}
                     </li>
                   ))}
+                  {result.conflicts.length > 10 && <li>…另有 {result.conflicts.length - 10} 条</li>}
                 </ul>
               </div>
             )}

@@ -91,14 +91,27 @@ describe('R2（REQ-20261010-001）：同批重复 rel 交给策略、不再静�
     assert.equal(result.conflictFromBatch, true);
   });
 
-  it('与库中已有 sourcePath 相同仍走幂等覆盖（重导更新语义不受影响）', () => {
+  it('R4：skip 模式下同 sourcePath 也真的跳过（此前被幂等覆盖分支截胡，选跳过仍全量重做）', () => {
     const result = resolveImportConflict({
       relations: [relation('foo', 'a/foo.md')], batchRelations: [{ ...relation('foo_1', 'a/foo.md') }],
       baseRelation: 'foo', sourcePath: 'a/foo.md', mode: 'skip',
     });
-    assert.equal(result.action, 'overwrite');
+    assert.equal(result.action, 'skip', 'skip 语义 = 库中已有就什么都不做');
     assert.equal(result.relation, 'foo');
     assert.equal(result.conflictFromBatch, false);
+    assert.equal(result.conflicted, true, '计入冲突明细，供结果摘要报告"已存在跳过"');
+  });
+
+  it('R4：其余策略下同 sourcePath 仍走幂等覆盖（重导更新语义不被 skip 改动影响）', () => {
+    for (const mode of ['incremental', 'overwrite', 'suffix', undefined]) {
+      const result = resolveImportConflict({
+        relations: [relation('foo', 'a/foo.md')],
+        baseRelation: 'foo', sourcePath: 'a/foo.md', mode,
+      });
+      assert.equal(result.action, 'overwrite', `mode=${mode} 应保持幂等覆盖`);
+      assert.equal(result.relation, 'foo', `mode=${mode} 不应另生成副本名`);
+      assert.equal(result.conflicted, false, `mode=${mode} 的幂等更新不算冲突`);
+    }
   });
 });
 

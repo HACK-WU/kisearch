@@ -124,7 +124,7 @@ flowchart LR
 ```
 
 - `memoryIds`：向量数据库中该文件全部 chunk 的 ID 列表（方案 D 多值）；`ki search` 命中任一 memoryId → 反查到同一文件级 relation → 返回文件原文（`--original`/`include_original` 开启时）。旧数据兼容单值 `memoryId` 字段
-- `sourcePath`：相对 `source.dir` 的 posix 路径，用于幂等判定（同 sourcePath 重导覆盖、不同 sourcePath 同名跳过）
+- `sourcePath`：相对 `source.dir` 的 posix 路径，用于幂等判定（同 sourcePath 重导默认幂等覆盖、`skip` 策略下跳过；不同 sourcePath 同名按所选策略处理）
 
 ### `index.json` 的 key 因写入来源不同而异
 
@@ -169,8 +169,8 @@ flowchart LR
 flowchart LR
     EXT2[外部知识库 文件变更/新增] --> IMP2[ki import --group &lt;name&gt;<br/>幂等追加]
     IMP2 --> ADD[新文件: 切分 + 向量化 + 写索引]
-    IMP2 --> MOD[同 sourcePath: 覆盖更新]
-    IMP2 --> SKIP[同名不同 sourcePath: 跳过]
+    IMP2 --> MOD[同 sourcePath: 默认幂等覆盖<br/>skip 策略: 跳过不处理]
+    IMP2 --> DUP[同名不同 sourcePath: 按 --conflict-mode<br/>默认覆盖 / skip 跳过 / suffix 加后缀]
 ```
 
 > 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，重复执行同命令即同步变更，不再依赖 git。

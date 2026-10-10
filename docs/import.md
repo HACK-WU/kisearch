@@ -33,7 +33,7 @@ ki import \
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
-| `--conflict-mode` | 否 | 同名文档处理策略，默认 **`incremental`**（增量导入：同 `sourcePath` 且内容未变则跳过重算；同名不同 `sourcePath` 与同批重复 rel 一律**直接覆盖**）；另有 `overwrite` 覆盖、`skip` 跳过、`suffix` 自动后缀 |
+| `--conflict-mode` | 否 | 同名文档处理策略，默认 **`incremental`**（增量导入：同 `sourcePath` 且内容未变则跳过重算；同名不同 `sourcePath` 与同批重复 rel 一律**直接覆盖**）；另有 `overwrite` 覆盖、`skip` 跳过（库中已存在的一律不动、**不比对内容**，只导入新文件）、`suffix` 自动后缀 |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；清洗后的 chunk 写入独立全文 Collection，`ki search --mode fulltext` 可召回；local KB 文件原文照写 |
 | `--no-clean` | 否 | 关闭全部数据清洗（含外部 hooks，等价 config `clean.enabled:false`） |
@@ -47,12 +47,13 @@ ki import \
 
 - **同 sourcePath 重导 + 内容未变**（默认 `incremental`）：**跳过重算**——不重切分、不调 embedding、不写向量、不重写原文；附件仍复制（同名先删后写）。判定全部本地计算：由本次清洗+切分结果推导的 dense docId 与全文 id 集合须与库中 `memoryIds`/`ftsIds` 完全一致（切分参数或清洗规则变化会被自动识别为「变了」）；不校验向量是否真实存在（丢失时用 `ki restore --rebuild-vector` 兜底）
 - **同 sourcePath 重导 + 内容已变**：覆盖更新（local KB + 向量重建）
+- **`--conflict-mode skip`（覆盖上面两条）**：库中**已存在的文件一律什么都不做**（同 `sourcePath` 的旧文档与同名不同来源的都跳过）——不切分、不调 embedding、不写向量、不重写原文、也不复制附件（跳过发生在附件处理之前）；整目录重导因此是**零处理单元**，语义等于"只导入新增文件"。代价：**正文改过也不会更新**（判定只看 `sourcePath`，不比对内容），要更新请改用 `incremental` / `overwrite`
 - **同名但 sourcePath 不同**（不同文件同名）：按 `--conflict-mode` 处理——默认（`incremental`）与 `overwrite` 都是**直接覆盖**（后者胜出，不留副本）；`suffix` 生成 `foo_1`、`foo_2`（目标名已占用时继续递增）；`skip` 跳过后者
 - **新文件**：正常导入
 
 > **入口路径口径**：Web 导入页（拖拽 / 目录选择器 / 目录回退）在上传前会**剥离被选目录的顶层段**，使 `sourcePath` 与 CLI `--source <目录>` 保持一致——同一目录无论从哪个入口导入，都是同一次幂等更新（否则会被当作全新文档，实测出现过文档翻倍）。
 
-同一 `sourcePath` 始终优先命中已有 relation，因此即使该文档此前通过自动后缀导入，重复导入也会覆盖原逻辑 relation，不会继续产生新后缀。自动后缀只改变逻辑 relation 名，不改写 `sourcePath`。
+同一 `sourcePath` 优先命中已有 relation（`skip` 策略下则直接跳过、不更新），因此即使该文档此前通过自动后缀导入，重复导入也会覆盖原逻辑 relation，不会继续产生新后缀。自动后缀只改变逻辑 relation 名，不改写 `sourcePath`。
 
 向量更新为文档级增量：先写新内容/标签向量，确认成功后再清理受影响 relation 的旧向量；无关文档不参与删除。若本批导入的某个文件向量化失败，该文件回滚 local KB 并保留旧 relation/向量；全部文件失败时导入 fail-loud。（系统性故障下的整批提交语义见下节「部分成功可用与只重试未完成」。）
 

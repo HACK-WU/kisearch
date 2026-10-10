@@ -7,7 +7,8 @@
  *   Phase 4: writeRelations      → 写 relations-cache + local KB（含 memoryId/sourcePath）
  *   Phase 5: recordSource        → 写 group-index.source 块（含切分参数）
  *
- * 幂等追加语义承载增量更新：同 sourcePath 覆盖、同名不同 sourcePath 跳过、新文件导入。
+ * 幂等追加语义承载增量更新：同 sourcePath 重导默认走幂等覆盖（`skip` 策略下改为跳过），
+ * 同名不同 sourcePath 按所选策略处理（默认覆盖 / `skip` 跳过 / `suffix` 加后缀），新文件导入。
  */
 
 import fs from 'fs';
@@ -109,7 +110,10 @@ export interface ImportStats {
   vector: boolean;
   /** 已复制进 KB 的本地图片附件数（REQ-20260904-001；--no-assets 或配置关闭时为 0） */
   assets: number;
-  /** 同一 Group 下不同 sourcePath 的真实同名冲突数量。 */
+  /**
+   * 冲突明细条数（= 结果里 `conflicts.length`）：不同 sourcePath 的真实同名冲突，
+   * 以及 `skip` 策略下被跳过的同源文件（详见 {@link ImportConflict.skipReason}）。
+   */
   conflicts: number;
   /** 写入 FTS-only Collection 的 chunk 文档数（--no-vector 模式）。 */
   fullTextIndexed: number;
@@ -152,6 +156,13 @@ export interface ImportConflict {
   originalRelation: string;
   relation: string;
   action: ImportConflictAction;
+  /**
+   * R4（2026-10-10）：仅 `action === 'skip'` 时有意义——跳过成因为
+   * `already-imported`（本文件此前已导入，同 sourcePath，跳过=不重算）或
+   * `same-name`（同 Group 内同名但来源不同，真正的"同名冲突"）。
+   * 供 CLI/Web 摘要区分，避免把"重导同一目录"的跳过写成「同名冲突」。
+   */
+  skipReason?: 'already-imported' | 'same-name';
 }
 
 export interface ImportResult {
@@ -212,7 +223,11 @@ export interface HandleDirectImportArgs {
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
   assets?: boolean;
-  /** 同一 Group 下不同 sourcePath 的同名处理策略，默认 suffix。 */
+  /**
+   * 同名文档处理策略，默认 `incremental`（见 {@link DEFAULT_IMPORT_CONFLICT_MODE}）。
+   * 覆盖两类判定：同 sourcePath 重导（skip 跳过 / 其余幂等覆盖）与同 Group 同名不同
+   * sourcePath（skip 跳过 / 默认与 overwrite 覆盖 / suffix 加后缀）。
+   */
   conflictMode?: ImportConflictMode;
   /** 自动后缀模板，默认 _{n}。 */
   conflictSuffix?: string;
@@ -837,10 +852,16 @@ async function handleDirectImportUnlocked(
       suffix: conflictSuffix,
     });
     if (resolution.action === 'skip') {
-      conflicts.push({ path: rel, originalRelation, relation: resolution.relation, action: 'skip' });
+      const skipReason = resolution.existing?.sourcePath === rel ? 'already-imported' : 'same-name';
+      conflicts.push({ path: rel, originalRelation, relation: resolution.relation, action: 'skip', skipReason });
       processedFileCount++;
       args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
-      logWarn(`relation 冲突已跳过（同 group "${groupPath}" 下已有 "${originalRelation}"）：${rel}`);
+      // R4：「跳过同名文件」= 库中已有就什么都不做。两种成因要分开说清——
+      // ① 同 sourcePath（本文件此前已导入）：跳过即"不重算"；② 同名不同来源（真撞名）。
+      const reason = skipReason === 'already-imported'
+        ? '本文件已导入过'
+        : `同 group "${groupPath}" 下已有同名文档 "${resolution.existing?.text ?? originalRelation}"`;
+      logInfo(`按「跳过同名文件」策略未处理（${reason}）：${rel}`);
       continue;
     }
     const relation = resolution.relation;
@@ -991,7 +1012,10 @@ async function handleDirectImportUnlocked(
   }
   const skippedConflicts = conflicts.filter((item) => item.action === 'skip');
   if (skippedConflicts.length > 0) {
-    logWarn(`跳过 ${skippedConflicts.length} 个文件（relation 冲突）：${skippedConflicts.map((item) => item.path).join(', ')}`);
+    // 列表截断：整目录重导（skip 策略）时命中数可达上千，逐条拼进一行会撑爆日志
+    const preview = skippedConflicts.slice(0, 10).map((item) => item.path).join(', ');
+    const rest = skippedConflicts.length > 10 ? ` ...等 ${skippedConflicts.length} 个` : '';
+    logWarn(`按「跳过同名文件」策略未处理 ${skippedConflicts.length} 个文件（库中已存在，不重算）：${preview}${rest}`);
   }
   if (assetWarnings.length > 0) {
     logWarn(`附件收集告警 ${assetWarnings.length} 条：${assetWarnings.slice(0, 10).join('；')}${assetWarnings.length > 10 ? ` ...等 ${assetWarnings.length} 条` : ''}`);
@@ -1056,7 +1080,17 @@ async function handleDirectImportUnlocked(
           assets: 0,
           conflicts: conflicts.length,
           fullTextIndexed: 0,
-          files: { total: 0, completed: 0, incomplete: 0, scanned: 0, skipped: 0, unchanged: 0 },
+          // R4：全部文件因策略被跳过时仍要如实报出扫描 / 跳过数——此前固定写 0，
+          // 使「重导同一目录 + 跳过同名」在结果摘要里显示「扫描 0（跳过 0）」，
+          // 与同屏的「已存在跳过 N 个」自相矛盾。
+          files: {
+            total: 0,
+            completed: 0,
+            incomplete: 0,
+            scanned: effectiveFiles.length,
+            skipped: skipped.length + skippedConflictCount,
+            unchanged: 0,
+          },
         },
         partial: false,
         incomplete: [],

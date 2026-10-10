@@ -54,7 +54,7 @@ ki import \
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
 | `--tags <t1,t2>` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复）。注意：不带 `--tags` 重导会清除该文件已有标签（导入为覆盖语义，区别于重建的只增不减） |
-| `--conflict-mode` | 否 | 同名文档处理策略，默认 `incremental`（增量导入：内容未变则跳过重算；同名不同来源直接覆盖）；另有 `overwrite` / `skip` / `suffix` |
+| `--conflict-mode` | 否 | 同名文档处理策略，默认 `incremental`（增量导入：内容未变则跳过重算；同名不同来源直接覆盖）；另有 `overwrite` / `skip`（已存在的一律不动，只导入新文件） / `suffix` |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；写入独立全文 Collection，使用 `ki search --mode fulltext` 召回。`memoryId` 仍为空，语义 hybrid 检索不会召回该文档 |
 

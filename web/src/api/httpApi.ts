@@ -361,7 +361,7 @@ export async function runImport(args: {
   vector?: boolean;
   /** 文档级自定义标签（逗号分隔），对本次导入全部文件生效 */
   tags?: string;
-  /** 同名文档处理策略，默认 suffix */
+  /** 同名文档处理策略，默认 incremental；skip = 库中已存在的一律不动（只导入新文件） */
   conflictMode?: ImportConflictMode;
   /** 自动后缀模板，必须包含 {n} */
   conflictSuffix?: string;
