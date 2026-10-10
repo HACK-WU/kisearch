@@ -997,3 +997,28 @@ describe('/api/tasks scope 授权', () => {
     }
   });
 });
+
+describe('/api/tags', () => {
+  // R8 二期（REQ-20261009-003）：本组锁**响应形状与关键不变量**；
+  // 超时降级 + 队列槽放行的**真实撞锁**验证在 temp/verify-r8-tags-timeout.ts（flock 占锁法）。
+  it('形状正确；未超时时不得出现 degraded 标记（degraded 只表示 timeout）', async () => {
+    const res = await fetch(`${handle!.base}/api/tags?scope=default`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as {
+      ok: boolean; tags: { tag: string; count: number }[]; scope: string; error?: string; degraded?: unknown;
+    };
+    assert.equal(body.scope, 'default', '响应必须回显 scope（前端按它归并标签缓存）');
+    assert.equal(typeof body.ok, 'boolean');
+    assert.ok(Array.isArray(body.tags), 'tags 必须是数组');
+    assert.equal(body.degraded, undefined, '未超时不得出现 degraded（真实失败也不得带 —— 只 timeout 才带）');
+    if (body.ok) {
+      // 成功路径：内部保留 tag 必须被过滤（ki-search / ki-relation / ki-path）
+      const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
+      for (const t of body.tags) assert.ok(!reserved.has(t.tag), `内部保留 tag 泄漏：${t.tag}`);
+    } else {
+      // 失败路径（如"向量服务暂不可用"）：不得返回标签，且必须给 error 文案
+      assert.deepEqual(body.tags, [], '失败时不得返回标签');
+      assert.equal(typeof body.error, 'string');
+    }
+  });
+});

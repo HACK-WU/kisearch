@@ -147,7 +147,12 @@ export interface RunImportResponse {
   error?: string;
 }
 
-export type ImportConflictMode = 'overwrite' | 'skip' | 'suffix';
+/**
+ * 同名文档处理策略（REQ-20261010-001）。
+ * `incremental`（默认）= 增量导入：同 sourcePath 重复导入时内容未变则跳过重算，
+ * 内容变了照常覆盖；对"同名不同 sourcePath"的兜底行为与 `suffix` 相同。
+ */
+export type ImportConflictMode = 'incremental' | 'overwrite' | 'skip' | 'suffix';
 
 export interface ImportJob {
   id: string;
@@ -352,11 +357,25 @@ export interface TagInfo {
   count: number;
 }
 
+/** R8 二期：超时降级的响应标记（与 `/vector/status/refresh` 的 `degraded` 同形） */
+export interface TagsDegraded {
+  reason: 'timeout';
+  waitedMs: number;
+}
+
 export interface TagsResponse {
   ok: boolean;
   tags: TagInfo[];
   scope: string;
   error?: string;
+  /**
+   * R8 二期（REQ-20261009-003）：引擎未在超时上限内响应时为 `{reason:'timeout', waitedMs}`，
+   * 此时 `ok=false`、`tags` 为空 —— 调用方应**保留现有标签、不视为故障**
+   * （SearchPage / ImportPage / WritePage 现有 `if (res.ok)` 守卫已兼容）。
+   * ⚠️ 与后端 `TagListResult.degraded`（boolean）**同名不同形**：后者不上线，
+   *    本字段只表示 timeout 降级。
+   */
+  degraded?: TagsDegraded;
 }
 
 /** 获取 tag 列表（排除 ki-search/ki-relation/ki-path 内部保留 tag） */

@@ -171,4 +171,8 @@ test('⑨ ★ 未显式传 kind 的 import 自动判为 engine-only（真实入�
   assert.equal(kindForOperation('restore-snapshot'), 'write');
   assert.equal(kindForOperation('sync-relation'), 'write');
   assert.equal(kindForOperation(undefined), 'write');
+  // ★ tag-list 必须保持 write（tags 要打开 zvec，不得与写并发）：
+  //   R8 二期的 e2e「降级返回后 /api/doc/list <1s」正是靠这条互斥证明队列槽已放行；
+  //   若有人给它加 'read' 特判，e2e 会静默失去证明力（read 无需等 write 槽释放）。
+  assert.equal(kindForOperation('tag-list'), 'write');
 });

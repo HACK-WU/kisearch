@@ -12,6 +12,7 @@ import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/docume
 import { ImportPage } from '@/pages/ImportPage';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
+import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
 import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
@@ -203,9 +204,33 @@ export function AppShell(): JSX.Element {
   const taskTone = activeTasks.length > 0 ? 'running' : failedTasks.length > 0 || taskQuery.error ? 'failed' : partialTasks.length > 0 ? 'partial' : 'idle';
 
   const refreshDimension = async (): Promise<void> => {
-    await refreshVectorDimensionStatus(scope);
-    await queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
+    try {
+      // R8：把**本次响应**写回 cache（含 degraded）—— 若只 invalidate，queryFn 会重新 GET，
+      // 命中的可能仍是旧快照（如 compatible）：「用户主动刷新失败」会被显示成"一切正常"。
+      // POST refresh 的响应本身就是最新状态，无需再触发一次 GET。
+      const res = await refreshVectorDimensionStatus(scope);
+      queryClient.setQueryData(['vectorDimensionStatus', scope], res);
+    } catch {
+      // 请求本身失败：让 query 走 error 态（banner 显示"暂无法确认"），而不是停在旧数据上
+      await queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', scope] });
+    }
   };
+
+  /**
+   * R8（REQ-20261009-003，二期）：refresh 超时时后端返回 `degraded` +「上次快照 + state:'unknown'」
+   * —— 这是"**本次未能确认**"，不是"快照缺失/引擎故障"（N9）：文案必须区分，否则用户会以为
+   * 维度信息丢了。降级时把上次已知维度与检查时刻一并给出（快照文件未被改动，仍是有效数据）。
+   * 文案生成见 `web/src/lib/vectorDimensionCopy.ts`（纯函数，有单测）。
+   * 守 #4：只保留手动「重新检查」，不引入自动轮询/重试。
+   *
+   * ⚠️ query 处于 error 态时忽略缓存里的 `degraded`：react-query 在 refetch 失败时会保留上次
+   * 成功的 data，若沿用它会把**本次请求失败**显示成"刷新未完成 + 上次结果"（把故障说成未知）。
+   */
+  const dimensionDegraded = dimensionQuery.error ? undefined : dimensionQuery.data?.degraded;
+  const dimensionUnknownDetail = dimensionStatusDetail({
+    degraded: dimensionDegraded,
+    status: dimensionQuery.data?.status,
+  });
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
   // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
@@ -355,8 +380,8 @@ export function AppShell(): JSX.Element {
               <div className="ki-vector-dimension-banner ki-vector-dimension-banner--unknown" role="status">
                 <span className="ki-vector-dimension-banner__icon" aria-hidden="true">?</span>
                 <div className="ki-vector-dimension-banner__copy">
-                  <b>暂无法确认向量维度</b>
-                  <span>{scope} · {dimensionQuery.data?.status.error ?? '维度快照缺失或已过期'}</span>
+                  <b>{dimensionDegraded ? DEGRADED_TITLE : UNKNOWN_TITLE}</b>
+                  <span>{scope} · {dimensionUnknownDetail}</span>
                 </div>
                 <button className="ki-btn ki-btn--secondary" onClick={() => void refreshDimension()} disabled={dimensionQuery.isFetching}>重新检查</button>
               </div>

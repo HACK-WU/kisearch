@@ -43,7 +43,7 @@ import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus } from './import-retry.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
-import { executeTagList } from '../tag.js';
+import { executeTagList, type TagListResult } from '../tag.js';
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 // chat 模块（REQ-20260924-001）—— 单行挂载，见下方 if 链末尾
 import { handleChatRoutes } from './chat/chat-routes.js';
@@ -80,6 +80,12 @@ const HEALTH_TIMEOUT_MS = healthCheckWorstCaseMs(HEALTH_PROBE.timeoutMs, HEALTH_
  * 而不是让请求无限挂住 —— 现场二就是一个挂住的辅助请求把该 scope 的队列槽占死 >10 分钟。
  */
 const VECTOR_STATUS_REFRESH_TIMEOUT_MS = 5_000;
+
+/**
+ * `/api/tags` 的超时上限（R8 二期，REQ-20261009-003）：tag 列表要打开/扫描 zvec
+ * Collection，与 refresh 同属"可失败的辅助读" —— 同值但保持独立常量（口径可各自调整）。
+ */
+const TAG_LIST_TIMEOUT_MS = 5_000;
 
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
@@ -754,8 +760,50 @@ function handleSearchConfig(res: http.ServerResponse, config: KiConfig): void {
 async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
   const scope = resolveScope(loadConfig(), scopeRaw);
-  const result = await executeTagList({ scope });
+  // ★ R8 二期（REQ-20261009-003）：tag 列表要打开/扫描 zvec Collection，属"可失败的辅助读"——
+  //   引擎被占（残留进程持 flock）时会长时间挂住，把该 scope 的队列槽占死。
+  //   超时上界必须包在**本 handler 内部**：coordinator 的 release() 在 handler 返回后才执行，
+  //   只在 HTTP 响应层超时的话 submit 不会 resolve，队列槽照旧占死（等于没修）。
+  //
+  //   ⚠️ 超时的**覆盖面**（勿夸大）：只覆盖"handler 开始执行后引擎不响应"。
+  //   本任务按 `kindForOperation('tag-list') = 'write'` 入队（tags 要打开 zvec，不得与写并发），
+  //   因此**导入/向量化长任务期间请求会排在队尾**——排队段不计入这 5s（那属 R9 的占比/kind 议题）。
+  //
+  //   ⚠️ 降级形态与 /vector/status/refresh **有意相反**（勿"统一"）：
+  //   - refresh 有"上次快照"可给 → `ok:true` + 陈旧数据 + degraded 标记；
+  //   - tags 没有可信快照（返回 `tags:[]` 会冒充"查询结果为空"）→ 必须 `ok:false`
+  //     （与既有失败路径同形）。前端三处调用点（SearchPage / ImportPage / WritePage）
+  //     均以 `if (res.ok)` 守卫：不 ok 时**保留现有标签、静默不刷新**——
+  //     符合 N9（呈现为"未知"而非"故障"，不触发重建/清库引导）。
+  //
+  //   ⚠️ 两个 `degraded` 不同形状，勿混：响应体的 `degraded` 是 `{reason:'timeout',waitedMs}`
+  //   （与 refresh 对齐）；`TagListResult.degraded` 是 **boolean**（"向量服务不可用"，见 tag.ts），
+  //   **不得** `{...result}` 直接透传，否则前端按对象读 `degraded.reason` 会得到 undefined。
+  const timeoutError = `引擎未在 ${TAG_LIST_TIMEOUT_MS / 1000}s 内响应，本次未取到 tag 列表（状态未知，非故障）`;
+  const outcome = await withTimeoutFallback(
+    executeTagList({ scope }),
+    // 超时时 value 一定来自本 fallback（哨兵以 race 实际结果为准）→ 下方 timedOut 分支据此必然 ok:false；
+    // 这里不再返回 `degraded: true`：响应标记只由 timedOut 决定，避免与工具层 boolean 同名混淆。
+    (): TagListResult => ({ ok: false, error: timeoutError }),
+    TAG_LIST_TIMEOUT_MS,
+  );
+  if (outcome.timedOut) {
+    process.stderr.write(
+      `[kisearch][api:/tags] 引擎未在 ${TAG_LIST_TIMEOUT_MS / 1000}s 内响应（等待 ${outcome.waitedMs}ms），`
+      + '已按"本次未取到"返回并放行该 scope 队列；底层扫描仍在后台继续。\n',
+    );
+    sendJson(res, 200, {
+      ok: false,
+      error: timeoutError,
+      tags: [],
+      scope,
+      degraded: { reason: 'timeout' as const, waitedMs: outcome.waitedMs },
+    });
+    return;
+  }
+  const result = outcome.value;
   if (!result.ok) {
+    // 既有失败路径（如"向量服务暂不可用"）：按原样返回，**不**透传 `result.degraded`（boolean）
     sendJson(res, 200, { ok: false, error: result.error, tags: [], scope });
     return;
   }

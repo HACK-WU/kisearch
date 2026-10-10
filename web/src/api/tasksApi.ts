@@ -79,10 +79,27 @@ export function getTask(id: string): Promise<{ ok: boolean; task: TaskRecord }> 
   return request(`/api/tasks/${encodeURIComponent(id)}`);
 }
 
-export function getVectorDimensionStatus(scope: string): Promise<{ ok: boolean; status: VectorDimensionStatus }> {
+/**
+ * R8（REQ-20261009-003）：辅助读超时降级标记 —— 引擎未在超时上限内响应时，后端返回
+ * **上次快照**（`status.state` 已置为 `'unknown'`，防止被误读为"刚刷新成功"）+ 本标记。
+ * ★ 语义是"本次未确认"，不是"快照缺失/故障"（N9）—— UI 文案必须区分。
+ */
+export interface VectorDimensionDegraded {
+  /** 当前后端只发 'timeout'（收窄类型：新增 reason 需同步改文案分支，见 vectorDimensionCopy.ts） */
+  reason: 'timeout';
+  waitedMs: number;
+}
+
+export interface VectorDimensionStatusResponse {
+  ok: boolean;
+  status: VectorDimensionStatus;
+  degraded?: VectorDimensionDegraded;
+}
+
+export function getVectorDimensionStatus(scope: string): Promise<VectorDimensionStatusResponse> {
   return request(`/api/vector/status?scope=${encodeURIComponent(scope)}`);
 }
 
-export function refreshVectorDimensionStatus(scope: string): Promise<{ ok: boolean; status: VectorDimensionStatus }> {
+export function refreshVectorDimensionStatus(scope: string): Promise<VectorDimensionStatusResponse> {
   return request('/api/vector/status/refresh', { method: 'POST', body: JSON.stringify({ scope }) });
 }
