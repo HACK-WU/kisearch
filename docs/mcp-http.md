@@ -114,6 +114,7 @@ ki mcp --http --web
 | `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`）；分批上传可传 `batchIndex`/`batchCount`，最后一批传 `finalize` 后由后端启动导入并返回 `jobId`；同内容重试幂等 |
 | `/api/import/upload-status` | GET | 按 `scope`、`uploadId` 查询上传会话状态与 `jobId`，用于标签页重开后找回已启动的导入任务 |
 | `/api/import/run` | POST | 兼容原有两步调用：显式触发导入（异步 job，返回 `jobId`）；同一 `uploadId` 重试返回已有任务，不重复启动 |
+| `/api/import/preflight` | POST | **重复导入预检（只读，无任何写入）**：body `{ scope, uploadId, onlyRelPaths? }`；返回本次文件与库中已有文档「原文一致但 `sourcePath` 不同」的清单 `{ files:{scanned,matched}, duplicates:[{rel,existingGroup,existingRelation,existingSourcePath}], truncated }`，供前端确认后再调 `/api/import/run` |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
 | `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
 
@@ -123,7 +124,7 @@ ki mcp --http --web
 
 导入完成结果中的 `stats.conflicts` 和 `conflicts[]` 会报告同名文件的原 relation、最终 relation 及动作；向量更新只清理受影响文档，无关 Scope 文档不会被全量清空。
 
-Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，每批发送 `{scope, uploadId, batchIndex, batchCount, files}`，最后一批额外发送 `finalize: {group?, chunkSize?, chunkOverlap?, vector?, tags?, conflictMode?, conflictSuffix?}`。服务端确认所有批次后启动导入，在最后一批的响应里返回 `jobId`；重复提交同一 `uploadId` 不会产生第二个导入任务。标签页重开时，前端先用 `/api/import/upload-status` 查询 `uploadId`：已生成 `jobId` 则继续查询导入结果，尚未传完则清除本地任务记录，由用户重新选择文件。旧客户端仍可先调用 `/api/import/upload`，再调用 `/api/import/run`。
+Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，每批发送 `{scope, uploadId, batchIndex, batchCount, files}`——**不再在最后一批带 `finalize`**：全部批次上传完成后，前端先调 `/api/import/preflight` 做重复导入预检，`files.matched === 0` 直接调 `/api/import/run`（body 带 `group?/chunkSize?/chunkOverlap?/vector?/tags?/conflictMode?/conflictSuffix?`）启动导入，`matched > 0` 则展示清单等用户确认（确认后照常 `run`；**取消则不导入任何内容**）。把「上传」与「起导入」解耦的原因：`finalize` 会在最后一批上传时就启动导入，届时取消已无法保证零写入。`/api/import/run` 对同一 `uploadId` 幂等——已有 job 时返回它，不重复启动。标签页重开时，前端先用 `/api/import/upload-status` 查询 `uploadId`：已生成 `jobId` 则继续查询导入结果，尚未传完则清除本地任务记录，由用户重新选择文件。旧客户端仍可先调用 `/api/import/upload`，再调用 `/api/import/run`。
 
 上传中站内切页不会取消任务；关闭或刷新标签页后，未传完的文件需要重新选择并上传。尚未启动导入的暂存目录在空闲满 24 小时后，于**下一次新上传**时惰性清理，不做定时扫描。已启动导入的上传目录会登记为源目录，后续编辑/同步可能使用，因此不参与这项清理。`/api/import/status` 的 job 仍是进程内状态，服务重启后可能无法查询，客户端应显示“状态待确认”。
 

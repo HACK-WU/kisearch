@@ -279,7 +279,7 @@ export const DEFAULT_MAX_ASSET_SIZE = 5 * 1024 * 1024;
  * @param extensions 格式白名单（默认 [.md]）；传空数组时用默认
  * @returns files=白名单文件列表；skippedNonMd=非白名单文件相对路径列表（汇总提示用）
  */
-function collectMarkdownFiles(sourceDir: string, extensions: string[] = DEFAULT_EXTENSIONS): { files: string[]; skippedNonMd: string[] } {
+export function collectMarkdownFiles(sourceDir: string, extensions: string[] = DEFAULT_EXTENSIONS): { files: string[]; skippedNonMd: string[] } {
   const out: string[] = [];
   const skippedNonMd: string[] = [];
   const exts = extensions.length > 0 ? extensions.map((e) => e.toLowerCase()) : DEFAULT_EXTENSIONS;

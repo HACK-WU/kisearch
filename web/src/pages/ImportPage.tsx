@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
@@ -377,6 +377,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * 上一次的 Scope 文本 —— 正是"框里有值但未确认"的误导态来源（Q4，2026-10-10）。
    */
   const [formEpoch, setFormEpoch] = useState(0);
+  /**
+   * R6：重复导入预检的待确认项（非空 = 上传已完成、导入**尚未开始**，等用户拍板）。
+   * 取消即回到 idle，不产生任何写入。
+   */
+  const [preflightConfirm, setPreflightConfirm] = useState<{ matched: number; duplicates: ImportPreflightDuplicate[]; truncated: boolean } | null>(null);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
   const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
@@ -1035,7 +1040,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           plan.uploadId,
           index,
           plan.batches.length,
-          index === plan.batches.length - 1 ? plan.finalize : undefined,
+          // R6（REQ-20261010-001）：上传一律不带 finalize —— 导入改由「预检 → 确认 → run」显式启动，
+          // 这样用户取消时是真正的零写入（finalize 会在最后一批上传时就起导入，取消已无意义）
+          undefined,
         );
         if (!response.ok || !response.uploadId) throw new Error(response.error ?? '上传失败');
         plan.nextBatch = index + 1;
@@ -1055,10 +1062,6 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           totalBytes: plan.totalBytes,
         });
         setProgressText(`已上传第 ${index + 1}/${plan.batches.length} 批（${plan.uploadedFiles}/${plan.totalFiles} 个文件）`);
-        if (index === plan.batches.length - 1) {
-          if (!response.jobId) throw new Error('文件已上传，但导入任务状态不明，请核查后再重试');
-          return response.jobId;
-        }
       }
       return null;
     } catch (error) {
@@ -1070,6 +1073,58 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setError(`上传第 ${plan.currentBatch + 1}/${plan.batches.length} 批失败：${getErrorDetails(error)}`);
       return null;
     }
+  };
+
+  /**
+   * R6（REQ-20261010-001）：上传完成后的收口——先做重复导入预检，命中则停下来等用户确认，
+   * 确认后才显式调 `/api/import/run`（`runImport` 已是「重试未完成」在用的成熟路径）。
+   */
+  const afterUploadsComplete = async (plan: UploadPlan): Promise<void> => {
+    setProgressText('正在预检重复导入…');
+    let preflight: Awaited<ReturnType<typeof preflightImport>> | null = null;
+    try {
+      preflight = await preflightImport({ scope: plan.scope, uploadId: plan.uploadId });
+    } catch (failure) {
+      // 预检是"提示"能力：失败不阻断导入（真问题在 run 阶段 fail-loud），但要如实告知
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setUploadErrors((previous) => [...previous, { name: '<重复导入预检>', error: `预检失败，已直接开始导入：${message}` }]);
+    }
+    const matched = preflight?.files?.matched ?? 0;
+    if (matched > 0) {
+      setPreflightConfirm({ matched, duplicates: preflight?.duplicates ?? [], truncated: Boolean(preflight?.truncated) });
+      setProgressText(`检测到 ${matched} 篇疑似重复，等待你确认`);
+      return;
+    }
+    await launchImport(plan);
+  };
+
+  /** 调 /api/import/run 真正启动导入（预检通过或用户确认后） */
+  const launchImport = async (plan: UploadPlan): Promise<void> => {
+    setPreflightConfirm(null);
+    setProgressText('正在启动导入…');
+    try {
+      const response = await runImport({ scope: plan.scope, uploadId: plan.uploadId, ...plan.finalize });
+      if (!response.ok || !response.jobId) throw new Error(response.error ?? '导入启动失败');
+      trackImport(response.jobId, plan.scope, plan.uploadId);
+    } catch (failure) {
+      setFailureStage('import');
+      setPhase('failed');
+      setScopeConfirmed(false);
+      setError(`导入启动失败：${failure instanceof Error ? failure.message : String(failure)}`);
+    }
+  };
+
+  /** 用户确认「仍然导入」（承认会新建副本） */
+  const confirmDuplicateImport = (): void => {
+    const plan = uploadPlanRef.current;
+    if (!plan) return;
+    void launchImport(plan);
+  };
+
+  /** 用户取消：导入尚未开始 → 零写入；保留文件选择与暂存，允许改策略后重来 */
+  const cancelDuplicateImport = (): void => {
+    setPreflightConfirm(null);
+    setProgressText('已取消（未导入任何内容）；可调整「同名文档处理」后重新开始');
   };
 
   const start = async (): Promise<void> => {
@@ -1150,8 +1205,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     uploadPlanRef.current = plan;
     try { localStorage.setItem(LAST_IMPORT_JOB_KEY, JSON.stringify({ uploadId: plan.uploadId, scope: plan.scope })); } catch { /* ignore */ }
     setUploadStats({ batch: 0, totalBatches: batches.length, filesDone: 0, totalFiles: files.length, bytesDone: 0, totalBytes: totalSelectedBytes });
-    const jobId = await continueUpload(0);
-    if (jobId) trackImport(jobId, scope, plan.uploadId);
+    await continueUpload(0);
+    await afterUploadsComplete(plan);
     } finally {
       startingRef.current = false;
     }
@@ -1161,8 +1216,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     if (startingRef.current || failureStage !== 'upload' || failedUploadBatch === null || !canRetryUpload()) return;
     startingRef.current = true;
     try {
-      const jobId = await continueUpload(failedUploadBatch);
-      if (jobId) trackImport(jobId, uploadPlanRef.current!.scope, uploadPlanRef.current!.uploadId);
+      await continueUpload(failedUploadBatch);
+      await afterUploadsComplete(uploadPlanRef.current!);
     } finally {
       startingRef.current = false;
     }
@@ -1281,6 +1336,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         : null;
   /** 点击「开始导入」：被阻塞则引导定位，否则真正开跑 */
   const runClick = (): void => {
+    // R6：预检待确认时不允许再点（否则会以新 uploadId 重新上传整批）
+    if (preflightConfirm) return;
     const target = scopeDraftDirty || !scopeConfirmed ? 'scope' : files.length === 0 ? 'files' : null;
     if (target) {
       (target === 'scope' ? scopeFieldRef : dropzoneRef).current?.scrollIntoView({
@@ -1417,7 +1474,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 onDraftChange={setScopeDraft}
                 hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
                 error={scopeErr}
-                disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
+                disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing' || Boolean(preflightConfirm)}
               />
             </div>
             <div>
@@ -1665,6 +1722,37 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             </div>
           </div>
 
+          {/* R6：重复导入预检待确认（导入尚未开始 → 取消是零写入） */}
+          {preflightConfirm && (
+            <div className="ki-card" style={{ marginTop: 12, borderColor: 'var(--ki-color-warning)' }}>
+              <div className="ki-card__body" style={{ padding: 12 }}>
+                <div style={{ color: 'var(--ki-color-warning)', fontWeight: 600 }}>
+                  检测到 {preflightConfirm.matched} 篇内容与库中已有文档一致，但来源路径不同 —— 直接导入会新建副本
+                </div>
+                <ul style={{ margin: '8px 0 0 18px', padding: 0, fontSize: 'var(--ki-font-size-sm)' }}>
+                  {preflightConfirm.duplicates.slice(0, 5).map((item) => (
+                    <li key={item.rel}>
+                      {item.rel} ↔ 已有「{item.existingRelation}」（{item.existingGroup}
+                      {item.existingSourcePath ? `，来源 ${item.existingSourcePath}` : '，来源未记录'}）
+                    </li>
+                  ))}
+                </ul>
+                <div className="ki-cell-sub" style={{ marginTop: 6 }}>
+                  {preflightConfirm.truncated
+                    ? `仅列出前 ${preflightConfirm.duplicates.length} 条，共 ${preflightConfirm.matched} 篇`
+                    : '确认后按当前「同名文档处理」策略继续；取消则不会导入任何内容。'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={confirmDuplicateImport}>
+                    仍然导入
+                  </button>
+                  <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" onClick={cancelDuplicateImport}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, marginTop: 20, alignItems: 'center' }}>
             <button
               className="ki-btn ki-btn--primary"

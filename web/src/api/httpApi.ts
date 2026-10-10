@@ -316,6 +316,41 @@ export async function uploadFiles(
   });
 }
 
+/** R6（REQ-20261010-001）：重复导入预检命中的一条（内容一致但来源路径不同） */
+export interface ImportPreflightDuplicate {
+  /** 本次待导入文件的相对路径 */
+  rel: string;
+  existingGroup: string;
+  existingRelation: string;
+  /** 库中该文档记录的来源路径（可能为空：手工写入的文档没有 sourcePath） */
+  existingSourcePath: string;
+}
+
+export interface ImportPreflightResult {
+  ok: boolean;
+  scope?: string;
+  error?: string;
+  files?: { scanned: number; matched: number };
+  duplicates?: ImportPreflightDuplicate[];
+  /** 明细被截断（files.matched 仍是完整计数） */
+  truncated?: boolean;
+}
+
+/**
+ * 重复导入预检（只读，无任何写入）：导出前提示"本次 N 篇与库中已有文档内容一致、
+ * 但来源路径不同，直接导入会新建副本"，由用户确认后再调 `runImport`。
+ */
+export async function preflightImport(args: {
+  scope: string;
+  uploadId: string;
+  onlyRelPaths?: string[];
+}): Promise<ImportPreflightResult> {
+  return req<ImportPreflightResult>('/api/import/preflight', {
+    method: 'POST',
+    body: JSON.stringify(args),
+  });
+}
+
 export async function runImport(args: {
   scope: string;
   uploadId: string;

@@ -39,6 +39,7 @@ import {
   type HandleDirectImportArgs,
   type ImportResult,
 } from './import.js';
+import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
 import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus } from './import-retry.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
@@ -611,6 +612,7 @@ export async function handleApiRequest(
     if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
     if (p === '/import/upload-status' && req.method === 'GET') return void handleImportUploadStatus(res, url, authScopes);
     if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
+    if (p === '/import/preflight' && req.method === 'POST') return void handleImportPreflight(req, res, authScopes);
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
     if (p === '/import/cancel' && req.method === 'POST') return void (await handleImportCancel(req, res, authScopes));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
@@ -1231,6 +1233,78 @@ function handleImportUploadStatus(res: http.ServerResponse, url: URL, authScopes
 
 // ─── POST /api/import/run ─────────────────────────────
 
+/**
+ * 净化 `onlyRelPaths`（「只重试未完成」子集）：只接受相对源目录的常规路径。
+ * `/api/import/run` 与 `/api/import/preflight` 共用同一实现，避免两端口径漂移。
+ */
+function sanitizeOnlyRelPaths(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= 4096
+    && !path.isAbsolute(value) && !value.split(/[\\/]/).includes('..'));
+}
+
+// ─── POST /api/import/preflight ─────────────────────
+/**
+ * 重复导入预检（REQ-20261010-001 R6 / A10）：只读，不产生任何写入。
+ * 返回「本次 N 篇与库中已有文档内容一致、但 sourcePath 不同」的清单，供前端确认后再调
+ * `/api/import/run`。前置校验与 run 完全一致（scope 越权 / uploadId / 暂存目录绑定）。
+ */
+function handleImportPreflight(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+): void {
+  void (async () => {
+    const body = (await readJsonBody(req)) as {
+      scope?: string;
+      uploadId?: string;
+      onlyRelPaths?: string[];
+    } | undefined;
+    if (!body || !body.scope || !body.uploadId) {
+      sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
+      return;
+    }
+    const uploadId = body.uploadId.trim();
+    if (!UPLOAD_ID_RE.test(uploadId)) {
+      sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+      return;
+    }
+    if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
+      rejectScopeViolation(res, body.scope, '/import/preflight');
+      return;
+    }
+    const scope = resolveScope(loadConfig(), body.scope);
+    const sourceDir = path.join(getUploadsRoot(), uploadId);
+    const root = path.normalize(getUploadsRoot());
+    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()
+      || !path.normalize(sourceDir).startsWith(root + path.sep)) {
+      sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
+      return;
+    }
+    if (!bindUploadScope(sourceDir, scope)) {
+      sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
+      return;
+    }
+    const sanitizedOnly = sanitizeOnlyRelPaths(body.onlyRelPaths);
+    const onlyRelPaths = Array.isArray(body.onlyRelPaths) ? sanitizedOnly : undefined;
+    if (Array.isArray(body.onlyRelPaths) && body.onlyRelPaths.length > 0 && onlyRelPaths!.length === 0) {
+      sendJson(res, 400, { ok: false, error: 'onlyRelPaths 非法（必须是相对源目录的路径，不可含 .. 或绝对路径）' });
+      return;
+    }
+    try {
+      sendJson(res, 200, preflightImportDuplicates({
+        scope,
+        sourceDir,
+        onlyRelPaths,
+        maxDetail: DEFAULT_PREFLIGHT_MAX_DETAIL,
+      }));
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: `预检失败：${(err as Error).message}` });
+    }
+  })();
+}
+
 async function handleImportRun(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1299,9 +1373,7 @@ async function handleImportRun(
     sendJson(res, 400, { ok: false, error: `onlyRelPaths 条数超限（${body.onlyRelPaths.length} > ${MAX_ONLY_REL_PATHS}）` });
     return;
   }
-  const retryOnly = Array.isArray(body.onlyRelPaths)
-    ? body.onlyRelPaths.filter((p): p is string => typeof p === 'string' && p.length > 0 && p.length <= 4096 && !path.isAbsolute(p) && !p.split(/[\\/]/).includes('..'))
-    : [];
+  const retryOnly = sanitizeOnlyRelPaths(body.onlyRelPaths);
   // 声明了 onlyRelPaths 但过滤后为空 = 调用方请求非法 → fail-loud；
   // 否则会静默落回「复用既有 job」分支，调用方以为重试已启动（复审 P2）
   if (Array.isArray(body.onlyRelPaths) && body.onlyRelPaths.length > 0 && retryOnly.length === 0) {
