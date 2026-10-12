@@ -184,7 +184,10 @@ program
             }).vector?.optimize?.timeoutMs ?? 600_000;
             task.update({ state: partial ? 'partial' : 'succeeded', phase: maint?.scheduled ? 'indexing' : 'available' });
             if (maint?.scheduled) {
-              process.stdout.write('⏳ 索引整理中…（本知识库检索可能变慢；文档浏览/编辑不受影响）\n');
+              // ★ 必须走 **stderr**：stdout 是 CLI 的机器可读契约（`runScriptJson` 对 stdout
+              //   整体 `JSON.parse`，见 test/integration.test.ts:21-40）；本行与下面的 ✅/⚠️
+              //   都是人类可读进度，与文件内其它人读输出（警告 / 未完成清单）一致走 stderr。
+              process.stderr.write('⏳ 索引整理中…（本知识库检索可能变慢；文档浏览/编辑不受影响）\n');
               await whenIndexMaintenanceIdle(optimizeTimeoutMs);
               const last = getIndexMaintenanceState().last;
               // S-03/R6：就绪判据写入任务台账（任务中心/详情可直接核对"索引是否真的建了"）
@@ -193,13 +196,13 @@ program
               if (last && last.scope === scope) {
                 if (last.ok) {
                   // A11 交叉核对：整理成功但**没有** dense 实体 = 信号与实物矛盾，必须说出来（不静默）
-                  process.stdout.write(
+                  process.stderr.write(
                     `✅ 索引已优化（${(last.wallMs / 1000).toFixed(1)}s）`
                     + `${readiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
                   );
                   task.update({ phase: 'optimized' });
                 } else {
-                  process.stdout.write(
+                  process.stderr.write(
                     `⚠️  索引整理未完成（${last.degraded ?? 'error'}）：${last.reason ?? ''}\n`
                     + `   文档已可用；重试：ki index-optimize -s ${scope}\n`,
                   );

@@ -54,6 +54,10 @@ let ftsDeleteCalls: string[][] = [];
     errors,
   });
 };
+// ★ 收尾索引整理走的是**真实引擎**（`index-maintenance` → `optimizeVectorIndex`）：
+//   本套件 mock 了整个向量层，必须一并打桩 —— 否则会打开真实引擎，既污染断言，
+//   也会因引擎 worker 句柄吊住事件循环（表现为套件跑完不退出 / rc=124）。
+(vectorClient as any).optimizeVectorIndex = async () => ({ ok: true, wallMs: 1 });
 (vectorClient as any).vectorDeleteScope = async () => {
   throw new Error('不得调用已废弃的 Scope 级向量清空接口');
 };
