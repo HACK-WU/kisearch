@@ -16,6 +16,7 @@ import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
+import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } from '@/lib/searchHistory';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -69,7 +70,7 @@ function readSearchHistory(scope: string): SearchHistoryEntry[] {
     const raw = localStorage.getItem(searchHistoryKey(scope));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is SearchHistoryEntry => {
+    const valid = parsed.filter((item): item is SearchHistoryEntry => {
       if (!item || typeof item !== 'object') return false;
       const entry = item as Partial<SearchHistoryEntry>;
       return typeof entry.query === 'string'
@@ -87,7 +88,9 @@ function readSearchHistory(scope: string): SearchHistoryEntry[] {
         && typeof entry.savedAt === 'number'
         && Number.isFinite(entry.savedAt)
         && (entry.timeout === undefined || (typeof entry.timeout === 'number' && Number.isFinite(entry.timeout) && entry.timeout >= QUERY_TIMEOUT_MIN_SECONDS && entry.timeout <= QUERY_TIMEOUT_MAX_SECONDS));
-    }).slice(0, SEARCH_HISTORY_LIMIT);
+    });
+    // 归一化：修复前的老数据可能同 query 存了两条（混合 / 全文各一），读取即收敛成一条。
+    return dedupeSearchHistory(valid).slice(0, SEARCH_HISTORY_LIMIT);
   } catch {
     return [];
   }
@@ -313,9 +316,8 @@ export function SearchPage(): JSX.Element {
         savedAt: Date.now(),
       };
       const previous = readSearchHistory(searchScope);
-      const identity = (entry: SearchHistoryEntry): string => JSON.stringify([entry.query, entry.mode, entry.selectedTags]);
-      const nextHistory = [historyEntry, ...previous.filter((entry) => identity(entry) !== identity(historyEntry))]
-        .slice(0, SEARCH_HISTORY_LIMIT);
+      // 同 query + 同标签即同一条记录（模式不参与身份），保留最近一次执行 —— 详见 lib/searchHistory.ts。
+      const nextHistory = upsertSearchHistory(historyEntry, previous, SEARCH_HISTORY_LIMIT);
       const historySaved = writeSearchHistory(searchScope, nextHistory);
       if (activeScopeRef.current === searchScope) {
         setRecentSearches(nextHistory);
@@ -348,8 +350,7 @@ export function SearchPage(): JSX.Element {
   };
 
   const removeRecentSearch = (entry: SearchHistoryEntry): void => {
-    const identity = (item: SearchHistoryEntry): string => JSON.stringify([item.query, item.mode, item.selectedTags]);
-    const next = recentSearches.filter((item) => identity(item) !== identity(entry));
+    const next = removeSearchHistoryEntry(entry, recentSearches);
     const historySaved = writeSearchHistory(scope, next);
     setRecentSearches(next);
     setHistoryStorageWarning(historySaved ? '' : '无法更新本地检索历史，请检查浏览器存储设置。');
