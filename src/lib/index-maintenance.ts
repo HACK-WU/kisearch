@@ -62,7 +62,7 @@ let last: IndexMaintenanceLast | undefined;
  */
 export function scheduleIndexMaintenance(
   scope: string,
-  _opts: { reason?: 'import' | 'manual' } = {},
+  _opts: { reason?: 'import' | 'rebuild' | 'manual' } = {},
 ): { accepted: boolean; merged: boolean } {
   const config = readOptimizeConfig();
   if (!config.enabled) return { accepted: false, merged: false };

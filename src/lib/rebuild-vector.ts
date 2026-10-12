@@ -28,6 +28,8 @@ import { loadConfig, getScopeDataDir, getScopeCleanConfig, runWithConfigSnapshot
 import { getVectorMigrationMarkerPath, getVectorMigrationPaths } from './scope-collection.js';
 import type { Relation } from './scoring.js';
 import { hasShardedLayout, loadCacheShape, writeGroupCacheBatch, getRelationsRoot as getRelationsRootPath, type GroupCacheDoc } from './group-cache.js';
+// S-02 同口径（REQ-20261009-003）：重建收尾也要做索引整理（与导入一致）
+import { scheduleIndexMaintenance } from './index-maintenance.js';
 import { buildGroupPathContent, buildRelationContent } from './path-vectorize.js';
 import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks, type CleanRules } from './clean.js';
@@ -96,6 +98,12 @@ export interface RebuildVectorResult {
   errors: { type: string; path: string; error: string }[];
   /** 系统性故障仍使用失败终态；该字段标出未能回滚的已提交数量。 */
   partialCommitted?: number;
+  /**
+   * S-02 同口径（REQ-20261009-003）：重建收尾已入队一次索引整理（optimize）。
+   * **不等待**——本函数只报告"是否入队"，是否等待由调用方决定
+   *（CLI 等待并打印阶段；daemon/HTTP 在服务端持有引擎，由其在任务终态里反映）。
+   */
+  indexMaintenance?: { scheduled: boolean; merged: boolean };
   stopReason?: VectorizationStopReason;
   /** 跨维度迁移成功后保留的旧 Collection 目录，供人工回退。 */
   migrationBackup?: string;
@@ -558,7 +566,19 @@ export async function rebuildScopeVectors(
   opts: RebuildVectorOptions = {}
 ): Promise<RebuildVectorResult> {
   const { withScopeWriteLock } = await import('./scope-write-lock.js');
-  return withScopeWriteLock(scope, 'rebuild-vector', () => rebuildScopeVectorsUnlocked(scope, deps, opts));
+  const result = await withScopeWriteLock(scope, 'rebuild-vector', () => rebuildScopeVectorsUnlocked(scope, deps, opts));
+  // ── S-02 同口径（REQ-20261009-003）：**重建收尾也做索引整理** ──
+  // 为什么必须做：写向量本身**不会**构建 ANN 索引（实测：写入 300 条后 dense=0，optimize 后才 dense=1）。
+  // 导入路径已自动整理（`handleDirectImport`），而 `rebuild-vector`/`restore --rebuild-vector`
+  // 此前**不做** ⇒ 重建后语义检索可能命中不到刚重建的向量，直到有人手工 `ki index-optimize`。
+  // 落点选在**库函数**（而非 CLI/HTTP）：CLI 直连、daemon RPC、HTTP job 三条入口都经过它，
+  // 不会漏；整理本身就是 `engine-only` 异步入队，不阻塞返回。
+  // ★ 放在写锁**之外**：整理另经 coordinator 排队，不应持锁等它。
+  // ★ 只在**真写了向量**时入队（succeeded=0 ⇒ 空转，例如失败或全跳过）。
+  const maintenance = result.stats.succeeded > 0
+    ? scheduleIndexMaintenance(scope, { reason: 'rebuild' })
+    : { accepted: false, merged: false };
+  return { ...result, indexMaintenance: { scheduled: maintenance.accepted, merged: maintenance.merged } };
 }
 
 async function rebuildScopeVectorsUnlocked(

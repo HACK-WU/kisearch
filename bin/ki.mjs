@@ -82,6 +82,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 
 命令：
   import            导入外部 Wiki（--source 直导，幂等追加）
+  index-optimize    整理 zvec 索引（optimize：构建 dense 索引；导入收尾已自动触发，可手动重跑）
   manage-index      Group 树 CRUD
   query-group       查询 Group + 分区
   get-module-info   读取本地 KB 原文
@@ -99,6 +100,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
   wiki-backfill     KB 历史关系全量写回 Wiki（幂等补齐）
+  migrate-relation-cache  显式迁移 relations 元数据到 per-Group 分片布局（幂等；写路径已带惰性迁移）
   mcp               启动 MCP Server（stdio 默认 / --http 共享单例）
 
 全局参数：
@@ -108,6 +110,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki config init
   ki doctor
   ki import --scope my-project --source ./wiki --group wiki
+  ki index-optimize -s my-project         # 整理索引：构建 dense 索引（导入收尾已自动做，失败可重跑）
   ki scope list
   ki doc list --scope my-project --limit 10
   ki tag list --scope my-project

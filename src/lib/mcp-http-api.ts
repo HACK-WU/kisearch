@@ -1841,6 +1841,38 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
     const hasPartial = !failed && (
       (value?.errors?.length ?? 0) > 0 || (value?.rebuildVector?.errors?.length ?? 0) > 0
     );
+    // ── S-02 同口径（REQ-20261009-003）：**重建收尾的索引整理**（两级口径）──
+    // 入队由 `rebuildScopeVectors` 完成（daemon 即引擎持有者，整理在服务端跑）；
+    // 本 job **保持存活**至整理落定，与导入 job 完全同口径：
+    // 「文档可用」早已成立（`usable`），`indexState` 表达整理阶段；失败/超时只降级、不判失败。
+    const rebuiltResult = (value?.rebuildVector ?? value) as
+      | { indexMaintenance?: { scheduled: boolean; merged: boolean } }
+      | undefined;
+    const maint = rebuiltResult?.indexMaintenance;
+    job.usable = true;
+    job.indexMaintenance = maint;
+    if (maint?.scheduled && !cancelled && !failed) {
+      const terminalState = hasPartial ? 'partial' : 'succeeded';
+      job.indexState = 'indexing';
+      job.taskReporter.update({ state: terminalState, phase: 'indexing' });
+      await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
+      const settled = getIndexMaintenanceState().last;
+      if (settled?.scope === args.scope && settled.ok) {
+        job.indexState = 'optimized';
+        job.taskReporter.update({ phase: 'optimized' });
+      } else {
+        job.indexState = 'available';
+        if (settled) job.indexMaintenanceDegraded = { degraded: settled.degraded, reason: settled.reason };
+        job.taskReporter.update({
+          phase: 'available',
+          ...(settled
+            ? { recoveryHint: `索引整理未完成（${settled.degraded ?? 'error'}）；文档已可用，可执行 ki index-optimize -s ${args.scope} 重试` }
+            : {}),
+        });
+      }
+      job.indexReadiness = await readIndexReadiness(args.scope);
+      job.taskReporter.update({ indexReadiness: job.indexReadiness });
+    }
     job.taskReporter.finish(cancelled ? 'cancelled' : failed ? 'failed' : hasPartial ? 'partial' : 'succeeded', {
       error: failed ? job.error : hasPartial ? job.error ?? '部分条目处理失败' : undefined,
       recoveryHint: failed ? '检查任务详情中的失败阶段与恢复建议，修复问题后重新执行。' : undefined,
@@ -1918,6 +1950,14 @@ async function handleJobStatus(res: http.ServerResponse, url: URL, authScopes: s
       error: job.error,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
+      // ── S-02/S-03（REQ-20261009-003）：两级完成口径（与 `/api/import/status` 同口径）──
+      // 重建（`--rebuild-vector` / rebuildOnly）收尾同样会做索引整理：`usable` 立刻成立，
+      // `indexState` 走 indexing → optimized | available，`indexReadiness` 为 A11 交叉判据。
+      usable: job.usable,
+      indexState: job.indexState,
+      indexMaintenance: job.indexMaintenance,
+      ...(job.indexMaintenanceDegraded ? { indexMaintenanceDegraded: job.indexMaintenanceDegraded } : {}),
+      ...(job.indexReadiness ? { indexReadiness: job.indexReadiness } : {}),
     },
   });
 }

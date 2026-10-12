@@ -26,6 +26,13 @@ import {
 import { validateScope } from './lib/scope.js';
 import { readAllGroupCaches, hasShardedLayout, notifyScopeRelationsInvalidated } from './lib/group-cache.js';
 import { rebuildScopeVectors, type RebuildVectorOptions } from './lib/rebuild-vector.js';
+// S-02 同口径（REQ-20261009-003）：重建收尾的索引整理 —— 等待 + 展示 + 就绪判据
+import {
+  whenIndexMaintenanceIdle,
+  getIndexMaintenanceState,
+  readIndexReadiness,
+  type IndexReadiness,
+} from './lib/index-maintenance.js';
 import { parseContentTags } from './lib/constants.js';
 import {
   backupScopeSnapshot,
@@ -521,14 +528,59 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
     }
     throw error;
   }
-  task?.finish(
-    !result.ok ? 'failed' : result.errors.length > 0 ? 'partial' : 'succeeded',
-    {
-      error: !result.ok ? result.errors[0]?.error : result.errors.length > 0 ? result.errors[0]?.error : undefined,
-      recoveryHint: !result.ok ? '检查任务详情中的失败阶段，修复问题后重新执行重建。' : undefined,
-      partialCommitted: result.partialCommitted ?? (result.ok ? result.stats.succeeded : undefined),
-    },
-  );
+  const partialState = !result.ok ? 'failed' : result.errors.length > 0 ? 'partial' : 'succeeded';
+  // ── S-02 同口径（REQ-20261009-003）：重建收尾的**索引整理**（两级口径：可用 → 已优化）──
+  // 入队由 `rebuildScopeVectors` 完成（CLI 直连 / daemon RPC / HTTP job 三条入口共用）；
+  // 本处只负责"等待 + 展示 + 降级"，且**整理失败不得算成重建失败**。
+  // daemon 路径：整理跑在**服务端**（重建进程即引擎持有者），本端无法等待 ⇒ 只给指引。
+  const maint = result.indexMaintenance;
+  const optimizeTimeoutMs = (requestConfig as unknown as { vector?: { optimize?: { timeoutMs?: number } } })
+    .vector?.optimize?.timeoutMs ?? 600_000;
+  task?.update({ state: partialState, phase: maint?.scheduled ? 'indexing' : 'rebuild' });
+  let indexMaintenancePhase: 'indexing' | 'optimized' | 'available' | undefined;
+  let indexReadiness: IndexReadiness | undefined;
+  if (maint?.scheduled) {
+    if (useDaemon) {
+      process.stderr.write(
+        `⏳ 索引整理已在服务端触发（重建进程持有引擎，本端不等待）；`
+        + `如需确认或重跑：ki index-optimize -s ${scopeName}\n`,
+      );
+      indexMaintenancePhase = 'indexing';
+    } else {
+      process.stderr.write('⏳ 索引整理中…（本知识库检索可能变慢；文档浏览/编辑不受影响）\n');
+      await whenIndexMaintenanceIdle(optimizeTimeoutMs);
+      const settled = getIndexMaintenanceState().last;
+      indexReadiness = await readIndexReadiness(scopeName);
+      if (settled && settled.scope === scopeName) {
+        if (settled.ok) {
+          process.stderr.write(
+            `✅ 索引已优化（${(settled.wallMs / 1000).toFixed(1)}s）`
+            + `${indexReadiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
+          );
+          indexMaintenancePhase = 'optimized';
+        } else {
+          process.stderr.write(
+            `⚠️  索引整理未完成（${settled.degraded ?? 'error'}）：${settled.reason ?? ''}\n`
+            + `   文档已可用；重试：ki index-optimize -s ${scopeName}\n`,
+          );
+          indexMaintenancePhase = 'available';
+        }
+      } else {
+        indexMaintenancePhase = 'available';
+      }
+    }
+    task?.update({
+      phase: indexMaintenancePhase ?? 'available',
+      ...(indexMaintenancePhase === 'available'
+        ? { recoveryHint: `索引整理未完成；可执行 ki index-optimize -s ${scopeName} 重试` }
+        : {}),
+    });
+  }
+  task?.finish(partialState, {
+    error: !result.ok ? result.errors[0]?.error : result.errors.length > 0 ? result.errors[0]?.error : undefined,
+    recoveryHint: !result.ok ? '检查任务详情中的失败阶段，修复问题后重新执行重建。' : undefined,
+    partialCommitted: result.partialCommitted ?? (result.ok ? result.stats.succeeded : undefined),
+  });
   if (!useDaemon) {
     try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* best effort */ }
   }
@@ -566,6 +618,10 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
     action: 'rebuild_vector',
     scope: scopeName,
     partial: result.partial,
+    // S-02 同口径：重建收尾的索引整理结果（daemon 路径下 scheduled=true 但本端不等待）
+    indexMaintenance: result.indexMaintenance,
+    indexMaintenancePhase,
+    indexReadiness,
     filter:
       result.partial
         ? { group: opts.groupFilter, tags: result.stats.mergedTags.length > 0 ? result.stats.mergedTags : undefined }
