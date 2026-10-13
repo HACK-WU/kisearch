@@ -2381,8 +2381,11 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   --ki-chat-bubble-r: 14px;
   --ki-chat-timeline-x: 10px;
 
-  width: 380px;                 /* S03 §3.2：常驻态宽度；360~420px 区间 */
-  min-width: 380px;
+  /* 宽度由 --ki-chat-dock-w 统一驱动（2026-10-13 起支持拖拽调宽）：
+     该变量同时是全屏阅读器的让位宽度，由 ChatPanel 运行时写到 .ki-shell 上；
+     缺省值与「两侧必须同源」的约定见本文件「E. 全屏阅读器与 AI 面板共存」段。 */
+  width: var(--ki-chat-dock-w, 380px);
+  min-width: var(--ki-chat-dock-w, 380px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -2391,6 +2394,34 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   border-left: 1px solid var(--ki-color-border);
   overflow: hidden;
 }
+
+/* ── 拖拽手柄（2026-10-13 用户需求）：面板左边缘 6px 命中区 ──
+   · 命中区比可见线宽，好抓；平时不可见（hover / 聚焦 / 拖动中才显色）
+   · z-index 1：在面板普通内容之上、会话浮层（z-index 20）之下 —— 浮层展开时
+     左边缘仍可拖（浮层自身 left 为 8px，不覆盖这条 6px 命中区）
+   · touch-action: none：触屏拖动不触发页面滚动 */
+.ki-chat-panel__resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+.ki-chat-panel__resize:hover,
+.ki-chat-panel__resize:focus-visible,
+.ki-chat-panel[data-resizing="true"] .ki-chat-panel__resize {
+  background: var(--ki-color-primary);
+  opacity: 0.35;
+}
+.ki-chat-panel__resize:focus-visible { outline: none; }
+
+/* 拖拽期间（ChatPanel 在 body 上挂 ki-resizing）：全局列宽光标 + 禁选文本 */
+body.ki-resizing,
+body.ki-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 /* ── 头部：标题 + 会话胶囊（切换器触发）+ 新建 ── */
 .ki-chat-panel__head {
@@ -3513,8 +3544,10 @@ select.ki-chat-cfg__ta--select {
      现在开合完全由用户意图决定。
    · ⚠️ 阈值 1400px 必须与 `web/src/chat/ChatPanel.tsx` 的
      `CHAT_DOCK_MIN_VIEWPORT` 保持同步（面板在 <1400px 时转为浮层态）。
-   · ⚠️ 面板宽度 380px 与 `.ki-chat-panel` 的 width/min-width 硬编码一致，
-     改其一须同步另一处（本段按约定为纯追加，不回改上方既有规则）。
+   · 面板宽度与让位宽度**同源**（2026-10-13 起）：`.ki-chat-panel` 的 width/min-width 与
+     本段的让位 `right` 都读 `--ki-chat-dock-w`；该变量由 ChatPanel 按用户拖拽/偏好写到
+     `.ki-shell` 的行内样式上。下面的 380px 只是「JS 尚未写入 / 面板从未打开过」时的缺省值，
+     **不再是第二处真相** —— 原先两处硬编码 380px 的同步约定随之作废。
    ════════════════════════════════════════════════════════════════ */
 .ki-shell { --ki-chat-dock-w: 380px; }
 

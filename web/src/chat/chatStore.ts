@@ -557,8 +557,13 @@ export interface ChatStore {
  * 骨架期即为**完整实现**：它是纯内存订阅容器，不含业务逻辑，无实现价值空间。
  * 业务逻辑在 `chatReducer` 的数据动作与 `useChatStream` 中（那些才是抛错点）。
  */
-export function createChatStore(): ChatStore {
-  let state = INITIAL_CHAT_STATE;
+export function createChatStore(initialOpen?: boolean): ChatStore {
+  // 初始开合由调用方注入（AppShell 从 localStorage 读「用户上次意图」，见 lib/chatPanelPrefs）：
+  // 缺省仍是「关闭」—— 首次使用不受影响；刷新后按用户意图恢复（2026-10-13 修复
+  // 「全屏开 AI 对话后刷新，面板被关掉」）。reducer 语义不变，只换初始值来源。
+  let state = initialOpen === undefined
+    ? INITIAL_CHAT_STATE
+    : { ...INITIAL_CHAT_STATE, open: initialOpen };
   const listeners = new Set<() => void>();
   return {
     getState: () => state,

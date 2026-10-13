@@ -9,6 +9,7 @@
  */
 
 import { createContext, useCallback, useContext, useSyncExternalStore } from 'react';
+import { writeChatOpen } from '@/lib/chatPanelPrefs';
 import type { ChatStore } from './chatStore';
 
 export const ChatStoreContext = createContext<ChatStore | null>(null);
@@ -38,12 +39,17 @@ export function useChatToggle(): {
   const setOpen = useCallback(
     (next: boolean) => {
       store.dispatch({ type: 'setOpen', open: next });
+      // 经本 hook 的开合都是**用户意图**（当前唯一消费者是全屏阅读器内的「AI 对话」开关），
+      // 写持久化以便刷新后恢复；路由派生的开合不经过这里（见 AppShell::setChatOpen）。
+      writeChatOpen(next);
     },
     [store],
   );
   const toggle = useCallback(() => {
     // 用 getState 读现值而非闭包 open：同一帧内连点两次不会都按旧值取反
-    store.dispatch({ type: 'setOpen', open: !store.getState().open });
+    const next = !store.getState().open;
+    store.dispatch({ type: 'setOpen', open: next });
+    writeChatOpen(next);
   }, [store]);
   return { open, toggle, setOpen };
 }

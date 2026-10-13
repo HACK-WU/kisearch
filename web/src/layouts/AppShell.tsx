@@ -25,6 +25,7 @@ import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import { ChatStoreContext } from '@/chat/chatStoreContext';
+import { readChatOpen, writeChatOpen } from '@/lib/chatPanelPrefs';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -32,6 +33,18 @@ const THEME_KEY = 'ki-theme';
 /** 「手动忽略任务提示」的时间戳 key（失败 / 部分完成各一；全局，不按 scope 分桶） */
 const FAILED_DISMISS_KEY = 'ki.taskFailedDismissedAt';
 const PARTIAL_DISMISS_KEY = 'ki.taskPartialDismissedAt';
+
+/** 左侧主导航「收起」偏好（2026-10-13：与对话面板同批补持久化，此前刷新即复位） */
+const SIDEBAR_HIDDEN_KEY = 'ki.sidebarHidden';
+
+/** 读取左侧主导航收起态（存储不可用 → 展开；顶栏始终有切换按钮，不会找不到入口） */
+function readSidebarHidden(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_HIDDEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 /** 读取忽略时间戳：多个 key 取最新（0 = 未忽略；localStorage 不可用时按未忽略处理） */
 function readDismissedAt(keys: string[]): number {
@@ -96,7 +109,9 @@ export function AppShell(): JSX.Element {
   // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
   //   因此 store 在此创建一次；ChatPanel 只是视图，不持有业务状态（否则关面板会丢内容并连带 abort）
   const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
-  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore();
+  // 初始开合按「用户上次意图」恢复（localStorage，见 lib/chatPanelPrefs）：
+  // 修复「全屏开 AI 对话后刷新，面板被关掉」——原先每次挂载都回落到「关闭」。
+  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore(readChatOpen());
   const chatStore = chatStoreRef.current;
   /**
    * 面板开合态：REQ-20261009-002 起收敛到 store（`chatStore.open` 此前是无人消费的死状态），
@@ -107,9 +122,18 @@ export function AppShell(): JSX.Element {
    * ⚠️ AppShell 是 `ChatStoreContext.Provider` 本身，不能消费该 context，故直接读 store。
    */
   const chatOpen = useSyncExternalStore(chatStore.subscribe, () => chatStore.getState().open);
+  /**
+   * 设置面板开合；`persist: false` 用于**路由派生**的开合（2026-10-13）。
+   *
+   * · 用户意图（顶栏开关 / 全屏阅读器内的开关 / 面板关闭按钮）→ 默认写 localStorage，刷新后恢复；
+   * · 路由派生（进入 `/chat` 自动收起、离开时恢复先态，见下方 Q4/Q5 段）→ 不写：
+   *   否则一次刷新就会把「派生状态」写成用户意图 —— 用户在 /chat 转一圈回来会发现
+   *   面板状态被路由逻辑改写。
+   */
   const setChatOpen = useCallback(
-    (next: boolean) => {
+    (next: boolean, opts?: { persist?: boolean }) => {
       chatStore.dispatch({ type: 'setOpen', open: next });
+      if (opts?.persist !== false) writeChatOpen(next);
     },
     [chatStore],
   );
@@ -131,10 +155,12 @@ export function AppShell(): JSX.Element {
         // （先态只记一次，不被面板自身的开/关覆盖）
         const wasOpen = chatStore.getState().open;
         chatOpenBeforeRef.current = wasOpen;
-        if (wasOpen) setChatOpen(false);
+        if (wasOpen) setChatOpen(false, { persist: false });
       }
     } else if (chatOpenBeforeRef.current !== null) {
-      if (chatOpenBeforeRef.current) setChatOpen(true);
+      // 此处同样是**路由派生**（恢复进入 /chat 前的先态），不得写持久化：
+      // 持久化只认用户在开关上的显式选择（见 setChatOpen 注释）。
+      if (chatOpenBeforeRef.current) setChatOpen(true, { persist: false });
       chatOpenBeforeRef.current = null;
     }
   }, [isChatRoute, chatStore, setChatOpen]);
@@ -142,7 +168,15 @@ export function AppShell(): JSX.Element {
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? '总览';
   const { theme, toggle } = useTheme();
-  const [sidebarHidden, setSidebarHidden] = useState(false);
+  /** 左侧主导航收起态：本地持久化（2026-10-13，此前只存 state、刷新即复位） */
+  const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_HIDDEN_KEY, sidebarHidden ? '1' : '0');
+    } catch {
+      /* 存储不可用：本次会话内仍生效 */
+    }
+  }, [sidebarHidden]);
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
   const queryClient = useQueryClient();
   const scope = useScopeValue();

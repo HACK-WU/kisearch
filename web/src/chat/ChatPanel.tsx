@@ -11,11 +11,16 @@
  *    下列 `useState` 只承载**纯瞬时 UI 态**（输入框文本、浮层开合、编辑草稿、用户展开意图），
  *    它们不随流式推进而累积。
  *
- * ═══ 布局契约（S03）═══
+ * ═══ 布局契约（S03 + 2026-10-13 修订）═══
  * · 落位：`ki-shell`（flex 容器）的新 flex 子项，插在 `ki-main` **之后**
- * · 宽度：360~420px；窄屏降级为浮层抽屉（阈值待前置门② 的真实基线补测）
+ * · 宽度：**用户可拖拽调整**（左边缘手柄 / 方向键 / 双击复位），范围
+ *   `320 ~ min(720, 视口一半)`，缺省 380px，偏好持久化在 localStorage
+ *   （lib/chatPanelPrefs）；实际宽度写到 CSS 变量 `--ki-chat-dock-w`，
+ *   与全屏阅读器的让位宽度**同源**（见 ki.css「E. 全屏阅读器与 AI 面板共存」段）
+ * · 窄屏（<1400px）降级为浮层抽屉：宽度不参与布局，故**不渲染拖拽手柄**
  * · `ki-main` 已是 `flex:1; min-width:0` → 不会破坏现有页面
- * · 全屏阅读器（`ki-drawer--fullscreen`）打开时**自动收起**本面板（避免空间与层级冲突）
+ * · 全屏阅读器（`ki-drawer--fullscreen`）打开时**不再自动收起**：改为并排让位
+ *   （REQ-20261009-002 需求 A 拍板；早期"自动收起"行为已移除，见下方同款注释）
  *
  * ═══ 本版界面结构调整（2026-09-28 重设计）═══
  * 走查结论「折叠感重、不像聊天应用」→ 三处 `<details>` 全部换成对话产品构件：
@@ -42,6 +47,14 @@ import {
 } from '@/api/chatApi';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ConversationSummary, type SourceRef } from '@/api/chatContract';
 import { useScopeValue } from '@/lib/scopeContext';
+import {
+  CHAT_PANEL_DEFAULT_WIDTH,
+  CHAT_PANEL_MIN_WIDTH,
+  chatPanelWidthUpperBound,
+  clampChatPanelWidth,
+  readChatPanelWidth,
+  writeChatPanelWidth,
+} from '@/lib/chatPanelPrefs';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { ChatToggleButton } from './ChatToggleButton';
@@ -617,12 +630,100 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
 
   /** 切首页以外的窄屏 → 浮层态（阈值初值 1400，待基线校准） */
   const [narrow, setNarrow] = useState(false);
+  /**
+   * 视口宽度：拖拽上限（`min(720, 视口×50%)`）与「偏好宽度 → 实际宽度」的收敛都依赖它，
+   * 必须随窗口变化重算 —— 与 narrow 共用同一个 resize 监听，不额外挂钩子。
+   */
+  const [viewportW, setViewportW] = useState(() => window.innerWidth);
   useEffect(() => {
-    const onResize = (): void => setNarrow(window.innerWidth < CHAT_DOCK_MIN_VIEWPORT);
+    const onResize = (): void => {
+      setViewportW(window.innerWidth);
+      setNarrow(window.innerWidth < CHAT_DOCK_MIN_VIEWPORT);
+    };
     onResize();
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  /**
+   * 面板宽度可拖拽（2026-10-13 用户需求：「希望可以拖拽，自动调整它的宽度」）。
+   *
+   * 三层口径（关键：窗口变窄只**压缩显示**，不偷偷改掉用户偏好）：
+   * · `panelWidthPref`：用户偏好，持久化在 localStorage（lib/chatPanelPrefs）；
+   * · `panelDisplayWidth`：实际生效宽度 = 偏好按当前视口收敛（上限 `min(720, 视口×50%)`）；
+   * · CSS 变量 `--ki-chat-dock-w`（写到最近的 `.ki-shell`）：**面板宽度与全屏阅读器让位宽度
+   *   的唯一真相** —— 原先 380px 在 ki.css 两处硬编码，改一处漏一处就会重叠/留白。
+   */
+  const [panelWidthPref, setPanelWidthPref] = useState(() => readChatPanelWidth());
+  const panelDisplayWidth = clampChatPanelWidth(panelWidthPref, viewportW);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [resizing, setResizing] = useState(false);
+
+  // 偏好变化 → 落地持久化（拖拽中每帧只改 state，写盘由这一处统一承担，不在手势里散写）
+  useEffect(() => {
+    writeChatPanelWidth(panelWidthPref);
+  }, [panelWidthPref]);
+
+  // 实际宽度 → CSS 变量（面板与全屏阅读器让位同源）；open 变化时重跑，保证重新打开也补写到位
+  useEffect(() => {
+    const shell = panelRef.current?.closest<HTMLElement>('.ki-shell');
+    if (!shell) return;
+    shell.style.setProperty('--ki-chat-dock-w', `${panelDisplayWidth}px`);
+  }, [panelDisplayWidth, open]);
+
+  // 拖拽期间全局反馈：光标变「列宽调整」、禁止选中文本（否则会顺手选中文档或消息文字）
+  useEffect(() => {
+    if (!resizing) return;
+    document.body.classList.add('ki-resizing');
+    return () => document.body.classList.remove('ki-resizing');
+  }, [resizing]);
+
+  /**
+   * 拖拽中途「手柄消失」时强制收尾（auto-review 2026-10-13 补）。
+   *
+   * 手柄在两种情况下会被**卸载**：① 面板被关闭（`open → false`，例如拖拽时发生路由跳转，
+   * /chat 的自动收起把面板关了）；② 窗口跨过窄屏断点（`narrow → true`，浮层态不渲染手柄）。
+   * 元素卸载后 `pointerup` / `pointercancel` 都不会再到达该元素 → `resizing` 卡在 true，
+   * body 上的 `.ki-resizing`（全局 col-resize + 禁选文本）就永久残留到刷新为止。
+   */
+  useEffect(() => {
+    if (open && !narrow) return;
+    resizeRef.current = null;
+    setResizing(false);
+  }, [open, narrow]);
+
+  /** 面板在右侧：指针左移（dx < 0）→ 面板变宽 */
+  const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // 指针捕获：拖到面板外甚至窗口外也不丢事件（否则快速拖动会「断手」）
+    e.currentTarget.setPointerCapture(e.pointerId);
+    resizeRef.current = { startX: e.clientX, startWidth: panelDisplayWidth };
+    setResizing(true);
+  };
+  const handleResizePointerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const info = resizeRef.current;
+    if (!info) return;
+    setPanelWidthPref(clampChatPanelWidth(info.startWidth - (e.clientX - info.startX), viewportW));
+  };
+  /** 结束拖拽（松手 / 被系统取消）：清状态并释放捕获 */
+  const endResize = (e: React.PointerEvent<HTMLDivElement>): void => {
+    if (!resizeRef.current) return;
+    resizeRef.current = null;
+    setResizing(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  /** 键盘可达：← 变宽 / → 变窄（Shift 加速），与拖拽共用同一套钳制 */
+  const handleResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.shiftKey ? 48 : 16;
+    const delta = e.key === 'ArrowLeft' ? step : -step;
+    setPanelWidthPref(clampChatPanelWidth(panelDisplayWidth + delta, viewportW));
+  };
+  /** 双击复位到默认宽度（拖歪了不必一点点拖回来） */
+  const resetPanelWidth = (): void => setPanelWidthPref(CHAT_PANEL_DEFAULT_WIDTH);
 
   /**
    * REQ-20261009-002（需求 A）：此处原先会轮询检测 `.ki-drawer--fullscreen` 并把整个面板
@@ -1361,10 +1462,36 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         </aside>
       ) : (
         <aside
+          ref={panelRef}
           className={`ki-chat-panel${narrow ? ' ki-chat-panel--overlay' : ''}`}
           aria-label="AI 对话面板"
           data-narrow={narrow ? 'true' : 'false'}
+          data-resizing={resizing ? 'true' : 'false'}
         >
+          {/**
+            * 拖拽手柄（2026-10-13）：面板左边缘的 6px 命中区。
+            * · 只在常驻态渲染 —— 窄屏浮层是覆盖式、宽度不参与布局，拖拽语义不同；
+            * · `role=separator` + 左右方向键 = 键盘可达；双击复位默认宽度；
+            * · pointer capture 在 handleResizePointerDown 里，移出面板仍可继续拖动。
+            */}
+          {!narrow && (
+            <div
+              className="ki-chat-panel__resize"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="拖动调整 AI 对话面板宽度（双击复位，方向键微调）"
+              aria-valuenow={panelDisplayWidth}
+              aria-valuemin={CHAT_PANEL_MIN_WIDTH}
+              aria-valuemax={chatPanelWidthUpperBound(viewportW)}
+              tabIndex={0}
+              onPointerDown={handleResizePointerDown}
+              onPointerMove={handleResizePointerMove}
+              onPointerUp={endResize}
+              onPointerCancel={endResize}
+              onDoubleClick={resetPanelWidth}
+              onKeyDown={handleResizeKeyDown}
+            />
+          )}
           {dockHeader}
           {mainColumn}
           {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
