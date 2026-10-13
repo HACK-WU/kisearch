@@ -89,6 +89,50 @@ export interface ChatMessage {
   progress?: ChatProgressStep[];
   /** 用户本轮提问手动引用的文档片段（仅 user 消息；与 assistant 的 `sources` 语义不同） */
   refs?: ChatRef[];
+  /**
+   * 上下文用量（**字符数**，REQ-20261013-001）= 最后一次 `context` 事件（该轮请求基数）
+   * + 本轮回答正文字符数。旧会话无此字段 → 前端按"无数据"渲染（不显示 0）。
+   */
+  contextChars?: number;
+  /** 上一次请求时的分量明细（同上口径；旧会话缺失） */
+  contextParts?: ContextCharsParts;
+}
+
+/**
+ * 上下文用量分量（**字符数**，与后端 `chat-contract.ts::ContextCharsParts` 同形状）。
+ *
+ * · 计入：system 组 / 历史 user（含当轮引用块）/ 历史 assistant / 工具返回
+ * · **不计入**：`reasoning`（永不进上游 messages）、`sources`（展示用）
+ * · `refs` 是 `user` 的**子集**（仅明细展示，不重复计入总数）
+ */
+export interface ContextCharsParts {
+  system: number;
+  user: number;
+  assistant: number;
+  tool: number;
+  refs: number;
+}
+
+/**
+ * 会话压缩记录（REQ-20261013-001 R8）。
+ *
+ * · `summary` 非空 = 摘要式；为 `null` = 截断式（早期消息被移出，**无模型时的降级形态**）
+ * · `backup` 是压缩前会话备份的文件名（撤销入口据此恢复）
+ */
+export interface ConversationCompaction {
+  at: string;
+  mode: 'summary' | 'truncate';
+  coveredCount: number;
+  summary: string | null;
+  /** 压缩前后**消息部分**字符数（不含 system / 工具返回） */
+  charsBefore: number;
+  charsAfter: number;
+  /**
+   * 压缩后**下一次请求的上下文字符数**（后端按与 `context` 事件同一口径重算）。
+   * 面板在「压缩发生时间晚于上一条 assistant 消息」时优先用它 —— 否则刚压完仍显示旧值。
+   */
+  contextChars?: number;
+  backup: string;
 }
 
 export interface ConversationFile {
@@ -105,6 +149,8 @@ export interface ConversationFile {
   messageCount: number;
   lastMessagePreview: string;
   messages: ChatMessage[];
+  /** 手动压缩记录（REQ-20261013-001 R8；旧会话无此字段） */
+  compaction?: ConversationCompaction;
 }
 
 export interface ConversationSummary {
@@ -139,6 +185,12 @@ export type ChatEvent =
   | { type: 'degraded'; reason: DegradedReason; message: string }
   | { type: 'reasoning'; text: string }
   | { type: 'content'; text: string }
+  /**
+   * 上下文用量（**字符口径**，REQ-20261013-001）：每轮上游请求**之前**发出，
+   * **可多次**（工具轮次后基数变大）→ 消费方取最后一次。
+   * `chars` = 各分量之和；分量口径见 `ContextCharsParts`。
+   */
+  | { type: 'context'; chars: number; parts: ContextCharsParts }
   | { type: 'usage'; promptTokens: number; completionTokens: number; reasoningTokens?: number }
   | {
       type: 'done';
@@ -151,7 +203,7 @@ export type ChatEvent =
   | { type: 'error'; code: string; error: string; retryable?: boolean };
 
 export const CHAT_EVENT_TYPES = [
-  'meta', 'tool_start', 'tool_end', 'sources', 'degraded',
+  'meta', 'context', 'tool_start', 'tool_end', 'sources', 'degraded',
   'reasoning', 'content', 'usage', 'done', 'aborted', 'error',
 ] as const;
 
@@ -173,6 +225,11 @@ export interface ChatConfigOk {
   retrievalEnabled: boolean;
   ackRequired: boolean;
   maxToolRounds: number;
+  /**
+   * 上下文上限（**字符数**，缺省 1000000 = 1000K；REQ-20261013-001）。
+   * 只作占比分母，**不得**当作模型真实窗口（模型按 token 计）。
+   */
+  contextChars: number;
 }
 
 // ─────────────────────────────────────────────────────────────

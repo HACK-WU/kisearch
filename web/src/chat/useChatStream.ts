@@ -393,6 +393,13 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
       if (ev.messageId) store.dispatch({ type: 'streamMessageId', messageId: ev.messageId });
       return;
 
+    // REQ-20261013-001：上下文用量（**字符口径**）—— 每轮上游请求前发出，比 `usage`
+    // （只在本轮流末尾）早一整个回答时长，故流首即可展示"本轮基数"。
+    // 消费方式：缓冲进 streaming，展示值 = 基数 + 正在生成的正文字符（逐字上涨）。
+    case 'context':
+      store.dispatch({ type: 'streamContext', chars: ev.chars, parts: ev.parts });
+      return;
+
     // usage / error 不改变累积态：
     // · usage → 由 done 后重取会话详情获得（落盘字段）
     // · error  → 走错误槽（见 consume 的 catch / API 层抛出）

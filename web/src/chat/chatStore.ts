@@ -18,7 +18,7 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md §9.3 · S05 §9.2
  */
 
-import type { ChatMessage, ChatRef, ChatToolResponse, SourceRef } from '@/api/chatContract';
+import type { ChatMessage, ChatRef, ChatToolResponse, ContextCharsParts, ConversationCompaction, SourceRef } from '@/api/chatContract';
 
 /** 生成期间的动态反馈条目（按时间序，供 R11a 展示） */
 export type ProgressStep =
@@ -97,6 +97,15 @@ export interface StreamingState {
    * 因此先缓冲在 streaming 里，`streamEnd` 时一次性并入消息 —— 否则来源引用会静默丢失。
    */
   sources: SourceRef[];
+  /**
+   * 本轮上下文用量基数（**字符口径**，REQ-20261013-001）。
+   *
+   * 来自 `context` 事件（每轮上游请求**之前**发出，可多次 → 取最后一次）。
+   * 展示值 = 本基数 + `content.length`（正在生成的正文会成为下一轮历史）——
+   * 因此流式期间数字会**逐字上涨**，这正是"实时"的落地方式。
+   * 收尾后清空，改由落盘消息的 `contextChars` 承担（刷新/回看同一口径）。
+   */
+  context: { chars: number; parts: ContextCharsParts } | null;
 }
 
 export interface ChatUiState {
@@ -164,6 +173,14 @@ export interface ChatUiState {
    * 该 id 命中的消息跳过入场动画（内容无缝接续）；历史回看新插入的消息不受影响、照常播放。
    */
   lastStreamedId: string | null;
+  /**
+   * 当前会话的手动压缩记录（REQ-20261013-001 R8）。
+   *
+   * 为什么放 store 而不是组件 state：dock 与 `/chat` page 是**两个同时挂载的实例**，
+   * 组件 state 不共享 —— 在抽屉里压缩完，独立页会仍显示"未压缩"。
+   * 数据源始终是服务端会话文件（`conversation.compaction`），本字段只是缓存。
+   */
+  compaction: ConversationCompaction | null;
 }
 
 /**
@@ -189,6 +206,7 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
     degraded: null,
     aborted: false,
     sources: [],
+    context: null,
   },
   degradedByMessage: {},
   progressByMessage: {},
@@ -196,6 +214,7 @@ export const INITIAL_CHAT_STATE: ChatUiState = {
   notice: null,
   lastStreamedId: null,
   pendingRefs: [],
+  compaction: null,
 };
 
 /** 动作（视图层只通过这些动作改状态） */
@@ -205,6 +224,8 @@ export type ChatAction =
   | { type: 'setMessages'; messages: ChatMessage[] }
   /** 整体替换待发送引用（加入 / 删除 / 清空共用：UI 侧算好新数组，reducer 保持纯净） */
   | { type: 'setRefs'; refs: ChatRef[] }
+  /** 会话压缩记录（服务端 `conversation.compaction` 的缓存；`null` = 未压缩 / 已撤销） */
+  | { type: 'setCompaction'; compaction: ConversationCompaction | null }
   /** `seq`：本轮流序号（可选，见 `StreamingState.seq`）；`at`：本轮开始时间（调用方注入，reducer 保持纯净） */
   | { type: 'streamStart'; messageId: string; seq?: number; at?: string; replacingId?: string }
   | { type: 'streamContent'; text: string }
@@ -212,6 +233,8 @@ export type ChatAction =
   | { type: 'streamProgress'; step: ProgressStep }
   | { type: 'streamDegraded'; mark: DegradedMark }
   | { type: 'streamSources'; sources: SourceRef[] }
+  /** 上下文用量（字符口径；每轮可多次 → 后到者覆盖先到者，取最新基数） */
+  | { type: 'streamContext'; chars: number; parts: ContextCharsParts }
   /** 本轮被中止（收到 `aborted` 事件，或用户 abort 而事件未达）→ 收尾时写进消息标记（N6） */
   | { type: 'streamAborted' }
   | { type: 'streamFailed' }
@@ -251,12 +274,15 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         reasoningSegsByMessage: {},
         notice: null,
         lastStreamedId: null,
+        compaction: null,
         // ⚠️ 引用**不在此处清空**：`setActiveConv` 同样被「首次发送时惰性建会话」调用，
         //    在这里清会让"刚加入引用就发送"的第一条消息把引用标签清掉（实测缺陷）。
         //    清空职责改由**用户主动切会话**的路径（`ChatPanel.openConversation`）与切 scope 承担。
       };
     case 'setRefs':
       return { ...state, pendingRefs: action.refs };
+    case 'setCompaction':
+      return { ...state, compaction: action.compaction };
     case 'reset':
       return { ...INITIAL_CHAT_STATE, open: state.open };
 
@@ -303,6 +329,8 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
           degraded: null,
           aborted: false,
           sources: [],
+          // 新一轮从头统计（`context` 事件到达后填入本轮基数）
+          context: null,
         },
       };
     }
@@ -366,6 +394,14 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
         ...state,
         streaming: { ...state.streaming, sources: action.sources },
         messages: attachSources(state.messages, state.streaming.messageId, action.sources),
+      };
+
+    case 'streamContext':
+      // REQ-20261013-001：上下文用量基数（字符口径）。**后到者覆盖**——
+      // 工具轮次后 messages 变大，最后一次才是"下一轮将发送"的真实规模。
+      return {
+        ...state,
+        streaming: { ...state.streaming, context: { chars: action.chars, parts: action.parts } },
       };
 
     case 'streamFailed':

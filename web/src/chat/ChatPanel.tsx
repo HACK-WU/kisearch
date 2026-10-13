@@ -33,19 +33,37 @@
  * @see demo/chat-panel-redesign/index.html（视觉基准 demo，token 与状态以此为准）
  */
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ackDisclosure,
   archiveConversation,
+  compactConversation,
   createConversation,
   deleteConversation,
   getChatConfig,
   getConversation,
   listConversations,
   patchConversation,
+  undoCompactConversation,
 } from '@/api/chatApi';
-import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import {
+  CONTEXT_MEASURE_NOTE,
+  CONTEXT_PART_ROWS,
+  canCompactMessages,
+  clearContextWarnDismiss,
+  contextLevel,
+  contextPercentLabel,
+  contextRatio,
+  contextUsageLabel,
+  contextWarnText,
+  dismissContextWarn,
+  formatKUnit,
+  liveContextChars,
+  ringProgress,
+  shouldShowContextWarn,
+} from '@/lib/contextUsage';
 import { useScopeValue } from '@/lib/scopeContext';
 import {
   CHAT_PANEL_DEFAULT_WIDTH,
@@ -93,6 +111,10 @@ const CHAT_DOCK_MIN_VIEWPORT = 1400;
 
 const MAX_SEND_CHARS = 20000;
 
+/** 环形指示几何：viewBox 20×20、半径 8 → 周长用于 `stroke-dasharray/offset` */
+const RING_RADIUS = 8;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
 export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelProps): JSX.Element | null {
   const isPage = variant === 'page';
   const scope = useScopeValue();
@@ -133,6 +155,25 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [cfgOpen, setCfgOpen] = useState(false);
   /** 引用选择器开合（纯瞬时 UI 态，REQ-20261009-002 需求 B） */
   const [refPickerOpen, setRefPickerOpen] = useState(false);
+  /** 上下文用量明细面板开合（纯瞬时 UI 态，REQ-20261013-001） */
+  const [ctxPanelOpen, setCtxPanelOpen] = useState(false);
+  /**
+   * 明细面板是否被**点击**固定（hover 打开是临时的：移开即收；点开后移开不收）。
+   * 触屏与键盘没有 hover：靠点击/聚焦打开（见 `ctxRingProps`）。
+   */
+  const [ctxPanelPinned, setCtxPanelPinned] = useState(false);
+  /** hover 关闭的延时句柄（环与面板之间有输入框，鼠标穿行会先 leave —— 留缓冲避免闪） */
+  const ctxCloseTimer = useRef<number | null>(null);
+  /** 明细面板的 DOM id（`useId`：dock 与 /chat page 两个实例并发挂载时不得撞 id） */
+  const ctxPopId = useId();
+  /** 压缩进行中（防重复点击；同时用于按钮禁用与文案） */
+  const [compactBusy, setCompactBusy] = useState(false);
+  /** 压缩的**二次确认**（不可逆操作：第一次点只变成确认态，不直接执行） */
+  const [compactConfirm, setCompactConfirm] = useState(false);
+  /** 压缩 / 撤销的结果反馈（成功降幅 或 失败原因） */
+  const [compactMsg, setCompactMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  /** 本会话已「忽略」的阈值提示（`{convId}:{level}`）；持久部分在 localStorage */
+  const [ctxWarnMuted, setCtxWarnMuted] = useState<string | null>(null);
   /**
    * 「加入引用」待选模式（用户走查修正：**不再弹模态框**，直接在正在读的正文里划选）。
    *
@@ -298,6 +339,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         // A late history response cannot replace a new stream or a different selection.
         if (scopeRef.current === reqScope && selectionSeqRef.current === selection && store.getState().activeConvId === id && !store.getState().streaming.active) {
           store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+          // 压缩记录随会话详情一起同步（REQ-20261013-001 R8）
+          store.dispatch({ type: 'setCompaction', compaction: d.conv.compaction ?? null });
           clearStreamError(id);
         }
       } finally {
@@ -428,12 +471,138 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         const d = await getConversation(convId);
         if (store.getState().activeConvId !== convId || store.getState().streaming.active || store.getState().messages !== snapshot) return;
         store.dispatch({ type: 'setMessages', messages: d.conv.messages });
+        store.dispatch({ type: 'setCompaction', compaction: d.conv.compaction ?? null });
       } catch {
         /* 保留本地内容 */
       }
     },
     [store]
   );
+
+  // ── 上下文用量与手动压缩（REQ-20261013-001）──────────────────
+  //   口径：**字符数**（后端按该轮真实 messages 计算；前端只做"基数 + 正在生成的正文"加法）
+  //   · 基数来自 SSE `context` 事件（每轮请求前发出，可多次 → 取最后一次）
+  //   · 未生成时取最后一条落盘 assistant 的 `contextChars`（刷新/回看同一口径）
+  const ctxLimit = config?.contextChars ?? null;
+  const persistedCtxMsg = lastContextMessage(state.messages);
+  /**
+   * 压缩记录里的"下一次请求规模"仅在**它比上一条回答更新**时采用：
+   * 刚压缩完 → 用压缩后的投影值（否则会继续显示压缩前的旧值，用户以为没生效）；
+   * 之后再问一轮 → 新的 assistant 消息自带更新的 `contextChars` → 自动切回实测值。
+   */
+  const compactionCtxChars = state.compaction
+    && typeof state.compaction.contextChars === 'number'
+    && (!persistedCtxMsg || state.compaction.at > persistedCtxMsg.at)
+    ? state.compaction.contextChars
+    : null;
+  const ctxChars = state.streaming.active
+    ? liveContextChars(state.streaming.context?.chars ?? null, state.streaming.content.length)
+    : (compactionCtxChars ?? persistedCtxMsg?.contextChars ?? null);
+  const ctxParts: ContextCharsParts | null =
+    (state.streaming.active ? state.streaming.context?.parts : null)
+    ?? persistedCtxMsg?.contextParts
+    ?? null;
+  const ctxLevel = contextLevel(ctxChars, ctxLimit);
+  const ctxWarnKey = state.activeConvId && (ctxLevel === 'warn' || ctxLevel === 'danger')
+    ? `${state.activeConvId}:${ctxLevel}`
+    : null;
+  const showCtxWarn = ctxWarnKey !== null
+    && ctxWarnKey !== ctxWarnMuted
+    && shouldShowContextWarn(state.activeConvId, ctxLevel);
+  /** 能否压缩：有会话、未在生成中、消息数够（后端会二次判定并给出人话原因） */
+  const ctxCanCompact = Boolean(state.activeConvId)
+    && !state.streaming.active
+    && canCompactMessages(state.messages.length);
+  /** 环形进度（0..1；无数据 = 空环，不画成"已满"） */
+  const ctxRingRatio = ringProgress(contextRatio(ctxChars, ctxLimit));
+
+  /** ── 环形指示的开合：hover 临时展开 / 点击固定（触屏与键盘靠点击·聚焦） ── */
+  const cancelCtxClose = useCallback((): void => {
+    if (ctxCloseTimer.current !== null) {
+      window.clearTimeout(ctxCloseTimer.current);
+      ctxCloseTimer.current = null;
+    }
+  }, []);
+  const openCtxPanel = useCallback((): void => {
+    cancelCtxClose();
+    setCtxPanelOpen(true);
+  }, [cancelCtxClose]);
+  const closeCtxPanelSoon = useCallback((): void => {
+    cancelCtxClose();
+    // 已点击固定 → 移开不收起（用户是特意看明细/压缩，不是路过）
+    if (ctxPanelPinned) return;
+    ctxCloseTimer.current = window.setTimeout(() => {
+      ctxCloseTimer.current = null;
+      setCtxPanelOpen(false);
+    }, 160);
+  }, [cancelCtxClose, ctxPanelPinned]);
+  useEffect(() => () => cancelCtxClose(), [cancelCtxClose]);
+  /**
+   * **失焦即收**：面板被点击固定后，点/聚焦到别处（输入框、消息区、页面任何地方）都应收起 ——
+   * 否则它会一直盖在消息区上，成为"忘了关"的常驻浮层。
+   * 判定用「事件目标是否落在环或面板内」，故在环上再点一次、或在面板内操作都不会误关。
+   */
+  useEffect(() => {
+    if (!ctxPanelOpen || !ctxPanelPinned) return;
+    const isInside = (el: EventTarget | null): boolean => {
+      const node = el as (Element | null);
+      return typeof node?.closest === 'function' && node.closest('.ki-chat-ctxwrap, .ki-chat-ctxpop') !== null;
+    };
+    const onDocPointerDown = (e: Event): void => {
+      if (isInside(e.target)) return;
+      setCtxPanelPinned(false);
+      setCtxPanelOpen(false);
+    };
+    document.addEventListener('pointerdown', onDocPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown, true);
+  }, [ctxPanelOpen, ctxPanelPinned]);
+
+  const handleCompact = useCallback(
+    async (mode: 'auto' | 'truncate' = 'auto'): Promise<void> => {
+      const convId = store.getState().activeConvId;
+      if (!convId) return;
+      setCompactBusy(true);
+      setCompactMsg(null);
+      try {
+        const r = await compactConversation(convId, { mode });
+        setCompactMsg({
+          kind: 'ok',
+          text: `已压缩 ${r.coveredCount} 条早期消息：消息部分 ${formatKUnit(r.charsBefore)} → ${formatKUnit(r.charsAfter)}`
+            + `${r.contextChars !== null ? `，上下文降为 ${formatKUnit(r.contextChars)}` : ''}`
+            + `${r.warning ? `（${r.warning}）` : ''}`,
+        });
+        // 会话状态已变 → 阈值提示的"已忽略"记录作废（否则压缩完仍看不到任何提示）
+        clearContextWarnDismiss(convId);
+        setCtxWarnMuted(null);
+        await reloadActive(convId);
+      } catch (err) {
+        // fail-loud：压缩失败时**会话未被修改**（后端保证），这里只如实报出原因
+        setCompactMsg({ kind: 'err', text: err instanceof Error ? err.message : '压缩失败' });
+      } finally {
+        setCompactBusy(false);
+        setCompactConfirm(false);
+      }
+    },
+    [reloadActive, store]
+  );
+
+  const handleUndoCompact = useCallback(async (): Promise<void> => {
+    const convId = store.getState().activeConvId;
+    if (!convId) return;
+    setCompactBusy(true);
+    setCompactMsg(null);
+    try {
+      const r = await undoCompactConversation(convId);
+      setCompactMsg({ kind: 'ok', text: `已撤销压缩，恢复 ${r.restored} 条消息` });
+      clearContextWarnDismiss(convId);
+      setCtxWarnMuted(null);
+      await reloadActive(convId);
+    } catch (err) {
+      setCompactMsg({ kind: 'err', text: err instanceof Error ? err.message : '撤销失败' });
+    } finally {
+      setCompactBusy(false);
+    }
+  }, [reloadActive, store]);
 
   // ── 配置：面板可用性 / 模型名 / 是否需要隐私确认（T12）──
   useEffect(() => {
@@ -1300,6 +1469,43 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             </div>
           ) : null}
 
+          {/* 上下文阈值预警（REQ-20261013-001 R4）：**给出路**（压缩 / 新建会话），
+              只报数字不给出口 = 用户看到 90% 也不知道该怎么办 */}
+          {showCtxWarn && ctxChars !== null && ctxLimit !== null ? (
+            <div className={`ki-chat-alert ki-chat-alert--ctx ki-chat-alert--ctx-${ctxLevel}`} role="status">
+              <span className="ki-chat-alert__body">
+                <span>{contextWarnText(ctxChars, ctxLimit, ctxLevel)}</span>
+                {state.compaction ? (
+                  <span className="ki-chat-ctxpop__dim">
+                    已压缩 {state.compaction.coveredCount} 条早期消息（{state.compaction.mode === 'summary' ? '摘要式' : '截断式'}）
+                  </span>
+                ) : null}
+              </span>
+              <span className="ki-chat-alert__acts">
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  onClick={() => {
+                    const convId = state.activeConvId;
+                    if (convId) dismissContextWarn(convId, ctxLevel);
+                    setCtxWarnMuted(ctxWarnKey);
+                  }}
+                >忽略</button>
+                <button
+                  type="button"
+                  className="ki-btn ki-btn--primary ki-btn--small"
+                  disabled={!ctxCanCompact || compactBusy}
+                  title={ctxCanCompact ? '把早期对话压缩掉，释放上下文' : '消息过少，暂不需要压缩'}
+                  onClick={() => {
+                    // 与面板内「立即压缩」等价：开面板 + 进入二次确认（跳出确认容易误操作）
+                    openCtxPanel();
+                    setCompactConfirm(true);
+                  }}
+                >{compactBusy ? '压缩中…' : '压缩上下文'}</button>
+              </span>
+            </div>
+          ) : null}
+
           {/* `done.warning` 落地（S03 §5：会话过长 / 检索轮次耗尽 —— 原先前端零消费） */}
           {state.notice ? (
             <div className="ki-chat-alert ki-chat-alert--notice" role="status">
@@ -1399,6 +1605,55 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             />
             <div className="ki-chat-composer__bar">
               <span className="ki-chat-composer__hint">{hint}</span>
+              {/* 上下文用量（REQ-20261013-001）：字符口径、流式期间逐字上涨。
+                  形态 = **环形进度**（占用比例一眼可见）+ **悬停**显示用量与明细（点击固定，键盘/触屏可达）；
+                  无数据画空环（**不猜**分母，见 lib/contextUsage）。 */}
+              <div
+                className="ki-chat-ctxwrap"
+                onMouseEnter={openCtxPanel}
+                onMouseLeave={closeCtxPanelSoon}
+              >
+                <button
+                  type="button"
+                  className={`ki-chat-ctxring ki-chat-ctxring--${ctxLevel}`}
+                  aria-expanded={ctxPanelOpen}
+                  aria-controls={ctxPopId}
+                  aria-label={`上下文已用 ${contextUsageLabel(ctxChars, ctxLimit)}（K 字符）`}
+                  onClick={() => {
+                    cancelCtxClose();
+                    setCtxPanelPinned((pinned) => {
+                      const next = !pinned;
+                      setCtxPanelOpen(next);
+                      return next;
+                    });
+                  }}
+                  onFocus={openCtxPanel}
+                  onBlur={(e) => {
+                    // 键盘 Tab 走开（焦点移出环与面板）也收起，与"点别处收起"同语义
+                    const next = e.relatedTarget as Element | null;
+                    if (typeof next?.closest === 'function' && next.closest('.ki-chat-ctxwrap, .ki-chat-ctxpop') !== null) return;
+                    setCtxPanelPinned(false);
+                    setCtxPanelOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') { setCtxPanelPinned(false); setCtxPanelOpen(false); }
+                  }}
+                >
+                  <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+                    <circle className="ki-chat-ctxring__track" cx="10" cy="10" r="8" />
+                    <circle
+                      className="ki-chat-ctxring__arc"
+                      cx="10" cy="10" r="8"
+                      strokeDasharray={RING_CIRCUMFERENCE}
+                      strokeDashoffset={RING_CIRCUMFERENCE * (1 - ctxRingRatio)}
+                      transform="rotate(-90 10 10)"
+                      style={ctxLevel === 'unknown' ? { display: 'none' } : undefined}
+                    />
+                  </svg>
+                </button>
+              </div>
+              {/* 草稿字数：**常显**（用户 2026-10-13 走查拍板：不要"输入后才出现"——位置稳定比少一行更值）
+                  ⚠️ 曾一度改为有草稿才显示（避免与用量环并排两个数字），用户否决，勿再改 */}
               <span className={`ki-chat-composer__count${draftChars > MAX_SEND_CHARS * 0.9 ? ' ki-chat-composer__count--over' : ''}`}>
                 {draftChars}/{MAX_SEND_CHARS}
               </span>
@@ -1416,7 +1671,169 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                   发送
                 </button>
               )}
+              {/* ── 上下文窗口面板（结构对齐参考图：大百分比 + 组成条 + 分布表 + 底部主操作；hover 展开、点击固定）── */}
+              {ctxPanelOpen ? (
+                <div
+                  className="ki-chat-ctxpop"
+                  id={ctxPopId}
+                  role="dialog"
+                  aria-label="上下文窗口"
+                  onMouseEnter={cancelCtxClose}
+                  onMouseLeave={closeCtxPanelSoon}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') { setCtxPanelPinned(false); setCtxPanelOpen(false); }
+                  }}
+                >
+                  <div className="ki-chat-ctxpop__head">
+                    <svg className="ki-chat-ctxpop__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+                      <ellipse cx="8" cy="3.6" rx="5.4" ry="2.1" />
+                      <path d="M2.6 3.6v8.8c0 1.2 2.4 2.1 5.4 2.1s5.4-.9 5.4-2.1V3.6" />
+                      <path d="M2.6 8c0 1.2 2.4 2.1 5.4 2.1S13.4 9.2 13.4 8" />
+                    </svg>
+                    <span>上下文窗口</span>
+                    <button
+                      type="button"
+                      className="ki-chat-alert__x"
+                      aria-label="关闭"
+                      onClick={() => { setCtxPanelPinned(false); setCtxPanelOpen(false); }}
+                    >×</button>
+                  </div>
+
+                  {/* 大百分比 + 右侧「已用 / 上限」（参考图的 hero 区） */}
+                  <div className="ki-chat-ctxpop__hero">
+                    <div className={`ki-chat-ctxpop__pct ki-chat-ctxpop__pct--${ctxLevel}`}>
+                      {contextPercentLabel(ctxChars, ctxLimit)}
+                      <span className="ki-chat-ctxpop__pctnote">
+                        {ctxLevel === 'unknown' ? '暂无数据' : '已用'}
+                      </span>
+                    </div>
+                    <div className="ki-chat-ctxpop__amount">
+                      <span title={CONTEXT_MEASURE_NOTE}>{formatKUnit(ctxChars)}</span>
+                      {ctxLimit === null ? null : (
+                        <>
+                          <span className="ki-chat-ctxpop__slash"> / </span>
+                          <b title={CONTEXT_MEASURE_NOTE}>{formatKUnit(ctxLimit)}</b>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 组成条：各分量按**上限**取宽（余量为底槽）—— 一眼看出「占了多少 + 被什么占的」 */}
+                  <div
+                    className="ki-chat-ctxpop__bar"
+                    role="img"
+                    aria-label={`组成：${ctxParts && ctxLimit
+                      ? CONTEXT_PART_ROWS.map((r) => `${r.label} ${formatKUnit(ctxParts[r.key])}`).join('，')
+                      : '暂无分量数据'}`}
+                  >
+                    {ctxParts && ctxLimit
+                      ? CONTEXT_PART_ROWS.map((row) => {
+                        const w = (ctxParts[row.key] / ctxLimit) * 100;
+                        return w > 0
+                          ? <span key={row.key} className={`ki-chat-ctxpop__seg ki-chat-ctxpop__seg--${row.key}`} style={{ width: `${w}%` }} />
+                          : null;
+                      })
+                      : (ctxChars !== null && ctxLimit
+                        ? <span className="ki-chat-ctxpop__seg ki-chat-ctxpop__seg--total" style={{ width: `${ctxRingRatio * 100}%` }} />
+                        : null)}
+                  </div>
+
+                  {/* 用量分布（字 / 窗口占比） */}
+                  {ctxParts && ctxLimit ? (
+                    <div className="ki-chat-ctxpop__table">
+                      <div className="ki-chat-ctxpop__row ki-chat-ctxpop__row--head">
+                        <span>用量分布</span><span>K</span><span>窗口占比</span>
+                      </div>
+                      {CONTEXT_PART_ROWS.map((row) => (
+                        <div className="ki-chat-ctxpop__row" key={row.key} title={row.hint}>
+                          <span className="ki-chat-ctxpop__label">
+                            <i className={`ki-chat-ctxpop__dot ki-chat-ctxpop__dot--${row.key}`} aria-hidden="true" />
+                            {row.label}
+                          </span>
+                          <span className="ki-chat-ctxpop__num">{formatKUnit(ctxParts[row.key])}</span>
+                          <span className="ki-chat-ctxpop__num">{contextPercentLabel(ctxParts[row.key], ctxLimit)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {ctxParts && ctxParts.refs > 0 ? (
+                    <div className="ki-chat-ctxpop__dim">其中引用片段 {formatKUnit(ctxParts.refs)}（已含在「提问」内）</div>
+                  ) : null}
+                  {!ctxParts ? (
+                    <div className="ki-chat-ctxpop__dim">
+                      {ctxLevel === 'unknown' ? '还没有可统计的用量：问一句后即出现。' : '本次只有总量（无分量数据）：下次提问后更新。'}
+                    </div>
+                  ) : null}
+
+                  {/* 底部：口径说明 + 主操作（参考图的 footer） */}
+                  <div className="ki-chat-ctxpop__foot">
+                    <div className="ki-chat-ctxpop__note" title={CONTEXT_MEASURE_NOTE}>
+                      {state.compaction
+                        ? `已压缩 ${state.compaction.coveredCount} 条早期对话（${state.compaction.mode === 'summary' ? '摘要式' : '截断式'}）`
+                        : '可压缩早期对话释放空间'}
+                    </div>
+                    {state.compaction ? (
+                      <button
+                        type="button"
+                        className="ki-btn ki-btn--secondary ki-btn--small"
+                        disabled={compactBusy}
+                        title="从压缩前的备份恢复被移出的消息"
+                        onClick={() => void handleUndoCompact()}
+                      >{compactBusy ? '处理中…' : '撤销压缩'}</button>
+                    ) : compactConfirm ? (
+                      <>
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--secondary ki-btn--small"
+                          disabled={compactBusy}
+                          onClick={() => setCompactConfirm(false)}
+                        >取消</button>
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--primary ki-btn--small"
+                          disabled={compactBusy}
+                          title="原对话会先备份，可撤销"
+                          onClick={() => void handleCompact('auto')}
+                        >{compactBusy ? '压缩中…' : '确认压缩'}</button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ki-btn ki-btn--primary ki-btn--small"
+                        disabled={!ctxCanCompact}
+                        title={ctxCanCompact ? '把早期对话压缩掉，释放上下文（原对话会先备份，可撤销）' : '消息过少，暂不需要压缩'}
+                        onClick={() => setCompactConfirm(true)}
+                      >立即压缩</button>
+                    )}
+                  </div>
+                  {compactConfirm ? (
+                    <div className="ki-chat-ctxpop__warn">
+                      将把最早的 {Math.max(0, state.messages.length - 4)} 条消息
+                      {config?.enabled ? '压成摘要' : '直接移出（未配置模型）'}，原对话会先备份、可撤销。
+                    </div>
+                  ) : null}
+
+                  {compactMsg ? (
+                    <div className={`ki-chat-ctxpop__msg ki-chat-ctxpop__msg--${compactMsg.kind}`} role="status">
+                      <span>{compactMsg.text}</span>
+                      {/* 摘要失败（上游报错 / 摘要为空）时给出**替代出路**：不生成摘要、直接移出早期对话。
+                          没有这条出路时用户只能反复重试同一个注定失败的动作（fail-loud 必须配给出路） */}
+                      {compactMsg.kind === 'err' && !state.compaction ? (
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--secondary ki-btn--small"
+                          disabled={compactBusy || !ctxCanCompact}
+                          title="不生成摘要，直接把早期对话移出（原对话仍会先备份，可撤销）"
+                          onClick={() => void handleCompact('truncate')}
+                        >改用截断式压缩</button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
+
+
           </div>
       </footer>
     </>
@@ -1707,6 +2124,20 @@ function MessageBubble({
 }
 
 /** `at`（ISO 8601）→ 消息时间戳；跨年补年份 */
+/**
+ * 最后一条带上下文用量的 assistant 消息（REQ-20261013-001）。
+ *
+ * 旧会话（改动前落盘）没有 `contextChars` → 返回 null ⇒ UI 走"无数据"分支
+ * （显示 `—` 而不是 0：0 会被读成"没有用量"）。
+ */
+function lastContextMessage(messages: readonly ChatMessage[]): ChatMessage | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]!;
+    if (m.role === 'assistant' && typeof m.contextChars === 'number') return m;
+  }
+  return null;
+}
+
 function formatMsgTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';

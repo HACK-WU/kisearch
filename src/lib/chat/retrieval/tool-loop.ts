@@ -53,7 +53,7 @@
  * @see .plans/2026-10-08-chat-mcp-tools-batch2/plan.md
  */
 
-import { CHAT_BUDGET, type ChatEvent, type ChatRef, type ConversationFile, type SourceRef } from '../chat-contract.js';
+import { CHAT_BUDGET, type ChatEvent, type ChatRef, type ContextCharsParts, type ConversationFile, type SourceRef } from '../chat-contract.js';
 import type { SearchResult } from '../../../search.js';
 import {
   streamChat,
@@ -197,6 +197,9 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
   for (const m of buildSystemMessages(input.convSystemPrompt, systemBlocks)) {
     msgs.push({ role: 'system', content: m.content });
   }
+  // 手动压缩摘要（REQ-20261013-001 R8）：**独立 system 块**，不动用户自己的 systemPrompt
+  const compactBlock = renderCompactionBlock(input.conv.compaction);
+  if (compactBlock) msgs.push({ role: 'system', content: compactBlock });
   // ★ 引用**不进 system 组**：它随本轮 user 消息一起下发（见 `withRefsBlock` 与
   //   `renderRefsBlock` 的 2026-10-09 修订说明）。本函数的不变量仍是
   //   「返回数组末条恒为本轮 user」（degradedPath 的 splice 依赖它）。
@@ -234,6 +237,75 @@ function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly stri
     msgs[msgs.length - 1] = { role: 'user', content: userContent };
   }
   return msgs;
+}
+
+/**
+ * 计算上下文用量的**字符口径**（REQ-20261013-001）。
+ *
+ * 口径三条（与 `chat-contract.ts::ContextCharsParts` 的注释一一对应）：
+ * 1. **算的是真实构造的 messages**，不是"落盘消息求和"—— 历史轮次的引用附录块、
+ *    工具返回、system 组三者只有在这里才是准确的（需求 §2.2）；
+ * 2. `reasoning` / `sources` **不计入**（前者永不进 messages=N12，后者是展示用）；
+ * 3. assistant 的 `tool_calls`（函数名 + 参数 JSON）**计入** —— 它确实作为
+ *    assistant 消息发给了上游，漏掉会低估。
+ *
+ * @param messages 该轮真实要发给上游的 messages
+ * @param refsChars 其中属于「当轮引用附录块」的字符数（**user 的子集**，仅明细展示）
+ */
+/**
+ * 压缩摘要 → 上游 system 块（REQ-20261013-001 R8）。
+ *
+ * · 截断式（`summary === null`）不注入任何块（早期消息已丢弃，模型只看保留部分）
+ * · 末尾的"冲突以最近消息为准"是**防摘要失真**的必要护栏：摘要是模型生成的二手信息，
+ *   不得盖过原始保留消息
+ */
+export function renderCompactionBlock(
+  compaction: ConversationFile['compaction'],
+): string | null {
+  if (!compaction || !compaction.summary) return null;
+  return [
+    '【早前对话摘要】以下是本次会话更早内容的压缩摘要（用户手动压缩产生，原始消息已移出会话，可从备份撤销）：',
+    compaction.summary,
+    '摘要仅作背景参考；若与最近消息冲突，一律以最近消息为准。',
+  ].join('\n');
+}
+
+export function computeContextChars(
+  messages: readonly ChatTurn[],
+  refsChars = 0,
+): { chars: number; parts: ContextCharsParts } {
+  const parts: ContextCharsParts = { system: 0, user: 0, assistant: 0, tool: 0, refs: 0 };
+  for (const m of messages) {
+    let n = m.content.length;
+    if (m.tool_calls) {
+      for (const c of m.tool_calls) n += c.function.name.length + c.function.arguments.length;
+    }
+    if (m.role === 'system') parts.system += n;
+    else if (m.role === 'user') parts.user += n;
+    else if (m.role === 'assistant') parts.assistant += n;
+    else parts.tool += n;
+  }
+  parts.refs = refsChars;
+  return { chars: parts.system + parts.user + parts.assistant + parts.tool, parts };
+}
+
+/**
+ * 重算"下一次请求"的上下文字符数（压缩后调用，REQ-20261013-001 R8）。
+ *
+ * ★ 与 `context` 事件走**同一构造与同一计数函数**（`buildUpstreamMessages` +
+ *   `computeContextChars`）—— 换个算法就会与实时口径漂移，前端两条路径的数字对不上。
+ *   前端**不得**自行拼算（护栏 #7 同源）。
+ */
+export function projectNextContextChars(
+  conv: ConversationFile,
+): { chars: number; parts: ContextCharsParts } {
+  const runtime = resolveRuntime();
+  const msgs = buildUpstreamMessages(
+    { scope: conv.scope, conv, userText: '', convSystemPrompt: conv.systemPrompt },
+    runtime.systemBlocks,
+  );
+  // 无当轮引用（压缩发生在发起请求之前）→ refs 分量恒 0
+  return computeContextChars(msgs, 0);
 }
 
 /**
@@ -308,6 +380,8 @@ async function* toolLoopPath(
 ): AsyncGenerator<ChatEvent> {
   const messages = buildUpstreamMessages(input, runtime.systemBlocks);
   const maxRounds = runtime.maxToolRounds;
+  /** 当轮引用附录块的长度（明细展示用；已包含在 user 分量里） */
+  const refsChars = renderRefsBlock(input.refs)?.length ?? 0;
   // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
   //   属用户显式配置、非故障，不发 degraded）
   const toolDefs = runtime.toolEntries.map((e) => e.def);
@@ -347,6 +421,11 @@ async function* toolLoopPath(
 
     let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
     let roundContent = '';
+
+    // ★ 每轮上游请求**之前**发上下文用量（字符口径，REQ-20261013-001）：
+    //   首轮即"本轮请求的基数"，比 token 口径的 usage（只在本轮流末尾）早一整个回答时长；
+    //   工具轮次后 messages 追加了工具结果 → 再次发出（消费方取**最后一次**）。
+    yield { type: 'context', ...computeContextChars(messages, refsChars) };
 
     try {
       for await (const part of streamChat(messages, {
@@ -578,6 +657,9 @@ async function* pureChatPath(
     role: 'system',
     content: '【提示】本次对话未接入知识库工具。请正常回答用户问题，并在回答开头简要说明「本次未检索知识库」；不得假装有检索结果，不得虚构知识库内容。',
   });
+
+  // 降级路径同样给出上下文用量（含刚注入的 system 提示；只调一次上游，故仅一次）
+  yield { type: 'context', ...computeContextChars(messages, renderRefsBlock(input.refs)?.length ?? 0) };
 
   if (runtime.enabled && runtime.baseURL && runtime.apiKey && runtime.model) {
     try {

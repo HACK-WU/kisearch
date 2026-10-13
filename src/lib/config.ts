@@ -196,6 +196,12 @@ export interface LlmConfig {
   supportsTools?: boolean;
   /** 默认 false：用户是否已确认"知识库内容外发"（T12）。false → 面板阻塞发送（S07 §3.8） */
   kbDisclosureAck?: boolean;
+  // ── v3（REQ-20261013-001）──────────────────────────
+  /**
+   * 上下文上限（**字符数**，默认 1000000 = 1000K）。仅用于面板占比与阈值预警的**分母**，
+   * 不是模型的真实窗口（模型按 token 计；字符口径偏保守，见需求 REQ-20261013-001 §4）。
+   */
+  contextChars?: number;
 }
 
 /** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
@@ -600,6 +606,7 @@ function parseAndExpand(configFile: string): KiConfig {
       maxImageBytes: rl.maxImageBytes !== undefined ? Number(rl.maxImageBytes) : undefined,
       supportsTools: rl.supportsTools !== undefined ? Boolean(rl.supportsTools) : undefined,
       kbDisclosureAck: rl.kbDisclosureAck !== undefined ? Boolean(rl.kbDisclosureAck) : undefined,
+      contextChars: rl.contextChars !== undefined ? Number(rl.contextChars) : undefined,
     };
   }
 

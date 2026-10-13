@@ -1912,7 +1912,16 @@ a:hover { text-decoration: underline; }
 }
 @keyframes ki-scrim-in { from { opacity: 0; } to { opacity: 1; } }
 .ki-drawer__scrim--show { display: block; }
-.ki-markdown { line-height: 1.7; font-size: var(--ki-font-size-md); }
+/* `overflow-wrap: anywhere` 是 Markdown 正文的「长串兜底」（2026-10-13 用户反馈表格挤压后定位）：
+   ① 段落 / 列表 / 引用里的长 path、长 URL、无空格长词此前会直接溢出正文容器
+      （真机实测 380px 对话面板下溢出 386px，内容盖到面板外）；
+   ② 更关键的是对**表格**的作用：本属性会参与 min-content 宽度计算，含无断点长串的列
+      不再把表格撑到近 1000px —— 实测 dock 面板（容器 355px）下表格 1128.9 → 355、溢出 773.9 → 0，
+      2 列列宽由 995.8/127.1 恢复为 216.9/132.1。
+   为什么放容器而不是逐个元素：可继承，th/td、p/li/blockquote、行内 code 一次覆盖；
+   代码块（pre）默认 `white-space: pre` 不受本属性影响，横向策略仍是既有的 overflow-x: auto。
+   不采用 `table-layout: fixed`（实测把 2 列强行等分，短列浪费空间）。 */
+.ki-markdown { line-height: 1.7; font-size: var(--ki-font-size-md); overflow-wrap: anywhere; }
 .ki-markdown h1 { font-size: 20px; margin: 16px 0 8px; }
 .ki-markdown h2 { font-size: 17px; margin: 14px 0 6px; }
 .ki-markdown h3 { font-size: 15px; margin: 12px 0 4px; }
@@ -1996,6 +2005,24 @@ a:hover { text-decoration: underline; }
 .ki-markdown details[open] > summary { margin-bottom: 8px; }
 .ki-markdown details > :last-child { margin-bottom: 0; }
 .ki-markdown blockquote { border-left: 3px solid var(--ki-color-primary); padding-left: 12px; color: var(--ki-color-text-muted); margin: 8px 0; }
+/* Markdown 正文表格（2026-10-13 用户反馈「长内容列把后面的列推过去很多」）：
+   此前**完全没有样式** —— 走浏览器默认（无边框、表头居中加粗、1px padding），既与产品自绘表格
+   `.ki-table` 的 token 用法不一致，长内容下可读性也差。这里只补「可读性 + 视觉一致」的最小集合，
+   刻意不照搬 `.ki-table` 的数据表特性（mono 大写表头 / 行 hover / 指针手型）——
+   正文表格是静态阅读内容，没有「点行进详情」的语义。
+   列宽策略：auto 布局 + 上方的 `overflow-wrap: anywhere`（长串可断）即可按内容比例分配且不溢出，
+   故**不设 `width: 100%`**：内容短时保持自然宽度（避免两列被拉散），内容长时自动填满容器。
+   ⚠️ 若日后出现 5 列以上的极窄场景（实测 4 列时最窄列 47.5px 仍可读），再考虑加
+   `display: block; overflow-x: auto` 的横向滚动兜底 —— 当前样本无触发条件，不预先引入。 */
+.ki-markdown table { border-collapse: collapse; margin: 10px 0; }
+.ki-markdown th, .ki-markdown td {
+  padding: 8px 10px;
+  border: 1px solid var(--ki-color-border);
+  text-align: left;
+  /* 多行单元格按首行对齐（默认 middle 会让「用法 / 干什么」两列文字错位） */
+  vertical-align: top;
+}
+.ki-markdown th { background: var(--ki-color-bg-secondary); font-weight: 650; }
 .ki-mermaid { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); padding: 12px; margin: 8px 0; overflow-x: auto; }
 .ki-mermaid svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 /* 附件缺失占位块（REQ-20260904-001：fail-loud，明确告知图片未导入 + 原始路径，而非静默破图/空白） */
@@ -3733,3 +3760,134 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-chat-refpicker__result-group { display: block; margin-top: 1px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-chat-refpicker__hint { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+
+/* ══════════════════════════════════════════════════════════════
+   上下文用量（**字符口径**）与手动压缩 —— REQ-20261013-001
+   · chip 在输入区底栏（与草稿字数同区但**不同时出现两个 0/xxx**：草稿为 0 时只显示用量）
+   · 明细面板贴 composer 上方（`.ki-chat-composer{position:relative}`，同 refbar toast 的定位方式）
+   · 颜色沿用语义令牌：ok = 次级文本 / warn = 警示 / danger = 危险
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 上下文用量：环形指示（占用比例一眼可见；悬停展开用量与明细）── */
+.ki-chat-ctxwrap { position: static; display: inline-flex; align-items: center; flex-shrink: 0; }
+.ki-chat-ctxring {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: 1px solid transparent; border-radius: 50%;
+  background: none; cursor: pointer; color: var(--ki-color-text-muted);
+  transition: background-color .15s ease, color .15s ease;
+}
+.ki-chat-ctxring:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+.ki-chat-ctxring:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-chat-ctxring > svg { display: block; }
+.ki-chat-ctxring__track { fill: none; stroke: currentColor; stroke-width: 2; opacity: .26; }
+.ki-chat-ctxring__arc {
+  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round;
+  transition: stroke-dashoffset .35s ease;
+}
+/* 未知道（还没有一次带 `context` 事件的请求）：只画实底环、不画弧 —— 与"用了 0%"的差别由
+   悬停面板的「—（暂无数据）」承担；**圈一律实线**（虚线易被读成"禁用/加载中"）。 */
+.ki-chat-ctxring--unknown .ki-chat-ctxring__track { opacity: .22; }
+.ki-chat-ctxring--warn { color: var(--ki-color-warning); }
+.ki-chat-ctxring--danger { color: var(--ki-color-danger); animation: ki-ctxring-pulse 2.4s ease-in-out infinite; }
+@keyframes ki-ctxring-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-ctxring--danger { animation: none; }
+  .ki-chat-ctxring__arc { transition: none; }
+}
+
+/* ── 明细 / 压缩面板 ── */
+/* 定位上下文 = 输入条（面板是 bar 的子元素）：bottom:100% 就是"圆圈正上方"。
+   锚在 composer 上会让面板飘到整块输入区（含引用条 + 文本域）之上、离圆圈一百多像素（用户走查反馈）。 */
+.ki-chat-composer__bar { position: relative; }
+/* ── 上下文窗口面板（结构对齐参考图：头部 + hero 大百分比 + 组成条 + 分布表 + footer 主操作）──
+   ★ 组成条用**单一强调色的明度阶梯**：设计语言规定「选中/主操作/进度一律 primary」，
+     故不引入分类色相；分段之间留 1px 缝，避免同色系相邻段糊成一片。 */
+.ki-chat-ctxpop {
+  position: absolute; right: 0; bottom: calc(100% + 6px);
+  z-index: 30; width: min(296px, 92vw);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-lg);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-1);
+  color: var(--ki-color-text); font-size: var(--ki-font-size-sm);
+}
+.ki-chat-ctxpop__head {
+  display: flex; align-items: center; gap: 6px;
+  font-weight: 600; font-size: var(--ki-font-size-sm);
+}
+.ki-chat-ctxpop__head > span { flex: 1; min-width: 0; }
+.ki-chat-ctxpop__icon { width: 14px; height: 14px; flex-shrink: 0; color: var(--ki-color-primary); }
+
+/* hero：左大百分比 + 右「已用 / 上限」 */
+.ki-chat-ctxpop__hero { display: flex; align-items: baseline; justify-content: space-between; gap: var(--ki-space-2); }
+.ki-chat-ctxpop__pct { font-size: var(--ki-font-size-heading); font-weight: 700; line-height: 1.1; letter-spacing: -0.3px; }
+.ki-chat-ctxpop__pct--warn { color: var(--ki-color-warning); }
+.ki-chat-ctxpop__pct--danger { color: var(--ki-color-danger); }
+.ki-chat-ctxpop__pctnote { margin-left: 4px; font-size: var(--ki-font-size-xs); font-weight: 500; color: var(--ki-color-text-muted); }
+.ki-chat-ctxpop__amount { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); white-space: nowrap; }
+.ki-chat-ctxpop__amount b { color: var(--ki-color-text); font-weight: 700; }
+
+/* 组成条 */
+.ki-chat-ctxpop__bar {
+  display: flex; height: 8px; overflow: hidden;
+  border-radius: var(--ki-radius-track); background: var(--ki-color-skeleton);
+}
+.ki-chat-ctxpop__seg { height: 100%; }
+.ki-chat-ctxpop__seg + .ki-chat-ctxpop__seg { box-shadow: -1px 0 0 var(--ki-color-surface); }
+.ki-chat-ctxpop__seg--system, .ki-chat-ctxpop__seg--total { background: var(--ki-color-primary); }
+.ki-chat-ctxpop__seg--user { background: color-mix(in srgb, var(--ki-color-primary) 72%, #fff); }
+.ki-chat-ctxpop__seg--assistant { background: color-mix(in srgb, var(--ki-color-primary) 46%, #fff); }
+.ki-chat-ctxpop__seg--tool { background: color-mix(in srgb, var(--ki-color-primary) 24%, #fff); }
+
+/* 用量分布表：`display: contents` 让三列跨行对齐（每行独立 grid 会对不齐） */
+.ki-chat-ctxpop__table {
+  display: grid; grid-template-columns: 1fr 42px 56px; align-items: center;
+  column-gap: 6px;
+}
+.ki-chat-ctxpop__row { display: contents; }
+.ki-chat-ctxpop__row > * { padding: 2px 0; min-width: 0; }
+.ki-chat-ctxpop__row--head > * {
+  padding-bottom: 4px; border-bottom: 1px solid var(--ki-color-border);
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); text-align: right;
+}
+.ki-chat-ctxpop__row--head > span:first-child { text-align: left; }
+.ki-chat-ctxpop__label {
+  display: inline-flex; align-items: center; gap: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-chat-ctxpop__dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+.ki-chat-ctxpop__dot--system { background: var(--ki-color-primary); }
+.ki-chat-ctxpop__dot--user { background: color-mix(in srgb, var(--ki-color-primary) 72%, #fff); }
+.ki-chat-ctxpop__dot--assistant { background: color-mix(in srgb, var(--ki-color-primary) 46%, #fff); }
+.ki-chat-ctxpop__dot--tool { background: color-mix(in srgb, var(--ki-color-primary) 24%, #fff); }
+.ki-chat-ctxpop__num { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); text-align: right; color: var(--ki-color-text); }
+.ki-chat-ctxpop__dim { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.5; }
+
+/* footer：口径说明 + 主操作 */
+.ki-chat-ctxpop__foot {
+  display: flex; align-items: flex-end; gap: var(--ki-space-2);
+  padding-top: 6px; border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-ctxpop__note { flex: 1; min-width: 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.5; cursor: help; }
+
+.ki-chat-ctxpop__warn { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); line-height: 1.5; }
+.ki-chat-ctxpop__msg {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  font-size: var(--ki-font-size-xs); line-height: 1.5;
+}
+.ki-chat-ctxpop__msg--ok { color: var(--ki-color-success); }
+.ki-chat-ctxpop__msg--err { color: var(--ki-color-danger); }
+
+/* ── 阈值预警条（R4）：给出路，不只报数字 ── */
+.ki-chat-alert--ctx { align-items: flex-start; }
+.ki-chat-alert--ctx-warn {
+  color: var(--ki-color-text);
+  background: color-mix(in srgb, var(--ki-color-warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 26%, transparent);
+}
+.ki-chat-alert--ctx-danger {
+  color: var(--ki-color-danger);
+  background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 28%, transparent);
+}

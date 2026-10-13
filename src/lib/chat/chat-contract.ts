@@ -139,6 +139,45 @@ export interface ChatMessage {
    * 仅 user 消息写入；assistant 的检索来源仍在 `sources` —— 两者语义不同，不得互相替代。
    */
   refs?: ChatRef[];
+  /**
+   * 上下文用量（**字符数**，REQ-20261013-001）。
+   * = 最后一次 `context` 事件（该轮请求基数）+ 本轮反问正文长度 → 语义为"此刻会话已占用"，
+   * 即下一轮请求的历史规模近似。旧会话无此字段（前端据此回退到"无数据"态）。
+   */
+  contextChars?: number;
+  /** 上一条的分量明细（同上口径；旧会话缺失） */
+  contextParts?: ContextCharsParts;
+}
+
+/**
+ * 会话压缩记录（REQ-20261013-001 R8 · 手动压缩上下文）。
+ *
+ * · `summary` 非空 = **摘要式**：覆盖 `coveredCount` 条早期消息，摘要作为独立 system 块持续注入；
+ * · `summary` 为 null = **截断式**：早期消息直接丢弃（**未配置模型**时的降级形态，必须明示用户）；
+ * · `backup` 是压缩前的会话文件副本（撤销用）；**不得**在无备份的情况下压缩。
+ */
+export interface ConversationCompaction {
+  /** 压缩发生时间（ISO） */
+  at: string;
+  mode: 'summary' | 'truncate';
+  /** 被移出 messages 的消息条数 */
+  coveredCount: number;
+  /** 摘要正文；截断式为 null */
+  summary: string | null;
+  /** 压缩前 / 后的**会话消息部分**字符数（不含 system 组与工具返回；摘要计入压缩后） */
+  charsBefore: number;
+  charsAfter: number;
+  /**
+   * 压缩后**下一次请求的上下文字符数**（后端按与 `context` 事件同一口径重算：
+   * system 组 + 保留消息 + 摘要块）。
+   *
+   * ★ 为什么必须有：压缩会移除消息，但**保留的那条 assistant 消息上仍写着压缩前的
+   *   `contextChars`**（它是"那次请求时"的规模）。前端若直接沿用，用户刚压完却看到
+   *   占比不降甚至更高 —— 数字说谎比没数字更糟。缺失（旧记录 / 无投影能力）时前端回退旧值。
+   */
+  contextChars?: number;
+  /** 压缩前会话备份的**文件名**（相对会话目录） */
+  backup: string;
 }
 
 /** 会话文件（S-02 §3.2） */
@@ -155,6 +194,8 @@ export interface ConversationFile {
   seq: number;
   messageCount: number;
   lastMessagePreview: string;
+  /** 手动压缩记录（REQ-20261013-001 R8；旧会话无此字段） */
+  compaction?: ConversationCompaction;
   messages: ChatMessage[];
 }
 
@@ -180,9 +221,33 @@ export type DegradedReason = 'tools-unsupported' | 'retrieval-unavailable' | 'se
 /** 检索模式（S07 §3.2） */
 export type RetrievalMode = 'fulltext' | 'hybrid';
 
+/**
+ * 上下文用量分量（**字符数**，REQ-20261013-001）。
+ *
+ * · 口径：该轮**真实构造的上游 messages** 的内容长度（不是"落盘消息求和"）
+ * · 计入：system 组 / 历史 user / 历史 assistant / 工具返回
+ * · **不计入**：`reasoning`（N12 永不进 messages）、`sources`（展示用）
+ * · `refs` 是 `user` 的**子集**（当轮引用附录块），仅供明细展示，不重复计入总数
+ */
+export interface ContextCharsParts {
+  system: number;
+  user: number;
+  assistant: number;
+  tool: number;
+  refs: number;
+}
+
 /** SSE 事件（判别联合，前端按 `type` 分派） */
 export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
+  /**
+   * 上下文用量（字符口径，REQ-20261013-001）：
+   * · 每轮上游请求**之前**发出 —— 首个 `context` 即"本轮请求的上下文基数"，
+   *   比 token 口径的 `usage`（只在本轮流末尾）早一整个回答时长，前端据此可立即展示；
+   * · 工具轮次后基数变化会**再次**发出 ⇒ **可多次，取最后一次**；
+   * · `chars` = 各分量之和。
+   */
+  | { type: 'context'; chars: number; parts: ContextCharsParts }
   /**
    * 工具调用开始（批次 2 泛化，D5）：
    * · 检索类工具（ki_search）带 `query` + `mode`（旧行为）
@@ -208,7 +273,7 @@ export type ChatEvent =
 
 /** 事件类型名（供契约测试遍历） */
 export const CHAT_EVENT_TYPES = [
-  'meta', 'tool_start', 'tool_end', 'sources', 'degraded',
+  'meta', 'context', 'tool_start', 'tool_end', 'sources', 'degraded',
   'reasoning', 'content', 'usage', 'done', 'aborted', 'error',
 ] as const;
 
@@ -218,13 +283,16 @@ export const CHAT_EVENT_TYPES = [
  * - `tool_start` / `tool_end` 必须成对（工具抛错也要发 `tool_end` 带 error）
  * - `sources` 至多一次且在 `done` 之前（无来源时**不发**，而非发空数组）
  * - `degraded` 至多一次
- * - 正常序：meta → tool_start → tool_end → [tool_start → tool_end]* → reasoning* → content* → sources → usage → done
+ * - `context` **可多次**（每轮请求前一次），消费方取最后一次；必在 `done` 之前
+ * - 正常序：meta → context → tool_start → tool_end → [context → tool_start → tool_end]* → reasoning* → content* → sources → usage → done
  */
 export const CHAT_EVENT_ORDER_RULES = {
   toolStartMustPairWithEnd: true,
   sourcesAtMostOnce: true,
   sourcesBeforeDone: true,
   degradedAtMostOnce: true,
+  /** `context` 可多次，但必须全部出现在 `done` 之前 */
+  contextBeforeDone: true,
 } as const;
 
 // ─────────────────────────────────────────────────────────────
@@ -249,6 +317,11 @@ export interface ChatConfigOk {
   /** 未确认隐私 → 面板阻塞发送（T12） */
   ackRequired: boolean;
   maxToolRounds: number;
+  /**
+   * 上下文上限（**字符数**，缺省 1000000 = 1000K；REQ-20261013-001）。
+   * 前端只用它作占比分母，**不得**当作模型真实窗口（模型按 token 计）。
+   */
+  contextChars: number;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -274,6 +347,14 @@ export const CHAT_BUDGET = {
   requestTimeoutMs: 300_000,
   /** 首块超时（只约束"建立连接并收到首个 chunk"，不约束工具轮次） */
   firstByteTimeoutMs: 30_000,
+  /**
+   * 上下文上限默认值（**字符数**，= 1000K；REQ-20261013-001）。
+   *
+   * 单位口径：K = 1000 字符（故 1000K = 1,000,000 字符）。用户可用
+   * `llm.contextChars` 覆盖。**仅用于占比与阈值预警**，不代表模型 token 窗口
+   * —— 字符口径偏保守（中文 ≈1 token/1~1.5 字，英文/代码 ≈1 token/3~4 字）。
+   */
+  defaultContextChars: 1_000_000,
 } as const;
 
 // ─────────────────────────────────────────────────────────────

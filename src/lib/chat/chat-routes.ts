@@ -48,6 +48,7 @@ import {
   type ChatMessage,
   type ChatProgressStep,
   type ChatRef,
+  type ContextCharsParts,
   type ConversationFile,
   type SourceRef,
 } from './chat-contract.js';
@@ -68,6 +69,7 @@ import {
   appendMessage,
   archiveConversation,
   chatRootDir,
+  compactConversation,
   createConversation,
   deleteAllConversations,
   deleteConversation,
@@ -76,8 +78,10 @@ import {
   readConversation,
   replaceLastAssistant,
   truncateAfterAndEdit,
+  undoCompaction,
 } from './chat-store.js';
-import { runToolLoop } from './retrieval/tool-loop.js';
+import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
+import { summarizeForCompaction } from './compaction.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
   MAX_SKILLS,
@@ -388,6 +392,12 @@ export async function handleChatRoutes(
     if (segs.length === 4 && segs[0] === 'conversations' && segs[2] === 'messages' && method === 'PATCH') {
       await handleMessageEdit(req, res, segs[1]!, segs[3]!, ctx);
       return true;
+    }
+
+    // ── REQ-20261013-001 R8 /api/chat/conversations/:id/compact（压缩 / 撤销）──
+    if (segs.length === 3 && segs[0] === 'conversations' && segs[2] === 'compact') {
+      if (method === 'POST') { await handleConversationCompact(req, res, segs[1]!, ctx); return true; }
+      if (method === 'DELETE') { await handleConversationCompactUndo(res, segs[1]!, ctx); return true; }
     }
 
     // ── API-09/10 图片：本期不实现（T13 后置 V2）──
@@ -720,6 +730,102 @@ export async function handleConversationArchive(req: IncomingMessage, res: Serve
   });
 }
 
+/**
+ * REQ-20261013-001 R8 `POST /api/chat/conversations/:id/compact` —— 手动压缩上下文。
+ *
+ * 三种 mode：
+ * · `auto`（缺省）：有模型 → 摘要式；未配置模型 → 截断式（**响应里明示**，护栏 #5）
+ * · `summary`：必须有模型；未配置模型 → 400（**不静默降级为截断**，护栏 #5）
+ * · `truncate`：直接丢弃早期消息（用户显式选择）
+ *
+ * 两条安全约束：
+ * · **生成中拒绝**（409）：压缩会改写消息序列，与生成并发的读-改-写不可交错；
+ * · 摘要失败 → 抛错（500），**会话保持原样** —— 宁可压缩失败，也不静默丢历史。
+ */
+export async function handleConversationCompact(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/compact`, res);
+  if (!hit) return;
+  if (generating.has(id)) {
+    sendErr(res, 409, CHAT_ERROR_CODES.CONVERSATION_GENERATING, '该会话正在生成中，请先停止或等待完成再压缩');
+    return;
+  }
+
+  const body = (await readJsonBody(req)) as { mode?: unknown; keepRecent?: unknown };
+  const mode = body?.mode === 'summary' || body?.mode === 'truncate' ? body.mode : 'auto';
+  const keepRecent = typeof body?.keepRecent === 'number' ? body.keepRecent : undefined;
+
+  const cfg = snapshotConfig(ctx);
+  const status = resolveLlmStatus(cfg, ctx.configPath ?? cfg._configPath ?? '');
+  if (mode === 'summary' && !status.enabled) {
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.CHAT_DISABLED,
+      '未配置模型，无法生成摘要；可改用截断式压缩（早期对话会被移出，但可从备份撤销）',
+    );
+  }
+  // ★ P4 隐私门禁（与生成路径同源）：摘要会把早期对话发给外部模型，
+  //   未确认外发时**不得**走摘要 —— 显式 summary 直接 403（与 API-08 一致），
+  //   auto 降级为截断式并在响应里明示（用户仍能释放上下文，但内容不出本机）。
+  if (mode === 'summary' && status.ackRequired) {
+    sendErr(res, 403, CHAT_ERROR_CODES.DISCLOSURE_REQUIRED, '知识库内容外发未确认，请先完成隐私确认再使用摘要式压缩');
+    return;
+  }
+  const useSummary = mode === 'truncate' ? false : (status.enabled && !status.ackRequired);
+
+  const outcome = await compactConversation(hit.scope, id, {
+    ...(keepRecent !== undefined ? { keepRecent } : {}),
+    ...(useSummary ? { summarize: (covered: readonly ChatMessage[]) => summarizeForCompaction(covered) } : {}),
+    // 压缩后把"下一次请求的上下文规模"按同一口径重算并落盘（否则面板会继续显示压缩前的旧值）
+    projectContextChars: (conv: ConversationFile) => projectNextContextChars(conv).chars,
+  });
+
+  sendOk(res, 200, {
+    id,
+    scope: hit.scope,
+    mode: outcome.mode,
+    coveredCount: outcome.coveredCount,
+    charsBefore: outcome.charsBefore,
+    charsAfter: outcome.charsAfter,
+    contextChars: outcome.conv.compaction?.contextChars ?? null,
+    messageCount: outcome.conv.messageCount,
+    backup: outcome.backup,
+    ...(outcome.mode === 'truncate'
+      ? {
+        warning: (status.ackRequired
+          ? '知识库内容外发未确认：本次为截断式压缩（早期对话被移出、未发送给模型、未生成摘要）。'
+          : '未配置模型：本次为截断式压缩（早期对话被移出，未生成摘要）。')
+          + '原对话已备份，可撤销。',
+      }
+      : {}),
+  });
+}
+
+/**
+ * REQ-20261013-001 R8 `DELETE /api/chat/conversations/:id/compact` —— 撤销压缩。
+ *
+ * · 从压缩前备份恢复 `messages`（会话级状态如标题/归档保持当前值）
+ * · 无压缩记录 / 备份缺失损坏 → 400 fail-loud（不假装成功）
+ */
+export async function handleConversationCompactUndo(
+  res: ServerResponse,
+  id: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/compact`, res);
+  if (!hit) return;
+  if (generating.has(id)) {
+    sendErr(res, 409, CHAT_ERROR_CODES.CONVERSATION_GENERATING, '该会话正在生成中，请先停止或等待完成再撤销');
+    return;
+  }
+  const r = await undoCompaction(hit.scope, id);
+  sendOk(res, 200, { id, scope: hit.scope, restored: r.restored, messageCount: r.conv.messageCount });
+}
+
 /** API-07 `DELETE /api/chat/conversations/:id` —— 物理删除 + 级联删本地图片（**绝不动 kb/**）；幂等 */
 export async function handleConversationDelete(res: ServerResponse, id: string, ctx: ChatRouteContext): Promise<void> {
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}`, res);
@@ -1036,6 +1142,12 @@ async function runGeneration(
   const t0 = Date.now();
   let content = '';
   let usage: ChatMessage['usage'];
+  /**
+   * 上下文用量（字符口径，REQ-20261013-001）：取**最后一次** `context` 事件
+   * （= 最后一轮的请求基数）。落盘时再加上本轮生成的正文长度 → "此刻会话已占用"。
+   */
+  let contextChars: number | undefined;
+  let contextParts: ContextCharsParts | undefined;
   let finishReason = 'stop';
   let sources: SourceRef[] = [];
   // 走查 #11：检索过程步骤摘要（随 assistant 消息落盘，生成结束后仍可回看）
@@ -1076,6 +1188,13 @@ async function runGeneration(
           userMessageId: convAfterPrep.messages.at(-1)?.id,
           ...(discardedCount !== undefined ? { discardedCount } : {}),
         });
+        continue;
+      }
+      if (ev.type === 'context') {
+        // 上下文用量（字符口径）：可多次 —— 每轮请求前一次，**取最后一次**为落盘值
+        contextChars = ev.chars;
+        contextParts = ev.parts;
+        writeSseEvent(res, ev);
         continue;
       }
       if (ev.type === 'reasoning') { writeSseEvent(res, ev); continue; }
@@ -1164,6 +1283,13 @@ async function runGeneration(
 
   const totalMs = Date.now() - t0;
 
+  // 落盘口径（REQ-20261013-001）：最后一次 `context`（**本轮请求基数**）+ 本轮正文长度
+  // = "此刻会话已占用"（下一轮请求的历史规模近似）。截断式/无 context 事件时为 undefined。
+  const persistedContextChars = contextChars !== undefined ? contextChars + content.length : undefined;
+  const persistedContextParts = contextParts !== undefined
+    ? { ...contextParts, assistant: contextParts.assistant + content.length }
+    : undefined;
+
   // ── ③ 锁内落 assistant ──
   try {
     if (streamError) {
@@ -1173,6 +1299,7 @@ async function runGeneration(
       if (content.trim().length > 0) {
         const partial = buildAssistantMessage({
           content, sources, usage, finishReason: 'aborted', aborted: true, totalMs, progress,
+          contextChars: persistedContextChars, contextParts: persistedContextParts,
         });
         const saved = replaceAnswer
           ? await replaceLastAssistant(scope, convId, partial)
@@ -1187,7 +1314,10 @@ async function runGeneration(
       const convNow = await readConversation(scope, convId);
       if (!convNow) throw new ConversationNotFoundError(convId);
 
-      const assistant = buildAssistantMessage({ content, sources, usage, finishReason, aborted: false, totalMs, progress });
+      const assistant = buildAssistantMessage({
+        content, sources, usage, finishReason, aborted: false, totalMs, progress,
+        contextChars: persistedContextChars, contextParts: persistedContextParts,
+      });
       // ★ 只有「重新生成」才替换最后一条 assistant。
       //
       //   · regenerate：会话尾部是 […, u, a]，语义是"替换 a" → messageCount 不变（R23）
@@ -1251,6 +1381,9 @@ function buildAssistantMessage(p: {
   totalMs: number;
   /** 检索过程步骤摘要（走查 #11；为空则不落该字段） */
   progress?: ChatProgressStep[];
+  /** 上下文字符用量（REQ-20261013-001；缺失则不落该字段，旧会话无此键） */
+  contextChars?: number;
+  contextParts?: ContextCharsParts;
 }): ChatMessage {
   const msg: ChatMessage = {
     id: '',
@@ -1262,6 +1395,8 @@ function buildAssistantMessage(p: {
   };
   if (p.aborted) msg.aborted = true;
   if (p.usage) msg.usage = p.usage;
+  if (p.contextChars !== undefined) msg.contextChars = p.contextChars;
+  if (p.contextParts !== undefined) msg.contextParts = p.contextParts;
   // 走查 #11：检索过程随消息落盘（无步骤则不落该字段，与 sources 的约定一致）
   if (p.progress && p.progress.length > 0) msg.progress = p.progress;
   // ★ N22：只落投影后的引用（无来源则不落该字段，与 SSE 语义一致）

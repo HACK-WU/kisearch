@@ -24,6 +24,7 @@
  */
 
 import type { ChatConfigOk, RetrievalMode } from './chat-contract.js';
+import { CHAT_BUDGET } from './chat-contract.js';
 import type { KiConfig } from '../config.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -46,6 +47,8 @@ export interface LlmStatus {
   retrievalEnabled: boolean;
   ackRequired: boolean;
   maxToolRounds: number;
+  /** 上下文上限（**字符数**，缺省 1000K；REQ-20261013-001）——面板占比的分母 */
+  contextChars: number;
 }
 
 /** v2 默认预算（SSOT = chat-contract 的 CHAT_BUDGET；此处只取所需两项，避免循环 import 语义混淆） */
@@ -71,6 +74,8 @@ function notReady(reason: string, maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS): LlmS
     retrievalEnabled: false,
     ackRequired: false,
     maxToolRounds,
+    // 未就绪也给出上限：面板仍可显示"已用多少"，只是不能生成
+    contextChars: CHAT_BUDGET.defaultContextChars,
   };
 }
 
@@ -112,6 +117,7 @@ export function resolveLlmStatus(cfg: unknown, configPath: string): LlmStatus {
     retrievalEnabled: !ackRequired,   // ★ 确认后即可检索（工具路径或预检索降级路径）
     ackRequired,
     maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
+    contextChars: llm.contextChars ?? CHAT_BUDGET.defaultContextChars,
   };
 }
 
@@ -130,6 +136,7 @@ export function toChatConfigOk(status: LlmStatus, configPath: string): ChatConfi
     retrievalEnabled: status.retrievalEnabled,
     ackRequired: status.ackRequired,
     maxToolRounds: status.maxToolRounds,
+    contextChars: status.contextChars,
   };
 }
 

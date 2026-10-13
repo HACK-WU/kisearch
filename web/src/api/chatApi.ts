@@ -185,6 +185,53 @@ export async function archiveConversation(
   );
 }
 
+// ─── 手动压缩上下文（REQ-20261013-001 R8）────────────────────
+
+/** 压缩响应（`mode` 由后端裁决：`summary` 摘要式 / `truncate` 截断式） */
+export interface CompactResultOk {
+  ok: true;
+  id: string;
+  scope: string;
+  mode: 'summary' | 'truncate';
+  /** 被移出会话的消息条数 */
+  coveredCount: number;
+  /** 压缩前后**消息部分**字符数（不含系统提示与工具返回） */
+  charsBefore: number;
+  charsAfter: number;
+  /** 压缩后下一次请求的上下文字符数（后端按同一口径重算；缺失为 null） */
+  contextChars: number | null;
+  messageCount: number;
+  backup: string;
+  /** 截断式必有：告知用户「没做摘要、早期对话被移出、可撤销」（护栏：降级必须明示） */
+  warning?: string;
+}
+
+/**
+ * POST `/api/chat/conversations/:id/compact` —— 手动压缩上下文。
+ *
+ * `mode`：`auto`（缺省，有模型则摘要 / 否则截断）· `summary`（无模型 → 400）· `truncate`。
+ * 生成中调用 → `ChatApiError(409, 'CONVERSATION_GENERATING')`；
+ * 摘要失败 → 500 且**会话未被修改**（fail-loud，不静默降级）。
+ */
+export async function compactConversation(
+  id: string,
+  opts: { mode?: 'auto' | 'summary' | 'truncate'; keepRecent?: number } = {},
+): Promise<CompactResultOk> {
+  return reqJson<CompactResultOk>(
+    `${CHAT_API_BASE}/conversations/${encodeURIComponent(id)}/compact`,
+    jsonBody({ mode: opts.mode ?? 'auto', ...(opts.keepRecent !== undefined ? { keepRecent: opts.keepRecent } : {}) }),
+  );
+}
+
+/** DELETE `/api/chat/conversations/:id/compact` —— 撤销压缩（从备份恢复被移出的消息）。 */
+export async function undoCompactConversation(
+  id: string,
+): Promise<{ ok: true; id: string; restored: number; messageCount: number }> {
+  return reqJson(`${CHAT_API_BASE}/conversations/${encodeURIComponent(id)}/compact`, {
+    method: 'DELETE',
+  });
+}
+
 /** 物理删除（前端须二次确认）；后端级联删本地图片，**绝不动 kb/** */
 export async function deleteConversation(id: string): Promise<{ ok: true }> {
   return reqJson<{ ok: true }>(`${CHAT_API_BASE}/conversations/${encodeURIComponent(id)}`, {

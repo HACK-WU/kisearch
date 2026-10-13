@@ -221,6 +221,8 @@ const CONFIG_SCHEMA: ConfigNode = {
         // ── v2（D13）──
         supportsTools: { type: 'boolean' },
         kbDisclosureAck: { type: 'boolean' },
+        // ── v3（REQ-20261013-001）── 上下文上限（字符数，默认 1000K）
+        contextChars: { type: 'number', validate: positiveInt },
       },
     },
     // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）

@@ -368,6 +368,8 @@ export async function deleteConversation(scope: string, id: string): Promise<voi
     // ★ 只删 {chatDir}/{scope}/ 下的会话文件；绝不触碰 kb/{scope}/
     try {
       fs.unlinkSync(convPath(scope, id));
+      // 压缩备份随会话一起清理（REQ-20261013-001 R8）——否则会留下无主文件
+      removeCompactionBackups(scope, id);
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       // 幂等：已不存在不报错（API-07 幂等）
@@ -403,6 +405,9 @@ export async function deleteAllConversations(scope: string): Promise<number> {
       failures.push(err);
     }
   }
+
+  // 压缩备份同样清空（它们不在 CONV_FILE_RE 里，需单独处理）
+  removeCompactionBackups(scope);
 
   // 清空 assets（本地图片随会话一起清；★ 同样不触碰 kb/）
   try {
@@ -557,4 +562,215 @@ export class MessageInvalidError extends Error {
     super(detail);
     this.name = 'MessageInvalidError';
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 手动压缩上下文（REQ-20261013-001 R8）
+// ─────────────────────────────────────────────────────────────
+
+/** 压缩时保留的最近消息条数（不足则拒绝压缩） */
+export const COMPACT_KEEP_RECENT = 4;
+
+/** 最少可压缩条数（低于该值不值得压缩 → 明确拒绝，而不是压出个没用的摘要） */
+export const COMPACT_MIN_COVERED = 2;
+
+/**
+ * 压缩备份文件名（**严格形态**，防路径穿越）。
+ *
+ * ★ 故意带一个 `.`：会话文件名判定是 `/^c-[A-Za-z0-9-]+\.json$/`（只允许字母数字与 `-`），
+ *   故 `c-xxx.compact-backup-1.json` **不会被 `listConversations` 当成会话**。
+ */
+function compactionBackupName(convId: string, ts: number): string {
+  return `${convId}.compact-backup-${ts}.json`;
+}
+
+const COMPACTION_BACKUP_RE = /^c-[A-Za-z0-9-]+\.compact-backup-\d+\.json$/;
+
+/** 消息正文总字符数（**仅消息部分**；system / 工具返回不在会话文件里） */
+function sumMessageChars(messages: readonly ChatMessage[]): number {
+  return messages.reduce((n, m) => n + m.content.length, 0);
+}
+
+/** 两次快照的消息序列是否一致（id 序列比对，防"压缩期间来了新一轮"写回陈旧快照） */
+function sameMessageIds(a: readonly ChatMessage[], b: readonly ChatMessage[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i]!.id !== b[i]!.id) return false;
+  }
+  return true;
+}
+
+/** 删除某会话的压缩备份（幂等；失败不阻断主流程） */
+function removeCompactionBackups(scope: string, convId?: string): void {
+  const dir = chatDirFor(scope);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return; // 目录不存在 → 幂等
+  }
+  for (const name of names) {
+    if (!COMPACTION_BACKUP_RE.test(name)) continue;
+    if (convId !== undefined && !name.startsWith(`${convId}.compact-backup-`)) continue;
+    try {
+      fs.unlinkSync(path.join(dir, name));
+    } catch {
+      /* 幂等：删不掉不影响会话本身 */
+    }
+  }
+}
+
+/**
+ * 压缩切分（**纯函数**，便于单测）：把消息切成「被压缩的早期部分」与「保留的最近部分」。
+ *
+ * · `ok:false` 时 `reason` 是可以直接给用户看的人话（fail-loud：说清为什么不能压）
+ * · 保留窗口按**条数**（不是字符数）：条数对用户可预期，字符数会随内容长度漂移
+ */
+export function planCompaction(
+  messages: readonly ChatMessage[],
+  keepRecent: number = COMPACT_KEEP_RECENT,
+): { ok: true; covered: ChatMessage[]; keep: ChatMessage[] } | { ok: false; reason: string } {
+  const keepCount = Math.max(0, Math.floor(keepRecent));
+  if (messages.length === 0) return { ok: false, reason: '会话没有消息，无需压缩' };
+  // ★ keepRecent=0 会把"全部对话"移出：不是本功能的语义（压缩是"保留最近 + 压掉更早"），
+  //   且会让会话变空。显式拒绝，避免 API 调用方误传来把会话清空（备份虽在，但语义已跑偏）。
+  if (keepCount < 1) return { ok: false, reason: 'keepRecent 至少为 1（必须保留最近的对话）' };
+  const coveredCount = messages.length - keepCount;
+  if (coveredCount < COMPACT_MIN_COVERED) {
+    return {
+      ok: false,
+      reason: `消息过少：当前 ${messages.length} 条，保留最近 ${keepCount} 条后不足 ${COMPACT_MIN_COVERED} 条，无需压缩`,
+    };
+  }
+  return { ok: true, covered: messages.slice(0, coveredCount), keep: messages.slice(coveredCount) };
+}
+
+/** 压缩结果（供路由层组装响应） */
+export interface CompactionOutcome {
+  conv: ConversationFile;
+  mode: 'summary' | 'truncate';
+  coveredCount: number;
+  /** 压缩前后**消息部分**字符数（不含 system / 工具返回；摘要计入压缩后） */
+  charsBefore: number;
+  charsAfter: number;
+  backup: string;
+}
+
+/**
+ * 手动压缩上下文（REQ-20261013-001 R8）。
+ *
+ * 锁边界（与生成同款两段式）：
+ *   ① 锁外：读快照 → 调 `summarize`（**LLM 调用可能耗时数十秒，绝不持锁**）
+ *   ② 锁内：校验快照未失效 → **先备份** → 改写并落盘
+ *
+ * 三条硬约束（对应 plan 护栏 #4/#5）：
+ * · **无备份不压缩**：备份失败直接抛错，不改会话；
+ * · **摘要失败不落盘**：`summarize` 抛错时立即向上抛，会话保持原样；
+ * · **期间变化不写回**：快照与当前消息序列不一致 → 拒绝（防把新一轮问答静默吃掉）。
+ *
+ * @param opts.summarize 摘要生成器；返回 `null` = 截断式（**调用方须已确认用户知情**）
+ */
+export async function compactConversation(
+  scope: string,
+  id: string,
+  opts: {
+    keepRecent?: number;
+    summarize?: (covered: readonly ChatMessage[]) => Promise<string | null>;
+    /**
+     * 重算"压缩后下一次请求"的上下文字符数（口径由调用方注入：`tool-loop.projectNextContextChars`）。
+     * 存储层不认识 system 组 / prompt-config，故**不在本层自算**（避免口径漂移）。
+     * 缺失时不写 `compaction.contextChars`（前端回退旧值，属可接受的降级）。
+     */
+    projectContextChars?: (conv: ConversationFile) => number;
+  } = {},
+): Promise<CompactionOutcome> {
+  validateScope(scope);
+  assertValidId(id);
+
+  // ① 锁外准备
+  const snapshot = readJson<ConversationFile>(convPath(scope, id));
+  if (!snapshot) throw new ConversationNotFoundError(id);
+  const plan = planCompaction(snapshot.messages, opts.keepRecent);
+  if (!plan.ok) throw new MessageInvalidError(plan.reason);
+
+  const summary = opts.summarize ? await opts.summarize(plan.covered) : null;
+  const charsBefore = sumMessageChars(snapshot.messages);
+  const charsAfter = sumMessageChars(plan.keep) + (summary?.length ?? 0);
+
+  // ② 锁内提交
+  return withConvLock(id, () => {
+    const conv = readJson<ConversationFile>(convPath(scope, id));
+    if (!conv) throw new ConversationNotFoundError(id);
+    if (!sameMessageIds(conv.messages, snapshot.messages)) {
+      throw new MessageInvalidError('会话在压缩期间发生变化（可能刚完成一轮问答），请重试');
+    }
+
+    const ts = Date.now();
+    const backup = compactionBackupName(id, ts);
+    try {
+      fs.copyFileSync(convPath(scope, id), path.join(chatDirFor(scope), backup));
+    } catch (err) {
+      // ★ 护栏 #4：备份失败绝不压缩（此刻会话文件仍是原样）
+      throw new ChatWriteFailedError(err);
+    }
+
+    const mode: 'summary' | 'truncate' = summary ? 'summary' : 'truncate';
+    conv.messages = plan.keep;
+    conv.messageCount = conv.messages.length;
+    conv.lastMessagePreview = derivePreview(conv.messages[conv.messages.length - 1]?.content ?? '');
+    conv.compaction = {
+      at: new Date().toISOString(),
+      mode,
+      coveredCount: plan.covered.length,
+      summary,
+      charsBefore,
+      charsAfter,
+      // 先写好新 messages 再投影（投影看到的就是"下一次请求"的形态）
+      ...(opts.projectContextChars ? { contextChars: opts.projectContextChars(conv) } : {}),
+      backup,
+    };
+    persist(scope, conv);
+    return { conv, mode, coveredCount: plan.covered.length, charsBefore, charsAfter, backup };
+  });
+}
+
+/**
+ * 撤销压缩（从最近一次压缩备份恢复消息）。
+ *
+ * · 无压缩记录 → `MessageInvalidError`（人话说明）
+ * · 备份名不合法 / 备份缺失或损坏 → **明确报错**（fail-loud，不假装成功）
+ * · 只恢复 `messages`：会话标题、归档态等会话级状态保持当前值（用户后来改过的不回退）
+ * · 备份文件**保留**（可重复撤销 / 人工取证），随会话删除一并清理
+ */
+export async function undoCompaction(
+  scope: string,
+  id: string,
+): Promise<{ conv: ConversationFile; restored: number }> {
+  validateScope(scope);
+  assertValidId(id);
+  return withConvLock(id, () => {
+    const conv = readJson<ConversationFile>(convPath(scope, id));
+    if (!conv) throw new ConversationNotFoundError(id);
+    const c = conv.compaction;
+    if (!c) throw new MessageInvalidError('该会话没有可撤销的压缩记录');
+    if (!COMPACTION_BACKUP_RE.test(c.backup) || !c.backup.startsWith(`${id}.compact-backup-`)) {
+      throw new MessageInvalidError(`压缩备份名不合法，拒绝恢复：${c.backup}`);
+    }
+
+    const restoredPath = path.join(chatDirFor(scope), c.backup);
+    if (!fs.existsSync(restoredPath)) {
+      throw new MessageInvalidError(`压缩备份已不存在，无法撤销：${c.backup}`);
+    }
+    const restored = readJson<ConversationFile>(restoredPath);
+    if (!restored || !Array.isArray(restored.messages)) {
+      throw new MessageInvalidError(`压缩备份损坏，无法撤销：${c.backup}`);
+    }
+
+    conv.messages = restored.messages;
+    conv.messageCount = conv.messages.length;
+    conv.lastMessagePreview = derivePreview(conv.messages[conv.messages.length - 1]?.content ?? '');
+    delete conv.compaction;
+    persist(scope, conv);
+    return { conv, restored: restored.messages.length };
+  });
 }
