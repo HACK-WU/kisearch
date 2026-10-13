@@ -1959,6 +1959,32 @@ a:hover { text-decoration: underline; }
 .ki-code-copy[data-copy-state="success"] { color: var(--ki-color-success); }
 .ki-code-copy[data-copy-state="error"] { color: var(--ki-color-danger, #d93025); }
 .ki-code-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+/* mermaid 兜底提示（fail-loud，走查 2026-10-13）：渲染失败 / 内容为空 / 资源不可用时在工具条标注，
+   不再静默保留源码块 —— 此前用户无法区分"源码语法错"与"产品坏了"。
+   `margin-left: auto` 把标记推到复制按钮左侧（语言名保持最左、按钮位置不动）。 */
+.ki-markdown .ki-code-warn {
+  margin-left: auto;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: inherit; font-size: 11px; line-height: 1.4;
+  color: var(--ki-color-danger);
+  background: none; border: 0; padding: 2px 4px; border-radius: 5px;
+  cursor: pointer;
+}
+/* 展开态与键盘焦点：标记是按钮（详情不再只靠 hover 的 title，触屏 / 键盘同样可达） */
+.ki-markdown .ki-code-warn:hover,
+.ki-markdown .ki-code-warn:focus-visible,
+.ki-markdown .ki-code-warn[aria-expanded="true"] {
+  background: var(--ki-color-danger-soft);
+}
+/* 详情面板：展开后贴在工具条下方（比源码块之后更贴近触发点） */
+.ki-markdown .ki-code-warn-detail {
+  margin: 0; padding: 8px 12px;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-danger-soft);
+  font-size: var(--ki-font-size-sm); line-height: 1.6;
+}
+.ki-markdown .ki-code-warn-detail__reason { display: block; color: var(--ki-color-text); }
+.ki-markdown .ki-code-warn-detail__hint { display: block; color: var(--ki-color-text-muted); }
 .ki-markdown details {
   margin: 10px 0; padding: 8px 12px;
   border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
@@ -2234,6 +2260,10 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 }
 .ki-vector-dimension-banner--unknown { color: var(--ki-color-text); background: var(--ki-color-bg-secondary); border-color: var(--ki-color-border-strong); border-left-color: var(--ki-color-text-subtle); box-shadow: none; }
 .ki-vector-dimension-banner--unknown .ki-vector-dimension-banner__icon { background: var(--ki-color-text-subtle); }
+/* 维度横幅的「忽略」×：复用全局任务提示样式，去掉其负左距（横幅 gap 已负责间距）。
+   选择器带 `.ki-vector-dimension-banner >` 前缀是为了压过窄屏媒体查询里的
+   `.ki-vector-dimension-banner > button { margin-left: 40px }`（同为 button，靠 class 数量取胜）。 */
+.ki-vector-dimension-banner > .ki-vector-dimension-banner__dismiss { margin-left: 0; }
 .ki-tasks-page { display: flex; flex-direction: column; gap: 18px; }
 .ki-task-summary-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .ki-task-summary { display: flex; align-items: baseline; gap: 10px; padding: 16px 20px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-lg); background: var(--ki-color-surface); }

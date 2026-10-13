@@ -459,13 +459,176 @@ function loadMermaid(): Promise<typeof import('mermaid')> {
  * mermaid 输出是否"只有外壳、没有图元"。
  *
  * 语法成立但没有任何节点的图（如仅 `graph TD`）不会抛错，`mermaid.render` 返回的 svg 里
- * 只有 `<style>`/`<defs>`/空 `<g>`——直接替换 `pre` 会留下"灰底空框 + 复制按钮"，
- * 源码被静默吞掉（真机走查 2026-10-09 的空白块即此类形态）。故判定为空白时保留源码块。
+ * 只有装饰容器（`<style>`/`<defs>`/`<marker>`）与空 `<g>`——直接替换 `pre` 会留下
+ * "空白框 + 复制按钮"，源码被静默吞掉（真机走查 2026-10-09 的空白块即此类形态）。
+ * 判定为空白时保留源码块并给出可见提示（见 markMermaidFallback）。
+ *
+ * **实现修正 2026-10-13（实测）**：必须先剥离装饰容器 `<defs>` / `<marker>`，再判有无图形元素。
+ * 旧实现直接对整份 svg 做黑名单匹配，被装饰容器误伤——mermaid 11.16.1 的空 flowchart 会输出
+ * `<marker>`（内含 `path`/`polygon`/`circle`，且**不在 `<defs>` 内**，只剥 defs 仍会误判），
+ * 于是旧判定对空图恒为 false：源码被替换成 16×16 的空白画布，正是本函数当初要消除的形态。
+ * 8 个实测样本（空/非空 flowchart、graph、stateDiagram、sequenceDiagram、pie）上，
+ * 剥离装饰后判定与人工判断完全一致。
  *
  * 用标签名判定而非解析 DOM：纯字符串可单测，且 `post`/`text-align` 等样式文本不含尖括号形式，不会误命中。
  */
 export function isBlankMermaidSvg(svg: string): boolean {
-  return !/<(?:path|rect|circle|ellipse|line|polyline|polygon|text|foreignObject|image)\b/i.test(svg);
+  const withoutDecor = svg
+    .replace(/<defs\b[\s\S]*?<\/defs>/gi, '')
+    .replace(/<marker\b[\s\S]*?<\/marker>/gi, '');
+  return !/<(?:path|rect|circle|ellipse|line|polyline|polygon|text|foreignObject|image)\b/i.test(withoutDecor);
+}
+
+/** mermaid 兜底提示的三种成因：语法失败 / 无图元 / 渲染资源加载失败 */
+export type MermaidFallbackKind = 'failed' | 'blank' | 'unavailable';
+
+/**
+ * 兜底提示文案（纯函数便于单测）：label 是工具条上的短标记，title 是悬浮说明。
+ *
+ * 为何必须提示（走查 2026-10-13）：渲染失败此前是 `catch {}` **全静默** —— 用户只看到"图没出来"，
+ * 无法区分"我的源码语法错了"与"产品坏了"。真实案例：AI 生成的节点文本内层写了裸引号
+ * `YOU["你：写 YAML（spec "）"]` → mermaid 报 `Parse error on line 2`，页面与 console 均无反馈。
+ * 口径沿用既有 fail-loud 先例（图片缺失的 `.ki-asset-missing` 占位块、被拦链接的 `⚠` 标记）：
+ * 保留源码块 + 明说原因，而不是静默降级。
+ */
+export interface MermaidFallbackNotice {
+  /** 工具条上的短标记 */
+  label: string;
+  /** 悬浮 / 读屏用的完整说明（桌面端快速查看；触屏与键盘用户走展开面板） */
+  title: string;
+  /** 展开面板：出了什么问题 */
+  reason: string;
+  /** 展开面板：怎么办（给出去路，而不是止于一句"失败"） */
+  hint: string;
+}
+
+export function mermaidFallbackNotice(kind: MermaidFallbackKind, detail?: string): MermaidFallbackNotice {
+  const build = (label: string, reason: string, hint: string): MermaidFallbackNotice => ({
+    label, reason, hint, title: `${reason}。${hint}`,
+  });
+  if (kind === 'blank') {
+    return build(
+      '⚠ 图表内容为空',
+      '源码里没有可渲染的节点（例如只写了 graph / flowchart 声明）',
+      '已保留源码块；补上节点后重新打开即可正常渲染',
+    );
+  }
+  if (kind === 'unavailable') {
+    return build(
+      '⚠ 图表渲染不可用',
+      '图表渲染资源加载失败（mermaid 模块未能加载）',
+      '已保留源码块；刷新页面可重试',
+    );
+  }
+  return build(
+    '⚠ 图表渲染失败',
+    `图表源码有语法错误，未能渲染成图${detail ? `：${detail}` : ''}`,
+    '已保留源码块；修正源码后重新打开即可正常渲染',
+  );
+}
+
+/** mermaid 报错摘要：取首个非空行并限长（报错原文是多行箭头图，塞进 title / 日志没有信息量） */
+export function mermaidErrorDetail(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const firstLine = raw.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '未知错误';
+  return firstLine.length > 160 ? `${firstLine.slice(0, 157)}…` : firstLine;
+}
+
+/**
+ * mermaid 源码容错修复：把**标签字符串内层**未转义的裸引号换成 mermaid 实体 `#quot;`。
+ *
+ * 为何需要（2026-10-13 实测根因）：AI 生成的图表常在节点文本里直接写引号，如
+ * `YOU["你：写 YAML（spec "）"]` —— mermaid 词法器在字符串中途遇到第二个 `"` 即判定字符串
+ * 结束（实测报 `Parse error on line 2 ... got 'STR'`），整块图不渲染。mermaid 语法要求
+ * 字符串内部的引号写 `#quot;`，故按"首次失败后修一次再重试"使用（合法源码不经过本函数重试）。
+ *
+ * 规则（保守：只动标签字符串，其余字节一律不改）：
+ *  · 起点 = `[` `(` `{` `|` 后紧跟的 `"`（mermaid 的全部标签/文本容器）
+ *  · 终点 = 起点之后第一个「后面紧跟 `]` `)` `}` `|` 或行尾」的 `"`
+ *  · 只替换起点与终点之间的裸 `"`；标签未闭合（找不到终点）时本行原样返回
+ *  · `%%` 注释行不处理
+ *
+ * 实测（2026-10-13）：对 6 类合法源码（含 `#quot;`、边标签 `|"是"|`、`(("圆"))`/`{"菱形"}`/
+ * `(["胶囊"])` 形状、单行多节点、`%%` 注释 + `style` 行）输出与输入**逐字节相同**；仅对非法样例生效。
+ */
+export function repairMermaidLabelQuotes(src: string): string {
+  return src.split('\n').map((line) => {
+    if (line.trim().startsWith('%%')) return line;
+    let out = '';
+    let i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if ((ch === '[' || ch === '(' || ch === '{' || ch === '|') && line[i + 1] === '"') {
+        const open = i + 1;
+        let close = -1;
+        for (let j = open + 1; j < line.length; j += 1) {
+          if (line[j] !== '"') continue;
+          const next = line[j + 1];
+          if (next === undefined || next === ']' || next === ')' || next === '}' || next === '|') {
+            close = j;
+            break;
+          }
+        }
+        // 标签未闭合：本行原样保留，交由渲染失败分支给出可见提示
+        if (close < 0) { out += line.slice(i); return out; }
+        out += `${ch}"${line.slice(open + 1, close).replace(/"/g, '#quot;')}"`;
+        i = close + 1;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return out;
+  }).join('\n');
+}
+
+/**
+ * 在代码块工具条上标注兜底原因（幂等：同一块只标一次）。
+ *
+ * 标记是 `<button>` 而非 `<span title>`：详情**不能只靠 hover** —— 触屏没有 hover、键盘用户
+ * 也拿不到 title（走查 2026-10-13 的待办）。点击 / 回车展开面板，面板贴在工具条下方
+ * （比源码块之后更贴近触发点）。复制按钮位置不动（标记插在它左侧）。
+ */
+function markMermaidFallback(pre: HTMLElement, kind: MermaidFallbackKind, detail?: string): void {
+  const block = pre.closest<HTMLElement>('.ki-code-block');
+  if (!block || block.querySelector('.ki-code-warn')) return;
+  const notice = mermaidFallbackNotice(kind, detail);
+  const panelId = `ki-code-warn-${Math.random().toString(36).slice(2, 8)}`;
+
+  const panel = document.createElement('p');
+  panel.className = 'ki-code-warn-detail';
+  panel.id = panelId;
+  panel.hidden = true;
+  const reason = document.createElement('span');
+  reason.className = 'ki-code-warn-detail__reason';
+  reason.textContent = notice.reason;
+  const hint = document.createElement('span');
+  hint.className = 'ki-code-warn-detail__hint';
+  hint.textContent = notice.hint;
+  panel.append(reason, hint);
+
+  const warn = document.createElement('button');
+  warn.type = 'button';
+  warn.className = 'ki-code-warn';
+  warn.textContent = notice.label;
+  warn.title = notice.title; // 桌面端可 hover 速览；点击展开则触屏 / 键盘同样可见
+  warn.setAttribute('aria-expanded', 'false');
+  warn.setAttribute('aria-controls', panelId);
+  warn.addEventListener('click', () => {
+    const expand = panel.hidden;
+    panel.hidden = !expand;
+    warn.setAttribute('aria-expanded', String(expand));
+  });
+
+  const bar = block.querySelector<HTMLElement>('.ki-code-block__bar');
+  const copy = bar?.querySelector<HTMLElement>('.ki-code-copy');
+  if (bar) {
+    if (copy) bar.insertBefore(warn, copy);
+    else bar.appendChild(warn);
+    bar.after(panel);
+    return;
+  }
+  block.append(warn, panel);
 }
 
 /** 占位块展示用的原始路径：/api/asset 路由还原 path 参数，其余原样 */
@@ -640,6 +803,19 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
         // 避免 Mermaid 解析失败时将错误图插入 document.body。
         suppressErrorRendering: true,
       });
+      /**
+       * 渲染单块：首次失败时按容错规则修一次再重试（AI 生成的图表常在标签串内层写裸引号，
+       * 见 repairMermaidLabelQuotes）；两次都失败则抛出，由调用方走 fail-loud 分支。
+       */
+      const renderMermaidSvg = async (id: string, code: string): Promise<string> => {
+        try {
+          return (await mermaid.render(id, code)).svg;
+        } catch (error) {
+          const repaired = repairMermaidLabelQuotes(code);
+          if (repaired === code) throw error;
+          return (await mermaid.render(`${id}-r`, repaired)).svg;
+        }
+      };
       const blocks = root.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
       const renderAll = async (): Promise<void> => {
         for (const block of Array.from(blocks)) {
@@ -648,24 +824,37 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
           const pre = block.closest('pre');
           if (!pre) continue;
           try {
-            const { svg } = await mermaid.render(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, code);
+            const svg = await renderMermaidSvg(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, code);
             // 无图元的空白图不替换：保留源码块，避免"空白框 + 复制按钮"把源码静默吞掉
             if (isBlankMermaidSvg(svg)) {
               console.warn('[ki] mermaid 渲染结果为空（无图元），已保留源码块');
+              markMermaidFallback(pre, 'blank');
               continue;
             }
             const wrap = document.createElement('div');
             wrap.className = 'ki-mermaid';
-            wrap.dataset.copyText = code;
+            wrap.dataset.copyText = code; // 复制始终是**原文**：容错重试只影响渲染输入
             wrap.innerHTML = svg;
             pre.replaceWith(wrap);
-          } catch {
-            /* 解析失败保留源码块，用户可自行查看 */
+          } catch (error) {
+            // fail-loud（走查 2026-10-13）：解析失败不再静默 —— 保留源码块 + 工具条标注失败原因
+            const detail = mermaidErrorDetail(error);
+            console.warn('[ki] mermaid 渲染失败，已保留源码块：', detail);
+            markMermaidFallback(pre, 'failed', detail);
           }
         }
         if (!cancelled) setReady(true);
       };
       void renderAll();
+    }).catch((error: unknown) => {
+      // 动态 chunk 加载失败此前无兜底（未处理的 rejection + 页面零反馈）→ 同样 fail-loud
+      if (cancelled) return;
+      console.warn('[ki] mermaid 资源加载失败，图表未渲染：', mermaidErrorDetail(error));
+      for (const block of Array.from(root.querySelectorAll<HTMLElement>('pre > code.language-mermaid'))) {
+        const pre = block.closest('pre');
+        if (pre) markMermaidFallback(pre, 'unavailable');
+      }
+      setReady(true);
     });
     return () => {
       cancelled = true;
