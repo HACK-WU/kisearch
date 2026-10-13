@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
-  getTask, getTasks, getImportIncomplete, retryImportIncomplete,
+  getTask, getTasks, getImportIncomplete, retryImportIncomplete, activeImportCount,
   type TaskRecord, type TaskState, type TaskIndexReadiness, type ImportIncompleteStatus,
 } from '@/api/tasksApi';
+import { cancelImport } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
 import { Icon } from '@/components/icons';
 
@@ -106,7 +107,7 @@ function TaskProgressBar({ task, large = false }: { task: TaskRecord; large?: bo
   );
 }
 
-function TaskDetail({ id }: { id: string }): JSX.Element {
+function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Element {
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ['task', id],
     queryFn: () => getTask(id),
@@ -151,7 +152,13 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
         </>
       ) : null}
       <code className="ki-task-id">{id}</code>
-      {task ? <TaskActions task={task} onRecheck={() => void refetch()} /> : null}
+      {task ? (
+        <TaskActions
+          task={task}
+          runningImports={activeImportCount(tasks, task.scope)}
+          onRecheck={() => void refetch()}
+        />
+      ) : null}
     </aside>
   );
 }
@@ -168,7 +175,16 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
  * ★ 重试由**服务端按清单执行**（不需要浏览器凭据）——成功后刷新任务列表即可看到新任务。
  * ★ 动作区只读清单摘要（`read` 通道），导入/向量化期间不会被排队。
  */
-function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => void }): JSX.Element | null {
+function TaskActions({
+  task,
+  runningImports,
+  onRecheck,
+}: {
+  task: TaskRecord;
+  /** 同 scope 正在跑的导入任务数（`queued`/`running`，来自任务列表，与后端闸门同口径） */
+  runningImports: number;
+  onRecheck: () => void;
+}): JSX.Element | null {
   const queryClient = useQueryClient();
   const isImport = task.operation === 'import';
   const recoverable = task.state === 'partial' || task.state === 'failed' || task.state === 'cancelled';
@@ -186,6 +202,8 @@ function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => v
   /**
    * 按钮防重锁（2026-10-13 评审 P2）：提交成功后只锁 20s 而非永久禁用——
    * 否则同一详情视图里再想重试（新 job 又 partial、清单又生成）只能刷新页面。
+   * ★ 2026-10-13 用户反馈后：真正的判据已交给 `runningImports`（服务端状态，跨刷新成立），
+   *   本锁只覆盖"提交到任务列表刷新之间"的窗口。
    */
   const [retryLocked, setRetryLocked] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
@@ -196,6 +214,7 @@ function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => v
     incomplete: incompleteQuery.data as ImportIncompleteStatus | undefined,
     incompleteLoading: isImport && recoverable && incompleteQuery.isPending,
     incompleteError: incompleteQuery.isError,
+    runningImports,
   });
 
   const startRetry = async (): Promise<void> => {
@@ -222,6 +241,40 @@ function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => v
     }
   };
 
+  /**
+   * 停止页面导入的任务（2026-10-13 用户要求）。
+   * 两段式确认：停止会中断正在跑的导入（已完成文档保留、未完成部分进未完成清单），不适合一键生效。
+   * ★ 只对 `source='web'` 的任务给出——`/api/import/cancel` 只认 HTTP 入口启动的 job。
+   */
+  const [stopArmed, setStopArmed] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopNotice, setStopNotice] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+
+  const stopTask = async (): Promise<void> => {
+    setStopping(true);
+    setStopError(null);
+    try {
+      const result = await cancelImport(task.id);
+      setStopArmed(false);
+      setStopNotice(result.message ?? '已请求停止：当前批次完成后停止写入');
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+        queryClient.invalidateQueries({ queryKey: ['task', task.id] }),
+      ]);
+    } catch (failure) {
+      setStopError(failure instanceof Error ? failure.message : '停止请求失败');
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  // 任务脱离进行中（cancelled / 终态）后，「已请求停止」不再适用——清掉，避免它与终态徽标
+  // 长期并存被读成"还在停"（2026-10-13 评审 P2）。
+  useEffect(() => {
+    if (task.state !== 'queued' && task.state !== 'running') setStopNotice(null);
+  }, [task.state]);
+
   const copyCommand = async (command: string): Promise<void> => {
     let ok = true;
     try {
@@ -246,6 +299,35 @@ function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => v
             {retrying ? '正在提交重试…' : retryLocked ? '已提交重试' : action.label}
           </button>
           {action.hint ? <span className="ki-task-action__hint">{action.hint}</span> : null}
+        </div>
+      );
+    }
+    if (action.kind === 'stop-import') {
+      return (
+        <div key={action.kind} className="ki-task-action">
+          {stopArmed ? (
+            <>
+              <button
+                className="ki-btn ki-btn--danger ki-btn--small"
+                onClick={() => void stopTask()}
+                disabled={stopping}
+              >
+                {stopping ? '正在请求停止…' : '确认停止'}
+              </button>
+              <button
+                className="ki-btn ki-btn--secondary ki-btn--small"
+                onClick={() => setStopArmed(false)}
+                disabled={stopping}
+              >
+                取消
+              </button>
+              <span className="ki-task-action__hint">停止后未完成部分进入未完成清单，可稍后再重试</span>
+            </>
+          ) : (
+            <button className="ki-btn ki-btn--secondary ki-btn--small" onClick={() => setStopArmed(true)}>
+              {action.label}
+            </button>
+          )}
         </div>
       );
     }
@@ -280,11 +362,14 @@ function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => v
     );
   }
 
-  const visible = model.actions.length > 0 || model.note !== undefined || retryError !== null || retryJobId !== null;
+  const visible = model.actions.length > 0 || model.note !== undefined || retryError !== null
+    || retryJobId !== null || stopNotice !== null || stopError !== null;
   if (!visible) return null;
 
   return (
     <div className="ki-task-actions">
+      {stopNotice ? <p className="ki-task-action-note ki-task-action-note--ok">{stopNotice}</p> : null}
+      {stopError ? <p className="ki-task-action-note ki-task-action-note--error">{stopError}</p> : null}
       {retryJobId ? (
         <p className="ki-task-action-note ki-task-action-note--ok">
           已提交重试任务（{retryJobId.slice(0, 8)}…）：只处理未完成文件，可在上方任务列表查看进度。
@@ -373,8 +458,9 @@ export function TasksPage(): JSX.Element {
           </div>
         </section>
         {/* ★ key 必须绑 id（2026-10-13 评审 P1）：切任务时 React 会复用同一实例，
-            否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。 */}
-        {selectedId ? <TaskDetail key={selectedId} id={selectedId} /> : (
+            否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。
+            `tasks` 传入用于「该 scope 是否已有导入在跑」的判据（用户反馈的重复重试修复）。 */}
+        {selectedId ? <TaskDetail key={selectedId} id={selectedId} tasks={tasks} /> : (
           <aside className="ki-task-detail ki-task-detail--empty">
             <span className="ki-task-detail__icon">
               <Icon name="clock" />

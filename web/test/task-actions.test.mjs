@@ -47,12 +47,24 @@ describe('taskDetailActions：状态分流', () => {
     assert.equal(result.note, undefined);
   });
 
-  it('进行中（running/queued）→ 无动作 + 进行中提示', () => {
+  it('进行中（running/queued）的**页面导入** → 给「停止任务」（2026-10-13 用户要求）', () => {
     for (const state of ['running', 'queued']) {
-      const result = taskDetailActions({ task: task({ state }) });
-      assert.deepEqual(result.actions, []);
-      assert.match(result.note, /进行中/);
+      const result = taskDetailActions({ task: task({ state, source: 'web' }) });
+      assert.deepEqual(kinds(result), ['stop-import']);
+      assert.match(result.note, /停止 = /);
     }
+  });
+
+  it('进行中的 **CLI / 后台来源**任务 → 不给停止按钮，指路终端（取消通道不同）', () => {
+    const result = taskDetailActions({ task: task({ state: 'running', source: 'cli' }) });
+    assert.deepEqual(result.actions, []);
+    assert.match(result.note, /终端中断/);
+  });
+
+  it('进行中的非导入任务（重建/还原）→ 只给说明，不给停止按钮', () => {
+    const result = taskDetailActions({ task: task({ state: 'running', operation: 'rebuild-vector' }) });
+    assert.deepEqual(result.actions, []);
+    assert.match(result.note, /进行中/);
   });
 
   it('unknown（心跳丢失）→ **不给重试**，但给「重新检查」+ 确认后重导（否则用户被卡住）', () => {
@@ -131,6 +143,26 @@ describe('taskDetailActions：import 任务的可重试分支', () => {
       incomplete: { canRetry: true, itemCount: 0, sourceKind: 'upload' },
     });
     assert.deepEqual(kinds(result), ['goto-import']);
+  });
+
+  it('该 scope 已有导入在跑 → **不给重试**（用户反馈：连点两次各起一个 job）', () => {
+    const result = taskDetailActions({
+      task: task({ state: 'partial' }),
+      incomplete: { canRetry: true, itemCount: 1183, sourceKind: 'upload' },
+      runningImports: 2,
+    });
+    assert.deepEqual(kinds(result), ['recheck']);
+    assert.match(result.note, /已有导入任务在跑（2 个/);
+    assert.equal(result.actions.some((a) => a.kind === 'retry-incomplete'), false);
+  });
+
+  it('runningImports=0 → 不影响既有可重试路径（回归）', () => {
+    const result = taskDetailActions({
+      task: task({ state: 'partial' }),
+      incomplete: { canRetry: true, itemCount: 10, sourceKind: 'upload' },
+      runningImports: 0,
+    });
+    assert.deepEqual(kinds(result), ['retry-incomplete']);
   });
 });
 

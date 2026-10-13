@@ -33,6 +33,8 @@ const { createMcpHttpServer } = await import('../src/lib/mcp-http.js');
 const { writeImportIncomplete, getImportIncompletePath, getImportIncompletePrevPath } =
   await import('../src/lib/import-retry.js');
 const { getKbDir } = await import('../src/lib/scope.js');
+const { createTaskReporter } = await import('../src/lib/task-registry.js');
+const { loadConfig } = await import('../src/lib/config.js');
 
 // 维度快照刷新会尝试打开引擎：本套件不测引擎，打桩避免拖慢/吊住事件循环（与导入无关的旁路）。
 const snapshotMod = await import('../src/lib/vector-dimension-snapshot.js');
@@ -304,6 +306,65 @@ describe('POST /api/import/retry-incomplete（重试入口）', () => {
     const { status, body } = await postRetry({ scope: SCOPE, taskId: 'task-big' });
     assert.equal(status, 400);
     assert.equal(body.code, 'INCOMPLETE_LIST_TOO_LARGE');
+  });
+
+  it('同 scope 已有导入在跑 → 409 INCOMPLETE_IMPORT_RUNNING（防重复重试，2026-10-13 用户反馈）', async () => {
+    const src = mkExternalSource();
+    seedIncomplete({ sourceDir: src, taskId: 'task-busy', items: [{ path: 'a.md' }] });
+    // 造一条正在跑的同 scope 导入任务（任务台账，与真实闸门判据同源）
+    const reporter = createTaskReporter(loadConfig(), { id: 'busy-import-running', source: 'web', operation: 'import', scope: SCOPE });
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    try {
+      const { status, body } = await postRetry({ scope: SCOPE, taskId: 'task-busy' });
+      assert.equal(status, 409);
+      assert.equal(body.code, 'INCOMPLETE_IMPORT_RUNNING');
+      assert.deepEqual(body.activeTaskIds, ['busy-import-running']);
+    } finally {
+      reporter.finish('failed', { error: '验证收尾：本用例造的在跑任务' });
+    }
+  });
+
+  it('常规导入（/api/import/run 无 onlyRelPaths）同样被闸门拦住 → 409（评审 P2：闸门统一到 createJob 前）', async () => {
+    const uploadId = '55555555-5555-4555-8555-555555555555';
+    const dir = path.join(uploadsRoot, uploadId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.scope'), SCOPE, 'utf8');
+    const reporter = createTaskReporter(loadConfig(), { id: 'busy-for-plain-run', source: 'web', operation: 'import', scope: SCOPE });
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    try {
+      const res = await fetch(`${handle!.base}/api/import/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: SCOPE, uploadId }),
+      });
+      assert.equal(res.status, 409);
+      const body = await res.json() as { code?: string };
+      assert.equal(body.code, 'INCOMPLETE_IMPORT_RUNNING');
+    } finally {
+      reporter.finish('failed', { error: '验证收尾：本用例造的在跑任务' });
+    }
+  });
+
+  it('导入页子集重试（/api/import/run + onlyRelPaths）同样被并发闸门拦住 → 409（两入口判据一致）', async () => {
+    const uploadId = '33333333-3333-4333-8333-333333333333';
+    const dir = path.join(uploadsRoot, uploadId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.scope'), SCOPE, 'utf8');
+    const reporter = createTaskReporter(loadConfig(), { id: 'busy-for-run', source: 'web', operation: 'import', scope: SCOPE });
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    try {
+      const res = await fetch(`${handle!.base}/api/import/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: SCOPE, uploadId, onlyRelPaths: ['a.md'] }),
+      });
+      assert.equal(res.status, 409);
+      const body = await res.json() as { code?: string; activeTaskIds?: string[] };
+      assert.equal(body.code, 'INCOMPLETE_IMPORT_RUNNING');
+      assert.deepEqual(body.activeTaskIds, ['busy-for-run']);
+    } finally {
+      reporter.finish('failed', { error: '验证收尾：本用例造的在跑任务' });
+    }
   });
 
   it('upload 来源但批次未传完 → 409（与 /api/import/run 同口径，半上传目录不得重试）', async () => {

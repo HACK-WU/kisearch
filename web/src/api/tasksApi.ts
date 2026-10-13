@@ -90,6 +90,19 @@ export function scopeImportRunning(tasks: TaskRecord[] | undefined, scope: strin
   return tasks.find((t) => t.scope === scope && t.operation === 'import' && active.has(t.state)) ?? null;
 }
 
+/**
+ * 同 scope 正在跑的导入任务数（`queued` / `running`）—— 任务详情「重试未完成」的可用性判据
+ * （2026-10-13 用户反馈：连点两次重试各起一个 job，重复处理同一批未完成文件）。
+ *
+ * ★ 刻意**不含** `unknown`（心跳过期）：它可能是死任务，计入会让重试入口在 1h TTL 内彻底
+ * 不可用。与后端 409 闸门（`INCOMPLETE_IMPORT_RUNNING`）**同口径**（同：queued + running）。
+ */
+export function activeImportCount(tasks: TaskRecord[] | undefined, scope: string): number {
+  if (!tasks) return 0;
+  return tasks.filter((task) => task.scope === scope && task.operation === 'import'
+    && (task.state === 'queued' || task.state === 'running')).length;
+}
+
 export function getTask(id: string): Promise<{ ok: boolean; task: TaskRecord }> {
   return request(`/api/tasks/${encodeURIComponent(id)}`);
 }

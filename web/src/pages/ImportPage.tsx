@@ -5,9 +5,10 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
+import { getTasks, activeImportCount } from '@/api/tasksApi';
 import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
@@ -1309,6 +1310,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           : '输入有误';
   const retryUploadPlan = uploadPlanRef.current;
   const completedScope = job?.scope || uploadPlanRef.current?.scope || scope;
+  /**
+   * 该 scope 是否已有导入在跑 —— 「重试未完成」的并发闸门判据（2026-10-13 用户反馈：
+   * 连点两次各起一个 job，重复处理同一批文件）。与任务页共用 `['tasks']` 缓存；
+   * 判据函数 `activeImportCount` 与服务端 409 同口径（只算 `queued` / `running`）。
+   */
+  const tasksQuery = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => getTasks(200),
+    staleTime: 5_000,
+    // 定期刷新：该判据决定「重试未完成」按钮是否可点，快照过期会让禁用态与后端 409 脱节
+    // （2026-10-13 评审 P2）。只在有 job 结果时轮询（无 job 就没有重试按钮，判据无用）；
+    // 后台标签页不轮询（react-query 默认）。
+    refetchInterval: job ? 5_000 : false,
+    retry: 1,
+  });
+  const scopeBusyImports = activeImportCount(tasksQuery.data?.tasks, completedScope || scope);
 
   /**
    * R2（REQ-20261009-001）：「重试未完成 N 篇」。
@@ -1325,6 +1342,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const retryRef = useRef(false);
   const startRetry = async (): Promise<void> => {
     if (retryRef.current || retrying || phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    // 并发闸门（与服务端 409 同口径）：该 scope 已有导入在跑时不再排一个重复 job
+    if (scopeBusyImports > 0) {
+      setRetryError(`该知识库已有导入任务在跑（${scopeBusyImports} 个）：请等它完成后再重试未完成`);
+      return;
+    }
     const plan = uploadPlanRef.current;
     // 刷新/重进页面后 plan 已不在内存，但凭据仍指向同一 uploadId（R2 部分成功时特意保留）
     const uploadId = plan?.uploadId ?? readImportCredential()?.uploadId;
@@ -1360,6 +1382,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       });
       if (!response.ok || !response.jobId) throw new Error(response.error ?? '重试启动失败');
       trackImport(response.jobId, retryScope, uploadId);
+      // 立即让并发判据看到这个新任务（否则按钮的禁用态要等到下一次轮询才更新）
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
     } catch (retryFailure) {
       setRetryError(`重试未完成失败：${retryFailure instanceof Error ? retryFailure.message : String(retryFailure)}`);
     } finally {
@@ -1990,8 +2014,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                     type="button"
                     className="ki-btn ki-btn--primary ki-btn--small"
                     onClick={() => void startRetry()}
-                    disabled={retrying}
+                    disabled={retrying || scopeBusyImports > 0}
                   >{retrying ? '重试启动中…' : `重试未完成 ${incompleteItems.length} 篇`}</button>
+                  {scopeBusyImports > 0 ? (
+                    <span className="ki-cell-sub">
+                      该知识库已有导入任务在跑（{scopeBusyImports} 个排队 / 进行中）：完成后再重试，避免重复处理同一批文件。
+                    </span>
+                  ) : null}
                 </div>
                 {retryError && <p className="ki-field-error" role="alert" style={{ marginTop: 6 }}>{retryError}</p>}
               </div>

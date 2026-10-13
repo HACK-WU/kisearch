@@ -1512,6 +1512,8 @@ async function handleImportRun(
     return;
   }
   const isSubsetRetry = retryOnly.length > 0;
+  // 并发闸门不在此处：统一放到 `createJob` 之前（幂等复用分支之后），
+  // 让常规导入与子集重试走**同一判据**（评审 P2：此前只盖住子集重试，另两个入口存在缝）。
   // R2 复审 P1：子集重试时请求未显式给出的参数回落到该 scope 的未完成清单（上次导入的实际
   // 口径），避免「刷新页面后重试」用前端表单默认值改写 group/切分/标签/向量化口径
   // P2（review）：清单「损坏」与「没有清单」必须区分——损坏时 fail-loud，
@@ -1542,6 +1544,13 @@ async function handleImportRun(
     return;
   }
 
+  // ── 并发闸门（2026-10-13 用户反馈：重复点重试各起一个 job）──────────────
+  // ★ 位置在「同一 uploadId 幂等复用 jobId」分支之后：复用是幂等读，不该被拦。
+  // 覆盖常规导入与子集重试两条路径（CLI 来源的在跑任务也计入，避免排队后撞 import.lock 白失败）。
+  // ⚠️ 未覆盖 `/api/import/upload` 的 finalize 分支——前端已不再走该路径（上传一律不带 finalize，
+  //    导入改由「预检 → 确认 → run」显式启动）；若将来恢复该用法需同样调用本闸门。
+  if (rejectIfImportBusy(res, requestConfig, scope)) return;
+
   const job = createJob(scope, 'import', requestConfig);
   session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
   try { writeUploadSession(sourceDir, session); } catch (error) {
@@ -1569,6 +1578,58 @@ async function handleImportRun(
   }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
+}
+
+// ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────
+//
+// 现象：连点两次重试各起一个 job（第一次 running、第二次 queued）——重复处理同一批未完成文件。
+// 根因是"能否重试"只看清单，而重试 job 结束前清单不会变（`taskId` 仍是旧任务）。
+// 判据与任务中心列表同源（任务台账）；★ `unknown`（心跳过期）刻意**不计入**——它可能是死任务，
+// 计入会让用户在 1h TTL 内彻底无法重试。
+
+/**
+ * 同 scope 正在跑的导入任务（`queued` / `running`）。
+ * 入口共用：`/import/run`（子集重试与常规导入，统一在 `createJob` 之前判）与
+ * `/import/retry-incomplete`（判据不得漂移）。
+ * ★ 台账不可读时**抛错**（由 `rejectIfImportBusy` 转 503），不静默放行——否则闸门形同虚设。
+ */
+function activeImportTasks(config: KiConfig, scope: string): ReturnType<typeof listTaskRecords> {
+  return listTaskRecords(config).filter((task) => task.scope === scope
+    && task.operation === 'import'
+    && (task.state === 'queued' || task.state === 'running'));
+}
+
+/** 409：已有导入在跑（入口共用错误码与文案，前端按 `code` 判定） */
+function sendImportBusy(res: http.ServerResponse, active: ReturnType<typeof listTaskRecords>): void {
+  sendJson(res, 409, {
+    ok: false,
+    code: 'INCOMPLETE_IMPORT_RUNNING',
+    error: `该知识库已有导入任务在跑（${active.length} 个排队 / 进行中）：请等它完成后再继续`,
+    activeTaskIds: active.map((task) => task.id),
+  });
+}
+
+/**
+ * 导入入口的统一并发闸门：**true = 已响应**（调用方直接 return）。
+ * - 台账不可读 → 503 `TASK_REGISTRY_UNAVAILABLE`（与 `/api/tasks` 的 fail-loud 口径一致；
+ *   静默放行会让闸门形同虚设，而这里防的正是"重复处理上千篇文件"）；
+ * - 已有导入在跑 → 409（见 `sendImportBusy`）。
+ */
+function rejectIfImportBusy(res: http.ServerResponse, config: KiConfig, scope: string): boolean {
+  let active: ReturnType<typeof listTaskRecords>;
+  try {
+    active = activeImportTasks(config, scope);
+  } catch (error) {
+    sendJson(res, 503, {
+      ok: false,
+      code: 'TASK_REGISTRY_UNAVAILABLE',
+      error: `任务状态暂不可读，无法确认是否已有导入在跑：${(error as Error).message}`,
+    });
+    return true;
+  }
+  if (active.length === 0) return false;
+  sendImportBusy(res, active);
+  return true;
 }
 
 // ─── GET /api/import/incomplete（2026-10-13）─────────────
@@ -1694,6 +1755,9 @@ async function handleImportRetryIncomplete(
       return;
     }
   }
+
+  // ── 并发闸门（与 /import/run 共用同一实现、错误码与文案）──
+  if (rejectIfImportBusy(res, requestConfig, scope)) return;
 
   // 条数上限与 /api/import/run 共用同一常量（两入口判据不得漂移）
   if (record.items.length > MAX_ONLY_REL_PATHS) {

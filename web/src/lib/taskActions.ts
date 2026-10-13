@@ -47,7 +47,9 @@ export type TaskActionKind =
   /** CLI 命令式出路（Web 端无执行入口时给出可复制命令） */
   | 'cli-command'
   /** 重新检查（unknown 先判定再行动） */
-  | 'recheck';
+  | 'recheck'
+  /** 停止页面导入的任务（2026-10-13 用户要求：任务中心对 web 来源的 queued/running 导入给停止入口） */
+  | 'stop-import';
 
 export interface TaskAction {
   kind: TaskActionKind;
@@ -98,6 +100,13 @@ export function taskDetailActions(input: {
   incomplete?: ImportIncompleteShape | null;
   incompleteLoading?: boolean;
   incompleteError?: boolean;
+  /**
+   * 同 scope 正在跑的导入任务数（`queued` / `running`，与后端闸门同口径）。
+   * ★ 2026-10-13 用户反馈：连点两次重试各起一个 job（第一次 running、第二次 queued）。
+   * 根因是"能不能重试"此前只看清单——而重试 job 结束前清单不会变（`taskId` 仍是旧任务），
+   * 按钮因此恒有效。正确判据是**该知识库此刻有没有导入在跑**（服务端状态，跨刷新/跨标签页成立）。
+   */
+  runningImports?: number;
 }): TaskActionsResult {
   const { task } = input;
 
@@ -105,6 +114,23 @@ export function taskDetailActions(input: {
   if (task.state === 'succeeded') return { actions: [] };
 
   if (task.state === 'queued' || task.state === 'running') {
+    // 页面导入（source='web'）可从任务中心停止：`/api/import/cancel` 只认 HTTP 入口启动的
+    // job（2026-10-13 用户要求）。CLI / daemon 发起的任务在另一条通道，取消要在终端中断——这里
+    // 如实指路而不是给一个点了没用的按钮。
+    if (task.operation === 'import' && task.source === 'web') {
+      return {
+        actions: [{ kind: 'stop-import', label: '停止任务' }],
+        note: '停止 = 当前 embedding / 向量批次完成后停止写入；已完成文档保留，未完成部分进入未完成清单（可再重试）。',
+        noteTone: 'info',
+      };
+    }
+    if (task.operation === 'import') {
+      return {
+        actions: [],
+        note: '任务进行中（由 CLI / 后台服务发起）：如需停止，请在启动它的终端中断。',
+        noteTone: 'info',
+      };
+    }
     return { actions: [], note: '任务进行中：结束后再决定是否需要重试。', noteTone: 'info' };
   }
 
@@ -133,6 +159,15 @@ export function taskDetailActions(input: {
       }
       if (input.incompleteLoading) {
         return { actions: [], note: '正在检查未完成清单…', noteTone: 'info' };
+      }
+      // ★ 已有导入在跑 → 不接受重复重试（与服务端 409 闸门同口径；判据来自任务列表，
+      //   跨刷新 / 跨标签页成立——用户反馈的"连点两次各起一个 job"正是缺了这道判据）。
+      if ((input.runningImports ?? 0) > 0) {
+        return {
+          actions: [{ kind: 'recheck', label: '刷新任务状态' }],
+          note: `该知识库已有导入任务在跑（${input.runningImports} 个排队 / 进行中）：等它完成后可按清单重试，避免重复处理同一批文件。`,
+          noteTone: 'info',
+        };
       }
       const incomplete = input.incomplete;
       /**
