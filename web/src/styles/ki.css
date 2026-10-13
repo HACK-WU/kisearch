@@ -1127,7 +1127,7 @@ a:hover { text-decoration: underline; }
   .ki-search-bar .ki-btn--primary { flex: 1 1 auto; }
   .ki-search-bar .ki-btn--secondary, .ki-search-mode { flex: none; }
 }
-/* 任务页：详情底部前往导入 */
+/* 任务页：详情底部前往导入（2026-10-13 起改为按状态的动作用区，见 TasksPage::TaskActions） */
 .ki-task-goto { margin-top: 12px; }
 /* 浏览页移动端：阅读区覆盖层 + 返回目录（对齐 demo <960px 形态） */
 .ki-reader-back { display: none; }
@@ -2306,6 +2306,21 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-recovery { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-task-id { display: block; margin-top: 14px; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+/* 任务详情动作区（2026-10-13）：按 `state × source × 清单可重试性` 渲染出路
+   （重试未完成 / 整批重导 / CLI 命令 / 重新检查），替代此前恒定显示的「前往导入页处理」。 */
+.ki-task-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.ki-task-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ki-task-action__hint { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-task-action__cmd {
+  flex: 1 1 auto; min-width: 0; padding: 6px 10px; border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-muted);
+  font-size: var(--ki-font-size-sm); overflow-wrap: anywhere;
+}
+.ki-task-action-note { margin: 0; padding: 8px 10px; border-radius: var(--ki-radius-sm); font-size: var(--ki-font-size-sm); overflow-wrap: anywhere; }
+.ki-task-action-note--info { color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); }
+.ki-task-action-note--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-task-action-note--error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+.ki-task-action-note--ok { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
 .ki-task-detail__icon { display: inline-flex; color: var(--ki-color-text-subtle); }
 /* 任务进度条（列表行 + 详情，v2 §7-4） */
 .ki-task-bar { height: 4px; margin-top: 4px; border-radius: var(--ki-radius-track); background: var(--ki-color-bg-muted); overflow: hidden; }

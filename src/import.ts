@@ -169,6 +169,8 @@ program
           try {
             result = await handleDirectImport({
               ...importParams,
+              // 任务归属：写进未完成清单，供任务中心按任务校验重试归属（CLI 直连路径）
+              jobId: daemonJobId,
               onInterrupt: () => task.finish('cancelled'),
               onProgress: (progress) => task.progress(progress),
             });

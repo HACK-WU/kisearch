@@ -99,7 +99,7 @@ describe('R2：只重试未完成子集', () => {
       // ── 第一次：部分成功 ──
       vectorizeMode = 'stop';
       vectorizePathCalls = [];
-      const first = await handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true });
+      const first = await handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true, jobId: 'task-retry-1' });
       assert.equal(first.partial, true);
       assert.deepEqual(first.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0 });
       assert.deepEqual(first.incomplete.map((i) => i.path).sort(), ['b.md', 'c.md']);
@@ -110,6 +110,7 @@ describe('R2：只重试未完成子集', () => {
       assert.deepEqual(record!.items.map((i) => i.path).sort(), ['b.md', 'c.md']);
       assert.equal(record!.params.vector, true, '清单记录原批次参数（供重试沿用）');
       assert.equal(record!.sourceDir, src);
+      assert.equal(record!.taskId, 'task-retry-1', '清单必须记录归属任务 ID（任务中心据此校验重试归属）');
       const completedIdBefore = relationsOf(scope, 'G').find((r) => r.text === 'a')?.memoryIds?.[0];
       assert.ok(completedIdBefore, '已完成文件必须有向量 id');
 

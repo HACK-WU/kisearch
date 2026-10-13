@@ -118,3 +118,61 @@ export function getVectorDimensionStatus(scope: string): Promise<VectorDimension
 export function refreshVectorDimensionStatus(scope: string): Promise<VectorDimensionStatusResponse> {
   return request('/api/vector/status/refresh', { method: 'POST', body: JSON.stringify({ scope }) });
 }
+
+/**
+ * 未完成清单摘要（2026-10-13）——任务详情「重试未完成 N 篇」入口的只读判据。
+ *
+ * 后端只读清单文件 + 源目录存在性（走 `read` 通道，导入期间不被排队）；
+ * ★ 响应**不含绝对路径**（只有 `sourceKind` / `sourceExists` / 计数）。
+ */
+export interface ImportIncompleteStatus {
+  ok: boolean;
+  scope: string;
+  /** 主清单存在且可解析 */
+  hasRecord: boolean;
+  /** 清单文件存在但损坏（≠ 没有待办） */
+  corrupted: boolean;
+  /** 旧清单（写入时还没有 taskId）⇒ 归属未知，放行但需提示 */
+  legacy: boolean;
+  taskId?: string;
+  itemCount: number;
+  createdAt?: string;
+  cancelled?: boolean;
+  sourceKind?: 'upload' | 'external';
+  sourceExists?: boolean;
+  /** 是否可以按本清单重试——UI 只认这一个判据 */
+  canRetry: boolean;
+  /** canRetry=false 时的原因（可直接展示） */
+  reason?: string;
+  previous?: { itemCount: number; sourceKind: 'upload' | 'external'; sourceExists: boolean } | null;
+}
+
+export function getImportIncomplete(scope: string): Promise<ImportIncompleteStatus> {
+  return request<ImportIncompleteStatus>(`/api/import/incomplete?scope=${encodeURIComponent(scope)}`);
+}
+
+/** 重试未完成的响应；失败分支（400/409）经 `request` 抛出，`error.body` 带 `code` 与原因 */
+export interface RetryIncompleteResponse {
+  ok: boolean;
+  jobId?: string;
+  scope?: string;
+  itemCount?: number;
+  sourceKind?: 'upload' | 'external';
+  /** 清单无 taskId 时后端回带（归属未知，已按最新清单重试） */
+  legacy?: boolean;
+  /** 失败分支 */
+  code?: string;
+  error?: string;
+  currentTaskId?: string;
+}
+
+/**
+ * 按 scope 清单重试未完成文件（服务端解析源目录，**不需要浏览器凭据**）。
+ * @param taskId 触发重试的任务 ID：与清单归属不一致时后端 409（清单已被后续导入覆盖）
+ */
+export function retryImportIncomplete(scope: string, taskId?: string): Promise<RetryIncompleteResponse> {
+  return request<RetryIncompleteResponse>('/api/import/retry-incomplete', {
+    method: 'POST',
+    body: JSON.stringify({ scope, ...(taskId ? { taskId } : {}) }),
+  });
+}

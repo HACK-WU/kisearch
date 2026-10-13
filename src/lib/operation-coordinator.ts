@@ -52,6 +52,9 @@ const READ_OPERATIONS = new Set<string>([
   'doc-get-api',
   'doc-edit-read',
   'asset-read-api',
+  // 任务中心「重试未完成」入口的只读判据（2026-10-13）：只读清单文件 + 源目录存在性，
+  // 不打开引擎、不写元数据 ⇒ 登记为 read（否则导入期间任务详情查询会被排到队尾）。
+  'import-incomplete-api',
   // ⚠️ 刻意**不登记** `doc-list`（CLI `ki doc list`）：它是向量层管理面扫描
   //（executeDocList 打开引擎列举向量文档），不是"纯元数据读"，且其结果在导入期间
   // 本就是中间态 —— 保持 write 串行更稳（浏览页用的是 `doc-list-api`，不受影响）。

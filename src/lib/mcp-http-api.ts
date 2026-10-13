@@ -48,7 +48,7 @@ import {
   type IndexReadiness,
 } from './index-maintenance.js';
 import type { ImportConflictMode } from './import-conflict.js';
-import { readImportIncompleteStatus } from './import-retry.js';
+import { readImportIncompleteStatus, summarizeImportIncomplete, uploadIdFromSourceDir } from './import-retry.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -106,6 +106,12 @@ const UPLOAD_SCOPE_FILE = '.scope';
 const UPLOAD_SESSION_FILE = '.upload-session.json';
 const UPLOAD_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * 子集重试（`onlyRelPaths`）的条数上限 —— `/api/import/run` 与 `/api/import/retry-incomplete`
+ * **共用同一真相**（2026-10-13 评审：两入口判据不得漂移）。超限 fail-loud：
+ * 该数组会整批进入净化/去重，且 `retryFilter.missing` 会全量物化后随 job 结果回传。
+ */
+const MAX_ONLY_REL_PATHS = 50_000;
 
 interface UploadSession {
   scope: string;
@@ -453,7 +459,7 @@ export async function handleApiRequest(
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
   if (authScopes !== null && req.method === 'GET'
-    && (p === '/tags' || p === '/doc/list' || p === '/doc/get' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/vector/status')) {
+    && (p === '/tags' || p === '/doc/list' || p === '/doc/get' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/import/incomplete' || p === '/vector/status')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -656,6 +662,19 @@ export async function handleApiRequest(
     if (p === '/import/preflight' && req.method === 'POST') return void handleImportPreflight(req, res, authScopes);
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
     if (p === '/import/cancel' && req.method === 'POST') return void (await handleImportCancel(req, res, authScopes));
+    if (p === '/import/incomplete' && req.method === 'GET') {
+      // 任务中心「重试未完成」入口的只读判据（2026-10-13）：只读清单文件 + 源目录存在性，
+      // 不打开引擎、不写元数据 ⇒ 走 `read` 通道（导入/向量化期间不被排队，与 /doc/get 同口径）。
+      const incompleteScope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      await getSharedOperationCoordinator().submit(
+        { operation: 'import-incomplete-api', params: { scope: incompleteScope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleImportIncomplete(res, incompleteScope)),
+        [incompleteScope],
+        'read',
+      );
+      return;
+    }
+    if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
     if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
@@ -1480,7 +1499,7 @@ async function handleImportRun(
   // R2：只重试未完成子集时**不复用**上次 job（它已终态）——同一 uploadId 开新 job；
   // 常规路径保持原语义（幂等返回既有 jobId / 任务失效提示）
   // P2（review）：条数上限——避免超大数组进入过滤/去重与 JSON 响应
-  const MAX_ONLY_REL_PATHS = 50000;
+  // （常量已提升到模块级 `MAX_ONLY_REL_PATHS`，与 /import/retry-incomplete 共用同一真相）
   if (Array.isArray(body.onlyRelPaths) && body.onlyRelPaths.length > MAX_ONLY_REL_PATHS) {
     sendJson(res, 400, { ok: false, error: `onlyRelPaths 条数超限（${body.onlyRelPaths.length} > ${MAX_ONLY_REL_PATHS}）` });
     return;
@@ -1552,6 +1571,172 @@ async function handleImportRun(
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
 }
 
+// ─── GET /api/import/incomplete（2026-10-13）─────────────
+
+/**
+ * 未完成清单摘要 —— 任务中心「重试未完成 N 篇」入口的**只读判据**。
+ *
+ * 为什么要它：重试此前只挂在导入页当前会话（浏览器凭据 uploadId + 内存 job 结果），
+ * 任务中心对失败 / 取消 / 中断任务没有任何出路。本接口把服务端的 scope 级清单
+ * （`.ki-import-incomplete.json`，跨进程 / 跨会话存活）暴露成前端可判定的状态。
+ *
+ * ★ 只读：不打开引擎、不写任何文件（调用方走 `read` 通道）。
+ * ★ 不回显绝对路径：只给 `sourceKind` / `sourceExists` / 计数（沿用路径脱敏惯例）。
+ */
+function handleImportIncomplete(res: http.ServerResponse, scope: string): void {
+  sendJson(res, 200, { ok: true, scope, ...summarizeImportIncomplete(scope, { uploadsRoot: getUploadsRoot() }) });
+}
+
+// ─── POST /api/import/retry-incomplete（2026-10-13）─────
+
+/**
+ * 按 scope 清单重试未完成文件（任务中心「重试未完成 N 篇」）。
+ *
+ * 与 `/api/import/run` 的差别：**前端无需提供 uploadId** —— 源目录由服务端按清单解析：
+ *   - `upload` 来源（Web 上传暂存目录）：反解 uploadId 并校验与 scope 的绑定；
+ *   - `external` 来源（CLI `--source` 的目录）：存在性校验后直接起 job，与 CLI
+ *     `--retry-incomplete` 同语义。
+ * 参数一律回落清单记录的原批次口径（切分 / 向量化 / 标签 / 冲突策略），
+ * 不做前端表单默认值改写。
+ *
+ * ★ 归属校验：清单记录了写入它的任务 ID；请求带 `taskId` 且不一致 ⇒ 清单已被后续
+ *   导入覆盖，**409 fail-loud**（不得静默重试错对象）。旧清单（无该字段）放行，
+ *   响应 `legacy: true` 提示归属未知。
+ * ★ 并发：复用 `runImportJob`（coordinator 串行 + `handleDirectImport` 内的 scope 写锁），
+ *   不在此另造并发控制。
+ */
+async function handleImportRetryIncomplete(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as { scope?: string; taskId?: string } | undefined;
+  if (!body?.scope) {
+    sendJson(res, 400, { ok: false, error: '缺少 scope' });
+    return;
+  }
+  // scope 越权校验（body.scope 必填，与 /import/run 同口径）
+  if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
+    rejectScopeViolation(res, body.scope, '/import/retry-incomplete');
+    return;
+  }
+  const scope = resolveScope(requestConfig, body.scope);
+  const requestedTaskId = typeof body.taskId === 'string' && body.taskId.trim() ? body.taskId.trim() : undefined;
+
+  const status = readImportIncompleteStatus(scope);
+  if (status.corrupted) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INCOMPLETE_LIST_CORRUPTED',
+      error: '未完成清单损坏（.ki-import-incomplete.json 无法解析）：请删除该文件后重新导入',
+    });
+    return;
+  }
+  const record = status.record;
+  if (!record) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INCOMPLETE_LIST_MISSING',
+      error: '没有待重试的未完成清单（可能已全部导入完成）：请重新导入整批',
+    });
+    return;
+  }
+  if (record.items.length === 0) {
+    sendJson(res, 400, { ok: false, code: 'INCOMPLETE_LIST_EMPTY', error: '未完成清单为空，无需重试' });
+    return;
+  }
+  if (record.taskId && requestedTaskId && record.taskId !== requestedTaskId) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'INCOMPLETE_TASK_MISMATCH',
+      error: '这份未完成清单已被后续导入覆盖（不属于该任务）：请到最新的导入任务重试，或重新导入整批',
+      currentTaskId: record.taskId,
+    });
+    return;
+  }
+  const legacy = record.taskId === undefined;
+
+  const sourceDir = path.resolve(record.sourceDir);
+  const uploadId = uploadIdFromSourceDir(sourceDir, getUploadsRoot());
+  if (!fs.existsSync(sourceDir)) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INCOMPLETE_SOURCE_MISSING',
+      error: uploadId !== null
+        ? '上次导入的暂存目录已不存在（可能已被清理）：请重新上传后导入'
+        : '上次导入的源目录已不存在：请用当前源目录重新导入',
+    });
+    return;
+  }
+  // upload 来源：目录名必须是合法 uploadId，且与当前 scope 绑定一致（与 /import/run 同口径）
+  if (uploadId !== null) {
+    if (!UPLOAD_ID_RE.test(uploadId)) {
+      sendJson(res, 400, { ok: false, code: 'INCOMPLETE_SOURCE_INVALID', error: '暂存目录名不是合法 uploadId，无法重试' });
+      return;
+    }
+    if (!bindUploadScope(sourceDir, scope)) {
+      sendJson(res, 400, { ok: false, error: '未完成清单的源目录与当前 scope 不匹配' });
+      return;
+    }
+    // 批次完整性检查：与 /api/import/run 同口径（2026-10-13 评审 P2）——半上传目录不得起重试。
+    // ★ 刻意**不**复制 `UPLOAD_IDLE_TTL_MS` 门禁：任务中心的事后重试正是要跨会话可用
+    //  （清单本身是"还有哪些没导完"的权威来源），TTL 只用于约束"尚未开始导入的暂存目录"。
+    let session: UploadSession | null = null;
+    try {
+      session = readUploadSession(sourceDir);
+    } catch {
+      sendJson(res, 400, { ok: false, code: 'INCOMPLETE_SOURCE_INVALID', error: '上传任务元数据损坏：请重新上传后导入' });
+      return;
+    }
+    if (session?.batchCount !== undefined && (session.completedBatches?.length ?? 0) !== session.batchCount) {
+      sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入' });
+      return;
+    }
+  }
+
+  // 条数上限与 /api/import/run 共用同一常量（两入口判据不得漂移）
+  if (record.items.length > MAX_ONLY_REL_PATHS) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'INCOMPLETE_LIST_TOO_LARGE',
+      error: `未完成清单条数超限（${record.items.length} > ${MAX_ONLY_REL_PATHS}）：请重新导入整批`,
+    });
+    return;
+  }
+
+  const onlyRelPaths = record.items.map((item) => item.path).filter((item): item is string => Boolean(item));
+  if (onlyRelPaths.length === 0) {
+    sendJson(res, 400, { ok: false, code: 'INCOMPLETE_LIST_EMPTY', error: '未完成清单没有可用的文件路径' });
+    return;
+  }
+
+  const job = createJob(scope, 'import', requestConfig);
+  void runImportJob(job, {
+    scope,
+    sourceDir,
+    // 参数回落清单（上次导入的实际口径），与 CLI --retry-incomplete 同语义
+    group: record.params.group,
+    chunkSize: record.params.chunkSize,
+    chunkOverlap: record.params.chunkOverlap,
+    vector: record.params.vector,
+    tags: record.params.tags,
+    conflictMode: record.params.conflictMode as ImportConflictMode | undefined,
+    conflictSuffix: record.params.conflictSuffix,
+    onlyRelPaths,
+    budget: undefined,
+  }, requestConfig);
+
+  sendJson(res, 202, {
+    ok: true,
+    jobId: job.id,
+    scope,
+    itemCount: onlyRelPaths.length,
+    sourceKind: uploadId !== null ? 'upload' : 'external',
+    ...(legacy ? { legacy: true } : {}),
+  });
+}
+
 interface RunImportArgs {
   scope: string;
   sourceDir: string;
@@ -1588,6 +1773,8 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         conflictSuffix: args.conflictSuffix,
         onlyRelPaths: args.onlyRelPaths,
         budget: args.budget,
+        // 任务归属：写进未完成清单，供任务中心按任务校验重试归属（HTTP 路径）
+        jobId: job.id,
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };

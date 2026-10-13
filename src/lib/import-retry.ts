@@ -54,6 +54,13 @@ export interface ImportIncompleteRecord {
   stopReason?: { kind: string; code: string; phase: string; reason: string };
   /** 本轮是否因取消而停止 */
   cancelled?: boolean;
+  /**
+   * 写入本清单的任务 ID（2026-10-13）：供任务中心按任务校验归属——
+   * 清单是 scope 级单文件，后被导入覆盖后，旧任务详情再点"重试"必须能识别出
+   * 「清单已属于别的批次」（否则会静默按最新清单重试，重试错对象）。
+   * 可选：早于本字段写入的旧清单没有它 ⇒ 调用方按"归属未知"处理（放行 + 提示）。
+   */
+  taskId?: string;
 }
 
 export interface ImportIncompleteRead {
@@ -82,6 +89,19 @@ function readRecordFile(file: string): { record: ImportIncompleteRecord | null; 
   try {
     const parsed = readJson<ImportIncompleteRecord>(file);
     if (!parsed || !Array.isArray(parsed.items)) return { record: null, corrupted: true };
+    // 结构校验（2026-10-13 评审）：只判 `items` 是数组不够——缺 `sourceDir` / `params`
+    // 的清单若放行，下游（HTTP 摘要、按清单重试）会以 `path.resolve(undefined)` 之类的
+    // TypeError 收场，落到统一 catch 后只剩一串英文 Node 报错，用户拿不到可读结论。
+    // 这里把「结构不合格」并入 `corrupted`（与"文件不存在"仍然区分，fail-loud 不静默）。
+    if (typeof parsed.sourceDir !== 'string' || parsed.sourceDir.length === 0) {
+      return { record: null, corrupted: true };
+    }
+    if (!parsed.params || typeof parsed.params !== 'object' || Array.isArray(parsed.params)) {
+      return { record: null, corrupted: true };
+    }
+    if (parsed.items.some((item) => !item || typeof item !== 'object')) {
+      return { record: null, corrupted: true };
+    }
     return { record: parsed, corrupted: false };
   } catch {
     return { record: null, corrupted: true };
@@ -144,4 +164,149 @@ export function clearImportIncomplete(scope: string): void {
   } catch {
     /* ignore */
   }
+}
+
+// ─── 清单摘要与来源分类（2026-10-13：任务中心「重试未完成」入口）────────────────
+//
+// 背景：重试入口此前只存在于导入页当前会话（依赖浏览器凭据 uploadId + 内存 job 结果），
+// 任务中心（/tasks）对失败/取消/中断任务无任何出路。本段为「按清单重试」提供**只读判据**：
+// HTTP 层只输出类型与存在性，**绝不回显绝对路径**（沿用 task-registry 的脱敏惯例）。
+
+/**
+ * 清单源目录类型：
+ *   - `upload`：Web 上传暂存目录（`<uploadsRoot>/<uploadId>`）—— 重试直接复用其内容；
+ *   - `external`：外部 Wiki 目录（CLI `ki import --source` 的落点）—— 需存在性校验。
+ */
+export type ImportIncompleteSourceKind = 'upload' | 'external';
+
+/**
+ * 若 `sourceDir` 恰为 `uploadsRoot` 的**直接子目录**，返回其目录名（uploadId 候选）；否则 null。
+ * ★ 刻意不做 UUID 格式校验：那份规则（`UPLOAD_ID_RE`）属 HTTP 层单一真相，此处只做路径归属判定。
+ */
+export function uploadIdFromSourceDir(sourceDir: string, uploadsRoot: string): string | null {
+  const root = path.resolve(uploadsRoot);
+  const dir = path.resolve(sourceDir);
+  if (dir === root || !dir.startsWith(root + path.sep)) return null;
+  const rel = dir.slice(root.length + 1);
+  if (!rel || rel.includes(path.sep)) return null;
+  return rel;
+}
+
+/** 清单摘要（HTTP 层直接序列化；**不含任何绝对路径**） */
+export interface ImportIncompleteSummary {
+  /** 主清单存在且可解析 */
+  hasRecord: boolean;
+  /** 主清单文件存在但损坏（≠ 没有待办，必须与"无清单"区分） */
+  corrupted: boolean;
+  /** 旧清单：写入时还没有 taskId 字段 ⇒ 归属未知（放行重试，但调用方必须提示） */
+  legacy: boolean;
+  /** 归属任务 ID（清单写入时记录） */
+  taskId?: string;
+  /** 未完成文件数 */
+  itemCount: number;
+  createdAt?: string;
+  cancelled?: boolean;
+  stopReason?: ImportIncompleteRecord['stopReason'];
+  sourceKind?: ImportIncompleteSourceKind;
+  /** 源目录当前是否存在（源目录被删/移走后不可重试） */
+  sourceExists?: boolean;
+  /** 是否可以按本清单重试——**前端只认这一个判据** */
+  canRetry: boolean;
+  /** canRetry=false 时的原因（面向用户，可直接展示） */
+  reason?: string;
+  /** 跨源覆盖前的备份清单摘要（主清单缺失时给用户出路线索） */
+  previous?: { itemCount: number; sourceKind: ImportIncompleteSourceKind; sourceExists: boolean } | null;
+}
+
+function sourceKindOf(sourceDir: string, uploadsRoot: string): ImportIncompleteSourceKind {
+  return uploadIdFromSourceDir(sourceDir, uploadsRoot) ? 'upload' : 'external';
+}
+
+/**
+ * `stopReason.reason` 是引擎/网络报错原文（`error.message`），可能含本机绝对路径。
+ * HTTP 摘要在边界上做一次**脱敏 + 截断**（2026-10-13 评审 P2）——让"响应不含绝对路径"
+ * 由代码保证，而不是"当前恰好没有路径"；正则口径与 task-registry 的脱敏惯例一致。
+ */
+function redactStopReason(
+  stopReason: NonNullable<ImportIncompleteRecord['stopReason']>,
+): NonNullable<ImportIncompleteRecord['stopReason']> {
+  const redacted = stopReason.reason
+    .replace(/(^|[\s([{:：='"])(?:\/[^\s,;)}，。；'"]+|[A-Za-z]:\\[^\s,;)}，。；'"]+)/g, '$1[path]')
+    .slice(0, 200);
+  return { ...stopReason, reason: redacted };
+}
+
+/**
+ * 汇总某 scope 的未完成清单状态，供任务中心「重试未完成」入口判定。
+ * 只读（读清单文件 + `existsSync` 源目录），不产生任何写入。
+ */
+export function summarizeImportIncomplete(
+  scope: string,
+  options: { uploadsRoot: string },
+): ImportIncompleteSummary {
+  const status = readImportIncompleteStatus(scope);
+  const previous = status.previous
+    ? {
+      itemCount: status.previous.items.length,
+      sourceKind: sourceKindOf(status.previous.sourceDir, options.uploadsRoot),
+      sourceExists: fs.existsSync(path.resolve(status.previous.sourceDir)),
+    }
+    : null;
+
+  if (status.corrupted) {
+    return {
+      hasRecord: false,
+      corrupted: true,
+      legacy: false,
+      itemCount: 0,
+      canRetry: false,
+      reason: '未完成清单损坏（无法解析）：请删除 <scope>/.ki-import-incomplete.json 后重新导入',
+      previous,
+    };
+  }
+  const record = status.record;
+  if (!record) {
+    return {
+      hasRecord: false,
+      corrupted: false,
+      legacy: false,
+      itemCount: 0,
+      canRetry: false,
+      reason: previous
+        ? '本批没有待重试清单（上一批清单已被另一次导入覆盖，备份仍可人工处理）'
+        : '没有待重试的未完成清单（可能已全部导入完成）',
+      previous,
+    };
+  }
+
+  const sourceDir = path.resolve(record.sourceDir);
+  const sourceExists = fs.existsSync(sourceDir);
+  const sourceKind = sourceKindOf(record.sourceDir, options.uploadsRoot);
+  const base = {
+    hasRecord: true,
+    corrupted: false,
+    legacy: record.taskId === undefined,
+    ...(record.taskId !== undefined ? { taskId: record.taskId } : {}),
+    itemCount: record.items.length,
+    createdAt: record.createdAt,
+    ...(record.cancelled !== undefined ? { cancelled: record.cancelled } : {}),
+    ...(record.stopReason !== undefined ? { stopReason: redactStopReason(record.stopReason) } : {}),
+    sourceKind,
+    sourceExists,
+    previous,
+  };
+
+  if (record.items.length === 0) {
+    return { ...base, canRetry: false, reason: '未完成清单为空，无需重试' };
+  }
+  if (!sourceExists) {
+    return {
+      ...base,
+      canRetry: false,
+      reason: sourceKind === 'upload'
+        ? '上次导入的暂存目录已不存在（可能已被清理）：请重新上传后导入'
+        : '上次导入的源目录已不存在：请用当前源目录重新导入',
+    };
+  }
+  return { ...base, canRetry: true };
 }

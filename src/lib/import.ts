@@ -253,6 +253,12 @@ export interface HandleDirectImportArgs {
     failed?: number;
     cancelled?: number;
   }) => void;
+  /**
+   * 任务归属（2026-10-13）：本批导入对应的任务记录 ID（CLI daemonJobId / HTTP job.id /
+   * daemon dispatch 注入的 context.jobId）。仅用于写进未完成清单的 `taskId`，
+   * 供任务中心校验「这份清单是否属于该任务」；不传则不写该字段（旧调用不受影响）。
+   */
+  jobId?: string;
   /** daemon HTTP job 使用：在当前批次完成后安全中止，不强行打断 zvec/embedding 调用。 */
   abortSignal?: AbortSignal;
   /** 直连 CLI 在同步退出前落下取消任务终态。 */
@@ -1810,6 +1816,8 @@ async function handleDirectImportUnlocked(
       items: incompleteList,
       ...(stopReport ? { stopReason: stopReport } : {}),
       ...(cancelRequested ? { cancelled: true } : {}),
+      // 归属任务（2026-10-13）：任务中心据此校验"这份清单是否属于该任务"
+      ...(args.jobId ? { taskId: args.jobId } : {}),
     });
     if (!written) {
       logWarn('未完成清单未能落盘：本次未完成文件将无法通过 --retry-incomplete 找回，请检查 scope 目录权限与磁盘空间');

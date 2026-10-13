@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { getTask, getTasks, type TaskRecord, type TaskState, type TaskIndexReadiness } from '@/api/tasksApi';
+import {
+  getTask, getTasks, getImportIncomplete, retryImportIncomplete,
+  type TaskRecord, type TaskState, type TaskIndexReadiness, type ImportIncompleteStatus,
+} from '@/api/tasksApi';
+import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
 import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
@@ -103,7 +107,7 @@ function TaskProgressBar({ task, large = false }: { task: TaskRecord; large?: bo
 }
 
 function TaskDetail({ id }: { id: string }): JSX.Element {
-  const { data, isPending, error } = useQuery({
+  const { data, isPending, error, refetch } = useQuery({
     queryKey: ['task', id],
     queryFn: () => getTask(id),
     refetchInterval: (queryState) => {
@@ -147,10 +151,151 @@ function TaskDetail({ id }: { id: string }): JSX.Element {
         </>
       ) : null}
       <code className="ki-task-id">{id}</code>
-      <Link className="ki-btn ki-btn--secondary ki-btn--small ki-task-goto" to="/import">
-        前往导入页处理 →
-      </Link>
+      {task ? <TaskActions task={task} onRecheck={() => void refetch()} /> : null}
     </aside>
+  );
+}
+
+/**
+ * 任务详情动作区（2026-10-13）。
+ *
+ * 背景：详情此前只有**恒定一个**「前往导入页处理 →」——失败 / 取消 / 中断任务点过去大概率
+ * 空跑（导入页的重试入口依赖浏览器凭据与内存 job 结果，凭据在 failed / cancelled 时已被清，
+ * 刷新恢复路径同样清理）。现按 `state × source × 服务端清单可重试性` 渲染真实可达的出路，
+ * 判据与文案在 `lib/taskActions.ts`（纯函数、有单测）。
+ *
+ * ★ `unknown`（心跳丢失）刻意不给重试：进程可能仍在跑，重试会与其重复导入。
+ * ★ 重试由**服务端按清单执行**（不需要浏览器凭据）——成功后刷新任务列表即可看到新任务。
+ * ★ 动作区只读清单摘要（`read` 通道），导入/向量化期间不会被排队。
+ */
+function TaskActions({ task, onRecheck }: { task: TaskRecord; onRecheck: () => void }): JSX.Element | null {
+  const queryClient = useQueryClient();
+  const isImport = task.operation === 'import';
+  const recoverable = task.state === 'partial' || task.state === 'failed' || task.state === 'cancelled';
+  const incompleteQuery = useQuery({
+    queryKey: ['import-incomplete', task.scope],
+    queryFn: () => getImportIncomplete(task.scope),
+    // 只有导入类任务的非成功终态需要清单判据；success / running / unknown 都不查
+    enabled: isImport && recoverable,
+    staleTime: 5_000,
+    retry: false,
+  });
+  const [retrying, setRetrying] = useState(false);
+  /** 最近一次提交成功的 jobId（提示条长期保留；按钮解锁见 retryLocked） */
+  const [retryJobId, setRetryJobId] = useState<string | null>(null);
+  /**
+   * 按钮防重锁（2026-10-13 评审 P2）：提交成功后只锁 20s 而非永久禁用——
+   * 否则同一详情视图里再想重试（新 job 又 partial、清单又生成）只能刷新页面。
+   */
+  const [retryLocked, setRetryLocked] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<{ command: string; ok: boolean } | null>(null);
+
+  const model = taskDetailActions({
+    task: { id: task.id, scope: task.scope, operation: task.operation, state: task.state, source: task.source },
+    incomplete: incompleteQuery.data as ImportIncompleteStatus | undefined,
+    incompleteLoading: isImport && recoverable && incompleteQuery.isPending,
+    incompleteError: incompleteQuery.isError,
+  });
+
+  const startRetry = async (): Promise<void> => {
+    if (retrying || retryLocked) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const response = await retryImportIncomplete(task.scope, task.id);
+      if (!response.ok || !response.jobId) throw new Error(response.error ?? '重试启动失败');
+      setRetryJobId(response.jobId);
+      // 防误重复点击：锁 20s 后解锁（提示条保留）——否则同一视图内再也无法重试
+      setRetryLocked(true);
+      window.setTimeout(() => setRetryLocked(false), 20_000);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+        queryClient.invalidateQueries({ queryKey: ['import-incomplete', task.scope] }),
+      ]);
+    } catch (failure) {
+      // 400/409 的失败分支由 request 抛出：`body.error` 是后端给出的可读原因（fail-loud，不吞）
+      const body = (failure as { body?: { error?: string } }).body;
+      setRetryError(body?.error ?? (failure instanceof Error ? failure.message : '重试启动失败'));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const copyCommand = async (command: string): Promise<void> => {
+    let ok = true;
+    try {
+      await navigator.clipboard.writeText(command);
+    } catch {
+      // 剪贴板不可用（非 https / 权限拒绝）：命令文本本身可见可手选，明确告知而不假装成功
+      ok = false;
+    }
+    setCopyState({ command, ok });
+    window.setTimeout(() => setCopyState((cur) => (cur?.command === command ? null : cur)), 4000);
+  };
+
+  function renderAction(action: TaskAction): JSX.Element {
+    if (action.kind === 'retry-incomplete') {
+      return (
+        <div key={action.kind} className="ki-task-action">
+          <button
+            className="ki-btn ki-btn--primary ki-btn--small"
+            onClick={() => void startRetry()}
+            disabled={retrying || retryLocked}
+          >
+            {retrying ? '正在提交重试…' : retryLocked ? '已提交重试' : action.label}
+          </button>
+          {action.hint ? <span className="ki-task-action__hint">{action.hint}</span> : null}
+        </div>
+      );
+    }
+    if (action.kind === 'goto-import') {
+      return (
+        <div key={action.kind} className="ki-task-action">
+          <Link className={`ki-btn ki-btn--small ${action.primary ? 'ki-btn--primary' : 'ki-btn--secondary'}`} to="/import">
+            {action.label}
+          </Link>
+        </div>
+      );
+    }
+    if (action.kind === 'cli-command') {
+      const command = action.command ?? '';
+      return (
+        <div key={action.kind} className="ki-task-action">
+          {/* 命令用 scope、不含真实路径（沿用脱敏惯例），可直接复制到终端执行 */}
+          <code className="ki-task-action__cmd">{command}</code>
+          <button className="ki-btn ki-btn--secondary ki-btn--small" onClick={() => void copyCommand(command)}>
+            {copyState?.command === command && copyState.ok ? '已复制' : '复制命令'}
+          </button>
+          {copyState?.command === command && !copyState.ok ? (
+            <span className="ki-task-action__hint">复制失败：请手动选择命令文本</span>
+          ) : null}
+        </div>
+      );
+    }
+    return (
+      <div key={action.kind} className="ki-task-action">
+        <button className="ki-btn ki-btn--secondary ki-btn--small" onClick={onRecheck}>{action.label}</button>
+      </div>
+    );
+  }
+
+  const visible = model.actions.length > 0 || model.note !== undefined || retryError !== null || retryJobId !== null;
+  if (!visible) return null;
+
+  return (
+    <div className="ki-task-actions">
+      {retryJobId ? (
+        <p className="ki-task-action-note ki-task-action-note--ok">
+          已提交重试任务（{retryJobId.slice(0, 8)}…）：只处理未完成文件，可在上方任务列表查看进度。
+        </p>
+      ) : null}
+      {retryError ? <p className="ki-task-action-note ki-task-action-note--error">{retryError}</p> : null}
+      {model.note ? (
+        <p className={`ki-task-action-note ki-task-action-note--${model.noteTone ?? 'info'}`}>{model.note}</p>
+      ) : null}
+      {model.actions.map(renderAction)}
+    </div>
   );
 }
 
@@ -227,7 +372,9 @@ export function TasksPage(): JSX.Element {
             ))}
           </div>
         </section>
-        {selectedId ? <TaskDetail id={selectedId} /> : (
+        {/* ★ key 必须绑 id（2026-10-13 评审 P1）：切任务时 React 会复用同一实例，
+            否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。 */}
+        {selectedId ? <TaskDetail key={selectedId} id={selectedId} /> : (
           <aside className="ki-task-detail ki-task-detail--empty">
             <span className="ki-task-detail__icon">
               <Icon name="clock" />
