@@ -151,6 +151,8 @@ const CONFIG_SCHEMA: ConfigNode = {
             maxBufferedVectorBytes: { type: 'number', validate: positiveInt },
             globalBufferedVectorBytes: { type: 'number', validate: positiveInt },
             requestTimeoutMs: { type: 'number', validate: positiveInt },
+            // B 策略熔断（2026-10-12）：连续失败多少次 provider 调用后停止剩余批次
+            consecutiveFailureThreshold: { type: 'number', validate: positiveInt },
           },
         },
       },

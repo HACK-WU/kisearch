@@ -2015,11 +2015,14 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               <div className="ki-import-errors" role="alert">
                 <div className="ki-import-errors__title">具体错误（{importErrors.length}）</div>
                 <ul>
-                  {importErrors.map((item, index) => (
+                  {/* 与同页冲突列表同口径截断：个别批次失败（如坏文本逐条隔离）也能上千条，
+                      全量渲染既撑爆 DOM 也淹没真正要看的那几条。 */}
+                  {importErrors.slice(0, 10).map((item, index) => (
                     <li key={`${item.path ?? 'error'}-${index}`}>
                       {item.path ? `${item.path}：` : ''}{item.error ?? '未知错误'}
                     </li>
                   ))}
+                  {importErrors.length > 10 && <li>…另有 {importErrors.length - 10} 条</li>}
                 </ul>
               </div>
             )}

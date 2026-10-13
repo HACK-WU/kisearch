@@ -177,6 +177,8 @@ async function checkEmbedding(
       model: emb.model,
       dimension: emb.dimension,
       apiKey: effectiveApiKey,
+      // 错误文案跟随配置的 provider 名（SiliconFlowProvider 只是实现名，厂商由 baseURL 决定）
+      providerLabel: emb.provider,
     });
   } catch (err) {
     // 构造期错误（EmbeddingConfigError）：apiKey / baseURL 非法
@@ -296,6 +298,7 @@ async function checkEmbeddingBatchSize(
       model: emb.model,
       dimension: emb.dimension,
       apiKey: emb.apiKey,
+      providerLabel: emb.provider,
     });
   } catch (err) {
     return { name, status: failureStatus, detail: `无法构造 provider，跳过批大小探测：${(err as Error).message}` };

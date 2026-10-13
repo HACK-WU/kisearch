@@ -37,6 +37,13 @@ export interface EmbeddingSchedulerConfig {
    * 故单批最坏耗时 ≈ 本值 ×(重试次数 + 1) + 退避；长文本（wiki 全文）可适当调大。
    */
   requestTimeoutMs: number;
+  /**
+   * 熔断阈值（B 策略，2026-10-12 用户拍板）：**连续**这么多次 provider 调用失败后，
+   * 才停止剩余批次。仅对「服务商暂时不可用」（timeout / 网络错 / 429 / 5xx）计容忍额度；
+   * 认证 / 维度 / 配置 / 持久化类错误重试无意义，**首次即停**（不受本阈值保护）。
+   * 成功一次即清零。`1` = 退回"一次失败即停"的旧行为。
+   */
+  consecutiveFailureThreshold: number;
 }
 
 /**
@@ -46,6 +53,9 @@ export interface EmbeddingSchedulerConfig {
  *   - maxConcurrency / maxGlobalConcurrency 25：实测 20 并发即可跑完 rebuild（23/23 批、0 失败批），
  *     25 为同量级上限；若 provider 出现 429/超时，优先下调本值。
  *   - maxPrefetchBatches 必须 ≥ maxConcurrency，否则实际并发会被它静默压低（workerCount 取 min）。
+ *   - consecutiveFailureThreshold 3：服务商偶发超时（provider 内部已重试 4 次）不应终止整库；
+ *     连续 3 个逻辑批都失败才判定"服务商不可用"。取值依据：默认并发 25 时单批 200 条
+ *     会同时发出 8 个请求，真挂会立刻累加到 3；而单点抖动通常伴随成功请求清零计数。
  */
 export const DEFAULT_EMBEDDING_SCHEDULER: EmbeddingSchedulerConfig = {
   batchSize: 16,
@@ -55,6 +65,7 @@ export const DEFAULT_EMBEDDING_SCHEDULER: EmbeddingSchedulerConfig = {
   maxBufferedVectorBytes: 64 * 1024 * 1024,
   globalBufferedVectorBytes: 128 * 1024 * 1024,
   requestTimeoutMs: 60_000,
+  consecutiveFailureThreshold: 3,
 };
 
 /** 单请求超时上限：再大就不是调优而是配置事故——一次失败重试即十几分钟，且与重试次数相乘。 */
@@ -94,6 +105,13 @@ export function normalizeEmbeddingScheduler(
   }
   if (merged.batchSize > 1000) {
     throw new Error(`embedding.scheduler.batchSize 不能大于 1000（当前 batchSize=${merged.batchSize}）`);
+  }
+  // 熔断阈值是"宽容度"，但配到极大 = 事实上的"永不熔断"（provider 全挂仍持续发无效请求），属配置事故。
+  if (merged.consecutiveFailureThreshold > 100) {
+    throw new Error(
+      `embedding.scheduler.consecutiveFailureThreshold 不能大于 100（当前 ${merged.consecutiveFailureThreshold}；`
+      + '该值 = 连续多少次 provider 调用失败后停止剩余批次，配得过大等于不熔断；默认 3，通常 2~10 足够）',
+    );
   }
   if (merged.requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS) {
     throw new Error(
@@ -505,6 +523,8 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
     let nextBatch = 0;
     let fatalError: Error | undefined;
     let consecutiveParameterFailures = 0;
+    /** 连续 provider 调用失败计数（成功一次清零；达 consecutiveFailureThreshold 触发熔断） */
+    let consecutiveProviderFailures = 0;
     const workerCount = Math.min(this.config.maxConcurrency, this.config.maxPrefetchBatches, Math.max(1, batches.length));
 
     const markNotProcessed = (): void => {
@@ -613,6 +633,8 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
                 }
                 for (let j = 0; j < slice.length; j++) collected[offset + j] = batchVectors[requestIndexForItem[j]];
                 consecutiveParameterFailures = 0;
+                // 一次成功即清零：熔断只认「连续」失败，不被历史抖动累计触发。
+                consecutiveProviderFailures = 0;
                 offset += size;
               } catch (err) {
                 const batchError = err instanceof Error ? err : new Error(String(err));
@@ -681,11 +703,26 @@ export class EmbeddingSchedulerRuntime implements EmbeddingScheduler {
             if (isolatedAny) itemErrors = collectedErrors;
           } catch (err) {
             providerError = err instanceof Error ? err : new Error(String(err));
-            // Provider retry policy is exhausted: stop allocating work immediately.
-            // Other batches already in flight are drained and their writes are retained.
-            if (!fatalError) {
+            // provider 重试策略耗尽后的处置分两类（B 策略熔断，2026-10-12 用户拍板）：
+            //   a) 「服务商暂时不可用」（timeout / 网络错 / 429 / 5xx）：容忍偶发 —— 连续达到
+            //      consecutiveFailureThreshold 次才停止剩余批次（成功一次即清零，见上方）；
+            //   b) 认证 / 维度 / 配置 / 持久化类错误：重试无意义，首次即停（不受阈值保护）。
+            // 未达阈值时该批仍按「失败批」记账（entries 进 failed、不设 stopReason），
+            // 已成功批次与在飞批次的写入照常保留。
+            const stop = classifyVectorizationStop(providerError, 'embedding');
+            const tolerable = stop.kind === 'provider-unavailable';
+            consecutiveProviderFailures = tolerable
+              ? consecutiveProviderFailures + 1
+              : this.config.consecutiveFailureThreshold;
+            if (consecutiveProviderFailures >= this.config.consecutiveFailureThreshold && !fatalError) {
               fatalError = providerError;
-              result.stopReason = classifyVectorizationStop(providerError, 'embedding');
+              result.stopReason = tolerable && consecutiveProviderFailures > 1
+                ? {
+                    ...stop,
+                    reason: `${stop.reason}（连续 ${consecutiveProviderFailures} 次 provider 调用失败，`
+                      + `达阈值 ${this.config.consecutiveFailureThreshold}，停止剩余批次）`,
+                  }
+                : stop;
             }
             vectors = [];
           } finally {

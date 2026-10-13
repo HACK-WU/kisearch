@@ -131,6 +131,8 @@ describe('阶段 3：请求级配置快照与资源配置', () => {
       maxBufferedVectorBytes: 1000,
       globalBufferedVectorBytes: 2000,
       requestTimeoutMs: 60000,
+      // B 策略熔断（2026-10-12）：未显式配置时的默认阈值
+      consecutiveFailureThreshold: 3,
     });
   });
 
@@ -151,6 +153,14 @@ describe('阶段 3：请求级配置快照与资源配置', () => {
         ['embedding:', '  scheduler:', '    batchSize: 1001'].join('\n'),
       ),
       /batchSize 不能大于 1000/,
+    );
+    // 熔断阈值配到极大 = 事实上的"永不熔断"，同属配置事故
+    assert.throws(
+      () => writeAndLoad(
+        'config.yaml',
+        ['embedding:', '  scheduler:', '    consecutiveFailureThreshold: 101'].join('\n'),
+      ),
+      /consecutiveFailureThreshold 不能大于 100/,
     );
     assert.throws(
       () => writeAndLoad(

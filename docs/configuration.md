@@ -82,8 +82,8 @@ Embedding 提供商配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `provider` | `string` | `siliconflow` | `siliconflow` \| `openai-compatible`（OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
-| `baseURL` | `string` | `https://api.siliconflow.cn/v1` | API 端点，决定实际对接的提供商 |
+| `provider` | `string` | `siliconflow` | **自由文本，不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为**错误文案里的显示名**（`dashscope /embeddings timeout …`），不切换实现。实现恒为 OpenAI 兼容客户端，实际厂商由 `baseURL` 决定 |
+| `baseURL` | `string` | `https://api.siliconflow.cn/v1` | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议，如 `https://host/compatible-mode/v1`）；换厂商只改这里。URL 是否真的兼容只能在真实请求时暴露（`ki doctor` 的连通性/密钥/维度三合一探测即此用途） |
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
 | `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
@@ -101,6 +101,7 @@ Embedding 提供商配置。
 | `maxBufferedVectorBytes` | `67108864` | 单任务待持久化向量估算上限，超限背压 |
 | `globalBufferedVectorBytes` | `134217728` | daemon 级待持久化向量估算上限 |
 | `requestTimeoutMs` | `60000` | 单次 provider 请求超时（ms），上限 `600000`；超时按既有策略重试，**单批最坏耗时 ≈ 本值 ×(重试次数+1)**（重试 3 次时即 4 倍） |
+| `consecutiveFailureThreshold` | `3` | **熔断阈值**：连续这么多次 provider 调用失败后停止剩余批次（成功一次即清零，不被历史抖动累计触发），上限 `100`（配得更大等于不熔断，会 fail-loud）。只对「服务商暂时不可用」（超时 / 网络错 / 429 / 5xx）计容忍额度；认证、维度、配置、持久化类错误**首次即停**（重试无意义）。设为 `1` = 回到「一次失败即停」的旧行为 |
 
 > **通常只需设置 `batchSize` 与 `maxConcurrency`**，其余字段省略即用默认值：
 > `maxPrefetchBatches` 省略时会自动跟随 `maxConcurrency`（无需手动配对），
@@ -124,6 +125,7 @@ embedding:
     maxBufferedVectorBytes: 67108864
     globalBufferedVectorBytes: 134217728
     requestTimeoutMs: 60000
+    consecutiveFailureThreshold: 3
 ```
 
 > **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。

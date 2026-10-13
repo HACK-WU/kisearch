@@ -1250,9 +1250,9 @@ vectorDir: $HOME/.ki/vector  # zvec collection 根目录（每个 scope 使用�
 vector:
   maxOpenCollections: 8      # daemon 同时保留的 Collection handle 上限（LRU）
 
-embedding:                    # Embedding 提供方（OpenAI 兼容，实际提供商由 baseURL 决定）
-  provider: siliconflow
-  baseURL: https://api.siliconflow.cn/v1
+embedding:                    # Embedding 提供方（实现恒为 OpenAI 兼容客户端，实际厂商由 baseURL 决定）
+  provider: siliconflow       # 自由文本，仅用于错误文案展示（不校验、不切换实现）
+  baseURL: https://api.siliconflow.cn/v1  # 必须指向 OpenAI 兼容端点（/embeddings 协议），换厂商只改这里
   model: Qwen/Qwen3-Embedding-8B
   dimension: 4096             # 向量维度（必须与建库时一致）
   apiKey: ${SILICONFLOW_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量（变量名自定义）
@@ -1264,6 +1264,7 @@ embedding:                    # Embedding 提供方（OpenAI 兼容，实际提�
     maxPrefetchBatches: 25    # 省略时自动跟随 maxConcurrency
     maxBufferedVectorBytes: 67108864
     globalBufferedVectorBytes: 134217728
+    consecutiveFailureThreshold: 3  # 熔断：连续 3 次 provider 调用失败后停止剩余批次（认证/维度/配置类错误首次即停）
 
 scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
 
@@ -1286,13 +1287,13 @@ scopes:
 | `backupDir` | 顶级 | 备份快照存储目录 |
 | `vectorDir` | 顶级 | zvec 向量库目录，每个 scope 使用 `collections/<scope>` 独立 Collection（独立，不进备份） |
 | `vector.maxOpenCollections` | `vector` | daemon 同时保留的 Collection handle 上限；达到上限后释放空闲 LRU 句柄，默认 8 |
-| `embedding.provider` | 顶级 | Embedding 提供方：`siliconflow` \| `openai-compatible`（均为 OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
-| `embedding.baseURL` | 顶级 | API 端点（决定实际对接的提供商；换成其他厂商端点即可对接其他提供商） |
+| `embedding.provider` | 顶级 | **自由文本、不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为错误文案里的显示名，不切换实现（实现恒为 OpenAI 兼容客户端） |
+| `embedding.baseURL` | 顶级 | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议）；实际厂商由它决定，换厂商只改此处 |
 | `embedding.model` | 顶级 | 模型名称 |
 | `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
 | `embedding.apiKey` | 顶级 | API 密钥（**必填**）：支持明文（`sk-xxx`）或环境变量引用（`${VAR_NAME}`，变量名自定义）；不做任何隐式回退 |
 | `embedding.queryTimeoutMs` | 顶级 | 查询 embedding 超时（ms），默认 3000，范围 1-60000；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
-| `embedding.scheduler` | 顶级 | import/restore/rebuild 的有界 Embedding 并发与向量缓冲背压；默认批大小 16、单任务并发 25、daemon 全局 25、单请求超时 60s |
+| `embedding.scheduler` | 顶级 | import/restore/rebuild 的有界 Embedding 并发与向量缓冲背压；默认批大小 16、单任务并发 25、daemon 全局 25、单请求超时 60s、**熔断阈值 `consecutiveFailureThreshold: 3`**（连续 3 次 provider 调用失败才停止剩余批次；认证/维度/配置类错误首次即停） |
 | `scopeMode` | 顶级 | `default`：未传 `--scope` 静默落 default，任意 scope 自动创建；`strict`：必须显式传入已注册 scope |
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |

@@ -73,6 +73,13 @@ export interface BulkStoreItemResult {
   memoryId?: string;
   success: boolean;
   error?: string;
+  /**
+   * 系统性故障停止前**从未尝试**的条目（区别于"尝试后失败"）。
+   * 上层据此把「未处理清单」汇总成一条，而不是与真实失败混在一起逐条展开。
+   * 不能用 error 文本是否等于 stopReason.reason 来判定：provider 错误消息与
+   * stopReason.reason 往往就是同一句，会把真实失败误吞进汇总。
+   */
+  notProcessed?: boolean;
 }
 
 export interface VectorBulkStoreResult {
@@ -580,6 +587,9 @@ function buildEmbedding(): SiliconFlowProvider {
     model: emb.model,
     dimension: emb.dimension,
     apiKey: emb.apiKey,
+    // 错误文案跟随配置的 provider 名（类是实现名，不等于厂商名）：
+    // 配置 dashscope 时不应再报 "SiliconFlow /embeddings timeout"（误导排障方向）。
+    providerLabel: emb.provider,
   });
 }
 
@@ -1265,7 +1275,12 @@ export async function vectorBulkStore(params: {
       return { index: i, success: false, error: '向量化已取消，条目尚未提交' };
     }
     if (notProcessedIds.has(d.id)) {
-      return { index: i, success: false, error: result.stopReason?.reason ?? '系统性向量故障，条目尚未尝试' };
+      return {
+        index: i,
+        success: false,
+        notProcessed: true,
+        error: result.stopReason?.reason ?? '系统性向量故障，条目尚未尝试',
+      };
     }
     if (metadataPendingIds.has(d.id)) {
       return { index: i, success: false, error: 'zvec 已写入但元数据尚未完成，请重试元数据回写' };

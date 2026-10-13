@@ -271,7 +271,9 @@ test('scheduler stops launching new batches after cancellation and reports exact
   assert.deepEqual(result.cancelledItems.map((item) => item.docId), ['c', 'd', 'e', 'f']);
 });
 
-test('scheduler stops on exhausted provider failure and reports unstarted entries separately', async () => {
+// B 策略熔断（2026-10-12）后本用例显式使用阈值 1（一次失败即停 = 旧行为）；
+// 默认阈值 3 的「连续失败才停 / 成功即清零」由文件末尾的熔断用例组覆盖。
+test('scheduler stops on exhausted provider failure when threshold is 1 and reports unstarted entries separately', async () => {
   let calls = 0;
   const provider: EmbeddingProvider = {
     dimension: 2,
@@ -287,6 +289,7 @@ test('scheduler stops on exhausted provider failure and reports unstarted entrie
     maxPrefetchBatches: 1,
     maxBufferedVectorBytes: 1024,
     globalBufferedVectorBytes: 1024,
+    consecutiveFailureThreshold: 1,
   });
   const delivered: string[][] = [];
   const result = await runtime.schedule(provider, ['a', 'b', 'c', 'd', 'e', 'f'], {
@@ -445,4 +448,105 @@ test('服务商上限小于配置 batchSize 时自动降批：全部落库且不
   // 进程内学习一次即可，后续任务不再重复撞 400
   assert.equal(runtime.getMetrics().batchLimitDowngrades, 1);
   assert.equal(runtime.effectiveRequestLimit(), 25);
+});
+
+// ─── B 策略熔断（2026-10-12：连续失败达阈值才停） ─────────────────
+
+const TIMEOUT_ERROR = () => Object.assign(
+  new Error('dashscope /embeddings timeout after 60000ms'),
+  { code: 'TIMEOUT' },
+);
+const AUTH_ERROR = () => Object.assign(
+  new Error('dashscope /embeddings HTTP 401: unauthorized'),
+  { code: 'HTTP_401', data: { status: 401 } },
+);
+
+/** 串行确定性环境：3 批 × 2 条，逐次调用按 failAt 决定成功/失败。 */
+function mkFlakyProvider(failFor: (call: number) => Error | undefined): { provider: EmbeddingProvider; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    provider: {
+      dimension: 2,
+      async embed(texts) {
+        const call = calls++;
+        const failure = failFor(call);
+        if (failure) throw failure;
+        return texts.map((text) => [text.length, call]);
+      },
+    },
+  };
+}
+
+function mkRuntime(consecutiveFailureThreshold: number): EmbeddingSchedulerRuntime {
+  return new EmbeddingSchedulerRuntime({
+    batchSize: 2,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+    consecutiveFailureThreshold,
+  });
+}
+
+const SIX = ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff'];
+const PASS_BATCH = (batch: EmbeddingBatch<string>) => ({ persisted: batch.items.length, failed: 0 });
+const FAIL_BATCH = (batch: EmbeddingBatch<string>) => ({ persisted: 0, failed: batch.items.length });
+
+test('熔断：偶发超时（低于阈值后恢复）不停剩余批次，成功一次即清零', async () => {
+  const { provider, calls } = mkFlakyProvider((call) => (call < 2 ? TIMEOUT_ERROR() : undefined));
+  const result = await mkRuntime(3).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 3, '连续 2 次失败 < 阈值 3：第 3 批必须照常发出');
+  assert.equal(result.stopReason, undefined, '未达阈值不得升级为系统性停止');
+  assert.equal(result.notProcessed, 0, '不得有未处理批次');
+  assert.equal(result.persisted, 2);
+  assert.equal(result.failed, 4, '失败批次按失败记账（entries 进 failed，供文件级部分成功/重试）');
+});
+
+test('熔断：连续失败达阈值才停止剩余批次，reason 带熔断说明', async () => {
+  const { provider, calls } = mkFlakyProvider(() => TIMEOUT_ERROR());
+  const result = await mkRuntime(2).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 2, '达阈值（2）后不得再发出第 3 批');
+  assert.equal(result.stopReason?.code, 'TIMEOUT');
+  assert.equal(result.stopReason?.kind, 'provider-unavailable');
+  assert.match(result.stopReason!.reason, /连续 2 次 provider 调用失败/);
+  assert.match(result.stopReason!.reason, /达阈值 2/);
+  assert.equal(result.notProcessed, 2, '第 3 批 2 条未尝试');
+});
+
+test('熔断：认证/配置类错误首次即停（不受阈值保护、reason 不加熔断后缀）', async () => {
+  const { provider, calls } = mkFlakyProvider(() => AUTH_ERROR());
+  const result = await mkRuntime(3).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 1, '认证错重试无意义：首次即停');
+  assert.equal(result.stopReason?.kind, 'authentication');
+  assert.doesNotMatch(result.stopReason!.reason, /连续/);
+  assert.equal(result.notProcessed, 4, '其余 2 批共 4 条未尝试');
+});
+
+test('熔断：阈值 1 等价旧行为（一次失败即停）', async () => {
+  const { provider, calls } = mkFlakyProvider(() => TIMEOUT_ERROR());
+  const result = await mkRuntime(1).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 1);
+  assert.equal(result.stopReason?.code, 'TIMEOUT');
+  assert.doesNotMatch(result.stopReason!.reason, /连续/, '阈值 1 时保持旧文案（向后兼容）');
+  assert.equal(result.notProcessed, 4);
 });

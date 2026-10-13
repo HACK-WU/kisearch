@@ -616,6 +616,15 @@ async function rebuildScopeVectorsUnlocked(
   });
   const stats = emptyStats();
   const errors: { type: string; path: string; error: string }[] = [];
+  /**
+   * errors 里逐条保留的「尝试后失败」明细上限（超出只留一条汇总）。
+   * 必要性（challenger 质疑 2026-10-12）：B 策略熔断让**未达阈值的间歇失败批**继续跑，
+   * 每批失败都会把整批条目逐条写进 errors —— provider 半挂（每次失败几个批）时，
+   * 总量仍会堆到与条目数同量级，输出治理会在此处破功。
+   */
+  const MAX_DETAILED_FAILURES = 50;
+  let detailedFailures = 0;
+  let suppressedFailures = 0;
   let cumulativePersisted = 0;
   let cumulativeMetadataPending = 0;
   let cumulativeFailed = 0;
@@ -917,11 +926,14 @@ async function rebuildScopeVectorsUnlocked(
         const remaining = allEntries.slice(offset + slice.length);
         cumulativeNotProcessed += remaining.length;
         stats.notProcessed = cumulativeNotProcessed;
-        for (const entry of remaining) {
+        // P0 输出治理：剩余条目**不再逐条展开**——整库重建失败时会输出与 chunk 数同量级的
+        // 同因条目（上万条），既刷爆 CLI/HTTP 输出，也让用户误读为"没有停止、一直在超时"。
+        // 数量由 stats.notProcessed 承载；修复 embedding 后重跑即可（幂等）。
+        if (remaining.length > 0) {
           errors.push({
             type: 'not-processed',
-            path: entry.text.slice(0, 60),
-            error: `系统性向量故障后未处理：${vectorizationStop.reason}`,
+            path: '<not-processed>',
+            error: `系统性向量故障后未处理 ${remaining.length} 条（本批未写入数见上一条汇总；合计 ${cumulativeNotProcessed} 条）：${vectorizationStop.reason}`,
           });
         }
         break;
@@ -929,13 +941,38 @@ async function rebuildScopeVectorsUnlocked(
       checkCancelled(Math.min(offset + VECTORIZE_BATCH_SIZE, allEntries.length), allEntries.length);
     }
   }
-  for (const r of aggResults) {
-    if (!r.success) {
+  const failedResults = aggResults.filter((r) => !r.success);
+  if (vectorizationStop && failedResults.length > 0) {
+    // 系统性停止的那一批里，failed 结果绝大多数是「未尝试」而非「尝试后失败」，
+    // 逐条展开同样会造成上述刷屏；只留一条汇总 + 少量样例便于定位。
+    const samples = failedResults
+      .slice(0, 3)
+      .map((r) => allEntries[r.index]?.text.slice(0, 40) ?? `index=${r.index}`)
+      .join(' | ');
+    errors.push({
+      type: 'vectorize',
+      path: '<batch>',
+      error: `系统性故障批次中有 ${failedResults.length} 条未写入（样例：${samples}）：${vectorizationStop.reason}`,
+    });
+  } else {
+    for (const r of failedResults) {
+      if (detailedFailures >= MAX_DETAILED_FAILURES) {
+        suppressedFailures++;
+        continue;
+      }
+      detailedFailures++;
       const src = allEntries[r.index];
       errors.push({
         type: 'vectorize',
         path: src ? src.text.slice(0, 60) : `index=${r.index}`,
         error: r.error ?? 'unknown',
+      });
+    }
+    if (suppressedFailures > 0) {
+      errors.push({
+        type: 'vectorize',
+        path: '<truncated>',
+        error: `另有 ${suppressedFailures} 条失败明细未逐条列出（逐条上限 ${MAX_DETAILED_FAILURES} 条）：${failedResults[0]?.error ?? 'unknown'}`,
       });
     }
   }
