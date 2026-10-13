@@ -2762,6 +2762,11 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
    （真机走查 #9；11px 灰字 + 36×24 实测） */
 .ki-chat-act {
   display: inline-flex; align-items: center; height: 28px; padding: 0 10px;
+  /* 与 `.ki-chat-btn` 同款契约（文字不折行、不被 flex 压缩）：
+     「按钮被压扁折行」这个坑在本项目已出现四处 —— 配置入口 `.ki-chat-cfg__entry`、
+     配置底栏 `.ki-chat-cfg__del/__reset`、会话浮层 foot，当时各自打了局部补丁；
+     2026-10-13 会话删除确认条复发后统一收敛，消息操作条是最后一处漏网点。 */
+  flex: none; white-space: nowrap;
   border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
   background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
   font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
@@ -2788,9 +2793,15 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-edit__warn { font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
 .ki-chat-edit__acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
 
-/* ── 通用小按钮（浮层底部 / 确认行 / 提示条动作）── */
+/* ── 通用小按钮（浮层底部 / 确认行 / 提示条动作）──
+   `white-space: nowrap` + `flex: none` 是**基类契约**：按钮文字永不折行、永不被压缩。
+   缺了这两条时，窄容器里的按钮会被 flex 压到几十像素宽 → 文字折成两行、999px 圆角被撑成椭圆
+   （2026-10-13 用户反馈会话删除确认条：「确认删除太大、取消被挤成椭圆」）。
+   此前只在 `.ki-chat-convpop--inline .ki-chat-convpop__foot` 打过同款局部补丁 —— 规则收归基类，
+   局部补丁已删除。 */
 .ki-chat-btn {
   display: inline-flex; align-items: center; justify-content: center;
+  flex: none; white-space: nowrap;
   height: 26px; padding: 0 10px; border: none; border-radius: 999px;
   background: var(--ki-color-primary); color: #fff;
   font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
@@ -2905,16 +2916,41 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
   border: 1px solid var(--ki-color-primary); background: var(--ki-color-bg);
   color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-sm); outline: none;
 }
-/* 删除二次确认：就地展开（误删即丢整段会话），不用 window.confirm */
+/* 删除二次确认：就地展开（误删即丢整段会话），不用 window.confirm。
+   ⚠️ 这是**两段式换行**布局，不是单行平铺：/chat 左栏仅 260px，
+   「删除后不可恢复」+ 会话名 + 两个按钮在一行里必然放不下 ——
+   单行平铺时 flex 会一起压缩所有 item（按钮被压到 40-50px → 文字折两行、999px 圆角变椭圆，
+   2026-10-13 用户反馈）。现在拆成 msg（文案 + 会话名）与 acts（按钮组）两块：
+   acts 用 `margin-left: auto` 靠右；放不下时整组落到第二行，而不是把按钮压扁。 */
 .ki-chat-conv__confirm {
-  flex: 1 0 100%; display: flex; align-items: center; gap: var(--ki-space-2);
-  margin-top: 4px; padding: 4px var(--ki-space-2); border-radius: 6px;
+  flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center;
+  /* ★ min-width: 0 不可省：flex item 的「自动最小尺寸」= 内容 min-content（实测 338px），
+     会盖过 flex-basis:100% 把确认条撑出列表栏（走查实测比行宽多 87px）。
+     它同时也是「长串不许撑破容器」在 flex 层的通用开关，与 .ki-chat-conv__main 同款处理。 */
+  min-width: 0;
+  gap: 4px var(--ki-space-2);
+  margin-top: 4px; padding: 5px var(--ki-space-2); border-radius: var(--ki-radius-sm);
   background: color-mix(in srgb, var(--ki-color-danger) 12%, transparent);
   font-size: var(--ki-font-size-xs); color: var(--ki-color-danger);
 }
-.ki-chat-conv__confirm b {
+.ki-chat-conv__confirm-msg {
+  display: flex; align-items: baseline; gap: 4px;
+  flex: 1 1 auto; min-width: 0;
+}
+/* 提示文案不参与压缩（flex: none + nowrap）：此前它是匿名 flex item，
+   窄栏里会与长会话名一起被压缩 → 「删除后不可恢复」折成两行（走查实测 68px 高） */
+.ki-chat-conv__confirm-tip { flex: none; white-space: nowrap; }
+.ki-chat-conv__confirm-msg b {
   font-weight: 500; color: var(--ki-color-text);
+  /* 收缩方只留会话名：min-width: 0 让它缩到省略号，而不是把确认条撑出容器 */
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 按钮组整组不压缩（flex: none）：换行决策里保持完整宽度，宁可整组落到第二行 */
+.ki-chat-conv__confirm-acts { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
+/* 确认条内的按钮比通用按钮更小、直角化：26px + 999px 圆角在列表行里显得笨重 */
+.ki-chat-conv__confirm .ki-chat-btn {
+  height: 22px; padding: 0 8px; border-radius: var(--ki-radius-sm);
 }
 
 /* ── 输入区：分级提示 + composer 卡片 ──
@@ -3486,9 +3522,10 @@ select.ki-chat-cfg__ta--select {
   border: none; border-radius: 0; box-shadow: none;
   background: transparent;
 }
-/* 左栏 260px 比浮层（380px）窄：foot 按钮禁止折行，低价值排序 hint 省略 */
+/* 左栏 260px 比浮层（380px）窄：foot 允许换行、省略低价值排序 hint。
+   （foot 按钮「禁止折行」的旧局部补丁已删除 —— 该契约现由 `.ki-chat-btn` 基类统一保证，
+     同一个坑此前在 foot 打过一次补丁、2026-10-13 又在删除确认条复发，故收归基类。） */
 .ki-chat-convpop--inline .ki-chat-convpop__foot { flex-wrap: wrap; }
-.ki-chat-convpop--inline .ki-chat-convpop__foot .ki-chat-btn { white-space: nowrap; }
 .ki-chat-convpop--inline .ki-chat-convpop__hint { display: none; }
 
 /* ── 顶部条等高：左栏搜索区 / 右栏上下文条下边线连成一条 ──

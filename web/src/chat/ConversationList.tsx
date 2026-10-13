@@ -201,18 +201,25 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
 
         {confirmingId === c.id ? (
           <span className="ki-chat-conv__confirm">
-            删除后不可恢复
-            <b>{title}</b>
-            <button
-              type="button"
-              className="ki-chat-btn ki-chat-btn--danger"
-              onClick={() => { setConfirmingId(null); props.onDelete(c.id); }}
-            >确认删除</button>
-            <button
-              type="button"
-              className="ki-chat-btn ki-chat-btn--ghost"
-              onClick={() => setConfirmingId(null)}
-            >取消</button>
+            {/* 文案 + 会话名成块、按钮成块：两者在窄栏（/chat 左栏 260px）里换行，
+                而不是让 flex 把按钮压扁（2026-10-13 用户反馈「确认删除按钮太大、取消被挤成椭圆」） */}
+            <span className="ki-chat-conv__confirm-msg">
+              <span className="ki-chat-conv__confirm-tip">删除后不可恢复</span>
+              <b>{title}</b>
+            </span>
+            {/* 破坏性操作的主按钮放右侧（取消在左），符合平台惯例；靠右由 CSS 的 margin-left: auto 保证 */}
+            <span className="ki-chat-conv__confirm-acts">
+              <button
+                type="button"
+                className="ki-chat-btn ki-chat-btn--ghost"
+                onClick={() => setConfirmingId(null)}
+              >取消</button>
+              <button
+                type="button"
+                className="ki-chat-btn ki-chat-btn--danger"
+                onClick={() => { setConfirmingId(null); props.onDelete(c.id); }}
+              >确认删除</button>
+            </span>
           </span>
         ) : null}
       </div>
