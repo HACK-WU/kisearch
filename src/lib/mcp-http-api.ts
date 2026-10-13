@@ -60,6 +60,8 @@ import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
+// 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
+import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
@@ -451,7 +453,7 @@ export async function handleApiRequest(
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
   if (authScopes !== null && req.method === 'GET'
-    && (p === '/tags' || p === '/doc/list' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/vector/status')) {
+    && (p === '/tags' || p === '/doc/list' || p === '/doc/get' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/vector/status')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -554,6 +556,23 @@ export async function handleApiRequest(
       );
       return;
     }
+    if (p === '/doc/get' && req.method === 'GET') {
+      // 浏览页阅读器专用正文读取（2026-10-13 缺陷修复）。
+      // 此前浏览页走 MCP `ki_get_module_info`，而 MCP 请求按缺省 `write` 入队
+      //（mcp-http.ts）⇒ 导入/向量化长任务期间同 scope 的正文读取被排到队尾
+      //（隔离实测：`/api/doc/list` 3ms 时该请求等了 8745ms）。
+      // 本接口与 /doc/list 同款：handler 只读 relations-cache 分片 + local KB 正文、
+      // 不做向量模糊兜底（noVectorFallback）⇒ 不打开 zvec ⇒ 可安全走 `read` 通道，
+      // 只与「元数据提交窗口」短互斥，导入期间照样秒回。
+      const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-get-api', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, () => handleDocGet(res, url)),
+        [scope],
+        'read',
+      );
+      return;
+    }
     if (p === '/doc/edit' && req.method === 'GET') {
       // REQ-20261009-003 S-01：读取待编辑原文同样不打开 zvec，走 read 通道。
       const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
@@ -608,14 +627,17 @@ export async function handleApiRequest(
       return;
     }
     if (p === '/asset' && req.method === 'GET') {
-      // 附件复制与 scope delete 可能同时操作 assets 目录；读请求也要经过
-      // 同一 scope 队列，避免读到半写文件或已删除目录。
+      // 附件读取改走 `read` 通道（2026-10-13）：导入的附件复制已原子化
+      //（临时文件 + rename，见 import.ts::collectAndCopyAssets）⇒ 并发读要么见旧文件、
+      // 要么见新文件，不会读到半写；目录被 scope/group 删除时读侧得 404（fail-loud 可接受）。
+      // 此前按 write 入队 ⇒ 导入/向量化长任务期间浏览页图片同样排在队尾（同类缺陷一并修）。
       const scopeRaw = url.searchParams.get('scope') ?? '';
       const effectiveScope = resolveScope(requestConfig, scopeRaw);
       await getSharedOperationCoordinator().submit(
         { operation: 'asset-read-api', params: { scope: effectiveScope } },
         () => runWithConfigSnapshot(requestConfig, () => handleAsset(res, url)),
         [effectiveScope],
+        'read',
       );
       return;
     }
@@ -966,6 +988,29 @@ async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
     ...(ext === '.svg' ? { 'Content-Security-Policy': 'sandbox' } : {}),
   });
   res.end(content);
+}
+
+// ─── GET /api/doc/get ─────────────────────────────────
+/**
+ * 读单篇文档正文（浏览页阅读器）。
+ *
+ * 与 MCP `ki_get_module_info` 的差异（有意为之）：
+ *   - **不做** group 路径 / relation 名的向量语义兜底（`noVectorFallback`）——
+ *     浏览页的 group/relation 来自 /api/doc/list 或深链接，本就精确；不打开 zvec
+ *     才能以 `read` 入队（read 契约见 operation-coordinator.ts 的 TaskKind）。
+ *   - 未命中时 fail-loud 返回 404 + hint（沿用读详情既有文案），不静默回退。
+ * 评分回写（recordUse）与 MCP 路径同源：仍在 `withMetadataCommitSync` 窗口内。
+ */
+async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
+  const scope = resolveScope(loadConfig(), url.searchParams.get('scope') ?? '');
+  const group = url.searchParams.get('group') ?? '';
+  const relation = url.searchParams.get('relation') ?? '';
+  if (!group.trim() || !relation.trim()) {
+    sendJson(res, 400, { ok: false, error: '缺少 group/relation 参数' });
+    return;
+  }
+  const result = await executeGetModuleInfoLocal({ scope, group, relation }, { noVectorFallback: true });
+  sendJson(res, result.ok ? 200 : 404, result);
 }
 
 // ─── GET /api/doc/list ────────────────────────────────

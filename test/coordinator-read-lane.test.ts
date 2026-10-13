@@ -20,7 +20,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OperationCoordinator, kindForOperation } from '../src/lib/operation-coordinator.js';
+import { OperationCoordinator, kindForOperation, kindForMcpToolNames } from '../src/lib/operation-coordinator.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const req = (scope: string, operation = 'op') => ({ operation, params: { scope } });
@@ -181,4 +181,97 @@ test('⑨ ★ 未显式传 kind 的 import 自动判为 engine-only（真实入�
   //   R8 二期的 e2e「降级返回后 /api/doc/list <1s」正是靠这条互斥证明队列槽已放行；
   //   若有人给它加 'read' 特判，e2e 会静默失去证明力（read 无需等 write 槽释放）。
   assert.equal(kindForOperation('tag-list'), 'write');
+});
+
+/**
+ * ⑩ 2026-10-13 现场缺陷（浏览页正文被导入阻塞）的登记回归：
+ *   读类 operation / MCP 读工具必须以 `read` 入队（不传 kind 时也如此）。
+ *   背景：MCP 通道此前整体缺省 `write` ⇒ `ki_get_module_info`（浏览页打开文档）
+ *   在导入向量化期间被排到队尾（隔离实测 8745ms，同时刻 /api/doc/list 3ms）。
+ */
+test('⑩ 读类 operation 与 MCP 读工具登记为 read（防缺省落回 write）', () => {
+  // CLI / daemon 读命令（daemon-rpc 按 operation 名推导，不传 kind）
+  assert.equal(kindForOperation('get-module-info'), 'read');
+  assert.equal(kindForOperation('get-module-info-batch'), 'read');
+  assert.equal(kindForOperation('query-group'), 'read');
+  // ⚠️ CLI `ki doc list`（operation='doc-list'）刻意保持 write：它是向量层管理面扫描
+  //（打开引擎列举向量文档），结果在导入期间本就是中间态；浏览页用的是 doc-list-api（已 read）。
+  assert.equal(kindForOperation('doc-list'), 'write');
+  // HTTP 只读接口（mcp-http-api 显式传 'read'，登记作双保险）
+  assert.equal(kindForOperation('doc-get-api'), 'read');
+  assert.equal(kindForOperation('asset-read-api'), 'read');
+  // chat 通道（operation 形如 chat-mcp-<tool>，与 MCP 通道共用白名单）
+  assert.equal(kindForOperation('chat-mcp-ki_get_module_info'), 'read');
+  assert.equal(kindForOperation('chat-mcp-ki_query_group'), 'read');
+  // 检索：2026-10-13 用户拍板放开为 read（导入期间可搜；结果中间态由降级机制兜底）
+  assert.equal(kindForOperation('chat-mcp-ki_search'), 'read');
+  assert.equal(kindForOperation('search'), 'read');
+  // ⚠️ 仍保持 write 的重读 / 管理面读（全库扫描，结果在导入期间不可信 + 非交互刚需）
+  assert.equal(kindForOperation('chat-mcp-ki_tag_list'), 'write');
+  assert.equal(kindForOperation('tag-list'), 'write');
+  assert.equal(kindForOperation('chat-mcp-ki_sync_relation'), 'write');
+  // 前缀相似但非白名单的 operation 不得误判
+  assert.equal(kindForOperation('chat-mcp-ki_get_module_info_x'), 'write');
+});
+
+test('⑪ MCP 工具批的 kind：全读才 read，混入写工具整批回退 write', () => {
+  assert.equal(kindForMcpToolNames(['ki_get_module_info']), 'read');
+  assert.equal(kindForMcpToolNames(['ki_get_module_info', 'ki_query_group']), 'read');
+  // 只读通道工具（不占 scope）与读工具混合仍是 read
+  assert.equal(kindForMcpToolNames(['ki_scope_list']), 'read');
+  assert.equal(kindForMcpToolNames(['ki_scope_list', 'ki_get_module_info']), 'read');
+  // ★ 混入写工具必须整批回退：否则写会绕过与长任务/短写的互斥
+  assert.equal(kindForMcpToolNames(['ki_get_module_info', 'ki_sync_relation']), 'write');
+  assert.equal(kindForMcpToolNames(['ki_search', 'ki_sync_relation']), 'write');
+  // 检索自身是读（放开后可与导入并行）
+  assert.equal(kindForMcpToolNames(['ki_search']), 'read');
+  assert.equal(kindForMcpToolNames(['ki_search', 'ki_get_module_info']), 'read');
+  // tags 扫描仍是 write
+  assert.equal(kindForMcpToolNames(['ki_tag_list']), 'write');
+  // 非 tools/call（undefined 占位）或空批：保守回退 write
+  assert.equal(kindForMcpToolNames([]), 'write');
+  assert.equal(kindForMcpToolNames([undefined]), 'write');
+  assert.equal(kindForMcpToolNames([undefined, 'ki_get_module_info']), 'read');
+});
+
+test('⑫ 行为：以 read 登记的 daemon 读命令（不传 kind）不被导入长任务阻塞', async () => {
+  const c = new OperationCoordinator(4, 5_000);
+  const scope = 's12';
+  const long = c.submit(req(scope, 'import'), () => sleep(400), [scope]);
+  await sleep(30);
+
+  // 模拟 daemon-rpc：只传 operation 名、不传 kind
+  const t0 = Date.now();
+  await c.submit(req(scope, 'get-module-info'), () => 'read', [scope]);
+  const waitMs = Date.now() - t0;
+  assert.ok(waitMs < 120, `get-module-info 应立即执行，实际 ${waitMs}ms`);
+
+  // ⚠️ 安全性：读与长任务并行时，读**不得**绕过「元数据提交窗口」
+  const commit = c.runMetadataCommit(scope, () => sleep(200));
+  await sleep(20);
+  const t1 = Date.now();
+  await c.submit(req(scope, 'query-group'), () => 'read', [scope]);
+  assert.ok(Date.now() - t1 >= 100, '窗口内读仍须等待（写侧不变量 I2 不回归）');
+  await commit;
+  await long;
+});
+
+test('⑬ 行为：检索（read）在导入期间立即可执行；tag-list（write）仍排队', async () => {
+  const c = new OperationCoordinator(4, 5_000);
+  const scope = 's13';
+  const long = c.submit(req(scope, 'import'), () => sleep(400), [scope]);
+  await sleep(30);
+
+  // 不传 kind ⇒ 走 kindForOperation('search') = read（2026-10-13 放开，导入期间可搜）
+  const t0 = Date.now();
+  await c.submit(req(scope, 'search'), () => 'r', [scope]);
+  const searchWait = Date.now() - t0;
+  assert.ok(searchWait < 120, `search 应立即执行，实际 ${searchWait}ms`);
+
+  // ⚠️ tag-list 刻意保持 write：必须等导入长任务结束（保守语义不回归）
+  const t1 = Date.now();
+  const tagP = c.submit(req(scope, 'tag-list'), () => 'w', [scope]);
+  await long;
+  await tagP;
+  assert.ok(Date.now() - t1 >= 300, 'tag-list 必须等导入结束');
 });

@@ -65,16 +65,22 @@ export type GetModuleInfoResult =
 /**
  * 在 Group 内查找 Relation：先精确匹配（id 或名称），未命中再走向量模糊兜底。
  * 供单条/批量两条链路复用；searchPath 自带降级（向量不可用返回 null，静默跳过模糊匹配）。
+ *
+ * @param noVectorFallback true = **跳过**向量兜底（纯元数据读，不打开 zvec）。
+ *   这是 HTTP `/api/doc/get` 能以 `read` 类型入队的前提（read 契约要求不触碰引擎，
+ *   见 operation-coordinator.ts 的 TaskKind 说明）。
  */
 async function findRelationWithFuzzy(
   groupData: GroupData,
   relation: string,
-  scope: string
+  scope: string,
+  noVectorFallback = false
 ): Promise<{ rel: Relation; fuzzyHint?: string } | null> {
   const exact = groupData.hot_relations.find(
     (r) => r.id === relation || r.text === relation
   );
   if (exact) return { rel: exact };
+  if (noVectorFallback) return null;
 
   const fuzzyRel = await searchPath(relation, 'ki-relation', scope);
   if (fuzzyRel && fuzzyRel.matched) {
@@ -90,7 +96,20 @@ async function findRelationWithFuzzy(
   return null;
 }
 
-async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
+/**
+ * 读详情的选项（REQ 2026-10-13 读通道解耦）：
+ * `noVectorFallback=true` 时全程不打开 zvec —— 不做 group 路径与 relation 名的向量模糊兜底。
+ * 这是 HTTP `/api/doc/get` 能以 `read` 类型入队的前提（read 只与「元数据提交窗口」互斥、
+ * 可旁路导入/向量化长任务；见 operation-coordinator.ts 的 TaskKind 契约）。
+ */
+export interface GetModuleInfoReadOptions {
+  noVectorFallback?: boolean;
+}
+
+export async function executeGetModuleInfoLocal(
+  params: GetModuleInfoParams,
+  opts: GetModuleInfoReadOptions = {}
+): Promise<GetModuleInfoResult> {
   try {
     const { scope, relation } = params;
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
@@ -120,7 +139,13 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     }
 
     const groupIndex = readGroupIndex(scope);
-    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, groupsContext, scope);
+    // 不传 scope ⇒ 关闭 resolveGroupPath 步骤 7 的向量语义兜底（noVectorFallback 场景）
+    const resolved = await resolveGroupPath(
+      group,
+      groupIndex || { version: 1, scope, groups: {}, updatedAt: null },
+      groupsContext,
+      opts.noVectorFallback ? undefined : scope
+    );
 
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到有效路径`, hint: resolved.hint };
@@ -145,7 +170,7 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
 
     let rel: Relation | null = null;
     {
-      const found = await findRelationWithFuzzy(groupData, relation, scope);
+      const found = await findRelationWithFuzzy(groupData, relation, scope, opts.noVectorFallback === true);
       if (found) {
         rel = found.rel;
         if (found.fuzzyHint) hints.push(found.fuzzyHint);

@@ -25,7 +25,7 @@ import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
-import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { getSharedOperationCoordinator, kindForMcpToolNames, GLOBAL_SCOPE } from './operation-coordinator.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
@@ -716,12 +716,17 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     const queueScopes = new Set<string>();
     let needsGlobal = false;
     let onlyReadOnly = true;
+    // 本次请求调用的 MCP 工具名（仅 tools/call），供读/写任务类型判定。
+    // 2026-10-13 修复：此前 MCP 通道整批缺省 `write` ⇒ 导入/向量化期间浏览页正文
+    // （ki_get_module_info）被排到队尾（隔离实测 8745ms）。
+    const calledTools: string[] = [];
     for (const message of messages) {
       const method = readMethod(message);
       if (method !== 'tools/call' && method !== 'resources/read' && method !== 'resources/list') continue;
       const toolName = method === 'tools/call' && message && typeof message === 'object'
         ? ((message as { params?: { name?: unknown } }).params?.name)
         : undefined;
+      if (method === 'tools/call' && typeof toolName === 'string') calledTools.push(toolName);
       // scope 枚举只读且自带 fastFail 撞锁降级（“scope 下拉不应因向量锁挂起十余秒”），
       // 归入只读通道：不占用任何 scope，也不被其他 scope 的写操作阻塞。
       if (toolName === 'ki_scope_list') continue;
@@ -756,6 +761,10 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         () => handleMcpPostInner(req, res, authScopes, body),
       ))),
       occupied,
+      // 读工具（ki_get_module_info / ki_query_group）判 `read`：它们不写元数据/引擎、
+      // 允许只读访问 zvec（实测导入期间引擎直读 68–220ms）⇒ 不再被导入长任务排到队尾。
+      // 混入任一写工具即整批回退 `write`（见 kindForMcpToolNames）。
+      kindForMcpToolNames(calledTools),
     );
   }
 

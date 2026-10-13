@@ -247,6 +247,39 @@ export async function getDocList(
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 
+/** GET /api/doc/get 返回：单篇文档正文（浏览页阅读器） */
+export interface DocContentResponse {
+  ok?: boolean;
+  scope?: string;
+  content?: string;
+  revision?: string;
+  totalLines?: number;
+  error?: string;
+  hint?: string;
+}
+
+/**
+ * 读取单篇文档正文（浏览页阅读器专用）。
+ *
+ * 为什么不再走 MCP `ki_get_module_info`：MCP 请求在后端按缺省 `write` 入队，
+ * 导入/向量化长任务期间同 scope 的读被排到队尾（隔离实测 8745ms）；本接口走 `read`
+ * 通道（只与元数据提交窗口短互斥），实测导入期间 3ms 级返回。
+ * 代价：不做向量模糊兜底 —— group/relation 须精确（浏览页本就来自文档列表/深链接）。
+ * 未命中时后端返回 404 + error/hint，这里拼成一条消息抛出（与 MCP 路径的提示口径一致）。
+ */
+export async function getDocContent(scope: string, group: string, relation: string): Promise<DocContentResponse> {
+  const params = new URLSearchParams({ scope, group, relation });
+  try {
+    return await req<DocContentResponse>(`/api/doc/get?${params.toString()}`);
+  } catch (err) {
+    const body = (err as { body?: DocContentResponse }).body;
+    if (body && (body.error || body.hint)) {
+      throw new Error([body.error, body.hint].filter(Boolean).join('；'));
+    }
+    throw err;
+  }
+}
+
 /**
  * 取全指定 Group 的文档（S0-2）：按 offset 翻页聚合到 truncated:false 或取完 total。
  * 安全护栏 GROUP_DOCS_MAX_PAGES 防御 total 异常膨胀导致的无限循环（500 × 1000 = 50 万篇封顶）。

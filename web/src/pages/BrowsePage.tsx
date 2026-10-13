@@ -17,8 +17,8 @@ import {
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
-import type { DocItem } from '@/api/httpApi';
-import { kiGetModuleInfo, kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
+import { getDocContent, type DocItem } from '@/api/httpApi';
+import { kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { TagSelect } from '@/components/TagSelect';
@@ -942,7 +942,8 @@ export function BrowsePage(): JSX.Element {
         targetAnchor={currentViewing.anchor}
         editable
         onClose={closeDocument}
-        fetcher={kiGetModuleInfo}
+        // 正文读取走 read 通道的 HTTP 接口（不再用 MCP）：导入/向量化期间不被排队
+        fetcher={getDocContent}
         onLocalLink={handleLocalLink}
         canGoBack={history.length > 0}
         onBack={goBack}

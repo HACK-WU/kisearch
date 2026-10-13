@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 
 import {
   getGroupIndexPath,
@@ -470,10 +471,25 @@ export function collectAndCopyAssets(opts: {
       continue;
     }
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    // REQ-20261010-001（用户要求）：同名附件先删除再写入——`copyFileSync` 虽有截断覆盖语义，
-    // 但目标是只读文件、软链或早先写入的目录时会失败/跟随软链；先删后拷让"替换"确定的成立。
-    if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
-    fs.copyFileSync(abs, dst); // 幂等重导：同名覆盖
+    // 幂等重导：同名覆盖。**原子化**（2026-10-13 修复，配合 /api/asset 改走 read 通道）：
+    //   ① 先拷到同目录临时文件（同文件系统 rename 才原子）；
+    //   ② rename 覆盖目标（POSIX 原子）。目标是只读文件/软链/目录等 rename 失败时，
+    //      退回 REQ-20261010-001 的"先删后拷"——该分支存在极短的"目标缺失"窗口，
+    //      读侧表现为 404（可接受的 fail-loud，且非重导常态）。
+    // 为什么必须原子：附件读取自 2026-10-13 起以 `read` 入队（不再排在导入长任务之后），
+    // 复制与读会并发 —— 半写文件会渲染成破图，而"旧图/404"都能随重试自愈。
+    const tmp = `${dst}.ki-tmp-${crypto.randomUUID()}`;
+    try {
+      fs.copyFileSync(abs, tmp);
+      try {
+        fs.renameSync(tmp, dst);
+      } catch {
+        if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
+        fs.renameSync(tmp, dst);
+      }
+    } finally {
+      if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true });
+    }
     copied.push(rel);
   }
   return { copied, warnings };

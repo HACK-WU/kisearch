@@ -12,11 +12,64 @@ export interface OperationRequest {
  *   窗口内。它仍与其它 write/engine-only 互斥，但 **不阻塞 `read` 任务**——
  *   这正是"导入期间仍可浏览"的关键。
  *   ⚠️ 只有真正满足"元数据写全在提交窗口内"的任务才能用它；否则读会与元数据写并发。
- * - `read`：**纯元数据读**（不打开 zvec），与同 scope 的 `write` 任务、以及
- *   「元数据提交窗口」互斥，但可旁路 `engine-only` 长任务。仅当确知不触碰引擎时使用；
- *   `/tags` 这类会打开 zvec 的读仍须用 `write`。
+ * - `read`：**只读任务**（2026-10-13 修订）。判定与边界：
+ *   ① 不得写元数据 —— 若确有评分回写之类的小写，必须自包 `runMetadataCommit` 窗口
+ *      （如 `executeGetModuleInfo` 的 recordUse）；
+ *   ② 不得写引擎（向量层）；**允许只读地访问 zvec**（检索 / 扫描）；
+ *   ③ 与「元数据提交窗口」互斥，与 `engine-only` 长任务及短写任务并行。
+ *   ★ ② 的放宽依据（2026-10-13 隔离实测，`temp/exp-read-lane-engine-concurrency.ts`）：
+ *   10.6s 导入（346 chunk 向量写）期间引擎直读 **68–220ms**，与空闲基线 276ms 同量级
+ *   —— zvec worker 对读写请求串行服务、读会插空执行，不会被写长任务压满；
+ *   open/close/probe 另有 `serializeEngineOp` 串行化、LRU 有 lease/activeUses 保护。
+ *   原文"read 必须不打开 zvec"是保守假设，它把浏览页正文（MCP）、CLI 读详情、
+ *   chat 读文档等一并挡在导入之后（实测这些读排到队尾、等满整个向量化）。
+ *   ★ 检索同为只读（`ki_search` / `search`，2026-10-13 用户拍板放开）：实测导入期间
+ *   直连检索 735–820ms 返回，而经 `write` 入队时要等满整个导入（实测 4921–4991ms）；
+ *   放开后的代价是**结果可能是中间态**（向量已分批写、元数据未提交 ⇒ 原文召回降级），
+ *   由既有降级机制兜底，用户已确认接受。
+ *   ⚠️ 仍**不**登记 `tag-list`（全库扫描重读）与 `doc-list`（向量层列举）：结果在导入
+ *   期间不可信且非交互刚需，保持 `write` 串行更稳。
  */
 export type TaskKind = 'write' | 'read' | 'engine-only';
+
+/**
+ * 读任务登记表（**单一真相**）：按 operation 名登记"只读任务"。
+ * 登记依据：不写元数据（或写全部入提交窗口）且不写引擎。
+ * ★ 新增读类 operation 必须在此登记，否则缺省落到 `write`（又会挡住读）——
+ *   这正是 2026-10-13 现场缺陷的成因（MCP 通道整体缺省 write）。
+ * 回归锚点：`test/coordinator-read-lane.test.ts`。
+ */
+const READ_OPERATIONS = new Set<string>([
+  // CLI / daemon（daemon-rpc 按 operation 名推导 kind）
+  'get-module-info',
+  'get-module-info-batch',
+  'query-group',
+  // CLI `ki search`（语义 + 全文检索）：纯读（不写元数据/引擎），2026-10-13 用户拍板放开 ——
+  // 实测导入期间直连检索 735–820ms 返回（经 write 入队则要等满整个导入）。
+  'search',
+  // HTTP（mcp-http-api 已显式传 'read'，此处登记作双保险）
+  'doc-list-api',
+  'doc-get-api',
+  'doc-edit-read',
+  'asset-read-api',
+  // ⚠️ 刻意**不登记** `doc-list`（CLI `ki doc list`）：它是向量层管理面扫描
+  //（executeDocList 打开引擎列举向量文档），不是"纯元数据读"，且其结果在导入期间
+  // 本就是中间态 —— 保持 write 串行更稳（浏览页用的是 `doc-list-api`，不受影响）。
+]);
+
+/**
+ * MCP 读工具白名单（MCP HTTP 通道与 chat 工具通道**共用**）：
+ * 一律不写引擎；`ki_get_module_info` 的评分回写已入提交窗口。
+ * - `ki_get_module_info` / `ki_query_group`：引擎访问是**条件性**的
+ *   （精确命中即不打开 zvec，仅模糊兜底才检索）。
+ * - `ki_search`：每次必开引擎，但**只读**（检索 + 反查 + 原文召回），
+ *   2026-10-13 用户拍板放开 —— 导入期间可搜（约 1s 返回），代价是结果可能为中间态。
+ * ⚠️ `ki_tag_list` 不在列（全库扫描重读，结果在导入期间不可信）。
+ * ⚠️ 一次 MCP 请求含多个 tools/call 时，混入任一**非**白名单工具即整批回退 `write`
+ *   （见 `kindForMcpToolNames`）—— 例如 AI 同时调 `ki_search` + `ki_sync_relation`
+ *   会整批排队，这是刻意的保守语义。
+ */
+const READ_MCP_TOOLS = new Set<string>(['ki_get_module_info', 'ki_query_group', 'ki_search']);
 
 /**
  * 按 operation 名推导任务类型（S-01 的**默认规则**，kind 的唯一真相）。
@@ -37,7 +90,38 @@ export function kindForOperation(operation: string | undefined): TaskKind {
   // 否则它会缺省落到 `write`（与 read 互斥）——索引整理会把刚放开的读又挡回去。
   // 登记依据：该类任务的元数据写全部包在提交窗口内（import），或本就不碰元数据
   //（vector-optimize 只调引擎 optimize）。
-  return operation === 'import' || operation === 'vector-optimize' ? 'engine-only' : 'write';
+  if (operation === 'import' || operation === 'vector-optimize') return 'engine-only';
+  if (operation && READ_OPERATIONS.has(operation)) return 'read';
+  // chat 通道的 operation 形如 `chat-mcp-<tool>`（chat/mcp-tool-registry.ts）：
+  // 读工具与 MCP HTTP 通道共用同一白名单，避免两处各写一份判断再漂移。
+  if (operation?.startsWith(CHAT_MCP_PREFIX)) {
+    const tool = operation.slice(CHAT_MCP_PREFIX.length);
+    if (READ_MCP_TOOLS.has(tool)) return 'read';
+  }
+  return 'write';
+}
+
+/** chat 工具通道的 operation 前缀（与 chat/mcp-tool-registry.ts 保持一致） */
+const CHAT_MCP_PREFIX = 'chat-mcp-';
+
+/**
+ * MCP HTTP 通道（一次请求可含多个 tools/call）：**全部**工具都属读白名单
+ *（或只读的 `ki_scope_list`，它走不占 scope 的只读通道）时才判 `read`；
+ * 出现任何写工具即回退 `write`（保守）。
+ *
+ * 为什么必须整批判定：批量请求里混入一个写工具，若整体判 read，写就会绕过与
+ * 长任务/短写的互斥（数据风险），故宁可让整批退回 write。
+ */
+export function kindForMcpToolNames(toolNames: readonly (string | undefined)[]): TaskKind {
+  let sawTool = false;
+  for (const name of toolNames) {
+    if (name === undefined) continue;
+    sawTool = true;
+    if (name === 'ki_scope_list') continue;
+    if (!READ_MCP_TOOLS.has(name)) return 'write';
+  }
+  // 无 tools/call（resources/read 等）不在此判定范围内：保守回退 write。
+  return sawTool ? 'read' : 'write';
 }
 
 export interface OperationResult<T = unknown> {
