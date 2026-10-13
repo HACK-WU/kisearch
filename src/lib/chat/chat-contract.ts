@@ -16,6 +16,14 @@
  *          `CodeWikiHub/kisearch/requirements/2026-10-09-全屏阅读与AI对话协同及文档引用/`。
  *          **修订（同日·bug 修复）**：`ChatRef` 的注入方式由「独立 system 块」改为
  *          「附在本轮 user 消息末尾」——形状未动（字段/常量不变），前端副本无需改代码。
+ *        · **skill 按需加载（2026-10-13）** —— 三类边界变更：
+ *          ① 新增 SSE 事件 `skill`（AI 通过 `use_skill` 加载 skill 正文；加载是**进程内瞬时动作**，
+ *             故为**单事件、无 start/end 配对**），`CHAT_EVENT_TYPES` 由 12 类变 13 类；
+ *          ② `ChatProgressStep` 新增**可选** `kind`（`'tool' | 'skill'`，缺省 = `'tool'`）、
+ *             `skillId` / `skillDescription` / `chars` —— 旧记录按工具行渲染，零兼容负担；
+ *          ③ `ConversationFile` 新增**可选** `injected`（首轮注入快照：提示词只在**新建会话**时读配置，
+ *             后续轮次从快照拼装）与 `loadedSkillIds`（会话级已加载 skill，每轮重放，避免模型反复加载）。
+ *          见 `.plans/2026-10-13-chat-skill-on-demand/plan.md`。
  *        其余形状未动；前端副本与 contract-parity 已同步）
  *   2. 前端有同形状副本 `web/src/api/chatContract.ts`（两端是独立 package，无法互相 import）
  *      → 形状一致性由 `tests/contract/SR-02/contract-parity.test.mjs` 机械保证
@@ -91,16 +99,23 @@ export interface ChatToolResponse {
  *   · **返回正文有界**：保留实际工具返回，仅超过 10000 字符时截断。
  *
  * 形状与 SSE 的 `tool_start` / `tool_end` 事件对齐，便于前端复用同一套文案渲染。
+ * skill 加载步骤（2026-10-13）复用本结构：`kind: 'skill'` + `skillId`/`skillDescription`/`chars`。
  */
 export interface ChatProgressStep {
   phase: 'start' | 'end';
+  /**
+   * 步骤类别（2026-10-13 新增，**可选**）：
+   * · 缺省 / `'tool'` = MCP 工具调用（旧记录即此，前端按工具行渲染）
+   * · `'skill'` = AI 通过 `use_skill` 加载 skill 正文（与工具行**样式区分**）
+   */
+  kind?: 'tool' | 'skill';
   /**
    * 本步发生时**已发出的正文字符数**（interleave 锚点）：
    * 渲染时把正文按各行的 afterChars 切段，调用痕迹插在"哪句话之后"就显示在哪句话下面。
    * 旧数据无此字段 → 视为 0（集中在正文前，维持旧行为）。
    */
   afterChars?: number;
-  /** 工具名（如 `ki_search`） */
+  /** 工具名（如 `ki_search`）/ skill 步骤时为 skill 名称 */
   name?: string;
   /** 检索模式（`tool_start` 带） */
   mode?: string;
@@ -111,6 +126,14 @@ export interface ChatProgressStep {
   durationMs?: number;
   /** 工具报错文本（仅失败步骤；这是"说人话"的失败原因，不含片段正文） */
   error?: string;
+  /** skill 步骤：skill id（`use_skill` 的调用键） */
+  skillId?: string;
+  /** skill 步骤：加载时该 skill 的描述（供展开查看"当时为什么用它"） */
+  skillDescription?: string;
+  /** skill 步骤：加载入上下文的正文**字符数**（不是命中数） */
+  chars?: number;
+  /** skill 步骤：本会话此前已加载过（本次**未重复注入**；前端据此弱化展示） */
+  alreadyLoaded?: boolean;
 }
 
 /**
@@ -180,6 +203,27 @@ export interface ConversationCompaction {
   backup: string;
 }
 
+/**
+ * 注入快照（skill 按需加载，2026-10-13）：新建会话**首轮**把「skill 目录 + 基础提示词 + 硬性规则」
+ * 固化进会话，之后每轮从快照拼装、**不再读对话配置**。
+ *
+ * 为什么快照而不是每轮读配置（用户裁决 2026-10-13）：
+ * · 提示词"只注入一次"→ 同一会话的行为可复现，不被中途改配置影响；
+ * · 配置改动的生效范围 = **下一个新建会话**（UI 需明示）。
+ *
+ * ⚠️ **不含 skill 正文**（只含目录与可调用 id 列表）：正文按 `skillIds` 从当前配置按需读取，
+ *    否则 20 × 8000 字的正文会把会话文件撑爆（护栏 #4）。
+ */
+export interface PromptInjectionSnapshot {
+  version: 1;
+  /** 快照生成时刻（ISO） */
+  at: string;
+  /** 恒定注入的 system 文本块（顺序即注入顺序） */
+  blocks: string[];
+  /** 可被 `use_skill` 调用的 skill id（= 快照生成时**启用**的条目，顺序 = 配置顺序） */
+  skillIds: string[];
+}
+
 /** 会话文件（S-02 §3.2） */
 export interface ConversationFile {
   version: 1;
@@ -196,6 +240,10 @@ export interface ConversationFile {
   lastMessagePreview: string;
   /** 手动压缩记录（REQ-20261013-001 R8；旧会话无此字段） */
   compaction?: ConversationCompaction;
+  /** 注入快照（2026-10-13；旧会话无此字段 → 下一轮按当前配置补建一次） */
+  injected?: PromptInjectionSnapshot;
+  /** 已加载 skill 的 id（会话级；每轮重放，避免模型"忘掉"或反复加载） */
+  loadedSkillIds?: string[];
   messages: ChatMessage[];
 }
 
@@ -256,6 +304,24 @@ export type ChatEvent =
    */
   | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
+  /**
+   * skill 正文加载（2026-10-13 新增；**可多次**，每次一个 skill）。
+   *
+   * · **单事件**：加载是进程内瞬时动作（读配置 + 拼块），不需要 start/end 配对 ——
+   *   与 `tool_start`/`tool_end` 的配对不变量无关；
+   * · `alreadyLoaded` = 本会话此前已加载过（本次未重复注入，前端据此可弱化展示）；
+   * · 失败（未知 id / 已禁用）同样发本事件并带 `error`，**不中断生成**（模型可见失败并改道）。
+   */
+  | {
+      type: 'skill';
+      id: string;
+      name: string;
+      description: string;
+      /** 加载入上下文的正文字符数；失败时为 0 */
+      chars: number;
+      alreadyLoaded?: boolean;
+      error?: string;
+    }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }
   | { type: 'reasoning'; text: string }
@@ -271,9 +337,9 @@ export type ChatEvent =
   | { type: 'aborted'; messageId: string }
   | { type: 'error'; code: string; error: string; retryable?: boolean };
 
-/** 事件类型名（供契约测试遍历） */
+/** 事件类型名（供契约测试遍历；`skill` 为 2026-10-13 新增，共 13 类） */
 export const CHAT_EVENT_TYPES = [
-  'meta', 'context', 'tool_start', 'tool_end', 'sources', 'degraded',
+  'meta', 'context', 'tool_start', 'tool_end', 'skill', 'sources', 'degraded',
   'reasoning', 'content', 'usage', 'done', 'aborted', 'error',
 ] as const;
 
@@ -284,7 +350,8 @@ export const CHAT_EVENT_TYPES = [
  * - `sources` 至多一次且在 `done` 之前（无来源时**不发**，而非发空数组）
  * - `degraded` 至多一次
  * - `context` **可多次**（每轮请求前一次），消费方取最后一次；必在 `done` 之前
- * - 正常序：meta → context → tool_start → tool_end → [context → tool_start → tool_end]* → reasoning* → content* → sources → usage → done
+ * - `skill` **可多次、无配对要求**（单事件；加载失败也发事件带 error）；必在 `done` 之前
+ * - 正常序：meta → context → tool_start → tool_end → [skill | context → tool_start → tool_end]* → reasoning* → content* → sources → usage → done
  */
 export const CHAT_EVENT_ORDER_RULES = {
   toolStartMustPairWithEnd: true,

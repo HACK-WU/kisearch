@@ -355,6 +355,11 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
       });
       return;
 
+    case 'skill':
+      // skill 按需加载（2026-10-13）：单事件 → 单步（无配对），与工具步骤同走 streamProgress
+      store.dispatch({ type: 'streamProgress', step: skillStep(ev) });
+      return;
+
     case 'sources':
       store.dispatch({ type: 'streamSources', sources: ev.sources });
       return;
@@ -442,6 +447,36 @@ export function toolEndStep(
         ? `已完成：${hits} 条结果`
         : '已完成';
   return { kind: 'tool', phase: 'end', label, hits, ...(error !== undefined ? { error } : {}), ...extra };
+}
+
+/**
+ * `skill` 事件 → skill 加载步骤（2026-10-13）。
+ *
+ * 文案三态（**与工具行刻意不同**，让"AI 用了哪个 skill"一眼可辨）：
+ * · 加载成功 → `已加载 skill：<名称>`（+ 正文字符数，展开可见描述）
+ * · 已加载过 → `skill 已在会话中：<名称>`（未重复注入）
+ * · 失败 → `skill 加载失败：<原因>`
+ *
+ * 导出：ChatPanel 还原"落盘的历史步骤"时复用同一套文案（刷新前后不得两套措辞）。
+ */
+export function skillStep(ev: Extract<ChatEvent, { type: 'skill' }>): ProgressStep {
+  const name = ev.name || ev.id || 'skill';
+  const label = ev.error !== undefined
+    ? `skill 加载失败：${ev.error}`
+    : ev.alreadyLoaded === true
+      ? `skill 已在会话中：${name}`
+      : `已加载 skill：${name}`;
+  return {
+    kind: 'skill',
+    phase: 'end',
+    label,
+    name,
+    skillId: ev.id,
+    ...(ev.description ? { skillDescription: ev.description } : {}),
+    ...(ev.chars > 0 ? { chars: ev.chars } : {}),
+    ...(ev.alreadyLoaded === true ? { alreadyLoaded: true } : {}),
+    ...(ev.error !== undefined ? { error: ev.error } : {}),
+  };
 }
 
 /**

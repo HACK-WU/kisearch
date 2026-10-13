@@ -62,11 +62,12 @@ import {
   LlmTimeoutError,
   ToolsUnsupportedError,
   type ChatTurn,
+  type ToolDef,
 } from '../llm-client.js';
 import { loadConfig } from '../../config.js';
 import { newMessageId } from '../chat-store.js';
 import { buildSystemMessages } from './retrieval-skill.js';
-import { promptConfigSystemBlocks, readPromptConfig } from '../prompt-config.js';
+import { findEnabledSkill, promptSnapshotBlocks, readPromptConfig, type PromptConfig } from '../prompt-config.js';
 import { enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
 import { toSourceRefs } from './projection.js';
 import { serializeToolResponse } from './tool-response.js';
@@ -109,10 +110,16 @@ interface LoopRuntime {
   enabled: boolean;
   reason: string | null;
   /**
-   * system 注入块（批次 1：由对话配置层产出）。
-   * 放进 runtime 而非 `ToolLoopInput`，理由与其余运行期字段一致：**不改冻结的输入签名**。
+   * 恒定注入块（对话配置层产出；**只在会话还没有快照时使用** —— 首轮之后走 `conv.injected`，
+   * 见 `injectionBlocks`）。放进 runtime 而非 `ToolLoopInput`，理由与其余运行期字段一致：
+   * **不改冻结的输入签名**。
    */
   systemBlocks: readonly string[];
+  /**
+   * 本轮读到的对话配置：`use_skill` 按 id 取正文、判定"当前是否仍启用"。
+   * 与 `systemBlocks` 取自**同一次读取**，避免同一轮里配置漂移（快照/目录/正文三者不一致）。
+   */
+  promptConfig: PromptConfig;
   /**
    * 启用的工具入口（批次 2：注册表 ∩ `PromptConfig.tools` 开关）。
    * 生成期间工具面固定（配置变更从下一次提问生效 —— 与批次 1「保存后下一次提问生效」口径一致）。
@@ -137,8 +144,10 @@ function resolveRuntime(): LoopRuntime {
     supportsTools: status.supportsTools,
     enabled: status.enabled,
     reason: status.reason,
-    // 页面与运行时使用同一配置：未保存时采用默认 skill + 基础规则，已保存时保持用户配置。
-    systemBlocks: promptConfigSystemBlocks(promptConfig),
+    // ★ 2026-10-13：这里的是**首轮快照的候选内容**（skill 目录 → 基础提示词 → 硬性规则），
+    //   不是"每轮注入的内容"；已有快照的会话走 `conv.injected.blocks`（用户裁决：提示词只注入一次）。
+    systemBlocks: promptSnapshotBlocks(promptConfig),
+    promptConfig,
     // ★ 工具开关首次被消费（批次 2）：默认只读 6 个；用户关掉的即时生效于下一次提问
     toolEntries: enabledChatToolEntries(promptConfig.tools),
   };
@@ -192,10 +201,138 @@ function renderRefsBlock(refs: readonly ChatRef[] | undefined): string | null {
   return lines.join('\n');
 }
 
-function buildUpstreamMessages(input: ToolLoopInput, systemBlocks: readonly string[]): ChatTurn[] {
+// ─── skill 按需加载（2026-10-13）──────────────────────────────
+
+/** `use_skill` 工具名（AI 加载 skill 正文的调用键；目录里会告诉模型用它） */
+export const USE_SKILL_TOOL_NAME = 'use_skill';
+
+/**
+ * skill 正文块的**唯一渲染口**：`use_skill` 的工具返回与"每轮重放"共用它。
+ * ★ 两处必须是同一段字节 —— 否则模型在"加载那一轮"与"后续轮次"看到的规则措辞不同，行为会漂。
+ */
+export function renderSkillLoadedBlock(skill: { id: string; name: string; content: string }): string {
+  return [`【skill：${skill.name}（${skill.id}）】`, skill.content].join('\n');
+}
+
+/**
+ * 本轮实际生效的恒定注入块：**优先会话快照**。
+ *
+ * 有快照 ⇒ 不再读配置（"提示词只在新建会话的第一次注入"）；无快照（旧会话首轮、或上轮未持久化成功）
+ * ⇒ 用当前配置，并由路由在本轮结束后补建快照。
+ */
+function injectionBlocks(conv: ConversationFile, runtime: LoopRuntime): readonly string[] {
+  return conv.injected?.blocks ?? runtime.systemBlocks;
+}
+
+/** 本会话**可调用**的 skill id：快照冻结的清单 ∩ 当前仍启用（配置层关掉的立即调不到） */
+function callableSkillIds(conv: ConversationFile, runtime: LoopRuntime): string[] {
+  const frozen = conv.injected?.skillIds ?? runtime.promptConfig.skills.filter((s) => s.enabled).map((s) => s.id);
+  return frozen.filter((id) => findEnabledSkill(runtime.promptConfig, id) !== null);
+}
+
+/**
+ * 会话级「已加载 skill 正文」块（**每轮重放**，紧跟恒定块、早于压缩摘要与历史消息）。
+ *
+ * 为什么必须重放：上游是无状态的 —— 上一轮的 `tool` 返回不会自动重现，不重放模型就会"忘掉"
+ * 已加载的规则并反复调用 `use_skill`（既费轮次，又让时间线被重复步骤噪音化）。
+ * · 被删除 / 正文被清空的 skill → 跳过（不注入空块；历史 `progress` 仍能回看当时加载了什么）
+ */
+function loadedSkillBlocks(conv: ConversationFile, runtime: LoopRuntime): string[] {
+  const out: string[] = [];
+  for (const id of conv.loadedSkillIds ?? []) {
+    // ★ 必须走 `findEnabledSkill`：**停用即从上下文移除**（challenger 质疑项，已修）。
+    //   否则会出现"目录里没有、也调不到，但正文每轮还在注入"的不一致 —— 用户关掉一个 skill
+    //   的直观预期是它立刻不再影响回答。
+    const skill = findEnabledSkill(runtime.promptConfig, id);
+    if (!skill || skill.content.trim().length === 0) continue;
+    out.push(renderSkillLoadedBlock(skill));
+  }
+  return out;
+}
+
+/** `use_skill` 的工具定义（**不是 MCP 工具**：只读配置、不碰知识库、不进 coordinator 队列） */
+function useSkillToolDef(): ToolDef {
+  return {
+    type: 'function',
+    function: {
+      name: USE_SKILL_TOOL_NAME,
+      description:
+        '加载某个 skill 的完整规则正文；加载后其规则立即生效，并在本会话后续轮次继续生效。skill_id 必须是【可用 skill】目录里列出的 id；重复加载同一个 id 会直接返回"已加载"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          skill_id: { type: 'string', description: '目录中列出的 skill id（如 builtin-retrieval）' },
+        },
+        required: ['skill_id'],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/** `use_skill` 的执行结果：一个可发往前端的事件 + 回给模型的 tool 返回正文 */
+export interface UseSkillOutcome {
+  event: Extract<ChatEvent, { type: 'skill' }>;
+  /** 回给上游的 tool 消息正文（成功时即 skill 正文块） */
+  toolContent: string;
+}
+
+/**
+ * 执行 `use_skill`（**纯逻辑，便于单测**）。
+ *
+ * 四类结果（**都不中断生成** —— 与"未知工具"同款：模型可见失败并自行改道）：
+ *   ① 参数不可解析 / `skill_id` 缺失 → 事件带 `error`；
+ *   ② id 不在本会话可调用清单（未知 / 已被禁用 / 快照后新增）→ 事件带 `error` + 可用清单；
+ *   ③ 已加载过（先前轮次或本轮）→ `alreadyLoaded: true`，**不重复注入**；
+ *   ④ 正常加载 → 返回正文块（`chars` = 正文字符数）。
+ */
+export function resolveUseSkill(
+  rawArgs: string,
+  ctx: {
+    callableIds: readonly string[];
+    skills: readonly { id: string; name: string; description: string; content: string }[];
+    alreadyLoaded: readonly string[];
+  },
+): UseSkillOutcome {
+  const fail = (id: string, name: string, error: string): UseSkillOutcome => ({
+    event: { type: 'skill', id, name, description: '', chars: 0, error },
+    toolContent: `use_skill 调用失败：${error}`,
+  });
+
+  let parsed: ChatToolArgs;
+  try {
+    parsed = rawArgs.trim() ? (JSON.parse(rawArgs) as ChatToolArgs) : {};
+  } catch (err) {
+    return fail('', '(未命名)', `参数不是合法 JSON：${(err as Error).message}`);
+  }
+  const id = typeof parsed.skill_id === 'string' ? parsed.skill_id.trim() : '';
+  if (!id) return fail('', '(未命名)', 'skill_id 不能为空（必须是【可用 skill】目录里列出的 id）');
+
+  const skill = ctx.skills.find((s) => s.id === id);
+  if (!skill || !ctx.callableIds.includes(id)) {
+    return fail(id, skill?.name ?? id, `未知或不可用的 skill：${id}（本会话可用：${ctx.callableIds.join(' | ') || '（无）'}）`);
+  }
+  if (ctx.alreadyLoaded.includes(id)) {
+    return {
+      event: { type: 'skill', id, name: skill.name, description: skill.description, chars: 0, alreadyLoaded: true },
+      toolContent: `【skill：${skill.name}（${skill.id}）】该 skill 已在本会话加载过，其规则仍然生效，无需重复加载。`,
+    };
+  }
+  return {
+    event: { type: 'skill', id, name: skill.name, description: skill.description, chars: skill.content.length },
+    toolContent: renderSkillLoadedBlock(skill),
+  };
+}
+
+function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): ChatTurn[] {
   const msgs: ChatTurn[] = [];
-  for (const m of buildSystemMessages(input.convSystemPrompt, systemBlocks)) {
+  for (const m of buildSystemMessages(input.convSystemPrompt, injectionBlocks(input.conv, runtime))) {
     msgs.push({ role: 'system', content: m.content });
+  }
+  // ★ 已加载 skill 的正文（会话级，每轮重放）：紧跟恒定块 —— 与恒定块同属"规则组"，
+  //   必须早于压缩摘要与历史消息出现（顺序变化会改变模型对"哪些是当前规则"的判断）。
+  for (const block of loadedSkillBlocks(input.conv, runtime)) {
+    msgs.push({ role: 'system', content: block });
   }
   // 手动压缩摘要（REQ-20261013-001 R8）：**独立 system 块**，不动用户自己的 systemPrompt
   const compactBlock = renderCompactionBlock(input.conv.compaction);
@@ -302,7 +439,7 @@ export function projectNextContextChars(
   const runtime = resolveRuntime();
   const msgs = buildUpstreamMessages(
     { scope: conv.scope, conv, userText: '', convSystemPrompt: conv.systemPrompt },
-    runtime.systemBlocks,
+    runtime,
   );
   // 无当轮引用（压缩发生在发起请求之前）→ refs 分量恒 0
   return computeContextChars(msgs, 0);
@@ -378,13 +515,21 @@ async function* toolLoopPath(
   runtime: LoopRuntime,
   messageId: string,
 ): AsyncGenerator<ChatEvent> {
-  const messages = buildUpstreamMessages(input, runtime.systemBlocks);
+  const messages = buildUpstreamMessages(input, runtime);
   const maxRounds = runtime.maxToolRounds;
   /** 当轮引用附录块的长度（明细展示用；已包含在 user 分量里） */
   const refsChars = renderRefsBlock(input.refs)?.length ?? 0;
   // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
   //   属用户显式配置、非故障，不发 degraded）
   const toolDefs = runtime.toolEntries.map((e) => e.def);
+  // ★ skill 目录非空 ⇒ 追加 `use_skill`（2026-10-13）：无可用 skill 时不暴露，减少无谓调用面
+  const callableIds = callableSkillIds(input.conv, runtime);
+  if (callableIds.length > 0) toolDefs.push(useSkillToolDef());
+  /**
+   * 本**轮**（不是本会话）已加载的 skill id：跨轮去重靠 `conv.loadedSkillIds`（由路由落盘），
+   * 轮内去重靠它 —— 模型在一轮里重复要求同一个 skill 时不必重复注入正文。
+   */
+  const loadedThisTurn = new Set<string>();
 
   let round = 0;
   // 路由聚合整个回答以落盘；本模块仅聚合单次上游响应正文供工具续轮使用。
@@ -509,6 +654,21 @@ async function* toolLoopPath(
       if (isAborted(input.signal)) {
         yield* abortedEvents(messageId, sources, usage);
         return;
+      }
+
+      // ── skill 加载（2026-10-13）：不是 MCP 工具，走独立分支（工具名 / 事件类型 / 文案都不同）──
+      if (call.name === USE_SKILL_TOOL_NAME) {
+        const outcome = resolveUseSkill(call.arguments, {
+          callableIds,
+          skills: runtime.promptConfig.skills,
+          alreadyLoaded: [...(input.conv.loadedSkillIds ?? []), ...loadedThisTurn],
+        });
+        // 只有"真正加载成功"才记账：失败与重复加载都不得进入已加载集合，
+        // 否则下一轮会静默重放一个空 skill（正文取不到，模型却以为规则已生效）。
+        if (!outcome.event.error && outcome.event.alreadyLoaded !== true) loadedThisTurn.add(outcome.event.id);
+        yield outcome.event;
+        messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.toolContent });
+        continue;
       }
 
       // 未知工具（模型幻觉出未暴露的工具名）：也必须回 tool 消息（实现细节 a），
@@ -649,13 +809,16 @@ async function* pureChatPath(
       : '模型不可用，本次未检索',
   };
 
-  const messages = buildUpstreamMessages(input, runtime.systemBlocks);
+  const messages = buildUpstreamMessages(input, runtime);
   // 系统提示插在既有 system 块之后、历史消息之前（无 system 块时置顶）
   let sysCount = 0;
   while (sysCount < messages.length && messages[sysCount].role === 'system') sysCount += 1;
   messages.splice(sysCount, 0, {
     role: 'system',
-    content: '【提示】本次对话未接入知识库工具。请正常回答用户问题，并在回答开头简要说明「本次未检索知识库」；不得假装有检索结果，不得虚构知识库内容。',
+    // ★ 括注 skill：快照里的目录写着「用 use_skill 加载」，而本路径**不暴露任何工具** ——
+    //   不点明的话模型会声称"我去加载 skill"却做不到（auto-review 一致性问题）。
+    //   不能改快照本身（快照 = 首轮注入，端到端有断言守着），只能在这里说清。
+    content: '【提示】本次对话未接入知识库工具（也无法加载 skill）。请正常回答用户问题，并在回答开头简要说明「本次未检索知识库」；不得假装有检索结果，不得虚构知识库内容。',
   });
 
   // 降级路径同样给出上下文用量（含刚注入的 system 提示；只调一次上游，故仅一次）

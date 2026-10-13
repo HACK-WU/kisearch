@@ -116,6 +116,8 @@ async function runTurn(conv: ReturnType<typeof convOf>, userText: string): Promi
 
 const rolesOf = (m: Captured) => m.messages.map((x) => x.role);
 const countOf = (m: Captured, content: string) => m.messages.filter((x) => x.content === content).length;
+/** 非 system 部分（system 组块数由注入模型决定，逐块断言在专门的用例里做） */
+const nonSystemRoles = (m: Captured) => rolesOf(m).filter((r) => r !== 'system');
 
 /** 相邻同角色（system 除外）—— 交替契约的负向检查 */
 function consecutiveSameRole(m: Captured): string[] {
@@ -140,7 +142,10 @@ describe('多轮上下文 · 上游 messages 形状', () => {
 
   it('★ 第 2 轮 → 历史按序带上，本轮 user 仍恰好一次，且无连续同角色', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2')]), 'Q2');
-    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user']);
+    // system 组块数由注入模型决定（2026-10-13：目录 + 基础提示词 + 硬性规则 = 3 条），
+    // 这里只断言**非 system 部分**的角色序，避免每次调整注入块都来改测试
+    assert.deepEqual(nonSystemRoles(cap), ['user', 'assistant', 'user']);
+    assert.ok(rolesOf(cap)[0] === 'system', 'system 必须在最前');
     assert.equal(countOf(cap, 'Q1'), 1, '历史中的 Q1 应保留一次');
     assert.equal(countOf(cap, 'A1'), 1, '历史中的 A1 应保留一次');
     assert.equal(countOf(cap, 'Q2'), 1, `本轮 user 应恰好 1 次，实际 ${countOf(cap, 'Q2')} 次`);
@@ -152,7 +157,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
       convOf([u('m1', 'Q1'), a('m2', 'A1'), u('m3', 'Q2'), a('m4', 'A2'), u('m5', 'Q3')]),
       'Q3',
     );
-    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user', 'assistant', 'user']);
+    assert.deepEqual(nonSystemRoles(cap), ['user', 'assistant', 'user', 'assistant', 'user']);
     assert.deepEqual(
       cap.messages.filter((m) => m.role !== 'system').map((m) => m.content),
       ['Q1', 'A1', 'Q2', 'A2', 'Q3'],
@@ -164,7 +169,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
 
   it('兼容形状：conv 未含本轮 user（store/skill 级单测的构造方式）→ 仍会追加，且只追加一次', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1'), a('m2', 'A1')]), 'Q2');
-    assert.deepEqual(rolesOf(cap), ['system', 'system', 'user', 'assistant', 'user']);
+    assert.deepEqual(nonSystemRoles(cap), ['user', 'assistant', 'user']);
     assert.equal(countOf(cap, 'Q2'), 1, '兼容形状下本轮 user 也应恰好一次');
     assert.deepEqual(consecutiveSameRole(cap), []);
   });
@@ -182,13 +187,20 @@ describe('多轮上下文 · 上游 messages 形状', () => {
     }
   });
 
-  it('systemPrompt 非空 → skill 在前、会话 prompt 在后（反幻觉规则不被用户 prompt 覆盖）', async () => {
+  it('systemPrompt 非空 → 目录/基础规则/硬性规则在前、会话 prompt 在最后', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1')], '我的自定义系统提示'), 'Q1');
     const sys = cap.messages.filter((m) => m.role === 'system');
-    assert.equal(sys.length, 3, `期望 skill + 基础规则 + 会话 prompt 三条 system，实际 ${sys.length} 条`);
-    assert.ok(sys[0].content.includes('检索知识库'), 'system[0] 应为检索 skill（反幻觉规则）');
+    // 2026-10-13 注入模型：目录 → 基础提示词 → 硬性规则 → 会话 prompt（skill 正文不进 system）
+    assert.equal(sys.length, 4, `期望 目录 + 基础规则 + 硬性规则 + 会话 prompt 四条 system，实际 ${sys.length} 条`);
+    assert.ok(sys[0].content.startsWith('【可用 skill】'), 'system[0] 应为 skill 目录（AI 先要知道有哪些可用）');
+    assert.ok(sys[0].content.includes('builtin-retrieval'), '目录必须带 id（use_skill 的调用键）');
     assert.ok(sys[1].content.includes('何时使用知识库检索 skill'), 'system[1] 应为基础规则');
-    assert.equal(sys[2].content, '我的自定义系统提示', 'system[2] 应为会话级 prompt');
+    assert.ok(sys[2].content.includes('知识库中未找到'), 'system[2] 应为硬性反幻觉规则（恒注入，N17 依赖）');
+    assert.equal(sys[3].content, '我的自定义系统提示', 'system[3] 应为会话级 prompt');
+    assert.ok(
+      !cap.messages.some((m) => m.content.includes('## 指令')),
+      '未调用 use_skill 时，skill 正文**不得**出现在上游（按需加载的核心断言）',
+    );
     assert.equal(countOf(cap, 'Q1'), 1);
   });
 });

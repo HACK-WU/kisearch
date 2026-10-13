@@ -15,6 +15,9 @@
  *   · REQ-20261009-002（2026-10-09）：新增 `ChatRef` 与 `ChatMessage.refs?`（用户手动引用）
  *     ↳ 同日修订：注入方式由「独立 system 块」改为「附在本轮 user 消息末尾」（后端内部行为，
  *       **形状与常量未变**，前端无需适配）
+ *   · skill 按需加载（2026-10-13）：新增 SSE 事件 `skill`（`CHAT_EVENT_TYPES` 12 → 13 类）；
+ *     `ChatProgressStep` 增可选 `kind`/`skillId`/`skillDescription`/`chars`/`alreadyLoaded`；
+ *     `PromptSkill` 增 `description`；`PromptConfigLimits` 增两个描述上限字段
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -63,8 +66,11 @@ export interface ChatToolResponse {
 /** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
 export interface ChatProgressStep {
   phase: 'start' | 'end';
+  /** 步骤类别（2026-10-13）：缺省/`'tool'` = MCP 工具调用；`'skill'` = skill 正文按需加载 */
+  kind?: 'tool' | 'skill';
   /** 本步发生时已发出的正文字符数（interleave 锚点，与后端契约对齐；旧数据缺省 = 0） */
   afterChars?: number;
+  /** 工具名（如 `ki_search`）/ skill 步骤时为 skill 名称 */
   name?: string;
   mode?: string;
   hits?: number;
@@ -72,6 +78,14 @@ export interface ChatProgressStep {
   response?: ChatToolResponse;
   durationMs?: number;
   error?: string;
+  /** skill 步骤：skill id（`use_skill` 的调用键） */
+  skillId?: string;
+  /** skill 步骤：加载时该 skill 的描述 */
+  skillDescription?: string;
+  /** skill 步骤：加载入上下文的正文**字符数**（不是命中数） */
+  chars?: number;
+  /** skill 步骤：本会话此前已加载过（本次未重复注入） */
+  alreadyLoaded?: boolean;
 }
 
 export interface ChatMessage {
@@ -135,6 +149,21 @@ export interface ConversationCompaction {
   backup: string;
 }
 
+/**
+ * 注入快照（skill 按需加载，2026-10-13）—— 与后端 `chat-contract.ts` 同形状副本。
+ *
+ * 新建会话**首轮**把「skill 目录 + 基础提示词 + 硬性规则」固化进会话，之后每轮从快照拼装、
+ * 不再读对话配置 ⇒ 配置改动的生效范围是「下一个新建会话」。**不含 skill 正文**。
+ */
+export interface PromptInjectionSnapshot {
+  version: 1;
+  at: string;
+  /** 恒定注入的 system 文本块（顺序即注入顺序） */
+  blocks: string[];
+  /** 可被 `use_skill` 调用的 skill id（快照生成时启用中的条目） */
+  skillIds: string[];
+}
+
 export interface ConversationFile {
   version: 1;
   id: string;
@@ -151,6 +180,10 @@ export interface ConversationFile {
   messages: ChatMessage[];
   /** 手动压缩记录（REQ-20261013-001 R8；旧会话无此字段） */
   compaction?: ConversationCompaction;
+  /** 注入快照（2026-10-13；旧会话无此字段 → 下一轮按当前配置补建一次） */
+  injected?: PromptInjectionSnapshot;
+  /** 已加载 skill 的 id（会话级；每轮重放） */
+  loadedSkillIds?: string[];
 }
 
 export interface ConversationSummary {
@@ -181,6 +214,23 @@ export type ChatEvent =
    */
   | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
+  /**
+   * skill 正文按需加载（2026-10-13 新增；**可多次**，每次一个 skill）。
+   *
+   * · **单事件**（加载是进程内瞬时动作，无 start/end 配对）→ 时间线上就是一行；
+   * · `alreadyLoaded` = 本会话此前已加载（本次未重复注入）；
+   * · 失败（未知 id / 已禁用）同样带 `error`，**不中断生成**（模型改道继续答）。
+   */
+  | {
+      type: 'skill';
+      id: string;
+      name: string;
+      description: string;
+      /** 加载入上下文的正文字符数；失败时为 0 */
+      chars: number;
+      alreadyLoaded?: boolean;
+      error?: string;
+    }
   | { type: 'sources'; sources: SourceRef[] }
   | { type: 'degraded'; reason: DegradedReason; message: string }
   | { type: 'reasoning'; text: string }
@@ -203,7 +253,7 @@ export type ChatEvent =
   | { type: 'error'; code: string; error: string; retryable?: boolean };
 
 export const CHAT_EVENT_TYPES = [
-  'meta', 'context', 'tool_start', 'tool_end', 'sources', 'degraded',
+  'meta', 'context', 'tool_start', 'tool_end', 'skill', 'sources', 'degraded',
   'reasoning', 'content', 'usage', 'done', 'aborted', 'error',
 ] as const;
 
@@ -243,6 +293,12 @@ export interface ChatConfigOk {
 export interface PromptSkill {
   id: string;
   name: string;
+  /**
+   * 规范描述（SKILL.md 的 description，2026-10-13 新增）：AI 判断"要不要加载它"的唯一依据，
+   * 也是恒注入目录里展示的内容。上限见 `PromptConfigLimits.skillDescMaxChars`。
+   * 旧配置缺该字段时服务端归一化为空串（目录回退正文摘要）。
+   */
+  description: string;
   content: string;
   /** 内置条目：可改内容、可禁用、**不可删除**（服务端强校验，前端据此隐藏删除入口） */
   builtin: boolean;
@@ -263,6 +319,10 @@ export interface PromptConfigLimits {
   promptMaxChars: number;
   skillMaxChars: number;
   skillNameMaxChars: number;
+  /** 描述硬上限（超过即服务端拒绝保存） */
+  skillDescMaxChars: number;
+  /** 描述建议长度（只用于字数提示，不是闸门） */
+  skillDescSuggestedChars: number;
   maxSkills: number;
 }
 

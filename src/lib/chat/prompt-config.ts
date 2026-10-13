@@ -13,22 +13,41 @@
  * ★═══ 批次边界 ═══★
  *   · 工具开关自批次 2（2026-10-08）起**真实生效**：`tool-loop.ts` 每次提问读一次本配置，
  *     以 `tools` 过滤注册表（`mcp-tool-registry.ts`）—— 保存后**下一次提问**即生效。
- *   · 不修改 `chat-contract.ts`（`tool_start` 可选字段化属批次 2 已批准的边界变更，见该文件头）。
+ *   · **2026-10-13（skill 按需加载）** 起，注入模型变为**会话快照**：
+ *     `promptSnapshotBlocks()` 只在**新建会话的首轮**被固化进 `ConversationFile.injected`，
+ *     后续轮次从快照拼装、**不再读本配置**；skill 正文不再常驻 system，由 AI 用
+ *     `use_skill` 按需加载。⇒ 配置改动的生效范围由「下一次提问」变为「**下一个新建会话**」。
  *   · 用户已保存的 `prompt-config.json` **不会被默认值变更覆盖**（含旧版 skill 文案）：
- *     批次 2 改写的是「未配置/恢复默认」时的内置 skill 与基础提示词。
+ *     「恢复默认」与新建时的默认值才用内置最新文案。
  */
 
 import fs from 'fs';
 import path from 'path';
 
 import { atomicWriteConfig, resolveDefaultChatDir, type KiConfig } from '../config.js';
-import { DEFAULT_CHAT_PROMPT, RETRIEVAL_SKILL_PROMPT } from './retrieval/retrieval-skill.js';
+import {
+  DEFAULT_CHAT_PROMPT,
+  HARD_RULES_BLOCK,
+  RETRIEVAL_SKILL_DESCRIPTION,
+  RETRIEVAL_SKILL_PROMPT,
+  renderSkillCatalog,
+} from './retrieval/retrieval-skill.js';
+import type { PromptInjectionSnapshot } from './chat-contract.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
 
 export const PROMPT_MAX_CHARS = 4000;
 export const SKILL_MAX_CHARS = 8000;
 export const SKILL_NAME_MAX_CHARS = 64;
+/**
+ * skill 描述上限（服务端强制）。
+ *
+ * 依据 SKILL.md 规范：description 承担"选不选它"，且在清单里**会被截断展示**，
+ * 因此要求 1-2 句、建议 ≤`SKILL_DESC_SUGGESTED_CHARS`；**超过本上限即视为不合格**。
+ */
+export const SKILL_DESC_MAX_CHARS = 200;
+/** 描述的建议长度（仅前端字数提示，不是硬闸门） */
+export const SKILL_DESC_SUGGESTED_CHARS = 120;
 export const MAX_SKILLS = 20;
 /** skill id：小写字母/数字开头，允许连字符（与 scope 命名风格一致，便于后续按 id 引用） */
 export const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -105,6 +124,14 @@ function defaultTools(): Record<string, boolean> {
 export interface PromptSkill {
   id: string;
   name: string;
+  /**
+   * 规范描述（SKILL.md 的 description）：AI 判断"要不要加载这个 skill"的**唯一依据**，
+   * 也是目录（恒注入）里展示的内容。
+   *
+   * · 上限 `SKILL_DESC_MAX_CHARS`；建议 ≤`SKILL_DESC_SUGGESTED_CHARS`
+   * · **旧配置缺该字段 → 空串**（不报错）：目录回退「正文摘要」，兼容护栏 #2/#6
+   */
+  description: string;
   content: string;
   /** 内置条目：**不可删除**（可禁用、可改内容、可恢复默认内容） */
   builtin: boolean;
@@ -156,7 +183,8 @@ export function defaultPromptConfig(): PromptConfig {
       {
         id: 'builtin-retrieval',
         name: '知识库检索',
-        // 页面与模型注入共用默认内容，避免文案漂移。
+        // 描述（目录里给 AI 判断用）与正文（按需加载）都取自同一常量，避免文案漂移。
+        description: RETRIEVAL_SKILL_DESCRIPTION,
         content: RETRIEVAL_SKILL_PROMPT,
         builtin: true,
         enabled: true,
@@ -170,6 +198,11 @@ export function defaultPromptConfig(): PromptConfig {
 /** 内置 skill 的默认内容（供「恢复默认」使用） */
 export function builtinSkillDefaultContent(id: string): string | null {
   return id === 'builtin-retrieval' ? RETRIEVAL_SKILL_PROMPT : null;
+}
+
+/** 内置 skill 的默认描述（供「恢复默认」使用；与 `defaultPromptConfig` 同源） */
+export function builtinSkillDefaultDescription(id: string): string | null {
+  return id === 'builtin-retrieval' ? RETRIEVAL_SKILL_DESCRIPTION : null;
 }
 
 // ─── 路径 ─────────────────────────────────────────────
@@ -286,6 +319,11 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
           issues.push({ path: `${at}.name`, message: `名称重复：${name}` });
         }
         seenNames.add(name);
+        // 描述：**允许缺失**（旧配置没有该字段）→ 空串；超上限即不合格（SKILL.md 规范）。
+        const description = typeof it.description === 'string' ? it.description.trim() : '';
+        if (description.length > SKILL_DESC_MAX_CHARS) {
+          issues.push({ path: `${at}.description`, message: `描述不得超过 ${SKILL_DESC_MAX_CHARS} 字，实际 ${description.length}` });
+        }
         const content = typeof it.content === 'string' ? it.content : '';
         if (content.length > SKILL_MAX_CHARS) {
           issues.push({ path: `${at}.content`, message: `不得超过 ${SKILL_MAX_CHARS} 字，实际 ${content.length}` });
@@ -293,6 +331,7 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
         skills.push({
           id,
           name,
+          description,
           content,
           // ★ 服务端强制：内置与否由 id 决定，不看客户端传的 builtin
           builtin: BUILTIN_SKILL_IDS.includes(id),
@@ -357,23 +396,46 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
   return next;
 }
 
-// ─── 注入（供 retrieval-skill / tool-loop 使用）──────────────
+// ─── 注入（供 tool-loop 使用）──────────────────────────
 
 /**
- * 按序产出要注入的 system 文本块：
- *   `[内置 skill*] → [基础提示词] → [其余启用的 skill*]`
+ * 按序产出**恒定注入**的 system 文本块（2026-10-13 起为会话快照的内容）：
+ *   `[skill 目录] → [基础提示词] → [硬性规则]`
  *
- * · 顺序理由：内置 skill 含反幻觉规则，必须**先于**用户配置出现（既有约定：skill 在前）
- * · 空块不发（调用方据此不留空 system 消息 —— 与既有契约测试口径一致）
- * · 未配置时：产出 [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]，与默认构造器同源。
+ * 三条不可动摇的约定（改动前先读护栏 #1）：
+ *   · **skill 正文不进这里** —— 正文由 AI 通过 `use_skill` 按需加载（加载后由 tool-loop 追加）；
+ *   · **硬性规则必须在** —— N17 依赖它，且它不能随 skill 一起"按需"，否则未加载时出现约束空窗；
+ *   · 空块不发（调用方据此不留空 system 消息 —— 与既有契约测试口径一致）。
+ *
+ * @param cfg 当前对话配置（**只在新建会话的首轮**被读取，之后走会话快照）
  */
-export function promptConfigSystemBlocks(cfg: PromptConfig): string[] {
+export function promptSnapshotBlocks(cfg: PromptConfig): string[] {
   const blocks: string[] = [];
-  const push = (text: string): void => {
+  const push = (text: string | null): void => {
     if (text && text.trim().length > 0) blocks.push(text);
   };
-  cfg.skills.filter((s) => s.builtin && s.enabled).forEach((s) => push(s.content));
+  push(renderSkillCatalog(cfg.skills));
   push(cfg.prompt.content);
-  cfg.skills.filter((s) => !s.builtin && s.enabled).forEach((s) => push(s.content));
+  push(HARD_RULES_BLOCK);
   return blocks;
+}
+
+/** 快照里冻结的"可被 `use_skill` 调用"的 skill 清单（启用项，顺序 = 配置顺序） */
+export function enabledSkillIds(cfg: PromptConfig): string[] {
+  return cfg.skills.filter((s) => s.enabled).map((s) => s.id);
+}
+
+/**
+ * 构造注入快照（纯函数，SSOT）。
+ *
+ * ★ 生成链路与"建快照"必须共用本函数：换个算法就会与首轮实际注入的字节漂移（护栏 #3 同源）。
+ * ★ 快照**只含目录/提示词/硬规则 + 可调用 id 列表，绝不含 skill 正文**（护栏 #4：20×8000=16 万字）。
+ */
+export function buildInjectionSnapshot(cfg: PromptConfig, at: string = new Date().toISOString()): PromptInjectionSnapshot {
+  return { version: 1, at, blocks: promptSnapshotBlocks(cfg), skillIds: enabledSkillIds(cfg) };
+}
+
+/** 按 id 取启用中的 skill（`use_skill` 用）；禁用或不存在 → `null`（调用方须回可见错误） */
+export function findEnabledSkill(cfg: PromptConfig, id: string): PromptSkill | null {
+  return cfg.skills.find((s) => s.id === id && s.enabled) ?? null;
 }

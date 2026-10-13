@@ -30,6 +30,11 @@ export type ProgressStep =
   | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; args?: string; hits?: number; durationMs?: number; error?: string; response?: ChatToolResponse;
       /** interleave 锚点：本步发生时已发出的正文字符数（reducer 统一捕获，渲染方不必传） */
       afterChars?: number; order?: number }
+  /**
+   * skill 加载步骤（2026-10-13）。**单事件 = 单步**（无 start/end 配对）——
+   * 与工具行的区别只在 kind：渲染层据此换样式（配色 / 措辞 / 展开卡片），不共享"检索中…"文案。
+   */
+  | { kind: 'skill'; phase: 'end'; label: string; name: string; skillId: string; skillDescription?: string; chars?: number; alreadyLoaded?: boolean; error?: string; afterChars?: number; order?: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'answering' };
 
@@ -360,20 +365,21 @@ export function chatReducer(state: ChatUiState, action: ChatAction): ChatUiState
       };
 
     case 'streamProgress':
-      // ★ tool 步骤在此统一捕获 afterChars = 当前已渲染正文长度（"在哪句话之后调的"），
+      // ★ tool / skill 步骤在此统一捕获 afterChars = 当前已渲染正文长度（"在哪句话之后调的"），
       //   渲染层据此把调用痕迹插回正文原位（interleave），而不是全部堆在消息顶部。
       //   落盘还原路径由服务端 progress.afterChars 提供，两路口径一致（同一事件流同一时刻）。
+      //   ⚠️ 新增 kind 必须一并纳入下面的锚点补全，否则它会以 afterChars=0 排到正文最前面。
       return {
         ...state,
         streaming: {
           ...state.streaming,
           progress: [
             ...state.streaming.progress,
-            action.step.kind === 'tool'
+            action.step.kind === 'tool' || action.step.kind === 'skill'
               ? { ...action.step, afterChars: state.streaming.content.length, order: state.streaming.progress.length + state.streaming.reasoningSegs.length }
               : action.step,
           ],
-          // 工具调用发生 → 同样封当前思考段（调用后的思考是新一段）
+          // 工具调用 / skill 加载发生 → 同样封当前思考段（其后的思考是新一段）
           reasoningSegs: closeLastReasoningSeg(state.streaming.reasoningSegs),
         },
       };

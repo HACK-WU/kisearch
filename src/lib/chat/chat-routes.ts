@@ -67,6 +67,7 @@ import {
   TITLE_MAX_LEN,
   SYSTEM_PROMPT_MAX_LEN,
   appendMessage,
+  applyInjectionState,
   archiveConversation,
   chatRootDir,
   compactConversation,
@@ -88,8 +89,11 @@ import {
   MCP_TOOL_GROUPS,
   PROMPT_MAX_CHARS,
   PromptConfigError,
+  SKILL_DESC_MAX_CHARS,
+  SKILL_DESC_SUGGESTED_CHARS,
   SKILL_MAX_CHARS,
   SKILL_NAME_MAX_CHARS,
+  buildInjectionSnapshot,
   defaultPromptConfig,
   readPromptConfig,
   savePromptConfig,
@@ -548,6 +552,9 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       promptMaxChars: PROMPT_MAX_CHARS,
       skillMaxChars: SKILL_MAX_CHARS,
       skillNameMaxChars: SKILL_NAME_MAX_CHARS,
+      // 描述上限（SKILL.md 规范：1-2 句、建议 ≤120、>200 不合格）—— 前端字数提示读这里
+      skillDescMaxChars: SKILL_DESC_MAX_CHARS,
+      skillDescSuggestedChars: SKILL_DESC_SUGGESTED_CHARS,
       maxSkills: MAX_SKILLS,
     },
     // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
@@ -1131,6 +1138,32 @@ async function runGeneration(
     throw new ConversationNotFoundError(convId);
   }
 
+  /**
+   * ①.5 注入快照**在生成之前**固化（skill 按需加载，2026-10-13）。
+   *
+   * ★ 为什么必须前置而不是"流结束后再写"：`injected.blocks` 的定义是"**本次回答实际注入的内容**"，
+   *   若在生成结束后才读配置写快照，用户在这段时间里改了提示词/skill，快照就会记下"第 1 轮没用过
+   *   的版本"，此后每轮都按它注入 —— "第一轮"与"快照"从此不一致（challenger 质疑项，已修）。
+   * ★ 写后重读会话：让本轮 tool-loop 直接用刚固化的快照，闭环"首轮注入 = 快照"。
+   * ★ 失败只记日志、不阻断生成：快照是"少读配置"的优化，缺了也只是按当前配置重建一次。
+   */
+  try {
+    if (!convAfterPrep.injected) {
+      await applyInjectionState(scope, convId, {
+        snapshot: buildInjectionSnapshot(readPromptConfig(loadConfig()).config),
+      });
+      const reread = await readConversation(scope, convId);
+      if (reread) convAfterPrep = { ...reread, messages: convAfterPrep.messages };
+    }
+  } catch (err) {
+    chatLog(CHAT_LOG_EVENTS.WRITE_FAILED, {
+      convId,
+      code: CHAT_ERROR_CODES.CHAT_WRITE_FAILED,
+      retryable: true,
+      detail: `注入快照落盘失败：${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
   // ── ② 建立 SSE 响应（此后错误只能以事件下发）──
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1152,6 +1185,8 @@ async function runGeneration(
   let sources: SourceRef[] = [];
   // 走查 #11：检索过程步骤摘要（随 assistant 消息落盘，生成结束后仍可回看）
   let progress: ChatProgressStep[] = [];
+  /** 本轮**成功加载**的 skill id（2026-10-13；流结束后并入 `conv.loadedSkillIds`，供后续轮次重放） */
+  const loadedSkills: string[] = [];
   let messageId: string | null = null;
   let abortedFlag = false;
   // 批次 2：最近一次 tool_start 的工具名（tool_end 事件本身不带 name，日志用）
@@ -1231,6 +1266,32 @@ async function runGeneration(
         writeSseEvent(res, ev);
         continue;
       }
+      if (ev.type === 'skill') {
+        /**
+         * skill 按需加载（2026-10-13）：**单事件 → 一条 `phase:'end'` 步骤**（`kind:'skill'`）。
+         *
+         * · 落盘口径与工具步骤同级：只记 id / 名称 / 描述 / 正文字符数 / 锚点，不落正文
+         *   （正文是用户在配置里写的规则文本，且随时可从配置再取；落盘只会撑大会话文件）；
+         * · 失败与"重复加载"同样落一条步骤 —— 用户要看到的是"AI 试图加载过什么"，
+         *   失败也必须有可见原因（不得静默丢弃）。
+         */
+        progress.push({
+          phase: 'end',
+          kind: 'skill',
+          name: ev.name,
+          skillId: ev.id,
+          skillDescription: ev.description,
+          chars: ev.chars,
+          afterChars: content.length,
+          ...(ev.alreadyLoaded === true ? { alreadyLoaded: true } : {}),
+          ...(ev.error !== undefined ? { error: ev.error } : {}),
+        });
+        if (!ev.error && ev.alreadyLoaded !== true && ev.id && !loadedSkills.includes(ev.id)) {
+          loadedSkills.push(ev.id);
+        }
+        writeSseEvent(res, ev);
+        continue;
+      }
       if (ev.type === 'degraded') {
         // ★ 必打事件 ④ 检索降级触发（§1.3）：三类 reason
         chatLog(CHAT_LOG_EVENTS.RETRIEVAL_DEGRADED, {
@@ -1290,7 +1351,26 @@ async function runGeneration(
     ? { ...contextParts, assistant: contextParts.assistant + content.length }
     : undefined;
 
-  // ── ③ 锁内落 assistant ──
+  // ── ③ 已加载 skill 落盘（skill 按需加载，2026-10-13）──
+  //
+  // · 快照已在 ①.5 前置固化（保证"首轮注入 = 快照"），这里只补**本轮加载的 skill id**；
+  // · 追加去重，供后续轮次重放（不重放模型会反复调用 `use_skill`，既费轮次又让时间线噪音化）；
+  // · 独立锁段、独立 try：它是元数据更新，失败只记日志，不能拖垮本轮回答的落盘与事件序。
+  if (loadedSkills.length > 0) {
+    try {
+      await applyInjectionState(scope, convId, { addLoadedSkillIds: loadedSkills });
+    } catch (err) {
+      chatLog(CHAT_LOG_EVENTS.WRITE_FAILED, {
+        convId,
+        msgId: messageId ?? undefined,
+        code: CHAT_ERROR_CODES.CHAT_WRITE_FAILED,
+        retryable: true,
+        detail: `已加载 skill 落盘失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // ── ④ 锁内落 assistant ──
   try {
     if (streamError) {
       writeSseEvent(res, { type: 'error', code: streamError.code, error: streamError.error, ...(streamError.retryable !== undefined ? { retryable: streamError.retryable } : {}) });

@@ -44,7 +44,7 @@ export function layoutAnswerFlow(blocks: MarkdownBlock[], items: InterleaveItem[
 /** 时间线节点（demo D9 行结构）：tool 的 start/end 合并为一行，end 未到时保持 running */
 export interface TimelineNode {
   key: string;
-  kind: 'tool' | 'think' | 'answer';
+  kind: 'tool' | 'think' | 'answer' | 'skill';
   running: boolean;
   label: string;
   name?: string;
@@ -56,6 +56,11 @@ export interface TimelineNode {
   response?: ChatToolResponse;
   durationMs?: number;
   error?: string;
+  /** skill 步骤（2026-10-13）：id / 描述 / 正文字符数 / 是否本会话此前已加载 */
+  skillId?: string;
+  skillDescription?: string;
+  chars?: number;
+  alreadyLoaded?: boolean;
   /** interleave 锚点：本行发生在已发出正文的第几个字符后（缺省 = 0，即正文之前） */
   afterChars?: number;
   order?: number;
@@ -96,6 +101,26 @@ export function buildTimeline(steps: ProgressStep[]): TimelineNode[] {
           out.push({ key: `t${i}`, kind: 'tool', running: false, label: s.label, name: s.name, mode: s.mode, args: s.args, hits: s.hits, response: s.response, durationMs: s.durationMs, error: s.error, afterChars: s.afterChars });
         }
       }
+    } else if (s.kind === 'skill') {
+      /**
+       * skill 加载步骤（2026-10-13）：**单事件步骤**，没有 start/end 配对 ——
+       * 加载是进程内瞬时动作，`running` 恒 false（不显示"加载中…"这种永远见不到的中间态）。
+       * 失败与"已加载过"都在同一行内用不同措辞 + `error` 表达。
+       */
+      out.push({
+        key: `s${i}`,
+        kind: 'skill',
+        running: false,
+        label: s.label,
+        name: s.name,
+        skillId: s.skillId,
+        ...(s.skillDescription !== undefined ? { skillDescription: s.skillDescription } : {}),
+        ...(s.chars !== undefined ? { chars: s.chars } : {}),
+        ...(s.alreadyLoaded === true ? { alreadyLoaded: true } : {}),
+        ...(s.error !== undefined ? { error: s.error } : {}),
+        afterChars: s.afterChars,
+        order: s.order,
+      });
     } else if (s.kind === 'reasoning') {
       out.push({ key: `r${i}`, kind: 'think', running: true, label: '思考中…' });
     } else {

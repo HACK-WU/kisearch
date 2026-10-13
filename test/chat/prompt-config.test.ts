@@ -17,16 +17,29 @@ import {
   MAX_SKILLS,
   MCP_TOOL_NAMES,
   PROMPT_MAX_CHARS,
+  SKILL_DESC_MAX_CHARS,
   SKILL_MAX_CHARS,
   PromptConfigError,
+  buildInjectionSnapshot,
+  builtinSkillDefaultDescription,
   defaultPromptConfig,
+  enabledSkillIds,
+  findEnabledSkill,
   normalizePromptConfig,
   promptConfigPath,
-  promptConfigSystemBlocks,
+  promptSnapshotBlocks,
   readPromptConfig,
   savePromptConfig,
 } from '../../src/lib/chat/prompt-config.js';
-import { DEFAULT_CHAT_PROMPT, RETRIEVAL_SKILL_PROMPT, buildSystemMessages } from '../../src/lib/chat/retrieval/retrieval-skill.js';
+import {
+  DEFAULT_CHAT_PROMPT,
+  HARD_RULES_BLOCK,
+  RETRIEVAL_SKILL_DESCRIPTION,
+  RETRIEVAL_SKILL_PROMPT,
+  buildSystemMessages,
+  deriveSkillSummary,
+  renderSkillCatalog,
+} from '../../src/lib/chat/retrieval/retrieval-skill.js';
 import type { KiConfig } from '../../src/lib/config.js';
 
 let root = '';
@@ -45,21 +58,27 @@ after(() => {
 // ─────────────────────────────────────────────────────────────
 
 describe('默认内容同源', () => {
-  it('配置默认值与 buildSystemMessages 默认值相同', () => {
-    const legacy = buildSystemMessages('').map((m) => m.content);
-    assert.deepEqual(
-      promptConfigSystemBlocks(defaultPromptConfig()),
-      legacy,
-      '配置页面与上游注入必须使用同一份默认内容',
+  it('2026-10-13 起：恒定注入块 = 目录 → 基础提示词 → 硬性规则（**不含 skill 正文**）', () => {
+    const blocks = promptSnapshotBlocks(defaultPromptConfig());
+    assert.equal(blocks.length, 3);
+    assert.ok(blocks[0]!.startsWith('【可用 skill】'), '目录在最前：AI 先要知道"有哪些 skill 可用"');
+    assert.equal(blocks[1], DEFAULT_CHAT_PROMPT);
+    assert.equal(blocks[2], HARD_RULES_BLOCK);
+    assert.ok(
+      !blocks.some((b) => b.includes('## 指令')),
+      'skill 正文（按需加载）绝不能出现在恒定注入块里 —— 否则"按需"名存实亡',
     );
-    assert.deepEqual(legacy, [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]);
+    assert.ok(blocks[2]!.includes('知识库中未找到'), '硬性反幻觉规则必须恒注入（N17 依赖）');
   });
 
-  it('会话 prompt 非空时：新路径 = 注入块 + 会话 prompt（顺序不变）', () => {
+  it('会话 prompt 非空时：注入块在前、会话 prompt 在最后（硬性规则不被用户文案覆盖）', () => {
     const convPrompt = '我的自定义系统提示';
-    const legacy = buildSystemMessages(convPrompt).map((m) => m.content);
-    const next = [...promptConfigSystemBlocks(defaultPromptConfig()), convPrompt];
-    assert.deepEqual(next, legacy, '会话 prompt 必须仍在最后一段（skill 在前，反幻觉规则不被覆盖）');
+    const msgs = buildSystemMessages(convPrompt, promptSnapshotBlocks(defaultPromptConfig()));
+    assert.deepEqual(
+      msgs.map((m) => m.content),
+      [...promptSnapshotBlocks(defaultPromptConfig()), convPrompt],
+    );
+    assert.equal(msgs.at(-1)!.content, convPrompt, '会话 prompt 必须仍在最后一段');
   });
 
   it('文件不存在 → 默认配置且 issue 为 null（未配置是可预期状态，不是错误）', () => {
@@ -103,11 +122,16 @@ describe('读写往返', () => {
     input.prompt.content = '';
     input.skills[0]!.content = '用户自己写的检索策略';
     input.skills[0]!.enabled = false;
-    input.skills.push({ id: 'custom', name: '自定义', content: '保留我的风格', builtin: false, enabled: true, at: input.prompt.at });
+    input.skills.push({ id: 'custom', name: '自定义', description: '自定义 skill 的描述', content: '保留我的风格', builtin: false, enabled: true, at: input.prompt.at });
     const saved = savePromptConfig(cfg, input);
     const read = readPromptConfig(cfg).config;
     assert.deepEqual(read, saved);
-    assert.deepEqual(promptConfigSystemBlocks(read), ['保留我的风格']);
+    // 清空的基础提示词不发；停用的内置 skill 不进目录；启用的自定义 skill 只以"目录"形态出现
+    assert.deepEqual(promptSnapshotBlocks(read), [
+      renderSkillCatalog(read.skills)!,
+      HARD_RULES_BLOCK,
+    ]);
+    assert.ok(promptSnapshotBlocks(read)[0]!.includes('保留我的风格') === false, '目录里只放描述，不放正文');
   });
 
   it('save → read 内容一致；落盘路径为 {chatDir}/prompt-config.json', () => {
@@ -244,57 +268,150 @@ describe('写入的原子性与权限', () => {
   });
 });
 
-describe('注入顺序', () => {
-  it('内置 skill → 基础提示词 → 用户 skill；空块不发', () => {
+describe('注入顺序（恒注入块 · 2026-10-13 改口径）', () => {
+  it('目录 → 基础提示词 → 硬性规则；停用项不进目录、空块不发', () => {
     const issues: Parameters<typeof normalizePromptConfig>[1] = [];
     const cfg2 = normalizePromptConfig(
       {
         prompt: { content: '基础提示词' },
         skills: [
-          { id: 'builtin-retrieval', name: '知识库检索', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
+          { id: 'builtin-retrieval', name: '知识库检索', description: '检索知识库', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
           { id: 'empty-one', name: '空的', content: '   ', enabled: true },
-          { id: 'style', name: '风格', content: '先给结论', enabled: true },
-          { id: 'off', name: '停用的', content: '不该出现', enabled: false },
+          { id: 'style', name: '风格', description: '按我的风格回答', content: '先给结论', enabled: true },
+          { id: 'off', name: '停用的', description: '不该出现', content: '不该出现', enabled: false },
         ],
       },
       issues,
     );
     assert.deepEqual(issues, []);
-    assert.deepEqual(promptConfigSystemBlocks(cfg2), [RETRIEVAL_SKILL_PROMPT, '基础提示词', '先给结论']);
+    const blocks = promptSnapshotBlocks(cfg2);
+    assert.equal(blocks.length, 3);
+    const catalog = blocks[0]!;
+    assert.ok(catalog.includes('知识库检索（builtin-retrieval）：检索知识库'));
+    assert.ok(catalog.includes('风格（style）：按我的风格回答'));
+    assert.ok(catalog.includes('（未填写描述）'), '空描述的条目仍进目录（否则 AI 永远不知道它存在）');
+    assert.ok(!catalog.includes('停用的'), '停用的 skill 不进目录 = 调不到');
+    assert.equal(blocks[1], '基础提示词');
+    assert.equal(blocks[2], HARD_RULES_BLOCK);
+  });
+});
+
+describe('skill 描述（SKILL.md 规范，2026-10-13 新增）', () => {
+  it('默认内置 skill 带描述；描述与正文是两份内容（描述进目录，正文按需加载）', () => {
+    const s = defaultPromptConfig().skills[0]!;
+    assert.equal(s.description, RETRIEVAL_SKILL_DESCRIPTION);
+    assert.equal(builtinSkillDefaultDescription('builtin-retrieval'), RETRIEVAL_SKILL_DESCRIPTION);
+    assert.equal(builtinSkillDefaultDescription('other'), null);
+    assert.ok(s.description.length <= 120, '描述应落在建议长度内（1-2 句，避免清单里被截断）');
+    assert.notEqual(s.description, s.content);
+  });
+
+  it('缺失描述 → 归一化为空串且不报错（旧配置兼容）', () => {
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    const out = normalizePromptConfig(
+      { skills: [{ id: 'builtin-retrieval', name: '知识库检索', content: RETRIEVAL_SKILL_PROMPT }] },
+      issues,
+    );
+    assert.deepEqual(issues, []);
+    assert.equal(out.skills[0]!.description, '');
+  });
+
+  it(`描述超 ${SKILL_DESC_MAX_CHARS} 字 → 报错（不静默截断）`, () => {
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig(
+      { skills: [{ id: 'builtin-retrieval', name: 'n', description: 'x'.repeat(SKILL_DESC_MAX_CHARS + 1), content: '' }] },
+      issues,
+    );
+    assert.ok(issues.some((i) => i.path === 'skills[0].description' && i.message.includes('描述不得超过')));
+  });
+
+  it('描述落盘 → 读回一致', () => {
+    const saved = savePromptConfig(cfg, {
+      skills: [{ id: 'builtin-retrieval', name: '知识库检索', description: '库内事实与排障。触发："查知识库"。', content: 'x' }],
+    });
+    assert.equal(saved.skills[0]!.description, '库内事实与排障。触发："查知识库"。');
+    assert.equal(readPromptConfig(cfg).config.skills[0]!.description, saved.skills[0]!.description);
+  });
+});
+
+describe('目录与快照（恒注入的内容与形状）', () => {
+  it('目录带 id（调用键）+ 名称 + 描述，并写明"未加载的正文不可见"', () => {
+    const catalog = renderSkillCatalog(defaultPromptConfig().skills)!;
+    assert.ok(catalog.includes('builtin-retrieval'), 'id 是 use_skill 的调用键，必须出现');
+    assert.ok(catalog.includes('知识库检索'));
+    assert.ok(catalog.includes(RETRIEVAL_SKILL_DESCRIPTION));
+    assert.ok(catalog.includes('use_skill'));
+    assert.ok(catalog.includes('未加载的 skill 正文不在本次上下文中'), '必须防止模型凭名称编造规则');
+  });
+
+  it('全部停用 → null（调用方据此不注入空块）', () => {
+    const skills = defaultPromptConfig().skills.map((s) => ({ ...s, enabled: false }));
+    assert.equal(renderSkillCatalog(skills), null);
+  });
+
+  it('描述缺失时回退正文摘要（取「用途：」/「**目的**：」首句，≤120 字）', () => {
+    const summary = deriveSkillSummary(RETRIEVAL_SKILL_PROMPT);
+    assert.ok(summary.startsWith('用当前知识库中的可核对片段'), `实际：${summary}`);
+    assert.ok(summary.length <= 121);
+    assert.equal(deriveSkillSummary('# 标题\n\n**目的**：干这件事。细节略。'), '干这件事。');
+    assert.equal(deriveSkillSummary('用途：查东西。补充说明。'), '查东西。');
+  });
+
+  it('快照：目录 + 提示词 + 硬规则 + 启用 id 列表，**绝不含 skill 正文**', () => {
+    const snap = buildInjectionSnapshot(defaultPromptConfig(), '2026-10-13T00:00:00.000Z');
+    assert.equal(snap.version, 1);
+    assert.equal(snap.at, '2026-10-13T00:00:00.000Z');
+    assert.deepEqual(snap.skillIds, ['builtin-retrieval']);
+    assert.equal(snap.blocks.length, 3);
+    assert.ok(!JSON.stringify(snap).includes('## 指令'), '快照含正文会把会话文件撑爆（护栏 #4）');
+  });
+
+  it('enabledSkillIds / findEnabledSkill：停用即不可调用', () => {
+    const cfg2 = defaultPromptConfig();
+    cfg2.skills[0]!.enabled = false;
+    assert.deepEqual(enabledSkillIds(cfg2), []);
+    assert.equal(findEnabledSkill(cfg2, 'builtin-retrieval'), null);
+    cfg2.skills[0]!.enabled = true;
+    assert.equal(findEnabledSkill(cfg2, 'builtin-retrieval')?.name, '知识库检索');
+    assert.equal(findEnabledSkill(cfg2, 'nope'), null);
   });
 });
 
 // ─────────────────────────────────────────────────────────────
 
-describe('接入后：buildSystemMessages 使用配置产出的注入块（工作项 3）', () => {
-  it('未配置（默认配置）→ 与默认单参调用逐字一致', () => {
-    const legacy = buildSystemMessages('会话提示');
-    const wired = buildSystemMessages('会话提示', promptConfigSystemBlocks(defaultPromptConfig()));
-    assert.deepEqual(wired, legacy, '接入配置层后，未配置时的上游 messages 必须一字不差');
+describe('接入后：buildSystemMessages 渲染注入块（2026-10-13 改口径）', () => {
+  it('不带块参数（兜底形态）：基础提示词 + 硬性规则，**没有 skill 正文**', () => {
+    assert.deepEqual(
+      buildSystemMessages('会话提示').map((m) => m.content),
+      [DEFAULT_CHAT_PROMPT, HARD_RULES_BLOCK, '会话提示'],
+    );
   });
 
-  it('注入顺序：内置 skill → 基础提示词 → 用户 skill → 会话 prompt', () => {
+  it('注入顺序：目录 → 基础提示词 → 硬性规则 → 会话 prompt', () => {
     const cfg = defaultPromptConfig();
     cfg.prompt.content = '基础提示词内容';
     cfg.skills.push({
-      id: 'user-a', name: 'A', content: '用户 skill A', builtin: false, enabled: true, at: cfg.prompt.at,
+      id: 'user-a', name: 'A', description: '用户 skill A 的描述', content: '用户 skill A 正文', builtin: false, enabled: true, at: cfg.prompt.at,
     });
-    const msgs = buildSystemMessages('会话提示', promptConfigSystemBlocks(cfg));
-    assert.deepEqual(
-      msgs.map((m) => m.content),
-      [RETRIEVAL_SKILL_PROMPT, '基础提示词内容', '用户 skill A', '会话提示'],
-      '反幻觉规则（内置 skill）必须仍在最前，会话 prompt 仍在最后',
-    );
+    const msgs = buildSystemMessages('会话提示', promptSnapshotBlocks(cfg));
+    const contents = msgs.map((m) => m.content);
+    assert.equal(contents.length, 4);
+    assert.ok(contents[0]!.includes('用户 skill A 的描述'));
+    assert.ok(!contents[0]!.includes('用户 skill A 正文'), '目录里不得出现正文');
+    assert.equal(contents[1], '基础提示词内容');
+    assert.equal(contents[2], HARD_RULES_BLOCK, '硬性规则必须在会话 prompt 之前');
+    assert.equal(contents[3], '会话提示');
     assert.ok(msgs.every((m) => m.role === 'system' && m.content.trim().length > 0), '不留空 system 消息');
   });
 
-  it('停用的 skill 与纯空白块都不出现在注入结果里', () => {
+  it('停用的 skill 不进目录；纯空白块不发', () => {
     const cfg = defaultPromptConfig();
     cfg.skills.push(
-      { id: 'off', name: '停用', content: '不该出现', builtin: false, enabled: false, at: cfg.prompt.at },
-      { id: 'blank', name: '空白', content: '   ', builtin: false, enabled: true, at: cfg.prompt.at },
+      { id: 'off', name: '停用', description: '不该出现', content: '不该出现', builtin: false, enabled: false, at: cfg.prompt.at },
     );
-    assert.deepEqual(buildSystemMessages('', promptConfigSystemBlocks(cfg)).map((m) => m.content), [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT]);
+    const contents = buildSystemMessages('', promptSnapshotBlocks(cfg)).map((m) => m.content);
+    assert.equal(contents.length, 3);
+    assert.ok(!contents.join('\n').includes('不该出现'));
   });
 
   it('显式传空块数组 → 只剩会话 prompt（调用方保留"清空注入"的能力）', () => {

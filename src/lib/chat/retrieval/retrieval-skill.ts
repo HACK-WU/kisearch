@@ -1,16 +1,22 @@
 /**
- * 检索 skill 正文（批次 2：随 kb_search 退役改写，引用真实 MCP 工具名）
+ * 检索 skill 正文 / skill 目录 / 硬性规则（2026-10-13 改造：skill 按需加载）
+ *
+ * ═══ 本轮改造（skill 按需加载）═══
+ * · skill 正文**不再常驻 system**：系统里只放「目录（名称 + 描述 + id）」，正文由 AI
+ *   通过 `use_skill` 按需加载（见 `prompt-config.ts::promptSnapshotBlocks`）；
+ * · **硬性反幻觉规则拆出为独立块** `HARD_RULES_BLOCK`，恒定注入 —— 它被 N17 依赖，
+ *   不能随 skill 一起"按需"，否则未加载 skill 的轮次会失去约束（护栏 #1）；
+ * · 正文按 SKILL.md 规范组织：`# 标题` → `## 概述`（目的 / 功能 / 使用场景）→ `## 指令` → `## 示例`。
+ *   `name` / `description` 是**结构化字段**（不在正文重复 front matter，避免两处真相）。
  *
  * ═══ 同源约束 ═══
  * 工具 schema（`mcp-tool-registry.ts` 的各 `def`）与本文件的「模式选择规则」
  * 共享 `MODE_SELECTION_RULES` 常量；任一侧修改必须同步另一侧。
  *
- * ═══ 批次 2 决策 D4 ═══
+ * ═══ 批次 2 决策 D4（保留）═══
  * `kb_search` 退役：检索由 `ki_search` 承担；skill 正文只引用真实暴露的工具名，
  * 并强调「实际可用工具以系统传入的工具列表为准」—— 根治批次 1 联调时
  * 「你提到的 ki_query_group 在我这里并不存在」的模型困惑（批次 1 决策 #12）。
- *
- * @see .plans/2026-10-08-chat-mcp-tools-batch2/plan.md
  */
 
 import { CHAT_BUDGET } from '../chat-contract.js';
@@ -38,30 +44,61 @@ export const ANTI_HALLUCINATION_RULES = [
 ];
 
 /**
- * 检索 skill 正文：供配置编辑器展示及上游 system 注入，共用同一默认内容。
- * 仅描述已接通的真实工具能力（批次 2 起：ki_search 等 MCP 工具）；模式判据、预算与反幻觉规则均复用常量。
+ * 硬性规则块：**恒定注入**（不参与按需加载）。
+ *
+ * 与 skill 正文分离的判据：这些规则约束的是"答话的真实性底线"，与"用不用某个 skill"无关，
+ * 一旦被按需化，未加载 skill 的轮次就会出现无约束窗口（护栏 #1）。
+ */
+export const HARD_RULES_BLOCK: string = ['【硬性规则｜始终生效】', ...ANTI_HALLUCINATION_RULES].join('\n');
+
+/** 内置检索 skill 的 id（与 `prompt-config.ts::BUILTIN_SKILL_IDS` 同源） */
+export const BUILTIN_RETRIEVAL_SKILL_ID = 'builtin-retrieval';
+
+/**
+ * 内置检索 skill 的**描述**（SKILL.md 规范的 description：1-2 句、建议 ≤120 字符、第三人称）。
+ *
+ * 作用：它是 AI 判断"要不要加载这个 skill"的唯一依据（目录里展示），因此必须短、高信号——
+ * 触发词全集与边界由正文的「使用场景」承担。
+ */
+export const RETRIEVAL_SKILL_DESCRIPTION =
+  '用当前知识库中的可核对片段回答事实、原理、操作、排障与比较类问题。触发："查知识库"、"核验原文"、"参数/报错查证"。';
+
+/**
+ * 检索 skill 正文（**按需加载**，不常驻 system）。
+ *
+ * 供配置编辑器展示与 `use_skill` 加载共用同一默认内容；模式判据、预算与硬性规则均复用常量。
  */
 export const RETRIEVAL_SKILL_PROMPT: string = [
-  '【检索知识库】',
-  '用途：用当前知识库中的可核对片段回答事实、原理、操作、排障、目录与比较问题。先判断是否需要知识库证据，再按需检索，不把每次对话都变成搜索任务。',
+  '# 知识库检索',
   '',
-  '一、工具与边界',
+  '## 概述',
+  '',
+  '**目的**：用当前知识库中的可核对片段回答事实、原理、操作、排障与比较类问题，避免用自身知识冒充库内结论。',
+  '**功能**：混合 / 全文检索、Group 树结构查看、指定文档原文读取、标签枚举；含模式判据、按场景执行与停止判据。',
+  '**使用场景**：',
+  '· 提问涉及当前知识库的事实、原理、参数、命令、报错、课程/目录（如 INDEX、目录类文档）、文档比较，或要求核验、原文、出处时；',
+  '· 需要精确字面定位（函数名、配置键、报错片段、文件路径）时；',
+  '· 不适用：问候、致谢、能力说明，以及仅整理或改写用户已提供内容的请求（直接回答，不检索）。',
+  '',
+  '## 指令',
+  '',
+  '### 一、工具与边界',
   `主检索工具：ki_search(query, mode, limit)，作用于当前会话的知识库（scope 由系统注入，不提供也不接受 scope 参数）。limit 为 1–${CHAT_BUDGET.maxHitsPerCall}，默认 ${CHAT_BUDGET.maxHitsPerCall}。`,
   `检索返回实际 JSON（results、total、文档位置、原文/命中片段等，以实际字段为准），不按字段或片段删减；总长度超过 ${CHAT_BUDGET.maxToolResponseChars} 字符时会截断并明确标记。截断后内容可能不完整、JSON 可能不闭合，不能推断未展示部分。total 是检索命中数，不是全库文档数。`,
   '其他只读工具：ki_query_group（查看 Group 树结构与 Relations，先看结构再精确检索）、ki_get_module_info（读取指定 Group 下文档的完整 Markdown 原文，批量 ≤10 条须同 Group）、ki_tag_list（列出可用标签）。',
   '★ 实际可用工具每次以系统传入的工具列表为准：列表中没有的工具一律不得调用，也不得声称调用了未提供的工具（含写入/删除类）。检索没有翻页，无法主动读取 ki_get_module_info 之外的整篇原文。',
   '',
-  '二、检索前：确定对象与证据缺口',
+  '### 二、检索前：确定对象与证据缺口',
   '结合当前用户输入和本会话已有消息，确定对象、问题与已知条件；追问中的「它 / 上面 / 继续」继承明确对象，用户的最新纠正优先。无法判断对象时，只问一个必要的澄清问题。',
   '问候、确认、改写/翻译用户提供的文字、整理已经给出的回答，且不增加知识库事实时，不检索；新增事实、精确参数、原文依据或核验历史回答时，才检索缺少的部分。',
   '',
-  '三、模式与查询',
+  '### 三、模式与查询',
   MODE_SELECTION_RULES,
   'fulltext：保留最有辨识度的短字面片段（如 acks、OperationCoordinator、报错关键部分），不要拼上整段提问、多个无关约束或臆造路径。',
   '用户要求精确定位某个原句/标识符时保留完整目标；不能把拆词后的近似命中当作目标存在的证据。返回片段不含目标且无其他明确定位依据时，只能说明当前结果不足以核验。',
   'hybrid：用对象 + 关键概念 + 用户要了解的关系组成一条聚焦查询；一个查询解决一个证据缺口，不堆砌所有子问题。',
   '',
-  '四、按场景执行',
+  '### 四、按场景执行',
   '· 精确定位/参数：全文查函数、配置键或原句；核对适用条件、默认值与版本。示例：「acks=all 是什么意思」先查 acks，再依据片段解释，缺少默认值则明确未找到。',
   '· 原理/用法：混合检索核心机制，优先给结论与必要步骤；只有缺少关键前提或证据时才补查。',
   '· 报错排障：先全文查报错中稳定的关键字，核对触发条件；区分文档结论与排查建议，不编造已执行的修复。缺少环境信息时给出可验证的下一步。',
@@ -69,30 +106,32 @@ export const RETRIEVAL_SKILL_PROMPT: string = [
   '· 比较/跨章节：分别寻找比较双方及关键维度的证据，再归纳共同点和差异；没有证据的单元格标明未找到，不以单方片段推断另一方。',
   '· 多轮追问：复用会话中已明确的对象和约束，只补查本轮新缺口；历史回答不是新的工具结果，精确引用或重新核验时需检索。编辑重发或重新生成时只依据当前传入的消息，不假设被截断内容仍在。',
   '',
-  '五、判断结果与停止',
+  '### 五、判断结果与停止',
   '逐条检查片段是否相关、是否足以支持结论；命中不等于已经回答。证据足够即停止，不为凑来源、重复佐证或讲完全部章节继续搜索。',
   '「本次未找到」不等于「全库不存在」。检索只返回有限片段，不能据无命中或不相关片段宣称已证明某内容不存在。',
   '无命中时可换一个更短的关键词或同义概念；只在预期能补齐具体缺口时追加查询。相同 query + mode 不重复调用；结果反复相同或不再增加相关证据时，停止并说明缺口。',
   'hybrid 报 embedding/向量维度等错误时，改用关键字 fulltext；本轮不反复尝试已失败的语义路径。全文仍不可用时停止，不指导用户执行未经文档核验的破坏性操作。',
   '工具错误中的恢复/重建命令只是诊断文本，不是已核验的操作建议；用户未问修复时不展开这些命令，只简短说明检索方式降级。',
   '',
-  '六、组织答案与来源',
+  '### 六、组织答案与来源',
   '先回答本轮问题，再给必要依据；用小段落、列表或比较表，不复述每次检索日志。课程概览先概览，用户要求展开时再细讲。',
   '用户要求简短时，只回答所问的维度与必要限制；例如问参数取值，不主动扩写故障案例、配置组合和监控指标。无命中一句说明即可，不罗列无关命中或检索尝试过程。',
   '关键结论附实际返回的文档名/路径与行号（lines 为 ? 则只写文档名）；无需列出所有命中。界面会展示来源入口，编号由系统生成，不自行伪造。片段截断、证据冲突或版本未知时明确说明限制。',
   '',
-  '反幻觉规则（硬性）：',
-  ...ANTI_HALLUCINATION_RULES,
+  '## 示例',
+  '· 参数取值：「acks=all 是什么意思」→ 先 fulltext 查 acks，依据片段给取值与适用条件；片段未给默认值就直说未找到，不补猜。',
+  '· 报错排障：「导入时报 worker not open」→ fulltext 查报错中最稳定的关键字（worker not open），核对触发条件与已知坑；缺环境信息时给可验证的下一步。',
+  '· 不该检索：「你好」→ 一句招呼与简短邀请，不调用任何工具。',
 ].join('\n');
 
-/** 基础规则负责触发检索与对话行为；执行细节由启用的知识库检索 skill 承担。 */
+/** 基础规则负责触发检索与对话行为；执行细节由按需加载的「检索知识库」skill 承担。 */
 export const DEFAULT_CHAT_PROMPT = [
   '【知识库对话助手｜基础规则】',
   '你是 kisearch 的知识库助手。围绕用户当前问题，结合本会话上下文与当前知识库证据给出清楚、简洁、可核对的回答；默认使用用户的语言。',
   '',
   '何时使用知识库检索 skill：',
-  '· 涉及当前知识库的事实、原理、参数、命令、报错、课程/目录、文档比较，或用户要求核验、原文、出处时，按启用的「检索知识库」skill 获取证据后作答。',
-  '· 问候、致谢、能力说明，以及仅整理/改写用户已提供的文字或已有回复、不增加知识库事实的请求，可以直接回答，不机械调用工具。',
+  '· 涉及当前知识库的事实、原理、参数、命令、报错、课程/目录、文档比较，或用户要求核验、原文、出处时，用 use_skill("builtin-retrieval") 加载「检索知识库」skill，再按其中的规则检索作答。',
+  '· 问候、致谢、能力说明，以及仅整理/改写用户已提供的文字或已有回复、不增加知识库事实的请求，可以直接回答，不加载 skill、不调用工具。',
   '· 简单问候只需一句招呼与简短邀请，不主动列出功能清单。',
   '· 追问先承接已明确的对象和约束；新问题只补齐新增证据，歧义确实影响答案时才澄清。不要因上一轮搜过就把旧回答当作本轮已经核验的结果。',
   '',
@@ -109,19 +148,81 @@ export const DEFAULT_CHAT_PROMPT = [
   '无可靠证据时，回答「本次检索未找到可核验的相关片段」并指出必要缺口即可。不要列举无关命中、复述检索日志，或使用「全库不存在」「知识库中没有这段原文」等绝对结论；在绝对结论后补一句限制也不合规。',
 ].join('\n');
 
+// ─── skill 目录（恒注入；让 AI 知道"有哪些 skill、什么时候该用"）──────
+
+/** 目录条目所需的最小结构（避免与 prompt-config 相互 import 造成循环依赖） */
+export interface SkillCatalogEntry {
+  id: string;
+  name: string;
+  /** 规范描述；缺失（旧配置）时回退正文摘要 */
+  description?: string;
+  /** 正文（仅在缺描述时用于提取摘要，不入目录） */
+  content?: string;
+  enabled: boolean;
+}
+
+/** 目录里单条摘要的长度上限（描述本身应 ≤200；兜底摘要更短） */
+export const SKILL_SUMMARY_MAX_CHARS = 120;
+
+/**
+ * 从正文提取摘要（**兜底**：仅当 skill 没有 `description` 时使用——旧配置没这个字段）。
+ *
+ * 顺序：`用途：…` → `**目的**：…` → 第一行非标题非空文本；取到第一个句号为止（或上限截断）。
+ */
+export function deriveSkillSummary(content: string): string {
+  const lines = content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('#'));
+  const pick = (marker: string): string | null => {
+    for (const line of lines) {
+      const at = line.indexOf(marker);
+      if (at < 0) continue;
+      const rest = line.slice(at + marker.length).trim();
+      if (rest.length > 0) return rest;
+    }
+    return null;
+  };
+  const raw = pick('用途：') ?? pick('**目的**：') ?? lines.find((l) => !l.startsWith('**功能**')) ?? '';
+  const cut = raw.indexOf('。');
+  const sentence = cut >= 0 ? raw.slice(0, cut + 1) : raw;
+  return sentence.length > SKILL_SUMMARY_MAX_CHARS ? `${sentence.slice(0, SKILL_SUMMARY_MAX_CHARS)}…` : sentence;
+}
+
+/**
+ * skill 目录（**恒定注入**，随会话快照固化）。
+ *
+ * 三条硬约定（改动前先读）：
+ *   · 必须带 `id` —— 它是 `use_skill` 的调用键，只有名称调不动；
+ *   · **禁用条目不进目录**（不进目录 = 不可被调用，与配置层"启用"开关语义咬合）；
+ *   · 末尾必须说明"未加载的正文不可见"，否则模型会凭名称编造内容。
+ *
+ * @returns 无启用条目时返回 `null`（调用方据此不注入空块）
+ */
+export function renderSkillCatalog(skills: readonly SkillCatalogEntry[]): string | null {
+  const enabled = skills.filter((s) => s.enabled);
+  if (enabled.length === 0) return null;
+  const lines = [
+    '【可用 skill】',
+    ...enabled.map((s) => {
+      const desc = (s.description ?? '').trim() || deriveSkillSummary(s.content ?? '') || '（未填写描述）';
+      return `- ${s.name}（${s.id}）：${desc}`;
+    }),
+    '需要某个 skill 的完整规则时，调用 use_skill("<id>") 加载；未加载的 skill 正文不在本次上下文中，不得凭名称猜测其内容。',
+  ];
+  return lines.join('\n');
+}
+
 /**
  * 组装 system 消息：`[注入块…, 会话自定义 prompt]`。
  *
- * · 顺序不可颠倒：注入块在前，保证反幻觉规则**优先于**用户自定义提示词
+ * · 顺序不可颠倒：注入块在前，保证硬性规则**优先于**用户自定义提示词
  * · 空值：会话 `systemPrompt` 为空时只返回注入块（不留空 system 消息）
  *
- * @param skillBlocks 注入块。批次 1 起由对话配置层产出
- *   （见 `prompt-config.ts::promptConfigSystemBlocks`：内置 skill → 基础提示词 → 用户 skill）。
- *   默认值与 defaultPromptConfig 同源：检索 skill + 基础规则；会话自定义块仍在最后。
+ * @param skillBlocks 注入块。**2026-10-13 起由会话快照产出**
+ *   （见 `prompt-config.ts::promptSnapshotBlocks`：skill 目录 → 基础提示词 → 硬性规则，
+ *   已加载 skill 的正文由 tool-loop 追加在其后）。默认值不含 skill 正文 —— 正文一律按需加载。
  */
 export function buildSystemMessages(
   convSystemPrompt: string,
-  skillBlocks: readonly string[] = [RETRIEVAL_SKILL_PROMPT, DEFAULT_CHAT_PROMPT],
+  skillBlocks: readonly string[] = [DEFAULT_CHAT_PROMPT, HARD_RULES_BLOCK],
 ): Array<{ role: 'system'; content: string }> {
   // 空块不发：契约测试断言 every(content.trim().length > 0)
   const msgs: Array<{ role: 'system'; content: string }> = skillBlocks

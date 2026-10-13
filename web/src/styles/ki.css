@@ -3215,6 +3215,27 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 /* ── 列表层条目卡片（提示词 / Skill）── */
 /* grid 列必须 minmax(0,1fr)：否则 grid 项 min-width:auto 会被摘要长文本撑开（第四轮修正：消除层内横向滚动 113px） */
 .ki-chat-cfg__list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-2); }
+/* ── 条目卡片内的点击区 + 启用开关（2026-10-13）──
+   `.ki-chat-cfg__item` 由 button 改为 div（按钮不能嵌按钮）：卡片保留原外观，
+   内部两枚按钮并列 —— 点击区（`__item-hit`，flex:1）+ 开关（`__switch`，卡片内右侧）。 */
+.ki-chat-cfg__item-hit {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  flex: 1; min-width: 0;
+  background: none; border: 0; padding: 0;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ki-chat-cfg__item-hit:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; border-radius: 4px; }
+.ki-chat-cfg__item[data-disabled="true"] { opacity: 0.6; }
+/* skill 启用开关**复用**工具开关的 `.ki-chat-cfg__sw`（同层同一外观语言，
+   不另造第二套 switch 样式）—— 见 PromptConfigLayer 卡片渲染处的注释。 */
+/* 描述输入框（skill 专用，2026-10-13）：**紧凑两行**，不参与"撑满剩余高度"。
+   ★ 必须同时写模态作用域的那条：`.ki-chat-cfg__modal .ki-chat-cfg__ta { flex:1; min-height:160px }`
+     特异性更高（2 个类），只写 `.ki-chat-cfg__ta--desc` 会被它盖掉 —— 实测表现为
+     描述框被拉成 160px 高的大空框（用户截图反馈"描述框太宽/太大"）。 */
+.ki-chat-cfg__ta--desc { min-height: 0; resize: vertical; line-height: 1.5; }
+.ki-chat-cfg__modal .ki-chat-cfg__ta--desc { flex: 0 0 auto; min-height: 0; height: auto; }
+.ki-chat-cfg__badge--warn { color: var(--ki-color-warning); }
+.ki-chat-cfg__badge--over { color: var(--ki-color-danger); }
 .ki-chat-cfg__item {
   display: flex; align-items: center; gap: var(--ki-space-2); width: 100%; min-width: 0;
   text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
@@ -3249,13 +3270,18 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__segb { padding: 6px 16px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); border: 0; background: transparent; border-radius: 999px; transition: background 160ms, color 160ms, box-shadow 160ms; }
 .ki-chat-cfg__segb:hover { color: var(--ki-color-text); }
 .ki-chat-cfg__segb[aria-selected="true"] { background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500; box-shadow: 0 1px 2px rgba(0, 0, 0, .10); }
+/* 预览区：内容已改为 Markdown 渲染（2026-10-13）—— `white-space` 必须复位成 normal，
+   否则 `pre-wrap` 会把 Markdown 渲染出来的块级元素之间的换行放大成空白行 */
 .ki-chat-cfg__view {
-  margin: 0; white-space: pre-wrap; word-break: break-word;
+  margin: 0; white-space: normal; word-break: break-word;
   font-size: var(--ki-font-size-sm); line-height: 1.7; color: var(--ki-color-text);
   background: var(--ki-color-bg-secondary); border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-sm); padding: var(--ki-space-3);
   max-height: 320px; overflow: auto;
 }
+.ki-chat-cfg__view > :first-child { margin-top: 0; }
+.ki-chat-cfg__view > :last-child { margin-bottom: 0; }
+.ki-chat-cfg__view-empty { color: var(--ki-color-text-subtle); }
 .ki-chat-cfg__meta { margin: var(--ki-space-2) 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; }
 .ki-chat-cfg__del { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
 .ki-chat-cfg__del:hover { text-decoration: underline; }
@@ -3440,6 +3466,24 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-tl__node--tool.ki-chat-tl__node--run::before { background: var(--ki-color-primary); animation: ki-chat-pulse 1.1s ease-in-out infinite; }
 .ki-chat-tl__chev { margin-left: auto; color: var(--ki-color-text-subtle); transition: transform 160ms; }
 .ki-chat-tl__node--tool[aria-expanded="true"] .ki-chat-tl__chev { transform: rotate(90deg); }
+/* ── skill 加载行（2026-10-13）：与工具行**刻意不同** ──
+   用户口径：「像 mcp 调用那样显示，样式不一样」→ 结构同构、视觉分家：
+   · 行首标记 = **紫色圆角方点**（工具是绿色圆点、思考是紫色圆点 → 颜色 + 形状双重区分）
+   · 名称胶囊 = 紫色浅底（工具胶囊是灰底 mono，用于"核对工具名"）
+   · 措辞 = "加载 skill"，与工具行的"检索知识库"完全不同轨 */
+.ki-chat-tl__node--skill { cursor: pointer; border-radius: var(--ki-radius-sm); }
+.ki-chat-tl__node--skill:hover { background: var(--ki-color-hover); }
+.ki-chat-tl__node--skill::before { background: var(--ki-color-purple); border-radius: 2px; }
+.ki-chat-tl__node--skill.ki-chat-tl__node--skill-fail::before { background: var(--ki-color-warning); }
+.ki-chat-tl__skill {
+  flex: 0 0 auto; font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-purple);
+  padding: 1px 6px; border-radius: 5px;
+  background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent);
+}
+.ki-chat-tl__node--skill[aria-expanded="true"] .ki-chat-tl__chev { transform: rotate(90deg); }
+/* skill 展开卡片：左侧紫色强调边，一眼区别于工具卡片 */
+.ki-chat-tool--skill { border-left: 2px solid var(--ki-color-purple); }
 .ki-chat-tool {
   margin: 4px 0 6px;
   background: var(--ki-color-bg-secondary);

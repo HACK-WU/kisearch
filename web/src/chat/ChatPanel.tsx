@@ -81,7 +81,7 @@ import { MarkdownPreview, renderMarkdownBlocks, type MarkdownBlock } from '@/com
 import type { ChatStore, DegradedMark, ProgressStep, ReasoningSegment } from './chatStore';
 import { buildTimeline, mergeInterleaveItems, layoutAnswerFlow, type TimelineNode } from './answerFlow';
 import { SourcesList } from './SourcesList';
-import { clearStreamError, getStreamError, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
+import { clearStreamError, getStreamError, skillStep, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
 import { ConversationList } from './ConversationList';
 import { PromptConfigLayer } from './PromptConfigLayer';
 
@@ -2159,11 +2159,26 @@ function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): Pr
   if (!steps || steps.length === 0) return undefined;
   // 复用 useChatStream 的同一套文案函数 → "生成中看到的"与"刷新后回看的"措辞一致；
   // 摘要字段（name/mode/hits/durationMs/error）一并透传，供时间线行与卡片渲染
-  return steps.map((s) =>
-    s.phase === 'end'
+  return steps.map((s) => {
+    // skill 加载步骤（2026-10-13）：单事件、无 start/end 配对，走 skillStep 的同一套文案
+    if (s.kind === 'skill') {
+      return {
+        ...skillStep({
+          type: 'skill',
+          id: s.skillId ?? '',
+          name: s.name ?? '',
+          description: s.skillDescription ?? '',
+          chars: s.chars ?? 0,
+          ...(s.alreadyLoaded === true ? { alreadyLoaded: true as const } : {}),
+          ...(s.error !== undefined ? { error: s.error } : {}),
+        }),
+        afterChars: s.afterChars,
+      };
+    }
+    return s.phase === 'end'
       ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs, response: s.response }), afterChars: s.afterChars }
-      : { ...toolStartStep(s.mode, s.name), afterChars: s.afterChars },
-  );
+      : { ...toolStartStep(s.mode, s.name), afterChars: s.afterChars };
+  });
 }
 
 /**
@@ -2230,11 +2245,13 @@ function AnswerFlow({
                     <div key={it.key} className="ki-chat-tl" {...liveAttrs}>
                       {it.kind === 'tool'
                         ? <ToolRow n={it} />
-                        : (
-                          <div className={`ki-chat-tl__node ki-chat-tl__node--${it.kind}${it.running ? ' ki-chat-tl__node--run' : ''}`}>
-                            <span className="ki-chat-tl__label">{it.label}</span>
-                          </div>
-                        )}
+                        : it.kind === 'skill'
+                          ? <SkillRow n={it} />
+                          : (
+                            <div className={`ki-chat-tl__node ki-chat-tl__node--${it.kind}${it.running ? ' ki-chat-tl__node--run' : ''}`}>
+                              <span className="ki-chat-tl__label">{it.label}</span>
+                            </div>
+                          )}
                     </div>
                   )
               ))}
@@ -2286,6 +2303,87 @@ function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
       </div>
       {open ? <ToolCard n={n} /> : null}
     </>
+  );
+}
+
+/**
+ * 时间线 skill 行（2026-10-13）。
+ *
+ * 用户口径：「像 mcp 调用那样显示，**样式不一样**」—— 结构同构（动作名 + 名称胶囊 + 状态 + 展开卡），
+ * 但类名前缀与配色独立（`--skill` 用紫色系，工具行是绿/警示），措辞也不同（"加载 skill" ≠ "检索知识库"）。
+ * · 无详情字段的退化行不带 `--skill`：不暗示可点击（同 ToolRow 的既有约定）
+ */
+function SkillRow({ n }: { n: TimelineNode }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const hasDetail = Boolean(n.skillDescription || n.chars !== undefined || n.error || n.skillId);
+  if (!hasDetail) {
+    return (
+      <div className="ki-chat-tl__node">
+        <span className="ki-chat-tl__label">{n.label}</span>
+      </div>
+    );
+  }
+  const stat = n.error
+    ? '失败'
+    : n.alreadyLoaded === true
+      ? '已在会话中'
+      : n.chars !== undefined
+        ? `${n.chars} 字`
+        : '';
+  const toggle = (): void => setOpen((v) => !v);
+  return (
+    <>
+      <div
+        className={`ki-chat-tl__node ki-chat-tl__node--skill${n.error ? ' ki-chat-tl__node--skill-fail' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        title={open ? '收起 skill 详情' : '展开 skill 详情'}
+        onClick={toggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+      >
+        <span className="ki-chat-tl__label ki-chat-tl__act">加载 skill</span>
+        {n.name ? <span className="ki-chat-tl__skill">{n.name}</span> : null}
+        <span className="ki-chat-tl__stat">{stat}</span>
+        <svg className="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <path d="M6.5 4 10.5 8 6.5 12" />
+        </svg>
+      </div>
+      {open ? <SkillCard n={n} /> : null}
+    </>
+  );
+}
+
+/**
+ * skill 展开卡片：描述（**AI 就是按它决定加载的**）+ 加载结果 + id。
+ *
+ * ★ 刻意**不展示正文**：正文随时可在配置里查看/编辑，落盘口径也不含它（会话文件体积，护栏 #4）；
+ *   这里要回答的是"AI 加载了什么、为什么加载、有没有生效"，不是"规则正文长什么样"。
+ */
+function SkillCard({ n }: { n: TimelineNode }): JSX.Element {
+  return (
+    <div className="ki-chat-tool ki-chat-tool--skill">
+      <section className="ki-chat-tool__sec">
+        <div className="ki-chat-tool__label">描述<em>AI 据此判断是否加载</em></div>
+        <p className="ki-chat-tool__note">{n.skillDescription?.trim() || '（该 skill 未填写描述，AI 只能凭名称判断）'}</p>
+      </section>
+      <section className="ki-chat-tool__sec">
+        <div className="ki-chat-tool__label">加载结果</div>
+        {n.error ? (
+          <pre className="ki-chat-tool__err">{n.error}</pre>
+        ) : n.alreadyLoaded === true ? (
+          <p className="ki-chat-tool__note">本会话此前已加载，本轮未重复注入（规则仍在生效）。</p>
+        ) : (
+          <p className="ki-chat-tool__note">已将正文 {n.chars ?? 0} 字注入本轮上下文，并在本会话后续轮次继续生效。</p>
+        )}
+      </section>
+      {n.skillId ? (
+        <section className="ki-chat-tool__sec">
+          <div className="ki-chat-tool__label">id</div>
+          <pre className="ki-chat-tool__code">{n.skillId}</pre>
+        </section>
+      ) : null}
+    </div>
   );
 }
 

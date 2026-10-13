@@ -99,13 +99,22 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
     [groups, draft],
   );
 
-  const isDefault = (content: string): boolean => {
-    const def = data?.defaults;
+  /**
+   * "默认 / 已修改"判定。
+   *
+   * ★ 2026-10-13：skill 的**描述也是配置的一部分** —— 只比 content 会让"改了描述"显示成"默认"，
+   *   用户以为没保存上（描述现在决定 AI 要不要加载它，改它比改正文更常见）。
+   */
+  const isDefaultSkill = (s: PromptSkill): boolean => {
+    const def = data?.defaults.skills.find((d) => d.id === s.id);
     if (!def) return false;
-    return (
-      def.prompt.content === content ||
-      def.skills.some((s) => s.content === content)
-    );
+    return def.content === s.content && (def.description ?? '') === (s.description ?? '');
+  };
+  const isDefaultPrompt = (content: string): boolean => data?.defaults.prompt.content === content;
+
+  /** 启用/停用（本地草稿即时生效；落盘仍走"保存"按钮 —— 与其他字段同一语义） */
+  const toggleSkill = (id: string): void => {
+    setDraft((d) => (d ? { ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) } : d));
   };
 
   const patchSkill = (id: string, patch: Partial<PromptSkill>) => {
@@ -120,13 +129,14 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
   const modalItem: PromptEditDraft | null = (() => {
     if (!modal || !draft) return null;
     if (modal.kind === 'prompt') {
-      return { id: 'prompt', name: '基础提示词', content: draft.prompt.content, builtin: true };
+      // 基础提示词没有描述（它不是"可被调用的能力"，而是恒定注入的规则）
+      return { id: 'prompt', name: '基础提示词', description: '', content: draft.prompt.content, builtin: true };
     }
     if (modal.kind === 'new-skill') {
-      return { id: newSkillId(), name: '', content: '', builtin: false };
+      return { id: newSkillId(), name: '', description: '', content: '', builtin: false };
     }
     const s = draft.skills.find((x) => x.id === modal.id);
-    return s ? { id: s.id, name: s.name, content: s.content, builtin: s.builtin } : null;
+    return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
   })();
 
   return (
@@ -157,13 +167,17 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
         {draft && data && (
           <>
             <div className="ki-chat-cfg__field">
-              <span className="ki-chat-cfg__label">基础提示词</span>
+              <span className="ki-chat-cfg__label">
+                基础提示词
+                <em className="ki-chat-cfg__badge">恒定生效</em>
+              </span>
+              <p className="ki-chat-cfg__hint">新建会话时注入一次并成为该会话的固定规则；此后改这里只影响**新建**的会话。</p>
               <div className="ki-chat-cfg__list">
                 <ItemCard
                   group="prompt"
                   name="基础提示词"
                   content={draft.prompt.content}
-                  isDefault={isDefault(draft.prompt.content)}
+                  isDefault={isDefaultPrompt(draft.prompt.content)}
                   onClick={() => setModal({ kind: 'prompt' })}
                 />
               </div>
@@ -172,17 +186,23 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 Skill
-                <em className="ki-chat-cfg__badge">{draft.skills.filter((s) => s.enabled).length} / {data.limits.maxSkills} 启用</em>
+                <em className="ki-chat-cfg__badge">{draft.skills.filter((s) => s.enabled).length} / {data.limits.maxSkills} 可调用</em>
               </span>
+              <p className="ki-chat-cfg__hint">
+                启用的 skill 只把「名称 + 描述」列给 AI（正文不常驻），由 AI 判断需要时加载；
+                停用的不会出现在清单里，AI 也调不到。
+              </p>
               <div className="ki-chat-cfg__list">
                 {draft.skills.map((s) => (
                   <ItemCard
                     key={s.id}
                     group="skill"
                     name={s.name}
+                    description={s.description}
                     content={s.content}
-                    isDefault={isDefault(s.content)}
+                    isDefault={isDefaultSkill(s)}
                     disabled={!s.enabled}
+                    onToggleEnabled={() => toggleSkill(s.id)}
                     onClick={() => setModal({ kind: 'skill', id: s.id })}
                   />
                 ))}
@@ -250,7 +270,9 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
       <footer className="ki-chat-cfg__bar">
         {saveError && <span className="ki-chat-cfg__err">{saveError}</span>}
         <span className="ki-chat-cfg__spacer" />
-        <span className="ki-chat-cfg__scope">作用域：全局 · 下一次提问生效</span>
+        {/* 生效范围**分开说**（2026-10-13）：提示词/skill 随会话快照冻结，只影响新建会话；
+            工具开关是即时读取的，下一次提问即生效 —— 混成一句会让"改了 skill 没反应"看起来像坏了 */}
+        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对**新建会话**生效，工具开关下一次提问生效</span>
         <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={onClose}>取消</button>
         <button
           type="button"
@@ -276,6 +298,8 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
           item={modalItem}
           maxChars={modal.kind === 'prompt' ? data!.limits.promptMaxChars : data!.limits.skillMaxChars}
           nameMaxChars={data!.limits.skillNameMaxChars}
+          descMaxChars={data!.limits.skillDescMaxChars}
+          descSuggestedChars={data!.limits.skillDescSuggestedChars}
           canRename={modal.kind !== 'prompt' && !modalItem.builtin}
           canReset={modal.kind !== 'new-skill' && modalItem.builtin}
           canDelete={modal.kind !== 'new-skill' && !modalItem.builtin}
@@ -285,17 +309,17 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
               : null
           }
           onCancel={() => setModal(null)}
-          onSubmit={({ name, content }) => {
+          onSubmit={({ name, content, description }) => {
             setDraft((d) => {
               if (!d) return d;
               if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
               if (modal.kind === 'new-skill') {
                 return {
                   ...d,
-                  skills: [...d.skills, { id: modalItem.id, name, content, builtin: false, enabled: true, at: new Date().toISOString() }],
+                  skills: [...d.skills, { id: modalItem.id, name, description, content, builtin: false, enabled: true, at: new Date().toISOString() }],
                 };
               }
-              return { ...d, skills: d.skills.map((s) => (s.id === modal.id ? { ...s, name, content } : s)) };
+              return { ...d, skills: d.skills.map((s) => (s.id === modal.id ? { ...s, name, content, description } : s)) };
             });
             setModal(null);
           }}
@@ -306,8 +330,10 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
               return;
             }
             if (modal.kind === 'skill') {
+              // ★ 恢复默认必须**一并恢复描述**：只回正文会让"描述已改"与"正文是默认"混在一起，
+              //   用户看不出到底恢复没恢复（描述是 AI 选不选它的唯一依据）。
               const def = data!.defaults.skills.find((s) => s.id === modal.id);
-              patchSkill(modal.id, { content: def?.content ?? '' });
+              patchSkill(modal.id, { content: def?.content ?? '', description: def?.description ?? '' });
               setModal(null);
             }
           }}
@@ -350,26 +376,53 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
 function ItemCard(props: {
   group: 'prompt' | 'skill';
   name: string;
+  /** skill 描述（恒注入目录里给 AI 看的"何时用"）；基础提示词没有 */
+  description?: string;
   content: string;
   isDefault: boolean;
   disabled?: boolean;
+  /** 提供即渲染启用开关（skill 专用：基础提示词是恒定规则，不可停用） */
+  onToggleEnabled?: () => void;
   onClick: () => void;
 }) {
-  const { group, name, content, isDefault, disabled, onClick } = props;
+  const { group, name, description, content, isDefault, disabled, onToggleEnabled, onClick } = props;
   const mod = !isDefault;
+  const desc = (description ?? '').trim();
   return (
-    <button type="button" className="ki-chat-cfg__item" onClick={onClick} data-disabled={disabled}>
-      <span className={`ki-chat-cfg__item-ic ki-chat-cfg__item-ic--${group}`}>{ITEM_IC[group]}</span>
-      <span className="ki-chat-cfg__item-main">
-        <span className="ki-chat-cfg__item-name">{name}</span>
-        <span className="ki-chat-cfg__item-prev">{content.slice(0, 42) || '（空）'}</span>
-      </span>
-      <span className={`ki-chat-cfg__item-meta${mod ? ' ki-chat-cfg__item-meta--mod' : ''}`}>
-        {content.length} 字 · {mod ? '已修改' : '默认'}
-      </span>
-      <svg className="ki-chat-cfg__chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-        <path d="M6.5 4 10.5 8 6.5 12" />
-      </svg>
-    </button>
+    // ★ 开关在**卡片内部**（用户裁决：不要单独漏在外面）—— 卡片本身是 div，
+    //   内部两枚按钮并列（点击区 + 开关）；按钮不能嵌按钮，故不再让卡片整体是一个 button。
+    <div className="ki-chat-cfg__item" data-disabled={disabled}>
+      <button type="button" className="ki-chat-cfg__item-hit" onClick={onClick}>
+        <span className={`ki-chat-cfg__item-ic ki-chat-cfg__item-ic--${group}`}>{ITEM_IC[group]}</span>
+        <span className="ki-chat-cfg__item-main">
+          <span className="ki-chat-cfg__item-name">{name}</span>
+          {/* skill 的第二行显示**描述**（AI 的选择依据）而不是正文摘要：正文不进上下文，摘要无意义 */}
+          <span className="ki-chat-cfg__item-prev">
+            {group === 'skill'
+              ? (desc || '未填写描述 —— AI 只能凭名称判断要不要加载它')
+              : (content.slice(0, 42) || '（空）')}
+          </span>
+        </span>
+        <span className={`ki-chat-cfg__item-meta${mod ? ' ki-chat-cfg__item-meta--mod' : ''}`}>
+          {content.length} 字 · {mod ? '已修改' : '默认'}
+        </span>
+        <svg className="ki-chat-cfg__chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <path d="M6.5 4 10.5 8 6.5 12" />
+        </svg>
+      </button>
+      {onToggleEnabled ? (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={!disabled}
+          aria-label={`${disabled ? '启用' : '停用'} skill ${name}`}
+          title={disabled ? '已停用：AI 的可用清单里没有它，也调不到' : '可被 AI 调用（清单里只有名称与描述，正文按需加载）'}
+          // ★ 复用工具开关的既有类（`__sw`）：同一层里两个开关必须是同一种外观语言
+          //   （auto-review 一致性问题，原先新造 `__switch` 会有两套样式）
+          className="ki-chat-cfg__sw"
+          onClick={onToggleEnabled}
+        />
+      ) : null}
+    </div>
   );
 }

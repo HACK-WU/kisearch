@@ -13,9 +13,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { MarkdownPreview } from '@/components/MarkdownPreview';
+
 export interface PromptEditDraft {
   id: string;
   name: string;
+  /** skill 描述（2026-10-13）；基础提示词为空串 */
+  description: string;
   content: string;
   builtin: boolean;
 }
@@ -27,6 +31,10 @@ export interface PromptConfigModalProps {
   /** 服务端下发的字数上限 */
   maxChars: number;
   nameMaxChars: number;
+  /** 描述硬上限（服务端拒绝保存的阈值） */
+  descMaxChars: number;
+  /** 描述建议长度（只提示，不拦保存） */
+  descSuggestedChars: number;
   canRename: boolean;
   /** 恢复默认（内置条目才有默认内容可恢复） */
   canReset: boolean;
@@ -34,7 +42,7 @@ export interface PromptConfigModalProps {
   /** 名称查重：返回错误文案表示不合法（仅 skill 用） */
   checkName?: (name: string) => string | null;
   onCancel: () => void;
-  onSubmit: (patch: { name: string; content: string }) => void;
+  onSubmit: (patch: { name: string; content: string; description: string }) => void;
   onDelete?: () => void;
   onReset?: () => void;
 }
@@ -42,9 +50,10 @@ export interface PromptConfigModalProps {
 const TITLE: Record<'new' | 'edit', string> = { new: '新增 skill', edit: '编辑' };
 
 export function PromptConfigModal(props: PromptConfigModalProps) {
-  const { mode, group, item, maxChars, nameMaxChars, canRename, canReset, canDelete } = props;
+  const { mode, group, item, maxChars, nameMaxChars, descMaxChars, descSuggestedChars, canRename, canReset, canDelete } = props;
 
   const [name, setName] = useState(item.name);
+  const [description, setDescription] = useState(item.description ?? '');
   const [content, setContent] = useState(item.content);
   const [view, setView] = useState<'preview' | 'edit'>(mode === 'new' ? 'edit' : 'preview');
   const [err, setErr] = useState('');
@@ -58,7 +67,12 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
     : `${group === 'prompt' ? '系统提示词' : '对话 skill'} · ${item.builtin ? '内置 · 可恢复默认内容' : '自定义'}`;
   const chars = content.length;
   const over = chars > maxChars;
-  const dirty = content !== item.content || (canRename && name !== item.name);
+  const descChars = description.length;
+  const descOver = descChars > descMaxChars;
+  const dirty =
+    content !== item.content ||
+    description !== (item.description ?? '') ||
+    (canRename && name !== item.name);
 
   useEffect(() => {
     if (view !== 'edit') return;
@@ -109,7 +123,12 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
       setErr(`超出 ${maxChars} 字，请先删减`);
       return;
     }
-    props.onSubmit({ name: nextName, content });
+    // 描述超上限**拦保存**（服务端也会拒绝）：它是 AI 选择依据，过长等于选择依据被截断
+    if (group === 'skill' && descOver) {
+      setErr(`描述超出 ${descMaxChars} 字，请先删减`);
+      return;
+    }
+    props.onSubmit({ name: nextName, content, description: description.trim() });
   };
 
   const modal = (
@@ -147,6 +166,35 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
               />
             </div>
 
+            {/* 描述（skill 专用，2026-10-13 新增）：它是 AI 判断"要不要加载这个 skill"的**唯一依据**，
+                也是恒注入目录里展示的内容 —— 正文不进上下文，所以这个字段比正文更常被 AI 读到。
+                基础提示词没有描述（它是恒定规则，不是可调用的能力）。 */}
+            {group === 'skill' ? (
+              <div className="ki-chat-cfg__field">
+                <label className="ki-chat-cfg__label" htmlFor="ki-cfg-desc">
+                  描述
+                  <em className={`ki-chat-cfg__badge${descOver ? ' ki-chat-cfg__badge--over' : descChars > descSuggestedChars ? ' ki-chat-cfg__badge--warn' : ''}`}>
+                    {descChars} 字 · 建议 ≤{descSuggestedChars}
+                  </em>
+                </label>
+                <textarea
+                  id="ki-cfg-desc"
+                  className="ki-chat-cfg__ta ki-chat-cfg__ta--desc"
+                  spellCheck={false}
+                  rows={2}
+                  placeholder={'一句话说清"做什么、产出什么"，再以「触发：」带 3-5 个口语触发词。例：用当前知识库片段回答事实与排障问题。触发："查知识库"、"核验原文"。'}
+                  value={description}
+                  onChange={(e) => { setDescription(e.target.value); setErr(''); }}
+                  aria-invalid={descOver}
+                />
+                {descOver ? (
+                  <p className="ki-chat-cfg__warn">超出 {descMaxChars} 字上限，保存会被拒绝。</p>
+                ) : !description.trim() ? (
+                  <p className="ki-chat-cfg__hint">未填写描述：AI 只能凭名称猜测它是否适用，可能不加载或误加载。</p>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="ki-chat-cfg__seg" role="tablist" aria-label="查看方式">
               {(['preview', 'edit'] as const).map((v) => (
                 <button
@@ -164,7 +212,16 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
             </div>
 
             {view === 'preview' ? (
-              <pre className="ki-chat-cfg__view">{content || '（还没有内容 —— 切到「编辑」写点什么）'}</pre>
+              /**
+               * 预览必须走**同一套 Markdown 渲染器**：内置 skill 正文已按 SKILL.md 规范
+               * 重写为 Markdown（`# 标题` / `## 概述` / `**目的**：`），仍用 `<pre>` 会原样显示
+               * 源码标记 —— 用户截图反馈的"预览渲染失败"就是这个（不是渲染崩了，是压根没渲染）。
+               */
+              <div className="ki-chat-cfg__view">
+                {content.trim()
+                  ? <MarkdownPreview text={content} />
+                  : <p className="ki-chat-cfg__view-empty">（还没有内容 —— 切到「编辑」写点什么）</p>}
+              </div>
             ) : (
               <div className="ki-chat-cfg__editwrap">
                 <textarea

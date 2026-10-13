@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import { CHAT_BUDGET } from '../../src/lib/chat/chat-contract.js';
 import { toToolProjection, toSourceRefs } from '../../src/lib/chat/retrieval/projection.js';
-import { buildSystemMessages, RETRIEVAL_SKILL_PROMPT } from '../../src/lib/chat/retrieval/retrieval-skill.js';
+import { HARD_RULES_BLOCK, RETRIEVAL_SKILL_PROMPT, buildSystemMessages } from '../../src/lib/chat/retrieval/retrieval-skill.js';
 import { CHAT_MCP_TOOLS, getChatTool } from '../../src/lib/chat/mcp-tool-registry.js';
 import { mockSearchResult, mockSearchResultWithoutLines } from './fixtures/mock-search.js';
 
@@ -94,9 +94,15 @@ describe('SR-01 契约 · 检索 skill（与工具 schema 同源）', () => {
     assert.ok(msgs.every((m) => m.content.trim().length > 0));
   });
 
-  it('skill 正文包含四条反幻觉规则（N17 依赖）', () => {
-    assert.match(RETRIEVAL_SKILL_PROMPT, /知识库中未找到/);
-    assert.match(RETRIEVAL_SKILL_PROMPT, /本次未检索/);
+  it('反幻觉规则在**恒注入**块里（2026-10-13：从 skill 正文拆出，N17 依赖）', () => {
+    // ★ 这些规则曾被塞在 RETRIEVAL_SKILL_PROMPT 末尾；skill 改为**按需加载**后，
+    //   若仍留在正文里，未加载 skill 的轮次就会出现"无约束窗口"（护栏 #1）。
+    assert.match(HARD_RULES_BLOCK, /知识库中未找到/);
+    assert.match(HARD_RULES_BLOCK, /本次未检索/);
+    assert.ok(
+      !RETRIEVAL_SKILL_PROMPT.includes('【硬性规则｜始终生效】'),
+      '正文不得再重复一份硬性规则（两处会漂移）',
+    );
   });
 
   it('工具 schema：不暴露 scope（N23 禁止跨 scope）—— 14 个工具全量校验（批次 2）', () => {

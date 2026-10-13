@@ -22,7 +22,7 @@ import path from 'node:path';
 import { readJson, writeJson } from '../store.js';
 import { loadConfig, resolveDefaultChatDir } from '../config.js';
 import { validateScope } from '../scope.js';
-import type { ConversationFile, ChatMessage, ConversationSummary } from './chat-contract.js';
+import type { ConversationFile, ChatMessage, ConversationSummary, PromptInjectionSnapshot } from './chat-contract.js';
 
 /** 会话不存在（映射 404 `CONVERSATION_NOT_FOUND`） */
 export class ConversationNotFoundError extends Error {
@@ -312,6 +312,55 @@ export async function patchConversation(
     if (patch.title !== undefined) conv.title = patch.title;
     if (patch.systemPrompt !== undefined) conv.systemPrompt = patch.systemPrompt;
     conv.seq += 1;
+    persist(scope, conv);
+    return conv;
+  });
+}
+
+/**
+ * 落盘「注入状态」（skill 按需加载，2026-10-13）。
+ *
+ * 两件事，都可独立发生：
+ * · `snapshot` —— **只在该会话还没有快照时写入**（首轮固化；幂等：并发/重试不会覆盖首个快照，
+ *   否则"提示词只注入一次"就退化成"每次提问都刷新"）；
+ * · `addLoadedSkillIds` —— 追加去重（保序 = 加载顺序，保证多轮之间提示词顺序稳定）。
+ *
+ * ★ **不碰 `seq`**：它的语义是"会话有新消息"（消息 id = `m{seq}` 由它派生），注入状态不是消息 ——
+ *   动了会制造 id 空洞。
+ *   ⚠️ `updatedAt` 由底层 `writeJson` **统一打戳**（所有会话写入都这样，本函数不例外）：
+ *   调用点都在本轮消息落盘之前，随后的 assistant 落盘会再打一次，因此列表顺序不受影响。
+ * ★ 无改动不写盘（省 IO；避免无意义 mtime 变化）。
+ */
+export async function applyInjectionState(
+  scope: string,
+  id: string,
+  patch: { snapshot?: PromptInjectionSnapshot; addLoadedSkillIds?: readonly string[] },
+): Promise<ConversationFile> {
+  validateScope(scope);
+  return withConvLock(id, () => {
+    const conv = readJson<ConversationFile>(convPath(scope, id));
+    if (!conv) throw new ConversationNotFoundError(id);
+    let dirty = false;
+    if (patch.snapshot && !conv.injected) {
+      conv.injected = patch.snapshot;
+      dirty = true;
+    }
+    const add = patch.addLoadedSkillIds ?? [];
+    const before = conv.loadedSkillIds ?? [];
+    if (add.length > 0) {
+      const list = [...before];
+      const seen = new Set(list);
+      for (const skillId of add) {
+        if (seen.has(skillId)) continue;
+        seen.add(skillId);
+        list.push(skillId);
+      }
+      if (list.length !== before.length) {
+        conv.loadedSkillIds = list;
+        dirty = true;
+      }
+    }
+    if (!dirty) return conv;
     persist(scope, conv);
     return conv;
   });
