@@ -108,6 +108,43 @@ async function runOne(scope: string, config: IndexMaintenanceState['config']): P
   if (next) void runOne(next, config);
 }
 
+/** 整理落定后任务 phase 的收敛结果（CLI 导入收尾用） */
+export interface IndexMaintenanceOutcome {
+  /** `optimized` = 确认整理成功；`available` = 未确认完成（**文档已可用，不等于失败**） */
+  phase: 'optimized' | 'available';
+  /** 未确认 / 未完成时的重试线索（`optimized` 时为 undefined） */
+  recoveryHint?: string;
+}
+
+/**
+ * 等待窗口结束后，任务 `phase` 应如何收敛（★ **必须总是返回收敛值**）。
+ *
+ * 三种情形：
+ *   1. `last` 命中本 scope 且成功 → `optimized`；
+ *   2. `last` 命中本 scope 但整理失败/降级 → `available` + 失败线索；
+ *   3. **`last` 缺失（等待超时、整理未落定）或属于其他 scope** → `available` + 通用重试线索。
+ *
+ * 情形 3 是本次补的兜底：早前实现直接跳过更新，任务 `phase` 会**永久停在 `indexing`**
+ * ⇒ 前端顶栏一直挂「索引整理中 · 文档已可用」且没有消除入口，直到任务记录 1h TTL 到期。
+ * 与 daemon 路径同口径（`mcp-http-api.ts` 的 else 恒收敛为 `available`）。
+ */
+export function resolveIndexMaintenanceOutcome(
+  scope: string,
+  last: IndexMaintenanceLast | undefined,
+): IndexMaintenanceOutcome {
+  if (last && last.scope === scope) {
+    if (last.ok) return { phase: 'optimized' };
+    return {
+      phase: 'available',
+      recoveryHint: `索引整理未完成（${last.degraded ?? 'error'}）；可执行 ki index-optimize -s ${scope} 重试`,
+    };
+  }
+  return {
+    phase: 'available',
+    recoveryHint: `索引整理未在等待窗口内落定；可执行 ki index-optimize -s ${scope} 重试`,
+  };
+}
+
 /** 当前单飞状态（HTTP `/api/import/status` 与控制台诊断共用） */
 export function getIndexMaintenanceState(): IndexMaintenanceState {
   return {

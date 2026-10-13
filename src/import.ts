@@ -29,7 +29,7 @@ import { createTaskReporter } from './lib/task-registry.js';
 import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
 import { closeFtsEngine } from './lib/fts-client.js';
 // S-02：导入收尾的索引整理"等待 + 展示"（入队在 handleDirectImport 内部完成）
-import { whenIndexMaintenanceIdle, getIndexMaintenanceState, readIndexReadiness } from './lib/index-maintenance.js';
+import { whenIndexMaintenanceIdle, getIndexMaintenanceState, readIndexReadiness, resolveIndexMaintenanceOutcome } from './lib/index-maintenance.js';
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
@@ -193,25 +193,33 @@ program
               // S-03/R6：就绪判据写入任务台账（任务中心/详情可直接核对"索引是否真的建了"）
               const readiness = await readIndexReadiness(scope);
               task.update({ indexReadiness: readiness });
-              if (last && last.scope === scope) {
-                if (last.ok) {
-                  // A11 交叉核对：整理成功但**没有** dense 实体 = 信号与实物矛盾，必须说出来（不静默）
-                  process.stderr.write(
-                    `✅ 索引已优化（${(last.wallMs / 1000).toFixed(1)}s）`
-                    + `${readiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
-                  );
-                  task.update({ phase: 'optimized' });
-                } else {
-                  process.stderr.write(
-                    `⚠️  索引整理未完成（${last.degraded ?? 'error'}）：${last.reason ?? ''}\n`
-                    + `   文档已可用；重试：ki index-optimize -s ${scope}\n`,
-                  );
-                  task.update({
-                    phase: 'available',
-                    recoveryHint: `索引整理未完成（${last.degraded ?? 'error'}）；可执行 ki index-optimize -s ${scope} 重试`,
-                  });
-                }
+              if (last && last.scope === scope && last.ok) {
+                // A11 交叉核对：整理成功但**没有** dense 实体 = 信号与实物矛盾，必须说出来（不静默）
+                process.stderr.write(
+                  `✅ 索引已优化（${(last.wallMs / 1000).toFixed(1)}s）`
+                  + `${readiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
+                );
+              } else if (last && last.scope === scope) {
+                process.stderr.write(
+                  `⚠️  索引整理未完成（${last.degraded ?? 'error'}）：${last.reason ?? ''}\n`
+                  + `   文档已可用；重试：ki index-optimize -s ${scope}\n`,
+                );
+              } else {
+                // ★ 兜底：等待窗口到点仍未落定，或 `last` 属**其他 scope** ⇒ 无法确认本次整理结果。
+                //   早前实现直接跳过更新，任务 phase 会永久停在 'indexing' ⇒ 前端顶栏一直挂
+                //   「索引整理中 · 文档已可用」且无消除入口（记录 1h TTL 才清）；
+                //   daemon 路径（mcp-http-api.ts）与 restore 路径（restore.ts）本就有同口径兜底。
+                process.stderr.write(
+                  '⚠️  索引整理未在等待窗口内落定（超时，或结果属于其他 scope）\n'
+                  + `   文档已可用；重试：ki index-optimize -s ${scope}\n`,
+                );
               }
+              // phase / recoveryHint 统一由纯函数给出（三种情形都必须收敛，不允许停在 indexing）
+              const outcome = resolveIndexMaintenanceOutcome(scope, last);
+              task.update({
+                phase: outcome.phase,
+                ...(outcome.recoveryHint !== undefined ? { recoveryHint: outcome.recoveryHint } : {}),
+              });
             }
             task.finish(partial ? 'partial' : 'succeeded', {
               error: partial
