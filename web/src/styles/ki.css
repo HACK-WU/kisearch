@@ -3379,6 +3379,8 @@ select.ki-chat-cfg__ta--select {
 :root {
   --ki-chatpage-side-w: 260px;
   --ki-chatpage-main-max: 880px;
+  /* 顶部条等高：左栏搜索区与右栏上下文条同高（下边线连成一条），4 的倍数 */
+  --ki-chatpage-topbar-h: 40px;
 }
 
 /* ChatPage 宿主：撑起 ki-content--noscroll 高度链（:last-child flex:1 由既有规则提供） */
@@ -3412,6 +3414,14 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-convpop--inline .ki-chat-convpop__foot { flex-wrap: wrap; }
 .ki-chat-convpop--inline .ki-chat-convpop__foot .ki-chat-btn { white-space: nowrap; }
 .ki-chat-convpop--inline .ki-chat-convpop__hint { display: none; }
+
+/* ── 顶部条等高：左栏搜索区 / 右栏上下文条下边线连成一条 ──
+   原两处各行其是：搜索区 8px padding + 12px 字行 = 31px；上下文条 6px padding + 11px 字行 = 39px
+   ⇒ 下边线相差 8px，在左栏右边界处形成阶梯（用户 2026-10-13 反馈，拍板按 40px 对齐）。
+   两处本来就是 flex + align-items:center，用 min-height 钉到同一高度即可严格对齐，
+   且不随字体行高漂移；box-sizing: border-box 由全局 * 规则（ki.css:114）保证高度含边框。 */
+.ki-chat-convpop--inline .ki-chat-convpop__search,
+.ki-chat-panel--page .ki-chat-ctx { min-height: var(--ki-chatpage-topbar-h); }
 
 /* ── 右栏：对话主区 ── */
 .ki-chatpage__main { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--ki-color-bg-secondary); }
