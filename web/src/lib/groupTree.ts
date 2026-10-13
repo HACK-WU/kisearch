@@ -143,3 +143,29 @@ export function revealGroupPath(nodes: GroupTreeNode[], path: string): GroupTree
     return { ...node, open: true, children };
   });
 }
+
+/** 收集树中所有「已展开」节点的路径（先根后子，同层保持树序）—— 供目录展开态持久化。 */
+export function collectOpenPaths(nodes: GroupTreeNode[]): string[] {
+  const paths: string[] = [];
+  const walk = (list: GroupTreeNode[]): void => {
+    for (const node of list) {
+      if (node.open) paths.push(node.path);
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return paths;
+}
+
+/**
+ * 按路径集合设置展开态（新树）：集合内的节点展开，其余一律折叠。
+ * 与其余操作一致——无任何变更时返回原引用，调用方可用引用比较跳过渲染。
+ */
+export function applyOpenPaths(nodes: GroupTreeNode[], paths: readonly string[]): GroupTreeNode[] {
+  const wanted = new Set(paths);
+  return rewriteTree(nodes, (node, children) => {
+    const open = wanted.has(node.path);
+    if (node.open === open && children === node.children) return null;
+    return { ...node, open, children };
+  });
+}

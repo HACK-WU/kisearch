@@ -13,6 +13,14 @@ import { ImportPage } from '@/pages/ImportPage';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
+import { visibleTaskNotices } from '@/lib/taskNotice';
+import {
+  dimensionNoticeFingerprint,
+  dimensionNoticeKind,
+  readDimensionDismissedFingerprint,
+  shouldShowDimensionNotice,
+  writeDimensionDismissedFingerprint,
+} from '@/lib/vectorDimensionNotice';
 import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
@@ -20,6 +28,19 @@ import { ChatStoreContext } from '@/chat/chatStoreContext';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
+
+/** 「手动忽略任务提示」的时间戳 key（失败 / 部分完成各一；全局，不按 scope 分桶） */
+const FAILED_DISMISS_KEY = 'ki.taskFailedDismissedAt';
+const PARTIAL_DISMISS_KEY = 'ki.taskPartialDismissedAt';
+
+/** 读取忽略时间戳：多个 key 取最新（0 = 未忽略；localStorage 不可用时按未忽略处理） */
+function readDismissedAt(keys: string[]): number {
+  let latest = 0;
+  for (const key of keys) {
+    try { latest = Math.max(latest, Number(localStorage.getItem(key)) || 0); } catch { /* 单个 key 读失败不影响其余 */ }
+  }
+  return latest;
+}
 
 const NAV_MAIN = [
   { to: '/', label: '总览', icon: 'grid', end: true },
@@ -168,40 +189,35 @@ export function AppShell(): JSX.Element {
    * 的"运行中"计数）：文档已可用，只是检索可能略慢，必须让用户看得见**在等什么**。
    */
   const indexingTasks = (taskQuery.data?.tasks ?? []).filter((task) => task.phase === 'indexing');
-  const partialTasks = taskQuery.data?.tasks.filter((task) => task.state === 'partial') ?? [];
-  /** `${scope}\u0000${operation}` → 最近一次 succeeded 的完成时间（用于自动消除被覆盖的旧失败） */
-  const latestSuccessByScopeOp = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const task of taskQuery.data?.tasks ?? []) {
-      if (task.state !== 'succeeded') continue;
-      const key = `${task.scope}\u0000${task.operation}`;
-      map.set(key, Math.max(map.get(key) ?? 0, task.finishedAt ?? 0));
-    }
-    return map;
-  }, [taskQuery.data?.tasks]);
-  /** 手动忽略：按 scope 记住忽略时间戳（localStorage）；该时间戳之前的失败不再进入徽章 */
+  /**
+   * 手动忽略：记住忽略时间戳（localStorage），该时间戳之前的记录不再进入徽章。
+   *
+   * 时间戳**不按 scope 分桶**——徽章展示的是全部 scope 的任务，若按 scope 存，
+   * 「在 A 忽略过的提示，切到 B 又原样冒出来」会让用户以为删不掉（旧 key 仍读取以兼容历史）。
+   */
   const [dismissTick, setDismissTick] = useState(0);
-  const dismissKey = `ki.taskFailedDismissedAt.${scope}`;
-  const dismissedFailedAt = useMemo(() => {
-    try { return Number(localStorage.getItem(dismissKey)) || 0; } catch { return 0; }
-  }, [dismissKey, dismissTick]);
-  const dismissFailedNotice = (): void => {
-    try { localStorage.setItem(dismissKey, String(Date.now())); } catch { /* 存储不可用时不影响本次会话内的重新计算 */ }
+  const dismissal = useMemo(() => ({
+    failedAt: readDismissedAt([FAILED_DISMISS_KEY, `ki.taskFailedDismissedAt.${scope}`]),
+    partialAt: readDismissedAt([PARTIAL_DISMISS_KEY, `ki.taskPartialDismissedAt.${scope}`]),
+    // 依赖 dataUpdatedAt：多标签页场景下，另一页点过忽略后本页在下次轮询（3s/15s）同步消失，
+    // 否则本页会一直挂着已被忽略的旧提示直到手动刷新。
+  }), [scope, dismissTick, taskQuery.dataUpdatedAt]);
+  const dismissTaskNotices = (): void => {
+    const now = String(Date.now());
+    try {
+      localStorage.setItem(FAILED_DISMISS_KEY, now);
+      localStorage.setItem(PARTIAL_DISMISS_KEY, now);
+    } catch { /* 存储不可用时不影响本次会话内的重新计算 */ }
     setDismissTick((n) => n + 1);
   };
   /**
-   * 失败任务（进入顶栏徽章的口径，用户 2026-10-02 要求两条消解规则）：
-   * ① 自动消除：同 scope + 同 operation 已有更新的 succeeded 记录 → 旧失败不再提示；
-   * ② 手动忽略：忽略时间戳之前的失败不再提示（其后的新失败仍会重新亮起）。
-   * 仅从顶栏徽章消解；任务页保留完整历史用于追溯。
+   * 进入顶栏徽章的「需关注任务」：失败/未知 + 部分完成，两条消解规则（自动消除 / 手动忽略）
+   * 见 lib/taskNotice.ts —— 部分完成此前没有手动消除入口，会一直挂到 1 小时 TTL 到期。
    */
-  const failedTasks = (taskQuery.data?.tasks ?? []).filter((task) => {
-    if (task.state !== 'failed' && task.state !== 'unknown') return false;
-    const latestSuccess = latestSuccessByScopeOp.get(`${task.scope}\u0000${task.operation}`) ?? 0;
-    if (latestSuccess > (task.finishedAt ?? 0)) return false;
-    if ((task.finishedAt ?? 0) <= dismissedFailedAt) return false;
-    return true;
-  });
+  const { failed: failedTasks, partial: partialTasks } = useMemo(
+    () => visibleTaskNotices(taskQuery.data?.tasks ?? [], dismissal),
+    [taskQuery.data?.tasks, dismissal],
+  );
   const taskStatus = activeTasks.length > 0
     ? `${activeTasks.length} 个任务运行中${failedTasks.length ? ` · ${failedTasks.length} 个失败/未知` : ''}${partialTasks.length ? ` · ${partialTasks.length} 个部分完成` : ''}`
     : failedTasks.length > 0
@@ -244,6 +260,28 @@ export function AppShell(): JSX.Element {
     degraded: dimensionDegraded,
     status: dimensionQuery.data?.status,
   });
+  /**
+   * 维度告警 banner 的展示判定（用户 2026-10-12：异常提示都要能手动消掉）。
+   * 忽略按「状态指纹」记（见 lib/vectorDimensionNotice.ts）：状态不变则保持隐藏，
+   * 状态一变（重建完成 / 维度值改变 / unknown↔mismatch / 请求恢复或再次失败）立即重新提示。
+   */
+  const dimensionNotice = useMemo(() => {
+    const input = {
+      scope,
+      state: dimensionQuery.data?.status.state,
+      persisted: dimensionQuery.data?.status.persisted,
+      configured: dimensionQuery.data?.status.configured,
+      degradedReason: dimensionDegraded?.reason,
+      hasError: Boolean(dimensionQuery.error),
+    };
+    if (!shouldShowDimensionNotice(input, readDimensionDismissedFingerprint())) return null;
+    return { kind: dimensionNoticeKind(input), fingerprint: dimensionNoticeFingerprint(input) } as const;
+    // dismissTick：点忽略后立即重算并隐藏
+  }, [scope, dimensionQuery.data, dimensionQuery.error, dimensionDegraded, dismissTick]);
+  const dismissDimensionNotice = (fingerprint: string): void => {
+    writeDimensionDismissedFingerprint(fingerprint);
+    setDismissTick((n) => n + 1);
+  };
 
   // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
   // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
@@ -363,14 +401,14 @@ export function AppShell(): JSX.Element {
                   {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}
                   <span>{taskStatus}</span>
                 </Link>
-                {/* 手动忽略失败提示：独立按钮（徽章本体是 Link，button 不能嵌进去） */}
-                {failedTasks.length > 0 && (
+                {/* 手动忽略失败 / 部分完成提示：独立按钮（徽章本体是 Link，button 不能嵌进去） */}
+                {(failedTasks.length > 0 || partialTasks.length > 0) && (
                   <button
                     className="ki-global-task-dismiss"
                     type="button"
-                    onClick={dismissFailedNotice}
-                    title="忽略失败提示；之后出现的新失败会再次提醒，任务页仍可查历史"
-                    aria-label="忽略失败提示"
+                    onClick={dismissTaskNotices}
+                    title="忽略失败 / 部分完成提示；之后出现的新提示会再次提醒，任务页仍可查历史"
+                    aria-label="忽略任务提示"
                   >
                     ×
                   </button>
@@ -379,17 +417,26 @@ export function AppShell(): JSX.Element {
                 <ServiceBadge />
               </div>
             </header>
-            {dimensionQuery.data?.status.state === 'mismatch' && dimensionQuery.data.status.persisted !== undefined ? (
+            {dimensionNotice?.kind === 'mismatch' ? (
               <div className="ki-vector-dimension-banner" role="alert">
                 <span className="ki-vector-dimension-banner__icon" aria-hidden="true">!</span>
                 <div className="ki-vector-dimension-banner__copy">
                   <b>当前知识库的语义向量不可用</b>
-                  <span>{scope}：当前 embedding 为 {dimensionQuery.data.status.configured} 维，旧向量集合为 {dimensionQuery.data.status.persisted} 维。</span>
+                  <span>{scope}：当前 embedding 为 {dimensionQuery.data?.status.configured} 维，旧向量集合为 {dimensionQuery.data?.status.persisted} 维。</span>
                   <code>ki restore {scope} --rebuild-vector --yes</code>
                 </div>
                 <button className="ki-btn ki-btn--secondary" onClick={() => void refreshDimension()}>重新检查</button>
+                <button
+                  className="ki-global-task-dismiss ki-vector-dimension-banner__dismiss"
+                  type="button"
+                  onClick={() => dismissDimensionNotice(dimensionNotice.fingerprint)}
+                  title="忽略该提示；维度状态发生变化后会再次提醒"
+                  aria-label="忽略向量维度提示"
+                >
+                  ×
+                </button>
               </div>
-            ) : dimensionQuery.data?.status.state === 'unknown' || dimensionQuery.error ? (
+            ) : dimensionNotice?.kind === 'unknown' ? (
               <div className="ki-vector-dimension-banner ki-vector-dimension-banner--unknown" role="status">
                 <span className="ki-vector-dimension-banner__icon" aria-hidden="true">?</span>
                 <div className="ki-vector-dimension-banner__copy">
@@ -397,6 +444,15 @@ export function AppShell(): JSX.Element {
                   <span>{scope} · {dimensionUnknownDetail}</span>
                 </div>
                 <button className="ki-btn ki-btn--secondary" onClick={() => void refreshDimension()} disabled={dimensionQuery.isFetching}>重新检查</button>
+                <button
+                  className="ki-global-task-dismiss ki-vector-dimension-banner__dismiss"
+                  type="button"
+                  onClick={() => dismissDimensionNotice(dimensionNotice.fingerprint)}
+                  title="忽略该提示；维度状态发生变化后会再次提醒"
+                  aria-label="忽略向量维度提示"
+                >
+                  ×
+                </button>
               </div>
             ) : null}
             <div style={{ display: importVisible ? 'contents' : 'none' }}>

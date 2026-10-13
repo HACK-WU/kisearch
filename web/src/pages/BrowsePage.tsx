@@ -8,6 +8,12 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
+import {
+  browseFullscreenFromSearch,
+  browseSearch,
+  isBrowseUrlSelfWritten,
+  markBrowseUrlSelfWritten,
+} from '@/lib/browseUrl';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
@@ -26,6 +32,7 @@ import {
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
+  applyOpenPaths,
   buildGroupTree,
   countDocs,
   findGroupNode,
@@ -37,6 +44,12 @@ import {
   withDefaultOpen,
   type GroupTreeNode as TreeNode,
 } from '@/lib/groupTree';
+import {
+  readBrowseTreeState,
+  treeStateFromTree,
+  writeBrowseTreeState,
+  type BrowseTreeState,
+} from '@/lib/browseTreeState';
 
 /** 树内所有 Group 是否都已展开（决定折叠按钮当前动作与图标；demo 为单按钮切换） */
 function isAllOpen(nodes: TreeNode[]): boolean {
@@ -97,7 +110,7 @@ function treeNodeLabel(node: TreeNode, totalDocs: number): string {
 
 export function BrowsePage(): JSX.Element {
   const { scope, setScope } = useScope();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   /**
    * 本页相关查询的在途状态（scope 列表 / 文档列表 / 全文检索）——只驱动刷新按钮的「刷新中」反馈。
@@ -123,7 +136,17 @@ export function BrowsePage(): JSX.Element {
   /** 旋转/「刷新中」的判定：本页查询在途 或 手动刷新窗口内 */
   const busy = fetching || manualRefreshing;
   const [q, setQ] = useState('');
-  const [activeGroup, setActiveGroup] = useState('');
+  /**
+   * 左树持久化状态（按 scope 分桶）：目录展开 / 选中 Group / 左列收起刷新后保持。
+   * 只在挂载与切 scope 时读取一次（见下方 scope 变化 effect），运行期以组件 state 为准。
+   */
+  const initialTreeStateRef = useRef<BrowseTreeState | null>(null);
+  if (initialTreeStateRef.current === null) initialTreeStateRef.current = readBrowseTreeState(scope);
+  const savedOpenPathsRef = useRef<string[] | null>(initialTreeStateRef.current.openPaths);
+  const savedActiveGroupRef = useRef(initialTreeStateRef.current.activeGroup);
+  /** 最近一次「因选中项变化而展开目录」的 Group；刷新恢复时初始化为恢复值，避免把持久化的折叠态抢回展开 */
+  const revealedActiveGroupRef = useRef<string | null>(initialTreeStateRef.current.activeGroup || null);
+  const [activeGroup, setActiveGroup] = useState(initialTreeStateRef.current.activeGroup);
   const [viewing, setViewing] = useState<ScopedDocumentView | null>(null);
   // Scope 切换的清理在 effect 中执行，首帧仍可能持有旧 viewing；渲染守卫必须同步生效，
   // 以免 ModuleDrawer 用新 scope 请求旧 Group/Relation。
@@ -151,10 +174,17 @@ export function BrowsePage(): JSX.Element {
   // 正文宽度：默认铺满；≥1480px 提供「居中 / 铺满」切换（对齐浏览 demo）
   const [readerWide, setReaderWide] = useState(true);
   /** 知识目录折叠：收起后左列变成窄条，正文拿到全部宽度（用户 2026-10-02 要求） */
-  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  const [treeCollapsed, setTreeCollapsed] = useState(initialTreeStateRef.current.collapsed);
   // 窄屏：点树内文档后阅读区以覆盖层展开（CSS 仅在 ≤959px 生效），「返回目录」关闭
   const [mobileReaderOpen, setMobileReaderOpen] = useState(false);
   const appliedDirectTarget = useRef('');
+  /** 最近一次已知的 URL 查询串（页面写入或深链接应用后同步）；写入前比较，避免无谓导航 */
+  const currentSearchRef = useRef(searchParams.toString());
+  /**
+   * 每个 scope 只自动打开一次第一篇（用户主动关闭后不再抢回焦点）。
+   * 刷新 / 深链接恢复同样算「已自动展示」，由深链接 effect 置位。
+   */
+  const autoOpenRef = useRef(false);
   const previousScopeRef = useRef(scope);
   const directoryRef = useRef<HTMLDivElement>(null);
   const fullscreenDirectoryRef = useRef<HTMLDivElement>(null);
@@ -164,6 +194,22 @@ export function BrowsePage(): JSX.Element {
   const hasDirectDocumentTarget = searchParams.get('scope') === scope
     && Boolean(searchParams.get('group') && searchParams.get('relation'));
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
+
+  /**
+   * 阅读态 → URL（replace）：URL 承担「刷新后恢复现场」与复制分享，
+   * 不产生浏览器历史 —— 文档导航仍由阅读器自带的「上一级 / 下一级」承担。
+   * 修复前只实现了反方向（URL → 页面），故刷新会退回默认第一篇。
+   */
+  const writeBrowseUrl = useCallback((view: ScopedDocumentView | null, fullscreen: boolean): void => {
+    const next = browseSearch(view, fullscreen);
+    if (next === currentSearchRef.current) return;
+    currentSearchRef.current = next;
+    // 这次参数变化来自页面自身，深链接 effect 不必把同一目标再应用一遍。
+    appliedDirectTarget.current = next;
+    // 标记「URL 是页面自己写的」：刷新时据此保持目录布局，而不是按外部深链接重置（见深链接 effect）。
+    markBrowseUrlSelfWritten(next);
+    setSearchParams(new URLSearchParams(next), { replace: true });
+  }, [setSearchParams]);
 
   // S0-6：列表加载中时查本 scope 是否有运行中的导入任务（同 scope 读请求会排在
   // import 之后）——有则骨架屏改为「等待导入队列」说明，而非无说明骨架条。
@@ -179,6 +225,9 @@ export function BrowsePage(): JSX.Element {
   });
   const importTask = isLoading ? importTaskQuery.data ?? null : null;
   useEffect(() => {
+    // URL 是权威的「当前地址」：无论本轮是否应用，都先把写回时的比较基准同步过来
+    // （浏览器前进后退、地址栏手改都走这里）。
+    currentSearchRef.current = directTarget;
     if (!directTarget) {
       appliedDirectTarget.current = '';
       return;
@@ -198,13 +247,22 @@ export function BrowsePage(): JSX.Element {
     }
     if (!group && !relation && data?.scope !== targetScope) return;
     if (group && relation) {
-      setTreeCollapsed(false);
-      setActiveGroup(group);
+      // URL 是本页自己写的（刷新恢复）→ 目录布局与选中项保持本地记忆；
+      // 外部深链接 / 新标签页打开 → 展开左列并把目录定位到目标文档所在组。
+      if (!isBrowseUrlSelfWritten(directTarget)) {
+        setTreeCollapsed(false);
+        setActiveGroup(group);
+      }
       setViewingSource('tree');
       setMobileReaderOpen(true);
       setQ('');
       setSearchQ('');
       setSelectedTag('');
+      // 刷新恢复现场：全屏阅读态也随 URL 一起回来（reader=1）
+      setReaderFullscreen(browseFullscreenFromSearch(directTarget));
+      // 深链接 / 刷新恢复也算「该 scope 已自动展示过」：否则用户随后关闭文档时会被
+      // autoOpen 抢回第一篇（与该标记「主动关闭后不再抢回焦点」的约定相悖）。
+      autoOpenRef.current = true;
       setViewing({ scope, group, module: relation, anchor: params.get('anchor') ?? undefined });
     } else {
       // scope / scope+group 是浏览入口：前者显示默认 Group，后者显示指定 Group；都不打开命中文档。
@@ -242,6 +300,16 @@ export function BrowsePage(): JSX.Element {
     setQ('');
     setSearchQ('');
     setSelectedTag('');
+    // 左树状态按 scope 分桶：切换后重新读取该 scope 的目录状态，避免把上一个 scope 的布局写过去
+    const savedTree = readBrowseTreeState(scope);
+    savedOpenPathsRef.current = savedTree.openPaths;
+    savedActiveGroupRef.current = savedTree.activeGroup;
+    // 该 scope 的恢复值即「当前选中项」：不视为需要强制展开的变化
+    revealedActiveGroupRef.current = savedTree.activeGroup || null;
+    setTreeCollapsed(savedTree.collapsed);
+    // URL 里写的是上一个 scope 的文档（用户手动切换 scope）→ 清掉参数，
+    // 否则刷新会被旧 scope 的深链接拉回去；深链接切换时参数里的 scope 就是新 scope，保留给下面的效果处理。
+    if (searchParams.get('scope') && searchParams.get('scope') !== scope) writeBrowseUrl(null, false);
     // 深链接的 effect 会在同一轮提交里设置目标文档；不要在这里把它清掉。
     if (hasDirectDocumentTarget) return;
     setViewing(null);
@@ -250,7 +318,7 @@ export function BrowsePage(): JSX.Element {
     setReaderFullscreen(false);
     setReaderOutlineCollapsed(true);
     setMobileReaderOpen(false);
-  }, [hasDirectDocumentTarget, scope]);
+  }, [hasDirectDocumentTarget, scope, searchParams, writeBrowseUrl]);
 
   // 搜索防抖：保留现有“跨 Group 搜索”语义，只减少逐字请求与列表闪烁。
   useEffect(() => {
@@ -278,19 +346,35 @@ export function BrowsePage(): JSX.Element {
       return;
     }
     const base = withDefaultOpen(buildGroupTree(rawGroups));
-    setTree(base);
+    // 恢复上次的目录展开态（该 scope 无记录时沿用默认展开）
+    const savedOpenPaths = savedOpenPathsRef.current;
+    setTree(savedOpenPaths ? applyOpenPaths(base, savedOpenPaths) : base);
     // 默认选中第一个有自身文档的 Group，包括有子级的父 Group。
     setActiveGroup((prev) => {
       // 已有选中且仍在树中 → 保留（避免重复请求）
       if (prev && findGroupNode(base, prev)) return prev;
+      // 其次沿用该 scope 上次的选中项（刷新 / 切回来时）
+      const saved = savedActiveGroupRef.current;
+      if (saved && findGroupNode(base, saved)) return saved;
       return firstGroupWithDocuments(base) || (base.length > 0 ? base[0].path : '');
     });
   }, [data?.groups]); // ← 仅依赖 groups，不依赖 activeGroup
 
-  // 选中项变化（含首次默认选中、链接跳转）后展开其祖先链，保证高亮在树中可见。
-  // revealGroupPath 幂等：已可见时返回原引用，不会触发额外渲染。
+  // 左树状态（展开 / 选中 / 左列收起）变化即写回 localStorage —— 刷新后目录保持原样。
+  // 只在数据属于当前 scope 时写入：切 scope 的过渡渲染里 tree 仍挂着上一个 scope 的树，
+  // 此时写入会把旧 scope 的布局记到新 scope 名下。
+  useEffect(() => {
+    if (data?.scope !== scope || tree.length === 0) return;
+    writeBrowseTreeState(scope, treeStateFromTree(tree, treeCollapsed, activeGroup));
+  }, [scope, data?.scope, tree, treeCollapsed, activeGroup]);
+
+  // 选中项**变化**时（点选 / 链接跳转 / 首次默认选中）展开其祖先链并展开自身，保证目录可见。
+  // 选中项未变则不动树：否则「用户手动折叠当前选中目录」会被数据刷新、布局变化等无关渲染抢回，
+  // 刷新后的持久化展开态也无法保持（revealGroupPath 幂等，已可见时返回原引用）。
   useEffect(() => {
     if (!activeGroup) return;
+    if (revealedActiveGroupRef.current === activeGroup) return;
+    revealedActiveGroupRef.current = activeGroup;
     setTree((prev) => {
       const revealed = revealGroupPath(prev, activeGroup);
       const target = findGroupNode(revealed, activeGroup);
@@ -367,16 +451,20 @@ export function BrowsePage(): JSX.Element {
     setViewingSource(source);
     setHistory([]);
     setForwardHistory([]);
-    setViewing({ ...doc, scope });
-  }, [scope]);
+    const target = { ...doc, scope };
+    setViewing(target);
+    writeBrowseUrl(target, readerFullscreen);
+  }, [scope, readerFullscreen, writeBrowseUrl]);
 
   /**
    * 默认打开第一篇：数据就绪、有文档、且用户尚未打开任何文档时，自动展示第一篇内容。
    * 只有文档数为 0 时才显示「从左侧目录选择文档开始阅读」的真实空白页（用户要求）。
    * autoOpenRef 保证每个 scope 只自动打开一次——用户主动关闭后不再抢回焦点。
    */
-  const autoOpenRef = useRef(false);
   useEffect(() => {
+    // 切换到带文档深链接（含刷新恢复）的 scope 时重置：那一轮该 scope 已有目标文档被摆好。
+    // 依赖只取 scope —— 加上 searchParams 会在关闭文档清空 URL 时误重置标记、抢回焦点。
+    if (searchParams.get('scope') && searchParams.get('group') && searchParams.get('relation')) return;
     autoOpenRef.current = false;
   }, [scope]);
   useEffect(() => {
@@ -438,7 +526,9 @@ export function BrowsePage(): JSX.Element {
     setReaderFullscreen(false);
     setReaderOutlineCollapsed(true);
     setViewing(null);
-  }, []);
+    // URL 里的文档参数一并清掉，否则刷新会把刚关掉的文档又打开。
+    writeBrowseUrl(null, false);
+  }, [writeBrowseUrl]);
 
   /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goBack = useCallback((): void => {
@@ -448,7 +538,8 @@ export function BrowsePage(): JSX.Element {
     if (currentViewing) setForwardHistory((prev) => [...prev, currentViewing]);
     setActiveGroup(previous.group ?? '');
     setViewing(previous);
-  }, [currentViewing, history]);
+    writeBrowseUrl(previous, readerFullscreen);
+  }, [currentViewing, history, readerFullscreen, writeBrowseUrl]);
 
   /** 前进到最近一次返回前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goForward = useCallback((): void => {
@@ -458,7 +549,8 @@ export function BrowsePage(): JSX.Element {
     if (currentViewing) setHistory((prev) => [...prev, currentViewing]);
     setActiveGroup(next.group ?? '');
     setViewing(next);
-  }, [currentViewing, forwardHistory]);
+    writeBrowseUrl(next, readerFullscreen);
+  }, [currentViewing, forwardHistory, readerFullscreen, writeBrowseUrl]);
 
   /** 在当前 Browse 页面内切换到 Markdown 链接指向的文档。 */
   const handleLocalLink = useCallback((href: string): boolean => {
@@ -467,15 +559,17 @@ export function BrowsePage(): JSX.Element {
     if (currentViewing) setHistory((prev) => [...prev, currentViewing]);
     setForwardHistory([]);
     setActiveGroup(target.group);
-    setViewing({
+    const next = {
       scope,
       module: target.name,
       group: target.group,
       path: target.path,
       highlightQuery: currentViewing?.highlightQuery,
-    });
+    };
+    setViewing(next);
+    writeBrowseUrl(next, readerFullscreen);
     return true;
-  }, [currentViewing, knownDocs, scope]);
+  }, [currentViewing, knownDocs, readerFullscreen, scope, writeBrowseUrl]);
 
   /** 切换节点展开/折叠（纯函数：返回新树，不改写旧 state 内的节点） */
   const toggleOpen = (path: string): void => {
@@ -860,6 +954,8 @@ export function BrowsePage(): JSX.Element {
           setReaderFullscreen(fullscreen);
           // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）
           setReaderOutlineCollapsed(true);
+          // 全屏态写进 URL（reader=1），刷新后仍以全屏阅读同一篇
+          writeBrowseUrl(currentViewing, fullscreen);
         }}
         outlineCollapsed={readerOutlineCollapsed}
         onOutlineCollapsedChange={setReaderOutlineCollapsed}

@@ -17,6 +17,7 @@ import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } from '@/lib/searchHistory';
+import { parseSearchUrl, searchUrlSearch, type SearchUrlState } from '@/lib/searchUrl';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -109,7 +110,7 @@ export function SearchPage(): JSX.Element {
   const { scope, setScope } = useScope();
   const activeScopeRef = useRef(scope);
   activeScopeRef.current = scope;
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedScope = searchParams.get('scope');
   const requestedScopeApplied = useRef(false);
   useEffect(() => {
@@ -148,6 +149,20 @@ export function SearchPage(): JSX.Element {
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
   /** 供「清空」后把焦点交还输入框，用户可直接打下一次查询 */
   const inputRef = useRef<HTMLInputElement>(null);
+  /** 最近一次已知的 URL 查询串；写入前比较，避免无谓导航（与浏览页同一套口径） */
+  const currentSearchRef = useRef(searchParams.toString());
+  /**
+   * 检索态 → URL（replace）：刷新后按同一组参数自动重跑，链接可复制分享；不产生浏览器历史。
+   * `state = null` 表示清空检索参数（整体清空，连跨页深链带入的 scope 参数一起去掉）。
+   */
+  const writeSearchUrl = useCallback((state: SearchUrlState | null): void => {
+    const next = state
+      ? searchUrlSearch(state, new URLSearchParams(currentSearchRef.current).get('scope'))
+      : '';
+    if (next === currentSearchRef.current) return;
+    currentSearchRef.current = next;
+    setSearchParams(new URLSearchParams(next), { replace: true });
+  }, [setSearchParams]);
 
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
@@ -158,6 +173,10 @@ export function SearchPage(): JSX.Element {
   const { data: docData } = useDocList(scope);
 
   useEffect(() => {
+    // URL 里的检索参数属于上一个 scope（用户手动切 scope）→ 清掉，否则刷新会在新 scope 上重跑旧查询。
+    // 判据用「不相等」而非「存在」：本页自己写出的检索 URL 不带 scope 参数（只有 q/mode/tags/...），
+    // 而跨页深链（URL 的 scope 就是当前 scope）必须保留参数，交给恢复逻辑重跑。
+    if (searchParams.get('scope') !== scope) writeSearchUrl(null);
     setHistoryScope(scope);
     setRecentSearches(readSearchHistory(scope));
     setHistoryStorageWarning('');
@@ -274,6 +293,14 @@ export function SearchPage(): JSX.Element {
       setError(`Timeout 必须是 ${QUERY_TIMEOUT_MIN_SECONDS}-${QUERY_TIMEOUT_MAX_SECONDS} 秒之间的数字`);
       return;
     }
+    // 参数校验通过后再写 URL：刷新（含失败后重试）与复制分享都按同一组参数重跑。
+    writeSearchUrl({
+      query: searchQuery,
+      mode: searchMode,
+      tags: [...historyTags],
+      threshold: searchThreshold,
+      limit: searchLimit,
+    });
     setLoading(true);
     setError(null);
     setErrorCode(null);
@@ -348,6 +375,33 @@ export function SearchPage(): JSX.Element {
     setQueryTimeoutStatus('ready');
     void run(undefined, entry);
   };
+
+  /**
+   * URL 恢复：带 `q` 进入（刷新 / 分享链接）时按同一组参数自动重跑一次。
+   * 跨页深链（URL 的 scope 与当前 scope 不同）先等 scope 切换落地，避免在旧 scope 上检索后被丢弃。
+   */
+  const urlRestoreAppliedRef = useRef(false);
+  useEffect(() => {
+    if (urlRestoreAppliedRef.current) return;
+    const urlScope = searchParams.get('scope');
+    if (urlScope && urlScope !== scope) return;
+    urlRestoreAppliedRef.current = true;
+    const restored = parseSearchUrl(searchParams.toString());
+    if (!restored) return;
+    setQuery(restored.query);
+    setSelectedTags(restored.tags);
+    setThreshold(restored.threshold);
+    setLimit(String(restored.limit));
+    setFullTextOnly(restored.mode === 'fulltext');
+    void run(undefined, {
+      query: restored.query,
+      mode: restored.mode,
+      selectedTags: restored.tags,
+      threshold: restored.threshold,
+      limit: restored.limit,
+      savedAt: Date.now(),
+    });
+  }, [scope, searchParams]);
 
   const removeRecentSearch = (entry: SearchHistoryEntry): void => {
     const next = removeSearchHistoryEntry(entry, recentSearches);
