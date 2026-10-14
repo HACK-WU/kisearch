@@ -141,6 +141,8 @@ ki manage-index \
 ```
 
 > 不指定 `--parent` 即创建顶层 Group。
+>
+> `--scope` 指向的 scope 尚未初始化时会**自动创建**（从 `_template` 生成 `group-index.json` 等，与 `sync-relation` / `import` 同口径）；`scopeMode: strict` 下未注册的 scope 仍 fail-loud，并提示注册方式。
 
 **示例：**
 

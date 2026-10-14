@@ -713,7 +713,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       type: 'function',
       function: {
         name: 'ki_manage_index_create',
-        description: '在当前会话知识库的 Group 树中创建新节点（scope 不存在则自动创建）。',
+        description: '在当前会话知识库的 Group 树中创建新节点（scope 不存在则自动创建；返回 createdScope: true 表示本次新建了 scope，可用于发现 scope 名笔误）。',
         parameters: {
           type: 'object',
           properties: {

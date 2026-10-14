@@ -14,7 +14,7 @@ export function registerManageIndexTools(server: McpServer, authScopes: string[]
   // ✅ 注册 create 工具
   server.tool(
     'ki_manage_index_create',
-    '在 Group 树中创建新节点（scope 不存在则自动创建）',
+    '在 Group 树中创建新节点（scope 不存在则自动创建；返回 createdScope: true 表示本次新建了 scope）',
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       name: z.string().describe('新节点名称（不能包含 /）'),

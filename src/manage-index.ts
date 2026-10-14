@@ -11,7 +11,7 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
-import { writeJson, readJson, readGroupIndex } from './lib/store.js';
+import { writeJson, readJson, readGroupIndex, ensureScopeDir } from './lib/store.js';
 import { getGroupIndexPath, getRelationsCachePath, getLocalKbDir, validateScope, listAllScopes } from './lib/scope.js';
 import { hasShardedLayout, listGroupPaths, loadGroupCache, deleteGroupCache, deleteGroupCacheBatch, buildGroupMatchContext } from './lib/group-cache.js';
 import type { GroupIndex } from './lib/scope.js';
@@ -79,7 +79,7 @@ export interface ManageCreateParams {
 }
 
 export type ManageCreateResult =
-  | { ok: true; scope: string; path: string; hint?: string }
+  | { ok: true; scope: string; path: string; hint?: string; createdScope?: true }
   | { ok: false; error: string };
 
 async function executeManageCreateLocal(params: ManageCreateParams): Promise<ManageCreateResult> {
@@ -90,15 +90,25 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
     validateScope(scope);
     assertNoPendingVectorMigration(scope);
 
+    // 纯参数校验前置：避免「缺 name / name 非法」的无效调用也把 scope 建出来（副作用最小化）
+    if (!name) return { ok: false, error: 'create 需要 name 参数' };
+    if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
+
+    // 记录初始化状态：scope 名拼错时会被静默创建，返回 createdScope 让调用方可发现
+    const scopeExisted = fs.existsSync(getGroupIndexPath(scope));
+
+    // scope 不存在则从 _template 初始化（与 sync-relation / import / edit-relation /
+    // query-group / get-module-info 同口径；工具描述承诺「scope 不存在则自动创建」）。
+    // strict 模式下未注册 scope 由 ensureScopeDir 抛错并给出注册指引（fail-loud）。
+    ensureScopeDir(scope);
+    const createdScope = scopeExisted ? {} : { createdScope: true as const };
+
     const data = readGroupIndex(scope);
     if (!data) return { ok: false, error: 'group-index.json 不存在' };
 
     const indexPath = getGroupIndexPath(scope);
     // 批次 2（W9）：resolveGroupPath 上下文改轻量键枚举（只读，不触发任何写）
     const groupsData = buildGroupMatchContext(listGroupPaths(scope));
-
-    if (!name) return { ok: false, error: 'create 需要 name 参数' };
-    if (name.includes('/')) return { ok: false, error: `节点名 "${name}" 不能包含 "/"` };
 
     const parentPath = (parent || '').replace(/^\/+|\/+$/g, '');
     const result = findContainer(data.groups, parentPath);
@@ -115,7 +125,7 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
           }
           parentNode[name] = {};
           writeJson(indexPath, data as unknown as Record<string, unknown>);
-          return { ok: true, scope, path: `${resolvedParent}/${name}`, ...(resolved.hint ? { hint: resolved.hint } : {}) };
+          return { ok: true, scope, path: `${resolvedParent}/${name}`, ...createdScope, ...(resolved.hint ? { hint: resolved.hint } : {}) };
         }
       }
       const hintParts: string[] = [`父节点路径不存在：${parentPath || '(顶层)'}`];
@@ -134,7 +144,7 @@ async function executeManageCreateLocal(params: ManageCreateParams): Promise<Man
 
     parentNode[name] = {};
     writeJson(indexPath, data as unknown as Record<string, unknown>);
-    return { ok: true, scope, path: parentPath ? `${parentPath}/${name}` : name };
+    return { ok: true, scope, path: parentPath ? `${parentPath}/${name}` : name, ...createdScope };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -602,6 +612,22 @@ program
       const resolvedScope = resolveScope(loadConfig(), scope);
       // 校验 scope
       validateScope(resolvedScope);
+
+      // create 参数前置校验（同 MCP 路径：缺参数/非法 name 的无效调用不应建出 scope）
+      if (action === 'create') {
+        if (!name) {
+          output({ ok: false, error: 'create 需要 --name 参数' });
+          process.exit(1);
+        }
+        if (typeof name === 'string' && name.includes('/')) {
+          output({ ok: false, error: `节点名 "${name}" 不能包含 "/"` });
+          process.exit(1);
+        }
+      }
+
+      // create 与 MCP/daemon 路径同口径：scope 不存在则先初始化；
+      // delete 不自动创建（无对象可删，沿用「group-index.json 不存在」报错）
+      if (action === 'create') ensureScopeDir(resolvedScope);
 
       const data = readGroupIndex(resolvedScope);
 

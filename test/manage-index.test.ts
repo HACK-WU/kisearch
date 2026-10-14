@@ -163,6 +163,115 @@ describe('manage-index 功能验证（通过模块直接调用）', () => {
   });
 });
 
+describe('scope 不存在时的 create（工具描述承诺「scope 不存在则自动创建」）', () => {
+  it('executeManageCreate 于全新 scope 自动初始化并建节点', async () => {
+    const { executeManageCreate } = await import('../src/manage-index.js');
+    const { getKbDir, getGroupIndexPath } = await import('../src/lib/scope.js');
+
+    const scope = 'auto-init-' + Date.now();
+    registerTestScope(scope);
+    const kbDir = getKbDir(scope);
+    assert.ok(!fs.existsSync(kbDir), '前置：scope 目录不应存在');
+
+    try {
+      const result = await executeManageCreate({ scope, name: '项目概述' });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual((result as { path?: string }).path, '项目概述');
+      assert.strictEqual(
+        (result as { createdScope?: true }).createdScope,
+        true,
+        '全新 scope 应在返回中标注 createdScope（让拼错的 scope 名可被发现）',
+      );
+      const groupIndex = JSON.parse(fs.readFileSync(getGroupIndexPath(scope), 'utf-8'));
+      assert.ok(groupIndex.groups['项目概述'] !== undefined, '节点应写入新初始化的 group-index.json');
+    } finally {
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('已初始化 scope 再 create 不标注 createdScope（幂等，不重建）', async () => {
+    const { executeManageCreate } = await import('../src/manage-index.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
+
+    const scope = 'auto-init-idem-' + Date.now();
+    registerTestScope(scope);
+    const kbDir = getKbDir(scope);
+
+    try {
+      const first = await executeManageCreate({ scope, name: 'A' });
+      assert.strictEqual((first as { createdScope?: true }).createdScope, true);
+
+      const second = await executeManageCreate({ scope, name: 'B' });
+      assert.strictEqual(second.ok, true);
+      assert.strictEqual(
+        (second as { createdScope?: true }).createdScope,
+        undefined,
+        '第二次调用复用已存在的 scope，不应再标注新建',
+      );
+    } finally {
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI create 于全新 scope 同样自动初始化', async () => {
+    const { getKbDir, getGroupIndexPath } = await import('../src/lib/scope.js');
+
+    const scope = 'auto-init-cli-' + Date.now();
+    registerTestScope(scope);
+    const kbDir = getKbDir(scope);
+    assert.ok(!fs.existsSync(kbDir), '前置：scope 目录不应存在');
+
+    try {
+      const result = runManageIndex(['--scope', scope, '--action', 'create', '--name', '背景与目标']);
+      assert.strictEqual(result.ok, true);
+      assert.ok(fs.existsSync(getGroupIndexPath(scope)), 'CLI create 应初始化 group-index.json');
+    } finally {
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('缺 name / name 非法时不创建 scope（无效调用零副作用）', async () => {
+    const { executeManageCreate } = await import('../src/manage-index.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
+
+    const scope = 'auto-init-noname-' + Date.now();
+    registerTestScope(scope);
+    const kbDir = getKbDir(scope);
+
+    try {
+      const noName = await executeManageCreate({ scope, name: '' });
+      assert.strictEqual(noName.ok, false);
+      assert.ok(!fs.existsSync(kbDir), '缺 name 不应初始化 scope');
+
+      const badName = await executeManageCreate({ scope, name: 'a/b' });
+      assert.strictEqual(badName.ok, false);
+      assert.ok(!fs.existsSync(kbDir), 'name 含 "/" 不应初始化 scope');
+
+      const cliNoName = runManageIndex(['--scope', scope, '--action', 'create']);
+      assert.strictEqual(cliNoName.ok, false);
+      assert.ok(!fs.existsSync(kbDir), 'CLI 缺 --name 不应初始化 scope');
+    } finally {
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('delete 于全新 scope 仍报错且不自动创建目录（无副作用）', async () => {
+    const { getKbDir } = await import('../src/lib/scope.js');
+
+    const scope = 'auto-init-del-' + Date.now();
+    registerTestScope(scope);
+    const kbDir = getKbDir(scope);
+
+    try {
+      const result = runManageIndex(['--scope', scope, '--action', 'delete', '--name', 'x']);
+      assert.strictEqual(result.ok, false);
+      assert.ok(!fs.existsSync(kbDir), 'delete 不应初始化 scope 目录');
+    } finally {
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('自动迁移（旧格式 → 新格式）', () => {
   it('旧格式 roots → 自动迁移为 groups（"项目根"子节点提升）', async () => {
     const { readGroupIndex } = await import('../src/lib/store.js');
