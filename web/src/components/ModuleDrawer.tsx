@@ -222,17 +222,19 @@ function applyDocumentHighlights(
 }
 
 /**
- * 定位第 index 个命中并滚动居中；**返回 DOM 中此刻实际存在的 mark 数**。
+ * 定位第 index 个命中，并在 `scroll` 为真时滚动居中；**返回 DOM 中此刻实际存在的 mark 数**。
  *
  * 返回值供调用方校正计数：查找时统计到的命中数可能多于此刻 DOM 里的 mark
  * （React 重渲染某棵子树会把手动插入的 mark 一并丢掉）。若计数只认统计值，
  * 用户就会看到「5/200」却跳不动 —— 那是一条错误的用户可见事实（R4）。
+ *
+ * `scroll=false`：只切 active 标记、不移动视口（混合检索"高亮但不跳转"，REQ-20261014-003 Q8）。
  */
-function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: ScrollBehavior): number {
+function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: ScrollBehavior, scroll = true): number {
   const marks = Array.from(body.querySelectorAll<HTMLElement>(`mark.${DOC_HIGHLIGHT_CLASS}`));
   marks.forEach((mark, markIndex) => mark.classList.toggle(DOC_HIGHLIGHT_ACTIVE_CLASS, markIndex === index));
   const target = marks[index];
-  if (target) {
+  if (target && scroll) {
     const bodyRect = body.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     const top = body.scrollTop + targetRect.top - bodyRect.top - (body.clientHeight - targetRect.height) / 2;
@@ -303,6 +305,14 @@ interface ModuleDrawerProps {
   fallbackContent?: string;
   /** 全文检索上下文；缺省时为普通阅读，不显示命中导航。 */
   highlightQuery?: string;
+  /**
+   * 打开文档时是否**自动滚动**到首个命中（缺省 `true` = 既有行为）。
+   *
+   * 混合检索（语义召回）传 `false`（REQ-20261014-003 Q8）：命中照常全部标记、工具条照常给
+   * `1/N` 计数，但视口停在文档顶部不跳转；用户**主动**跳转（「下一个命中」/ 查找栏输入）后恢复滚动。
+   * 全文检索与 AI 引用片段保持缺省 —— 那两条链路的语义就是"定位到命中"（J1 / J2），不得改变。
+   */
+  highlightAutoScroll?: boolean;
   targetAnchor?: string;
   editable?: boolean;
   onClose: () => void;
@@ -341,6 +351,7 @@ export function ModuleDrawer({
   initialContent,
   fallbackContent,
   highlightQuery,
+  highlightAutoScroll = true,
   targetAnchor,
   editable = false,
   onClose,
@@ -400,6 +411,13 @@ export function ModuleDrawer({
 
   const outlineCollapsed = controlledOutlineCollapsed ?? internalOutlineCollapsed;
   const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
+  /**
+   * 是否允许"自动滚动到命中"。初值取 `highlightAutoScroll`（混合检索传 false = 打开时不跳转），
+   * **只在挂载时取一次**：已打开的文档不因外部 prop 变化改变滚动行为（REQ-20261014-003 N3）。
+   * 用户**主动**跳转（「下一个命中」/「上一个命中」/ 查找栏输入生效）后置 true ——
+   * 主动行为必须滚动，否则会出现"点了下一个命中、视口纹丝不动"的死按钮。
+   */
+  const autoScrollRef = useRef(highlightAutoScroll);
   /** 正文滚动容器 */
   const bodyRef = useRef<HTMLDivElement>(null);
   /** 查找栏输入框（Ctrl+F / 工具条入口展开后聚焦） */
@@ -636,7 +654,7 @@ export function ModuleDrawer({
         setHighlightIndex((current) => (count === 0 ? 0 : Math.min(current, count - 1)));
         if (count > 0) {
           window.requestAnimationFrame(() => {
-            focusDocumentHighlight(body, Math.min(highlightIndex, count - 1), highlightScrollBehavior.current);
+            focusDocumentHighlight(body, Math.min(highlightIndex, count - 1), highlightScrollBehavior.current, autoScrollRef.current);
             highlightScrollBehavior.current = 'auto';
           });
         }
@@ -650,6 +668,12 @@ export function ModuleDrawer({
             setHighlightCount(retry.count);
             setFindTruncated(retry.truncated);
             setHighlightIndex((current) => (retry.count === 0 ? 0 : Math.min(current, retry.count - 1)));
+            // 复扫会重建全部 mark（applyDocumentHighlights 先清后插），**连带丢掉 `--active` 标记** ——
+            // 实测：打开文档 1.2s 后（第二次复扫）当前命中高亮消失且无人重标，用户只看到满篇同色 mark。
+            // 这里补一次重标；`scroll=false` 保持"复扫不动视口"（用户可能已滚到别处阅读）。
+            if (retry.count > 0) {
+              focusDocumentHighlight(liveBody, Math.min(highlightIndex, retry.count - 1), 'auto', false);
+            }
           }, delay));
         }
       } else {
@@ -674,7 +698,7 @@ export function ModuleDrawer({
     const frame = window.requestAnimationFrame(() => {
       const body = bodyRef.current;
       if (!body) return;
-      const actual = focusDocumentHighlight(body, highlightIndex, highlightScrollBehavior.current);
+      const actual = focusDocumentHighlight(body, highlightIndex, highlightScrollBehavior.current, autoScrollRef.current);
       highlightScrollBehavior.current = 'auto';
       if (actual !== highlightCount) {
         setHighlightCount(actual);
@@ -696,6 +720,7 @@ export function ModuleDrawer({
 
   const focusNextHighlight = useCallback((): void => {
     if (highlightCount === 0) return;
+    autoScrollRef.current = true;
     highlightScrollBehavior.current = 'smooth';
     setHighlightIndex((current) => stepFindIndex(current, highlightCount, 1));
   }, [highlightCount]);
@@ -722,6 +747,8 @@ export function ModuleDrawer({
     const { value, truncated } = clampFindQuery(raw);
     setFindNotice(truncated ? `查询最多 ${DOC_FIND_QUERY_MAX} 字符，已截断` : '');
     setFindApplied(value);
+    // 用户主动查找：此后命中变化都该滚动（否则"搜了却停在原地"）
+    if (value) autoScrollRef.current = true;
     highlightScrollBehavior.current = 'auto';
     if (value) setHighlightEnabled(true);
   }, []);
@@ -735,11 +762,13 @@ export function ModuleDrawer({
   }, [commitFindQuery]);
 
   const findPrev = useCallback((): void => {
+    autoScrollRef.current = true;
     highlightScrollBehavior.current = 'smooth';
     setHighlightIndex((current) => stepFindIndex(current, highlightCount, -1));
   }, [highlightCount]);
 
   const findNext = useCallback((): void => {
+    autoScrollRef.current = true;
     highlightScrollBehavior.current = 'smooth';
     setHighlightIndex((current) => stepFindIndex(current, highlightCount, 1));
   }, [highlightCount]);

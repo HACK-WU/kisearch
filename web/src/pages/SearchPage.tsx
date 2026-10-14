@@ -18,6 +18,8 @@ import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } from '@/lib/searchHistory';
 import { parseSearchUrl, searchUrlSearch, type SearchUrlState } from '@/lib/searchUrl';
+import { readDocHighlight, writeDocHighlight } from '@/lib/searchPrefs';
+import { decideDocHighlight } from '@/lib/searchHighlight';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -133,6 +135,11 @@ export function SearchPage(): JSX.Element {
   /** 与当前结果绑定的查询词/模式；输入框清空或修改后，结果仍保持原查询的高亮口径。 */
   const [resultQuery, setResultQuery] = useState('');
   const [resultMode, setResultMode] = useState<'hybrid' | 'fulltext' | null>(null);
+  /**
+   * 混合检索「文档内高亮」开关（REQ-20261014-003 R2）：纯展示偏好 —— 只影响点开文档后的
+   * 正文高亮，不进入检索请求；默认开，用户意图持久化（不进 URL：分享链接不该替接收者决定）。
+   */
+  const [docHighlight, setDocHighlight] = useState<boolean>(() => readDocHighlight());
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /** 错误码（如 VECTOR_DIMENSION_MISMATCH）：与导入页共用同一判定口径，不再靠错误串猜 */
@@ -147,6 +154,33 @@ export function SearchPage(): JSX.Element {
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
+
+  /**
+   * 「文档内高亮」决策（REQ-20261014-003 §0.1）——判据集中在 `lib/searchHighlight.ts`（可单测），
+   * 这里只把**结果属性**喂进去：`resultMode` / `degradeReason` 都在检索完成时写入
+   * （run 内 setResultMode / setDegradeReason），是"当前结果"的属性。
+   * **不得改用 `fullTextOnly`**（模式按钮的选择态，点了就变，会让"搜完混合 → 点全文不重搜"
+   * 时开关与列表错位）。
+   */
+  const {
+    listHighlight,
+    docHighlightQuery,
+    switchDisabled: docHighlightSwitchDisabled,
+    autoScroll: docHighlightAutoScroll,
+  } = decideDocHighlight({
+    resultMode,
+    degraded: degradeReason !== null,
+    switchOn: docHighlight,
+    query: resultQuery,
+  });
+
+  /** 切换「文档内高亮」：纯展示偏好 —— 只写 state + localStorage，**不重跑检索**（R2 / N3） */
+  const toggleDocHighlight = useCallback((): void => {
+    if (docHighlightSwitchDisabled) return;
+    const next = !docHighlight;
+    setDocHighlight(next);
+    writeDocHighlight(next);
+  }, [docHighlight, docHighlightSwitchDisabled]);
   /** 供「清空」后把焦点交还输入框，用户可直接打下一次查询 */
   const inputRef = useRef<HTMLInputElement>(null);
   /** 最近一次已知的 URL 查询串；写入前比较，避免无谓导航（与浏览页同一套口径） */
@@ -551,6 +585,27 @@ export function SearchPage(): JSX.Element {
               <option value="20">20</option>
             </select>
           </div>
+          {/* 混合检索「文档内高亮」开关（R2/R7）：只影响点开文档后的正文高亮，不进检索请求。
+              全文结果下无意义（恒高亮）→ 禁用灰掉，避免"点了没反应"（R4/Q5）。 */}
+          <div className="ki-query-option">
+            <span className="ki-form-label">文档内高亮</span>
+            <div
+              className={`ki-switch${docHighlight ? ' ki-switch--on' : ''}${docHighlightSwitchDisabled ? ' ki-switch--disabled' : ''}`}
+              role="switch"
+              aria-checked={docHighlight}
+              aria-disabled={docHighlightSwitchDisabled}
+              title={docHighlightSwitchDisabled
+                ? '全文检索（含降级）的正文高亮始终开启，不受此开关影响'
+                : '混合检索时，点开文档是否在正文中高亮查询词（不自动跳转，工具条可逐个跳转）'}
+              onClick={toggleDocHighlight}
+            >
+              <div className="ki-switch__knob" />
+            </div>
+            {/* 禁用只在「当前结果是全文」时发生 ⇒ 给出**可见**说明，不依赖 hover（用户反馈：灰掉却不说为什么） */}
+            {docHighlightSwitchDisabled && (
+              <span className="ki-cell-sub">全文检索始终高亮</span>
+            )}
+          </div>
         </div>
         {historyScope === scope && recentSearches.length > 0 && (
           <section className="ki-search-history" aria-label="最近检索记录">
@@ -695,7 +750,7 @@ export function SearchPage(): JSX.Element {
                       fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
                       group: r.group,
                       path: doc?.path,
-                      highlightQuery: resultMode === 'fulltext' ? resultQuery : undefined,
+                      highlightQuery: docHighlightQuery,
                     });
                   }}
                 >
@@ -716,9 +771,10 @@ export function SearchPage(): JSX.Element {
                         >{r.relation ? '定位文档 ↗' : '浏览此 Group ↗'}</Link>
                       )}
                     </div>
-                    {/* 原文 / 向量内容；仅全文模式高亮，避免把语义近似结果误标成精确命中 */}
+                    {/* 原文 / 向量内容；全文**与降级**（结果实为 BM25 字面命中）高亮，
+                        纯混合（语义近似）不高亮 —— 避免把语义召回误标成精确命中（REQ-20261014-003 R5） */}
                     <div className="ki-qr-content">
-                      {resultMode === 'fulltext' ? (() => {
+                      {listHighlight ? (() => {
                         // 全文命中的 content 通常是命中 chunk；original 是文件级原文，优先展示前者。
                         const matchedContent = r.content ?? r.original ?? r.relation ?? '(无内容)';
                         return highlightMatch(makeSearchSnippet(matchedContent, resultQuery), resultQuery);
@@ -766,6 +822,9 @@ export function SearchPage(): JSX.Element {
           initialContent={viewing.content}
           fallbackContent={viewing.fallbackContent}
           highlightQuery={viewing.highlightQuery}
+          /* 混合检索（含降级）打开文档时不自动跳转：命中全部标记 + 工具条给 `1/N`，
+             视口停在顶部；全文检索保持"定位到命中"的既有语义（REQ-20261014-003 Q8）。 */
+          highlightAutoScroll={docHighlightAutoScroll}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}
