@@ -345,7 +345,9 @@ export function AppShell(): JSX.Element {
       // ① 文档查看器：查找栏已展开则直接聚焦；未展开则请查看器自行展开（组件内部状态不外露）
       if (document.querySelector('.ki-drawer')) {
         e.preventDefault();
-        const findInput = document.querySelector<HTMLInputElement>('[data-ki-drawer-find]');
+        // 只认可见的那个输入框：同时挂载多个查看器时（引用预览 + 阅读区），隐藏实例不应偷走焦点
+        const findInput = Array.from(document.querySelectorAll<HTMLInputElement>('[data-ki-drawer-find]'))
+          .find((el) => el.offsetWidth > 0 || el.offsetHeight > 0);
         if (findInput) {
           findInput.focus();
           findInput.select();

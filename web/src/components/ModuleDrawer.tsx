@@ -2,12 +2,34 @@
  * ModuleDrawer.tsx —— 原文查看抽屉（右侧滑出 + scrim + 复制）
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type CompositionEvent as ReactCompositionEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
+import {
+  DOC_FIND_DEBOUNCE_MS,
+  DOC_FIND_MARK_LIMIT,
+  DOC_FIND_OPEN_EVENT,
+  DOC_FIND_QUERY_MAX,
+  buildFindTerms,
+  clampFindQuery,
+  describeFindLimit,
+  describeFindMiss,
+  formatFindCount,
+  stepFindIndex,
+} from '@/lib/docFind';
 
 /** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
 const ICON_DRAWER_COLLAPSE = (
@@ -25,6 +47,14 @@ const ICON_NAV_PREV = (
 const ICON_NAV_NEXT = (
   <svg className="ki-drawer__nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M9.5 6.5 15 12l-5.5 5.5" />
+  </svg>
+);
+
+/** 文档内查找入口（放大镜） */
+const ICON_FIND = (
+  <svg className="ki-drawer__find-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="11" cy="11" r="6" />
+    <path d="m20 20-3.7-3.7" />
   </svg>
 );
 
@@ -67,33 +97,83 @@ const ICON_OUTLINE_EXPAND = (
 const DOC_HIGHLIGHT_CLASS = 'ki-doc-highlight';
 const DOC_HIGHLIGHT_ACTIVE_CLASS = 'ki-doc-highlight--active';
 
+/**
+ * 命中应用后的复扫时点（ms）。
+ *
+ * Markdown 里的 mermaid / 代码块是**异步渲染**的，会在首轮应用之后替换子树，
+ * 把手动插入的 `mark` 一并丢掉 —— 表现为「计数 200、DOM 只剩 196」（既有偏差，2026-10-14 实测复现）。
+ * 这两个时点各复扫一次：确实少了就重新应用（`applyDocumentHighlights` 幂等），
+ * 仍少于统计值则把计数收敛到 DOM 实际值（R4：计数必须等于可导航命中数）。
+ */
+const DOC_HIGHLIGHT_RESCAN_DELAYS = [400, 1200];
+
 function escapeHighlightRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
- * 正文高亮词表：与结果列表（lib/searchText）共用同一套切词（中文 2~4 字滑窗 + 停用词），
- * 并按**全文文本**自适应剔除泛词——否则「什么需要注册中心」这类无空格中文长句会拆不出词（0 命中），
- * 或是「注册」这种泛词在一篇讲服务注册的文档里铺满几十处高亮（实测 39 处 → 泛词剔除后 ~24 处）。
+ * 正文高亮词表有两个来源，由调用方决定（都经本函数构造成一条 OR 正则）：
+ *
+ * - **外部 `highlightQuery`**（检索命中 / AI 引用片段）：用 `selectHighlightTerms`，即检索口径
+ *   （中文 2~4 字滑窗 + 停用词 + 按全文频次剔除 2 字泛词）——保持既有行为不变；
+ * - **用户主动查找**：用 `lib/docFind::buildFindTerms` 的**字面词表**（不做泛词剔除），
+ *   对齐浏览器 Ctrl+F 的心智：输 `ku` 就要看到所有 `ku`（见 docFind.ts 顶部注释的实测缺陷说明）。
  */
-function buildHighlightPattern(query: string, text: string): RegExp | null {
-  const terms = selectHighlightTerms(query, text)
+function buildHighlightPattern(terms: string[]): RegExp | null {
+  const escaped = terms
+    .filter((term) => term.length > 0)
     .sort((a, b) => b.length - a.length)
     .map(escapeHighlightRegExp);
-  return terms.length > 0 ? new RegExp(`(${terms.join('|')})`, 'gi') : null;
+  return escaped.length > 0 ? new RegExp(`(${escaped.join('|')})`, 'gi') : null;
 }
 
 function clearDocumentHighlights(root: HTMLElement): void {
+  const touched = new Set<Node>();
   for (const mark of Array.from(root.querySelectorAll<HTMLElement>(`mark.${DOC_HIGHLIGHT_CLASS}`))) {
     const parent = mark.parentNode;
     if (!parent) continue;
+    touched.add(parent);
     while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
     mark.remove();
   }
+  /*
+   * 合并被高亮切碎的相邻文本节点。
+   *
+   * 匹配是**逐文本节点**做的（见 applyDocumentHighlights），若只把 mark 的子节点原样插回而不合并，
+   * 先前的高亮会把词永久拆碎：搜过 `contex` 之后，正文里的 `context` 变成 `"contex"` + `"t"`
+   * 两个相邻文本节点，再搜 `context` 两个碎片都匹配不到 ⇒ 计数 0、显示「未找到」，且**重新输入无法自愈**。
+   * 用户逐字打字（c → co → con → …）会不断累积碎片，最终必然踩到。
+   * normalize 只合并相邻文本节点、不改元素结构（实测 2026-10-14 复现与修复验证）。
+   */
+  for (const node of touched) node.normalize();
 }
 
-/** 在已安全渲染的 Markdown 文本节点上包裹 mark，不拼接原始 HTML。 */
-function applyDocumentHighlights(root: HTMLElement, query: string): number {
+interface DocumentHighlightResult {
+  /** 实际包裹的命中数（=== 此刻 DOM 中可导航的 mark 数） */
+  count: number;
+  /** 是否因命中上限提前停止（确认还有未显示的命中） */
+  truncated: boolean;
+}
+
+interface DocumentHighlightOptions {
+  /** 命中词表；缺省时按检索口径（selectHighlightTerms）从 query + 全文统计推导 */
+  terms?: string[];
+  /** 命中上限（默认 DOC_FIND_MARK_LIMIT） */
+  limit?: number;
+}
+
+/**
+ * 在已安全渲染的 Markdown 文本节点上包裹 mark，不拼接原始 HTML。
+ *
+ * 与历史实现的唯一差别是**上限**（R8）：单字查询在长文档里可命数千处，无上限时每次重算都要
+ * 建/删同样数量的 mark 并触发整页重排。达到上限即停止包裹，并只多扫一跳用于确认「确实还有更多」。
+ */
+function applyDocumentHighlights(
+  root: HTMLElement,
+  query: string,
+  options: DocumentHighlightOptions = {},
+): DocumentHighlightResult {
+  const { terms, limit = DOC_FIND_MARK_LIMIT } = options;
   clearDocumentHighlights(root);
 
   const textNodes: Text[] = [];
@@ -102,17 +182,21 @@ function applyDocumentHighlights(root: HTMLElement, query: string): number {
   while (node) {
     const text = node as Text;
     const parent = text.parentElement;
-    // 页面生成的复制控件不是原文，不能参与命中计数/自动定位。
-    if (text.nodeValue && parent && !parent.closest('script,style,svg,button,[aria-live]')) textNodes.push(text);
+    // 页面生成的复制控件与查找栏本身不是原文，不能参与命中计数/自动定位。
+    if (text.nodeValue && parent && !parent.closest('script,style,svg,button,[aria-live],.ki-drawer__findbar')) textNodes.push(text);
     node = walker.nextNode();
   }
 
-  // 词表按全文自适应（先收集文本再建 pattern）：泛词剔除依赖整篇的出现频次
-  const pattern = buildHighlightPattern(query, textNodes.map((text) => text.nodeValue ?? '').join('\n'));
-  if (!pattern) return 0;
+  // 未显式给出词表时按检索口径自适应（先收集文本再建 pattern：泛词剔除依赖整篇的出现频次）
+  const pattern = buildHighlightPattern(
+    terms ?? selectHighlightTerms(query, textNodes.map((text) => text.nodeValue ?? '').join('\n')),
+  );
+  if (!pattern) return { count: 0, truncated: false };
 
   let count = 0;
+  let truncated = false;
   for (const textNode of textNodes) {
+    if (truncated) break;
     const value = textNode.nodeValue ?? '';
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -120,6 +204,7 @@ function applyDocumentHighlights(root: HTMLElement, query: string): number {
     let matched = false;
     const fragment = root.ownerDocument.createDocumentFragment();
     while ((match = pattern.exec(value)) !== null) {
+      if (count >= limit) { truncated = true; break; }
       matched = true;
       if (match.index > lastIndex) fragment.appendChild(root.ownerDocument.createTextNode(value.slice(lastIndex, match.index)));
       const mark = root.ownerDocument.createElement('mark');
@@ -133,18 +218,27 @@ function applyDocumentHighlights(root: HTMLElement, query: string): number {
     if (lastIndex < value.length) fragment.appendChild(root.ownerDocument.createTextNode(value.slice(lastIndex)));
     textNode.replaceWith(fragment);
   }
-  return count;
+  return { count, truncated };
 }
 
-function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: ScrollBehavior): void {
+/**
+ * 定位第 index 个命中并滚动居中；**返回 DOM 中此刻实际存在的 mark 数**。
+ *
+ * 返回值供调用方校正计数：查找时统计到的命中数可能多于此刻 DOM 里的 mark
+ * （React 重渲染某棵子树会把手动插入的 mark 一并丢掉）。若计数只认统计值，
+ * 用户就会看到「5/200」却跳不动 —— 那是一条错误的用户可见事实（R4）。
+ */
+function focusDocumentHighlight(body: HTMLDivElement, index: number, behavior: ScrollBehavior): number {
   const marks = Array.from(body.querySelectorAll<HTMLElement>(`mark.${DOC_HIGHLIGHT_CLASS}`));
   marks.forEach((mark, markIndex) => mark.classList.toggle(DOC_HIGHLIGHT_ACTIVE_CLASS, markIndex === index));
   const target = marks[index];
-  if (!target) return;
-  const bodyRect = body.getBoundingClientRect();
-  const targetRect = target.getBoundingClientRect();
-  const top = body.scrollTop + targetRect.top - bodyRect.top - (body.clientHeight - targetRect.height) / 2;
-  body.scrollTo({ top: Math.max(0, top), behavior });
+  if (target) {
+    const bodyRect = body.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = body.scrollTop + targetRect.top - bodyRect.top - (body.clientHeight - targetRect.height) / 2;
+    body.scrollTo({ top: Math.max(0, top), behavior });
+  }
+  return marks.length;
 }
 
 interface OutlineHeading {
@@ -288,6 +382,16 @@ export function ModuleDrawer({
   const [highlightEnabled, setHighlightEnabled] = useState(Boolean(highlightQuery?.trim()));
   const [highlightCount, setHighlightCount] = useState(0);
   const [highlightIndex, setHighlightIndex] = useState(0);
+  /** 文档内查找栏是否展开（Ctrl+F / 工具条入口；移动端没有 Ctrl 键，必须有可见入口） */
+  const [findOpen, setFindOpen] = useState(false);
+  /** 输入框受控值：逐键更新（IME 组词期间的中间态也照常回显） */
+  const [findDraft, setFindDraft] = useState('');
+  /** 已生效的查找词：防抖结束 / compositionend 后才从 draft 同步 */
+  const [findApplied, setFindApplied] = useState('');
+  /** 查找栏即时提示（查询被截断） */
+  const [findNotice, setFindNotice] = useState('');
+  /** 命中是否被上限截断（计数文案补 `+` 并给提示） */
+  const [findTruncated, setFindTruncated] = useState(false);
   const [outlineHeadings, setOutlineHeadings] = useState<OutlineHeading[]>([]);
   /** 非受控兜底：大纲默认折叠（与两个页面的受控初值一致），需要时手动展开 */
   const [internalOutlineCollapsed, setInternalOutlineCollapsed] = useState(true);
@@ -298,6 +402,15 @@ export function ModuleDrawer({
   const highlightScrollBehavior = useRef<ScrollBehavior>('auto');
   /** 正文滚动容器 */
   const bodyRef = useRef<HTMLDivElement>(null);
+  /** 查找栏输入框（Ctrl+F / 工具条入口展开后聚焦） */
+  const findInputRef = useRef<HTMLInputElement>(null);
+  /** IME 组词中：期间不重算，待 compositionend 统一生效（N8） */
+  const findComposingRef = useRef(false);
+  const findDebounceRef = useRef<number | undefined>(undefined);
+  /** 本次展开是否已预填过：避免输入过程中被 effect 反复聚焦 / 全选 */
+  const findSeededRef = useRef(false);
+  /** 查看器根节点：用于判断本实例是否可见（Ctrl+F 事件可能被多个实例同时收到） */
+  const drawerRef = useRef<HTMLElement>(null);
   /** 全屏切换前记下的阅读位置（正文容器会换父节点被重建，切换后按此恢复） */
   const savedScrollRef = useRef<number | null>(null);
 
@@ -332,6 +445,7 @@ export function ModuleDrawer({
   useEffect(() => () => {
     window.clearTimeout(selectionWarningTimer.current);
     window.clearTimeout(savedNoticeTimer.current);
+    window.clearTimeout(findDebounceRef.current);
   }, []);
 
   useEffect(() => {
@@ -339,6 +453,47 @@ export function ModuleDrawer({
     setHighlightIndex(0);
     highlightScrollBehavior.current = 'auto';
   }, [highlightQuery]);
+
+  /** Ctrl+F 判定链①（AppShell 侧）派发事件 → 查看器展开查找栏；组件不依赖任何页面路由 */
+  useEffect(() => {
+    const handler = (): void => {
+      // 多实例防护：页面可能同时挂载多个查看器（AI 引用预览 + 浏览页阅读区，前者窄屏时被
+      // display:none 隐藏）。只有**可见**的那个响应，否则按一次 Ctrl+F 会弹出两个查找栏。
+      const el = drawerRef.current;
+      if (el && el.offsetWidth === 0 && el.offsetHeight === 0) return;
+      setFindOpen(true);
+    };
+    window.addEventListener(DOC_FIND_OPEN_EVENT, handler);
+    return () => window.removeEventListener(DOC_FIND_OPEN_EVENT, handler);
+  }, []);
+
+  /**
+   * 查找栏展开时聚焦输入框，并在输入为空时**预填当前生效词**（外部高亮词可直接续用 / 清除）。
+   * 用 findSeededRef 保证「每次展开只做一次」——否则输入过程中本 effect 会反复全选输入框。
+   */
+  useEffect(() => {
+    if (!findOpen) {
+      findSeededRef.current = false;
+      return;
+    }
+    if (findSeededRef.current) return;
+    findSeededRef.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      const input = findInputRef.current;
+      if (!input) return;
+      const seeded = clampFindQuery(highlightQuery ?? '').value;
+      if (seeded) {
+        setFindDraft(seeded);
+        setFindApplied(seeded);
+        // 预填即代表「用户正在查找」：必须同时恢复高亮开关，否则「先点取消高亮、再打开查找框」
+        // 会让核心 effect 走 else 分支把计数清零 ⇒ 正文里明明有该词却显示「未找到」（实测复现）
+        setHighlightEnabled(true);
+      }
+      input.focus();
+      input.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [findOpen, highlightQuery]);
 
   /** 从实际渲染的标题生成当前文档大纲，普通抽屉也保留折叠入口。 */
   const collectOutlineHeadings = useCallback((): void => {
@@ -454,38 +609,77 @@ export function ModuleDrawer({
     setLoadAttempt((attempt) => attempt + 1);
   }, []);
 
-  /** 内容渲染后把全文上下文应用到 Markdown 文本节点，并自动定位首个命中。 */
+  /**
+   * 生效查找词：用户输入优先（findApplied），否则回落到打开文档时带入的 highlightQuery
+   * —— 外部链路（AI 引用片段 / 检索命中）的语义因此完全不变（J1/J2）。
+   */
+  const activeFindQuery = findApplied.trim() || highlightQuery?.trim() || '';
+
+  /** 内容渲染后把生效查找词应用到 Markdown 文本节点，并自动定位首个命中。 */
   useEffect(() => {
+    /** 复扫定时器（异步渲染可能丢掉 mark）：effect 重跑或卸载时一并清理 */
+    const timers: number[] = [];
     const frame = window.requestAnimationFrame(() => {
       const body = bodyRef.current;
       const root = body?.querySelector<HTMLElement>('.ki-markdown--drawer');
       if (!body || !root) {
         setHighlightCount(0);
+        setFindTruncated(false);
         return;
       }
-      const count = highlightEnabled && highlightQuery?.trim()
-        ? applyDocumentHighlights(root, highlightQuery)
-        : (clearDocumentHighlights(root), 0);
-      setHighlightCount(count);
-      setHighlightIndex((current) => count === 0 ? 0 : Math.min(current, count - 1));
-      if (count > 0) {
-        window.requestAnimationFrame(() => {
-          focusDocumentHighlight(body, Math.min(highlightIndex, count - 1), highlightScrollBehavior.current);
-          highlightScrollBehavior.current = 'auto';
-        });
+      if (highlightEnabled && activeFindQuery) {
+        // 用户主动查找用字面词表（对齐 Ctrl+F）；外部 highlightQuery 沿用检索口径（既有行为不变）
+        const userTerms = findApplied.trim() ? buildFindTerms(findApplied) : undefined;
+        const { count, truncated } = applyDocumentHighlights(root, activeFindQuery, { terms: userTerms });
+        setHighlightCount(count);
+        setFindTruncated(truncated);
+        setHighlightIndex((current) => (count === 0 ? 0 : Math.min(current, count - 1)));
+        if (count > 0) {
+          window.requestAnimationFrame(() => {
+            focusDocumentHighlight(body, Math.min(highlightIndex, count - 1), highlightScrollBehavior.current);
+            highlightScrollBehavior.current = 'auto';
+          });
+        }
+        for (const delay of DOC_HIGHLIGHT_RESCAN_DELAYS) {
+          timers.push(window.setTimeout(() => {
+            const liveBody = bodyRef.current;
+            const liveRoot = liveBody?.querySelector<HTMLElement>('.ki-markdown--drawer');
+            if (!liveBody || !liveRoot) return;
+            if (liveBody.querySelectorAll(`mark.${DOC_HIGHLIGHT_CLASS}`).length >= count) return;
+            const retry = applyDocumentHighlights(liveRoot, activeFindQuery, { terms: userTerms });
+            setHighlightCount(retry.count);
+            setFindTruncated(retry.truncated);
+            setHighlightIndex((current) => (retry.count === 0 ? 0 : Math.min(current, retry.count - 1)));
+          }, delay));
+        }
+      } else {
+        clearDocumentHighlights(root);
+        setHighlightCount(0);
+        setFindTruncated(false);
+        setHighlightIndex(0);
       }
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [displayedContent, loading, fullscreen, highlightEnabled, highlightQuery]);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [displayedContent, loading, fullscreen, highlightEnabled, activeFindQuery]);
 
-  /** 当前命中变化时更新 active 状态并滚动到目标。 */
+  /**
+   * 当前命中变化时更新 active 状态并滚动到目标；顺带用 DOM 实数校正计数。
+   * 校正方向只可能是「变小」：React 重渲染会丢掉手动插入的 mark（R4：计数必须等于可导航命中数）。
+   */
   useEffect(() => {
     if (!highlightEnabled || highlightCount === 0) return;
     const frame = window.requestAnimationFrame(() => {
       const body = bodyRef.current;
       if (!body) return;
-      focusDocumentHighlight(body, highlightIndex, highlightScrollBehavior.current);
+      const actual = focusDocumentHighlight(body, highlightIndex, highlightScrollBehavior.current);
       highlightScrollBehavior.current = 'auto';
+      if (actual !== highlightCount) {
+        setHighlightCount(actual);
+        setHighlightIndex((current) => (actual === 0 ? 0 : Math.min(current, actual - 1)));
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [highlightEnabled, highlightCount, highlightIndex, fullscreen]);
@@ -494,13 +688,92 @@ export function ModuleDrawer({
     highlightScrollBehavior.current = 'auto';
     setHighlightEnabled(false);
     setHighlightIndex(0);
+    // 取消高亮同时清掉查找词：否则查找栏里还留着词、用户却看不到任何高亮
+    setFindDraft('');
+    setFindApplied('');
+    setFindNotice('');
   }, []);
 
   const focusNextHighlight = useCallback((): void => {
     if (highlightCount === 0) return;
     highlightScrollBehavior.current = 'smooth';
-    setHighlightIndex((current) => (current + 1) % highlightCount);
+    setHighlightIndex((current) => stepFindIndex(current, highlightCount, 1));
   }, [highlightCount]);
+
+  /** 关闭查找栏：清空输入并回到「展开查找栏之前」的状态（外部词仍在则恢复外部高亮） */
+  const closeFindBar = useCallback((): void => {
+    window.clearTimeout(findDebounceRef.current);
+    findDebounceRef.current = undefined;
+    highlightScrollBehavior.current = 'auto';
+    setFindOpen(false);
+    setFindDraft('');
+    setFindApplied('');
+    setFindNotice('');
+    setHighlightEnabled(Boolean(highlightQuery?.trim()));
+    setHighlightIndex(0);
+  }, [highlightQuery]);
+
+  const openFindBar = useCallback((): void => {
+    setFindOpen(true);
+  }, []);
+
+  /** 查找词生效（防抖后统一落地）：逐键全量重算在大文档上明显迟滞（R8） */
+  const commitFindQuery = useCallback((raw: string): void => {
+    const { value, truncated } = clampFindQuery(raw);
+    setFindNotice(truncated ? `查询最多 ${DOC_FIND_QUERY_MAX} 字符，已截断` : '');
+    setFindApplied(value);
+    highlightScrollBehavior.current = 'auto';
+    if (value) setHighlightEnabled(true);
+  }, []);
+
+  const scheduleFind = useCallback((raw: string): void => {
+    window.clearTimeout(findDebounceRef.current);
+    findDebounceRef.current = window.setTimeout(() => {
+      findDebounceRef.current = undefined;
+      commitFindQuery(raw);
+    }, DOC_FIND_DEBOUNCE_MS);
+  }, [commitFindQuery]);
+
+  const findPrev = useCallback((): void => {
+    highlightScrollBehavior.current = 'smooth';
+    setHighlightIndex((current) => stepFindIndex(current, highlightCount, -1));
+  }, [highlightCount]);
+
+  const findNext = useCallback((): void => {
+    highlightScrollBehavior.current = 'smooth';
+    setHighlightIndex((current) => stepFindIndex(current, highlightCount, 1));
+  }, [highlightCount]);
+
+  const handleFindChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    const raw = event.target.value;
+    setFindDraft(raw);
+    // IME 组词期间不重算：中文用户还在选词，此时搜索只会让命中数抖动（N8）
+    if (findComposingRef.current) return;
+    scheduleFind(raw);
+  }, [scheduleFind]);
+
+  const handleFindCompositionStart = useCallback((): void => {
+    findComposingRef.current = true;
+  }, []);
+
+  const handleFindCompositionEnd = useCallback((event: ReactCompositionEvent<HTMLInputElement>): void => {
+    findComposingRef.current = false;
+    scheduleFind(event.currentTarget.value);
+  }, [scheduleFind]);
+
+  /**
+   * 查找栏键盘闭环：Enter=下一个、Shift+Enter=上一个。
+   *
+   * **Esc 不在这里处理**：keydown 是 discrete 事件，React 会在本处理器内同步 flush 状态更新并
+   * 重挂 window 监听器（新闭包里 findOpen 已是 false），事件随后冒泡到 window 时会走「关抽屉」分支
+   * —— 表现为按一次 Esc 同时关掉查找栏与文档。统一交给 window 上的既有 ESC 处理器（单一入口）。
+   */
+  const handleFindKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>): void => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (event.shiftKey) findPrev();
+    else findNext();
+  }, [findNext, findPrev]);
 
   const handleCopy = useCallback(async () => {
     if (!displayedContent) return;
@@ -631,6 +904,8 @@ export function ModuleDrawer({
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
       if (editor.isOpen || readerLinkComposerOpen) return;
+      // 查找栏优先：Esc 只关查找栏，再按一次才退全屏 / 关抽屉（Q3：三个 Esc 语义不能撞车）
+      if (findOpen) { closeFindBar(); return; }
       // 待选模式优先退出，避免用户被留在「选择片段…」状态里
       if (linkArmed) { setLinkArmed(false); clearSelectionWarning(); return; }
       if (fullscreen) updateFullscreen(false);
@@ -641,7 +916,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [clearSelectionWarning, editor.isOpen, fullscreen, linkArmed, onClose, readerLinkComposerOpen, updateFullscreen]);
+  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, onClose, readerLinkComposerOpen, updateFullscreen]);
 
   /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
   const [atTop, setAtTop] = useState(true);
@@ -690,6 +965,20 @@ export function ModuleDrawer({
 
   /** 内容不足一屏时不渲染按钮，避免无意义的悬浮控件 */
   const scrollable = !(atTop && atBottom);
+
+  /** 查找栏状态区：有词才显示；0 命中给「未找到 x」，否则给 `n/m`（R4：不允许静默） */
+  const findStatusText = !activeFindQuery
+    ? ''
+    : highlightCount > 0
+      ? formatFindCount(highlightIndex, highlightCount, findTruncated)
+      : describeFindMiss(activeFindQuery);
+  /** 查找提示：完整文案（进 title）与工具条内的短徽标（就地展开后空间有限） */
+  const findNoticeText = findNotice || (findTruncated && highlightCount > 0 ? describeFindLimit(highlightCount) : '');
+  const findNoticeBadge = findNotice
+    ? `最多 ${DOC_FIND_QUERY_MAX} 字`
+    : findTruncated && highlightCount > 0
+      ? `仅前 ${highlightCount} 处`
+      : '';
 
   const body = (
     <div
@@ -758,6 +1047,7 @@ export function ModuleDrawer({
     <>
       {!inline && <div className="ki-drawer__scrim ki-drawer__scrim--show" onClick={onClose} />}
       <aside
+        ref={drawerRef}
         className={`ki-drawer${fullscreen ? ' ki-drawer--fullscreen' : ''}${inline ? ' ki-drawer--inline' : ''}`}
         role={inline ? undefined : 'dialog'}
         aria-modal={inline ? undefined : true}
@@ -825,6 +1115,64 @@ export function ModuleDrawer({
             {/* 全屏专属动作（如「AI 对话」开关）：REQ-20261009-002 —— 全屏层会盖住顶栏开关，
                 面板未打开时用户在全屏中没有任何 AI 入口 */}
             {fullscreen ? fullscreenActions : null}
+            {/* 文档内查找：点放大镜**就地**展开为输入框（不新占一行，正文不被下推）；Ctrl+F 同样唤出。
+                移动端没有 Ctrl 键，故保留这个可点入口。 */}
+            {findOpen ? (
+              <div className="ki-drawer__findgroup" role="search" aria-label="文档内查找">
+                <input
+                  ref={findInputRef}
+                  className="ki-drawer__find-input"
+                  data-ki-drawer-find=""
+                  type="text"
+                  value={findDraft}
+                  placeholder="本文档内查找…"
+                  aria-label="在本文档内查找"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={handleFindChange}
+                  onCompositionStart={handleFindCompositionStart}
+                  onCompositionEnd={handleFindCompositionEnd}
+                  onKeyDown={handleFindKeyDown}
+                />
+                <span className="ki-drawer__find-status" role="status" aria-live="polite">{findStatusText}</span>
+                {findNoticeBadge && (
+                  <span className="ki-drawer__find-notice" title={findNoticeText}>{findNoticeBadge}</span>
+                )}
+                <button
+                  className="ki-drawer__find-btn"
+                  type="button"
+                  onClick={findPrev}
+                  disabled={highlightCount === 0}
+                  title="上一个命中（Shift+Enter）"
+                  aria-label="上一个命中"
+                >↑</button>
+                <button
+                  className="ki-drawer__find-btn"
+                  type="button"
+                  onClick={findNext}
+                  disabled={highlightCount === 0}
+                  title="下一个命中（Enter）"
+                  aria-label="下一个命中"
+                >↓</button>
+                <button
+                  className="ki-drawer__find-btn ki-drawer__find-btn--close"
+                  type="button"
+                  onClick={closeFindBar}
+                  title="关闭查找（Esc）"
+                  aria-label="关闭查找"
+                >✕</button>
+              </div>
+            ) : (
+              <button
+                className="ki-drawer__find-toggle"
+                type="button"
+                onClick={openFindBar}
+                title="在本文档内查找（Ctrl+F）"
+                aria-label="在本文档内查找"
+              >
+                {ICON_FIND}
+              </button>
+            )}
             {/* 全文命中导航：紧贴复制按钮左侧（用户反馈：原孤立在标题区右侧视觉割裂） */}
             {fullscreen && (
               <div className="ki-segmented ki-reader-width" role="group" aria-label="正文宽度">
@@ -836,7 +1184,8 @@ export function ModuleDrawer({
                 </button>
               </div>
             )}
-            {highlightEnabled && highlightCount > 0 && (
+            {/* 查找栏展开时由查找栏承担同一套计数与导航，避免两条并排重复（REQ-20261014-002） */}
+            {highlightEnabled && highlightCount > 0 && !findOpen && (
               <div className="ki-drawer__highlight" role="group" aria-label="全文命中导航">
                 <span className="ki-drawer__highlight-count">{highlightIndex + 1}/{highlightCount}</span>
                 <button

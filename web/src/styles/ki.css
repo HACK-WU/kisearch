@@ -1339,7 +1339,7 @@ a:hover { text-decoration: underline; }
   border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
   color: var(--ki-color-primary);
 }
-/* ── 文档内查找（REQ-20261014-002）：独立一行，三形态（内联 / 全屏 / 抽屉）一致 ── */
+/* ── 文档内查找（REQ-20261014-002）：点放大镜**就地**展开为输入框，不新占一行 ── */
 .ki-drawer__find-toggle {
   display: inline-flex;
   align-items: center;
@@ -1359,61 +1359,62 @@ a:hover { text-decoration: underline; }
   border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
   color: var(--ki-color-primary);
 }
-.ki-drawer__find-toggle--active {
-  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
-  border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border));
-  color: var(--ki-color-primary);
-}
 .ki-drawer__find-icon { width: 14px; height: 14px; }
 
-.ki-drawer__findbar {
-  display: flex;
+/* 展开态：占住放大镜原位的紧凑查找组（输入框 + 计数 + 上/下/关闭）。
+   输入框可弹性收缩（min-width 96px），标题区先让位 ⇒ 既有按钮不被挤走、正文也不被下推。 */
+.ki-drawer__findgroup {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap; /* 窄屏换行：输入框独占一行，导航与提示落到第二行，不挤压既有工具条 */
-  gap: 6px;
-  padding: 8px 20px;
-  border-bottom: 1px solid var(--ki-color-border);
-  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+  gap: 4px;
+  min-width: 0;
+}
+/* 查找态：把标题区的弹性基准收窄，让输入框真正拿到宽度。
+   用 :has() 限定「查找框展开」这一个状态——关闭查找后标题区恢复原样，既有布局零影响。
+   实测（内联阅读区 938px）：不收窄时标题区占 337px 且不让位，输入框被压到 168px。 */
+.ki-drawer__head:has(.ki-drawer__findgroup) .ki-drawer__identity {
+  flex: 0 1 160px;
 }
 .ki-drawer__find-input {
-  flex: 1 1 180px;
-  min-width: 0;
-  height: 28px;
+  /* 用户要求「再长一点」：定宽 320px，空间不足时收缩到 150px 下限。
+     必须用 width 而不是 flex-basis —— 工具条宽度由内容 max-content 决定，而 max-content
+     的计算**不看 flex-basis**（实测：只写 flex-basis:280px 时输入框仍是 input 固有宽 168px）。 */
+  flex: 0 1 auto;
+  width: 320px;
+  min-width: 150px;
+  max-width: 420px;
+  height: 26px;
   padding: 0 8px;
   border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-sm);
   background: var(--ki-color-surface);
   color: var(--ki-color-text);
-  font-size: 13px;
+  font-size: 12px;
 }
 .ki-drawer__find-input:focus {
   outline: none;
   border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border));
 }
 .ki-drawer__find-status {
-  min-width: 48px;
+  min-width: 34px;
   color: var(--ki-color-warning);
   font-size: 11px;
   font-family: var(--ki-font-mono);
   text-align: center;
+  white-space: nowrap;
 }
 .ki-drawer__find-notice {
-  font-size: 11px;
   color: var(--ki-color-warning);
-}
-.ki-drawer__find-nav {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto; /* 导航靠右，与输入框拉开距离 */
+  font-size: 11px;
+  white-space: nowrap;
 }
 .ki-drawer__find-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 26px;
+  min-width: 24px;
   height: 24px;
-  padding: 0 6px;
+  padding: 0 5px;
   border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-sm);
   background: var(--ki-color-surface);
@@ -1431,13 +1432,11 @@ a:hover { text-decoration: underline; }
 .ki-drawer__find-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .ki-drawer__find-btn--close { font-size: 11px; }
 
-/* 内联模式头部左内边距是 16px（.ki-drawer--inline .ki-drawer__head），查找栏与标题左边缘对齐 */
-.ki-drawer--inline .ki-drawer__findbar { padding-left: 16px; }
-
+/* 窄屏：仅在工具条放不下时允许换行，查找组独占一行（宽屏不换行，既有外观不变） */
 @media (max-width: 800px) {
-  .ki-drawer__findbar { padding: 8px 12px; }
-  .ki-drawer__find-input { flex: 1 1 100%; }
-  .ki-drawer__find-nav { margin-left: 0; }
+  .ki-drawer__actions { flex-wrap: wrap; }
+  .ki-drawer__findgroup { flex: 1 1 100%; }
+  .ki-drawer__find-input { flex: 1 1 auto; width: auto; }
 }
 
 .ki-drawer__copy {
