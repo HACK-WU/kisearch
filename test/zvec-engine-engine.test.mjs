@@ -246,15 +246,21 @@ test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影�
 
   const result = await engine.upsert(docs);
 
-  // batch0 的1 boom + 63 b0-* = 64 条全标 EMBEDDING_FAILED；batch1 的 b1 + noEmbed pre 成功
-  assert.equal(result.failed, 64, 'batch0（含 BOOM）整批失败');
-  assert.equal(result.ok, 2, 'batch1 的 b1 + 预计算 pre 成功写入');
+  // 批量故障止损（025976d）：mock 抛的是普通 Error（非单条内容参数错误），按系统性
+  // provider/配置故障处理 —— 停止发起后续 embed 批次，且不再写入任何待写项
+  // （含 noEmbed 的预计算 vector），统一进 notProcessedItems 交由调用方处置。
+  assert.equal(result.failed, 64, 'batch0（含 BOOM）整批标 EMBEDDING_FAILED');
+  assert.equal(result.ok, 0, '系统性故障停止后不再写入任何文档');
+  assert.equal(result.notProcessed, 2, 'batch1 的 b1 与 noEmbed 的 pre 均未被处理');
+  assert.deepEqual(result.notProcessedItems, ['b1', 'pre']);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stopReason?.phase, 'embedding');
+  assert.equal(result.stopReason?.kind, 'configuration');
   assert.ok(result.errors.every((e) => e.code === 'EMBEDDING_FAILED'), '失败项均为 EMBEDDING_FAILED');
   assert.ok(result.errors.some((e) => e.id === 'boom'));
-  // b1/pre 应可 fetch 到，boom 与同批 b0-* 不应写入
+  // 停止后 b1/pre 同样不写入，boom 与同批 b0-* 也不写入
   const fetched = await engine.fetch(['b1', 'pre', 'boom', 'b0-0']);
-  const ids = fetched.map((d) => d.id).sort();
-  assert.deepEqual(ids, ['b1', 'pre'], 'b1/pre 成功写入，boom/b0-0 未写入');
+  assert.deepEqual(fetched.map((d) => d.id), [], '停止后无任何文档写入');
 });
 
 test('TC-REQ-01-28: update 传 text → 重嵌 + 同步 FTS', async (t) => {

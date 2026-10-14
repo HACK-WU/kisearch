@@ -304,7 +304,7 @@ test('S-06: upsert 部分 embedding 失败 → EMBEDDING_FAILED', async (t) => {
   assert.equal(result.errors[0].code, 'EMBEDDING_FAILED');
 });
 
-test('S-06: 预计算 vector 不受 embed 失败影响（S-03 失败粒度）', async (t) => {
+test('S-06: 系统性 embed 故障时预计算 vector 一并停止写入（S-03 失败粒度）', async (t) => {
   const tmpdirRoot = mkdtempSync(join(tmpdir(), 'zvec-s06-prevector-'));
   const dbPath = join(tmpdirRoot, 'db');
   t.after(() => rmSync(tmpdirRoot, { recursive: true, force: true }));
@@ -324,13 +324,20 @@ test('S-06: 预计算 vector 不受 embed 失败影响（S-03 失败粒度）', 
     { id: 'doc2', vector: hashVector('precomputed') },  // 预计算 vector 不参与 embed
   ]);
 
-  // doc1 embed 失败，doc2 预计算 vector 应成功写入
-  assert.equal(result.ok, 1);
-  assert.equal(result.failed, 1);
+  // 批量故障止损（025976d）：embed 抛普通 Error → 系统性故障，停止后续写入。
+  // doc1 标 EMBEDDING_FAILED；doc2 虽为预计算 vector（不参与 embed），也不再写入，
+  // 改为进 notProcessedItems 交由调用方重试。
+  assert.equal(result.ok, 0, '系统性故障停止后不再写入任何文档');
+  assert.equal(result.failed, 1, 'doc1 标 EMBEDDING_FAILED');
+  assert.equal(result.notProcessed, 1, 'doc2 未被处理（未写入）');
+  assert.deepEqual(result.notProcessedItems, ['doc2']);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stopReason?.phase, 'embedding');
+  assert.equal(result.stopReason?.kind, 'configuration');
   assert.equal(result.errors[0].id, 'doc1');
   assert.equal(result.errors[0].code, 'EMBEDDING_FAILED');
 
-  // 验证 doc2 已写入
+  // 验证 doc2 未被写入
   const docs = await engine.fetch(['doc2']);
-  assert.equal(docs.length, 1);
+  assert.equal(docs.length, 0);
 });
