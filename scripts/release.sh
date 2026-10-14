@@ -104,18 +104,12 @@ git push origin "$TAG" --force
 # 9. 创建 GitHub Release 并上传 tarball
 RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 
-\`ki mcp\` 启动 MCP Server，暴露 13 个工具（查询、写入、批量同步、索引管理、Scope/Tag 管理等）。
+\`ki mcp\` 启动 MCP Server，暴露 14 个工具（查询、写入、批量同步、索引管理、Scope/Tag 管理等）。
 
 ### 安装
 
 \`\`\`bash
 npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}
-\`\`\`
-
-### MCP 配置
-
-\`\`\`json
-{ \"mcpServers\": { \"ki\": { \"command\": \"ki\", \"args\": [\"mcp\"] } } }
 \`\`\`"
 
 if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
