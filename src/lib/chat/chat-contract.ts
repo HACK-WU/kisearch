@@ -385,10 +385,22 @@ export interface ChatConfigOk {
   ackRequired: boolean;
   maxToolRounds: number;
   /**
-   * 上下文上限（**字符数**，缺省 1000000 = 1000K；REQ-20261013-001）。
+   * 上下文上限的**生效值**（**字符数**；REQ-20261013-001 / REQ-20261014-001）。
+   *
+   * 三级优先链：**对话配置层的用户覆盖值** → `config.yaml` 的 `llm.contextChars`（部署默认）→ 内置 1000K。
    * 前端只用它作占比分母，**不得**当作模型真实窗口（模型按 token 计）。
    */
   contextChars: number;
+  /**
+   * 三级链的后两级（= **部署默认**）：前端「恢复默认」的目标值。
+   *
+   * 为什么不写死 1000K：运维可在 `config.yaml` 把默认设成别的值，此时"恢复默认"应回到
+   * 那个值而不是 1000K（REQ-20261014-001）。
+   * 旧 daemon 不返回本字段 → 前端回退用 `contextChars`（等价）。
+   */
+  contextCharsDefault?: number;
+  /** 是否启用了用户覆盖值（前端据此显示"自定义"标记）。旧 daemon 下为 undefined（视为未知）。 */
+  contextCharsOverridden?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -415,10 +427,12 @@ export const CHAT_BUDGET = {
   /** 首块超时（只约束"建立连接并收到首个 chunk"，不约束工具轮次） */
   firstByteTimeoutMs: 30_000,
   /**
-   * 上下文上限默认值（**字符数**，= 1000K；REQ-20261013-001）。
+   * 上下文上限的**内置兜底值**（**字符数**，= 1000K；REQ-20261013-001）。
    *
-   * 单位口径：K = 1000 字符（故 1000K = 1,000,000 字符）。用户可用
-   * `llm.contextChars` 覆盖。**仅用于占比与阈值预警**，不代表模型 token 窗口
+   * 单位口径：K = 1000 字符（故 1000K = 1,000,000 字符）。
+   * 三级优先链的**最后一级**（REQ-20261014-001）：
+   *   对话配置层的用户覆盖值 → `config.yaml` 的 `llm.contextChars` → 本值。
+   * **仅用于占比与阈值预警**，不代表模型 token 窗口
    * —— 字符口径偏保守（中文 ≈1 token/1~1.5 字，英文/代码 ≈1 token/3~4 字）。
    */
   defaultContextChars: 1_000_000,

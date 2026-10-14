@@ -85,6 +85,7 @@ import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
 import { summarizeForCompaction } from './compaction.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
+  CONTEXT_CHARS_MAX,
   MAX_SKILLS,
   MCP_TOOL_GROUPS,
   PROMPT_MAX_CHARS,
@@ -459,7 +460,7 @@ function mapAndSendError(res: ServerResponse, err: unknown): void {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 配置（API-01 / API-13）
+// 配置（API-01 / API-13 / API-15）
 // ─────────────────────────────────────────────────────────────
 
 /** 取当前配置快照（外部注入优先，缺省回退 loadConfig） */
@@ -467,13 +468,75 @@ function snapshotConfig(ctx: ChatRouteContext): KiConfig {
   return (ctx.configSnapshot as KiConfig) ?? loadConfig();
 }
 
-/** API-01 `GET /api/chat/config` */
+/**
+ * API-01 `GET /api/chat/config`
+ *
+ * `contextChars` 返回的是**生效值**（REQ-20261014-001 v2 起为三级优先链）：
+ *   ① 对话配置层的**用户覆盖值**（`prompt-config.json` 的 `contextChars`）
+ *   ② `config.yaml` 的 `llm.contextChars`（**部署默认**）
+ *   ③ 内置 `CHAT_BUDGET.defaultContextChars`（1000K）
+ *
+ * 同时透出 `contextCharsDefault`（②或③）与 `contextCharsOverridden`，让「恢复默认」
+ * 有明确目标值 —— 运维把默认设成 500K 时，恢复默认就该回到 500K，而不是写死 1000K。
+ */
 export async function handleConfigGet(res: ServerResponse, ctx: ChatRouteContext): Promise<void> {
   const cfg = snapshotConfig(ctx);
   const configPath = ctx.configPath ?? cfg._configPath ?? '~/.ki/config.yaml';
   const status: LlmStatus = resolveLlmStatus(cfg, configPath);
+  const ok = toChatConfigOk(status, configPath) as unknown as Record<string, unknown>;
+  // 读失败 / 字段非法时 readPromptConfig 回退默认 → 视为"未覆盖"，属可接受降级
+  const { config: promptCfg } = readPromptConfig(cfg);
+  const fallback = status.contextChars;
   // ★ **未就绪时仍返回 200 + ok:true**（配置缺失是可预期的产品状态）
-  sendOk(res, 200, toChatConfigOk(status, configPath) as unknown as Record<string, unknown>);
+  sendOk(res, 200, {
+    ...ok,
+    contextChars: promptCfg.contextChars ?? fallback,
+    contextCharsDefault: fallback,
+    contextCharsOverridden: promptCfg.contextChars !== undefined,
+  });
+}
+
+/**
+ * 就地修改配置文件 `llm` 段的**单个字段**（保留其余内容与文件权限）。
+ *
+ * 从 `handleConfigAck` 的行内实现抽出。2026-10-14 一度与 `PUT /api/chat/config` 共用；
+ * 后者因用户裁决「界面改的值不写 config.yaml、单独存储」被撤销，**现仅 ack 使用** ——
+ * 仍保留抽取，因为这里是**全项目唯一**会写该文件的地方，读写顺序集中一处比散在 handler 里可控。
+ * ★ 复用 config.ts 的原子写（临时文件 + rename + 沿用原 mode）：
+ *   ① 直接 writeFileSync 会让并发 daemon 有机会读到**半截文件**（解析失败 → 被当成"配置坏了"）；
+ *   ② 配置含 apiKey 明文，rename 不带原 mode 会把 0600 降级为默认权限（密钥泄露）。
+ *
+ * @param what 用于错误文案（`无法持久化{what}`）
+ * @throws ChatWriteFailedError 未找到配置文件路径，或读写失败（**不返回部分成功**）
+ */
+function patchLlmConfigField(field: string, value: unknown, what: string): void {
+  const configPath = loadConfig()._configPath;
+  if (!configPath) {
+    throw new ChatWriteFailedError(`未找到配置文件路径，无法持久化${what}`);
+  }
+
+  try {
+    const text = fs.readFileSync(configPath, 'utf-8');
+    const parsed = (path.extname(configPath).toLowerCase() === '.json'
+      ? JSON.parse(text)
+      : YAML.parse(text)) as Record<string, unknown> | null;
+    const doc = (parsed && typeof parsed === 'object') ? parsed : {};
+    const llmRaw = (doc.llm && typeof doc.llm === 'object' && !Array.isArray(doc.llm))
+      ? doc.llm as Record<string, unknown>
+      : {};
+    llmRaw[field] = value;
+    doc.llm = llmRaw;
+
+    const out = path.extname(configPath).toLowerCase() === '.json'
+      ? JSON.stringify(doc, null, 2) + '\n'
+      : YAML.stringify(doc);
+    atomicWriteConfig(configPath, out);
+    // 改动应立即生效：清掉配置缓存，避免后续 `loadConfig()` 仍拿到旧快照
+    resetConfigCache();
+  } catch (err) {
+    if (err instanceof ChatWriteFailedError) throw err;
+    throw new ChatWriteFailedError(err);
+  }
 }
 
 /**
@@ -489,45 +552,14 @@ export async function handleConfigAck(req: IncomingMessage, res: ServerResponse)
     throw new ChatApiError(400, 'API_ERROR', '不支持取消确认：撤销入口在配置文件（llm.kbDisclosureAck）');
   }
 
-  const cfg = loadConfig();
-  const configPath = cfg._configPath;
-  if (!configPath) {
-    throw new ChatWriteFailedError('未找到配置文件路径，无法持久化确认状态');
-  }
-
-  try {
-    // 就地写回 llm.kbDisclosureAck: true（保留其余内容）
-    const text = fs.readFileSync(configPath, 'utf-8');
-    const parsed = (path.extname(configPath).toLowerCase() === '.json'
-      ? JSON.parse(text)
-      : YAML.parse(text)) as Record<string, unknown> | null;
-    const doc = (parsed && typeof parsed === 'object') ? parsed : {};
-    const llmRaw = (doc.llm && typeof doc.llm === 'object' && !Array.isArray(doc.llm))
-      ? doc.llm as Record<string, unknown>
-      : {};
-    llmRaw.kbDisclosureAck = true;
-    doc.llm = llmRaw;
-
-    const out = path.extname(configPath).toLowerCase() === '.json'
-      ? JSON.stringify(doc, null, 2) + '\n'
-      : YAML.stringify(doc);
-    // ★ 复用 config.ts 的原子写（临时文件 + rename + 沿用原 mode）：
-    //   ① 直接 writeFileSync 会让并发 daemon 有机会读到**半截文件**（解析失败 → 被当成"配置坏了"）；
-    //   ② 配置含 apiKey 明文，rename 不带原 mode 会把 0600 降级为默认权限（密钥泄露）。
-    atomicWriteConfig(configPath, out);
-    // 本次确认应立即生效：清掉配置缓存，避免后续 `loadConfig()` 仍拿到 kbDisclosureAck=false 的旧快照
-    resetConfigCache();
-  } catch (err) {
-    if (err instanceof ChatWriteFailedError) throw err;
-    throw new ChatWriteFailedError(err);
-  }
+  patchLlmConfigField('kbDisclosureAck', true, '确认状态');
 
   // 幂等：重复确认结果一致
   sendOk(res, 200, { kbDisclosureAck: true });
 }
 
 // ─────────────────────────────────────────────────────────────
-// 对话配置层（批次 1）：提示词 / Skill / 工具开关
+// 对话配置层（批次 1）：提示词 / Skill / 工具开关 / 上下文上限
 // ─────────────────────────────────────────────────────────────
 
 /**
@@ -545,6 +577,10 @@ export async function handleConfigAck(req: IncomingMessage, res: ServerResponse)
 export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteContext): Promise<void> {
   const cfg = snapshotConfig(ctx);
   const { config, issue } = readPromptConfig(cfg);
+  // 上下文上限的**部署默认**（config.yaml 的 llm.contextChars，缺省回落内置 1000K）：
+  // 前端只写覆盖值、不改 config.yaml，故「恢复默认」需要一个明确的目标值 ——
+  // 运维把默认设成 500K 时，恢复默认就该回到 500K（REQ-20261014-001）
+  const status = resolveLlmStatus(cfg, ctx.configPath ?? cfg._configPath ?? '~/.ki/config.yaml');
   sendOk(res, 200, {
     config: config as unknown as Record<string, unknown>,
     defaults: defaultPromptConfig() as unknown as Record<string, unknown>,
@@ -556,7 +592,11 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       skillDescMaxChars: SKILL_DESC_MAX_CHARS,
       skillDescSuggestedChars: SKILL_DESC_SUGGESTED_CHARS,
       maxSkills: MAX_SKILLS,
+      // 上下文上限的硬上界（字符数）—— 与 `normalizePromptConfig` 的校验同源
+      contextCharsMax: CONTEXT_CHARS_MAX,
     },
+    /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
+    contextCharsDefault: status.contextChars,
     // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
     // 前端自己写一份分组清单必然会随工具增减而漂移
     toolGroups: MCP_TOOL_GROUPS,

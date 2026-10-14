@@ -276,10 +276,16 @@ export interface ChatConfigOk {
   ackRequired: boolean;
   maxToolRounds: number;
   /**
-   * 上下文上限（**字符数**，缺省 1000000 = 1000K；REQ-20261013-001）。
+   * 上下文上限的**生效值**（**字符数**；REQ-20261013-001 / REQ-20261014-001）。
+   *
+   * 三级优先链：对话配置层的**用户覆盖值** → `config.yaml` 的 `llm.contextChars`（部署默认）→ 内置 1000K。
    * 只作占比分母，**不得**当作模型真实窗口（模型按 token 计）。
    */
   contextChars: number;
+  /** 三级链的后两级（部署默认）；「恢复默认」的目标值。旧 daemon 不返回 → 回退用 `contextChars`。 */
+  contextCharsDefault?: number;
+  /** 是否启用了用户覆盖值。旧 daemon 下为 undefined（未知，不显示"自定义"标记）。 */
+  contextCharsOverridden?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -313,6 +319,13 @@ export interface PromptConfig {
   skills: PromptSkill[];
   /** 工具名 → 是否暴露给 AI（批次 2 起真实生效：保存后下一次提问即生效） */
   tools: Record<string, boolean>;
+  /**
+   * **用户覆盖的上下文上限**（字符数，REQ-20261014-001）。
+   *
+   * **缺省 = 未覆盖** ⇒ 生效值取服务端三级链的后两级（`config.yaml` 的 `llm.contextChars`
+   * → 内置 1000K）。「恢复默认」= **删掉本字段**（不是写 1000K）。
+   */
+  contextChars?: number;
 }
 
 export interface PromptConfigLimits {
@@ -324,6 +337,8 @@ export interface PromptConfigLimits {
   /** 描述建议长度（只用于字数提示，不是闸门） */
   skillDescSuggestedChars: number;
   maxSkills: number;
+  /** 上下文上限的硬上界（字符数）；与 `contextUsage.ts::CONTEXT_CHARS_MAX` 手工同源 */
+  contextCharsMax: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
@@ -343,6 +358,11 @@ export interface PromptConfigOk {
   /** 内置默认（「恢复默认」直接回填用，前端不复制一份默认文案） */
   defaults: PromptConfig;
   limits: PromptConfigLimits;
+  /**
+   * 上下文上限的**部署默认**（= `config.yaml` 的 `llm.contextChars`，缺省内置 1000K）。
+   * 「恢复默认」的目标值 —— 前端不写死 1000K。旧版 daemon 不返回 → 回退前端常量。
+   */
+  contextCharsDefault?: number;
   toolGroups: PromptToolGroup[];
   /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
   issue: string | null;

@@ -605,6 +605,27 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   }, [reloadActive, store]);
 
   // ── 配置：面板可用性 / 模型名 / 是否需要隐私确认（T12）──
+  /**
+   * 重拉 `GET /api/chat/config`。
+   *
+   * 抽出来是因为有两个触发点：T12 隐私确认后（`handleAck`）与对话配置层的上下文上限应用后 ——
+   * 两处都需要"改完立刻生效"，而挂载期那一次拉取不会重来（只靠它就会出现"改了看不到变化"）。
+   */
+  const refreshConfig = useCallback(async (): Promise<void> => {
+    try {
+      const cfg = await getChatConfig();
+      setConfig(cfg);
+      setConfigError(null);
+    } catch (err: unknown) {
+      setConfigError(err instanceof Error ? err.message : '配置读取失败');
+    }
+  }, []);
+
+  /** 传给 `PromptConfigLayer`：对话配置保存成功后刷新（上下文面板的分母/预警随之立即变化） */
+  const handleConfigSaved = useCallback((): void => {
+    void refreshConfig();
+  }, [refreshConfig]);
+
   useEffect(() => {
     let alive = true;
     getChatConfig()
@@ -1158,9 +1179,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     void (async () => {
       try {
         await ackDisclosure();
-        const cfg = await getChatConfig();
-        setConfig(cfg);
-        setConfigError(null);
+        // 复用统一重拉（与上下文上限应用后同一路径）；失败时它自己写 configError，仍保持阻塞
+        await refreshConfig();
       } catch (err) {
         setConfigError(err instanceof Error ? err.message : '确认失败，请重试');
       } finally {
@@ -1874,7 +1894,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           <section className="ki-chatpage__main">
             {mainColumn}
             {/* ── 对话配置层：absolute inset:0 相对 .ki-chat-panel，page 下覆盖整个双栏区 ── */}
-            {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
+            {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} onSaved={handleConfigSaved} />}
           </section>
         </aside>
       ) : (
@@ -1912,7 +1932,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           {dockHeader}
           {mainColumn}
           {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
-          {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} />}
+          {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} onSaved={handleConfigSaved} />}
         </aside>
       )}
 

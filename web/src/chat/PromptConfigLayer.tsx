@@ -17,6 +17,14 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { PromptConfig, PromptSkill } from '@/api/chatContract';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
 import { usePromptConfig } from '@/chat/usePromptConfig';
+import {
+  CONTEXT_LIMIT_K_MAX,
+  DEFAULT_CONTEXT_CHARS,
+  contextLimitHint,
+  contextLimitToKText,
+  formatKUnit,
+  parseContextLimitK,
+} from '@/lib/contextUsage';
 
 interface ConfirmState {
   title: string;
@@ -48,12 +56,24 @@ const cloneConfig = (c: PromptConfig): PromptConfig => ({
   prompt: { ...c.prompt },
   skills: c.skills.map((s) => ({ ...s })),
   tools: { ...c.tools },
+  // ★ 可选字段必须**显式搬运**：这是白名单式拷贝，漏掉它会让草稿静默丢掉用户覆盖值
+  //   （表现为"改了 skill 保存一下，上下文上限就被清回默认了"）
+  ...(c.contextChars !== undefined ? { contextChars: c.contextChars } : {}),
 });
 
 /** 新增 skill 的 id：符合服务端 `SKILL_ID_RE`（小写字母/数字开头，允许连字符） */
 const newSkillId = () => `skill-${Date.now().toString(36)}`;
 
-export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
+export interface PromptConfigLayerProps {
+  onClose: () => void;
+  /**
+   * 保存成功后通知外层重拉 `GET /api/chat/config` —— 让上下文面板的分母 / 占比 / 预警档位
+   * 立即跟着变（不刷新页面）。
+   */
+  onSaved: () => void;
+}
+
+export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) {
   const { loading, loadError, data, saving, saveError, fieldErrors, savedAt, reload, save } =
     usePromptConfig(true);
 
@@ -62,9 +82,59 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [showSavedBar, setShowSavedBar] = useState(false);
 
-  // 载入 / 保存成功后（服务端回传了新基线）都重置草稿，保证"内容 = 磁盘"
+  // ── 上下文窗口（REQ-20261014-001）：**随层主「保存」提交**，与其余项同一个文件 ──
+  //    用户裁决（2026-10-14）：`config.yaml` 的 `llm.contextChars` 只作**部署默认**，
+  //    界面上改的值单独存在 `prompt-config.json` 的 `contextChars`（**缺省 = 未覆盖**）。
+  //    因此它与 skill / 工具开关同属一份配置、同一个保存动作 —— 不再需要独立「应用」按钮，
+  //    也就不会再有"跨文件写入无法原子"的问题。
+  //    输入单位是 **K**（与面板显示同口径），落盘前换算为字符数。
+  const [ctxText, setCtxText] = useState('');
+
+  /** 「恢复默认」的目标值 = 部署默认（config.yaml 的 llm.contextChars，缺省 1000K） */
+  const ctxDefaultChars = data?.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS;
+  const ctxTextInvalid = ctxText.trim() !== '' && parseContextLimitK(ctxText) === null;
+  /** 是否用了用户覆盖值（决定徽标显示"自定义"还是"默认"） */
+  const ctxOverridden = draft?.contextChars !== undefined;
+  /** 合法但会显著影响读数体验的值（过小 → 长期预警区；过大 → 预警失效）：只提示、不拦截（R6） */
+  const ctxSizeHint = useMemo(() => {
+    const parsed = parseContextLimitK(ctxText);
+    return parsed === null ? null : contextLimitHint(parsed);
+  }, [ctxText]);
+
+  /** 输入 → 草稿：合法才写；**空串视为"未覆盖"**（与「恢复默认」等价，不报错） */
+  const handleCtxInput = (v: string): void => {
+    setCtxText(v);
+    const parsed = parseContextLimitK(v);
+    if (parsed !== null) {
+      setDraft((d) => (d ? { ...d, contextChars: parsed } : d));
+    } else if (v.trim() === '') {
+      setDraft((d) => {
+        if (!d) return d;
+        const { contextChars: _drop, ...rest } = d;
+        return rest;
+      });
+    }
+    // 非法（如 "abc"）：草稿保持上一次的合法值，仅由保存按钮禁用 + 提示拦住
+  };
+
+  /** 恢复默认 = **删掉覆盖值**（回到部署默认），不是写死 1000K */
+  const handleCtxReset = (): void => {
+    setCtxText(contextLimitToKText(ctxDefaultChars));
+    setDraft((d) => {
+      if (!d) return d;
+      const { contextChars: _drop, ...rest } = d;
+      return rest;
+    });
+  };
+
+  // 载入 / 保存成功后（服务端回传了新基线）都重置草稿，保证"内容 = 磁盘"；
+  // 输入框文本只在此刻（基线变化）跟随，**不**随草稿逐字符同步 —— 否则用户输入
+  // "5000" 的过程中会被归一化成 "500" 而打断输入。
   useEffect(() => {
-    if (data) setDraft(cloneConfig(data.config));
+    if (!data) return;
+    const next = cloneConfig(data.config);
+    setDraft(next);
+    setCtxText(contextLimitToKText(next.contextChars ?? (data.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS)));
   }, [data]);
 
   // "已保存"顶部细条：1.2s 自隐
@@ -122,8 +192,11 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
   };
 
   const handleSave = () => {
-    if (!draft) return;
-    void save(draft);
+    if (!draft || ctxTextInvalid) return;
+    void save(draft).then((ok) => {
+      // 保存成功 → 通知外层重拉 `GET /api/chat/config`（面板分母 / 占比 / 预警随之立即变化）
+      if (ok) onSaved();
+    });
   };
 
   const modalItem: PromptEditDraft | null = (() => {
@@ -171,7 +244,7 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
                 基础提示词
                 <em className="ki-chat-cfg__badge">恒定生效</em>
               </span>
-              <p className="ki-chat-cfg__hint">新建会话时注入一次并成为该会话的固定规则；此后改这里只影响**新建**的会话。</p>
+              <p className="ki-chat-cfg__hint">新建会话时注入一次并成为该会话的固定规则；此后改这里只对之后新建的会话生效。</p>
               <div className="ki-chat-cfg__list">
                 <ItemCard
                   group="prompt"
@@ -215,6 +288,77 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
               >
                 ＋ 新增 skill
               </button>
+            </div>
+
+            {/* ── 上下文窗口（REQ-20261014-001）：与其余项同属对话配置，随下方「保存」提交 ──
+                用户裁决：`config.yaml` 的 `llm.contextChars` 只作**部署默认**，界面改的值单独存
+                （`prompt-config.json` 的 `contextChars`），**不写配置文件** */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                上下文窗口
+                <em className="ki-chat-cfg__badge">
+                  {ctxOverridden ? '自定义' : `默认 ${formatKUnit(ctxDefaultChars)}`}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                上下文占比与预警的字符口径上限（K = 1000 字符），不是模型 token 窗口 ——
+                调整它只改变读数与预警时机，不改变 AI 实际能承载的内容量。
+                配置文件（config.yaml）里的值是默认值，这里填的值单独保存、不修改该文件。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="上下文上限（K）"
+                  aria-invalid={ctxTextInvalid || undefined}
+                  value={ctxText}
+                  onChange={(e) => handleCtxInput(e.target.value)}
+                />
+                <span className="ki-chat-cfg__ctxunit">K</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={!ctxOverridden}
+                  onClick={handleCtxReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              <p className="ki-chat-cfg__hint">
+                {ctxOverridden ? '当前：自定义 ' : '当前：默认 '}
+                {formatKUnit(draft.contextChars ?? ctxDefaultChars)}
+                （{(draft.contextChars ?? ctxDefaultChars).toLocaleString('en-US')} 字符）
+                {ctxOverridden ? ` · 默认 ${formatKUnit(ctxDefaultChars)}` : ''}
+              </p>
+              {/**
+                * 降级 fail-loud：旧版服务端不认识 `contextChars`，会**静默丢弃**（仍返回 200），
+                * 表现为"保存成功但值没变"。这里前置告知，而不是等用户困惑 ——
+                * 判据是响应里有没有 `contextCharsDefault`（新版本必有）。
+                */}
+              {data.contextCharsDefault === undefined && (
+                <p className="ki-chat-cfg__warn">
+                  服务端未返回上限的默认值：通常是后端尚未重启，本项的保存可能不会生效。
+                </p>
+              )}
+              {ctxTextInvalid && (
+                <p className="ki-chat-cfg__warn">
+                  请输入正数（K）：如 500、1000；上限 {CONTEXT_LIMIT_K_MAX}K。
+                </p>
+              )}
+              {/* R6：极小 / 极大但**合法**的值 —— 不拦截保存，只把"会发生什么"说清楚 */}
+              {ctxSizeHint === 'small' && (
+                <p className="ki-chat-cfg__warn">
+                  值偏小：系统提示与检索规则本身约占 3~4K 字符，过小会让占比长期落在预警区
+                  —— 只影响读数与预警，不影响 AI 实际能力。
+                </p>
+              )}
+              {ctxSizeHint === 'large' && (
+                <p className="ki-chat-cfg__warn">
+                  值偏大：占比会长期接近 0，预警将失去意义（硬上界 {CONTEXT_LIMIT_K_MAX}K）。
+                </p>
+              )}
             </div>
 
             <div className="ki-chat-cfg__field">
@@ -272,12 +416,12 @@ export function PromptConfigLayer({ onClose }: { onClose: () => void }) {
         <span className="ki-chat-cfg__spacer" />
         {/* 生效范围**分开说**（2026-10-13）：提示词/skill 随会话快照冻结，只影响新建会话；
             工具开关是即时读取的，下一次提问即生效 —— 混成一句会让"改了 skill 没反应"看起来像坏了 */}
-        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对**新建会话**生效，工具开关下一次提问生效</span>
+        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对之后新建的会话生效，工具开关与上下文上限保存后生效</span>
         <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={onClose}>取消</button>
         <button
           type="button"
           className="ki-chat-btn"
-          disabled={saving || !draft}
+          disabled={saving || !draft || ctxTextInvalid}
           data-busy={saving}
           onClick={handleSave}
         >

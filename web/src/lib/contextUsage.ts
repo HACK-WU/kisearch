@@ -60,6 +60,79 @@ export function formatKUnit(chars: number | null | undefined): string {
   return `${(chars / 1000).toFixed(1)}K`;
 }
 
+// ─────────────────────────────────────────────────────────────
+// 上下文上限的输入换算（对话配置层「上下文窗口」用；REQ-20261014-001）
+//
+// 「恢复默认」按钮写的是文件顶部已有的 `DEFAULT_CONTEXT_CHARS`（= 1000K，与后端
+// `CHAT_BUDGET.defaultContextChars` 同值）；本段只补"输入 → 提交"这条路径。
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 后端硬上界（字符数），与 `src/lib/chat/prompt-config.ts::CONTEXT_CHARS_MAX` **手工同源**
+ * （对话配置保存时由 `normalizePromptConfig` 强制）。
+ * 超此值占比恒为 0.0%，预警静默失效 —— 故前端先行拦截，避免用户提交后才被拒。
+ */
+export const CONTEXT_CHARS_MAX = 100_000_000;
+
+/** 输入框可接受的最大 K 值 */
+export const CONTEXT_LIMIT_K_MAX = CONTEXT_CHARS_MAX / 1000;
+
+/**
+ * 解析输入框的 **K 值** → 字符数（正整数）。
+ *
+ * 返回 `null` 表示不可提交（调用方据此禁用按钮并给提示），覆盖：
+ * 空 / 前后空白 / 非十进制写法（`1e3`、`0x10`、`1000K`）/ 非正数 / 超过硬上界 /
+ * 换算后不足 1 字符（如 `0.0001`）。
+ */
+export function parseContextLimitK(input: string): number | null {
+  const t = input.trim();
+  if (!t) return null;
+  // 只接受十进制（可带小数）：挡掉 `1e3` / `0x10` / `1000K` / `+-1` 这类写法 ——
+  // 它们 `Number()` 多半能得到一个数，但用户意图不明确，宁可拒绝并提示。
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  const k = Number(t);
+  if (!Number.isFinite(k) || k <= 0) return null;
+  if (k > CONTEXT_LIMIT_K_MAX) return null;
+  const chars = Math.round(k * 1000);
+  return chars > 0 ? chars : null;
+}
+
+/**
+ * 字符数 → 输入框文本（K；去掉尾随零，如 `1000000` → `1000`、`250000` → `250`）。
+ * 最多保留 3 位小数（1 字符 = 0.001K）；非法输入返回空串。
+ */
+export function contextLimitToKText(chars: number | null | undefined): string {
+  if (chars === null || chars === undefined || !Number.isFinite(chars) || chars <= 0) return '';
+  return String(Number((chars / 1000).toFixed(3)));
+}
+
+/**
+ * 偏小阈值（字符数）：低于它给出"占比会长期落在预警区"的提示。
+ *
+ * 依据：系统提示 + 检索 skill 规则本身约 **3~4K 字符**（`context` 事件的 system 分量实测），
+ * 取 10K 留 2~3 倍余量 —— 再小就几乎一轮对话就触达 80% 黄线。
+ */
+export const CONTEXT_LIMIT_SMALL_CHARS = 10_000;
+
+/**
+ * 偏大阈值（字符数）：10,000K = 1000 万字符 ≈ 300 万 token，已远超任何真实模型窗口。
+ * 高于它占比会长期接近 `0.0%` ⇒ **预警静默失效**（与后端硬上界同为"防呆"目的，只是更早提示）。
+ */
+export const CONTEXT_LIMIT_LARGE_CHARS = 10_000_000;
+
+/**
+ * 上限的**合理性提示**（REQ-20261014-001 R6）：`'small'` / `'large'` / `null`（= 无需提示）。
+ *
+ * ⚠️ 两种都**只提示、不拦截** —— 用户可能有非常规用法（如刻意压小以观察预警），
+ * 拦截反而会挡住正当诉求；这里只负责把"设成这个值会发生什么"说清楚。
+ */
+export function contextLimitHint(chars: number | null | undefined): 'small' | 'large' | null {
+  if (chars === null || chars === undefined || !Number.isFinite(chars) || chars <= 0) return null;
+  if (chars < CONTEXT_LIMIT_SMALL_CHARS) return 'small';
+  if (chars > CONTEXT_LIMIT_LARGE_CHARS) return 'large';
+  return null;
+}
+
 /** 占比（0~∞）；分母无效时返回 null */
 export function contextRatio(chars: number | null | undefined, limit: number | null | undefined): number | null {
   if (chars === null || chars === undefined || !Number.isFinite(chars)) return null;

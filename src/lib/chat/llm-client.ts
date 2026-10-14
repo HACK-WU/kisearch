@@ -47,7 +47,12 @@ export interface LlmStatus {
   retrievalEnabled: boolean;
   ackRequired: boolean;
   maxToolRounds: number;
-  /** 上下文上限（**字符数**，缺省 1000K；REQ-20261013-001）——面板占比的分母 */
+  /**
+   * 上下文上限的**部署默认**（**字符数**，取自 `config.yaml` 的 `llm.contextChars`，缺省 1000K）。
+   *
+   * ⚠️ REQ-20261014-001 起：这是三级优先链的**第二级**，**不是最终生效值** ——
+   * 对话配置层可存用户覆盖值，生效值由 `handleConfigGet` 组装（`覆盖 ?? 本值`）。
+   */
   contextChars: number;
 }
 

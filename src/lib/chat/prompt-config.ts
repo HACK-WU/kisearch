@@ -52,6 +52,15 @@ export const MAX_SKILLS = 20;
 /** skill id：小写字母/数字开头，允许连字符（与 scope 命名风格一致，便于后续按 id 引用） */
 export const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+/**
+ * 上下文上限的硬上界（字符数，REQ-20261014-001）。
+ *
+ * 1 亿字符 ≈ 3000 万 token，远超任何真实模型 —— 只为挡掉荒谬值：分母过大时占比恒为
+ * `0.0%`，**预警静默失效**（宁可拒绝也不静默）。与前端 `contextUsage.ts::CONTEXT_CHARS_MAX`
+ * **手工同源**，改动需两侧同步。
+ */
+export const CONTEXT_CHARS_MAX = 100_000_000;
+
 // ─── 工具白名单（★ 取自 src/lib/mcp-tools/ 的真实注册名，共 14 个）───
 
 export interface McpToolGroup {
@@ -146,6 +155,24 @@ export interface PromptConfig {
   skills: PromptSkill[];
   /** 工具名 → 是否暴露给 AI（批次 2 生效；本批只存） */
   tools: Record<string, boolean>;
+  /**
+   * **用户覆盖的上下文上限**（字符数，REQ-20261014-001）。
+   *
+   * ⚠️ 语义是"覆盖"而非"配置本体"，三级优先链的**第一级**：
+   *   本字段 → `~/.ki/config.yaml` 的 `llm.contextChars`（**部署默认**）→ 内置 1000K。
+   *
+   * · **缺省（undefined）= 未覆盖** ⇒ 前端「恢复默认」= **删掉本字段**（回到部署默认），
+   *   而不是写死 1000K —— 运维把默认设成 500K 时，"恢复默认"就该回到 500K。
+   * · 为什么单独存这里、不写 `config.yaml`：`config.yaml` 是**运维级**配置（含 apiKey / 模型 /
+   *   scope，且是 yaml 整文件重写、会丢手写注释），对话配置是**产品级**配置；两者的
+   *   责任人与变更频率都不同，混在一起会让"界面上的一次点击"写出运维级文件的 diff。
+   *
+   * ⚠️ 本字段同样受 `readPromptConfig` 的「**任一字段非法 → 整体回退默认**」语义约束：
+   *   手工把 JSON 里的它改成非整数，会让**整个**对话配置（含提示词与 skill）在界面上显示为默认
+   *   （磁盘内容仍在，仅读取时回退，`issue` 会透出）。该事实由
+   *   `test/chat/context-limit-config.test.ts` ⑨ 钉住 —— 改这条语义前先看那组用例。
+   */
+  contextChars?: number;
 }
 
 export interface PromptConfigIssue {
@@ -370,6 +397,21 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
         tools[name] = value;
       }
       out.tools = tools;
+    }
+  }
+
+  // contextChars（**用户覆盖值**；缺省 = 不覆盖，不是 0）
+  if (obj.contextChars !== undefined) {
+    const v = obj.contextChars;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+      issues.push({ path: 'contextChars', message: '应为正整数（字符数；1000K = 1000000）' });
+    } else if (v > CONTEXT_CHARS_MAX) {
+      issues.push({
+        path: 'contextChars',
+        message: `不得超过 ${CONTEXT_CHARS_MAX}（分母过大会让占比与预警失去意义）`,
+      });
+    } else {
+      out.contextChars = v;
     }
   }
 

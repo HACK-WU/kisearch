@@ -3935,3 +3935,38 @@ select.ki-chat-cfg__ta--select {
   background: color-mix(in srgb, var(--ki-color-danger) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--ki-color-danger) 28%, transparent);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   上下文上限可配置（REQ-20261014-001）· 对话配置层「上下文窗口」分组
+   ─────────────────────────────────────────────────────────────
+   用户裁决（2026-10-14）：`config.yaml` 的 `llm.contextChars` 只是**部署默认**，界面上改的值
+   单独存（`prompt-config.json`），因此该分组与其余项**同一个保存动作** —— 排布只需
+   "一行内自洽"：K 输入 + 单位 + 靠右的「恢复默认」。
+   ═══════════════════════════════════════════════════════════════ */
+.ki-chat-cfg__ctxrow {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  margin-top: 6px; min-width: 0;
+}
+.ki-chat-cfg__ctxinput {
+  flex: 0 0 84px; min-width: 0; height: 26px;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  text-align: right;
+  color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 0 8px; transition: border-color 160ms;
+}
+.ki-chat-cfg__ctxinput:focus { outline: none; border-color: var(--ki-color-primary); }
+.ki-chat-cfg__ctxinput:disabled { opacity: .6; }
+/* 非法输入：边框转危险色（原因由下方 `__warn` 一行说清，不在框内重复） */
+.ki-chat-cfg__ctxinput[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__ctxunit { flex: none; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__ctxsp { flex: 1; min-width: 0; }
+
+/* ── 补齐既有缺口（2026-10-14）─────────────────────────────────
+   `ki-chat-cfg__warn` 在 JSX 里早已使用（读取失败 / 配置损坏已回退默认两处，见
+   PromptConfigLayer.tsx），但样式表里**一直没有它** —— 警告文案与正文同色，用户看不出
+   那是警告。本次新增的输入校验提示同样需要它，故一并补上。 */
+.ki-chat-cfg__warn {
+  margin: 6px 0 0; color: var(--ki-color-warning);
+  font-size: var(--ki-font-size-xs); line-height: 1.6;
+}
