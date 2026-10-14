@@ -223,7 +223,7 @@ test('TC-REQ-01-36: 空数组写入 → { ok:0, failed:0 }', async (t) => {
   assert.equal(result.failed, 0);
 });
 
-test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影响（S-03 §4a.2）', async (t) => {
+test('TC-U4: 系统性 embed 故障停止后续批次，含 noEmbed 组一并进 notProcessed（S-03 §4a.2）', async (t) => {
   // 自定义 embedding：任一小批含 "BOOM" 则该批整体抛错（模拟 provider 单次 HTTP 抛错）
   const failing = {
     dimension: DIM,
@@ -236,9 +236,9 @@ test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影�
   t.after(() => engine.close());
 
   // 构造跨 2 个 embed 小批（batchSize=64）：
-  //   batch0 = [boom, b0-0..b0-62]（64 条、含 BOOM → 整批失败）
-  //   batch1 = [b1]（1 条 → 成功）
-  //   另加 1 条预计算 vector 的 noEmbed doc（永不受 embed 影响）
+  //   batch0 = [boom, b0-0..b0-62]（64 条、含 BOOM → 整批失败并触发系统性停止）
+  //   batch1 = [b1]（1 条；本可成功，但停止后不再发起 → 进 notProcessed）
+  //   另加 1 条预计算 vector 的 noEmbed doc（不参与 embed，但停止下同样不写入）
   const docs = [{ id: 'boom', text: 'BOOM trigger', fields: { tag: 'A' } }];
   for (let i = 0; i < 63; i++) docs.push({ id: `b0-${i}`, text: `alpha-${i}`, fields: { tag: 'A' } });
   docs.push({ id: 'b1', text: 'lonely-second-batch', fields: { tag: 'A' } });
