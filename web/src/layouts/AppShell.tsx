@@ -26,6 +26,7 @@ import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import { ChatStoreContext } from '@/chat/chatStoreContext';
 import { readChatOpen, writeChatOpen } from '@/lib/chatPanelPrefs';
+import { DOC_FIND_OPEN_EVENT } from '@/lib/docFind';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -122,6 +123,15 @@ export function AppShell(): JSX.Element {
    * ⚠️ AppShell 是 `ChatStoreContext.Provider` 本身，不能消费该 context，故直接读 store。
    */
   const chatOpen = useSyncExternalStore(chatStore.subscribe, () => chatStore.getState().open);
+  /**
+   * 对话是否正在生成（2026-10-14 用户需求：「AI 对话」tab 要有进行中提示）。
+   *
+   * ★ 为何订阅而不是从 `chatOpen` 派生：面板**关闭时生成照旧进行**（D15：关闭=隐藏不卸载），
+   *   用户切到别的页面（甚至面板收着）时全站只有这里能提示"回答还在生成"。
+   * ★ 只订阅布尔：流式推进（content 逐字累积）不改变 `active`，getSnapshot 恒等 ⇒
+   *   AppShell 不会随 chunk 重渲染（与上面 `open` 同款写法）。
+   */
+  const chatStreaming = useSyncExternalStore(chatStore.subscribe, () => chatStore.getState().streaming.active);
   /**
    * 设置面板开合；`persist: false` 用于**路由派生**的开合（2026-10-13）。
    *
@@ -317,17 +327,36 @@ export function AppShell(): JSX.Element {
     setDismissTick((n) => n + 1);
   };
 
-  // 全局 Ctrl+F / Cmd+F → 聚焦当前页的搜索框（data-ki-search-input 标记）
-  // 阻止浏览器默认的"查找页面 DOM"行为，让用户用应用内搜索框（在 Browse/Search 页有意义）
-  // 抽屉打开时不拦截：用户可能想在文档原文内用浏览器查找文本
+  /**
+   * 全局 Ctrl+F / Cmd+F 判定链（REQ-20261014-002 §2.1）：
+   *
+   * ① 文档查看器可见（内联 / 全屏 / 抽屉任一形态）→ **文档内查找**；
+   * ② 无查看器但有应用内搜索框（`data-ki-search-input`）→ 聚焦它（浏览页 / 检索页的全库与语义搜索）；
+   * ③ 两者都无 → 不拦截，保留浏览器原生查找（跨节点命中的兜底路径）。
+   *
+   * 原判据 `'.ki-drawer:not(.ki-drawer--inline)'` 的缺陷：内联阅读进入全屏后元素**同时**带
+   * `--inline --fullscreen` 两个 class，选择器匹配不到 ⇒ 全屏阅读时 Ctrl+F 被抢到「搜索全库文档」框，
+   * 与本段原本声明的意图相悖（2026-10-14 实测 + git 历史确认同属 ab1e3ec）。
+   */
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       const isFind = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F');
       if (!isFind) return;
-      // 覆盖层抽屉打开：保留浏览器默认查找；常驻阅读区（inline）不算，Ctrl+F 仍聚焦应用内搜索框
-      if (document.querySelector('.ki-drawer:not(.ki-drawer--inline)')) return;
+      // ① 文档查看器：查找栏已展开则直接聚焦；未展开则请查看器自行展开（组件内部状态不外露）
+      if (document.querySelector('.ki-drawer')) {
+        e.preventDefault();
+        const findInput = document.querySelector<HTMLInputElement>('[data-ki-drawer-find]');
+        if (findInput) {
+          findInput.focus();
+          findInput.select();
+        } else {
+          window.dispatchEvent(new CustomEvent(DOC_FIND_OPEN_EVENT));
+        }
+        return;
+      }
+      // ② 应用内搜索框
       const target = document.querySelector<HTMLInputElement>('[data-ki-search-input]');
-      if (!target) return; // 当前页无应用内搜索框，保留浏览器默认
+      if (!target) return; // ③ 保留浏览器原生查找
       e.preventDefault();
       target.focus();
       target.select();
@@ -357,19 +386,27 @@ export function AppShell(): JSX.Element {
           <div className="ki-sidebar__section-head">
             <span className="ki-sidebar__section-label">工作空间</span>
           </div>
-          {NAV_MAIN.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`
-              }
-            >
-              <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
-              <span className="ki-nav-item__name">{item.label}</span>
-            </NavLink>
-          ))}
+          {NAV_MAIN.map((item) => {
+            /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
+            const busy = item.to === '/chat' && chatStreaming;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`
+                }
+                title={busy ? 'AI 正在生成回答' : undefined}
+              >
+                <span className="ki-nav-item__icon">
+                  <Icon name={item.icon} />
+                  {busy ? <span className="ki-nav-item__busy" aria-hidden="true" /> : null}
+                </span>
+                <span className="ki-nav-item__name">{item.label}</span>
+              </NavLink>
+            );
+          })}
         </nav>
 
         <div className="ki-sidebar__spacer" />

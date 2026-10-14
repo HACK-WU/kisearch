@@ -273,14 +273,38 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    */
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  /**
+   * 「scope 是否变化」的判定锚点（`null` = 本实例尚未挂载过）。
+   *
+   * ★ 为什么必须是「变化」而不能是「挂载」：本组件有两个挂载点 —— AppShell 的常驻
+   *   dock（一次挂载后长期在树）与 `/chat` 独立页（`page` 变体，**每次从其它 tab
+   *   进入该路由都会重新挂载**）。而下方的重置块含 `stream.abort()`，它掐断的是
+   *   **全局**进行中的流（`useChatStream` 的 ctrl 是模块级单例）—— 一旦"挂载"也执行，
+   *   用户在别的页面点开「AI 对话」就会把正在生成的回答杀掉，与
+   *   `useChatStream` 的「组件卸载不中止流」/ N2「切路由不断流」口径**直接相反**。
+   *
+   *   实测（2026-10-14，隔离实例 + mock 慢速上游）：在 /search 的 dock 生成中点
+   *   「AI 对话」→ 1.5s 内流被 abort（mock 收到 client-abort），回答停在半截并标
+   *   「已中止」；从 /chat 切到 /search 期间流则照常推进（切走不断、切回才被这段杀掉）。
+   */
+  const scopeInitRef = useRef<string | null>(null);
   useLayoutEffect(() => {
+    const isFirstMount = scopeInitRef.current === null;
+    const scopeChanged = !isFirstMount && scopeInitRef.current !== scope;
+    scopeInitRef.current = scope;
     selectionSeqRef.current += 1;
     operationSeqRef.current += 1;
     sendLockRef.current = false;
     creatingRef.current = null;
     creatingScopeRef.current = null;
-    stream.abort();
-    store.dispatch({ type: 'setActiveConv', convId: null });
+    // ★ 只有「切 scope」才中止流并清空当前会话：`setActiveConv(null)` 会把 store 的
+    //   `streaming` 重置为初始态（seq 归零）→ 即使没 abort，进行中的流也会因
+    //   `isCurrent()` 的 store 令牌失配而停止消费（等价于打断），两者必须同进同退。
+    //   首次挂载保留全局态：用户从别的页面进入 /chat 要能接着看正在生成的回答。
+    if (scopeChanged) {
+      stream.abort();
+      store.dispatch({ type: 'setActiveConv', convId: null });
+    }
     setReadyScope(null);
     setOpeningConv(false);
     setConvs([]);

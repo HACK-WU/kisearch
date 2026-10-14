@@ -214,7 +214,22 @@ a:hover { text-decoration: underline; }
   content: ""; position: absolute; left: 0; top: 9px; bottom: 9px;
   width: 3px; background: var(--ki-color-primary); border-radius: 0 3px 3px 0;
 }
-.ki-nav-item__icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.ki-nav-item__icon { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+/* 「AI 对话」生成中标记（2026-10-14 用户需求）：图标右上角脉冲点。
+   挂在 icon 上而非文字旁 —— 侧栏收起态（窄轨只留图标）同样可见；
+   描边取侧栏自身背景色，避免与图标笔画糊在一起。 */
+.ki-nav-item__busy {
+  position: absolute; top: -2px; right: -3px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ki-color-primary);
+  box-shadow: 0 0 0 2px var(--ki-color-bg-muted);
+  animation: ki-nav-busy 1.6s ease-in-out infinite;
+}
+@keyframes ki-nav-busy {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.72); }
+}
+@media (prefers-reduced-motion: reduce) { .ki-nav-item__busy { animation: none; } }
 .ki-nav-item__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-nav-item__ext { font-size: 10px; font-weight: 600; color: var(--ki-color-text-subtle); background: var(--ki-color-surface-muted); padding: 1px 5px; border-radius: var(--ki-radius-tag); flex-shrink: 0; }
 
@@ -1324,6 +1339,107 @@ a:hover { text-decoration: underline; }
   border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
   color: var(--ki-color-primary);
 }
+/* ── 文档内查找（REQ-20261014-002）：独立一行，三形态（内联 / 全屏 / 抽屉）一致 ── */
+.ki-drawer__find-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-drawer__find-toggle:hover {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-drawer__find-toggle--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-drawer__find-icon { width: 14px; height: 14px; }
+
+.ki-drawer__findbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* 窄屏换行：输入框独占一行，导航与提示落到第二行，不挤压既有工具条 */
+  gap: 6px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+}
+.ki-drawer__find-input {
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  font-size: 13px;
+}
+.ki-drawer__find-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border));
+}
+.ki-drawer__find-status {
+  min-width: 48px;
+  color: var(--ki-color-warning);
+  font-size: 11px;
+  font-family: var(--ki-font-mono);
+  text-align: center;
+}
+.ki-drawer__find-notice {
+  font-size: 11px;
+  color: var(--ki-color-warning);
+}
+.ki-drawer__find-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto; /* 导航靠右，与输入框拉开距离 */
+}
+.ki-drawer__find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-drawer__find-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-primary) 40%, var(--ki-color-border));
+  color: var(--ki-color-primary);
+}
+.ki-drawer__find-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ki-drawer__find-btn--close { font-size: 11px; }
+
+/* 内联模式头部左内边距是 16px（.ki-drawer--inline .ki-drawer__head），查找栏与标题左边缘对齐 */
+.ki-drawer--inline .ki-drawer__findbar { padding-left: 16px; }
+
+@media (max-width: 800px) {
+  .ki-drawer__findbar { padding: 8px 12px; }
+  .ki-drawer__find-input { flex: 1 1 100%; }
+  .ki-drawer__find-nav { margin-left: 0; }
+}
+
 .ki-drawer__copy {
   background: none;
   border: 1px solid var(--ki-color-border);
