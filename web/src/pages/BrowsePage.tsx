@@ -10,10 +10,12 @@ import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   browseFullscreenFromSearch,
+  browseLinkKey,
   browseSearch,
   isBrowseUrlSelfWritten,
   markBrowseUrlSelfWritten,
 } from '@/lib/browseUrl';
+import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
@@ -191,6 +193,11 @@ export function BrowsePage(): JSX.Element {
   const revealedDirectoryTarget = useRef('');
 
   const directTarget = searchParams.toString();
+  /**
+   * 深链接判定的比较键：剔除与阅读态无关的 AI 面板标记（`chat=1`）——面板开关会写当前地址
+   * （AppShell 镜像），若不剔除，开关一次面板就会被当成「URL 目标变了」而重放一遍阅读态。
+   */
+  const directTargetKey = browseLinkKey(directTarget);
   const hasDirectDocumentTarget = searchParams.get('scope') === scope
     && Boolean(searchParams.get('group') && searchParams.get('relation'));
   const { data, isLoading, isError, error, refetch } = useDocList(scope);
@@ -201,11 +208,17 @@ export function BrowsePage(): JSX.Element {
    * 修复前只实现了反方向（URL → 页面），故刷新会退回默认第一篇。
    */
   const writeBrowseUrl = useCallback((view: ScopedDocumentView | null, fullscreen: boolean): void => {
-    const next = browseSearch(view, fullscreen);
+    // AI 面板开合标记（`chat=1`）不属于阅读态，但与之同处一个查询串：重建参数时按当前地址原样带上。
+    // 否则 AppShell 的镜像 effect 得再补写一次 —— 那次导航会让下面的深链接 effect 重跑
+    // （directTarget 变了），把用户刚输入的列表过滤词清掉、并重放一次阅读态。
+    const next = withChatOpenParam(
+      browseSearch(view, fullscreen),
+      chatOpenFromSearch(currentSearchRef.current),
+    ).toString();
     if (next === currentSearchRef.current) return;
     currentSearchRef.current = next;
-    // 这次参数变化来自页面自身，深链接 effect 不必把同一目标再应用一遍。
-    appliedDirectTarget.current = next;
+    // 这次参数变化来自页面自身，深链接 effect 不必把同一目标再应用一遍（比较键不含面板标记）。
+    appliedDirectTarget.current = browseLinkKey(next);
     // 标记「URL 是页面自己写的」：刷新时据此保持目录布局，而不是按外部深链接重置（见深链接 effect）。
     markBrowseUrlSelfWritten(next);
     setSearchParams(new URLSearchParams(next), { replace: true });
@@ -232,7 +245,7 @@ export function BrowsePage(): JSX.Element {
       appliedDirectTarget.current = '';
       return;
     }
-    if (appliedDirectTarget.current === directTarget) return;
+    if (appliedDirectTarget.current === directTargetKey) return;
     const params = new URLSearchParams(directTarget);
     const targetScope = params.get('scope');
     const group = params.get('group');
@@ -282,8 +295,8 @@ export function BrowsePage(): JSX.Element {
       setSearchQ('');
       setSelectedTag('');
     }
-    appliedDirectTarget.current = directTarget;
-  }, [directTarget, scope, setScope, data?.scope, data?.groups]);
+    appliedDirectTarget.current = directTargetKey;
+  }, [directTarget, directTargetKey, scope, setScope, data?.scope, data?.groups]);
 
   // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
   // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求

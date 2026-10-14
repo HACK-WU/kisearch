@@ -1,12 +1,14 @@
 /**
  * 浏览页阅读态 ⇄ URL 查询串单测
  *
- * 锁住四条不变量：
+ * 锁住五条不变量：
  *   1) 文档阅读态写出 `scope/group/relation`（与 lib/kiLinks.ts::deepLink 同一契约），
  *      参数顺序稳定 —— 页面用字符串比较判断「URL 是否已是最新」，顺序抖动会造成无谓导航；
  *   2) 全屏阅读额外写出 `reader=1`，且只有伴随文档时才写出；
  *   3) 无文档 / 缺 group 时返回空串（浏览入口），不排出半截深链接；
- *   4) `reader` 读回：只有 `1` 为真。
+ *   4) `reader` 读回：只有 `1` 为真；
+ *   5) `browseLinkKey` 剔除 AI 面板标记（`chat=1`）—— 面板开关不属于阅读态，不得让深链接
+ *      effect 误判「URL 目标变了」而重放阅读态（2026-10-14 面板开合改由 URL 承载后新增）。
  *
  * 运行：cd web && npm run test
  */
@@ -24,8 +26,14 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { FULLSCREEN_PARAM, browseFullscreenFromSearch, browseSearch, isBrowseUrlSelfWritten, markBrowseUrlSelfWritten } =
-  await vite.ssrLoadModule('/src/lib/browseUrl.ts');
+const {
+  FULLSCREEN_PARAM,
+  browseFullscreenFromSearch,
+  browseLinkKey,
+  browseSearch,
+  isBrowseUrlSelfWritten,
+  markBrowseUrlSelfWritten,
+} = await vite.ssrLoadModule('/src/lib/browseUrl.ts');
 after(async () => vite.close());
 
 const view = (over = {}) => ({ scope: 'kisearch', group: 'stages/1-核心架构', module: '架构总览', ...over });
@@ -91,5 +99,36 @@ describe('browseFullscreenFromSearch', () => {
     assert.equal(browseFullscreenFromSearch('scope=kisearch&group=g&relation=r'), false);
     assert.equal(browseFullscreenFromSearch('reader=0'), false);
     assert.equal(browseFullscreenFromSearch(''), false);
+  });
+});
+
+describe('browseLinkKey（深链接比较键剔除面板标记）', () => {
+  it('剔除 chat，其余参数与顺序保持不变', () => {
+    assert.equal(
+      browseLinkKey('scope=kisearch&group=g&relation=r&chat=1'),
+      'scope=kisearch&group=g&relation=r',
+    );
+    assert.equal(
+      browseLinkKey('scope=kisearch&group=g&relation=r&anchor=h-1&reader=1&chat=1'),
+      'scope=kisearch&group=g&relation=r&anchor=h-1&reader=1',
+    );
+  });
+
+  it('开关面板前后键相同 —— 这才是「URL 目标没变」的正确判据', () => {
+    const withPanel = browseLinkKey('scope=kisearch&group=g&relation=r&chat=1');
+    const without = browseLinkKey('scope=kisearch&group=g&relation=r');
+    assert.equal(withPanel, without);
+  });
+
+  it('只有面板标记 → 空键（等价于浏览入口）', () => {
+    assert.equal(browseLinkKey('chat=1'), '');
+    assert.equal(browseLinkKey(''), '');
+  });
+
+  it('阅读目标真的变化时键仍不同（不能把差异一并抹掉）', () => {
+    assert.notEqual(
+      browseLinkKey('scope=kisearch&group=g&relation=r1&chat=1'),
+      browseLinkKey('scope=kisearch&group=g&relation=r2&chat=1'),
+    );
   });
 });

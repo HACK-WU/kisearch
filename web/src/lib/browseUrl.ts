@@ -10,6 +10,7 @@
  */
 
 import type { ScopedDocumentView } from '@/lib/documentLinks';
+import { CHAT_OPEN_PARAM } from '@/lib/chatOpenUrl';
 
 /** URL 查询串中标记全屏阅读的参数名 */
 export const FULLSCREEN_PARAM = 'reader';
@@ -32,6 +33,19 @@ export function browseSearch(view: ScopedDocumentView | null, fullscreen: boolea
 /** 从查询串读取全屏标记（缺省/非 `1` 一律为否）。 */
 export function browseFullscreenFromSearch(search: string): boolean {
   return new URLSearchParams(search).get(FULLSCREEN_PARAM) === '1';
+}
+
+/**
+ * 深链接判定的比较键：剔除 AI 面板标记（`chat=1`）。
+ *
+ * 面板开合由 AppShell 镜像到当前地址（lib/chatOpenUrl.ts）⇒ **每次开关面板都会改动查询串**。
+ * 但面板标记不属于阅读态：若让它参与「URL 目标是否变化」的比较，开关一次面板就会让深链接
+ * effect 重放一遍阅读态 —— 把右栏从「搜索结果」切回文档、并清掉列表过滤词。
+ */
+export function browseLinkKey(search: string): string {
+  const params = new URLSearchParams(search);
+  params.delete(CHAT_OPEN_PARAM);
+  return params.toString();
 }
 
 /**

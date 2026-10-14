@@ -1,11 +1,12 @@
 /**
- * AI 对话面板偏好（宽度 / 开合）单测
+ * AI 对话面板偏好（**宽度**）单测
  *
- * 锁住四条不变量：
+ * 锁住三条不变量：
  *   1) 宽度钳制：默认 380；下限 320；上限 min(720, 视口×50%)；
  *   2) 坏值兜底：非数值 / 空 / 越界一律收敛到合法区间（localStorage 里可能躺着任何脏数据）；
- *   3) 存储不可用（隐私模式 / setItem 抛错）时读写都不抛，读回默认值；
- *   4) 开合偏好只认 `'1'` 为打开 —— 与「面板默认关闭」的既有口径一致。
+ *   3) 存储不可用（隐私模式 / setItem 抛错）时读写都不抛，读回默认值。
+ *
+ * 开合态已不在本模块：2026-10-14 起由 URL 承载（见 test/chat-open-url.test.mjs）。
  *
  * 运行：cd web && npm run test
  */
@@ -31,8 +32,6 @@ const {
   clampChatPanelWidth,
   readChatPanelWidth,
   writeChatPanelWidth,
-  readChatOpen,
-  writeChatOpen,
 } = await vite.ssrLoadModule('/src/lib/chatPanelPrefs.ts');
 after(async () => vite.close());
 
@@ -139,30 +138,4 @@ describe('readChatPanelWidth / writeChatPanelWidth', () => {
   });
 });
 
-describe('readChatOpen / writeChatOpen', () => {
-  it('无记录 → 关闭（与「面板默认关闭」口径一致）', () => {
-    assert.equal(readChatOpen(), false);
-  });
 
-  it('写入 true / false 后读回一致', () => {
-    writeChatOpen(true);
-    assert.equal(readChatOpen(), true);
-    writeChatOpen(false);
-    assert.equal(readChatOpen(), false);
-  });
-
-  it('脏值只认 "1" 为打开', () => {
-    for (const bad of ['yes', 'true', '0', 'null']) {
-      localStorage.setItem('ki.chatOpen', bad);
-      assert.equal(readChatOpen(), false, `bad=${bad}`);
-    }
-    localStorage.setItem('ki.chatOpen', '1');
-    assert.equal(readChatOpen(), true);
-  });
-
-  it('存储不可用：读回关闭、写入不抛', () => {
-    installStorage({ throws: true });
-    assert.equal(readChatOpen(), false);
-    assert.doesNotThrow(() => writeChatOpen(true));
-  });
-});

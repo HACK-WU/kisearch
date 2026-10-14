@@ -21,7 +21,7 @@ export interface DocHighlightDecision {
   listHighlight: boolean;
   /** 传给文档查看器的 `highlightQuery`：有值 = 打开即高亮；`undefined` = 不高亮 */
   docHighlightQuery: string | undefined;
-  /** 开关是否禁用灰掉（全文 / 未检索时开关无意义） */
+  /** 开关是否禁用灰掉（**仅**「当前结果是全文」时 —— 全文恒高亮，开关无意义；未检索不禁用，偏好可先设） */
   switchDisabled: boolean;
   /** 打开文档时是否自动滚动到首个命中（全文 = 是；混合与降级 = 否） */
   autoScroll: boolean;

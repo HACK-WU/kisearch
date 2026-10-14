@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
@@ -25,7 +25,7 @@ import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import { ChatStoreContext } from '@/chat/chatStoreContext';
-import { readChatOpen, writeChatOpen } from '@/lib/chatPanelPrefs';
+import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { DOC_FIND_OPEN_EVENT } from '@/lib/docFind';
 import webPackage from '../../package.json';
 
@@ -107,12 +107,14 @@ function ServiceBadge(): JSX.Element {
 }
 
 export function AppShell(): JSX.Element {
+  const [searchParams, setSearchParams] = useSearchParams();
   // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
   //   因此 store 在此创建一次；ChatPanel 只是视图，不持有业务状态（否则关面板会丢内容并连带 abort）
   const chatStoreRef = useRef<ReturnType<typeof createChatStore> | null>(null);
-  // 初始开合按「用户上次意图」恢复（localStorage，见 lib/chatPanelPrefs）：
-  // 修复「全屏开 AI 对话后刷新，面板被关掉」——原先每次挂载都回落到「关闭」。
-  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore(readChatOpen());
+  // 初始开合以**本标签页的 URL** 为准（`chat=1`，见 lib/chatOpenUrl）：
+  // 修复「全屏开 AI 对话后刷新，面板被关掉」，且不再用 localStorage —— 那是同源跨标签页共享的，
+  // 一个标签页关面板会让另一个标签页刷新后也被关掉（2026-10-14 用户报的 Bug）。
+  if (chatStoreRef.current === null) chatStoreRef.current = createChatStore(chatOpenFromSearch(searchParams.toString()));
   const chatStore = chatStoreRef.current;
   /**
    * 面板开合态：REQ-20261009-002 起收敛到 store（`chatStore.open` 此前是无人消费的死状态），
@@ -133,17 +135,14 @@ export function AppShell(): JSX.Element {
    */
   const chatStreaming = useSyncExternalStore(chatStore.subscribe, () => chatStore.getState().streaming.active);
   /**
-   * 设置面板开合；`persist: false` 用于**路由派生**的开合（2026-10-13）。
+   * 设置面板开合（顶栏开关 / 全屏阅读器内的开关 / 面板关闭按钮 / 路由派生，全走这里）。
    *
-   * · 用户意图（顶栏开关 / 全屏阅读器内的开关 / 面板关闭按钮）→ 默认写 localStorage，刷新后恢复；
-   * · 路由派生（进入 `/chat` 自动收起、离开时恢复先态，见下方 Q4/Q5 段）→ 不写：
-   *   否则一次刷新就会把「派生状态」写成用户意图 —— 用户在 /chat 转一圈回来会发现
-   *   面板状态被路由逻辑改写。
+   * 只改 store：面板状态本身常驻 store（D15 关闭不卸载），URL 上的 `chat=1` 由下方
+   * 「镜像同步」effect 统一维护 —— 于是这里不必再区分「用户意图」与「路由派生」。
    */
   const setChatOpen = useCallback(
-    (next: boolean, opts?: { persist?: boolean }) => {
+    (next: boolean) => {
       chatStore.dispatch({ type: 'setOpen', open: next });
-      if (opts?.persist !== false) writeChatOpen(next);
     },
     [chatStore],
   );
@@ -165,15 +164,37 @@ export function AppShell(): JSX.Element {
         // （先态只记一次，不被面板自身的开/关覆盖）
         const wasOpen = chatStore.getState().open;
         chatOpenBeforeRef.current = wasOpen;
-        if (wasOpen) setChatOpen(false, { persist: false });
+        if (wasOpen) setChatOpen(false);
       }
     } else if (chatOpenBeforeRef.current !== null) {
-      // 此处同样是**路由派生**（恢复进入 /chat 前的先态），不得写持久化：
-      // 持久化只认用户在开关上的显式选择（见 setChatOpen 注释）。
-      if (chatOpenBeforeRef.current) setChatOpen(true, { persist: false });
+      // 此处同样是**路由派生**（恢复进入 /chat 前的先态）：只改 store，URL 标记由见下方
+      // 镜像 effect 处理（它在 /chat 上不写，URL 记的是「进入 /chat 前的意图」）。
+      if (chatOpenBeforeRef.current) setChatOpen(true);
       chatOpenBeforeRef.current = null;
     }
   }, [isChatRoute, chatStore, setChatOpen]);
+
+  /**
+   * 面板开合 ⇄ URL 标记（`chat=1`）镜像同步（2026-10-14 用户裁决：开合态由 URL 承载）。
+   *
+   * 分工：store 是**渲染来源**（D15 关闭不卸载、不丢对话态），URL 是**跨刷新载体**，两者由本
+   * effect 拉平 —— 于是站内跳转（导航链接 / 深链接只带自己的参数）不会把面板关掉，而刷新按本
+   * 标签页自己的地址恢复；两个标签页各持一份 URL，互不影响。
+   *
+   * · 镜像的是**意图**：`/chat` 上 dock 被路由派生收起（Q4/Q5），此时写的是「进入前的开合」，
+   *   于是 `/chat` 页刷新后离开仍能恢复先态 —— 与既有「路由派生不写意图」的约定等价。
+   * · 合并写（lib/chatOpenUrl.withChatOpenParam）：只增删 `chat`，不动页面自己的参数。
+   * · 读 `chatStore.getState()` 而非闭包里的 `chatOpen`：离开 `/chat` 的恢复 dispatch 与本次
+   *   effect 同处一轮提交（dispatch 是同步的），闭包值还是收起后的旧值，照它写会先删标记再
+   *   加回来（多一次无谓导航，浏览页的深链接 effect 会被顺带重跑）。
+   */
+  useEffect(() => {
+    const intent = isChatRoute && chatOpenBeforeRef.current !== null
+      ? chatOpenBeforeRef.current
+      : chatStore.getState().open;
+    if (chatOpenFromSearch(searchParams.toString()) === intent) return;
+    setSearchParams((prev) => withChatOpenParam(prev, intent), { replace: true });
+  }, [isChatRoute, chatOpen, chatStore, searchParams, setSearchParams]);
   const currentLabel = NAV_MAIN.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? '总览';

@@ -1,20 +1,22 @@
 /**
- * AI 对话面板的个人偏好 ⇄ localStorage（面板宽度 / 开合态）。
+ * AI 对话面板的个人偏好 ⇄ localStorage（**当前只剩宽度**）。
  *
  * ═══ 为什么需要（2026-10-13 用户反馈）═══
- * · **开合态**原先只活在 `chatStore` 内存里（`INITIAL_CHAT_STATE.open === false`，且 store
- *   在 AppShell 每次挂载时新建）⇒ **刷新即关**；而同一操作场景里的「全屏阅读」早已由 URL 的
- *   `reader=1` 持久化（见 lib/browseUrl.ts + BrowsePage）⇒ 刷新后出现「全屏还在、AI 面板消失」
- *   的不对称（用户报的 Bug）。
- * · **宽度**原先硬编码 380px（ki.css 两处，其中一处是全屏阅读器的让位宽度）⇒ 无法按当前
- *   任务在「正文 / 对话」之间分配空间。
+ * **宽度**原先硬编码 380px（ki.css 两处，其中一处是全屏阅读器的让位宽度）⇒ 无法按当前
+ * 任务在「正文 / 对话」之间分配空间。
  *
- * ═══ 为什么放 localStorage 而不是 URL（与 browseUrl.ts 的分工）═══
- * URL 承载**可分享的文档定位**（分享出去别人看到同一篇）；面板开合与宽度是**个人界面偏好**，
+ * ═══ 开合态为什么搬走了（2026-10-14 用户裁决）═══
+ * 开合态原也存在这里（`ki.chatOpen`），但 localStorage **同源跨标签页共享**，且只在新页面
+ * 挂载时读一次 ⇒ 两个标签页各开一份对话时，一个关掉会让另一个**刷新后也被关掉**
+ * （用户报的 Bug）。现改由 URL 承载（`chat=1`，见 lib/chatOpenUrl.ts）：每个标签页各持一份。
+ *
+ * ═══ 为什么宽度仍放 localStorage（与 browseUrl.ts 的分工）═══
+ * URL 承载**可分享的文档定位**（分享出去别人看到同一篇）；面板宽度是**个人界面偏好**，
  * 与文档无关、也不该让别人打开链接时继承我的面板宽度 —— 同 lib/browseTreeState.ts 的口径。
+ * （开合态不受这条约束：它描述「这一页在用哪个面板」，与全屏标记 `reader=1` 同类。）
  *
  * ═══ 降级约定（与 browseTreeState 一致）═══
- * 读写全程 try/catch；坏值 / 存储不可用一律回默认，不让脏数据把面板变成 0 宽或打不开。
+ * 读写全程 try/catch；坏值 / 存储不可用一律回默认，不让脏数据把面板变成 0 宽。
  */
 
 /** 默认宽度（与既有视觉基线一致：S03 §3.2 的 380px） */
@@ -28,9 +30,6 @@ export const CHAT_PANEL_MAX_WIDTH = 720;
 
 /** 宽度偏好键 */
 const WIDTH_KEY = 'ki.chatPanelWidth';
-
-/** 开合偏好键（`'1'` = 打开；其它/缺失 = 关闭） */
-const OPEN_KEY = 'ki.chatOpen';
 
 /**
  * 视口决定的上限：不超过绝对上限，也不超过视口一半（防正文被挤没）。
@@ -103,26 +102,4 @@ export function writeChatPanelWidth(width: number): void {
   }
 }
 
-/** 读开合偏好（缺失 / 存储不可用 → 关闭，与既有「默认关闭」口径一致） */
-export function readChatOpen(): boolean {
-  try {
-    return localStorage.getItem(OPEN_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
 
-/**
- * 写开合偏好。
- *
- * ⚠️ **只记「用户意图」**：顶栏开关 / 全屏阅读器内的开关 / 面板关闭按钮三处调用；
- * 路由派生（进入 `/chat` 自动收起、离开恢复先态，见 AppShell）**不得**调用 ——
- * 否则 `/chat` 页的一次刷新就会把「派生状态」写成用户意图（AppShell.tsx 「Q4/Q5」段）。
- */
-export function writeChatOpen(open: boolean): void {
-  try {
-    localStorage.setItem(OPEN_KEY, open ? '1' : '0');
-  } catch {
-    /* 存储不可用：本次会话内开合仍正常 */
-  }
-}

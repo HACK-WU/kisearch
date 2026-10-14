@@ -600,9 +600,10 @@ export interface ChatStore {
  * 业务逻辑在 `chatReducer` 的数据动作与 `useChatStream` 中（那些才是抛错点）。
  */
 export function createChatStore(initialOpen?: boolean): ChatStore {
-  // 初始开合由调用方注入（AppShell 从 localStorage 读「用户上次意图」，见 lib/chatPanelPrefs）：
-  // 缺省仍是「关闭」—— 首次使用不受影响；刷新后按用户意图恢复（2026-10-13 修复
-  // 「全屏开 AI 对话后刷新，面板被关掉」）。reducer 语义不变，只换初始值来源。
+  // 初始开合由调用方注入（AppShell 从**本标签页 URL** 的 `chat=1` 读，见 lib/chatOpenUrl）：
+  // 缺省仍是「关闭」—— 首次使用不受影响；刷新按本标签页自己的地址恢复，且**不跨标签页共享**
+  // （2026-10-14 用户裁决；此前用 localStorage，一个标签页关面板会连带关掉另一个标签页的）。
+  // reducer 语义不变，只换初始值来源。
   let state = initialOpen === undefined
     ? INITIAL_CHAT_STATE
     : { ...INITIAL_CHAT_STATE, open: initialOpen };
