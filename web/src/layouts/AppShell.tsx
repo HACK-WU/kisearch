@@ -26,7 +26,7 @@ import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import { ChatStoreContext } from '@/chat/chatStoreContext';
 import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
-import { DOC_FIND_OPEN_EVENT } from '@/lib/docFind';
+import { DOC_FIND_OPEN_EVENT, pickFindSeed, type DocFindOpenDetail } from '@/lib/docFind';
 import webPackage from '../../package.json';
 
 const THEME_KEY = 'ki-theme';
@@ -366,6 +366,17 @@ export function AppShell(): JSX.Element {
       // ① 文档查看器：查找栏已展开则直接聚焦；未展开则请查看器自行展开（组件内部状态不外露）
       if (document.querySelector('.ki-drawer')) {
         e.preventDefault();
+        // 选中的正文文本 → 查找种子（2026-10-15）：有选中就把所选带入查找栏（编辑器式行为），
+        // 无选中则保持原行为（聚焦已展开的输入框并全选 / 展开空查找栏）。
+        // ⚠️ 查找栏是受控 input：**已展开时也无法从外部赋值** ⇒ 有种子一律走事件通道，
+        // 由查看器自己写入并聚焦（隐藏实例会被查看器侧的可见性判定挡掉）。
+        const seed = pickFindSeed(window.getSelection()?.toString() ?? '');
+        if (seed) {
+          window.dispatchEvent(
+            new CustomEvent<DocFindOpenDetail>(DOC_FIND_OPEN_EVENT, { detail: { query: seed } }),
+          );
+          return;
+        }
         // 只认可见的那个输入框：同时挂载多个查看器时（引用预览 + 阅读区），隐藏实例不应偷走焦点
         const findInput = Array.from(document.querySelectorAll<HTMLInputElement>('[data-ki-drawer-find]'))
           .find((el) => el.offsetWidth > 0 || el.offsetHeight > 0);

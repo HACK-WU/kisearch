@@ -24,9 +24,19 @@ export const DOC_FIND_DEBOUNCE_MS = 200;
  *
  * AppShell 的 Ctrl+F 判定链①要在文档查看器可见时展开其查找栏，但 AppShell 不持有查看器内部状态；
  * 约定用 window 事件解耦——查看器只监听事件，页面只在判定链命中 ① 时派发。
- * 事件不带 payload：查看器展开后自行预填当前生效词（外部 highlightQuery）。
+ *
+ * payload（2026-10-15 起）：可选携带 `{ query }` —— 用户在文档里**选中文本后按 Ctrl+F** 时，
+ * AppShell 把 `pickFindSeed` 的产物带过来，查看器直接写入并立即查找（查找栏是受控 input，
+ * 无法从外部赋值，只能走事件通道）。**不带 query 时行为不变**：查看器展开后按既有逻辑
+ * 预填当前生效词（外部 `highlightQuery`）。
  */
 export const DOC_FIND_OPEN_EVENT = 'ki:drawer-find-open';
+
+/** `DOC_FIND_OPEN_EVENT` 的事件载荷 */
+export interface DocFindOpenDetail {
+  /** 由 `pickFindSeed` 归一化的查找种子；空串 / 缺省 = 未携带（走既有预填逻辑） */
+  query?: string;
+}
 
 export interface ClampedFindQuery {
   value: string;
@@ -109,4 +119,27 @@ export function describeFindMiss(query: string, labelMax = 40): string {
 /** 命中被上限截断时的提示文案 */
 export function describeFindLimit(count: number): string {
   return `命中过多，仅显示前 ${count} 处`;
+}
+
+/** 「选中文本 → 查找种子」的字符上限（按**码点**计） */
+export const DOC_FIND_SEED_MAX = 40;
+
+/**
+ * 从选区文本提取查找种子（Ctrl+F 带入选区，2026-10-15 需求裁决 D3：「只取首个词」）。
+ *
+ * 为什么不能整段塞进来：文档内查找是**字面匹配 + 多词 OR**（`buildFindTerms`），整段文本
+ * 会命中一大片、计数失去定位意义；跨行选区更是几乎必然搜不到。口径：
+ *   1) 取首行（多行选区只取第一行）；
+ *   2) 取首个空白分隔块（`kubectl get pods` → `kubectl`）；
+ *   3) 去掉**首尾**标点（`kubectl,` → `kubectl`；`config.yaml` 内部的点号保留）；
+ *   4) 按码点截断到 `DOC_FIND_SEED_MAX`（emoji 等代理对安全）。
+ * 空 / 纯空白 / 只剩标点 → 返回空串（调用方据此走「无选区」分支，不替换查找词）。
+ */
+export function pickFindSeed(raw: string): string {
+  const firstLine = raw.trim().split(/\r?\n/, 1)[0] ?? '';
+  const firstChunk = firstLine.trim().split(/\s+/, 1)[0] ?? '';
+  const stripped = firstChunk
+    .replace(/^[^\p{L}\p{N}_]+/u, '')
+    .replace(/[^\p{L}\p{N}_]+$/u, '');
+  return [...stripped].slice(0, DOC_FIND_SEED_MAX).join('');
 }

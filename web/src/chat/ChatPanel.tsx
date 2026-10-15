@@ -34,7 +34,7 @@
  */
 
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ackDisclosure,
   archiveConversation,
@@ -47,7 +47,8 @@ import {
   patchConversation,
   undoCompactConversation,
 } from '@/api/chatApi';
-import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import { buildRefCandidate, checkRefAdd, drawerOfSelection, type RefAddResult } from './refSelection';
 import {
   CONTEXT_MEASURE_NOTE,
   CONTEXT_PART_ROWS,
@@ -196,49 +197,81 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     return () => window.clearTimeout(t);
   }, [refToast]);
 
+  /** 当前是否在独立对话页（/chat）—— 多实例门控用（见下方 Ctrl+L effect） */
+  const isChatRoute = useLocation().pathname.startsWith('/chat');
+
+  /**
+   * 把**当前选区**加入引用（两条入口共用：划选 mouseup / Ctrl+L 快捷键）。
+   *
+   * 判定与守卫全部来自 `chat/refSelection.ts`（**单一来源**，防两条入口漂移成
+   * "一条拦得住、另一条放到发送时才 400"）；本函数只做「读 store → 派发 → 给反馈」。
+   * 返回结果供调用方决定后续（是否退出 armed 等）；`message` 为空表示静默忽略。
+   *
+   * ⚠️ 必须是 hook 区内的 useCallback（在 `if (!open) return null` 早退之前）：
+   * 下方 mouseup effect 与 Ctrl+L effect 都要用它，而 effect 是钩子。
+   */
+  const addRefFromSelection = useCallback((selection: Selection | null): RefAddResult => {
+    const raw = selection?.toString() ?? '';
+    if (!raw.trim()) return { ok: false, reason: 'empty', message: '' };
+    const drawer = drawerOfSelection(selection);
+    const candidate = buildRefCandidate(raw, drawer);
+    if (!candidate) return { ok: false, reason: drawer ? 'no-doc' : 'not-in-drawer', message: '' };
+    const cur = store.getState().pendingRefs;
+    const result = checkRefAdd(cur, candidate);
+    if (!result.ok) {
+      if (result.message) setRefToast(result.message);
+      return result;
+    }
+    store.dispatch({ type: 'setRefs', refs: [...cur, result.ref] });
+    setRefToast(result.message);
+    return result;
+  }, [store]);
+
   useEffect(() => {
     if (!refArmed) return;
     const onUp = (): void => {
-      const sel = window.getSelection();
-      const raw = sel?.toString().trim() ?? '';
-      if (!raw) return;
-      const anchor = sel?.anchorNode ?? null;
-      const el = anchor instanceof Element ? anchor : (anchor?.parentElement ?? null);
-      // 选区必须落在阅读器正文里：在面板内选字、或在别处选字，都不算引用
-      const drawer = el?.closest('.ki-drawer') ?? null;
-      if (!drawer) return;
-      const doc = drawer.getAttribute('data-ki-doc-name') ?? '';
-      const grp = drawer.getAttribute('data-ki-doc-group') ?? '';
-      if (!doc) return;
-      const cur = store.getState().pendingRefs;
-      if (cur.length >= CHAT_REF_MAX_COUNT) {
-        setRefToast(`一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容，请先移除一条`);
-        return;
-      }
-      const text = raw.length > CHAT_REF_TEXT_MAX ? raw.slice(0, CHAT_REF_TEXT_MAX) : raw;
-      // 总量守卫：只限条数与单条长度时，5 × 2000 可合法凑出 10000 字，而后端
-      // `CHAT_REF_TOTAL_MAX`（6000）会直接 400 —— 必须在前端拦住并说明原因，避免"操作合法但发送必失败"
-      const usedChars = cur.reduce((n, r) => n + r.text.length, 0);
-      if (usedChars + text.length > CHAT_REF_TOTAL_MAX) {
-        setRefToast(`引用内容合计不得超过 ${CHAT_REF_TOTAL_MAX} 字（当前 ${usedChars} 字），请先移除部分引用`);
-        return;
-      }
-      if (cur.some((r) => r.group === grp && r.doc === doc && r.text === text)) {
-        setRefToast(`这段内容已在引用中：${doc}`);
-        return;
-      }
-      store.dispatch({ type: 'setRefs', refs: [...cur, { group: grp, doc, text }] });
-      setRefToast(
-        raw.length > CHAT_REF_TEXT_MAX
-          ? `已加入引用（超长已截断至 ${CHAT_REF_TEXT_MAX} 字）：${doc}`
-          : `已加入引用：${doc}（${text.length} 字）`,
-      );
+      const selection = window.getSelection();
+      const result = addRefFromSelection(selection);
+      // 选区不构成引用（空 / 不在查看器内 / 无文档名）→ 静默忽略（既有行为）
+      if (!result.ok) return;
       setRefArmed(false);
-      sel?.removeAllRanges();
+      // 加入后清掉选区：避免用户误以为"同一段还能再划一次"（既有行为，勿删）
+      selection?.removeAllRanges();
     };
     document.addEventListener('mouseup', onUp);
     return () => document.removeEventListener('mouseup', onUp);
-  }, [refArmed, store, setRefToast]);
+  }, [refArmed, addRefFromSelection]);
+
+  /**
+   * `Ctrl+L`：把**选中的文档内容**加入引用（2026-10-15 需求 ②）。
+   *
+   * 三条硬约束（需求分析定稿）：
+   *   ① **条件式拦截** —— 只有"选区落 `.ki-drawer` 且有文档名"时才 `preventDefault`；
+   *      其余一律放行浏览器默认行为（Ctrl+L 聚焦地址栏是用户的既有习惯，不可无条件劫持）。
+   *   ② **面板未开时自动打开**（开合真相是 `store.open`，URL `chat=1` 由 AppShell 镜像）：
+   *      面板关闭 = `return null` 隐藏但**未卸载**，本监听器仍然有效。
+   *   ③ 复用 `addRefFromSelection`（与划选路径同一套守卫与文案）。
+   *
+   * 多实例门控：`/chat` 页同时挂载 page 实例（可见）与 dock 实例（被路由派生收起），
+   * 二者共享同一 store ⇒ 只让当前可见的那个响应（否则会重复加入并弹出第二个面板）。
+   * 与 mouseup 路径的差异：加入后**不清选区** —— 用户可能接着按 Ctrl+F 用同一段文本查找。
+   */
+  useEffect(() => {
+    if (!isPage && isChatRoute) return;
+    const handler = (event: KeyboardEvent): void => {
+      if (event.repeat || event.shiftKey || event.altKey) return;
+      if (!(event.ctrlKey || event.metaKey) || (event.key !== 'l' && event.key !== 'L')) return;
+      const selection = window.getSelection();
+      // 条件式拦截：先确认"这次按键能构成一次引用"，不能构成就什么都不做（放行地址栏）
+      if (!buildRefCandidate(selection?.toString() ?? '', drawerOfSelection(selection))) return;
+      event.preventDefault();
+      if (!open) store.dispatch({ type: 'setOpen', open: true });
+      const result = addRefFromSelection(selection);
+      if (result.ok) setRefArmed(false);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isPage, isChatRoute, open, store, addRefFromSelection]);
   /** 左栏会话抽屉开合（page 窄屏 <1024px 专用，瞬时 UI 态） */
   const [sideOpen, setSideOpen] = useState(false);
   const chipRef = useRef<HTMLDivElement>(null);
@@ -1003,19 +1036,18 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    * 因为 open=false 时早退不执行它们、open=true 时执行，hook 数量前后不一致。
    */
   const handleAddRef = (ref: ChatRef): void => {
+    // 守卫复用同一实现（chat/refSelection.ts）：三条入口（划选 / Ctrl+L / 选择器）口径一致
     const cur = store.getState().pendingRefs;
-    if (cur.length >= CHAT_REF_MAX_COUNT) return;
-    if (cur.some((r) => r.group === ref.group && r.doc === ref.doc && r.text === ref.text)) return;
-    // 总量守卫（与正文划选路径同口径）：三条限制必须两两相容，
-    // 不能出现"UI 放行、后端 400"的组合
-    const usedChars = cur.reduce((n, r) => n + r.text.length, 0);
-    if (usedChars + ref.text.length > CHAT_REF_TOTAL_MAX) {
-      setRefToast(`引用内容合计不得超过 ${CHAT_REF_TOTAL_MAX} 字（当前 ${usedChars} 字），请先移除部分引用`);
+    const result = checkRefAdd(cur, { group: ref.group, doc: ref.doc, text: ref.text });
+    if (!result.ok) {
+      // 保持选择器路径的**既有行为**：条数达上限与重复时静默（按钮已禁用 / 已去重），
+      // 只有"合计超限"给提示 —— 改成两类都提示会让同一次操作出现两种反馈口径。
+      if (result.reason === 'total-max') setRefToast(result.message);
       return;
     }
-    store.dispatch({ type: 'setRefs', refs: [...cur, ref] });
+    store.dispatch({ type: 'setRefs', refs: [...cur, result.ref] });
     // 成功反馈与「正文划选」路径保持一致（否则两条入口一个提示一个静默）
-    setRefToast(`已加入引用：${ref.doc}（${ref.text.length} 字）`);
+    setRefToast(result.message);
   };
 
   /** 移除一条待发送引用（需求 B：已加入的引用必须可单独删除） */
@@ -1605,31 +1637,51 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                   <span className="ki-chat-refbar__x" aria-hidden="true">✕</span>
                 </button>
               ))}
-              <button
-                type="button"
-                className={`ki-chat-refbar__add${refArmed ? ' ki-chat-refbar__add--armed' : ''}`}
-                onClick={() => {
-                  if (refArmed) {
-                    setRefArmed(false);
-                    return;
+              {/* hover 说明卡：与「来源文档」chip 的预览卡同款（用户口径：原生 title 不够精致）。
+                  hover 挂在**包装元素**上 —— 按钮 disabled 时不派发鼠标事件，挂在按钮上会连说明一起消失 */}
+              <span className="ki-chat-refbar__addwrap">
+                <button
+                  type="button"
+                  className={`ki-chat-refbar__add${refArmed ? ' ki-chat-refbar__add--armed' : ''}`}
+                  onClick={() => {
+                    if (refArmed) {
+                      setRefArmed(false);
+                      return;
+                    }
+                    // 有打开的文档 → 直接在正文里划选（用户口径）；没有可划选的内容时才回退到选择器弹层
+                    if (document.querySelector('.ki-drawer')) {
+                      setRefArmed(true);
+                      setRefToast('在正文中划选要引用的内容（再点按钮取消）；也可选中后按 Ctrl+L 直接加入');
+                    } else {
+                      setRefPickerOpen(true);
+                    }
+                  }}
+                  disabled={!(config?.enabled ?? false) || state.pendingRefs.length >= CHAT_REF_MAX_COUNT}
+                  aria-label={
+                    state.pendingRefs.length >= CHAT_REF_MAX_COUNT
+                      ? `加入引用（已达上限 ${CHAT_REF_MAX_COUNT} 段，请先移除一条）`
+                      : refArmed
+                        ? '退出引用模式'
+                        : '加入引用（也可选中文档内容后按 Ctrl+L）'
                   }
-                  // 有打开的文档 → 直接在正文里划选（用户口径）；没有可划选的内容时才回退到选择器弹层
-                  if (document.querySelector('.ki-drawer')) {
-                    setRefArmed(true);
-                    setRefToast('在正文中划选要引用的内容（再点按钮取消）');
-                  } else {
-                    setRefPickerOpen(true);
-                  }
-                }}
-                disabled={!(config?.enabled ?? false) || state.pendingRefs.length >= CHAT_REF_MAX_COUNT}
-                title={
-                  state.pendingRefs.length >= CHAT_REF_MAX_COUNT
-                    ? `一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容`
-                    : refArmed
-                      ? '点击取消引用模式'
-                      : '点击后，在打开的文档正文里划选要引用的内容'
-                }
-              >{refArmed ? '在正文中划选…' : '+ 加入引用'}</button>
+                >{refArmed ? '在正文中划选…' : '+ 加入引用'}</button>
+                <span className="ki-chat-refbar__pop" role="tooltip" aria-hidden="true">
+                  <b>加入引用{refArmed ? '（进行中）' : ''}</b>
+                  <em>选中文档正文 → 按 Ctrl+L 一步加入</em>
+                  {/* 说明用普通描述而非 <q>：`<q>` 自带引号（来源卡片的 <q> 是"摘要原文"，
+                      语义是引用；本卡这句是操作说明，加引号既不语义也不够干净）。
+                      达上限分支不可省：按钮 disabled 时用户只能靠卡片知道"为什么点不了"
+                      （旧的原生 title 有该分支，卡片化时若丢掉就是信息回归） */}
+                  <span className="ki-chat-refbar__pop-note">
+                    {state.pendingRefs.length >= CHAT_REF_MAX_COUNT
+                      ? '已达引用上限，请先移除一条再继续。'
+                      : refArmed
+                        ? '回到文档正文里划选要引用的内容；再点一次按钮即退出引用模式。'
+                        : '点击本按钮后，在打开的文档正文里划选要引用的内容；引用会随本次提问一起发送。'}
+                  </span>
+                  <u>一次提问最多 {CHAT_REF_MAX_COUNT} 段，合计不超过 {CHAT_REF_TOTAL_MAX} 字</u>
+                </span>
+              </span>
             </div>
             <textarea
               className="ki-chat-composer__ta"

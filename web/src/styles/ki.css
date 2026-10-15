@@ -3854,6 +3854,43 @@ select.ki-chat-cfg__ta--select {
   color: var(--ki-color-primary);
   background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
 }
+/* 「+ 加入引用」的 hover 说明卡：与「来源文档」chip 的预览卡（`.ki-chat-src__pop`）同款
+   视觉语言 —— 用户口径：原生 `title` 不够精致，对齐来源卡片的观感。
+   两个实现要点：
+   ① 定位基准是 **composer**（`.ki-chat-composer` 已是 positioning context），与
+      `.ki-chat-refbar__toast` 同一坐标 → 卡片位置不随按钮在引用条中的左右位置漂移；
+   ② hover 挂在**包装元素**上而非按钮：按钮 `disabled`（达上限 / 配置未启用）时不派发
+      鼠标事件、`:hover` 不生效，卡片会连"已达上限"的说明一起消失。 */
+.ki-chat-refbar__addwrap { display: inline-flex; }
+.ki-chat-refbar__pop {
+  position: absolute; z-index: 2;
+  left: var(--ki-space-3);
+  bottom: calc(100% + 8px);
+  width: min(320px, calc(100% - 24px));
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2);
+  text-align: left; white-space: normal;
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity var(--ki-motion-fast) ease, transform var(--ki-motion-fast) ease;
+}
+.ki-chat-refbar__addwrap:hover .ki-chat-refbar__pop,
+.ki-chat-refbar__addwrap:focus-within .ki-chat-refbar__pop {
+  opacity: 1; transform: none;
+}
+.ki-chat-refbar__pop b { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); margin-bottom: 2px; }
+.ki-chat-refbar__pop em {
+  display: block; font-style: normal; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); margin-bottom: var(--ki-space-2);
+}
+.ki-chat-refbar__pop q,
+.ki-chat-refbar__pop .ki-chat-refbar__pop-note {
+  display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); line-height: 1.55;
+}
+.ki-chat-refbar__pop u {
+  display: block; margin-top: var(--ki-space-2); text-decoration: none;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
 /* 引用轻提示：3s 自动消失，且**绝对定位、不参与布局** ——
    用户反馈一：作为 composer 内独立一行会把输入框撑高 → 改浮层；
    用户反馈二：白底描边横贯整行「丑」→ 收成胶囊气泡（宽度随内容自适应、靠左与按钮对齐）；

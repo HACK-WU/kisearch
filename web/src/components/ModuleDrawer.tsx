@@ -11,6 +11,7 @@ import {
   type ChangeEvent,
   type CompositionEvent as ReactCompositionEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
@@ -23,11 +24,13 @@ import {
   DOC_FIND_MARK_LIMIT,
   DOC_FIND_OPEN_EVENT,
   DOC_FIND_QUERY_MAX,
+  type DocFindOpenDetail,
   buildFindTerms,
   clampFindQuery,
   describeFindLimit,
   describeFindMiss,
   formatFindCount,
+  pickFindSeed,
   stepFindIndex,
 } from '@/lib/docFind';
 
@@ -472,18 +475,63 @@ export function ModuleDrawer({
     highlightScrollBehavior.current = 'auto';
   }, [highlightQuery]);
 
+  /**
+   * 选区种子的写入序号：每写入一次 +1，供下方「聚焦」effect 监听。
+   *
+   * 为什么不直接在写入时 rAF 聚焦：本写入发生在 **window 事件处理器**里，而 React 对
+   * 非 React 事件的批处理更新不保证在同帧提交 —— 实测（2026-10-15 验证脚本 A4）
+   * 处理器内注册的 rAF 会在输入框挂载**之前**执行，聚焦 / 全选静默失效。
+   * 改走 effect（提交后执行）与既有「展开时预填」effect 同款时序。
+   */
+  const [findSeedSeq, setFindSeedSeq] = useState(0);
+
+  /**
+   * 把一段文本作为查找词写入并**立即生效**（Ctrl+F 带入选区，2026-10-15）。
+   *
+   * 与「展开时预填」effect 的分工：本函数置 `findSeededRef`，使那个 effect 不再用
+   * `highlightQuery`（上次检索词）覆盖本次写入 —— 用户刚选中的文本优先于旧检索词。
+   * 聚焦 + 全选交给下方按序号触发的 effect：查找栏**已展开**时那个预填 effect 不会重跑
+   * （它只在展开那一刻跑一次），而"已展开状态下再选一段字按 Ctrl+F"是最常见的换词路径。
+   */
+  const applyFindSeed = useCallback((seed: string): void => {
+    const value = clampFindQuery(seed).value;
+    if (!value) return;
+    findSeededRef.current = true;
+    setFindDraft(value);
+    setFindApplied(value);
+    // 与预填同款要求：写入即代表「用户正在查找」，必须同时恢复高亮开关 ——
+    // 否则此前点过「取消高亮」会让正文里明明有该词却显示「未找到」（同款缺陷已修过一次）
+    setHighlightEnabled(true);
+    setFindSeedSeq((n) => n + 1);
+  }, []);
+
+  /** 选区种子写入后聚焦 + 全选（放 effect 里 = 提交后执行，见 `findSeedSeq` 的说明） */
+  useEffect(() => {
+    if (findSeedSeq === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      const input = findInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [findSeedSeq]);
+
   /** Ctrl+F 判定链①（AppShell 侧）派发事件 → 查看器展开查找栏；组件不依赖任何页面路由 */
   useEffect(() => {
-    const handler = (): void => {
+    const handler = (event: Event): void => {
       // 多实例防护：页面可能同时挂载多个查看器（AI 引用预览 + 浏览页阅读区，前者窄屏时被
       // display:none 隐藏）。只有**可见**的那个响应，否则按一次 Ctrl+F 会弹出两个查找栏。
       const el = drawerRef.current;
       if (el && el.offsetWidth === 0 && el.offsetHeight === 0) return;
+      // 带选区种子（2026-10-15）：直接写入并立即查找；不带则维持「展开后预填 highlightQuery」
+      const seed = (event as CustomEvent<DocFindOpenDetail>).detail?.query ?? '';
       setFindOpen(true);
+      if (seed.trim()) applyFindSeed(seed);
     };
     window.addEventListener(DOC_FIND_OPEN_EVENT, handler);
     return () => window.removeEventListener(DOC_FIND_OPEN_EVENT, handler);
-  }, []);
+  }, [applyFindSeed]);
 
   /**
    * 查找栏展开时聚焦输入框，并在输入为空时**预填当前生效词**（外部高亮词可直接续用 / 清除）。
@@ -738,9 +786,31 @@ export function ModuleDrawer({
     setHighlightIndex(0);
   }, [highlightQuery]);
 
-  const openFindBar = useCallback((): void => {
-    setFindOpen(true);
+  /**
+   * 工具条放大镜**按下瞬间**抓到的选区种子。
+   *
+   * 为什么必须提前抓：点击按钮会让正文失焦，浏览器随即清除 DOM 选区 —— 若只在 click 里读
+   * `window.getSelection()`，用户「选中文本 → 点放大镜」将永远拿不到内容（要么空栏、要么
+   * 上一次的残留词）。capture 放在 onMouseDown，键盘触发（Enter/Space）走 click 兜底。
+   */
+  const pressedFindSeedRef = useRef('');
+
+  const captureFindSelection = useCallback((): void => {
+    pressedFindSeedRef.current = pickFindSeed(window.getSelection()?.toString() ?? '');
   }, []);
+
+  const openFindBar = useCallback((event?: ReactMouseEvent<HTMLButtonElement>): void => {
+    setFindOpen(true);
+    // 2026-10-15 增量：与 Ctrl+F 同款 —— 有选中就把所选带入查找栏并立即查找；无选中只是展开
+    //
+    // ⚠️ 只用**鼠标触发**（clickCount ≥ 1）那次的捕获值：用户按下后把指针拖出按钮时 click 不
+    // 触发、`pressedFindSeedRef` 会留下陈旧值；键盘（Enter/Space）触发时 clickCount 为 0，
+    // 此时必须忽略残留、直接读当前选区 —— 否则会代入上一次的词（无选中时误填）。
+    const fromPointer = (event?.detail ?? 0) > 0 ? pressedFindSeedRef.current : '';
+    pressedFindSeedRef.current = '';
+    const seed = fromPointer || pickFindSeed(window.getSelection()?.toString() ?? '');
+    if (seed) applyFindSeed(seed);
+  }, [applyFindSeed]);
 
   /** 查找词生效（防抖后统一落地）：逐键全量重算在大文档上明显迟滞（R8） */
   const commitFindQuery = useCallback((raw: string): void => {
@@ -1195,8 +1265,9 @@ export function ModuleDrawer({
               <button
                 className="ki-drawer__find-toggle"
                 type="button"
+                onMouseDown={captureFindSelection}
                 onClick={openFindBar}
-                title="在本文档内查找（Ctrl+F）"
+                title="在本文档内查找（选中文本会带入；Ctrl+F 同效）"
                 aria-label="在本文档内查找"
               >
                 {ICON_FIND}

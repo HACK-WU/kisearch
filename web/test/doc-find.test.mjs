@@ -27,8 +27,10 @@ const {
   DOC_FIND_QUERY_MAX,
   DOC_FIND_MARK_LIMIT,
   DOC_FIND_SLIDE_TERM_LIMIT,
+  DOC_FIND_SEED_MAX,
   buildFindTerms,
   clampFindQuery,
+  pickFindSeed,
   stepFindIndex,
   formatFindCount,
   describeFindMiss,
@@ -166,5 +168,56 @@ describe('上限常量（与需求 R8 一致）', () => {
   it('查询 200 字符 / 命中 2000 处', () => {
     assert.equal(DOC_FIND_QUERY_MAX, 200);
     assert.equal(DOC_FIND_MARK_LIMIT, 2000);
+  });
+});
+
+/**
+ * 2026-10-15 新增：Ctrl+F 带入选区（「选中文档内容 → 查找栏带入所选」）。
+ * 口径为「只取首个词」—— 整段/多行选区塞进字面查找会命中一大片，失去定位意义。
+ */
+describe('pickFindSeed（Ctrl+F 带入的选区种子）', () => {
+  it('单个词原样返回', () => {
+    assert.equal(pickFindSeed('kubectl'), 'kubectl');
+  });
+
+  it('多词只取首个空白块', () => {
+    assert.equal(pickFindSeed('kubectl get pods'), 'kubectl');
+    assert.equal(pickFindSeed('  告警  收敛  '), '告警');
+  });
+
+  it('多行选区只取首行（trim 后）', () => {
+    assert.equal(pickFindSeed('first line\nsecond line'), 'first');
+    assert.equal(pickFindSeed('\n  \n kubectl pods \n'), 'kubectl');
+  });
+
+  it('去掉首尾标点，但保留词内部的点号 / 连字符 / 下划线', () => {
+    assert.equal(pickFindSeed('kubectl,'), 'kubectl');
+    assert.equal(pickFindSeed('「config.yaml」'), 'config.yaml');
+    assert.equal(pickFindSeed('ki-search。'), 'ki-search');
+    assert.equal(pickFindSeed('a_b'), 'a_b');
+  });
+
+  it('中文整句保留（无空白可切，属预期：由 buildFindTerms 滑窗兜底）', () => {
+    assert.equal(pickFindSeed('告警收敛策略是什么？'), '告警收敛策略是什么');
+  });
+
+  it('超长按码点截断到 DOC_FIND_SEED_MAX', () => {
+    const long = 'a'.repeat(DOC_FIND_SEED_MAX + 20);
+    assert.equal(pickFindSeed(long), 'a'.repeat(DOC_FIND_SEED_MAX));
+    assert.equal(DOC_FIND_SEED_MAX, 40);
+  });
+
+  it('码点截断安全：代理对（emoji）不会被切成半个', () => {
+    // 首尾用字母，避免触发「首尾标点剥离」这条正交规则
+    const raw = `${'a'.repeat(30)}${'🎉'.repeat(20)}b`;
+    const seed = pickFindSeed(raw);
+    assert.equal([...seed].length, DOC_FIND_SEED_MAX);
+    assert.equal(seed, [...raw].slice(0, DOC_FIND_SEED_MAX).join(''));
+  });
+
+  it('空 / 纯空白 / 只剩标点 → 空串（调用方走「无选区」分支）', () => {
+    assert.equal(pickFindSeed(''), '');
+    assert.equal(pickFindSeed('   \n\t '), '');
+    assert.equal(pickFindSeed('（）'), '');
   });
 });
