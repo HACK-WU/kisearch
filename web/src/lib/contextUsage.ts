@@ -202,14 +202,14 @@ export function ringProgress(ratio: number | null): number {
  * ★ 必须保留"字符 ≠ token"与"偏保守"两句：否则用户会把它当成精确的模型额度。
  */
 export const CONTEXT_MEASURE_NOTE =
-  '思考过程不计入；工具返回单次最多 10000 字。字符 ≠ token（英文/代码更省），故该数字偏保守：不会漏报「快满了」。';
+  '思考过程不计入；工具返回的单次上限可在「对话配置 → 工具预算」中调整（默认 10000 字符）。字符 ≠ token（英文/代码更省），故该数字偏保守：不会漏报「快满了」。';
 
 /** 分量明细行（顺序即展示顺序；`refs` 是 `user` 的子集，单独标注不参与合计） */
 export const CONTEXT_PART_ROWS: ReadonlyArray<{ key: keyof ContextCharsParts; label: string; hint: string }> = [
   { key: 'system', label: '系统提示', hint: '会话提示词 + 检索规则（每次请求都会带上）' },
   { key: 'user', label: '提问', hint: '历史与当前的用户消息（含当轮引用片段）' },
   { key: 'assistant', label: '回答', hint: '历史回答正文（思考过程不计入）' },
-  { key: 'tool', label: '工具返回', hint: '知识库检索结果（单次最多 10000 字）' },
+  { key: 'tool', label: '工具返回', hint: '知识库检索结果（单次上限见「工具预算」）' },
 ];
 
 /** 汇总分量为总字符数（与后端 `chars` 同口径；`refs` 不计） */

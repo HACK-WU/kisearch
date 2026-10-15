@@ -68,7 +68,8 @@ import { loadConfig } from '../../config.js';
 import { newMessageId } from '../chat-store.js';
 import { buildSystemMessages } from './retrieval-skill.js';
 import { findEnabledSkill, promptSnapshotBlocks, readPromptConfig, type PromptConfig } from '../prompt-config.js';
-import { enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { applyBudgetDefault, enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
 import { toSourceRefs } from './projection.js';
 import { serializeToolResponse } from './tool-response.js';
 
@@ -125,6 +126,11 @@ interface LoopRuntime {
    * 生成期间工具面固定（配置变更从下一次提问生效 —— 与批次 1「保存后下一次提问生效」口径一致）。
    */
   toolEntries: readonly ChatMcpToolEntry[];
+  /**
+   * 工具预算（REQ-20261015-001）：本轮生效值 = 对话配置覆盖值 ?? 内置默认。
+   * 与工具面同样**每轮解析一次**、生成期间固定（改配置下一次提问生效）。
+   */
+  budget: { responseChars: number; hitsPerCall: number };
 }
 
 function resolveRuntime(): LoopRuntime {
@@ -150,6 +156,11 @@ function resolveRuntime(): LoopRuntime {
     promptConfig,
     // ★ 工具开关首次被消费（批次 2）：默认只读 6 个；用户关掉的即时生效于下一次提问
     toolEntries: enabledChatToolEntries(promptConfig.tools),
+    // ★ 工具预算（REQ-20261015-001）：覆盖值 ?? 内置默认（缺省时行为与改造前逐字节一致）
+    budget: {
+      responseChars: promptConfig.toolResponseChars ?? CHAT_BUDGET.maxToolResponseChars,
+      hitsPerCall: promptConfig.searchHitsPerCall ?? CHAT_BUDGET.maxHitsPerCall,
+    },
   };
 }
 
@@ -190,6 +201,7 @@ function renderRefsBlock(refs: readonly ChatRef[] | undefined): string | null {
   if (!refs || refs.length === 0) return null;
   const lines: string[] = [
     '【用户指定的参考资料】用户在本轮提问中手动引用了以下知识库文档片段，请优先依据它们作答；',
+    '若这些引用已足以回答，直接作答，不要为确认而重复检索相同内容；',
     '若这些内容不足以回答，可继续调用检索工具查阅知识库，并说明补充来源。',
     // 提示注入缓解（code review P2）：引用文本原样进 system，块内指令可尝试覆盖模型行为——
     // 明确声明"内容即资料"，降低模型对引用中指令性文字的顺从度（缓解非根除，对抗样本仍可能生效）
@@ -324,6 +336,19 @@ export function resolveUseSkill(
   };
 }
 
+/**
+ * 回放构造的容错包装（REQ-20261015-001 · S-02 §6）：
+ * 回放是"锦上添花"—— 它遍历的是用户数据（`progress` / `refs`），脏结构或旧记录异常
+ * 只应损失证据，**绝不能**让整个回答生成失败，故失败一律降级为"无证据"。
+ */
+function safeReplayItems(input: ToolLoopInput): ReplayItem[] {
+  try {
+    return collectReplayItems(input.conv, undefined, input.refs);
+  } catch {
+    return [];
+  }
+}
+
 function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): ChatTurn[] {
   const msgs: ChatTurn[] = [];
   for (const m of buildSystemMessages(input.convSystemPrompt, injectionBlocks(input.conv, runtime))) {
@@ -367,7 +392,10 @@ function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): Chat
   const alreadyIncluded = last !== undefined && last.role === 'user' && last.content === input.userText;
   // 引用附录只加在**本轮 user** 上：命中守卫时就地替换该条（它必然是数组末条），
   // 不得再追加一条 —— 否则上游会出现两条相同 user（部分上游直接 400，另一些令模型复述提问）。
-  const userContent = withRefsBlock(input.userText, input.refs);
+  // ★ 历史证据回放（REQ-20261015-001 · S-02）：此前轮次的工具返回与引用原文以**有界文本块**
+  //   附在本轮 user 末尾（引用块之后）。构造失败降级为无证据（见 safeReplayItems）。
+  const replayItems = safeReplayItems(input);
+  const userContent = withEvidenceBlock(withRefsBlock(input.userText, input.refs), replayItems);
   if (!alreadyIncluded) {
     msgs.push({ role: 'user', content: userContent });
   } else {
@@ -676,7 +704,7 @@ async function* toolLoopPath(
       const entry = getChatTool(call.name);
       if (!entry) {
         const errText = `未知工具 ${call.name || '(未命名)'}：不在本次暴露的工具列表中，请仅使用系统提供的工具`;
-        const response = serializeToolResponse({ error: errText });
+        const response = serializeToolResponse({ error: errText }, runtime.budget.responseChars);
         yield { type: 'tool_start', name: call.name || 'unknown', ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}) };
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
@@ -692,6 +720,11 @@ async function* toolLoopPath(
         parseError = (err as Error).message;
       }
 
+      // ★ 预算补全（REQ-20261015-001）：`ki_search` 未显式传 limit 时补运行时配置的默认值。
+      //   必须在**执行必经点**（此处）而非包装 registry 的 `run` —— 执行走 `getChatTool()` 的
+      //   **原始 entry**，包装 `enabledChatToolEntries` 返回值的 `run` 不会被调用（challenger 意见 1，🔴）。
+      if (parsed) parsed = applyBudgetDefault(entry.name, parsed, runtime.budget.hitsPerCall);
+
       const desc = parsed ? entry.describe(parsed) : {};
       yield {
         type: 'tool_start',
@@ -703,7 +736,7 @@ async function* toolLoopPath(
 
       if (parseError || !parsed) {
         // 解析失败：发 tool_end 带 error（★ 抛错也必须发，否则前端永久停留在"正在调用…"）
-        const response = serializeToolResponse({ error: parseError ?? '参数解析失败' });
+        const response = serializeToolResponse({ error: parseError ?? '参数解析失败' }, runtime.budget.responseChars);
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError ?? '参数解析失败', response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
         continue;
@@ -735,10 +768,10 @@ async function* toolLoopPath(
         }
       }
 
-      // 页面与模型共用实际返回文本，仅施加总字符预算。
+      // 页面与模型共用实际返回文本，仅施加总字符预算（上限取自本轮 runtime 的工具预算）。
       // ★ 失败也序列化**原始结果**（ok:false 的 JSON 含 error/code/details，模型可见失败详情；
       //   与旧行为一致），仅当执行抛错（result 为空）时退化为 {error} 摘要。
-      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' });
+      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' }, runtime.budget.responseChars);
       yield { type: 'tool_end', hits, durationMs, ...(runError ? { error: runError } : {}), response };
       messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
 

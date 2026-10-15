@@ -25,7 +25,7 @@ export type ProgressStep =
   /**
    * 工具步骤。走查 #4：除 label 外透传事件摘要字段（name/mode/query/args/hits/durationMs/error），
    * 供时间线行做「动作名 + 工具胶囊 + 状态」双轨展示与展开卡片；
-   * 实际返回正文由后端统一限制为最多 10000 字符，生成与历史共用。
+   * 实际返回正文由后端按「工具预算」的返回上限截断（默认 10000 字符），生成与历史共用。
    */
   | { kind: 'tool'; phase: 'start' | 'end'; label: string; name?: string; query?: string; mode?: string; args?: string; hits?: number; durationMs?: number; error?: string; response?: ChatToolResponse;
       /** interleave 锚点：本步发生时已发出的正文字符数（reducer 统一捕获，渲染方不必传） */

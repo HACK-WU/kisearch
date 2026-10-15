@@ -26,11 +26,20 @@ function parseKiSearch(raw: string): Record<string, unknown> {
   const out: Record<string, unknown> = { query: q };
   if (obj.mode === 'fulltext' || obj.mode === 'hybrid') out.mode = obj.mode;
   const limit = Number(obj.limit);
-  if (Number.isFinite(limit)) out.limit = Math.min(Math.max(Math.floor(limit), 1), 5);
+  // 硬上界（REQ-20261015-001 由 5 放开到 50）—— 与真实 spec 的 `maxHitsPerCallHardMax` 同源口径
+  if (Number.isFinite(limit)) out.limit = Math.min(Math.max(Math.floor(limit), 1), 50);
   return out;
 }
 
+const lastArgsKey = Symbol.for('ki.chat.test.last-search-args');
+
+/** 最近一次检索收到的参数（含 tool-loop 注入的 limit）—— 供"预算注入是否生效"的端到端断言 */
+export function lastSearchArgs(): Record<string, unknown> | null {
+  return (globalThis as unknown as Record<symbol, Record<string, unknown> | undefined>)[lastArgsKey] ?? null;
+}
+
 export async function runKbSearch(_scope: string, args: { query: string }) {
+  (globalThis as unknown as Record<symbol, unknown>)[lastArgsKey] = args;
   if (args.query === 'wait') {
     waitingSearch.entered = true;
     await new Promise<void>((resolve) => { waitingSearch.release = resolve; });
@@ -59,4 +68,15 @@ export function getChatTool(name: string) {
 
 export function enabledChatToolEntries(tools: Record<string, boolean>) {
   return tools.ki_search === true ? [kiSearchEntry] : [];
+}
+
+/**
+ * 预算补全（REQ-20261015-001）：`tool-loop` 在**执行必经点**调用。
+ * ⚠️ 夹具是独立最小实现（不经真实 registry）⇒ **真实模块新增/变更导出时必须同步本文件**，
+ *    否则 alias 替换后调用即抛错（2026-10-15 实际踩过：缺 applyBudgetDefault 让中止测试整条挂掉）。
+ *    语义与 `src/lib/chat/mcp-tool-registry.js::applyBudgetDefault` 一致。
+ */
+export function applyBudgetDefault(name: string, args: Record<string, unknown>, hitsDefault: number): Record<string, unknown> {
+  if (name !== 'ki_search' || args.limit !== undefined) return args;
+  return { ...args, limit: hitsDefault };
 }

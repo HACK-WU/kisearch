@@ -258,6 +258,21 @@ function shorten(s: string, max = 60): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
+// ─── 预算补全（REQ-20261015-001）──────────────────────────────────────
+
+/**
+ * 仅 `ki_search` 且**未显式传 limit** 时补运行时配置的默认值；其余工具与显式传值原样透传。
+ *
+ * ★ 必须在**执行必经点**调用（`tool-loop.ts` 的 `entry.parse()` 之后）：
+ *   执行路径走 `getChatTool(call.name)`（注册表原始 entry），而 `runtime.toolEntries`
+ *   只用于 `toolDefs`（喂 schema）—— 包装 `run` 不会被调用 ⇒ 配置**静默失效**
+ *   （challenger 意见 1 的根因，见 design/S01 §3.3）。
+ */
+export function applyBudgetDefault(name: string, args: ChatToolArgs, hitsDefault: number): ChatToolArgs {
+  if (name !== 'ki_search' || args.limit !== undefined) return args;
+  return { ...args, limit: hitsDefault };
+}
+
 // ─── 14 个工具注册 ────────────────────────────────────────────────────
 
 /** 工具入口工厂（specs → parse/describe 的公共装配） */
@@ -315,7 +330,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
               enum: ['fulltext', 'hybrid'],
               description: 'fulltext=仅全文（快，不调 embedding）；hybrid=语义+全文（默认）',
             },
-            limit: { type: 'integer', minimum: 1, maximum: CHAT_BUDGET.maxHitsPerCall, description: `返回条数上限，默认 ${CHAT_BUDGET.maxHitsPerCall}` },
+            limit: { type: 'integer', minimum: 1, maximum: CHAT_BUDGET.maxHitsPerCallHardMax, description: `返回条数上限（1–${CHAT_BUDGET.maxHitsPerCallHardMax}）；不传时使用系统默认条数` },
           },
           required: ['query'],
         },
@@ -324,7 +339,8 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
     specs: [
       { key: 'query', type: 'string', required: true },
       { key: 'mode', type: 'enum', values: ['fulltext', 'hybrid'], default: 'hybrid' },
-      { key: 'limit', type: 'int', min: 1, max: CHAT_BUDGET.maxHitsPerCall, default: CHAT_BUDGET.maxHitsPerCall },
+      // default 刻意不设：AI 未传时由 tool-loop 在**执行必经点**补运行时配置值（设死会与配置漂移）
+      { key: 'limit', type: 'int', min: 1, max: CHAT_BUDGET.maxHitsPerCallHardMax },
     ],
     describe: (args: ChatToolArgs): ChatToolDescribe => ({
       query: args.query as string | undefined,

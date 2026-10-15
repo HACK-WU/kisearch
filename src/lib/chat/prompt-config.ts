@@ -32,7 +32,7 @@ import {
   RETRIEVAL_SKILL_PROMPT,
   renderSkillCatalog,
 } from './retrieval/retrieval-skill.js';
-import type { PromptInjectionSnapshot } from './chat-contract.js';
+import { CHAT_BUDGET, type PromptInjectionSnapshot } from './chat-contract.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
 
@@ -173,6 +173,21 @@ export interface PromptConfig {
    *   `test/chat/context-limit-config.test.ts` ⑨ 钉住 —— 改这条语义前先看那组用例。
    */
   contextChars?: number;
+  /**
+   * **用户覆盖的工具返回字符上限**（REQ-20261015-001）。
+   *
+   * ⚠️ 与 `contextChars` 同语义：本字段是**用户覆盖值**，缺省 = 未覆盖 → 内置
+   * `CHAT_BUDGET.maxToolResponseChars`（10000）；界面改的值**只存本文件**、不写 `config.yaml`（D1 裁决）。
+   */
+  toolResponseChars?: number;
+  /**
+   * **用户覆盖的检索条数默认值**（REQ-20261015-001）。
+   *
+   * 语义边界：它是「AI 未传 `limit` 时使用的条数」，**不是上限** ——
+   * 上限是代码常量 `CHAT_BUDGET.maxHitsPerCallHardMax`（50，AI 可在 1–50 内自主传值）。
+   * 缺省 = 未覆盖 → 内置 `CHAT_BUDGET.maxHitsPerCall`（5）。
+   */
+  searchHitsPerCall?: number;
 }
 
 export interface PromptConfigIssue {
@@ -412,6 +427,39 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
       });
     } else {
       out.contextChars = v;
+    }
+  }
+
+  // toolResponseChars（**用户覆盖值**；缺省 = 不覆盖 → 内置 10000）
+  if (obj.toolResponseChars !== undefined) {
+    const v = obj.toolResponseChars;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < CHAT_BUDGET.toolResponseCharsMin) {
+      issues.push({
+        path: 'toolResponseChars',
+        message: `应为 ${CHAT_BUDGET.toolResponseCharsMin}–${CHAT_BUDGET.toolResponseCharsMax} 的整数（字符数）`,
+      });
+    } else if (v > CHAT_BUDGET.toolResponseCharsMax) {
+      issues.push({
+        path: 'toolResponseChars',
+        message: `不得超过 ${CHAT_BUDGET.toolResponseCharsMax}（再大没有实际意义，且会挤爆上下文）`,
+      });
+    } else {
+      out.toolResponseChars = v;
+    }
+  }
+
+  // searchHitsPerCall（**用户覆盖值**；缺省 = 不覆盖 → 内置 5）
+  if (obj.searchHitsPerCall !== undefined) {
+    const v = obj.searchHitsPerCall;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+      issues.push({ path: 'searchHitsPerCall', message: `应为 1–${CHAT_BUDGET.maxHitsPerCallHardMax} 的整数（条）` });
+    } else if (v > CHAT_BUDGET.maxHitsPerCallHardMax) {
+      issues.push({
+        path: 'searchHitsPerCall',
+        message: `不得超过 ${CHAT_BUDGET.maxHitsPerCallHardMax}（须与 AI 可自主传值的硬上界一致）`,
+      });
+    } else {
+      out.searchHitsPerCall = v;
     }
   }
 

@@ -25,6 +25,13 @@ import {
   formatKUnit,
   parseContextLimitK,
 } from '@/lib/contextUsage';
+import {
+  budgetComboWarn,
+  isHitsInputInvalid,
+  isResponseCharsInputInvalid,
+  parseKChars,
+  parseStrictInt,
+} from '@/lib/toolBudget';
 
 interface ConfirmState {
   title: string;
@@ -59,6 +66,9 @@ const cloneConfig = (c: PromptConfig): PromptConfig => ({
   // ★ 可选字段必须**显式搬运**：这是白名单式拷贝，漏掉它会让草稿静默丢掉用户覆盖值
   //   （表现为"改了 skill 保存一下，上下文上限就被清回默认了"）
   ...(c.contextChars !== undefined ? { contextChars: c.contextChars } : {}),
+  // REQ-20261015-001：工具预算的两个覆盖值同样必须显式搬运（同一个白名单拷贝坑）
+  ...(c.toolResponseChars !== undefined ? { toolResponseChars: c.toolResponseChars } : {}),
+  ...(c.searchHitsPerCall !== undefined ? { searchHitsPerCall: c.searchHitsPerCall } : {}),
 });
 
 /** 新增 skill 的 id：符合服务端 `SKILL_ID_RE`（小写字母/数字开头，允许连字符） */
@@ -89,6 +99,10 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   //    也就不会再有"跨文件写入无法原子"的问题。
   //    输入单位是 **K**（与面板显示同口径），落盘前换算为字符数。
   const [ctxText, setCtxText] = useState('');
+  // ── 工具预算（REQ-20261015-001）：与上下文窗口同层、同一「保存」提交 ──
+  //    输入单位：返回上限用 **K 字符**（与上面同口径）；条数用 **条**。
+  const [toolRespText, setToolRespText] = useState('');
+  const [hitsText, setHitsText] = useState('');
 
   /** 「恢复默认」的目标值 = 部署默认（config.yaml 的 llm.contextChars，缺省 1000K） */
   const ctxDefaultChars = data?.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS;
@@ -127,6 +141,71 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     });
   };
 
+  // ── 工具预算（REQ-20261015-001）的解析、校验与草稿写入 ──
+  //    边界一律读服务端 limits（前端不硬编码数字）；旧 daemon 缺字段时逐项容忍（不拦保存）。
+  const trMin = data?.limits.toolResponseCharsMin;
+  const trMax = data?.limits.toolResponseCharsMax;
+  const trDefault = data?.limits.toolResponseCharsDefault ?? 10000;
+  const hitsMin = data?.limits.searchHitsMin ?? 1;
+  const hitsMax = data?.limits.searchHitsMax ?? 50;
+  const hitsDefault = data?.limits.searchHitsDefault ?? 5;
+
+  /** K 字符文本 → 字符数；空串或非法返回 null（调用方再区分"空 = 未覆盖"） */
+  const trParsed = parseKChars(toolRespText);
+  const hitsParsed = parseStrictInt(hitsText);
+  const trInvalid = isResponseCharsInputInvalid(toolRespText, trMin, trMax);
+  const hitsInvalid = isHitsInputInvalid(hitsText, hitsMin, hitsMax);
+  const trOverridden = draft?.toolResponseChars !== undefined;
+  const hitsOverridden = draft?.searchHitsPerCall !== undefined;
+  /** 组合提示（场景推演发现）：条数 × 典型单条 ≈1.2K 字符 > 返回上限 ⇒ 多数返回会被截断 */
+  const comboWarn = budgetComboWarn(hitsParsed, trParsed);
+
+  /** 工具返回上限：输入 → 草稿（合法才写；**空串 = 未覆盖**，与「恢复默认」等价） */
+  const handleToolRespInput = (v: string): void => {
+    setToolRespText(v);
+    const parsed = parseKChars(v);
+    const inRange = parsed !== null && (trMin === undefined || parsed >= trMin) && (trMax === undefined || parsed <= trMax);
+    if (inRange) {
+      setDraft((d) => (d ? { ...d, toolResponseChars: parsed } : d));
+    } else if (v.trim() === '') {
+      setDraft((d) => {
+        if (!d) return d;
+        const { toolResponseChars: _drop, ...rest } = d;
+        return rest;
+      });
+    }
+  };
+  const handleToolRespReset = (): void => {
+    setToolRespText(String(trDefault / 1000));
+    setDraft((d) => {
+      if (!d) return d;
+      const { toolResponseChars: _drop, ...rest } = d;
+      return rest;
+    });
+  };
+  /** 检索条数默认值：输入 → 草稿 */
+  const handleHitsInput = (v: string): void => {
+    setHitsText(v);
+    const parsed = parseStrictInt(v);
+    if (parsed !== null && parsed >= hitsMin && parsed <= hitsMax) {
+      setDraft((d) => (d ? { ...d, searchHitsPerCall: parsed } : d));
+    } else if (v.trim() === '') {
+      setDraft((d) => {
+        if (!d) return d;
+        const { searchHitsPerCall: _drop, ...rest } = d;
+        return rest;
+      });
+    }
+  };
+  const handleHitsReset = (): void => {
+    setHitsText(String(hitsDefault));
+    setDraft((d) => {
+      if (!d) return d;
+      const { searchHitsPerCall: _drop, ...rest } = d;
+      return rest;
+    });
+  };
+
   // 载入 / 保存成功后（服务端回传了新基线）都重置草稿，保证"内容 = 磁盘"；
   // 输入框文本只在此刻（基线变化）跟随，**不**随草稿逐字符同步 —— 否则用户输入
   // "5000" 的过程中会被归一化成 "500" 而打断输入。
@@ -135,6 +214,9 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     const next = cloneConfig(data.config);
     setDraft(next);
     setCtxText(contextLimitToKText(next.contextChars ?? (data.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS)));
+    // 工具预算两个输入同样只在「基线变化」时同步（不随草稿逐字符刷新，避免打断输入）
+    setToolRespText(String((next.toolResponseChars ?? (data.limits.toolResponseCharsDefault ?? 10000)) / 1000));
+    setHitsText(String(next.searchHitsPerCall ?? data.limits.searchHitsDefault ?? 5));
   }, [data]);
 
   // "已保存"顶部细条：1.2s 自隐
@@ -192,7 +274,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
 
   const handleSave = () => {
-    if (!draft || ctxTextInvalid) return;
+    if (!draft || ctxTextInvalid || trInvalid || hitsInvalid) return;
     void save(draft).then((ok) => {
       // 保存成功 → 通知外层重拉 `GET /api/chat/config`（面板分母 / 占比 / 预警随之立即变化）
       if (ok) onSaved();
@@ -361,6 +443,85 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
               )}
             </div>
 
+            {/* ── 工具预算（REQ-20261015-001）：与上下文窗口同层、同一「保存」提交；
+                   两个旋钮在同一分组里天然会被一起调 ⇒ 组合不合理时给提示（场景推演发现） ── */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                工具预算
+                <em className="ki-chat-cfg__badge">
+                  {trOverridden || hitsOverridden ? '自定义' : `默认 ${formatKUnit(trDefault)} / ${hitsDefault} 条`}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                仅作用于 AI 对话内的工具调用：返回上限是单次工具返回被截断的阈值；
+                条数默认值是 AI 未指定时一次检索取回的条数（AI 可在 1–{hitsMax} 内自主指定）。
+                与上面的「上下文窗口」不同 —— 这两项是真实行为预算，会改变 AI 实际看到的内容量。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="工具返回上限（K 字符）"
+                  aria-invalid={trInvalid || undefined}
+                  value={toolRespText}
+                  onChange={(e) => handleToolRespInput(e.target.value)}
+                />
+                <span className="ki-chat-cfg__ctxunit">K 字符</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={!trOverridden}
+                  onClick={handleToolRespReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="检索条数默认值（条）"
+                  aria-invalid={hitsInvalid || undefined}
+                  value={hitsText}
+                  onChange={(e) => handleHitsInput(e.target.value)}
+                />
+                <span className="ki-chat-cfg__ctxunit">条</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={!hitsOverridden}
+                  onClick={handleHitsReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {trInvalid && (
+                <p className="ki-chat-cfg__warn">
+                  返回上限请输入 {trMin !== undefined ? trMin / 1000 : '?'}–{trMax !== undefined ? trMax / 1000 : '?'} K 之间的数字。
+                </p>
+              )}
+              {hitsInvalid && (
+                <p className="ki-chat-cfg__warn">
+                  检索条数请输入 {hitsMin}–{hitsMax} 之间的整数。
+                </p>
+              )}
+              {/* 组合提示（场景推演 🟡）：两个旋钮一起调时的坑 —— 条数调大反而答得更差 */}
+              {comboWarn && !trInvalid && !hitsInvalid && (
+                <p className="ki-chat-cfg__warn">
+                  按当前组合（{hitsParsed} 条 × 每条约 1.2K 字符）多数检索返回会被截断 —— 建议同时调大返回上限。
+                </p>
+              )}
+              {data.limits.toolResponseCharsMax === undefined && (
+                <p className="ki-chat-cfg__warn">
+                  服务端未返回工具预算的上限：通常是后端尚未重启，本项的保存可能不会生效。
+                </p>
+              )}
+            </div>
+
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 工具与权限
@@ -416,12 +577,12 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
         <span className="ki-chat-cfg__spacer" />
         {/* 生效范围**分开说**（2026-10-13）：提示词/skill 随会话快照冻结，只影响新建会话；
             工具开关是即时读取的，下一次提问即生效 —— 混成一句会让"改了 skill 没反应"看起来像坏了 */}
-        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对之后新建的会话生效，工具开关与上下文上限保存后生效</span>
+        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对之后新建的会话生效，工具开关、上下文上限与工具预算保存后生效</span>
         <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={onClose}>取消</button>
         <button
           type="button"
           className="ki-chat-btn"
-          disabled={saving || !draft || ctxTextInvalid}
+          disabled={saving || !draft || ctxTextInvalid || trInvalid || hitsInvalid}
           data-busy={saving}
           onClick={handleSave}
         >

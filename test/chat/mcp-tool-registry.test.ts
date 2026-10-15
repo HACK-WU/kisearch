@@ -61,18 +61,22 @@ describe('工具注册表 · 参数解析', () => {
 
   it('越界参数（模型幻觉的 scope/threshold）被静默丢弃，必填缺失抛错', () => {
     const parsed = ki.parse('{"query":"acks","scope":"other-project","threshold":0.9}');
-    assert.deepEqual(Object.keys(parsed).sort(), ['limit', 'mode', 'query']);
+    // ★ REQ-20261015-001：limit 未传时**不写入**（改由 tool-loop 在执行必经点补运行时配置的默认值）
+    assert.deepEqual(Object.keys(parsed).sort(), ['mode', 'query']);
     assert.equal((parsed as Record<string, unknown>).query, 'acks');
     assert.throws(() => ki.parse('{}'), /query/);
     assert.throws(() => ki.parse('not json'), /JSON/);
   });
 
-  it('非法枚举回落默认、limit 越界钳制到 [1,5]', () => {
+  it('非法枚举回落默认、limit 越界钳制到 [1,50]（硬上界），区间内显式值原样保留', () => {
     const parsed = ki.parse('{"query":"x","mode":"semantic","limit":99}') as Record<string, unknown>;
     assert.equal(parsed.mode, 'hybrid');
-    assert.equal(parsed.limit, 5);
+    assert.equal(parsed.limit, 50); // REQ-20261015-001：上限由 5 放开到硬上界 50
     const parsed2 = ki.parse('{"query":"x","limit":0}') as Record<string, unknown>;
     assert.equal(parsed2.limit, 1);
+    // AI 自主控制条数的前提：区间内的显式值必须原样保留
+    const parsed3 = ki.parse('{"query":"x","limit":10}') as Record<string, unknown>;
+    assert.equal(parsed3.limit, 10);
   });
 
   it('ki_bulk_sync_relation：items 超上限（>50）抛错、条目缺必填键抛错', () => {

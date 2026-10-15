@@ -2452,7 +2452,7 @@ function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
       {n.response ? (
         <section className="ki-chat-tool__sec">
           <div className="ki-chat-tool__label">响应<em>{n.hits} 命中{n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}</em></div>
-          {n.response.truncated ? <p className="ki-chat-tool__note ki-chat-tool__note--warn">原返回 {n.response.originalChars} 字符，超过 10000 字符已截断。AI 收到相同内容。</p> : null}
+          {n.response.truncated ? <p className="ki-chat-tool__note ki-chat-tool__note--warn">原返回 {n.response.originalChars} 字符，{n.response.limit !== undefined ? `超过 ${n.response.limit} 字符已截断` : '已截断'}。AI 收到相同内容。</p> : null}
           <pre className="ki-chat-tool__code ki-chat-tool__code--response">{n.response.text}</pre>
         </section>
       ) : n.hits !== undefined && !n.error ? (

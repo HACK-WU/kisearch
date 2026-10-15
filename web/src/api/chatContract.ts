@@ -61,6 +61,8 @@ export interface ChatToolResponse {
   text: string;
   originalChars: number;
   truncated: boolean;
+  /** 本次序列化使用的字符上限（配置生效值，REQ-20261015-001）；旧记录缺失 → 回退为不显示具体上限的文案 */
+  limit?: number;
 }
 
 /** 检索过程步骤摘要（与后端 `chat-contract.ts` 的 `ChatProgressStep` 对齐；**落盘**，刷新后仍可展示） */
@@ -326,6 +328,17 @@ export interface PromptConfig {
    * → 内置 1000K）。「恢复默认」= **删掉本字段**（不是写 1000K）。
    */
   contextChars?: number;
+  /**
+   * **用户覆盖的工具返回字符上限**（REQ-20261015-001）。
+   * 缺省 = 未覆盖 → 服务端内置 10000（「恢复默认」目标值读 `limits.toolResponseCharsDefault`）。
+   */
+  toolResponseChars?: number;
+  /**
+   * **用户覆盖的检索条数默认值**（REQ-20261015-001）。
+   * 语义 = 「AI 未传 `limit` 时使用的条数」，**不是上限**（上限由服务端代码常量约束）。
+   * 缺省 = 未覆盖 → 服务端内置 5（读 `limits.searchHitsDefault`）。
+   */
+  searchHitsPerCall?: number;
 }
 
 export interface PromptConfigLimits {
@@ -339,6 +352,19 @@ export interface PromptConfigLimits {
   maxSkills: number;
   /** 上下文上限的硬上界（字符数）；与 `contextUsage.ts::CONTEXT_CHARS_MAX` 手工同源 */
   contextCharsMax: number;
+  // ── 工具预算（REQ-20261015-001）：前端不硬编码任何数字，一律读这里 ──
+  /** 工具返回上限的下界（字符数） */
+  toolResponseCharsMin?: number;
+  /** 工具返回上限的上界（字符数） */
+  toolResponseCharsMax?: number;
+  /** 工具返回上限的内置默认（字符数；「恢复默认」的目标值） */
+  toolResponseCharsDefault?: number;
+  /** 检索条数下界 */
+  searchHitsMin?: number;
+  /** 检索条数上界（= AI 可自主传值的硬上界） */
+  searchHitsMax?: number;
+  /** 检索条数的内置默认（「恢复默认」的目标值） */
+  searchHitsDefault?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */

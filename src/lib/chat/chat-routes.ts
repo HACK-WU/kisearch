@@ -40,6 +40,7 @@ import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import YAML from 'yaml';
 import {
+  CHAT_BUDGET,
   CHAT_ERROR_CODES,
   CHAT_REF_MAX_COUNT,
   CHAT_REF_TEXT_MAX,
@@ -594,6 +595,13 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       maxSkills: MAX_SKILLS,
       // 上下文上限的硬上界（字符数）—— 与 `normalizePromptConfig` 的校验同源
       contextCharsMax: CONTEXT_CHARS_MAX,
+      // ── 工具预算（REQ-20261015-001）：前端不硬编码任何数字，一律读这里 ──
+      toolResponseCharsMin: CHAT_BUDGET.toolResponseCharsMin,
+      toolResponseCharsMax: CHAT_BUDGET.toolResponseCharsMax,
+      toolResponseCharsDefault: CHAT_BUDGET.maxToolResponseChars,
+      searchHitsMin: 1,
+      searchHitsMax: CHAT_BUDGET.maxHitsPerCallHardMax,
+      searchHitsDefault: CHAT_BUDGET.maxHitsPerCall,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,

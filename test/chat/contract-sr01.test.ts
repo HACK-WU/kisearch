@@ -21,9 +21,12 @@ import { mockSearchResult, mockSearchResultWithoutLines } from './fixtures/mock-
 describe('SR-01 契约 · 检索工具参数解析（批次 2：ki_search 注册表）', () => {
   const parseKiSearch = (raw: string): Record<string, unknown> => getChatTool('ki_search')!.parse(raw) as Record<string, unknown>;
 
-  it('limit 超上限 → 钳制到 maxHitsPerCall（不报错）', () => {
+  it('limit 超硬上界 → 钳制到 maxHitsPerCallHardMax（不报错；REQ-20261015-001 放开上限）', () => {
     const a = parseKiSearch(JSON.stringify({ query: 'x', limit: 99 }));
-    assert.equal(a.limit, CHAT_BUDGET.maxHitsPerCall);
+    assert.equal(a.limit, CHAT_BUDGET.maxHitsPerCallHardMax);
+    // 下限仍钳制到 1（区间内显式值原样保留 → 见 test/chat/tool-budget.test.ts）
+    const b = parseKiSearch(JSON.stringify({ query: 'x', limit: 0 }));
+    assert.equal(b.limit, 1);
   });
 
   it('mode 非法 → 回落 hybrid（模型无需懂枚举）', () => {

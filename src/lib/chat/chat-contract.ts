@@ -85,6 +85,11 @@ export interface ChatToolResponse {
   text: string;
   originalChars: number;
   truncated: boolean;
+  /**
+   * 本次序列化使用的字符上限（配置生效值；REQ-20261015-001）。
+   * 旧记录（改造前落盘）缺失 → 消费方回退为"不显示具体上限"的文案。
+   */
+  limit?: number;
 }
 
 /**
@@ -414,10 +419,29 @@ export const CHAT_BUDGET = {
    * ⚠️ Infinity 经 JSON 序列化为 null：消费方只做展示/比较，不做算术（见 retrieval-skill 规则 4）。
    */
   maxToolRounds: Number.POSITIVE_INFINITY,
-  /** 单次检索返回条数上限（T11） */
+  /**
+   * 单次检索条数的**内置默认**（T11）。
+   * REQ-20261015-001 起：可被对话配置的 `searchHitsPerCall` 覆盖「AI 未传 limit 时的条数」；
+   * 同时仍是页面 sources 投影的取条上限 —— 两者**刻意同值**（投影口径不随配置变化）。
+   */
   maxHitsPerCall: 5,
-  /** 工具返回总长度上限；不按字段或单条片段裁剪。 */
+  /** `ki_search.limit` 的**硬上界**（代码常量，用户不可配）—— 模型自主传值的天花板（REQ-20261015-001） */
+  maxHitsPerCallHardMax: 50,
+  /** 工具返回总长度的**内置默认**（可被对话配置覆盖；不按字段或单条片段裁剪） */
   maxToolResponseChars: 10000,
+  /** 工具返回上限的配置边界（服务端强校验）：低于下限几乎必然截断，高于上限无实际意义 */
+  toolResponseCharsMin: 1000,
+  toolResponseCharsMax: 100_000,
+  /**
+   * 证据回放的**轮数上限**（REQ-20261015-001 · S-02；D3 双预算之一）。
+   * 暂不做用户配置（见设计 S-02 §10 Q1）。
+   */
+  replayTurns: 5,
+  /**
+   * 证据回放的**正文总字符上限**（D3 双预算之二）。
+   * ⚠️ 10000 是 **demo 实测校准值**：20000 时 TTFB +40%（超 +30% 判据），故下调。
+   */
+  replayMaxChars: 10_000,
   /** 旧投影兼容函数的单片段截断长度（S07 §3.4） */
   snippetChars: 300,
   /** `sources[].snippet` 落盘截断长度（S07 §3.5） */
