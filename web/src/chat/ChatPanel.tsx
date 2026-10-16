@@ -74,6 +74,13 @@ import {
   readChatPanelWidth,
   writeChatPanelWidth,
 } from '@/lib/chatPanelPrefs';
+import {
+  readChatContentWidth,
+  readChatpageSideCollapsed,
+  writeChatContentWidth,
+  writeChatpageSideCollapsed,
+  type ChatContentWidth,
+} from '@/lib/chatLayoutPrefs';
 import { kiGetModuleInfo } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { ChatToggleButton } from './ChatToggleButton';
@@ -109,6 +116,15 @@ export interface ChatPanelProps {
  * 真实 `/browse` 基线测定后回填（见 `design/S03` §3.2 的算式）。
  */
 const CHAT_DOCK_MIN_VIEWPORT = 1400;
+
+/**
+ * 独立对话页左栏「常驻 / 抽屉」的断点（REQ-20261016-004）。
+ *
+ * ⚠️ **必须与 ki.css 的 `@media (min-width: 1024px)` / `(max-width: 1023px)` 一致**：
+ * ≥ 此宽度左栏常驻在 grid 里，`☰` 切换折叠；< 此宽度左栏转 fixed 抽屉，`☰` 只打开抽屉
+ * （**不回写折叠偏好** —— 把窗口缩小不该静默丢掉桌面上的选择）。
+ */
+const CHAT_PAGE_SIDE_MIN_VIEWPORT = 1024;
 
 const MAX_SEND_CHARS = 20000;
 
@@ -893,6 +909,47 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   }, []);
 
   /**
+   * 对话页布局偏好（REQ-20261016-004）：内容宽度模式 + 左栏折叠态。
+   *
+   * 三层口径与面板宽度同款（偏好 → 实际 → 下发）：
+   * · `contentWidth` / `sideCollapsed` 是用户偏好，持久化在 localStorage（lib/chatLayoutPrefs）；
+   * · 下发给 `.ki-chat-panel--page` 的 `data-width` / `data-side-collapsed`，**样式只认属性**；
+   * · 窄屏（< 1024）由 CSS 关掉它们，JS 也**不回写偏好**（见 CHAT_PAGE_SIDE_MIN_VIEWPORT）。
+   */
+  const [contentWidth, setContentWidth] = useState<ChatContentWidth>(() => readChatContentWidth());
+  const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => readChatpageSideCollapsed());
+
+  const chooseContentWidth = useCallback((next: ChatContentWidth): void => {
+    setContentWidth(next);
+    writeChatContentWidth(next);
+  }, []);
+
+  /**
+   * `☰` 一个按钮、两种语义（按当前视口自适应，不引入第二处真相）：
+   * · 桌面（≥1024）：切换左栏折叠 —— 展开态是折叠入口，折叠态是**唯一的展开入口**；
+   * · 窄屏（<1024）：只打开抽屉，**不写折叠偏好**（负向 #5：缩窗口不改写用户选择）。
+   */
+  const handleSideToggle = useCallback((): void => {
+    if (window.innerWidth >= CHAT_PAGE_SIDE_MIN_VIEWPORT) {
+      setSideCollapsed((prev) => {
+        const next = !prev;
+        writeChatpageSideCollapsed(next);
+        return next;
+      });
+      return;
+    }
+    setSideOpen(true);
+  }, []);
+
+  /** `☰` 的语义随视口分流：宽屏是「折叠 / 展开左栏」，窄屏是「打开抽屉」 */
+  const isWideSide = viewportW >= CHAT_PAGE_SIDE_MIN_VIEWPORT;
+  const sideToggleLabel = isWideSide
+    ? sideCollapsed
+      ? '展开会话列表'
+      : '折叠会话列表'
+    : '打开会话列表';
+
+  /**
    * 面板宽度可拖拽（2026-10-13 用户需求：「希望可以拖拽，自动调整它的宽度」）。
    *
    * 三层口径（关键：窗口变窄只**压缩显示**，不偷偷改掉用户偏好）：
@@ -1375,11 +1432,28 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           <button
             type="button"
             className="ki-chat-iconbtn ki-chatpage__convbtn"
-            title="会话列表"
-            aria-label="打开会话列表"
-            onClick={() => setSideOpen(true)}
+            title={sideToggleLabel}
+            aria-label={sideToggleLabel}
+            aria-expanded={isWideSide ? !sideCollapsed : sideOpen}
+            onClick={handleSideToggle}
           >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
+            {/* 图标随视口语义切换：宽屏用「面板边界 + 方向箭头」（箭头随折叠态翻转，表达
+                「收起 / 展开左栏」），不用容易被读成「打开菜单」的汉堡三条线；窄屏保留汉堡 ——
+                那里它确实是「打开会话列表」抽屉的通用语义。
+                （用户 2026-10-16 反馈：原来的线条图标「一般人看了不知道点了可以折叠」） */}
+            {isWideSide ? (
+              /* 双 chevron（Lucide `chevrons-left` / `chevrons-right` 原坐标，24×24 由 CSS 缩到 16px）。
+                 用户拍板口径（2026-10-16）：形状就用这个方向双箭头，不用"面板外框"那类复合图形
+                 —— 15px 下笔画一多就糊成一团（前两版 `|‹` / `panel-left` 均被判「丑」）。
+                 展开态指左 `«`（点了收起左栏）；折叠态指右 `»`（点了展开）。颜色见 ki.css：主色。 */
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                {sideCollapsed
+                  ? <><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></>
+                  : <><path d="m11 17-5-5 5-5" /><path d="m18 17-5-5 5-5" /></>}
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
+            )}
           </button>
         ) : null}
         <span className={`ki-chat-ctx__dot${config && !config.enabled ? ' ki-chat-ctx__dot--off' : config?.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
@@ -1395,6 +1469,28 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         {isPage ? (
           <>
             <span className="ki-chatpage__ctx-spacer" />
+            {/* 内容宽度：居中 / 铺满（REQ-20261016-004）。
+                窄屏由 CSS 隐藏 —— 该区间两种模式等价（可用宽度 < 880），不存在可切换的差异。 */}
+            <div className="ki-chatpage__widthseg" role="group" aria-label="对话内容宽度">
+              <button
+                type="button"
+                className="ki-chatpage__widthsegb"
+                aria-pressed={contentWidth === 'center'}
+                title="内容居中（880px）：长文阅读更舒适"
+                onClick={() => chooseContentWidth('center')}
+              >
+                居中
+              </button>
+              <button
+                type="button"
+                className="ki-chatpage__widthsegb"
+                aria-pressed={contentWidth === 'full'}
+                title="内容铺满可用宽度：正文保留可读行宽，代码块与表格用满整行"
+                onClick={() => chooseContentWidth('full')}
+              >
+                铺满
+              </button>
+            </div>
             <button
               type="button"
               className="ki-chat-cfg__entry"
@@ -1957,7 +2053,12 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   return (
     <>
       {isPage ? (
-        <aside className="ki-chat-panel ki-chat-panel--page" aria-label="AI 对话页面">
+        <aside
+          className="ki-chat-panel ki-chat-panel--page"
+          aria-label="AI 对话页面"
+          data-width={contentWidth}
+          data-side-collapsed={sideCollapsed ? 'true' : 'false'}
+        >
           <div className="ki-chatpage__side" data-open={sideOpen ? 'true' : 'false'}>
             {sideList}
           </div>

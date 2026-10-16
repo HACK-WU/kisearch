@@ -4598,3 +4598,130 @@ select.ki-chat-cfg__ta--select {
   margin: 6px 0 0; color: var(--ki-color-warning);
   font-size: var(--ki-font-size-xs); line-height: 1.6;
 }
+
+/* ════════════════════════════════════════════════════════════════
+   G. 对话页左栏折叠 与 内容宽度切换（REQ-20261016-004）
+   ────────────────────────────────────────────────────────────────
+   纯追加、不改上方任何既有规则；复用 --ki-* 令牌；新增量以 --ki-chatpage-* 声明。
+   状态由 ChatPanel（page 变体）以 `data-width` / `data-side-collapsed` 下发 —— 样式只认属性。
+   · 折叠与宽度**只在 ≥1024px 生效**：<1024 时左栏本就是 fixed 抽屉、两种宽度也等价
+     （可用宽度 < 880）；那时 CSS 关掉切换控件，JS 也不回写偏好（见 lib/chatLayoutPrefs）。
+   ════════════════════════════════════════════════════════════════ */
+:root {
+  /* 铺满模式下**正文文本块**的可读行宽上限（约 68 个中文字 @16px）。
+     只约束文本：代码块 / 表格 / 工具卡不受它限制 —— 它们正是需要宽度的内容。 */
+  --ki-chatpage-prose-max: 1100px;
+}
+
+/* ── `☰` 常驻（宽屏新增折叠入口）──
+   原规则只在 `<1024px` 才 `display:inline-grid`（ki.css:4182 的窄屏抽屉开关），桌面恒藏；
+   这里提升为常驻：展开态它是折叠入口，折叠态它是**唯一**的展开入口 ——
+   缺了就把会话列表永久藏起来（R1 验收项）。特异性 (0,2,0) 覆盖 (0,1,0)，与窄屏规则同值不冲突。 */
+.ki-chat-panel--page .ki-chatpage__convbtn { display: inline-grid; }
+/* ⚠️ `☰` 在 page 顶栏内必须限高 26px：它默认 28px（`.ki-chat-iconbtn`，ki.css:3015），
+   加上上下文条的上下 padding 与 1px 下边框后内容高 41px > 与左栏搜索区共享的
+   `--ki-chatpage-topbar-h`(40px) ⇒ **右栏下边线被顶低 1px**（用户 2026-10-16 反馈
+   「左右横线有点错位」；`temp/verify-chatpage-topbar-align.cjs` 复现「下边线差 -1px」）。
+   26px 与同行「配置」入口（`.ki-chat-cfg__entry`）等高。
+   ⚠️ 仅限 ≥1024：窄屏该按钮是抽屉开关，28px 的点击面积不应被缩小。
+
+   ★ 同一作用域内**必须给出可点击的外观**（用户 2026-10-16 二次反馈：「总感觉这个折叠按钮不是很
+   明显，一般人看了不知道点了可以折叠」）：`.ki-chat-iconbtn` 默认是**无边框的浅灰图标**，放在
+   浅色顶栏里像装饰性图形、没有任何「这是按钮」的暗示。这里补上与同行「配置」入口
+   （`.ki-chat-cfg__entry`）同款的**边框 + hover 主色描边**语义，图标也换成
+   「面板边界 + 方向箭头」（见 ChatPanel.tsx）。 */
+@media (min-width: 1024px) {
+  .ki-chat-panel--page .ki-chatpage__convbtn {
+    width: 26px; height: 26px;
+    /* 用**浅灰底**而不是描边：图标本身是带矩形外框的 panel-left，再叠一圈按钮边框就成了
+       「框中框」。灰底与右侧「居中 | 铺满」的分段控件同款语言 —— 既有"可点击"的暗示，
+       又不与图标自己那一笔打架。 */
+    background: transparent;
+    border-radius: 999px;
+    /* 箭头用**主色**：它既是「这是可操作入口」的强调（用户 2026-10-16 两轮反馈的诉求），
+       也与顶栏右侧「配置」入口的 hover 语义同源（同一个主色在两侧呼应，不引入新色相）。 */
+    color: var(--ki-color-primary);
+  }
+  /* ⚠️ hover 必须显式声明：本规则的 background 与基类 `.ki-chat-iconbtn:hover` (0,2,0)
+     特异性相同、位置更靠后 ⇒ 不写会把基类的 hover 反馈一并覆盖掉。
+     默认背景透明（用户 2026-10-16 拍板「背景要透明的，不要是灰色」）后，hover 反馈
+     就是它**唯一**的"可点击"提示，因此这一条不能省。 */
+  .ki-chat-panel--page .ki-chatpage__convbtn:hover {
+    background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  }
+  .ki-chat-panel--page .ki-chatpage__convbtn svg { width: 16px; height: 16px; }
+}
+
+/* ── 内容宽度：铺满 ──
+   ⚠️ 不能把 `--ki-chatpage-main-max` 直接改成 none：`.ki-chat-jump` 的
+   `right: calc((100% - var(--ki-chatpage-main-max)) / 2 + ...)` 会因 `100% - none` 失效
+   （回底浮钮定位崩掉）。故逐条覆盖，令牌本身保持 880px。 */
+.ki-chat-panel--page[data-width="full"] .ki-chat-panel__content,
+.ki-chat-panel--page[data-width="full"] .ki-chat-panel__foot > *:not(.ki-chat-jump) { max-width: none; }
+.ki-chat-panel--page[data-width="full"] .ki-chat-jump { right: var(--ki-space-6); }
+/* 铺满时左右留白 12px → 24px：宽屏下贴边 12px 会让正文压着容器边。
+   ⚠️ body 与 foot **必须同值**：foot 的左右 padding 在 dock 面板里被归零（ki.css:3857「输入框贴边」），
+   而 page 居中态下两者靠 `max-width:880 + margin:auto` 天然对齐 —— 数学上 padding 与居中留白恰好抵消
+   （body: p + (W-2p-880)/2 ≡ (W-880)/2）；铺满时 max-width 上限消失、不再抵消，
+   只改 body 会让输入卡片比消息列宽出 2×24px（走查实测 1432 vs 1384）。 */
+.ki-chat-panel--page[data-width="full"] .ki-chat-panel__body,
+.ki-chat-panel--page[data-width="full"] .ki-chat-panel__foot {
+  padding-left: var(--ki-space-6); padding-right: var(--ki-space-6);
+}
+/* ★ 方案 C 护栏：正文文本块限宽（**白名单**，不是黑名单）。
+   ⚠️ 不能用 `:not(pre):not(table)` 反选：代码块的 DOM 是 `div.ki-code-block > div.bar + pre`
+   （MarkdownPreview.tsx:458 / 435）—— 黑名单只看 `pre` 会漏掉外层 `div`，把**代码块一起限窄**，
+   与 R3「代码块/表格用满整行」正相反。白名单只列纯文本块；`div`（代码块 / code-group /
+   mermaid / 附件占位）与 `table` 一律铺满。
+   已知取舍：`ul`/`ol` 在白名单内，故列表里嵌套的代码块会随列表限到同一上限（代码块自带
+   `overflow:auto`，不会破版）。 */
+.ki-chat-panel--page[data-width="full"] .ki-markdown > :is(p, h1, h2, h3, h4, h5, h6, blockquote, ul, ol),
+.ki-chat-panel--page[data-width="full"] .ki-chat-msg__body > .ki-chat-msg__text {
+  max-width: var(--ki-chatpage-prose-max);
+}
+
+/* ── 宽度切换控件（上下文条右侧、配置入口左侧）──
+   视觉语言复用配置模态框的分段器（`.ki-chat-cfg__seg`），尺寸压到上下文条可容纳 */
+.ki-chatpage__widthseg {
+  display: inline-flex; gap: 2px; padding: 3px; margin-right: var(--ki-space-2);
+  background: var(--ki-color-surface-muted); border-radius: 999px;
+  /* 上下文条空间已满：不得被压缩折行（与 .ki-chat-cfg__entry 同款契约） */
+  flex: 0 0 auto;
+}
+.ki-chatpage__widthsegb {
+  height: 20px; padding: 0 10px;
+  border: 0; background: transparent; border-radius: 999px; cursor: pointer;
+  color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs);
+  white-space: nowrap;
+  transition: background 160ms, color 160ms, box-shadow 160ms;
+}
+.ki-chatpage__widthsegb:hover { color: var(--ki-color-text); }
+.ki-chatpage__widthsegb[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .10);
+}
+.ki-chatpage__widthsegb:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+
+/* ── 窄屏（<1024px）：左栏是抽屉、两种宽度等价 ⇒ 关掉切换控件 ── */
+@media (max-width: 1023px) {
+  .ki-chatpage__widthseg { display: none; }
+}
+
+/* ── 桌面（≥1024px）：折叠左栏 ──
+   ⚠️ 必须限定在 ≥1024：窄屏 `.ki-chatpage__side` 是 `position:fixed` 抽屉、**脱离 grid 流** ——
+      若此处仍留一列占位，`.ki-chatpage__main` 会落到第一列（0px）上，整个对话区塌成 0 宽。
+   ⚠️ 也不能用 `display:none` 藏左栏（同样让 main 掉到第一列，走查实测 contentWidth = 0）：
+      改用 0 列 + `min-width:0` + `overflow:hidden` —— grid item 的 `min-width:auto`
+      会拒绝收缩到 0，必须显式解除。 */
+@media (min-width: 1024px) {
+  .ki-chat-panel--page[data-side-collapsed="true"] { grid-template-columns: 0 minmax(0, 1fr); }
+  .ki-chat-panel--page[data-side-collapsed="true"] .ki-chatpage__side {
+    min-width: 0; overflow: hidden; visibility: hidden; border-right: 0;
+  }
+}
+
+/* 折叠是瞬变的（不做列宽过渡）：既避免与 reduced-motion 的顺序坑纠缠，
+   也避免长消息列表在动画期间反复重排。 */
+@media (prefers-reduced-motion: reduce) {
+  .ki-chatpage__widthsegb { transition: none; }
+}
