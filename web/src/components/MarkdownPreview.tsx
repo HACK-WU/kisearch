@@ -319,6 +319,126 @@ function safeDetailsExtension(): TokenizerAndRendererExtension {
   };
 }
 
+// ─── 多语言代码块（VitePress `::: code-group` 容器）────────────────
+
+/** 组内一个语言变体：标签（省略时取语言名）与源码原文 */
+interface CodeGroupItem {
+  lang: string;
+  label: string;
+  text: string;
+}
+
+interface CodeGroupToken {
+  type: string;
+  raw: string;
+  items: CodeGroupItem[];
+}
+
+const CODE_GROUP_OPEN_LINE = /^ {0,3}:{3,}[ \t]*code-group[ \t]*(?:\n+|$)/;
+/** 结束行（**只用于单行文本**，故不带 m 标志） */
+const CODE_GROUP_CLOSE_LINE = /^ {0,3}:{3,}[ \t]*$/;
+/** 组内每个代码块的 info string 尾部可写 `[显示名]`（VitePress 同款），其余 meta 不参与解析 */
+const CODE_GROUP_LABEL = /\[([^\]]*)\][ \t]*$/;
+
+/**
+ * 找容器的结束行：**按行扫描并跳过围栏内部**。
+ *
+ * 不能用「正则在剩余文本里找第一个 `:::`」——代码块**内容**里出现 `:::` 行完全合法
+ * （如示例里讲 VitePress 语法本身），那样会把围栏内的那行当成容器结束，整个容器随即降级为
+ * 普通块（实测复现：`0 !== 1`）。safeDetailsExtension 早就用同一手法规避了同类问题。
+ */
+function findCodeGroupClose(source: string): { index: number; end: number } | null {
+  let fence: { char: '`' | '~'; length: number } | null = null;
+  for (const line of markdownLines(source)) {
+    if (fence) {
+      if (isFenceClose(line.text, fence)) fence = null;
+      continue;
+    }
+    const marker = fenceMarker(line.text);
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    if (CODE_GROUP_CLOSE_LINE.test(line.text)) return { index: line.start, end: line.end };
+  }
+  return null;
+}
+
+/** 组件的 id 前缀：模块级自增，保证同一页面多次渲染也不出现重复 id */
+let codeGroupSeq = 0;
+
+function readCodeToken(token: Token): { lang: string; text: string } {
+  const code = token as Token & { lang?: string; text?: string };
+  return { lang: code.lang ?? '', text: code.text ?? '' };
+}
+
+/**
+ * 多语言代码块：`::: code-group` 容器内一串围栏代码块，渲染为一组可切换的 tab（默认展示第一个）。
+ *
+ * 三条降级硬约束（都返回 undefined，交回默认解析，整段退化为「段落 + 独立代码块」）：
+ * ① **未闭合不消费** —— 没写结束的 `:::` 时不接管。AI 流式输出到一半正是此形态；这也让
+ *    renderMarkdownBlocks 的 `complete` 判定自动保持正确（不产 token 就不会被误判为完整）。
+ * ② **组内只允许代码块与空行** —— 出现其他块级内容即降级，保证正文不被吞掉。
+ * ③ **有效语言块少于 2 个** —— 没有可切换的对象，按普通代码块渲染（空块与普通块同口径丢弃）。
+ *
+ * 安全：容器只重排「已有的代码块 token」，不引入任何新的原始 HTML 通路；标签与语言名一律转义。
+ */
+function codeGroupExtension(): TokenizerAndRendererExtension {
+  return {
+    name: 'kiCodeGroup',
+    level: 'block',
+    start(source) {
+      const index = /^ {0,3}:{3,}[ \t]*code-group\b/m.exec(source)?.index;
+      return index === undefined || index < 0 ? undefined : index;
+    },
+    tokenizer(source) {
+      const opening = CODE_GROUP_OPEN_LINE.exec(source);
+      if (!opening) return undefined;
+      const rest = source.slice(opening[0].length);
+      const closing = findCodeGroupClose(rest);
+      if (!closing) return undefined;
+      const body = rest.slice(0, closing.index);
+      const tokens = this.lexer.blockTokens(body.trim(), []);
+      if (!tokens.every((token) => token.type === 'code' || token.type === 'space')) return undefined;
+      const items = tokens
+        .filter((token) => token.type === 'code')
+        .map((token) => {
+          const { lang, text } = readCodeToken(token);
+          const tagged = CODE_GROUP_LABEL.exec(lang.trim());
+          const language = (tagged ? lang.trim().slice(0, tagged.index) : lang).trim().split(/\s+/)[0] ?? '';
+          const label = (tagged?.[1] ?? '').trim() || language || '代码';
+          return { lang: language, label, text };
+        })
+        .filter((item) => item.text.trim().length > 0);
+      if (items.length < 2) return undefined;
+      return { type: 'kiCodeGroup', raw: source.slice(0, opening[0].length + closing.end), items };
+    },
+    renderer(token) {
+      const group = token as unknown as CodeGroupToken;
+      const groupId = `ki-code-group-${++codeGroupSeq}`;
+      const tabs = group.items.map((item, index) =>
+        `<button class="ki-code-tab" type="button" role="tab" id="${groupId}-tab-${index}"`
+        + ` aria-controls="${groupId}-panel-${index}" aria-selected="${index === 0}"`
+        + ` tabindex="${index === 0 ? 0 : -1}" data-ki-code-tab="${index}"`
+        + ` title="${escapeAttr(item.lang || item.label)}">${escapeHtml(item.label)}</button>`).join('');
+      const panels = group.items.map((item, index) => {
+        const languageClass = item.lang ? ` class="language-${escapeAttr(item.lang)}"` : '';
+        return `<div class="ki-code-panel" role="tabpanel" id="${groupId}-panel-${index}"`
+          + ` aria-labelledby="${groupId}-tab-${index}" data-ki-code-panel="${index}"${index === 0 ? '' : ' hidden'}>`
+          + `<pre><code${languageClass}>${escapeHtml(item.text)}</code></pre></div>`;
+      }).join('');
+      return '<div class="ki-code-block ki-code-group" data-ki-code-group>'
+        + '<div class="ki-code-block__bar">'
+        + `<div class="ki-code-tabs" role="tablist" aria-label="代码语言">${tabs}</div>`
+        + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
+        + '</div>'
+        + `<div class="ki-code-panels">${panels}</div>`
+        + '<span class="ki-code-copy-status" aria-live="polite"></span>'
+        + '</div>\n';
+    },
+  };
+}
+
 /** 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃 */
 function buildRenderer(base?: AssetBase) {
   const renderer = new Renderer();
@@ -394,7 +514,7 @@ function buildRenderer(base?: AssetBase) {
 /** 渲染 Markdown 为 HTML 字符串（GFM：表格/删除线/任务列表；breaks 单换行转 <br>） */
 export function renderMarkdownHtml(md: string, base?: AssetBase): string {
   const parser = new Marked({ renderer: buildRenderer(base), gfm: true, breaks: true });
-  parser.use({ extensions: [safeDetailsExtension()] });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension()] });
   return parser.parse(encodeImageSpaces(md), { async: false }) as string;
 }
 
@@ -412,7 +532,7 @@ export interface MarkdownBlock {
 /** Parse the whole document before rendering individual blocks; never split Markdown source. */
 export function renderMarkdownBlocks(md: string, previous: readonly MarkdownBlock[] = []): MarkdownBlock[] {
   const parser = new Marked({ renderer: buildRenderer(), gfm: true, breaks: true });
-  parser.use({ extensions: [safeDetailsExtension()] });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension()] });
   const input = encodeImageSpaces(md).replace(/\r\n?|\r/g, '\n');
   // Preprocessing only expands image-path spaces and normalizes newlines. Preserve raw SSE offsets.
   const offsets: number[] = [];
@@ -739,8 +859,11 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
       const button = target.closest<HTMLButtonElement>('[data-ki-copy-code]');
       if (!button || !root.contains(button)) return;
       const codeBlock = button.closest<HTMLElement>('.ki-code-block');
-      const source = codeBlock?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
-        ?? codeBlock?.querySelector('pre code')?.textContent;
+      // 多语言块（`::: code-group`）内含多个面板，只取**当前显示**的那一个——否则会复制到
+      // 隐藏语言（原型实测：按 DOM 顺序取第一个 `pre code` 会取到未选中的版本）。
+      const scope = codeBlock?.querySelector<HTMLElement>('.ki-code-panel:not([hidden])') ?? codeBlock;
+      const source = scope?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
+        ?? scope?.querySelector('pre code')?.textContent;
       if (source === undefined) return;
       const status = codeBlock?.querySelector<HTMLElement>('.ki-code-copy-status');
 
@@ -775,6 +898,64 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
       root.removeEventListener('click', handleCopy);
       for (const timer of timers) window.clearTimeout(timer);
       timers.clear();
+    };
+  }, [html]);
+
+  // 多语言代码块切换（VitePress `::: code-group`）：与复制按钮同款事件代理——直接改 DOM 属性，
+  // 不走 React 状态（DOM 由 dangerouslySetInnerHTML 注入，且流式渲染下 html 每轮都可能重建）。
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !html.includes('data-ki-code-group')) return;
+    const activate = (group: HTMLElement, index: number): void => {
+      const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-ki-code-tab]'));
+      const panels = Array.from(group.querySelectorAll<HTMLElement>('[data-ki-code-panel]'));
+      tabs.forEach((tab, tabIndex) => {
+        const active = tabIndex === index;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+      });
+      panels.forEach((panel, panelIndex) => { panel.hidden = panelIndex !== index; });
+    };
+    // 索引以 **DOM 顺序**为准（不解析 data-ki-code-tab，省掉一处"属性被改就切不动"的隐患）
+    const groupOf = (node: Element): { group: HTMLElement; tabs: HTMLButtonElement[]; index: number } | null => {
+      const tab = node.closest<HTMLButtonElement>('[data-ki-code-tab]');
+      if (!tab || !root.contains(tab)) return null;
+      const group = tab.closest<HTMLElement>('[data-ki-code-group]');
+      if (!group) return null;
+      const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-ki-code-tab]'));
+      return { group, tabs, index: tabs.indexOf(tab) };
+    };
+    const handleClick = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const found = groupOf(target);
+      if (!found || found.index < 0) return;
+      activate(found.group, found.index);
+    };
+    // ARIA tablist 的标准键盘交互：←/→ 循环移动并跟随激活，Home/End 跳首尾；
+    // 焦点一并移动，键盘与读屏用户不会「切过去了但焦点还在原标签」。
+    const handleKeydown = (event: KeyboardEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const found = groupOf(target);
+      if (!found || found.index < 0) return;
+      const { tabs, index: current } = found;
+      const last = tabs.length - 1;
+      const next = event.key === 'ArrowRight' ? (current === last ? 0 : current + 1)
+        : event.key === 'ArrowLeft' ? (current === 0 ? last : current - 1)
+          : event.key === 'Home' ? 0
+            : event.key === 'End' ? last
+              : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      activate(found.group, next);
+      tabs[next]?.focus();
+    };
+    root.addEventListener('click', handleClick);
+    root.addEventListener('keydown', handleKeydown);
+    return () => {
+      root.removeEventListener('click', handleClick);
+      root.removeEventListener('keydown', handleKeydown);
     };
   }, [html]);
 

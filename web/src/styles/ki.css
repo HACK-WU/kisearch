@@ -2451,6 +2451,27 @@ a:hover { text-decoration: underline; }
 .ki-code-copy[data-copy-state="success"] { color: var(--ki-color-success); }
 .ki-code-copy[data-copy-state="error"] { color: var(--ki-color-danger, #d93025); }
 .ki-code-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+/* 多语言代码块（VitePress `::: code-group` 容器）：工具条左侧变成语言标签组，右侧仍是复制按钮；
+   标签沿用 .ki-segmented 的选中态口径（浅主色底 + 主色字），不另造一套视觉。
+   ⚠️ 代码 pre 与 mermaid 图块移进 .ki-code-panel 后，上面那两条**直接子选择器**
+   （`.ki-code-block > pre` / `> .ki-mermaid`）不再命中——必须按同口径补面板内规则，
+   否则面板上下会多出 8px 外边距、图块多出一条边框（原型实测）。 */
+.ki-markdown .ki-code-group > .ki-code-block__bar { padding-left: 5px; }
+/* 标签多 / 标签长时横向滚动，不挤压右侧复制按钮（复制按钮 flex: none） */
+.ki-code-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; }
+.ki-code-tab {
+  flex: none; min-height: 24px; padding: 0 10px;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--ki-color-text-subtle);
+  font-family: var(--ki-font-mono); font-size: 11px; line-height: 1.4;
+  cursor: pointer; white-space: nowrap;
+}
+.ki-code-tab:hover { color: var(--ki-color-text); }
+.ki-code-tab[aria-selected="true"] { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); font-weight: 650; }
+.ki-code-tab:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-markdown .ki-code-panel > pre { margin: 0; background: transparent; }
+.ki-markdown .ki-code-panel > .ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; padding: 12px; }
+.ki-code-panel[hidden] { display: none; }
 /* mermaid 兜底提示（fail-loud，走查 2026-10-13）：渲染失败 / 内容为空 / 资源不可用时在工具条标注，
    不再静默保留源码块 —— 此前用户无法区分"源码语法错"与"产品坏了"。
    `margin-left: auto` 把标记推到复制按钮左侧（语言名保持最左、按钮位置不动）。 */

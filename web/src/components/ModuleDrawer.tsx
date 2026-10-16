@@ -207,8 +207,11 @@ function applyDocumentHighlights(
   while (node) {
     const text = node as Text;
     const parent = text.parentElement;
-    // 页面生成的复制控件与查找栏本身不是原文，不能参与命中计数/自动定位。
-    if (text.nodeValue && parent && !parent.closest('script,style,svg,button,[aria-live],.ki-drawer__findbar')) textNodes.push(text);
+    // 页面生成的复制控件与查找栏本身不是原文，不能参与命中计数/自动定位；
+    // 多语言代码块里**未显示**的语言同理——合成 TreeWalker 不看 CSS 可见性，不显式排除就会
+    // 出现「命中数比看得见的多、点『下一条』跳到一片空白」（原型 temp/code-group-demo 实测 5 个文本节点）。
+    if (text.nodeValue && parent
+      && !parent.closest('script,style,svg,button,[aria-live],.ki-drawer__findbar,.ki-code-panel[hidden]')) textNodes.push(text);
     node = walker.nextNode();
   }
 
