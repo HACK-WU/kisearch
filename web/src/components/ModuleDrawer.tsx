@@ -61,6 +61,28 @@ const ICON_FIND = (
   </svg>
 );
 
+/**
+ * 「本文档内查找」模式的图标（文档 + 放大镜）。
+ * 与「搜索全库文档」共用同一个输入框，图标是肉眼区分当前范围的三个信号之一
+ * （另两个：placeholder 文案、右侧分段的选中态）。
+ */
+const ICON_SEARCH_DOC = (
+  <svg className="ki-drawer__search-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+    <circle cx="11.5" cy="14" r="2.6" />
+    <path d="m13.6 16.1 1.9 1.9" />
+  </svg>
+);
+
+/** 「搜索全库文档」模式的图标（纯放大镜，与外层图标同形） */
+const ICON_SEARCH_GLOBAL = (
+  <svg className="ki-drawer__search-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="11" cy="11" r="6" />
+    <path d="m20 20-3.7-3.7" />
+  </svg>
+);
+
 /** 正文快速滚动按钮图标 */
 const ICON_SCROLL_TOP = (
   <svg className="ki-scroll-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -345,6 +367,47 @@ interface ModuleDrawerProps {
   fullscreenActions?: ReactNode;
   /** 常驻模式（浏览页双栏的右栏）：不渲染遮罩与 dialog 语义，容器改为内联定位，隐藏关闭按钮。 */
   inline?: boolean;
+  /**
+   * 内联阅读态：头部常驻搜索框**左侧**的页级控件（浏览页的标签过滤器）。
+   *
+   * 2026-10-16 一行化：浏览页阅读态原为**两行**头部（页面的 `.ki-reader-toolbar` 55px +
+   * 本组件的 `.ki-drawer__head` 71.5px = 126.5px，占阅读区 16% 且不随滚动消失）。
+   * 传入 `inlineSearch` 时本组件接管整行：`[nav][inlineBar][搜索框+模式分段][inlineActions][动作]`，
+   * 标题与 meta 不再占用头部（文档身份由左栏选中态与正文首块承担）。
+   */
+  inlineBar?: ReactNode;
+  /**
+   * 内联阅读态头部的**常驻搜索框**（「全库」侧受控）。
+   *
+   * 为什么由本组件渲染而不是页面插槽传入：同一个输入框要同时承担「文档内查找」，
+   * 而后者依赖组件内部的高亮内核（`applyDocumentHighlights` / 计数 / ↑↓ 导航）；
+   * 若由页面渲染、状态分居两处，模式与命中计数必然漂移。
+   *
+   * 传入后：
+   * - 「全库」模式 = 本接口受控（值即浏览页检索词），输入交由页面驱动结果列表；
+   * - 「本文」模式 = 复用既有查找内核（`findOpen`），输入即在正文高亮并可 ↑↓ 导航；
+   * - 内联态的标题/meta 与动作区里的放大镜（就地展开查找栏）**不再渲染**（模式分段取代其入口）；
+   * - Ctrl+F 判定链不变：查看器内一律进「本文」模式并聚焦本框（有选中文本则带入）。
+   */
+  inlineSearch?: {
+    /** 「全库」模式的输入值（页面受控） */
+    value: string;
+    onChange: (value: string) => void;
+    /** 「清空」按钮（常驻在「全库|本文」右侧）：清空检索词与标签筛选，由页面执行 */
+    onClear?: () => void;
+    placeholder?: string;
+  };
+  /** 内联阅读态动作区**最前**的页级动作（浏览页的「居中/铺满」正文宽度切换）。 */
+  inlineActions?: ReactNode;
+  /**
+   * 用**页级内容**替换正文区（浏览页把「全库搜索结果列表」交给本组件承载）。
+   *
+   * 为什么不让页面"卸载查看器、换回自己的工具栏"：那会让头部整体换一套 DOM，
+   * 用户看到的是「一开始全库搜索，头部样式就大变样」（2026-10-16 反馈）。
+   * 保持挂载后头部**完全连续**，只是文档动作按钮因为"当前没有可操作的正文"而禁用。
+   * ⚠️ 传入时：文档内查找（Ctrl+F / 「本文」）不响应 —— 正文此刻不是文档，搜它没有意义。
+   */
+  bodySlot?: ReactNode;
 }
 
 export function ModuleDrawer({
@@ -372,6 +435,10 @@ export function ModuleDrawer({
   fullscreenToolbar,
   fullscreenActions,
   inline = false,
+  inlineBar,
+  inlineSearch,
+  inlineActions,
+  bodySlot,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -388,6 +455,18 @@ export function ModuleDrawer({
   const [readerLinkComposerOpen, setReaderLinkComposerOpen] = useState(false);
   /** 「添加链接」待选模式：点按钮后等待用户在正文中选中片段，选中即自动弹面板（用户要求的新顺序） */
   const [linkArmed, setLinkArmed] = useState(false);
+  /**
+   * 窄容器下的「⋯」更多动作菜单（把「添加链接 / 编辑文档 / 复制」收进浮层）。
+   *
+   * 为什么需要：这三个动作平铺时占约 200px，而手机宽度下容器可用宽只有 ~330px
+   * ⇒ 一行头部会被折成 **3 行 135px**，反而高于改造前的 126.5px（实测，见 .plans 台账偏差 #4）。
+   * 收起后 375px 回到 2 行 91px，窄窗（AI 面板打开，容器 557px）甚至回到 1 行。
+   *
+   * ⚠️ 这**不是**把功能藏起来：菜单就是它们的入口，功能仍可达（执行护栏 #4）。
+   * 宽容器下 `⋯` 按钮自身 `display: none`（菜单不可达），动作照旧平铺 —— 模式切换纯由容器宽度决定。
+   */
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement>(null);
   const [selectionWarning, setSelectionWarning] = useState('');
   const selectionWarningTimer = useRef<number | undefined>(undefined);
   const editor = useDocumentEditor();
@@ -524,6 +603,8 @@ export function ModuleDrawer({
       // display:none 隐藏）。只有**可见**的那个响应，否则按一次 Ctrl+F 会弹出两个查找栏。
       const el = drawerRef.current;
       if (el && el.offsetWidth === 0 && el.offsetHeight === 0) return;
+      // 正文被页级内容（全库搜索结果）替换时没有"文档"可搜 —— 让位给浏览器原生查找
+      if (bodySlot) return;
       // 带选区种子（2026-10-15）：直接写入并立即查找；不带则维持「展开后预填 highlightQuery」
       const seed = (event as CustomEvent<DocFindOpenDetail>).detail?.query ?? '';
       setFindOpen(true);
@@ -531,7 +612,7 @@ export function ModuleDrawer({
     };
     window.addEventListener(DOC_FIND_OPEN_EVENT, handler);
     return () => window.removeEventListener(DOC_FIND_OPEN_EVENT, handler);
-  }, [applyFindSeed]);
+  }, [applyFindSeed, bodySlot]);
 
   /**
    * 查找栏展开时聚焦输入框，并在输入为空时**预填当前生效词**（外部高亮词可直接续用 / 清除）。
@@ -782,9 +863,13 @@ export function ModuleDrawer({
     setFindDraft('');
     setFindApplied('');
     setFindNotice('');
-    setHighlightEnabled(Boolean(highlightQuery?.trim()));
+    /* 退出查找 = **清掉全部正文高亮**（原为 `setHighlightEnabled(Boolean(highlightQuery?.trim()))`）。
+       原写法把开关回落成"打开文档时带的检索词"：若这篇文档是从检索结果点开的（带 highlightQuery），
+       清空/退出后 `activeFindQuery` 又回落到那个词，高亮重新出现 —— 用户点「清空」发现高亮还在
+       （2026-10-16 反馈）。清空与退出就应该是"全清"，不再区分高亮来自谁。 */
+    setHighlightEnabled(false);
     setHighlightIndex(0);
-  }, [highlightQuery]);
+  }, []);
 
   /**
    * 工具条放大镜**按下瞬间**抓到的选区种子。
@@ -1003,6 +1088,8 @@ export function ModuleDrawer({
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
       if (editor.isOpen || readerLinkComposerOpen) return;
+      // 浮层最先关（⋯ 菜单排在查找栏之前）：否则一次 Esc 会连抽屉一起收掉
+      if (overflowOpen) { setOverflowOpen(false); return; }
       // 查找栏优先：Esc 只关查找栏，再按一次才退全屏 / 关抽屉（Q3：三个 Esc 语义不能撞车）
       if (findOpen) { closeFindBar(); return; }
       // 待选模式优先退出，避免用户被留在「选择片段…」状态里
@@ -1015,7 +1102,17 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, onClose, readerLinkComposerOpen, updateFullscreen]);
+  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, onClose, overflowOpen, readerLinkComposerOpen, updateFullscreen]);
+
+  /** 「⋯」菜单：点面板外关闭（与 ScopeSelect 同款做法；ESC 由上面的统一链处理） */
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const onDocumentClick = (event: MouseEvent): void => {
+      if (overflowRef.current && !overflowRef.current.contains(event.target as Node)) setOverflowOpen(false);
+    };
+    document.addEventListener('click', onDocumentClick);
+    return () => document.removeEventListener('click', onDocumentClick);
+  }, [overflowOpen]);
 
   /** 正文滚动状态：驱动「回到顶部 / 滑到底部」按钮的可用态与显隐 */
   const [atTop, setAtTop] = useState(true);
@@ -1079,11 +1176,71 @@ export function ModuleDrawer({
       ? `仅前 ${highlightCount} 处`
       : '';
 
+  /**
+   * 文档导航（上一级 / 下一级），只在存在跳转历史时渲染。
+   *
+   * 两个位置共用同一份节点：**内联阅读态放在头部最左**（2026-10-16 一行化：占用原「文档内容」
+   * 标签腾出的位置，符合"文档间移动在最外侧"的心智）；其余形态仍跟在标题右侧。
+   */
+  const hasNavHistory = Boolean((canGoBack && onBack) || (canGoForward && onForward));
+  const navCluster = hasNavHistory ? (
+    <div className="ki-drawer__nav">
+      {canGoBack && onBack && (
+        <button
+          className="ki-drawer__back"
+          onClick={onBack}
+          title="返回上一级文档"
+          type="button"
+          aria-label="返回上一级文档"
+        >
+          {ICON_NAV_PREV}<span className="ki-drawer__back-label">上一级</span>
+        </button>
+      )}
+      {canGoForward && onForward && (
+        <button
+          className="ki-drawer__forward"
+          onClick={onForward}
+          title="前进到下一级文档"
+          type="button"
+          aria-label="前进到下一级文档"
+        >
+          {ICON_NAV_NEXT}<span className="ki-drawer__forward-label">下一级</span>
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  /**
+   * 内联一行头部（浏览页阅读区）是否启用 —— 由 `inlineSearch` 开启，见该 prop 注释。
+   * 关掉时本组件头部与交互**完全保持改动前**：标题 + meta + 就地展开的查找栏。
+   *
+   * ⚠️ 必须排除全屏态：内联阅读**由同一个实例**进入全屏（`inline` 仍为 true），
+   * 若只判 `inline`，全屏头部会被一并换成单行布局（标题消失、页级 Tag 与全库搜索框被带进全屏层）
+   * —— 而全屏态的头部与动作条是既有形态，本次不改（执行护栏 #1）。
+   */
+  const inlineBarMode = inline && !fullscreen && Boolean(inlineSearch);
+  /**
+   * 搜索范围：`findOpen` 即「本文」（复用既有查找内核：高亮、计数、↑↓ 导航、Esc 退出），
+   * 不另立状态机 —— 两套状态并存必然漂移。
+   */
+  const docSearchMode = inlineBarMode && findOpen;
+  /**
+   * 正文被页级内容（浏览页的全库搜索结果）替换时，一切依赖"当前文档"的动作都禁用：
+   * 添加链接 / 编辑文档 / 复制原文 / 全屏阅读 / 正文宽度切换。
+   *
+   * 用户 2026-10-16 的方案：**头部保持不动、按钮变灰** —— 比"换一套页面工具栏"视觉连续得多，
+   * 也诚实（此刻这些动作确实无处作用）。
+   */
+  const docActionsDisabled = Boolean(bodySlot);
+
   const body = (
     <div
-      className={`ki-drawer__body${fullscreen && !fullscreenWide ? ' ki-drawer__body--narrow' : ''}`}
+      className={`ki-drawer__body${fullscreen && !fullscreenWide ? ' ki-drawer__body--narrow' : ''}${bodySlot ? ' ki-drawer__body--slot' : ''}`}
       ref={bodyRef}
     >
+      {/* bodySlot（页级内容，如全库搜索结果列表）优先：头部仍是本组件的形态，只有正文被替换 */}
+      {bodySlot ?? (
+        <>
       {savedNotice && <div className="ki-drawer__copy-failed" role="status">{savedNotice}</div>}
       {selectionWarning && <div className="ki-drawer__copy-failed" role="status">{selectionWarning}</div>}
       {anchorWarning && <div className="ki-drawer__copy-failed" role="status">{anchorWarning}。文档已打开，请重新选择位置。</div>}
@@ -1133,6 +1290,8 @@ export function ModuleDrawer({
           </article>
         </>
       )}
+        </>
+      )}
     </div>
   );
 
@@ -1157,7 +1316,7 @@ export function ModuleDrawer({
         data-ki-doc-name={module}
       >
         {/* 头部 */}
-        <header className="ki-drawer__head">
+        <header className={`ki-drawer__head${inlineBarMode ? ' ki-drawer__head--bar' : ''}`}>
           <button
             className="ki-drawer__close"
             onClick={onClose}
@@ -1167,56 +1326,157 @@ export function ModuleDrawer({
           >
             {ICON_DRAWER_COLLAPSE}
           </button>
-          <div className="ki-drawer__identity">
-            <div className="ki-drawer__title-row">
-              <div className="ki-drawer__title" title={module}>{module}</div>
-              {(canGoBack && onBack || canGoForward && onForward) && (
-                <div className="ki-drawer__nav">
-                  {canGoBack && onBack && (
+          {inlineBarMode ? (
+            <>
+              {/* ── 一行头部（浏览页阅读态，2026-10-16）─────────────────────────────
+                  三段：**文档导航** │ 过滤 + 搜索 │ 文档动作。
+                  文档身份标识（标题、scope、group 路径）**不在此渲染**：
+                  - 头部因此从两行 126.5px（占阅读区 16%、且不随滚动消失）降为一行 55px；
+                  - 身份改由**页头的路径行**（`${group} / ${module}`，见 BrowsePage 的 .ki-page-head）
+                    与左栏目录选中态承担 —— 单行内放标题会把搜索框压到 ~80px 不可用
+                    （用户 2026-10-16 先要求"最左显示标题"，实测拥挤后改为"取消标题、身份上移页头"）。 */}
+              {navCluster}
+              {inlineBar}
+              {inlineSearch ? (
+                <div
+                  className={`ki-drawer__search${docSearchMode ? ' ki-drawer__search--doc' : ''}`}
+                  role="search"
+                  aria-label={docSearchMode ? '文档内查找' : '搜索全部文档'}
+                >
+                  {/* 输入框与其附属（图标 / 计数 / ↑↓ / ✕）包一层**相对定位容器**：
+                      附属元素必须相对**输入框**定位，而不是相对整个搜索组 ——
+                      组里还有「全库|本文」与「清空」，相对组定位会让 ✕ 叠到清空按钮上
+                      （2026-10-16 用户实测到的重叠：清空按钮背景里出现了 ✕）。 */}
+                  <div className="ki-drawer__search-field">
+                  <span className="ki-drawer__search-icon" aria-hidden="true">
+                    {docSearchMode ? ICON_SEARCH_DOC : ICON_SEARCH_GLOBAL}
+                  </span>
+                  {/* 同一个输入框承担两种范围：value/onChange/键盘行为随之切换，
+                      不换 DOM —— 换 DOM 会在切换瞬间丢焦点。 */}
+                  <input
+                    ref={findInputRef}
+                    className="ki-form-input ki-drawer__search-input"
+                    type="text"
+                    value={docSearchMode ? findDraft : inlineSearch.value}
+                    onChange={docSearchMode ? handleFindChange : (event) => inlineSearch.onChange(event.target.value)}
+                    onCompositionStart={docSearchMode ? handleFindCompositionStart : undefined}
+                    onCompositionEnd={docSearchMode ? handleFindCompositionEnd : undefined}
+                    onKeyDown={docSearchMode ? handleFindKeyDown : undefined}
+                    placeholder={docSearchMode ? '本文档内查找…' : (inlineSearch.placeholder ?? '搜索全库文档…')}
+                    aria-label={docSearchMode ? '在本文档内查找' : '搜索全部文档'}
+                    autoComplete="off"
+                    spellCheck={false}
+                    /* 走查脚本据此判定当前范围；**不带** data-ki-drawer-find ——
+                       AppShell 的 Ctrl+F 判定链靠它区分「直接聚焦」与「请查看器展开」，
+                       本框要让 Ctrl+F 走后者（先切「本文」再聚焦），否则会在「全库」模式下被聚焦 */
+                    data-ki-drawer-search={docSearchMode ? 'doc' : 'global'}
+                  />
+                  {docSearchMode ? (
+                    <>
+                      {findNoticeBadge && (
+                        <span className="ki-drawer__find-notice" title={findNoticeText}>{findNoticeBadge}</span>
+                      )}
+                      <span className="ki-drawer__find-status" role="status" aria-live="polite">{findStatusText}</span>
+                      <button
+                        className="ki-drawer__find-btn"
+                        type="button"
+                        onClick={findPrev}
+                        disabled={highlightCount === 0}
+                        title="上一个命中（Shift+Enter）"
+                        aria-label="上一个命中"
+                      >↑</button>
+                      <button
+                        className="ki-drawer__find-btn"
+                        type="button"
+                        onClick={findNext}
+                        disabled={highlightCount === 0}
+                        title="下一个命中（Enter）"
+                        aria-label="下一个命中"
+                      >↓</button>
+                      {/* 「本文」模式**不再渲染 ✕**（用户 2026-10-16）：退出由右侧「全库」分段或 Esc 完成，
+                          同一处给两个出口反而让人犹豫点哪个 */}
+                    </>
+                  ) : inlineSearch.value ? (
                     <button
-                      className="ki-drawer__back"
-                      onClick={onBack}
-                      title="返回上一级文档"
+                      className="ki-drawer__search-clear"
                       type="button"
-                      aria-label="返回上一级文档"
-                    >
-                      {ICON_NAV_PREV}<span className="ki-drawer__back-label">上一级</span>
-                    </button>
-                  )}
-                  {canGoForward && onForward && (
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => inlineSearch.onChange('')}
+                      title="清空检索词"
+                      aria-label="清空检索词"
+                    >✕</button>
+                  ) : null}
+                  </div>
+                  {/* 范围分段：复用检索页「混合|全文」同款 .ki-segmented，不新造视觉语言。
+                      「本文」= 既有文档内查找（含计数、↑↓、Esc 退出）；「全库」= 页面的结果列表。 */}
+                  <div className="ki-segmented ki-drawer__search-mode" role="group" aria-label="搜索范围">
                     <button
-                      className="ki-drawer__forward"
-                      onClick={onForward}
-                      title="前进到下一级文档"
                       type="button"
-                      aria-label="前进到下一级文档"
-                    >
-                      {ICON_NAV_NEXT}<span className="ki-drawer__forward-label">下一级</span>
-                    </button>
+                      aria-pressed={!docSearchMode}
+                      onClick={() => { if (findOpen) closeFindBar(); }}
+                    >全库</button>
+                    <button
+                      type="button"
+                      aria-pressed={docSearchMode}
+                      /* 正文被页级内容替换时禁用：此刻没有"本文"可搜，能点开只会误导 */
+                      disabled={docActionsDisabled}
+                      /* 复用既有「放大镜」入口的全部行为：进入本文查找 + **带入正文所选**
+                         （onMouseDown 抓选区 —— click 时正文已失焦、选区已被清除，2026-10-15 的既有口径） */
+                      onMouseDown={captureFindSelection}
+                      onClick={openFindBar}
+                    >本文</button>
+                  </div>
+                  {/* 「清空」常驻在分段右侧（用户 2026-10-16：「永久增加，搜不搜索都显示」）。
+                      **两个范围都清**：先退出文档内查找（连带清掉全部正文高亮），再清页面的检索词与标签。
+                      为什么不再按模式二选一：本文模式的词在组件内、全库模式的词在页面，只清一边会留下
+                      另一边的痕迹（先是"本文模式点了没反应"，后是"清空后高亮还在"，两次反馈同一根因）。 */}
+                  {inlineSearch.onClear ? (
+                    <button
+                      className="ki-btn ki-btn--secondary ki-btn--small ki-drawer__search-clearall"
+                      type="button"
+                      onClick={() => {
+                        closeFindBar();
+                        inlineSearch.onClear?.();
+                      }}
+                      title="清空检索词、文档内查找与标签筛选"
+                    >清空</button>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="ki-drawer__identity">
+                <div className="ki-drawer__title-row">
+                  <div className="ki-drawer__title" title={module}>{module}</div>
+                  {navCluster}
+                </div>
+                <div className="ki-drawer__meta">
+                  <span className="ki-badge ki-badge--kb" style={{ fontSize: 11 }}>{scope}</span>
+                  {group && (
+                    <>
+                      <span className="ki-drawer__sep">·</span>
+                      <span className="ki-drawer__path">{group}</span>
+                    </>
                   )}
                 </div>
-              )}
-            </div>
-            <div className="ki-drawer__meta">
-              <span className="ki-badge ki-badge--kb" style={{ fontSize: 11 }}>{scope}</span>
-              {group && (
-                <>
-                  <span className="ki-drawer__sep">·</span>
-                  <span className="ki-drawer__path">{group}</span>
-                </>
-              )}
-            </div>
-          </div>
-          {fullscreen && fullscreenToolbar ? (
-            <div className="ki-drawer__fs-toolbar">{fullscreenToolbar}</div>
-          ) : null}
+              </div>
+              {fullscreen && fullscreenToolbar ? (
+                <div className="ki-drawer__fs-toolbar">{fullscreenToolbar}</div>
+              ) : null}
+            </>
+          )}
           <div className="ki-drawer__actions">
             {/* 全屏专属动作（如「AI 对话」开关）：REQ-20261009-002 —— 全屏层会盖住顶栏开关，
                 面板未打开时用户在全屏中没有任何 AI 入口 */}
             {fullscreen ? fullscreenActions : null}
+            {/* ── 内联一行头部（浏览页阅读态）：把页级动作（居中/铺满）排在动作区最前
+                「文档内查找」的入口已交给搜索框右侧的「全库|本文」分段，这里不再渲染放大镜 /
+                就地查找栏 —— 同一页出现两个查找入口会让「搜哪里」变得不可判定。 */}
+            {inlineBarMode ? inlineActions : null}
             {/* 文档内查找：点放大镜**就地**展开为输入框（不新占一行，正文不被下推）；Ctrl+F 同样唤出。
                 移动端没有 Ctrl 键，故保留这个可点入口。 */}
-            {findOpen ? (
+            {inlineBarMode ? null : findOpen ? (
               <div className="ki-drawer__findgroup" role="search" aria-label="文档内查找">
                 <input
                   ref={findInputRef}
@@ -1306,22 +1566,26 @@ export function ModuleDrawer({
                 </button>
               </div>
             )}
+            {/* 这三个动作在**窄容器**下会收进右侧「⋯」菜单（同一批节点渲染两版，由容器宽度互斥显示）——
+                它们各自带一个角色类名供 CSS 定位，状态类（--armed / --done）语义不变 */}
             {editable && group && content !== null && (
               <button
-                className={`ki-drawer__copy${linkArmed ? ' ki-drawer__copy--armed' : ''}`}
+                className={`ki-drawer__copy ki-drawer__copy--link${linkArmed ? ' ki-drawer__copy--armed' : ''}`}
                 type="button"
                 aria-pressed={linkArmed}
+                disabled={docActionsDisabled}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={openReaderLinkComposer}
                 title={linkArmed ? '已进入添加链接模式：在正文中选中片段（再点一次取消）' : '点击后在正文中选中片段，自动弹出链接设置'}
               >{linkArmed ? '选择片段…' : '添加链接'}</button>
             )}
             {editable && group && content !== null && (
-              <button className="ki-drawer__copy" type="button" onClick={openEditor}>编辑文档</button>
+              <button className="ki-drawer__copy ki-drawer__copy--edit" type="button" disabled={docActionsDisabled} onClick={openEditor}>编辑文档</button>
             )}
             {displayedContent && (
               <button
-                className={`ki-drawer__copy${copied ? ' ki-drawer__copy--done' : ''}`}
+                className={`ki-drawer__copy ki-drawer__copy--copy${copied ? ' ki-drawer__copy--done' : ''}`}
+                disabled={docActionsDisabled}
                 onClick={handleCopy}
                 title="复制原文"
                 type="button"
@@ -1329,8 +1593,53 @@ export function ModuleDrawer({
                 {copied ? '已复制' : '复制'}
               </button>
             )}
+            {/* 窄容器的「⋯」入口：宽容器里按钮自身 display:none（菜单不可达），动作照旧平铺 */}
+            <div className="ki-drawer__overflow" ref={overflowRef}>
+              <button
+                type="button"
+                className="ki-drawer__copy ki-drawer__overflow-toggle"
+                aria-haspopup="menu"
+                aria-expanded={overflowOpen}
+                onClick={() => setOverflowOpen((open) => !open)}
+                title="更多文档动作"
+                aria-label="更多文档动作"
+              >⋯</button>
+              {overflowOpen && (
+                <div className="ki-drawer__overflow-menu" role="menu" aria-label="更多文档动作">
+                  {editable && group && content !== null && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docActionsDisabled}
+                      className={`ki-drawer__overflow-item${linkArmed ? ' ki-drawer__overflow-item--armed' : ''}`}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => { setOverflowOpen(false); openReaderLinkComposer(); }}
+                    >{linkArmed ? '选择片段…' : '添加链接'}</button>
+                  )}
+                  {editable && group && content !== null && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docActionsDisabled}
+                      className="ki-drawer__overflow-item"
+                      onClick={() => { setOverflowOpen(false); openEditor(); }}
+                    >编辑文档</button>
+                  )}
+                  {displayedContent && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docActionsDisabled}
+                      className="ki-drawer__overflow-item"
+                      onClick={() => { setOverflowOpen(false); void handleCopy(); }}
+                    >{copied ? '已复制' : '复制'}</button>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               className="ki-drawer__fullscreen"
+              disabled={docActionsDisabled}
               onClick={() => updateFullscreen(!fullscreen)}
               title={fullscreen ? '退出全屏' : '全屏查看'}
               type="button"

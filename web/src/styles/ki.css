@@ -141,7 +141,16 @@ a:hover { text-decoration: underline; }
 .ki-sidebar {
   width: var(--ki-sidebar-width);
   min-width: var(--ki-sidebar-width);
-  padding: 24px 12px 16px;
+  /* 顶部内边距：让「ki 知识库」与主区标题（「总览 / 知识库浏览」）**文字的中心**落在同一条水平线
+     （用户 2026-10-16 两轮反馈的最终口径）。
+     为什么按中心而不是文字顶：两者字号差 6px（18 vs 24），对齐文字顶会让**基线**差 6px，
+     小字看着"浮"在大字上半部分 ⇒ 用户原话「ki 知识库要更高一点」。
+     算式：品牌区高 = logo 40px（最高元素），brand 块（含两行文字）高 34.8px 并**居中**于它
+     ⇒ 标题文字中心 = padding-top + 2.6 + 0.9 + 9 = padding-top + 12.5；
+     主区标题文字中心 = 25px（= `.ki-content` 的 8px + 行内居中）
+     ⇒ padding-top = 12px（实测中心差在 1px 内）。
+     ⚠️ 与 `.ki-content` 的 padding-top、`.ki-logo` 尺寸、`.ki-sidebar__title` 字号**成组**：动其一要重算本值。 */
+  padding: 12px 12px 16px;
   background: var(--ki-color-bg-muted);
   border-right: 1px solid var(--ki-color-border);
   display: flex;
@@ -155,34 +164,53 @@ a:hover { text-decoration: underline; }
 .ki-sidebar::-webkit-scrollbar { width: 0; }
 .ki-sidebar--hidden { margin-left: calc(var(--ki-sidebar-width) * -1); opacity: 0; pointer-events: none; }
 
-/* 品牌区：对齐 demo .brand —— logo 35 + 双行标题，下留 32px */
+/* 品牌区：logo 在左，「ki 知识库」+「KNOWLEDGE INDEXER」两行在右（用户 2026-10-16 指定的形态） */
 .ki-sidebar__header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 8px;
+  /* gap 与左右内边距一起压缩，把宽度让给右侧的两行文字 ——
+     「KNOWLEDGE INDEXER」在 10px 等宽字体下需要约 122px，而侧栏只有 196px：
+     logo 40 + gap + 两侧内边距 + 文字宽 ≤ 196 是硬约束（用户要求"图标往左移，文字完整显示"）。
+     原为 padding 0 12px + gap 8 ⇒ 文字只有 100px 可用，必然被省略。 */
+  gap: 6px;
+  /* logo 左边缘 = 侧栏 12px + 本值 ⇒ 16px（原 24px，按用户要求"图标往左移一点点"腾出文字宽度）。
+     为什么停在 4px：实测「KNOWLEDGE INDEXER」（10px 等宽、字距 0）需 103px，
+     本值给出约 110px 可用 —— 留 7px 余量抗字体渲染差异；再往左移只会让 logo
+     与下方导航图标（左边缘 24px）错位更多，得不偿失。 */
+  padding: 0 4px;
   margin-bottom: 32px;
   flex-shrink: 0;
 }
 .ki-logo {
-  width: 35px; height: 35px;
+  /* 35 → 40px（用户 2026-10-16：「标志和字样大一点太小了」）：主区标题是 24px，
+     侧栏这套若停在 35px/16px，两块并排时侧栏明显偏小、且文字会"浮"在大字的上半部分 */
+  width: 40px; height: 40px;
   border-radius: var(--ki-radius-md);
   background: var(--ki-color-primary);
   display: grid; place-items: center;
-  color: #fff; font-weight: 700; font-size: 17px; letter-spacing: -0.08em;
+  color: #fff; font-weight: 700; font-size: 19px; letter-spacing: -0.08em;
   flex-shrink: 0;
 }
 .ki-sidebar__brand { min-width: 0; }
+/* 两行都必须**不换行**：品牌区宽 = 侧栏 196 − 左右 24 − logo 40 − gap 8 = 124px，
+   字号放大后「KNOWLEDGE INDEXER」实测会在 124px 内折成两行 ⇒ brand 高 34.8 → 46.8px，
+   把 logo 居中推下去 3.4px（表现为「ki 知识库比主区标题低/高」的错位，用户 2026-10-16 反馈）。
+   改用省略号兜底：宁可截断英文副标题，也不让它改变品牌区高度。 */
 .ki-sidebar__title {
   display: block;
-  font-size: 16px; font-weight: 700; letter-spacing: -0.04em; line-height: 1.1;
+  font-size: 18px; font-weight: 700; letter-spacing: -0.04em; line-height: 1.1;
   color: var(--ki-color-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ki-sidebar__subtitle {
   display: block; margin-top: 3px;
   color: var(--ki-color-text-muted);
-  font: 9px/1.2 var(--ki-font-mono);
-  letter-spacing: 0.06em;
+  font: 10px/1.2 var(--ki-font-mono);
+  /* 字距归零（原 0.06em）：省约 10px 宽（17 个字符），是让它在 logo 右侧**完整显示**的关键之一；
+     10px 小字下去掉这点字距肉眼无感，但换来不再被省略号截断 */
+  letter-spacing: 0;
+  /* 单行显示：宁可省略也不折行（折行会把品牌区撑高、logo 被居中推下去） */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 .ki-sidebar__section { display: grid; gap: 3px; }
@@ -262,7 +290,9 @@ a:hover { text-decoration: underline; }
   :root { --ki-sidebar-width: 72px; }
   .ki-sidebar { padding: 16px 8px 12px; }
   .ki-sidebar__header { justify-content: center; padding: 0; margin-bottom: 20px; gap: 0; }
-  .ki-sidebar__brand, .ki-sidebar__section-head,
+  /* ⚠️ 必须含 .ki-sidebar__subtitle：它已从 brand 内提出（独占一行），不再随 brand 一起隐藏，
+     漏掉就会在图标条里露出一截英文副标题 */
+  .ki-sidebar__brand, .ki-sidebar__subtitle, .ki-sidebar__section-head,
   .ki-sidebar__footer-title, .ki-sidebar__footer-meta, .ki-nav-item__name { display: none; }
   .ki-nav-item { justify-content: center; gap: 0; padding: 0; }
   .ki-sidebar__footer { padding: 12px 0 0; }
@@ -364,7 +394,12 @@ a:hover { text-decoration: underline; }
 .ki-scope-picker__check { color: var(--ki-color-success); font-weight: 700; }
 .ki-scope-picker__empty { padding: 10px 9px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
 
-.ki-content { flex: 1; overflow-y: auto; padding: 16px; }
+/* 顶部内边距减半（16 → 8，用户 2026-10-16：「页面顶部离顶栏那一行稍微远了点，缩一半」）。
+   实测（temp/probe-content-top-gap.cjs）：视口顶 → 顶栏行顶正好等于本 padding-top（16px），
+   叠加标题行高留白约 4px ⇒ 视觉间距约 20px。改后视觉约 12px。
+   左右与底部维持 16px —— 用户说的是"上"这一侧。
+   ⚠️ 本规则为**全站主内容区共用**，所有页面顶栏同步变紧（一致性是目的，不是副作用）。 */
+.ki-content { flex: 1; overflow-y: auto; padding: 8px 16px 16px; }
 .ki-content::-webkit-scrollbar { width: 6px; }
 .ki-content::-webkit-scrollbar-thumb { background: var(--ki-color-scrollbar); border-radius: 3px; }
 .ki-content-inner { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ki-space-3); }
@@ -379,6 +414,10 @@ a:hover { text-decoration: underline; }
   /* 双栏工作台铺满：不再套用 1600px 上限并居中（用户反馈目录卡离左侧边栏太远） */
   max-width: none;
   margin: 0;
+  /* 页头路径行 ↔ 下方双栏（知识目录 / 文档内容）挨近一点（用户 2026-10-16）：
+     基类的 `gap: var(--ki-space-3)`（12px）叠加上卡片自身的头部高度，视觉上太松。
+     只覆盖浏览页这一处，不动通用间距。 */
+  gap: 6px;
 }
 .ki-content--noscroll .ki-content-inner > :last-child {
   flex: 1 1 auto;
@@ -481,6 +520,34 @@ a:hover { text-decoration: underline; }
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); white-space: nowrap;
 }
 .ki-page-head__summary strong { margin-right: 4px; color: var(--ki-color-text); font: 650 16px var(--ki-font-mono); }
+/* 页头路径行：当前阅读的「Group 路径 / 文档名」（浏览页，2026-10-16）。
+   取代原先的功能罗列（那三件事左右两栏本身可见），并让阅读区头部可以取消标题 ——
+   文档名加重、路径弱化，长路径整体省略号（title 给全文） */
+.ki-page-head p.ki-page-head__path {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  /* 放不下时**换行**而不是省略 —— 用户 2026-10-16：文档名必须完整可见 */
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+}
+/* Group 路径是上下文，可以先让位（长路径折成省略号） */
+.ki-page-head__group { flex: 0 1 auto; min-width: 0; max-width: 44ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-page-head__sep { flex: none; opacity: 0.5; }
+/* 文档名是重点：**不省略**。极长名字下允许折行（word-break），而不是被截成 `…`
+   —— 页头是"我在读哪一篇"的唯一可见处，截断它就等于没有这个信息 */
+.ki-page-head__doc {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--ki-color-text);
+  font-weight: 600;
+  word-break: break-word;
+}
+/* scope 芯片最前：复用抽屉 meta 行的既有权重（浅底 + 主色字），不新造视觉语言 */
+.ki-page-head__scope { flex: none; }
+.ki-page-head__hint { flex: none; }
 
 /* 服务横幅 */
 .ki-banner {
@@ -1289,7 +1356,15 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 20px;
+  /* 上内边距 11px（原 14px）：让**全屏/抽屉态**头部的左侧标题与右侧按钮，
+     距视口顶的距离与非全屏时主区标题「知识库浏览」一致（用户 2026-10-16）。
+     算式：主区标题文字视觉顶 = `.ki-content` 的 8px + 行内留白 5px = 13px；
+     本组件标题（15px/行高 1.3 ⇒ 盒比文字多 4.5px）⇒ 11 + 2.3 ≈ 13.3px；
+     动作区另有 +2px 补偿 ⇒ 按钮顶 13.5px。三项实测互相差 ≤0.5px。
+     底边 14 → 8px（用户 2026-10-16：「全屏下这距离感觉没变化」）——
+     头部下边距与下方面板/正文的上边距是**两段相加**，只收后者（12→6px）总距离只减 6px、几乎看不出来。
+     两段一起收：「meta 行 → 知识目录」由 26px 收到 12px。 */
+  padding: 11px 20px 8px;
   border-bottom: 1px solid var(--ki-color-border);
   flex-shrink: 0;
   background: var(--ki-color-surface);
@@ -1393,12 +1468,212 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
   margin-left: auto;
   align-self: flex-start;
+  /* 与左侧**标题文字**的顶部对齐（用户 2026-10-16 全屏态反馈"按钮距顶部的距离要一致"）。
+     `align-self: flex-start` 让按钮贴的是标题**行盒**顶，而标题行盒（line-height 1.3 × 16px）
+     上下各留约 2.4px 行高空隙 ⇒ 按钮视觉上"偏高"1.8px（实测：按钮顶 14.5 / 标题文字顶 16.3）。
+     补偿半格行高即可，不加高度、不动布局。单行头部另行覆盖为 0（那里用 align-self: center）。 */
+  margin-top: 2px;
 }
 .ki-drawer__highlight {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* ════════ 一行头部（浏览页内联阅读态，2026-10-16）════════
+   原为两行：页面的 .ki-reader-toolbar（55px）+ 本组件头部（71.5px）= 126.5px，占阅读区 16%，
+   且**不随正文滚动消失**（头部在滚动容器之外）⇒ 每屏永久少 126.5px 正文。
+   合并后只剩三段：文档导航 │ 过滤 + 搜索 │ 文档动作；标题与 meta 不在此渲染
+   （文档身份由左栏目录选中态与正文首块承担）。
+   执行计划与实测数据：.plans/2026-10-16-browse-reader-single-row-header/ */
+.ki-drawer--inline .ki-drawer__head--bar {
+  gap: 8px;
+  padding: 8px 12px;
+  /* 窄容器兜底：放不下时整组动作换到第二行 —— 保证**所有功能仍可达**，
+     不允许用 display:none 把入口藏掉（阅读区会被左栏目录与 AI 面板同时挤压） */
+  flex-wrap: wrap;
+}
+/* 抽屉根节点作为查询容器：一行头部要按**自身可用宽度**降级，而非视口宽度
+   （同一 1440px 视口下，阅读区宽度能从 940px 变到 560px） */
+.ki-drawer--inline { container-type: inline-size; container-name: reader-drawer; }
+/* 导航在最左；无跳转历史时整组由 JSX 条件不渲染 */
+.ki-drawer--inline .ki-drawer__head--bar .ki-drawer__nav { margin-right: 2px; }
+/* 标签过滤器不参与收缩（曾被压成窄条），但也不能按内容无上限地占宽 ——
+   它是一行里的固定开销之一，封顶后搜索框才拿得到可用宽度 */
+.ki-drawer--inline .ki-drawer__head--bar .ki-combobox { flex: none; max-width: 112px; }
+/* 同行放不下时，"添加链接 / 编辑文档 / 复制"等文字按钮的横向内边距收紧
+   （只在一行头部内生效；全屏与抽屉态保持既有 5px 10px） */
+.ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy { padding: 0 8px; }
+/* ── 头部内所有控件**等高 32px**（用户 2026-10-16：先提"右边那几个按钮和清空一致比较好"，
+      看完全屏后又提"全屏后这几个按钮高度也一致"）──
+   改动前各形态实测：一行头部 清空 32 / 全屏 29 / 分段 28 / 添加链接 27 / 居中 24；
+   全屏态 🔍 24 / 分段 30 / 添加链接·编辑·复制·还原 29 —— 同排控件从未统一过高度。
+   统一到 32px（=「清空」即 `.ki-btn--small` 的高度）。一行头部的总高仍由搜索框（38px）决定、
+   全屏态由身份区（42.5px）决定，**都不会被顶高**。 */
+.ki-drawer__head .ki-drawer__copy,
+.ki-drawer__head .ki-drawer__fullscreen,
+.ki-drawer__head .ki-drawer__overflow-toggle,
+.ki-drawer__head .ki-drawer__find-toggle,
+.ki-drawer__head .ki-drawer__highlight-btn, /* 「取消高亮 / 下一个命中」—— code-review 未覆盖形态检查时发现漏网（实测 29px） */
+.ki-drawer__head .ki-drawer__fs-toolbar button {
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 分段容器**定高 32**（含自身内边距与边框），内部按钮自适应居中 ——
+   只收内部按钮的 min-height 实测仍差 2px，容器定高才严格 */
+.ki-drawer__head .ki-segmented {
+  height: 32px;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+/* 常驻搜索框：占据 Tag 与分段/动作之间的剩余宽度。
+   因为同一行还要放标题与 5 个动作，伸缩基准比独占态小（用户要求"缩短搜索框腾位置"）——
+   但**下限不退让**：min-width 220px 保证输入框本体 ≥110px（能看清自己打的字）。
+   放不下时由 flex-wrap 把动作组整体换到第二行，而不是把搜索框压成一条缝。
+   实测：1600/1440/1366 一行；1280 及以下换两行（此时搜索框可占满整行）。 */
+.ki-drawer__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 150px;
+  /* 下限 240px 现在要装「输入框 + 全库|本文 + 清空」三件（用户要求清空常驻）；
+     输入框本体因此可以被压到 ~76px，比改造前更窄 —— 这是用户认可的置换（"缩短搜索框腾位置"） */
+  min-width: 240px;
+}
+/* 正文被页级内容替换时的容器：结果列表自带内边距，这里清零避免叠加 24px */
+.ki-drawer__body--slot { padding: 0; }
+.ki-drawer__search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--ki-color-text-subtle);
+  pointer-events: none;
+}
+.ki-drawer__search-glyph { width: 14px; height: 14px; }
+/* 输入框与其附属（图标 / 计数 / ↑↓ / ✕）的相对定位容器。
+   ⚠️ 必须包这一层：✕ 与图标是 absolute，只能相对**输入框所在这一格**定位；
+   若相对整个 `.ki-drawer__search` 定位，✕ 会跑到组的最右侧 —— 而组右侧现在是「清空」按钮，
+   于是 ✕ 叠在清空上（2026-10-16 用户实测到的重叠）。 */
+.ki-drawer__search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.ki-drawer__search-input {
+  /* 必须用 `flex: 1 1 0` + `width: auto`：只写 `width: 100%` 时，输入框在窄容器里会被自身的
+     默认最小尺寸顶住、缩不下去，把整个搜索框撑破（实测 375px 视口下溢出 20px） */
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  padding-left: 32px;
+  /* 右侧 30 → 8：✕ 从"覆盖在输入框右端"改成同一行的 flex 项，不再需要给它预留空间 */
+  padding-right: 8px;
+}
+/* 「本文」模式：图标与描边转主色 —— "在搜哪儿"必须一眼可辨（另两处信号：placeholder、分段选中态） */
+.ki-drawer__search--doc .ki-drawer__search-icon { color: var(--ki-color-primary); }
+.ki-drawer__search--doc .ki-drawer__search-input {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 45%, var(--ki-color-border));
+}
+/* 全库模式的「清空检索词」：与输入框同行的 flex 项（原先 absolute 覆盖在输入框右端，
+   在同一个组里出现「清空」按钮后就会叠上去） */
+.ki-drawer__search-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+}
+.ki-drawer__search-clear:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+/* 「全库|本文」分段：复用检索页「混合|全文」的 .ki-segmented，只压到与输入框同高 */
+.ki-drawer__search-mode { flex: none; padding: 2px; }
+.ki-drawer__search-mode button { min-height: 26px; padding: 0 7px; font-size: var(--ki-font-size-xs); }
+/* 「清空」常驻在分段右侧（用户 2026-10-16） */
+.ki-drawer__search-clearall { flex: none; }
+/* 正文被页级内容（全库搜索结果）替换时，依赖"当前文档"的动作置灰（用户方案：头部不动、按钮变灰） */
+.ki-drawer__actions button:disabled,
+.ki-drawer__search-mode button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* 内联态的正文宽度切换：**不复用** .ki-reader-width —— 那条规则在视口 ≤800px 时 display:none，
+   会让窄屏下宽度切换彻底不可达 */
+.ki-drawer__inline-width { flex: none; padding: 2px; }
+.ki-drawer__inline-width button { min-height: 26px; padding: 0 8px; font-size: var(--ki-font-size-xs); }
+/* 单行头部里动作区纵向居中（基类的 align-self: flex-start + 2px 补偿是为两行头部设计的），
+   这里把基类的 margin-top 一并归零，否则按钮在单行头部里会整体偏下 2px */
+.ki-drawer--inline .ki-drawer__head--bar .ki-drawer__actions { align-self: center; margin-top: 0; }
+
+/* 窄容器降级：导航只留箭头（标签文字隐去，宽度让给搜索框）；其余靠 flex-wrap 换行兜底 */
+@container reader-drawer (max-width: 760px) {
+  .ki-drawer--inline .ki-drawer__head--bar { gap: 6px; }
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__back-label,
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__forward-label { display: none; }
+}
+
+/* 「⋯」更多动作（窄容器）：菜单与平铺版共用同一批节点，按容器宽度互斥显示 */
+.ki-drawer__overflow { position: relative; display: none; }
+.ki-drawer__overflow-toggle { min-width: 32px; font-size: 15px; line-height: 1; }
+.ki-drawer__overflow-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  /* 与 ScopeSelect 面板同层：单行头部里要压过正文区与「⋯」下方的其余动作 */
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  min-width: 136px;
+  padding: 4px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+.ki-drawer__overflow-item {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--ki-radius-sm);
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  font-family: var(--ki-font-family);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ki-drawer__overflow-item:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-drawer__overflow-item--armed { color: var(--ki-color-primary); font-weight: 650; }
+
+/* 手机/窄窗：三个文字动作收进 ⋯ 菜单。
+   实测依据（temp/probe-bar-width.cjs）：375px 视口下平铺会把头部折成 **3 行 135px**，
+   反而高于改造前的 126.5px；收起后回到 2 行 91px，窄窗（AI 面板打开 557px）回到 1 行。
+   ⚠️ 平铺版隐藏不等于功能不可达 —— 菜单即它们的入口（护栏 #4 只管"有没有入口"）。 */
+@container reader-drawer (max-width: 620px) {
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--link,
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--edit,
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--copy { display: none; }
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__overflow { display: inline-flex; }
+  /* 窄容器把搜索框下限从 240 收到 230（其内部固定件：分段 106 + 清空 46 + 输入框最小 64 + gaps）。
+     实测各档：1100（容器 597）1 行、414（371）2 行、375（332）3 行 —— 375 是物理极限
+     （Tag 112 + 230 + 动作 192 = 534 > 332），此时搜索框自然换行独占一行（输入框反而宽敞），
+     不再溢出。曾试过 `flex: 1 1 100%` 强制独占，但那让 1100 也白白多折两行，已回退。 */
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__search { min-width: 230px; }
 }
 /* 分段控件（居中/铺满）默认 36px 高，会把这一排撑得高低不齐：压平到与相邻按钮一致 */
 .ki-drawer__actions .ki-segmented { padding: 2px; }
@@ -1748,7 +2023,9 @@ a:hover { text-decoration: underline; }
   /* 切换全屏后如果因文档 key 重新挂载，直接显示正文，不重复播放抽屉滑入动画。 */
   animation: none;
 }
-.ki-drawer--fullscreen .ki-drawer__body { padding: 32px 48px; }
+/* 全屏正文：上留白 32 → 22px（用户 2026-10-16：「全屏下路径显示离文档内容区也太远」）。
+   head 底 14px + 22px = 36px 起正文（原 46px）；左右 48px 与底部 32px 保持不动（阅读轴与呼吸感）。 */
+.ki-drawer--fullscreen .ki-drawer__body { padding: 22px 48px 32px; }
 /* 全屏正文宽度：默认铺满；动作区切「居中」时收窄到 770px 阅读轴（demo .reader-article 同款） */
 .ki-drawer--fullscreen .ki-drawer__body--narrow .ki-markdown--drawer { max-width: 770px; margin: 0 auto; }
 
@@ -1870,8 +2147,12 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 62px;
-  padding: 12px 14px;
+  /* 上下内边距 12 → 6px（用户 2026-10-16：「全屏下路径显示离知识目录也太远」）：
+     面板头总高 = 内容 38 + 上下 padding ⇒ 62 → 50px，标题文字距头部底由 12px 收到 6px。
+     ⚠️ 必须改 **padding**，不能只改 min-height —— 本元素实际高度由「内容 + padding」决定
+     （实测 38+24=62 > min-height），min-height 只是下限。 */
+  min-height: 50px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--ki-color-border);
   flex-shrink: 0;
 }

@@ -5,7 +5,7 @@
  * 原文：ki_get_module_info
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -428,6 +428,23 @@ export function BrowsePage(): JSX.Element {
   const searchDocs = searchQuery.data?.docs ?? [];
   const isSearching = q.trim().length > 0;
 
+  /**
+   * 全库搜索框在两种状态下**换宿主**渲染：
+   * - 阅读态（`readingInline`）→ 查看器的一行头部（`ModuleDrawer` 的 `inlineSearch`）；
+   * - 结果态 → 页级工具栏（本文件）。
+   *
+   * 宿主切换 = 输入框卸载重建。若不管，用户敲下第一个字符（300ms 防抖后进入结果态）
+   * 就会把焦点丢到 body —— 表现为「打着字忽然不能打了」。这两个 ref 用于**焦点接力**：
+   * `lastTypingAtRef` 记住最近一次真实输入的时刻，切换时只在「刚刚还在输入」时把焦点交给
+   * 新宿主，避免无谓抢焦点（例如用户只是点了 Tag）。
+   */
+  const pageSearchRef = useRef<HTMLInputElement>(null);
+  const lastTypingAtRef = useRef(0);
+  const handleSearchInput = useCallback((value: string): void => {
+    lastTypingAtRef.current = Date.now();
+    setQ(value);
+  }, []);
+
   // 文档列表搜索之外，按同一关键词查询正文；结果独立展示，避免把“文件名命中”
   // 与“正文命中”混成一个排序口径。仅使用 FTS-only/hybrid 的全文分支，不调用 embedding。
   const fullTextQuery = useQuery<SearchResult>({
@@ -542,6 +559,18 @@ export function BrowsePage(): JSX.Element {
     // URL 里的文档参数一并清掉，否则刷新会把刚关掉的文档又打开。
     writeBrowseUrl(null, false);
   }, [writeBrowseUrl]);
+
+  /**
+   * 关闭「检索结果点开」的那个抽屉：**只把来源切回树，保留 currentViewing**。
+   *
+   * 为什么不与 `closeDocument` 共用：结果列表此刻还开着，而它的头部是**内联查看器**渲染的
+   * （结果列表作为它的 bodySlot）。若在这里清空 currentViewing，页面会回落到「无文档」分支的
+   * 页级工具栏 —— 用户看到的就是「退出抽屉后，搜索框样式又变回原来的样子」（2026-10-16 反馈）。
+   * 保留后头部与阅读态是同一套 DOM；之后清空搜索会自然回到这篇文档的正文（符合"我确实看过它"）。
+   */
+  const closeSearchDrawer = useCallback((): void => {
+    setViewingSource('tree');
+  }, []);
 
   /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
   const goBack = useCallback((): void => {
@@ -942,7 +971,7 @@ export function BrowsePage(): JSX.Element {
    * 文档阅读器：inline = 就地渲染在右侧阅读区（树入口）；
    * 抽屉 = 覆盖式滑出、结果列表留在主区（检索结果入口，与语义检索页一致）。
    */
-  const renderViewer = (asDrawer: boolean): JSX.Element | null => {
+  const renderViewer = (asDrawer: boolean, slot?: ReactNode): JSX.Element | null => {
     if (!currentViewing) return null;
     return (
       <ModuleDrawer
@@ -954,7 +983,8 @@ export function BrowsePage(): JSX.Element {
         highlightQuery={currentViewing.highlightQuery}
         targetAnchor={currentViewing.anchor}
         editable
-        onClose={closeDocument}
+        /* 抽屉（检索结果打开）关闭时**保留文档**，避免头部回落到页级工具栏（见 closeSearchDrawer） */
+        onClose={asDrawer ? closeSearchDrawer : closeDocument}
         // 正文读取走 read 通道的 HTTP 接口（不再用 MCP）：导入/向量化期间不被排队
         fetcher={getDocContent}
         onLocalLink={handleLocalLink}
@@ -974,6 +1004,31 @@ export function BrowsePage(): JSX.Element {
         outlineCollapsed={readerOutlineCollapsed}
         onOutlineCollapsedChange={setReaderOutlineCollapsed}
         fullscreenNavigation={fullscreenNavigation}
+        /* ── 一行头部（2026-10-16）：只有**内联阅读态**把页级控件交给查看器头部 ──
+           检索结果点开的抽屉（asDrawer）保持原样：那时主区是结果列表，搜索框仍属结果区工具条。
+           头部高度因此由两行 126.5px 降为一行（.plans/2026-10-16-browse-reader-single-row-header）。 */
+        inlineBar={asDrawer ? undefined : (
+          <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+        )}
+        inlineSearch={asDrawer ? undefined : {
+          value: q,
+          onChange: handleSearchInput,
+          onClear: clearFilters,
+          // 与 Tag / 范围分段 / 动作按钮同排后，搜索框可用宽度由独占 420px 收到约 260px：
+          // 原「（结果在此处展示）」会被截断，只留主句（结果出现的位置已由使用形成预期）
+          placeholder: '搜索全库文档…',
+        }}
+        inlineActions={asDrawer ? undefined : (
+          <div className="ki-segmented ki-drawer__inline-width" role="group" aria-label="正文宽度">
+            {/* 全库结果态下正文不是文档，宽度切换无处作用 ⇒ 与其它文档动作一起禁用（用户 2026-10-16） */}
+            <button type="button" aria-pressed={!readerWide} disabled={showingResults} onClick={() => setReaderWide(false)}>居中</button>
+            <button type="button" aria-pressed={readerWide} disabled={showingResults} onClick={() => setReaderWide(true)}>铺满</button>
+          </div>
+        )}
+        /* 全库搜索结果列表：交给查看器的正文区承载 —— 头部因此**一套到底**，
+           不再出现"一搜索头部样式就大变样"（用户 2026-10-16）。结果态下文档动作由
+           ModuleDrawer 自行禁用（docActionsDisabled） */
+        bodySlot={slot}
       />
     );
   };
@@ -987,11 +1042,53 @@ export function BrowsePage(): JSX.Element {
   const showingResults = isSearching;
   const readingInline = currentViewing !== null && !showingResults;
 
+  /**
+   * 焦点接力（配合 `pageSearchRef`）：搜索框换宿主时把焦点交到新宿主，
+   * 让「连续输入」不被打断。只在最近 1.5s 内确有输入时接管，避免抢焦点。
+   */
+  const prevReadingInlineRef = useRef(readingInline);
+  useEffect(() => {
+    const was = prevReadingInlineRef.current;
+    prevReadingInlineRef.current = readingInline;
+    if (was === readingInline) return;
+    if (Date.now() - lastTypingAtRef.current > 1500) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = readingInline
+        ? document.querySelector<HTMLInputElement>('[data-ki-drawer-search="global"]')
+        : pageSearchRef.current;
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [readingInline]);
+
   return (
     <>
+      {/* 页头副标题：由「功能罗列」改为**当前上下文路径**（用户 2026-10-16）。
+          为什么不写死功能罗列：那三件事左栏与右栏本身就看得见，而"我现在在读哪一篇、在哪一级"
+          只有这里能一眼给全 —— 也因此让阅读区头部可以取消标题（单行头部放标题会把搜索框压到 ~80px）。 */}
       <div className="ki-page-head" style={{ flexShrink: 0 }}>
         <div>
-          <p>Group 树 · 文档列表 · 原文查看</p>
+          {currentViewing ? (
+            <p className="ki-page-head__path" title={`${scope} / ${currentViewing.group} / ${currentViewing.module}`}>
+              {/* scope 芯片在最前（用户 2026-10-16：参考抽屉 meta 行的 scope 徽标样式），
+                  其后是「主题短语 · Group 路径 / 文档名」—— 与检索页/总览页页头同句式 */}
+              <span className="ki-badge ki-badge--kb ki-page-head__scope">{scope}</span>
+              <span className="ki-page-head__hint">原文阅读</span>
+              <span className="ki-page-head__sep">·</span>
+              <span className="ki-page-head__group">{currentViewing.group}</span>
+              <span className="ki-page-head__sep">/</span>
+              <span className="ki-page-head__doc">{currentViewing.module}</span>
+            </p>
+          ) : (
+            /* 未选文档时保持**同一句式**（用户 2026-10-16：避免开关文档时那行字"跳"）——
+               scope 芯片、主题短语、分隔符都在，只有路径段换成提示语 */
+            <p className="ki-page-head__path">
+              <span className="ki-badge ki-badge--kb ki-page-head__scope">{scope}</span>
+              <span className="ki-page-head__hint">原文阅读</span>
+              <span className="ki-page-head__sep">·</span>
+              <span className="ki-page-head__group">未选择文档，从左侧目录选择</span>
+            </p>
+          )}
         </div>
       </div>
 
@@ -1065,19 +1162,32 @@ export function BrowsePage(): JSX.Element {
         {/* 右：文档内容（常驻阅读区，对齐 demo：右侧专注展示正文） */}
         <section className={`ki-browse-reader${mobileReaderOpen ? ' ki-browse-reader--mobile-open' : ''}`}>
           <div className="ki-card ki-browse-reader__card">
-            {/* 阅读区头部（对齐 demo .reader-head：左「文档内容」标签，右侧整组搜索/标签/清除/宽度） */}
+            {/* 阅读区头部（对齐 demo .reader-head：左「文档内容」标签，右侧整组搜索/标签/清除/宽度）
+                ⚠️ 内联阅读态整行**不渲染**：此时搜索框 / 标签 / 宽度切换由查看器的一行头部承载
+                （见 ModuleDrawer 的 inlineBar / inlineSearch / inlineActions），否则「页级工具条 +
+                抽屉头部」两行会把正文下推 126.5px（占阅读区 16%，且不随滚动消失）。
+                结果列表态与空态仍用本行 —— 那时没有内联查看器承载搜索框。 */}
+            {/* 工具栏只在**从未打开文档**时出现（空态）——
+                一旦有 currentViewing，头部就交给查看器并**一直保持**（含全库搜索出结果时），
+                避免"搜索前一套头部、搜索后另一套"的割裂（用户 2026-10-16） */}
+            {currentViewing === null && (
             <div className="ki-reader-toolbar">
-              <span className="ki-reader-toolbar__label">文档内容</span>
+              {/* 顺序与阅读态的一行头部保持一致：**Tag 在最左 → 搜索框**（用户 2026-10-16：
+                  「一开始全库搜索，头部样式就大变样」）。原先这里是「文档内容标签 + 搜索框 + Tag」，
+                  与阅读态完全相反，一切换就整体错位；「文档内容」标签同时去掉（阅读态也没有它）。
+                  结果态与阅读态的**故意差异**只剩右侧：此处按语境给「清空 + 居中|铺满」，
+                  阅读态给「全库|本文 + 文档动作」—— 那些动作依赖当前文档，结果态没有它。 */}
+              <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
               <div className="ki-reader-tools">
-                {/* 检索组（搜索框 + Tags + 清除）整组居中，对齐全屏头部 .ki-drawer__fs-toolbar 的检索组 */}
                 <div className="ki-reader-filters">
                   <label className="ki-reader-search">
                     <Icon name="search" className="ki-icon ki-icon--sm ki-reader-search__icon" />
                     <input
+                      ref={pageSearchRef}
                       className="ki-form-input ki-reader-toolbar__search"
                       placeholder="搜索全库文档…（结果在此处展示）"
                       value={q}
-                      onChange={(e) => setQ(e.target.value)}
+                      onChange={(e) => handleSearchInput(e.target.value)}
                       data-ki-search-input
                       aria-label="搜索全部目录与文档，结果显示在右侧内容区"
                     />
@@ -1092,7 +1202,6 @@ export function BrowsePage(): JSX.Element {
                       <Icon name="x" className="ki-icon ki-icon--sm" />
                     </button>
                   </label>
-                  <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
                   <button
                     className="ki-btn ki-btn--secondary ki-btn--small"
                     type="button"
@@ -1118,11 +1227,15 @@ export function BrowsePage(): JSX.Element {
                 </button>
               </div>
             </div>
+            )}
             <div className={`ki-browse-reader__body${readerWide ? ' ki-browse-reader__body--wide' : ''}`}>
-              {showingResults ? (
+              {currentViewing !== null ? (
+                /* 结果列表作为 bodySlot 交给查看器承载：头部（含搜索框 / 分段 / 清空 / 文档动作）
+                   全程不换，动作按钮在结果态由 ModuleDrawer 自动置灰 */
+                renderViewer(false, showingResults ? renderSearchResults() : undefined)
+              ) : showingResults ? (
+                /* 极端情况：没有 currentViewing 时也可能在搜（URL 带 q 但文档已关）—— 直接渲染结果 */
                 renderSearchResults()
-              ) : readingInline ? (
-                renderViewer(false)
               ) : (
                 <div className="ki-empty" style={{ padding: 64 }}>
                   <div>
