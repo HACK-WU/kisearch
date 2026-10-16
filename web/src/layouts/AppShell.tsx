@@ -7,6 +7,7 @@ import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-route
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, useVectorDimensionStatus, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
+import { HealthDetailPanel } from '@/components/HealthDetailPanel';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
 import { ImportPage } from '@/pages/ImportPage';
@@ -95,14 +96,71 @@ const DOT_CLASS: Record<HealthLevel, string> = {
   ok: 'ki-dot--ok',
 };
 
+/**
+ * 服务健康徽标（REQ-20261016-003）
+ *
+ * ★ 由 `<span title>` 升级为 `<button>` + 明细面板：原先完整原因只躺在原生 title 里 ——
+ *   触屏没有 hover、键盘用户拿不到 title、长项名还会被固定宽度截断，且多异常项时
+ *   只显示第一条。同款问题项目已在 `.ki-code-warn`（MarkdownPreview）解决过，此处沿用
+ *   同一口径：点击 / 回车展开，桌面端仍保留 title 速览入口提示。
+ * ★ 判据仍是唯一来源 `summarizeHealth`（lib/healthSummary.ts），本组件只负责呈现。
+ * ★ 面板为**非模态**浮层：绝对定位、不参与顶栏布局（宽度链 170px 保持不变），
+ *   点外部 / ESC 关闭且焦点归还徽标。
+ */
 function ServiceBadge(): JSX.Element {
-  const { data, error, isPending } = useHealth();
+  const { data, error, isPending, isFetching, refetch, dataUpdatedAt } = useHealth();
   const s = summarizeHealth(data, error, isPending);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onOutside = (event: MouseEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      buttonRef.current?.focus(); // 键盘用户关掉浮层后不应丢失焦点
+    };
+    document.addEventListener('mousedown', onOutside);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onOutside);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const closeAndReturnFocus = useCallback((): void => {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }, []);
+
   return (
-    <span className="ki-service-badge" title={s.detail || s.label}>
-      <span className={`ki-dot ${DOT_CLASS[s.level]}`} />
-      <span className="ki-service-badge__text">{s.label}</span>
-    </span>
+    <div className="ki-service-badge-wrap" ref={rootRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        className={`ki-service-badge${open ? ' ki-service-badge--open' : ''}`}
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title="点击查看服务健康明细（含每项原因与修复指引）"
+      >
+        <span className={`ki-dot ${DOT_CLASS[s.level]}`} aria-hidden="true" />
+        <span className="ki-service-badge__text">{s.label}</span>
+      </button>
+      {open && (
+        <HealthDetailPanel
+          summary={s}
+          updatedAt={dataUpdatedAt || undefined}
+          checking={isFetching}
+          onRetry={() => void refetch()}
+          onClose={closeAndReturnFocus}
+        />
+      )}
+    </div>
   );
 }
 

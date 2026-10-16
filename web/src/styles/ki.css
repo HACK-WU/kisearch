@@ -282,6 +282,17 @@ a:hover { text-decoration: underline; }
 .ki-workspace-title { font-size: 24px; line-height: 1.35; font-weight: 680; letter-spacing: -0.04em; }
 .ki-workspace-header__actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .ki-workspace-header__actions .ki-scope-picker { min-width: 180px; width: 180px; }
+/* 顶栏 scope 输入框与相邻按钮（AI 对话 / 后台任务 = 32px）等高 —— 2026-10-16 用户要求。
+   ⚠️ 必须同时写 `min-height`：表单基类 `.ki-form-input`（ki.css:668）的 `min-height: 38px`
+   与 `.ki-scope-picker__input` 的 `height: 36px` 特异性相同、定义更晚 ⇒ 实际高度一直是 38px
+   （2026-10-16 实测量到 computed padding 也是基类的 `8px 12px`）；只写 height 会被压回 38px。
+   ★ 只作用于顶栏，**不动全站表单基类**（`.ki-form-input` / `-select` / `-textarea` 被各页共用）。 */
+.ki-workspace-header__actions .ki-scope-picker__input {
+  height: 32px;
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
 .ki-workspace-header__actions .ki-service-badge { width: 170px; }
 .ki-icon-button {
   display: inline-grid; place-items: center;
@@ -376,18 +387,76 @@ a:hover { text-decoration: underline; }
 
 /* ══════════ 公共组件 ══════════ */
 
-/* 服务状态徽标 */
+/* 服务状态徽标（REQ-20261016-003：由 span 改为 button —— 点击展开明细面板，
+   与 .ki-code-warn 同款口径「详情不能只靠 hover」） */
+.ki-service-badge-wrap { position: relative; }
 .ki-service-badge {
   display: inline-flex; align-items: center; gap: 6px;
   width: 220px; box-sizing: border-box; white-space: nowrap;
-  font-size: var(--ki-font-size-sm); font-weight: 600;
+  font-family: inherit; font-size: var(--ki-font-size-sm); font-weight: 600;
   padding: 4px 10px; border-radius: var(--ki-radius-track);
   border: 1px solid var(--ki-color-border);
   background: var(--ki-color-bg);
   color: var(--ki-color-text-muted);
+  cursor: pointer; text-align: left;
+  transition: border-color var(--ki-motion-fast), background var(--ki-motion-fast), color var(--ki-motion-fast);
 }
-/* 徽标宽度固定，健康原因文案超长时截断（完整文案在 title 提示与总览卡片里） */
+.ki-service-badge:hover, .ki-service-badge--open {
+  border-color: var(--ki-color-border-strong);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text);
+}
+.ki-service-badge:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+/* 徽标宽度固定，文案超长时截断 —— 完整原因在明细面板里（不再是只有 hover 才可达的 title） */
 .ki-service-badge__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* 健康明细面板：非模态浮层，右对齐贴在徽标下方（复用 .ki-scope-picker__panel 的视觉语言）。
+   绝对定位 ⇒ 不参与顶栏布局，不引入抖动；宽度留 40px 视口余量防窄屏溢出。 */
+.ki-health-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 120;
+  width: min(420px, calc(100vw - 40px));
+  display: flex; flex-direction: column;
+  background: var(--ki-color-surface); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2);
+  overflow: hidden; text-align: left;
+}
+.ki-health-panel__head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 10px 12px 8px; border-bottom: 1px solid var(--ki-color-border);
+}
+.ki-health-panel__title { font-size: var(--ki-font-size-md); font-weight: 650; color: var(--ki-color-text); }
+.ki-health-panel__meta { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-health-panel__body { max-height: 320px; overflow-y: auto; }
+.ki-health-panel__list { list-style: none; margin: 0; padding: 0 12px; }
+.ki-health-panel__empty {
+  margin: 0; padding: 14px 12px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.ki-health-issue { display: flex; gap: 8px; padding: 9px 0; }
+.ki-health-issue + .ki-health-issue { border-top: 1px solid var(--ki-color-border); }
+.ki-health-issue__icon { flex-shrink: 0; margin-top: 1px; }
+.ki-health-issue__icon--fail { color: var(--ki-color-danger); }
+.ki-health-issue__icon--warn { color: var(--ki-color-warning); }
+.ki-health-issue__main { flex: 1; min-width: 0; }
+.ki-health-issue__name { font-size: var(--ki-font-size-md); font-weight: 650; color: var(--ki-color-text); }
+.ki-health-issue__detail {
+  margin-top: 2px; font-size: var(--ki-font-size-sm); line-height: 1.5;
+  color: var(--ki-color-text-muted); overflow-wrap: anywhere; user-select: text;
+}
+.ki-health-issue__copy {
+  margin-top: 6px; padding: 3px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-bg); color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-xs); font-weight: 500; cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-health-issue__copy:hover {
+  background: var(--ki-color-surface); border-color: var(--ki-color-border-strong); color: var(--ki-color-text);
+}
+.ki-health-issue__copy--fail { border-color: var(--ki-color-danger); color: var(--ki-color-danger-ink); }
+.ki-health-panel__foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; border-top: 1px solid var(--ki-color-border); background: var(--ki-color-bg);
+}
+.ki-health-panel__more { font-size: var(--ki-font-size-sm); }
 .ki-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .ki-dot--ok { background: var(--ki-color-success); }
 .ki-dot--warn { background: var(--ki-color-warning); }
@@ -573,6 +642,8 @@ a:hover { text-decoration: underline; }
 .ki-badge--vec { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
 .ki-badge--off { background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle); }
 .ki-badge--warn { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+/* 失败态角标（总览健康卡：doctor 报告有 fail 时，REQ-20261016-003 R2） */
+.ki-badge--fail { background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink); }
 /* 通过态角标（总览「向量维度」= 集合与配置一致，REQ-20261016-002）；与 .ki-badge--tag 同款成功色调 */
 .ki-badge--ok { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
 .ki-badge--fts { background: color-mix(in srgb, var(--ki-color-warning, #d97706) 10%, transparent); color: var(--ki-color-warning, #b45309); }
@@ -2489,6 +2560,11 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 @media (max-width: 1100px) {
   .ki-topbar { gap: 8px; }
   .ki-scope-picker { min-width: 150px; }
+  /* ⚠️ 本行**当前不生效**：特异性低于 `.ki-workspace-header__actions .ki-service-badge`（170px）。
+     2026-10-16 曾把它"修正"为同等特异性，被 challenger 质疑 #9 拦下并回退 —— 修正会让窄屏徽标
+     从 170px 收窄到 140px（文本可见宽 134→104px，异常文案截断更早），与 REQ-20261016-003
+     「让异常信息更可见」的目标**方向相反**，且属未授权变更。保持原样，待用户决策：
+     要么删掉这条死规则（放弃窄屏收窄意图），要么与更宽的窄屏布局策略一起改。 */
   .ki-service-badge { width: 140px; }
   .ki-global-task-link { max-width: 160px; }
 }

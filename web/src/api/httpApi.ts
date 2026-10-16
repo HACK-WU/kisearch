@@ -15,7 +15,13 @@ export interface HealthItem {
 }
 
 export interface HealthReport {
-  pass?: boolean;
+  /**
+   * 通过项数（**数值**）。
+   * ⚠️ 旧定义误写为 `boolean`，与后端不符 —— `src/lib/health-check.ts:36-41` 的
+   * HealthReport 三项（pass/warn/fail）均为 count 数值；订正前前端无任何消费点，
+   * 故直接更正（REQ-20261016-003 R2 起角标改用该计数）。
+   */
+  pass?: number;
   fail?: number;
   warn?: number;
   items: HealthItem[];

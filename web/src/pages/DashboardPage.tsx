@@ -2,6 +2,8 @@
  * DashboardPage.tsx —— 总览（对齐 demo：服务横幅 + 统计卡 + scope 表格 + 健康列表）
  */
 
+import { useEffect, useState } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
@@ -11,6 +13,13 @@ import { useScopeValue } from '@/lib/scopeContext';
 import { HealthBanner } from '@/components/HealthBanner';
 import { Icon } from '@/components/icons';
 import type { HealthReport, HealthItem } from '@/api/httpApi';
+
+/**
+ * 运行概览已覆盖的 doctor 检查项名（REQ-20261016-003 R4）：
+ * 「数据目录可写 / MCP HTTP 服务 / 嵌入服务维度 / FTS 索引 / 后台任务队列」5 行只映射到这几项，
+ * doctor 的其余非 pass 项原本在概览区完全不可见 —— 需补一行「另有 N 项」摘要，避免"卡片全绿"错觉。
+ */
+const RUNTIME_COVERED_DOCTOR_NAMES = new Set(['dataDir', '维度匹配', '密钥有效性']);
 
 const HEALTH_ICON: Record<string, { name: string; tone: string }> = {
   pass: { name: 'check', tone: 'ok' },
@@ -124,12 +133,15 @@ function RuntimeRow({ item }: { item: RuntimeItem }): JSX.Element {
 function HealthList({
   report,
   failure,
+  wantSelfCheck,
   rttMs,
   taskState,
   scopes,
 }: {
   report?: HealthReport;
   failure: HealthSummary;
+  /** 由「服务健康明细」面板的「查看完整自检」跳转带入（URL `?selfcheck=1`） */
+  wantSelfCheck: boolean;
   rttMs: number | null;
   taskState: { ready: boolean; running: number; queued: number };
   scopes: ScopeEntry[];
@@ -138,6 +150,31 @@ function HealthList({
   const runtime = buildRuntimeItems(report, rttMs, taskState, scopes);
   const pass = runtime.filter((i) => i.tone === 'ok').length;
   const alerts = runtime.filter((i) => i.tone === 'warn' || i.tone === 'fail').length;
+  // ★ R2（REQ-20261016-003）：角标口径对齐 doctor —— 取 /api/health 报告的 pass/warn/fail 原值。
+  //   旧口径数的是「运行概览 5 行」，会出现「顶栏说有告警、卡片说 5 通过」的自相矛盾（已实测）。
+  //   旧 daemon 不返回计数时回退既有口径（运行概览计数），不编造数字。
+  const counts = failure.counts;
+  const badgeText = counts
+    ? `${counts.pass} 通过${counts.warn > 0 ? ` · ${counts.warn} 告警` : ''}${counts.fail > 0 ? ` · ${counts.fail} 失败` : ''}`
+    : `${pass} 通过${alerts > 0 ? ` · ${alerts} 告警` : ''}`;
+  const badgeTone = counts
+    ? (counts.fail > 0 ? ' ki-badge--fail' : (counts.warn > 0 ? ' ki-badge--warn' : ''))
+    : (alerts > 0 ? ' ki-badge--warn' : '');
+  // ★ R4：doctor 中未被运行概览覆盖的异常项（概览区需给摘要入口，避免"卡片全绿"错觉）
+  const uncovered = failure.issues.filter((i) => !RUNTIME_COVERED_DOCTOR_NAMES.has(i.name));
+  // ★ R3：折叠区异常计数；有 fail（或从明细面板跳来）时默认展开，用户不必自己发现"里面有问题"
+  const doctorIssues = doctorItems.filter((i) => i.status !== 'pass').length;
+  const hasFail = doctorItems.some((i) => i.status === 'fail');
+  const [selfCheckOpen, setSelfCheckOpen] = useState(wantSelfCheck);
+  // ⚠️ `location.key` 必须在依赖里（challenger 2026-10-16 质疑 #3）：从明细面板**第二次**
+  //    点「查看完整自检 →」时 URL 已是 `?selfcheck=1`（值未变）⇒ `wantSelfCheck` 不变 ⇒
+  //    若用户此前手动关过折叠区，再点链接会"点了没反应"（死链感）。location.key 每次导航
+  //    都会变，可稳定承载"这次点击的意图"。
+  const locationKey = useLocation().key;
+  useEffect(() => {
+    // 只在"出现 fail / 带 selfcheck 跳转"时展开；用户手动关闭后不因无关重渲染强制重开
+    if (wantSelfCheck || hasFail) setSelfCheckOpen(true);
+  }, [wantSelfCheck, hasFail, locationKey]);
   return (
     <div className="ki-card">
       <div className="ki-card__head">
@@ -145,9 +182,7 @@ function HealthList({
           <span className="ki-panel-kicker">HEALTH</span>
           <span className="ki-card__title">健康检查</span>
         </span>
-        <span className={`ki-badge${alerts > 0 ? ' ki-badge--warn' : ''}`}>
-          {pass} 通过{alerts > 0 ? ` · ${alerts} 告警` : ''}
-        </span>
+        <span className={`ki-badge${badgeTone}`}>{badgeText}</span>
       </div>
       {doctorItems.length === 0 ? (
         <div className="ki-card__body ki-card__body--flush">
@@ -164,9 +199,26 @@ function HealthList({
             {runtime.map((item) => (
               <RuntimeRow key={item.name} item={item} />
             ))}
+            {/* R4：概览 5 行未覆盖的 doctor 异常项，用一行摘要把人引到下方完整清单 */}
+            {uncovered.length > 0 && (
+              <RuntimeRow
+                item={{
+                  name: `另有 ${uncovered.length} 项配置自检异常`,
+                  detail: `${uncovered.map((i) => i.name).join('、')} —— 原因见下方「配置自检」`,
+                  tone: uncovered.some((i) => i.status === 'fail') ? 'fail' : 'warn',
+                }}
+              />
+            )}
           </div>
-          <details className="ki-health-config">
-            <summary>配置自检（ki doctor · {doctorItems.length} 项）</summary>
+          <details
+            className="ki-health-config"
+            open={selfCheckOpen}
+            onToggle={(event) => setSelfCheckOpen((event.target as HTMLDetailsElement).open)}
+          >
+            <summary>
+              配置自检（ki doctor · {doctorItems.length} 项
+              {doctorIssues > 0 ? ` · ${doctorIssues} 项异常` : ''}）
+            </summary>
             <div className="ki-card__body ki-card__body--flush">
               {doctorItems.map((item) => {
                 const tone = HEALTH_ICON[item.status];
@@ -198,6 +250,8 @@ export function DashboardPage(): JSX.Element {
   const { data: health, error: healthError, isPending: healthPending } = useHealth();
   const healthSummary = summarizeHealth(health, healthError, healthPending);
   const scope = useScopeValue();
+  // 「服务健康明细」面板的「查看完整自检」以 `?selfcheck=1` 跳来（REQ-20261016-003 R1）
+  const [searchParams] = useSearchParams();
   // 最近一次成功请求耗时（MCP HTTP 服务健康项）；任务接口未就绪时该行显示不可用
   const rttMs = getLastRttMs();
   const { data: tasks } = useQuery({
@@ -335,6 +389,7 @@ export function DashboardPage(): JSX.Element {
         <HealthList
           report={health?.report}
           failure={healthSummary}
+          wantSelfCheck={searchParams.get('selfcheck') === '1'}
           rttMs={rttMs}
           taskState={taskState}
           scopes={list}
