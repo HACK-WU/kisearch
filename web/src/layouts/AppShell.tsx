@@ -5,13 +5,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, type HealthLevel } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useVectorDimensionStatus, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
 import { ImportPage } from '@/pages/ImportPage';
 import { useScopeValue } from '@/lib/scopeContext';
-import { getTasks, getVectorDimensionStatus, refreshVectorDimensionStatus } from '@/api/tasksApi';
+import { getTasks, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
 import { visibleTaskNotices } from '@/lib/taskNotice';
 import {
@@ -223,22 +223,9 @@ export function AppShell(): JSX.Element {
     staleTime: 0,
     retry: false,
   });
-  const dimensionQuery = useQuery({
-    queryKey: ['vectorDimensionStatus', scope],
-    queryFn: async () => {
-      const current = await getVectorDimensionStatus(scope);
-      const { checkedAt, staleAfterMs, state } = current.status;
-      // 快照缺失或过期时检查一次；真正检查失败的近期快照留给用户手动重试。
-      if (state === 'unknown' && (checkedAt === undefined || Date.now() - checkedAt >= staleAfterMs)) {
-        return refreshVectorDimensionStatus(scope);
-      }
-      return current;
-    },
-    staleTime: 0,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    retry: false,
-  });
+  // REQ-20261016-002：查询逻辑抽到 lib/hooks（总览页「嵌入模型 / 向量维度」面板共用同一缓存），
+  // 此处行为与抽前逐项等价（见 hooks.useVectorDimensionStatus 注释）。
+  const dimensionQuery = useVectorDimensionStatus(scope);
   useEffect(() => {
     const latestFinish = Math.max(0, ...(taskQuery.data?.tasks ?? [])
       .filter((task) => task.scope === scope && ['import', 'rebuild-vector', 'restore-snapshot'].includes(task.operation))

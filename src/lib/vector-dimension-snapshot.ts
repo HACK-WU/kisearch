@@ -10,12 +10,33 @@ export interface VectorDimensionSnapshot {
   scope: string;
   state: VectorDimensionSnapshotState;
   configured: number;
+  /**
+   * 当前配置的 embedding 标识（REQ-20261016-002，总览页「嵌入模型」面板）。
+   *
+   * ★ 与 `configured` 同口径：**由读路径从 config 活读**，快照文件里即使写了也会被覆盖
+   *   ⇒ 改配置后不会展示陈旧模型名（守 N-2：语义只表达"配置"，不表达"索引时实际使用的
+   *   模型" —— 集合侧不持久化模型名，见 vector-client.buildCreateConfig）。
+   */
+  model: string;
+  provider: string;
+  baseURL: string;
   persisted?: number;
   /** 各向量字段索引完成度（0~1）；REQ-20261009-003 S-02 —— 0 表示索引未建（检索走暴力扫描） */
   indexCompleteness?: Record<string, number>;
   checkedAt?: number;
   error?: string;
   staleAfterMs: number;
+}
+
+/** 配置侧 embedding 标识（活读 config；快照文件里的同名值不参与判定） */
+function configuredIdentity(
+  config: Pick<KiConfig, 'embedding'>,
+): Pick<VectorDimensionSnapshot, 'model' | 'provider' | 'baseURL'> {
+  return {
+    model: config.embedding.model,
+    provider: config.embedding.provider,
+    baseURL: config.embedding.baseURL,
+  };
 }
 
 const SNAPSHOT_DIR = '.vector-status';
@@ -69,6 +90,7 @@ export async function refreshVectorDimensionSnapshot(
       scope: status.scope,
       state: status.compatible ? 'compatible' : 'mismatch',
       configured: status.configured,
+      ...configuredIdentity(config),
       ...(status.persisted !== undefined ? { persisted: status.persisted } : {}),
       ...(status.indexCompleteness ? { indexCompleteness: status.indexCompleteness } : {}),
       checkedAt: Date.now(),
@@ -81,6 +103,7 @@ export async function refreshVectorDimensionSnapshot(
       scope,
       state: 'unknown',
       configured: config.embedding.dimension,
+      ...configuredIdentity(config),
       checkedAt: Date.now(),
       error: safeError(error),
       staleAfterMs: SNAPSHOT_TTL_MS,
@@ -99,6 +122,7 @@ export function readVectorDimensionSnapshot(
     scope,
     state: 'unknown',
     configured: config.embedding.dimension,
+    ...configuredIdentity(config),
     staleAfterMs: SNAPSHOT_TTL_MS,
   });
   try {
@@ -120,6 +144,7 @@ export function readVectorDimensionSnapshot(
       scope,
       state,
       configured: config.embedding.dimension,
+      ...configuredIdentity(config),
       ...(persisted !== undefined ? { persisted } : {}),
       // S-02：索引完成度随快照返回（此前重建对象时会丢失该字段）
       ...(stored.indexCompleteness ? { indexCompleteness: stored.indexCompleteness } : {}),

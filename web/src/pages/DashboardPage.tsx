@@ -3,7 +3,8 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, useScopeList, useDocList, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
+import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { getLastRttMs } from '@/api/httpApi';
 import { getTasks } from '@/api/tasksApi';
 import { useScopeValue } from '@/lib/scopeContext';
@@ -53,7 +54,6 @@ function buildRuntimeItems(
   const dataDir = pick('dataDir');
   const dim = pick('维度匹配');
   const key = pick('密钥有效性');
-  const dimConfig = /config=(\d+)/.exec(dim?.detail ?? '')?.[1];
 
   return [
     {
@@ -67,11 +67,15 @@ function buildRuntimeItems(
       tone: rttMs != null ? 'ok' : 'off',
     },
     {
-      name: '向量集合维度',
+      // REQ-20261016-002/D3：本项数据源是 doctor 三合一 probe —— 它比的是**上游 embedding API
+      // 返回向量的长度 vs 配置维度**，从不打开集合。集合侧一致性由「当前知识库」卡片的
+      // 「向量维度」角标承担（/api/vector/status 快照）。故此处只报结论、不再重复打印配置维度；
+      // 也不再给 rebuild-vector 建议（上游维度不符时重建修不了这个因）。
+      name: '嵌入服务维度',
       detail: dim
         ? dim.status === 'pass'
-          ? `当前 embedding ${dimConfig ?? '—'} 维，集合维度一致`
-          : `${dim.detail ?? ''}；需执行 ki restore <scope> --rebuild-vector --yes`
+          ? '上游返回维度与当前配置一致'
+          : `${dim.detail ?? ''}；请核对 embedding.model / embedding.dimension 是否匹配`
         : key?.detail ?? '后端未返回维度信息',
       tone: toneOfDoctor(dim?.status ?? key?.status),
     },
@@ -219,6 +223,21 @@ export function DashboardPage(): JSX.Element {
   const curDocs = scopeDocs?.docs ?? [];
   const curGroups = new Set(curDocs.map((d) => d.group)).size;
 
+  /**
+   * 当前 scope 的向量维度状态（REQ-20261016-002）：与顶栏共用同一 queryKey ⇒ 复用缓存、
+   * 不新增请求。面板里的模型名 / 维度都是**当前配置**的活读值（后端读路径从 config 取）。
+   */
+  const { data: dimensionData, error: dimensionError } = useVectorDimensionStatus(scope);
+  const embeddingStatus = dimensionData?.status;
+  const dimensionReady = Boolean(dimensionData) || Boolean(dimensionError);
+  const dimBadge = dimensionBadge({
+    state: embeddingStatus?.state,
+    persisted: embeddingStatus?.persisted,
+    hasError: Boolean(dimensionError),
+    scope,
+  });
+  const modelTitle = embeddingIdentityTitle(embeddingStatus);
+
   return (
     <>
       <div className="ki-page-head">
@@ -290,6 +309,24 @@ export function DashboardPage(): JSX.Element {
                 <div className="ki-stat-label">向量层</div>
                 <div className="ki-stat-value">
                   {currentMeta ? (currentMeta.vector ? '✓' : '✗') : '—'}
+                </div>
+              </div>
+              {/* REQ-20261016-002：嵌入模型 / 向量维度（值来自 /api/vector/status，与顶栏同一份缓存） */}
+              <div className="ki-stat-card ki-stat-card--soft">
+                <div className="ki-stat-label">嵌入模型</div>
+                <div className="ki-stat-value ki-stat-value--text" title={modelTitle}>
+                  {embeddingStatus?.model || '—'}
+                </div>
+              </div>
+              <div className="ki-stat-card ki-stat-card--soft">
+                <div className="ki-stat-label">向量维度</div>
+                <div className="ki-stat-value">
+                  {embeddingStatus?.configured ?? '—'}
+                  {dimensionReady && (
+                    <span className={`ki-badge ki-badge--${dimBadge.tone}`} title={dimBadge.title}>
+                      {dimBadge.text}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>

@@ -62,3 +62,62 @@ export function dimensionStatusDetail(input: {
     : '';
   return `${waited}，显示上次结果：${persisted} 维${at}`;
 }
+
+/**
+ * 「向量维度」小面板的状态角标（REQ-20261016-002 / 用户裁决 D3②）。
+ *
+ * 语义边界（守 N9 同款诚实性）：**只有 `persisted` 存在**时才敢断言"一致 / 不符"；
+ * 其余一律「未确认」—— 绝不把"没取到"渲染成"一致"。
+ * 与顶栏 banner 的判定口径同源（`dimensionNoticeKind`：mismatch 也只在有 persisted 时成立）。
+ */
+export interface DimensionBadge {
+  text: string;
+  /** 复用 `.ki-badge--{ok|warn|off}` 三个色调 */
+  tone: 'ok' | 'warn' | 'off';
+  title: string;
+}
+
+export function dimensionBadge(input: {
+  state?: string;
+  persisted?: number;
+  hasError?: boolean;
+  scope?: string;
+}): DimensionBadge {
+  if (input.state === 'mismatch' && input.persisted !== undefined) {
+    const scopeArg = input.scope && input.scope.length > 0 ? ` ${input.scope}` : ' <scope>';
+    return {
+      text: `集合 ${input.persisted} 维`,
+      tone: 'warn',
+      title: `集合维度与当前配置不符：需执行 ki restore${scopeArg} --rebuild-vector --yes 重建向量`,
+    };
+  }
+  if (input.state === 'compatible' && input.persisted !== undefined) {
+    return {
+      text: '集合一致',
+      tone: 'ok',
+      title: `集合维度 ${input.persisted} 维，与当前配置一致`,
+    };
+  }
+  return {
+    text: '未确认',
+    tone: 'off',
+    title: input.hasError
+      ? '维度状态请求失败；可稍后重试或执行 ki doctor 排查'
+      : '尚未取到集合维度（快照缺失或已过期）',
+  };
+}
+
+/**
+ * 模型名面板的 hover 全文：完整模型名 + provider + baseURL（D4②）。
+ * 兼作**省略号后的全文入口**（模型名可能被截断，见 `.ki-stat-value--text`）。
+ * 三者全缺（旧 daemon）时返回 undefined ⇒ 不渲染空的 title 属性。
+ */
+export function embeddingIdentityTitle(status?: {
+  model?: string;
+  provider?: string;
+  baseURL?: string;
+}): string | undefined {
+  const parts = [status?.model, status?.provider, status?.baseURL]
+    .filter((v): v is string => typeof v === 'string' && v.length > 0);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}

@@ -57,6 +57,14 @@ export interface VectorDimensionStatus {
   scope: string;
   state: 'compatible' | 'mismatch' | 'unknown';
   configured: number;
+  /**
+   * 当前配置的 embedding 标识（REQ-20261016-002，总览「嵌入模型」面板）。
+   * ★ 可选：旧 daemon 不返回这些字段 ⇒ 缺省显示「—」，不渲染 undefined。
+   * ★ 语义只表达"当前配置"，不代表索引时实际使用的模型（集合不持久化模型名）。
+   */
+  model?: string;
+  provider?: string;
+  baseURL?: string;
   persisted?: number;
   checkedAt?: number;
   error?: string;

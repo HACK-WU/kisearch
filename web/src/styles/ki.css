@@ -490,6 +490,18 @@ a:hover { text-decoration: underline; }
   letter-spacing: 0; text-transform: none; color: var(--ki-color-text-muted);
 }
 .ki-stat-card--soft .ki-stat-value { font-size: 22px; font-weight: 650; letter-spacing: -0.03em; }
+/* 文本型数值（嵌入模型名等非数字值，REQ-20261016-002）：mono 小字号 + 单行省略，全文由 title 承载。
+   刻意不用 22px 数字口径 —— 27 字符的模型名（如 qwen3.7-text-embedding-flash）会撑破两列小面板。 */
+.ki-stat-card--soft .ki-stat-value--text {
+  display: block;
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-lg);
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ki-stats--pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 /* 总览双卡（当前知识库 ｜ 健康状态）：等宽等高，<960px 纵排 */
@@ -561,6 +573,8 @@ a:hover { text-decoration: underline; }
 .ki-badge--vec { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
 .ki-badge--off { background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle); }
 .ki-badge--warn { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+/* 通过态角标（总览「向量维度」= 集合与配置一致，REQ-20261016-002）；与 .ki-badge--tag 同款成功色调 */
+.ki-badge--ok { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
 .ki-badge--fts { background: color-mix(in srgb, var(--ki-color-warning, #d97706) 10%, transparent); color: var(--ki-color-warning, #b45309); }
 .ki-badge-group { display: flex; gap: 4px; flex-wrap: wrap; }
 
