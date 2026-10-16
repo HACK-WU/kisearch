@@ -179,6 +179,31 @@ describe('多语言代码块（VitePress ::: code-group）', () => {
     assert.match(html, /data-ki-code-panel="1" hidden><pre><code class="language-mermaid">/);
   });
 
+  it('围栏内展示的 ::: 示例不被误解析（写文档讲这个语法时的真实场景）', () => {
+    // docs/markdown-multilang.md 就是这种形态：用四反引号围栏展示 ::: code-group 的写法
+    const md = [
+      '下面演示写法：',
+      '',
+      '````markdown',
+      '::: code-group',
+      '',
+      '```python [Python]',
+      'print(1)',
+      '```',
+      '',
+      ':::',
+      '````',
+      '',
+      '后面的正文',
+    ].join('\n');
+    const html = renderMarkdownHtml(md);
+
+    assert.equal(countOf(html, /data-ki-code-group/g), 0);
+    assert.match(html, /::: code-group/);
+    assert.match(html, /&lt;|print\(1\)/);
+    assert.match(html, /<p>后面的正文<\/p>/);
+  });
+
   it('不接管其它 ::: 容器（如 VitePress 的 ::: tip）', () => {
     const html = renderMarkdownHtml(group('::: tip', '提示内容', ':::', '', '正文'));
 

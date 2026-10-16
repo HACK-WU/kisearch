@@ -67,6 +67,7 @@ const PATHS: Record<string, JSX.Element> = {
     </>
   ),
   moon: <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />,
+  code: <path d="m9 18-6-6 6-6m6-2-4 16m10-8-6 6-6-6" />,
   chat: (
     <>
       <path d="M20 11.5a8 8 0 0 1-8 8H5l-3 3V11.5a9 9 0 0 1 18 0Z" />

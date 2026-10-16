@@ -382,14 +382,13 @@ ki import --scope my-project --source /path/to/wiki --group Wiki
 | [`docs/cli.md`](./docs/cli.md) | CLI 命令完整参考（含 search 输出字段说明） |
 | [`docs/configuration.md`](./docs/configuration.md) | 配置文件说明（数据目录/Embedding/对话模型 `llm`/会话目录 `chatDir`/scope 映射/导入清洗） |
 | [`docs/architecture.md`](./docs/architecture.md) | 架构与协作关系 |
+| [`docs/markdown-multilang.md`](./docs/markdown-multilang.md) | 内置 Web 前端：多语言代码块（`::: code-group`）的写法、首选语言设置与降级行为 |
 | [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式（含 `/api/*` 扩展路由与 `/api/chat/*` 对话接口） |
 | [`docs/vector-engine-mem.md`](./docs/vector-engine-mem.md) | 向量引擎（zvec）设计说明 |
 | [`docs/tags-design.md`](./docs/tags-design.md) | 三层标签设计 |
 | [`docs/error-handling.md`](./docs/error-handling.md) | 异常处理与恢复 |
 | [`docs/workflows.md`](./docs/workflows.md) | 典型工作流 |
 | [`docs/backup-restore.md`](./docs/backup-restore.md) | 备份与恢复 |
-| [`docs/memory-system-requirements.md`](./docs/memory-system-requirements.md) | 记忆系统需求 |
-| [`docs/memory-system-dataflow.md`](./docs/memory-system-dataflow.md) | 数据流图 |
 
 ### Agent Skills
 

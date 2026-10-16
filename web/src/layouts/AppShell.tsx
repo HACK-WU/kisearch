@@ -22,6 +22,7 @@ import {
   shouldShowDimensionNotice,
   writeDimensionDismissedFingerprint,
 } from '@/lib/vectorDimensionNotice';
+import { CodeLangSelect } from '@/components/CodeLangSelect';
 import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
@@ -494,6 +495,7 @@ export function AppShell(): JSX.Element {
           <strong className="ki-sidebar__footer-title">本地工作区</strong>
           <span className="ki-sidebar__footer-meta">ki v{webPackage.version} · MCP 7423</span>
           <div className="ki-sidebar__footer-row">
+            <CodeLangSelect />
             <button className="ki-icon-link" onClick={toggle} title="切换主题" aria-label="切换主题">
               <Icon name={theme === 'dark' ? 'moon' : 'sun'} />
             </button>

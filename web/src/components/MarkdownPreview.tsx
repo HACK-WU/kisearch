@@ -16,6 +16,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Marked, Renderer, type Token, type TokenizerAndRendererExtension } from 'marked';
+import { pickPreferredIndex, usePreferredLang } from '@/lib/codeLangPreference';
 import { isLocalDocumentHref } from '@/lib/documentLinks';
 import { deepLink, parseKiLink } from '@/lib/kiLinks';
 
@@ -382,8 +383,10 @@ function readCodeToken(token: Token): { lang: string; text: string } {
  * ③ **有效语言块少于 2 个** —— 没有可切换的对象，按普通代码块渲染（空块与普通块同口径丢弃）。
  *
  * 安全：容器只重排「已有的代码块 token」，不引入任何新的原始 HTML 通路；标签与语言名一律转义。
+ *
+ * `preferredLang` = 读者在设置里选的首选语言：命中的那一项默认展开，没有则仍是第一个（不提示）。
  */
-function codeGroupExtension(): TokenizerAndRendererExtension {
+function codeGroupExtension(preferredLang = ''): TokenizerAndRendererExtension {
   return {
     name: 'kiCodeGroup',
     level: 'block',
@@ -416,15 +419,17 @@ function codeGroupExtension(): TokenizerAndRendererExtension {
     renderer(token) {
       const group = token as unknown as CodeGroupToken;
       const groupId = `ki-code-group-${++codeGroupSeq}`;
+      // 默认选中项：命中读者首选语言的那一项，否则第一个（匹配规则见 codeLangPreference）
+      const activeIndex = pickPreferredIndex(group.items, preferredLang);
       const tabs = group.items.map((item, index) =>
         `<button class="ki-code-tab" type="button" role="tab" id="${groupId}-tab-${index}"`
-        + ` aria-controls="${groupId}-panel-${index}" aria-selected="${index === 0}"`
-        + ` tabindex="${index === 0 ? 0 : -1}" data-ki-code-tab="${index}"`
+        + ` aria-controls="${groupId}-panel-${index}" aria-selected="${index === activeIndex}"`
+        + ` tabindex="${index === activeIndex ? 0 : -1}" data-ki-code-tab="${index}"`
         + ` title="${escapeAttr(item.lang || item.label)}">${escapeHtml(item.label)}</button>`).join('');
       const panels = group.items.map((item, index) => {
         const languageClass = item.lang ? ` class="language-${escapeAttr(item.lang)}"` : '';
         return `<div class="ki-code-panel" role="tabpanel" id="${groupId}-panel-${index}"`
-          + ` aria-labelledby="${groupId}-tab-${index}" data-ki-code-panel="${index}"${index === 0 ? '' : ' hidden'}>`
+          + ` aria-labelledby="${groupId}-tab-${index}" data-ki-code-panel="${index}"${index === activeIndex ? '' : ' hidden'}>`
           + `<pre><code${languageClass}>${escapeHtml(item.text)}</code></pre></div>`;
       }).join('');
       return '<div class="ki-code-block ki-code-group" data-ki-code-group>'
@@ -512,9 +517,9 @@ function buildRenderer(base?: AssetBase) {
 }
 
 /** 渲染 Markdown 为 HTML 字符串（GFM：表格/删除线/任务列表；breaks 单换行转 <br>） */
-export function renderMarkdownHtml(md: string, base?: AssetBase): string {
+export function renderMarkdownHtml(md: string, base?: AssetBase, preferredLang = ''): string {
   const parser = new Marked({ renderer: buildRenderer(base), gfm: true, breaks: true });
-  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension()] });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension(preferredLang)] });
   return parser.parse(encodeImageSpaces(md), { async: false }) as string;
 }
 
@@ -530,9 +535,20 @@ export interface MarkdownBlock {
 }
 
 /** Parse the whole document before rendering individual blocks; never split Markdown source. */
-export function renderMarkdownBlocks(md: string, previous: readonly MarkdownBlock[] = []): MarkdownBlock[] {
+/**
+ * 流式分块渲染（AI 对话链路用）。
+ *
+ * ⚠️ 已完成块的 html 复用判据只有 `raw` 与 `references`，**不含 `preferredLang`** ——
+ * 调用方传入的偏好发生变化时必须传空 `previous`，否则会复用按旧偏好生成的 html，
+ * 已渲染的多语言组不会跟着换默认语言。
+ */
+export function renderMarkdownBlocks(
+  md: string,
+  previous: readonly MarkdownBlock[] = [],
+  preferredLang = '',
+): MarkdownBlock[] {
   const parser = new Marked({ renderer: buildRenderer(), gfm: true, breaks: true });
-  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension()] });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension(preferredLang)] });
   const input = encodeImageSpaces(md).replace(/\r\n?|\r/g, '\n');
   // Preprocessing only expands image-path spaces and normalizes newlines. Preserve raw SSE offsets.
   const offsets: number[] = [];
@@ -824,9 +840,11 @@ export interface MarkdownPreviewProps {
 export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, deferMermaid = false }: MarkdownPreviewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
+  // 读者首选语言：变化时重算 html，已打开的多语言组随之换成命中语言（见 codeLangPreference）
+  const preferredLang = usePreferredLang();
   const html = useMemo(
-    () => renderedHtml ?? renderMarkdownHtml(text, assetBase),
-    [text, renderedHtml, assetBase?.scope, assetBase?.group],
+    () => renderedHtml ?? renderMarkdownHtml(text, assetBase, preferredLang),
+    [text, renderedHtml, assetBase?.scope, assetBase?.group, preferredLang],
   );
 
   // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；

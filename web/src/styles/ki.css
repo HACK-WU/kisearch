@@ -2472,6 +2472,43 @@ a:hover { text-decoration: underline; }
 .ki-markdown .ki-code-panel > pre { margin: 0; background: transparent; }
 .ki-markdown .ki-code-panel > .ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; padding: 12px; }
 .ki-code-panel[hidden] { display: none; }
+/* 首选代码语言选择器（侧边栏 footer 的图标按钮 + 浮层）。选项视觉沿用既有下拉项口径。
+   ⚠️ 浮层由组件 Portal 到 body 并以 `position: fixed` 定位（left/bottom 由组件测量后内联给出）：
+   就地渲染会被 `.ki-sidebar` 的 `overflow-x: hidden`（上方 :161）裁掉右侧大半。 */
+.ki-code-lang { position: relative; display: inline-flex; }
+.ki-code-lang__trigger--on { color: var(--ki-color-primary); }
+.ki-code-lang__panel {
+  position: fixed; z-index: 120; width: 272px;
+  padding: 8px; background: var(--ki-color-surface); border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2);
+}
+.ki-code-lang__hint { margin: 0 0 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); line-height: 1.6; }
+.ki-code-lang__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; max-height: 264px; overflow-y: auto; }
+.ki-code-lang__option {
+  padding: 6px 8px; border: 0; border-radius: 5px; background: none; color: var(--ki-color-text);
+  cursor: pointer; font: inherit; font-size: var(--ki-font-size-sm); text-align: left;
+}
+.ki-code-lang__option:hover { background: var(--ki-color-hover); }
+.ki-code-lang__option--active { background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent); color: var(--ki-color-primary); font-weight: 650; }
+.ki-code-lang__option:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-code-lang__custom { display: flex; gap: 4px; margin-top: 6px; }
+/* 双重类名压过 `.ki-form-input` 的 min-height: 38px（表单基类是给主区大输入框用的） */
+.ki-code-lang__custom .ki-form-input {
+  flex: 1; min-width: 0; height: 28px; min-height: 28px; padding: 0 8px; font-size: var(--ki-font-size-sm);
+}
+.ki-code-lang__custom-go {
+  flex: none; padding: 0 9px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer;
+  font: inherit; font-size: var(--ki-font-size-sm);
+}
+.ki-code-lang__custom-go:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-code-lang__custom-go:disabled { cursor: default; opacity: 0.5; }
+.ki-code-lang__clear {
+  width: 100%; margin-top: 6px; padding: 6px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer; font: inherit; font-size: var(--ki-font-size-sm);
+}
+.ki-code-lang__clear:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
+.ki-code-lang__clear:disabled { cursor: default; opacity: 0.5; }
 /* mermaid 兜底提示（fail-loud，走查 2026-10-13）：渲染失败 / 内容为空 / 资源不可用时在工具条标注，
    不再静默保留源码块 —— 此前用户无法区分"源码语法错"与"产品坏了"。
    `margin-left: auto` 把标记推到复制按钮左侧（语言名保持最左、按钮位置不动）。 */
