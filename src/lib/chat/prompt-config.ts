@@ -25,6 +25,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { atomicWriteConfig, resolveDefaultChatDir, type KiConfig } from '../config.js';
+import { REASONING_EFFORT_MAX_CHARS, REASONING_EFFORT_RESERVED } from '../config-schema.js';
 import {
   DEFAULT_CHAT_PROMPT,
   HARD_RULES_BLOCK,
@@ -188,6 +189,17 @@ export interface PromptConfig {
    * 缺省 = 未覆盖 → 内置 `CHAT_BUDGET.maxHitsPerCall`（5）。
    */
   searchHitsPerCall?: number;
+  /**
+   * **用户覆盖的思考级别**（REQ-20261016-001 · OpenAI 通用协议纯透传）。
+   *
+   * 三级链第一级：本值 → `config.yaml` 的 `llm.reasoningEffort`（部署默认档）→ **不下发**。
+   * 缺省 = 未覆盖（**不是空串**）；面板的「跟随模型默认」等价于**删除本字段**（设计 §5 决策 3）。
+   *
+   * ⚠️ **读取宽松 / 保存严格**（设计 §5 决策 7）：本字段非法时（读取路径）**只忽略它**并透出 `issue`，
+   *    **不触发**"任一字段非法 → 整份回退默认" —— 避免一个可选增强字段的笔误把提示词 / skill /
+   *    工具开关一起显示成默认值（磁盘内容其实未变）。
+   */
+  reasoningEffort?: string;
 }
 
 export interface PromptConfigIssue {
@@ -283,11 +295,14 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
     return { config: defaultPromptConfig(), issue: `配置文件不是合法 JSON：${(err as Error).message}` };
   }
   const issues: PromptConfigIssue[] = [];
-  const normalized = normalizePromptConfig(parsed, issues);
+  // ★ REQ-20261016-001（设计 §5 决策 7）：思考级别走**软通道** —— 非法时只忽略该字段，
+  //   不把提示词 / skill / 工具开关一起拉进"整份回退默认"。
+  const softNotes: string[] = [];
+  const normalized = normalizePromptConfig(parsed, issues, { effortSoft: true, softNotes });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
   }
-  return { config: normalized, issue: null };
+  return { config: normalized, issue: softNotes.length > 0 ? softNotes.join('；') : null };
 }
 
 // ─── 校验 / 归一化 ─────────────────────────────────────
@@ -299,7 +314,26 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
  *   · `builtin` 由 id 是否属于内置集合决定（客户端传什么都被覆盖）
  *   · `tools` 只接受白名单内的键（未知名报错，不静默丢弃 —— 拼错的开关名会让人以为生效了）
  */
-export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[]): PromptConfig {
+/** `normalizePromptConfig` 的上下文（REQ-20261016-001）：决定思考级别字段的**软/硬**处理与白名单。 */
+export interface NormalizePromptConfigOptions {
+  /**
+   * `true` = **读取路径**（`readPromptConfig`）：思考级别字段非法 / 脱离清单时**只忽略该字段**并把原因
+   * 写入 `softNotes`（不产生 issue ⇒ 不触发整份回退默认）。缺省 = **保存路径**（严格，进 issues → 400）。
+   */
+  effortSoft?: boolean;
+  /** 软通道说明收集器（仅 `effortSoft` 时有意义；调用方负责并入 `ReadPromptConfigResult.issue`）。 */
+  softNotes?: string[];
+  /** 当前磁盘上的覆盖值（保存路径传入）：**既有值脱离清单时放行**（防止运维改小清单导致保存死锁）。 */
+  existingEffort?: string;
+  /** 可选档位清单（保存路径传入 = `config.yaml` 的 `llm.reasoningEfforts`；`undefined` = 运维未配置）。 */
+  effortOptions?: readonly string[];
+}
+
+export function normalizePromptConfig(
+  input: unknown,
+  issues: PromptConfigIssue[],
+  opts?: NormalizePromptConfigOptions,
+): PromptConfig {
   const out = defaultPromptConfig();
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     issues.push({ path: '(root)', message: '应为对象' });
@@ -463,6 +497,47 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
     }
   }
 
+  // reasoningEffort（REQ-20261016-001 · 设计 §4.3 / §8.2「两段校验 + 读取宽松」）
+  //
+  //   ① 值 === 既有已存值 ⇒ **放行**（运维改小清单时，用户仍能保存其它字段 —— 防保存死锁）
+  //   ② 值 ∈ 清单 ⇒ 放行
+  //   ③ 新提交且 ∉ 清单 / 清单未配置 / 类型非法 / 保留字 ⇒ 严格模式报错（400）、宽松模式忽略该字段
+  if (obj.reasoningEffort !== undefined) {
+    const v = obj.reasoningEffort;
+    const soft = opts?.effortSoft === true;
+    /**
+     * 统一出口。两类问题的处理**不同**（设计 §4.3 vs §11）：
+     *   · `dropField = true`（形状非法：非字符串 / 空串 / 超长 / 保留字）⇒ 读取时**忽略该字段**；
+     *   · `dropField = false`（清单相关：脱离清单 / 清单未配置）⇒ **保留该值**（设计 §11 明确"照发"，
+     *     面板负责明示"不在可选清单内"）—— 若这里也忽略，保存路径会读不到既有值 ⇒ 保存死锁复现。
+     */
+    const reject = (msg: string, dropField: boolean): void => {
+      if (!soft) {
+        issues.push({ path: 'reasoningEffort', message: msg });
+        return;
+      }
+      opts?.softNotes?.push(
+        `思考级别 reasoningEffort：${msg}（${dropField ? '已忽略该字段' : '仍会按此值发送，可在面板点「恢复默认」'}，其余配置照常读取）`,
+      );
+      if (!dropField && typeof v === 'string' && v.trim() !== '') out.reasoningEffort = v;
+    };
+    const options = opts?.effortOptions;
+    const known = typeof v === 'string' && v === opts?.existingEffort;
+    if (typeof v !== 'string') {
+      reject('应为字符串', true);
+    } else if (!v.trim() || v.length > REASONING_EFFORT_MAX_CHARS) {
+      reject(`应为 1–${REASONING_EFFORT_MAX_CHARS} 字符的非空字符串`, true);
+    } else if (v === REASONING_EFFORT_RESERVED) {
+      reject(`"${REASONING_EFFORT_RESERVED}" 是内部保留值，不应提交（"跟随模型默认" = 删除本字段）`, true);
+    } else if (!known && options === undefined) {
+      reject('未配置可选档位清单（config.yaml 的 llm.reasoningEfforts）', false);
+    } else if (!known && !(options as readonly string[]).includes(v)) {
+      reject(`不在可选档位清单内（可用：${(options as readonly string[]).join(' | ') || '（清单为空）'}）`, false);
+    } else {
+      out.reasoningEffort = v;
+    }
+  }
+
   return out;
 }
 
@@ -474,7 +549,13 @@ export function normalizePromptConfig(input: unknown, issues: PromptConfigIssue[
  */
 export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig {
   const issues: PromptConfigIssue[] = [];
-  const next = normalizePromptConfig(input, issues);
+  // ★ REQ-20261016-001（设计 §5 决策 6/7）：保存路径**严格**，但**既有值脱离清单时放行** ——
+  //   否则运维改小清单后，用户连 skill 都改不动（整体替换语义会把旧档位值一并提交）。
+  const existingEffort = readPromptConfig(config).config.reasoningEffort;
+  const next = normalizePromptConfig(input, issues, {
+    existingEffort,
+    effortOptions: config.llm?.reasoningEfforts,
+  });
   if (issues.length > 0) throw new PromptConfigError(issues);
   const now = new Date().toISOString();
   // 时间戳由服务端打（客户端时间不可信）

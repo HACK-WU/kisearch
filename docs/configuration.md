@@ -149,6 +149,8 @@ Web 侧边栏「AI 对话」所使用的**对话模型**配置。**整段可缺�
 | `supportsTools` | `boolean` | `true` | 上游是否支持 function calling。`false` → 走「daemon 代跑一次检索 + `degraded` 明示」的降级路径（**不是**禁用检索） |
 | `kbDisclosureAck` | `boolean` | `false` | 隐私确认（T12）。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
 | `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 图片能力**本期未实现**（后置 V2），保留字段 |
+| `reasoningEfforts` | `string[]` | 不配置 | **思考级别可选档位清单**（对话配置面板下拉的来源 + 合法性白名单）。按 **OpenAI 通用协议**原样透传（请求体顶层 `reasoning_effort`），**不做任何厂商适配**、本地不校验具体取值；仅约束形状：元素 1–64 字符非空、≤20 个、不重复、不得为保留字 `__follow_default__`。**不配置 ⇒ 面板该项不可调、且不下发该参数** |
+| `reasoningEffort` | `string` | 不配置 | 思考级别的**部署默认档**，必须 ∈ `reasoningEfforts`（否则配置加载阶段即报错，会阻断全部 `ki` 命令）。与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发** |
 
 > - **不含 `supportsTools` 也能用**：默认按「支持工具」走，上游真不支持时会由错误特征自动降级。
 > - **不要把 `apiKey` 明文提交到仓库**：用 `${ENV_VAR}` 引用环境变量（与 `embedding.apiKey` 一致）。
@@ -282,6 +284,8 @@ llm:
   # 可选：requestTimeoutMs / firstByteTimeoutMs / maxTokens / temperature
   # supportsTools: true       # 上游不支持 function calling 时置 false → 走「预检索 + 明示」降级
   # kbDisclosureAck: true     # 隐私确认；也可由前端确认入口（POST /api/chat/config/ack）写入
+  # reasoningEfforts: [low, high, max]  # 思考级别可选档位（面板下拉的来源；按 OpenAI 通用协议透传，不做厂商适配）
+  # reasoningEffort: high               # 部署默认档，必须在上面的清单里；两者都不配 = 不下发该参数
 chatDir: /data/ki-chat        # 会话存储根目录（默认 = dataDir 的父目录下 chat/；与 kb/ 完全分离）
 
 scopeMode: default

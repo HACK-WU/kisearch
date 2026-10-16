@@ -4130,6 +4130,24 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-cfg__ctxunit { flex: none; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-chat-cfg__ctxsp { flex: 1; min-width: 0; }
 
+/* ── 思考级别下拉（REQ-20261016-001）────────────────────────────
+   ⚠️ **不要复用 `__ctxinput`**：那是给数字输入用的（84px 定宽 + 右对齐 + 等宽字体），
+   套到 `<select>` 上会出现"选中文字被截断 + 展开项右对齐"的观感问题（2026-10-16 走查反馈）。
+   宽度**与上方数字输入框同列**（`flex: 0 0 84px`，用户 2026-10-16 走查反馈："太宽了，和上面的对齐"）
+   —— 故选项文案要短（收起态受限于列宽；**展开态由浏览器按内容渲染，仍显示完整**）。 */
+.ki-chat-cfg__select {
+  flex: 0 0 84px; min-width: 0; height: 26px;
+  font-family: inherit; font-size: var(--ki-font-size-sm);
+  text-align: left; text-overflow: ellipsis;
+  color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 0 8px; cursor: pointer; transition: border-color 160ms;
+}
+.ki-chat-cfg__select:focus { outline: none; border-color: var(--ki-color-primary); }
+.ki-chat-cfg__select:disabled { opacity: .6; cursor: not-allowed; }
+/* 展开的选项一律左对齐（部分浏览器会把 option 继承 select 的对齐方式） */
+.ki-chat-cfg__select option { text-align: left; }
+
 /* ── 补齐既有缺口（2026-10-14）─────────────────────────────────
    `ki-chat-cfg__warn` 在 JSX 里早已使用（读取失败 / 配置损坏已回退默认两处，见
    PromptConfigLayer.tsx），但样式表里**一直没有它** —— 警告文案与正文同色，用户看不出

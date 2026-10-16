@@ -202,6 +202,20 @@ export interface LlmConfig {
    * 不是模型的真实窗口（模型按 token 计；字符口径偏保守，见需求 REQ-20261013-001 §4）。
    */
   contextChars?: number;
+  // ── v4（REQ-20261016-001）──────────────────────────
+  /**
+   * 思考级别：**可选档位清单**（面板选项来源 + 合法性白名单）。
+   *
+   * 按 **OpenAI 通用协议纯透传**，本地**不校验具体取值**（D5：不做厂商适配）；
+   * 只校验：元素为 1–64 字符非空字符串、≤20 个、不重复、不得等于保留字 `__follow_default__`。
+   */
+  reasoningEfforts?: string[];
+  /**
+   * 思考级别：**部署默认档**（运维级）。若存在必须 ∈ `reasoningEfforts`（跨字段校验见 config-schema）。
+   *
+   * 与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发**。
+   */
+  reasoningEffort?: string;
 }
 
 /** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
@@ -608,6 +622,9 @@ function parseAndExpand(configFile: string): KiConfig {
       supportsTools: rl.supportsTools !== undefined ? Boolean(rl.supportsTools) : undefined,
       kbDisclosureAck: rl.kbDisclosureAck !== undefined ? Boolean(rl.kbDisclosureAck) : undefined,
       contextChars: rl.contextChars !== undefined ? Number(rl.contextChars) : undefined,
+      // REQ-20261016-001：思考级别（字段校验见 config-schema；此处只做形状归一化）
+      reasoningEfforts: Array.isArray(rl.reasoningEfforts) ? rl.reasoningEfforts.map((v) => String(v)) : undefined,
+      reasoningEffort: rl.reasoningEffort !== undefined ? String(rl.reasoningEffort) : undefined,
     };
   }
 

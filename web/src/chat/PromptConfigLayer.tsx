@@ -32,6 +32,7 @@ import {
   parseKChars,
   parseStrictInt,
 } from '@/lib/toolBudget';
+import { EFFORT_FOLLOW_DEFAULT, buildEffortOptions, resolveEffortView } from '@/lib/reasoningEffort';
 
 interface ConfirmState {
   title: string;
@@ -69,6 +70,8 @@ const cloneConfig = (c: PromptConfig): PromptConfig => ({
   // REQ-20261015-001：工具预算的两个覆盖值同样必须显式搬运（同一个白名单拷贝坑）
   ...(c.toolResponseChars !== undefined ? { toolResponseChars: c.toolResponseChars } : {}),
   ...(c.searchHitsPerCall !== undefined ? { searchHitsPerCall: c.searchHitsPerCall } : {}),
+  // REQ-20261016-001：思考级别覆盖值——**第三个踩同一个坑的字段**，漏了就是"保存别的配置后档位被静默清空"
+  ...(c.reasoningEffort !== undefined ? { reasoningEffort: c.reasoningEffort } : {}),
 });
 
 /** 新增 skill 的 id：符合服务端 `SKILL_ID_RE`（小写字母/数字开头，允许连字符） */
@@ -159,6 +162,42 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   const hitsOverridden = draft?.searchHitsPerCall !== undefined;
   /** 组合提示（场景推演发现）：条数 × 典型单条 ≈1.2K 字符 > 返回上限 ⇒ 多数返回会被截断 */
   const comboWarn = budgetComboWarn(hitsParsed, trParsed);
+
+  // ── 思考级别（REQ-20261016-001）：选项**一律来自 config.yaml 的清单**（本地不内置取值表）──
+  //    「跟随配置默认（不覆盖）」= **删除覆盖值**（哨兵只存在内存里，不落盘、不下发）
+  const effortOverridden = draft?.reasoningEffort !== undefined;
+  /** 生效值 = 草稿覆盖值 ?? 部署默认档（与后端三级链同口径） */
+  const effortCurrent = draft?.reasoningEffort ?? data?.reasoningEffortDefault;
+  const effortOptions = useMemo(
+    () => buildEffortOptions(data?.reasoningEffortOptions, effortCurrent),
+    [data?.reasoningEffortOptions, effortCurrent],
+  );
+  const effortView = resolveEffortView({
+    options: data?.reasoningEffortOptions,
+    def: data?.reasoningEffortDefault,
+    current: effortCurrent,
+    overridden: effortOverridden,
+  });
+
+  /** 选择档位：选「跟随配置默认」= 删字段；其余原样写入草稿（合法性最终由服务端按清单强校验） */
+  const handleEffortChange = (v: string): void => {
+    setDraft((d) => {
+      if (!d) return d;
+      if (v === EFFORT_FOLLOW_DEFAULT) {
+        const { reasoningEffort: _drop, ...rest } = d;
+        return rest;
+      }
+      return { ...d, reasoningEffort: v };
+    });
+  };
+  /** 恢复默认 = 删掉覆盖值（回到部署默认档；两者都无 ⇒ 不下发该参数） */
+  const handleEffortReset = (): void => {
+    setDraft((d) => {
+      if (!d) return d;
+      const { reasoningEffort: _drop, ...rest } = d;
+      return rest;
+    });
+  };
 
   /** 工具返回上限：输入 → 草稿（合法才写；**空串 = 未覆盖**，与「恢复默认」等价） */
   const handleToolRespInput = (v: string): void => {
@@ -518,6 +557,53 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
               {data.limits.toolResponseCharsMax === undefined && (
                 <p className="ki-chat-cfg__warn">
                   服务端未返回工具预算的上限：通常是后端尚未重启，本项的保存可能不会生效。
+                </p>
+              )}
+            </div>
+
+            {/* ── 思考级别（REQ-20261016-001）：选项**只能**来自 config.yaml 的清单（本地不内置取值表）── */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                思考级别
+                <em className="ki-chat-cfg__badge">{effortView.badge}</em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                档位由 config.yaml 的 llm.reasoningEfforts 提供，仅作用于 AI 对话请求。「跟随默认」=
+                不使用覆盖值（回到部署默认档；都没有则不下发该参数）。档位是上游软约束：同一档位单次
+                思考量波动很大（实测可达 10 倍），更高档通常更慢、更贵；多轮检索场景会叠加。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <select
+                  className="ki-chat-cfg__select"
+                  aria-label="思考级别"
+                  // 收起态受列宽限制会省略（ellipsis）—— hover 显示完整名
+                  title={effortOptions.find((o) => o.value === effortView.selectValue)?.label ?? ''}
+                  disabled={!effortView.editable}
+                  value={effortView.selectValue}
+                  onChange={(e) => handleEffortChange(e.target.value)}
+                >
+                  {effortOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={!effortOverridden}
+                  onClick={handleEffortReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {effortView.warn !== null && <p className="ki-chat-cfg__warn">{effortView.warn}</p>}
+              {/**
+                * 降级 fail-loud：旧版服务端不返回 `reasoningEffortOverridden`（新版恒有该字段）——
+                * 表现为"选了档位、保存成功但值没变"，这里前置告知（与上下文窗口 / 工具预算同款范式）。
+                */}
+              {data.reasoningEffortOverridden === undefined && (
+                <p className="ki-chat-cfg__warn">
+                  服务端未返回思考级别的配置信息：通常是后端尚未重启，本项的保存可能不会生效。
                 </p>
               )}
             </div>

@@ -104,6 +104,12 @@ interface LoopRuntime {
   model: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * 思考级别（REQ-20261016-001）：本轮生效值 = 对话配置**覆盖值** ?? `config.yaml` **部署默认档**；
+   * `undefined` = **不下发该字段**（未配置时的默认行为，与改造前逐字节一致）。
+   * 与工具面/预算同样**每轮解析一次** ⇒ 改配置**下一次提问**即生效。
+   */
+  reasoningEffort?: string;
   requestTimeoutMs: number;
   firstByteTimeoutMs: number;
   maxToolRounds: number;
@@ -144,6 +150,8 @@ function resolveRuntime(): LoopRuntime {
     model: llm?.model ?? '',
     temperature: llm?.temperature,
     maxTokens: llm?.maxTokens,
+    // ★ 思考级别（REQ-20261016-001）：三级链 —— 对话配置覆盖值 → config.yaml 部署默认档 → 不下发
+    reasoningEffort: promptConfig.reasoningEffort ?? llm?.reasoningEffort,
     requestTimeoutMs: llm?.requestTimeoutMs ?? CHAT_BUDGET.requestTimeoutMs,
     firstByteTimeoutMs: llm?.firstByteTimeoutMs ?? CHAT_BUDGET.firstByteTimeoutMs,
     maxToolRounds: status.maxToolRounds,
@@ -580,6 +588,8 @@ async function* toolLoopPath(
     model: runtime.model,
     temperature: runtime.temperature,
     maxTokens: runtime.maxTokens,
+    // ★ 思考级别（REQ-20261016-001）：未配置时 undefined ⇒ llm-client 不下发该键
+    reasoningEffort: runtime.reasoningEffort,
   };
 
   while (true) {
@@ -870,6 +880,8 @@ async function* pureChatPath(
           model: runtime.model,
           temperature: runtime.temperature,
           maxTokens: runtime.maxTokens,
+          // ★ 与工具路径同一口径（REQ-20261016-001）：降级路径同样下发思考级别
+          reasoningEffort: runtime.reasoningEffort,
         },
       })) {
         if (part.type === 'reasoning') yield { type: 'reasoning', text: part.text };

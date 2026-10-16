@@ -605,6 +605,14 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,
+    // ── 思考级别（REQ-20261016-001）：清单 / 部署默认档 / 生效值 / 是否覆盖 ──
+    // ⚠️ 清单**未配置 = 字段缺失**（`undefined`），与"显式空清单 `[]`"语义不同（设计 §5 决策 4）
+    reasoningEffortOptions: cfg.llm?.reasoningEfforts,
+    reasoningEffortDefault: cfg.llm?.reasoningEffort,
+    /** 生效档位：覆盖值 ?? 部署默认档；两者都无 ⇒ 字段缺失（= 不下发该参数） */
+    reasoningEffort: config.reasoningEffort ?? cfg.llm?.reasoningEffort,
+    /** 是否使用了用户覆盖值（决定面板"自定义 / 默认"徽标与「恢复默认」可用性） */
+    reasoningEffortOverridden: config.reasoningEffort !== undefined,
     // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
     // 前端自己写一份分组清单必然会随工具增减而漂移
     toolGroups: MCP_TOOL_GROUPS,

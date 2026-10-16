@@ -339,6 +339,12 @@ export interface PromptConfig {
    * 缺省 = 未覆盖 → 服务端内置 5（读 `limits.searchHitsDefault`）。
    */
   searchHitsPerCall?: number;
+  /**
+   * **用户覆盖的思考级别**（REQ-20261016-001 · OpenAI 通用协议顶层 `reasoning_effort`，纯透传）。
+   * 三级链第一级：本值 → `config.yaml` 的 `llm.reasoningEffort`（部署默认档）→ **不下发**。
+   * 缺省 = 未覆盖；面板的「跟随配置默认（不覆盖）」= **删除本字段**（哨兵 `__follow_default__` 不落盘）。
+   */
+  reasoningEffort?: string;
 }
 
 export interface PromptConfigLimits {
@@ -389,6 +395,18 @@ export interface PromptConfigOk {
    * 「恢复默认」的目标值 —— 前端不写死 1000K。旧版 daemon 不返回 → 回退前端常量。
    */
   contextCharsDefault?: number;
+  // ── 思考级别（REQ-20261016-001）：4 个字段全部**可选** —— 旧版 daemon 不返回 ──
+  /**
+   * 可选档位清单（= `config.yaml` 的 `llm.reasoningEfforts`）。
+   * ⚠️ **缺失 = 运维未配置**（面板禁用并指引）；`[]` = 显式空清单（另一条文案）—— 两者语义不同。
+   */
+  reasoningEffortOptions?: string[];
+  /** 部署默认档（= `llm.reasoningEffort`）；不写死前端常量 */
+  reasoningEffortDefault?: string;
+  /** **生效档位** = 覆盖值 ?? 部署默认档；缺失 = 不下发该参数 */
+  reasoningEffort?: string;
+  /** 是否使用了用户覆盖值（决定"自定义 / 默认"徽标与「恢复默认」可用性）；**旧版 daemon 缺失** */
+  reasoningEffortOverridden?: boolean;
   toolGroups: PromptToolGroup[];
   /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
   issue: string | null;

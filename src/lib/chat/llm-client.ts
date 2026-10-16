@@ -180,7 +180,14 @@ export interface StreamChatOptions {
   requestTimeoutMs?: number;
   firstByteTimeoutMs?: number;
   /** 调用方注入的配置（缺省由参数直接给出；tool-loop 从会话上下文传入） */
-  llm?: { baseURL: string; apiKey: string; model: string; temperature?: number; maxTokens?: number };
+  llm?: {
+    baseURL: string; apiKey: string; model: string; temperature?: number; maxTokens?: number;
+    /**
+     * 思考级别（REQ-20261016-001）：OpenAI 通用协议**顶层** `reasoning_effort`，纯透传。
+     * **`undefined` = 不下发该键**（未配置时的默认行为与改造前逐字节一致 —— 回归点）。
+     */
+    reasoningEffort?: string;
+  };
 }
 
 /** 连续 JSON 解析失败超过该值即中断（S01 §5） */
@@ -190,6 +197,10 @@ const MAX_PARSE_FAILURES = 10;
 function looksLikeToolsUnsupported(status: number, body: string): boolean {
   if (status < 400 || status >= 500) return false;
   const b = body.toLowerCase();
+  // ★ REQ-20261016-001（设计 §4.7）：文案提及思考级别时**不得**判为"工具不支持" ——
+  //   某些网关把未知参数一并列出（如 "unknown parameters: tools, reasoning_effort"），
+  //   误判会走进"去掉 tools 再试一次"的降级路径，但档位仍在 ⇒ 再失败且提示指向错误方向。
+  if (/reasoning[_ ]effort/.test(b)) return false;
   if (!b.includes('tool') && !b.includes('function')) return false;
   return (
     b.includes('not support') ||
@@ -203,12 +214,18 @@ function looksLikeToolsUnsupported(status: number, body: string): boolean {
 }
 
 /** 解析上游错误码 → 本地错误类型映射（S01 §5） */
-function mapUpstreamError(status: number, body: string): Error {
+function mapUpstreamError(status: number, body: string, reasoningEffort?: string): Error {
   if (status === 429) return new LlmUpstreamError(`上游限流（HTTP 429）：${truncate(body, 200)}`, true);
   if (status === 401 || status === 403) {
     return new LlmUpstreamError(`上游凭据无效（HTTP ${status}）：${truncate(body, 200)}（提示：凭据无效）`, false);
   }
-  return new LlmUpstreamError(`上游异常（HTTP ${status}）：${truncate(body, 200)}`, status >= 500);
+  // ★ REQ-20261016-001（设计 §4.7 · R7）：本次请求携带了思考级别且上游判 4xx ⇒ 给出可操作出路。
+  //   动机：D5 决定"纯透传、不加适配开关"，换模型/网关后上游可能直接 400，
+  //   用户面对原始报错无从下手 —— 这条提示是唯一的可恢复路径（N8：面板可一键改回"不传"）。
+  const effortHint = (status >= 400 && status < 500 && reasoningEffort !== undefined)
+    ? '（提示：若该模型不支持思考级别，请在对话配置中把「思考级别」恢复默认（即不传），或修正 config.yaml 的 llm.reasoningEffort / llm.reasoningEfforts）'
+    : '';
+  return new LlmUpstreamError(`上游异常（HTTP ${status}）：${truncate(body, 200)}${effortHint}`, status >= 500);
 }
 
 function truncate(s: string, n: number): string {
@@ -279,6 +296,8 @@ export async function* streamChat(
   if (opts?.tools && opts.tools.length > 0) body.tools = opts.tools;
   if (llm.temperature !== undefined) body.temperature = llm.temperature;
   if (llm.maxTokens !== undefined) body.max_tokens = llm.maxTokens;
+  // ★ 思考级别（REQ-20261016-001 · D5 通用协议）：仅在配置了档位时出现 —— 未配置时该**键不得存在**
+  if (llm.reasoningEffort !== undefined) body.reasoning_effort = llm.reasoningEffort;
   // ⚠️ 不传 max_tokens 是默认行为（S01 §3：该上游 reasoning token 与 max_tokens 关系不确定）
 
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -314,7 +333,7 @@ export async function* streamChat(
       if (looksLikeToolsUnsupported(resp.ok ? 400 : resp.status, text)) {
         throw new ToolsUnsupportedError(`上游不支持 function calling：${truncate(text, 200)}`);
       }
-      if (!resp.ok) throw mapUpstreamError(resp.status, text);
+      if (!resp.ok) throw mapUpstreamError(resp.status, text, llm.reasoningEffort);
       throw new LlmUpstreamError(`上游返回非 SSE JSON 响应：${truncate(text, 200)}`, true);
     }
 
