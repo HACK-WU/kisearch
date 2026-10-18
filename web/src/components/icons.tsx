@@ -60,6 +60,13 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="M13 3v8h8M7.5 15h9M7.5 18h6" />
     </>
   ),
+  /** 「在页内打开」：左侧文档 + 右侧展开箭头（区别于全屏 / 外部链接） */
+  'open-inline': (
+    <>
+      <path d="M4 4.5h8.5v15H4z" />
+      <path d="M13.5 12h7m-3.2-3.2L20.5 12l-3.2 3.2" />
+    </>
+  ),
   sun: (
     <>
       <circle cx="12" cy="12" r="4" />

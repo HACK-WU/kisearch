@@ -5,7 +5,7 @@
  * 原文：ki_get_module_info
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -32,6 +32,12 @@ import {
   type ScopedDocumentView,
 } from '@/lib/documentLinks';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
+import {
+  browseViewReducer,
+  deriveBrowseMode,
+  initialBrowseView,
+  type BrowseViewMode,
+} from '@/lib/browseReadMode';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
   applyOpenPaths,
@@ -158,10 +164,14 @@ export function BrowsePage(): JSX.Element {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [searchQ, setSearchQ] = useState('');
   /**
-   * 文档打开来源：树点击 → 就地渲染在右侧阅读区（inline）；
-   * 检索结果点击 → 右侧抽屉滑出、结果列表保持可见（与语义检索页一致）。
+   * 主区视图状态（REQ-20261018-001）：
+   * - `viewMode`：文档呈现形态 —— 内联阅读区 / 右侧抽屉；
+   * - `resultsHidden`：用户用「在页内打开」显式隐藏了结果列表。
+   *
+   * 不用原 `viewingSource: 'tree' | 'search'`：它同时承担"从哪来"与"怎么显示"两个语义，
+   * 加了"页内打开结果"这第三种入口后必然打架（从结果来、却要内联显示）。
    */
-  const [viewingSource, setViewingSource] = useState<'tree' | 'search'>('tree');
+  const [browseView, dispatchBrowseView] = useReducer(browseViewReducer, initialBrowseView);
   // 阅读器全屏时把 Browse 导航（Group 树）带入工作区；默认折叠，可从收起态展开。
   // 文档列表卡已按用户决策移除——全屏阅读以树选文档即可，列表与正文重复。
   const [readerFullscreen, setReaderFullscreen] = useState(false);
@@ -266,7 +276,7 @@ export function BrowsePage(): JSX.Element {
         setTreeCollapsed(false);
         setActiveGroup(group);
       }
-      setViewingSource('tree');
+      dispatchBrowseView({ type: 'open-inline' });
       setMobileReaderOpen(true);
       setQ('');
       setSearchQ('');
@@ -313,6 +323,8 @@ export function BrowsePage(): JSX.Element {
     setQ('');
     setSearchQ('');
     setSelectedTag('');
+    // 上一个 scope 的「页内打开」不应带到新 scope（q 被清空后结果态本就不存在，这里一并归零）
+    dispatchBrowseView({ type: 'show-results' });
     // 左树状态按 scope 分桶：切换后重新读取该 scope 的目录状态，避免把上一个 scope 的布局写过去
     const savedTree = readBrowseTreeState(scope);
     savedOpenPathsRef.current = savedTree.openPaths;
@@ -342,6 +354,17 @@ export function BrowsePage(): JSX.Element {
     const timer = window.setTimeout(() => setSearchQ(q.trim()), 300);
     return () => window.clearTimeout(timer);
   }, [q]);
+
+  /**
+   * 检索条件一变即回到结果列表（REQ-20261018-001 R5）。
+   *
+   * 页内阅读没有显式「返回检索结果」入口（用户 D3 拍板），修改检索词 / 切换 tag 就是唯一回退路径：
+   * 不自动复位的话，用户会陷入"输入了词却仍停在正文、看不到结果"的错觉。
+   * 用输入值 `q` 而非防抖后的 `searchQ`：一敲字就复位，不等 300ms。
+   */
+  useEffect(() => {
+    dispatchBrowseView({ type: 'show-results' });
+  }, [q, selectedTag]);
 
   // 浏览页：禁止外层 .ki-content 滚动，让双栏内部各自滚动
   useEffect(() => {
@@ -427,6 +450,20 @@ export function BrowsePage(): JSX.Element {
   });
   const searchDocs = searchQuery.data?.docs ?? [];
   const isSearching = q.trim().length > 0;
+  /**
+   * 主区形态（REQ-20261018-001）：结果列表可见 = 有检索词 **且** 未被「在页内打开」隐藏。
+   *
+   * 原实现是 `showingResults = isSearching`（检索态下主区恒为结果列表，2026-10-16 决策：
+   * 防止"先开着文档再搜索，主区仍是旧文档"）。页内打开引入了第三种意图，故拆成派生状态；
+   * 原决策由 R5 守住 —— 检索条件一变立即回到结果列表。
+   */
+  const readMode = deriveBrowseMode({
+    isSearching,
+    resultsHidden: browseView.resultsHidden,
+    hasViewing: currentViewing !== null,
+  });
+  const showingResults = readMode === 'results';
+  const readingInline = readMode === 'reading';
 
   /**
    * 全库搜索框在两种状态下**换宿主**渲染：
@@ -476,15 +513,63 @@ export function BrowsePage(): JSX.Element {
     }
     return [...byKey.values()];
   }, [data?.docs, groupDocs, searchDocs]);
-  /** 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。 */
-  const openDocument = useCallback((doc: DocumentView, source: 'tree' | 'search' = 'tree'): void => {
-    setViewingSource(source);
+  /**
+   * 打开文档时把知识目录同步到它所在的 Group（REQ-20261018-001 D4：抽屉与页内两条路径共用）。
+   *
+   * 这里**直接**展开目标 Group 与祖先链，而不是只改 activeGroup 等 effect 去展开：
+   * 重复打开同一篇文档时 activeGroup / currentViewing 的依赖值都没变，effect 不会重跑，
+   * 用户手动折叠过的 Group 会保持折叠 —— 目录看起来"没切过去"。
+   * 同时清掉滚动去重键，保证重新展开后仍会滚到该行。
+   */
+  const syncDirectoryTo = useCallback((group?: string): void => {
+    if (!group) return;
+    setTreeCollapsed(false);
+    setActiveGroup(group);
+    setTree((prev) => {
+      const revealed = revealGroupPath(prev, group);
+      const target = findGroupNode(revealed, group);
+      return target && !target.open ? toggleNodeOpen(revealed, group) : revealed;
+    });
+    // 已由上面的 setTree 完成展开，effect 不必再跑一次；但仍保持"选中项已揭示"的语义。
+    revealedActiveGroupRef.current = group;
+    revealedDirectoryTarget.current = '';
+  }, []);
+
+  /**
+   * 手动打开文档是新的导航起点，不沿用上一次文档链接产生的历史。
+   *
+   * `syncDirectory=false` 只给「默认打开第一篇」用：那是页面初始化，不是用户导航，
+   * 不应把用户持久化的目录折叠态强行展开（否则刷新一次就把「收起知识目录」的偏好重置）。
+   */
+  const openDocument = useCallback((
+    doc: DocumentView,
+    mode: BrowseViewMode = 'inline',
+    syncDirectory = true,
+  ): void => {
+    dispatchBrowseView({ type: mode === 'drawer' ? 'open-drawer' : 'open-inline' });
     setHistory([]);
     setForwardHistory([]);
+    if (syncDirectory) syncDirectoryTo(doc.group);
     const target = { ...doc, scope };
     setViewing(target);
     writeBrowseUrl(target, readerFullscreen);
-  }, [scope, readerFullscreen, writeBrowseUrl]);
+  }, [scope, readerFullscreen, writeBrowseUrl, syncDirectoryTo]);
+
+  /**
+   * 结果行「在页内打开」：隐藏结果列表，主区切正文，左侧目录同步定位。
+   * 窄屏同时展开阅读覆盖层（与树点击同一口径）。
+   *
+   * 同时清空全库检索词：搜索框属于结果态，留在阅读态会让人误以为"还在检索"，
+   * 且按 D3 没有返回入口 —— 清空后搜索框回到空态，输入新词即重新进入结果列表。
+   * 正文高亮不受影响：它走 `viewing.highlightQuery`（打开瞬间的快照），不是这里的 `q`。
+   */
+  const openDocumentInline = useCallback((doc: DocumentView): void => {
+    setMobileReaderOpen(true);
+    dispatchBrowseView({ type: 'hide-results' });
+    setQ('');
+    setSearchQ('');
+    openDocument(doc, 'inline');
+  }, [openDocument]);
 
   /**
    * 默认打开第一篇：数据就绪、有文档、且用户尚未打开任何文档时，自动展示第一篇内容。
@@ -505,7 +590,8 @@ export function BrowsePage(): JSX.Element {
     const first = knownDocs[0];
     if (!first) return;
     autoOpenRef.current = true;
-    openDocument({ module: first.name, group: first.group, path: first.path });
+    // 默认打开不是用户导航：不强制展开目录（保留用户持久化的折叠偏好）
+    openDocument({ module: first.name, group: first.group, path: first.path }, 'inline', false);
   }, [currentViewing, isLoading, isSearching, knownDocs, openDocument, scope, searchParams]);
 
   // ── 树内文档叶子 ──
@@ -549,13 +635,16 @@ export function BrowsePage(): JSX.Element {
       });
   }, [scope, queryClient]);
 
-  /** 关闭抽屉后再次打开文档时从头开始记录导航历史。 */
+  /** 关闭文档后再次打开时从头开始记录导航历史。 */
   const closeDocument = useCallback((): void => {
     setHistory([]);
     setForwardHistory([]);
     setReaderFullscreen(false);
     setReaderOutlineCollapsed(true);
     setViewing(null);
+    // 结果列表复位：检索词非空时关闭文档应回落到结果（需求 N4），
+    // 否则会停在"有检索词 + 无文档"的空态 —— 页内打开又没有返回入口，等于死路。
+    dispatchBrowseView({ type: 'show-results' });
     // URL 里的文档参数一并清掉，否则刷新会把刚关掉的文档又打开。
     writeBrowseUrl(null, false);
   }, [writeBrowseUrl]);
@@ -569,7 +658,7 @@ export function BrowsePage(): JSX.Element {
    * 保留后头部与阅读态是同一套 DOM；之后清空搜索会自然回到这篇文档的正文（符合"我确实看过它"）。
    */
   const closeSearchDrawer = useCallback((): void => {
-    setViewingSource('tree');
+    dispatchBrowseView({ type: 'close-drawer' });
   }, []);
 
   /** 返回最近一次本地链接跳转前的文档，并同步恢复其 Group（祖先展开由选中 effect 统一处理）。 */
@@ -658,10 +747,12 @@ export function BrowsePage(): JSX.Element {
     setActiveGroup(node.path);
   };
 
-  // 搜索命中集（后端跨组检索结果）：仅用于过滤树内文档叶子，不隐藏目录本身
+  // 搜索命中集（后端跨组检索结果）：仅用于过滤树内文档叶子，不隐藏目录本身。
+  // 页内阅读时结果列表已让位 ⇒ 目录恢复完整（否则正文命中的文档在目录里根本不存在，
+  // 「目录切过去」无从谈起 —— REQ-20261018-001 R3 / 护栏 #4）。
   const matchedDocKeys = useMemo(
-    () => (isSearching ? new Set(searchDocs.map((d) => `${d.group}\u0000${d.name}`)) : null),
-    [isSearching, searchDocs],
+    () => (showingResults ? new Set(searchDocs.map((d) => `${d.group}\u0000${d.name}`)) : null),
+    [showingResults, searchDocs],
   );
 
   /** hideSelf=true 时跳过本行、只渲染其子内容（全屏展平单根目录用） */
@@ -720,10 +811,11 @@ export function BrowsePage(): JSX.Element {
                 data-ki-group={doc.group}
                 data-ki-document={doc.name}
                 onClick={() => {
-                  // 检索态下从树打开文档也走抽屉，避免把结果列表顶掉
+                  // 结果列表可见时从树打开也走抽屉，避免把结果列表顶掉；
+                  // 页内阅读态则就地替换正文，不再叠一个抽屉（REQ-20261018-001 R6）。
                   openDocument(
                     { module: doc.name, group: doc.group, path: doc.path },
-                    isSearching ? 'search' : 'tree',
+                    showingResults ? 'drawer' : 'inline',
                   );
                   setMobileReaderOpen(true);
                 }}
@@ -798,7 +890,8 @@ export function BrowsePage(): JSX.Element {
 
   /**
    * 全文检索结果面板——展示在右侧主区，与语义检索页同构（RESULTS kicker + 标题 + meta + 结果项点击打开）。
-   * 交互约定：结果只在主区出现，左侧目录保持原样（仅叠加命中高亮，不筛选、不换标题、不替换树）。
+   * 交互约定：结果只在主区出现；左侧目录不换标题、不替换树，仅按「文件名命中」过滤文档叶子
+   * （正文命中不参与目录过滤）。页内阅读时结果让位，过滤一并解除（见 matchedDocKeys）。
    */
   const renderSearchResults = (): JSX.Element => {
     const total = searchDocs.length + fullTextHits.length;
@@ -839,23 +932,37 @@ export function BrowsePage(): JSX.Element {
                     {searchQuery.isFetching ? '搜索中…' : `${searchDocs.length} 条`}
                   </span>
                 </div>
-                {searchDocs.map((doc) => (
-                  <button
-                    type="button"
-                    className="ki-browse-fulltext__item"
-                    key={`name:${doc.group}\u0000${doc.name}`}
-                    onClick={() => {
-                      // 带上 highlightQuery：正文若含该词，打开后自动高亮并出现「取消高亮 / 下一个命中」导航
-                      openDocument(
-                        { module: doc.name, group: doc.group, path: doc.path, highlightQuery: searchQ },
-                        'search',
-                      );
-                    }}
-                  >
-                    <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
-                    <span className="ki-browse-fulltext__path">{doc.group}</span>
-                  </button>
-                ))}
+                {searchDocs.map((doc) => {
+                  // 带上 highlightQuery：正文若含该词，打开后自动高亮并出现「取消高亮 / 下一个命中」导航
+                  const target = {
+                    module: doc.name,
+                    group: doc.group,
+                    path: doc.path,
+                    highlightQuery: searchQ,
+                  };
+                  return (
+                    <div className="ki-browse-fulltext__row" key={`name:${doc.group}\u0000${doc.name}`}>
+                      {/* 主点击保持原行为：右侧抽屉（REQ-20261018-001 护栏 #1） */}
+                      <button
+                        type="button"
+                        className="ki-browse-fulltext__item"
+                        onClick={() => openDocument(target, 'drawer')}
+                      >
+                        <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
+                        <span className="ki-browse-fulltext__path">{doc.group}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ki-browse-fulltext__open-inline"
+                        onClick={() => openDocumentInline(target)}
+                        title="在页内打开（替换当前结果列表）"
+                        aria-label={`在页内打开 ${doc.group} / ${doc.name}`}
+                      >
+                        <Icon name="open-inline" className="ki-icon ki-icon--sm" />
+                      </button>
+                    </div>
+                  );
+                })}
               </section>
             )}
             <section className="ki-browse-results__group">
@@ -874,24 +981,44 @@ export function BrowsePage(): JSX.Element {
                   const known = knownDocs.find((doc) => doc.group === hit.group && doc.name === hit.relation);
                   const group = hit.group ?? known?.group ?? '';
                   const relation = hit.relation ?? known?.name ?? '';
+                  // 脏数据（缺 Group / 文档名）无法在目录中定位：动作禁用并说明原因（需求 N1）
+                  const canOpen = Boolean(relation && group);
+                  const target = { module: relation, group, path: known?.path, highlightQuery: searchQ };
                   return (
-                    <button
-                      type="button"
-                      className="ki-browse-fulltext__item"
+                    <div
+                      className="ki-browse-fulltext__row"
                       key={`${hit.memoryId ?? index}:${hit.group ?? ''}:${hit.relation ?? ''}`}
-                      onClick={() => {
-                        if (!relation || !group) return;
-                        openDocument({ module: relation, group, path: known?.path, highlightQuery: searchQ }, 'search');
-                      }}
                     >
-                      <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
-                      <span className="ki-browse-fulltext__path">{group}</span>
-                      <span className="ki-browse-fulltext__snippet">
-                        {/* 与语义检索页全文模式同口径：命中 chunk（content）优先于文件级原文（original），
-                            否则整篇原文的开头会把命中位置挤出片段，高亮看起来「消失」 */}
-                        {highlightMatch(makeSearchSnippet(hit.content ?? hit.original ?? '', searchQ), searchQ)}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        className="ki-browse-fulltext__item"
+                        onClick={() => {
+                          if (!canOpen) return;
+                          openDocument(target, 'drawer');
+                        }}
+                      >
+                        <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
+                        <span className="ki-browse-fulltext__path">{group}</span>
+                        <span className="ki-browse-fulltext__snippet">
+                          {/* 与语义检索页全文模式同口径：命中 chunk（content）优先于文件级原文（original），
+                              否则整篇原文的开头会把命中位置挤出片段，高亮看起来「消失」 */}
+                          {highlightMatch(makeSearchSnippet(hit.content ?? hit.original ?? '', searchQ), searchQ)}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ki-browse-fulltext__open-inline"
+                        onClick={() => {
+                          if (!canOpen) return;
+                          openDocumentInline(target);
+                        }}
+                        disabled={!canOpen}
+                        title={canOpen ? '在页内打开（替换当前结果列表）' : '缺少 Group 或文档名，无法在页内打开'}
+                        aria-label={canOpen ? `在页内打开 ${group} / ${relation}` : '无法在页内打开：缺少文档定位信息'}
+                      >
+                        <Icon name="open-inline" className="ki-icon ki-icon--sm" />
+                      </button>
+                    </div>
                   );
                 })
               )}
@@ -1032,15 +1159,6 @@ export function BrowsePage(): JSX.Element {
       />
     );
   };
-
-  /**
-   * 检索态下主区**恒为结果列表**（搜索结果要像语义检索页那样展示，不能被之前的阅读态顶掉——
-   * 用户实测：先打开着文档再搜索时，主区仍是旧文档，看不到结果）。
-   * 此时无论从结果还是从树打开文档，都走右侧抽屉，结果列表不被打断。
-   * 非检索态：树入口就地阅读（保持原浏览体验）。
-   */
-  const showingResults = isSearching;
-  const readingInline = currentViewing !== null && !showingResults;
 
   /**
    * 焦点接力（配合 `pageSearchRef`）：搜索框换宿主时把焦点交到新宿主，
@@ -1240,7 +1358,11 @@ export function BrowsePage(): JSX.Element {
                 <div className="ki-empty" style={{ padding: 64 }}>
                   <div>
                     <h3>从左侧目录选择文档开始阅读</h3>
-                    <p>展开目录，点击文档名即可在此处连续阅读；用上方搜索框检索时，结果会显示在这里，点击结果从右侧抽屉打开原文。</p>
+                    <p>
+                      展开目录，点击文档名即可在此处连续阅读；用上方搜索框检索时，结果会显示在这里：
+                      点击结果在右侧抽屉预览，点行尾的「页内打开」直接在此处阅读并同步定位左侧目录。
+                      页内阅读时搜索框会清空，输入新的检索词（或切换 tag）即回到结果列表。
+                    </p>
                   </div>
                 </div>
               )}
@@ -1249,8 +1371,9 @@ export function BrowsePage(): JSX.Element {
         </section>
       </div>
 
-      {/* 检索结果点开的文档：右侧抽屉（与语义检索页一致），结果列表保持可见 */}
-      {currentViewing && viewingSource === 'search' && renderViewer(true)}
+      {/* 结果行默认点击打开的文档：右侧抽屉（与语义检索页一致），结果列表保持可见。
+          「在页内打开」走 viewMode='inline'，此时不渲染抽屉 —— 同一篇正文只留一个实例（护栏 #5）。 */}
+      {currentViewing && browseView.viewMode === 'drawer' && renderViewer(true)}
     </>
   );
 }

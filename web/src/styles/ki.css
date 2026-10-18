@@ -2606,9 +2606,36 @@ a:hover { text-decoration: underline; }
 .ki-browse-filename-head { padding: 0 4px 8px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600; }
 .ki-browse-fulltext { margin-top: 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); overflow: hidden; }
 .ki-browse-fulltext__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--ki-color-border); font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
-.ki-browse-fulltext__item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--ki-color-border); background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.ki-browse-fulltext__item:last-child { border-bottom: 0; }
-.ki-browse-fulltext__item:hover { background: var(--ki-color-hover); }
+/* 结果行：主按钮（打开抽屉）+ 行尾次级动作（在页内打开）——REQ-20261018-001
+   分隔线从 item 移到 row，保证动作区与正文同属一行、hover 高亮连续 */
+.ki-browse-fulltext__item { display: flex; flex-direction: column; align-items: flex-start; flex: 1 1 auto; min-width: 0; width: 100%; padding: 10px 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.ki-browse-fulltext__row { display: flex; align-items: stretch; border-bottom: 1px solid var(--ki-color-border); }
+.ki-browse-fulltext__row:last-child { border-bottom: 0; }
+.ki-browse-fulltext__row:hover { background: var(--ki-color-hover); }
+/* 行尾动作：默认隐形，hover / 键盘聚焦 / 触屏常显。
+   用 opacity 而非 display:none —— 保证 Tab 可达、读屏可读；
+   同时用 pointer-events 挡住"隐身状态被误点"（行尾空白处突然触发页内打开会很意外） */
+.ki-browse-fulltext__open-inline {
+  flex: none; align-self: center;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; margin: 0 10px 0 2px;
+  border: 1px solid transparent; border-radius: var(--ki-radius-sm);
+  background: transparent; color: var(--ki-color-text-subtle);
+  cursor: pointer; opacity: 0; pointer-events: none;
+  transition: opacity .12s ease, color .12s ease, background .12s ease;
+}
+.ki-browse-fulltext__row:hover .ki-browse-fulltext__open-inline,
+.ki-browse-fulltext__row:focus-within .ki-browse-fulltext__open-inline { opacity: 1; pointer-events: auto; }
+.ki-browse-fulltext__open-inline:hover { color: var(--ki-color-primary); background: var(--ki-color-surface); border-color: var(--ki-color-border); }
+.ki-browse-fulltext__open-inline:focus-visible { opacity: 1; pointer-events: auto; outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+/* 脏数据行（缺 Group / 文档名）：保留低透明度图标而不是完全消失 ——
+   用户能看出"这里本该有入口但不可用"，title/aria-label 仍可被读屏读到 */
+.ki-browse-fulltext__row:hover .ki-browse-fulltext__open-inline:disabled,
+.ki-browse-fulltext__row:focus-within .ki-browse-fulltext__open-inline:disabled,
+.ki-browse-fulltext__open-inline:disabled { opacity: .35; pointer-events: auto; cursor: not-allowed; }
+@media (hover: none) {
+  .ki-browse-fulltext__open-inline { opacity: 1; pointer-events: auto; }
+}
 .ki-browse-fulltext__title { font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
 .ki-browse-fulltext__path { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
 .ki-browse-fulltext__snippet { margin-top: 6px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.55; }
