@@ -338,7 +338,17 @@ const STATIC_MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 };
 
-/** 提供 --web 静态页面：GET 请求，支持 SPA fallback（非 /api /mcp 的 404 返回 index.html） */
+/** 固定名文件（index.html 等）：每次回源校验，避免旧 HTML 继续引用已删除的 hash chunk */
+const HTML_CACHE_CONTROL = 'no-cache';
+/** `assets/` 下的 Vite 产物带 content hash：内容变则文件名变，可长缓存 */
+const ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+/**
+ * 提供 --web 静态页面：GET 请求。
+ *
+ * SPA fallback **只对无扩展名的前端路由**生效；`assets/*` 与已知静态扩展名的缺失文件一律 404
+ * （回 index.html 会让动态 import 拿到 HTML，错误信息退化为 MIME 失败，掩盖真因）。
+ */
 export function serveStatic(res: http.ServerResponse, webDir: string, pathname: string): void {
   try {
     // 防路径穿越：decodeURIComponent 后 normalize，确保解析路径仍在 webDir 内
@@ -376,16 +386,35 @@ export function serveStatic(res: http.ServerResponse, webDir: string, pathname: 
       }
     }
 
-    // 读文件；不存在时 SPA fallback（仅对非静态资源扩展名）
+    const ext = path.extname(resolved).toLowerCase();
+    /**
+     * 是否为构建产物（`assets/` 下的 chunk，或已知静态扩展名）。
+     *
+     * 这类文件**缺失必须回 404，不能走 SPA fallback**：回 index.html 会让浏览器拿到一份
+     * `200 + text/html` 的 `.js`，动态 `import()` 只会报「Failed to fetch dynamically imported
+     * module / MIME type mismatch」，把「文件已删」伪装成前端加载故障。
+     * 2026-10-18 实测：重新构建后旧标签页仍在请求已删除的 `mermaid.core-<旧 hash>.js`，
+     * 页面表现为图表红标「渲染不可用」，排查方向一度被误导到 mermaid 语法。
+     */
+    const isBuildAsset = relative.startsWith('assets/') || STATIC_MIME[ext] !== undefined;
+
+    // 读文件；不存在时：构建产物 404，只有**无扩展名的前端路由**才 SPA fallback
     let content: Buffer;
     try {
       content = fs.readFileSync(resolved);
     } catch {
+      if (isBuildAsset) {
+        sendJson(res, 404, { ok: false, error: 'Not Found' });
+        return;
+      }
       // SPA fallback：非 /api /mcp 的 GET 404 都回 index.html（前端路由接管）
       const index = path.join(webDir, 'index.html');
       if (fs.existsSync(index)) {
         content = fs.readFileSync(index);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': HTML_CACHE_CONTROL,
+        });
         res.end(content);
         return;
       }
@@ -393,8 +422,13 @@ export function serveStatic(res: http.ServerResponse, webDir: string, pathname: 
       return;
     }
 
-    const ext = path.extname(resolved).toLowerCase();
-    res.writeHead(200, { 'Content-Type': STATIC_MIME[ext] ?? 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': STATIC_MIME[ext] ?? 'application/octet-stream',
+      // assets/ 下的文件名带 content hash（内容变则文件名变），可长缓存；
+      // 其余（index.html、favicon 等固定名）必须每次回源校验，否则重新构建后
+      // 旧 HTML 会继续引用已删除的 hash chunk（同上 2026-10-18 故障的触发条件）。
+      'Cache-Control': relative.startsWith('assets/') ? ASSET_CACHE_CONTROL : HTML_CACHE_CONTROL,
+    });
     res.end(content);
   } catch {
     sendJson(res, 500, { ok: false, error: 'Internal error serving static file' });

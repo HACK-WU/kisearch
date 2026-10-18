@@ -900,6 +900,22 @@ describe('--web 静态服务', () => {
       assert.equal(spa.status, 200);
       assert.ok((await spa.text()).includes('ki-web'));
 
+      // 但**缺失的构建产物**必须 404：回 index.html 会让动态 import 拿到 text/html，
+      // 错误信息退化成「MIME / Failed to fetch dynamically imported module」，
+      // 把「文件已删除」伪装成渲染故障（2026-10-18 实测：旧标签页请求已删除的
+      // mermaid.core-<旧 hash>.js → 图表红标「渲染不可用」）。
+      const missingAsset = await fetch(`${base}/assets/index-deadbeef.js`);
+      assert.equal(missingAsset.status, 404);
+      assert.ok(!(await missingAsset.text()).includes('ki-web'));
+
+      // 缓存策略：固定名文件（index.html 等）不缓存；assets/ 下带 hash 的产物可长缓存
+      assert.equal(root.headers.get('cache-control'), 'no-cache');
+      fs.mkdirSync(path.join(webDir, 'assets'), { recursive: true });
+      fs.writeFileSync(path.join(webDir, 'assets', 'index-abc123.js'), 'console.log(2)');
+      const hashed = await fetch(`${base}/assets/index-abc123.js`);
+      assert.equal(hashed.status, 200);
+      assert.ok((hashed.headers.get('cache-control') ?? '').includes('immutable'), String(hashed.headers.get('cache-control')));
+
       // 编码后的 .. 不能借 startsWith(webRoot) 的前缀误判读到相邻目录。
       const traversal = await new Promise<{ status: number; body: string }>((resolve, reject) => {
         const req = http.get({ hostname: '127.0.0.1', port: addr.port, path: '/%2e%2e/webdist-evil/secret.txt' }, (res) => {
