@@ -6,9 +6,10 @@
  *
  * 🔴 浮层必须 **Portal 到 body + fixed 定位**：它挂在侧边栏 footer，而 `.ki-sidebar` 带
  * `overflow-x: hidden`（ki.css:161）——就地渲染时 272px 的浮层会被 196px 的侧栏裁掉右侧大半。
- * 位置在展开时测量锚点算一次（浮层**向上**弹：footer 在页面底部，向下弹会被视口裁掉）。
+ * 位置按锚点矩形计算（浮层**向上**弹：footer 在页面底部，向下弹会被视口裁掉）；
+ * 展开时算一次，之后只在 **resize / 滚动** 时重新测量 —— 滚动**不关闭**浮层（见下方 useEffect 注释）。
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@/components/icons';
 import {
@@ -32,16 +33,27 @@ export function CodeLangSelect(): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // 展开时测量锚点（视口右侧不够就左移，但不越过左边界）
-  useLayoutEffect(() => {
-    if (!open) return;
+  /** 测量锚点（视口右侧不够就左移，但不越过左边界）；锚点已完全滚出视口时返回 null */
+  const measureAnchor = useCallback((): { left: number; bottom: number } | null => {
     const rect = rootRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    setAnchor({
+    if (!rect) return null;
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight) return null;
+    return {
       left: Math.max(8, Math.min(rect.left, window.innerWidth - PANEL_WIDTH - 8)),
       bottom: window.innerHeight - rect.top + PANEL_GAP,
-    });
-  }, [open]);
+    };
+  }, []);
+
+  // 展开时测量锚点
+  useLayoutEffect(() => {
+    if (!open) return;
+    const next = measureAnchor();
+    if (!next) {
+      setOpen(false);
+      return;
+    }
+    setAnchor(next);
+  }, [open, measureAnchor]);
 
   useEffect(() => {
     if (!open) return;
@@ -54,27 +66,52 @@ export function CodeLangSelect(): JSX.Element {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setOpen(false);
     };
-    // 位置按展开那一刻测量 ⇒ 窗口尺寸变化、或承载锚点的容器滚动（侧栏 `overflow-y: auto`）
-    // 都会让浮层与按钮分离，直接关掉最省事，也不会让浮层停在错误位置。
-    // 用捕获阶段挂 scroll：滚动可能发生在任意可滚动祖先上，冒泡阶段收不全。
-    const close = (): void => setOpen(false);
+    // 🔴 滚动时「重新测量」而不是「一滚就关」（旧实现 `window.addEventListener('scroll', close, true)`）：
+    // ① 浮层是 fixed，页面内容（`.ki-content`）滚动时侧栏按钮并不动 ⇒ 关掉纯属惩罚用户；
+    // ② 捕获阶段的 scroll 连浮层内部也收（`.ki-code-lang__grid` 自带 `max-height: 264px` 滚动）
+    //    ⇒ 在浮层里滚轮翻语言列表，浮层自己把自己关了。
+    // 现在：锚点位置没变就什么都不做，变了就跟随；只有锚点滚出视口才关闭。
+    let frame: number | null = null;
+    const sync = (): void => {
+      frame = null;
+      const next = measureAnchor();
+      if (!next) {
+        setOpen(false);
+        return;
+      }
+      setAnchor((prev) => (prev && prev.left === next.left && prev.bottom === next.bottom ? prev : next));
+    };
+    const scheduleSync = (): void => {
+      // `null` 判据而不是 `0`：rAF 句柄的起始值规范没保证，别拿它当「没有排程」
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(sync);
+    };
+    const onScroll = (event: Event): void => {
+      const target = event.target;
+      // 浮层自身内部的滚动与定位无关，直接忽略
+      if (panelRef.current && target instanceof Node && panelRef.current.contains(target)) return;
+      scheduleSync();
+    };
     document.addEventListener('mousedown', onDocMouseDown);
     document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', scheduleSync);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
       document.removeEventListener('mousedown', onDocMouseDown);
       document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', scheduleSync);
+      window.removeEventListener('scroll', onScroll, true);
     };
-  }, [open]);
+  }, [open, measureAnchor]);
 
+  // ⚠️ 选中**不关闭**浮层（用户 2026-10-19：「点击任意一个语义后，也会自动关闭」）：
+  // 这是设置面板而非一次性下拉 —— 用户要连续试几门语言看代码块效果，关一次就得重新
+  // 打开一次。关闭只留给 Escape / 点浮层外部（trigger 按钮再点一次也关）。
   const pick = (value: string): void => {
     const next = value.trim();
     if (!next) return;
     writePreferredLang(next);
-    setOpen(false);
   };
 
   const activeLang = canonicalLang(preferred);
@@ -104,6 +141,12 @@ export function CodeLangSelect(): JSX.Element {
           >
             <p className="ki-code-lang__hint">
               多语言代码块默认展开这一门；不含该语言的组仍展示第一个，手动切换不受影响。
+              {/* 点选不再自动关闭 ⇒ ① 必须写明怎么关，否则用户无处可退（fail-loud + 给出路）；
+                  ② 必须给出「已生效」的回显 —— 自定义语言（haskell 等）不在网格里，没有高亮可看。 */}
+              <span className="ki-code-lang__hint-tail">
+                {preferred ? `当前首选：${preferred}` : '当前不指定'}
+              </span>
+              <span className="ki-code-lang__hint-tail">点空白处或按 Esc 关闭</span>
             </p>
             <div className="ki-code-lang__grid">
               {CODE_LANG_OPTIONS.map((lang) => (
@@ -139,10 +182,7 @@ export function CodeLangSelect(): JSX.Element {
             <button
               type="button"
               className="ki-code-lang__clear"
-              onClick={() => {
-                writePreferredLang('');
-                setOpen(false);
-              }}
+              onClick={() => writePreferredLang('')}
               disabled={!preferred}
             >
               不指定（展示每组第一个）

@@ -2471,6 +2471,9 @@ a:hover { text-decoration: underline; }
   border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2);
 }
 .ki-code-lang__hint { margin: 0 0 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); line-height: 1.6; }
+/* 「当前首选」与「怎么关」各占一行、再弱一级：点选不再自动关闭后，这两句是用户确认生效
+   与退出浮层的唯一可见依据（自定义语言在网格里没有高亮项）。 */
+.ki-code-lang__hint-tail { display: block; margin-top: 2px; font-size: 11px; opacity: 0.8; }
 .ki-code-lang__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; max-height: 264px; overflow-y: auto; }
 .ki-code-lang__option {
   padding: 6px 8px; border: 0; border-radius: 5px; background: none; color: var(--ki-color-text);
