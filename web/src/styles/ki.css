@@ -1559,10 +1559,10 @@ a:hover { text-decoration: underline; }
   pointer-events: none;
 }
 .ki-drawer__search-glyph { width: 14px; height: 14px; }
-/* 输入框与其附属（图标 / 计数 / ↑↓ / ✕）的相对定位容器。
-   ⚠️ 必须包这一层：✕ 与图标是 absolute，只能相对**输入框所在这一格**定位；
-   若相对整个 `.ki-drawer__search` 定位，✕ 会跑到组的最右侧 —— 而组右侧现在是「清空」按钮，
-   于是 ✕ 叠在清空上（2026-10-16 用户实测到的重叠）。 */
+/* 输入框与其附属（absolute 的放大镜图标、同行的计数 / ↑↓）的相对定位容器。
+   ⚠️ 必须包这一层：图标是 absolute，只能相对**输入框所在这一格**定位；
+   若相对整个 `.ki-drawer__search` 定位，图标会跑到组的最右侧 —— 而组右侧现在是「清空」按钮，
+   于是叠在清空上（2026-10-16 用户实测过同源的错位）。 */
 .ki-drawer__search-field {
   position: relative;
   display: flex;
@@ -1578,7 +1578,7 @@ a:hover { text-decoration: underline; }
   width: auto;
   min-width: 0;
   padding-left: 32px;
-  /* 右侧 30 → 8：✕ 从"覆盖在输入框右端"改成同一行的 flex 项，不再需要给它预留空间 */
+  /* 右侧 8：常规内边距（原先为绝对定位的 ✕ 预留 30px；✕ 已于 2026-10-19 按用户要求移除） */
   padding-right: 8px;
 }
 /* 「本文」模式：图标与描边转主色 —— "在搜哪儿"必须一眼可辨（另两处信号：placeholder、分段选中态） */
@@ -1586,21 +1586,6 @@ a:hover { text-decoration: underline; }
 .ki-drawer__search--doc .ki-drawer__search-input {
   border-color: color-mix(in srgb, var(--ki-color-primary) 45%, var(--ki-color-border));
 }
-/* 全库模式的「清空检索词」：与输入框同行的 flex 项（原先 absolute 覆盖在输入框右端，
-   在同一个组里出现「清空」按钮后就会叠上去） */
-.ki-drawer__search-clear {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--ki-color-text-subtle);
-  cursor: pointer;
-}
-.ki-drawer__search-clear:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
 /* 「全库|本文」分段：复用检索页「混合|全文」的 .ki-segmented，只压到与输入框同高 */
 .ki-drawer__search-mode { flex: none; padding: 2px; }
 .ki-drawer__search-mode button { min-height: 26px; padding: 0 7px; font-size: var(--ki-font-size-xs); }

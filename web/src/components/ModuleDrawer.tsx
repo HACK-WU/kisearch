@@ -1346,10 +1346,10 @@ export function ModuleDrawer({
                   role="search"
                   aria-label={docSearchMode ? '文档内查找' : '搜索全部文档'}
                 >
-                  {/* 输入框与其附属（图标 / 计数 / ↑↓ / ✕）包一层**相对定位容器**：
-                      附属元素必须相对**输入框**定位，而不是相对整个搜索组 ——
-                      组里还有「全库|本文」与「清空」，相对组定位会让 ✕ 叠到清空按钮上
-                      （2026-10-16 用户实测到的重叠：清空按钮背景里出现了 ✕）。 */}
+                  {/* 输入框与其附属（absolute 的放大镜图标、同行的计数 / ↑↓）包一层**相对定位容器**：
+                      图标必须相对**输入框**定位，而不是相对整个搜索组 ——
+                      组里还有「全库|本文」与「清空」，相对组定位会把图标推出输入框
+                      （2026-10-16 用户实测过同源的错位：✕ 叠到「清空」按钮上）。 */}
                   <div className="ki-drawer__search-field">
                   <span className="ki-drawer__search-icon" aria-hidden="true">
                     {docSearchMode ? ICON_SEARCH_DOC : ICON_SEARCH_GLOBAL}
@@ -1399,16 +1399,9 @@ export function ModuleDrawer({
                       {/* 「本文」模式**不再渲染 ✕**（用户 2026-10-16）：退出由右侧「全库」分段或 Esc 完成，
                           同一处给两个出口反而让人犹豫点哪个 */}
                     </>
-                  ) : inlineSearch.value ? (
-                    <button
-                      className="ki-drawer__search-clear"
-                      type="button"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => inlineSearch.onChange('')}
-                      title="清空检索词"
-                      aria-label="清空检索词"
-                    >✕</button>
                   ) : null}
+                  {/* 「全库」模式**不再渲染 ✕**（用户 2026-10-19）：与右侧常驻的「清空」按钮
+                      职责重复（同一个动作两个出口），清空统一由「清空」承担 */}
                   </div>
                   {/* 范围分段：复用检索页「混合|全文」同款 .ki-segmented，不新造视觉语言。
                       「本文」= 既有文档内查找（含计数、↑↓、Esc 退出）；「全库」= 页面的结果列表。 */}
