@@ -14,6 +14,16 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
+import {
+  activePercentOf,
+  errorStatusOf,
+  isBusyPhase,
+  isCancelledTrack,
+  trackLabelOf,
+  trackToneOf,
+  type ImportFailureStage,
+  type ImportPhase,
+} from '@/lib/importPhase';
 
 interface PendingFile {
   name: string;
@@ -324,7 +334,8 @@ interface DataTransferItemWithEntry {
 }
 
 export interface ImportTaskSummary {
-  phase: 'scanning' | 'uploading' | 'importing' | 'done' | 'failed' | 'unknown';
+  /** 阶段与呈现口径见 `lib/importPhase.ts`（那里是唯一权威，本页只消费） */
+  phase: ImportPhase;
   scope: string;
   text: string;
 }
@@ -351,6 +362,11 @@ function readImportCredential(): ImportCredential | null {
 function clearImportCredentialIf(owner: { uploadId?: string; jobId?: string }): void {
   const current = readImportCredential();
   if (!current) return;
+  /**
+   * 两个 owner 都为空 = 无法判定归属（典型：终态清理时 `uploadPlanRef` 与 `job` 都已被置空）。
+   * 此时**不能**无条件删除 —— localStorage 是单槽共享的，另一标签页可能在跑自己的任务。
+   */
+  if (owner.uploadId === undefined && owner.jobId === undefined) return;
   if (owner.uploadId !== undefined && current.uploadId !== owner.uploadId) return;
   if (owner.jobId !== undefined && current.jobId !== owner.jobId) return;
   try {
@@ -480,10 +496,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setSelectedTags((prev) => prev.filter((t) => t !== tag));
   };
 
-  const [phase, setPhase] = useState<'idle' | ImportTaskSummary['phase']>('idle');
+  const [phase, setPhase] = useState<ImportPhase>('idle');
+  /** 「忙」= 本次任务未结束、不得再发新任务（口径见 `isBusyPhase`） */
+  const busyPhase = isBusyPhase(phase);
   const [job, setJob] = useState<ImportJob | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [failureStage, setFailureStage] = useState<'scan' | 'upload' | 'import' | 'cancelled' | 'unknown' | null>(null);
+  const [failureStage, setFailureStage] = useState<ImportFailureStage>(null);
   const [uploadErrors, setUploadErrors] = useState<{ name: string; error: string }[]>([]);
   const [progressText, setProgressText] = useState('');
   const [uploadStats, setUploadStats] = useState<UploadStats | null>(null);
@@ -498,8 +516,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    *
    * 本页在 AppShell 常驻（`display:none` 隐藏而非卸载），此前切走再切回会保留上一批的
    * 文件选择 / 上传统计 / 错误卡 / 进度文案（用户反馈"上传导入中的数据没有清空"）。
-   * 边界（已与用户确认）：**在途任务不打断**——scanning / uploading / importing / unknown
-   * 原样保留（进度继续、可继续查看）；只有回到 idle / done / failed 这类终态时才清空。
+   * 边界（已与用户确认）：**在途任务不打断**——scanning / uploading / awaiting-confirm /
+   * importing / unknown 原样保留（进度继续、可继续查看）；只有回到 idle / done / failed /
+   * cancelled 这类终态时才清空。
    * Q4（2026-10-10 用户拍板）：Scope / Group / 同名策略 / tags / 切分参数**一并清空**
    * （此前当"偏好"保留，会造成"输入框已填好上次的 Scope 与同名策略、却没确认"的误导态）。
    */
@@ -510,7 +529,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     const wasOn = wasOnImportRoute.current;
     wasOnImportRoute.current = onImportRoute;
     if (!onImportRoute || wasOn) return;
-    if (phase !== 'idle' && phase !== 'done' && phase !== 'failed') return;
+    if (phase !== 'idle' && phase !== 'done' && phase !== 'failed' && phase !== 'cancelled') return;
     /**
      * R2（REQ-20261009-001）与 R3 的边界：**部分成功不是「本批暂存」，而是「待处置结果」**。
      * `partial`（或结果里仍有未完成清单）时保留 `job`、localStorage 凭据（uploadId）与
@@ -583,7 +602,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * 用户无法判断任务到底结束了没有。
    */
   useEffect(() => {
-    if (phase !== 'done' && phase !== 'failed') return;
+    if (phase !== 'done' && phase !== 'failed' && phase !== 'cancelled') return;
     setCancelState((prev) => (prev === 'idle' ? prev : 'idle'));
     setCancelError('');
   }, [phase]);
@@ -601,11 +620,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       text: phase === 'done'
         ? (uploadErrors.length > 0 || (Array.isArray(job?.result?.errors) && job.result.errors.length > 0)
           ? `导入完成，部分文件失败${doneIndexSuffix}` : `导入完成${doneIndexSuffix}`)
-        : phase === 'failed' ? (failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败')
-          : phase === 'unknown' ? '任务状态待确认'
-            : phase === 'importing' && job?.progress?.total
-              ? `导入中 ${job.progress.done}/${job.progress.total}`
-              : progressText || (phase === 'importing' ? '导入中…' : '上传中…'),
+        : phase === 'failed' ? (failureStage === 'cancelled' ? '导入已取消' : failureStage === 'upload' ? '上传失败' : failureStage === 'scan' ? '读取失败' : '导入失败')
+          : phase === 'cancelled' ? '导入已取消'
+            : phase === 'unknown' ? '任务状态待确认'
+              : phase === 'awaiting-confirm' ? '等待确认是否继续导入'
+                : phase === 'importing' && job?.progress?.total
+                  ? `导入中 ${job.progress.done}/${job.progress.total}`
+                  : progressText || (phase === 'importing' ? '导入中…' : '上传中…'),
     });
   }, [phase, failureStage, progressText, uploadErrors, job?.scope, job?.progress?.done, job?.progress?.total, job?.result, job?.indexState, scope, onTaskChange]);
 
@@ -792,7 +813,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           setPhase('failed');
           setScopeConfirmed(false);
           setFailureStage('cancelled');
-          setError('导入已取消');
+          // 取消不是失败：不写 error（否则主区会弹一张红色"出错"卡，标题与正文都是
+          // 「导入已取消」重复两遍）。状态由右轨「已取消」+ 主按钮旁「导入已取消」承载。
+          setError(null);
         }
       } catch (e) {
         if (!active) return;
@@ -859,7 +882,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   };
 
   const scanSelectedFiles = (list: FileList, message: string): void => {
-    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    if (busyPhase) return;
     setError(null);
     setFailureStage(null);
     setUploadErrors([]);
@@ -903,7 +926,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * 不支持该 API 的浏览器回退到 webkitdirectory input。
    */
   const openDirPicker = async (): Promise<void> => {
-    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    if (busyPhase) return;
     const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
     if (picker) {
       let directory: FileSystemHandleLike;
@@ -979,7 +1002,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragOver(false);
-    if (phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    if (busyPhase) return;
     setError(null);
     setFailureStage(null);
     setUploadErrors([]);
@@ -1101,6 +1124,24 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   };
 
   /**
+   * 把**当前**表单值冻结成一次 run 的 finalize。
+   *
+   * 为什么不在 `start()` 里只算一次：预检命中后「等待确认」期间表单仍可编辑（同名策略 /
+   * Group / 切分参数 / tags / 向量开关），而预检卡片明确写着"确认后按**当前**「同名文档处理」
+   * 策略继续"。若确认时仍用上传开始时的快照，用户恰好在"决定是否接受副本"的时刻改策略却
+   * 不生效（2026-10-19 code review P1）。
+   */
+  const currentFinalize = (): UploadPlan['finalize'] => ({
+    group: group.trim() || undefined,
+    chunkSize: chunkSize ? Number(chunkSize) : undefined,
+    chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
+    vector,
+    tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
+    conflictMode,
+    conflictSuffix: suffixInUse ? conflictSuffix : undefined,
+  });
+
+  /**
    * R6（REQ-20261010-001）：上传完成后的收口——先做重复导入预检，命中则停下来等用户确认，
    * 确认后才显式调 `/api/import/run`（`runImport` 已是「重试未完成」在用的成熟路径）。
    */
@@ -1117,19 +1158,27 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     const matched = preflight?.files?.matched ?? 0;
     if (matched > 0) {
       setPreflightConfirm({ matched, duplicates: preflight?.duplicates ?? [], truncated: Boolean(preflight?.truncated) });
+      // 上传已完成、导入未开始：迁出 uploading，否则右轨会一直说「上传中…」（2026-10-19 报障）
+      setPhase('awaiting-confirm');
+      // 「重试上传」链路进来时 failureStage 可能仍是上一轮的 'upload'，等待期不能再背着它
+      setFailureStage(null);
       setProgressText(`检测到 ${matched} 篇疑似重复，等待你确认`);
       return;
     }
     await launchImport(plan);
   };
 
-  /** 调 /api/import/run 真正启动导入（预检通过或用户确认后） */
+  /** 调 /api/import/run 真正启动导入（预检通过或用户确认后）——策略取**当前**表单值 */
   const launchImport = async (plan: UploadPlan): Promise<void> => {
     setPreflightConfirm(null);
     setProgressText('正在启动导入…');
+    const finalize = currentFinalize();
     try {
-      const response = await runImport({ scope: plan.scope, uploadId: plan.uploadId, ...plan.finalize });
+      const response = await runImport({ scope: plan.scope, uploadId: plan.uploadId, ...finalize });
       if (!response.ok || !response.jobId) throw new Error(response.error ?? '导入启动失败');
+      // 回写「本次实际使用的参数」：`startRetry` 的「重试未完成」必须沿用上一次 run 的
+      // finalize（而不是上传时的快照），否则"改成 overwrite 跑一半失败后重试"会退回 incremental
+      plan.finalize = finalize;
       trackImport(response.jobId, plan.scope, plan.uploadId);
     } catch (failure) {
       setFailureStage('import');
@@ -1142,18 +1191,42 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   /** 用户确认「仍然导入」（承认会新建副本） */
   const confirmDuplicateImport = (): void => {
     const plan = uploadPlanRef.current;
-    if (!plan) return;
+    if (!plan) {
+      // 兜底：上传会话已不在内存（理论上不可达）。不能静默 —— 卡片是唯一出口，
+      // 点「仍然导入」没反应就会让用户同时失去「导入」与「退出」两个动作。
+      setPreflightConfirm(null);
+      setPhase('idle');
+      setFailureStage('upload');
+      setError('上传会话已失效，请重新选择文件后再导入');
+      return;
+    }
     void launchImport(plan);
   };
 
-  /** 用户取消：导入尚未开始 → 零写入；保留文件选择与暂存，允许改策略后重来 */
+  /**
+   * 用户取消：导入尚未开始 → 零写入；保留文件选择，允许改策略后重来。
+   *
+   * ⚠️ 必须把 `phase` 迁出等待态（2026-10-19 用户报障）：此前只清 `preflightConfirm`
+   * 与改一行文案，`phase` 仍停在 `awaiting-confirm` 的上游 `uploading` 分支 ——
+   * 右轨恒显示「上传中…」+ 100% 进度条 + 一个禁用的「取消导入」，主按钮也一直是
+   * 「上传中…」且禁用，选文件/开始导入的守卫全按"忙"拦下，页面被锁死到只能刷新。
+   */
   const cancelDuplicateImport = (): void => {
+    // 只允许从等待确认态取消：否则会把「已在跑的任务」标成已取消并停掉轮询（防御性）
+    if (phase !== 'awaiting-confirm') return;
+    const plan = uploadPlanRef.current;
     setPreflightConfirm(null);
-    setProgressText('已取消（未导入任何内容）；可调整「同名文档处理」后重新开始');
+    setPhase('cancelled');
+    setFailureStage('cancelled');
+    // 上传已结束、这批不会导入：清掉 100% 的进度条，别让"已取消"与"上传完成"并存
+    setUploadStats(null);
+    setProgressText('已取消：本次未写入任何内容；可调整「同名文档处理」后重新开始');
+    // 服务端暂存目录不再被引用：不清凭据的话，刷新页面会先走一遍「确认上传状态…」才回 idle
+    if (plan) clearImportCredentialIf({ uploadId: plan.uploadId });
   };
 
   const start = async (): Promise<void> => {
-    if (startingRef.current || phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    if (startingRef.current || busyPhase) return;
     startingRef.current = true;
     try {
     setFailureStage(null);
@@ -1210,15 +1283,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     const plan: UploadPlan = {
       scope,
       uploadId: crypto.randomUUID(),
-      finalize: {
-        group: group.trim() || undefined,
-        chunkSize: chunkSize ? Number(chunkSize) : undefined,
-        chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
-        vector,
-        tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
-        conflictMode,
-        conflictSuffix: suffixInUse ? conflictSuffix : undefined,
-      },
+      // 只作「上传时口径」留档：真正 run 时用 currentFinalize()（等待确认期间可改策略）
+      finalize: currentFinalize(),
       selectionSnapshot: selections,
       batches,
       nextBatch: 0,
@@ -1296,18 +1362,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const uploadPercent = uploadStats && uploadStats.totalFiles > 0
     ? Math.min(100, Math.round((uploadStats.filesDone / uploadStats.totalFiles) * 100))
     : null;
-  const activePercent = phase === 'uploading' ? uploadPercent : importPercent;
-  const errorStatus = failureStage === 'scan'
-    ? '读取失败'
-    : failureStage === 'upload'
-      ? '上传失败'
-      : failureStage === 'cancelled'
-        ? '导入已取消'
-        : failureStage === 'unknown'
-          ? '任务状态待确认'
-        : failureStage === 'import'
-          ? '导入失败'
-          : '输入有误';
+  // 等待确认时上传已 100% 完成：沿用上传百分比（不落到 importPercent 的 null → 无限滚动条）
+  const activePercent = activePercentOf(phase, uploadPercent, importPercent);
+  const errorStatus = errorStatusOf(failureStage);
   const retryUploadPlan = uploadPlanRef.current;
   const completedScope = job?.scope || uploadPlanRef.current?.scope || scope;
   /**
@@ -1341,7 +1398,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   // 同帧双击必须靠 ref 挡（state 更新是异步的，两次点击都会通过 state 判定）
   const retryRef = useRef(false);
   const startRetry = async (): Promise<void> => {
-    if (retryRef.current || retrying || phase === 'scanning' || phase === 'uploading' || phase === 'importing') return;
+    if (retryRef.current || retrying || busyPhase) return;
     // 并发闸门（与服务端 409 同口径）：该 scope 已有导入在跑时不再排一个重复 job
     if (scopeBusyImports > 0) {
       setRetryError(`该知识库已有导入任务在跑（${scopeBusyImports} 个）：请等它完成后再重试未完成`);
@@ -1407,7 +1464,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         : null;
   /** 点击「开始导入」：被阻塞则引导定位，否则真正开跑 */
   const runClick = (): void => {
-    // R6：预检待确认时不允许再点（否则会以新 uploadId 重新上传整批）
+    // R6：预检待确认时不允许再点（否则会以新 uploadId 重新上传整批）。
+    // 按钮此时 `disabled={busyPhase}`（awaiting-confirm 属 busy），这里只是防御性兜底。
     if (preflightConfirm) return;
     const target = scopeDraftDirty || !scopeConfirmed ? 'scope' : files.length === 0 ? 'files' : null;
     if (target) {
@@ -1429,9 +1487,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         ? errorStatus
         : runBlockedReason ?? (progressText || '直导无需 AI · 无第三方依赖');
 
-  // 右轨常显（对齐 demo：打开即双栏）；阶段徽标复用任务状态色
-  const trackLabel = phase === 'idle' ? '等待开始' : phase === 'scanning' ? '读取目录中' : phase === 'uploading' ? '上传中' : phase === 'importing' ? '导入中' : phase === 'done' ? '导入完成' : phase === 'unknown' ? '待确认' : '导入失败';
-  const trackTone = phase === 'idle' ? 'cancelled' : phase === 'scanning' ? 'partial' : phase === 'uploading' || phase === 'importing' ? 'running' : phase === 'done' ? 'succeeded' : phase === 'unknown' ? 'unknown' : 'failed';
+  // 右轨常显（对齐 demo：打开即双栏）；阶段徽标复用任务状态色。
+  // 文案/色调/取消判据统一由 `lib/importPhase.ts` 给出（那里有单测锁语义）
+  const trackLabel = trackLabelOf(phase, failureStage);
+  const trackTone = trackToneOf(phase, failureStage);
   // 取消导入（POST /api/import/cancel）：服务端在当前批次完成后停止后续写入
   const requestCancel = async (): Promise<void> => {
     const jobId = job?.id;
@@ -1545,7 +1604,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 onDraftChange={setScopeDraft}
                 hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
                 error={scopeErr}
-                disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing' || Boolean(preflightConfirm)}
+                disabled={busyPhase}
               />
             </div>
             <div>
@@ -1735,7 +1794,14 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         <div className="ki-file-item__size">{selection.files[0]?.kind === 'asset' ? '附件' : 'Markdown'} · {formatBytes(totalSize)}</div>
                       )}
                     </div>
-                    <button className="ki-file-item__remove" onClick={() => removeSelection(selection.id)} title="移除">
+                    {/* 任务在途时不许改清单：上传内容已冻结在 plan.batches，移除只会让
+                        「画面上的文件」与「确认后真正导入的文件」不一致 */}
+                    <button
+                      className="ki-file-item__remove"
+                      onClick={() => removeSelection(selection.id)}
+                      disabled={busyPhase}
+                      title={busyPhase ? '任务进行中，暂不可移除文件' : '移除'}
+                    >
                       ✕
                     </button>
                   </div>
@@ -1803,7 +1869,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           </div>
 
           {/* R6：重复导入预检待确认（导入尚未开始 → 取消是零写入） */}
-          {preflightConfirm && (
+          {preflightConfirm && phase === 'awaiting-confirm' && (
             <div className="ki-card" style={{ marginTop: 12, borderColor: 'var(--ki-color-warning)' }}>
               <div className="ki-card__body" style={{ padding: 12 }}>
                 <div style={{ color: 'var(--ki-color-warning)', fontWeight: 600 }}>
@@ -1837,10 +1903,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <button
               className="ki-btn ki-btn--primary"
               onClick={runClick}
-              disabled={phase === 'scanning' || phase === 'uploading' || phase === 'importing'}
-              title={runBlockedReason ?? undefined}
+              disabled={busyPhase}
+              title={runBlockedReason
+                ?? (phase === 'awaiting-confirm' ? '请先在上方「重复导入预检」中选择「仍然导入」或「取消」' : undefined)}
             >
-              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'importing' ? '导入中…' : '开始导入'}
+              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'awaiting-confirm' ? '等待确认' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
             <span
               className="ki-cell-sub"
@@ -1860,12 +1927,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <span className={`ki-task-state ki-task-state--${trackTone}`}>{trackLabel}</span>
           </div>
           <div className="ki-track-title">导入进度</div>
-          {(phase === 'scanning' || phase === 'uploading' || phase === 'importing') ? (
+          {busyPhase ? (
           <>
           <div className="ki-progress-row">
             <span className="ki-progress-label">
-              <span className="ki-spinner" aria-hidden="true" />
-              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : '导入中…'}
+              {/* 等待确认不是"进行中"：不转圈，避免用户以为还在跑 */}
+              {phase !== 'awaiting-confirm' && <span className="ki-spinner" aria-hidden="true" />}
+              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'awaiting-confirm' ? '上传完成，等待确认' : '导入中…'}
             </span>
             <span className="ki-cell-sub">{progressText}</span>
           </div>
@@ -1878,12 +1946,19 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <div className="ki-progress-sub">
             {phase === 'uploading' && uploadStats
               ? `第 ${uploadStats.batch}/${uploadStats.totalBatches} 批 · ${uploadStats.filesDone}/${uploadStats.totalFiles} 个文件 · ${formatBytes(uploadStats.bytesDone)}/${formatBytes(uploadStats.totalBytes)}（${uploadPercent ?? 0}%）`
-              : phase === 'importing' && job?.progress
-                ? `${job.progress.done}/${job.progress.total} 个处理单元（${importPercent ?? 0}%）`
-                : progressText}
+              : phase === 'awaiting-confirm'
+                ? (uploadStats
+                  ? `第 ${uploadStats.batch}/${uploadStats.totalBatches} 批 · ${uploadStats.filesDone}/${uploadStats.totalFiles} 个文件已上传（${uploadPercent ?? 0}%，尚未写入任何内容）`
+                  : '上传已完成，尚未写入任何内容')
+                : phase === 'importing' && job?.progress
+                  ? `${job.progress.done}/${job.progress.total} 个处理单元（${importPercent ?? 0}%）`
+                  : progressText}
           </div>
           <div className="ki-progress-actions">
-            {cancelState === 'requested' ? (
+            {phase === 'awaiting-confirm' ? (
+              // 「取消导入」此刻必然是禁用态（job 未建立），显示它只会让用户以为能点
+              <span className="ki-cell-sub">请在上方预检卡片中选择「仍然导入」或「取消」</span>
+            ) : cancelState === 'requested' ? (
               <span className="ki-cell-sub">已请求取消：当前批次完成后停止后续写入</span>
             ) : (
               <button
@@ -1901,7 +1976,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           </>
           ) : (
             <p className="ki-cell-sub" style={{ marginTop: 8 }}>
-              {phase === 'idle' ? '等待开始：选择文件并确认 Scope 后点击「开始导入」。' : phase === 'done' ? '本次导入已结束，结果见下方「结果摘要」。' : '本次导入未完成，可在主区修正后重试。'}
+              {phase === 'idle' ? '等待开始：选择文件并确认 Scope 后点击「开始导入」。'
+                : phase === 'done' ? '本次导入已结束，结果见下方「结果摘要」。'
+                  : phase === 'cancelled' ? '导入已取消：未写入任何内容；可调整设置后重新点击「开始导入」。'
+                    : isCancelledTrack(phase, failureStage) ? '导入已取消：已处理的内容可能已写入，请到目标 Scope 确认实际结果。'
+                      : '本次导入未完成，可在主区修正后重试。'}
             </p>
           )}
         </div>

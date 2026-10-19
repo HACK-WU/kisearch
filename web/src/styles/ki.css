@@ -1010,6 +1010,9 @@ a:hover { text-decoration: underline; }
 .ki-file-item__status--err { color: var(--ki-color-danger); }
 .ki-file-item__remove { background: none; border: none; color: var(--ki-color-text-subtle); cursor: pointer; font-size: 14px; padding: 4px; border-radius: 4px; }
 .ki-file-item__remove:hover { color: var(--ki-color-danger); background: var(--ki-color-danger-soft); }
+/* 任务在途（上传 / 等待确认 / 导入中）时清单冻结：禁用态不能还留红色 hover 反馈 */
+.ki-file-item__remove:disabled { color: var(--ki-color-text-muted); cursor: not-allowed; opacity: 0.5; }
+.ki-file-item__remove:disabled:hover { color: var(--ki-color-text-muted); background: none; }
 
 /* 热度标签 */
 .ki-heat { display: inline-flex; padding: 1px 7px; border-radius: 4px; font-size: var(--ki-font-size-xs); font-weight: 600; }
