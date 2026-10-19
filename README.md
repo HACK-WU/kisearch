@@ -184,7 +184,8 @@ scopeMode: default            # default: 自动创建 scope；strict: 必须显�
 
 ```bash
 # ① 导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分；幂等追加，
-#    重复执行即增量更新；同名不同 sourcePath 默认自动生成 _1/_2 后缀）
+#    重复执行即增量更新；同名默认按「增量导入」处理 —— 内容未变不重算，
+#    同名不同 sourcePath 直接覆盖；需要保留旧文档请显式 --conflict-mode suffix）
 # 可选：--conflict-mode overwrite|skip|suffix --conflict-suffix '_{n}'
 ki import \
   --scope my-project \

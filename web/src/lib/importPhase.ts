@@ -102,3 +102,37 @@ export function errorStatusOf(failureStage: ImportFailureStage): string {
     default: return '输入有误';
   }
 }
+
+/**
+ * 阶段 → 「忙」阶段行内文案；非忙阶段为空串。
+ *
+ * 为什么用 `Record<ImportPhase, string>` 而不是 switch（2026-10-19）：`ImportPhase`
+ * 新增一个阶段时，switch 的 `default` 会静默返回空串——"忙但没文案"这类漂移
+ * 只能靠人记得补测试才能发现；写成全集 Record 则新增阶段直接编译失败。
+ */
+export const IMPORT_PHASE_BUSY_LABEL: Record<ImportPhase, string> = {
+  idle: '',
+  scanning: '读取目录中…',
+  uploading: '上传中…',
+  'awaiting-confirm': '上传完成，等待确认',
+  importing: '导入中…',
+  done: '',
+  failed: '',
+  cancelled: '',
+  unknown: '',
+};
+
+/** 阶段全集（由上面的 Record 派生，新增阶段自动纳入；测试遍历它而不是手抄清单） */
+export const ALL_IMPORT_PHASES = Object.keys(IMPORT_PHASE_BUSY_LABEL) as ImportPhase[];
+
+/**
+ * 「忙」阶段的行内文案 —— 右轨进度行与主区按钮行就地进度**共用同一来源**。
+ *
+ * 为什么收敛到这里（2026-10-19）：主区加就地进度时若另写一份
+ * `phase === 'uploading' ? '上传中…' : '导入中…'`，就会与右轨各演化一次而漂移
+ * （同页已经历过「等待确认被当成上传中」这类分叉）。非忙阶段返回空串，
+ * 由调用方决定是否渲染。
+ */
+export function busyPhaseLabelOf(phase: ImportPhase): string {
+  return IMPORT_PHASE_BUSY_LABEL[phase] ?? '';
+}

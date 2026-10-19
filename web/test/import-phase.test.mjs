@@ -32,6 +32,8 @@ const {
   trackToneOf,
   activePercentOf,
   errorStatusOf,
+  busyPhaseLabelOf,
+  ALL_IMPORT_PHASES,
 } = await vite.ssrLoadModule('/src/lib/importPhase.ts');
 after(async () => vite.close());
 
@@ -132,6 +134,11 @@ describe('activePercentOf：进度条百分比', () => {
     assert.equal(activePercentOf('cancelled', 100, null), null);
     assert.equal(activePercentOf('idle', null, null), null);
   });
+
+  it('上传百分比缺失时返回 null（保持无限滚动条语义，不能假装 0%）', () => {
+    assert.equal(activePercentOf('awaiting-confirm', null, null), null);
+    assert.equal(activePercentOf('uploading', null, null), null);
+  });
 });
 
 describe('errorStatusOf：阻塞/失败标题', () => {
@@ -145,5 +152,33 @@ describe('errorStatusOf：阻塞/失败标题', () => {
 
   it('无失败细分（表单校验类）落到「输入有误」', () => {
     assert.equal(errorStatusOf(null), '输入有误');
+  });
+});
+
+describe('busyPhaseLabelOf：右轨与主区共用的阶段文案', () => {
+  it('四个忙阶段的文案与右轨历史文案逐字一致（防漂移）', () => {
+    assert.equal(busyPhaseLabelOf('scanning'), '读取目录中…');
+    assert.equal(busyPhaseLabelOf('uploading'), '上传中…');
+    assert.equal(busyPhaseLabelOf('awaiting-confirm'), '上传完成，等待确认');
+    assert.equal(busyPhaseLabelOf('importing'), '导入中…');
+  });
+
+  it('非忙阶段返回空串（调用方据此决定是否渲染就地进度）', () => {
+    for (const phase of ['idle', 'done', 'failed', 'cancelled', 'unknown']) {
+      assert.equal(busyPhaseLabelOf(phase), '', `${phase} 不应有忙阶段文案`);
+    }
+  });
+
+  it('与 isBusyPhase 严格同集合：忙 ⇔ 文案非空（遍历阶段全集，不手抄清单）', () => {
+    // 手抄清单的坑：`ImportPhase` 新增阶段后，写死的数组仍会"通过"。
+    // 这里遍历 lib 导出的全集——它由 `Record<ImportPhase, string>` 派生，新增阶段自动纳入。
+    assert.ok(ALL_IMPORT_PHASES.length >= 9, `阶段全集异常：${ALL_IMPORT_PHASES.join(',')}`);
+    for (const phase of ALL_IMPORT_PHASES) {
+      assert.equal(
+        isBusyPhase(phase),
+        busyPhaseLabelOf(phase).length > 0,
+        `${phase} 的「忙」判定与文案存在性必须一致`,
+      );
+    }
   });
 });

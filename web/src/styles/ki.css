@@ -760,6 +760,20 @@ a:hover { text-decoration: underline; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
 }
 
+/* 禁用态（2026-10-19）：上面这条基类把 background / color / border 都写死了，
+   会盖掉浏览器 UA 对 `:disabled` 的默认灰化 —— 实测「禁用」与「可编辑」两态的
+   background / color / border 逐项相同，用户只能靠 hover 的 cursor 察觉（导入页
+   「同名文档处理」在非 suffix 策略下正是如此，见 suffix-disabled 走查）。
+   这里补回可见的禁用态：底降一档、字降一档、边框降一档 + not-allowed 光标。 */
+.ki-form-input:disabled,
+.ki-form-textarea:disabled,
+.ki-form-select:disabled {
+  background: color-mix(in srgb, var(--ki-color-text-subtle) 10%, var(--ki-color-bg));
+  color: var(--ki-color-text-subtle);
+  border-color: var(--ki-color-border);
+  cursor: not-allowed;
+}
+
 /* 新建 Group 输入框独特样式（绿色边框 + 淡绿背景，区别于已有 Group 的蓝色） */
 .ki-form-input--new {
   border-color: var(--ki-color-success);
@@ -2715,6 +2729,64 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-import-layout--solo { grid-template-columns: minmax(0, 1fr); }
 .ki-import-track { display: grid; gap: 12px; min-width: 0; }
 @media (max-width: 959px) { .ki-import-layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* 右轨常驻（2026-10-19）：主卡实测 1034~1332px，而常见视口高只有 620~900px。
+   静态右轨会随页面滚走 —— 1180×620 实测滚到「开始导入」时进度卡 top=-592、
+   可见 0/107px，导入全程用户看不到任何百分比。这里让进度卡粘在视口顶部。
+   两个条件必须同时满足（少一个都不生效，均为实测）：
+     ① `align-self: stretch`：右列默认被父级 `align-items: start` 收成内容高（219px），
+        sticky 的包含块就是这 219px，滚动一过立刻失效（实测 top=-480）；
+     ② `align-content: start`：拉满行高后 grid 行会被拉伸，两张卡各自撑到 600+px。
+   只粘第一张卡：「结果摘要」含冲突/错误长列表，压在 100vh 内滚动会读不全。
+   单列（<960px）不启用：右轨在表单下方，粘住只会遮挡表单。 */
+@media (min-width: 960px) {
+  .ki-import-layout > .ki-import-track { align-self: stretch; align-content: start; }
+  .ki-import-layout > .ki-import-track > .ki-progress-block:first-child {
+    position: sticky;
+    top: 8px;
+    z-index: 1;
+  }
+  /* 终态退出 sticky：完成后用户要读的是「结果摘要」（可能很长，含冲突/错误列表）。
+     进度卡若继续常驻顶部，结果卡会从它后面滑过、被遮掉 107px。
+     `unknown`（任务状态待确认）也算终态：它已 clearInterval + 落 error，页内会渲染红色
+     错误卡，同样不能被常驻进度卡压住。
+     进行中（idle/scanning/uploading/awaiting-confirm/importing）才保留常驻。 */
+  .ki-import-layout > .ki-import-track[data-phase='done'] > .ki-progress-block:first-child,
+  .ki-import-layout > .ki-import-track[data-phase='failed'] > .ki-progress-block:first-child,
+  .ki-import-layout > .ki-import-track[data-phase='cancelled'] > .ki-progress-block:first-child,
+  .ki-import-layout > .ki-import-track[data-phase='unknown'] > .ki-progress-block:first-child {
+    position: static;
+  }
+}
+
+/* 按钮行 + 就地进度（2026-10-19）：右轨已常驻，但用户视线停在按钮上，
+   把「在动」的反馈放到视线处（改前按钮旁只有一行 12px 灰字）。
+   与按钮**同一行**：按钮常被滚到视口底边，放到下一行会正好被裁掉（实测 1180×620）。
+   容器允许换行（`flex-wrap`）：极窄主列下会折到第二行，属可接受的降级。
+   百分比与阶段文案复用右轨同一份来源（见 lib/importPhase.ts）。 */
+.ki-import-runrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 20px; }
+.ki-import-inline {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1 1 220px; min-width: 180px;
+}
+.ki-progress--inline { flex: 1 1 auto; min-width: 100px; height: 4px; }
+.ki-import-inline__pct {
+  flex: 0 0 auto; min-width: 34px; text-align: right;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text); font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* 细节文本可能较长（如「准备第 1/1 批：3/3 个文件…」）——必须可收缩 + 省略，
+   否则 960px 双栏（主列约 340px）会被撑出横向滚动。 */
+.ki-import-inline__detail {
+  flex: 0 1 auto; min-width: 0;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ki-import-inline .ki-progress__fill { transition: none; }
+  .ki-import-inline .ki-progress__fill--indeterminate { animation: none; width: 100%; opacity: 0.4; }
+}
 .ki-progress-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .ki-progress-label { font-weight: 600; font-size: var(--ki-font-size-md); }
 .ki-progress-sub { margin-top: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }

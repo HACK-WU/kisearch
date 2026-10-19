@@ -16,6 +16,7 @@ import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
 import {
   activePercentOf,
+  busyPhaseLabelOf,
   errorStatusOf,
   isBusyPhase,
   isCancelledTrack,
@@ -24,6 +25,18 @@ import {
   type ImportFailureStage,
   type ImportPhase,
 } from '@/lib/importPhase';
+
+/**
+ * 「同名文档处理」的默认策略。
+ *
+ * 需求来源：`REQ-2026-10-10-导入路径口径对齐与增量导入` R3 ——「增量导入」
+ * 要「列为下拉第一项**且为默认值**」。后端/CLI 早已是这个默认
+ * （`src/lib/import-conflict.ts` 的 `DEFAULT_IMPORT_CONFLICT_MODE`、`docs/import.md`），
+ * 但前端初始 `useState` 自 2026-09-20（c80c64c）起一直是 `'suffix'` 没跟着改 ——
+ * 于是出现「终态复位回到 incremental、刷新又变回 suffix」的不一致。
+ * 抽成常量：初始值与终态复位共用一处，避免再次各自演化。
+ */
+const DEFAULT_CONFLICT_MODE: ImportConflictMode = 'incremental';
 
 interface PendingFile {
   name: string;
@@ -408,6 +421,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   /** 预检明细展开/收起（明细 >5 条时提供入口） */
   const [showAllPreflight, setShowAllPreflight] = useState(false);
   const preflightRef = useRef<HTMLDivElement>(null);
+  /** 「结果摘要」卡（完成后「查看结果」入口的滚动目标） */
+  const resultCardRef = useRef<HTMLDivElement>(null);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
   const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
@@ -436,7 +451,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [chunkOverlap, setChunkOverlap] = useState('150');
   const [vector, setVector] = useState(true);
   const [group, setGroup] = useState('');
-  const [conflictMode, setConflictMode] = useState<ImportConflictMode>('suffix');
+  const [conflictMode, setConflictMode] = useState<ImportConflictMode>(DEFAULT_CONFLICT_MODE);
   const [conflictSuffix, setConflictSuffix] = useState('_{n}');
   const [dragOver, setDragOver] = useState(false);
 
@@ -607,7 +622,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setScopeConfirmed(false);
     setFormEpoch((epoch) => epoch + 1);
     setGroup('');
-    setConflictMode('incremental');
+    setConflictMode(DEFAULT_CONFLICT_MODE);
     setConflictSuffix('_{n}');
     setSelectedTags([]);
     setTagInput('');
@@ -1617,6 +1632,64 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   // 文案/色调/取消判据统一由 `lib/importPhase.ts` 给出（那里有单测锁语义）
   const trackLabel = trackLabelOf(phase, failureStage);
   const trackTone = trackToneOf(phase, failureStage);
+  /**
+   * 「查看结果」入口（2026-10-19）：完成态的结果摘要位于右轨第二张卡。
+   * 双栏靠 sticky 能看见进度卡，但结果卡在下方/视口外——用户只看到按钮旁
+   * 「导入完成」却不知道去哪看数字，故给一个显式入口（不自动滚动，避免打断「再导一次」）。
+   * 与页内既有 `preflightRef` / `runClick` 同口径：尊重 prefers-reduced-motion + 移交焦点。
+   *
+   * ⚠️ 不用 `scrollIntoView({ block: 'start' })` 的原因与「为什么这里不需要 sticky 偏移」：
+   * 该入口只在 `phase === 'done'` 渲染，而 `.ki-import-track[data-phase='done']` 已让进度卡
+   * 退出 sticky（见 ki.css）。若只做 `block:'start'`，历史版本里结果卡会被常驻的进度卡压住；
+   * 现在终态常驻已取消，直接对齐容器顶部即可——一旦有人改回终态 sticky，
+   * `verify-import-progress-visibility.cjs` 的 D2b/D3 会立刻失败提醒。
+   * 偏移统一换算到**滚动容器坐标系**（减去容器自身 top），这样将来壳层加固定头也不会多滚。
+   */
+  const showResultCard = (): void => {
+    const card = resultCardRef.current;
+    if (!card) return;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const scrollerEl = card.closest('.ki-content');
+    const scroller = scrollerEl instanceof HTMLElement ? scrollerEl : null;
+    // 只有真正可滚动的容器才走偏移算法：`.ki-content` 若挂 `--noscroll`（overflow:hidden）则
+    // scrollTo 不生效、会变成"点了没反应"，此时退回 scrollIntoView。
+    if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+      const delta = card.getBoundingClientRect().top
+        - scroller.getBoundingClientRect().top
+        - 8;
+      scroller.scrollTo({
+        top: scroller.scrollTop + delta,
+        behavior: reduceMotion ? 'auto' : 'smooth',
+      });
+    } else {
+      card.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    }
+    card.focus({ preventScroll: true });
+  };
+  /** 主区按钮行的就地进度（复用右轨同一份百分比与阶段文案，不另算） */
+  const busyPhaseLabel = busyPhaseLabelOf(phase);
+  // 「忙」与「有文案」由 Record + 单测锁成同集合，这里只判文案，避免两处判据各自漂移
+  const showInlineProgress = busyPhaseLabel.length > 0;
+  /** 就地进度右侧的数量细节：只搬运已有统计（上传按篇 / 导入按处理单元），不新增口径 */
+  const inlineDetail = phase === 'uploading' && uploadStats
+    ? `${uploadStats.filesDone}/${uploadStats.totalFiles} 篇`
+    : phase === 'awaiting-confirm'
+      ? '等待确认'
+      : phase === 'importing' && job?.progress?.total
+        ? `${job.progress.done}/${job.progress.total} 个处理单元`
+        /**
+         * 数量未知时退回阶段说明：`progressText` 在导入起步阶段承载真实信息
+         * （「正在比对库内文档并跳过疑似重复…」等，见 launchImport / runImport 前），
+         * 改前这句显示在主区按钮旁，改成就地进度后不能把它弄丢（单列布局时右轨在视口外）。
+         * 过滤掉与按钮 / 阶段标签重复的三句，避免又出现「导入中…」刷屏。
+         */
+        : (phase === 'importing' || phase === 'uploading') && progressText
+          && progressText !== busyPhaseLabel
+          && progressText !== '导入中…'
+          && progressText !== '上传中…'
+          ? progressText
+          : '';
+  const doneClean = phase === 'done' && !error;
   // 取消导入（POST /api/import/cancel）：服务端在当前批次完成后停止后续写入
   const requestCancel = async (): Promise<void> => {
     const jobId = job?.id;
@@ -1769,6 +1842,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                   onChange={(e) => setConflictSuffix(e.target.value)}
                   placeholder="_{n}"
                   aria-label="自动后缀模板"
+                  title={conflictMode === 'suffix'
+                    ? '自动后缀模板：{n} 会替换为递增序号（如 _{n} → foo_1、foo_2）'
+                    : '仅「自动添加后缀」策略生效；当前策略不会使用后缀'}
                 />
                 {conflictSuffixErr && <div className="ki-form-error">{conflictSuffixErr}</div>}
               </div>
@@ -2095,7 +2171,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               )}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, marginTop: 20, alignItems: 'center' }}>
+          {/* 按钮行（2026-10-19）：右轨进度已常驻，但用户视线在按钮上——
+              就地再给一条细进度条，避免「按钮灰着、不知道到底在动没动」。 */}
+          <div className="ki-import-runrow">
             <button
               className="ki-btn ki-btn--primary"
               onClick={runClick}
@@ -2103,19 +2181,56 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               title={runBlockedReason
                 ?? (phase === 'awaiting-confirm' ? '请先在上方「重复导入预检」中选择「仍然导入」或「取消」' : undefined)}
             >
+              {/* 按钮用**短**文案（宽度受限）：与右轨 `busyPhaseLabelOf` 的长文案有意不同
+                  （「等待确认」↔「上传完成，等待确认」），就地进度的 aria-label 用长文案。
+                  改这里请同步 lib 单测，别让两处各自演化。 */}
               {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'awaiting-confirm' ? '等待确认' : phase === 'importing' ? '导入中…' : '开始导入'}
             </button>
-            <span
-              className="ki-cell-sub"
-              style={runBlockedReason ? { color: 'var(--ki-color-warning)' } : undefined}
-            >
-              {buttonStatus}
-            </span>
+            {/* 忙阶段由这条就地进度接管：进度条与按钮**同一行**，避免按钮贴视口底时
+                进度被顶到视口外；阶段文案已由按钮本身表达，这里只给百分比 + 数量，
+                不再重复写一遍 progressText（否则会凑出三个「导入中…」）。 */}
+            {showInlineProgress ? (
+              <div className="ki-import-inline">
+                <div
+                  className="ki-progress ki-progress--inline"
+                  role="progressbar"
+                  aria-label={busyPhaseLabel}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={activePercent ?? undefined}
+                >
+                  <div
+                    className={`ki-progress__fill${activePercent === null ? ' ki-progress__fill--indeterminate' : ''}`}
+                    style={activePercent === null ? undefined : { width: `${activePercent}%` }}
+                  />
+                </div>
+                {/* 百分比未知（刚起步）时不写文案：阶段已由按钮表达，
+                    再补一句「导入中…」就是同一个页面里的第三份。 */}
+                {activePercent !== null && (
+                  <span className="ki-import-inline__pct">{activePercent}%</span>
+                )}
+                {inlineDetail && <span className="ki-import-inline__detail">{inlineDetail}</span>}
+              </div>
+            ) : (
+              <span
+                className="ki-cell-sub"
+                style={runBlockedReason ? { color: 'var(--ki-color-warning)' } : undefined}
+              >
+                {buttonStatus}
+              </span>
+            )}
+            {doneClean && (
+              <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={showResultCard}>
+                查看结果 →
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      <aside className="ki-import-track" aria-label="当前任务">
+      {/* data-phase 供 CSS 判断「是否还在进行中」：终态要让进度卡退出 sticky，
+          否则它会常驻顶部、把下方结果摘要的长内容遮掉 107px（结果卡在它后面滑过）。 */}
+      <aside className="ki-import-track" data-phase={phase} aria-label="当前任务">
         {/* 卡 1：导入进度（idle 也常显，对齐 demo） */}
         <div className="ki-progress-block">
           <div className="ki-track-head">
@@ -2127,9 +2242,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <>
           <div className="ki-progress-row">
             <span className="ki-progress-label">
-              {/* 等待确认不是"进行中"：不转圈，避免用户以为还在跑 */}
+              {/* 等待确认不是"进行中"：不转圈，避免用户以为还在跑。
+                  文案与主区按钮行共用 `busyPhaseLabelOf`（唯一来源，见 lib/importPhase.ts） */}
               {phase !== 'awaiting-confirm' && <span className="ki-spinner" aria-hidden="true" />}
-              {phase === 'scanning' ? '读取目录中…' : phase === 'uploading' ? '上传中…' : phase === 'awaiting-confirm' ? '上传完成，等待确认' : '导入中…'}
+              {busyPhaseLabel}
             </span>
             <span className="ki-cell-sub">{progressText}</span>
           </div>
@@ -2211,8 +2327,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         </div>
       )}
 
-        {/* 卡 2：结果摘要（对齐 demo LAST RUN） */}
-        <div className="ki-progress-block">
+        {/* 卡 2：结果摘要（对齐 demo LAST RUN）
+            不参与 sticky：含冲突/错误长列表，长度不可控，限制在 100vh 内会读不全。
+            `tabIndex` 只服务于「查看结果」入口的焦点移交。 */}
+        <div className="ki-progress-block" ref={resultCardRef} tabIndex={-1}>
           <div className="ki-track-head">
             <span className="ki-track-kicker">LAST RUN</span>
             {phase === 'done' && !error && (
