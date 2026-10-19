@@ -121,6 +121,11 @@ interface UploadSession {
   completedBatches?: number[];
   jobId?: string;
   errors?: { name: string; error: string }[];
+  /**
+   * REQ-20261019-002：run 参数快照（仅存影响幂等复用判据的最小集合）。
+   * 缺失时视为 `{ skipDuplicates: false }`（兼容升级前的旧 session）。
+   */
+  params?: { skipDuplicates?: boolean };
 }
 
 function readUploadSession(dir: string): UploadSession | null {
@@ -208,6 +213,11 @@ interface Job {
   progress?: { done: number; total: number };
   result?: ImportResult | RestoreSnapshotResult | RebuildVectorResult | Record<string, unknown>;
   error?: string;
+  /**
+   * REQ-20261019-002：可判别错误码（如 `ALL_FILES_DUPLICATES` / `IMPORT_BUDGET_EXCEEDED`）。
+   * 前端据此把"全部重复"渲染成可纠正提示，而不是失败红态（不得靠文案匹配）。
+   */
+  errorCode?: string;
   startedAt: number;
   finishedAt?: number;
   cancelRequested: boolean;
@@ -1459,6 +1469,11 @@ async function handleImportRun(
      * 前端「重试未完成 N 篇」用同一 `uploadId` 重跑，不必重新上传。
      */
     onlyRelPaths?: string[];
+    /**
+     * REQ-20261019-002：跳过「内容一致但 sourcePath 不同」的疑似重复文档。
+     * 缺省 false（行为与改前一致）。真实判定在 `handleDirectImport` 内完成（此处只透传）。
+     */
+    skipDuplicates?: boolean;
   } | undefined;
   if (!body || !body.scope || !body.uploadId) {
     sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
@@ -1527,13 +1542,33 @@ async function handleImportRun(
     return;
   }
   const retryParams = retryStatus?.record?.params;
+  // REQ-20261019-002：同一 uploadId 的幂等复用必须尊重「跳过重复」决策——
+  // 参数一致才复用；运行中且参数不同 → 409；已终态且参数不同 → 起新 job（用户被拦截后改选「仍然导入」）。
+  if (body.skipDuplicates !== undefined && typeof body.skipDuplicates !== 'boolean') {
+    sendJson(res, 400, { ok: false, error: 'skipDuplicates 必须是布尔值' });
+    return;
+  }
+  const requestedSkipDuplicates = body.skipDuplicates === true;
   if (session.jobId && !isSubsetRetry) {
-    if (!jobs.has(session.jobId)) {
+    const previousJob = jobs.get(session.jobId);
+    if (!previousJob) {
       sendJson(res, 409, { ok: false, error: '导入任务状态已失效，请重新上传' });
       return;
     }
-    sendJson(res, 202, { ok: true, jobId: session.jobId, scope });
-    return;
+    const previousSkipDuplicates = session.params?.skipDuplicates === true;
+    if (previousSkipDuplicates === requestedSkipDuplicates) {
+      sendJson(res, 202, { ok: true, jobId: session.jobId, scope });
+      return;
+    }
+    if (previousJob.state === 'running') {
+      sendJson(res, 409, {
+        ok: false,
+        code: 'IMPORT_JOB_PARAMS_MISMATCH',
+        error: '该批次已在导入中（与本次「跳过重复」设置不同），请到任务中心查看或等待完成后再试',
+      });
+      return;
+    }
+    // 已终态 + 参数不同：落到下方新建 job（并覆盖 session 参数快照）
   }
   if (session.batchCount !== undefined && session.completedBatches?.length !== session.batchCount) {
     sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入' });
@@ -1552,7 +1587,14 @@ async function handleImportRun(
   if (rejectIfImportBusy(res, requestConfig, scope)) return;
 
   const job = createJob(scope, 'import', requestConfig);
-  session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
+  // REQ-20261019-002：写入参数快照，供后续 run 判断"是否可幂等复用"
+  session = {
+    ...session,
+    state: 'importing',
+    jobId: job.id,
+    params: { skipDuplicates: requestedSkipDuplicates },
+    updatedAt: Date.now(),
+  };
   try { writeUploadSession(sourceDir, session); } catch (error) {
     job.taskReporter.finish('failed', { error: '上传任务状态登记失败' });
     jobs.delete(job.id);
@@ -1561,6 +1603,7 @@ async function handleImportRun(
   void runImportJob(job, {
     scope,
     sourceDir,
+    skipDuplicates: requestedSkipDuplicates,
     // group 缺省 → undefined → handleDirectImport 按推断落点（与 CLI 语义一致，REQ-01）；
     // 不再用 scope 兜底（子目录会落 <scope>/<sub>，与 CLI 缺省落 <sub> 不一致）
     group: body.group?.trim() || retryParams?.group || undefined,
@@ -1813,6 +1856,8 @@ interface RunImportArgs {
   conflictSuffix?: string;
   /** R2：只重试未完成子集（相对源目录路径） */
   onlyRelPaths?: string[];
+  /** REQ-20261019-002：跳过疑似重复（真实判定在 `handleDirectImport` 内） */
+  skipDuplicates?: boolean;
   /** S0-3：Web 端预算覆盖入口（当前不暴露给前端，预留保持 CLI/Web 同构） */
   budget?: HandleDirectImportArgs['budget'];
 }
@@ -1836,6 +1881,8 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         conflictMode: args.conflictMode,
         conflictSuffix: args.conflictSuffix,
         onlyRelPaths: args.onlyRelPaths,
+        // REQ-20261019-002：跳过疑似重复（缺省 undefined = 不计算跳过集，行为与改前一致）
+        skipDuplicates: args.skipDuplicates,
         budget: args.budget,
         // 任务归属：写进未完成清单，供任务中心按任务校验重试归属（HTTP 路径）
         jobId: job.id,
@@ -1914,15 +1961,24 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
       partialCommitted: result.stats.vectorized,
     });
   } catch (err) {
-    job.state = (err as Error & { code?: string }).code === 'IMPORT_CANCELLED' ? 'cancelled' : 'failed';
-    job.error = (err as Error).message;
-    const details = err as Error & { code?: string; stats?: { partialCommitted?: number } };
+    const failure = err as Error & { code?: string; stats?: { partialCommitted?: number } };
+    const code = failure.code;
+    // REQ-20261019-002：错码独立下发，前端按码分流（不得靠文案匹配）
+    job.errorCode = code;
+    job.state = code === 'IMPORT_CANCELLED' ? 'cancelled' : 'failed';
+    job.error = failure.message;
+    const allDuplicates = code === 'ALL_FILES_DUPLICATES';
     job.taskReporter.finish(job.state === 'cancelled' ? 'cancelled' : 'failed', {
-      error: job.error,
-      recoveryHint: details.code === 'VECTORIZATION_STOPPED'
-        ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。'
-        : undefined,
-      partialCommitted: details.stats?.partialCommitted,
+      // 全部重复不是系统故障：台账用引导性文案，并明确"未写入"
+      error: allDuplicates
+        ? '本批全部为疑似重复，未写入任何文件；如需建副本请改用「仍然导入」'
+        : job.error,
+      recoveryHint: allDuplicates
+        ? '重新点击导入并选择「仍然导入」即可建副本；跳过本身不产生任何写入。'
+        : code === 'VECTORIZATION_STOPPED'
+          ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。'
+          : undefined,
+      partialCommitted: failure.stats?.partialCommitted,
     });
   } finally {
     job.finishedAt = Date.now();
@@ -1990,6 +2046,8 @@ async function handleImportStatus(res: http.ServerResponse, url: URL, authScopes
       cancelRequested: job.cancelRequested,
       result: job.result,
       error: job.error,
+      // REQ-20261019-002：错码必须显式透传（本 handler 手工挑字段），否则前端拿不到
+      errorCode: job.errorCode,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
       // ── S-02/S-03（REQ-20261009-003）：两级完成口径（纯新增字段，既有字段语义不变）──

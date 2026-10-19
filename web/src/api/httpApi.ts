@@ -151,6 +151,8 @@ export interface RunImportResponse {
   jobId?: string;
   scope?: string;
   error?: string;
+  /** REQ-20261019-002：同步错误码（如 IMPORT_JOB_PARAMS_MISMATCH），供前端分流 */
+  code?: string;
 }
 
 /**
@@ -168,6 +170,8 @@ export interface ImportJob {
   progress?: { done: number; total: number };
   result?: Record<string, unknown>;
   error?: string;
+  /** REQ-20261019-002：可判别错误码（ALL_FILES_DUPLICATES 等），前端据此渲染可纠正提示 */
+  errorCode?: string;
   startedAt: number;
   finishedAt?: number;
   /**
@@ -426,6 +430,11 @@ export async function runImport(args: {
    * 用同一 uploadId 重跑未完成子集——不必重新上传，已完成文件不重算 embedding。
    */
   onlyRelPaths?: string[];
+  /**
+   * REQ-20261019-002：跳过「内容与库中一致但 sourcePath 不同」的疑似重复文档。
+   * 缺省不传 = 与改前行为一致；由服务端按同一判据重算（前端清单只用于展示）。
+   */
+  skipDuplicates?: boolean;
 }): Promise<RunImportResponse> {
   return req<RunImportResponse>('/api/import/run', {
     method: 'POST',

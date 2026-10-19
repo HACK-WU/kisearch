@@ -68,6 +68,8 @@ import {
   type ImportConflictMode,
 } from './import-conflict.js';
 import { resolveImportBudget, preflightImportBudget, budgetViolationMessage, IMPORT_BUDGET_EXCEEDED, type ImportBudget } from './import-budget.js';
+// REQ-20261019-002：疑似重复判据的单一真相（本模块**不得**反向 import import-preflight.ts，会成环）
+import { collectDuplicateHits, type DuplicateHit } from './duplicate-index.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -142,8 +144,25 @@ export interface ImportStats {
      * 恒等式 `completed + incomplete + skipped = scanned` 仍然成立。
      */
     unchanged: number;
+    /**
+     * REQ-20261019-002：因「疑似重复」被跳过的文件数，是 `skipped` 的**子集**
+     * （与 `unchanged` 之于 `completed` 同构）。恒等式不变。
+     * 未传 `skipDuplicates` 时恒为 0。
+     */
+    duplicatesSkipped: number;
   };
 }
+
+/** REQ-20261019-002：跳过明细条目（结果区可展开核对用） */
+export interface ImportDuplicateSkipItem {
+  /** 本次待导入文件的相对路径（与 rel 同口径） */
+  path: string;
+  existingGroup: string;
+  existingRelation: string;
+}
+
+/** REQ-20261019-002：跳过明细上限（超出截断，计数仍取完整值） */
+export const MAX_DUPLICATE_DETAIL = 500;
 
 /** R1：未完成文件条目（文件级；已成功文件不出现在清单中） */
 export interface ImportIncompleteItem {
@@ -193,6 +212,13 @@ export interface ImportResult {
   retryFilter?: { requested: number; matched: number; missing: string[]; invalid?: string[] };
   errors: { path: string; error: string }[];
   conflicts: ImportConflict[];
+  /**
+   * REQ-20261019-002：本次因「疑似重复」被跳过的文件明细（按 path 升序，最多 {@link MAX_DUPLICATE_DETAIL} 条）。
+   * 未传 `skipDuplicates` 时恒为 `[]`。
+   */
+  duplicatesSkipped: ImportDuplicateSkipItem[];
+  /** 跳过明细被截断（完整条数见 `stats.files.duplicatesSkipped`） */
+  duplicatesSkippedTruncated: boolean;
   groups: string[];
   source: GroupIndexSource;
   /**
@@ -229,6 +255,14 @@ export interface HandleDirectImportArgs {
    * 缺省 = 处理全部扫描到的文件（既有行为）。
    */
   onlyRelPaths?: string[];
+  /**
+   * REQ-20261019-002：跳过「内容与库中已有文档一致、但 sourcePath 不同」的文件。
+   *
+   * 缺省 `false`：**不计算跳过集**，预算、进度、统计完全走既有口径（行为等价）。
+   * `true`：在预算预检与进度分母**之前**算出跳过集并从待处理集剔除；
+   * 剔除后为空 → 抛 `ALL_FILES_DUPLICATES`（fail-loud，不得静默成功 0 篇）。
+   */
+  skipDuplicates?: boolean;
   /** 文档级自定义标签（逗号分隔多个）。无论是否向量化均持久化到 relation.tags（供 rebuild-vector/restore 恢复）；向量化时额外为每个导入文件每个 tag 写一条内容向量 */
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
@@ -703,6 +737,52 @@ async function handleDirectImportUnlocked(
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
   }
 
+  // REQ-20261019-002：跳过疑似重复（内容一致但 sourcePath 不同）。
+  // 判据只有一份（duplicate-index.ts），且必须**先于预算预检**剔除：
+  // 否则"全量超限、剔除后在预算内"的批次会被误判 IMPORT_BUDGET_EXCEEDED。
+  // 不传 skipDuplicates 时本段完全不执行（AC8：预算/进度/统计保持既有口径）。
+  /**
+   * 路径净化（R2 引入，P1 review：三端同一防护）——绝对路径 / 含 `..` / 空值 / 超长一律拒绝。
+   * 定义上移是因为「跳过重复」需要在预算预检前解析白名单；下方 onlyRelPaths 解析段复用同一
+   * 实现，避免两份口径漂移。
+   */
+  const sanitizeRelPath = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const rel = value.trim();
+    if (!rel || rel.length > 4096) return null;
+    if (path.isAbsolute(rel)) return null;
+    if (rel.split(/[\\/]/).includes('..')) return null;
+    return rel;
+  };
+  /** 白名单后、剔除重复前 —— `scanned` 的基准（见下方 scannedBaseCount） */
+  let baseAfterOnly: string[] = files;
+  let dupSkipMap: Map<string, DuplicateHit> | null = null;
+  if (args.skipDuplicates) {
+    const rawOnly = Array.isArray(args.onlyRelPaths) ? args.onlyRelPaths : null;
+    const allowed = new Set<string>();
+    for (const item of rawOnly ?? []) {
+      const rel = sanitizeRelPath(item);
+      if (rel) allowed.add(rel);
+    }
+    // 与既有解析段同口径：声明了清单但全部非法 → fail-loud（不静默退化为整批）
+    if (rawOnly && rawOnly.length > 0 && allowed.size === 0) {
+      throw new Error(
+        `onlyRelPaths 的 ${rawOnly.length} 条路径全部非法（绝对路径 / 含 .. / 空值或超长），`
+        + '已拒绝执行以免误处理整批文件；请检查重试清单或重新导入',
+      );
+    }
+    baseAfterOnly = allowed.size > 0 ? files.filter((rel) => allowed.has(rel)) : files;
+    const startedAt = Date.now();
+    dupSkipMap = collectDuplicateHits({ scope, sourceDir, relPaths: baseAfterOnly });
+    logInfo(`重复导入判定：${dupSkipMap.size} / ${baseAfterOnly.length} 篇为疑似重复，耗时 ${Date.now() - startedAt}ms`);
+  }
+  /** 真正待处理的文件（跳过集已剔除；未传跳过时等于 `files`） */
+  const filesForImport = dupSkipMap && dupSkipMap.size > 0
+    ? baseAfterOnly.filter((rel) => !dupSkipMap!.has(rel))
+    : baseAfterOnly;
+  /** 预算预检输入：跳过时用剔除后列表；否则沿用既有 `files`（AC8） */
+  const budgetFiles = args.skipDuplicates ? filesForImport : files;
+
   // 批次 2（W1）：预读改双轨（loadCurrentLayoutCache 统一入口）——新布局从分片聚合
   // 重建内存结构；旧布局读旧单文件（随后写入时惰性迁移）。内存结构 RelationsCache
   // 形状不变，全流程（冲突检测/upsert/回填）无需改动。
@@ -730,7 +810,8 @@ async function handleDirectImportUnlocked(
     let preflightBytes = 0;
     let preflightChunks = 0;
     if (needStat) {
-      for (const rel of files) {
+      // REQ-20261019-002：跳过重复时按剔除后清单算预算（未跳过时 budgetFiles === files）
+      for (const rel of budgetFiles) {
         const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
         try {
           const size = fs.statSync(absPath).size;
@@ -745,7 +826,7 @@ async function handleDirectImportUnlocked(
       }
     }
     const preflight = preflightImportBudget({
-      files,
+      files: budgetFiles,
       totalBytes: preflightBytes,
       estimatedChunks: preflightChunks,
       budget,
@@ -800,16 +881,8 @@ async function handleDirectImportUnlocked(
   // R2（REQ-20261009-001）：只重试未完成子集——名单外的文件本轮完全不处理（不读原文、
   // 不复制附件、不写 KB、不向量化，也不计入 skipped/errors）。未命中的清单条目
   //（源文件已删除/改名）单独记账，不静默消失。
-  // P1（review）：重试清单可能被手工编辑或外部污染 → 在**核心层**统一净化（绝对路径 /
-  // `..` 段 / 空值 / 超长一律拒绝），让 CLI、daemon、HTTP 三端获得同一防护（HTTP 侧另有校验）。
-  const sanitizeRelPath = (value: unknown): string | null => {
-    if (typeof value !== 'string') return null;
-    const rel = value.trim();
-    if (!rel || rel.length > 4096) return null;
-    if (path.isAbsolute(rel)) return null;
-    if (rel.split(/[\\/]/).includes('..')) return null;
-    return rel;
-  };
+  // P1（review）：重试清单可能被手工编辑或外部污染 → 在**核心层**统一净化。
+  // 净化实现见本函数上方 `sanitizeRelPath`（与「跳过重复」的白名单解析共用，单一实现）。
   const requestedRaw = Array.isArray(args.onlyRelPaths) ? args.onlyRelPaths : null;
   const invalidRelPaths: string[] = [];
   const requestedRels = new Set<string>();
@@ -846,10 +919,40 @@ async function handleDirectImportUnlocked(
       + `；请确认 --source 指向原目录`,
     );
   }
-  /** 本轮实际处理的文件（重试模式下 = 清单 ∩ 源目录）——进度分母/中断标记分母都必须用它，
-   * 否则子集重试会显示 done 3/100 永不达 100%（复审 P2），中断标记也记全量。 */
-  const effectiveFiles = onlySet ? files.filter((rel) => onlySet.has(rel)) : files;
+  /** 本轮实际处理的文件（重试模式下 = 清单 ∩ 源目录，且已剔除跳过重复）——进度分母/中断标记
+   * 分母都必须用它，否则子集重试会显示 done 3/100 永不达 100%（复审 P2），中断标记也记全量。 */
+  const effectiveFiles = onlySet ? filesForImport.filter((rel) => onlySet.has(rel)) : filesForImport;
+  // REQ-20261019-002：`matched` 语义 = 「清单 ∩ 源目录」**再减去跳过集**（跳过项不算本轮处理），
+  // 与 `retryFilter.requested` 的差额可能大于 `missing`——差额里含被跳过的重复项。
   if (retryFilter) retryFilter.matched = effectiveFiles.length;
+
+  // REQ-20261019-002：全部被剔除 → fail-loud。放在「重试清单全部不存在」之后，
+  // 避免遮蔽既有错误码（清单全缺失时用户该看到的是"源文件没了"，不是"全部重复"）。
+  if (args.skipDuplicates && effectiveFiles.length === 0) {
+    const err = new Error(
+      `本批 ${baseAfterOnly.length} 篇全部为疑似重复文档，跳过重复将不导入任何文件；`
+      + '如需新建副本请改用「仍然导入」；如为重试，请检查重试清单',
+    ) as Error & { code?: string };
+    err.code = 'ALL_FILES_DUPLICATES';
+    throw err;
+  }
+
+  /**
+   * REQ-20261019-002：统计基准。
+   * - 跳过时 = 白名单后、剔除前（含将被跳过的重复项）⇒ `skipped` 自动吸收跳过数；
+   * - 未跳过时 = 既有 `effectiveFiles.length`（逐字保持原口径，AC8）。
+   * ⚠️ `skipped` 必须用同一基准反算，**不得**再额外 `+ dupSkipCount`（会重复计数）。
+   */
+  const scannedBaseCount = args.skipDuplicates ? baseAfterOnly.length : effectiveFiles.length;
+  const dupSkipCount = dupSkipMap?.size ?? 0;
+  const dupSkipDetail: ImportDuplicateSkipItem[] = dupSkipMap
+    ? [...dupSkipMap.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, MAX_DUPLICATE_DETAIL)
+      .map(([rel, hit]) => ({ path: rel, existingGroup: hit.existingGroup, existingRelation: hit.existingRelation }))
+    : [];
+  // 计数与明细已固化：释放完整 Map（大库数万条时避免整批常驻内存到导入结束）
+  dupSkipMap = null;
 
   totalFileCount = effectiveFiles.length; // 中断标记总文件数（REQ-01）
   args.onProgress?.({ phase: 'scan', done: 0, total: effectiveFiles.length });
@@ -1068,7 +1171,7 @@ async function handleDirectImportUnlocked(
         total: 0,
         vectorized: 0,
         errors: 0,
-        skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length,
+        skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + dupSkipCount,
         vector,
         assets: assetCopied.size,
         conflicts: conflicts.length,
@@ -1078,15 +1181,18 @@ async function handleDirectImportUnlocked(
           total: 0,
           completed: unchangedFileCount,
           incomplete: 0,
-          scanned: effectiveFiles.length,
-          skipped: Math.max(0, effectiveFiles.length - unchangedFileCount),
+          scanned: scannedBaseCount,
+          skipped: Math.max(0, scannedBaseCount - unchangedFileCount),
           unchanged: unchangedFileCount,
+          duplicatesSkipped: dupSkipCount,
         },
       },
       partial: false,
       incomplete: [],
       errors: [],
       conflicts,
+      duplicatesSkipped: dupSkipDetail,
+      duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
       groups: [],
       source: { dir: sourceDir, chunkSize, chunkOverlap },
     };
@@ -1106,7 +1212,7 @@ async function handleDirectImportUnlocked(
           total: 0,
           vectorized: 0,
           errors: 0,
-          skipped: skippedConflictCount,
+          skipped: skippedConflictCount + dupSkipCount,
           vector,
           assets: 0,
           conflicts: conflicts.length,
@@ -1118,15 +1224,18 @@ async function handleDirectImportUnlocked(
             total: 0,
             completed: 0,
             incomplete: 0,
-            scanned: effectiveFiles.length,
-            skipped: skipped.length + skippedConflictCount,
+            scanned: scannedBaseCount,
+            skipped: Math.max(0, scannedBaseCount - fileRecords.length - unchangedFileCount),
             unchanged: 0,
+            duplicatesSkipped: dupSkipCount,
           },
         },
         partial: false,
         incomplete: [],
         errors: [],
         conflicts,
+        duplicatesSkipped: dupSkipDetail,
+        duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
       };
@@ -1849,7 +1958,7 @@ async function handleDirectImportUnlocked(
       vectorized: mergedMap.size,
       errors: importErrors.length,
       // skipped 合并：过大/超限/hook 失败 + relation 冲突（REQ-06：冲突计入 skipped）
-      skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + failedRecords.size,
+      skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + failedRecords.size + dupSkipCount,
       vector,
       assets: assetCopied.size,
       conflicts: conflicts.length,
@@ -1861,9 +1970,12 @@ async function handleDirectImportUnlocked(
         completed: fileRecords.length - failedRecords.size + unchangedFileCount,
         incomplete: failedRecords.size,
         // P2（review）：补分母与跳过数，使「扫描 = 完成 + 未完成 + 跳过」可自洽核算
-        scanned: effectiveFiles.length,
-        skipped: Math.max(0, effectiveFiles.length - fileRecords.length - unchangedFileCount),
+        // REQ-20261019-002：基准换成 scannedBaseCount（白名单后、剔除前）；
+        // 跳过数被 scannedBaseCount - fileRecords - unchanged 自动吸收，**不得**再 + dupSkipCount。
+        scanned: scannedBaseCount,
+        skipped: Math.max(0, scannedBaseCount - fileRecords.length - unchangedFileCount),
         unchanged: unchangedFileCount,
+        duplicatesSkipped: dupSkipCount,
       },
     },
     /** R1：部分成功（提交了已完成文件，但仍有未完成文件） */
@@ -1878,6 +1990,8 @@ async function handleDirectImportUnlocked(
     ...(retryFilter ? { retryFilter } : {}),
     errors: importErrors,
     conflicts,
+    duplicatesSkipped: dupSkipDetail,
+    duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
     groups: [...kbResult.groups].sort(),
     source,
     /** S-02：只报告"是否入队"，不等整理完成 */

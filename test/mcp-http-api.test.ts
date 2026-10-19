@@ -763,7 +763,7 @@ describe('/api/import/run + status', () => {
       second.result?.conflicts?.map((item: any) => [item.action, item.skipReason]),
       [['skip', 'already-imported'], ['skip', 'already-imported']],
     );
-    assert.deepEqual(second.result?.stats?.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0 });
+    assert.deepEqual(second.result?.stats?.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0, duplicatesSkipped: 0 });
   });
 
   it('status jobId 不存在 → 404', async () => {

@@ -279,7 +279,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
       [['skip', 'already-imported'], ['skip', 'already-imported']],
       '跳过成因应标为 already-imported（区别于同名的 same-name）',
     );
-    assert.deepStrictEqual(second.stats.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0 });
+    assert.deepStrictEqual(second.stats.files, { total: 0, completed: 0, incomplete: 0, scanned: 2, skipped: 2, unchanged: 0, duplicatesSkipped: 0 });
 
     // 正文改过也不重算（skip 不比对内容）——要更新请用 incremental / overwrite
     fs.writeFileSync(path.join(src, 'a.md'), '# A\n新正文');
@@ -295,7 +295,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     const fourth = runImport(skipArgs);
     assert.strictEqual(fourth.ok, true, JSON.stringify(fourth));
     assert.strictEqual(fourth.stats.total, 1, '只有新增文件被处理');
-    assert.deepStrictEqual(fourth.stats.files, { total: 1, completed: 1, incomplete: 0, scanned: 3, skipped: 2, unchanged: 0 });
+    assert.deepStrictEqual(fourth.stats.files, { total: 1, completed: 1, incomplete: 0, scanned: 3, skipped: 2, unchanged: 0, duplicatesSkipped: 0 });
   });
 
   it('同一批次 overwrite：后者替换前者，不产生重复 relation', () => {

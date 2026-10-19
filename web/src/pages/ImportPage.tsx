@@ -398,7 +398,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * R6：重复导入预检的待确认项（非空 = 上传已完成、导入**尚未开始**，等用户拍板）。
    * 取消即回到 idle，不产生任何写入。
    */
-  const [preflightConfirm, setPreflightConfirm] = useState<{ matched: number; duplicates: ImportPreflightDuplicate[]; truncated: boolean } | null>(null);
+  const [preflightConfirm, setPreflightConfirm] = useState<{ matched: number; scanned: number; duplicates: ImportPreflightDuplicate[]; truncated: boolean } | null>(null);
+  /**
+   * REQ-20261019-002：面板快照。`launchImport` 进入即清空面板，而
+   * `ALL_FILES_DUPLICATES` / 409 参数不一致是**异步**才知道的 —— 没有快照就无法恢复面板，
+   * 用户只能重新上传整批（AC15）。
+   */
+  const preflightSnapshotRef = useRef<{ matched: number; scanned: number; duplicates: ImportPreflightDuplicate[]; truncated: boolean } | null>(null);
   /** 预检明细展开/收起（明细 >5 条时提供入口） */
   const [showAllPreflight, setShowAllPreflight] = useState(false);
   const preflightRef = useRef<HTMLDivElement>(null);
@@ -411,27 +417,16 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const selectedDocuments = files.filter((file) => file.kind === 'document');
   const selectedAssets = files.filter((file) => file.kind === 'asset');
   /**
-   * 预检明细是否完整：服务端明细上限 50 条（`DEFAULT_PREFLIGHT_MAX_DETAIL`，HTTP 不接受调大），
-   * 超限时 `truncated = matched > duplicates.length`。
-   * 截断时算不出完整的"不重复"集合 → 「仅导入不重复」必须禁用，否则未列出的重复项会被再导一遍。
+   * REQ-20261019-002：「跳过重复文档」的可用性。
+   *
+   * 判定由**服务端重算**（`run(skipDuplicates=true)`），因此不受预检明细 50 条上限约束——
+   * 旧实现用明细反算 `onlyRelPaths`，>50 条重复时整条路不可用；现在 `truncated` 只影响面板展示
+   * （meta 会写「另有 N 篇未回传明细」）。
+   * 唯一条件是「剔除后仍有文件可导入」——全部重复时禁用按钮并给出**可见**原因。
    */
-  // 用 `=== false`（而非 `!truncated`）：旧 daemon 不返回该字段时按"明细可能不全"处理，
-  // 少一个入口总比把未列出的重复项再导一遍安全。
-  const preflightDetailComplete = preflightConfirm ? preflightConfirm.truncated === false : false;
-  /**
-   * 本次上传的 Markdown 中未被预检标记为重复的 rel —— 与「仅导入不重复」实际下发的清单**同源**。
-   * 不用 `selectedDocuments.length - matched` 做数字：有文件上传失败时（`uploadErrors`）它会把
-   * 没到服务端的文件也算成"不重复"，导致按钮上的数字与真正下发的条数不一致。
-   */
-  const nonDuplicateRels = preflightConfirm
-    ? (() => {
-      const duplicated = new Set(preflightConfirm.duplicates.map((item) => item.rel));
-      return selectedDocuments
-        .map((file) => stripTopSegment(file.name))
-        .filter((rel) => !duplicated.has(rel));
-    })()
-    : [];
-  const nonDuplicateCount = nonDuplicateRels.length;
+  const canSkipDuplicates = preflightConfirm !== null && preflightConfirm.scanned > preflightConfirm.matched;
+  /** 跳过之后预计导入的文件数（仅展示用；实际以 run 时刻服务端判定为准） */
+  const newFileCount = preflightConfirm ? Math.max(0, preflightConfirm.scanned - preflightConfirm.matched) : 0;
   const skippedFiles = selections.reduce((sum, selection) => sum + selection.skippedFiles, 0);
   const skippedBytes = selections.reduce((sum, selection) => sum + selection.skippedBytes, 0);
   const totalSelectedBytes = files.reduce((sum, file) => sum + file.size, 0);
@@ -591,6 +586,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     // 凭据要先按「当前任务的 uploadId/jobId」清（清空 plan/job 后就取不到了）
     clearImportCredentialIf({ uploadId: uploadPlanRef.current?.uploadId, jobId: job?.id });
     uploadPlanRef.current = null;
+    // 本批结束：预检快照一并释放，避免下一个批次误用上一批的面板数据
+    preflightSnapshotRef.current = null;
     setSelections([]);
     setUploadStats(null);
     setUploadErrors([]);
@@ -748,8 +745,17 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       }
       setJob(result.job);
       setScope(savedScope);
-      setPhase(result.job.state === 'done' ? 'done' : result.job.state === 'running' ? 'importing' : 'failed');
-      if (result.job.state === 'failed') {
+      // REQ-20261019-002：刷新/重进页面时面板快照（内存态）已丢失，无法恢复「跳过/仍然导入」选择；
+      // 但「全部重复」是输入问题不是系统故障，不得渲染成红色失败——回 idle 并给出下一步指引。
+      const recoveredAllDuplicates = result.job.errorCode === 'ALL_FILES_DUPLICATES';
+      setPhase(recoveredAllDuplicates
+        ? 'idle'
+        : result.job.state === 'done' ? 'done' : result.job.state === 'running' ? 'importing' : 'failed');
+      if (recoveredAllDuplicates) {
+        setFailureStage(null);
+        setError(null);
+        setProgressText('上次「跳过重复文档」未导入任何文件（本批全部为疑似重复）；如需建副本请重新选择文件并点「仍然导入」');
+      } else if (result.job.state === 'failed') {
         setFailureStage('import');
         setError(result.job.error ?? '导入失败');
       } else if (result.job.state === 'cancelled') {
@@ -842,6 +848,21 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           active = false;
           clearInterval(timer);
           invalidateImportQueries(targetScope);
+          // REQ-20261019-002：全部重复是「可纠正的输入问题」，不是失败——
+          // 恢复预检面板（快照）并保留 plan/凭据，用户可直接改选「仍然导入」。
+          // 若落成 failed 红态，用户会以为系统故障，且面板已清空只能重传整批（AC15）。
+          if (res.job.errorCode === 'ALL_FILES_DUPLICATES' && preflightSnapshotRef.current) {
+            const snapshot = preflightSnapshotRef.current;
+            preflightSnapshotRef.current = null; // 已消费，避免下次误用上一次批次的快照
+            setJob(null);
+            setPreflightConfirm(snapshot);
+            setPhase('awaiting-confirm');
+            setScopeConfirmed(false);
+            setFailureStage(null);
+            setError(null);
+            setProgressText('本批全部为疑似重复，未导入任何文件；如需建副本请点「仍然导入」');
+            return;
+          }
           clearImportCredentialIf({ jobId: job.id });
           setPhase('failed');
           setScopeConfirmed(false);
@@ -1199,7 +1220,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     }
     const matched = preflight?.files?.matched ?? 0;
     if (matched > 0) {
-      setPreflightConfirm({ matched, duplicates: preflight?.duplicates ?? [], truncated: Boolean(preflight?.truncated) });
+      setPreflightConfirm({
+        matched,
+        // 预检扫描到的 Markdown 数（「本批共 N 篇」的口径，Q5）；旧 daemon 缺失时退回 matched
+        scanned: preflight?.files?.scanned ?? matched,
+        duplicates: preflight?.duplicates ?? [],
+        truncated: Boolean(preflight?.truncated),
+      });
       // 上传已完成、导入未开始：迁出 uploading，否则右轨会一直说「上传中…」（2026-10-19 报障）
       setPhase('awaiting-confirm');
       // 「重试上传」链路进来时 failureStage 可能仍是上一轮的 'upload'，等待期不能再背着它
@@ -1218,9 +1245,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    *   不写 KB），附件跟随其所属文档一起生效。**空数组不可传** —— 服务端会当成"未指定"退化为
    *   全量导入（`import.ts:827`），恰好与用户意图相反，故调用方需先判空。
    */
-  const launchImport = async (plan: UploadPlan, onlyRelPaths?: string[]): Promise<void> => {
+  const launchImport = async (
+    plan: UploadPlan,
+    onlyRelPaths?: string[],
+    options?: { skipDuplicates?: boolean },
+  ): Promise<void> => {
     setPreflightConfirm(null);
-    setProgressText('正在启动导入…');
+    setProgressText(options?.skipDuplicates ? '正在比对库内文档并跳过疑似重复…' : '正在启动导入…');
     const finalize = currentFinalize();
     try {
       const response = await runImport({
@@ -1228,13 +1259,28 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         uploadId: plan.uploadId,
         ...finalize,
         ...(onlyRelPaths && onlyRelPaths.length > 0 ? { onlyRelPaths } : {}),
+        ...(options?.skipDuplicates ? { skipDuplicates: true } : {}),
       });
-      if (!response.ok || !response.jobId) throw new Error(response.error ?? '导入启动失败');
+      if (!response.ok || !response.jobId) {
+        throw Object.assign(new Error(response.error ?? '导入启动失败'), { code: response.code });
+      }
       // 回写「本次实际使用的参数」：`startRetry` 的「重试未完成」必须沿用上一次 run 的
       // finalize（而不是上传时的快照），否则"改成 overwrite 跑一半失败后重试"会退回 incremental
       plan.finalize = finalize;
       trackImport(response.jobId, plan.scope, plan.uploadId);
     } catch (failure) {
+      // REQ-20261019-002：同一 uploadId 已在跑且「跳过重复」设置不同 → 可纠正提示，不落失败红态
+      const code = (failure as { code?: string }).code;
+      if (code === 'IMPORT_JOB_PARAMS_MISMATCH' && preflightSnapshotRef.current) {
+        const snapshot = preflightSnapshotRef.current;
+        preflightSnapshotRef.current = null;
+        setPreflightConfirm(snapshot);
+        setPhase('awaiting-confirm');
+        setFailureStage(null);
+        setError(null);
+        setProgressText('该批次已在导入中，请等待完成或到任务中心查看');
+        return;
+      }
       setFailureStage('import');
       setPhase('failed');
       setScopeConfirmed(false);
@@ -1258,19 +1304,18 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   };
 
   /**
-   * 「仅导入不重复的 N 篇」：把本次上传的 Markdown 减去预检命中的重复项，按子集跑 run。
+   * 「跳过重复文档」（REQ-20261019-002）：把「跳过疑似重复」交给服务端判定。
    *
-   * 复用 `/api/import/run` 的 `onlyRelPaths`（「重试未完成」已在用），**零后端改动**。
-   * 两个必须自己兜住的边界：
-   *   ① 明细被截断（`matched > duplicates.length`）→ 算出的"不重复"集合不可信，不给入口；
-   *   ② 减完为空 → **不能传空数组**（服务端 `import.ts:827` 会当成未指定 → 全量导入），直接不给入口。
-   * 附件不必单独列出：`import.ts` 在遍历 Markdown 时按引用复制，被排除的文档其图片也不会落盘。
+   * 与旧实现（前端用预检明细反算 `onlyRelPaths`）的差别：
+   *   ① 不再受明细 50 条上限约束（服务端按同一判据重算，任意条数都能跳过）；
+   *   ② 判定口径 = run 时刻的库状态（预检只作提示），不会把"预检后新出现的重复"当新文件导入；
+   *   ③ 全部重复时由服务端 fail-loud，前端渲染可纠正提示（而不是一个灰按钮 + hover 说明）。
    */
-  const importNonDuplicates = (): void => {
+  const skipDuplicateImport = (): void => {
     const plan = uploadPlanRef.current;
-    // nonDuplicateRels 与按钮文案同源：为空时按钮已 disabled，这里的早退只是兜底
-    if (!plan || !preflightDetailComplete || nonDuplicateRels.length === 0) return;
-    void launchImport(plan, nonDuplicateRels);
+    if (!plan || !preflightConfirm || !canSkipDuplicates) return;
+    preflightSnapshotRef.current = preflightConfirm;
+    void launchImport(plan, undefined, { skipDuplicates: true });
   };
 
   /**
@@ -1389,8 +1434,16 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         stats?: {
           total?: number; vectorized?: number; errors?: number; conflicts?: number;
           /** R2：文件级完成度（CLI/Web 同源口径） */
-          files?: { total?: number; completed?: number; incomplete?: number; scanned?: number; skipped?: number; unchanged?: number };
+          files?: {
+            total?: number; completed?: number; incomplete?: number;
+            scanned?: number; skipped?: number; unchanged?: number;
+            /** REQ-20261019-002：因疑似重复被跳过的文件数（skipped 的子集） */
+            duplicatesSkipped?: number;
+          };
         };
+        /** REQ-20261019-002：跳过明细（最多 500 条） */
+        duplicatesSkipped?: { path: string; existingGroup: string; existingRelation: string }[];
+        duplicatesSkippedTruncated?: boolean;
         errors?: { path?: string; error?: string }[];
         conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string; skipReason?: string }[];
         /** R1/R2：部分成功语义（REQ-20261009-001） */
@@ -1403,6 +1456,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       }
     | undefined;
   const importErrors = result?.errors ?? [];
+  /** REQ-20261019-002：本次跳过重复的计数与明细（旧 daemon 无字段 → 0 / 空） */
+  const duplicatesSkippedCount = result?.stats?.files?.duplicatesSkipped ?? 0;
+  const duplicatesSkippedList = result?.duplicatesSkipped ?? [];
   /**
    * R4（2026-10-10）：「同名处理」摘要要区分 skip 的两种成因——
    * ① `already-imported`：本文件此前已导入（同 sourcePath），跳过 = 不重算；
@@ -2008,31 +2064,35 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               </div>
 
               <p className="ki-preflight__note">
-                确认后按当前「同名文档处理」策略继续；取消不会写入任何内容。
+                本批共 {preflightConfirm.scanned} 篇：其中 {preflightConfirm.matched} 篇疑似重复、
+                其余 {newFileCount} 篇将按当前设置处理；取消不会写入任何内容。
               </p>
 
               <div className="ki-preflight__actions">
-                <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={confirmDuplicateImport}>
-                  仍然导入
-                </button>
                 <button
                   type="button"
-                  className="ki-btn ki-btn--secondary ki-btn--small"
-                  onClick={importNonDuplicates}
-                  disabled={!preflightDetailComplete || nonDuplicateCount === 0}
-                  title={!preflightDetailComplete
-                    ? '重复明细超出服务端回传上限，无法精确算出不重复清单：建议改用「跳过同名文件」策略，或取消后分批导入'
-                    : nonDuplicateCount === 0
-                      ? '本次上传的 Markdown 内容都与库中已有文档重复，没有可单独导入的新文件'
-                      : `只导入这 ${nonDuplicateCount} 篇，跳过 ${preflightConfirm.matched} 篇内容重复的文件`}
+                  className="ki-btn ki-btn--primary ki-btn--small"
+                  onClick={skipDuplicateImport}
+                  disabled={!canSkipDuplicates}
+                  title={canSkipDuplicates
+                    ? `跳过这 ${preflightConfirm.matched} 篇疑似重复，导入其余 ${newFileCount} 篇`
+                    : '全部文件均为疑似重复，跳过将不导入任何文件；如需建副本请点「仍然导入」'}
                 >
-                  仅导入不重复的 {nonDuplicateCount} 篇
+                  跳过重复文档
                 </button>
-                {/* 退出动线用 ghost：三个动作里它最弱，避免与「仅导入不重复」抢同等视觉权重 */}
+                <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" onClick={confirmDuplicateImport}>
+                  仍然导入（会新建副本）
+                </button>
+                {/* 退出动线用 ghost：三个动作里它最弱 */}
                 <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={cancelDuplicateImport}>
                   取消
                 </button>
               </div>
+              {!canSkipDuplicates && (
+                <p className="ki-form-hint">
+                  全部 {preflightConfirm.scanned} 篇均为疑似重复，跳过将不导入任何文件；如需建副本请点「仍然导入」。
+                </p>
+              )}
             </div>
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 20, alignItems: 'center' }}>
@@ -2186,6 +2246,27 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}${partialFiles.unchanged ? ` / 其中未变跳过重算 ${partialFiles.unchanged}` : ''}）`
                 : ''}
             </p>
+            {/* REQ-20261019-002：跳过重复的结果（与"文件级跳过"并存，不重复计数） */}
+            {duplicatesSkippedCount > 0 && (
+              <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                已跳过 {duplicatesSkippedCount} 篇疑似重复（未写入知识库）。
+                {result?.duplicatesSkippedTruncated
+                  ? ` 仅展示前 ${duplicatesSkippedList.length} 条，共 ${duplicatesSkippedCount} 条。`
+                  : ''}
+                {duplicatesSkippedList.length > 0 && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary>查看跳过的 {duplicatesSkippedList.length} 篇</summary>
+                    <ul style={{ margin: '6px 0 0 18px', padding: 0, overflowWrap: 'anywhere' }}>
+                      {duplicatesSkippedList.map((item) => (
+                        <li key={item.path}>
+                          {item.path} ↔ 已有「{item.existingRelation}」（{item.existingGroup}）
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
             {/* S-02/S-03：两级完成口径的说明文案（整理期文档照常可用；失败只降级、不谎报导入失败） */}
             {job?.indexState === 'indexing' && (
               <p className="ki-cell-sub" style={{ marginTop: 4 }}>
