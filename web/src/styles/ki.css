@@ -2471,9 +2471,39 @@ a:hover { text-decoration: underline; }
   border-radius: var(--ki-radius-sm); box-shadow: var(--ki-shadow-2);
 }
 .ki-code-lang__hint { margin: 0 0 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); line-height: 1.6; }
-/* 「当前首选」与「怎么关」各占一行、再弱一级：点选不再自动关闭后，这两句是用户确认生效
-   与退出浮层的唯一可见依据（自定义语言在网格里没有高亮项）。 */
-.ki-code-lang__hint-tail { display: block; margin-top: 2px; font-size: 11px; opacity: 0.8; }
+/* 「当前首选」状态条（PM M4 走查 2026-10-19）：原为 11px + opacity .8 的灰字，实测是浮层里
+   权重最低的信息（比说明正文 12px 还弱），却承担着「我现在选的是什么」这个首要确认职责。
+   做法：独立成条（浅底）+ 状态值做成主色 chip —— 与网格 active 项同一套 primary 语义，
+   但对比度与字号都更高一档（12px/650 主色 vs 说明 12px/400 subtle），层级不再倒挂。
+   未指定时退化为虚线空态 chip，不抢注意力。
+   ⚠️ 高度预算：状态条 +30px、关闭提示 +16px、说明精简 -0px ⇒ 浮层 439 → ~453px，
+   1440×900 下 top 397 仍完整可见；480 高视口下 top 约 7px（已是既有上限，再矮会顶出视口）。 */
+.ki-code-lang__current {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 8px; padding: 6px 8px;
+  background: var(--ki-color-bg-secondary); border-radius: var(--ki-radius-sm);
+}
+.ki-code-lang__current-label { flex: none; font-size: 11px; color: var(--ki-color-text-subtle); }
+/* 状态值用**实底主色**而不是浅底：网格的 active 项已经是「浅底 + 主色字」，
+   两处同款会让人分不清哪个才是当前值（实测首版就是这个问题）。实底面积只有 ~70×22px，
+   不至于压过网格；暗色主题主色本身很亮，必须换成深色文字（同 `.ki-btn--primary` 的做法）。 */
+.ki-code-lang__current-value {
+  min-width: 0; max-width: 100%;
+  padding: 1px 8px; border-radius: 4px;
+  font: 650 12px/1.4 var(--ki-font-mono);
+  color: #fff; background: var(--ki-color-primary); border: 1px solid transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+[data-theme="dark"] .ki-code-lang__current-value { color: #10231b; }
+.ki-code-lang__current--none .ki-code-lang__current-value {
+  font-weight: 500; color: var(--ki-color-text-subtle);
+  background: transparent; border-style: dashed; border-color: var(--ki-color-border-strong);
+}
+/* 关闭提示：整条浮层唯一的「退出路径」说明，弱于状态但必须能读到 */
+.ki-code-lang__foot {
+  margin: 8px 0 0; text-align: center;
+  font-size: 11px; color: var(--ki-color-text-subtle); opacity: 0.85;
+}
 .ki-code-lang__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; max-height: 264px; overflow-y: auto; }
 .ki-code-lang__option {
   padding: 6px 8px; border: 0; border-radius: 5px; background: none; color: var(--ki-color-text);

@@ -140,14 +140,20 @@ export function CodeLangSelect(): JSX.Element {
             aria-label="首选代码语言"
           >
             <p className="ki-code-lang__hint">
-              多语言代码块默认展开这一门；不含该语言的组仍展示第一个，手动切换不受影响。
-              {/* 点选不再自动关闭 ⇒ ① 必须写明怎么关，否则用户无处可退（fail-loud + 给出路）；
-                  ② 必须给出「已生效」的回显 —— 自定义语言（haskell 等）不在网格里，没有高亮可看。 */}
-              <span className="ki-code-lang__hint-tail">
-                {preferred ? `当前首选：${preferred}` : '当前不指定'}
-              </span>
-              <span className="ki-code-lang__hint-tail">点空白处或按 Esc 关闭</span>
+              多语言代码块默认展开这一门；不含该语言的组仍展示第一个。
             </p>
+            {/* 「当前首选」独立成状态条（PM M4 走查 2026-10-19）：原实现是 11px + opacity .8 的
+                灰字，实测是全浮层**权重最低**的信息（比说明还弱），而它恰是用户打开面板最想确认的。
+                点选不再自动关闭后，自定义语言（haskell 等）在网格里连高亮都没有，只能靠这条回显。 */}
+            <div
+              className={`ki-code-lang__current${preferred ? '' : ' ki-code-lang__current--none'}`}
+              aria-live="polite"
+            >
+              <span className="ki-code-lang__current-label">当前首选</span>
+              <span className="ki-code-lang__current-value" title={preferred || '不指定'}>
+                {preferred || '不指定'}
+              </span>
+            </div>
             <div className="ki-code-lang__grid">
               {CODE_LANG_OPTIONS.map((lang) => (
                 <button
@@ -187,6 +193,8 @@ export function CodeLangSelect(): JSX.Element {
             >
               不指定（展示每组第一个）
             </button>
+            {/* 关闭提示压在动作区之后：它是「怎么结束」的说明，不该跟状态、说明抢顶部视线 */}
+            <p className="ki-code-lang__foot">点空白处或按 Esc 关闭</p>
           </div>,
           document.body,
         )
