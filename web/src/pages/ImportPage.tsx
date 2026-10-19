@@ -399,6 +399,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * 取消即回到 idle，不产生任何写入。
    */
   const [preflightConfirm, setPreflightConfirm] = useState<{ matched: number; duplicates: ImportPreflightDuplicate[]; truncated: boolean } | null>(null);
+  /** 预检明细展开/收起（明细 >5 条时提供入口） */
+  const [showAllPreflight, setShowAllPreflight] = useState(false);
+  const preflightRef = useRef<HTMLDivElement>(null);
 
   const [importConfig, setImportConfig] = useState<ImportConfigResponse | null>(null);
   const importConfigOrFallback = importConfig ?? FALLBACK_IMPORT_CONFIG;
@@ -407,6 +410,28 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const files = selections.flatMap((selection) => selection.files);
   const selectedDocuments = files.filter((file) => file.kind === 'document');
   const selectedAssets = files.filter((file) => file.kind === 'asset');
+  /**
+   * 预检明细是否完整：服务端明细上限 50 条（`DEFAULT_PREFLIGHT_MAX_DETAIL`，HTTP 不接受调大），
+   * 超限时 `truncated = matched > duplicates.length`。
+   * 截断时算不出完整的"不重复"集合 → 「仅导入不重复」必须禁用，否则未列出的重复项会被再导一遍。
+   */
+  // 用 `=== false`（而非 `!truncated`）：旧 daemon 不返回该字段时按"明细可能不全"处理，
+  // 少一个入口总比把未列出的重复项再导一遍安全。
+  const preflightDetailComplete = preflightConfirm ? preflightConfirm.truncated === false : false;
+  /**
+   * 本次上传的 Markdown 中未被预检标记为重复的 rel —— 与「仅导入不重复」实际下发的清单**同源**。
+   * 不用 `selectedDocuments.length - matched` 做数字：有文件上传失败时（`uploadErrors`）它会把
+   * 没到服务端的文件也算成"不重复"，导致按钮上的数字与真正下发的条数不一致。
+   */
+  const nonDuplicateRels = preflightConfirm
+    ? (() => {
+      const duplicated = new Set(preflightConfirm.duplicates.map((item) => item.rel));
+      return selectedDocuments
+        .map((file) => stripTopSegment(file.name))
+        .filter((rel) => !duplicated.has(rel));
+    })()
+    : [];
+  const nonDuplicateCount = nonDuplicateRels.length;
   const skippedFiles = selections.reduce((sum, selection) => sum + selection.skippedFiles, 0);
   const skippedBytes = selections.reduce((sum, selection) => sum + selection.skippedBytes, 0);
   const totalSelectedBytes = files.reduce((sum, file) => sum + file.size, 0);
@@ -606,6 +631,23 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setCancelState((prev) => (prev === 'idle' ? prev : 'idle'));
     setCancelError('');
   }, [phase]);
+
+  /**
+   * 预检命中后把用户带到面板前。
+   *
+   * 面板挂在表单底部：23 个文件的清单之后实测 `top ≈ 2341px`（视口 1000），**根本不在视野里**。
+   * 不主动滚过去，用户只会看到右轨「等待确认」却不知道要确认什么（2026-10-19 M4 走查）。
+   * 同时把焦点交给面板（`alertdialog` + `tabIndex=-1`），键盘/读屏用户不必从头 Tab。
+   */
+  useEffect(() => {
+    if (!preflightConfirm) return;
+    setShowAllPreflight(false);
+    const panel = preflightRef.current;
+    if (!panel) return;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    panel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    panel.focus({ preventScroll: true });
+  }, [preflightConfirm]);
 
   useEffect(() => {
     // S-02/S-03（REQ-20261009-003）：两级完成口径下的轨道文案 ——「已完成 · 可用」与
@@ -1168,13 +1210,25 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     await launchImport(plan);
   };
 
-  /** 调 /api/import/run 真正启动导入（预检通过或用户确认后）——策略取**当前**表单值 */
-  const launchImport = async (plan: UploadPlan): Promise<void> => {
+  /**
+   * 调 /api/import/run 真正启动导入（预检通过或用户确认后）——策略取**当前**表单值。
+   *
+   * @param onlyRelPaths 只导入这批 rel（「仅导入不重复」子集）；不传 = 整批。
+   *   服务端语义见 `src/lib/import.ts:813-851`：清单外文件完全不处理（不读原文、不复制附件、
+   *   不写 KB），附件跟随其所属文档一起生效。**空数组不可传** —— 服务端会当成"未指定"退化为
+   *   全量导入（`import.ts:827`），恰好与用户意图相反，故调用方需先判空。
+   */
+  const launchImport = async (plan: UploadPlan, onlyRelPaths?: string[]): Promise<void> => {
     setPreflightConfirm(null);
     setProgressText('正在启动导入…');
     const finalize = currentFinalize();
     try {
-      const response = await runImport({ scope: plan.scope, uploadId: plan.uploadId, ...finalize });
+      const response = await runImport({
+        scope: plan.scope,
+        uploadId: plan.uploadId,
+        ...finalize,
+        ...(onlyRelPaths && onlyRelPaths.length > 0 ? { onlyRelPaths } : {}),
+      });
       if (!response.ok || !response.jobId) throw new Error(response.error ?? '导入启动失败');
       // 回写「本次实际使用的参数」：`startRetry` 的「重试未完成」必须沿用上一次 run 的
       // finalize（而不是上传时的快照），否则"改成 overwrite 跑一半失败后重试"会退回 incremental
@@ -1201,6 +1255,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       return;
     }
     void launchImport(plan);
+  };
+
+  /**
+   * 「仅导入不重复的 N 篇」：把本次上传的 Markdown 减去预检命中的重复项，按子集跑 run。
+   *
+   * 复用 `/api/import/run` 的 `onlyRelPaths`（「重试未完成」已在用），**零后端改动**。
+   * 两个必须自己兜住的边界：
+   *   ① 明细被截断（`matched > duplicates.length`）→ 算出的"不重复"集合不可信，不给入口；
+   *   ② 减完为空 → **不能传空数组**（服务端 `import.ts:827` 会当成未指定 → 全量导入），直接不给入口。
+   * 附件不必单独列出：`import.ts` 在遍历 Markdown 时按引用复制，被排除的文档其图片也不会落盘。
+   */
+  const importNonDuplicates = (): void => {
+    const plan = uploadPlanRef.current;
+    // nonDuplicateRels 与按钮文案同源：为空时按钮已 disabled，这里的早退只是兜底
+    if (!plan || !preflightDetailComplete || nonDuplicateRels.length === 0) return;
+    void launchImport(plan, nonDuplicateRels);
   };
 
   /**
@@ -1868,34 +1938,100 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             </div>
           </div>
 
-          {/* R6：重复导入预检待确认（导入尚未开始 → 取消是零写入） */}
+          {/* R6：重复导入预检待确认（导入尚未开始 → 取消是零写入）
+              2026-10-19 改版：原先是"一句长标题 + 5 条 ul + 一行说明"，信息平铺、行内塞 4 个字段、
+              截断时还会吞掉后果说明。现改为：标题/副标题分层 + 两列对照表（可滚动、可展开）+
+              常驻后果说明 + 动作文案带后果。 */}
           {preflightConfirm && phase === 'awaiting-confirm' && (
-            <div className="ki-card" style={{ marginTop: 12, borderColor: 'var(--ki-color-warning)' }}>
-              <div className="ki-card__body" style={{ padding: 12 }}>
-                <div style={{ color: 'var(--ki-color-warning)', fontWeight: 600 }}>
-                  检测到 {preflightConfirm.matched} 篇内容与库中已有文档一致，但来源路径不同 —— 直接导入会新建副本
+            <div
+              ref={preflightRef}
+              className="ki-preflight"
+              role="alertdialog"
+              aria-labelledby="ki-preflight-title"
+              aria-describedby="ki-preflight-sub"
+              tabIndex={-1}
+            >
+              <div className="ki-preflight__head">
+                <span className="ki-preflight__icon" aria-hidden="true">
+                  <Icon name="warn" className="ki-icon ki-icon--sm" />
+                </span>
+                <div className="ki-preflight__headtext">
+                  <div className="ki-preflight__title" id="ki-preflight-title">
+                    {preflightConfirm.matched} 篇内容与库中已有文档重复
+                  </div>
+                  <p className="ki-preflight__sub" id="ki-preflight-sub">
+                    内容一致、来源路径不同；继续导入会按上方「同名文档处理」策略处理。
+                  </p>
                 </div>
-                <ul style={{ margin: '8px 0 0 18px', padding: 0, fontSize: 'var(--ki-font-size-sm)' }}>
-                  {preflightConfirm.duplicates.slice(0, 5).map((item) => (
-                    <li key={item.rel}>
-                      {item.rel} ↔ 已有「{item.existingRelation}」（{item.existingGroup}
-                      {item.existingSourcePath ? `，来源 ${item.existingSourcePath}` : '，来源未记录'}）
-                    </li>
-                  ))}
-                </ul>
-                <div className="ki-cell-sub" style={{ marginTop: 6 }}>
-                  {preflightConfirm.truncated
-                    ? `仅列出前 ${preflightConfirm.duplicates.length} 条，共 ${preflightConfirm.matched} 篇`
-                    : '确认后按当前「同名文档处理」策略继续；取消则不会导入任何内容。'}
+                <span className="ki-preflight__count">重复 {preflightConfirm.matched}</span>
+              </div>
+
+              <div className="ki-preflight__list" id="ki-preflight-list">
+                <div className="ki-preflight__cols" aria-hidden="true">
+                  <span>本次文件</span>
+                  <span />
+                  <span>库中已有</span>
                 </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                  <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={confirmDuplicateImport}>
-                    仍然导入
+                {(showAllPreflight ? preflightConfirm.duplicates : preflightConfirm.duplicates.slice(0, 5)).map((item) => (
+                  <div className="ki-preflight__row" key={`${item.rel}\u0000${item.existingRelation}`}>
+                    <span className="ki-preflight__file" title={item.rel}>{item.rel}</span>
+                    <span className="ki-preflight__arrow" aria-hidden="true">→</span>
+                    <span
+                      className="ki-preflight__existing"
+                      title={`${item.existingRelation}${item.existingGroup ? ` · ${item.existingGroup}` : ''}${item.existingSourcePath ? ` · 来源 ${item.existingSourcePath}` : ' · 来源未记录'}`}
+                    >
+                      <b>{item.existingRelation}</b>
+                      {item.existingGroup ? <span className="ki-preflight__group">· {item.existingGroup}</span> : null}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="ki-preflight__meta">
+                <span>
+                  {preflightConfirm.duplicates.length < preflightConfirm.matched
+                    ? `已列出 ${preflightConfirm.duplicates.length} 篇，另有 ${preflightConfirm.matched - preflightConfirm.duplicates.length} 篇未回传明细`
+                    : `共 ${preflightConfirm.duplicates.length} 篇`}
+                  {!showAllPreflight && preflightConfirm.duplicates.length > 5 ? ' · 仅显示前 5 条' : ''}
+                </span>
+                {preflightConfirm.duplicates.length > 5 && (
+                  <button
+                    type="button"
+                    className="ki-preflight__toggle"
+                    aria-expanded={showAllPreflight}
+                    aria-controls="ki-preflight-list"
+                    onClick={() => setShowAllPreflight((value) => !value)}
+                  >
+                    {showAllPreflight ? '收起' : `展开全部 ${preflightConfirm.duplicates.length} 条`}
                   </button>
-                  <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" onClick={cancelDuplicateImport}>
-                    取消
-                  </button>
-                </div>
+                )}
+              </div>
+
+              <p className="ki-preflight__note">
+                确认后按当前「同名文档处理」策略继续；取消不会写入任何内容。
+              </p>
+
+              <div className="ki-preflight__actions">
+                <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={confirmDuplicateImport}>
+                  仍然导入
+                </button>
+                <button
+                  type="button"
+                  className="ki-btn ki-btn--secondary ki-btn--small"
+                  onClick={importNonDuplicates}
+                  disabled={!preflightDetailComplete || nonDuplicateCount === 0}
+                  title={!preflightDetailComplete
+                    ? '重复明细超出服务端回传上限，无法精确算出不重复清单：建议改用「跳过同名文件」策略，或取消后分批导入'
+                    : nonDuplicateCount === 0
+                      ? '本次上传的 Markdown 内容都与库中已有文档重复，没有可单独导入的新文件'
+                      : `只导入这 ${nonDuplicateCount} 篇，跳过 ${preflightConfirm.matched} 篇内容重复的文件`}
+                >
+                  仅导入不重复的 {nonDuplicateCount} 篇
+                </button>
+                {/* 退出动线用 ghost：三个动作里它最弱，避免与「仅导入不重复」抢同等视觉权重 */}
+                <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={cancelDuplicateImport}>
+                  取消
+                </button>
               </div>
             </div>
           )}
@@ -2081,7 +2217,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 </ul>
                 {result?.retryFilter && (result.retryFilter.missing?.length || result.retryFilter.invalid?.length) ? (
                   <p className="ki-cell-sub" style={{ marginTop: 6 }}>
-                    本次只重试了清单中可用的文件
+                    {/* 子集清单有两条来源：重试未完成、仅导入不重复；措辞保持中性 */}
+                    本次只处理了清单中可用的文件
                     {typeof result.retryFilter.matched === 'number' ? `（命中 ${result.retryFilter.matched} 篇）` : ''}
                     {result.retryFilter.missing?.length ? `；${result.retryFilter.missing.length} 篇在当前暂存目录已找不到（已跳过）` : ''}
                     {result.retryFilter.invalid?.length ? `；${result.retryFilter.invalid.length} 条非法路径已忽略` : ''}

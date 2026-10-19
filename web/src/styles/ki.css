@@ -4713,3 +4713,110 @@ select.ki-chat-cfg__ta--select {
 @media (prefers-reduced-motion: reduce) {
   .ki-chatpage__widthsegb { transition: none; }
 }
+
+/* ═══ 重复导入预检面板（2026-10-19 改版：结构化对照表，替代原「长句 + 5 条 ul」）═══
+   视觉语言对齐 .ki-vector-dimension-banner 的「左 3px 语义色边 + 图标」，
+   但**不铺大面积暖底**：页面主色是冷绿灰，warning-soft(#fbf3db) 大面积铺底会撞色相，
+   暖色只保留"左侧竖条 / 图标圆底 / 徽标描边"三种小面积点缀。
+   信息层级：标题/副标题 > 两列对照表（可滚动、可展开）> 计数与后果说明 > 动作。 */
+.ki-preflight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ki-space-2);
+  margin-top: var(--ki-space-3);
+  padding: var(--ki-space-3) var(--ki-space-4) var(--ki-space-4);
+  border: 1px solid var(--ki-color-border);
+  border-left: 3px solid var(--ki-color-warning);
+  border-radius: var(--ki-radius-md);
+  /* 页面主色是冷绿灰，warning-soft(#fbf3db) 大面积铺底会与页面撞色相；
+     改为中性底，暖色只承担"线/图标/徽标描边"三种小面积点缀。 */
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text);
+  outline: none;
+}
+.ki-preflight:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ki-color-warning) 45%, transparent); }
+
+.ki-preflight__head { display: flex; align-items: flex-start; gap: var(--ki-space-2); }
+.ki-preflight__icon {
+  display: grid; place-items: center;
+  width: 24px; height: 24px; flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ki-color-warning);
+  color: var(--ki-color-surface);
+}
+.ki-preflight__headtext { flex: 1; min-width: 0; }
+.ki-preflight__title { font-size: var(--ki-font-size-md); font-weight: 600; line-height: 1.45; }
+.ki-preflight__sub { margin: 2px 0 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); line-height: 1.5; }
+.ki-preflight__count {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 40%, transparent);
+  border-radius: var(--ki-radius-tag);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  background: transparent;
+  color: var(--ki-color-warning);
+}
+
+/* 两列对照：本次文件 → 库中已有（路径单行省略，hover 显示全文） */
+.ki-preflight__list {
+  /* 230 = 表头(~29) + 6 行(30×6) + 余量：让收起/展开都没有"半行被切"的观感 */
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+}
+.ki-preflight__cols,
+.ki-preflight__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px minmax(0, 1.1fr);
+  align-items: center;
+  column-gap: var(--ki-space-2);
+  padding: 0 var(--ki-space-2);
+}
+.ki-preflight__cols {
+  position: sticky; top: 0; z-index: 1;
+  padding-top: 6px; padding-bottom: 6px;
+  background: var(--ki-color-bg-secondary);
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+.ki-preflight__row { min-height: 30px; border-bottom: 1px solid color-mix(in srgb, var(--ki-color-border) 60%, transparent); }
+.ki-preflight__row:last-child { border-bottom: none; }
+.ki-preflight__row:hover { background: var(--ki-color-hover); }
+.ki-preflight__file,
+.ki-preflight__existing { min-width: 0; font-size: var(--ki-font-size-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ki-preflight__file { font-family: var(--ki-font-mono); }
+.ki-preflight__arrow { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); text-align: center; }
+.ki-preflight__existing { display: flex; align-items: baseline; gap: 6px; color: var(--ki-color-text-subtle); }
+.ki-preflight__existing b { font-weight: 600; color: var(--ki-color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ki-preflight__group { overflow: hidden; text-overflow: ellipsis; }
+
+.ki-preflight__meta { display: flex; align-items: center; gap: var(--ki-space-2); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-preflight__toggle {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs);
+  cursor: pointer;
+}
+.ki-preflight__toggle:hover { text-decoration: underline; }
+.ki-preflight__note { margin: 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); line-height: 1.5; }
+.ki-preflight__actions { display: flex; flex-wrap: wrap; gap: var(--ki-space-2); }
+
+/* 窄容器（展开后 AI 面板 / 小窗口）：退回单列，避免两列都挤成「…」 */
+@media (max-width: 720px) {
+  .ki-preflight__cols { display: none; }
+  .ki-preflight__row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+  .ki-preflight__arrow { display: none; }
+  .ki-preflight__existing { padding-left: var(--ki-space-4); }
+}
