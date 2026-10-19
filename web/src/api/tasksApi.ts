@@ -25,6 +25,57 @@ export interface TaskIndexReadiness {
   reason?: string;
 }
 
+/**
+ * 参数快照（REQ-20261019-004 S-01）：任务创建时确定，此后不变。
+ * ★ 与后端 `src/lib/task-registry.ts` 的 `TaskParamSnapshot` 必须逐字段一致（手写副本，非生成）。
+ */
+export interface TaskParamSnapshot {
+  /** 来源形态：浏览器上传（受控暂存目录，会被清理）/ 外部目录 */
+  sourceKind?: 'upload' | 'external';
+  /** 用户显式指定的落点 Group */
+  group?: string;
+  tags?: string[];
+  /** 是否写 dense 向量层（false = 仅全文索引） */
+  vector?: boolean;
+  conflictMode?: string;
+  conflictSuffix?: string;
+  skipDuplicates?: boolean;
+  chunkSize?: number;
+  chunkOverlap?: number;
+}
+
+/** 结果摘要（REQ-20261019-004 S-01）：结束时写入；旧记录缺失 */
+export interface TaskResultSnapshot {
+  files?: {
+    scanned: number;
+    completed: number;
+    incomplete: number;
+    skipped: number;
+    /** 其中内容未变、未重算（completed 的子集） */
+    unchanged: number;
+    /** 其中疑似重复被跳过（skipped 的子集） */
+    duplicatesSkipped: number;
+    skippedReasons?: { conflict: number; duplicate: number; other: number };
+  };
+  vectorized?: number;
+  fullTextIndexed?: number;
+  assets?: number;
+  /** 实际写入的 Group（多值） */
+  groups?: string[];
+  duplicates?: { path: string; existingGroup: string; existingRelation: string }[];
+  conflicts?: {
+    path: string;
+    relation: string;
+    action: 'overwrite' | 'skip' | 'suffix';
+    skipReason?: string;
+    /** 判定为覆盖但最终未执行（增量导入「内容未变」跳过） */
+    unchanged?: boolean;
+  }[];
+  /** 明细不完整（条数超限或字节预算裁剪，不区分成因） */
+  truncated?: boolean;
+  errorCode?: string;
+}
+
 export interface TaskRecord {
   id: string;
   source: TaskSource;
@@ -43,6 +94,12 @@ export interface TaskRecord {
   finishedAt?: number;
   /** S-03/R6：索引就绪判据（导入类任务在整理落定后写入；缺失 = 本次未产生整理） */
   indexReadiness?: TaskIndexReadiness;
+  /** REQ-20261019-004：参数快照（旧记录无此字段） */
+  params?: TaskParamSnapshot;
+  /** REQ-20261019-004：结果摘要（运行中 / 失败中断 / 旧记录可能缺失） */
+  result?: TaskResultSnapshot;
+  /** REQ-20261019-004：重试血缘（原任务 ID，1h 后原任务可能已被清理） */
+  retryOf?: string;
 }
 
 export interface TasksResponse {

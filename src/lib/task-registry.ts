@@ -31,6 +31,82 @@ export interface TaskIndexReadiness {
   reason?: string;
 }
 
+/**
+ * 参数快照（REQ-20261019-004 S-01）：任务创建时确定的执行参数，此后不再变化。
+ * ★ 与 `ImportRetryParams` 字段一一对应，但**刻意不复用其类型**——registry 是零引擎依赖的
+ *   落盘层，引用 `import-retry.ts` 会把 scope/fs 依赖带进来（见 DESIGN.md D1-3）。
+ * ★ 不存绝对路径：共享任务文件会被 `sanitizedText` 替换为 `[path]`，存了也读不出，
+ *   且可能泄漏用户目录名。改用 `sourceKind` 枚举回答"能否事后重试"。
+ */
+export interface TaskParamSnapshot {
+  /** 来源形态：浏览器上传（受控暂存目录，会被 TTL 清理）/ 外部目录 */
+  sourceKind?: 'upload' | 'external';
+  /** 用户显式指定的落点 Group；未指定时省略 */
+  group?: string;
+  /** 文档级自定义标签 */
+  tags?: string[];
+  /** 是否写 dense 向量层（false = 仅全文索引） */
+  vector?: boolean;
+  /** 同名文档处理策略：incremental / suffix / overwrite / skip */
+  conflictMode?: string;
+  /** suffix 策略的后缀模板（仅 conflictMode='suffix' 时有意义） */
+  conflictSuffix?: string;
+  /** 是否启用「跳过疑似重复」 */
+  skipDuplicates?: boolean;
+  chunkSize?: number;
+  chunkOverlap?: number;
+}
+
+/**
+ * 结果摘要（REQ-20261019-004 S-01）：任务结束时写入一次。
+ * ★ 明细条数受 {@link MAX_TASK_DETAIL_ITEMS} 限制：台账文件超过 32KB 时
+ *   `readRecordFile` 会返回 null ⇒ 任务从列表与详情彻底消失（不是"加载慢"）。
+ */
+export interface TaskResultSnapshot {
+  files?: {
+    /** 白名单后、剔除疑似重复前的文件数 */
+    scanned: number;
+    /** 文件级完成（含 unchanged） */
+    completed: number;
+    /** 未提交元数据的文件数 */
+    incomplete: number;
+    /** 未进入最终处理的文件数 */
+    skipped: number;
+    /** 其中内容未变、未重算的文件数（completed 的**子集**） */
+    unchanged: number;
+    /** 其中疑似重复被跳过的文件数（skipped 的**子集**） */
+    duplicatesSkipped: number;
+    /** skipped 的三类拆分：三项之和 == skipped */
+    skippedReasons?: { conflict: number; duplicate: number; other: number };
+  };
+  /** 写入 dense 层的条目数（chunk 合并后） */
+  vectorized?: number;
+  /** 全文索引条目数 */
+  fullTextIndexed?: number;
+  /** 复制的本地图片附件数 */
+  assets?: number;
+  /**
+   * 实际写入的 Group 列表（源目录子结构会派生多个；最多 MAX_TASK_DETAIL_ITEMS 个）。
+   * ★ 与 `params.group` 不同：`params.group` 是用户显式指定，本字段是执行后真实落点。
+   */
+  groups?: string[];
+  /** 疑似重复明细（≤ MAX_TASK_DETAIL_ITEMS） */
+  duplicates?: { path: string; existingGroup: string; existingRelation: string }[];
+  /** 同名冲突明细（≤ MAX_TASK_DETAIL_ITEMS） */
+  conflicts?: {
+    path: string;
+    relation: string;
+    action: 'overwrite' | 'skip' | 'suffix';
+    skipReason?: string;
+    /** 判定为覆盖但最终未执行（增量导入「内容未变」跳过） */
+    unchanged?: boolean;
+  }[];
+  /** 明细是否被截断（完整数见计数） */
+  truncated?: boolean;
+  /** 可判别错误码（如 ALL_FILES_DUPLICATES / VECTORIZATION_STOPPED） */
+  errorCode?: string;
+}
+
 export interface TaskRecord {
   id: string;
   source: TaskSource;
@@ -49,12 +125,34 @@ export interface TaskRecord {
   finishedAt?: number;
   /** S-03/R6：索引就绪判据（导入类任务在整理落定后写入；缺失 = 本次未产生整理） */
   indexReadiness?: TaskIndexReadiness;
+  /** 参数快照（创建时写入；旧记录无此字段） */
+  params?: TaskParamSnapshot;
+  /** 结果摘要（结束时写入；运行中为 undefined） */
+  result?: TaskResultSnapshot;
+  /** 重试血缘：本任务重试自哪个任务 */
+  retryOf?: string;
 }
 
+/** 单类明细上限：20 条 × ~120B ≈ 2.4KB，远小于 32KB 文件上限 */
+export const MAX_TASK_DETAIL_ITEMS = 20;
+
+/** 可更新字段白名单（`params` 在 args 就绪后单独写入一次；`result` 只在 finish 时写） */
+type TaskPatch = Partial<Pick<TaskRecord,
+  'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted'
+  | 'startedAt' | 'finishedAt' | 'indexReadiness' | 'params' | 'result'>>;
+
 export interface TaskReporter {
-  update(patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>>): void;
-  progress(progress: TaskProgress): void;
-  finish(state: Exclude<TaskState, 'queued' | 'running' | 'unknown'>, options?: { error?: string; recoveryHint?: string; partialCommitted?: number }): void;
+  update(patch: TaskPatch): boolean;
+  progress(progress: TaskProgress): boolean;
+  finish(state: Exclude<TaskState, 'queued' | 'running' | 'unknown'>, options?: {
+    error?: string;
+    recoveryHint?: string;
+    partialCommitted?: number;
+    /** 结果摘要；与 `errorCode` 一起写入 `record.result` */
+    result?: TaskResultSnapshot;
+    /** 可判别错误码（会合并进 result.errorCode，便于 UI 单点读取） */
+    errorCode?: string;
+  }): void;
   stop(): void;
 }
 
@@ -133,6 +231,150 @@ function normalizeProgress(progress: TaskProgress): TaskProgress {
   };
 }
 
+const MAX_SNAPSHOT_TEXT = 200;
+const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * 相对路径净化（REQ-20261019-004 S-01）：绝对路径 / 含 `..` / 空值 / 超长一律拒绝。
+ * ★ 与 `import.ts` 的 `sanitizeRelPath` **同判据但不同实现**：后者在 import 模块内部，
+ *   落盘层引用它会把导入链路的依赖带进来（见 DESIGN.md D1-3）。
+ */
+function safeRelPath(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const rel = value.trim().replace(/\\/g, '/');
+  if (!rel || rel.length > MAX_SNAPSHOT_TEXT) return undefined;
+  if (rel.startsWith('/') || /^[A-Za-z]:\//.test(rel)) return undefined;
+  if (rel.split('/').includes('..')) return undefined;
+  return rel;
+}
+
+function countish(value: unknown): number | undefined {
+  return Number.isFinite(value) ? Math.max(0, Number(value)) : undefined;
+}
+
+function normalizeParams(input: TaskParamSnapshot | undefined): TaskParamSnapshot | undefined {
+  if (!input) return undefined;
+  const out: TaskParamSnapshot = {};
+  if (input.sourceKind === 'upload' || input.sourceKind === 'external') out.sourceKind = input.sourceKind;
+  const group = safeRelPath(input.group);
+  if (group) out.group = group;
+  const tags = (Array.isArray(input.tags) ? input.tags : [])
+    .map((tag) => sanitizedText(tag, 80))
+    .filter((tag): tag is string => Boolean(tag))
+    .slice(0, MAX_TASK_DETAIL_ITEMS);
+  if (tags.length > 0) out.tags = tags;
+  if (typeof input.vector === 'boolean') out.vector = input.vector;
+  const conflictMode = sanitizedText(input.conflictMode, 40);
+  if (conflictMode) out.conflictMode = conflictMode;
+  if (out.conflictMode === 'suffix') {
+    const suffix = sanitizedText(input.conflictSuffix, 40);
+    if (suffix) out.conflictSuffix = suffix;
+  }
+  if (typeof input.skipDuplicates === 'boolean') out.skipDuplicates = input.skipDuplicates;
+  if (countish(input.chunkSize) !== undefined) out.chunkSize = countish(input.chunkSize);
+  if (countish(input.chunkOverlap) !== undefined) out.chunkOverlap = countish(input.chunkOverlap);
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeResult(input: TaskResultSnapshot | undefined): TaskResultSnapshot | undefined {
+  if (!input) return undefined;
+  const out: TaskResultSnapshot = {};
+  const files = input.files;
+  if (files && typeof files === 'object') {
+    const scanned = countish(files.scanned) ?? 0;
+    const completed = countish(files.completed) ?? 0;
+    const incomplete = countish(files.incomplete) ?? 0;
+    const skipped = countish(files.skipped) ?? 0;
+    const unchanged = countish(files.unchanged) ?? 0;
+    const duplicatesSkipped = countish(files.duplicatesSkipped) ?? 0;
+    const reasons = files.skippedReasons;
+    out.files = {
+      scanned, completed, incomplete, skipped, unchanged, duplicatesSkipped,
+      ...(reasons && typeof reasons === 'object'
+        ? {
+            skippedReasons: {
+              conflict: countish(reasons.conflict) ?? 0,
+              duplicate: countish(reasons.duplicate) ?? 0,
+              other: countish(reasons.other) ?? 0,
+            },
+          }
+        : {}),
+    };
+  }
+  if (countish(input.vectorized) !== undefined) out.vectorized = countish(input.vectorized);
+  if (countish(input.fullTextIndexed) !== undefined) out.fullTextIndexed = countish(input.fullTextIndexed);
+  if (countish(input.assets) !== undefined) out.assets = countish(input.assets);
+  const groupsRaw = (Array.isArray(input.groups) ? input.groups : [])
+    .map(safeRelPath)
+    .filter((group): group is string => Boolean(group));
+  if (groupsRaw.length > MAX_TASK_DETAIL_ITEMS) out.truncated = true;
+  const groups = groupsRaw.slice(0, MAX_TASK_DETAIL_ITEMS);
+  if (groups.length > 0) out.groups = groups;
+  const duplicatesRaw = (Array.isArray(input.duplicates) ? input.duplicates : [])
+    .map((item) => {
+      const rel = safeRelPath(item?.path);
+      const existingGroup = safeRelPath(item?.existingGroup);
+      const existingRelation = sanitizedText(item?.existingRelation, MAX_SNAPSHOT_TEXT);
+      return rel && existingGroup && existingRelation
+        ? { path: rel, existingGroup, existingRelation }
+        : null;
+    })
+    .filter((item): item is { path: string; existingGroup: string; existingRelation: string } => item !== null);
+  if (duplicatesRaw.length > MAX_TASK_DETAIL_ITEMS) out.truncated = true;
+  const duplicates = duplicatesRaw.slice(0, MAX_TASK_DETAIL_ITEMS);
+  if (duplicates.length > 0) out.duplicates = duplicates;
+  const conflictsRaw = (Array.isArray(input.conflicts) ? input.conflicts : [])
+    .map((item) => {
+      const rel = safeRelPath(item?.path);
+      const relation = sanitizedText(item?.relation, MAX_SNAPSHOT_TEXT);
+      const action = item?.action;
+      if (!rel || !relation) return null;
+      if (action !== 'overwrite' && action !== 'skip' && action !== 'suffix') return null;
+      const skipReason = item.skipReason === 'already-imported' || item.skipReason === 'same-name'
+        ? item.skipReason
+        : undefined;
+      return {
+        path: rel,
+        relation,
+        action,
+        ...(skipReason ? { skipReason } : {}),
+        ...(item.unchanged === true ? { unchanged: true } : {}),
+      };
+    })
+    .filter((item): item is { path: string; relation: string; action: 'overwrite' | 'skip' | 'suffix'; skipReason?: 'already-imported' | 'same-name' } => item !== null);
+  if (conflictsRaw.length > MAX_TASK_DETAIL_ITEMS) out.truncated = true;
+  const conflicts = conflictsRaw.slice(0, MAX_TASK_DETAIL_ITEMS);
+  if (conflicts.length > 0) out.conflicts = conflicts;
+  if (input.truncated === true) out.truncated = true;
+  if (typeof input.errorCode === 'string' && ERROR_CODE_RE.test(input.errorCode)) out.errorCode = input.errorCode;
+  return out;
+}
+
+/**
+ * 落盘前按字节预算裁剪明细（REQ-20261019-004 G1）。
+ * ★ 必须：`readRecordFile` 对 `size > MAX_TASK_FILE_BYTES` 返回 null ⇒ 超限任务会**静默消失**。
+ * 降级顺序：先砍 conflicts → 再砍 duplicates → 最后只留计数（`truncated` 标记共存）。
+ */
+function fitToBudget(record: TaskRecord): TaskRecord {
+  if (!record.result) return record;
+  const limit = MAX_TASK_FILE_BYTES - 512;
+  /**
+   * ★ 必须按 **UTF-8 字节** 算，不能用 `String.length`（UTF-16 码元数）：
+   *   中文在 UTF-8 下 3 字节 / 1 码元，按长度算会低估约 3 倍，
+   *   而读侧 `readRecordFile` 用的是 `stat.size`（真实字节数）——
+   *   低估会让"以为没超"的记录落盘后超限，任务直接从列表消失。
+   */
+  const sizeOf = (value: TaskRecord): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  if (sizeOf(record) <= limit) return record;
+  const withoutConflicts: TaskResultSnapshot = { ...record.result, truncated: true };
+  delete withoutConflicts.conflicts;
+  const candidate: TaskRecord = { ...record, result: withoutConflicts };
+  if (sizeOf(candidate) <= limit) return candidate;
+  const withoutDetails: TaskResultSnapshot = { ...withoutConflicts };
+  delete withoutDetails.duplicates;
+  return { ...record, result: withoutDetails };
+}
+
 function writeRecord(config: Pick<KiConfig, 'dataDir'>, record: TaskRecord, createOnly = false): void {
   const dir = ensureTaskDir(config);
   const file = taskPath(config, record.id);
@@ -145,10 +387,12 @@ function writeRecord(config: Pick<KiConfig, 'dataDir'>, record: TaskRecord, crea
   } else if (!createOnly) {
     throw Object.assign(new Error('任务状态文件已丢失，拒绝重建活动任务'), { code: 'TASK_REGISTRY_MISSING' });
   }
+  // 唯一落盘入口：超预算时裁剪明细，避免文件 >32KB 后被 readRecordFile 判为不可读（任务消失）
+  const payload = JSON.stringify(fitToBudget(record));
   const temporary = path.join(dir, `.${record.id}.${crypto.randomUUID()}.tmp`);
   const fd = fs.openSync(temporary, 'wx', 0o600);
   try {
-    fs.writeFileSync(fd, JSON.stringify(record), 'utf8');
+    fs.writeFileSync(fd, payload, 'utf8');
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -180,7 +424,14 @@ function readRecordFile(file: string, expectedId: string): TaskRecord | null {
 /** Register first, then expose safe state updates and an independent heartbeat. */
 export function createTaskReporter(
   config: Pick<KiConfig, 'dataDir'>,
-  input: { id?: string; source: TaskSource; operation: string; scope: string },
+  input: {
+    id?: string;
+    source: TaskSource;
+    operation: string;
+    scope: string;
+    /** 重试血缘：本任务重试自哪个任务（缺省 = 非重试任务） */
+    retryOf?: string;
+  },
 ): TaskReporter {
   const now = Date.now();
   const record: TaskRecord = {
@@ -192,6 +443,7 @@ export function createTaskReporter(
     createdAt: now,
     updatedAt: now,
     heartbeatAt: now,
+    ...(typeof input.retryOf === 'string' && TASK_ID_RE.test(input.retryOf) ? { retryOf: input.retryOf } : {}),
   };
   writeRecord(config, record, true);
   let stopped = false;
@@ -201,7 +453,7 @@ export function createTaskReporter(
     lastWriteWarningAt = Date.now();
     process.stderr.write(`[ki] 任务状态暂不能更新：${sanitizedText((error as Error)?.message, 180) ?? 'unknown'}\n`);
   };
-  const update = (patch: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>>): boolean => {
+  const update = (patch: TaskPatch): boolean => {
     if (stopped) return false;
     const updated: TaskRecord = {
       ...record,
@@ -210,6 +462,9 @@ export function createTaskReporter(
       ...(patch.error !== undefined ? { error: safeErrorSummary(patch.error) } : {}),
       ...(patch.recoveryHint !== undefined ? { recoveryHint: sanitizedText(patch.recoveryHint, 240) } : {}),
       ...(patch.progress !== undefined ? { progress: normalizeProgress(patch.progress) } : {}),
+      // REQ-20261019-004：参数快照 / 结果摘要同样过卫生化（相对路径、标签、错误码白名单）
+      ...(patch.params !== undefined ? { params: normalizeParams(patch.params) } : {}),
+      ...(patch.result !== undefined ? { result: normalizeResult(patch.result) } : {}),
       // S-03/R6：就绪判据同样过卫生化（`reason` 可能来自引擎/超时错误文本）
       ...(patch.indexReadiness !== undefined
         ? {
@@ -233,7 +488,7 @@ export function createTaskReporter(
       return false;
     }
   };
-  let pendingFinish: Partial<Pick<TaskRecord, 'state' | 'phase' | 'progress' | 'error' | 'recoveryHint' | 'partialCommitted' | 'startedAt' | 'finishedAt' | 'indexReadiness'>> | undefined;
+  let pendingFinish: TaskPatch | undefined;
   let pendingFinishRetries = 0;
   const timer = setInterval(() => {
     if (pendingFinish) {
@@ -262,13 +517,25 @@ export function createTaskReporter(
       phase: progress.phase,
     }),
     finish: (state, options = {}) => {
+      /**
+       * REQ-20261019-004：`errorCode` 统一并入 `result.errorCode`——UI 只需读一个位置；
+       * 失败路径即使没有结果摘要（`toResultSnapshot` 返回 undefined），也落一个只含错误码的
+       * result，避免"错误码存在别处"的两套读法。
+       */
+      const mergedResult = options.result !== undefined || options.errorCode !== undefined
+        ? {
+            ...(options.result ?? {}),
+            ...(options.errorCode !== undefined ? { errorCode: options.errorCode } : {}),
+          }
+        : undefined;
       const terminalPatch = {
         state,
         finishedAt: Date.now(),
         ...(options.error ? { error: options.error } : {}),
         ...(options.recoveryHint ? { recoveryHint: options.recoveryHint } : {}),
         ...(Number.isFinite(options.partialCommitted) ? { partialCommitted: options.partialCommitted } : {}),
-      } satisfies Partial<Pick<TaskRecord, 'state' | 'finishedAt' | 'error' | 'recoveryHint' | 'partialCommitted'>>;
+        ...(mergedResult !== undefined ? { result: mergedResult } : {}),
+      } satisfies TaskPatch;
       if (update(terminalPatch)) {
         stopped = true;
         clearInterval(timer);

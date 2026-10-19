@@ -42,7 +42,9 @@ import {
   toPosix,
 } from './chunk-entries.js';
 
-import { deriveGroupPath, type ScanResultEntry } from './ai-results.js';
+import type { ScanResultEntry } from './ai-results.js';
+// 落点推导与重复判据共用同一实现（debug：group 吸收路径前缀时的疑似重复误判）
+import { resolveGroupForSource } from './import-path.js';
 
 // 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
 export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
@@ -185,6 +187,12 @@ export interface ImportConflict {
    * 供 CLI/Web 摘要区分，避免把"重导同一目录"的跳过写成「同名冲突」。
    */
   skipReason?: 'already-imported' | 'same-name';
+  /**
+   * 实际结果补充（2026-10-19 debug）：该条冲突**最终没有执行**——增量导入判定「内容未变」后跳过。
+   * ★ `action` 表达的是"按策略将如何处理"，不是"实际做了什么"：不区分时前端会把
+   *   `overwrite` 渲染成「已覆盖」，而实际一个字节都没写（用户报的"报告说覆盖、原文没变"）。
+   */
+  unchanged?: boolean;
 }
 
 export interface ImportResult {
@@ -305,26 +313,13 @@ export interface HandleDirectImportArgs {
 // rebuild 共用同一实现，避免两条链路的向量粒度/文本漂移）；本模块只做 re-export。
 
 /**
- * 推导文件的 groupPath（rootName 概念移除后的落点规则）
+ * 落点推导已提取到 `import-path.ts`：`resolveGroupForSource` 与
+ * `duplicate-index.ts` 的「是否同一篇文档」判据必须共用同一套规则，
+ * 否则 group 吸收路径前缀时会把幂等更新误判成疑似重复（debug 2026-10-19）。
  *
- * - 显式 --group（非空）：沿用旧语义——group 作为统一根前缀，文件相对子目录挂其下。
- *   `deriveGroupPath(group, rel)` = `group` 或 `group/<子目录>`。
- * - 缺省 --group（空）：
- *   - 目录导入：文件的相对目录即 groupPath（顶层子目录名 = 根节点）；根目录下的顶层 .md 归 scope name 根。
- *   - 单文件导入：groupPath = scope name。
- *
- * @param group 显式 group（可空）
- * @param rel 文件相对 sourceDir 的 posix 路径
- * @param scope scope name（缺省 group 时的兜底根）
+ * 规则保持：显式 group ⇒ `group` 或 `group/<子目录>`；缺省 ⇒ 文件相对目录，
+ * 根下文件归 scope 根；单文件（rel 无目录）缺省时归 scope 根。
  */
-function resolveGroupForSource(group: string, rel: string, scope: string): string {
-  if (group) {
-    return deriveGroupPath(group, rel);
-  }
-  // 缺省 group：取文件相对目录为 groupPath（顶层子目录名即根节点）
-  const dir = path.posix.dirname(toPosix(rel));
-  return dir === '.' ? scope : dir;
-}
 
 // ─── 直导（原文直导 + 切分）工具 ─────────────────────────
 
@@ -773,7 +768,9 @@ async function handleDirectImportUnlocked(
     }
     baseAfterOnly = allowed.size > 0 ? files.filter((rel) => allowed.has(rel)) : files;
     const startedAt = Date.now();
-    dupSkipMap = collectDuplicateHits({ scope, sourceDir, relPaths: baseAfterOnly });
+    // ★ 传 group：判据要按「本次真实落点（group + rel）」与库中比较，
+    //   否则 group 吸收了路径前缀时，幂等更新会被当成「来源不同」而误剔除（debug 2026-10-19）
+    dupSkipMap = collectDuplicateHits({ scope, sourceDir, relPaths: baseAfterOnly, group });
     logInfo(`重复导入判定：${dupSkipMap.size} / ${baseAfterOnly.length} 篇为疑似重复，耗时 ${Date.now() - startedAt}ms`);
   }
   /** 真正待处理的文件（跳过集已剔除；未传跳过时等于 `files`） */
@@ -1106,6 +1103,12 @@ async function handleDirectImportUnlocked(
         scope,
       })) {
       unchangedFileCount += 1;
+      // 回写冲突明细的实际结果：判定为 overwrite 但被「内容未变」拦下，不得让报告说"已覆盖"
+      // （不用 findLast：tsconfig 的 lib 不含 es2023）
+      for (let index = conflicts.length - 1; index >= 0; index -= 1) {
+        const item = conflicts[index];
+        if (item.path === rel && item.action === 'overwrite') { item.unchanged = true; break; }
+      }
       logInfo(`内容未变，增量跳过重算（${rel}）`);
       processedFileCount++;
       args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });

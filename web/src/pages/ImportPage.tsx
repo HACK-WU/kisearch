@@ -1227,7 +1227,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setProgressText('正在预检重复导入…');
     let preflight: Awaited<ReturnType<typeof preflightImport>> | null = null;
     try {
-      preflight = await preflightImport({ scope: plan.scope, uploadId: plan.uploadId });
+      preflight = await preflightImport({
+        scope: plan.scope,
+        uploadId: plan.uploadId,
+        // 用**当前**表单的 Group（与 `currentFinalize` 同源）：预检要按真实落点判断"是否同一篇文档"，
+        // 否则 group 吸收路径前缀时（上次父目录 / 本次 group 子目录）整批幂等更新会被误报成重复
+        ...(group.trim() ? { group: group.trim() } : {}),
+      });
     } catch (failure) {
       // 预检是"提示"能力：失败不阻断导入（真问题在 run 阶段 fail-loud），但要如实告知
       const message = failure instanceof Error ? failure.message : String(failure);
@@ -1460,7 +1466,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         duplicatesSkipped?: { path: string; existingGroup: string; existingRelation: string }[];
         duplicatesSkippedTruncated?: boolean;
         errors?: { path?: string; error?: string }[];
-        conflicts?: { path?: string; originalRelation?: string; relation?: string; action?: string; skipReason?: string }[];
+        conflicts?: {
+          path?: string; originalRelation?: string; relation?: string;
+          action?: string; skipReason?: string;
+          /** 判定为覆盖但实际被「内容未变」跳过（不能显示成"已覆盖"） */
+          unchanged?: boolean;
+        }[];
         /** R1/R2：部分成功语义（REQ-20261009-001） */
         partial?: boolean;
         incomplete?: { path?: string; group?: string; relation?: string; reason?: string }[];
@@ -1483,17 +1494,21 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const conflictSummary = (() => {
     const items = result?.conflicts ?? [];
     if (items.length === 0) return '';
-    const count = (predicate: (item: { action?: string; skipReason?: string }) => boolean): number =>
+    const count = (predicate: (item: { action?: string; skipReason?: string; unchanged?: boolean }) => boolean): number =>
       items.filter(predicate).length;
     const alreadyImported = count((item) => item.action === 'skip' && item.skipReason === 'already-imported');
     const sameNameSkipped = count((item) => item.action === 'skip' && item.skipReason !== 'already-imported');
-    const overwritten = count((item) => item.action === 'overwrite');
+    // `unchanged` 的条目虽然判定为 overwrite，实际被「内容未变」跳过 ⇒ 不能算进「同名覆盖」
+    const overwritten = count((item) => item.action === 'overwrite' && !item.unchanged);
+    const unchanged = count((item) => item.unchanged === true);
     const suffixed = count((item) => item.action === 'suffix');
     const parts = [
       alreadyImported > 0 ? `已存在跳过 ${alreadyImported} 个` : '',
       sameNameSkipped > 0 ? `同名跳过 ${sameNameSkipped} 个` : '',
       overwritten > 0 ? `同名覆盖 ${overwritten} 个` : '',
       suffixed > 0 ? `另存后缀 ${suffixed} 个` : '',
+      // 明确「这是同名冲突里的一部分」：否则会和文件级的「其中未变跳过重算 N」形成两个"未变"数字
+      unchanged > 0 ? `同名冲突 ${unchanged} 个（内容未变，未覆盖）` : '',
     ].filter(Boolean);
     return parts.length > 0 ? `，${parts.join('，')}` : '';
   })();
@@ -2446,9 +2461,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 <ul>
                   {result.conflicts.slice(0, 10).map((item, index) => (
                     <li key={`${item.path ?? 'conflict'}-${index}`}>
-                      {item.path ?? '文件'}：{item.action === 'skip' && item.skipReason === 'already-imported'
-                        ? '已存在，跳过（不重算）'
-                        : `${item.originalRelation ?? '文档'} → ${item.relation ?? '未命名'}（${item.action === 'skip' ? '同名，已跳过' : item.action === 'overwrite' ? '已覆盖' : '已加后缀'}）`}
+                      {item.path ?? '文件'}：{item.unchanged
+                        ? '内容未变，跳过重算（原文未改动）'
+                        : item.action === 'skip' && item.skipReason === 'already-imported'
+                          ? '已存在，跳过（不重算）'
+                          : `${item.originalRelation ?? '文档'} → ${item.relation ?? '未命名'}（${item.action === 'skip' ? '同名，已跳过' : item.action === 'overwrite' ? '已覆盖' : '已加后缀'}）`}
                     </li>
                   ))}
                   {result.conflicts.length > 10 && <li>…另有 {result.conflicts.length - 10} 条</li>}

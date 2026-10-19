@@ -55,6 +55,11 @@ export function preflightImportDuplicates(args: {
   scope: string;
   sourceDir: string;
   onlyRelPaths?: string[];
+  /**
+   * 本次导入的显式 group（与 `/api/import/run` 同参数）。
+   * ★ 必传才能判断"是否同一篇文档"：落点 = group + rel，只比裸 rel 会在 group 吸收路径前缀时误判。
+   */
+  group?: string;
   maxDetail?: number;
   extensions?: string[];
 }): ImportPreflightResult {
@@ -63,7 +68,12 @@ export function preflightImportDuplicates(args: {
   const onlySet = args.onlyRelPaths ? new Set(args.onlyRelPaths) : null;
   const effective = (onlySet ? files.filter((rel) => onlySet.has(rel)) : files).sort();
   // 判据单一真相：与导入侧「跳过重复」共用同一实现（排序保证明细顺序稳定）
-  const hits = collectDuplicateHits({ scope: args.scope, sourceDir: args.sourceDir, relPaths: effective });
+  const hits = collectDuplicateHits({
+    scope: args.scope,
+    sourceDir: args.sourceDir,
+    relPaths: effective,
+    ...(args.group ? { group: args.group } : {}),
+  });
   const duplicates: ImportPreflightDuplicate[] = [];
   for (const [rel, hit] of hits) {
     if (duplicates.length >= maxDetail) break;

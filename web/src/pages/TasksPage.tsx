@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
   getTask, getTasks, getImportIncomplete, retryImportIncomplete, activeImportCount,
-  type TaskRecord, type TaskState, type TaskIndexReadiness, type ImportIncompleteStatus,
+  type TaskRecord, type TaskState, type ImportIncompleteStatus,
 } from '@/api/tasksApi';
 import { cancelImport } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
+import {
+  buildTaskDetail, taskSummaryLine, sourceLabel, type DetailItem, type DetailRow,
+} from '@/lib/taskDetailModel';
 import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
@@ -28,57 +31,12 @@ const OPERATION_LABEL: Record<string, string> = {
 };
 
 /**
- * S-02/R2（REQ-20261009-003）：阶段中文映射 —— 复用既有 `phase` 字段（**不新增状态枚举**），
- * 新增 `indexing` / `optimized` / `available` / `skipped` 四值（两级完成口径）。
- * 任务中心必须显示中文：不能把英文枚举直接露给用户（`phase` 未知时原样回显，便于排障）。
+ * 阶段中文映射 / 索引就绪文案 / 进度口径 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
+ * （REQ-20261019-004 S-03）：口径需要被单测锁死，不能散落在 JSX 里做判断。
  */
-const PHASE_LABEL: Record<string, string> = {
-  scan: '扫描',
-  vectorize: '向量化',
-  persist: '写入',
-  restore: '恢复',
-  rebuild: '重建',
-  indexing: '索引整理中',
-  optimized: '已优化',
-  available: '可用（索引未整理）',
-  skipped: '未触发索引整理',
-};
-
-function phaseLabel(phase?: string): string {
-  if (!phase) return '—';
-  return PHASE_LABEL[phase] ?? phase;
-}
-
-/**
- * S-03/R6（REQ-20261009-003）：索引就绪判据文案（A11 交叉口径）。
- * ★ `unknown`（读取失败/超时）**不得**显示成"未建"——两者对用户的操作指引完全相反：
- *   未建 → 去整理（`ki index-optimize`）；未知 → 稍后重试诊断（别动引擎）。
- */
-function indexReadinessLabel(readiness?: TaskIndexReadiness): string {
-  if (!readiness) return '—';
-  if (readiness.unknown) return '未知（读取超时/失败，稍后重试）';
-  return readiness.denseIndexed
-    ? `已建（dense ${readiness.completeness?.dense ?? 1}）`
-    : '未建（可执行 ki index-optimize 整理）';
-}
-
 function timeLabel(value?: number): string {
   if (!value) return '—';
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' }).format(value);
-}
-
-function taskProgress(task: TaskRecord): string {
-  const progress = task.progress;
-  if (!progress || progress.total <= 0) return task.phase ? phaseLabel(task.phase) : '等待开始';
-  const percent = Math.min(100, Math.round((progress.done / progress.total) * 100));
-  const phase = progress.phase ? phaseLabel(progress.phase) : task.phase ? phaseLabel(task.phase) : '处理中';
-  return `${phase} · ${percent}%（${progress.done}/${progress.total}）`;
-}
-
-function sourceLabel(source: TaskRecord['source']): string {
-  if (source === 'web') return '网页';
-  if (source === 'cli') return 'CLI';
-  return '后台服务';
 }
 
 /** 进度百分比；无总数时返回 null（不渲染进度条，与 demo 不确定态一致） */
@@ -89,8 +47,12 @@ function progressPercent(task: TaskRecord): number | null {
 }
 
 /** 任务进度条（v2 §7-4：列表行与详情均显示；失败/未知转 danger、部分完成转 warn） */
-function TaskProgressBar({ task, large = false }: { task: TaskRecord; large?: boolean }): JSX.Element | null {
-  const percent = progressPercent(task);
+function TaskProgressBar({ task, percent, large = false }: {
+  task: TaskRecord;
+  /** 百分比由调用方给出——详情用 `buildTaskDetail` 的口径（含阶段单位判定），避免两处各算一份 */
+  percent: number | null;
+  large?: boolean;
+}): JSX.Element | null {
   if (percent === null) return null;
   const tone = task.state === 'failed' || task.state === 'unknown' ? 'danger' : task.state === 'partial' ? 'warn' : 'accent';
   return (
@@ -107,11 +69,51 @@ function TaskProgressBar({ task, large = false }: { task: TaskRecord; large?: bo
   );
 }
 
+/** 详情分组标题（参数 / 结果 / 时间三段） */
+function SectionTitle({ children }: { children: ReactNode }): JSX.Element {
+  return <h3 className="ki-task-detail__section">{children}</h3>;
+}
+
+function RowList({ rows }: { rows: DetailRow[] }): JSX.Element {
+  return (
+    <dl className="ki-task-detail__grid">
+      {rows.map((row) => (
+        <div key={row.label}>
+          <dt>{row.label}</dt>
+          <dd className={row.tone && row.tone !== 'normal' ? `ki-task-detail__value--${row.tone}` : undefined}>
+            {row.href ? <Link to={row.href}>{row.value}</Link> : row.value}
+            {row.hint ? <small className="ki-task-detail__hint">{row.hint}</small> : null}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function ItemList({ items }: { items: DetailItem[] }): JSX.Element {
+  return (
+    <ul className="ki-task-detail__items">
+      {items.map((item) => (
+        <li key={`${item.title}-${item.meta ?? ''}`}>
+          <code>{item.title}</code>
+          {item.meta ? <span>{item.meta}</span> : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * 任务详情（REQ-20261019-004 S-03）：三段布局 + 口径修正。
+ * ★ 所有判定在 `buildTaskDetail` 里，组件只渲染——口径需要被单测锁死。
+ */
 function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Element {
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ['task', id],
     queryFn: () => getTask(id),
     refetchInterval: (queryState) => {
+      // 记录已被 TTL 清理（404）：继续轮询只会持续打 404
+      if (queryState.state.error) return false;
       const state = queryState.state.data?.task.state;
       return state === 'queued' || state === 'running' ? 3_000 : state === 'unknown' ? 15_000 : false;
     },
@@ -119,6 +121,7 @@ function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Ele
     retry: false,
   });
   const task = data?.task;
+  const detail = task ? buildTaskDetail(task) : null;
   return (
     <aside className="ki-task-detail">
       <div className="ki-task-detail__head">
@@ -131,24 +134,47 @@ function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Ele
         </span>
       </div>
       {isPending ? <p className="ki-task-muted">正在读取任务详情…</p> : null}
-      {error ? <p className="ki-task-error">任务详情暂不可用，可能已过期。</p> : null}
-      {task ? (
+      {error ? <p className="ki-task-error">记录已清理或读取失败：任务仅保留 1 小时。</p> : null}
+      {task && detail ? (
         <>
-          <dl className="ki-task-detail__grid">
-            <div><dt>来源</dt><dd>{sourceLabel(task.source)}</dd></div>
-            <div><dt>知识库</dt><dd>{task.scope}</dd></div>
-            <div><dt>阶段</dt><dd>{phaseLabel(task.phase)}</dd></div>
-            {/* S-03/R6：索引就绪（A11 交叉口径）——"索引是否真的建了"不必再开引擎诊断 */}
-            <div><dt>索引</dt><dd>{indexReadinessLabel(task.indexReadiness)}</dd></div>
-            <div><dt>进度</dt><dd>{taskProgress(task)}</dd></div>
-            <div><dt>开始时间</dt><dd>{timeLabel(task.startedAt ?? task.createdAt)}</dd></div>
-            <div><dt>结束时间</dt><dd>{timeLabel(task.finishedAt)}</dd></div>
-            {task.partialCommitted !== undefined && <div><dt>已提交条目</dt><dd>{task.partialCommitted}</dd></div>}
-          </dl>
-          <TaskProgressBar task={task} large />
-          {task.error && <p className="ki-task-error">{task.error}</p>}
-          {task.recoveryHint && <p className="ki-task-recovery">{task.recoveryHint}</p>}
-          {task.state === 'unknown' && <p className="ki-task-muted">任务来源已失去心跳；请查看启动任务的终端确认最终结果。</p>}
+          {/* 参数段恒非空（至少含「知识库」「来源」两行） */}
+          <SectionTitle>本次参数</SectionTitle>
+          <RowList rows={detail.params} />
+
+          {detail.results.length > 0 ? (
+            <>
+              <SectionTitle>执行结果</SectionTitle>
+              <RowList rows={detail.results} />
+              {detail.duplicates.length > 0 ? (
+                <details className="ki-task-detail__details">
+                  <summary>疑似重复明细 {detail.duplicates.length} 条</summary>
+                  <ItemList items={detail.duplicates} />
+                </details>
+              ) : null}
+              {detail.conflicts.length > 0 ? (
+                <details className="ki-task-detail__details">
+                  <summary>同名冲突明细 {detail.conflicts.length} 条</summary>
+                  <ItemList items={detail.conflicts} />
+                </details>
+              ) : null}
+            </>
+          ) : null}
+
+          {detail.progressText ? <p className="ki-task-muted">{detail.progressText}</p> : null}
+          {detail.showProgress ? <TaskProgressBar task={task} percent={detail.progressPercent} large /> : null}
+
+          {detail.times.length > 0 ? (
+            <>
+              <SectionTitle>时间</SectionTitle>
+              <RowList rows={detail.times} />
+            </>
+          ) : null}
+
+          {detail.notices.map((notice, index) => (
+            <p key={`${notice.tone}-${index}`} className={`ki-task-notice ki-task-notice--${notice.tone}`}>
+              {notice.text}
+            </p>
+          ))}
         </>
       ) : null}
       <code className="ki-task-id">{id}</code>
@@ -448,8 +474,8 @@ export function TasksPage(): JSX.Element {
                 <span className={`ki-task-state ki-task-state--${task.state}`}>{STATE_LABEL[task.state]}</span>
                 <span className="ki-task-row__main">
                   <b>{OPERATION_LABEL[task.operation] ?? task.operation}</b>
-                  <span>{task.scope} · {sourceLabel(task.source)} · {taskProgress(task)}</span>
-                  <TaskProgressBar task={task} />
+                  <span>{task.scope} · {sourceLabel(task.source)} · {taskSummaryLine(task)}</span>
+                  <TaskProgressBar task={task} percent={progressPercent(task)} />
                   {task.error && <small>{task.error}</small>}
                 </span>
                 <time>{timeLabel(task.startedAt ?? task.createdAt)}</time>

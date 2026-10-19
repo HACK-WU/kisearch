@@ -403,6 +403,12 @@ export interface ImportPreflightResult {
 export async function preflightImport(args: {
   scope: string;
   uploadId: string;
+  /**
+   * 本次导入的 Group（与 `runImport` 同参数）。
+   * ★ 必须传：落点 = group + 文件相对路径，服务端只比裸相对路径时，
+   *   「上次选父目录、本次选 group 子目录」的幂等更新会被误报成重复。
+   */
+  group?: string;
   onlyRelPaths?: string[];
 }): Promise<ImportPreflightResult> {
   return req<ImportPreflightResult>('/api/import/preflight', {

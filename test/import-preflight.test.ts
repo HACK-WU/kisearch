@@ -102,6 +102,100 @@ describe('R6：重复导入预检（只读）', () => {
   });
 });
 
+/**
+ * debug 2026-10-19：group 吸收路径前缀时的疑似重复误判。
+ *
+ * 场景（用户实测）：上次 sourceDir 选父目录、缺省 group（rel=`wiki/docs/a.md`），
+ * 本次 sourceDir 选 `wiki` 子目录 + 显式 group=`wiki`（rel=`docs/a.md`）。
+ * 两次**落点相同**（`wiki/docs` + `a`），只比裸 rel 会把幂等更新报成"会新建副本"。
+ */
+describe('group 吸收路径前缀时不算重复', () => {
+  const GROUP_SCOPE = `${SCOPE}-grp`;
+  const parent = path.join(tmpRoot, 'grp-parent');
+  const child = path.join(tmpRoot, 'grp-child');
+
+  it('落点相同 ⇒ 幂等更新；不传 group 时仍按旧口径误报（证明修复必要性）', async () => {
+    registerTestScope(GROUP_SCOPE);
+    writeFiles(parent, { 'wiki/docs/a.md': BODY_A });
+    await handleDirectImport({ scope: GROUP_SCOPE, sourceDir: parent, vector: false });
+    writeFiles(child, { 'docs/a.md': BODY_A });
+
+    const withoutGroup = preflightImportDuplicates({ scope: GROUP_SCOPE, sourceDir: child });
+    assert.equal(withoutGroup.files.matched, 1, '不传 group ⇒ 只比裸 rel，误判为重复（旧行为）');
+
+    const withGroup = preflightImportDuplicates({ scope: GROUP_SCOPE, sourceDir: child, group: 'wiki' });
+    assert.equal(withGroup.files.matched, 0, '落点相同（wiki/docs + a）不得判为疑似重复');
+    assert.deepEqual(withGroup.duplicates, []);
+  });
+
+  it('落点不同时仍要判重复（修复不能放宽到"永不重复"）', async () => {
+    const other = path.join(tmpRoot, 'grp-other');
+    writeFiles(other, { 'docs/a.md': BODY_A });
+    const result = preflightImportDuplicates({ scope: GROUP_SCOPE, sourceDir: other, group: 'other' });
+    assert.equal(result.files.matched, 1, 'group=other 落点不同，应仍然提示重复');
+  });
+
+  it('导入侧同口径：同落点重导不进入跳过集，落点不同才跳过', async () => {
+    // 同落点（sourceDir=<group> 子目录 + group=wiki）再导一次 ⇒ 应视为更新，duplicatesSkipped = 0
+    const again = path.join(tmpRoot, 'grp-child-2');
+    writeFiles(again, { 'docs/a.md': BODY_A });
+    const updated = await handleDirectImport({
+      scope: GROUP_SCOPE,
+      sourceDir: again,
+      group: 'wiki',
+      vector: false,
+      skipDuplicates: true,
+    });
+    assert.equal(updated.stats.files.duplicatesSkipped, 0, '落点相同（wiki/docs + a）不得被跳过');
+
+    // 换 group 落到别的 groupPath ⇒ 与库中不是同一篇，整批被判重复
+    // ⇒ 按既有语义 fail-loud 抛 ALL_FILES_DUPLICATES（不静默成功 0 篇）
+    // 注意用不同文件名：`sourcePath` 只存相对路径（不含 sourceDir 身份），
+    // 同名 rel 会被既有语义当成"同一来源"，测不出落点差异
+    const elsewhere = path.join(tmpRoot, 'grp-child-3');
+    writeFiles(elsewhere, { 'docs/b.md': BODY_A });
+    await assert.rejects(
+      () => handleDirectImport({
+        scope: GROUP_SCOPE,
+        sourceDir: elsewhere,
+        group: 'other',
+        vector: false,
+        skipDuplicates: true,
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'ALL_FILES_DUPLICATES',
+      '落点不同应被判为重复（整批重复则拒绝导入）',
+    );
+  });
+});
+
+describe('库中同内容多副本', () => {
+  const MULTI_SCOPE = `${SCOPE}-multi`;
+
+  it('副本都进索引（不再只留第一条），任一条匹配即视为同一篇', async () => {
+    const { buildLibraryIndex } = await import('../src/lib/duplicate-index.ts');
+    registerTestScope(MULTI_SCOPE);
+    // 副本 1：父目录导入（rel 带 wiki 前缀）⇒ 落点 wiki/docs
+    const first = path.join(tmpRoot, 'multi-first');
+    writeFiles(first, { 'wiki/docs/a.md': BODY_A });
+    await handleDirectImport({ scope: MULTI_SCOPE, sourceDir: first, vector: false });
+    // 副本 2：另一 group、同内容 ⇒ 同 hash 的第二条
+    const second = path.join(tmpRoot, 'multi-second');
+    writeFiles(second, { 'docs/a.md': BODY_A });
+    await handleDirectImport({ scope: MULTI_SCOPE, sourceDir: second, group: 'other', vector: false });
+
+    const index = buildLibraryIndex(MULTI_SCOPE);
+    const multi = [...index.values()].filter((list) => list.length > 1);
+    assert.ok(multi.length > 0, '同内容的两份文档必须留在同一个 hash 的数组里');
+    assert.ok(multi[0].length >= 2);
+
+    // 本次与副本 1 落点相同（wiki/docs + a）⇒ 不判重复
+    const third = path.join(tmpRoot, 'multi-third');
+    writeFiles(third, { 'docs/a.md': BODY_A });
+    const result = preflightImportDuplicates({ scope: MULTI_SCOPE, sourceDir: third, group: 'wiki' });
+    assert.equal(result.files.matched, 0);
+  });
+});
+
 after(() => {
   cleanupTestConfig();
   fs.rmSync(tmpRoot, { recursive: true, force: true });

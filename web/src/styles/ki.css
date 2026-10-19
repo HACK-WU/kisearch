@@ -3049,9 +3049,47 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-detail__grid div { min-width: 0; }
 .ki-task-detail__grid dt { margin-bottom: 3px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-task-detail__grid dd { margin: 0; overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
-.ki-task-error, .ki-task-recovery { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
-.ki-task-error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
-.ki-task-recovery { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+/* 任务详情三段布局（REQ-20261019-004 S-03）：参数 / 结果 / 时间。
+   分组标题用上分隔线区分，右侧 380px 列内字段增至 ~18 行时靠列内滚动兜底（见上方 sticky 段）。 */
+.ki-task-detail__section {
+  margin: 16px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ki-color-border);
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.ki-task-detail__section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+/* 行内次要说明：「其中内容未变 9 篇」「排队 1s」「原任务可能已清理」 */
+.ki-task-detail__hint { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font-size: 11px; line-height: 1.4; }
+.ki-task-detail__value--warn { color: var(--ki-color-warning); }
+.ki-task-detail__value--danger { color: var(--ki-color-danger-ink); }
+/* 明细折叠（原生 <details>：零 JS、键盘可达） */
+.ki-task-detail__details { margin-top: 10px; font-size: var(--ki-font-size-xs); }
+.ki-task-detail__details summary { cursor: pointer; color: var(--ki-color-primary); }
+.ki-task-detail__items {
+  display: flex;
+  max-height: 160px;
+  margin: 8px 0 0;
+  padding: 0;
+  flex-direction: column;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ki-task-detail__items li { display: flex; padding: 6px 8px; flex-direction: column; gap: 2px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-muted); }
+.ki-task-detail__items li + li { margin-top: 4px; }
+.ki-task-detail__items code { overflow-wrap: anywhere; }
+.ki-task-detail__items span { color: var(--ki-color-text-subtle); font-size: 11px; overflow-wrap: anywhere; }
+/* 结论提示（错误 / 恢复建议 / 旧记录 / 全部重复）：warning 与 danger 必须分开——
+   ALL_FILES_DUPLICATES 不是故障，用 warn 而非红态 */
+.ki-task-notice { margin-top: 12px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
+.ki-task-notice--info { color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); }
+.ki-task-notice--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-task-notice--danger { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+/* recoveryHint 已并入 `.ki-task-notice--warn`（三段布局），`.ki-task-recovery` 规则删除 */
+.ki-task-error { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-id { display: block; margin-top: 14px; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
 /* 任务详情动作区（2026-10-13）：按 `state × source × 清单可重试性` 渲染出路
    （重试未完成 / 整批重导 / CLI 命令 / 重新检查），替代此前恒定显示的「前往导入页处理」。 */

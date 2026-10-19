@@ -9,6 +9,8 @@ import { dispatchOperation, supportedOperations } from './daemon-dispatch.js';
 import { getVectorizationMetrics } from './vector-client.js';
 import { readKiVersion } from './version-guard.js';
 import { createTaskReporter, type TaskReporter, type TaskState } from './task-registry.js';
+// REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI 直连、HTTP 端同一实现）
+import { toParamSnapshot, toResultSnapshot, type ImportArgsLike } from './task-snapshot.js';
 import { refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 
 export interface DaemonRpcOptions {
@@ -377,7 +379,15 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
     }
     let taskReporter: TaskReporter;
     try {
-      taskReporter = createTaskReporter(requestConfig, { id: jobId, source: 'cli', operation: req.operation, scope });
+      // REQ-20261019-004：重试血缘由客户端在 params 里透传（CLI --retry-incomplete）
+      const retryOf = (req.params as { retryOf?: unknown } | undefined)?.retryOf;
+      taskReporter = createTaskReporter(requestConfig, {
+        id: jobId,
+        source: 'cli',
+        operation: req.operation,
+        scope,
+        ...(typeof retryOf === 'string' ? { retryOf } : {}),
+      });
     } catch {
       send(socket, {
         id: req.id ?? null,
@@ -443,6 +453,9 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       }
     };
     job.emitProgress = emitProgress;
+    // REQ-20261019-004：参数快照在**入队之前**写入（排队态的任务详情也能看到本次参数）。
+    // 非导入 operation 时 `toParamSnapshot` 返回 undefined，不会产生无意义字段。
+    job.taskReporter?.update({ params: toParamSnapshot(req.operation, req.params as ImportArgsLike) });
     emitProgress({ phase: 'queued', done: 0, total: 1 });
   }
   const operation: OperationRequest = { operation: req.operation, params: req.params };
@@ -516,6 +529,8 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
           ?? (taskState === 'succeeded' || taskState === 'partial'
             ? resultValue?.stats?.succeeded ?? resultValue?.stats?.vectorized ?? resultValue?.rebuildVector?.stats?.succeeded : undefined),
         recoveryHint: taskState === 'failed' ? '检查命令输出中的失败阶段与恢复建议，修复问题后重试。' : undefined,
+        // REQ-20261019-004：文件级结果摘要（任务中心回看口径）
+        result: toResultSnapshot(req.operation, outcome.result),
       });
       job.eventSeq++;
       send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue, jobId: job.id, eventSeq: job.eventSeq, final: true });
@@ -536,6 +551,10 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         error: error.message,
         recoveryHint: job.state === 'failed' ? recoveryHint(error.code) : undefined,
         partialCommitted: (error as Error & { stats?: { partialCommitted?: number } }).stats?.partialCommitted,
+        // REQ-20261019-004（challenger 意见 1）：失败/取消路径通常没有 `stats.files`，
+        // 只落可判别错误码；文件级 N/M 由 error 文案承载，不虚构数字。
+        errorCode: error.code,
+        result: toResultSnapshot(req.operation, job.result),
       });
     }
     send(socket, {

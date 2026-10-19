@@ -26,6 +26,8 @@ import { parseCleanRules, type CleanRules } from './lib/clean.js';
 import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { logProgress } from './lib/progress.js';
 import { createTaskReporter } from './lib/task-registry.js';
+// REQ-20261019-004：任务台账的参数快照 / 结果摘要（三端共用同一实现）
+import { toParamSnapshot, toResultSnapshot } from './lib/task-snapshot.js';
 import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
 import { closeFtsEngine } from './lib/fts-client.js';
 // S-02：导入收尾的索引整理"等待 + 展示"（入队在 handleDirectImport 内部完成）
@@ -163,8 +165,20 @@ program
       let result: unknown;
       try {
         if (!useDaemon) {
-          const task = createTaskReporter(requestConfig, { id: daemonJobId, source: 'cli', operation: 'import', scope });
-          task.update({ state: 'running', startedAt: Date.now() });
+          const task = createTaskReporter(requestConfig, {
+            id: daemonJobId,
+            source: 'cli',
+            operation: 'import',
+            scope,
+            // REQ-20261019-004：重试血缘（清单无 taskId 的 legacy 场景为 undefined）
+            ...(retryRecord?.taskId ? { retryOf: retryRecord.taskId } : {}),
+          });
+          // REQ-20261019-004：参数快照与状态同一次写盘（args 此刻已完整）
+          task.update({
+            state: 'running',
+            startedAt: Date.now(),
+            params: toParamSnapshot('import', importParams),
+          });
           try { await refreshVectorDimensionSnapshot(requestConfig, scope); } catch { /* diagnostics never block the import */ }
           try {
             result = await handleDirectImport({
@@ -229,6 +243,8 @@ program
                 : undefined,
               recoveryHint: partial ? '未完成文件可在修复 embedding 后重试导入；已完成部分已可用。' : undefined,
               partialCommitted: stats?.vectorized,
+              // REQ-20261019-004：文件级结果摘要（任务中心回看口径）
+              result: toResultSnapshot('import', result),
             });
           } catch (error) {
             const e = error as Error & { code?: string; stats?: { partialCommitted?: number } };
@@ -236,6 +252,9 @@ program
               error: e.message,
               recoveryHint: e.code === 'VECTORIZATION_STOPPED' ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。' : undefined,
               partialCommitted: e.stats?.partialCommitted,
+              // REQ-20261019-004：可判别错误码（落 result.errorCode）
+              errorCode: e.code,
+              result: toResultSnapshot('import', error),
             });
             throw error;
         } finally {
@@ -247,7 +266,12 @@ program
         } else {
           // timeoutMs=0：导入内部向量化预算为 60s + N*10s（100 chunk ≈ 17 分钟），
           // 固定客户端超时会在任务完成前误报失败；daemon 死亡由 socket error 兜底感知。
-          result = await callDaemon('import', importParams, 0, {
+          result = await callDaemon('import', {
+            ...importParams,
+            // REQ-20261019-004（设计评审 🔴-2）：daemon 路径的血缘只能随 params 穿透，
+            // handleDirectImport 只读已知字段，多余字段无副作用。
+            ...(retryRecord?.taskId ? { retryOf: retryRecord.taskId } : {}),
+          }, 0, {
             streamProgress: true,
             jobId: daemonJobId,
             abortSignal: daemonAbort?.signal,

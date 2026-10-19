@@ -49,6 +49,8 @@ import {
 } from './index-maintenance.js';
 import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus, summarizeImportIncomplete, uploadIdFromSourceDir } from './import-retry.js';
+// Group 路径校验：preflight 与 run 同口径（debug 2026-10-19 的 R1 行动项）
+import { isSafeGroupPath } from './import-path.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -63,6 +65,8 @@ import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './docu
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
+// REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
+import { toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 import { withTimeoutFallback } from './timeout.js';
@@ -241,7 +245,13 @@ const jobs = new Map<string, Job>();
 const MAX_JOBS = 50;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1h
 
-function createJob(scope: string, operation: Job['operation'], config: KiConfig): Job {
+function createJob(
+  scope: string,
+  operation: Job['operation'],
+  config: KiConfig,
+  /** REQ-20261019-004：重试血缘（`/api/import/retry-incomplete` 传入原任务 ID） */
+  extras?: { retryOf?: string },
+): Job {
   // 清理过期 job，防止 Map 无界增长
   const now = Date.now();
   for (const [id, j] of jobs) {
@@ -255,7 +265,10 @@ function createJob(scope: string, operation: Job['operation'], config: KiConfig)
   const id = crypto.randomUUID();
   let taskReporter: TaskReporter;
   try {
-    taskReporter = createTaskReporter(config, { id, source: 'web', operation, scope });
+    taskReporter = createTaskReporter(config, {
+      id, source: 'web', operation, scope,
+      ...(extras?.retryOf ? { retryOf: extras.retryOf } : {}),
+    });
   } catch {
     throw Object.assign(new Error('后台任务状态登记失败，任务未启动。请检查数据目录权限后重试。'), {
       code: 'TASK_REGISTRY_UNAVAILABLE', status: 503,
@@ -781,7 +794,17 @@ function handleTaskList(res: http.ServerResponse, url: URL, config: KiConfig, au
   const limit = Number.isFinite(raw) ? Math.min(Math.max(1, Math.floor(raw)), 500) : 100;
   let tasks = listTaskRecords(config, limit);
   if (authScopes !== null) tasks = tasks.filter((task) => scopeAllowed(authScopes, task.scope));
-  sendJson(res, 200, { ok: true, tasks, total: tasks.length, retainedForMs: TASK_TTL_MS });
+  /**
+   * 列表只回计数，不回明细（code-review P1-3）：`AppShell` 每 3–15s 拉 200 条，
+   * 每条最多 20+20 条明细（~4KB），而列表行只用 `result.files` 的计数。
+   * 明细由 `/api/tasks/:id` 单独提供。
+   */
+  const summarized = tasks.map((task) => {
+    if (!task.result || (!task.result.duplicates && !task.result.conflicts)) return task;
+    const { duplicates: _duplicates, conflicts: _conflicts, ...rest } = task.result;
+    return { ...task, result: rest };
+  });
+  sendJson(res, 200, { ok: true, tasks: summarized, total: summarized.length, retainedForMs: TASK_TTL_MS });
 }
 
 /** 单个任务详情；记录已被 TTL 清理时返回 404，由前端提示重新发起。 */
@@ -1401,9 +1424,17 @@ function handleImportPreflight(
       scope?: string;
       uploadId?: string;
       onlyRelPaths?: string[];
+      /** 本次导入的 Group（与 run 同参数）：判据需要按「group + rel」的落点比较，见 duplicate-index */
+      group?: string;
     } | undefined;
     if (!body || !body.scope || !body.uploadId) {
       sendJson(res, 400, { ok: false, error: '缺少 scope/uploadId' });
+      return;
+    }
+    const requestedGroup = typeof body.group === 'string' ? body.group.trim() : '';
+    // 只读预检不接受可疑路径（`..` / 反斜杠 / 绝对路径）：避免拿它拼出奇怪落点参与比较
+    if (!isSafeGroupPath(requestedGroup)) {
+      sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
       return;
     }
     const uploadId = body.uploadId.trim();
@@ -1438,6 +1469,7 @@ function handleImportPreflight(
         scope,
         sourceDir,
         onlyRelPaths,
+        ...(requestedGroup ? { group: requestedGroup } : {}),
         maxDetail: DEFAULT_PREFLIGHT_MAX_DETAIL,
       }));
     } catch (err) {
@@ -1482,6 +1514,12 @@ async function handleImportRun(
   const uploadId = body.uploadId.trim();
   if (!UPLOAD_ID_RE.test(uploadId)) {
     sendJson(res, 400, { ok: false, error: '非法 uploadId' });
+    return;
+  }
+  // Group 合法性：与 `/api/import/preflight` 同口径（否则会出现"预检 400 而 run 放行"的分叉）
+  const requestedGroup = typeof body.group === 'string' ? body.group.trim() : '';
+  if (!isSafeGroupPath(requestedGroup)) {
+    sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
     return;
   }
   // scope 越权校验（body.scope 必填）
@@ -1606,7 +1644,7 @@ async function handleImportRun(
     skipDuplicates: requestedSkipDuplicates,
     // group 缺省 → undefined → handleDirectImport 按推断落点（与 CLI 语义一致，REQ-01）；
     // 不再用 scope 兜底（子目录会落 <scope>/<sub>，与 CLI 缺省落 <sub> 不一致）
-    group: body.group?.trim() || retryParams?.group || undefined,
+    group: requestedGroup || retryParams?.group || undefined,
     chunkSize: body.chunkSize ?? retryParams?.chunkSize,
     chunkOverlap: body.chunkOverlap ?? retryParams?.chunkOverlap,
     vector: body.vector ?? retryParams?.vector,
@@ -1818,7 +1856,8 @@ async function handleImportRetryIncomplete(
     return;
   }
 
-  const job = createJob(scope, 'import', requestConfig);
+  // REQ-20261019-004：血缘——本任务重试自哪个任务（清单归属，可能为 undefined 的 legacy 场景）
+  const job = createJob(scope, 'import', requestConfig, { retryOf: requestedTaskId });
   void runImportJob(job, {
     scope,
     sourceDir,
@@ -1863,6 +1902,10 @@ interface RunImportArgs {
 }
 
 async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
+  // REQ-20261019-004（challenger 意见 2）：参数快照必须在**进入队列之前**写入——
+  // 否则「排队中」的任务点开详情参数全为空，而那正是用户想确认策略的时刻。
+  // `state/startedAt` 仍留在出队后（排队 ≠ 开始执行）。
+  job.taskReporter.update({ params: toParamSnapshot('import', args, getUploadsRoot()) });
   try {
     const result = await getSharedOperationCoordinator().submit(
       { operation: 'import', params: { ...args, jobId: job.id } },
@@ -1926,7 +1969,15 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
     const maint = result.indexMaintenance;
     job.usable = true;
     job.indexMaintenance = maint;
-    job.indexState = maint?.scheduled ? 'indexing' : (args.vector === false ? 'skipped' : 'available');
+    /**
+     * ★ 未入队整理 ≠ 整理失败（2026-10-19）：`scheduled=false` 有三种正常原因——关闭向量、
+     *   本批全部「内容未变」、全部重复被跳过。它们都只表示**没有产生需要整理的写入**，
+     *   与「入队了但失败/超时」完全是两回事。此前把后者也置 `available`，前端据此渲染
+     *   「索引整理未完成（可重试）」，让用户以为需要执行 `ki index-optimize`——
+     *   而实际上什么都没有写，根本没有要整理的东西。
+     *   `available` 从此只留给 1984 行的失败/降级分支。
+     */
+    job.indexState = maint?.scheduled ? 'indexing' : 'skipped';
     job.taskReporter.update({ state: partialState, phase: job.indexState });
     if (maint?.scheduled) {
       await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
@@ -1959,6 +2010,8 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         : result.stats.errors > 0 ? result.errors[0]?.error ?? `${result.stats.errors} 项导入处理有错误` : undefined,
       recoveryHint: result.partial ? '未完成文件可在修复 embedding 后重试导入；已完成部分已可用。' : undefined,
       partialCommitted: result.stats.vectorized,
+      // REQ-20261019-004：文件级结果摘要（任务中心回看口径）
+      result: toResultSnapshot('import', result),
     });
   } catch (err) {
     const failure = err as Error & { code?: string; stats?: { partialCommitted?: number } };
@@ -1979,6 +2032,11 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
           ? '检查 embedding 配置、鉴权与服务状态；确认后重试导入。'
           : undefined,
       partialCommitted: failure.stats?.partialCommitted,
+      // REQ-20261019-004（challenger 意见 1）：失败/取消路径**通常没有** `stats.files`
+      // （取消错误只有 message、全部重复只有 code、VECTORIZATION_STOPPED 是 chunk 级统计），
+      // 故只落可判别错误码；文件级 N/M 由 error 文案承载，不虚构数字。
+      errorCode: code,
+      result: toResultSnapshot('import', failure),
     });
   } finally {
     job.finishedAt = Date.now();
