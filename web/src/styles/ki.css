@@ -2732,30 +2732,38 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 
 /* 右轨常驻（2026-10-19）：主卡实测 1034~1332px，而常见视口高只有 620~900px。
    静态右轨会随页面滚走 —— 1180×620 实测滚到「开始导入」时进度卡 top=-592、
-   可见 0/107px，导入全程用户看不到任何百分比。这里让进度卡粘在视口顶部。
-   两个条件必须同时满足（少一个都不生效，均为实测）：
-     ① `align-self: stretch`：右列默认被父级 `align-items: start` 收成内容高（219px），
-        sticky 的包含块就是这 219px，滚动一过立刻失效（实测 top=-480）；
-     ② `align-content: start`：拉满行高后 grid 行会被拉伸，两张卡各自撑到 600+px。
-   只粘第一张卡：「结果摘要」含冲突/错误长列表，压在 100vh 内滚动会读不全。
+   可见 0/107px，导入全程用户看不到任何百分比。
+   ★ 必须**整列**常驻，不能只粘第一张卡：sticky 只是让元素的视觉位置脱离常规流，
+   被它越过的兄弟元素必然从它背后穿过 —— 实测只粘进度卡时「结果摘要」被压住
+   55~221px（`LAST RUN` 标题整行被盖），观感像层叠 bug。
+   两个注意点（均为实测）：
+     ① `align-self: start`：右列是被 `align-items: start` 收成内容高的 grid item，
+        sticky 的包含块因此是整行高（主卡高），能一路粘住；改成 stretch 反而会让
+        grid 行被拉伸、两张卡各撑到 600+px。
+     ② `max-height + overflow-y` 是兜底：结果卡含冲突/错误明细时可能长于视口，
+        此时在列内滚动，而不是让底部内容永远不可达。
    单列（<960px）不启用：右轨在表单下方，粘住只会遮挡表单。 */
 @media (min-width: 960px) {
-  .ki-import-layout > .ki-import-track { align-self: stretch; align-content: start; }
-  .ki-import-layout > .ki-import-track > .ki-progress-block:first-child {
+  .ki-import-layout > .ki-import-track {
     position: sticky;
     top: 8px;
-    z-index: 1;
+    align-self: start;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
-  /* 终态退出 sticky：完成后用户要读的是「结果摘要」（可能很长，含冲突/错误列表）。
-     进度卡若继续常驻顶部，结果卡会从它后面滑过、被遮掉 107px。
-     `unknown`（任务状态待确认）也算终态：它已 clearInterval + 落 error，页内会渲染红色
-     错误卡，同样不能被常驻进度卡压住。
+  /* 终态退出常驻：完成后用户要读的是「结果摘要」（可能很长，含冲突/错误列表），
+     此时让它随页面流完整展开、正常滚动阅读。
+     `unknown`（任务状态待确认）也算终态：它已 clearInterval + 落 error，
+     页内会渲染红色错误卡，同样不该被常驻轨道压住。
      进行中（idle/scanning/uploading/awaiting-confirm/importing）才保留常驻。 */
-  .ki-import-layout > .ki-import-track[data-phase='done'] > .ki-progress-block:first-child,
-  .ki-import-layout > .ki-import-track[data-phase='failed'] > .ki-progress-block:first-child,
-  .ki-import-layout > .ki-import-track[data-phase='cancelled'] > .ki-progress-block:first-child,
-  .ki-import-layout > .ki-import-track[data-phase='unknown'] > .ki-progress-block:first-child {
+  .ki-import-layout > .ki-import-track[data-phase='done'],
+  .ki-import-layout > .ki-import-track[data-phase='failed'],
+  .ki-import-layout > .ki-import-track[data-phase='cancelled'],
+  .ki-import-layout > .ki-import-track[data-phase='unknown'] {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 }
 
