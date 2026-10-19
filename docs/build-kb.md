@@ -170,13 +170,13 @@ ki import \
 
 1. **Group 树结构**：
    ```bash
-   ki query-group --scope <scope> --mode full
+   ki group list --scope <scope> --mode full
    ```
    预期：显示完整的 Group 目录结构
 
 2. **Relations 列表**：
    ```bash
-   ki query-group --scope <scope> --groups <group>
+   ki group list --scope <scope> --groups <group>
    ```
    预期：显示 Group 下的 Relation 列表和关键词
 

@@ -103,118 +103,34 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ---
 
-## `manage-index`
+## `group`
 
-管理 Group 树索引节点，以及查询已初始化的 scope 列表。
+Group 管理：`create` / `delete` / `list`。组的位置只由单一路径表达，**不提供** `--parent` / `--name` / `--parents`。
 
-### 列出所有 scope
-
-```bash
-ki manage-index --action list-scopes
-```
-
-**示例：**
+### `ki group create`
 
 ```bash
-ki manage-index --action list-scopes
+ki group create <path> [--scope <s>]
 ```
 
-输出：
-```json
-{
-  "ok": true,
-  "scopes": [
-    { "scope": "my-project", "topGroups": ["API", "设计文档"] },
-    { "scope": "qoder-wiki", "topGroups": ["QoderWiki"] }
-  ],
-  "total": 2
-}
-```
+- 只创建单个节点，父路径必须已存在；近似路径直接报错并给候选（不做语义补全）。
+- scope 不存在时自动创建并返回 `createdScope: true`。
+- 例：`ki group create "我的项目/API" --scope my-project`。
 
-> `list-scopes` 不需要 `--scope` 参数。
-
-### 创建顶层 Group
+### `ki group delete`
 
 ```bash
-ki manage-index \
-  --scope <scope> --action create --name <name>
+ki group delete <path> [--yes] [--scope <s>]
 ```
 
-> 不指定 `--parent` 即创建顶层 Group。
->
-> `--scope` 指向的 scope 尚未初始化时会**自动创建**（从 `_template` 生成 `group-index.json` 等，与 `sync-relation` / `import` 同口径）；`scopeMode: strict` 下未注册的 scope 仍 fail-loud，并提示注册方式。
+- 不带 `--yes` 时**只输出预览**（relations / KB 文件 / assets / 向量 / FTS / 保留的 wiki 路径），零写入。
+- 带 `--yes` 才执行：删除 relations 分片、`kb/<scope>/<group>/`（含 assets）、group-index 树节点、dense 向量与 FTS。
+- **不触碰** `source.dir` / wiki 目录；不存在 `.ki/trash`。
+- 例：`ki group delete "我的项目/API" --yes --scope my-project`。
 
-**示例：**
+### `ki group list`
 
-```bash
-ki manage-index --scope my-project --action create --name "API"
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "path": "我的项目"
-}
-```
-
-### 创建子节点
-
-```bash
-ki manage-index \
-  --scope <scope> --action create --parent <path> --name <name>
-```
-
-**示例：**
-
-```bash
-ki manage-index --scope my-project --action create --parent "我的项目" --name "API"
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "path": "我的项目/API"
-}
-```
-
-### 删除节点
-
-```bash
-ki manage-index \
-  --scope <scope> --action delete --parent <path> --name <name> [--force]
-```
-
-**示例：删除空节点**
-
-```bash
-ki manage-index --scope my-project --action delete --parent "我的项目" --name "API"
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "path": "我的项目/API"
-}
-```
-
-**示例：强制删除非空节点**
-
-```bash
-ki manage-index --scope my-project --action delete --parent "我的项目" --name "API" --force
-```
-
-输出：
-```json
-{
-  "ok": true,
-  "path": "我的项目/API"
-}
-```
-
----
+`list` 承接原查询命令的全部能力（评分分区 + 语义兜底 + 树渲染），参数与输出见后文《`ki group list`》章节。
 
 ## `scope`
 
@@ -392,7 +308,7 @@ ki tag list --scope my-project
 | 参数 | 出现命令 | 语义 |
 |------|----------|------|
 | `--limit <n>` | `search` / `doc list` | **返回条数上限**（结果截断，非扫描上限）；默认 `10` |
-| `--hot-count <n>` | `query-group` | 热门分区展示个数；默认 `5` |
+| `--hot-count <n>` | `ki group list` | 热门分区展示个数；默认 `5` |
 | `--scan-limit <n>` | `tag list` | **扫描上限**（引擎扫描条数上限，超出则 `truncated:true` 近似）；默认 `10000` |
 
 > 三者语义不同：`--limit` 截断**返回**条数，`--scan-limit` 限制**扫描**条数，`--hot-count` 控制展示个数。历史命名保留（统一为 `--limit` 语义易混淆，本期仅文档化标注）。
@@ -573,22 +489,22 @@ ki search --query "仪表盘配置" --scope monitor --threshold 0.03
 
 ---
 
-## `query-group`
+## `ki group list`
 
 查询 Group 树和 Relation 分区（词云展示已移除，REQ-05）。
 
 ```bash
-ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <count>] [--depth <depth>]
+ki group list --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <count>] [--depth <depth>]
 ```
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--scope` | 项目隔离标识 | 必填 |
-| `--groups` | 逗号分隔的 Group 路径（展示各 Group 的 **Relations**；与 `--subtree` 互斥） | - |
-| `--subtree` | 以指定 Group 路径为根输出**子树结构**（结构导航视角：该 Group 下有哪些子 Group；支持同样的路径补全/模糊兜底；无子 Group 时提示并附自身 Relations 概要；与 `--groups` 互斥，不受 `--mode` 过滤） | - |
+| `--groups` | 逗号分隔的 Group 路径（展示各 Group 的 **Relations**；与位置参数互斥） | - |
+- **位置参数 `<path>`**：以指定 Group 路径为根输出子树结构（结构导航视角；与 `--groups` 互斥） - |
 | `--mode` | 展示分区：`hot` / `warm` / `cold` / `emerging` / `full`（支持逗号分隔） | `hot` |
 | `--hot-count` | 热门展示个数 | `5` |
-| `--depth` | 索引层级深度（`--subtree` 时从子树根起算） | `4` |
+| `--depth` | 索引层级深度（位置参数时从子树根起算） | `4` |
 
 **mode 说明**：
 - `hot`：热门索引（高频使用）
@@ -612,7 +528,7 @@ ki query-group --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <
 **示例：模糊 Group 路径匹配**
 
 ```bash
-ki query-group --scope monitor --groups "部署运维"
+ki group list --scope monitor --groups "部署运维"
 ```
 
 输出：
@@ -629,7 +545,7 @@ ki query-group --scope monitor --groups "部署运维"
 **示例：子树导航（某 Group 下有哪些子 Group）**
 
 ```bash
-ki query-group --scope monitor --subtree "项目根/监控"
+ki group list "项目根/监控" --scope monitor
 ```
 
 输出（结构导航视角，节点带 score 与分区标签；叶子 Group 则提示无子 Group 并附自身 Relations 概要）：
@@ -643,7 +559,7 @@ ki query-group --scope monitor --subtree "项目根/监控"
 **示例：查看热门索引**
 
 ```bash
-ki query-group --scope my-project
+ki group list --scope my-project
 ```
 
 输出：
@@ -667,7 +583,7 @@ ki query-group --scope my-project
 **示例：查看特定 Group 的 Relations**
 
 ```bash
-ki query-group --scope my-project --groups "项目/API"
+ki group list --scope my-project --groups "项目/API"
 ```
 
 输出：
@@ -685,7 +601,7 @@ ki query-group --scope my-project --groups "项目/API"
 **示例：查看多个分区**
 
 ```bash
-ki query-group --scope my-project --mode hot,warm
+ki group list --scope my-project --mode hot,warm
 ```
 
 输出：
@@ -709,7 +625,7 @@ ki query-group --scope my-project --mode hot,warm
 **示例：查看完整索引树**
 
 ```bash
-ki query-group --scope my-project --mode full
+ki group list --scope my-project --mode full
 ```
 
 输出：
@@ -1042,13 +958,12 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 | 工具名 | 类型 | 功能 | 对应 CLI 命令 |
 |--------|------|------|--------------|
-| `ki_query_group` | 读 | 查询 Group 树 + Relations 分区 | `query-group` |
+| `ki_group_list` | 读 | 查询 Group 树 + Relations 分区 | `ki group list` |
 | `ki_get_module_info` | 读 | 读取本地 KB Markdown 内容 | `get-module-info` |
-| `ki_manage_index_list` | 读 | 列出所有 scope | `manage-index --action list-scopes` |
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
 | `ki_search` | 读 | 检索（默认 hybrid；支持 `mode=fulltext` 仅全文且不调用 embedding，输出 group/relation 定位字段） | `search` |
-| `ki_manage_index_create` | 写 | 创建 Group 节点 | `manage-index --action create` |
+| `ki_group_create` | 写 | 创建 Group 节点 | `ki group create` |
 | `ki_sync_relation` | 写 | 写入单条 Relation + 模块说明（可非向量化） | `sync-relation` |
 | `ki_edit_relation` | 写 | 对已有大 Relation 多轮局部修改，完成后一次性更新索引 | 仅 MCP |
 | `ki_bulk_sync_relation` | 写 | 批量写入 Relation + 模块说明（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | `sync-relation --input` |
@@ -1090,7 +1005,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 ### 工具参数说明
 
-#### `ki_query_group`
+#### `ki_group_list`
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
@@ -1148,7 +1063,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 > - `vectorStored`（顶层）：**所有需向量化的条目全部完整写入成功**才为 `true`；任一条失败（含部分 tag 失败）即为 `false`。⚠️ 注意：顶层与逐条粒度不同——顶层 `false` 不代表每条都失败，需结合 `results[].vectorStored`/`vectorReason` 定位
 > - `hints`（可选）：Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），供调用方感知路径是否精确命中
 
-#### `ki_manage_index_create`
+#### `ki_group_create`
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -1156,7 +1071,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `name` | string | 是 | 新节点名称（不能包含 /） |
 | `parent` | string | 否 | 父节点路径（省略则挂在根层） |
 
-#### `ki_manage_index_list`
+#### `ki_scope_list`
 
 无参数，返回所有 scope 及顶层 Group。
 
@@ -1577,17 +1492,17 @@ wiki-output/
 
 ### 本地知识沉淀
 
-1. `manage-index` 创建 Group
+1. `ki group` 创建 Group
 2. `sync-relation` 写入模块说明
-3. `query-group` 检查导航与热点
+3. `ki group list` 检查导航与热点
 4. `get-module-info` 验证原文可读性
 
 ### AI Agent 通过 MCP 使用
 
 1. 配置 `mcp.json`（见上方 MCP 客户端配置）
 2. 重启 AI Agent 客户端
-3. Agent 自动调用 `ki_query_group` / `ki_get_module_info` 查询知识
-4. Agent 需要沉淀知识时调用 `ki_sync_relation` / `ki_manage_index_create`
+3. Agent 自动调用 `ki_group_list` / `ki_get_module_info` 查询知识
+4. Agent 需要沉淀知识时调用 `ki_sync_relation` / `ki_group_create`
 
 ### 外部知识库导入（原文直导，无 AI，幂等追加）
 

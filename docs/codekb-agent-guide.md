@@ -16,11 +16,11 @@
           ├─ 定位级（找文件/函数/类/报错行）
           │   → 直接用 SearchSymbol / grep / Read，不走 KB
           └─ 理解级（架构/流程/设计意图/排查思路/模块关系）
-              → ki query-group --mode full 拉全景 → 缓存
+              → ki group list --mode full 拉全景 → 缓存
 
 查询项目知识（四步走，理解级专用）:
   ① 定位 Group  → 从缓存全景中锁定目标 Group
-  ② 查热区      → ki query-group --groups <G> --mode hot,emerging
+  ② 查热区      → ki group list --groups <G> --mode hot,emerging
                   （若①已明确 Relation → 可跳过，直接③）
   ③ 取原文      → 命中 → ki get-module-info → 提炼回答
   ④ 语义兜底    → ②/③ 未命中 → memory_recall → 仍无 → 问用户
@@ -96,7 +96,7 @@
 **第一个动作**：
 
 ```bash
-ki query-group --scope ${scope} --mode full
+ki group list --scope ${scope} --mode full
 ```
 
 **输出示例**：
@@ -133,11 +133,11 @@ flowchart TD
     Z -- 定位级 --> Z1[SearchSymbol / grep<br/>直接定位]
     Z1 --> H([结束])
     Z -- 理解级 --> B{能否从已缓存的<br/>全景索引定位Group?}
-    B -- 否 --> C[重新确认/扩大范围<br/>ki query-group --mode full]
+    B -- 否 --> C[重新确认/扩大范围<br/>ki group list --mode full]
     C --> B
     B -- 是 --> P{全景中已明确<br/>Relation名称?}
     P -- 是 --> F[取原文<br/>ki get-module-info]
-    P -- 否 --> D[查该Group热区<br/>ki query-group --groups G<br/>--mode hot,emerging]
+    P -- 否 --> D[查该Group热区<br/>ki group list --groups G<br/>--mode hot,emerging]
     D --> E{命中relation?}
     E -- 是 --> F
     F --> G[提炼回答]
@@ -154,7 +154,7 @@ flowchart TD
 
 基于 §3 已缓存的全景索引，判断用户问题涉及哪个 Group。
 
-- **若缓存中无明确匹配**，可重新执行 `ki query-group --scope ${scope} --mode full` 确认或扩大范围，并更新缓存。
+- **若缓存中无明确匹配**，可重新执行 `ki group list --scope ${scope} --mode full` 确认或扩大范围，并更新缓存。
 - **若定位到多个候选 Group**，优先选择得分最高的；不确定时可依次排查。
 
 **快捷路径（跳过第②步）**：如果全景索引中已经能看到与用户问题直接匹配的 Relation 名称（如用户问“告警收敛”，全景中有“告警收敛机制”），可跳过第②步，直接进入第③步 `get-module-info`。判断标准：Relation 名称与用户问题关键词高度吻合，无需通过热区排序来筛选。
@@ -164,7 +164,7 @@ flowchart TD
 对目标 Group 执行：
 
 ```bash
-ki query-group --scope ${scope} --groups "目标Group路径" --mode hot,emerging
+ki group list --scope ${scope} --groups "目标Group路径" --mode hot,emerging
 ```
 
 **输出示例**：
@@ -270,7 +270,7 @@ ki sync-relation \
 
 **本规则只管写 KB。不管写 memory。AI 是否写 memory 自行决定。**
 
-**写入后刷新**：每次写入完成（sync-relation 或 ki import）后，必须重新执行 `ki query-group --scope ${scope} --mode full` 更新本地索引缓存。
+**写入后刷新**：每次写入完成（sync-relation 或 ki import）后，必须重新执行 `ki group list --scope ${scope} --mode full` 更新本地索引缓存。
 
 ### 允许写入的白名单（8 类项目代码知识）
 
@@ -374,7 +374,7 @@ ki sync-relation --scope ${scope} --input /path/to/batch.json
 ### 创建 Group
 
 ```bash
-ki manage-index --scope ${scope} --action create --parent "父Group路径" --name "新Group名"
+ki group create "父Group路径/新Group名" --scope ${scope}
 ```
 
 输出示例：`{ "ok": true, "path": "父Group路径/新Group名" }`
@@ -382,7 +382,7 @@ ki manage-index --scope ${scope} --action create --parent "父Group路径" --nam
 ### 删除 Group（含子数据）
 
 ```bash
-ki manage-index --scope ${scope} --action delete --parent "父Group路径" --name "目标Group名" --force
+ki group delete "父Group路径/目标Group名" --yes --scope ${scope}
 ```
 
 输出示例：`{ "ok": true, "path": "父Group路径/目标Group名" }`

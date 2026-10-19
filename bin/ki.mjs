@@ -8,8 +8,9 @@
  * 
  * 示例：
  *   ki import --scope my-project --source ./wiki --group wiki
- *   ki manage-index --scope my-project --action create-root --root-name "我的项目"
- *   ki query-group --scope my-project
+ *   ki group create "我的项目/API" --scope my-project
+ *   ki group delete "我的项目/API" --yes --scope my-project
+ *   ki group list --scope my-project
  */
 
 import { spawn } from 'child_process';
@@ -28,8 +29,7 @@ const VERSION = pkg.version;
 // 命令映射
 const COMMANDS = {
   'import': 'src/import.ts',
-  'manage-index': 'src/manage-index.ts',
-  'query-group': 'src/query-group.ts',
+  'group': 'src/group.ts',
   'get-module-info': 'src/get-module-info.ts',
   'sync-relation': 'src/sync-relation.ts',
   'delete-relation': 'src/delete-relation.ts',
@@ -83,8 +83,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 命令：
   import            导入外部 Wiki（--source 直导，幂等追加）
   index-optimize    整理 zvec 索引（optimize：构建 dense 索引；导入收尾已自动触发，可手动重跑）
-  manage-index      Group 树 CRUD
-  query-group       查询 Group + 分区
+  group             Group 管理：create / delete / list（单一路径，无 --parent/--name）
   get-module-info   读取本地 KB 原文
   sync-relation     写入 Relation + 本地 KB
   delete-relation   删除 Relation 及其关联数据（cache + KB + wiki + 向量）
@@ -117,8 +116,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki backup my-project
   ki restore my-project --from-snapshot --yes
   ki export my-project --output ./wiki-output
-  ki manage-index --scope my-project --action create-root --root-name "我的项目"
-  ki query-group --scope my-project
+  ki group create "我的项目/API" --scope my-project
+  ki group delete "我的项目/API" --yes --scope my-project   # 无 --yes 只预览
+  ki group list --scope my-project
   ki search --scope my-project --query "用户登录流程"
   ki mcp                                  # stdio 模式（默认，桥接本机 daemon）
   ki mcp --http                           # HTTP 共享单例/唯一 zvec owner（默认回环 127.0.0.1，本机免鉴权）
@@ -135,6 +135,46 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki <command> --help
 `);
   process.exit(0);
+}
+
+// ── 旧命令迁移提示（零兼容：只报错，不执行） ──
+function argValue(args, name) {
+  const i = args.indexOf(name);
+  return i >= 0 && args[i + 1] && !args[i + 1].startsWith('-') ? args[i + 1] : '';
+}
+
+function renamedMessage(cmd, rest) {
+  const scope = argValue(rest, '-s') || argValue(rest, '--scope');
+  const scopeArg = scope ? ` --scope ${scope}` : '';
+  if (cmd === 'manage-index') {
+    const action = argValue(rest, '--action') || 'create';
+    const parent = argValue(rest, '--parent').replace(/^\/+|\/+$/g, '');
+    const name = argValue(rest, '--name');
+    const full = [parent, name].filter(Boolean).join('/');
+    if (action === 'list-scopes') return ['ki scope list'];
+    if (action === 'create' && full) return [`ki group create "${full}"${scopeArg}`];
+    if (action === 'delete' && full) return [`ki group delete "${full}" --yes${scopeArg}`];
+    return [
+      `ki group create "<parent/name>"${scopeArg}`,
+      `ki group delete "<parent/name>" --yes${scopeArg}`,
+      'ki scope list',
+    ];
+  }
+  if (cmd === 'query-group') {
+    const subtree = argValue(rest, '--subtree');
+    const groups = argValue(rest, '--groups') || argValue(rest, '-g');
+    if (subtree) return [`ki group list "${subtree}"${scopeArg}`];
+    return [`ki group list${groups ? ` --groups ${groups}` : ''}${scopeArg}`];
+  }
+  return [];
+}
+
+if (command === 'manage-index' || command === 'query-group') {
+  const lines = renamedMessage(command, filteredArgs.slice(1));
+  console.error(`错误：命令 "${command}" 已移除（REQ-20261019-005，零兼容）`);
+  console.error('新命令：');
+  for (const line of lines) console.error(`  ${line}`);
+  process.exit(1);
 }
 
 // 检查命令是否存在

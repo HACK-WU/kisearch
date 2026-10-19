@@ -25,8 +25,8 @@ const registryNames = CHAT_MCP_TOOLS.map((t) => t.name).sort();
 const whitelistNames = [...MCP_TOOL_NAMES].sort();
 
 describe('工具注册表 · 与配置层白名单对齐', () => {
-  it('注册表工具名集合 === MCP_TOOL_NAMES（14 个，三组口径）', () => {
-    assert.equal(registryNames.length, 14);
+  it('注册表工具名集合 === MCP_TOOL_NAMES（13 个，三组口径）', () => {
+    assert.equal(registryNames.length, 13);
     assert.deepEqual(registryNames, whitelistNames);
   });
 
@@ -113,10 +113,10 @@ describe('工具注册表 · 参数解析', () => {
 });
 
 describe('工具注册表 · 开关过滤（PromptConfig.tools 首次消费）', () => {
-  it('默认配置（只读全开、写/删全关）→ 恰好 6 个只读入口', () => {
+  it('默认配置（只读全开、写/删全关）→ 恰好 5 个只读入口', () => {
     const enabled = enabledChatToolEntries(defaultPromptConfig().tools);
     assert.deepEqual(enabled.map((e) => e.name).sort(), [
-      'ki_get_module_info', 'ki_manage_index_list', 'ki_query_group', 'ki_scope_list', 'ki_search', 'ki_tag_list',
+      'ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_search', 'ki_tag_list',
     ]);
     assert.ok(enabled.every((e) => e.readOnly));
   });

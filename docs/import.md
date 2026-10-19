@@ -75,7 +75,7 @@ ki import \
 
 **提交粒度 = 文件级**。系统性向量故障（provider 不可用、配额耗尽、维度不匹配等）不再把整批一起回滚：
 
-- **已成功的文件**照常提交（local KB + 向量 + 元数据三处一致），导入结束后即可 `ki search` / `ki query-group` / Web 文档列表看到；
+- **已成功的文件**照常提交（local KB + 向量 + 元数据三处一致），导入结束后即可 `ki search` / `ki group list` / Web 文档列表看到；
 - **失败或未处理的文件**不写元数据、不留在文档列表，进入「未完成清单」；
 - **全部文件都未完成**时仍是 fail-loud（`ok:false`），不做"零提交假成功"；
 - 结果里新增 `partial`、`stats.files{total,completed,incomplete,scanned,skipped,unchanged,duplicatesSkipped}`（`unchanged` 是增量导入下「内容未变、跳过重算」的文件数，属 `completed` 的子集；`duplicatesSkipped` 是「疑似重复被跳过」的文件数，属 `skipped` 的子集；恒等式均不变）（恒等式 `completed + incomplete + skipped = scanned`）、`incomplete[]{path,group,relation,reason}`、`duplicatesSkipped[]{path,existingGroup,existingRelation}` 与 `duplicatesSkippedTruncated`（仅 Web 的 `skipDuplicates` 场景非空，明细上限 500 条）、`stopReason`（取消时 `cancelled:true`）；只重试子集时另有 `retryFilter{requested,matched,missing,invalid}`（`requested`=净化去重后的清单条数、`matched`=源目录命中并纳入本轮处理的条数、`missing`=源文件已删除/改名、`invalid`=被拒绝的非法路径：绝对路径 / 含 `..` / 空值或超长）；

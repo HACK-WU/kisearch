@@ -7,7 +7,7 @@
  *   · `run`：进程内直调底层 `executeXxx`（与 MCP 工具同一批函数，S07 已否决 MCP 自连接）
  *   · 只读与写/删一律经 `OperationCoordinator`（scope 维度）排队 —— 与 `chat-kb-search`
  *     先例同款：生成期间的 zvec / local KB 读写必须与同 scope 写操作互斥；
- *     无 scope 参数的两个枚举工具（ki_scope_list / ki_manage_index_list）直接执行
+ *     无 scope 参数的枚举工具（ki_scope_list）直接执行
  *     （与 MCP HTTP 层"只读不排队"口径一致）。
  *
  * ★ 与 `src/lib/mcp-tools/*` 的关系：参数语义、默认值、超时档位（READ/WRITE/BULK）
@@ -34,7 +34,8 @@ import { executeQueryGroup } from '../../query-group.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../../get-module-info.js';
 import { executeTagList } from '../../tag.js';
 import { executeScopeList } from '../../scope.js';
-import { executeManageCreate, executeListScopes, executeManageDeleteEmpty } from '../../manage-index.js';
+import { executeGroupCreate } from '../group-create.js';
+import { executeGroupDelete } from '../group-delete.js';
 import { executeStore } from '../../store.js';
 import { executeBulkStore } from '../../bulk-store.js';
 import { executeSyncRelation, executeBulkSyncRelation } from '../../sync-relation.js';
@@ -359,12 +360,12 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       )),
   }),
   makeEntry({
-    name: 'ki_query_group',
+    name: 'ki_group_list',
     readOnly: true,
     def: {
       type: 'function',
       function: {
-        name: 'ki_query_group',
+        name: 'ki_group_list',
         description: '查询当前会话知识库的 Group 树结构与 Relations（支持按分区 hot/warm/cold/emerging/full 展示、按 Group 路径或子树过滤）。先看结构再精确检索时使用。',
         parameters: {
           type: 'object',
@@ -383,7 +384,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       { key: 'mode', type: 'string', default: 'hot' },
       { key: 'depth', type: 'int', min: 1, max: 10, default: 4 },
     ],
-    run: (scope, a) => submitScoped('ki_query_group', scope, () =>
+    run: (scope, a) => submitScoped('ki_group_list', scope, () =>
       withTimeout(
         executeQueryGroup({
           scope,
@@ -395,7 +396,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
           autoFallback: true,
         }),
         TOOL_TIMEOUT.READ,
-        'ki_query_group',
+        'ki_group_list',
       )),
   }),
   makeEntry({
@@ -465,21 +466,6 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
     },
     specs: [],
     run: () => runDirect(() => withTimeout(executeScopeList(), TOOL_TIMEOUT.READ, 'ki_scope_list')),
-  }),
-  makeEntry({
-    name: 'ki_manage_index_list',
-    readOnly: true,
-    def: {
-      type: 'function',
-      function: {
-        name: 'ki_manage_index_list',
-        description: '列出所有 scope 及其顶层 Group（带 registered/initialized 标注），用于了解索引配置全貌。',
-        parameters: { type: 'object', properties: {} },
-      },
-    },
-    specs: [],
-    // executeListScopes 是同步函数（读配置与目录）—— 包一层 Promise 以统一超时底座
-    run: () => runDirect(() => withTimeout(Promise.resolve(executeListScopes()), TOOL_TIMEOUT.READ, 'ki_manage_index_list')),
   }),
 
   // ── 写入 6（默认关闭；配置层显式开启后才暴露给模型）────────────
@@ -723,32 +709,30 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       )),
   }),
   makeEntry({
-    name: 'ki_manage_index_create',
+    name: 'ki_group_create',
     readOnly: false,
     def: {
       type: 'function',
       function: {
-        name: 'ki_manage_index_create',
-        description: '在当前会话知识库的 Group 树中创建新节点（scope 不存在则自动创建；返回 createdScope: true 表示本次新建了 scope，可用于发现 scope 名笔误）。',
+        name: 'ki_group_create',
+        description: '在当前会话知识库的 Group 树中创建单个节点（父级必须已存在；scope 不存在则自动创建并返回 createdScope）。',
         parameters: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: '新节点名称（不能包含 /）' },
-            parent: { type: 'string', description: '父节点路径（省略则挂在根层）' },
+            path: { type: 'string', description: '组路径，如 "工具库/Redis"' },
           },
-          required: ['name'],
+          required: ['path'],
         },
       },
     },
     specs: [
-      { key: 'name', type: 'string', required: true },
-      { key: 'parent', type: 'string' },
+      { key: 'path', type: 'string', required: true },
     ],
-    run: (scope, a) => submitScoped('ki_manage_index_create', scope, () =>
+    run: (scope, a) => submitScoped('ki_group_create', scope, () =>
       withTimeout(
-        executeManageCreate({ scope, name: a.name as string, parent: a.parent as string | undefined }),
+        executeGroupCreate({ scope, path: a.path as string }),
         TOOL_TIMEOUT.WRITE,
-        'ki_manage_index_create',
+        'ki_group_create',
       )),
   }),
 
@@ -783,32 +767,30 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       )),
   }),
   makeEntry({
-    name: 'ki_manage_index_delete',
+    name: 'ki_group_delete_empty',
     readOnly: false,
     def: {
       type: 'function',
       function: {
-        name: 'ki_manage_index_delete',
-        description: '删除 Group 树中的**空**节点（仅限无子节点、无 relation、无本地 KB 的节点；非空节点会被拒绝）。仅当用户明确要求删除时使用。',
+        name: 'ki_group_delete_empty',
+        description: '删除 Group 树中的**空**节点（仅限无子组、无 relation、无本地 KB 的节点；非空会被拒绝并提示用 CLI `ki group delete <path> --yes`）。仅当用户明确要求删除时使用。',
         parameters: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: '要删除的节点名称（不能包含 /）' },
-            parent: { type: 'string', description: '父节点路径（省略则在顶层查找）' },
+            path: { type: 'string', description: '组路径，如 "工具库/Redis"' },
           },
-          required: ['name'],
+          required: ['path'],
         },
       },
     },
     specs: [
-      { key: 'name', type: 'string', required: true },
-      { key: 'parent', type: 'string' },
+      { key: 'path', type: 'string', required: true },
     ],
-    run: (scope, a) => submitScoped('ki_manage_index_delete', scope, () =>
+    run: (scope, a) => submitScoped('ki_group_delete_empty', scope, () =>
       withTimeout(
-        executeManageDeleteEmpty({ scope, name: a.name as string, parent: a.parent as string | undefined }),
+        executeGroupDelete({ scope, path: a.path as string, requireEmpty: true }),
         TOOL_TIMEOUT.WRITE,
-        'ki_manage_index_delete',
+        'ki_group_delete_empty',
       )),
   }),
 ];

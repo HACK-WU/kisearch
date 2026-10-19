@@ -2,7 +2,7 @@
  * integration.test.ts - Batch 4 端到端集成测试
  *
  * 覆盖：
- *   快速路径: manage-index → sync-relation → query-group → get-module-info
+ *   快速路径: ki group create → sync-relation → ki group list → get-module-info
  *   检索回退路径: 查询不存在的 Group/Relation
  *   知识缺失路径: 本地 KB 缺失
  *   导入路径: ki import --source 直导（幂等追加，无 AI / 无 git 依赖）
@@ -37,6 +37,10 @@ function runScriptJson(script: string, args: string[]): any {
   } catch {
     return { ok: false, raw: stdout, status };
   }
+}
+
+function createGroup(scope: string, groupPath: string): any {
+  return runScriptJson('group.ts', ['create', groupPath, '--scope', scope]);
 }
 
 const createdScopes: string[] = [];
@@ -79,38 +83,21 @@ after(async () => {
   cleanupTestConfig();
 });
 
-// ─── 快速路径: manage-index → sync-relation → query-group → get-module-info ───
+// ─── 快速路径: ki group create → sync-relation → ki group list → get-module-info ───
 
 describe('快速路径', () => {
-  it('manage-index 创建 Group 树', async () => {
+  it('ki group create 创建 Group 树', async () => {
     const scope = await makeScopeInit('integration-fast');
 
-    // create root
-    const createRoot = runScriptJson('manage-index.ts', [
-      '--scope', scope,
-      '--action', 'create',
-      '--name', 'wiki',
-    ]);
+    const createRoot = createGroup(scope, 'wiki');
     assert.strictEqual(createRoot.ok, true);
     assert.strictEqual(createRoot.path, 'wiki');
 
-    // create child
-    const createChild = runScriptJson('manage-index.ts', [
-      '--scope', scope,
-      '--action', 'create',
-      '--parent', 'wiki',
-      '--name', '监控',
-    ]);
+    const createChild = createGroup(scope, 'wiki/监控');
     assert.strictEqual(createChild.ok, true);
     assert.strictEqual(createChild.path, 'wiki/监控');
 
-    // create deeper child
-    const createDeeper = runScriptJson('manage-index.ts', [
-      '--scope', scope,
-      '--action', 'create',
-      '--parent', 'wiki/监控',
-      '--name', '告警中心',
-    ]);
+    const createDeeper = createGroup(scope, 'wiki/监控/告警中心');
     assert.strictEqual(createDeeper.ok, true);
     assert.strictEqual(createDeeper.path, 'wiki/监控/告警中心');
   });
@@ -118,9 +105,7 @@ describe('快速路径', () => {
   it('sync-relation 单条回写', async () => {
     const scope = await makeScopeInit('integration-fast');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     const result = runScriptJson('sync-relation.ts', [
       '--scope', scope,
@@ -137,9 +122,7 @@ describe('快速路径', () => {
     const inputDir = makeTempDir('ki-int-batch');
     const inputFile = path.join(inputDir, 'batch.json');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     fs.writeFileSync(inputFile, JSON.stringify({
       items: [
@@ -158,14 +141,12 @@ describe('快速路径', () => {
     assert.strictEqual(result.results.length, 2);
   });
 
-  it('query-group 快速查询', async () => {
+  it('ki group list 快速查询', async () => {
     const scope = await makeScopeInit('integration-fast');
     const inputDir = makeTempDir('ki-int-query');
     const inputFile = path.join(inputDir, 'batch.json');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     fs.writeFileSync(inputFile, JSON.stringify({
       items: [
@@ -176,7 +157,8 @@ describe('快速路径', () => {
     runScriptJson('sync-relation.ts', ['--scope', scope, '--input', inputFile]);
 
     // query specific group
-    const { stdout } = runScript('query-group.ts', [
+    const { stdout } = runScript('group.ts', [
+      'list',
       '--scope', scope,
       '--groups', 'wiki/监控',
       '--mode', 'hot',
@@ -188,9 +170,7 @@ describe('快速路径', () => {
   it('get-module-info 读取模块信息', async () => {
     const scope = await makeScopeInit('integration-fast');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     runScriptJson('sync-relation.ts', [
       '--scope', scope,
@@ -216,11 +196,10 @@ describe('检索回退路径', () => {
   it('查询不存在的 Group 返回空', async () => {
     const scope = await makeScopeInit('integration-fallback');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
-    const { stdout } = runScript('query-group.ts', [
+    const { stdout } = runScript('group.ts', [
+      'list',
       '--scope', scope,
       '--groups', 'wiki/不存在',
       '--mode', 'hot',
@@ -231,9 +210,7 @@ describe('检索回退路径', () => {
   it('get-module-info 查询不存在的 Relation 返回错误', async () => {
     const scope = await makeScopeInit('integration-fallback');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     runScriptJson('sync-relation.ts', [
       '--scope', scope,
@@ -269,9 +246,7 @@ describe('知识缺失路径', () => {
   it('本地 KB 不存在时 get-module-info 报错', async () => {
     const scope = await makeScopeInit('integration-missing');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     runScriptJson('sync-relation.ts', [
       '--scope', scope,
@@ -297,9 +272,7 @@ describe('知识缺失路径', () => {
   it('relations-cache 不存在时 get-module-info 报错', async () => {
     const scope = await makeScopeInit('integration-missing');
 
-    runScriptJson('manage-index.ts', [
-      '--scope', scope, '--action', 'create', '--name', 'wiki',
-    ]);
+    createGroup(scope, 'wiki');
 
     // 删除 relations-cache
     const { getRelationsCachePath } = await import('../src/lib/scope.js');

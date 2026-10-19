@@ -19,7 +19,7 @@
 ### 1. 拉取全景索引
 
 ```bash
-ki query-group --scope <scope> --mode full
+ki group list --scope <scope> --mode full
 ```
 
 **用途**：获取 scope 下所有 Group 的索引树和热度信息。
@@ -49,7 +49,7 @@ my-project/ (score: 25.2) [热]
 ### 2. 查 Group 热区
 
 ```bash
-ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
+ki group list --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ```
 
 **用途**：查看指定 Group 下的热门知识和新兴热区（近 48 小时内频繁使用的知识）。
@@ -142,16 +142,16 @@ ki sync-relation --scope <scope> --input /path/to/batch.json
 
 ```bash
 # 列出所有已初始化的 scope（不需要 --scope 参数）
-ki manage-index --action list-scopes
+ki scope list
 
 # 创建顶层 Group（不指定 --parent 即创建顶层）
-ki manage-index --scope <scope> --action create --name "Group名称"
+ki group create "Group名称" --scope <scope>
 
 # 创建子 Group
-ki manage-index --scope <scope> --action create --parent "父Group路径" --name "新Group名"
+ki group create "父Group路径/新Group名" --scope <scope>
 
 # 删除 Group（含子数据）
-ki manage-index --scope <scope> --action delete --parent "父Group路径" --name "目标Group名" --force
+ki group delete "父Group路径/目标Group名" --yes --scope <scope>
 ```
 
 **`list-scopes` 输出示例**：
@@ -193,22 +193,22 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再执行 `ki manage-index --action create --name "名称"` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
-| Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create --name "名称"` 创建 |
-| Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki query-group --mode full` 确认路径 |
+| `scope not found` | scope 尚未创建 | 先用 `ki scope list` 确认已有 scope，再执行 `ki group create "名称" --scope <scope>` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
+| Group 不存在 | 尚未创建该 Group | 执行 `ki group create "名称" --scope <scope>` 创建 |
+| Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki group list --mode full` 确认路径 |
 | `--module-info 内容不能为空` | 未传或空内容 | 补充 `--module-info "<markdown>"` |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
-| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki query-group --mode full` 确认实际名称 |
+| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki group list --mode full` 确认实际名称 |
 | 写入到错误的 scope | 混淆了 scope | 确认写入目标 scope 是否正确 |
 
 ---
 
 ## 写入后刷新缓存
 
-每次写入操作（`sync-relation` / `ki import` / `manage-index create`）完成后，必须重新拉取全景：
+每次写入操作（`sync-relation` / `ki import` / `ki group create`）完成后，必须重新拉取全景：
 
 ```bash
-ki query-group --scope <scope> --mode full
+ki group list --scope <scope> --mode full
 ```
 
 > 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由各规则文件（`codekb-agent-guide.md` / `memory-agent-guide.md`）定义。

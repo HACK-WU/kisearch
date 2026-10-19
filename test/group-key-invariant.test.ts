@@ -28,7 +28,7 @@ process.env.KI_DAEMON_OWNER = '1';
 const { handleDirectImport } = await import('../src/lib/import.js');
 const { handleExport } = await import('../src/export.js');
 const { executeQueryGroup } = await import('../src/query-group.js');
-const { executeDeleteGroup } = await import('../src/delete-relation.js');
+const { executeGroupDelete } = await import('../src/lib/group-delete.js');
 const { initScope, writeJson, readJson, readGroupIndex } = await import('../src/lib/store.js');
 const { getKbDir, getRelationsCachePath, getGroupIndexPath, getLocalKbDir } = await import('../src/lib/scope.js');
 const gc = await import('../src/lib/group-cache.js');
@@ -162,10 +162,10 @@ describe('分片键不变量（第二轮审查 P0）', () => {
       assert.equal(q.ok, true);
       assert.ok(q.ok && q.output.includes('DocA'), `query-group 应返回该组 relation，实际：${q.ok ? q.output : q.error}`);
 
-      const del = await executeDeleteGroup({ scope, group: PREFIXED } as never);
+      const del = await executeGroupDelete({ scope, path: PREFIXED });
       assert.equal(del.ok, true);
       assert.equal(
-        (del as { result: { relationCount: number } }).result.relationCount, 1,
+        del.deleted.relations, 1,
         'delete-group 必须收集到该组 relation（否则向量/FTS 残留）',
       );
       assert.deepEqual(gc.listGroupPaths(scope), [], '删除后不得残留分片（否则幽灵组复活）');

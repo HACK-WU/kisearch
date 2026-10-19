@@ -45,12 +45,12 @@ describe('REQ-11 短别名帮助输出', () => {
     { cmd: 'sync-relation', helpArgs: [], short: '-g', long: '--group' },
     { cmd: 'sync-relation', helpArgs: [], short: '-r', long: '--relation' },
     { cmd: 'sync-relation', helpArgs: [], short: '-i', long: '--input' },
-    { cmd: 'query-group', helpArgs: [], short: '-s', long: '--scope' },
+    { cmd: 'group', helpArgs: ['create'], short: '-s', long: '--scope' },
+    { cmd: 'group', helpArgs: ['delete'], short: '-s', long: '--scope' },
     { cmd: 'get-module-info', helpArgs: [], short: '-g', long: '--group' },
     { cmd: 'get-module-info', helpArgs: [], short: '-r', long: '--relation' },
     { cmd: 'delete-relation', helpArgs: [], short: '-r', long: '--relation' },
     { cmd: 'bulk-store', helpArgs: [], short: '-i', long: '--input' },
-    { cmd: 'manage-index', helpArgs: [], short: '-n', long: '--name' },
     { cmd: 'import', helpArgs: [], short: '-s', long: '--scope' },
     // 已删：{ cmd: 'scan-kb', helpArgs: ['diff'], short: '-o', long: '--output' }
     //   —— `diff` 子命令与其 `--output` 选项早已随 incremental 一并移除，该用例长期预存失败；

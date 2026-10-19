@@ -21,8 +21,9 @@ import path from 'node:path';
 import { getLocalKbDir, getKbDir } from '../src/lib/scope.js';
 import { migrateLegacyRelationsCache, persistCacheShape, loadGroupCache } from '../src/lib/group-cache.js';
 import { readJson, writeJson } from '../src/lib/store.js';
-import { executeDeleteRelation, executeDeleteGroup } from '../src/delete-relation.js';
-import { executeManageCreate, executeManageDelete } from '../src/manage-index.js';
+import { executeDeleteRelation } from '../src/delete-relation.js';
+import { executeGroupDelete } from '../src/lib/group-delete.js';
+import { executeGroupCreate } from '../src/lib/group-create.js';
 import { executeSyncRelation } from '../src/sync-relation.js';
 // W8 ③：导入路径从"仅登记"提升为被测臂
 import { handleDirectImport } from '../src/lib/import.js';
@@ -35,9 +36,9 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const kbFile = (scope: string, group: string): string => getLocalKbDir(scope, group);
 
 /** 造一条一致的初始数据（★ KB 先写、分片后写，脚手架自身满足 I1） */
-function seed(scope: string, group: string, relations: string[], withTree = false): void {
+async function seed(scope: string, group: string, relations: string[], withTree = false): Promise<void> {
   if (withTree) {
-    const created = executeManageCreate({ scope, name: group });
+    const created = await executeGroupCreate({ scope, path: group });
     assert.ok((created as { ok?: boolean }).ok !== false, `建树节点失败: ${JSON.stringify(created)}`);
   }
   migrateLegacyRelationsCache(scope);
@@ -114,7 +115,7 @@ test('对照臂：旧顺序（KB 先删 → 引擎 I/O → 分片后更新）必
   const scope = newScope();
   const group = 'g-old';
   const rel = 'doc-a';
-  seed(scope, group, [rel]);
+  await seed(scope, group, [rel]);
 
   const sampler = startSampler(scope, group, rel);
   sampler.setPhase('old-order');
@@ -155,11 +156,7 @@ const ARMS: {
   },
   {
     name: 'delete-relation 目录级（S-04 修复：同上）',
-    run: async (scope, group) => executeDeleteGroup({ scope, group }),
-  },
-  {
-    name: 'manage-index 级联删除 --force（S-04 修复：分片先删 → KB 后删）',
-    run: async (scope, group) => executeManageDelete({ scope, name: group, force: true }),
+    run: async (scope, group) => executeGroupDelete({ scope, path: group }),
   },
   {
     name: 'sync-relation 覆盖写（KB 先 → 分片后；6 处落盘已入窗）',
@@ -192,7 +189,7 @@ for (const arm of ARMS) {
     const rel = arm.rel ?? 'doc-a';
     const withTree = arm.name.startsWith('manage-index');
     // fresh 臂（导入）自行创建数据：预置会造成"已存在"冲突，且探针应从"未列出"开始
-    if (!arm.fresh) seed(scope, group, [rel, 'doc-b'], withTree);
+    if (!arm.fresh) await seed(scope, group, [rel, "doc-b"], withTree);
 
     const sampler = startSampler(scope, group, rel);
     sampler.setPhase('mutate');

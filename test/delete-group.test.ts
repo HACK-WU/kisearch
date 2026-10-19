@@ -1,18 +1,13 @@
 /**
- * delete-group.test.ts —— 目录级删除 executeDeleteGroup 逻辑验证
+ * delete-group.test.ts —— 唯一删组 core（src/lib/group-delete.ts）验证
  *
- * 契约（REQ-20260814-001）：
- *   - 删除整个 group：清空该 group 下所有 relations（cache + KB + 向量）
- *   - 级联删除：删除父 group 连带全部子 group（前缀 = group + '/'）
- *   - wiki 目录移入回收站（.ki/trash/<group>/ 保留完整结构）
- *   - group-index 树节点删除（叶子节点连带清理空父节点）
- *   - 向量删除失败 → vectorRemoved:false（可观测，避免孤儿向量静默残留）
- *   - NOT_FOUND（doc 已不存在）视为「已清理」，幂等重删不误报
- *   - 空路径卫兵：resolvedGroup 为空拒绝执行（防 rmSync 删整个 scope）
- *
- * 策略：patch vector-client 的 vectorDelete，验证 executeDeleteGroup 在各场景的行为。
- *       文件系统侧走真实临时目录（KB 写入真实发生，与 import-scheme-d 一致）。
- *       精确 group 名直接匹配，resolveGroupPath 不触发向量兜底（searchPath）。
+ * 契约（REQ-20261019-005）：
+ *   - planGroupDelete 只读、零写入；
+ *   - executeGroupDelete 删 relations 分片 + KB 目录（含 assets）+ 树节点 + 向量/FTS；
+ *   - 组级删除不触碰 source.dir / wiki 目录（D3/D4）；
+ *   - 只精确匹配，近似路径报 GROUP_NOT_FOUND；
+ *   - requireEmpty 拒绝非空组；
+ *   - 向量失败 → degraded + orphanIds。
  *
  * 运行：npx jiti test/delete-group.test.ts
  */
@@ -23,52 +18,31 @@ import path from 'path';
 import os from 'os';
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
 
-// ─── 被测模块（先 import 以便 patch 导出）───
 const vectorClient = await import('../src/lib/vector-client.js');
-const pathSearch = await import('../src/lib/path-search.js');
 
-// ─── mock 状态 ───
 let deleteCalls: { scope: string; ids: string[] }[] = [];
-// mock 模拟引擎原始返回（含 NOT_FOUND），归一化交给生产的 normalizeVectorDeleteResult，
-// 避免测试自造结果形状与真实契约漂移。
 let mockDeleteResult: { ok: number; errors: { id: string; code: string; reason: string }[] } = {
   ok: 0,
   errors: [],
 };
 let mockDeleteThrows: Error | null = null;
 
-// patch（CJS interop 下消费方按命名空间动态取属性，patch 生效）
 (vectorClient as any).vectorDelete = async (params: { scope: string; ids: string[] }) => {
   deleteCalls.push({ scope: params.scope, ids: params.ids });
   if (mockDeleteThrows) throw mockDeleteThrows;
   return vectorClient.normalizeVectorDeleteResult(params.ids, mockDeleteResult);
 };
 
-// patch searchPath：向量语义兜底返回 null（降级），避免「未匹配」用例触发真实引擎初始化
-(pathSearch as any).searchPath = async () => null;
-
-// ─── 动态 import 被测函数（patch 之后再 import，消费方取 patch 后的引用）───
-const { executeDeleteGroup } = await import('../src/delete-relation.js');
+const { planGroupDelete, executeGroupDelete } = await import('../src/lib/group-delete.js');
 const { ensureScopeDir } = await import('../src/lib/store.js');
-const { getKbDir, setSource, getSource } = await import('../src/lib/scope.js');
+const { getKbDir, setSource } = await import('../src/lib/scope.js');
 
-const scope = `delete-group-${Date.now()}`;
-
-// ─── 测试数据构造 ───
-let wikiSourceDir: string;
-
-/**
- * 构造一个含 group 树 + relations + KB 目录 + wiki 目录的 scope
- */
 function setupGroup(scopeName: string, tree: Record<string, unknown>, relations: Record<string, any>) {
   ensureScopeDir(scopeName);
   const kbDir = getKbDir(scopeName);
-
-  // source 块：sourceDir 指向临时 wiki 目录
   const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-del-src-'));
   setSource(scopeName, { dir: sourceDir });
 
-  // 写 group-index.json（groups 树）
   const groupIndex = {
     version: 1,
     scope: scopeName,
@@ -78,7 +52,6 @@ function setupGroup(scopeName: string, tree: Record<string, unknown>, relations:
   };
   fs.writeFileSync(path.join(kbDir, 'group-index.json'), JSON.stringify(groupIndex), 'utf-8');
 
-  // 写 relations-cache.json（groups 平铺键）
   const cache = {
     version: 1,
     scope: scopeName,
@@ -87,20 +60,22 @@ function setupGroup(scopeName: string, tree: Record<string, unknown>, relations:
     updatedAt: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(kbDir, 'relations-cache.json'), JSON.stringify(cache), 'utf-8');
-
   return { sourceDir, kbDir };
 }
 
-/** 造一个 relation 条目 */
 function mkRelation(id: string, text: string, memoryIds?: string[]) {
   const r: any = { id, text, score: 1, useCount: 0, lastUsedTime: null, isImported: true };
   if (memoryIds) r.memoryIds = memoryIds;
   return r;
 }
 
+function readTree(scope: string): Record<string, unknown> {
+  const p = path.join(getKbDir(scope), 'group-index.json');
+  return JSON.parse(fs.readFileSync(p, 'utf-8')).groups;
+}
+
 before(() => {
-  registerTestScope(scope);
-  wikiSourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-del-wiki-'));
+  registerTestScope('delete-group-test');
 });
 
 after(() => {
@@ -113,198 +88,151 @@ beforeEach(() => {
   mockDeleteThrows = null;
 });
 
-describe('executeDeleteGroup：目录级删除', () => {
-  it('基础删除：cache/KB/向量/wiki/树节点全清 + vectorRemoved:true', async () => {
-    const s = `basic-${Date.now()}`;
+describe('group-delete：plan / execute', () => {
+  it('预览零写入：KB、树、wiki 全部保持原样', async () => {
+    const s = `plan-${Date.now()}`;
+    registerTestScope(s);
+    const { sourceDir } = setupGroup(
+      s,
+      { wiki: { docs: {} } },
+      { wiki: { hot_relations: [mkRelation('r1', 'a', ['m1'])], keywords: [] } },
+    );
+    fs.mkdirSync(path.join(getKbDir(s), 'wiki', 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(getKbDir(s), 'wiki', 'docs', 'index.json'), '{}', 'utf-8');
+    fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'wiki', 'a.md'), '# keep', 'utf-8');
+
+    const plan = await planGroupDelete({ scope: s, path: 'wiki' });
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.willDelete.relations, 1);
+    assert.equal(plan.willDelete.vectors, 1);
+    assert.ok(plan.willDelete.groups.includes('wiki/docs'));
+    assert.equal(plan.willKeep.wikiDir, path.join(sourceDir, 'wiki'));
+
+    assert.equal(fs.existsSync(path.join(getKbDir(s), 'wiki')), true);
+    assert.equal(fs.existsSync(path.join(getKbDir(s), 'relations-cache.json')), true);
+    assert.deepEqual(readTree(s), { wiki: { docs: {} } });
+    assert.equal(fs.existsSync(path.join(sourceDir, 'wiki', 'a.md')), true);
+    assert.equal(fs.existsSync(path.join(sourceDir, '.ki', 'trash')), false);
+  });
+
+  it('执行删除：分片/KB/树/向量清理，source.dir 原样保留', async () => {
+    const s = `exec-${Date.now()}`;
     registerTestScope(s);
     const { sourceDir } = setupGroup(
       s,
       { wiki: { docs: {} } },
       {
-        'wiki': { hot_relations: [mkRelation('r1', '父 relation', ['mem-1'])], keywords: [] },
+        wiki: { hot_relations: [mkRelation('r1', 'a', ['m1', 'm2'])], keywords: [] },
         'wiki/docs': { hot_relations: [], keywords: [] },
-      }
+      },
     );
-
-    // 建 KB 目录 + wiki 目录
     fs.mkdirSync(path.join(getKbDir(s), 'wiki', 'docs'), { recursive: true });
     fs.writeFileSync(path.join(getKbDir(s), 'wiki', 'docs', 'index.json'), '{}', 'utf-8');
+    fs.mkdirSync(path.join(getKbDir(s), 'wiki', 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(getKbDir(s), 'wiki', 'assets', 'a.png'), 'img', 'utf-8');
     fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
-    fs.writeFileSync(path.join(sourceDir, 'wiki', 'a.md'), '# 内容', 'utf-8');
+    fs.writeFileSync(path.join(sourceDir, 'wiki', 'a.md'), '# keep', 'utf-8');
 
-    mockDeleteResult = { ok: 1, errors: [] };
-
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
+    mockDeleteResult = { ok: 2, errors: [] };
+    const r = await executeGroupDelete({ scope: s, path: 'wiki' });
 
     assert.equal(r.ok, true);
-    const res = (r as any).result;
-    assert.equal(res.deleted, true);
-    assert.equal(res.vectorRemoved, true);
-    assert.equal(res.relationCount, 1);
-    assert.equal(res.wikiMoved, true);
-    assert.equal(res.nodeRemoved, true);
+    assert.equal(r.degraded, false);
+    assert.equal(r.deleted.kbDir, true);
+    assert.equal(r.deleted.tree, true);
+    assert.equal(r.vectors.deleted, deleteCalls[0].ids.length);
+    assert.ok(deleteCalls[0].ids.includes('m1') && deleteCalls[0].ids.includes('m2'));
+    const { generateDocId } = await import('../src/lib/vector-client.js');
+    const { buildGroupPathContent } = await import('../src/lib/path-vectorize.js');
+    for (const g of ['wiki', 'wiki/docs']) {
+      assert.ok(deleteCalls[0].ids.includes(generateDocId(buildGroupPathContent(g), s, 'ki-path')),
+        `应删除 ${g} 的 ki-path 路径向量`);
+    }
 
-    // cache 键已删（批次 2：布局无关断言——删除后新布局分片目录整棵移除）
-    const { readAllGroupCaches } = await import('../src/lib/group-cache.js');
-    assert.equal(readAllGroupCaches(s).get('wiki'), undefined);
-    assert.equal(readAllGroupCaches(s).get('wiki/docs'), undefined);
-
-    // KB 目录已删
     assert.equal(fs.existsSync(path.join(getKbDir(s), 'wiki')), false);
-
-    // wiki 移入回收站
-    assert.equal(fs.existsSync(path.join(sourceDir, 'wiki')), false);
-    assert.equal(fs.existsSync(path.join(sourceDir, '.ki', 'trash', 'wiki', 'a.md')), true);
-
-    // 向量被调用一次，携带聚合 ids
-    assert.equal(deleteCalls.length, 1);
-    assert.deepEqual(deleteCalls[0].ids, ['mem-1']);
+    assert.deepEqual(readTree(s), {});
+    // D3/D4：wiki / source.dir 零写操作
+    assert.equal(fs.existsSync(path.join(sourceDir, 'wiki', 'a.md')), true);
+    assert.equal(fs.existsSync(path.join(sourceDir, '.ki', 'trash')), false);
   });
 
-  it('级联删除：父 group 连带子 group（cache + KB 前缀匹配）', async () => {
-    const s = `cascade-${Date.now()}`;
+  it('只精确匹配：近似路径返回 GROUP_NOT_FOUND + candidates', async () => {
+    const s = `exact-${Date.now()}`;
     registerTestScope(s);
-    const { sourceDir } = setupGroup(
+    setupGroup(s, { wiki: {} }, { wiki: { hot_relations: [], keywords: [] } });
+
+    const plan = await planGroupDelete({ scope: s, path: 'wik' });
+    assert.equal(plan.ok, false);
+    if (plan.ok) return;
+    assert.equal(plan.code, 'GROUP_NOT_FOUND');
+    assert.ok(Array.isArray(plan.candidates));
+  });
+
+  it('拒绝 .. 与空路径', async () => {
+    const s = `invalid-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(s, { wiki: {} }, { wiki: { hot_relations: [], keywords: [] } });
+
+    for (const p of ['../x', '', 'a//b', '..']) {
+      const r = await planGroupDelete({ scope: s, path: p });
+      assert.equal(r.ok, false, `path=${JSON.stringify(p)} 应被拒绝`);
+      if (!r.ok) assert.equal(r.code, 'INVALID_PATH');
+    }
+  });
+
+  it('requireEmpty：非空组拒绝，空组可删', async () => {
+    const s = `empty-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(
       s,
-      { wiki: { docs: { sub: {} } } },
-      {
-        'wiki': { hot_relations: [mkRelation('r1', '父', ['mem-1'])], keywords: [] },
-        'wiki/docs': { hot_relations: [mkRelation('r2', '子', ['mem-2'])], keywords: [] },
-        'wiki/docs/sub': { hot_relations: [mkRelation('r3', '孙', ['mem-3'])], keywords: [] },
-        // 无关 group 不应被删除
-        'other': { hot_relations: [mkRelation('r4', '无关', ['mem-4'])], keywords: [] },
-      }
+      { A: { B: {} }, Empty: {} },
+      { A: { hot_relations: [mkRelation('r1', 'a')], keywords: [] } },
     );
 
-    fs.mkdirSync(path.join(getKbDir(s), 'wiki', 'docs', 'sub'), { recursive: true });
-    fs.mkdirSync(path.join(sourceDir, 'wiki', 'docs'), { recursive: true });
-    fs.writeFileSync(path.join(sourceDir, 'wiki', 'docs', 'b.md'), '# b', 'utf-8');
+    const nonEmpty = await executeGroupDelete({ scope: s, path: 'A', requireEmpty: true });
+    assert.equal(nonEmpty.ok, false);
+    assert.equal(nonEmpty.code, 'GROUP_NOT_EMPTY');
+    assert.ok(readTree(s).A);
 
-    mockDeleteResult = { ok: 3, errors: [] };
-
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
-
-    assert.equal(r.ok, true);
-    const res = (r as any).result;
-    assert.equal(res.deleted, true);
-    assert.equal(res.relationCount, 3);
-
-    // 批次 2：布局无关断言（级联组键全删、无关组保留）
-    const { readAllGroupCaches: readAllAfter } = await import('../src/lib/group-cache.js');
-    const after = readAllAfter(s);
-    assert.equal(after.get('wiki'), undefined);
-    assert.equal(after.get('wiki/docs'), undefined);
-    assert.equal(after.get('wiki/docs/sub'), undefined);
-    // 无关 group 保留
-    assert.notEqual(after.get('other'), undefined);
-
-    // 聚合删除 3 个 memoryIds
-    assert.equal(deleteCalls.length, 1);
-    assert.deepEqual(new Set(deleteCalls[0].ids), new Set(['mem-1', 'mem-2', 'mem-3']));
+    const empty = await executeGroupDelete({ scope: s, path: 'Empty', requireEmpty: true });
+    assert.equal(empty.ok, true);
+    assert.equal(readTree(s).Empty, undefined);
   });
 
-  it('向量删除抛错 → vectorRemoved:false + reason 记录', async () => {
-    const s = `verr-${Date.now()}`;
+  it('向量删除失败：degraded + orphanIds，元数据仍删除', async () => {
+    const s = `degraded-${Date.now()}`;
     registerTestScope(s);
-    const { sourceDir } = setupGroup(
+    setupGroup(
       s,
       { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-1'])], keywords: [] } }
+      { wiki: { hot_relations: [mkRelation('r1', 'a', ['m1'])], keywords: [] } },
     );
-    fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
-    fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
+    mockDeleteThrows = new Error('vector down');
 
-    mockDeleteThrows = new Error('engine locked');
-
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
-
+    const r = await executeGroupDelete({ scope: s, path: 'wiki' });
     assert.equal(r.ok, true);
-    const res = (r as any).result;
-    // 索引删除仍成功（deleted:true），但向量残留需可观测
-    assert.equal(res.deleted, true);
-    assert.equal(res.vectorRemoved, false);
-    assert.match(res.reason, /向量删除失败/);
+    assert.equal(r.degraded, true);
+    assert.ok(r.vectors.orphanIds.includes('m1'));
+    assert.equal(fs.existsSync(path.join(getKbDir(s), 'wiki')), false);
   });
 
-  it('NOT_FOUND（doc 已不存在）→ 视为已清理，vectorRemoved:true 不误报', async () => {
-    const s = `notfound-${Date.now()}`;
+  it('删除叶子后清理确认为空的父节点', async () => {
+    const s = `prune-${Date.now()}`;
     registerTestScope(s);
-    const { sourceDir } = setupGroup(
+    setupGroup(
       s,
-      { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-gone'])], keywords: [] } }
+      { A: { B: {} } },
+      { A: { hot_relations: [], keywords: [] }, 'A/B': { hot_relations: [], keywords: [] } },
     );
-    fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
-    fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
 
-    // NOT_FOUND：deleted 计数不含该 doc，但 errors 只含 NOT_FOUND
-    mockDeleteResult = {
-      ok: 0,
-      errors: [{ id: 'mem-gone', code: 'NOT_FOUND', reason: 'not found' }],
-    };
+    const plan = await planGroupDelete({ scope: s, path: 'A/B' });
+    assert.equal(plan.ok, true);
+    if (plan.ok) assert.deepEqual(plan.willDelete.emptyParents, ['A']);
 
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
-
+    const r = await executeGroupDelete({ scope: s, path: 'A/B' });
     assert.equal(r.ok, true);
-    const res = (r as any).result;
-    assert.equal(res.vectorRemoved, true); // 不误报
-    assert.equal(res.reason, undefined); // 无失败提示
-  });
-
-  it('真实写错误（非 NOT_FOUND）→ vectorRemoved:false', async () => {
-    const s = `realerr-${Date.now()}`;
-    registerTestScope(s);
-    const { sourceDir } = setupGroup(
-      s,
-      { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x', ['mem-bad'])], keywords: [] } }
-    );
-    fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
-    fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
-
-    mockDeleteResult = {
-      ok: 0,
-      errors: [{ id: 'mem-bad', code: 'ZVEC_WRITE_ERROR', reason: 'io error' }],
-    };
-
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
-
-    assert.equal(r.ok, true);
-    const res = (r as any).result;
-    assert.equal(res.vectorRemoved, false);
-    assert.match(res.reason, /向量删除失败/);
-    assert.match(res.reason, /mem-bad/);
-  });
-
-  it('group 未匹配 → ok:false（不执行删除）', async () => {
-    const s = `nomatch-${Date.now()}`;
-    registerTestScope(s);
-    setupGroup(s, { wiki: {} }, { 'wiki': { hot_relations: [], keywords: [] } });
-
-    const r = await executeDeleteGroup({ scope: s, group: 'nonexistent' });
-
-    assert.equal(r.ok, false);
-    assert.match((r as any).error, /未匹配/);
-    // 未触发向量删除
-    assert.equal(deleteCalls.length, 0);
-  });
-
-  it('无 memoryIds 的 group（纯索引无向量）→ vectorRemoved:true 且不调 vectorDelete', async () => {
-    const s = `novec-${Date.now()}`;
-    registerTestScope(s);
-    const { sourceDir } = setupGroup(
-      s,
-      { wiki: {} },
-      { 'wiki': { hot_relations: [mkRelation('r1', 'x')], keywords: [] } }
-    );
-    fs.mkdirSync(path.join(getKbDir(s), 'wiki'), { recursive: true });
-    fs.mkdirSync(path.join(sourceDir, 'wiki'), { recursive: true });
-
-    const r = await executeDeleteGroup({ scope: s, group: 'wiki' });
-
-    assert.equal(r.ok, true);
-    const res = (r as any).result;
-    assert.equal(res.vectorRemoved, true);
-    assert.equal(deleteCalls.length, 0); // 无 ids 可删，不调 vectorDelete
+    assert.deepEqual(readTree(s), {});
   });
 });

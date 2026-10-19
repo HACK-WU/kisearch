@@ -22,20 +22,13 @@
 ### 步骤 1：创建顶层 Group
 
 ```bash
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --name "API"
+ki group create "API" --scope my-project
 ```
 
 ### 步骤 2：创建 Group
 
 ```bash
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --parent "我的项目" \
-  --name "API"
+ki group create "我的项目/API" --scope my-project
 ```
 
 ### 步骤 3：写入 Relation 和模块说明
@@ -51,7 +44,7 @@ ki sync-relation \
 ### 步骤 4：查看写入效果
 
 ```bash
-ki query-group \
+ki group list \
   --scope my-project \
   --groups "我的项目/API"
 ```
@@ -73,7 +66,7 @@ AI Agent 在回答用户问题时的典型路径：
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> G[query-group]
+    Q[用户问题] --> G[ki group list]
     G --> H{本地热点是否命中?}
     H -- 是 --> M[get-module-info]
     M --> A[基于本地原文直接回答]

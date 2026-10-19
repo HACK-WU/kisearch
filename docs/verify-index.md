@@ -17,7 +17,7 @@
 
 **命令**：
 ```bash
-ki query-group --scope <scope> --mode full
+ki group list --scope <scope> --mode full
 ```
 
 **预期结果**：
@@ -42,7 +42,7 @@ ki query-group --scope <scope> --mode full
 
 **命令**：
 ```bash
-ki query-group --scope <scope> --groups <group>
+ki group list --scope <scope> --groups <group>
 ```
 
 **预期结果**：
@@ -144,10 +144,10 @@ GROUP=$2
 RELATION=$3
 
 echo "=== 结构验证 ==="
-ki query-group --scope $SCOPE --mode full
+ki group list --scope $SCOPE --mode full
 
 echo -e "\n=== Relations 验证 ==="
-ki query-group --scope $SCOPE --groups $GROUP
+ki group list --scope $SCOPE --groups $GROUP
 
 echo -e "\n=== 本地 KB 验证 ==="
 ki get-module-info --scope $SCOPE --group $GROUP --relation $RELATION
@@ -159,10 +159,10 @@ echo -e "\n=== 验证完成 ==="
 
 ```bash
 # 验证所有 Group 的结构
-ki query-group --scope <scope>
+ki group list --scope <scope>
 
 # 验证特定 Group 的所有 Relation
-ki query-group --scope <scope> --groups "设计文档/API"
+ki group list --scope <scope> --groups "设计文档/API"
 ```
 
 ---

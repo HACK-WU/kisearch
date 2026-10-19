@@ -3,12 +3,12 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { registerQueryGroupTool } from './lib/mcp-tools/query-group.js';
+import { registerGroupListTool } from './lib/mcp-tools/group-list.js';
 import { registerGetModuleInfoTool } from './lib/mcp-tools/get-module-info.js';
 import { registerSyncRelationTool } from './lib/mcp-tools/sync-relation.js';
 import { registerEditRelationTool } from './lib/mcp-tools/edit-relation.js';
 import { registerBulkSyncRelationTool } from './lib/mcp-tools/bulk-sync-relation.js';
-import { registerManageIndexTools } from './lib/mcp-tools/manage-index.js';
+import { registerGroupTools } from './lib/mcp-tools/group.js';
 import { registerSearchTool } from './lib/mcp-tools/search.js';
 import { registerStoreTool } from './lib/mcp-tools/store.js';
 import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
@@ -66,12 +66,12 @@ export function buildKiMcpServer(authScopes: string[] | null = null): McpServer 
     name: SERVICE_NAME,
     version: readKiVersion(),
   });
-  registerQueryGroupTool(server);
+  registerGroupListTool(server);
   registerGetModuleInfoTool(server);
   registerSyncRelationTool(server);
   registerEditRelationTool(server);
   registerBulkSyncRelationTool(server);
-  registerManageIndexTools(server, authScopes);
+  registerGroupTools(server);
   registerSearchTool(server);
   registerStoreTool(server);
   registerBulkStoreTool(server);

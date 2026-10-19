@@ -75,12 +75,12 @@ flowchart LR
 > `groupPath` 同时是 ①`group-index.json` 的树节点路径 ②本地 KB 目录
 >（`kb/<scope>/<groupPath>/index.json`）③分片目录。任何单侧改写（早期实现无条件剥
 > 历史 `项目根/` 前缀）都会让三者分叉，导致 `ki export` 静默导出 0 条、
-> `query-group` 报「暂无 Relations」、`delete-*` 收集不到 relation（向量/FTS 残留）
+> `ki group list` 报「暂无 Relations」、`delete-*` 收集不到 relation（向量/FTS 残留）
 > 与分片残留；且剥前缀是**非单射**映射（`项目根/X` 与 `X` 会撞同一分片互相覆盖）。
 > 唯一合法的前缀剥离时机是 `store.ts` 的 `roots → groups` 迁移——那里树里的 `项目根`
 > 节点被提升掉，`renameGroupCacheShards` 会把分片键一起改名（单文件与分片两种布局都覆盖）。
 >
-> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `query-group` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
+> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `ki group list` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
 >
 > **分区守恒不变量（2026-09-04 修复）**：展示侧截断只改变条目所属分区，不会让条目消失——热区溢出回流常温/冷区、常温溢出回流冷区，`hot + warm + cold` 恒等于全量（唯一例外：显式配置 `maxColdCount` 时的冷区末端截断）。修复前规模 ≥ 34 时被截断条目会在**所有 mode 下都查不到**（且被兜底标记为 `[冷]` 却筛不到）。`warmPercent` 以热区之外的候选池为基准；Group 聚合分取组内 Relation 评分的**均值**（非求和，避免规模压倒活跃度）。
 >
@@ -137,7 +137,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> G[query-group<br/>读取 Group 树 / 热门 Relation / 关键词]
+    Q[用户问题] --> G[ki group list<br/>读取 Group 树 / 热门 Relation / 关键词]
     G --> H{本地热门 Relation 是否命中?}
     H -- 是 --> M[get-module-info<br/>读取本地 KB 原文]
     M --> A[AI 直接回答]

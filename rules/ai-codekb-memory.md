@@ -178,7 +178,7 @@ provider:
 2. 标记过期（近期工作 >7 天；当前状态 >30 天；进行中进度永久保留）
 3. 活跃条目覆盖写回（AGENTS.md 或 `ki_sync_relation`）
 4. 过期条目追加到项目根目录 `archive.md`（按日期分组，不删除历史，首次自动创建）
-5. ki 数据源需 `ki_query_group(mode: "full")` 刷新缓存
+5. ki 数据源需 `ki_group_list(mode: "full")` 刷新缓存
 
 ---
 
@@ -237,7 +237,7 @@ provider:
 - 写入（单条）：`ki_sync_relation(scope: "${scope}-memory", group: "工具库", relation: "日期时间", module_info: "<描述+符号+位置>")`。⚠️ **`module_info` 是该 Relation 的完整正文，不是增量片段**——实现是整篇覆盖（无追加语义；2026-09-24 实测：只传新片段会把原内容整体替换掉）。追加新片段必须先 `ki_get_module_info` 取回当前正文，拼上 `<新片段>` 后整篇写入
 - **批量写入（≥3 条或多文档）**：用 `ki_bulk_sync_relation(scope: "${scope}-memory", items: [{ group, relation, module_info, tags? }])`，一次 embed + 一次向量写入，比多次逐条调用快 N 倍；**建议分批调用，每批 ≤5 条**（一次性组织大量文档耗时易错，分批服务端总耗时几乎不变）
 - **写入前查重**：先 `ki_get_module_info` 获取 Relation 当前内容，若已存在相同 `符号` 的片段 → 更新而非追加
-- 写入后刷新缓存：`ki_query_group(scope: "${scope}-memory", mode: "full")`
+- 写入后刷新缓存：`ki_group_list(scope: "${scope}-memory", mode: "full")`
 
 ### 查询片段
 

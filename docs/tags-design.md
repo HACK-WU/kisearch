@@ -8,7 +8,7 @@ kisearch 定义了三类核心标签（`ki-path`、`ki-relation`、`ki-search`�
 
 | 标签 | 定位 | 写入频率 | 用途 |
 |------|------|----------|------|
-| `ki-path` | 路径层级索引 | 每个 Group 一条 | group-resolve / query-group 路径模糊匹配 |
+| `ki-path` | 路径层级索引 | 每个 Group 一条 | group-resolve / ki group list 路径模糊匹配 |
 | `ki-relation` | Relation 关系索引 | 每个 Entry 一条 | get-module-info Relation 名称模糊匹配 |
 | `ki-search` | 通用语义搜索 | 用户手动 / 批量导入 | ki search CLI / MCP 通用语义搜索 |
 
@@ -42,7 +42,7 @@ BK-Monitor-Wiki 告警系统设计 告警处理服务
 | 消费方 | 调用链 | 场景 |
 |--------|--------|------|
 | `group-resolve.ts` | `searchPath(userInput, 'ki-path', scope)` | 用户输入 Group 路径时模糊匹配（如 "告警系统" 匹配 "BK-Monitor-Wiki/告警系统设计"） |
-| `query-group.ts` | `memSearch({ tags: 'ki-path' })` | 语义兜底：精确匹配失败后，通过语义向量查找相似路径 |
+| `group.ts` | `memSearch({ tags: 'ki-path' })` | 语义兜底：精确匹配失败后，通过语义向量查找相似路径 |
 | `path-vectorize.ts` | `deletePathVector(text, 'ki-path', scope)` | 增量导入时删除旧路径向量（先搜索定位 memoryId 再删除） |
 
 ---
@@ -143,7 +143,7 @@ export function searchPath(query: string, tag: 'ki-path' | 'ki-relation', scope:
 │  │  消费:       │  │  消费:       │  │  消费:                   │  │
 │  │  group-      │  │  get-module- │  │  ki search CLI           │  │
 │  │  resolve     │  │  info        │  │  MCP ki-search           │  │
-│  │  query-group │  │              │  │                          │  │
+│  │  ki group list │  │              │  │                          │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 │                                                                  │
 │  写入源: import.ts / sync-relation.ts / store.ts                 │
@@ -221,6 +221,6 @@ const hits = await engine.hybridSearch({
 | [import.ts](../src/lib/import.ts) | ki import 导入：bulkVectorize（ki-search）+ bulkStorePaths（ki-path/ki-relation） |
 | [search.ts](../src/search.ts) | ki search CLI（默认 tags: ki-search） |
 | [store.ts](../src/store.ts) | ki store CLI（默认 tags: ki-search） |
-| [query-group.ts](../src/query-group.ts) | 语义兜底（tags: ki-path） |
+| [group.ts](../src/group.ts) | 语义兜底（tags: ki-path） |
 | [get-module-info.ts](../src/get-module-info.ts) | Relation 模糊匹配（tags: ki-relation） |
 | [group-resolve.ts](../src/lib/group-resolve.ts) | Group 路径模糊匹配（tags: ki-path） |

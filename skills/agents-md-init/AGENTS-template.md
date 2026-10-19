@@ -23,22 +23,22 @@ description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scop
 
 ```bash
 # 1. 查询当前 Group 全貌
-ki query-group --scope ${scope}-memory --mode full
+ki group list --scope ${scope}-memory --mode full
 
 # 2. 对比预定义列表，缺失则逐个创建
-ki manage-index create --scope ${scope}-memory --name "背景与目标"
-ki manage-index create --scope ${scope}-memory --name "技术栈选型"
-ki manage-index create --scope ${scope}-memory --name "团队约定"
-ki manage-index create --scope ${scope}-memory --name "项目历史"
-ki manage-index create --scope ${scope}-memory --name "当前状态"
-ki manage-index create --scope ${scope}-memory --name "外部依赖"
-ki manage-index create --scope ${scope}-memory --name "项目踩坑点"
-ki manage-index create --scope ${scope}-memory --name "项目架构"
-ki manage-index create --scope ${scope}-memory --name "工具库"
-ki manage-index create --scope ${scope}-memory --name "常用命令"
-ki manage-index create --scope ${scope}-memory --name "部署运维"
-ki manage-index create --scope ${scope}-memory --name "通用记忆片段"
-ki manage-index create --scope ${scope}-memory --name "专题记忆"
+ki group create "背景与目标" --scope ${scope}-memory
+ki group create "技术栈选型" --scope ${scope}-memory
+ki group create "团队约定" --scope ${scope}-memory
+ki group create "项目历史" --scope ${scope}-memory
+ki group create "当前状态" --scope ${scope}-memory
+ki group create "外部依赖" --scope ${scope}-memory
+ki group create "项目踩坑点" --scope ${scope}-memory
+ki group create "项目架构" --scope ${scope}-memory
+ki group create "工具库" --scope ${scope}-memory
+ki group create "常用命令" --scope ${scope}-memory
+ki group create "部署运维" --scope ${scope}-memory
+ki group create "通用记忆片段" --scope ${scope}-memory
+ki group create "专题记忆" --scope ${scope}-memory
 ```
 
 #### Group 结构
@@ -68,7 +68,7 @@ ki manage-index create --scope ${scope}-memory --name "专题记忆"
 
 ## 团队约定
 
-> **同步源**：ki `${scope}-memory` → 「团队约定」Group（`ki_query_group(scope: "${scope}-memory", groups: "团队约定", mode: "full")`）。
+> **同步源**：ki `${scope}-memory` → 「团队约定」Group（`ki_group_list(scope: "${scope}-memory", groups: "团队约定", mode: "full")`）。
 > **本节为缓存**：权威数据在 ki，此处只做占位同步，便于 agent 免查询直接获取。
 > **无内容时必须写 `无`**，禁止留空或删除本节；写入 ki 后须回刷本节。
 > **写入方向**：先 `ki_sync_relation(scope: "${scope}-memory", group: "团队约定", ...)`，再把要点回刷到本节。

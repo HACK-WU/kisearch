@@ -202,7 +202,7 @@ test('⑩ 读类 operation 与 MCP 读工具登记为 read（防缺省落回 wri
   assert.equal(kindForOperation('asset-read-api'), 'read');
   // chat 通道（operation 形如 chat-mcp-<tool>，与 MCP 通道共用白名单）
   assert.equal(kindForOperation('chat-mcp-ki_get_module_info'), 'read');
-  assert.equal(kindForOperation('chat-mcp-ki_query_group'), 'read');
+  assert.equal(kindForOperation('chat-mcp-ki_group_list'), 'read');
   // 检索：2026-10-13 用户拍板放开为 read（导入期间可搜；结果中间态由降级机制兜底）
   assert.equal(kindForOperation('chat-mcp-ki_search'), 'read');
   assert.equal(kindForOperation('search'), 'read');
@@ -216,7 +216,7 @@ test('⑩ 读类 operation 与 MCP 读工具登记为 read（防缺省落回 wri
 
 test('⑪ MCP 工具批的 kind：全读才 read，混入写工具整批回退 write', () => {
   assert.equal(kindForMcpToolNames(['ki_get_module_info']), 'read');
-  assert.equal(kindForMcpToolNames(['ki_get_module_info', 'ki_query_group']), 'read');
+  assert.equal(kindForMcpToolNames(['ki_get_module_info', 'ki_group_list']), 'read');
   // 只读通道工具（不占 scope）与读工具混合仍是 read
   assert.equal(kindForMcpToolNames(['ki_scope_list']), 'read');
   assert.equal(kindForMcpToolNames(['ki_scope_list', 'ki_get_module_info']), 'read');

@@ -23,14 +23,14 @@
 
 恢复：只使用字母、数字、连字符、下划线，不要包含 `/`、`..`。
 
-### `manage-index.ts` 参数缺失
+### `group.ts` 参数缺失
 
 常见错误：
 
 - `create` 缺少 `--name`
 - 非 `list-scopes` 操作缺少 `--scope`
 
-> 忘记 scope 名称？执行 `ki manage-index --action list-scopes` 列出所有已初始化的 scope。
+> 忘记 scope 名称？执行 `ki scope list` 列出所有已初始化的 scope。
 
 ### `sync-relation.ts` 单条模式参数不完整
 
@@ -60,11 +60,11 @@
 
 恢复：先执行任一会触发 `ensureScopeDir` 的命令初始化 scope。
 
-> `query-group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
+> `group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
 
 ### relations 元数据结构损坏（`CACHE_SHAPE_INVALID`）
 
-影响：`query-group.ts`（CLI 与 `ki_query_group` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
+影响：`group.ts`（CLI 与 `ki_group_list` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
 
 典型现象：
 
@@ -88,7 +88,7 @@
 
 ### `group-index.json` 损坏
 
-影响：`query-group.ts`、`manage-index.ts`
+影响：`group.ts`、`group.ts`
 
 恢复：从用户备份恢复，或从模板重新初始化。
 
@@ -184,7 +184,7 @@ scopes:
 
 ### `--mode` 无效
 
-`query-group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
+`group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
 支持逗号分隔多值，如 `--mode hot,warm`。
 
 无效参数会报错退出并提示有效值列表。

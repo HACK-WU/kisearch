@@ -3,10 +3,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeQueryGroup } from '../../query-group.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
-export function registerQueryGroupTool(server: McpServer): void {
+export function registerGroupListTool(server: McpServer): void {
   server.tool(
-    'ki_query_group',
-    '查询 Group 树 + Relations + 词云，支持向量语义兜底',
+    'ki_group_list',
+    '列出 Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量语义兜底',
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       groups: z.string().optional().describe('逗号分隔的 Group 路径列表（支持模糊匹配），展示各 Group 的 Relations（与 subtree 互斥）'),
@@ -24,7 +24,6 @@ export function registerQueryGroupTool(server: McpServer): void {
         const result = await withTimeout(
           executeQueryGroup({
             scope: args.scope,
-            // 兼容单数 group 别名：之前传 group 会被 zod 静默剔除，误落入全库视图
             groupsParam: args.groups ?? args.group,
             subtreeParam: args.subtree,
             hotCount: args.hot_count ?? 5,
@@ -33,7 +32,7 @@ export function registerQueryGroupTool(server: McpServer): void {
             autoFallback: args.auto_fallback,
           }),
           TOOL_TIMEOUT.READ,
-          'ki_query_group'
+          'ki_group_list',
         );
         if (result.ok) {
           return {
@@ -50,6 +49,6 @@ export function registerQueryGroupTool(server: McpServer): void {
           content: [{ type: 'text', text: (err as Error).message }],
         };
       }
-    }
+    },
   );
 }

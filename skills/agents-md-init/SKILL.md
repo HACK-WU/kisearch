@@ -34,17 +34,17 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 
 ## 1.5 首次使用引导
 
-> **当 `ki_manage_index_list` 返回空列表时，AI 应主动引导。**
+> **当 `ki_scope_list` 返回空列表时，AI 应主动引导。**
 
 ```
-① ki_manage_index_list → 无任何 scope
+① ki_scope_list → 无任何 scope
     ↓
 ② 主动提示用户：
     "检测到项目尚未配置 ki 索引。是否需要我帮你初始化？"
     ↓ 用户确认
 ③ 确定 scope 名称（默认取项目目录名的小写简写）
-④ ki_manage_index_create(scope, name: "项目概述")
-⑤ ki_manage_index_create(scope: "${scope}-memory", name: "背景与目标")
+④ ki_group_create(scope, path: "项目概述")
+⑤ ki_group_create(scope: "${scope}-memory", path: "背景与目标")
 ⑥ 执行完整初始化（步骤 2.1）
 ```
 
@@ -77,9 +77,9 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ### 2.1 完整初始化
 
 ```
-① ki_manage_index_list → 获取所有 scope，识别 ${scope}-memory 项目记忆 scope
-② 对每个 ${scope}-memory 执行 ki_query_group(mode: "full,depth=4") → Group 结构
-③ 对每个 ${scope}-memory 执行 ki_query_group(mode: "hot,hot_count=3") → 热门 Relation
+① ki_scope_list → 获取所有 scope，识别 ${scope}-memory 项目记忆 scope
+② 对每个 ${scope}-memory 执行 ki_group_list(mode: "full", depth: 4) → Group 结构
+③ 对每个 ${scope}-memory 执行 ki_group_list(mode: "hot", hot_count: 3) → 热门 Relation
 ④ 同步「团队约定」Group → 填充 AGENTS.md"团队约定"章节（Group 为空则写"无"，见 §3.6）
 ⑤ 用户画像与近期工作 → 直接写入 AGENTS.md 对应章节（空模板 + 预定义维度）
 ⑥ 写入 AGENTS.md（参考 AGENTS-template.md）
@@ -93,7 +93,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 
 ```
 ① 读取 AGENTS.md，提取已有的 ${scope}-memory 列表
-② ki_manage_index_list → 获取最新 scope 列表，识别 ${scope}-memory
+② ki_scope_list → 获取最新 scope 列表，识别 ${scope}-memory
 ③ 对比差异：
    - 新增 ${scope}-memory → 补充对应章节
    - 删除 ${scope}-memory → 移除对应章节
@@ -101,7 +101,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ④ 检查项目记忆预定义 Group 是否存在，缺失则初始化（见 §项目记忆索引）
 ⑤ 检查"近期工作"时间戳 → 超过 1 天则刷新（直接维护 AGENTS.md 章节）
 ⑥ 用户画像 → 保持 AGENTS.md 中已有内容，不重复初始化；仅当维度缺失时补充小节
-⑦ 回刷"团队约定"章节 → ki_query_group(scope: "${scope}-memory", groups: "团队约定", mode: "full") 与本节比对，不一致则覆盖（Group 为空则写"无"）
+⑦ 回刷"团队约定"章节 → ki_group_list(scope: "${scope}-memory", groups: "团队约定", mode: "full") 与本节比对，不一致则覆盖（Group 为空则写"无"）
 ```
 
 ---
@@ -188,10 +188,10 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 
 ### 有真实数据时
 
-- `${scope}-memory` 列表 → 来自 `ki_manage_index_list`
-- Group 结构 → 来自 `ki_query_group(mode: "full")`（仅 ${scope}-memory）
-- 热门 Relation → 来自 `ki_query_group(mode: "hot")`（仅 ${scope}-memory）
-- 团队约定 → 来自 `ki_query_group(groups: "团队约定", mode: "full")`，空则写"无"（见 §3.6）
+- `${scope}-memory` 列表 → 来自 `ki_scope_list`
+- Group 结构 → 来自 `ki_group_list(mode: "full")`（仅 ${scope}-memory）
+- 热门 Relation → 来自 `ki_group_list(mode: "hot")`（仅 ${scope}-memory）
+- 团队约定 → 来自 `ki_group_list(groups: "团队约定", mode: "full")`，空则写"无"（见 §3.6）
 - 近期工作 → AGENTS.md 内已有内容（无 ki 数据源）
 - 用户画像 → AGENTS.md 内已有内容（无 ki 数据源）
 
@@ -203,7 +203,7 @@ description: 初始化或更新项目根目录的 AGENTS.md 文件。填充 ${sc
 ## 项目记忆索引
 
 > ⚠️ 项目记忆索引为空，尚未创建任何项目记忆。
-> 执行 `ki_manage_index_create` 创建 ${scope}-memory scope 后自动更新。
+> 执行 `ki_group_create` 创建 ${scope}-memory scope 后自动更新。
 
 ## 用户画像
 

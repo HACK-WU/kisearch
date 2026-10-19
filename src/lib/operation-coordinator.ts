@@ -43,7 +43,8 @@ const READ_OPERATIONS = new Set<string>([
   // CLI / daemon（daemon-rpc 按 operation 名推导 kind）
   'get-module-info',
   'get-module-info-batch',
-  'query-group',
+  'group-list',
+  'query-group', // 过渡别名（一个版本）
   // CLI `ki search`（语义 + 全文检索）：纯读（不写元数据/引擎），2026-10-13 用户拍板放开 ——
   // 实测导入期间直连检索 735–820ms 返回（经 write 入队则要等满整个导入）。
   'search',
@@ -63,7 +64,7 @@ const READ_OPERATIONS = new Set<string>([
 /**
  * MCP 读工具白名单（MCP HTTP 通道与 chat 工具通道**共用**）：
  * 一律不写引擎；`ki_get_module_info` 的评分回写已入提交窗口。
- * - `ki_get_module_info` / `ki_query_group`：引擎访问是**条件性**的
+ * - `ki_get_module_info` / `ki_group_list`：引擎访问是**条件性**的
  *   （精确命中即不打开 zvec，仅模糊兜底才检索）。
  * - `ki_search`：每次必开引擎，但**只读**（检索 + 反查 + 原文召回），
  *   2026-10-13 用户拍板放开 —— 导入期间可搜（约 1s 返回），代价是结果可能为中间态。
@@ -72,7 +73,7 @@ const READ_OPERATIONS = new Set<string>([
  *   （见 `kindForMcpToolNames`）—— 例如 AI 同时调 `ki_search` + `ki_sync_relation`
  *   会整批排队，这是刻意的保守语义。
  */
-const READ_MCP_TOOLS = new Set<string>(['ki_get_module_info', 'ki_query_group', 'ki_search']);
+const READ_MCP_TOOLS = new Set<string>(['ki_get_module_info', 'ki_group_list', 'ki_search']);
 
 /**
  * 按 operation 名推导任务类型（S-01 的**默认规则**，kind 的唯一真相）。
@@ -241,6 +242,11 @@ export class OperationCoordinator {
    * `persistTouchedGroups`）。这些写虽短，但若不入窗口，读就会与"删 KB / 重落分片"并发 —
    * 正是"列表里在、点开 404"的来源（challenger 质疑 C1）。
    */
+  /** 该 scope 是否处于元数据提交窗口（scope list 用它标记 topGroups 可能过期） */
+  isScopeCommitting(scope: string): boolean {
+    return (this.committing.get(scope) ?? 0) > 0;
+  }
+
   withMetadataCommitSync<T>(scope: string, run: () => T): T {
     this.enterCommit(scope);
     try {

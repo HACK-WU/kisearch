@@ -19,7 +19,9 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
-import { listAllScopes, getKbDir, getRelationsCachePath, validateScope } from './lib/scope.js';
+import { listAllScopes, getKbDir, getRelationsCachePath, getGroupIndexPath, validateScope } from './lib/scope.js';
+import { readJson } from './lib/store.js';
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { loadConfig, removeScopeFromConfigFile } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
@@ -71,6 +73,10 @@ export interface ScopeEntry {
   ftsOnlyDocCount: number;
   /** 有 FTS 索引的文档数（含 dense+FTS 混合）；用于「FTS 层是否已建立」的运行态判断。 */
   ftsDocCount: number;
+  /** 顶层组名（仅第一层）；读失败为空数组 */
+  topGroups: string[];
+  /** topGroups 是否可能过期（该 scope 正在提交窗口内或读取失败） */
+  topGroupsStale: boolean;
 }
 
 /** 统计 Scope 的 KB 文档数与完整 FTS-only 文档数（每个 relation 计一次）。 */
@@ -190,12 +196,26 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
         console.warn(`⚠️ scope "${s}" 的 relations 元数据读取失败，计数暂按 0 计：${(err as Error).message}`);
       }
     }
+    let topGroups: string[] = [];
+    let topGroupsStale = false;
+    try {
+      const gi = readJson<{ groups?: Record<string, unknown> }>(getGroupIndexPath(s));
+      topGroups = gi?.groups ? Object.keys(gi.groups) : [];
+    } catch {
+      topGroupsStale = true;
+    }
+    try {
+      if (getSharedOperationCoordinator().isScopeCommitting(s)) topGroupsStale = true;
+    } catch { /* 协调器不可用时忽略 */ }
+
     return {
       scope: s,
       kb: kbScopes.has(s),
       vector: vectorScopes.has(s),
       registered: Object.prototype.hasOwnProperty.call(config.scopes, s),
       ...docCounts,
+      topGroups,
+      topGroupsStale,
     };
   });
 

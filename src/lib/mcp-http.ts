@@ -99,7 +99,7 @@ export interface HttpServerOptions {
   /**
    * 每个 MCP 会话新建一个 McpServer 的工厂。
    * 接收该会话的授权 scope 集合（authScopes）：null = 免鉴权（不限）；否则为授权集合（['all'] 或具体列表）。
-   * 供枚举类工具（ki_scope_list / ki_manage_index_list）按授权过滤，避免泄露未授权 scope。
+   * 供枚举类工具（ki_scope_list）按授权过滤，避免泄露未授权 scope。
    */
   buildServer: (authScopes: string[] | null) => McpServer;
   /** 进程退出前的额外清理（如停止 version guard） */
@@ -135,7 +135,7 @@ function isInitializeBody(body: unknown): boolean {
  *
  * ⚠️ 新增 schema 不含 scope 参数的工具时必须同步加入此清单。
  */
-const SCOPE_LESS_TOOLS = new Set(['ki_scope_list', 'ki_manage_index_list']);
+const SCOPE_LESS_TOOLS = new Set(['ki_scope_list']);
 
 /**
  * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
@@ -765,11 +765,6 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       // 归入只读通道：不占用任何 scope，也不被其他 scope 的写操作阻塞。
       if (toolName === 'ki_scope_list') continue;
       onlyReadOnly = false;
-      // 索引树枚举会返回跨 scope 的 Group 结构，需要一致快照，保留全局独占。
-      if (toolName === 'ki_manage_index_list') {
-        needsGlobal = true;
-        continue;
-      }
       const args = message && typeof message === 'object'
         ? ((message as { params?: { arguments?: unknown } }).params?.arguments as { scope?: unknown } | undefined)
         : undefined;
@@ -795,7 +790,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         () => handleMcpPostInner(req, res, authScopes, body),
       ))),
       occupied,
-      // 读工具（ki_get_module_info / ki_query_group）判 `read`：它们不写元数据/引擎、
+      // 读工具（ki_get_module_info / ki_group_list）判 `read`：它们不写元数据/引擎、
       // 允许只读访问 zvec（实测导入期间引擎直读 68–220ms）⇒ 不再被导入长任务排到队尾。
       // 混入任一写工具即整批回退 `write`（见 kindForMcpToolNames）。
       kindForMcpToolNames(calledTools),

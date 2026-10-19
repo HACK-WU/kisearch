@@ -90,7 +90,7 @@ function loadGroupIndex(scope: string): GroupIndex | null {
  *
  * 抛出点位于 executeQueryGroup 的 try 内，对外仍表现为 {ok:false, error}，
  * 不违背「executeXxx 不抛异常、失败以 ok:false 返回」的可复用纯函数契约
- * （MCP 层 ki_query_group 将其转为 isError:true + 同文案；web 前端不调用本工具）。
+ * （MCP 层 ki_group_list 将其转为 isError:true + 同文案；web 前端不调用本工具）。
  *
  * ⚠ 口径差异是有意的，勿误「统一」：同一份 relations-cache，
  * `mcp-http-api.ts::buildDocList` 用宽松降级（`hot_relations?` + `?? []`）。因为那里只是
@@ -105,7 +105,7 @@ function assertCacheShape(cache: RelationsCache, scope: string, source: string):
   // 出路刻意不预置 --yes：restore.ts 对快照还原是「先预览总览 → 再加 --yes 执行」的两步门禁
   // （NEG-11，previewAndRequireYes）。预置 --yes 等于替使用者跳过预览，直接触发不可逆的
   // 「删除 + 覆盖 scope 目录」，且看不到将使用哪个快照（默认取最新，可能早于现有数据）；
-  // 本文案还会经 MCP ki_query_group（isError:true）原样流给 AI agent，被照抄执行的风险更高。
+  // 本文案还会经 MCP ki_group_list（isError:true）原样流给 AI agent，被照抄执行的风险更高。
   const hint = `建议：先执行 ki restore ${scope} --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；`
     + `或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）`;
 
@@ -137,7 +137,7 @@ function loadRelationsCache(scope: string): RelationsCache | null {
   // JSON 语法损坏由 readJson 抛 CORRUPT_JSON，loadCacheShape 两侧路径同源。
   //
   // 批次 2 审查 P1/M5：原实现把**一切**读取异常都吞成 null → 分片/manifest 损坏时
-  // ki_query_group 静默返回空索引树（与 :82-100 自述的 fail-loud 承诺矛盾）。
+  // ki_group_list 静默返回空索引树（与 :82-100 自述的 fail-loud 承诺矛盾）。
   // 现在只把「两布局均无数据」当 null，其余按原样上抛（由 CLI/MCP 层给出错误）。
   let cache: RelationsCache | null;
   try {
@@ -986,7 +986,7 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
 }
 
 export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
-  if (shouldUseDaemonClient()) return callDaemon<QueryGroupResult>('query-group', params);
+  if (shouldUseDaemonClient()) return callDaemon<QueryGroupResult>('group-list', params);
   return executeQueryGroupLocal(params);
 }
 

@@ -16,7 +16,7 @@
  * ═══ 批次 2 决策 D4（保留）═══
  * `kb_search` 退役：检索由 `ki_search` 承担；skill 正文只引用真实暴露的工具名，
  * 并强调「实际可用工具以系统传入的工具列表为准」—— 根治批次 1 联调时
- * 「你提到的 ki_query_group 在我这里并不存在」的模型困惑（批次 1 决策 #12）。
+ * 「你提到的 ki_group_list 在我这里并不存在」的模型困惑（批次 1 决策 #12）。
  */
 
 import { CHAT_BUDGET } from '../chat-contract.js';
@@ -85,7 +85,7 @@ export const RETRIEVAL_SKILL_PROMPT: string = [
   '### 一、工具与边界',
   '主检索工具：ki_search(query, mode, limit)，作用于当前会话的知识库（scope 由系统注入，不提供也不接受 scope 参数）。limit 可在允许范围内按需选择；不传时使用系统默认条数。',
   '检索返回实际 JSON（results、total、文档位置、原文/命中片段等，以实际字段为准），不按字段或片段删减；总长度超过上限时会截断并明确标记。截断后内容可能不完整、JSON 可能不闭合，不能推断未展示部分。total 是检索命中数，不是全库文档数。',
-  '其他只读工具：ki_query_group（查看 Group 树结构与 Relations，先看结构再精确检索）、ki_get_module_info（读取指定 Group 下文档的完整 Markdown 原文，批量 ≤10 条须同 Group）、ki_tag_list（列出可用标签）。',
+  '其他只读工具：ki_group_list（查看 Group 树结构与 Relations，先看结构再精确检索）、ki_get_module_info（读取指定 Group 下文档的完整 Markdown 原文，批量 ≤10 条须同 Group）、ki_tag_list（列出可用标签）。',
   '★ 实际可用工具每次以系统传入的工具列表为准：列表中没有的工具一律不得调用，也不得声称调用了未提供的工具（含写入/删除类）。检索没有翻页，无法主动读取 ki_get_module_info 之外的整篇原文。',
   '',
   '### 二、检索前：确定对象与证据缺口',

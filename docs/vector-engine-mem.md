@@ -227,7 +227,7 @@ zvec 引擎通过 metadata 字段 `tags` 实现向量空间隔离，语义与原
 
 - 所有向量操作都绑定 `scope`（metadata 字段），实现项目物理隔离
 - 配置文件：`~/.ki/config.yaml`，结构为 `scopes.definitions.<scope>`
-- 首次使用某 scope 前必须先在配置中注册（通过 `ki manage-index` 或 `ki config init`）
+- 首次使用某 scope 前必须先在配置中注册（通过 `ki group` 或 `ki config init`）
 - **无需全局 mem 安装**：`@zvec/zvec` 是 npm 依赖，版本锁定在 `package.json`
 
 ## 7. 性能对比（zvec vs 旧 mem CLI）

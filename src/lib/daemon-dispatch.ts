@@ -3,14 +3,15 @@ import { executeBulkStore } from '../bulk-store.js';
 import { executeSearch } from '../search.js';
 import { executeSyncRelation, executeBulkSyncRelation } from '../sync-relation.js';
 import { executeEditRelation } from '../edit-relation.js';
-import { executeDeleteRelation, executeDeleteGroup, executeBatchDelete } from '../delete-relation.js';
+import { executeDeleteRelation, executeBatchDelete } from '../delete-relation.js';
+import { executeGroupCreate } from './group-create.js';
+import { executeGroupDelete } from './group-delete.js';
 import { handleDirectImport } from './import.js';
 import { executeScopeList, executeScopeDelete, executeScopeClear } from '../scope.js';
 import { executeQueryGroup } from '../query-group.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../get-module-info.js';
 import { executeTagList } from '../tag.js';
 import { executeDocList, executeDocDelete } from '../doc.js';
-import { executeManageCreate, executeManageDeleteEmpty, executeManageDelete } from '../manage-index.js';
 import { rebuildScopeVectors } from './rebuild-vector.js';
 import { vectorCountScope } from './vector-client.js';
 import { restoreSnapshotLocal } from './restore-snapshot.js';
@@ -43,21 +44,32 @@ const HANDLERS: Record<string, Handler> = {
   'edit-relation': executeEditRelation,
   'bulk-sync-relation': executeBulkSyncRelation,
   'delete-relation': executeDeleteRelation,
-  'delete-group': executeDeleteGroup,
+  'group-delete': executeGroupDelete,
+  'group-delete-empty': (params) => executeGroupDelete({ ...params, requireEmpty: true }),
+  'group-create': executeGroupCreate,
+  'group-list': executeQueryGroup,
   'batch-delete': (params) => executeBatchDelete(params?.scope, params?.items ?? []),
   import: handleDirectImport,
   'scope-list': executeScopeList,
   'scope-delete': executeScopeDelete,
   'scope-clear': executeScopeClear,
-  'query-group': executeQueryGroup,
   'get-module-info': executeGetModuleInfo,
   'get-module-info-batch': executeGetModuleInfoBatch,
   'tag-list': executeTagList,
   'doc-list': executeDocList,
   'doc-delete': executeDocDelete,
-  'manage-create': executeManageCreate,
-  'manage-delete-empty': executeManageDeleteEmpty,
-  'manage-delete': executeManageDelete,
+  // ── 过渡别名（一个版本）：只做参数适配，指向同一实现 ──
+  'delete-group': (params) => executeGroupDelete({ scope: params?.scope, path: params?.group ?? params?.path }),
+  'query-group': executeQueryGroup,
+  'manage-create': (params) => executeGroupCreate({
+    scope: params?.scope,
+    path: [params?.parent ?? '', params?.name ?? ''].filter(Boolean).join('/'),
+  }),
+  'manage-delete-empty': (params) => executeGroupDelete({
+    scope: params?.scope,
+    path: [params?.parent ?? '', params?.name ?? ''].filter(Boolean).join('/'),
+    requireEmpty: true,
+  }),
   'rebuild-vector': (params) => rebuildScopeVectors(
     params.scope,
     { countScope: vectorCountScope },

@@ -78,10 +78,10 @@ MCP 工具形成了可持续的记忆闭环：
 
 | Agent 动作 | MCP 工具 | 作用 |
 |-----------|---------|------|
-| 回忆 | `ki_search`、`ki_query_group`、`ki_get_module_info` | 语义检索、按结构导航、读取原文 |
+| 回忆 | `ki_search`、`ki_group_list`、`ki_get_module_info` | 语义检索、按结构导航、读取原文 |
 | 记住 | `ki_sync_relation`、`ki_bulk_sync_relation` | 写入带 Group / Relation 的持久化结构化记忆 |
 | 更新 | `ki_sync_relation`、`ki_bulk_sync_relation`、`ki_edit_relation` | 短文档整篇覆盖；大 Relation 可多轮按行修改，完成后再更新索引 |
-| 组织 | `ki_manage_index_create`、标签、scope | 建立记忆层级、分类和项目隔离 |
+| 组织 | `ki_group_create`、标签、scope | 建立记忆层级、分类和项目隔离 |
 | 遗忘 | `ki_delete_relation` | 删除指定 Relation 及其关联的 KB、缓存和向量数据 |
 
 典型使用流程：
@@ -91,7 +91,7 @@ Agent 从当前对话或代码中提取稳定事实
         ↓
 通过 ki_sync_relation 写入结构化记忆
         ↓
-后续会话通过 ki_search / ki_query_group 回忆
+后续会话通过 ki_search / ki_group_list 回忆
         ↓
 事实变化时覆盖更新；过期或错误时删除
 ```
@@ -138,7 +138,7 @@ Agent 从当前对话或代码中提取稳定事实
 - **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
 - **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
 - **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 14 个 MCP 工具（stdio / HTTP 共享单例）
-- **MCP 安全约束**：不暴露 scope / doc 级联删除和 `--force` 操作；`ki_delete_relation` 仅按 Group+Relation 删除单条知识条目，`ki_manage_index_delete` 仅允许删除空 Group 节点
+- **MCP 安全约束**：不暴露 scope / doc 级联删除和 `--force` 操作；`ki_delete_relation` 仅按 Group+Relation 删除单条知识条目，`ki_group_delete_empty` 仅允许删除空 Group 节点
 
 ## <a id="quickstart"></a>🚀 快速开始
 
@@ -239,8 +239,8 @@ ki mcp token delete <id>                   # 删除指定 Token（立即失效�
 | 命令 | 说明 |
 |------|------|
 | `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--conflict-mode/--conflict-suffix` 同名策略、`--no-vector` FTS-only 全文索引、`--no-assets` 关闭图片附件收集 |
-| `manage-index` | Group 树 CRUD + scope 列表（create / delete / list-scopes） |
-| `query-group` | 查询 Group + 分区（索引直查 · 支持模糊路径语义兜底） |
+| `ki group` | Group 管理：`create` / `delete` / `list`（单一路径，无 `--parent`/`--name`） |
+| `ki group list` | `group` 的 list 子命令：Group 树 + 分区（索引直查 · 支持模糊路径语义兜底） |
 | `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
 | `sync-relation` | 写入 Relation + 本地 KB（单条/批量 dense 向量化；`--no-vector` 改写独立 FTS-only 全文索引） |
 | `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
@@ -319,11 +319,10 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 
 | 工具 | 功能 | 对应路径 |
 |------|------|---------|
-| `ki_query_group` | 查询 Group 树 + Relations + 词云 | 索引直查 |
+| `ki_group_list` | 查询 Group 树 + Relations + 词云 | 索引直查 |
 | `ki_get_module_info` | 读取本地 KB Markdown 原文 | 索引直查 |
-| `ki_manage_index_create` | 创建 Group 节点 | — |
-| `ki_manage_index_list` | 列出所有 scope | — |
-| `ki_manage_index_delete` | 删除空 Group 节点（非空节点拒绝删除） | — |
+| `ki_group_create` | 创建 Group 节点 | — |
+| `ki_group_delete_empty` | 删除空 Group 节点（非空节点拒绝删除） | — |
 | `ki_sync_relation` | 写入单条 Relation（向量 + KB 双写，`vector=false` 非向量化） | 写入 |
 | `ki_edit_relation` | 对已有大 Relation 多轮、多区域按行编辑草稿；`finish` 后才更新向量或全文索引 | 更新 |
 | `ki_bulk_sync_relation` | 批量写入 Relation（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | 写入 |
@@ -335,7 +334,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 | `ki_tag_list` | 列出 scope 下 tag 及文档数 | — |
 
 > `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（每个标签最多返回 `limit` 条，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
-> MCP 工具不提供 scope / doc 级联删除和 `--force` 操作：`ki_delete_relation` 只能删除单条 Relation，`ki_manage_index_delete` 只能删除空 Group 节点；需要级联或强制操作时使用 CLI。
+> MCP 工具不提供 scope / doc 级联删除和 `--force` 操作：`ki_delete_relation` 只能删除单条 Relation，`ki_group_delete_empty` 只能删除空 Group 节点；需要级联或强制操作时使用 CLI。
 
 ## <a id="kb-import"></a>📥 知识库导入
 
@@ -372,7 +371,7 @@ ki import --scope my-project --source /path/to/wiki --group Wiki
 |------|------|
 | [`docs/build-kb.md`](./docs/build-kb.md) | 首次构建知识索引 |
 | [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
-| [`docs/manage-index.md`](./docs/manage-index.md) | 索引结构管理 |
+| [`docs/group.md`](./docs/group.md) | 索引结构管理 |
 | [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
 | [`docs/import.md`](./docs/import.md) | `ki import` 导入流程、参数与幂等追加语义详解 |
 
@@ -424,7 +423,7 @@ ki-memory-write（查重后写入并校验）
 
 2. **`ki-memory-lookup`：查询只读，按记忆类型选路径**
    - 专题记忆、接口信息、数据流和错误库优先使用语义检索；查询中带上功能模块名和关键代码符号。
-   - 强关联、决策记忆和待生效变更优先使用 `ki_query_group` 目录导航；需要列全量条目时必须使用 `mode="full"`。
+   - 强关联、决策记忆和待生效变更优先使用 `ki_group_list` 目录导航；需要列全量条目时必须使用 `mode="full"`。
    - 同一 Group 需要读取多条内容时，使用 `ki_get_module_info` 的 `relations` 数组批量读取；同一批最多 10 条，并逐条核对返回结果。
    - 该 Skill 只负责查询，不直接修改记忆；与代码实际不一致时，以代码为准。
 

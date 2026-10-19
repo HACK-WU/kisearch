@@ -95,10 +95,10 @@ ki backup scope-name --list
 
 ```bash
 # 列出所有 scope
-ki manage-index --action list-scopes
+ki scope list
 
 # 逐个备份
-for scope in $(ki manage-index --action list-scopes | jq -r '.scopes[].scope'); do
+for scope in $(ki scope list | jq -r '.scopes[].scope'); do
   ki backup "$scope"
 done
 ```
@@ -191,7 +191,7 @@ ki restore scope-name --rebuild-vector --tags api,auth
 rm -rf kb/{scope}
 
 # 触发自动初始化（运行任一 ki 命令即可）
-ki manage-index --action list-scopes
+ki scope list
 ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化"
 
 # 重新导入数据（原文直导，幂等追加）
@@ -233,7 +233,7 @@ ki restore {scope} --from-snapshot --yes
 ki restore {scope} --from-snapshot --yes
 
 # 或重新初始化 scope
-ki manage-index --scope {scope} --action create --name "初始化"
+ki group create "初始化" --scope {scope}
 ```
 
 ### 场景 4：本地 KB 原文丢失
