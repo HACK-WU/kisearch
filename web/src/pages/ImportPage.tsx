@@ -2364,7 +2364,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               >
                 {job.indexState === 'indexing'
                   ? '索引整理中…'
-                  : job.indexState === 'optimized' ? '索引已优化' : '索引整理未完成（可重试）'}
+                  : job.indexState === 'optimized'
+                    ? '索引已优化'
+                    : job.indexMaintenanceUnknown ? '索引整理结果未落定' : '索引整理未完成（可重试）'}
               </span>
             )}
           </div>
@@ -2408,8 +2410,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             )}
             {job?.indexState === 'available' && (
               <p className="ki-cell-sub" style={{ marginTop: 4 }}>
-                文档已可用；索引整理未完成（{job.indexMaintenanceDegraded?.degraded ?? 'error'}）——可在服务端执行
-                {' '}<code>ki index-optimize -s {job.scope}</code> 重试（不需要重新导入）。
+                {job.indexMaintenanceUnknown
+                  // 未知 ≠ 失败：不写 error、不给重跑命令，避免用户做无用功
+                  ? '文档已可用；索引整理结果未落定（可能仍在后台进行）——稍后刷新任务或再次导入即可确认，无需手动重跑。'
+                  : `文档已可用；索引整理未完成（${job.indexMaintenanceDegraded?.degraded ?? 'error'}）——可在服务端执行 `
+                    + `ki index-optimize -s ${job.scope} 重试（不需要重新导入）。`}
               </p>
             )}
             {showPartial && (

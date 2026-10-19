@@ -183,6 +183,8 @@ export interface ImportJob {
    */
   usable?: boolean;
   indexState?: 'indexing' | 'optimized' | 'available' | 'skipped';
+  /** 整理结果未落定（unknown ≠ 失败）：前端不得渲染成 error，也不引导重跑 */
+  indexMaintenanceUnknown?: boolean;
   indexMaintenance?: { scheduled: boolean; merged: boolean };
   indexMaintenanceDegraded?: { degraded?: string; reason?: string };
   indexReadiness?: {

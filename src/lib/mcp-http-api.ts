@@ -238,6 +238,12 @@ interface Job {
   indexState?: 'indexing' | 'optimized' | 'available' | 'skipped';
   indexMaintenance?: { scheduled: boolean; merged: boolean };
   indexMaintenanceDegraded?: { degraded?: string; reason?: string };
+  /**
+   * 整理**结果未落定**（等待窗口结束时 `last` 属于其他 scope / 本 scope 尚未落定）。
+   * ★ 与 `indexMaintenanceDegraded` 区分：后者是"确定失败/超时"，本字段是"不知道"。
+   *   前端据此显示「结果未落定」而不是「整理未完成（error）」，也不引导重跑命令。
+   */
+  indexMaintenanceUnknown?: boolean;
   indexReadiness?: IndexReadiness;
 }
 
@@ -1990,7 +1996,17 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
       } else {
         // 失败/超时/未知一律降级为「可用」——**不判失败、不丢数据、不引导重建**（护栏 3）
         job.indexState = 'available';
-        if (settled) job.indexMaintenanceDegraded = { degraded: settled.degraded, reason: settled.reason };
+        if (settled) {
+          job.indexMaintenanceDegraded = { degraded: settled.degraded, reason: settled.reason };
+        } else {
+          /**
+           * 等待窗口结束时 `last` 属于**其他 scope**（全局单飞队列里排在别的 scope 后面，
+           * 或本 scope 的整理还没落定）⇒ 我们**不知道**结果，不是"失败"。
+           * 此前这里不写 degraded，前端 fallback 成 'error'，把未知渲染成"整理未完成（error）"
+           * 并引导用户执行 `ki index-optimize`——可能根本不需要重跑。
+           */
+          job.indexMaintenanceUnknown = true;
+        }
         job.taskReporter.update({
           phase: 'available',
           ...(settled
@@ -2115,6 +2131,8 @@ async function handleImportStatus(res: http.ServerResponse, url: URL, authScopes
       indexState: job.indexState,
       indexMaintenance: job.indexMaintenance,
       ...(job.indexMaintenanceDegraded ? { indexMaintenanceDegraded: job.indexMaintenanceDegraded } : {}),
+      // 结果未落定（未知 ≠ 失败）：显式下发，前端据此不显示 "error" 与重跑引导
+      ...(job.indexMaintenanceUnknown ? { indexMaintenanceUnknown: true } : {}),
       ...(job.indexReadiness ? { indexReadiness: job.indexReadiness } : {}),
     },
   });
@@ -2268,13 +2286,18 @@ async function runRestoreJob(job: Job, args: RestoreJobArgs, requestConfig: KiCo
       job.indexState = 'indexing';
       job.taskReporter.update({ state: terminalState, phase: 'indexing' });
       await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
+      // ★ 先按 scope 过滤再判断（2026-10-19 自查）：`last` 可能属于并发整理的其他 scope，
+      //   此时旧写法 `if (settled)` 会写入一个空的 degraded 对象，前端 `?? 'error'` 又把它
+      //   渲染成「整理未完成（error）」——与导入路径同一类"未知说成失败"。
       const settled = getIndexMaintenanceState().last;
-      if (settled?.scope === args.scope && settled.ok) {
+      const mine = settled?.scope === args.scope ? settled : undefined;
+      if (mine?.ok) {
         job.indexState = 'optimized';
         job.taskReporter.update({ phase: 'optimized' });
       } else {
         job.indexState = 'available';
-        if (settled) job.indexMaintenanceDegraded = { degraded: settled.degraded, reason: settled.reason };
+        if (mine) job.indexMaintenanceDegraded = { degraded: mine.degraded, reason: mine.reason };
+        else job.indexMaintenanceUnknown = true;
         job.taskReporter.update({
           phase: 'available',
           ...(settled
@@ -2369,6 +2392,7 @@ async function handleJobStatus(res: http.ServerResponse, url: URL, authScopes: s
       indexState: job.indexState,
       indexMaintenance: job.indexMaintenance,
       ...(job.indexMaintenanceDegraded ? { indexMaintenanceDegraded: job.indexMaintenanceDegraded } : {}),
+      ...(job.indexMaintenanceUnknown ? { indexMaintenanceUnknown: true } : {}),
       ...(job.indexReadiness ? { indexReadiness: job.indexReadiness } : {}),
     },
   });

@@ -198,7 +198,10 @@ program
             const optimizeTimeoutMs = (requestConfig as unknown as {
               vector?: { optimize?: { timeoutMs?: number } };
             }).vector?.optimize?.timeoutMs ?? 600_000;
-            task.update({ state: partial ? 'partial' : 'succeeded', phase: maint?.scheduled ? 'indexing' : 'available' });
+            // ★ 未入队整理 ⇒ `skipped`（未触发），不再复用 `available`（那是"整理了但失败/超时"）。
+            //   全量 unchanged 时 `maint.scheduled=false`，此前会把阶段写成「可用（索引未整理）」，
+            //   与 web 端修复前的误报同源（2026-10-19）。
+            task.update({ state: partial ? 'partial' : 'succeeded', phase: maint?.scheduled ? 'indexing' : 'skipped' });
             if (maint?.scheduled) {
               // ★ 必须走 **stderr**：stdout 是 CLI 的机器可读契约（`runScriptJson` 对 stdout
               //   整体 `JSON.parse`，见 test/integration.test.ts:21-40）；本行与下面的 ✅/⚠️

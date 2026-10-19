@@ -12,6 +12,8 @@ import { createTaskReporter, type TaskReporter, type TaskState } from './task-re
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI 直连、HTTP 端同一实现）
 import { toParamSnapshot, toResultSnapshot, type ImportArgsLike } from './task-snapshot.js';
 import { refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
+// 导入收尾的索引阶段判定（与 web / CLI 直连同口径）
+import { whenIndexMaintenanceIdle, getIndexMaintenanceState } from './index-maintenance.js';
 
 export interface DaemonRpcOptions {
   onShutdown?: () => void;
@@ -521,6 +523,28 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         stats?: { succeeded?: number; vectorized?: number; partialCommitted?: number };
         rebuildVector?: { error?: string; errors?: Array<{ error?: string }>; stats?: { succeeded?: number; partialCommitted?: number } };
       } | undefined;
+      /**
+       * 索引阶段收尾（2026-10-19，与 web / CLI 直连同口径）。
+       * 此前 phase 只跟随进度事件：**全部文件在 scan 阶段被跳过**（全量 unchanged / 全重复）
+       * 时永远走不到 vectorize/persist，台账 phase 就停在 `scan`，而状态已是"已完成"。
+       * 这里按 `result.indexMaintenance` 收尾：未入队 ⇒ skipped；入队 ⇒ 等落定再定 optimized/available。
+       */
+      if (req.operation === 'import' || req.operation === 'rebuild-vector') {
+        // 两种结果的挂载位置不同：import 在顶层，rebuild 在 `rebuildVector` 下
+        const asImport = outcome.result as { indexMaintenance?: { scheduled?: boolean } } | undefined;
+        const asRebuild = outcome.result as { rebuildVector?: { indexMaintenance?: { scheduled?: boolean } } } | undefined;
+        const maint = asImport?.indexMaintenance ?? asRebuild?.rebuildVector?.indexMaintenance;
+        if (maint?.scheduled) {
+          job.taskReporter?.update({ phase: 'indexing' });
+          await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
+          const last = getIndexMaintenanceState().last;
+          job.taskReporter?.update({
+            phase: last?.scope === job.scope && last.ok ? 'optimized' : 'available',
+          });
+        } else {
+          job.taskReporter?.update({ phase: 'skipped' });
+        }
+      }
       job.taskReporter?.finish(taskState, {
         error: job.error?.message ?? resultValue?.error ?? resultValue?.errors?.[0]?.error
           ?? resultValue?.rebuildVector?.error ?? resultValue?.rebuildVector?.errors?.[0]?.error,
