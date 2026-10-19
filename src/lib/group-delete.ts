@@ -485,8 +485,12 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
     .filter(Boolean);
   // 组级路径向量（ki-path）的 docId 由内容 + scope + tag 决定，可安全重算删除；
   // ki-relation 向量只含 relation 名、跨组共享，不能按组删除（保留）。
-  const pathIds = plan.willDelete.groups.map((group) =>
-    generateDocId(buildGroupPathContent(group), scope, 'ki-path'));
+  // 仅当该组确有内容向量时才重算路径向量 id：避免在纯树/FTS scope 上
+  // 为一堆不存在的 id 初始化向量引擎（会让无向量的测试/CLI 卡在引擎启动）。
+  const pathIds = relationIds.length > 0
+    ? plan.willDelete.groups.map((group) =>
+      generateDocId(buildGroupPathContent(group), scope, 'ki-path'))
+    : [];
   const vectorIds = [...new Set([...relationIds, ...pathIds])] as string[];
   const ftsIds = [...new Set(relations.flatMap((r) => r.ftsIds ?? []))];
 
