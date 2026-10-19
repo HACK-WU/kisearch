@@ -2917,6 +2917,36 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-md-preview--tall { height: auto; min-height: 480px; }
 .ki-form-textarea--tall { height: auto; min-height: 480px; }
 
+/* 知识写入右卡（正文）跟随左卡高度（2026-10-19）
+   左侧「文档信息」字段多、高度随内容增长（实测 714px），右侧正文原先只有一个
+   固定 min-height:480 的 textarea（整卡 587px）⇒ 两卡底部差 127px，视觉上右列
+   「短了一截」，正文区比实际可用的空间小。这里让右卡在 grid 行内 stretch：
+   行高由左卡决定 → 右卡底边与左卡对齐，卡头与内边距之外的高度全部给编辑区。
+   仅作用于 .ki-write-split__editor（该 block 只有写入页使用），不影响其他
+   复用 .ki-card / .ki-card__body 的页面。 */
+.ki-write-split__editor { align-self: stretch; display: flex; flex-direction: column; }
+.ki-write-split__editor > .ki-card__body {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+}
+.ki-write-split__editor .ki-md-editor {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+}
+.ki-write-split__editor .ki-form-textarea--tall {
+  flex: 1 1 auto; height: auto; min-height: 480px;
+}
+/* 预览区必须用 flex-basis:0：它按内容撑高，若用 flex-basis:auto（默认），长正文会把整张
+   右卡顶到 3132px、连 grid 行一起撑高，左卡不动 ⇒ 又错位（实测）。basis 0 + 有 min-height
+   兜底：短内容撑满可用高度，长内容内部滚动，单列（无兄弟卡可比）仍有 480 下限。 */
+.ki-write-split__editor .ki-md-preview--tall {
+  flex: 1 1 0; height: auto; min-height: 480px;
+}
+/* 两列时正文高度由左卡驱动（对齐意图）：此时拖拽 textarea 右下角会把右卡连同
+   grid 行一起撑高，左卡不动 ⇒ 立刻又错位（实测拖到 780px 时右卡 884 / 左卡 714）。
+   单列（<960）没有对齐约束，保留原有 resize: vertical 行为。 */
+@media (min-width: 960px) {
+  .ki-write-split__editor .ki-form-textarea--tall { resize: none; }
+}
+
 /* 全局向量状态与任务中心 */
 .ki-global-task-link {
   display: inline-flex; align-items: center; gap: 8px; height: 32px; max-width: 280px;
@@ -2967,7 +2997,9 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-summary span { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-task-summary--failure b { color: var(--ki-color-danger); }
 .ki-task-summary--partial b { color: var(--ki-color-warning); }
-/* 两卡等高（默认 stretch）：原先 align-items:start 让左右卡各按内容高，无任务时右卡比左卡高一截（用户反馈） */
+/* 两卡等高（默认 stretch）：原先 align-items:start 让左右卡各按内容高，无任务时右卡比左卡高一截（用户反馈）
+   ★ 右栏例外见 `.ki-task-workspace > .ki-task-detail`（sticky + align-self: start）——
+     任务多时 stretch 会把右卡一并拉到数千像素，别再按"等高"把它改回去。 */
 .ki-task-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: stretch; }
 .ki-task-list-card { min-width: 0; }
 .ki-task-filters { display: flex; align-items: center; gap: 4px; }
@@ -2992,6 +3024,25 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-state--cancelled, .ki-task-state--unknown { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
 .ki-task-detail { min-width: 0; padding: 18px 20px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-lg); background: var(--ki-color-surface); }
 .ki-task-detail--empty { min-height: 220px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--ki-color-text-subtle); }
+/* 右栏固定尺寸 + 跟随滚动（2026-10-19，用户反馈「任务越多，右边『选择一个任务』卡片怎么也越高」）。
+   实测（50 条任务，1440×900）：左右两卡被 `.ki-task-workspace` 的 `align-items: stretch` 拉到
+   4054px 等高；空态 `justify-content: center` 于是把「选择一个任务」推到 top 2208 ——
+   首屏（900）完全空白，滚到列表中间 top 仍为 1008，滚到底已是 -1159，用户全程碰不到它。
+   做法与 `.ki-import-layout > .ki-import-track`（导入页右轨）同源：
+     · align-self: start —— 右栏按内容高，不再跟着列表长（＝"卡片大小固定"）
+     · position: sticky + top: 8 —— 滚动时跟随；包含块是整行高（列表卡），因此能一路粘住
+     · max-height + overflow-y —— 详情字段多时在列内滚动，不撑出视口（对齐导入页兜底）
+   窄屏（<960，单列）不启用：右栏排在列表下方，粘住只会遮挡列表。 */
+@media (min-width: 960px) {
+  .ki-task-workspace > .ki-task-detail {
+    position: sticky;
+    top: 8px;
+    align-self: start;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
 .ki-task-detail__head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
 .ki-task-detail__head h2 { margin-top: 4px; font-size: 17px; font-weight: 680; letter-spacing: -0.025em; }
 .ki-task-detail__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0; }

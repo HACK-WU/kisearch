@@ -379,8 +379,8 @@ export function WritePage(): JSX.Element {
         </div>
         </div>
 
-        {/* 右：正文编辑卡（编辑 / 预览双态） */}
-        <div className="ki-card">
+        {/* 右：正文编辑卡（编辑 / 预览双态）—— 高度跟随左卡（见 ki-write-split__editor） */}
+        <div className="ki-card ki-write-split__editor">
           <div className="ki-card__head">
             <span className="ki-panel-heading">
               <span className="ki-panel-kicker">MARKDOWN</span>
