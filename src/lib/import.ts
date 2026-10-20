@@ -72,6 +72,8 @@ import {
 import { resolveImportBudget, preflightImportBudget, budgetViolationMessage, IMPORT_BUDGET_EXCEEDED, type ImportBudget } from './import-budget.js';
 // REQ-20261019-002：疑似重复判据的单一真相（本模块**不得**反向 import import-preflight.ts，会成环）
 import { collectDuplicateHits, type DuplicateHit } from './duplicate-index.js';
+// REQ-20261019-001：目录导入后的清理候选（纯计算，见 import-prune.ts 头注释的三条判定前提）
+import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -227,6 +229,11 @@ export interface ImportResult {
   duplicatesSkipped: ImportDuplicateSkipItem[];
   /** 跳过明细被截断（完整条数见 `stats.files.duplicatesSkipped`） */
   duplicatesSkippedTruncated: boolean;
+  /**
+   * REQ-20261019-001：目录导入后的「库中存在、本次目录已没有」候选（双闸门 + token）。
+   * 仅 `pruneStale` 开启时存在；不开启时**不出现该字段**（既有消费方零影响）。
+   */
+  prune?: ImportPrunePlan;
   groups: string[];
   source: GroupIndexSource;
   /**
@@ -271,6 +278,27 @@ export interface HandleDirectImportArgs {
    * 剔除后为空 → 抛 `ALL_FILES_DUPLICATES`（fail-loud，不得静默成功 0 篇）。
    */
   skipDuplicates?: boolean;
+  /**
+   * REQ-20261019-001：本次上传的选择方式。`'dir'` 才会计算清理候选；
+   * `'files'` / `'mixed'` 一律不产候选（路径口径与目录导入不一致）。
+   *
+   * ★ **仅 Web 路径使用**：CLI（`src/import.ts`）与 daemon RPC 都不传 `pickMode`/`pruneStale`，
+   *   因而恒不产候选；缺省 `undefined` 同样落在 `NOT_DIR_MODE` 的 graceful 分支
+   *   （不产候选、不报错），既有导入行为不变。
+   */
+  pickMode?: 'dir' | 'files' | 'mixed';
+  /** REQ-20261019-001：是否计算清理候选（默认 false；缺省时 ImportResult 无 `prune` 字段） */
+  pruneStale?: boolean;
+  /**
+   * 上传阶段失败的文件 rel：视为「本次有」，永不进候选（R11 体验路径）。
+   *
+   * ⚠️ 当前**无生产调用方**：Web 前端不收集失败清单，上传不完整时由 {@link uploadIncomplete}
+   * 硬闸门整次关掉清理；本字段留给脚本/未来的「只排除失败文件、其余照常清理」路径。
+   * 若某调用方给 run 传了它，`/api/import/prune` 必须传同一份，否则候选集偏大 → token 恒失配。
+   */
+  preserveRels?: string[];
+  /** 上传会话存在失败批次/文件且无失败清单 —— 硬门槛，直接不产候选（R11 安全路径） */
+  uploadIncomplete?: boolean;
   /** 文档级自定义标签（逗号分隔多个）。无论是否向量化均持久化到 relation.tags（供 rebuild-vector/restore 恢复）；向量化时额外为每个导入文件每个 tag 写一条内容向量 */
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
@@ -731,6 +759,27 @@ async function handleDirectImportUnlocked(
   if (skippedNonMd.length > 0) {
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
   }
+
+  // REQ-20261019-001：清理候选（库中存在、本次目录已没有）。在**任何早退之前**算一次，
+  // 三条 return 路径统一带出（早退①"整批未变"恰恰是最需要清理的场景）。
+  // ★ 必须用 `files`（全量扫描）而不是 filesForImport / budgetFiles：skipDuplicates 剔除、
+  //   预算剔除、增量未变的文件虽然没被写入，但仍"在本次目录里"，误用会把它们判成本地已删。
+  const prune: ImportPrunePlan | undefined = args.pruneStale
+    ? planImportPrune({
+      scope,
+      group,
+      scannedRels: files,
+      preserveRels: args.preserveRels,
+      importedGroups: [...new Set(files.map((rel) => resolveGroupForSource(group, rel, scope)))],
+      precheck: {
+        pruneStale: true,
+        pickMode: args.pickMode,
+        subsetRetry: Array.isArray(args.onlyRelPaths) && args.onlyRelPaths.length > 0,
+        uploadIncomplete: args.uploadIncomplete === true,
+        scannedCount: files.length,
+      },
+    })
+    : undefined;
 
   // REQ-20261019-002：跳过疑似重复（内容一致但 sourcePath 不同）。
   // 判据只有一份（duplicate-index.ts），且必须**先于预算预检**剔除：
@@ -1196,6 +1245,7 @@ async function handleDirectImportUnlocked(
       conflicts,
       duplicatesSkipped: dupSkipDetail,
       duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+      ...(prune ? { prune } : {}),
       groups: [],
       source: { dir: sourceDir, chunkSize, chunkOverlap },
     };
@@ -1239,6 +1289,7 @@ async function handleDirectImportUnlocked(
         conflicts,
         duplicatesSkipped: dupSkipDetail,
         duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+        ...(prune ? { prune } : {}),
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
       };
@@ -1995,6 +2046,7 @@ async function handleDirectImportUnlocked(
     conflicts,
     duplicatesSkipped: dupSkipDetail,
     duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+    ...(prune ? { prune } : {}),
     groups: [...kbResult.groups].sort(),
     source,
     /** S-02：只报告"是否入队"，不等整理完成 */

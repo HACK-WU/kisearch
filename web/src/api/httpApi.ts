@@ -443,8 +443,93 @@ export async function runImport(args: {
    * 缺省不传 = 与改前行为一致；由服务端按同一判据重算（前端清单只用于展示）。
    */
   skipDuplicates?: boolean;
+  /**
+   * REQ-20261019-001：本次选择方式。只有 `'dir'` 才会计算清理候选；
+   * `'files'` / `'mixed'`（目录与文件混合）一律不产候选。
+   */
+  pickMode?: 'dir' | 'files' | 'mixed';
+  /** REQ-20261019-001：导入后是否计算「库中存在、本次目录已没有」的候选（默认关） */
+  pruneStale?: boolean;
+  /** 上传阶段失败的文件 rel（视为「本次有」，永不进候选）；仅在所有批次成功应答时提供 */
+  preserveRels?: string[];
 }): Promise<RunImportResponse> {
   return req<RunImportResponse>('/api/import/run', {
+    method: 'POST',
+    body: JSON.stringify(args),
+  });
+}
+
+// ─── REQ-20261019-001：清理候选 ────────────────────────────
+
+/** 与后端 `ImportPrunePlan` 逐字段一致的镜像（后端为准，改动需同步两端） */
+export interface ImportPruneCandidate {
+  group: string;
+  relation: string;
+  sourcePath: string;
+  /** 所属 group 本次没有任何文件落入（前端默认不勾选） */
+  untouched: boolean;
+}
+
+export interface ImportPrunePlan {
+  scope: string;
+  scopeGroups: number;
+  libDocs: number;
+  judicable: number;
+  scanned: number;
+  overlap: number;
+  coordRatio: number;
+  deleteRatio: number;
+  /** 删除占比超 20%：不关闭功能，但必须强制二次确认 */
+  warn: boolean;
+  overLimit: boolean;
+  total: number;
+  items: ImportPruneCandidate[];
+  truncated: boolean;
+  unableCount: number;
+  untouchedGroups: string[];
+  token?: string;
+  skipReason?: string;
+  skipDetail?: string;
+}
+
+export interface PruneImportArgs {
+  scope: string;
+  /** 与导入时同口径；缺省 = 全 scope */
+  group?: string;
+  /** 首选：服务端重扫同一暂存目录（与 run 同源）。与 `scannedRels` 至少给一个 */
+  uploadId?: string;
+  /** 降级通道：仅 CLI/脚本使用 */
+  scannedRels?: string[];
+  /** 必须与 run 时一致（上传失败的文件视为「本次有」），否则 token 恒失配 */
+  preserveRels?: string[];
+  /** `dryRun` 时可省 */
+  token?: string;
+  /** true = 只重算并返回新清单与 token，不删除 */
+  dryRun?: boolean;
+  /** **必填**（fail-safe）：只删这些 `{group, relation}`；`[]` 不删任何东西 */
+  selected: { group: string; relation: string }[];
+}
+
+export interface PruneImportResponse {
+  ok: boolean;
+  scope?: string;
+  dryRun?: boolean;
+  /** 候选已空（重复点击 / 上次已删完），不是错误 */
+  allDone?: boolean;
+  requested?: number;
+  selected?: number;
+  deleted?: number;
+  skipped?: { group: string; relation: string; reason: string }[];
+  failed?: { group: string; relation: string; reason: string }[];
+  plan?: ImportPrunePlan;
+  code?: string;
+  error?: string;
+  skipReason?: string;
+  skipDetail?: string;
+}
+
+export async function pruneImport(args: PruneImportArgs): Promise<PruneImportResponse> {
+  return req<PruneImportResponse>('/api/import/prune', {
     method: 'POST',
     body: JSON.stringify(args),
   });

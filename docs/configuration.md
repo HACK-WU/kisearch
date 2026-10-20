@@ -182,7 +182,7 @@ scope → KB 目录映射。每个 scope 可独立配置数据来源与导入/�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `kbDir` | `string` | 无 | KB **基础目录**。程序自动拼接 `kb/{scope}` 子目录（如 `kbDir=/data/kb`、scope=monitor → 实际数据目录 `/data/kb/kb/monitor`），**不要**在 `kbDir` 里带上 scope 名。未配置时回退到 `dataDir/{scope}` |
-| `wikiSync` | `object` | — | wiki 写回/回收站的源目录定位（`sourceDir`）与开关（`enabled`）|
+| `wikiSync` | `object` | — | wiki 写回目录的源目录定位（`sourceDir`）与开关（`enabled`）；与删除无关（删除不进回收站）|
 | `clean` | `object` | — | 数据清洗配置 |
 | `import` | `object` | — | 导入配置 |
 

@@ -66,7 +66,7 @@ interface RelationsCache {
   updatedAt: string | null;
 }
 
-interface DeleteResult {
+export interface DeleteResult {
   relation: string;
   group: string;
   deleted: boolean;
@@ -432,12 +432,12 @@ function findWikiFile(scope: string, group: string, relation: string): string | 
 
 // ─── 批量删除 ───
 
-interface BatchDeleteItem {
+export interface BatchDeleteItem {
   group: string;
   relation: string;
 }
 
-type BatchDeleteResult = {
+export type BatchDeleteResult = {
   ok: boolean;
   scope?: string;
   results: DeleteResult[];

@@ -36,6 +36,7 @@ import {
   DEFAULT_MAX_ASSET_SIZE,
   DEFAULT_MAX_FILE_SIZE_BYTES,
   handleDirectImport,
+  collectMarkdownFiles,
   type HandleDirectImportArgs,
   type ImportResult,
 } from './import.js';
@@ -50,7 +51,10 @@ import {
 import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus, summarizeImportIncomplete, uploadIdFromSourceDir } from './import-retry.js';
 // Group 路径校验：preflight 与 run 同口径（debug 2026-10-19 的 R1 行动项）
-import { isSafeGroupPath } from './import-path.js';
+import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
+// REQ-20261019-001：清理候选（与 import.ts 同源计算，保证「看到的 = 删掉的」）
+import { planImportPrune, verifyPruneToken } from './import-prune.js';
+import { executeBatchDelete } from '../delete-relation.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -126,10 +130,16 @@ interface UploadSession {
   jobId?: string;
   errors?: { name: string; error: string }[];
   /**
-   * REQ-20261019-002：run 参数快照（仅存影响幂等复用判据的最小集合）。
-   * 缺失时视为 `{ skipDuplicates: false }`（兼容升级前的旧 session）。
+   * run 参数快照（仅存影响后续判定的最小集合）。
+   *
+   * - REQ-20261019-002：`skipDuplicates` 影响「同一 uploadId 能否幂等复用」；
+   *   缺失时视为 `{ skipDuplicates: false }`（兼容升级前的旧 session）。
+   * - REQ-20261019-001：`pickMode` / `group` 是 `/api/import/prune` 重算候选的**同源输入**。
+   *   `group` 必须在 run 时落盘（设计 S02 N-2）：prune 若取前端表单实时值，用户导入后
+   *   改过输入框就会让作用域漂移 → 重算候选偏离 → 恒 409。
+   *   `group: ''` 是合法值（= 不带 group 前缀），与「快照里没有该键」语义不同。
    */
-  params?: { skipDuplicates?: boolean };
+  params?: { skipDuplicates?: boolean; pickMode?: 'dir' | 'files' | 'mixed'; group?: string };
 }
 
 function readUploadSession(dir: string): UploadSession | null {
@@ -704,6 +714,7 @@ export async function handleApiRequest(
       return;
     }
     if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig));
+    if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
     if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
@@ -1593,6 +1604,31 @@ async function handleImportRun(
     return;
   }
   const requestedSkipDuplicates = body.skipDuplicates === true;
+  // ── REQ-20261019-001：清理候选参数 ────────────────────────────
+  // body 的既有内联类型未声明这三个字段（避免为向后兼容大改），统一按 unknown 收窄。
+  const bodyExtra = body as unknown as Record<string, unknown>;
+  const rawPickMode = bodyExtra.pickMode;
+  if (rawPickMode !== undefined && rawPickMode !== 'dir' && rawPickMode !== 'files' && rawPickMode !== 'mixed') {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: "pickMode 必须是 'dir' / 'files' / 'mixed'" });
+    return;
+  }
+  // 缺省回落到上传时写入的参数快照（刷新恢复路径拿不到前端表单值）
+  const requestedPickMode = (rawPickMode ?? session.params?.pickMode) as 'dir' | 'files' | 'mixed' | undefined;
+  const requestedPruneStale = bodyExtra.pruneStale === true;
+  if (requestedPruneStale && requestedPickMode !== 'dir') {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'PRUNE_NOT_DIR_MODE',
+      error: '仅「选择目录」上传时可用清理功能（目录与文件混合选择也不支持）',
+    });
+    return;
+  }
+  // 路径型入参复用既有净化（拒绝绝对路径 / `..` / 超长），与 onlyRelPaths 同口径
+  const requestedPreserveRels = sanitizeOnlyRelPaths(bodyExtra.preserveRels);
+  // R11 硬门槛：上传会话有失败记录或批次不全 —— 说明「本次目录里的文件」不完整，
+  // 此时任何差集都可能把"没传上来"误判成"本地已删"。
+  const uploadIncomplete = (session.errors?.length ?? 0) > 0
+    || (session.batchCount !== undefined && (session.completedBatches?.length ?? 0) < session.batchCount);
   if (session.jobId && !isSubsetRetry) {
     const previousJob = jobs.get(session.jobId);
     if (!previousJob) {
@@ -1631,12 +1667,16 @@ async function handleImportRun(
   if (rejectIfImportBusy(res, requestConfig, scope)) return;
 
   const job = createJob(scope, 'import', requestConfig);
-  // REQ-20261019-002：写入参数快照，供后续 run 判断"是否可幂等复用"
+  // 本次**实际生效**的 group（显式值 > 子集重试的上次快照 > 空）；只算一处，
+  // 既用于 run 入参，也写进 session 快照供 `/api/import/prune` 同源重算（设计 S02 N-2）。
+  const effectiveGroup = requestedGroup || retryParams?.group || '';
+  // REQ-20261019-002：写入参数快照，供后续 run 判断"是否可幂等复用"；
+  // REQ-20261019-001：`pickMode` / `group` 供 prune 重算候选时对齐口径。
   session = {
     ...session,
     state: 'importing',
     jobId: job.id,
-    params: { skipDuplicates: requestedSkipDuplicates },
+    params: { skipDuplicates: requestedSkipDuplicates, pickMode: requestedPickMode, group: effectiveGroup },
     updatedAt: Date.now(),
   };
   try { writeUploadSession(sourceDir, session); } catch (error) {
@@ -1650,7 +1690,7 @@ async function handleImportRun(
     skipDuplicates: requestedSkipDuplicates,
     // group 缺省 → undefined → handleDirectImport 按推断落点（与 CLI 语义一致，REQ-01）；
     // 不再用 scope 兜底（子目录会落 <scope>/<sub>，与 CLI 缺省落 <sub> 不一致）
-    group: requestedGroup || retryParams?.group || undefined,
+    group: effectiveGroup || undefined,
     chunkSize: body.chunkSize ?? retryParams?.chunkSize,
     chunkOverlap: body.chunkOverlap ?? retryParams?.chunkOverlap,
     vector: body.vector ?? retryParams?.vector,
@@ -1659,12 +1699,213 @@ async function handleImportRun(
     conflictSuffix: body.conflictSuffix ?? retryParams?.conflictSuffix,
     // R2：「重试未完成 N 篇」只处理名单内文件（已完成文件不重传/不重算 embedding）
     ...(isSubsetRetry ? { onlyRelPaths: retryOnly } : {}),
+    // REQ-20261019-001：清理候选（子集重试场景由 import.ts 的 precheck 再拦一次）
+    pickMode: requestedPickMode,
+    pruneStale: requestedPruneStale && !isSubsetRetry,
+    preserveRels: requestedPreserveRels.length > 0 ? requestedPreserveRels : undefined,
+    uploadIncomplete,
     // S0-3：Web 端不提供预算覆盖（预算来自 scope 配置/默认值）；
     // 超限时 IMPORT_BUDGET_EXCEEDED 经 job 终态 error 透出
     budget: undefined,
   }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
+}
+
+// ─── POST /api/import/prune（REQ-20261019-001）──────────────────
+/**
+ * 删除「库中存在、本次目录已没有」的候选文档。
+ *
+ * 关键约束：
+ *  - **服务端重算**：不信任前端清单。`uploadId` 优先（重扫同一暂存目录，与 run 完全同源），
+ *    缺省回退到净化后的 `scannedRels`。两种来源都会重算 `pruneToken`，对不上即 409。
+ *  - **`selected` 必填**：删除类接口不得用「缺省 = 全删」（fail-safe）。
+ *  - **候选已空 → 200 allDone**：重复点击 / 上一次已删完不是错误。
+ *  - `dryRun` 为查询语义：只重算并返回新清单与 token，不删除；闸门不通过也返回 200 + skipReason。
+ *  - 删除复用 `executeBatchDelete`（自带 scope 写锁、草稿卫兵）；wiki 源文件按 `sourcePath`
+ *    物理删除，**无回收站**。
+ *
+ * 与 run 必须同源的**三个输入**（任一不同源 → 候选集漂移 → token 恒失配，或误判「本地已删」）：
+ *  1. `scannedRels`：run 用 scope 配置的 `import.extensions` 扫描，这里必须传同一白名单；
+ *  2. `group`：取 run 时写入的 `session.params.group`（设计 S02 N-2），**不用前端表单实时值**
+ *     —— 用户可能在导入后改过输入框，用表单值会让作用域漂移；
+ *  3. `preserveRels`：上传失败的文件要并入有效集合。
+ */
+async function handleImportPrune(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as Record<string, unknown> | undefined;
+  const scopeRaw = typeof body?.scope === 'string' ? body.scope : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 scope' });
+    return;
+  }
+  // 越权判据与全站其余 handler 一致：`scopeAllowed` 含 `ALL_SCOPES` 通配
+  //（全权 `--token` / `KI_MCP_TOKEN` 的授权集合就是 `['all']`）。直接 `includes(scope)`
+  // 会把这类 Token 全判成越权 → 恒 403（code review Q1）。
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/import/prune');
+    return;
+  }
+  const scope = resolveScope(requestConfig, scopeRaw);
+  const dryRun = body?.dryRun === true;
+  const token = typeof body?.token === 'string' ? body.token : '';
+  const selectedRaw = body?.selected;
+  if (!dryRun && !token) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 token' });
+    return;
+  }
+  // `dryRun` 是查询语义，不需要勾选清单；真正删除时 `selected` 必填（fail-safe）
+  if (!dryRun && !Array.isArray(selectedRaw)) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 selected（删除类接口不允许缺省为全部候选）' });
+    return;
+  }
+  const selected: { group: string; relation: string }[] = [];
+  const selectedSeen = new Set<string>();
+  for (const item of Array.isArray(selectedRaw) ? selectedRaw : []) {
+    const entry = item as { group?: unknown; relation?: unknown } | null;
+    const group = typeof entry?.group === 'string' ? entry.group.trim() : '';
+    const relation = typeof entry?.relation === 'string' ? entry.relation.trim() : '';
+    if (!group || !relation) continue;
+    const key = `${group}\u0000${relation}`;
+    if (selectedSeen.has(key)) continue;
+    selectedSeen.add(key);
+    selected.push({ group, relation });
+  }
+
+  // ── 还原「本次目录有哪些文件」：uploadId 优先，其次净化后的 scannedRels ──
+  const uploadId = typeof body?.uploadId === 'string' ? body.uploadId.trim() : '';
+  let scannedRels: string[] = sanitizeOnlyRelPaths(body?.scannedRels);
+  /** run 时写入的上传会话参数快照（`group` / `pickMode`）——与 body 同名字段并存时**以快照为准** */
+  let sessionParams: UploadSession['params'];
+  if (uploadId) {
+    // 与 `/api/import/run` 同口径：UUID 先过格式校验，避免把任意子路径当 uploadId
+    if (!UPLOAD_ID_RE.test(uploadId)) {
+      sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '非法 uploadId' });
+      return;
+    }
+    const dir = path.join(getUploadsRoot(), uploadId);
+    const root = path.normalize(getUploadsRoot());
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory() || !path.normalize(dir).startsWith(root + path.sep)) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'PRUNE_SOURCE_UNAVAILABLE',
+        error: '上次导入的暂存目录已清理（或 uploadId 非法），请重新导入一次后重试',
+      });
+      return;
+    }
+    if (!bindUploadScope(dir, scope)) {
+      sendJson(res, 400, { ok: false, error: 'uploadId 与当前 scope 不匹配' });
+      return;
+    }
+    // 会话快照损坏（JSON 结构不对）不应让删除接口 500：降级为「无快照」，由 body 兜底
+    try { sessionParams = readUploadSession(dir)?.params; } catch { sessionParams = undefined; }
+    // ★ 与 run 同源：run 是 `collectMarkdownFiles(sourceDir, extensions)`，白名单来自
+    //   `scopes.<scope>.import.extensions`。这里若用默认 `.md`，放宽过扩展名（如 `.mdx`）
+    //   的 scope 会把**仍在本地**的那批文件全判成「已删除」（code review Q2）。
+    const extensions = getScopeImportConfig(requestConfig, scope)?.extensions ?? DEFAULT_EXTENSIONS;
+    scannedRels = collectMarkdownFiles(dir, extensions).files;
+  }
+
+  // group 口径（设计 S02 N-2）：优先 run 时的快照；仅快照缺失（升级前的旧会话 / 脚本调用）时回落 body。
+  const bodyGroup = typeof body?.group === 'string' ? body.group.trim() : '';
+  const group = typeof sessionParams?.group === 'string' ? sessionParams.group : bodyGroup;
+  if (!isSafeGroupPath(group)) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
+    return;
+  }
+
+  if (scannedRels.length === 0) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'PRUNE_SOURCE_UNAVAILABLE',
+      error: '缺少本次扫描的文件集合（uploadId 已失效且未提供 scannedRels），请重新导入一次后重试',
+    });
+    return;
+  }
+
+  const importedGroups = [...new Set(scannedRels.map((rel) => resolveGroupForSource(group, rel, scope)))];
+  // ★ 必须与 run 时同口径：run 用 preserveRels 把「上传失败的文件」并入有效集合，
+  //   重算若漏掉它，候选集必然变大 → token 恒失配（code reviewed #1）。
+  const preserveRels = sanitizeOnlyRelPaths(body?.preserveRels);
+
+  try {
+    const plan = planImportPrune({
+      scope,
+      group,
+      scannedRels,
+      preserveRels,
+      importedGroups,
+      precheck: { pruneStale: true, pickMode: 'dir', subsetRetry: false, uploadIncomplete: false, scannedCount: scannedRels.length },
+    });
+
+    if (dryRun) {
+      sendJson(res, 200, { ok: true, scope, dryRun: true, plan });
+      return;
+    }
+    if (plan.skipReason) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'PRUNE_CHECK_DISABLED',
+        error: plan.skipDetail ?? '清理条件不满足',
+        skipReason: plan.skipReason,
+        skipDetail: plan.skipDetail,
+      });
+      return;
+    }
+    if (plan.total === 0) {
+      sendJson(res, 200, { ok: true, scope, allDone: true, requested: 0, selected: 0, deleted: 0, skipped: [], failed: [] });
+      return;
+    }
+    if (plan.overLimit) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'PRUNE_OVER_LIMIT',
+        error: `候选 ${plan.total} 篇，超过单次上限：请用 CLI 清理，或先在本地恢复部分文件后重新导入`,
+      });
+      return;
+    }
+    if (!verifyPruneToken(plan, token)) {
+      sendJson(res, 409, {
+        ok: false,
+        code: 'PRUNE_TOKEN_STALE',
+        error: '库在这期间发生了变化，请刷新候选清单后重试',
+      });
+      return;
+    }
+
+    // 只删「重算后仍在候选集内」的项；其余归入 skipped（幂等，不报错）
+    const candidateKeys = new Set(plan.items.map((item) => `${item.group}\u0000${item.relation}`));
+    const toDelete: { group: string; relation: string }[] = [];
+    const skipped: { group: string; relation: string; reason: string }[] = [];
+    for (const item of selected) {
+      if (candidateKeys.has(`${item.group}\u0000${item.relation}`)) toDelete.push(item);
+      else skipped.push({ ...item, reason: 'not-in-candidates' });
+    }
+    if (toDelete.length === 0) {
+      sendJson(res, 200, { ok: true, scope, requested: plan.total, selected: 0, deleted: 0, skipped, failed: [] });
+      return;
+    }
+
+    const batch = await executeBatchDelete(scope, toDelete);
+    const failed = batch.results
+      .filter((item) => !item.deleted)
+      .map((item) => ({ group: item.group, relation: item.relation, reason: item.reason ?? '删除失败' }));
+    sendJson(res, 200, {
+      ok: true,
+      scope,
+      requested: plan.total,
+      selected: toDelete.length,
+      deleted: batch.results.filter((item) => item.deleted).length,
+      skipped,
+      failed,
+    });
+  } catch (err) {
+    sendJson(res, 500, { ok: false, code: 'PRUNE_FAILED', error: `清理失败：${(err as Error).message}` });
+  }
 }
 
 // ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────
@@ -1903,6 +2144,14 @@ interface RunImportArgs {
   onlyRelPaths?: string[];
   /** REQ-20261019-002：跳过疑似重复（真实判定在 `handleDirectImport` 内） */
   skipDuplicates?: boolean;
+  /** REQ-20261019-001：本次选择方式（'dir' 才会计算清理候选） */
+  pickMode?: 'dir' | 'files' | 'mixed';
+  /** REQ-20261019-001：计算清理候选开关 */
+  pruneStale?: boolean;
+  /** REQ-20261019-001：上传失败的文件 rel（视为「本次有」） */
+  preserveRels?: string[];
+  /** REQ-20261019-001：上传不完整且无失败清单 —— 硬门槛 */
+  uploadIncomplete?: boolean;
   /** S0-3：Web 端预算覆盖入口（当前不暴露给前端，预留保持 CLI/Web 同构） */
   budget?: HandleDirectImportArgs['budget'];
 }
@@ -1932,6 +2181,11 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
         onlyRelPaths: args.onlyRelPaths,
         // REQ-20261019-002：跳过疑似重复（缺省 undefined = 不计算跳过集，行为与改前一致）
         skipDuplicates: args.skipDuplicates,
+        // REQ-20261019-001：清理候选（缺省 undefined = 不计算，ImportResult 无 prune 字段）
+        pickMode: args.pickMode,
+        pruneStale: args.pruneStale,
+        preserveRels: args.preserveRels,
+        uploadIncomplete: args.uploadIncomplete,
         budget: args.budget,
         // 任务归属：写进未完成清单，供任务中心按任务校验重试归属（HTTP 路径）
         jobId: job.id,

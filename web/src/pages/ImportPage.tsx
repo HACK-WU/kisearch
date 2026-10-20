@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, activeImportCount } from '@/api/tasksApi';
-import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPrunePlan } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
@@ -139,6 +139,18 @@ function stripTopSegment(name: string): string {
   const normalized = name.replaceAll('\\', '/');
   const slash = normalized.indexOf('/');
   return slash < 0 ? normalized : normalized.slice(slash + 1);
+}
+
+/**
+ * REQ-20261019-001：本次选择方式（服务端据此决定是否计算清理候选）。
+ * 目录 + 文件混合时返回 `'mixed'` —— 目录部分被 `stripTopSegment` 剥了顶层段、文件部分没有，
+ * 路径口径不一致，差集不可信，因此禁止清理。
+ */
+function derivePickMode(selections: PendingSelection[]): 'dir' | 'files' | 'mixed' {
+  const hasDir = selections.some((item) => item.kind === 'directory');
+  const hasFile = selections.some((item) => item.kind === 'file');
+  if (hasDir && hasFile) return 'mixed';
+  return hasDir ? 'dir' : 'files';
 }
 
 function normalizeRelativePath(value: string): string {
@@ -452,6 +464,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [vector, setVector] = useState(true);
   const [group, setGroup] = useState('');
   const [conflictMode, setConflictMode] = useState<ImportConflictMode>(DEFAULT_CONFLICT_MODE);
+  // REQ-20261019-001：目录同步清理（默认关；仅目录导入可用）
+  const [pruneSyncEnabled, setPruneSyncEnabled] = useState(false);
+  /**
+   * 当前生效的候选清单。初值来自 run 结果（`job.result.prune`），删除后用 `dryRun` 重算覆盖。
+   * **必须可覆盖**：`pruneToken` 是候选集指纹，删成功任意一条后旧 token 立即失效，
+   * 沿用旧清单重试只会 409。
+   */
+  const [prunePlanOverride, setPrunePlanOverride] = useState<ImportPrunePlan | null>(null);
+  const [pruneSelected, setPruneSelected] = useState<Set<string>>(new Set());
+  const [pruneBusy, setPruneBusy] = useState(false);
+  const [pruneError, setPruneError] = useState<string | null>(null);
+  const [pruneReceipt, setPruneReceipt] = useState<{
+    deleted: number;
+    allDone?: boolean;
+    failed: { group: string; relation: string; reason: string }[];
+  } | null>(null);
   const [conflictSuffix, setConflictSuffix] = useState('_{n}');
   const [dragOver, setDragOver] = useState(false);
 
@@ -471,6 +499,16 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
   // 后缀模板只在「自动添加后缀」模式生效：增量导入对同名（含不同来源）**一律覆盖**
   // （用户 2026-10-10 拍板），覆盖/跳过也都不使用后缀
+  // REQ-20261019-001：清理开关的可用性完全由「本次选择方式」决定（目录 + 文件混合不可用）
+  const currentPickMode = derivePickMode(selections);
+  const canPruneSync = currentPickMode === 'dir';
+  // 尚未选择任何文件时不能说「仅选择目录时可用」——那会让用户以为功能不可用（设计 S03）
+  const pickModeHint = selections.length === 0
+    ? '请先选择要导入的目录'
+    : currentPickMode === 'mixed'
+      ? '目录与文件混合选择时不支持清理（路径口径不一致），请分开导入'
+      : '仅「选择目录」上传时可用';
+
   const suffixInUse = conflictMode === 'suffix';
   const conflictSuffixErr = suffixInUse ? conflictSuffixError(conflictSuffix) : null;
 
@@ -1274,6 +1312,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setPreflightConfirm(null);
     setProgressText(options?.skipDuplicates ? '正在比对库内文档并跳过疑似重复…' : '正在启动导入…');
     const finalize = currentFinalize();
+    // REQ-20261019-001：只有「纯目录选择」才允许清理（混合/文件模式服务端会 400）
+    const pickMode = derivePickMode(selections);
     try {
       const response = await runImport({
         scope: plan.scope,
@@ -1281,6 +1321,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         ...finalize,
         ...(onlyRelPaths && onlyRelPaths.length > 0 ? { onlyRelPaths } : {}),
         ...(options?.skipDuplicates ? { skipDuplicates: true } : {}),
+        pickMode,
+        ...(pruneSyncEnabled && pickMode === 'dir' ? { pruneStale: true } : {}),
       });
       if (!response.ok || !response.jobId) {
         throw Object.assign(new Error(response.error ?? '导入启动失败'), { code: response.code });
@@ -1289,6 +1331,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       // finalize（而不是上传时的快照），否则"改成 overwrite 跑一半失败后重试"会退回 incremental
       plan.finalize = finalize;
       trackImport(response.jobId, plan.scope, plan.uploadId);
+      // REQ-20261019-001：候选删除需要 uploadId 让服务端重扫暂存目录；key 带 scope 防串号
+      try {
+        window.sessionStorage.setItem(`ki.import.uploadId.${plan.scope}`, plan.uploadId);
+      } catch { /* 隐私模式 / 配额满：退回内存态，删除时会提示重新导入 */ }
     } catch (failure) {
       // REQ-20261019-002：同一 uploadId 已在跑且「跳过重复」设置不同 → 可纠正提示，不落失败红态
       const code = (failure as { code?: string }).code;
@@ -1465,6 +1511,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         /** REQ-20261019-002：跳过明细（最多 500 条） */
         duplicatesSkipped?: { path: string; existingGroup: string; existingRelation: string }[];
         duplicatesSkippedTruncated?: boolean;
+        /** REQ-20261019-001：清理候选（仅开启「目录同步清理」时出现） */
+        prune?: ImportPrunePlan;
         errors?: { path?: string; error?: string }[];
         conflicts?: {
           path?: string; originalRelation?: string; relation?: string;
@@ -1549,6 +1597,103 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const incompleteItems = result?.incomplete ?? [];
   const partialFiles = result?.stats?.files;
   const showPartial = Boolean(result?.partial) && incompleteItems.length > 0;
+  /**
+   * REQ-20261019-001：候选清单的**当前生效版本**。
+   *
+   * - 初值：run 结果里的 `prune`；
+   * - 删除后：`dryRun` 重算的结果覆盖（库已变，旧 token 失效）。
+   */
+  const activePrune = prunePlanOverride ?? result?.prune;
+
+  /**
+   * REQ-20261019-001：用 `dryRun` 重算候选与 token。
+   *
+   * 为什么必须有：`pruneToken` 是候选集指纹——本次**只要删成功一条**，重算出的候选集就变了，
+   * 旧 token 必然失配（服务端 409）。所以删除结束后必须换一份新清单，否则
+   * 「失败项已保留勾选，可重试」是一句空话（review Q4）。
+   *
+   * @param keepKeys 重算后仍需保留勾选的 key（通常是被删除失败的那几条）
+   */
+  const refreshPrunePlan = async (keepKeys: Set<string> = new Set()): Promise<boolean> => {
+    const plan = activePrune;
+    if (!plan) return false;
+    const uploadId = window.sessionStorage.getItem(`ki.import.uploadId.${plan.scope}`) ?? undefined;
+    try {
+      // 重算不允许带 token/selected：这是查询语义，服务端只回新清单
+      const response = await pruneImport({ scope: plan.scope, uploadId, dryRun: true, selected: [] });
+      if (!response.plan) return false;
+      setPrunePlanOverride(response.plan);
+      setPruneSelected(new Set([...keepKeys].filter((key) => response.plan!.items.some(
+        (item) => `${item.group}\u0000${item.relation}` === key,
+      ))));
+      return true;
+    } catch {
+      // 重算失败不回滚已完成的删除结果；保留旧清单，用户可点「重新计算候选」手动再试
+      return false;
+    }
+  };
+
+  /**
+   * REQ-20261019-001：提交删除。
+   * `uploadId` 走 sessionStorage（key 带 scope），服务端据此重扫暂存目录重算候选与 token。
+   */
+  const handlePrune = async (): Promise<void> => {
+    const plan = activePrune;
+    if (!plan?.token) return;
+    const selected = [...pruneSelected];
+    if (selected.length === 0) {
+      setPruneError('请至少选择一篇要删除的文档');
+      return;
+    }
+    setPruneBusy(true);
+    setPruneError(null);
+    try {
+      const uploadId = window.sessionStorage.getItem(`ki.import.uploadId.${plan.scope}`) ?? undefined;
+      const response = await pruneImport({
+        scope: plan.scope,
+        // 仅作降级：服务端优先用 run 时写入的 session 快照（设计 S02 N-2），
+        // 用户即使改过下面的 Group 输入框也不会让作用域漂移
+        group: group.trim() || undefined,
+        uploadId,
+        token: plan.token,
+        selected: selected.map((key) => {
+          const [groupPath, relation] = key.split('\u0000');
+          return { group: groupPath, relation };
+        }),
+      });
+      setPruneReceipt({ deleted: response.deleted ?? 0, allDone: response.allDone, failed: response.failed ?? [] });
+      const failedKeys = new Set((response.failed ?? []).map((item) => `${item.group}\u0000${item.relation}`));
+      // 删除后立刻换新清单：失败项仍勾选、可重试；全部删完则清空勾选
+      const refreshed = await refreshPrunePlan(failedKeys);
+      if (!refreshed) setPruneSelected(new Set(selected.filter((key) => failedKeys.has(key))));
+    } catch (failure) {
+      setPruneError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setPruneBusy(false);
+    }
+  };
+
+  // 候选清单出现（或 token 变化）时接管并重置勾选：默认勾「已触及组」，未触及组留给用户手动勾
+  useEffect(() => {
+    const incoming = result?.prune;
+    // 没有 token（未开开关 / 被闸门关闭 / 换了另一次导入）→ 丢掉上一轮的覆盖，
+    // 让渲染回落到 `result.prune`（该显示 skipReason 就显示，该整块不渲染就不渲染）
+    if (!incoming?.token) {
+      setPrunePlanOverride(null);
+      setPruneReceipt(null);
+      setPruneError(null);
+      return;
+    }
+    setPrunePlanOverride(incoming);
+    setPruneSelected(new Set(
+      incoming.items
+        .filter((item) => !item.untouched)
+        .map((item) => `${item.group}\u0000${item.relation}`),
+    ));
+    setPruneReceipt(null);
+    setPruneError(null);
+  }, [result?.prune?.token]);
+
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   // 同帧双击必须靠 ref 挡（state 更新是异步的，两次点击都会通过 state 判定）
@@ -2063,6 +2208,36 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             )}
           </div>
 
+          {/* REQ-20261019-001：目录同步清理开关（默认关；不改既有导入行为）
+              位置：紧贴「向量化」上方 —— 两个都是「本次导入的策略开关」，同一视觉组里更易对比。
+              样式复用「向量化」的卡片式开关（ki-vec-switch + ki-switch）：左侧标题/说明、右侧拨杆；
+              不可用时置灰并就地说明原因，不用禁用态 checkbox（辨识度低）。 */}
+          <div className="ki-vec-switch" style={{ marginTop: 12 }}>
+            <div className="ki-vec-switch__label">
+              <span className="ki-vec-switch__title">目录同步清理</span>
+              <span className="ki-vec-switch__desc">
+                导入后提示「库中存在、本次目录已没有」的文档；不会自动删除，需再次确认
+                {!canPruneSync && `（${pickModeHint}）`}
+              </span>
+            </div>
+            <div
+              className={`ki-switch${pruneSyncEnabled && canPruneSync ? ' ki-switch--on' : ''}${!canPruneSync || busyPhase ? ' ki-switch--disabled' : ''}`}
+              role="switch"
+              aria-checked={pruneSyncEnabled && canPruneSync}
+              aria-disabled={!canPruneSync || busyPhase}
+              aria-label="目录同步清理"
+              title={canPruneSync ? undefined : pickModeHint}
+              onClick={() => {
+                if (!canPruneSync || busyPhase) return;
+                setPruneSyncEnabled((on) => !on);
+                setPruneReceipt(null);
+                setPruneError(null);
+              }}
+            >
+              <div className="ki-switch__knob" />
+            </div>
+          </div>
+
           {/* 向量化开关 */}
           {vector && importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
             <div className="ki-form-error" role="alert" style={{ marginTop: 12 }}>
@@ -2381,6 +2556,123 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 ? `　文件级：扫描 ${partialFiles.scanned}（完成 ${partialFiles.completed ?? 0} / 未完成 ${partialFiles.incomplete ?? 0} / 跳过 ${partialFiles.skipped ?? 0}${partialFiles.unchanged ? ` / 其中未变跳过重算 ${partialFiles.unchanged}` : ''}）`
                 : ''}
             </p>
+            {/* REQ-20261019-001：目录同步清理候选（只在开启开关且为目录导入时由服务端给出） */}
+            {activePrune && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed var(--ki-color-border, #ddd)' }}>
+                {activePrune.skipReason ? (
+                  <>
+                    <div className="ki-cell-sub" style={{ color: 'var(--ki-color-warning)' }}>
+                      已关闭「清理本地已不存在的文档」：{activePrune.skipDetail ?? activePrune.skipReason}
+                    </div>
+                    <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                      如需强制清理：ki delete-relation -g &lt;组&gt; -r &lt;文档&gt;
+                    </div>
+                  </>
+                ) : pruneReceipt && (pruneReceipt.allDone || pruneReceipt.failed.length === 0) ? (
+                  <div className="ki-cell-sub">
+                    {pruneReceipt.allDone || pruneReceipt.deleted === 0
+                      ? '已无剩余候选'
+                      : `已删除 ${pruneReceipt.deleted} 篇`}
+                    {pruneReceipt.failed.length > 0 && `；${pruneReceipt.failed.length} 篇失败：`}
+                    {pruneReceipt.failed.map((item) => (
+                      <div key={`${item.group}\u0000${item.relation}`}>
+                        {item.group} / {item.relation}：{item.reason}
+                      </div>
+                    ))}
+                  </div>
+                ) : activePrune.total === 0 ? null : activePrune.overLimit ? (
+                  <div className="ki-cell-sub" style={{ color: 'var(--ki-color-warning)' }}>
+                    候选 {activePrune.total} 篇，超过单次上限 500：请用 CLI 清理，或先在本地恢复部分文件后重新导入
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontWeight: 600 }}>
+                      库中另有 {activePrune.total} 篇文档，本次上传的目录里没有
+                    </div>
+                    {pruneReceipt && pruneReceipt.failed.length > 0 && (
+                      <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', marginTop: 4 }}>
+                        上次删除：成功 {pruneReceipt.deleted} 篇，失败 {pruneReceipt.failed.length} 篇
+                        （失败项已保留勾选，可直接重试）
+                      </div>
+                    )}
+                    {activePrune.warn && (
+                      <div className="ki-cell-sub" style={{ color: 'var(--ki-color-warning)', marginTop: 4 }}>
+                        本次将删除库中 {Math.round(activePrune.deleteRatio * 100)}% 的文档，请逐条核对后再确认
+                      </div>
+                    )}
+                    <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
+                      {activePrune.items.map((item) => {
+                        const key = `${item.group}\u0000${item.relation}`;
+                        return (
+                          <label
+                            key={key}
+                            style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '2px 0', overflowWrap: 'anywhere' }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={pruneSelected.has(key)}
+                              disabled={pruneBusy}
+                              onChange={(e) => {
+                                setPruneSelected((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(key);
+                                  else next.delete(key);
+                                  return next;
+                                });
+                              }}
+                            />
+                            <span>
+                              {item.sourcePath} → 「{item.relation}」（{item.group}
+                              {item.untouched ? ' · 本次未涉及' : ''}）
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {activePrune.unableCount > 0 && (
+                      <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                        另有 {activePrune.unableCount} 篇无来源记录，不参与清理
+                      </div>
+                    )}
+                    <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                      删除后即刻从列表与检索消失，<strong>不可恢复</strong>（原文、向量与全文索引一并物理删除）。
+                      清单与本次任务绑定，库在这期间有变化会自动重算。
+                    </div>
+                    {pruneError && (
+                      <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', marginTop: 4 }}>
+                        {pruneError}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="ki-btn"
+                        disabled={pruneBusy || pruneSelected.size === 0}
+                        onClick={() => void handlePrune()}
+                      >
+                        {pruneBusy ? '正在删除…' : `删除所选 ${pruneSelected.size} 篇`}
+                      </button>
+                      {/* 手动重算入口：自动重算失败（如暂存目录已被清理）时兜底，避免用户卡在 409 */}
+                      <button
+                        type="button"
+                        className="ki-btn ki-btn--ghost"
+                        disabled={pruneBusy}
+                        onClick={() => {
+                          setPruneReceipt(null);
+                          setPruneError(null);
+                          void refreshPrunePlan(new Set(pruneSelected)).then((ok) => {
+                            if (!ok) setPruneError('重新计算失败：暂存目录可能已被清理，请重新导入一次后再试');
+                          });
+                        }}
+                      >
+                        重新计算候选
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* REQ-20261019-002：跳过重复的结果（与"文件级跳过"并存，不重复计数） */}
             {duplicatesSkippedCount > 0 && (
               <div className="ki-cell-sub" style={{ marginTop: 4 }}>

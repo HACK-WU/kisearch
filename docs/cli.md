@@ -704,37 +704,38 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 ## `delete-relation`
 
-删除 Relation 或整个 Group 及其关联数据（relations-cache + 本地 KB + wiki 文件 + 向量），wiki 文件移入回收站（`.ki/trash`，保留完整相对结构）。
+只删除**单个 Relation** 及其关联数据（relations-cache + 本地 KB 原文 + wiki 源文件 + 向量 + 全文索引）。
 
-### 文档级删除（`--group` + `--relation`）
+> ⚠️ **删除不可恢复**：wiki 源文件走物理 `unlink`（`delete-relation.ts` 的 `unlinkWithinSourceDir`），**不存在回收站**——`.ki/trash` 已移除（见 [group.md](group.md)）。删完只能靠备份或重新导入恢复。
+
+### 文档级删除（`--group` + `--relation`，两者必填）
 
 ```bash
 ki delete-relation --scope <scope> --group <group> --relation <relation>
 ```
 
-删除单个 Relation。向量删除优先按 `memoryId` 精确删除，无 `memoryId` 时用向量搜索严格匹配兜底。
-
-### 目录级删除（仅 `--group`）
-
-```bash
-ki delete-relation --scope <scope> --group <group>
-```
-
-删除整个 Group 及其全部子 Group（级联），适用：
-- **relations-cache**：清空该 group 及前缀 `group/` 下的全部关系
-- **本地 KB**：删除 `kb/{scope}/{group}/` 目录
-- **wiki**：源目录对应子树移入回收站 `.ki/trash/{group}/`（保留完整结构，重名追加时间戳）
-- **向量**：聚合该 group 下全部 `memoryIds` 一并删除；删除失败（或部分失败）时结果含 `vectorRemoved:false` 与原因，避免孤儿向量静默残留（已不存在的 doc 记 `NOT_FOUND`，视为已清理不误报）
-
-> **安全约束**：目录级删除为不可逆的破坏性操作，仅通过 CLI 暴露；MCP 工具 `ki_delete_relation` 仅支持文档级单条删除（`relation` 必填）。
+删除单条 Relation。向量删除优先按 `memoryId` 精确删除，无 `memoryId` 时用向量搜索严格匹配兜底。
+wiki 文件按 `relation.sourcePath` 定位（历史无 `sourcePath` 的按文件名兜底），且必须落在 `source.dir` 内才允许删除。
 
 ### 批量删除（`--input`）
 
 ```bash
-ki delete-relation --scope <scope> --input <file.json>
+ki delete-relation --scope <scope> --input items.json
 ```
 
-JSON 格式 `{"items":[{"group":"...","relation":"..."}]}`，逐条文档级删除并汇总 `total`/`failed`。
+`items.json` 格式：`{"items":[{"group":"...","relation":"..."}]}`，逐条文档级删除并按条返回结果（单条失败不影响其余），汇总 `total` / `failed`。
+`--scope` 在 strict 模式下必填（与单条模式同规则）。
+
+### 删组请改用 `ki group delete`
+
+```bash
+ki group delete "<group>" --yes   # 缺省只预览，--yes 才执行
+```
+
+`delete-relation` **不再支持**"只传 `--group` 删整组"——会直接报错并提示改用 `ki group delete`。
+组级删除只清 relations 分片 / `kb/{scope}/{group}/` / group-index 树节点 / 向量 / FTS，**不触碰 `source.dir` 下的 wiki 文件**；语义与安全约束见 [group.md](group.md)。
+
+> **安全约束**：不可逆的破坏性操作。可通过三条通路触达：① CLI（本文档）；② MCP 工具 `ki_delete_relation` **仅支持文档级单条删除**（`relation` 必填）；③ Web 导入页的「目录同步清理」（`POST /api/import/prune`，**需开关开启 + 逐条勾选 + token 校验**，单次上限 500 篇，见 [mcp-http.md](mcp-http.md)）。
 
 ---
 
