@@ -2172,13 +2172,37 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             </div>
           )}
 
-          {/* 高级选项 */}
-          <div style={{ marginTop: 8 }}>
-            <button type="button" className="ki-adv-toggle" onClick={() => setAdvOpen((v) => !v)}>
-              切分参数（高级）
+          {/* 高级选项：切分参数折叠行（2026-10-20 改版）
+              原先是 12px 纯文字按钮 —— 实测命中区 96×17px、无边框无底色、hover 前后样式逐项相同、
+              展开后标题文字也不变；又被上方的 tags 提示与下方的「目录同步清理」卡片夹着，
+              用户反馈"看上去就不是能点的"。
+              现改为与「目录同步清理 / 向量化」同构的卡片行：整行可点（卡片总高 48px，与同级同像素）、
+              右端常显当前值 + ▾/▴、展开体与卡片连体（用分隔线，不再叠第二层描边）。
+              ★ 折叠态也显示当前值是有意的：用户不必展开就能发现「值被改过」。 */}
+          <div className="ki-adv-card">
+            <button
+              type="button"
+              className="ki-adv-card__head"
+              aria-expanded={advOpen}
+              aria-controls={advOpen ? 'ki-adv-chunk-body' : undefined}
+              onClick={() => setAdvOpen((v) => !v)}
+            >
+              <span className="ki-adv-card__label">
+                <span className="ki-adv-card__title">切分参数</span>
+                {/* 文案不带「点开」：展开后就地读会变成一句失效指令（2026-10-20 review Q1）。
+                    用状态中立的「可调」，折叠/展开两态都成立。 */}
+                <span className="ki-adv-card__desc">段落边界优先；可调 Chunk Size 与 Overlap</span>
+              </span>
+              <span className="ki-adv-card__meta">
+                {/* 空值 = 用服务端默认（`currentFinalize` 里是 `chunkSize ? Number(...) : undefined`） */}
+                <span className="ki-adv-card__value" title="Chunk Size / Chunk Overlap">
+                  {chunkSize.trim() || '默认'} / {chunkOverlap.trim() || '默认'}
+                </span>
+                <span className="ki-adv-card__chevron" aria-hidden="true">{advOpen ? '▴' : '▾'}</span>
+              </span>
             </button>
             {advOpen && (
-              <div className="ki-adv-body">
+              <div className="ki-adv-card__body" id="ki-adv-chunk-body">
                 <div className="ki-form-row">
                   <div className="ki-form-group">
                     <label className="ki-form-label">Chunk Size（字符）</label>

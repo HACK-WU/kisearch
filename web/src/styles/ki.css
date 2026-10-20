@@ -2782,8 +2782,41 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 40px; text-align: center; }
 
 /* ── 导入页 ── */
-.ki-adv-toggle { background: none; border: none; color: var(--ki-color-primary); font-size: var(--ki-font-size-sm); cursor: pointer; padding: 0; }
-.ki-adv-body { margin-top: 12px; padding: 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); }
+/* 导入页「切分参数」折叠行（2026-10-20 改版）：
+   旧实现是 12px 纯文字按钮（96×17px / 无边框无底色 / hover 零反馈 / 展开后标题不变），
+   实测被上下两行说明文字夹着，读者当成第三行提示、以为不可点。
+   现与「目录同步清理 / 向量化」同构：卡片描边 + 整行可点 + 右端当前值 + ▾/▴。
+   · 命中区靠 `min-height: 46px` + 上下描边 2px = 卡片 48px，与 `.ki-vec-switch`（实测 48px）
+     逐像素同高；不靠加大字号，也不让三张卡在纵列里差 2px
+   · 展开体用 `border-top` 分隔线与头部连成一张卡 —— 另加描边会叠成双框
+   · `:focus-visible` 用负 offset 内描边：整行按钮已满宽，外描边会溢出卡片圆角 */
+.ki-adv-card {
+  margin-top: 12px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+  overflow: hidden;
+  transition: border-color var(--ki-motion-fast);
+}
+.ki-adv-card:hover { border-color: var(--ki-color-border-strong); }
+.ki-adv-card__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  box-sizing: border-box; width: 100%; min-height: 46px; padding: 6px 10px;
+  border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.ki-adv-card__head:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-adv-card__label { display: block; min-width: 0; }
+.ki-adv-card__title { display: block; font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
+.ki-adv-card__desc { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 1px; }
+.ki-adv-card__meta { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.ki-adv-card__value { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); }
+.ki-adv-card__chevron { font-size: var(--ki-font-size-xs); line-height: 1; color: var(--ki-color-text-subtle); }
+.ki-adv-card__body {
+  padding: 12px 10px;
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
 .ki-progress-block { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-lg); padding: 16px 20px; }
 .ki-progress-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 /* 右轨卡片头（PROGRESS / LAST RUN，对齐 demo kicker + 标题 + 状态徽标） */
