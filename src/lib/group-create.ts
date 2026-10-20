@@ -8,9 +8,8 @@
  */
 
 import fs from 'node:fs';
-import { readJson, writeJson } from './store.js';
+import { writeJson, ensureScopeDir, readGroupIndex } from './store.js';
 import { getGroupIndexPath, validateScope } from './scope.js';
-import { ensureScopeDir } from './store.js';
 import { loadConfig, resolveScope } from './config.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { assertNoPendingVectorMigration } from './vector-client.js';
@@ -26,7 +25,8 @@ export type GroupCreateResult =
   | { ok: true; scope: string; path: string; createdScope?: true }
   | { ok: false; error: string; candidates?: string[]; code?: 'SCOPE_OPERATION_BUSY' };
 
-type TreeNode = Record<string, TreeNode>;
+// 不能用 `Record<string, TreeNode>`：Record 是映射类型，自引用会被 TS 判为循环引用（TS2456）
+type TreeNode = { [name: string]: TreeNode };
 
 function findNode(groups: TreeNode, p: string): TreeNode | null {
   const segs = p.split('/').filter(Boolean);
@@ -54,13 +54,16 @@ export async function executeGroupCreate(opts: GroupCreateOptions): Promise<Grou
     return { ok: false, error: (err as Error).message };
   }
   try {
-    return await withScopeWriteLock(scope, 'group-create', () => createLocal(scope, opts.path));
+    return await withScopeWriteLock(scope, 'group-create', async () => createLocal(scope, opts.path));
   } catch (err) {
     const message = (err as Error).message;
     return {
       ok: false,
       error: message,
-      ...(message.includes('正在写入') ? { code: 'SCOPE_OPERATION_BUSY' as const } : {}),
+      // 按结构化 code 判定，不依赖中文文案（文案一改就会静默失效）
+      ...((err as { code?: string }).code === 'SCOPE_OPERATION_BUSY'
+        ? { code: 'SCOPE_OPERATION_BUSY' as const }
+        : {}),
     };
   }
 }
@@ -84,14 +87,18 @@ function createLocal(scope: string, rawPath: string): GroupCreateResult {
   const createdScope = scopeExisted ? {} : { createdScope: true as const };
 
   const indexPath = getGroupIndexPath(scope);
-  const data = readJson<{ groups: TreeNode }>(indexPath);
+  // 用 readGroupIndex 而非 readJson：它会在写锁内完成 legacy `roots` → `groups` 迁移。
+  // 直接用 readJson 时老 scope 上 data.groups 为 undefined，Object.keys(undefined)
+  // 会抛裸 TypeError（"Cannot convert undefined or null to object"）。
+  const data = readGroupIndex(scope);
   if (!data) return { ok: false, error: 'group-index.json 不存在' };
+  const groups = (data.groups ?? {}) as TreeNode;
 
-  const parent = findNode(data.groups, parentPath);
+  const parent = findNode(groups, parentPath);
   if (!parent) {
     const candidates = parentPath
-      ? listChildren(data.groups, segs.slice(0, -2).join('/'))
-      : Object.keys(data.groups);
+      ? listChildren(groups, segs.slice(0, -2).join('/'))
+      : Object.keys(groups);
     return {
       ok: false,
       error: `父路径不存在：${parentPath || '(顶层)'}；create 只建单个节点，请先创建父组`,

@@ -1512,6 +1512,77 @@ export async function vectorListDocs(params: {
   });
 }
 
+/** 辅助向量（ki-relation / ki-path）文档视图。 */
+export interface VectorAuxDoc {
+  id: string;
+  tag?: string;
+  group?: string;
+  text: string;
+}
+
+/**
+ * 按 Group 元数据枚举辅助向量（默认 ki-relation / ki-path）。
+ *
+ * **为什么需要**：辅助向量的 docId 由 `sha256(text + scope + tag)` 生成，**不含 group**
+ * （relation 路径向量的 text 就是 relation 名，见 `buildRelationContent`），所以删组时
+ * 无法从 relations 元数据反推出它们的 id —— 历史实现只能保留，导致「删组后 ki search
+ * 仍命中关系名」。写入时 group 会落进已建索引的标量字段
+ * （schema: `{ name: GROUP_FIELD, indexed: true }`），故这里按 group 精确枚举。
+ *
+ * **只读**：scope collection 不存在时直接返回空数组，不初始化向量引擎
+ * （避免纯树 / FTS-only scope 上的删组被引擎启动拖住）。
+ */
+export async function vectorListAuxDocsByGroups(params: {
+  scope: string;
+  groups: string[];
+  /** 只枚举这些标签；默认 `['ki-relation','ki-path']`，传空数组表示不限标签 */
+  tags?: string[];
+  /** 单批 listIds 上限（zvec listIds 无 offset 分页） */
+  limit?: number;
+}): Promise<{ docs: VectorAuxDoc[]; truncated: boolean }> {
+  validateScope(params.scope);
+  const groups = [...new Set(params.groups.filter((g) => typeof g === 'string' && g.length > 0))];
+  if (groups.length === 0) return { docs: [], truncated: false };
+  if (!scopeCollectionExists(params.scope)) return { docs: [], truncated: false };
+
+  const tags = (params.tags ?? ['ki-relation', 'ki-path'])
+    .map((t) => normalizeTag(t))
+    .filter((t) => t.length > 0);
+  const limit = params.limit ?? 20_000;
+  // filter 会被编译成 SQL：组名成百上千时串会很长，按 50 组分批查询后合并。
+  const CHUNK = 50;
+  const out: VectorAuxDoc[] = [];
+  let truncated = false;
+  for (let i = 0; i < groups.length; i += CHUNK) {
+    const slice = groups.slice(i, i + CHUNK);
+    const clauses: Filter[] = [{ field: SCOPE_FIELD, op: '==', value: params.scope }];
+    if (tags.length > 0) {
+      const tagConds: Filter[] = tags.map((t) => ({ field: TAG_FIELD, op: '==', value: t }));
+      clauses.push(tagConds.length === 1 ? tagConds[0] : { or: tagConds });
+    }
+    const groupConds: Filter[] = slice.map((g) => ({ field: GROUP_FIELD, op: '==', value: g }));
+    clauses.push(groupConds.length === 1 ? groupConds[0] : { or: groupConds });
+
+    const docs = await withEngine(params.scope, async (engine) => {
+      const ids = await engine.listIds({ and: clauses }, limit);
+      // listIds 无 offset 分页（只 topk+filter）：命中数顶到 limit 即有截断，必须显式上报，
+      // 否则调用方会把"没枚举完"当成"没有残留"
+      if (ids.length >= limit) truncated = true;
+      if (ids.length === 0) return [];
+      return engine.fetch(ids, false);
+    });
+    for (const d of docs) {
+      out.push({
+        id: d.id,
+        tag: d.fields?.[TAG_FIELD] !== undefined ? String(d.fields[TAG_FIELD]) : undefined,
+        group: d.fields?.[GROUP_FIELD] !== undefined ? String(d.fields[GROUP_FIELD]) : undefined,
+        text: d.text ?? String(d.fields?.[FTS_FIELD] ?? ''),
+      });
+    }
+  }
+  return { docs: out, truncated };
+}
+
 /**
  * 按 doc id 批量取回文档（供 doc delete 删前预览）。
  */

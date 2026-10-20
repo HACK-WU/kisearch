@@ -21,10 +21,16 @@ import {
   getLocalKbDir,
   validateScope,
   getSource,
+  migrateGroupIndex,
 } from '../lib/scope.js';
 import { loadConfig, resolveScope, getScopeWikiSync } from '../lib/config.js';
 import { withScopeWriteLock } from '../lib/scope-write-lock.js';
-import { assertNoPendingVectorMigration, vectorDelete, generateDocId } from '../lib/vector-client.js';
+import {
+  assertNoPendingVectorMigration,
+  vectorDelete,
+  generateDocId,
+  vectorListAuxDocsByGroups,
+} from '../lib/vector-client.js';
 import { buildGroupPathContent } from './path-vectorize.js';
 import { ftsDeleteByIds } from '../lib/fts-client.js';
 import { getSharedOperationCoordinator } from '../lib/operation-coordinator.js';
@@ -96,7 +102,18 @@ export interface GroupDeleteResult {
     kbDir: boolean;
     tree: boolean;
   };
-  vectors: { deleted: number; failed: number; skipped: number; orphanIds: string[] };
+  vectors: {
+    deleted: number;
+    failed: number;
+    skipped: number;
+    orphanIds: string[];
+    /** 辅助向量按 group 清扫时，因「同名 relation 仍被存活组引用」而保留的条数 */
+    sharedKept?: number;
+    /** 内容向量因「同一 docId 仍被存活组引用」而保留的条数（同内容跨组共享） */
+    sharedContentKept?: number;
+    /** 辅助向量按 group 枚举到的条数（ki-relation + ki-path） */
+    auxFound?: number;
+  };
   fts: { deleted: number; failed: number; orphanIds: string[] };
   degraded: boolean;
   warnings: string[];
@@ -158,6 +175,20 @@ function walkTree(node: TreeGroups, prefix: string, out: string[]): void {
   }
 }
 
+/**
+ * 纯读取得归一化后的 Group 树（legacy `roots` → `groups`，**不写盘**）。
+ *
+ * 预览必须零写入，但也要与执行路径看到同一棵树：执行前会 `readGroupIndex` 触发迁移，
+ * 预览若只读原始 `groups`，老 scope 上会出现「预览说没有、执行却删了」（K-03）。
+ */
+function readNormalizedGroups(scope: string): TreeGroups {
+  const raw = readJson<Record<string, unknown>>(getGroupIndexPath(scope));
+  if (!raw) return {};
+  const migrated = migrateGroupIndex(raw);
+  const doc = (migrated ?? raw) as { groups?: TreeGroups };
+  return doc.groups ?? {};
+}
+
 function readShardKeys(scope: string): string[] {
   try {
     if (hasShardedLayout(scope)) return listGroupPaths(scope);
@@ -198,8 +229,7 @@ export function resolveExactGroupPath(
   } catch {
     return null;
   }
-  const data = readJson<{ groups?: TreeGroups }>(getGroupIndexPath(scope));
-  const tree = (data?.groups ?? {}) as TreeGroups;
+  const tree = readNormalizedGroups(scope);
   const shardKeys = readShardKeys(scope);
   const treeExact = treeHasExact(tree, canonical);
   const shardExact = shardKeys.includes(canonical);
@@ -219,8 +249,7 @@ export function resolveExactGroupPath(
 }
 
 function candidatePaths(scope: string, limit = 5): string[] {
-  const data = readJson<{ groups?: TreeGroups }>(getGroupIndexPath(scope));
-  const tree = (data?.groups ?? {}) as TreeGroups;
+  const tree = readNormalizedGroups(scope);
   const all: string[] = [];
   walkTree(tree, '', all);
   for (const k of readShardKeys(scope)) if (!all.includes(k)) all.push(k);
@@ -259,6 +288,69 @@ function loadRelations(scope: string, keys: string[]): CacheRelation[] {
     groups?: Record<string, { hot_relations?: CacheRelation[] }>;
   };
   return keys.flatMap((k) => cache.groups?.[k]?.hot_relations ?? []);
+}
+
+/** 共享 docId 保护扫描的组数上限：超限时放弃判定（宁可保留辅助向量，也不误删存活组的） */
+const SURVIVOR_SCAN_GROUP_CAP = 5000;
+
+/**
+ * 收集**未被删除**的组引用的 relation 名与内容向量 id。
+ *
+ * 为什么需要：向量 docId 是确定性的且**不含 group**——
+ *  - 内容向量 `sha256(内容 + scope + tag)`：同内容跨组共用一条；
+ *  - ki-relation `sha256(relation 名 + scope + tag)`：同名跨组共用一条
+ *    （import 还会按 chunk 追加 `-NN` 后缀）。
+ * 直接按「本组元数据」删除会连带删掉别的组仍在用的向量，故先扫存活组求引用集合。
+ *
+ * 超过 `SURVIVOR_SCAN_GROUP_CAP` 个存活组时返回 `degraded: true`：调用方退回
+ * 保守策略（跳过辅助向量清扫），不冒误删风险。
+ */
+function collectSurvivingReferences(
+  scope: string,
+  deletedGroups: string[],
+): { names: Set<string>; ids: Set<string>; degraded: boolean } {
+  const names = new Set<string>();
+  const ids = new Set<string>();
+  const deletedSet = new Set(deletedGroups);
+  const consider = (rels: CacheRelation[]): void => {
+    for (const r of rels) {
+      if (r.text) names.add(r.text);
+      for (const id of r.memoryIds ?? (r.memoryId ? [r.memoryId] : [])) if (id) ids.add(id);
+    }
+  };
+
+  if (hasShardedLayout(scope)) {
+    const keys = listGroupPaths(scope).filter((k) => !deletedSet.has(k));
+    if (keys.length > SURVIVOR_SCAN_GROUP_CAP) return { names, ids, degraded: true };
+    for (const key of keys) {
+      consider((loadGroupCache(scope, key)?.hot_relations ?? []) as CacheRelation[]);
+    }
+    return { names, ids, degraded: false };
+  }
+
+  const cache = loadCacheShape(scope) as unknown as {
+    groups?: Record<string, { hot_relations?: CacheRelation[] }>;
+  };
+  const entries = Object.entries(cache?.groups ?? {});
+  if (entries.length > SURVIVOR_SCAN_GROUP_CAP) return { names, ids, degraded: true };
+  for (const [key, group] of entries) {
+    if (deletedSet.has(key)) continue;
+    consider(group.hot_relations ?? []);
+  }
+  return { names, ids, degraded: false };
+}
+
+/**
+ * 判断某条 ki-relation 向量是否仍被存活组引用。
+ *
+ * 两种写入约定并存：`sync-relation` 用 relation 名原文，`import` 按 chunk 追加
+ * `-01`/`-02`…（见 `import.ts` 的 `buildRelationContent(\`${text}-${NN}\`)`），
+ * 因此既要精确命中，也要剥掉 chunk 后缀再比对。宁可多保留（幽灵）也不误删。
+ */
+function isSharedRelationName(text: string, survivors: Set<string>): boolean {
+  if (survivors.has(text)) return true;
+  const stripped = text.replace(/-\d{2,}$/, '');
+  return stripped !== text && survivors.has(stripped);
 }
 
 function resolveWikiSourceDir(scope: string): string | null {
@@ -301,9 +393,11 @@ export async function planGroupDelete(
     return errResult(scope, canonical, 'INVALID_PATH', (err as Error).message);
   }
 
-  const groupIndex = readJson<{ groups?: TreeGroups }>(getGroupIndexPath(scope));
+  // 只读感知：不可解析 / 不存在 → 视为未初始化（保持既有语义，不改成 existsSync——
+  // 那会把"文件损坏"从 SCOPE_NOT_INITIALIZED 变成 GROUP_NOT_FOUND，属无授权的行为变更）
+  const hasIndex = readJson<Record<string, unknown>>(getGroupIndexPath(scope)) !== null;
   const shardKeys = readShardKeys(scope);
-  if (!groupIndex && shardKeys.length === 0) {
+  if (!hasIndex && shardKeys.length === 0) {
     return errResult(scope, canonical, 'SCOPE_NOT_INITIALIZED', `scope "${scope}" 尚未初始化`);
   }
 
@@ -338,14 +432,19 @@ export async function planGroupDelete(
       kbDir,
       kbFiles: stats.files,
       assets: stats.assets,
-      vectors: vectorIds.size,
+      // 与执行同口径：内容向量 + 组路径向量（ki-path）。
+      // 纯树 / FTS-only（无内容向量）时执行路径不会重算路径 id，故此处也不计入。
+      vectors: vectorIds.size > 0 ? vectorIds.size + resolved.groups.length : 0,
       ftsDocs,
       emptyParents: computeEmptyParents(scope, resolved.canonical, resolved.groups),
     },
     willKeep: {
       wikiDir: wikiSource ? path.join(wikiSource, resolved.canonical) : null,
     },
-    hint: '确认无误后追加 --yes 执行',
+    // 辅助向量（ki-relation / ki-path）按 group 元数据清扫，条数只有执行时才能确定；
+    // 且跨组共享的 docId 会被保留，因此实际删除数可能少于预览值
+    hint: '确认无误后追加 --yes 执行（执行时另会按 group 清扫 ki-relation / ki-path 辅助向量；'
+      + '跨组共享的同名 relation / 同内容向量会保留，实际删除数可能少于预览）',
   };
 }
 
@@ -420,7 +519,8 @@ export async function executeGroupDelete(
     const message = (err as Error).message;
     return {
       ok: false, scope, path: opts.path,
-      code: message.includes('正在写入') ? 'SCOPE_OPERATION_BUSY' : undefined,
+      // 按结构化 code 判定，不依赖中文文案（文案一改就会静默失效）
+      code: (err as { code?: string }).code === 'SCOPE_OPERATION_BUSY' ? 'SCOPE_OPERATION_BUSY' : undefined,
       deleted: { groups: [], relations: 0, kbDir: false, tree: false },
       vectors: { deleted: 0, failed: 0, skipped: 0, orphanIds: [] },
       fts: { deleted: 0, failed: 0, orphanIds: [] },
@@ -483,15 +583,6 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
   const relationIds = relations
     .flatMap((r) => r.memoryIds ?? (r.memoryId ? [r.memoryId] : []))
     .filter(Boolean);
-  // 组级路径向量（ki-path）的 docId 由内容 + scope + tag 决定，可安全重算删除；
-  // ki-relation 向量只含 relation 名、跨组共享，不能按组删除（保留）。
-  // 仅当该组确有内容向量时才重算路径向量 id：避免在纯树/FTS scope 上
-  // 为一堆不存在的 id 初始化向量引擎（会让无向量的测试/CLI 卡在引擎启动）。
-  const pathIds = relationIds.length > 0
-    ? plan.willDelete.groups.map((group) =>
-      generateDocId(buildGroupPathContent(group), scope, 'ki-path'))
-    : [];
-  const vectorIds = [...new Set([...relationIds, ...pathIds])] as string[];
   const ftsIds = [...new Set(relations.flatMap((r) => r.ftsIds ?? []))];
 
   const result: GroupDeleteResult = {
@@ -504,6 +595,81 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
       tree: false,
     },
   };
+
+  // ── 辅助向量枚举（ki-relation / ki-path）──
+  // 这些向量的 docId 不含 group，无法由 relations 元数据推导（K-01/K-02）；
+  // 但写入时 group 落进了已建索引的标量字段，故按 group 精确枚举后清扫。
+  // 先把枚举做了，再决定是否需要扫存活组：纯树删除（无 relation、无辅助向量）可省掉
+  // O(存活组数) 的引用扫描。
+  let auxDocs: Awaited<ReturnType<typeof vectorListAuxDocsByGroups>>['docs'] = [];
+  let auxSweepFailed = false;
+  try {
+    const aux = await vectorListAuxDocsByGroups({ scope, groups: plan.willDelete.groups });
+    auxDocs = aux.docs;
+    result.vectors.auxFound = auxDocs.length;
+    if (aux.truncated) {
+      result.warnings.push(
+        `辅助向量枚举达到单批上限（${auxDocs.length} 条），可能有残留；可重复执行删除或 ki rebuild-vector 清理`,
+      );
+    }
+  } catch (err) {
+    auxSweepFailed = true;
+    result.warnings.push(`辅助向量枚举失败（ki-relation / ki-path 可能残留）: ${(err as Error).message}`);
+  }
+
+  // 存活组的引用集合：确定性 docId 是**跨组共享**的，直接按本组元数据删会误删别的组
+  //  - 内容向量：docId = sha256(内容 + scope + tag)，同内容跨组共用一条；
+  //  - ki-relation：docId 只由 relation 名 + scope + tag 决定（import 还会按 chunk 加 `-NN`）。
+  // 扫描失败一律按 degraded 处理并退回「不保护」的旧行为，不能让删除因兄弟分片损坏而中断。
+  let survivors: { names: Set<string>; ids: Set<string>; degraded: boolean } = {
+    names: new Set(), ids: new Set(), degraded: false,
+  };
+  const needSurvivorScan = relationIds.length > 0
+    || auxDocs.some((d) => d.tag === 'ki-relation');
+  if (needSurvivorScan) {
+    try {
+      survivors = collectSurvivingReferences(scope, plan.willDelete.groups);
+    } catch (err) {
+      survivors = { names: new Set(), ids: new Set(), degraded: true };
+      result.warnings.push(`存活组引用扫描失败，跳过共享保护与辅助向量清扫: ${(err as Error).message}`);
+    }
+  }
+
+  const vectorIds = new Set<string>();
+  let sharedContentKept = 0;
+  for (const id of relationIds) {
+    if (!survivors.degraded && survivors.ids.has(id)) {
+      sharedContentKept++;
+      continue;
+    }
+    vectorIds.add(id);
+  }
+  // 组级路径向量（ki-path）的 docId 由内容 + scope + tag 决定，可安全重算删除。
+  // 仅当该组确有内容向量时才重算路径向量 id：避免在纯树/FTS scope 上
+  // 为一堆不存在的 id 初始化向量引擎（会让无向量的测试/CLI 卡在引擎启动）。
+  if (relationIds.length > 0) {
+    for (const group of plan.willDelete.groups) {
+      vectorIds.add(generateDocId(buildGroupPathContent(group), scope, 'ki-path'));
+    }
+  }
+  result.vectors.sharedContentKept = sharedContentKept;
+
+  if (survivors.degraded) {
+    result.warnings.push(
+      `存活组数量超过 ${SURVIVOR_SCAN_GROUP_CAP}，跳过辅助向量清扫与共享向量保护`
+      + '（ki-relation / ki-path 可能残留；可用 ki rebuild-vector 重建）',
+    );
+  } else if (auxDocs.length > 0) {
+    let kept = 0;
+    for (const doc of auxDocs) {
+      if (doc.tag === 'ki-relation' && isSharedRelationName(doc.text, survivors.names)) {
+        kept++;
+        continue;
+      }
+      vectorIds.add(doc.id);
+    }
+    result.vectors.sharedKept = kept;
+  }
 
   // ── 窗口 1：删除 relations 分片（列表先消失） ──
   try {
@@ -545,12 +711,16 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
   try {
     getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
       const indexPath = getGroupIndexPath(scope);
-      const groupIndex = readJson<{ groups: TreeGroups }>(indexPath);
-      if (!groupIndex) return;
-      const removed = removeTreeNode(groupIndex.groups, target);
+      const raw = readJson<Record<string, unknown>>(indexPath);
+      if (!raw) return;
+      // legacy roots 归一化（不依赖窗口外那次迁移是否成功）
+      const doc = (migrateGroupIndex(raw) ?? raw) as Record<string, unknown> & { groups?: TreeGroups };
+      const groups = doc.groups ?? {};
+      const removed = removeTreeNode(groups, target);
       if (removed) {
-        pruneEmptyParents(scope, groupIndex.groups, target);
-        writeJson(indexPath, groupIndex as unknown as Record<string, unknown>);
+        pruneEmptyParents(scope, groups, target);
+        doc.groups = groups;
+        writeJson(indexPath, doc);
       }
       result.deleted.tree = removed;
     });
@@ -559,15 +729,16 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
   }
 
   // ── 向量 / FTS（失败只降级，不回滚元数据） ──
-  if (vectorIds.length > 0) {
+  const idsToDelete = [...vectorIds];
+  if (idsToDelete.length > 0) {
     try {
-      const del = await vectorDelete({ scope, ids: vectorIds });
-      result.vectors.deleted = vectorIds.length - del.failedIds.length;
+      const del = await vectorDelete({ scope, ids: idsToDelete });
+      result.vectors.deleted = idsToDelete.length - del.failedIds.length;
       result.vectors.failed = del.failedIds.length;
       result.vectors.orphanIds = del.failedIds;
     } catch (err) {
-      result.vectors.failed = vectorIds.length;
-      result.vectors.orphanIds = vectorIds;
+      result.vectors.failed = idsToDelete.length;
+      result.vectors.orphanIds = idsToDelete;
       result.warnings.push(`向量删除失败: ${(err as Error).message}`);
     }
   }
@@ -584,7 +755,8 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
     }
   }
 
-  result.degraded = result.vectors.failed > 0 || result.fts.failed > 0;
+  // 辅助向量枚举失败也要标 degraded：否则用户会以为「删干净了」，而 ki search 仍能命中关系名
+  result.degraded = result.vectors.failed > 0 || result.fts.failed > 0 || auxSweepFailed;
   if (result.degraded) {
     result.warnings.push('部分向量/FTS 未删除，可用 ki doc delete 清理孤儿索引');
   }

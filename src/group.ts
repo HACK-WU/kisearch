@@ -145,7 +145,9 @@ program
   .description('列出 Group 结构与 Relations（文本渲染，或 --json 结构）')
   .argument('[path]', '子树根路径（与 --groups 互斥）')
   .option('-g, --groups <groups>', '逗号分隔的 Group 路径列表（与 path 互斥）')
-  .option('--mode <mode>', '展示分区：hot|warm|cold|emerging|full（可逗号多值）', 'hot')
+  // 默认 full：命令语义是 list，纯树组（无 relation）在 hot 视图里只能看到统计数字、
+  // 看不到任何组名（实测 `ki group list` 对只有 create 出来的组的 scope 输出空树）。
+  .option('--mode <mode>', '展示分区：full|hot|warm|cold|emerging（可逗号多值；默认 full 渲染树）', 'full')
   .option('--depth <depth>', '索引层级深度', '4')
   .option('--hot-count <count>', '热门展示个数', '5')
   .option('--no-auto-fallback', '禁用语义兜底（默认开启）')
@@ -185,7 +187,7 @@ program
         subtreeParam: groupPath,
         hotCount: Number(opts.hotCount) || 5,
         depth: Number(opts.depth) || 4,
-        modes: String(opts.mode ?? 'hot').split(',').map((m) => m.trim()).filter(Boolean),
+        modes: String(opts.mode ?? 'full').split(',').map((m) => m.trim()).filter(Boolean),
         autoFallback: opts.autoFallback,
       });
       if (result.ok) {

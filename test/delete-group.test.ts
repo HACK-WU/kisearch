@@ -33,6 +33,11 @@ let mockDeleteThrows: Error | null = null;
   return vectorClient.normalizeVectorDeleteResult(params.ids, mockDeleteResult);
 };
 
+// 辅助向量（ki-relation / ki-path）按 group 枚举：测试里直接给结果，不启动向量引擎。
+let auxDocs: { id: string; tag?: string; group?: string; text: string }[] = [];
+let auxTruncated = false;
+(vectorClient as any).vectorListAuxDocsByGroups = async () => ({ docs: auxDocs, truncated: auxTruncated });
+
 const { planGroupDelete, executeGroupDelete } = await import('../src/lib/group-delete.js');
 const { ensureScopeDir } = await import('../src/lib/store.js');
 const { getKbDir, setSource } = await import('../src/lib/scope.js');
@@ -86,6 +91,8 @@ beforeEach(() => {
   deleteCalls = [];
   mockDeleteResult = { ok: 0, errors: [] };
   mockDeleteThrows = null;
+  auxDocs = [];
+  auxTruncated = false;
 });
 
 describe('group-delete：plan / execute', () => {
@@ -106,7 +113,8 @@ describe('group-delete：plan / execute', () => {
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.willDelete.relations, 1);
-    assert.equal(plan.willDelete.vectors, 1);
+    // 内容向量 1 条 + 组路径向量 2 条（wiki / wiki/docs）——预览与执行同口径（N-01）
+    assert.equal(plan.willDelete.vectors, 3);
     assert.ok(plan.willDelete.groups.includes('wiki/docs'));
     assert.equal(plan.willKeep.wikiDir, path.join(sourceDir, 'wiki'));
 
@@ -232,6 +240,139 @@ describe('group-delete：plan / execute', () => {
     if (plan.ok) assert.deepEqual(plan.willDelete.emptyParents, ['A']);
 
     const r = await executeGroupDelete({ scope: s, path: 'A/B' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(readTree(s), {});
+  });
+
+  it('辅助向量按 group 清扫：ki-relation / ki-path 幽灵被删除（K-01/K-02）', async () => {
+    const s = `aux-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(
+      s,
+      { wiki: {} },
+      { wiki: { hot_relations: [mkRelation('r1', 'a-01', ['m1'])], keywords: [] } },
+    );
+    // 辅助向量的 docId 不含 group，只能靠向量文档上的 group 字段枚举出来
+    auxDocs = [
+      { id: 'rel-docid', tag: 'ki-relation', group: 'wiki', text: 'a-01' },
+      { id: 'path-docid', tag: 'ki-path', group: 'wiki', text: 'wiki' },
+    ];
+    mockDeleteResult = { ok: 3, errors: [] };
+
+    const r = await executeGroupDelete({ scope: s, path: 'wiki' });
+    assert.equal(r.ok, true);
+    assert.equal(r.vectors.auxFound, 2);
+    assert.equal(r.vectors.sharedKept, 0);
+    const ids = deleteCalls[0].ids;
+    assert.ok(ids.includes('m1'), '内容向量仍按 memoryIds 删除');
+    assert.ok(ids.includes('rel-docid'), '应删除 ki-relation 辅助向量（K-01）');
+    assert.ok(ids.includes('path-docid'), '应删除 ki-path 辅助向量');
+  });
+
+  it('同名 relation 仍被存活组引用时，保留该 ki-relation 向量', async () => {
+    const s = `aux-shared-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(
+      s,
+      { A: {}, B: {} },
+      {
+        A: { hot_relations: [mkRelation('ra', '共享名', ['ma'])], keywords: [] },
+        B: { hot_relations: [mkRelation('rb', '共享名', ['mb'])], keywords: [] },
+      },
+    );
+    auxDocs = [{ id: 'shared-rel', tag: 'ki-relation', group: 'A', text: '共享名' }];
+
+    const r = await executeGroupDelete({ scope: s, path: 'A' });
+    assert.equal(r.ok, true);
+    assert.equal(r.vectors.sharedKept, 1);
+    assert.ok(!deleteCalls[0].ids.includes('shared-rel'), '存活组仍在用的共享向量不得删除');
+    assert.ok(deleteCalls[0].ids.includes('ma'));
+    assert.ok((readTree(s) as Record<string, unknown>).B !== undefined, 'B 组保留');
+  });
+
+  it('辅助向量枚举被截断时给出 warning，不静默当成"没有残留"', async () => {
+    const s = `aux-trunc-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(s, { wiki: {} }, { wiki: { hot_relations: [], keywords: [] } });
+    auxTruncated = true;
+    auxDocs = [{ id: 'path-x', tag: 'ki-path', group: 'wiki', text: 'wiki' }];
+
+    const r = await executeGroupDelete({ scope: s, path: 'wiki' });
+    assert.equal(r.ok, true);
+    assert.ok(r.warnings.some((w) => w.includes('单批上限')), '截断必须显式告警');
+  });
+
+  it('import 的 -NN chunk 后缀也识别为同一 relation，不误删共享向量', async () => {
+    const s = `aux-chunk-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(
+      s,
+      { A: {}, B: {} },
+      {
+        A: { hot_relations: [mkRelation('ra', 'a', ['ma'])], keywords: [] },
+        B: { hot_relations: [mkRelation('rb', 'a', ['mb'])], keywords: [] },
+      },
+    );
+    // import 写的是 `${relation}-${NN}`（见 import.ts），与 cache 里的 'a' 不同名
+    auxDocs = [{ id: 'chunk-01', tag: 'ki-relation', group: 'A', text: 'a-01' }];
+
+    const r = await executeGroupDelete({ scope: s, path: 'A' });
+    assert.equal(r.ok, true);
+    assert.equal(r.vectors.sharedKept, 1);
+    assert.ok(!deleteCalls[0].ids.includes('chunk-01'), 'chunk 后缀的共享向量不得删除');
+  });
+
+  it('内容向量仍被存活组引用时不删（同内容跨组共享 docId）', async () => {
+    const s = `aux-content-${Date.now()}`;
+    registerTestScope(s);
+    setupGroup(
+      s,
+      { A: {}, B: {} },
+      {
+        A: { hot_relations: [mkRelation('ra', '同文', ['shared-id'])], keywords: [] },
+        B: { hot_relations: [mkRelation('rb', '同文', ['shared-id'])], keywords: [] },
+      },
+    );
+
+    const r = await executeGroupDelete({ scope: s, path: 'A' });
+    assert.equal(r.ok, true);
+    assert.equal(r.vectors.sharedContentKept, 1);
+    assert.ok(!deleteCalls[0].ids.includes('shared-id'), '存活组仍在引用的内容向量不得删除');
+  });
+
+  it('legacy roots：预览与执行看到同一棵树，且预览零写入（K-03）', async () => {
+    const s = `legacy-${Date.now()}`;
+    registerTestScope(s);
+    ensureScopeDir(s);
+    const kbDir = getKbDir(s);
+    fs.writeFileSync(
+      path.join(kbDir, 'group-index.json'),
+      JSON.stringify({ version: 1, scope: s, roots: { 项目根: { A: { B: {} } } }, updatedAt: null }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(kbDir, 'relations-cache.json'),
+      JSON.stringify({
+        version: 1,
+        scope: s,
+        partition_config: {},
+        groups: { A: { hot_relations: [], keywords: [] } },
+        updatedAt: null,
+      }),
+      'utf-8',
+    );
+    const before = fs.readFileSync(path.join(kbDir, 'group-index.json'), 'utf-8');
+
+    const plan = await planGroupDelete({ scope: s, path: 'A' });
+    assert.equal(plan.ok, true, plan.ok ? '' : plan.error);
+    if (plan.ok) assert.deepEqual(plan.willDelete.groups, ['A', 'A/B']);
+    assert.equal(
+      fs.readFileSync(path.join(kbDir, 'group-index.json'), 'utf-8'),
+      before,
+      '预览不得触发 legacy 迁移写盘',
+    );
+
+    const r = await executeGroupDelete({ scope: s, path: 'A' });
     assert.equal(r.ok, true);
     assert.deepEqual(readTree(s), {});
   });

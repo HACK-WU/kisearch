@@ -16,7 +16,9 @@ import path from 'path';
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
 import { executeGroupCreate } from '../src/lib/group-create.js';
 import { getKbDir } from '../src/lib/scope.js';
+import { ensureScopeDir } from '../src/lib/store.js';
 import { buildListJson } from '../src/group.js';
+import { executeQueryGroup } from '../src/query-group.js';
 
 function readTree(scope: string): Record<string, unknown> {
   const p = path.join(getKbDir(scope), 'group-index.json');
@@ -97,5 +99,40 @@ describe('group-create', () => {
       assert.equal(r.ok, false, `path=${JSON.stringify(p)} 应被拒绝`);
     }
     assert.equal(fs.existsSync(path.join(getKbDir(s), 'group-index.json')) === false, true, '非法路径不应建库');
+  });
+
+  it('legacy roots：create 先迁移再建节点，不抛裸 TypeError（K-04）', async () => {
+    const s = freshScope();
+    ensureScopeDir(s);
+    const kb = getKbDir(s);
+    fs.writeFileSync(
+      path.join(kb, 'group-index.json'),
+      JSON.stringify({ version: 1, scope: s, roots: { 项目根: { A: {} } }, updatedAt: null }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(kb, 'relations-cache.json'),
+      JSON.stringify({ version: 1, scope: s, partition_config: {}, groups: {}, updatedAt: null }),
+      'utf-8',
+    );
+
+    const r = await executeGroupCreate({ scope: s, path: 'B' });
+    assert.equal(r.ok, true, r.ok ? '' : r.error);
+    assert.doesNotMatch(r.ok ? '' : r.error, /Cannot convert undefined or null/);
+    assert.deepEqual(readTree(s), { A: {}, B: {} });
+  });
+
+  it('list 文本模式默认渲染树：纯树组可见（N-02）', async () => {
+    const s = freshScope();
+    await executeGroupCreate({ scope: s, path: '工具库' });
+    const r = await executeQueryGroup({
+      scope: s,
+      hotCount: 5,
+      depth: 4,
+      modes: ['full'],
+      autoFallback: false,
+    });
+    assert.equal(r.ok, true, r.ok ? '' : r.error);
+    if (r.ok) assert.match(r.output, /工具库/);
   });
 });
