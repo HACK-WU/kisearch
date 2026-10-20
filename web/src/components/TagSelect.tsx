@@ -70,7 +70,7 @@ export function TagSelect({ scope, value, onChange, width = 140 }: TagSelectProp
   };
 
   return (
-    <div className="ki-combobox" ref={rootRef} style={{ width }}>
+    <div className="ki-combobox ki-combobox--tags" ref={rootRef} style={{ width }}>
       <div className="ki-combobox__input-wrap">
         <input
           className="ki-form-input"
@@ -85,7 +85,11 @@ export function TagSelect({ scope, value, onChange, width = 140 }: TagSelectProp
           onFocus={() => { if (!open) openPicker(); }}
           onKeyDown={handleKeyDown}
           autoComplete="off"
-          title={disabled ? '当前知识库暂无自定义 tag' : '按 tag 过滤文档（可输入关键字搜索）'}
+          /* 收起态值会被输入框宽度裁掉（省略号），悬停提示补完整 tag 名；
+             展开时输入框是搜索词、值不可见，提示回到功能说明 */
+          title={!open && value
+            ? `${value}（点击更换 tag）`
+            : disabled ? '当前知识库暂无自定义 tag' : '按 tag 过滤文档（可输入关键字搜索）'}
         />
         <button
           type="button"
@@ -120,6 +124,8 @@ export function TagSelect({ scope, value, onChange, width = 140 }: TagSelectProp
               type="button"
               className={`ki-combobox__option${t === value ? ' ki-combobox__option--active' : ''}`}
               onClick={() => pick(t)}
+              /* 面板虽已随内容加宽，超过上限（min(320px,60vw)）仍会截断 —— 悬停给全名 */
+              title={t}
             >
               <span className="ki-combobox__option-label">{t}</span>
               {t === value && <span className="ki-combobox__option-check">✓</span>}
