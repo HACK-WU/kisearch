@@ -380,3 +380,66 @@ test('embedding 单请求上限（provider 声明 25）触发时自动降批，�
   assert.equal(requestSizes.slice(1).every((size) => size <= DECLARED_LIMIT), true);
   assert.equal((await engine.listIds()).length, 70, '降批后全部文档应可检索');
 });
+
+// ─── 删组清扫依赖的 group 过滤契约（REQ-20261019-005 跟进项）─────────────
+// `ki group delete` 靠「按 group 标量字段枚举 ki-relation / ki-path」清扫辅助向量；
+// 这里验证引擎侧三个前提：中文组名、含单引号值、无 group 字段的文档不被命中。
+test('TC-GROUP-01: 按 group 标量字段过滤（中文 / 单引号 / 缺字段文档边界 / limit 截断）', async (t) => {
+  const cfg = makeConfig(makeDbPath('zvec-group-'), {
+    collection: {
+      scalarFields: [
+        { name: 'tag', dataType: 'STRING', indexed: true },
+        { name: 'scope', dataType: 'STRING', indexed: true },
+        { name: 'group', dataType: 'STRING', indexed: true },
+        { name: 'content', dataType: 'STRING' },
+      ],
+    },
+  });
+  const engine = await ZvecEngine.create(cfg);
+  t.after(() => engine.close());
+
+  await engine.upsert([
+    { id: 'r1', text: 'a-01', fields: { tag: 'ki-relation', scope: 's1', group: '验收/子组' } },
+    { id: 'r2', text: 'b-01', fields: { tag: 'ki-relation', scope: 's1', group: "it's 组" } },
+    { id: 'p1', text: '验收', fields: { tag: 'ki-path', scope: 's1', group: '验收' } },
+    { id: 'c1', text: 'content', fields: { tag: 'ki-search', scope: 's1' } },
+  ]);
+
+  // ① 中文组名 + tag OR + group OR（清扫实际使用的结构）
+  const ids = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { or: [
+        { field: 'tag', op: '==', value: 'ki-relation' },
+        { field: 'tag', op: '==', value: 'ki-path' },
+      ] },
+      { or: [
+        { field: 'group', op: '==', value: '验收/子组' },
+        { field: 'group', op: '==', value: '验收' },
+      ] },
+    ],
+  });
+  assert.deepEqual(ids.sort(), ['p1', 'r1']);
+
+  // ② 含单引号的组名必须命中（转义正确性）
+  const quoted = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { field: 'group', op: '==', value: "it's 组" },
+    ],
+  });
+  assert.deepEqual(quoted, ['r2']);
+
+  // ③ 无 group 字段的文档不会被 group 条件命中（历史向量的清扫边界，已有文档化说明）
+  const missing = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { field: 'group', op: '==', value: 'no-such-group' },
+    ],
+  });
+  assert.deepEqual(missing, []);
+
+  // ④ limit 截断可观测：清扫据此判定 truncated，避免把"没枚举完"当"无残留"
+  const truncated = await engine.listIds({ and: [{ field: 'scope', op: '==', value: 's1' }] }, 2);
+  assert.equal(truncated.length, 2);
+});

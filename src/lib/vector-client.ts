@@ -594,6 +594,20 @@ function buildEmbedding(): SiliconFlowProvider {
 }
 
 /**
+ * 集合标量字段定义。
+ *
+ * 导出供契约测试断言：`group` 必须存在且 `indexed: true` —— 删组清扫
+ * （`vectorListAuxDocsByGroups`）依赖按它过滤枚举 `ki-relation` / `ki-path`；
+ * 字段一旦被移除或改名，清扫会静默枚举为空（`auxFound: 0` 看起来像"无残留"）。
+ */
+export const COLLECTION_SCALAR_FIELDS = [
+  { name: TAG_FIELD, dataType: 'STRING', indexed: true },
+  { name: SCOPE_FIELD, dataType: 'STRING', indexed: true },
+  { name: GROUP_FIELD, dataType: 'STRING', indexed: true },
+  { name: FTS_FIELD, dataType: 'STRING' },
+] as const;
+
+/**
  * 构建 create/open 配置
  */
 function buildCreateConfig(scope: string): ZvecEngineConfig {
@@ -607,12 +621,7 @@ function buildCreateConfig(scope: string): ZvecEngineConfig {
       denseField: DENSE_FIELD,
       dimension: emb.dimension,
       metric: 'COSINE',
-      scalarFields: [
-        { name: TAG_FIELD, dataType: 'STRING', indexed: true },
-        { name: SCOPE_FIELD, dataType: 'STRING', indexed: true },
-        { name: GROUP_FIELD, dataType: 'STRING', indexed: true },
-        { name: FTS_FIELD, dataType: 'STRING' },
-      ],
+      scalarFields: COLLECTION_SCALAR_FIELDS.map((f) => ({ ...f })),
       fts: {
         field: FTS_FIELD,
         tokenizer: 'jieba',
