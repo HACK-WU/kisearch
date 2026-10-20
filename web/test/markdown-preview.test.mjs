@@ -16,11 +16,25 @@ const {
   isBlankMermaidSvg,
   mermaidErrorDetail,
   mermaidFallbackNotice,
+  mermaidInitOptions,
   normalizeCodeForCopy,
   renderMarkdownHtml,
   repairMermaidLabelQuotes,
 } = await vite.ssrLoadModule('/src/components/MarkdownPreview.tsx');
+const { readDocumentTheme } = await vite.ssrLoadModule('/src/lib/theme.ts');
 after(async () => vite.close());
+
+/** 第 n 个 `<code>` 的文本（去标签 + 解实体）：高亮后内容被 span 切分，只能按文本口径断言 */
+const codeText = (html, index) => {
+  const inner = [...html.matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)][index]?.[1] ?? '';
+  return inner
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&amp;/g, '&');
+};
 
 describe('MarkdownPreview safe interactive Markdown', () => {
   it('renders Markdown headings while ignoring heading-looking text inside fenced code', () => {
@@ -54,7 +68,8 @@ describe('MarkdownPreview safe interactive Markdown', () => {
 
     assert.match(html, /<details open><summary>外层<\/summary>/);
     assert.match(html, /<details><summary>内层<\/summary>/);
-    assert.match(html, /&lt;\/details&gt;/);
+    // 围栏内的 `</details>` 是代码文本（高亮后被 token span 切分），按文本口径断言未被当成标签
+    assert.match(codeText(html, 0), /<\/details>/);
     assert.equal((html.match(/<details(?:\s|>)/g) ?? []).length, 2);
   });
 
@@ -87,8 +102,12 @@ describe('MarkdownPreview safe interactive Markdown', () => {
 
     assert.equal((html.match(/data-ki-copy-code/g) ?? []).length, 2);
     assert.match(html, /class="language-html"/);
-    assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+    // 代码块自 2026-10-20 起带语法高亮（内容被 token span 切分），故「转义为纯文本」改用
+    // 「去标签 + 解实体后等于原文」口径；**裸标签仍不得出现**这一条保持不变。
+    assert.equal(codeText(html, 0), '<img src=x onerror="alert(1)">');
     assert.doesNotMatch(html, /<img src=x/);
+    // mermaid 不参与着色：它由图表渲染接管，源码块只在渲染失败时兜底展示
+    assert.match(html, /<code class="language-mermaid">graph TD/);
     assert.match(html, /class="language-mermaid"/);
   });
 
@@ -171,6 +190,24 @@ describe('MarkdownPreview safe interactive Markdown', () => {
     assert.match(mermaidFallbackNotice('blank').hint, /补上节点后重新打开/);
     assert.match(mermaidFallbackNotice('unavailable').title, /加载失败/);
     assert.match(mermaidFallbackNotice('unavailable').hint, /刷新页面可重试/);
+  });
+
+  it('mermaid 主题跟随当前主题，且 strict 安全围栏不可退让', () => {
+    const light = mermaidInitOptions('light');
+    const dark = mermaidInitOptions('dark');
+
+    assert.equal(light.theme, 'default');
+    assert.equal(dark.theme, 'dark');
+    // 渲染对象是导入的外部不可信 wiki：securityLevel 一旦被改成 loose 就会跳过 DOMPurify 净化，
+    // 并让 `click A call fn()` 绑定为活动 JS 回调 —— 这条断言是防止它被"顺手调松"的围栏
+    assert.equal(light.securityLevel, 'strict');
+    assert.equal(dark.securityLevel, 'strict');
+    assert.equal(light.suppressErrorRendering, true);
+    assert.equal(dark.suppressErrorRendering, true);
+    assert.equal(light.startOnLoad, false);
+
+    // Node 环境没有 document：主题读取必须安全降级为 light（SSR / 单测不炸）
+    assert.equal(readDocumentTheme(), 'light');
   });
 
   it('keeps only the first line of a mermaid error and truncates long ones', () => {

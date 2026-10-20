@@ -2415,7 +2415,9 @@ a:hover { text-decoration: underline; }
 .ki-markdown code { font-family: var(--ki-font-mono); font-size: 12px; background: var(--ki-color-bg-muted); padding: 1px 5px; border-radius: 4px; }
 /* 代码块内的 code 必须完全去壳：`border/font-size` 也一并重置，否则对话场景的
    `.ki-chat-msg__body code`（0,2,1）会给块内每段代码补 1px 边框并改字号（特异性高于旧规则）。 */
-.ki-markdown pre code { background: transparent; padding: 0; border-radius: 0; border: none; font-size: inherit; }
+/* `color` 必须**显式**给出（不靠继承）：语法高亮的 token 只覆盖一部分字符，
+   剩下未命中的标识符/标点由它兜底。POC 实测：暗色下靠继承会直接掉到低对比（正文近乎不可读）。 */
+.ki-markdown pre code { background: transparent; padding: 0; border-radius: 0; border: none; font-size: inherit; color: var(--ki-color-text); }
 .ki-markdown pre { background: var(--ki-color-bg); padding: 12px; border-radius: var(--ki-radius-sm); overflow-x: auto; font-family: var(--ki-font-mono); font-size: 12px; margin: 8px 0; }
 .ki-markdown .ki-code-block {
   position: relative;
@@ -2474,6 +2476,71 @@ a:hover { text-decoration: underline; }
 .ki-markdown .ki-code-panel > pre { margin: 0; background: transparent; }
 .ki-markdown .ki-code-panel > .ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; padding: 12px; }
 .ki-code-panel[hidden] { display: none; }
+/* ── 代码语法高亮（highlight.js token → `--ki-code-*` 令牌，方案 A「克制品牌色」）────────
+   落地口径（2026-10-20 POC 实测）：
+   ① 高亮色自成一族 `--ki-code-*`，**不占用 `--ki-color-*` 语义色**（语义色只用于状态徽标）；
+      换配色只改令牌值，映射规则不动。
+   ② 只给 token 上色，**不改 DOM 形状** —— `pre > code.language-X` 是 mermaid 定位与复制取原文的契约。
+   ③ 深浅两套值；正文色由 `.ki-markdown pre code` 的显式 `color` 兜底（未命中 token 的字符）。
+   ④ 「着色」≠「结构清晰」：hljs 对 Python/JS 的**调用名**不标 `title.function_`，
+      真正有色差的是 keyword / string / number / comment / title.class_ / attr 这几族，
+      故下面按族逐类映射（缺一族就等于少一层结构信息）。 */
+:root {
+  --ki-code-keyword: #0b6b52;
+  --ki-code-string: #8a5a00;
+  --ki-code-number: #8a6208;
+  /* 注释色实测：初版 #8b978f 在 --ki-color-bg(#f5f6f3) 上只有 2.80:1，低于 WCAG AA 正文阈值
+     4.5:1（review 量化发现），改为 #66746d（4.52:1）。注释是正文内容，不能只当装饰。 */
+  --ki-code-comment: #66746d;
+  --ki-code-func: #1f5f4b;
+  --ki-code-type: #4a5f56;
+  --ki-code-attr: #5e6f66;
+  --ki-code-punct: #4e5f56;
+}
+[data-theme="dark"] {
+  --ki-code-keyword: #74c3a0;
+  --ki-code-string: #d9ad5c;
+  --ki-code-number: #d9ad5c;
+  --ki-code-comment: #7c8a83;
+  --ki-code-func: #8fd6b6;
+  --ki-code-type: #b4beb7;
+  --ki-code-attr: #a9b6ae;
+  --ki-code-punct: #b4beb7;
+}
+.ki-markdown pre code .hljs-keyword,
+.ki-markdown pre code .hljs-doctag,
+.ki-markdown pre code .hljs-selector-tag,
+.ki-markdown pre code .hljs-built_in,
+.ki-markdown pre code .hljs-literal { color: var(--ki-code-keyword); font-weight: 600; }
+.ki-markdown pre code .hljs-string,
+.ki-markdown pre code .hljs-regexp,
+.ki-markdown pre code .hljs-template-tag,
+.ki-markdown pre code .hljs-template-variable,
+.ki-markdown pre code .hljs-meta .hljs-string { color: var(--ki-code-string); }
+.ki-markdown pre code .hljs-number,
+.ki-markdown pre code .hljs-symbol,
+.ki-markdown pre code .hljs-bullet,
+.ki-markdown pre code .hljs-link { color: var(--ki-code-number); }
+.ki-markdown pre code .hljs-comment,
+.ki-markdown pre code .hljs-quote,
+.ki-markdown pre code .hljs-meta { color: var(--ki-code-comment); }
+.ki-markdown pre code .hljs-title,
+.ki-markdown pre code .hljs-title.function_,
+.ki-markdown pre code .hljs-section { color: var(--ki-code-func); }
+.ki-markdown pre code .hljs-title.class_,
+.ki-markdown pre code .hljs-type,
+.ki-markdown pre code .hljs-name { color: var(--ki-code-type); }
+.ki-markdown pre code .hljs-attr,
+.ki-markdown pre code .hljs-attribute,
+.ki-markdown pre code .hljs-property,
+.ki-markdown pre code .hljs-variable,
+.ki-markdown pre code .hljs-params,
+.ki-markdown pre code .hljs-selector-attr,
+.ki-markdown pre code .hljs-selector-class,
+.ki-markdown pre code .hljs-selector-id { color: var(--ki-code-attr); }
+.ki-markdown pre code .hljs-operator,
+.ki-markdown pre code .hljs-punctuation,
+.ki-markdown pre code .hljs-tag { color: var(--ki-code-punct); }
 /* 首选代码语言选择器（侧边栏 footer 的图标按钮 + 浮层）。选项视觉沿用既有下拉项口径。
    ⚠️ 浮层由组件 Portal 到 body 并以 `position: fixed` 定位（left/bottom 由组件测量后内联给出）：
    就地渲染会被 `.ki-sidebar` 的 `overflow-x: hidden`（上方 :161）裁掉右侧大半。 */

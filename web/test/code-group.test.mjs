@@ -18,6 +18,18 @@ after(async () => vite.close());
 const group = (...lines) => lines.join('\n');
 const countOf = (html, pattern) => (html.match(pattern) ?? []).length;
 
+/** 第 n 个 `<code>` 的文本（去标签 + 解实体）：高亮后内容被 span 切分，只能按文本口径断言 */
+const codeText = (html, index) => {
+  const inner = [...html.matchAll(/<code[^>]*>([\s\S]*?)<\/code>/g)][index]?.[1] ?? '';
+  return inner
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&amp;/g, '&');
+};
+
 describe('多语言代码块（VitePress ::: code-group）', () => {
   it('把同一功能的多种语言实现收成一个组：标签条 + 面板 + 默认展示第一个', () => {
     const html = renderMarkdownHtml(group(
@@ -46,8 +58,14 @@ describe('多语言代码块（VitePress ::: code-group）', () => {
     assert.match(html, /aria-selected="false" tabindex="-1" data-ki-code-tab="1"/);
     // 面板：第一个可见、其余 hidden；语言类名沿用既有约定（mermaid 后处理也依赖它）
     assert.equal(countOf(html, /role="tabpanel"/g), 2);
-    assert.match(html, /data-ki-code-panel="0"><pre><code class="language-python">print\(1\)<\/code><\/pre><\/div>/);
-    assert.match(html, /data-ki-code-panel="1" hidden><pre><code class="language-ts">console\.log\(1\)<\/code>/);
+    // 代码内容自 2026-10-20 起带语法高亮（token 被 span 切分），故断言「面板各自持有自己的代码」
+    // 用「去标签 + 解实体」口径；`pre > code.language-X` 的外层形状仍严格保留（mermaid / 复制依赖它）
+    assert.match(html, /data-ki-code-panel="0"><pre><code class="language-python">/);
+    assert.match(html, /data-ki-code-panel="1" hidden><pre><code class="language-ts">/);
+    assert.equal(codeText(html, 0), 'print(1)');
+    assert.equal(codeText(html, 1), 'console.log(1)');
+    // 两个面板都被着色（未选中的也要着好色，切换时不得出现"白块待渲染"）
+    assert.match(html, /hljs-built_in/);
     // 整个组共用工具条上的一个复制按钮
     assert.equal(countOf(html, /data-ki-copy-code/g), 1);
     // 容器标记不得泄漏成正文
@@ -164,7 +182,8 @@ describe('多语言代码块（VitePress ::: code-group）', () => {
 
     assert.equal(countOf(html, /data-ki-code-group/g), 1);
     assert.equal(countOf(html, /role="tabpanel"/g), 2);
-    assert.match(html, /note: 下面这行是内容\n:::/);
+    // 内容含 `:::` 行的 yaml 块：高亮会把 token 切分，按文本口径断言整段未被截断
+    assert.equal(codeText(html, 0), 'note: 下面这行是内容\n:::');
   });
 
   it('组内含 mermaid 时按一个语言变体处理（面板内仍带 language-mermaid，后处理选择器才能命中）', () => {

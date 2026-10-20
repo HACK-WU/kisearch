@@ -99,7 +99,9 @@ describe('首选代码语言对渲染的影响', () => {
     const html = renderMarkdownHtml(DOC, undefined, 'typescript');
     assert.match(html, /aria-selected="true" tabindex="0" data-ki-code-tab="1"/);
     assert.match(html, /aria-selected="false" tabindex="-1" data-ki-code-tab="0"/);
-    assert.match(html, /data-ki-code-panel="1"><pre><code class="language-ts">MARK_TS/);
+    // 高亮会把 token 切分（`MARK_TS` 被 ts 语法标成常量变量），故只断言面板归属与内容在场
+    assert.match(html, /data-ki-code-panel="1"><pre><code class="language-ts">/);
+    assert.match(html, /MARK_TS/);
     assert.match(html, /data-ki-code-panel="0" hidden><pre><code class="language-python">/);
     // 结构本身不变：仍是两个标签 + 两个面板 + 一个复制按钮
     assert.equal(countOf(html, /role="tab"/g), 2);
