@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, activeImportCount } from '@/api/tasksApi';
-import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPrunePlan } from '@/api/httpApi';
+import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, getDocContent, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPruneCandidate, type ImportPrunePlan } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
@@ -152,6 +152,38 @@ function derivePickMode(selections: PendingSelection[]): 'dir' | 'files' | 'mixe
   if (hasDir && hasFile) return 'mixed';
   return hasDir ? 'dir' : 'files';
 }
+
+/**
+ * 候选条目的选择键。**文档身份 = group + relation**：同一个 relation 名可并存于不同 group，
+ * 只按 relation 做键会互相顶替（勾一篇等于勾了另一组同名的那篇）。用 `\u0000` 拼接，
+ * 避免路径分隔符与文档名本身的字符冲突。
+ */
+function pruneKeyOf(item: { group: string; relation: string }): string {
+  return `${item.group}\u0000${item.relation}`;
+}
+
+/**
+ * 候选按 group 归并，供候选区按组分块渲染。
+ *
+ * 为什么必须分组：删除粒度是「文档」，风险落点却是「组」——某个组在本次导入里一篇文件都没落入时，
+ * 它的候选就是**整个组**，勾一条与勾全组在旧列表里长得完全一样。分组后组头能直接说清这件事。
+ * 后端构造 items 时按组遍历，同组条目本就连续，这里只做保序归并，不重排。
+ */
+function groupPruneItems(items: ImportPruneCandidate[]): { group: string; items: ImportPruneCandidate[] }[] {
+  const groups = new Map<string, ImportPruneCandidate[]>();
+  for (const item of items) {
+    const bucket = groups.get(item.group);
+    if (bucket) bucket.push(item);
+    else groups.set(item.group, [item]);
+  }
+  return [...groups].map(([group, bucket]) => ({ group, items: bucket }));
+}
+
+/**
+ * 候选正文预览的展示上限（字符）。
+ * 只看开头足够判断"这是不是我不要的那篇"；整篇塞进清单里既卡 DOM 也没人读。
+ */
+const PRUNE_PREVIEW_CHARS = 1200;
 
 function normalizeRelativePath(value: string): string {
   const segments: string[] = [];
@@ -475,6 +507,27 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [pruneSelected, setPruneSelected] = useState<Set<string>>(new Set());
   const [pruneBusy, setPruneBusy] = useState(false);
   const [pruneError, setPruneError] = useState<string | null>(null);
+  /**
+   * 二次确认开关：`true` = 用户已点「删除所选」，但**尚未执行删除**。
+   * 不可逆物理删除（原文 + 向量 + 全文索引）不得一键完成，`handlePrune` 只挂在确认条上。
+   */
+  const [pruneConfirm, setPruneConfirm] = useState(false);
+  /** 确认条的「取消」：展开时接管焦点（原「删除所选」按钮已被替换，焦点会掉回 body） */
+  const pruneCancelRef = useRef<HTMLButtonElement>(null);
+  /**
+   * 候选清单筛选（100+ 时逐条翻找不可用）：按路径/文档名/组名子串过 + 「只看未涉及组」。
+   * 只是**视图**过滤——`pruneSelected` 仍按真实身份存 key，全选只作用于当前可见项。
+   */
+  const [pruneQuery, setPruneQuery] = useState('');
+  const [pruneOnlyUntouched, setPruneOnlyUntouched] = useState(false);
+  /**
+   * 候选正文预览（F3）：列表里只有路径与文档名，删之前看不到内容。
+   * 复用只读的 `GET /api/doc/get`（读通道，导入期间不被排队），**不新增后端接口**。
+   */
+  const [prunePreviewKey, setPrunePreviewKey] = useState<string | null>(null);
+  const [prunePreview, setPrunePreview] = useState<{ state: 'loading' | 'ready' | 'error'; text: string } | null>(null);
+  /** 预览请求序号：连点两条时只认最后一次的响应（慢响应不得覆盖新选择） */
+  const prunePreviewSeq = useRef(0);
   const [pruneReceipt, setPruneReceipt] = useState<{
     deleted: number;
     allDone?: boolean;
@@ -1606,6 +1659,75 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const activePrune = prunePlanOverride ?? result?.prune;
 
   /**
+   * 候选清单的派生视图（全选 / 组选 / 整组清空警示）。
+   * 一律从 `activePrune.items` 现算、不另存 state —— 删除后清单会被 `refreshPrunePlan`
+   * 整个替换，任何缓存都可能与 token 指向的候选集不一致。
+   */
+  const pruneGroups = groupPruneItems(activePrune?.items ?? []);
+  const pruneAllKeys = (activePrune?.items ?? []).map(pruneKeyOf);
+  /** 只数清单内命中的勾选：残留 key（清单已变）不应计进「已选」 */
+  const pruneSelectedInList = pruneAllKeys.filter((key) => pruneSelected.has(key)).length;
+  /**
+   * 勾选已覆盖、且**整组会消失**的组。
+   *
+   * ⚠️ 只算 `untouched` 组：它的全部文档都在候选集里，全勾 = 组变空。
+   * 已触及组即使候选全勾，本次导入落进去的文件仍在（不在候选集里）⇒ 组不会消失，
+   * 此时说「整组清空」是错的（走查实测：a 组 6 篇里删 3 篇，组还在）。
+   */
+  const pruneWholeGroups = pruneGroups.filter(
+    ({ items }) => items.some((item) => item.untouched) && items.every((item) => pruneSelected.has(pruneKeyOf(item))),
+  );
+  /** 本次完全没有文件落入的组数（服务端已算好 `untouchedGroups`，此前前端从未消费） */
+  const pruneUntouchedGroupCount = pruneGroups.filter(({ items }) => items.some((item) => item.untouched)).length;
+
+  /**
+   * 过滤后的候选视图（F5）。作用是**定位**，不是裁剪数据：勾选仍按真实身份存 key，
+   * 「全选」只作用于当前可见项——否则筛完点全选会把看不见的条目一起勾上（删除白名单必须所见即所选）。
+   * 组内计数随之变成「可见项」计数，筛选态由工具条上的「筛选出 N 篇」说明口径。
+   */
+  const pruneQueryNeedle = pruneQuery.trim().toLowerCase();
+  const pruneVisibleGroups = pruneGroups
+    .map(({ group, items }) => ({
+      group,
+      items: items.filter((item) => {
+        if (pruneOnlyUntouched && !item.untouched) return false;
+        if (!pruneQueryNeedle) return true;
+        // 路径、文档名、组名任一命中即可：用户手上往往只有其中一段
+        return `${item.sourcePath}\u0000${item.relation}\u0000${group}`.toLowerCase().includes(pruneQueryNeedle);
+      }),
+    }))
+    .filter((entry) => entry.items.length > 0);
+  const pruneVisibleKeys = pruneVisibleGroups.flatMap(({ items }) => items.map(pruneKeyOf));
+  const pruneVisibleSelected = pruneVisibleKeys.filter((key) => pruneSelected.has(key)).length;
+  const pruneFiltering = pruneQueryNeedle.length > 0 || pruneOnlyUntouched;
+
+  /**
+   * 载入/收起某条候选的正文预览。
+   * 再次点同一条 = 收起；换条目时只认最后一次请求（`prunePreviewSeq`），慢响应不得覆盖新内容。
+   */
+  const togglePrunePreview = async (item: ImportPruneCandidate, groupPath: string): Promise<void> => {
+    const key = pruneKeyOf(item);
+    if (prunePreviewKey === key) {
+      setPrunePreviewKey(null);
+      setPrunePreview(null);
+      return;
+    }
+    const scopeForRead = activePrune?.scope;
+    if (!scopeForRead) return;
+    setPrunePreviewKey(key);
+    setPrunePreview({ state: 'loading', text: '' });
+    const seq = ++prunePreviewSeq.current;
+    try {
+      const response = await getDocContent(scopeForRead, groupPath, item.relation);
+      if (prunePreviewSeq.current !== seq) return;
+      setPrunePreview({ state: 'ready', text: response.content ?? '' });
+    } catch (error) {
+      if (prunePreviewSeq.current !== seq) return;
+      setPrunePreview({ state: 'error', text: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  /**
    * REQ-20261019-001：用 `dryRun` 重算候选与 token。
    *
    * 为什么必须有：`pruneToken` 是候选集指纹——本次**只要删成功一条**，重算出的候选集就变了，
@@ -1624,7 +1746,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       if (!response.plan) return false;
       setPrunePlanOverride(response.plan);
       setPruneSelected(new Set([...keepKeys].filter((key) => response.plan!.items.some(
-        (item) => `${item.group}\u0000${item.relation}` === key,
+        (item) => pruneKeyOf(item) === key,
       ))));
       return true;
     } catch {
@@ -1640,7 +1762,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const handlePrune = async (): Promise<void> => {
     const plan = activePrune;
     if (!plan?.token) return;
-    const selected = [...pruneSelected];
+    // 只删**当前清单里点名的**：残留 key（换过清单）不得被一起提交——
+    // 删除接口按 `selected` 执行，界面上看不见的条目绝不能被删掉
+    const inList = new Set(pruneAllKeys);
+    const selected = [...pruneSelected].filter((key) => inList.has(key));
     if (selected.length === 0) {
       setPruneError('请至少选择一篇要删除的文档');
       return;
@@ -1662,7 +1787,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         }),
       });
       setPruneReceipt({ deleted: response.deleted ?? 0, allDone: response.allDone, failed: response.failed ?? [] });
-      const failedKeys = new Set((response.failed ?? []).map((item) => `${item.group}\u0000${item.relation}`));
+      const failedKeys = new Set((response.failed ?? []).map(pruneKeyOf));
       // 删除后立刻换新清单：失败项仍勾选、可重试；全部删完则清空勾选
       const refreshed = await refreshPrunePlan(failedKeys);
       if (!refreshed) setPruneSelected(new Set(selected.filter((key) => failedKeys.has(key))));
@@ -1670,6 +1795,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setPruneError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setPruneBusy(false);
+      // 无论成败都收起确认条：成功要换清单，失败要露出错误文案（否则确认条把错误盖在下面）
+      setPruneConfirm(false);
+      // 删除后清单会重算，预览指向的文档可能已不存在
+      setPrunePreviewKey(null);
+      setPrunePreview(null);
     }
   };
 
@@ -1682,17 +1812,30 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setPrunePlanOverride(null);
       setPruneReceipt(null);
       setPruneError(null);
+      setPruneConfirm(false);
       return;
     }
     setPrunePlanOverride(incoming);
     setPruneSelected(new Set(
       incoming.items
         .filter((item) => !item.untouched)
-        .map((item) => `${item.group}\u0000${item.relation}`),
+        .map(pruneKeyOf),
     ));
     setPruneReceipt(null);
     setPruneError(null);
+    setPruneConfirm(false);
+    // 换了一份清单 = 预览指向的文档可能已被删掉，必须收起
+    setPrunePreviewKey(null);
+    setPrunePreview(null);
+    // 新一次导入沿用上一轮的筛选词会让候选看起来"空了"，必须清掉（删除后的重算不走这里，筛选得以保留）
+    setPruneQuery('');
+    setPruneOnlyUntouched(false);
   }, [result?.prune?.token]);
+
+  // 确认条展开时把焦点交给「取消」：键盘用户不会因为首按钮被替换而丢失焦点位置
+  useEffect(() => {
+    if (pruneConfirm) pruneCancelRef.current?.focus();
+  }, [pruneConfirm]);
 
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
@@ -2592,31 +2735,87 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                       如需强制清理：ki delete-relation -g &lt;组&gt; -r &lt;文档&gt;
                     </div>
                   </>
-                ) : pruneReceipt && (pruneReceipt.allDone || pruneReceipt.failed.length === 0) ? (
-                  <div className="ki-cell-sub">
-                    {pruneReceipt.allDone || pruneReceipt.deleted === 0
-                      ? '已无剩余候选'
-                      : `已删除 ${pruneReceipt.deleted} 篇`}
-                    {pruneReceipt.failed.length > 0 && `；${pruneReceipt.failed.length} 篇失败：`}
-                    {pruneReceipt.failed.map((item) => (
-                      <div key={`${item.group}\u0000${item.relation}`}>
-                        {item.group} / {item.relation}：{item.reason}
+                ) : activePrune.total === 0 ? (
+                  /* 只有「候选真的清空了」才收起列表：只要还有剩余候选就必须继续可操作——
+                     旧实现删掉一部分就把剩下的一起藏进无处可点的回执里（走查实测踩到） */
+                  pruneReceipt ? (
+                    <div className="ki-cell-sub">
+                      {pruneReceipt.deleted > 0 ? `已删除 ${pruneReceipt.deleted} 篇` : '已无剩余候选'}
+                      {pruneReceipt.failed.length > 0 && `；${pruneReceipt.failed.length} 篇失败：`}
+                      {pruneReceipt.failed.map((item) => (
+                        <div key={pruneKeyOf(item)}>
+                          {item.group} / {item.relation}：{item.reason}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null
+                ) : activePrune.overLimit ? (
+                  /* 超过单次上限：网页端**有意**不给批量删除（一次删几百篇无法逐条核对）。
+                     这里必须给能直接照做的出路，不能只说"请用 CLI" */
+                  <>
+                    <div style={{ fontWeight: 600, color: 'var(--ki-color-warning)' }}>
+                      候选 {activePrune.total} 篇，超过网页单次上限 500
+                    </div>
+                    <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                      一次删这么多无法逐条核对，网页端不提供批量删除。请按下列任一方式在服务端清理：
+                    </div>
+                    <div className="ki-cell-sub" style={{ marginTop: 4, lineHeight: 1.6 }}>
+                      <div>① <strong>整组清理</strong>（候选集中在少数组时最快；不带 --yes 先预览，确认无误再加）</div>
+                      <code
+                        style={{
+                          display: 'block',
+                          margin: '2px 0 6px',
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                          whiteSpace: 'pre-wrap',
+                          overflowWrap: 'anywhere',
+                        }}
+                      >
+                        ki group delete -s {activePrune.scope} &quot;&lt;组路径&gt;&quot;
+                      </code>
+                      <div>② <strong>逐篇清理</strong></div>
+                      <code
+                        style={{
+                          display: 'block',
+                          margin: '2px 0 6px',
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                          whiteSpace: 'pre-wrap',
+                          overflowWrap: 'anywhere',
+                        }}
+                      >
+                        ki delete-relation -s {activePrune.scope} -g &lt;组&gt; -r &lt;文档&gt;
+                      </code>
+                      <div>
+                        ③ <strong>分批导入</strong>：每次只选一部分子目录重新导入并开启「目录同步清理」，
+                        让候选降到 500 以内后回到本页逐条核对删除
                       </div>
-                    ))}
-                  </div>
-                ) : activePrune.total === 0 ? null : activePrune.overLimit ? (
-                  <div className="ki-cell-sub" style={{ color: 'var(--ki-color-warning)' }}>
-                    候选 {activePrune.total} 篇，超过单次上限 500：请用 CLI 清理，或先在本地恢复部分文件后重新导入
-                  </div>
+                    </div>
+                    {/* 明细只取前 500 条（后端 PRUNE_MAX_DETAIL），组清单可能不全，必须说清 */}
+                    {pruneGroups.length > 0 && (
+                      <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                        涉及组（明细只取前 500 条，可能不全）：{pruneGroups.slice(0, 10).map((entry) => entry.group).join('、')}
+                        {pruneGroups.length > 10 ? ` 等 ${pruneGroups.length} 个组` : ''}
+                      </div>
+                    )}
+                    {activePrune.unableCount > 0 && (
+                      <div className="ki-cell-sub" style={{ marginTop: 4 }}>
+                        另有 {activePrune.unableCount} 篇无来源记录，不参与清理
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <>
                     <div style={{ fontWeight: 600 }}>
                       库中另有 {activePrune.total} 篇文档，本次上传的目录里没有
                     </div>
-                    {pruneReceipt && pruneReceipt.failed.length > 0 && (
-                      <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', marginTop: 4 }}>
-                        上次删除：成功 {pruneReceipt.deleted} 篇，失败 {pruneReceipt.failed.length} 篇
-                        （失败项已保留勾选，可直接重试）
+                    {pruneReceipt && (pruneReceipt.deleted > 0 || pruneReceipt.failed.length > 0) && (
+                      <div
+                        className="ki-cell-sub"
+                        style={{ color: pruneReceipt.failed.length > 0 ? 'var(--ki-color-danger)' : undefined, marginTop: 4 }}
+                      >
+                        上次删除：成功 {pruneReceipt.deleted} 篇
+                        {pruneReceipt.failed.length > 0
+                          ? `，失败 ${pruneReceipt.failed.length} 篇（失败项已保留勾选，可直接重试）`
+                          : '；下面是剩余候选'}
                       </div>
                     )}
                     {activePrune.warn && (
@@ -2624,32 +2823,244 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         本次将删除库中 {Math.round(activePrune.deleteRatio * 100)}% 的文档，请逐条核对后再确认
                       </div>
                     )}
+                    {/* 选择工具条：全选 + 已选/总数 + 筛选。清单动辄几十上百条，逐条点/翻找都不可用 */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: pruneBusy ? 'default' : 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          // 全选只覆盖**当前可见**项：筛完再全选不得把看不见的条目一起勾上
+                          checked={pruneVisibleKeys.length > 0 && pruneVisibleSelected >= pruneVisibleKeys.length}
+                          disabled={pruneBusy || pruneVisibleKeys.length === 0}
+                          // 三态：部分选中必须显示 indeterminate，否则硬看是「已全选」
+                          ref={(el) => {
+                            if (el) el.indeterminate = pruneVisibleSelected > 0 && pruneVisibleSelected < pruneVisibleKeys.length;
+                          }}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setPruneConfirm(false);
+                            setPruneSelected((prev) => {
+                              const next = new Set(prev);
+                              for (const key of pruneVisibleKeys) {
+                                if (checked) next.add(key);
+                                else next.delete(key);
+                              }
+                              return next;
+                            });
+                          }}
+                        />
+                        全选
+                      </label>
+                      <span className="ki-cell-sub">已选 {pruneSelectedInList} / 共 {pruneAllKeys.length} 篇</span>
+                      {pruneUntouchedGroupCount > 0 && (
+                        <span className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)' }}>
+                          其中 {pruneUntouchedGroupCount} 个组本次无文件落入
+                        </span>
+                      )}
+                    </div>
+                    {/* 筛选：100+ 候选时靠肉眼在 220px 里翻找不现实 */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                      <input
+                        className="ki-form-input"
+                        style={{ flex: '1 1 200px', minWidth: 0, height: 32, minHeight: 32, fontSize: 12, padding: '0 8px' }}
+                        placeholder="筛选：路径 / 文档名 / 组名"
+                        value={pruneQuery}
+                        disabled={pruneBusy}
+                        onChange={(e) => {
+                          // 改筛选就收起确认条：确认条上的数字是"整份清单已选 X 篇"，与筛后眼前的条目数不一致会误导
+                          setPruneConfirm(false);
+                          setPruneQuery(e.target.value);
+                        }}
+                        aria-label="筛选候选文档"
+                      />
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: pruneBusy ? 'default' : 'pointer', whiteSpace: 'nowrap' }}>
+                        <input
+                          type="checkbox"
+                          checked={pruneOnlyUntouched}
+                          disabled={pruneBusy}
+                          onChange={(e) => {
+                            setPruneConfirm(false);
+                            setPruneOnlyUntouched(e.target.checked);
+                          }}
+                        />
+                        只看未涉及组
+                      </label>
+                      {pruneFiltering && (
+                        <span className="ki-cell-sub">筛选出 {pruneVisibleKeys.length} / {pruneAllKeys.length} 篇</span>
+                      )}
+                    </div>
                     <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
-                      {activePrune.items.map((item) => {
-                        const key = `${item.group}\u0000${item.relation}`;
+                      {pruneVisibleGroups.length === 0 && (
+                        <div className="ki-cell-sub" style={{ padding: '6px 0' }}>
+                          没有匹配的候选：换关键词，或取消「只看未涉及组」
+                        </div>
+                      )}
+                      {pruneVisibleGroups.map(({ group: groupPath, items }) => {
+                        const groupKeys = items.map(pruneKeyOf);
+                        const pickedInGroup = groupKeys.filter((key) => pruneSelected.has(key)).length;
+                        const fullyPicked = pickedInGroup === items.length;
+                        // untouched 是组级属性（该组本次一篇文件都没落入）→ 勾选等于整组清空
+                        const groupUntouched = items.some((item) => item.untouched);
                         return (
-                          <label
-                            key={key}
-                            style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '2px 0', overflowWrap: 'anywhere' }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={pruneSelected.has(key)}
-                              disabled={pruneBusy}
-                              onChange={(e) => {
-                                setPruneSelected((prev) => {
-                                  const next = new Set(prev);
-                                  if (e.target.checked) next.add(key);
-                                  else next.delete(key);
-                                  return next;
-                                });
+                          <div key={groupPath}>
+                            <label
+                              style={{
+                                position: 'sticky',
+                                top: 0,
+                                zIndex: 1,
+                                display: 'flex',
+                                gap: 8,
+                                alignItems: 'flex-start',
+                                padding: '4px 0',
+                                fontWeight: 600,
+                                // sticky 头必须有实底，否则滚动时与下条目文本叠字
+                                background: 'var(--ki-color-surface, #fff)',
+                                overflowWrap: 'anywhere',
                               }}
-                            />
-                            <span>
-                              {item.sourcePath} → 「{item.relation}」（{item.group}
-                              {item.untouched ? ' · 本次未涉及' : ''}）
-                            </span>
-                          </label>
+                            >
+                              <input
+                                type="checkbox"
+                                checked={fullyPicked}
+                                disabled={pruneBusy}
+                                ref={(el) => {
+                                  if (el) el.indeterminate = pickedInGroup > 0 && !fullyPicked;
+                                }}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setPruneConfirm(false);
+                                  setPruneSelected((prev) => {
+                                    const next = new Set(prev);
+                                    for (const key of groupKeys) {
+                                      if (checked) next.add(key);
+                                      else next.delete(key);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                              />
+                              <span>{groupPath}</span>
+                              <span
+                                className="ki-cell-sub"
+                                style={{ fontWeight: 400, flex: 'none' }}
+                                // 筛选态下分子分母都是「可见」口径，不给提示会误读成整组只有这么多
+                                title={pruneFiltering ? '筛选后可见的条目' : undefined}
+                              >
+                                {pickedInGroup}/{items.length}
+                              </span>
+                              {groupUntouched && (
+                                <span className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', flex: 'none' }}>
+                                  ⚠ 本次未涉及
+                                </span>
+                              )}
+                            </label>
+                            {groupUntouched && (
+                              <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', padding: '0 0 2px 24px' }}>
+                                本组本次没有任何文件落入，勾选即清空整组（{items.length} 篇）
+                              </div>
+                            )}
+                            {items.map((item) => {
+                              const key = pruneKeyOf(item);
+                              const previewOpen = prunePreviewKey === key;
+                              return (
+                                <div key={key}>
+                                  <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', padding: '2px 0 2px 24px' }}>
+                                    <label
+                                      style={{
+                                        display: 'flex',
+                                        gap: 8,
+                                        alignItems: 'flex-start',
+                                        flex: '1 1 auto',
+                                        minWidth: 0,
+                                        overflowWrap: 'anywhere',
+                                        cursor: pruneBusy ? 'default' : 'pointer',
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={pruneSelected.has(key)}
+                                        disabled={pruneBusy}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked;
+                                          setPruneConfirm(false);
+                                          setPruneSelected((prev) => {
+                                            const next = new Set(prev);
+                                            if (checked) next.add(key);
+                                            else next.delete(key);
+                                            return next;
+                                          });
+                                        }}
+                                      />
+                                      <span>
+                                        {item.sourcePath} → 「{item.relation}」
+                                      </span>
+                                    </label>
+                                    {/* 预览按钮必须在 label 之外：放进 label 里点它会被浏览器当成「点标签」→ 顺带切换勾选 */}
+                                    <button
+                                      type="button"
+                                      disabled={pruneBusy}
+                                      aria-expanded={previewOpen}
+                                      // 只在展开时挂 aria-controls：收起时节点不存在，挂了会指向空 id
+                                      {...(previewOpen ? { 'aria-controls': `ki-prune-preview-${key.replace(/\u0000/g, '-')}` } : {})}
+                                      onClick={() => void togglePrunePreview(item, groupPath)}
+                                      style={{
+                                        flex: 'none',
+                                        border: 0,
+                                        background: 'none',
+                                        color: 'var(--ki-color-primary)',
+                                        font: 'inherit',
+                                        fontSize: 12,
+                                        padding: '0 2px',
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      {previewOpen ? '收起' : '预览'}
+                                    </button>
+                                  </div>
+                                  {previewOpen && (
+                                    <div
+                                      id={`ki-prune-preview-${key.replace(/\u0000/g, '-')}`}
+                                      style={{ margin: '2px 0 6px 24px' }}
+                                    >
+                                      {prunePreview?.state === 'loading' && <div className="ki-cell-sub">载入正文…</div>}
+                                      {prunePreview?.state === 'error' && (
+                                        <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)' }}>
+                                          正文读取失败：{prunePreview.text}
+                                        </div>
+                                      )}
+                                      {prunePreview?.state === 'ready' && (
+                                        prunePreview.text.trim()
+                                          ? (
+                                            <>
+                                              <pre
+                                                style={{
+                                                  margin: 0,
+                                                  maxHeight: 160,
+                                                  overflow: 'auto',
+                                                  padding: '6px 8px',
+                                                  background: 'var(--ki-color-bg-secondary, #f6f6f6)',
+                                                  borderRadius: 'var(--ki-radius-sm, 8px)',
+                                                  fontSize: 12,
+                                                  lineHeight: 1.45,
+                                                  whiteSpace: 'pre-wrap',
+                                                  overflowWrap: 'anywhere',
+                                                }}
+                                              >
+                                                {prunePreview.text.slice(0, PRUNE_PREVIEW_CHARS)}
+                                              </pre>
+                                              {prunePreview.text.length > PRUNE_PREVIEW_CHARS && (
+                                                <div className="ki-cell-sub">
+                                                  仅显示前 {PRUNE_PREVIEW_CHARS} 个字符（共 {prunePreview.text.length}）
+                                                </div>
+                                              )}
+                                            </>
+                                          )
+                                          : <div className="ki-cell-sub">该文档正文为空</div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         );
                       })}
                     </div>
@@ -2658,40 +3069,125 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         另有 {activePrune.unableCount} 篇无来源记录，不参与清理
                       </div>
                     )}
+                    {/* 文案分层：后果（不可恢复）常显在按钮旁，机制说明（指纹/重算/CLI）收进 details —— 两者混排会让人一眼读不完 */}
                     <div className="ki-cell-sub" style={{ marginTop: 4 }}>
-                      删除后即刻从列表与检索消失，<strong>不可恢复</strong>（原文、向量与全文索引一并物理删除）。
-                      清单与本次任务绑定，库在这期间有变化会自动重算。
+                      <strong>不可恢复</strong>：原文、向量与全文索引一并物理删除，删除后即刻从列表与检索消失。
                     </div>
+                    <details style={{ marginTop: 2 }}>
+                      <summary className="ki-cell-sub" style={{ cursor: 'pointer' }}>清理规则与命令行入口</summary>
+                      <div className="ki-cell-sub" style={{ marginTop: 2 }}>
+                        清单与本次任务绑定（候选集指纹）：库在这期间有变化会自动重算，删除前请重新核对。
+                        <div style={{ marginTop: 4 }}>命令行入口（在服务端执行）：</div>
+                        <code
+                          style={{
+                            display: 'block',
+                            marginTop: 2,
+                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                            whiteSpace: 'pre-wrap',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          ki delete-relation -s {activePrune.scope} -g &lt;组&gt; -r &lt;文档&gt;
+                        </code>
+                        <code
+                          style={{
+                            display: 'block',
+                            marginTop: 2,
+                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                            whiteSpace: 'pre-wrap',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          ki group delete -s {activePrune.scope} &quot;&lt;组&gt;&quot;　（默认只预览，确认后加 --yes）
+                        </code>
+                      </div>
+                    </details>
                     {pruneError && (
                       <div className="ki-cell-sub" style={{ color: 'var(--ki-color-danger)', marginTop: 4 }}>
                         {pruneError}
                       </div>
                     )}
-                    <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <button
-                        type="button"
-                        className="ki-btn"
-                        disabled={pruneBusy || pruneSelected.size === 0}
-                        onClick={() => void handlePrune()}
-                      >
-                        {pruneBusy ? '正在删除…' : `删除所选 ${pruneSelected.size} 篇`}
-                      </button>
-                      {/* 手动重算入口：自动重算失败（如暂存目录已被清理）时兜底，避免用户卡在 409 */}
-                      <button
-                        type="button"
-                        className="ki-btn ki-btn--ghost"
-                        disabled={pruneBusy}
-                        onClick={() => {
-                          setPruneReceipt(null);
-                          setPruneError(null);
-                          void refreshPrunePlan(new Set(pruneSelected)).then((ok) => {
-                            if (!ok) setPruneError('重新计算失败：暂存目录可能已被清理，请重新导入一次后再试');
-                          });
+                    {pruneConfirm ? (
+                      /* 二次确认：不可逆物理删除不得一键完成。确认条里把「会整组清空哪几个组」点明。
+                         首按钮被替换后焦点会掉回 body（元素被卸载），键盘用户必须能继续操作：
+                         确认条出现即把焦点交给「取消」（不交给删除按钮，避免回车误删），Esc 关闭。 */
+                      <div
+                        role="alertdialog"
+                        aria-label="确认删除候选文档"
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Escape') return;
+                          // 只吃自己这层的 Esc，别把页面其它 Esc 行为一并触发
+                          e.stopPropagation();
+                          setPruneConfirm(false);
+                        }}
+                        style={{
+                          marginTop: 8,
+                          padding: '8px 10px',
+                          border: '1px solid var(--ki-color-danger)',
+                          borderRadius: 'var(--ki-radius-sm, 8px)',
                         }}
                       >
-                        重新计算候选
-                      </button>
-                    </div>
+                        <div style={{ fontWeight: 600, color: 'var(--ki-color-danger)' }}>
+                          确认删除 {pruneSelectedInList} 篇文档？
+                        </div>
+                        <div className="ki-cell-sub" style={{ marginTop: 2 }}>
+                          {pruneSelectedInList === 0
+                            ? '当前没有选中任何文档。'
+                            : pruneWholeGroups.length > 0
+                              ? `${pruneWholeGroups.length} 个组将被整组清空（${pruneWholeGroups
+                                .map((entry) => `${entry.group} ${entry.items.length} 篇`)
+                                .join('、')}）。原文、向量与全文索引一并物理删除，不可恢复。`
+                              : '原文、向量与全文索引一并物理删除，不可恢复。'}
+                        </div>
+                        <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <button
+                            ref={pruneCancelRef}
+                            type="button"
+                            className="ki-btn ki-btn--ghost ki-btn--small"
+                            disabled={pruneBusy}
+                            onClick={() => setPruneConfirm(false)}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            className="ki-btn ki-btn--danger ki-btn--small"
+                            disabled={pruneBusy || pruneSelectedInList === 0}
+                            onClick={() => void handlePrune()}
+                          >
+                            {pruneBusy ? '正在删除…' : `确认删除 ${pruneSelectedInList} 篇`}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+                        {/* 危险操作入口用 danger（同页只有真正会改数据的按钮才红）；省略号表示"还要再确认一步" */}
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--danger"
+                          disabled={pruneBusy || pruneSelectedInList === 0}
+                          onClick={() => setPruneConfirm(true)}
+                        >
+                          删除所选 {pruneSelectedInList} 篇…
+                        </button>
+                        {/* 手动重算入口：自动重算失败（如暂存目录已被清理）时兜底，避免用户卡在 409 */}
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--ghost"
+                          disabled={pruneBusy}
+                          onClick={() => {
+                            setPruneConfirm(false);
+                            setPruneReceipt(null);
+                            setPruneError(null);
+                            void refreshPrunePlan(new Set(pruneSelected)).then((ok) => {
+                              if (!ok) setPruneError('重新计算失败：暂存目录可能已被清理，请重新导入一次后再试');
+                            });
+                          }}
+                        >
+                          重新计算候选
+                        </button>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
