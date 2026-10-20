@@ -26,7 +26,7 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { buildTaskDetail, taskSummaryLine, indexReadinessLabel } = await vite.ssrLoadModule('/src/lib/taskDetailModel.ts');
+const { buildTaskDetail, buildGroupTreeLines, buildPathTree, taskSummaryLine, indexReadinessLabel } = await vite.ssrLoadModule('/src/lib/taskDetailModel.ts');
 
 after(async () => { await vite.close(); });
 
@@ -81,7 +81,9 @@ describe('完成态结果摘要', () => {
     const byLabel = Object.fromEntries(view.params.map((row) => [row.label, row]));
     assert.equal(byLabel['来源'].value, '网页 · 浏览器上传（暂存目录）');
     assert.equal(byLabel['Group'].value, '未指定（按源目录派生）');
-    assert.match(byLabel['Group'].hint ?? '', /raw\/sub/);
+    // 参数段只给数量（整份落点曾在两处各抄一遍，601 字把栅格拉断）
+    assert.match(byLabel['Group'].hint ?? '', /实际落点 1 个 Group/);
+    assert.doesNotMatch(byLabel['Group'].hint ?? '', /raw\/sub/, '落点明细不得再进参数段 hint');
     assert.equal(byLabel['标签'].value, 'a / b');
     assert.equal(byLabel['向量'].value, '仅全文索引（未写 dense）');
     assert.equal(byLabel['同名策略'].value, '自动添加后缀（模板 _{n}）');
@@ -164,6 +166,115 @@ describe('进度口径', () => {
   });
 });
 
+describe('落点 Group 展示形态（2026-10-20）', () => {
+  it('落点只出现在结果段一次，且独占整行', () => {
+    const groups = ['langchain', 'langchain/stages', 'langchain/stages/lessons'];
+    const view = buildTaskDetail(baseTask({ params: { sourceKind: 'upload' }, result: { groups } }));
+    const landing = view.results.find((row) => row.label === '落点 Group');
+    assert.deepEqual(landing?.tree?.items, groups, '结果段持有完整落点');
+    assert.equal(landing?.tree?.summary, undefined, '只有 3 个落点直接摊开，别让人多点一次');
+    assert.equal(landing?.full, true, '长值独占整行，否则把双列栅格的另一格拉出大片空白');
+    const paramHint = view.params.find((row) => row.label === 'Group')?.hint ?? '';
+    assert.equal(groups.some((group) => paramHint.includes(group)), false, '参数段不得复制落点正文');
+  });
+
+  it('树形合并公共根，父级只出现一次', () => {
+    assert.deepEqual(
+      buildGroupTreeLines(['a', 'a/b', 'a/b/c', 'a/d']),
+      ['a', '├ b', '│  └ c', '└ d'],
+    );
+  });
+
+  it('多个根时顶端带连接符', () => {
+    assert.deepEqual(buildGroupTreeLines(['x/1', 'y/2']), ['├ x', '│  └ 1', '└ y', '   └ 2']);
+  });
+
+  it('空列表与单值不产生空行', () => {
+    assert.deepEqual(buildGroupTreeLines([]), []);
+    assert.deepEqual(buildGroupTreeLines(['only']), ['only']);
+  });
+});
+
+describe('落点折叠阈值（2026-10-20）', () => {
+  it('≥4 个落点才折叠，摘要量词由 model 给', () => {
+    for (const count of [2, 3]) {
+      const groups = Array.from({ length: count }, (_, i) => `g/${i}`);
+      const row = buildTaskDetail(baseTask({ params: { sourceKind: 'upload' }, result: { groups } }))
+        .results.find((item) => item.label === '落点 Group');
+      assert.equal(row?.tree?.summary, undefined, `${count} 个应直接摊开`);
+    }
+    const four = buildTaskDetail(baseTask({
+      params: { sourceKind: 'upload' },
+      result: { groups: ['a', 'b', 'c', 'd'] },
+    })).results.find((item) => item.label === '落点 Group');
+    assert.equal(four?.tree?.summary, '全部 4 个 Group');
+  });
+});
+
+describe('明细树形缩进（2026-10-20）', () => {
+  it('明细按目录建树，说明只挂在条目行', () => {
+    const lines = buildPathTree([
+      { path: 'docs/guides/a.md', meta: '库中已有：raw/a' },
+      { path: 'docs/guides/b.md', meta: '库中已有：raw/b' },
+      { path: 'docs/intro.md', meta: '→ intro（已覆盖）' },
+    ]);
+    assert.deepEqual(
+      lines.map((line) => line.text),
+      ['docs', '├ guides', '│  ├ a.md', '│  └ b.md', '└ intro.md'],
+      '目录前缀只出现一次，不再 20 行重复同一段路径',
+    );
+    assert.deepEqual(lines.map((line) => line.item), [false, false, true, true, true], '中间目录行不是条目');
+    assert.equal(lines[2].meta, '库中已有：raw/a');
+    assert.equal(lines[0].meta, undefined, '目录行不得凭空带说明');
+  });
+
+  it('只有一条明细时也不能丢说明（单根即叶子）', () => {
+    assert.deepEqual(
+      buildPathTree([{ path: 'a.md', meta: '→ a（已覆盖）' }]),
+      [{ text: 'a.md', item: true, meta: '→ a（已覆盖）' }],
+    );
+  });
+
+  it('条目没有说明时仍算条目（不能靠 meta 反推）', () => {
+    const lines = buildPathTree([{ path: 'a/b.md' }, { path: 'a/c.md', meta: '→ 已覆盖' }]);
+    const leaf = lines.find((line) => line.text.endsWith('b.md'));
+    assert.equal(leaf?.item, true, '没说明也是条目；靠 meta 判定会把它渲染成目录行（颜色变淡）');
+    assert.equal(leaf?.meta, undefined);
+  });
+
+  it('落点树是纯路径（不带说明）', () => {
+    assert.deepEqual(buildGroupTreeLines(['a/b', 'a/c']), ['a', '├ b', '└ c']);
+  });
+
+  it('库里位置与源路径相同时不重复打印路径', () => {
+    const view = buildTaskDetail(baseTask({
+      result: {
+        files: FILES,
+        duplicates: [
+          { path: 'docs/guides/a.md', existingGroup: 'docs/guides', existingRelation: 'a' },
+          { path: 'docs/guides/b.md', existingGroup: 'other/place', existingRelation: 'b' },
+        ],
+      },
+    }));
+    assert.equal(view.duplicates[0].meta, '库中已有同一路径', '同落点不必把路径抄第二遍');
+    assert.match(view.duplicates[1].meta ?? '', /other\/place\/b/, '真跨 Group 时要写清位置');
+  });
+
+  it('冲突动作在 relation 就是源路径时不重复路径', () => {
+    const view = buildTaskDetail(baseTask({
+      result: {
+        files: FILES,
+        conflicts: [
+          { path: 'docs/a.md', relation: 'docs/a', action: 'overwrite' },
+          { path: 'docs/b.md', relation: 'moved/b', action: 'suffix' },
+        ],
+      },
+    }));
+    assert.equal(view.conflicts[0].meta, '→ 已覆盖');
+    assert.equal(view.conflicts[1].meta, '→ moved/b（已改名）');
+  });
+});
+
 describe('错误与提示 tone', () => {
   it('全部疑似重复用 warn 而非 danger，并给出「仍然导入」指引', () => {
     const view = buildTaskDetail(baseTask({
@@ -242,5 +353,17 @@ describe('时间口径', () => {
     const view = buildTaskDetail(baseTask({ startedAt: NOW + 5_000, finishedAt: NOW + 7_000 }));
     assert.match(view.times[0].hint ?? '', /排队 5s/);
     assert.match(view.times[1].hint ?? '', /执行 2s/);
+  });
+
+  it('同一天不重复打印日期（日期移到 hint，避免半宽列折行）', () => {
+    const same = buildTaskDetail(baseTask({ startedAt: NOW + 5_000, finishedAt: NOW + 7_000 }));
+    // 区间里只剩「16:56:07 → 16:56:12」，两个 yyyy/MM/dd 会既读成「跨了一天」又撑爆列宽
+    assert.doesNotMatch(same.times[0].value, /\//, `同一天区间内不应出现日期：${same.times[0].value}`);
+    assert.match(same.times[0].hint ?? '', /\d{2}\/\d{2}/, '日期必须还有地方可看（hint）');
+    assert.doesNotMatch(same.times[1].value, /\//, `结束行同一天也不重复日期：${same.times[1].value}`);
+
+    const crossDay = buildTaskDetail(baseTask({ startedAt: NOW + 90_000_000, finishedAt: NOW + 90_000_000 }));
+    assert.equal(crossDay.times[0].value.split('/').length - 1, 4, `跨天必须各写一次完整日期：${crossDay.times[0].value}`);
+    assert.doesNotMatch(crossDay.times[0].hint ?? '', /\d{2}\/\d{2}$/, '跨天时日期已在 value 里，hint 不再重复');
   });
 });

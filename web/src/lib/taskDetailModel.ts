@@ -19,6 +19,22 @@ export interface DetailRow {
   tone?: DetailTone;
   /** 可跳转目标（R9：知识库 → Browse 页） */
   href?: string;
+  /**
+   * 独占整行（`grid-column: 1 / -1`）。
+   * 双列栅格里出现长值会把同行的另一格一起拉高、空出一大片（实测「落点 Group」
+   * 曾把右侧「标签」拉到 451px 高只放一行字），长值必须自己占满整行。
+   */
+  full?: boolean;
+  /**
+   * 多值路径列表（如落点 Group）：渲染为**可折叠的层级树**，`value` 留空。
+   * 不用 ` / ` 串联也不用胶囊流——落点本来就是一棵树，压平后看不出
+   * `stages` 是 `stages/1-入门与模型层` 的父级（实测同一任务：串联 507px、
+   * 胶囊 474px/最宽 303px 撑满卡片、树 418px/最宽 22 字符）。
+   * `summary` 由 model 给：折叠文案里的量词（「20 个 Group」）也是口径，不该写死在 JSX 里。
+   * ★ `summary` 为 undefined ⇒ **不折叠直接摊开**：只有 2~3 个落点还让人多点一次是负担
+   *   （真实台账里 `ui-prune-test` 这类任务全是 3 个落点），摊开也只占 3 行。
+   */
+  tree?: { items: string[]; summary?: string };
 }
 
 export interface DetailItem {
@@ -86,6 +102,9 @@ const SOURCE_KIND_LABEL: Record<'upload' | 'external', string> = {
 /** 明细不完整时的统一文案（不区分「超 20 条」与「字节预算裁剪」） */
 const TRUNCATED_HINT = '明细未完整显示';
 
+/** 落点少于此值时直接摊开（折叠一次的成本 > 多出来的两三行） */
+const GROUP_TREE_COLLAPSE_THRESHOLD = 4;
+
 function dash(value: unknown): string {
   if (value === undefined || value === null || value === '') return '—';
   if (typeof value === 'number' && !Number.isFinite(value)) return '—';
@@ -112,6 +131,29 @@ export function indexReadinessLabel(readiness?: TaskIndexReadiness): string {
 function timeLabel(value?: number): string {
   if (!value) return '—';
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' }).format(value);
+}
+
+function timeOnly(value: number): string {
+  return new Intl.DateTimeFormat('zh-CN', { timeStyle: 'medium' }).format(value);
+}
+
+/** 「10/20」——只有跨天判断需要日期时，才把它挪到 hint 里（列宽 163px） */
+function dayLabel(value: number): string {
+  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(value);
+}
+
+function sameDay(a: number, b: number): boolean {
+  return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
+/**
+ * 时间区间：同一天**不重复打印日期**。
+ * 原实现写成 `2026/10/20 16:56:07 → 2026/10/20 16:56:07`：既看不出这是「同一时刻还是
+ * 跨了整天」，在双列栅格 163px 的列宽里又必然折行（实测断成「…16:56:07 →」/「16:56:07」）。
+ * 现在同一天只留时间，日期由调用方放进 hint。
+ */
+function rangeLabel(from: number, to: number): string {
+  return sameDay(from, to) ? `${timeOnly(from)} → ${timeOnly(to)}` : `${timeLabel(from)} → ${timeLabel(to)}`;
 }
 
 function durationLabel(ms: number): string {
@@ -198,8 +240,10 @@ function paramRows(task: TaskRecord): DetailRow[] {
     rows.push({
       label: 'Group',
       value: params.group ? dash(params.group) : '未指定（按源目录派生）',
+      // 只给数量、指向下方结果段：整份落点曾在这里再抄一遍（601 字 / 435px），
+      // 与「执行结果 → 落点 Group」完全重复，还把双列栅格拉断。
       ...(task.result?.groups && task.result.groups.length > 0
-        ? { hint: `实际落点：${task.result.groups.join(' / ')}` }
+        ? { hint: `实际落点 ${task.result.groups.length} 个 Group（见下方执行结果）` }
         : {}),
     });
     rows.push({ label: '标签', value: params.tags && params.tags.length > 0 ? params.tags.join(' / ') : '未设置' });
@@ -270,8 +314,19 @@ function resultRows(task: TaskRecord): DetailRow[] {
   if (result.fullTextIndexed !== undefined) rows.push({ label: '全文索引', value: `${result.fullTextIndexed} 条` });
   // 0 个附件不占一行（关闭附件收集与「一张都没复制」在详情里没有区分价值）
   if (result.assets) rows.push({ label: '附件', value: `复制 ${result.assets} 个` });
+  // 落点经常是几十个层级路径：`value` 留空，由渲染层折叠成摘要 + 层级树
   if (result.groups && result.groups.length > 0) {
-    rows.push({ label: '落点 Group', value: result.groups.join(' / ') });
+    rows.push({
+      label: '落点 Group',
+      value: '',
+      tree: {
+        items: result.groups,
+        ...(result.groups.length >= GROUP_TREE_COLLAPSE_THRESHOLD
+          ? { summary: `全部 ${result.groups.length} 个 Group` }
+          : {}),
+      },
+      full: true,
+    });
   }
   // 索引行只在有诊断数据时出现：`—` 对用户没有信息量（code-review P2）
   if (task.indexReadiness) rows.push({ label: '索引', value: indexReadinessLabel(task.indexReadiness) });
@@ -280,22 +335,30 @@ function resultRows(task: TaskRecord): DetailRow[] {
 
 function timeRows(task: TaskRecord): DetailRow[] {
   const rows: DetailRow[] = [];
+  const created = task.createdAt;
   const startAt = task.startedAt;
-  const waiting = startAt !== undefined && startAt >= task.createdAt ? startAt - task.createdAt : undefined;
-  rows.push(
-    startAt === undefined
-      ? { label: '创建', value: timeLabel(task.createdAt), hint: '尚未开始执行' }
-      : {
-          label: '创建 → 开始',
-          value: `${timeLabel(task.createdAt)} → ${timeLabel(startAt)}`,
-          ...(waiting !== undefined ? { hint: `排队 ${durationLabel(waiting)}` } : {}),
-        },
-  );
+  const waiting = startAt !== undefined && startAt >= created ? startAt - created : undefined;
+  if (startAt === undefined) {
+    rows.push({ label: '创建', value: timeLabel(created), hint: '尚未开始执行' });
+  } else {
+    // 同一天时区间里只剩时间，日期挪到这里——否则「2026/10/20 16:56:07 → 16:56:07」
+    // 在半宽列里必然折行（实测）。
+    const hintParts = [
+      ...(sameDay(created, startAt) ? [dayLabel(created)] : []),
+      ...(waiting !== undefined ? [`排队 ${durationLabel(waiting)}`] : []),
+    ];
+    rows.push({
+      label: '创建 → 开始',
+      value: rangeLabel(created, startAt),
+      ...(hintParts.length > 0 ? { hint: hintParts.join(' · ') } : {}),
+    });
+  }
   const finished = task.finishedAt;
   const ran = finished !== undefined && startAt !== undefined ? finished - startAt : undefined;
   rows.push({
     label: '结束',
-    value: timeLabel(finished),
+    // 与创建同一天：日期已在上一行 hint 里，这里不再重复
+    value: finished === undefined ? '—' : sameDay(created, finished) ? timeOnly(finished) : timeLabel(finished),
     ...(ran !== undefined ? { hint: `执行 ${durationLabel(ran)}` } : {}),
   });
   return rows;
@@ -344,19 +407,112 @@ function noticesOf(task: TaskRecord): TaskNotice[] {
   return notices;
 }
 
+/** 路径去掉文件扩展名（`a/b.md` → `a/b`），用于判断库里位置是否只是把源路径抄了一遍 */
+function stripExtension(path: string): string {
+  return path.replace(/\.[^./]+$/, '');
+}
+
 function detailItemsOf(task: TaskRecord): { duplicates: DetailItem[]; conflicts: DetailItem[] } {
-  const duplicates: DetailItem[] = (task.result?.duplicates ?? []).map((item) => ({
-    title: item.path,
-    meta: `库中已有：${item.existingGroup ? `${item.existingGroup} / ` : ''}${item.existingRelation}`,
-  }));
-  const conflicts: DetailItem[] = (task.result?.conflicts ?? []).map((item) => ({
-    title: item.path,
+  /**
+   * ★ 说明里的路径要**去冗余**（2026-10-20 实测）：疑似重复绝大多数就是「同一落点」，
+   *   `existingGroup/existingRelation` 拼回来与源 `path` 逐字相同；原来无条件打全路径，
+   *   在 380px 卡片里每条明细被撑成 4 行（树已经写过一次目录，等于抄第三遍）。
+   *   真要指向别处（跨 Group 重复）才把位置写出来。
+   */
+  const duplicates: DetailItem[] = (task.result?.duplicates ?? []).map((item) => {
+    const existing = item.existingGroup ? `${item.existingGroup}/${item.existingRelation}` : item.existingRelation;
+    const samePath = existing === stripExtension(item.path) || existing === item.path;
+    return { title: item.path, meta: samePath ? '库中已有同一路径' : `库中已有：${existing}` };
+  });
+  const conflicts: DetailItem[] = (task.result?.conflicts ?? []).map((item) => {
     // `unchanged` 优先：判定为覆盖但实际被「内容未变」跳过，不能说"已覆盖"（debug 2026-10-19）
-    meta: `→ ${item.relation}（${item.unchanged
+    const action = item.unchanged
       ? '内容未变，跳过重算'
-      : item.action === 'suffix' ? '已改名' : item.action === 'skip' ? '已跳过' : '已覆盖'}）`,
-  }));
+      : item.action === 'suffix' ? '已改名' : item.action === 'skip' ? '已跳过' : '已覆盖';
+    const rewritten = item.relation === stripExtension(item.path) || item.relation === item.path;
+    return { title: item.path, meta: rewritten ? `→ ${action}` : `→ ${item.relation}（${action}）` };
+  });
   return { duplicates, conflicts };
+}
+
+/** 树的一行：`text` 是带 `├ └ │` 前缀的路径片段，`meta` 是挂在条目行上的说明 */
+export interface TreeLine {
+  text: string;
+  /** 该行是否对应一条真实明细条目（中间目录行没有） */
+  item: boolean;
+  /** 条目行才有的说明（`库中已有：raw/a` / `→ a（已覆盖）`） */
+  meta?: string;
+}
+
+/**
+ * 路径集合 → 层级树（`├` `└` `│`）。
+ *
+ * 为什么是树：落点 Group 与导入明细（疑似重复 / 同名冲突）**本来就是一棵树**
+ * （`stages` 是 `stages/1-入门与模型层` 的父级），` / ` 串联和胶囊流都在把树压平。
+ * 实测同一任务 20 个落点（380px 卡片）：串联成段 507px（看不出层级）· 胶囊流
+ * 474px / 最宽 303px（占卡片 80%，一条一行）· 树形 418px / 最宽 22 字符（不折行）。
+ *
+ * 顶层只有一个根时（如全部落在 `langchain/` 下）不画连接符，顶端直接写根名——
+ * 否则会出现「一棵只有一层分支的树」，多两个字符的缩进却读不出任何结构。
+ */
+export function buildPathTree(entries: { path: string; meta?: string }[]): TreeLine[] {
+  /** `entry` 与 `meta` 解耦：说明可以没有，但「这一行是不是一条真实条目」不能靠说明推断 */
+  interface TreeNode { name: string; children: Map<string, TreeNode>; meta?: string; entry: boolean }
+  const root: TreeNode = { name: '', children: new Map(), entry: false };
+  for (const entry of entries) {
+    const segments = entry.path.split('/').filter(Boolean);
+    if (segments.length === 0) continue;
+    let node = root;
+    for (const segment of segments) {
+      let child = node.children.get(segment);
+      if (!child) {
+        child = { name: segment, children: new Map(), entry: false };
+        node.children.set(segment, child);
+      }
+      node = child;
+    }
+    node.entry = true;
+    // 同一条路径出现多次（不会发生，但别静默丢说明）：保留第一条非空 meta
+    if (node.meta === undefined && entry.meta !== undefined) node.meta = entry.meta;
+  }
+
+  const lines: TreeLine[] = [];
+  const walk = (node: TreeNode, prefix: string): void => {
+    const children = [...node.children.values()];
+    children.forEach((child, index) => {
+      const last = index === children.length - 1;
+      lines.push({
+        text: `${prefix}${last ? '└ ' : '├ '}${child.name}`,
+        item: child.entry,
+        ...(child.meta !== undefined ? { meta: child.meta } : {}),
+      });
+      walk(child, `${prefix}${last ? '   ' : '│  '}`);
+    });
+  };
+
+  const roots = [...root.children.values()];
+  if (roots.length === 1) {
+    // 单根直接写根名，同样要带上它自己的 meta（单条目时它就是叶子）
+    const [only] = roots;
+    lines.push({
+      text: only.name,
+      item: only.entry,
+      ...(only.meta !== undefined ? { meta: only.meta } : {}),
+    });
+    walk(only, '');
+  } else {
+    walk(root, '');
+  }
+  return lines;
+}
+
+/**
+ * 落点 Group 等纯路径列表：只要文本（渲染为 `<pre>`）。
+ * ★ 命名带 `Lines`：`lib/groupTree.ts` 已有一个**同名但语义完全不同**的 `buildGroupTree`
+ *   （返回 `GroupTreeNode` 树，供浏览页/搜索页用），两个模块同名导出极易 import 错。
+ */
+export function buildGroupTreeLines(paths: string[]): string[] {
+  return buildPathTree(paths.map((path) => ({ path }))).map((line) => line.text);
 }
 
 export function buildTaskDetail(task: TaskRecord): TaskDetailView {

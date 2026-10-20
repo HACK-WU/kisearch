@@ -68,6 +68,8 @@
   --ki-color-surface-muted: rgba(26, 58, 41, 0.06);
   --ki-color-bg-muted: #f0f2ee;
   --ki-color-scrollbar: rgba(26, 58, 41, 0.18);
+  /* 滚动容器「还有内容」的阴影色（见 .ki-task-tree 的 local/scroll 差速技巧） */
+  --ki-tree-shadow: rgba(26, 58, 41, 0.13);
   /* ── 阴影（暖色调；页内卡片不用阴影，仅浮层） ── */
   --ki-shadow-1: 0 1px 3px rgba(26, 58, 41, 0.08);
   --ki-shadow-2: 0 10px 32px rgba(26, 58, 41, 0.12), 0 1px 4px rgba(26, 58, 41, 0.06);
@@ -102,6 +104,7 @@
   --ki-color-surface-muted: rgba(255, 255, 255, 0.06);
   --ki-color-bg-muted: #232c27;
   --ki-color-scrollbar: rgba(255, 255, 255, 0.18);
+  --ki-tree-shadow: rgba(255, 255, 255, 0.11);
   --ki-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.38);
   --ki-shadow-2: 0 10px 32px rgba(0, 0, 0, 0.38);
   --ki-color-purple: #bf5af2;
@@ -2850,7 +2853,9 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
     align-self: start;
     max-height: calc(100vh - 16px);
     overflow-y: auto;
-    overscroll-behavior: contain;
+    /* ★ 同步去掉 overscroll-behavior: contain（2026-10-20）：与任务详情卡片同源。
+       这里靠「终态退出常驻」侥幸没暴露（done 之后 position: static、不构成滚动容器），
+       但导入进行中只要右轨内容长于视口，滚到底同样会吞掉滚轮事件。 */
   }
   /* 终态退出常驻：完成后用户要读的是「结果摘要」（可能很长，含冲突/错误列表），
      此时让它随页面流完整展开、正常滚动阅读。
@@ -3140,7 +3145,20 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
     align-self: start;
     max-height: calc(100vh - 16px);
     overflow-y: auto;
-    overscroll-behavior: contain;
+    /* ★ 严禁 overscroll-behavior: contain（2026-10-20 实测复现的 Bug）：
+       它让卡片成为「滚动终点」—— 内部滚到底后滚轮事件被彻底吞掉，页面一动不动。
+       实测同一动作：鼠标在左栏 `.ki-content` 0→197，鼠标在卡片上 0→0；
+       滚 4000px 时卡片吃掉 814px、剩下 3186px 凭空消失。用户观感就是「鼠标一放到
+       详情上滚轮就失灵」。宁可让滚到边界后带动页面，也不要一个吞事件的滚动容器。 */
+    scrollbar-width: thin;
+    scrollbar-color: var(--ki-color-scrollbar) transparent;
+  }
+  /* 卡片溢出时（内容随任务数据浮动，实测 20 个落点的任务溢出 12px）用与 .ki-content
+     同宽度的细滚动条，避免系统默认 15px 的粗条把 380px 宽的右栏切开。 */
+  .ki-task-workspace > .ki-task-detail::-webkit-scrollbar { width: 6px; }
+  .ki-task-workspace > .ki-task-detail::-webkit-scrollbar-thumb {
+    background: var(--ki-color-scrollbar);
+    border-radius: 3px;
   }
 }
 .ki-task-detail__head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
@@ -3165,23 +3183,82 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-detail__hint { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font-size: 11px; line-height: 1.4; }
 .ki-task-detail__value--warn { color: var(--ki-color-warning); }
 .ki-task-detail__value--danger { color: var(--ki-color-danger-ink); }
-/* 明细折叠（原生 <details>：零 JS、键盘可达） */
+/* 明细 / 落点折叠（原生 <details>：零 JS、键盘可达）
+   ★ 折叠行必须**自己做标记与焦点态**（2026-10-20 用户截图反馈）：原来只写了
+     `cursor:pointer + color`，三角形走浏览器默认的 `list-item` marker（各浏览器大小不一），
+     键盘/程序化聚焦时又落到浏览器默认 focus ring —— 出现在 380px 卡片里就是一个
+     突兀的深绿粗胶囊描边，用户第一反应是"这里怎么长这样"。
+   做法照 `.ki-health-config > summary`（本文件 886 行）的既有范式：隐藏默认 marker、
+   用 `::before` 画 ▸/▾，焦点态给设计好的圆角描边。 */
 .ki-task-detail__details { margin-top: 10px; font-size: var(--ki-font-size-xs); }
-.ki-task-detail__details summary { cursor: pointer; color: var(--ki-color-primary); }
-.ki-task-detail__items {
-  display: flex;
-  max-height: 160px;
-  margin: 8px 0 0;
-  padding: 0;
-  flex-direction: column;
+.ki-task-detail__details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  margin-left: -4px;
+  padding: 1px 5px;
+  border-radius: var(--ki-radius-sm);
   list-style: none;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  cursor: pointer;
+  color: var(--ki-color-primary);
 }
-.ki-task-detail__items li { display: flex; padding: 6px 8px; flex-direction: column; gap: 2px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-muted); }
-.ki-task-detail__items li + li { margin-top: 4px; }
-.ki-task-detail__items code { overflow-wrap: anywhere; }
-.ki-task-detail__items span { color: var(--ki-color-text-subtle); font-size: 11px; overflow-wrap: anywhere; }
+.ki-task-detail__details summary::-webkit-details-marker { display: none; }
+.ki-task-detail__details summary::before { content: '\25B8'; font-size: 10px; line-height: 1; }
+.ki-task-detail__details[open] > summary::before { content: '\25BE'; }
+.ki-task-detail__details summary:hover { background: var(--ki-color-primary-soft); }
+/* 内描边（offset:-1）而不是外描边：本行是卡片内的一条窄行，外描边会顶到卡片边距 */
+.ki-task-detail__details summary:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -1px; }
+/* 明细（疑似重复 / 同名冲突）已改为树形，原 `.ki-task-detail__items` 列表样式随之废弃 */
+/* 长值独占整行（2026-10-20）：20 个落点曾把「Group」单元格撑到 451px，
+   同行右格「标签 / 未设置」被一起拉高、空出 451px 空白，栅格看起来断成两截。 */
+.ki-task-detail__cell--full { grid-column: 1 / -1; }
+/* 落点 Group 层级树（只读）：限高可滚，默认收起时才展开。
+   ★ max-height 用 min(280px, 34vh)：小屏（620 高的窗口）按 34vh 收窄，
+     否则树本身就把 380px 宽的卡片顶出视口。
+   ★ 不写 overscroll-behavior: contain —— 树滚到底要继续带动卡片、卡片再带动页面。
+     写 contain 就会重演「鼠标悬停后滚轮无响应」（卡片那个坑的同款）。 */
+.ki-task-tree {
+  max-height: min(280px, 34vh);
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--ki-radius-sm);
+  /* ★ 「还有内容」滚动阴影（2026-10-20 challenger Q1）：限高 280px 后 20 个落点只看得到
+     约 15 行，用户容易把「被裁掉」读成「就这些」。这里用 background-attachment 的
+     `local` / `scroll` 差速技巧：`local` 那两层随内容滚、`scroll` 那两层钉在盒子上，
+     于是**未滚到顶/底时才显出阴影，滚到边界阴影自动消失** —— 零 JS、零监听、自动感知。 */
+  background:
+    linear-gradient(var(--ki-color-bg-muted) 40%, transparent) top / 100% 18px no-repeat local,
+    linear-gradient(transparent, var(--ki-color-bg-muted) 60%) bottom / 100% 18px no-repeat local,
+    linear-gradient(var(--ki-tree-shadow), transparent) top / 100% 12px no-repeat scroll,
+    linear-gradient(transparent, var(--ki-tree-shadow)) bottom / 100% 12px no-repeat scroll,
+    var(--ki-color-bg-muted);
+  color: var(--ki-color-text);
+  font: 11px/1.6 var(--ki-font-mono);
+  white-space: pre;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-task-tree:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+/* 明细树用 <ul>（条目要带说明），底色/字体/限高沿用 .ki-task-tree，只把整体 white-space
+   收回 normal（`pre` 只给路径片段，否则条目的中文说明会连成一行不换行）。 */
+.ki-task-tree--list { margin: 8px 0 0; padding: 8px 10px; list-style: none; white-space: normal; }
+/* 全部条目共用同一句说明时提到树上方（明细里逐条重复 9 遍是纯噪音） */
+.ki-task-tree__shared { margin: 8px 0 0; color: var(--ki-color-text-subtle); font-size: 11px; }
+.ki-task-tree__shared + .ki-task-tree--list { margin-top: 4px; }
+.ki-task-tree__row { display: flex; gap: 8px; align-items: baseline; }
+.ki-task-tree__row + .ki-task-tree__row { margin-top: 2px; }
+.ki-task-tree__path { flex: 0 0 auto; white-space: pre; color: var(--ki-color-text-muted); }
+/* 条目行（真实文件）用正文色，中间目录只做承重——否则 20 条明细的目录行比文件名还抢眼 */
+.ki-task-tree__row--item .ki-task-tree__path { color: var(--ki-color-text); }
+.ki-task-tree__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ki-color-text-subtle);
+  font-family: var(--ki-font-family);
+  overflow-wrap: anywhere;
+}
 /* 结论提示（错误 / 恢复建议 / 旧记录 / 全部重复）：warning 与 danger 必须分开——
    ALL_FILES_DUPLICATES 不是故障，用 warn 而非红态 */
 .ki-task-notice { margin-top: 12px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
