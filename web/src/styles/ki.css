@@ -3007,6 +3007,19 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-combobox__option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-combobox__option-check { flex-shrink: 0; color: var(--ki-color-success); font-weight: 700; }
 .ki-combobox__empty { padding: 8px 9px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+/* ── tag 筛选下拉（TagSelect）：长 tag 名可读 ──
+   面板默认 `left:0;right:0` ⇒ 宽度恒等于触发器，而一行头部把触发器压到 112px，
+   于是 anomaly_detection / anomaly_monitor 这类长名被截成同一前缀（连 ✓ 行也看不清）。
+   这里只放宽**标签选项面板**：不小于触发器、随内容增长、封顶 min(320px, 60vw)；
+   Group 树下拉（.ki-combobox__tree）宽度语义不同，不受影响。 */
+.ki-combobox--tags .ki-combobox__panel {
+  right: auto;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(320px, 60vw);
+}
+/* 收起态当前值被输入框宽度裁掉时给省略号（输入框不会自动折行/省略），完整值见 title */
+.ki-combobox--tags .ki-combobox__input-wrap .ki-form-input { text-overflow: ellipsis; }
 .ki-combobox__toggle:disabled { cursor: default; opacity: 0.5; }
 /* Group 树节点（combobox 内） */
 .ki-gtree-dir { display: flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 5px; cursor: pointer; user-select: none; white-space: nowrap; line-height: 1.5; transition: background var(--ki-motion-fast); font-size: var(--ki-font-size-sm); font-weight: 500; color: var(--ki-color-text); }
@@ -3118,7 +3131,9 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-summary--partial b { color: var(--ki-color-warning); }
 /* 两卡等高（默认 stretch）：原先 align-items:start 让左右卡各按内容高，无任务时右卡比左卡高一截（用户反馈）
    ★ 右栏例外见 `.ki-task-workspace > .ki-task-detail`（sticky + align-self: start）——
-     任务多时 stretch 会把右卡一并拉到数千像素，别再按"等高"把它改回去。 */
+     任务多时 stretch 会把右卡一并拉到数千像素，别再按"等高"把它改回去。
+   ★ 空态卡（`--empty`）另有例外：stretch 与左卡等高 + max-height 520 封顶，
+     见下方 media 块末尾的同名规则（2026-10-20）。 */
 .ki-task-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: stretch; }
 .ki-task-list-card { min-width: 0; }
 .ki-task-filters { display: flex; align-items: center; gap: 4px; }
@@ -3173,6 +3188,18 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-workspace > .ki-task-detail::-webkit-scrollbar-thumb {
     background: var(--ki-color-scrollbar);
     border-radius: 3px;
+  }
+  /* ★ 空态卡例外：与左卡等高（2026-10-20，用户反馈「空任务时两个卡片两边高度不一致」）。
+     上面的 align-self: start 让空态卡停在 min-height: 220px，实测左卡 252 → 底边差 32px。
+     start 是为「任务多时右卡被拉到 4046px、内容滚不到」加的，与「空态要等高」是相反诉求，
+     靠 start/stretch 二选一必然顾此失彼 —— 这里只对空态卡换回 stretch，用 max-height 兜住多任务：
+       · 行高 ≤ 520（约 0~6 条任务）→ stretch 生效，两卡底边齐平（实测 252/252、333/333）
+       · 行高 > 520（任务更多）→ 封顶 520 + sticky 跟随，不再随列表一路长到 4046px
+     选中任务的详情卡（.ki-task-detail 不带 --empty）保持 start，零影响。
+     窄屏（<960）不在本 media 内；单列下 stretch 本就不改变高度，无需额外处理。 */
+  .ki-task-workspace > .ki-task-detail--empty {
+    align-self: stretch;
+    max-height: min(calc(100vh - 16px), 520px);
   }
 }
 .ki-task-detail__head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
