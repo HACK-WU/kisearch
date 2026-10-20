@@ -4,7 +4,7 @@
  * 为可视化前端补齐 MCP 缺失能力（REQ-20260806-003，S-02/S-03）：
  *   GET  /api/health                ki doctor 健康报告（runHealthCheck）
  *   GET  /api/search-config          语义检索默认 timeout（仅非敏感配置）
- *   GET  /api/doc/list              Group 路径 + 文档列表（支持 q 文件名模糊搜索）
+ *   GET  /api/doc/list              Group 路径 + 文档列表（支持 q 名称 / 路径模糊搜索）
  *   POST /api/import/upload         上传文件落盘受控目录（~/.ki/import-uploads/<uploadId>/）
  *   POST /api/import/run            触发导入（幂等追加，异步 job）
  *   GET  /api/import/status         轮询导入进度/结果
@@ -65,6 +65,8 @@ import { vectorCollectionDimension, vectorCountScope, optimizeVectorIndex } from
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
+// 路径检索：检索词归一 + 逻辑路径（group 与 sourcePath 重叠合并）见 doc-path.ts
+import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc } from './doc-path.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
@@ -1087,7 +1089,10 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
 async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
   const scope = resolveScope(loadConfig(), scopeRaw);
-  const q = (url.searchParams.get('q') ?? '').toLowerCase();
+  // 路径检索（2026-10-20）：检索词归一化后与「逻辑路径」（Group 路径 + 导入源 sourcePath，
+  // 按最长重叠段合并，见 doc-path.ts）比较。归一处后为空 = 无有效检索词（纯空格 / 纯 `/`），
+  // 按「不过滤」处理 —— 不能当成"搜不到任何文档"。
+  const q = normalizeSearchQuery(url.searchParams.get('q') ?? '');
   const groupRaw = url.searchParams.get('group');
   // 按自定义 tag 过滤（relation.tags 精确匹配；缺省不过滤）
   const tagRaw = (url.searchParams.get('tag') ?? '').toLowerCase();
@@ -1115,8 +1120,21 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   // tag 过滤辅助：tagRaw 为空则不过滤；否则匹配 relation.tags 中的某个 tag
   const matchTag = (d: { tags?: string[] }): boolean =>
     !tagRaw || (d.tags ?? []).some((t) => t.toLowerCase() === tagRaw);
-  const matchQuery = (d: { name: string; path?: string }): boolean =>
-    !q || d.name.toLowerCase().includes(q) || (d.path ?? '').toLowerCase().includes(q);
+  // 检索过滤：文档名 **或** 逻辑路径（含 Group 路径）命中即保留。
+  // 旧实现只比 name + sourcePath，而 sourcePath 是"导入源目录相对路径"、与界面展示的
+  // group/文件名不同源 ⇒ 照着页头路径搜恒为 0；无 sourcePath 的文档（MCP/CLI 写入）更无从命中。
+  const matchQuery = (d: SearchableDoc): boolean => !q || matchDocQuery(d, q) !== null;
+  /**
+   * 检索态给命中文档补两个展示字段（**非检索态不补**，不给既有消费方凭空加字段）：
+   *   - `matchedBy`：命中来源 `name` / `path` —— 前端据此分「名称命中」「路径命中」两个分区；
+   *   - `logicalPath`：Group 与 sourcePath 合并后的完整路径 —— 前端据此展示并高亮命中片段。
+   * 路径只此一处拼装，避免各端各自拼出"看到的路径 ≠ 能搜到的路径"。
+   */
+  type ListedDoc = DocListCache['docs'][number] & { matchedBy?: 'name' | 'path'; logicalPath?: string };
+  const withSearchMeta = (docs: DocListCache['docs']): ListedDoc[] =>
+    q
+      ? docs.map((d) => ({ ...d, matchedBy: matchDocQuery(d, q) ?? 'path', logicalPath: logicalDocPath(d) }))
+      : docs;
 
   // 指定 group 时按 [offset, offset+limit) 分页返回该 group 文档（S0-2 修复：
   // 旧行为 slice 后以截断长度冒充 total 且恒 truncated:false，单 Group >500 篇静默丢失）
@@ -1127,7 +1145,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     sendJson(res, 200, {
       ok: true,
       scope,
-      docs,
+      docs: withSearchMeta(docs),
       offset,
       total: groupMatched.length,
       truncated: offset + docs.length < groupMatched.length,
@@ -1147,7 +1165,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   sendJson(res, 200, {
     ok: true,
     scope,
-    docs,
+    docs: withSearchMeta(docs),
     offset,
     total: filtered.length,
     truncated: offset + docs.length < filtered.length,

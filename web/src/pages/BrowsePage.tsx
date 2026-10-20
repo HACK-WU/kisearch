@@ -1,7 +1,7 @@
 /**
  * BrowsePage.tsx —— 知识库浏览（对齐 demo 双栏：左 Group 递归树 + 右文档列表 + 原文抽屉）
  *
- * 数据源：/api/doc/list（返回 Group 路径 + 文档，支持 q 文件名搜索）
+ * 数据源：/api/doc/list（返回 Group 路径 + 文档，支持 q **名称 / 路径**搜索）
  * 原文：ki_get_module_info
  */
 
@@ -32,6 +32,15 @@ import {
   type ScopedDocumentView,
 } from '@/lib/documentLinks';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
+// 路径检索：命中分区 / 结果头计数 / 展示路径（见各模块头部说明）
+import {
+  docDisplayPath,
+  hasNameOrPathHit,
+  hasSearchTerm,
+  searchResultSummary,
+  splitSearchDocs,
+} from '@/lib/browseSearchGroups';
+import { findPathHighlightRange } from '@/lib/pathHighlight';
 import {
   browseViewReducer,
   deriveBrowseMode,
@@ -439,17 +448,21 @@ export function BrowsePage(): JSX.Element {
     return () => cancelAnimationFrame(frame);
   }, [scope, activeGroup, currentViewing, readerFullscreen, treeCollapsed, readerGroupCollapsed, groupQuery.isFetching, tree, docsByGroup]);
 
-  // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组模糊匹配，limit=2000）──
+  // ── 全局搜索：有搜索词时发起后端 q 参数请求（跨组「名称 / 路径」模糊匹配，limit=2000）──
+  // 判空由 hasSearchTerm 负责（只由分隔符/空白组成 = 无检索词，N1）：否则输入 `/` 会发一次请求并
+  // 命中全库（实测 161 条）——那既不是用户要的，也把"空输入"伪装成了"有结果"。
   const searchQuery = useQuery<DocListResponse>({
     queryKey: ['docList', scope, 'search', searchQ, selectedTag],
     queryFn: () => getDocList(scope, { q: searchQ, tag: selectedTag || undefined }),
-    enabled: searchQ.length > 0,
+    enabled: hasSearchTerm(searchQ),
     staleTime: 10_000,
     retry: 1,
     placeholderData: (previousData) => previousData,
   });
   const searchDocs = searchQuery.data?.docs ?? [];
-  const isSearching = q.trim().length > 0;
+  /** 名称命中 / 路径命中分区（后端 matchedBy 决定；旧 daemon 无该字段时全部归名称，不丢结果） */
+  const searchSections = useMemo(() => splitSearchDocs(searchDocs), [searchDocs]);
+  const isSearching = hasSearchTerm(q);
   /**
    * 主区形态（REQ-20261018-001）：结果列表可见 = 有检索词 **且** 未被「在页内打开」隐藏。
    *
@@ -482,7 +495,7 @@ export function BrowsePage(): JSX.Element {
     setQ(value);
   }, []);
 
-  // 文档列表搜索之外，按同一关键词查询正文；结果独立展示，避免把“文件名命中”
+  // 文档列表搜索之外，按同一关键词查询正文；结果独立展示，避免把“名称 / 路径命中”
   // 与“正文命中”混成一个排序口径。仅使用 FTS-only/hybrid 的全文分支，不调用 embedding。
   const fullTextQuery = useQuery<SearchResult>({
     queryKey: ['fullTextSearch', scope, searchQ, selectedTag],
@@ -492,7 +505,8 @@ export function BrowsePage(): JSX.Element {
       limit: 20,
       mode: 'fulltext',
     }),
-    enabled: searchQ.length > 0,
+    // 与名称/路径检索同一判空口径：无有效检索词时不打 FTS（否则正文噪声会顶出"有结果"的假象）
+    enabled: hasSearchTerm(searchQ),
     staleTime: 10_000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -888,15 +902,74 @@ export function BrowsePage(): JSX.Element {
     </>
   );
 
+  /** 结果行路径：优先后端合并的 logicalPath，命中片段画 mark（连续子串高亮，见 lib/pathHighlight.ts） */
+  const renderResultPath = (doc: DocItem): ReactNode => {
+    const text = docDisplayPath(doc);
+    const range = findPathHighlightRange(text, searchQ);
+    if (!range) return <>{text}</>;
+    return (
+      <>
+        {text.slice(0, range.start)}
+        <mark className="ki-search-hit-mark">{text.slice(range.start, range.end)}</mark>
+        {text.slice(range.end)}
+      </>
+    );
+  };
+
+  /** 名称命中 / 路径命中共用的一行：主点击开右侧抽屉（REQ-20261018-001 护栏 #1），次按钮页内打开 */
+  const renderDocResultRow = (doc: DocItem): JSX.Element => {
+    // 带上 highlightQuery：正文若含该词，打开后自动高亮并出现「取消高亮 / 下一个命中」导航
+    const target = {
+      module: doc.name,
+      group: doc.group,
+      path: doc.path,
+      highlightQuery: searchQ,
+    };
+    return (
+      <div className="ki-browse-fulltext__row" key={`doc:${doc.group}\u0000${doc.name}`}>
+        <button
+          type="button"
+          className="ki-browse-fulltext__item"
+          onClick={() => openDocument(target, 'drawer')}
+        >
+          <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
+          {/* 路径常显（原先只显示 Group）：按路径检索时，用户要能一眼看出命中的是路径哪一段 */}
+          <span className="ki-browse-fulltext__path">{renderResultPath(doc)}</span>
+        </button>
+        <button
+          type="button"
+          className="ki-browse-fulltext__open-inline"
+          onClick={() => openDocumentInline(target)}
+          title="在页内打开（替换当前结果列表）"
+          aria-label={`在页内打开 ${doc.group} / ${doc.name}`}
+        >
+          <Icon name="open-inline" className="ki-icon ki-icon--sm" />
+        </button>
+      </div>
+    );
+  };
+
+  /** 名称 / 路径 / 正文三条链路的命中条数：结果头**分别计数**，不相加成"总数" */
+  const searchCounts = {
+    name: searchSections.nameHits.length,
+    path: searchSections.pathHits.length,
+    fullText: fullTextHits.length,
+  };
+
   /**
    * 全文检索结果面板——展示在右侧主区，与语义检索页同构（RESULTS kicker + 标题 + meta + 结果项点击打开）。
-   * 交互约定：结果只在主区出现；左侧目录不换标题、不替换树，仅按「文件名命中」过滤文档叶子
+   * 交互约定：结果只在主区出现；左侧目录不换标题、不替换树，仅按「名称 / 路径命中」过滤文档叶子
    * （正文命中不参与目录过滤）。页内阅读时结果让位，过滤一并解除（见 matchedDocKeys）。
+   *
+   * 2026-10-20 路径检索：名称命中与路径命中**拆成两个分区**、结果头分开计数。此前两者合并在
+   * 「文件名命中」里，并与正文条数相加成"总数" —— 路径 0 命中时用户只看到「正文命中 20 条」
+   * 的无关片段，于是判定"不支持路径匹配"（详见 lib/browseSearchGroups.ts 的说明）。
    */
   const renderSearchResults = (): JSX.Element => {
-    const total = searchDocs.length + fullTextHits.length;
+    const total = searchCounts.name + searchCounts.path + searchCounts.fullText;
     const searching = searchQuery.isFetching || fullTextQuery.isFetching;
     const failed = searchQuery.isError && fullTextQuery.isError;
+    const pathOrNameHit = hasNameOrPathHit(searchSections);
     return (
       <div className="ki-browse-results" aria-live="polite">
         <div className="ki-results__head">
@@ -905,7 +978,7 @@ export function BrowsePage(): JSX.Element {
             <span className="ki-results__title">检索结果</span>
           </span>
           <span className="ki-results__meta">
-            「{searchQ || q.trim()}」 · {searching ? '搜索中…' : `${total} 条`}
+            「{searchQ || q.trim()}」 · {searching ? '搜索中…' : searchResultSummary(searchCounts)}
           </span>
         </div>
         {failed ? (
@@ -919,51 +992,48 @@ export function BrowsePage(): JSX.Element {
           <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
             <div>
               <h3>未找到相关内容</h3>
-              <p>建议：调整关键词 / 切换 tag 过滤；正文检索只覆盖已建立 FTS 索引的文档。</p>
+              <p>
+                建议：调整关键词 / 切换 tag 过滤；路径检索支持「组名/文件名」写法（如 <code>wiki/API接口文档</code>）；
+                正文检索只覆盖已建立 FTS 索引的文档。
+              </p>
             </div>
           </div>
         ) : (
           <div className="ki-browse-results__list">
-            {searchDocs.length > 0 && (
+            {searchCounts.name > 0 && (
               <section className="ki-browse-results__group">
                 <div className="ki-browse-results__group-head">
-                  文件名命中
+                  名称命中
                   <span className="ki-card__sub">
-                    {searchQuery.isFetching ? '搜索中…' : `${searchDocs.length} 条`}
+                    {searchQuery.isFetching ? '搜索中…' : `${searchCounts.name} 条`}
                   </span>
                 </div>
-                {searchDocs.map((doc) => {
-                  // 带上 highlightQuery：正文若含该词，打开后自动高亮并出现「取消高亮 / 下一个命中」导航
-                  const target = {
-                    module: doc.name,
-                    group: doc.group,
-                    path: doc.path,
-                    highlightQuery: searchQ,
-                  };
-                  return (
-                    <div className="ki-browse-fulltext__row" key={`name:${doc.group}\u0000${doc.name}`}>
-                      {/* 主点击保持原行为：右侧抽屉（REQ-20261018-001 护栏 #1） */}
-                      <button
-                        type="button"
-                        className="ki-browse-fulltext__item"
-                        onClick={() => openDocument(target, 'drawer')}
-                      >
-                        <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
-                        <span className="ki-browse-fulltext__path">{doc.group}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="ki-browse-fulltext__open-inline"
-                        onClick={() => openDocumentInline(target)}
-                        title="在页内打开（替换当前结果列表）"
-                        aria-label={`在页内打开 ${doc.group} / ${doc.name}`}
-                      >
-                        <Icon name="open-inline" className="ki-icon ki-icon--sm" />
-                      </button>
-                    </div>
-                  );
-                })}
+                {searchSections.nameHits.map(renderDocResultRow)}
               </section>
+            )}
+            {searchCounts.path > 0 && (
+              <section className="ki-browse-results__group">
+                <div className="ki-browse-results__group-head">
+                  路径命中
+                  <span className="ki-card__sub">
+                    {searchQuery.isFetching ? '搜索中…' : `${searchCounts.path} 条`}
+                  </span>
+                </div>
+                {searchSections.pathHits.map(renderDocResultRow)}
+              </section>
+            )}
+            {/* 名称/路径 0 命中必须**明说**：否则下面那 20 条正文命中会被当成"搜到过路径"，
+                用户既不知道路径没命中，也看不到该怎么改（实测反馈就出在这里）。
+                本块**不再加** role="status"：外层 .ki-browse-results 已是 aria-live="polite"，
+                内层再来一个 live region 会让读屏把同一段话播报两遍。 */}
+            {!pathOrNameHit && !searchQuery.isFetching && (
+              <div className="ki-browse-results__hint">
+                <div className="ki-browse-results__hint-title">名称 / 路径没有命中</div>
+                <p>
+                  当前检索词没有匹配到任何文档名或路径。可只输组名或文件名片段（如 <code>wiki</code>、
+                  <code>API认证</code>）；若要找正文内容，见下方「正文命中」{searchCounts.fullText} 条。
+                </p>
+              </div>
             )}
             <section className="ki-browse-results__group">
               <div className="ki-browse-results__group-head">
@@ -973,7 +1043,7 @@ export function BrowsePage(): JSX.Element {
                 </span>
               </div>
               {fullTextQuery.isError ? (
-                <div className="ki-browse-fulltext__empty">正文检索暂时失败，可继续查看文件名命中。</div>
+                <div className="ki-browse-fulltext__empty">正文检索暂时失败，可继续查看名称 / 路径命中。</div>
               ) : fullTextHits.length === 0 && !fullTextQuery.isFetching ? (
                 <div className="ki-browse-fulltext__empty">暂未找到正文命中。</div>
               ) : (

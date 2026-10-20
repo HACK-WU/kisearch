@@ -45,7 +45,15 @@ export interface SearchConfigResponse {
 export interface DocItem {
   name: string;
   group: string;
+  /** 导入源相对路径（relation.sourcePath）；MCP / CLI 写入的文档没有该字段 */
   path?: string;
+  /**
+   * 检索命中来源（**仅 `q` 检索时下发**）：`name` 名称命中 / `path` 路径命中。
+   * 旧版 daemon 不返回 → 组件按"名称命中"降级，不丢结果。
+   */
+  matchedBy?: 'name' | 'path';
+  /** 检索时下发：Group 与 sourcePath 合并后的完整路径（后端唯一拼装点，避免各端拼出不同路径） */
+  logicalPath?: string;
   /** 文档级自定义标签（来自 relations-cache relation.tags） */
   tags?: string[];
   /**

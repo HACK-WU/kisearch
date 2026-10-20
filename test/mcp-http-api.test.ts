@@ -72,8 +72,13 @@ after(async () => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
-/** hot_relations 种子：字符串 = 仅文件名；对象 = 附带向量 ID（用于 vectorized 标志用例） */
-type SeedRel = string | { text: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean };
+/**
+ * hot_relations 种子：字符串 = 仅文件名；对象 = 附带向量 ID（用于 vectorized 标志用例）。
+ * `sourcePath` 显式传 `undefined` 可模拟 MCP / CLI 写入的文档（无导入源路径）。
+ */
+type SeedRel =
+  | string
+  | { text: string; sourcePath?: string; memoryId?: string; memoryIds?: string[]; ftsIds?: string[]; ftsIndexComplete?: boolean };
 
 /** 构造一个 scope 的 relations-cache，供 /api/doc/list 测试 */
 function seedRelationsCache(scope: string, groups: Record<string, SeedRel[]>): void {
@@ -234,6 +239,65 @@ describe('/api/doc/list', () => {
     const pathFiltered = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-test&q=docs%2F%E5%91%8A%E8%AD%A6%E9%80%9A%E7%9F%A5`)).json();
     assert.equal(pathFiltered.total, 1);
     assert.equal(pathFiltered.docs[0].name, '告警通知');
+  });
+
+  /**
+   * 路径检索（2026-10-20）：旧实现只比 name + sourcePath，而 sourcePath 是「导入源相对路径」，
+   * 与界面展示的 group/文件名**不同源**；无 sourcePath 的文档（MCP/CLI 写入）更无从命中。
+   * 旧测试的 seed 给每条 relation 都塞了 sourcePath，故此处必须显式造出「缺 group 前缀」与
+   * 「无 sourcePath」两种形态 —— 否则这条链路又会退回"看起来有测试、其实没覆盖"。
+   */
+  it('路径检索：group 路径 / 页头形态 / 无 sourcePath 文档均命中，并回传 matchedBy 与 logicalPath', async () => {
+    seedRelationsCache('doc-path', {
+      'wiki/API接口文档': [
+        // 导入源相对路径缺 group 前缀（真实形态：scope monitot）
+        { text: 'API认证与授权', sourcePath: 'API接口文档/API认证与授权.md' },
+      ],
+      k8s: [{ text: '00-学习档案', sourcePath: '00-学习档案.md' }],
+      // MCP / CLI 写入：没有 sourcePath
+      '专题记忆/Agent 执行链专家': [{ text: '执行链概览', sourcePath: undefined }],
+    });
+    const fetchQ = async (q: string): Promise<{
+      total: number;
+      docs: { name: string; matchedBy?: string; logicalPath?: string }[];
+    }> => (await fetch(`${handle!.base}/api/doc/list?scope=doc-path&q=${encodeURIComponent(q)}`)).json() as never;
+
+    // 1) 界面上的完整路径（group 前缀 + 文件）—— 旧实现恒为 0
+    const byFullPath = await fetchQ('wiki/API接口文档/API认证与授权');
+    assert.equal(byFullPath.total, 1);
+    assert.equal(byFullPath.docs[0].name, 'API认证与授权');
+    assert.equal(byFullPath.docs[0].matchedBy, 'path');
+    assert.equal(byFullPath.docs[0].logicalPath, 'wiki/API接口文档/API认证与授权.md');
+
+    // 2) 页头形态（`group / module`，分隔符两侧带空格）
+    assert.equal((await fetchQ('wiki / API接口文档 / API认证与授权')).total, 1);
+    // 3) 只输组名也能命中
+    assert.equal((await fetchQ('wiki')).total, 1);
+    // 4) ./ 前缀
+    assert.equal((await fetchQ('./wiki/API接口文档')).total, 1);
+
+    // 5) 无 sourcePath 的文档按 group/name 命中
+    const memory = await fetchQ('专题记忆/Agent 执行链专家/执行链概览');
+    assert.equal(memory.total, 1);
+    assert.equal(memory.docs[0].matchedBy, 'path');
+    assert.equal(memory.docs[0].logicalPath, '专题记忆/Agent 执行链专家/执行链概览');
+
+    // 6) 名称命中优先归 name
+    const byName = await fetchQ('API认证');
+    assert.equal(byName.total, 1);
+    assert.equal(byName.docs[0].matchedBy, 'name');
+
+    // 7) 纯分隔符 / 纯空白 = 无检索词（放行全部，而不是 0 条）
+    assert.equal((await fetchQ('/')).total, 3);
+    assert.equal((await fetchQ('   ')).total, 3);
+
+    // 8) 非检索态不下发检索专用字段（不给既有消费方凭空加字段）
+    const plain = await (await fetch(`${handle!.base}/api/doc/list?scope=doc-path`)).json();
+    assert.equal(
+      plain.docs.some((d: { matchedBy?: string }) => d.matchedBy !== undefined),
+      false,
+      '未带 q 时不应出现 matchedBy',
+    );
   });
 
   it('vectorized：登记了向量 ID 的为 true（多值/单值皆可），未登记的为 false', async () => {

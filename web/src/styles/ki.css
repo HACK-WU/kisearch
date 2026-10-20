@@ -2742,16 +2742,30 @@ a:hover { text-decoration: underline; }
   .ki-browse-fulltext__open-inline { opacity: 1; pointer-events: auto; }
 }
 .ki-browse-fulltext__title { font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-text); }
-.ki-browse-fulltext__path { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
+/* 路径检索（2026-10-20）后结果行常显完整路径（Group + 导入源路径）：长路径必须允许任意断行，
+   否则一条深路径会把结果行撑出横向滚动 */
+.ki-browse-fulltext__path { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); overflow-wrap: anywhere; }
 .ki-browse-fulltext__snippet { margin-top: 6px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.55; }
 .ki-browse-fulltext__empty { padding: 12px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 /* 浏览页全文检索结果面板（主区）：与语义检索页 .ki-results 同构；结果只出现在主区，左侧目录不变 */
 .ki-browse-results { background: var(--ki-color-surface); border-radius: var(--ki-radius-lg); border: 1px solid var(--ki-color-border); overflow: hidden; }
+/* 结果头把「名称 / 路径 / 正文」分开计数后文字明显变长（还带检索词），两处必须处理：
+   1) 允许换行：否则会被 .ki-browse-results 的 overflow:hidden 直接裁掉，计数看不见等于没分开；
+   2) 右侧留 60px：右上角常驻「文档大纲」折叠按钮（.ki-document-outline--collapsed，absolute 42×40、
+      z-index 6），摘要变长后会钻到它下面（实测最后一个数字被它盖住）。
+   只作用于浏览页结果面板，不影响语义检索页共用同名的 .ki-results__* 结构。 */
+.ki-browse-results .ki-results__head { flex-wrap: wrap; gap: 6px 16px; padding-right: 60px; }
+.ki-browse-results .ki-results__meta { min-width: 0; overflow-wrap: anywhere; }
 .ki-browse-results__list { padding: 8px 0; }
 .ki-browse-results__group + .ki-browse-results__group { border-top: 1px solid var(--ki-color-border); }
 .ki-browse-results__group-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 6px; font-size: var(--ki-font-size-xs); font-weight: 650; letter-spacing: 0.04em; color: var(--ki-color-text-subtle); }
 .ki-browse-results .ki-browse-fulltext__item { padding: 10px 20px; }
 .ki-browse-results .ki-browse-fulltext__empty { padding: 8px 20px 14px; }
+/* 名称 / 路径 0 命中时的显式提示：必须和下方「正文命中」分开读，不能被它的条数掩盖 */
+.ki-browse-results__hint { margin: 8px 20px 12px; padding: 10px 12px; border: 1px dashed var(--ki-color-border); border-radius: var(--ki-radius-md); background: var(--ki-color-bg-secondary); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.6; }
+.ki-browse-results__hint-title { margin-bottom: 4px; color: var(--ki-color-text); font-weight: 650; }
+.ki-browse-results__hint p { margin: 0; }
+.ki-browse-results__hint code { padding: 0 4px; border-radius: var(--ki-radius-sm); background: var(--ki-color-surface); font-family: var(--ki-font-mono); font-size: .95em; }
 .ki-search-hit-mark { padding: 0 2px; border-radius: 2px; background: var(--ki-color-warning-soft, #fbf3db); color: var(--ki-color-text); }
 .ki-search-history { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 10px; font-size: var(--ki-font-size-xs); }
 .ki-search-history__label { flex: none; color: var(--ki-color-text-subtle); white-space: nowrap; }
