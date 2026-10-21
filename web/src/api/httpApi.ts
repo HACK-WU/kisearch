@@ -57,6 +57,11 @@ export interface DocItem {
   /** 文档级自定义标签（来自 relations-cache relation.tags） */
   tags?: string[];
   /**
+   * 落点来源（REQ-20261021-001）：`scope-fallback` = 写入时 Group 留空，
+   * 由「与 scope 同名组」兜底落进来。**缺省 = 用户显式指定了 Group**（老数据同此）。
+   */
+  groupSource?: 'scope-fallback';
+  /**
    * 是否已向量化（KB 层登记的 memoryId/memoryIds 非空）→ 决定是否渲染 RAG 状态标签。
    * undefined = 后端未提供该字段（旧版 daemon），同样不渲染标签。
    */

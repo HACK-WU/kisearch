@@ -378,7 +378,12 @@ function sanitizeFileName(name: string): string {
 interface DocListCache {
   scope: string;
   /** vectorized：KB 层登记的向量 ID 是否非空（供前端区分已/未向量化文档） */
-  docs: { name: string; group: string; path?: string; tags?: string[]; vectorized: boolean; fullTextIndexed: boolean }[];
+  docs: {
+    name: string; group: string; path?: string; tags?: string[];
+    vectorized: boolean; fullTextIndexed: boolean;
+    /** 落点来源（REQ-20261021-001）：仅兜底写入时下发；缺省 = 用户显式指定 Group */
+    groupSource?: 'scope-fallback';
+  }[];
   mtimeMs: number;
   size: number;
   /** 批次 2（R7）：布局感知身份三元组的 revision 成员（新布局 manifest revision / 旧布局 -1） */
@@ -437,6 +442,8 @@ function buildDocList(scope: string): DocListCache['docs'] {
         fullTextIndexed: ftsOnlyIndexed,
         ...(rel.sourcePath ? { path: rel.sourcePath } : {}),
         ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),
+        // 落点来源留痕（REQ-20261021-001）：只在兜底时下发，避免给绝大多数条目加字段
+        ...(rel.groupSource ? { groupSource: rel.groupSource } : {}),
       });
     }
   }

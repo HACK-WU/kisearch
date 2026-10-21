@@ -28,7 +28,8 @@ import {
 } from './lib/scope.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, hasNoRelationsData, listGroupPaths, loadGroupCache, deleteGroupCache, buildGroupMatchContext, isRelationsRootPath, type LegacyRelationsCacheShape } from './lib/group-cache.js';
-import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { assertNoPendingVectorMigration, vectorSearch, vectorDelete, ensureVectorAvailable, closeEngine, generateDocId } from './lib/vector-client.js';
+import { buildRelationContent } from './lib/path-vectorize.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 // S-04（REQ-20261009-003）：元数据删除需与同进程读任务互斥（提交窗口）
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
@@ -80,6 +81,16 @@ export interface DeleteResult {
   memMethod: 'memoryId' | 'search' | 'skip' | 'none';
   memMemoryId?: string;
   fullTextRemoved: boolean;
+  /**
+   * 路径向量（tag=ki-relation）是否已清理（REQ-20261021-002）。
+   * 写入侧刻意不回写它的 docId（只记内容向量），故删除侧必须按可重算 docId 补删；
+   * 同名 relation 仍被其他组引用时**保留**（docId 跨组共享，删了会误伤）。
+   */
+  relationVectorRemoved: boolean;
+  /** 本次删掉的路径向量条数（0 = 未命中或按共享保护跳过） */
+  relationVectorDeleted?: number;
+  /** 路径向量保留 / 失败的原因（成功命中时不下发） */
+  relationVectorReason?: string;
   reason?: string;
 }
 
@@ -138,6 +149,7 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       memRemoved: false,
       memMethod: 'none',
       fullTextRemoved: true,
+      relationVectorRemoved: false,
     };
 
     // 在途编辑草稿卫兵（fail-loud）：草稿的 baseRevision 绑定当前正文，Relation 一旦被删，
@@ -247,6 +259,27 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       result.reason = `${result.reason || ''} FTS-only 索引删除失败：${ftsOutcome.failed} 条`.trim();
     }
 
+    // 4.5 清理路径向量（tag=ki-relation，REQ-20261021-002）：
+    //    写入侧刻意不回写它的 docId（cache 只记内容向量），只按 memoryIds 删会留下孤儿。
+    //    ★ docId 只由 relation 名 + scope + tag 决定 ⇒ **跨组共享**：同名 relation 还活在
+    //    别的组时必须保留，否则会把兄弟组的路径向量一起删掉（与 group-delete 的共享保护同源）。
+    const otherHolders = Object.entries(cache.groups)
+      .filter(([groupPath]) => groupPath !== resolvedGroup)
+      .filter(([, data]) => (data?.hot_relations ?? []).some((item) => item.text === relation))
+      .map(([groupPath]) => groupPath);
+    if (otherHolders.length > 0) {
+      result.relationVectorRemoved = false;
+      result.relationVectorReason = `同名 relation 仍存在于其他组（${otherHolders.join('、')}），路径向量为跨组共享，已保留`;
+    } else {
+      const relVec = await deleteRelationVector(scope, relation, resolvedGroup);
+      result.relationVectorRemoved = relVec.removed;
+      if (relVec.deleted !== undefined) result.relationVectorDeleted = relVec.deleted;
+      if (relVec.reason) {
+        result.relationVectorReason = relVec.reason;
+        result.reason = `${result.reason || ''} ${relVec.reason}`.trim();
+      }
+    }
+
     // 注：cache 分片落盘已上移到第 2 步的「元数据提交窗口」内（S-04 I1/I2：分片先落 → KB 后删）。
     result.deleted = result.cacheRemoved;
     return { ok: true, scope, result };
@@ -331,6 +364,10 @@ async function deleteBySearch(scope: string, relation: string): Promise<{ remove
     // 避免 "加密" 误匹配 "### 加密工具"（\b 对中文无效，用自定义边界）
     const boundary = '(?=[^a-zA-Z0-9\\u4e00-\\u9fa5]|$)';
     const matched = results.filter(r => {
+      // 路径向量（tag=ki-relation）由 deleteRelationVector 专职清理：
+      // 它的 content 就是 relation 名，必然命中下面的"标题前缀"规则 ⇒ 会在这里被顺手删掉，
+      // 既造成职责重叠，也让 deleteRelationVector 事后命中不到、把结果误报成"未删除"。
+      if (r.tag === 'ki-relation') return false;
       const content = r.content || '';
       const cleanContent = content.replace(/^【标签:[^】]*】\s*/, '');
       const titlePatterns = [
@@ -354,6 +391,68 @@ async function deleteBySearch(scope: string, relation: string): Promise<{ remove
     return { removed: true, method: 'search', memoryId: ids[0] };
   } catch (err) {
     return { removed: false, method: 'search', reason: `search 兜底失败: ${(err as Error).message}` };
+  }
+}
+
+/**
+ * 删除 tag=ki-relation 的**路径向量**（REQ-20261021-002）。
+ *
+ * 为什么单列一个函数：路径向量的 docId **没有回写到 cache**（见 sync-relation.ts
+ * 「relation 路径向量（ki-relation），不回写到 cache（cache 只记内容向量 docId）」），
+ * 而 delete-relation 只按 memoryIds 删内容向量 ⇒ 删完 `ki doc list` 仍剩一条孤儿。
+ *
+ * 好在 docId 可**重算**：`sha256(文本 + scope + tag)`，文本形态有两种——
+ *   现状：`buildRelationContent()` 只返回 relation 名；
+ *   历史（12d14c4 之前）：`${relation} | Group: ${group 空格化}`（keywords 机制已废弃）。
+ * 两种都算一遍直接删；仍未命中再按 tag 精确检索兜底（更早形态无法穷举）。
+ *
+ * ⚠️ docId 跨组共享（只由 relation 名决定），调用方必须先确认没有其他组持有同名 relation。
+ */
+async function deleteRelationVector(
+  scope: string,
+  relation: string,
+  group: string,
+): Promise<{ removed: boolean; deleted?: number; reason?: string }> {
+  const avail = await ensureVectorAvailable();
+  if (!avail.available) {
+    return { removed: false, reason: `路径向量未清理（向量服务不可用：${avail.reason || 'unknown'}）` };
+  }
+  const RELATION_TAG = 'ki-relation';
+  const legacyGroupPart = group.split('/').filter(Boolean).join(' ');
+  const candidateIds = [...new Set([
+    generateDocId(buildRelationContent(relation, group), scope, RELATION_TAG),
+    generateDocId(`${relation} | Group: ${legacyGroupPart}`, scope, RELATION_TAG),
+  ])];
+
+  let deleted = 0;
+  try {
+    const res = await vectorDelete({ scope, ids: candidateIds });
+    deleted += res.deleted;
+  } catch (err) {
+    return { removed: false, deleted: 0, reason: `路径向量删除失败: ${(err as Error).message}` };
+  }
+  if (deleted > 0) return { removed: true, deleted };
+
+  // docId 未命中 → 按 tag 精确检索兜底；只认「以 relation 名开头」的命中，避免误删仅语义相近的条目
+  try {
+    const hits = await vectorSearch({ scope, query: relation, tags: [RELATION_TAG], limit: 20 });
+    const ids = hits
+      .filter((hit) => {
+        const content = (hit.content || '').trim();
+        return content === relation
+          || content.startsWith(`${relation} |`)
+          || content.startsWith(`${relation} `);
+      })
+      .map((hit) => hit.memoryId)
+      .filter(Boolean) as string[];
+    // 未命中视为「本就不存在路径向量」（纯 FTS-only / 历史无路径向量的数据），不报错误
+    if (ids.length === 0) return { removed: false, deleted: 0 };
+    const res = await vectorDelete({ scope, ids });
+    return res.deleted > 0
+      ? { removed: true, deleted: res.deleted }
+      : { removed: false, deleted: 0, reason: `路径向量兜底删除未生效（ids=${ids.join(',')}）` };
+  } catch (err) {
+    return { removed: false, deleted: 0, reason: `路径向量 search 兜底失败: ${(err as Error).message}` };
   }
 }
 
@@ -469,6 +568,7 @@ async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDe
         fullTextRemoved: false,
         memRemoved: false,
         memMethod: 'none',
+        relationVectorRemoved: false,
         reason: outcome.error,
       });
       failed++;
@@ -498,6 +598,7 @@ export async function executeBatchDelete(scope: string | undefined, items: Batch
         fullTextRemoved: false,
         memRemoved: false,
         memMethod: 'none' as const,
+        relationVectorRemoved: false,
         reason: message,
       })),
       total: items.length,

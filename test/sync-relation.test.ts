@@ -753,6 +753,37 @@ describe('sync-relation Group 留空兜底', () => {
     assert.doesNotMatch(String(result.hint ?? ''), /Group 为空/);
   });
 
+  it('落点来源留痕：兜底写 scope-fallback，显式写入清除该字段', async () => {
+    const relation = '落点来源文档';
+    // 1) 留空 → 落 scope 同名组，元数据应带 groupSource
+    const r1 = runSync([
+      '--scope', scope,
+      '--relation', relation,
+      '--module-info', '# 落点来源\n\n正文',
+      '--no-vector',
+    ]);
+    assert.equal(r1.ok, true, JSON.stringify(r1));
+
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    let cache = loadCacheShape(scope) as any;
+    let item = cache.groups[scope]?.hot_relations.find((r: any) => r.text === relation);
+    assert.ok(item, '应写入 scope 同名组');
+    assert.equal(item.groupSource, 'scope-fallback', '兜底写入必须留痕');
+
+    // 2) 同一 (group, relation) 显式写入 → 覆盖语义：字段被清除（缺省即 explicit）
+    const r2 = runSync([
+      '--scope', scope,
+      '--group', scope,
+      '--relation', relation,
+      '--module-info', '# 落点来源\n\n正文（显式）',
+      '--no-vector',
+    ]);
+    assert.equal(r2.ok, true, JSON.stringify(r2));
+    cache = loadCacheShape(scope) as any;
+    item = cache.groups[scope]?.hot_relations.find((r: any) => r.text === relation);
+    assert.equal(item.groupSource, undefined, '显式写入应清除兜底标记');
+  });
+
   it('批量模式 item.group 留空同样落 scope 同名组，且整批只提示一次', async () => {
     const bulkScope = `sync-bulk-group-empty-${Date.now()}`;
     registerTestScope(bulkScope);

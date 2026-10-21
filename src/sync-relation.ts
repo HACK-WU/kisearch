@@ -685,6 +685,9 @@ async function executeBulkSyncRelationLocal(params: {
         if (relRec) {
           if (customTags.length > 0) relRec.tags = customTags;
           else delete relRec.tags;
+          // 落点来源留痕（REQ-20261021-001）：逐 item 判定，缺省即 explicit
+          if (itemGroupFellBack) relRec.groupSource = 'scope-fallback';
+          else delete relRec.groupSource;
         }
 
         // 收集向量 entries（向量化模式才需要）
@@ -1235,6 +1238,9 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     if (relRec) {
       if (customTags.length > 0) relRec.tags = customTags;
       else delete relRec.tags; // 无 tag 时移除字段（避免残留）
+      // 落点来源留痕（REQ-20261021-001）：缺省即 explicit，只有兜底才落字段。
+      if (groupFellBack) relRec.groupSource = 'scope-fallback';
+      else delete relRec.groupSource;
     }
 
     const fts = params.vector === false

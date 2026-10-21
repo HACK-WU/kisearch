@@ -59,7 +59,7 @@ export interface GetModuleInfoParams {
 }
 
 export type GetModuleInfoResult =
-  | { ok: true; scope: string; content: string; revision: string; totalLines: number; hint?: string }
+  | { ok: true; scope: string; content: string; revision: string; totalLines: number; hint?: string; /** 落点来源（REQ-20261021-001）：仅兜底写入时下发，缺省即显式 */ groupSource?: 'scope-fallback' }
   | { ok: false; error: string; hint?: string };
 
 /**
@@ -264,6 +264,8 @@ export async function executeGetModuleInfoLocal(
       revision: contentRevision(markdown),
       totalLines: markdown.split(/\r?\n/).length,
       ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
+      // 落点来源留痕（REQ-20261021-001）：只在兜底时下发
+      ...(rel.groupSource ? { groupSource: rel.groupSource } : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
