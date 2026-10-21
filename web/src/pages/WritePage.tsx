@@ -16,6 +16,7 @@ import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
+import { resolveWriteGroup } from '@/lib/writeGroup';
 
 export function WritePage(): JSX.Element {
   const currentScope = useScopeValue();
@@ -44,12 +45,24 @@ export function WritePage(): JSX.Element {
   const [result, setResult] = useState<string | null>(null);
   const [savedTarget, setSavedTarget] = useState<{ scope: string; group: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 本次报错指向的字段：用于在错误块里给「去填写」按钮（null = 与具体字段无关，如后端异常） */
+  const [errorField, setErrorField] = useState<'relation' | 'body' | null>(null);
+  const relationRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  /**
+   * Group 允许留空：落点由 `resolveWriteGroup` 统一推导（留空 → 与 scope 同名的 Group，
+   * 与 `ki import` 的根目录口径一致）。推导规则与后端保持一致，见 `@/lib/writeGroup`。
+   */
+  const { group: targetGroup, fellBack: groupFellBack } = resolveWriteGroup(group, scope);
 
   // 实时校验 group / relation（空字符串时不报错，避免初次进入显示错误）
   const groupErr = group.trim() ? groupError(group) : null;
   const relationErr = relation.trim() ? relationError(relation) : null;
   const scopeErr = scopeConfirmed && scope.trim() ? scopeError(scope) : null;
-  const hasFormError = !scopeConfirmed || !scope.trim() || !!scopeErr || !!groupErr || !!relationErr;
+  /** 必填但界面上此前没有任何标识的字段（正文），纳入阻塞判断才能"点保存前就提示" */
+  const missingRelation = !relation.trim();
+  const missingBody = !markdown.trim();
   /**
    * 保存被阻塞的原因：按钮保持可点（点击后由 submit() 给出具体错误），
    * 同时把原因写在按钮旁——否则按钮灰着，用户不知道卡在哪。
@@ -61,9 +74,23 @@ export function WritePage(): JSX.Element {
     ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
     : !scopeConfirmed
       ? '请先在上方确认目标 Scope'
-      : hasFormError
-        ? '请补全必填项后再保存'
-        : null;
+      : scopeErr
+        ? scopeErr
+        : missingRelation
+          ? '文档名称（Relation）还没填'
+          : missingBody
+            ? '正文还没写（必填）'
+            : groupErr || relationErr
+              ? '请先修正标红的字段'
+              : null;
+
+  /** 滚到并聚焦缺失字段（窄屏下正文卡常在首屏之外，仅报文字用户找不到） */
+  const focusField = (field: 'relation' | 'body'): void => {
+    const el = field === 'body' ? bodyRef.current : relationRef.current;
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.focus({ preventScroll: true });
+  };
 
   // 点击外部关闭 tag combobox
   useEffect(() => {
@@ -89,6 +116,7 @@ export function WritePage(): JSX.Element {
 
   const submit = async (): Promise<void> => {
     setError(null);
+    setErrorField(null);
     setResult(null);
     setSavedTarget(null);
     if (!scopeConfirmed) {
@@ -99,20 +127,32 @@ export function WritePage(): JSX.Element {
       setError(scopeErr);
       return;
     }
-    if (!group.trim() || !relation.trim() || !markdown.trim()) {
-      setError('Group、Relation、Module Info 均不能为空');
+    // 逐字段报错：此前三者合并成一句「Group、Relation、Module Info 均不能为空」，
+    // 用户填了 Group/Relation 时无法判断缺的是正文（本次 debug 的直接起因）。
+    if (!relation.trim()) {
+      setError('请填写文档名称（Relation）');
+      setErrorField('relation');
+      focusField('relation');
       return;
     }
-    // 字符格式校验（与后端 isUnsafeRelationName / resolveGroupPath 对齐）
-    const gErr = groupError(group);
+    if (!markdown.trim()) {
+      setError('请填写正文（Module Info）——「正文」框里还没有内容，正文为必填项');
+      setErrorField('body');
+      focusField('body');
+      return;
+    }
+    // 字符格式校验（与后端 isUnsafeRelationName / resolveGroupPath 对齐）；Group 留空合法
+    const gErr = group.trim() ? groupError(group) : null;
     const rErr = relationError(relation);
     if (gErr || rErr) {
       setError(gErr || rErr);
+      setErrorField(gErr ? null : 'relation');
+      if (!gErr) focusField('relation');
       return;
     }
     setSubmitting(true);
     try {
-      const target = { scope, group: group.trim() };
+      const target = { scope, group: targetGroup };
       await kiSyncRelation({ scope: target.scope, group: target.group, relation: relation.trim(), content: markdown, vector, tags: selectedTags });
       void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
       void queryClient.invalidateQueries({ queryKey: ['docList', target.scope] });
@@ -120,7 +160,10 @@ export function WritePage(): JSX.Element {
       void fetchTags(target.scope).then((res) => {
         if (res.ok) setAvailableTags(res.tags.map((tag) => tag.tag));
       }).catch(() => {});
-      setResult(`写入成功${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`);
+      setResult(
+        `写入成功${groupFellBack ? `（Group 留空 → 写入「${target.group}」组）` : ''}` +
+        `${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`,
+      );
       setSavedTarget(target);
       setScopeConfirmed(false);
       setGroup('');
@@ -132,6 +175,7 @@ export function WritePage(): JSX.Element {
       setPreview(false);
     } catch (e) {
       setError((e as Error).message);
+      setErrorField(null);
       setScopeConfirmed(false);
     } finally {
       setSubmitting(false);
@@ -171,6 +215,7 @@ export function WritePage(): JSX.Element {
     setResult(null);
     setSavedTarget(null);
     setError(null);
+    setErrorField(null);
   };
 
   return (
@@ -205,6 +250,7 @@ export function WritePage(): JSX.Element {
                 setResult(null);
                 setSavedTarget(null);
                 setError(null);
+                setErrorField(null);
                 setScope(value.trim());
                 setScopeConfirmed(confirmed);
               }}
@@ -217,23 +263,35 @@ export function WritePage(): JSX.Element {
           </div>
           <div className="ki-form-row">
             <div className="ki-form-group">
-              <label className="ki-form-label">Group（文档分组）</label>
+              <label className="ki-form-label">
+                Group（文档分组）
+                <span className="ki-form-label__opt">可留空</span>
+              </label>
               <GroupPathSelect
                 scope={scope || currentScope}
                 value={group}
                 onChange={setGroup}
-                placeholder="选择或输入 Group 路径，如：告警系统/告警收敛"
-                hint={scopeConfirmed ? "斜杠分隔层级，下拉选择已有 Group 或直接输入新建。禁止包含 \\ 和 .." : '下拉来自当前 Scope；保存前需确认上方目标 Scope。'}
+                placeholder={`留空 = 写入「${scope || currentScope}」组，或输入路径如：告警系统/告警收敛`}
+                hint={
+                  scopeConfirmed
+                    ? `斜杠分隔层级，下拉选择已有 Group 或直接输入新建；留空则写入与 scope 同名的组「${scope}」。禁止包含 \\ 和 ..`
+                    : '下拉来自当前 Scope；保存前需确认上方目标 Scope。'
+                }
                 error={groupErr}
               />
             </div>
             <div className="ki-form-group">
-              <label className="ki-form-label">文档名称（Relation）</label>
+              <label className="ki-form-label">
+                文档名称（Relation）
+                <span className="ki-form-label__req" aria-hidden="true">*</span>
+              </label>
               <input
+                ref={relationRef}
                 className={`ki-form-input${relationErr ? ' ki-form-input--error' : ''}`}
-                placeholder="如：告警收敛策略"
+                placeholder="如：告警收敛策略（必填）"
                 value={relation}
                 onChange={(e) => setRelation(e.target.value)}
+                aria-required="true"
                 aria-invalid={relationErr ? true : undefined}
               />
               {relationErr ? (
@@ -369,11 +427,21 @@ export function WritePage(): JSX.Element {
           </div>
 
           {error && (
-            <div className="ki-empty" style={{ marginTop: 16 }}>
-              <div>
-                <h3>写入失败</h3>
-                <p>{error}</p>
+            <div className="ki-write-error" role="alert">
+              <span className="ki-write-error__icon" aria-hidden="true">!</span>
+              <div className="ki-write-error__body">
+                <strong className="ki-write-error__title">写入失败</strong>
+                <p className="ki-write-error__msg">{error}</p>
               </div>
+              {errorField && (
+                <button
+                  type="button"
+                  className="ki-btn ki-btn--secondary ki-btn--small"
+                  onClick={() => focusField(errorField)}
+                >
+                  {errorField === 'body' ? '去填写正文' : '去填写文档名称'}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -384,7 +452,10 @@ export function WritePage(): JSX.Element {
           <div className="ki-card__head">
             <span className="ki-panel-heading">
               <span className="ki-panel-kicker">MARKDOWN</span>
-              <span className="ki-card__title">正文</span>
+              <span className="ki-card__title">
+                正文
+                <span className="ki-form-label__req" aria-hidden="true">*</span>
+              </span>
             </span>
             <div className="ki-segmented" role="group" aria-label="正文视图">
               <button type="button" aria-pressed={!preview} onClick={() => setPreview(false)}>编辑</button>
@@ -401,10 +472,12 @@ export function WritePage(): JSX.Element {
                 </div>
               ) : (
                 <textarea
+                  ref={bodyRef}
                   className="ki-form-textarea ki-form-textarea--tall"
-                  placeholder="## 标题&#10;&#10;正文…"
+                  placeholder="必填：## 标题&#10;&#10;正文…"
                   value={markdown}
                   onChange={(e) => setMarkdown(e.target.value)}
+                  aria-required="true"
                 />
               )}
             </div>

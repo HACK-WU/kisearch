@@ -10,7 +10,7 @@ export function registerBulkSyncRelationTool(server: McpServer): void {
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       items: z.array(z.object({
-        group: z.string().describe('Group 路径（支持 / 层级嵌套）'),
+        group: z.string().describe('Group 路径（支持 / 层级嵌套）；留空（""）则写入与 scope 同名的组（对齐 ki import 的根目录口径）'),
         relation: z.string().describe('Relation 名称'),
         module_info: z.string().describe('本地 KB Markdown 内容'),
         tags: z.string().optional().describe('文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 "api,auth"）'),

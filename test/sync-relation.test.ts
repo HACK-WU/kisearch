@@ -679,11 +679,12 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
             relation: '正常关系',
             module_info: '# 正常\n\n内容。',
           },
-          // 故意传一个 group 为空格的条目（通过首层校验但 trim 后为空）
+          // 异常样本改用「空白 module_info」：2026-10-21 起 group 留空不再算参数缺失
+          // （改为兜底落到与 scope 同名的组），原先拿 group: '   ' 当异常样本的写法已不符合契约。
           {
-            group: '   ',
+            group: '项目根/异常',
             relation: '异常关系',
-            module_info: '# 异常\n\n内容。',
+            module_info: '   ',
           },
         ],
       });
@@ -705,4 +706,89 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
     }
   });
 
+});
+
+/**
+ * Group 留空兜底（2026-10-21 · Q2 口径统一）
+ *
+ * 三处调用方（写入页 / MCP 工具 / CLI）都必须同口径：group 留空不再是错误，
+ * 而是落到**与 scope 同名的组**（对齐 import-path.ts resolveGroupForSource 的根目录口径），
+ * 并且必须通过 hint 让调用方看见实际落点——否则字会"悄悄"写到一个用户没指定的组里。
+ */
+describe('sync-relation Group 留空兜底', () => {
+  it('省略 --group → 落到与 scope 同名的组，hint 回显落点', async () => {
+    const relation = '空组兜底文档';
+    const result = runSync([
+      '--scope', scope,
+      '--relation', relation,
+      '--module-info', '# 空组兜底\n\n正文内容',
+      '--no-vector',
+    ]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(String(result.hint ?? ''), /Group 为空/, 'hint 必须说明留空兜底');
+    assert.ok(String(result.hint ?? '').includes(scope), 'hint 必须回显实际落点组名');
+
+    const { readJson } = await import('../src/lib/store.js');
+    const { getLocalKbDir } = await import('../src/lib/scope.js');
+    const localKb = readJson<any>(getLocalKbDir(scope, scope));
+    assert.ok(localKb?.[relation], '本地 KB 应落在 <kb>/<scope>/index.json');
+
+    const { loadCacheShape } = await import('../src/lib/group-cache.js');
+    const cache = loadCacheShape(scope) as any;
+    assert.ok(
+      cache.groups[scope]?.hot_relations.some((item: any) => item.text === relation),
+      '元数据应记在 <scope> 同名组下',
+    );
+  });
+
+  it('显式 --group 时不得出现兜底 hint（不误报）', () => {
+    const result = runSync([
+      '--scope', scope,
+      '--group', '项目根/显式组',
+      '--relation', '显式组文档',
+      '--module-info', '# 显式\n\n正文',
+      '--no-vector',
+    ]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.doesNotMatch(String(result.hint ?? ''), /Group 为空/);
+  });
+
+  it('批量模式 item.group 留空同样落 scope 同名组，且整批只提示一次', async () => {
+    const bulkScope = `sync-bulk-group-empty-${Date.now()}`;
+    registerTestScope(bulkScope);
+    const { initScope } = await import('../src/lib/store.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
+    initScope(bulkScope);
+    const inputFile = path.join(getKbDir(bulkScope), 'bulk-empty-group.json');
+    try {
+      fs.writeFileSync(inputFile, JSON.stringify({
+        items: [
+          { group: '', relation: '批量空组A', module_info: '# A\n\n正文A' },
+          { group: '  ', relation: '批量空组B', module_info: '# B\n\n正文B' },
+        ],
+      }), 'utf-8');
+      const result = runSync([
+        '--scope', bulkScope,
+        '--input', inputFile,
+        '--no-vector',
+      ]);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.succeeded, 2, JSON.stringify(result));
+      const hints: string[] = result.hints ?? [];
+      assert.equal(
+        hints.filter((h) => h.includes('Group 为空')).length,
+        1,
+        `兜底提示应整批只出现一次，实际：${JSON.stringify(hints)}`,
+      );
+      assert.ok(hints.some((h) => h.includes(bulkScope)), 'hint 必须回显落点组名');
+
+      const { loadCacheShape } = await import('../src/lib/group-cache.js');
+      const cache = loadCacheShape(bulkScope) as any;
+      const texts = (cache.groups[bulkScope]?.hot_relations ?? []).map((item: any) => item.text);
+      assert.ok(texts.includes('批量空组A') && texts.includes('批量空组B'), JSON.stringify(texts));
+    } finally {
+      const kbDir = getKbDir(bulkScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -3035,6 +3035,42 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-write-split .ki-form-group { margin-bottom: 12px; }
 @media (max-width: 959px) { .ki-write-split { grid-template-columns: minmax(0, 1fr); } }
 
+/* 表单必填标记（写入页：文档名称、正文）与"可留空"说明（Group）
+   ——此前正文是必填但界面上完全看不出，导致「都填了还报错」的错觉。 */
+.ki-form-label__req { margin-left: 2px; color: var(--ki-color-danger); font-weight: 700; }
+.ki-form-label__opt {
+  margin-left: 6px; font-weight: 500; font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+/* 写入页错误提示：危险色卡片（此前复用 .ki-empty 虚线空态框，读起来像"没有数据"而非报错）
+   flex-basis 用像素底线而非 auto：窄屏时正文列不再被按钮压成一条竖排文字，
+   空间不足直接把「去填写正文」挤到下一行（实测 360px 原先正文列只剩 ~100px）。 */
+.ki-write-error {
+  display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px;
+  margin-top: 16px; padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 35%, transparent);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft);
+}
+.ki-write-error__icon {
+  flex: 0 0 18px; display: inline-grid; place-items: center;
+  width: 18px; height: 18px; margin-top: 1px; border-radius: 50%;
+  background: var(--ki-color-danger); color: var(--ki-color-surface);
+  font-size: 12px; font-weight: 700; line-height: 1;
+}
+.ki-write-error__body { flex: 1 1 220px; min-width: 0; }
+.ki-write-error__title {
+  display: block; font-size: var(--ki-font-size-sm); font-weight: 650;
+  color: var(--ki-color-danger-ink);
+}
+.ki-write-error__msg {
+  margin: 2px 0 0; font-size: var(--ki-font-size-xs); line-height: 1.5;
+  color: var(--ki-color-danger-ink); word-break: break-word;
+}
+.ki-write-error .ki-btn { flex: 0 0 auto; }
+/* 按钮换到下一行时与正文左对齐（跳过 18px 图标 + 10px gap），避免贴左框 */
+@media (max-width: 560px) { .ki-write-error .ki-btn { margin-left: 28px; } }
+
 /* 分段控件（对齐 demo .segmented） */
 .ki-segmented { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); }
 .ki-segmented button { min-height: 28px; padding: 0 12px; border: 0; border-radius: 4px; background: transparent; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-family: var(--ki-font-family); }

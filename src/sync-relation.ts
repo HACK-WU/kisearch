@@ -534,6 +534,8 @@ async function executeBulkSyncRelationLocal(params: {
     // ─── 阶段 1：循环 syncSingleRelation 改 cache + 收集 entries ───
     const results: BulkSyncResultItem[] = [];
     const hints: string[] = [];
+    /** group 留空兜底的提示只推一次（同一批多条留空时避免复读） */
+    let groupFallbackHintPushed = false;
     let failed = 0;
     /** 批次 2：触达组采集（阶段 4 只批写这些组） */
     const bulkTouchedGroups = new Set<string>();
@@ -551,7 +553,9 @@ async function executeBulkSyncRelationLocal(params: {
     const shardedAtEntry = hasShardedLayout(scope);
     for (const item of items) {
       const relation = String(item.relation || '');
-      let group = normalizeGroupKeyForWrite(shardedAtEntry, String(item.group || '').replace(/^\/+|\/+$/g, ''));
+      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      let group = normalizeGroupKeyForWrite(shardedAtEntry, rawItemGroup.trim() === '' ? scope : rawItemGroup);
       if (!String(item.module_info || '').trim() || !relation || !group || isUnsafeRelationName(relation)) continue;
       if (groupIndex) {
         try {
@@ -594,7 +598,10 @@ async function executeBulkSyncRelationLocal(params: {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const group = normalizeGroupKeyForWrite(shardedAtEntry, String(item.group || '').replace(/^\/+|\/+$/g, ''));
+      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      const itemGroupFellBack = rawItemGroup.trim() === '';
+      const group = normalizeGroupKeyForWrite(shardedAtEntry, itemGroupFellBack ? scope : rawItemGroup);
       const relation = item.relation || '';
       const moduleInfo = item.module_info || '';
 
@@ -658,6 +665,11 @@ async function executeBulkSyncRelationLocal(params: {
           }
           // 透出路径解析提示（自动补全 / 多候选歧义 / 部分匹配 / 未匹配），供调用方感知路径是否精确命中
           if (resolved.hint) hints.push(resolved.hint);
+        }
+        // 留空兜底必须可见（否则文档"悄悄"落到 scope 同名组）；整批只提示一次
+        if (itemGroupFellBack && !groupFallbackHintPushed) {
+          hints.push(`💡 Group 为空，已落到与 scope 同名的组「${resolvedGroup}」`);
+          groupFallbackHintPushed = true;
         }
 
         itemPriorFtsIds[i] = [...(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
@@ -1141,8 +1153,18 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     const { moduleInfo } = params;
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
     const scope = resolveScope(loadConfig(), params.scope);
+    /**
+     * Group 留空 → 落到**与 scope 同名的组**（与 `ki import` 的根目录口径一致，
+     * 见 lib/import-path.ts resolveGroupForSource：根下散文件归 scope 名）。
+     * 前端写入页、MCP 工具、CLI 三处因此同口径：都不再因 group 为空而报错。
+     * ⚠️ 不引入"空 group 键"：分片路径 `''.split('/')` 会被判非法抛错、
+     * persistCacheShape 会静默丢空组、分片枚举收不到（写进去读不到）、
+     * 路径向量撞同一 docId、/api/doc/list 的 `group=` 空值已被"全部文档"占用。
+     */
+    const rawGroup = String(params.group ?? '').replace(/^\/+|\/+$/g, '');
+    const groupFellBack = rawGroup.trim() === '';
     // 批次 2（护栏 #7）：组键归一（布局感知，见 normalizeGroupKeyForWrite；入口一次性判定）
-    let group = normalizeGroupKeyForWrite(hasShardedLayout(scope), String(params.group).replace(/^\/+|\/+$/g, ''));
+    let group = normalizeGroupKeyForWrite(hasShardedLayout(scope), groupFellBack ? scope : rawGroup);
     const relation = params.relation;
 
     if (!group || !relation || !moduleInfo) {
@@ -1174,15 +1196,21 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
     }
 
-    // Group 路径自动补全提示
-    let pathHint: string | undefined;
+    // Group 路径提示：留空兜底必须始终可见（否则文档"悄悄"落到 scope 同名组），
+    // 与自动补全/未匹配提示同一条 hint 通道，多条时用「；」拼接而不互相覆盖。
+    let pathHint: string | undefined = groupFellBack
+      ? `💡 Group 为空，已落到与 scope 同名的组「${group}」`
+      : undefined;
+    const appendHint = (hint: string): void => {
+      pathHint = pathHint ? `${pathHint}；${hint}` : hint;
+    };
     const groupIndex = readGroupIndex(scope);
     if (groupIndex) {
       const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
       if (resolved.matched && resolved.resolvedPath !== group) {
-        pathHint = `💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`;
+        appendHint(`💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`);
       } else if (!resolved.matched && resolved.hint) {
-        pathHint = resolved.hint;
+        appendHint(resolved.hint);
       }
     }
 
@@ -1320,7 +1348,7 @@ program
   .showHelpAfterError()
   .description('关系回写：写入缓存 + 本地 KB')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('-g, --group <group>', 'Group 路径（单条模式）')
+  .option('-g, --group <group>', 'Group 路径（单条模式）；留空则写入与 scope 同名的组（对齐 ki import 的根目录口径）')
   .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')

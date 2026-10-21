@@ -9,7 +9,7 @@ export function registerSyncRelationTool(server: McpServer): void {
     '写入/更新 Relation + 本地 KB（自动补建 Group 树）',
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
-      group: z.string().describe('Group 路径（支持 / 层级嵌套）'),
+      group: z.string().describe('Group 路径（支持 / 层级嵌套）；留空（""）则写入与 scope 同名的组（对齐 ki import 的根目录口径）'),
       relation: z.string().describe('Relation 名称'),
       module_info: z.string().describe('本地 KB Markdown 内容'),
       vector: z.boolean().optional().default(true).describe('是否写入 dense 向量层。false=FTS-only：不调用 embedding，写入独立全文 Collection'),
