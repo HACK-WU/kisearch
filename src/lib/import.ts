@@ -46,6 +46,7 @@ import {
 import type { ScanResultEntry } from './ai-results.js';
 // 落点推导与重复判据共用同一实现（debug：group 吸收路径前缀时的疑似重复误判）
 import { resolveGroupForSource } from './import-path.js';
+import { writeImportedDocsToWiki, type WikiImportWritebackResult } from './wiki-sync.js';
 
 // 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
 export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
@@ -244,6 +245,11 @@ export interface ImportResult {
    * 可选：早退路径（无文件 / 全部未变）不产生整理，故不返回该字段。
    */
   indexMaintenance?: { scheduled: boolean; merged: boolean };
+  /**
+   * CLI 导入的可选 wiki 写回结果（仅 `wikiWriteback: true` 且 scope 配置了
+   * wikiSync.enabled + sourceDir 时出现；未配置时不返回该字段）。
+   */
+  wikiWriteback?: WikiImportWritebackResult;
 }
 
 export interface HandleDirectImportArgs {
@@ -341,6 +347,11 @@ export interface HandleDirectImportArgs {
    * 否则 `sync_relation` 的 wiki 写回会持续指向用户源文档目录。
    */
   writeSourceBlock?: boolean;
+  /**
+   * 导入成功后把本次完成的文档按 wiki 格式写回 `scopes.<scope>.wikiSync.sourceDir`
+   * （已存在文件跳过）。CLI `ki import` 传 `true`；Web 上传 / 数据源同步保持缺省 false。
+   */
+  wikiWriteback?: boolean;
   /**
    * 候选所有权基线（数据源路径用）：只有这些相对路径能进入待删候选。
    * 缺省 = 现有 Web 导入行为（全 scope 差集）；**首次同步须传空数组**而非 undefined。
@@ -2029,6 +2040,47 @@ async function handleDirectImportUnlocked(
     ? scheduleIndexMaintenance(scope, { reason: 'import' })
     : { accepted: false, merged: false };
 
+  // CLI 导入的可选 wiki 写回（wikiSync 未配置/关闭 → null，既有导入零变化）。
+  // 只写本次「文件级完成」的文档；已存在文件由 writeImportedDocsToWiki 跳过。
+  let wikiWriteback: WikiImportWritebackResult | undefined;
+  if (args.wikiWriteback === true && activeFileRecords.length > 0) {
+    const kbByGroup = new Map<string, Record<string, unknown>>();
+    const items = activeFileRecords.map((rec) => {
+      let kb = kbByGroup.get(rec.groupPath);
+      if (!kb) {
+        kb = readLocalKb(scope, rec.groupPath);
+        kbByGroup.set(rec.groupPath, kb);
+      }
+      const raw = kb[rec.relation];
+      const content = typeof raw === 'string'
+        ? raw
+        : ((raw as { moduleInfo?: string; content?: string } | null)?.moduleInfo
+          ?? (raw as { content?: string } | null)?.content
+          ?? '');
+      return {
+        group: rec.groupPath,
+        relation: rec.relation,
+        content,
+        sourcePath: sourceIsFile ? sourceDir : path.resolve(sourceDir, rec.rel),
+      };
+    });
+    try {
+      const written = writeImportedDocsToWiki(scope, items);
+      if (written) {
+        wikiWriteback = written;
+        logInfo(`wiki 同步：写入 ${written.written} 篇，跳过 ${written.skipped} 篇（已存在/源在 wiki 内），失败 ${written.failed.length} 篇`);
+        if (written.failed.length > 0) {
+          const detail = written.failed.slice(0, 5)
+            .map((item) => `${item.group}/${item.relation}: ${item.reason}`)
+            .join('；');
+          logWarn(`wiki 同步失败 ${written.failed.length} 篇（不影响导入结果）：${detail}${written.failed.length > 5 ? ' …' : ''}`);
+        }
+      }
+    } catch (err) {
+      logWarn(`wiki 同步异常（不影响导入结果）：${(err as Error).message}`);
+    }
+  }
+
   return {
     ok: true,
     action: 'import',
@@ -2077,6 +2129,7 @@ async function handleDirectImportUnlocked(
     source,
     /** S-02：只报告"是否入队"，不等整理完成 */
     indexMaintenance: { scheduled: indexMaintenance.accepted, merged: indexMaintenance.merged },
+    ...(wikiWriteback ? { wikiWriteback } : {}),
   };
   } finally {
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);

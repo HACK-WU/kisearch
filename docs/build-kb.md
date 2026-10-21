@@ -276,7 +276,9 @@ scopes:
 - **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation；keywords 已移除）
 - **目录结构**：按 Group 路径创建子目录，如 `wiki-output/我的项目/API/用户登录接口.md`
 - **优先级**：如果 scope 有 `source` 块（通过 ki import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
-- **直导不触发写回**：`ki import --source` 只写本地 KB + 向量层，不写回外部 Wiki（避免 chunk 的 `{relation}.md` 污染源目录）
+- **Group 目录同步**：开启 wikiSync 时，`ki group create` 会在 `wikiSync.sourceDir` 下创建同名目录（创建失败只告警，不影响建组）
+- **导入写回（仅 CLI `ki import`）**：开启 wikiSync 时，导入成功的文档会按 wiki 格式写入 `<sourceDir>/<group>/<relation>.md`（源文件自带的 frontmatter 会被替换为 groupPath/relation 头）；**已存在的文件跳过**，不覆盖手工维护的内容；导入源本身位于 wiki 目录内时不自我复制。Web 上传与 `ki datasource sync` 不写回
+- **写回范围**：只覆盖「本次实际写入 KB」的文档——增量未变、冲突跳过、预算剔除的文件不写回；wiki 文件被手工删除后重导同内容也不会重建，需用 `ki wiki-backfill <scope>` 补齐
 
 ### Wiki 文件示例
 

@@ -141,6 +141,7 @@ ki group create <path> [--scope <s>]
 
 - 只创建单个节点，父路径必须已存在；近似路径直接报错并给候选（不做语义补全）。
 - scope 不存在时自动创建并返回 `createdScope: true`。
+- 开启 `wikiSync` 时会在 `wikiSync.sourceDir` 下创建同名目录并返回 `wikiDir`（创建失败返回 `wikiWarning`，不影响建组）。
 - 例：`ki group create "我的项目/API" --scope my-project`。
 
 ### `ki group delete`
@@ -835,6 +836,11 @@ ki sync-relation \
 > **历史补齐**：Wiki 写回是事件驱动的——只覆盖 `sync-relation` 执行之后的关系。历史关系的补齐有两条路径：
 > - **自动**：写回时检测到 wiki 目标目录不存在或为空 → 自动全量补齐后写入本条（`wikiSync.autoBackfill: false` 可关闭）
 > - **手动**：`ki wiki-backfill <scope>`（已存在文件跳过、不刷新时间戳；`--force` 全量覆盖）
+>
+> **Group / 导入同步**：开启 wikiSync 时，`ki group create` 会在 `wikiSync.sourceDir` 下创建同名目录；
+> CLI `ki import` 会把本次导入成功的文档按 wiki 格式写入 `<sourceDir>/<group>/<relation>.md`
+> （已存在文件跳过、导入源在 wiki 内不自我复制；Web 上传与 `ki datasource sync` 不写回）。
+> 写回结果在导入 JSON 的 `wikiWriteback` 字段（`targetDir/written/skipped/failed`），失败不阻塞导入。
 
 ### 批量模式
 
