@@ -24,7 +24,7 @@ import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { createMcpHttpServer, serveStatic } from '../src/lib/mcp-http.js';
-import { getRelationsCachePath } from '../src/lib/scope.js';
+import { getKbDir, getRelationsCachePath } from '../src/lib/scope.js';
 import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
 import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
@@ -176,6 +176,65 @@ describe('/api/tasks 与 /api/vector/status', () => {
       assert.equal((await dimensionResponse.json() as any).status.state, 'unknown');
     } finally {
       reporter.stop();
+    }
+  });
+});
+
+describe('/api/datasource/list|detail', () => {
+  it('activeState 来自任务台账：queued → running(startedAt) → 结束后 null', async () => {
+    const config = loadConfig();
+    const scope = 'api_datasource_scope';
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-src-'));
+    const dsFile = path.join(getKbDir(scope), 'datasource.json');
+    fs.mkdirSync(path.dirname(dsFile), { recursive: true });
+    fs.writeFileSync(dsFile, JSON.stringify({
+      version: 1,
+      scope,
+      dir: sourceDir,
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: true,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: null,
+    }));
+
+    const taskId = `ds-sync-${crypto.randomUUID()}`;
+    const reporter = createTaskReporter(config, { id: taskId, source: 'cli', operation: 'datasource-sync', scope });
+    const startedAt = Date.now() + 1000;
+    const readList = async (): Promise<any> => (await fetch(`${handle!.base}/api/datasource/list?scope=${scope}`)).json();
+    const readDetail = async (): Promise<any> => (await fetch(`${handle!.base}/api/datasource/detail?scope=${scope}`)).json();
+
+    try {
+      // queued：算 active（删除闸门依赖 running 布尔），但不伪造 startedAt
+      let row = (await readList()).sources[0];
+      assert.equal(row.running, true);
+      assert.equal(row.activeState, 'queued');
+      assert.equal(row.activeStartedAt, null);
+
+      reporter.update({ state: 'running', startedAt });
+      row = (await readList()).sources[0];
+      assert.equal(row.running, true);
+      assert.equal(row.activeState, 'running');
+      assert.equal(row.activeStartedAt, startedAt);
+      assert.equal(row.lastSync, null, '同步进行中 lastSync 必须仍为 null（状态不能靠它）');
+      const detail = await readDetail();
+      assert.equal(detail.running, true);
+      assert.equal(detail.activeState, 'running');
+      assert.equal(detail.activeStartedAt, startedAt);
+      assert.equal(detail.source.lastSync, null);
+
+      reporter.finish('succeeded');
+      row = (await readList()).sources[0];
+      assert.equal(row.running, false);
+      assert.equal(row.activeState, null);
+      assert.equal(row.activeStartedAt, null);
+    } finally {
+      reporter.stop();
+      fs.rmSync(sourceDir, { recursive: true, force: true });
     }
   });
 });

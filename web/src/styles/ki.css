@@ -5305,7 +5305,6 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__row:hover { background: var(--ki-color-bg-secondary); }
 .ki-ds-table__row.is-active { background: var(--ki-color-primary-soft); box-shadow: inset 3px 0 0 var(--ki-color-primary); }
 .ki-ds-table__scope { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
-.ki-ds-row__running { color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); font-style: normal; font-weight: 500; }
 .ki-ds-table__dir,
 .ki-ds-table__group {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -5377,19 +5376,8 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-drawer { width: 100vw; }
 }
 
-/* 宽屏抽屉打开：主区右让 536px（抽屉宽 + 间隙），列表降为三列，避免被抽屉盖住。
-   ≤1279 不做让位（让位后主区不足 400px，反而不可读）——由遮罩表达"背景不可操作"。 */
-@media (min-width: 1280px) {
-  .ki-datasource-page--drawer-open { padding-right: 536px; }
-  .ki-datasource-page--drawer-open .ki-ds-table__head,
-  .ki-datasource-page--drawer-open .ki-ds-table__row {
-    grid-template-columns: 150px minmax(0, 1fr) 96px;
-    gap: 8px;
-  }
-  .ki-datasource-page--drawer-open .ki-ds-col--group,
-  .ki-datasource-page--drawer-open .ki-ds-col--time,
-  .ki-datasource-page--drawer-open .ki-ds-col--pending { display: none; }
-}
+/* 宽屏抽屉为纯浮层（带遮罩）：**不再对背景做右让/三列降级**——遮罩已表达"背景不可操作"，
+   再让位只会在开关抽屉时制造列表 reflow 抖动。≤1199 的三列是独立响应式规则。 */
 
 .ki-ds-pending { margin-top: var(--ki-space-3); padding-top: var(--ki-space-3); border-top: 1px solid var(--ki-color-border); }
 .ki-ds-pending__from { margin: -4px 0 8px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }

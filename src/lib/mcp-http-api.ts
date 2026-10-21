@@ -57,6 +57,7 @@ import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
 import { readDataSource, scanDataSources, toClientPending } from './datasource.js';
+import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -2033,14 +2034,12 @@ async function handleDatasourcePrune(
 
 const DATASOURCE_STALE_MS = 24 * 60 * 60 * 1000;
 
-/** 正在跑 datasource-sync 的 scope（台账不可读时降级为空集：不能因它让列表 500） */
-function activeDatasourceSyncScopes(config: KiConfig): Set<string> {
+/** 正在跑 datasource-sync 的 scope → 运行态（台账不可读时降级为空 Map：不能因它让列表 500） */
+function activeDatasourceSyncByScope(config: KiConfig): Map<string, DataSourceActiveSync> {
   try {
-    return new Set(listTaskRecords(config)
-      .filter((task) => task.operation === 'datasource-sync' && (task.state === 'queued' || task.state === 'running'))
-      .map((task) => task.scope));
+    return pickActiveDatasourceSync(listTaskRecords(config));
   } catch {
-    return new Set();
+    return new Map();
   }
 }
 
@@ -2063,36 +2062,42 @@ function handleDatasourceList(
   const visible = (scope: string): boolean => authScopes === null || scopeAllowed(authScopes, scope);
   const inFilter = (scope: string): boolean => !scopeFilter || scope === scopeFilter;
   const scan = scanDataSources(requestConfig);
-  const running = activeDatasourceSyncScopes(requestConfig);
+  const activeSync = activeDatasourceSyncByScope(requestConfig);
   const now = Date.now();
 
   const sources = scan.registered
     .filter(({ scope }) => visible(scope) && inFilter(scope))
-    .map(({ scope, record }) => ({
-      scope,
-      dir: record.dir,
-      group: record.group,
-      conflictMode: record.conflictMode,
-      vector: record.vector,
-      registeredAt: record.createdAt,
-      updatedAt: record.updatedAt,
-      lastSync: record.lastSync
-        ? {
-          at: record.lastSync.at,
-          durationMs: record.lastSync.durationMs,
-          state: record.lastSync.state,
-          files: record.lastSync.result.files,
-          pendingDelete: {
-            total: record.lastSync.pendingDelete.total,
-            overLimit: record.lastSync.pendingDelete.overLimit,
-            stale: record.lastSync.pendingDelete.stale,
-            blocked: record.lastSync.pendingDelete.blocked,
-          },
-        }
-        : null,
-      running: running.has(scope),
-      stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
-    }));
+    .map(({ scope, record }) => {
+      const active = activeSync.get(scope) ?? null;
+      return {
+        scope,
+        dir: record.dir,
+        group: record.group,
+        conflictMode: record.conflictMode,
+        vector: record.vector,
+        registeredAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        lastSync: record.lastSync
+          ? {
+            at: record.lastSync.at,
+            durationMs: record.lastSync.durationMs,
+            state: record.lastSync.state,
+            files: record.lastSync.result.files,
+            pendingDelete: {
+              total: record.lastSync.pendingDelete.total,
+              overLimit: record.lastSync.pendingDelete.overLimit,
+              stale: record.lastSync.pendingDelete.stale,
+              blocked: record.lastSync.pendingDelete.blocked,
+            },
+          }
+          : null,
+        // activeState 是状态的唯一精确口径；running 保留为派生值（activeState !== null）
+        running: active !== null,
+        activeState: active?.state ?? null,
+        activeStartedAt: active?.startedAt ?? null,
+        stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
+      };
+    });
 
   res.setHeader('Cache-Control', 'no-store');
   sendJson(res, 200, {
@@ -2137,7 +2142,8 @@ function handleDatasourceDetail(
     });
     return;
   }
-  const running = activeDatasourceSyncScopes(requestConfig).has(scope);
+  const active = activeDatasourceSyncByScope(requestConfig).get(scope) ?? null;
+  const running = active !== null;
   let lastSync = read.record.lastSync;
   if (lastSync) {
     // 内部字段不下发：candidateSourcePaths（重算基线，可达数万条）与 seenRels（扫描清单，页面不消费）
@@ -2146,7 +2152,13 @@ function handleDatasourceDetail(
     lastSync = { ...syncSafe, pendingDelete: pendingSafe } as unknown as typeof lastSync;
   }
   res.setHeader('Cache-Control', 'no-store');
-  sendJson(res, 200, { ok: true, running, source: { ...read.record, lastSync } });
+  sendJson(res, 200, {
+    ok: true,
+    running,
+    activeState: active?.state ?? null,
+    activeStartedAt: active?.startedAt ?? null,
+    source: { ...read.record, lastSync },
+  });
 }
 
 // ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────//

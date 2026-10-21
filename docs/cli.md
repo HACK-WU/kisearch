@@ -103,6 +103,32 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ---
 
+## `datasource`（数据源登记与同步，REQ-20261020-001）
+
+CLI 是登记与同步的唯一入口；页面只读（唯一写动作是删除待删候选）。
+
+```bash
+ki datasource add --scope <s> --source <dir> [--group <g>] \
+  [--conflict-mode incremental|overwrite|skip|suffix] [--conflict-suffix "_{n}"] \
+  [--chunk-size N] [--chunk-overlap N] [--no-vector] [--force]
+ki datasource sync --scope <s> [--dry-run]     # 导入 + 算候选，永不删除；单源
+ki datasource prune --scope <s> [--group <g>] [--yes]  # 默认预览；每次 ≤500 篇
+ki datasource list [--json]
+ki datasource remove --scope <s> [--yes]       # 只取消登记，不删库内文档
+```
+
+**语义（与设计 S-01~S-03 一致）**
+
+- 清单落 `<kbDir>/datasource.json`（每 scope 一个，0600 原子写）；**不写** `group-index.json.source` —— `sync_relation` 的 wiki 写回不会指向用户源目录
+- `sync` 只导入 + 计算待删候选：候选只在「上一次成功同步见过的 rel 集合」内产生，首次同步零候选；**永不删除**，库内文档数只增不减
+- `--dry-run` 零写入（不导入、不写 `lastSync`）
+- `prune` 执行时服务端按**当前源目录**重算候选并与 `token` 比对（失配 `409`），只删「所选 ∩ 可见候选」，且**不动源目录文件**（`wikiDelete:false`）
+- 候选 > 500 篇：页面/CLI 分批删除（每次 ≤500，删完刷新继续）
+- `remove` 只删登记，不清空历史 `source` 块（后者属于一次性 `ki import` 的状态）
+- 退出码：成功 `0` / 失败 `1`（`sync` 部分成功仍为 `0`，stderr 提示未完成文件）
+
+---
+
 ## `group`
 
 Group 管理：`create` / `delete` / `list`。组的位置只由单一路径表达，**不提供** `--parent` / `--name` / `--parents`。

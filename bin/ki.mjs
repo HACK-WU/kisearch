@@ -29,6 +29,7 @@ const VERSION = pkg.version;
 // 命令映射
 const COMMANDS = {
   'import': 'src/import.ts',
+  'datasource': 'src/datasource.ts',
   'group': 'src/group.ts',
   'get-module-info': 'src/get-module-info.ts',
   'sync-relation': 'src/sync-relation.ts',
@@ -82,6 +83,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 
 命令：
   import            导入外部 Wiki（--source 直导，幂等追加）
+  datasource        数据源登记与同步：add / list / remove / sync（只导入+算候选，永不删除）
   index-optimize    整理 zvec 索引（optimize：构建 dense 索引；导入收尾已自动触发，可手动重跑）
   group             Group 管理：create / delete / list（单一路径，无 --parent/--name）
   get-module-info   读取本地 KB 原文
@@ -109,6 +111,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki config init
   ki doctor
   ki import --scope my-project --source ./wiki --group wiki
+  ki datasource add --scope my-project --source ./wiki --group wiki
+  ki datasource sync --scope my-project          # 导入 + 算待删候选（不删除）
+  ki datasource list --json
   ki index-optimize -s my-project         # 整理索引：构建 dense 索引（导入收尾已自动做，失败可重跑）
   ki scope list
   ki doc list --scope my-project --limit 10

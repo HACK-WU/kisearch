@@ -4,8 +4,38 @@
  * 与任务详情同构（三段 + 待删段），但**不伪造 TaskRecord**：
  * `lastSync` 是数据源自己的快照，字段与任务台账不同。
  */
-import type { DataSourceLastSyncView, DataSourcePendingItem, DataSourceRecordView, DataSourceSyncState } from '@/api/httpApi';
+import type { DataSourceActiveState, DataSourceLastSyncView, DataSourcePendingItem, DataSourceRecordView, DataSourceSyncState } from '@/api/httpApi';
 import type { DetailItem, DetailRow } from '@/lib/taskDetailModel';
+
+export type DataSourceStatusState = DataSourceSyncState | 'never' | DataSourceActiveState;
+export type DataSourceStatusTone = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
+
+export interface DataSourceStatusView {
+  state: DataSourceStatusState;
+  label: string;
+  tone: DataSourceStatusTone;
+  active: boolean;
+}
+
+/** 运行态描述（由 `/api/datasource/detail` 下发；`running` 用于旧 daemon 缺字段时兜底） */
+export interface DataSourceRuntimeState {
+  activeState?: DataSourceActiveState | null;
+  activeStartedAt?: number | null;
+  running?: boolean;
+}
+
+/**
+ * 统一运行态口径：
+ * - 新接口给 `activeState`（queued/running/null）——精确；
+ * - 旧 daemon 只给 `running:boolean`——按 running 兜底，避免 `undefined !== null` 把空闲判成进行中。
+ */
+export function resolveDataSourceActiveState(
+  activeState: DataSourceActiveState | null | undefined,
+  running?: boolean,
+): DataSourceActiveState | null {
+  if (activeState === 'running' || activeState === 'queued') return activeState;
+  return running === true ? 'running' : null;
+}
 
 export interface DataSourcePendingGroup {
   group: string;
@@ -16,7 +46,7 @@ export interface DataSourcePendingGroup {
 }
 
 export interface DataSourceDetailModel {
-  header: { title: string; state: DataSourceSyncState | 'never'; stateLabel: string };
+  header: { title: string; state: DataSourceStatusState; stateLabel: string; tone: DataSourceStatusTone; active: boolean };
   params: DetailRow[];
   results: DetailRow[];
   details: {
@@ -54,6 +84,77 @@ export const DATASOURCE_STATE_LABEL: Record<DataSourceSyncState | 'never', strin
   cancelled: '已取消',
 };
 
+export function datasourceStateTone(state: DataSourceStatusState): DataSourceStatusTone {
+  switch (state) {
+    case 'running': return 'running';
+    case 'ok': return 'succeeded';
+    case 'partial': return 'partial';
+    case 'failed': return 'failed';
+    case 'cancelled': return 'cancelled';
+    default: return 'queued';
+  }
+}
+
+/**
+ * 数据源「当前状态」的唯一口径（列表行 / 抽屉头部 / aria-label 共用）：
+ * 运行态（排队 / 同步中）优先于上次同步结果；只有空闲且从未同步才是「从未同步」。
+ * ★ 不要把 `lastSync.state` 直接当状态渲染——同步进行中它仍是上一版或 null。
+ */
+export function dataSourceStatusView(input: {
+  activeState?: DataSourceActiveState | null;
+  running?: boolean;
+  lastSync: { state: DataSourceSyncState } | null;
+}): DataSourceStatusView {
+  const activeState = resolveDataSourceActiveState(input.activeState, input.running);
+  if (activeState) {
+    return {
+      state: activeState,
+      label: activeState === 'running' ? '同步中' : '排队中',
+      tone: datasourceStateTone(activeState),
+      active: true,
+    };
+  }
+  if (input.lastSync) {
+    const state = input.lastSync.state;
+    return { state, label: DATASOURCE_STATE_LABEL[state], tone: datasourceStateTone(state), active: false };
+  }
+  return { state: 'never', label: DATASOURCE_STATE_LABEL.never, tone: 'queued', active: false };
+}
+
+export interface DataSourceSummaryRow {
+  lastSync: { state: DataSourceSyncState } | null;
+  activeState?: DataSourceActiveState | null;
+  running?: boolean;
+  stale: boolean;
+}
+
+/**
+ * 页头统计口径（与状态列同源）：
+ * - 「从未同步」只数**空闲**且无 lastSync 的；同步中的行不算（否则又是「同步中 + 从未同步」同屏）；
+ * - 「超过 24h 未同步」只数有上次结果且已过期的；
+ * - 同步中 / 排队中分别计数。
+ */
+export function buildDataSourceListSummary(total: number, sources: DataSourceSummaryRow[]): string {
+  let never = 0;
+  let staleOver24h = 0;
+  let running = 0;
+  let queued = 0;
+  for (const source of sources) {
+    const status = dataSourceStatusView(source);
+    if (status.state === 'never') never += 1;
+    else if (status.state === 'running') running += 1;
+    else if (status.state === 'queued') queued += 1;
+    else if (source.stale) staleOver24h += 1;
+  }
+  return [
+    `共 ${total} 个数据源`,
+    never > 0 ? `${never} 个从未同步` : '',
+    staleOver24h > 0 ? `${staleOver24h} 个超过 24h 未同步` : '',
+    running > 0 ? `${running} 个同步中` : '',
+    queued > 0 ? `${queued} 个排队中` : '',
+  ].filter(Boolean).join(' · ');
+}
+
 const CONFLICT_LABEL: Record<string, string> = {
   incremental: '增量（同名覆盖）',
   overwrite: '覆盖已有文档',
@@ -85,8 +186,13 @@ function conflictItems(sync: DataSourceLastSyncView | null): DetailItem[] {
   }));
 }
 
-export function buildDataSourceDetail(record: DataSourceRecordView): DataSourceDetailModel {
+export function buildDataSourceDetail(
+  record: DataSourceRecordView,
+  runtime: DataSourceRuntimeState = {},
+): DataSourceDetailModel {
   const sync = record.lastSync;
+  const activeState = resolveDataSourceActiveState(runtime.activeState, runtime.running);
+  const status = dataSourceStatusView({ activeState, lastSync: sync });
   const pendingDelete = sync?.pendingDelete;
   const items = pendingDelete?.items ?? [];
   const groupMap = new Map<string, DataSourcePendingItem[]>();
@@ -104,6 +210,16 @@ export function buildDataSourceDetail(record: DataSourceRecordView): DataSourceD
   }));
 
   const notices: DataSourceDetailModel['notices'] = [];
+  // 运行态提示放在最前：它解释「为什么头部不是上次结果」「为什么删除候选不可选」
+  if (activeState) {
+    const lastDataNote = sync ? '；下方执行结果与明细为上次同步数据' : '';
+    notices.push({
+      tone: 'info',
+      text: activeState === 'running'
+        ? `${runtime.activeStartedAt ? `同步进行中（本次开始于 ${formatTime(runtime.activeStartedAt)}）` : '同步进行中'}${lastDataNote}`
+        : `同步已排队，等待同知识库的其他任务完成${lastDataNote}`,
+    });
+  }
   if (pendingDelete?.stale) {
     const reason = pendingDelete.staleReason;
     notices.push({
@@ -169,13 +285,15 @@ export function buildDataSourceDetail(record: DataSourceRecordView): DataSourceD
       { label: '上次同步', value: formatTime(sync.at) },
       { label: '用时', value: formatDuration(sync.durationMs) },
     ]
-    : [{ label: '上次同步', value: '从未同步' }];
+    : [{ label: '上次同步', value: '—' }];
 
   return {
     header: {
       title: '数据源同步',
-      state: sync?.state ?? 'never',
-      stateLabel: DATASOURCE_STATE_LABEL[sync?.state ?? 'never'],
+      state: status.state,
+      stateLabel: status.label,
+      tone: status.tone,
+      active: status.active,
     },
     params,
     results,

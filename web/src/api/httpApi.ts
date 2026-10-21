@@ -638,6 +638,9 @@ export interface DataSourceLastSyncView {
   pendingDelete: DataSourcePendingDelete;
 }
 
+/** 当前同步运行态（来自任务台账）：null = 空闲 */
+export type DataSourceActiveState = 'queued' | 'running';
+
 export interface DataSourceRecordView {
   version: number;
   scope: string;
@@ -669,6 +672,10 @@ export interface DataSourceListRow {
     pendingDelete: { total: number; overLimit: boolean; stale: boolean; blocked: string | null };
   } | null;
   running: boolean;
+  /** 当前运行态（精确口径）；`running === (activeState !== null)`。旧 daemon 不返回，按 running 兜底 */
+  activeState?: DataSourceActiveState | null;
+  /** 本次同步开始时间（仅 running） */
+  activeStartedAt?: number | null;
   stale: boolean;
 }
 
@@ -684,6 +691,9 @@ export interface DataSourceListResponse {
 export interface DataSourceDetailResponse {
   ok: boolean;
   running: boolean;
+  /** 旧 daemon 缺省；页面用 running 兜底 */
+  activeState?: DataSourceActiveState | null;
+  activeStartedAt?: number | null;
   source: DataSourceRecordView;
 }
 

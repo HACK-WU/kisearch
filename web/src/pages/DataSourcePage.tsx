@@ -11,7 +11,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList } from '@/lib/hooks';
 import { pruneDataSource, type DataSourcePendingItem } from '@/api/httpApi';
-import { buildDataSourceDetail, DATASOURCE_STATE_LABEL } from '@/lib/dataSourceDetailModel';
+import { buildDataSourceDetail, buildDataSourceListSummary, dataSourceStatusView, resolveDataSourceActiveState } from '@/lib/dataSourceDetailModel';
 import { RowList, SectionTitle } from '@/components/TaskDetailParts';
 
 const keyOf = (item: { group: string; relation: string }): string => `${item.group}\u0000${item.relation}`;
@@ -20,16 +20,6 @@ function formatDateTime(ts: number): string {
   const d = new Date(ts);
   const p = (n: number): string => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-function stateTone(state: string): string {
-  switch (state) {
-    case 'ok': return 'succeeded';
-    case 'partial': return 'partial';
-    case 'failed': return 'failed';
-    case 'cancelled': return 'cancelled';
-    default: return 'queued';
-  }
 }
 
 function GroupCheckbox({ checked, indeterminate, disabled, onChange, label }: {
@@ -96,7 +86,7 @@ export function DataSourcePage(): JSX.Element {
     if (!last) return;
     lastScopeRef.current = null;
     requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(`[data-ds-scope="${last}"]`)?.focus();
+      document.querySelector<HTMLElement>(`[data-ds-scope="${CSS.escape(last)}"]`)?.focus();
     });
   }, [scope]);
 
@@ -110,11 +100,18 @@ export function DataSourcePage(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, [scope, navigate]);
 
+  // 旧 daemon 只返回 running：统一在这里归一，避免 `undefined !== null` 把空闲判成进行中
+  const activeState = resolveDataSourceActiveState(detailQuery.data?.activeState, detailQuery.data?.running);
+  const active = activeState !== null;
   const model = useMemo(
-    () => (detailQuery.data ? buildDataSourceDetail(detailQuery.data.source) : null),
-    [detailQuery.data],
+    () => (detailQuery.data
+      ? buildDataSourceDetail(detailQuery.data.source, {
+        activeState,
+        activeStartedAt: detailQuery.data.activeStartedAt,
+      })
+      : null),
+    [detailQuery.data, activeState],
   );
-  const running = detailQuery.data?.running ?? false;
   const sources = listQuery.data?.sources ?? [];
   const missing = listQuery.data?.missing ?? [];
   const corrupt = listQuery.data?.corrupt ?? [];
@@ -122,16 +119,23 @@ export function DataSourcePage(): JSX.Element {
   const total = sources.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageSources = sources.slice((page - 1) * pageSize, page * pageSize);
+  const listSummary = listQuery.data ? buildDataSourceListSummary(listQuery.data.total, sources) : '加载中…';
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
 
-  const selectable = model !== null && !running && !model.pending.blocked && model.pending.items.length > 0;
+  const selectable = model !== null && !active && !model.pending.blocked && model.pending.items.length > 0;
   const visibleItems = model?.pending.items ?? [];
   const selectedCount = selected.size;
   const ratio = model && model.pending.eligibleCount > 0
     ? Math.round((selectedCount / model.pending.eligibleCount) * 1000) / 10
     : null;
+
+  // 外部（CLI / 另一标签页）启动同步时 selectable 变 false：收起已打开的确认条，
+  // 否则「确认删除」只剩 submitting 一道拦截，能在同步进行中被点下去。
+  useEffect(() => {
+    if (confirming && !selectable) setConfirming(false);
+  }, [confirming, selectable]);
 
   // 数据刷新后（删除成功 / 同步完成）清掉已不在候选里的勾选
   useEffect(() => {
@@ -175,6 +179,12 @@ export function DataSourcePage(): JSX.Element {
 
   const runPrune = async (): Promise<void> => {
     if (!model || !scope || submitting) return;
+    // 确认条打开后同步可能被外部启动：提交前再判一次，避免与本次扫描竞争
+    if (!selectable) {
+      setError('当前不可删除候选（同步进行中或候选已失效）。');
+      setConfirming(false);
+      return;
+    }
     const runScope = scope;
     if (!model.pending.token) {
       setError('没有可用的候选凭证，请重新同步后再试。');
@@ -223,14 +233,10 @@ export function DataSourcePage(): JSX.Element {
   };
 
   return (
-    <div className={`ki-datasource-page${scope ? ' ki-datasource-page--drawer-open' : ''}`}>
+    <div className="ki-datasource-page">
       <div className="ki-page-head">
         <div>
-          <p>
-            {listQuery.data
-              ? `共 ${listQuery.data.total} 个数据源${sources.some((s) => s.stale) ? ` · ${sources.filter((s) => s.stale).length} 个超过 24h 未同步` : ''}`
-              : '加载中…'}
-          </p>
+          <p>{listSummary}</p>
         </div>
       </div>
 
@@ -293,28 +299,27 @@ export function DataSourcePage(): JSX.Element {
                 <span className="ki-ds-col--pending">待删</span>
               </div>
               {pageSources.map((source) => {
-                const statusLabel = source.lastSync ? DATASOURCE_STATE_LABEL[source.lastSync.state] : DATASOURCE_STATE_LABEL.never;
+                const status = dataSourceStatusView({ activeState: source.activeState, running: source.running, lastSync: source.lastSync });
                 const pendingCount = source.lastSync?.pendingDelete.total ?? 0;
+                const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
                 return (
                 <button
                   key={source.scope}
                   type="button"
                   data-ds-scope={source.scope}
-                  aria-label={`${source.scope}，${source.dir}，${statusLabel}${pendingCount > 0 ? `，待删 ${pendingCount} 篇` : ''}`}
+                  aria-label={`${source.scope}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${pendingCount > 0 ? `，待删 ${pendingCount} 篇` : ''}`}
                   className={`ki-ds-table__row${scope === source.scope ? ' is-active' : ''}`}
                   onClick={() => navigate(`/datasource/${encodeURIComponent(source.scope)}`)}
                 >
-                  <span className="ki-ds-table__scope">
-                    {source.scope}
-                    {source.running ? <em className="ki-ds-row__running">同步中</em> : null}
-                  </span>
+                  <span className="ki-ds-table__scope">{source.scope}</span>
                   <span className="ki-ds-table__dir" title={source.dir}>{source.dir}</span>
                   <span className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</span>
-                  <span className="ki-ds-col--time">{source.lastSync ? formatDateTime(source.lastSync.at) : '从未同步'}</span>
+                  <span className="ki-ds-col--time">{lastSyncLabel ?? '—'}</span>
                   <span>
-                    {source.lastSync
-                      ? <span className={`ki-task-state ki-task-state--${stateTone(source.lastSync.state)}`}>{DATASOURCE_STATE_LABEL[source.lastSync.state]}</span>
-                      : <span className="ki-task-state ki-task-state--queued">{DATASOURCE_STATE_LABEL.never}</span>}
+                    <span
+                      className={`ki-task-state ki-task-state--${status.tone}`}
+                      title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
+                    >{status.label}</span>
                   </span>
                   <span className="ki-ds-col--pending">
                     {source.lastSync && source.lastSync.pendingDelete.total > 0
@@ -359,7 +364,7 @@ export function DataSourcePage(): JSX.Element {
                 <div className="ki-ds-drawer__kicker">DATASOURCE</div>
                 <h2 className="ki-ds-drawer__title">{scope}</h2>
               </div>
-              {model ? <span className={`ki-task-state ki-task-state--${stateTone(model.header.state)}`}>{model.header.stateLabel}</span> : null}
+              {model ? <span className={`ki-task-state ki-task-state--${model.header.tone}`}>{model.header.stateLabel}</span> : null}
               <button
                 type="button"
                 ref={closeBtnRef}
@@ -387,7 +392,7 @@ export function DataSourcePage(): JSX.Element {
 
                   {model.results.length > 0 ? (
                     <>
-                      <SectionTitle>执行结果</SectionTitle>
+                      <SectionTitle>{model.header.active ? '上次执行结果' : '执行结果'}</SectionTitle>
                       <RowList rows={model.results} />
                     </>
                   ) : null}
@@ -438,6 +443,13 @@ export function DataSourcePage(): JSX.Element {
                         <p className="ki-task-notice ki-task-notice--warn">{model.pending.skipDetail ?? '未生成候选'}</p>
                       ) : (
                         <>
+                          {active ? (
+                            <p className="ki-task-notice ki-task-notice--info">
+                              {activeState === 'queued'
+                                ? '同步已排队，暂不能删除候选（避免与即将开始的同步冲突）。'
+                                : '同步进行中，暂不能删除候选（避免与本次扫描冲突）。'}
+                            </p>
+                          ) : null}
                           <div className="ki-ds-pending__head">
                             <label className="ki-ds-pending__all">
                               <GroupCheckbox
@@ -501,7 +513,7 @@ export function DataSourcePage(): JSX.Element {
                               </span>
                               <div className="ki-ds-confirm__acts">
                                 <button type="button" className="ki-btn ki-btn--small" disabled={submitting} onClick={() => { setConfirming(false); requestAnimationFrame(() => deleteBtnRef.current?.focus()); }}>取消</button>
-                                <button type="button" className="ki-btn ki-btn--danger ki-btn--small" disabled={submitting} onClick={() => { void runPrune(); }}>
+                                <button type="button" className="ki-btn ki-btn--danger ki-btn--small" disabled={submitting || !selectable} onClick={() => { void runPrune(); }}>
                                   {submitting ? '删除中…' : '确认删除'}
                                 </button>
                               </div>
