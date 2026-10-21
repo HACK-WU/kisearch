@@ -2106,7 +2106,6 @@ function handleDatasourceList(
     sources,
     missing: scan.missing.filter(({ scope }) => visible(scope) && inFilter(scope)),
     corrupt: scan.corrupt.filter(({ scope }) => visible(scope) && inFilter(scope)),
-    migrationHints: scan.hints.filter(({ scope }) => visible(scope) && inFilter(scope)),
   });
 }
 

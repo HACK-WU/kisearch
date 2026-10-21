@@ -1,10 +1,17 @@
 /**
- * DataSourcePage —— 数据源列表 + 右侧详情抽屉（REQ-20261020-001）
+ * DataSourcePage —— 数据源列表 + 右侧详情面板（REQ-20261020-001）
  *
  * 信息架构（2026-10-21 用户定稿）：
  *  - 主区是**全宽列表**（不再用左右分栏）：Scope / 源目录 / 落点 / 上次同步 / 状态 / 待删
- *  - 点击某行 → 右侧抽屉展示该数据源上一次同步详情 + 待删段（URL `/datasource/:scope`，可分享/刷新恢复）
- *  - 页面只读；唯一写动作是抽屉里的「删除待删候选」
+ *  - 点击某行 → 右侧面板展示该数据源上一次同步详情 + 待删段（URL `/datasource/:scope`，可分享/刷新恢复）
+ *  - 页面只读；唯一写动作是面板里的「删除待删候选」
+ *  - **面板是非模态的**（V3 定稿）：不铺遮罩、1px 描边、全高常驻 ⇒ 点另一行直接切换数据源。
+ *    曾试过「半高 + 全屏遮罩」，实测面板像悬空白板、选中行绿带透过遮罩像污渍，已推翻。
+ *  - **列表不再自带卡片标题**（PM 走查）：页面身份由顶栏 H1 唯一承载，总数在页头副标题；
+ *    原先卡片头重复了一次「数据源」又把「共 N 个」数了两遍。想加回标题前先确认这两处仍在。
+ *  - loading / error / empty 三者互斥（见下方卡内分支）：同屏出现「加载失败」与「还没有数据源」
+ *    会把读取故障伪装成"用户没登记过"。
+ *  - **不再展示"未登记的历史导入目录"**（用户 2026-10-21 决定删除该逻辑）：页面只列已登记数据源。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -15,6 +22,8 @@ import { buildDataSourceDetail, buildDataSourceListSummary, dataSourceStatusView
 import { RowList, SectionTitle } from '@/components/TaskDetailParts';
 
 const keyOf = (item: { group: string; relation: string }): string => `${item.group}\u0000${item.relation}`;
+
+const PAGE_SIZE_DEFAULT = 10;
 
 function formatDateTime(ts: number): string {
   const d = new Date(ts);
@@ -58,7 +67,7 @@ export function DataSourcePage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const scopeRef = useRef<string | undefined>(scope);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
@@ -115,11 +124,13 @@ export function DataSourcePage(): JSX.Element {
   const sources = listQuery.data?.sources ?? [];
   const missing = listQuery.data?.missing ?? [];
   const corrupt = listQuery.data?.corrupt ?? [];
-  const hints = listQuery.data?.migrationHints ?? [];
   const total = sources.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const pageSources = sources.slice((page - 1) * pageSize, page * pageSize);
-  const listSummary = listQuery.data ? buildDataSourceListSummary(listQuery.data.total, sources) : '加载中…';
+  // 失败时不得再报「加载中…」：该文案会一直挂着，与卡内的失败提示自相矛盾。
+  const listSummary = listQuery.isError
+    ? '数据源列表读取失败'
+    : listQuery.data ? buildDataSourceListSummary(listQuery.data.total, sources) : '加载中…';
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
@@ -249,22 +260,6 @@ export function DataSourcePage(): JSX.Element {
         </span>
       </div>
 
-      {hints.length > 0 ? (
-        <details className="ki-ds-hints">
-          <summary>
-            ⓘ 检测到 {hints.length} 个历史导入目录（目录可读且非上传暂存；只能通过命令行登记）
-          </summary>
-          <ul>
-            {hints.map((hint) => (
-              <li key={hint.scope}>
-                <span className="ki-ds-hints__scope">{hint.scope}</span>
-                <span className="ki-ds-hints__dir" title={hint.dir}>{hint.dir}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-
       {missing.map((item) => (
         <p key={item.scope} className="ki-task-notice ki-task-notice--warn">⚠ {item.scope} 目录不可读：{item.reason}</p>
       ))}
@@ -273,92 +268,109 @@ export function DataSourcePage(): JSX.Element {
       ))}
 
       <section className="ki-card">
-        <div className="ki-card__head">
-          <span className="ki-card__title">数据源</span>
-          <span className="ki-ds-table__count">{listQuery.data ? `共 ${listQuery.data.total} 个` : ''}</span>
-        </div>
         <div className="ki-card__body">
-          {listQuery.isLoading ? <p className="ki-ds-muted">加载中…</p> : null}
-          {listQuery.isError ? (
-            <p className="ki-task-notice ki-task-notice--warn">加载失败：{(listQuery.error as Error).message}</p>
-          ) : null}
-          {!listQuery.isLoading && sources.length === 0 ? (
+          {listQuery.isLoading ? (
+            <p className="ki-ds-muted">加载中…</p>
+          ) : listQuery.isError ? (
+            /* 失败态与空态必须互斥（2026-10-21 PM 走查）：原先两块各自独立渲染，读取失败时
+               「加载失败」与「还没有数据源」同屏出现，把故障伪装成"用户没登记过"。
+               口径与结构照 BrowsePage 的「Group 加载失败」块，复用 .ki-empty 现成样式。 */
+            <div className="ki-empty" style={{ padding: 24 }}>
+              <div>
+                <h3>数据源列表读取失败</h3>
+                <p>{(listQuery.error as Error).message}</p>
+                <div className="ki-empty__actions">
+                  <button
+                    className="ki-btn ki-btn--secondary ki-btn--small"
+                    type="button"
+                    disabled={listQuery.isFetching}
+                    onClick={() => { void listQuery.refetch(); }}
+                  >{listQuery.isFetching ? '重试中…' : '重试'}</button>
+                </div>
+              </div>
+            </div>
+          ) : sources.length === 0 ? (
             <div className="ki-empty">
               <p>还没有数据源。数据源只能通过命令行登记：</p>
               <code className="ki-ds-empty__cmd">{'ki datasource add\n  --scope <scope>\n  --source <目录>'}</code>
             </div>
-          ) : null}
-          {sources.length > 0 ? (
-            <div className="ki-ds-table" role="group" aria-label="数据源列表">
-              <div className="ki-ds-table__head">
-                <span>Scope</span>
-                <span>源目录</span>
-                <span className="ki-ds-col--group">落点 Group</span>
-                <span className="ki-ds-col--time">上次同步</span>
-                <span>状态</span>
-                <span className="ki-ds-col--pending">待删</span>
-              </div>
-              {pageSources.map((source) => {
-                const status = dataSourceStatusView({ activeState: source.activeState, running: source.running, lastSync: source.lastSync });
-                const pendingCount = source.lastSync?.pendingDelete.total ?? 0;
-                const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
-                return (
-                <button
-                  key={source.scope}
-                  type="button"
-                  data-ds-scope={source.scope}
-                  aria-label={`${source.scope}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${pendingCount > 0 ? `，待删 ${pendingCount} 篇` : ''}`}
-                  className={`ki-ds-table__row${scope === source.scope ? ' is-active' : ''}`}
-                  onClick={() => navigate(`/datasource/${encodeURIComponent(source.scope)}`)}
-                >
-                  <span className="ki-ds-table__scope">{source.scope}</span>
-                  <span className="ki-ds-table__dir" title={source.dir}>{source.dir}</span>
-                  <span className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</span>
-                  <span className="ki-ds-col--time">{lastSyncLabel ?? '—'}</span>
-                  <span>
-                    <span
-                      className={`ki-task-state ki-task-state--${status.tone}`}
-                      title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
-                    >{status.label}</span>
-                  </span>
-                  <span className="ki-ds-col--pending">
-                    {source.lastSync && source.lastSync.pendingDelete.total > 0
-                      ? <span className="ki-ds-pending-badge">待删 {source.lastSync.pendingDelete.total}</span>
-                      : '—'}
-                  </span>
-                </button>
-                );
-              })}
-            </div>
-          ) : null}
-          {sources.length > 0 ? (
-            <div className="ki-ds-pager">
-              <span className="ki-ds-pager__info">第 {page} / {pageCount} 页 · 共 {total} 个</span>
-              <label className="ki-ds-pager__size">
-                每页
-                <select
-                  value={pageSize}
-                  onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}
-                  aria-label="每页条数"
-                >
-                  <option value={10}>10</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-                条
-              </label>
-              <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
-              <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
-            </div>
-          ) : null}
+          ) : (
+            <>
+              <div className="ki-ds-table" role="group" aria-label="数据源列表">
+                <div className="ki-ds-table__head">
+                  <span>Scope</span>
+                  <span>源目录</span>
+                  <span className="ki-ds-col--group">落点 Group</span>
+                  <span className="ki-ds-col--time">上次同步</span>
+                  <span>状态</span>
+                  <span className="ki-ds-col--pending">待删</span>
+                </div>
+                {pageSources.map((source) => {
+                  const status = dataSourceStatusView({ activeState: source.activeState, running: source.running, lastSync: source.lastSync });
+                  const pendingCount = source.lastSync?.pendingDelete.total ?? 0;
+                  const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
+                  return (
+                  <button
+                    key={source.scope}
+                    type="button"
+                    data-ds-scope={source.scope}
+                    aria-label={`${source.scope}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${pendingCount > 0 ? `，待删 ${pendingCount} 篇` : ''}`}
+                    className={`ki-ds-table__row${scope === source.scope ? ' is-active' : ''}`}
+                    onClick={() => navigate(`/datasource/${encodeURIComponent(source.scope)}`)}
+                  >
+                    <span className="ki-ds-table__scope" title={source.scope}>{source.scope}</span>
+                    <span className="ki-ds-table__dir" title={source.dir}>{source.dir}</span>
+                    <span className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</span>
+                    <span className="ki-ds-col--time">{lastSyncLabel ?? '—'}</span>
+                    <span>
+                      <span
+                        className={`ki-task-state ki-task-state--${status.tone}`}
+                        title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
+                      >{status.label}</span>
+                    </span>
+                    <span className="ki-ds-col--pending">
+                      {source.lastSync && source.lastSync.pendingDelete.total > 0
+                        ? <span className="ki-ds-pending-badge">待删 {source.lastSync.pendingDelete.total}</span>
+                        : '—'}
+                    </span>
+                  </button>
+                  );
+                })}
+                </div>
+              {/* 单页时不渲染分页栏（四个控件全禁用、"第 1/1 页"与副标题重复）。
+                  ★ 但 `pageSize !== 默认` 时必须继续渲染 —— 否则用户把每页改成 100 后、
+                    页数变 1，分页栏连同「每页」选择器一起消失，本会话内再也改不回 10。 */}
+              {(pageCount > 1 || pageSize !== PAGE_SIZE_DEFAULT) ? (
+                <div className="ki-ds-pager">
+                  <span className="ki-ds-pager__info">第 {page} / {pageCount} 页 · 共 {total} 个</span>
+                  <label className="ki-ds-pager__size">
+                    每页
+                    <select
+                      value={pageSize}
+                      onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}
+                      aria-label="每页条数"
+                    >
+                      <option value={10}>10</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                    条
+                  </label>
+                  <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
+                  <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       </section>
 
-      {/* 右侧详情抽屉：URL 驱动（/datasource/:scope），Esc / 点遮罩 / ✕ 关闭 */}
+      {/* 右侧详情：URL 驱动（/datasource/:scope），Esc / ✕ 关闭。
+          ★ 非模态（2026-10-21 用户定稿 V3）：不铺遮罩、1px 描边分隔、面板常驻全高。
+            列表保持可读可点 —— 直接点另一行即可切换数据源；代价是"点背景关闭"不再成立。 */}
       {scope ? (
         <>
-          <div className="ki-ds-scrim" onClick={() => navigate('/datasource')} aria-hidden />
-          <aside className="ki-ds-drawer" role="dialog" aria-modal="true" aria-label={`数据源详情 ${scope}`}>
+          <aside className="ki-ds-drawer" role="region" aria-label={`数据源详情 ${scope}`}>
             <header className="ki-ds-drawer__head">
               <div className="ki-ds-drawer__identity">
                 <div className="ki-ds-drawer__kicker">DATASOURCE</div>
@@ -370,7 +382,6 @@ export function DataSourcePage(): JSX.Element {
                 ref={closeBtnRef}
                 className="ki-ds-drawer__close"
                 aria-label="关闭详情"
-                autoFocus
                 onClick={() => navigate('/datasource')}
               >✕</button>
             </header>
@@ -388,7 +399,7 @@ export function DataSourcePage(): JSX.Element {
                     <p key={notice.text} className={`ki-task-notice ki-task-notice--${notice.tone}`}>{notice.text}</p>
                   ))}
                   <SectionTitle>同步参数</SectionTitle>
-                  <RowList rows={model.params} />
+                  <RowList rows={model.params} className="ki-ds-facts--stack" />
 
                   {model.results.length > 0 ? (
                     <>

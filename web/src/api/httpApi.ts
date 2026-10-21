@@ -685,7 +685,6 @@ export interface DataSourceListResponse {
   sources: DataSourceListRow[];
   missing: { scope: string; reason: string }[];
   corrupt?: { scope: string; reason: string }[];
-  migrationHints: { scope: string; dir: string; chunkSize?: number; chunkOverlap?: number }[];
 }
 
 export interface DataSourceDetailResponse {

@@ -30,10 +30,8 @@ import {
 import { resolveImportExtensions } from './config.js';
 import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
-import { uploadIdFromSourceDir } from './import-retry.js';
 import type {
   DataSourceLastSync,
-  DataSourceMigrationHint,
   DataSourcePendingDelete,
   DataSourceRecord,
   DataSourceResultSnapshot,
@@ -42,9 +40,6 @@ import type {
 } from './datasource-types.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
-
-/** Web 上传暂存根（与 task-snapshot / mcp-http-api 同源：<home>/.ki/import-uploads） */
-const UPLOADS_ROOT = path.join(os.homedir(), '.ki', 'import-uploads');
 
 export function dataSourcePath(scope: string): string {
   return path.join(getKbDir(scope), DATASOURCE_FILE);
@@ -332,8 +327,6 @@ export interface DataSourceScopeScan {
   missing: { scope: string; reason: string }[];
   /** 有登记但 datasource.json 损坏/非法 */
   corrupt: { scope: string; reason: string }[];
-  /** 有历史 source 块但无登记（只提示，不自动写入） */
-  hints: DataSourceMigrationHint[];
 }
 
 /**
@@ -342,7 +335,7 @@ export interface DataSourceScopeScan {
  * 「登记了但从未同步」的 scope（而这恰恰是列表里最该出现的 `never` 状态）。
  */
 export function scanDataSources(config: KiConfig = loadConfig()): DataSourceScopeScan {
-  const out: DataSourceScopeScan = { registered: [], missing: [], corrupt: [], hints: [] };
+  const out: DataSourceScopeScan = { registered: [], missing: [], corrupt: [] };
   let entries: fs.Dirent[] = [];
   try {
     entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
@@ -371,24 +364,8 @@ export function scanDataSources(config: KiConfig = loadConfig()): DataSourceScop
       out.corrupt.push({ scope, reason: read.error });
       continue;
     }
-    const legacy = getSource(scope);
-    if (legacy?.dir) {
-      // 只提示「仍可用的历史目录」：
-      //  ① 目录必须存在且可读（失效路径登记了也没用）
-      //  ② 排除 Web 上传暂存目录（`~/.ki/import-uploads/<uuid>`，24h 后必被清理）
-      //  ③ 排除数据目录内部（自己导入自己）
-      const inUploads = uploadIdFromSourceDir(legacy.dir, UPLOADS_ROOT) !== null;
-      const relToData = path.relative(path.resolve(config.dataDir), path.resolve(legacy.dir));
-      const insideData = !relToData.startsWith('..') && !path.isAbsolute(relToData);
-      if (!inUploads && !insideData && checkSourceReachable(legacy.dir).ok) {
-        out.hints.push({
-          scope,
-          dir: legacy.dir,
-          ...(legacy.chunkSize !== undefined ? { chunkSize: legacy.chunkSize } : {}),
-          ...(legacy.chunkOverlap !== undefined ? { chunkOverlap: legacy.chunkOverlap } : {}),
-        });
-      }
-    }
+    // 未登记的 scope 直接跳过：2026-10-21 用户决定不再提示"历史导入目录"
+    // （原先会扫描 group-index 的 source 块推一批"可登记"候选，页面与 CLI 都不再展示）
   }
   // 最久未同步在前；无 lastSync 的排最后
   out.registered.sort((a, b) => (a.record.lastSync?.at ?? Number.MAX_SAFE_INTEGER) - (b.record.lastSync?.at ?? Number.MAX_SAFE_INTEGER));

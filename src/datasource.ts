@@ -167,7 +167,6 @@ program
         })),
         missing: scan.missing,
         corrupt: scan.corrupt,
-        migrationHints: scan.hints,
       });
       return;
     }
@@ -180,15 +179,6 @@ program
     }
     for (const item of scan.missing) console.error(`⚠ ${item.scope} 目录不可读：${item.reason}`);
     for (const item of scan.corrupt) console.error(`⚠ ${item.scope} 登记损坏：${item.reason}`);
-    if (scan.hints.length > 0) {
-      console.error(`ⓘ 检测到 ${scan.hints.length} 个历史导入目录（目录可读且非上传暂存；只提示，不自动登记）：`);
-      for (const hint of scan.hints.slice(0, 5)) {
-        console.error(`   ${hint.scope}\t${hint.dir}`);
-        console.error(`     ki datasource add --scope ${hint.scope} --source "${hint.dir}"${hint.chunkSize ? ` --chunk-size ${hint.chunkSize}` : ''}${hint.chunkOverlap ? ` --chunk-overlap ${hint.chunkOverlap}` : ''}`);
-      }
-      if (scan.hints.length > 5) console.error(`   …还有 ${scan.hints.length - 5} 个（--json 查看全部）`);
-      console.error('   ⚠ --group 无法从 source 块还原，请按实际落点补充');
-    }
   });
 
 // ─── remove ─────────────────────────────────────────────

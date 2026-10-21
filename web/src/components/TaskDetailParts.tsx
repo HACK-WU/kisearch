@@ -13,9 +13,10 @@ export function SectionTitle({ children }: { children: ReactNode }): JSX.Element
   return <h3 className="ki-task-detail__section">{children}</h3>;
 }
 
-export function RowList({ rows }: { rows: DetailRow[] }): JSX.Element {
+/** `className` 供调用方按段调整栅格（如数据源抽屉的「同步参数」走单列），默认不改变任务详情页 */
+export function RowList({ rows, className }: { rows: DetailRow[]; className?: string }): JSX.Element {
   return (
-    <dl className="ki-task-detail__grid">
+    <dl className={className ? `ki-task-detail__grid ${className}` : 'ki-task-detail__grid'}>
       {rows.map((row) => (
         <div key={row.label} className={row.full ? 'ki-task-detail__cell--full' : undefined}>
           <dt>{row.label}</dt>

@@ -4696,6 +4696,13 @@ select.ki-chat-cfg__ta--select {
   .ki-shell[data-chat-open="true"] .ki-reader-navigation { display: flex; }
 }
 
+/* ── 数据源详情面板与 AI 面板共存（2026-10-21，随非模态面板一起来）
+   面板去遮罩后，顶栏「AI 对话」不再是不可点的，但它的 z-index(1021) 高于对话面板：
+   宽屏对话面板是 shell 的布局兄弟(z:auto) → **被详情面板整块盖住**，表现为"点了没反应"。
+   宽屏让位并排（与全屏阅读器同一套 `--ki-chat-dock-w`），窄屏只能靠层级覆盖。 */
+@media (min-width: 1400px) {
+  .ki-shell[data-chat-open="true"] .ki-ds-drawer { right: var(--ki-chat-dock-w); }
+}
 /* ── 窄屏：面板是浮层，必须浮在全屏阅读器之上才可见 ──
    阅读器 z-index 1000；面板浮层既有 990 属「与阅读器不争层级」的旧口径
    （其注释即写明"刻意低于 .ki-drawer"），本需求下窄屏无法并排，只能靠覆盖
@@ -4704,7 +4711,10 @@ select.ki-chat-cfg__ta--select {
    `.ki-drawer`(1000) 而非被它盖住。这与本需求方向一致（用户主动打开面板时
    面板应在最上层），故不额外引入"是否全屏"的 JS 判定来收窄范围。 */
 @media (max-width: 1399.98px) {
-  .ki-shell[data-chat-open="true"] .ki-chat-panel--overlay { z-index: 1010; }
+  /* 1010 原只需压过阅读器(1000)；2026-10-21 数据源详情面板(1021)变成非模态后，
+     浮层会被它整块盖住（点「AI 对话」看不到东西），故提到 1030。
+     1030 仍低于编辑/配置类模态(1150 / 1200)，不影响它们的层级。 */
+  .ki-shell[data-chat-open="true"] .ki-chat-panel--overlay { z-index: 1030; }
 }
 
 /* ── 全屏动作区内的 AI 开关：打开态用主色描边，与「添加链接」的激活态同款语义 ── */
@@ -5283,13 +5293,15 @@ select.ki-chat-cfg__ta--select {
 .ki-datasource-page { display: flex; flex-direction: column; gap: var(--ki-space-3); }
 .ki-ds-muted { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
 
-/* 列表：六列网格（窄屏折叠为 Scope / 目录 / 状态 三列） */
+/* 列表：六列网格（窄屏折叠为 Scope / 目录 / 状态 三列）
+   ★ 列宽按实测内容占用校准（2026-10-21 PM 走查）：原先「落点 200 / 状态 110 / 待删 80」
+     实际只装下 "(自动)"(31px)、「成功」(36px)、「—」(14px)，多出来的宽度全变成列间空隙，
+     是"稀疏感"的直接来源；省下的宽度让给唯一需要它的「源目录」。 */
 .ki-ds-table { display: flex; flex-direction: column; }
-.ki-ds-table__count { margin-left: auto; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-ds-table__head,
 .ki-ds-table__row {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr) 200px 170px 110px 80px;
+  grid-template-columns: 190px minmax(0, 1fr) 170px 168px 92px 76px;
   gap: 12px;
   align-items: center;
 }
@@ -5304,7 +5316,13 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__row:last-child { border-bottom: 0; }
 .ki-ds-table__row:hover { background: var(--ki-color-bg-secondary); }
 .ki-ds-table__row.is-active { background: var(--ki-color-primary-soft); box-shadow: inset 3px 0 0 var(--ki-color-primary); }
-.ki-ds-table__scope { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+/* scope 名单行截断（2026-10-21）：原先无 nowrap/ellipsis，长 scope 名会把行高从 41px
+   撑到 85px，列表出现锯齿；`__dir`/`__group` 早有同款截断，这里补齐同一口径（title 兜底全名）。
+   ★ 不用 flex 容器 —— 纯文本节点在 flex 下 text-overflow 不生效。 */
+.ki-ds-table__scope {
+  min-width: 0; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .ki-ds-table__dir,
 .ki-ds-table__group {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -5330,13 +5348,17 @@ select.ki-chat-cfg__ta--select {
   background: var(--ki-color-surface); color: var(--ki-color-text); font-size: var(--ki-font-size-xs);
 }
 
-/* 详情抽屉：右侧 520px，遮罩 + Esc / ✕ / 点遮罩关闭。
-   z-index 必须高于 AI 浮层（≤1399px 时为 1010），否则窄屏开聊天会盖住抽屉与 ✕。 */
-.ki-ds-scrim { position: fixed; inset: 0; z-index: 1020; background: rgba(18, 24, 21, 0.28); }
+/* 详情面板（V3，2026-10-21 用户定稿）：右侧 520px、全高、**非模态**。
+   1px 描边 + 轻阴影做分隔，不铺遮罩 —— 列表保持可读可点，直接点另一行即可切换数据源。
+   ★ 曾被改成「高度贴合内容 + 全屏遮罩」，实测在 1440×720 下露出 248px 暗区，
+     面板像块悬空的白板、选中行的绿色高亮透过遮罩像污渍；不要再改回半高。
+   z-index 必须高于 AI 浮层（≤1399px 时为 1010），否则窄屏开聊天会盖住面板与 ✕。 */
 .ki-ds-drawer {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 1021;
   display: flex; flex-direction: column; width: min(520px, 100vw);
-  background: var(--ki-color-bg); box-shadow: -8px 0 32px rgba(18, 24, 21, 0.18);
+  background: var(--ki-color-bg);
+  border-left: 1px solid var(--ki-color-border);
+  box-shadow: -6px 0 24px rgba(18, 24, 21, 0.06);
 }
 .ki-ds-drawer__head {
   display: flex; align-items: center; gap: 10px;
@@ -5363,6 +5385,21 @@ select.ki-chat-cfg__ta--select {
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   padding: 14px 16px 24px;
 }
+/* 抽屉提密度（2026-10-21 PM 走查）：字段由「标签在上、值在下」两行式改为同行。
+   ★ 必须限定在 .ki-ds-drawer 作用域内 —— `.ki-task-detail__grid` 与其 dt/dd 是
+     后台任务详情页共用的基线，改那里会连带把 /tasks 的详情卡一起改版。
+   实测（同一 langchain 数据）：字段区 392px → 235px，无新增折行（仅「完成」的
+   行内说明照旧换到第二行）。 */
+.ki-ds-drawer .ki-task-detail__grid > div { display: flex; align-items: baseline; gap: 6px; }
+.ki-ds-drawer .ki-task-detail__grid dt { margin-bottom: 0; flex: none; }
+.ki-ds-drawer .ki-task-detail__grid dd { flex: 1 1 auto; min-width: 0; }
+
+/* 「同步参数」走单列（2026-10-21 用户定稿 V3）：2 列等宽时 6 个字段（3 整行 + 3 半行）
+   必然留下两处空格（知识库右侧、切分参数右侧），且值起点实测极差 250px。
+   单列 + 标签定宽 76px 后，6 行值统一左对齐，空洞与参差同时消失。
+   「执行结果」「时间」仍是 2 列 —— 6 项 = 3 行、2 项 = 1 行，刚好整除、无空洞。 */
+.ki-ds-facts--stack { grid-template-columns: minmax(0, 1fr); gap: 8px 0; }
+.ki-ds-facts--stack dt { min-width: 76px; }
 
 /* 中窄屏（≤1199）：固定三列 —— 六列在 ~1200 以下会横向溢出 */
 @media (max-width: 1199px) {
@@ -5425,16 +5462,6 @@ select.ki-chat-cfg__ta--select {
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
-/* R15 迁移提示：一条可折叠块替代 N 条全宽横幅（上传暂存/失效目录已在后端过滤） */
-.ki-ds-hints {
-  padding: 8px 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
-  background: var(--ki-color-bg-secondary); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm);
-}
-.ki-ds-hints summary { cursor: pointer; }
-.ki-ds-hints ul { margin: 8px 0 0; padding-left: 16px; max-height: 220px; overflow: auto; }
-.ki-ds-hints li { display: flex; gap: 8px; margin: 3px 0; font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); }
-.ki-ds-hints__scope { flex: none; color: var(--ki-color-text); }
-.ki-ds-hints__dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-ds-empty__cmd {
   display: block; margin-top: 8px; padding: 6px 8px; text-align: left;
   border: 1px dashed var(--ki-color-border); border-radius: var(--ki-radius-sm);

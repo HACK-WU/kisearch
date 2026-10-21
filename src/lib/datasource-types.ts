@@ -132,10 +132,3 @@ export interface DataSourceSummary {
   stale: boolean;
 }
 
-/** 历史一次性 `ki import` 留下的 source 块（只提示，不自动登记） */
-export interface DataSourceMigrationHint {
-  scope: string;
-  dir: string;
-  chunkSize?: number;
-  chunkOverlap?: number;
-}
