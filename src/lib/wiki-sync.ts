@@ -13,10 +13,11 @@
 
 import fs from 'fs';
 import path from 'path';
-import { getSource, getRelationsCachePath, getLocalKbDir } from './scope.js';
+import { getSource, getRelationsCachePath, getLocalKbDir, getKbDir } from './scope.js';
 import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './group-cache.js';
 import { loadConfig, getScopeWikiSync } from './config.js';
 import { generateMarkdown } from './markdown-gen.js';
+import { isSafeGroupPath } from './import-path.js';
 
 // ─── 类型 ───
 
@@ -57,6 +58,155 @@ function resolveWikiTarget(scope: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * 仅供 `wikiSync` 配置解析写回目标（不含 `source` 块）。
+ *
+ * `source` 块在单文件导入时指向**一个文件**，不能当目录用；group create / import
+ * 的主动写回只认用户显式配置的 `wikiSync.sourceDir`。
+ */
+function resolveWikiSyncTarget(scope: string): string | null {
+  const wikiSync = getScopeWikiSync(loadConfig(), scope);
+  if (!wikiSync || wikiSync.enabled === false || !wikiSync.sourceDir) return null;
+  return path.resolve(wikiSync.sourceDir);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+export type WikiGroupDirResult =
+  | { ok: true; targetDir: string; dir: string }
+  | { ok: false; reason: string };
+
+/**
+ * group create 时在 wikiSync.sourceDir 下同步创建同名目录。
+ * 未配置 wikiSync / enabled=false → null（零副作用）。
+ */
+export function ensureWikiGroupDir(scope: string, group: string): WikiGroupDirResult | null {
+  const targetDir = resolveWikiSyncTarget(scope);
+  if (!targetDir) return null;
+  // 与导入写回同一护栏：wiki 指向 KB 内部属配置错误，不在索引目录里建组目录
+  const kbDir = path.resolve(getKbDir(scope));
+  const relToKb = path.relative(kbDir, targetDir);
+  if (!relToKb.startsWith('..') && !path.isAbsolute(relToKb)) {
+    return { ok: false, reason: `wikiSync.sourceDir（${targetDir}）位于 KB 数据目录内，已跳过建目录` };
+  }
+  if (!isSafeGroupPath(group)) {
+    return { ok: false, reason: `非法 Group 路径：${group}` };
+  }
+  const dir = group ? path.join(targetDir, group) : targetDir;
+  const rel = path.relative(targetDir, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, reason: `Group 路径越出 wiki 目录：${group}` };
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    return { ok: true, targetDir, dir };
+  } catch (err) {
+    return { ok: false, reason: `创建 wiki 目录失败：${(err as Error).message}` };
+  }
+}
+
+export interface WikiImportWritebackItem {
+  group: string;
+  relation: string;
+  content: string;
+  /** 物理源文件绝对路径；已位于 wiki 目录内时跳过，避免把 wiki 自身再导一遍 */
+  sourcePath?: string;
+}
+
+export interface WikiImportWritebackResult {
+  targetDir: string;
+  written: number;
+  skipped: number;
+  failed: { group: string; relation: string; reason: string }[];
+  /** 失败明细超过 100 条时截断（完整条数见 failedCount） */
+  failedTruncated?: boolean;
+  failedCount?: number;
+}
+
+const MAX_WRITEBACK_FAILED_DETAIL = 100;
+
+/** 去掉源文件自带的 frontmatter，避免与 generateMarkdown 生成的头形成双 YAML 块 */
+function stripLeadingFrontmatter(content: string): string {
+  if (!content.startsWith('---')) return content;
+  const end = content.indexOf('\n---', 3);
+  if (end === -1) return content;
+  const after = content.slice(end + 4);
+  if (after !== '' && !/^[\r\n]/.test(after)) return content;
+  return after.replace(/^\r?\n/, '');
+}
+
+/**
+ * 导入成功后将文档按 wiki 格式写回 `wikiSync.sourceDir`。
+ *
+ * 与 `sync_relation` 写回的区别：
+ *  - 只认 `wikiSync`（不读 `source` 块——导入源可能是单个文件）；
+ *  - **不覆盖已存在文件**（幂等：只补缺，不刷新手写 wiki）；
+ *  - 不触发 autoBackfill（导入只同步本次成功导入的文档）。
+ *
+ * 未配置 wikiSync / enabled=false → null（零副作用）。
+ */
+export function writeImportedDocsToWiki(
+  scope: string,
+  items: WikiImportWritebackItem[],
+): WikiImportWritebackResult | null {
+  const targetDir = resolveWikiSyncTarget(scope);
+  if (!targetDir || items.length === 0) return null;
+
+  // 配置错误（wiki 指向 KB 内部）时拒绝写回，避免把 wiki 文档写进本地索引目录
+  const kbDir = path.resolve(getKbDir(scope));
+  const relToKb = path.relative(kbDir, targetDir);
+  if (!relToKb.startsWith('..') && !path.isAbsolute(relToKb)) {
+    process.stderr.write(`提示：wikiSync.sourceDir（${targetDir}）位于 KB 数据目录内，已跳过导入写回\n`);
+    return null;
+  }
+
+  const result: WikiImportWritebackResult = { targetDir, written: 0, skipped: 0, failed: [] };
+  const exportedAt = new Date().toISOString();
+  for (const item of items) {
+    if (!isSafeGroupPath(item.group) || isUnsafeRelationName(item.relation)) {
+      result.skipped++;
+      continue;
+    }
+    if (item.sourcePath && isPathInside(targetDir, item.sourcePath)) {
+      result.skipped++;
+      continue;
+    }
+    const dest = item.group
+      ? path.join(targetDir, item.group, `${item.relation}.md`)
+      : path.join(targetDir, `${item.relation}.md`);
+    const rel = path.relative(targetDir, dest);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      result.skipped++;
+      continue;
+    }
+    if (fs.existsSync(dest)) {
+      result.skipped++;
+      continue;
+    }
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(
+        dest,
+        generateMarkdown(item.group, item.relation, stripLeadingFrontmatter(item.content), exportedAt),
+        'utf-8',
+      );
+      result.written++;
+    } catch (err) {
+      result.failed.push({ group: item.group, relation: item.relation, reason: (err as Error).message });
+    }
+  }
+  // 磁盘满等系统性故障会让 failed 与导入文件数同量级；明细截断，条数单独给
+  if (result.failed.length > MAX_WRITEBACK_FAILED_DETAIL) {
+    result.failedCount = result.failed.length;
+    result.failed = result.failed.slice(0, MAX_WRITEBACK_FAILED_DETAIL);
+    result.failedTruncated = true;
+  }
+  return result;
 }
 
 /**

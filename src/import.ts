@@ -151,6 +151,9 @@ program
         conflictMode: opts.conflictMode ?? retryRecord?.params.conflictMode,
         conflictSuffix: opts.conflictSuffix ?? retryRecord?.params.conflictSuffix,
         budget,
+        // CLI 导入开启 wiki 写回：仅当 scope 配了 wikiSync.enabled + sourceDir 时生效，
+        // 已存在文件跳过（Web 上传 / 数据源同步不传，保持原行为）
+        wikiWriteback: true,
         // R2：只重试未完成子集（名单外的文件本轮不处理）
         ...(retryRecord ? { onlyRelPaths: retryRecord.items.map((item) => item.path) } : {}),
       };

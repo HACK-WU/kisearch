@@ -205,6 +205,10 @@ scopes:
 | `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
 | `sourceDir` | `string` | 无 | 源文档目录 |
 
+> 开启时除 `sync-relation` 写回外，`ki group create` 会在 `sourceDir` 下创建同名目录，
+> CLI `ki import` 会把导入成功的文档写入 `<sourceDir>/<group>/<relation>.md`（已存在跳过）；
+> Web 上传与 `ki datasource sync` 不写回。
+
 #### `scopes.<scope>.clean`
 
 数据清洗配置（REQ-06/07）。清洗只作用于**向量化输入**（local KB 始终保存文件原文），

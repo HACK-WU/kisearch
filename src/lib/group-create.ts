@@ -15,6 +15,7 @@ import { withScopeWriteLock } from './scope-write-lock.js';
 import { assertNoPendingVectorMigration } from './vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './daemon-client.js';
 import { normalizeGroupPath } from './group-delete.js';
+import { ensureWikiGroupDir } from './wiki-sync.js';
 
 export interface GroupCreateOptions {
   scope?: string;
@@ -22,7 +23,16 @@ export interface GroupCreateOptions {
 }
 
 export type GroupCreateResult =
-  | { ok: true; scope: string; path: string; createdScope?: true }
+  | {
+    ok: true;
+    scope: string;
+    path: string;
+    createdScope?: true;
+    /** wikiSync 已开启时，在 sourceDir 下同步创建的目录 */
+    wikiDir?: string;
+    /** wiki 目录创建失败（不阻断 group create） */
+    wikiWarning?: string;
+  }
   | { ok: false; error: string; candidates?: string[]; code?: 'SCOPE_OPERATION_BUSY' };
 
 // 不能用 `Record<string, TreeNode>`：Record 是映射类型，自引用会被 TS 判为循环引用（TS2456）
@@ -111,5 +121,15 @@ function createLocal(scope: string, rawPath: string): GroupCreateResult {
 
   parent[name] = {};
   writeJson(indexPath, data as unknown as Record<string, unknown>);
-  return { ok: true, scope, path: canonical, ...createdScope };
+  // wiki 目录与 group 树同生命周期入口：开启 wikiSync 时建同名目录；
+  // 写失败只告警，不回滚已创建的 group（目录属外部 wiki，失败可能只是权限问题）
+  const wiki = ensureWikiGroupDir(scope, canonical);
+  return {
+    ok: true,
+    scope,
+    path: canonical,
+    ...createdScope,
+    ...(wiki?.ok ? { wikiDir: wiki.dir } : {}),
+    ...(wiki && !wiki.ok ? { wikiWarning: wiki.reason } : {}),
+  };
 }
