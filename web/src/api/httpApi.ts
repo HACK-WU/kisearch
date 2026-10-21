@@ -589,3 +589,131 @@ export async function fetchTags(scope?: string): Promise<TagsResponse> {
   const sp = scope ? `?scope=${encodeURIComponent(scope)}` : '';
   return req<TagsResponse>(`/api/tags${sp}`);
 }
+
+// ─── 数据源（REQ-20261020-001 · 页面只读 + 唯一写动作「删除待删候选」） ───
+
+export type DataSourceSyncState = 'ok' | 'partial' | 'failed' | 'cancelled';
+
+export interface DataSourcePendingItem {
+  group: string;
+  relation: string;
+  sourcePath?: string;
+  untouched?: boolean;
+}
+
+export interface DataSourcePendingDelete {
+  token?: string;
+  computedAt: number;
+  total: number;
+  overLimit: boolean;
+  truncated: boolean;
+  items: DataSourcePendingItem[];
+  untouchedGroups: string[];
+  unableCount: number;
+  eligibleCount: number;
+  stale: boolean;
+  staleReason: 'source-missing' | 'source-unreadable' | 'not-recomputed' | null;
+  blocked: string | null;
+  skipDetail?: string;
+}
+
+export interface DataSourceResultView {
+  files: { scanned: number; completed: number; unchanged: number; skipped: number; incomplete: number; duplicatesSkipped: number };
+  vectorized: number;
+  fullTextIndexed: number;
+  groups: string[];
+  conflicts: { path: string; relation: string; action: string; unchanged?: boolean }[];
+  failures: { path: string; reason: string }[];
+}
+
+export interface DataSourceLastSyncView {
+  at: number;
+  durationMs: number;
+  state: DataSourceSyncState;
+  taskId?: string;
+  params: { group: string | null; conflictMode: string; vector: boolean; chunkSize: number | null; chunkOverlap: number | null };
+  result: DataSourceResultView;
+  /** 服务端内部扫描基线，detail 接口不下发（页面不消费） */
+  seenRels?: string[];
+  pendingDelete: DataSourcePendingDelete;
+}
+
+export interface DataSourceRecordView {
+  version: number;
+  scope: string;
+  dir: string;
+  group: string | null;
+  conflictMode: string;
+  conflictSuffix: string;
+  vector: boolean;
+  chunkSize: number | null;
+  chunkOverlap: number | null;
+  createdAt: number;
+  updatedAt: number;
+  lastSync: DataSourceLastSyncView | null;
+}
+
+export interface DataSourceListRow {
+  scope: string;
+  dir: string;
+  group: string | null;
+  conflictMode: string;
+  vector: boolean;
+  registeredAt: number;
+  updatedAt: number;
+  lastSync: {
+    at: number;
+    durationMs: number;
+    state: DataSourceSyncState;
+    files: DataSourceResultView['files'];
+    pendingDelete: { total: number; overLimit: boolean; stale: boolean; blocked: string | null };
+  } | null;
+  running: boolean;
+  stale: boolean;
+}
+
+export interface DataSourceListResponse {
+  ok: boolean;
+  total: number;
+  sources: DataSourceListRow[];
+  missing: { scope: string; reason: string }[];
+  corrupt?: { scope: string; reason: string }[];
+  migrationHints: { scope: string; dir: string; chunkSize?: number; chunkOverlap?: number }[];
+}
+
+export interface DataSourceDetailResponse {
+  ok: boolean;
+  running: boolean;
+  source: DataSourceRecordView;
+}
+
+export interface DataSourcePruneResponse {
+  ok: boolean;
+  scope: string;
+  deleted: number;
+  failed: number;
+  results: { group: string; relation: string; deleted: boolean; wikiRemoved: boolean; wikiSkipReason?: string; reason?: string }[];
+  skipped: { group: string; relation: string; reason: string }[];
+  pendingDelete: DataSourcePendingDelete;
+}
+
+export async function getDataSourceList(scope?: string): Promise<DataSourceListResponse> {
+  const sp = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+  return req<DataSourceListResponse>(`/api/datasource/list${sp}`);
+}
+
+export async function getDataSourceDetail(scope: string): Promise<DataSourceDetailResponse> {
+  return req<DataSourceDetailResponse>(`/api/datasource/detail?scope=${encodeURIComponent(scope)}`);
+}
+
+/** 唯一写接口：删除所选待删候选（服务端重算 + token 校验；不动源目录文件） */
+export async function pruneDataSource(input: {
+  scope: string;
+  token: string;
+  selected: { group: string; relation: string }[];
+}): Promise<DataSourcePruneResponse> {
+  return req<DataSourcePruneResponse>('/api/datasource/prune', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}

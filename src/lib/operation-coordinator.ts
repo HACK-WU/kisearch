@@ -94,7 +94,7 @@ export function kindForOperation(operation: string | undefined): TaskKind {
   // 否则它会缺省落到 `write`（与 read 互斥）——索引整理会把刚放开的读又挡回去。
   // 登记依据：该类任务的元数据写全部包在提交窗口内（import），或本就不碰元数据
   //（vector-optimize 只调引擎 optimize）。
-  if (operation === 'import' || operation === 'vector-optimize') return 'engine-only';
+  if (operation === 'import' || operation === 'vector-optimize' || operation === 'datasource-sync') return 'engine-only';
   if (operation && READ_OPERATIONS.has(operation)) return 'read';
   // chat 通道的 operation 形如 `chat-mcp-<tool>`（chat/mcp-tool-registry.ts）：
   // 读工具与 MCP HTTP 通道共用同一白名单，避免两处各写一份判断再漂移。

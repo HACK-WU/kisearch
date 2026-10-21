@@ -304,3 +304,72 @@ describe('阈值常量', () => {
     assert.equal(PRUNE_SCALE_THRESHOLD, 0.8);
   });
 });
+
+describe('候选所有权（eligibleRels）与超限 token（数据源路径）', () => {
+  it('eligibleRels 收窄：其他通道导入的文档不进候选（不传基线则会）', () => {
+    const lib = buildLib([
+      { group: 'wiki', count: 100, prefix: 'wiki/' },
+      { group: 'other', count: 100, prefix: 'other/' },
+    ]);
+    const scanned = relsOf({ group: 'wiki', count: 100, prefix: 'wiki/' });
+    const base = { scope: 's', group: '', scannedRels: scanned, importedGroups: ['wiki'], lib };
+    // 不传基线 = 现有 Web 行为：another-channel 的 100 篇也会进候选
+    const legacy = computePrunePlan(base);
+    assert.equal(legacy.total, 100);
+    // 传基线：只认本数据源上次见过的文件
+    const owned = computePrunePlan({ ...base, eligibleRels: scanned });
+    assert.equal(owned.skipReason, undefined);
+    assert.equal(owned.total, 0);
+    assert.equal(owned.eligibleCount, 100);
+    assert.equal(owned.coordRatio, 1);
+  });
+
+  it('空基线（首次同步）→ 零候选且不产生 NaN', () => {
+    const lib = buildLib([{ group: 'wiki', count: 100, prefix: 'wiki/' }]);
+    const plan = computePrunePlan({
+      scope: 's',
+      group: 'wiki',
+      scannedRels: relsOf({ group: 'wiki', count: 100, prefix: 'wiki/' }),
+      importedGroups: ['wiki'],
+      lib,
+      eligibleRels: [],
+    });
+    assert.equal(plan.skipReason, undefined);
+    assert.equal(plan.total, 0);
+    assert.equal(plan.eligibleCount, 0);
+    assert.equal(plan.overLimit, false);
+    assert.equal(plan.token, undefined);
+    assert.ok(Number.isFinite(plan.coordRatio) && Number.isFinite(plan.deleteRatio));
+  });
+
+  it('闸门 B 分母按基线算：删光本数据源全部文档 → GATE_SCALE（不被全库稀释）', () => {
+    const lib = buildLib([
+      { group: 'wiki', count: 10, prefix: 'wiki/' },
+      { group: 'other', count: 100, prefix: 'other/' },
+    ]);
+    const plan = computePrunePlan({
+      scope: 's',
+      group: '',
+      scannedRels: ['wiki/0.md'],
+      importedGroups: ['wiki'],
+      lib,
+      eligibleRels: relsOf({ group: 'wiki', count: 10, prefix: 'wiki/' }),
+    });
+    assert.equal(plan.skipReason, 'GATE_SCALE');
+    assert.equal(plan.total, 9);
+    assert.equal(plan.deleteRatio, 0.9); // 9/10，不是 9/110
+  });
+
+  it('emitTokenWhenOverLimit：Web 缺省超限不给 token；数据源开启后给', () => {
+    const lib = buildLib([{ group: 'wiki', count: 700, prefix: 'wiki/' }]);
+    const scanned = relsOf({ group: 'wiki', count: 150, prefix: 'wiki/' });
+    const base = { scope: 's', group: 'wiki', scannedRels: scanned, importedGroups: ['wiki'], lib };
+    const web = computePrunePlan(base);
+    assert.equal(web.overLimit, true);
+    assert.equal(web.total, 550);
+    assert.equal(web.token, undefined);
+    const ds = computePrunePlan({ ...base, emitTokenWhenOverLimit: true });
+    assert.equal(ds.overLimit, true);
+    assert.ok(ds.token);
+  });
+});

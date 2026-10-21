@@ -46,7 +46,9 @@ export function toParamSnapshot(
   args: ImportArgsLike | undefined,
   uploadsRoot: string = DEFAULT_UPLOADS_ROOT,
 ): TaskParamSnapshot | undefined {
-  if (operation !== 'import' || !args) return undefined;
+  // 数据源同步复用导入参数形态（sourceDir/group/conflict/vector/chunk）；
+  // 结果快照不写入台账——完整结果在 datasource.json.lastSync（SSOT，不受 1h TTL 影响）。
+  if ((operation !== 'import' && operation !== 'datasource-sync') || !args) return undefined;
   const snapshot: TaskParamSnapshot = {};
   const sourceDir = typeof args.sourceDir === 'string' ? args.sourceDir : '';
   // 来源形态决定「能否事后重试」：暂存目录会被 UPLOAD_IDLE_TTL_MS 清理，外部目录不会

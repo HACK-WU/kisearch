@@ -828,6 +828,21 @@ export function getScopeImportConfig(config: KiConfig, scope: string): ImportCon
   return config.scopes[scope]?.import ?? null;
 }
 
+/** 默认格式白名单：.md（REQ-08，可通过 `scopes.<scope>.import.extensions` 扩展） */
+export const DEFAULT_EXTENSIONS = ['.md'];
+
+/**
+ * scope 的导入扩展名白名单 —— **唯一解析入口**。
+ *
+ * 导入扫描（run）、候选重算（prune）、数据源 add 校验、上传校验必须共用：
+ * 各自写一份会让两次扫描的文件集合不同 ⇒ 候选漂移 + token 恒失配。
+ * 先例：`/api/import/prune` 曾用默认 `.md`，放宽过 `.mdx` 的 scope 会把仍在本地
+ * 的大批文件判成「已删除」（2026-10-20 code review Q2，P0）。
+ */
+export function resolveImportExtensions(config: KiConfig, scope: string): string[] {
+  return getScopeImportConfig(config, scope)?.extensions ?? DEFAULT_EXTENSIONS;
+}
+
 /**
  * 【新增】获取 zvec collection 目录
  */

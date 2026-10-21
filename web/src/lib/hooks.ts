@@ -3,7 +3,10 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { getDocList, fetchGroupDocsAll, getHealth, type DocListResponse, type HealthResponse } from '@/api/httpApi';
+import {
+  getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail,
+  type DocListResponse, type HealthResponse, type DataSourceListResponse, type DataSourceDetailResponse,
+} from '@/api/httpApi';
 import { kiScopeList, type ScopeListResponse } from '@/api/mcpClient';
 import {
   getVectorDimensionStatus,
@@ -95,5 +98,30 @@ export function useGroupDocs(scope: string, group: string | null, tag?: string) 
     enabled: !!group,
     staleTime: 30_000,
     retry: 1,
+  });
+}
+
+// ─── 数据源（REQ-20261020-001） ─────────────────────────
+
+/** 数据源列表（跨 scope；页面只读）。固定 15s 轮询：CLI 在别处启动同步时页面也能感知 */
+export function useDataSourceList() {
+  return useQuery<DataSourceListResponse>({
+    queryKey: ['dataSourceList'],
+    queryFn: () => getDataSourceList(),
+    staleTime: 15_000,
+    retry: 1,
+    refetchInterval: 15_000,
+  });
+}
+
+/** 单个数据源详情（含完整 lastSync + 待删候选）；同步进行中 3s，否则 15s 兜底 */
+export function useDataSourceDetail(scope: string | null) {
+  return useQuery<DataSourceDetailResponse>({
+    queryKey: ['dataSourceDetail', scope],
+    queryFn: () => getDataSourceDetail(scope as string),
+    enabled: !!scope,
+    staleTime: 5_000,
+    retry: 1,
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : 15_000),
   });
 }

@@ -26,6 +26,7 @@ import {
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
 import { parseContentTags, type PartitionConfig } from './constants.js';
+import { DEFAULT_EXTENSIONS, resolveImportExtensions } from './config.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasNoRelationsData, type LegacyRelationsCacheShape } from './group-cache.js';
 import { writeImportIncomplete, clearImportIncomplete, readImportIncompleteStatus, backupImportIncomplete } from './import-retry.js';
 // S-01（REQ-20261009-003）：静态导入协调器 —— 回滚等**同步**路径需要同步版元数据提交窗口
@@ -333,6 +334,25 @@ export interface HandleDirectImportArgs {
   abortSignal?: AbortSignal;
   /** 直连 CLI 在同步退出前落下取消任务终态。 */
   onInterrupt?: () => void;
+  /**
+   * 是否把本次 `dir/chunkSize/chunkOverlap` 写进 `group-index.json.source`（默认 true）。
+   *
+   * 数据源同步传 `false`（Q-C 裁决）：数据源与「一次性导入源」存储隔离，
+   * 否则 `sync_relation` 的 wiki 写回会持续指向用户源文档目录。
+   */
+  writeSourceBlock?: boolean;
+  /**
+   * 候选所有权基线（数据源路径用）：只有这些相对路径能进入待删候选。
+   * 缺省 = 现有 Web 导入行为（全 scope 差集）；**首次同步须传空数组**而非 undefined。
+   */
+  pruneEligibleRels?: string[];
+  /** 候选超限时仍生成 token（数据源分批删除用；缺省 false） */
+  pruneEmitTokenWhenOverLimit?: boolean;
+  /**
+   * 全量扫描完成后回调（与候选计算、导入处理共用同一份 `files`）。
+   * 数据源用它写 `lastSync.seenRels`——自己再扫一遍会多一次 IO 且可能不一致。
+   */
+  onScannedFiles?: (files: string[]) => void;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -350,9 +370,6 @@ export interface HandleDirectImportArgs {
  */
 
 // ─── 直导（原文直导 + 切分）工具 ─────────────────────────
-
-/** 默认格式白名单：.md（REQ-08，可配置扩展 .markdown 等） */
-export const DEFAULT_EXTENSIONS = ['.md'];
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 
 /** 图片附件后缀白名单（REQ-20260904-001：仅本地相对路径引用会被复制进 KB） */
@@ -733,7 +750,7 @@ async function handleDirectImportUnlocked(
   const { loadConfig, getScopeImportConfig, getScopeCleanConfig } = await import('./config.js');
   const cfg = loadConfig();
   const importCfg = getScopeImportConfig(cfg, scope);
-  const extensions = importCfg?.extensions ?? DEFAULT_EXTENSIONS;
+  const extensions = resolveImportExtensions(cfg, scope);
   const maxFileSizeBytes = args.maxFileSizeBytes ?? importCfg?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES; // 默认 1MB（REQ-08）
   // REQ-20260904-001：附件收集开关（--no-assets / config assets:false 关闭）与单附件上限（默认 5MB）
   const assetsEnabled = args.assets !== false && importCfg?.assets !== false;
@@ -759,6 +776,9 @@ async function handleDirectImportUnlocked(
   if (skippedNonMd.length > 0) {
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
   }
+  // 数据源同步：把**同一份**全量扫描结果交给编排层写 lastSync.seenRels
+  //（必须与候选计算同源；编排层自己再扫会多一次 IO 且两次结果可能不一致）
+  args.onScannedFiles?.(files);
 
   // REQ-20261019-001：清理候选（库中存在、本次目录已没有）。在**任何早退之前**算一次，
   // 三条 return 路径统一带出（早退①"整批未变"恰恰是最需要清理的场景）。
@@ -778,6 +798,8 @@ async function handleDirectImportUnlocked(
         uploadIncomplete: args.uploadIncomplete === true,
         scannedCount: files.length,
       },
+      eligibleRels: args.pruneEligibleRels,
+      emitTokenWhenOverLimit: args.pruneEmitTokenWhenOverLimit === true,
     })
     : undefined;
 
@@ -1906,7 +1928,9 @@ async function handleDirectImportUnlocked(
     //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
     migrateLegacyRelationsCache(scope);
     persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
-    setSource(scope, source);
+    // Q-C（2026-10-21）：数据源同步不写 source 块——该块只由一次性 `ki import` 维护，
+    // 否则 wiki 写回会持续指向用户源目录（数据源把目录从"一次性"变成"长期"）。
+    if (args.writeSourceBlock !== false) setSource(scope, source);
   });
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
@@ -1915,7 +1939,9 @@ async function handleDirectImportUnlocked(
   // Phase 5: 记录 source（含切分参数持久化 H-18；不再依赖 git commit——增量由幂等追加承载）
   // ★ S-04 I2：实际写入已提前到 Phase 4 的「元数据提交窗口」内（见上），此处仅保留阶段日志。
   logPhaseStart(5, TOTAL, '记录 source ...');
-  logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
+  logPhaseDone(5, TOTAL, args.writeSourceBlock === false
+    ? 'source 块已跳过（数据源同步不写 group-index.source）'
+    : `source 已记录（dir=${sourceDir}）`);
 
   const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
   logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  unchanged=${unchangedFileCount}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);

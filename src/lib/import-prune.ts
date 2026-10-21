@@ -79,8 +79,13 @@ export interface ImportPrunePlan {
   scopeGroups: number;
   /** 作用域内文档总数 */
   libDocs: number;
-  /** 可判定文档数（闸门 B 分母） */
+  /** 作用域内可判定文档数（未按基线收窄，仅作透明披露） */
   judicable: number;
+  /**
+   * 候选基线的可判定文档数（闸门 B 分母）。
+   * 未传 `eligibleRels` 时 = {@link judicable}；传了则只数「基线内」的文档。
+   */
+  eligibleCount: number;
   /** 本次有效文件数（scannedRels ∪ preserveRels） */
   scanned: number;
   /** 交集个数 */
@@ -91,7 +96,7 @@ export interface ImportPrunePlan {
   deleteRatio: number;
   /** deleteRatio > 0.2：不关闭功能，但前端必须强制二次确认 */
   warn: boolean;
-  /** 候选 > 单次上限：只展示计数、不给 token */
+  /** 候选 > 单次上限（明细只给前 {@link PRUNE_MAX_DETAIL} 条） */
   overLimit: boolean;
   /** 候选总数（完整计数） */
   total: number;
@@ -103,8 +108,17 @@ export interface ImportPrunePlan {
   unableCount: number;
   /** 本次未触及的 group（有文档且本次完全没有文件落入） */
   untouchedGroups: string[];
-  /** 仅 skipReason 为空、total>0、!overLimit 时给出 */
+  /**
+   * 候选指纹。缺省（Web 导入路径）只在「total>0 且未超限」时给出；
+   * `emitTokenWhenOverLimit`（数据源路径）时超限也给，供分批删除。
+   */
   token?: string;
+  /**
+   * **超限时**的全量候选 sourcePath（仅 `emitTokenWhenOverLimit` 且 overLimit 时给出）。
+   * 数据源把它存进 `pendingDelete.candidateSourcePaths`：删除接口重算时用它作为基线
+   * （否则同步后 seenRels 已更新，候选会被清零）。未超限时用 `items` 即可覆盖全量。
+   */
+  allCandidateSourcePaths?: string[];
   skipReason?: PruneSkipReason;
   /** 面向用户的原因补充（含实际数值），可直接渲染 */
   skipDetail?: string;
@@ -192,14 +206,34 @@ export interface ComputePrunePlanInput {
   /** 由 import.ts 用 resolveGroupForSource 推导后传入 */
   importedGroups: string[];
   lib: PruneLibSnapshot;
+  /**
+   * 候选基线（数据源路径用）：只允许「这些 sourcePath」进入候选。
+   * 缺省 `undefined` ⇒ 现有 Web 导入行为（全 scope 差集）逐字节不变。
+   * 传空数组 ⇒ 零候选（首次同步没有历史基线，不做任何删除提案）。
+   */
+  eligibleRels?: string[];
+  /**
+   * 超限（候选 > {@link PRUNE_MAX_ITEMS}）时是否仍生成 token。
+   * 缺省 `false`（Web 路径：超限不删）；数据源路径传 `true` 以支持分批删除。
+   */
+  emitTokenWhenOverLimit?: boolean;
+}
+
+/** 按基线收窄后的库条目（未传基线时 = 全部条目） */
+function eligibleItemsOf(input: ComputePrunePlanInput): PruneLibItem[] {
+  if (input.eligibleRels === undefined) return input.lib.items;
+  const eligible = new Set(input.eligibleRels.map(normalizePrunePath));
+  return input.lib.items.filter((item) => eligible.has(normalizePrunePath(item.sourcePath)));
 }
 
 function emptyPlan(input: ComputePrunePlanInput, scanned: number): ImportPrunePlan {
+  const eligibleCount = eligibleItemsOf(input).length;
   return {
     scope: input.scope,
     scopeGroups: input.lib.groups.length,
     libDocs: input.lib.docs,
     judicable: input.lib.judicable,
+    eligibleCount,
     scanned,
     overlap: 0,
     coordRatio: 0,
@@ -222,6 +256,9 @@ function emptyPlan(input: ComputePrunePlanInput, scanned: number): ImportPrunePl
 export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan {
   const scanned = uniqSorted([...input.scannedRels, ...(input.preserveRels ?? [])].map(normalizePrunePath));
   const plan = emptyPlan(input, scanned.length);
+  // 基线口径：未传 eligibleRels ⇒ 全部条目（保持 Web 导入行为不变）
+  const eligibleItems = eligibleItemsOf(input);
+  const eligibleCount = eligibleItems.length;
 
   if (input.lib.judicable === 0) {
     return { ...plan, skipReason: 'EMPTY_LIBRARY', skipDetail: '库中没有可判定来源的文档（sourcePath 均为空），无需清理' };
@@ -229,9 +266,14 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
   if (scanned.length === 0) {
     return { ...plan, skipReason: 'EMPTY_SOURCE', skipDetail: '本次未扫描到任何文档，已跳过清理' };
   }
+  // ★ 空基线必须早退：否则下面闸门 A 的分母 Math.min(scanned, libRels)=0 → NaN/Infinity。
+  //   语义：本数据源上次什么都没见过（首次同步）⇒ 库里任何文档都不属于它，零候选。
+  if (input.eligibleRels !== undefined && eligibleCount === 0) {
+    return plan;
+  }
 
   const effective = new Set(scanned);
-  const libRels = uniqSorted(input.lib.items.map((item) => normalizePrunePath(item.sourcePath)));
+  const libRels = uniqSorted(eligibleItems.map((item) => normalizePrunePath(item.sourcePath)));
   const overlap = libRels.filter((rel) => effective.has(rel)).length;
   const coordRatio = round3(overlap / Math.min(scanned.length, libRels.length));
 
@@ -241,12 +283,12 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
       overlap,
       coordRatio,
       skipReason: 'GATE_COORD',
-      skipDetail: `本次上传的路径与库中记录仅 ${Math.round(coordRatio * 100)}% 重合，低于 ${Math.round(PRUNE_COORD_THRESHOLD * 100)}% 阈值；直接清理会误删 ${input.lib.judicable - overlap} 篇。这也可能意味着本次选错了目录层级，请核对`,
+      skipDetail: `本次上传的路径与库中记录仅 ${Math.round(coordRatio * 100)}% 重合，低于 ${Math.round(PRUNE_COORD_THRESHOLD * 100)}% 阈值；直接清理会误删 ${eligibleCount - overlap} 篇。这也可能意味着本次选错了目录层级，请核对`,
     };
   }
 
   const importedGroups = new Set(input.importedGroups);
-  const candidates: PruneCandidateItem[] = input.lib.items
+  const candidates: PruneCandidateItem[] = eligibleItems
     .filter((item) => !effective.has(normalizePrunePath(item.sourcePath)))
     .map((item) => ({
       group: item.group,
@@ -255,7 +297,7 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
       untouched: !importedGroups.has(item.group),
     }));
 
-  const deleteRatio = round3(candidates.length / input.lib.judicable);
+  const deleteRatio = round3(candidates.length / eligibleCount);
   if (deleteRatio > PRUNE_SCALE_THRESHOLD) {
     return {
       ...plan,
@@ -264,7 +306,7 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
       deleteRatio,
       total: candidates.length,
       skipReason: 'GATE_SCALE',
-      skipDetail: `本次将删除库中 ${Math.round(deleteRatio * 100)}% 的文档（${candidates.length}/${input.lib.judicable}），超过 ${Math.round(PRUNE_SCALE_THRESHOLD * 100)}% 阈值`,
+      skipDetail: `本次将删除库中 ${Math.round(deleteRatio * 100)}% 的文档（${candidates.length}/${eligibleCount}），超过 ${Math.round(PRUNE_SCALE_THRESHOLD * 100)}% 阈值`,
     };
   }
 
@@ -273,7 +315,11 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
   );
   const overLimit = candidates.length > PRUNE_MAX_ITEMS;
   const items = candidates.slice(0, PRUNE_MAX_DETAIL);
-  const token = candidates.length > 0 && !overLimit ? computePruneToken(candidates) : undefined;
+  // Web 路径（缺省）：超限不给 token（保持既有"请用 CLI 清理"语义）；
+  // 数据源路径：超限也给 token，供「分批删除」逐批校验。
+  const token = candidates.length > 0 && (!overLimit || input.emitTokenWhenOverLimit === true)
+    ? computePruneToken(candidates)
+    : undefined;
 
   return {
     ...plan,
@@ -287,6 +333,10 @@ export function computePrunePlan(input: ComputePrunePlanInput): ImportPrunePlan 
     truncated: candidates.length > items.length,
     untouchedGroups,
     ...(token ? { token } : {}),
+    // 超限时 items 只含前 500 条：把全量 sourcePath 一并给出，供数据源持久化后重算
+    ...(overLimit && input.emitTokenWhenOverLimit === true
+      ? { allCandidateSourcePaths: candidates.map((item) => item.sourcePath) }
+      : {}),
   };
 }
 
@@ -330,6 +380,10 @@ export function planImportPrune(args: {
   preserveRels?: string[];
   importedGroups: string[];
   precheck: PrunePrecheckInput;
+  /** 候选基线（数据源路径用）；缺省 = 现有 Web 行为 */
+  eligibleRels?: string[];
+  /** 超限仍生成 token（数据源分批删除用） */
+  emitTokenWhenOverLimit?: boolean;
 }): ImportPrunePlan {
   const EMPTY_LIB: PruneLibSnapshot = { groups: [], docs: 0, judicable: 0, groupDocs: {}, items: [] };
   const precheck = resolvePrunePrecheck(args.precheck);
@@ -340,6 +394,8 @@ export function planImportPrune(args: {
     preserveRels: args.preserveRels,
     importedGroups: args.importedGroups,
     lib: EMPTY_LIB,
+    eligibleRels: args.eligibleRels,
+    emitTokenWhenOverLimit: args.emitTokenWhenOverLimit,
   };
 
   try {

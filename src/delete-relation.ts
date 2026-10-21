@@ -74,7 +74,7 @@ export interface DeleteResult {
   cacheRemoved: boolean;
   kbRemoved: boolean;
   wikiRemoved: boolean;
-  wikiSkipReason?: 'not-configured' | 'file-not-found' | 'outside-source-dir' | 'source-mismatch';
+  wikiSkipReason?: 'not-configured' | 'file-not-found' | 'outside-source-dir' | 'source-mismatch' | 'wiki-delete-disabled';
   wikiMatch?: 'sourcePath' | 'legacy-name';
   wikiError?: string;
   memRemoved: boolean;
@@ -100,6 +100,12 @@ export interface DeleteRelationParams {
   scope?: string;
   group: string;
   relation: string;
+  /**
+   * 是否硬删源 `.md`（默认 true，既有 CLI/HTTP 行为不变）。
+   * 数据源 prune 传 `false`（设计 S-03 D6）：候选的存在性判定不可靠时，
+   * 删源文件是不可逆的数据丢失面，必须由用户显式确认才做——数据源路径暂不提供。
+   */
+  wikiDelete?: boolean;
 }
 
 export type DeleteRelationOutcome =
@@ -194,7 +200,8 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
 
     // 3. 硬删源 .md（D7）：归属校验 + realpath containment，不进回收站
     try {
-      const sourceDir = resolveWikiSourceDir(scope);
+      const wikiDeleteDisabled = params.wikiDelete === false;
+      const sourceDir = wikiDeleteDisabled ? null : resolveWikiSourceDir(scope);
       // sourcePath 是导入时的真实相对路径（可能平铺在 sourceDir 根下），优先用它定位；
       // 仅历史数据无 sourcePath 时才回退到 <sourceDir>/<group>/<relation>.md 约定。
       const sourcePathFile = sourceDir && rel?.sourcePath
@@ -203,7 +210,9 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       const fallbackFile = findWikiFile(scope, resolvedGroup, relation);
       const expectedExists = !!sourcePathFile && fs.existsSync(sourcePathFile);
       const wikiFile = expectedExists ? sourcePathFile : fallbackFile;
-      if (!sourceDir) {
+      if (wikiDeleteDisabled) {
+        result.wikiSkipReason = 'wiki-delete-disabled';
+      } else if (!sourceDir) {
         result.wikiSkipReason = 'not-configured';
       } else if (sourcePathFile && !expectedExists && fallbackFile && fs.existsSync(fallbackFile)) {
         // sourcePath 声明的文件不存在，但按命名约定存在另一份：视为归属不符，拒绝删除
@@ -544,7 +553,11 @@ export type BatchDeleteResult = {
   failed: number;
 };
 
-async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDeleteItem[]): Promise<BatchDeleteResult> {
+async function executeBatchDeleteLocal(
+  scope: string | undefined,
+  items: BatchDeleteItem[],
+  opts?: { wikiDelete?: boolean },
+): Promise<BatchDeleteResult> {
   const results: DeleteResult[] = [];
   let failed = 0;
 
@@ -553,6 +566,7 @@ async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDe
       scope,
       group: item.group,
       relation: item.relation,
+      ...(opts?.wikiDelete !== undefined ? { wikiDelete: opts.wikiDelete } : {}),
     });
     if (outcome.ok) {
       results.push(outcome.result);
@@ -578,10 +592,20 @@ async function executeBatchDeleteLocal(scope: string | undefined, items: BatchDe
   return { ok: true, scope, results, total: items.length, failed };
 }
 
-export async function executeBatchDelete(scope: string | undefined, items: BatchDeleteItem[]): Promise<BatchDeleteResult> {
-  if (shouldUseDaemonClient()) return callDaemon<BatchDeleteResult>('batch-delete', { scope, items });
+export async function executeBatchDelete(
+  scope: string | undefined,
+  items: BatchDeleteItem[],
+  opts?: { wikiDelete?: boolean },
+): Promise<BatchDeleteResult> {
+  if (shouldUseDaemonClient()) {
+    return callDaemon<BatchDeleteResult>('batch-delete', {
+      scope,
+      items,
+      ...(opts?.wikiDelete !== undefined ? { wikiDelete: opts.wikiDelete } : {}),
+    });
+  }
   try {
-    return await withScopeWriteLock(resolveScope(loadConfig(), scope), 'batch-delete', () => executeBatchDeleteLocal(scope, items));
+    return await withScopeWriteLock(resolveScope(loadConfig(), scope), 'batch-delete', () => executeBatchDeleteLocal(scope, items, opts));
   } catch (error) {
     // BatchDeleteResult 无 error 字段（既有类型约束）：整体失败时按逐条失败落形，
     // 错误信息进每条 DeleteResult.reason —— 与上方单条失败分支同款形状

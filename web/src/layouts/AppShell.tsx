@@ -66,6 +66,7 @@ const NAV_MAIN = [
   { to: '/chat', label: 'AI 对话', icon: 'chat' },
   { to: '/import', label: '上传导入', icon: 'upload' },
   { to: '/write', label: '知识写入', icon: 'edit' },
+  { to: '/datasource', label: '数据源', icon: 'database' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
 ];
 

@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { getLastRttMs } from '@/api/httpApi';
 import { getTasks } from '@/api/tasksApi';
@@ -247,6 +247,8 @@ function HealthList({
 
 export function DashboardPage(): JSX.Element {
   const { data: scopes, isLoading } = useScopeList();
+  // 数据源（REQ-20261020-001 Q4）：总览第 4 卡由「注册」改为「数据源」数
+  const { data: dsList } = useDataSourceList();
   const { data: health, error: healthError, isPending: healthPending } = useHealth();
   const healthSummary = summarizeHealth(health, healthError, healthPending);
   const scope = useScopeValue();
@@ -326,8 +328,8 @@ export function DashboardPage(): JSX.Element {
           <div className="ki-stat-value">{vecCount}</div>
         </div>
         <div className="ki-stat-card">
-          <div className="ki-stat-label">注册</div>
-          <div className="ki-stat-value">{list.filter((x) => x.registered).length}</div>
+          <div className="ki-stat-label">数据源</div>
+          <div className="ki-stat-value">{dsList ? dsList.total : '—'}</div>
         </div>
       </section>
 

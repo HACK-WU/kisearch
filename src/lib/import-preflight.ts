@@ -18,7 +18,8 @@
  */
 
 import { collectDuplicateHits } from './duplicate-index.js';
-import { collectMarkdownFiles, DEFAULT_EXTENSIONS } from './import.js';
+import { collectMarkdownFiles } from './import.js';
+import { DEFAULT_EXTENSIONS } from './config.js';
 
 export interface ImportPreflightDuplicate {
   /** 本次待导入文件的相对路径（与 `ki import` 的 rel 同口径） */

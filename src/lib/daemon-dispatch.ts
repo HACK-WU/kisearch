@@ -7,6 +7,7 @@ import { executeDeleteRelation, executeBatchDelete } from '../delete-relation.js
 import { executeGroupCreate } from './group-create.js';
 import { executeGroupDelete } from './group-delete.js';
 import { handleDirectImport } from './import.js';
+import { syncDataSource } from './datasource.js';
 import { executeScopeList, executeScopeDelete, executeScopeClear } from '../scope.js';
 import { executeQueryGroup } from '../query-group.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../get-module-info.js';
@@ -48,8 +49,21 @@ const HANDLERS: Record<string, Handler> = {
   'group-delete-empty': (params) => executeGroupDelete({ ...params, requireEmpty: true }),
   'group-create': executeGroupCreate,
   'group-list': executeQueryGroup,
-  'batch-delete': (params) => executeBatchDelete(params?.scope, params?.items ?? []),
+  // wikiDelete=false：数据源 prune 只删知识库记录、不动源目录文件（设计 S-03 D6）。
+  // 缺省 undefined ⇒ 既有调用方行为不变（默认硬删）。
+  'batch-delete': (params) => executeBatchDelete(params?.scope, params?.items ?? [], {
+    ...(typeof params?.wikiDelete === 'boolean' ? { wikiDelete: params.wikiDelete } : {}),
+  }),
   import: handleDirectImport,
+  // 数据源同步：复用 handleDirectImport（不写 source 块、按 seenRels 收窄候选）。
+  // 取消/进度由 dispatchOperation 注入（见下方 datasource-sync 分支）。
+  'datasource-sync': (params) => syncDataSource({
+    scope: String(params?.scope ?? ''),
+    dryRun: params?.dryRun === true,
+    ...(typeof params?.taskId === 'string' ? { taskId: params.taskId } : {}),
+    ...(params?.abortSignal ? { abortSignal: params.abortSignal as AbortSignal } : {}),
+    ...(params?.onProgress ? { onProgress: params.onProgress } : {}),
+  }),
   'scope-list': executeScopeList,
   'scope-delete': executeScopeDelete,
   'scope-clear': executeScopeClear,
@@ -117,6 +131,9 @@ export async function dispatchOperation(
   // 在 dispatch 边界注入，其他短操作保持原 handler 契约。
   if (request.operation === 'import') {
     return handler({ ...(request.params as Record<string, unknown>), jobId: context.jobId, abortSignal: context.abortSignal, onProgress: context.onProgress });
+  }
+  if (request.operation === 'datasource-sync') {
+    return handler({ ...(request.params as Record<string, unknown>), taskId: context.jobId, abortSignal: context.abortSignal, onProgress: context.onProgress });
   }
   if (request.operation === 'rebuild-vector') {
     const params = request.params as Record<string, any>;

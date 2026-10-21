@@ -36,6 +36,14 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="M12 7v5l3 2" />
     </>
   ),
+  // REQ-20261020-001：数据源（库/数据盘意象）
+  database: (
+    <>
+      <ellipse cx="12" cy="5.5" rx="8" ry="3" />
+      <path d="M4 5.5v13c0 1.7 3.6 3 8 3s8-1.3 8-3v-13" />
+      <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+    </>
+  ),
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   check: <path d="m5 13 4.5 4.5L19 7" />,
   warn: (

@@ -32,7 +32,6 @@ import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import {
   ASSET_EXTENSIONS,
-  DEFAULT_EXTENSIONS,
   DEFAULT_MAX_ASSET_SIZE,
   DEFAULT_MAX_FILE_SIZE_BYTES,
   handleDirectImport,
@@ -40,6 +39,7 @@ import {
   type HandleDirectImportArgs,
   type ImportResult,
 } from './import.js';
+import { resolveImportExtensions } from './config.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
 // S-02/S-03：两级完成口径 —— 整理等待/状态 + A11 就绪判据
 import {
@@ -55,6 +55,8 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 // REQ-20261019-001：清理候选（与 import.ts 同源计算，保证「看到的 = 删掉的」）
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
+import { executeDatasourcePrune } from './datasource-prune.js';
+import { readDataSource, scanDataSources, toClientPending } from './datasource.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -723,7 +725,10 @@ export async function handleApiRequest(
       return;
     }
     if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig));
+    if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
+    if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
+    if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
     if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
@@ -774,7 +779,7 @@ async function handleImportConfig(res: http.ServerResponse, url: URL, requestCon
   sendJson(res, 200, {
     ok: true,
     scope,
-    extensions: importConfig?.extensions ?? DEFAULT_EXTENSIONS,
+    extensions: resolveImportExtensions(requestConfig, scope),
     maxFileSize: importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES,
     assets: importConfig?.assets !== false,
     assetExtensions: ASSET_EXTENSIONS,
@@ -1232,7 +1237,7 @@ async function processImportUpload(
   const requestConfig = loadConfig();
   const scope = resolveScope(requestConfig, body.scope);
   const importConfig = getScopeImportConfig(requestConfig, scope);
-  const allowedExtensions = importConfig?.extensions ?? DEFAULT_EXTENSIONS;
+  const allowedExtensions = resolveImportExtensions(requestConfig, scope);
   const allowedExt = new Set(allowedExtensions.map((extension) => extension.toLowerCase()));
   const assetExt = new Set(ASSET_EXTENSIONS);
   const assetsEnabled = importConfig?.assets !== false;
@@ -1831,7 +1836,7 @@ async function handleImportPrune(
     // ★ 与 run 同源：run 是 `collectMarkdownFiles(sourceDir, extensions)`，白名单来自
     //   `scopes.<scope>.import.extensions`。这里若用默认 `.md`，放宽过扩展名（如 `.mdx`）
     //   的 scope 会把**仍在本地**的那批文件全判成「已删除」（code review Q2）。
-    const extensions = getScopeImportConfig(requestConfig, scope)?.extensions ?? DEFAULT_EXTENSIONS;
+    const extensions = resolveImportExtensions(requestConfig, scope);
     scannedRels = collectMarkdownFiles(dir, extensions).files;
   }
 
@@ -1933,8 +1938,218 @@ async function handleImportPrune(
   }
 }
 
-// ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────
-//
+// ─── POST /api/datasource/prune（设计 S-03）──────────────
+
+/**
+ * 数据源待删候选的删除接口（唯一写接口）。
+ *
+ * 安全边界：
+ *  - 鉴权与 `/import/prune` 同款（`scopeAllowed` 含 `all` 通配）
+ *  - 服务端按**当前源目录**重算候选，不信任前端清单；token 失配 409
+ *  - `selected` 必填且 ≤500；只删「可见 items ∩ selected」
+ *  - 强制 `wikiDelete:false`：只删知识库记录，不动源目录文件
+ */
+async function handleDatasourcePrune(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as Record<string, unknown> | undefined;
+  const scopeRaw = typeof body?.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/prune');
+    return;
+  }
+  const dryRun = body?.dryRun === true;
+  const token = typeof body?.token === 'string' ? body.token : '';
+  if (!dryRun && !token) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 token' });
+    return;
+  }
+  const selectedRaw = Array.isArray(body?.selected) ? body.selected : [];
+  const selected: { group: string; relation: string }[] = [];
+  for (const item of selectedRaw) {
+    const entry = item as { group?: unknown; relation?: unknown } | null;
+    const group = typeof entry?.group === 'string' ? entry.group.trim() : '';
+    const relation = typeof entry?.relation === 'string' ? entry.relation.trim() : '';
+    if (group && relation) selected.push({ group, relation });
+  }
+  if (!dryRun && selected.length === 0) {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'PRUNE_EMPTY_SELECTION',
+      error: 'selected 为空（删除类接口不允许缺省为全部候选）',
+    });
+    return;
+  }
+
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+
+  const result = await executeDatasourcePrune({ scope, token, selected, dryRun, config: requestConfig });
+  if (result.ok) {
+    if (result.dryRun) {
+      // allCandidateSourcePaths 只在超限时存在，是服务端持久化用的内部字段（可达数万条），
+      // 不下发给页面
+      const { allCandidateSourcePaths, ...planForClient } = result.plan;
+      sendJson(res, 200, { ok: true, scope, dryRun: true, plan: planForClient });
+    } else {
+      sendJson(res, 200, {
+        ok: true,
+        scope,
+        deleted: result.deleted,
+        failed: result.failed,
+        results: result.results,
+        skipped: result.skipped,
+        // candidateSourcePaths 是服务端重算基线（超限时可达数万条），不下发
+        pendingDelete: toClientPending(result.pendingDelete),
+      });
+    }
+    return;
+  }
+  const status = result.code === 'PRUNE_TOKEN_STALE' || result.code === 'PRUNE_BLOCKED'
+    ? 409
+    : result.code === 'PRUNE_FAILED' ? 500 : 400;
+  sendJson(res, status, {
+    ok: false,
+    scope,
+    code: result.code,
+    error: result.error,
+    ...(result.plan?.skipDetail ? { skipDetail: result.plan.skipDetail } : {}),
+  });
+}
+
+// ─── GET /api/datasource/list | detail（设计 S-04）────────
+
+const DATASOURCE_STALE_MS = 24 * 60 * 60 * 1000;
+
+/** 正在跑 datasource-sync 的 scope（台账不可读时降级为空集：不能因它让列表 500） */
+function activeDatasourceSyncScopes(config: KiConfig): Set<string> {
+  try {
+    return new Set(listTaskRecords(config)
+      .filter((task) => task.operation === 'datasource-sync' && (task.state === 'queued' || task.state === 'running'))
+      .map((task) => task.scope));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * 列表（跨 scope）。
+ * ★ 鉴权两段式：带 `?scope=` 时走 `scopeAllowed`；**省略 scope 时必须在 handler 内按
+ *   `authScopes` 过滤**——只读白名单只约束"以 default 身份能否调用"，不限制返回范围。
+ */
+function handleDatasourceList(
+  res: http.ServerResponse,
+  url: URL,
+  requestConfig: KiConfig,
+  authScopes: string[] | null,
+): void {
+  const scopeFilter = (url.searchParams.get('scope') ?? '').trim();
+  if (scopeFilter && authScopes !== null && !scopeAllowed(authScopes, scopeFilter)) {
+    rejectScopeViolation(res, scopeFilter, '/datasource/list');
+    return;
+  }
+  const visible = (scope: string): boolean => authScopes === null || scopeAllowed(authScopes, scope);
+  const inFilter = (scope: string): boolean => !scopeFilter || scope === scopeFilter;
+  const scan = scanDataSources(requestConfig);
+  const running = activeDatasourceSyncScopes(requestConfig);
+  const now = Date.now();
+
+  const sources = scan.registered
+    .filter(({ scope }) => visible(scope) && inFilter(scope))
+    .map(({ scope, record }) => ({
+      scope,
+      dir: record.dir,
+      group: record.group,
+      conflictMode: record.conflictMode,
+      vector: record.vector,
+      registeredAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      lastSync: record.lastSync
+        ? {
+          at: record.lastSync.at,
+          durationMs: record.lastSync.durationMs,
+          state: record.lastSync.state,
+          files: record.lastSync.result.files,
+          pendingDelete: {
+            total: record.lastSync.pendingDelete.total,
+            overLimit: record.lastSync.pendingDelete.overLimit,
+            stale: record.lastSync.pendingDelete.stale,
+            blocked: record.lastSync.pendingDelete.blocked,
+          },
+        }
+        : null,
+      running: running.has(scope),
+      stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
+    }));
+
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, {
+    ok: true,
+    total: sources.length,
+    sources,
+    missing: scan.missing.filter(({ scope }) => visible(scope) && inFilter(scope)),
+    corrupt: scan.corrupt.filter(({ scope }) => visible(scope) && inFilter(scope)),
+    migrationHints: scan.hints.filter(({ scope }) => visible(scope) && inFilter(scope)),
+  });
+}
+
+/** 详情（单 scope）：完整 datasource.json + running；内部重算基线不下发 */
+function handleDatasourceDetail(
+  res: http.ServerResponse,
+  url: URL,
+  requestConfig: KiConfig,
+  authScopes: string[] | null,
+): void {
+  const scopeRaw = (url.searchParams.get('scope') ?? '').trim();
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'PRUNE_MISSING_PARAM', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/detail');
+    return;
+  }
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+  const read = readDataSource(scope);
+  if (!read.ok) {
+    sendJson(res, read.code === 'NOT_FOUND' ? 404 : 400, {
+      ok: false,
+      code: read.code === 'NOT_FOUND' ? 'DATASOURCE_NOT_FOUND' : read.code,
+      error: read.error,
+    });
+    return;
+  }
+  const running = activeDatasourceSyncScopes(requestConfig).has(scope);
+  let lastSync = read.record.lastSync;
+  if (lastSync) {
+    // 内部字段不下发：candidateSourcePaths（重算基线，可达数万条）与 seenRels（扫描清单，页面不消费）
+    const { candidateSourcePaths: _base, ...pendingSafe } = lastSync.pendingDelete;
+    const { seenRels: _seen, ...syncSafe } = lastSync;
+    lastSync = { ...syncSafe, pendingDelete: pendingSafe } as unknown as typeof lastSync;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, { ok: true, running, source: { ...read.record, lastSync } });
+}
+
+// ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────//
 // 现象：连点两次重试各起一个 job（第一次 running、第二次 queued）——重复处理同一批未完成文件。
 // 根因是"能否重试"只看清单，而重试 job 结束前清单不会变（`taskId` 仍是旧任务）。
 // 判据与任务中心列表同源（任务台账）；★ `unknown`（心跳过期）刻意**不计入**——它可能是死任务，

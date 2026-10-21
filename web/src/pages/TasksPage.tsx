@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -7,10 +7,8 @@ import {
 } from '@/api/tasksApi';
 import { cancelImport } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
-import {
-  buildTaskDetail, buildGroupTreeLines, buildPathTree, taskSummaryLine, sourceLabel,
-  type DetailItem, type DetailRow,
-} from '@/lib/taskDetailModel';
+import { buildTaskDetail, taskSummaryLine, sourceLabel } from '@/lib/taskDetailModel';
+import { ItemTree, RowList, SectionTitle } from '@/components/TaskDetailParts';
 import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
@@ -67,81 +65,6 @@ function TaskProgressBar({ task, percent, large = false }: {
     >
       <i className={`ki-task-bar__fill ki-task-bar__fill--${tone}`} style={{ width: `${percent}%` }} />
     </div>
-  );
-}
-
-/** 详情分组标题（参数 / 结果 / 时间三段） */
-function SectionTitle({ children }: { children: ReactNode }): JSX.Element {
-  return <h3 className="ki-task-detail__section">{children}</h3>;
-}
-
-function RowList({ rows }: { rows: DetailRow[] }): JSX.Element {
-  return (
-    <dl className="ki-task-detail__grid">
-      {rows.map((row) => (
-        <div key={row.label} className={row.full ? 'ki-task-detail__cell--full' : undefined}>
-          <dt>{row.label}</dt>
-          <dd className={row.tone && row.tone !== 'normal' ? `ki-task-detail__value--${row.tone}` : undefined}>
-            {row.tree && row.tree.items.length > 0 ? (
-              /* 条目多（≥4）才收起：20 个层级路径摊开要 418px，卡片会被撑出视口；
-                 2~3 个直接摊开 —— 折叠一次的成本大于多出来的两三行（model 用 summary 缺失表达）。
-                 树体自身限高可滚，与卡片的滚动链保持通畅（见 ki.css 的 .ki-task-tree 注释）。 */
-              row.tree.summary ? (
-                <details className="ki-task-detail__details">
-                  <summary>{row.tree.summary}</summary>
-                  {/* ★ 内容必须与 <pre> 同行：`<pre>` 保留 JSX 里的换行与缩进，
-                      写成多行会在树顶端多出一整行空白、并在每行前多出缩进。 */}
-                  <pre className="ki-task-tree" tabIndex={0} aria-label={`${row.label} 层级树，共 ${row.tree.items.length} 个`}>{buildGroupTreeLines(row.tree.items).join('\n')}</pre>
-                </details>
-              ) : (
-                <pre className="ki-task-tree" tabIndex={0} aria-label={`${row.label} 层级树，共 ${row.tree.items.length} 个`}>{buildGroupTreeLines(row.tree.items).join('\n')}</pre>
-              )
-            ) : (
-              <>
-                {row.href ? <Link to={row.href}>{row.value}</Link> : row.value}
-                {row.hint ? <small className="ki-task-detail__hint">{row.hint}</small> : null}
-              </>
-            )}
-          </dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-/**
- * 明细树（疑似重复 / 同名冲突）：路径按目录建树，说明挂在条目行。
- * 明细的 `path` 全是同一源目录下的文件，平铺列表会把 `langchain/stages/…/lessons/`
- * 这段前缀在 20 行里重复 20 遍；树形只写一次，真正要看的文件名与动作才露得出来。
- */
-function ItemTree({ items, label }: { items: DetailItem[]; label: string }): JSX.Element {
-  const lines = buildPathTree(items.map((item) => ({ path: item.title, meta: item.meta })));
-  /**
-   * 所有条目说明相同时只在顶部写一次：疑似重复大多是「同一落点」，
-   * 9 条明细挂 9 遍「库中已有同一路径」纯属噪音（实测整块从 328px 里再省一截可读宽度）。
-   * 只有真跨 Group 重复（说明各不相同）时才逐条标注。
-   */
-  const metas = lines.filter((line) => line.item).map((line) => line.meta ?? '');
-  const sharedMeta = metas.length > 1 && metas[0] !== '' && metas.every((meta) => meta === metas[0])
-    ? metas[0]
-    : undefined;
-  return (
-    <>
-      {sharedMeta ? <p className="ki-task-tree__shared">{sharedMeta}</p> : null}
-      <ul className="ki-task-tree ki-task-tree--list" tabIndex={0} aria-label={`${label}层级树，共 ${items.length} 条`}>
-        {lines.map((line, index) => (
-          <li
-            key={`${index}-${line.text}`}
-            className={line.item ? 'ki-task-tree__row ki-task-tree__row--item' : 'ki-task-tree__row'}
-          >
-            <span className="ki-task-tree__path">{line.text}</span>
-            {line.meta && line.meta !== sharedMeta
-              ? <span className="ki-task-tree__meta">{line.meta}</span>
-              : null}
-          </li>
-        ))}
-      </ul>
-    </>
   );
 }
 
