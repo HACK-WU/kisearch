@@ -593,6 +593,14 @@ export async function fetchTags(scope?: string): Promise<TagsResponse> {
 // ─── 数据源（REQ-20261020-001 · 页面只读 + 唯一写动作「删除待删候选」） ───
 
 export type DataSourceSyncState = 'ok' | 'partial' | 'failed' | 'cancelled';
+export type DataSourceKind = 'directory' | 'git';
+
+export interface SyncAvailabilityView {
+  allowed: boolean;
+  nextAvailableAt: number | null;
+  retryAfterSec: number | null;
+  reason: 'active' | 'cooldown' | null;
+}
 
 export interface DataSourcePendingItem {
   group: string;
@@ -618,7 +626,18 @@ export interface DataSourcePendingDelete {
 }
 
 export interface DataSourceResultView {
-  files: { scanned: number; completed: number; unchanged: number; skipped: number; incomplete: number; duplicatesSkipped: number };
+  files: {
+    scanned: number;
+    /** 旧 daemon 缺省 → 回退 scanned */
+    fullScanned?: number;
+    /** 旧 daemon 缺省 → 回退 scanned */
+    changed?: number;
+    completed: number;
+    unchanged: number;
+    skipped: number;
+    incomplete: number;
+    duplicatesSkipped: number;
+  };
   vectorized: number;
   fullTextIndexed: number;
   groups: string[];
@@ -626,16 +645,46 @@ export interface DataSourceResultView {
   failures: { path: string; reason: string }[];
 }
 
+export interface DataSourceGitSyncView {
+  commit: string | null;
+  runCommit: string | null;
+  shortCommit: string | null;
+  subject: string | null;
+  authorTime: number | null;
+  changedCount: number;
+  fullScanned: number;
+  untrackedMarkdown: number;
+  update: 'updated' | 'up-to-date' | 'skipped' | 'failed';
+  updateDetail?: string;
+  fetch: 'ok' | 'failed' | 'skipped';
+  fetchDetail?: string;
+}
+
+export interface DataSourceWarningView {
+  code: string;
+  message: string;
+}
+
 export interface DataSourceLastSyncView {
   at: number;
   durationMs: number;
   state: DataSourceSyncState;
   taskId?: string;
-  params: { group: string | null; conflictMode: string; vector: boolean; chunkSize: number | null; chunkOverlap: number | null };
+  params: {
+    group: string | null;
+    conflictMode: string;
+    vector: boolean;
+    chunkSize: number | null;
+    chunkOverlap: number | null;
+    /** 旧快照缺省 → 视作全量 */
+    mode?: 'incremental' | 'full';
+  };
   result: DataSourceResultView;
   /** 服务端内部扫描基线，detail 接口不下发（页面不消费） */
   seenRels?: string[];
   pendingDelete: DataSourcePendingDelete;
+  git?: DataSourceGitSyncView;
+  warnings?: DataSourceWarningView[];
 }
 
 /** 当前同步运行态（来自任务台账）：null = 空闲 */
@@ -644,7 +693,16 @@ export type DataSourceActiveState = 'queued' | 'running';
 export interface DataSourceRecordView {
   version: number;
   scope: string;
+  type?: DataSourceKind;
   dir: string;
+  git?: {
+    repoRoot: string;
+    relativeRoot: string;
+    branch: string | null;
+    remoteUrl: string | null;
+    managed: boolean;
+    remoteBranch: string | null;
+  };
   group: string | null;
   conflictMode: string;
   conflictSuffix: string;
@@ -658,6 +716,17 @@ export interface DataSourceRecordView {
 
 export interface DataSourceListRow {
   scope: string;
+  type?: DataSourceKind;
+  git?: {
+    repoRoot: string;
+    relativeRoot: string;
+    branch: string | null;
+    managed: boolean;
+    shortCommit: string | null;
+    commitTime: number | null;
+    untrackedMarkdown: number;
+  } | null;
+  syncAvailability?: SyncAvailabilityView;
   dir: string;
   group: string | null;
   conflictMode: string;
@@ -693,7 +762,17 @@ export interface DataSourceDetailResponse {
   /** 旧 daemon 缺省；页面用 running 兜底 */
   activeState?: DataSourceActiveState | null;
   activeStartedAt?: number | null;
+  /** 旧 daemon 缺省 → 页面隐藏同步入口并提示升级 */
+  syncAvailability?: SyncAvailabilityView;
   source: DataSourceRecordView;
+}
+
+export interface DataSourceSyncTriggerResponse {
+  ok: boolean;
+  scope: string;
+  taskId: string;
+  mode: 'incremental' | 'full';
+  state: 'queued';
 }
 
 export interface DataSourcePruneResponse {
@@ -713,6 +792,17 @@ export async function getDataSourceList(scope?: string): Promise<DataSourceListR
 
 export async function getDataSourceDetail(scope: string): Promise<DataSourceDetailResponse> {
   return req<DataSourceDetailResponse>(`/api/datasource/detail?scope=${encodeURIComponent(scope)}`);
+}
+
+/** 页面同步（服务端负责限频/并发闸门；返回 taskId） */
+export async function syncDataSource(input: {
+  scope: string;
+  full?: boolean;
+}): Promise<DataSourceSyncTriggerResponse> {
+  return req<DataSourceSyncTriggerResponse>('/api/datasource/sync', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
 }
 
 /** 唯一写接口：删除所选待删候选（服务端重算 + token 校验；不动源目录文件） */

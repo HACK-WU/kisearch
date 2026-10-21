@@ -60,6 +60,7 @@ const HANDLERS: Record<string, Handler> = {
   'datasource-sync': (params) => syncDataSource({
     scope: String(params?.scope ?? ''),
     dryRun: params?.dryRun === true,
+    full: params?.full === true,
     ...(typeof params?.taskId === 'string' ? { taskId: params.taskId } : {}),
     ...(params?.abortSignal ? { abortSignal: params.abortSignal as AbortSignal } : {}),
     ...(params?.onProgress ? { onProgress: params.onProgress } : {}),
@@ -147,5 +148,7 @@ export async function dispatchOperation(
 }
 
 export function supportedOperations(): string[] {
-  return Object.keys(HANDLERS).sort();
+  // `capability:*` 是给客户端做能力探测的伪条目（非 RPC 操作）；
+  // REQ-20261021-003：新 CLI 可据此判断 daemon 是否支持 Git 数据源 v2。
+  return [...Object.keys(HANDLERS).sort(), 'capability:datasource-git-v2'];
 }

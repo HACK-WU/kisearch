@@ -9,6 +9,7 @@
  *
  * stdout = JSON；人类可读进度/提示一律走 stderr（与 ki group 一致）。
  */
+import path from 'node:path';
 import { Command } from 'commander';
 import { loadConfig, type KiConfig } from './lib/config.js';
 import { getSource } from './lib/scope.js';
@@ -77,9 +78,11 @@ async function shutdownEngines(): Promise<void> {
   try { await closeFtsEngine(); } catch { /* ignore */ }
 }
 
-function taskParamsOf(record: DataSourceRecord, dryRun: boolean): ReturnType<typeof toParamSnapshot> {
+function taskParamsOf(record: DataSourceRecord, dryRun: boolean, full: boolean): ReturnType<typeof toParamSnapshot> {
   return toParamSnapshot('datasource-sync', {
     sourceDir: record.dir,
+    type: record.type,
+    mode: record.type === 'git' && !full ? 'incremental' : 'full',
     ...(record.group ? { group: record.group } : {}),
     vector: record.vector,
     conflictMode: record.conflictMode,
@@ -97,6 +100,7 @@ program
   .description('登记/更新该 scope 的唯一数据源（不写 group-index.json.source）')
   .requiredOption('-s, --scope <scope>', '目标 scope（必填）')
   .requiredOption('--source <dir>', '源目录（~ 会展开为绝对路径）')
+  .option('--type <type>', '数据源类型：git|directory（缺省自动探测）')
   .option('-g, --group <group>', '落点 Group（留空 = 按顶层子目录自动）')
   .option('--conflict-mode <mode>', '同名文档策略：incremental|overwrite|skip|suffix（默认 incremental）')
   .option('--conflict-suffix <suffix>', '自动后缀模板（默认 _{n}）')
@@ -104,10 +108,11 @@ program
   .option('--chunk-overlap <n>', '切分重叠（默认 150）', intArg)
   .option('--no-vector', '只写 FTS 全文索引（不向量化）')
   .option('--force', '改 --source / --group 时必须显式确认')
-  .action((opts) => {
-    const result = addDataSource({
+  .action(async (opts) => {
+    const result = await addDataSource({
       scope: opts.scope,
       dir: opts.source,
+      ...(opts.type ? { type: opts.type } : {}),
       group: opts.group ?? null,
       conflictMode: opts.conflictMode,
       conflictSuffix: opts.conflictSuffix,
@@ -122,6 +127,13 @@ program
       const next = dataSourceNextStep(result.code, result.scope);
       if (next) process.stderr.write(`下一步：${next}\n`);
       return;
+    }
+    for (const warning of result.warnings ?? []) process.stderr.write(`⚠ ${warning}\n`);
+    const gitInfo = result.record.git;
+    if (gitInfo) {
+      process.stderr.write(`  类型：git（repoRoot=${gitInfo.repoRoot}，relativeRoot=${gitInfo.relativeRoot || '.'}，branch=${gitInfo.branch ?? 'detached'}）\n`);
+    } else {
+      process.stderr.write('  类型：directory（全量同步）\n');
     }
     const legacy = getSource(result.scope);
     if (legacy?.dir) {
@@ -144,7 +156,19 @@ program
         total: scan.registered.length,
         sources: scan.registered.map(({ scope, record }) => ({
           scope,
+          type: record.type,
           dir: record.dir,
+          git: record.git
+            ? {
+              repoRoot: record.git.repoRoot,
+              relativeRoot: record.git.relativeRoot,
+              branch: record.git.branch,
+              managed: record.git.managed,
+              shortCommit: record.lastSync?.git?.shortCommit ?? null,
+              commitTime: record.lastSync?.git?.authorTime ?? null,
+              untrackedMarkdown: record.lastSync?.git?.untrackedMarkdown ?? 0,
+            }
+            : null,
           group: record.group,
           conflictMode: record.conflictMode,
           vector: record.vector,
@@ -175,7 +199,8 @@ program
       const last = record.lastSync
         ? `${new Date(record.lastSync.at).toISOString()} (${record.lastSync.state})`
         : '从未同步';
-      console.log(`${scope}\t${record.dir}\tgroup=${record.group ?? '(自动)'}\t${last}\t待删=${record.lastSync?.pendingDelete.total ?? 0}`);
+      const commit = record.lastSync?.git?.shortCommit ? `\tcommit=${record.lastSync.git.shortCommit}` : '';
+      console.log(`${scope}\t${record.type}\t${record.dir}\tgroup=${record.group ?? '(自动)'}\t${last}${commit}\t待删=${record.lastSync?.pendingDelete.total ?? 0}`);
     }
     for (const item of scan.missing) console.error(`⚠ ${item.scope} 目录不可读：${item.reason}`);
     for (const item of scan.corrupt) console.error(`⚠ ${item.scope} 登记损坏：${item.reason}`);
@@ -188,7 +213,7 @@ program
   .description('取消登记（默认预览；只删 datasource.json，不删库内文档、不碰 source 块）')
   .requiredOption('-s, --scope <scope>', '目标 scope')
   .option('--yes', '确认执行')
-  .action((opts) => {
+  .action(async (opts) => {
     const config = loadConfig();
     const read = readDataSource(opts.scope);
     if (!read.ok) {
@@ -197,6 +222,7 @@ program
       return;
     }
     const legacy = getSource(opts.scope);
+    const managedCloneDir = read.record.git?.managed ? path.dirname(read.record.git.repoRoot) : null;
     if (!opts.yes) {
       printJson({
         ok: true,
@@ -205,14 +231,20 @@ program
         dir: read.record.dir,
         note: '仅取消登记；库内文档保留；不修改 group-index.json.source',
         ...(legacy?.dir ? { legacySourceDir: legacy.dir } : {}),
+        ...(managedCloneDir ? { managedCloneDir } : {}),
       });
       process.stderr.write('确认后加 --yes 执行\n');
       return;
     }
-    const result = removeDataSource(opts.scope, config);
+    const result = await removeDataSource(opts.scope, config);
     printJson(result);
     if (!result.ok) process.exitCode = 1;
-    else process.stderr.write('✓ 已取消登记；库内文档保留（未删除任何文档）\n');
+    else {
+      process.stderr.write('✓ 已取消登记；库内文档保留（未删除任何文档）\n');
+      if (result.managedCloneDir) {
+        process.stderr.write(`ⓘ 托管 clone 仍保留在 ${result.managedCloneDir}（后续支持 --purge 清理）\n`);
+      }
+    }
   });
 
 // ─── sync ───────────────────────────────────────────────
@@ -222,6 +254,7 @@ program
   .description('同步：导入 + 计算待删候选（永不删除；一次一个 scope）')
   .option('-s, --scope <scope>', '目标 scope（必填；不支持 --all）')
   .option('--dry-run', '只算不写：扫描 + 候选摘要，零写入')
+  .option('--full', '忽略 Git commit diff，处理全部文件（含 untracked）')
   .action(async (opts) => {
     const config: KiConfig = loadConfig();
     const scope = typeof opts.scope === 'string' ? opts.scope.trim() : '';
@@ -242,6 +275,7 @@ program
     }
     const record = read.record;
     const dryRun = opts.dryRun === true;
+    const full = opts.full === true;
     const jobId = createDaemonJobId();
 
     if (shouldUseDaemonClient()) {
@@ -252,6 +286,7 @@ program
         const res = await callDaemon<SyncDataSourceResult>('datasource-sync', {
           scope,
           dryRun,
+          full,
           jobId,
           group: record.group,
           conflictMode: record.conflictMode,
@@ -268,7 +303,7 @@ program
     }
 
     const task = createTaskReporter(config, { id: jobId, source: 'cli', operation: 'datasource-sync', scope });
-    task.update({ state: 'running', startedAt: Date.now(), params: taskParamsOf(record, dryRun) });
+    task.update({ state: 'running', startedAt: Date.now(), params: taskParamsOf(record, dryRun, full) });
     const abort = new AbortController();
     let settled = false;
     const onSigint = (): void => {
@@ -281,6 +316,7 @@ program
       const res = await syncDataSource({
         scope,
         dryRun,
+        full,
         taskId: jobId,
         config,
         abortSignal: abort.signal,
@@ -288,21 +324,36 @@ program
         onInterrupt: () => { if (!settled) { task.finish('cancelled'); settled = true; } },
       });
       if (res.ok && res.dryRun) {
-        printJson({ ok: true, scope, dryRun: true, plannedFiles: res.plannedFiles, pendingDelete: compactPending(res.pendingDelete) });
+        printJson({
+          ok: true,
+          scope,
+          dryRun: true,
+          mode: res.mode,
+          plannedFiles: res.plannedFiles,
+          changedFiles: res.changedFiles,
+          untrackedMarkdown: res.untrackedMarkdown,
+          wouldFallbackFull: res.wouldFallbackFull,
+          warnings: res.warnings,
+          pendingDelete: compactPending(res.pendingDelete),
+        });
         if (!settled) { task.finish('succeeded'); settled = true; }
       } else if (res.ok) {
         printJson({
           ok: true,
           scope,
           state: res.summary.state,
+          mode: res.summary.mode,
           durationMs: res.summary.durationMs,
           files: res.summary.files,
+          ...(res.summary.git ? { git: res.summary.git } : {}),
+          warnings: res.summary.warnings,
           pendingDelete: compactPending(res.summary.pendingDelete, 10),
         });
         if (!settled) {
           task.finish(res.summary.state === 'partial' ? 'partial' : res.summary.state === 'cancelled' ? 'cancelled' : 'succeeded');
           settled = true;
         }
+        for (const warning of res.summary.warnings ?? []) process.stderr.write(`⚠ ${warning.message}\n`);
         if (res.summary.state === 'partial') process.stderr.write('⚠ 部分文件未完成，详见 datasource.json 的 lastSync.result.failures\n');
       } else {
         printJson(res);

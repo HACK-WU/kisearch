@@ -5301,7 +5301,7 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__head,
 .ki-ds-table__row {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr) 170px 168px 92px 76px;
+  grid-template-columns: 190px minmax(0, 1fr) 170px 168px 92px 76px 76px;
   gap: 12px;
   align-items: center;
 }
@@ -5315,14 +5315,31 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-ds-table__row:last-child { border-bottom: 0; }
 .ki-ds-table__row:hover { background: var(--ki-color-bg-secondary); }
+.ki-ds-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 .ki-ds-table__row.is-active { background: var(--ki-color-primary-soft); box-shadow: inset 3px 0 0 var(--ki-color-primary); }
 /* scope 名单行截断（2026-10-21）：原先无 nowrap/ellipsis，长 scope 名会把行高从 41px
    撑到 85px，列表出现锯齿；`__dir`/`__group` 早有同款截断，这里补齐同一口径（title 兜底全名）。
    ★ 不用 flex 容器 —— 纯文本节点在 flex 下 text-overflow 不生效。 */
 .ki-ds-table__scope {
-  min-width: 0; font-weight: 600;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600;
 }
+.ki-ds-table__scope-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-ds-type-badge {
+  flex: none; padding: 0 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 600; line-height: 16px; white-space: nowrap;
+}
+.ki-ds-type-badge--git {
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+}
+.ki-ds-type-badge--dir {
+  color: var(--ki-color-text-subtle);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-table__actions { display: flex; justify-content: flex-end; }
+.ki-ds-sync-btn { min-width: 52px; }
 .ki-ds-table__dir,
 .ki-ds-table__group {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -5366,6 +5383,7 @@ select.ki-chat-cfg__ta--select {
   background: var(--ki-color-surface);
 }
 .ki-ds-drawer__identity { flex: 1; min-width: 0; }
+.ki-ds-drawer__sync-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .ki-ds-drawer__kicker {
   color: var(--ki-color-primary);
   font: 700 var(--ki-font-size-xs)/1.3 var(--ki-font-mono);
@@ -5404,7 +5422,7 @@ select.ki-chat-cfg__ta--select {
 /* 中窄屏（≤1199）：固定三列 —— 六列在 ~1200 以下会横向溢出 */
 @media (max-width: 1199px) {
   .ki-ds-table__head,
-  .ki-ds-table__row { grid-template-columns: 150px minmax(0, 1fr) 96px; gap: 8px; }
+  .ki-ds-table__row { grid-template-columns: 150px minmax(0, 1fr) 96px 72px; gap: 8px; }
   .ki-ds-col--group,
   .ki-ds-col--time,
   .ki-ds-col--pending { display: none; }

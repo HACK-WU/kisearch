@@ -56,8 +56,9 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { readDataSource, scanDataSources, toClientPending } from './datasource.js';
+import { checkSourceReachable, readDataSource, scanDataSources, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
+import { computeSyncAvailability } from './datasource-policy.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -73,7 +74,7 @@ import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
-import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter } from './task-registry.js';
+import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
 import { toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
@@ -728,6 +729,7 @@ export async function handleApiRequest(
     if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig));
     if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
     if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
+    if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
@@ -2071,6 +2073,18 @@ function handleDatasourceList(
       const active = activeSync.get(scope) ?? null;
       return {
         scope,
+        type: record.type,
+        git: record.git
+          ? {
+            repoRoot: record.git.repoRoot,
+            relativeRoot: record.git.relativeRoot,
+            branch: record.git.branch,
+            managed: record.git.managed,
+            shortCommit: record.lastSync?.git?.shortCommit ?? null,
+            commitTime: record.lastSync?.git?.authorTime ?? null,
+            untrackedMarkdown: record.lastSync?.git?.untrackedMarkdown ?? 0,
+          }
+          : null,
         dir: record.dir,
         group: record.group,
         conflictMode: record.conflictMode,
@@ -2096,6 +2110,12 @@ function handleDatasourceList(
         activeState: active?.state ?? null,
         activeStartedAt: active?.startedAt ?? null,
         stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
+        syncAvailability: computeSyncAvailability({
+          type: record.type,
+          lastSync: record.lastSync,
+          active: active !== null,
+          now,
+        }),
       };
     });
 
@@ -2156,8 +2176,223 @@ function handleDatasourceDetail(
     running,
     activeState: active?.state ?? null,
     activeStartedAt: active?.startedAt ?? null,
+    syncAvailability: computeSyncAvailability({
+      type: read.record.type,
+      lastSync: read.record.lastSync,
+      active: running,
+    }),
     source: { ...read.record, lastSync },
   });
+}
+
+// ─── POST /api/datasource/sync（S-03）────────────────────
+
+/**
+ * 页面同步闸门：单 daemon 进程内 per-scope Map。
+ * 关闭「两个并发 POST 都读到无 active」的 check-then-create 竞态；
+ * 任务 finish / submit 失败都必须释放。
+ */
+const pageSyncGates = new Map<string, string>();
+
+function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): TaskResultSnapshot | undefined {
+  if (!result.ok || result.dryRun) return undefined;
+  const summary = result.summary;
+  return {
+    ...(summary.files
+      ? {
+        files: {
+          scanned: summary.files.scanned,
+          completed: summary.files.completed,
+          incomplete: summary.files.incomplete,
+          skipped: summary.files.skipped,
+          unchanged: summary.files.unchanged,
+          duplicatesSkipped: summary.files.duplicatesSkipped,
+        },
+      }
+      : {}),
+    vectorized: summary.vectorized,
+    fullTextIndexed: summary.fullTextIndexed,
+    groups: summary.groups,
+  };
+}
+
+async function handleDatasourceSync(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: { scope?: unknown; full?: unknown } = {};
+  try {
+    body = await readJsonBody(req) as { scope?: unknown; full?: unknown };
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'DATASOURCE_SYNC_MISSING_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/sync');
+    return;
+  }
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+  const read = readDataSource(scope);
+  if (!read.ok) {
+    sendJson(res, read.code === 'NOT_FOUND' ? 404 : 400, {
+      ok: false,
+      code: read.code === 'NOT_FOUND' ? 'DATASOURCE_NOT_FOUND' : read.code,
+      error: read.error,
+    });
+    return;
+  }
+  const record = read.record;
+  const full = body.full === true;
+
+  // 严格读台账：读失败必须 503，不能放行重复同步
+  let tasks: ReturnType<typeof listTaskRecords>;
+  try {
+    tasks = listTaskRecords(requestConfig);
+  } catch (err) {
+    sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `任务台账不可读，同步未启动：${(err as Error).message}` });
+    return;
+  }
+  const activeTask = tasks.find((task) => task.scope === scope
+    && task.operation === 'datasource-sync'
+    && (task.state === 'queued' || task.state === 'running'));
+  if (activeTask) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'SYNC_ALREADY_RUNNING',
+      error: '该数据源已有同步任务在排队或执行中',
+      taskId: activeTask.id,
+    });
+    return;
+  }
+  const availability = computeSyncAvailability({ type: record.type, lastSync: record.lastSync, active: false });
+  if (!availability.allowed) {
+    sendJson(res, 429, {
+      ok: false,
+      code: 'SYNC_RATE_LIMITED',
+      error: `普通目录数据源 30 分钟内只能同步一次。如需立即同步，请执行：ki datasource sync --scope ${scope}`,
+      nextAvailableAt: availability.nextAvailableAt,
+      retryAfterSec: availability.retryAfterSec,
+    });
+    return;
+  }
+  const reachable = checkSourceReachable(record.dir);
+  if (!reachable.ok) {
+    sendJson(res, 409, { ok: false, code: 'SOURCE_UNREACHABLE', error: reachable.reason });
+    return;
+  }
+  if (pageSyncGates.has(scope)) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'SYNC_ALREADY_RUNNING',
+      error: '该数据源已有同步任务在排队或执行中',
+      taskId: pageSyncGates.get(scope),
+    });
+    return;
+  }
+  const taskId = crypto.randomUUID();
+  pageSyncGates.set(scope, taskId);
+
+  // 占位后复核一次：防止在闸门外刚好完成/启动了别的同步
+  const recheck = readDataSource(scope);
+  const latest = recheck.ok ? recheck.record : record;
+  const latestAvailability = computeSyncAvailability({ type: latest.type, lastSync: latest.lastSync, active: false });
+  if (!latestAvailability.allowed) {
+    pageSyncGates.delete(scope);
+    sendJson(res, 429, {
+      ok: false,
+      code: 'SYNC_RATE_LIMITED',
+      error: `普通目录数据源 30 分钟内只能同步一次。如需立即同步，请执行：ki datasource sync --scope ${scope}`,
+      nextAvailableAt: latestAvailability.nextAvailableAt,
+      retryAfterSec: latestAvailability.retryAfterSec,
+    });
+    return;
+  }
+
+  let task: TaskReporter;
+  try {
+    task = createTaskReporter(requestConfig, { id: taskId, source: 'web', operation: 'datasource-sync', scope });
+  } catch (err) {
+    pageSyncGates.delete(scope);
+    sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `后台任务状态登记失败，任务未启动：${(err as Error).message}` });
+    return;
+  }
+  // 首次同步没有 commit 水位时必然是 full；不能只看 type/full
+  const mode = latest.type === 'git' && !full && Boolean(latest.lastSync?.git?.commit)
+    ? 'incremental'
+    : 'full';
+  task.update({
+    params: toParamSnapshot('datasource-sync', {
+      sourceDir: latest.dir,
+      type: latest.type,
+      mode,
+      ...(latest.group ? { group: latest.group } : {}),
+      vector: latest.vector,
+      conflictMode: latest.conflictMode,
+      conflictSuffix: latest.conflictSuffix,
+      ...(latest.chunkSize !== null ? { chunkSize: latest.chunkSize } : {}),
+      ...(latest.chunkOverlap !== null ? { chunkOverlap: latest.chunkOverlap } : {}),
+    }),
+  });
+
+  void getSharedOperationCoordinator().submit(
+    { operation: 'datasource-sync', params: { scope, full } },
+    () => runWithConfigSnapshot(requestConfig, async () => {
+      task.update({ state: 'running', startedAt: Date.now() });
+      try {
+        const result = await syncDataSource({
+          scope,
+          full,
+          taskId,
+          config: requestConfig,
+          onProgress: (progress) => task.progress(progress),
+          onPhase: (phase) => task.update({ phase }),
+        });
+        if (!result.ok) {
+          task.finish('failed', { errorCode: result.code, error: result.error });
+          return;
+        }
+        if (result.dryRun) {
+          task.finish('failed', { errorCode: 'SYNC_UNEXPECTED_DRY_RUN', error: '页面同步不应返回 dry-run' });
+          return;
+        }
+        const state = result.summary.state;
+        task.finish(
+          state === 'ok' ? 'succeeded' : state === 'partial' ? 'partial' : state === 'cancelled' ? 'cancelled' : 'failed',
+          {
+            result: toDatasourceSyncResultSnapshot(result),
+            ...(state === 'partial'
+              ? { error: '部分文件未完成', recoveryHint: '修复后重试同步；未完成文件会自动重试' }
+              : {}),
+          },
+        );
+      } catch (err) {
+        task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'SYNC_FAILED', error: (err as Error).message });
+      } finally {
+        pageSyncGates.delete(scope);
+      }
+    }),
+    scope,
+  ).catch((err) => {
+    pageSyncGates.delete(scope);
+    try {
+      task.finish('failed', { errorCode: 'SYNC_FAILED', error: (err as Error).message });
+    } catch { /* 台账写失败时只能放弃 */ }
+  });
+
+  sendJson(res, 200, { ok: true, scope, taskId, mode, state: 'queued' });
 }
 
 // ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────//

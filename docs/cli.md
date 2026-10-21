@@ -105,13 +105,13 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ## `datasource`（数据源登记与同步，REQ-20261020-001）
 
-CLI 是登记与同步的唯一入口；页面只读（唯一写动作是删除待删候选）。
+本地目录登记仍以 CLI 为主；页面可触发同步（普通目录 30 分钟一次，CLI 可强制）。
 
 ```bash
-ki datasource add --scope <s> --source <dir> [--group <g>] \
+ki datasource add --scope <s> --source <dir> [--type git|directory] [--group <g>] \
   [--conflict-mode incremental|overwrite|skip|suffix] [--conflict-suffix "_{n}"] \
   [--chunk-size N] [--chunk-overlap N] [--no-vector] [--force]
-ki datasource sync --scope <s> [--dry-run]     # 导入 + 算候选，永不删除；单源
+ki datasource sync --scope <s> [--dry-run] [--full]  # 导入 + 算候选，永不删除；单源
 ki datasource prune --scope <s> [--group <g>] [--yes]  # 默认预览；每次 ≤500 篇
 ki datasource list [--json]
 ki datasource remove --scope <s> [--yes]       # 只取消登记，不删库内文档
@@ -120,8 +120,11 @@ ki datasource remove --scope <s> [--yes]       # 只取消登记，不删库内�
 **语义（与设计 S-01~S-03 一致）**
 
 - 清单落 `<kbDir>/datasource.json`（每 scope 一个，0600 原子写）；**不写** `group-index.json.source` —— `sync_relation` 的 wiki 写回不会指向用户源目录
+- `--type`：缺省自动探测目录是否为 Git 仓库；`git` 显式要求（探测失败 fail-loud）；`directory` 显式关闭增量（即使目录是仓库也按全量）
+- Git 数据源同步：`git fetch` + 自动更新（本地仓库只 `merge --ff-only`；工具托管的 clone 才 `reset --hard` + `clean`），只导入 tracked 变更；untracked 不进入增量，页面/CLI 会给出计数警告；首次同步无 commit 水位 → 全量；`--full` 处理全部文件（含 untracked）。commit 水位只在本次同步完整成功时推进
+- 页面同步：普通目录成功同步后 30 分钟内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409
 - `sync` 只导入 + 计算待删候选：候选只在「上一次成功同步见过的 rel 集合」内产生，首次同步零候选；**永不删除**，库内文档数只增不减
-- `--dry-run` 零写入（不导入、不写 `lastSync`）
+- `--dry-run` 零写入（不导入、不写 `lastSync`，也不 fetch/自动更新）
 - `prune` 执行时服务端按**当前源目录**重算候选并与 `token` 比对（失配 `409`），只删「所选 ∩ 可见候选」，且**不动源目录文件**（`wikiDelete:false`）
 - 候选 > 500 篇：页面/CLI 分批删除（每次 ≤500，删完刷新继续）
 - `remove` 只删登记，不清空历史 `source` 块（后者属于一次性 `ki import` 的状态）

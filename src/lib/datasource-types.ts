@@ -10,6 +10,53 @@ export type DataSourceSyncState = 'ok' | 'partial' | 'failed' | 'cancelled';
 
 export type DataSourceStaleReason = 'source-missing' | 'source-unreadable' | 'not-recomputed';
 
+export type DataSourceKind = 'directory' | 'git';
+
+export type DataSourceSyncMode = 'incremental' | 'full';
+
+export interface DataSourceGitInfo {
+  /** 仓库根绝对路径（可能是 dir 的祖先） */
+  repoRoot: string;
+  /** dir 相对 repoRoot 的 posix 前缀；仓库根为 '' */
+  relativeRoot: string;
+  /** 当前分支；detached HEAD 为 null */
+  branch: string | null;
+  /** 远端 URL（已去凭据）；无 remote 为 null */
+  remoteUrl: string | null;
+  /** 是否工具托管的 clone（S-05） */
+  managed: boolean;
+  /** 托管 clone 配置的远端分支；非托管为 null */
+  remoteBranch: string | null;
+}
+
+export interface DataSourceGitSyncState {
+  /** 下次 diff 的水位：成功同步推进；partial/失败保持旧值 */
+  commit: string | null;
+  /** 本次自动更新完成后、扫描开始前的 HEAD */
+  runCommit: string | null;
+  shortCommit: string | null;
+  subject: string | null;
+  /** 提交时间（epoch ms） */
+  authorTime: number | null;
+  /** 本次进入 onlyRelPaths 的 tracked 变更数 */
+  changedCount: number;
+  /** 本次全量扫描到的可导入文件数 */
+  fullScanned: number;
+  /** 未跟踪且可导入的文件数（不参与增量） */
+  untrackedMarkdown: number;
+  /** 自动更新结果 */
+  update: 'updated' | 'up-to-date' | 'skipped' | 'failed';
+  updateDetail?: string;
+  /** fetch 结果 */
+  fetch: 'ok' | 'failed' | 'skipped';
+  fetchDetail?: string;
+}
+
+export interface DataSourceWarning {
+  code: string;
+  message: string;
+}
+
 /** 同步参数快照（= 本次实际使用的登记参数） */
 export interface DataSourceSyncParams {
   group: string | null;
@@ -17,6 +64,8 @@ export interface DataSourceSyncParams {
   vector: boolean;
   chunkSize: number | null;
   chunkOverlap: number | null;
+  /** 新增；旧快照缺省按 full */
+  mode?: DataSourceSyncMode;
 }
 
 export interface DataSourcePendingDeleteItem {
@@ -62,7 +111,12 @@ export interface DataSourcePendingDelete {
 /** 一次同步的结果快照（页面详情据此渲染，不读 1h TTL 的任务台账） */
 export interface DataSourceResultSnapshot {
   files: {
+    /** 导入管线本次处理基准（子集导入时 = 变更数） */
     scanned: number;
+    /** 全量扫描数 */
+    fullScanned: number;
+    /** 本次变更数（全量同步 = fullScanned） */
+    changed: number;
     completed: number;
     unchanged: number;
     skipped: number;
@@ -90,13 +144,21 @@ export interface DataSourceLastSync {
    */
   seenRels: string[];
   pendingDelete: DataSourcePendingDelete;
+  /** Git 数据源专有 */
+  git?: DataSourceGitSyncState;
+  /** 本次同步的可展示警告（fetch/update/untracked/fallback） */
+  warnings?: DataSourceWarning[];
 }
 
 export interface DataSourceRecord {
-  version: 1;
+  version: 2;
   scope: string;
+  /** directory = 普通目录（全量）；git = 仓库（增量） */
+  type: DataSourceKind;
   /** 绝对路径（add 时 resolve，~ 已展开） */
   dir: string;
+  /** type='git' 时必填 */
+  git?: DataSourceGitInfo;
   /** null = 按顶层子目录自动落点 */
   group: string | null;
   conflictMode: ImportConflictMode;
@@ -115,7 +177,17 @@ export interface DataSourceRecord {
 /** `GET /api/datasource/list` 的一行（摘要素材） */
 export interface DataSourceSummary {
   scope: string;
+  type: DataSourceKind;
   dir: string;
+  /** 列表摘要（不执行 git 命令；来自记录与 lastSync.git） */
+  git?: {
+    repoRoot: string;
+    relativeRoot: string;
+    branch: string | null;
+    shortCommit: string | null;
+    commitTime: number | null;
+    untrackedMarkdown: number;
+  };
   group: string | null;
   conflictMode: ImportConflictMode;
   vector: boolean;

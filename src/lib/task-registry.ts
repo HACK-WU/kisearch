@@ -41,6 +41,10 @@ export interface TaskIndexReadiness {
 export interface TaskParamSnapshot {
   /** 来源形态：浏览器上传（受控暂存目录，会被 TTL 清理）/ 外部目录 */
   sourceKind?: 'upload' | 'external';
+  /** 数据源类型（datasource-sync） */
+  type?: 'directory' | 'git';
+  /** 同步模式（datasource-sync） */
+  mode?: 'incremental' | 'full';
   /** 用户显式指定的落点 Group；未指定时省略 */
   group?: string;
   /** 文档级自定义标签 */
@@ -256,6 +260,8 @@ function normalizeParams(input: TaskParamSnapshot | undefined): TaskParamSnapsho
   if (!input) return undefined;
   const out: TaskParamSnapshot = {};
   if (input.sourceKind === 'upload' || input.sourceKind === 'external') out.sourceKind = input.sourceKind;
+  if (input.type === 'git' || input.type === 'directory') out.type = input.type;
+  if (input.mode === 'incremental' || input.mode === 'full') out.mode = input.mode;
   const group = safeRelPath(input.group);
   if (group) out.group = group;
   const tags = (Array.isArray(input.tags) ? input.tags : [])

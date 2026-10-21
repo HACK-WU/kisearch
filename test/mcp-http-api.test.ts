@@ -29,6 +29,7 @@ import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
 import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
 import { createTaskReporter, getTaskRecord } from '../src/lib/task-registry.js';
+import { closeFtsEngine } from '../src/lib/fts-client.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -69,6 +70,7 @@ before(async () => {
 
 after(async () => {
   await handle?.close();
+  try { await closeFtsEngine(); } catch { /* 未打开时忽略 */ }
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
@@ -236,6 +238,239 @@ describe('/api/datasource/list|detail', () => {
       reporter.stop();
       fs.rmSync(sourceDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('/api/datasource/sync', () => {
+  function writeDirectoryDatasource(scope: string, opts: { dir: string; lastSync?: unknown }): void {
+    const file = path.join(getKbDir(scope), 'datasource.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      scope,
+      dir: opts.dir,
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: opts.lastSync ?? null,
+    }));
+  }
+
+  function writeGitDatasource(scope: string, dir: string): void {
+    const file = path.join(getKbDir(scope), 'datasource.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      version: 2,
+      scope,
+      type: 'git',
+      dir,
+      git: {
+        repoRoot: dir,
+        relativeRoot: '',
+        branch: 'main',
+        remoteUrl: null,
+        managed: false,
+        remoteBranch: null,
+      },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: null,
+    }));
+  }
+
+  function newScope(): string {
+    return `api_ds_sync_${crypto.randomUUID().slice(0, 8)}`;
+  }
+
+  it('缺少 scope → 400', async () => {
+    const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).code, 'DATASOURCE_SYNC_MISSING_SCOPE');
+  });
+
+  it('未登记 → 404', async () => {
+    const scope = newScope();
+    const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    assert.equal(res.status, 404);
+    assert.equal((await res.json()).code, 'DATASOURCE_NOT_FOUND');
+  });
+
+  it('200：创建 datasource-sync 任务并返回 taskId/mode', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-src-'));
+    writeDirectoryDatasource(scope, { dir });
+    try {
+      const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { ok: boolean; scope: string; taskId: string; mode: string; state: string };
+      assert.equal(body.ok, true);
+      assert.equal(body.scope, scope);
+      assert.equal(body.taskId.length > 0, true);
+      assert.equal(body.mode, 'full');
+      assert.equal(body.state, 'queued');
+
+      // 任务异步执行（空源会快速失败）；台账里应存在该任务且参数含 type/mode
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const task = getTaskRecord(loadConfig(), body.taskId);
+      assert.ok(task);
+      assert.equal(task?.operation, 'datasource-sync');
+      assert.equal(task?.params?.type, 'directory');
+      assert.equal(task?.params?.mode, 'full');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('git 首次同步（无 commit 水位）响应 mode=full', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-git-'));
+    fs.writeFileSync(path.join(dir, 'x.md'), '# x\n');
+    writeGitDatasource(scope, dir);
+    try {
+      const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { ok: boolean; taskId: string; mode: string };
+      assert.equal(body.ok, true);
+      assert.equal(body.mode, 'full');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const task = getTaskRecord(loadConfig(), body.taskId);
+      assert.equal(task?.params?.mode, 'full');
+      assert.equal(task?.params?.type, 'git');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('目录 ok 且不足 30 分钟 → 429 SYNC_RATE_LIMITED', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-src-'));
+    writeDirectoryDatasource(scope, {
+      dir,
+      lastSync: { at: Date.now(), durationMs: 1, state: 'ok' },
+    });
+    try {
+      const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      assert.equal(res.status, 429);
+      const body = await res.json() as { code: string; retryAfterSec: number; nextAvailableAt: number };
+      assert.equal(body.code, 'SYNC_RATE_LIMITED');
+      assert.ok(body.retryAfterSec > 0);
+      assert.ok(body.nextAvailableAt > Date.now());
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('同 scope 已有 active 任务 → 409 SYNC_ALREADY_RUNNING', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-src-'));
+    writeDirectoryDatasource(scope, { dir });
+    const taskId = crypto.randomUUID();
+    const reporter = createTaskReporter(loadConfig(), { id: taskId, source: 'cli', operation: 'datasource-sync', scope });
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    try {
+      const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      assert.equal(res.status, 409);
+      const body = await res.json() as { code: string; taskId: string };
+      assert.equal(body.code, 'SYNC_ALREADY_RUNNING');
+      assert.equal(body.taskId, taskId);
+    } finally {
+      reporter.finish('succeeded');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('同 scope 并发 5 个 POST → 1×200 + 4×409（per-scope 闸门）', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-src-'));
+    fs.writeFileSync(path.join(dir, 'x.md'), '# x\n');
+    writeDirectoryDatasource(scope, { dir });
+    try {
+      const responses = await Promise.all(Array.from({ length: 5 }, () => fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      })));
+      const statuses = responses.map((res) => res.status).sort();
+      assert.deepEqual(statuses, [200, 409, 409, 409, 409]);
+      // 等首个任务落定后再清理源目录
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('任务台账不可用 → 503 TASK_REGISTRY_UNAVAILABLE', async () => {
+    const scope = newScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-sync-src-'));
+    writeDirectoryDatasource(scope, { dir });
+    const taskDir = path.join(loadConfig().dataDir, '.ki-tasks');
+    const backup = `${taskDir}.acceptance-bak-${crypto.randomUUID()}`;
+    let moved = false;
+    try {
+      if (fs.existsSync(taskDir)) {
+        fs.renameSync(taskDir, backup);
+        moved = true;
+      }
+      fs.writeFileSync(taskDir, 'not-a-directory');
+      const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      assert.equal(res.status, 503);
+      assert.equal((await res.json()).code, 'TASK_REGISTRY_UNAVAILABLE');
+    } finally {
+      fs.rmSync(taskDir, { force: true });
+      if (moved) fs.renameSync(backup, taskDir);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('源目录不可达 → 409 SOURCE_UNREACHABLE', async () => {
+    const scope = newScope();
+    writeDirectoryDatasource(scope, { dir: path.join(os.tmpdir(), `ds-missing-${crypto.randomUUID()}`) });
+    const res = await fetch(`${handle!.base}/api/datasource/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).code, 'SOURCE_UNREACHABLE');
   });
 });
 
@@ -1151,6 +1386,46 @@ describe('/api/* 鉴权（对外绑定 + 本地豁免）', () => {
       assert.equal(res.status, 200);
     } finally {
       await srv.close();
+    }
+  });
+
+  it('/api/datasource/sync：scoped token 访问未授权 scope → 403；授权 scope 通过鉴权', async () => {
+    const tokensFile = path.join(tmpHome, '.ki', 'mcp-tokens.json');
+    fs.mkdirSync(path.dirname(tokensFile), { recursive: true });
+    fs.writeFileSync(tokensFile, JSON.stringify([{
+      id: 'scoped01',
+      token: 'scoped-token',
+      scopes: ['allowed-scope'],
+      createdAt: new Date().toISOString(),
+    }]));
+    const { httpServer, closeAllSessions } = createMcpHttpServer({
+      authEnabled: true,
+      buildServer: buildTestServer,
+      webDir: null,
+      resolveClientAddr: () => '192.168.1.10',
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const addr = httpServer.address() as AddressInfo;
+    const base = `http://127.0.0.1:${addr.port}`;
+    try {
+      const denied = await fetch(`${base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer scoped-token' },
+        body: JSON.stringify({ scope: 'denied-scope' }),
+      });
+      assert.equal(denied.status, 403);
+
+      const allowed = await fetch(`${base}/api/datasource/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer scoped-token' },
+        body: JSON.stringify({ scope: 'allowed-scope' }),
+      });
+      assert.equal(allowed.status, 404);
+      assert.equal((await allowed.json()).code, 'DATASOURCE_NOT_FOUND');
+    } finally {
+      await closeAllSessions();
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      fs.rmSync(tokensFile, { force: true });
     }
   });
 });

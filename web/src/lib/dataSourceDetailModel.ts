@@ -240,6 +240,30 @@ export function buildDataSourceDetail(
       text: `候选 ${pendingDelete.total} 篇，超过单次上限：本页显示前 ${items.length} 篇，删除后刷新可继续。`,
     });
   }
+  const git = sync?.git;
+  if (sync?.warnings && sync.warnings.length > 0) {
+    // 服务端给完整 message，前端直出（不在两端各维护一份 code→文案）
+    for (const item of sync.warnings) {
+      notices.push({ tone: item.code === 'GIT_UNTRACKED_SKIPPED' ? 'info' : 'warn', text: item.message });
+    }
+  } else if (git) {
+    // 旧快照没有 warnings 时的降级展示
+    if (git.fetch === 'failed') {
+      notices.push({ tone: 'warn', text: `远端更新检查失败：${git.fetchDetail ?? '未知原因'}；本次同步基于本地内容` });
+    }
+    if (git.update === 'failed') {
+      notices.push({ tone: 'warn', text: `自动更新失败：${git.updateDetail ?? '未知原因'}；本地工作区未改动，本次同步本地内容` });
+    }
+    if (git.untrackedMarkdown > 0) {
+      notices.push({ tone: 'info', text: `检测到 ${git.untrackedMarkdown} 个未跟踪文件不参与增量；需要同步请执行全量同步` });
+    }
+  }
+  if (sync?.state === 'partial' && git && git.commit !== git.runCommit) {
+    notices.push({ tone: 'warn', text: '本次有未完成文件，commit 水位未推进；下次同步会重试' });
+  }
+  if (sync && sync.state === 'ok' && sync.result.files.changed === 0 && (sync.result.files.fullScanned ?? 0) > 0) {
+    notices.push({ tone: 'info', text: `本次无变更（全量扫描 ${sync.result.files.fullScanned} 篇）` });
+  }
 
   const result = sync?.result;
   // 「同步参数」取**上次同步实际使用的参数**（lastSync.params），不是当前登记配置：
@@ -260,18 +284,43 @@ export function buildDataSourceDetail(
       notices.push({ tone: 'info', text: '登记配置已变更：上方为上次同步所用参数，新配置在下次同步生效。' });
     }
   }
+  const typeLabel = record.type === 'git' ? 'Git 仓库' : '普通目录';
+  const modeLabel = p?.mode === 'incremental' ? '增量' : p?.mode === 'full' ? '全量' : '—';
+  const gitRows: DetailRow[] = record.type === 'git' && record.git
+    ? [
+      { label: 'Git 仓库', value: record.git.repoRoot, full: true },
+      { label: '分支', value: record.git.branch ?? 'detached' },
+      {
+        label: '最近提交',
+        value: git?.shortCommit ? `${git.shortCommit}${git.subject ? ` · ${git.subject}` : ''}` : '—',
+        hint: git?.authorTime ? formatTime(git.authorTime) : undefined,
+        full: true,
+      },
+    ]
+    : [];
   const params: DetailRow[] = [
+    { label: '类型', value: typeLabel },
     { label: '知识库', value: record.scope },
     { label: '源目录', value: record.dir, full: true },
+    ...gitRows,
+    { label: '同步模式', value: modeLabel },
     { label: '落点 Group', value: effGroup ?? '(自动：按顶层子目录)', full: true },
     { label: '同名策略', value: CONFLICT_LABEL[effConflict] ?? effConflict },
     { label: '向量化', value: effVector ? '开启' : '关闭（仅全文）' },
     { label: '切分参数', value: `${effChunkSize ?? 1000} / ${effChunkOverlap ?? 150}` },
   ];
 
+  const fullScanned = result ? (result.files.fullScanned ?? result.files.scanned) : 0;
+  const changed = result ? (sync?.git?.changedCount ?? result.files.changed ?? result.files.scanned) : 0;
   const results: DetailRow[] = result
     ? [
-      { label: '扫描', value: String(result.files.scanned) },
+      { label: '全量扫描', value: String(fullScanned) },
+      {
+        label: '本次变更',
+        value: String(changed),
+        hint: result.files.changed === undefined ? '旧快照无增量字段，按导入基准显示' : undefined,
+      },
+      { label: '处理', value: String(result.files.scanned) },
       { label: '完成', value: String(result.files.completed), hint: result.files.unchanged > 0 ? `其中内容未变 ${result.files.unchanged} 篇` : undefined },
       { label: '跳过', value: String(result.files.skipped) },
       { label: '失败', value: String(result.files.incomplete), tone: result.files.incomplete > 0 ? 'danger' : 'normal' },

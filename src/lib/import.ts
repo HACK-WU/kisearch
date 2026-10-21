@@ -272,6 +272,12 @@ export interface HandleDirectImportArgs {
    */
   onlyRelPaths?: string[];
   /**
+   * REQ-20261021-003：数据源 Git 增量。
+   * `onlyRelPaths` 是变更子集，但 `files` 已完成全量扫描，候选计算可按全量差集进行。
+   * 缺省/`false` ⇒ 保持现有「重试未完成」语义（`SUBSET_RETRY` 跳过候选）。
+   */
+  pruneSubsetFullScan?: boolean;
+  /**
    * REQ-20261019-002：跳过「内容与库中已有文档一致、但 sourcePath 不同」的文件。
    *
    * 缺省 `false`：**不计算跳过集**，预算、进度、统计完全走既有口径（行为等价）。
@@ -794,7 +800,7 @@ async function handleDirectImportUnlocked(
       precheck: {
         pruneStale: true,
         pickMode: args.pickMode,
-        subsetRetry: Array.isArray(args.onlyRelPaths) && args.onlyRelPaths.length > 0,
+        subsetRetry: Array.isArray(args.onlyRelPaths) && args.onlyRelPaths.length > 0 && args.pruneSubsetFullScan !== true,
         uploadIncomplete: args.uploadIncomplete === true,
         scannedCount: files.length,
       },

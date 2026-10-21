@@ -33,6 +33,7 @@ import {
   closeEngine,
 } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { deleteFtsCollection, ftsDeleteByFilter } from './lib/fts-client.js';
 import { removeScopeCollection } from './lib/scope-collection.js';
 import { getRelationsCacheIdentity, loadCacheShape, onScopeRelationsInvalidated } from './lib/group-cache.js';
 
@@ -237,7 +238,16 @@ export async function executeScopeList(): Promise<ScopeListResult> {
 // ─── 纯函数：scope delete ───
 
 export type ScopeDeleteResult =
-  | { ok: true; scope: string; deletedVectors: number; kbRemoved: boolean; configRemoved: boolean }
+  | {
+    ok: true;
+    scope: string;
+    deletedVectors: number;
+    kbRemoved: boolean;
+    configRemoved: boolean;
+    /** FTS-only collection 目录是否被删除（无该目录时为 false） */
+    ftsRemoved?: boolean;
+    ftsError?: string;
+  }
   | {
       ok: false;
       error: string;
@@ -274,11 +284,23 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
     const deletedVectors = (await vectorDeleteScope({ scope: params.scope })).deleted;
     // daemon 内只关闭被删除 scope 的 engine，不能影响其他 scope 的并行请求。
     await closeEngine(params.scope);
+    // FTS-only collection 独立于 dense collection：不删会留下 fts-collections/<scope> 孤儿目录
+    let ftsRemoved = false;
+    let ftsError: string | undefined;
+    try {
+      ftsRemoved = (await deleteFtsCollection(params.scope)).removed;
+    } catch (err) {
+      ftsError = (err as Error).message;
+    }
     const kbRemoved = removeKbDir(params.scope);
     const configResult = removeScopeFromConfigFile(params.scope);
     removeScopeCollection(config, params.scope);
 
-    return { ok: true, scope: params.scope, deletedVectors, kbRemoved, configRemoved: configResult.removed };
+    return {
+      ok: true, scope: params.scope, deletedVectors, kbRemoved, configRemoved: configResult.removed,
+      ftsRemoved,
+      ...(ftsError ? { ftsError } : {}),
+    };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -294,7 +316,18 @@ export async function executeScopeDelete(params: { scope: string; yes: boolean }
 // ─── 纯函数：scope clear ───
 
 export type ScopeClearResult =
-  | { ok: true; scope: string; tags: string[] | 'all'; deletedVectors: number; kbCleared: boolean }
+  | {
+    ok: true;
+    scope: string;
+    tags: string[] | 'all';
+    deletedVectors: number;
+    kbCleared: boolean;
+    /** 全量 clear：FTS collection 目录是否被删除 */
+    ftsRemoved?: boolean;
+    /** 带 tags clear：FTS 中按 tag 删除的文档数 */
+    ftsDeletedDocs?: number;
+    ftsError?: string;
+  }
   | {
       ok: false;
       error: string;
@@ -329,8 +362,27 @@ async function executeScopeClearLocal(params: { scope: string; tags?: string[]; 
 
     const deletedVectors = (await vectorDeleteScope({ scope: params.scope, tags: params.tags })).deleted;
     const kbCleared = !params.tags ? clearKbDir(params.scope) : false;
+    // FTS-only 与 dense 是两套索引：clear 必须同时清，否则全文检索仍能召回旧文档
+    let ftsRemoved = false;
+    let ftsDeletedDocs = 0;
+    let ftsError: string | undefined;
+    try {
+      if (params.tags && params.tags.length > 0) {
+        for (const tag of params.tags) {
+          ftsDeletedDocs += await ftsDeleteByFilter({ scope: params.scope, tag });
+        }
+      } else {
+        ftsRemoved = (await deleteFtsCollection(params.scope)).removed;
+      }
+    } catch (err) {
+      ftsError = (err as Error).message;
+    }
 
-    return { ok: true, scope: params.scope, tags: params.tags ?? 'all', deletedVectors, kbCleared };
+    return {
+      ok: true, scope: params.scope, tags: params.tags ?? 'all', deletedVectors, kbCleared,
+      ...(params.tags && params.tags.length > 0 ? { ftsDeletedDocs } : { ftsRemoved }),
+      ...(ftsError ? { ftsError } : {}),
+    };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

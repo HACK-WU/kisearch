@@ -194,6 +194,114 @@ describe('buildDataSourceDetail 头部与时间口径', () => {
   });
 });
 
+describe('buildDataSourceDetail Git / 增量口径', () => {
+  const base = lastSync();
+  const gitSync = lastSync({
+    params: { ...base.params, mode: 'incremental' },
+    result: {
+      ...base.result,
+      files: { ...base.result.files, fullScanned: 241, changed: 3 },
+    },
+    git: {
+      commit: 'a'.repeat(40),
+      runCommit: 'b'.repeat(40),
+      shortCommit: 'bbbbbbb',
+      subject: 'feat: git sync',
+      authorTime: NOW,
+      changedCount: 3,
+      fullScanned: 241,
+      untrackedMarkdown: 2,
+      update: 'failed',
+      updateDetail: 'not possible to fast-forward',
+      fetch: 'ok',
+    },
+    warnings: [
+      { code: 'GIT_UPDATE_FAILED', message: '自动更新失败：not possible to fast-forward；本地工作区未改动，本次同步本地内容' },
+      { code: 'GIT_UNTRACKED_SKIPPED', message: '检测到 2 个未跟踪文件不参与增量；需要同步请执行全量同步' },
+    ],
+  });
+  const gitRecord = record({
+    type: 'git',
+    git: {
+      repoRoot: '/root/learning',
+      relativeRoot: 'langchain',
+      branch: 'main',
+      remoteUrl: null,
+      managed: false,
+      remoteBranch: null,
+    },
+    lastSync: gitSync,
+  });
+
+  it('参数含类型 / Git 仓库 / 分支 / 最近提交 / 同步模式', () => {
+    const model = buildDataSourceDetail(gitRecord);
+    const byLabel = new Map(model.params.map((row) => [row.label, row]));
+    assert.equal(byLabel.get('类型').value, 'Git 仓库');
+    assert.equal(byLabel.get('Git 仓库').value, '/root/learning');
+    assert.equal(byLabel.get('分支').value, 'main');
+    assert.match(byLabel.get('最近提交').value, /bbbbbbb.*feat: git sync/);
+    assert.equal(byLabel.get('同步模式').value, '增量');
+  });
+
+  it('结果区分全量扫描 / 本次变更 / 处理', () => {
+    const model = buildDataSourceDetail(gitRecord);
+    const byLabel = new Map(model.results.map((row) => [row.label, row]));
+    assert.equal(byLabel.get('全量扫描').value, '241');
+    assert.equal(byLabel.get('本次变更').value, '3');
+    assert.equal(byLabel.get('处理').value, '241');
+    assert.equal(byLabel.get('完成').hint, '其中内容未变 29 篇');
+  });
+
+  it('服务端 warnings 直出；untracked 为 info，其余为 warn', () => {
+    const model = buildDataSourceDetail(gitRecord);
+    const untracked = model.notices.find((item) => item.text.includes('未跟踪文件'));
+    const update = model.notices.find((item) => item.text.includes('自动更新失败'));
+    assert.equal(untracked.tone, 'info');
+    assert.equal(update.tone, 'warn');
+  });
+
+  it('partial + commit 未推进时有明确提示', () => {
+    const model = buildDataSourceDetail(record({
+      type: 'git',
+      git: gitRecord.git,
+      lastSync: lastSync({ ...gitSync, state: 'partial' }),
+    }));
+    assert.ok(model.notices.some((item) => item.text.includes('commit 水位未推进')));
+  });
+
+  it('旧快照无 fullScanned/changed 时回退 scanned 并加 hint', () => {
+    const model = buildDataSourceDetail(record({
+      lastSync: lastSync({
+        result: {
+          ...base.result,
+          files: { scanned: 10, completed: 10, unchanged: 8, skipped: 0, incomplete: 0, duplicatesSkipped: 0 },
+        },
+      }),
+    }));
+    const byLabel = new Map(model.results.map((row) => [row.label, row]));
+    assert.equal(byLabel.get('全量扫描').value, '10');
+    assert.equal(byLabel.get('本次变更').value, '10');
+    assert.match(byLabel.get('本次变更').hint, /旧快照无增量字段/);
+  });
+
+  it('本次无变更时给出显式提示（避免只看到全 0）', () => {
+    const model = buildDataSourceDetail(record({
+      type: 'git',
+      git: gitRecord.git,
+      lastSync: lastSync({
+        params: { ...base.params, mode: 'incremental' },
+        result: {
+          ...base.result,
+          files: { scanned: 0, fullScanned: 5, changed: 0, completed: 0, unchanged: 0, skipped: 0, incomplete: 0, duplicatesSkipped: 0 },
+        },
+        git: { ...gitSync.git, changedCount: 0, fullScanned: 5 },
+        warnings: [],
+      }),
+    }));
+    assert.ok(model.notices.some((item) => item.text.includes('本次无变更（全量扫描 5 篇）')));
+  });
+});
+
 describe('buildDataSourceListSummary', () => {
   it('同步中的行不计入「从未同步」，并单独计数', () => {
     const summary = buildDataSourceListSummary(2, [

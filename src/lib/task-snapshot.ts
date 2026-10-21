@@ -26,6 +26,8 @@ const DEFAULT_UPLOADS_ROOT = path.join(os.homedir(), '.ki', 'import-uploads');
 /** `handleDirectImport` 入参中与本快照相关的子集 */
 export interface ImportArgsLike {
   sourceDir?: string;
+  type?: 'directory' | 'git';
+  mode?: 'incremental' | 'full';
   group?: string;
   tags?: string;
   vector?: boolean;
@@ -55,6 +57,8 @@ export function toParamSnapshot(
   if (sourceDir) {
     snapshot.sourceKind = uploadIdFromSourceDir(sourceDir, uploadsRoot) !== null ? 'upload' : 'external';
   }
+  if (args.type === 'git' || args.type === 'directory') snapshot.type = args.type;
+  if (args.mode === 'incremental' || args.mode === 'full') snapshot.mode = args.mode;
   if (typeof args.group === 'string' && args.group.trim()) snapshot.group = args.group.trim();
   // 与 `handleDirectImport` 的 `customTags` 同源解析（大小写/去重/保留 tag 过滤），
   // 保证详情展示的就是实际生效的标签集合

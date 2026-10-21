@@ -31,13 +31,20 @@ import { resolveImportExtensions } from './config.js';
 import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import type {
+  DataSourceGitInfo,
+  DataSourceGitSyncState,
+  DataSourceKind,
   DataSourceLastSync,
   DataSourcePendingDelete,
   DataSourceRecord,
   DataSourceResultSnapshot,
   DataSourceStaleReason,
+  DataSourceSyncMode,
   DataSourceSyncState,
+  DataSourceWarning,
 } from './datasource-types.js';
+import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
+import { withScopeWriteLock } from './scope-write-lock.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
 
@@ -92,24 +99,143 @@ export function checkSourceReachable(dir: string): { ok: true } | { ok: false; r
   return { ok: true };
 }
 
+function toCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeGitInfo(raw: unknown): DataSourceGitInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.repoRoot !== 'string' || !v.repoRoot.trim() || !path.isAbsolute(v.repoRoot)) return null;
+  const rawRel = typeof v.relativeRoot === 'string' ? v.relativeRoot : '';
+  const relativeRoot = rawRel.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
+  if (relativeRoot.split('/').includes('..')) return null;
+  const branch = optionalString(v.branch);
+  return {
+    repoRoot: path.resolve(v.repoRoot),
+    relativeRoot: relativeRoot === '.' ? '' : relativeRoot,
+    branch: branch === 'HEAD' ? null : branch,
+    remoteUrl: sanitizeRemoteUrl(optionalString(v.remoteUrl) ?? ''),
+    managed: v.managed === true,
+    remoteBranch: optionalString(v.remoteBranch),
+  };
+}
+
+function normalizeGitSyncState(raw: unknown): DataSourceGitSyncState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as Record<string, unknown>;
+  const update = v.update === 'updated' || v.update === 'up-to-date' || v.update === 'failed' ? v.update : 'skipped';
+  const fetch = v.fetch === 'ok' || v.fetch === 'failed' ? v.fetch : 'skipped';
+  return {
+    commit: optionalString(v.commit),
+    runCommit: optionalString(v.runCommit),
+    shortCommit: optionalString(v.shortCommit),
+    subject: optionalString(v.subject),
+    authorTime: typeof v.authorTime === 'number' && Number.isFinite(v.authorTime) ? v.authorTime : null,
+    changedCount: toCount(v.changedCount),
+    fullScanned: toCount(v.fullScanned),
+    untrackedMarkdown: toCount(v.untrackedMarkdown),
+    update,
+    ...(optionalString(v.updateDetail) ? { updateDetail: optionalString(v.updateDetail) as string } : {}),
+    fetch,
+    ...(optionalString(v.fetchDetail) ? { fetchDetail: optionalString(v.fetchDetail) as string } : {}),
+  };
+}
+
+function normalizeWarnings(raw: unknown): DataSourceWarning[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => ({
+      code: typeof item.code === 'string' ? item.code : 'UNKNOWN',
+      message: typeof item.message === 'string' ? item.message : '',
+    }))
+    .filter((item) => item.message.length > 0)
+    .slice(0, 10);
+  return items.length > 0 ? items : undefined;
+}
+
+function normalizeLastSync(raw: unknown): DataSourceLastSync | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Record<string, unknown>;
+  const paramsRaw = s.params && typeof s.params === 'object' ? s.params as Record<string, unknown> : {};
+  const resultRaw = s.result && typeof s.result === 'object' ? s.result as Record<string, unknown> : {};
+  const filesRaw = resultRaw.files && typeof resultRaw.files === 'object' ? resultRaw.files as Record<string, unknown> : {};
+  const scanned = toCount(filesRaw.scanned);
+  const files: DataSourceResultSnapshot['files'] = {
+    scanned,
+    fullScanned: toCount(filesRaw.fullScanned) || scanned,
+    changed: toCount(filesRaw.changed) || scanned,
+    completed: toCount(filesRaw.completed),
+    unchanged: toCount(filesRaw.unchanged),
+    skipped: toCount(filesRaw.skipped),
+    incomplete: toCount(filesRaw.incomplete),
+    duplicatesSkipped: toCount(filesRaw.duplicatesSkipped),
+  };
+  const result: DataSourceResultSnapshot = {
+    files,
+    vectorized: toCount(resultRaw.vectorized),
+    fullTextIndexed: toCount(resultRaw.fullTextIndexed),
+    groups: Array.isArray(resultRaw.groups) ? resultRaw.groups.filter((item): item is string => typeof item === 'string') : [],
+    conflicts: Array.isArray(resultRaw.conflicts) ? resultRaw.conflicts as DataSourceResultSnapshot['conflicts'] : [],
+    failures: Array.isArray(resultRaw.failures) ? resultRaw.failures as DataSourceResultSnapshot['failures'] : [],
+  };
+  const pendingRaw = s.pendingDelete && typeof s.pendingDelete === 'object'
+    ? s.pendingDelete as DataSourcePendingDelete & { candidateSourcePaths?: unknown }
+    : null;
+  const now = Date.now();
+  const pending = pendingRaw ?? emptyPending(now);
+  // 兼容旧版快照：candidateSourcePaths 是 2026-10-21 新增，旧数据用 items 回填
+  if (!Array.isArray(pending.candidateSourcePaths)) {
+    pending.candidateSourcePaths = (pending.items ?? [])
+      .map((item) => item.sourcePath)
+      .filter((item): item is string => typeof item === 'string' && item.length > 0);
+  }
+  return {
+    at: typeof s.at === 'number' ? s.at : now,
+    durationMs: toCount(s.durationMs),
+    state: s.state === 'ok' || s.state === 'partial' || s.state === 'failed' || s.state === 'cancelled' ? s.state : 'failed',
+    ...(optionalString(s.taskId) ? { taskId: optionalString(s.taskId) as string } : {}),
+    params: {
+      group: optionalString(paramsRaw.group),
+      conflictMode: validateImportConflictMode(typeof paramsRaw.conflictMode === 'string' ? paramsRaw.conflictMode : undefined),
+      vector: paramsRaw.vector !== false,
+      chunkSize: typeof paramsRaw.chunkSize === 'number' ? paramsRaw.chunkSize : null,
+      chunkOverlap: typeof paramsRaw.chunkOverlap === 'number' ? paramsRaw.chunkOverlap : null,
+      mode: paramsRaw.mode === 'incremental' ? 'incremental' : 'full',
+    },
+    result,
+    seenRels: Array.isArray(s.seenRels) ? s.seenRels.filter((item): item is string => typeof item === 'string') : [],
+    pendingDelete: pending,
+    ...(normalizeGitSyncState(s.git) ? { git: normalizeGitSyncState(s.git) as DataSourceGitSyncState } : {}),
+    ...(normalizeWarnings(s.warnings) ? { warnings: normalizeWarnings(s.warnings) } : {}),
+  };
+}
+
 function normalizeRecord(scope: string, raw: unknown): DataSourceRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const v = raw as Record<string, unknown>;
   if (typeof v.dir !== 'string' || !v.dir.trim()) return null;
+
+  const type: DataSourceKind = v.type === 'git' ? 'git' : 'directory';
+  let git: DataSourceGitInfo | undefined;
+  if (type === 'git') {
+    git = normalizeGitInfo(v.git) ?? undefined;
+    if (!git) return null;
+  }
+
   const conflictMode = validateImportConflictMode(typeof v.conflictMode === 'string' ? v.conflictMode : undefined);
   const groupRaw = typeof v.group === 'string' ? v.group.trim() : '';
-  const lastSync = v.lastSync && typeof v.lastSync === 'object' ? (v.lastSync as DataSourceLastSync) : null;
-  // 兼容旧版快照：candidateSourcePaths 是 2026-10-21 新增，旧数据用 items 回填
-  const pending = lastSync?.pendingDelete as (DataSourceLastSync['pendingDelete'] & { candidateSourcePaths?: unknown }) | undefined;
-  if (pending && !Array.isArray(pending.candidateSourcePaths)) {
-    pending.candidateSourcePaths = (pending.items ?? [])
-      .map((item) => item.sourcePath)
-      .filter((path): path is string => typeof path === 'string' && path.length > 0);
-  }
   return {
-    version: 1,
+    version: 2,
     scope,
+    type,
     dir: path.resolve(v.dir),
+    ...(git ? { git } : {}),
     group: groupRaw ? groupRaw : null,
     conflictMode,
     conflictSuffix: typeof v.conflictSuffix === 'string'
@@ -120,7 +246,7 @@ function normalizeRecord(scope: string, raw: unknown): DataSourceRecord | null {
     chunkOverlap: typeof v.chunkOverlap === 'number' ? v.chunkOverlap : null,
     createdAt: typeof v.createdAt === 'number' ? v.createdAt : Date.now(),
     updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : Date.now(),
-    lastSync,
+    lastSync: normalizeLastSync(v.lastSync),
   };
 }
 
@@ -195,6 +321,10 @@ export function checkSourceDir(dir: string, config: KiConfig, scope: string): So
 export interface AddDataSourceInput {
   scope: string;
   dir: string;
+  /** directory = 显式普通目录；git = 显式 Git（探测失败 fail-loud）；缺省 = 自动探测 */
+  type?: DataSourceKind;
+  /** S-05 托管 clone 直接注入，避免重复探测 */
+  gitInfo?: DataSourceGitInfo;
   group?: string | null;
   conflictMode?: string;
   conflictSuffix?: string;
@@ -206,10 +336,10 @@ export interface AddDataSourceInput {
 }
 
 export type AddDataSourceResult =
-  | { ok: true; scope: string; record: DataSourceRecord; created: boolean; next: string }
+  | { ok: true; scope: string; record: DataSourceRecord; created: boolean; next: string; warnings?: string[] }
   | { ok: false; scope: string; code: string; error: string };
 
-export function addDataSource(input: AddDataSourceInput): AddDataSourceResult {
+export async function addDataSource(input: AddDataSourceInput): Promise<AddDataSourceResult> {
   const config = input.config ?? loadConfig();
   let scope: string;
   try {
@@ -217,7 +347,19 @@ export function addDataSource(input: AddDataSourceInput): AddDataSourceResult {
   } catch (err) {
     return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
   }
+  try {
+    return await withScopeWriteLock(scope, 'datasource-add', () => addDataSourceUnlocked(scope, input, config));
+  } catch (err) {
+    return {
+      ok: false,
+      scope,
+      code: (err as NodeJS.ErrnoException & { code?: string }).code ?? 'ADD_FAILED',
+      error: (err as Error).message,
+    };
+  }
+}
 
+async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, config: KiConfig): Promise<AddDataSourceResult> {
   const dir = resolveSourceDirInput(input.dir);
   const conflictMode = validateImportConflictMode(input.conflictMode);
   const conflictSuffix = validateImportConflictSuffix(input.conflictSuffix);
@@ -235,6 +377,32 @@ export function addDataSource(input: AddDataSourceInput): AddDataSourceResult {
 
   const dirCheck = checkSourceDir(dir, config, scope);
   if (!dirCheck.ok) return { ok: false, scope, code: dirCheck.code, error: dirCheck.error };
+
+  if (input.type !== undefined && input.type !== 'git' && input.type !== 'directory') {
+    return { ok: false, scope, code: 'INVALID_TYPE', error: `--type 只能是 git 或 directory：${String(input.type)}` };
+  }
+
+  const warnings: string[] = [];
+  let type: DataSourceKind;
+  let git: DataSourceGitInfo | undefined;
+  if (input.type === 'directory') {
+    type = 'directory';
+  } else if (input.gitInfo) {
+    git = normalizeGitInfo(input.gitInfo) ?? undefined;
+    if (!git) return { ok: false, scope, code: 'INVALID_GIT_INFO', error: 'gitInfo 非法（repoRoot 必须是绝对路径）' };
+    type = 'git';
+  } else {
+    const probe = await probeGit(dir);
+    if (probe.ok) {
+      type = 'git';
+      git = { ...probe.value, managed: false, remoteBranch: null };
+    } else if (input.type === 'git') {
+      return { ok: false, scope, code: probe.code, error: probe.error };
+    } else {
+      type = 'directory';
+      warnings.push(`未识别为 Git 仓库（${probe.error}），已按普通目录登记；如需增量请使用 --type git`);
+    }
+  }
 
   const group = (input.group ?? '').trim() || null;
   // group 会拼进 local-kb / 分片路径：绝对路径、反斜杠、`..` 一律拒绝
@@ -261,21 +429,29 @@ export function addDataSource(input: AddDataSourceInput): AddDataSourceResult {
 
   if (!prev) ensureScopeDir(scope);
   const now = Date.now();
-  const changed = prev !== null && (prev.dir !== dir || prev.group !== group);
-  // 改 --source / --group（--force）：保留 seenRels（旧路径文档下次同步仍能进候选），
-  // 但**清掉旧候选与 token**——它们是按旧目录算的，换目录后未同步即可删会与承诺不符。
-  const lastSync = prev?.lastSync
-    ? (changed
-      ? {
-        ...prev.lastSync,
-        pendingDelete: { ...emptyPending(now), stale: true, staleReason: 'not-recomputed' as const },
-      }
-      : prev.lastSync)
-    : null;
+  const gitChanged = prev !== null && (
+    prev.type !== type
+    || prev.git?.repoRoot !== git?.repoRoot
+    || prev.git?.relativeRoot !== git?.relativeRoot
+    || prev.git?.managed !== git?.managed
+  );
+  const changed = prev !== null && (prev.dir !== dir || prev.group !== group || gitChanged);
+  // 改 --source / --group / 类型 / 仓库根：保留 seenRels（旧文档下次同步仍能进候选），
+  // 但清掉旧候选/token 与 commit 水位——它们属于旧目录/旧仓库。
+  let lastSync = prev?.lastSync ?? null;
+  if (lastSync && changed) {
+    const { git: _prevGit, warnings: _prevWarnings, ...rest } = lastSync;
+    lastSync = {
+      ...rest,
+      pendingDelete: { ...emptyPending(now), stale: true, staleReason: 'not-recomputed' as const },
+    };
+  }
   const record: DataSourceRecord = {
-    version: 1,
+    version: 2,
     scope,
+    type,
     dir,
+    ...(git ? { git } : {}),
     group,
     conflictMode,
     conflictSuffix,
@@ -293,30 +469,44 @@ export function addDataSource(input: AddDataSourceInput): AddDataSourceResult {
     record,
     created: !prev,
     next: `ki datasource sync --scope ${scope}`,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
 export type RemoveDataSourceResult =
-  | { ok: true; scope: string; removed: boolean; /** 仅提示 */ legacySourceDir: string | null }
+  | { ok: true; scope: string; removed: boolean; /** 仅提示 */ legacySourceDir: string | null; managedCloneDir: string | null }
   | { ok: false; scope: string; code: string; error: string };
 
 /** 取消登记：只删 datasource.json；**不碰** group-index.json.source（Q-C） */
-export function removeDataSource(scopeInput: string, config: KiConfig = loadConfig()): RemoveDataSourceResult {
+export async function removeDataSource(scopeInput: string, config: KiConfig = loadConfig()): Promise<RemoveDataSourceResult> {
   let scope: string;
   try {
     scope = resolveScope(config, scopeInput);
   } catch (err) {
     return { ok: false, scope: scopeInput, code: 'INVALID_SCOPE', error: (err as Error).message };
   }
-  const file = dataSourcePath(scope);
-  const legacySourceDir = getSource(scope)?.dir ?? null;
-  if (!fs.existsSync(file)) return { ok: true, scope, removed: false, legacySourceDir };
   try {
-    fs.unlinkSync(file);
+    return await withScopeWriteLock(scope, 'datasource-remove', async () => {
+      const file = dataSourcePath(scope);
+      const legacySourceDir = getSource(scope)?.dir ?? null;
+      const read = readDataSource(scope);
+      const managedCloneDir = read.ok && read.record.git?.managed ? path.dirname(read.record.git.repoRoot) : null;
+      if (!fs.existsSync(file)) return { ok: true, scope, removed: false, legacySourceDir, managedCloneDir };
+      try {
+        fs.unlinkSync(file);
+      } catch (err) {
+        return { ok: false, scope, code: 'REMOVE_FAILED', error: `删除 datasource.json 失败：${(err as Error).message}` };
+      }
+      return { ok: true, scope, removed: true, legacySourceDir, managedCloneDir };
+    });
   } catch (err) {
-    return { ok: false, scope, code: 'REMOVE_FAILED', error: `删除 datasource.json 失败：${(err as Error).message}` };
+    return {
+      ok: false,
+      scope,
+      code: (err as NodeJS.ErrnoException & { code?: string }).code ?? 'REMOVE_FAILED',
+      error: (err as Error).message,
+    };
   }
-  return { ok: true, scope, removed: true, legacySourceDir };
 }
 
 // ─── 枚举（列表 / 迁移提示） ─────────────────────────────
@@ -377,8 +567,11 @@ export function scanDataSources(config: KiConfig = loadConfig()): DataSourceScop
 export interface SyncDataSourceInput {
   scope: string;
   dryRun?: boolean;
+  /** S-02：忽略 commit diff，处理全部文件（含 untracked） */
+  full?: boolean;
   taskId?: string;
   onProgress?: HandleDirectImportArgs['onProgress'];
+  onPhase?: (phase: 'git-fetch' | 'git-update' | 'git-diff') => void;
   abortSignal?: AbortSignal;
   onInterrupt?: () => void;
   config?: KiConfig;
@@ -389,10 +582,27 @@ export interface SyncSummary {
   durationMs: number;
   files: DataSourceResultSnapshot['files'] | null;
   pendingDelete: DataSourcePendingDelete | null;
+  mode: DataSourceSyncMode;
+  git?: DataSourceGitSyncState;
+  warnings: DataSourceWarning[];
+  vectorized: number;
+  fullTextIndexed: number;
+  groups: string[];
 }
 
 export type SyncDataSourceResult =
-  | { ok: true; scope: string; dryRun: true; plannedFiles: number; pendingDelete: DataSourcePendingDelete | null }
+  | {
+    ok: true;
+    scope: string;
+    dryRun: true;
+    plannedFiles: number;
+    mode: DataSourceSyncMode;
+    changedFiles: number;
+    untrackedMarkdown: number;
+    wouldFallbackFull: boolean;
+    warnings: DataSourceWarning[];
+    pendingDelete: DataSourcePendingDelete | null;
+  }
   | { ok: true; scope: string; dryRun: false; summary: SyncSummary }
   | { ok: false; scope: string; code: string; error: string; summary?: SyncSummary };
 
@@ -450,6 +660,9 @@ function resultSnapshot(result: ImportResult): DataSourceResultSnapshot {
   return {
     files: {
       scanned: result.stats.files.scanned,
+      // S-02 会用 onScannedFiles 覆盖为真实全量/变更数；此处先保持向后兼容的初值
+      fullScanned: result.stats.files.scanned,
+      changed: result.stats.files.scanned,
       completed: result.stats.files.completed,
       unchanged: result.stats.files.unchanged,
       skipped: result.stats.files.skipped,
@@ -475,6 +688,7 @@ function preservePrevSync(
   state: DataSourceSyncState,
   staleReason: DataSourceStaleReason,
   partialResult?: ImportResult,
+  extra?: { git?: DataSourceGitSyncState; warnings?: DataSourceWarning[] },
 ): DataSourceLastSync {
   const prev = record.lastSync;
   const now = Date.now();
@@ -489,9 +703,10 @@ function preservePrevSync(
       vector: record.vector,
       chunkSize: record.chunkSize,
       chunkOverlap: record.chunkOverlap,
+      mode: prev?.params.mode ?? 'full',
     },
     result: partialResult ? resultSnapshot(partialResult) : {
-      files: { scanned: 0, completed: 0, unchanged: 0, skipped: 0, incomplete: 0, duplicatesSkipped: 0 },
+      files: { scanned: 0, fullScanned: 0, changed: 0, completed: 0, unchanged: 0, skipped: 0, incomplete: 0, duplicatesSkipped: 0 },
       vectorized: 0,
       fullTextIndexed: 0,
       groups: [],
@@ -504,58 +719,143 @@ function preservePrevSync(
       stale: true,
       staleReason,
     },
+    ...(extra?.git ? { git: extra.git } : (prev?.git ? { git: prev.git } : {})),
+    ...(extra?.warnings ? { warnings: extra.warnings } : (prev?.warnings ? { warnings: prev.warnings } : {})),
   };
 }
 
-export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDataSourceResult> {
-  const config = input.config ?? loadConfig();
-  let scope: string;
+/**
+ * 数据源同步终态判据（S-02）。
+ * `stats.errors` 包含 tag/附件/向量清理等错误；CLI 任务态已按
+ * `partial || stats.errors > 0` 判 partial，数据源用 state=ok 推进 commit 水位，
+ * 因此不能只看 `result.partial`。
+ */
+export function resolveDataSourceSyncState(
+  result: Pick<ImportResult, 'cancelled' | 'partial'> & { stats: { errors: number } },
+): DataSourceSyncState {
+  if (result.cancelled === true) return 'cancelled';
+  return result.partial || result.stats.errors > 0 ? 'partial' : 'ok';
+}
+
+function warning(code: string, message: string): DataSourceWarning {
+  return { code, message };
+}
+
+function emptyFiles(fullScanned = 0, changed = 0): DataSourceResultSnapshot['files'] {
+  return { scanned: 0, fullScanned, changed, completed: 0, unchanged: 0, skipped: 0, incomplete: 0, duplicatesSkipped: 0 };
+}
+
+function staleReasonOf(code: string): DataSourceStaleReason {
+  if (code === 'SOURCE_UNREADABLE') return 'source-unreadable';
+  if (code === 'SOURCE_MISSING') return 'source-missing';
+  return 'not-recomputed';
+}
+
+/** Git 源的前置可达性：只 stat/access，不判空（空源要在自动更新后再判）。 */
+function checkGitReachable(dir: string): { ok: true } | { ok: false; code: 'SOURCE_MISSING' | 'SOURCE_NOT_DIR' | 'SOURCE_UNREADABLE'; error: string } {
   try {
-    scope = resolveScope(config, input.scope);
+    const lst = fs.lstatSync(dir);
+    const stat = lst.isSymbolicLink() ? fs.statSync(dir) : lst;
+    if (!stat.isDirectory()) return { ok: false, code: 'SOURCE_NOT_DIR', error: `源路径不是目录：${dir}` };
+  } catch {
+    return { ok: false, code: 'SOURCE_MISSING', error: `源目录不存在：${dir}` };
+  }
+  try {
+    fs.accessSync(dir, fs.constants.R_OK);
   } catch (err) {
-    return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
+    return { ok: false, code: 'SOURCE_UNREADABLE', error: `源目录不可读：${dir}（${(err as Error).message}）` };
   }
+  return { ok: true };
+}
 
-  const read = readDataSource(scope);
-  if (!read.ok) return { ok: false, scope, code: read.code, error: read.error };
-  const record = read.record;
-  const prevSeen = record.lastSync?.seenRels ?? [];
-  const startedAt = Date.now();
-
-  const dirCheck = checkSourceDir(record.dir, config, scope);
-  if (!dirCheck.ok) {
-    const state: DataSourceSyncState = 'failed';
-    // 只有「不存在/不可读」才是目录失效；空目录/非目录等属"本次无法导入"，不误导为 missing
-    const reason: DataSourceStaleReason = dirCheck.code === 'SOURCE_UNREADABLE'
-      ? 'source-unreadable'
-      : dirCheck.code === 'SOURCE_MISSING' ? 'source-missing' : 'not-recomputed';
-    if (!input.dryRun) {
-      writeDataSource(scope, { ...record, updatedAt: Date.now(), lastSync: preservePrevSync(record, state, reason) });
-    }
-    return { ok: false, scope, code: dirCheck.code, error: dirCheck.error };
-  }
-
-  // ── dry-run：只算不写（不导入、不落 lastSync）──
-  if (input.dryRun) {
-    const files = collectMarkdownFiles(record.dir, resolveImportExtensions(config, scope)).files;
-    const importedGroups = [...new Set(files.map((rel) => resolveGroupForSource(record.group ?? '', rel, scope)))];
-    const plan = planImportPrune({
-      scope,
-      group: record.group ?? '',
-      scannedRels: files,
-      importedGroups,
-      precheck: { pruneStale: true, pickMode: 'dir', subsetRetry: false, uploadIncomplete: false, scannedCount: files.length },
-      eligibleRels: prevSeen,
-      emitTokenWhenOverLimit: true,
+function failSync(
+  scope: string,
+  input: SyncDataSourceInput,
+  record: DataSourceRecord,
+  code: string,
+  error: string,
+  staleReason: DataSourceStaleReason,
+  extra?: { git?: DataSourceGitSyncState; warnings?: DataSourceWarning[] },
+): SyncDataSourceResult {
+  if (!input.dryRun) {
+    writeDataSource(scope, {
+      ...record,
+      updatedAt: Date.now(),
+      lastSync: preservePrevSync(record, 'failed', staleReason, undefined, extra),
     });
-    return { ok: true, scope, dryRun: true, plannedFiles: files.length, pendingDelete: pendingFromPlan(plan, Date.now()) };
   }
+  return { ok: false, scope, code, error };
+}
 
-  // ── 真实同步：导入 + 算候选，永不删除 ──
+function buildGitState(args: {
+  update: GitUpdateResult;
+  prevCommit: string | null;
+  runCommit: string | null;
+  changedCount: number;
+  fullScanned: number;
+  untrackedMarkdown: number;
+  state: DataSourceSyncState;
+}): DataSourceGitSyncState {
+  const commit = args.state === 'ok' ? args.runCommit : args.prevCommit;
+  return {
+    commit,
+    runCommit: args.runCommit,
+    shortCommit: args.runCommit ? args.runCommit.slice(0, 7) : (commit ? commit.slice(0, 7) : null),
+    subject: args.update.headSubject,
+    authorTime: args.update.headAuthorTime,
+    changedCount: args.changedCount,
+    fullScanned: args.fullScanned,
+    untrackedMarkdown: args.untrackedMarkdown,
+    update: args.update.update,
+    ...(args.update.updateDetail ? { updateDetail: args.update.updateDetail } : {}),
+    fetch: args.update.fetch,
+    ...(args.update.fetchDetail ? { fetchDetail: args.update.fetchDetail } : {}),
+  };
+}
+
+function planFor(
+  scope: string,
+  record: DataSourceRecord,
+  config: KiConfig,
+  files: string[],
+  prevSeen: string[],
+): ImportPrunePlan {
+  const importedGroups = [...new Set(files.map((rel) => resolveGroupForSource(record.group ?? '', rel, scope)))];
+  return planImportPrune({
+    scope,
+    group: record.group ?? '',
+    scannedRels: files,
+    importedGroups,
+    precheck: { pruneStale: true, pickMode: 'dir', subsetRetry: false, uploadIncomplete: false, scannedCount: files.length },
+    eligibleRels: prevSeen,
+    emitTokenWhenOverLimit: true,
+  });
+}
+
+async function importAndPersist(args: {
+  scope: string;
+  record: DataSourceRecord;
+  input: SyncDataSourceInput;
+  config: KiConfig;
+  mode: DataSourceSyncMode;
+  prevSeen: string[];
+  startedAt: number;
+  onlyRelPaths?: string[];
+  pruneSubsetFullScan: boolean;
+  git?: {
+    update: GitUpdateResult;
+    prevCommit: string | null;
+    runCommit: string | null;
+    untrackedMarkdown: number;
+    warnings: DataSourceWarning[];
+  };
+}): Promise<SyncDataSourceResult> {
+  const { scope, record, input, config, mode, prevSeen, startedAt, git } = args;
   let scannedForBaseline: string[] = [];
   let scannedCaptured = false;
+  let result: ImportResult;
   try {
-    const result = await handleDirectImport({
+    result = await handleDirectImport({
       scope,
       sourceDir: record.dir,
       ...(record.group ? { group: record.group } : {}),
@@ -564,6 +864,8 @@ export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDa
       vector: record.vector,
       ...(record.chunkSize !== null ? { chunkSize: record.chunkSize } : {}),
       ...(record.chunkOverlap !== null ? { chunkOverlap: record.chunkOverlap } : {}),
+      ...(args.onlyRelPaths && args.onlyRelPaths.length > 0 ? { onlyRelPaths: args.onlyRelPaths } : {}),
+      pruneSubsetFullScan: args.pruneSubsetFullScan,
       pickMode: 'dir',
       pruneStale: true,
       pruneEligibleRels: prevSeen,
@@ -576,53 +878,384 @@ export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDa
       ...(input.onInterrupt ? { onInterrupt: input.onInterrupt } : {}),
       onScannedFiles: (files) => { scannedForBaseline = files; scannedCaptured = true; },
     });
-
-    const state: DataSourceSyncState = result.cancelled === true
-      ? 'cancelled'
-      : result.partial ? 'partial' : 'ok';
-    const success = state === 'ok' || state === 'partial';
-    const now = Date.now();
-    const pendingDelete = success
-      ? pendingFromPlan(result.prune, now)
-      : { ...(record.lastSync?.pendingDelete ?? emptyPending(now)), stale: true, staleReason: 'not-recomputed' as const };
-    // 候选被闸门拦下（坐标/规模/空源）时**冻结基线**：把 seenRels 切成幸存文件会让
-    // 被拦下的那批文档永久退出候选（既不在基线、也不在候选）。冻结后下次同步可重评。
-    const blockedReason = result.prune?.skipReason;
-    const freezeBaseline = blockedReason === 'GATE_COORD' || blockedReason === 'GATE_SCALE' || blockedReason === 'EMPTY_SOURCE';
-    const seenRels = success && scannedCaptured && !freezeBaseline ? [...scannedForBaseline].sort() : prevSeen;
-
-    const lastSync: DataSourceLastSync = {
-      at: now,
-      durationMs: now - startedAt,
-      state,
-      ...(input.taskId ? { taskId: input.taskId } : {}),
-      params: {
-        group: record.group,
-        conflictMode: record.conflictMode,
-        vector: record.vector,
-        chunkSize: record.chunkSize,
-        chunkOverlap: record.chunkOverlap,
-      },
-      result: resultSnapshot(result),
-      seenRels,
-      pendingDelete,
-    };
-    writeDataSource(scope, { ...record, updatedAt: now, lastSync });
-
-    return {
-      ok: true,
-      scope,
-      dryRun: false,
-      summary: { state, durationMs: lastSync.durationMs, files: lastSync.result.files, pendingDelete },
-    };
   } catch (err) {
-    const now = Date.now();
-    writeDataSource(scope, {
-      ...record,
-      updatedAt: now,
-      lastSync: preservePrevSync(record, 'failed', 'not-recomputed'),
+    const warnings = [...(git?.warnings ?? []), warning((err as { code?: string }).code ?? 'SYNC_FAILED', (err as Error).message)];
+    const gitState = git
+      ? buildGitState({
+        update: git.update, prevCommit: git.prevCommit, runCommit: git.runCommit,
+        changedCount: 0, fullScanned: 0, untrackedMarkdown: git.untrackedMarkdown, state: 'failed',
+      })
+      : undefined;
+    return failSync(
+      scope, input, record,
+      (err as { code?: string }).code ?? 'SYNC_FAILED',
+      (err as Error).message,
+      'not-recomputed',
+      { ...(gitState ? { git: gitState } : {}), warnings },
+    );
+  }
+
+  // ★ 与 CLI 任务态同口径：stats.errors（tag/附件/向量清理等）也算未完整成功。
+  //   数据源用 state=ok 推进 commit 水位，不能只看 result.partial。
+  const state = resolveDataSourceSyncState(result);
+  const success = state === 'ok' || state === 'partial';
+  const now = Date.now();
+  const pendingDelete = success
+    ? pendingFromPlan(result.prune, now)
+    : { ...(record.lastSync?.pendingDelete ?? emptyPending(now)), stale: true, staleReason: 'not-recomputed' as const };
+  const blockedReason = result.prune?.skipReason;
+  const freezeBaseline = blockedReason === 'GATE_COORD' || blockedReason === 'GATE_SCALE' || blockedReason === 'EMPTY_SOURCE';
+  const seenRels = success && scannedCaptured && !freezeBaseline ? [...scannedForBaseline].sort() : prevSeen;
+
+  const snapshot = resultSnapshot(result);
+  const fullScanned = scannedCaptured ? scannedForBaseline.length : snapshot.files.scanned;
+  const changed = mode === 'full'
+    ? fullScanned
+    : (result.retryFilter?.matched ?? args.onlyRelPaths?.length ?? 0);
+  snapshot.files.fullScanned = fullScanned;
+  snapshot.files.changed = changed;
+
+  const warnings = [...(git?.warnings ?? [])];
+  const missing = result.retryFilter?.missing?.length ?? 0;
+  if (missing > 0) warnings.push(warning('GIT_CHANGESET_MISSING_PATHS', `有 ${missing} 个变更文件在扫描前已不存在，已跳过`));
+
+  const gitState = git
+    ? buildGitState({
+      update: git.update, prevCommit: git.prevCommit, runCommit: git.runCommit,
+      changedCount: changed, fullScanned, untrackedMarkdown: git.untrackedMarkdown, state,
+    })
+    : undefined;
+
+  const lastSync: DataSourceLastSync = {
+    at: now,
+    durationMs: now - startedAt,
+    state,
+    ...(input.taskId ? { taskId: input.taskId } : {}),
+    params: {
+      group: record.group,
+      conflictMode: record.conflictMode,
+      vector: record.vector,
+      chunkSize: record.chunkSize,
+      chunkOverlap: record.chunkOverlap,
+      mode,
+    },
+    result: snapshot,
+    seenRels,
+    pendingDelete,
+    ...(gitState ? { git: gitState } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+  const nextRecord = git && git.update.branch && record.git && git.update.branch !== record.git.branch
+    ? { ...record, git: { ...record.git, branch: git.update.branch }, updatedAt: now, lastSync }
+    : { ...record, updatedAt: now, lastSync };
+  writeDataSource(scope, nextRecord);
+
+  return {
+    ok: true,
+    scope,
+    dryRun: false,
+    summary: {
+      state,
+      durationMs: lastSync.durationMs,
+      files: snapshot.files,
+      pendingDelete,
+      mode,
+      ...(gitState ? { git: gitState } : {}),
+      warnings,
+      vectorized: snapshot.vectorized,
+      fullTextIndexed: snapshot.fullTextIndexed,
+      groups: snapshot.groups,
+    },
+  };
+}
+
+async function finalizeNoChangeGit(args: {
+  scope: string;
+  record: DataSourceRecord;
+  input: SyncDataSourceInput;
+  config: KiConfig;
+  prevSeen: string[];
+  prevCommit: string | null;
+  startedAt: number;
+  gitUpdate: GitUpdateResult;
+  changes: Awaited<ReturnType<typeof collectGitChanges>>;
+  warnings: DataSourceWarning[];
+  runCommit: string | null;
+}): Promise<SyncDataSourceResult> {
+  const files = collectMarkdownFiles(args.record.dir, resolveImportExtensions(args.config, args.scope)).files;
+  const plan = planFor(args.scope, args.record, args.config, files, args.prevSeen);
+  const now = Date.now();
+  const blockedReason = plan.skipReason;
+  const freeze = blockedReason === 'GATE_COORD' || blockedReason === 'GATE_SCALE' || blockedReason === 'EMPTY_SOURCE';
+  const seenRels = freeze ? args.prevSeen : [...files].sort();
+  const pendingDelete = pendingFromPlan(plan, now);
+  const gitState = buildGitState({
+    update: args.gitUpdate,
+    prevCommit: args.prevCommit,
+    runCommit: args.runCommit,
+    changedCount: 0,
+    fullScanned: files.length,
+    untrackedMarkdown: args.changes.untrackedMarkdown,
+    state: 'ok',
+  });
+  const lastSync: DataSourceLastSync = {
+    at: now,
+    durationMs: now - args.startedAt,
+    state: 'ok',
+    ...(args.input.taskId ? { taskId: args.input.taskId } : {}),
+    params: {
+      group: args.record.group,
+      conflictMode: args.record.conflictMode,
+      vector: args.record.vector,
+      chunkSize: args.record.chunkSize,
+      chunkOverlap: args.record.chunkOverlap,
+      mode: 'incremental',
+    },
+    result: {
+      files: emptyFiles(files.length, 0),
+      vectorized: 0,
+      fullTextIndexed: 0,
+      groups: [],
+      conflicts: [],
+      failures: [],
+    },
+    seenRels,
+    pendingDelete,
+    git: gitState,
+    ...(args.warnings.length > 0 ? { warnings: args.warnings } : {}),
+  };
+  const nextRecord = args.gitUpdate.branch && args.record.git && args.gitUpdate.branch !== args.record.git.branch
+    ? { ...args.record, git: { ...args.record.git, branch: args.gitUpdate.branch }, updatedAt: now, lastSync }
+    : { ...args.record, updatedAt: now, lastSync };
+  writeDataSource(args.scope, nextRecord);
+  return {
+    ok: true,
+    scope: args.scope,
+    dryRun: false,
+    summary: {
+      state: 'ok',
+      durationMs: lastSync.durationMs,
+      files: lastSync.result.files,
+      pendingDelete,
+      mode: 'incremental',
+      git: gitState,
+      warnings: args.warnings,
+      vectorized: 0,
+      fullTextIndexed: 0,
+      groups: [],
+    },
+  };
+}
+
+async function syncDirectory(
+  scope: string,
+  record: DataSourceRecord,
+  input: SyncDataSourceInput,
+  config: KiConfig,
+  prevSeen: string[],
+  startedAt: number,
+): Promise<SyncDataSourceResult> {
+  const dirCheck = checkSourceDir(record.dir, config, scope);
+  if (!dirCheck.ok) {
+    return failSync(scope, input, record, dirCheck.code, dirCheck.error, staleReasonOf(dirCheck.code));
+  }
+  if (input.dryRun) {
+    const files = collectMarkdownFiles(record.dir, resolveImportExtensions(config, scope)).files;
+    const plan = planFor(scope, record, config, files, prevSeen);
+    return {
+      ok: true, scope, dryRun: true,
+      plannedFiles: files.length,
+      mode: 'full',
+      changedFiles: files.length,
+      untrackedMarkdown: 0,
+      wouldFallbackFull: false,
+      warnings: [],
+      pendingDelete: pendingFromPlan(plan, Date.now()),
+    };
+  }
+  return importAndPersist({
+    scope, record, input, config, mode: 'full', prevSeen, startedAt,
+    pruneSubsetFullScan: false,
+  });
+}
+
+async function syncGit(
+  scope: string,
+  record: DataSourceRecord,
+  input: SyncDataSourceInput,
+  config: KiConfig,
+  prevSeen: string[],
+  prevCommit: string | null,
+  startedAt: number,
+): Promise<SyncDataSourceResult> {
+  if (!record.git) {
+    return failSync(scope, input, record, 'INVALID_GIT_RECORD', '数据源类型为 git 但缺少 git 元信息，请重新 add', 'not-recomputed');
+  }
+  const reachable = checkGitReachable(record.dir);
+  if (!reachable.ok) {
+    return failSync(scope, input, record, reachable.code, reachable.error, staleReasonOf(reachable.code));
+  }
+  const extensions = resolveImportExtensions(config, scope);
+  const warnings: DataSourceWarning[] = [];
+
+  // ── dry-run：不 fetch / 不更新，只读计算 ──
+  if (input.dryRun) {
+    const dirCheck = checkSourceDir(record.dir, config, scope);
+    if (!dirCheck.ok) return failSync(scope, input, record, dirCheck.code, dirCheck.error, staleReasonOf(dirCheck.code));
+    input.onPhase?.('git-diff');
+    let mode: DataSourceSyncMode = input.full || !prevCommit ? 'full' : 'incremental';
+    let wouldFallbackFull = false;
+    let changes = await collectGitChanges({
+      repoRoot: record.git.repoRoot,
+      relativeRoot: record.git.relativeRoot,
+      lastCommit: mode === 'incremental' ? prevCommit : null,
+      extensions,
     });
-    return { ok: false, scope, code: 'SYNC_FAILED', error: (err as Error).message };
+    if (mode === 'incremental' && changes.commitUnknown) {
+      mode = 'full';
+      wouldFallbackFull = true;
+    }
+    if (changes.untrackedError) warnings.push(warning('GIT_UNTRACKED_UNKNOWN', `未跟踪文件统计失败：${changes.untrackedError}`));
+    if (mode === 'incremental' && changes.untrackedMarkdown > 0) {
+      warnings.push(warning('GIT_UNTRACKED_SKIPPED', `检测到 ${changes.untrackedMarkdown} 个未跟踪文件不参与增量；需要同步请执行全量同步`));
+    }
+    const files = collectMarkdownFiles(record.dir, extensions).files;
+    const plan = planFor(scope, record, config, files, prevSeen);
+    return {
+      ok: true, scope, dryRun: true,
+      plannedFiles: files.length,
+      mode,
+      changedFiles: mode === 'incremental' ? changes.changedRels.length : files.length,
+      untrackedMarkdown: changes.untrackedMarkdown,
+      wouldFallbackFull,
+      warnings,
+      pendingDelete: pendingFromPlan(plan, Date.now()),
+    };
+  }
+
+  // ── 真实同步：fetch → 自动更新 → 判空 → diff → 导入 ──
+  let gitUpdate: GitUpdateResult;
+  try {
+    gitUpdate = await prepareGitSync({
+      repoRoot: record.git.repoRoot,
+      managed: record.git.managed,
+      branch: record.git.branch,
+      onPhase: input.onPhase,
+    });
+  } catch (err) {
+    return failSync(scope, input, record, 'GIT_UPDATE_FAILED', (err as Error).message, 'not-recomputed');
+  }
+  if (gitUpdate.fetch === 'failed') {
+    warnings.push(warning('GIT_FETCH_FAILED', `远端更新检查失败：${gitUpdate.fetchDetail ?? '未知原因'}；本次同步基于本地内容`));
+  }
+  if (gitUpdate.update === 'failed') {
+    warnings.push(warning('GIT_UPDATE_FAILED', `自动更新失败：${gitUpdate.updateDetail ?? '未知原因'}；本地工作区未改动，本次同步本地内容`));
+  }
+  if (gitUpdate.clean === 'failed') {
+    warnings.push(warning('GIT_CLEAN_FAILED', `托管副本清理失败：${gitUpdate.cleanDetail ?? '未知原因'}`));
+    const gitState = buildGitState({
+      update: gitUpdate, prevCommit, runCommit: gitUpdate.headCommit,
+      changedCount: 0, fullScanned: 0, untrackedMarkdown: 0, state: 'failed',
+    });
+    return failSync(scope, input, record, 'GIT_CLEAN_FAILED', `托管副本清理失败：${gitUpdate.cleanDetail ?? '未知原因'}`, 'not-recomputed', { git: gitState, warnings });
+  }
+
+  // 自动更新之后才判空源/扩展名（challenger 意见1）
+  const dirCheck = checkSourceDir(record.dir, config, scope);
+  if (!dirCheck.ok) {
+    const gitState = buildGitState({
+      update: gitUpdate, prevCommit, runCommit: gitUpdate.headCommit,
+      changedCount: 0, fullScanned: 0, untrackedMarkdown: 0, state: 'failed',
+    });
+    return failSync(scope, input, record, dirCheck.code, dirCheck.error, staleReasonOf(dirCheck.code), { git: gitState, warnings });
+  }
+
+  input.onPhase?.('git-diff');
+  let mode: DataSourceSyncMode = input.full || !prevCommit ? 'full' : 'incremental';
+  let changes: Awaited<ReturnType<typeof collectGitChanges>>;
+  try {
+    changes = await collectGitChanges({
+      repoRoot: record.git.repoRoot,
+      relativeRoot: record.git.relativeRoot,
+      lastCommit: mode === 'incremental' ? prevCommit : null,
+      extensions,
+    });
+  } catch (err) {
+    const gitState = buildGitState({
+      update: gitUpdate, prevCommit, runCommit: gitUpdate.headCommit,
+      changedCount: 0, fullScanned: 0, untrackedMarkdown: 0, state: 'failed',
+    });
+    return failSync(
+      scope, input, record,
+      (err as { code?: string }).code ?? 'GIT_DIFF_FAILED',
+      (err as Error).message,
+      'not-recomputed',
+      { git: gitState, warnings: [...warnings, warning('GIT_DIFF_FAILED', (err as Error).message)] },
+    );
+  }
+  if (mode === 'incremental' && changes.commitUnknown) {
+    mode = 'full';
+    warnings.push(warning('GIT_COMMIT_UNKNOWN_FALLBACK_FULL', '上次同步的 commit 不存在（可能被 force push/rebase），本次已降级为全量同步'));
+  }
+  if (changes.untrackedError) warnings.push(warning('GIT_UNTRACKED_UNKNOWN', `未跟踪文件统计失败：${changes.untrackedError}`));
+  if (mode === 'incremental' && changes.untrackedMarkdown > 0) {
+    warnings.push(warning('GIT_UNTRACKED_SKIPPED', `检测到 ${changes.untrackedMarkdown} 个未跟踪文件不参与增量；需要同步请执行全量同步`));
+  }
+  const runCommit = changes.headCommit ?? gitUpdate.headCommit;
+
+  if (mode === 'incremental' && changes.changedRels.length === 0) {
+    return finalizeNoChangeGit({
+      scope, record, input, config, prevSeen, prevCommit, startedAt,
+      gitUpdate, changes, warnings, runCommit,
+    });
+  }
+
+  return importAndPersist({
+    scope, record, input, config, mode, prevSeen, startedAt,
+    ...(mode === 'incremental' ? { onlyRelPaths: changes.changedRels } : {}),
+    pruneSubsetFullScan: mode === 'incremental',
+    git: {
+      update: gitUpdate,
+      prevCommit,
+      runCommit,
+      untrackedMarkdown: changes.untrackedMarkdown,
+      warnings,
+    },
+  });
+}
+
+export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDataSourceResult> {
+  const config = input.config ?? loadConfig();
+  let scope: string;
+  try {
+    scope = resolveScope(config, input.scope);
+  } catch (err) {
+    return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
+  }
+
+  const run = async (): Promise<SyncDataSourceResult> => {
+    const read = readDataSource(scope);
+    if (!read.ok) return { ok: false, scope, code: read.code, error: read.error };
+    const record = read.record;
+    const prevSeen = record.lastSync?.seenRels ?? [];
+    const prevCommit = record.lastSync?.git?.commit ?? null;
+    const startedAt = Date.now();
+    if (record.type === 'git') {
+      return syncGit(scope, record, input, config, prevSeen, prevCommit, startedAt);
+    }
+    return syncDirectory(scope, record, input, config, prevSeen, startedAt);
+  };
+
+  if (input.dryRun) return run();
+  try {
+    return await withScopeWriteLock(scope, 'datasource-sync', run);
+  } catch (err) {
+    return {
+      ok: false,
+      scope,
+      code: (err as NodeJS.ErrnoException & { code?: string }).code ?? 'SYNC_FAILED',
+      error: (err as Error).message,
+    };
   }
 }
 
