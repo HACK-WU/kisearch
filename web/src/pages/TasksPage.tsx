@@ -27,6 +27,8 @@ const OPERATION_LABEL: Record<string, string> = {
   import: '上传导入',
   'rebuild-vector': '向量重建',
   'restore-snapshot': '快照还原',
+  'datasource-sync': '数据源同步',
+  'datasource-add-remote': '添加 Git 数据源',
 };
 
 /**

@@ -9,12 +9,13 @@
  *
  * stdout = JSON；人类可读进度/提示一律走 stderr（与 ki group 一致）。
  */
-import path from 'node:path';
+import fs from 'node:fs';
 import { Command } from 'commander';
 import { loadConfig, type KiConfig } from './lib/config.js';
 import { getSource } from './lib/scope.js';
 import {
   addDataSource,
+  addRemoteDataSource,
   dataSourceNextStep,
   readDataSource,
   removeDataSource,
@@ -22,6 +23,7 @@ import {
   syncDataSource,
   type SyncDataSourceResult,
 } from './lib/datasource.js';
+import { managedCloneDirOf, managedScopeDir, purgeManagedCloneDir } from './lib/datasource-clone.js';
 import { callDaemon, cancelDaemonJob, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { createTaskReporter } from './lib/task-registry.js';
 import { toParamSnapshot } from './lib/task-snapshot.js';
@@ -97,10 +99,13 @@ function taskParamsOf(record: DataSourceRecord, dryRun: boolean, full: boolean):
 
 program
   .command('add')
-  .description('登记/更新该 scope 的唯一数据源（不写 group-index.json.source）')
+  .description('登记/更新该 scope 的唯一数据源（--source 本地目录 或 --git-url 托管 clone，二选一）')
   .requiredOption('-s, --scope <scope>', '目标 scope（必填）')
-  .requiredOption('--source <dir>', '源目录（~ 会展开为绝对路径）')
-  .option('--type <type>', '数据源类型：git|directory（缺省自动探测）')
+  .option('--source <dir>', '源目录（~ 会展开为绝对路径；与 --git-url 互斥）')
+  .option('--git-url <url>', 'Git 仓库地址（https/ssh/scp-like；clone 到 ~/.ki/datasources/<scope>/repo）')
+  .option('--branch <branch>', '仅 --git-url：跟踪的远端分支（缺省 = 仓库默认分支）')
+  .option('--subdir <path>', '仅 --git-url：仓库内的导入子目录（缺省 = 仓库根）')
+  .option('--type <type>', '仅 --source：数据源类型 git|directory（缺省自动探测）')
   .option('-g, --group <group>', '落点 Group（留空 = 按顶层子目录自动）')
   .option('--conflict-mode <mode>', '同名文档策略：incremental|overwrite|skip|suffix（默认 incremental）')
   .option('--conflict-suffix <suffix>', '自动后缀模板（默认 _{n}）')
@@ -109,37 +114,81 @@ program
   .option('--no-vector', '只写 FTS 全文索引（不向量化）')
   .option('--force', '改 --source / --group 时必须显式确认')
   .action(async (opts) => {
-    const result = await addDataSource({
-      scope: opts.scope,
-      dir: opts.source,
-      ...(opts.type ? { type: opts.type } : {}),
-      group: opts.group ?? null,
-      conflictMode: opts.conflictMode,
-      conflictSuffix: opts.conflictSuffix,
-      vector: opts.vector !== false,
-      chunkSize: opts.chunkSize ?? null,
-      chunkOverlap: opts.chunkOverlap ?? null,
-      force: opts.force === true,
-    });
+    const hasSource = typeof opts.source === 'string' && opts.source.trim() !== '';
+    const hasGitUrl = typeof opts.gitUrl === 'string' && opts.gitUrl.trim() !== '';
+    if (hasSource === hasGitUrl) {
+      printJson({ ok: false, code: 'ADD_SOURCE_REQUIRED', error: '--source 与 --git-url 必须且只能提供一个' });
+      process.exitCode = 1;
+      return;
+    }
+    if (hasGitUrl && (opts.type !== undefined || opts.force === true)) {
+      printJson({ ok: false, code: 'INVALID_OPTIONS', error: '--type / --force 只对 --source 有效' });
+      process.exitCode = 1;
+      return;
+    }
+    if (hasSource && (opts.branch !== undefined || opts.subdir !== undefined)) {
+      printJson({ ok: false, code: 'INVALID_OPTIONS', error: '--branch / --subdir 只对 --git-url 有效' });
+      process.exitCode = 1;
+      return;
+    }
+
+    let lastPercent = -1;
+    const result = hasGitUrl
+      ? await addRemoteDataSource({
+          scope: opts.scope,
+          url: opts.gitUrl,
+          branch: opts.branch ?? null,
+          subdir: opts.subdir ?? null,
+          group: opts.group ?? null,
+          conflictMode: opts.conflictMode,
+          conflictSuffix: opts.conflictSuffix,
+          vector: opts.vector !== false,
+          chunkSize: opts.chunkSize ?? null,
+          chunkOverlap: opts.chunkOverlap ?? null,
+          // 与 HTTP 同口径：file:// 默认拒绝，仅隔离测试环境放行
+          allowFileUrl: process.env.KI_DATASOURCE_ALLOW_FILE_URL === '1',
+          onProgress: (p) => {
+            if (p.done === lastPercent) return;
+            lastPercent = p.done;
+            process.stderr.write(p.done >= 100 ? `\r  克隆中 100%\n` : `\r  克隆中 ${p.done}%`);
+          },
+        })
+      : await addDataSource({
+          scope: opts.scope,
+          dir: opts.source,
+          ...(opts.type ? { type: opts.type } : {}),
+          group: opts.group ?? null,
+          conflictMode: opts.conflictMode,
+          conflictSuffix: opts.conflictSuffix,
+          vector: opts.vector !== false,
+          chunkSize: opts.chunkSize ?? null,
+          chunkOverlap: opts.chunkOverlap ?? null,
+          force: opts.force === true,
+        });
     printJson(result);
     if (!result.ok) {
       process.exitCode = 1;
       const next = dataSourceNextStep(result.code, result.scope);
       if (next) process.stderr.write(`下一步：${next}\n`);
+      if ('cleanupWarning' in result && result.cleanupWarning) process.stderr.write(`⚠ ${result.cleanupWarning}\n`);
       return;
     }
     for (const warning of result.warnings ?? []) process.stderr.write(`⚠ ${warning}\n`);
     const gitInfo = result.record.git;
     if (gitInfo) {
-      process.stderr.write(`  类型：git（repoRoot=${gitInfo.repoRoot}，relativeRoot=${gitInfo.relativeRoot || '.'}，branch=${gitInfo.branch ?? 'detached'}）\n`);
+      process.stderr.write(`  类型：git（${gitInfo.managed ? '托管 clone，' : ''}repoRoot=${gitInfo.repoRoot}，relativeRoot=${gitInfo.relativeRoot || '.'}，branch=${gitInfo.branch ?? 'detached'}）\n`);
     } else {
       process.stderr.write('  类型：directory（全量同步）\n');
+    }
+    if ('clone' in result && result.clone.headCommit) {
+      process.stderr.write(`  已克隆 HEAD ${result.clone.headCommit.slice(0, 8)}\n`);
     }
     const legacy = getSource(result.scope);
     if (legacy?.dir) {
       process.stderr.write(`ⓘ 该 scope 另有历史一次性导入目录 ${legacy.dir}（数据源不接管它；wiki 写回仍可能指向该目录）\n`);
     }
-    process.stderr.write(`✓ 已登记 ${result.scope} → ${result.record.dir}（${result.created ? '新建' : '更新'}）\n下一步：${result.next}\n`);
+    const next = 'next' in result ? result.next : `ki datasource sync --scope ${result.scope}`;
+    process.stderr.write(`✓ 已登记 ${result.scope} → ${result.record.dir}（${result.created ? '新建' : '更新'}）\n下一步：${next}\n`);
   });
 
 // ─── list ───────────────────────────────────────────────
@@ -213,37 +262,80 @@ program
   .description('取消登记（默认预览；只删 datasource.json，不删库内文档、不碰 source 块）')
   .requiredOption('-s, --scope <scope>', '目标 scope')
   .option('--yes', '确认执行')
+  .option('--purge', '同时删除托管 clone 目录（仅 --git-url 登记的 git.managed=true）')
   .action(async (opts) => {
     const config = loadConfig();
     const read = readDataSource(opts.scope);
     if (!read.ok) {
+      // 无登记时才走「清理遗留目录」；CORRUPT 必须原样报错，不能被 --purge 掩盖
+      if (read.code === 'NOT_FOUND' && opts.purge && opts.yes) {
+        let leftover: string | null = null;
+        try { leftover = managedScopeDir(opts.scope); } catch { /* 非法 scope 交给原错误 */ }
+        if (leftover && fs.existsSync(leftover)) {
+          const purge = await purgeManagedCloneDir(leftover);
+          printJson({
+            ok: purge.removed,
+            scope: opts.scope,
+            removed: false,
+            note: '该 scope 无数据源登记；仅清理遗留托管目录',
+            managedCloneDir: leftover,
+            cloneRemoved: purge.removed,
+            ...(purge.removed === false && 'error' in purge ? { cloneRemoveError: purge.error } : {}),
+          });
+          if (purge.removed) process.stderr.write(`✓ 已清理遗留托管 clone：${leftover}\n`);
+          else process.exitCode = 1;
+          return;
+        }
+      }
       printJson({ ok: false, code: read.code, error: read.error });
       process.exitCode = 1;
       return;
     }
     const legacy = getSource(opts.scope);
-    const managedCloneDir = read.record.git?.managed ? path.dirname(read.record.git.repoRoot) : null;
+    const managedCloneDir = managedCloneDirOf(read.record);
+    if (opts.purge && !managedCloneDir) {
+      printJson({ ok: false, code: 'NOT_MANAGED', error: '该数据源不是托管 clone（--purge 只适用于 --git-url 登记的来源）' });
+      process.exitCode = 1;
+      return;
+    }
     if (!opts.yes) {
       printJson({
         ok: true,
         preview: true,
         scope: opts.scope,
         dir: read.record.dir,
-        note: '仅取消登记；库内文档保留；不修改 group-index.json.source',
+        note: opts.purge
+          ? '将取消登记并删除托管 clone 目录；库内文档保留；不修改 group-index.json.source'
+          : '仅取消登记；库内文档保留；不修改 group-index.json.source',
         ...(legacy?.dir ? { legacySourceDir: legacy.dir } : {}),
         ...(managedCloneDir ? { managedCloneDir } : {}),
+        ...(opts.purge && managedCloneDir ? { willDelete: managedCloneDir } : {}),
       });
       process.stderr.write('确认后加 --yes 执行\n');
       return;
     }
     const result = await removeDataSource(opts.scope, config);
-    printJson(result);
-    if (!result.ok) process.exitCode = 1;
-    else {
+    if (!result.ok) {
+      printJson(result);
+      process.exitCode = 1;
+      return;
+    }
+    if (opts.purge && result.managedCloneDir) {
+      const purge = await purgeManagedCloneDir(result.managedCloneDir);
+      printJson({
+        ...result,
+        cloneRemoved: purge.removed,
+        ...(purge.removed === false && 'error' in purge ? { cloneRemoveError: purge.error } : {}),
+      });
       process.stderr.write('✓ 已取消登记；库内文档保留（未删除任何文档）\n');
-      if (result.managedCloneDir) {
-        process.stderr.write(`ⓘ 托管 clone 仍保留在 ${result.managedCloneDir}（后续支持 --purge 清理）\n`);
-      }
+      if (purge.removed) process.stderr.write(`✓ 已删除托管 clone：${result.managedCloneDir}\n`);
+      else if ('error' in purge) process.stderr.write(`⚠ 托管 clone 未删除，请手动清理 ${result.managedCloneDir}：${purge.error}\n`);
+      return;
+    }
+    printJson(result);
+    process.stderr.write('✓ 已取消登记；库内文档保留（未删除任何文档）\n');
+    if (result.managedCloneDir) {
+      process.stderr.write(`ⓘ 托管 clone 仍保留在 ${result.managedCloneDir}（如需一并删除，加 --purge）\n`);
     }
   });
 

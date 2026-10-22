@@ -103,19 +103,32 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ---
 
-## `datasource`（数据源登记与同步，REQ-20261020-001）
+## `datasource`（数据源登记与同步，REQ-20261020-001 / S-05）
 
-本地目录登记仍以 CLI 为主；页面可触发同步（普通目录 30 分钟一次，CLI 可强制）。
+本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录 30 分钟一次，CLI 可强制）。
 
 ```bash
 ki datasource add --scope <s> --source <dir> [--type git|directory] [--group <g>] \
   [--conflict-mode incremental|overwrite|skip|suffix] [--conflict-suffix "_{n}"] \
   [--chunk-size N] [--chunk-overlap N] [--no-vector] [--force]
+ki datasource add --scope <s> --git-url <url> [--branch <b>] [--subdir <path>] [-g <g>]
 ki datasource sync --scope <s> [--dry-run] [--full]  # 导入 + 算候选，永不删除；单源
 ki datasource prune --scope <s> [--group <g>] [--yes]  # 默认预览；每次 ≤500 篇
 ki datasource list [--json]
-ki datasource remove --scope <s> [--yes]       # 只取消登记，不删库内文档
+ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--purge 同时删除托管 clone
 ```
+
+`--git-url` 规则（S-05）：
+
+- 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。
+- 私有仓库使用**当前进程环境**的 SSH agent / credential helper（CLI 不落盘凭据；页面添加由 daemon 环境提供）。
+- `--branch` 只接受远端分支（tag 会 detached，后续无法 `reset --hard origin/<tag>`）；`--subdir` 为仓库内相对路径（空 = 仓库根）。
+- clone 使用临时目录 + rename，失败不残留半成品；同一 scope 的托管目录已存在时报 `CLONE_TARGET_EXISTS`（不自动清空）。
+- 首次同步必然是 `full`（无 commit 水位），之后按 `git diff <lastCommit>..HEAD` 增量；托管副本同步前 `fetch` + `reset --hard origin/<branch>` + `clean -fdx`（**禁止手工修改托管副本**）。
+- `remove --purge` 只对 `git.managed=true` 生效；先删登记再删目录，删除失败时登记已删并返回 `cloneRemoved=false` + `cloneRemoveError`。
+- `ki scope delete <scope> --yes` 会一并删除该 scope 的托管 clone（预览中显示路径）。
+- `remove --purge --yes` 在该 scope **没有登记**时也会清理遗留的 `<cloneRoot>/<scope>` 目录（用于 add 失败/手工删登记后的恢复）。若 `datasource.json` 损坏（`CORRUPT`），先 `ki scope delete <scope> --yes` 删除登记与 KB，再执行 `remove --purge --yes` 清理遗留 clone。
+- 测试/离线环境变量（**生产 daemon 不要设置**）：`KI_DATASOURCE_ALLOW_FILE_URL=1` 放开 `file://`（任何有权限的调用者都能借此读取服务器本地 git 仓库）；`KI_DATASOURCE_CLONE_ROOT` 覆盖托管根目录。
 
 **语义（与设计 S-01~S-03 一致）**
 

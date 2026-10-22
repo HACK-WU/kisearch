@@ -40,6 +40,7 @@ before(() => {
     KI_CONFIG_PATH: process.env.KI_CONFIG_PATH,
     SILICONFLOW_API_KEY: process.env.SILICONFLOW_API_KEY,
     HOME: process.env.HOME,
+    KI_DATASOURCE_CLONE_ROOT: process.env.KI_DATASOURCE_CLONE_ROOT,
   };
 });
 
@@ -416,5 +417,107 @@ describe('D. 引擎回路 —— 空 collection（dummy apiKey）', () => {
     }
     // 预览不应真正删除
     assert.strictEqual(fs.existsSync(path.join(dataDir, 'projZ')), true);
+  });
+
+  it('S-05：非托管 git 记录不产生 managedCloneDir，也不删外部仓库', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: '  projL: {}',
+      apiKey: 'dummy-offline-key',
+    });
+    const scopeDir = makeKbScope(dataDir, 'projL');
+    const localRepo = path.join(dir, 'local-repo');
+    fs.mkdirSync(localRepo, { recursive: true });
+    fs.writeFileSync(path.join(localRepo, 'a.md'), '# a\n');
+    fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+      version: 2,
+      scope: 'projL',
+      type: 'git',
+      dir: localRepo,
+      git: {
+        repoRoot: localRepo,
+        relativeRoot: '',
+        branch: 'main',
+        remoteUrl: null,
+        managed: false,
+        remoteBranch: null,
+      },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: 0,
+      updatedAt: 0,
+      lastSync: null,
+    }));
+    const preview = await executeScopeDelete({ scope: 'projL', yes: false });
+    assert.strictEqual(preview.ok, false);
+    if (!preview.ok) {
+      assert.strictEqual(preview.willDelete?.managedCloneDir, undefined);
+      assert.doesNotMatch(preview.error, /托管 clone/);
+    }
+    const res = await executeScopeDelete({ scope: 'projL', yes: true });
+    assert.strictEqual(res.ok, true);
+    if (res.ok) assert.strictEqual(res.managedCloneDir, undefined);
+    assert.strictEqual(fs.existsSync(path.join(localRepo, 'a.md')), true, '本地仓库不得被删除');
+  });
+
+  it('S-05：scope delete 预览/执行会清理托管 clone（仅 git.managed=true）', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: '  projM: {}',
+      apiKey: 'dummy-offline-key',
+    });
+    const scopeDir = makeKbScope(dataDir, 'projM');
+    const cloneRoot = path.join(dir, 'datasources');
+    const repoRoot = path.join(cloneRoot, 'projM', 'repo');
+    fs.mkdirSync(path.join(repoRoot, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, 'docs', 'a.md'), '# a\n');
+    fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+      version: 2,
+      scope: 'projM',
+      type: 'git',
+      dir: path.join(repoRoot, 'docs'),
+      git: {
+        repoRoot,
+        relativeRoot: 'docs',
+        branch: 'main',
+        remoteUrl: 'https://example.com/x.git',
+        managed: true,
+        remoteBranch: 'main',
+      },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: 0,
+      updatedAt: 0,
+      lastSync: null,
+    }));
+    const prevRoot = process.env.KI_DATASOURCE_CLONE_ROOT;
+    process.env.KI_DATASOURCE_CLONE_ROOT = cloneRoot;
+    try {
+      const preview = await executeScopeDelete({ scope: 'projM', yes: false });
+      assert.strictEqual(preview.ok, false);
+      if (!preview.ok) {
+        assert.strictEqual(preview.willDelete?.managedCloneDir, path.join(cloneRoot, 'projM'));
+        assert.match(preview.error, /托管 clone/);
+      }
+      assert.strictEqual(fs.existsSync(repoRoot), true);
+
+      const res = await executeScopeDelete({ scope: 'projM', yes: true });
+      assert.strictEqual(res.ok, true);
+      if (res.ok) {
+        assert.strictEqual(res.managedCloneRemoved, true);
+        assert.strictEqual(res.managedCloneDir, path.join(cloneRoot, 'projM'));
+        assert.strictEqual(res.managedCloneError, undefined);
+      }
+      assert.strictEqual(fs.existsSync(path.join(cloneRoot, 'projM')), false);
+    } finally {
+      if (prevRoot === undefined) delete process.env.KI_DATASOURCE_CLONE_ROOT;
+      else process.env.KI_DATASOURCE_CLONE_ROOT = prevRoot;
+    }
   });
 });

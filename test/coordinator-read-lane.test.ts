@@ -173,6 +173,7 @@ test('⑨ ★ 未显式传 kind 的 import 自动判为 engine-only（真实入�
 
   // 推导表：import 之外一律保守为 write（rebuild-vector 等需先把元数据写纳入提交窗口）
   assert.equal(kindForOperation('import'), 'engine-only');
+  assert.equal(kindForOperation('datasource-add-remote'), 'engine-only');
   assert.equal(kindForOperation('rebuild-vector'), 'write');
   assert.equal(kindForOperation('restore-snapshot'), 'write');
   assert.equal(kindForOperation('sync-relation'), 'write');

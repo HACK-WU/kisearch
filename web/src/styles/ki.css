@@ -5486,3 +5486,24 @@ select.ki-chat-cfg__ta--select {
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
   white-space: pre; overflow: auto;
 }
+/* S-05：页面添加 Git URL 数据源（服务端 clone + 首次同步） */
+.ki-ds-add__hint {
+  margin: 0 0 10px; color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm); line-height: 1.6;
+}
+.ki-ds-add__hint code {
+  padding: 1px 4px; border: 1px solid var(--ki-color-border); border-radius: 4px;
+  background: var(--ki-color-bg-secondary);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+}
+.ki-ds-add__grid {
+  display: grid; grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 12px; align-items: center;
+}
+.ki-ds-add__grid .ki-form-label { margin: 0; justify-self: end; text-align: right; }
+.ki-ds-add__actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.ki-ds-add__status { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
+@media (max-width: 720px) {
+  .ki-ds-add__grid { grid-template-columns: minmax(0, 1fr); }
+  .ki-ds-add__grid .ki-form-label { justify-self: start; text-align: left; }
+}

@@ -107,6 +107,11 @@ export interface TaskResultSnapshot {
   }[];
   /** 明细是否被截断（完整数见计数） */
   truncated?: boolean;
+  /**
+   * S-05：`datasource-add-remote` 成功后自动入队的首次同步任务 ID。
+   * 页面据此跟随首次同步；为 null = 入队失败（登记仍成功，需手动同步）。
+   */
+  syncTaskId?: string | null;
   /** 可判别错误码（如 ALL_FILES_DUPLICATES / VECTORIZATION_STOPPED） */
   errorCode?: string;
 }
@@ -352,6 +357,8 @@ function normalizeResult(input: TaskResultSnapshot | undefined): TaskResultSnaps
   const conflicts = conflictsRaw.slice(0, MAX_TASK_DETAIL_ITEMS);
   if (conflicts.length > 0) out.conflicts = conflicts;
   if (input.truncated === true) out.truncated = true;
+  if (input.syncTaskId === null) out.syncTaskId = null;
+  else if (typeof input.syncTaskId === 'string' && TASK_ID_RE.test(input.syncTaskId)) out.syncTaskId = input.syncTaskId;
   if (typeof input.errorCode === 'string' && ERROR_CODE_RE.test(input.errorCode)) out.errorCode = input.errorCode;
   return out;
 }

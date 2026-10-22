@@ -288,6 +288,11 @@ export function buildDataSourceDetail(
   const modeLabel = p?.mode === 'incremental' ? '增量' : p?.mode === 'full' ? '全量' : '—';
   const gitRows: DetailRow[] = record.type === 'git' && record.git
     ? [
+      {
+        label: '仓库来源',
+        value: record.git.managed ? '托管 clone（服务端维护，勿手动修改）' : '本地仓库',
+        hint: record.git.managed && record.git.remoteUrl ? record.git.remoteUrl : undefined,
+      },
       { label: 'Git 仓库', value: record.git.repoRoot, full: true },
       { label: '分支', value: record.git.branch ?? 'detached' },
       {

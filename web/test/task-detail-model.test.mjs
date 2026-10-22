@@ -160,6 +160,14 @@ describe('进度口径', () => {
     assert.equal(view.progressPercent, 25);
   });
 
+  it('数据源 clone / 首次同步排队阶段有中文标签（不暴露英文 phase）', () => {
+    const cloning = buildTaskDetail(baseTask({ state: 'running', finishedAt: undefined, progress: { phase: 'clone', done: 42, total: 100 } }));
+    assert.match(cloning.progressText, /克隆仓库/);
+    assert.doesNotMatch(cloning.progressText, /clone/);
+    const queuedSync = buildTaskDetail(baseTask({ state: 'running', finishedAt: undefined, progress: { phase: 'queued-sync', done: 0, total: 0 } }));
+    assert.match(queuedSync.progressText, /首次同步/);
+  });
+
   it('旧记录终态不显示 100% 进度条', () => {
     const view = buildTaskDetail(baseTask({ state: 'partial', progress: { phase: 'persist', done: 1, total: 1 } }));
     assert.equal(view.showProgress, false);

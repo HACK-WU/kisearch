@@ -16,8 +16,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useDataSourceDetail, useDataSourceList } from '@/lib/hooks';
-import { pruneDataSource, syncDataSource, type DataSourcePendingItem } from '@/api/httpApi';
+import { useDataSourceDetail, useDataSourceList, useScopeList } from '@/lib/hooks';
+import { addRemoteDataSource, pruneDataSource, syncDataSource, type DataSourcePendingItem } from '@/api/httpApi';
+import { getTask } from '@/api/tasksApi';
 import { buildDataSourceDetail, buildDataSourceListSummary, dataSourceStatusView, resolveDataSourceActiveState } from '@/lib/dataSourceDetailModel';
 import { RowList, SectionTitle } from '@/components/TaskDetailParts';
 
@@ -60,6 +61,7 @@ export function DataSourcePage(): JSX.Element {
   const queryClient = useQueryClient();
   const listQuery = useDataSourceList();
   const detailQuery = useDataSourceDetail(scope ?? null);
+  const scopeListQuery = useScopeList();
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
@@ -72,6 +74,15 @@ export function DataSourcePage(): JSX.Element {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncReceipt, setSyncReceipt] = useState<string | null>(null);
   const [rowSyncNotice, setRowSyncNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addForm, setAddForm] = useState({ scope: '', url: '', branch: '', subdir: '', group: '' });
+  const [addState, setAddState] = useState<{
+    phase: 'idle' | 'submitting' | 'cloning' | 'done';
+    taskId?: string;
+    progress?: number;
+    error?: string;
+    notice?: string;
+  }>({ phase: 'idle' });
   const scopeRef = useRef<string | undefined>(scope);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
@@ -303,18 +314,218 @@ export function DataSourcePage(): JSX.Element {
     void triggerSync(scope, full);
   };
 
+  // ── S-05：页面添加 Git URL 数据源 ──────────────────────
+  const addBusy = addState.phase === 'submitting' || addState.phase === 'cloning';
+
+  useEffect(() => {
+    if (addState.phase !== 'cloning' || !addState.taskId) return undefined;
+    const taskId = addState.taskId;
+    let cancelled = false;
+    let failures = 0;
+    const tick = async (): Promise<void> => {
+      try {
+        const { task } = await getTask(taskId);
+        if (cancelled) return;
+        failures = 0;
+        if (task.state === 'queued' || task.state === 'running' || task.state === 'unknown') {
+          const progress = task.progress && task.progress.total > 0
+            ? Math.min(100, Math.round((task.progress.done / task.progress.total) * 100))
+            : undefined;
+          setAddState((prev) => (prev.phase === 'cloning' ? { ...prev, progress } : prev));
+          return;
+        }
+        if (task.state === 'succeeded') {
+          const syncTaskId = task.result?.syncTaskId ?? null;
+          const targetScope = task.scope;
+          setAddState({
+            phase: 'done',
+            notice: syncTaskId
+              ? `已登记 ${targetScope}；首次全量同步已入队（任务 ${syncTaskId.slice(0, 8)}）`
+              : `已登记 ${targetScope}；首次同步入队失败，请执行 ki datasource sync --scope ${targetScope}`,
+          });
+          setAddOpen(false);
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['dataSourceList'] }),
+            queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', targetScope] }),
+          ]);
+          navigate(`/datasource/${encodeURIComponent(targetScope)}`);
+          return;
+        }
+        const detail = task.error ?? '添加失败';
+        const code = task.result?.errorCode ? `（${task.result.errorCode}）` : '';
+        setAddState({ phase: 'idle', error: `${detail}${code}${task.recoveryHint ? `；${task.recoveryHint}` : ''}` });
+      } catch (err) {
+        if (cancelled) return;
+        failures += 1;
+        // daemon 重启 / 任务 1h TTL 到期：任务可能已不存在，不能无限显示「克隆中」
+        const e = err as Error & { status?: number };
+        if (e.status === 404 || failures >= 3) {
+          setAddState({
+            phase: 'idle',
+            error: '无法读取添加任务状态（可能 daemon 已重启或任务已过期）；请刷新页面确认是否已登记，必要时执行 ki datasource remove --scope <scope> --purge --yes 后重试',
+          });
+        }
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => { void tick(); }, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [addState.phase, addState.taskId, navigate, queryClient]);
+
+  const submitAdd = async (): Promise<void> => {
+    if (addBusy) return;
+    const targetScope = addForm.scope.trim();
+    const url = addForm.url.trim();
+    if (!targetScope) {
+      setAddState({ phase: 'idle', error: '请选择要登记到的 scope' });
+      return;
+    }
+    if (!url) {
+      setAddState({ phase: 'idle', error: '请填写 Git 仓库地址' });
+      return;
+    }
+    setAddState({ phase: 'submitting' });
+    try {
+      const result = await addRemoteDataSource({
+        scope: targetScope,
+        url,
+        ...(addForm.branch.trim() ? { branch: addForm.branch.trim() } : {}),
+        ...(addForm.subdir.trim() ? { subdir: addForm.subdir.trim() } : {}),
+        group: addForm.group.trim() || null,
+      });
+      setAddState({ phase: 'cloning', taskId: result.taskId });
+    } catch (err) {
+      const e = err as Error & { status?: number; body?: { code?: string; error?: string } };
+      let message: string;
+      if (e.status === 403) message = '没有该知识库的操作权限';
+      else if (e.status === 404) message = '当前 daemon 不支持页面添加 Git 数据源，请升级并重启 daemon';
+      else message = e.body?.error ?? `添加失败：${e.message}`;
+      setAddState({ phase: 'idle', error: message });
+    }
+  };
+
   return (
     <div className="ki-datasource-page">
       <div className="ki-page-head">
         <div>
           <p>{listSummary}</p>
         </div>
+        <button
+          type="button"
+          className="ki-btn ki-btn--secondary"
+          aria-expanded={addOpen}
+          aria-controls="ki-ds-add-form"
+          onClick={() => {
+            setAddOpen((prev) => !prev);
+            setAddState((prev) => ({ ...prev, error: undefined, notice: undefined }));
+          }}
+        >{addOpen ? '收起添加表单' : '添加 Git 数据源'}</button>
       </div>
+
+      {addState.notice ? (
+        <p className="ki-task-notice ki-task-notice--info">{addState.notice}</p>
+      ) : null}
+
+      {addOpen ? (
+        <section className="ki-card ki-ds-add" id="ki-ds-add-form" aria-label="添加 Git 数据源">
+          <div className="ki-card__body">
+            <p className="ki-ds-add__hint">
+              服务端会 clone 到 <code>~/.ki/datasources/&lt;scope&gt;/repo</code> 并自动开始首次全量同步。
+              私有仓库使用 daemon 环境的 SSH agent / credential helper，本页不收集凭据。
+              本地目录仍请用 <code>ki datasource add --source &lt;目录&gt;</code>。
+            </p>
+            <div className="ki-ds-add__grid">
+              <label className="ki-form-label" htmlFor="ki-ds-add-scope">Scope *</label>
+              <select
+                id="ki-ds-add-scope"
+                className="ki-form-input"
+                value={addForm.scope}
+                disabled={addBusy}
+                onChange={(event) => setAddForm((prev) => ({ ...prev, scope: event.target.value }))}
+              >
+                <option value="">{scopeListQuery.isLoading ? '加载中…' : '选择已有 scope'}</option>
+                {(scopeListQuery.data?.scopes ?? []).map((item) => (
+                  <option key={item.scope} value={item.scope}>{item.scope}</option>
+                ))}
+              </select>
+
+              <label className="ki-form-label" htmlFor="ki-ds-add-url">Git 仓库地址 *</label>
+              <input
+                id="ki-ds-add-url"
+                className="ki-form-input"
+                type="text"
+                placeholder="https://github.com/org/repo.git 或 git@github.com:org/repo.git"
+                value={addForm.url}
+                disabled={addBusy}
+                onChange={(event) => setAddForm((prev) => ({ ...prev, url: event.target.value }))}
+              />
+
+              <label className="ki-form-label" htmlFor="ki-ds-add-branch">分支</label>
+              <input
+                id="ki-ds-add-branch"
+                className="ki-form-input"
+                type="text"
+                placeholder="留空 = 仓库默认分支"
+                value={addForm.branch}
+                disabled={addBusy}
+                onChange={(event) => setAddForm((prev) => ({ ...prev, branch: event.target.value }))}
+              />
+
+              <label className="ki-form-label" htmlFor="ki-ds-add-subdir">仓库子目录</label>
+              <input
+                id="ki-ds-add-subdir"
+                className="ki-form-input"
+                type="text"
+                placeholder="如 docs/guide（留空 = 仓库根）"
+                value={addForm.subdir}
+                disabled={addBusy}
+                onChange={(event) => setAddForm((prev) => ({ ...prev, subdir: event.target.value }))}
+              />
+
+              <label className="ki-form-label" htmlFor="ki-ds-add-group">落点 Group</label>
+              <input
+                id="ki-ds-add-group"
+                className="ki-form-input"
+                type="text"
+                placeholder="留空 = 按子目录自动"
+                value={addForm.group}
+                disabled={addBusy}
+                onChange={(event) => setAddForm((prev) => ({ ...prev, group: event.target.value }))}
+              />
+            </div>
+            {scopeListQuery.isError ? (
+              <p className="ki-task-notice ki-task-notice--warn" role="alert">
+                scope 列表读取失败：{(scopeListQuery.error as Error).message}；请刷新后重试或改用 CLI。
+              </p>
+            ) : null}
+            {addState.error ? (
+              <p className="ki-write-error" role="alert">{addState.error}</p>
+            ) : null}
+            <div className="ki-ds-add__actions">
+              <button
+                type="button"
+                className="ki-btn ki-btn--primary"
+                disabled={addBusy || scopeListQuery.data === undefined || !addForm.scope.trim() || !addForm.url.trim()}
+                onClick={() => { void submitAdd(); }}
+              >
+                {addState.phase === 'cloning'
+                  ? `克隆中${addState.progress !== undefined ? ` ${addState.progress}%` : '…'}`
+                  : addState.phase === 'submitting' ? '提交中…' : '添加并开始首次同步'}
+              </button>
+              <span className="ki-ds-add__status" aria-live="polite">
+                {addState.phase === 'cloning'
+                  ? `正在服务端 clone（任务 ${addState.taskId?.slice(0, 8) ?? ''}）；关闭页面也会继续`
+                  : ''}
+              </span>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <div className="ki-ds-callout" role="note">
         <span className="ki-ds-callout__icon" aria-hidden>ⓘ</span>
         <span>
-          本地目录数据源通过命令行登记：<code className="ki-ds-callout__cmd">ki datasource add --scope &lt;scope&gt; --source &lt;目录&gt;</code>；
+          Git 仓库可在本页「添加 Git 数据源」（服务端 clone）；本地目录数据源通过命令行登记：<code className="ki-ds-callout__cmd">ki datasource add --scope &lt;scope&gt; --source &lt;目录&gt;</code>。
           <strong>同步可在本页触发</strong>（普通目录 30 分钟一次，CLI 可强制）。本页的删除仅针对待删候选，不动源目录文件。
         </span>
       </div>
@@ -356,7 +567,7 @@ export function DataSourcePage(): JSX.Element {
             </div>
           ) : sources.length === 0 ? (
             <div className="ki-empty">
-              <p>还没有数据源。本地目录通过命令行登记：</p>
+              <p>还没有数据源。Git 仓库可用右上角「添加 Git 数据源」；本地目录通过命令行登记：</p>
               <code className="ki-ds-empty__cmd">{'ki datasource add\n  --scope <scope>\n  --source <目录>'}</code>
             </div>
           ) : (

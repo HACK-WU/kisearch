@@ -30,6 +30,11 @@ ki restore scope-name --from-snapshot --yes
 **备份存储位置**：
 - 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
 
+> **托管 Git clone 不在快照内**：clone 位于 `~/.ki/datasources/<scope>/repo`（独立于 dataDir）。
+> 快照里的 `datasource.json` 会随 scope 目录一起还原，但 clone 目录需重新获取：
+> 先 `ki datasource remove --scope <s>`（必要时 `--purge`），再 `ki datasource add --scope <s> --git-url <url>`。
+> 首次同步会全量重建，不依赖旧 clone。
+
 > （ai-results 备份已随批次 3 删除：REQ-04 移除 ai-results 输入契约，备份仅保留 scope 快照。）
 
 > 详细用法见 [CLI 参考 → backup](./cli.md#backup)、[CLI 参考 → restore](./cli.md#restore)、[CLI 参考 → config](./cli.md#config)

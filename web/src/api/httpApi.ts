@@ -805,7 +805,28 @@ export async function syncDataSource(input: {
   });
 }
 
-/** 唯一写接口：删除所选待删候选（服务端重算 + token 校验；不动源目录文件） */
+/** S-05：页面添加 Git URL 数据源（服务端 clone + 登记 + 自动入队首次同步） */
+export interface AddRemoteDataSourceResponse {
+  ok: boolean;
+  scope: string;
+  taskId: string;
+  state: 'queued';
+}
+
+export async function addRemoteDataSource(input: {
+  scope: string;
+  url: string;
+  branch?: string;
+  subdir?: string;
+  group?: string | null;
+  vector?: boolean;
+}): Promise<AddRemoteDataSourceResponse> {
+  return req<AddRemoteDataSourceResponse>('/api/datasource/add-remote', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 export async function pruneDataSource(input: {
   scope: string;
   token: string;

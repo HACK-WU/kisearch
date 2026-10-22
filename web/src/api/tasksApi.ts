@@ -42,6 +42,10 @@ export interface TaskParamSnapshot {
   skipDuplicates?: boolean;
   chunkSize?: number;
   chunkOverlap?: number;
+  /** 数据源类型（datasource-sync） */
+  type?: 'directory' | 'git';
+  /** 同步模式（datasource-sync） */
+  mode?: 'incremental' | 'full';
 }
 
 /** 结果摘要（REQ-20261019-004 S-01）：结束时写入；旧记录缺失 */
@@ -73,6 +77,8 @@ export interface TaskResultSnapshot {
   }[];
   /** 明细不完整（条数超限或字节预算裁剪，不区分成因） */
   truncated?: boolean;
+  /** S-05：add-remote 成功后自动入队的首次同步任务 ID；null = 入队失败 */
+  syncTaskId?: string | null;
   errorCode?: string;
 }
 

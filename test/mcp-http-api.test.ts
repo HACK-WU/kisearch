@@ -17,6 +17,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,12 +30,15 @@ import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.js';
 import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
 import { createTaskReporter, getTaskRecord } from '../src/lib/task-registry.js';
-import { closeFtsEngine } from '../src/lib/fts-client.js';
+import { closeFtsEngine, deleteFtsCollection } from '../src/lib/fts-client.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
 process.env.HOME = tmpHome;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'ki-config.json');
+// S-05 测试：托管 clone 根与 file:// 放行都限制在临时目录（生产默认拒绝 file://）
+process.env.KI_DATASOURCE_CLONE_ROOT = path.join(tmpHome, 'datasources');
+process.env.KI_DATASOURCE_ALLOW_FILE_URL = '1';
 fs.writeFileSync(
   process.env.KI_CONFIG_PATH,
   JSON.stringify({ scopeMode: 'default', embedding: { provider: 'mock', model: 'mock' } }),
@@ -471,6 +475,215 @@ describe('/api/datasource/sync', () => {
     });
     assert.equal(res.status, 409);
     assert.equal((await res.json()).code, 'SOURCE_UNREACHABLE');
+  });
+});
+
+describe('/api/datasource/add-remote', () => {
+  const cloneRoot = path.join(tmpHome, 'datasources');
+
+  function makeScope(): string {
+    const scope = `api_ds_remote_${crypto.randomUUID().slice(0, 8)}`;
+    fs.mkdirSync(getKbDir(scope), { recursive: true });
+    return scope;
+  }
+
+  function git(cwd: string, ...args: string[]): string {
+    return execFileSync('git', ['-C', cwd, ...args], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      encoding: 'utf8',
+    });
+  }
+
+  /** 工作仓库 + bare 远端（docs/ 有 md，便于断言子目录） */
+  function makeRepo(): { bare: string; work: string } {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-remote-work-'));
+    fs.mkdirSync(path.join(work, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(work, 'docs', 'a.md'), '# a\n');
+    fs.writeFileSync(path.join(work, 'README.md'), '# root\n');
+    git(work, 'init', '-q', '-b', 'main');
+    git(work, 'config', 'user.email', 'test@example.com');
+    git(work, 'config', 'user.name', 'Test');
+    git(work, 'config', 'commit.gpgsign', 'false');
+    git(work, 'add', '.');
+    git(work, 'commit', '-q', '-m', 'init');
+    const bare = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ds-remote-bare-')), 'repo.git');
+    execFileSync('git', ['clone', '-q', '--bare', work, bare], { encoding: 'utf8' });
+    return { bare, work };
+  }
+
+  async function postAdd(body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+    const res = await fetch(`${handle!.base}/api/datasource/add-remote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  }
+
+  async function waitTask(id: string, timeoutMs = 60_000): Promise<any> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const task = getTaskRecord(loadConfig(), id);
+      if (task && ['succeeded', 'partial', 'failed', 'cancelled', 'unknown'].includes(task.state)) return task;
+      if (Date.now() > deadline) throw new Error(`任务 ${id} 未在 ${timeoutMs}ms 内落定（当前 ${task?.state ?? 'missing'}）`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  it('参数校验：非法 URL / 凭据 / 子目录 / 分支 / 缺少 scope', async () => {
+    const scope = makeScope();
+    const invalidUrl = await postAdd({ scope, url: 'http://example.com/x.git' });
+    assert.equal(invalidUrl.status, 400);
+    assert.equal(invalidUrl.body.code, 'GIT_SCHEME_UNSUPPORTED');
+
+    const credentials = await postAdd({ scope, url: 'https://user:secret@example.com/x.git' });
+    assert.equal(credentials.status, 400);
+    assert.equal(credentials.body.code, 'GIT_URL_CREDENTIALS');
+
+    const injection = await postAdd({ scope, url: 'ext::sh -c touch% /tmp/pwn' });
+    assert.equal(injection.status, 400);
+    assert.equal(injection.body.code, 'GIT_SCHEME_UNSUPPORTED');
+
+    const subdir = await postAdd({ scope, url: 'https://example.com/x.git', subdir: '../escape' });
+    assert.equal(subdir.status, 400);
+    assert.equal(subdir.body.code, 'INVALID_SUBDIR');
+
+    const branch = await postAdd({ scope, url: 'https://example.com/x.git', branch: '-bad' });
+    assert.equal(branch.status, 400);
+    assert.equal(branch.body.code, 'INVALID_BRANCH');
+
+    const missingScope = await postAdd({ url: 'https://example.com/x.git' });
+    assert.equal(missingScope.status, 400);
+    assert.equal(missingScope.body.code, 'INVALID_SCOPE');
+  });
+
+  it('file:// 在生产口径下拒绝（无 KI_DATASOURCE_ALLOW_FILE_URL）', async () => {
+    const scope = makeScope();
+    const { bare } = makeRepo();
+    const prev = process.env.KI_DATASOURCE_ALLOW_FILE_URL;
+    delete process.env.KI_DATASOURCE_ALLOW_FILE_URL;
+    try {
+      const res = await postAdd({ scope, url: `file://${bare}` });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.code, 'GIT_SCHEME_UNSUPPORTED');
+    } finally {
+      process.env.KI_DATASOURCE_ALLOW_FILE_URL = prev;
+    }
+  });
+
+  it('仅存在于向量层的 scope 也视为已存在（与 kiScopeList 对齐）', async () => {
+    const scope = `vec_only_${crypto.randomUUID().slice(0, 8)}`;
+    const collectionDir = path.join(loadConfig().vectorDir, 'collections', scope);
+    fs.mkdirSync(collectionDir, { recursive: true });
+    const missing = path.join(os.tmpdir(), `no-such-repo-${crypto.randomUUID()}.git`);
+    const res = await postAdd({ scope, url: `file://${missing}` });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const task = await waitTask(res.body.taskId);
+    assert.equal(task.state, 'failed');
+    fs.rmSync(collectionDir, { recursive: true, force: true });
+    fs.rmSync(getKbDir(scope), { recursive: true, force: true });
+    fs.rmSync(path.join(cloneRoot, scope), { recursive: true, force: true });
+  });
+
+  it('scope 不存在 → 400 SCOPE_NOT_FOUND（Q8 不允许页面新建）', async () => {
+    const res = await postAdd({ scope: `no_such_${crypto.randomUUID().slice(0, 8)}`, url: 'https://example.com/x.git' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'SCOPE_NOT_FOUND');
+  });
+
+  it('完整链路：clone + 登记 + 首次 full 同步 + 第二次增量', async () => {
+    const scope = makeScope();
+    const { bare, work } = makeRepo();
+    const created = await postAdd({ scope, url: `file://${bare}`, subdir: 'docs', vector: false });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.ok, true);
+    assert.equal(created.body.state, 'queued');
+
+    const addTask = await waitTask(created.body.taskId);
+    assert.equal(addTask.state, 'succeeded', addTask.error ?? '');
+    assert.match(String(addTask.result?.syncTaskId), /^[A-Za-z0-9-]{8,}$/);
+
+    const syncTask = await waitTask(addTask.result.syncTaskId);
+    assert.equal(syncTask.state, 'succeeded', syncTask.error ?? '');
+    assert.equal(syncTask.params?.mode, 'full');
+
+    // 登记文件：type=git、managed=true、relativeRoot=docs、dir 位于托管根内
+    const detailRes = await fetch(`${handle!.base}/api/datasource/detail?scope=${encodeURIComponent(scope)}`);
+    const detail = await detailRes.json() as any;
+    assert.equal(detail.source.type, 'git');
+    assert.equal(detail.source.git.managed, true);
+    assert.equal(detail.source.git.relativeRoot, 'docs');
+    assert.equal(detail.source.dir, path.join(cloneRoot, scope, 'repo', 'docs'));
+    assert.equal(detail.source.git.repoRoot, path.join(cloneRoot, scope, 'repo'));
+    assert.match(String(detail.source.lastSync.git.commit), /^[0-9a-f]{40}$/);
+    assert.equal(detail.source.lastSync.params.mode, 'full');
+
+    // 远端新增一篇 → 第二次同步应为增量，且只处理 1 个变更文件
+    fs.writeFileSync(path.join(work, 'docs', 'b.md'), '# b\n');
+    git(work, 'add', '.');
+    git(work, 'commit', '-q', '-m', 'add b');
+    git(work, 'push', '-q', bare, 'main');
+
+    const second = await fetch(`${handle!.base}/api/datasource/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    const secondBody = await second.json() as any;
+    assert.equal(second.status, 200, JSON.stringify(secondBody));
+    assert.equal(secondBody.mode, 'incremental');
+    const incremental = await waitTask(secondBody.taskId);
+    assert.equal(incremental.state, 'succeeded', incremental.error ?? '');
+
+    const detail2Res = await fetch(`${handle!.base}/api/datasource/detail?scope=${encodeURIComponent(scope)}`);
+    const detail2 = await detail2Res.json() as any;
+    assert.equal(detail2.source.lastSync.params.mode, 'incremental');
+    assert.equal(detail2.source.lastSync.git.changedCount, 1);
+    assert.equal(detail2.source.lastSync.result.files.changed, 1);
+
+    // 已有登记 → 409
+    const exists = await postAdd({ scope, url: `file://${bare}` });
+    assert.equal(exists.status, 409);
+    assert.equal(exists.body.code, 'DATASOURCE_EXISTS');
+
+    // 清理（不依赖 scope delete 打开向量引擎）
+    fs.rmSync(getKbDir(scope), { recursive: true, force: true });
+    fs.rmSync(path.join(cloneRoot, scope), { recursive: true, force: true });
+    await deleteFtsCollection(scope);
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.rmSync(path.dirname(bare), { recursive: true, force: true });
+  });
+
+  it('并发两个 POST：仅一个创建任务（另一个 409）', async () => {
+    const scope = makeScope();
+    const missing = path.join(os.tmpdir(), `race-missing-${crypto.randomUUID()}.git`);
+    const [a, b] = await Promise.all([
+      postAdd({ scope, url: `file://${missing}` }),
+      postAdd({ scope, url: `file://${missing}` }),
+    ]);
+    const statuses = [a.status, b.status].sort((x, y) => x - y);
+    assert.deepEqual(statuses, [200, 409]);
+    const winner = a.status === 200 ? a : b;
+    const loser = a.status === 409 ? a : b;
+    assert.equal(loser.body.code, 'SYNC_ALREADY_RUNNING');
+    const task = await waitTask(winner.body.taskId);
+    assert.equal(task.state, 'failed');
+    fs.rmSync(getKbDir(scope), { recursive: true, force: true });
+    fs.rmSync(path.join(cloneRoot, scope), { recursive: true, force: true });
+  });
+
+  it('clone 失败：任务 failed + 不留托管目录', async () => {
+    const scope = makeScope();
+    const missing = path.join(os.tmpdir(), `no-such-repo-${crypto.randomUUID()}.git`);
+    const created = await postAdd({ scope, url: `file://${missing}` });
+    assert.equal(created.status, 200);
+    const task = await waitTask(created.body.taskId);
+    assert.equal(task.state, 'failed');
+    assert.equal(task.result?.errorCode, 'GIT_REPO_NOT_FOUND');
+    const scopeDir = path.join(cloneRoot, scope);
+    const leftovers = fs.existsSync(scopeDir) ? fs.readdirSync(scopeDir) : [];
+    assert.deepEqual(leftovers, []);
+    fs.rmSync(getKbDir(scope), { recursive: true, force: true });
   });
 });
 

@@ -56,7 +56,9 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { checkSourceReachable, readDataSource, scanDataSources, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
+import { addRemoteDataSource, checkSourceReachable, readDataSource, scanDataSources, scopeExists, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
+import { isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
+import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { computeSyncAvailability } from './datasource-policy.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
@@ -74,7 +76,7 @@ import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
-import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
+import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskParamSnapshot, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
 import { toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
@@ -730,6 +732,7 @@ export async function handleApiRequest(
     if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
     if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
     if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
+    if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
@@ -2216,6 +2219,70 @@ function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): TaskResul
   };
 }
 
+/**
+ * 同步任务执行体（页面 `POST /datasource/sync` 与 add-remote 首次同步共用）。
+ * ★ 终态映射必须一致：ok→succeeded / partial→partial / cancelled→cancelled。
+ */
+async function runDatasourceSyncTask(
+  task: TaskReporter,
+  taskId: string,
+  scope: string,
+  full: boolean,
+  config: KiConfig,
+): Promise<void> {
+  task.update({ state: 'running', startedAt: Date.now() });
+  try {
+    const result = await syncDataSource({
+      scope,
+      full,
+      taskId,
+      config,
+      onProgress: (progress) => task.progress(progress),
+      onPhase: (phase) => task.update({ phase }),
+    });
+    if (!result.ok) {
+      task.finish('failed', { errorCode: result.code, error: result.error });
+      return;
+    }
+    if (result.dryRun) {
+      task.finish('failed', { errorCode: 'SYNC_UNEXPECTED_DRY_RUN', error: '页面同步不应返回 dry-run' });
+      return;
+    }
+    const state = result.summary.state;
+    task.finish(
+      state === 'ok' ? 'succeeded' : state === 'partial' ? 'partial' : state === 'cancelled' ? 'cancelled' : 'failed',
+      {
+        result: toDatasourceSyncResultSnapshot(result),
+        ...(state === 'partial'
+          ? { error: '部分文件未完成', recoveryHint: '修复后重试同步；未完成文件会自动重试' }
+          : {}),
+      },
+    );
+  } catch (err) {
+    task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'SYNC_FAILED', error: (err as Error).message });
+  }
+}
+
+/** 首次同步没有 commit 水位时必然是 full；不能只看 type/full */
+function datasourceSyncMode(record: DataSourceRecord, full: boolean): 'incremental' | 'full' {
+  return record.type === 'git' && !full && Boolean(record.lastSync?.git?.commit) ? 'incremental' : 'full';
+}
+
+/** 登记参数快照（页面 sync 与 add-remote 首次同步同口径） */
+function datasourceSyncParams(record: DataSourceRecord, full: boolean): TaskParamSnapshot | undefined {
+  return toParamSnapshot('datasource-sync', {
+    sourceDir: record.dir,
+    type: record.type,
+    mode: datasourceSyncMode(record, full),
+    ...(record.group ? { group: record.group } : {}),
+    vector: record.vector,
+    conflictMode: record.conflictMode,
+    conflictSuffix: record.conflictSuffix,
+    ...(record.chunkSize !== null ? { chunkSize: record.chunkSize } : {}),
+    ...(record.chunkOverlap !== null ? { chunkOverlap: record.chunkOverlap } : {}),
+  });
+}
+
 async function handleDatasourceSync(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -2329,57 +2396,15 @@ async function handleDatasourceSync(
     sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `后台任务状态登记失败，任务未启动：${(err as Error).message}` });
     return;
   }
-  // 首次同步没有 commit 水位时必然是 full；不能只看 type/full
-  const mode = latest.type === 'git' && !full && Boolean(latest.lastSync?.git?.commit)
-    ? 'incremental'
-    : 'full';
-  task.update({
-    params: toParamSnapshot('datasource-sync', {
-      sourceDir: latest.dir,
-      type: latest.type,
-      mode,
-      ...(latest.group ? { group: latest.group } : {}),
-      vector: latest.vector,
-      conflictMode: latest.conflictMode,
-      conflictSuffix: latest.conflictSuffix,
-      ...(latest.chunkSize !== null ? { chunkSize: latest.chunkSize } : {}),
-      ...(latest.chunkOverlap !== null ? { chunkOverlap: latest.chunkOverlap } : {}),
-    }),
-  });
+  task.update({ params: datasourceSyncParams(latest, full) });
+
+  const mode = datasourceSyncMode(latest, full);
 
   void getSharedOperationCoordinator().submit(
     { operation: 'datasource-sync', params: { scope, full } },
     () => runWithConfigSnapshot(requestConfig, async () => {
-      task.update({ state: 'running', startedAt: Date.now() });
       try {
-        const result = await syncDataSource({
-          scope,
-          full,
-          taskId,
-          config: requestConfig,
-          onProgress: (progress) => task.progress(progress),
-          onPhase: (phase) => task.update({ phase }),
-        });
-        if (!result.ok) {
-          task.finish('failed', { errorCode: result.code, error: result.error });
-          return;
-        }
-        if (result.dryRun) {
-          task.finish('failed', { errorCode: 'SYNC_UNEXPECTED_DRY_RUN', error: '页面同步不应返回 dry-run' });
-          return;
-        }
-        const state = result.summary.state;
-        task.finish(
-          state === 'ok' ? 'succeeded' : state === 'partial' ? 'partial' : state === 'cancelled' ? 'cancelled' : 'failed',
-          {
-            result: toDatasourceSyncResultSnapshot(result),
-            ...(state === 'partial'
-              ? { error: '部分文件未完成', recoveryHint: '修复后重试同步；未完成文件会自动重试' }
-              : {}),
-          },
-        );
-      } catch (err) {
-        task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'SYNC_FAILED', error: (err as Error).message });
+        await runDatasourceSyncTask(task, taskId, scope, full, requestConfig);
       } finally {
         pageSyncGates.delete(scope);
       }
@@ -2393,6 +2418,216 @@ async function handleDatasourceSync(
   });
 
   sendJson(res, 200, { ok: true, scope, taskId, mode, state: 'queued' });
+}
+
+// ─── POST /api/datasource/add-remote（S-05）────────────────────
+
+/**
+ * add-remote 闸门：与 pageSyncGates 同源，防两个 POST 都读到「无 active」后各起一个任务。
+ * 权威判据仍在 scope 锁内（登记存在性）；这里只是快速失败。
+ */
+const datasourceAddGates = new Map<string, string>();
+
+/**
+ * 登记成功后自动入队首次同步（必然是 full：没有 commit 水位）。
+ * ★ 不 await submit：当前 add 任务还占着队列槽，await 会自死锁；
+ *   submit 排在 add 之后，add 释放槽位即开始执行。
+ */
+function enqueueFirstDatasourceSync(scope: string, record: DataSourceRecord, config: KiConfig): string {
+  const syncTaskId = crypto.randomUUID();
+  const syncTask = createTaskReporter(config, {
+    id: syncTaskId,
+    source: 'web',
+    operation: 'datasource-sync',
+    scope,
+  });
+  syncTask.update({ params: datasourceSyncParams(record, true) });
+  void getSharedOperationCoordinator().submit(
+    { operation: 'datasource-sync', params: { scope, full: true } },
+    () => runWithConfigSnapshot(config, () => runDatasourceSyncTask(syncTask, syncTaskId, scope, true, config)),
+    scope,
+  ).catch((err) => {
+    try {
+      syncTask.finish('failed', { errorCode: 'SYNC_ENQUEUE_FAILED', error: (err as Error).message });
+    } catch { /* 台账写失败时只能放弃 */ }
+  });
+  return syncTaskId;
+}
+
+async function handleDatasourceAddRemote(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: {
+    scope?: unknown; url?: unknown; branch?: unknown; subdir?: unknown; group?: unknown;
+    vector?: unknown; conflictMode?: unknown; conflictSuffix?: unknown;
+  } = {};
+  try {
+    body = await readJsonBody(req) as typeof body;
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/add-remote');
+    return;
+  }
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+
+  const url = typeof body.url === 'string' ? body.url.trim() : '';
+  // file:// 默认拒绝（本地目录请走 --source）；`KI_DATASOURCE_ALLOW_FILE_URL=1` 仅供隔离测试
+  const allowFileUrl = process.env.KI_DATASOURCE_ALLOW_FILE_URL === '1';
+  const urlCheck = validateGitUrl(url, { allowFile: allowFileUrl });
+  if (!urlCheck.ok) {
+    sendJson(res, 400, { ok: false, code: urlCheck.code, error: urlCheck.error });
+    return;
+  }
+  const subdir = typeof body.subdir === 'string' ? body.subdir.trim().replace(/^\/+|\/+$/g, '') : '';
+  if (!isSafeRelativeSubdir(subdir)) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SUBDIR', error: `非法子目录：${String(body.subdir)}` });
+    return;
+  }
+  const branch = typeof body.branch === 'string' ? body.branch.trim() : '';
+  if (branch) {
+    const branchCheck = await validateBranchName(branch);
+    if (!branchCheck.ok) {
+      sendJson(res, 400, { ok: false, code: 'INVALID_BRANCH', error: branchCheck.error });
+      return;
+    }
+  }
+  const group = typeof body.group === 'string' ? body.group.trim() : '';
+  if (group && !isSafeGroupPath(group)) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}` });
+    return;
+  }
+
+  // Q8：页面只允许已有 scope（新建请走 ki scope / 首次导入）
+  if (!scopeExists(requestConfig, scope)) {
+    sendJson(res, 400, { ok: false, code: 'SCOPE_NOT_FOUND', error: `scope「${scope}」不存在；页面添加只支持已存在的 scope` });
+    return;
+  }
+  const read = readDataSource(scope);
+  if (read.ok) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'DATASOURCE_EXISTS',
+      error: `scope「${scope}」已登记数据源；请先取消登记（ki datasource remove --scope ${scope}${read.record.git?.managed ? ' --purge' : ''}）`,
+    });
+    return;
+  }
+  if (read.code !== 'NOT_FOUND') {
+    sendJson(res, 400, { ok: false, code: read.code, error: read.error });
+    return;
+  }
+
+  let tasks: ReturnType<typeof listTaskRecords>;
+  try {
+    tasks = listTaskRecords(requestConfig);
+  } catch (err) {
+    sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `任务台账不可读，添加未启动：${(err as Error).message}` });
+    return;
+  }
+  const activeTask = tasks.find((task) => task.scope === scope
+    && (task.operation === 'datasource-add-remote' || task.operation === 'datasource-sync')
+    && (task.state === 'queued' || task.state === 'running'));
+  if (activeTask) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'SYNC_ALREADY_RUNNING',
+      error: '该 scope 已有数据源添加/同步任务在排队或执行中',
+      taskId: activeTask.id,
+    });
+    return;
+  }
+  if (datasourceAddGates.has(scope)) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'SYNC_ALREADY_RUNNING',
+      error: '该 scope 已有数据源添加/同步任务在排队或执行中',
+      taskId: datasourceAddGates.get(scope),
+    });
+    return;
+  }
+
+  const taskId = crypto.randomUUID();
+  datasourceAddGates.set(scope, taskId);
+  let task: TaskReporter;
+  try {
+    task = createTaskReporter(requestConfig, { id: taskId, source: 'web', operation: 'datasource-add-remote', scope });
+  } catch (err) {
+    datasourceAddGates.delete(scope);
+    sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `后台任务状态登记失败，任务未启动：${(err as Error).message}` });
+    return;
+  }
+  if (group) task.update({ params: { group } });
+
+  void getSharedOperationCoordinator().submit(
+    { operation: 'datasource-add-remote', params: { scope, url: urlCheck.url } },
+    () => runWithConfigSnapshot(requestConfig, async () => {
+      task.update({ state: 'running', startedAt: Date.now(), phase: 'clone' });
+      try {
+        const added = await addRemoteDataSource({
+          scope,
+          url: urlCheck.url,
+          branch: branch || null,
+          subdir: subdir || null,
+          group: group || null,
+          ...(body.vector === false ? { vector: false } : {}),
+          ...(typeof body.conflictMode === 'string' && body.conflictMode.trim() ? { conflictMode: body.conflictMode.trim() } : {}),
+          ...(typeof body.conflictSuffix === 'string' && body.conflictSuffix.trim() ? { conflictSuffix: body.conflictSuffix.trim() } : {}),
+          requireExistingScope: true,
+          allowFileUrl,
+          config: requestConfig,
+          onProgress: (progress) => task.progress({ phase: 'clone', done: progress.done, total: progress.total }),
+        });
+        if (!added.ok) {
+          task.finish('failed', {
+            errorCode: added.code,
+            error: added.error,
+            ...(added.cleanupWarning ? { recoveryHint: added.cleanupWarning } : {}),
+          });
+          return;
+        }
+        task.update({ phase: 'queued-sync' });
+        let syncTaskId: string | null = null;
+        let syncWarning: string | undefined;
+        try {
+          syncTaskId = enqueueFirstDatasourceSync(scope, added.record, requestConfig);
+        } catch (err) {
+          syncWarning = `登记成功，但首次同步入队失败：${(err as Error).message}`;
+        }
+        task.finish('succeeded', {
+          result: { syncTaskId },
+          ...(syncWarning ? { errorCode: 'SYNC_ENQUEUE_FAILED', recoveryHint: `请执行 ki datasource sync --scope ${scope}` } : {}),
+        });
+      } catch (err) {
+        task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'ADD_REMOTE_FAILED', error: (err as Error).message });
+      } finally {
+        datasourceAddGates.delete(scope);
+      }
+    }),
+    scope,
+  ).catch((err) => {
+    datasourceAddGates.delete(scope);
+    try {
+      task.finish('failed', { errorCode: 'ADD_REMOTE_FAILED', error: (err as Error).message });
+    } catch { /* 台账写失败时只能放弃 */ }
+  });
+
+  sendJson(res, 200, { ok: true, scope, taskId, state: 'queued' });
 }
 
 // ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────//

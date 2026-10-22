@@ -247,13 +247,31 @@ export type ScopeDeleteResult =
     /** FTS-only collection 目录是否被删除（无该目录时为 false） */
     ftsRemoved?: boolean;
     ftsError?: string;
+    /** S-05：托管 clone（`~/.ki/datasources/<scope>`）是否删除 */
+    managedCloneRemoved?: boolean;
+    managedCloneDir?: string;
+    managedCloneError?: string;
   }
   | {
       ok: false;
       error: string;
       requireConfirm?: boolean;
-      willDelete?: { vectorCount: number; kbExists: boolean; registered: boolean };
+      willDelete?: { vectorCount: number; kbExists: boolean; registered: boolean; managedCloneDir?: string };
     };
+
+/** 读取该 scope 的托管 clone 目录（无登记/非托管返回 null）；动态 import 避免 scope↔datasource 循环依赖 */
+async function managedCloneDirForScope(scope: string): Promise<string | null> {
+  try {
+    const [{ readDataSource }, { managedCloneDirOf }] = await Promise.all([
+      import('./lib/datasource.js'),
+      import('./lib/datasource-clone.js'),
+    ]);
+    const read = readDataSource(scope);
+    return read.ok ? managedCloneDirOf(read.record) : null;
+  } catch {
+    return null;
+  }
+}
 
 async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
   try {
@@ -271,13 +289,17 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
     const vectorCount = await vectorCountScope({ scope: params.scope });
     const kbExists = kbDirExists(params.scope);
     const registered = Object.prototype.hasOwnProperty.call(config.scopes, params.scope);
+    const managedCloneDir = await managedCloneDirForScope(params.scope);
 
     if (!params.yes) {
       return {
         ok: false,
-        error: `破坏性操作需 --yes 确认：将删除向量 ${vectorCount} 条${kbExists ? ' + KB 目录' : ''}${registered ? ' + 配置条目' : ''}`,
+        error: `破坏性操作需 --yes 确认：将删除向量 ${vectorCount} 条${kbExists ? ' + KB 目录' : ''}${registered ? ' + 配置条目' : ''}${managedCloneDir ? ` + 托管 clone ${managedCloneDir}` : ''}`,
         requireConfirm: true,
-        willDelete: { vectorCount, kbExists, registered },
+        willDelete: {
+          vectorCount, kbExists, registered,
+          ...(managedCloneDir ? { managedCloneDir } : {}),
+        },
       };
     }
 
@@ -296,10 +318,27 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
     const configResult = removeScopeFromConfigFile(params.scope);
     removeScopeCollection(config, params.scope);
 
+    // S-05：托管 clone 是派生资源，登记随 KB 目录一起删除 ⇒ 一并清理，避免孤儿 clone。
+    let managedCloneRemoved = false;
+    let managedCloneError: string | undefined;
+    if (managedCloneDir) {
+      try {
+        const { purgeManagedCloneDir } = await import('./lib/datasource-clone.js');
+        const purge = await purgeManagedCloneDir(managedCloneDir);
+        managedCloneRemoved = purge.removed;
+        if (!purge.removed && 'error' in purge) managedCloneError = purge.error;
+      } catch (err) {
+        managedCloneError = (err as Error).message;
+      }
+    }
+
     return {
       ok: true, scope: params.scope, deletedVectors, kbRemoved, configRemoved: configResult.removed,
       ftsRemoved,
       ...(ftsError ? { ftsError } : {}),
+      ...(managedCloneDir
+        ? { managedCloneRemoved, managedCloneDir, ...(managedCloneError ? { managedCloneError } : {}) }
+        : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -460,6 +499,9 @@ program
     const result = await executeScopeDelete({ scope: name, yes: !!opts.yes });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();
+    if (result.ok && result.managedCloneError) {
+      process.stderr.write(`⚠ 托管 clone 未删除，请手动清理 ${result.managedCloneDir ?? ''}：${result.managedCloneError}\n`);
+    }
     if (!result.ok) process.exit(1);
   });
 

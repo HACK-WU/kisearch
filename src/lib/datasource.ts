@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { loadConfig, resolveScope, type KiConfig } from './config.js';
+import { getScopeDataDir, loadConfig, resolveScope, type KiConfig } from './config.js';
 import { getKbDir, getSource } from './scope.js';
 import { ensureScopeDir } from './store.js';
 import {
@@ -44,6 +44,8 @@ import type {
   DataSourceWarning,
 } from './datasource-types.js';
 import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
+import { cloneManagedRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
+import { getCollectionsRoot } from './scope-collection.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
@@ -473,6 +475,184 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
   };
 }
 
+// ─── add-remote（S-05 托管 clone）────────────────────────
+
+export interface AddRemoteDataSourceInput {
+  scope: string;
+  url: string;
+  branch?: string | null;
+  subdir?: string | null;
+  group?: string | null;
+  conflictMode?: string;
+  conflictSuffix?: string;
+  vector?: boolean;
+  chunkSize?: number | null;
+  chunkOverlap?: number | null;
+  /** 页面入口（Q8）：scope 必须已存在，拒绝隐式新建 */
+  requireExistingScope?: boolean;
+  /** 仅测试：允许 file:// */
+  allowFileUrl?: boolean;
+  onProgress?: (progress: { phase: 'clone'; done: number; total: number }) => void;
+  abortSignal?: AbortSignal;
+  config?: KiConfig;
+}
+
+export type AddRemoteDataSourceResult =
+  | {
+    ok: true;
+    scope: string;
+    record: DataSourceRecord;
+    created: boolean;
+    clone: { repoRoot: string; dir: string; branch: string | null; headCommit: string | null };
+    warnings?: string[];
+  }
+  | { ok: false; scope: string; code: string; error: string; cleanupWarning?: string };
+
+/**
+ * 页面 add-remote（Q8）只允许已存在的 scope：配置注册 ∪ KB 目录 ∪ 向量集合目录。
+ * 判据与 `kiScopeList`（config ∪ KB ∪ vector）对齐——只差这一处会让页面上能选中的
+ * 纯向量 scope 在提交时被 400 拒绝。
+ */
+export function scopeExists(config: KiConfig, scope: string): boolean {
+  if (Object.prototype.hasOwnProperty.call(config.scopes, scope)) return true;
+  if (fs.existsSync(getScopeDataDir(config, scope))) return true;
+  return fs.existsSync(path.join(getCollectionsRoot(config), scope));
+}
+
+/**
+ * clone + 登记（同步执行，调用方决定任务边界）。
+ *
+ * 锁内顺序：重新检查登记/scope → clone（临时目录 + rename）→ addDataSource（同锁嵌套复用）。
+ * clone 成功但登记失败时回收 clone 目录；回收失败在 `cleanupWarning` 里明示路径。
+ */
+export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Promise<AddRemoteDataSourceResult> {
+  const config = input.config ?? loadConfig();
+  let scope: string;
+  try {
+    scope = resolveScope(config, input.scope);
+  } catch (err) {
+    return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
+  }
+  // 参数校验必须早于 clone：否则一次几分钟的 clone 后才失败
+  const group = (input.group ?? '').trim() || null;
+  const branch = (input.branch ?? '').trim() || null;
+  const subdir = (input.subdir ?? '').trim().replace(/^\/+|\/+$/g, '');
+  if (group !== null && !isSafeGroupPath(group)) {
+    return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径，或含 .. / 反斜杠）` };
+  }
+  try {
+    validateImportConflictMode(input.conflictMode);
+    validateImportConflictSuffix(input.conflictSuffix);
+  } catch (err) {
+    return { ok: false, scope, code: 'INVALID_CONFLICT', error: (err as Error).message };
+  }
+  const chunkSize = input.chunkSize ?? null;
+  const chunkOverlap = input.chunkOverlap ?? null;
+  if (chunkSize !== null && (!Number.isInteger(chunkSize) || chunkSize <= 0)) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-size 必须为正整数：${chunkSize}` };
+  }
+  if (chunkOverlap !== null && (!Number.isInteger(chunkOverlap) || chunkOverlap < 0)) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap 必须为非负整数：${chunkOverlap}` };
+  }
+  if (chunkSize !== null && chunkOverlap !== null && chunkOverlap >= chunkSize) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap（${chunkOverlap}）必须小于 --chunk-size（${chunkSize}）` };
+  }
+  if (input.requireExistingScope && !scopeExists(config, scope)) {
+    return {
+      ok: false,
+      scope,
+      code: 'SCOPE_NOT_FOUND',
+      error: `scope「${scope}」不存在；页面添加只支持已存在的 scope（新建请用 ki scope 或先导入一次）`,
+    };
+  }
+  const precheck = readDataSource(scope);
+  if (precheck.ok) {
+    return { ok: false, scope, code: 'DATASOURCE_EXISTS', error: `scope「${scope}」已登记数据源；请先 ki datasource remove --scope ${scope}` };
+  }
+  if (!precheck.ok && precheck.code !== 'NOT_FOUND') {
+    return { ok: false, scope, code: precheck.code, error: precheck.error };
+  }
+
+  try {
+    return await withScopeWriteLock(scope, 'datasource-add-remote', async () => {
+      // 权威判断在锁内：快速失败检查只是减少无谓 clone
+      const again = readDataSource(scope);
+      if (again.ok) {
+        return { ok: false, scope, code: 'DATASOURCE_EXISTS', error: `scope「${scope}」已登记数据源；请先 ki datasource remove --scope ${scope}` };
+      }
+      if (input.requireExistingScope && !scopeExists(config, scope)) {
+        return { ok: false, scope, code: 'SCOPE_NOT_FOUND', error: `scope「${scope}」不存在` };
+      }
+
+      const cloned = await cloneManagedRepo({
+        scope,
+        url: input.url,
+        branch,
+        subdir,
+        config,
+        allowFileUrl: input.allowFileUrl === true,
+        ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      });
+      if (!cloned.ok) return { ok: false, scope, code: cloned.code, error: cloned.error };
+
+      const relativeRoot = subdir;
+      const added = await addDataSource({
+        scope,
+        dir: cloned.value.dir,
+        type: 'git',
+        gitInfo: {
+          repoRoot: cloned.value.repoRoot,
+          relativeRoot,
+          branch: cloned.value.branch,
+          remoteUrl: cloned.value.remoteUrl,
+          managed: true,
+          remoteBranch: branch ?? cloned.value.branch ?? 'HEAD',
+        },
+        group,
+        ...(input.conflictMode ? { conflictMode: input.conflictMode } : {}),
+        ...(input.conflictSuffix ? { conflictSuffix: input.conflictSuffix } : {}),
+        ...(input.vector !== undefined ? { vector: input.vector } : {}),
+        chunkSize,
+        chunkOverlap,
+        config,
+      });
+      if (!added.ok) {
+        const cleanup = await purgeManagedCloneDir(path.dirname(cloned.value.repoRoot));
+        return {
+          ok: false,
+          scope,
+          code: added.code,
+          error: added.error,
+          ...(cleanup.removed === false && 'error' in cleanup
+            ? { cleanupWarning: `登记失败且托管目录未清理：${cleanup.error}` }
+            : {}),
+        };
+      }
+      return {
+        ok: true,
+        scope,
+        record: added.record,
+        created: added.created,
+        clone: {
+          repoRoot: cloned.value.repoRoot,
+          dir: cloned.value.dir,
+          branch: cloned.value.branch,
+          headCommit: cloned.value.headCommit,
+        },
+        ...(added.warnings && added.warnings.length > 0 ? { warnings: added.warnings } : {}),
+      };
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      scope,
+      code: (err as NodeJS.ErrnoException & { code?: string }).code ?? 'ADD_REMOTE_FAILED',
+      error: (err as Error).message,
+    };
+  }
+}
+
 export type RemoveDataSourceResult =
   | { ok: true; scope: string; removed: boolean; /** 仅提示 */ legacySourceDir: string | null; managedCloneDir: string | null }
   | { ok: false; scope: string; code: string; error: string };
@@ -490,7 +670,8 @@ export async function removeDataSource(scopeInput: string, config: KiConfig = lo
       const file = dataSourcePath(scope);
       const legacySourceDir = getSource(scope)?.dir ?? null;
       const read = readDataSource(scope);
-      const managedCloneDir = read.ok && read.record.git?.managed ? path.dirname(read.record.git.repoRoot) : null;
+      // 只认「由本工具派生」的托管目录（repoRoot 必须精确等于 <cloneRoot>/<scope>/repo）
+      const managedCloneDir = read.ok ? managedCloneDirOf(read.record) : null;
       if (!fs.existsSync(file)) return { ok: true, scope, removed: false, legacySourceDir, managedCloneDir };
       try {
         fs.unlinkSync(file);
