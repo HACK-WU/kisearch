@@ -531,23 +531,55 @@ export function DataSourcePage(): JSX.Element {
                 <p className="ki-write-error" role="alert">{addState.error}</p>
               ) : null}
             </div>
-            <footer className="ki-dialog__foot">
-              <span className="ki-ds-add__status" aria-live="polite">
-                {addState.phase === 'cloning'
-                  ? `正在服务端 clone（任务 ${addState.taskId?.slice(0, 8) ?? ''}）；关闭弹窗不会取消任务`
-                  : ''}
-              </span>
-              <button type="button" className="ki-btn ki-btn--secondary" onClick={() => setAddOpen(false)}>取消</button>
-              <button
-                type="button"
-                className="ki-btn ki-btn--primary"
-                disabled={addBusy || !addScopeConfirmed || !addForm.scope.trim() || !addForm.url.trim()}
-                onClick={() => { void submitAdd(); }}
-              >
-                {addState.phase === 'cloning'
-                  ? `克隆中${addState.progress !== undefined ? ` ${addState.progress}%` : '…'}`
-                  : addState.phase === 'submitting' ? '提交中…' : '添加并开始首次同步'}
+            <footer className="ki-dialog__foot ki-ds-add__foot">
+              {addBusy ? (
+                <div className="ki-ds-clone-progress" role="status" aria-live="polite">
+                  <div className="ki-ds-clone-progress__head">
+                    <span className="ki-ds-clone-progress__pulse" aria-hidden />
+                    <span className="ki-ds-clone-progress__title">
+                      {addState.phase === 'submitting'
+                        ? '正在提交任务…'
+                        : addState.progress !== undefined && addState.progress >= 100
+                          ? '正在校验并登记数据源…'
+                          : '正在克隆 Git 仓库…'}
+                    </span>
+                    {addState.phase === 'cloning' && addState.progress !== undefined ? (
+                      <span className="ki-ds-clone-progress__pct">{addState.progress}%</span>
+                    ) : null}
+                  </div>
+                  <div
+                    className={`ki-ds-clone-progress__track${addState.phase === 'submitting' || addState.progress === undefined ? ' is-indeterminate' : ''}`}
+                    role="progressbar"
+                    aria-label="克隆进度"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    {...(addState.phase === 'cloning' && addState.progress !== undefined
+                      ? { 'aria-valuenow': addState.progress }
+                      : {})}
+                  >
+                    <span
+                      className="ki-ds-clone-progress__bar"
+                      style={addState.phase === 'cloning' && addState.progress !== undefined
+                        ? { width: `${Math.max(4, addState.progress)}%` }
+                        : undefined}
+                    />
+                  </div>
+                  <div className="ki-ds-clone-progress__meta">
+                    {addState.taskId ? `任务 ${addState.taskId.slice(0, 8)} · 关闭弹窗不会取消任务` : '正在创建后台任务'}
+                  </div>
+                </div>
+              ) : null}
+              <button type="button" className="ki-btn ki-btn--secondary" onClick={() => setAddOpen(false)}>
+                {addBusy ? '关闭' : '取消'}
               </button>
+              {!addBusy ? (
+                <button
+                  type="button"
+                  className="ki-btn ki-btn--primary"
+                  disabled={!addScopeConfirmed || !addForm.scope.trim() || !addForm.url.trim()}
+                  onClick={() => { void submitAdd(); }}
+                >添加并开始首次同步</button>
+              ) : null}
             </footer>
           </section>
         </div>

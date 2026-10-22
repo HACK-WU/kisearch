@@ -5529,4 +5529,60 @@ select.ki-chat-cfg__ta--select {
   top: auto; bottom: calc(100% + 4px);
   box-shadow: var(--ki-shadow-2);
 }
-.ki-ds-add__status { margin-right: auto; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
+.ki-ds-add__foot { align-items: center; gap: 12px; }
+/* 克隆进度：不占用主按钮文案，独立进度条 + 脉冲点 + 流光 */
+.ki-ds-clone-progress { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.ki-ds-clone-progress__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ki-ds-clone-progress__pulse {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ki-color-primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--ki-color-primary) 35%, transparent);
+  animation: ki-ds-clone-pulse 1.6s ease-out infinite;
+}
+.ki-ds-clone-progress__title {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text); font-size: var(--ki-font-size-sm); font-weight: 600;
+}
+.ki-ds-clone-progress__pct {
+  flex: none; margin-left: auto; color: var(--ki-color-primary);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); font-weight: 650;
+}
+.ki-ds-clone-progress__track {
+  position: relative; height: 6px; overflow: hidden; border-radius: 999px;
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-clone-progress__bar {
+  display: block; height: 100%; border-radius: inherit; position: relative; overflow: hidden;
+  background: linear-gradient(90deg, var(--ki-color-primary), color-mix(in srgb, var(--ki-color-primary) 65%, #7cc7a4));
+  transition: width 0.35s ease;
+}
+.ki-ds-clone-progress__bar::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.42) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: ki-ds-clone-shimmer 1.4s ease-in-out infinite;
+}
+.ki-ds-clone-progress__track.is-indeterminate .ki-ds-clone-progress__bar {
+  width: 38% !important;
+  animation: ki-ds-clone-indeterminate 1.3s ease-in-out infinite;
+}
+.ki-ds-clone-progress__meta {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+}
+@keyframes ki-ds-clone-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ki-color-primary) 35%, transparent); }
+  70% { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes ki-ds-clone-shimmer { to { transform: translateX(100%); } }
+@keyframes ki-ds-clone-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ki-ds-clone-progress__pulse,
+  .ki-ds-clone-progress__bar::after,
+  .ki-ds-clone-progress__track.is-indeterminate .ki-ds-clone-progress__bar { animation: none; }
+  .ki-ds-clone-progress__bar { transition: none; }
+}
