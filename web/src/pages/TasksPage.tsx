@@ -1,51 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   getTask, getTasks, getImportIncomplete, retryImportIncomplete, activeImportCount,
-  type TaskRecord, type TaskState, type ImportIncompleteStatus,
+  type TaskRecord, type ImportIncompleteStatus,
 } from '@/api/tasksApi';
 import { cancelImport } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
-import { buildTaskDetail, taskSummaryLine, sourceLabel } from '@/lib/taskDetailModel';
+import {
+  buildTaskDetail, operationLabel, sourceLabel, stateLabel,
+} from '@/lib/taskDetailModel';
+import { buildTaskListRow } from '@/lib/taskListModel';
 import { ItemTree, RowList, SectionTitle } from '@/components/TaskDetailParts';
-import { Icon } from '@/components/icons';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
 
-const STATE_LABEL: Record<TaskState, string> = {
-  queued: '排队中',
-  running: '运行中',
-  succeeded: '已完成',
-  partial: '部分完成',
-  failed: '失败',
-  cancelled: '已取消',
-  unknown: '状态未知',
-};
-
-const OPERATION_LABEL: Record<string, string> = {
-  import: '上传导入',
-  'rebuild-vector': '向量重建',
-  'restore-snapshot': '快照还原',
-  'datasource-sync': '数据源同步',
-  'datasource-add-remote': '添加 Git 数据源',
-};
-
 /**
- * 阶段中文映射 / 索引就绪文案 / 进度口径 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
- * （REQ-20261019-004 S-03）：口径需要被单测锁死，不能散落在 JSX 里做判断。
+ * 阶段中文映射 / 索引就绪文案 / 状态与操作文案 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
+ * 与 `lib/taskListModel.ts`（REQ-20261019-004 S-03 / REQ-20261022-002）：
+ * 口径需要被单测锁死，不能散落在 JSX 里做判断。
  */
-function timeLabel(value?: number): string {
-  if (!value) return '—';
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' }).format(value);
-}
-
-/** 进度百分比；无总数时返回 null（不渲染进度条，与 demo 不确定态一致） */
-function progressPercent(task: TaskRecord): number | null {
-  const progress = task.progress;
-  if (!progress || progress.total <= 0) return null;
-  return Math.min(100, Math.round((progress.done / progress.total) * 100));
-}
 
 /** 任务进度条（v2 §7-4：列表行与详情均显示；失败/未知转 danger、部分完成转 warn） */
 function TaskProgressBar({ task, percent, large = false }: {
@@ -71,10 +45,16 @@ function TaskProgressBar({ task, percent, large = false }: {
 }
 
 /**
- * 任务详情（REQ-20261019-004 S-03）：三段布局 + 口径修正。
- * ★ 所有判定在 `buildTaskDetail` 里，组件只渲染——口径需要被单测锁死。
+ * 任务详情抽屉（REQ-20261022-002）：从常驻 380px 右栏迁入 520px 右侧抽屉。
+ * ★ 所有判定在 `buildTaskDetail` / `taskActions` 里，组件只渲染。
+ * ★ 任务页跨 scope：详情、落点与动作全部使用 `task.scope`，不跟随顶部当前 scope。
  */
-function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Element {
+function TaskDetailDrawer({ id, tasks, onClose }: {
+  id: string;
+  tasks: TaskRecord[];
+  onClose: () => void;
+}): JSX.Element {
+  const drawerRef = useRef<HTMLElement>(null);
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ['task', id],
     queryFn: () => getTask(id),
@@ -89,70 +69,144 @@ function TaskDetail({ id, tasks }: { id: string; tasks: TaskRecord[] }): JSX.Ele
   });
   const task = data?.task;
   const detail = task ? buildTaskDetail(task) : null;
+  const title = task ? `${operationLabel(task.operation)} · ${task.scope}` : '任务详情';
+
+  /**
+   * 焦点陷阱：抽屉是 aria-modal，键盘 Tab 不能落到遮罩后的任务列表。
+   * 不在数据源抽屉里做同样处理是为了控制本次回归面；任务页先守住新入口。
+   */
+  useEffect(() => {
+    const root = drawerRef.current;
+    if (!root) return undefined;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab') return;
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), '
+        + 'textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => {
+        // 折叠的 <details> 内容仍有 offsetWidth/Height，但 focus() 无效；摘要本身始终可见
+        if (element.tagName !== 'SUMMARY' && element.closest('details:not([open])')) return false;
+        return element.offsetWidth > 0 || element.offsetHeight > 0 || element === document.activeElement;
+      });
+      if (focusables.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || !root.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !root.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    root.addEventListener('keydown', onKeyDown);
+    return () => root.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
-    <aside className="ki-task-detail">
-      <div className="ki-task-detail__head">
-        <div>
-          <span className="ki-panel-kicker">DETAIL</span>
-          <h2>{task ? (OPERATION_LABEL[task.operation] ?? task.operation) : '任务'}</h2>
+    <>
+      <div className="ki-task-drawer__scrim" onClick={onClose} aria-hidden="true" />
+      <aside
+        ref={drawerRef}
+        className="ki-task-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="任务详情"
+        data-task-detail-id={id}
+      >
+        <header className="ki-task-drawer__head">
+          <div className="ki-task-drawer__identity">
+            <div className="ki-task-drawer__kicker">TASK</div>
+            <h2 className="ki-task-drawer__title" title={title}>{title}</h2>
+            {task ? (
+              <div className="ki-task-drawer__meta">
+                <code title={task.id}>{task.id.slice(0, 8)}…</code>
+                <span>{sourceLabel(task.source)}</span>
+              </div>
+            ) : null}
+          </div>
+          {task ? (
+            <span className={`ki-task-state ki-task-state--${task.state}`}>{stateLabel(task.state)}</span>
+          ) : null}
+          <button
+            type="button"
+            className="ki-task-drawer__close"
+            aria-label="关闭任务详情"
+            autoFocus
+            onClick={onClose}
+          >✕</button>
+        </header>
+
+        <div className="ki-task-drawer__body">
+          {isPending ? <p className="ki-task-muted">正在读取任务详情…</p> : null}
+          {error ? (
+            <div className="ki-task-drawer__error" role="alert">
+              <p className="ki-task-error">记录已清理或读取失败：任务仅保留 1 小时。</p>
+              <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={() => void refetch()}>
+                重试
+              </button>
+            </div>
+          ) : null}
+          {task && detail ? (
+            <>
+              {/* 参数段恒非空（至少含「知识库」「来源」两行） */}
+              <SectionTitle>本次参数</SectionTitle>
+              <RowList rows={detail.params} />
+
+              {detail.results.length > 0 ? (
+                <>
+                  <SectionTitle>执行结果</SectionTitle>
+                  <RowList rows={detail.results} />
+                  {detail.duplicates.length > 0 ? (
+                    <details className="ki-task-detail__details">
+                      <summary>疑似重复明细 {detail.duplicates.length} 条</summary>
+                      <ItemTree items={detail.duplicates} label="疑似重复明细" />
+                    </details>
+                  ) : null}
+                  {detail.conflicts.length > 0 ? (
+                    <details className="ki-task-detail__details">
+                      <summary>同名冲突明细 {detail.conflicts.length} 条</summary>
+                      <ItemTree items={detail.conflicts} label="同名冲突明细" />
+                    </details>
+                  ) : null}
+                </>
+              ) : null}
+
+              {detail.progressText ? <p className="ki-task-muted">{detail.progressText}</p> : null}
+              {detail.showProgress ? <TaskProgressBar task={task} percent={detail.progressPercent} large /> : null}
+
+              {detail.times.length > 0 ? (
+                <>
+                  <SectionTitle>时间</SectionTitle>
+                  <RowList rows={detail.times} />
+                </>
+              ) : null}
+
+              {detail.notices.map((notice, index) => (
+                <p key={`${notice.tone}-${index}`} className={`ki-task-notice ki-task-notice--${notice.tone}`}>
+                  {notice.text}
+                </p>
+              ))}
+            </>
+          ) : null}
+          {!isPending && !error && !task ? <p className="ki-task-muted">未找到任务详情。</p> : null}
+          <code className="ki-task-id">{id}</code>
+          {task ? (
+            <TaskActions
+              task={task}
+              runningImports={activeImportCount(tasks, task.scope)}
+              onRecheck={() => void refetch()}
+            />
+          ) : null}
         </div>
-        <span className={`ki-task-state ki-task-state--${task?.state ?? 'unknown'}`}>
-          {task ? STATE_LABEL[task.state] : '读取中'}
-        </span>
-      </div>
-      {isPending ? <p className="ki-task-muted">正在读取任务详情…</p> : null}
-      {error ? <p className="ki-task-error">记录已清理或读取失败：任务仅保留 1 小时。</p> : null}
-      {task && detail ? (
-        <>
-          {/* 参数段恒非空（至少含「知识库」「来源」两行） */}
-          <SectionTitle>本次参数</SectionTitle>
-          <RowList rows={detail.params} />
-
-          {detail.results.length > 0 ? (
-            <>
-              <SectionTitle>执行结果</SectionTitle>
-              <RowList rows={detail.results} />
-              {detail.duplicates.length > 0 ? (
-                <details className="ki-task-detail__details">
-                  <summary>疑似重复明细 {detail.duplicates.length} 条</summary>
-                  <ItemTree items={detail.duplicates} label="疑似重复明细" />
-                </details>
-              ) : null}
-              {detail.conflicts.length > 0 ? (
-                <details className="ki-task-detail__details">
-                  <summary>同名冲突明细 {detail.conflicts.length} 条</summary>
-                  <ItemTree items={detail.conflicts} label="同名冲突明细" />
-                </details>
-              ) : null}
-            </>
-          ) : null}
-
-          {detail.progressText ? <p className="ki-task-muted">{detail.progressText}</p> : null}
-          {detail.showProgress ? <TaskProgressBar task={task} percent={detail.progressPercent} large /> : null}
-
-          {detail.times.length > 0 ? (
-            <>
-              <SectionTitle>时间</SectionTitle>
-              <RowList rows={detail.times} />
-            </>
-          ) : null}
-
-          {detail.notices.map((notice, index) => (
-            <p key={`${notice.tone}-${index}`} className={`ki-task-notice ki-task-notice--${notice.tone}`}>
-              {notice.text}
-            </p>
-          ))}
-        </>
-      ) : null}
-      <code className="ki-task-id">{id}</code>
-      {task ? (
-        <TaskActions
-          task={task}
-          runningImports={activeImportCount(tasks, task.scope)}
-          onRecheck={() => void refetch()}
-        />
-      ) : null}
-    </aside>
+      </aside>
+    </>
   );
 }
 
@@ -379,7 +433,11 @@ function TaskActions({
 
 export function TasksPage(): JSX.Element {
   const [filter, setFilter] = useState<Filter>('all');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { id: routeId } = useParams<{ id?: string }>();
+  const navigate = useNavigate();
+  const selectedId = routeId ?? null;
+  /** 关闭抽屉后把焦点还给打开它的行（否则焦点掉到 body） */
+  const lastSelectedRef = useRef<string | null>(null);
   const query = useQuery({
     queryKey: ['tasks'],
     queryFn: () => getTasks(200),
@@ -397,15 +455,47 @@ export function TasksPage(): JSX.Element {
   const failedCount = tasks.filter((task) => task.state === 'failed' || task.state === 'unknown').length;
   const partialCount = tasks.filter((task) => task.state === 'partial').length;
 
+  useEffect(() => {
+    if (selectedId) {
+      lastSelectedRef.current = selectedId;
+      return;
+    }
+    const last = lastSelectedRef.current;
+    if (!last) return;
+    lastSelectedRef.current = null;
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(last)}"]`)?.focus();
+    });
+  }, [selectedId]);
+
+  // Esc 关闭抽屉（与数据源页 / 站内其他浮层同口径）
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') navigate('/tasks');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedId, navigate]);
+
   return (
     <div className="ki-tasks-page">
       <div className="ki-page-head">
         <div>
           <p>查看网页导入、CLI 导入与向量重建 · 最近任务保留 1 小时</p>
         </div>
-        <button className="ki-btn ki-btn--secondary" onClick={() => void query.refetch()} disabled={query.isFetching}>
-          {query.isFetching ? '刷新中…' : '刷新任务'}
-        </button>
+        <div className="ki-task-page-actions">
+          <div className="ki-task-filters" role="tablist" aria-label="任务筛选">
+            {([['all', '全部'], ['running', '进行中'], ['failed', '失败'], ['recent', '最近结束']] as const).map(([key, label]) => (
+              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => setFilter(key)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button className="ki-btn ki-btn--secondary" onClick={() => void query.refetch()} disabled={query.isFetching}>
+            {query.isFetching ? '刷新中…' : '刷新任务'}
+          </button>
+        </div>
       </div>
 
       <div className="ki-task-summary-row">
@@ -415,54 +505,116 @@ export function TasksPage(): JSX.Element {
         <div className="ki-task-summary"><b>{query.data?.total ?? 0}</b><span>可见任务</span></div>
       </div>
 
-      <div className="ki-task-workspace">
-        <section className="ki-card ki-task-list-card">
-          <div className="ki-card__head">
-            <span className="ki-panel-heading">
-              <span className="ki-panel-kicker">TASKS</span>
-              <span className="ki-card__title">任务记录</span>
-            </span>
-            <div className="ki-task-filters" role="tablist" aria-label="任务筛选">
-              {([['all', '全部'], ['running', '进行中'], ['failed', '失败'], ['recent', '最近结束']] as const).map(([key, label]) => (
-                <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => setFilter(key)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="ki-card__body ki-task-list">
-            {query.error ? <div className="ki-task-error">无法读取后台任务。请检查服务连接和数据目录权限。</div> : null}
-            {query.isPending ? <div className="ki-task-muted">正在读取任务…</div> : null}
-            {!query.error && !query.isPending && visibleTasks.length === 0 ? (
-              <div className="ki-empty"><div><h3>暂无任务</h3><p>CLI 或网页启动导入、向量重建后，任务会自动出现在这里。</p></div></div>
-            ) : null}
-            {visibleTasks.map((task) => (
-              <button key={task.id} className={`ki-task-row${selectedId === task.id ? ' ki-task-row--selected' : ''}`} onClick={() => setSelectedId(task.id)}>
-                <span className={`ki-task-state ki-task-state--${task.state}`}>{STATE_LABEL[task.state]}</span>
-                <span className="ki-task-row__main">
-                  <b>{OPERATION_LABEL[task.operation] ?? task.operation}</b>
-                  <span>{task.scope} · {sourceLabel(task.source)} · {taskSummaryLine(task)}</span>
-                  <TaskProgressBar task={task} percent={progressPercent(task)} />
-                  {task.error && <small>{task.error}</small>}
-                </span>
-                <time>{timeLabel(task.startedAt ?? task.createdAt)}</time>
-              </button>
-            ))}
-          </div>
-        </section>
-        {/* ★ key 必须绑 id（2026-10-13 评审 P1）：切任务时 React 会复用同一实例，
-            否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。
-            `tasks` 传入用于「该 scope 是否已有导入在跑」的判据（用户反馈的重复重试修复）。 */}
-        {selectedId ? <TaskDetail key={selectedId} id={selectedId} tasks={tasks} /> : (
-          <aside className="ki-task-detail ki-task-detail--empty">
-            <span className="ki-task-detail__icon">
-              <Icon name="clock" />
-            </span>
-            <h2>选择一个任务</h2>
-            <p>任务详情会显示阶段、进度、错误摘要和恢复建议。</p>
-          </aside>
-        )}
-      </div>
+      <section className="ki-card ki-task-list-card">
+        <div className="ki-card__body">
+          {query.error ? <div className="ki-task-error">无法读取后台任务。请检查服务连接和数据目录权限。</div> : null}
+          {query.isPending ? <div className="ki-task-muted">正在读取任务…</div> : null}
+          {!query.error && !query.isPending && visibleTasks.length === 0 ? (
+            <div className="ki-empty"><div><h3>暂无任务</h3><p>CLI 或网页启动导入、向量重建后，任务会自动出现在这里。</p></div></div>
+          ) : null}
+          {visibleTasks.length > 0 ? (
+            <table className="ki-task-table" aria-label="任务列表">
+              <thead>
+                <tr className="ki-task-table__head">
+                  <th scope="col">状态</th>
+                  <th scope="col">任务</th>
+                  <th scope="col" className="ki-task-col--scope">知识库</th>
+                  <th scope="col" className="ki-task-col--source">来源</th>
+                  <th scope="col" className="ki-task-col--result">结果摘要</th>
+                  <th scope="col" className="ki-task-col--time">时间</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleTasks.map((task) => {
+                  const row = buildTaskListRow(task);
+                  const active = selectedId === task.id;
+                  const openTask = (): void => {
+                    navigate(`/tasks/${encodeURIComponent(task.id)}`);
+                  };
+                  return (
+                    <tr
+                      key={task.id}
+                      tabIndex={0}
+                      className={`ki-task-table__row${active ? ' is-active' : ''}`}
+                      data-task-id={task.id}
+                      aria-label={row.ariaLabel}
+                      aria-current={active ? 'true' : undefined}
+                      onClick={openTask}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          openTask();
+                        }
+                      }}
+                    >
+                      <td>
+                        <span className="ki-task-table__state">
+                          <span className={`ki-task-state ki-task-state--${task.state}`}>{row.stateLabel}</span>
+                          {row.progressPercent !== null ? (
+                            <span className="ki-task-table__bar">
+                              <TaskProgressBar task={task} percent={row.progressPercent} />
+                            </span>
+                          ) : null}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="ki-task-table__task">
+                          <b>{row.operationLabel}</b>
+                          <code title={row.id}>#{row.shortId}</code>
+                          <small className="ki-task-table__task-scope" title={row.scope}>{row.scope}</small>
+                          <small
+                            className="ki-task-table__task-result"
+                            title={[row.resultSummary, row.resultError].filter(Boolean).join(' · ')}
+                          >
+                            {row.resultError ?? row.resultSummary}
+                          </small>
+                        </span>
+                      </td>
+                      <td className="ki-task-col--scope">
+                        <span className="ki-task-table__scope" title={row.scope}>{row.scope}</span>
+                      </td>
+                      <td className="ki-task-col--source">
+                        <span className={`ki-task-source-badge ki-task-source-badge--${task.source}`}>{row.sourceLabel}</span>
+                      </td>
+                      <td className="ki-task-col--result">
+                        <span
+                          className={`ki-task-table__result${row.resultTone !== 'normal' ? ` ki-task-table__result--${row.resultTone}` : ''}`}
+                          title={[row.resultSummary, row.resultError].filter(Boolean).join(' · ')}
+                        >
+                          <span className="ki-task-table__summary">{row.resultSummary}</span>
+                          {row.resultError ? <span className="ki-task-table__error">{row.resultError}</span> : null}
+                        </span>
+                      </td>
+                      <td className="ki-task-col--time">
+                        <span className="ki-task-table__time" title={row.timeTitle}>
+                          <span>{row.timeLabel}</span>
+                          {row.timeHint ? <small>{row.timeHint}</small> : null}
+                        </span>
+                      </td>
+                      <td className="ki-task-table__actions">
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--secondary ki-btn--small ki-task-detail-btn"
+                          onClick={(event) => { event.stopPropagation(); openTask(); }}
+                        >详情</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : null}
+        </div>
+      </section>
+
+      {/* ★ key 必须绑 id（2026-10-13 评审 P1）：切任务时 React 会复用同一实例，
+          否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。
+          `tasks` 传入用于「该 scope 是否已有导入在跑」的判据（用户反馈的重复重试修复）。 */}
+      {selectedId ? (
+        <TaskDetailDrawer key={selectedId} id={selectedId} tasks={tasks} onClose={() => navigate('/tasks')} />
+      ) : null}
     </div>
   );
 }
