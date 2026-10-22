@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>数据源 · 同步详情重设计 demo</title>
+<style>
+/* ════════════════════════════════════════════════════════════
+   设计 token —— 与 web/src/styles/ki.css 同名同值，落地时直接引用现有变量。
+   仅新增 --ds-* 局部 token（抽屉专用，不影响全局）。
+   ════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: light;
+
+  --ki-color-bg: #f5f6f3;
+  --ki-color-bg-secondary: #f9faf8;
+  --ki-color-surface: #ffffff;
+  --ki-color-border: #e1e7e1;
+  --ki-color-border-strong: #c8d3c9;
+  --ki-color-text: #202b27;
+  --ki-color-text-muted: #4e5f56;
+  --ki-color-text-subtle: #61716a;
+  --ki-color-primary: #2d6755;
+  --ki-color-primary-hover: #23513f;
+  --ki-color-primary-soft: #e8f3ed;
+  --ki-color-success: #2a8055;
+  --ki-color-warning: #8a6208;
+  --ki-color-warning-soft: #fbf3db;
+  --ki-color-danger: #b14e49;
+  --ki-color-danger-soft: #fdebec;
+  --ki-color-danger-ink: #9d3a36;
+  --ki-color-bg-muted: #f0f2ee;
+  --ki-color-scrollbar: rgba(26, 58, 41, 0.18);
+
+  --ki-space-1: 4px;
+  --ki-space-2: 8px;
+  --ki-space-3: 12px;
+  --ki-space-4: 16px;
+  --ki-space-5: 20px;
+  --ki-space-6: 24px;
+
+  --ki-radius-sm: 6px;
+  --ki-radius-md: 10px;
+  --ki-radius-lg: 14px;
+  --ki-radius-tag: 4px;
+  --ki-radius-track: 999px;
+
+  --ki-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --ki-font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --ki-font-size-xs: 11px;
+  --ki-font-size-sm: 12px;
+  --ki-font-size-md: 14px;
+  --ki-font-size-lg: 15px;
+  --ki-font-size-xl: 17px;
+  --ki-font-size-heading: 20px;
+  --ki-font-size-2xl: 28px;
+
+  --ki-shadow-drawer: -8px 0 32px rgba(18, 24, 21, 0.07);
+  --ki-motion-fast: 150ms;
+  --ki-motion-base: 220ms;
+
+  /* 抽屉局部 token */
+  /* 抽屉宽度：占视口 70%（用户定稿），窄屏回落 520px，≤960 时直接全宽 */
+  --ds-drawer-width: clamp(520px, 70vw, 100vw);
+  --ds-font-value: 13px;      /* 参数值字号：介于 sm(12) 与 md(14) 之间 */
+  --ds-label-gap: 4px;        /* label 与 value 的垂直距 */
+  --ds-row-gap: 14px;         /* 参数行距 */
+  --ds-sheen: rgba(255, 255, 255, 0.72);
+  --ds-scroll-thumb: rgba(26, 58, 41, 0.24);
+  --ds-scroll-thumb-hover: rgba(26, 58, 41, 0.44);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ki-color-bg: #131715;
+  --ki-color-bg-secondary: #212724;
+  --ki-color-surface: #1b201d;
+  --ki-color-border: #2c332f;
+  --ki-color-border-strong: #3f4a44;
+  --ki-color-text: #e9ede8;
+  --ki-color-text-muted: #b4beb7;
+  --ki-color-text-subtle: #97a39d;
+  --ki-color-primary: #5fae8c;
+  --ki-color-primary-hover: #74c3a0;
+  --ki-color-primary-soft: #17322a;
+  --ki-color-success: #6cc194;
+  --ki-color-warning: #d9ad5c;
+  --ki-color-warning-soft: #362d18;
+  --ki-color-danger: #d98a85;
+  --ki-color-danger-soft: #3a2422;
+  --ki-color-danger-ink: #eda7a2;
+  --ki-color-bg-muted: #232c27;
+  --ki-color-scrollbar: rgba(255, 255, 255, 0.18);
+
+  --ki-shadow-drawer: -8px 0 32px rgba(0, 0, 0, 0.42);
+  --ds-sheen: rgba(255, 255, 255, 0.07);
+  --ds-scroll-thumb: rgba(255, 255, 255, 0.22);
+  --ds-scroll-thumb-hover: rgba(255, 255, 255, 0.36);
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--ki-color-bg);
+  color: var(--ki-color-text);
+  font-family: var(--ki-font-family);
+  font-size: var(--ki-font-size-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font: inherit; color: inherit; }
+
+/* ══════════════ demo 控件条（不属于产品 UI） ══════════════ */
+.demo-bar {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  max-width: min(760px, calc(100vw - 32px));
+  padding: 6px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: color-mix(in srgb, var(--ki-color-surface) 92%, transparent);
+  box-shadow: 0 8px 28px rgba(18, 24, 21, 0.12);
+  backdrop-filter: blur(8px);
+}
+.demo-bar__label {
+  padding: 0 4px 0 6px;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  letter-spacing: 0.04em;
+}
+.demo-bar button {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-sm);
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.demo-bar button:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.demo-bar button.is-on {
+  background: var(--ki-color-primary-soft);
+  border-color: color-mix(in srgb, var(--ki-color-primary) 26%, transparent);
+  color: var(--ki-color-primary);
+  font-weight: 600;
+}
+.demo-bar button:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.demo-bar__sep { width: 1px; height: 16px; margin: 0 4px; background: var(--ki-color-border); }
+
+/* ══════════════ 背景：数据源列表（上下文，非本次重点） ══════════════ */
+.list-pane { padding: 26px 28px 96px; }
+.list-pane__head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.list-pane__title { margin: 0; font-size: var(--ki-font-size-heading); font-weight: 680; letter-spacing: -0.02em; }
+.list-pane__sub { margin: 6px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
+.list-card { border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-lg); background: var(--ki-color-surface); overflow: hidden; }
+.list-table { width: 100%; border-collapse: collapse; }
+.list-table th {
+  padding: 9px 12px; text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
+}
+.list-table td { padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
+.list-table tr:last-child td { border-bottom: 0; }
+.list-row { cursor: pointer; transition: background var(--ki-motion-fast); }
+.list-row:hover { background: var(--ki-color-bg-secondary); }
+.list-row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.list-row.is-active { background: var(--ki-color-primary-soft); }
+.list-row.is-active td:first-child { box-shadow: inset 3px 0 0 var(--ki-color-primary); }
+.list-row__scope { color: var(--ki-color-text); font-weight: 600; }
+.list-row__path { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); }
+.list-pill { display: inline-block; padding: 1px 7px; border-radius: var(--ki-radius-track); font-size: var(--ki-font-size-xs); font-weight: 600; }
+.list-pill--ok { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 13%, transparent); }
+.list-pill--queued { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+
+/* ════════════════════════════════════════════════════════════
+   抽屉（本次重设计主体）
+   ════════════════════════════════════════════════════════════ */
+.ds-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1021;
+  display: flex;
+  flex-direction: column;
+  width: var(--ds-drawer-width);
+  background: var(--ki-color-surface);
+  border-left: 1px solid var(--ki-color-border);
+  box-shadow: var(--ki-shadow-drawer);
+  transform: translateX(100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform var(--ki-motion-base) cubic-bezier(0.22, 0.61, 0.36, 1), opacity var(--ki-motion-base);
+}
+.ds-drawer.is-open { transform: translateX(0); opacity: 1; pointer-events: auto; }
+
+/* ── 头部 ─────────────────────────────────────────────── */
+.ds-head {
+  flex: none;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ds-head__row { display: flex; align-items: flex-start; gap: 10px; }
+.ds-head__title {
+  flex: 1;
+  min-width: 0;
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ki-font-size-heading);
+  font-weight: 680;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+.ds-head__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-sm);
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast), border-color var(--ki-motion-fast);
+}
+.ds-head__close:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ds-head__close:active { transform: translateY(1px); }
+.ds-head__close:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+
+/* 第二行：类型 chip + 源目录 + 复制 */
+.ds-head__origin { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 10px; }
+.ds-type {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+}
+.ds-head__path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ki-color-text-muted);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-sm);
+  direction: ltr;
+}
+
+/* 第三行：状态 + 时间元信息 */
+.ds-head__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.ds-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.ds-state__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ds-state--ok { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
+.ds-state--partial { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ds-state--failed { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+.ds-state--running,
+.ds-state--queued { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ds-state--never { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+.ds-state--running .ds-state__dot { animation: ds-pulse 1.6s ease-in-out infinite; }
+@keyframes ds-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.78); }
+}
+.ds-head__when {
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* ── 主体 ─────────────────────────────────────────────── */
+.ds-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px 18px 32px;
+}
+
+/* 功能区隔离（2026-10-22 用户：不同功能区之间要有隔离，且各自有独特样式）：
+   三个区各是一种材质，不只是换个色标：
+     执行结果 = 白底 + 1px 细边（"仪表盘"面板，主色身份）
+     同步参数 = 浅灰底、无边框（"属性面板"，中性、次一级）
+     待删除   = 浅警告底 + 警告描边（"操作台"，全抽屉唯一写入口）
+   卡与卡之间 14px 间距，不再用横线分隔（线 + 卡边会重复）。 */
+.ds-sec {
+  padding: 14px 14px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-md);
+}
+.ds-sec + .ds-sec { margin-top: 14px; }
+.ds-sec__head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ds-sec__mark {
+  flex: none;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--ki-color-border-strong);
+}
+.ds-sec__title {
+  margin: 0;
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-md);
+  font-weight: 680;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+}
+.ds-sec__hint {
+  margin-left: auto;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 数据区：淡主色底 + 主色调边的面板（白底压在白抽屉上只有一条线，撑不起"最重要"的位置） */
+.ds-sec--data {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 16%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+}
+.ds-sec--data .ds-sec__mark { background: var(--ki-color-primary); }
+
+/* 参数区：浅灰底 + 常规细边 —— 与数据区同为面板，但底色更淡、标题更弱，层级低一档 */
+.ds-sec--meta {
+  border-color: var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.ds-sec--meta .ds-sec__title { color: var(--ki-color-text-muted); font-weight: 650; }
+
+/* 操作区：警告底 + 警告描边 —— 全抽屉唯一的写入口 */
+.ds-sec--action {
+  border-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-warning) 5%, var(--ki-color-surface));
+}
+.ds-sec--action .ds-sec__mark { background: var(--ki-color-warning); }
+.ds-sec--action .ds-sec__title { color: var(--ki-color-warning); }
+
+/* ── Hero：完成数 + 分段条 ─────────────────────────────── */
+.ds-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+  padding: 14px 16px 15px;
+  border-radius: var(--ki-radius-md);
+  /* 数据卡本身是淡主色底，hero 用纯 surface 提亮一层，形成卡内焦点 */
+  background: var(--ki-color-surface);
+}
+
+.ds-hero__num {
+  font-size: var(--ki-font-size-2xl);
+  font-weight: 660;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.ds-hero__label {
+  margin-top: 4px;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  letter-spacing: 0.04em;
+}
+.ds-hero__barrow { display: flex; align-items: center; gap: 10px; }
+.ds-bar {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  height: 4px;
+  border-radius: var(--ki-radius-track);
+  background: var(--ki-color-bg-muted);
+  overflow: hidden;
+}
+.ds-bar__seg { display: block; height: 100%; border-radius: var(--ki-radius-track); }
+.ds-bar__seg--done { background: var(--ki-color-primary); }
+.ds-bar__seg--skipped { background: var(--ki-color-border-strong); }
+.ds-bar__seg--failed { background: var(--ki-color-danger); }
+.ds-hero__pct {
+  flex: none;
+  min-width: 40px;
+  text-align: right;
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ds-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.ds-legend__item { display: inline-flex; align-items: baseline; gap: 5px; }
+.ds-legend__item::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ki-color-border-strong);
+  transform: translateY(-1px);
+}
+.ds-legend__item--done::before { background: var(--ki-color-primary); }
+.ds-legend__item--failed { color: var(--ki-color-danger-ink); font-weight: 600; }
+.ds-legend__item--failed::before { background: var(--ki-color-danger); }
+.ds-legend__sub { color: var(--ki-color-text-subtle); font-weight: 400; }
+.ds-legend__dot { color: var(--ki-color-border-strong); }
+
+/* ── 指标网格 3×2 ─────────────────────────────────────── */
+.ds-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 12px 0 0;
+  padding: 0;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-border);
+  overflow: hidden;
+}
+.ds-metric {
+  padding: 10px 12px 11px;
+  background: var(--ki-color-surface);
+  transition: background var(--ki-motion-fast);
+}
+.ds-metric:hover { background: var(--ki-color-bg-secondary); }
+/* 深色下 surface(#1b201d) 比数据卡底(primary 4%)还暗，块会"凹"下去；
+   混一点文字色提亮，保持"块浮在卡上"的方向与浅色一致。 */
+[data-theme="dark"] .ds-hero,
+[data-theme="dark"] .ds-metric { background: color-mix(in srgb, var(--ki-color-text) 5%, var(--ki-color-surface)); }
+[data-theme="dark"] .ds-metric:hover { background: color-mix(in srgb, var(--ki-color-text) 9%, var(--ki-color-surface)); }
+.ds-metric__label {
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  letter-spacing: 0.03em;
+}
+.ds-metric__value {
+  margin-top: 3px;
+  font-size: var(--ki-font-size-xl);
+  font-weight: 640;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.ds-metric__value--zero { color: var(--ki-color-text-subtle); font-weight: 560; }
+.ds-metric__value--danger { color: var(--ki-color-danger-ink); }
+
+/* ── 同步参数：**保持原有两列布局**（2026-10-22 用户明确：布局不要动）──────
+   用户反馈「值不要加背景色，key 和 value 用不同颜色，简单点」：
+   去 chip / 去虚线分隔，只留两级文字色 —— key 浅灰 11px，value 深色 13px/500。 */
+.ds-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin: 0; }
+.ds-params__cell { min-width: 0; }
+.ds-params dt {
+  margin: 0 0 var(--ds-label-gap);
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+.ds-params dd {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+  color: var(--ki-color-text);
+  font-size: var(--ds-font-value);
+  font-weight: 500;
+  line-height: 1.45;
+}
+.ds-params dd > span { min-width: 0; }
+/* 路径是全篇唯一需要等宽辨识的值，其余一律正文体 */
+.ds-params dd.is-mono { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); font-weight: 400; color: var(--ki-color-text); }
+.ds-params dd .ds-copy { margin-left: auto; }
+.ds-params__cell--full { grid-column: 1 / -1; }
+
+/* 复制按钮：常显（可发现性优先），hover/focus 才提亮 */
+.ds-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ki-radius-sm);
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  transition: color var(--ki-motion-fast), background var(--ki-motion-fast), border-color var(--ki-motion-fast);
+}
+.ds-copy:hover { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ds-copy:active { transform: translateY(1px); }
+.ds-copy:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ds-copy.is-done { color: var(--ki-color-success); border-color: color-mix(in srgb, var(--ki-color-success) 30%, transparent); }
+
+/* ── 提示条 ───────────────────────────────────────────── */
+.ds-notice {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  border-radius: var(--ki-radius-sm);
+  border-left: 3px solid var(--ki-color-border-strong);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.5;
+}
+.ds-notice--info { border-left-color: var(--ki-color-primary); background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
+/* ── 同步进度（1:1 复刻导入页 .ki-progress* / .ki-track-* 的口径）──────
+   来源：web/src/pages/ImportPage.tsx 右侧「导入进度」卡 + web/src/styles/ki.css
+   阶段文案 + 进度条 + 计数，值是原作者那一套，不要凭感觉改。 */
+.ki-progress-block {
+  padding: 14px 16px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+  /* 与下方功能区保持同一档间距（.ds-sec 之间是 14px，进度块不是 .ds-sec，得自己带） */
+  margin-bottom: 14px;
+}
+.ki-track-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ki-track-kicker {
+  color: var(--ki-color-text-subtle);
+  font: 650 var(--ki-font-size-xs)/1.2 var(--ki-font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ki-track-title { margin-top: 4px; font-size: 17px; font-weight: 680; letter-spacing: -0.025em; }
+.ki-progress-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0 8px; }
+.ki-progress-label { display: inline-flex; align-items: center; font-weight: 600; font-size: var(--ki-font-size-md); }
+.ki-progress-sub { margin-top: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-progress { height: 6px; border-radius: var(--ki-radius-track); background: var(--ki-color-bg-muted); overflow: hidden; }
+.ki-progress__fill {
+  height: 100%;
+  border-radius: var(--ki-radius-track);
+  background: var(--ki-color-primary);
+  transition: width 0.3s ease;
+}
+.ki-progress__fill--indeterminate { width: 35%; animation: ki-progress-indeterminate 1.4s ease-in-out infinite; }
+@keyframes ki-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  50% { transform: translateX(180%); }
+  100% { transform: translateX(300%); }
+}
+.ki-spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ds-spin 0.85s linear infinite;
+}
+
+/* 进行中的提示条：左侧竖条呼吸 + 转圈指示器（只在"同步中/排队中"出现，
+   静态提示条不要动，否则整页都在闪） */
+.ds-notice--live { animation: ds-notice-breathe 2.4s ease-in-out infinite; }
+@keyframes ds-notice-breathe {
+  0%, 100% { border-left-color: var(--ki-color-primary); }
+  50% { border-left-color: color-mix(in srgb, var(--ki-color-primary) 32%, transparent); }
+}
+.ds-notice__spinner {
+  flex: none;
+  width: 12px; height: 12px;
+  margin-top: 3px;
+  border: 2px solid color-mix(in srgb, currentColor 26%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ds-spin 0.9s linear infinite;
+}
+@keyframes ds-spin { to { transform: rotate(360deg); } }
+.ds-notice--warn { border-left-color: var(--ki-color-warning); background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+.ds-notice strong { font-weight: 650; }
+
+/* ── 折叠明细 ─────────────────────────────────────────── */
+.ds-details { margin-top: 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); overflow: hidden; }
+.ds-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.ds-details > summary::-webkit-details-marker { display: none; }
+.ds-details > summary::before { content: '\25B8'; font-size: 10px; color: var(--ki-color-text-subtle); }
+.ds-details[open] > summary::before { content: '\25BE'; }
+.ds-details > summary:hover { background: var(--ki-color-bg-muted); }
+.ds-details > summary:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ds-details__count { margin-left: auto; color: var(--ki-color-text-subtle); font-weight: 500; font-variant-numeric: tabular-nums; }
+.ds-fail-list { margin: 0; padding: 6px 0; list-style: none; }
+.ds-fail-list li {
+  display: flex;
+  gap: 10px;
+  padding: 5px 12px;
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.5;
+}
+.ds-fail-list li:hover { background: var(--ki-color-bg-secondary); }
+.ds-fail-list__path { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ki-color-text); }
+.ds-fail-list__why { flex: none; color: var(--ki-color-danger-ink); font-family: var(--ki-font-family); }
+
+/* 失败明细箱：默认就展开，只截前 5 条，其余靠底部按钮展开 */
+.ds-failbox {
+  margin-top: 12px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  overflow: hidden;
+}
+.ds-failbox__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.ds-failbox__title { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 650; }
+.ds-failbox__count {
+  margin-left: auto;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+/* .ds-fail-list li 是 display:flex，会盖掉 [hidden] 的默认 display:none */
+.ds-fail-list li[hidden] { display: none; }
+/* 展开后条数多时（服务端上限 20 条）列表内滚动，不把卡片撑长；
+   头部与底部按钮在滚动区外，始终可见。 */
+.ds-failbox .ds-fail-list {
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ── 滚动条（抽屉本体 + 失败明细列表）──────────────────────
+   两套写法并存：标准属性给 Firefox / Chrome 121+，::-webkit-* 给旧 Chromium。
+   ★ 必须显式 `::-webkit-scrollbar-button { display: none }`，否则 Windows 上会
+     画出带上下箭头的系统滚动条（用户截图里那个）。 */
+.ds-body,
+.ds-failbox .ds-fail-list,
+.ds-tree-wrap {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ds-scroll-thumb) transparent;
+}
+.ds-body::-webkit-scrollbar,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+.ds-body::-webkit-scrollbar-track,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar-track { background: transparent; }
+.ds-body::-webkit-scrollbar-thumb,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 3px solid transparent;      /* 左右内缩，视觉上变成 4px 细条 */
+  border-radius: 999px;
+  background: var(--ds-scroll-thumb);
+  background-clip: content-box;
+}
+.ds-body::-webkit-scrollbar-thumb:hover,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--ds-scroll-thumb-hover);
+  background-clip: content-box;
+}
+.ds-body::-webkit-scrollbar-button,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar-button { display: none; }
+.ds-body::-webkit-scrollbar-corner,
+.ds-failbox .ds-fail-list::-webkit-scrollbar,
+.ds-tree-wrap::-webkit-scrollbar-corner { background: transparent; }
+.ds-failbox__more {
+  display: block;
+  width: 100%;
+  padding: 7px 11px;
+  border: 0;
+  border-top: 1px dashed var(--ki-color-border);
+  background: transparent;
+  color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast);
+}
+.ds-failbox__more:hover { background: var(--ki-color-bg-secondary); }
+.ds-failbox__more:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+
+/* ── 待删除段 ─────────────────────────────────────────── */
+.ds-pending__bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.ds-check { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); cursor: pointer; }
+.ds-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--ki-color-primary); cursor: pointer; }
+/* 待删候选树：**1:1 复刻知识目录**（web/src/styles/ki.css 的 .ki-tree-* +
+   web/src/components/GroupTreePanel.tsx 的结构），只额外加了复选框。
+   数值、字号、图标颜色、树线缩进都照原实现，不要凭感觉改：
+     · 箭头 = 9px 文本 ▾/▸，宽 20px
+     · 文件夹图标 = 主色 16px
+     · 组名 = 正文体 14px/600，不是 mono
+     · 数量 = .ki-cell-sub，紧贴组名（原实现没有 margin-left:auto）
+     · 树 = padding-left:14px + margin-left:9px + border-left */
+.ki-tree-dir {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--ki-radius-sm);
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-md);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast);
+}
+.ki-tree-dir:hover { background: var(--ki-color-bg-secondary); }
+.ki-tree-dir:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+/* 箭头列：从 20px 收到 12px，并置于勾选框左侧 —— 否则勾选框与图标之间会留出
+   20px+2×gap 的空档（用户反馈"太远"）。复选框列与图标列仍逐层对齐。 */
+.ki-tree-arrow {
+  flex-shrink: 0;
+  width: 12px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ki-color-text-subtle);
+  text-align: center;
+}
+.ki-tree-dir button.ki-tree-arrow {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 20px; padding: 0;
+  border: 0; background: transparent;
+  cursor: pointer;
+}
+.ki-tree-dir button.ki-tree-arrow:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; border-radius: 3px; }
+.ki-tree-icon { width: 16px; height: 16px; flex-shrink: 0; color: var(--ki-color-primary); }
+.ki-tree-dir__label { flex-shrink: 0; }
+.ki-cell-sub { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-tree-group {
+  display: flex; flex-direction: column; gap: 2px;
+  padding-left: 14px;
+  margin-left: 9px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  border-left: 1px solid var(--ki-color-border);
+  animation: ki-tree-expand 0.15s ease;
+}
+.ki-tree-group[hidden] { display: none; }
+@keyframes ki-tree-expand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ki-tree-doc {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; min-height: 32px; padding: 0 8px 0 10px;
+  border: 0; border-radius: var(--ki-radius-sm);
+  background: transparent;
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-tree-doc:hover { background: var(--ki-color-bg-secondary); color: var(--ki-color-text); }
+.ki-tree-doc .ki-icon { color: var(--ki-color-text-subtle); }
+.ki-tree-doc__name { flex: 1 0 auto; white-space: nowrap; }
+.ki-icon { width: 14px; height: 14px; flex: none; }
+.ki-icon--sm { width: 13px; height: 13px; }
+/* 待删特有：树行内的复选框（知识目录本来没有多选） */
+.ki-tree-check {
+  flex: none;
+  width: 13px; height: 13px; margin: 0;
+  accent-color: var(--ki-color-primary);
+  cursor: pointer;
+}
+/* ★ 复选框尺寸必须与文件行一致（都 13px）：差 1px 会让整列图标/文字错开 */
+.ki-tree-dir .ki-tree-check { width: 13px; height: 13px; }
+/* 纯父组（自身没有直属候选）不放复选框，用同宽占位保证箭头/图标列对齐 */
+.ki-tree-check--gap { display: inline-block; visibility: hidden; }
+/* 一个容器包住所有组，组间不留卡片、不加分隔线 —— 与知识目录一致。
+   待删树行距比知识目录更紧凑（用户要求）：目录行 24px、文件行 26px，
+   层级之间不留额外 margin —— 否则深层树一路排下来会明显发散。 */
+.ds-tree-wrap {
+  padding: 0;
+  /* 候选多时（服务端上限 500 条）桶内滚动，不把抽屉越撑越长 */
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 折叠 / 展开全部（对齐知识目录头部的 expand/collapse 动作） */
+.ds-tree-actions { display: flex; align-items: center; gap: 2px; margin-left: 10px; }
+.ds-linkbtn {
+  padding: 2px 5px;
+  border: 0;
+  border-radius: var(--ki-radius-tag);
+  background: transparent;
+  color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ds-linkbtn:hover { background: var(--ki-color-primary-soft); }
+.ds-linkbtn:active { transform: translateY(1px); }
+.ds-linkbtn:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ds-tree-actions__sep { color: var(--ki-color-border-strong); font-size: var(--ki-font-size-xs); }
+
+.ds-tree-wrap .ki-tree-dir { padding: 2px 8px; line-height: 1.6; gap: 5px; }
+/* 文件行与目录行左内边距对齐（原值 10px 会让文件整体右移 2px） */
+.ds-tree-wrap .ki-tree-doc { min-height: 26px; padding-left: 8px; gap: 5px; }
+.ds-tree-wrap .ki-tree-group { gap: 0; margin-top: 1px; margin-bottom: 0; }
+
+.ds-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), border-color var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ds-btn:hover:not(:disabled) { background: var(--ki-color-bg-secondary); color: var(--ki-color-text); }
+.ds-btn:active:not(:disabled) { transform: translateY(1px); }
+.ds-btn:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ds-btn:disabled { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); border-color: transparent; cursor: not-allowed; }
+.ds-btn--danger:not(:disabled) { color: var(--ki-color-danger-ink); border-color: color-mix(in srgb, var(--ki-color-danger) 34%, transparent); }
+.ds-btn--danger:hover:not(:disabled) { background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink); }
+.ds-note { margin: 10px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.55; }
+
+/* ── 空态 / 骨架 ──────────────────────────────────────── */
+.ds-empty {
+  padding: 22px 16px;
+  border: 1px dashed var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  text-align: center;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-sm);
+}
+.ds-empty__cmd {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+}
+/* 行内命令/路径：显式声明每个视觉属性，避免被宿主环境的 <code> 默认样式染成深底 */
+.ds-notice__code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  color: inherit;
+  font-family: var(--ki-font-mono);
+  font-size: 0.94em;
+}
+.ds-skel {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted);
+}
+.ds-skel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--ds-sheen), transparent);
+  animation: ds-shimmer 1.5s ease-in-out infinite;
+}
+@keyframes ds-shimmer { 100% { transform: translateX(100%); } }
+.ds-skel--title { width: 42%; height: 22px; margin-top: 4px; }
+.ds-skel--line { height: 12px; }
+.ds-skel--hero { height: 76px; border-radius: var(--ki-radius-md); }
+.ds-skel--metric { height: 56px; }
+
+/* ── 文档行「查看」按钮 ────────────────────────────────
+   对应知识目录点文档叶子的行为（ModuleDrawer）。默认隐形，hover / 键盘聚焦时才出现；
+   opacity 而非 display，避免出现时把行内元素挤动。 */
+.ds-doc-open {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--ki-radius-tag);
+  background: transparent;
+  color: var(--ki-color-primary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--ki-motion-fast), background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-tree-doc:hover .ds-doc-open,
+.ds-doc-open:focus-visible { opacity: 1; }
+.ds-doc-open:hover { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
+.ds-doc-open:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+/* 按钮紧贴文件名（原实现 .ki-tree-doc__name 是 flex:1 会把按钮推到行末） */
+.ds-tree-wrap .ki-tree-doc__name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 与文件名的总间距 = 行内 gap(5px) + 55px = 60px（用户定值） */
+.ds-tree-wrap .ki-tree-doc .ds-doc-open { margin-left: 55px; }
+
+/* ── 文档内容抽屉（复刻 .ki-drawer 浮层口径：右侧滑出 + 遮罩） ── */
+.ds-docd { position: fixed; inset: 0; z-index: 1060; display: none; }
+.ds-docd.is-open { display: block; }
+.ds-docd__scrim { position: absolute; inset: 0; background: rgba(18, 24, 21, 0.3); }
+.ds-docd__panel {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  display: flex; flex-direction: column;
+  width: min(680px, 92vw);
+  background: var(--ki-color-surface);
+  border-left: 1px solid var(--ki-color-border);
+  box-shadow: -8px 0 32px rgba(18, 24, 21, 0.14);
+}
+.ds-docd__head {
+  flex: none;
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.ds-docd__identity { flex: 1; min-width: 0; }
+.ds-docd__crumb {
+  margin: 0 0 3px;
+  color: var(--ki-color-text-subtle);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-docd__title { margin: 0; font-size: var(--ki-font-size-heading); font-weight: 680; letter-spacing: -0.02em; }
+.ds-docd__close {
+  flex: none; width: 28px; height: 28px;
+  border: 1px solid transparent; border-radius: var(--ki-radius-sm);
+  background: transparent; color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ds-docd__close:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ds-docd__close:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ds-docd__body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px 32px; }
+
+/* 正文排版（仅 demo 用的最小 markdown 样式） */
+.ds-md h1 { margin: 0 0 12px; font-size: 20px; font-weight: 680; letter-spacing: -0.02em; }
+.ds-md h2 { margin: 22px 0 8px; font-size: 15px; font-weight: 650; }
+.ds-md p { margin: 0 0 12px; color: var(--ki-color-text-muted); font-size: 13px; line-height: 1.7; }
+.ds-md ul { margin: 0 0 12px; padding-left: 18px; color: var(--ki-color-text-muted); font-size: 13px; line-height: 1.7; }
+.ds-md code {
+  padding: 1px 4px; border-radius: 3px;
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text);
+  font-family: var(--ki-font-mono); font-size: 12px;
+}
+.ds-md pre {
+  margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  font-family: var(--ki-font-mono); font-size: 12px;
+  overflow-x: auto;
+}
+
+/* 兜底：本 demo 不依赖 <code>/<pre> 的 UA 或宿主注入样式。
+   （IDE 内置预览、浏览器扩展、编辑器主题常给 code 注入深底浅字，
+     实测在 Chromium 里 code 背景是透明的，但在宿主 webview 里不是。） */
+code, pre {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-family: var(--ki-font-mono);
+  font-size: inherit;
+}
+
+/* ══════════════ 响应式 ══════════════ */
+@media (max-width: 960px) {
+  .ds-drawer { width: 100vw; border-left: 0; }
+  .list-table th:nth-child(4),
+  .list-table td:nth-child(4) { display: none; }
+}
+@media (max-width: 420px) {
+  .ds-params { grid-template-columns: minmax(0, 1fr); }
+  .ds-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ds-hero { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .ds-body { padding: 16px 14px 28px; }
+  .ds-head { padding: 14px 14px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- demo 控件（不属于产品 UI，落地时删除） -->
+<div class="demo-bar" role="group" aria-label="demo 状态切换">
+  <span class="demo-bar__label">状态</span>
+  <button type="button" data-case="ok" class="is-on">成功</button>
+  <button type="button" data-case="partial">部分失败</button>
+  <button type="button" data-case="failed">失败</button>
+  <button type="button" data-case="running">同步中</button>
+  <button type="button" data-case="never">从未同步</button>
+  <button type="button" data-case="loading">加载骨架</button>
+  <span class="demo-bar__sep" aria-hidden></span>
+  <button type="button" id="togglePending" class="is-on">待删候选</button>
+  <button type="button" id="toggleTheme">深色</button>
+</div>
+
+<!-- 背景：数据源列表 -->
+<main class="list-pane">
+  <div class="list-pane__head">
+    <div>
+      <h1 class="list-pane__title">数据源</h1>
+      <p class="list-pane__sub">共 4 个数据源 · 1 个超过 24h 未同步</p>
+    </div>
+  </div>
+  <div class="list-card">
+    <table class="list-table" aria-label="数据源列表">
+      <thead>
+        <tr><th>Scope</th><th>类型</th><th>源目录</th><th>上次同步</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        <tr class="list-row is-active" tabindex="0" data-scope="langchain">
+          <td class="list-row__scope">langchain</td><td>目录</td>
+          <td class="list-row__path">/root/learning/langchain</td><td>2026-10-22 14:21:20</td>
+          <td><span class="list-pill list-pill--ok">成功</span></td>
+        </tr>
+        <tr class="list-row" tabindex="0" data-scope="ki-docs">
+          <td class="list-row__scope">ki-docs</td><td>Git</td>
+          <td class="list-row__path">/root/.ki-data/ki-docs/repo</td><td>2026-10-22 12:08:44</td>
+          <td><span class="list-pill list-pill--ok">成功</span></td>
+        </tr>
+        <tr class="list-row" tabindex="0" data-scope="ops-runbook">
+          <td class="list-row__scope">ops-runbook</td><td>目录</td>
+          <td class="list-row__path">/root/learning/runbook</td><td>—</td>
+          <td><span class="list-pill list-pill--queued">从未同步</span></td>
+        </tr>
+        <tr class="list-row" tabindex="0" data-scope="kafka-notes">
+          <td class="list-row__scope">kafka-notes</td><td>目录</td>
+          <td class="list-row__path">/root/learning/kafka</td><td>2026-10-20 09:31:05</td>
+          <td><span class="list-pill list-pill--queued">超过 24h</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<!-- 抽屉：由脚本渲染 -->
+<aside class="ds-drawer" id="drawer" role="region" aria-label="数据源详情"></aside>
+
+<!-- 文档内容抽屉（层级高于数据源详情抽屉）-->
+<div class="ds-docd" id="docDrawer" aria-hidden="true">
+  <div class="ds-docd__scrim" data-doc-close></div>
+  <aside class="ds-docd__panel" role="dialog" aria-modal="true" aria-labelledby="docDrawerTitle">
+    <header class="ds-docd__head">
+      <div class="ds-docd__identity">
+        <p class="ds-docd__crumb" id="docDrawerCrumb"></p>
+        <h2 class="ds-docd__title" id="docDrawerTitle"></h2>
+      </div>
+      <button type="button" class="ds-docd__close" data-doc-close aria-label="关闭文档">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+      </button>
+    </header>
+    <div class="ds-docd__body"><div class="ds-md" id="docDrawerBody"></div></div>
+  </aside>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   demo 数据（真实字段口径见 web/src/lib/dataSourceDetailModel.ts）
+   ══════════════════════════════════════════════════════════ */
+const CASES = {
+  ok: {
+    scope: 'langchain',
+    type: '目录',
+    dir: '/root/learning/langchain',
+    state: { tone: 'ok', label: '成功' },
+    lastSync: '2026-10-22 14:21:20',
+    duration: '7.9s',
+    notices: [],
+    summary: { scanned: 251, processed: 251, completed: 251, unchanged: 224, skipped: 0, failed: 0, vectorized: 457, fullText: 0 },
+    params: { mode: '全量', conflict: '增量（同名覆盖）', vector: '开启', chunk: '1000 / 150', group: '(自动：按顶层子目录)' },
+    failures: []
+  },
+  partial: {
+    scope: 'langchain',
+    type: '目录',
+    dir: '/root/learning/langchain',
+    state: { tone: 'partial', label: '部分失败' },
+    lastSync: '2026-10-22 14:21:20',
+    duration: '9.2s',
+    notices: [{ tone: 'warn', html: '本次有 <strong>2</strong> 个文件未完成，commit 水位未推进；下次同步会重试' }],
+    summary: { scanned: 251, processed: 251, completed: 249, unchanged: 224, skipped: 0, failed: 2, vectorized: 452, fullText: 0 },
+    params: { mode: '全量', conflict: '增量（同名覆盖）', vector: '开启', chunk: '1000 / 150', group: '(自动：按顶层子目录)' },
+    /* 20 条 = 服务端 lastSync.result.failures 的存储上限，用来验证展开后的滚动 */
+    failures: Array.from({ length: 20 }, (_, i) => ({
+      path: `guide/chapter-${String(i + 1).padStart(2, '0')}.md`,
+      why: ['解析失败：frontmatter 缺少 title', '向量化超时（30s）', '文件读取失败：EACCES', '不支持的格式'][i % 4]
+    }))
+  },
+  failed: {
+    scope: 'langchain',
+    type: '目录',
+    dir: '/root/learning/langchain',
+    state: { tone: 'failed', label: '失败' },
+    lastSync: '2026-10-22 13:02:11',
+    duration: '1.4s',
+    notices: [{ tone: 'warn', html: '源目录不可读：<span class="ds-notice__code">/root/learning/langchain</span> 权限拒绝；本次未写入任何文档' }],
+    summary: { scanned: 251, processed: 251, completed: 0, unchanged: 0, skipped: 0, failed: 251, vectorized: 0, fullText: 0 },
+    params: { mode: '全量', conflict: '增量（同名覆盖）', vector: '开启', chunk: '1000 / 150', group: '(自动：按顶层子目录)' },
+    failures: [{ path: '(整个目录)', why: 'EACCES: permission denied' }]
+  },
+  running: {
+    scope: 'langchain',
+    type: '目录',
+    dir: '/root/learning/langchain',
+    state: { tone: 'running', label: '同步中' },
+    lastSync: '2026-10-22 13:44:07',
+    duration: '6.1s',
+    notices: [{ tone: 'info', html: '同步进行中（本次开始于 14:41:02）；下方执行结果与明细为上次同步数据' }],
+    summary: { scanned: 251, processed: 251, completed: 251, unchanged: 198, skipped: 0, failed: 0, vectorized: 503, fullText: 0 },
+    params: { mode: '增量', conflict: '增量（同名覆盖）', vector: '开启', chunk: '1000 / 150', group: '(自动：按顶层子目录)' },
+    failures: []
+  },
+  never: {
+    scope: 'ops-runbook',
+    type: '目录',
+    dir: '/root/learning/runbook',
+    state: { tone: 'never', label: '从未同步' },
+    lastSync: null,
+    duration: null,
+    notices: [],
+    summary: null,
+    params: { mode: '—', conflict: '增量（同名覆盖）', vector: '开启', chunk: '1000 / 150', group: '(自动：按顶层子目录)' },
+    failures: []
+  },
+  loading: null
+};
+
+const PENDING = {
+  computedAt: '14:21',
+  /* 候选按 group 路径给出，渲染时拆成多级树（对齐真实知识目录的嵌套形态） */
+  groups: [
+    { name: 'docs', items: ['README.md', 'CHANGELOG.md'] },
+    { name: 'docs/guide', items: ['old/intro.md', 'old/setup.md', 'old/migration.md', 'install.md', 'quickstart.md'] },
+    { name: 'docs/api', items: ['v1/deprecated.md', 'v1/auth.md', 'v2/auth.md', 'errors.md'] },
+    { name: 'wiki', items: ['legacy/api.md', 'legacy/faq.md', 'home.md'] }
+  ]
+};
+
+/**
+ * 把候选合并成一棵完整目录树（对齐真实知识目录）：
+ *   · group 路径段 = 目录（docs → guide）
+ *   · 候选项 sourcePath 的目录段 = 目录（guide → old）
+ *   · 文件名 = 叶子，例如 docs/guide + old/intro.md ⇒ docs / guide / old / intro.md
+ * ★ 不能把 `old/intro.md` 整个当文件名渲染 —— `old` 是目录。
+ * direct = 本级直属文件数，total = 子树文件数（用于 `1 / 4` 计数）。
+ */
+function buildPendingTree(groups) {
+  const roots = [];
+  const dirMap = new Map();
+  const split = (value) => value.split('/').filter(Boolean);
+
+  const ensureDir = (parts) => {
+    let level = roots;
+    let path = '';
+    let node = null;
+    for (const part of parts) {
+      path = path ? `${path}/${part}` : part;
+      node = dirMap.get(path);
+      if (!node) {
+        node = { kind: 'dir', name: part, path, children: [], direct: 0, total: 0 };
+        dirMap.set(path, node);
+        level.push(node);
+      }
+      level = node.children;
+    }
+    return node;
+  };
+
+  for (const g of groups) {
+    const groupParts = split(g.name);
+    ensureDir(groupParts);
+    for (const item of g.items) {
+      const parts = split(item);
+      const dirParts = [...groupParts, ...parts.slice(0, -1)];
+      const parent = ensureDir(dirParts);
+      parent.children.push({
+        kind: 'file',
+        name: parts[parts.length - 1],
+        full: `${g.name}/${item}`
+      });
+    }
+  }
+
+  const countFiles = (nodes) => nodes.reduce((sum, n) => sum + (n.kind === 'file' ? 1 : countFiles(n.children)), 0);
+  const walk = (nodes) => nodes.forEach((n) => {
+    if (n.kind !== 'dir') return;
+    n.direct = n.children.filter((c) => c.kind === 'file').length;
+    n.total = countFiles(n.children);
+    walk(n.children);
+  });
+  walk(roots);
+  return roots;
+}
+
+/* ══════════════ 渲染 ══════════════ */
+const drawer = document.getElementById('drawer');
+let current = 'ok';
+/* 默认展开待删段：它是抽屉的第二个写入口，默认藏起来会被误读成"没做" */
+let withPending = true;
+
+const num = (n) => n.toLocaleString('en-US');
+const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+
+function copyIcon() {
+  return '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">'
+    + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M10.5 5.5V3.9A1.4 1.4 0 0 0 9.1 2.5H3.9A1.4 1.4 0 0 0 2.5 3.9v5.2a1.4 1.4 0 0 0 1.4 1.4h1.6"/></svg>';
+}
+
+function renderHead(c) {
+  const when = c.lastSync
+    ? `上次同步 ${esc(c.lastSync)} · 用时 ${esc(c.duration)}`
+    : '尚未同步过';
+  return `
+    <header class="ds-head">
+      <div class="ds-head__row">
+        <h2 class="ds-head__title" title="${esc(c.scope)}">${esc(c.scope)}</h2>
+        <button type="button" class="ds-head__close" id="ds-close" aria-label="关闭详情">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+        </button>
+      </div>
+      <div class="ds-head__origin">
+        <span class="ds-type">${esc(c.type)}</span>
+        <span class="ds-head__path" title="${esc(c.dir)}">${esc(c.dir)}</span>
+        <button type="button" class="ds-copy" data-copy="${esc(c.dir)}" aria-label="复制源目录" title="复制源目录">${copyIcon()}</button>
+      </div>
+      <div class="ds-head__foot">
+        <span class="ds-state ds-state--${c.state.tone}"><span class="ds-state__dot" aria-hidden></span>${esc(c.state.label)}</span>
+        <span class="ds-head__when">${when}</span>
+      </div>
+    </header>`;
+}
+
+function renderHero(c) {
+  const s = c.summary;
+  if (!s) {
+    return `
+      <div class="ds-hero ds-hero--idle">
+        <div><div class="ds-hero__num" style="color:var(--ki-color-text-subtle)">—</div><div class="ds-hero__label">完成</div></div>
+        <div class="ds-empty">
+          还没有同步记录。命令行执行后可在此查看结果：
+          <br><span class="ds-empty__cmd">ki datasource sync --scope ${esc(c.scope)}</span>
+        </div>
+      </div>`;
+  }
+  const total = Math.max(1, s.scanned);
+  /*
+   * 分段条语义：完成(主色) + 跳过(灰) + 失败(红)。
+   * ★ 不要把「内容未变」拆成独立淡色段 —— 它是「完成」的子集，
+   *   拆开后成功态看起来像只完成了 10%（实测 251 篇里 224 未变），
+   *   且在暗色下 28% 透明度的主色几乎不可见。
+   */
+  const segs = [
+    { cls: 'done', n: s.completed },
+    { cls: 'skipped', n: s.skipped },
+    { cls: 'failed', n: s.failed }
+  ].filter((x) => x.n > 0);
+  const pct = Math.round((s.completed / total) * 1000) / 10;
+  const heroTone = s.failed > 0 ? (s.completed > 0 ? 'warn' : 'danger') : '';
+  const legend = [
+    `<span class="ds-legend__item ds-legend__item--done">完成 ${num(s.completed)}`
+      + (s.unchanged > 0 ? `<span class="ds-legend__sub">（未变 ${num(s.unchanged)}）</span>` : '')
+      + `</span>`,
+    `<span class="ds-legend__item">跳过 ${num(s.skipped)}</span>`,
+    s.failed > 0
+      ? `<span class="ds-legend__item ds-legend__item--failed">失败 ${num(s.failed)}</span>`
+      : `<span class="ds-legend__item">失败 0</span>`
+  ].join('<span class="ds-legend__dot" aria-hidden>·</span>');
+  return `
+    <div class="ds-hero${heroTone ? ' ds-hero--' + heroTone : ''}">
+      <div>
+        <div class="ds-hero__num">${num(s.completed)}</div>
+        <div class="ds-hero__label">完成</div>
+      </div>
+      <div>
+        <div class="ds-hero__barrow">
+          <span class="ds-bar" role="img" aria-label="完成 ${pct}%，共扫描 ${num(s.scanned)} 篇">
+            ${segs.map((x) => `<span class="ds-bar__seg ds-bar__seg--${x.cls}" style="width:${(x.n / total) * 100}%"></span>`).join('')}
+          </span>
+          <span class="ds-hero__pct">${pct}%</span>
+        </div>
+        <div class="ds-legend">${legend}</div>
+      </div>
+    </div>`;
+}
+
+function renderMetrics(c) {
+  const s = c.summary;
+  if (!s) return '';
+  const items = [
+    ['全量扫描', s.scanned], ['处理', s.processed], ['跳过', s.skipped],
+    ['失败', s.failed], ['向量条目', s.vectorized], ['全文条目', s.fullText]
+  ];
+  return `
+    <dl class="ds-metrics">
+      ${items.map(([label, value]) => {
+        const cls = value === 0 ? ' ds-metric__value--zero' : (label === '失败' && value > 0 ? ' ds-metric__value--danger' : '');
+        return `<div class="ds-metric"><dt class="ds-metric__label">${label}</dt><dd class="ds-metric__value${cls}" style="margin:0">${num(value)}</dd></div>`;
+      }).join('')}
+    </dl>`;
+}
+
+function renderParams(c) {
+  const p = c.params;
+  /* 值与用户确认的布局一致：两列短字段 + 源目录/落点 Group 各占整行。
+     值不加任何底色/描边，层级只靠文字色与字重（key 浅灰 11px / value 深色 13px 500）。 */
+  const cell = (k, v, cls, full) => `<div class="ds-params__cell${full ? ' ds-params__cell--full' : ''}"><dt>${k}</dt><dd class="${cls || ''}">${v}</dd></div>`;
+  return `
+    <dl class="ds-params">
+      ${cell('类型', esc(c.type))}
+      ${cell('同步模式', esc(p.mode))}
+      ${cell('知识库', esc(c.scope))}
+      ${cell('同名策略', esc(p.conflict))}
+      ${cell('向量化', esc(p.vector))}
+      ${cell('切分参数', esc(p.chunk))}
+      ${cell('落点 Group', esc(p.group), '', true)}
+    </dl>`;
+}
+
+/* 失败明细：默认就显示（不折叠），只截前 5 条，其余走「展开剩余」。
+   折叠起来等于藏起用户最需要看的东西；全量铺开会把卡片撑得过长。 */
+const FAIL_PREVIEW = 5;
+
+function renderFailures(c) {
+  const all = c.failures || [];
+  if (all.length === 0) return '';
+  const rest = all.length - FAIL_PREVIEW;
+  const items = all.map((f, i) => {
+    const extra = i >= FAIL_PREVIEW;
+    return `<li${extra ? ' class="is-extra" hidden' : ''}>`
+      + `<span class="ds-fail-list__path">${esc(f.path)}</span>`
+      + `<span class="ds-fail-list__why">${esc(f.why)}</span></li>`;
+  }).join('');
+  return `
+    <div class="ds-failbox" data-expanded="false">
+      <div class="ds-failbox__head">
+        <span class="ds-failbox__title">失败明细</span>
+        <span class="ds-failbox__count">${all.length} 条${rest > 0 ? ` · 先显示 ${FAIL_PREVIEW} 条` : ''}</span>
+      </div>
+      <ul class="ds-fail-list">${items}</ul>
+      ${rest > 0 ? `<button type="button" class="ds-failbox__more" data-more="${rest}" aria-expanded="false">展开剩余 ${rest} 条</button>` : ''}
+    </div>`;
+}
+
+/* 图标与结构照 GroupTreePanel.tsx 抄：文件夹用 .ki-tree-icon（主色），文档用 .ki-icon--sm（subtle） */
+const FOLDER_SVG = '<svg class="ki-tree-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.6 3.7c0-.6.5-1.1 1.1-1.1h2.9l1.6 1.7h5.7c.6 0 1.1.5 1.1 1.1v6.9c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1V3.7z"/></svg>';
+const FILE_SVG = '<svg class="ki-icon ki-icon--sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 2.4h4.5L12 5.7v7.9H4.2z"/><path d="M8.7 2.4v3.3H12"/></svg>';
+/* 文档打开图标：左侧文档方框 + 右侧箭头（用户指定符号） */
+const OPEN_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.8" y="3.4" width="6.2" height="9.2" rx="1"/><path d="M10.4 8h4.1"/><path d="M12.3 5.8 14.6 8l-2.3 2.2"/></svg>';
+
+/* 同步中的阶段推进（demo 模拟；真实由任务台账的 progress 驱动） */
+const SYNC_STAGES = [
+  { until: 25, label: '正在扫描源目录…' },
+  { until: 55, label: '解析 Markdown 并切分…' },
+  { until: 85, label: '写入向量与全文索引…' },
+  { until: 100, label: '重算待删除候选…' }
+];
+let syncPct = 6;
+let syncTimer = null;
+let syncTotal = 251;
+
+const stageLabelOf = (pct) => (SYNC_STAGES.find((s) => pct < s.until) ?? SYNC_STAGES[SYNC_STAGES.length - 1]).label;
+
+function syncBlockHtml(c) {
+  syncTotal = c.summary ? c.summary.scanned : 251;
+  return `
+    <div class="ki-progress-block" id="syncBlock">
+      <div class="ki-track-head">
+        <span class="ki-track-kicker">PROGRESS</span>
+        <span class="ds-state ds-state--running"><span class="ds-state__dot" aria-hidden></span>同步中</span>
+      </div>
+      <div class="ki-track-title">同步进度</div>
+      <div class="ki-progress-row">
+        <span class="ki-progress-label"><span class="ki-spinner" aria-hidden></span><span id="syncStage">${stageLabelOf(syncPct)}</span></span>
+        <span class="ki-cell-sub" id="syncCount"></span>
+      </div>
+      <div class="ki-progress" role="progressbar" aria-label="同步进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(syncPct)}">
+        <div class="ki-progress__fill" id="syncFill" style="width:${syncPct}%"></div>
+      </div>
+      <div class="ki-progress-sub" id="syncSub">本次开始于 14:41:02 · 下方「执行结果」为上次同步数据</div>
+    </div>`;
+}
+
+function paintSync() {
+  const fill = document.getElementById('syncFill');
+  const stage = document.getElementById('syncStage');
+  const count = document.getElementById('syncCount');
+  if (!fill || !stage || !count) return;
+  fill.style.width = `${syncPct}%`;
+  stage.textContent = stageLabelOf(syncPct);
+  count.textContent = `${Math.round((syncPct / 100) * syncTotal)} / ${syncTotal}`;
+  const bar = fill.closest('.ki-progress');
+  if (bar) bar.setAttribute('aria-valuenow', String(Math.round(syncPct)));
+}
+
+function stopSyncSim() {
+  if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+}
+
+function startSyncSim() {
+  stopSyncSim();
+  paintSync();
+  syncTimer = setInterval(() => {
+    syncPct = Math.min(100, syncPct + Math.random() * 8 + 4);
+    paintSync();
+    if (syncPct >= 100) {
+      stopSyncSim();
+      const stage = document.getElementById('syncStage');
+      if (stage) stage.textContent = '同步收尾中，即将刷新结果…';
+      const sub = document.getElementById('syncSub');
+      if (sub) sub.textContent = '完成后本页自动刷新；「执行结果」将替换为本次数据';
+    }
+  }, 700);
+}
+
+function renderPending() {
+  if (!withPending) return '';
+  const tree = buildPendingTree(PENDING.groups);
+
+  /* 逐级渲染：结构、类名、计数口径都对齐真实知识目录
+     · 计数 = `本组直接数 / 子树累计数`，两者相等时只写一个数
+     · 只有直属候选的组才给「整组勾选」复选框；纯父组用等宽占位保持箭头对齐
+     · 每层缩进由 .ki-tree-group 的 padding-left/margin-left/border-left 提供 */
+  const renderNode = (node) => {
+    if (node.kind === 'file') {
+      /* 空箭头占位必须留在最前（与目录行同构），否则同层文件图标会相对文件夹图标左移 */
+      return `<label class="ki-tree-doc"><span class="ki-tree-arrow" aria-hidden="true"></span><input type="checkbox" class="ki-tree-check" data-item="${esc(node.full)}" />${FILE_SVG}<span class="ki-tree-doc__name">${esc(node.name)}</span><button type="button" class="ds-doc-open" data-doc="${esc(node.full)}" aria-label="查看 ${esc(node.name)} 内容" title="查看内容">${OPEN_SVG}</button></label>`;
+    }
+    const openable = node.children.length > 0;
+    const countText = node.direct > 0 && node.direct !== node.total
+      ? `${node.direct} / ${node.total}`
+      : String(node.total);
+    return `
+      <div class="ds-tree-node">
+        <div class="ki-tree-dir${openable ? ' ki-tree-dir--open' : ''}" role="treeitem" tabindex="0"
+             data-dir="${esc(node.path)}" aria-expanded="${openable}" title="${esc(node.path)}"
+             aria-label="${esc(node.name)}，共 ${node.total} 篇">
+          ${openable
+            ? '<button type="button" class="ki-tree-arrow" tabindex="-1" aria-hidden="true">▾</button>'
+            : '<span class="ki-tree-arrow" aria-hidden="true"></span>'}
+          <input type="checkbox" class="ki-tree-check" data-dir-check="${esc(node.path)}" aria-label="全选 ${esc(node.path)}" />
+          ${FOLDER_SVG}
+          <span class="ki-tree-dir__label">${esc(node.name)}</span>
+          <span class="ki-cell-sub">${countText}</span>
+        </div>
+        ${openable
+          ? `<div class="ki-tree-group">${node.children.map(renderNode).join('')}</div>`
+          : ''}
+      </div>`;
+  };
+
+  return `
+    <section class="ds-sec ds-sec--action">
+      <div class="ds-sec__head">
+        <span class="ds-sec__mark" aria-hidden></span>
+        <h3 class="ds-sec__title">待删除 ${PENDING.groups.reduce((n, g) => n + g.items.length, 0)} 篇</h3>
+        <span class="ds-sec__hint">由 ${PENDING.computedAt} 同步算出</span>
+        <div class="ds-tree-actions">
+          <button type="button" class="ds-linkbtn" data-tree-action="expand">展开全部</button>
+          <span class="ds-tree-actions__sep" aria-hidden>·</span>
+          <button type="button" class="ds-linkbtn" data-tree-action="collapse">折叠全部</button>
+        </div>
+      </div>
+      <div class="ds-pending__bar">
+        <label class="ds-check"><input type="checkbox" id="ds-all" aria-label="全选待删候选" />全选（${PENDING.groups.reduce((n, g) => n + g.items.length, 0)}）</label>
+        <button type="button" class="ds-btn ds-btn--danger" id="ds-delete" disabled>删除所选 0 篇…</button>
+      </div>
+      <div class="ds-tree-wrap">${tree.map(renderNode).join('')}</div>
+      <p class="ds-note">删除不可恢复；执行时按当前源目录重新校验，目录变了会拒绝。只删知识库记录，不动源目录文件。</p>
+    </section>`;
+}
+
+function renderSkeleton() {
+  return `
+    <header class="ds-head">
+      <div class="ds-head__row">
+        <div class="ds-skel ds-skel--title"></div>
+        <button type="button" class="ds-head__close" aria-label="关闭详情">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+        </button>
+      </div>
+      <div style="margin-top:12px"><div class="ds-skel ds-skel--line" style="width:64%"></div></div>
+      <div style="margin-top:10px"><div class="ds-skel ds-skel--line" style="width:38%"></div></div>
+    </header>
+    <div class="ds-body">
+      <div class="ds-skel ds-skel--hero"></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px">
+        <div class="ds-skel ds-skel--metric"></div><div class="ds-skel ds-skel--metric"></div><div class="ds-skel ds-skel--metric"></div>
+        <div class="ds-skel ds-skel--metric"></div><div class="ds-skel ds-skel--metric"></div><div class="ds-skel ds-skel--metric"></div>
+      </div>
+    </div>`;
+}
+
+function render() {
+  stopSyncSim();
+  if (current === 'loading') {
+    drawer.innerHTML = renderSkeleton();
+    return;
+  }
+  const c = CASES[current];
+  // 同步中：用「PROGRESS 卡 + 阶段文案 + 进度条」替代文字提示（对齐导入页的导入进度）
+  const isRunning = c.state.tone === 'running';
+  const syncBlock = isRunning ? syncBlockHtml(c) : '';
+  const notices = isRunning ? '' : (c.notices || []).map((n) => {
+    const live = c.state.tone === 'queued' && n.tone === 'info';
+    return `<p class="ds-notice ds-notice--${n.tone}${live ? ' ds-notice--live' : ''}">`
+      + `${live ? '<span class="ds-notice__spinner" aria-hidden></span>' : ''}${n.html}</p>`;
+  }).join('');
+  drawer.innerHTML = `
+    ${renderHead(c)}
+    <div class="ds-body">
+      ${syncBlock}${notices}
+      <section class="ds-sec ds-sec--data">
+        <div class="ds-sec__head">
+          <span class="ds-sec__mark" aria-hidden></span>
+          <h3 class="ds-sec__title">执行结果</h3>
+          ${c.summary ? `<span class="ds-sec__hint">扫描 ${num(c.summary.scanned)} 篇</span>` : ''}
+        </div>
+        ${renderHero(c)}
+        ${renderMetrics(c)}
+        ${renderFailures(c)}
+      </section>
+      <section class="ds-sec ds-sec--meta">
+        <div class="ds-sec__head">
+          <span class="ds-sec__mark" aria-hidden></span>
+          <h3 class="ds-sec__title">同步参数</h3>
+        </div>
+        ${renderParams(c)}
+      </section>
+      ${renderPending()}
+    </div>`;
+  bind();
+  if (isRunning) startSyncSim();
+}
+
+/* ══════════════ 交互 ══════════════ */
+function bind() {
+  drawer.querySelector('#ds-close')?.addEventListener('click', closeDrawer);
+
+  drawer.querySelectorAll('.ds-copy').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy;
+      try { await navigator.clipboard.writeText(text); } catch (err) { /* file:// 下不可用，仅演示反馈 */ }
+      btn.classList.add('is-done');
+      btn.title = '已复制';
+      window.setTimeout(() => { btn.classList.remove('is-done'); btn.title = '复制'; }, 1500);
+    });
+  });
+
+  // 失败明细：默认只露前 5 条，其余由底部按钮展开/收起
+  const failMore = drawer.querySelector('.ds-failbox__more');
+  failMore?.addEventListener('click', () => {
+    const box = failMore.closest('.ds-failbox');
+    const expanded = box.dataset.expanded === 'true';
+    box.dataset.expanded = expanded ? 'false' : 'true';
+    box.querySelectorAll('li.is-extra').forEach((li) => { li.hidden = expanded; });
+    failMore.textContent = expanded ? `展开剩余 ${failMore.dataset.more} 条` : '收起';
+    failMore.setAttribute('aria-expanded', String(!expanded));
+  });
+
+  // 文档行「查看」：打开文档抽屉（对应知识目录点文档叶子 → ModuleDrawer）
+  drawer.querySelectorAll('.ds-doc-open').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      // 按钮在 <label> 内：不拦住的话点它会连带切换该行的复选框
+      ev.preventDefault();
+      ev.stopPropagation();
+      openDoc(btn.dataset.doc);
+    });
+  });
+
+  // 待删树：与知识目录同样的交互 —— 点目录行折叠该组，点复选框不触发折叠
+  const setRowOpen = (row, open) => {
+    row.setAttribute('aria-expanded', String(open));
+    row.classList.toggle('ki-tree-dir--open', open);
+    const arrow = row.querySelector('.ki-tree-arrow');
+    if (arrow) arrow.textContent = open ? '▾' : '▸';
+    const group = row.nextElementSibling;
+    if (group && group.classList.contains('ki-tree-group')) group.hidden = !open;
+  };
+
+  drawer.querySelectorAll('.ki-tree-dir').forEach((row) => {
+    const toggle = () => setRowOpen(row, row.getAttribute('aria-expanded') !== 'true');
+    row.addEventListener('click', (ev) => {
+      if (ev.target.closest('input')) return;
+      toggle();
+    });
+    row.addEventListener('keydown', (ev) => {
+      if (ev.target !== row) return;
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault();
+      toggle();
+    });
+  });
+
+  // 展开全部 / 折叠全部（不影响勾选状态）
+  drawer.querySelectorAll('[data-tree-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const expand = btn.dataset.treeAction === 'expand';
+      drawer.querySelectorAll('.ki-tree-dir').forEach((row) => setRowOpen(row, expand));
+    });
+  });
+
+  const all = drawer.querySelector('#ds-all');
+  const files = [...drawer.querySelectorAll('input[data-item]')];
+  const dirChecks = [...drawer.querySelectorAll('input[data-dir-check]')];
+  const del = drawer.querySelector('#ds-delete');
+
+  /** 某个目录复选框管的是它下面所有层级的文件（目录行 → 紧随的 .ki-tree-group） */
+  const filesUnder = (dirCheck) => {
+    const group = dirCheck.closest('.ki-tree-dir')?.nextElementSibling;
+    return group && group.classList.contains('ki-tree-group')
+      ? [...group.querySelectorAll('input[data-item]')]
+      : [];
+  };
+
+  const syncChecks = () => {
+    if (!all) return;
+    const picked = files.filter((i) => i.checked).length;
+    all.checked = picked > 0 && picked === files.length;
+    all.indeterminate = picked > 0 && picked < files.length;
+    // 每个目录的状态由其后代文件直接统计，所以遍历顺序无关
+    dirChecks.forEach((box) => {
+      const list = filesUnder(box);
+      const on = list.filter((i) => i.checked).length;
+      box.checked = list.length > 0 && on === list.length;
+      box.indeterminate = on > 0 && on < list.length;
+    });
+    del.disabled = picked === 0;
+    del.textContent = `删除所选 ${picked} 篇…`;
+  };
+
+  all?.addEventListener('change', () => { files.forEach((i) => { i.checked = all.checked; }); syncChecks(); });
+  dirChecks.forEach((box) => box.addEventListener('change', () => {
+    filesUnder(box).forEach((i) => { i.checked = box.checked; });
+    syncChecks();
+  }));
+  files.forEach((i) => i.addEventListener('change', syncChecks));
+  syncChecks();
+}
+
+function openDrawer() {
+  drawer.classList.add('is-open');
+  drawer.setAttribute('aria-hidden', 'false');
+}
+function closeDrawer() {
+  drawer.classList.remove('is-open');
+  drawer.setAttribute('aria-hidden', 'true');
+  const active = document.querySelector('.list-row.is-active');
+  if (active) active.focus();
+}
+
+/* ══════════════ demo 控件绑定 ══════════════ */
+document.querySelectorAll('.demo-bar [data-case]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.demo-bar [data-case]').forEach((b) => b.classList.remove('is-on'));
+    btn.classList.add('is-on');
+    current = btn.dataset.case;
+    render();
+  });
+});
+
+document.getElementById('togglePending').addEventListener('click', (e) => {
+  withPending = !withPending;
+  e.currentTarget.classList.toggle('is-on', withPending);
+  render();
+});
+
+document.getElementById('toggleTheme').addEventListener('click', (e) => {
+  const dark = document.documentElement.dataset.theme !== 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  e.currentTarget.textContent = dark ? '浅色' : '深色';
+});
+
+document.querySelectorAll('.list-row').forEach((row) => {
+  const open = () => {
+    document.querySelectorAll('.list-row').forEach((r) => r.classList.remove('is-active'));
+    row.classList.add('is-active');
+    openDrawer();
+  };
+  row.addEventListener('click', open);
+  row.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
+  });
+});
+
+/* ══════════════ 文档内容抽屉（复用知识目录「点文档看正文」的口径）══════════════
+   真实实现是 ModuleDrawer（.ki-drawer）：右侧滑出 + 遮罩，层级高于数据源详情抽屉。
+   demo 没有后端，正文用与同步结果一致的示例内容。 */
+const docDrawer = document.getElementById('docDrawer');
+
+function buildDocHtml(full) {
+  const name = full.split('/').pop();
+  const groupPath = full.split('/').slice(0, -1).join(' / ');
+  return `
+    <h1>${esc(name.replace(/\.md$/, ''))}</h1>
+    <p>本页由数据源 <code>langchain</code> 同步而来，源文件 <code>${esc(full)}</code>；
+       同步按「增量（同名覆盖）」策略重建向量与全文索引。</p>
+    <h2>背景</h2>
+    <p>这一版接入说明由早期手写流程迁移而来，部分步骤已与当前 CLI 不一致，
+       因此源目录里对应文件不再被引用，它才出现在「待删除」候选里。</p>
+    <ul>
+      <li>落点 Group：<code>${esc(groupPath)}</code></li>
+      <li>切分：1000 字符 / 重叠 150</li>
+      <li>向量条目：本篇拆成 ${2 + (name.length % 4)} 个 chunk</li>
+    </ul>
+    <h2>如何重新同步</h2>
+    <pre>ki datasource sync --scope langchain</pre>
+    <p>删除只影响知识库记录，不会改动源目录里的文件；之后需要恢复，重新同步即可重新导入。</p>
+  `;
+}
+
+function openDoc(full) {
+  document.getElementById('docDrawerCrumb').textContent = full.split('/').slice(0, -1).join(' / ');
+  document.getElementById('docDrawerTitle').textContent = full.split('/').pop();
+  document.getElementById('docDrawerBody').innerHTML = buildDocHtml(full);
+  docDrawer.classList.add('is-open');
+  docDrawer.setAttribute('aria-hidden', 'false');
+  docDrawer.querySelector('.ds-docd__close')?.focus();
+}
+
+function closeDoc() {
+  docDrawer.classList.remove('is-open');
+  docDrawer.setAttribute('aria-hidden', 'true');
+}
+
+docDrawer.querySelectorAll('[data-doc-close]').forEach((el) => el.addEventListener('click', closeDoc));
+
+window.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  // 层级优先：先关文档抽屉，再关数据源详情
+  if (docDrawer.classList.contains('is-open')) { closeDoc(); return; }
+  closeDrawer();
+});
+
+/* 点抽屉外部自动关闭（用户要求）。三处例外：
+   · 点列表行 —— 那是"切换数据源"，先关再开会闪；
+   · 点 demo 控件条 —— 演示用，不算页面外部；
+   · 点抽屉内部（含滚动区）与文档抽屉（它有自己的遮罩与关闭逻辑）。 */
+document.addEventListener('click', (ev) => {
+  if (!drawer.classList.contains('is-open')) return;
+  const target = ev.target;
+  if (drawer.contains(target)) return;
+  if (target.closest('#docDrawer')) return;
+  if (target.closest('.list-row')) return;
+  if (target.closest('.demo-bar')) return;
+  closeDrawer();
+});
+
+render();
+openDrawer();
+</script>
+</body>
+</html>

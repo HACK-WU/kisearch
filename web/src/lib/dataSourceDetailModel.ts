@@ -45,9 +45,128 @@ export interface DataSourcePendingGroup {
   untouched: boolean;
 }
 
+/** 结果概览：hero 大数字 + 分段进度条 + 图例（2026-10-22 视觉改造） */
+export interface DataSourceSummary {
+  scanned: number;
+  completed: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  vectorized: number;
+  fullText: number;
+}
+
+/** 指标网格单元（3×2），zero 值降权、失败>0 走危险色 */
+export interface DataSourceMetric {
+  label: string;
+  value: number;
+  tone?: 'normal' | 'danger';
+}
+
+/**
+ * group 路径与 sourcePath 合并成文档的逻辑路径。
+ *
+ * ★ 口径与后端 `src/lib/doc-path.ts::logicalDocPath` 完全一致（前端不能跨端 import 后端 src）：
+ *   - sourcePath 已含 group 后缀前缀（`aiops/rca/x.md` @ group `aiops/rca`）→ 原样
+ *   - sourcePath 缺 group 前缀（`API文档/x.md` @ group `wiki/API文档`）→ 补 group
+ *   - 无 sourcePath（MCP / CLI 写入）→ 退回 `group/name`
+ * 按「最长重叠段」判定，不要改成简单字符串拼接 —— 拼接会把 group 重复一层。
+ */
+export function mergeGroupSourcePath(group: string, sourcePath: string | undefined, name: string): string {
+  const split = (value: string): string[] => value.replace(/[\\/]+/g, '/').split('/').map((s) => s.trim()).filter(Boolean);
+  const groupSegments = split(group);
+  const fileSegments = sourcePath ? split(sourcePath) : split(name);
+  let overlap = 0;
+  const max = Math.min(groupSegments.length, fileSegments.length);
+  for (let size = max; size > 0; size -= 1) {
+    if (groupSegments.slice(-size).join('/') === fileSegments.slice(0, size).join('/')) {
+      overlap = size;
+      break;
+    }
+  }
+  return [...groupSegments, ...fileSegments.slice(overlap)].join('/');
+}
+
+/** 待删候选树节点：dir = 目录（group 段或 sourcePath 目录段），file = 候选文档 */
+export interface DataSourcePendingTreeNode {
+  kind: 'dir' | 'file';
+  name: string;
+  /** 逻辑路径（已合并 group），目录折叠态与勾选联动都以它为键 */
+  path: string;
+  children: DataSourcePendingTreeNode[];
+  /** 本级直属文档数（file 子节点数） */
+  direct: number;
+  /** 子树文档总数 */
+  total: number;
+  /** 仅 file 节点：候选本身（勾选 / 打开正文都用它） */
+  item?: DataSourcePendingItem;
+}
+
+/**
+ * 把待删候选合并成一棵目录树（对齐知识目录形态）。
+ *
+ * 路径来源：`mergeGroupSourcePath(item.group, item.sourcePath, item.relation)` ——
+ * **不能只用 sourcePath 建树**，否则 group 层会重复（护栏 #3）。
+ */
+export function buildDataSourcePendingTree(items: DataSourcePendingItem[]): DataSourcePendingTreeNode[] {
+  const roots: DataSourcePendingTreeNode[] = [];
+  const dirs = new Map<string, DataSourcePendingTreeNode>();
+  const split = (value: string): string[] => value.replace(/[\\/]+/g, '/').split('/').map((s) => s.trim()).filter(Boolean);
+
+  const ensureDir = (segments: string[]): DataSourcePendingTreeNode | null => {
+    let level = roots;
+    let path = '';
+    let node: DataSourcePendingTreeNode | null = null;
+    for (const segment of segments) {
+      path = path ? `${path}/${segment}` : segment;
+      node = dirs.get(path) ?? null;
+      if (!node) {
+        node = { kind: 'dir', name: segment, path, children: [], direct: 0, total: 0 };
+        dirs.set(path, node);
+        level.push(node);
+      }
+      level = node.children;
+    }
+    return node;
+  };
+
+  for (const item of items) {
+    const logical = mergeGroupSourcePath(item.group, item.sourcePath, item.relation);
+    const segments = split(logical);
+    if (segments.length === 0) continue;
+    const parent = ensureDir(segments.slice(0, -1));
+    if (!parent) continue;
+    parent.children.push({
+      kind: 'file',
+      name: segments[segments.length - 1],
+      path: logical,
+      children: [],
+      direct: 0,
+      total: 0,
+      item,
+    });
+  }
+
+  const countFiles = (nodes: DataSourcePendingTreeNode[]): number => nodes
+    .reduce((sum, node) => sum + (node.kind === 'file' ? 1 : countFiles(node.children)), 0);
+  const walk = (nodes: DataSourcePendingTreeNode[]): void => {
+    for (const node of nodes) {
+      if (node.kind !== 'dir') continue;
+      node.direct = node.children.filter((child) => child.kind === 'file').length;
+      node.total = countFiles(node.children);
+      walk(node.children);
+    }
+  };
+  walk(roots);
+  return roots;
+}
+
 export interface DataSourceDetailModel {
   header: { title: string; state: DataSourceStatusState; stateLabel: string; tone: DataSourceStatusTone; active: boolean };
   params: DetailRow[];
+  /** 无同步记录时为 null（渲染空态引导） */
+  summary: DataSourceSummary | null;
+  metrics: DataSourceMetric[];
   results: DetailRow[];
   details: {
     failures: DetailItem[];
@@ -166,7 +285,8 @@ function formatTime(ts: number): string {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' }).format(ts);
 }
 
-function formatDuration(ms: number): string {
+/** 用时格式化（抽屉头部元信息与「时间」段共用） */
+export function formatSyncDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
@@ -289,30 +409,31 @@ export function buildDataSourceDetail(
   const gitRows: DetailRow[] = record.type === 'git' && record.git
     ? [
       {
+        // 只显示远端地址（用户要求：不要"托管 clone（服务端维护…）"这类描述）
         label: '仓库来源',
-        value: record.git.managed ? '托管 clone（服务端维护，勿手动修改）' : '本地仓库',
-        hint: record.git.managed && record.git.remoteUrl ? record.git.remoteUrl : undefined,
+        value: record.git.remoteUrl ?? '本地仓库',
       },
-      { label: 'Git 仓库', value: record.git.repoRoot, full: true },
+      { label: 'Git 仓库', value: record.git.repoRoot },
       { label: '分支', value: record.git.branch ?? 'detached' },
       {
         label: '最近提交',
         value: git?.shortCommit ? `${git.shortCommit}${git.subject ? ` · ${git.subject}` : ''}` : '—',
         hint: git?.authorTime ? formatTime(git.authorTime) : undefined,
-        full: true,
       },
     ]
     : [];
+  // 顺序与两列栅格对齐（2026-10-22 视觉改造）：短字段两列、长字段独占整行。
+  // ★ 源目录不再出现在这里 —— 抽屉头部已展示（mono + 复制按钮），重复展示是冗余。
   const params: DetailRow[] = [
     { label: '类型', value: typeLabel },
-    { label: '知识库', value: record.scope },
-    { label: '源目录', value: record.dir, full: true },
-    ...gitRows,
     { label: '同步模式', value: modeLabel },
-    { label: '落点 Group', value: effGroup ?? '(自动：按顶层子目录)', full: true },
+    { label: '知识库', value: record.scope },
     { label: '同名策略', value: CONFLICT_LABEL[effConflict] ?? effConflict },
     { label: '向量化', value: effVector ? '开启' : '关闭（仅全文）' },
     { label: '切分参数', value: `${effChunkSize ?? 1000} / ${effChunkOverlap ?? 150}` },
+    ...gitRows,
+    // 落点 Group 放最后：它是"这条数据源写到哪里"的结论，放在参数末尾读起来更顺
+    { label: '落点 Group', value: effGroup ?? '自动：按顶层子目录', full: true },
   ];
 
   const fullScanned = result ? (result.files.fullScanned ?? result.files.scanned) : 0;
@@ -337,10 +458,34 @@ export function buildDataSourceDetail(
     ]
     : [];
 
+  // 概览与指标把「完成 / 未变 / 跳过 / 失败」拆成可比较的数字：
+  // hero 表达"这次同步到底成了多少"，指标网格补齐其余维度（完成不在网格里，避免与 hero 重复）
+  const summary: DataSourceSummary | null = result
+    ? {
+      scanned: fullScanned,
+      completed: result.files.completed,
+      unchanged: result.files.unchanged,
+      skipped: result.files.skipped,
+      failed: result.files.incomplete,
+      vectorized: result.vectorized,
+      fullText: result.fullTextIndexed,
+    }
+    : null;
+  const metrics: DataSourceMetric[] = result
+    ? [
+      { label: '全量扫描', value: fullScanned },
+      { label: '处理', value: result.files.scanned },
+      { label: '跳过', value: result.files.skipped },
+      { label: '失败', value: result.files.incomplete, tone: result.files.incomplete > 0 ? 'danger' : 'normal' },
+      { label: '向量条目', value: result.vectorized },
+      { label: '全文条目', value: result.fullTextIndexed },
+    ]
+    : [];
+
   const times: DetailRow[] = sync
     ? [
       { label: '上次同步', value: formatTime(sync.at) },
-      { label: '用时', value: formatDuration(sync.durationMs) },
+      { label: '用时', value: formatSyncDuration(sync.durationMs) },
     ]
     : [{ label: '上次同步', value: '—' }];
 
@@ -353,6 +498,8 @@ export function buildDataSourceDetail(
       active: status.active,
     },
     params,
+    summary,
+    metrics,
     results,
     details: {
       failures: failureItems(sync),

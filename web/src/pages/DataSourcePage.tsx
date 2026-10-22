@@ -5,8 +5,8 @@
  *  - 主区是**全宽列表**（不再用左右分栏）：Scope / 源目录 / 落点 / 上次同步 / 状态 / 待删
  *  - 点击某行 → 右侧面板展示该数据源上一次同步详情 + 待删段（URL `/datasource/:scope`，可分享/刷新恢复）
  *  - 页面只读；唯一写动作是面板里的「删除待删候选」
- *  - **面板是非模态的**（V3 定稿）：不铺遮罩、1px 描边、全高常驻 ⇒ 点另一行直接切换数据源。
- *    曾试过「半高 + 全屏遮罩」，实测面板像悬空白板、选中行绿带透过遮罩像污渍，已推翻。
+ *  - **面板是模态浮层**（V5，2026-10-22 用户定稿）：宽度 70vw + 左侧遮罩压暗 ⇒ 点遮罩/外部关闭。
+ *    历史：V3 曾定「非模态不铺遮罩」，V5 按用户要求加回遮罩；不要再按 V3 结论去掉。
  *  - **列表不再自带卡片标题**（PM 走查）：页面身份由顶栏 H1 唯一承载，总数在页头副标题；
  *    原先卡片头重复了一次「数据源」又把「共 N 个」数了两遍。想加回标题前先确认这两处仍在。
  *  - loading / error / empty 三者互斥（见下方卡内分支）：同屏出现「加载失败」与「还没有数据源」
@@ -18,16 +18,71 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
-import { addRemoteDataSource, pruneDataSource, syncDataSource, type DataSourcePendingItem } from '@/api/httpApi';
+import { addRemoteDataSource, getDocContent, pruneDataSource, syncDataSource, type DataSourcePendingItem } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
-import { buildDataSourceDetail, buildDataSourceListSummary, dataSourceStatusView, resolveDataSourceActiveState } from '@/lib/dataSourceDetailModel';
-import { RowList, SectionTitle } from '@/components/TaskDetailParts';
+import {
+  buildDataSourceDetail,
+  buildDataSourceListSummary,
+  buildDataSourcePendingTree,
+  dataSourceStatusView,
+  formatSyncDuration,
+  resolveDataSourceActiveState,
+  type DataSourcePendingTreeNode,
+} from '@/lib/dataSourceDetailModel';
+import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { Icon } from '@/components/icons';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 
 const keyOf = (item: { group: string; relation: string }): string => `${item.group}\u0000${item.relation}`;
 
 const PAGE_SIZE_DEFAULT = 10;
+
+/** 失败明细默认展示条数；超出折叠，展开后由 CSS 限高滚动 */
+const FAILURE_PREVIEW = 5;
+
+const FOLDER_ICON = (
+  <svg
+    className="ki-tree-icon"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.3"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M1.6 3.7c0-.6.5-1.1 1.1-1.1h2.9l1.6 1.7h5.7c.6 0 1.1.5 1.1 1.1v6.9c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1V3.7z" />
+  </svg>
+);
+
+const OPEN_DOC_ICON = (
+  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="2.8" y="3.4" width="6.2" height="9.2" rx="1" />
+    <path d="M10.4 8h4.1" />
+    <path d="M12.3 5.8 14.6 8l-2.3 2.2" />
+  </svg>
+);
+
+/** 目录节点下的全部候选（整组勾选 / 状态统计共用） */
+function collectItems(node: DataSourcePendingTreeNode): DataSourcePendingItem[] {
+  if (node.kind === 'file') return node.item ? [node.item] : [];
+  return node.children.flatMap(collectItems);
+}
+
+/** 所有目录路径（「折叠全部」用） */
+function allDirPaths(nodes: DataSourcePendingTreeNode[]): string[] {
+  const paths: string[] = [];
+  const walk = (list: DataSourcePendingTreeNode[]): void => {
+    for (const node of list) {
+      if (node.kind !== 'dir') continue;
+      paths.push(node.path);
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return paths;
+}
 
 function formatDateTime(ts: number): string {
   const d = new Date(ts);
@@ -71,6 +126,10 @@ export function DataSourcePage(): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<string | null>(null);
+  // 待删树：折叠的目录（空 = 全部展开）、失败明细是否展开全部、正在查看正文的候选
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const [showAllFailures, setShowAllFailures] = useState(false);
+  const [docTarget, setDocTarget] = useState<DataSourcePendingItem | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const [syncingScope, setSyncingScope] = useState<string | null>(null);
@@ -126,6 +185,9 @@ export function DataSourcePage(): JSX.Element {
     setReceipt(null);
     setSyncingScope(null);
     setRowSyncNotice(null);
+    setCollapsedDirs(new Set());
+    setShowAllFailures(false);
+    setDocTarget(null);
   }, [scope]);
 
   // 关闭抽屉后把焦点还给打开它的行（否则焦点掉到 body）
@@ -142,15 +204,16 @@ export function DataSourcePage(): JSX.Element {
     });
   }, [scope]);
 
-  // Esc 关闭抽屉（与站内其他浮层同口径）；添加弹窗打开时由弹窗独占 Esc
+  // Esc 关闭抽屉（与站内其他浮层同口径）；添加弹窗 / 文档抽屉打开时由它们独占 Esc，
+  // 否则一次 Esc 会把文档抽屉和数据源详情一起关掉
   useEffect(() => {
-    if (!scope || addOpen) return undefined;
+    if (!scope || addOpen || docTarget) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') navigate('/datasource');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [scope, navigate, addOpen]);
+  }, [scope, navigate, addOpen, docTarget]);
 
   // 旧 daemon 只返回 running：统一在这里归一，避免 `undefined !== null` 把空闲判成进行中
   const activeState = resolveDataSourceActiveState(detailQuery.data?.activeState, detailQuery.data?.running);
@@ -165,6 +228,158 @@ export function DataSourcePage(): JSX.Element {
       : null),
     [detailQuery.data, activeState],
   );
+  // 待删候选 → 目录树（group 段 + sourcePath 目录段合并，见 buildDataSourcePendingTree）
+  const pendingTree = useMemo(
+    () => buildDataSourcePendingTree(model?.pending.items ?? []),
+    [model?.pending.items],
+  );
+
+  /** 待删除段常显：无候选时也要给一句说明（否则用户以为功能消失） */
+  const pendingEmpty = model ? model.pending.total === 0 && !model.pending.blocked : false;
+
+  const lastSync = detailQuery.data?.source.lastSync ?? null;
+  const whenLabel = lastSync
+    ? `上次同步 ${formatDateTime(lastSync.at)} · 用时 ${formatSyncDuration(lastSync.durationMs)}`
+    : '尚未同步过';
+
+  // hero：完成率 = 完成 / 扫描；分段条只表达「完成 / 跳过 / 失败」三种结局
+  // （「内容未变」是完成的子集，不单独占段，否则成功态看起来像只完成了 10%）
+  const heroTotal = Math.max(1, model?.summary?.scanned ?? 1);
+  const heroPercent = model?.summary ? Math.round((model.summary.completed / heroTotal) * 1000) / 10 : 0;
+  const heroSegments = (model?.summary
+    ? [
+      { cls: 'done', count: model.summary.completed },
+      { cls: 'skipped', count: model.summary.skipped },
+      { cls: 'failed', count: model.summary.failed },
+    ]
+    : []).filter((segment) => segment.count > 0);
+
+  const toggleDir = (path: string): void => {
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+
+  /** 目录勾选：作用于该目录下**所有层级**的候选；子项状态由后代统计得出 */
+  const toggleNodeItems = (node: DataSourcePendingTreeNode): void => {
+    const items = collectItems(node);
+    setConfirming(false);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allSelected = items.length > 0 && items.every((item) => next.has(keyOf(item)));
+      for (const item of items) {
+        if (allSelected) next.delete(keyOf(item));
+        else next.add(keyOf(item));
+      }
+      return next;
+    });
+  };
+
+  const renderPendingNode = (node: DataSourcePendingTreeNode): JSX.Element => {
+    if (node.kind === 'file') {
+      const item = node.item;
+      const key = item ? keyOf(item) : node.path;
+      return (
+        <label key={node.path} className="ki-tree-doc">
+          <span className="ki-tree-arrow" aria-hidden="true" />
+          <input
+            type="checkbox"
+            className="ki-ds-check"
+            checked={item ? selected.has(key) : false}
+            disabled={!selectable || !item}
+            onChange={() => { if (item) toggleOne(item); }}
+            aria-label={`选择 ${node.name}`}
+          />
+          <Icon name="file" className="ki-icon ki-icon--sm" />
+          <span className="ki-tree-doc__name">{node.name}</span>
+          <button
+            type="button"
+            className="ki-ds-doc-open"
+            aria-label={`查看 ${node.name} 内容`}
+            title="查看内容"
+            onClick={(event) => {
+              // 按钮在 <label> 内：不拦住会连带切换复选框
+              event.preventDefault();
+              event.stopPropagation();
+              if (item) setDocTarget(item);
+            }}
+          >
+            {OPEN_DOC_ICON}
+          </button>
+        </label>
+      );
+    }
+    const open = !collapsedDirs.has(node.path);
+    const items = collectItems(node);
+    const picked = items.filter((item) => selected.has(keyOf(item))).length;
+    const countText = node.direct > 0 && node.direct !== node.total
+      ? `${node.direct} / ${node.total}`
+      : String(node.total);
+    return (
+      <div key={node.path}>
+        <div
+          className={`ki-tree-dir${open ? ' ki-tree-dir--open' : ''}`}
+          role="treeitem"
+          tabIndex={0}
+          aria-expanded={open}
+          aria-label={`${node.name}，共 ${node.total} 篇`}
+          title={node.path}
+          onClick={(event) => {
+            if ((event.target as Element).closest('input')) return;
+            toggleDir(node.path);
+          }}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            toggleDir(node.path);
+          }}
+        >
+          <button
+            type="button"
+            className="ki-tree-arrow"
+            tabIndex={-1}
+            aria-hidden="true"
+            onClick={(event) => { event.stopPropagation(); toggleDir(node.path); }}
+          >{open ? '▾' : '▸'}</button>
+          <input
+            type="checkbox"
+            className="ki-ds-check"
+            checked={items.length > 0 && picked === items.length}
+            ref={(element) => { if (element) element.indeterminate = picked > 0 && picked < items.length; }}
+            disabled={!selectable || items.length === 0}
+            onChange={() => toggleNodeItems(node)}
+            aria-label={`全选 ${node.path}`}
+          />
+          {FOLDER_ICON}
+          <span className="ki-tree-dir__label">{node.name}</span>
+          <span className="ki-cell-sub">{countText}</span>
+        </div>
+        {open ? <div className="ki-tree-group">{node.children.map(renderPendingNode)}</div> : null}
+      </div>
+    );
+  };
+
+  // 点抽屉外部自动关闭（2026-10-22 用户要求 V4）。例外：抽屉内部、列表行（切换数据源）、
+  // 添加弹窗、文档抽屉（ModuleDrawer 自带遮罩）、AI 面板（浮层，不是"页面空白"）。
+  useEffect(() => {
+    if (!scope) return undefined;
+    const onDocClick = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('.ki-ds-drawer')) return;
+      if (target.closest('.ki-ds-table__row')) return;
+      if (target.closest('.ki-overlay')) return;
+      if (target.closest('.ki-drawer')) return;
+      if (target.closest('.ki-chat')) return;
+      navigate('/datasource');
+    };
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, [scope, navigate]);
+
   const sources = listQuery.data?.sources ?? [];
   const missing = listQuery.data?.missing ?? [];
   const corrupt = listQuery.data?.corrupt ?? [];
@@ -216,19 +431,6 @@ export function DataSourcePage(): JSX.Element {
     setSelected((prev) => {
       if (prev.size >= visibleItems.length) return new Set();
       return new Set(visibleItems.map(keyOf));
-    });
-  };
-
-  const toggleGroup = (items: DataSourcePendingItem[]): void => {
-    setConfirming(false);
-    setSelected((prev) => {
-      const next = new Set(prev);
-      const allSelected = items.every((item) => next.has(keyOf(item)));
-      for (const item of items) {
-        if (allSelected) next.delete(keyOf(item));
-        else next.add(keyOf(item));
-      }
-      return next;
     });
   };
 
@@ -405,7 +607,7 @@ export function DataSourcePage(): JSX.Element {
   };
 
   return (
-    <div className="ki-datasource-page">
+    <div className={`ki-datasource-page${scope ? ' ki-datasource-page--drawer' : ''}`}>
       <div className="ki-page-head">
         <div>
           <p>{listSummary}</p>
@@ -607,7 +809,7 @@ export function DataSourcePage(): JSX.Element {
       ))}
 
       <section className="ki-card">
-        <div className="ki-card__body">
+        <div className="ki-card__body ki-card__body--flush">
           {listQuery.isLoading ? (
             <p className="ki-ds-muted">加载中…</p>
           ) : listQuery.isError ? (
@@ -755,21 +957,38 @@ export function DataSourcePage(): JSX.Element {
             列表保持可读可点 —— 直接点另一行即可切换数据源；代价是"点背景关闭"不再成立。 */}
       {scope ? (
         <>
+          {/* ★ 模态浮层（2026-10-22 V5，用户定稿）：宽度 70vw + 左侧遮罩压暗 + 点遮罩/外部关闭。
+              历史：V3 曾定稿"非模态不铺遮罩、列表可点"，V4 改成 70vw，V5 按用户反馈加回遮罩
+              —— 不要再按 V3 的结论去掉遮罩。 */}
+          <div
+            className="ki-ds-drawer__scrim"
+            aria-hidden="true"
+            onClick={() => navigate('/datasource')}
+          />
           <aside className="ki-ds-drawer" role="region" aria-label={`数据源详情 ${scope}`}>
             <header className="ki-ds-drawer__head">
-              <div className="ki-ds-drawer__identity">
-                <div className="ki-ds-drawer__kicker">DATASOURCE</div>
-                <h2 className="ki-ds-drawer__title">{scope}</h2>
+              {/* 第一行只有 scope 名称（地址/类型已按用户要求移除，Git 路径见「同步参数」） */}
+              <div className="ki-ds-drawer__row">
+                <h2 className="ki-ds-drawer__title" title={scope}>{scope}</h2>
+                <button
+                  type="button"
+                  ref={closeBtnRef}
+                  className="ki-ds-drawer__close"
+                  aria-label="关闭详情"
+                  onClick={() => navigate('/datasource')}
+                >✕</button>
               </div>
-              {model ? <span className={`ki-task-state ki-task-state--${model.header.tone}`}>{model.header.stateLabel}</span> : null}
-              <button
-                type="button"
-                ref={closeBtnRef}
-                className="ki-ds-drawer__close"
-                aria-label="关闭详情"
-                onClick={() => navigate('/datasource')}
-              >✕</button>
+              <div className="ki-ds-drawer__foot">
+                {model ? (
+                  <span className={`ki-ds-state ki-ds-state--${model.header.tone}`}>
+                    <span className="ki-ds-state__dot" aria-hidden />
+                    {model.header.stateLabel}
+                  </span>
+                ) : null}
+                <span className="ki-ds-drawer__when">{whenLabel}</span>
+              </div>
             </header>
+
             <div className="ki-ds-drawer__body">
               {detailQuery.isLoading ? <p className="ki-ds-muted">加载中…</p> : null}
               {detailQuery.isError ? (
@@ -780,10 +999,43 @@ export function DataSourcePage(): JSX.Element {
               ) : null}
               {model ? (
                 <>
-                  {model.notices.map((notice) => (
-                    <p key={notice.text} className={`ki-task-notice ki-task-notice--${notice.tone}`}>{notice.text}</p>
-                  ))}
-                  {availability?.reason === 'cooldown' ? (
+                  {/* 同步中：进度块（阶段 + 进度条）。接口暂无 progress/stage，用不确定态兜底。 */}
+                  {active ? (
+                    <div className="ki-progress-block">
+                      <div className="ki-track-head">
+                        <span className="ki-track-kicker">PROGRESS</span>
+                        <span className="ki-ds-state ki-ds-state--running">
+                          <span className="ki-ds-state__dot" aria-hidden />
+                          {activeState === 'queued' ? '排队中' : '同步中'}
+                        </span>
+                      </div>
+                      <div className="ki-track-title">同步进度</div>
+                      <div className="ki-progress-row">
+                        <span className="ki-progress-label">
+                          <span className="ki-spinner" aria-hidden />
+                          {activeState === 'queued' ? '等待同知识库的其他任务完成…' : '正在同步源目录…'}
+                        </span>
+                      </div>
+                      <div className="ki-progress" role="progressbar" aria-label="同步进度" aria-valuemin={0} aria-valuemax={100}>
+                        <div className="ki-progress__fill ki-progress__fill--indeterminate" />
+                      </div>
+                      <div className="ki-progress-sub">
+                        {detailQuery.data?.activeStartedAt
+                          ? `本次开始于 ${formatDateTime(detailQuery.data.activeStartedAt)} · 下方「执行结果」为上次同步数据`
+                          : '下方「执行结果」为上次同步数据'}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* 待删段的 skipDetail 只在下方区块里出现一次：同一条 warn 在顶部与卡内各渲染一遍
+                      会让"已生成候选 / 未生成候选"这类结论重复两遍（实测确实重复）。 */}
+                  {!active ? model.notices
+                    .filter((notice) => !(model.pending.blocked && notice.text === model.pending.skipDetail))
+                    .map((notice) => (
+                      <p key={notice.text} className={`ki-task-notice ki-task-notice--${notice.tone}`}>{notice.text}</p>
+                    )) : null}
+                  {/* 冷却提示只在空闲时才有意义：同步中再说"距上次不足 30 分钟"是噪音 */}
+                  {!active && availability?.reason === 'cooldown' ? (
                     <p className="ki-task-notice ki-task-notice--info">
                       距上次成功同步不足 30 分钟（约 {Math.max(1, Math.ceil((availability.retryAfterSec ?? 0) / 60))} 分钟）。
                       如需立即同步：<code>ki datasource sync --scope {scope}</code>
@@ -792,60 +1044,183 @@ export function DataSourcePage(): JSX.Element {
                   {availability === undefined && detailQuery.data ? (
                     <p className="ki-task-notice ki-task-notice--warn">当前 daemon 不支持页面同步，请升级并重启。</p>
                   ) : null}
-                  <SectionTitle>同步参数</SectionTitle>
-                  <RowList rows={model.params} className="ki-ds-facts--stack" />
 
-                  {model.results.length > 0 ? (
-                    <>
-                      <SectionTitle>{model.header.active ? '上次执行结果' : '执行结果'}</SectionTitle>
-                      <RowList rows={model.results} className="ki-ds-facts--stack" />
-                    </>
-                  ) : null}
-                  {model.details.failures.length > 0 ? (
-                    <details className="ki-task-detail__details">
-                      <summary>
-                        失败明细 {model.details.failures.length}
-                        {model.details.failureTotal > model.details.failures.length ? ` / 共 ${model.details.failureTotal}` : ''} 条
-                      </summary>
-                      <ul className="ki-task-tree ki-task-tree--list">
-                        {model.details.failures.map((item) => (
-                          <li key={`${item.title}-${item.meta ?? ''}`} className="ki-task-tree__row ki-task-tree__row--item">
-                            <span className="ki-task-tree__path">{item.title}</span>
-                            {item.meta ? <span className="ki-task-tree__meta">{item.meta}</span> : null}
-                          </li>
-                        ))}
-                      </ul>
-                      {model.details.failureTotal > model.details.failures.length ? (
-                        <p className="ki-ds-pending__note">
-                          仅显示前 {model.details.failures.length} 条；完整清单见 datasource.json 的 lastSync.result.failures。
-                        </p>
-                      ) : null}
-                    </details>
-                  ) : null}
-                  {model.details.conflicts.length > 0 ? (
-                    <details className="ki-task-detail__details">
-                      <summary>冲突 / 覆盖明细 {model.details.conflicts.length} 条</summary>
-                      <ul className="ki-task-tree ki-task-tree--list">
-                        {model.details.conflicts.map((item) => (
-                          <li key={`${item.title}-${item.meta ?? ''}`} className="ki-task-tree__row ki-task-tree__row--item">
-                            <span className="ki-task-tree__path">{item.title}</span>
-                            {item.meta ? <span className="ki-task-tree__meta">{item.meta}</span> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  ) : null}
+                  {/* ── 执行结果（数据区材质） ── */}
+                  <section className="ki-ds-sec ki-ds-sec--data">
+                    <div className="ki-ds-sec__head">
+                      <span className="ki-ds-sec__mark" aria-hidden />
+                      <h3 className="ki-ds-sec__title">执行结果</h3>
+                      {model.summary ? <span className="ki-ds-sec__hint">扫描 {model.summary.scanned} 篇</span> : null}
+                    </div>
 
-                  {model.pending.total > 0 || model.pending.blocked ? (
-                    <section className="ki-ds-pending">
-                      <SectionTitle>
-                        {model.pending.blocked ? '待删除（未生成候选）' : `待删除 ${model.pending.total} 篇`}
-                      </SectionTitle>
-                      {model.pending.computedAt > 0 ? (
-                        <p className="ki-ds-pending__from">由 {new Date(model.pending.computedAt).toLocaleString('zh-CN')} 同步算出</p>
-                      ) : null}
+                    {model.summary ? (
+                      <>
+                        <div className="ki-ds-hero">
+                          <div>
+                            <div className="ki-ds-hero__num">{model.summary.completed}</div>
+                            <div className="ki-ds-hero__label">完成</div>
+                          </div>
+                          <div>
+                            <div className="ki-ds-hero__barrow">
+                              <span
+                                className="ki-ds-bar"
+                                role="img"
+                                aria-label={`完成 ${heroPercent}%，共扫描 ${model.summary.scanned} 篇`}
+                              >
+                                {heroSegments.map((segment) => (
+                                  <span
+                                    key={segment.cls}
+                                    className={`ki-ds-bar__seg ki-ds-bar__seg--${segment.cls}`}
+                                    style={{ width: `${(segment.count / heroTotal) * 100}%` }}
+                                  />
+                                ))}
+                              </span>
+                              <span className="ki-ds-hero__pct">{heroPercent}%</span>
+                            </div>
+                            <div className="ki-ds-legend">
+                              <span className="ki-ds-legend__item ki-ds-legend__item--done">
+                                完成 {model.summary.completed}
+                                {model.summary.unchanged > 0
+                                  ? <span className="ki-ds-legend__sub">（未变 {model.summary.unchanged}）</span>
+                                  : null}
+                              </span>
+                              <span className="ki-ds-legend__dot" aria-hidden>·</span>
+                              <span className="ki-ds-legend__item">跳过 {model.summary.skipped}</span>
+                              <span className="ki-ds-legend__dot" aria-hidden>·</span>
+                              {model.summary.failed > 0 ? (
+                                <span className="ki-ds-legend__item ki-ds-legend__item--failed">失败 {model.summary.failed}</span>
+                              ) : (
+                                <span className="ki-ds-legend__item">失败 0</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <dl className="ki-ds-metrics">
+                          {model.metrics.map((metric) => {
+                            const zero = metric.value === 0;
+                            const danger = metric.tone === 'danger' && metric.value > 0;
+                            return (
+                              <div key={metric.label} className="ki-ds-metric">
+                                <dt className="ki-ds-metric__label">{metric.label}</dt>
+                                <dd className={`ki-ds-metric__value${zero ? ' ki-ds-metric__value--zero' : ''}${danger ? ' ki-ds-metric__value--danger' : ''}`}>
+                                  {metric.value}
+                                </dd>
+                              </div>
+                            );
+                          })}
+                        </dl>
+
+                        {model.details.failures.length > 0 ? (
+                          <div className="ki-ds-failbox">
+                            <div className="ki-ds-failbox__head">
+                              <span className="ki-ds-failbox__title">失败明细</span>
+                              <span className="ki-ds-failbox__count">
+                                {model.details.failures.length} 条
+                                {model.details.failures.length > FAILURE_PREVIEW ? ` · 先显示 ${FAILURE_PREVIEW} 条` : ''}
+                              </span>
+                            </div>
+                            <ul className="ki-ds-failbox__list">
+                              {(showAllFailures ? model.details.failures : model.details.failures.slice(0, FAILURE_PREVIEW)).map((item) => (
+                                <li key={`${item.title}-${item.meta ?? ''}`} className="ki-ds-failbox__row">
+                                  <span className="ki-ds-failbox__path">{item.title}</span>
+                                  {item.meta ? <span className="ki-ds-failbox__why">{item.meta}</span> : null}
+                                </li>
+                              ))}
+                            </ul>
+                            {model.details.failures.length > FAILURE_PREVIEW ? (
+                              <button
+                                type="button"
+                                className="ki-ds-failbox__more"
+                                aria-expanded={showAllFailures}
+                                onClick={() => setShowAllFailures((prev) => !prev)}
+                              >
+                                {showAllFailures ? '收起' : `展开剩余 ${model.details.failures.length - FAILURE_PREVIEW} 条`}
+                              </button>
+                            ) : null}
+                            {model.details.failureTotal > model.details.failures.length ? (
+                              <p className="ki-ds-pending__note" style={{ padding: '0 12px 8px' }}>
+                                仅显示前 {model.details.failures.length} 条（服务端最多存 20 条）；完整清单见 datasource.json 的 lastSync.result.failures。
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {model.details.conflicts.length > 0 ? (
+                          <details className="ki-task-detail__details">
+                            <summary>冲突 / 覆盖明细 {model.details.conflicts.length} 条</summary>
+                            <ul className="ki-task-tree ki-task-tree--list">
+                              {model.details.conflicts.map((item) => (
+                                <li key={`${item.title}-${item.meta ?? ''}`} className="ki-task-tree__row ki-task-tree__row--item">
+                                  <span className="ki-task-tree__path">{item.title}</span>
+                                  {item.meta ? <span className="ki-task-tree__meta">{item.meta}</span> : null}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="ki-ds-hero__empty">
+                        还没有同步记录。命令行执行后可在此查看结果：
+                        <br />
+                        <code className="ki-ds-callout__cmd">ki datasource sync --scope {scope}</code>
+                      </div>
+                    )}
+                  </section>
+
+                  {/* ── 同步参数（只读属性区材质；源目录已上移到头部，不重复） ── */}
+                  <section className="ki-ds-sec ki-ds-sec--meta">
+                    <div className="ki-ds-sec__head">
+                      <span className="ki-ds-sec__mark" aria-hidden />
+                      <h3 className="ki-ds-sec__title">同步参数</h3>
+                    </div>
+                    <dl className="ki-ds-params">
+                      {model.params.map((row) => (
+                        <div key={row.label} className={`ki-ds-params__cell${row.full ? ' ki-ds-params__cell--full' : ''}`}>
+                          <dt>{row.label}</dt>
+                          <dd className={/仓库|分支|提交|Group|知识库/.test(row.label) ? 'is-mono' : undefined}>
+                            <span>{row.value}</span>
+                            {row.hint ? <small className="ki-ds-params__hint">{row.hint}</small> : null}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+
+                  {/* ── 待删除（操作台材质；唯一写入口）
+                       ★ 常显（2026-10-22 用户要求）：没有候选时也要说明"当前没有待删"，
+                         否则用户会以为这块功能消失了。 ── */}
+                  <section className="ki-ds-sec ki-ds-sec--action">
+                      <div className="ki-ds-sec__head">
+                        <span className="ki-ds-sec__mark" aria-hidden />
+                        <h3 className="ki-ds-sec__title">
+                          {model.pending.blocked ? '待删除（未生成候选）' : `待删除 ${model.pending.total} 篇`}
+                        </h3>
+                        {model.pending.computedAt > 0 ? (
+                          <span className="ki-ds-sec__hint">
+                            由 {new Date(model.pending.computedAt).toLocaleString('zh-CN')} 同步算出
+                          </span>
+                        ) : null}
+                        {!model.pending.blocked && pendingTree.length > 0 ? (
+                          <div className="ki-ds-tree-actions">
+                            <button type="button" className="ki-ds-linkbtn" onClick={() => setCollapsedDirs(new Set())}>展开全部</button>
+                            <span className="ki-ds-legend__dot" aria-hidden>·</span>
+                            <button
+                              type="button"
+                              className="ki-ds-linkbtn"
+                              onClick={() => setCollapsedDirs(new Set(allDirPaths(pendingTree)))}
+                            >折叠全部</button>
+                          </div>
+                        ) : null}
+                      </div>
+
                       {model.pending.blocked ? (
                         <p className="ki-task-notice ki-task-notice--warn">{model.pending.skipDetail ?? '未生成候选'}</p>
+                      ) : pendingEmpty ? (
+                        <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                          当前没有待删除的文档：知识库与源目录一致。下次同步会重新比对并生成候选。
+                        </p>
                       ) : (
                         <>
                           {active ? (
@@ -855,6 +1230,7 @@ export function DataSourcePage(): JSX.Element {
                                 : '同步进行中，暂不能删除候选（避免与本次扫描冲突）。'}
                             </p>
                           ) : null}
+
                           <div className="ki-ds-pending__head">
                             <label className="ki-ds-pending__all">
                               <GroupCheckbox
@@ -877,39 +1253,7 @@ export function DataSourcePage(): JSX.Element {
                             </button>
                           </div>
 
-                          {model.pending.groups.map((group) => {
-                            const groupSelected = group.items.filter((item) => selected.has(keyOf(item))).length;
-                            return (
-                              <div key={group.group} className="ki-ds-pending__group">
-                                <label className="ki-ds-pending__group-head">
-                                  <GroupCheckbox
-                                    checked={groupSelected > 0 && groupSelected === group.items.length}
-                                    indeterminate={groupSelected > 0 && groupSelected < group.items.length}
-                                    disabled={!selectable}
-                                    onChange={() => toggleGroup(group.items)}
-                                    label={`全选 ${group.group}`}
-                                  />
-                                  <span className="ki-ds-pending__group-name">{group.group}</span>
-                                  <span className="ki-ds-pending__count">
-                                    {group.count} 篇{group.untouched ? ' · ⚠ 本次未涉及，勾选即清空整组' : ''}
-                                  </span>
-                                </label>
-                                <div className="ki-ds-pending__items">
-                                  {group.items.map((item) => (
-                                    <label key={keyOf(item)} className="ki-ds-pending__item">
-                                      <input
-                                        type="checkbox"
-                                        checked={selected.has(keyOf(item))}
-                                        disabled={!selectable}
-                                        onChange={() => toggleOne(item)}
-                                      />
-                                      <span>{item.sourcePath ?? item.relation}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </div>
-                            );
-                          })}
+                          <div className="ki-ds-tree">{pendingTree.map(renderPendingNode)}</div>
 
                           {confirming ? (
                             <div className="ki-ds-confirm" role="alertdialog" aria-label="确认删除">
@@ -930,18 +1274,25 @@ export function DataSourcePage(): JSX.Element {
                           <p className="ki-ds-pending__note">删除不可恢复；执行时按当前源目录重新校验，目录变了会拒绝。只删知识库记录，不动源目录文件。</p>
                         </>
                       )}
-                    </section>
-                  ) : null}
+                  </section>
 
                   {error ? <p className="ki-task-notice ki-task-notice--warn" role="alert">{error}</p> : null}
                   {receipt ? <p className="ki-ds-receipt">{receipt}</p> : null}
-
-                  <SectionTitle>时间</SectionTitle>
-                  <RowList rows={model.times} className="ki-ds-facts--stack" />
                 </>
               ) : null}
             </div>
           </aside>
+
+          {/* 文档正文抽屉：复用知识目录的 ModuleDrawer（右侧滑出 + 遮罩 + dialog 语义） */}
+          {docTarget ? (
+            <ModuleDrawer
+              scope={scope}
+              module={docTarget.relation}
+              group={docTarget.group}
+              fetcher={getDocContent}
+              onClose={() => setDocTarget(null)}
+            />
+          ) : null}
         </>
       ) : null}
     </div>

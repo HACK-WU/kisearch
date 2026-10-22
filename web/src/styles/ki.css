@@ -5356,7 +5356,7 @@ select.ki-chat-cfg__ta--select {
      改为 table 后表头与单元格由同一列宽驱动，结构上不可能错位。 */
 .ki-ds-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .ki-ds-table__head th {
-  padding: 8px 10px; text-align: left; white-space: nowrap;
+  padding: 9px 12px; text-align: left; white-space: nowrap;
   border-bottom: 1px solid var(--ki-color-border);
   background: var(--ki-color-bg-secondary);
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
@@ -5373,7 +5373,7 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__head th:nth-child(8) { width: 9%; text-align: center; }
 .ki-ds-table__row { cursor: pointer; }
 .ki-ds-table__row td {
-  padding: 10px; border-bottom: 1px solid var(--ki-color-border);
+  padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
   text-align: left; vertical-align: middle;
 }
 .ki-ds-table__row td:nth-child(5) { white-space: nowrap; }
@@ -5382,7 +5382,7 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 .ki-ds-table__row.is-active { background: var(--ki-color-primary-soft); }
 .ki-ds-table__row.is-active td:first-child { box-shadow: inset 3px 0 0 var(--ki-color-primary); }
-.ki-ds-table__scope { display: flex; align-items: center; min-width: 0; font-weight: 600; }
+.ki-ds-table__scope { display: flex; align-items: center; min-width: 0; color: var(--ki-color-text); font-weight: 600; }
 .ki-ds-table__scope-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-ds-type-badge {
   display: inline-block; padding: 0 8px; border-radius: 999px;
@@ -5410,10 +5410,15 @@ select.ki-chat-cfg__ta--select {
   background: var(--ki-color-warning-soft); color: var(--ki-color-warning);
   font-size: var(--ki-font-size-xs); white-space: nowrap;
 }
+/* 列表贴边（2026-10-22 用户：上 / 左 / 右不留白）：卡片 body 走 --flush，
+   单元格自带 padding；只有不带内边距的零件需要这里补。 */
+.ki-datasource-page .ki-card__body--flush > .ki-ds-muted { padding: 16px 12px; }
+.ki-datasource-page .ki-card__body--flush > .ki-empty { margin: 4px; }
+
 /* 分页：默认 10，可选 50 / 100 */
 .ki-ds-pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
-  margin-top: 4px; padding-top: 10px;
+  margin-top: 4px; padding: 10px 12px 12px;
   border-top: 1px solid var(--ki-color-border);
   color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
 }
@@ -5424,64 +5429,369 @@ select.ki-chat-cfg__ta--select {
   background: var(--ki-color-surface); color: var(--ki-color-text); font-size: var(--ki-font-size-xs);
 }
 
-/* 详情面板（V3，2026-10-21 用户定稿）：右侧 520px、全高、**非模态**。
-   1px 描边 + 轻阴影做分隔，不铺遮罩 —— 列表保持可读可点，直接点另一行即可切换数据源。
-   ★ 曾被改成「高度贴合内容 + 全屏遮罩」，实测在 1440×720 下露出 248px 暗区，
-     面板像块悬空的白板、选中行的绿色高亮透过遮罩像污渍；不要再改回半高。
+/* ═══ 数据源详情抽屉（2026-10-22 视觉改造）═══
+   视觉基准：demo/datasource-sync-detail/variant-ds-redesign.html（用户逐项定稿）。
+   · 宽度 = 视口 70%（≥960）；≤960 全宽。非模态、列表可点，点外部关闭由组件监听实现。
+   · 三个功能区各一种材质：数据区（淡主色底）/ 参数区（灰底）/ 操作区（警告底）。
+   · 新增类统一 .ki-ds-* 前缀且作用域限定在本抽屉；**不改** .ki-task-* / .ki-tree-* /
+     .ki-progress* 的共享基线值（改基线会连带 /tasks、知识目录、导入页）。
    z-index 必须高于 AI 浮层（≤1399px 时为 1010），否则窄屏开聊天会盖住面板与 ✕。 */
 .ki-ds-drawer {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 1021;
-  display: flex; flex-direction: column; width: min(520px, 100vw);
-  background: var(--ki-color-bg);
+  display: flex; flex-direction: column;
+  width: clamp(520px, 70vw, 100vw);
+  background: var(--ki-color-surface);
   border-left: 1px solid var(--ki-color-border);
-  box-shadow: -6px 0 24px rgba(18, 24, 21, 0.06);
+  box-shadow: -8px 0 32px rgba(18, 24, 21, 0.07);
+  /* 从右侧滑入（2026-10-22 用户：不要直接出现）。用 transform 走合成层，
+     位移距离就是抽屉自身宽度，故用 translateX(100%)；遮罩另行淡入。 */
+  animation: ki-ds-drawer-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
+@keyframes ki-ds-drawer-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* 抽屉遮罩（2026-10-22 V5）：展开详情时左侧内容压暗，点遮罩关闭。
+   z-index 1020 = 高于内容与 AI 浮层(1010)、低于抽屉本体(1021)。 */
+.ki-ds-drawer__scrim {
+  position: fixed; inset: 0; z-index: 1020;
+  background: rgba(18, 24, 21, 0.28);
+  animation: ki-scrim-in 0.2s ease both;
+}
+
+/* 头部：标题 / 类型+源目录+复制 / 状态+时间（原 DATASOURCE kicker 已删） */
+/* 头部不是独立卡片（2026-10-22 用户：去掉那层卡）：直接作为抽屉顶栏，只有底部分隔线。
+   名称/地址一行 + 状态一行，紧凑排布。 */
 .ki-ds-drawer__head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 14px 16px; border-bottom: 1px solid var(--ki-color-border);
+  flex: none;
+  /* 上内边距压到 6px：标题本身有 1.25 行高留白，再加 12px 会显得与抽屉顶隔太远 */
+  padding: 6px 16px 10px;
+  /* 底线略深于常规分隔线：头部与正文需要明确断点（此前用户反馈"框线偏淡"） */
+  border-bottom: 1px solid color-mix(in srgb, var(--ki-color-text) 14%, var(--ki-color-border));
+  /* 头像背景：2026-10-22 试过浅绿（7%/12%），用户最终否决 —— 保持与正文同色 */
   background: var(--ki-color-surface);
 }
-.ki-ds-drawer__identity { flex: 1; min-width: 0; }
-.ki-ds-drawer__kicker {
-  color: var(--ki-color-primary);
-  font: 700 var(--ki-font-size-xs)/1.3 var(--ki-font-mono);
-  letter-spacing: 0.12em;
+.ki-ds-drawer__row {
+  display: flex; align-items: center; gap: 10px;
+  /* 名称与地址同行、紧挨着；状态行紧随其下（间距 6px，2026-10-22 用户要求再收紧） */
+  margin-bottom: 6px;
 }
 .ki-ds-drawer__title {
-  margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 18px; font-weight: 650;
+  /* 名称不再吃掉整行：地址要跟在同一行右侧 */
+  flex: 0 1 auto; max-width: 46%; min-width: 0; margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--ki-font-size-heading); font-weight: 680;
+  line-height: 1.25; letter-spacing: -0.02em;
 }
 .ki-ds-drawer__close {
-  flex: none; width: 28px; height: 28px;
-  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
-  background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer;
+  flex: none; margin-left: auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--ki-radius-sm);
+  background: transparent; color: var(--ki-color-text-subtle); cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
 }
-.ki-ds-drawer__close:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+.ki-ds-drawer__close:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ki-ds-drawer__close:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-ds-drawer__origin {
+  display: flex; align-items: center; gap: 6px;
+  /* 紧跟名称（不再 margin-left:auto 推到行右端），剩余宽度给地址做省略 */
+  flex: 1 1 auto; min-width: 0;
+}
+/* 类型 chip：2026-10-22 用户要求从头部去掉（Git/目录 由路径即可判断）。规则保留以便恢复。 */
+.ki-ds-type-chip {
+  flex: none; padding: 1px 7px; border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  /* 头部底色变成浅灰后，chip 必须自带 1px 内描边才立得住 */
+  box-shadow: inset 0 0 0 1px var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); font-weight: 600; line-height: 18px; letter-spacing: 0.02em;
+}
+/* 文件夹图标同上，暂未使用 */
+.ki-ds-drawer__folder { flex: none; color: var(--ki-color-text-subtle); }
+.ki-ds-drawer__path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text-muted);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+}
+.ki-ds-drawer__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 0; }
+.ki-ds-drawer__when {
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums; letter-spacing: 0.01em;
+}
+
+/* 状态徽章（带圆点；与列表里的 .ki-task-state 分开，避免改动共享基线） */
+.ki-ds-state {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 9px; border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); font-weight: 600; letter-spacing: 0.01em;
+}
+.ki-ds-state__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* 状态徽章在浅灰头部上同样需要边界 */
+.ki-ds-state { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent); }
+.ki-ds-state--succeeded { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
+.ki-ds-state--partial { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-ds-state--failed { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+.ki-ds-state--running,
+.ki-ds-state--queued { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ki-ds-state--cancelled { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+.ki-ds-state--running .ki-ds-state__dot { animation: ki-ds-pulse 1.6s ease-in-out infinite; }
+@keyframes ki-ds-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.78); }
+}
+
 .ki-ds-drawer__body {
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 14px 16px 24px;
+  /* 上边距与区块间距同为 14px：原来 18px padding + 提示条 12px margin 叠加成 30px 顶部空白 */
+  padding: 14px 18px 32px;
 }
-/* 抽屉提密度（2026-10-21 PM 走查）：字段由「标签在上、值在下」两行式改为同行。
-   ★ 必须限定在 .ki-ds-drawer 作用域内 —— `.ki-task-detail__grid` 与其 dt/dd 是
-     后台任务详情页共用的基线，改那里会连带把 /tasks 的详情卡一起改版。
-   实测（同一 langchain 数据）：字段区 392px → 235px，无新增折行（仅「完成」的
-   行内说明照旧换到第二行）。 */
-.ki-ds-drawer .ki-task-detail__grid > div { display: flex; align-items: baseline; gap: 6px; }
-.ki-ds-drawer .ki-task-detail__grid dt { margin-bottom: 0; flex: none; }
-.ki-ds-drawer .ki-task-detail__grid dd { flex: 1 1 auto; min-width: 0; }
+/* 首个提示条不再叠加 margin-top（否则等于把上面那 14px 又加了一遍） */
+.ki-ds-drawer__body > .ki-task-notice:first-child { margin-top: 0; }
 
-/* 详情三段统一走单列（2026-10-22 用户反馈）：参数/结果/时间的行距一致为 10px，
-   值统一左对齐；原先结果区两列会因行内说明产生 16/33px 交替行高。 */
-.ki-ds-facts--stack { grid-template-columns: minmax(0, 1fr); gap: 10px 0; }
-.ki-ds-facts--stack dt { min-width: 76px; }
-/* 段标题：12px/650 + text-muted（原 11px/600/text-subtle 与表头一样偏弱）。
-   作用域限定在数据源抽屉，任务详情共用类不动。 */
-.ki-ds-drawer .ki-task-detail__grid { gap: 10px 0; }
-.ki-ds-drawer .ki-task-detail__section {
-  margin: 20px 0 10px; padding-top: 12px;
-  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 650;
+/* 顶部提示条与下方功能区之间要留间距：`.ki-task-notice` 只有 margin-top，
+   最后一条会与随后的 .ki-ds-sec 贴死（实测 gap=0）。只作用于抽屉直接子级，
+   卡内的提示条（待删段的 skipDetail）保持原样。 */
+.ki-ds-drawer__body > .ki-task-notice { margin-bottom: 12px; }
+
+/* ── 功能区容器：三种材质 ── */
+.ki-ds-sec {
+  padding: 14px; border: 1px solid transparent; border-radius: var(--ki-radius-md);
 }
-.ki-ds-drawer .ki-task-detail__section:first-of-type { margin-top: 0; padding-top: 0; }
+.ki-ds-sec + .ki-ds-sec { margin-top: 14px; }
+.ki-ds-sec__head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ki-ds-sec__mark {
+  flex: none; width: 3px; height: 12px; border-radius: 2px;
+  background: var(--ki-color-border-strong);
+}
+.ki-ds-sec__title {
+  margin: 0; color: var(--ki-color-text);
+  font-size: var(--ki-font-size-md); font-weight: 680; line-height: 1.3; letter-spacing: 0.01em;
+}
+.ki-ds-sec__hint {
+  margin-left: auto; color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums;
+}
+.ki-ds-sec--data {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 16%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+}
+.ki-ds-sec--data .ki-ds-sec__mark { background: var(--ki-color-primary); }
+.ki-ds-sec--meta {
+  border-color: var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-sec--meta .ki-ds-sec__title { color: var(--ki-color-text-muted); font-weight: 650; }
+.ki-ds-sec--action {
+  border-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-warning) 5%, var(--ki-color-surface));
+}
+.ki-ds-sec--action .ki-ds-sec__mark { background: var(--ki-color-warning); }
+.ki-ds-sec--action .ki-ds-sec__title { color: var(--ki-color-warning); }
+
+/* ── 执行结果 hero：完成数 + 分段条 + 图例 ── */
+.ki-ds-hero {
+  display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 18px; align-items: center;
+  padding: 14px 16px; border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+}
+.ki-ds-hero__num {
+  font-size: var(--ki-font-size-2xl); font-weight: 660; line-height: 1.05;
+  letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+}
+.ki-ds-hero__label { margin-top: 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.04em; }
+.ki-ds-hero__barrow { display: flex; align-items: center; gap: 10px; }
+.ki-ds-bar {
+  flex: 1; display: flex; gap: 2px; height: 4px;
+  border-radius: var(--ki-radius-track); background: var(--ki-color-bg-muted); overflow: hidden;
+}
+.ki-ds-bar__seg { display: block; height: 100%; border-radius: var(--ki-radius-track); }
+.ki-ds-bar__seg--done { background: var(--ki-color-primary); }
+.ki-ds-bar__seg--skipped { background: var(--ki-color-border-strong); }
+.ki-ds-bar__seg--failed { background: var(--ki-color-danger); }
+.ki-ds-hero__pct {
+  flex: none; min-width: 40px; text-align: right;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ki-ds-legend {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 9px; color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums;
+}
+.ki-ds-legend__item { display: inline-flex; align-items: baseline; gap: 5px; }
+.ki-ds-legend__item::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ki-color-border-strong); transform: translateY(-1px);
+}
+.ki-ds-legend__item--done::before { background: var(--ki-color-primary); }
+.ki-ds-legend__item--failed { color: var(--ki-color-danger-ink); font-weight: 600; }
+.ki-ds-legend__item--failed::before { background: var(--ki-color-danger); }
+.ki-ds-legend__sub { color: var(--ki-color-text-subtle); font-weight: 400; }
+.ki-ds-legend__dot { color: var(--ki-color-border-strong); }
+.ki-ds-hero__empty {
+  padding: 18px 16px; border: 1px dashed var(--ki-color-border); border-radius: var(--ki-radius-md);
+  text-align: center; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm);
+}
+
+/* ── 指标网格（3×2） ── */
+.ki-ds-metrics {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+  margin: 12px 0 0; padding: 0;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-border); overflow: hidden;
+}
+.ki-ds-metric { padding: 10px 12px 11px; background: var(--ki-color-surface); transition: background var(--ki-motion-fast); }
+.ki-ds-metric:hover { background: var(--ki-color-bg-secondary); }
+.ki-ds-metric__label { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.03em; }
+.ki-ds-metric__value {
+  margin-top: 3px; font-size: var(--ki-font-size-xl); font-weight: 640;
+  line-height: 1.2; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+}
+.ki-ds-metric__value--zero { color: var(--ki-color-text-subtle); font-weight: 560; }
+.ki-ds-metric__value--danger { color: var(--ki-color-danger-ink); }
+
+/* ── 失败明细箱：默认展开，只露前 5 条，超出滚动 ── */
+.ki-ds-failbox {
+  margin-top: 12px; border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); background: var(--ki-color-surface); overflow: hidden;
+}
+.ki-ds-failbox__head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 11px;
+  border-bottom: 1px solid var(--ki-color-border); background: var(--ki-color-bg-secondary);
+}
+.ki-ds-failbox__title { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 650; }
+.ki-ds-failbox__count {
+  margin-left: auto; color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums;
+}
+.ki-ds-failbox__list {
+  margin: 0; padding: 6px 0; list-style: none;
+  max-height: 232px; overflow-y: auto; overscroll-behavior: contain;
+}
+.ki-ds-failbox__row {
+  display: flex; gap: 10px; padding: 5px 12px;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); line-height: 1.5;
+}
+.ki-ds-failbox__row:hover { background: var(--ki-color-bg-secondary); }
+.ki-ds-failbox__path { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ki-color-text); }
+.ki-ds-failbox__why { flex: none; color: var(--ki-color-danger-ink); font-family: var(--ki-font-family); }
+.ki-ds-failbox__more {
+  display: block; width: 100%; padding: 7px 11px;
+  border: 0; border-top: 1px dashed var(--ki-color-border); background: transparent;
+  color: var(--ki-color-primary); font-size: var(--ki-font-size-xs); font-weight: 600; cursor: pointer;
+  transition: background var(--ki-motion-fast);
+}
+.ki-ds-failbox__more:hover { background: var(--ki-color-bg-secondary); }
+.ki-ds-failbox__more:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+
+/* ── 同步参数：两列 key/value（值不加底色，层级靠文字色与字重） ── */
+.ki-ds-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin: 0; }
+/* 横向 key-value（2026-10-22 用户：不要竖向堆叠）：label 定宽在左、值在右 */
+/* label 宽度跟随内容（max-content），冒号后只留 6px —— 定宽列会在冒号与值之间留一大段空白 */
+.ki-ds-params__cell {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+/* key：value 形态 —— 冒号由样式补，数据里不带（便于复用到其他位置） */
+.ki-ds-params dt::after { content: '：'; }
+.ki-ds-params__cell--full { grid-column: 1 / -1; }
+.ki-ds-params dt {
+  margin: 0; color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs); font-weight: 500; letter-spacing: 0.03em;
+}
+.ki-ds-params dd {
+  margin: 0; min-width: 0;
+  overflow-wrap: anywhere; color: var(--ki-color-text);
+  font-size: 13px; font-weight: 500; line-height: 1.45;
+}
+/* 行内说明（如 Git 仓库来源的远端地址）独占一行，不跟值抢同一行 */
+.ki-ds-params__hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 400;
+  line-height: 1.5;
+}
+.ki-ds-params dd.is-mono {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); font-weight: 400;
+}
+.ki-ds-copy {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--ki-radius-sm);
+  background: transparent; color: var(--ki-color-text-subtle); cursor: pointer;
+  transition: color var(--ki-motion-fast), background var(--ki-motion-fast), border-color var(--ki-motion-fast);
+}
+.ki-ds-copy:hover { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ki-ds-copy:active { transform: translateY(1px); }
+.ki-ds-copy:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-ds-copy.is-done { color: var(--ki-color-success); border-color: color-mix(in srgb, var(--ki-color-success) 30%, transparent); }
+
+/* ── 待删候选树：复用 .ki-tree-*，仅在本抽屉内收紧行距并加复选框/查看按钮 ── */
+.ki-ds-tree { max-height: 280px; overflow-y: auto; overscroll-behavior: contain; }
+.ki-ds-tree .ki-tree-dir { padding: 2px 8px; line-height: 1.6; gap: 5px; }
+.ki-ds-tree .ki-tree-arrow { width: 12px; }
+.ki-ds-tree .ki-tree-doc { min-height: 26px; padding-left: 8px; gap: 5px; }
+.ki-ds-tree .ki-tree-doc__name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ki-ds-tree .ki-tree-group { gap: 0; margin-top: 1px; margin-bottom: 0; }
+.ki-ds-check { flex: none; width: 13px; height: 13px; margin: 0; accent-color: var(--ki-color-primary); cursor: pointer; }
+.ki-ds-tree-group { padding: 2px 0; }
+.ki-ds-tree-actions { display: flex; align-items: center; gap: 2px; margin-left: 10px; }
+.ki-ds-linkbtn {
+  padding: 2px 5px; border: 0; border-radius: var(--ki-radius-tag);
+  background: transparent; color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs); font-weight: 600; cursor: pointer;
+  transition: background var(--ki-motion-fast);
+}
+.ki-ds-linkbtn:hover { background: var(--ki-color-primary-soft); }
+.ki-ds-linkbtn:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+/* 文档行「打开」按钮：默认隐形，hover / 键盘聚焦才出现（opacity 不挤动布局） */
+.ki-ds-doc-open {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; margin-left: 55px;
+  border: 0; border-radius: var(--ki-radius-tag); background: transparent;
+  color: var(--ki-color-primary); cursor: pointer; opacity: 0;
+  transition: opacity var(--ki-motion-fast), background var(--ki-motion-fast);
+}
+.ki-tree-doc:hover .ki-ds-doc-open,
+.ki-ds-doc-open:focus-visible { opacity: 1; }
+.ki-ds-doc-open:hover { background: var(--ki-color-primary-soft); }
+.ki-ds-doc-open:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+
+/* ── 同步进度：复用导入页 .ki-progress* / .ki-track-*，仅补与下方功能区的间距 ── */
+.ki-ds-drawer .ki-progress-block { margin-bottom: 14px; }
+
+/* 本页打开详情时，ModuleDrawer（默认 1000 / 遮罩 999）必须盖住详情抽屉（1021）——
+   只在"数据源页 + 详情已开"时提升，其他页面层级不变（护栏：不改共享基线） */
+.ki-datasource-page--drawer .ki-drawer { z-index: 1060; }
+.ki-datasource-page--drawer .ki-drawer__scrim { z-index: 1059; }
+
+/* ── 滚动条（抽屉本体 + 失败明细 + 待删树）：细条、无箭头、随主题 ── */
+.ki-ds-drawer__body,
+.ki-ds-failbox__list,
+.ki-ds-tree {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-ds-drawer__body::-webkit-scrollbar,
+.ki-ds-failbox__list::-webkit-scrollbar,
+.ki-ds-tree::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+.ki-ds-drawer__body::-webkit-scrollbar-track,
+.ki-ds-failbox__list::-webkit-scrollbar-track,
+.ki-ds-tree::-webkit-scrollbar-track { background: transparent; }
+.ki-ds-drawer__body::-webkit-scrollbar-thumb,
+.ki-ds-failbox__list::-webkit-scrollbar-thumb,
+.ki-ds-tree::-webkit-scrollbar-thumb {
+  min-height: 36px; border: 3px solid transparent; border-radius: 999px;
+  background: var(--ki-color-scrollbar); background-clip: content-box;
+}
+.ki-ds-drawer__body::-webkit-scrollbar-button,
+.ki-ds-failbox__list::-webkit-scrollbar-button,
+.ki-ds-tree::-webkit-scrollbar-button { display: none; }
 
 /* 中窄屏（≤1199）：固定三列 —— 六列在 ~1200 以下会横向溢出 */
 @media (max-width: 1399px) {
