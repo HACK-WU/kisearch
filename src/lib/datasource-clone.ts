@@ -166,7 +166,7 @@ export interface CloneResult {
   remoteUrl: string | null;
 }
 
-export type CloneOutcome = { ok: true; value: CloneResult } | { ok: false; code: CloneErrorCode; error: string };
+export type CloneOutcome = { ok: true; value: CloneResult } | { ok: false; code: CloneErrorCode; error: string; hint?: string };
 
 function isInside(root: string, target: string): boolean {
   const rel = path.relative(path.resolve(root), path.resolve(target));
@@ -210,18 +210,63 @@ function cleanupStaleTemps(scopeDir: string): void {
   }
 }
 
-/** 校验 clone 后的源目录：目录、非 dataDir、至少一个可导入文件。 */
-function validateClonedSource(dir: string, config: KiConfig, scope: string): { ok: true } | { ok: false; code: 'SOURCE_EMPTY' | 'CLONE_FAILED'; error: string } {
-  let stat: fs.Stats;
-  try { stat = fs.statSync(dir); } catch { return { ok: false, code: 'CLONE_FAILED', error: `克隆后目录不存在：${dir}` }; }
-  if (!stat.isDirectory()) return { ok: false, code: 'CLONE_FAILED', error: `克隆后路径不是目录：${dir}` };
-  if (isInside(config.dataDir, dir)) return { ok: false, code: 'CLONE_FAILED', error: `克隆目录不能位于 dataDir 内：${dir}` };
+export type ManagedSubdirCheck =
+  | { ok: true; dir: string }
+  | { ok: false; code: 'INVALID_SUBDIR' | 'SOURCE_EMPTY'; error: string; hint?: string };
+
+function topLevelDirsHint(repoRoot: string): string | undefined {
+  try {
+    const dirs = fs.readdirSync(repoRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+    if (dirs.length === 0) return undefined;
+    return `仓库顶层目录：${dirs.slice(0, 12).join('、')}${dirs.length > 12 ? ` 等 ${dirs.length} 个` : ''}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 校验某个仓库根下的导入子目录（复用已有 clone 时也用它做前置校验）。 */
+export function checkManagedSubdir(
+  repoRoot: string,
+  subdirInput: string,
+  config: KiConfig,
+  scope: string,
+): ManagedSubdirCheck {
+  const subdir = subdirInput.trim().replace(/^\/+|\/+$/g, '');
+  const fail = (code: 'INVALID_SUBDIR' | 'SOURCE_EMPTY', error: string, withHint = true): ManagedSubdirCheck => {
+    const hint = withHint ? topLevelDirsHint(repoRoot) : undefined;
+    return { ok: false, code, error, ...(hint ? { hint } : {}) };
+  };
+  if (!isSafeRelativeSubdir(subdir)) {
+    return fail('INVALID_SUBDIR', `非法子目录：${subdirInput}`);
+  }
+  const dir = subdir ? path.join(repoRoot, ...subdir.split('/')) : repoRoot;
+  try {
+    const lstat = fs.lstatSync(dir);
+    // lstat 不跟随链接：必须先判 symlink，否则 isDirectory() 为 false 会掩盖真实原因
+    if (lstat.isSymbolicLink()) {
+      return fail('INVALID_SUBDIR', `子目录不能是符号链接：${subdir}`, false);
+    }
+    if (!lstat.isDirectory()) {
+      return fail('INVALID_SUBDIR', `子目录不存在或不是目录：${subdir}`);
+    }
+    // 仓库内容可含任意 symlink：realpath 必须仍落在 clone 内，否则会把宿主机任意目录当导入源
+    const realDir = fs.realpathSync(dir);
+    const realRepo = fs.realpathSync(repoRoot);
+    if (!isInside(realRepo, realDir)) {
+      return fail('INVALID_SUBDIR', `子目录解析后越出仓库（符号链接）：${subdir}`, false);
+    }
+  } catch {
+    return fail('INVALID_SUBDIR', `子目录不存在：${subdir}`);
+  }
   const files = collectMarkdownFiles(dir, resolveImportExtensions(config, scope)).files;
   if (files.length === 0) {
     const exts = resolveImportExtensions(config, scope).join(', ');
-    return { ok: false, code: 'SOURCE_EMPTY', error: `仓库（或子目录）中没有可导入文件（${exts}）：${dir}` };
+    return fail('SOURCE_EMPTY', `仓库（或子目录）中没有可导入文件（${exts}）：${subdir || '.'}`);
   }
-  return { ok: true };
+  return { ok: true, dir };
 }
 
 export interface CloneManagedInput {
@@ -344,32 +389,15 @@ export async function cloneManagedRepo(input: CloneManagedInput): Promise<CloneO
         error: `--branch 只支持远端分支（${input.branch} 克隆后为 detached HEAD，可能是 tag/commit）`,
       };
     }
-    const dir = subdir ? path.join(tmp, ...subdir.split('/')) : tmp;
-    try {
-      const lstat = fs.lstatSync(dir);
-      if (!lstat.isDirectory()) {
-        cleanupTemp(tmp);
-        return { ok: false, code: 'INVALID_SUBDIR', error: `子目录不存在或不是目录：${subdir}` };
-      }
-      if (lstat.isSymbolicLink()) {
-        cleanupTemp(tmp);
-        return { ok: false, code: 'INVALID_SUBDIR', error: `子目录不能是符号链接：${subdir}` };
-      }
-      // 仓库内容可含任意 symlink：realpath 必须仍落在 clone 内，否则会把宿主机任意目录当导入源
-      const realDir = fs.realpathSync(dir);
-      const realRepo = fs.realpathSync(tmp);
-      if (!isInside(realRepo, realDir)) {
-        cleanupTemp(tmp);
-        return { ok: false, code: 'INVALID_SUBDIR', error: `子目录解析后越出仓库（符号链接）：${subdir}` };
-      }
-    } catch {
+    const subdirCheck = checkManagedSubdir(tmp, subdir, input.config, scope);
+    if (!subdirCheck.ok) {
       cleanupTemp(tmp);
-      return { ok: false, code: 'INVALID_SUBDIR', error: `子目录不存在：${subdir}` };
-    }
-    const sourceCheck = validateClonedSource(dir, input.config, scope);
-    if (!sourceCheck.ok) {
-      cleanupTemp(tmp);
-      return { ok: false, code: sourceCheck.code, error: sourceCheck.error };
+      return {
+        ok: false,
+        code: subdirCheck.code,
+        error: subdirCheck.error,
+        ...(subdirCheck.hint ? { hint: subdirCheck.hint } : {}),
+      };
     }
     if (fs.existsSync(repoDir)) {
       cleanupTemp(tmp);
@@ -397,13 +425,24 @@ export async function cloneManagedRepo(input: CloneManagedInput): Promise<CloneO
   }
 }
 
-/** 从记录推导托管根目录（`<root>/<scope>`），非托管/路径不符返回 null。 */
+/** 从 repoRoot 推导托管根目录（`<cloneRoot>/<owner>/repo` → `<cloneRoot>/<owner>`）。 */
+export function managedCloneDirForRepo(repoRoot: string): string | null {
+  const root = path.resolve(cloneRoot());
+  const repo = path.resolve(repoRoot);
+  const rel = path.relative(root, repo);
+  const parts = rel.split(path.sep);
+  if (parts.length !== 2 || parts[1] !== 'repo') return null;
+  if (!/^[a-zA-Z0-9_-]+$/.test(parts[0])) return null;
+  return path.join(root, parts[0]);
+}
+
+/**
+ * 从记录推导托管根目录。允许多个 scope 共享同一 clone（repoRoot 可能属于
+ * 另一个 scope）；是否可删除由引用计数决定，不在这里判断。
+ */
 export function managedCloneDirOf(record: DataSourceRecord): string | null {
   if (!record.git?.managed) return null;
-  let expected: string;
-  try { expected = managedScopeDir(record.scope); } catch { return null; }
-  if (path.resolve(record.git.repoRoot) !== path.resolve(path.join(expected, 'repo'))) return null;
-  return expected;
+  return managedCloneDirForRepo(record.git.repoRoot);
 }
 
 /** 删除托管 clone 根目录（`<root>/<scope>`），带根目录守卫与符号链接拒绝。 */

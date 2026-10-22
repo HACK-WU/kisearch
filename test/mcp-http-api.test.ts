@@ -622,12 +622,37 @@ describe('/api/datasource/add-remote', () => {
     assert.equal(detail2.source.lastSync.git.changedCount, 1);
     assert.equal(detail2.source.lastSync.result.files.changed, 1);
 
+    // 同一 remote+branch 的新 scope 复用已有托管 clone（换子目录也不重新 clone）
+    const reuseScope = `api_ds_remote_reuse_${crypto.randomUUID().slice(0, 8)}`;
+    const reused = await postAdd({ scope: reuseScope, url: `file://${bare}`, subdir: '', vector: false });
+    assert.equal(reused.status, 200, JSON.stringify(reused.body));
+    const reuseAddTask = await waitTask(reused.body.taskId);
+    assert.equal(reuseAddTask.state, 'succeeded', reuseAddTask.error ?? '');
+    const reuseSyncTask = await waitTask(reuseAddTask.result.syncTaskId);
+    assert.equal(reuseSyncTask.state, 'succeeded', reuseSyncTask.error ?? '');
+    const reuseDetailRes = await fetch(`${handle!.base}/api/datasource/detail?scope=${encodeURIComponent(reuseScope)}`);
+    const reuseDetail = await reuseDetailRes.json() as any;
+    assert.equal(reuseDetail.source.git.repoRoot, detail.source.git.repoRoot, '应复用同一 repoRoot');
+    assert.equal(reuseDetail.source.git.relativeRoot, '');
+    assert.equal(reuseDetail.source.dir, detail.source.git.repoRoot, '不同子目录复用同一 clone 根');
+    assert.equal(fs.existsSync(path.join(cloneRoot, reuseScope)), false, '复用不应创建第二个 clone 目录');
+
+    // 已有同 remote 的托管 clone 时，非法子目录在创建任务前即被拒绝
+    const badScope = `api_ds_remote_bad_${crypto.randomUUID().slice(0, 8)}`;
+    const badSubdir = await postAdd({ scope: badScope, url: `file://${bare}`, subdir: 'not-a-dir', vector: false });
+    assert.equal(badSubdir.status, 400);
+    assert.equal(badSubdir.body.code, 'INVALID_SUBDIR');
+    assert.match(badSubdir.body.error, /仓库顶层目录/);
+    assert.equal(fs.existsSync(getKbDir(badScope)), false, '预检失败不应创建 scope');
+
     // 已有登记 → 409
     const exists = await postAdd({ scope, url: `file://${bare}` });
     assert.equal(exists.status, 409);
     assert.equal(exists.body.code, 'DATASOURCE_EXISTS');
 
     // 清理（不依赖 scope delete 打开向量引擎）
+    fs.rmSync(getKbDir(reuseScope), { recursive: true, force: true });
+    await deleteFtsCollection(reuseScope);
     fs.rmSync(getKbDir(scope), { recursive: true, force: true });
     fs.rmSync(path.join(cloneRoot, scope), { recursive: true, force: true });
     await deleteFtsCollection(scope);

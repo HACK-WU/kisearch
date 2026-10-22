@@ -122,11 +122,14 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 
 - 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。
 - 私有仓库使用**当前进程环境**的 SSH agent / credential helper（CLI 不落盘凭据；页面添加由 daemon 环境提供）。
-- `--branch` 只接受远端分支（tag 会 detached，后续无法 `reset --hard origin/<tag>`）；`--subdir` 为仓库内相对路径（空 = 仓库根）。
+- `--branch` 只接受远端分支（tag 会 detached，后续无法 `reset --hard origin/<tag>`）；`--subdir` 为仓库内相对路径（空 = 仓库根）。已有同 remote/分支的托管副本时，子目录在创建任务前即校验；不存在的子目录会直接报错并列出仓库顶层目录。
 - clone 使用临时目录 + rename，失败不残留半成品；同一 scope 的托管目录已存在时报 `CLONE_TARGET_EXISTS`（不自动清空）。
 - 首次同步必然是 `full`（无 commit 水位），之后按 `git diff <lastCommit>..HEAD` 增量；托管副本同步前 `fetch` + `reset --hard origin/<branch>` + `clean -fdx`（**禁止手工修改托管副本**）。
 - `remove --purge` 只对 `git.managed=true` 生效；先删登记再删目录，删除失败时登记已删并返回 `cloneRemoved=false` + `cloneRemoveError`。
-- `ki scope delete <scope> --yes` 会一并删除该 scope 的托管 clone（预览中显示路径）。
+- **共享托管 clone（2026-10-22）**：同一 `remote + 分支` 已存在托管副本时，新 scope 直接复用该副本（不重复 clone）；`repoRoot` 可能属于先登记的 scope，各 scope 只用自己的 `relativeRoot`。
+  - `remove --purge` / `scope delete` 按**引用计数**：还有其他 scope 引用时保留 clone，最后一个引用删除时才清理。
+  - 共享副本的同步、子目录校验与删除由 clone 级锁串行化，避免多个 scope 同时 reset/clean 同一工作树。
+- `ki scope delete <scope> --yes` 会一并删除该 scope 的托管 clone（预览中显示路径；共享副本会按引用计数保留）。
 - `remove --purge --yes` 在该 scope **没有登记**时也会清理遗留的 `<cloneRoot>/<scope>` 目录（用于 add 失败/手工删登记后的恢复）。若 `datasource.json` 损坏（`CORRUPT`），先 `ki scope delete <scope> --yes` 删除登记与 KB，再执行 `remove --purge --yes` 清理遗留 clone。
 - 测试/离线环境变量（**生产 daemon 不要设置**）：`KI_DATASOURCE_ALLOW_FILE_URL=1` 放开 `file://`（任何有权限的调用者都能借此读取服务器本地 git 仓库）；`KI_DATASOURCE_CLONE_ROOT` 覆盖托管根目录。
 

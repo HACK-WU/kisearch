@@ -219,6 +219,7 @@ function safeErrorSummary(value: unknown): string | undefined {
   else if (/\b(?:ECONNREFUSED|ENOTFOUND|NETWORK)\b|provider unavailable|embedding unavailable|服务不可用/i.test(value)) category = 'Embedding 服务暂不可用';
   else if (/\bENOSPC\b|磁盘空间不足/i.test(value)) category = '存储空间不足';
   else if (/取消|CANCELLED/i.test(value)) category = '任务已取消';
+  else if (/\bINVALID_SUBDIR\b|子目录不存在|子目录.*越出/i.test(value)) category = '仓库子目录不存在或不可用';
   else if (/\b(?:ZVEC_WRITE_ERROR|COLLECTION_UNWRITABLE|METADATA_PERSIST_FAILED)\b|集合不可写/i.test(value)) category = '向量集合或元数据写入失败';
   else if (importFailures) category = `${importFailures[1]} 项导入处理有错误`;
   else category = '任务失败，请查看发起端的命令输出或服务日志';

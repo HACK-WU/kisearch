@@ -463,6 +463,66 @@ describe('D. 引擎回路 —— 空 collection（dummy apiKey）', () => {
     assert.strictEqual(fs.existsSync(path.join(localRepo, 'a.md')), true, '本地仓库不得被删除');
   });
 
+  it('S-05：多个 scope 共享 clone 时，先删 owner 保留 clone，最后删除才清理', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: ['  ownerS: {}', '  sharedS: {}'].join('\n'),
+      apiKey: 'dummy-offline-key',
+    });
+    const cloneRoot = path.join(dir, 'datasources');
+    const repoRoot = path.join(cloneRoot, 'ownerS', 'repo');
+    fs.mkdirSync(path.join(repoRoot, 'docs'), { recursive: true });
+    const writeRecord = (scopeName: string): void => {
+      const scopeDir = makeKbScope(dataDir, scopeName);
+      fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+        version: 2,
+        scope: scopeName,
+        type: 'git',
+        dir: path.join(repoRoot, 'docs'),
+        git: {
+          repoRoot,
+          relativeRoot: 'docs',
+          branch: 'main',
+          remoteUrl: 'https://example.com/shared.git',
+          managed: true,
+          remoteBranch: 'main',
+        },
+        group: null,
+        conflictMode: 'incremental',
+        conflictSuffix: '_{n}',
+        vector: false,
+        chunkSize: null,
+        chunkOverlap: null,
+        createdAt: 0,
+        updatedAt: 0,
+        lastSync: null,
+      }));
+    };
+    writeRecord('ownerS');
+    writeRecord('sharedS');
+    const prevRoot = process.env.KI_DATASOURCE_CLONE_ROOT;
+    process.env.KI_DATASOURCE_CLONE_ROOT = cloneRoot;
+    try {
+      const first = await executeScopeDelete({ scope: 'ownerS', yes: true });
+      assert.strictEqual(first.ok, true);
+      if (first.ok) {
+        assert.strictEqual(first.managedCloneShared, true);
+        assert.strictEqual(first.managedCloneRemoved, false);
+      }
+      assert.strictEqual(fs.existsSync(path.join(repoRoot, 'docs')), true, '共享 clone 不得随首个 scope 删除');
+
+      const last = await executeScopeDelete({ scope: 'sharedS', yes: true });
+      assert.strictEqual(last.ok, true);
+      if (last.ok) {
+        assert.strictEqual(last.managedCloneRemoved, true);
+        assert.strictEqual(last.managedCloneShared, undefined);
+      }
+      assert.strictEqual(fs.existsSync(path.join(cloneRoot, 'ownerS')), false, '最后一个引用删除后清理 clone');
+    } finally {
+      if (prevRoot === undefined) delete process.env.KI_DATASOURCE_CLONE_ROOT;
+      else process.env.KI_DATASOURCE_CLONE_ROOT = prevRoot;
+    }
+  });
+
   it('S-05：scope delete 预览/执行会清理托管 clone（仅 git.managed=true）', async () => {
     const { dataDir, dir } = makeWorkspace({
       scopesYaml: '  projM: {}',

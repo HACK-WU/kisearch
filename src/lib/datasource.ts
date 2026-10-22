@@ -7,6 +7,7 @@
  *  - 同步 = `handleDirectImport`（不写 source 块）+ 用**上一次成功同步的 seenRels**
  *    收窄候选（Q14）；**永不删除**，删除是独立动作（S-03）
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,7 +45,7 @@ import type {
   DataSourceWarning,
 } from './datasource-types.js';
 import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
-import { cloneManagedRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
+import { checkManagedSubdir, cloneManagedRepo, managedCloneDirForRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
@@ -474,6 +475,122 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
   };
 }
 
+// ─── 共享托管 clone（同一 remote+branch 只保留一份工作副本）────
+
+export interface ReusableManagedClone {
+  repoRoot: string;
+  branch: string | null;
+  remoteBranch: string;
+  remoteUrl: string;
+  ownerScope: string;
+}
+
+/** 读取所有已登记记录（不做源目录可达性过滤；共享 clone/引用计数必须看到它们）。 */
+function listRegisteredDataSourceRecords(config: KiConfig): { scope: string; record: DataSourceRecord }[] {
+  const out: { scope: string; record: DataSourceRecord }[] = [];
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
+    try {
+      const read = readDataSource(entry.name);
+      if (read.ok) out.push({ scope: entry.name, record: read.record });
+    } catch {
+      /* 单条损坏不影响其余记录 */
+    }
+  }
+  return out;
+}
+
+function remoteUrlKey(url: string | null): string | null {
+  const sanitized = sanitizeRemoteUrl(url ?? '');
+  if (!sanitized) return null;
+  return sanitized.replace(/\/+$/, '').replace(/\.git$/i, '');
+}
+
+/** 查找可复用的托管 clone：remoteUrl（已脱敏）+ 分支一致。 */
+export function findReusableManagedClone(
+  config: KiConfig,
+  url: string,
+  branch: string | null,
+): ReusableManagedClone | null {
+  const target = remoteUrlKey(url);
+  if (!target) return null;
+  const candidates: ReusableManagedClone[] = [];
+  for (const { scope, record } of listRegisteredDataSourceRecords(config)) {
+    const git = record.git;
+    if (record.type !== 'git' || !git?.managed || !git.repoRoot || !git.remoteBranch) continue;
+    // 只复用真正的托管副本（<cloneRoot>/<owner>/repo）；dataset.json 可被手工编辑，
+    // managed=true 不足以证明路径受控，purge 也依赖该布局
+    if (!managedCloneDirForRepo(git.repoRoot)) continue;
+    if (!git.remoteUrl || remoteUrlKey(git.remoteUrl) !== target) continue;
+    // 共享工作副本的身份是「远端分支」：branch 只是克隆时的 checkout 结果
+    if (branch && git.remoteBranch !== branch) continue;
+    try {
+      if (!fs.statSync(git.repoRoot).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    candidates.push({
+      repoRoot: git.repoRoot,
+      branch: git.branch,
+      remoteBranch: git.remoteBranch,
+      remoteUrl: git.remoteUrl,
+      ownerScope: scope,
+    });
+  }
+  if (candidates.length === 0) return null;
+  // 未显式指定分支时，若已有副本分属不同分支，不能猜测默认分支，退回独立 clone
+  if (!branch && new Set(candidates.map((item) => item.remoteBranch)).size > 1) return null;
+  return candidates[0];
+}
+
+/** 统计引用某个托管 repoRoot 的其他数据源数量（用于 purge 前的引用计数）。 */
+export function countManagedRepoRefs(
+  repoRoot: string,
+  config: KiConfig,
+  excludeScope?: string,
+): number {
+  const target = path.resolve(repoRoot);
+  return listRegisteredDataSourceRecords(config).filter(({ scope, record }) => (
+    scope !== excludeScope
+    && record.git?.managed === true
+    && path.resolve(record.git.repoRoot) === target
+  )).length;
+}
+
+function cloneLockScope(repoRoot: string): string {
+  // 前缀含 NUL：保证不与任何合法 scope 名（[a-zA-Z0-9_-]+）产生的锁键重合
+  return `\u0000clone:${crypto.createHash('sha256').update(path.resolve(repoRoot)).digest('hex').slice(0, 24)}`;
+}
+
+function remoteAddLockScope(url: string): string {
+  // 只按 URL 加锁（且与复用判据同源，`repo` 与 `repo.git` 视为同一仓库）：
+  // branch 为空与显式同名分支的并发 add 也走同一把锁，避免两个请求都看不到对方而各自 clone。
+  const key = remoteUrlKey(url) ?? sanitizeRemoteUrl(url) ?? url;
+  return `\u0000remote:${crypto.createHash('sha256').update(key).digest('hex').slice(0, 24)}`;
+}
+
+/**
+ * clone 级写锁：多个 scope 可以共享同一工作副本，scope 锁无法覆盖这种跨 scope
+ * 竞争（同步/校验/删除）。锁文件仍落在 dataDir 的 scope 锁目录，键为 repoRoot 哈希。
+ */
+export async function withManagedCloneLock<T>(
+  repoRoot: string,
+  operation: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return withScopeWriteLock(cloneLockScope(repoRoot), operation, run);
+}
+
+function cloneBusyResult(scope: string): { ok: false; scope: string; code: string; error: string } {
+  return { ok: false, scope, code: 'CLONE_BUSY', error: '该 Git 仓库正在被另一个数据源同步/校验，请稍后重试' };
+}
+
 // ─── add-remote（S-05 托管 clone）────────────────────────
 
 export interface AddRemoteDataSourceInput {
@@ -501,9 +618,10 @@ export type AddRemoteDataSourceResult =
     record: DataSourceRecord;
     created: boolean;
     clone: { repoRoot: string; dir: string; branch: string | null; headCommit: string | null };
+    reused?: boolean;
     warnings?: string[];
   }
-  | { ok: false; scope: string; code: string; error: string; cleanupWarning?: string };
+  | { ok: false; scope: string; code: string; error: string; hint?: string; cleanupWarning?: string };
 
 /**
  * clone + 登记（同步执行，调用方决定任务边界）。
@@ -558,64 +676,138 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
       if (again.ok) {
         return { ok: false, scope, code: 'DATASOURCE_EXISTS', error: `scope「${scope}」已登记数据源；请先 ki datasource remove --scope ${scope}` };
       }
-      const cloned = await cloneManagedRepo({
-        scope,
-        url: input.url,
-        branch,
-        subdir,
-        config,
-        allowFileUrl: input.allowFileUrl === true,
-        ...(input.onProgress ? { onProgress: input.onProgress } : {}),
-        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-      });
-      if (!cloned.ok) return { ok: false, scope, code: cloned.code, error: cloned.error };
 
-      const relativeRoot = subdir;
-      const added = await addDataSource({
-        scope,
-        dir: cloned.value.dir,
-        type: 'git',
-        gitInfo: {
-          repoRoot: cloned.value.repoRoot,
-          relativeRoot,
-          branch: cloned.value.branch,
-          remoteUrl: cloned.value.remoteUrl,
-          managed: true,
-          remoteBranch: branch ?? cloned.value.branch ?? 'HEAD',
-        },
-        group,
-        ...(input.conflictMode ? { conflictMode: input.conflictMode } : {}),
-        ...(input.conflictSuffix ? { conflictSuffix: input.conflictSuffix } : {}),
-        ...(input.vector !== undefined ? { vector: input.vector } : {}),
-        chunkSize,
-        chunkOverlap,
-        config,
-      });
-      if (!added.ok) {
-        const cleanup = await purgeManagedCloneDir(path.dirname(cloned.value.repoRoot));
-        return {
-          ok: false,
-          scope,
-          code: added.code,
-          error: added.error,
-          ...(cleanup.removed === false && 'error' in cleanup
-            ? { cleanupWarning: `登记失败且托管目录未清理：${cleanup.error}` }
-            : {}),
-        };
+      // 同一 remote 的并发 add 互斥：第一个 clone/复用，后到者返回 CLONE_BUSY，避免各自 clone
+      try {
+        return await withScopeWriteLock(remoteAddLockScope(input.url), 'datasource-add-remote', async () => {
+          const reusable = findReusableManagedClone(config, input.url, branch);
+          if (reusable) {
+            try {
+              return await withManagedCloneLock(reusable.repoRoot, 'datasource-add-reuse', async () => {
+                const checked = checkManagedSubdir(reusable.repoRoot, subdir, config, scope);
+                if (!checked.ok) {
+                  return {
+                    ok: false,
+                    scope,
+                    code: checked.code,
+                    error: checked.error,
+                    ...(checked.hint ? { hint: checked.hint } : {}),
+                  };
+                }
+                const added = await addDataSource({
+                  scope,
+                  dir: checked.dir,
+                  type: 'git',
+                  gitInfo: {
+                    repoRoot: reusable.repoRoot,
+                    relativeRoot: subdir,
+                    branch: reusable.branch,
+                    remoteUrl: reusable.remoteUrl,
+                    managed: true,
+                    remoteBranch: reusable.remoteBranch,
+                  },
+                  group,
+                  ...(input.conflictMode ? { conflictMode: input.conflictMode } : {}),
+                  ...(input.conflictSuffix ? { conflictSuffix: input.conflictSuffix } : {}),
+                  ...(input.vector !== undefined ? { vector: input.vector } : {}),
+                  chunkSize,
+                  chunkOverlap,
+                  config,
+                });
+                if (!added.ok) return { ok: false, scope, code: added.code, error: added.error };
+                return {
+                  ok: true,
+                  scope,
+                  record: added.record,
+                  created: added.created,
+                  reused: true,
+                  clone: {
+                    repoRoot: reusable.repoRoot,
+                    dir: checked.dir,
+                    branch: reusable.branch,
+                    headCommit: null,
+                  },
+                  ...(added.warnings && added.warnings.length > 0 ? { warnings: added.warnings } : {}),
+                };
+              });
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'SCOPE_OPERATION_BUSY') return cloneBusyResult(scope);
+              throw err;
+            }
+          }
+
+          const cloned = await cloneManagedRepo({
+            scope,
+            url: input.url,
+            branch,
+            subdir,
+            config,
+            allowFileUrl: input.allowFileUrl === true,
+            ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+            ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+          });
+          if (!cloned.ok) {
+            return {
+              ok: false,
+              scope,
+              code: cloned.code,
+              error: cloned.error,
+              ...(cloned.hint ? { hint: cloned.hint } : {}),
+            };
+          }
+
+          const added = await addDataSource({
+            scope,
+            dir: cloned.value.dir,
+            type: 'git',
+            gitInfo: {
+              repoRoot: cloned.value.repoRoot,
+              relativeRoot: subdir,
+              branch: cloned.value.branch,
+              remoteUrl: cloned.value.remoteUrl,
+              managed: true,
+              remoteBranch: branch ?? cloned.value.branch ?? 'HEAD',
+            },
+            group,
+            ...(input.conflictMode ? { conflictMode: input.conflictMode } : {}),
+            ...(input.conflictSuffix ? { conflictSuffix: input.conflictSuffix } : {}),
+            ...(input.vector !== undefined ? { vector: input.vector } : {}),
+            chunkSize,
+            chunkOverlap,
+            config,
+          });
+          if (!added.ok) {
+            const cleanup = await purgeManagedCloneDir(path.dirname(cloned.value.repoRoot));
+            return {
+              ok: false,
+              scope,
+              code: added.code,
+              error: added.error,
+              ...(cleanup.removed === false && 'error' in cleanup
+                ? { cleanupWarning: `登记失败且托管目录未清理：${cleanup.error}` }
+                : {}),
+            };
+          }
+          return {
+            ok: true,
+            scope,
+            record: added.record,
+            created: added.created,
+            clone: {
+              repoRoot: cloned.value.repoRoot,
+              dir: cloned.value.dir,
+              branch: cloned.value.branch,
+              headCommit: cloned.value.headCommit,
+            },
+            ...(added.warnings && added.warnings.length > 0 ? { warnings: added.warnings } : {}),
+          };
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'SCOPE_OPERATION_BUSY') {
+          return { ok: false, scope, code: 'CLONE_BUSY', error: '该 Git 仓库正在被另一个数据源添加，请稍后重试' };
+        }
+        throw err;
       }
-      return {
-        ok: true,
-        scope,
-        record: added.record,
-        created: added.created,
-        clone: {
-          repoRoot: cloned.value.repoRoot,
-          dir: cloned.value.dir,
-          branch: cloned.value.branch,
-          headCommit: cloned.value.headCommit,
-        },
-        ...(added.warnings && added.warnings.length > 0 ? { warnings: added.warnings } : {}),
-      };
     });
   } catch (err) {
     return {
@@ -644,7 +836,8 @@ export async function removeDataSource(scopeInput: string, config: KiConfig = lo
       const file = dataSourcePath(scope);
       const legacySourceDir = getSource(scope)?.dir ?? null;
       const read = readDataSource(scope);
-      // 只认「由本工具派生」的托管目录（repoRoot 必须精确等于 <cloneRoot>/<scope>/repo）
+      // 托管目录可能属于另一个 scope（共享 clone）：是否可删由引用计数决定，
+      // 这里只负责把实际目录带给调用方。
       const managedCloneDir = read.ok ? managedCloneDirOf(read.record) : null;
       if (!fs.existsSync(file)) return { ok: true, scope, removed: false, legacySourceDir, managedCloneDir };
       try {
@@ -1395,10 +1588,21 @@ export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDa
     const prevSeen = record.lastSync?.seenRels ?? [];
     const prevCommit = record.lastSync?.git?.commit ?? null;
     const startedAt = Date.now();
-    if (record.type === 'git') {
-      return syncGit(scope, record, input, config, prevSeen, prevCommit, startedAt);
+    const execute = record.type === 'git'
+      ? () => syncGit(scope, record, input, config, prevSeen, prevCommit, startedAt)
+      : () => syncDirectory(scope, record, input, config, prevSeen, startedAt);
+    // 托管 clone 可能被多个 scope 共享：scope 锁不足以覆盖跨 scope 的工作树竞争
+    if (record.type === 'git' && record.git?.managed && record.git.repoRoot) {
+      try {
+        return await withManagedCloneLock(record.git.repoRoot, 'datasource-clone-sync', execute);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'SCOPE_OPERATION_BUSY') {
+          return { ok: false, scope, code: 'CLONE_BUSY', error: '该 Git 仓库正在被另一个数据源同步，请稍后重试' };
+        }
+        throw err;
+      }
     }
-    return syncDirectory(scope, record, input, config, prevSeen, startedAt);
+    return execute();
   };
 
   if (input.dryRun) return run();

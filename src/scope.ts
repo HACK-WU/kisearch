@@ -251,6 +251,8 @@ export type ScopeDeleteResult =
     managedCloneRemoved?: boolean;
     managedCloneDir?: string;
     managedCloneError?: string;
+    /** 该 clone 仍被其他 scope 引用（已保留，不视为错误） */
+    managedCloneShared?: boolean;
   }
   | {
       ok: false;
@@ -321,12 +323,30 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
     // S-05：托管 clone 是派生资源，登记随 KB 目录一起删除 ⇒ 一并清理，避免孤儿 clone。
     let managedCloneRemoved = false;
     let managedCloneError: string | undefined;
+    let managedCloneShared = false;
     if (managedCloneDir) {
       try {
-        const { purgeManagedCloneDir } = await import('./lib/datasource-clone.js');
-        const purge = await purgeManagedCloneDir(managedCloneDir);
-        managedCloneRemoved = purge.removed;
-        if (!purge.removed && 'error' in purge) managedCloneError = purge.error;
+        const { countManagedRepoRefs, withManagedCloneLock } = await import('./lib/datasource.js');
+        const repoRoot = path.join(managedCloneDir, 'repo');
+        const locked = await withManagedCloneLock(repoRoot, 'datasource-purge', async () => {
+          const refs = countManagedRepoRefs(repoRoot, config);
+          if (refs > 0) return { refs, purge: null };
+          const { purgeManagedCloneDir } = await import('./lib/datasource-clone.js');
+          const purge = await purgeManagedCloneDir(managedCloneDir);
+          return {
+            refs,
+            purge: purge.removed === false && 'error' in purge
+              ? { removed: false, error: purge.error }
+              : { removed: purge.removed },
+          };
+        });
+        if (locked.refs > 0) {
+          managedCloneShared = true;
+          managedCloneError = `该托管 clone 仍被 ${locked.refs} 个其他 scope 引用，已保留：${managedCloneDir}`;
+        } else if (locked.purge) {
+          managedCloneRemoved = locked.purge.removed;
+          if (!locked.purge.removed && locked.purge.error) managedCloneError = locked.purge.error;
+        }
       } catch (err) {
         managedCloneError = (err as Error).message;
       }
@@ -337,7 +357,12 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
       ftsRemoved,
       ...(ftsError ? { ftsError } : {}),
       ...(managedCloneDir
-        ? { managedCloneRemoved, managedCloneDir, ...(managedCloneError ? { managedCloneError } : {}) }
+        ? {
+          managedCloneRemoved,
+          managedCloneDir,
+          ...(managedCloneShared ? { managedCloneShared } : {}),
+          ...(managedCloneError ? { managedCloneError } : {}),
+        }
         : {}),
     };
   } catch (err) {
@@ -499,7 +524,9 @@ program
     const result = await executeScopeDelete({ scope: name, yes: !!opts.yes });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();
-    if (result.ok && result.managedCloneError) {
+    if (result.ok && result.managedCloneShared) {
+      process.stderr.write(`ⓘ ${result.managedCloneError ?? '托管 clone 仍被其他 scope 使用，已保留'}\n`);
+    } else if (result.ok && result.managedCloneError) {
       process.stderr.write(`⚠ 托管 clone 未删除，请手动清理 ${result.managedCloneDir ?? ''}：${result.managedCloneError}\n`);
     }
     if (!result.ok) process.exit(1);

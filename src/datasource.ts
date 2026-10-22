@@ -10,17 +10,20 @@
  * stdout = JSON；人类可读进度/提示一律走 stderr（与 ki group 一致）。
  */
 import fs from 'node:fs';
+import path from 'node:path';
 import { Command } from 'commander';
 import { loadConfig, type KiConfig } from './lib/config.js';
 import { getSource } from './lib/scope.js';
 import {
   addDataSource,
   addRemoteDataSource,
+  countManagedRepoRefs,
   dataSourceNextStep,
   readDataSource,
   removeDataSource,
   scanDataSources,
   syncDataSource,
+  withManagedCloneLock,
   type SyncDataSourceResult,
 } from './lib/datasource.js';
 import { managedCloneDirOf, managedScopeDir, purgeManagedCloneDir } from './lib/datasource-clone.js';
@@ -180,7 +183,9 @@ program
     } else {
       process.stderr.write('  类型：directory（全量同步）\n');
     }
-    if ('clone' in result && result.clone.headCommit) {
+    if ('reused' in result && result.reused) {
+      process.stderr.write(`  复用已有托管 clone（${result.clone.repoRoot}），未重复下载\n`);
+    } else if ('clone' in result && result.clone.headCommit) {
       process.stderr.write(`  已克隆 HEAD ${result.clone.headCommit.slice(0, 8)}\n`);
     }
     const legacy = getSource(result.scope);
@@ -272,17 +277,45 @@ program
         let leftover: string | null = null;
         try { leftover = managedScopeDir(opts.scope); } catch { /* 非法 scope 交给原错误 */ }
         if (leftover && fs.existsSync(leftover)) {
-          const purge = await purgeManagedCloneDir(leftover);
+          const repoRoot = path.join(leftover, 'repo');
+          let locked: { refs: number; purge: { removed: boolean; error?: string } | null };
+          try {
+            locked = await withManagedCloneLock(repoRoot, 'datasource-purge', async () => {
+              const refs = countManagedRepoRefs(repoRoot, config);
+              if (refs > 0) return { refs, purge: null };
+              const result = await purgeManagedCloneDir(leftover);
+              return {
+                refs,
+                purge: result.removed === false && 'error' in result
+                  ? { removed: false, error: result.error }
+                  : { removed: result.removed },
+              };
+            });
+          } catch (err) {
+            printJson({ ok: false, scope: opts.scope, code: (err as NodeJS.ErrnoException).code ?? 'PURGE_FAILED', error: (err as Error).message });
+            process.exitCode = 1;
+            return;
+          }
+          if (locked.refs > 0) {
+            printJson({ ok: false, scope: opts.scope, code: 'CLONE_SHARED', error: `该目录仍被 ${locked.refs} 个其他 scope 引用，拒绝清理：${leftover}` });
+            process.exitCode = 1;
+            return;
+          }
+          if (!locked.purge) {
+            printJson({ ok: false, scope: opts.scope, code: 'PURGE_FAILED', error: '未能清理遗留托管目录' });
+            process.exitCode = 1;
+            return;
+          }
           printJson({
-            ok: purge.removed,
+            ok: locked.purge.removed,
             scope: opts.scope,
             removed: false,
             note: '该 scope 无数据源登记；仅清理遗留托管目录',
             managedCloneDir: leftover,
-            cloneRemoved: purge.removed,
-            ...(purge.removed === false && 'error' in purge ? { cloneRemoveError: purge.error } : {}),
+            cloneRemoved: locked.purge.removed,
+            ...(locked.purge.error ? { cloneRemoveError: locked.purge.error } : {}),
           });
-          if (purge.removed) process.stderr.write(`✓ 已清理遗留托管 clone：${leftover}\n`);
+          if (locked.purge.removed) process.stderr.write(`✓ 已清理遗留托管 clone：${leftover}\n`);
           else process.exitCode = 1;
           return;
         }
@@ -321,15 +354,51 @@ program
       return;
     }
     if (opts.purge && result.managedCloneDir) {
-      const purge = await purgeManagedCloneDir(result.managedCloneDir);
+      const managedDir = result.managedCloneDir;
+      const repoRoot = path.join(managedDir, 'repo');
+      let locked: { refs: number; purge: { removed: boolean; error?: string } | null };
+      try {
+        locked = await withManagedCloneLock(repoRoot, 'datasource-purge', async () => {
+          const refs = countManagedRepoRefs(repoRoot, config);
+          if (refs > 0) return { refs, purge: null };
+          const result = await purgeManagedCloneDir(managedDir);
+          return {
+            refs,
+            purge: result.removed === false && 'error' in result
+              ? { removed: false, error: result.error }
+              : { removed: result.removed },
+          };
+        });
+      } catch (err) {
+        printJson({ ...result, cloneRemoved: false, cloneRemoveError: (err as Error).message });
+        process.stderr.write(`✓ 已取消登记；库内文档保留（未删除任何文档）\n`);
+        process.stderr.write(`⚠ 托管 clone 未删除，请稍后重试：${(err as Error).message}\n`);
+        return;
+      }
+      if (locked.refs > 0) {
+        printJson({
+          ...result,
+          cloneRemoved: false,
+          cloneRemoveSkipped: true,
+          cloneRemoveReason: `其他 ${locked.refs} 个 scope 仍在使用该 clone，已保留 ${managedDir}`,
+        });
+        process.stderr.write(`✓ 已取消登记；库内文档保留（未删除任何文档）\n`);
+        process.stderr.write(`ⓘ 该托管 clone 仍被 ${locked.refs} 个其他 scope 使用，未删除：${managedDir}\n`);
+        return;
+      }
+      if (!locked.purge) {
+        printJson({ ...result, cloneRemoved: false, cloneRemoveError: '未能清理托管目录' });
+        process.stderr.write(`✓ 已取消登记；库内文档保留（未删除任何文档）\n`);
+        return;
+      }
       printJson({
         ...result,
-        cloneRemoved: purge.removed,
-        ...(purge.removed === false && 'error' in purge ? { cloneRemoveError: purge.error } : {}),
+        cloneRemoved: locked.purge.removed,
+        ...(locked.purge.error ? { cloneRemoveError: locked.purge.error } : {}),
       });
       process.stderr.write('✓ 已取消登记；库内文档保留（未删除任何文档）\n');
-      if (purge.removed) process.stderr.write(`✓ 已删除托管 clone：${result.managedCloneDir}\n`);
-      else if ('error' in purge) process.stderr.write(`⚠ 托管 clone 未删除，请手动清理 ${result.managedCloneDir}：${purge.error}\n`);
+      if (locked.purge.removed) process.stderr.write(`✓ 已删除托管 clone：${managedDir}\n`);
+      else if (locked.purge.error) process.stderr.write(`⚠ 托管 clone 未删除，请手动清理 ${managedDir}：${locked.purge.error}\n`);
       return;
     }
     printJson(result);

@@ -56,8 +56,8 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { addRemoteDataSource, checkSourceReachable, readDataSource, scanDataSources, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
-import { isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
+import { addRemoteDataSource, checkSourceReachable, findReusableManagedClone, readDataSource, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
+import { checkManagedSubdir, isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { computeSyncAvailability } from './datasource-policy.js';
@@ -2528,6 +2528,30 @@ async function handleDatasourceAddRemote(
     return;
   }
 
+  // 已有同 remote+branch 的托管 clone 时，子目录可立即校验（不 clone、不建任务）
+  const reusable = findReusableManagedClone(requestConfig, urlCheck.url, branch || null);
+  if (reusable) {
+    let invalid: { code: string; error: string; hint?: string } | null = null;
+    try {
+      await withManagedCloneLock(reusable.repoRoot, 'datasource-add-preflight', async () => {
+        const checked = checkManagedSubdir(reusable.repoRoot, subdir, requestConfig, scope);
+        if (!checked.ok) invalid = { code: checked.code, error: checked.error, ...(checked.hint ? { hint: checked.hint } : {}) };
+      });
+    } catch (err) {
+      // 正在同步时不做前置判断，交给任务内的复用校验（会返回 CLONE_BUSY 或校验结果）
+      if ((err as NodeJS.ErrnoException).code !== 'SCOPE_OPERATION_BUSY') throw err;
+    }
+    if (invalid) {
+      const detail = invalid as { code: string; error: string; hint?: string };
+      sendJson(res, 400, {
+        ok: false,
+        code: detail.code,
+        error: `${detail.error}${detail.hint ? `；${detail.hint}` : ''}`,
+      });
+      return;
+    }
+  }
+
   let tasks: ReturnType<typeof listTaskRecords>;
   try {
     tasks = listTaskRecords(requestConfig);
@@ -2588,10 +2612,11 @@ async function handleDatasourceAddRemote(
           onProgress: (progress) => task.progress({ phase: 'clone', done: progress.done, total: progress.total }),
         });
         if (!added.ok) {
+          const recoveryHint = [added.hint, added.cleanupWarning].filter(Boolean).join('；');
           task.finish('failed', {
             errorCode: added.code,
             error: added.error,
-            ...(added.cleanupWarning ? { recoveryHint: added.cleanupWarning } : {}),
+            ...(recoveryHint ? { recoveryHint } : {}),
           });
           return;
         }
