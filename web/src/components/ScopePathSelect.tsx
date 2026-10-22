@@ -288,7 +288,9 @@ export function ScopePathSelect({
       {error ? <div className="ki-form-error">{error}</div> : null}
 
       <div className="ki-form-hint">
-        {hint ?? '「已有」点选即设目标；「新建」输入名称后回车、失焦或点「创建」均可。'}
+        {hint ?? (autoConfirmNew
+          ? '「已有」点选即设目标；「新建」直接输入名称即可生效。'
+          : '「已有」点选即设目标；「新建」输入名称后回车、失焦或点「创建」均可。')}
       </div>
     </div>
   );

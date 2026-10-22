@@ -238,6 +238,7 @@ export function WritePage(): JSX.Element {
         <div className="ki-card__body">
           <div className="ki-form-group" style={{ marginBottom: 12 }}>
             <ScopePathSelect
+              autoConfirmNew
               value={scope}
               confirmed={scopeConfirmed}
               currentScope={currentScope}
@@ -256,7 +257,7 @@ export function WritePage(): JSX.Element {
               }}
               placeholder="按名称筛选已有 Scope，如：kafka"
               onDraftChange={setScopeDraft}
-              hint="每次保存前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
+              hint="每次保存前都要重新确认目标；切到「新建 Scope」直接输入名称即可，无需再点创建。"
               error={scopeErr}
               disabled={submitting}
             />

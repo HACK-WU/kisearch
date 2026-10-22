@@ -2090,6 +2090,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <div ref={scopeFieldRef} className={attention === 'scope' ? 'ki-attention' : undefined}>
               <ScopePathSelect
                 key={formEpoch}
+                autoConfirmNew
                 value={scope}
                 confirmed={scopeConfirmed}
                 currentScope={currentScope}
@@ -2104,7 +2105,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 }}
                 placeholder="按名称筛选已有 Scope，如：kafka"
                 onDraftChange={setScopeDraft}
-                hint="每次开始导入前都要重新确认目标；选择新建后提交时会自动创建 Scope。"
+                hint="每次开始导入前都要重新确认目标；切到「新建 Scope」直接输入名称即可，无需再点创建。"
                 error={scopeErr}
                 disabled={busyPhase}
               />
