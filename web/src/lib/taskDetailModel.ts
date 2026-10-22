@@ -7,7 +7,7 @@
  *
  * 原则：组件只渲染本文件的输出，不再做条件判断。
  */
-import type { TaskIndexReadiness, TaskRecord, TaskResultSnapshot } from '@/api/tasksApi';
+import type { TaskIndexReadiness, TaskRecord, TaskResultSnapshot, TaskState } from '@/api/tasksApi';
 
 export type DetailTone = 'normal' | 'warn' | 'danger';
 
@@ -92,6 +92,33 @@ const SOURCE_LABEL: Record<TaskRecord['source'], string> = {
 /** 来源中文名（列表行与详情共用，避免两套映射） */
 export function sourceLabel(source: TaskRecord['source']): string {
   return SOURCE_LABEL[source] ?? source;
+}
+
+const STATE_LABEL: Record<TaskState, string> = {
+  queued: '排队中',
+  running: '运行中',
+  succeeded: '已完成',
+  partial: '部分完成',
+  failed: '失败',
+  cancelled: '已取消',
+  unknown: '状态未知',
+};
+
+/** 任务状态中文名（列表、抽屉头部共用） */
+export function stateLabel(state: TaskState): string {
+  return STATE_LABEL[state] ?? state;
+}
+
+const OPERATION_LABEL: Record<string, string> = {
+  import: '上传导入',
+  'rebuild-vector': '向量重建',
+  'restore-snapshot': '快照还原',
+  'datasource-sync': '数据源同步',
+};
+
+/** 任务操作中文名（列表、抽屉头部共用） */
+export function operationLabel(operation: string): string {
+  return OPERATION_LABEL[operation] ?? operation;
 }
 
 const SOURCE_KIND_LABEL: Record<'upload' | 'external', string> = {

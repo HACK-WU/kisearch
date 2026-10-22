@@ -18,6 +18,8 @@ export function AppRoutes(): JSX.Element {
         <Route path="import" element={null} />
         <Route path="write" element={<WritePage />} />
         <Route path="tasks" element={<TasksPage />} />
+        {/* 任务详情抽屉（REQ-20261022-002）：URL 可分享 / 刷新可恢复 */}
+        <Route path="tasks/:id" element={<TasksPage />} />
         {/* 数据源（REQ-20261020-001）：列表 + 详情（URL 可分享/刷新可恢复） */}
         <Route path="datasource" element={<DataSourcePage />} />
         <Route path="datasource/:scope" element={<DataSourcePage />} />

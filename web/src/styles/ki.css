@@ -3165,26 +3165,12 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-summary span { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-task-summary--failure b { color: var(--ki-color-danger); }
 .ki-task-summary--partial b { color: var(--ki-color-warning); }
-/* 两卡等高（默认 stretch）：原先 align-items:start 让左右卡各按内容高，无任务时右卡比左卡高一截（用户反馈）
-   ★ 右栏例外见 `.ki-task-workspace > .ki-task-detail`（sticky + align-self: start）——
-     任务多时 stretch 会把右卡一并拉到数千像素，别再按"等高"把它改回去。
-   ★ 空态卡（`--empty`）另有例外：stretch 与左卡等高 + max-height 520 封顶，
-     见下方 media 块末尾的同名规则（2026-10-20）。 */
-.ki-task-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: stretch; }
 .ki-task-list-card { min-width: 0; }
+.ki-task-page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .ki-task-filters { display: flex; align-items: center; gap: 4px; }
 .ki-task-filter { padding: 5px 9px; border: 0; border-radius: var(--ki-radius-sm); background: transparent; color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer; }
 .ki-task-filter:hover, .ki-task-filter--active { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
-.ki-task-list { display: flex; flex-direction: column; gap: 8px; }
-.ki-task-row { display: flex; width: 100%; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm); color: var(--ki-color-text); background: var(--ki-color-surface); text-align: left; cursor: pointer; }
-.ki-task-row:hover { border-color: var(--ki-color-border-strong); }
-.ki-task-row--selected { border-color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
-.ki-task-row__main { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
-.ki-task-row__main b { font-size: var(--ki-font-size-sm); }
-.ki-task-row__main span, .ki-task-row time, .ki-task-muted { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
-.ki-task-row__main span, .ki-task-row__main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ki-task-row__main small { color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); }
-.ki-task-row time { flex: 0 0 auto; }
+.ki-task-muted { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-task-state { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 20px; padding: 1px 7px; border-radius: var(--ki-radius-tag); color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); font-size: var(--ki-font-size-xs); font-weight: 650; }
 .ki-task-state--running { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
 .ki-task-state--queued { color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); }
@@ -3192,60 +3178,134 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-state--partial { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-task-state--failed { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-state--cancelled, .ki-task-state--unknown { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
-.ki-task-detail { min-width: 0; padding: 18px 20px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-lg); background: var(--ki-color-surface); }
-.ki-task-detail--empty { min-height: 220px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--ki-color-text-subtle); }
-/* 右栏固定尺寸 + 跟随滚动（2026-10-19，用户反馈「任务越多，右边『选择一个任务』卡片怎么也越高」）。
-   实测（50 条任务，1440×900）：左右两卡被 `.ki-task-workspace` 的 `align-items: stretch` 拉到
-   4054px 等高；空态 `justify-content: center` 于是把「选择一个任务」推到 top 2208 ——
-   首屏（900）完全空白，滚到列表中间 top 仍为 1008，滚到底已是 -1159，用户全程碰不到它。
-   做法与 `.ki-import-layout > .ki-import-track`（导入页右轨）同源：
-     · align-self: start —— 右栏按内容高，不再跟着列表长（＝"卡片大小固定"）
-     · position: sticky + top: 8 —— 滚动时跟随；包含块是整行高（列表卡），因此能一路粘住
-     · max-height + overflow-y —— 详情字段多时在列内滚动，不撑出视口（对齐导入页兜底）
-   窄屏（<960，单列）不启用：右栏排在列表下方，粘住只会遮挡列表。 */
-@media (min-width: 960px) {
-  .ki-task-workspace > .ki-task-detail {
-    position: sticky;
-    top: 8px;
-    align-self: start;
-    max-height: calc(100vh - 16px);
-    overflow-y: auto;
-    /* ★ 严禁 overscroll-behavior: contain（2026-10-20 实测复现的 Bug）：
-       它让卡片成为「滚动终点」—— 内部滚到底后滚轮事件被彻底吞掉，页面一动不动。
-       实测同一动作：鼠标在左栏 `.ki-content` 0→197，鼠标在卡片上 0→0；
-       滚 4000px 时卡片吃掉 814px、剩下 3186px 凭空消失。用户观感就是「鼠标一放到
-       详情上滚轮就失灵」。宁可让滚到边界后带动页面，也不要一个吞事件的滚动容器。 */
-    scrollbar-width: thin;
-    scrollbar-color: var(--ki-color-scrollbar) transparent;
-  }
-  /* 卡片溢出时（内容随任务数据浮动，实测 20 个落点的任务溢出 12px）用与 .ki-content
-     同宽度的细滚动条，避免系统默认 15px 的粗条把 380px 宽的右栏切开。 */
-  .ki-task-workspace > .ki-task-detail::-webkit-scrollbar { width: 6px; }
-  .ki-task-workspace > .ki-task-detail::-webkit-scrollbar-thumb {
-    background: var(--ki-color-scrollbar);
-    border-radius: 3px;
-  }
-  /* ★ 空态卡例外：与左卡等高（2026-10-20，用户反馈「空任务时两个卡片两边高度不一致」）。
-     上面的 align-self: start 让空态卡停在 min-height: 220px，实测左卡 252 → 底边差 32px。
-     start 是为「任务多时右卡被拉到 4046px、内容滚不到」加的，与「空态要等高」是相反诉求，
-     靠 start/stretch 二选一必然顾此失彼 —— 这里只对空态卡换回 stretch，用 max-height 兜住多任务：
-       · 行高 ≤ 520（约 0~6 条任务）→ stretch 生效，两卡底边齐平（实测 252/252、333/333）
-       · 行高 > 520（任务更多）→ 封顶 520 + sticky 跟随，不再随列表一路长到 4046px
-     选中任务的详情卡（.ki-task-detail 不带 --empty）保持 start，零影响。
-     窄屏（<960）不在本 media 内；单列下 stretch 本就不改变高度，无需额外处理。 */
-  .ki-task-workspace > .ki-task-detail--empty {
-    align-self: stretch;
-    max-height: min(calc(100vh - 16px), 520px);
-  }
+
+/* ── 全宽任务列表（REQ-20261022-002；2026-10-22 对齐 master 数据源列表）──
+   语义 table + table-layout:fixed：表头与单元格由同一列宽驱动，结构上不可能错位。
+   列：状态 / 任务 / 知识库 / 来源 / 结果摘要 / 时间 / 操作。 */
+.ki-task-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ki-task-table__head th {
+  padding: 8px 10px; text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
 }
-.ki-task-detail__head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
-.ki-task-detail__head h2 { margin-top: 4px; font-size: 17px; font-weight: 680; letter-spacing: -0.025em; }
+.ki-task-table__head th:nth-child(1) { width: 9%; }
+.ki-task-table__head th:nth-child(2) { width: 22%; }
+.ki-task-table__head th:nth-child(3) { width: 15%; }
+.ki-task-table__head th:nth-child(4) { width: 11%; }
+.ki-task-table__head th:nth-child(5) { width: 22%; }
+.ki-task-table__head th:nth-child(6) { width: 12%; }
+.ki-task-table__head th:nth-child(7) { width: 9%; text-align: center; }
+.ki-task-table__row { cursor: pointer; }
+.ki-task-table__row td {
+  padding: 10px; border-bottom: 1px solid var(--ki-color-border);
+  text-align: left; vertical-align: middle;
+}
+.ki-task-table__row:last-child td { border-bottom: 0; }
+.ki-task-table__row:hover { background: var(--ki-color-bg-secondary); }
+.ki-task-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-task-table__row.is-active { background: var(--ki-color-primary-soft); }
+.ki-task-table__row.is-active td:first-child { box-shadow: inset 3px 0 0 var(--ki-color-primary); }
+.ki-task-table__state { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ki-task-table__bar { width: 100%; max-width: 74px; }
+.ki-task-table__task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; }
+.ki-task-table__task b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ki-task-table__task code { flex: none; color: var(--ki-color-text-subtle); font-size: 11px; }
+.ki-task-table__task-scope,
+.ki-task-table__task-result {
+  display: none;
+  flex-basis: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ki-color-text-subtle);
+  font-size: 11px;
+  font-weight: 400;
+}
+.ki-task-table__scope { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ki-task-source-badge {
+  display: inline-block; max-width: 100%; padding: 0 8px; border-radius: 999px;
+  overflow: hidden; text-overflow: ellipsis;
+  font-size: var(--ki-font-size-xs); font-weight: 600; line-height: 18px; white-space: nowrap;
+  color: var(--ki-color-text-subtle); background: var(--ki-color-bg-secondary);
+}
+.ki-task-source-badge--cli { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+.ki-task-table__result { display: flex; flex-direction: column; gap: 2px; min-width: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+.ki-task-table__summary,
+.ki-task-table__error { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ki-task-table__error { color: var(--ki-color-danger-ink); }
+.ki-task-table__result--warn .ki-task-table__summary { color: var(--ki-color-warning); }
+.ki-task-table__result--danger .ki-task-table__summary { color: var(--ki-color-danger-ink); }
+.ki-task-table__time { display: flex; flex-direction: column; gap: 2px; color: var(--ki-color-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ki-task-table__time small { color: var(--ki-color-text-subtle); font-size: 11px; }
+.ki-task-table__actions { text-align: center; }
+.ki-task-detail-btn { min-width: 48px; }
+
+/* ── 任务详情抽屉：视觉对齐数据源页的 520px 抽屉 ── */
+.ki-task-drawer__scrim { position: fixed; inset: 0; z-index: 1020; background: rgba(18, 24, 21, 0.28); }
+.ki-task-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 1021;
+  display: flex; flex-direction: column; width: min(520px, 100vw);
+  background: var(--ki-color-bg); box-shadow: -8px 0 32px rgba(18, 24, 21, 0.18);
+}
+.ki-task-drawer__head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+}
+.ki-task-drawer__identity { flex: 1; min-width: 0; }
+.ki-task-drawer__kicker {
+  color: var(--ki-color-primary);
+  font: 700 var(--ki-font-size-xs)/1.3 var(--ki-font-mono);
+  letter-spacing: 0.12em;
+}
+.ki-task-drawer__title {
+  margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 18px; font-weight: 650;
+}
+.ki-task-drawer__meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-task-drawer__meta code { font-size: 11px; }
+.ki-task-drawer__close {
+  flex: none; width: 28px; height: 28px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer;
+}
+.ki-task-drawer__close:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
+.ki-task-drawer__body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 14px 16px 24px;
+}
+.ki-task-drawer__error { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ki-task-drawer__error .ki-task-error { margin-top: 0; }
+
+@media (max-width: 1199px) {
+  .ki-task-col--scope,
+  .ki-task-col--source { display: none; }
+  .ki-task-table__head th:nth-child(1) { width: 96px; }
+  .ki-task-table__head th:nth-child(2) { width: auto; }
+  .ki-task-table__head th:nth-child(5) { width: 30%; }
+  .ki-task-table__head th:nth-child(6) { width: 118px; }
+  .ki-task-table__head th:nth-child(7) { width: 78px; }
+  .ki-task-table__task-scope { display: block; }
+}
+@media (max-width: 960px) {
+  .ki-task-drawer { width: 100vw; }
+}
+@media (max-width: 760px) {
+  .ki-task-col--result { display: none; }
+  .ki-task-table__head th:nth-child(1) { width: 82px; }
+  .ki-task-table__head th:nth-child(2) { width: auto; }
+  .ki-task-table__head th:nth-child(6) { width: 96px; }
+  .ki-task-table__head th:nth-child(7) { width: 68px; }
+  .ki-task-table__task-result { display: block; }
+  .ki-task-table__time small { display: none; }
+}
 .ki-task-detail__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0; }
 .ki-task-detail__grid div { min-width: 0; }
 .ki-task-detail__grid dt { margin-bottom: 3px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-task-detail__grid dd { margin: 0; overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
 /* 任务详情三段布局（REQ-20261019-004 S-03）：参数 / 结果 / 时间。
-   分组标题用上分隔线区分，右侧 380px 列内字段增至 ~18 行时靠列内滚动兜底（见上方 sticky 段）。 */
+   分组标题用上分隔线区分；字段多时由 `.ki-task-drawer__body` 统一滚动兜底。 */
 .ki-task-detail__section {
   margin: 16px 0 8px;
   padding-top: 12px;
@@ -3360,7 +3420,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-action-note--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-task-action-note--error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-action-note--ok { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
-.ki-task-detail__icon { display: inline-flex; color: var(--ki-color-text-subtle); }
 /* 任务进度条（列表行 + 详情，v2 §7-4） */
 .ki-task-bar { height: 4px; margin-top: 4px; border-radius: var(--ki-radius-track); background: var(--ki-color-bg-muted); overflow: hidden; }
 .ki-task-bar__fill { display: block; height: 100%; background: var(--ki-color-primary); border-radius: var(--ki-radius-track); }
@@ -3379,7 +3438,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-global-task-link { max-width: 160px; }
 }
 @media (max-width: 900px) {
-  .ki-task-workspace { grid-template-columns: 1fr; }
   .ki-task-summary-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
@@ -3390,7 +3448,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-vector-dimension-banner__copy code { overflow-wrap: anywhere; }
   .ki-vector-dimension-banner > button { margin-left: 40px; }
   .ki-task-filters { flex-wrap: wrap; justify-content: flex-end; }
-  .ki-task-row time { display: none; }
   .ki-task-summary-row { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
