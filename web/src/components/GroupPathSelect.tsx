@@ -196,11 +196,12 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setFilter('');
   }, [disabled]);
 
-  /** 只选模式下按关键字过滤后的树；非只选模式恒为原树（filter 始终为空）。
+  /** 只选模式按独立搜索词过滤；可新建模式按当前输入值过滤（输入既有路径片段即搜索，
+   *  输入不存在路径时树为空、底部给出「将新建」）。
    *  memo 化：否则每次渲染都重建节点对象，子组件同步本地展开态的 effect 会被反复触发。 */
   const filtered = useMemo(
-    () => filterGroupTree(tree, selectOnly ? filter : ''),
-    [tree, filter, selectOnly],
+    () => filterGroupTree(tree, selectOnly ? filter : value),
+    [tree, filter, selectOnly, value],
   );
   const searching = selectOnly && filter.trim().length > 0;
 
@@ -279,7 +280,9 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
             <div className="ki-cell-sub" style={{ padding: 6 }}>
               {selectOnly
                 ? searching ? '没有匹配的 Group' : '当前 scope 暂无 Group'
-                : '当前 scope 暂无 Group，可直接输入新建'}
+                : value.trim()
+                  ? `没有匹配的 Group（回车将新建：${value.trim()}）`
+                  : '当前 scope 暂无 Group，可直接输入新建'}
             </div>
           ) : (
             <GroupTreeView nodes={filtered.nodes} onPick={pick} activePath={selectOnly ? value : undefined} allowParentPick={!selectOnly} disabled={disabled} />
@@ -298,9 +301,15 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
             ) : confirmed ? (
               <span style={{ color: 'var(--ki-color-success)' }}>✓ 已确认：{value}</span>
             ) : value && !isPathInTree(tree, value) ? (
-              <span style={{ color: 'var(--ki-color-success)' }}>✚ 将新建 Group：{value}（回车确认）</span>
+              <span style={{ color: 'var(--ki-color-success)' }}>
+                {filtered.matches.length > 0
+                  ? `${filtered.matches.length} 个匹配 · 回车新建「${value}」`
+                  : `✚ 将新建 Group：${value}（回车确认）`}
+              </span>
             ) : value ? (
-              <span style={{ color: 'var(--ki-color-primary)' }}>✓ 已有 Group</span>
+              <span style={{ color: 'var(--ki-color-primary)' }}>
+                {filtered.matches.length > 0 ? `${filtered.matches.length} 个匹配 · ` : ''}✓ 已有 Group
+              </span>
             ) : (
               '输入新路径可新建 Group'
             )}

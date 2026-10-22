@@ -56,7 +56,7 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { addRemoteDataSource, checkSourceReachable, readDataSource, scanDataSources, scopeExists, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
+import { addRemoteDataSource, checkSourceReachable, readDataSource, scanDataSources, syncDataSource, toClientPending, type SyncDataSourceResult } from './datasource.js';
 import { isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
@@ -2514,11 +2514,6 @@ async function handleDatasourceAddRemote(
     return;
   }
 
-  // Q8：页面只允许已有 scope（新建请走 ki scope / 首次导入）
-  if (!scopeExists(requestConfig, scope)) {
-    sendJson(res, 400, { ok: false, code: 'SCOPE_NOT_FOUND', error: `scope「${scope}」不存在；页面添加只支持已存在的 scope` });
-    return;
-  }
   const read = readDataSource(scope);
   if (read.ok) {
     sendJson(res, 409, {
@@ -2588,7 +2583,6 @@ async function handleDatasourceAddRemote(
           ...(body.vector === false ? { vector: false } : {}),
           ...(typeof body.conflictMode === 'string' && body.conflictMode.trim() ? { conflictMode: body.conflictMode.trim() } : {}),
           ...(typeof body.conflictSuffix === 'string' && body.conflictSuffix.trim() ? { conflictSuffix: body.conflictSuffix.trim() } : {}),
-          requireExistingScope: true,
           allowFileUrl,
           config: requestConfig,
           onProgress: (progress) => task.progress({ phase: 'clone', done: progress.done, total: progress.total }),

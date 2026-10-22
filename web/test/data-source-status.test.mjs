@@ -252,6 +252,13 @@ describe('buildDataSourceDetail Git / 增量口径', () => {
     assert.equal(byLabel.get('完成').hint, '其中内容未变 29 篇');
   });
 
+  it('目录源不显示「本次变更」（无 diff 语义，避免 250/250 误读）', () => {
+    const model = buildDataSourceDetail(record({ type: 'directory', lastSync: lastSync() }));
+    const labels = model.results.map((row) => row.label);
+    assert.equal(labels.includes('本次变更'), false);
+    assert.equal(labels.includes('全量扫描'), true);
+  });
+
   it('服务端 warnings 直出；untracked 为 info，其余为 warn', () => {
     const model = buildDataSourceDetail(gitRecord);
     const untracked = model.notices.find((item) => item.text.includes('未跟踪文件'));

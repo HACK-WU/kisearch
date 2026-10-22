@@ -571,28 +571,8 @@ describe('/api/datasource/add-remote', () => {
     }
   });
 
-  it('仅存在于向量层的 scope 也视为已存在（与 kiScopeList 对齐）', async () => {
-    const scope = `vec_only_${crypto.randomUUID().slice(0, 8)}`;
-    const collectionDir = path.join(loadConfig().vectorDir, 'collections', scope);
-    fs.mkdirSync(collectionDir, { recursive: true });
-    const missing = path.join(os.tmpdir(), `no-such-repo-${crypto.randomUUID()}.git`);
-    const res = await postAdd({ scope, url: `file://${missing}` });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    const task = await waitTask(res.body.taskId);
-    assert.equal(task.state, 'failed');
-    fs.rmSync(collectionDir, { recursive: true, force: true });
-    fs.rmSync(getKbDir(scope), { recursive: true, force: true });
-    fs.rmSync(path.join(cloneRoot, scope), { recursive: true, force: true });
-  });
-
-  it('scope 不存在 → 400 SCOPE_NOT_FOUND（Q8 不允许页面新建）', async () => {
-    const res = await postAdd({ scope: `no_such_${crypto.randomUUID().slice(0, 8)}`, url: 'https://example.com/x.git' });
-    assert.equal(res.status, 400);
-    assert.equal(res.body.code, 'SCOPE_NOT_FOUND');
-  });
-
-  it('完整链路：clone + 登记 + 首次 full 同步 + 第二次增量', async () => {
-    const scope = makeScope();
+  it('完整链路：新建 scope + clone + 登记 + 首次 full 同步 + 第二次增量', async () => {
+    const scope = `api_ds_remote_new_${crypto.randomUUID().slice(0, 8)}`;
     const { bare, work } = makeRepo();
     const created = await postAdd({ scope, url: `file://${bare}`, subdir: 'docs', vector: false });
     assert.equal(created.status, 200, JSON.stringify(created.body));
@@ -602,6 +582,7 @@ describe('/api/datasource/add-remote', () => {
     const addTask = await waitTask(created.body.taskId);
     assert.equal(addTask.state, 'succeeded', addTask.error ?? '');
     assert.match(String(addTask.result?.syncTaskId), /^[A-Za-z0-9-]{8,}$/);
+    assert.equal(fs.existsSync(getKbDir(scope)), true, '页面新建的 scope 应被初始化');
 
     const syncTask = await waitTask(addTask.result.syncTaskId);
     assert.equal(syncTask.state, 'succeeded', syncTask.error ?? '');

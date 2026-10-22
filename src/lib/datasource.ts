@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { getScopeDataDir, loadConfig, resolveScope, type KiConfig } from './config.js';
+import { loadConfig, resolveScope, type KiConfig } from './config.js';
 import { getKbDir, getSource } from './scope.js';
 import { ensureScopeDir } from './store.js';
 import {
@@ -45,7 +45,6 @@ import type {
 } from './datasource-types.js';
 import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
 import { cloneManagedRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
-import { getCollectionsRoot } from './scope-collection.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
@@ -488,8 +487,6 @@ export interface AddRemoteDataSourceInput {
   vector?: boolean;
   chunkSize?: number | null;
   chunkOverlap?: number | null;
-  /** 页面入口（Q8）：scope 必须已存在，拒绝隐式新建 */
-  requireExistingScope?: boolean;
   /** 仅测试：允许 file:// */
   allowFileUrl?: boolean;
   onProgress?: (progress: { phase: 'clone'; done: number; total: number }) => void;
@@ -507,17 +504,6 @@ export type AddRemoteDataSourceResult =
     warnings?: string[];
   }
   | { ok: false; scope: string; code: string; error: string; cleanupWarning?: string };
-
-/**
- * 页面 add-remote（Q8）只允许已存在的 scope：配置注册 ∪ KB 目录 ∪ 向量集合目录。
- * 判据与 `kiScopeList`（config ∪ KB ∪ vector）对齐——只差这一处会让页面上能选中的
- * 纯向量 scope 在提交时被 400 拒绝。
- */
-export function scopeExists(config: KiConfig, scope: string): boolean {
-  if (Object.prototype.hasOwnProperty.call(config.scopes, scope)) return true;
-  if (fs.existsSync(getScopeDataDir(config, scope))) return true;
-  return fs.existsSync(path.join(getCollectionsRoot(config), scope));
-}
 
 /**
  * clone + 登记（同步执行，调用方决定任务边界）。
@@ -557,14 +543,6 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
   if (chunkSize !== null && chunkOverlap !== null && chunkOverlap >= chunkSize) {
     return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap（${chunkOverlap}）必须小于 --chunk-size（${chunkSize}）` };
   }
-  if (input.requireExistingScope && !scopeExists(config, scope)) {
-    return {
-      ok: false,
-      scope,
-      code: 'SCOPE_NOT_FOUND',
-      error: `scope「${scope}」不存在；页面添加只支持已存在的 scope（新建请用 ki scope 或先导入一次）`,
-    };
-  }
   const precheck = readDataSource(scope);
   if (precheck.ok) {
     return { ok: false, scope, code: 'DATASOURCE_EXISTS', error: `scope「${scope}」已登记数据源；请先 ki datasource remove --scope ${scope}` };
@@ -580,10 +558,6 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
       if (again.ok) {
         return { ok: false, scope, code: 'DATASOURCE_EXISTS', error: `scope「${scope}」已登记数据源；请先 ki datasource remove --scope ${scope}` };
       }
-      if (input.requireExistingScope && !scopeExists(config, scope)) {
-        return { ok: false, scope, code: 'SCOPE_NOT_FOUND', error: `scope「${scope}」不存在` };
-      }
-
       const cloned = await cloneManagedRepo({
         scope,
         url: input.url,

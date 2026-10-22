@@ -317,14 +317,17 @@ export function buildDataSourceDetail(
 
   const fullScanned = result ? (result.files.fullScanned ?? result.files.scanned) : 0;
   const changed = result ? (sync?.git?.changedCount ?? result.files.changed ?? result.files.scanned) : 0;
+  // 目录源没有 diff 语义：不展示「本次变更」（否则会显示 fullScanned，看起来像 250 篇都变了）
   const results: DetailRow[] = result
     ? [
       { label: '全量扫描', value: String(fullScanned) },
-      {
-        label: '本次变更',
-        value: String(changed),
-        hint: result.files.changed === undefined ? '旧快照无增量字段，按导入基准显示' : undefined,
-      },
+      ...(record.type !== 'directory'
+        ? [{
+          label: '本次变更',
+          value: String(changed),
+          hint: result.files.changed === undefined ? '旧快照无增量字段，按导入基准显示' : undefined,
+        }]
+        : []),
       { label: '处理', value: String(result.files.scanned) },
       { label: '完成', value: String(result.files.completed), hint: result.files.unchanged > 0 ? `其中内容未变 ${result.files.unchanged} 篇` : undefined },
       { label: '跳过', value: String(result.files.skipped) },

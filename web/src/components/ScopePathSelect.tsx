@@ -19,6 +19,13 @@ interface ScopePathSelectProps {
   confirmed: boolean;
   currentScope: string;
   onChange: (value: string, confirmed: boolean) => void;
+  /** 模式切换回调（调用方据此作废旧确认，避免「切到新建但未确认」时提交旧 scope） */
+  onModeChange?: (mode: 'existing' | 'new') => void;
+  /**
+   * 新建模式输入即生效：隐藏「创建」按钮，按输入内容实时回调 onChange(value, valid)。
+   * 数据源添加弹窗使用；上传导入/知识写入保持显式确认。
+   */
+  autoConfirmNew?: boolean;
   /**
    * 「新建 Scope」模式下输入框的草稿（尚未回车确认）。
    * 父组件据此拦截「输入了 consu 却没回车、结果按旧 scope 静默导入」这类串号。
@@ -26,6 +33,8 @@ interface ScopePathSelectProps {
   onDraftChange?: (draft: string) => void;
   /** 字段标签；与模式按钮同行渲染，保证与相邻字段（如 Group 路径）左右对齐 */
   label?: string;
+  /** 隐藏字段标签（模式按钮已表达 Scope 语义时使用） */
+  hideLabel?: boolean;
   placeholder?: string;
   hint?: string;
   error?: string | null;
@@ -52,8 +61,11 @@ export function ScopePathSelect({
   confirmed,
   currentScope,
   onChange,
+  onModeChange,
+  autoConfirmNew = false,
   onDraftChange,
   label,
+  hideLabel = false,
   placeholder,
   hint,
   error,
@@ -99,6 +111,7 @@ export function ScopePathSelect({
 
   const chooseMode = (next: 'existing' | 'new'): void => {
     setMode(next);
+    onModeChange?.(next);
     // 切换模式一律重置该模式的输入（未确认的草稿即丢弃），列表按目标模式开合
     confirmedNameRef.current = '';
     onDraftChange?.('');
@@ -142,7 +155,7 @@ export function ScopePathSelect({
   return (
     <div className="ki-scope-target" ref={rootRef}>
       <div className="ki-scope-target__head">
-        <label className="ki-form-label">{label ?? 'Scope（目标知识库）'}</label>
+        {!hideLabel ? <label className="ki-form-label">{label ?? 'Scope（目标知识库）'}</label> : null}
       <div className="ki-scope-target__modes" role="group" aria-label="选择目标 Scope 类型">
         <button
           type="button"
@@ -166,10 +179,13 @@ export function ScopePathSelect({
       <div className="ki-scope-target__row">
       <div className="ki-combobox__input-wrap">
         <input
+          aria-label="Scope"
           className={`ki-form-input${inputVerified ? ' ki-form-input--verified' : ''}`}
           placeholder={
             mode === 'new'
-              ? '输入新 Scope 名称（回车 / 失焦 / 点右侧「创建」）'
+              ? autoConfirmNew
+                ? '输入新 Scope 名称（直接生效）'
+                : '输入新 Scope 名称（回车 / 失焦 / 点右侧「创建」）'
               : placeholder ?? '按名称筛选已有 Scope，如：kafka'
           }
           value={inputValue}
@@ -179,8 +195,15 @@ export function ScopePathSelect({
             if (mode === 'new') {
               // 名称一改，上一次的"已确认"即作废（否则改名后无法再创建）
               confirmedNameRef.current = '';
-              setNewScope(e.target.value);
-              onDraftChange?.(e.target.value);
+              const next = e.target.value;
+              setNewScope(next);
+              onDraftChange?.(next);
+              if (autoConfirmNew) {
+                const trimmed = next.trim();
+                const valid = Boolean(trimmed) && !scopeError(trimmed)
+                  && !scopes.some((item) => item.scope === trimmed);
+                onChange(trimmed, valid);
+              }
               return;
             }
             setScopeFilter(e.target.value);
@@ -200,7 +223,7 @@ export function ScopePathSelect({
         />
         </div>
 
-        {mode === 'new' && (
+        {mode === 'new' && !autoConfirmNew && (
           <button
             type="button"
             className="ki-btn ki-btn--small ki-btn--primary"
