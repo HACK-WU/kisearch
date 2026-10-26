@@ -30,6 +30,7 @@ import {
   type DataSourcePendingTreeNode,
 } from '@/lib/dataSourceDetailModel';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { Notice } from '@/components/Notice';
 import { Icon } from '@/components/icons';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
@@ -1030,19 +1031,19 @@ export function DataSourcePage(): JSX.Element {
                   {/* 待删段的 skipDetail 只在下方区块里出现一次：同一条 warn 在顶部与卡内各渲染一遍
                       会让"已生成候选 / 未生成候选"这类结论重复两遍（实测确实重复）。 */}
                   {!active ? model.notices
-                    .filter((notice) => !(model.pending.blocked && notice.text === model.pending.skipDetail))
+                    .filter((notice) => !(model.pending.blocked && notice.text === model.pending.blockedText))
                     .map((notice) => (
-                      <p key={notice.text} className={`ki-task-notice ki-task-notice--${notice.tone}`}>{notice.text}</p>
+                      <Notice key={`${notice.tone}:${notice.text}`} tone={notice.tone} title={notice.title}>{notice.text}</Notice>
                     )) : null}
                   {/* 冷却提示只在空闲时才有意义：同步中再说"距上次不足 30 分钟"是噪音 */}
                   {!active && availability?.reason === 'cooldown' ? (
-                    <p className="ki-task-notice ki-task-notice--info">
-                      距上次成功同步不足 30 分钟（约 {Math.max(1, Math.ceil((availability.retryAfterSec ?? 0) / 60))} 分钟）。
-                      如需立即同步：<code>ki datasource sync --scope {scope}</code>
-                    </p>
+                    <Notice tone="info" title="距上次成功同步不足 30 分钟">
+                      约 {Math.max(1, Math.ceil((availability.retryAfterSec ?? 0) / 60))} 分钟后可再次同步。如需立即同步：
+                      <code className="ki-notice__code">ki datasource sync --scope {scope}</code>
+                    </Notice>
                   ) : null}
                   {availability === undefined && detailQuery.data ? (
-                    <p className="ki-task-notice ki-task-notice--warn">当前 daemon 不支持页面同步，请升级并重启。</p>
+                    <Notice tone="warn">当前 daemon 不支持页面同步，请升级并重启。</Notice>
                   ) : null}
 
                   {/* ── 执行结果（数据区材质） ── */}
@@ -1216,7 +1217,7 @@ export function DataSourcePage(): JSX.Element {
                       </div>
 
                       {model.pending.blocked ? (
-                        <p className="ki-task-notice ki-task-notice--warn">{model.pending.skipDetail ?? '未生成候选'}</p>
+                        <Notice tone="warn" slim className="ki-ds-pending__notice">{model.pending.blockedText ?? '未生成候选'}</Notice>
                       ) : pendingEmpty ? (
                         <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
                           当前没有待删除的文档：知识库与源目录一致。下次同步会重新比对并生成候选。
@@ -1224,11 +1225,11 @@ export function DataSourcePage(): JSX.Element {
                       ) : (
                         <>
                           {active ? (
-                            <p className="ki-task-notice ki-task-notice--info">
+                            <Notice tone="info" slim className="ki-ds-pending__notice">
                               {activeState === 'queued'
                                 ? '同步已排队，暂不能删除候选（避免与即将开始的同步冲突）。'
                                 : '同步进行中，暂不能删除候选（避免与本次扫描冲突）。'}
-                            </p>
+                            </Notice>
                           ) : null}
 
                           <div className="ki-ds-pending__head">
@@ -1269,14 +1270,14 @@ export function DataSourcePage(): JSX.Element {
                             </div>
                           ) : null}
                           {ratio !== null && ratio > 20 ? (
-                            <p className="ki-task-notice ki-task-notice--warn">本次将删除本数据源 {ratio}% 的文档，比例偏高，请确认源目录无误</p>
+                            <Notice tone="warn" slim className="ki-ds-pending__notice">本次将删除本数据源 {ratio}% 的文档，比例偏高，请确认源目录无误</Notice>
                           ) : null}
                           <p className="ki-ds-pending__note">删除不可恢复；执行时按当前源目录重新校验，目录变了会拒绝。只删知识库记录，不动源目录文件。</p>
                         </>
                       )}
                   </section>
 
-                  {error ? <p className="ki-task-notice ki-task-notice--warn" role="alert">{error}</p> : null}
+                  {error ? <Notice tone="warn">{error}</Notice> : null}
                   {receipt ? <p className="ki-ds-receipt">{receipt}</p> : null}
                 </>
               ) : null}

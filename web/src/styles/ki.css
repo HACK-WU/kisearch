@@ -33,6 +33,24 @@
   --ki-color-danger-ink: #9d3a36;
   --ki-color-focus: #3e765e;
   --ki-color-skeleton: #eef1ec;
+  /* ── 提示信息卡片（Notice）语气色阶：组件级（全局 warning 是褐琥珀，
+        混不出"淡黄/亮黄"双档；2026-10-26 用户定稿） ── */
+  --notice-info-bg: #fdf0c4;
+  --notice-info-ink: #7a5a00;
+  --notice-info-border: #e2c469;
+  --notice-info-wash: rgba(122, 90, 0, 0.1);
+  --notice-success-bg: #b9f6ca;
+  --notice-success-ink: #145c39;
+  --notice-success-border: #6fd6a6;
+  --notice-success-wash: rgba(20, 92, 57, 0.1);
+  --notice-warn-bg: #fff9c4;
+  --notice-warn-ink: #6b4f00;
+  --notice-warn-border: #e0cd4a;
+  --notice-warn-wash: rgba(107, 79, 0, 0.12);
+  --notice-danger-bg: #fbdadb;
+  --notice-danger-ink: #b02a20;
+  --notice-danger-border: #e89b96;
+  --notice-danger-wash: rgba(176, 42, 32, 0.1);
   /* ── 间距 ── */
   --ki-space-1: 4px;
   --ki-space-2: 8px;
@@ -108,6 +126,23 @@
   --ki-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.38);
   --ki-shadow-2: 0 10px 32px rgba(0, 0, 0, 0.38);
   --ki-color-purple: #bf5af2;
+
+  --notice-info-bg: #3b3013;
+  --notice-info-ink: #f2c94c;
+  --notice-info-border: #7d6420;
+  --notice-info-wash: rgba(242, 201, 76, 0.12);
+  --notice-success-bg: #143425;
+  --notice-success-ink: #74cf9e;
+  --notice-success-border: #2f7a55;
+  --notice-success-wash: rgba(116, 207, 158, 0.12);
+  --notice-warn-bg: #3f3412;
+  --notice-warn-ink: #ffd75e;
+  --notice-warn-border: #8a6a12;
+  --notice-warn-wash: rgba(255, 215, 94, 0.14);
+  --notice-danger-bg: #3d1f1f;
+  --notice-danger-ink: #f09a94;
+  --notice-danger-border: #a3443d;
+  --notice-danger-wash: rgba(240, 154, 148, 0.12);
 }
 
 /* 暗色下强调色提亮，实心按钮/品牌块改用深色文字以满足对比度（demo 同款处理） */
@@ -3402,6 +3437,82 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-notice--info { color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); }
 .ki-task-notice--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-task-notice--danger { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+
+/* ═══ 提示信息卡片（Notice）═══
+   视觉参考库 ui-tools/design-reference v1.0.0（components/notice.html + spec）。
+   结构：图标 + 标题 + 正文（+ 操作/关闭）；颜色只做语气，浅底 + 1px 语气描边，
+   无左竖条、无阴影。语气色阶见 :root 的 `--notice-*` 变量。 */
+.ki-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid var(--notice-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--notice-bg);
+  color: var(--ki-color-text);
+  font-size: 12.5px;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.ki-notice__icon {
+  flex: none;
+  width: 16px; height: 16px;
+  margin-top: 1px;
+  color: var(--notice-ink);
+  fill: none;
+  stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.ki-notice__body { flex: 1 1 auto; min-width: 0; }
+.ki-notice__title {
+  color: var(--notice-ink);
+  font-size: 12.5px;
+  font-weight: 640;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+.ki-notice__title + .ki-notice__text { margin-top: 2px; }
+.ki-notice__text { color: var(--ki-color-text-muted); font-variant-numeric: tabular-nums; }
+.ki-notice__code {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--notice-border);
+  border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-surface);
+  color: var(--notice-ink);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.ki-notice--slim { align-items: center; padding: 8px 12px; }
+.ki-notice--slim .ki-notice__icon { margin-top: 0; }
+.ki-notice--slim .ki-notice__text { color: var(--ki-color-text); }
+.ki-notice--info {
+  --notice-bg: var(--notice-info-bg);
+  --notice-ink: var(--notice-info-ink);
+  --notice-border: var(--notice-info-border);
+  --notice-wash: var(--notice-info-wash);
+}
+.ki-notice--success {
+  --notice-bg: var(--notice-success-bg);
+  --notice-ink: var(--notice-success-ink);
+  --notice-border: var(--notice-success-border);
+  --notice-wash: var(--notice-success-wash);
+}
+.ki-notice--warn {
+  --notice-bg: var(--notice-warn-bg);
+  --notice-ink: var(--notice-warn-ink);
+  --notice-border: var(--notice-warn-border);
+  --notice-wash: var(--notice-warn-wash);
+}
+.ki-notice--danger {
+  --notice-bg: var(--notice-danger-bg);
+  --notice-ink: var(--notice-danger-ink);
+  --notice-border: var(--notice-danger-border);
+  --notice-wash: var(--notice-danger-wash);
+}
 /* recoveryHint 已并入 `.ki-task-notice--warn`（三段布局），`.ki-task-recovery` 规则删除 */
 .ki-task-error { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-id { display: block; margin-top: 14px; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
@@ -5545,13 +5656,9 @@ select.ki-chat-cfg__ta--select {
   /* 上边距与区块间距同为 14px：原来 18px padding + 提示条 12px margin 叠加成 30px 顶部空白 */
   padding: 14px 18px 32px;
 }
-/* 首个提示条不再叠加 margin-top（否则等于把上面那 14px 又加了一遍） */
-.ki-ds-drawer__body > .ki-task-notice:first-child { margin-top: 0; }
+/* 提示卡片与下方功能区的间距（.ki-notice 自身无 margin；.ki-ds-sec 另有 14px 上边距） */
+.ki-ds-drawer__body > .ki-notice { margin-bottom: 12px; }
 
-/* 顶部提示条与下方功能区之间要留间距：`.ki-task-notice` 只有 margin-top，
-   最后一条会与随后的 .ki-ds-sec 贴死（实测 gap=0）。只作用于抽屉直接子级，
-   卡内的提示条（待删段的 skipDetail）保持原样。 */
-.ki-ds-drawer__body > .ki-task-notice { margin-bottom: 12px; }
 
 /* ── 功能区容器：三种材质 ── */
 .ki-ds-sec {
@@ -5835,6 +5942,8 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-ds-confirm__acts { display: flex; gap: 8px; }
 .ki-ds-pending__note { margin-top: 8px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+/* 待删段内的提示卡片：与段头 / 确认条之间留 12px（.ki-notice 自身无 margin） */
+.ki-ds-pending__notice { margin-top: var(--ki-space-3); }
 .ki-ds-receipt { margin-top: 8px; color: var(--ki-color-primary); font-size: var(--ki-font-size-sm); }
 /* 页面能力边界说明：用户走查反馈「太不明显」——由灰底提示条升级为带主色竖条的说明卡 */
 .ki-ds-callout {

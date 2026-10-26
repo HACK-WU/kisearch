@@ -46,6 +46,26 @@ const PATHS: Record<string, JSX.Element> = {
   ),
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   check: <path d="m5 13 4.5 4.5L19 7" />,
+  // 提示信息卡片语义图标（Notice 组件用）
+  info: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v6" />
+      <circle cx="12" cy="7.6" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  'check-circle': (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12.4 2.7 2.7 4.9-5.6" />
+    </>
+  ),
+  'x-circle': (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m9.2 9.2 5.6 5.6M14.8 9.2l-5.6 5.6" />
+    </>
+  ),
   warn: (
     <>
       <path d="M12 4 2.5 20h19z" />

@@ -187,12 +187,14 @@ export interface DataSourceDetailModel {
     truncated: boolean;
     blocked: string | null;
     skipDetail?: string;
+    /** 待删段展示的拦截文案（与顶部 notice 同源，避免两处各拼一份） */
+    blockedText?: string;
     stale: boolean;
     staleReason?: string | null;
     eligibleCount: number;
     untouchedGroups: string[];
   };
-  notices: { tone: 'warn' | 'info'; text: string }[];
+  notices: { tone: 'warn' | 'info'; title?: string; text: string }[];
 }
 
 export const DATASOURCE_STATE_LABEL: Record<DataSourceSyncState | 'never', string> = {
@@ -351,8 +353,11 @@ export function buildDataSourceDetail(
           : '候选来自上次同步：最近一次同步未重算候选。删除前请先重新同步。',
     });
   }
-  if (pendingDelete?.blocked) {
-    notices.push({ tone: 'warn', text: pendingDelete.skipDetail ?? `未生成候选（${pendingDelete.blocked}）` });
+  const blockedText = pendingDelete?.blocked
+    ? pendingDelete.skipDetail ?? `未生成候选（${pendingDelete.blocked}）`
+    : undefined;
+  if (blockedText) {
+    notices.push({ tone: 'warn', text: blockedText });
   }
   if (pendingDelete?.overLimit) {
     notices.push({
@@ -382,7 +387,7 @@ export function buildDataSourceDetail(
     notices.push({ tone: 'warn', text: '本次有未完成文件，commit 水位未推进；下次同步会重试' });
   }
   if (sync && sync.state === 'ok' && sync.result.files.changed === 0 && (sync.result.files.fullScanned ?? 0) > 0) {
-    notices.push({ tone: 'info', text: `本次无变更（全量扫描 ${sync.result.files.fullScanned} 篇）` });
+    notices.push({ tone: 'info', title: '本次同步无变更', text: `全量扫描 ${sync.result.files.fullScanned} 篇，源目录与知识库内容一致。` });
   }
 
   const result = sync?.result;
@@ -518,6 +523,7 @@ export function buildDataSourceDetail(
       truncated: pendingDelete?.truncated ?? false,
       blocked: pendingDelete?.blocked ?? null,
       skipDetail: pendingDelete?.skipDetail,
+      blockedText,
       stale: pendingDelete?.stale ?? false,
       staleReason: pendingDelete?.staleReason ?? null,
       eligibleCount: pendingDelete?.eligibleCount ?? 0,

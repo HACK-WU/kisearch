@@ -305,7 +305,7 @@ describe('buildDataSourceDetail Git / 增量口径', () => {
         warnings: [],
       }),
     }));
-    assert.ok(model.notices.some((item) => item.text.includes('本次无变更（全量扫描 5 篇）')));
+    assert.ok(model.notices.some((item) => item.title === '本次同步无变更' && item.text.includes('全量扫描 5 篇')));
   });
 });
 
