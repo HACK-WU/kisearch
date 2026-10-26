@@ -1456,16 +1456,15 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             )}
           </button>
         ) : null}
-        <span className={`ki-chat-ctx__dot${config && !config.enabled ? ' ki-chat-ctx__dot--off' : config?.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
         <span className="ki-chat-ctx__model">{config?.model ?? '未配置模型'}</span>
-        {config && config.enabled ? (
-          <>
-            <span className="ki-chat-ctx__sep">·</span>
-            <span>
+        <span className={`ki-chat-ctx__status${state.streaming.active ? ' ki-chat-ctx__status--live' : ''}${!config || !config.enabled ? ' ki-chat-ctx__status--off' : config.ackRequired ? ' ki-chat-ctx__status--warn' : ''}`}>
+          <span className={`ki-chat-ctx__dot${!config || !config.enabled ? ' ki-chat-ctx__dot--off' : config.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
+          {config && config.enabled ? (
+            <span className="ki-chat-ctx__statusText">
               {state.streaming.active ? '生成中' : config.ackRequired ? '外发未确认' : config.supportsTools ? '工具检索就绪' : '预检索模式'}
             </span>
-          </>
-        ) : null}
+          ) : null}
+        </span>
         {isPage ? (
           <>
             <span className="ki-chatpage__ctx-spacer" />
@@ -1485,7 +1484,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 type="button"
                 className="ki-chatpage__widthsegb"
                 aria-pressed={contentWidth === 'full'}
-                title="内容铺满可用宽度：正文保留可读行宽，代码块与表格用满整行"
+                title="内容铺满可用宽度：正文、代码块与表格都用满整行"
                 onClick={() => chooseContentWidth('full')}
               >
                 铺满
@@ -1541,10 +1540,24 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           {state.messages.length === 0 && !state.streaming.active ? (
             <div className="ki-chat-empty">
               <span className="ki-chat-empty__ic" aria-hidden="true">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"><path d="M2.6 4.2A1.6 1.6 0 0 1 4.2 2.6h7.6a1.6 1.6 0 0 1 1.6 1.6v5a1.6 1.6 0 0 1-1.6 1.6H7.4L4.2 13.4v-2.6H4.2a1.6 1.6 0 0 1-1.6-1.6z" /></svg>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M8 3.2c-1.2-.9-2.7-1.3-4.6-1.3-.4 0-.7.3-.7.7v8.2c0 .4.3.7.7.7 1.9 0 3.4.4 4.6 1.3 1.2-.9 2.7-1.3 4.6-1.3.4 0 .7-.3.7-.7V2.6c0-.4-.3-.7-.7-.7-1.9 0-3.4.4-4.6 1.3Z" /><path d="M8 3.2v9.6" /></svg>
               </span>
-              <p className="ki-chat-empty__t">在任意页面提问</p>
-              <p className="ki-chat-empty__d">回答会附带知识库来源，点击可回原文并高亮命中片段。</p>
+              <p className="ki-chat-empty__t">有什么可以帮你？</p>
+              <p className="ki-chat-empty__d">我会先检索当前知识库，再给出带来源的回答。</p>
+              <div className="ki-chat-empty__hints">
+                {['总结一下主机监控首屏优化的结论', '知识库里怎么配置数据源？', '查找关于向量维度的文档'].map((text) => (
+                  <button
+                    key={text}
+                    type="button"
+                    className="ki-chat-q"
+                    disabled={Boolean(config && !config.enabled)}
+                    onClick={() => {
+                      setDraft(text);
+                      requestAnimationFrame(() => taRef.current?.focus());
+                    }}
+                  >{text}</button>
+                ))}
+              </div>
             </div>
           ) : null}
 
@@ -1784,7 +1797,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               ref={bindComposer}
               value={draft}
               maxLength={MAX_SEND_CHARS}
-              placeholder={blocked ?? '输入问题，Enter 发送（Shift+Enter 换行）'}
+              placeholder={blocked ?? '请输入内容…'}
               disabled={Boolean(config && !config.enabled)}
               /* ⚠️ 不标记 data-ki-search-input：否则 AppShell 的 Ctrl+F 会聚焦到这里而非页面搜索框 */
               onChange={(e) => setDraft(e.target.value)}
@@ -1796,7 +1809,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               }}
             />
             <div className="ki-chat-composer__bar">
-              <span className="ki-chat-composer__hint">{hint}</span>
+              {hint === 'Enter 发送 · Shift+Enter 换行' ? (
+                <span className="ki-chat-composer__hint ki-chat-composer__hint--keys">
+                  <kbd>Enter</kbd><span>发送</span><kbd>Shift</kbd><span>+</span><kbd>Enter</kbd><span>换行</span>
+                </span>
+              ) : (
+                <span className="ki-chat-composer__hint">{hint}</span>
+              )}
               {/* 上下文用量（REQ-20261013-001）：字符口径、流式期间逐字上涨。
                   形态 = **环形进度**（占用比例一眼可见）+ **悬停**显示用量与明细（点击固定，键盘/触屏可达）；
                   无数据画空环（**不猜**分母，见 lib/contextUsage）。 */}
@@ -1850,17 +1869,25 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 {draftChars}/{MAX_SEND_CHARS}
               </span>
               {state.streaming.active ? (
-                <button type="button" className="ki-chat-btn ki-chat-btn--stop" onClick={handleStop}>
-                  停止
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--stop ki-chat-send ki-chat-send--stop"
+                  onClick={handleStop}
+                  aria-label="停止生成"
+                  title="停止生成"
+                >
+                  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="4.5" y="4.5" width="7" height="7" rx="1.4" fill="currentColor" /></svg>
                 </button>
               ) : (
                 <button
                   type="button"
-                  className="ki-chat-btn"
+                  className="ki-chat-btn ki-chat-send"
                   onClick={handleSend}
                   disabled={Boolean(blocked)}
+                  aria-label="发送"
+                  title="发送"
                 >
-                  发送
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M4.2 6.8 8 3l3.8 3.8" /></svg>
                 </button>
               )}
               {/* ── 上下文窗口面板（结构对齐参考图：大百分比 + 组成条 + 分布表 + 底部主操作；hover 展开、点击固定）── */}

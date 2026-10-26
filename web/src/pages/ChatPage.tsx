@@ -20,8 +20,8 @@ export function ChatPage(): JSX.Element {
   // 双栏工作台模式：禁止外层 .ki-content 滚动，让对话页内部各自滚动（同 BrowsePage 做法）
   useEffect(() => {
     const el = document.querySelector('.ki-content');
-    if (el) el.classList.add('ki-content--noscroll');
-    return () => { el?.classList.remove('ki-content--noscroll'); };
+    if (el) el.classList.add('ki-content--noscroll', 'ki-content--chatpage');
+    return () => { el?.classList.remove('ki-content--noscroll', 'ki-content--chatpage'); };
   }, []);
 
   // page 变体恒 open；page 无关闭按钮，onClose 不会被触发，传 noop 满足契约

@@ -93,6 +93,23 @@ const IconTrash = () => (
     <path d="M3.4 5h9.2M6.4 5V3.6h3.2V5M4.6 5l.7 8h5.4l.7-8" />
   </svg>
 );
+const IconSearch = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+    <circle cx="7" cy="7" r="4.2" />
+    <path d="m10.2 10.2 3 3" />
+  </svg>
+);
+const IconPlus = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+    <path d="M8 3.2v9.6M3.2 8h9.6" />
+  </svg>
+);
+const IconRefresh = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+    <path d="M13 8a5 5 0 1 1-1.5-3.5" />
+    <path d="M13 2.8v3.4H9.6" />
+  </svg>
+);
 
 export function ConversationList(props: ConversationListProps): JSX.Element | null {
   const { open, items, activeId, loading, error, variant = 'popover' } = props;
@@ -248,13 +265,25 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
       }}
     >
       <div className="ki-chat-convpop__search">
-        <input
-          type="search"
-          placeholder="搜索当前列表（最近 50 条）"
-          aria-label="搜索会话"
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-        />
+        <div className="ki-chat-convpop__searchbox">
+          <span className="ki-chat-convpop__searchic" aria-hidden="true"><IconSearch /></span>
+          <input
+            type="search"
+            placeholder="搜索会话"
+            aria-label="搜索会话"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+        </div>
+        {inline ? (
+          <button
+            type="button"
+            className="ki-chat-convpop__newicon"
+            onClick={props.onCreate}
+            aria-label="新建会话"
+            title="新建会话"
+          ><IconPlus /></button>
+        ) : null}
       </div>
 
       <div className="ki-chat-convpop__body" role="menu">
@@ -264,10 +293,12 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
           <div className="ki-chat-convpop__skel"><i /><i /><i /></div>
         ) : (
           <>
-            {recent.length > 0 ? <p className="ki-chat-convpop__group">最近</p> : null}
+            {recent.length > 0 ? (
+              <p className="ki-chat-convpop__group">最近<span className="ki-chat-convpop__group-count">{recent.length}</span></p>
+            ) : null}
             {rowsOf(recent)}
             {archived.length > 0 ? (
-              <p className="ki-chat-convpop__group">已归档（{archived.length}）</p>
+              <p className="ki-chat-convpop__group">已归档<span className="ki-chat-convpop__group-count">{archived.length}</span></p>
             ) : null}
             {rowsOf(archived)}
             {recent.length + archived.length === 0 ? (
@@ -280,13 +311,18 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
       </div>
 
       <div className="ki-chat-convpop__foot">
-        <button type="button" className="ki-chat-btn" onClick={props.onCreate}>新建会话</button>
+        <button type="button" className="ki-chat-btn ki-chat-convpop__new" onClick={props.onCreate}>
+          <IconPlus />
+          <span>新建会话</span>
+        </button>
         <button
           type="button"
-          className="ki-chat-btn ki-chat-btn--ghost"
+          className="ki-chat-btn ki-chat-btn--ghost ki-chat-convpop__refresh"
           onClick={props.onRefresh}
           disabled={loading}
-        >刷新</button>
+          aria-label="刷新会话列表"
+          title="刷新会话列表"
+        ><IconRefresh /></button>
         <span className="ki-chat-convpop__hint">按 (updatedAt, id) 倒序</span>
       </div>
     </div>

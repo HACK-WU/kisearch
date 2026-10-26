@@ -3215,7 +3215,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
    列：状态 / 任务 / 知识库 / 来源 / 结果摘要 / 时间 / 操作。 */
 .ki-task-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .ki-task-table__head th {
-  padding: 8px 10px; text-align: left; white-space: nowrap;
+  padding: 9px 12px; text-align: left; white-space: nowrap;
   border-bottom: 1px solid var(--ki-color-border);
   background: var(--ki-color-bg-secondary);
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
@@ -3224,12 +3224,12 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-table__head th:nth-child(2) { width: 22%; }
 .ki-task-table__head th:nth-child(3) { width: 15%; }
 .ki-task-table__head th:nth-child(4) { width: 11%; }
-.ki-task-table__head th:nth-child(5) { width: 22%; }
+.ki-task-table__head th:nth-child(5) { width: 19%; }
 .ki-task-table__head th:nth-child(6) { width: 12%; }
-.ki-task-table__head th:nth-child(7) { width: 9%; text-align: center; }
+.ki-task-table__head th:nth-child(7) { width: 12%; }
 .ki-task-table__row { cursor: pointer; }
 .ki-task-table__row td {
-  padding: 10px; border-bottom: 1px solid var(--ki-color-border);
+  padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
   text-align: left; vertical-align: middle;
 }
 .ki-task-table__row:last-child td { border-bottom: 0; }
@@ -3237,7 +3237,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 .ki-task-table__row.is-active { background: var(--ki-color-primary-soft); }
 .ki-task-table__row.is-active td:first-child { box-shadow: inset 3px 0 0 var(--ki-color-primary); }
-.ki-task-table__state { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ki-task-table__state { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .ki-task-table__bar { width: 100%; max-width: 74px; }
 .ki-task-table__task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; }
 .ki-task-table__task b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
@@ -3268,9 +3268,12 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-table__result--warn .ki-task-table__summary { color: var(--ki-color-warning); }
 .ki-task-table__result--danger .ki-task-table__summary { color: var(--ki-color-danger-ink); }
 .ki-task-table__time { display: flex; flex-direction: column; gap: 2px; color: var(--ki-color-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.ki-task-table__time small { color: var(--ki-color-text-subtle); font-size: 11px; }
-.ki-task-table__actions { text-align: center; }
-.ki-task-detail-btn { min-width: 48px; }
+/* 列表贴边（与数据源列表同口径）：卡片 body 走 --flush，单元格自带内距 */
+.ki-tasks-page .ki-card__body--flush > .ki-task-muted { padding: 16px 12px; }
+.ki-tasks-page .ki-card__body--flush > .ki-task-error { margin: 12px; }
+.ki-tasks-page .ki-card__body--flush > .ki-empty { margin: 4px; }
+
+.ki-task-table__duration { color: var(--ki-color-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ── 任务详情抽屉：视觉对齐数据源页的 520px 抽屉 ── */
 @media (max-width: 1199px) {
@@ -3477,6 +3480,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
      要么删掉这条死规则（放弃窄屏收窄意图），要么与更宽的窄屏布局策略一起改。 */
   .ki-service-badge { width: 140px; }
   .ki-global-task-link { max-width: 160px; }
+}
+@media (max-width: 900px) {
 }
 @media (max-width: 900px) {
   .ki-task-summary-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4303,7 +4308,7 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
    - fixed + inset:0 覆盖整个视口；z-index 1200 高于面板常驻态与窄屏浮层（990）
    - 危险确认卡复用本类（append 到 body）→ 两者都是页面级模态，DOM 靠后者在上
    ⚠️ 落地时应把这类层改为 app 级命名（如 .ki-modal），不再挂在 ki-chat-cfg 前缀下 */
-.ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: rgba(0, 0, 0, .32); display: grid; place-items: center; padding: var(--ki-space-4); }
+.ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: var(--ki-scrim); display: grid; place-items: center; padding: var(--ki-space-4); }
 /* hidden 必须显式声明：本类的 display:grid 会覆盖浏览器对 [hidden] 的 display:none，
    导致编辑模态框从页面加载起就一直显示空表单（用户截图抓到的 bug） */
 .ki-chat-cfg__mask[hidden] { display: none; }
@@ -4493,7 +4498,7 @@ select.ki-chat-cfg__ta--select {
 @keyframes ki-cfg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* ── D6 模态框 / 确认卡：遮罩柔化 + 卡片入场 + 三段结构 ── */
-.ki-chat-cfg__mask { background: rgba(15, 20, 32, .45); backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
+.ki-chat-cfg__mask { backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
 @keyframes ki-mask-in { from { opacity: 0; } }
 .ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1) both; }
 @keyframes ki-card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
@@ -5494,7 +5499,7 @@ select.ki-chat-cfg__ta--select {
 /* 遮罩：展开详情时左侧内容压暗，点遮罩关闭。z-index 1020 高于内容与 AI 浮层(1010)、低于抽屉(1021)。 */
 .ki-detail__scrim {
   position: fixed; inset: 0; z-index: 1020;
-  background: rgba(18, 24, 21, 0.28);
+  background: var(--ki-scrim);
   animation: ki-scrim-in 0.2s ease both;
 }
 
@@ -5970,4 +5975,504 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-clone-progress__bar::after,
   .ki-ds-clone-progress__track.is-indeterminate .ki-ds-clone-progress__bar { animation: none; }
   .ki-ds-clone-progress__bar { transition: none; }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   松墨 · Pine on Paper —— AI 对话页视觉层（2026-10-26）
+   ════════════════════════════════════════════════════════════════
+   只改对话页外围视觉：会话栏 / 上下文条 / 消息正文 / 来源 / 空态 / 输入区。
+   ★ 明确不改（用户 2026-10-26 拍板）：
+     .ki-chat-tl*（工具行）、.ki-chat-tool*（工具详情卡）、.ki-chat-skill*（skill 行）、
+     .ki-chat-reason*（推理轨迹）保持现有实现；本段不得出现这些选择器。
+   ★ 不改 .ki-chat-msg 的 gap / 字体：工具行是该容器的直接子元素，改容器节奏会连带改检索展示。
+   ════════════════════════════════════════════════════════════════ */
+
+.ki-chat-panel {
+  --ki-chat-meta-size: 11px;
+  --ki-chat-radius-chip: 8px;
+  --ki-chat-radius-card: 12px;
+  --ki-chat-radius-sheet: 16px;
+  --ki-chat-on-primary: #fff;
+  --ki-chat-focus-ring: 0 0 0 3px rgba(45, 103, 85, .16);
+  --ki-chat-shadow-dock: 0 2px 4px rgba(28, 39, 35, .04), 0 22px 48px -28px rgba(28, 39, 35, .30);
+  --ki-chat-canvas-glow: radial-gradient(1200px 520px at 50% -8%, rgba(45, 103, 85, .055), transparent 68%);
+  --ki-chat-ease: cubic-bezier(.2, .8, .2, 1);
+}
+[data-theme="dark"] .ki-chat-panel {
+  --ki-chat-on-primary: #10231b;
+  --ki-chat-focus-ring: 0 0 0 3px rgba(95, 174, 140, .22);
+  --ki-chat-shadow-dock: 0 2px 4px rgba(0, 0, 0, .28), 0 22px 48px -28px rgba(0, 0, 0, .7);
+  --ki-chat-canvas-glow: radial-gradient(1200px 520px at 50% -8%, rgba(95, 174, 140, .07), transparent 68%);
+}
+
+/* ChatPage 取消外层 16px 内容内距：会话栏/主区与外壳齐平（用户走查：左侧有明显空隙） */
+.ki-content.ki-content--chatpage { padding: 0; }
+
+/* ── 页面骨架：48px 顶条 / 纸面 / 唯一抬升输入区 ── */
+.ki-chat-panel--page { --ki-chatpage-topbar-h: 48px; }
+.ki-chat-panel--page .ki-chatpage__side { background: var(--ki-color-bg-muted); }
+.ki-chat-panel--page .ki-chatpage__main {
+  background-image: var(--ki-chat-canvas-glow);
+  background-repeat: no-repeat;
+}
+.ki-chat-panel--page .ki-chat-panel__body { padding: 28px 28px 24px; gap: 28px; }
+.ki-chat-panel--page .ki-chat-panel__foot {
+  padding: 8px 28px 20px;
+  border-top: 0;
+  background: transparent;
+}
+
+/* 铺满模式：正文、代码块、表格都用满可用宽度（原 1100px 正文上限取消，2026-10-26 用户反馈） */
+.ki-chat-panel--page[data-width="full"] .ki-markdown > :is(p, h1, h2, h3, h4, h5, h6, blockquote, ul, ol),
+.ki-chat-panel--page[data-width="full"] .ki-chat-msg__body > .ki-chat-msg__text {
+  max-width: none;
+}
+
+/* ── 上下文条：模型 + 状态 pill + 分段 / 配置 ── */
+.ki-chat-panel .ki-chat-ctx {
+  height: 48px; min-height: 48px;
+  padding: 0 12px; gap: 10px;
+  font-size: 11px;
+}
+.ki-chat-panel--page .ki-chat-ctx { padding: 0 20px; }
+.ki-chat-panel .ki-chat-ctx__sep { display: none; }
+.ki-chat-panel .ki-chat-ctx__model {
+  font-family: var(--ki-font-mono); font-size: 12px; font-weight: 560;
+  color: var(--ki-color-text-muted); white-space: nowrap;
+}
+.ki-chat-panel .ki-chat-ctx__status {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 9px;
+  border: 1px solid var(--ki-color-border); border-radius: 999px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted); font-size: 11px; white-space: nowrap;
+}
+.ki-chat-panel .ki-chat-ctx__status--warn {
+  color: var(--ki-color-warning);
+  border-color: color-mix(in srgb, var(--ki-color-warning) 26%, transparent);
+}
+.ki-chat-panel .ki-chat-ctx__status--off { color: var(--ki-color-text-subtle); }
+.ki-chat-panel .ki-chat-ctx__status--live {
+  color: var(--ki-color-primary);
+  border-color: color-mix(in srgb, var(--ki-color-primary) 24%, transparent);
+}
+.ki-chat-panel .ki-chat-ctx__dot {
+  width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 12%, transparent);
+}
+.ki-chat-panel .ki-chat-ctx__dot--warn {
+  background: var(--ki-color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-warning) 12%, transparent);
+}
+.ki-chat-panel .ki-chat-ctx__dot--off {
+  background: var(--ki-color-text-subtle);
+  box-shadow: none;
+}
+.ki-chat-panel .ki-chat-ctx__status--live .ki-chat-ctx__dot {
+  background: var(--ki-color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 14%, transparent);
+  animation: ki-chat-ctx-dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ki-chat-ctx-dot-pulse { 50% { opacity: .45; } }
+
+.ki-chat-panel .ki-chatpage__convbtn {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 1px solid color-mix(in srgb, var(--ki-color-primary) 22%, transparent);
+  border-radius: 8px;
+  background: transparent; color: var(--ki-color-primary);
+}
+.ki-chat-panel .ki-chatpage__convbtn:hover { background: var(--ki-color-primary-soft); }
+
+.ki-chat-panel--page .ki-chatpage__widthseg {
+  display: inline-flex; gap: 2px; padding: 2px; margin-right: 8px;
+  border: 1px solid var(--ki-color-border); border-radius: 8px;
+  background: color-mix(in srgb, var(--ki-color-surface) 45%, transparent);
+}
+.ki-chat-panel--page .ki-chatpage__widthsegb {
+  height: 24px; padding: 0 10px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--ki-color-text-subtle);
+  font-size: 11px;
+}
+.ki-chat-panel--page .ki-chatpage__widthsegb:hover:not([aria-pressed="true"]) { color: var(--ki-color-text-muted); }
+.ki-chat-panel--page .ki-chatpage__widthsegb[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-text); font-weight: 500;
+  box-shadow: 0 0 0 1px var(--ki-color-border), 0 1px 0 rgba(28, 39, 35, .03);
+}
+.ki-chat-panel--page .ki-chat-cfg__entry {
+  height: 28px; padding: 0 8px;
+  border: 0; border-radius: 8px;
+  background: transparent; color: var(--ki-color-text-muted);
+  font-size: 11px;
+}
+.ki-chat-panel--page .ki-chat-cfg__entry:hover {
+  background: var(--ki-color-hover); color: var(--ki-color-text); border-color: transparent;
+}
+
+/* ── 会话栏：搜索 / 分组计数 / 会话行 / 底部主操作 ── */
+.ki-chat-convpop--inline .ki-chat-convpop__search {
+  height: 48px; min-height: 48px;
+  padding: 6px 12px; gap: 8px;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: transparent;
+}
+.ki-chat-convpop .ki-chat-convpop__searchbox {
+  flex: 1; min-width: 0; height: 36px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--ki-color-border); border-radius: 8px;
+  background: var(--ki-color-bg-secondary);
+  transition: background 160ms, border-color 160ms, box-shadow 160ms;
+}
+.ki-chat-convpop .ki-chat-convpop__searchbox:focus-within {
+  background: var(--ki-color-surface);
+  border-color: color-mix(in srgb, var(--ki-color-primary) 45%, var(--ki-color-border));
+  box-shadow: var(--ki-chat-focus-ring);
+}
+.ki-chat-convpop .ki-chat-convpop__searchic {
+  width: 14px; height: 14px; flex: none;
+  display: grid; place-items: center;
+  color: var(--ki-color-text-subtle); opacity: .8;
+}
+.ki-chat-convpop .ki-chat-convpop__searchic svg { width: 14px; height: 14px; }
+.ki-chat-convpop .ki-chat-convpop__searchbox input {
+  width: 100%; min-width: 0;
+  border: 0; outline: 0; background: transparent;
+  color: var(--ki-color-text); font: inherit; font-size: 12px;
+}
+.ki-chat-convpop .ki-chat-convpop__searchbox input::placeholder { color: var(--ki-color-text-subtle); }
+.ki-chat-convpop--inline .ki-chat-convpop__newicon {
+  flex: none; width: 28px; height: 28px;
+  display: grid; place-items: center;
+  border: 1px solid var(--ki-color-border-strong); border-radius: 8px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  transition: border-color 160ms, color 160ms, background 160ms;
+}
+.ki-chat-convpop--inline .ki-chat-convpop__newicon:hover {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+}
+.ki-chat-convpop--inline .ki-chat-convpop__newicon svg { width: 14px; height: 14px; }
+
+.ki-chat-convpop--inline .ki-chat-convpop__body { padding: 12px 10px 8px; }
+.ki-chat-convpop .ki-chat-convpop__group-count {
+  margin-left: 6px;
+  padding: 1px 5px; border-radius: 4px;
+  background: color-mix(in srgb, var(--ki-color-text-subtle) 10%, transparent);
+  font-family: var(--ki-font-mono); font-size: 9.5px; font-weight: 500; letter-spacing: 0;
+}
+.ki-chat-convpop--inline .ki-chat-convpop__group {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 8px;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  color: var(--ki-color-text-subtle);
+}
+.ki-chat-convpop--inline .ki-chat-convpop__group:not(:first-child) {
+  border-top: 0; margin-top: 12px;
+}
+.ki-chat-convpop--inline .ki-chat-convpop__group-count { margin-left: 0; }
+
+.ki-chat-convpop--inline .ki-chat-conv {
+  position: relative;
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: 2px 8px;
+  width: 100%; padding: 9px 10px 9px 12px;
+  border-radius: var(--ki-chat-radius-card);
+  font-size: 12.5px;
+}
+.ki-chat-convpop--inline .ki-chat-conv + .ki-chat-conv { margin-top: 2px; }
+.ki-chat-convpop--inline .ki-chat-conv__main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ki-chat-convpop--inline .ki-chat-conv__name {
+  padding-right: 60px;
+  font-size: 13px; font-weight: 500; color: var(--ki-color-text);
+}
+.ki-chat-convpop--inline .ki-chat-conv__time {
+  font-family: var(--ki-font-mono); font-size: 10px;
+  color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums;
+}
+.ki-chat-convpop--inline .ki-chat-conv__count {
+  position: absolute; right: 10px; bottom: 9px;
+  padding: 1px 5px; border-radius: 4px;
+  background: color-mix(in srgb, var(--ki-color-text-subtle) 9%, transparent);
+  font-family: var(--ki-font-mono); font-size: 10px;
+  color: var(--ki-color-text-subtle);
+}
+.ki-chat-convpop--inline .ki-chat-conv[aria-current="true"] {
+  background: var(--ki-color-surface);
+  box-shadow: inset 0 0 0 1px var(--ki-color-border);
+}
+.ki-chat-convpop--inline .ki-chat-conv[aria-current="true"]::before {
+  content: "";
+  position: absolute; left: 0; top: 10px; bottom: 10px;
+  width: 2px; border-radius: 0 2px 2px 0;
+  background: var(--ki-color-primary);
+}
+.ki-chat-convpop--inline .ki-chat-conv[aria-current="true"] .ki-chat-conv__name {
+  color: var(--ki-color-primary); font-weight: 600;
+}
+.ki-chat-convpop--inline .ki-chat-conv[aria-disabled="true"] { opacity: .55; }
+.ki-chat-convpop--inline .ki-chat-conv[aria-disabled="true"] .ki-chat-conv__name { text-decoration: none; }
+.ki-chat-convpop--inline .ki-chat-conv__acts {
+  position: absolute; top: 7px; right: 7px;
+  opacity: .5;
+}
+.ki-chat-convpop--inline .ki-chat-conv:hover .ki-chat-conv__acts,
+.ki-chat-convpop--inline .ki-chat-conv:focus-within .ki-chat-conv__acts { opacity: 1; }
+.ki-chat-convpop--inline .ki-chat-conv__act { width: 20px; height: 20px; border-radius: 5px; }
+.ki-chat-convpop--inline .ki-chat-conv__act svg { width: 12px; height: 12px; }
+
+.ki-chat-convpop--inline .ki-chat-convpop__foot {
+  flex-wrap: nowrap; align-items: center; gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-convpop--inline .ki-chat-convpop__new {
+  flex: 1; height: 34px; padding: 0 10px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 0; border-radius: 8px;
+  background: var(--ki-color-primary); color: var(--ki-chat-on-primary);
+  font-size: 12.5px; font-weight: 600;
+}
+.ki-chat-convpop--inline .ki-chat-convpop__new:hover:not(:disabled) {
+  background: var(--ki-color-primary-hover); color: var(--ki-chat-on-primary);
+}
+.ki-chat-convpop--inline .ki-chat-convpop__refresh {
+  flex: none; width: 34px; height: 34px; padding: 0; border-radius: 8px;
+}
+.ki-chat-convpop--inline .ki-chat-convpop__hint { display: none; }
+.ki-chat-convpop__new svg, .ki-chat-convpop__refresh svg { width: 14px; height: 14px; flex: none; }
+
+/* ── 消息：身份行 / 纸面正文 / 用户气泡 / 来源 / 操作条 ── */
+.ki-chat-panel .ki-chat-msg__meta { min-height: 28px; gap: 8px; font-size: 11px; }
+.ki-chat-panel .ki-chat-msg__role {
+  font-size: 12.5px; font-weight: 600; color: var(--ki-color-text); letter-spacing: .01em;
+}
+.ki-chat-panel .ki-chat-msg__role::after {
+  content: "知识库助手";
+  margin-left: 8px;
+  font-size: var(--ki-chat-meta-size); font-weight: 400;
+  color: var(--ki-color-text-subtle); letter-spacing: 0;
+}
+.ki-chat-panel .ki-chat-msg__at {
+  order: 10; margin-left: auto;
+  font-family: var(--ki-font-mono); font-size: 10.5px;
+  color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ki-chat-panel .ki-chat-msg__badge { order: 5; }
+.ki-chat-panel .ki-chat-msg--user .ki-chat-msg__meta { min-height: 0; justify-content: flex-end; }
+.ki-chat-panel .ki-chat-avatar {
+  width: 28px; height: 28px; flex: none;
+  display: grid; place-items: center;
+  border: 1px solid color-mix(in srgb, var(--ki-color-primary) 18%, transparent);
+  border-radius: 8px;
+  background: var(--ki-color-primary-soft); color: var(--ki-color-primary);
+  font-size: 13px; font-weight: 700; letter-spacing: -.02em;
+}
+.ki-chat-panel .ki-chat-msg--user .ki-chat-msg__body {
+  width: auto; max-width: min(76%, 620px);
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-primary) 22%, transparent);
+  border-radius: var(--ki-chat-radius-sheet) var(--ki-chat-radius-sheet) 6px var(--ki-chat-radius-sheet);
+  background: var(--ki-color-primary-soft);
+}
+.ki-chat-panel .ki-chat-msg__text { font-size: 14.5px; line-height: 1.62; }
+.ki-chat-panel .ki-chat-msg__acts { margin-top: 8px; gap: 2px; }
+.ki-chat-panel .ki-chat-act {
+  height: 26px; padding: 0 8px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--ki-color-text-subtle);
+  font-size: 11px;
+}
+.ki-chat-panel .ki-chat-act:hover {
+  background: var(--ki-color-hover); color: var(--ki-color-text); border-color: transparent;
+}
+
+/* ── 来源：发丝线 + 方圆形 chip（不是检索工具行） ── */
+.ki-chat-panel .ki-chat-srcs {
+  margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--ki-color-border);
+  gap: 6px;
+}
+.ki-chat-panel .ki-chat-srcs__label {
+  margin-right: 2px;
+  font-size: var(--ki-chat-meta-size); font-weight: 600; letter-spacing: .06em;
+  color: var(--ki-color-text-subtle);
+}
+.ki-chat-panel .ki-chat-src {
+  height: 26px; padding: 0 8px 0 4px;
+  border-radius: var(--ki-chat-radius-chip);
+  font-size: 11px;
+}
+.ki-chat-panel .ki-chat-src__no {
+  width: 16px; height: 16px; border-radius: 4px;
+  font-size: 9.5px;
+}
+.ki-chat-panel .ki-chat-srcs__toggle {
+  height: 26px; padding: 0 8px; border-radius: 6px;
+  font-size: 11px;
+}
+.ki-chat-panel .ki-chat-srcs__toggle:hover {
+  background: var(--ki-color-hover); text-decoration: none;
+}
+.ki-chat-panel .ki-chat-srcs__dropdown { border-radius: var(--ki-chat-radius-card); }
+.ki-chat-panel .ki-chat-srcs__row { border-radius: 6px; }
+.ki-chat-panel .ki-chat-src__pop {
+  display: none;
+  border-radius: var(--ki-chat-radius-card);
+}
+.ki-chat-panel .ki-chat-src:hover .ki-chat-src__pop,
+.ki-chat-panel .ki-chat-src:focus-visible .ki-chat-src__pop { display: block; }
+
+/* ── 空态：品牌标 + 真实示例 ── */
+.ki-chat-panel .ki-chat-empty { margin: auto var(--ki-space-2); gap: 12px; }
+.ki-chat-panel--page .ki-chat-empty { padding: 40px 0 56px; }
+.ki-chat-panel .ki-chat-empty__ic {
+  width: 44px; height: 44px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 12px;
+  background: var(--ki-color-primary); color: var(--ki-chat-on-primary);
+  box-shadow: 0 10px 24px -16px color-mix(in srgb, var(--ki-color-primary) 60%, transparent);
+}
+.ki-chat-panel .ki-chat-empty__ic svg { width: 22px; height: 22px; }
+.ki-chat-panel .ki-chat-empty__t {
+  font-size: 20px; font-weight: 620; letter-spacing: -.01em; text-wrap: balance;
+}
+.ki-chat-panel .ki-chat-empty__d {
+  max-width: 34ch;
+  font-size: 13px; line-height: 1.6; color: var(--ki-color-text-muted);
+}
+.ki-chat-panel .ki-chat-empty__hints { max-width: 600px; margin-top: 10px; gap: 8px; }
+.ki-chat-panel .ki-chat-q {
+  height: 34px; padding: 0 12px;
+  border: 1px solid var(--ki-color-border); border-radius: 8px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
+  font: inherit; font-size: 12px;
+}
+.ki-chat-panel .ki-chat-q:hover:not(:disabled) {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
+  transform: translateY(-1px);
+}
+.ki-chat-panel .ki-chat-q:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── 输入区：唯一抬升层 + 圆形发送 ── */
+.ki-chat-panel .ki-chat-composer {
+  padding: 10px 12px 8px;
+  border-color: var(--ki-color-border-strong);
+  border-radius: var(--ki-chat-radius-card);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-chat-shadow-dock);
+  transition: border-color 180ms, box-shadow 180ms;
+}
+.ki-chat-panel .ki-chat-composer:focus-within {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border-strong));
+  box-shadow: var(--ki-chat-shadow-dock), var(--ki-chat-focus-ring);
+}
+.ki-chat-panel .ki-chat-composer__ta {
+  padding: 6px 4px 4px;
+  font-size: 15px; line-height: 1.6;
+  min-height: 52px; max-height: 160px;
+}
+.ki-chat-panel .ki-chat-composer__bar {
+  padding: 8px 0 0; gap: 10px;
+  border-top: 1px solid var(--ki-color-border);
+}
+.ki-chat-panel .ki-chat-composer__hint { font-size: 10.5px; }
+.ki-chat-panel .ki-chat-composer__hint--keys { display: flex; align-items: center; gap: 4px; }
+.ki-chat-panel .ki-chat-composer__hint kbd {
+  display: inline-grid; place-items: center;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  border: 1px solid var(--ki-color-border);
+  border-bottom-color: var(--ki-color-border-strong);
+  border-radius: 4px;
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text-muted);
+  font-family: var(--ki-font-mono); font-size: 9.5px;
+}
+.ki-chat-panel .ki-chat-composer__hint span { color: var(--ki-color-text-subtle); }
+.ki-chat-panel .ki-chat-composer__count { font-size: 10.5px; }
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send {
+  width: 32px; height: 32px; min-width: 32px;
+  padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--ki-color-primary); color: var(--ki-chat-on-primary);
+  transition: background 160ms, transform 120ms, opacity 160ms;
+}
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send:hover:not(:disabled) { background: var(--ki-color-primary-hover); }
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send:active:not(:disabled) { transform: scale(.96); }
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send:disabled {
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text-subtle); cursor: not-allowed;
+}
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send--stop {
+  background: var(--ki-color-surface); color: var(--ki-color-danger);
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 45%, transparent);
+}
+.ki-chat-panel .ki-chat-composer__bar .ki-chat-send--stop:hover:not(:disabled) {
+  background: var(--ki-color-danger-soft);
+}
+
+.ki-chat-panel .ki-chat-refbar { padding: 0 0 6px; gap: 6px; }
+.ki-chat-panel .ki-chat-refbar__chip {
+  height: 24px; padding: 0 4px 0 7px;
+  border-color: color-mix(in srgb, var(--ki-color-primary) 25%, transparent);
+  border-radius: 8px;
+  background: var(--ki-color-primary-soft); color: var(--ki-color-primary);
+  font-size: 11px;
+}
+.ki-chat-panel .ki-chat-refbar__add {
+  height: 24px; padding: 0 8px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: 8px;
+  background: transparent; color: var(--ki-color-text-muted);
+  font-size: 11px;
+}
+.ki-chat-panel .ki-chat-refbar__add:hover:not(:disabled) {
+  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, transparent);
+}
+.ki-chat-panel .ki-chat-refbar__pop { border-radius: var(--ki-chat-radius-card); }
+
+/* ── 告警：对齐参考库 notice 的语气 ── */
+.ki-chat-panel .ki-chat-alert { padding: 10px 12px; border-radius: var(--ki-chat-radius-card); }
+.ki-chat-panel .ki-chat-alert--err {
+  background: var(--notice-danger-bg);
+  border-color: var(--notice-danger-border);
+  color: var(--notice-danger-ink);
+}
+.ki-chat-panel .ki-chat-alert--err .ki-chat-alert__body span { color: var(--ki-color-text-muted); }
+.ki-chat-panel .ki-chat-alert--notice {
+  background: var(--notice-warn-bg);
+  border-color: var(--notice-warn-border);
+  color: var(--notice-warn-ink);
+}
+
+/* ── 响应式：页面内边距 / 窄屏降级 ── */
+@media (max-width: 1023px) {
+  .ki-chat-panel--page .ki-chat-ctx { padding: 0 16px; }
+  .ki-chat-panel--page .ki-chat-ctx__statusText { display: none; }
+  .ki-chat-panel--page .ki-chat-ctx__status { padding: 0 7px; }
+  .ki-chat-panel--page .ki-chat-panel__body { padding: 24px 20px 20px; gap: 24px; }
+  .ki-chat-panel--page .ki-chat-panel__foot { padding: 8px 16px 16px; }
+  .ki-chat-panel--page .ki-chat-empty { padding: 32px 0 40px; }
+  .ki-chat-panel--page .ki-chatpage__widthseg { display: none; }
+}
+@media (max-width: 760px) {
+  .ki-chat-panel--page .ki-chat-ctx { padding: 0 12px; gap: 8px; }
+  .ki-chat-panel--page .ki-chat-panel__body { padding: 20px 14px 16px; gap: 20px; }
+  .ki-chat-panel--page .ki-chat-panel__foot { padding: 6px 12px 12px; }
+  .ki-chat-panel .ki-chat-composer__hint--keys { display: none; }
+  .ki-chat-panel .ki-chat-msg--user .ki-chat-msg__body { max-width: 90%; }
+  .ki-chat-panel .ki-chat-msg__role::after { display: none; }
+  .ki-chat-panel .ki-chat-empty__t { font-size: 18px; }
+  .ki-chat-panel .ki-chat-empty__hints { max-width: 100%; }
+  .ki-chat-panel .ki-chat-q { height: 32px; font-size: 11.5px; }
+  .ki-chat-panel .ki-chat-src__pop { display: none !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ki-chat-panel .ki-chat-ctx__status--live .ki-chat-ctx__dot { animation: none; }
+  .ki-chat-panel .ki-chat-q:hover:not(:disabled) { transform: none; }
+  .ki-chat-panel .ki-chat-composer__bar .ki-chat-send:active:not(:disabled) { transform: none; }
 }
