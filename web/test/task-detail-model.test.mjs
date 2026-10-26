@@ -375,3 +375,48 @@ describe('时间口径', () => {
     assert.doesNotMatch(crossDay.times[0].hint ?? '', /\d{2}\/\d{2}$/, '跨天时日期已在 value 里，hint 不再重复');
   });
 });
+
+describe('执行结果概览（与数据源详情同构）', () => {
+  it('summary / metrics 与结果段同口径，指标按数据源顺序排列', () => {
+    const task = baseTask({
+      params: { sourceKind: 'upload', group: 'raw' },
+      result: { files: { ...FILES, incomplete: 2 }, vectorized: 148, fullTextIndexed: 132, assets: 3, groups: ['raw/browser'] },
+    });
+    const view = buildTaskDetail(task);
+    assert.deepEqual(view.summary, {
+      scanned: 12, completed: 10, incomplete: 2, skipped: 2, unchanged: 9,
+      vectorized: 148, fullText: 132,
+    });
+    assert.deepEqual(view.metrics.map((m) => m.label), ['全量扫描', '处理', '跳过', '未完成', '向量条目', '全文条目']);
+    assert.equal(view.metrics.find((m) => m.label === '未完成')?.tone, 'danger', '未完成 > 0 时指标走危险色');
+    assert.equal(view.metrics.find((m) => m.label === '全量扫描')?.value, 12);
+  });
+
+  it('缺向量/全文计数时指标仍为 6 格（按 0 补齐）', () => {
+    const task = baseTask({ params: { sourceKind: 'upload' }, result: { files: FILES } });
+    const view = buildTaskDetail(task);
+    assert.equal(view.metrics.length, 6);
+    assert.equal(view.metrics.find((m) => m.label === '向量条目')?.value, 0);
+    assert.equal(view.metrics.find((m) => m.label === '全文条目')?.value, 0);
+  });
+
+  it('resultExtras 只保留指标网格未覆盖的行（落点 Group 等）', () => {
+    const task = baseTask({
+      params: { sourceKind: 'upload', group: 'raw' },
+      result: { files: FILES, vectorized: 1, fullTextIndexed: 1, assets: 3, groups: ['raw/browser'] },
+    });
+    const view = buildTaskDetail(task);
+    assert.deepEqual(view.resultExtras.map((row) => row.label), ['附件', '落点 Group'], '附件降为参数行，网格保持 6 格');
+    assert.deepEqual(view.resultExtras.find((row) => row.label === '落点 Group')?.tree?.items, ['raw/browser']);
+    // results 仍保留完整行（旧消费方/单测口径不变）
+    assert.ok(view.results.some((row) => row.label === '文件'));
+  });
+
+  it('无文件级结果时不产出概览（restore/rebuild 走原结果行）', () => {
+    const task = baseTask({ operation: 'rebuild-vector', state: 'succeeded', partialCommitted: 5 });
+    const view = buildTaskDetail(task);
+    assert.equal(view.summary, null);
+    assert.deepEqual(view.metrics, []);
+    assert.deepEqual(view.resultExtras.map((row) => row.label), ['已提交条目']);
+  });
+});

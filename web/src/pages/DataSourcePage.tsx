@@ -31,6 +31,8 @@ import {
 } from '@/lib/dataSourceDetailModel';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
+import { DetailDrawer, DetailSection, DetailStatus } from '@/components/DetailDrawer';
+import { DetailHero, DetailMetrics, DetailParams } from '@/components/DetailParts';
 import { Icon } from '@/components/icons';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
@@ -243,17 +245,6 @@ export function DataSourcePage(): JSX.Element {
     ? `上次同步 ${formatDateTime(lastSync.at)} · 用时 ${formatSyncDuration(lastSync.durationMs)}`
     : '尚未同步过';
 
-  // hero：完成率 = 完成 / 扫描；分段条只表达「完成 / 跳过 / 失败」三种结局
-  // （「内容未变」是完成的子集，不单独占段，否则成功态看起来像只完成了 10%）
-  const heroTotal = Math.max(1, model?.summary?.scanned ?? 1);
-  const heroPercent = model?.summary ? Math.round((model.summary.completed / heroTotal) * 1000) / 10 : 0;
-  const heroSegments = (model?.summary
-    ? [
-      { cls: 'done', count: model.summary.completed },
-      { cls: 'skipped', count: model.summary.skipped },
-      { cls: 'failed', count: model.summary.failed },
-    ]
-    : []).filter((segment) => segment.count > 0);
 
   const toggleDir = (path: string): void => {
     setCollapsedDirs((prev) => {
@@ -370,7 +361,7 @@ export function DataSourcePage(): JSX.Element {
     const onDocClick = (event: MouseEvent): void => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest('.ki-ds-drawer')) return;
+      if (target.closest('.ki-detail')) return;
       if (target.closest('.ki-ds-table__row')) return;
       if (target.closest('.ki-overlay')) return;
       if (target.closest('.ki-drawer')) return;
@@ -961,36 +952,14 @@ export function DataSourcePage(): JSX.Element {
           {/* ★ 模态浮层（2026-10-22 V5，用户定稿）：宽度 70vw + 左侧遮罩压暗 + 点遮罩/外部关闭。
               历史：V3 曾定稿"非模态不铺遮罩、列表可点"，V4 改成 70vw，V5 按用户反馈加回遮罩
               —— 不要再按 V3 的结论去掉遮罩。 */}
-          <div
-            className="ki-ds-drawer__scrim"
-            aria-hidden="true"
-            onClick={() => navigate('/datasource')}
-          />
-          <aside className="ki-ds-drawer" role="region" aria-label={`数据源详情 ${scope}`}>
-            <header className="ki-ds-drawer__head">
-              {/* 第一行只有 scope 名称（地址/类型已按用户要求移除，Git 路径见「同步参数」） */}
-              <div className="ki-ds-drawer__row">
-                <h2 className="ki-ds-drawer__title" title={scope}>{scope}</h2>
-                <button
-                  type="button"
-                  ref={closeBtnRef}
-                  className="ki-ds-drawer__close"
-                  aria-label="关闭详情"
-                  onClick={() => navigate('/datasource')}
-                >✕</button>
-              </div>
-              <div className="ki-ds-drawer__foot">
-                {model ? (
-                  <span className={`ki-ds-state ki-ds-state--${model.header.tone}`}>
-                    <span className="ki-ds-state__dot" aria-hidden />
-                    {model.header.stateLabel}
-                  </span>
-                ) : null}
-                <span className="ki-ds-drawer__when">{whenLabel}</span>
-              </div>
-            </header>
-
-            <div className="ki-ds-drawer__body">
+          <DetailDrawer
+            ariaLabel={`数据源详情 ${scope}`}
+            title={scope}
+            status={model ? { tone: model.header.tone, label: model.header.stateLabel } : null}
+            meta={whenLabel}
+            onClose={() => navigate('/datasource')}
+            closeRef={closeBtnRef}
+          >
               {detailQuery.isLoading ? <p className="ki-ds-muted">加载中…</p> : null}
               {detailQuery.isError ? (
                 <div className="ki-empty">
@@ -1005,10 +974,7 @@ export function DataSourcePage(): JSX.Element {
                     <div className="ki-progress-block">
                       <div className="ki-track-head">
                         <span className="ki-track-kicker">PROGRESS</span>
-                        <span className="ki-ds-state ki-ds-state--running">
-                          <span className="ki-ds-state__dot" aria-hidden />
-                          {activeState === 'queued' ? '排队中' : '同步中'}
-                        </span>
+                        <DetailStatus tone="running" label={activeState === 'queued' ? '排队中' : '同步中'} />
                       </div>
                       <div className="ki-track-title">同步进度</div>
                       <div className="ki-progress-row">
@@ -1047,70 +1013,22 @@ export function DataSourcePage(): JSX.Element {
                   ) : null}
 
                   {/* ── 执行结果（数据区材质） ── */}
-                  <section className="ki-ds-sec ki-ds-sec--data">
-                    <div className="ki-ds-sec__head">
-                      <span className="ki-ds-sec__mark" aria-hidden />
-                      <h3 className="ki-ds-sec__title">执行结果</h3>
-                      {model.summary ? <span className="ki-ds-sec__hint">扫描 {model.summary.scanned} 篇</span> : null}
-                    </div>
+                  <DetailSection
+                    material="data"
+                    title="执行结果"
+                    hint={model.summary ? `扫描 ${model.summary.scanned} 篇` : undefined}
+                  >
 
                     {model.summary ? (
                       <>
-                        <div className="ki-ds-hero">
-                          <div>
-                            <div className="ki-ds-hero__num">{model.summary.completed}</div>
-                            <div className="ki-ds-hero__label">完成</div>
-                          </div>
-                          <div>
-                            <div className="ki-ds-hero__barrow">
-                              <span
-                                className="ki-ds-bar"
-                                role="img"
-                                aria-label={`完成 ${heroPercent}%，共扫描 ${model.summary.scanned} 篇`}
-                              >
-                                {heroSegments.map((segment) => (
-                                  <span
-                                    key={segment.cls}
-                                    className={`ki-ds-bar__seg ki-ds-bar__seg--${segment.cls}`}
-                                    style={{ width: `${(segment.count / heroTotal) * 100}%` }}
-                                  />
-                                ))}
-                              </span>
-                              <span className="ki-ds-hero__pct">{heroPercent}%</span>
-                            </div>
-                            <div className="ki-ds-legend">
-                              <span className="ki-ds-legend__item ki-ds-legend__item--done">
-                                完成 {model.summary.completed}
-                                {model.summary.unchanged > 0
-                                  ? <span className="ki-ds-legend__sub">（未变 {model.summary.unchanged}）</span>
-                                  : null}
-                              </span>
-                              <span className="ki-ds-legend__dot" aria-hidden>·</span>
-                              <span className="ki-ds-legend__item">跳过 {model.summary.skipped}</span>
-                              <span className="ki-ds-legend__dot" aria-hidden>·</span>
-                              {model.summary.failed > 0 ? (
-                                <span className="ki-ds-legend__item ki-ds-legend__item--failed">失败 {model.summary.failed}</span>
-                              ) : (
-                                <span className="ki-ds-legend__item">失败 0</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <dl className="ki-ds-metrics">
-                          {model.metrics.map((metric) => {
-                            const zero = metric.value === 0;
-                            const danger = metric.tone === 'danger' && metric.value > 0;
-                            return (
-                              <div key={metric.label} className="ki-ds-metric">
-                                <dt className="ki-ds-metric__label">{metric.label}</dt>
-                                <dd className={`ki-ds-metric__value${zero ? ' ki-ds-metric__value--zero' : ''}${danger ? ' ki-ds-metric__value--danger' : ''}`}>
-                                  {metric.value}
-                                </dd>
-                              </div>
-                            );
-                          })}
-                        </dl>
+                        <DetailHero
+                          completed={model.summary.completed}
+                          total={model.summary.scanned}
+                          skipped={model.summary.skipped}
+                          failed={model.summary.failed}
+                          unchanged={model.summary.unchanged}
+                        />
+                        <DetailMetrics metrics={model.metrics} />
 
                         {model.details.failures.length > 0 ? (
                           <div className="ki-ds-failbox">
@@ -1162,59 +1080,40 @@ export function DataSourcePage(): JSX.Element {
                         ) : null}
                       </>
                     ) : (
-                      <div className="ki-ds-hero__empty">
+                      <div className="ki-detail-hero__empty">
                         还没有同步记录。命令行执行后可在此查看结果：
                         <br />
                         <code className="ki-ds-callout__cmd">ki datasource sync --scope {scope}</code>
                       </div>
                     )}
-                  </section>
+                  </DetailSection>
 
                   {/* ── 同步参数（只读属性区材质；源目录已上移到头部，不重复） ── */}
-                  <section className="ki-ds-sec ki-ds-sec--meta">
-                    <div className="ki-ds-sec__head">
-                      <span className="ki-ds-sec__mark" aria-hidden />
-                      <h3 className="ki-ds-sec__title">同步参数</h3>
-                    </div>
-                    <dl className="ki-ds-params">
-                      {model.params.map((row) => (
-                        <div key={row.label} className={`ki-ds-params__cell${row.full ? ' ki-ds-params__cell--full' : ''}`}>
-                          <dt>{row.label}</dt>
-                          <dd className={/仓库|分支|提交|Group|知识库/.test(row.label) ? 'is-mono' : undefined}>
-                            <span>{row.value}</span>
-                            {row.hint ? <small className="ki-ds-params__hint">{row.hint}</small> : null}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </section>
+                  <DetailSection material="meta" title="同步参数">
+                    <DetailParams rows={model.params} />
+                  </DetailSection>
 
                   {/* ── 待删除（操作台材质；唯一写入口）
                        ★ 常显（2026-10-22 用户要求）：没有候选时也要说明"当前没有待删"，
                          否则用户会以为这块功能消失了。 ── */}
-                  <section className="ki-ds-sec ki-ds-sec--action">
-                      <div className="ki-ds-sec__head">
-                        <span className="ki-ds-sec__mark" aria-hidden />
-                        <h3 className="ki-ds-sec__title">
-                          {model.pending.blocked ? '待删除（未生成候选）' : `待删除 ${model.pending.total} 篇`}
-                        </h3>
-                        {model.pending.computedAt > 0 ? (
-                          <span className="ki-ds-sec__hint">
-                            由 {new Date(model.pending.computedAt).toLocaleString('zh-CN')} 同步算出
-                          </span>
-                        ) : null}
-                        {!model.pending.blocked && pendingTree.length > 0 ? (
-                          <div className="ki-ds-tree-actions">
-                            <button type="button" className="ki-ds-linkbtn" onClick={() => setCollapsedDirs(new Set())}>展开全部</button>
-                            <span className="ki-ds-legend__dot" aria-hidden>·</span>
-                            <button
-                              type="button"
-                              className="ki-ds-linkbtn"
-                              onClick={() => setCollapsedDirs(new Set(allDirPaths(pendingTree)))}
-                            >折叠全部</button>
-                          </div>
-                        ) : null}
+                  <DetailSection
+                    material="action"
+                    title={model.pending.blocked ? '待删除（未生成候选）' : `待删除 ${model.pending.total} 篇`}
+                    hint={model.pending.computedAt > 0
+                      ? `由 ${new Date(model.pending.computedAt).toLocaleString('zh-CN')} 同步算出`
+                      : undefined}
+                    actions={!model.pending.blocked && pendingTree.length > 0 ? (
+                      <div className="ki-ds-tree-actions">
+                        <button type="button" className="ki-ds-linkbtn" onClick={() => setCollapsedDirs(new Set())}>展开全部</button>
+                        <span className="ki-detail-legend__dot" aria-hidden>·</span>
+                        <button
+                          type="button"
+                          className="ki-ds-linkbtn"
+                          onClick={() => setCollapsedDirs(new Set(allDirPaths(pendingTree)))}
+                        >折叠全部</button>
                       </div>
+                    ) : undefined}
+                  >
 
                       {model.pending.blocked ? (
                         <Notice tone="warn" slim className="ki-ds-pending__notice">{model.pending.blockedText ?? '未生成候选'}</Notice>
@@ -1275,14 +1174,13 @@ export function DataSourcePage(): JSX.Element {
                           <p className="ki-ds-pending__note">删除不可恢复；执行时按当前源目录重新校验，目录变了会拒绝。只删知识库记录，不动源目录文件。</p>
                         </>
                       )}
-                  </section>
+                  </DetailSection>
 
                   {error ? <Notice tone="warn">{error}</Notice> : null}
                   {receipt ? <p className="ki-ds-receipt">{receipt}</p> : null}
                 </>
               ) : null}
-            </div>
-          </aside>
+          </DetailDrawer>
 
           {/* 文档正文抽屉：复用知识目录的 ModuleDrawer（右侧滑出 + 遮罩 + dialog 语义） */}
           {docTarget ? (

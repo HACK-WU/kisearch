@@ -47,11 +47,33 @@ export interface TaskNotice {
   text: string;
 }
 
+/** 执行结果概览（与数据源详情同构：hero + 指标网格） */
+export interface TaskSummaryView {
+  scanned: number;
+  completed: number;
+  incomplete: number;
+  skipped: number;
+  unchanged: number;
+  vectorized?: number;
+  fullText?: number;
+}
+
+export interface TaskMetricView {
+  label: string;
+  value: number;
+  tone?: 'normal' | 'danger';
+}
+
 export interface TaskDetailView {
   /** 旧记录：终态且既无 params 也无 result（台账扩展前创建） */
   legacy: boolean;
   params: DetailRow[];
   results: DetailRow[];
+  /** 指标网格（与数据源同标签/同排版）；无文件级结果时为 null/[] */
+  summary: TaskSummaryView | null;
+  metrics: TaskMetricView[];
+  /** 结果段中不进入指标网格的补充行（落点 Group / 索引 / 已提交条目） */
+  resultExtras: DetailRow[];
   times: DetailRow[];
   duplicates: DetailItem[];
   conflicts: DetailItem[];
@@ -366,6 +388,38 @@ function resultRows(task: TaskRecord): DetailRow[] {
   return rows;
 }
 
+/** 这些结果行已由指标网格承载，不重复渲染 */
+const METRIC_RESULT_LABELS = new Set(['文件', '成功', '未完成', '跳过', '向量条目', '全文索引']);
+
+function summaryOf(task: TaskRecord): TaskSummaryView | null {
+  const files = task.result?.files;
+  if (!files) return null;
+  return {
+    scanned: files.scanned,
+    completed: files.completed,
+    incomplete: files.incomplete,
+    skipped: files.skipped,
+    unchanged: files.unchanged,
+    vectorized: task.result?.vectorized,
+    fullText: task.result?.fullTextIndexed,
+  };
+}
+
+function metricsOf(summary: TaskSummaryView | null): TaskMetricView[] {
+  if (!summary) return [];
+  const metrics: TaskMetricView[] = [
+    { label: '全量扫描', value: summary.scanned },
+    { label: '处理', value: summary.completed },
+    { label: '跳过', value: summary.skipped },
+    { label: '未完成', value: summary.incomplete, tone: summary.incomplete > 0 ? 'danger' : 'normal' },
+  ];
+  // 指标网格保持 6 格（3×2，与数据源一致）：缺字段按 0，避免网格出现空格；
+  // 附件数量少且非核心指标，走下方参数行（resultExtras）
+  metrics.push({ label: '向量条目', value: summary.vectorized ?? 0 });
+  metrics.push({ label: '全文条目', value: summary.fullText ?? 0 });
+  return metrics;
+}
+
 function timeRows(task: TaskRecord): DetailRow[] {
   const rows: DetailRow[] = [];
   const created = task.createdAt;
@@ -552,6 +606,9 @@ export function buildTaskDetail(task: TaskRecord): TaskDetailView {
   const legacy = isLegacy(task);
   const progress = progressOf(task);
   const notices = noticesOf(task);
+  const summary = summaryOf(task);
+  const metrics = metricsOf(summary);
+  const results = resultRows(task);
   if (legacy) {
     notices.unshift({ tone: 'info', text: '旧记录：该任务创建于台账扩展之前，无参数与结果快照。' });
   }
@@ -561,7 +618,10 @@ export function buildTaskDetail(task: TaskRecord): TaskDetailView {
   return {
     legacy,
     params: paramRows(task),
-    results: resultRows(task),
+    results,
+    summary,
+    metrics,
+    resultExtras: results.filter((row) => !METRIC_RESULT_LABELS.has(row.label)),
     times: timeRows(task),
     ...detailItemsOf(task),
     notices,

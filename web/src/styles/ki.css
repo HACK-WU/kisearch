@@ -38,19 +38,15 @@
   --notice-info-bg: #fdf0c4;
   --notice-info-ink: #7a5a00;
   --notice-info-border: #e2c469;
-  --notice-info-wash: rgba(122, 90, 0, 0.1);
   --notice-success-bg: #b9f6ca;
   --notice-success-ink: #145c39;
   --notice-success-border: #6fd6a6;
-  --notice-success-wash: rgba(20, 92, 57, 0.1);
   --notice-warn-bg: #fff9c4;
   --notice-warn-ink: #6b4f00;
   --notice-warn-border: #e0cd4a;
-  --notice-warn-wash: rgba(107, 79, 0, 0.12);
   --notice-danger-bg: #fbdadb;
   --notice-danger-ink: #b02a20;
   --notice-danger-border: #e89b96;
-  --notice-danger-wash: rgba(176, 42, 32, 0.1);
   /* ── 间距 ── */
   --ki-space-1: 4px;
   --ki-space-2: 8px;
@@ -130,19 +126,15 @@
   --notice-info-bg: #3b3013;
   --notice-info-ink: #f2c94c;
   --notice-info-border: #7d6420;
-  --notice-info-wash: rgba(242, 201, 76, 0.12);
   --notice-success-bg: #143425;
   --notice-success-ink: #74cf9e;
   --notice-success-border: #2f7a55;
-  --notice-success-wash: rgba(116, 207, 158, 0.12);
   --notice-warn-bg: #3f3412;
   --notice-warn-ink: #ffd75e;
   --notice-warn-border: #8a6a12;
-  --notice-warn-wash: rgba(255, 215, 94, 0.14);
   --notice-danger-bg: #3d1f1f;
   --notice-danger-ink: #f09a94;
   --notice-danger-border: #a3443d;
-  --notice-danger-wash: rgba(240, 154, 148, 0.12);
 }
 
 /* 暗色下强调色提亮，实心按钮/品牌块改用深色文字以满足对比度（demo 同款处理） */
@@ -3277,42 +3269,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-detail-btn { min-width: 48px; }
 
 /* ── 任务详情抽屉：视觉对齐数据源页的 520px 抽屉 ── */
-.ki-task-drawer__scrim { position: fixed; inset: 0; z-index: 1020; background: rgba(18, 24, 21, 0.28); }
-.ki-task-drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; z-index: 1021;
-  display: flex; flex-direction: column; width: min(520px, 100vw);
-  background: var(--ki-color-bg); box-shadow: -8px 0 32px rgba(18, 24, 21, 0.18);
-}
-.ki-task-drawer__head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 14px 16px; border-bottom: 1px solid var(--ki-color-border);
-  background: var(--ki-color-surface);
-}
-.ki-task-drawer__identity { flex: 1; min-width: 0; }
-.ki-task-drawer__kicker {
-  color: var(--ki-color-primary);
-  font: 700 var(--ki-font-size-xs)/1.3 var(--ki-font-mono);
-  letter-spacing: 0.12em;
-}
-.ki-task-drawer__title {
-  margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 18px; font-weight: 650;
-}
-.ki-task-drawer__meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
-.ki-task-drawer__meta code { font-size: 11px; }
-.ki-task-drawer__close {
-  flex: none; width: 28px; height: 28px;
-  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
-  background: var(--ki-color-surface); color: var(--ki-color-text-muted); cursor: pointer;
-}
-.ki-task-drawer__close:hover { color: var(--ki-color-primary); border-color: var(--ki-color-primary); }
-.ki-task-drawer__body {
-  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 14px 16px 24px;
-}
-.ki-task-drawer__error { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.ki-task-drawer__error .ki-task-error { margin-top: 0; }
-
 @media (max-width: 1199px) {
   .ki-task-col--scope,
   .ki-task-col--source { display: none; }
@@ -3323,9 +3279,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-table__head th:nth-child(7) { width: 78px; }
   .ki-task-table__task-scope { display: block; }
 }
-@media (max-width: 960px) {
-  .ki-task-drawer { width: 100vw; }
-}
 @media (max-width: 760px) {
   .ki-task-col--result { display: none; }
   .ki-task-table__head th:nth-child(1) { width: 82px; }
@@ -3335,26 +3288,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-table__task-result { display: block; }
   .ki-task-table__time small { display: none; }
 }
-.ki-task-detail__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0; }
-.ki-task-detail__grid div { min-width: 0; }
-.ki-task-detail__grid dt { margin-bottom: 3px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
-.ki-task-detail__grid dd { margin: 0; overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); }
-/* 任务详情三段布局（REQ-20261019-004 S-03）：参数 / 结果 / 时间。
-   分组标题用上分隔线区分；字段多时由 `.ki-task-drawer__body` 统一滚动兜底。 */
-.ki-task-detail__section {
-  margin: 16px 0 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--ki-color-border);
-  color: var(--ki-color-text-subtle);
-  font-size: var(--ki-font-size-xs);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.ki-task-detail__section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
-/* 行内次要说明：「其中内容未变 9 篇」「排队 1s」「原任务可能已清理」 */
-.ki-task-detail__hint { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font-size: 11px; line-height: 1.4; }
-.ki-task-detail__value--warn { color: var(--ki-color-warning); }
-.ki-task-detail__value--danger { color: var(--ki-color-danger-ink); }
 /* 明细 / 落点折叠（原生 <details>：零 JS、键盘可达）
    ★ 折叠行必须**自己做标记与焦点态**（2026-10-20 用户截图反馈）：原来只写了
      `cursor:pointer + color`，三角形走浏览器默认的 `list-item` marker（各浏览器大小不一），
@@ -3382,9 +3315,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 /* 内描边（offset:-1）而不是外描边：本行是卡片内的一条窄行，外描边会顶到卡片边距 */
 .ki-task-detail__details summary:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -1px; }
 /* 明细（疑似重复 / 同名冲突）已改为树形，原 `.ki-task-detail__items` 列表样式随之废弃 */
-/* 长值独占整行（2026-10-20）：20 个落点曾把「Group」单元格撑到 451px，
-   同行右格「标签 / 未设置」被一起拉高、空出 451px 空白，栅格看起来断成两截。 */
-.ki-task-detail__cell--full { grid-column: 1 / -1; }
 /* 落点 Group 层级树（只读）：限高可滚，默认收起时才展开。
    ★ max-height 用 min(280px, 34vh)：小屏（620 高的窗口）按 34vh 收窄，
      否则树本身就把 380px 宽的卡片顶出视口。
@@ -3493,25 +3423,21 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   --notice-bg: var(--notice-info-bg);
   --notice-ink: var(--notice-info-ink);
   --notice-border: var(--notice-info-border);
-  --notice-wash: var(--notice-info-wash);
 }
 .ki-notice--success {
   --notice-bg: var(--notice-success-bg);
   --notice-ink: var(--notice-success-ink);
   --notice-border: var(--notice-success-border);
-  --notice-wash: var(--notice-success-wash);
 }
 .ki-notice--warn {
   --notice-bg: var(--notice-warn-bg);
   --notice-ink: var(--notice-warn-ink);
   --notice-border: var(--notice-warn-border);
-  --notice-wash: var(--notice-warn-wash);
 }
 .ki-notice--danger {
   --notice-bg: var(--notice-danger-bg);
   --notice-ink: var(--notice-danger-ink);
   --notice-border: var(--notice-danger-border);
-  --notice-wash: var(--notice-danger-wash);
 }
 /* recoveryHint 已并入 `.ki-task-notice--warn`（三段布局），`.ki-task-recovery` 规则删除 */
 .ki-task-error { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
@@ -4869,7 +4795,7 @@ select.ki-chat-cfg__ta--select {
    宽屏对话面板是 shell 的布局兄弟(z:auto) → **被详情面板整块盖住**，表现为"点了没反应"。
    宽屏让位并排（与全屏阅读器同一套 `--ki-chat-dock-w`），窄屏只能靠层级覆盖。 */
 @media (min-width: 1400px) {
-  .ki-shell[data-chat-open="true"] .ki-ds-drawer { right: var(--ki-chat-dock-w); }
+  .ki-shell[data-chat-open="true"] .ki-detail { right: var(--ki-chat-dock-w); }
 }
 /* ── 窄屏：面板是浮层，必须浮在全屏阅读器之上才可见 ──
    阅读器 z-index 1000；面板浮层既有 990 属「与阅读器不争层级」的旧口径
@@ -5540,222 +5466,199 @@ select.ki-chat-cfg__ta--select {
   background: var(--ki-color-surface); color: var(--ki-color-text); font-size: var(--ki-font-size-xs);
 }
 
-/* ═══ 数据源详情抽屉（2026-10-22 视觉改造）═══
-   视觉基准：demo/datasource-sync-detail/variant-ds-redesign.html（用户逐项定稿）。
-   · 宽度 = 视口 70%（≥960）；≤960 全宽。非模态、列表可点，点外部关闭由组件监听实现。
+/* ═══ 详情抽屉（数据源详情 / 任务详情共用）═══
+   视觉基线 = 数据源详情（2026-10-22 定稿）：右侧滑入、头部两行、三材质分区。
+   任务详情自 2026-10-26 起不再维护独立外壳，复用同一套 `.ki-detail*`。
+   · 宽度 = 视口 70%（≥960）；≤960 全宽。非模态浮层：正文滚动，遮罩表达背景不可操作。
    · 三个功能区各一种材质：数据区（淡主色底）/ 参数区（灰底）/ 操作区（警告底）。
-   · 新增类统一 .ki-ds-* 前缀且作用域限定在本抽屉；**不改** .ki-task-* / .ki-tree-* /
-     .ki-progress* 的共享基线值（改基线会连带 /tasks、知识目录、导入页）。
    z-index 必须高于 AI 浮层（≤1399px 时为 1010），否则窄屏开聊天会盖住面板与 ✕。 */
-.ki-ds-drawer {
+.ki-detail {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 1021;
   display: flex; flex-direction: column;
   width: clamp(520px, 70vw, 100vw);
   background: var(--ki-color-surface);
   border-left: 1px solid var(--ki-color-border);
   box-shadow: -8px 0 32px rgba(18, 24, 21, 0.07);
-  /* 从右侧滑入（2026-10-22 用户：不要直接出现）。用 transform 走合成层，
-     位移距离就是抽屉自身宽度，故用 translateX(100%)；遮罩另行淡入。 */
-  animation: ki-ds-drawer-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  /* 从右侧滑入：transform 走合成层，位移即自身宽度 */
+  animation: ki-detail-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
-@keyframes ki-ds-drawer-in {
+@keyframes ki-detail-in {
   from { transform: translateX(100%); }
   to { transform: translateX(0); }
 }
 
-/* 抽屉遮罩（2026-10-22 V5）：展开详情时左侧内容压暗，点遮罩关闭。
-   z-index 1020 = 高于内容与 AI 浮层(1010)、低于抽屉本体(1021)。 */
-.ki-ds-drawer__scrim {
+/* 遮罩：展开详情时左侧内容压暗，点遮罩关闭。z-index 1020 高于内容与 AI 浮层(1010)、低于抽屉(1021)。 */
+.ki-detail__scrim {
   position: fixed; inset: 0; z-index: 1020;
   background: rgba(18, 24, 21, 0.28);
   animation: ki-scrim-in 0.2s ease both;
 }
 
-/* 头部：标题 / 类型+源目录+复制 / 状态+时间（原 DATASOURCE kicker 已删） */
-/* 头部不是独立卡片（2026-10-22 用户：去掉那层卡）：直接作为抽屉顶栏，只有底部分隔线。
-   名称/地址一行 + 状态一行，紧凑排布。 */
-.ki-ds-drawer__head {
+/* 头部两行：标题 + 关闭；状态 pill + 元信息 */
+.ki-detail__head {
   flex: none;
-  /* 上内边距压到 6px：标题本身有 1.25 行高留白，再加 12px 会显得与抽屉顶隔太远 */
   padding: 6px 16px 10px;
-  /* 底线略深于常规分隔线：头部与正文需要明确断点（此前用户反馈"框线偏淡"） */
   border-bottom: 1px solid color-mix(in srgb, var(--ki-color-text) 14%, var(--ki-color-border));
-  /* 头像背景：2026-10-22 试过浅绿（7%/12%），用户最终否决 —— 保持与正文同色 */
   background: var(--ki-color-surface);
 }
-.ki-ds-drawer__row {
-  display: flex; align-items: center; gap: 10px;
-  /* 名称与地址同行、紧挨着；状态行紧随其下（间距 6px，2026-10-22 用户要求再收紧） */
-  margin-bottom: 6px;
-}
-.ki-ds-drawer__title {
-  /* 名称不再吃掉整行：地址要跟在同一行右侧 */
-  flex: 0 1 auto; max-width: 46%; min-width: 0; margin: 0;
+.ki-detail__row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.ki-detail__title {
+  flex: 1 1 auto; min-width: 0; margin: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--ki-font-size-heading); font-weight: 680;
   line-height: 1.25; letter-spacing: -0.02em;
 }
-.ki-ds-drawer__close {
-  flex: none; margin-left: auto; display: inline-flex; align-items: center; justify-content: center;
+.ki-detail__close {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0;
   border: 1px solid transparent; border-radius: var(--ki-radius-sm);
   background: transparent; color: var(--ki-color-text-subtle); cursor: pointer;
   transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
 }
-.ki-ds-drawer__close:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
-.ki-ds-drawer__close:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
-.ki-ds-drawer__origin {
-  display: flex; align-items: center; gap: 6px;
-  /* 紧跟名称（不再 margin-left:auto 推到行右端），剩余宽度给地址做省略 */
-  flex: 1 1 auto; min-width: 0;
-}
-/* 类型 chip：2026-10-22 用户要求从头部去掉（Git/目录 由路径即可判断）。规则保留以便恢复。 */
-.ki-ds-type-chip {
-  flex: none; padding: 1px 7px; border-radius: var(--ki-radius-tag);
-  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
-  /* 头部底色变成浅灰后，chip 必须自带 1px 内描边才立得住 */
-  box-shadow: inset 0 0 0 1px var(--ki-color-border);
-  font-size: var(--ki-font-size-xs); font-weight: 600; line-height: 18px; letter-spacing: 0.02em;
-}
-/* 文件夹图标同上，暂未使用 */
-.ki-ds-drawer__folder { flex: none; color: var(--ki-color-text-subtle); }
-.ki-ds-drawer__path {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--ki-color-text-muted);
-  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
-}
-.ki-ds-drawer__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 0; }
-.ki-ds-drawer__when {
+.ki-detail__close:hover { background: var(--ki-color-bg-muted); color: var(--ki-color-text); }
+.ki-detail__close:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-detail__meta-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 22px; }
+.ki-detail__meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
   font-variant-numeric: tabular-nums; letter-spacing: 0.01em;
 }
+.ki-detail__meta code { font-family: var(--ki-font-mono); }
 
-/* 状态徽章（带圆点；与列表里的 .ki-task-state 分开，避免改动共享基线） */
-.ki-ds-state {
+/* 状态 pill（带圆点；列表行仍用 .ki-task-state，两者互不影响） */
+.ki-detail__status {
   display: inline-flex; align-items: center; gap: 6px;
   height: 22px; padding: 0 9px; border-radius: var(--ki-radius-sm);
   font-size: var(--ki-font-size-sm); font-weight: 600; letter-spacing: 0.01em;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent);
 }
-.ki-ds-state__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-/* 状态徽章在浅灰头部上同样需要边界 */
-.ki-ds-state { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent); }
-.ki-ds-state--succeeded { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
-.ki-ds-state--partial { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
-.ki-ds-state--failed { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
-.ki-ds-state--running,
-.ki-ds-state--queued { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
-.ki-ds-state--cancelled { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
-.ki-ds-state--running .ki-ds-state__dot { animation: ki-ds-pulse 1.6s ease-in-out infinite; }
-@keyframes ki-ds-pulse {
+.ki-detail__status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ki-detail__status--succeeded { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 12%, transparent); }
+.ki-detail__status--partial { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-detail__status--failed { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+.ki-detail__status--running,
+.ki-detail__status--queued { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ki-detail__status--cancelled,
+.ki-detail__status--unknown { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+.ki-detail__status--never { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); box-shadow: none; }
+.ki-detail__status--never .ki-detail__status-dot { display: none; }
+.ki-detail__status--running .ki-detail__status-dot { animation: ki-detail-pulse 1.6s ease-in-out infinite; }
+@keyframes ki-detail-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.78); }
 }
 
-.ki-ds-drawer__body {
+.ki-detail__body {
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  /* 上边距与区块间距同为 14px：原来 18px padding + 提示条 12px margin 叠加成 30px 顶部空白 */
   padding: 14px 18px 32px;
 }
-/* 提示卡片与下方功能区的间距（.ki-notice 自身无 margin；.ki-ds-sec 另有 14px 上边距） */
-.ki-ds-drawer__body > .ki-notice { margin-bottom: 12px; }
-
+/* 提示卡片与下方功能区的间距（.ki-notice 自身无 margin；.ki-detail-sec 另有 margin-top） */
+.ki-detail__body > .ki-notice { margin-bottom: 12px; }
 
 /* ── 功能区容器：三种材质 ── */
-.ki-ds-sec {
+.ki-detail-sec {
   padding: 14px; border: 1px solid transparent; border-radius: var(--ki-radius-md);
 }
-.ki-ds-sec + .ki-ds-sec { margin-top: 14px; }
-.ki-ds-sec__head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.ki-ds-sec__mark {
+.ki-detail-sec + .ki-detail-sec { margin-top: 14px; }
+.ki-detail-sec__head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ki-detail-sec__mark {
   flex: none; width: 3px; height: 12px; border-radius: 2px;
   background: var(--ki-color-border-strong);
 }
-.ki-ds-sec__title {
+.ki-detail-sec__title {
   margin: 0; color: var(--ki-color-text);
   font-size: var(--ki-font-size-md); font-weight: 680; line-height: 1.3; letter-spacing: 0.01em;
 }
-.ki-ds-sec__hint {
+.ki-detail-sec__hint {
   margin-left: auto; color: var(--ki-color-text-subtle);
   font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums;
 }
-.ki-ds-sec--data {
+.ki-detail-sec__actions {
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
+}
+/* 任务详情的进度块 / 动作区 / 任务 ID 在分区内的间距 */
+.ki-detail-progress { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.ki-detail-sec--action .ki-task-actions { margin-top: 0; }
+.ki-detail-sec .ki-task-id { margin-top: 10px; }
+.ki-detail-sec--data {
   border-color: color-mix(in srgb, var(--ki-color-primary) 16%, var(--ki-color-border));
   background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
 }
-.ki-ds-sec--data .ki-ds-sec__mark { background: var(--ki-color-primary); }
-.ki-ds-sec--meta {
+.ki-detail-sec--data .ki-detail-sec__mark { background: var(--ki-color-primary); }
+.ki-detail-sec--meta {
   border-color: var(--ki-color-border);
   background: var(--ki-color-bg-secondary);
 }
-.ki-ds-sec--meta .ki-ds-sec__title { color: var(--ki-color-text-muted); font-weight: 650; }
-.ki-ds-sec--action {
+.ki-detail-sec--meta .ki-detail-sec__title { color: var(--ki-color-text-muted); font-weight: 650; }
+.ki-detail-sec--action {
   border-color: color-mix(in srgb, var(--ki-color-warning) 24%, var(--ki-color-border));
   background: color-mix(in srgb, var(--ki-color-warning) 5%, var(--ki-color-surface));
 }
-.ki-ds-sec--action .ki-ds-sec__mark { background: var(--ki-color-warning); }
-.ki-ds-sec--action .ki-ds-sec__title { color: var(--ki-color-warning); }
+.ki-detail-sec--action .ki-detail-sec__mark { background: var(--ki-color-warning); }
+.ki-detail-sec--action .ki-detail-sec__title { color: var(--ki-color-warning); }
 
 /* ── 执行结果 hero：完成数 + 分段条 + 图例 ── */
-.ki-ds-hero {
+.ki-detail-hero {
   display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 18px; align-items: center;
   padding: 14px 16px; border-radius: var(--ki-radius-md);
   background: var(--ki-color-surface);
 }
-.ki-ds-hero__num {
+.ki-detail-hero__num {
   font-size: var(--ki-font-size-2xl); font-weight: 660; line-height: 1.05;
   letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
 }
-.ki-ds-hero__label { margin-top: 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.04em; }
-.ki-ds-hero__barrow { display: flex; align-items: center; gap: 10px; }
-.ki-ds-bar {
+.ki-detail-hero__label { margin-top: 4px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.04em; }
+.ki-detail-hero__barrow { display: flex; align-items: center; gap: 10px; }
+.ki-detail-bar {
   flex: 1; display: flex; gap: 2px; height: 4px;
   border-radius: var(--ki-radius-track); background: var(--ki-color-bg-muted); overflow: hidden;
 }
-.ki-ds-bar__seg { display: block; height: 100%; border-radius: var(--ki-radius-track); }
-.ki-ds-bar__seg--done { background: var(--ki-color-primary); }
-.ki-ds-bar__seg--skipped { background: var(--ki-color-border-strong); }
-.ki-ds-bar__seg--failed { background: var(--ki-color-danger); }
-.ki-ds-hero__pct {
+.ki-detail-bar__seg { display: block; height: 100%; border-radius: var(--ki-radius-track); }
+.ki-detail-bar__seg--done { background: var(--ki-color-primary); }
+.ki-detail-bar__seg--skipped { background: var(--ki-color-border-strong); }
+.ki-detail-bar__seg--failed { background: var(--ki-color-danger); }
+.ki-detail-hero__pct {
   flex: none; min-width: 40px; text-align: right;
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.ki-ds-legend {
+.ki-detail-legend {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 9px; color: var(--ki-color-text-subtle);
   font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums;
 }
-.ki-ds-legend__item { display: inline-flex; align-items: baseline; gap: 5px; }
-.ki-ds-legend__item::before {
+.ki-detail-legend__item { display: inline-flex; align-items: baseline; gap: 5px; }
+.ki-detail-legend__item::before {
   content: ''; width: 5px; height: 5px; border-radius: 50%;
   background: var(--ki-color-border-strong); transform: translateY(-1px);
 }
-.ki-ds-legend__item--done::before { background: var(--ki-color-primary); }
-.ki-ds-legend__item--failed { color: var(--ki-color-danger-ink); font-weight: 600; }
-.ki-ds-legend__item--failed::before { background: var(--ki-color-danger); }
-.ki-ds-legend__sub { color: var(--ki-color-text-subtle); font-weight: 400; }
-.ki-ds-legend__dot { color: var(--ki-color-border-strong); }
-.ki-ds-hero__empty {
+.ki-detail-legend__item--done::before { background: var(--ki-color-primary); }
+.ki-detail-legend__item--failed { color: var(--ki-color-danger-ink); font-weight: 600; }
+.ki-detail-legend__item--failed::before { background: var(--ki-color-danger); }
+.ki-detail-legend__sub { color: var(--ki-color-text-subtle); font-weight: 400; }
+.ki-detail-legend__dot { color: var(--ki-color-border-strong); }
+.ki-detail-hero__empty {
   padding: 18px 16px; border: 1px dashed var(--ki-color-border); border-radius: var(--ki-radius-md);
   text-align: center; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm);
 }
 
 /* ── 指标网格（3×2） ── */
-.ki-ds-metrics {
+.ki-detail-metrics {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
   margin: 12px 0 0; padding: 0;
   border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
   background: var(--ki-color-border); overflow: hidden;
 }
-.ki-ds-metric { padding: 10px 12px 11px; background: var(--ki-color-surface); transition: background var(--ki-motion-fast); }
-.ki-ds-metric:hover { background: var(--ki-color-bg-secondary); }
-.ki-ds-metric__label { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.03em; }
-.ki-ds-metric__value {
+.ki-detail-metric { padding: 10px 12px 11px; background: var(--ki-color-surface); transition: background var(--ki-motion-fast); }
+.ki-detail-metric:hover { background: var(--ki-color-bg-secondary); }
+.ki-detail-metric__label { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); letter-spacing: 0.03em; }
+.ki-detail-metric__value {
   margin-top: 3px; font-size: var(--ki-font-size-xl); font-weight: 640;
   line-height: 1.2; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
 }
-.ki-ds-metric__value--zero { color: var(--ki-color-text-subtle); font-weight: 560; }
-.ki-ds-metric__value--danger { color: var(--ki-color-danger-ink); }
+.ki-detail-metric__value--zero { color: var(--ki-color-text-subtle); font-weight: 560; }
+.ki-detail-metric__value--danger { color: var(--ki-color-danger-ink); }
 
 /* ── 失败明细箱：默认展开，只露前 5 条，超出滚动 ── */
 .ki-ds-failbox {
@@ -5792,10 +5695,10 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-failbox__more:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 
 /* ── 同步参数：两列 key/value（值不加底色，层级靠文字色与字重） ── */
-.ki-ds-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin: 0; }
+.ki-detail-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin: 0; }
 /* 横向 key-value（2026-10-22 用户：不要竖向堆叠）：label 定宽在左、值在右 */
 /* label 宽度跟随内容（max-content），冒号后只留 6px —— 定宽列会在冒号与值之间留一大段空白 */
-.ki-ds-params__cell {
+.ki-detail-params__cell {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 6px;
@@ -5803,19 +5706,19 @@ select.ki-chat-cfg__ta--select {
   min-width: 0;
 }
 /* key：value 形态 —— 冒号由样式补，数据里不带（便于复用到其他位置） */
-.ki-ds-params dt::after { content: '：'; }
-.ki-ds-params__cell--full { grid-column: 1 / -1; }
-.ki-ds-params dt {
+.ki-detail-params dt::after { content: '：'; }
+.ki-detail-params__cell--full { grid-column: 1 / -1; }
+.ki-detail-params dt {
   margin: 0; color: var(--ki-color-text-subtle);
   font-size: var(--ki-font-size-xs); font-weight: 500; letter-spacing: 0.03em;
 }
-.ki-ds-params dd {
+.ki-detail-params dd {
   margin: 0; min-width: 0;
   overflow-wrap: anywhere; color: var(--ki-color-text);
   font-size: 13px; font-weight: 500; line-height: 1.45;
 }
 /* 行内说明（如 Git 仓库来源的远端地址）独占一行，不跟值抢同一行 */
-.ki-ds-params__hint {
+.ki-detail-params__hint {
   display: block;
   margin-top: 2px;
   color: var(--ki-color-text-subtle);
@@ -5823,7 +5726,9 @@ select.ki-chat-cfg__ta--select {
   font-weight: 400;
   line-height: 1.5;
 }
-.ki-ds-params dd.is-mono {
+/* 指标网格后的补充键值行（如任务详情的附件/落点）与网格拉开一档 */
+.ki-detail-metrics + .ki-detail-params { margin-top: 12px; }
+.ki-detail-params dd.is-mono {
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); font-weight: 400;
 }
 .ki-ds-copy {
@@ -5870,7 +5775,7 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-doc-open:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
 
 /* ── 同步进度：复用导入页 .ki-progress* / .ki-track-*，仅补与下方功能区的间距 ── */
-.ki-ds-drawer .ki-progress-block { margin-bottom: 14px; }
+.ki-detail .ki-progress-block { margin-bottom: 14px; }
 
 /* 本页打开详情时，ModuleDrawer（默认 1000 / 遮罩 999）必须盖住详情抽屉（1021）——
    只在"数据源页 + 详情已开"时提升，其他页面层级不变（护栏：不改共享基线） */
@@ -5878,25 +5783,25 @@ select.ki-chat-cfg__ta--select {
 .ki-datasource-page--drawer .ki-drawer__scrim { z-index: 1059; }
 
 /* ── 滚动条（抽屉本体 + 失败明细 + 待删树）：细条、无箭头、随主题 ── */
-.ki-ds-drawer__body,
+.ki-detail__body,
 .ki-ds-failbox__list,
 .ki-ds-tree {
   scrollbar-width: thin;
   scrollbar-color: var(--ki-color-scrollbar) transparent;
 }
-.ki-ds-drawer__body::-webkit-scrollbar,
+.ki-detail__body::-webkit-scrollbar,
 .ki-ds-failbox__list::-webkit-scrollbar,
 .ki-ds-tree::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
-.ki-ds-drawer__body::-webkit-scrollbar-track,
+.ki-detail__body::-webkit-scrollbar-track,
 .ki-ds-failbox__list::-webkit-scrollbar-track,
 .ki-ds-tree::-webkit-scrollbar-track { background: transparent; }
-.ki-ds-drawer__body::-webkit-scrollbar-thumb,
+.ki-detail__body::-webkit-scrollbar-thumb,
 .ki-ds-failbox__list::-webkit-scrollbar-thumb,
 .ki-ds-tree::-webkit-scrollbar-thumb {
   min-height: 36px; border: 3px solid transparent; border-radius: 999px;
   background: var(--ki-color-scrollbar); background-clip: content-box;
 }
-.ki-ds-drawer__body::-webkit-scrollbar-button,
+.ki-detail__body::-webkit-scrollbar-button,
 .ki-ds-failbox__list::-webkit-scrollbar-button,
 .ki-ds-tree::-webkit-scrollbar-button { display: none; }
 
@@ -5912,7 +5817,7 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-table__head th:nth-child(8) { width: 96px; }
 }
 @media (max-width: 960px) {
-  .ki-ds-drawer { width: 100vw; }
+  .ki-detail { width: 100vw; }
 }
 
 /* 宽屏抽屉为纯浮层（带遮罩）：**不再对背景做右让/三列降级**——遮罩已表达"背景不可操作"，
