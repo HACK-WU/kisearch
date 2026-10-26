@@ -23,7 +23,8 @@ export interface TaskListRowView {
   timeLabel: string;
   /** 完整时间（悬停提示；列表只显示月/日 时:分） */
   timeTitle: string;
-  timeHint?: string;
+  /** 持续时间（终态给实际耗时；运行中/排队中给状态或「—」） */
+  durationLabel: string;
   progressPercent: number | null;
   ariaLabel: string;
 }
@@ -47,10 +48,10 @@ function formatDuration(ms: number): string {
   return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
 }
 
-function timeHintOf(task: TaskRecord): string | undefined {
-  if (task.state === 'queued') return '排队中';
-  if (task.startedAt === undefined) return undefined;
-  if (task.finishedAt === undefined) return task.state === 'running' ? '运行中' : undefined;
+function durationLabelOf(task: TaskRecord): string {
+  // 排队中还没有开始时间，持续时间无从谈起（状态列已给出「排队中」）
+  if (task.state === 'queued' || task.startedAt === undefined) return '—';
+  if (task.finishedAt === undefined) return task.state === 'running' ? '运行中' : '—';
   return formatDuration(task.finishedAt - task.startedAt);
 }
 
@@ -74,7 +75,7 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
     : task.state === 'partial' || task.state === 'cancelled'
       ? 'warn'
       : 'normal';
-  const timeHint = timeHintOf(task);
+  const durationLabel = durationLabelOf(task);
 
   return {
     id: task.id,
@@ -89,8 +90,8 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
     resultTone: tone,
     timeLabel: time.label,
     timeTitle: time.title,
-    ...(timeHint ? { timeHint } : {}),
+    durationLabel,
     progressPercent: progressPercentOf(task),
-    ariaLabel: `${stateText}，${operation}，${task.scope}，${source}，${summary}${error ? `，${error}` : ''}，${time.title}`,
+    ariaLabel: `${stateText}，${operation}，${task.scope}，${source}，${summary}${error ? `，${error}` : ''}，${time.title}，持续时间 ${durationLabel}`,
   };
 }

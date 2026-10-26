@@ -485,7 +485,7 @@ export function TasksPage(): JSX.Element {
       </div>
 
       <section className="ki-card ki-task-list-card">
-        <div className="ki-card__body">
+        <div className="ki-card__body ki-card__body--flush">
           {query.error ? <div className="ki-task-error">无法读取后台任务。请检查服务连接和数据目录权限。</div> : null}
           {query.isPending ? <div className="ki-task-muted">正在读取任务…</div> : null}
           {!query.error && !query.isPending && visibleTasks.length === 0 ? (
@@ -501,7 +501,7 @@ export function TasksPage(): JSX.Element {
                   <th scope="col" className="ki-task-col--source">来源</th>
                   <th scope="col" className="ki-task-col--result">结果摘要</th>
                   <th scope="col" className="ki-task-col--time">时间</th>
-                  <th scope="col">操作</th>
+                  <th scope="col">持续时间</th>
                 </tr>
               </thead>
               <tbody>
@@ -567,18 +567,9 @@ export function TasksPage(): JSX.Element {
                         </span>
                       </td>
                       <td className="ki-task-col--time">
-                        <span className="ki-task-table__time" title={row.timeTitle}>
-                          <span>{row.timeLabel}</span>
-                          {row.timeHint ? <small>{row.timeHint}</small> : null}
-                        </span>
+                        <span className="ki-task-table__time" title={row.timeTitle}>{row.timeLabel}</span>
                       </td>
-                      <td className="ki-task-table__actions">
-                        <button
-                          type="button"
-                          className="ki-btn ki-btn--secondary ki-btn--small ki-task-detail-btn"
-                          onClick={(event) => { event.stopPropagation(); openTask(); }}
-                        >详情</button>
-                      </td>
+                      <td className="ki-task-table__duration">{row.durationLabel}</td>
                     </tr>
                   );
                 })}

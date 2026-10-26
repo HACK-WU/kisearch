@@ -53,7 +53,7 @@ function baseTask(overrides = {}) {
 }
 
 describe('任务列表行：六列口径', () => {
-  it('完成态给出操作 / 状态 / 来源 / 摘要 / 短 ID / 耗时', () => {
+  it('完成态给出操作 / 状态 / 来源 / 摘要 / 短 ID / 持续时间', () => {
     const row = buildTaskListRow(baseTask());
     assert.equal(row.stateLabel, '已完成');
     assert.equal(row.operationLabel, '上传导入');
@@ -62,7 +62,7 @@ describe('任务列表行：六列口径', () => {
     assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0');
     assert.equal(row.shortId, 'abcdef12');
     assert.equal(row.id, 'abcdef1234567890');
-    assert.equal(row.timeHint, '7s');
+    assert.equal(row.durationLabel, '7s');
     assert.equal(row.progressPercent, null);
     assert.equal(row.resultTone, 'normal');
     assert.equal(row.resultError, undefined);
@@ -87,7 +87,7 @@ describe('任务列表行：六列口径', () => {
     assert.equal(buildTaskListRow(baseTask({ state: 'cancelled', result: undefined })).resultTone, 'warn');
   });
 
-  it('运行中给出进度百分比与「运行中」时间提示', () => {
+  it('运行中给出进度百分比与「运行中」持续时间', () => {
     const row = buildTaskListRow(baseTask({
       state: 'running',
       finishedAt: undefined,
@@ -96,11 +96,11 @@ describe('任务列表行：六列口径', () => {
     }));
     assert.equal(row.stateLabel, '运行中');
     assert.equal(row.progressPercent, 42);
-    assert.equal(row.timeHint, '运行中');
+    assert.equal(row.durationLabel, '运行中');
     assert.equal(row.resultSummary, '向量化 42/100 段');
   });
 
-  it('排队中按创建时间展示并提示「排队中」', () => {
+  it('排队中按创建时间展示，持续时间留空', () => {
     const row = buildTaskListRow(baseTask({
       state: 'queued',
       startedAt: undefined,
@@ -109,7 +109,7 @@ describe('任务列表行：六列口径', () => {
       progress: undefined,
     }));
     assert.equal(row.stateLabel, '排队中');
-    assert.equal(row.timeHint, '排队中');
+    assert.equal(row.durationLabel, '—', '排队中还没有持续时间');
     assert.match(row.timeLabel, /^\d{2}\/\d{2} \d{2}:\d{2}$/);
   });
 
