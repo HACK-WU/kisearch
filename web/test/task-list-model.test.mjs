@@ -66,7 +66,7 @@ describe('任务列表行：六列口径', () => {
     assert.equal(row.progressPercent, null);
     assert.equal(row.resultTone, 'normal');
     assert.equal(row.resultError, undefined);
-    assert.match(row.timeLabel, /^\d{2}\/\d{2} \d{2}:\d{2}$/);
+    assert.match(row.timeLabel, /^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
     assert.match(row.ariaLabel, /已完成，上传导入，langchain，网页/);
   });
 
@@ -110,7 +110,7 @@ describe('任务列表行：六列口径', () => {
     }));
     assert.equal(row.stateLabel, '排队中');
     assert.equal(row.durationLabel, '—', '排队中还没有持续时间');
-    assert.match(row.timeLabel, /^\d{2}\/\d{2} \d{2}:\d{2}$/);
+    assert.match(row.timeLabel, /^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
   });
 
   it('无总数不渲染进度条（避免 0/0 被算成 100%）', () => {

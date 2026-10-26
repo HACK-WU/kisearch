@@ -838,14 +838,13 @@ export function DataSourcePage(): JSX.Element {
                     <th scope="col" className="ki-ds-col--group">落点 Group</th>
                     <th scope="col" className="ki-ds-col--time">上次同步</th>
                     <th scope="col">状态</th>
-                    <th scope="col" className="ki-ds-col--pending">待删</th>
+                    <th scope="col" className="ki-ds-col--duration">持续时间</th>
                     <th scope="col" className="ki-ds-col--actions">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                 {pageSources.map((source) => {
                   const status = dataSourceStatusView({ activeState: source.activeState, running: source.running, lastSync: source.lastSync });
-                  const pendingCount = source.lastSync?.pendingDelete.total ?? 0;
                   const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
                   const rowAvailability = source.syncAvailability;
                   const rowSyncing = syncingScope === source.scope;
@@ -865,7 +864,7 @@ export function DataSourcePage(): JSX.Element {
                     key={source.scope}
                     tabIndex={0}
                     data-ds-scope={source.scope}
-                    aria-label={`${source.scope}，${typeLabel}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${pendingCount > 0 ? `，待删 ${pendingCount} 篇` : ''}`}
+                    aria-label={`${source.scope}，${typeLabel}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${source.lastSync ? `，持续时间 ${formatSyncDuration(source.lastSync.durationMs)}` : ''}`}
                     className={`ki-ds-table__row${scope === source.scope ? ' is-active' : ''}`}
                     onClick={() => navigate(`/datasource/${encodeURIComponent(source.scope)}`)}
                     onKeyDown={(event) => {
@@ -893,10 +892,8 @@ export function DataSourcePage(): JSX.Element {
                         title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
                       >{status.label}</span>
                     </td>
-                    <td className="ki-ds-col--pending">
-                      {source.lastSync && source.lastSync.pendingDelete.total > 0
-                        ? <span className="ki-ds-pending-badge">待删 {source.lastSync.pendingDelete.total}</span>
-                        : '—'}
+                    <td className="ki-ds-col--duration">
+                      {source.lastSync ? formatSyncDuration(source.lastSync.durationMs) : '—'}
                     </td>
                     <td className="ki-ds-table__actions">
                       <button

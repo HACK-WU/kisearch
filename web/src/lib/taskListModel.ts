@@ -34,7 +34,8 @@ function formatListTime(ts?: number): { label: string; title: string } {
   const date = new Date(ts);
   const pad = (value: number): string => String(value).padStart(2, '0');
   return {
-    label: `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`,
+    // 月日中文写法（用户 2026-10-26：`10/26` 看起来像分数）：`10月26日 15:57`
+    label: `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`,
     title: new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' }).format(ts),
   };
 }

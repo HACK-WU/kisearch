@@ -5455,11 +5455,6 @@ select.ki-chat-cfg__ta--select {
   color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs);
 }
 .ki-ds-table__dir { font-family: var(--ki-font-mono); }
-.ki-ds-pending-badge {
-  display: inline-block; padding: 1px 6px; border-radius: 999px;
-  background: var(--ki-color-warning-soft); color: var(--ki-color-warning);
-  font-size: var(--ki-font-size-xs); white-space: nowrap;
-}
 /* 列表贴边（2026-10-22 用户：上 / 左 / 右不留白）：卡片 body 走 --flush，
    单元格自带 padding；只有不带内边距的零件需要这里补。 */
 .ki-datasource-page .ki-card__body--flush > .ki-ds-muted { padding: 16px 12px; }
@@ -5823,7 +5818,7 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-col--group,
   .ki-ds-col--type,
   .ki-ds-col--time,
-  .ki-ds-col--pending { display: none; }
+  .ki-ds-col--duration { display: none; }
   .ki-ds-table__head th:nth-child(1) { width: 190px; }
   .ki-ds-table__head th:nth-child(3) { width: auto; }
   .ki-ds-table__head th:nth-child(6) { width: 96px; }

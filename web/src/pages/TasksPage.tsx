@@ -500,7 +500,7 @@ export function TasksPage(): JSX.Element {
                   <th scope="col" className="ki-task-col--scope">知识库</th>
                   <th scope="col" className="ki-task-col--source">来源</th>
                   <th scope="col" className="ki-task-col--result">结果摘要</th>
-                  <th scope="col" className="ki-task-col--time">时间</th>
+                  <th scope="col" className="ki-task-col--time">开始时间</th>
                   <th scope="col">持续时间</th>
                 </tr>
               </thead>
