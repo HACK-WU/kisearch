@@ -1231,7 +1231,8 @@ a:hover { text-decoration: underline; }
   position: fixed;
   top: 0;
   right: 0;
-  width: min(680px, 88vw);
+  /* 与数据源/任务详情抽屉同宽（2026-10-26 用户要求）：70vw，≤960 全宽 */
+  width: clamp(520px, 70vw, 100vw);
   height: 100vh;
   background: var(--ki-color-surface);
   box-shadow: -4px 0 24px rgba(0,0,0,0.1), -2px 0 8px rgba(0,0,0,0.06);
@@ -1240,6 +1241,9 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   /* 入场动画：从右滑入，避免 right 偏移导致的首次渲染抖动 */
   animation: ki-drawer-in 0.25s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@media (max-width: 960px) {
+  .ki-drawer { width: 100vw; }
 }
 @keyframes ki-drawer-in {
   from { transform: translateX(100%); }
