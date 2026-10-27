@@ -41,3 +41,6 @@ CodeWikiHub/
 # ---- 设计风格工具库（ui-designer 技能安装，本地辅助，不进版本控制）----
 ui-tools/
 .plans/
+
+# ---- 设计演示与原型 demo（本地辅助产物，不进版本控制）----
+demo/
