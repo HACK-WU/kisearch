@@ -1,4 +1,4 @@
-## 架构说明
+# 架构说明
 
 `knowledge-index`（kisearch）是一个**本地知识索引与向量检索系统**，基于 zvec 向量引擎，提供完整的知识管理能力。
 
@@ -30,7 +30,7 @@ flowchart TB
 | 组件 | 主要职责 |
 |------|------|
 | `knowledge-index` | Group 导航、热门 Relation 缓存、本地 Markdown 原文交付、CLI 命令 |
-| `ki MCP Server` | 常驻 MCP 服务，暴露 store/search/list/stats 等工具 |
+| `ki MCP Server` | 常驻 MCP 服务，暴露 13 个工具（检索 / 读取 / 写入 / 组织 / 删除），见 [mcp-tools.md](./mcp-tools.md) |
 | `ZvecEngine` | 进程内向量引擎：insert/upsert/hybridSearch，Embedding 集成 |
 
 ## knowledge-index 内部结构
@@ -38,15 +38,11 @@ flowchart TB
 ```mermaid
 flowchart LR
     GI["group-index.json<br/>Group 树索引 + source 块"]
-    RC["relations/ 分片布局<br/>manifest.json + <groupPath>/cache.json<br/>（Relation 缓存 / 分区，含 memoryIds / sourcePath）"]
+    RC[".relations/ 分片布局<br/>manifest.json + <groupPath>/cache.json<br/>（Relation 缓存 / 分区，含 memoryIds / sourcePath）"]
     KB["kb/<scope>/<group>/index.json<br/>本地 KB 原文"]
-    SI["scan-index.json<br/>[旧流程] 外部知识库扫描状态账本"]
-    SP["scan-pending.json<br/>[旧流程] 扫描断点（临时）"]
 
     GI --> RC
     RC --> KB
-    SI --> RC
-    SP --> SI
 ```
 
 ### 核心文件
@@ -58,8 +54,6 @@ flowchart LR
 | `.relations/manifest.json` | scope 级元数据：`partition_config` + `revision`（缓存失效身份锚，每次写递增） | 存储原语自动维护 | 永久 |
 | ~~`relations-cache.json`~~ | 旧布局单文件（v3 前）；首次写自动迁移为分片布局，原名改名 `.bak` 保留 | 迁移/回退用 | 过渡期保留 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
-| `scan-index.json` | [旧流程] 外部知识库扫描状态账本 | **已无生产/消费方**（随 incremental 流程移除，`src/` 零引用） | 遗留文件，可删 |
-| `scan-pending.json` | [旧流程] 扫描断点 | **已无生产/消费方**（同上） | 遗留文件，可删 |
 
 > **存储布局（2026-10-09 v3，per-Group 分片）**：Relation 元数据从 scope 级单文件
 > `relations-cache.json` 拆分为 `<scope>/.relations/<groupPath>/cache.json`（每组一份）
@@ -137,18 +131,18 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> G[ki group list<br/>读取 Group 树 / 热门 Relation / 关键词]
+    Q[用户问题] --> G[ki group list<br/>读取 Group 树 / 热门 Relation]
     G --> H{本地热门 Relation 是否命中?}
     H -- 是 --> M[get-module-info<br/>读取本地 KB 原文]
     M --> A[AI 直接回答]
 
-    H -- 否 --> R[memory_recall<br/>到父项目记忆系统做语义检索]
-    R --> F{是否命中记忆?}
-    F -- 是 --> S[sync-relation<br/>回写本地 Relation + KB]
+    H -- 否 --> R[ki search<br/>语义检索 hybrid / fulltext]
+    R --> F{是否命中?}
+    F -- 是 --> S[get-module-info<br/>按 group + relation 取原文]
     S --> A
 
     F -- 否 --> P[AI 暂停并补充线索 / 扫描代码 / 生成模块说明]
-    P --> D[sync-relation + memory_store<br/>双写本地索引与记忆系统]
+    P --> D[sync-relation<br/>写入本地索引 + KB]
     D --> A
 ```
 
@@ -173,23 +167,17 @@ flowchart LR
     IMP2 --> DUP[同名不同 sourcePath: 按 --conflict-mode<br/>默认覆盖 / skip 跳过 / suffix 加后缀]
 ```
 
-> 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，重复执行同命令即同步变更，不再依赖 git。
+> 增量更新由「幂等追加」承载：重复执行同一条命令即同步变更，不依赖 git。
 
-## 与父项目记忆系统的配合
+## 知识库与 Agent 记忆的关系
 
-### 协作 1：本地快取 + 远端召回
+kisearch 用**同一套** Group / Relation / 本地 KB / 向量索引同时承载两类内容：
 
-- 热门知识优先走本地 JSON
-- 长尾知识走 `memory_recall`
-- 命中后回写本地，逐步把长尾知识沉淀为可导航的热点知识
+| 视角 | 典型内容 | 主要入口 |
+|------|---------|---------|
+| 知识库 | 外部 Wiki、项目文档、架构说明、API 资料 | `ki import`、`ki search`、MCP 只读工具 |
+| Agent 记忆 | 用户偏好、项目约定、历史决策、排障结论 | MCP 写入 / 更新 / 删除工具 |
 
-### 协作 2：原文与摘要分层存储
-
-- 本地 KB 更适合保存**完整 Markdown 原文**
-- 记忆系统更适合保存**摘要、标签、关键词、长期记忆条目**
-
-### 协作 3：共同形成闭环
-
-- **查询时**：本地命中优先，记忆检索兜底
-- **写入时**：新知识双写到本地索引与记忆系统
-- **演化时**：热点沉淀在本地，长尾保留在记忆系统
+- **读取**：先索引直查（Group → Relation → 原文），未命中再做语义检索。
+- **写入**：统一走 `ki sync-relation` / `ki_bulk_sync_relation`，自动补建 Group 树。
+- **演化**：热点内容留在热区，长尾内容由检索召回；是否记住、写什么、何时更新由 Agent 的工作流决定。

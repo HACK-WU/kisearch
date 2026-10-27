@@ -1,30 +1,62 @@
 # CLI 参考
 
-所有脚本都通过 `ki` 命令执行（已通过 `npm link` 创建全局链接）。
+所有命令通过 `ki` 执行（`npm link` 后可用）。
 
-**CLI 简化约定（批次 4，REQ-11/12）**：
-- **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-n`(--name)，覆盖 commander 化命令的常用/必填参数。
-  > `-o`(--output) 属 REQ-11 原规划但**从未实现**：`export` 走手写 argv 解析，只认 `--output` 长选项（实测 `ki export -h`）。
-- **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 直接传位置参数；原 `--query`/`--text` option 保留兼容（两种写法均可，位置参数优先）
-- **超长内容警告（REQ-10）**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分
+**CLI 简化约定**
+- **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-n`(--name)。
+  > `-o`(--output) 未实现：`export` 走手写 argv 解析，只认 `--output` 长选项。
+- **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 可直接传位置参数；`--query` / `--text` 保留兼容，位置参数优先。
+- **超长内容警告**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分。
 
-**配置优先级**：
-1. `--config <path>` 命令行参数（按扩展名判定 YAML / JSON 解析器）
+**配置优先级**
+1. `--config <path>`（按扩展名判定 YAML / JSON 解析器）
 2. `$HOME/.ki/config.yaml` → `config.yml` → `config.json`
 3. 内置默认值（`dataDir` = `$HOME/.ki/kb`，`backupDir` = `$HOME/.ki/backup`，`vectorDir` = `$HOME/.ki/vector`）
 
-**首次使用**：运行 `ki config init` 生成 YAML 配置文件模板（`~/.ki/config.yaml`）。配置格式以 YAML 为主，保留对旧版 `config.json` 的读取兼容。
+**首次使用**：`ki config init` 生成 `~/.ki/config.yaml` 模板；配置以 YAML 为主，保留对旧版 `config.json` 的读取兼容。
 
-**校验**：运行 `ki doctor` 一键校验配置文件（语法 + 字段名/类型/取值）/ 目录 / API 密钥 / 向量维度是否就绪。字段名拼错、类型写错会在配置加载阶段直接报 `CONFIG_FIELD_INVALID` 并退出（详见 [configuration.md · 字段校验](./configuration.md#字段校验)）。
+**校验**：`ki doctor` 一键校验配置（语法 + 字段名/类型/取值）/ 目录 / API 密钥 / 向量维度。字段名或类型错误会在加载阶段报 `CONFIG_FIELD_INVALID` 并退出（详见 [configuration.md · 字段校验](./configuration.md#字段校验)）。
 
-**注意**：环境变量 `KI_DATA_DIR` 已不再作为运行时配置来源，仅使用配置文件机制（`ki config init` 生成模板时可被其显式覆盖默认值 `~/.ki/kb`）。
+> `KI_DATA_DIR` 已不再作为运行时配置来源（仅 `ki config init` 生成模板时可覆盖默认值）。
 
 ---
 
-## `ki import`（外部 Wiki 导入）
+## 目录
+
+| 命令 / 章节 | 说明 |
+|---|---|
+| [`import`](#import) | 外部 Markdown 导入（幂等追加） |
+| [`datasource`](#datasource) | 数据源登记与同步 |
+| [`group`](#group) | Group 创建 / 删除 / 列表 |
+| [`scope`](#scope) | scope 列表 / 删除 / 清空 |
+| [`tag`](#tag) | tag 发现 |
+| [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
+| [`doc`](#doc) | 向量文档查看 / 删除 |
+| [`search`](#search) | 语义检索 / 全文检索 |
+| [`group list`](#group-list) | Group 树与 Relation 分区 |
+| [`get-module-info`](#get-module-info) | 读取本地 KB 原文 |
+| [`delete-relation`](#delete-relation) | 删除单条 Relation |
+| [`sync-relation`](#sync-relation) | 写入 / 更新 Relation |
+| [`store`](#store) | 只写向量层（单条） |
+| [`bulk-store`](#bulk-store) | 只写向量层（批量） |
+| [`mcp`](#mcp) | MCP 服务（HTTP / stdio / token） |
+| [`config`](#config) | 配置生成 |
+| [`doctor`](#doctor) | 配置诊断 |
+| [`index-optimize`](#index-optimize) | 索引整理 |
+| [`backup`](#backup) | 备份 |
+| [`restore`](#restore) | 恢复与重建 |
+| [`export`](#export) | 导出 Markdown |
+| [`wiki-backfill`](#wiki-backfill) | 历史 Relation 写回 Wiki |
+| [`migrate-relation-cache`](#migrate-relation-cache) | 元数据布局迁移 |
+| [常用工作流](#常用工作流) | 组合用法 |
+
+---
+
+## import
 
 外部 Markdown Wiki 导入（**幂等追加**，重复执行 = 增量）。扁平命令，**无子命令层级**。
-（历史：2026-09-07 由 `ki scan-kb import` 扁平化而来，scan-kb 壳已移除且不保留兼容别名（旧调用报「未知命令」）；更早的 `--mode incremental`（git diff 驱动）与 `diff` 子命令亦已废弃移除。）
+
+> 旧命令 `ki scan-kb import` 与 `--mode incremental` 已移除且不保留兼容别名，旧调用会报「未知命令」。
 
 ### 用法
 
@@ -49,7 +81,7 @@ ki import \
 |------|------|------|
 | `-s, --scope` | 否 | 项目隔离标识 |
 | `--source` | 是（`--retry-incomplete` 时可省略） | Markdown 目录绝对路径；重试模式下缺省沿用上次导入记录的源目录 |
-| `--retry-incomplete` | 否 | 只重试上次未完成的文件：读 `<scope>/.ki-import-incomplete.json`，只处理清单内文件；已完成文件不重传、不重算 embedding、不产生 `_1` 副本。详见 [ki import 详解](./import.md#部分成功可用与只重试未完成req-20261009-001) |
+| `--retry-incomplete` | 否 | 只重试上次未完成的文件：读 `<scope>/.ki-import-incomplete.json`，只处理清单内文件；已完成文件不重传、不重算 embedding、不产生 `_1` 副本。详见 [ki import 详解](./import.md#部分成功可用与只重试未完成) |
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
 | `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
 | `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
@@ -73,14 +105,14 @@ ki import -s my-project --source /path/to/wiki --group wiki
 
 向量更新采用文档级增量策略：新向量写入成功后才清理受影响文档的旧内容/标签/关系辅助向量，Scope 内无关文档不会被清空；新向量全部失败时旧 KB、旧 relation 和旧向量保留。
 
-**系统性故障下的提交语义（REQ-20261009-001）**：提交粒度为**文件级**——已成功的文件照常提交可用，失败/未处理的文件进入未完成清单（`result.partial:true`、`stats.files{total,completed,incomplete,scanned,skipped}`、`incomplete[]`），**退出码仍为 0**（stderr 有警告块）；全部未完成时仍是 fail-loud（`ok:false`）。辅助向量（`--tags` 的标签向量、关系/路径导航向量）失败属**降级**：照常提交正文，只在 `errors[]` 记账并提示 `ki rebuild-vector`，不产生未完成文件。只重试未完成部分：
+**系统性故障下的提交语义**：提交粒度为**文件级**——已成功的文件照常提交可用，失败/未处理的文件进入未完成清单（`result.partial:true`、`stats.files{total,completed,incomplete,scanned,skipped}`、`incomplete[]`），**退出码仍为 0**（stderr 有警告块）；全部未完成时仍是 fail-loud（`ok:false`）。辅助向量（`--tags` 的标签向量、关系/路径导航向量）失败属**降级**：照常提交正文，只在 `errors[]` 记账并提示 `ki restore <scope> --rebuild-vector`，不产生未完成文件。只重试未完成部分：
 
 ```bash
 ki import --scope my-project --retry-incomplete          # 沿用上次源目录与参数
 ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已移动时
 ```
 
-详见 [ki import 详解](./import.md#部分成功可用与只重试未完成req-20261009-001)。
+详见 [ki import 详解](./import.md#部分成功可用与只重试未完成)。
 
 因此重复执行同命令即同步变更（追加新文档 / 更新已有文档）。
 
@@ -103,7 +135,7 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ---
 
-## `datasource`（数据源登记与同步，REQ-20261020-001 / S-05）
+## datasource
 
 本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录 30 分钟一次，CLI 可强制）。
 
@@ -148,7 +180,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 
 ---
 
-## `group`
+## group
 
 Group 管理：`create` / `delete` / `list`。组的位置只由单一路径表达，**不提供** `--parent` / `--name` / `--parents`。
 
@@ -174,11 +206,11 @@ ki group delete <path> [--yes] [--scope <s>]
 - **不触碰** `source.dir` / wiki 目录；不存在 `.ki/trash`。
 - 例：`ki group delete "我的项目/API" --yes --scope my-project`。
 
-### `ki group list`
+### group list
 
-`list` 承接原查询命令的全部能力（评分分区 + 语义兜底 + 树渲染），参数与输出见后文《`ki group list`》章节。
+`list` 承接原查询命令的全部能力（评分分区 + 语义兜底 + 树渲染），参数与输出见后文「group list」章节。
 
-## `scope`
+## scope
 
 scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `delete` / `clear` 三个子命令。
 
@@ -189,10 +221,11 @@ scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。
 列出所有 scope（KB 目录层 + 向量语义层并集），标注每个 scope 存在于哪层、是否已在配置注册。
 
 ```bash
-ki scope list
+ki scope list          # 人类可读表格
+ki scope list --json   # JSON（脚本解析用）
 ```
 
-输出：
+输出（`--json`，字段节选）：
 ```json
 {
   "ok": true,
@@ -200,8 +233,12 @@ ki scope list
   "vectorAvailable": true,
   "count": 2,
   "scopes": [
-    { "scope": "default", "kb": true, "vector": true, "registered": true },
-    { "scope": "my-project", "kb": true, "vector": false, "registered": false }
+    { "scope": "default", "kb": true, "vector": true, "registered": true,
+      "wikiCount": 12, "ftsOnlyDocCount": 0, "ftsDocCount": 12,
+      "topGroups": ["项目"], "topGroupsStale": false },
+    { "scope": "my-project", "kb": true, "vector": false, "registered": false,
+      "wikiCount": 30, "ftsOnlyDocCount": 0, "ftsDocCount": 0,
+      "topGroups": ["Wiki"], "topGroupsStale": false }
   ]
 }
 ```
@@ -211,6 +248,9 @@ ki scope list
 | `kb` | 该 scope 在 KB 目录层存在（`dataDir/{scope}/`） |
 | `vector` | 该 scope 在向量语义层存在（zvec collection 的 `scope` 字段） |
 | `registered` | 该 scope 已在 `config.scopes` 中注册 |
+| `wikiCount` | KB 层文档数（文件级 relation 数） |
+| `ftsOnlyDocCount` / `ftsDocCount` | 仅 FTS 的文档数 / 有 FTS 索引的文档数 |
+| `topGroups` / `topGroupsStale` | 顶层组名（第一层）/ 该结果是否可能过期 |
 
 > 向量服务不可用时降级：`vectorAvailable:false` + `vectorReason`，`scopes` 仅依 KB 目录与配置列出。
 
@@ -305,7 +345,7 @@ ki scope clear my-project --tags ki-search --yes
 
 ---
 
-## `tag`
+## tag
 
 向量层 tag 发现（**只读**）。tag 是文档上的标量字段，无独立生命周期；本命令用于发现某 scope 下用过哪些 tag，便于后续 `ki search` / `ki doc list --tags` 精确过滤。
 
@@ -322,7 +362,7 @@ ki tag list [--scope <scope>] [--scan-limit <n>]
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--scope <scope>` | 项目隔离标识 | `default` |
-| `--scan-limit <n>` | 扫描上限（超出则结果为近似，`truncated:true`） | `10000` |
+| `--scan-limit <n>` | 扫描上限（显式指定则为硬上限，结果为近似 `truncated:true`；缺省取全） | 不限制 |
 
 **示例：**
 
@@ -349,7 +389,7 @@ ki tag list --scope my-project
 
 ---
 
-## 数值参数语义（CLI-11）
+## 数值参数语义
 
 | 参数 | 出现命令 | 语义 |
 |------|----------|------|
@@ -361,7 +401,7 @@ ki tag list --scope my-project
 
 ---
 
-## `doc`
+## doc
 
 向量层文档的查看与删除（管理面）。包含 `list` / `delete` 两个子命令。
 
@@ -455,7 +495,7 @@ ki doc delete abc123 --scope my-project --yes
 
 ---
 
-## `search`
+## search
 
 检索知识库内容（默认 **hybrid 混合检索**；`fulltext` 模式只查全文索引，不调用 embedding）。
 
@@ -472,7 +512,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（内部按 tag 分别取候选并保证 `ki-search` 内容优先；最终总条数仍不超过 `--limit`） |
 | `--mode <mode>` | 检索模式：`hybrid`（默认）或 `fulltext`（仅全文，不调用 embedding） | `hybrid` |
 | `--timeout <seconds>` | 查询 embedding 等待超时；超时后降级为关键词检索，范围 `0.001-60` 秒 | 配置 `embedding.queryTimeoutMs`（未配置为 `3` 秒） |
-| `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`，REQ-09） |
+| `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`） |
 
 > 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
 
@@ -504,7 +544,7 @@ ki search "告警静默策略" -s monitor,alerting
 }
 ```
 
-**定位字段**：`content` 是向量层存储文本（清洗后的 chunk 原文，不再拼接任何前缀；local KB 的文件级原文经 `--original` 获取）。每条结果按 `memoryId` 反查 `relations-cache.json`，附加定位字段（命中 KB 条目时存在，否则缺省）：
+**定位字段**：`content` 是向量层存储文本（清洗后的 chunk 原文，不再拼接任何前缀；local KB 的文件级原文经 `--original` 获取）。每条结果按 `memoryId` 反查 relations 元数据（`.relations/` 分片），附加定位字段（命中 KB 条目时存在，否则缺省）：
 
 | 字段 | 含义 |
 |------|------|
@@ -512,7 +552,7 @@ ki search "告警静默策略" -s monitor,alerting
 | `relation` | 文件级 relation 名（`hot_relation.text`，文件名去扩展名；用于定位原文，非原文全文） |
 | `original` | local KB 文件级原文（**仅 `--original` 开启时**；`originalRetrieved` 标记获取成功，多 chunk 命中仅首条携带并标 `deduplicated`，失败降级 `originalHint`） |
 
-> 批次 3（REQ-05/09）：`keywords` 与 `isFullText` 字段已从 search 输出与 relations-cache 移除（keywords 机制、isFullText 标记全链路删除）。
+> `keywords` 与 `isFullText` 字段已从 search 输出与 relations-cache 移除。
 
 反查使用**内存缓存**：首次构建 `Map<memoryId, …>` 后复用，文件 mtime/size 变化或 10 分钟 TTL 过期才重建，`ki search` 连续调用无额外 IO 开销。
 
@@ -535,9 +575,9 @@ ki search --query "仪表盘配置" --scope monitor --threshold 0.03
 
 ---
 
-## `ki group list`
+## group list
 
-查询 Group 树和 Relation 分区（词云展示已移除，REQ-05）。
+查询 Group 树和 Relation 分区。
 
 ```bash
 ki group list --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <count>] [--depth <depth>]
@@ -559,7 +599,7 @@ ki group list --scope <scope> [--groups <g1,g2>] [--mode <mode>] [--hot-count <c
 - `emerging`：新兴热区（近期活跃）
 - `full`：完整索引树
 
-> **分区上限语义（仅展示，非存储上限）**：hot 分区最多展示 `partition_config.maxHotCount`（默认 `10`）条，新兴席位（`reservedEmerging`，默认 `10`）优先保留，历史热区按 score 填充剩余席位；warm/cold 分区上限分别为 `maxWarmCount`（默认 `50`）/ `maxColdCount`（默认不截断）。**存储层（`relations-cache.json` 的 `hot_relations`）不设上限**；`full` 模式按分区展示 Relation，但**每区最多渲染 50 条**（超出时输出「还有 N 个未展示」并附上查看该区完整列表的命令）。注意区分：`--hot-count`（默认 `5`）是单次查询的展示条数，再次截断分区结果，与 `maxHotCount` 是两个独立旋钮。**两个旋钮的截断都可感知**：非 `full` 模式被 `--hot-count` 截断时，标题追加 `/ 本区共 N` 并输出「还有 N 个未展示；查看本区完整列表：`--mode <区> --hot-count <N>`」（默认 `--mode hot --hot-count 5` 同样适用，不会静默只给 5 条）。
+> **分区上限语义（仅展示，非存储上限）**：hot 分区最多展示 `partition_config.maxHotCount`（默认 `10`）条，新兴席位（`reservedEmerging`，默认 `10`）优先保留，历史热区按 score 填充剩余席位；warm/cold 分区上限分别为 `maxWarmCount`（默认 `50`）/ `maxColdCount`（默认不截断）。**存储层（relations 元数据中的 `hot_relations`）不设上限**；`full` 模式按分区展示 Relation，但**每区最多渲染 50 条**（超出时输出「还有 N 个未展示」并附上查看该区完整列表的命令）。注意区分：`--hot-count`（默认 `5`）是单次查询的展示条数，再次截断分区结果，与 `maxHotCount` 是两个独立旋钮。**两个旋钮的截断都可感知**：非 `full` 模式被 `--hot-count` 截断时，标题追加 `/ 本区共 N` 并输出「还有 N 个未展示；查看本区完整列表：`--mode <区> --hot-count <N>`」（默认 `--mode hot --hot-count 5` 同样适用，不会静默只给 5 条）。
 >
 > **分区守恒不变量**：被上限挤出的条目**回流到下一层分区**（热区溢出 → 常温/冷区，常温溢出 → 冷区），因此 `hot + warm + cold` 恒等于全量条目数，统计信息的三区之和与「总索引数」自洽，任何 Relation 都能在某个分区下查到（不再有「所有 mode 都查不到」的展示黑洞）。唯一例外是显式配置 `maxColdCount` 时对冷区末端的截断（冷区已是最后一层，无处回流；默认 `null` 不截断）。**注意**：守恒说的是**分区归属**，不等于一次渲染出全部条目——`full` 模式渲染层每区有 50 条上限（见上），非 `full` 模式受 `--hot-count`（默认 5）截断；两者均会输出未展示计数与可执行的完整查看命令，按提示用 `--mode <区> --hot-count <N>` 取完整列表。
 >
@@ -700,7 +740,7 @@ ki group list --scope my-project --mode full
 
 ---
 
-## `get-module-info`
+## get-module-info
 
 按 Group + Relation 读取本地 KB 中的 Markdown 原文。支持 Relation 名称的向量语义兜底：精确名称未命中时自动尝试模糊匹配。
 
@@ -748,7 +788,7 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 ---
 
-## `delete-relation`
+## delete-relation
 
 只删除**单个 Relation** 及其关联数据（relations-cache + 本地 KB 原文 + wiki 源文件 + 向量 + 全文索引）。
 
@@ -785,7 +825,7 @@ ki group delete "<group>" --yes   # 缺省只预览，--yes 才执行
 
 ---
 
-## `sync-relation`
+## sync-relation
 
 把 Relation 和模块说明写入本地索引。支持单条模式和批量模式。
 
@@ -797,7 +837,7 @@ ki sync-relation \
   -r <text> --module-info <markdown>
 ```
 
-> **超长警告（REQ-10）**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
+> **超长警告**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
 
 > **FTS-only 模式（`--no-vector`）**：写 KB 层并把正文写入独立全文 Collection，**不调用 embedding API、不写 dense 向量**——使用 `ki search --mode fulltext` 召回；语义 hybrid 检索仍不会召回该文档。单条与批量模式均支持：
 > ```bash
@@ -933,13 +973,31 @@ ki sync-relation -s my-project -i batch-input.json
 }
 ```
 
-### 关键词约束
+## store
 
-> （已随批次 3 REQ-05 删除：`sync-relation` 不再接收 `--keywords`，关键词机制全链路移除。）
+只写向量层的单条文本存储（不写 relations-cache 与本地 KB）。
 
----
+```bash
+ki store "待向量化文本" [-s <scope>] [--tags t1,t2]
+```
 
-## `mcp`
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `<text>`（位置） | 待向量化文本；`--text` 保留兼容 | 必填 |
+| `-s, --scope` | 项目隔离标识 | `default` |
+| `--tags` | 标签 | `ki-search` |
+
+> 只写向量层意味着没有 relation 归属，会产生「搜得到但列表里没有」的孤立向量。持久化知识请用 `sync-relation`。
+
+## bulk-store
+
+批量写向量层，参数从 JSON 文件读取。
+
+```bash
+ki bulk-store -s <scope> -i batch.json
+```
+
+## mcp
 
 启动 MCP (Model Context Protocol) Server，向 AI Agent 暴露知识索引能力。支持两种传输：
 
@@ -995,8 +1053,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 |------|------|
 | `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
 | `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
-| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
-| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
+| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`TOKEN_NOT_FOUND`） |
+| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`TOKEN_NOT_FOUND`） |
 
 > **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储或 `--token` 全权临时 Token）。
 >
@@ -1174,7 +1232,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 ---
 
-## `config`
+## config
 
 配置管理命令，用于生成和管理 ki 配置文件。
 
@@ -1285,7 +1343,7 @@ scopes:
 
 ---
 
-## `doctor`
+## doctor
 
 配置诊断命令，一次性只读检查 ki 运行环境是否就绪，输出 ✅/⚠️/❌ 分级报告。
 
@@ -1313,7 +1371,21 @@ ki doctor
 
 ---
 
-## `backup`
+## index-optimize
+
+触发索引整理（optimize）。导入收尾会自动执行；本命令用于失败重试或存量按需整理。
+
+```bash
+ki index-optimize -s <scope> [--concurrency 1] [--timeout-ms 600000]
+```
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `-s, --scope` | 目标 scope | - |
+| `--concurrency <n>` | 整理线程数（0 = 引擎自动；建议 1） | 引擎默认 |
+| `--timeout-ms <ms>` | 等待上限，超时按「中断」处理 | `600000` |
+
+## backup
 
 备份 scope 目录快照。
 
@@ -1367,11 +1439,11 @@ ki backup my-project --list
 **备份存储位置**：
 - 快照：`{backupDir}/{scope}/snapshots/snapshot.{timestamp}.tar.gz`
 
-（ai-results 备份已随批次 3 删除，备份仅保留 scope 快照。）
+（备份仅保留 scope 快照。）
 
 ---
 
-## `restore`
+## restore
 
 从快照还原 scope 数据。
 
@@ -1398,7 +1470,7 @@ ki restore <scope> --rebuild-vector --tags <t1,t2>    # 重建打标：为重建
 
 > **局部重建与中断标记**：带 `--group` 或 `--tags` 的重建为局部重建（输出 `partial: true`），成功后**不清除**导入中断标记（库整体仍可能不完整）；仅不带过滤参数的全量重建才清除。局部重建**不可与 `--from-snapshot` 组合**：快照仅还原 KB 层（向量层不随快照还原），还原后需全量重建与快照 KB 对齐；局部重建请对当前 KB 单独执行（不带 `--from-snapshot`）。
 
-（`--from-results` 重放已删除，REQ-04：ai-results 输入契约移除。）
+（`--from-results` 已移除：ai-results 输入契约不再支持。）
 
 **示例：列出可用备份**
 
@@ -1447,7 +1519,7 @@ ki restore my-project --from-snapshot --yes
 
 ---
 
-## `export`
+## export
 
 将 KB scope 中的结构化数据反向导出为 Markdown 文件目录。
 
@@ -1500,7 +1572,18 @@ exportedAt: 2026-06-16T22:30:00.000Z
 用户输入账号密码后进入认证流程，服务端校验成功后返回 token。
 ```
 
-## `migrate-relation-cache`（存储布局迁移）
+## wiki-backfill
+
+把 KB 中已有 Relation 全量写回 Wiki（历史补齐）。
+
+```bash
+ki wiki-backfill <scope> [--force]
+```
+
+- 前置：`wikiSync.enabled` 不为 false，且存在 wiki 目标目录（`group-index` 的 `source` 块或 `wikiSync.sourceDir`）。
+- 幂等：已存在的文件跳过；`--force` 全量覆盖（刷新 `exportedAt`）。
+
+## migrate-relation-cache
 
 把旧布局单文件 `<scope>/relations-cache.json` 显式迁移为 v3 per-Group 分片布局
 （`.relations/<groupPath>/cache.json` + `.relations/manifest.json`）。
@@ -1565,8 +1648,10 @@ wiki-output/
 
 ## 相关文档
 
-- [架构与协作关系](./architecture.md) - 了解 kisearch 与向量数据库的分层关系
+- [文档索引](./README.md) - 按使用意图查找文档
+- [架构与协作关系](./architecture.md) - kisearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
+- [MCP 工具参考](./mcp-tools.md) - 13 个工具及参数
 - [ki import 详解](./import.md) - 导入流程、参数与幂等追加语义（原文直导，无 AI）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案
 - [典型工作流](./workflows.md) - 完整的使用场景和最佳实践

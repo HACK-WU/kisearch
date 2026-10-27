@@ -76,6 +76,16 @@ zvec 向量库 collection 目录，存储向量数据与索引。
 - **观测**：`GET /healthz` 的 `vectorResources` 提供当前打开数、峰值、打开/释放次数及耗时累计。
 - **注意**：该上限不改变既有 idle-close 参数；idle-close 仍按原配置运行。
 
+### `vector.optimize`
+
+导入收尾的索引整理（`optimize`）开关与预算。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | `boolean` | `true` | 导入收尾是否自动触发索引整理 |
+| `concurrency` | 正整数 | `1` | 整理线程数（`0` = 引擎自动） |
+| `timeoutMs` | 正整数 | `600000` | 等待整理落定的上限，超时按「中断」处理（任务会提示用 `ki index-optimize` 重试） |
+
 ### `embedding`
 
 Embedding 提供商配置。
@@ -85,7 +95,7 @@ Embedding 提供商配置。
 | `provider` | `string` | `siliconflow` | **自由文本，不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为**错误文案里的显示名**（`dashscope /embeddings timeout …`），不切换实现。实现恒为 OpenAI 兼容客户端，实际厂商由 `baseURL` 决定 |
 | `baseURL` | `string` | `https://api.siliconflow.cn/v1` | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议，如 `https://host/compatible-mode/v1`）；换厂商只改这里。URL 是否真的兼容只能在真实请求时暴露（`ki doctor` 的连通性/密钥/维度三合一探测即此用途） |
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
-| `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
+| `dimension` | `number` | `4096` | 向量维度，必须与建库时写入 collection 的维度一致；可配置（如 `1024`），更改后需重建向量 |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
 | `queryTimeoutMs` | `number` | `3000` | 查询 embedding 超时（ms），范围 `1-60000`；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `scheduler` | `object` | 见下表 | import/restore/rebuild 的有界 Embedding 调度与背压护栏 |
@@ -97,7 +107,7 @@ Embedding 提供商配置。
 | `batchSize` | `16` | 每次逻辑 provider 调用的文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数 |
 | `maxConcurrency` | `25` | 单任务同时在途的逻辑 provider 调用数；出现 429/超时优先下调 |
 | `maxGlobalConcurrency` | `25` | daemon 内所有任务共享的逻辑调用槽数（含 provider 重试/退避）；必须 ≥ `maxConcurrency` |
-| `maxPrefetchBatches` | `25` | 单任务预取批次数；**可省略**：省略时自动取 `max(maxConcurrency, 2)`；显式设置时不能小于 `maxConcurrency`，否则实际并发会被静默压低（worker 数取两者最小值） |
+| `maxPrefetchBatches` | `25` | 单任务预取批次数；**建议省略**：省略且默认值小于 `maxConcurrency` 时自动抬到 `maxConcurrency`；显式设置时若小于 `maxConcurrency`，配置加载会 fail-loud（不会静默压低并发） |
 | `maxBufferedVectorBytes` | `67108864` | 单任务待持久化向量估算上限，超限背压 |
 | `globalBufferedVectorBytes` | `134217728` | daemon 级待持久化向量估算上限 |
 | `requestTimeoutMs` | `60000` | 单次 provider 请求超时（ms），上限 `600000`；超时按既有策略重试，**单批最坏耗时 ≈ 本值 ×(重试次数+1)**（重试 3 次时即 4 倍） |
@@ -145,12 +155,13 @@ Web 侧边栏「AI 对话」所使用的**对话模型**配置。**整段可缺�
 | `temperature` | `number` | 不传 | 透传给上游 |
 | `requestTimeoutMs` | 正整数 | `300000` | 单次上游调用**整体**超时（不约束工具轮次） |
 | `firstByteTimeoutMs` | 正整数 | `30000` | 只约束「建立连接并收到首个 chunk」 |
-| `defaultSystemPrompt` | `string` | 空 | 保留字段（当前由会话级 `systemPrompt` 决定） |
+| `defaultSystemPrompt` | `string` | 空 | 新建会话未显式传 `systemPrompt` 时使用的默认系统提示词 |
 | `supportsTools` | `boolean` | `true` | 上游是否支持 function calling。`false` → 走「daemon 代跑一次检索 + `degraded` 明示」的降级路径（**不是**禁用检索） |
 | `kbDisclosureAck` | `boolean` | `false` | 隐私确认（T12）。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
 | `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 图片能力**本期未实现**（后置 V2），保留字段 |
 | `reasoningEfforts` | `string[]` | 不配置 | **思考级别可选档位清单**（对话配置面板下拉的来源 + 合法性白名单）。按 **OpenAI 通用协议**原样透传（请求体顶层 `reasoning_effort`），**不做任何厂商适配**、本地不校验具体取值；仅约束形状：元素 1–64 字符非空、≤20 个、不重复、不得为保留字 `__follow_default__`。**不配置 ⇒ 面板该项不可调、且不下发该参数** |
 | `reasoningEffort` | `string` | 不配置 | 思考级别的**部署默认档**，必须 ∈ `reasoningEfforts`（否则配置加载阶段即报错，会阻断全部 `ki` 命令）。与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发** |
+| `contextChars` | 正整数 | `1000000` | 上下文窗口刻度（字符数，默认 1000K）：只作占比分母与 80% / 90% 预警基准，不参与截断或拒绝。对话配置层可覆盖 |
 
 > - **不含 `supportsTools` 也能用**：默认按「支持工具」走，上游真不支持时会由错误特征自动降级。
 > - **不要把 `apiKey` 明文提交到仓库**：用 `${ENV_VAR}` 引用环境变量（与 `embedding.apiKey` 一致）。
@@ -211,7 +222,7 @@ scopes:
 
 #### `scopes.<scope>.clean`
 
-数据清洗配置（REQ-06/07）。清洗只作用于**向量化输入**（local KB 始终保存文件原文），
+数据清洗配置。清洗只作用于**向量化输入**（local KB 始终保存文件原文），
 且 `ki import` 与 `restore --rebuild-vector` **共用同一套规则与 hooks** —— 两条链路的
 向量文本因此保持一致（rebuild 会按 `group-index.source` 记录的切分参数重新切 chunk）。
 
@@ -238,7 +249,7 @@ scopes:
 
 #### `scopes.<scope>.import`
 
-导入配置（REQ-08）。
+导入配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|

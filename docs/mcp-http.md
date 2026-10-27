@@ -76,8 +76,8 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 |------|------|
 | `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
 | `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
-| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
-| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
+| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`TOKEN_NOT_FOUND`） |
+| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`TOKEN_NOT_FOUND`） |
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
 
@@ -124,6 +124,23 @@ ki mcp --http --web
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
 | `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
 
+**其余路由**（鉴权与入队规则同上）：
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/tags` | GET | scope 下 tag 及文档数；会打开 Collection，走 write 通道 |
+| `/api/doc/get` | GET | 读取单篇文档原文；只读 `read` 通道，导入期间不被排队 |
+| `/api/doc/edit` | GET / POST | 读取 / 保存文档编辑 |
+| `/api/import/config` | GET | 当前 scope 的导入配置（扩展名 / 大小上限）+ 向量维度快照 |
+| `/api/import/incomplete` | GET | 未完成重试清单；只读 `read` 通道 |
+| `/api/import/retry-incomplete` | POST | 按清单重试未完成文件 |
+| `/api/restore/status` | GET | restore / rebuild 任务进度与结果 |
+| `/api/vector/status` | GET | 向量维度快照（读取，不排队） |
+| `/api/vector/status/refresh` | POST | 主动刷新维度快照；引擎 5s 未响应时降级返回上次快照 |
+| `/api/vector/optimize` | POST | 触发索引整理（同 `ki index-optimize`） |
+| `/api/tasks` | GET | 任务列表（只含计数，明细走单条） |
+| `/api/tasks/:id` | GET | 任务详情 |
+
 `/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 
 `/api/import/status` 的 `job` 会返回 `state`（`running`/`done`/`failed`/`cancelled`）、`phase`（`scan`/`vectorize`/`persist`）、`progress` 和 `cancelRequested`。服务重启后内存中的 job 状态不保留，需要重新提交或查看 daemon 日志。
@@ -132,7 +149,7 @@ ki mcp --http --web
 
 Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，每批发送 `{scope, uploadId, batchIndex, batchCount, files}`——**不再在最后一批带 `finalize`**：全部批次上传完成后，前端先调 `/api/import/preflight` 做重复导入预检，`files.matched === 0` 直接调 `/api/import/run`（body 带 `group?/chunkSize?/chunkOverlap?/vector?/tags?/conflictMode?/conflictSuffix?`）启动导入，`matched > 0` 则展示清单等用户确认：可选「跳过重复文档」（`run` 带 `skipDuplicates: true`，服务端重算并剔除重复项后导入其余）、「仍然导入（会新建副本）」或「取消」（**取消则不导入任何内容**）。`skipDuplicates` 只在 Web 提供（CLI 无对应参数）。全部文件均为疑似重复时按钮禁用；服务端兜底 `ALL_FILES_DUPLICATES`，前端按 `errorCode` 渲染为可纠正提示（不落红色失败态）并恢复面板供改选。把「上传」与「起导入」解耦的原因：`finalize` 会在最后一批上传时就启动导入，届时取消已无法保证零写入。`/api/import/run` 对同一 `uploadId` 幂等——已有 job 时返回它，不重复启动。标签页重开时，前端先用 `/api/import/upload-status` 查询 `uploadId`：已生成 `jobId` 则继续查询导入结果，尚未传完则清除本地任务记录，由用户重新选择文件。旧客户端仍可先调用 `/api/import/upload`，再调用 `/api/import/run`。
 
-**目录同步清理（`POST /api/import/prune`，REQ-20261019-001）**：导入页可选「导入后提示清理」，`run` 带 `pruneStale:true` + `pickMode:'dir'` 时，导入结果会多一个 `prune` 块（`{ total, items:[{group,relation,sourcePath,untouched}], token, skipReason?, … }`），**只提示不自动删**。用户勾选后再调 `/api/import/prune`。三条不可破的同源约束：① `scannedRels` 必须与 run 用**同一扩展名白名单**重扫暂存目录（`scopes.<scope>.import.extensions`）；② `group` 取 run 时写入的 `uploadId` 会话快照，不用前端表单实时值；③ `preserveRels` 两侧一致。任一不同源 → 候选集漂移 → `token` 恒失配（`409`）。删除成功后候选集已变，前端会用 `dryRun:true` 重算换新 token（否则「失败项可重试」无法成立）。双闸门：本次路径与库中 `sourcePath` 重合率 <80%（多半是选错目录层级）或候选占比 >80% 时整体关闭，不产候选。
+**目录同步清理（`POST /api/import/prune`）**：导入页可选「导入后提示清理」，`run` 带 `pruneStale:true` + `pickMode:'dir'` 时，导入结果会多一个 `prune` 块（`{ total, items:[{group,relation,sourcePath,untouched}], token, skipReason?, … }`），**只提示不自动删**。用户勾选后再调 `/api/import/prune`。三条不可破的同源约束：① `scannedRels` 必须与 run 用**同一扩展名白名单**重扫暂存目录（`scopes.<scope>.import.extensions`）；② `group` 取 run 时写入的 `uploadId` 会话快照，不用前端表单实时值；③ `preserveRels` 两侧一致。任一不同源 → 候选集漂移 → `token` 恒失配（`409`）。删除成功后候选集已变，前端会用 `dryRun:true` 重算换新 token（否则「失败项可重试」无法成立）。双闸门：本次路径与库中 `sourcePath` 重合率 <80%（多半是选错目录层级）或候选占比 >80% 时整体关闭，不产候选。
 
 上传中站内切页不会取消任务；关闭或刷新标签页后，未传完的文件需要重新选择并上传。尚未启动导入的暂存目录在空闲满 24 小时后，于**下一次新上传**时惰性清理，不做定时扫描。已启动导入的上传目录会登记为源目录，后续编辑/同步可能使用，因此不参与这项清理。`/api/import/status` 的 job 仍是进程内状态，服务重启后可能无法查询，客户端应显示“状态待确认”。
 

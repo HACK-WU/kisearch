@@ -1,18 +1,18 @@
 # ki 命令参考
 
-> 本文件是 `codekb-agent-guide` 和 `memory-agent-guide` 的公共命令参考。
-> 各规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
+> 本文件是 Agent 规则（[codekb-agent-guide](./codekb-agent-guide.md)）的公共命令参考。
+> 规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
 
 ---
 
 ## 公共命令
 
-以下命令的 `<scope>` 为占位符，各规则替换为实际 scope 值：
+以下命令的 `<scope>` 为占位符，使用时替换为实际 scope 值：
 
-| 规则 | scope 值 |
+| 用途 | scope 值 |
 |------|----------|
-| codekb-agent-guide | `${scope}` |
-| memory-agent-guide | `${scope}-memory` |
+| 代码知识库 | `${scope}` |
+| 记忆类内容 | `${scope}-memory` |
 
 > 用户画像已迁移至 AGENTS.md"用户画像"章节直接存储，不再使用 `user-profile` scope（见 `agents-md-init` skill）。
 
@@ -68,7 +68,7 @@ ki group list --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ```
 === my-project/API ===
 
-🔥 热门知识 (Top 3):
+热门索引 (Top 3):
 ├── 用户登录接口 (score: 8.5) [热]
 ├── 数据查询接口 (score: 6.2) [热]
 └── 文件上传接口 (score: 4.8) [常温]
@@ -141,10 +141,10 @@ ki sync-relation --scope <scope> --input /path/to/batch.json
 ### 5. 管理 Group
 
 ```bash
-# 列出所有已初始化的 scope（不需要 --scope 参数）
-ki scope list
+# 列出所有 scope（不需要 --scope 参数）
+ki scope list --json
 
-# 创建顶层 Group（不指定 --parent 即创建顶层）
+# 创建顶层 Group（位置参数即完整路径）
 ki group create "Group名称" --scope <scope>
 
 # 创建子 Group
@@ -154,36 +154,42 @@ ki group create "父Group路径/新Group名" --scope <scope>
 ki group delete "父Group路径/目标Group名" --yes --scope <scope>
 ```
 
-**`list-scopes` 输出示例**：
+**`ki scope list` 输出示例**：
 
 ```json
 {
   "ok": true,
+  "scopeMode": "default",
+  "vectorAvailable": true,
+  "count": 2,
   "scopes": [
-    { "scope": "my-project", "topGroups": ["我的项目"], "registered": true, "initialized": true },
-    { "scope": "qoder-wiki", "topGroups": ["QoderWiki"], "registered": true, "initialized": true }
-  ],
-  "total": 2
+    { "scope": "my-project", "kb": true, "vector": true, "registered": true,
+      "wikiCount": 12, "ftsOnlyDocCount": 0, "ftsDocCount": 12,
+      "topGroups": ["我的项目"], "topGroupsStale": false },
+    { "scope": "qoder-wiki", "kb": true, "vector": false, "registered": false,
+      "wikiCount": 30, "ftsOnlyDocCount": 0, "ftsDocCount": 0,
+      "topGroups": ["QoderWiki"], "topGroupsStale": false }
+  ]
 }
 ```
 
 **Group 操作输出示例**：
 
 ```json
-{ "ok": true, "path": "父Group路径/新Group名" }
+{ "ok": true, "scope": "my-project", "path": "父Group路径/新Group名", "createdScope": false }
 ```
 
-**`--force` 会删除 Group 以及所有子 Relation。**
+**删除默认只预览，追加 `--yes` 才执行；不触碰 `source.dir` / wiki 源目录。**
 
-**`create` 不带 `--parent` vs 带 `--parent`**：
-- 不带 `--parent`：创建顶层 Group
-- 带 `--parent`：在已有 Group 下创建子节点（需 `--parent` + `--name`）
+**`create` 的位置参数就是完整路径**：
+- 顶层：`ki group create "API" --scope <scope>`
+- 子节点：`ki group create "API/用户" --scope <scope>`（父路径必须已存在）
 
-**`list-scopes`**：列出 `kb/` 下所有已初始化的 scope 及其顶层 Group 名称，不需要 `--scope` 参数
+**`ki scope list`**：列出 KB、向量层与配置中出现的全部 scope，并标注所在层与注册状态；不需要 `--scope` 参数
 
 ---
 
-## 超长 module-info 提示（REQ-10）
+## 超长 module-info 提示
 
 `sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `ki import --source` 自动切分），但仍正常写入单条。
 
@@ -211,4 +217,4 @@ ki group delete "父Group路径/目标Group名" --yes --scope <scope>
 ki group list --scope <scope> --mode full
 ```
 
-> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由各规则文件（`codekb-agent-guide.md` / `memory-agent-guide.md`）定义。
+> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由 [codekb-agent-guide.md](./codekb-agent-guide.md) 定义。

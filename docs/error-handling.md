@@ -1,4 +1,4 @@
-## 异常处理与恢复
+# 异常处理与恢复
 
 本文档汇总 `knowledge-index` 当前实现中的**常见报错、警告与恢复方式**。
 
@@ -27,14 +27,14 @@
 
 常见错误：
 
-- `create` 缺少 `--name`
-- 非 `list-scopes` 操作缺少 `--scope`
+- `create` 缺少位置参数 `<path>`
+- `scopeMode: strict` 下缺少 `--scope`
 
-> 忘记 scope 名称？执行 `ki scope list` 列出所有已初始化的 scope。
+> 忘记 scope 名称？执行 `ki scope list` 查看全部 scope 及所在层。
 
 ### `sync-relation.ts` 单条模式参数不完整
 
-单条模式要求同时提供 `--group`、`--relation`、`--module-info`。
+单条模式要求 `--relation` 与 `--module-info`；`--group` 可留空（落到与 scope 同名的组）。
 
 ### 配置文件字段不合法（`CONFIG_FIELD_INVALID`）
 
@@ -102,7 +102,6 @@
 
 ## 三类：`src/lib/import.ts`（导入核心）相关错误
 
-> 历史：`--mode incremental` 与 `diff` 子命令已废弃移除（git diff 依赖被「幂等追加」语义替代）。
 
 ### `sourceDir 不存在或不是目录`
 
@@ -116,11 +115,9 @@
 
 恢复：确认 source 目录包含 `.md` 文件，或调整格式白名单配置。
 
-### `--group` 为空
+### `--group` 缺省时的落点
 
-原因：`--group` 传了空值。
-
-恢复：检查 `--group` 参数。缺省不传时落到 `default` group。
+`--group` 可以留空：目录导入按源目录的**顶层子目录名**各建根节点；单文档导入用 **scope 名**。需要固定落点时显式传 `--group <path>`。
 
 ### `scope "X" 没有待重试的未完成清单` / `未完成清单为空，无需重试`
 
@@ -146,41 +143,22 @@
 
 恢复：确认 `--source` 指向原目录；若文件确已移除，删除清单即可（`rm <scope>/.ki-import-incomplete.json`）。
 
-### `Access denied to scope: <scope>`
+### `unknown scope: "<scope>"（scopeMode=strict）` / `scopeMode=strict：必须显式传入 scope 参数`
 
-原因：scope 未在 `~/.ki/config.yaml` 的 `scopes.definitions` 中注册。
+原因：`scopeMode: strict` 下未传 scope，或 scope 未在 `~/.ki/config.yaml` 的 `scopes` 中注册。
 
-恢复：在 config.yaml 中添加 scope 定义：
+恢复：在 config.yaml 注册（key 即 scope 名），或把 `scopeMode` 改为 `default`：
 
 ```yaml
+scopeMode: strict
 scopes:
-  definitions:
-    my-project:
-      description: "项目描述"
-      acl: ["global", "my-project"]
+  my-project:
+    kbDir: /data/kb        # 可选
 ```
 
 ---
 
-## 四类：增量导入相关错误
-
-### 增量删除失败
-
-现象：增量 modify/delete 时 `deleteMemory`（内部函数，非独立命令）返回错误。
-
-处理：不阻塞流程，记录为 warning 继续执行。旧记录可能残留在向量数据库中，但不影响新记录的写入。
-
-### `relations-cache 中未找到 sourcePath`
-
-现象：删除条目时 `removeFromCache` 返回 false。
-
-原因：缓存中没有对应 `sourcePath` 的 relation，可能是首次导入时未写入 `sourcePath`。
-
-处理：记录 warning，继续清理 local KB。
-
----
-
-## 五类：展示参数问题
+## 四类：展示参数问题
 
 ### `--mode` 无效
 

@@ -13,20 +13,17 @@
 
 ---
 
-
-
 ## 📑 目录
 
 - [📖 项目介绍](#intro)
 - [🧠 Agent 长期记忆](#agent-memory)
 - [🆚 与常规 RAG 的差异](#why-not-rag)
 - [🧩 核心概念](#concepts)
-- [✨ 核心特性](#features)
 - [🚀 快速开始](#quickstart)
-- [🛠️ CLI 命令参考](#cli-commands)
-- [🔌 MCP 集成](#mcp)
-- [📥 知识库导入](#kb-import)
-- [📚 文档导航](#docs)
+- [🔌 接入 Agent](#mcp)
+- [🛠️ 命令与工具](#cli-commands)
+- [🖥️ 内置 Web 前端](#web)
+- [📚 文档地图](#docs)
 - [🔒 设计约束](#constraints)
 - [🤝 参与开发](#contributing)
 - [📄 License](#license)
@@ -35,11 +32,9 @@
 
 ## <a id="intro"></a>📖 项目介绍
 
-`kisearch`（CLI 命令：`ki`）是面向 AI Agent 的**结构化知识索引与长期记忆系统**，**主要通过 MCP 协议向 Agent 暴露**（同时提供 CLI 直接使用）。它不仅能导入和检索项目文档，也允许 Agent 通过 MCP **写入、更新、组织、回忆和删除记忆**，让知识在不同会话之间持续积累。它不是常规的 RAG chunk 检索，而是把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能"语义搜到"，也能"按索引直查原文"。
+`kisearch`（CLI 命令：`ki`）是面向 AI Agent 的**结构化知识索引与长期记忆系统**，主要通过 MCP 协议向 Agent 暴露，同时提供 CLI 与内置 Web 前端。它把项目知识组织成 **Group 树 / Relation 结构化视图**，叠加 [**zvec**](https://github.com/alibaba/zvec) 混合检索引擎（语义 + BM25 + RRF 融合），让 Agent 既能「语义搜到」，也能「按索引直查原文」。
 
-> 底层向量引擎 [**zvec**](https://github.com/alibaba/zvec)（阿里巴巴开源） 
-
-```
+```text
 发现层  zvec 向量引擎：语义召回 · BM25 全文 · RRF 融合 · 长期持久化
 交付层  kisearch：Group 树导航 · Relation 热缓存 · 原文全文交付
 记忆层  MCP 工具：Agent 写入 · 更新 · 回忆 · 组织 · 删除
@@ -47,44 +42,28 @@
 
 ![kisearch 架构](./assets/architecture.svg)
 
-### 配套可视化：内置 Web 前端
-
-kisearch 自带可视化前端 `web`，由 `ki mcp --http --web` 一并提供：浏览器打开 `http://127.0.0.1:7423/` 即可查看**总览**（scope / KB / 向量 / 注册 / 当前 scope 等状态）、**知识库浏览**（Group 树 + 文档列表 + 文件名模糊搜索）、**语义搜索**、**上传导入**、**知识写入**五个页面，便于在知识导入后验证写入效果、排查检索异常。
-
-此外，任意页面右侧提供**常驻可收起的 AI 对话面板**：多轮问答、流式输出、模型自主调用检索并给出**可点击回原文的来源引用**、历史会话管理，且**关闭面板不丢内容、不中止生成**。该能力需在配置文件的 `llm` 段填写模型（`baseURL` / `model` / `apiKey`），未配置时面板显示「未配置模型」而其余功能不受影响 —— 详见 [`docs/configuration.md`](./docs/configuration.md#llm) 与 [`docs/mcp-http.md`](./docs/mcp-http.md#apichat侧边栏-ai-对话)。
+*图 1：三层架构 —— zvec 负责语义召回与全文检索，kisearch 负责 Group 结构化与原文交付，MCP 负责 Agent 的记忆闭环。*
 
 ![kisearch Web 前端 · 总览](assets/overview.png)
 
-> 底层向量引擎 [zvec](https://github.com/alibaba/zvec) 的独立可视化工具 [Zvec Studio](https://github.com/zvec-ai/zvec-studio) 仍可作为向量层的辅助调试工具单独使用（`zvec-studio --port 7861`），本项目内置前端不集成跳转入口。
-
-### 启动内置 Web 前端
-
-```bash
-cd web && npm install && npm run build   # 构建前端产物（web/dist）
-ki mcp --http --web                      # 启动服务（提供静态页面 + /api/* 扩展路由）
-# 浏览器打开 http://127.0.0.1:7423/
-```
+*图 2：内置 Web 前端的总览页（`ki mcp --http --web`）—— 一屏查看 scope / KB / 向量 / 数据源状态，另有浏览、搜索、AI 对话、导入、写入、任务等页面。*
 
 ## <a id="agent-memory"></a>🧠 作为 AI Agent 的长期记忆系统
 
-知识库解决的是“有哪些资料可以查”，记忆系统解决的是“Agent 在不同会话之间需要记住什么、如何更新以及何时遗忘”。`kisearch` 使用同一套 Group / Relation / local KB / 向量索引，同时覆盖这两种场景：
+知识库解决「有哪些资料可以查」，记忆系统解决「Agent 在不同会话之间需要记住什么、如何更新、何时遗忘」。`kisearch` 用同一套 Group / Relation / 本地 KB / 向量索引同时覆盖两种场景：
 
 | 使用视角 | 典型内容 | 主要操作方式 |
 |---------|---------|-------------|
 | **知识库** | 外部 Wiki、项目文档、架构说明、API 资料 | `ki import`、`ki search`、MCP 查询工具 |
-| **Agent 记忆** | 用户偏好、项目约定、历史决策、排障结论、任务上下文 | Agent 通过 MCP 写入、更新、检索和删除 |
-
-MCP 工具形成了可持续的记忆闭环：
+| **Agent 记忆** | 用户偏好、项目约定、历史决策、排障结论 | Agent 通过 MCP 写入、更新、检索和删除 |
 
 | Agent 动作 | MCP 工具 | 作用 |
 |-----------|---------|------|
 | 回忆 | `ki_search`、`ki_group_list`、`ki_get_module_info` | 语义检索、按结构导航、读取原文 |
-| 记住 | `ki_sync_relation`、`ki_bulk_sync_relation` | 写入带 Group / Relation 的持久化结构化记忆 |
-| 更新 | `ki_sync_relation`、`ki_bulk_sync_relation`、`ki_edit_relation` | 短文档整篇覆盖；大 Relation 可多轮按行修改，完成后再更新索引 |
+| 记住 | `ki_sync_relation`、`ki_bulk_sync_relation` | 写入带 Group / Relation 的结构化记忆 |
+| 更新 | `ki_sync_relation`、`ki_bulk_sync_relation`、`ki_edit_relation` | 整篇覆盖；大 Relation 可多轮按行修改 |
 | 组织 | `ki_group_create`、标签、scope | 建立记忆层级、分类和项目隔离 |
-| 遗忘 | `ki_delete_relation` | 删除指定 Relation 及其关联的 KB、缓存和向量数据 |
-
-典型使用流程：
+| 遗忘 | `ki_delete_relation` | 删除指定 Relation 及其 KB、缓存和向量 |
 
 ```text
 Agent 从当前对话或代码中提取稳定事实
@@ -96,25 +75,23 @@ Agent 从当前对话或代码中提取稳定事实
 事实变化时覆盖更新；过期或错误时删除
 ```
 
-这里的“记忆”是**可由 Agent 管理的持久化记忆基础设施**：系统负责存储、索引、检索和生命周期管理，是否值得记住、写入什么内容以及何时更新，仍由 Agent 的工作流或提示词决定。
+> 这里的「记忆」是**可由 Agent 管理的持久化基础设施**：系统负责存储、索引、检索和生命周期管理；是否值得记住、写入什么、何时更新，由 Agent 的工作流或提示词决定。
 
 ## <a id="why-not-rag"></a>🆚 与常规 RAG 的差异
 
-常规 RAG 把文档切块（chunking）→ embedding → 向量检索 → 返回 chunk 片段。kisearch 在此之上叠加**结构化知识索引**，解决常规 RAG 的几个核心痛点：
+常规 RAG 把文档切块 → embedding → 向量检索 → 返回 chunk。kisearch 在此之上叠加结构化知识索引：
 
 | 维度 | 常规 RAG | kisearch |
 |------|---------|----------|
-| **知识组织** | 无序 chunk，无层级关系 | Group 树 + Relation 结构化索引，知识有归属有层级 |
-| **检索结果** | chunk 片段（可能断裂、缺上下文） | 原文全文（命中时可直接引用原文） |
-| **查询路径** | 仅语义检索一条路（模糊召回） | **双路径**：已知索引时**直接精准查询原文**（100% 命中、无向量噪声）；未知时语义检索兜底 |
-| **检索精准度** | 语义模糊匹配，存在噪声 | 索引直查**精准命中**原文（零误差）；语义检索有 memoryId 反查定位兜底 |
-| **原文定位** | 黑盒召回，不知结果来自哪 | 每条结果带 `group` / `relation` 定位字段，可定位到原文出处 |
+| **知识组织** | 无序 chunk，无层级关系 | Group 树 + Relation 索引，知识有归属有层级 |
+| **检索结果** | chunk 片段，可能断裂缺上下文 | 原文全文（命中时可直接引用原文） |
+| **查询路径** | 仅语义检索一条路 | **双路径**：已知索引时精准直查；未知时语义检索兜底 |
+| **原文定位** | 黑盒召回 | 每条结果带 `group` / `relation` 定位字段 |
 | **符号检索** | 弱（纯语义向量，camelCase 难匹配） | BM25 全文路支持类名 / 方法名精确召回 |
-| **状态管理** | 无状态，每次检索平等 | 冷热治理 + 评分衰减 + 使用计数，热点 Relation 优先 |
+| **状态管理** | 无状态 | 冷热治理 + 评分衰减 + 使用计数，热点优先 |
 | **跨会话** | 一次性检索，无积累 | 长期记忆库，Agent 沉淀的知识持续积累 |
-| **写入校验** | 无约束，随意写入 | scope 隔离 + WAL 原子写入 + 幂等覆盖更新 |
 
-> **一句话**：常规 RAG 解决"搜得到"，kisearch 同时解决"搜得到 + 看得见 + 定位到原文"。
+> **一句话**：常规 RAG 解决「搜得到」，kisearch 同时解决「搜得到 + 看得见 + 定位到原文」。
 
 ## <a id="concepts"></a>🧩 核心概念
 
@@ -123,22 +100,9 @@ Agent 从当前对话或代码中提取稳定事实
 | `scope` | 项目隔离标识，不同 scope 物理隔离（`scopeMode: default` 自动创建 / `strict` 需注册） |
 | `Group` | 知识分组路径，如 `项目/告警系统设计/告警处理服务` |
 | `Relation` | 某个 Group 下可被检索和命中的知识条目（含 memoryId / sourcePath） |
-| `module-info` | Relation 对应的 Markdown 原文说明 |
+| `module-info` | Relation 对应的 Markdown 原文 |
 | 标签（Tag） | `ki-search`（内容）/ `ki-path`（路径）/ `ki-relation`（关系）三层标签 |
 | 记忆（Memory） | Agent 可跨会话持续积累、更新和删除的知识，带评分衰减与冷热治理 |
-
-## <a id="features"></a>✨ 核心特性
-
-- **结构化知识索引**：Group 树导航、Relation 热缓存、关键词词云 —— 不是无序 chunk
-- **Agent 长期记忆**：通过 MCP 写入、更新、检索、组织和删除记忆，支持跨会话持续积累
-- **混合检索（Hybrid）**：语义向量 + BM25 全文 + RRF 融合排序；camelCase 符号（类名/方法名）可精确召回
-- **双路径查询**：索引直查（已知路径 → 原文）+ 语义检索（自然语言 → 向量 → 反查原文）
-- **原文交付**：search 结果按 memoryId 反查定位（group / relation），交付原文全文而非片段
-- **三层标签**：`ki-search` / `ki-relation` / `ki-path`，按需过滤提升准确率；默认搜全部且按标签限流（内容优先）
-- **向量语义兜底**：精确 Group / Relation 路径未命中时，自动经向量模糊定位
-- **TypeScript 直接执行**：jiti 运行时，无需编译；Node ≥ 18
-- **CLI + MCP 双通道**：19 个 CLI 命令；`ki mcp` 暴露 14 个 MCP 工具（stdio / HTTP 共享单例）
-- **MCP 安全约束**：不暴露 scope / doc 级联删除和 `--force` 操作；`ki_delete_relation` 仅按 Group+Relation 删除单条知识条目，`ki_group_delete_empty` 仅允许删除空 Group 节点
 
 ## <a id="quickstart"></a>🚀 快速开始
 
@@ -148,67 +112,66 @@ Agent 从当前对话或代码中提取稳定事实
 # 方式一：一键安装 CLI（推荐）
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/scripts/install-latest.sh | bash
 
-# 方式二：源码安装（开发 & CLI）
+# 方式二：源码安装
 git clone git@github.com:HACK-WU/kisearch.git && cd kisearch
 npm install && npm link
-# 编译 zvec 引擎（必需）：vector-client 从 dist/zvec-engine 导入运行时，跳过会在 ki mcp 启动时报
-# 'Cannot find module ../../dist/zvec-engine/index.js'
-npm run build:zvec-engine
+npm run build:zvec-engine   # 必需：运行时从 dist/zvec-engine 加载向量引擎
 ```
 
 ### 2. 初始化配置
 
 ```bash
-ki config init        # 生成 ~/.ki/config.yaml（含 dataDir/backupDir/vectorDir/embedding/scopeMode）
-ki doctor             # 一键校验配置、目录、Embedding API 密钥与向量维度
+ki config init        # 生成 ~/.ki/config.yaml
+ki doctor             # 校验配置、目录、Embedding 密钥与向量维度
 ```
-
-生成的配置（节选）：
 
 ```yaml
-dataDir: $HOME/.ki/kb       # KB 源数据目录
-backupDir: $HOME/.ki/backup  # 备份目录
-vectorDir: $HOME/.ki/vector  # zvec 向量库（所有 scope 共享，按 metadata 隔离）
+dataDir: $HOME/.ki/kb
+backupDir: $HOME/.ki/backup
+vectorDir: $HOME/.ki/vector        # 每个 scope 独立 Collection：collections/<scope>
 embedding:
   provider: siliconflow
-  apiKey: ${SILICONFLOW_API_KEY} # 显式引用环境变量；不做隐式回退
+  apiKey: ${SILICONFLOW_API_KEY}   # 显式引用环境变量，不做隐式回退
   model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096             # 必须与建库时一致
-  queryTimeoutMs: 3000        # 查询 embedding 超时（ms），默认 3 秒
-scopeMode: default            # default: 自动创建 scope；strict: 必须显式注册
+  dimension: 4096                  # 必须与建库时一致
+  queryTimeoutMs: 3000             # 查询 embedding 超时（ms）
+scopeMode: default                 # default 自动创建 scope；strict 需显式注册
 ```
 
-> `SILICONFLOW_API_KEY` 需在环境中导出（MCP 场景必须在客户端 `env` 字段显式传入，MCP 进程不继承 shell 环境）。
+> `SILICONFLOW_API_KEY` 需在环境中导出；MCP 场景必须在客户端 `env` 字段显式传入（MCP 进程不继承 shell 环境）。完整配置项见 [`docs/configuration.md`](./docs/configuration.md)。
 
-### 3. 使用示例（导入外部 Wiki + HTTP 模式启动 MCP）
+### 3. 导入外部 Wiki
 
 ```bash
-# ① 导入外部 Markdown Wiki（原文直导，无 AI 依赖，自动切分；幂等追加，
-#    重复执行即增量更新；同名默认按「增量导入」处理 —— 内容未变不重算，
-#    同名不同 sourcePath 直接覆盖；需要保留旧文档请显式 --conflict-mode suffix）
-# 可选：--conflict-mode overwrite|skip|suffix --conflict-suffix '_{n}'
 ki import \
   --scope my-project \
   --source /path/to/wiki \
   --group Wiki \
   --chunk-size 1000 \
   --chunk-overlap 150
-  # 可选：--tags <t1,t2> 为导入文件打标（可被 ki search -t <tag> 召回；--no-vector 时写入 FTS-only 标签索引）
-
-# ② 语义检索（默认搜全部标签；不传 --tags 时内部按标签取候选，最终总条数仍不超过 --limit，ki-search 内容优先）
-ki search --scope my-project --query "用户登录流程"
-
-# ④ 构建内置 Web 前端（产物输出到 web/dist，仅需首次构建或前端改动后）
-cd web && npm install && npm run build && cd ..
-
-# ⑤ 启动 MCP HTTP 共享单例并附带可视化前端（供 AI Agent 经 URL 接入；浏览器访问 http://127.0.0.1:7423/）
-ki mcp --http --web
-
-# ⑥ 查看连接信息（含持锁进程与对外绑定地址）
-ki mcp --status
 ```
 
-导入完成后，AI Agent 通过 MCP 接入（推荐 **HTTP 模式**）：
+幂等追加：重复执行同一条命令即增量更新（内容未变不重算；同名不同来源默认覆盖，需保留旧文档时用 `--conflict-mode suffix`）。参数与冲突策略见 [`docs/import.md`](./docs/import.md)。
+
+### 4. 验证检索
+
+```bash
+ki search "用户登录流程" --scope my-project
+```
+
+结果带 `group` / `relation` 定位字段；需要整篇原文时加 `--original`。查询技巧见 [`docs/query-kb.md`](./docs/query-kb.md)。
+
+### 5. 启动 MCP 与 Web 前端
+
+```bash
+cd web && npm install && npm run build && cd ..   # 仅首次或前端改动后需要
+ki mcp --http --web
+# 浏览器打开 http://127.0.0.1:7423/
+```
+
+## <a id="mcp"></a>🔌 接入 Agent
+
+HTTP 模式（推荐，多 IDE / 远程共享同一进程）：
 
 ```json
 {
@@ -221,275 +184,99 @@ ki mcp --status
 }
 ```
 
-> 回环绑定（仅本机）免鉴权时省略 `headers`；跨机访问需绑定 `0.0.0.0` 并先生成 Token。连接 URL 需与 `ki mcp --status` 输出的 `host`/`port` 完全一致。
-
-Token 生成与查看（多 Token + scope 授权）：
+- 回环绑定（仅本机）免鉴权时可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token。
+- stdio 模式用 `{"command": "ki", "args": ["mcp"], "env": {"SILICONFLOW_API_KEY": "..."}}`，它会桥接到本机 daemon，不会另开向量库持锁进程。
+- 连接 URL 需与 `ki mcp --status` 输出的 `host` / `port` 完全一致。
 
 ```bash
-ki mcp token generate --scope team-a      # 生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
-ki mcp token list                          # 列出所有 Token（含明文与授权 scope）
-ki mcp token update <id> --scope team-b    # 修改指定 Token 的授权 scope
-ki mcp token delete <id>                   # 删除指定 Token（立即失效）
+ki mcp --http --web                    # 启动（HTTP + 前端）
+ki mcp --http --daemon                 # 后台常驻
+ki mcp restart                         # 重启（幂等，等待就绪后返回）
+ki mcp --status                        # 只读查看状态
+ki mcp stop                            # 关闭本机所有实例并清理 lock
+
+ki mcp token generate --scope team-a   # 生成授权 Token（单个 / 逗号分隔多个 / all）
+ki mcp token list                      # 列出 Token（含明文与授权 scope）
+ki mcp token update <id> --scope team-b
+ki mcp token delete <id>
 ```
 
-> 每个 Token 可绑定一个或多个 scope（`all` 表示全部），不同 Token 访问不同 scope，实现租户/项目数据隔离。
+> 启动前会自动预检：配置/目录/无效密钥等硬错误 fail-loud；embedding 网络暂不可用只告警并继续启动。详见 [`docs/mcp-http.md`](./docs/mcp-http.md)。
 
-## <a id="cli-commands"></a>🛠️ CLI 命令参考
+## <a id="cli-commands"></a>🛠️ 命令与工具
 
 | 命令 | 说明 |
 |------|------|
-| `import` | 外部 Markdown Wiki 导入：原文直导 + 自动切分，**幂等追加**（重复执行 = 增量）；支持 `--conflict-mode/--conflict-suffix` 同名策略、`--no-vector` FTS-only 全文索引、`--no-assets` 关闭图片附件收集 |
-| `ki group` | Group 管理：`create` / `delete` / `list`（单一路径，无 `--parent`/`--name`） |
-| `ki group list` | `group` 的 list 子命令：Group 树 + 分区（索引直查 · 支持模糊路径语义兜底） |
-| `get-module-info` | 读取本地 KB 原文（索引直查 · 支持模糊 Relation 语义兜底） |
-| `sync-relation` | 写入 Relation + 本地 KB（单条/批量 dense 向量化；`--no-vector` 改写独立 FTS-only 全文索引） |
-| `delete-relation` | 删除 Relation（cache + KB + wiki + 向量四层） |
-| `search` | 语义检索（zvec 混合检索，输出含原文定位字段） |
-| `store` | 向量化存储单条知识 |
-| `bulk-store` | 批量向量化存储知识 |
-| `scope` | scope 管理：list / delete / clear（KB + 向量两层） |
-| `doc` | 向量文档管理：list / delete |
-| `tag` | 向量 tag 发现：list（只读，含文档数） |
-| `config` | 配置管理：init（生成 YAML） |
-| `doctor` | 配置诊断（apiKey / 连通性 / 维度 / 目录） |
-| `backup` | 备份 scope 目录快照 |
-| `restore` | 从快照还原（支持 `--list` / `--rebuild-vector`；重建支持 `--group` 过滤 / `--tags` 打标的局部重建） |
-| `export` | 导出 KB 为 Wiki Markdown |
-| `mcp` | 启动 MCP Server（stdio 默认 / `--http` 共享单例 / `--status` / `token` 子命令） |
+| `import` | 外部 Markdown 导入（幂等追加；`--conflict-mode` / `--no-vector` / `--no-assets`） |
+| `datasource` | 数据源登记与同步：`add` / `sync` / `prune` / `list` / `remove` |
+| `group` | Group 管理：`create` / `delete` / `list` |
+| `get-module-info` | 读取本地 KB 原文（批量 ≤10 条） |
+| `sync-relation` | 写入 / 更新 Relation + 本地 KB |
+| `delete-relation` | 删除单条 Relation（cache / KB / wiki / 向量四层） |
+| `search` | 语义检索（`hybrid` 默认 / `fulltext` 不调用 embedding） |
+| `store` / `bulk-store` | 只写向量层（单条 / 批量） |
+| `scope` | scope 管理：`list` / `delete` / `clear` |
+| `doc` | 向量文档：`list` / `delete` |
+| `tag` | tag 发现：`list` |
+| `config` | 配置：`init` |
+| `doctor` | 配置与连通性诊断 |
+| `backup` / `restore` | scope 快照备份 / 恢复（`--rebuild-vector` 重建向量） |
+| `export` | 导出 KB 为 Markdown |
+| `wiki-backfill` | 历史 Relation 写回 Wiki |
+| `migrate-relation-cache` | 元数据布局迁移（v3 per-Group 分片） |
+| `index-optimize` | 索引整理（失败重试 / 存量整理） |
+| `mcp` | MCP 服务（stdio / `--http` / `--status` / `token`） |
 
-> `ki <command> --help` 查看每个命令的完整参数。
+> 完整参数：`ki <command> --help` 或 [`docs/cli.md`](./docs/cli.md)。
+> MCP 共暴露 **13 个工具**，参数见 [`docs/mcp-tools.md`](./docs/mcp-tools.md)。MCP 不提供 scope / doc 级联删除与 `--force` 操作，需要时用 CLI。
 
-## <a id="mcp"></a>🔌 MCP 集成
+## <a id="web"></a>🖥️ 内置 Web 前端
 
-启动后 AI Agent 可通过标准 MCP 协议使用知识索引能力：
+`ki mcp --http --web` 一并提供浏览器界面（`http://127.0.0.1:7423/`），用于导入后验证写入效果、排查检索异常：
 
-```bash
-ki mcp                      # stdio 模式（默认；桥接本机 daemon，见 docs/mcp-http.md）
-ki mcp --http               # HTTP 共享单例/唯一 zvec owner（见 docs/mcp-http.md）
-ki mcp --http --web         # HTTP 模式 + 可视化前端（浏览器访问 http://127.0.0.1:7423/）
-ki mcp --http --daemon      # HTTP 模式后台常驻运行（-d 同义，SSH 断开不退出；--web 组合同样生效）
-ki mcp restart              # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
-ki mcp --status             # 查看 HTTP 单例运行状态（只读）
-ki mcp stop                 # 关闭本机所有 ki mcp 实例并清理 lock
-ki mcp token generate --scope team-a   # 生成授权 Token（必须指定 scope）
-ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
-ki mcp token update <id> --scope all    # 修改 Token 授权 scope
-ki mcp token delete <id>                # 删除 Token（立即失效）
-```
+| 页面 | 用途 |
+|---|---|
+| 总览 | scope / KB / 向量 / 数据源 / 当前 scope 状态 |
+| 知识库浏览 | Group 树 + 文档列表 + 文件名/路径搜索 |
+| 语义搜索 | hybrid / fulltext 检索，结果可跳原文 |
+| AI 对话 | 多轮问答、流式输出、检索来源可点击回原文；独立页面 + 全站右侧面板 |
+| 上传导入 | 浏览器内选择/拖拽目录导入，含重复预检与清理候选 |
+| 知识写入 | 在线写入 Relation 与正文 |
+| 数据源 | 已登记的本地目录 / Git 数据源；可添加 Git 源、触发同步、清理待删候选 |
+| 后台任务 | 导入/同步任务进度、结果明细与重试 |
 
-> **启动预检**：HTTP daemon 启动前自动执行健康检查，报告写入 stderr（不污染 stdio）。embedding 网络/服务暂时不可用（重试 1 次后）或未配置 `embedding.apiKey` 时记为 ⚠️ 警告并继续启动；配置文件、目录、无效密钥等硬错误仍 fail-loud。`ki doctor` 对缺失 key 仍报错；启用向量化的导入/关系写入会返回向量失败信息。stdio 客户端只负责桥接并等待 daemon 就绪。
+> AI 对话需在配置 `llm` 段填写 `baseURL` / `model` / `apiKey`；未配置时面板显示「未配置模型」，其余功能不受影响。
 
-### MCP 客户端配置
+## <a id="docs"></a>📚 文档地图
 
-支持 **stdio** 与 **HTTP** 两种接入方式：
+完整索引见 [`docs/README.md`](./docs/README.md)，按「我想做什么」查找。
 
-#### 方式一：stdio（默认，桥接本机 daemon）
-
-```json
-{
-  "mcpServers": {
-    "ki": {
-      "command": "ki",
-      "args": ["mcp"],
-      "env": { "SILICONFLOW_API_KEY": "<your-api-key>" }
-    }
-  }
-}
-```
-
-#### 方式二：HTTP（共享单例，多 IDE / 远程接入）
-
-先用 `ki mcp --http` 启动服务（详见 [`docs/mcp-http.md`](./docs/mcp-http.md)），再用 URL 型条目接入：
-
-```json
-{
-  "mcpServers": {
-    "ki": {
-      "url": "http://127.0.0.1:7423/mcp",
-      "headers": { "Authorization": "Bearer <your-token>" }
-    }
-  }
-}
-```
-
-> 回环绑定（仅本机）免鉴权时，可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token——先用 `ki mcp token generate --scope <scope>` 生成授权 Token，再用 `ki mcp token list` 查看明文填入上方 `<your-token>`。
-> HTTP 客户端应使用一致的连接 URL；本机 IDE 可以继续保留 stdio `command: ki mcp`，stdio 会桥接到同一 daemon，不会另开 zvec owner。
-
-### 暴露的工具（14 个）
-
-| 工具 | 功能 | 对应路径 |
-|------|------|---------|
-| `ki_group_list` | 查询 Group 树 + Relations + 词云 | 索引直查 |
-| `ki_get_module_info` | 读取本地 KB Markdown 原文 | 索引直查 |
-| `ki_group_create` | 创建 Group 节点 | — |
-| `ki_group_delete_empty` | 删除空 Group 节点（非空节点拒绝删除） | — |
-| `ki_sync_relation` | 写入单条 Relation（向量 + KB 双写，`vector=false` 非向量化） | 写入 |
-| `ki_edit_relation` | 对已有大 Relation 多轮、多区域按行编辑草稿；`finish` 后才更新向量或全文索引 | 更新 |
-| `ki_bulk_sync_relation` | 批量写入 Relation（一次 embed + 一次向量写入，比多次并发调用快 N 倍） | 写入 |
-| `ki_delete_relation` | 删除 Relation（四层清理） | — |
-| `ki_search` | 语义检索，输出 group/relation 定位字段 | 语义检索 |
-| `ki_store` | 向量化存储单条知识 | 写入 |
-| `ki_bulk_store` | 批量向量化存储知识 | 写入 |
-| `ki_scope_list` | 列出 scope 及其 KB/向量状态 | — |
-| `ki_tag_list` | 列出 scope 下 tag 及文档数 | — |
-
-> `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（内部按标签取候选，最终总条数仍不超过 `limit`，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
-> MCP 工具不提供 scope / doc 级联删除和 `--force` 操作：`ki_delete_relation` 只能删除单条 Relation，`ki_group_delete_empty` 只能删除空 Group 节点；需要级联或强制操作时使用 CLI。
-
-## <a id="kb-import"></a>📥 知识库导入
-
-### 前置：scope 注册
-
-- `scopeMode: default`（默认）：首次使用某个 scope 时自动创建，无需注册
-- `scopeMode: strict`：必须在 `~/.ki/config.yaml` 的 `scopes` 中显式注册，否则拒绝访问
-
-### 首次导入（外部 Wiki 原文直导，无 AI 依赖）
-
-```bash
-ki import \
-  --scope my-project \
-  --source /path/to/wiki \
-  --group Wiki
-```
-
-内部完成：格式白名单校验（默认 `.md`）→ 自动切分（chunkSize 1000 / overlap 150，段落边界优先）→ 批量向量化（zvec）→ local KB 文件级原文写入 → relations-cache 写入（含 memoryIds）。
-
-### 增量更新（幂等追加，无 AI）
-
-```bash
-# 修改/新增 source 目录文件后，重新执行同一条 import 命令即可（幂等追加）
-ki import --scope my-project --source /path/to/wiki --group Wiki
-```
-
-`--group` / `--chunk-*` 等参数详解见 [`docs/import.md`](./docs/import.md)。
-
-## <a id="docs"></a>📚 文档导航
-
-### 操作指南
-
-| 文档 | 场景 |
+| 分组 | 包含 |
 |------|------|
-| [`docs/build-kb.md`](./docs/build-kb.md) | 首次构建知识索引 |
-| [`docs/query-kb.md`](./docs/query-kb.md) | 知识库查询 |
-| [`docs/group.md`](./docs/group.md) | 索引结构管理 |
-| [`docs/verify-index.md`](./docs/verify-index.md) | 验证操作结果 |
-| [`docs/import.md`](./docs/import.md) | `ki import` 导入流程、参数与幂等追加语义详解 |
-
-### 参考与架构
-
-| 文档 | 内容 |
-|------|------|
-| [`docs/cli.md`](./docs/cli.md) | CLI 命令完整参考（含 search 输出字段说明） |
-| [`docs/configuration.md`](./docs/configuration.md) | 配置文件说明（数据目录/Embedding/对话模型 `llm`/会话目录 `chatDir`/scope 映射/导入清洗） |
-| [`docs/architecture.md`](./docs/architecture.md) | 架构与协作关系 |
-| [`docs/markdown-multilang.md`](./docs/markdown-multilang.md) | 内置 Web 前端：多语言代码块（`::: code-group`）的写法、首选语言设置与降级行为 |
-| [`docs/mcp-http.md`](./docs/mcp-http.md) | MCP HTTP 共享单例模式（含 `/api/*` 扩展路由与 `/api/chat/*` 对话接口） |
-| [`docs/vector-engine-mem.md`](./docs/vector-engine-mem.md) | 向量引擎（zvec）设计说明 |
-| [`docs/tags-design.md`](./docs/tags-design.md) | 三层标签设计 |
-| [`docs/error-handling.md`](./docs/error-handling.md) | 异常处理与恢复 |
-| [`docs/workflows.md`](./docs/workflows.md) | 典型工作流 |
-| [`docs/backup-restore.md`](./docs/backup-restore.md) | 备份与恢复 |
-
-### Agent Skills
-
-| Skill | 场景 | 核心能力 |
-|-------|------|---------|
-| [`skills/ki-search/SKILL.md`](./skills/ki-search/SKILL.md) | 代码知识库检索/写入 | 四步走查询 + 白名单/黑名单 |
-| [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md) | 记忆系统行为总控 | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
-| [`ki-search-first`](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置 | 先查项目记忆，再进入代码、专家或解决方案路径 |
-| [`ki-memory-lookup`](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 查询已沉淀记忆 | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
-| [`ki-memory-write`](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-write) | 写入和维护 Agent 记忆 | 统一查重、格式校验、双写、刷新、校验与结账删除 |
-
-> 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](./rules/ai-codekb-memory.md)。
-
-#### ki 配套 Skills 最佳实践
-
-三个配套 Skill 共同构成“先查、再判断、后写入”的记忆工作流：
-
-```text
-ki-search-first
-        ↓
-ki-memory-lookup（按需查询既有记忆）
-        ↓
-完成分析或提炼记忆内容
-        ↓
-ki-memory-write（查重后写入并校验）
-```
-
-1. **`ki-search-first`：任何任务先查记忆**
-   - 先查询项目已有记忆，再决定是否需要读代码、查专家资产或查解决方案。
-   - 已定位到要修改的代码时，额外查询强关联，确认改动会牵动哪些模块。
-   - 记忆不可用或没有命中时应降级继续，不应阻塞主任务；但不能把“没有命中”当成“项目中不存在”。
-
-2. **`ki-memory-lookup`：查询只读，按记忆类型选路径**
-   - 专题记忆、接口信息、数据流和错误库优先使用语义检索；查询中带上功能模块名和关键代码符号。
-   - 强关联、决策记忆和待生效变更优先使用 `ki_group_list` 目录导航；需要列全量条目时必须使用 `mode="full"`。
-   - 同一 Group 需要读取多条内容时，使用 `ki_get_module_info` 的 `relations` 数组批量读取；同一批最多 10 条，并逐条核对返回结果。
-   - 该 Skill 只负责查询，不直接修改记忆；与代码实际不一致时，以代码为准。
-
-3. **`ki-memory-write`：统一写入，避免记忆退化**
-   - 写入前先查重：同一 Group 下已有相同 Relation 时更新，不重复创建。
-   - 持久化记忆统一使用 `ki_sync_relation` / `ki_bulk_sync_relation`，不要使用只写向量层的 `ki_store` / `ki_bulk_store`，避免产生孤儿向量。
-   - 写入内容使用纯文本描述和列表，不放 YAML frontmatter、Markdown 标题或表格；需要语义召回时，关键词必须是正文中真实出现的自然语言词汇。
-   - 写入后刷新 Group 视图并抽查落盘结果；`vector=false` 仅用于待生效变更台账，这类内容通过目录查询，不依赖语义检索。
-   - `ki_delete_relation` 对普通记忆仅在明确要求遗忘时使用；其余情况下优先覆盖更新保留演进历史。待生效变更必须在正式变更落地后再结账删除。
-
-> 实践建议：将稳定的项目约定、历史决策、接口信息、数据流、错误解法和跨模块关联写入记忆；不要把一次性诊断、短期上下文或未经确认的推测当作长期事实。
-
-**安装本仓库的 Skill**（基于 [`HACK-WU/skills`](https://github.com/HACK-WU/skills) 的 `skill-install.sh`，通过 `--repo` 指定本仓库）：
-
-```bash
-# 一键安装本仓库全部 skill 到目标项目
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- --repo HACK-WU/kisearch -t /path/to/your-project
-
-# 只安装指定 skill（如 ki-search）
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- --repo HACK-WU/kisearch -n ki-search -t /path/to/your-project
-```
-
-**安装三个 ki 配套 Skill**：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
-  bash -s -- --repo HACK-WU/skills \
-  -n ki-search-first,ki-memory-lookup,ki-memory-write \
-  -t /path/to/your-project
-```
-
-> 该安装器基于 `npx skills`（需 Node.js >= 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update`（更新）、`remove`（删除）、`list`（查看）子命令。安装后直接对话即可触发对应 skill。
-
-**安装本仓库的 Rules**（当前安装器仅支持 Skills，Rules 需手动放置）：
-
-```bash
-# 将记忆行为总控规则安装到目标项目的 rules/ 目录
-mkdir -p /path/to/your-project/rules
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/rules/ai-codekb-memory.md \
-  -o /path/to/your-project/rules/ai-codekb-memory.md
-```
-
-> 存量用户迁移提示：旧版 `ki setup` 使用 `~/.ki-targets` 记录目标目录，现已由 HACK-WU/skills 安装器的 `~/.skill-targets`（或当前目录 `./.skill-targets`）取代，旧配置文件不再生效；如需保留原目标列表，请将其内容迁移到新配置文件。
+| 入门 | [首次构建](./docs/build-kb.md)、[配置](./docs/configuration.md)、[导入](./docs/import.md)、[验证](./docs/verify-index.md) |
+| 操作 | [查询](./docs/query-kb.md)、[Group 管理](./docs/group.md)、[备份恢复](./docs/backup-restore.md)、[典型工作流](./docs/workflows.md) |
+| 参考 | [CLI](./docs/cli.md)、[MCP HTTP](./docs/mcp-http.md)、[MCP 工具](./docs/mcp-tools.md)、[错误处理](./docs/error-handling.md) |
+| 机制 | [架构](./docs/architecture.md)、[向量引擎](./docs/vector-engine-mem.md)、[标签设计](./docs/tags-design.md) |
+| Agent | [Skill / Rule 集成](./docs/agent-integration.md)、[命令速查](./docs/ki-command-guide.md)、[行为规则](./docs/codekb-agent-guide.md) |
 
 ## <a id="constraints"></a>🔒 设计约束
 
-- **Scope 隔离**：仅允许字母、数字、连字符、下划线；禁止路径遍历 `../`；不同 scope 物理隔离
-- **关键词规则**：仅自然语言词汇，禁止代码符号（类名、方法名、路径等）；关键词需真实出现在原文中
-- **数据版本**：所有 JSON 文件含 `version` 字段，当前版本 1
+- **Scope 隔离**：仅允许字母、数字、连字符、下划线；禁止路径遍历；不同 scope 物理隔离
 - **WAL 写入**：JSON 写入采用临时文件 → 原子 rename
-- **自动迁移**：读取旧格式 `group-index.json`（`roots`）自动迁移为 `groups`
 - **幂等安全**：重复操作无副作用（重复导入覆盖更新）
 - **快速失败**：输入校验失败立即退出，不静默降级
 - **异常恢复**：运行时数据损坏自动从 `_template/` 恢复
+- **MCP 安全边界**：不暴露 scope / doc 级联删除与 `--force`
 
 ## <a id="contributing"></a>🤝 参与开发
 
 ```bash
-npm install                 # 安装依赖
-npm run build:zvec-engine   # 构建 zvec 引擎层（tsc）
-npm test                    # 运行单元测试（test/*.test.ts）
-npm run test:zvec-engine    # zvec 引擎测试（node --test）
-npm run test:all            # 全部单元测试
-npx jiti src/search.ts --help   # 直接执行任意命令
+npm install
+npm run build:zvec-engine        # 构建向量引擎层（tsc）
+npm test                         # 单元测试
+npm run test:zvec-engine         # 引擎测试（node --test）
+npm run test:all                 # 全部单元测试
+npx jiti src/search.ts --help    # 直接执行任意命令
 ```
 
 ## <a id="license"></a>📄 License

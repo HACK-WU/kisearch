@@ -2,7 +2,7 @@
 
 > Group 的创建、删除与查询。命令族固定为 `ki group create|delete|list`，组的位置只由**单一路径**表达。
 
-## 触发场景
+## 适用场景
 
 - 需要新建一个 Group 节点（或为某个 scope 首次建库）
 - 需要删除整个 Group（知识库侧）
@@ -87,7 +87,7 @@ ki group delete <path> [--yes] [--scope <s>]
 > 且跨组共享的 docId 会被保留，**实际删除数可能少于预览值**（结果里的 `sharedKept` / `sharedContentKept` 会说明保留了哪些）。
 >
 > ⚠️ 历史遗留（仅理论边界）：只有在 **2026-08-05 之前**的版本写入过关系向量的库，才会有"没有 `group` 字段"的辅助向量，
-> 按 group 枚举不到它们，需要用 `ki rebuild-vector` 重建清理；此后版本写入的向量都带 `group`。
+> 按 group 枚举不到它们，需要用 `ki restore <scope> --rebuild-vector` 重建清理；此后版本写入的向量都带 `group`。
 
 带 `--yes` 执行后：
 

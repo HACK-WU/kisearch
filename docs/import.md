@@ -1,10 +1,8 @@
-## `ki import` 使用说明
+# `ki import` 使用说明
 
-`src/import.ts` 实现外部 Markdown Wiki 导入（幂等追加）。**扁平命令，无子命令层级**。
+把外部 Markdown 目录导入知识库（幂等追加），无子命令层级。
 
-> 历史（2026-09-07）：由 `ki scan-kb import` 扁平化为 `ki import`——scan-kb 壳下仅存 `import` 一个子命令，层级冗余；且 `bin/ki.mjs` 的命令映射是单级扁平结构（会剥掉子命令名），与 commander 嵌套子命令不兼容。**scan-kb 已移除、不保留兼容别名**，旧调用 `ki scan-kb import ...` 会 fail-loud 报「未知命令」并列出全部可用命令。
->
-> 历史（更早）：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义天然承载——重复执行 `ki import` 即同步变更（同文件覆盖更新、新文件导入、同名文件按冲突策略处理），不再依赖 git。
+> 旧命令 `ki scan-kb import` 与 `--mode incremental` 已移除且不保留兼容别名，旧调用会报「未知命令」。增量更新由「幂等追加」承载：重复执行同一条命令即同步变更（同文件覆盖、新文件导入、同名按冲突策略处理），不依赖 git。
 
 ---
 
@@ -57,7 +55,7 @@ ki import \
 
 向量更新为文档级增量：先写新内容/标签向量，确认成功后再清理受影响 relation 的旧向量；无关文档不参与删除。若本批导入的某个文件向量化失败，该文件回滚 local KB 并保留旧 relation/向量；全部文件失败时导入 fail-loud。（系统性故障下的整批提交语义见下节「部分成功可用与只重试未完成」。）
 
-### 重复导入预检（导入前确认，REQ-20261010-001 R6）
+### 重复导入预检
 
 路径口径对齐之后，跨入口的重复导入由幂等覆盖吸收；但「**内容一致、来源路径不同**」（同一份
 目录被克隆到别处、或目录层级不同）仍会新建副本——这在进度条上看不出来。因此导入**开始前**
@@ -71,7 +69,7 @@ ki import \
 - **边界**：预检是**提示而非门禁**——直接调 `/api/import/run` 或 CLI 的调用方不会被拦
   （避免给脚本与自动化加负担）；`--no-vector`（FTS-only）同样适用，判据只看原文。
 
-### 目录同步清理（导入后提示删除本地已不存在的文档，REQ-20261019-001）
+### 目录同步清理
 
 **仅 Web 端提供**（CLI 无对应参数）。开启「导入后提示清理」且本次为**纯目录选择**时，导入结果
 会多一个 `prune` 块，列出「库里还有、本次上传的目录里已经没有了」的文档；**只提示，不自动删**，
@@ -90,7 +88,7 @@ ki import \
   `409 PRUNE_TOKEN_STALE`（提示"库在这期间发生了变化"）。删除成功后前端会用 `dryRun` 重算换新 token，
   失败项可原地重试。
 
-### 部分成功可用与「只重试未完成」（REQ-20261009-001）
+### 部分成功可用与「只重试未完成」
 
 **提交粒度 = 文件级**。系统性向量故障（provider 不可用、配额耗尽、维度不匹配等）不再把整批一起回滚：
 
@@ -104,10 +102,10 @@ ki import \
 
 清单是 **scope 级单文件**：同一 scope 先后导入不同源目录时，覆盖/清除前会先把上一份备份为 `<scope>/.ki-import-incomplete.prev.json` 并打印告警（不静默丢弃上一批的未完成项）；`--retry-incomplete` 在「没有主清单但存在备份」时会提示备份的来源与条数，便于人工改名回收。清单写入失败（磁盘/权限）会**显式告警**——此时重试入口实际不可用，不能假设还有清单可读。
 
-**辅助向量失败 = 降级，不进未完成清单**（标签向量、关系/路径导航向量）：这类向量可由 `ki rebuild-vector` 重建，且不影响文档正文的浏览与检索，因此它们失败**不会**把文件标为未完成，也不会回滚已写入的正文向量：
+**辅助向量失败 = 降级，不进未完成清单**（标签向量、关系/路径导航向量）：这类向量可由 `ki restore <scope> --rebuild-vector` 重建，且不影响文档正文的浏览与检索，因此它们失败**不会**把文件标为未完成，也不会回滚已写入的正文向量：
 
-- 标签（`--tags`）向量阶段系统性停止 → 文件照常提交，`errors[]` 给出「标签向量写入失败…（不影响正文，可用 ki rebuild-vector 重建标签向量）」；`stopReason` 仍带回停止原因，`partial`/`files.incomplete` 不受影响；
-- 关系/路径辅助向量停止 → 未写入的关系沿用**旧索引**（已存在文档的导航不出现空洞；本次新增的文档此时没有旧索引可沿用，语义兜底会缺失，可 `ki rebuild-vector` 补建），`errors[]` 记一条 `<ki-path/ki-relation>` 汇总；
+- 标签（`--tags`）向量阶段系统性停止 → 文件照常提交，`errors[]` 记录「标签向量写入失败」（不影响正文），可用 `ki restore <scope> --rebuild-vector` 重建标签向量；`stopReason` 仍带回停止原因，`partial`/`files.incomplete` 不受影响；
+- 关系/路径辅助向量停止 → 未写入的关系沿用**旧索引**（已存在文档的导航不出现空洞；本次新增的文档此时没有旧索引可沿用，语义兜底会缺失，可 `ki restore <scope> --rebuild-vector` 补建），`errors[]` 记一条 `<ki-path/ki-relation>` 汇总；
 - 只有**正文 chunk** 的成功与否决定文件级完成（守 Q1 拍板口径）。
 
 **FTS-only（`--no-vector`）的口径**：文件级完成度只覆盖 dense 向量阶段。全文索引写入失败只体现在 `stats.errors` 与 `errors[]` 明细（关系标记 `ftsIndexComplete:false`），**不**产生 `partial` / `files.incomplete`，也**不**写未完成清单——修复后重新导入（幂等追加）即可。
@@ -131,7 +129,7 @@ ki import --scope my-project --source /new/path/to/wiki --retry-incomplete
 - 后续向同一 group 追加新文档，重复执行同命令即可
 - 修改已有文档，重新导入即覆盖更新
 
-### 数据模型（方案 D，REQ-20260807-001）
+### 数据模型（方案 D）
 
 local KB 存**文件级原文**（一个文件一条，key=文件级 relation，basename 去扩展名）；relation-cache 文件级 relation 挂 **`memoryIds` 多值**（该文件全部 chunk 的向量 docId）；`sourcePath` 存文件路径（无 `#N`）。清洗只作用于**向量化输入**（local KB 保留原文，未被清洗）。
 
@@ -141,11 +139,11 @@ local KB 存**文件级原文**（一个文件一条，key=文件级 relation，
 
 默认开启：内置规则（BOM/frontmatter/mermaid/代码块先剥→路径/空行折叠）→ 外部 hooks（config `scopes.<scope>.clean.hooks`，stdin→stdout 管道，超时 10s，失败跳过）。hook 全部失败 → 文件跳过 + local KB 回滚（P-7）。
 
-### 格式与大小限制（REQ-08）
+### 格式与大小限制
 
 格式白名单默认 `.md`（config `scopes.<scope>.import.extensions`，非白名单跳过 + 汇总提示）；单文件上限默认 **1MB**（config `scopes.<scope>.import.maxFileSize`，超限跳过）；chunk 超限兜底 500。
 
-### 中断防护（REQ-01/02）
+### 中断防护
 
 导入捕获 SIGINT/SIGTERM 写中断标记；`SIGKILL`（kill -9）不可捕获由 probe residue 兜底（双路径）。中断后任意向量命令给出恢复引导（`ki restore <scope> --rebuild-vector` 或 `ki restore <scope> --from-snapshot --rebuild-vector`）；重建/成功导入后标记自动清除。并发导入拒绝（`import.lock`，残留自动清理）。
 

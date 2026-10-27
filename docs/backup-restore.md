@@ -1,4 +1,4 @@
-## 备份与恢复
+# 备份与恢复
 
 本文档说明 `kisearch` 的数据备份和恢复策略。
 
@@ -32,10 +32,9 @@ ki restore scope-name --from-snapshot --yes
 
 > **托管 Git clone 不在快照内**：clone 位于 `~/.ki/datasources/<scope>/repo`（独立于 dataDir）。
 > 快照里的 `datasource.json` 会随 scope 目录一起还原，但 clone 目录需重新获取：
-> 先 `ki datasource remove --scope <s>`（必要时 `--purge`），再 `ki datasource add --scope <s> --git-url <url>`。
+> 先 `ki datasource remove --scope <s> --yes`（需要连 clone 一起删时加 `--purge`），再 `ki datasource add --scope <s> --git-url <url>`。
 > 首次同步会全量重建，不依赖旧 clone。
 
-> （ai-results 备份已随批次 3 删除：REQ-04 移除 ai-results 输入契约，备份仅保留 scope 快照。）
 
 > 详细用法见 [CLI 参考 → backup](./cli.md#backup)、[CLI 参考 → restore](./cli.md#restore)、[CLI 参考 → config](./cli.md#config)
 
@@ -52,30 +51,30 @@ ki restore scope-name --from-snapshot --yes
 ### 核心数据目录
 
 ```
-kisearch/
-├── kb/                          # 运行时数据目录
-│   ├── {scope}/                 # 每个 scope 独立目录
-│   │   ├── group-index.json     # Group 树索引 + source 块
-│   │   ├── relations/           # Relation 缓存（v3 per-Group 分片布局）
-│   │   │   ├── manifest.json    # scope 级元数据 + revision（缓存身份锚）
-│   │   │   └── {groupPath}/     # 每个 Group 一份分片（与 KB 原文同构路径）
-│   │   │       └── cache.json   # 该组 Relation（评分/分区，含 memoryIds/sourcePath）
-│   │   ├── relations-cache.json.bak  # 旧布局单文件（迁移后保留，可手动回退）
-│   │   ├── scan-index.json      # 扫描状态账本（已废弃，批次 3 移除 scan 子命令）
-│   │   └── {group}/             # 本地 KB 原文
-│   │       └── index.json       # 模块说明原文
-│   └── _template/               # 模板目录（初始化新 scope 用）
-└── ...
+~/.ki/                          # 数据根（dataDir / backupDir / vectorDir 可分别覆盖）
+├── kb/                         # 运行时数据目录（dataDir 默认值）
+│   └── {scope}/                # 每个 scope 独立目录
+│       ├── group-index.json    # Group 树索引 + source 块
+│       ├── .relations/         # Relation 缓存（v3 per-Group 分片布局）
+│       │   ├── manifest.json   # scope 级元数据 + revision（缓存身份锚）
+│       │   └── {groupPath}/    # 每个 Group 一份分片（与 KB 原文同构路径）
+│       │       └── cache.json  # 该组 Relation（评分/分区，含 memoryIds/sourcePath）
+│       ├── relations-cache.json.bak  # 旧布局单文件（迁移后保留，可手动回退）
+│       └── {group}/            # 本地 KB 原文
+│           └── index.json      # 模块说明原文
+├── vector/                     # 向量库（vectorDir 默认值；collections/<scope>）
+└── backup/                     # 快照（backupDir 默认值）
 ```
+
+> 内置模板在仓库根目录 `_template/`，不在 `kb/` 下。
 
 ### 关键文件说明
 
 | 文件 | 作用 | 备份优先级 |
 |------|------|-----------|
 | `group-index.json` | Group 树结构索引 + source 块 | **必须** |
-| `relations/`（manifest + 各组分片） | Relation 缓存（含 memoryIds/sourcePath）；v3 分片布局，整目录随快照打包/还原 | **必须** |
+| `.relations/`（manifest + 各组分片） | Relation 缓存（含 memoryIds/sourcePath）；v3 分片布局，整目录随快照打包/还原 | **必须** |
 | `relations-cache.json.bak` | 旧布局单文件残留（迁移后保留）；回退材料，非运行必需 | 建议 |
-| `scan-index.json` | 扫描状态账本 | 建议 |
 | `{group}/index.json` | 本地 KB 原文 | 建议 |
 
 ---
@@ -103,7 +102,7 @@ ki backup scope-name --list
 ki scope list
 
 # 逐个备份
-for scope in $(ki scope list | jq -r '.scopes[].scope'); do
+for scope in $(ki scope list --json | jq -r '.scopes[].scope'); do
   ki backup "$scope"
 done
 ```
@@ -114,7 +113,7 @@ done
 
 ```bash
 # 备份命令
-rsync -av kisearch/kb/ /path/to/backup/kb/
+rsync -av ~/.ki/kb/ /path/to/backup/kb/
 
 # 或使用 tar 打包
 tar -czf kisearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz kisearch/kb/
@@ -123,7 +122,6 @@ tar -czf kisearch-backup-$(date +%Y%m%d_%H%M%S).tar.gz kisearch/kb/
 **备份内容**：
 - 所有 scope 的 `group-index.json`
 - 所有 scope 的 relations 元数据：`.relations/manifest.json` + `.relations/<groupPath>/cache.json`（迁移前为单文件 `relations-cache.json`）
-- 所有 scope 的 `scan-index.json`
 - 所有 scope 的本地 KB 原文
 
 ---
@@ -147,13 +145,15 @@ ki restore scope-name
   "scope": "scope-name",
   "available": {
     "snapshots": [
-      "snapshot.20260616-223000.tar.gz",
-      "snapshot.20260615-100000.tar.gz",
-      "snapshot.20260614-080000.tar.gz"
+      { "file": "snapshot.20260614-080000.tar.gz", "timestamp": "20260614-080000", "size": 102400 },
+      { "file": "snapshot.20260615-100000.tar.gz", "timestamp": "20260615-100000", "size": 102400 },
+      { "file": "snapshot.20260616-223000.tar.gz", "timestamp": "20260616-223000", "size": 102400 }
     ]
   }
 }
 ```
+
+> 快照按 `timestamp` **升序**（旧 → 新）；`--timestamp` 取其中的 `timestamp` 字段，省略时用最新一个。
 
 ```bash
 # 第 2 步：从指定快照恢复（timestamp 从文件名提取，格式：YYYYMMDD-HHMMSS）
@@ -192,11 +192,10 @@ ki restore scope-name --rebuild-vector --tags api,auth
 当没有备份且数据损坏时，可删除 scope 目录后重新初始化：
 
 ```bash
-# 删除损坏的 scope 目录
-rm -rf kb/{scope}
+# 删除损坏的 scope 目录（dataDir 默认 ~/.ki/kb）
+rm -rf ~/.ki/kb/{scope}
 
-# 触发自动初始化（运行任一 ki 命令即可）
-ki scope list
+# 触发自动初始化（写入类命令会调用 ensureScopeDir；只读命令不会）
 ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化"
 
 # 重新导入数据（原文直导，幂等追加）
