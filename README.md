@@ -138,7 +138,7 @@ embedding:
 scopeMode: default                 # default 自动创建 scope；strict 需显式注册
 ```
 
-> `SILICONFLOW_API_KEY` 需在环境中导出；MCP 场景必须在客户端 `env` 字段显式传入（MCP 进程不继承 shell 环境）。完整配置项见 [`docs/configuration.md`](./docs/configuration.md)。
+> 用 `${SILICONFLOW_API_KEY}` 这类引用时，该变量必须对**实际执行引擎的进程**可见：daemon 由 `ki mcp` 启动则继承 shell 环境即可；**由 IDE 以 stdio 直接拉起引擎**时 IDE 不继承 shell 环境，才需要在客户端 `env` 补上（正常用 stdio 桥接 daemon 时不需要）。完整配置项见 [`docs/configuration.md`](./docs/configuration.md)。
 
 ### 3. 导入外部 Wiki
 
@@ -185,7 +185,7 @@ HTTP 模式（推荐，多 IDE / 远程共享同一进程）：
 ```
 
 - 回环绑定（仅本机）免鉴权时可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token。
-- stdio 模式用 `{"command": "ki", "args": ["mcp"], "env": {"SILICONFLOW_API_KEY": "..."}}`，它会桥接到本机 daemon，不会另开向量库持锁进程。
+- stdio 模式用 `{"command": "ki", "args": ["mcp"]}` 即可：它会桥接到本机 daemon，不会另开向量库持锁进程，**Token 与 API Key 都在 daemon 侧，无需在客户端 `env` 里填**。只有 `daemon` 未运行、由 IDE 直接拉起引擎，且配置用 `${ENV_VAR}` 引用密钥时才需要补 `env`（IDE 不继承 shell 环境）。
 - 连接 URL 需与 `ki mcp --status` 输出的 `host` / `port` 完全一致。
 
 ```bash
@@ -244,6 +244,7 @@ ki mcp token delete <id>
 | 知识写入 | 在线写入 Relation 与正文 |
 | 数据源 | 已登记的本地目录 / Git 数据源；可添加 Git 源、触发同步、清理待删候选 |
 | 后台任务 | 导入/同步任务进度、结果明细与重试 |
+| 资源 | 双栏：左目录（接入 MCP / Agent Skill / 对话模型 + 导入 / 数据源 / 备份 / Scope 与 Wiki 同步 / 导出 / 向量重建 / Group），右侧说明与可复制示例 |
 
 > AI 对话需在配置 `llm` 段填写 `baseURL` / `model` / `apiKey`；未配置时面板显示「未配置模型」，其余功能不受影响。
 

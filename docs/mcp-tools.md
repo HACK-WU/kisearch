@@ -11,7 +11,7 @@
 | `ki_search` | 语义检索（hybrid / fulltext） | `query`（必填）、`limit`（默认 10，总条数上限）、`tags`（不传=搜全部）、`mode`、`threshold`、`timeout`、`include_original` |
 | `ki_group_list` | Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量兜底 | `groups`（单数别名 `group`）、`subtree`、`mode`（默认 hot）、`hot_count`、`depth`、`auto_fallback` |
 | `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条 | `group`（必填）、`relation` 或 `relations[]`（二选一） |
-| `ki_scope_list` | 列出所有 scope 及 KB/向量状态 | — |
+| `ki_scope_list` | 列出所有 scope 及 KB/向量状态；每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如 source 块指向单文件） | — |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
 
 ## 写

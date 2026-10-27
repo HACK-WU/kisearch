@@ -22,6 +22,24 @@ export interface ScopeInfo {
   ftsOnlyDocCount: number;
   /** 有 FTS 索引的文档数（含 dense+FTS 混合）；旧版 daemon 不返回该字段。 */
   ftsDocCount?: number;
+  /** wiki 写回可用性（2026-10-27 新增；旧版 daemon 不返回该字段） */
+  wikiSync?: ScopeWikiStatusInfo;
+}
+
+/**
+ * wiki 写回状态。
+ *
+ * ⚠️ `enabled` 只是配置开关：`enabled:true` + `writableDir:null` 表示**配了但用不了**
+ * （典型：单文件导入把 source 块写成文件路径，且没配 wikiSync.sourceDir）。
+ */
+export interface ScopeWikiStatusInfo {
+  enabled: boolean;
+  /** 实际可用的写回根目录；null = 不可用 */
+  writableDir: string | null;
+  /** 写回目录来源 */
+  writableFrom: 'source' | 'wiki-sync' | null;
+  /** source 块被判为不可用的原因 */
+  rejectReason?: string;
 }
 
 export interface SearchHit {

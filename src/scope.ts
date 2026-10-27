@@ -22,7 +22,7 @@ import path from 'path';
 import { listAllScopes, getKbDir, getRelationsCachePath, getGroupIndexPath, validateScope } from './lib/scope.js';
 import { readJson } from './lib/store.js';
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
-import { loadConfig, removeScopeFromConfigFile } from './lib/config.js';
+import { loadConfig, removeScopeFromConfigFile, getScopeWikiSync } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
@@ -36,6 +36,7 @@ import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { deleteFtsCollection, ftsDeleteByFilter } from './lib/fts-client.js';
 import { removeScopeCollection } from './lib/scope-collection.js';
 import { getRelationsCacheIdentity, loadCacheShape, onScopeRelationsInvalidated } from './lib/group-cache.js';
+import { resolveWikiRootDir } from './lib/wiki-sync.js';
 
 // ─── KB 目录辅助 ───
 
@@ -78,6 +79,26 @@ export interface ScopeEntry {
   topGroups: string[];
   /** topGroups 是否可能过期（该 scope 正在提交窗口内或读取失败） */
   topGroupsStale: boolean;
+  /**
+   * Wiki 写回状态（资源页「Scope 与 Wiki 同步」需要）。
+   *
+   * ⚠️ **只看配置开关会误导**：`wikiSync.enabled` 为 true 但 `source` 块指向的是单个文件
+   * （单文件导入）且没配 `wikiSync.sourceDir` 时，写回会直接 fail-loud（ENOTDIR）。
+   * 因此这里给出**解析后的实际可用目录**，与 `resolveWikiRootDir` 同源。
+   */
+  wikiSync: ScopeWikiStatus;
+}
+
+/** 单个 scope 的 wiki 写回可用性（`ki_scope_list` 输出，见 {@link ScopeEntry.wikiSync}） */
+export interface ScopeWikiStatus {
+  /** 配置开关：存在 wikiSync 段且未显式 `enabled:false`；与写入门禁 `enabled !== false` 同口径 */
+  enabled: boolean;
+  /** 实际可用的写回根目录（绝对路径）；null = 不可用 */
+  writableDir: string | null;
+  /** 写回目录来源：group-index 的 source 块 / config 的 wikiSync.sourceDir / 无 */
+  writableFrom: 'source' | 'wiki-sync' | null;
+  /** `source` 块被判为不可用时的原因（fail-loud 诊断文案，来自 resolveWikiRootDir） */
+  rejectReason?: string;
 }
 
 /** 统计 Scope 的 KB 文档数与完整 FTS-only 文档数（每个 relation 计一次）。 */
@@ -209,6 +230,27 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
       if (getSharedOperationCoordinator().isScopeCommitting(s)) topGroupsStale = true;
     } catch { /* 协调器不可用时忽略 */ }
 
+    // wiki 写回可用性：只看配置开关会误导（source 块指向单个文件时写回仍会 ENOTDIR），
+    // 统一用与写回路径同源的解析器，逐 scope 兜底（解析异常不拖垮整个列表）。
+    const wikiCfg = getScopeWikiSync(config, s);
+    let wikiSync: ScopeWikiStatus = {
+      // 开关口径与 writeBackToWiki / resolveWikiSyncTarget 一致：缺省视为开启，显式 false 才算关闭
+      enabled: wikiCfg !== null && wikiCfg.enabled !== false,
+      writableDir: null,
+      writableFrom: null,
+    };
+    try {
+      const root = resolveWikiRootDir(s);
+      wikiSync = {
+        ...wikiSync,
+        writableDir: root.dir,
+        writableFrom: root.from,
+        ...(root.sourceRejected ? { rejectReason: root.sourceRejected } : {}),
+      };
+    } catch (err) {
+      console.warn(`⚠️ scope "${s}" 的 wiki 写回目录解析失败，按不可用处理：${(err as Error).message}`);
+    }
+
     return {
       scope: s,
       kb: kbScopes.has(s),
@@ -217,6 +259,7 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
       ...docCounts,
       topGroups,
       topGroupsStale,
+      wikiSync,
     };
   });
 

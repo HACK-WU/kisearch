@@ -44,6 +44,13 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
     </>
   ),
+  // 资源（MCP 接入 / Skill 安装）：指南针意象
+  compass: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15.5 8.5-2 5-5 2 2-5z" />
+    </>
+  ),
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   check: <path d="m5 13 4.5 4.5L19 7" />,
   // 提示信息卡片语义图标（Notice 组件用）
