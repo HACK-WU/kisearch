@@ -6006,6 +6006,15 @@ select.ki-chat-cfg__ta--select {
 
 /* ChatPage 取消外层 16px 内容内距：会话栏/主区与外壳齐平（用户走查：左侧有明显空隙） */
 .ki-content.ki-content--chatpage { padding: 0; }
+/* 但**顶栏不是工作台的一部分**：它由 AppShell 渲染在同一个 `.ki-content-inner` 里，
+   padding 归零会把它一起贴到侧栏边与视口顶 —— 实测标题比其它页面左 16px、上 8px
+  （2026-10-27 用户反馈「AI 对话标题的距离怎么和其他页面不一致」）。
+   这里只把页头还原成全站口径（与 `.ki-content` 的 8px 16px 同值），双栏工作台仍与外壳齐平。 */
+.ki-content.ki-content--chatpage .ki-content-inner > .ki-topbar { margin: 8px 16px 0; }
+@media (max-width: 640px) {
+  /* 基类在该断点把内距放回 16px（ki.css:1149），页头同步 */
+  .ki-content.ki-content--chatpage .ki-content-inner > .ki-topbar { margin: 16px 16px 0; }
+}
 
 /* ── 页面骨架：48px 顶条 / 纸面 / 唯一抬升输入区 ── */
 .ki-chat-panel--page { --ki-chatpage-topbar-h: 48px; }
