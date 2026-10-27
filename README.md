@@ -40,13 +40,13 @@
 记忆层  MCP 工具：Agent 写入 · 更新 · 回忆 · 组织 · 删除
 ```
 
+**三层架构**
+
 ![kisearch 架构](./assets/architecture.svg)
 
-*图 1：三层架构 —— zvec 负责语义召回与全文检索，kisearch 负责 Group 结构化与原文交付，MCP 负责 Agent 的记忆闭环。*
+**Web 前端 · 总览页**
 
 ![kisearch Web 前端 · 总览](assets/overview.png)
-
-*图 2：内置 Web 前端的总览页（`ki mcp --http --web`）—— 一屏查看 scope / KB / 向量 / 数据源状态，另有浏览、搜索、AI 对话、导入、写入、任务等页面。*
 
 ## <a id="agent-memory"></a>🧠 作为 AI Agent 的长期记忆系统
 

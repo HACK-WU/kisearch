@@ -161,6 +161,6 @@
 
   <!-- ============ 3. 底部说明（无横线分隔） ============ -->
   <text x="30" y="708" font-size="10.5" fill="#64748b"><tspan font-weight="700" fill="#7e22ce">交互层：</tspan>Web（用户浏览器）· MCP（Agent/IDE）· CLI（用户终端）→ 三者共享同一核心引擎</text>
-  <text x="30" y="726" font-size="10" fill="#94a3b8"><tspan font-weight="700" fill="#0369a1">Web：</tspan>5 页面　<tspan font-weight="700" fill="#b45309">MCP：</tspan>11 工具　<tspan font-weight="700" fill="#15803d">CLI：</tspan>search/import/scope/mcp</text>
+  <text x="30" y="726" font-size="10" fill="#94a3b8"><tspan font-weight="700" fill="#0369a1">Web：</tspan>8 页面　<tspan font-weight="700" fill="#b45309">MCP：</tspan>13 工具　<tspan font-weight="700" fill="#15803d">CLI：</tspan>21 命令</text>
   <text x="30" y="744" font-size="9.5" fill="#cbd5e1"><tspan font-weight="700" fill="#b45309">写入：</tspan>输入层(Wiki/AI记忆) → 存储层(Group树→Relation→原文+向量)　<tspan font-weight="700" fill="#6d28d9">直查：</tspan>路径A ← 直接读Scope树　<tspan font-weight="700" fill="#15803d">检索：</tspan>路径B ← 向量混合检索(默认匹配数据) · 可选memoryId反查原文</text>
 </svg>
