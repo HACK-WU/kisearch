@@ -331,7 +331,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
               enum: ['fulltext', 'hybrid'],
               description: 'fulltext=仅全文（快，不调 embedding）；hybrid=语义+全文（默认）',
             },
-            limit: { type: 'integer', minimum: 1, maximum: CHAT_BUDGET.maxHitsPerCallHardMax, description: `返回条数上限（1–${CHAT_BUDGET.maxHitsPerCallHardMax}）；不传时使用系统默认条数` },
+            limit: { type: 'integer', minimum: 1, maximum: CHAT_BUDGET.maxHitsPerCallHardMax, description: `返回条数上限（1–${CHAT_BUDGET.maxHitsPerCallHardMax}，整次检索最多返回的文档数）；不传时使用系统默认条数；引擎单次候选上限 1000，超出时部分 tag 召回可能减少` },
           },
           required: ['query'],
         },

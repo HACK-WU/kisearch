@@ -51,6 +51,11 @@ test('FTS-only client writes/searches/reopens/deletes without embedding', async 
   assert.equal(publicSearch[0]?.ftsId, stored.ids[0]);
   assert.equal(publicSearch[0]?.group, 'docs/kafka');
 
+  // adapter clamp 回归：limit 超过引擎 MAX_TOPK=1000 时必须收敛，不能把 2000 直接传给引擎
+  const clamped = await fullTextSearch({ scope, query: 'Kafka rebalance', limit: 2000 });
+  assert.ok(clamped.length <= 1000);
+  assert.equal(clamped[0]?.memoryId, stored.ids[0]);
+
   await closeFtsEngine(scope);
   const reopened = await ftsSearch({ scope, query: 'HTTP retry', limit: 5 });
   assert.equal(reopened[0]?.relation, 'gateway');

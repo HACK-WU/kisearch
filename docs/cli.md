@@ -353,7 +353,7 @@ ki tag list --scope my-project
 
 | 参数 | 出现命令 | 语义 |
 |------|----------|------|
-| `--limit <n>` | `search` / `doc list` | **返回条数上限**（结果截断，非扫描上限）；默认 `10` |
+| `--limit <n>` | `search` / `doc list` | **返回条数上限**（结果截断，非扫描上限）；`search` 未传 `--tags` 时内部按 tag 取候选，最终仍按该值截断；默认 `10` |
 | `--hot-count <n>` | `ki group list` | 热门分区展示个数；默认 `5` |
 | `--scan-limit <n>` | `tag list` | **扫描上限**（引擎扫描条数上限，超出则 `truncated:true` 近似）；默认 `10000` |
 
@@ -466,10 +466,10 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `<query>`（位置） | 自然语言查询文本（**必填**；`-q/--query` 等效，位置参数优先） | - |
-| `-s, --scope <scope>` | 项目隔离标识（**多个用逗号分隔聚合检索**：单次查询跨 scope 召回，结果按得分统一排序，每条命中标注来源 `scope`；strict 模式下未注册的多传 scope 会被跳过并在 `skipped` 中提示） | `default` |
-| `--limit <n>` | 返回条数上限 | `10` |
+| `-s, --scope <scope>` | 项目隔离标识（**多个用逗号分隔聚合检索**：单次查询跨 scope 召回，结果按得分统一排序，每条命中标注来源 `scope`；strict 模式下未注册的多传 scope 会被跳过并在 `skipped` 中提示；引擎候选上限等召回受限也会写入 `skipped`） | `default` |
+| `--limit <n>` | 返回条数上限（整次检索的总条数；未传 `--tags` 时内部按 tag 取候选，引擎单次候选上限 1000） | `10` |
 | `--threshold <score>` | 融合得分阈值，过滤低于此值的命中 | `0`（不过滤） |
-| `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（每个 tag 最多返回 `--limit` 条，且 `ki-search` 内容优先） |
+| `--tags <tags>` | 过滤标签（逗号分隔多值，OR 组合） | 不传则搜索全部 tag（内部按 tag 分别取候选并保证 `ki-search` 内容优先；最终总条数仍不超过 `--limit`） |
 | `--mode <mode>` | 检索模式：`hybrid`（默认）或 `fulltext`（仅全文，不调用 embedding） | `hybrid` |
 | `--timeout <seconds>` | 查询 embedding 等待超时；超时后降级为关键词检索，范围 `0.001-60` 秒 | 配置 `embedding.queryTimeoutMs`（未配置为 `3` 秒） |
 | `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`，REQ-09） |
@@ -1143,7 +1143,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 |------|------|------|--------|------|
 | `scope` | string | 否 | `default` | 项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内） |
 | `query` | string | 是 | — | 自然语言查询文本 |
-| `limit` | number | 否 | 10 | 返回条数上限 |
+| `limit` | number | 否 | 10 | 返回条数上限（整次检索最多返回的文档数；未传 `tags` 时内部按 tag 取候选，最终仍按该值截断） |
 | `threshold` | number | 否 | — | 相似度阈值（0-1，过滤低分命中） |
 | `tags` | string | 否 | — | 过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合） |
 | `timeout` | number | 否 | 配置值 / 3 | 查询 embedding 等待超时（秒，范围 `0.001-60`）；超时后降级为关键词检索 |

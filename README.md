@@ -195,7 +195,7 @@ ki import \
   --chunk-overlap 150
   # 可选：--tags <t1,t2> 为导入文件打标（可被 ki search -t <tag> 召回；--no-vector 时写入 FTS-only 标签索引）
 
-# ② 语义检索（默认搜全部标签；不传 --tags 时每个标签最多返回 --limit 条，ki-search 内容优先）
+# ② 语义检索（默认搜全部标签；不传 --tags 时内部按标签取候选，最终总条数仍不超过 --limit，ki-search 内容优先）
 ki search --scope my-project --query "用户登录流程"
 
 # ④ 构建内置 Web 前端（产物输出到 web/dist，仅需首次构建或前端改动后）
@@ -333,7 +333,7 @@ ki mcp token delete <id>                # 删除 Token（立即失效）
 | `ki_scope_list` | 列出 scope 及其 KB/向量状态 | — |
 | `ki_tag_list` | 列出 scope 下 tag 及文档数 | — |
 
-> `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（每个标签最多返回 `limit` 条，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
+> `ki_search` 的 `tags` 参数：**不传 → 搜索全部标签**（内部按标签取候选，最终总条数仍不超过 `limit`，`ki-search` 内容优先）；传值 → 按标签过滤（逗号分隔多标签，OR 组合）。
 > MCP 工具不提供 scope / doc 级联删除和 `--force` 操作：`ki_delete_relation` 只能删除单条 Relation，`ki_group_delete_empty` 只能删除空 Group 节点；需要级联或强制操作时使用 CLI。
 
 ## <a id="kb-import"></a>📥 知识库导入

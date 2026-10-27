@@ -656,7 +656,7 @@ export function SearchPage(): JSX.Element {
                 )}
                 {skippedScopes.length > 0 && (
                   <>
-                    <span>已跳过 {skippedScopes.length} 个 scope，结果可能不完整</span>
+                    <span>已跳过或受限 {skippedScopes.length} 项，结果可能不完整</span>
                     <span className="ki-cell-sub">
                       {skippedScopes.map((s) => `${s.scope}：${s.reason}`).join('；')}
                     </span>

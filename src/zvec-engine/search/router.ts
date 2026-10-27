@@ -20,7 +20,7 @@ import type {
 } from '../types.js';
 import type { MultiQueryPayload, QueryPayload } from '../worker-protocol.js';
 
-const MAX_TOPK = 1000;
+export const MAX_TOPK = 1000;
 const DEFAULT_TOPK = 10;
 const MAX_TEXT_LEN = 10_000;
 

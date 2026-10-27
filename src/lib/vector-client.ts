@@ -282,6 +282,14 @@ const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
 
+/**
+ * 引擎单次检索的 topk 硬上限（与 src/zvec-engine/search/router.ts 的 MAX_TOPK 一致）。
+ * 超过会被引擎直接拒绝（topk exceeds max 1000）；调用方组合 topk 时必须先收敛，
+ * 否则「limit × tag 数」这类放大在 tag 多的 scope 下会整次检索失败。
+ * 一致性由 test/vector-cli-functions.test.ts 的契约用例守住。
+ */
+export const SEARCH_TOPK_MAX = 1000;
+
 /** 查询 embedding 固定 0 重试；超时由配置或请求级 timeout 决定。 */
 const QUERY_EMBED_RETRIES = 0;
 /** @deprecated 仅为旧调用方保留；查询运行时不再读取该常量。 */
@@ -1032,13 +1040,16 @@ export async function vectorSearch(params: {
     }
   }
   if (degradeReason !== undefined) params.onDegrade?.(degradeReason);
+  // 引擎层硬上限（MAX_TOPK=1000）：adapter 先收敛，避免任何调用方组合出 >1000 的 topk
+  // 直接被引擎拒绝（CLI/MCP 的 limit 无上界，放大路径见 search.ts 的 tag 数乘法）。
+  const topk = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
   const perScope = await Promise.all(existingScopes.map(async (scope) => {
     const filter = buildScopeTagFilter([scope], tagList);
     try {
       return await withEngine(scope, (engine) => engine.hybridSearch({
         ...(queryVector !== undefined ? { vector: queryVector } : {}),
         fts: params.query,
-        topk: params.limit ?? 10,
+        topk,
         filter,
       }));
     } catch (err) {
@@ -1064,7 +1075,7 @@ export async function vectorSearch(params: {
     .filter((r) => degradeReason !== undefined
       || params.threshold === undefined
       || r.score >= params.threshold);
-  return mergeVectorSearchHits([normalized], params.limit ?? 10);
+  return mergeVectorSearchHits([normalized], topk);
 }
 
 /**
@@ -1082,7 +1093,7 @@ export async function fullTextSearch(params: {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
   if (scopes.length === 0) throw new Error('scope 不能为空：至少传入一个 scope');
-  const limit = params.limit ?? 10;
+  const limit = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
   const tagList = Array.isArray(params.tags)
     ? params.tags
     : params.tags

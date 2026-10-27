@@ -61,7 +61,7 @@ export interface SearchResult {
   /** 降级原因，用于向用户解释分数口径变化 */
   degradedReason?: string;
   mode?: 'hybrid' | 'fulltext';
-  /** 被跳过的 scope（strict 未注册 / 无向量 Collection）——不展示即为静默漏召回 */
+  /** 被跳过或受召回上限影响的 scope（strict 未注册 / 无向量 Collection / 引擎候选上限）——不展示即为静默漏召回 */
   skipped?: { scope: string; reason: string }[];
   /** 结构化错误码（ok=false 时），如 VECTOR_DIMENSION_MISMATCH */
   code?: string;
