@@ -1,6 +1,6 @@
 ---
 name: agents-md-template
-description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像、近期工作与历史工作记录（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
+description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search）与置顶安全底线（代码、测试、配置、示例禁止写入私钥、线上地址、真实 IP、账号口令、个人信息，须用占位符）、项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像、近期工作与历史工作记录（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
 ---
 
 # AGENTS.md - AI AGENT 项目记忆文件
@@ -19,6 +19,8 @@ description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scop
 > **代码知识库（`${scope}`）索引不写入本文件**。检索走 `ki-search`：**默认优先查 `${scope}-memory`**（项目上下文/决策更精准，`${scope}` 仅作宏观兜底，与 `ki-search` 规则禁忌一致）；确认主题在代码库里时再查 `${scope}`；两者都确需时方可一次传两个 scope：`ki_search(scope: "${scope},${scope}-memory", query)`。
 >
 > **格式口径**：本文件是 AGENTS.md 格式的唯一真源；`agents-md-init` skill 与 `rules/ai-codekb-memory.md` 只引用不重定义。
+>
+> **🔒 安全底线（置顶必留，缺失即补）**：**本文件与一切代码、测试、配置、示例禁止写入敏感信息** —— 私钥/证书内容、线上地址与生产域名、真实 IP/内网网段、账号口令/Token/AK-SK/Cookie、个人信息（真实姓名、手机号、邮箱、身份证、住址）、未脱敏业务数据，一律用占位符：`<API_KEY>` / `<PRIVATE_KEY>` / `https://example.com` / `192.0.2.10`（RFC 5737 文档网段）/ `user@example.com`。测试样例必须是**明显不可用的伪造值**（如 `sk-test-0000`），不得复制线上真实值；真实配置走环境变量或 `.env`（`.gitignore` 内），代码里只留占位符。
 
 ---
 
