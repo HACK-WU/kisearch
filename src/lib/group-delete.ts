@@ -609,7 +609,7 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
     result.vectors.auxFound = auxDocs.length;
     if (aux.truncated) {
       result.warnings.push(
-        `辅助向量枚举达到单批上限（${auxDocs.length} 条），可能有残留；可重复执行删除或 ki rebuild-vector 清理`,
+        `辅助向量枚举达到单批上限（${auxDocs.length} 条），可能有残留；可重复执行删除或 ki restore ${scope} --rebuild-vector 清理`,
       );
     }
   } catch (err) {
@@ -657,7 +657,7 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
   if (survivors.degraded) {
     result.warnings.push(
       `存活组数量超过 ${SURVIVOR_SCAN_GROUP_CAP}，跳过辅助向量清扫与共享向量保护`
-      + '（ki-relation / ki-path 可能残留；可用 ki rebuild-vector 重建）',
+      + `（ki-relation / ki-path 可能残留；可用 ki restore ${scope} --rebuild-vector 重建）`,
     );
   } else if (auxDocs.length > 0) {
     let kept = 0;

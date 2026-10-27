@@ -288,7 +288,7 @@ describe('import 增量向量更新', () => {
       assert.equal(result.stopReason?.code, 'HTTP_503');
       assert.equal(result.stopReason?.phase, 'embedding');
       // unchanged: 增量导入（REQ-20261010-001）新增字段：本用例无"内容未变"文件 ⇒ 0
-      assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0 }, '完成 1 / 未完成 2（文件级）');
+      assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0, duplicatesSkipped: 0 }, '完成 1 / 未完成 2（文件级）');
       // mock 的 stop 模式：entries[0]（扫描序首个 = later.md）成功、其余报错/未处理
       assert.deepEqual(
         result.incomplete.map((item) => item.path).sort(),
@@ -341,7 +341,7 @@ describe('import 增量向量更新', () => {
     pathStoreMode = 'stop';
     try {
       // P1-1（REQ-20261009-001）：辅助向量阶段停止**不再整批回滚**——正文向量与原文照常提交，
-      // 只有关系/路径辅助向量缺失（显式记账 + 提示 `ki rebuild-vector` 补建）。
+      // 只有关系/路径辅助向量缺失（显式记账 + 提示 `ki restore <scope> --rebuild-vector` 补建）。
       const result = await handleDirectImport({ scope, sourceDir: updated, group: 'TestWiki', vector: true });
       assert.equal(result.ok, true, '辅助向量缺失不再抛错');
       assert.equal(result.partial, false, '辅助向量缺失不产生未完成文件');

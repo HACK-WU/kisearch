@@ -321,7 +321,7 @@ program
           // 但仍要说清"为什么有错误"与重建出路，避免用户只能自己去读 JSON 的 errors 数组。
           process.stderr.write(
             `\nℹ️  辅助向量未完成（${r.stopReason.kind}/${r.stopReason.code}）：文档正文已全部提交可用；`
-            + '标签向量 / 关系路径向量可用 `ki rebuild-vector` 重建。\n',
+            + `标签向量 / 关系路径向量可用 \`ki restore ${scope} --rebuild-vector\` 重建。\n`,
           );
         }
       }

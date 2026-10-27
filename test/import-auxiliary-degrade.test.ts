@@ -4,7 +4,7 @@
  *
  * 契约：
  *   1. **tag（自定义标签）向量阶段系统性停止 → 不再全批连坐**：正文照常提交（元数据 + 原文 + 向量
- *      可浏览/可检索），仅标签向量缺失，error 记账并给出 `ki rebuild-vector` 出路（P0-2）；
+ *      可浏览/可检索），仅标签向量缺失，error 记账并给出 `ki restore <scope> --rebuild-vector` 出路（P0-2）；
  *   2. `onlyRelPaths` 在**核心层**净化：绝对路径 / 含 `..` / 空值一律拒绝并计入
  *      `retryFilter.invalid`；全部非法时 fail-loud（不静默退化为「处理整批」）（P1-4）；
  *   3. 未完成清单跨源覆盖/清除前先备份为 `.ki-import-incomplete.prev.json`，
@@ -144,7 +144,7 @@ describe('辅助向量降级与重试清单边界（review 修复批）', () => 
       assert.equal(result.partial, false, '标签向量失败不得产生未完成文件（P0-2）');
       assert.equal(result.stats.files.incomplete, 0);
       // unchanged: 增量导入（REQ-20261010-001）新增字段：本用例无"内容未变"文件 ⇒ 0
-      assert.deepEqual(result.stats.files, { total: 2, completed: 2, incomplete: 0, scanned: 2, skipped: 0, unchanged: 0 });
+      assert.deepEqual(result.stats.files, { total: 2, completed: 2, incomplete: 0, scanned: 2, skipped: 0, unchanged: 0, duplicatesSkipped: 0 });
 
       // ② 元数据 + 原文提交（= 文档列表/检索可用）
       const groups = readAllGroupCaches(scope);
@@ -161,7 +161,13 @@ describe('辅助向量降级与重试清单边界（review 修复批）', () => 
       // ③ 不回滚正文向量 + 标签缺失显式记账（含重建出路）
       assert.equal(vectorDeleteCalls.flat().some((id) => id.startsWith('content-')), false, '不得回滚正文向量');
       assert.equal(result.errors.some((item) => /标签向量/.test(item.error)), true, '标签向量缺失必须记账');
-      assert.equal(result.errors.some((item) => /rebuild-vector/.test(item.error)), true, '必须给出重建出路');
+      const rebuildHint = result.errors.find((item) => /rebuild-vector/.test(item.error))?.error ?? '';
+      assert.equal(
+        rebuildHint.includes(`ki restore ${scope} --rebuild-vector`),
+        true,
+        '重建出路必须给出真实命令（含 scope）',
+      );
+      assert.equal(rebuildHint.includes('ki rebuild-vector'), false, '不得再给出不存在的 ki rebuild-vector');
       assert.equal(result.stopReason?.code, 'HTTP_503', '停止原因保留在结果里供两端展示');
     } finally {
       tagStageMode = 'success';

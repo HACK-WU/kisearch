@@ -1468,7 +1468,7 @@ async function handleDirectImportUnlocked(
             // 提示重建：正文照常提交可浏览/可检索，仅 `ki search -t <tag>` 暂时召回不到该文件。
             tagErrors.push({
               path: rec.rel,
-              error: `标签向量写入失败：${item.error || 'unknown error'}（不影响正文，可用 ki rebuild-vector 重建标签向量）`,
+              error: `标签向量写入失败：${item.error || 'unknown error'}（不影响正文，可用 ki restore ${scope} --rebuild-vector 重建标签向量）`,
             });
           }
         }
@@ -1487,7 +1487,7 @@ async function handleDirectImportUnlocked(
           if ((tagResult.notProcessed ?? 0) > 0) {
             tagErrors.push({
               path: '<tags>',
-              error: `标签向量有 ${tagResult.notProcessed} 条未处理（系统性停止：${tagResult.stopReason.kind}/${tagResult.stopReason.code}）；正文已提交，标签可用 ki rebuild-vector 重建`,
+              error: `标签向量有 ${tagResult.notProcessed} 条未处理（系统性停止：${tagResult.stopReason.kind}/${tagResult.stopReason.code}）；正文已提交，标签可用 ki restore ${scope} --rebuild-vector 重建`,
             });
           }
           logWarn(`标签向量系统性停止（${tagResult.stopReason.kind}/${tagResult.stopReason.code}）：成功 ${tagResult.succeeded}/${tagEntries.length}，已降级为辅助向量缺失（不影响正文可用性）`);
@@ -1508,10 +1508,10 @@ async function handleDirectImportUnlocked(
         for (const rec of tagRecords) {
           tagErrors.push({
             path: rec.rel,
-            error: `标签向量写入失败：${(err as Error).message}（不影响正文，可用 ki rebuild-vector 重建标签向量）`,
+            error: `标签向量写入失败：${(err as Error).message}（不影响正文，可用 ki restore ${scope} --rebuild-vector 重建标签向量）`,
           });
         }
-        logWarn(`自定义标签向量写入失败：${(err as Error).message}（已降级：正文照常提交，标签可用 ki rebuild-vector 重建）`);
+        logWarn(`自定义标签向量写入失败：${(err as Error).message}（已降级：正文照常提交，标签可用 ki restore ${scope} --rebuild-vector 重建）`);
       }
     }
     logPhaseDone(2, TOTAL, `标签向量写入完成`);
@@ -1723,7 +1723,7 @@ async function handleDirectImportUnlocked(
   // R1（REQ-20261009-001）：本次运行已系统性停止 / 已取消时**跳过关系与路径辅助向量**。
   // 必要性（不只是省一次请求）：该阶段自带"失败即回滚本批已提交内容"的收尾（见下方
   // pathResult.stopReason 分支）——嵌 provider 仍不可用时它会删掉刚提交成功的正文向量，
-  // 把 R1 的"部分可用"抵消掉。辅助向量可由 `ki rebuild-vector` 重建，不影响已完成文档
+  // 把 R1 的"部分可用"抵消掉。辅助向量可由 `ki restore <scope> --rebuild-vector` 重建，不影响已完成文档
   // 的浏览与检索。
   if (vector && !systemStopReason && !cancelRequested && pathEntries.length > 0) {
     const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
@@ -1745,7 +1745,7 @@ async function handleDirectImportUnlocked(
       auxiliaryErrors.push({
         path: '<ki-path/ki-relation>',
         error: `关系/路径辅助向量未全部写入（${pathResult.stopReason.kind}/${pathResult.stopReason.code}）：`
-          + `成功 ${pathResult.ok.size}，未写入 ${pathUnwritten}；未写入部分沿用旧索引，可用 ki rebuild-vector 重建（不影响已完成文档的浏览与检索）`,
+          + `成功 ${pathResult.ok.size}，未写入 ${pathUnwritten}；未写入部分沿用旧索引，可用 ki restore ${scope} --rebuild-vector 重建（不影响已完成文档的浏览与检索）`,
       });
       logWarn(`关系/路径辅助向量系统性停止（${pathResult.stopReason.kind}/${pathResult.stopReason.code}）：成功 ${pathResult.ok.size}/${pathEntries.length}，已降级为辅助索引缺失（正文不受影响）`);
     }
@@ -1759,7 +1759,7 @@ async function handleDirectImportUnlocked(
     auxiliaryErrors.push({
       path: '<ki-path/ki-relation>',
       error: `本次运行${cancelRequested ? '已取消' : '因系统性向量故障停止'}，关系/路径辅助向量已跳过；`
-        + '可用 `ki rebuild-vector` 重建（不影响已完成文档的浏览与检索）',
+        + `可用 ki restore ${scope} --rebuild-vector 重建（不影响已完成文档的浏览与检索）`,
     });
   }
 
