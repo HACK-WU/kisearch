@@ -33,9 +33,9 @@ import { buildRelationContent } from './lib/path-vectorize.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 // S-04（REQ-20261009-003）：元数据删除需与同进程读任务互斥（提交窗口）
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
-import { loadConfig, getScopeWikiSync, resolveScope } from './lib/config.js';
+import { loadConfig, resolveScope } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
-import { getSource } from './lib/scope.js';
+import { resolveWikiRootDir } from './lib/wiki-sync.js';
 import { ftsDeleteByIds } from './lib/fts-client.js';
 import { activeDrafts } from './lib/relation-edit-draft.js';
 
@@ -201,10 +201,16 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     // 3. 硬删源 .md（D7）：归属校验 + realpath containment，不进回收站
     try {
       const wikiDeleteDisabled = params.wikiDelete === false;
-      const sourceDir = wikiDeleteDisabled ? null : resolveWikiSourceDir(scope);
+      const root = wikiDeleteDisabled ? null : resolveWikiRootDir(scope);
+      const sourceDir = root?.dir ?? null;
       // sourcePath 是导入时的真实相对路径（可能平铺在 sourceDir 根下），优先用它定位；
       // 仅历史数据无 sourcePath 时才回退到 <sourceDir>/<group>/<relation>.md 约定。
-      const sourcePathFile = sourceDir && rel?.sourcePath
+      //
+      // ★ 只有根目录确实来自**该次导入的 source 块**时才敢用 sourcePath：根目录退化为
+      //   wikiSync.sourceDir 时（单文件导入的 scope 属这一类），sourcePath 相对的是导入源
+      //   那棵树，套到 wiki 根上会命中同名的 wiki 文件并硬删（无回收站）。这种场景只认
+      //   命名约定 <wiki>/<group>/<relation>.md —— 那正是 writeBackToWiki 写出的镜像文件。
+      const sourcePathFile = sourceDir && root?.from === 'source' && rel?.sourcePath
         ? path.resolve(sourceDir, rel.sourcePath)
         : null;
       const fallbackFile = findWikiFile(scope, resolvedGroup, relation);
@@ -471,15 +477,9 @@ function escapeRegExp(s: string): string {
 
 // ─── wiki 文件定位 ───
 
-/** wiki 源目录（source 块优先，wikiSync 兜底） */
-function resolveWikiSourceDir(scope: string): string | null {
-  const source = getSource(scope);
-  if (source?.dir) return source.dir;
-  const config = loadConfig();
-  const wikiSync = getScopeWikiSync(config, scope);
-  if (wikiSync?.enabled && wikiSync.sourceDir) return wikiSync.sourceDir;
-  return null;
-}
+// wiki 源目录统一由 wiki-sync.ts::resolveWikiRootDir 解析（source 块须是目录才算数）：
+// 单文件导入时 source.dir 是文件路径，当目录用只会定位到 `file/<sourcePath>` 这种
+// 必然不存在的路径（静默不删 wiki 文件）。
 
 /**
  * 在 sourceDir 内删除文件：realpath containment 校验，拒绝符号链接逃逸。
@@ -505,28 +505,12 @@ function unlinkWithinSourceDir(
 
 /**
  * 根据 config.json 的 wikiSync 配置定位 wiki 文件路径
- * 优先级与 wiki-sync.ts 的 resolveWikiTarget 一致（rootName 概念已移除）：
- *   1. group-index.json 的 source 块（source.dir）
+ * 优先级与 wiki-sync.ts 的 resolveWikiRootDir 一致（rootName 概念已移除）：
+ *   1. group-index.json 的 source 块（source.dir，须为目录）
  *   2. config.json 中 scope 级 wikiSync.sourceDir
  */
 function findWikiFile(scope: string, group: string, relation: string): string | null {
-  let sourceDir: string | null = null;
-
-  // 优先级 1：group-index.json 的 source 块
-  const source = getSource(scope);
-  if (source?.dir) {
-    sourceDir = source.dir;
-  }
-
-  // 优先级 2：config.json 的 wikiSync
-  if (!sourceDir) {
-    const config = loadConfig();
-    const wikiSync = getScopeWikiSync(config, scope);
-    if (wikiSync?.enabled && wikiSync?.sourceDir) {
-      sourceDir = wikiSync.sourceDir;
-    }
-  }
-
+  const sourceDir = resolveWikiRootDir(scope).dir;
   if (!sourceDir) return null;
 
   // 计算文件路径（group 即完整相对路径，不做前缀剥离）

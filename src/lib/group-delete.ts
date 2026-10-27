@@ -20,10 +20,10 @@ import {
   getKbDir,
   getLocalKbDir,
   validateScope,
-  getSource,
   migrateGroupIndex,
 } from '../lib/scope.js';
-import { loadConfig, resolveScope, getScopeWikiSync } from '../lib/config.js';
+import { loadConfig, resolveScope } from '../lib/config.js';
+import { resolveWikiRootDir } from './wiki-sync.js';
 import { withScopeWriteLock } from '../lib/scope-write-lock.js';
 import {
   assertNoPendingVectorMigration,
@@ -354,11 +354,10 @@ function isSharedRelationName(text: string, survivors: Set<string>): boolean {
 }
 
 function resolveWikiSourceDir(scope: string): string | null {
-  const source = getSource(scope);
-  if (source?.dir) return source.dir;
-  const wikiSync = getScopeWikiSync(loadConfig(), scope);
-  if (wikiSync?.enabled && wikiSync.sourceDir) return wikiSync.sourceDir;
-  return null;
+  // 与写回同口径（wiki-sync.ts::resolveWikiRootDir）：source 块须是目录才算数，
+  // 单文件导入时它是文件路径，否则 willKeep.wikiDir 会报出 `file/group` 这种假路径。
+  // 注意 D3/D4：组级删除只**报告** wiki 目录（willKeep），从不删除它。
+  return resolveWikiRootDir(scope).dir;
 }
 
 function computeEmptyParents(scope: string, target: string, groups: string[]): string[] {
