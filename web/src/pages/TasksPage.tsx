@@ -18,6 +18,9 @@ import { Notice } from '@/components/Notice';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
 
+/** 客户端分页（与数据源页同口径：默认 10，可选 50 / 100） */
+const PAGE_SIZE_DEFAULT = 10;
+
 /**
  * 阶段中文映射 / 索引就绪文案 / 状态与操作文案 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
  * 与 `lib/taskListModel.ts`（REQ-20261019-004 S-03 / REQ-20261022-002）：
@@ -412,11 +415,15 @@ function TaskActions({
 
 export function TasksPage(): JSX.Element {
   const [filter, setFilter] = useState<Filter>('all');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const { id: routeId } = useParams<{ id?: string }>();
   const navigate = useNavigate();
   const selectedId = routeId ?? null;
   /** 关闭抽屉后把焦点还给打开它的行（否则焦点掉到 body） */
   const lastSelectedRef = useRef<string | null>(null);
+  /** 已为哪个选中项做过「跳到所在页」——避免列表刷新或用户翻页时被反复拉回 */
+  const syncedSelectionRef = useRef<string | null>(null);
   const query = useQuery({
     queryKey: ['tasks'],
     queryFn: () => getTasks(200),
@@ -430,6 +437,33 @@ export function TasksPage(): JSX.Element {
     if (filter === 'recent') return task.state !== 'queued' && task.state !== 'running';
     return true;
   }), [tasks, filter]);
+  const pageCount = Math.max(1, Math.ceil(visibleTasks.length / pageSize));
+  // 收敛帧不能直接读超界页码：下面的 effect 回写要到下一次渲染才生效，
+  // 直接用 page 切片会渲染一帧「有表头无行」的空表（空态判据看的是 visibleTasks）
+  const currentPage = Math.min(page, pageCount);
+  const pageTasks = visibleTasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  /** 后端 total 是全部可见任务数，列表只取最近 200 条：两者不一致时必须给出说明 */
+  const truncated = (query.data?.total ?? 0) > tasks.length;
+  // 任务列表会自动刷新（顶栏同 queryKey 每 3–15s）：条目变少时把页码收回，避免停在空白页
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+  // 深链 /tasks/:id 或列表刷新后，选中项可能落在别的页：跳到它所在页，否则看不到高亮行。
+  // ★ 必须依赖 visibleTasks：深链首帧数据还没到，首次执行时 index=-1，数据到达后要再试一次；
+  //   同步过就记下来 —— 列表自动刷新与用户翻页都不得被拉回。
+  useEffect(() => {
+    if (!selectedId) {
+      syncedSelectionRef.current = null;
+      return;
+    }
+    if (syncedSelectionRef.current === selectedId) return;
+    const index = visibleTasks.findIndex((task) => task.id === selectedId);
+    // 记录已被 TTL 清理时抽屉自己会提示，不强行翻页（下次数据变化再试）
+    if (index < 0) return;
+    syncedSelectionRef.current = selectedId;
+    const target = Math.floor(index / pageSize) + 1;
+    setPage((prev) => (prev === target ? prev : target));
+  }, [selectedId, visibleTasks, pageSize]);
   const runningCount = tasks.filter((task) => task.state === 'queued' || task.state === 'running').length;
   const failedCount = tasks.filter((task) => task.state === 'failed' || task.state === 'unknown').length;
   const partialCount = tasks.filter((task) => task.state === 'partial').length;
@@ -466,7 +500,7 @@ export function TasksPage(): JSX.Element {
         <div className="ki-task-page-actions">
           <div className="ki-task-filters" role="tablist" aria-label="任务筛选">
             {([['all', '全部'], ['running', '进行中'], ['failed', '失败'], ['recent', '最近结束']] as const).map(([key, label]) => (
-              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => setFilter(key)}>
+              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => { setFilter(key); setPage(1); }}>
                 {label}
               </button>
             ))}
@@ -505,7 +539,7 @@ export function TasksPage(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {visibleTasks.map((task) => {
+                {pageTasks.map((task) => {
                   const row = buildTaskListRow(task);
                   const active = selectedId === task.id;
                   const openTask = (): void => {
@@ -575,6 +609,37 @@ export function TasksPage(): JSX.Element {
                 })}
               </tbody>
             </table>
+          ) : null}
+          {/* 客户端分页（照搬数据源页）：单页时不渲染，但以下两种情况必须保留 ——
+              ① `pageSize !== 默认`：否则用户改成 100 后页数变 1，选择器一起消失、改不回 10；
+              ② 列表被截断（truncated）：否则切到「失败」只剩几篇时整条说明一起消失，
+                 用户会以为列表就是全部任务。 */}
+          {visibleTasks.length > 0 && (pageCount > 1 || pageSize !== PAGE_SIZE_DEFAULT || truncated) ? (
+            <div className="ki-ds-pager" role="navigation" aria-label="任务分页">
+              <span className="ki-ds-pager__info" aria-live="polite">
+                第 {currentPage} / {pageCount} 页 · 共 {visibleTasks.length} 个
+                {/* 后端 total 是全部可见任务数，而列表只取最近 200 条：两者不一致时说明差异，
+                    否则页头计数与可翻页条数对不上（用户只会觉得少了任务）。
+                    文案必须给每个数字贴标签：筛选后「共 5 个」与「200 条 / 350 个」并排时，
+                    不写清楚会被读成同一个口径。 */}
+                {truncated ? ` · 全部任务共 ${query.data?.total} 个，列表仅加载最近 ${tasks.length} 条` : ''}
+              </span>
+              <label className="ki-ds-pager__size">
+                每页
+                <select
+                  value={pageSize}
+                  onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}
+                  aria-label="每页条数"
+                >
+                  <option value={10}>10</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                条
+              </label>
+              <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={currentPage <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
+              <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={currentPage >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
+            </div>
           ) : null}
         </div>
       </section>

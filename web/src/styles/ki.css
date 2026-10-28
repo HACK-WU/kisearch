@@ -5460,7 +5460,7 @@ select.ki-chat-cfg__ta--select {
 .ki-datasource-page .ki-card__body--flush > .ki-ds-muted { padding: 16px 12px; }
 .ki-datasource-page .ki-card__body--flush > .ki-empty { margin: 4px; }
 
-/* 分页：默认 10，可选 50 / 100 */
+/* 分页：默认 10，可选 50 / 100（数据源页与后台任务页共用，类名保留了 ds- 前缀） */
 .ki-ds-pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
   margin-top: 4px; padding: 10px 12px 12px;
