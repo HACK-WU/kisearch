@@ -6829,6 +6829,51 @@ select.ki-chat-cfg__ta--select {
 .res-wikisync--warn { color: var(--ki-color-warning); }
 .res-wikisync--muted { color: var(--ki-color-text-subtle); }
 
+/* ── MCP 工具清单（接入后能用什么） ──
+   三组各自成块 + 行间细线 + 组标题带语义色点：
+   读(绿)=只读安全 / 写(主色)=会改数据 / 组织与删除(黄)=危险。
+   只做纯文字两栏时 13 行连成一片，看不出"哪几条会改数据"。 */
+.res-mcp-tools { display: grid; gap: 10px; margin-top: 12px; }
+.res-mcp-tools__group {
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+  overflow: hidden;
+}
+.res-mcp-tools__label {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  font: 600 10.5px/1.4 var(--ki-font-mono);
+  letter-spacing: 0.14em;
+}
+.res-mcp-tools__label::before {
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+/* 读用中性灰而不是绿：绿与「写」的主色同为绿系区分度不够，且绿容易被读成"成功了" */
+.res-mcp-tools__group[data-tone="read"] .res-mcp-tools__label { color: var(--ki-color-text-muted); }
+.res-mcp-tools__group[data-tone="write"] .res-mcp-tools__label { color: var(--ki-color-primary); }
+.res-mcp-tools__group[data-tone="danger"] .res-mcp-tools__label { color: var(--ki-color-warning); }
+.res-mcp-tool {
+  display: grid;
+  /* 工具名列固定 168px（够放最长的 ki_bulk_sync_relation），作用列吃剩余 —— 13 条对齐成两栏 */
+  grid-template-columns: 168px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--ki-color-border) 60%, transparent);
+}
+/* label 是 span、条目是 div ⇒ first-of-type 命中的就是第一条（去掉与 label 重复的线） */
+.res-mcp-tools__list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.res-mcp-tool:first-child { border-top: 0; }
+.res-mcp-tool__name { color: var(--ki-color-text); font: 600 12.5px/1.5 var(--ki-font-mono); }
+.res-mcp-tool__purpose { color: var(--ki-color-text-muted); font-size: 12.5px; line-height: 1.55; }
+
 .res-benefits { display: grid; gap: 9px; }
 .res-benefit {
   position: relative;
@@ -6956,6 +7001,8 @@ select.ki-chat-cfg__ta--select {
     overflow-x: visible;
   }
   .res-tool .res-copy { grid-column: 2; grid-row: 1; }
+  /* 工具清单：两栏在窄屏会把「说明」挤成 31px 宽（实测折 9 行），改单列 */
+  .res-mcp-tool { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 7px 12px; }
 }
 
 /* ≤480：16 项 chips 换行后占掉近半屏，收紧内距与字号压到 6 行左右 */

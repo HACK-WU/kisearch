@@ -10,6 +10,7 @@
  * 运行：cd web && npm run test
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,10 @@ const {
   GROUP_LABEL,
   isLoopbackHost,
   MEMORY_RULE_FILE,
+  MCP_TOOL_COUNT,
+  MCP_TOOLS,
+  MCP_TOOLS_NOTE,
+  mcpToolsDocUrl,
   MEMORY_SKILLS,
   MORE_SKILL_TOOLS,
   PRIMARY_SKILL_TOOLS,
@@ -250,6 +255,38 @@ describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
     for (const topic of topicsByGroup('feature')) {
       assert.match(topic.docAnchor, /^[a-z][a-z-]*$/, `${topic.id} 锚点格式异常`);
     }
+  });
+});
+
+describe('MCP 工具清单（接入后能用什么）', () => {
+  it('13 个工具分三组：读 5 / 写 5 / 组织与删除 3', () => {
+    assert.equal(MCP_TOOL_COUNT, 13);
+    assert.deepEqual(MCP_TOOLS.map((g) => g.label), ['读', '写', '组织与删除']);
+    assert.deepEqual(MCP_TOOLS.map((g) => g.items.length), [5, 5, 3]);
+  });
+
+  it('★ 工具名与 docs/mcp-tools.md 的清单逐条一致（防文档漂移）', () => {
+    const docText = fs.readFileSync(path.join(webRoot, '..', 'docs', 'mcp-tools.md'), 'utf-8');
+    // 只取表格里 `| \`ki_xxx\` |` 形式出现的工具名
+    const docNames = [...docText.matchAll(/^\|\s*`(ki_[a-z_]+)`/gm)].map((m) => m[1]).sort();
+    const pageNames = MCP_TOOLS.flatMap((g) => g.items.map((i) => i.name)).sort();
+    assert.deepEqual(pageNames, docNames, '页面工具名必须与 docs/mcp-tools.md 完全一致');
+  });
+
+  it('工具名唯一，每条都有作用说明', () => {
+    const names = MCP_TOOLS.flatMap((g) => g.items.map((i) => i.name));
+    assert.equal(new Set(names).size, names.length);
+    for (const group of MCP_TOOLS) {
+      for (const item of group.items) {
+        assert.ok(item.purpose.length >= 6, `${item.name} 缺少作用说明`);
+      }
+    }
+  });
+
+  it('外链指向 docs/mcp-tools.md，边界说明点明不暴露级联删除', () => {
+    assert.equal(mcpToolsDocUrl(), `${REPO_DOCS_BASE}/mcp-tools.md`);
+    assert.ok(MCP_TOOLS_NOTE.includes('刻意不暴露'));
+    assert.ok(MCP_TOOLS_NOTE.includes('CLI'));
   });
 });
 

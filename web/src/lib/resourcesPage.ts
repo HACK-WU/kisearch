@@ -55,6 +55,74 @@ export function configDocUrl(anchor?: string): string {
   return anchor ? `${REPO_DOCS_BASE}/configuration.md#${anchor}` : `${REPO_DOCS_BASE}/configuration.md`;
 }
 
+/** `docs/mcp-tools.md`（MCP 工具全表；与 CLI 文档分开） */
+export function mcpToolsDocUrl(): string {
+  return `${REPO_DOCS_BASE}/mcp-tools.md`;
+}
+
+// ─── MCP 工具清单（接入后能用什么） ────────────────────────────────────────
+
+export interface McpToolItem {
+  /** 工具名（与 `src/lib/mcp-tools/` 注册名一致） */
+  name: string;
+  /** 一句话作用（摘 docs/mcp-tools.md，不复制参数表） */
+  purpose: string;
+}
+
+export interface McpToolGroup {
+  label: string;
+  /** 语义色调：读=安全 / 写=变更 / 删除=危险（页面用它给组标题上色，不是纯装饰） */
+  tone: 'read' | 'write' | 'danger';
+  items: McpToolItem[];
+}
+
+/**
+ * `ki mcp` 暴露的全部 13 个工具，按「读 / 写 / 组织与删除」分组。
+ *
+ * 权威源：`docs/mcp-tools.md`（工具定义以 `src/lib/mcp-tools/` 为准）。
+ * 页面只给"叫什么、干什么"，参数细节走文档外链 —— 否则就是第二份会漂移的参数表。
+ */
+export const MCP_TOOLS: McpToolGroup[] = [
+  {
+    label: '读',
+    tone: 'read',
+    items: [
+      { name: 'ki_search', purpose: '语义检索（hybrid 混合 / fulltext 只查全文）' },
+      { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
+      { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
+      { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态与 wiki 写回可用性' },
+      { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
+    ],
+  },
+  {
+    label: '写',
+    tone: 'write',
+    items: [
+      { name: 'ki_sync_relation', purpose: '写入 / 更新单条 Relation + 本地 KB（自动补建 Group）' },
+      { name: 'ki_bulk_sync_relation', purpose: '批量写入（一次 embedding + 一次向量写入，单次 ≤50 条）' },
+      { name: 'ki_edit_relation', purpose: '对大 Relation 多轮按行编辑，finish 后一次性更新索引' },
+      { name: 'ki_store', purpose: '只写向量层单条文本（不写 KB，易产生孤儿向量）' },
+      { name: 'ki_bulk_store', purpose: '只写向量层批量文本（同上）' },
+    ],
+  },
+  {
+    label: '组织与删除',
+    tone: 'danger',
+    items: [
+      { name: 'ki_group_create', purpose: '创建 Group 节点（父级须已存在，scope 不存在时自动创建）' },
+      { name: 'ki_group_delete_empty', purpose: '删除空 Group（非空请用 CLI ki group delete --yes）' },
+      { name: 'ki_delete_relation', purpose: '删除单条 Relation（cache + KB + wiki + 向量四层）' },
+    ],
+  },
+];
+
+/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 13 个」一致，单测锁） */
+export const MCP_TOOL_COUNT = MCP_TOOLS.reduce((sum, group) => sum + group.items.length, 0);
+
+/** 工具清单的边界说明：MCP 刻意不暴露的能力 */
+export const MCP_TOOLS_NOTE =
+  'MCP 刻意不暴露 scope / doc 级联删除与 --force 类操作 —— 需要级联或强制操作时用 CLI（左侧「Scope 数据操作」）。';
+
 // ─── 目录（左栏） ────────────────────────────────────────────────────────
 
 export type TopicGroup = 'access' | 'feature' | 'config';

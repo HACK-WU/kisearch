@@ -41,6 +41,10 @@ import {
   MEMORY_RULE_COMMAND,
   MEMORY_RULE_FILE,
   MEMORY_SKILLS,
+  MCP_TOOL_COUNT,
+  MCP_TOOLS,
+  MCP_TOOLS_NOTE,
+  mcpToolsDocUrl,
   MEMORY_SKILLS_COMMAND,
   MORE_SKILL_TOOLS,
   NODE_REQUIREMENT,
@@ -330,6 +334,43 @@ function McpSection(): JSX.Element {
         <CodeBlock code={stdioConfig} label="mcp.json" ariaLabel="stdio 配置示例" />
         <p className="res-note">{STDIO_ENV_NOTE}</p>
       </div>
+
+      {/* 接入之后最常问的下一个问题：「接上了能干什么」 */}
+      <h3 className="res-subhead">
+        可用的 MCP 工具
+        <span className="res-subhead__hint">{MCP_TOOL_COUNT} 个</span>
+      </h3>
+      <div className="res-mcp-tools">
+        {MCP_TOOLS.map((group) => (
+          <div className="res-mcp-tools__group" key={group.label} data-tone={group.tone}>
+            <span className="res-mcp-tools__label" id={`res-mcp-tools-${group.tone}`}>{group.label}</span>
+            <ul className="res-mcp-tools__list" aria-labelledby={`res-mcp-tools-${group.tone}`}>
+              {group.items.map((item) => (
+                <li className="res-mcp-tool" key={item.name}>
+                  <code className="res-mcp-tool__name">{item.name}</code>
+                  <span className="res-mcp-tool__purpose">{item.purpose}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+      <p className="res-note res-mt-3">{MCP_TOOLS_NOTE}</p>
+      <p className="res-foot res-mt-2">
+        <Icon name="info" className="ki-icon res-foot__icon" />
+        <span>
+          参数与返回结构见
+          <a
+            className="res-link"
+            href={mcpToolsDocUrl()}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            MCP 工具参考 ↗
+          </a>
+          （docs/mcp-tools.md）
+        </span>
+      </p>
     </>
   );
 }
