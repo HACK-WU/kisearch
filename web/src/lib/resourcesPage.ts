@@ -201,7 +201,21 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
   },
   // ── 功能：对数据做的操作 ──
   {
-    id: 'import', group: 'feature', label: '导入', title: '导入外部 Wiki', kicker: '01 · IMPORT',
+    id: 'search', group: 'feature', label: '检索', title: '语义 / 全文检索', kicker: '01 · SEARCH',
+    summary: '页面检索够日常用；CLI 多了按 tag 过滤、阈值、只走全文这几项，写脚本与排查时更顺手。',
+    docAnchor: 'search',
+    params: [
+      { flag: '<query>', desc: '查询文本（位置参数；--query / -q 保留兼容）' },
+      { flag: '--limit <n>', desc: '整次检索返回的总条数上限，默认 10；引擎单次候选上限 1000' },
+      { flag: '--tags t1,t2', desc: '只在这些 tag 内检索（OR 组合）；不传=搜全部 tag' },
+      { flag: '--threshold <score>', desc: '融合得分阈值，过滤低分命中；默认 0 不过滤' },
+      { flag: '--mode hybrid|fulltext', desc: 'fulltext 不调用 embedding，可与 --no-vector 导入的文档对上' },
+      { flag: '--timeout <s>', desc: '查询 embedding 超时（秒，0.001–60）；不传用配置值' },
+      { flag: '--original', desc: '额外返回 KB 文件级原文（默认只返回向量匹配片段）' },
+    ],
+  },
+  {
+    id: 'import', group: 'feature', label: '导入', title: '导入外部 Wiki', kicker: '02 · IMPORT',
     summary: '把外部 Markdown 目录导入指定 Group。幂等追加：重复执行即增量（内容未变跳过重算），同名不同来源默认覆盖。',
     docAnchor: 'import',
     params: [
@@ -216,7 +230,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'datasource', group: 'feature', label: '数据源', title: '数据源登记与同步', kicker: '02 · DATASOURCE',
+    id: 'datasource', group: 'feature', label: '数据源', title: '数据源登记与同步', kicker: '03 · DATASOURCE',
     summary: '登记本地目录或 Git 源后按需同步。同步只「导入 + 计算待删候选」，永不自动删除 —— 删除必须另行确认。',
     docAnchor: 'datasource',
     params: [
@@ -229,21 +243,39 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'search', group: 'feature', label: '检索', title: '语义 / 全文检索', kicker: '03 · SEARCH',
-    summary: '页面检索够日常用；CLI 多了按 tag 过滤、阈值、只走全文这几项，写脚本与排查时更顺手。',
-    docAnchor: 'search',
+    id: 'rebuild', group: 'feature', label: '向量重建', title: '向量重建', kicker: '04 · REBUILD',
+    summary: '换过 embedding 模型 / 维度，或索引损坏时重建。会**全库重算**，耗时与文档量成正比。',
+    docAnchor: 'restore',
     params: [
-      { flag: '<query>', desc: '查询文本（位置参数；--query / -q 保留兼容）' },
-      { flag: '--limit <n>', desc: '整次检索返回的总条数上限，默认 10；引擎单次候选上限 1000' },
-      { flag: '--tags t1,t2', desc: '只在这些 tag 内检索（OR 组合）；不传=搜全部 tag' },
-      { flag: '--threshold <score>', desc: '融合得分阈值，过滤低分命中；默认 0 不过滤' },
-      { flag: '--mode hybrid|fulltext', desc: 'fulltext 不调用 embedding，可与 --no-vector 导入的文档对上' },
-      { flag: '--timeout <s>', desc: '查询 embedding 超时（秒，0.001–60）；不传用配置值' },
-      { flag: '--original', desc: '额外返回 KB 文件级原文（默认只返回向量匹配片段）' },
+      { flag: '--rebuild-vector', desc: '重建向量；可配 --group 只重建子树（幂等，不清其它向量）、--tags 给重建范围打标' },
+      { flag: '--group <path>', desc: '局部重建：只重算该 Group 子树' },
+      { flag: '--tags t1,t2', desc: '为重建范围内的文档附加标签（与已有标签合并去重）' },
     ],
   },
   {
-    id: 'backup', group: 'feature', label: '备份与还原', title: '备份与还原', kicker: '04 · BACKUP',
+    id: 'deleteDoc', group: 'feature', label: '删除文档', title: '删除文档', kicker: '05 · DELETE',
+    summary: '按 Group + 文档名删一条知识文档，连带清理 KB 原文、wiki 源文件、向量与全文索引 —— 不可恢复，没有回收站。',
+    docAnchor: 'delete-relation',
+    params: [
+      { flag: '--group <g>', desc: '文档所在 Group（与 --relation 一起用，文档级删除）' },
+      { flag: '--relation <r>', desc: '文档（Relation）名' },
+      { flag: '--input items.json', desc: '批量删除：{"items":[{"group":"…","relation":"…"}]}，逐条返回结果' },
+      { flag: '（无 --yes）', desc: 'delete-relation 不做二次确认，执行即删；删除范围含 wiki 源文件，不可撤销' },
+    ],
+  },
+  {
+    id: 'export', group: 'feature', label: '导出为 Wiki', title: '导出为 Wiki', kicker: '06 · EXPORT',
+    summary: '把知识库反向导出成 Markdown Wiki，便于迁移或对外发布。',
+    docAnchor: 'export',
+    params: [
+      { flag: '<scope>', desc: '要导出的库（必填）' },
+      { flag: '--output <dir>', desc: '输出目录（必填）' },
+      { flag: '--group <path>', desc: '只导某个 Group 子树；缺省全量，顶层目录名 = scope 名' },
+      { flag: '--yes', desc: '输出目录已存在且非空时确认覆盖；缺省会拒绝' },
+    ],
+  },
+  {
+    id: 'backup', group: 'feature', label: '备份与还原', title: '备份与还原', kicker: '07 · BACKUP',
     summary: '备份 scope 目录快照；还原可指定快照文件，也可顺带重建向量。',
     docAnchor: 'backup',
     params: [
@@ -255,45 +287,13 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'export', group: 'feature', label: '导出为 Wiki', title: '导出为 Wiki', kicker: '05 · EXPORT',
-    summary: '把知识库反向导出成 Markdown Wiki，便于迁移或对外发布。',
-    docAnchor: 'export',
-    params: [
-      { flag: '<scope>', desc: '要导出的库（必填）' },
-      { flag: '--output <dir>', desc: '输出目录（必填）' },
-      { flag: '--group <path>', desc: '只导某个 Group 子树；缺省全量，顶层目录名 = scope 名' },
-      { flag: '--yes', desc: '输出目录已存在且非空时确认覆盖；缺省会拒绝' },
-    ],
-  },
-  {
-    id: 'rebuild', group: 'feature', label: '向量重建', title: '向量重建', kicker: '06 · REBUILD',
-    summary: '换过 embedding 模型 / 维度，或索引损坏时重建。会**全库重算**，耗时与文档量成正比。',
-    docAnchor: 'restore',
-    params: [
-      { flag: '--rebuild-vector', desc: '重建向量；可配 --group 只重建子树（幂等，不清其它向量）、--tags 给重建范围打标' },
-      { flag: '--group <path>', desc: '局部重建：只重算该 Group 子树' },
-      { flag: '--tags t1,t2', desc: '为重建范围内的文档附加标签（与已有标签合并去重）' },
-    ],
-  },
-  {
-    id: 'group', group: 'feature', label: 'Group 操作', title: 'Group 操作', kicker: '07 · GROUP',
+    id: 'group', group: 'feature', label: 'Group 操作', title: 'Group 操作', kicker: '08 · GROUP',
     summary: 'Group 是知识目录的层级路径（如 `项目/API`）。创建可带父路径，删除不写 `--yes` 只预览。',
     docAnchor: 'group',
     params: [
       { flag: '<path>', desc: 'Group 路径，支持多级（如 项目/API）；create 要求父级已存在' },
       { flag: '--yes', desc: 'delete 时确认删除；不写则只预览将删内容并拒绝执行' },
       { flag: '--scope <s>', desc: '所属库；缺省 default（strict 模式必填）' },
-    ],
-  },
-  {
-    id: 'deleteDoc', group: 'feature', label: '删除文档', title: '删除文档', kicker: '08 · DELETE',
-    summary: '按 Group + 文档名删一条知识文档，连带清理 KB 原文、wiki 源文件、向量与全文索引 —— 不可恢复，没有回收站。',
-    docAnchor: 'delete-relation',
-    params: [
-      { flag: '--group <g>', desc: '文档所在 Group（与 --relation 一起用，文档级删除）' },
-      { flag: '--relation <r>', desc: '文档（Relation）名' },
-      { flag: '--input items.json', desc: '批量删除：{"items":[{"group":"…","relation":"…"}]}，逐条返回结果' },
-      { flag: '（无 --yes）', desc: 'delete-relation 不做二次确认，执行即删；删除范围含 wiki 源文件，不可撤销' },
     ],
   },
   {
@@ -307,15 +307,21 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
 
-  // ── 配置：改配置 / 管凭据 / 诊断 ──
+  // ── 配置：诊断 / 改配置 / 管凭据 ──
   {
-    id: 'scope', group: 'config', label: '注册 scope', title: '注册 scope 与配置方式', kicker: '01 · SCOPE',
+    // 放第一位：配置类问题的入口应该是「先诊断」，而不是先改配置
+    id: 'doctor', group: 'config', label: '配置诊断', title: '配置诊断', kicker: '01 · DOCTOR',
+    summary: '一条命令校验配置语法与字段、目录、API 密钥、向量维度 —— 「改了怎么没生效」的第一站。',
+    docAnchor: 'doctor',
+  },
+  {
+    id: 'scope', group: 'config', label: '注册 scope', title: '注册 scope 与配置方式', kicker: '02 · SCOPE',
     summary: '把 scope 写进配置能换来什么（白名单护栏、独立目录、Wiki 写回），以及 scopes 段怎么配。',
     docAnchor: 'scope',
     configAnchor: 'scopes',
   },
   {
-    id: 'token', group: 'config', label: '生成 Token', title: 'MCP Token 管理', kicker: '02 · TOKEN',
+    id: 'token', group: 'config', label: 'MCP Token 管理', title: 'MCP Token 管理', kicker: '03 · TOKEN',
     summary: '跨机访问 MCP 时要 Token。每个 Token 限定授权 scope，可改权限，也可立即失效。',
     docAnchor: 'mcp',
     params: [
@@ -325,12 +331,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'doctor', group: 'config', label: '配置诊断', title: '配置诊断', kicker: '03 · DOCTOR',
-    summary: '一条命令校验配置语法与字段、目录、API 密钥、向量维度 —— 「改了怎么没生效」的第一站。',
-    docAnchor: 'doctor',
-  },
-  {
-    id: 'concurrency', group: 'config', label: '并发与资源', title: '并发与资源配置', kicker: '04 · CONCURRENCY',
+    id: 'concurrency', group: 'config', label: '并发与资源配置', title: '并发与资源配置', kicker: '04 · CONCURRENCY',
     summary: '导入/重建时的 embedding 并发、daemon 同时持有的 collection 句柄数、索引整理线程数。改错会拖慢或打满 CPU。',
     configAnchor: 'embedding',
   },

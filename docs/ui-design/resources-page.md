@@ -47,21 +47,21 @@
 │  ├─ 01 MCP 接入      （本机 / 其他设备 / stdio + **可用工具清单 13 个**）
 │  ├─ 02 Agent Skill   （2 个 Skill + 生效方式 + 记忆闭环 + 9 家工具命令）
 │  └─ 03 对话模型      （协议前提 / 状态 / configPath / 已配置看真实值 · 未配置看片段 / 隐私确认）
-├─ 功能（9）            ← 对知识数据做的操作
-│  ├─ 01 导入          （幂等追加）
-│  ├─ 02 数据源        （登记 + 同步 + 待删候选）
-│  ├─ 03 检索          （tag 过滤 / 阈值 / 只走全文）
-│  ├─ 04 备份与还原
-│  ├─ 05 导出为 Wiki
-│  ├─ 06 向量重建
-│  ├─ 07 Group 操作
-│  ├─ 08 删除文档      （delete-relation：四层一起清）
-│  └─ 09 Scope 数据操作（clear / delete，破坏性）
-└─ 配置（4）            ← 改配置、管凭据、诊断
-   ├─ 01 注册 scope    （已注册清单 / 好处 / scopes 段配置方式）
-   ├─ 02 生成 Token    （generate / list / update / delete）
-   ├─ 03 配置诊断      （ki doctor）
-   └─ 04 并发与资源    （scheduler / maxOpenCollections / optimize）
+├─ 功能（9）            ← 对知识数据做的操作；顺序按用户 2026-10-28 指定
+│  ├─ 01 检索          （最高频，tag 过滤 / 阈值 / 只走全文）
+│  ├─ 02 导入          （幂等追加）
+│  ├─ 03 数据源        （登记 + 同步 + 待删候选）
+│  ├─ 04 向量重建      （修复）
+│  ├─ 05 删除文档      （销毁：delete-relation 四层一起清）
+│  ├─ 06 导出为 Wiki
+│  ├─ 07 备份与还原
+│  ├─ 08 Group 操作
+│  └─ 09 Scope 数据操作（销毁：clear / delete，破坏性最大）
+└─ 配置（4）            ← 诊断、改配置、管凭据
+   ├─ 01 配置诊断      （ki doctor —— 放首位：配置问题先诊断，而不是先改）
+   ├─ 02 注册 scope    （已注册清单 / 好处 / scopes 段配置方式）
+   ├─ 03 MCP Token 管理（generate / list / update / delete）
+   └─ 04 并发与资源配置（scheduler / maxOpenCollections / optimize）
 ```
 
 > **「注册 scope」（改配置）与「Scope 数据操作」（改数据）必须分开**：前者答"怎么配才有白名单与写回"，

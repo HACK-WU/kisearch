@@ -183,11 +183,11 @@ describe('目录定义（左栏）', () => {
     assert.deepEqual(topicsByGroup('access').map((t) => t.id), ['mcp', 'skill', 'llm']);
     assert.deepEqual(
       topicsByGroup('feature').map((t) => t.id),
-      ['import', 'datasource', 'search', 'backup', 'export', 'rebuild', 'group', 'deleteDoc', 'scopeOps'],
+      ['search', 'import', 'datasource', 'rebuild', 'deleteDoc', 'export', 'backup', 'group', 'scopeOps'],
     );
     assert.deepEqual(
       topicsByGroup('config').map((t) => t.id),
-      ['scope', 'token', 'doctor', 'concurrency'],
+      ['doctor', 'scope', 'token', 'concurrency'],
     );
     assert.equal(RESOURCE_TOPICS.length, 16);
     assert.deepEqual(GROUP_LABEL, { access: '接入', feature: '功能', config: '配置' });
