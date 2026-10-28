@@ -6905,6 +6905,27 @@ select.ki-chat-cfg__ta--select {
 .res-example { display: grid; gap: 5px; min-width: 0; }
 .res-example__label { color: var(--ki-color-text-subtle); font-size: 12px; }
 
+/* ── 参数说明（flag + 含义，两栏对齐） ── */
+.res-params { display: grid; gap: 9px; }
+.res-params__item {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+.res-params__item dt { min-width: 0; }
+.res-params__item code {
+  color: var(--ki-color-text);
+  font: 600 12px/1.5 var(--ki-font-mono);
+  overflow-wrap: anywhere;
+}
+.res-params__item dd {
+  margin: 0;
+  color: var(--ki-color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
 /* ── 小节标题 / 说明 / 页脚 ── */
 /* 小节标题：上 12(+14 内距)、下 10 —— 原先只有上边距，标题紧贴自己的内容，
    多段叠起来就"一节挤一节"（用户 2026-10-28 反馈拥挤）。 */
@@ -7006,6 +7027,7 @@ select.ki-chat-cfg__ta--select {
   .res-tool .res-copy { grid-column: 2; grid-row: 1; }
   /* 工具清单：两栏在窄屏会把「说明」挤成 31px 宽（实测折 9 行），改单列 */
   .res-mcp-tool { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 7px 12px; }
+  .res-params__item { grid-template-columns: minmax(0, 1fr); gap: 3px; }
 }
 
 /* ≤480：16 项 chips 换行后占掉近半屏，收紧内距与字号压到 6 行左右 */

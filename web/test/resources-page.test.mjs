@@ -266,6 +266,34 @@ describe('功能示例（scope 实填）', () => {
   });
 });
 
+describe('功能项的参数说明', () => {
+  it('功能组每项都有 params（至少 3 条），flag 与 desc 都非空', () => {
+    for (const topic of topicsByGroup('feature')) {
+      assert.ok(Array.isArray(topic.params), `${topic.id} 缺参数说明`);
+      assert.ok(topic.params.length >= 3, `${topic.id} 参数太少`);
+      for (const param of topic.params) {
+        assert.ok(param.flag.length > 0, `${topic.id} 有空的 flag`);
+        assert.ok(param.desc.length >= 6, `${topic.id} 的 ${param.flag} 说明过短`);
+      }
+    }
+  });
+
+  it('接入组的 MCP / Skill 不需要 params（内容在各自面板）', () => {
+    for (const topic of topicsByGroup('access')) {
+      if (topic.id === 'llm') continue;  // LLM 走配置示例 + 字段口径
+      assert.equal(topic.params, undefined, `${topic.id} 不该有 params`);
+    }
+  });
+
+  it('★ --conflict-mode 的默认值写成 incremental（不能写成"跳过同名"）', () => {
+    const imp = RESOURCE_TOPICS.find((t) => t.id === 'import');
+    const param = imp.params.find((p) => p.flag === '--conflict-mode');
+    assert.ok(param.desc.includes('incremental'));
+    assert.equal(imp.summary.includes('同名不同来源跳过'), false, 'summary 不得写"跳过"（默认是覆盖）');
+    assert.ok(imp.summary.includes('覆盖'));
+  });
+});
+
 describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
   it('cliDocUrl 指向 docs/cli.md，可带锚点', () => {
     assert.equal(REPO_DOCS_BASE, 'https://github.com/HACK-WU/kisearch/blob/master/docs');

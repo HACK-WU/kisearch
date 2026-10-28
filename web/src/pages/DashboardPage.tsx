@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
+import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { getLastRttMs } from '@/api/httpApi';
 import { getTasks } from '@/api/tasksApi';
@@ -276,8 +277,8 @@ export function DashboardPage(): JSX.Element {
   // 当前 scope 概览（切换 scope 时实时更新）
   const { data: scopeDocs } = useDocList(scope);
   const currentMeta = list.find((s) => s.scope === scope);
-  const curDocs = scopeDocs?.docs ?? [];
-  const curGroups = new Set(curDocs.map((d) => d.group)).size;
+  // 计数取 `total` / `groups`：doc/list 无 group 时上限 500，列表长度与由它去重的分组数都是截断值
+  const { docTotal: curDocTotal, groupCount: curGroups } = scopeOverviewCounts(scopeDocs);
 
   /**
    * 当前 scope 的向量维度状态（REQ-20261016-002）：与顶栏共用同一 queryKey ⇒ 复用缓存、
@@ -349,7 +350,7 @@ export function DashboardPage(): JSX.Element {
             <div className="ki-stats ki-stats--pair">
               <div className="ki-stat-card ki-stat-card--soft">
                 <div className="ki-stat-label">文档</div>
-                <div className="ki-stat-value">{curDocs.length}</div>
+                <div className="ki-stat-value">{curDocTotal}</div>
               </div>
               <div className="ki-stat-card ki-stat-card--soft">
                 <div className="ki-stat-label">分组</div>

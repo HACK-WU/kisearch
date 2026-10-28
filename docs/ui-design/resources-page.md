@@ -170,6 +170,7 @@
 | 已注册 scope | `.res-registered` + `.res-wikisync--{ok,warn,muted}` | 轻量行内列表（scope 名 + Wiki 写回三态）；不用表格 —— 运行态诊断归 `ki scope list`，本页重心是「注册 + 怎么配」 |
 | 好处与口径 | `.res-benefits` / `.res-notes` | 主色圆点列表（标题 + 说明）/ disc 列表（配置口径提醒） |
 | 示例块 | `.res-examples` / `.res-example` | 每条 = 小标题 + 代码块 |
+| 参数说明 | `.res-params`（`dl` + `dt/dd`） | flag 列 210px（mono 600）+ 含义列自适应；≤760 单列。放在示例**之后**（先看怎么用，再看每个参数啥意思）；只列常用几条，完整表走文档外链 |
 | 外链 | `.res-link` | 主色 + 下划线；`target=_blank rel="noopener noreferrer"` |
 
 **加载 / 空 / 错误态**：

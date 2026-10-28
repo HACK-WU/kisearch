@@ -716,6 +716,23 @@ function FeatureSection({ topic }: { topic: ResourceTopic }): JSX.Element {
         </>
       ) : null}
 
+      {topic.params && topic.params.length > 0 ? (
+        <>
+          <h3 className="res-subhead">
+            参数
+            <span className="res-subhead__hint">只列常用；完整参数表见文档</span>
+          </h3>
+          <dl className="res-params">
+            {topic.params.map((param) => (
+              <div className="res-params__item" key={param.flag}>
+                <dt><code>{param.flag}</code></dt>
+                <dd>{param.desc}</dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      ) : null}
+
       {caution ? (
         <Notice tone={caution.tone} title={caution.title}>{caution.body}</Notice>
       ) : null}
