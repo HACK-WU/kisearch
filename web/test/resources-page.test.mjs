@@ -55,7 +55,9 @@ const {
   resolveTopic,
   SCOPE_CONFIG_BENEFITS,
   SCOPE_CONFIG_NOTES,
+  SKILL_AGENT_COUNT_HINT,
   SKILL_ITEMS,
+  SKILL_TOOLS,
   skillInstallCommand,
   STATUS_COMMAND,
   TOKEN_COMMAND,
@@ -134,9 +136,27 @@ describe('配置 JSON', () => {
 });
 
 describe('命令常量', () => {
-  it('常见工具只直出 3 个，其余进更多工具', () => {
-    assert.deepEqual(PRIMARY_SKILL_TOOLS.map((tool) => tool.agent), ['claude-code', 'codex', 'opencode']);
-    assert.deepEqual(MORE_SKILL_TOOLS.map((tool) => tool.agent), ['cursor', 'qoder', 'qoder-cn']);
+  it('常见工具直出 4 个（含 CodeBuddy），其余进更多工具', () => {
+    assert.deepEqual(
+      PRIMARY_SKILL_TOOLS.map((tool) => tool.agent),
+      ['claude-code', 'codex', 'opencode', 'codebuddy'],
+    );
+    assert.deepEqual(
+      MORE_SKILL_TOOLS.map((tool) => tool.agent),
+      ['cursor', 'qoder', 'qoder-cn', 'trae', 'trae-cn'],
+    );
+  });
+
+  it('★ Trae / Trae CN 的 agent 标识与官方表一致（字节，国际版 / 国内版）', () => {
+    assert.equal(SKILL_TOOLS.find((t) => t.id === 'trae').agent, 'trae');
+    assert.equal(SKILL_TOOLS.find((t) => t.id === 'trae-cn').agent, 'trae-cn');
+    assert.equal(skillInstallCommand('trae-cn'), 'npx skills add HACK-WU/kisearch -a trae-cn');
+  });
+
+  it('★ CodeBuddy 的 agent 标识为 codebuddy（与 skills 官方 agent 表一致）', () => {
+    const cb = SKILL_TOOLS.find((tool) => tool.id === 'codebuddy');
+    assert.equal(cb.agent, 'codebuddy');
+    assert.equal(skillInstallCommand(cb.agent), 'npx skills add HACK-WU/kisearch -a codebuddy');
   });
 
   it('Skill 安装命令使用 npx skills + 对应 agent', () => {

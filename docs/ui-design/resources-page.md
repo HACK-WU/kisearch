@@ -45,7 +45,7 @@
 资源
 ├─ 接入（3）            ← 把外部工具接进来
 │  ├─ 01 MCP 接入      （本机 / 其他设备 / stdio + **可用工具清单 13 个**）
-│  ├─ 02 Agent Skill   （2 个 Skill + 生效方式 + 记忆闭环）
+│  ├─ 02 Agent Skill   （2 个 Skill + 生效方式 + 记忆闭环 + 9 家工具命令）
 │  └─ 03 对话模型      （状态 / configPath / 可复制片段 / 隐私确认）
 ├─ 功能（9）            ← 对知识数据做的操作
 │  ├─ 01 导入          （幂等追加）
@@ -247,6 +247,7 @@
 | 5 | 非 `--web` 打开（如 Vite dev）时 MCP 地址可能不准 | 页面提示以 `ki mcp --status` 的实监听为准 |
 | 6 | 页面不校验客户端配置是否生效 | 只给验证命令，不假装已连接 |
 | 7 | stdio 示例**不带 `env`** | 桥接 daemon 时 Token / API Key 都在 daemon 侧，配置层也"不做隐式回退"（`docs/cli.md`）；页面用 `STDIO_ENV_NOTE` 说明唯一例外（IDE 直接拉起引擎 + 配置用 `${ENV_VAR}` 引用）。在示例里塞 `env` 会让人误以为必须填密钥（用户 2026-10-27 指出） |
+| 8 | Agent 清单只列 7 家 | `npx skills` 官方支持 70+ 种 agent（`docs/agents.md` 表格）；页面列高频 4 家直出 + 5 家折叠（Cursor / Qoder / Qoder CN / Trae / Trae CN），并提示 `-a '*'` 可装全部。CodeBuddy 的标识是 `codebuddy`（落 `.codebuddy/skills/`），已实跑 `-a codebuddy -l` 验证可用 |
 
 ---
 

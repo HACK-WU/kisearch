@@ -24,13 +24,22 @@ export const SKILL_TOOLS: SkillTool[] = [
   { id: 'claude-code', label: 'Claude Code', agent: 'claude-code' },
   { id: 'codex', label: 'Codex', agent: 'codex' },
   { id: 'opencode', label: 'OpenCode', agent: 'opencode' },
+  // CodeBuddy 与其它三家同一档：`skills` 原生支持（agent 标识 codebuddy，
+  // 落到 .codebuddy/skills/ 或 ~/.codebuddy/skills/）——本页就跑在它里面，不该藏进「更多工具」
+  { id: 'codebuddy', label: 'CodeBuddy', agent: 'codebuddy' },
   { id: 'cursor', label: 'Cursor', agent: 'cursor' },
   { id: 'qoder', label: 'Qoder', agent: 'qoder' },
   { id: 'qoder-cn', label: 'Qoder CN', agent: 'qoder-cn' },
+  // 字节 Trae：国际版 trae / 国内版 trae-cn（项目路径同为 .trae/skills/，全局路径不同）
+  { id: 'trae', label: 'Trae', agent: 'trae' },
+  { id: 'trae-cn', label: 'Trae CN', agent: 'trae-cn' },
 ];
 
-export const PRIMARY_SKILL_TOOLS = SKILL_TOOLS.slice(0, 3);
-export const MORE_SKILL_TOOLS = SKILL_TOOLS.slice(3);
+/** `npx skills` 当前支持的 agent 数量（`docs/agents.md` 的表格口径，用于页面提示不要以为只有列出的几家） */
+export const SKILL_AGENT_COUNT_HINT = 'npx skills 目前支持 70+ 种 agent（-a \'*\' 可一次装到全部）';
+
+export const PRIMARY_SKILL_TOOLS = SKILL_TOOLS.slice(0, 4);
+export const MORE_SKILL_TOOLS = SKILL_TOOLS.slice(4);
 
 export const TOKEN_COMMAND = 'ki mcp token generate --scope all';
 export const STATUS_COMMAND = 'ki mcp --status';

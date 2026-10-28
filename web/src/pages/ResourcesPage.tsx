@@ -52,6 +52,7 @@ import {
   resolveTopic,
   SCOPE_CONFIG_BENEFITS,
   SCOPE_CONFIG_NOTES,
+  SKILL_AGENT_COUNT_HINT,
   SKILL_ITEMS,
   SKILLS_LIST_COMMAND,
   skillInstallCommand,
@@ -438,7 +439,7 @@ function SkillSection(): JSX.Element {
       </div>
       <p className="res-note res-mt-2">
         说明：加 <code>-g</code> 装到全局；加 <code>--skill ki-search</code> 只装检索规则。
-        装完用 <code>{SKILLS_LIST_COMMAND}</code> 确认。
+        装完用 <code>{SKILLS_LIST_COMMAND}</code> 确认。{SKILL_AGENT_COUNT_HINT}。
       </p>
 
       <details className="res-more res-more--block">
