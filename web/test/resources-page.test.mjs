@@ -48,6 +48,8 @@ const {
   MCP_TOOLS_NOTE,
   mcpToolsDocUrl,
   MEMORY_SKILLS,
+  LLM_FIELD_NOTES,
+  LLM_PROTOCOL_NOTE,
   MORE_SKILL_TOOLS,
   PRIMARY_SKILL_TOOLS,
   REPO_DOCS_BASE,
@@ -402,6 +404,21 @@ describe('LLM 配置文案', () => {
     assert.ok(snippet.includes('model:'));
     assert.ok(snippet.includes('${KI_LLM_API_KEY}'));
     assert.equal(/sk-[A-Za-z0-9]/.test(snippet), false);
+  });
+
+  it('★ 片段含常用可选字段与 OpenAI 协议说明', () => {
+    const snippet = buildLlmConfigSnippet();
+    for (const key of ['contextChars', 'requestTimeoutMs', 'maxTokens', 'temperature', 'supportsTools']) {
+      assert.ok(snippet.includes(key), `片段缺 ${key}`);
+    }
+    assert.ok(snippet.includes('chat/completions'), '片段要说明只支持 OpenAI 协议');
+    assert.ok(LLM_PROTOCOL_NOTE.includes('OpenAI'));
+    assert.ok(LLM_PROTOCOL_NOTE.includes('chat/completions'));
+  });
+
+  it('★ contextChars 的口径被明确写成「分母」而非上限', () => {
+    assert.ok(LLM_FIELD_NOTES.some((n) => n.includes('分母') && n.includes('不截断')));
+    assert.ok(LLM_FIELD_NOTES.some((n) => n.includes('maxTokens')));
   });
 
   it('未配置 → warn 且透出后端原因；已配置 → ok 带 model@host', () => {

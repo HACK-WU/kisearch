@@ -46,7 +46,7 @@
 ├─ 接入（3）            ← 把外部工具接进来
 │  ├─ 01 MCP 接入      （本机 / 其他设备 / stdio + **可用工具清单 13 个**）
 │  ├─ 02 Agent Skill   （2 个 Skill + 生效方式 + 记忆闭环 + 9 家工具命令）
-│  └─ 03 对话模型      （状态 / configPath / 可复制片段 / 隐私确认）
+│  └─ 03 对话模型      （协议前提 / 状态 / configPath / 已配置看真实值 · 未配置看片段 / 隐私确认）
 ├─ 功能（9）            ← 对知识数据做的操作
 │  ├─ 01 导入          （幂等追加）
 │  ├─ 02 数据源        （登记 + 同步 + 待删候选）
@@ -165,6 +165,7 @@
 | Skill 卡 | `.res-skills` / `.res-skill` | 徽标 `--auto`（绿，装完即生效）/ `--manual`（黄，需手动触发） |
 | 折叠块 | `.res-more` / `.res-more--block` | 工具行内折叠 / 独立成块（记忆闭环） |
 | LLM 状态 | `.res-llm-status` | `--ok`（绿点）/ `--warn`（黄点） |
+| LLM 两态 | — | **已配置**：显示真实 `model` / `baseURLHost` / `contextChars` / `supportsTools` / 超时，片段收进折叠「查看完整配置示例」；**未配置**：直接给含可选字段的片段 + 3 条字段口径。⚠️ 已配置时**不得**再展示 `your-host` / `your-model` 占位模板（标题写"当前生效配置"却给模板＝误导） |
 | MCP 工具清单 | `.res-mcp-tools` + `[data-tone=read\|write\|danger]` | 三组各自成块（描边 + 表头浅底）；组标题左侧 5px 语义色点：读=中性灰 / 写=主色 / 组织与删除=警告黄。**只做纯文字两栏时 13 行连成一片，看不出哪几条会改数据** |
 | 已注册 scope | `.res-registered` + `.res-wikisync--{ok,warn,muted}` | 轻量行内列表（scope 名 + Wiki 写回三态）；不用表格 —— 运行态诊断归 `ki scope list`，本页重心是「注册 + 怎么配」 |
 | 好处与口径 | `.res-benefits` / `.res-notes` | 主色圆点列表（标题 + 说明）/ disc 列表（配置口径提醒） |

@@ -37,6 +37,8 @@ import {
   describeWikiSync,
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
+  LLM_FIELD_NOTES,
+  LLM_PROTOCOL_NOTE,
   LLM_RELOAD_HINT,
   MEMORY_RULE_COMMAND,
   MEMORY_RULE_FILE,
@@ -529,23 +531,53 @@ function LlmSection(): JSX.Element {
         </div>
       ) : null}
 
-      <h3 className="res-subhead">{data?.enabled ? '当前生效配置（只读）' : '填入必填三项即可启用'}</h3>
-      <p className="res-help">
-        {data?.enabled
-          ? '页面不展示 apiKey。要改配置请编辑上面的文件后保存。'
-          : '把下面这段合并进配置文件即可；apiKey 支持 ${ENV_VAR} 引用，无需明文落盘。'}
-      </p>
-      <CodeBlock code={snippet} label="config.yaml" ariaLabel="llm 配置片段" />
+      <h3 className="res-subhead">协议前提</h3>
+      <p className="res-help">{LLM_PROTOCOL_NOTE}</p>
 
-      <p className="res-note res-mt-2">
+      {data?.enabled ? (
+        <>
+          {/* 已配置时**不再展示占位模板**：那段是「怎么配」，不是「现在是什么」，
+              之前标题写「当前生效配置」却给 your-host / your-model，等于误导 */}
+          <h3 className="res-subhead">当前生效配置（只读）</h3>
+          <ul className="res-notes">
+            <li>模型 <code>{data.model}</code> · 上游 <code>{data.baseURLHost}</code></li>
+            <li>
+              上下文刻度 <code>contextChars</code>：
+              {typeof data.contextChars === 'number' ? data.contextChars.toLocaleString('en-US') : '—'} 字符
+              （只作面板占比分母，不截断内容）
+            </li>
+            <li>
+              工具调用：{data.supportsTools ? '支持' : '不支持（走预检索降级）'}
+              {' · '}单次超时：{data.requestTimeoutMs ? `${data.requestTimeoutMs}ms` : '默认'}
+            </li>
+            <li>apiKey 不在页面展示；要改配置请编辑上面的文件后保存，可调项见配置文档。</li>
+          </ul>
+          {/* 已配置时也直接展开示例（用户 2026-10-28：不要折叠） */}
+          <h3 className="res-subhead">完整配置示例（含可选字段）</h3>
+          <CodeBlock code={snippet} label="config.yaml" ariaLabel="llm 完整配置示例" />
+          <ul className="res-notes">
+            {LLM_FIELD_NOTES.map((note) => <li key={note}>{note}</li>)}
+          </ul>
+        </>
+      ) : (
+        <>
+          <h3 className="res-subhead">填入必填三项即可启用</h3>
+          <p className="res-help">把下面这段合并进配置文件；未配置不影响导入、检索等其它功能。</p>
+          <CodeBlock code={snippet} label="config.yaml" ariaLabel="llm 配置片段" />
+          <ul className="res-notes">
+            {LLM_FIELD_NOTES.map((note) => <li key={note}>{note}</li>)}
+          </ul>
+        </>
+      )}
+
+      <p className="res-note res-mt-3">
         <Icon name="check" className="ki-icon res-foot__icon" />
         {LLM_RELOAD_HINT}
       </p>
-      <p className="res-note res-mt-1">
-        其余可选字段（<code>supportsTools</code> / <code>kbDisclosureAck</code> / <code>contextChars</code> /
-        {' '}<code>requestTimeoutMs</code> 等）见
-        <a className="res-link" href={cliDocUrl()} target="_blank" rel="noopener noreferrer">文档 ↗</a>
-        ；未配置不影响导入、检索等其它功能。
+      <p className="res-note res-mt-2">
+        完整字段（<code>firstByteTimeoutMs</code> / <code>defaultSystemPrompt</code> /
+        {' '}<code>kbDisclosureAck</code> / <code>reasoningEfforts</code> 等）见
+        <a className="res-link" href={configDocUrl('llm')} target="_blank" rel="noopener noreferrer">配置文档 ↗</a>
       </p>
     </>
   );

@@ -436,11 +436,31 @@ export const LLM_ENV_PLACEHOLDER = 'KI_LLM_API_KEY';
 export function buildLlmConfigSnippet(envName: string = LLM_ENV_PLACEHOLDER): string {
   return [
     'llm:',
+    '  # 只支持 OpenAI 兼容协议：请求发往 ${baseURL}/chat/completions（SSE 流式）',
     '  baseURL: https://your-host/v1',
     '  model: your-model',
-    `  apiKey: \${${envName}}`,
+    `  apiKey: \${${envName}}          # 支持 \${ENV_VAR} 引用，避免明文落盘`,
+    '',
+    '  # 可选（不写即用默认值）',
+    '  contextChars: 1000000        # 面板上下文占比的分母（字符），默认 1000K',
+    '  requestTimeoutMs: 300000     # 单次请求总超时，默认 5 分钟',
+    '  maxTokens: 4096              # 默认不下发；设了才有上限（设小有截断风险）',
+    '  temperature: 0.7             # 默认不传，原样透传给上游',
+    '  supportsTools: true          # 模型是否支持 function calling；false 走预检索降级',
   ].join('\n');
 }
+
+/** LLM 配置的协议前提（用户 2026-10-28 要求：baseURL 必须说明只支持 OpenAI 协议） */
+export const LLM_PROTOCOL_NOTE =
+  'baseURL 只支持 OpenAI 兼容协议：客户端请求 `${baseURL}/chat/completions`（SSE 流式），'
+  + '不做任何厂商适配。非 OpenAI 协议的厂商需要自建兼容网关。';
+
+/** LLM 字段口径提醒（写错最典型的三个） */
+export const LLM_FIELD_NOTES: string[] = [
+  'contextChars 是面板「已用多少」的分母（字符数），不截断内容 —— 模型真实窗口按 token 计，别拿它当上限。',
+  'maxTokens 默认不下发：部分上游的 reasoning token 与 max_tokens 关系不确定，设小值有截断答案的风险。',
+  'supportsTools 默认 true；上游确实不支持 function calling 时设 false，会走「预检索 + degraded 明示」降级，不是禁用检索。',
+];
 
 /** 只读诊断所需的 LLM 状态子集（来自 `GET /api/chat/config`） */
 export interface LlmStatusView {

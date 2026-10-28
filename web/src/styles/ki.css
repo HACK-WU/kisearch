@@ -6892,12 +6892,12 @@ select.ki-chat-cfg__ta--select {
 .res-benefit span { color: var(--ki-color-text-muted); }
 
 .res-notes {
-  display: grid; gap: 5px;
+  display: grid; gap: 9px;
   margin-left: 16px;
   padding-left: 2px;
   list-style: disc;
   color: var(--ki-color-text-subtle);
-  font-size: 12px; line-height: 1.6;
+  font-size: 12px; line-height: 1.7;
 }
 
 /* ── 示例 ── */
@@ -6906,9 +6906,12 @@ select.ki-chat-cfg__ta--select {
 .res-example__label { color: var(--ki-color-text-subtle); font-size: 12px; }
 
 /* ── 小节标题 / 说明 / 页脚 ── */
+/* 小节标题：上 12(+14 内距)、下 10 —— 原先只有上边距，标题紧贴自己的内容，
+   多段叠起来就"一节挤一节"（用户 2026-10-28 反馈拥挤）。 */
 .res-subhead {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
-  margin-top: var(--ki-space-2);
+  margin-top: var(--ki-space-3);
+  margin-bottom: 10px;
   padding-top: 14px;
   border-top: 1px solid var(--ki-color-border);
   font-size: 13px;
