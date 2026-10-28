@@ -4,8 +4,9 @@
 
 import { useQuery } from '@tanstack/react-query';
 import {
-  getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail,
+  getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail, getHealthz,
   type DocListResponse, type HealthResponse, type DataSourceListResponse, type DataSourceDetailResponse,
+  type HealthzInfo,
 } from '@/api/httpApi';
 import { kiScopeList, type ScopeListResponse } from '@/api/mcpClient';
 import {
@@ -13,6 +14,8 @@ import {
   refreshVectorDimensionStatus,
   type VectorDimensionStatusResponse,
 } from '@/api/tasksApi';
+import { resolveMcpPort } from './daemonPort';
+import { isLoopbackHost } from './resourcesPage';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
@@ -33,6 +36,34 @@ export function useHealth() {
 // （`summarizeHealth` 等仍可从 '@/lib/hooks' 取用）。纯逻辑独立成文件是为了可零依赖单测。
 export { summarizeHealth, toHealthIssues, healthIssueCopyText, humanizeHealthError } from './healthSummary';
 export type { HealthLevel, HealthIssue, HealthSummary } from './healthSummary';
+
+/**
+ * daemon 实际监听信息（`/healthz`）：**端口** + 版本，供侧栏页脚等展示。
+ *
+ * 用户 2026-10-27 反馈：页脚写死 `MCP 7423`，换端口（如 7433）后仍显示 7423，
+ * 等于指着一个不存在的 MCP 地址。口径见 `lib/daemonPort.ts`：
+ * 回环访问以 `/healthz.port` 为准（proxy 目标），其他设备以地址栏为准，逐级回落。
+ *
+ * `staleTime` 5 分钟：端口/版本运行期不会变，不值得反复探活；失败不重试，
+ * 展示层各有回落（端口回落到地址栏，版本回落到本包 version）。
+ */
+export function useServerInfo(): { port: string; version?: string } {
+  const { data } = useQuery<HealthzInfo>({
+    queryKey: ['healthz'],
+    queryFn: getHealthz,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  const port = resolveMcpPort({
+    healthzPort: data?.port,
+    locationPort: window.location.port,
+    protocol: window.location.protocol,
+    isLoopback: isLoopbackHost(window.location.hostname),
+  });
+  return { port, version: data?.version };
+}
 
 /** scope 列表 */
 export function useScopeList() {

@@ -2,7 +2,7 @@
  * httpApi.ts —— /api/* 接口封装（方案 A：扩展 mcp-http 路由）
  *
  * 与 ki mcp --http 同源，直接 fetch 同源路径（--web 提供页面）。
- * dev 模式下经 Vite proxy 转发到 7423。
+ * dev 模式下经 Vite proxy 转发到 daemon（目标见 `vite.config.ts` 的 `KI_API_TARGET`，默认 :7433）。
  */
 
 // ─── 类型（对齐 mcp-http-api.ts 返回） ────────────────
@@ -40,6 +40,21 @@ export interface SearchConfigResponse {
   /** 语义检索 query embedding 默认超时（秒） */
   timeout: number;
   error?: string;
+}
+
+/**
+ * `/healthz` 返回体中前端会用到的字段（完整结构见 `src/lib/mcp-http.ts` 的 `HealthzInfo`）。
+ *
+ * 只取**稳定**子集：`port` 是 daemon 实际监听端口（前端显示 MCP 端口的唯一权威来源，
+ * 见 `lib/daemonPort.ts`），`version` 是 daemon 进程版本。
+ */
+export interface HealthzInfo {
+  ok: boolean;
+  name?: string;
+  version?: string;
+  /** 对外暴露的绑定地址；`--port 0` 或旧版本可能缺省 */
+  host?: string;
+  port?: number;
 }
 
 export interface DocItem {
@@ -255,6 +270,18 @@ export async function getHealth(): Promise<HealthResponse> {
 
 export async function getSearchConfig(): Promise<SearchConfigResponse> {
   return req<SearchConfigResponse>('/api/search-config');
+}
+
+/**
+ * 探活端点 `/healthz`（免鉴权，MCP 单例探活同源）。
+ *
+ * 刻意**不走 `req()`**：`req` 会把耗时写进 `lastRttMs`，而总览页「MCP HTTP 服务」
+ * 展示的是「最近一次 /api 请求响应 N ms」；让探活覆盖它会把运维指标污染成 1ms 级假象。
+ */
+export async function getHealthz(): Promise<HealthzInfo> {
+  const res = await fetch('/healthz', { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as HealthzInfo;
 }
 
 export async function getDocList(

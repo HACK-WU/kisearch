@@ -2,7 +2,7 @@
  * chatApi.ts —— `/api/chat/*` 接口封装 + SSE 解析
  *
  * ═══ 通用语义契约 ═══
- * · 通道：同源 `fetch`（dev 经 Vite proxy → 7423）；**浏览器绝不直连第三方模型**
+ * · 通道：同源 `fetch`（dev 经 Vite proxy → daemon，目标见 `vite.config.ts` 的 `KI_API_TARGET`，默认 :7433）；**浏览器绝不直连第三方模型**
  * · SSE 用 `fetch` + `ReadableStream`（**不用 `EventSource`**：它只支持 GET、无法带请求体、无法中途 abort）
  * · 事件分派：按 `data.type`（**不使用 SSE `event:` 字段**，见 api/INDEX.md §1）
  * · 错误：非 2xx → 抛 `ChatApiError`（带 `code`）；流中 `{type:'error'}` → 作为事件产出，**不抛**

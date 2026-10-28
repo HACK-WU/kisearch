@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, useVectorDimensionStatus, type HealthLevel } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useServerInfo, useVectorDimensionStatus, type HealthLevel } from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { HealthDetailPanel } from '@/components/HealthDetailPanel';
 import { DocumentEditor } from '@/components/DocumentEditor';
@@ -209,6 +209,12 @@ export function AppShell(): JSX.Element {
     [chatStore],
   );
   const chatToggleRef = useRef<HTMLButtonElement>(null);
+  /**
+   * 页脚「MCP 端口」：**动态**取自 daemon（`/healthz`），不写死。
+   * 2026-10-27 用户反馈：端口换成 7433 后页脚仍显示 `MCP 7423`，等于指向不存在的地址。
+   * 口径（dev 走 proxy 目标端口 / 生产走地址栏 / 逐级回落）见 `lib/daemonPort.ts`。
+   */
+  const serverInfo = useServerInfo();
 
   const location = useLocation();
   const importVisible = location.pathname === '/import';
@@ -496,7 +502,8 @@ export function AppShell(): JSX.Element {
 
         <div className="ki-sidebar__footer">
           <strong className="ki-sidebar__footer-title">本地工作区</strong>
-          <span className="ki-sidebar__footer-meta">ki v{webPackage.version} · MCP 7423</span>
+          {/* 端口动态取自 daemon（/healthz），见 useServerInfo —— 不写死 7423 */}
+          <span className="ki-sidebar__footer-meta">ki v{webPackage.version} · MCP {serverInfo.port}</span>
           {/* 顺序固定为：GitHub（最左）→ 首选代码语言（中）→ 主题切换（最右），见 ki.css 的 .ki-sidebar__footer-row */}
           <div className="ki-sidebar__footer-row">
             <a

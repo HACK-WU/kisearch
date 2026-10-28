@@ -8,6 +8,19 @@ import path from 'node:path';
 // 默认常驻实例为 7423。若要临时指向真实实例，用环境变量覆盖，勿改默认值：
 //   KI_API_TARGET=http://127.0.0.1:7423 npm run dev
 const API_TARGET = process.env.KI_API_TARGET ?? 'http://127.0.0.1:7433';
+/**
+ * 同三条代理规则，dev（`npm run dev` :5173）与 preview（`npm run preview` :4173
+ * 预览 dist 产物）**共用**：
+ *
+ * ★ preview 原先没有 proxy —— 页面能开，但 `/api`、`/mcp`、`/healthz` 全被静态服务
+ *   当文件找（404 / 返回 index.html），等于「预览构建产物」时所有功能都不可用；
+ *   侧栏页脚也会因为拿不到 `/healthz` 而回落到 4173（一个不存在的 MCP 端口）。
+ */
+const PROXY = {
+  '/api': { target: API_TARGET, changeOrigin: true },
+  '/mcp': { target: API_TARGET, changeOrigin: true },
+  '/healthz': { target: API_TARGET, changeOrigin: true },
+};
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -19,11 +32,13 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
-    proxy: {
-      '/api': { target: API_TARGET, changeOrigin: true },
-      '/mcp': { target: API_TARGET, changeOrigin: true },
-      '/healthz': { target: API_TARGET, changeOrigin: true },
-    },
+    proxy: PROXY,
+  },
+  preview: {
+    host: '127.0.0.1',
+    port: 4173,
+    strictPort: true,
+    proxy: PROXY,
   },
   build: {
     outDir: 'dist',
