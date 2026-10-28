@@ -647,7 +647,7 @@ export function buildScopeConfigSnippet(scope: string = 'my-project'): string {
     `  ${name}:`,
     '    kbDir: /data/kb            # 可选：KB 基础目录（程序自动拼 kb/<scope>）',
     '    wikiSync:',
-    '      enabled: true            # 开关；缺省视为开启，显式 false 才关闭',
+    '      enabled: true            # 开启 wiki 回写；缺省视为开启，显式 false 才关闭',
     '      sourceDir: ./wiki        # wiki 写回目录（不配则写不回去）',
     '      autoBackfill: true       # 目标目录为空时自动补齐历史关系',
   ].join('\n');

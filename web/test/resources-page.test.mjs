@@ -381,6 +381,8 @@ describe('注册 scope：好处与配置方式', () => {
     assert.ok(text.includes('wikiSync:'));
     assert.ok(text.includes('sourceDir:'));
     assert.ok(text.includes('autoBackfill:'));
+    // 用户 2026-10-28：enabled 那行要写明它开的是「wiki 回写」，不能只写「开关」
+    assert.ok(/enabled: true\s+#\s*开启 wiki 回写/.test(text), 'enabled 注释要写明开启 wiki 回写');
   });
 
   it('★ 片段不使用已废弃的顶层 scopes.<scope>.sourceDir', () => {
