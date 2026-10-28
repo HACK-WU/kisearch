@@ -49,6 +49,11 @@ interface Result {
   tags?: string[];
   /** 向量数据标识（doc id） */
   memoryId?: string;
+  /**
+   * 导入源相对路径（后端 `SearchHit.sourcePath`，与 DocItem.path 同源）。
+   * 超过 doc/list 500 条上限的文档在 `docData.docs` 里查不到，用它兜底。
+   */
+  sourcePath?: string;
 }
 
 interface SearchHistoryEntry {
@@ -705,7 +710,9 @@ export function SearchPage(): JSX.Element {
                       content: r.originalRetrieved === true ? r.original : undefined,
                       fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
                       group: r.group,
-                      path: doc?.path,
+                      // doc 来自 useDocList（前 500 条），超过上限的文档查不到；检索命中自带 sourcePath，
+                      // 与 DocItem.path 同源（relation.sourcePath），用它兜底避免丢掉本地链接解析上下文
+                      path: doc?.path ?? r.sourcePath,
                       highlightQuery: docHighlightQuery,
                     });
                   }}

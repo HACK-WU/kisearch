@@ -5,7 +5,8 @@ import { kiGetModuleInfo } from '@/api/mcpClient';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupTreePanel } from '@/components/GroupTreePanel';
 import { Icon } from '@/components/icons';
-import { useDocList } from '@/lib/hooks';
+import { useDocSearch } from '@/lib/hooks';
+import { hasSearchTerm } from '@/lib/browseSearchGroups';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatRef } from '@/api/chatContract';
 import { anchorBlock, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
 import { externalTarget, insertReaderLink } from '@/lib/readerLinks';
@@ -67,6 +68,8 @@ function blockLabel(element: HTMLElement): TargetPosition['kind'] {
 }
 
 const EMPTY_REFS: readonly ChatRef[] = [];
+/** 搜索结果显示上限：服务端最多返回 2000 条，面板里全量渲染会撑出上千行 */
+const SEARCH_DISPLAY_LIMIT = 200;
 
 export function ReaderLinkComposer(props: Props): JSX.Element {
   const {
@@ -120,14 +123,22 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     setPanelStyle({ left, top, visibility: 'visible' });
   }, [pickerOpen, linkSelection.rect]);
 
-  // ref 模式：左栏搜索（有词时用内存过滤的结果列表替代树，与浏览页同口径）
-  const { data: docListData } = useDocList(scope);
-  const matches = useMemo(() => {
-    const kw = query.trim().toLowerCase();
-    if (!kw) return [];
-    return (docListData?.docs ?? []).filter((d) =>
-      d.name.toLowerCase().includes(kw) || (d.group ?? '').toLowerCase().includes(kw));
-  }, [docListData, query]);
+  // 搜索走服务端 q（名称 / 逻辑路径，最多 2000 条）：不能在前端过滤 useDocList 的 500 条，
+  // 否则超过 500 篇的 scope 里靠后的文档永远选不到（ai-docs 实测 1882 篇）。
+  // 300ms 防抖与浏览页全局搜索同口径；只由分隔符/空白组成的词不算检索词（N1），退回目录树。
+  const [searchQ, setSearchQ] = useState('');
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearchQ(query.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+  const searching = hasSearchTerm(query);
+  const { data: searchData, isFetching: searchFetching, error: searchError } = useDocSearch(scope, searchQ);
+  const matches = useMemo(() => (searching ? (searchData?.docs ?? []) : []), [searching, searchData]);
+  const matchTotal = searching ? (searchData?.total ?? matches.length) : 0;
+  /** 服务端最多 2000 条；宽泛词（如「的」）全量渲染会撑出上千行，只展示前 N 条并提示细化 */
+  const visibleMatches = useMemo(() => matches.slice(0, SEARCH_DISPLAY_LIMIT), [matches]);
+  // 防抖未到点（searchQ 还是旧词）或正在取数：空结果时提示"搜索中"，不要先说"未找到"
+  const matchPending = searching && (searchQ !== query.trim() || searchFetching);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -350,16 +361,24 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
               <input className="ki-form-input" placeholder="搜索文档名或路径…" value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索文档" />
               {query ? <button type="button" className="ki-reader-search__clear" onMouseDown={(event) => event.preventDefault()} onClick={() => setQuery('')} title="清空检索词" aria-label="清空检索词"><Icon name="x" className="ki-icon ki-icon--sm" /></button> : null}
             </label>
-            {query.trim() ? (
+            {searching ? (
               /* 有搜索词时用结果列表替代树：命中常散落多个 Group，树形展开不便于定位 */
               <ul className="ki-chat-refpicker__results">
                 {matches.length === 0 ? (
-                  <li className="ki-chat-refpicker__hint">未找到匹配「{query.trim()}」的文档</li>
+                  <li className="ki-chat-refpicker__hint">
+                    {searchError
+                      ? `搜索失败：${searchError instanceof Error ? searchError.message : String(searchError)}`
+                      : matchPending ? '搜索中…' : `未找到匹配「${query.trim()}」的文档`}
+                  </li>
                 ) : (
                   <>
-                    <li className="ki-chat-refpicker__result-count" role="status">命中 {matches.length} 篇</li>
-                    {matches.map((d) => (
-                      <li key={`${d.group}/${d.name}`}>
+                    <li className="ki-chat-refpicker__result-count" role="status">
+                      命中 {matchTotal} 篇
+                      {matchTotal > visibleMatches.length ? `（仅显示前 ${visibleMatches.length} 条，可细化关键词）` : ''}
+                      {matchPending ? ' · 搜索中…' : ''}
+                    </li>
+                    {visibleMatches.map((d) => (
+                      <li key={`${d.group}\u0000${d.name}`}>
                         <button
                           type="button"
                           className={`ki-chat-refpicker__result${d.group === selectedDoc.group && d.name === selectedDoc.name ? ' ki-chat-refpicker__result--active' : ''}`}

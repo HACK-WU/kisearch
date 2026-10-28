@@ -16,6 +16,7 @@ import {
 } from '@/api/tasksApi';
 import { resolveMcpPort } from './daemonPort';
 import { isLoopbackHost } from './resourcesPage';
+import { hasSearchTerm } from './browseSearchGroups';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
@@ -75,13 +76,39 @@ export function useScopeList() {
   });
 }
 
-/** 文档列表（一次拉取当前 scope 全量，文件名/路径过滤由前端内存完成） */
+/**
+ * 文档列表（服务端一次最多返回 500 条，`total` / `groups` 才是完整口径）。
+ *
+ * 完整列表**不是**全量：需要"按名称/路径找某篇"时用 `useDocSearch`（服务端检索），
+ * 需要完整计数时用响应里的 `total` / `groups.length`（见 `lib/scopeCounts.ts`）。
+ */
 export function useDocList(scope: string) {
   return useQuery<DocListResponse>({
     queryKey: ['docList', scope],
     queryFn: () => getDocList(scope),
     staleTime: 30_000,
     retry: 1,
+  });
+}
+
+/**
+ * 跨组文档搜索（服务端 `q`：名称 / 逻辑路径模糊匹配，最多 2000 条）。
+ *
+ * ★ 不能在前端过滤 `useDocList` 的 500 条：超过 500 篇的 scope 里，靠后的文档永远搜不到
+ *   （ai-docs 实测 1882 篇）。消费方：ReaderLinkComposer 的文档选择搜索。
+ * ★ `enabled` 用 `hasSearchTerm`：只由分隔符/空白组成（`/`、` `）不算检索词（N1），
+ *   否则服务端会把空检索词当成"不过滤"返回全库。
+ */
+export function useDocSearch(scope: string, query: string) {
+  const q = query.trim();
+  return useQuery<DocListResponse>({
+    // 挂在 `docList` 前缀下：导入 / 写入完成时既有 `invalidateQueries(['docList', scope])` 能一并失效
+    queryKey: ['docList', scope, 'search', q],
+    queryFn: () => getDocList(scope, { q }),
+    enabled: hasSearchTerm(q),
+    staleTime: 30_000,
+    retry: 1,
+    placeholderData: (previousData) => previousData,
   });
 }
 
