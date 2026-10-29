@@ -961,8 +961,11 @@ export function DataSourcePage(): JSX.Element {
         />
       ) : null}
 
-      {/* 移除数据源登记确认（2026-10-29）：破坏性操作，二次确认 + 明示"库内文档保留"。
-          语义口径见文件头：这是取消登记，不是删文档。 */}
+      {/* 移除数据源登记确认（2026-10-29 改版）：破坏性操作，二次确认 + 明示"库内文档保留"。
+          语义口径见文件头：这是取消登记，不是删文档。
+          视觉结构 = danger 顶条 + 三块分组（登记 / 影响 / 附加操作），
+          规格见 docs/ui-design/datasource-remove-dialog.md；不要改回平铺键值表。
+          ★ 宽度与限高只挂在 .ki-ds-remove 上：.ki-dialog--form 是其它表单弹窗共用的全局类。 */}
       {removeTarget ? (
         <div
           className="ki-overlay ki-overlay--show ki-overlay--front"
@@ -972,91 +975,130 @@ export function DataSourcePage(): JSX.Element {
         >
           <section
             ref={removeDialogRef}
-            className="ki-dialog ki-dialog--form"
+            className="ki-dialog ki-ds-remove"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ki-ds-remove-title"
             tabIndex={-1}
           >
+            <div className="ki-ds-remove__bar" aria-hidden="true" />
             <header className="ki-dialog__head">
-              <div>
-                <h3 className="ki-dialog__title" id="ki-ds-remove-title">移除数据源</h3>
-                <p className="ki-ds-add__sub">取消登记后不再自动同步，也不再产生待删候选</p>
+              <div className="ki-ds-remove__heading">
+                <span className="ki-ds-remove__mark" aria-hidden="true">!</span>
+                <div className="ki-ds-remove__heading-text">
+                  <h3 className="ki-dialog__title" id="ki-ds-remove-title">移除数据源</h3>
+                  <p className="ki-ds-remove__sub">
+                    {removeTarget.corrupt
+                      ? '登记文件已损坏、无法解析，移除只是清掉这个坏文件'
+                      : '取消登记后不再自动同步，也不再产生待删候选'}
+                  </p>
+                </div>
               </div>
               <button type="button" className="ki-dialog__close" aria-label="关闭移除确认" disabled={removing} onClick={closeRemove}>✕</button>
             </header>
             <div className="ki-dialog__body">
-              <div className="ki-ds-remove__grid">
-                <div className="ki-ds-remove__row">
-                  <span className="ki-ds-remove__label">Scope</span>
-                  <span className="ki-ds-remove__value">{removeTarget.scope}</span>
+              {/* ① 将被移除的登记：Scope + 类型徽标同行为身份，路径与时间降为次级键值 */}
+              <section className="ki-ds-remove__card">
+                <h4 className="ki-ds-remove__card-title">将被移除的登记</h4>
+                <div className="ki-ds-remove__ident">
+                  <span className="ki-ds-remove__scope">{removeTarget.scope}</span>
+                  {removeTarget.corrupt ? (
+                    <span className="ki-ds-remove__managed ki-ds-remove__managed--danger">
+                      登记文件损坏：{removeTarget.corrupt}
+                    </span>
+                  ) : (
+                    <>
+                      <span className={`ki-ds-type-badge ${removeTarget.type === 'git' ? 'ki-ds-type-badge--git' : 'ki-ds-type-badge--dir'}`}>
+                        {removeTarget.type === 'git' ? 'Git' : '目录'}
+                      </span>
+                      {removeTarget.managed ? (
+                        <span className="ki-ds-remove__managed">服务端托管 clone</span>
+                      ) : removeTarget.type === 'directory' ? (
+                        <span className="ki-ds-remove__managed">本地目录</span>
+                      ) : null}
+                    </>
+                  )}
                 </div>
-                {removeTarget.corrupt ? (
-                  <div className="ki-ds-remove__row">
-                    <span className="ki-ds-remove__label">登记状态</span>
-                    <span className="ki-ds-remove__value ki-ds-remove__value--danger">损坏：{removeTarget.corrupt}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div className="ki-ds-remove__row">
-                      <span className="ki-ds-remove__label">类型</span>
-                      <span className="ki-ds-remove__value">
-                        {removeTarget.type === 'git' ? 'Git 仓库' : '普通目录'}
-                        {removeTarget.managed ? '（服务端托管 clone）' : ''}
-                      </span>
-                    </div>
-                    <div className="ki-ds-remove__row">
-                      <span className="ki-ds-remove__label">源目录</span>
-                      <span className="ki-ds-remove__value ki-ds-remove__value--mono" title={removeTarget.dir}>{removeTarget.dir}</span>
-                    </div>
-                    <div className="ki-ds-remove__row">
-                      <span className="ki-ds-remove__label">上次同步</span>
-                      <span className="ki-ds-remove__value">
-                        {removeTarget.lastSyncAt ? formatDateTime(removeTarget.lastSyncAt) : '尚未同步过'}
-                      </span>
-                    </div>
-                    <div className="ki-ds-remove__row">
-                      <span className="ki-ds-remove__label">库内文档</span>
-                      <span className="ki-ds-remove__value">
-                        {removeDocCount !== undefined ? `${removeDocCount} 篇 · ` : ''}
-                        <span className="ki-ds-remove__keep">保留，不会被删除</span>
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
+                {!removeTarget.corrupt && removeTarget.dir ? (
+                  <dl className="ki-ds-remove__kv">
+                    <dt>源目录</dt>
+                    <dd className="ki-ds-remove__v--mono" title={removeTarget.dir}>{removeTarget.dir}</dd>
+                    <dt>上次同步</dt>
+                    <dd className="ki-ds-remove__v--num">
+                      {removeTarget.lastSyncAt ? formatDateTime(removeTarget.lastSyncAt) : '尚未同步过'}
+                    </dd>
+                  </dl>
+                ) : null}
+              </section>
 
+              {/* ② 移除后会怎样：「会保留」与「会失去」分语气两行，不再挤进一个黄块 */}
+              <section className="ki-ds-remove__card">
+                <h4 className="ki-ds-remove__card-title">移除后会怎样</h4>
+                <ul className="ki-ds-remove__facts">
+                  {removeTarget.corrupt ? null : (
+                    <li className="ki-ds-remove__fact ki-ds-remove__fact--keep">
+                      <span className="ki-ds-remove__fact-icon" aria-hidden="true">✓</span>
+                      <span>
+                        库内{removeDocCount !== undefined ? <> <b>{removeDocCount}</b> 篇</> : ''}文档保留，仍可被检索
+                      </span>
+                    </li>
+                  )}
+                  <li className="ki-ds-remove__fact ki-ds-remove__fact--lose">
+                    <span className="ki-ds-remove__fact-icon" aria-hidden="true">!</span>
+                    <span>
+                      {removeTarget.corrupt
+                        ? '只删除这个损坏的登记文件，无参数可恢复'
+                        : '登记参数不保留（落点 Group / 同名策略 / 切分 / 向量化），重新登记需再填一次'}
+                    </span>
+                  </li>
+                </ul>
+                <p className="ki-ds-remove__guide">
+                  {removeTarget.corrupt
+                    ? '库内文档与源目录文件都不受影响，随时可以重新登记'
+                    : '如需清理这些文档，请先在详情抽屉「待删除」处理候选；移除后本页不再产生候选'}
+                </p>
+              </section>
+
+              {/* ③ 附加操作：只有托管 clone 才有可删目录；勾选后展开删除范围，让"可变部分"可见 */}
               {removeTarget.managed && !removeTarget.corrupt ? (
-                <label className="ki-ds-remove__check">
-                  <input
-                    type="checkbox"
-                    checked={removePurge}
-                    disabled={removing}
-                    onChange={(event) => setRemovePurge(event.target.checked)}
-                  />
-                  同时删除服务端托管 clone 目录（释放磁盘；其他 scope 仍复用时自动保留）
-                </label>
+                <section className="ki-ds-remove__card">
+                  <h4 className="ki-ds-remove__card-title">附加操作</h4>
+                  <label className="ki-ds-remove__check">
+                    <input
+                      type="checkbox"
+                      checked={removePurge}
+                      disabled={removing}
+                      onChange={(event) => setRemovePurge(event.target.checked)}
+                    />
+                    <span>
+                      同时删除服务端托管 clone 目录
+                      <span className="ki-ds-remove__check-sub">释放磁盘；其他 scope 仍在复用时自动保留</span>
+                    </span>
+                  </label>
+                  {removePurge && removeTarget.dir ? (
+                    <p className="ki-ds-remove__path">
+                      <span className="ki-ds-remove__path-key">将删除</span>{removeTarget.dir}
+                    </p>
+                  ) : null}
+                </section>
               ) : null}
 
-              <p className="ki-ds-remove__note">
-                {removeTarget.corrupt
-                  ? '登记文件已损坏、无法解析；移除只删除登记文件，不影响库内文档与源目录。'
-                  : '库内文档不会被删除，仍可被检索。如需清理这些文档，请先在详情抽屉的「待删除」里处理候选；移除后本页不再产生候选。'}
-                {removeTarget.corrupt ? null : (
-                  <>
-                    <br />
-                    登记参数（落点 Group / 同名策略 / 切分 / 向量化）不会保留，重新登记需再填一次。
-                  </>
-                )}
-              </p>
-
-              {removeError ? <p className="ki-write-error" role="alert">{removeError}</p> : null}
+              {removeError ? <p className="ki-ds-remove__error" role="alert">{removeError}</p> : null}
             </div>
-            <footer className="ki-dialog__foot">
-              <button type="button" className="ki-btn ki-btn--secondary" disabled={removing} onClick={closeRemove}>取消</button>
-              <button type="button" className="ki-btn ki-btn--danger" disabled={removing} onClick={() => { void submitRemove(); }}>
-                {removing ? '移除中…' : '确认移除'}
-              </button>
+            <footer className="ki-dialog__foot ki-ds-remove__foot">
+              <p className={`ki-ds-remove__foot-note${!removeTarget.corrupt && removeTarget.managed === true && removePurge ? ' ki-ds-remove__foot-note--strong' : ''}`}>
+                {removeTarget.corrupt
+                  ? '只清掉损坏的登记文件，库内文档与源目录不动'
+                  : removeTarget.managed === true && removePurge
+                    ? '将同时删除 clone 目录，此操作不可撤销'
+                    : '此操作不可撤销，源目录文件不受影响'}
+              </p>
+              <div className="ki-ds-remove__actions">
+                <button type="button" className="ki-btn ki-btn--secondary" disabled={removing} onClick={closeRemove}>取消</button>
+                <button type="button" className="ki-btn ki-btn--danger" disabled={removing} onClick={() => { void submitRemove(); }}>
+                  {removing ? '移除中…' : '确认移除'}
+                </button>
+              </div>
             </footer>
           </section>
         </div>

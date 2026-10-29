@@ -5520,26 +5520,135 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-notice--action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 /* 提示行的「程序化焦点落点」：不画焦点环（它是结果提示，不是可操作控件） */
 .ki-ds-notice--focus:focus, .ki-ds-notice--focus:focus-visible { outline: none; }
-/* 移除确认弹窗：信息行（标签 72px + 值自适应），值可折行防长路径撑破 */
-.ki-ds-remove__grid { display: flex; flex-direction: column; gap: 8px; }
-.ki-ds-remove__row {
-  display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px;
-  align-items: baseline; font-size: var(--ki-font-size-sm);
+/* 移除确认弹窗（2026-10-29 改版）：danger 顶条 + 三块分组卡片，规格见
+   docs/ui-design/datasource-remove-dialog.md。原「5 行平铺键值 + 单个黄块」已废弃，
+   不要再改回 .ki-ds-remove__grid/row/label/value/keep/note 那套结构。
+   ★ 宽度与限高只挂在本专属类上 —— .ki-dialog--form 是其它表单弹窗共用的全局类，
+     且它把 .ki-dialog 的 max-height 覆盖成 none，直接复用会让矮视口点不到按钮。 */
+.ki-ds-remove { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
+.ki-ds-remove:focus { outline: none; }
+/* 危险的唯一色块：3px 顶条（其余靠分组与图标表达，不用整块红底） */
+.ki-ds-remove__bar {
+  flex: none; height: 3px; background: var(--ki-color-danger);
+  border-radius: var(--ki-radius-md) var(--ki-radius-md) 0 0;
 }
-.ki-ds-remove__label { color: var(--ki-color-text-subtle); }
-.ki-ds-remove__value { color: var(--ki-color-text); min-width: 0; overflow-wrap: anywhere; }
-.ki-ds-remove__value--mono { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); }
-.ki-ds-remove__value--danger { color: var(--ki-color-danger-ink); }
-.ki-ds-remove__keep { color: var(--ki-color-success); font-weight: 600; }
-.ki-ds-remove__check {
-  display: flex; align-items: flex-start; gap: 8px; margin-top: 14px;
-  font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer;
+/* 头部：圆形 ! + 标题 + 副标题同组，关闭按钮顶对齐 */
+.ki-ds-remove .ki-dialog__head { align-items: flex-start; gap: 10px; padding: 13px 18px 12px; }
+.ki-ds-remove__heading { display: flex; gap: 10px; min-width: 0; }
+.ki-ds-remove__mark {
+  flex: none; display: grid; place-items: center;
+  width: 20px; height: 20px; margin-top: 1px;
+  border-radius: var(--ki-radius-track);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-size: 12px; font-weight: 700; line-height: 1;
 }
-.ki-ds-remove__check input { margin: 2px 0 0; accent-color: var(--ki-color-primary); flex: none; }
-.ki-ds-remove__note {
-  margin: 14px 0 0; padding: 10px 12px; border-radius: var(--ki-radius-sm);
-  background: var(--ki-color-warning-soft); color: var(--ki-color-warning);
-  font-size: var(--ki-font-size-xs); line-height: 1.6;
+.ki-ds-remove__heading-text { min-width: 0; }
+.ki-ds-remove .ki-dialog__title { font-size: var(--ki-font-size-lg); font-weight: 650; }
+.ki-ds-remove__sub { margin: 2px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove .ki-dialog__close { margin-top: -2px; }
+/* 正文：滚动容器 + 三块分组（滚动条与其它容器同口径，否则内容被裁时看不出还能滚） */
+.ki-ds-remove .ki-dialog__body {
+  display: flex; flex-direction: column; gap: 10px;
+  min-height: 0; overflow-y: auto; padding: 12px 18px 14px;
+  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-ds-remove__card {
+  padding: 11px 13px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+/* 分组标题：3px 竖条 + 小字（与 .ki-detail-sec__head 的 mark 同口径） */
+.ki-ds-remove__card-title {
+  display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+  font-size: var(--ki-font-size-xs); font-weight: 640; letter-spacing: .04em;
+  color: var(--ki-color-text-subtle);
+}
+.ki-ds-remove__card-title::before {
+  content: ""; flex: none; width: 3px; height: 11px; border-radius: 2px;
+  background: var(--ki-color-border-strong);
+}
+.ki-ds-remove__ident { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ki-ds-remove__scope {
+  font-family: var(--ki-font-mono); font-size: 13px; font-weight: 650;
+  color: var(--ki-color-text); overflow-wrap: anywhere;
+}
+.ki-ds-remove__managed { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+.ki-ds-remove__managed--danger { color: var(--ki-color-danger-ink); }
+/* 灰卡上类型徽标改白底描边：列表里的 12% 混色在 bg-secondary 上与卡底同色，看不出边界 */
+.ki-ds-remove__card .ki-ds-type-badge { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); }
+.ki-ds-remove__card .ki-ds-type-badge--git { border-color: color-mix(in srgb, var(--ki-color-primary) 28%, transparent); }
+/* 次级键值：标签 60px，路径单行截断 + title 保全文 */
+.ki-ds-remove__kv {
+  display: grid; grid-template-columns: 60px minmax(0, 1fr);
+  gap: 4px 10px; align-items: baseline; margin: 8px 0 0;
+  font-size: var(--ki-font-size-sm);
+}
+.ki-ds-remove__kv dt { color: var(--ki-color-text-subtle); }
+.ki-ds-remove__kv dd { margin: 0; min-width: 0; color: var(--ki-color-text); }
+.ki-ds-remove__v--mono {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-ds-remove__v--num { font-variant-numeric: tabular-nums; }
+/* 影响行：保留 / 丢失分语气，取代原来"一整块黄底装两件事" */
+.ki-ds-remove__facts { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ki-ds-remove__fact {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 9px; border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); line-height: 1.55;
+}
+.ki-ds-remove__fact-icon {
+  flex: none; display: grid; place-items: center;
+  width: 15px; height: 15px; margin-top: 1px;
+  border-radius: var(--ki-radius-track);
+  font-size: 10px; font-weight: 700; line-height: 1;
+}
+.ki-ds-remove__fact--keep { background: color-mix(in srgb, var(--ki-color-success) 10%, var(--ki-color-surface)); color: var(--ki-color-text); }
+.ki-ds-remove__fact--keep .ki-ds-remove__fact-icon { background: color-mix(in srgb, var(--ki-color-success) 22%, transparent); color: var(--ki-color-success); }
+.ki-ds-remove__fact--keep b { color: var(--ki-color-success); font-weight: 700; font-variant-numeric: tabular-nums; }
+.ki-ds-remove__fact--lose { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+.ki-ds-remove__fact--lose .ki-ds-remove__fact-icon { background: color-mix(in srgb, var(--ki-color-warning) 18%, transparent); color: var(--ki-color-warning); }
+/* 后续动作：不再占一行强调色，降为引导 */
+.ki-ds-remove__guide { margin: 8px 0 0; padding-left: 23px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__guide::before { content: "→ "; }
+/* 附加操作：勾选项 + 缩进说明 + 勾选后展开的删除路径 */
+.ki-ds-remove__check { display: flex; align-items: flex-start; gap: 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer; }
+.ki-ds-remove__check input { flex: none; margin: 2px 0 0; accent-color: var(--ki-color-primary); }
+.ki-ds-remove__check input:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; }
+.ki-ds-remove__check-sub { display: block; margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__path {
+  margin: 8px 0 0 22px; padding: 6px 9px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  line-height: 1.5; overflow-wrap: anywhere;
+}
+.ki-ds-remove__path-key { font-family: var(--ki-font-family); font-weight: 650; margin-right: 4px; }
+/* 底栏：左侧不可撤销提示（原来整块空着）+ 右侧按钮 */
+.ki-ds-remove__foot { align-items: center; gap: 10px; padding: 13px 18px; }
+.ki-ds-remove__foot-note { margin: 0 auto 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__foot-note--strong { color: var(--ki-color-danger-ink); font-weight: 600; }
+.ki-ds-remove__actions { display: flex; gap: 8px; }
+.ki-ds-remove__error {
+  margin: 0; padding: 8px 10px;
+  border: 1px solid var(--ki-color-danger); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-size: var(--ki-font-size-sm);
+}
+/* 窄屏：键值改单列堆叠，底栏提示换到按钮上方
+   ★ 不要写 max-height:100% —— 父级 overlay 是 flex + 高度 auto，100% 解析成 none，
+     会抹掉上面的 calc(100vh - 24px) 限高，矮视口下弹窗顶出屏幕且按钮点不到。 */
+@media (max-width: 640px) {
+  /* 不要再写 width:100% —— 基础规则是 min(560px, calc(100vw - 24px))，100% 会让
+     窄屏弹窗左右贴边（全站其它弹窗都留边距）。左右边距交给基础规则即可。 */
+  .ki-ds-remove .ki-dialog__head { padding: 12px 14px 10px; }
+  .ki-ds-remove .ki-dialog__body { padding: 10px 14px 12px; }
+  .ki-ds-remove__kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ki-ds-remove__kv dt { font-size: var(--ki-font-size-xs); }
+  .ki-ds-remove__foot { flex-wrap: wrap; padding: 12px 14px; }
+  .ki-ds-remove__foot-note { flex: 1 1 100%; margin: 0 0 2px; }
+  .ki-ds-remove__actions { width: 100%; }
+  .ki-ds-remove__actions .ki-btn { flex: 1 1 auto; }
 }
 .ki-ds-table__dir,
 .ki-ds-table__group {
