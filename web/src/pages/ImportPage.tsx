@@ -14,6 +14,7 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
+import { useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
 import {
   activePercentOf,
   busyPhaseLabelOf,
@@ -435,6 +436,8 @@ function clearImportCredentialIf(owner: { uploadId?: string; jobId?: string }): 
 
 export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskSummary | null) => void }): JSX.Element {
   const currentScope = useScopeValue();
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
   const queryClient = useQueryClient();
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
@@ -494,6 +497,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const [chunkSize, setChunkSize] = useState('1000');
   const [chunkOverlap, setChunkOverlap] = useState('150');
   const [vector, setVector] = useState(true);
+  /**
+   * ★ 「向量化」的**实际生效值**（派生，不用 effect 强改 state）：
+   *   本页的复位 effect 会把 `vector` 写回 `true`（见下方 setVector(true)），若改用
+   *   `useEffect(() => setVector(false), [vectorAvailable])`，复位后立刻又变回 true。
+   *   派生值没有这个时序问题，且所有提交点只需统一读 `effectiveVector`。
+   */
+  const effectiveVector = vector && vectorAvailable;
   const [group, setGroup] = useState('');
   const [conflictMode, setConflictMode] = useState<ImportConflictMode>(DEFAULT_CONFLICT_MODE);
   // REQ-20261019-001：目录同步清理（默认关；仅目录导入可用）
@@ -1304,7 +1314,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     group: group.trim() || undefined,
     chunkSize: chunkSize ? Number(chunkSize) : undefined,
     chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
-    vector,
+    vector: effectiveVector,
     tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
     conflictMode,
     conflictSuffix: suffixInUse ? conflictSuffix : undefined,
@@ -1473,10 +1483,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setError(scopeErr);
       return;
     }
-    const checkedConfig = vector && importConfig?.scope !== scope
+    const checkedConfig = effectiveVector && importConfig?.scope !== scope
       ? await getImportConfig(scope).catch(() => null)
       : importConfig;
-    if (vector) {
+    if (effectiveVector) {
       const dimension = checkedConfig?.vectorDimension;
       if (!dimension) {
         setError('无法确认当前向量集合维度，请刷新页面后重试；也可关闭向量化，仅导入全文索引。');
@@ -1865,7 +1875,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       group: group.trim() || undefined,
       chunkSize: chunkSize ? Number(chunkSize) : undefined,
       chunkOverlap: chunkOverlap ? Number(chunkOverlap) : undefined,
-      vector,
+      vector: effectiveVector,
       tags: selectedTags.length > 0 ? selectedTags.join(',') : undefined,
       conflictMode,
       conflictSuffix: suffixInUse ? conflictSuffix : undefined,
@@ -2406,8 +2416,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             </div>
           </div>
 
-          {/* 向量化开关 */}
-          {vector && importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
+          {/* 向量化开关。★ 不可用时置灰并就地说明（windows 4e9d624 的能力，合并 66c3c19 时丢失，
+              2026-10-29 接回）；真正提交的值由 `effectiveVector` 钳制 —— 只置灰不改值会"能点但必失败"。 */}
+          {effectiveVector && importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
             <div className="ki-form-error" role="alert" style={{ marginTop: 12 }}>
               当前 embedding 为 {importConfig.vectorDimension.configured} 维，旧向量集合为 {importConfig.vectorDimension.persisted} 维。
               请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>；完成后刷新页面再导入。全文检索仍可使用。
@@ -2419,14 +2430,24 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               <span className="ki-vec-switch__desc">生成 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
             </div>
             <div
-              className={`ki-switch${vector ? ' ki-switch--on' : ''}`}
+              className={`ki-switch${effectiveVector ? ' ki-switch--on' : ''}${vectorAvailable ? '' : ' ki-switch--disabled'}`}
               role="switch"
-              aria-checked={vector}
-              onClick={() => setVector((v) => !v)}
+              aria-checked={effectiveVector}
+              aria-disabled={!vectorAvailable}
+              title={vectorAvailable ? undefined : vectorAvailabilityHint(vectorAvailability)}
+              onClick={() => {
+                if (!vectorAvailable) return;
+                setVector((v) => !v);
+              }}
             >
               <div className="ki-switch__knob" />
             </div>
           </div>
+          {!vectorAvailable && (
+            <div className="ki-form-hint ki-vector-status-hint" role="status" aria-live="polite">
+              {vectorAvailabilityHint(vectorAvailability)}（本次只写全文索引）
+            </div>
+          )}
 
           {/* R6：重复导入预检待确认（导入尚未开始 → 取消是零写入）
               2026-10-19 改版：原先是"一句长标题 + 5 条 ul + 一行说明"，信息平铺、行内塞 4 个字段、

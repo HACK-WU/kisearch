@@ -905,6 +905,8 @@ a:hover { text-decoration: underline; }
 .ki-form-input--error, .ki-form-textarea--error { border-color: var(--ki-color-danger); }
 .ki-form-error { font-size: var(--ki-font-size-xs); color: var(--ki-color-danger); margin-top: 4px; }
 .ki-form-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 4px; }
+/* 向量能力不可用的就地说明（windows 4e9d624 的 .ki-vector-status-hint，合并 66c3c19 时随 ki.css 丢失，2026-10-29 接回） */
+.ki-vector-status-hint { color: var(--ki-color-warning); }
 .ki-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .ki-checkbox-label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); font-weight: 500; cursor: pointer; }
 

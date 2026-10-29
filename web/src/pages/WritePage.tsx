@@ -17,6 +17,7 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
 import { resolveWriteGroup } from '@/lib/writeGroup';
+import { useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
 
 export function WritePage(): JSX.Element {
   const currentScope = useScopeValue();
@@ -27,6 +28,14 @@ export function WritePage(): JSX.Element {
   const [scopeDraft, setScopeDraft] = useState('');
   const [preview, setPreview] = useState(false);
   const [vector, setVector] = useState(true);
+  /**
+   * 向量能力可用性（windows 4e9d624 的能力，合并 66c3c19 时随 hooks.ts 丢失，2026-10-29 接回）：
+   * 不可用时开关置灰，且**提交值**钳为 false（写 FTS-only 全文索引）—— 只置灰不改值会"能点但必失败"。
+   * ★ 用派生值而非 effect 强改 state：探测恢复后用户原选择仍然在（不会被永久抹成 false）。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
+  const effectiveVector = vector && vectorAvailable;
 
   // relation 表单
   const [group, setGroup] = useState('');
@@ -153,7 +162,7 @@ export function WritePage(): JSX.Element {
     setSubmitting(true);
     try {
       const target = { scope, group: targetGroup };
-      await kiSyncRelation({ scope: target.scope, group: target.group, relation: relation.trim(), content: markdown, vector, tags: selectedTags });
+      await kiSyncRelation({ scope: target.scope, group: target.group, relation: relation.trim(), content: markdown, vector: effectiveVector, tags: selectedTags });
       void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
       void queryClient.invalidateQueries({ queryKey: ['docList', target.scope] });
       void queryClient.invalidateQueries({ queryKey: ['fullTextSearch', target.scope] });
@@ -162,7 +171,7 @@ export function WritePage(): JSX.Element {
       }).catch(() => {});
       setResult(
         `写入成功${groupFellBack ? `（Group 留空 → 写入「${target.group}」组）` : ''}` +
-        `${vector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`,
+        `${effectiveVector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`,
       );
       setSavedTarget(target);
       setScopeConfirmed(false);
@@ -381,21 +390,32 @@ export function WritePage(): JSX.Element {
             )}
           </div>
 
-          {/* 是否向量化 */}
+          {/* 是否向量化。★ 不可用时置灰并就地说明（windows 4e9d624 的能力，合并 66c3c19 时丢失，
+              2026-10-29 接回）；提交值由 effectiveVector 钳制。 */}
           <div className="ki-vec-switch" style={{ marginTop: 12 }}>
             <div className="ki-vec-switch__label">
               <span className="ki-vec-switch__title">向量化</span>
               <span className="ki-vec-switch__desc">写入 dense 向量，可被语义搜索；关闭则写入 FTS-only 全文索引，不调用 embedding</span>
             </div>
             <div
-              className={`ki-switch${vector ? ' ki-switch--on' : ''}`}
+              className={`ki-switch${effectiveVector ? ' ki-switch--on' : ''}${vectorAvailable ? '' : ' ki-switch--disabled'}`}
               role="switch"
-              aria-checked={vector}
-              onClick={() => setVector((v) => !v)}
+              aria-checked={effectiveVector}
+              aria-disabled={!vectorAvailable}
+              title={vectorAvailable ? undefined : vectorAvailabilityHint(vectorAvailability)}
+              onClick={() => {
+                if (!vectorAvailable) return;
+                setVector((v) => !v);
+              }}
             >
               <div className="ki-switch__knob" />
             </div>
           </div>
+          {!vectorAvailable && (
+            <div className="ki-form-hint ki-vector-status-hint" role="status" aria-live="polite">
+              {vectorAvailabilityHint(vectorAvailability)}（本次写入不生成向量）
+            </div>
+          )}
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 20 }}>
             <button

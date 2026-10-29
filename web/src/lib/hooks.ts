@@ -17,6 +17,7 @@ import {
 import { resolveMcpPort } from './daemonPort';
 import { isLoopbackHost } from './resourcesPage';
 import { hasSearchTerm } from './browseSearchGroups';
+import { resolveVectorAvailability, type VectorAvailability } from './vectorAvailability';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
@@ -35,8 +36,19 @@ export function useHealth() {
 // ── 健康判据（REQ-20261016-003 起独立成 lib/healthSummary.ts）──
 // 徽标 / 横幅 / 总览卡 / 明细面板共用同一判据；本文件只做 re-export，保持既有 import 路径不变
 // （`summarizeHealth` 等仍可从 '@/lib/hooks' 取用）。纯逻辑独立成文件是为了可零依赖单测。
-export { summarizeHealth, toHealthIssues, healthIssueCopyText, humanizeHealthError } from './healthSummary';
+export {
+  summarizeHealth,
+  toHealthIssues,
+  healthIssueCopyText,
+  humanizeHealthError,
+  isVectorHealthCheck,
+  vectorOnlyFailureLabel,
+  VECTOR_HEALTH_CHECK_NAMES,
+} from './healthSummary';
 export type { HealthLevel, HealthIssue, HealthSummary } from './healthSummary';
+// 向量可用性判据同样独立成纯逻辑（lib/vectorAvailability.ts），可零依赖单测
+export { resolveVectorAvailability, vectorAvailabilityHint, vectorBadgeLabel } from './vectorAvailability';
+export type { VectorAvailability, VectorAvailabilityStatus } from './vectorAvailability';
 
 /**
  * daemon 实际监听信息（`/healthz`）：**端口** + 版本，供侧栏页脚等展示。
@@ -73,6 +85,25 @@ export function useScopeList() {
     queryFn: kiScopeList,
     staleTime: 30_000,
     retry: 1,
+  });
+}
+
+/**
+ * 向量能力是否可用 —— 顶栏徽标与「导入 / 检索 / 写入」三处动作层保护**共用同一判据**。
+ *
+ * ★ 来源：windows 4e9d624 的 `useVectorAvailability`。2026-10-29 合并 66c3c19 时随 hooks.ts
+ *   整取 master 版丢失，现以「纯函数（lib/vectorAvailability.ts）+ 本 hook 仅做 query 装配」接回。
+ * ★ 不引入独立的 `/healthz` 存活探针（windows 版曾用 `useHttpReadiness`）：master 已有
+ *   `useHealth` + `summarizeHealth` 区分 unreachable / slow，再加一套会让"服务活没活"出现两个答案。
+ * ★ 两路 query 都是既有 key（`health` / `scopeList`）：本 hook 不产生额外请求，也不会因挂载
+ *   顺序变化触发额外取数（`useHealth` 的 staleTime 60s、`useScopeList` 30s）。
+ */
+export function useVectorAvailability(): VectorAvailability {
+  const health = useHealth();
+  const scopeList = useScopeList();
+  return resolveVectorAvailability({
+    health: { data: health.data, error: health.error, isPending: health.isPending },
+    scopeList: { data: scopeList.data, error: scopeList.error, isPending: scopeList.isPending },
   });
 }
 

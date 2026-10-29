@@ -34,6 +34,46 @@ export interface HealthSummary {
   counts?: { pass: number; warn: number; fail: number };
   /** 是否拿到了带 items 的报告（false ⇒ 面板显示「后端未返回健康明细」而非空列表） */
   hasReport: boolean;
+  /**
+   * fail 项中属于**向量探测**的项名（保持 issues 原序）。
+   *
+   * 用途：失败项全是向量探测时，徽标降级为「向量不可用」而非整体故障 —— 用户仍可全文检索，
+   * 不必去重启一个健康、只是 embedding 没配好的 daemon（对齐 windows 4e9d624 的 onlyVectorFailures）。
+   * ★ 只是**新增字段**：level 判定与 label 文案逐字未变，既有消费方（总览卡 / 横幅 / 明细面板）不受影响。
+   */
+  vectorFailures: string[];
+}
+
+/**
+ * 参与「向量能力」判定的 doctor 检查项名。
+ *
+ * ★ 与后端 `src/lib/health-check.ts` 的探测项名**硬绑定**（apiKey / URL 连通性 / 密钥有效性 / 维度匹配）：
+ *   后端改名必须同步改这里，否则「仅向量失败」会被误判成整体故障。
+ * ★ 放在本文件而不是 `vectorAvailability.ts`：`summarizeHealth` 需要它算 `vectorFailures`，
+ *   同文件避免循环依赖；可用性判据反向 import 本文件的 `isVectorHealthCheck`。
+ */
+export const VECTOR_HEALTH_CHECK_NAMES = new Set([
+  'apiKey',
+  'URL 连通性',
+  '密钥有效性',
+  '维度匹配',
+]);
+
+export function isVectorHealthCheck(name: string): boolean {
+  return VECTOR_HEALTH_CHECK_NAMES.has(name);
+}
+
+/**
+ * 「只是向量不可用」的展示判据：全部 fail 项都是向量探测项时返回降级文案，否则 null。
+ *
+ * 单独成函数是为了可单测，也让 ServiceBadge 只负责渲染（与 `summarizeHealth` 的分工一致）。
+ * ★ 文案必须短：`.ki-service-badge` 固定宽度 + nowrap。
+ */
+export function vectorOnlyFailureLabel(summary: HealthSummary): string | null {
+  if (summary.level !== 'fail') return null;
+  const failCount = summary.issues.filter((i) => i.status === 'fail').length;
+  if (failCount === 0 || summary.vectorFailures.length !== failCount) return null;
+  return `向量不可用 · ${summary.vectorFailures[0]}`;
 }
 
 /** 把 doctor 报告拆成异常项清单：fail 全部在前，其余保持原序 */
@@ -73,7 +113,7 @@ export function summarizeHealth(
   error: unknown,
   pending: boolean,
 ): HealthSummary {
-  const none = { issues: [] as HealthIssue[], hasReport: false };
+  const none = { issues: [] as HealthIssue[], hasReport: false, vectorFailures: [] as string[] };
   // TanStack Query 无错误时给的是 null 而非 undefined，只能用真值判定
   if (pending || (!data && !error)) {
     return { level: 'checking', label: '检测中…', detail: '', ...none };
@@ -94,6 +134,10 @@ export function summarizeHealth(
   const report = data?.report;
   const items = report?.items ?? [];
   const issues = toHealthIssues(items);
+  /** fail 项中的向量探测项名：供徽标判断「只是向量不可用」（不影响 level 判定） */
+  const vectorFailures = issues
+    .filter((i) => i.status === 'fail' && isVectorHealthCheck(i.name))
+    .map((i) => i.name);
   const counts = report
     && typeof report.pass === 'number' && typeof report.warn === 'number' && typeof report.fail === 'number'
     ? { pass: report.pass, warn: report.warn, fail: report.fail }
@@ -107,6 +151,7 @@ export function summarizeHealth(
       issues,
       counts,
       hasReport: items.length > 0,
+      vectorFailures,
     };
   }
   if (issues.length > 0) {
@@ -117,7 +162,16 @@ export function summarizeHealth(
       issues,
       counts,
       hasReport: items.length > 0,
+      vectorFailures,
     };
   }
-  return { level: 'ok', label: '服务健康', detail: '', issues, counts, hasReport: items.length > 0 };
+  return {
+    level: 'ok',
+    label: '服务健康',
+    detail: '',
+    issues,
+    counts,
+    hasReport: items.length > 0,
+    vectorFailures,
+  };
 }
