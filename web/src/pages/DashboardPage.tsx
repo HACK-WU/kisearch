@@ -3,11 +3,16 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useLocation, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
 import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
+import { describeWikiSync } from '@/lib/resourcesPage';
+import {
+  normalizeScopeMode,
+  registeredScopesOf,
+} from '@/lib/registeredScopes';
 import { getLastRttMs } from '@/api/httpApi';
 import { getTasks } from '@/api/tasksApi';
 import { useScopeValue } from '@/lib/scopeContext';
@@ -247,7 +252,7 @@ function HealthList({
 }
 
 export function DashboardPage(): JSX.Element {
-  const { data: scopes, isLoading } = useScopeList();
+  const { data: scopes, isLoading, isError, error, refetch } = useScopeList();
   // 数据源（REQ-20261020-001 Q4）：总览第 4 卡由「注册」改为「数据源」数
   const { data: dsList } = useDataSourceList();
   const { data: health, error: healthError, isPending: healthPending } = useHealth();
@@ -279,6 +284,11 @@ export function DashboardPage(): JSX.Element {
   const currentMeta = list.find((s) => s.scope === scope);
   // 计数取 `total` / `groups`：doc/list 无 group 时上限 500，列表长度与由它去重的分组数都是截断值
   const { docTotal: curDocTotal, groupCount: curGroups } = scopeOverviewCounts(scopeDocs);
+
+  // 「显示注册 scope」卡片：数据全部来自同一份 scopeList（0 新增请求、0 后端改动）
+  const scopeMode = normalizeScopeMode(scopes?.scopeMode);
+  const registeredScopes = registeredScopesOf(list);
+  const vectorDegraded = scopes?.vectorAvailable === false;
 
   /**
    * 当前 scope 的向量维度状态（REQ-20261016-002）：与顶栏共用同一 queryKey ⇒ 复用缓存、
@@ -397,6 +407,119 @@ export function DashboardPage(): JSX.Element {
           taskState={taskState}
           scopes={list}
         />
+      </section>
+
+      {/* 显示注册 scope（全宽，与下方「知识库」列表同形态） */}
+      <section>
+        <div className="ki-card">
+          <div className="ki-card__head">
+            <span className="ki-panel-heading">
+              <span className="ki-panel-kicker">REGISTERED SCOPES</span>
+              <span className="ki-card__title">显示注册 scope</span>
+            </span>
+            <span className="ki-card__sub ki-reg-scope__meta">
+              {vectorDegraded && (
+                <span className="ki-reg-scope__degraded" title={scopes?.vectorReason || '向量层未枚举'}>
+                  向量层未枚举
+                </span>
+              )}
+              <span
+                className={`ki-badge${scopeMode === 'strict' ? ' ki-badge--ok' : ''}`}
+                title={
+                  scopeMode === 'strict'
+                    ? 'scopeMode: strict —— 只认配置中注册的 scope，未注册会直接报错'
+                    : 'scopeMode: default —— 未注册的 scope 也能正常使用'
+                }
+              >
+                {/* 数据未到时显示「—」：先显示 default / 0 会被读成"确实是这个值" */}
+                scopeMode: {scopes ? scopeMode : '—'}
+              </span>
+              <span>{scopes ? `${registeredScopes.length} 个已注册` : '已注册数 —'}</span>
+            </span>
+          </div>
+          {isError ? (
+            // 失败必须显式报错：降级成"0 个注册"会被读成"没配过"
+            <div className="ki-reg-scope__state" role="alert">
+              <span>注册 scope 读取失败：{(error as Error)?.message || '未知错误'}</span>
+              <button type="button" className="ki-btn ki-btn--small" onClick={() => void refetch()}>
+                重试
+              </button>
+            </div>
+          ) : isLoading ? (
+            <div className="ki-card__body">
+              <div className="ki-skeleton" style={{ width: '100%', height: 40, marginBottom: 8 }} />
+              <div className="ki-skeleton" style={{ width: '90%', height: 40 }} />
+            </div>
+          ) : (
+            <>
+              {registeredScopes.length === 0 ? (
+                <div className="ki-empty" style={{ border: 'none' }}>
+                  <div>
+                    <h3>配置里还没有注册任何 scope</h3>
+                    <p>注册后可获得白名单护栏、独立 KB 目录与 Wiki 写回配置位。</p>
+                  </div>
+                </div>
+              ) : (
+                <table className="ki-table ki-reg-scope__table">
+                  <thead>
+                    <tr>
+                      <th>Scope</th>
+                      <th>层状态</th>
+                      <th style={{ textAlign: 'right' }}>文档数</th>
+                      <th>Wiki 写回</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {registeredScopes.map((s) => {
+                      // 文案唯一来源：与资源页同一函数（enabled ≠ 可写回）
+                      const wiki = describeWikiSync(s.wikiSync);
+                      return (
+                        <tr key={s.scope}>
+                          <td>
+                            <div className="ki-scope-name">
+                              <span className="ki-scope-name__dot ki-dot--blue" />
+                              <span className="ki-reg-scope__name">
+                                <span className="ki-scope-name__text">{s.scope}</span>
+                                {s.scope === scope && <span className="ki-badge">当前</span>}
+                                <span
+                                  className={`ki-reg-scope__wiki-inline ki-reg-scope__wiki--${wiki.tone}`}
+                                  title={wiki.title}
+                                >
+                                  Wiki 写回：{wiki.label}
+                                </span>
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="ki-badge-group">
+                              {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
+                              {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
+                            </div>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <span className="ki-num">{s.wikiCount ?? 0}</span>
+                          </td>
+                          <td>
+                            <span
+                              className={`ki-reg-scope__wiki ki-reg-scope__wiki--${wiki.tone}`}
+                              title={wiki.title}
+                            >
+                              {wiki.label}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              <div className="ki-reg-scope__foot">
+                <span>配置方式：</span>
+                <Link to="/resources/scope">资源 › 注册 scope ↗</Link>
+              </div>
+            </>
+          )}
+        </div>
       </section>
 
       {/* Scope 列表 */}

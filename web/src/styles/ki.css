@@ -679,6 +679,55 @@ a:hover { text-decoration: underline; }
 .ki-dash-grid > .ki-card { height: 100%; }
 @media (max-width: 959px) { .ki-dash-grid { grid-template-columns: minmax(0, 1fr); } }
 
+/* ── 总览：显示注册 scope（全宽，与下方「知识库」列表同形态） ── */
+.ki-reg-scope__meta { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.ki-reg-scope__degraded { font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+.ki-reg-scope__state {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 16px 20px; font-size: var(--ki-font-size-sm); color: var(--ki-color-danger);
+}
+.ki-reg-scope__name { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+/* Wiki 路径可能很长，而 .ki-table td 是 nowrap：必须自己截断，否则撑出横向滚动 */
+.ki-reg-scope__wiki {
+  display: inline-block; max-width: min(38vw, 420px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+  font-size: var(--ki-font-size-sm);
+}
+.ki-reg-scope__wiki-inline { display: none; }
+.ki-reg-scope__wiki--ok { color: var(--ki-color-success); }
+.ki-reg-scope__wiki--warn { color: var(--ki-color-warning); }
+.ki-reg-scope__wiki--muted { color: var(--ki-color-text-subtle); }
+.ki-reg-scope__table tbody tr { cursor: default; }
+.ki-reg-scope__foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  padding: 10px 20px; border-top: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle);
+}
+.ki-reg-scope__foot a { color: var(--ki-color-primary); font-weight: 600; text-decoration: none; }
+.ki-reg-scope__foot a:hover { text-decoration: underline; }
+/* ≤960：Wiki 列收起，状态降到 scope 名称下方（信息不丢，也不横向溢出）
+   ⚠️ 必须用 table-layout: fixed + 百分比列宽：`.ki-table td` 是 nowrap，
+   名称下方的长路径若不裁切，会把 Scope 列撑宽、把「层状态」挤出卡片
+   （`.ki-card` 是 overflow:hidden，页面级 scrollWidth 仍是 0，肉眼才发现）。 */
+@media (max-width: 960px) {
+  .ki-reg-scope__table { table-layout: fixed; }
+  .ki-reg-scope__table th:nth-child(1) { width: 52%; }
+  .ki-reg-scope__table th:nth-child(2) { width: 26%; }
+  .ki-reg-scope__table th:nth-child(3) { width: 22%; }
+  .ki-reg-scope__table th:nth-child(4), .ki-reg-scope__table td:nth-child(4) { display: none; }
+  .ki-reg-scope__name { width: 100%; min-width: 0; }
+  .ki-reg-scope__wiki-inline {
+    display: block; flex-basis: 100%; min-width: 0; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: var(--ki-font-size-xs);
+  }
+}
+/* ≤640：文档数也被通用规则隐藏；重排列宽，避免右侧留下空列 */
+@media (max-width: 640px) {
+  .ki-reg-scope__table th:nth-child(1) { width: 64%; }
+  .ki-reg-scope__table th:nth-child(2) { width: 36%; }
+}
+
 /* 骨架屏 */
 .ki-skeleton { position: relative; overflow: hidden; background: var(--ki-color-bg-muted); border-radius: 4px; }
 .ki-skeleton::after {

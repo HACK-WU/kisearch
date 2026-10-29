@@ -606,19 +606,38 @@ export interface WikiSyncCopy {
 /**
  * 把 wikiSync 状态翻译成一句人话。
  *
- * 刻意把「开关」与「可用」分开表达：`enabled:true` 但目录不可用时必须说清
- * 「开了但写不进去」—— 只说"已开启"会让用户以为写回正常。
+ * 刻意把「开关」「配置」「实际落点」分开表达：
+ *   · `enabled:true` 但目录不可用 → 必须说清「开了但写不进去」；
+ *   · **没配 wikiSync 时不算"已配置"** —— 此时 `writableDir` 来自 group-index 的 source 块
+ *     （导入源目录，Web 上传的多为一次性暂存目录），只是"若发生写回会落到哪"，
+ *     不能写成 ✓ 让用户以为配对过（2026-10-28 用户反馈 default / kisearch 误显示 ✓）。
  */
 export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncCopy {
   if (!ws) {
     return { tone: 'muted', label: '—', title: '当前 daemon 未提供该信息（旧版本）' };
   }
-  if (ws.writableDir) {
-    const via = ws.writableFrom === 'source' ? '跟随导入源目录' : 'wikiSync.sourceDir';
+  // ① 显式配置了 wikiSync.sourceDir —— 只有这一种才算「已配置 wiki 回写」
+  if (ws.writableFrom === 'wiki-sync' && ws.writableDir) {
     return {
       tone: 'ok',
       label: `✓ ${ws.writableDir}`,
-      title: `可写回（来源：${via}）`,
+      title: '可写回（来源：wikiSync.sourceDir）',
+    };
+  }
+  if (ws.writableDir) {
+    if (ws.enabled) {
+      // ② 开了 wikiSync，但实际落点来自 group-index 的 source 块（优先级 1，压过配置）
+      return {
+        tone: 'ok',
+        label: `✓ ${ws.writableDir}`,
+        title: '可写回（实际落点来自导入源目录，优先级高于 wikiSync.sourceDir）',
+      };
+    }
+    // ③ 没配 wikiSync：source 块只是导入源，不等于"配置了写回"
+    return {
+      tone: 'muted',
+      label: '未配置',
+      title: `未配置 wikiSync（或已显式关闭）；若未关闭，写回会落到导入源目录：${ws.writableDir}`,
     };
   }
   if (ws.enabled) {

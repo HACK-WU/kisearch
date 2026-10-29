@@ -476,14 +476,26 @@ describe('LLM 配置文案', () => {
   });
 });
 
-describe('wikiSync 文案（开关 ≠ 可用）', () => {
-  it('有可用目录 → ok，并区分来源', () => {
-    const viaSource = describeWikiSync({ enabled: false, writableDir: '/w', writableFrom: 'source' });
-    assert.equal(viaSource.tone, 'ok');
-    assert.ok(viaSource.title.includes('导入源'));
+describe('wikiSync 文案（配置 ≠ 落点 ≠ 可用）', () => {
+  it('显式配置 wikiSync.sourceDir → ok，并标明来源', () => {
     const viaConfig = describeWikiSync({ enabled: true, writableDir: '/w', writableFrom: 'wiki-sync' });
     assert.equal(viaConfig.tone, 'ok');
     assert.ok(viaConfig.title.includes('wikiSync.sourceDir'));
+  });
+
+  it('★ 没配 wikiSync、只有 source 块 → 「未配置」，不得显示 ✓（2026-10-28 用户反馈）', () => {
+    const viaSource = describeWikiSync({ enabled: false, writableDir: '/tmp/upload-xxx', writableFrom: 'source' });
+    assert.equal(viaSource.tone, 'muted');
+    assert.equal(viaSource.label, '未配置');
+    // 仍然要告诉用户"若写回会落到哪"，否则用户无从判断风险
+    assert.ok(viaSource.title.includes('/tmp/upload-xxx'));
+    assert.ok(viaSource.title.includes('导入源'));
+  });
+
+  it('开了 wikiSync 但 source 块优先 → ok，title 说明实际落点来自导入源', () => {
+    const shadowed = describeWikiSync({ enabled: true, writableDir: '/w', writableFrom: 'source' });
+    assert.equal(shadowed.tone, 'ok');
+    assert.ok(shadowed.title.includes('导入源'));
   });
 
   it('★ 已开启但无可用目录 → warn，不能说「已开启」了事', () => {
