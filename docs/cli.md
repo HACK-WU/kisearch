@@ -150,6 +150,8 @@ ki datasource list [--json]
 ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--purge 同时删除托管 clone
 ```
 
+`list` 默认输出对齐表格（`SCOPE / TYPE / SOURCE / LAST SYNC / STATE / PENDING`）：时间按本地时区 `YYYY-MM-DD HH:mm`；托管 Git 源显示 `host/owner/repo › 子目录 @commit`（保留 host，避免不同实例的同名仓库混淆）；`PENDING` 为 0 时显示 `-`，未计算（stale / 被闸门拦）显示 `未算`；终端较窄时 `SOURCE` 中间省略（`[同目录]` 这类标记不会被裁），**重定向 / 管道（非 TTY）不截断**；同一本地目录被多个 scope 登记会标 `[同目录]` 并在表下列出。**人类可读格式不作为稳定契约，脚本请用 `--json`。**
+
 `--git-url` 规则（S-05）：
 
 - 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。

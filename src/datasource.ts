@@ -8,6 +8,7 @@
  *   sync   同步：导入 + 计算待删候选，**永不删除**（--dry-run 只算不写）
  *
  * stdout = JSON；人类可读进度/提示一律走 stderr（与 ki group 一致）。
+ * 例外：`list` 的人类可读表格走 stdout（`--json` 时输出 JSON，脚本请用后者）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,6 +35,11 @@ import { executeDatasourcePrune, planDatasourcePrune } from './lib/datasource-pr
 import { closeEngine } from './lib/vector-client.js';
 import { closeFtsEngine } from './lib/fts-client.js';
 import type { DataSourceRecord } from './lib/datasource-types.js';
+import {
+  buildDataSourceList,
+  renderDataSourceTable,
+  sanitizeTerminalText,
+} from './lib/datasource-format.js';
 
 const program = new Command();
 program
@@ -248,13 +254,24 @@ program
       });
       return;
     }
-    if (scan.registered.length === 0) process.stderr.write('还没有数据源。登记：ki datasource add --scope <s> --source <目录>\n');
-    for (const { scope, record } of scan.registered) {
-      const last = record.lastSync
-        ? `${new Date(record.lastSync.at).toISOString()} (${record.lastSync.state})`
-        : '从未同步';
-      const commit = record.lastSync?.git?.shortCommit ? `\tcommit=${record.lastSync.git.shortCommit}` : '';
-      console.log(`${scope}\t${record.type}\t${record.dir}\tgroup=${record.group ?? '(自动)'}\t${last}${commit}\t待删=${record.lastSync?.pendingDelete.total ?? 0}`);
+    if (scan.registered.length === 0) {
+      process.stderr.write('还没有数据源。登记：ki datasource add --scope <s> --source <目录>\n');
+    } else {
+      const model = buildDataSourceList(scan.registered);
+      // 非 TTY（重定向 / 管道）没有"屏幕宽度"这回事：此时不截断，否则路径会被裁成不可读的一小段
+      const columns = process.stdout.isTTY && process.stdout.columns && process.stdout.columns > 0
+        ? process.stdout.columns
+        : 0;
+      console.log('');
+      for (const line of renderDataSourceTable(model.rows, columns)) console.log(line);
+      for (const { dir, scopes } of model.sharedDirs) {
+        console.log(`  ⚠ ${scopes.length} 个 scope 指向同一目录：${scopes.join(' ↔ ')}（${sanitizeTerminalText(dir)}）`);
+      }
+      model.explicitGroups.forEach(({ scope, group }, index) => {
+        const hint = index === 0 ? '（未列出的按顶层子目录自动）' : '';
+        console.log(`  落点 Group：${sanitizeTerminalText(scope)} → ${sanitizeTerminalText(group)}${hint}`);
+      });
+      console.log('');
     }
     for (const item of scan.missing) console.error(`⚠ ${item.scope} 目录不可读：${item.reason}`);
     for (const item of scan.corrupt) console.error(`⚠ ${item.scope} 登记损坏：${item.reason}`);
