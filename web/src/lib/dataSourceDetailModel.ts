@@ -447,13 +447,22 @@ export function buildDataSourceDetail(
     : [];
   // 顺序与两列栅格对齐（2026-10-22 视觉改造）：短字段两列、长字段独占整行。
   // ★ 源目录不再出现在这里 —— 抽屉头部已展示（mono + 复制按钮），重复展示是冗余。
+  // 「切分参数」的值是「段长 / 重叠」两个数字，单看数字不知道含义与顺序（用户 2026-10-29 反馈），
+  // 因此在值下方补一行 hint（由 DetailParams 渲染成小字，与值同列对齐）。
+  // 文案带**实际生效**的数值（跟随 lastSync.params 变化），不写死 1000 / 150。
+  const chunkSizeShown = effChunkSize ?? 1000;
+  const chunkOverlapShown = effChunkOverlap ?? 150;
   const params: DetailRow[] = [
     { label: '类型', value: typeLabel },
     { label: '同步模式', value: modeLabel },
     { label: '知识库', value: record.scope },
     { label: '同名策略', value: CONFLICT_LABEL[effConflict] ?? effConflict },
     { label: '向量化', value: effVector ? '开启' : '关闭（仅全文）' },
-    { label: '切分参数', value: `${effChunkSize ?? 1000} / ${effChunkOverlap ?? 150}` },
+    {
+      label: '切分参数',
+      value: `${chunkSizeShown} / ${chunkOverlapShown}`,
+      hint: `每段目标 ${chunkSizeShown} 字符；相邻两段重叠 ${chunkOverlapShown} 字符，避免跨段语义被切断`,
+    },
     ...gitRows,
     // 落点 Group 放最后：它是"这条数据源写到哪里"的结论，放在参数末尾读起来更顺
     { label: '落点 Group', value: effGroup ?? '自动：按顶层子目录', full: true },

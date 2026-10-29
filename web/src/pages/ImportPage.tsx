@@ -2413,6 +2413,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                       max={4000}
                       onChange={(e) => setChunkSize(e.target.value)}
                     />
+                    {/* 含义就地说明：此前只有标签 + 一个数字，用户不知道它在控制什么。
+                        区间（与 input 的 min/max 同源）与「调大调小的取舍」一并写清，避免被当成越大越好。 */}
+                    <div className="ki-form-hint">每段目标字符数（100–4000）；越小越精准、上下文越碎，越大反之</div>
                   </div>
                   <div className="ki-form-group">
                     <label className="ki-form-label">Chunk Overlap（字符）</label>
@@ -2424,6 +2427,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                       max={500}
                       onChange={(e) => setChunkOverlap(e.target.value)}
                     />
+                    <div className="ki-form-hint">相邻两段重复的字符数（0–500），避免关键句被切断；需小于段长</div>
                   </div>
                 </div>
                 <div className="ki-form-hint">切分规则：段落边界优先（\n\n → \n → 。 → ；），超过上限强制按长度切。</div>
