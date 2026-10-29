@@ -21,6 +21,12 @@ import { parseContentTags } from './constants.js';
 /** 单类明细上限：与 `task-registry.MAX_TASK_DETAIL_ITEMS` 同值（此处不 import 常量以避免循环依赖） */
 export const MAX_SNAPSHOT_DETAIL = 20;
 
+/**
+ * 新建文档明细上限：与 `task-registry.MAX_SNAPSHOT_CREATED` 同值（同上，不 import）。
+ * 比其它明细宽得多——「新增了哪些目录」需要看全量，20 条对 250 篇导入没有意义。
+ */
+export const MAX_SNAPSHOT_CREATED = 400;
+
 const DEFAULT_UPLOADS_ROOT = path.join(os.homedir(), '.ki', 'import-uploads');
 
 /** `handleDirectImport` 入参中与本快照相关的子集 */
@@ -119,6 +125,9 @@ interface ImportResultLike {
   duplicatesSkipped?: Array<{ path?: string; existingGroup?: string; existingRelation?: string }>;
   duplicatesSkippedTruncated?: boolean;
   conflicts?: Array<{ path?: string; relation?: string; action?: string; skipReason?: string; unchanged?: boolean }>;
+  created?: Array<{ group?: string; relation?: string }>;
+  createdTotal?: number;
+  createdTruncated?: boolean;
   groups?: string[];
 }
 
@@ -186,6 +195,19 @@ export function toResultSnapshot(operation: string, result: unknown): TaskResult
     }));
   if (conflicts.length > MAX_SNAPSHOT_DETAIL) truncated = true;
   if (conflicts.length > 0) out.conflicts = conflicts.slice(0, MAX_SNAPSHOT_DETAIL);
+
+  // 新建文档：压成 [group, relation] 二元组（带键名的对象约 120B/条，会把 32KB 台账撑爆）
+  const created = (Array.isArray(value.created) ? value.created : [])
+    .filter((item) => typeof item?.group === 'string' && item.group.trim().length > 0
+      && typeof item?.relation === 'string' && item.relation.trim().length > 0)
+    .map((item) => [String(item.group).trim(), String(item.relation).trim()] as [string, string]);
+  if (Number.isFinite(value.createdTotal)) out.createdTotal = Math.max(0, Math.trunc(value.createdTotal as number));
+  if (value.createdTruncated === true) out.createdTruncated = true;
+  if (created.length > MAX_SNAPSHOT_CREATED) {
+    out.createdTruncated = true;
+    truncated = true;
+  }
+  if (created.length > 0) out.created = created.slice(0, MAX_SNAPSHOT_CREATED);
 
   if (truncated) out.truncated = true;
   return Object.keys(out).length > 0 ? out : undefined;

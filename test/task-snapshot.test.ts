@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { splitSkipped, toParamSnapshot, toResultSnapshot, MAX_SNAPSHOT_DETAIL } from '../src/lib/task-snapshot.ts';
+import { splitSkipped, toParamSnapshot, toResultSnapshot, MAX_SNAPSHOT_DETAIL, MAX_SNAPSHOT_CREATED } from '../src/lib/task-snapshot.ts';
 
 test('splitSkipped：三项之和恒等于 skipped', () => {
   const reasons = splitSkipped(10, 3, [{ action: 'skip' }, { action: 'skip' }, { action: 'overwrite' }]);
@@ -140,4 +140,54 @@ test('toResultSnapshot：未知 action 的冲突条目被丢弃', () => {
     conflicts: [{ path: 'a.md', relation: 'a_1', action: 'renamed' }],
   });
   assert.equal(snapshot?.conflicts, undefined);
+});
+
+test('toResultSnapshot：新建明细压成 [group, relation] 二元组', () => {
+  const snapshot = toResultSnapshot('import', {
+    stats: { files: { scanned: 2, completed: 2, incomplete: 0, skipped: 0, unchanged: 0, duplicatesSkipped: 0 } },
+    created: [
+      { group: 'langchain/stages', relation: '01-入门' },
+      { group: 'langchain/stages', relation: '02-进阶' },
+    ],
+    createdTotal: 2,
+  });
+  assert.deepEqual(snapshot?.created, [
+    ['langchain/stages', '01-入门'],
+    ['langchain/stages', '02-进阶'],
+  ]);
+  assert.equal(snapshot?.createdTotal, 2);
+  assert.equal(snapshot?.createdTruncated, undefined);
+});
+
+test('toResultSnapshot：新建明细超过上限时截断并标记（防 32KB 撑爆导致任务消失）', () => {
+  const created = Array.from({ length: MAX_SNAPSHOT_CREATED + 5 }, (_, i) => ({ group: `g/${i}`, relation: `r${i}` }));
+  const snapshot = toResultSnapshot('import', {
+    stats: { files: { scanned: 1, completed: 1, incomplete: 0, skipped: 0, unchanged: 0, duplicatesSkipped: 0 } },
+    created,
+    createdTotal: created.length,
+  });
+  assert.equal(snapshot?.created?.length, MAX_SNAPSHOT_CREATED);
+  assert.equal(snapshot?.createdTruncated, true);
+  assert.equal(snapshot?.createdTotal, created.length);
+  assert.equal(snapshot?.truncated, true);
+});
+
+test('toResultSnapshot：明细被裁掉但总数仍在（前端展示「共 N 篇」而不是 0）', () => {
+  const snapshot = toResultSnapshot('import', {
+    stats: { files: { scanned: 3, completed: 3, incomplete: 0, skipped: 0, unchanged: 0, duplicatesSkipped: 0 } },
+    createdTotal: 251,
+    createdTruncated: true,
+  });
+  assert.equal(snapshot?.created, undefined);
+  assert.equal(snapshot?.createdTotal, 251);
+  assert.equal(snapshot?.createdTruncated, true);
+});
+
+test('toResultSnapshot：非法新建条目被丢弃', () => {
+  const snapshot = toResultSnapshot('import', {
+    stats: { files: { scanned: 1, completed: 1, incomplete: 0, skipped: 0, unchanged: 0, duplicatesSkipped: 0 } },
+    created: [{ group: '', relation: 'a' }, { group: 'g', relation: '   ' }, { group: 'g', relation: 'ok' }],
+    createdTotal: 3,
+  });
+  assert.deepEqual(snapshot?.created, [['g', 'ok']]);
 });

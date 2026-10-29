@@ -78,7 +78,7 @@ import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './docu
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskParamSnapshot, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
-import { toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
+import { MAX_SNAPSHOT_CREATED, toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 import { withTimeoutFallback } from './timeout.js';
@@ -2216,6 +2216,18 @@ function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): TaskResul
     vectorized: summary.vectorized,
     fullTextIndexed: summary.fullTextIndexed,
     groups: summary.groups,
+    // 数据源同步任务的详情也要有「新增的文档」，否则同一份快照在数据源页有、任务页说"没有记录"
+    ...(summary.created && summary.created.length > 0
+      ? {
+        created: summary.created
+          .slice(0, MAX_SNAPSHOT_CREATED)
+          .map((item) => [item.group, item.relation] as [string, string]),
+      }
+      : {}),
+    ...(typeof summary.createdTotal === 'number' ? { createdTotal: summary.createdTotal } : {}),
+    ...(summary.createdTruncated || (summary.created?.length ?? 0) > MAX_SNAPSHOT_CREATED
+      ? { createdTruncated: true }
+      : {}),
   };
 }
 

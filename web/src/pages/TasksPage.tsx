@@ -5,15 +5,18 @@ import {
   getTask, getTasks, getImportIncomplete, retryImportIncomplete, activeImportCount,
   type TaskRecord, type ImportIncompleteStatus,
 } from '@/api/tasksApi';
-import { cancelImport } from '@/api/httpApi';
+import { cancelImport, getDocContent, getDataSourceDetail } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
 import {
   buildTaskDetail, operationLabel, sourceLabel, stateLabel,
 } from '@/lib/taskDetailModel';
 import { buildTaskListRow } from '@/lib/taskListModel';
 import { ItemTree } from '@/components/TaskDetailParts';
+import { ReadOnlyPathTree } from '@/components/ReadOnlyPathTree';
+import { buildDataSourcePendingTree } from '@/lib/dataSourceDetailModel';
 import { DetailHero, DetailMetrics, DetailParams } from '@/components/DetailParts';
 import { DetailDrawer, DetailSection, type DetailStatusTone } from '@/components/DetailDrawer';
+import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
 
 type Filter = 'all' | 'running' | 'failed' | 'recent';
@@ -88,8 +91,23 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
   const task = data?.task;
   const detail = task ? buildTaskDetail(task) : null;
   const title = task ? `${operationLabel(task.operation)} · ${task.scope}` : '任务详情';
+  // 「新增的文档」点开正文：与数据源「待删除」卡一致（阅读用同一套 ModuleDrawer）
+  const [docTarget, setDocTarget] = useState<{ scope: string; group: string; relation: string } | null>(null);
+  /**
+   * 待删除候选属于**数据源**（同步时算出），任务本身没有。任务详情要展示这张卡，
+   * 只能按 `task.scope` 反查数据源详情；该 scope 未登记数据源时静默不显示。
+   */
+  const dsQuery = useQuery({
+    queryKey: ['dataSourceDetail', task?.scope],
+    queryFn: () => getDataSourceDetail(task!.scope),
+    enabled: Boolean(task?.scope && task.scope !== 'unknown'),
+    staleTime: 30_000,
+    retry: false,
+  });
+  const pending = dsQuery.data?.source.lastSync?.pendingDelete;
 
   return (
+    <>
     <DetailDrawer
       ariaLabel="任务详情"
       title={title}
@@ -171,6 +189,66 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
             <DetailParams rows={detail.params} />
           </DetailSection>
 
+          {/* 新增的文档：与数据源「待删除」卡同款目录树（2026-10-29 用户要求，
+              替代原先「执行结果 → 落点 Group」——落点组对用户价值低，新增目录才是关心的） */}
+          <DetailSection
+            material="created"
+            title={detail.created.available ? `新增的文档 ${detail.created.total} 篇` : '新增的文档'}
+            hint={detail.created.truncated ? '明细未完整显示' : undefined}
+          >
+            {!detail.created.available ? (
+              <p className="ki-task-muted">
+                {detail.legacy
+                  ? '该任务创建于台账扩展之前，没有新建明细。'
+                  : '该任务没有新建明细（未完成、非导入任务或旧记录）。'}
+              </p>
+            ) : detail.created.total === 0 ? (
+              <p className="ki-task-muted">本次没有新建文档：全部为覆盖更新、内容未变或被跳过。</p>
+            ) : detail.created.items.length === 0 ? (
+              // 台账 32KB 预算把明细裁掉了：有总数但没有条目，不能说成「没有新建」
+              <p className="ki-task-muted">共 {detail.created.total} 篇，但明细未保留（任务记录超限被裁剪）。</p>
+            ) : (
+              <>
+                <div className="ki-ds-subcard">
+                  <ReadOnlyPathTree
+                    nodes={buildDataSourcePendingTree(detail.created.items)}
+                    label="新增的文档目录"
+                    onOpenDoc={(item) => setDocTarget({ scope: task.scope, group: item.group, relation: item.relation })}
+                  />
+                </div>
+                {detail.created.truncated ? (
+                  <p className="ki-task-muted">仅显示前 {detail.created.items.length} 篇（共 {detail.created.total} 篇）。</p>
+                ) : null}
+              </>
+            )}
+          </DetailSection>
+
+          {/* 待删除候选属于数据源（同步时算出），本页只读展示、可点开正文；删除在「数据源」页 */}
+          {pending && (pending.total > 0 || pending.blocked || pending.stale) ? (
+            <DetailSection
+              material="action"
+              title={pending.blocked ? '待删除（未生成候选）' : `待删除 ${pending.total} 篇`}
+              hint={pending.computedAt ? `由 ${new Date(pending.computedAt).toLocaleString('zh-CN')} 同步算出` : undefined}
+            >
+              {pending.blocked ? (
+                <p className="ki-task-muted">{pending.skipDetail ?? '未生成候选；请在「数据源」页查看原因。'}</p>
+              ) : pending.items.length === 0 ? (
+                <p className="ki-task-muted">候选明细不可用（可能已过期或超限）。</p>
+              ) : (
+                <>
+                  <div className="ki-ds-subcard">
+                    <ReadOnlyPathTree
+                      nodes={buildDataSourcePendingTree(pending.items)}
+                      label="待删除文档"
+                      onOpenDoc={(item) => setDocTarget({ scope: task.scope, group: item.group, relation: item.relation })}
+                    />
+                  </div>
+                  <p className="ki-task-muted">本页只读；删除请在「数据源」页处理。</p>
+                </>
+              )}
+            </DetailSection>
+          ) : null}
+
           {detail.times.length > 0 ? (
             <DetailSection material="meta" title="时间">
               <DetailParams rows={detail.times} />
@@ -187,6 +265,16 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
       ) : null}
       {!isPending && !error && !task ? <p className="ki-task-muted">未找到任务详情。</p> : null}
     </DetailDrawer>
+    {docTarget ? (
+      <ModuleDrawer
+        scope={docTarget.scope}
+        module={docTarget.relation}
+        group={docTarget.group}
+        fetcher={getDocContent}
+        onClose={() => setDocTarget(null)}
+      />
+    ) : null}
+    </>
   );
 }
 
@@ -485,7 +573,10 @@ export function TasksPage(): JSX.Element {
   useEffect(() => {
     if (!selectedId) return undefined;
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') navigate('/tasks');
+      if (event.key !== 'Escape') return;
+      // 文档抽屉（新增/待删除的「查看内容」）开着时 Esc 归它 —— 否则一次 Esc 会连任务详情一起关
+      if (document.querySelector('.ki-drawer:not(.ki-drawer--inline)')) return;
+      navigate('/tasks');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

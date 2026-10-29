@@ -81,9 +81,8 @@ describe('完成态结果摘要', () => {
     const byLabel = Object.fromEntries(view.params.map((row) => [row.label, row]));
     assert.equal(byLabel['来源'].value, '网页 · 浏览器上传（暂存目录）');
     assert.equal(byLabel['Group'].value, '未指定（按源目录派生）');
-    // 参数段只给数量（整份落点曾在两处各抄一遍，601 字把栅格拉断）
-    assert.match(byLabel['Group'].hint ?? '', /实际落点 1 个 Group/);
-    assert.doesNotMatch(byLabel['Group'].hint ?? '', /raw\/sub/, '落点明细不得再进参数段 hint');
+    // 2026-10-29：落点数量不再进参数段——改由「新增的文档」卡片承载
+    assert.equal(byLabel['Group'].hint, undefined, '参数段不再提落点 Group');
     assert.equal(byLabel['标签'].value, 'a / b');
     assert.equal(byLabel['向量'].value, '仅全文索引（未写 dense）');
     assert.equal(byLabel['同名策略'].value, '自动添加后缀（模板 _{n}）');
@@ -174,16 +173,13 @@ describe('进度口径', () => {
   });
 });
 
-describe('落点 Group 展示形态（2026-10-20）', () => {
-  it('落点只出现在结果段一次，且独占整行', () => {
+describe('落点 Group 不再展示（2026-10-29）', () => {
+  it('结果段与参数段都不再出现落点 Group', () => {
     const groups = ['langchain', 'langchain/stages', 'langchain/stages/lessons'];
     const view = buildTaskDetail(baseTask({ params: { sourceKind: 'upload' }, result: { groups } }));
-    const landing = view.results.find((row) => row.label === '落点 Group');
-    assert.deepEqual(landing?.tree?.items, groups, '结果段持有完整落点');
-    assert.equal(landing?.tree?.summary, undefined, '只有 3 个落点直接摊开，别让人多点一次');
-    assert.equal(landing?.full, true, '长值独占整行，否则把双列栅格的另一格拉出大片空白');
-    const paramHint = view.params.find((row) => row.label === 'Group')?.hint ?? '';
-    assert.equal(groups.some((group) => paramHint.includes(group)), false, '参数段不得复制落点正文');
+    assert.equal(view.results.some((row) => row.label === '落点 Group'), false, '结果段不再渲染落点 Group');
+    assert.equal(view.resultExtras.some((row) => row.label === '落点 Group'), false);
+    assert.equal(view.params.find((row) => row.label === 'Group')?.hint, undefined);
   });
 
   it('树形合并公共根，父级只出现一次', () => {
@@ -203,19 +199,38 @@ describe('落点 Group 展示形态（2026-10-20）', () => {
   });
 });
 
-describe('落点折叠阈值（2026-10-20）', () => {
-  it('≥4 个落点才折叠，摘要量词由 model 给', () => {
-    for (const count of [2, 3]) {
-      const groups = Array.from({ length: count }, (_, i) => `g/${i}`);
-      const row = buildTaskDetail(baseTask({ params: { sourceKind: 'upload' }, result: { groups } }))
-        .results.find((item) => item.label === '落点 Group');
-      assert.equal(row?.tree?.summary, undefined, `${count} 个应直接摊开`);
-    }
-    const four = buildTaskDetail(baseTask({
-      params: { sourceKind: 'upload' },
-      result: { groups: ['a', 'b', 'c', 'd'] },
-    })).results.find((item) => item.label === '落点 Group');
-    assert.equal(four?.tree?.summary, '全部 4 个 Group');
+describe('新增的文档视图（2026-10-29）', () => {
+  it('没有 created 快照 = 旧记录：available=false，不得冒充「0 篇」', () => {
+    const view = buildTaskDetail(baseTask({ result: { files: FILES } }));
+    assert.equal(view.created.available, false);
+    assert.deepEqual(view.created.items, []);
+  });
+
+  it('明细被字节预算裁掉时仍可展示总数与截断标记', () => {
+    const view = buildTaskDetail(baseTask({ result: { createdTotal: 251, createdTruncated: true } }));
+    assert.equal(view.created.available, true);
+    assert.equal(view.created.total, 251);
+    assert.equal(view.created.truncated, true);
+    assert.deepEqual(view.created.items, []);
+  });
+
+  it('二元组映射为 group/relation，总数缺省回退明细条数', () => {
+    const view = buildTaskDetail(baseTask({
+      result: { created: [['langchain/stages', '01-入门'], ['langchain/stages', '02-进阶']], createdTotal: 2 },
+    }));
+    assert.deepEqual(view.created.items, [
+      { group: 'langchain/stages', relation: '01-入门' },
+      { group: 'langchain/stages', relation: '02-进阶' },
+    ]);
+    assert.equal(view.created.total, 2);
+    assert.equal(view.created.truncated, false);
+  });
+
+  it('新建 0 篇是「本次没有新建」，与旧记录区分开', () => {
+    const view = buildTaskDetail(baseTask({ result: { created: [], createdTotal: 0 } }));
+    assert.equal(view.created.available, true);
+    assert.equal(view.created.total, 0);
+    assert.deepEqual(view.created.items, []);
   });
 });
 
@@ -400,14 +415,15 @@ describe('执行结果概览（与数据源详情同构）', () => {
     assert.equal(view.metrics.find((m) => m.label === '全文条目')?.value, 0);
   });
 
-  it('resultExtras 只保留指标网格未覆盖的行（落点 Group 等）', () => {
+  it('resultExtras 只保留指标网格未覆盖的行（附件等）', () => {
     const task = baseTask({
       params: { sourceKind: 'upload', group: 'raw' },
       result: { files: FILES, vectorized: 1, fullTextIndexed: 1, assets: 3, groups: ['raw/browser'] },
     });
     const view = buildTaskDetail(task);
-    assert.deepEqual(view.resultExtras.map((row) => row.label), ['附件', '落点 Group'], '附件降为参数行，网格保持 6 格');
-    assert.deepEqual(view.resultExtras.find((row) => row.label === '落点 Group')?.tree?.items, ['raw/browser']);
+    assert.deepEqual(view.resultExtras.map((row) => row.label), ['附件'], '附件降为参数行，网格保持 6 格');
+    // 2026-10-29：落点 Group 不再进结果段（改由「新增的文档」卡承载）
+    assert.equal(view.results.some((row) => row.label === '落点 Group'), false);
     // results 仍保留完整行（旧消费方/单测口径不变）
     assert.ok(view.results.some((row) => row.label === '文件'));
   });

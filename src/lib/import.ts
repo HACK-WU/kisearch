@@ -170,6 +170,20 @@ export interface ImportDuplicateSkipItem {
 /** REQ-20261019-002：跳过明细上限（超出截断，计数仍取完整值） */
 export const MAX_DUPLICATE_DETAIL = 500;
 
+/**
+ * 本次**新建**文档明细的条数上限（按 group+relation 去重后）。
+ * 与 {@link MAX_DUPLICATE_DETAIL} 同量级：任务台账单文件上限 32KB，超了会被判不可读。
+ */
+export const MAX_CREATED_DETAIL = 500;
+
+/** 一条「本次新建」的文档（= 知识库此前没有这个 relation） */
+export interface ImportCreatedItem {
+  /** 落点组（知识库侧路径） */
+  group: string;
+  /** 文档名（relation） */
+  relation: string;
+}
+
 /** R1：未完成文件条目（文件级；已成功文件不出现在清单中） */
 export interface ImportIncompleteItem {
   /** 相对源目录的文件路径 */
@@ -231,6 +245,16 @@ export interface ImportResult {
   duplicatesSkipped: ImportDuplicateSkipItem[];
   /** 跳过明细被截断（完整条数见 `stats.files.duplicatesSkipped`） */
   duplicatesSkippedTruncated: boolean;
+  /**
+   * 本次**新建**的文档明细：`create`（新文件）与 `suffix`（同名冲突改名后新建）计入，
+   * `overwrite`（覆盖已有）不计。同一批次内被后续覆盖的同名条目会被剔除。
+   * 最多 {@link MAX_CREATED_DETAIL} 条，完整条数见 {@link createdTotal}。
+   */
+  created: ImportCreatedItem[];
+  /** 本次新建文档总数（去重后，不受 {@link MAX_CREATED_DETAIL} 截断影响） */
+  createdTotal: number;
+  /** {@link created} 是否被截断 */
+  createdTruncated: boolean;
   /**
    * REQ-20261019-001：目录导入后的「库中存在、本次目录已没有」候选（双闸门 + token）。
    * 仅 `pruneStale` 开启时存在；不开启时**不出现该字段**（既有消费方零影响）。
@@ -945,6 +969,12 @@ async function handleDirectImportUnlocked(
   }[] = [];
   const skipped: string[] = [];
   const conflicts: ImportConflict[] = [];
+  /**
+   * 本次新建的文档（group\u0000relation → 条目）。
+   * 用 Map 而不是数组：同一批次内 `a.md` 新建后又被 `a.md`（另一 sourcePath）覆盖时，
+   * 前者已从 fileRecords 剔除，不该再算作"新增"。
+   */
+  const createdMap = new Map<string, ImportCreatedItem>();
   /** D7：组级原文写缓冲（groupPath → relation → 原文）；扫描循环内只进缓冲，
    *  扫描结束后每组一次 loadLocalKb+合并+writeJson 落盘（O(文档数)→O(组数)）。
    *  键在循环前由 ensureGroupBuffer 预建，避免热路径重复判空。 */
@@ -1095,9 +1125,15 @@ async function handleDirectImportUnlocked(
       previousLocalText = replacedBatchRecord.previousLocalText;
       const replacedIndex = fileRecords.indexOf(replacedBatchRecord);
       if (replacedIndex >= 0) fileRecords.splice(replacedIndex, 1);
+      // 被同批覆盖的那条若刚被记为"新建"，现在它不会落库 —— 撤销
+      createdMap.delete(`${groupPath}\u0000${relation}`);
     }
     if (resolution.conflicted) {
       conflicts.push({ path: rel, originalRelation, relation, action: resolution.action as ImportConflictAction });
+    }
+    // 新增口径 = 知识库此前没有这个 relation：create（新文件）+ suffix（冲突改名后仍新建）
+    if (resolution.action === 'create' || resolution.action === 'suffix') {
+      createdMap.set(`${groupPath}\u0000${relation}`, { group: groupPath, relation });
     }
     const previousRelationSnapshot = previousRelation ? cloneRelation(previousRelation) : undefined;
     const previousFtsKey = `${groupPath}\u0000${relation}`;
@@ -1118,6 +1154,8 @@ async function handleDirectImportUnlocked(
       if (!hookResult.ok) {
         // P-7：所有 hooks 均失败 → 不写入向量，也不覆盖旧 local KB，文件计入 skipped。
         skipped.push(rel);
+        // 被跳过的文件不会落库，不能留在「新建」明细里
+        createdMap.delete(`${groupPath}\u0000${relation}`);
         logWarn(`清洗 hook 失败已跳过（${rel}）：${hookResult.failedHooks.join(', ')}，未覆盖旧 local KB`);
         processedFileCount++;
         args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
@@ -1138,6 +1176,7 @@ async function handleDirectImportUnlocked(
     });
     if (chunks.length > MAX_CHUNKS_PER_FILE) {
       skipped.push(rel);
+      createdMap.delete(`${groupPath}\u0000${relation}`);
       logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
       // chunk 超限发生在覆盖之前，旧 local KB 与索引状态均保持不变。
       processedFileCount++;
@@ -1284,6 +1323,10 @@ async function handleDirectImportUnlocked(
       conflicts,
       duplicatesSkipped: dupSkipDetail,
       duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+      // 早退分支没有任何写入，也就不可能新建文档
+      created: [],
+      createdTotal: 0,
+      createdTruncated: false,
       ...(prune ? { prune } : {}),
       groups: [],
       source: { dir: sourceDir, chunkSize, chunkOverlap },
@@ -1328,6 +1371,10 @@ async function handleDirectImportUnlocked(
         conflicts,
         duplicatesSkipped: dupSkipDetail,
         duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+        // 全部被跳过时同样没有新建
+        created: [],
+        createdTotal: 0,
+        createdTruncated: false,
         ...(prune ? { prune } : {}),
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
@@ -1961,6 +2008,14 @@ async function handleDirectImportUnlocked(
     : `source 已记录（dir=${sourceDir}）`);
 
   const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
+  // ★ created 在扫描阶段记录，后续向量化/元数据提交失败的文件并不会真正落库 ——
+  //   必须剔除，否则失败会被报成「新增」。排序与待删候选同口径（group/relation 升序）。
+  const failedKeys = new Set([...failedRecords].map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
+  const createdItems = [...createdMap.entries()]
+    .filter(([key]) => !failedKeys.has(key))
+    .map(([, item]) => item)
+    .sort((a, b) => `${a.group}/${a.relation}`.localeCompare(`${b.group}/${b.relation}`));
+
   logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  unchanged=${unchangedFileCount}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
@@ -2130,6 +2185,9 @@ async function handleDirectImportUnlocked(
     conflicts,
     duplicatesSkipped: dupSkipDetail,
     duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+    created: createdItems.slice(0, MAX_CREATED_DETAIL),
+    createdTotal: createdItems.length,
+    createdTruncated: createdItems.length > MAX_CREATED_DETAIL,
     ...(prune ? { prune } : {}),
     groups: [...kbResult.groups].sort(),
     source,

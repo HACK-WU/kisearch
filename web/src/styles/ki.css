@@ -5646,6 +5646,14 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-detail-sec--action .ki-detail-sec__mark { background: var(--ki-color-warning); }
 .ki-detail-sec--action .ki-detail-sec__title { color: var(--ki-color-warning); }
+/* 新增的文档：主色淡绿，取 8%（比 data 的 4% 略实、比 primary-soft 更淡），
+   既与待删除的黄底区分，也不会抢执行结果的视觉重量。暗色下同样按 surface 混合。 */
+.ki-detail-sec--created {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 20%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+}
+.ki-detail-sec--created .ki-detail-sec__mark { background: var(--ki-color-primary); }
+.ki-detail-sec--created .ki-detail-sec__title { color: var(--ki-color-primary); }
 
 /* ── 执行结果 hero：完成数 + 分段条 + 图例 ── */
 .ki-detail-hero {
@@ -5794,6 +5802,19 @@ select.ki-chat-cfg__ta--select {
 
 /* ── 待删候选树：复用 .ki-tree-*，仅在本抽屉内收紧行距并加复选框/查看按钮 ── */
 .ki-ds-tree { max-height: 280px; overflow-y: auto; overscroll-behavior: contain; }
+/* 详情抽屉（任务 / 数据源）本身就是可滚容器：树再 contain 会把滚轮吞在树上，
+   滚到底后页面完全不动（2026-10-20 在任务明细上踩过同款坑）。 */
+.ki-detail .ki-ds-tree { overscroll-behavior: auto; }
+/* 新增的文档：树外包一层白底子卡片（详情区其余内容卡同材质），避免树直接铺在灰底上 */
+.ki-ds-subcard {
+  padding: 6px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+}
+/* 只读树（新增的文档）：没有勾选/打开动作，去掉 pointer 与 hover 反馈，避免"看起来能点" */
+/* 只读树不再压掉 hover/cursor：可点的文件行要与「待删除」卡一样有整行高亮 */
+.ki-ds-tree--readonly .ki-tree-doc .ki-tree-icon { color: var(--ki-color-text-subtle); }
 .ki-ds-tree .ki-tree-dir { padding: 2px 8px; line-height: 1.6; gap: 5px; }
 .ki-ds-tree .ki-tree-arrow { width: 12px; }
 .ki-ds-tree .ki-tree-doc { min-height: 26px; padding-left: 8px; gap: 5px; }
@@ -5810,18 +5831,12 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-ds-linkbtn:hover { background: var(--ki-color-primary-soft); }
 .ki-ds-linkbtn:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
-/* 文档行「打开」按钮：默认隐形，hover / 键盘聚焦才出现（opacity 不挤动布局） */
-.ki-ds-doc-open {
-  flex: none; display: inline-flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; padding: 0; margin-left: 55px;
-  border: 0; border-radius: var(--ki-radius-tag); background: transparent;
-  color: var(--ki-color-primary); cursor: pointer; opacity: 0;
-  transition: opacity var(--ki-motion-fast), background var(--ki-motion-fast);
-}
-.ki-tree-doc:hover .ki-ds-doc-open,
-.ki-ds-doc-open:focus-visible { opacity: 1; }
-.ki-ds-doc-open:hover { background: var(--ki-color-primary-soft); }
-.ki-ds-doc-open:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+/* 文档行即入口（2026-10-29 用户要求：取消右侧「查看」按钮，点整行看正文）：
+   新增卡与待删除卡统一 hover 高亮；待删除卡里勾选只认复选框。 */
+.ki-tree-doc--clickable { cursor: pointer; }
+.ki-tree-doc--clickable:hover { background: var(--ki-color-bg-secondary); color: var(--ki-color-text); }
+.ki-tree-doc--clickable:hover .ki-tree-doc__name { color: var(--ki-color-primary); text-decoration: underline; }
+.ki-tree-doc--clickable:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 
 /* ── 同步进度：复用导入页 .ki-progress* / .ki-track-*，仅补与下方功能区的间距 ── */
 .ki-detail .ki-progress-block { margin-bottom: 14px; }
@@ -5830,6 +5845,21 @@ select.ki-chat-cfg__ta--select {
    只在"数据源页 + 详情已开"时提升，其他页面层级不变（护栏：不改共享基线） */
 .ki-datasource-page--drawer .ki-drawer { z-index: 1060; }
 .ki-datasource-page--drawer .ki-drawer__scrim { z-index: 1059; }
+
+/* 任务详情同样会再开文档抽屉（「新增的文档 → 查看内容」）：ModuleDrawer 默认 1000
+   低于 .ki-detail(1021)，不加这条会被详情抽屉整块盖住（点开"没反应"）。
+   用兄弟选择器限定「详情抽屉与文档抽屉同时存在」，不影响单独打开阅读器的页面。 */
+.ki-detail ~ .ki-drawer { z-index: 1060; }
+.ki-detail ~ .ki-drawer__scrim { z-index: 1059; }
+/* 详情之上再开文档抽屉时，宽度收敛为详情抽屉的一半（两者原本同为 clamp(520px,70vw,100vw)，
+   完全重叠）。排除 inline（浏览页内联，宽度由 flex 决定）与 fullscreen（用户主动全屏）。
+   ★ 只在「详情抽屉 + 文档抽屉」同屏时生效，浏览页/搜索页阅读器不受影响。 */
+/* 仅宽屏收窄：≤960 时详情抽屉本身是全宽，再取一半会让正文窄到不可读 */
+@media (min-width: 961px) {
+  .ki-detail ~ .ki-drawer:not(.ki-drawer--inline):not(.ki-drawer--fullscreen) {
+    width: calc(clamp(520px, 70vw, 100vw) / 2);
+  }
+}
 
 /* ── 滚动条（抽屉本体 + 失败明细 + 待删树）：细条、无箭头、随主题 ── */
 .ki-detail__body,

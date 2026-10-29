@@ -153,6 +153,9 @@ describe('R1：系统性向量故障下的文件级部分成功', () => {
       assert.equal(result.stopReason?.code, 'HTTP_503');
       assert.deepEqual(result.stats.files, { total: 3, completed: 1, incomplete: 2, scanned: 3, skipped: 0, unchanged: 0, duplicatesSkipped: 0 }, '完成 1 / 未完成 2（文件级）');
       assert.deepEqual(result.incomplete.map((i) => i.path).sort(), ['b.md', 'c.md'], '未完成清单只含未完成文件');
+      // 新建明细不得把未落库的文件算进去（否则「失败」被报成「新增」）
+      assert.deepEqual(result.created.map((i) => i.relation).sort(), ['a'], 'created 只含真正写入的文件');
+      assert.equal(result.createdTotal, 1);
 
       // ② 元数据（= /api/doc/list 数据源，`mcp-http-api.buildDocList` 直接投影该分片）：
       // 只有 a 可见；未完成文件不得出现在文档列表

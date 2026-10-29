@@ -670,6 +670,10 @@ export interface DataSourceResultView {
   groups: string[];
   conflicts: { path: string; relation: string; action: string; unchanged?: boolean }[];
   failures: { path: string; reason: string }[];
+  /** 本次新建的文档（旧快照不返回 → 卡片显示"无记录"而非"0 篇"） */
+  created?: { group: string; relation: string }[];
+  createdTotal?: number;
+  createdTruncated?: boolean;
 }
 
 export interface DataSourceGitSyncView {

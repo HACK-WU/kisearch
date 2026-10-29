@@ -185,6 +185,15 @@ function normalizeLastSync(raw: unknown): DataSourceLastSync | null {
     groups: Array.isArray(resultRaw.groups) ? resultRaw.groups.filter((item): item is string => typeof item === 'string') : [],
     conflicts: Array.isArray(resultRaw.conflicts) ? resultRaw.conflicts as DataSourceResultSnapshot['conflicts'] : [],
     failures: Array.isArray(resultRaw.failures) ? resultRaw.failures as DataSourceResultSnapshot['failures'] : [],
+    ...(Array.isArray(resultRaw.created)
+      ? {
+        created: (resultRaw.created as Array<{ group?: unknown; relation?: unknown }>)
+          .filter((item) => typeof item?.group === 'string' && typeof item?.relation === 'string')
+          .map((item) => ({ group: String(item.group), relation: String(item.relation) })),
+      }
+      : {}),
+    ...(typeof resultRaw.createdTotal === 'number' ? { createdTotal: Math.max(0, Math.trunc(resultRaw.createdTotal)) } : {}),
+    ...(resultRaw.createdTruncated === true ? { createdTruncated: true } : {}),
   };
   const pendingRaw = s.pendingDelete && typeof s.pendingDelete === 'object'
     ? s.pendingDelete as DataSourcePendingDelete & { candidateSourcePaths?: unknown }
@@ -936,6 +945,10 @@ export interface SyncSummary {
   vectorized: number;
   fullTextIndexed: number;
   groups: string[];
+  /** 本次新建的文档（与 `result.created` 同源；页面任务详情据此渲染「新增的文档」） */
+  created?: { group: string; relation: string }[];
+  createdTotal?: number;
+  createdTruncated?: boolean;
 }
 
 export type SyncDataSourceResult =
@@ -1020,6 +1033,9 @@ function resultSnapshot(result: ImportResult): DataSourceResultSnapshot {
     vectorized: result.stats.vectorized,
     fullTextIndexed: result.stats.fullTextIndexed,
     groups: result.groups ?? [],
+    created: (result.created ?? []).map((item) => ({ group: item.group, relation: item.relation })),
+    createdTotal: result.createdTotal ?? result.created?.length ?? 0,
+    ...(result.createdTruncated ? { createdTruncated: true } : {}),
     conflicts: (result.conflicts ?? []).slice(0, 50).map((item) => ({
       path: item.path,
       relation: item.relation,
@@ -1313,6 +1329,9 @@ async function importAndPersist(args: {
       vectorized: snapshot.vectorized,
       fullTextIndexed: snapshot.fullTextIndexed,
       groups: snapshot.groups,
+      ...(snapshot.created ? { created: snapshot.created } : {}),
+      ...(typeof snapshot.createdTotal === 'number' ? { createdTotal: snapshot.createdTotal } : {}),
+      ...(snapshot.createdTruncated ? { createdTruncated: true } : {}),
     },
   };
 }
@@ -1391,6 +1410,9 @@ async function finalizeNoChangeGit(args: {
       vectorized: 0,
       fullTextIndexed: 0,
       groups: [],
+      // 本轮没有任何变更 ⇒ 明确「新建 0 篇」，而不是让页面当成"没有记录"
+      created: [],
+      createdTotal: 0,
     },
   };
 }

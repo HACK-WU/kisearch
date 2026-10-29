@@ -108,6 +108,16 @@ export interface TaskResultSnapshot {
   /** 明细是否被截断（完整数见计数） */
   truncated?: boolean;
   /**
+   * 本次**新建**的文档（`create` + `suffix`；`overwrite` 不计），上限见 MAX_SNAPSHOT_CREATED。
+   * ★ 用 `[group, relation]` 二元组而不是对象：台账单文件上限 32KB，
+   *   带键名的对象约 120 字节/条，250 篇中文路径就会把任务文件撑爆（读侧直接判不可读）。
+   */
+  created?: [string, string][];
+  /** 本次新建文档总数（未被 created 截断影响） */
+  createdTotal?: number;
+  /** `created` 是否被截断 */
+  createdTruncated?: boolean;
+  /**
    * S-05：`datasource-add-remote` 成功后自动入队的首次同步任务 ID。
    * 页面据此跟随首次同步；为 null = 入队失败（登记仍成功，需手动同步）。
    */
@@ -144,6 +154,13 @@ export interface TaskRecord {
 
 /** 单类明细上限：20 条 × ~120B ≈ 2.4KB，远小于 32KB 文件上限 */
 export const MAX_TASK_DETAIL_ITEMS = 20;
+
+/**
+ * 新建文档明细的独立上限：比 `MAX_TASK_DETAIL_ITEMS` 大得多——
+ * 用户要看的是"这次新增了哪些目录下的文档"，20 条在 250 篇的真实导入里毫无意义。
+ * 值受 32KB 单文件上限约束（二元组约 40~60 字节/条），仍由 `fitToBudget` 兜底裁剪。
+ */
+export const MAX_SNAPSHOT_CREATED = 400;
 
 /** 可更新字段白名单（`params` 在 args 就绪后单独写入一次；`result` 只在 finish 时写） */
 type TaskPatch = Partial<Pick<TaskRecord,
@@ -357,6 +374,19 @@ function normalizeResult(input: TaskResultSnapshot | undefined): TaskResultSnaps
   if (conflictsRaw.length > MAX_TASK_DETAIL_ITEMS) out.truncated = true;
   const conflicts = conflictsRaw.slice(0, MAX_TASK_DETAIL_ITEMS);
   if (conflicts.length > 0) out.conflicts = conflicts;
+  const createdRaw = (Array.isArray(input.created) ? input.created : [])
+    .map((entry) => {
+      if (!Array.isArray(entry) || entry.length < 2) return null;
+      const group = safeRelPath(entry[0]);
+      const relation = sanitizedText(entry[1], MAX_SNAPSHOT_TEXT);
+      return group && relation ? [group, relation] as [string, string] : null;
+    })
+    .filter((entry): entry is [string, string] => entry !== null);
+  if (createdRaw.length > MAX_SNAPSHOT_CREATED) out.createdTruncated = true;
+  const created = createdRaw.slice(0, MAX_SNAPSHOT_CREATED);
+  if (created.length > 0) out.created = created;
+  if (countish(input.createdTotal) !== undefined) out.createdTotal = countish(input.createdTotal);
+  if (input.createdTruncated === true) out.createdTruncated = true;
   if (input.truncated === true) out.truncated = true;
   if (input.syncTaskId === null) out.syncTaskId = null;
   else if (typeof input.syncTaskId === 'string' && TASK_ID_RE.test(input.syncTaskId)) out.syncTaskId = input.syncTaskId;
@@ -386,7 +416,13 @@ function fitToBudget(record: TaskRecord): TaskRecord {
   if (sizeOf(candidate) <= limit) return candidate;
   const withoutDetails: TaskResultSnapshot = { ...withoutConflicts };
   delete withoutDetails.duplicates;
-  return { ...record, result: withoutDetails };
+  const trimmed: TaskRecord = { ...record, result: withoutDetails };
+  if (sizeOf(trimmed) <= limit) return trimmed;
+  // 新建明细放在最后砍：它是用户主动要看的（「新增了哪些目录」），
+  // 但宁可丢明细也不能让整个任务文件超限（超了任务会从列表静默消失）
+  const withoutCreated: TaskResultSnapshot = { ...withoutDetails };
+  delete withoutCreated.created;
+  return { ...record, result: { ...withoutCreated, createdTruncated: true } };
 }
 
 function writeRecord(config: Pick<KiConfig, 'dataDir'>, record: TaskRecord, createOnly = false): void {

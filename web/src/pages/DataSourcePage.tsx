@@ -32,6 +32,7 @@ import {
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
 import { DetailDrawer, DetailSection, DetailStatus } from '@/components/DetailDrawer';
+import { ReadOnlyPathTree } from '@/components/ReadOnlyPathTree';
 import { DetailHero, DetailMetrics, DetailParams } from '@/components/DetailParts';
 import { Icon } from '@/components/icons';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
@@ -56,14 +57,6 @@ const FOLDER_ICON = (
     aria-hidden="true"
   >
     <path d="M1.6 3.7c0-.6.5-1.1 1.1-1.1h2.9l1.6 1.7h5.7c.6 0 1.1.5 1.1 1.1v6.9c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1V3.7z" />
-  </svg>
-);
-
-const OPEN_DOC_ICON = (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <rect x="2.8" y="3.4" width="6.2" height="9.2" rx="1" />
-    <path d="M10.4 8h4.1" />
-    <path d="M12.3 5.8 14.6 8l-2.3 2.2" />
   </svg>
 );
 
@@ -273,8 +266,22 @@ export function DataSourcePage(): JSX.Element {
     if (node.kind === 'file') {
       const item = node.item;
       const key = item ? keyOf(item) : node.path;
+      // 2026-10-29 用户要求：点整行 = 看正文（与「新增的文档」一致）；勾选只认复选框
       return (
-        <label key={node.path} className="ki-tree-doc">
+        <div
+          key={node.path}
+          className={`ki-tree-doc${item ? ' ki-tree-doc--clickable' : ''}`}
+          role={item ? 'button' : undefined}
+          tabIndex={item ? 0 : undefined}
+          title={item ? '查看内容' : undefined}
+          onClick={item ? () => setDocTarget(item) : undefined}
+          onKeyDown={item ? (event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            setDocTarget(item);
+          } : undefined}
+        >
           <span className="ki-tree-arrow" aria-hidden="true" />
           <input
             type="checkbox"
@@ -282,25 +289,13 @@ export function DataSourcePage(): JSX.Element {
             checked={item ? selected.has(key) : false}
             disabled={!selectable || !item}
             onChange={() => { if (item) toggleOne(item); }}
+            // 复选框在可点行内：不拦住冒泡会把「勾选」也当成「打开正文」
+            onClick={(event) => event.stopPropagation()}
             aria-label={`选择 ${node.name}`}
           />
           <Icon name="file" className="ki-icon ki-icon--sm" />
           <span className="ki-tree-doc__name">{node.name}</span>
-          <button
-            type="button"
-            className="ki-ds-doc-open"
-            aria-label={`查看 ${node.name} 内容`}
-            title="查看内容"
-            onClick={(event) => {
-              // 按钮在 <label> 内：不拦住会连带切换复选框
-              event.preventDefault();
-              event.stopPropagation();
-              if (item) setDocTarget(item);
-            }}
-          >
-            {OPEN_DOC_ICON}
-          </button>
-        </label>
+        </div>
       );
     }
     const open = !collapsedDirs.has(node.path);
@@ -313,7 +308,7 @@ export function DataSourcePage(): JSX.Element {
       <div key={node.path}>
         <div
           className={`ki-tree-dir${open ? ' ki-tree-dir--open' : ''}`}
-          role="treeitem"
+          role="button"
           tabIndex={0}
           aria-expanded={open}
           aria-label={`${node.name}，共 ${node.total} 篇`}
@@ -365,6 +360,8 @@ export function DataSourcePage(): JSX.Element {
       if (target.closest('.ki-ds-table__row')) return;
       if (target.closest('.ki-overlay')) return;
       if (target.closest('.ki-drawer')) return;
+      // 文档抽屉的遮罩是 .ki-drawer 的**兄弟**，不排除的话点它关文档时会把详情页一起带走
+      if (target.closest('.ki-drawer__scrim')) return;
       if (target.closest('.ki-chat')) return;
       navigate('/datasource');
     };
@@ -1090,6 +1087,43 @@ export function DataSourcePage(): JSX.Element {
                     <DetailParams rows={model.params} />
                   </DetailSection>
 
+                  {/* ── 新增的文档（2026-10-29）：与下方「待删除」同款目录树，只读
+                       —— 落点 Group 已在参数里，用户更关心"这次多了哪些目录下的文档" ── */}
+                  {model.summary ? <DetailSection
+                    material="created"
+                    title={model.created.available ? `新增的文档 ${model.created.total} 篇` : '新增的文档'}
+                    hint={model.created.truncated ? '明细未完整显示' : undefined}
+                  >
+                    {!model.created.available ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        这次同步没有记录新建明细（旧版本同步快照）。重新同步一次即可看到。
+                      </p>
+                    ) : model.created.total === 0 ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        本次没有新建文档：全部为覆盖更新、内容未变或被跳过。
+                      </p>
+                    ) : model.created.items.length === 0 ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        共 {model.created.total} 篇，但明细未保留（同步快照被裁剪）。
+                      </p>
+                    ) : (
+                      <>
+                        <div className="ki-ds-subcard">
+                          <ReadOnlyPathTree
+                            nodes={buildDataSourcePendingTree(model.created.items)}
+                            label="新增的文档目录"
+                            onOpenDoc={(item) => setDocTarget(item)}
+                          />
+                        </div>
+                        {model.created.truncated ? (
+                          <p className="ki-ds-pending__note">
+                            仅显示前 {model.created.items.length} 篇（共 {model.created.total} 篇）。
+                          </p>
+                        ) : null}
+                      </>
+                    )}
+                  </DetailSection> : null}
+
                   {/* ── 待删除（操作台材质；唯一写入口）
                        ★ 常显（2026-10-22 用户要求）：没有候选时也要说明"当前没有待删"，
                          否则用户会以为这块功能消失了。 ── */}
@@ -1150,7 +1184,9 @@ export function DataSourcePage(): JSX.Element {
                             </button>
                           </div>
 
-                          <div className="ki-ds-tree">{pendingTree.map(renderPendingNode)}</div>
+                          <div className="ki-ds-subcard">
+                            <div className="ki-ds-tree">{pendingTree.map(renderPendingNode)}</div>
+                          </div>
 
                           {confirming ? (
                             <div className="ki-ds-confirm" role="alertdialog" aria-label="确认删除">

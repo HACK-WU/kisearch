@@ -77,6 +77,16 @@ export interface TaskDetailView {
   times: DetailRow[];
   duplicates: DetailItem[];
   conflicts: DetailItem[];
+  /**
+   * 本次新建的文档（`create` + `suffix`，覆盖不算）。
+   * `available === false` 表示旧记录没有这份快照（要说"未记录"，不能说"0 篇"）。
+   */
+  created: {
+    items: { group: string; relation: string }[];
+    total: number;
+    truncated: boolean;
+    available: boolean;
+  };
   notices: TaskNotice[];
   showProgress: boolean;
   progressText: string;
@@ -156,9 +166,6 @@ const SOURCE_KIND_LABEL: Record<'upload' | 'external', string> = {
 
 /** 明细不完整时的统一文案（不区分「超 20 条」与「字节预算裁剪」） */
 const TRUNCATED_HINT = '明细未完整显示';
-
-/** 落点少于此值时直接摊开（折叠一次的成本 > 多出来的两三行） */
-const GROUP_TREE_COLLAPSE_THRESHOLD = 4;
 
 function dash(value: unknown): string {
   if (value === undefined || value === null || value === '') return '—';
@@ -295,11 +302,6 @@ function paramRows(task: TaskRecord): DetailRow[] {
     rows.push({
       label: 'Group',
       value: params.group ? dash(params.group) : '未指定（按源目录派生）',
-      // 只给数量、指向下方结果段：整份落点曾在这里再抄一遍（601 字 / 435px），
-      // 与「执行结果 → 落点 Group」完全重复，还把双列栅格拉断。
-      ...(task.result?.groups && task.result.groups.length > 0
-        ? { hint: `实际落点 ${task.result.groups.length} 个 Group（见下方执行结果）` }
-        : {}),
     });
     rows.push({ label: '标签', value: params.tags && params.tags.length > 0 ? params.tags.join(' / ') : '未设置' });
     rows.push({
@@ -369,20 +371,8 @@ function resultRows(task: TaskRecord): DetailRow[] {
   if (result.fullTextIndexed !== undefined) rows.push({ label: '全文索引', value: `${result.fullTextIndexed} 条` });
   // 0 个附件不占一行（关闭附件收集与「一张都没复制」在详情里没有区分价值）
   if (result.assets) rows.push({ label: '附件', value: `复制 ${result.assets} 个` });
-  // 落点经常是几十个层级路径：`value` 留空，由渲染层折叠成摘要 + 层级树
-  if (result.groups && result.groups.length > 0) {
-    rows.push({
-      label: '落点 Group',
-      value: '',
-      tree: {
-        items: result.groups,
-        ...(result.groups.length >= GROUP_TREE_COLLAPSE_THRESHOLD
-          ? { summary: `全部 ${result.groups.length} 个 Group` }
-          : {}),
-      },
-      full: true,
-    });
-  }
+  // 落点 Group 不再作为结果行展示（2026-10-29 用户要求）：它对用户的用处远不如
+  // 「这次新增了哪些目录的文档」，后者见 TaskDetailView.created 卡片。
   // 索引行只在有诊断数据时出现：`—` 对用户没有信息量（code-review P2）
   if (task.indexReadiness) rows.push({ label: '索引', value: indexReadinessLabel(task.indexReadiness) });
   return rows;
@@ -602,6 +592,22 @@ export function buildGroupTreeLines(paths: string[]): string[] {
   return buildPathTree(paths.map((path) => ({ path }))).map((line) => line.text);
 }
 
+/** 新建文档视图：旧记录没有该快照时 `available=false`（不能显示成「0 篇」） */
+function createdViewOf(task: TaskRecord): TaskDetailView['created'] {
+  const result = task.result;
+  const raw = result?.created;
+  const available = raw !== undefined || result?.createdTotal !== undefined;
+  const items = (raw ?? [])
+    .filter((entry) => Array.isArray(entry) && entry.length >= 2)
+    .map(([group, relation]) => ({ group, relation }));
+  return {
+    items,
+    total: typeof result?.createdTotal === 'number' ? result.createdTotal : items.length,
+    truncated: result?.createdTruncated === true,
+    available,
+  };
+}
+
 export function buildTaskDetail(task: TaskRecord): TaskDetailView {
   const legacy = isLegacy(task);
   const progress = progressOf(task);
@@ -624,6 +630,7 @@ export function buildTaskDetail(task: TaskRecord): TaskDetailView {
     resultExtras: results.filter((row) => !METRIC_RESULT_LABELS.has(row.label)),
     times: timeRows(task),
     ...detailItemsOf(task),
+    created: createdViewOf(task),
     notices,
     showProgress: progress.show,
     progressText: progress.text,

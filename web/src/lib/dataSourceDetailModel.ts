@@ -181,6 +181,13 @@ export interface DataSourceDetailModel {
     conflictTotal: number;
   };
   times: DetailRow[];
+  /** 上次同步新建的文档（与任务详情同口径；旧快照没有 → available=false） */
+  created: {
+    items: DataSourcePendingItem[];
+    total: number;
+    truncated: boolean;
+    available: boolean;
+  };
   pending: {
     total: number;
     items: DataSourcePendingItem[];
@@ -499,6 +506,14 @@ export function buildDataSourceDetail(
     ]
     : [{ label: '上次同步', value: '—' }];
 
+  const createdRaw = sync?.result.created;
+  const created = {
+    items: (createdRaw ?? []).map((item) => ({ group: item.group, relation: item.relation })),
+    total: sync?.result.createdTotal ?? createdRaw?.length ?? 0,
+    truncated: sync?.result.createdTruncated === true,
+    available: createdRaw !== undefined || sync?.result.createdTotal !== undefined,
+  };
+
   return {
     header: {
       title: '数据源同步',
@@ -518,6 +533,7 @@ export function buildDataSourceDetail(
       conflictTotal: sync?.result.conflicts.length ?? 0,
     },
     times,
+    created,
     pending: {
       total: pendingDelete?.total ?? 0,
       items,

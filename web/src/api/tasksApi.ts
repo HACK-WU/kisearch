@@ -77,6 +77,15 @@ export interface TaskResultSnapshot {
   }[];
   /** 明细不完整（条数超限或字节预算裁剪，不区分成因） */
   truncated?: boolean;
+  /**
+   * 本次新建的文档 `[group, relation]`（`create` + `suffix`；覆盖不算）。
+   * 二元组是为省台账字节；旧 daemon 不返回。
+   */
+  created?: [string, string][];
+  /** 新建文档总数（不受 created 截断影响） */
+  createdTotal?: number;
+  /** `created` 是否被截断（旧记录不返回 = 未截断） */
+  createdTruncated?: boolean;
   /** S-05：add-remote 成功后自动入队的首次同步任务 ID；null = 入队失败 */
   syncTaskId?: string | null;
   errorCode?: string;

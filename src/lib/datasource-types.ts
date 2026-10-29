@@ -126,6 +126,13 @@ export interface DataSourceResultSnapshot {
   vectorized: number;
   fullTextIndexed: number;
   groups: string[];
+  /**
+   * 本次**新建**的文档（`create` + `suffix`；`overwrite` 不计）。
+   * 上限沿用导入侧 `MAX_CREATED_DETAIL`，完整条数见 `createdTotal`。
+   */
+  created?: { group: string; relation: string }[];
+  createdTotal?: number;
+  createdTruncated?: boolean;
   conflicts: { path: string; relation: string; action: string; unchanged?: boolean }[];
   failures: { path: string; reason: string }[];
 }

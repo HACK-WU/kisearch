@@ -27,7 +27,8 @@ export function DetailStatus({ tone, label }: DetailStatusView): JSX.Element {
 export interface DetailSectionProps {
   title: ReactNode;
   /** 数据区（主结果）/ 参数区（键值）/ 操作区（后续动作、危险操作） */
-  material?: 'data' | 'meta' | 'action';
+  /** created：本次新建文档（主色浅绿，与 data 的淡绿、action 的黄底区分） */
+  material?: 'data' | 'meta' | 'action' | 'created';
   hint?: ReactNode;
   /** 标题行右侧的额外操作（如「展开全部 / 折叠全部」） */
   actions?: ReactNode;
