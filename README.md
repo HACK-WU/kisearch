@@ -44,9 +44,9 @@
 
 ![kisearch 架构](./assets/architecture.svg)
 
-**Web 前端 · 总览页**
+**Web 前端 · 知识库浏览**
 
-![kisearch Web 前端 · 总览](assets/overview.png)
+![kisearch Web 前端 · 知识库浏览](assets/overview.png)
 
 ## <a id="agent-memory"></a>🧠 作为 AI Agent 的长期记忆系统
 
