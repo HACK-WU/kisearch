@@ -3738,14 +3738,6 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-empty__ic svg { width: 22px; height: 22px; }
 .ki-chat-empty__t { font-size: var(--ki-font-size-lg); color: var(--ki-color-text); }
 .ki-chat-empty__d { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); max-width: 30ch; }
-.ki-chat-empty__hints { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
-.ki-chat-q {
-  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--ki-color-border-strong);
-  background: transparent; color: var(--ki-color-text-muted);
-  font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer;
-  transition: border-color var(--ki-motion-fast) ease, color var(--ki-motion-fast) ease, background var(--ki-motion-fast) ease;
-}
-.ki-chat-q:hover { border-color: var(--ki-color-primary); color: var(--ki-color-primary); background: var(--ki-color-surface); }
 
 /* ── 消息：user 右对齐气泡，assistant 左对齐平铺（长回答与代码块要占满可读宽度）── */
 .ki-chat-msg { display: flex; flex-direction: column; gap: var(--ki-space-2); }
@@ -6403,19 +6395,6 @@ select.ki-chat-cfg__ta--select {
   max-width: 34ch;
   font-size: 13px; line-height: 1.6; color: var(--ki-color-text-muted);
 }
-.ki-chat-panel .ki-chat-empty__hints { max-width: 600px; margin-top: 10px; gap: 8px; }
-.ki-chat-panel .ki-chat-q {
-  height: 34px; padding: 0 12px;
-  border: 1px solid var(--ki-color-border); border-radius: 8px;
-  background: var(--ki-color-surface); color: var(--ki-color-text-muted);
-  font: inherit; font-size: 12px;
-}
-.ki-chat-panel .ki-chat-q:hover:not(:disabled) {
-  border-color: var(--ki-color-primary); color: var(--ki-color-primary);
-  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-surface));
-  transform: translateY(-1px);
-}
-.ki-chat-panel .ki-chat-q:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── 输入区：唯一抬升层 + 圆形发送 ── */
 .ki-chat-panel .ki-chat-composer {
@@ -6524,13 +6503,10 @@ select.ki-chat-cfg__ta--select {
   .ki-chat-panel .ki-chat-msg--user .ki-chat-msg__body { max-width: 90%; }
   .ki-chat-panel .ki-chat-msg__role::after { display: none; }
   .ki-chat-panel .ki-chat-empty__t { font-size: 18px; }
-  .ki-chat-panel .ki-chat-empty__hints { max-width: 100%; }
-  .ki-chat-panel .ki-chat-q { height: 32px; font-size: 11.5px; }
   .ki-chat-panel .ki-chat-src__pop { display: none !important; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ki-chat-panel .ki-chat-ctx__status--live .ki-chat-ctx__dot { animation: none; }
-  .ki-chat-panel .ki-chat-q:hover:not(:disabled) { transform: none; }
   .ki-chat-panel .ki-chat-composer__bar .ki-chat-send:active:not(:disabled) { transform: none; }
 }
 

@@ -1544,20 +1544,6 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               </span>
               <p className="ki-chat-empty__t">有什么可以帮你？</p>
               <p className="ki-chat-empty__d">我会先检索当前知识库，再给出带来源的回答。</p>
-              <div className="ki-chat-empty__hints">
-                {['总结一下主机监控首屏优化的结论', '知识库里怎么配置数据源？', '查找关于向量维度的文档'].map((text) => (
-                  <button
-                    key={text}
-                    type="button"
-                    className="ki-chat-q"
-                    disabled={Boolean(config && !config.enabled)}
-                    onClick={() => {
-                      setDraft(text);
-                      requestAnimationFrame(() => taRef.current?.focus());
-                    }}
-                  >{text}</button>
-                ))}
-              </div>
             </div>
           ) : null}
 
