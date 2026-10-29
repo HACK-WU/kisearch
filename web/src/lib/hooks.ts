@@ -89,6 +89,21 @@ export function useScopeList() {
 }
 
 /**
+ * 该 scope 是否只读（REQ-20261029-001）。
+ *
+ * - 与 `useScopeList` 共用同一个 query key（`scopeList`）：全局 `ScopeSelect` 常驻已预热，
+ *   阅读抽屉等深层组件调用本 hook **不会产生额外请求**。
+ * - 列表未就绪 / 旧版 daemon 不返回 `readonly` 时一律按**可写**处理（前端只做体验保护，
+ *   真正的边界在后端门禁）：保守放行不会把用户卡死，越权由后端 409 兜底。
+ */
+export function useScopeReadonly(scope: string | undefined): boolean {
+  const { data } = useScopeList();
+  if (!scope) return false;
+  const entry = data?.scopes?.find((item) => item.scope === scope);
+  return entry?.readonly === true;
+}
+
+/**
  * 向量能力是否可用 —— 顶栏徽标与「导入 / 检索 / 写入」三处动作层保护**共用同一判据**。
  *
  * ★ 来源：windows 4e9d624 的 `useVectorAvailability`。2026-10-29 合并 66c3c19 时随 hooks.ts

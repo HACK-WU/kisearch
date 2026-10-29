@@ -9,7 +9,7 @@ import { executeGroupDelete } from './group-delete.js';
 import { handleDirectImport } from './import.js';
 import { resetScheduleFailures, syncDataSource } from './datasource.js';
 import { refreshDataSourceScheduler } from './datasource-scheduler.js';
-import { executeScopeList, executeScopeDelete, executeScopeClear } from '../scope.js';
+import { executeScopeList, executeScopeDelete, executeScopeClear, executeScopeSetReadonlyLocal } from '../scope.js';
 import { executeQueryGroup } from '../query-group.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../get-module-info.js';
 import { executeTagList } from '../tag.js';
@@ -86,6 +86,13 @@ const HANDLERS: Record<string, Handler> = {
     refreshDataSourceScheduler();
     return result;
   },
+  // wiki 只读开关（REQ-20261029-001）。⚠️ 刻意**不包 withScopeWriteLock**：它写的是配置文件
+  // （策略本身），若被自身门禁拦下，只读库将永远无法解除只读（自锁死锁）。
+  // 走 daemon 执行的意义：进程内写配置 + resetConfigCache ⇒ 常驻进程立即读到新名单。
+  'scope-readonly': async (params) => executeScopeSetReadonlyLocal({
+    scope: String(params?.scope ?? ''),
+    readonly: params?.readonly !== false,
+  }),
   'get-module-info': executeGetModuleInfo,
   'get-module-info-batch': executeGetModuleInfoBatch,
   'tag-list': executeTagList,

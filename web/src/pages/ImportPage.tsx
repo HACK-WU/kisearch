@@ -14,7 +14,13 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
-import { useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { Notice } from '@/components/Notice';
+import {
+  SCOPE_READONLY_BLOCKED_HINT,
+  SCOPE_READONLY_INFLIGHT_HINT,
+  scopeReadonlyNotice,
+} from '@/lib/scopeReadonly';
 import {
   activePercentOf,
   busyPhaseLabelOf,
@@ -441,6 +447,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const queryClient = useQueryClient();
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  /** 只读 scope（REQ-20261029-001）：页面仍可进入、可切库，但写入类动作全部不可用 */
+  const scopeReadonly = useScopeReadonly(scopeConfirmed ? scope : undefined);
   const fileInput = useRef<HTMLInputElement>(null);
   /** 「开始导入」被阻塞时的引导目标：未确认 Scope → Scope 区；未选文件 → 拖拽区 */
   const scopeFieldRef = useRef<HTMLDivElement>(null);
@@ -1297,7 +1305,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setPhase('failed');
       // Retry remains tied to this immutable upload plan, but a new start requires a fresh target confirmation.
       setScopeConfirmed(false);
-      setError(`上传第 ${plan.currentBatch + 1}/${plan.batches.length} 批失败：${getErrorDetails(error)}`);
+      // 只读 409 降级（验收 12）：上传暂存同样被拒，给可读原因 + 刷新列表
+      if ((error as { code?: string }).code === 'SCOPE_READONLY') {
+        void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
+        setError(`${SCOPE_READONLY_BLOCKED_HINT}（已刷新该库状态）`);
+      } else {
+        setError(`上传第 ${plan.currentBatch + 1}/${plan.batches.length} 批失败：${getErrorDetails(error)}`);
+      }
       return null;
     }
   };
@@ -1401,6 +1415,19 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     } catch (failure) {
       // REQ-20261019-002：同一 uploadId 已在跑且「跳过重复」设置不同 → 可纠正提示，不落失败红态
       const code = (failure as { code?: string }).code;
+      /**
+       * 只读 409 降级（REQ-20261029-001 验收 12）：前端列表可能 stale（30s 缓存），
+       * 此时按钮还是可点的 —— 被后端拒绝后必须给**可读原因**并刷新 scope 列表，
+       * 让徽标/按钮立刻切到只读态，而不是甩一个裸 409 文本。
+       */
+      if (code === 'SCOPE_READONLY') {
+        void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
+        setFailureStage('import');
+        setPhase('failed');
+        setScopeConfirmed(false);
+        setError(`${SCOPE_READONLY_BLOCKED_HINT}（已刷新该库状态）。${scopeReadonlyNotice(plan.scope)}`);
+        return;
+      }
       if (code === 'IMPORT_JOB_PARAMS_MISMATCH' && preflightSnapshotRef.current) {
         const snapshot = preflightSnapshotRef.current;
         preflightSnapshotRef.current = null;
@@ -1909,15 +1936,19 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   /** 「新建 Scope」输入框里有未确认草稿（且与已确认目标不同）——必须先回车，否则会导入到旧 scope */
   const pendingScope = scopeDraft.trim();
   const scopeDraftDirty = pendingScope.length > 0 && pendingScope !== scope;
-  const runBlockedReason = scopeDraftDirty
-    ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
-    : !scopeConfirmed
-      ? '请先在上方确认目标 Scope，再开始导入'
-      : files.length === 0
-        ? '请先选择要导入的 Markdown 文件或目录'
-        : null;
+  const runBlockedReason = scopeReadonly
+    ? SCOPE_READONLY_BLOCKED_HINT
+    : scopeDraftDirty
+      ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
+      : !scopeConfirmed
+        ? '请先在上方确认目标 Scope，再开始导入'
+        : files.length === 0
+          ? '请先选择要导入的 Markdown 文件或目录'
+          : null;
   /** 点击「开始导入」：被阻塞则引导定位，否则真正开跑 */
   const runClick = (): void => {
+    // 只读库：按钮已置灰，这里防键盘/程序触发（后端仍会 409 兜底）
+    if (scopeReadonly) return;
     // R6：预检待确认时不允许再点（否则会以新 uploadId 重新上传整批）。
     // 按钮此时 `disabled={busyPhase}`（awaiting-confirm 属 busy），这里只是防御性兜底。
     if (preflightConfirm) return;
@@ -2030,6 +2061,14 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         </div>
       </div>
 
+      {/* 只读 scope（REQ-20261029-001）：常驻原因 + 出路 + 进行中任务说明。
+          页面仍可进入、可切换目标库，只把写入类动作置灰（设计 S04 屏 2）。 */}
+      {scopeReadonly && scopeConfirmed && (
+        <Notice tone="warn" title="该库为只读">
+          {scopeReadonlyNotice(scope)} {SCOPE_READONLY_INFLIGHT_HINT}
+        </Notice>
+      )}
+
       <div className="ki-import-layout">
       <div className="ki-card">
         <div className="ki-card__head">
@@ -2046,7 +2085,13 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <div
             ref={dropzoneRef}
             className={`ki-dropzone${dragOver ? ' ki-dropzone--over' : ''}${attention === 'files' ? ' ki-attention' : ''}`}
-            onClick={() => fileInput.current?.click()}
+            onClick={() => {
+              // 只读库：上传暂存也禁止（后端 /api/import/upload 同样会 409）
+              if (scopeReadonly) return;
+              fileInput.current?.click();
+            }}
+            aria-disabled={scopeReadonly}
+            title={scopeReadonly ? SCOPE_READONLY_BLOCKED_HINT : undefined}
             onDragOver={(e) => {
               e.preventDefault();
               setDragOver(true);
@@ -2556,7 +2601,8 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <button
               className="ki-btn ki-btn--primary"
               onClick={runClick}
-              disabled={busyPhase}
+              disabled={busyPhase || scopeReadonly}
+              aria-disabled={busyPhase || scopeReadonly}
               title={runBlockedReason
                 ?? (phase === 'awaiting-confirm' ? '请先在上方「重复导入预检」中选择「仍然导入」或「取消」' : undefined)}
             >
@@ -2852,7 +2898,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                           type="checkbox"
                           // 全选只覆盖**当前可见**项：筛完再全选不得把看不见的条目一起勾上
                           checked={pruneVisibleKeys.length > 0 && pruneVisibleSelected >= pruneVisibleKeys.length}
-                          disabled={pruneBusy || pruneVisibleKeys.length === 0}
+                          disabled={pruneBusy || scopeReadonly || pruneVisibleKeys.length === 0}
                           // 三态：部分选中必须显示 indeterminate，否则硬看是「已全选」
                           ref={(el) => {
                             if (el) el.indeterminate = pruneVisibleSelected > 0 && pruneVisibleSelected < pruneVisibleKeys.length;
@@ -2886,7 +2932,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         style={{ flex: '1 1 200px', minWidth: 0, height: 32, minHeight: 32, fontSize: 12, padding: '0 8px' }}
                         placeholder="筛选：路径 / 文档名 / 组名"
                         value={pruneQuery}
-                        disabled={pruneBusy}
+                        disabled={pruneBusy || scopeReadonly}
                         onChange={(e) => {
                           // 改筛选就收起确认条：确认条上的数字是"整份清单已选 X 篇"，与筛后眼前的条目数不一致会误导
                           setPruneConfirm(false);
@@ -2898,7 +2944,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         <input
                           type="checkbox"
                           checked={pruneOnlyUntouched}
-                          disabled={pruneBusy}
+                          disabled={pruneBusy || scopeReadonly}
                           onChange={(e) => {
                             setPruneConfirm(false);
                             setPruneOnlyUntouched(e.target.checked);
@@ -2942,7 +2988,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                               <input
                                 type="checkbox"
                                 checked={fullyPicked}
-                                disabled={pruneBusy}
+                                disabled={pruneBusy || scopeReadonly}
                                 ref={(el) => {
                                   if (el) el.indeterminate = pickedInGroup > 0 && !fullyPicked;
                                 }}
@@ -2999,7 +3045,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                                       <input
                                         type="checkbox"
                                         checked={pruneSelected.has(key)}
-                                        disabled={pruneBusy}
+                                        disabled={pruneBusy || scopeReadonly}
                                         onChange={(e) => {
                                           const checked = e.target.checked;
                                           setPruneConfirm(false);
@@ -3018,7 +3064,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                                     {/* 预览按钮必须在 label 之外：放进 label 里点它会被浏览器当成「点标签」→ 顺带切换勾选 */}
                                     <button
                                       type="button"
-                                      disabled={pruneBusy}
+                                      disabled={pruneBusy || scopeReadonly}
                                       aria-expanded={previewOpen}
                                       // 只在展开时挂 aria-controls：收起时节点不存在，挂了会指向空 id
                                       {...(previewOpen ? { 'aria-controls': `ki-prune-preview-${key.replace(/\u0000/g, '-')}` } : {})}
@@ -3166,7 +3212,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                             ref={pruneCancelRef}
                             type="button"
                             className="ki-btn ki-btn--ghost ki-btn--small"
-                            disabled={pruneBusy}
+                            disabled={pruneBusy || scopeReadonly}
                             onClick={() => setPruneConfirm(false)}
                           >
                             取消
@@ -3174,7 +3220,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                           <button
                             type="button"
                             className="ki-btn ki-btn--danger ki-btn--small"
-                            disabled={pruneBusy || pruneSelectedInList === 0}
+                            disabled={pruneBusy || scopeReadonly || pruneSelectedInList === 0}
                             onClick={() => void handlePrune()}
                           >
                             {pruneBusy ? '正在删除…' : `确认删除 ${pruneSelectedInList} 篇`}
@@ -3187,7 +3233,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         <button
                           type="button"
                           className="ki-btn ki-btn--danger"
-                          disabled={pruneBusy || pruneSelectedInList === 0}
+                          disabled={pruneBusy || scopeReadonly || pruneSelectedInList === 0}
                           onClick={() => setPruneConfirm(true)}
                         >
                           删除所选 {pruneSelectedInList} 篇…
@@ -3196,7 +3242,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                         <button
                           type="button"
                           className="ki-btn ki-btn--ghost"
-                          disabled={pruneBusy}
+                          disabled={pruneBusy || scopeReadonly}
                           onClick={() => {
                             setPruneConfirm(false);
                             setPruneReceipt(null);

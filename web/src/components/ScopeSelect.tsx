@@ -100,6 +100,7 @@ export function ScopeSelect(): JSX.Element {
                   onClick={() => pick(item.scope)}
                 >
                   <span>{item.scope}</span>
+                  {item.readonly === true && <span className="ki-scope-picker__ro">只读</span>}
                   {item.scope === scope && <span className="ki-scope-picker__check">✓</span>}
                 </button>
               ))

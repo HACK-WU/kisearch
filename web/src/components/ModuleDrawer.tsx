@@ -19,6 +19,8 @@ import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/Reade
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
+import { useScopeReadonly } from '@/lib/hooks';
+import { SCOPE_READONLY_BLOCKED_HINT } from '@/lib/scopeReadonly';
 import {
   DOC_FIND_DEBOUNCE_MS,
   DOC_FIND_MARK_LIMIT,
@@ -1031,7 +1033,16 @@ export function ModuleDrawer({
    * ② 未选 → 进入待选模式（按钮高亮为「选择片段…」），随后在正文中选中片段即自动弹出面板；
    * ③ 待选模式下再点一次 → 取消。
    */
+  /**
+   * 只读 scope（REQ-20261029-001）：**内部按 scope 派生**，5 个挂载点零改动
+   * （BrowsePage / SearchPage / DataSourcePage / TasksPage / ChatPanel 各传一遍必漏）。
+   * 与 `useScopeList` 共用 query key，全局 ScopeSelect 已预热 ⇒ 无额外请求。
+   */
+  const scopeReadonly = useScopeReadonly(scope);
+
   const openReaderLinkComposer = useCallback((): void => {
+    // 只读库入口兜底（按钮已置灰；防键盘/程序触发）
+    if (scopeReadonly) return;
     if (captureReaderSelection(true)) {
       setReaderLinkComposerOpen(true);
       setLinkArmed(false);
@@ -1044,7 +1055,7 @@ export function ModuleDrawer({
     }
     setLinkArmed(true);
     showSelectionWarning('已进入「添加链接」模式：在正文中选中片段即自动弹出设置面板；再点一次按钮可取消');
-  }, [captureReaderSelection, clearSelectionWarning, linkArmed, showSelectionWarning]);
+  }, [captureReaderSelection, clearSelectionWarning, linkArmed, scopeReadonly, showSelectionWarning]);
 
   useEffect(() => {
     if (readerLinkComposerOpen || !editable || content === null || editor.isOpen) return;
@@ -1065,6 +1076,8 @@ export function ModuleDrawer({
   }, [captureReaderSelection, content, editable, editor.isOpen, linkArmed, readerLinkComposerOpen]);
 
   const openEditor = useCallback((): void => {
+    // 只读库入口兜底（按钮已置灰；这里防键盘/程序触发、以及"面板已开时被设为只读"）
+    if (scopeReadonly) return;
     setReaderLinkSelection(null);
     setReaderLinkComposerOpen(false);
     setLinkArmed(false);
@@ -1082,7 +1095,7 @@ export function ModuleDrawer({
         showSavedNotice(`文档已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
       },
     });
-  }, [editor, group, module, scope, showSavedNotice]);
+  }, [editor, group, module, scope, scopeReadonly, showSavedNotice]);
 
   /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
@@ -1235,6 +1248,14 @@ export function ModuleDrawer({
    * 也诚实（此刻这些动作确实无处作用）。
    */
   const docActionsDisabled = Boolean(bodySlot);
+  /**
+   * 只读 scope 的**写类动作**禁用（REQ-20261029-001）。
+   *
+   * ⚠️ 不得把只读 OR 进 `docActionsDisabled`：后者还管「复制原文 / 全屏 / 居中铺满 /
+   * 本文搜索」，复用会把"可读"一起关掉——只读 ≠ 不可读（验收 6）。
+   * 作用范围仅「添加链接 / 编辑文档」（宽工具条 + 窄屏「⋯」菜单两版节点）。
+   */
+  const docWriteDisabled = docActionsDisabled || scopeReadonly;
 
   const body = (
     <div
@@ -1569,14 +1590,22 @@ export function ModuleDrawer({
                 className={`ki-drawer__copy ki-drawer__copy--link${linkArmed ? ' ki-drawer__copy--armed' : ''}`}
                 type="button"
                 aria-pressed={linkArmed}
-                disabled={docActionsDisabled}
+                disabled={docWriteDisabled}
+                aria-disabled={docWriteDisabled}
+                title={scopeReadonly ? SCOPE_READONLY_BLOCKED_HINT : (linkArmed ? '已进入添加链接模式：在正文中选中片段（再点一次取消）' : '点击后在正文中选中片段，自动弹出链接设置')}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={openReaderLinkComposer}
-                title={linkArmed ? '已进入添加链接模式：在正文中选中片段（再点一次取消）' : '点击后在正文中选中片段，自动弹出链接设置'}
               >{linkArmed ? '选择片段…' : '添加链接'}</button>
             )}
             {editable && group && content !== null && (
-              <button className="ki-drawer__copy ki-drawer__copy--edit" type="button" disabled={docActionsDisabled} onClick={openEditor}>编辑文档</button>
+              <button
+                className="ki-drawer__copy ki-drawer__copy--edit"
+                type="button"
+                disabled={docWriteDisabled}
+                aria-disabled={docWriteDisabled}
+                title={scopeReadonly ? SCOPE_READONLY_BLOCKED_HINT : undefined}
+                onClick={openEditor}
+              >编辑文档</button>
             )}
             {displayedContent && (
               <button
@@ -1606,7 +1635,8 @@ export function ModuleDrawer({
                     <button
                       type="button"
                       role="menuitem"
-                      disabled={docActionsDisabled}
+                      disabled={docWriteDisabled}
+                      aria-disabled={docWriteDisabled}
                       className={`ki-drawer__overflow-item${linkArmed ? ' ki-drawer__overflow-item--armed' : ''}`}
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => { setOverflowOpen(false); openReaderLinkComposer(); }}
@@ -1616,7 +1646,8 @@ export function ModuleDrawer({
                     <button
                       type="button"
                       role="menuitem"
-                      disabled={docActionsDisabled}
+                      disabled={docWriteDisabled}
+                      aria-disabled={docWriteDisabled}
                       className="ki-drawer__overflow-item"
                       onClick={() => { setOverflowOpen(false); openEditor(); }}
                     >编辑文档</button>

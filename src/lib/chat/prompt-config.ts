@@ -89,7 +89,7 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
       ki_group_list: '查看 Group 树结构',
       ki_get_module_info: '读取指定文档原文',
       ki_tag_list: '列出标签',
-      ki_scope_list: '列出 scope 清单（含顶层组）',
+      ki_scope_list: '列出 scope 清单（含顶层组与只读标记）',
     },
   },
   {

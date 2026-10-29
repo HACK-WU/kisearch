@@ -797,6 +797,10 @@ a:hover { text-decoration: underline; }
 /* 通过态角标（总览「向量维度」= 集合与配置一致，REQ-20261016-002）；与 .ki-badge--tag 同款成功色调 */
 .ki-badge--ok { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
 .ki-badge--fts { background: color-mix(in srgb, var(--ki-color-warning, #d97706) 10%, transparent); color: var(--ki-color-warning, #b45309); }
+/* 只读 scope 角标（REQ-20261029-001）：保护态用警示色系，**不用红色**（红色语义是错误） */
+.ki-badge--readonly { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+/* 选择器内的只读后缀：纯文本、弱化色，不新增图标 */
+.ki-scope-picker__ro { font-size: 11px; color: var(--ki-color-warning); margin-left: 6px; }
 .ki-badge-group { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .ki-num { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); }

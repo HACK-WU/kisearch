@@ -28,7 +28,7 @@
 | [`import`](#import) | 外部 Markdown 导入（幂等追加） |
 | [`datasource`](#datasource) | 数据源登记与同步 |
 | [`group`](#group) | Group 创建 / 删除 / 列表 |
-| [`scope`](#scope) | scope 列表 / 删除 / 清空 |
+| [`scope`](#scope) | scope 列表 / 只读开关 / 删除 / 清空 |
 | [`tag`](#tag) | tag 发现 |
 | [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
 | [`doc`](#doc) | 向量文档查看 / 删除 |
@@ -216,9 +216,11 @@ ki group delete <path> [--yes] [--scope <s>]
 
 ## scope
 
-scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `delete` / `clear` 三个子命令。
+scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `readonly` / `delete` / `clear` 四个子命令。
 
 > **两层一致性**：`delete` / `clear` 为破坏性操作，需向量服务可用且强制 `--yes`；向量服务不可用时拒绝执行，以免两层不一致。
+>
+> **只读库的破坏性运维**：若目标 scope 已设为只读，`delete` / `clear` 还须额外传 `--force-readonly`（`--yes` 不足以确认清空一个只读库）。
 
 ### `list` 子命令
 
@@ -257,6 +259,36 @@ ki scope list --json   # JSON（脚本解析用）
 | `topGroups` / `topGroupsStale` | 顶层组名（第一层）/ 该结果是否可能过期 |
 
 > 向量服务不可用时降级：`vectorAvailable:false` + `vectorReason`，`scopes` 仅依 KB 目录与配置列出。
+
+### `readonly` 子命令
+
+设置 / 解除某个 scope 的**只读**状态（REQ-20261029-001）。状态存于配置文件顶层 `scopeReadonly`，**不写进 `scopes` 条目**（因此不会让该 scope 变成 registered）。
+
+```bash
+ki scope readonly my-project          # 设为只读
+ki scope readonly my-project --off    # 解除只读（恢复可写）
+```
+
+只读语义（**边界极重要**）：
+
+| 通道 | 只读下的行为 |
+|------|-------------|
+| `ki import`、`ki datasource sync`（含 Web 数据源页「同步」） | ✅ **放行** —— 内容仍可批量更新 |
+| `ki scope clear / delete`、`ki restore`、`ki rebuild-vector` | ✅ 放行（`clear/delete` 需额外 `--force-readonly`） |
+| Web 上传导入页、知识写入页、阅读页「编辑文档 / 添加链接」 | ⛔ 拒绝（HTTP 409 / `SCOPE_READONLY`） |
+| MCP 写工具（`ki_store`、`ki_sync_relation` 等 8 个） | ⛔ 拒绝 |
+| CLI 单条写入（`ki store`、`ki sync-relation`、`ki group create` 等） | ⛔ 拒绝 |
+| 检索 / 浏览 / 导出 / 备份 | ✅ 不受影响 |
+
+输出（`--json` 字段节选）：
+```json
+{ "ok": true, "scope": "my-project", "readonly": true, "changed": true,
+  "configPath": "/root/.ki/config.yaml" }
+```
+
+> `changed:false` 表示状态本就如此（幂等）。stderr 会额外回显一行「`my-project` 现在 只读/可写」——`--off` 语义是**解除只读**，回显可避免反向误读。
+>
+> ⚠️ 无配置文件时该命令 **fail-loud**（提示先 `ki config init`），不会静默成功。
 
 ### `delete` 子命令
 

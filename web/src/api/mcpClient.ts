@@ -17,6 +17,11 @@ export interface ScopeInfo {
   kb: boolean;
   vector: boolean;
   registered: boolean;
+  /**
+   * 只读（REQ-20261029-001）：该 scope 禁止逐条写入（Web / MCP / CLI），
+   * 但导入与数据源同步仍可更新。旧版 daemon 不返回该字段 ⇒ 视为可写。
+   */
+  readonly?: boolean;
   wikiCount: number;
   /** 未向量化且 FTS-only 索引完整的文档数（按文档，不按 chunk/ID）。 */
   ftsOnlyDocCount: number;

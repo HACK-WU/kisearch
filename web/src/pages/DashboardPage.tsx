@@ -9,6 +9,7 @@ import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensio
 import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { describeWikiSync } from '@/lib/resourcesPage';
+import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
 import {
   normalizeScopeMode,
   registeredScopesOf,
@@ -32,6 +33,14 @@ const HEALTH_ICON: Record<string, { name: string; tone: string }> = {
   warn: { name: 'warn', tone: 'warn' },
   fail: { name: 'x', tone: 'fail' },
 };
+
+/** 只读徽标（REQ-20261029-001）：仅只读 scope 显示；可写时不渲染，避免噪声 */
+function readonlyBadge(scope: string, readonly: boolean | undefined): JSX.Element | null {
+  if (readonly !== true) return null;
+  return (
+    <span className="ki-badge ki-badge--readonly" title={scopeReadonlyTitle(scope)}>只读</span>
+  );
+}
 
 function badgeCell(ok: boolean | undefined, label: string, cls: string): JSX.Element {
   return (
@@ -494,6 +503,7 @@ export function DashboardPage(): JSX.Element {
                             <div className="ki-badge-group">
                               {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
                               {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
+                              {readonlyBadge(s.scope, s.readonly)}
                             </div>
                           </td>
                           <td style={{ textAlign: 'right' }}>
@@ -584,6 +594,7 @@ export function DashboardPage(): JSX.Element {
                               FTS {s.ftsOnlyDocCount}
                             </span>
                           )}
+                          {readonlyBadge(s.scope, s.readonly)}
                         </div>
                       </td>
                       <td style={{ textAlign: 'right' }}>

@@ -41,6 +41,11 @@ import {
 } from './import.js';
 import { resolveImportExtensions } from './config.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
+import {
+  assertHttpChannelWritable,
+  isScopeReadonlyError,
+  scopeReadonlyBody,
+} from './scope-policy.js';
 // S-02/S-03：两级完成口径 —— 整理等待/状态 + A11 就绪判据
 import {
   whenIndexMaintenanceIdle,
@@ -322,6 +327,28 @@ function createJob(
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(payload));
+}
+
+/**
+ * 第一段只读门禁（REQ-20261029-001）：**Web 用户通道**的写接口在只读 scope 上直接 409。
+ *
+ * 为什么不能只靠 `withScopeWriteLock` 内的第二段：`import` op 被 CLI、Web、数据源同步
+ * 三方共用（`lib/datasource.ts:1222` / `lib/mcp-http-api.ts:3046` / `src/import.ts:187`），
+ * 第二段必须放行它以保住数据源同步；Web 侧只能在这里挡。
+ *
+ * 返回 true = 已响应（调用方直接 return）。
+ */
+function rejectIfScopeReadonly(res: http.ServerResponse, scope: string, action: string): boolean {
+  try {
+    assertHttpChannelWritable(scope, action);
+    return false;
+  } catch (err) {
+    if (isScopeReadonlyError(err)) {
+      sendJson(res, 409, scopeReadonlyBody(err));
+      return true;
+    }
+    throw err;
+  }
 }
 
 /** 读取 JSON 请求体（复用 mcp-http readJsonBody 逻辑） */
@@ -664,6 +691,8 @@ export async function handleApiRequest(
         rejectScopeViolation(res, scope, p);
         return;
       }
+      // 只读门禁（REQ-20261029-001）：阅读页「编辑文档 / 添加链接」的保存入口
+      if (rejectIfScopeReadonly(res, scope, 'http:/api/doc/edit')) return;
       await getSharedOperationCoordinator().submit(
         { operation: 'doc-edit-write', params: { scope } },
         () => runWithConfigSnapshot(requestConfig, async () => withScopeWriteLock(scope, 'doc-edit-write', async () => {
@@ -1243,6 +1272,9 @@ async function processImportUpload(
       return;
     }
   }
+  // 只读门禁（REQ-20261029-001）：上传暂存也拒——否则文件先落到 `~/.ki/import-uploads`，
+  // 到 run 才被拒，留下无人清理的残留
+  if (rejectIfScopeReadonly(res, resolveScope(loadConfig(), body?.scope), 'http:/api/import/upload')) return;
   if (!body || !Array.isArray(body.files) || body.files.length === 0) {
     sendJson(res, 400, { ok: false, error: '缺少 files 数组（{ scope, files: [{ name, content }] }）' });
     return;
@@ -1588,6 +1620,9 @@ async function handleImportRun(
     return;
   }
   const scope = resolveScope(requestConfig, body.scope);
+  // 只读门禁（REQ-20261029-001）：在上传导入页发起导入前拒绝，**不创建 job**
+  // （避免任务列表里出现一个必然失败的导入任务）
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/import/run')) return;
   const sourceDir = path.join(getUploadsRoot(), uploadId);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
@@ -1795,6 +1830,9 @@ async function handleImportPrune(
   }
   const scope = resolveScope(requestConfig, scopeRaw);
   const dryRun = body?.dryRun === true;
+  // 只读门禁（REQ-20261029-001）：dryRun 是查询语义（只列候选、不删除）⇒ 放行；
+  // 真正删除时拒绝（只读库不允许经 Web 删除文档）。
+  if (!dryRun && rejectIfScopeReadonly(res, scope, 'http:/api/import/prune')) return;
   const token = typeof body?.token === 'string' ? body.token : '';
   const selectedRaw = body?.selected;
   if (!dryRun && !token) {
@@ -2920,6 +2958,9 @@ async function handleImportRetryIncomplete(
     return;
   }
   const scope = resolveScope(requestConfig, body.scope);
+  // 只读门禁（REQ-20261029-001）：重试 = 继续一次写入。
+  // 注意调用方不止上传导入页——后台任务页也提供重试，故 S04 在任务页同步置灰并给出 CLI 出路。
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/import/retry-incomplete')) return;
   const requestedTaskId = typeof body.taskId === 'string' && body.taskId.trim() ? body.taskId.trim() : undefined;
 
   const status = readImportIncompleteStatus(scope);

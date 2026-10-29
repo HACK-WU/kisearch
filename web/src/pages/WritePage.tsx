@@ -17,13 +17,17 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
 import { resolveWriteGroup } from '@/lib/writeGroup';
-import { useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { Notice } from '@/components/Notice';
+import { SCOPE_READONLY_BLOCKED_HINT, scopeReadonlyNotice } from '@/lib/scopeReadonly';
 
 export function WritePage(): JSX.Element {
   const currentScope = useScopeValue();
   const queryClient = useQueryClient();
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  /** 只读 scope（REQ-20261029-001）：表单仍可填写（不遮罩），仅保存不可用 */
+  const scopeReadonly = useScopeReadonly(scopeConfirmed ? scope : undefined);
   /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默写到旧 scope */
   const [scopeDraft, setScopeDraft] = useState('');
   const [preview, setPreview] = useState(false);
@@ -79,9 +83,11 @@ export function WritePage(): JSX.Element {
   /** 新建 Scope 草稿未确认（且与已确认目标不同）——先提示回车确认，避免写到旧 scope */
   const pendingScope = scopeDraft.trim();
   const scopeDraftDirty = pendingScope.length > 0 && pendingScope !== scope;
-  const saveBlockedReason = scopeDraftDirty
-    ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
-    : !scopeConfirmed
+  const saveBlockedReason = scopeReadonly
+    ? SCOPE_READONLY_BLOCKED_HINT
+    : scopeDraftDirty
+      ? `「${pendingScope}」还没确认，请按回车确认新建的 Scope`
+      : !scopeConfirmed
       ? '请先在上方确认目标 Scope'
       : scopeErr
         ? scopeErr
@@ -183,7 +189,18 @@ export function WritePage(): JSX.Element {
       setTagInputErr(null);
       setPreview(false);
     } catch (e) {
-      setError((e as Error).message);
+      const message = (e as Error).message;
+      /**
+       * 只读 409 降级（REQ-20261029-001 验收 12）：写入走 MCP 工具，错误以文本返回，
+       * 故按 `SCOPE_READONLY` / 「为只读」关键字识别 —— 命中即刷新 scope 列表，
+       * 让按钮与提示条立刻切到只读态（前端列表可能 stale 30s）。
+       */
+      if (message.includes('SCOPE_READONLY') || message.includes('为只读')) {
+        void queryClient.invalidateQueries({ queryKey: ['scopeList'] });
+        setError(`${SCOPE_READONLY_BLOCKED_HINT}（已刷新该库状态）`);
+      } else {
+        setError(message);
+      }
       setErrorField(null);
       setScopeConfirmed(false);
     } finally {
@@ -234,6 +251,13 @@ export function WritePage(): JSX.Element {
           <p>sync-relation · 目标 scope：{scopeConfirmed ? scope : '尚未确认'}</p>
         </div>
       </div>
+
+      {/* 只读 scope（REQ-20261029-001）：表单保持可填（不做只读遮罩），仅保存不可用 */}
+      {scopeReadonly && scopeConfirmed && (
+        <Notice tone="warn" title="该库为只读">
+          {scopeReadonlyNotice(scope)}
+        </Notice>
+      )}
 
       <div className="ki-write-split">
         {/* 左：元数据卡（Scope / Group / 文档名 / Tags / 向量化 / 操作） */}
@@ -421,7 +445,8 @@ export function WritePage(): JSX.Element {
             <button
               className="ki-btn ki-btn--primary"
               onClick={() => void submit()}
-              disabled={submitting}
+              disabled={submitting || scopeReadonly}
+              aria-disabled={submitting || scopeReadonly}
               title={saveBlockedReason ?? undefined}
             >
               {submitting ? '保存中…' : '保存'}

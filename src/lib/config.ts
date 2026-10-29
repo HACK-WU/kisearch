@@ -241,6 +241,16 @@ export interface KiConfig {
   embedding: EmbeddingConfig;            // 【新增】embedding 配置
   scopeMode: 'default' | 'strict';       // 【新增】scope 护栏模式（默认 'default'）；见 S-01 §3.5
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
+  /**
+   * 只读 scope 名单（REQ-20261029-001）。
+   *
+   * 语义：列出的 scope **禁止逐条写入**（Web / MCP / CLI 单条），但批量更新
+   * （`ki import`、数据源同步）与运维通道不受限，读侧完全不受影响。
+   *
+   * ⚠️ 刻意放**顶层**而非 `scopes.<name>.readonly`：后者会让 `registered` 变 true，
+   * strict 模式下 `resolveScope` 以 scopes 存在性做白名单 ⇒ 锁一个库等于给它开检索权限。
+   */
+  scopeReadonly: string[];
   vector?: VectorResourceConfig;         // Collection handle/worker 资源治理
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
   llm?: LlmConfig;                       // 【新增】模型配置段（REQ-20260924-001）；缺失 = 未配置（fail-loud）
@@ -762,8 +772,11 @@ function parseAndExpand(configFile: string): KiConfig {
     }
   }
 
+  // REQ-20261029-001：只读名单归一化（顶层节点；非法项丢弃并告警，不阻断加载）
+  const scopeReadonly = normalizeScopeReadonly(raw.scopeReadonly);
+
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp, llm, chatDir,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, scopeReadonly, vector, mcp, llm, chatDir,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };
@@ -781,6 +794,7 @@ function buildDefaults(): KiConfig {
     vector: { ...DEFAULT_VECTOR_RESOURCES },
     scopeMode: 'default',
     scopes: {},
+    scopeReadonly: [],
     // llm 刻意不给默认值（D8）：无配置即"未配置"，由 resolveLlmStatus 判 CHAT_DISABLED。
     // chatDir 给默认值（会话目录是纯本地路径，无需用户配置即可工作），★ 基准派生自 dataDir。
     chatDir: resolveDefaultChatDir(dataDir),
@@ -826,6 +840,54 @@ export function getScopeCleanConfig(config: KiConfig, scope: string): CleanConfi
  */
 export function getScopeImportConfig(config: KiConfig, scope: string): ImportConfig | null {
   return config.scopes[scope]?.import ?? null;
+}
+
+// ─── 只读 scope 名单（REQ-20261029-001） ───
+
+/**
+ * 归一化只读名单：trim + 去重（保序）+ 丢弃非字符串/空项。
+ *
+ * 丢弃非法项而不是抛错：配置手改出错不应让整个 daemon 起不来
+ * （与 parseAndExpand 其余字段"告警不阻断"的口径一致）。
+ */
+function normalizeScopeReadonly(input: unknown): string[] {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) {
+    process.stderr.write('警告：配置 scopeReadonly 不是数组，已按空名单处理（"只读"保护不会生效）\n');
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let dropped = 0;
+  for (const item of input) {
+    if (typeof item !== 'string') { dropped += 1; continue; }
+    const name = item.trim();
+    if (!name) { dropped += 1; continue; }
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  if (dropped > 0) {
+    process.stderr.write(`警告：配置 scopeReadonly 有 ${dropped} 个非法/空项已被忽略\n`);
+  }
+  return out;
+}
+
+/**
+ * 该 scope 是否只读 —— **唯一判定入口**（门禁、scope list、前端展示都走这里）。
+ *
+ * scope 为空串一律 false；大小写敏感（与 `validateScope` 一致，不做模糊匹配）。
+ * ⚠️ 调用方若需要"读配置失败时的安全语义"，注意 `loadConfig` 会沿用 last-known-good，
+ * 其 `scopeReadonly` 仍是上次成功解析的名单 ⇒ 保护不会因配置损坏而自动放开。
+ */
+export function isScopeReadonly(config: KiConfig, scope: string): boolean {
+  if (!scope) return false;
+  return config.scopeReadonly.includes(scope);
+}
+
+/** 只读名单副本（供 `ki scope list` / 前端展示，避免调用方直接改内部数组） */
+export function getScopeReadonlyScopes(config: KiConfig): string[] {
+  return [...config.scopeReadonly];
 }
 
 /** 默认格式白名单：.md（REQ-08，可通过 `scopes.<scope>.import.extensions` 扩展） */
@@ -935,6 +997,90 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
   atomicWriteConfig(configPath, JSON.stringify(parsed, null, 2) + '\n');
   resetConfigCache();
   return { removed: true, configPath };
+}
+
+// ─── 配置写回（scope readonly 用：增删只读名单） ───
+
+export type SetScopeReadonlyResult =
+  | { ok: true; scope: string; readonly: boolean; changed: boolean; configPath: string }
+  | { ok: false; error: string; code: 'NO_CONFIG_FILE' | 'WRITE_FAILED' | 'BAD_SCOPE' };
+
+/**
+ * 写后抬 mtime（D9 兜底）。
+ *
+ * `loadConfig` 以 `mtimeMs + size` 判缓存新鲜度：`[a-docs]`→`[b-docs]` 是**等长改写**，
+ * size 不变，若落在同一毫秒内就会命中旧指纹 ⇒ 只读静默失效。mtime 刻意设为 1 秒后，
+ * 保证指纹必然变化；后续任何 rename 写入都会覆盖该时间戳，无持久副作用。
+ */
+function bumpConfigMtime(configPath: string): void {
+  try {
+    const now = new Date();
+    fs.utimesSync(configPath, now, new Date(now.getTime() + 1000));
+  } catch {
+    /* 抬时间戳失败不影响正确性：daemon 侧由 op 内 resetConfigCache 保证 */
+  }
+}
+
+function nextScopeReadonlyList(list: string[], scope: string, readonly: boolean): string[] {
+  const set = new Set(list);
+  if (readonly) set.add(scope);
+  else set.delete(scope);
+  return [...set];
+}
+
+/**
+ * 设置 / 解除某 scope 的只读状态（写配置文件 + 失效缓存）。
+ *
+ * 与 `removeScopeFromConfigFile` 同范式：YAML 走 Document API 保留注释、JSON 走解析写回，
+ * 均通过 `atomicWriteConfig`（临时文件 + rename + 保留原 mode）。
+ *
+ * ⚠️ 无配置文件时 **fail-loud**（返回 `NO_CONFIG_FILE`），不静默成功、不自动建文件：
+ * 否则用户会以为"设上了"，重启后又消失。
+ */
+export function setScopeReadonlyInConfigFile(scope: string, readonly: boolean): SetScopeReadonlyResult {
+  const name = scope?.trim();
+  if (!name) return { ok: false, code: 'BAD_SCOPE', error: 'scope 不能为空' };
+
+  const config = loadConfig();
+  const configPath = config._configPath;
+  if (!configPath || !fs.existsSync(configPath)) {
+    return {
+      ok: false,
+      code: 'NO_CONFIG_FILE',
+      error: '未找到配置文件，无处记录只读状态；请先执行 ki config init',
+    };
+  }
+
+  const wasReadonly = isScopeReadonly(config, name);
+  const ext = path.extname(configPath).toLowerCase();
+  try {
+    const text = fs.readFileSync(configPath, 'utf-8');
+
+    if (ext === '.yaml' || ext === '.yml') {
+      const doc = YAML.parseDocument(text);
+      const current = (doc.toJS() as Record<string, unknown> | null)?.scopeReadonly;
+      const list = Array.isArray(current) ? current.filter((v): v is string => typeof v === 'string') : [];
+      const next = nextScopeReadonlyList(list, name, readonly);
+      // 名单清空时删节点，避免留下 `scopeReadonly: []` 噪声
+      if (next.length === 0) doc.delete('scopeReadonly');
+      else doc.set('scopeReadonly', next);
+      atomicWriteConfig(configPath, doc.toString());
+    } else {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const current = parsed.scopeReadonly;
+      const list = Array.isArray(current) ? current.filter((v): v is string => typeof v === 'string') : [];
+      const next = nextScopeReadonlyList(list, name, readonly);
+      if (next.length === 0) delete parsed.scopeReadonly;
+      else parsed.scopeReadonly = next;
+      atomicWriteConfig(configPath, JSON.stringify(parsed, null, 2) + '\n');
+    }
+
+    resetConfigCache();
+    bumpConfigMtime(configPath);
+    return { ok: true, scope: name, readonly, changed: wasReadonly !== readonly, configPath };
+  } catch (err) {
+    return { ok: false, code: 'WRITE_FAILED', error: (err as Error).message };
+  }
 }
 
 /**

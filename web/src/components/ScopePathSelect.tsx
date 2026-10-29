@@ -268,6 +268,7 @@ export function ScopePathSelect({
                 >
                   {ICON_SCOPE}
                   <span className="ki-gtree-label">{item.scope}</span>
+                  {item.readonly === true && <span className="ki-badge ki-badge--readonly">只读</span>}
                   {item.scope === currentScope && value !== item.scope && (
                     <span className="ki-badge ki-badge--off">当前</span>
                   )}
