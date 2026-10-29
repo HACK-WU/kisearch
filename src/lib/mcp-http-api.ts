@@ -56,11 +56,14 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { addRemoteDataSource, checkSourceReachable, findReusableManagedClone, readDataSource, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
+import { addRemoteDataSource, checkSourceReachable, findReusableManagedClone, readDataSource, resetScheduleFailures, saveDataSourceSchedule, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
 import { checkManagedSubdir, isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { computeSyncAvailability } from './datasource-policy.js';
+import { toScheduleView } from './datasource-schedule.js';
+import { datasourceSyncMode, datasourceSyncParams, toDatasourceSyncResultSnapshot } from './datasource-task.js';
+import { isDataSourceSchedulerDisabled, refreshDataSourceScheduler } from './datasource-scheduler.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -732,6 +735,7 @@ export async function handleApiRequest(
     if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
     if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
     if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
+    if (p === '/datasource/schedule' && req.method === 'POST') return void (await handleDatasourceSchedule(req, res, authScopes, requestConfig));
     if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
@@ -2113,6 +2117,7 @@ function handleDatasourceList(
         activeState: active?.state ?? null,
         activeStartedAt: active?.startedAt ?? null,
         stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
+        schedule: toScheduleView(record.schedule, record.lastSync, now),
         syncAvailability: computeSyncAvailability({
           type: record.type,
           lastSync: record.lastSync,
@@ -2126,8 +2131,18 @@ function handleDatasourceList(
   sendJson(res, 200, {
     ok: true,
     total: sources.length,
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
     sources,
-    missing: scan.missing.filter(({ scope }) => visible(scope) && inFilter(scope)),
+    missing: scan.missing
+      .filter(({ scope }) => visible(scope) && inFilter(scope))
+      .map(({ scope, reason }) => {
+        const read = readDataSource(scope);
+        return {
+          scope,
+          reason,
+          ...(read.ok ? { schedule: toScheduleView(read.record.schedule, read.record.lastSync, now) } : {}),
+        };
+      }),
     corrupt: scan.corrupt.filter(({ scope }) => visible(scope) && inFilter(scope)),
   });
 }
@@ -2184,7 +2199,12 @@ function handleDatasourceDetail(
       lastSync: read.record.lastSync,
       active: running,
     }),
-    source: { ...read.record, lastSync },
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
+    source: {
+      ...read.record,
+      lastSync,
+      schedule: toScheduleView(read.record.schedule, read.record.lastSync),
+    },
   });
 }
 
@@ -2196,40 +2216,6 @@ function handleDatasourceDetail(
  * 任务 finish / submit 失败都必须释放。
  */
 const pageSyncGates = new Map<string, string>();
-
-function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): TaskResultSnapshot | undefined {
-  if (!result.ok || result.dryRun) return undefined;
-  const summary = result.summary;
-  return {
-    ...(summary.files
-      ? {
-        files: {
-          scanned: summary.files.scanned,
-          completed: summary.files.completed,
-          incomplete: summary.files.incomplete,
-          skipped: summary.files.skipped,
-          unchanged: summary.files.unchanged,
-          duplicatesSkipped: summary.files.duplicatesSkipped,
-        },
-      }
-      : {}),
-    vectorized: summary.vectorized,
-    fullTextIndexed: summary.fullTextIndexed,
-    groups: summary.groups,
-    // 数据源同步任务的详情也要有「新增的文档」，否则同一份快照在数据源页有、任务页说"没有记录"
-    ...(summary.created && summary.created.length > 0
-      ? {
-        created: summary.created
-          .slice(0, MAX_SNAPSHOT_CREATED)
-          .map((item) => [item.group, item.relation] as [string, string]),
-      }
-      : {}),
-    ...(typeof summary.createdTotal === 'number' ? { createdTotal: summary.createdTotal } : {}),
-    ...(summary.createdTruncated || (summary.created?.length ?? 0) > MAX_SNAPSHOT_CREATED
-      ? { createdTruncated: true }
-      : {}),
-  };
-}
 
 /**
  * 同步任务执行体（页面 `POST /datasource/sync` 与 add-remote 首次同步共用）。
@@ -2270,28 +2256,74 @@ async function runDatasourceSyncTask(
           : {}),
       },
     );
+    if (state === 'ok' || state === 'partial') await resetScheduleFailures(scope);
   } catch (err) {
     task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'SYNC_FAILED', error: (err as Error).message });
+  } finally {
+    // 手动同步完成后 nextRunAt 以新的 lastSync.at 重算
+    refreshDataSourceScheduler();
   }
 }
 
-/** 首次同步没有 commit 水位时必然是 full；不能只看 type/full */
-function datasourceSyncMode(record: DataSourceRecord, full: boolean): 'incremental' | 'full' {
-  return record.type === 'git' && !full && Boolean(record.lastSync?.git?.commit) ? 'incremental' : 'full';
-}
+// ─── POST /api/datasource/schedule（S-01）────────────────
 
-/** 登记参数快照（页面 sync 与 add-remote 首次同步同口径） */
-function datasourceSyncParams(record: DataSourceRecord, full: boolean): TaskParamSnapshot | undefined {
-  return toParamSnapshot('datasource-sync', {
-    sourceDir: record.dir,
-    type: record.type,
-    mode: datasourceSyncMode(record, full),
-    ...(record.group ? { group: record.group } : {}),
-    vector: record.vector,
-    conflictMode: record.conflictMode,
-    conflictSuffix: record.conflictSuffix,
-    ...(record.chunkSize !== null ? { chunkSize: record.chunkSize } : {}),
-    ...(record.chunkOverlap !== null ? { chunkOverlap: record.chunkOverlap } : {}),
+async function handleDatasourceSchedule(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: { scope?: unknown; schedule?: unknown } = {};
+  try {
+    body = await readJsonBody(req) as { scope?: unknown; schedule?: unknown };
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'SCHEDULE_MISSING_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/schedule');
+    return;
+  }
+  const result = await saveDataSourceSchedule({
+    scope: scopeRaw,
+    schedule: body.schedule,
+    config: requestConfig,
+  });
+  if (!result.ok) {
+    const status = result.code === 'INVALID_SCOPE'
+      ? 400
+      : result.code === 'NOT_FOUND' || result.code === 'NOT_REGISTERED'
+        ? 404
+        : result.code === 'SCHEDULE_STALE' || result.code === 'SCOPE_OPERATION_BUSY'
+          ? 409
+          : result.code === 'CORRUPT'
+            ? 400
+            : result.code.startsWith('SCHEDULE_') ? 400 : 500;
+    sendJson(res, status, {
+      ok: false,
+      scope: result.scope,
+      code: result.code === 'NOT_FOUND' ? 'DATASOURCE_NOT_FOUND' : result.code,
+      error: result.error,
+      ...(result.field ? { details: { field: result.field } } : {}),
+      ...(result.current ? { current: result.current } : {}),
+    });
+    return;
+  }
+  refreshDataSourceScheduler();
+  const now = Date.now();
+  const view = toScheduleView(result.record.schedule, result.record.lastSync, now);
+  sendJson(res, 200, {
+    ok: true,
+    scope: result.scope,
+    schedule: view,
+    nextRunAt: view.nextRunAt,
+    warnings: result.warnings,
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
   });
 }
 

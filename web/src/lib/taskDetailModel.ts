@@ -124,6 +124,7 @@ const SOURCE_LABEL: Record<TaskRecord['source'], string> = {
   web: '网页',
   cli: 'CLI',
   daemon: '后台服务',
+  scheduler: '定时',
 };
 
 /** 来源中文名（列表行与详情共用，避免两套映射） */

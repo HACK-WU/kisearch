@@ -1,4 +1,4 @@
-export type TaskSource = 'cli' | 'daemon' | 'web';
+export type TaskSource = 'cli' | 'daemon' | 'web' | 'scheduler';
 export type TaskState = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'unknown';
 
 export interface TaskProgress {

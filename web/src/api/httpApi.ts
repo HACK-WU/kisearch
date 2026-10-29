@@ -721,6 +721,46 @@ export interface DataSourceLastSyncView {
 /** 当前同步运行态（来自任务台账）：null = 空闲 */
 export type DataSourceActiveState = 'queued' | 'running';
 
+export type DataSourceScheduleMode = 'interval' | 'at';
+export type DataSourceScheduleUnit = 'minute' | 'hour' | 'day';
+export type DataSourceScheduleRepeat = 'once' | 'daily';
+
+export interface DataSourceScheduleView {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  at: string | null;
+  repeat: DataSourceScheduleRepeat | null;
+  revision: number;
+  consecutiveFailures: number;
+  lastAutoAt: number | null;
+  lastAutoFor: number | null;
+  lastAutoState: DataSourceSyncState | null;
+  lastSkipReason: string | null;
+  lastSkipAt: number | null;
+  nextRunAt: number | null;
+}
+
+export interface DataSourceScheduleInput {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  at: string | null;
+  repeat: DataSourceScheduleRepeat | null;
+  baseRevision?: number;
+}
+
+export interface DataSourceScheduleResponse {
+  ok: boolean;
+  scope: string;
+  schedule: DataSourceScheduleView;
+  nextRunAt: number | null;
+  warnings: { code: string; message: string }[];
+  schedulerDisabled: boolean;
+}
+
 export interface DataSourceRecordView {
   version: number;
   scope: string;
@@ -742,6 +782,8 @@ export interface DataSourceRecordView {
   chunkOverlap: number | null;
   createdAt: number;
   updatedAt: number;
+  /** 旧 daemon 不下发 → 页面隐藏定时入口 */
+  schedule?: DataSourceScheduleView;
   lastSync: DataSourceLastSyncView | null;
 }
 
@@ -777,13 +819,16 @@ export interface DataSourceListRow {
   /** 本次同步开始时间（仅 running） */
   activeStartedAt?: number | null;
   stale: boolean;
+  /** 定时计划视图（旧 daemon 不下发） */
+  schedule?: DataSourceScheduleView;
 }
 
 export interface DataSourceListResponse {
   ok: boolean;
   total: number;
+  schedulerDisabled?: boolean;
   sources: DataSourceListRow[];
-  missing: { scope: string; reason: string }[];
+  missing: { scope: string; reason: string; schedule?: DataSourceScheduleView }[];
   corrupt?: { scope: string; reason: string }[];
 }
 
@@ -795,6 +840,7 @@ export interface DataSourceDetailResponse {
   activeStartedAt?: number | null;
   /** 旧 daemon 缺省 → 页面隐藏同步入口并提示升级 */
   syncAvailability?: SyncAvailabilityView;
+  schedulerDisabled?: boolean;
   source: DataSourceRecordView;
 }
 
@@ -831,6 +877,17 @@ export async function syncDataSource(input: {
   full?: boolean;
 }): Promise<DataSourceSyncTriggerResponse> {
   return req<DataSourceSyncTriggerResponse>('/api/datasource/sync', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** 保存定时设置（唯一配置入口；baseRevision 用于多标签页乐观锁） */
+export async function saveDataSourceSchedule(input: {
+  scope: string;
+  schedule: DataSourceScheduleInput;
+}): Promise<DataSourceScheduleResponse> {
+  return req<DataSourceScheduleResponse>('/api/datasource/schedule', {
     method: 'POST',
     body: JSON.stringify(input),
   });

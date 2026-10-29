@@ -7091,3 +7091,56 @@ select.ki-chat-cfg__ta--select {
   .res-nav__item { padding: 5px 8px; font-size: 12px; }
   .res-nav__grouplabel { font-size: 10px; padding-bottom: 4px; }
 }
+
+/* ── 数据源定时同步（REQ-20261029-001） ───────────────── */
+.ki-ds-sched-badge {
+  display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 999px;
+  font-size: var(--ki-font-size-xs); line-height: 18px; font-weight: 600;
+  color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  white-space: nowrap; vertical-align: middle;
+}
+.ki-ds-sched-badge--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-ds-sched-next { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); white-space: nowrap; }
+.ki-ds-sched-next--warn { color: var(--ki-color-warning); }
+.ki-ds-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ki-task-source-badge--scheduler { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+
+.ki-ds-sched-dialog { width: min(520px, 92vw); max-width: 92vw; }
+.ki-ds-sched-sub { margin: 4px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: center; margin-top: 12px; }
+.ki-ds-sched-label { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-ds-sched-control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.ki-ds-sched-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-modes { gap: 16px; }
+.ki-ds-sched-radio { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer; }
+.ki-ds-sched-inline { gap: 8px; }
+.ki-ds-sched-number { width: 96px; }
+.ki-ds-sched-unit { width: 96px; }
+.ki-ds-sched-datetime { width: 210px; max-width: 100%; }
+.ki-ds-sched-error { margin: 8px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-danger-ink); }
+.ki-ds-sched-warn { margin-bottom: 4px; padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-warning-soft); color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
+.ki-ds-sched-warn-line { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
+.ki-ds-sched-hint-block { margin: 12px 0 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-meta { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); display: grid; gap: 4px; }
+.ki-ds-sched-meta > div { display: flex; justify-content: space-between; gap: 12px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); }
+.ki-ds-sched-meta b { font-weight: 600; color: var(--ki-color-text); }
+.ki-ds-sched-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+.ki-ds-sched-discard { margin-right: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+@media (max-width: 640px) {
+  .ki-ds-sched-row { grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: start; }
+  .ki-ds-sched-dialog { width: 100%; max-width: 100%; }
+  .ki-ds-sched-footer { flex-wrap: wrap; }
+  .ki-ds-sched-footer .ki-btn { flex: 1 1 auto; }
+  .ki-ds-sched-datetime, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
+  .ki-ds-sched-inline { flex-direction: column; align-items: stretch; }
+  .ki-ds-missing-row { flex-direction: column; align-items: flex-start; }
+}
+
+/* 窄屏（≤1399）类型/上次同步列会隐藏：把定时徽标与下次运行下沉到 Scope 列 */
+.ki-ds-sched-badge--compact,
+.ki-ds-sched-next--compact { display: none; }
+@media (max-width: 1399px) {
+  .ki-ds-sched-badge--compact { display: inline-block; }
+  .ki-ds-sched-next--compact { display: block; }
+}

@@ -6,6 +6,7 @@
  */
 import type { DataSourceActiveState, DataSourceLastSyncView, DataSourcePendingItem, DataSourceRecordView, DataSourceSyncState } from '@/api/httpApi';
 import type { DetailItem, DetailRow } from '@/lib/taskDetailModel';
+import { describeSchedule } from '@/lib/datasourceSchedule';
 
 export type DataSourceStatusState = DataSourceSyncState | 'never' | DataSourceActiveState;
 export type DataSourceStatusTone = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
@@ -168,6 +169,12 @@ export function buildDataSourcePendingTree(items: DataSourcePendingItem[]): Data
 export interface DataSourceDetailModel {
   header: { title: string; state: DataSourceStatusState; stateLabel: string; tone: DataSourceStatusTone; active: boolean };
   params: DetailRow[];
+  /** 定时计划只读展示（旧 daemon 无 schedule 时 available=false） */
+  schedule: {
+    available: boolean;
+    rows: DetailRow[];
+    warning?: string;
+  };
   /** 无同步记录时为 null（渲染空态引导） */
   summary: DataSourceSummary | null;
   metrics: DataSourceMetric[];
@@ -452,6 +459,31 @@ export function buildDataSourceDetail(
     { label: '落点 Group', value: effGroup ?? '自动：按顶层子目录', full: true },
   ];
 
+  const scheduleView = record.schedule;
+  const scheduleRows: DetailRow[] = scheduleView
+    ? [
+      {
+        label: '状态',
+        value: scheduleView.enabled
+          ? `开启 · ${describeSchedule(scheduleView)}`
+          : scheduleView.mode === 'at' && scheduleView.repeat === 'once' && scheduleView.lastAutoFor !== null
+            ? '关闭 · 已完成（仅一次）'
+            : '关闭（默认）',
+      },
+      { label: '下次运行', value: scheduleView.nextRunAt ? formatTime(scheduleView.nextRunAt) : '—' },
+      {
+        label: '上次自动',
+        value: scheduleView.lastAutoAt
+          ? `${formatTime(scheduleView.lastAutoAt)}${scheduleView.lastAutoState ? ` · ${DATASOURCE_STATE_LABEL[scheduleView.lastAutoState]}` : ''}`
+          : '—',
+      },
+      { label: '连续失败', value: `${scheduleView.consecutiveFailures} 次` },
+    ]
+    : [];
+  const scheduleWarning = scheduleView && scheduleView.consecutiveFailures >= 3
+    ? `连续失败 ${scheduleView.consecutiveFailures} 次 · 下个周期仍会尝试`
+    : undefined;
+
   const fullScanned = result ? (result.files.fullScanned ?? result.files.scanned) : 0;
   const changed = result ? (sync?.git?.changedCount ?? result.files.changed ?? result.files.scanned) : 0;
   // 目录源没有 diff 语义：不展示「本次变更」（否则会显示 fullScanned，看起来像 250 篇都变了）
@@ -523,6 +555,11 @@ export function buildDataSourceDetail(
       active: status.active,
     },
     params,
+    schedule: {
+      available: scheduleView !== undefined,
+      rows: scheduleRows,
+      ...(scheduleWarning ? { warning: scheduleWarning } : {}),
+    },
     summary,
     metrics,
     results,

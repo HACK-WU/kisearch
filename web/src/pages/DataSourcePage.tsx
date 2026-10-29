@@ -18,8 +18,10 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
-import { addRemoteDataSource, getDocContent, pruneDataSource, syncDataSource, type DataSourcePendingItem } from '@/api/httpApi';
+import { addRemoteDataSource, getDocContent, pruneDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceScheduleView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
+import { DatasourceScheduleDialog } from '@/components/DatasourceScheduleDialog';
+import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
 import {
   buildDataSourceDetail,
   buildDataSourceListSummary,
@@ -144,6 +146,12 @@ export function DataSourcePage(): JSX.Element {
   const addTriggerRef = useRef<HTMLButtonElement>(null);
   const addDialogRef = useRef<HTMLElement>(null);
   const addWasOpenRef = useRef(false);
+  const [scheduleTarget, setScheduleTarget] = useState<{
+    scope: string;
+    schedule?: DataSourceScheduleView;
+    schedulerDisabled?: boolean;
+  } | null>(null);
+  const scheduleTriggerRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
   const lastScopeRef = useRef<string | null>(null);
@@ -215,6 +223,7 @@ export function DataSourcePage(): JSX.Element {
   const activeState = resolveDataSourceActiveState(detailQuery.data?.activeState, detailQuery.data?.running);
   const active = activeState !== null;
   const availability = detailQuery.data?.syncAvailability;
+  const detailSchedule = detailQuery.data?.source.schedule;
   const model = useMemo(
     () => (detailQuery.data
       ? buildDataSourceDetail(detailQuery.data.source, {
@@ -490,6 +499,8 @@ export function DataSourcePage(): JSX.Element {
         queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', targetScope] }),
         queryClient.invalidateQueries({ queryKey: ['dataSourceList'] }),
         queryClient.invalidateQueries({ queryKey: ['docList'] }),
+        // 修复：顶栏徽章按 ['tasks'] 轮询，提交后不失效会滞后最多 15s
+        queryClient.invalidateQueries({ queryKey: ['tasks'] }),
       ]);
     } catch (err) {
       const e = err as Error & { status?: number; body?: { code?: string; error?: string } };
@@ -503,6 +514,26 @@ export function DataSourcePage(): JSX.Element {
     } finally {
       setSyncingScope(null);
     }
+  };
+
+  const openSchedule = (
+    targetScope: string,
+    schedule: DataSourceScheduleView | undefined,
+    trigger: HTMLElement | null,
+  ): void => {
+    scheduleTriggerRef.current = trigger;
+    setScheduleTarget({
+      scope: targetScope,
+      ...(schedule ? { schedule } : {}),
+      schedulerDisabled: listQuery.data?.schedulerDisabled,
+    });
+  };
+
+  const closeSchedule = (): void => {
+    setScheduleTarget(null);
+    const trigger = scheduleTriggerRef.current;
+    scheduleTriggerRef.current = null;
+    if (trigger) requestAnimationFrame(() => trigger.focus());
   };
 
   // ── S-05：页面添加 Git URL 数据源 ──────────────────────
@@ -776,13 +807,36 @@ export function DataSourcePage(): JSX.Element {
         </div>
       ) : null}
 
+      {scheduleTarget ? (
+        <DatasourceScheduleDialog
+          key={scheduleTarget.scope}
+          scope={scheduleTarget.scope}
+          schedule={scheduleTarget.schedule}
+          schedulerDisabled={scheduleTarget.schedulerDisabled}
+          onClose={closeSchedule}
+          onSaved={(response) => {
+            setRowSyncNotice({
+              tone: 'info',
+              text: `定时设置已保存（${response.scope}）：${describeSchedule(response.schedule)}${response.nextRunAt ? `，下次 ${formatDateTime(response.nextRunAt)}` : ''}${response.schedulerDisabled ? '（服务端已禁用调度，不会自动执行）' : ''}`,
+            });
+            closeSchedule();
+            void queryClient.invalidateQueries({ queryKey: ['dataSourceList'] });
+            void queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', response.scope] });
+          }}
+        />
+      ) : null}
+
       <div className="ki-ds-callout" role="note">
         <span className="ki-ds-callout__icon" aria-hidden>ⓘ</span>
         <span>
           Git 仓库可在本页「添加 Git 数据源」（服务端 clone）；本地目录数据源通过命令行登记：<code className="ki-ds-callout__cmd">ki datasource add --scope &lt;scope&gt; --source &lt;目录&gt;</code>。
-          <strong>同步可在本页触发</strong>（普通目录 30 分钟一次，CLI 可强制）。本页的删除仅针对待删候选，不动源目录文件。
+          <strong>手动同步有 30 分钟冷却</strong>（CLI 可强制）；<strong>定时同步在列表「定时」中按源开启，默认关闭</strong>。本页的删除仅针对待删候选，不动源目录文件。
         </span>
       </div>
+
+      {!listQuery.isLoading && sources.length > 0 && sources.every((item) => item.schedule === undefined) ? (
+        <p className="ki-task-notice ki-task-notice--warn">⚠ 当前 daemon 不支持定时同步，请升级并重启</p>
+      ) : null}
 
       {rowSyncNotice ? (
         <p className={`ki-task-notice ki-task-notice--${rowSyncNotice.tone}`} role={rowSyncNotice.tone === 'warn' ? 'alert' : undefined}>
@@ -791,7 +845,16 @@ export function DataSourcePage(): JSX.Element {
       ) : null}
 
       {missing.map((item) => (
-        <p key={item.scope} className="ki-task-notice ki-task-notice--warn">⚠ {item.scope} 目录不可读：{item.reason}</p>
+        <div key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-missing-row">
+          <span>⚠ {item.scope} 目录不可读：{item.reason}</span>
+          {item.schedule !== undefined ? (
+            <button
+              type="button"
+              className="ki-btn ki-btn--secondary ki-btn--small"
+              onClick={(event) => openSchedule(item.scope, item.schedule, event.currentTarget)}
+            >定时</button>
+          ) : null}
+        </div>
       ))}
       {corrupt.map((item) => (
         <p key={item.scope} className="ki-task-notice ki-task-notice--warn">⚠ {item.scope} 登记损坏：{item.reason}</p>
@@ -856,6 +919,9 @@ export function DataSourcePage(): JSX.Element {
                           ? `距上次成功同步不足 30 分钟；如需立即同步：ki datasource sync --scope ${source.scope}`
                           : '同步（Git 源为增量）';
                   const typeLabel = source.type === 'git' ? 'Git' : '目录';
+                  const schedBadge = scheduleBadge(source.schedule);
+                  const nextLine = scheduleNextLine(source.schedule);
+                  const rowTitleWithSchedule = `${rowTitle}${source.schedule?.enabled ? `；定时同步已开启（${describeSchedule(source.schedule)}）` : ''}`;
                   return (
                   <tr
                     key={source.scope}
@@ -875,14 +941,34 @@ export function DataSourcePage(): JSX.Element {
                     <td>
                       <span className="ki-ds-table__scope" title={source.scope}>
                         <span className="ki-ds-table__scope-name">{source.scope}</span>
+                        {schedBadge ? (
+                          <span
+                            className={`ki-ds-sched-badge ki-ds-sched-badge--compact${schedBadge === '定时⚠' ? ' ki-ds-sched-badge--warn' : ''}`}
+                            title={source.schedule ? describeSchedule(source.schedule) : undefined}
+                          >{schedBadge}</span>
+                        ) : null}
                       </span>
+                      {nextLine ? (
+                        <div className={`ki-ds-sched-next ki-ds-sched-next--compact ki-ds-sched-next--${nextLine.tone}`}>{nextLine.text}</div>
+                      ) : null}
                     </td>
                     <td className="ki-ds-col--type">
                       <span className={`ki-ds-type-badge ki-ds-type-badge--${source.type === 'git' ? 'git' : 'dir'}`}>{typeLabel}</span>
+                      {schedBadge ? (
+                        <span
+                          className={`ki-ds-sched-badge${schedBadge === '定时⚠' ? ' ki-ds-sched-badge--warn' : ''}`}
+                          title={source.schedule ? describeSchedule(source.schedule) : undefined}
+                        >{schedBadge}</span>
+                      ) : null}
                     </td>
                     <td className="ki-ds-table__dir" title={source.dir}>{source.dir}</td>
                     <td className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</td>
-                    <td className="ki-ds-col--time">{lastSyncLabel ?? '—'}</td>
+                    <td className="ki-ds-col--time">
+                      <div>{lastSyncLabel ?? '—'}</div>
+                      {nextLine ? (
+                        <div className={`ki-ds-sched-next ki-ds-sched-next--${nextLine.tone}`}>{nextLine.text}</div>
+                      ) : null}
+                    </td>
                     <td>
                       <span
                         className={`ki-task-state ki-task-state--${status.tone}`}
@@ -893,17 +979,31 @@ export function DataSourcePage(): JSX.Element {
                       {source.lastSync ? formatSyncDuration(source.lastSync.durationMs) : '—'}
                     </td>
                     <td className="ki-ds-table__actions">
-                      <button
-                        type="button"
-                        className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sync-btn"
-                        disabled={!rowCanSync}
-                        title={rowTitle}
-                        aria-label={`同步 ${source.scope}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          if (rowCanSync) void triggerSync(source.scope);
-                        }}
-                      >{rowSyncing ? '提交中…' : source.running ? (source.activeState === 'queued' ? '排队中' : '同步中') : '同步'}</button>
+                      <div className="ki-ds-row-actions">
+                        <button
+                          type="button"
+                          className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sync-btn"
+                          disabled={!rowCanSync}
+                          title={rowTitleWithSchedule}
+                          aria-label={`同步 ${source.scope}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (rowCanSync) void triggerSync(source.scope);
+                          }}
+                        >{rowSyncing ? '提交中…' : source.running ? (source.activeState === 'queued' ? '排队中' : '同步中') : '同步'}</button>
+                        {source.schedule !== undefined ? (
+                          <button
+                            type="button"
+                            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sched-btn"
+                            title={`设置定时同步${source.schedule?.enabled ? `（当前：${describeSchedule(source.schedule)}）` : '（默认关闭）'}`}
+                            aria-label={`设置定时同步 ${source.scope}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openSchedule(source.scope, source.schedule, event.currentTarget);
+                            }}
+                          >定时</button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                   );
@@ -997,10 +1097,17 @@ export function DataSourcePage(): JSX.Element {
                     )) : null}
                   {/* 冷却提示只在空闲时才有意义：同步中再说"距上次不足 30 分钟"是噪音 */}
                   {!active && availability?.reason === 'cooldown' ? (
-                    <Notice tone="info" title="距上次成功同步不足 30 分钟">
-                      约 {Math.max(1, Math.ceil((availability.retryAfterSec ?? 0) / 60))} 分钟后可再次同步。如需立即同步：
-                      <code className="ki-notice__code">ki datasource sync --scope {scope}</code>
-                    </Notice>
+                    detailSchedule?.enabled ? (
+                      <Notice tone="info" title="定时同步已开启">
+                        下次 {detailSchedule.nextRunAt ? formatDateTime(detailSchedule.nextRunAt) : '—'}。普通目录手动同步仍在冷却中；如需立即同步：
+                        <code className="ki-notice__code">ki datasource sync --scope {scope}</code>
+                      </Notice>
+                    ) : (
+                      <Notice tone="info" title="距上次成功同步不足 30 分钟">
+                        约 {Math.max(1, Math.ceil((availability.retryAfterSec ?? 0) / 60))} 分钟后可再次同步。如需立即同步：
+                        <code className="ki-notice__code">ki datasource sync --scope {scope}</code>
+                      </Notice>
+                    )
                   ) : null}
                   {availability === undefined && detailQuery.data ? (
                     <Notice tone="warn">当前 daemon 不支持页面同步，请升级并重启。</Notice>
@@ -1086,6 +1193,16 @@ export function DataSourcePage(): JSX.Element {
                   <DetailSection material="meta" title="同步参数">
                     <DetailParams rows={model.params} />
                   </DetailSection>
+
+                  {/* ── 定时同步（只读）：配置入口在列表「定时」弹窗，这里只展示 ── */}
+                  {model.schedule.available ? (
+                    <DetailSection material="meta" title="定时同步（只读）">
+                      <DetailParams rows={model.schedule.rows} />
+                      {model.schedule.warning ? (
+                        <Notice tone="warn" slim>{model.schedule.warning}</Notice>
+                      ) : null}
+                    </DetailSection>
+                  ) : null}
 
                   {/* ── 新增的文档（2026-10-29）：与下方「待删除」同款目录树，只读
                        —— 落点 Group 已在参数里，用户更关心"这次多了哪些目录下的文档" ── */}

@@ -22,6 +22,7 @@ import {
   dataSourceNextStep,
   readDataSource,
   removeDataSource,
+  resetScheduleFailures,
   scanDataSources,
   syncDataSource,
   withManagedCloneLock,
@@ -533,6 +534,11 @@ program
         }
         for (const warning of res.summary.warnings ?? []) process.stderr.write(`⚠ ${warning.message}\n`);
         if (res.summary.state === 'partial') process.stderr.write('⚠ 部分文件未完成，详见 datasource.json 的 lastSync.result.failures\n');
+        // 与 daemon 路径（daemon-dispatch 的 datasource-sync 分支）同口径：
+        // 手动同步成功/部分成功清零「自动同步连续失败」，否则 CLI 直连修好后页面仍显示「连续失败 N 次」
+        if (res.summary.state === 'ok' || res.summary.state === 'partial') {
+          await resetScheduleFailures(scope);
+        }
       } else {
         printJson(res);
         if (!settled) { task.finish('failed', { errorCode: res.code, error: res.error }); settled = true; }

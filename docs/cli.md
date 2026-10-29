@@ -137,7 +137,7 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ## datasource
 
-本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录 30 分钟一次，CLI 可强制）。
+本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录手动同步冷却 30 分钟，CLI 可强制）。
 
 ```bash
 ki datasource add --scope <s> --source <dir> [--type git|directory] [--group <g>] \
@@ -172,7 +172,8 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 - 清单落 `<kbDir>/datasource.json`（每 scope 一个，0600 原子写）；**不写** `group-index.json.source` —— `sync_relation` 的 wiki 写回不会指向用户源目录
 - `--type`：缺省自动探测目录是否为 Git 仓库；`git` 显式要求（探测失败 fail-loud）；`directory` 显式关闭增量（即使目录是仓库也按全量）
 - Git 数据源同步：`git fetch` + 自动更新（本地仓库只 `merge --ff-only`；工具托管的 clone 才 `reset --hard` + `clean`），只导入 tracked 变更；untracked 不进入增量，页面/CLI 会给出计数警告；首次同步无 commit 水位 → 全量；`--full` 处理全部文件（含 untracked）。commit 水位只在本次同步完整成功时推进
-- 页面同步：普通目录成功同步后 30 分钟内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409
+- 页面手动同步：普通目录成功同步后 30 分钟冷却内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409。**30 分钟是手动冷却，不是自动同步**
+- 定时同步（REQ-20261029-001）：配置**只在页面**（数据源列表操作列「定时」弹窗），无 CLI 配置命令；计划落 `<kbDir>/datasource.json` 的 `schedule` 字段，默认关闭，`directory` / `git` 均可开启。调度器**只在 HTTP daemon 内运行**（无 daemon 即不调度），没有任何启用计划时不建定时器；到期后全局同时最多 1 个自动同步，同 scope 已有运行中/排队任务、或共享托管 clone 忙时**跳过本次**（不排队、不建任务、不计失败）。daemon 启动时若已过预定时间，会补跑一次。连续失败只累计与提示，不阻断下个周期。定时同步同样**只导入 + 算候选，永不删除**；`KI_DISABLE_DATASOURCE_SCHEDULER=1` 可整体关闭调度（测试/开发用），当前状态见 `/healthz` 的 `datasourceScheduler`
 - `sync` 只导入 + 计算待删候选：候选只在「上一次成功同步见过的 rel 集合」内产生，首次同步零候选；**永不删除**，库内文档数只增不减
 - `--dry-run` 零写入（不导入、不写 `lastSync`，也不 fetch/自动更新）
 - `prune` 执行时服务端按**当前源目录**重算候选并与 `token` 比对（失配 `409`），只删「所选 ∩ 可见候选」，且**不动源目录文件**（`wikiDelete:false`）
