@@ -35,6 +35,12 @@ export interface DataSourceSchedule {
   repeat: DataSourceScheduleRepeat | null;
   /** 配置版本；每次页面保存 +1，用于多标签页乐观锁 */
   revision: number;
+  /**
+   * 启用锚点：由服务端在「关闭 → 开启」时写入（客户端不可写）。
+   * ★ 周期模式必须有持久锚点：从未同步过的数据源没有 `lastSync.at`，
+   *   若以 `now` 当基准，`nextRunAt` 会随每次读取向后滑，`due` 永远为 false ⇒ 永不触发。
+   */
+  enabledAt: number | null;
 
   consecutiveFailures: number;
   lastAutoAt: number | null;

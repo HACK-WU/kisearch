@@ -30,6 +30,7 @@ export function defaultDataSourceSchedule(): DataSourceSchedule {
     at: null,
     repeat: 'once',
     revision: 0,
+    enabledAt: null,
     consecutiveFailures: 0,
     lastAutoAt: null,
     lastAutoFor: null,
@@ -105,6 +106,7 @@ export function normalizeDataSourceSchedule(raw: unknown): DataSourceSchedule {
     at: typeof v.at === 'string' && AT_RE.test(v.at) && parseAtLocal(v.at) !== null ? v.at : null,
     repeat: toRepeat(v.repeat),
     revision: toInteger(v.revision, 0, Number.MAX_SAFE_INTEGER) ?? 0,
+    enabledAt: typeof v.enabledAt === 'number' && Number.isFinite(v.enabledAt) && v.enabledAt > 0 ? v.enabledAt : null,
     consecutiveFailures: toInteger(v.consecutiveFailures, 0, Number.MAX_SAFE_INTEGER) ?? 0,
     lastAutoAt: typeof v.lastAutoAt === 'number' && Number.isFinite(v.lastAutoAt) ? v.lastAutoAt : null,
     lastAutoFor: typeof v.lastAutoFor === 'number' && Number.isFinite(v.lastAutoFor) ? v.lastAutoFor : null,
@@ -115,7 +117,8 @@ export function normalizeDataSourceSchedule(raw: unknown): DataSourceSchedule {
     lastSkipReason: typeof v.lastSkipReason === 'string' ? v.lastSkipReason : null,
     lastSkipAt: typeof v.lastSkipAt === 'number' && Number.isFinite(v.lastSkipAt) ? v.lastSkipAt : null,
   };
-  if (!schedule.enabled) return schedule;
+  // 不变式：关闭的计划不留启用锚点（手改/旧版本写进来的也一并清掉）
+  if (!schedule.enabled) return { ...schedule, enabledAt: null };
 
   const usable = schedule.mode === 'interval'
     ? isValidInterval(schedule)
@@ -124,6 +127,8 @@ export function normalizeDataSourceSchedule(raw: unknown): DataSourceSchedule {
   return {
     ...schedule,
     enabled: false,
+    // 同一条不变式：enabled=false ⇒ 不留启用锚点（否则修好配置再开启时不该沿用旧锚点）
+    enabledAt: null,
     lastSkipReason: 'invalid-schedule',
   };
 }
@@ -192,7 +197,10 @@ const NEVER: NextRunResult = { nextRunAt: null, due: false, occurrence: null };
 
 /**
  * 计算下次运行。
- * 周期模式从「上次同步完成」起算（`lastSync.at`，无则 `lastAutoAt`）；首次开启等满一个周期。
+ * 周期模式从「上次同步完成」起算（`lastSync.at`，其次 `lastAutoAt`，再次启用锚点 `enabledAt`）；
+ * 首次开启等满一个周期。
+ * ★ 锚点必须是**持久化**的：早期实现以 `now` 为基准兜底，导致"从未同步过的源"每次读取都把
+ *   `nextRunAt` 推到 `now + interval`、`due` 永远为 false ⇒ 定时永不触发（2026-10-29 修复）。
  * 指定时间模式以 `lastAutoFor` 判断某个槽位是否已执行。
  */
 export function computeNextRun(input: {
@@ -207,8 +215,15 @@ export function computeNextRun(input: {
     const minutes = intervalMinutes(schedule.intervalValue, schedule.intervalUnit);
     if (minutes === null || minutes < MIN_INTERVAL_MINUTES || minutes > MAX_INTERVAL_MINUTES) return NEVER;
     const intervalMs = minutes * 60_000;
-    const base = Math.max(input.lastSyncAt ?? 0, schedule.lastAutoAt ?? 0);
-    if (base === 0) return { nextRunAt: now + intervalMs, due: false, occurrence: null };
+    const base = Math.max(input.lastSyncAt ?? 0, schedule.lastAutoAt ?? 0, schedule.enabledAt ?? 0);
+    /**
+     * 三个基准都缺失 = **锚点字段出现之前**写入的旧记录，或从旧快照 `restore` 回来的记录
+     * （正常开启路径一定会写 `enabledAt`，不会是 0）。
+     * 无法知道它已经等了多久 ⇒ 按"已到期"处理、补跑一次（用户 2026-10-29 决策 D1-A）；
+     * 跑完 `lastAutoAt` 落定，之后回到正常节奏。若早前用 `now + interval` 兜底，
+     * 下次时间会随每次读取向后滑，`due` 恒为 false ⇒ 永远不跑。
+     */
+    if (base === 0) return { nextRunAt: now, due: true, occurrence: null };
     const nextRunAt = base + intervalMs;
     return { nextRunAt, due: nextRunAt <= now, occurrence: null };
   }
@@ -275,4 +290,82 @@ export function describeSchedule(schedule: DataSourceSchedule): string {
   }
   const repeat = schedule.repeat === 'daily' ? '每天' : '仅一次';
   return `${schedule.at ?? '未设置'} · ${repeat}`;
+}
+
+const UNIT_LABEL: Record<DataSourceScheduleUnit, string> = { minute: '分钟', hour: '小时', day: '天' };
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/** 同一自然日只给 `HH:mm`（脚注一行放得下），跨日给 `MM-DD HH:mm` */
+function formatMoment(ms: number, now: number): string {
+  const at = new Date(ms);
+  const today = new Date(now);
+  const sameDay = at.getFullYear() === today.getFullYear()
+    && at.getMonth() === today.getMonth()
+    && at.getDate() === today.getDate();
+  const hm = `${pad2(at.getHours())}:${pad2(at.getMinutes())}`;
+  return sameDay ? hm : `${pad2(at.getMonth() + 1)}-${pad2(at.getDate())} ${hm}`;
+}
+
+/**
+ * 用户填写的绝对时刻 `YYYY-MM-DD HH:mm`。
+ * ★ 不能用 `schedule.at` 原文直接展示：它是 `2026-11-01T09:30`（带 `T`），
+ *   与表格/页面其它时间口径不一致，跨年时也不能省年份。
+ */
+function formatAbsolute(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+export interface ScheduleListSummary {
+  /** 计划是否启用（关闭的不进 `datasource list` 脚注） */
+  enabled: boolean;
+  /** 连续失败 ≥3：调用方据此加告警标记 */
+  warn: boolean;
+  text: string;
+}
+
+/**
+ * `ki datasource list` 的紧凑一行（只读展示；配置入口只在页面）。
+ * 与 `describeSchedule` 的分工：那个是"配置是什么"，这个是"接下来会怎样"
+ * —— 都基于 `computeNextRun` 的同一套判定，避免 CLI 与页面各算一份下次时间。
+ */
+export function scheduleListSummary(input: {
+  schedule: DataSourceSchedule;
+  lastSyncAt?: number | null;
+  now: number;
+}): ScheduleListSummary {
+  const { schedule, now } = input;
+  if (!schedule?.enabled) return { enabled: false, warn: false, text: '关闭' };
+  const warn = schedule.consecutiveFailures >= 3;
+  const next = computeNextRun({ schedule, lastSyncAt: input.lastSyncAt ?? null, now });
+  const when = next.nextRunAt === null
+    ? '无下次'
+    : next.due
+      ? '待补跑'
+      : `下次 ${formatMoment(next.nextRunAt, now)}`;
+  const failSuffix = warn ? ` · 连续失败 ${schedule.consecutiveFailures} 次` : '';
+
+  if (schedule.mode === 'interval') {
+    const unit = schedule.intervalUnit ?? 'hour';
+    return { enabled: true, warn, text: `每${schedule.intervalValue ?? '?'}${UNIT_LABEL[unit]} · ${when}${failSuffix}` };
+  }
+
+  if (schedule.repeat === 'once') {
+    // 仅一次跑完会自动关闭（applyScheduleRunResult）；走到这里说明还没跑、上次被取消，或用户又把它打开了
+    const executed = schedule.lastAutoFor !== null && schedule.lastAutoState !== null;
+    const atMs = parseAtLocal(schedule.at);
+    const text = executed
+      ? '仅一次 · 已执行'
+      : next.due
+        ? '仅一次 · 待补跑'
+        : `仅一次 ${atMs === null ? (schedule.at ?? '未设置') : formatAbsolute(atMs)}`;
+    return { enabled: true, warn, text: `${text}${failSuffix}` };
+  }
+
+  const atMs = parseAtLocal(schedule.at);
+  const hm = atMs === null ? (schedule.at ?? '未设置') : `${pad2(new Date(atMs).getHours())}:${pad2(new Date(atMs).getMinutes())}`;
+  return { enabled: true, warn, text: `每天 ${hm} · ${when}${failSuffix}` };
 }

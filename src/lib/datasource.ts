@@ -1688,6 +1688,15 @@ export async function saveDataSourceSchedule(input: {
         };
       }
       const atChanged = value.mode === 'at' && value.at !== prev.schedule.at;
+      /**
+       * 启用锚点：只在「关闭 → 开启」时写一次，之后改间隔沿用旧锚点
+       * （否则每次保存都把周期起点往后推，等于永不触发）；关闭时清空，再开重新等一个周期。
+       */
+      const enabledAt = !value.enabled
+        ? null
+        : prev.schedule.enabled === false || prev.schedule.enabledAt === null
+          ? Date.now()
+          : prev.schedule.enabledAt;
       const schedule: DataSourceSchedule = {
         ...prev.schedule,
         enabled: value.enabled,
@@ -1697,6 +1706,7 @@ export async function saveDataSourceSchedule(input: {
         at: value.at,
         repeat: value.repeat,
         revision: prev.schedule.revision + 1,
+        enabledAt,
         ...(atChanged ? { lastAutoFor: null, lastAutoState: null } : {}),
       };
       if (schedule.enabled && schedule.mode === 'at' && schedule.repeat === 'once') {
@@ -1767,6 +1777,8 @@ export function applyScheduleRunResult(scope: string, result: {
   // 仅一次：非跳过完成即关闭（cancelled 留给下次补跑）
   if (schedule.mode === 'at' && schedule.repeat === 'once' && result.outcome !== 'cancelled') {
     schedule.enabled = false;
+    // 不变式：enabled=false ⇒ enabledAt=null（关闭的计划不留启用锚点，重新开启时由保存路径写新锚点）
+    schedule.enabledAt = null;
   }
   writeDataSource(scope, { ...prev, schedule });
 }

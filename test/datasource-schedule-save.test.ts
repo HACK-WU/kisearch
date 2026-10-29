@@ -200,4 +200,42 @@ describe('saveDataSourceSchedule', () => {
     assert.equal(read.record.schedule.enabled, false);
     assert.equal(read.record.schedule.lastAutoState, 'ok');
   });
+
+  it('★ 启用锚点：开启时写入、改间隔不重置、关闭清空（否则周期永不触发）', async () => {
+    const save = (schedule: Record<string, unknown>) => saveDataSourceSchedule({
+      scope, config: loadConfig(), schedule: { at: null, repeat: null, ...schedule },
+    });
+
+    // 关闭态：锚点为空
+    const off = readDataSource(scope);
+    assert.equal(off.ok, true);
+    if (!off.ok) return;
+    assert.equal(off.record.schedule.enabled, false);
+    assert.equal(off.record.schedule.enabledAt, null);
+
+    // 首次开启 → 写入锚点
+    const opened = await save({ enabled: true, mode: 'interval', intervalValue: 30, intervalUnit: 'minute' });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    const anchor = opened.record.schedule.enabledAt;
+    assert.equal(typeof anchor, 'number');
+    assert.ok((anchor as number) > 0);
+
+    // 改间隔（仍启用）→ 锚点不动，否则每次保存都把周期起点推后
+    const tweaked = await save({ enabled: true, mode: 'interval', intervalValue: 5, intervalUnit: 'minute' });
+    assert.equal(tweaked.ok, true);
+    if (!tweaked.ok) return;
+    assert.equal(tweaked.record.schedule.enabledAt, anchor);
+    assert.equal(tweaked.record.schedule.intervalValue, 5);
+
+    // 关闭 → 清空；再开 → 新锚点
+    const closed = await save({ enabled: false, mode: 'interval', intervalValue: 5, intervalUnit: 'minute' });
+    assert.equal(closed.ok, true);
+    if (!closed.ok) return;
+    assert.equal(closed.record.schedule.enabledAt, null);
+    const reopened = await save({ enabled: true, mode: 'interval', intervalValue: 5, intervalUnit: 'minute' });
+    assert.equal(reopened.ok, true);
+    if (!reopened.ok) return;
+    assert.equal(typeof reopened.record.schedule.enabledAt, 'number');
+  });
 });

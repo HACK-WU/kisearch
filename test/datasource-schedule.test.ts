@@ -11,6 +11,7 @@ import {
   describeSchedule,
   normalizeDataSourceSchedule,
   parseAtLocal,
+  scheduleListSummary,
   toScheduleView,
   validateScheduleInput,
 } from '../src/lib/datasource-schedule.js';
@@ -117,10 +118,20 @@ describe('validateScheduleInput', () => {
 describe('computeNextRun · interval', () => {
   const schedule = { ...defaultDataSourceSchedule(), enabled: true, mode: 'interval' as const, intervalValue: 30, intervalUnit: 'minute' as const };
 
-  it('无 lastSync → now + interval，不立即跑', () => {
-    const r = computeNextRun({ schedule, lastSyncAt: null, now: NOW });
+  it('有启用锚点、从未同步 → 锚点 + interval，不立即跑（首次开启等满一个周期）', () => {
+    const r = computeNextRun({ schedule: { ...schedule, enabledAt: NOW }, lastSyncAt: null, now: NOW });
     assert.equal(r.nextRunAt, NOW + 30 * 60_000);
     assert.equal(r.due, false);
+  });
+
+  it('★ 无任何基准（锚点字段出现前的旧记录 / 从旧快照恢复）→ 视为已到期，补跑一次（决策 D1-A）', () => {
+    const r = computeNextRun({ schedule, lastSyncAt: null, now: NOW });
+    assert.equal(r.due, true, '旧记录不能落入"永远不 due"的坑');
+    assert.equal(r.nextRunAt, NOW);
+    // 跑完 lastAutoAt 落定后回到正常节奏
+    const afterRun = computeNextRun({ schedule: { ...schedule, lastAutoAt: NOW }, lastSyncAt: null, now: NOW });
+    assert.equal(afterRun.due, false);
+    assert.equal(afterRun.nextRunAt, NOW + 30 * 60_000);
   });
 
   it('上次完成已超过间隔 → 到期补跑', () => {
@@ -138,6 +149,26 @@ describe('computeNextRun · interval', () => {
   it('关闭态无下次', () => {
     const r = computeNextRun({ schedule: { ...schedule, enabled: false }, lastSyncAt: NOW, now: NOW });
     assert.equal(r.nextRunAt, null);
+  });
+
+  it('★ 从未同步过：有启用锚点时到点必须 due（否则定时永不触发）', () => {
+    const anchored = { ...schedule, enabledAt: NOW };
+    // 读多少次都一样：不能被 now 推着走
+    for (const offset of [0, 1, 29]) {
+      const r = computeNextRun({ schedule: anchored, lastSyncAt: null, now: NOW + offset * 60_000 });
+      assert.equal(r.nextRunAt, NOW + 30 * 60_000, `offset=${offset}min 的下次时间被 now 推走了`);
+      assert.equal(r.due, false);
+    }
+    const atDue = computeNextRun({ schedule: anchored, lastSyncAt: null, now: NOW + 30 * 60_000 });
+    assert.equal(atDue.due, true);
+    assert.equal(atDue.nextRunAt, NOW + 30 * 60_000, '到期后仍指向同一个槽位，供补跑使用');
+  });
+
+  it('lastSync / lastAutoAt 优先于启用锚点（锚点只兜底）', () => {
+    const mixed = { ...schedule, enabledAt: NOW - 90 * 60_000, lastAutoAt: NOW - 10 * 60_000 };
+    const r = computeNextRun({ schedule: mixed, lastSyncAt: NOW - 5 * 60_000, now: NOW });
+    assert.equal(r.nextRunAt, NOW + 25 * 60_000, '应从更近的 lastSync.at 起算');
+    assert.equal(r.due, false);
   });
 });
 
@@ -183,5 +214,83 @@ describe('toScheduleView / describeSchedule', () => {
     assert.equal(describeSchedule({
       ...defaultDataSourceSchedule(), enabled: true, mode: 'at', at: '2026-11-01T09:00', repeat: 'daily',
     }), '2026-11-01T09:00 · 每天');
+  });
+});
+
+describe('scheduleListSummary（`datasource list` 只读脚注）', () => {
+  const base = { ...defaultDataSourceSchedule(), enabled: true };
+  const summarize = (schedule: typeof base, lastSyncAt: number | null = null) =>
+    scheduleListSummary({ schedule, lastSyncAt, now: NOW });
+
+  it('关闭的计划不进脚注', () => {
+    const summary = summarize({ ...base, enabled: false });
+    assert.equal(summary.enabled, false);
+    assert.equal(summary.text, '关闭');
+  });
+
+  it('周期：模式 + 同日下次只给时分（脚注一行放得下）', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 30, intervalUnit: 'minute' },
+      new Date(2026, 9, 29, 9, 50).getTime());
+    assert.deepEqual(summary, { enabled: true, warn: false, text: '每30分钟 · 下次 10:20' });
+  });
+
+  it('已有启用锚点：下次时间稳定，不随读取时刻滑移', () => {
+    const schedule = {
+      ...base, mode: 'interval' as const, intervalValue: 30, intervalUnit: 'minute' as const,
+      enabledAt: NOW - 10 * 60_000,
+    };
+    const first = scheduleListSummary({ schedule, lastSyncAt: null, now: NOW });
+    const later = scheduleListSummary({ schedule, lastSyncAt: null, now: NOW + 5 * 60_000 });
+    assert.equal(first.text, '每30分钟 · 下次 10:20');
+    assert.equal(later.text, '每30分钟 · 下次 10:20', '两次读取必须给出同一个下次时间');
+  });
+
+  it('周期：跨自然日给出 MM-DD', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 2, intervalUnit: 'day' },
+      new Date(2026, 9, 29, 9, 0).getTime());
+    assert.equal(summary.text, '每2天 · 下次 10-31 09:00');
+  });
+
+  it('已到期显示「待补跑」而不是过去的时刻', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 30, intervalUnit: 'minute' },
+      new Date(2026, 9, 29, 8, 0).getTime());
+    assert.equal(summary.text, '每30分钟 · 待补跑');
+  });
+
+  it('有锚点、从未同步：从锚点起算一个周期（与 computeNextRun 同口径）', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 1, intervalUnit: 'hour', enabledAt: NOW });
+    assert.equal(summary.text, '每1小时 · 下次 11:00');
+  });
+
+  it('无锚点的旧记录：标「待补跑」而不是给一个会滑动的"下次"（决策 D1-A）', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 1, intervalUnit: 'hour' });
+    assert.equal(summary.text, '每1小时 · 待补跑');
+  });
+
+  it('每天：给出固定时刻 + 下次', () => {
+    const summary = summarize({ ...base, mode: 'at', at: localAt(2026, 10, 20, 9, 0), repeat: 'daily' });
+    assert.equal(summary.text, '每天 09:00 · 待补跑');
+  });
+
+  it('仅一次：未执行给时刻，被取消后仍启用时给「已执行」', () => {
+    assert.equal(
+      summarize({ ...base, mode: 'at', at: localAt(2026, 11, 1, 9, 30), repeat: 'once' }).text,
+      '仅一次 2026-11-01 09:30', // 不用 at 原文（带 T），与表格/页面时间口径一致
+    );
+    assert.equal(
+      summarize({
+        ...base, mode: 'at', at: localAt(2026, 11, 1, 9, 30), repeat: 'once',
+        lastAutoFor: parseAtLocal(localAt(2026, 11, 1, 9, 30)), lastAutoState: 'cancelled',
+      }).text,
+      '仅一次 · 已执行',
+    );
+  });
+
+  it('连续失败 ≥3：标 warn 并写出次数（不阻断下个周期）', () => {
+    const summary = summarize({ ...base, mode: 'interval', intervalValue: 30, intervalUnit: 'minute', consecutiveFailures: 3 },
+      new Date(2026, 9, 29, 9, 50).getTime());
+    assert.equal(summary.warn, true);
+    assert.equal(summary.text, '每30分钟 · 下次 10:20 · 连续失败 3 次');
+    assert.equal(summarize({ ...base, consecutiveFailures: 2 }).warn, false);
   });
 });

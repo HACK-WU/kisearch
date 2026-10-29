@@ -4,6 +4,7 @@
  * 抽成纯函数放 lib：`src/datasource.ts` 顶层会 parse argv，测试无法直接 import。
  */
 
+import { scheduleListSummary } from './datasource-schedule.js';
 import type { DataSourceRecord, DataSourceSyncState } from './datasource-types.js';
 
 export interface DataSourceListEntry {
@@ -29,6 +30,12 @@ export interface DataSourceListModel {
   sharedDirs: { dir: string; scopes: string[] }[];
   /** 显式指定落点 Group 的数据源（null = 按顶层子目录自动，不在此列） */
   explicitGroups: { scope: string; group: string }[];
+  /**
+   * 已启用定时计划的数据源（只读展示）。
+   * ★ 刻意不进表格：定时是"附加状态"，多一列会把 6 列的窄终端挤到溢出；
+   *   放在表格脚注里能写全「模式 + 下次 + 连续失败」，也不动既有的列对齐断言。
+   */
+  schedules: { scope: string; text: string; warn: boolean }[];
 }
 
 export const SYNC_STATE_LABEL: Record<DataSourceSyncState, string> = {
@@ -115,8 +122,11 @@ export function shortRemote(url: string): string {
   }
 }
 
-/** 记录 → 表格行（含同目录标记、仓库身份、待删口径） */
-export function buildDataSourceList(entries: DataSourceListEntry[]): DataSourceListModel {
+/**
+ * 记录 → 表格行（含同目录标记、仓库身份、待删口径）+ 启用中的定时计划脚注。
+ * `now` 可注入，便于测试「待补跑 / 同日 / 跨日」三种展示而不依赖真实时钟。
+ */
+export function buildDataSourceList(entries: DataSourceListEntry[], now = Date.now()): DataSourceListModel {
   const scopeByDir = new Map<string, string[]>();
   for (const { scope, record } of entries) {
     if (record.git?.managed) continue;
@@ -156,6 +166,14 @@ export function buildDataSourceList(entries: DataSourceListEntry[]): DataSourceL
     explicitGroups: entries
       .filter(({ record }) => record.group !== null)
       .map(({ scope, record }) => ({ scope, group: record.group as string })),
+    // 旧记录/旧测试夹具可能没有 schedule 字段：缺省视为未配置，不进脚注
+    schedules: entries
+      .map(({ scope, record }) => ({
+        scope,
+        summary: scheduleListSummary({ schedule: record.schedule, lastSyncAt: record.lastSync?.at ?? null, now }),
+      }))
+      .filter(({ summary }) => summary.enabled)
+      .map(({ scope, summary }) => ({ scope, text: summary.text, warn: summary.warn })),
   };
 }
 

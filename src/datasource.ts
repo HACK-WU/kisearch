@@ -38,9 +38,11 @@ import { closeFtsEngine } from './lib/fts-client.js';
 import type { DataSourceRecord } from './lib/datasource-types.js';
 import {
   buildDataSourceList,
+  displayWidth,
   renderDataSourceTable,
   sanitizeTerminalText,
 } from './lib/datasource-format.js';
+import { toScheduleView } from './lib/datasource-schedule.js';
 
 const program = new Command();
 program
@@ -249,6 +251,9 @@ program
               },
             }
             : null,
+          // 只读展示（REQ-20261029-001 / A5）：与 `/api/datasource/list` 同一口径（含 nextRunAt），
+          // 配置入口仍只在页面 —— 这里只增字段，不改既有字段语义。
+          schedule: toScheduleView(record.schedule, record.lastSync),
         })),
         missing: scan.missing,
         corrupt: scan.corrupt,
@@ -272,6 +277,20 @@ program
         const hint = index === 0 ? '（未列出的按顶层子目录自动）' : '';
         console.log(`  落点 Group：${sanitizeTerminalText(scope)} → ${sanitizeTerminalText(group)}${hint}`);
       });
+      /**
+       * 定时计划脚注（只读）。只在**有启用计划**时出现，默认关闭的用户输出与旧版逐字符一致；
+       * 不放进表格：6 列已是窄终端上限，多一列会溢出，且脚注能写全「模式 + 下次 + 连续失败」。
+       */
+      if (model.schedules.length > 0) {
+        const label = '定时：';
+        const indent = ' '.repeat(displayWidth(label));
+        model.schedules.forEach((item, index) => {
+          const prefix = index === 0 ? label : indent;
+          const mark = item.warn ? '⚠ ' : '';
+          console.log(`  ${prefix}${mark}${sanitizeTerminalText(item.scope)} ${sanitizeTerminalText(item.text)}`);
+        });
+        console.log('  （只读；修改定时请到页面「数据源 → 定时」）');
+      }
       console.log('');
     }
     for (const item of scan.missing) console.error(`⚠ ${item.scope} 目录不可读：${item.reason}`);

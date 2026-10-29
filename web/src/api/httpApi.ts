@@ -733,6 +733,8 @@ export interface DataSourceScheduleView {
   at: string | null;
   repeat: DataSourceScheduleRepeat | null;
   revision: number;
+  /** 启用锚点（服务端写，客户端只读）：周期模式的起算基准之一，旧 daemon 不返回 */
+  enabledAt?: number | null;
   consecutiveFailures: number;
   lastAutoAt: number | null;
   lastAutoFor: number | null;
