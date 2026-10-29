@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { MAX_TOPK as ENGINE_MAX_TOPK } from '../src/zvec-engine/search/router.js';
 
 // ─── 测试环境 ───
 
@@ -44,8 +45,14 @@ let mockSearchResultsByTag: Record<string, any[]> | null = null;
 let mockStoreResult = { docId: 'mock_doc_id_1234567890abcdef' };
 let mockBulkResult = { total: 1, succeeded: 1, failed: 0, results: [{ index: 0, memoryId: 'mock_bulk_id', success: true }] };
 let mockSearchCalls: any[] = [];
+let mockFullTextCalls: any[] = [];
 let mockStoreCalls: any[] = [];
 let mockBulkCalls: any[] = [];
+const DEFAULT_MOCK_TAGS = [
+  { tag: 'ki-search', count: 1 },
+  { tag: 'ki-relation', count: 1 },
+];
+let mockTags = DEFAULT_MOCK_TAGS;
 
 async function loadModulesWithMock() {
   // 先 import vector-client（会读 KI_CONFIG_PATH）
@@ -72,13 +79,15 @@ async function loadModulesWithMock() {
     return src.slice(0, params.limit ?? 10);
   };
 
+  (vectorClientModule as any).fullTextSearch = async (params: any) => {
+    mockFullTextCalls.push(params);
+    return mockSearchResults;
+  };
+
   (vectorClientModule as any).vectorListTags = async () => {
     return {
-      tags: [
-        { tag: 'ki-search', count: 1 },
-        { tag: 'ki-relation', count: 1 },
-      ],
-      scanned: 2,
+      tags: mockTags,
+      scanned: mockTags.length,
       truncated: false,
     };
   };
@@ -188,11 +197,11 @@ describe('CLI 纯函数 · executeSearch', () => {
     assert.equal(mockSearchCalls[0].limit, 20); // limit 默认 10 × 2 个 tag
   });
 
-  it('默认搜全部：per-tag 限流 + ki-search 优先排序', async () => {
+  it('默认搜全部：per-tag 取候选 + ki-search 优先 + 全局 limit 截断', async () => {
     mockSearchCalls = [];
     mockSearchResultsByTag = {
       // 单次查询返回全部 tag 混合结果（模拟引擎按 score 降序），ki-search 4 条
-      // 超过 limit=3 应截断为 3；ki-relation 的 r1 score 最高但排在 ki-search 之后
+      // 每 tag 先取 limit=3 条候选；最终全局只保留 3 条，且 ki-search 内容优先
       'ki-search,ki-relation': [
         { memoryId: 'r1', content: '关系A', score: 0.03, tag: 'ki-relation' },
         { memoryId: 's1', content: '内容A', score: 0.02, tag: 'ki-search' },
@@ -208,20 +217,98 @@ describe('CLI 纯函数 · executeSearch', () => {
     });
     assert.equal(r.ok, true);
     if (r.ok) {
-      // per-tag 限流：ki-search 截断为 3 条，ki-relation 仅 1 条 → 共 4 条
-      assert.equal(r.results.length, 4);
-      // ki-search 内容优先：前 3 条 ki-search，最后 ki-relation
+      // limit 是总返回条数上限：per-tag 候选 4 条 → 最终只保留 3 条
+      assert.equal(r.results.length, 3);
+      // ki-search 内容优先：3 条全部来自 ki-search（r1 分数更高也让位）
       assert.deepEqual(
         r.results.map((x: any) => x.tag),
-        ['ki-search', 'ki-search', 'ki-search', 'ki-relation']
+        ['ki-search', 'ki-search', 'ki-search']
       );
       // 组内按 score 降序（s4 被 limit 截断）
       assert.deepEqual(
         r.results.map((x: any) => x.memoryId),
-        ['s1', 's2', 's3', 'r1']
+        ['s1', 's2', 's3']
       );
     }
     mockSearchResultsByTag = null; // 恢复默认 mock 行为
+  });
+
+  it('未传 tags：limit 是总返回条数上限（不再按每个 tag 各返回 limit 条）', async () => {
+    mockSearchResultsByTag = {
+      'ki-search,ki-relation': [
+        { memoryId: 's1', content: '内容A', score: 0.02, tag: 'ki-search' },
+        { memoryId: 'r1', content: '关系A', score: 0.03, tag: 'ki-relation' },
+      ],
+    };
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({ scope: 'test', query: 'test', limit: 1 });
+    mockSearchResultsByTag = null;
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.results.length, 1);
+      // ki-search 内容优先：分数更高的 ki-relation 也让位
+      assert.equal(r.results[0].memoryId, 's1');
+    }
+  });
+
+  it('未传 tags：tag 数 × limit 超过引擎上限时 topk 收敛到 1000 并显式提示', async () => {
+    mockTags = Array.from({ length: 200 }, (_, i) => ({ tag: `t${i}`, count: 1 }));
+    mockSearchResults = [];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({ scope: 'test', query: 'test', limit: 10 });
+    mockTags = DEFAULT_MOCK_TAGS;
+    assert.equal(r.ok, true);
+    // 200 × 10 = 2000 → 收敛到引擎硬上限，不再让引擎抛 topk exceeds max
+    assert.equal(mockSearchCalls[0].limit, ENGINE_MAX_TOPK);
+    if (r.ok) {
+      assert.ok(
+        r.skipped?.some((s) => s.reason.includes(String(ENGINE_MAX_TOPK))),
+        `skipped=${JSON.stringify(r.skipped)}`
+      );
+    }
+  });
+
+  it('显式 tags：limit 超过引擎上限时 topk 收敛到 1000 并显式提示', async () => {
+    mockSearchResults = [];
+    mockSearchCalls = [];
+    const r = await searchModule.executeSearch({
+      scope: 'test',
+      query: 'test',
+      tags: 'ki-search',
+      limit: 2000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(mockSearchCalls[0].limit, ENGINE_MAX_TOPK);
+    if (r.ok) {
+      assert.ok(
+        r.skipped?.some((s) => s.reason.includes(String(ENGINE_MAX_TOPK))),
+        `skipped=${JSON.stringify(r.skipped)}`
+      );
+    }
+  });
+
+  it('fulltext：候选数超过引擎上限时收敛到 1000 并显式提示', async () => {
+    mockSearchResults = [];
+    mockFullTextCalls = [];
+    const r = await searchModule.executeSearch({
+      scope: 'test',
+      query: 'test',
+      mode: 'fulltext',
+      limit: 200,
+    });
+    assert.equal(r.ok, true);
+    // max(200*10, 50) = 2000 → 收敛到引擎上限
+    assert.equal(mockFullTextCalls[0].limit, ENGINE_MAX_TOPK);
+    if (r.ok) {
+      assert.ok(
+        r.skipped?.some((s) => s.reason.includes('全文检索候选数')),
+        `skipped=${JSON.stringify(r.skipped)}`
+      );
+    }
+  });
+
+  it('SEARCH_TOPK_MAX 与引擎 MAX_TOPK 同源', () => {
+    assert.equal(vectorClientModule.SEARCH_TOPK_MAX, ENGINE_MAX_TOPK);
   });
 
   it('默认 limit = 10', async () => {
@@ -363,6 +450,43 @@ describe('CLI 纯函数 · executeBulkStore', () => {
     assert.equal(mockBulkCalls.length, 1);
     assert.equal(mockBulkCalls[0].scope, 'test');
     assert.equal(mockBulkCalls[0].entries.length, 2);
+  });
+
+  it('系统性向量停止返回失败和可恢复的逐项统计', async () => {
+    mockBulkResult = {
+      total: 4,
+      attempted: 2,
+      succeeded: 1,
+      failed: 1,
+      notProcessed: 2,
+      results: [
+        { index: 0, memoryId: 'id1', success: true },
+        { index: 1, error: 'upstream unavailable', success: false },
+        { index: 2, error: 'not attempted', success: false },
+        { index: 3, error: 'not attempted', success: false },
+      ],
+      stopReason: {
+        kind: 'provider-unavailable',
+        code: 'HTTP_503',
+        phase: 'embedding',
+        reason: 'embedding service unavailable',
+      },
+    };
+    fs.writeFileSync(tmpInput, JSON.stringify([
+      { text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'd' },
+    ]), 'utf-8');
+
+    const r = await bulkStoreModule.executeBulkStore({ scope: 'test', inputFile: tmpInput });
+    assert.equal(r.ok, false);
+    if (!r.ok && 'stopReason' in r) {
+      assert.equal(r.stopReason.code, 'HTTP_503');
+      assert.equal(r.total, 4);
+      assert.equal(r.succeeded, 1);
+      assert.equal(r.notProcessed, 2);
+    } else {
+      assert.fail('系统性停止必须以失败和统计返回');
+    }
+    mockBulkResult = { total: 1, succeeded: 1, failed: 0, results: [{ index: 0, memoryId: 'mock_bulk_id', success: true }] };
   });
 
   it('文件不存在返回 ok=false', async () => {

@@ -97,8 +97,8 @@ vector:
 #   2. 环境变量引用：apiKey: \${OPENAI_API_KEY}   # 变量名可自定义，运行时从同名环境变量读取
 # 注：不做任何隐式回退。未配置 apiKey 则向量操作会 fail-loud（避免跨提供商误用密钥）
 embedding:
-  provider: siliconflow                    # embedding 提供方: siliconflow | openai-compatible（均为 OpenAI 兼容）
-  baseURL: https://api.siliconflow.cn/v1   # API 端点（换成其他厂商端点即可对接其他提供商）
+  provider: siliconflow                    # 自由文本，仅用于错误文案展示（如 dashscope / openai-compatible），不校验、不切换实现
+  baseURL: https://api.siliconflow.cn/v1   # 【必须】OpenAI 兼容端点（/embeddings 协议）——实际厂商由它决定，换厂商只改这里
   model: Qwen/Qwen3-Embedding-8B           # 模型名称
   dimension: 4096                          # 向量维度（必须与建库时一致）
   queryTimeoutMs: 3000                     # 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 可按请求覆盖，范围 1-60000
@@ -107,6 +107,7 @@ embedding:
     batchSize: 16                          # 每批文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数
     maxConcurrency: 25                     # 单任务并发（同时在途的 provider 请求数）；遇 429/超时优先下调
     requestTimeoutMs: 60000                # 单次 provider 请求超时（ms）；单批最坏耗时 ≈ 本值 ×(重试次数+1)
+    consecutiveFailureThreshold: 3          # 熔断：连续多少次 provider 调用失败后停止剩余批次（认证/维度/配置类错误不受此保护，首次即停）
     # maxGlobalConcurrency: 25             # daemon 级共享槽位，必须 ≥ maxConcurrency
     # maxPrefetchBatches: 25               # 省略时自动跟随 maxConcurrency（必须 ≥ maxConcurrency），通常无需设置
     # maxBufferedVectorBytes: 67108864

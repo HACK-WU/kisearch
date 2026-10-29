@@ -8,6 +8,12 @@ import { getSharedOperationCoordinator, scopesOf, scopeOf, type OperationRequest
 import { dispatchOperation, supportedOperations } from './daemon-dispatch.js';
 import { getVectorizationMetrics } from './vector-client.js';
 import { readKiVersion } from './version-guard.js';
+import { createTaskReporter, type TaskReporter, type TaskState } from './task-registry.js';
+// REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI 直连、HTTP 端同一实现）
+import { toParamSnapshot, toResultSnapshot, type ImportArgsLike } from './task-snapshot.js';
+import { refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
+// 导入收尾的索引阶段判定（与 web / CLI 直连同口径）
+import { whenIndexMaintenanceIdle, getIndexMaintenanceState } from './index-maintenance.js';
 
 export interface DaemonRpcOptions {
   onShutdown?: () => void;
@@ -57,6 +63,7 @@ interface DaemonJob {
   finishedAt?: number;
   subscribers: Set<net.Socket>;
   emitProgress?: (progress: { phase: string; done: number; total: number; persisted?: number; metadataPending?: number; failed?: number; cancelled?: number }) => void;
+  taskReporter?: TaskReporter;
 }
 
 const daemonJobs = new Map<string, DaemonJob>();
@@ -97,7 +104,14 @@ function jobSummary(job: DaemonJob): Record<string, unknown> {
 }
 
 function classifyJobState(result: unknown, cancelled: boolean, failed: boolean): DaemonJob['state'] {
-  if (cancelled) return 'cancelled';
+  // R1（REQ-20261009-001）：import 在 D2 之后的「取消」= 已提交完成部分 + 未完成清单，
+  // 结果同时带 ok:true + partial:true + cancelled:true。此时终态必须是 partial（与 CLI/Web 同口径），
+  // 不能落成 cancelled——否则任务中心显示「已取消」，与导入页的「部分成功」结论相反，
+  // 且下方 partialCommitted 记账分支不成立（该次提交量会丢失在台账之外）。
+  if (cancelled) {
+    const cancelValue = result as { ok?: boolean; partial?: boolean } | undefined;
+    return cancelValue?.ok === true && cancelValue.partial === true ? 'partial' : 'cancelled';
+  }
   if (failed) return 'failed';
   const value = result as {
     partial?: boolean;
@@ -354,6 +368,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
   const stream = req.streamProgress === true;
   const jobId = (req.jobId ?? '').trim();
   let job: DaemonJob | undefined;
+  let requestConfig: ReturnType<typeof loadConfig> | undefined;
   if (stream) {
     if (!jobId) {
       send(socket, { id: req.id ?? null, ok: false, error: { code: 'DAEMON_JOB_ID_REQUIRED', message: 'streamProgress=true 必须提供 jobId' } });
@@ -364,6 +379,33 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       return;
     }
     const scope = scopeOf(req.params, req.operation);
+    try {
+      requestConfig = loadConfig();
+      assertDaemonIdentityCurrent(requestConfig);
+    } catch (error) {
+      const e = error as Error & { code?: string };
+      send(socket, { id: req.id ?? null, ok: false, error: { code: e.code ?? 'DAEMON_OPERATION_FAILED', message: e.message } });
+      return;
+    }
+    let taskReporter: TaskReporter;
+    try {
+      // REQ-20261019-004：重试血缘由客户端在 params 里透传（CLI --retry-incomplete）
+      const retryOf = (req.params as { retryOf?: unknown } | undefined)?.retryOf;
+      taskReporter = createTaskReporter(requestConfig, {
+        id: jobId,
+        source: 'cli',
+        operation: req.operation,
+        scope,
+        ...(typeof retryOf === 'string' ? { retryOf } : {}),
+      });
+    } catch {
+      send(socket, {
+        id: req.id ?? null,
+        ok: false,
+        error: { code: 'TASK_REGISTRY_UNAVAILABLE', message: '后台任务状态登记失败，操作未启动。请检查数据目录权限后重试。' },
+      });
+      return;
+    }
     job = {
       id: jobId,
       owner,
@@ -375,6 +417,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       eventSeq: 0,
       createdAt: Date.now(),
       subscribers: new Set([socket]),
+      taskReporter,
     };
     daemonJobs.set(jobId, job);
     const tombstone = pendingCancels.get(jobId);
@@ -384,6 +427,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       job.state = 'cancelled';
       job.finishedAt = Date.now();
       job.result = { cancelled: true, jobId, reason: 'cancel requested before execute registration' };
+      job.taskReporter?.finish('cancelled');
       send(socket, { id: req.id ?? null, ok: true, result: job.result, jobId, eventSeq: ++job.eventSeq });
       return;
     }
@@ -404,19 +448,32 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         inFlight: metrics.inFlightRequests,
         bufferedBytes: metrics.bufferedVectorBytes,
       };
+      job.taskReporter?.progress({
+        phase: progress.phase,
+        done: progress.done,
+        total: progress.total,
+        persisted: progress.persisted,
+        metadataPending: progress.metadataPending,
+        failed: progress.failed,
+        cancelled: progress.cancelled,
+      });
       job.eventSeq++;
       for (const subscriber of job.subscribers) {
         send(subscriber, { id: req.id ?? null, type: 'progress', jobId: job.id, eventSeq: job.eventSeq, progress: job.progress });
       }
     };
     job.emitProgress = emitProgress;
+    // REQ-20261019-004：参数快照在**入队之前**写入（排队态的任务详情也能看到本次参数）。
+    // 非导入 operation 时 `toParamSnapshot` 返回 undefined，不会产生无意义字段。
+    job.taskReporter?.update({ params: toParamSnapshot(req.operation, req.params as ImportArgsLike) });
     emitProgress({ phase: 'queued', done: 0, total: 1 });
   }
   const operation: OperationRequest = { operation: req.operation, params: req.params };
   try {
     // 身份漂移必须在**入队之前**拒绝：漂移后 daemon 的路径解析与内存句柄不一致，
     // 排队执行只会把数据写到错误位置。放在 try 内以复用统一的错误响应与失败日志。
-    const requestConfig = loadConfig();
+    requestConfig ??= loadConfig();
+    const executionConfig = requestConfig;
     // 身份检查与快照必须基于同一次读取；否则配置恰好在两次 loadConfig 之间
     // 变化时，可能出现“用旧配置做守卫、用新配置执行”的裂缝。
     assertDaemonIdentityCurrent(requestConfig);
@@ -432,23 +489,81 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
           }
           job.state = 'running';
           job.startedAt = Date.now();
+          job.taskReporter?.update({ state: 'running', startedAt: job.startedAt });
         }
-        return runWithConfigSnapshot(
-          requestConfig,
-          () => dispatchOperation(
-            { operation: req.operation!, params },
-            job ? { jobId: job.id, abortSignal: job.abortController.signal, onProgress: (p: any) => job.emitProgress?.(p) } : {},
-          ),
-        );
+        return runWithConfigSnapshot(executionConfig, async () => {
+          const tracksVectorStatus = ['import', 'rebuild-vector', 'restore-snapshot'].includes(req.operation!);
+          if (tracksVectorStatus) {
+            try { await refreshVectorDimensionSnapshot(executionConfig, scopeOf(params, req.operation)); } catch { /* diagnostics never block the operation */ }
+          }
+          try {
+            return await dispatchOperation(
+              { operation: req.operation!, params },
+              job ? { jobId: job.id, abortSignal: job.abortController.signal, onProgress: (p: any) => job.emitProgress?.(p) } : {},
+            );
+          } finally {
+            if (tracksVectorStatus) {
+              try { await refreshVectorDimensionSnapshot(executionConfig, scopeOf(params, req.operation)); } catch { /* operation outcome remains authoritative */ }
+            }
+          }
+        });
       },
       scopesOf(req.params, req.operation),
+      // S-01（REQ-20261009-003）：**不传 kind** —— 由 coordinator 的 `kindForOperation`
+      // 按 operation 名推导（`import` → engine-only，其余 write）。导入的元数据写已全部
+      // 包在 runMetadataCommit 窗口内，故其向量化长尾不阻塞同 scope 的纯元数据读。
+      // ★ 勿在此硬编码 `req.operation === 'import' ? ... : ...`：两处入口各写一份判断，
+      //   正是上一次漏改（HTTP 端未标）的成因。
     );
     if (job) {
       job.result = outcome.result;
       const value = outcome.result as { cancelled?: boolean; ok?: boolean; errors?: Array<{ type?: string }> } | undefined;
       const cancelled = job.cancelRequested || value?.cancelled === true || value?.errors?.some((e) => e.type === 'cancelled') === true;
-      job.state = classifyJobState(outcome.result, cancelled, value?.ok === false);
+      const nestedFailed = (outcome.result as { rebuildVector?: { ok?: boolean } } | undefined)?.rebuildVector?.ok === false;
+      job.state = classifyJobState(outcome.result, cancelled, value?.ok === false || nestedFailed);
       job.finishedAt = Date.now();
+      const taskState: TaskState = job.state === 'succeeded' || job.state === 'partial' || job.state === 'failed' || job.state === 'cancelled'
+        ? job.state
+        : 'failed';
+      const resultValue = outcome.result as {
+        error?: string;
+        errors?: Array<{ error?: string }>;
+        stats?: { succeeded?: number; vectorized?: number; partialCommitted?: number };
+        rebuildVector?: { error?: string; errors?: Array<{ error?: string }>; stats?: { succeeded?: number; partialCommitted?: number } };
+      } | undefined;
+      /**
+       * 索引阶段收尾（2026-10-19，与 web / CLI 直连同口径）。
+       * 此前 phase 只跟随进度事件：**全部文件在 scan 阶段被跳过**（全量 unchanged / 全重复）
+       * 时永远走不到 vectorize/persist，台账 phase 就停在 `scan`，而状态已是"已完成"。
+       * 这里按 `result.indexMaintenance` 收尾：未入队 ⇒ skipped；入队 ⇒ 等落定再定 optimized/available。
+       */
+      if (req.operation === 'import' || req.operation === 'rebuild-vector') {
+        // 两种结果的挂载位置不同：import 在顶层，rebuild 在 `rebuildVector` 下
+        const asImport = outcome.result as { indexMaintenance?: { scheduled?: boolean } } | undefined;
+        const asRebuild = outcome.result as { rebuildVector?: { indexMaintenance?: { scheduled?: boolean } } } | undefined;
+        const maint = asImport?.indexMaintenance ?? asRebuild?.rebuildVector?.indexMaintenance;
+        if (maint?.scheduled) {
+          job.taskReporter?.update({ phase: 'indexing' });
+          await whenIndexMaintenanceIdle(getIndexMaintenanceState().config.timeoutMs);
+          const last = getIndexMaintenanceState().last;
+          job.taskReporter?.update({
+            phase: last?.scope === job.scope && last.ok ? 'optimized' : 'available',
+          });
+        } else {
+          job.taskReporter?.update({ phase: 'skipped' });
+        }
+      }
+      job.taskReporter?.finish(taskState, {
+        error: job.error?.message ?? resultValue?.error ?? resultValue?.errors?.[0]?.error
+          ?? resultValue?.rebuildVector?.error ?? resultValue?.rebuildVector?.errors?.[0]?.error,
+        // import 结果的提交量口径是 stats.vectorized（向量化条目数）；rebuild 仍是 succeeded。
+        partialCommitted: (resultValue as any)?.partialCommitted ?? (resultValue?.rebuildVector as any)?.partialCommitted
+          ?? (taskState === 'succeeded' || taskState === 'partial'
+            ? resultValue?.stats?.succeeded ?? resultValue?.stats?.vectorized ?? resultValue?.rebuildVector?.stats?.succeeded : undefined),
+        recoveryHint: taskState === 'failed' ? '检查命令输出中的失败阶段与恢复建议，修复问题后重试。' : undefined,
+        // REQ-20261019-004：文件级结果摘要（任务中心回看口径）
+        result: toResultSnapshot(req.operation, outcome.result),
+      });
       job.eventSeq++;
       send(socket, { id: req.id ?? null, ok: true, result: outcome.result, queue: outcome.queue, jobId: job.id, eventSeq: job.eventSeq, final: true });
     } else {
@@ -464,6 +579,15 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
         ? 'cancelled'
         : 'failed';
       job.finishedAt = Date.now();
+      job.taskReporter?.finish(job.state, {
+        error: error.message,
+        recoveryHint: job.state === 'failed' ? recoveryHint(error.code) : undefined,
+        partialCommitted: (error as Error & { stats?: { partialCommitted?: number } }).stats?.partialCommitted,
+        // REQ-20261019-004（challenger 意见 1）：失败/取消路径通常没有 `stats.files`，
+        // 只落可判别错误码；文件级 N/M 由 error 文案承载，不虚构数字。
+        errorCode: error.code,
+        result: toResultSnapshot(req.operation, job.result),
+      });
     }
     send(socket, {
       id: req.id ?? null,

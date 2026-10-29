@@ -1,261 +1,94 @@
-# 知识库查询 SKILL
+# 知识库查询
 
-> Agent 日常查询项目知识的核心能力，按优先级走快速路径 → 检索路径 → 知识缺失路径。
+在某个 scope 里找到知识并拿到原文。核心思路：**能按索引定位就别做语义检索**。
 
-## 触发场景
+## 三条路径
 
-- 用户提问涉及项目知识（如"这个模块怎么工作"、"API 怎么调用"）
-- 需要查找特定功能、模块、概念的相关信息
-- 用户显式请求查询知识库
-
-## 三层架构基础
-
-知识索引系统在记忆系统上层构建三层文件系统：
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Layer 1: Group 树索引 (group-index.json)          │
-│  - 层级导航：顶层Group → 子Group → ...              │
-│  - 快速定位目标 Group                              │
-└─────────────────────────────────────────────────────┘
-          ↓
-┌─────────────────────────────────────────────────────┐
-│  Layer 2: Relations 缓存 (relations-cache.json)    │
-│  - 热门 Relation 列表 + 评分                        │
-│  - 冷热分区：hot / warm / cold / emerging         │
-└─────────────────────────────────────────────────────┘
-          ↓
-┌─────────────────────────────────────────────────────┐
-│  Layer 3: 本地 KB (index.json)                     │
-│  - Markdown 模块信息全文                            │
-│  - 按 Group 物理隔离                               │
-└─────────────────────────────────────────────────────┘
+```text
+问题
+├─ 知道大概在哪个 Group   → 路径 1 索引直查（精确、无噪声）
+├─ 只记得自然语言描述     → 路径 2 语义检索（模糊召回）
+└─ 都没有                → 路径 3 问用户要线索，命中后写入
 ```
 
-## 执行流程
+## 路径 1：索引直查
 
-### 决策顺序
+适合「知道在哪，只要读出来」。
 
-```
-用户提问
-  │
-  ├─[1] 快速路径：热门 Relation 直接命中 → 获取模块信息 → 回答
-  │
-  ├─[2] 检索路径：向量语义检索（ki search）→ 回写 Relation
-  │
-  └─[3] 知识缺失路径：均未命中 → 暂停询问用户 → 双写
-```
+```bash
+# 1) 看 Group 树（找目标组）
+ki group list --scope <scope> --mode full
 
----
+# 2) 看某组下有哪些 Relation（可一次看多个组）
+ki group list --scope <scope> --groups "项目/API,项目/前端"
 
-### 路径 1: 快速路径（热门命中）
-
-**适用条件**：目标 Relation 在 `hot_relations` 中（评分高、近期使用过）
-
-**执行步骤**：
-
-1. **查询 Group 的热门 Relation**
-   ```bash
-   ki query-group --scope <scope> --groups <group> --mode hot
-   ```
-
-   > 💡 **向量兜底**：若 Group 路径不精确，CLI 会自动通过向量搜索模糊匹配（如 `"部署运维"` 可匹配 `"部署与运维"`），输出带 `💡 近似匹配` 前缀。Agent 看到此提示即可确认匹配成功，无需人工修正路径。
-
-   输出示例：
-   ```
-   === 项目/API ===
-
-   🔥 热门知识 (Top 5):
-   ├── 用户登录接口 (score: 8.5) [热]
-   ├── 数据查询接口 (score: 6.2) [热]
-   ```
-
-2. **匹配 Relation**
-   - 从输出的 Relation 列表中选择与用户问题最匹配的 Relation
-   - 匹配依据：Relation 名称语义相似度
-
-3. **获取模块信息**
-   ```bash
-   ki get-module-info \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationId或text>
-   ```
-   
-   输出：Markdown 文本（直接输出到 stdout）
-
-4. **回答用户问题**
-   - 基于获取的 Markdown 内容回答
-   - 引用来源：`[来源: <group>/<relation>]`
-
----
-
-### 路径 2: 检索路径（冷门回退）
-
-**适用条件**：快速路径未命中，需语义检索召回
-
-**执行步骤**：
-
-1. **向量语义检索**
-   ```bash
-   ki search --scope <scope> --query "<用户问题>"
-   # 默认仅返回向量匹配数据（不返回原文，REQ-09）；--original 开启返回 local KB 文件级原文。
-   # 跨项目联合召回：--scope 传逗号分隔多个（如 a,b），单次查询、结果统一排序并标注来源 scope
-   ```
-
-   输出包含（默认不传 `--original`）：
-   - 命中的 `memoryId` / `content` / `score` / `group` / `relation`（原文定位字段，按 memoryId 反查 relations-cache）
-   - `original` / `originalRetrieved` / `deduplicated`（仅 `--original` 开启时：返回**文件级原文**，local KB 未清洗原文；同一文件多 chunk 命中去重只返回一次）
-   - `originalHint`（原文获取失败时降级提示，不抛错）
-
-2. **定位原文**
-   - 命中结果反查 `relations-cache` 得到 `relation` / `group`（文件级）
-   - `ki get-module-info --scope <scope> --group <group> --relation <relation>` 读取原文（按文件级 relation 返回整文件原文）
-
-3. **调用 MCP memory_recall**（检索外部记忆）
-   
-   **重要参数**：
-   ```json
-   {
-     "query": "<用户问题>",
-     "limit": 3,
-     "tags": "knowledge-index,<scope>"
-   }
-   ```
-   
-   **常见错误**：
-   - ❌ 使用 `"text"` 参数 → 报错 "Cannot read properties of undefined"
-   - ✅ 必须使用 `"query"` 参数
-
-4. **回写 Relation（提升后续访问速度）**
-   
-   命中后调用：
-   ```bash
-   ki sync-relation \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationText> \
-     --module-info "<markdown内容>"
-   ```
-   
-   同时调用 MCP `memory_store` 双写：
-   ```json
-   {
-     "content": "<markdown内容>",
-     "tags": "knowledge-index,<scope>,<group>"
-   }
-   ```
-
----
-
-### 路径 3: 知识缺失路径（双写）
-
-**适用条件**：本地 KB 与记忆系统均未命中
-
-**执行步骤**：
-
-1. **暂停并询问用户**
-   ```
-   我在知识库中没有找到相关信息，请提供以下线索：
-   - 模块名称或文件路径
-   - 功能描述
-   - 相关代码位置
-   ```
-
-2. **扫描代码并总结**
-   - 根据用户提示扫描相关代码
-   - 总结为 Relation 描述 + Markdown 模块信息
-
-3. **创建 Group（如需要）**
-   ```bash
-   ki manage-index \
-     --scope <scope> \
-     --action create \
-     --parent <parentPath> \
-     --name <groupName>
-   ```
-
-4. **双写 Relation + 记忆系统**
-   ```bash
-   # 写入知识索引
-   ki sync-relation \
-     --scope <scope> \
-     --group <group> \
-     --relation <relationText> \
-     --module-info "<markdown>"
-   ```
-   
-   ```json
-   // 写入 MCP 记忆系统
-   {
-     "content": "<markdown>",
-     "tags": "knowledge-index,<scope>,<group>"
-   }
-   ```
-
----
-
-## 参数速查
-
-| 参数 | 说明 | 必填 |
-|------|------|------|
-| `--scope` | 项目隔离标识（字母、数字、连字符、下划线） | 是 |
-| `--groups` | 逗号分隔的 Group 路径列表（展示 Relations；与 `--subtree` 互斥） | 否 |
-| `--subtree` | 以指定 Group 为根输出子树结构（导航：该 Group 下有哪些子 Group；与 `--groups` 互斥） | 否 |
-| `--mode` | hot / warm / cold / emerging / full（支持逗号分隔多值，默认 hot） | 否 |
-| `--hot-count` | 热门展示个数 | 否（默认 5） |
-| `--depth` | 索引层级深度 | 否（默认 4） |
-| `--relation` | Relation ID 或描述文本 | 是（get-module-info） |
-
----
-
-## MCP 工具配合
-
-### memory_recall（检索路径）
-
-```json
-{
-  "query": "用户登录 认证 token",
-  "limit": 3,
-  "tags": "knowledge-index,my-project"
-}
+# 3) 读原文（批量用逗号分隔，≤10 条且须同 Group）
+ki get-module-info --scope <scope> --group "项目/API" --relation "用户登录接口,鉴权中间件"
 ```
 
-**注意**：
-- 必须使用 `"query"` 参数（不是 `"text"`）
-- `tags` 用于过滤 scope，格式：`knowledge-index,<scope>`
+说明：
 
-### memory_store（双写）
+- `<path>` 位置参数是**子树导航**（这个 Group 下有哪些子 Group），`--groups` 是**展示 Relation**，两者互斥。
+- Group / Relation 路径不精确时会自动向量兜底，输出带 `💡 近似匹配` 前缀。
+- `--mode` 支持 `hot` / `warm` / `cold` / `emerging` / `full`；`full` 每区最多渲染 50 条，超出会提示未展示数量。
 
-```json
-{
-  "content": "# 用户登录模块\n\n## 流程\n1. 用户输入账号密码\n2. 服务端验证\n3. 返回 token",
-  "tags": "knowledge-index,my-project,API"
-}
+## 路径 2：语义检索
+
+适合「只记得内容，不知道归在哪个组」。
+
+```bash
+ki search "用户登录流程" -s <scope>
 ```
 
-**注意**：
-- MCP memory server 不支持自定义 scope，所有记忆默认存入 `global` scope
-- 使用 `tags` 实现逻辑隔离
+| 参数 | 说明 |
+|---|---|
+| `--limit <n>` | 整次检索返回的**总条数**上限（默认 10；引擎单次候选上限 1000） |
+| `--threshold <score>` | 融合分阈值，建议 `0.02 ~ 0.03`（RRF 理论上限约 0.033，超过会过滤掉全部结果） |
+| `--tags t1,t2` | 按标签过滤（OR）；不传 = 搜全部标签，`ki-search` 内容优先 |
+| `--mode hybrid\|fulltext` | `hybrid` 默认（语义 + 全文）；`fulltext` 只查全文索引，不调用 embedding |
+| `--timeout <seconds>` | 查询 embedding 超时，超时后降级为关键词检索并在结果中标记 `degraded` |
+| `--original` | 额外返回 local KB 文件级原文（`original` 字段） |
 
----
+每条结果都带定位字段：`group` / `relation` / `tag` / `score` / `content`。需要整篇原文时用 `--original`，或拿 `group` + `relation` 走路径 1 的 `ki get-module-info`。
 
-## 验证建议
+> `score` 是 RRF 融合分（通常 0.0x），不是相似度百分比。降级为关键词检索时分数是 BM25 量级，两套尺度不可直接比较。
 
-执行查询后验证：
+## 路径 3：未命中
 
-1. **索引结构**：`query-group.ts --mode full`
-2. **关键词质量**：`query-group.ts --groups <group>`
-3. **内容完整性**：`get-module-info.ts` 检索已写入的模块信息
-4. **语义检索**：`memory_recall` 确认 tags 过滤生效
+1. 先确认 scope 正确：`ki scope list` 看该 scope 是否在 KB / 向量层存在。
+2. 用 `--mode fulltext` 再试一次——`--no-vector` 导入的文档只写全文索引，语义路可能召回不到。
+3. 仍未命中：向用户索取模块名 / 文件路径 / 功能描述，再按 [import.md](./import.md) 或下面的写入方式补进知识库。
 
----
+```bash
+ki group create "项目/API" --scope <scope>
+ki sync-relation \
+  --scope <scope> \
+  --group "项目/API" \
+  --relation "用户登录接口" \
+  --module-info "## 登录流程\n..."
+```
+
+## MCP 对应
+
+| 动作 | 工具 | 关键参数 |
+|---|---|---|
+| 看 Group / Relation | `ki_group_list` | `groups`、`subtree`、`mode`、`hot_count` |
+| 语义检索 | `ki_search` | `query`、`limit`、`tags`、`mode`、`threshold` |
+| 读原文 | `ki_get_module_info` | `group` + `relation` 或 `relations[]`（≤10） |
+| 写入 | `ki_sync_relation` / `ki_bulk_sync_relation` | `group`、`relation`、`module_info` |
 
 ## 常见错误
 
-| 错误 | 原因 | 修复 |
-|------|------|------|
-| `Cannot read properties of undefined (reading 'match')` | `memory_recall` 使用了 `"text"` 参数 | 改为 `"query"` 参数 |
-| Group 路径未精确命中 | Group 路径不精确（拼写、别名、简称） | CLI 已内置向量语义兜底，会自动模糊匹配并输出 `💡 近似匹配` 提示。若仍失败，用 `query-group --mode full` 确认路径 |
-| `Group "XXX" 在 relations-cache 中不存在` | Group 路径错误或未创建 | 先用 `manage-index.ts` 创建 Group |
-| `本地 KB 中未找到 "XXX" 的内容` | Relation 存在但本地 KB 缺失 | 使用 `sync-relation.ts` 写入模块信息 |
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `Group "X" 在 relations-cache 中不存在` | Group 路径错误或未创建 | `ki group list --mode full` 核对路径；必要时 `ki group create` |
+| `本地 KB 中未找到 "X" 的内容` | Relation 存在但原文缺失 | 用 `ki sync-relation` 补写 |
+| 检索结果为空 | 阈值过高 / 文档是 `--no-vector` 导入 | 降低 `--threshold`；改用 `--mode fulltext` |
+| 结果里没有 `original` | 未传 `--original` | 加 `--original`，或按 `group`+`relation` 读原文 |
+
+## 相关文档
+
+- [cli.md](./cli.md) —— `search` / `group list` / `get-module-info` 完整参数
+- [mcp-tools.md](./mcp-tools.md) —— MCP 工具参数
+- [tags-design.md](./tags-design.md) —— 三层标签的语义
+- [error-handling.md](./error-handling.md) —— 完整报错清单

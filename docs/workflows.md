@@ -1,13 +1,10 @@
-## 典型工作流
+# 典型工作流
 
-本文档把 `kisearch` 当前最常见的使用方式整理成可直接执行的流程。
-
-重点覆盖 4 类场景：
+把 `kisearch` 最常见的使用方式整理成可直接执行的流程，覆盖 3 类场景：
 
 - **本地知识沉淀**：人工或 AI 主动写入项目知识
-- **运行时查询闭环**：优先本地命中，不足时回流到记忆系统
-- **外部知识库导入（新流程）**：2 步首次导入 / 3 步增量更新
-- **外部知识库导入（旧流程）**：7 步旧流程，仍可用
+- **查询闭环**：索引直查优先，未命中再走语义检索
+- **外部知识库导入**：首次导入 / 幂等增量更新
 
 ---
 
@@ -22,20 +19,13 @@
 ### 步骤 1：创建顶层 Group
 
 ```bash
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --name "API"
+ki group create "API" --scope my-project
 ```
 
 ### 步骤 2：创建 Group
 
 ```bash
-ki manage-index \
-  --scope my-project \
-  --action create \
-  --parent "我的项目" \
-  --name "API"
+ki group create "我的项目/API" --scope my-project
 ```
 
 ### 步骤 3：写入 Relation 和模块说明
@@ -51,7 +41,7 @@ ki sync-relation \
 ### 步骤 4：查看写入效果
 
 ```bash
-ki query-group \
+ki group list \
   --scope my-project \
   --groups "我的项目/API"
 ```
@@ -73,28 +63,26 @@ AI Agent 在回答用户问题时的典型路径：
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> G[query-group]
+    Q[用户问题] --> G[ki group list]
     G --> H{本地热点是否命中?}
     H -- 是 --> M[get-module-info]
     M --> A[基于本地原文直接回答]
-    H -- 否 --> R[memory_recall]
-    R --> F{记忆系统是否命中?}
-    F -- 是 --> S[sync-relation]
+    H -- 否 --> R[ki search 语义检索]
+    R --> F{是否命中?}
+    F -- 是 --> S[get-module-info 取原文]
     S --> A
     F -- 否 --> C[扫描代码 / 询问线索 / 生成模块说明]
-    C --> D[sync-relation + memory_store]
+    C --> D[sync-relation 写入索引 + KB]
     D --> A
 ```
 
 ---
 
-## 工作流三：外部知识库导入（推荐：S-04 统一流程）
+## 工作流三：外部知识库导入
 
-> 前置条件：**首次使用某个 `scope` 前**，需在 `~/.ki/config.yaml` 的 `scopes` 中注册该 scope。
+> 前置条件：`scopeMode: default`（默认）下首次使用会自动创建 scope；`scopeMode: strict` 下需先在 `~/.ki/config.yaml` 的 `scopes` 中注册。
 
 ### 首次导入（原文直导，1 步）
-
-> **REQ-04（批次 3）**：ai-results.json 输入契约已删除，改为 `--source` 原文直导。
 
 **一条命令完成**：
 
@@ -111,7 +99,6 @@ ki import \
 
 ### 增量更新（幂等追加，1 步）
 
-> 历史：`--mode incremental`（git diff 驱动）与 `diff` 子命令已废弃移除。增量更新由「幂等追加」语义承载，不再依赖 git。
 
 ```bash
 # 修改 / 新增 source 目录中的文件后，重新执行同一条 import 命令即可
@@ -128,21 +115,9 @@ ki import \
 
 ---
 
-## 工作流五：外部知识库导入（旧 7 步流程，仍可用）
+## 工作流四：排障时怎么判断自己卡在哪一步
 
-> 旧流程（ai-results 契约）已随批次 3 删除，仅保留 `ki import --source` 原文直导。
-
-```text
-（旧流程已删除：scan / scan --results / vectorize / import-kb / migrate-keywords）
-```
-
-迁移路径：`ki import --source <dir> --group <name>`（幂等追加，重复执行即增量）。
-
----
-
-## 工作流六：排障时怎么判断自己卡在哪一步
-
-- **`ki import` 报 `Access denied to scope`**：scope 未在 `config.yaml` 注册
+- **`ki import` 报 `unknown scope: "X"（scopeMode=strict）`**：scope 未在 `config.yaml` 注册，或改用 `scopeMode: default`
 - **`ki import` 报 `--source 目录不存在或不是目录`**：确认 `--source` 指向的 Markdown 目录存在
 - **`ki import` 报 `--group 不能为空`**：`--group` 未传或为空（缺省会落到 `default` group）
 - **追加后 `ki search` 召回不到**：确认导入未用 `--no-vector`（非向量化模式不产生 memoryId，无法被召回）

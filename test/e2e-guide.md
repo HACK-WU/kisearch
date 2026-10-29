@@ -187,7 +187,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 ## 5. ki import：全量导入
 
-核心链路：源文件收集（后缀白名单）→ 写 local KB 原文 → 清洗 → 切分 → 图片附件收集 → 批量向量化（Phase 2）→ Group 树构建（Phase 3）→ relations-cache 写入（Phase 4）→ source 块记录（Phase 5）
+核心链路：源文件收集（后缀白名单）→ 写 local KB 原文 → 清洗 → 切分 → 图片附件收集 → 批量向量化（Phase 2）→ Group 树构建（Phase 3）→ relations 元数据写入（Phase 4，新布局 `.relations/<groupPath>/cache.json` + `manifest.json`）→ source 块记录（Phase 5）
 
 ### 5.1 执行全量导入
 
@@ -249,8 +249,9 @@ KB_DIR="/tmp/ki-e2e-test/kb/e2e-test"
 # group-index.json
 cat "$KB_DIR/group-index.json" | python3 -m json.tool
 
-# relations-cache.json
-cat "$KB_DIR/relations-cache.json" | python3 -m json.tool
+# relations 元数据：scope 级 manifest + 各组分片（迁移前的旧单文件已改名 relations-cache.json.bak）
+cat "$KB_DIR/.relations/manifest.json" | python3 -m json.tool
+cat "$KB_DIR/.relations/TestWiki/cache.json" | python3 -m json.tool
 ```
 
 **group-index.json 验证要点**：
@@ -262,11 +263,12 @@ cat "$KB_DIR/relations-cache.json" | python3 -m json.tool
 - [ ] `source.chunkSize` / `source.chunkOverlap` = 导入时生效的切分参数（默认 1000 / 150）
 - [ ] **无 `source.rootName` / `source.commit`**（两者已随 rootName 概念与增量模式删除）
 
-**relations-cache.json 验证要点**：
+**relations 元数据验证要点**：
 
-- [ ] `groups` 下每个导入的 Group 都有 `hot_relations` 条目
+- [ ] `manifest.json` 有 `partition_config` 与单调递增的 `revision`
+- [ ] 每个导入的 Group 各有一份 `.relations/<groupPath>/cache.json`，其 `hot_relations` 非空
 - [ ] 每个 relation 含 `id`、`text`、`isImported: true`
-- [ ] Group 级 `keywords` 非空
+- [ ] Group 级 `keywords` 恒为 `[]`（字段保留，不承担语义）
 
 ### 5.3 验证 local KB 文件
 
@@ -405,7 +407,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 **验证要点**：
 - [ ] 返回 `ok: true`
-- [ ] 新 relation 已写入 relations-cache.json
+- [ ] 新 relation 已写入该组的 `.relations/<groupPath>/cache.json`
 - [ ] 新关键词已合并到 Group keywords
 
 ### 8.2 批量写入
@@ -443,7 +445,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 **验证要点**：
 - [ ] 2 条均返回 `ok: true`
-- [ ] relations-cache.json 中"常见问题"组新增 2 条 relation
+- [ ] relations 元数据中"常见问题"组新增 2 条 relation（`ki query-group --scope <s> --groups 常见问题` 可核）
 
 ### 8.3 Wiki 写回（需配置 wikiSync）
 
@@ -568,7 +570,8 @@ PURE_DIR="/tmp/ki-e2e-test/kb/e2e-pure-sync"
 cat "$PURE_DIR/group-index.json" | python3 -m json.tool
 
 # 查看 Relations 缓存
-cat "$PURE_DIR/relations-cache.json" | python3 -m json.tool
+cat "$PURE_DIR/.relations/manifest.json" | python3 -m json.tool
+cat "$PURE_DIR/.relations/我的项目/后端/cache.json" | python3 -m json.tool
 
 # 查看 local KB
 cat "$PURE_DIR/我的项目/后端/index.json" | python3 -m json.tool
@@ -581,8 +584,8 @@ find /tmp/ki-e2e-test/wiki-output -name "*.md" | sort
 - [ ] 返回 `ok: true`（3 条均成功）
 - [ ] 每条返回 `wikiSynced: true`
 - [ ] group-index.json 中 groups 树包含 `我的项目 → {后端, 前端}`
-- [ ] relations-cache.json 中 "我的项目/后端" 组有 2 条 hot_relations
-- [ ] relations-cache.json 中 "我的项目/前端" 组有 1 条 hot_relation
+- [ ] `.relations/我的项目/后端/cache.json` 有 2 条 hot_relations
+- [ ] `.relations/我的项目/前端/cache.json` 有 1 条 hot_relation
 - [ ] 关键词已正确合并到各 Group 的 keywords 中
 - [ ] local KB `我的项目/后端/index.json` 包含 "用户注册接口" 和 "数据库设计" 两个 key
 - [ ] Wiki 目录下生成 3 个 .md 文件，路径分别为 `我的项目/后端/用户注册接口.md` 等
@@ -612,7 +615,8 @@ AUTO_DIR="/tmp/ki-e2e-test/kb/e2e-auto-create"
 cat "$AUTO_DIR/group-index.json" | python3 -m json.tool
 
 # 查看 Relations 缓存
-cat "$AUTO_DIR/relations-cache.json" | python3 -m json.tool
+cat "$AUTO_DIR/.relations/manifest.json" | python3 -m json.tool
+cat "$AUTO_DIR/.relations/运维手册/监控告警/cache.json" | python3 -m json.tool
 
 # 查看 local KB
 cat "$AUTO_DIR/运维手册/监控告警/index.json" | python3 -m json.tool
@@ -624,7 +628,7 @@ find /tmp/ki-e2e-test/wiki-output -path "*/运维手册*" -name "*.md"
 **验证要点**：
 - [ ] 返回 `ok: true`（即使从未 manage-index，也能成功）
 - [ ] group-index.json 自动创建了 "运维手册" 和 "运维手册/监控告警" 节点
-- [ ] relations-cache.json 包含 "运维手册/监控告警" 组及 "Prometheus 配置" relation
+- [ ] relations 元数据包含 "运维手册/监控告警" 组及 "Prometheus 配置" relation
 - [ ] local KB `运维手册/监控告警/index.json` 包含模块信息
 - [ ] Wiki 写回文件已生成在 `/tmp/ki-e2e-test/wiki-output/运维手册/监控告警/Prometheus 配置.md`
 
@@ -633,7 +637,7 @@ find /tmp/ki-e2e-test/wiki-output -path "*/运维手册*" -name "*.md"
 | 观察维度 | 子场景 A（先建节点） | 子场景 B（自动补建） |
 |----------|---------------------|---------------------|
 | group-index.json | 节点预先存在，sync 只写入 relation | 节点由 sync-relation 自动创建 |
-| relations-cache.json | 正常写入 | 正常写入（与 A 一致） |
+| relations 元数据（`.relations/` 分片 + manifest） | 正常写入 | 正常写入（与 A 一致） |
 | local KB | 正常写入 | 正常写入（与 A 一致） |
 | Wiki 写回 | 正常写回 | 正常写回（与 A 一致） |
 | source 块 | 无（非 ki import 不会写 source） | 无 |
@@ -707,7 +711,7 @@ node bin/ki.mjs --config /tmp/ki-e2e-test/.ki/config.json \
 
 **验证要点**：
 - [ ] `ok: true`
-- [ ] `stats.total` 等于 relations-cache 中的总 relation 数
+- [ ] `stats.total` 等于 relations 元数据中的总 relation 数（`ki query-group --mode full` 或分片逐个统计）
 - [ ] `stats.exported` 等于 total（local KB 中有内容的条目）
 - [ ] `/tmp/ki-e2e-export/` 下生成 Markdown 文件
 - [ ] 目录结构与 Group 树一致
@@ -824,8 +828,8 @@ rm -rf /tmp/ki-e2e-test/wiki-output
 |--------|------|----------|
 | Group 树完整 | group-index.json | groups 层级正确 |
 | source 块记录 | group-index.json | source.{dir,chunkSize?,chunkOverlap?} |
-| Relation 写入 | relations-cache.json | hot_relations 含 isImported/memoryId |
-| memoryId 回填 | relations-cache.json | hot_relations 含 memoryId（直导真实 docId） |
+| Relation 写入 | `.relations/<groupPath>/cache.json` | hot_relations 含 isImported/memoryId |
+| memoryId 回填 | `.relations/<groupPath>/cache.json` | hot_relations 含 memoryId（直导真实 docId） |
 | local KB 存在 | kb/{scope}/**/index.json | 每个 Group 有 index.json |
 | local KB 内容 | kb/{scope}/**/index.json | 内容为原始 Markdown |
 | Wiki 写回文件 | wikiSync.dir | frontmatter 格式正确 |

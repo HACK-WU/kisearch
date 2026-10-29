@@ -113,20 +113,14 @@ export function validateCreateConfig(
   }
 }
 
-// ─── open 校验（O-02 ~ O-05，O-01 由 worker 内 zvec 错误映射承担） ───
+// ─── open 校验（O-03 ~ O-05，O-01 由 worker 内 zvec 错误映射承担） ───
 
 export function validateOpenConfig(
   config: ZvecEngineOpenConfig,
   persistedSchema: PersistedSchema,
 ): void {
-  // O-02 embedding 维度 vs 持久化维度
-  if (config.embedding && persistedSchema.dimension !== undefined
-      && config.embedding.dimension !== persistedSchema.dimension) {
-    throw new DimensionMismatchError(
-      `embedding.dimension (${config.embedding.dimension}) !== persisted dimension (${persistedSchema.dimension})`,
-      { data: { embeddingDim: config.embedding.dimension, persistedDim: persistedSchema.dimension } },
-    );
-  }
+  // 打开 Collection 本身不执行 dense 操作。FTS、读取和删除不依赖当前 embedding
+  // 维度，因此不在 open 阶段比较配置维度；dense 查询/写入在各自操作边界校验向量维度。
 
   // O-03 持久化 metric 限定
   if (persistedSchema.metric !== undefined && persistedSchema.metric !== 'COSINE') {

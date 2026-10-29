@@ -18,7 +18,6 @@ import fs from 'fs';
 import path from 'path';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './lib/store.js';
 import {
-  getRelationsCachePath,
   getLocalKbDir,
   getGroupIndexPath,
   validateScope,
@@ -29,12 +28,17 @@ import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, hasNoRelationsData, type LegacyRelationsCacheShape } from './lib/group-cache.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
-import { vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
+import type { VectorizationStopReason } from './zvec-engine/errors.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { writeBackToWiki, isUnsafeRelationName } from './lib/wiki-sync.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { closeFtsEngine, ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './lib/fts-client.js';
+// S-04 I2 补口（2026-10-10）：分片落盘必须入「元数据提交窗口」
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 
 // 向后兼容 re-export：parseContentTags 已统一提取到 lib/constants.js，
 // 保留本模块导出供既有测试/外部依赖引用。
@@ -117,6 +121,28 @@ function referencedDenseIds(cache: RelationsCache, excludedKeys: Set<string>): S
 }
 
 // ─── Group 树自动补建 ───
+
+/**
+ * 写入侧组键归一（护栏 #7 的**布局感知**版本）：
+ * - 新布局：剥 `项目根/` 历史前缀，对齐迁移后已清洗的分片键（不剥就会写出
+ *   `.relations/项目根/X/` 与 `.relations/X/` 两份，同组双份）；
+ * - 旧布局：**保持原样**。旧文件里的键本来就是带前缀的，单侧剥离会让"更新已有
+ *   Relation"找不到原键 → 新建一条同 text 的条目、旧条目与旧索引 ID 永久残留
+ *   （批次 2 回归审查实测：sync-relation-bulk-vector 4 例失败即此因）。
+ *   与 R2「兼容读必须与旧行为逐字节一致」同一条原则——前缀清洗的时机只有迁移
+ *   （migrateLegacyRelationsCache → sanitizeLegacyGroups）。
+ */
+/**
+ * 写入侧组键归一（第二轮审查 P0 后为**恒等**，保留函数作为单点说明）。
+ *
+ * 曾经按布局剥 `项目根/` 前缀，起因是迁移侧剥了前缀而写入侧不剥 → 同组双份；
+ * 现在两侧都不剥（键原样，见 group-cache.ts 的键不变量）：分片键必须与
+ * group-index 树路径、local-kb 目录一致，否则 export/query-group/delete-* 会静默失真。
+ * 前缀剥离只发生在 `store.ts` 的 roots→groups 迁移（那里树与分片一起改名）。
+ */
+function normalizeGroupKeyForWrite(_shardedLayout: boolean, group: string): string {
+  return group;
+}
 
 /**
  * 确保 Group 路径在 group-index.json 的 groups 树中完整存在
@@ -271,13 +297,18 @@ function syncBatch(
     process.exit(1);
   }
 
-  const cachePath = getRelationsCachePath(scope);
-  const cache = readJson<RelationsCache>(cachePath);
-
-  if (!cache) {
-    output({ ok: false, error: 'relations-cache.json 不存在' });
+  // 批次 2（W2）：双轨读（新布局分片聚合 / 旧布局旧文件）；内存形状不变
+  let cache: RelationsCache;
+  try {
+    cache = loadCacheShape(scope) as RelationsCache;
+  } catch (err) {
+    // 第二轮审查 P2：只把「两布局皆无数据」报成未初始化；数据在但读失败（分片/manifest
+    // 损坏）必须原样透出——吞掉会把 fail-loud 降级成误导文案
+    output({ ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message });
     process.exit(1);
   }
+  const touchedGroups = new Set<string>();
+  const touch = (g: string): void => { touchedGroups.add(g); };
 
   const results: SyncResult[] = [];
   let failed = 0;
@@ -313,6 +344,7 @@ function syncBatch(
         item.relation,
         item.module_info
       );
+      touch(item.group);
 
       // Wiki 写回（容错）
       try {
@@ -335,8 +367,9 @@ function syncBatch(
     }
   }
 
-  // 统一 WAL 持久化
-  writeJson(cachePath, cache as unknown as Record<string, unknown>);
+  // 统一 WAL 持久化（批次 2：惰性迁移 + 触达组批写，一次 bump+失效）
+  migrateLegacyRelationsCache(scope);
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups));
 
   output({
     ok: true,
@@ -400,11 +433,12 @@ export type BulkSyncRelationResult =
       skipped: number;
       results: BulkSyncResultItem[];
       vectorStored: boolean;
+      stopReason?: VectorizationStopReason;
       fullTextStored?: boolean;
       /** Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），按出现顺序收集 */
       hints?: string[];
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; scope?: string; total?: number; succeeded?: number; failed?: number; skipped?: number; results?: BulkSyncResultItem[]; vectorStored?: boolean; stopReason?: VectorizationStopReason };
 
 /**
  * 写入独立 FTS-only Collection。该路径不创建 embedding provider，也不触碰
@@ -485,18 +519,26 @@ async function executeBulkSyncRelationLocal(params: {
     }
 
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
+    if (vector) await assertVectorDimensionCompatible(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在' };
+    // 批次 2（W2）：双轨读
+    let cache: RelationsCache;
+    try {
+      cache = loadCacheShape(scope) as RelationsCache;
+    } catch (err) {
+      return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
     }
 
     // ─── 阶段 1：循环 syncSingleRelation 改 cache + 收集 entries ───
     const results: BulkSyncResultItem[] = [];
     const hints: string[] = [];
+    /** group 留空兜底的提示只推一次（同一批多条留空时避免复读） */
+    let groupFallbackHintPushed = false;
     let failed = 0;
+    /** 批次 2：触达组采集（阶段 4 只批写这些组） */
+    const bulkTouchedGroups = new Set<string>();
 
     // Group 路径自动补全：读取一次 groupIndex 供所有 item 复用
     // （对齐单条模式 executeSyncRelation:809-819 的 resolveGroupPath 逻辑）
@@ -505,9 +547,15 @@ async function executeBulkSyncRelationLocal(params: {
     // syncSingleRelation 会逐条覆盖 local KB。先一次性持久化目标旧 FTS
     // relation 的失效状态，避免批量同步中途失败时旧索引仍显示为完整。
     let ftsStatusInvalidated = false;
+    const ftsInvalidatedGroups = new Set<string>();
+    // 布局在**函数入口**一次性判定：预失效阶段会触发惰性迁移（旧 → 新），中途重判会让
+    // 同一条 item 在前后两轮落到不同组键（旧键预失效 + 新键新建）→ 同组双份 + 断言/数据错位。
+    const shardedAtEntry = hasShardedLayout(scope);
     for (const item of items) {
       const relation = String(item.relation || '');
-      let group = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      let group = normalizeGroupKeyForWrite(shardedAtEntry, rawItemGroup.trim() === '' ? scope : rawItemGroup);
       if (!String(item.module_info || '').trim() || !relation || !group || isUnsafeRelationName(relation)) continue;
       if (groupIndex) {
         try {
@@ -522,9 +570,14 @@ async function executeBulkSyncRelationLocal(params: {
       if (existing?.ftsIds?.length) {
         existing.ftsIndexComplete = false;
         ftsStatusInvalidated = true;
+        ftsInvalidatedGroups.add(group);
       }
     }
-    if (ftsStatusInvalidated) writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    if (ftsStatusInvalidated) {
+      // 批次 2：预失效改触达组批写（含惰性迁移）
+      migrateLegacyRelationsCache(scope);
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, ftsInvalidatedGroups));
+    }
 
     // 向量 entries 收集：每条 item 产出 [ki-relation, ki-search, ...customTags] 个 entry
     // 用 sliceStart/sliceEnd 记录每条 item 在 entries 数组中的区间，用于后续结果拆分
@@ -545,7 +598,10 @@ async function executeBulkSyncRelationLocal(params: {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const group = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
+      const itemGroupFellBack = rawItemGroup.trim() === '';
+      const group = normalizeGroupKeyForWrite(shardedAtEntry, itemGroupFellBack ? scope : rawItemGroup);
       const relation = item.relation || '';
       const moduleInfo = item.module_info || '';
 
@@ -610,10 +666,16 @@ async function executeBulkSyncRelationLocal(params: {
           // 透出路径解析提示（自动补全 / 多候选歧义 / 部分匹配 / 未匹配），供调用方感知路径是否精确命中
           if (resolved.hint) hints.push(resolved.hint);
         }
+        // 留空兜底必须可见（否则文档"悄悄"落到 scope 同名组）；整批只提示一次
+        if (itemGroupFellBack && !groupFallbackHintPushed) {
+          hints.push(`💡 Group 为空，已落到与 scope 同名的组「${resolvedGroup}」`);
+          groupFallbackHintPushed = true;
+        }
 
         itemPriorFtsIds[i] = [...(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
         itemPriorDenseIds[i] = relationDenseIds(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation));
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
+        bulkTouchedGroups.add(resolvedGroup);
 
         // 文档级自定义 tag 持久化到 KB 层（与单条模式一致）
         const customTags = parseContentTags(item.tags);
@@ -623,6 +685,9 @@ async function executeBulkSyncRelationLocal(params: {
         if (relRec) {
           if (customTags.length > 0) relRec.tags = customTags;
           else delete relRec.tags;
+          // 落点来源留痕（REQ-20261021-001）：逐 item 判定，缺省即 explicit
+          if (itemGroupFellBack) relRec.groupSource = 'scope-fallback';
+          else delete relRec.groupSource;
         }
 
         // 收集向量 entries（向量化模式才需要）
@@ -700,10 +765,17 @@ async function executeBulkSyncRelationLocal(params: {
 
     // ─── 阶段 2：批量向量写入（一次 embedding HTTP + 一次 worker upsert） ───
     let vectorStored = false;
+    let vectorizationStopReason: VectorizationStopReason | undefined;
     if (vector && filteredEntries.length > 0) {
       try {
         const avail = await ensureVectorAvailable();
         if (!avail.available) {
+          vectorizationStopReason = {
+            kind: 'provider-unavailable',
+            code: 'VECTOR_UNAVAILABLE',
+            phase: 'embedding',
+            reason: avail.reason || '向量服务不可用',
+          };
           // 向量服务不可用：所有 item 标记向量未写入，但不阻塞 KB 层
           for (let i = 0; i < results.length; i++) {
             if (results[i].skipped) continue;
@@ -713,6 +785,7 @@ async function executeBulkSyncRelationLocal(params: {
           }
         } else {
           const bulkResult = await vectorBulkStore({ scope, entries: filteredEntries });
+          vectorizationStopReason = bulkResult.stopReason;
 
           // ─── 阶段 3：拆分结果 + 回写 memoryId/memoryIds ───
           // 按 itemIdx 分组：每个 item 的 content entries 的 memoryId 收集为 memoryIds，
@@ -832,6 +905,12 @@ async function executeBulkSyncRelationLocal(params: {
       } catch (err) {
         // 向量批量写入异常：不阻塞 KB 层，标记所有未跳过 item
         const reason = (err as Error).message;
+        vectorizationStopReason = {
+          kind: 'unknown',
+          code: (err as Error & { code?: string }).code ?? (err as Error).name ?? 'UNKNOWN',
+          phase: 'embedding',
+          reason,
+        };
         for (let i = 0; i < results.length; i++) {
           if (results[i].skipped) continue;
           if (results[i].vectorReason) continue; // 已被去重标记，不再覆盖
@@ -877,9 +956,8 @@ async function executeBulkSyncRelationLocal(params: {
       if (candidates.length > 0) {
         try {
           const deleted = await vectorDelete({ scope, ids: candidates });
-          const errors = (deleted.errors ?? []).filter((item) => item.code !== 'NOT_FOUND');
-          failedDenseIds = new Set(errors.map((item) => item.id));
-          if ((deleted.errors?.length ?? 0) > 0 && errors.length === 0) failedDenseIds = new Set(candidates);
+          // vectorDelete 已把 NOT_FOUND 视为幂等成功，并只在无法逐条归因时保守返回全部 id
+          failedDenseIds = new Set(deleted.failedIds);
         } catch {
           failedDenseIds = new Set(candidates);
         }
@@ -902,8 +980,9 @@ async function executeBulkSyncRelationLocal(params: {
       fullTextStored = activeResults.length > 0 && activeResults.every((_, i) => results.filter((item) => !item.skipped)[i]?.fullTextStored === true);
     }
 
-    // ─── 阶段 4：一次 writeJson 落盘 cache ───
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    // ─── 阶段 4：落盘 cache（批次 2：惰性迁移 + 触达组批写）───
+    migrateLegacyRelationsCache(scope);
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, bulkTouchedGroups));
 
     // ─── 阶段 5：各自 wiki 写回（文件路径不同，无冲突） ───
     for (let i = 0; i < items.length; i++) {
@@ -929,8 +1008,7 @@ async function executeBulkSyncRelationLocal(params: {
     const succeeded = results.length - skippedCount;
 
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
-    return {
-      ok: true,
+    const response = {
       scope,
       total: items.length,
       succeeded,
@@ -941,6 +1019,15 @@ async function executeBulkSyncRelationLocal(params: {
       ...(vector ? {} : { fullTextStored }),
       ...(hints.length > 0 ? { hints } : {}),
     };
+    if (vectorizationStopReason) {
+      return {
+        ok: false,
+        error: `批量向量化已停止（${vectorizationStopReason.code}）：${vectorizationStopReason.reason}`,
+        ...response,
+        stopReason: vectorizationStopReason,
+      };
+    }
+    return { ok: true, ...response };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -953,7 +1040,11 @@ export async function executeBulkSyncRelation(params: {
 }): Promise<BulkSyncRelationResult> {
   // timeoutMs=0：批量回写逐条向量化，条目多时远超固定客户端超时。
   if (shouldUseDaemonClient()) return callDaemon<BulkSyncRelationResult>('bulk-sync-relation', params, 0);
-  return executeBulkSyncRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'bulk-sync-relation', () => executeBulkSyncRelationLocal(params));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 export type SyncRelationResult =
@@ -973,11 +1064,10 @@ async function vectorWriteBack(params: {
   group: string;
   moduleInfo: string;
   scope: string;
-  cachePath: string;
   /** 文档内容自定义标签（额外叠加在 ki-search 之上） */
   tags?: string;
 }): Promise<{ stored: boolean; reason?: string }> {
-  const { relation, group, moduleInfo, scope, cachePath, tags } = params;
+  const { relation, group, moduleInfo, scope, tags } = params;
 
   try {
     const avail = await ensureVectorAvailable();
@@ -1017,7 +1107,7 @@ async function vectorWriteBack(params: {
       ...customTags.map((t) => generateDocId(moduleInfo, scope, t)),
     ]);
     try {
-      const priorCache = readJson<RelationsCache>(cachePath);
+      const priorCache = loadCacheShape(scope) as RelationsCache;
       const priorIds = priorCache?.groups?.[group]?.hot_relations?.find((r) => r.text === relation)?.memoryIds ?? [];
       const staleIds = priorIds.filter((id) => id && !newContentIds.has(id));
       if (staleIds.length > 0) {
@@ -1033,8 +1123,8 @@ async function vectorWriteBack(params: {
     const searchItem = result.results.find((r) => r.index === 1 && r.success);
     if (contentItems.length > 0 || searchItem) {
       try {
-        const latestCache = readJson<RelationsCache>(cachePath);
-        if (latestCache) {
+        const latestCache = loadCacheShape(scope) as RelationsCache;
+        {
           const groupData = latestCache.groups[group];
           const rel = groupData?.hot_relations.find(r => r.text === relation);
           if (rel) {
@@ -1045,7 +1135,8 @@ async function vectorWriteBack(params: {
             if (searchItem?.memoryId) {
               rel.memoryId = searchItem.memoryId;
             }
-            writeJson(cachePath, latestCache as unknown as Record<string, unknown>);
+            migrateLegacyRelationsCache(scope);
+            getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, latestCache as unknown as LegacyRelationsCacheShape, new Set([group])));
           }
         }
       } catch {
@@ -1065,7 +1156,18 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     const { moduleInfo } = params;
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
     const scope = resolveScope(loadConfig(), params.scope);
-    const group = String(params.group).replace(/^\/+|\/+$/g, '');
+    /**
+     * Group 留空 → 落到**与 scope 同名的组**（与 `ki import` 的根目录口径一致，
+     * 见 lib/import-path.ts resolveGroupForSource：根下散文件归 scope 名）。
+     * 前端写入页、MCP 工具、CLI 三处因此同口径：都不再因 group 为空而报错。
+     * ⚠️ 不引入"空 group 键"：分片路径 `''.split('/')` 会被判非法抛错、
+     * persistCacheShape 会静默丢空组、分片枚举收不到（写进去读不到）、
+     * 路径向量撞同一 docId、/api/doc/list 的 `group=` 空值已被"全部文档"占用。
+     */
+    const rawGroup = String(params.group ?? '').replace(/^\/+|\/+$/g, '');
+    const groupFellBack = rawGroup.trim() === '';
+    // 批次 2（护栏 #7）：组键归一（布局感知，见 normalizeGroupKeyForWrite；入口一次性判定）
+    let group = normalizeGroupKeyForWrite(hasShardedLayout(scope), groupFellBack ? scope : rawGroup);
     const relation = params.relation;
 
     if (!group || !relation || !moduleInfo) {
@@ -1085,24 +1187,33 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     }
 
     validateScope(scope);
+    assertNoPendingVectorMigration(scope);
+    if (params.vector !== false) await assertVectorDimensionCompatible(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在' };
+    // 批次 2（W2）：双轨读
+    let cache: RelationsCache;
+    try {
+      cache = loadCacheShape(scope) as RelationsCache;
+    } catch (err) {
+      return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
     }
 
-    // Group 路径自动补全提示
-    let pathHint: string | undefined;
+    // Group 路径提示：留空兜底必须始终可见（否则文档"悄悄"落到 scope 同名组），
+    // 与自动补全/未匹配提示同一条 hint 通道，多条时用「；」拼接而不互相覆盖。
+    let pathHint: string | undefined = groupFellBack
+      ? `💡 Group 为空，已落到与 scope 同名的组「${group}」`
+      : undefined;
+    const appendHint = (hint: string): void => {
+      pathHint = pathHint ? `${pathHint}；${hint}` : hint;
+    };
     const groupIndex = readGroupIndex(scope);
     if (groupIndex) {
       const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
       if (resolved.matched && resolved.resolvedPath !== group) {
-        pathHint = `💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`;
+        appendHint(`💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`);
       } else if (!resolved.matched && resolved.hint) {
-        pathHint = resolved.hint;
+        appendHint(resolved.hint);
       }
     }
 
@@ -1113,7 +1224,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       // syncSingleRelation 会先覆盖 local KB。先持久化失效状态，避免进程在 dense
       // 写入失败/中断后，让旧 FTS ID 因 legacy fallback 继续被误报为完整。
       existingRelation.ftsIndexComplete = false;
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+      migrateLegacyRelationsCache(scope);
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group])));
     }
     const result = syncSingleRelation(cache, scope, group, relation, moduleInfo);
 
@@ -1126,6 +1238,9 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     if (relRec) {
       if (customTags.length > 0) relRec.tags = customTags;
       else delete relRec.tags; // 无 tag 时移除字段（避免残留）
+      // 落点来源留痕（REQ-20261021-001）：缺省即 explicit，只有兜底才落字段。
+      if (groupFellBack) relRec.groupSource = 'scope-fallback';
+      else delete relRec.groupSource;
     }
 
     const fts = params.vector === false
@@ -1149,9 +1264,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
         if (candidates.length > 0) {
           try {
             const deleted = await vectorDelete({ scope, ids: candidates });
-            const errors = deleted.errors.filter((item) => item.code !== 'NOT_FOUND');
-            failedIds = new Set(errors.map((item) => item.id));
-            if (deleted.errors.length > 0 && errors.length === 0) failedIds = new Set(candidates);
+            // 同上：NOT_FOUND 属幂等成功，不再误判为"清理失败"而保留陈旧 memoryId
+            failedIds = new Set(deleted.failedIds);
           } catch {
             failedIds = new Set(candidates);
           }
@@ -1170,8 +1284,9 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       delete relRec.ftsIndexComplete;
     }
 
-    // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘。
-    writeJson(cachePath, cache as unknown as Record<string, unknown>);
+    // WAL 持久化：FTS-only ID 与 relation 元数据同批落盘（批次 2：惰性迁移+触达组批写）。
+    migrateLegacyRelationsCache(scope);
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, new Set([group])));
 
     // 向量写入（await 完成后再返回）：一次批量 embed 写 ki-relation + ki-search，
     // 并回写 ki-search 的 docId 到 cache 供 delete 定位。失败仅记日志，不阻塞主流程，
@@ -1180,7 +1295,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     // dense embedding 与 memoryId 回写，不应再描述为“仅写 KB 层”。
     const vec = params.vector === false
       ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
-      : await vectorWriteBack({ relation, group, moduleInfo, scope, cachePath, tags: params.tags });
+      : await vectorWriteBack({ relation, group, moduleInfo, scope, tags: params.tags });
 
     // Wiki 写回（容错，失败不阻塞）
     let wikiSynced: boolean | undefined;
@@ -1223,7 +1338,11 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
 
 export async function executeSyncRelation(params: SyncRelationParams): Promise<SyncRelationResult> {
   if (shouldUseDaemonClient()) return callDaemon<SyncRelationResult>('sync-relation', params);
-  return executeSyncRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'sync-relation', () => executeSyncRelationLocal(params));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 // ─── CLI ───
@@ -1235,7 +1354,7 @@ program
   .showHelpAfterError()
   .description('关系回写：写入缓存 + 本地 KB')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('-g, --group <group>', 'Group 路径（单条模式）')
+  .option('-g, --group <group>', 'Group 路径（单条模式）；留空则写入与 scope 同名的组（对齐 ki import 的根目录口径）')
   .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')

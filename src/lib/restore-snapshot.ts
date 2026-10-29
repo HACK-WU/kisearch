@@ -15,6 +15,8 @@ import { backupScopeSnapshot } from './backup.js';
 import { checkWritable, checkDiskSpace } from './preflight.js';
 import { extractScopeSnapshot } from './safe-tar.js';
 import { rebuildFtsOnlyScope, type FtsRebuildResult } from './fts-rebuild.js';
+import { assertNoPendingVectorMigration } from './vector-client.js';
+import { notifyScopeRelationsInvalidated } from './group-cache.js';
 
 export interface RestoreSnapshotOptions {
   timestamp?: string;
@@ -70,6 +72,14 @@ export async function restoreSnapshotLocal(
   scope: string,
   opts: RestoreSnapshotOptions = {},
 ): Promise<RestoreSnapshotResult> {
+  const { withScopeWriteLock } = await import('./scope-write-lock.js');
+  return withScopeWriteLock(scope, 'restore-snapshot', () => restoreSnapshotLocalUnlocked(scope, opts));
+}
+
+async function restoreSnapshotLocalUnlocked(
+  scope: string,
+  opts: RestoreSnapshotOptions = {},
+): Promise<RestoreSnapshotResult> {
   const checkCancelled = () => {
     if (opts.abortSignal?.aborted) {
       throw Object.assign(new Error('还原已取消（当前 restore 批次尚未开始写入）'), { code: 'RESTORE_CANCELLED' });
@@ -78,6 +88,7 @@ export async function restoreSnapshotLocal(
   checkCancelled();
   opts.onProgress?.({ phase: 'restore', done: 0, total: 1 });
   validateScope(scope);
+  assertNoPendingVectorMigration(scope);
   ensureTarAvailable();
   const config = loadConfig();
   const backupDir = opts.backupDir ? path.resolve(opts.backupDir) : getBackupDir(config);
@@ -151,6 +162,12 @@ export async function restoreSnapshotLocal(
       process.stderr.write(`还原已完成，但清理旧目录失败：${stashed}（${(cleanupErr as Error).message}）；可手动删除。\n`);
     }
   }
+
+  // 批次 2（W7，design.md §6）：restore 用快照整体覆盖了 scope 目录（relations 分片/
+  // manifest/旧 relations-cache 均可能是新数据），daemon 进程内的 docListCache/
+  // relation-map/scopeDocCountCache 必须立即失效，不等下次读的身份戳兜底。
+  // CLI 短进程内调用无消费者、无害；跨进程场景另有 manifest revision 兜底。
+  notifyScopeRelationsInvalidated(scope);
 
   // 快照不包含 vectorDir；无 dense 的 --no-vector 文档仍应在 restore 后可全文检索。
   // 该步骤不调用 embedding，失败只作为结构化告警返回，不回滚已成功还原的 KB。

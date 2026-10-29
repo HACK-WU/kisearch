@@ -38,7 +38,7 @@ description: 代码知识库检索行为规则。当用户问题涉及代码知�
 ## 1. Scope 约定
 
 - `${scope}` 未指定时必须暂停问用户
-- 不确定有哪些 scope？`ki_manage_index_list()` 查看
+- 不确定有哪些 scope？`ki_scope_list()` 查看
 - **`${scope}` 仍是字面量时，禁止执行任何 ki MCP 工具调用**
 
 ---
@@ -62,7 +62,7 @@ description: 代码知识库检索行为规则。当用户问题涉及代码知�
 
 ## 3. 对话开始：拉取全景
 
-理解级查询时自动执行：`ki_query_group(scope: "${scope}-memory", mode: "full")`
+理解级查询时自动执行：`ki_group_list(scope: "${scope}-memory", mode: "full")`
 
 - 首次查询后缓存有效，写入后需刷新
 - scope 不存在或树为空时静默失败，记录"无已建索引"
@@ -91,7 +91,7 @@ ki_search(scope: "${scope}-memory", query: "核心词", limit: 4, threshold: 0.0
 语义检索未命中时，才回到索引定位取原文：
 
 1. 从缓存全景（`${scope}-memory`）判断问题涉及哪个 Group
-2. `ki_query_group(scope: "${scope}-memory", groups: "目标Group路径", mode: "hot,emerging")` → 查热区
+2. `ki_group_list(scope: "${scope}-memory", groups: "目标Group路径", mode: "hot,emerging")` → 查热区
 3. `ki_get_module_info(scope, group, relation)` → **Agent 必须提炼后回答，不要全文转储。**
 
 - 命中 → 回答；未命中 → 换 Group 重试一次，仍无 → ③
@@ -163,8 +163,8 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 
 ### Group 管理
 
-- 创建：`ki_manage_index_create(scope, parent, name)`
-- 删除：MCP 不支持，需 CLI `ki manage-index --action delete`
+- 创建：`ki_group_create(scope, path)`
+- 删除：`ki_group_delete_empty(scope, path)` 只能删空节点；级联删除走 CLI `ki group delete <path> --yes`
 
 ---
 

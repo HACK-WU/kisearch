@@ -1,8 +1,8 @@
-# 知识库构建 SKILL
+# 知识库构建
 
-> 首次将外部知识库完整导入知识索引系统的完整流程。基于 S-04 统一导入流程，2 步完成全部操作。
+> 首次把外部知识库完整导入 kisearch 的流程：2 步完成。
 
-## 触发场景
+## 适用场景
 
 - 为新项目首次导入外部知识库（如 Wiki、文档站）
 - 用户要求"构建知识索引"、"导入外部文档"、"初始化知识库"
@@ -34,33 +34,37 @@ ki config init --dir /path/to/test
 
 ### 2. 配置嵌入 API
 
-确保 `~/.ki/config.yaml` 中已配置嵌入 API 密钥（SiliconFlow 或其他 OpenAI 兼容 API）：
+确保 `~/.ki/config.yaml` 中已配置嵌入服务：
 
 ```yaml
 embedding:
-  provider: openai-compatible
-  apiKey: ${OPENAI_API_KEY}
+  provider: siliconflow
+  apiKey: ${SILICONFLOW_API_KEY}
   model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096
-  queryTimeoutMs: 3000  # 查询 embedding 超时（ms），默认 3 秒
+  dimension: 4096              # 必须与建库时一致
+  queryTimeoutMs: 3000         # 查询 embedding 超时（ms）
 ```
 
-### 3. 注册 scope
+> 使用其他 OpenAI 兼容服务时，把 `provider` 改为 `openai-compatible` 并显式配置 `baseURL`。
+> `dimension` 必须与已有向量库一致，否则启动或检索会报维度不匹配。
 
-首次使用某个 scope 前，需在配置文件中注册该 scope：
+### 3. 注册 scope（可选）
+
+`scopeMode: default`（默认）下无需注册，首次使用某个 scope 时自动创建。
+只有 `scopeMode: strict` 才需要把 scope 写进 `scopes` 白名单（key 即 scope 名）：
 
 ```yaml
+scopeMode: strict
 scopes:
-  default: global
-  definitions:
-    your-scope:
-      description: your scope description
-      acl:
-        - global
-        - your-scope
+  your-scope:
+    kbDir: /data/kb          # 可选，覆盖 dataDir
 ```
 
-### 5. 确定 KB 存储位置
+> `scopes.<scope>` 只接受 `kbDir` / `wikiSync` / `clean` / `import` 四个字段；早期文档里的
+> `description` / `acl` 已不再支持，写入会被 `ki doctor` 判为未知字段。字段说明见
+> [configuration.md](./configuration.md#scopes)。
+
+### 4. 确定 KB 存储位置
 
 不同 scope 的 KB 数据可以独立配置存储目录。在确定 scope 后，需要询问用户选择存储位置（例如："KB 数据存储位置使用默认路径还是自定义路径？"）；若用户选择自定
 义，引导其编辑 `~/.ki/config.yaml` 添加 `kbDir` 字段。
@@ -95,7 +99,7 @@ scopes:
 
 ### 原文直导（--source，无 AI 依赖）
 
-> **REQ-01/04（批次 3）**：ai-results.json 输入契约已删除，首次导入统一走 `--source` 原文直导（无 AI 依赖，大文档自动切分）。
+> 首次导入统一走 `--source` 原文直导（无 AI 依赖，大文档自动切分）。
 
 ```
 外部知识库目录（Markdown）
@@ -136,7 +140,7 @@ ki import \
 2. **自动切分**：超过 `chunk-size` 的文件按"固定长度 + 段落边界优先"切分为多 chunk，relation 名 = `文件名-N`（如 `deploy-01`），sourcePath = `文件#N`
 3. **批量向量化**：调用 zvec 引擎批量向量化（content = chunk 原文）
 4. **Group 树创建**：自动创建 Group 目录结构（groupPath 从目录结构推导）
-5. **Relations 缓存写入**：写入 `relations-cache.json`，文件级 relation 包含 `memoryIds`（多值）和 `sourcePath`
+5. **Relations 元数据写入**：写入 `.relations/<groupPath>/cache.json`（迁移前为单文件 `relations-cache.json`），文件级 relation 包含 `memoryIds`（多值）和 `sourcePath`
 6. **group-index.source 记录**：记录导入元信息（含切分参数持久化）
 7. **sourceDir 写入**：scope 未配置 sourceDir 时写入绝对路径（供增量免传 `--source`）
 
@@ -160,7 +164,7 @@ ki import \
 }
 ```
 
-> **自动备份**：导入成功后，系统会自动创建 scope 快照备份（输出到 stderr）。备份文件保存在 `~/.ki/backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原。
+> **备份说明**：导入不会自动备份。如需快照，请在导入前（或任一时间点）手动执行 `ki backup <scope>`；备份文件保存在 `~/.ki/backup/<scope>/snapshots/` 目录下，格式为 `.tar.gz`，可用于后续还原（`ki restore`）。
 
 ---
 
@@ -170,15 +174,15 @@ ki import \
 
 1. **Group 树结构**：
    ```bash
-   ki query-group --scope <scope> --mode full
+   ki group list --scope <scope> --mode full
    ```
    预期：显示完整的 Group 目录结构
 
 2. **Relations 列表**：
    ```bash
-   ki query-group --scope <scope> --groups <group>
+   ki group list --scope <scope> --groups <group>
    ```
-   预期：显示 Group 下的 Relation 列表和关键词
+   预期：显示 Group 下的 Relation 列表、评分与分区
 
 3. **本地 KB 内容**：
    ```bash
@@ -206,25 +210,12 @@ ki import \
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `Access denied to scope: <scope>` | scope 未注册 | 在 `~/.ki/config.yaml` 注册 scope |
+| `unknown scope: "<scope>"（scopeMode=strict）` | `scopeMode: strict` 下 scope 未注册 | 在 `~/.ki/config.yaml` 注册 scope，或改用 `scopeMode: default` |
 | `sourceDir 不存在或不是目录` | `--source` 路径错误 | 确认目录存在且路径正确 |
 | `目录下未发现 .md 文件` | 目录无 Markdown 文件 | 确认目录含 `.md` 文件 |
 | `--group 不能为空` | `--group` 传了空值 | 检查 `--group` 参数（缺省不传落到 `default`） |
 | `向量化失败` | Embedding API 配置错误或网络问题 | 检查 `~/.ki/config.yaml` 中的 embedding 配置，确认 API 密钥有效 |
 | `文件过大已跳过` | 超过单文件大小上限（默认 1MB，config `import.maxFileSize`） | 手动切分后导入或调整上限 |
-
----
-
-## 与其他 Skill 的关系
-
-| Skill | 使用场景 | 依赖关系 |
-|------|---------|----------|
-| knowledge-index-update | 增量更新 | 依赖首次构建的 `group-index.source` 块 |
-| knowledge-index-verify | 验证构建结果 | 在构建完成后执行 |
-| knowledge-index-query | 查询知识 | 构建完成后使用 |
-| knowledge-index-manage | 管理索引结构 | 构建过程中自动创建 Group |
-
-**knowledge-index-build 是首次导入的入口**，后续更新使用 knowledge-index-update。
 
 ---
 
@@ -257,7 +248,7 @@ ki import \
 
 ### 配置方式
 
-> `wikiSync` 与 `kbDir` 均在同一个 `~/.ki/config.yaml` 的 scope 配置中设置，完整配置文件结构参见[前置条件第 5 步](#5-确定-kb-存储位置)。
+> `wikiSync` 与 `kbDir` 均在同一个 `~/.ki/config.yaml` 的 scope 配置中设置，完整配置文件结构参见[前置条件第 4 步](#4-确定-kb-存储位置)。
 
 在 scope 配置中添加 `wikiSync`：
 
@@ -276,7 +267,9 @@ scopes:
 - **输出格式**：生成 Markdown 文件，包含 YAML frontmatter（group、relation；keywords 已移除）
 - **目录结构**：按 Group 路径创建子目录，如 `wiki-output/我的项目/API/用户登录接口.md`
 - **优先级**：如果 scope 有 `source` 块（通过 ki import 导入），Wiki 写回会直接写入 source 目录，而非 wikiSync.sourceDir
-- **直导不触发写回**：`ki import --source` 只写本地 KB + 向量层，不写回外部 Wiki（避免 chunk 的 `{relation}.md` 污染源目录）
+- **Group 目录同步**：开启 wikiSync 时，`ki group create` 会在 `wikiSync.sourceDir` 下创建同名目录（创建失败只告警，不影响建组）
+- **导入写回（仅 CLI `ki import`）**：开启 wikiSync 时，导入成功的文档会按 wiki 格式写入 `<sourceDir>/<group>/<relation>.md`（源文件自带的 frontmatter 会被替换为 groupPath/relation 头）；**已存在的文件跳过**，不覆盖手工维护的内容；导入源本身位于 wiki 目录内时不自我复制。Web 上传与 `ki datasource sync` 不写回
+- **写回范围**：只覆盖「本次实际写入 KB」的文档——增量未变、冲突跳过、预算剔除的文件不写回；wiki 文件被手工删除后重导同内容也不会重建，需用 `ki wiki-backfill <scope>` 补齐
 
 ### Wiki 文件示例
 

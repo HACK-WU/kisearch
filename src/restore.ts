@@ -24,7 +24,15 @@ import {
   getBackupDir,
 } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
+import { readAllGroupCaches, hasShardedLayout, notifyScopeRelationsInvalidated } from './lib/group-cache.js';
 import { rebuildScopeVectors, type RebuildVectorOptions } from './lib/rebuild-vector.js';
+// S-02 同口径（REQ-20261009-003）：重建收尾的索引整理 —— 等待 + 展示 + 就绪判据
+import {
+  whenIndexMaintenanceIdle,
+  getIndexMaintenanceState,
+  readIndexReadiness,
+  type IndexReadiness,
+} from './lib/index-maintenance.js';
 import { parseContentTags } from './lib/constants.js';
 import {
   backupScopeSnapshot,
@@ -38,6 +46,10 @@ import { extractScopeSnapshot } from './lib/safe-tar.js';
 import { rebuildFtsOnlyScope } from './lib/fts-rebuild.js';
 import { closeFtsEngine } from './lib/fts-client.js';
 import { logProgress } from './lib/progress.js';
+import { createTaskReporter } from './lib/task-registry.js';
+import type { TaskReporter } from './lib/task-registry.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
+import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
 
 // ─── 工具 ───
 
@@ -46,8 +58,7 @@ function output(result: Record<string, unknown>): void {
 }
 
 function fail(msg: string): never {
-  output({ ok: false, error: msg });
-  process.exit(1);
+  throw new Error(msg);
 }
 
 let cliAbortSignal: AbortSignal | undefined;
@@ -87,26 +98,33 @@ function ensureTarAvailable(): void {
  * 汇总即将被覆盖的 scope 目录信息，供二次确认时展示。
  * 尽力而为：任何读取失败都降级为「未知」，不阻断流程。
  */
-function summarizeScopeDir(scopeDataDir: string): string {
+function summarizeScopeDir(scope: string, scopeDataDir: string): string {
   if (!fs.existsSync(scopeDataDir)) {
     return '   目标目录当前不存在（等价于全新导入）';
   }
   const lines: string[] = [];
 
-  // 关系条目数：统计 relations-cache.json 各 Group 的 hot_relations
+  // 关系条目数：统计 relations 元数据（批次 2 审查 P1-6——原实现只读旧单文件，
+  // 新布局 scope 的"现有数据规模"一行会静默消失，破坏 NEG-11 覆盖前可见性）
   try {
-    const rcPath = path.join(scopeDataDir, 'relations-cache.json');
-    if (fs.existsSync(rcPath)) {
-      const rc = JSON.parse(fs.readFileSync(rcPath, 'utf-8')) as {
-        groups?: Record<string, { hot_relations?: unknown[] }>;
-      };
-      const groups = rc.groups || {};
-      const groupCount = Object.keys(groups).length;
+    const groups = readAllGroupCaches(scope);
+    if (groups.size > 0 || hasShardedLayout(scope)) {
       let relCount = 0;
-      for (const g of Object.values(groups)) {
-        relCount += g.hot_relations?.length || 0;
+      for (const g of groups.values()) relCount += g.hot_relations?.length || 0;
+      lines.push(`   现有数据：${groups.size} 个 Group、${relCount} 条 Relation`);
+    } else {
+      const rcPath = path.join(scopeDataDir, 'relations-cache.json');
+      if (fs.existsSync(rcPath)) {
+        const rc = JSON.parse(fs.readFileSync(rcPath, 'utf-8')) as {
+          groups?: Record<string, { hot_relations?: unknown[] }>;
+        };
+        const legacyGroups = rc.groups || {};
+        let relCount = 0;
+        for (const g of Object.values(legacyGroups)) {
+          relCount += g.hot_relations?.length || 0;
+        }
+        lines.push(`   现有数据：${Object.keys(legacyGroups).length} 个 Group、${relCount} 条 Relation`);
       }
-      lines.push(`   现有数据：${groupCount} 个 Group、${relCount} 条 Relation`);
     }
   } catch {
     /* 忽略统计失败 */
@@ -198,9 +216,7 @@ async function restoreFromSnapshot(
     checkDiskSpace(scopeDirParent, snapSize * 5);
   } catch (err) {
     if (err instanceof PreflightError) {
-      output({ ok: false, error: err.message, code: err.code });
-      await closeEngine();
-      process.exit(1);
+      throw err;
     }
     throw err;
   }
@@ -209,7 +225,7 @@ async function restoreFromSnapshot(
   if (!opts.yes) {
     previewAndRequireYes(
       `⚠️  即将删除并覆盖目录：${scopeDataDir}\n` +
-        `${summarizeScopeDir(scopeDataDir)}\n` +
+        `${summarizeScopeDir(scope, scopeDataDir)}\n` +
         `   还原来源：${snapshotPath}\n` +
         `   还原快照：${snapshotFile}\n` +
         `   ⚠️  此操作不可逆（还原前会自动创建安全网快照）\n`
@@ -225,16 +241,11 @@ async function restoreFromSnapshot(
     try {
       preRestoreSnapshot = backupScopeSnapshot(safetyBackupDir, scope, scopeDataDir);
     } catch (err) {
-      output({
-        ok: false,
-        error:
+      throw Object.assign(new Error(
           `还原前安全网快照创建失败：${(err as Error).message}\n` +
           `为避免不可逆的数据丢失，已中止还原（未删除任何现有数据）。\n` +
           `请修复上述问题（如磁盘空间 / 目录权限 / tar 可用性）后重试。`,
-        code: 'SAFETY_SNAPSHOT_FAILED',
-      });
-      await closeEngine();
-      process.exit(1);
+      ), { code: 'SAFETY_SNAPSHOT_FAILED' });
     }
   }
 
@@ -252,9 +263,6 @@ async function restoreFromSnapshot(
       process.stderr.write(`tar 解压失败，尝试从还原前快照自动恢复...\n`);
       try {
         extractScopeSnapshot(preRestoreSnapshot, scopeDataDir);
-        fail(
-          `tar 解压失败：${(err as Error).message}\n已自动从还原前快照恢复原始数据`
-        );
       } catch (recoverErr) {
         fail(
           `tar 解压失败且自动恢复也失败：\n` +
@@ -264,6 +272,7 @@ async function restoreFromSnapshot(
             `  请手动执行：ki restore ${scope} --from-snapshot --timestamp <ts>`
         );
       }
+      fail(`tar 解压失败：${(err as Error).message}\n已自动从还原前快照恢复原始数据`);
     } else {
       // CH-2 下：preRestoreSnapshot 为空仅出现于目标目录原本不存在（等价全新导入），
       // 此时无现有数据可丢失，无需安全网。
@@ -272,6 +281,12 @@ async function restoreFromSnapshot(
       );
     }
   }
+
+  // 批次 2（W7 对齐，第二轮审查 P2）：快照已覆盖 scope 目录（含 `.relations/` 分片与
+  // manifest），进程内缓存必须立即失效——原实现只在 daemon 路径
+  //（lib/restore-snapshot.ts）接线，CLI 路径仅靠身份三元组兜底（多一次全量重读，
+  // 且同进程内若已缓存则依赖下次 stat 才发现）
+  notifyScopeRelationsInvalidated(scope);
 
   // 快照不包含 vectorDir；无 dense 的 --no-vector 文档仍应在 restore 后可全文检索。
   const fullText = await rebuildFtsOnlyScope(scope);
@@ -317,6 +332,12 @@ function listAvailableBackups(scope: string, opts: { backupDir?: string } = {}):
 
 const args = process.argv.slice(2);
 
+/**
+ * 重建失败时回显的逐条错误上限（避免整库重建失败时刷出上万行）。
+ * 第一条（通用迁移文案）单独作为 error 字段，其余明细进 errors 数组。
+ */
+const MAX_REPORTED_REBUILD_ERRORS = 10;
+
 /** 帮助文本：-h/--help 与缺省 scope 时共用 */
 const RESTORE_HELP = `ki restore - 从快照还原 scope
 
@@ -324,7 +345,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   ki restore <scope> --list             列出可用备份（显式 flag，与 backup --list 一致）
   ki restore <scope>                    列出可用备份（无参兼容）
   ki restore <scope> --from-snapshot [--timestamp <ts>] [--yes]
-  ki restore <scope> --rebuild-vector  仅重建 scope 向量（对已还原的 KB；需 embedding 密钥）
+  ki restore <scope> --rebuild-vector [--yes]  从 KB 重建 scope 向量；跨维度迁移需 --yes
 
 选项：
   --list              列出可用备份（显式）
@@ -334,7 +355,7 @@ const RESTORE_HELP = `ki restore - 从快照还原 scope
   --tags <t1,t2>      重建打标：为重建范围内文档附加自定义标签（与已有标签合并去重，只增不减；需与 --rebuild-vector 配合）
   --timestamp <ts>    指定快照时间戳（默认取最新）
   --backup-dir <dir>  指定备份根目录（默认用配置 backupDir）
-  --yes               跳过确认直接执行（破坏性）
+  --yes               确认快照还原或跨维度全量重建（破坏性；旧集合保留备份）
   -h, --help          显示帮助`;
 
 // -h/--help：打印帮助后直接退出（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
@@ -406,7 +427,7 @@ const rebuildTagsRaw = extractValuedFlag('--tags');
 // NEG：记录用户是否显式传入了 --group/--tags（值缺失/空/全保留标签时不得静默降级为全量重建）
 const groupFlagProvided = args.some((a) => a === '--group' || a.startsWith('--group='));
 const tagsFlagProvided = args.some((a) => a === '--tags' || a.startsWith('--tags='));
-const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided };
+const rebuildOpts: RebuildVectorOptions = { tagsProvided: tagsFlagProvided, yes: skipYes };
 if (rebuildGroupRaw && rebuildGroupRaw.trim()) rebuildOpts.groupFilter = rebuildGroupRaw.trim();
 if (rebuildTagsRaw && parseContentTags(rebuildTagsRaw).length > 0) rebuildOpts.tags = rebuildTagsRaw;
 
@@ -458,23 +479,111 @@ function validateRebuildOptsOrExit(): void {
 // ─── 向量重建（--rebuild-vector）───
 
 /** 从已还原 KB 重建 scope 向量并输出结果；失败 exit 1。opts 支持局部重建（--group/--tags） */
-async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}): Promise<void> {
+async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = {}, compositeTask?: TaskReporter): Promise<void> {
   const effectiveOpts = { ...opts, abortSignal: opts.abortSignal ?? cliAbortSignal };
   const { abortSignal: _abortSignal, ...rpcOpts } = effectiveOpts;
   const jobId = createDaemonJobId();
+  const useDaemon = shouldUseDaemonClient();
+  const requestConfig = loadConfig();
+  const task = useDaemon ? undefined : compositeTask ?? createTaskReporter(requestConfig, {
+    id: jobId,
+    source: 'cli',
+    operation: 'rebuild-vector',
+    scope: scopeName,
+  });
+  task?.update({ state: 'running', phase: 'rebuild', startedAt: Date.now() });
+  if (!useDaemon) {
+    try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* diagnostics never block rebuild */ }
+  }
   // 注入真实 countScope：全量重建清空旧向量前统计总数，删除过程输出进度条
-  const result = shouldUseDaemonClient()
-    // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
-    ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
-      scope: scopeName,
-      options: rpcOpts,
-    }, 0, {
-      streamProgress: true,
-      jobId,
-      abortSignal: _abortSignal,
-      onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `rebuild ${event.progress.phase ?? 'running'}`),
-    })
-    : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, effectiveOpts);
+  let result: Awaited<ReturnType<typeof rebuildScopeVectors>>;
+  try {
+    result = useDaemon
+      // timeoutMs=0：重建需逐条重新向量化，耗时随文档数线性增长，远超固定客户端超时。
+      ? await callDaemon<Awaited<ReturnType<typeof rebuildScopeVectors>>>('rebuild-vector', {
+        scope: scopeName,
+        options: rpcOpts,
+      }, 0, {
+        streamProgress: true,
+        jobId,
+        abortSignal: _abortSignal,
+        onProgress: (event) => logProgress(event.progress.done, Math.max(event.progress.total, 1), `rebuild ${event.progress.phase ?? 'running'}`),
+      })
+      : await rebuildScopeVectors(scopeName, { countScope: vectorCountScope }, {
+        ...effectiveOpts,
+        onProgress: (progress) => {
+          effectiveOpts.onProgress?.(progress);
+          task?.progress({ phase: progress.phase, done: progress.done, total: progress.total });
+        },
+      });
+  } catch (error) {
+    const e = error as Error & { code?: string; stats?: { partialCommitted?: number } };
+    task?.finish(e.code === 'REBUILD_CANCELLED' ? 'cancelled' : 'failed', {
+      error: e.message,
+      recoveryHint: e.code === 'VECTORIZATION_STOPPED' ? '检查 embedding 配置、鉴权与服务状态；确认后重新执行重建。' : undefined,
+      partialCommitted: e.stats?.partialCommitted,
+    });
+    if (!useDaemon) {
+      try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* best effort */ }
+    }
+    throw error;
+  }
+  const partialState = !result.ok ? 'failed' : result.errors.length > 0 ? 'partial' : 'succeeded';
+  // ── S-02 同口径（REQ-20261009-003）：重建收尾的**索引整理**（两级口径：可用 → 已优化）──
+  // 入队由 `rebuildScopeVectors` 完成（CLI 直连 / daemon RPC / HTTP job 三条入口共用）；
+  // 本处只负责"等待 + 展示 + 降级"，且**整理失败不得算成重建失败**。
+  // daemon 路径：整理跑在**服务端**（重建进程即引擎持有者），本端无法等待 ⇒ 只给指引。
+  const maint = result.indexMaintenance;
+  const optimizeTimeoutMs = (requestConfig as unknown as { vector?: { optimize?: { timeoutMs?: number } } })
+    .vector?.optimize?.timeoutMs ?? 600_000;
+  task?.update({ state: partialState, phase: maint?.scheduled ? 'indexing' : 'rebuild' });
+  let indexMaintenancePhase: 'indexing' | 'optimized' | 'available' | undefined;
+  let indexReadiness: IndexReadiness | undefined;
+  if (maint?.scheduled) {
+    if (useDaemon) {
+      process.stderr.write(
+        `⏳ 索引整理已在服务端触发（重建进程持有引擎，本端不等待）；`
+        + `如需确认或重跑：ki index-optimize -s ${scopeName}\n`,
+      );
+      indexMaintenancePhase = 'indexing';
+    } else {
+      process.stderr.write('⏳ 索引整理中…（本知识库检索可能变慢；文档浏览/编辑不受影响）\n');
+      await whenIndexMaintenanceIdle(optimizeTimeoutMs);
+      const settled = getIndexMaintenanceState().last;
+      indexReadiness = await readIndexReadiness(scopeName);
+      if (settled && settled.scope === scopeName) {
+        if (settled.ok) {
+          process.stderr.write(
+            `✅ 索引已优化（${(settled.wallMs / 1000).toFixed(1)}s）`
+            + `${indexReadiness.denseIndexed ? '' : '（注意：未检测到 dense 索引实体，可执行 ki doctor 诊断）'}\n`,
+          );
+          indexMaintenancePhase = 'optimized';
+        } else {
+          process.stderr.write(
+            `⚠️  索引整理未完成（${settled.degraded ?? 'error'}）：${settled.reason ?? ''}\n`
+            + `   文档已可用；重试：ki index-optimize -s ${scopeName}\n`,
+          );
+          indexMaintenancePhase = 'available';
+        }
+      } else {
+        indexMaintenancePhase = 'available';
+      }
+    }
+    task?.update({
+      phase: indexMaintenancePhase ?? 'available',
+      ...(indexMaintenancePhase === 'available'
+        ? { recoveryHint: `索引整理未完成；可执行 ki index-optimize -s ${scopeName} 重试` }
+        : {}),
+    });
+  }
+  task?.finish(partialState, {
+    error: !result.ok ? result.errors[0]?.error : result.errors.length > 0 ? result.errors[0]?.error : undefined,
+    recoveryHint: !result.ok ? '检查任务详情中的失败阶段，修复问题后重新执行重建。' : undefined,
+    partialCommitted: result.partialCommitted ?? (result.ok ? result.stats.succeeded : undefined),
+  });
+  if (!useDaemon) {
+    try { await refreshVectorDimensionSnapshot(requestConfig, scopeName); } catch { /* best effort */ }
+  }
   // REQ-02 生命周期①：仅全量重建成功后清除中断标记（局部重建后库整体仍可能不完整，保留引导）
   if (result.ok && !result.partial) {
     try {
@@ -483,24 +592,43 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
     } catch { /* 清除失败不阻断 */ }
   }
   if (!result.ok) {
+    // 失败时只回 errors[0] 会把可诊断信息全部丢掉：跨维度迁移的第一条是通用提示
+    // （"新维度向量未全部写入…请修复 embedding"），真实逐条原因在 errors[1..] 与 stats 里。
+    // 实测该行为让「batchSize=32 超过服务商单请求上限 25」这类配置问题完全无从定位
+    // （用户只看到"请修复 embedding"，而 provider 与密钥其实都正常）。
+    const reportedErrors = result.errors.slice(0, MAX_REPORTED_REBUILD_ERRORS);
     output({
       ok: false,
       action: 'rebuild_vector',
       scope: scopeName,
-      error: result.errors[0]?.error ?? '重建向量失败',
+      error: reportedErrors[0]?.error ?? '重建向量失败',
+      stats: result.stats,
+      errors: reportedErrors.length > 1 ? reportedErrors.slice(1) : undefined,
+      errorsTotal: result.errors.length,
+      hint:
+        'errors 只有一条通用文案且 stats.failed>0 时，优先核对 embedding provider：连通性 / 密钥 / '
+        + '单请求条数上限（服务商常限制每次请求的 inputs 数；运行时已支持自动降批，'
+        + '仍建议把 embedding.scheduler.batchSize 配到上限内）。执行 ki doctor 可复现同款探测。',
     });
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   output({
     ok: true,
     action: 'rebuild_vector',
     scope: scopeName,
     partial: result.partial,
+    // S-02 同口径：重建收尾的索引整理结果（daemon 路径下 scheduled=true 但本端不等待）
+    indexMaintenance: result.indexMaintenance,
+    indexMaintenancePhase,
+    indexReadiness,
     filter:
       result.partial
         ? { group: opts.groupFilter, tags: result.stats.mergedTags.length > 0 ? result.stats.mergedTags : undefined }
         : undefined,
     stats: result.stats,
+    migrationBackup: result.migrationBackup,
+    migrationCacheBackup: result.migrationCacheBackup,
     errors: result.errors.length > 0 ? result.errors : undefined,
     hint:
       result.errors.length > 0
@@ -557,19 +685,38 @@ async function main() {
             error: rebuilt.errors[0]?.error ?? '重建向量失败',
             restore: daemonResult,
           });
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         output(daemonResult);
         return;
       }
-      await restoreFromSnapshot(scope, {
-        timestamp,
-        yes: skipYes,
-        backupDir: backupDirOverride,
-        snapshotFile: snapshotFileArg,
-        rebuildVector,
-      });
-      if (rebuildVector) await rebuildAndReport(scope, rebuildOpts);
+      if (!skipYes) {
+        await restoreFromSnapshot(scope, {
+          timestamp, yes: false, backupDir: backupDirOverride, snapshotFile: snapshotFileArg, rebuildVector,
+        });
+        return;
+      }
+      const compositeTask = skipYes ? createTaskReporter(loadConfig(), {
+        source: 'cli', operation: rebuildVector ? 'restore-snapshot+rebuild-vector' : 'restore-snapshot', scope,
+      }) : undefined;
+      compositeTask?.update({ state: 'running', phase: 'restore', startedAt: Date.now() });
+      try {
+        await withScopeWriteLock(scope, 'restore-snapshot', async () => {
+          await restoreFromSnapshot(scope, {
+            timestamp,
+            yes: skipYes,
+            backupDir: backupDirOverride,
+            snapshotFile: snapshotFileArg,
+            rebuildVector,
+          });
+          if (rebuildVector) await rebuildAndReport(scope, rebuildOpts, compositeTask);
+          else compositeTask?.finish('succeeded');
+        });
+      } catch (error) {
+        compositeTask?.finish('failed', { error: (error as Error).message });
+        throw error;
+      }
     } else if (rebuildVector) {
       // 独立调用：对已还原的 KB 仅重建向量（支持 --group/--tags 局部重建）
       await rebuildAndReport(scope, rebuildOpts);
@@ -579,7 +726,7 @@ async function main() {
     }
   } catch (err) {
     output(toErrorPayload(err));
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     if (shouldUseDaemonClient()) process.removeListener('SIGINT', onInterrupt);
     cliAbortSignal = undefined;

@@ -284,6 +284,28 @@ describe('/healthz 探活', () => {
     assert.equal(body.name, 'kisearch');
     assert.equal(typeof body.pid, 'number');
   });
+
+  it('S0-4：process 资源证据字段齐全（rss/heap/cpu/eventLoop/activeHandles/uptime）', async () => {
+    const res = await fetch(`${srv.base}/healthz`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      process?: {
+        rssBytes?: number; heapUsedBytes?: number; heapTotalBytes?: number;
+        cpuUserMs?: number; cpuSystemMs?: number; activeHandles?: number | null;
+        eventLoopDelayMs?: number; uptimeMs?: number;
+      };
+    };
+    const p = body.process ?? {};
+    // 导入成功输出后 CPU/内存仍高的归因证据：字段缺失 = 排查入口断档
+    assert.ok(typeof p.rssBytes === 'number' && p.rssBytes > 0, 'rssBytes 应为正数');
+    assert.ok(typeof p.heapUsedBytes === 'number' && p.heapUsedBytes >= 0);
+    assert.ok(typeof p.heapTotalBytes === 'number' && p.heapTotalBytes >= 0);
+    assert.ok(typeof p.cpuUserMs === 'number' && p.cpuUserMs >= 0);
+    assert.ok(typeof p.cpuSystemMs === 'number' && p.cpuSystemMs >= 0);
+    assert.ok(p.activeHandles === null || typeof p.activeHandles === 'number');
+    assert.ok(typeof p.eventLoopDelayMs === 'number' && p.eventLoopDelayMs >= 0, '事件循环延迟应为非负数（ms）');
+    assert.ok(typeof p.uptimeMs === 'number' && p.uptimeMs > 0);
+  });
 });
 
 // ─── C. 回环绑定：免鉴权 ───

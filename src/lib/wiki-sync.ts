@@ -1,8 +1,9 @@
 /**
  * wiki-sync.ts — sync_relation 写回外部 Wiki 文件
  *
- * Wiki 目录发现优先级：
- *   1. group-index.json 的 source 块（source.dir）
+ * Wiki 目录发现优先级（见 {@link resolveWikiRootDir}）：
+ *   1. group-index.json 的 source 块（source.dir）——**须为目录**；
+ *      单文件导入时该字段是文件路径，不能当目录用（否则 ENOTDIR），跳过
  *   2. config.json 中 scope 级 wikiSync（wikiSync.sourceDir）
  *   3. 都没有 → 跳过
  *
@@ -13,9 +14,11 @@
 
 import fs from 'fs';
 import path from 'path';
-import { getSource, getRelationsCachePath, getLocalKbDir } from './scope.js';
-import { loadConfig, getScopeWikiSync } from './config.js';
+import { getSource, getRelationsCachePath, getLocalKbDir, getKbDir } from './scope.js';
+import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './group-cache.js';
+import { loadConfig, getScopeWikiSync, resolveImportExtensions } from './config.js';
 import { generateMarkdown } from './markdown-gen.js';
+import { isSafeGroupPath } from './import-path.js';
 
 // ─── 类型 ───
 
@@ -37,25 +40,225 @@ export function isUnsafeRelationName(relation: string): boolean {
 }
 
 /**
- * 解析 wiki 写回目标目录
+ * `source` 块能否当**目录**用；不可用时返回原因。
  *
- * @returns sourceDir 或 null（无法确定写回目录）
+ * 单文件导入（`ki import <file>.md`）把 `source.dir` 记成**该文件的路径**
+ * （import.ts 的 `source = { dir: sourceDir }`），直接当目录拼
+ * `<dir>/<group>/<relation>.md` 必然 ENOTDIR（2026-10-27 线上报错）。
+ *
+ * 判定：
+ *   - 路径存在 → 必须是目录；
+ *   - 路径不存在 → 扩展名命中 scope 导入白名单时仍按「文件」处理
+ *     （否则源文件被移走后，写回会在文件原位建出一个同名目录，根目录依旧错）；
+ *   - 其余情况维持原有「写回时按需重建」行为。
  */
-function resolveWikiTarget(scope: string): string | null {
-  // 优先级 1：group-index.json 的 source 块
+function rejectSourceDirAsWikiRoot(dir: string, importExtensions: string[]): string | null {
+  let stat: fs.Stats | null = null;
+  try { stat = fs.statSync(dir); } catch { stat = null; }
+  if (stat) {
+    return stat.isDirectory() ? null : `source 块指向的是文件而不是目录：${dir}`;
+  }
+  const ext = path.extname(dir).toLowerCase();
+  if (ext && importExtensions.some((item) => item.toLowerCase() === ext)) {
+    return `source 块指向单文件导入的源文件（已不存在）：${dir}`;
+  }
+  return null;
+}
+
+export interface WikiRootResult {
+  /** 可用的 wiki 文档根目录（绝对路径）；null = 不可用 */
+  dir: string | null;
+  /** 根目录来源 */
+  from: 'source' | 'wiki-sync' | null;
+  /** `source` 块被判为不可用时的原因（供 fail-loud 文案与诊断使用） */
+  sourceRejected?: string;
+}
+
+/**
+ * 解析 wiki **文档根目录**：`source` 块（须为目录）优先 → `wikiSync.sourceDir` 兜底。
+ *
+ * 与 {@link resolveWikiSyncTarget} 的分工：后者只认配置，供 import / group create 用
+ * （导入源可能是单文件，其 source 块不能当目录）；本函数供「定位写回 / 删除的 wiki
+ * 文档根」用，会先验证 `source` 块确实是目录，再决定是否让它优先。
+ */
+export function resolveWikiRootDir(scope: string): WikiRootResult {
+  const config = loadConfig();
+
+  // 优先级 1：group-index.json 的 source 块（须可当目录用）
   const source = getSource(scope);
+  let sourceRejected: string | undefined;
   if (source?.dir) {
-    return source.dir;
+    const sourceDir = path.resolve(source.dir);
+    const rejected = rejectSourceDirAsWikiRoot(sourceDir, resolveImportExtensions(config, scope));
+    if (!rejected) return { dir: sourceDir, from: 'source' };
+    sourceRejected = rejected;
   }
 
   // 优先级 2：config.json 的 wikiSync
-  const config = loadConfig();
+  // 开关口径与 writeBackToWiki / resolveWikiSyncTarget 统一：`enabled` 缺省视为 true，
+  // 只有显式 false 才算关闭（此前这里要求 enabled 真值，与写入门禁 `=== false` 不一致）。
   const wikiSync = getScopeWikiSync(config, scope);
-  if (wikiSync?.enabled && wikiSync?.sourceDir) {
-    return wikiSync.sourceDir;
+  if (wikiSync?.enabled !== false && wikiSync?.sourceDir) {
+    return { dir: path.resolve(wikiSync.sourceDir), from: 'wiki-sync', sourceRejected };
   }
 
-  return null;
+  return { dir: null, from: null, sourceRejected };
+}
+
+/** 无可用目录时的 fail-loud 文案（含 source 块被拒原因） */
+function noWikiRootReason(root: WikiRootResult): string {
+  return root.sourceRejected
+    ? `无可用 wiki 写回目录：${root.sourceRejected}，且未配置 wikiSync.sourceDir`
+    : '无可用 wiki 写回目录（source 块和 wikiSync 均未配置）';
+}
+
+/**
+ * 仅供 `wikiSync` 配置解析写回目标（不含 `source` 块）。
+ *
+ * `source` 块在单文件导入时指向**一个文件**，不能当目录用；group create / import
+ * 的主动写回只认用户显式配置的 `wikiSync.sourceDir`。
+ */
+function resolveWikiSyncTarget(scope: string): string | null {
+  const wikiSync = getScopeWikiSync(loadConfig(), scope);
+  if (!wikiSync || wikiSync.enabled === false || !wikiSync.sourceDir) return null;
+  return path.resolve(wikiSync.sourceDir);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+export type WikiGroupDirResult =
+  | { ok: true; targetDir: string; dir: string }
+  | { ok: false; reason: string };
+
+/**
+ * group create 时在 wikiSync.sourceDir 下同步创建同名目录。
+ * 未配置 wikiSync / enabled=false → null（零副作用）。
+ */
+export function ensureWikiGroupDir(scope: string, group: string): WikiGroupDirResult | null {
+  const targetDir = resolveWikiSyncTarget(scope);
+  if (!targetDir) return null;
+  // 与导入写回同一护栏：wiki 指向 KB 内部属配置错误，不在索引目录里建组目录
+  const kbDir = path.resolve(getKbDir(scope));
+  const relToKb = path.relative(kbDir, targetDir);
+  if (!relToKb.startsWith('..') && !path.isAbsolute(relToKb)) {
+    return { ok: false, reason: `wikiSync.sourceDir（${targetDir}）位于 KB 数据目录内，已跳过建目录` };
+  }
+  if (!isSafeGroupPath(group)) {
+    return { ok: false, reason: `非法 Group 路径：${group}` };
+  }
+  const dir = group ? path.join(targetDir, group) : targetDir;
+  const rel = path.relative(targetDir, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, reason: `Group 路径越出 wiki 目录：${group}` };
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    return { ok: true, targetDir, dir };
+  } catch (err) {
+    return { ok: false, reason: `创建 wiki 目录失败：${(err as Error).message}` };
+  }
+}
+
+export interface WikiImportWritebackItem {
+  group: string;
+  relation: string;
+  content: string;
+  /** 物理源文件绝对路径；已位于 wiki 目录内时跳过，避免把 wiki 自身再导一遍 */
+  sourcePath?: string;
+}
+
+export interface WikiImportWritebackResult {
+  targetDir: string;
+  written: number;
+  skipped: number;
+  failed: { group: string; relation: string; reason: string }[];
+  /** 失败明细超过 100 条时截断（完整条数见 failedCount） */
+  failedTruncated?: boolean;
+  failedCount?: number;
+}
+
+const MAX_WRITEBACK_FAILED_DETAIL = 100;
+
+/** 去掉源文件自带的 frontmatter，避免与 generateMarkdown 生成的头形成双 YAML 块 */
+function stripLeadingFrontmatter(content: string): string {
+  if (!content.startsWith('---')) return content;
+  const end = content.indexOf('\n---', 3);
+  if (end === -1) return content;
+  const after = content.slice(end + 4);
+  if (after !== '' && !/^[\r\n]/.test(after)) return content;
+  return after.replace(/^\r?\n/, '');
+}
+
+/**
+ * 导入成功后将文档按 wiki 格式写回 `wikiSync.sourceDir`。
+ *
+ * 与 `sync_relation` 写回的区别：
+ *  - 只认 `wikiSync`（不读 `source` 块——导入源可能是单个文件）；
+ *  - **不覆盖已存在文件**（幂等：只补缺，不刷新手写 wiki）；
+ *  - 不触发 autoBackfill（导入只同步本次成功导入的文档）。
+ *
+ * 未配置 wikiSync / enabled=false → null（零副作用）。
+ */
+export function writeImportedDocsToWiki(
+  scope: string,
+  items: WikiImportWritebackItem[],
+): WikiImportWritebackResult | null {
+  const targetDir = resolveWikiSyncTarget(scope);
+  if (!targetDir || items.length === 0) return null;
+
+  // 配置错误（wiki 指向 KB 内部）时拒绝写回，避免把 wiki 文档写进本地索引目录
+  const kbDir = path.resolve(getKbDir(scope));
+  const relToKb = path.relative(kbDir, targetDir);
+  if (!relToKb.startsWith('..') && !path.isAbsolute(relToKb)) {
+    process.stderr.write(`提示：wikiSync.sourceDir（${targetDir}）位于 KB 数据目录内，已跳过导入写回\n`);
+    return null;
+  }
+
+  const result: WikiImportWritebackResult = { targetDir, written: 0, skipped: 0, failed: [] };
+  const exportedAt = new Date().toISOString();
+  for (const item of items) {
+    if (!isSafeGroupPath(item.group) || isUnsafeRelationName(item.relation)) {
+      result.skipped++;
+      continue;
+    }
+    if (item.sourcePath && isPathInside(targetDir, item.sourcePath)) {
+      result.skipped++;
+      continue;
+    }
+    const dest = item.group
+      ? path.join(targetDir, item.group, `${item.relation}.md`)
+      : path.join(targetDir, `${item.relation}.md`);
+    const rel = path.relative(targetDir, dest);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      result.skipped++;
+      continue;
+    }
+    if (fs.existsSync(dest)) {
+      result.skipped++;
+      continue;
+    }
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(
+        dest,
+        generateMarkdown(item.group, item.relation, stripLeadingFrontmatter(item.content), exportedAt),
+        'utf-8',
+      );
+      result.written++;
+    } catch (err) {
+      result.failed.push({ group: item.group, relation: item.relation, reason: (err as Error).message });
+    }
+  }
+  // 磁盘满等系统性故障会让 failed 与导入文件数同量级；明细截断，条数单独给
+  if (result.failed.length > MAX_WRITEBACK_FAILED_DETAIL) {
+    result.failedCount = result.failed.length;
+    result.failed = result.failed.slice(0, MAX_WRITEBACK_FAILED_DETAIL);
+    result.failedTruncated = true;
+  }
+  return result;
 }
 
 /**
@@ -94,9 +297,10 @@ function writeBackToWikiInner(
     return { synced: false, reason: 'wikiSync.enabled=false 已禁用 wiki 写回' };
   }
 
-  const sourceDir = resolveWikiTarget(scope);
+  const root = resolveWikiRootDir(scope);
+  const sourceDir = root.dir;
   if (!sourceDir) {
-    return { synced: false, reason: '无可用 wiki 写回目录（source 块和 wikiSync 均未配置）' };
+    return { synced: false, reason: noWikiRootReason(root) };
   }
 
   // 自动补齐：目标目录不存在或为空 → 视为"wiki 尚未初始化"，
@@ -203,33 +407,38 @@ export function backfillWiki(scope: string, opts: { force?: boolean } = {}): Wik
       stats, skipped,
     };
   }
-  const targetDir = resolveWikiTarget(scope);
+  const root = resolveWikiRootDir(scope);
+  const targetDir = root.dir;
   if (!targetDir) {
     return {
       ok: false, action: 'wiki-backfill', scope,
-      error: '无可用 wiki 写回目录（source 块和 wikiSync 均未配置），请先配置 wikiSync.sourceDir 或执行一次导入',
+      error: `${noWikiRootReason(root)}，请先配置 wikiSync.sourceDir 或执行一次目录导入`,
       stats, skipped,
     };
   }
 
-  // relations-cache 不存在 → scope 尚无任何数据
-  const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) {
+  // 批次 2（W8）：全量读双轨（backfill 天然全量；本函数只读 relations 不写元数据）
+  const all = (() => {
+    try {
+      return readAllGroupCaches(scope);
+    } catch (err) {
+      return err as Error;
+    }
+  })();
+  if (all instanceof Error) {
+    return { ok: false, action: 'wiki-backfill', scope, error: `relations 元数据解析失败：${(all as Error).message}`, stats, skipped };
+  }
+  // 批次 2 审查 P2：判定必须布局感知，否则「已迁移但 0 组」的空 scope 会被误判为未初始化
+  // （命令从"幂等成功、0 补齐"变成失败，且文案指向已不存在的旧文件）。
+  if (all.size === 0 && !hasShardedLayout(scope) && !fs.existsSync(getRelationsCachePath(scope))) {
     return {
       ok: false, action: 'wiki-backfill', scope,
-      error: `relations-cache 不存在（${cachePath}）：scope 尚无数据可补齐`,
+      error: `relations 元数据不存在（${getRelationsManifestPath(scope)} / ${getRelationsCachePath(scope)}）：scope 尚无数据可补齐`,
       stats, skipped,
     };
   }
 
-  let cache: { groups?: Record<string, { hot_relations?: Array<{ text: string }> }> };
-  try {
-    cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
-  } catch {
-    return { ok: false, action: 'wiki-backfill', scope, error: `relations-cache 解析失败：${cachePath}`, stats, skipped };
-  }
-
-  for (const [groupPath, groupData] of Object.entries(cache.groups ?? {})) {
+  for (const [groupPath, groupData] of all) {
     const relations = groupData?.hot_relations ?? [];
     if (relations.length === 0) continue;
     const localKb = readLocalKbIndex(scope, groupPath);

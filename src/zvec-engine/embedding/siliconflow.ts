@@ -19,6 +19,14 @@ export interface SiliconFlowProviderConfig {
   baseURL?: string;
   model?: string;
   dimension?: number;
+  /**
+   * 错误文案中显示的提供商名（缺省 'SiliconFlow'）。
+   *
+   * 本类是**通用 OpenAI 兼容实现**，实际厂商由 `baseURL` 决定（可指向 dashscope /
+   * 阿里云百炼 / 任何兼容端点）。若文案恒为 "SiliconFlow"，用户配置 dashscope 却看到
+   * SiliconFlow 报错，会把排障方向带偏。调用方应传入 `config.embedding.provider`。
+   */
+  providerLabel?: string;
   /** 单测可注入 mock fetch */
   fetchImpl?: typeof fetch;
 }
@@ -46,25 +54,29 @@ export class SiliconFlowProvider implements EmbeddingProvider {
   private readonly apiKey: string;
   private readonly baseURL: string;
   private readonly model: string;
+  /** 错误文案中的提供商名（见 SiliconFlowProviderConfig.providerLabel） */
+  private readonly label: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(config: SiliconFlowProviderConfig = {}) {
+    const label = config.providerLabel?.trim() || 'SiliconFlow';
+    this.label = label;
     const apiKey = config.apiKey ?? process.env.SILICONFLOW_API_KEY;
     if (!apiKey) {
       throw new EmbeddingConfigError(
-        'SiliconFlow apiKey missing: pass apiKey in config or set SILICONFLOW_API_KEY env',
+        `${label} apiKey missing: pass apiKey in config or set SILICONFLOW_API_KEY env`,
       );
     }
     const dimension = config.dimension ?? DEFAULT_DIMENSION;
     if (!Number.isInteger(dimension) || dimension <= 0) {
       throw new EmbeddingConfigError(
-        `SiliconFlow dimension must be a positive integer, got: ${dimension}`,
+        `${label} dimension must be a positive integer, got: ${dimension}`,
       );
     }
     const baseURL = config.baseURL ?? DEFAULT_BASE_URL;
     if (!baseURL.startsWith('https://')) {
       throw new EmbeddingConfigError(
-        `SiliconFlow baseURL must start with https://, got: ${baseURL}`,
+        `${label} baseURL must start with https://, got: ${baseURL}`,
       );
     }
     this.apiKey = apiKey;
@@ -162,7 +174,7 @@ export class SiliconFlowProvider implements EmbeddingProvider {
         // 5xx / 429 可重试；其他 4xx 不可重试
         const nonRetryable = status >= 400 && status < 500 && status !== 429;
         throw new EmbeddingError(
-          `SiliconFlow /embeddings HTTP ${status}: ${truncate(text, 300)}`,
+          `${this.label} /embeddings HTTP ${status}: ${truncate(text, 300)}`,
           { code: `HTTP_${status}`, data: { status, nonRetryable, retryAfterMs } },
         );
       }
@@ -171,7 +183,7 @@ export class SiliconFlowProvider implements EmbeddingProvider {
       const data = json.data;
       if (!Array.isArray(data) || data.length !== batch.length) {
         throw new EmbeddingError(
-          `SiliconFlow response data length mismatch: expected ${batch.length}, got ${data?.length ?? 'undefined'}`,
+          `${this.label} response data length mismatch: expected ${batch.length}, got ${data?.length ?? 'undefined'}`,
           { data: { nonRetryable: true } },
         );
       }
@@ -181,13 +193,13 @@ export class SiliconFlowProvider implements EmbeddingProvider {
       return sorted.map((item, i) => {
         if (!Array.isArray(item.embedding)) {
           throw new EmbeddingError(
-            `SiliconFlow response item[${i}] embedding is not an array`,
+            `${this.label} response item[${i}] embedding is not an array`,
             { data: { nonRetryable: true } },
           );
         }
         if (item.embedding.length !== this.dimension) {
           throw new EmbeddingError(
-            `SiliconFlow response item[${i}] dimension mismatch: expected ${this.dimension}, got ${item.embedding.length}`,
+            `${this.label} response item[${i}] dimension mismatch: expected ${this.dimension}, got ${item.embedding.length}`,
             { data: { nonRetryable: true, expectedDim: this.dimension, actualDim: item.embedding.length } },
           );
         }
@@ -198,13 +210,13 @@ export class SiliconFlowProvider implements EmbeddingProvider {
       const e = err as Error & { name?: string };
       if (e.name === 'AbortError') {
         throw new EmbeddingError(
-          `SiliconFlow /embeddings timeout after ${timeoutMs}ms`,
+          `${this.label} /embeddings timeout after ${timeoutMs}ms`,
           { code: 'TIMEOUT', data: { nonRetryable: false } },
         );
       }
       // 网络错误（fetch reject）可重试
       throw new EmbeddingError(
-        `SiliconFlow /embeddings network error: ${e.message}`,
+        `${this.label} /embeddings network error: ${e.message}`,
         { code: 'NETWORK', data: { nonRetryable: false } },
       );
     } finally {

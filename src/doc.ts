@@ -27,6 +27,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 const PREVIEW_LEN = 200;
@@ -139,12 +140,16 @@ async function executeDocDeleteLocal(params: {
       return { ok: true, scope: params.scope, requested: params.ids.length, deleted: 0, errors: [] };
     }
     const res = await vectorDelete({ scope: params.scope, ids: inScopeIds });
+    // 管理面按 id 逐条回显：NOT_FOUND 在向量层属幂等成功，但用户需要知道它没删到东西
     return {
       ok: true,
       scope: params.scope,
       requested: params.ids.length,
       deleted: res.deleted,
-      errors: res.errors,
+      errors: [
+        ...res.errors,
+        ...res.notFoundIds.map((id) => ({ id, reason: 'doc 不存在（未删除任何内容）' })),
+      ],
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -153,7 +158,9 @@ async function executeDocDeleteLocal(params: {
 
 export async function executeDocDelete(params: { scope: string; ids: string[]; yes: boolean }): Promise<DocDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<DocDeleteResult>('doc-delete', params);
-  return executeDocDeleteLocal(params);
+  try {
+    return await withScopeWriteLock(params.scope, 'doc-delete', () => executeDocDeleteLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── CLI ───

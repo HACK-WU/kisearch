@@ -19,8 +19,25 @@ export interface DocumentView {
   group?: string;
   path?: string;
   content?: string;
+  /** 搜索未取到全文时保留命中片段，完整文档加载失败后仍可阅读。 */
+  fallbackContent?: string;
   /** 从全文检索/浏览正文命中打开时，传递到阅读器的高亮查询词。 */
   highlightQuery?: string;
+  /** 新页深链接的目标段落/标题 ID。 */
+  anchor?: string;
+}
+
+/** 带所属 scope 的阅读项；跨 scope 复用同一页面时必须用它隔离旧选择。 */
+export interface ScopedDocumentView extends DocumentView {
+  scope: string;
+}
+
+/** 只有文档属于当前 scope 时才允许阅读器挂载，避免以新 scope 查询旧文档定位。 */
+export function documentViewForScope(
+  scope: string,
+  viewing: ScopedDocumentView | null,
+): ScopedDocumentView | null {
+  return viewing?.scope === scope ? viewing : null;
 }
 
 /** Markdown 链接是否可能是知识库中的本地文档链接。 */

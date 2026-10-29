@@ -1,47 +1,58 @@
 ---
 name: agents-md-template
-description: AGENTS.md 的标准格式模板。包含项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像与近期工作（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
+description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search）与置顶安全底线（代码、测试、配置、示例禁止写入私钥、线上地址、真实 IP、账号口令、个人信息，须用占位符）、项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像、近期工作与历史工作记录（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
 ---
 
 # AGENTS.md - AI AGENT 项目记忆文件
 
-> **本文件由 AI AGENT 自动维护，用于缓存项目记忆索引（`${scope}-memory`）、存储用户画像、记录近期工作与进度、跟踪新需求。**
+## 🔑 第一原则：遇事不决，ki-search
+
+**遇到任何不知道的问题、信息或不确定的内容，先用 `ki_search` MCP 工具查项目记忆，不凭记忆猜、不凭印象答。**
+
+- 查询顺序：先 `ki_search(scope: "${scope}-memory", ...)` 查项目上下文与决策；确认主题在代码库时再查 `${scope}`（代码知识）
+- 同源约定：`rules/ai-codekb-memory.md`「第一性原则：遇事不决 ki-search」
+
+---
+
+> **本文件由 AI AGENT 自动维护**：缓存项目记忆索引（`${scope}-memory`）、同步「团队约定」Group 占位、存储用户画像、记录近期工作与进度。
 >
-> **代码知识库（`${scope}`）索引不写入本文件**，查询代码知识时直接使用 `ki-search` 访问 ki。
+> **代码知识库（`${scope}`）索引不写入本文件**。检索走 `ki-search`：**默认优先查 `${scope}-memory`**（项目上下文/决策更精准，`${scope}` 仅作宏观兜底，与 `ki-search` 规则禁忌一致）；确认主题在代码库里时再查 `${scope}`；两者都确需时方可一次传两个 scope：`ki_search(scope: "${scope},${scope}-memory", query)`。
+>
+> **格式口径**：本文件是 AGENTS.md 格式的唯一真源；`agents-md-init` skill 与 `rules/ai-codekb-memory.md` 只引用不重定义。
+>
+> **🔒 安全底线（置顶必留，缺失即补）**：**本文件与一切代码、测试、配置、示例禁止写入敏感信息** —— 私钥/证书内容、线上地址与生产域名、真实 IP/内网网段、账号口令/Token/AK-SK/Cookie、个人信息（真实姓名、手机号、邮箱、身份证、住址）、未脱敏业务数据，一律用占位符：`<API_KEY>` / `<PRIVATE_KEY>` / `https://example.com` / `192.0.2.10`（RFC 5737 文档网段）/ `user@example.com`。测试样例必须是**明显不可用的伪造值**（如 `sk-test-0000`），不得复制线上真实值；真实配置走环境变量或 `.env`（`.gitignore` 内），代码里只留占位符。
 
 ---
 
 ## 项目记忆索引
 
-> 从 ki 的 `${scope}-memory` scope 获取真实数据填充；Group 缺失时按下方清单补建。代码知识库 `${scope}` 的索引不缓存于此。
+> 数据来源：ki 的 `${scope}-memory` scope（`YYYY-MM-DD` 初始化）。仅缓存此 scope，代码知识库不缓存。
+> **转写规则**：下面的 Group 结构与热门 Relation 必须由 `ki_group_list` 输出**逐行机械转写**，禁止读完凭印象重写（会持续漂移）。
 
 ### {scope}-memory 索引
 
-#### Group 初始化检查
+#### Group 骨架（按需补建，不必一次建满）
 
-首次或 Group 缺失时，先查询当前实际 Group，再补建缺少的：
+只立即建**必要项**，其余等 `ki_sync_relation` 写入时自动补建（该工具会自动创建路径上缺失的所有节点）：
 
-```bash
-# 1. 查询当前 Group 全貌
-ki query-group --scope ${scope}-memory --mode full
-
-# 2. 对比预定义列表，缺失则逐个创建
-ki manage-index create --scope ${scope}-memory --name "背景与目标"
-ki manage-index create --scope ${scope}-memory --name "技术栈选型"
-ki manage-index create --scope ${scope}-memory --name "团队约定"
-ki manage-index create --scope ${scope}-memory --name "项目历史"
-ki manage-index create --scope ${scope}-memory --name "当前状态"
-ki manage-index create --scope ${scope}-memory --name "外部依赖"
-ki manage-index create --scope ${scope}-memory --name "项目踩坑点"
-ki manage-index create --scope ${scope}-memory --name "项目架构"
-ki manage-index create --scope ${scope}-memory --name "工具库"
-ki manage-index create --scope ${scope}-memory --name "常用命令"
-ki manage-index create --scope ${scope}-memory --name "部署运维"
-ki manage-index create --scope ${scope}-memory --name "通用记忆片段"
-ki manage-index create --scope ${scope}-memory --name "专题记忆"
+```text
+ki_group_create(scope: "${scope}-memory", path: "团队约定")
+# scope 不存在时该工具自动创建并返回 createdScope，无需单独建 scope
 ```
 
+| Group | 必要性 | 用途 |
+|-------|--------|------|
+| 团队约定 | **必建** | 「团队约定」章节的同步源（见本文件「团队约定」章节） |
+| 背景与目标 / 当前状态 / 项目架构 | 建议 | 高频读写，先有槽位便于归类 |
+| 技术栈选型 / 项目历史 / 外部依赖 / 项目踩坑点 / 工具库 / 常用命令 / 部署运维 | 按需 | 首次写入时自动补建 |
+| 接口信息 / 数据流 / 决策记录 / 关联关系 | 按需（**高频，建议预留**） | 实测多个项目都会自发演化出这四类 |
+| 专题记忆 | 按需 | **必须先建子组再写 Relation**（团队约定，系统不校验） |
+| 通用记忆片段 | 兜底 | 无法归入上述分类时用，可再按功能/类型细分子组 |
+| 错误库 | 可选 | 踩坑多的项目适用；不需要就别建 |
+
 #### Group 结构
+
+> 从 `ki_group_list(scope: "${scope}-memory", mode: "full", depth: 4)` 的树形输出逐层转写，组名原样照抄。
 
 - 背景与目标
 - 技术栈选型
@@ -55,20 +66,35 @@ ki manage-index create --scope ${scope}-memory --name "专题记忆"
 - 常用命令
 - 部署运维
 - 专题记忆
-  > **注意**：专题记忆组下必须创建子索引（子组）后才能写入记忆片段，禁止直接向专题记忆组写入 relation。
+  > **约定**：专题记忆组下必须先建子组再写入 relation，禁止直接向本组写片段（**系统不校验，靠自觉**）。
+  - {子组名}
+- 接口信息
+  - {子组名}
+- 数据流
+  - {子组名}
+- 关联关系
+  - {子组名}
 - 通用记忆片段
-  - {列出实际分类，按功能或类型}
+  - {实际分类，按功能或类型}
+
+> **没有 Relation 的组也会出现在树里**，照写即可——它就是"这个槽位已备好但还没内容"的提示。
 
 #### 热门 Relation
 
-- {Relation1} (热度: {score})
-- ...
+> 来自 `ki_group_list(scope: "${scope}-memory", mode: "hot", hot_count: 3)`，每条一行。
+
+- 暂无（上次核对：`YYYY-MM-DD`）
+
+<!-- 有数据时：
+- {Group}/{Relation} (score: 0.7)
+- {Group}/{Relation} (score: 0.5)
+-->
 
 ---
 
 ## 团队约定
 
-> **同步源**：ki `${scope}-memory` → 「团队约定」Group（`ki_query_group(scope: "${scope}-memory", groups: "团队约定", mode: "full")`）。
+> **同步源**：ki `${scope}-memory` → 「团队约定」Group（`ki_group_list(scope: "${scope}-memory", groups: "团队约定", mode: "full")`）。
 > **本节为缓存**：权威数据在 ki，此处只做占位同步，便于 agent 免查询直接获取。
 > **无内容时必须写 `无`**，禁止留空或删除本节；写入 ki 后须回刷本节。
 > **写入方向**：先 `ki_sync_relation(scope: "${scope}-memory", group: "团队约定", ...)`，再把要点回刷到本节。
@@ -82,57 +108,48 @@ ki manage-index create --scope ${scope}-memory --name "专题记忆"
 ## 用户画像
 
 > **用户画像直接存储于本文件，不写入 ki 记忆。**
-> 按维度维护，每个维度一个小节，内容为用户偏好的事实描述（1-3 条，简洁明确）。
+> **维度按需新增，不预置空维度**——只写真实观察到的偏好，避免出现一堆"待填写"的噪音小节。
 
 ### 沟通偏好
 
-- 回复风格: {如"简洁直接"、"结构化输出"}
 - 语言偏好: {如"中文"}
-
-### 代码风格
-
-- {如"命名用 camelCase"、"偏好函数式写法"}
-
-### 工具链
-
-- {如"编辑器 VSCode"、"包管理 pnpm"}
-
-### 技术背景
-
-- {如"熟悉 TypeScript/React"、"擅长后端架构"}
+- 回复风格: {如"简洁直接"、"结构化输出"}
 
 ### 工作习惯
 
-- {如"先设计后编码"、"要求单测覆盖"}
+- {如"先设计后编码"、"要求单测覆盖"、"禁止擅自提交"}
 
-### 对话习惯
-
-- {如"喜欢列点回答"、"对 AI 的要求"}
-
-> **新增维度**：发现以上维度无法覆盖的偏好时，直接新增小节，命名保持"4-8 字名词短语"。
+> **新增维度**：发现以上维度无法覆盖的偏好时直接新增小节，命名保持"4-8 字名词短语"（常见：代码风格 / 工具链 / 技术背景 / 对话习惯）。
 
 ---
 
 ## 近期工作 (7天内)
 
-> **近期工作（最近需求/进度）直接存储于本文件，不写入 ki 记忆（不使用"最近需求"/"进度" Group）。**
-> 超过 7 天的已完成条目移入项目根目录 `archive.md`（进行中进度永久保留）。
+> **每条严格 1 行（≤ 80 字）**：只写结论；根因、代码位置、验证数据、审查过程写入 `${scope}-memory` 或项目台账（`.plans/`、`.debug/`），此处最多留一个指向。
+> **容量**：目标 ≤ 20 条 / ≤ 40 行。**每次追加新条目后就数一次**，> 20 条则本次立即归档（不等下次访问才想起）。
+> 状态标记：`🔄` 进行中 / `✅` 已完成 / `🆕` 待拍板。
 
-### 最近需求
+- [YYYY-MM-DD] ✅ {一句话结论}
+- [YYYY-MM-DD] 🔄 {一句话进度}
 
-- [YYYY-MM-DD] {需求描述（1-2 句话）}
+---
 
-### 进度
+## 历史工作记录
 
-- 进行中: [YYYY-MM-DD] 🔄 {描述}
-- 已完成: [YYYY-MM-DD] ✅ {描述}
+> **归档区**：已完成/待拍板条目超过 7 天，压缩为一行后移入本节（按日期倒序追加，不删除历史）。
+> 每条 ≤ 120 字，只留"结论 + 仍有效的决策"；实现细节查 git 历史或台账。
+> 进行中（🔄）条目不归档。
+> **不再创建外部 `archive.md`** —— 归档留在本文件内，少一次文件跳转、可直接检索。
+
+- [YYYY-MM-DD] {结论或决策}
 
 ---
 
 ## 更新日志
 
-> 每次修改本文件后追加一条记录，保留最近 10 条。
+> **只记结构性变更**：新增/删除章节、memory scope 变更、Group 结构大改、归档整理、模板升级。
+> 不记日常条目增删（那些在「近期工作」里已有）。保留最近 10 条。
 
 | 日期 | 更新内容 |
 |------|----------|
-| YYYY-MM-DD | {更新说明} |
+| YYYY-MM-DD | {结构性变更} |

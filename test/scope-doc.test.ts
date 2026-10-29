@@ -40,6 +40,7 @@ before(() => {
     KI_CONFIG_PATH: process.env.KI_CONFIG_PATH,
     SILICONFLOW_API_KEY: process.env.SILICONFLOW_API_KEY,
     HOME: process.env.HOME,
+    KI_DATASOURCE_CLONE_ROOT: process.env.KI_DATASOURCE_CLONE_ROOT,
   };
 });
 
@@ -213,6 +214,77 @@ describe('B. scope —— list 并集 & 向量层降级（无 apiKey）', () => 
     assert.equal(scope.wikiCount, 5, 'KB 文档数仍按 relation 数统计');
     assert.equal(scope.ftsOnlyDocCount, 2, '只计完整 FTS-only relation；legacy 回退兼容，每个文档只计一次');
   });
+
+  it('S0-3：scope 计数缓存命中后 relations-cache 变更 → 计数刷新无漂移', async () => {
+    const { dataDir } = makeWorkspace({ scopesYaml: '  count-cache: {}' });
+    const scopeDir = makeKbScope(dataDir, 'count-cache');
+    const rcPath = path.join(scopeDir, 'relations-cache.json');
+    const writeCache = (names: string[]) => fs.writeFileSync(rcPath, JSON.stringify({
+      groups: { docs: { hot_relations: names.map((n) => ({ text: n })) } },
+    }), 'utf-8');
+
+    writeCache(['d1', 'd2']);
+    const entry1 = (await executeScopeList()).scopes.find((s) => s.scope === 'count-cache')!;
+    assert.equal(entry1.wikiCount, 2);
+
+    // 第二次调用走缓存命中路径；随后文件变更（size 变化）→ 计数必须重算
+    await executeScopeList();
+    writeCache(['d1', 'd2', 'd3', 'd4']);
+    const entry3 = (await executeScopeList()).scopes.find((s) => s.scope === 'count-cache')!;
+    assert.equal(entry3.wikiCount, 4, 'relations-cache 变更后计数不得停留在缓存旧值');
+  });
+
+  it('S0-3：不同工作区同名 scope 计数互不串台（缓存键含文件路径）', async () => {
+    const ws1 = makeWorkspace({ scopesYaml: '  dup-scope: {}' });
+    const dir1 = makeKbScope(ws1.dataDir, 'dup-scope');
+    fs.writeFileSync(path.join(dir1, 'relations-cache.json'), JSON.stringify({
+      groups: { g: { hot_relations: [{ text: 'a' }, { text: 'b' }] } },
+    }), 'utf-8');
+    const r1 = await executeScopeList();
+    assert.equal(r1.scopes.find((s) => s.scope === 'dup-scope')!.wikiCount, 2);
+
+    // 同名 scope、新工作区（不同 dataDir → 不同文件路径）：即便时间接近也不得读旧缓存
+    const ws2 = makeWorkspace({ scopesYaml: '  dup-scope: {}' });
+    const dir2 = makeKbScope(ws2.dataDir, 'dup-scope');
+    fs.writeFileSync(path.join(dir2, 'relations-cache.json'), JSON.stringify({
+      groups: { g: { hot_relations: [{ text: 'a' }, { text: 'b' }, { text: 'c' }] } },
+    }), 'utf-8');
+    const r2 = await executeScopeList();
+    assert.equal(r2.scopes.find((s) => s.scope === 'dup-scope')!.wikiCount, 3, '同名 scope 换工作区后计数不得串台');
+  });
+
+  it('批次 2 R6：新布局（relations/ 分片）计数正确 + bump revision 后计数刷新', async () => {
+    const { writeGroupCacheBatch, writeGroupCache } = await import('../src/lib/group-cache.js');
+    const { dataDir } = makeWorkspace({ scopesYaml: '  sharded-count: {}' });
+    makeKbScope(dataDir, 'sharded-count');
+    const rel = (n: string, fts?: boolean) => ({
+      id: `r-${n}`, text: n, score: 1,
+      ...(fts ? { ftsIds: [`f-${n}`], ftsIndexComplete: true } : { memoryIds: [`m-${n}`] }),
+    });
+
+    // 新布局：不写旧单文件，直接种分片
+    writeGroupCacheBatch('sharded-count', new Map([
+      ['g1', { version: 1, scope: 'sharded-count', hot_relations: [rel('a'), rel('b'), rel('f1', true)] as never, keywords: [] }],
+      ['g2', { version: 1, scope: 'sharded-count', hot_relations: [rel('f2', true)] as never, keywords: [] }],
+    ]));
+    const r1 = await executeScopeList();
+    const e1 = r1.scopes.find((s) => s.scope === 'sharded-count')!;
+    assert.equal(e1.kb, true, '新布局 scope 必须被 listAllScopes 识别（listGroupPaths 同族缺口回归）');
+    assert.equal(e1.wikiCount, 4, '新布局计数不再恒 0');
+    assert.equal(e1.ftsDocCount, 2);
+    assert.equal(e1.ftsOnlyDocCount, 2);
+
+    // 二次调用走缓存命中；随后 bump revision（写原语）→ 计数必须重算
+    await executeScopeList();
+    writeGroupCache('sharded-count', 'g1', {
+      version: 1, scope: 'sharded-count',
+      hot_relations: [rel('a'), rel('b'), rel('f1', true), rel('c')] as never,
+      keywords: [], updatedAt: null,
+    });
+    const r2 = await executeScopeList();
+    const e2 = r2.scopes.find((s) => s.scope === 'sharded-count')!;
+    assert.equal(e2.wikiCount, 5, 'revision bump 后计数不得停留在缓存旧值');
+  });
 });
 
 describe('B. scope —— delete 护栏', () => {
@@ -345,5 +417,167 @@ describe('D. 引擎回路 —— 空 collection（dummy apiKey）', () => {
     }
     // 预览不应真正删除
     assert.strictEqual(fs.existsSync(path.join(dataDir, 'projZ')), true);
+  });
+
+  it('S-05：非托管 git 记录不产生 managedCloneDir，也不删外部仓库', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: '  projL: {}',
+      apiKey: 'dummy-offline-key',
+    });
+    const scopeDir = makeKbScope(dataDir, 'projL');
+    const localRepo = path.join(dir, 'local-repo');
+    fs.mkdirSync(localRepo, { recursive: true });
+    fs.writeFileSync(path.join(localRepo, 'a.md'), '# a\n');
+    fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+      version: 2,
+      scope: 'projL',
+      type: 'git',
+      dir: localRepo,
+      git: {
+        repoRoot: localRepo,
+        relativeRoot: '',
+        branch: 'main',
+        remoteUrl: null,
+        managed: false,
+        remoteBranch: null,
+      },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: 0,
+      updatedAt: 0,
+      lastSync: null,
+    }));
+    const preview = await executeScopeDelete({ scope: 'projL', yes: false });
+    assert.strictEqual(preview.ok, false);
+    if (!preview.ok) {
+      assert.strictEqual(preview.willDelete?.managedCloneDir, undefined);
+      assert.doesNotMatch(preview.error, /托管 clone/);
+    }
+    const res = await executeScopeDelete({ scope: 'projL', yes: true });
+    assert.strictEqual(res.ok, true);
+    if (res.ok) assert.strictEqual(res.managedCloneDir, undefined);
+    assert.strictEqual(fs.existsSync(path.join(localRepo, 'a.md')), true, '本地仓库不得被删除');
+  });
+
+  it('S-05：多个 scope 共享 clone 时，先删 owner 保留 clone，最后删除才清理', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: ['  ownerS: {}', '  sharedS: {}'].join('\n'),
+      apiKey: 'dummy-offline-key',
+    });
+    const cloneRoot = path.join(dir, 'datasources');
+    const repoRoot = path.join(cloneRoot, 'ownerS', 'repo');
+    fs.mkdirSync(path.join(repoRoot, 'docs'), { recursive: true });
+    const writeRecord = (scopeName: string): void => {
+      const scopeDir = makeKbScope(dataDir, scopeName);
+      fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+        version: 2,
+        scope: scopeName,
+        type: 'git',
+        dir: path.join(repoRoot, 'docs'),
+        git: {
+          repoRoot,
+          relativeRoot: 'docs',
+          branch: 'main',
+          remoteUrl: 'https://example.com/shared.git',
+          managed: true,
+          remoteBranch: 'main',
+        },
+        group: null,
+        conflictMode: 'incremental',
+        conflictSuffix: '_{n}',
+        vector: false,
+        chunkSize: null,
+        chunkOverlap: null,
+        createdAt: 0,
+        updatedAt: 0,
+        lastSync: null,
+      }));
+    };
+    writeRecord('ownerS');
+    writeRecord('sharedS');
+    const prevRoot = process.env.KI_DATASOURCE_CLONE_ROOT;
+    process.env.KI_DATASOURCE_CLONE_ROOT = cloneRoot;
+    try {
+      const first = await executeScopeDelete({ scope: 'ownerS', yes: true });
+      assert.strictEqual(first.ok, true);
+      if (first.ok) {
+        assert.strictEqual(first.managedCloneShared, true);
+        assert.strictEqual(first.managedCloneRemoved, false);
+      }
+      assert.strictEqual(fs.existsSync(path.join(repoRoot, 'docs')), true, '共享 clone 不得随首个 scope 删除');
+
+      const last = await executeScopeDelete({ scope: 'sharedS', yes: true });
+      assert.strictEqual(last.ok, true);
+      if (last.ok) {
+        assert.strictEqual(last.managedCloneRemoved, true);
+        assert.strictEqual(last.managedCloneShared, undefined);
+      }
+      assert.strictEqual(fs.existsSync(path.join(cloneRoot, 'ownerS')), false, '最后一个引用删除后清理 clone');
+    } finally {
+      if (prevRoot === undefined) delete process.env.KI_DATASOURCE_CLONE_ROOT;
+      else process.env.KI_DATASOURCE_CLONE_ROOT = prevRoot;
+    }
+  });
+
+  it('S-05：scope delete 预览/执行会清理托管 clone（仅 git.managed=true）', async () => {
+    const { dataDir, dir } = makeWorkspace({
+      scopesYaml: '  projM: {}',
+      apiKey: 'dummy-offline-key',
+    });
+    const scopeDir = makeKbScope(dataDir, 'projM');
+    const cloneRoot = path.join(dir, 'datasources');
+    const repoRoot = path.join(cloneRoot, 'projM', 'repo');
+    fs.mkdirSync(path.join(repoRoot, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, 'docs', 'a.md'), '# a\n');
+    fs.writeFileSync(path.join(scopeDir, 'datasource.json'), JSON.stringify({
+      version: 2,
+      scope: 'projM',
+      type: 'git',
+      dir: path.join(repoRoot, 'docs'),
+      git: {
+        repoRoot,
+        relativeRoot: 'docs',
+        branch: 'main',
+        remoteUrl: 'https://example.com/x.git',
+        managed: true,
+        remoteBranch: 'main',
+      },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: 0,
+      updatedAt: 0,
+      lastSync: null,
+    }));
+    const prevRoot = process.env.KI_DATASOURCE_CLONE_ROOT;
+    process.env.KI_DATASOURCE_CLONE_ROOT = cloneRoot;
+    try {
+      const preview = await executeScopeDelete({ scope: 'projM', yes: false });
+      assert.strictEqual(preview.ok, false);
+      if (!preview.ok) {
+        assert.strictEqual(preview.willDelete?.managedCloneDir, path.join(cloneRoot, 'projM'));
+        assert.match(preview.error, /托管 clone/);
+      }
+      assert.strictEqual(fs.existsSync(repoRoot), true);
+
+      const res = await executeScopeDelete({ scope: 'projM', yes: true });
+      assert.strictEqual(res.ok, true);
+      if (res.ok) {
+        assert.strictEqual(res.managedCloneRemoved, true);
+        assert.strictEqual(res.managedCloneDir, path.join(cloneRoot, 'projM'));
+        assert.strictEqual(res.managedCloneError, undefined);
+      }
+      assert.strictEqual(fs.existsSync(path.join(cloneRoot, 'projM')), false);
+    } finally {
+      if (prevRoot === undefined) delete process.env.KI_DATASOURCE_CLONE_ROOT;
+      else process.env.KI_DATASOURCE_CLONE_ROOT = prevRoot;
+    }
   });
 });

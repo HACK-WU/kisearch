@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   EmbeddingSchedulerRuntime,
   normalizeEmbeddingScheduler,
+  parseProviderBatchLimit,
   type EmbeddingBatch,
 } from '../src/zvec-engine/embedding/batch-scheduler.ts';
 import type { EmbeddingProvider } from '../src/zvec-engine/embedding/provider.ts';
@@ -171,8 +172,74 @@ test('超大 400/20015 批次不展开成无界单条请求', async () => {
   });
 
   assert.equal(calls, 1);
-  assert.equal(completed?.error?.message.includes('20015'), true);
+  assert.match(completed?.error?.message ?? '', /20015/);
   assert.equal(result.failed, 65);
+  assert.equal(result.stopReason?.kind, 'configuration');
+});
+
+test('单条 400/20015 内容错误不会阻断后续批次', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      if (texts[0] === 'bad') throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['bad', 'good'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.vectors.filter(Boolean).length, failed: batch.vectors.filter((v) => !v).length }),
+  });
+  assert.deepEqual(seen, ['bad', 'good']);
+  assert.equal(result.failed, 1);
+  assert.equal(result.persisted, 1);
+  assert.equal(result.notProcessed, 0);
+  assert.equal(result.stopReason, undefined);
+});
+
+test('连续单条 400/20015 在第二次后止损，不继续请求后续批次', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['a', 'b', 'c'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: () => ({ persisted: 0, failed: 1 }),
+  });
+  assert.deepEqual(seen, ['a', 'b', 'ki vector health check']);
+  assert.equal(result.notProcessed, 1);
+  assert.equal(result.stopReason?.kind, 'configuration');
+});
+
+test('连续两条坏内容但探针有效时，继续处理第三条合法内容', async () => {
+  const seen: string[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      seen.push(texts[0]);
+      if (texts[0].startsWith('bad')) throw Object.assign(new Error('HTTP 400: {"code":"20015"}'), { code: 'HTTP_400' });
+      return [[1, 2]];
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({ batchSize: 1, maxConcurrency: 1, maxGlobalConcurrency: 1, maxPrefetchBatches: 1 });
+  const result = await runtime.schedule(provider, ['bad1', 'bad2', 'good'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.vectors.filter(Boolean).length, failed: batch.vectors.filter((v) => !v).length }),
+  });
+  assert.deepEqual(seen, ['bad1', 'bad2', 'ki vector health check', 'good']);
+  assert.equal(result.failed, 2);
+  assert.equal(result.persisted, 1);
+  assert.equal(result.stopReason, undefined);
 });
 
 test('scheduler stops launching new batches after cancellation and reports exact items', async () => {
@@ -202,6 +269,45 @@ test('scheduler stops launching new batches after cancellation and reports exact
   assert.equal(result.persisted, 2);
   assert.equal(result.cancelled, 4);
   assert.deepEqual(result.cancelledItems.map((item) => item.docId), ['c', 'd', 'e', 'f']);
+});
+
+// B 策略熔断（2026-10-12）后本用例显式使用阈值 1（一次失败即停 = 旧行为）；
+// 默认阈值 3 的「连续失败才停 / 成功即清零」由文件末尾的熔断用例组覆盖。
+test('scheduler stops on exhausted provider failure when threshold is 1 and reports unstarted entries separately', async () => {
+  let calls = 0;
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed() {
+      calls++;
+      throw Object.assign(new Error('provider unavailable'), { code: 'NETWORK' });
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 2,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+    maxBufferedVectorBytes: 1024,
+    globalBufferedVectorBytes: 1024,
+    consecutiveFailureThreshold: 1,
+  });
+  const delivered: string[][] = [];
+  const result = await runtime.schedule(provider, ['a', 'b', 'c', 'd', 'e', 'f'], {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete(batch) {
+      delivered.push(batch.items.map((item) => item.docId));
+      return { persisted: 0, failed: batch.items.length };
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(delivered, [['a', 'b']]);
+  assert.equal(result.failed, 2);
+  assert.equal(result.cancelled, 0);
+  assert.equal(result.notProcessed, 4);
+  assert.deepEqual(result.notProcessedItems.map((item) => item.docId), ['c', 'd', 'e', 'f']);
+  assert.equal(result.stopReason?.kind, 'provider-unavailable');
 });
 
 test('scheduler rejects a buffer smaller than one estimated batch before provider call', async () => {
@@ -288,4 +394,159 @@ test('调度器把配置的 requestTimeoutMs 透传给 provider（默认 60s，�
     () => normalizeEmbeddingScheduler({ requestTimeoutMs: 600_001 }),
     /requestTimeoutMs 不能大于 600000/,
   );
+});
+
+// ─── 服务商单请求条数上限（回归：batchSize=32 vs 上限 25 让跨维度迁移整体回滚） ───
+
+/** DashScope 兼容模式（阿里云百炼）超限时的真实报错 */
+const DASHSCOPE_BATCH_LIMIT_ERROR =
+  'SiliconFlow /embeddings HTTP 400: <400> InternalError.Algo.InvalidParameter: '
+  + 'Value error, batch size is invalid, it should not be larger than 25.: input.contents';
+
+test('parseProviderBatchLimit 只从参数类 4xx 解析单请求上限', () => {
+  const mk = (message: string, code = 'HTTP_400'): Error => Object.assign(new Error(message), { code });
+  assert.equal(parseProviderBatchLimit(mk(DASHSCOPE_BATCH_LIMIT_ERROR)), 25);
+  assert.equal(parseProviderBatchLimit(mk('maximum of 10 inputs per request')), 10);
+  // 非 4xx / 非参数类报错不得误读数字（避免把认证、网络类错误当成"降批可解"）
+  assert.equal(parseProviderBatchLimit(mk(DASHSCOPE_BATCH_LIMIT_ERROR, 'TIMEOUT')), undefined);
+  assert.equal(parseProviderBatchLimit(mk('connect ECONNREFUSED 127.0.0.1:25')), undefined);
+  assert.equal(parseProviderBatchLimit(mk('SiliconFlow /embeddings HTTP 400: {"code":"20015"}')), undefined);
+});
+
+test('服务商上限小于配置 batchSize 时自动降批：全部落库且不退化成逐条请求', async () => {
+  const requestSizes: number[] = [];
+  const provider: EmbeddingProvider = {
+    dimension: 2,
+    async embed(texts) {
+      requestSizes.push(texts.length);
+      if (texts.length > 25) {
+        throw Object.assign(new Error(DASHSCOPE_BATCH_LIMIT_ERROR), { code: 'HTTP_400' });
+      }
+      return texts.map((text) => [text.length, 0]);
+    },
+  };
+  const runtime = new EmbeddingSchedulerRuntime({
+    batchSize: 32,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+  });
+  const result = await runtime.schedule(provider, Array.from({ length: 100 }, (_, i) => `text-${i}`), {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => ({ persisted: batch.items.length, failed: 0 }),
+  });
+
+  // 第一次按配置 32 发出并撞 400，之后一律不超过服务商上限
+  assert.equal(requestSizes[0], 32);
+  assert.equal(requestSizes.slice(1).every((size) => size <= 25), true);
+  // 关键：不是"逐条隔离"（那会把 100 条放大成 100 次请求），而是整片降到上限内重发
+  assert.equal(requestSizes.filter((size) => size === 1).length, 0);
+  assert.equal(result.persisted, 100);
+  assert.equal(result.failed, 0);
+  assert.equal(result.errors.length, 0);
+  // 进程内学习一次即可，后续任务不再重复撞 400
+  assert.equal(runtime.getMetrics().batchLimitDowngrades, 1);
+  assert.equal(runtime.effectiveRequestLimit(), 25);
+});
+
+// ─── B 策略熔断（2026-10-12：连续失败达阈值才停） ─────────────────
+
+const TIMEOUT_ERROR = () => Object.assign(
+  new Error('dashscope /embeddings timeout after 60000ms'),
+  { code: 'TIMEOUT' },
+);
+const AUTH_ERROR = () => Object.assign(
+  new Error('dashscope /embeddings HTTP 401: unauthorized'),
+  { code: 'HTTP_401', data: { status: 401 } },
+);
+
+/** 串行确定性环境：3 批 × 2 条，逐次调用按 failAt 决定成功/失败。 */
+function mkFlakyProvider(failFor: (call: number) => Error | undefined): { provider: EmbeddingProvider; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    provider: {
+      dimension: 2,
+      async embed(texts) {
+        const call = calls++;
+        const failure = failFor(call);
+        if (failure) throw failure;
+        return texts.map((text) => [text.length, call]);
+      },
+    },
+  };
+}
+
+function mkRuntime(consecutiveFailureThreshold: number): EmbeddingSchedulerRuntime {
+  return new EmbeddingSchedulerRuntime({
+    batchSize: 2,
+    maxConcurrency: 1,
+    maxGlobalConcurrency: 1,
+    maxPrefetchBatches: 1,
+    consecutiveFailureThreshold,
+  });
+}
+
+const SIX = ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff'];
+const PASS_BATCH = (batch: EmbeddingBatch<string>) => ({ persisted: batch.items.length, failed: 0 });
+const FAIL_BATCH = (batch: EmbeddingBatch<string>) => ({ persisted: 0, failed: batch.items.length });
+
+test('熔断：偶发超时（低于阈值后恢复）不停剩余批次，成功一次即清零', async () => {
+  const { provider, calls } = mkFlakyProvider((call) => (call < 2 ? TIMEOUT_ERROR() : undefined));
+  const result = await mkRuntime(3).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 3, '连续 2 次失败 < 阈值 3：第 3 批必须照常发出');
+  assert.equal(result.stopReason, undefined, '未达阈值不得升级为系统性停止');
+  assert.equal(result.notProcessed, 0, '不得有未处理批次');
+  assert.equal(result.persisted, 2);
+  assert.equal(result.failed, 4, '失败批次按失败记账（entries 进 failed，供文件级部分成功/重试）');
+});
+
+test('熔断：连续失败达阈值才停止剩余批次，reason 带熔断说明', async () => {
+  const { provider, calls } = mkFlakyProvider(() => TIMEOUT_ERROR());
+  const result = await mkRuntime(2).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 2, '达阈值（2）后不得再发出第 3 批');
+  assert.equal(result.stopReason?.code, 'TIMEOUT');
+  assert.equal(result.stopReason?.kind, 'provider-unavailable');
+  assert.match(result.stopReason!.reason, /连续 2 次 provider 调用失败/);
+  assert.match(result.stopReason!.reason, /达阈值 2/);
+  assert.equal(result.notProcessed, 2, '第 3 批 2 条未尝试');
+});
+
+test('熔断：认证/配置类错误首次即停（不受阈值保护、reason 不加熔断后缀）', async () => {
+  const { provider, calls } = mkFlakyProvider(() => AUTH_ERROR());
+  const result = await mkRuntime(3).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 1, '认证错重试无意义：首次即停');
+  assert.equal(result.stopReason?.kind, 'authentication');
+  assert.doesNotMatch(result.stopReason!.reason, /连续/);
+  assert.equal(result.notProcessed, 4, '其余 2 批共 4 条未尝试');
+});
+
+test('熔断：阈值 1 等价旧行为（一次失败即停）', async () => {
+  const { provider, calls } = mkFlakyProvider(() => TIMEOUT_ERROR());
+  const result = await mkRuntime(1).schedule(provider, SIX, {
+    getText: (item) => item,
+    getDocId: (item) => item,
+    onBatchComplete: (batch) => (batch.error ? FAIL_BATCH(batch) : PASS_BATCH(batch)),
+  });
+
+  assert.equal(calls(), 1);
+  assert.equal(result.stopReason?.code, 'TIMEOUT');
+  assert.doesNotMatch(result.stopReason!.reason, /连续/, '阈值 1 时保持旧文案（向后兼容）');
+  assert.equal(result.notProcessed, 4);
 });

@@ -15,8 +15,10 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
+import { findLockHolder, formatLockHolder } from './lock-holder.js';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
 // 编译后的 worker.js，源码目录无法直接运行；故 dist 是运行时必需品，
 // 源码变更后需 npx tsc -p tsconfig.src.json（npm run build）重建。
@@ -33,13 +35,16 @@ import {
 import type { EmbeddingProvider } from '../zvec-engine/embedding/provider.js';
 import { EmbeddingSchedulerRuntime, type EmbeddingSchedulerConfig, type EmbeddingSchedulerMetrics } from '../zvec-engine/embedding/batch-scheduler.js';
 import type { ZvecWriteOptions } from '../zvec-engine/types.js';
+import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
 import { validateScope } from './scope.js';
 import { interruptGuidance } from './interrupt.js';
-import { ensureVectorLayout, getScopeCollectionPath, getCollectionsRoot } from './scope-collection.js';
+import { ensureVectorLayout, getCollectionsRoot, getScopeCollectionPath, getVectorMigrationMarkerPath, listVectorMigrationBackups } from './scope-collection.js';
 import { getPrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { ftsSearch as ftsOnlySearch } from './fts-client.js';
+// S-01：索引整理的"超时 = 中断"语义（复用 R8 落地的超时原语）
+import { withTimeoutFallback } from './timeout.js';
 
 // ─── 公开类型（对齐 mem-client 返回结构，便于上层平滑替换） ───
 
@@ -68,6 +73,13 @@ export interface BulkStoreItemResult {
   memoryId?: string;
   success: boolean;
   error?: string;
+  /**
+   * 系统性故障停止前**从未尝试**的条目（区别于"尝试后失败"）。
+   * 上层据此把「未处理清单」汇总成一条，而不是与真实失败混在一起逐条展开。
+   * 不能用 error 文本是否等于 stopReason.reason 来判定：provider 错误消息与
+   * stopReason.reason 往往就是同一句，会把真实失败误吞进汇总。
+   */
+  notProcessed?: boolean;
 }
 
 export interface VectorBulkStoreResult {
@@ -83,8 +95,11 @@ export interface VectorBulkStoreResult {
   metadataPendingItems?: string[];
   cancelled?: number;
   cancelledItems?: number;
+  notProcessed?: number;
+  notProcessedItems?: string[];
   failedItems?: string[];
   status?: 'succeeded' | 'partial' | 'failed' | 'cancelled';
+  stopReason?: VectorizationStopReason;
 }
 
 export interface VectorBulkStoreOptions {
@@ -118,10 +133,18 @@ export interface VectorAvailableResult {
 
 /**
  * 向量库被占用时的可操作处置提示（NEG-10）。
+ *
+ * 优先反查**真实持锁进程**（Linux `/proc/locks`，见 `lock-holder.ts`）：现场定位
+ * "谁占着"过去只能靠用户自己 ps/lsof（实际撞见过一个挂住的临时脚本持锁 40 分钟），
+ * 提示里直接给出 PID/进程名可省掉这一跳。查不到时自动降级为原文案，不影响报错语义。
+ *
+ * 导出：供测试与其它撞锁路径复用同一文案（撞锁是异常慢路径，可承受一次 `/proc` 读取）。
  */
-function lockedHint(dbPath: string): string {
+export function lockedHint(dbPath: string): string {
+  const holder = findLockHolder(path.join(dbPath, 'LOCK'));
   return (
     `向量库被其他进程占用或存在崩溃残留（${dbPath}）。\n` +
+    (holder ? `${formatLockHolder(holder)}\n` : '') +
     `  处置方式：\n` +
     `  1) 若有 ki mcp/server 常驻进程在运行，请先停止它；\n` +
     `  2) 确认无其他 ki 命令正在写入（并发写会互斥）；\n` +
@@ -151,20 +174,48 @@ export function getVectorOpSource(): string | undefined {
 }
 
 /**
+ * 诊断路径的"不重试"标注：标注后 probeWithRetry 只探一次。
+ *
+ * 场景：`ki doctor` / MCP 启动预检要逐个 scope 做维度诊断，若 Collection 被常驻实例
+ * （或残留 LOCK）持有，旧行为每个 scope 白等 3 次重试（3s 探测 + 2s 间隔 ≈ 15s）；
+ * 15 个 scope 就是数分钟静默输出——`ki doctor` / `ki mcp restart` 看起来像卡死。
+ * 诊断只需要"现在能不能读"，一次探测足够。
+ */
+const vectorFastFailStorage = new AsyncLocalStorage<boolean>();
+
+/** 标注：fn 执行期间向量 probe 不重试（仅用于诊断类只读路径） */
+export function runWithVectorFastFail<T>(fn: () => T): T {
+  return vectorFastFailStorage.run(true, fn);
+}
+
+/** 当前异步链是否处于"不重试"标注下；诊断/测试用 */
+export function isVectorFastFail(): boolean {
+  return vectorFastFailStorage.getStore() === true;
+}
+
+/**
  * probe 带撞锁重试：检测到 locked 时等待外部维护进程释放后重试。
  * 正常 CLI/stdio/HTTP 请求均由 daemon 内部调度，不会互相抢锁；重试仅作为
  * daemon 启动期间或显式维护模式的兜底，最多 LOCK_RETRY_MAX 次。
  */
 async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
+  // 诊断路径（runWithVectorFastFail）只探一次：占用判定不需要重试，重试只表现为"卡住"
+  const maxRetries = isVectorFastFail() ? 0 : LOCK_RETRY_MAX;
   for (let attempt = 0; ; attempt++) {
     const probe = await ZvecEngine.probe(dbPath);
-    if (!probe.locked || attempt >= LOCK_RETRY_MAX) {
+    if (!probe.locked || attempt >= maxRetries) {
       return probe;
     }
     // 撞锁日志附带来源（HTTP 端点/MCP 工具名；CLI 路径未标注则无来源段）
     const source = vectorSourceStorage.getStore();
+    // 首次重试就把持锁者带出来：用户第一眼看到的往往正是这条刷屏日志（见 lib/lock-holder.ts）。
+    // 只查一次（attempt===0），避免每条重试都读 /proc；查不到时日志保持原样。
+    const holder = attempt === 0 ? findLockHolder(path.join(dbPath, 'LOCK')) : null;
+    const holderNote = holder
+      ? `（持锁进程 PID ${holder.pid} (${holder.name})${holder.self ? '，本进程' : ''}）`
+      : '';
     process.stderr.write(
-      `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
+      `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用${holderNote}，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
     );
     await sleep(LOCK_RETRY_INTERVAL_MS);
   }
@@ -230,6 +281,14 @@ const SCOPE_FIELD = 'scope';
 const GROUP_FIELD = 'group';
 const DEFAULT_TAG = 'ki-search';
 const MAX_TEXT_LENGTH = 50_000;
+
+/**
+ * 引擎单次检索的 topk 硬上限（与 src/zvec-engine/search/router.ts 的 MAX_TOPK 一致）。
+ * 超过会被引擎直接拒绝（topk exceeds max 1000）；调用方组合 topk 时必须先收敛，
+ * 否则「limit × tag 数」这类放大在 tag 多的 scope 下会整次检索失败。
+ * 一致性由 test/vector-cli-functions.test.ts 的契约用例守住。
+ */
+export const SEARCH_TOPK_MAX = 1000;
 
 /** 查询 embedding 固定 0 重试；超时由配置或请求级 timeout 决定。 */
 const QUERY_EMBED_RETRIES = 0;
@@ -383,6 +442,7 @@ export function getVectorizationMetrics(): VectorizationMetrics {
     retries: 0,
     rateLimited: 0,
     timeouts: 0,
+    batchLimitDowngrades: 0,
   };
   for (const runtime of schedulerRuntimes.values()) {
     const current = runtime.getMetrics();
@@ -535,8 +595,25 @@ function buildEmbedding(): SiliconFlowProvider {
     model: emb.model,
     dimension: emb.dimension,
     apiKey: emb.apiKey,
+    // 错误文案跟随配置的 provider 名（类是实现名，不等于厂商名）：
+    // 配置 dashscope 时不应再报 "SiliconFlow /embeddings timeout"（误导排障方向）。
+    providerLabel: emb.provider,
   });
 }
+
+/**
+ * 集合标量字段定义。
+ *
+ * 导出供契约测试断言：`group` 必须存在且 `indexed: true` —— 删组清扫
+ * （`vectorListAuxDocsByGroups`）依赖按它过滤枚举 `ki-relation` / `ki-path`；
+ * 字段一旦被移除或改名，清扫会静默枚举为空（`auxFound: 0` 看起来像"无残留"）。
+ */
+export const COLLECTION_SCALAR_FIELDS = [
+  { name: TAG_FIELD, dataType: 'STRING', indexed: true },
+  { name: SCOPE_FIELD, dataType: 'STRING', indexed: true },
+  { name: GROUP_FIELD, dataType: 'STRING', indexed: true },
+  { name: FTS_FIELD, dataType: 'STRING' },
+] as const;
 
 /**
  * 构建 create/open 配置
@@ -552,12 +629,7 @@ function buildCreateConfig(scope: string): ZvecEngineConfig {
       denseField: DENSE_FIELD,
       dimension: emb.dimension,
       metric: 'COSINE',
-      scalarFields: [
-        { name: TAG_FIELD, dataType: 'STRING', indexed: true },
-        { name: SCOPE_FIELD, dataType: 'STRING', indexed: true },
-        { name: GROUP_FIELD, dataType: 'STRING', indexed: true },
-        { name: FTS_FIELD, dataType: 'STRING' },
-      ],
+      scalarFields: COLLECTION_SCALAR_FIELDS.map((f) => ({ ...f })),
       fts: {
         field: FTS_FIELD,
         tokenizer: 'jieba',
@@ -587,6 +659,7 @@ function buildOpenConfig(scope: string): ZvecEngineOpenConfig {
  */
 export function getEngine(scope = 'default'): Promise<ZvecEngine> {
   validateScope(scope);
+  assertNoPendingVectorMigration(scope);
   const normalizedScope = scope;
   // 每次引擎访问刷新空闲计时（空闲释放锁依据）；CLI 未启用时无副作用
   touchEngineUse();
@@ -733,6 +806,33 @@ function isWorkerUnavailable(err: unknown): boolean {
   );
 }
 
+/**
+ * 维度不匹配存在两种文案变体，必须都识别（否则前端两页口径分叉）：
+ *   - 写入路径（engine.upsert 前置校验）：`embedding.dimension (1024) !== persisted dimension (4096)`
+ *   - 检索路径（search/router 原生校验）：`vector dimension mismatch: expected 4096, got 1024`
+ * 导出供前端/上层按语义判断，避免各自维护字符串匹配。
+ */
+export function isVectorDimensionMismatchMessage(message: string): boolean {
+  return /embedding\.dimension \(\d+\) !== persisted dimension \(\d+\)/.test(message)
+    || /vector dimension mismatch: expected \d+, got \d+/.test(message);
+}
+
+/**
+ * 把维度不匹配归一化为带 code + 迁移指引的错误；非维度问题返回 undefined。
+ *
+ * 旧实现只归一化写入路径变体，检索路径的原生文案会裸抛到 HTTP 层：响应里 code 退化成
+ * API_ERROR，前端只能靠字符串猜——于是"导入页提示先重建向量、搜索页只显示一行英文报错"。
+ */
+function classifyVectorDimensionMismatch(err: unknown, scope: string): Error | undefined {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!isVectorDimensionMismatchMessage(message)) return undefined;
+  if ((err as { code?: string } | null)?.code === 'VECTOR_DIMENSION_MISMATCH') return undefined;
+  return Object.assign(
+    new Error(`${message}；scope "${scope}" 的旧向量集合需要迁移。请执行 ki restore ${scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`),
+    { code: 'VECTOR_DIMENSION_MISMATCH' },
+  );
+}
+
 /** 为一次 withEngine 调用预占租约，覆盖首次打开和 worker 自愈重试。 */
 function reserveEngineLease(scope: string): EngineMeta {
   const meta = _engineMeta.get(scope) ?? { lastUsedAt: Date.now(), activeUses: 0, ready: false };
@@ -769,7 +869,9 @@ async function withEngine<T>(scope: string, op: (engine: ZvecEngine) => Promise<
       }
       return await op(engine);
     } catch (err) {
-      if (!isWorkerUnavailable(err)) throw err;
+      if (!isWorkerUnavailable(err)) {
+        throw classifyVectorDimensionMismatch(err, scope) ?? err;
+      }
       // worker 已不可用（如 state=closed）：重置后重开重试一次
       // 只重置当前 scope；不同 scope 的 worker 允许并行，不能因一个分片
       // 的自愈重连而关闭其他 scope 正在执行的请求。
@@ -938,17 +1040,23 @@ export async function vectorSearch(params: {
     }
   }
   if (degradeReason !== undefined) params.onDegrade?.(degradeReason);
+  // 引擎层硬上限（MAX_TOPK=1000）：adapter 先收敛，避免任何调用方组合出 >1000 的 topk
+  // 直接被引擎拒绝（CLI/MCP 的 limit 无上界，放大路径见 search.ts 的 tag 数乘法）。
+  const topk = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
   const perScope = await Promise.all(existingScopes.map(async (scope) => {
     const filter = buildScopeTagFilter([scope], tagList);
     try {
       return await withEngine(scope, (engine) => engine.hybridSearch({
         ...(queryVector !== undefined ? { vector: queryVector } : {}),
         fts: params.query,
-        topk: params.limit ?? 10,
+        topk,
         filter,
       }));
     } catch (err) {
-      throw new Error(`scope "${scope}" 检索失败：${(err as Error).message}`);
+      // 保留底层 code（如 VECTOR_DIMENSION_MISMATCH）：HTTP 层按 code 回给前端，
+      // 这里若丢掉，检索页就只能靠错误串猜，与导入页的口径会分叉。
+      const cause = err as Error & { code?: string };
+      throw Object.assign(new Error(`scope "${scope}" 检索失败：${cause.message}`), { code: cause.code });
     }
   }));
   const hits: Hit[] = perScope.flat();
@@ -967,7 +1075,7 @@ export async function vectorSearch(params: {
     .filter((r) => degradeReason !== undefined
       || params.threshold === undefined
       || r.score >= params.threshold);
-  return mergeVectorSearchHits([normalized], params.limit ?? 10);
+  return mergeVectorSearchHits([normalized], topk);
 }
 
 /**
@@ -985,7 +1093,7 @@ export async function fullTextSearch(params: {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
   if (scopes.length === 0) throw new Error('scope 不能为空：至少传入一个 scope');
-  const limit = params.limit ?? 10;
+  const limit = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
   const tagList = Array.isArray(params.tags)
     ? params.tags
     : params.tags
@@ -1068,6 +1176,62 @@ export async function vectorStore(params: {
 }
 
 /**
+ * 触发索引整理（optimize）——S-01（REQ-20261009-003）。
+ *
+ * 语义（勿改，均有设计依据）：
+ *   - 经 `withEngine` 在目标 scope 的 collection 上调用**原生异步** `optimize({concurrency})`；
+ *   - **超时 = 中断**：超过 `timeoutMs` 即返回 `degraded:'timeout'`——原生无 abort API，
+ *     进程退出会终止 worker，故**不声称"底层继续跑完"**；可观测靠 readiness/indexState，
+ *     恢复靠重试入口（`ki index-optimize` / `POST /api/vector/optimize`）；
+ *   - 引擎不可用（锁被占/损坏）按 `degraded:'unavailable'` 区分，便于上层给不同文案；
+ *   - 本函数**不抛错**：整理属"可失败的辅助动作"，失败不得判导入任务失败（N4/N8/N9）。
+ */
+export interface OptimizeIndexOptions {
+  /** 整理线程数；未传 = 引擎自动（实验 1：1 ≈ 1.0 核，自动峰值可达 4.3 核） */
+  concurrency?: number;
+  /** 等待上限（默认 600s）；超时按"中断"处理 */
+  timeoutMs?: number;
+}
+
+export type OptimizeIndexOutcome =
+  | { ok: true; wallMs: number }
+  | { ok: false; degraded: 'timeout' | 'unavailable' | 'error'; reason: string; waitedMs: number };
+
+export async function optimizeVectorIndex(
+  scope: string,
+  options: OptimizeIndexOptions = {},
+): Promise<OptimizeIndexOutcome> {
+  const { concurrency, timeoutMs = 600_000 } = options;
+  const startedAt = Date.now();
+  // ★ 必须包在 async IIFE 内：`withEngine` 可能在返回 Promise **之前**同步抛错
+  //   （如 scope 校验失败），裸 `.catch()` 接不住 ⇒ 违反本函数"不抛错"的契约。
+  const work = (async () => {
+    try {
+      await withEngine(scope, (engine) => engine.optimize(concurrency !== undefined ? { concurrency } : undefined));
+      return { ok: true as const, error: undefined as string | undefined };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  })();
+  const outcome = await withTimeoutFallback(
+    work,
+    () => ({ ok: false as const, error: `索引整理未在 ${timeoutMs}ms 内完成（已中断等待）` }),
+    timeoutMs,
+  );
+  const waitedMs = Date.now() - startedAt;
+  if (outcome.timedOut) {
+    return { ok: false, degraded: 'timeout', reason: outcome.value.error ?? 'timeout', waitedMs };
+  }
+  if (!outcome.value.ok) {
+    const reason = outcome.value.error ?? 'unknown';
+    // 锁被占 / 集合损坏 ⇒ 归为 unavailable（上层文案与"真实错误"区分开）
+    const unavailable = /LOCKED|锁|被其他进程占用|CORRUPT|NOT_FOUND/i.test(reason);
+    return { ok: false, degraded: unavailable ? 'unavailable' : 'error', reason, waitedMs };
+  }
+  return { ok: true, wallMs: waitedMs };
+}
+
+/**
  * 批量存储（幂等 upsert）。
  */
 export async function vectorBulkStore(params: {
@@ -1122,6 +1286,7 @@ export async function vectorBulkStore(params: {
     errorById.set(e.id, e.reason);
   }
   const cancelledIds = new Set(result.cancelledItems ?? []);
+  const notProcessedIds = new Set(result.notProcessedItems ?? []);
   const failedIds = new Set(result.failedItems ?? []);
   const metadataPendingIds = new Set(result.metadataPendingItems ?? []);
   const results: BulkStoreItemResult[] = docs.map((d, i) => {
@@ -1129,11 +1294,19 @@ export async function vectorBulkStore(params: {
     if (cancelledIds.has(d.id)) {
       return { index: i, success: false, error: '向量化已取消，条目尚未提交' };
     }
+    if (notProcessedIds.has(d.id)) {
+      return {
+        index: i,
+        success: false,
+        notProcessed: true,
+        error: result.stopReason?.reason ?? '系统性向量故障，条目尚未尝试',
+      };
+    }
     if (metadataPendingIds.has(d.id)) {
       return { index: i, success: false, error: 'zvec 已写入但元数据尚未完成，请重试元数据回写' };
     }
     if (failedIds.has(d.id)) {
-      return { index: i, success: false, error: '批次持久化失败，后续批次已停止' };
+      return { index: i, success: false, error: err ?? result.stopReason?.reason ?? '批次持久化失败，后续批次已停止' };
     }
     return err
       ? { index: i, success: false, error: err }
@@ -1142,10 +1315,13 @@ export async function vectorBulkStore(params: {
 
   const succeeded = results.filter((item) => item.success).length;
   const cancelled = results.filter((item) => cancelledIds.has(docs[item.index].id)).length;
+  const notProcessed = results.filter((item) => notProcessedIds.has(docs[item.index].id)).length;
   const metadataPending = results.filter((item) => metadataPendingIds.has(docs[item.index].id)).length;
-  const failed = results.length - succeeded - cancelled - metadataPending;
-  const attempted = results.length - cancelled;
-  const status: VectorBulkStoreResult['status'] = cancelled > 0
+  const failed = results.length - succeeded - cancelled - metadataPending - notProcessed;
+  const attempted = results.length - cancelled - notProcessed;
+  const status: VectorBulkStoreResult['status'] = result.stopReason
+    ? 'failed'
+    : cancelled > 0
     ? (succeeded > 0 ? 'partial' : 'cancelled')
     : failed > 0 || metadataPending > 0
       ? (succeeded > 0 ? 'partial' : 'failed')
@@ -1162,27 +1338,65 @@ export async function vectorBulkStore(params: {
     metadataPendingItems: result.metadataPendingItems,
     cancelled,
     cancelledItems: result.cancelled,
+    notProcessed,
+    notProcessedItems: result.notProcessedItems,
     failedItems: result.failedItems,
     status,
+    stopReason: result.stopReason,
   };
 }
 
 // ─── 删除（供 sync-relation / delete-relation 后续使用） ───
 
+/** vectorDelete 结果：errors/failed 只计真实失败，NOT_FOUND 视为幂等成功。 */
+export interface VectorDeleteResult {
+  deleted: number;
+  /** 真实失败条数（不含 NOT_FOUND） */
+  failed: number;
+  /** 真实失败的 doc id；底层未逐条归因时为本次全部待删 id（保守） */
+  failedIds: string[];
+  /** 本就不存在的 doc id（幂等成功，但管理面需要如实回显） */
+  notFoundIds: string[];
+  errors: { id: string; code: string; reason: string }[];
+}
+
 /**
- * 按 doc id 删除。
+ * 把引擎逐条删除结果归一化为 VectorDeleteResult（纯函数，供实现与测试共用）。
+ *
+ * NOT_FOUND（doc 本就不存在）视为幂等成功：删除的目标状态就是"它不存在"，
+ * 误报失败会让调用方保留本应清掉的 memoryId（缓存谎称文档已向量化）。
+ * 归一化集中在此处，调用方直接用 failed/failedIds，不再各自过滤。
  */
+export function normalizeVectorDeleteResult(
+  ids: string[],
+  reported: { ok: number; failed?: number; errors?: { id: string; code: string; reason: string }[] },
+): VectorDeleteResult {
+  const reportedErrors = reported.errors ?? [];
+  const realErrors = reportedErrors.filter((e) => e.code !== 'NOT_FOUND');
+  // 底层只给失败总数、或未把失败归因到具体 id 时，保守认为全部待删 id 都可能残留，
+  // 让调用方继续追踪，而不是静默丢弃引用。
+  const unattributed = (reported.failed ?? 0) > reportedErrors.length || realErrors.some((e) => !e.id);
+  const failedIds = unattributed ? [...new Set(ids)] : [...new Set(realErrors.map((e) => e.id).filter(Boolean))];
+  return {
+    deleted: Math.max(0, reported.ok),
+    failed: unattributed ? (reported.failed ?? failedIds.length) : failedIds.length,
+    failedIds,
+    notFoundIds: reportedErrors.filter((e) => e.code === 'NOT_FOUND').map((e) => e.id),
+    errors: realErrors,
+  };
+}
+
+/** 按 doc id 删除 dense 向量（空 ids 短路，不触碰引擎）。 */
 export async function vectorDelete(params: {
   scope: string;
   ids: string[];
-}): Promise<{ deleted: number; errors: { id: string; code: string; reason: string }[] }> {
+}): Promise<VectorDeleteResult> {
   // strict 档下校验 scope（删除按 doc id 全局定位，scope 仅用于护栏一致性）
   const scope = resolveScope(loadConfig(), params.scope);
-  const result = await withEngine(scope, (engine) => engine.delete(params.ids));
-  return {
-    deleted: result.ok,
-    errors: (result.errors ?? []).map((e) => ({ id: e.id, code: e.code, reason: e.reason })),
-  };
+  const ids = [...new Set(params.ids.filter(Boolean))];
+  if (ids.length === 0) return normalizeVectorDeleteResult(ids, { ok: 0, failed: 0 });
+  const reported = await withEngine(scope, (engine) => engine.delete(ids));
+  return normalizeVectorDeleteResult(ids, reported);
 }
 
 // ─── 管理面（scope / doc 命令；绕过 strict 白名单，仅做字符校验） ───
@@ -1191,6 +1405,18 @@ export async function vectorDelete(params: {
 // validateScope（仅字符安全）而非 resolveScope（会按 strict 白名单拒绝）。
 
 const LIST_ALL_LIMIT = 10_000;
+
+/**
+ * S0-1（REQ-20260930-002）：倍增扫描的硬上限。
+ * listIds 无 offset 分页（zvec querySync 仅 topk+filter），取全只能倍增 limit 重查；
+ * 超过本上限时：计数路径 fail-loud（拒绝低报值作为破坏性操作预告），
+ * 标签扫描返回 truncated:true（明确标记不完整）。1.28M 覆盖目标规模（100 万 chunk）。
+ * 导出供 tag.ts CLI 对 --scan-limit 显式值做同源 clamp。
+ */
+export const SCAN_HARD_CAP = 1_280_000;
+
+/** 标签扫描分批 fetch 的批大小（避免一次取回全部文档的峰值内存）。 */
+const TAG_FETCH_BATCH = 5_000;
 
 /**
  * 构建 scope + tag 过滤：scope 单值必等 / 多值 OR；tags 非空时多 tag 以 OR 组合。
@@ -1209,6 +1435,7 @@ function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
 
 /** 只读路径使用：不存在/空 Collection 视为空 scope，避免查询意外创建新库。 */
 function scopeCollectionExists(scope: string): boolean {
+  assertNoPendingVectorMigration(scope);
   const config = loadConfig();
   const dbPath = getScopeCollectionPath(config, scope);
   try {
@@ -1217,6 +1444,52 @@ function scopeCollectionExists(scope: string): boolean {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw err;
   }
+}
+
+/**
+ * 迁移目录切换跨多次 rename，并非原子完成；未完成事务必须显式恢复后才允许读写。
+ *
+ * 两种中断形态都要拦住：
+ *  1. 事务标记仍在（正常崩溃窗口：标记先于 rename 写入，最后一步才删除）；
+ *  2. 标记已丢失但 live Collection 不见了、migration-backups 里仍有该 scope 的旧集合
+ *     （标记被外部清理 / 手工挪动目录）——此时放任 getEngine 会在原址创建空库，
+ *     用户以为迁移完成，实际旧数据全在备份目录里静默沉睡。
+ */
+export function assertNoPendingVectorMigration(scope: string): void {
+  const config = loadConfig();
+  const markerPath = getVectorMigrationMarkerPath(config, scope);
+  if (fs.existsSync(markerPath)) {
+    let recoveryHint = '';
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as { backupPath?: unknown; cacheBackupPath?: unknown };
+      const backup = typeof marker.backupPath === 'string' ? `；旧集合备份：${marker.backupPath}` : '';
+      const cache = typeof marker.cacheBackupPath === 'string' ? `；relations-cache 备份：${marker.cacheBackupPath}` : '';
+      recoveryHint = `${backup}${cache}`;
+    } catch {
+      recoveryHint = '；事务标记也无法读取，请检查该文件内容及 migration-backups 目录';
+    }
+    throw Object.assign(new Error(
+      `scope "${scope}" 的向量迁移未完成（${markerPath}）；所有检索与写入暂时停止${recoveryHint}。`
+      + `请执行 ki restore ${scope} --rebuild-vector --yes 自动回退并重试；若事务标记损坏，请先根据备份人工恢复`
+    ), { code: 'VECTOR_MIGRATION_INTERRUPTED' });
+  }
+
+  // 标记缺失但备份仍在：仅当 live Collection 确实不见时才判定为迁移可能中断。
+  let liveExists = true;
+  try {
+    liveExists = fs.statSync(getScopeCollectionPath(config, scope)).isDirectory();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') liveExists = false;
+    else throw err;
+  }
+  if (liveExists) return;
+  const backups = listVectorMigrationBackups(config, scope);
+  if (backups.length === 0) return;
+  throw Object.assign(new Error(
+    `scope "${scope}" 的向量集合目录缺失，但 migration-backups 中存在旧集合备份：${backups.join(', ')}；`
+    + '迁移可能中断，禁止自动创建空库以免掩盖旧数据。'
+    + `请执行 ki restore ${scope} --rebuild-vector --yes 自动回退并重试`
+  ), { code: 'VECTOR_MIGRATION_INTERRUPTED' });
 }
 
 /**
@@ -1259,6 +1532,77 @@ export async function vectorListDocs(params: {
   });
 }
 
+/** 辅助向量（ki-relation / ki-path）文档视图。 */
+export interface VectorAuxDoc {
+  id: string;
+  tag?: string;
+  group?: string;
+  text: string;
+}
+
+/**
+ * 按 Group 元数据枚举辅助向量（默认 ki-relation / ki-path）。
+ *
+ * **为什么需要**：辅助向量的 docId 由 `sha256(text + scope + tag)` 生成，**不含 group**
+ * （relation 路径向量的 text 就是 relation 名，见 `buildRelationContent`），所以删组时
+ * 无法从 relations 元数据反推出它们的 id —— 历史实现只能保留，导致「删组后 ki search
+ * 仍命中关系名」。写入时 group 会落进已建索引的标量字段
+ * （schema: `{ name: GROUP_FIELD, indexed: true }`），故这里按 group 精确枚举。
+ *
+ * **只读**：scope collection 不存在时直接返回空数组，不初始化向量引擎
+ * （避免纯树 / FTS-only scope 上的删组被引擎启动拖住）。
+ */
+export async function vectorListAuxDocsByGroups(params: {
+  scope: string;
+  groups: string[];
+  /** 只枚举这些标签；默认 `['ki-relation','ki-path']`，传空数组表示不限标签 */
+  tags?: string[];
+  /** 单批 listIds 上限（zvec listIds 无 offset 分页） */
+  limit?: number;
+}): Promise<{ docs: VectorAuxDoc[]; truncated: boolean }> {
+  validateScope(params.scope);
+  const groups = [...new Set(params.groups.filter((g) => typeof g === 'string' && g.length > 0))];
+  if (groups.length === 0) return { docs: [], truncated: false };
+  if (!scopeCollectionExists(params.scope)) return { docs: [], truncated: false };
+
+  const tags = (params.tags ?? ['ki-relation', 'ki-path'])
+    .map((t) => normalizeTag(t))
+    .filter((t) => t.length > 0);
+  const limit = params.limit ?? 20_000;
+  // filter 会被编译成 SQL：组名成百上千时串会很长，按 50 组分批查询后合并。
+  const CHUNK = 50;
+  const out: VectorAuxDoc[] = [];
+  let truncated = false;
+  for (let i = 0; i < groups.length; i += CHUNK) {
+    const slice = groups.slice(i, i + CHUNK);
+    const clauses: Filter[] = [{ field: SCOPE_FIELD, op: '==', value: params.scope }];
+    if (tags.length > 0) {
+      const tagConds: Filter[] = tags.map((t) => ({ field: TAG_FIELD, op: '==', value: t }));
+      clauses.push(tagConds.length === 1 ? tagConds[0] : { or: tagConds });
+    }
+    const groupConds: Filter[] = slice.map((g) => ({ field: GROUP_FIELD, op: '==', value: g }));
+    clauses.push(groupConds.length === 1 ? groupConds[0] : { or: groupConds });
+
+    const docs = await withEngine(params.scope, async (engine) => {
+      const ids = await engine.listIds({ and: clauses }, limit);
+      // listIds 无 offset 分页（只 topk+filter）：命中数顶到 limit 即有截断，必须显式上报，
+      // 否则调用方会把"没枚举完"当成"没有残留"
+      if (ids.length >= limit) truncated = true;
+      if (ids.length === 0) return [];
+      return engine.fetch(ids, false);
+    });
+    for (const d of docs) {
+      out.push({
+        id: d.id,
+        tag: d.fields?.[TAG_FIELD] !== undefined ? String(d.fields[TAG_FIELD]) : undefined,
+        group: d.fields?.[GROUP_FIELD] !== undefined ? String(d.fields[GROUP_FIELD]) : undefined,
+        text: d.text ?? String(d.fields?.[FTS_FIELD] ?? ''),
+      });
+    }
+  }
+  return { docs: out, truncated };
+}
+
 /**
  * 按 doc id 批量取回文档（供 doc delete 删前预览）。
  */
@@ -1299,8 +1643,14 @@ export async function vectorListScopes(scanLimit: number = LIST_ALL_LIMIT): Prom
 
 /**
  * 枚举指定 scope 下出现过的所有 tag（distinct + 计数）。
- * 引擎无 distinct/group-by：一次 listIds(scope) + fetch，内存按 tag 字段分组计数。
- * 受 scanLimit 约束（默认 10000）——大库下 truncated:true 表示为"已扫描范围内"的近似结果。
+ * 引擎无 distinct/group-by：listIds(scope) + fetch，内存按 tag 字段分组计数。
+ *
+ * S0-1（2026-10-08）：默认不再固定 10,000 上限近似——listIds 无 offset 分页，
+ * 采用倍增 limit 重查直到取全（10k → 20k → … ≤ SCAN_HARD_CAP）；达到硬上限时
+ * truncated:true 表示"已扫描范围内"的近似结果（标签可能漏）。
+ * 显式传入 scanLimit 视为硬上限不倍增（CLI 成本控制的既有逃生口）。
+ * 内容向量默认带 ki-search tag（vectorStore/vectorBulkStore 的 DEFAULT_TAG），
+ * 故本扫描天然 O(全库)，无法用 tag 过滤缩小范围。
  */
 export async function vectorListTags(params: {
   scope: string;
@@ -1308,19 +1658,26 @@ export async function vectorListTags(params: {
 }): Promise<{ tags: VectorTagInfo[]; scanned: number; truncated: boolean }> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return { tags: [], scanned: 0, truncated: false };
-  const limit = params.scanLimit ?? LIST_ALL_LIMIT;
   const scopeCond: Filter = { field: SCOPE_FIELD, op: '==', value: params.scope };
   return withEngine(params.scope, async (engine) => {
-    const ids = await engine.listIds(scopeCond, limit);
-    const truncated = ids.length >= limit;
+    let limit = params.scanLimit ?? LIST_ALL_LIMIT;
+    let ids = await engine.listIds(scopeCond, limit);
+    let truncated = ids.length >= limit;
+    while (!params.scanLimit && truncated && limit < SCAN_HARD_CAP) {
+      limit = Math.min(limit * 2, SCAN_HARD_CAP);
+      ids = await engine.listIds(scopeCond, limit);
+      truncated = ids.length >= limit;
+    }
     if (ids.length === 0) return { tags: [], scanned: 0, truncated };
-    const docs = await engine.fetch(ids, false);
     const counts = new Map<string, number>();
-    for (const d of docs) {
-      const raw = d.fields?.[TAG_FIELD];
-      const tag = raw !== undefined && raw !== null ? String(raw) : '';
-      if (tag.length === 0) continue;
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    for (let i = 0; i < ids.length; i += TAG_FETCH_BATCH) {
+      const docs = await engine.fetch(ids.slice(i, i + TAG_FETCH_BATCH), false);
+      for (const d of docs) {
+        const raw = d.fields?.[TAG_FIELD];
+        const tag = raw !== undefined && raw !== null ? String(raw) : '';
+        if (tag.length === 0) continue;
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
     }
     const tags: VectorTagInfo[] = [...counts.entries()]
       .map(([tag, count]) => ({ tag, count }))
@@ -1330,13 +1687,97 @@ export async function vectorListTags(params: {
 }
 
 /**
- * 统计指定 scope（可选 tag）下文档数（listIds 长度，受 LIST_ALL_LIMIT 约束）。
+ * 统计指定 scope（可选 tag）下文档数。
+ *
+ * S0-1（2026-10-08）：不再受 LIST_ALL_LIMIT 封顶低报——
+ * - 无 tags：布局 v2 起 Collection 按 scope 独立（scope-collection.ts），且所有写入
+ *   链路（vectorStore/vectorBulkStore）恒写 SCOPE_FIELD，故 info().docCount 即该
+ *   scope 全部向量数，与 vectorDeleteScope({scope}) 循环删除的实际目标一致，O(1)。
+ *   （异常态防御性口径：若 Collection 被外部工具污染混入异 scope/缺 SCOPE_FIELD 的
+ *   doc，docCount 会按整个 Collection 计——预告偏高是安全方向，实删数以
+ *   vectorDeleteScope 返回值为准。）
+ * - 带 tags：listIds 无 offset 分页，倍增 limit 取全；达到 SCAN_HARD_CAP 仍取不全时
+ *   fail-loud 抛错——破坏性操作预告（scope clear --tags）不得以低报值放行。
  */
 export async function vectorCountScope(params: { scope: string; tags?: string[] }): Promise<number> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return 0;
+  if (!params.tags || params.tags.length === 0) {
+    return withEngine(params.scope, async (engine) => (await engine.info()).docCount);
+  }
   const filter = buildScopeTagFilter([params.scope], params.tags);
-  return withEngine(params.scope, (engine) => engine.listIds(filter, LIST_ALL_LIMIT).then((ids) => ids.length));
+  return withEngine(params.scope, async (engine) => {
+    let limit = LIST_ALL_LIMIT;
+    let ids = await engine.listIds(filter, limit);
+    while (ids.length >= limit && limit < SCAN_HARD_CAP) {
+      limit = Math.min(limit * 2, SCAN_HARD_CAP);
+      ids = await engine.listIds(filter, limit);
+    }
+    if (ids.length >= limit) {
+      throw new Error(
+        `scope "${params.scope}" 按 tag 过滤的向量数超过 ${SCAN_HARD_CAP}，无法精确计数；` +
+        `请缩小 tag 范围后分批操作，或对确认类命令（如 ki scope clear --tags）显式加 --yes ` +
+        `跳过预告计数直接执行（实际删除数以执行结果为准）`,
+      );
+    }
+    return ids.length;
+  });
+}
+
+/** 返回 scope 持久化 Collection 的 dense 维度；FTS-only 或不存在时返回 undefined。 */
+export async function vectorCollectionDimension(scope: string): Promise<number | undefined> {
+  return (await vectorCollectionDiagnostics(scope)).dimension;
+}
+
+/**
+ * 一次打开集合，返回诊断所需的只读信息（REQ-20261009-003 S-02）。
+ * `indexCompleteness`：各向量字段的索引完成度（0 = 全部停留在 flat 缓冲、检索退化为暴力扫描；1 = 已建好）。
+ * 现网实测：不调 `optimize()` 时恒为 0（见 requirements/2026-10-09-导入完成口径与索引整理阶段/review/exp-1-indexing-cpu.md）。
+ */
+export async function vectorCollectionDiagnostics(
+  scope: string,
+): Promise<{ dimension?: number; indexCompleteness?: Record<string, number> }> {
+  validateScope(scope);
+  if (!scopeCollectionExists(scope)) return {};
+  return withEngine(scope, async (engine) => {
+    const info = await engine.info();
+    return {
+      dimension: info.dimension,
+      ...(info.indexCompleteness ? { indexCompleteness: info.indexCompleteness } : {}),
+    };
+  });
+}
+
+export interface VectorDimensionStatus {
+  scope: string;
+  configured: number;
+  persisted?: number;
+  compatible: boolean;
+  /** 索引完成度（0~1）；S-02 暴露，用于"索引到底建没建"的诊断与展示 */
+  indexCompleteness?: Record<string, number>;
+}
+
+/** 对同一 scope 的所有 dense 写入入口提供一致的迁移诊断。 */
+export async function getVectorDimensionStatus(scope: string): Promise<VectorDimensionStatus> {
+  const config = loadConfig();
+  const normalizedScope = resolveScope(config, scope);
+  const diagnostics = await vectorCollectionDiagnostics(normalizedScope);
+  const persisted = diagnostics.dimension;
+  return {
+    scope: normalizedScope,
+    configured: config.embedding.dimension,
+    persisted,
+    compatible: persisted === undefined || persisted === config.embedding.dimension,
+    ...(diagnostics.indexCompleteness ? { indexCompleteness: diagnostics.indexCompleteness } : {}),
+  };
+}
+
+export async function assertVectorDimensionCompatible(scope: string): Promise<void> {
+  const status = await getVectorDimensionStatus(scope);
+  if (status.compatible) return;
+  throw Object.assign(new Error(
+    `embedding.dimension (${status.configured}) !== persisted dimension (${status.persisted})；scope "${status.scope}" 的旧向量集合需要迁移。请执行 ki restore ${status.scope} --rebuild-vector --yes；迁移前仍可使用全文搜索`
+  ), { code: 'VECTOR_DIMENSION_MISMATCH' });
 }
 
 /**
@@ -1346,7 +1787,7 @@ export async function vectorCountScope(params: { scope: string; tags?: string[] 
 export async function vectorDeleteScope(
   params: { scope: string; tags?: string[] },
   onProgress?: (deleted: number) => void
-): Promise<{ deleted: number }> {
+): Promise<{ deleted: number; remaining?: number }> {
   validateScope(params.scope);
   if (!scopeCollectionExists(params.scope)) return { deleted: 0 };
   const filter = buildScopeTagFilter([params.scope], params.tags);
@@ -1363,6 +1804,7 @@ export async function vectorDeleteScope(
       if (res.ok === 0) break;
       if (ids.length < LIST_ALL_LIMIT) break;
     }
-    return { deleted: total };
+    const remaining = (await engine.listIds(filter, LIST_ALL_LIMIT)).length;
+    return { deleted: total, remaining };
   });
 }

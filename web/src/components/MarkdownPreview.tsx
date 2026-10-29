@@ -2,7 +2,10 @@
  * MarkdownPreview.tsx —— Markdown 渲染（marked 完整语法 + mermaid 图表 + 本地图片附件）
  *
  * - marked 渲染标题/列表/表格/代码块/引用/链接等 GFM 语法
- * - ```mermaid 代码块渲染为图表（mermaid 动态加载，仅当文档含 mermaid 时才拉取 chunk）
+ * - 代码块语法高亮（highlight.js，同步）：见 `lib/codeHighlight.ts`；未知语言 / mermaid /
+ *   超阈值一律退回转义纯文本，**DOM 形状不变**（`pre > code.language-X` 是下游契约）
+ * - ```mermaid 代码块渲染为图表（mermaid 动态加载，仅当文档含 mermaid 时才拉取 chunk）；
+ *   图表配色跟随当前主题（暗色用 mermaid `dark` 主题），切换主题时按 `data-copy-text` 取回原文重绘
  * - 安全（渲染的是**导入的外部不可信 wiki**，故按不可信输入处理）：
  *   ① 丢弃文档中内嵌的原始 HTML（避免样式注入/XSS），仅白名单放行 `<img>`（只取 src/alt/title，
  *      其余属性含 on* 事件一律丢弃）
@@ -16,7 +19,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Marked, Renderer, type Token, type TokenizerAndRendererExtension } from 'marked';
+import { highlightCodeHtml } from '@/lib/codeHighlight';
+import { pickPreferredIndex, usePreferredLang } from '@/lib/codeLangPreference';
+import { useDocumentTheme } from '@/lib/theme';
 import { isLocalDocumentHref } from '@/lib/documentLinks';
+import { deepLink, parseKiLink } from '@/lib/kiLinks';
 
 /** 附件寻址上下文：提供时相对路径图片重写为 /api/asset 路由；缺省时保持原 src（如写入页预览） */
 export interface AssetBase {
@@ -32,6 +39,18 @@ function escapeAttr(s: string): string {
 /** 代码文本转义：代码高亮前先确保不可信内容只能作为文本节点显示。 */
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * 代码块内容：优先语法高亮，不可用时退回转义纯文本。
+ *
+ * 只替换 `<code>` 的**内容**，不动外层结构 —— `pre > code.language-<lang>` 是两条既有契约：
+ * ① mermaid 靠 `pre > code.language-mermaid` 定位并替换（见下方 effect）；
+ * ② 复制按钮靠 `pre code` 的 `textContent` 取原文（高亮只插入 span，不新增可见文本，
+ *    实测 10/10 面板 textContent 与原文逐字节一致）。
+ */
+function codeInnerHtml(text: string, language?: string): string {
+  return highlightCodeHtml(text, language) ?? escapeHtml(text);
 }
 
 /** 复制代码时移除末尾全部 CR/LF（包括作者保留的末尾空行），避免终端粘贴后立即提交命令。 */
@@ -318,15 +337,155 @@ function safeDetailsExtension(): TokenizerAndRendererExtension {
   };
 }
 
-/** 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃 */
-function buildRenderer(base?: AssetBase) {
+// ─── 多语言代码块（VitePress `::: code-group` 容器）────────────────
+
+/** 组内一个语言变体：标签（省略时取语言名）与源码原文 */
+interface CodeGroupItem {
+  lang: string;
+  label: string;
+  text: string;
+}
+
+interface CodeGroupToken {
+  type: string;
+  raw: string;
+  items: CodeGroupItem[];
+}
+
+const CODE_GROUP_OPEN_LINE = /^ {0,3}:{3,}[ \t]*code-group[ \t]*(?:\n+|$)/;
+/** 结束行（**只用于单行文本**，故不带 m 标志） */
+const CODE_GROUP_CLOSE_LINE = /^ {0,3}:{3,}[ \t]*$/;
+/** 组内每个代码块的 info string 尾部可写 `[显示名]`（VitePress 同款），其余 meta 不参与解析 */
+const CODE_GROUP_LABEL = /\[([^\]]*)\][ \t]*$/;
+
+/**
+ * 找容器的结束行：**按行扫描并跳过围栏内部**。
+ *
+ * 不能用「正则在剩余文本里找第一个 `:::`」——代码块**内容**里出现 `:::` 行完全合法
+ * （如示例里讲 VitePress 语法本身），那样会把围栏内的那行当成容器结束，整个容器随即降级为
+ * 普通块（实测复现：`0 !== 1`）。safeDetailsExtension 早就用同一手法规避了同类问题。
+ */
+function findCodeGroupClose(source: string): { index: number; end: number } | null {
+  let fence: { char: '`' | '~'; length: number } | null = null;
+  for (const line of markdownLines(source)) {
+    if (fence) {
+      if (isFenceClose(line.text, fence)) fence = null;
+      continue;
+    }
+    const marker = fenceMarker(line.text);
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    if (CODE_GROUP_CLOSE_LINE.test(line.text)) return { index: line.start, end: line.end };
+  }
+  return null;
+}
+
+/** 组件的 id 前缀：模块级自增，保证同一页面多次渲染也不出现重复 id */
+let codeGroupSeq = 0;
+
+function readCodeToken(token: Token): { lang: string; text: string } {
+  const code = token as Token & { lang?: string; text?: string };
+  return { lang: code.lang ?? '', text: code.text ?? '' };
+}
+
+/**
+ * 多语言代码块：`::: code-group` 容器内一串围栏代码块，渲染为一组可切换的 tab（默认展示第一个）。
+ *
+ * 三条降级硬约束（都返回 undefined，交回默认解析，整段退化为「段落 + 独立代码块」）：
+ * ① **未闭合不消费** —— 没写结束的 `:::` 时不接管。AI 流式输出到一半正是此形态；这也让
+ *    renderMarkdownBlocks 的 `complete` 判定自动保持正确（不产 token 就不会被误判为完整）。
+ * ② **组内只允许代码块与空行** —— 出现其他块级内容即降级，保证正文不被吞掉。
+ * ③ **有效语言块少于 2 个** —— 没有可切换的对象，按普通代码块渲染（空块与普通块同口径丢弃）。
+ *
+ * 安全：容器只重排「已有的代码块 token」，不引入任何新的原始 HTML 通路；标签与语言名一律转义。
+ *
+ * `preferredLang` = 读者在设置里选的首选语言：命中的那一项默认展开，没有则仍是第一个（不提示）。
+ */
+function codeGroupExtension(preferredLang = ''): TokenizerAndRendererExtension {
+  return {
+    name: 'kiCodeGroup',
+    level: 'block',
+    start(source) {
+      const index = /^ {0,3}:{3,}[ \t]*code-group\b/m.exec(source)?.index;
+      return index === undefined || index < 0 ? undefined : index;
+    },
+    tokenizer(source) {
+      const opening = CODE_GROUP_OPEN_LINE.exec(source);
+      if (!opening) return undefined;
+      const rest = source.slice(opening[0].length);
+      const closing = findCodeGroupClose(rest);
+      if (!closing) return undefined;
+      const body = rest.slice(0, closing.index);
+      const tokens = this.lexer.blockTokens(body.trim(), []);
+      if (!tokens.every((token) => token.type === 'code' || token.type === 'space')) return undefined;
+      const items = tokens
+        .filter((token) => token.type === 'code')
+        .map((token) => {
+          const { lang, text } = readCodeToken(token);
+          const tagged = CODE_GROUP_LABEL.exec(lang.trim());
+          const language = (tagged ? lang.trim().slice(0, tagged.index) : lang).trim().split(/\s+/)[0] ?? '';
+          const label = (tagged?.[1] ?? '').trim() || language || '代码';
+          return { lang: language, label, text };
+        })
+        .filter((item) => item.text.trim().length > 0);
+      if (items.length < 2) return undefined;
+      return { type: 'kiCodeGroup', raw: source.slice(0, opening[0].length + closing.end), items };
+    },
+    renderer(token) {
+      const group = token as unknown as CodeGroupToken;
+      const groupId = `ki-code-group-${++codeGroupSeq}`;
+      // 默认选中项：命中读者首选语言的那一项，否则第一个（匹配规则见 codeLangPreference）
+      const activeIndex = pickPreferredIndex(group.items, preferredLang);
+      const tabs = group.items.map((item, index) =>
+        `<button class="ki-code-tab" type="button" role="tab" id="${groupId}-tab-${index}"`
+        + ` aria-controls="${groupId}-panel-${index}" aria-selected="${index === activeIndex}"`
+        + ` tabindex="${index === activeIndex ? 0 : -1}" data-ki-code-tab="${index}"`
+        + ` title="${escapeAttr(item.lang || item.label)}">${escapeHtml(item.label)}</button>`).join('');
+      const panels = group.items.map((item, index) => {
+        const languageClass = item.lang ? ` class="language-${escapeAttr(item.lang)}"` : '';
+        return `<div class="ki-code-panel" role="tabpanel" id="${groupId}-panel-${index}"`
+          + ` aria-labelledby="${groupId}-tab-${index}" data-ki-code-panel="${index}"${index === activeIndex ? '' : ' hidden'}>`
+          + `<pre><code${languageClass}>${codeInnerHtml(item.text, item.lang)}</code></pre></div>`;
+      }).join('');
+      return '<div class="ki-code-block ki-code-group" data-ki-code-group>'
+        + '<div class="ki-code-block__bar">'
+        + `<div class="ki-code-tabs" role="tablist" aria-label="代码语言">${tabs}</div>`
+        + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
+        + '</div>'
+        + `<div class="ki-code-panels">${panels}</div>`
+        + '<span class="ki-code-copy-status" aria-live="polite"></span>'
+        + '</div>\n';
+    },
+  };
+}
+
+/**
+ * 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃。
+ *
+ * `highlight: false` 用于**流式渲染中尚未闭合的围栏**：那段代码每个 chunk 都会变，
+ * 逐个 chunk 对"已累积的全部行"重新做语法高亮是纯浪费（1000 行块约 25ms/次 × 数百 chunk），
+ * 且用户看到的是半行代码，上色没有意义。闭合后的那一帧再着色。
+ */
+function buildRenderer(base?: AssetBase, options?: { highlight?: boolean }) {
   const renderer = new Renderer();
+  const inner = (text: string, language?: string): string =>
+    options?.highlight === false ? escapeHtml(text) : codeInnerHtml(text, language);
   renderer.code = ({ text, lang }) => {
+    // 空内容块（``` 立即闭合、或只有空白字符）不产出容器：否则只会渲染出"灰底空框 + 一个复制按钮"
+    // （真机走查 2026-10-09 实测：整块 195px 高、除按钮外零内容像素，点复制得到空串）。
+    if (!text.trim()) return '';
     const language = lang?.trim().split(/\s+/, 1)[0];
     const languageClass = language ? ` class="language-${escapeAttr(language)}"` : '';
+    // 顶部工具条（左语言名 / 右常驻复制按钮）。按钮此前是绝对定位浮层，靠容器 `padding-right: 72px` 让位——
+    // 那条内边距作用于**整列高度**，按钮下方同样被占用，内容区与横向滚动条被永久挤窄（走查 2026-10-09）。
     return '<div class="ki-code-block">'
+      + '<div class="ki-code-block__bar">'
+      + `<span class="ki-code-lang">${language ? escapeHtml(language) : '代码'}</span>`
       + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
-      + `<pre><code${languageClass}>${escapeHtml(text)}</code></pre>`
+      + '</div>'
+      + `<pre><code${languageClass}>${inner(text, language)}</code></pre>`
       + '<span class="ki-code-copy-status" aria-live="polite"></span>'
       + '</div>\n';
   };
@@ -344,6 +503,13 @@ function buildRenderer(base?: AssetBase) {
   renderer.link = function ({ href, title, tokens, text }) {
     const url = href ?? '';
     const inner = this.parser?.parseInline(tokens) ?? escapeAttr(text ?? '');
+    if (url.startsWith('ki-link:')) {
+      const target = parseKiLink(url);
+      if (!target) return `${inner}${blockedLinkMark(url)}`;
+      const destination = target.type === 'external' ? target.url : deepLink(target);
+      const t = title ? ` title="${escapeAttr(title)}"` : '';
+      return `<a class="ki-jump-link" href="${escapeAttr(destination)}" target="_blank" rel="noopener noreferrer"${t}>${inner}</a>`;
+    }
     if (!isSafeLinkUrl(url)) return `${inner}${blockedLinkMark(url)}`;
     const t = title ? ` title="${escapeAttr(title)}"` : '';
     // 外部链接开新页并断 opener（防 window.opener 反向操控来源页）；站内相对链接不加 target
@@ -376,16 +542,295 @@ function buildRenderer(base?: AssetBase) {
 }
 
 /** 渲染 Markdown 为 HTML 字符串（GFM：表格/删除线/任务列表；breaks 单换行转 <br>） */
-export function renderMarkdownHtml(md: string, base?: AssetBase): string {
+export function renderMarkdownHtml(md: string, base?: AssetBase, preferredLang = ''): string {
   const parser = new Marked({ renderer: buildRenderer(base), gfm: true, breaks: true });
-  parser.use({ extensions: [safeDetailsExtension()] });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension(preferredLang)] });
   return parser.parse(encodeImageSpaces(md), { async: false }) as string;
+}
+
+/** A complete top-level Markdown token. Inline links are resolved by the full-document lexer. */
+export interface MarkdownBlock {
+  key: string;
+  start: number;
+  end: number;
+  raw: string;
+  references: string;
+  html: string;
+  complete: boolean;
+}
+
+/** Parse the whole document before rendering individual blocks; never split Markdown source. */
+/**
+ * 流式分块渲染（AI 对话链路用）。
+ *
+ * ⚠️ 已完成块的 html 复用判据只有 `raw` 与 `references`，**不含 `preferredLang`** ——
+ * 调用方传入的偏好发生变化时必须传空 `previous`，否则会复用按旧偏好生成的 html，
+ * 已渲染的多语言组不会跟着换默认语言。
+ */
+export function renderMarkdownBlocks(
+  md: string,
+  previous: readonly MarkdownBlock[] = [],
+  preferredLang = '',
+): MarkdownBlock[] {
+  const parser = new Marked({ renderer: buildRenderer(), gfm: true, breaks: true });
+  parser.use({ extensions: [safeDetailsExtension(), codeGroupExtension(preferredLang)] });
+  // 未闭合 token 专用（按需创建）：同样的扩展与渲染器，只是代码块不做语法高亮
+  let plainParser: Marked | null = null;
+  const plain = (): Marked => {
+    plainParser ??= (() => {
+      const p = new Marked({ renderer: buildRenderer(undefined, { highlight: false }), gfm: true, breaks: true });
+      p.use({ extensions: [safeDetailsExtension(), codeGroupExtension(preferredLang)] });
+      return p;
+    })();
+    return plainParser;
+  };
+  const input = encodeImageSpaces(md).replace(/\r\n?|\r/g, '\n');
+  // Preprocessing only expands image-path spaces and normalizes newlines. Preserve raw SSE offsets.
+  const offsets: number[] = [];
+  let original = 0;
+  for (let i = 0; i < input.length;) {
+    offsets[i] = original;
+    if (md[original] === ' ' && input.slice(i, i + 3) === '%20') {
+      offsets[i + 1] = original; offsets[i + 2] = original;
+      i += 3; original += 1;
+    } else if (md[original] === '\r' && input[i] === '\n') {
+      i += 1; original += md[original + 1] === '\n' ? 2 : 1;
+    } else { i += 1; original += 1; }
+  }
+  offsets[input.length] = md.length;
+  const tokens = parser.lexer(input);
+  const references = JSON.stringify(tokens.links);
+  const cache = new Map(previous.map((b) => [b.key, b]));
+  let cursor = 0;
+  return tokens.map((token) => {
+    const found = input.indexOf(token.raw, cursor);
+    const startAt = found >= 0 ? found : cursor;
+    const start = offsets[startAt] ?? md.length;
+    cursor = startAt + token.raw.length;
+    const key = `${start}:${token.type}`;
+    const old = cache.get(key);
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(token.raw);
+    const lines = token.raw.trimEnd().split('\n');
+    const closing = fence && new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \t]*$`);
+    const complete = !fence || (lines.length > 1 && Boolean(closing?.test(lines[lines.length - 1])));
+    // Reuse completed HTML so Mermaid/details DOM survives unrelated subsequent chunks.
+    // 未闭合的 token（流式输出到一半的围栏）走 plain：不做语法高亮，闭合一帧再着色。
+    const html = old?.raw === token.raw && old.references === references
+      ? old.html : (complete ? parser.parser([token]) : plain().parser([token]));
+    return { key, start, end: offsets[cursor] ?? md.length, raw: token.raw, references, html, complete };
+  });
 }
 
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null;
 function loadMermaid(): Promise<typeof import('mermaid')> {
   mermaidPromise ??= import('mermaid');
   return mermaidPromise;
+}
+
+/**
+ * mermaid 初始化参数（纯函数，便于单测锁定两条不可退让的约束）。
+ *
+ * ① **securityLevel 必须为 'strict'**（mermaid 默认值），**不得改成 'loose'**：
+ *    源码实证（mermaid 11.16.1）三处均以 loose 为开关——
+ *    - `mermaid.core.mjs` `else if (!isLooseSecurityLevel) DOMPurify.sanitize(...)`：loose 时**完全跳过净化**，
+ *      原始 SVG 直接进 innerHTML（可含 foreignObject/事件属性）；
+ *    - `setClickFun` / `setClickFunc` 开头均 `if (securityLevel !== 'loose') return`：loose 时
+ *      `click A call fn()` 会绑定为活动 JS 回调（比 javascript: 链接更危险）。
+ *    本组件渲染的是**导入的外部不可信 wiki**，故取 strict。
+ *    代价：图表内 HTML 标签会被转义为文本、`click` 交互失效——知识 wiki 的图表只用于展示，可接受。
+ *    注：'loose' 是前端初始脚手架提交（c56d68b「对齐 demo」）带入的，无注释/无测试锁定，非故意围栏。
+ * ② **theme 跟随当前文档主题**：此前写死 `'default'`，暗色页里图表是浅底白卡，与周围正文割裂
+ *    （与代码块高亮同一个"主题一致性"缺口，2026-10-20 一并修）。
+ */
+export function mermaidInitOptions(theme: 'light' | 'dark'): {
+  startOnLoad: false;
+  theme: 'default' | 'dark';
+  securityLevel: 'strict';
+  suppressErrorRendering: true;
+} {
+  return {
+    startOnLoad: false,
+    theme: theme === 'dark' ? 'dark' : 'default',
+    securityLevel: 'strict',
+    // 避免 Mermaid 解析失败时将错误图插入 document.body。
+    suppressErrorRendering: true,
+  };
+}
+
+/**
+ * mermaid 输出是否"只有外壳、没有图元"。
+ *
+ * 语法成立但没有任何节点的图（如仅 `graph TD`）不会抛错，`mermaid.render` 返回的 svg 里
+ * 只有装饰容器（`<style>`/`<defs>`/`<marker>`）与空 `<g>`——直接替换 `pre` 会留下
+ * "空白框 + 复制按钮"，源码被静默吞掉（真机走查 2026-10-09 的空白块即此类形态）。
+ * 判定为空白时保留源码块并给出可见提示（见 markMermaidFallback）。
+ *
+ * **实现修正 2026-10-13（实测）**：必须先剥离装饰容器 `<defs>` / `<marker>`，再判有无图形元素。
+ * 旧实现直接对整份 svg 做黑名单匹配，被装饰容器误伤——mermaid 11.16.1 的空 flowchart 会输出
+ * `<marker>`（内含 `path`/`polygon`/`circle`，且**不在 `<defs>` 内**，只剥 defs 仍会误判），
+ * 于是旧判定对空图恒为 false：源码被替换成 16×16 的空白画布，正是本函数当初要消除的形态。
+ * 8 个实测样本（空/非空 flowchart、graph、stateDiagram、sequenceDiagram、pie）上，
+ * 剥离装饰后判定与人工判断完全一致。
+ *
+ * 用标签名判定而非解析 DOM：纯字符串可单测，且 `post`/`text-align` 等样式文本不含尖括号形式，不会误命中。
+ */
+export function isBlankMermaidSvg(svg: string): boolean {
+  const withoutDecor = svg
+    .replace(/<defs\b[\s\S]*?<\/defs>/gi, '')
+    .replace(/<marker\b[\s\S]*?<\/marker>/gi, '');
+  return !/<(?:path|rect|circle|ellipse|line|polyline|polygon|text|foreignObject|image)\b/i.test(withoutDecor);
+}
+
+/** mermaid 兜底提示的三种成因：语法失败 / 无图元 / 渲染资源加载失败 */
+export type MermaidFallbackKind = 'failed' | 'blank' | 'unavailable';
+
+/**
+ * 兜底提示文案（纯函数便于单测）：label 是工具条上的短标记，title 是悬浮说明。
+ *
+ * 为何必须提示（走查 2026-10-13）：渲染失败此前是 `catch {}` **全静默** —— 用户只看到"图没出来"，
+ * 无法区分"我的源码语法错了"与"产品坏了"。真实案例：AI 生成的节点文本内层写了裸引号
+ * `YOU["你：写 YAML（spec "）"]` → mermaid 报 `Parse error on line 2`，页面与 console 均无反馈。
+ * 口径沿用既有 fail-loud 先例（图片缺失的 `.ki-asset-missing` 占位块、被拦链接的 `⚠` 标记）：
+ * 保留源码块 + 明说原因，而不是静默降级。
+ */
+export interface MermaidFallbackNotice {
+  /** 工具条上的短标记 */
+  label: string;
+  /** 悬浮 / 读屏用的完整说明（桌面端快速查看；触屏与键盘用户走展开面板） */
+  title: string;
+  /** 展开面板：出了什么问题 */
+  reason: string;
+  /** 展开面板：怎么办（给出去路，而不是止于一句"失败"） */
+  hint: string;
+}
+
+export function mermaidFallbackNotice(kind: MermaidFallbackKind, detail?: string): MermaidFallbackNotice {
+  const build = (label: string, reason: string, hint: string): MermaidFallbackNotice => ({
+    label, reason, hint, title: `${reason}。${hint}`,
+  });
+  if (kind === 'blank') {
+    return build(
+      '⚠ 图表内容为空',
+      '源码里没有可渲染的节点（例如只写了 graph / flowchart 声明）',
+      '已保留源码块；补上节点后重新打开即可正常渲染',
+    );
+  }
+  if (kind === 'unavailable') {
+    return build(
+      '⚠ 图表渲染不可用',
+      '图表渲染资源加载失败（mermaid 模块未能加载）',
+      '已保留源码块；刷新页面可重试',
+    );
+  }
+  return build(
+    '⚠ 图表渲染失败',
+    `图表源码有语法错误，未能渲染成图${detail ? `：${detail}` : ''}`,
+    '已保留源码块；修正源码后重新打开即可正常渲染',
+  );
+}
+
+/** mermaid 报错摘要：取首个非空行并限长（报错原文是多行箭头图，塞进 title / 日志没有信息量） */
+export function mermaidErrorDetail(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const firstLine = raw.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? '未知错误';
+  return firstLine.length > 160 ? `${firstLine.slice(0, 157)}…` : firstLine;
+}
+
+/**
+ * mermaid 源码容错修复：把**标签字符串内层**未转义的裸引号换成 mermaid 实体 `#quot;`。
+ *
+ * 为何需要（2026-10-13 实测根因）：AI 生成的图表常在节点文本里直接写引号，如
+ * `YOU["你：写 YAML（spec "）"]` —— mermaid 词法器在字符串中途遇到第二个 `"` 即判定字符串
+ * 结束（实测报 `Parse error on line 2 ... got 'STR'`），整块图不渲染。mermaid 语法要求
+ * 字符串内部的引号写 `#quot;`，故按"首次失败后修一次再重试"使用（合法源码不经过本函数重试）。
+ *
+ * 规则（保守：只动标签字符串，其余字节一律不改）：
+ *  · 起点 = `[` `(` `{` `|` 后紧跟的 `"`（mermaid 的全部标签/文本容器）
+ *  · 终点 = 起点之后第一个「后面紧跟 `]` `)` `}` `|` 或行尾」的 `"`
+ *  · 只替换起点与终点之间的裸 `"`；标签未闭合（找不到终点）时本行原样返回
+ *  · `%%` 注释行不处理
+ *
+ * 实测（2026-10-13）：对 6 类合法源码（含 `#quot;`、边标签 `|"是"|`、`(("圆"))`/`{"菱形"}`/
+ * `(["胶囊"])` 形状、单行多节点、`%%` 注释 + `style` 行）输出与输入**逐字节相同**；仅对非法样例生效。
+ */
+export function repairMermaidLabelQuotes(src: string): string {
+  return src.split('\n').map((line) => {
+    if (line.trim().startsWith('%%')) return line;
+    let out = '';
+    let i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if ((ch === '[' || ch === '(' || ch === '{' || ch === '|') && line[i + 1] === '"') {
+        const open = i + 1;
+        let close = -1;
+        for (let j = open + 1; j < line.length; j += 1) {
+          if (line[j] !== '"') continue;
+          const next = line[j + 1];
+          if (next === undefined || next === ']' || next === ')' || next === '}' || next === '|') {
+            close = j;
+            break;
+          }
+        }
+        // 标签未闭合：本行原样保留，交由渲染失败分支给出可见提示
+        if (close < 0) { out += line.slice(i); return out; }
+        out += `${ch}"${line.slice(open + 1, close).replace(/"/g, '#quot;')}"`;
+        i = close + 1;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return out;
+  }).join('\n');
+}
+
+/**
+ * 在代码块工具条上标注兜底原因（幂等：同一块只标一次）。
+ *
+ * 标记是 `<button>` 而非 `<span title>`：详情**不能只靠 hover** —— 触屏没有 hover、键盘用户
+ * 也拿不到 title（走查 2026-10-13 的待办）。点击 / 回车展开面板，面板贴在工具条下方
+ * （比源码块之后更贴近触发点）。复制按钮位置不动（标记插在它左侧）。
+ */
+function markMermaidFallback(pre: HTMLElement, kind: MermaidFallbackKind, detail?: string): void {
+  const block = pre.closest<HTMLElement>('.ki-code-block');
+  if (!block || block.querySelector('.ki-code-warn')) return;
+  const notice = mermaidFallbackNotice(kind, detail);
+  const panelId = `ki-code-warn-${Math.random().toString(36).slice(2, 8)}`;
+
+  const panel = document.createElement('p');
+  panel.className = 'ki-code-warn-detail';
+  panel.id = panelId;
+  panel.hidden = true;
+  const reason = document.createElement('span');
+  reason.className = 'ki-code-warn-detail__reason';
+  reason.textContent = notice.reason;
+  const hint = document.createElement('span');
+  hint.className = 'ki-code-warn-detail__hint';
+  hint.textContent = notice.hint;
+  panel.append(reason, hint);
+
+  const warn = document.createElement('button');
+  warn.type = 'button';
+  warn.className = 'ki-code-warn';
+  warn.textContent = notice.label;
+  warn.title = notice.title; // 桌面端可 hover 速览；点击展开则触屏 / 键盘同样可见
+  warn.setAttribute('aria-expanded', 'false');
+  warn.setAttribute('aria-controls', panelId);
+  warn.addEventListener('click', () => {
+    const expand = panel.hidden;
+    panel.hidden = !expand;
+    warn.setAttribute('aria-expanded', String(expand));
+  });
+
+  const bar = block.querySelector<HTMLElement>('.ki-code-block__bar');
+  const copy = bar?.querySelector<HTMLElement>('.ki-code-copy');
+  if (bar) {
+    if (copy) bar.insertBefore(warn, copy);
+    else bar.appendChild(warn);
+    bar.after(panel);
+    return;
+  }
+  block.append(warn, panel);
 }
 
 /** 占位块展示用的原始路径：/api/asset 路由还原 path 参数，其余原样 */
@@ -450,17 +895,24 @@ async function copyText(text: string): Promise<void> {
 /** Markdown 预览组件（dangerouslySetInnerHTML 渲染 + mermaid 图表挂载 + 附件占位块） */
 export interface MarkdownPreviewProps {
   text: string;
+  /** Already sanitized by renderMarkdownBlocks; only trusted callers supply this. */
+  renderedHtml?: string;
+  deferMermaid?: boolean;
   assetBase?: AssetBase;
   /** 返回 true 表示已在当前应用内处理该本地文档链接，应阻止浏览器默认跳转。 */
   onLocalLink?: (href: string) => boolean;
 }
 
-export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPreviewProps): JSX.Element {
+export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, deferMermaid = false }: MarkdownPreviewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
+  // 读者首选语言：变化时重算 html，已打开的多语言组随之换成命中语言（见 codeLangPreference）
+  const preferredLang = usePreferredLang();
+  // 当前主题：mermaid 图必须按主题重绘（SVG 里是写死的配色，不随 CSS 变量走）
+  const theme = useDocumentTheme();
   const html = useMemo(
-    () => renderMarkdownHtml(text, assetBase),
-    [text, assetBase?.scope, assetBase?.group],
+    () => renderedHtml ?? renderMarkdownHtml(text, assetBase, preferredLang),
+    [text, renderedHtml, assetBase?.scope, assetBase?.group, preferredLang],
   );
 
   // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；
@@ -493,8 +945,11 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
       const button = target.closest<HTMLButtonElement>('[data-ki-copy-code]');
       if (!button || !root.contains(button)) return;
       const codeBlock = button.closest<HTMLElement>('.ki-code-block');
-      const source = codeBlock?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
-        ?? codeBlock?.querySelector('pre code')?.textContent;
+      // 多语言块（`::: code-group`）内含多个面板，只取**当前显示**的那一个——否则会复制到
+      // 隐藏语言（原型实测：按 DOM 顺序取第一个 `pre code` 会取到未选中的版本）。
+      const scope = codeBlock?.querySelector<HTMLElement>('.ki-code-panel:not([hidden])') ?? codeBlock;
+      const source = scope?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
+        ?? scope?.querySelector('pre code')?.textContent;
       if (source === undefined) return;
       const status = codeBlock?.querySelector<HTMLElement>('.ki-code-copy-status');
 
@@ -532,57 +987,156 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     };
   }, [html]);
 
+  // 多语言代码块切换（VitePress `::: code-group`）：与复制按钮同款事件代理——直接改 DOM 属性，
+  // 不走 React 状态（DOM 由 dangerouslySetInnerHTML 注入，且流式渲染下 html 每轮都可能重建）。
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !html.includes('data-ki-code-group')) return;
+    const activate = (group: HTMLElement, index: number): void => {
+      const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-ki-code-tab]'));
+      const panels = Array.from(group.querySelectorAll<HTMLElement>('[data-ki-code-panel]'));
+      tabs.forEach((tab, tabIndex) => {
+        const active = tabIndex === index;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+      });
+      panels.forEach((panel, panelIndex) => { panel.hidden = panelIndex !== index; });
+    };
+    // 索引以 **DOM 顺序**为准（不解析 data-ki-code-tab，省掉一处"属性被改就切不动"的隐患）
+    const groupOf = (node: Element): { group: HTMLElement; tabs: HTMLButtonElement[]; index: number } | null => {
+      const tab = node.closest<HTMLButtonElement>('[data-ki-code-tab]');
+      if (!tab || !root.contains(tab)) return null;
+      const group = tab.closest<HTMLElement>('[data-ki-code-group]');
+      if (!group) return null;
+      const tabs = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-ki-code-tab]'));
+      return { group, tabs, index: tabs.indexOf(tab) };
+    };
+    const handleClick = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const found = groupOf(target);
+      if (!found || found.index < 0) return;
+      activate(found.group, found.index);
+    };
+    // ARIA tablist 的标准键盘交互：←/→ 循环移动并跟随激活，Home/End 跳首尾；
+    // 焦点一并移动，键盘与读屏用户不会「切过去了但焦点还在原标签」。
+    const handleKeydown = (event: KeyboardEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const found = groupOf(target);
+      if (!found || found.index < 0) return;
+      const { tabs, index: current } = found;
+      const last = tabs.length - 1;
+      const next = event.key === 'ArrowRight' ? (current === last ? 0 : current + 1)
+        : event.key === 'ArrowLeft' ? (current === 0 ? last : current - 1)
+          : event.key === 'Home' ? 0
+            : event.key === 'End' ? last
+              : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      activate(found.group, next);
+      tabs[next]?.focus();
+    };
+    root.addEventListener('click', handleClick);
+    root.addEventListener('keydown', handleKeydown);
+    return () => {
+      root.removeEventListener('click', handleClick);
+      root.removeEventListener('keydown', handleKeydown);
+    };
+  }, [html]);
+
   // mermaid 代码块异步渲染（动态加载 mermaid，避免无图表时也加载大 chunk）
   useEffect(() => {
     const root = rootRef.current;
-    if (!root || !html.includes('language-mermaid')) return;
+    if (!root || deferMermaid || !html.includes('language-mermaid')) return;
     let cancelled = false;
     setReady(false);
     void loadMermaid().then((mod) => {
       if (cancelled) return;
       const mermaid = mod.default;
-      // securityLevel 必须为 'strict'（mermaid 默认值），**不得改成 'loose'**：
-      // 源码实证（mermaid 11.16.1）三处均以 loose 为开关——
-      //   ① mermaid.core.mjs `else if (!isLooseSecurityLevel) DOMPurify.sanitize(...)`：loose 时**完全跳过净化**，
-      //      原始 SVG 直接进 innerHTML（可含 foreignObject/事件属性）；
-      //   ② setClickFun / setClickFunc 开头均 `if (securityLevel !== 'loose') return`：loose 时
-      //      `click A call fn()` 会绑定为活动 JS 回调（比 javascript: 链接更危险）。
-      // 本组件渲染的是**导入的外部不可信 wiki**，故取 strict。
-      // 代价：图表内 HTML 标签会被转义为文本、`click` 交互失效——知识 wiki 的图表只用于展示，可接受。
-      // 注：'loose' 是前端初始脚手架提交（c56d68b「对齐 demo」）带入的，无注释/无测试锁定，非故意围栏。
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: 'default',
-        securityLevel: 'strict',
-        // 避免 Mermaid 解析失败时将错误图插入 document.body。
-        suppressErrorRendering: true,
-      });
-      const blocks = root.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
+      // 参数口径（strict 安全围栏 / 主题跟随）见 mermaidInitOptions 的文档注释
+      mermaid.initialize(mermaidInitOptions(theme));
+      /**
+       * 渲染单块：首次失败时按容错规则修一次再重试（AI 生成的图表常在标签串内层写裸引号，
+       * 见 repairMermaidLabelQuotes）；两次都失败则抛出，由调用方走 fail-loud 分支。
+       */
+      const renderMermaidSvg = async (id: string, code: string): Promise<string> => {
+        try {
+          return (await mermaid.render(id, code)).svg;
+        } catch (error) {
+          const repaired = repairMermaidLabelQuotes(code);
+          if (repaired === code) throw error;
+          return (await mermaid.render(`${id}-r`, repaired)).svg;
+        }
+      };
+      /**
+       * 收集待渲染目标，两种形态都要覆盖：
+       * ① 尚未渲染的源码块（`pre > code.language-mermaid`，首次进入）；
+       * ② **已渲染的图表**（`.ki-mermaid[data-copy-text]`）——主题切换时源码 `<pre>` 早被替换掉了，
+       *    只能从 `data-copy-text`（复制用的原文）取回源码重绘。漏了这条，暗色切换后图表仍是浅底白卡。
+       */
+      const collectTargets = (): { code: string; pre: HTMLElement | null; wrapper: HTMLElement | null }[] => {
+        const targets: { code: string; pre: HTMLElement | null; wrapper: HTMLElement | null }[] = [];
+        for (const block of Array.from(root.querySelectorAll<HTMLElement>('pre > code.language-mermaid'))) {
+          targets.push({ code: block.textContent ?? '', pre: block.closest('pre'), wrapper: null });
+        }
+        for (const el of Array.from(root.querySelectorAll<HTMLElement>('.ki-mermaid[data-copy-text]'))) {
+          targets.push({ code: el.dataset.copyText ?? '', pre: null, wrapper: el });
+        }
+        return targets;
+      };
       const renderAll = async (): Promise<void> => {
-        for (const block of Array.from(blocks)) {
+        for (const target of collectTargets()) {
           if (cancelled) return;
-          const code = block.textContent ?? '';
-          const pre = block.closest('pre');
-          if (!pre) continue;
           try {
-            const { svg } = await mermaid.render(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, code);
-            const wrap = document.createElement('div');
-            wrap.className = 'ki-mermaid';
-            wrap.dataset.copyText = code;
+            const svg = await renderMermaidSvg(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, target.code);
+            // 无图元的空白图不替换：保留源码块，避免"空白框 + 复制按钮"把源码静默吞掉
+            if (isBlankMermaidSvg(svg)) {
+              if (target.pre) {
+                console.warn('[ki] mermaid 渲染结果为空（无图元），已保留源码块');
+                markMermaidFallback(target.pre, 'blank');
+              } else {
+                console.warn('[ki] mermaid 重渲染结果为空（无图元），已保留原图');
+              }
+              continue;
+            }
+            // 复用已存在的容器（主题切换场景）：原地换 innerHTML 而不是换节点，
+            // 图不会出现"先消失再出现"的空档（走查实测：换节点期间断言会捕捉到两者都不存在的瞬时态）
+            const wrap = target.wrapper ?? document.createElement('div');
+            if (!target.wrapper) wrap.className = 'ki-mermaid';
+            wrap.dataset.copyText = target.code; // 复制始终是**原文**：容错重试只影响渲染输入
             wrap.innerHTML = svg;
-            pre.replaceWith(wrap);
-          } catch {
-            /* 解析失败保留源码块，用户可自行查看 */
+            if (target.pre) target.pre.replaceWith(wrap);
+          } catch (error) {
+            const detail = mermaidErrorDetail(error);
+            if (target.pre) {
+              // fail-loud（走查 2026-10-13）：解析失败不再静默 —— 保留源码块 + 工具条标注失败原因
+              console.warn('[ki] mermaid 渲染失败，已保留源码块：', detail);
+              markMermaidFallback(target.pre, 'failed', detail);
+            } else {
+              // 重绘失败（源码本身没改过，多半是瞬时问题）：保留旧图比清空好，只记录
+              console.warn('[ki] mermaid 按主题重绘失败，已保留原图：', detail);
+            }
           }
         }
         if (!cancelled) setReady(true);
       };
       void renderAll();
+    }).catch((error: unknown) => {
+      // 动态 chunk 加载失败此前无兜底（未处理的 rejection + 页面零反馈）→ 同样 fail-loud
+      if (cancelled) return;
+      console.warn('[ki] mermaid 资源加载失败，图表未渲染：', mermaidErrorDetail(error));
+      for (const block of Array.from(root.querySelectorAll<HTMLElement>('pre > code.language-mermaid'))) {
+        const pre = block.closest('pre');
+        if (pre) markMermaidFallback(pre, 'unavailable');
+      }
+      setReady(true);
     });
     return () => {
       cancelled = true;
     };
-  }, [html]);
+    // 主题进依赖：mermaid 的配色写死在 svg 里，只有重绘才能跟随深浅切换
+  }, [html, deferMermaid, theme]);
 
   // 附件缺失 fail-loud：加载/解码失败的 img 替换为可见占位块（REQ-20260904-001）。
   // 以 decode() 结果判定而非 naturalWidth：Firefox 对无固有尺寸的 SVG 返回 naturalWidth=0 且 complete=true，
@@ -605,5 +1159,16 @@ export function MarkdownPreview({ text, assetBase, onLocalLink }: MarkdownPrevie
     }
   }, [html]);
 
-  return <div ref={rootRef} dangerouslySetInnerHTML={{ __html: html }} data-mermaid={ready ? 'done' : undefined} />;
+  // `ki-markdown`：Markdown 排版的样式钩子（`ki.css` §markdown，含列表缩进 / 代码块 / 引用 / 标题）。
+  // 此前只有部分调用方在外层自行套了这个类（DocumentEditor / ModuleDrawer），**对话消息两处漏套** →
+  // 列表 marker 的 padding-left 被全局 reset 清成 0、代码块与引用无样式（真机走查 #8）。
+  // 由组件自身带上，避免以后再有调用方漏掉这一层。
+  return (
+    <div
+      ref={rootRef}
+      className="ki-markdown"
+      dangerouslySetInnerHTML={{ __html: html }}
+      data-mermaid={ready ? 'done' : undefined}
+    />
+  );
 }

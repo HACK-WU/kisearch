@@ -116,6 +116,10 @@ test('stage1：scope 枚举走只读通道，不被长写任务阻塞', async ()
     { operation: 'import', params: { scope: 'a' } },
     async () => { await new Promise((resolve) => setTimeout(resolve, 80)); return 'done'; },
     scopesOf({ scope: 'a' }, 'import'),
+    // ★ 显式 'write'：本用例意图是"长**写**任务"。import 自 S-01 起缺省推导为
+    //   engine-only（不阻塞纯元数据读），不显式标注会让用例名与实际语义漂移 ——
+    //   名字是长写、跑的却是 engine-only，测不到原本要测的互斥。
+    'write',
   );
   await new Promise((resolve) => setTimeout(resolve, 5));
   const startedAt = Date.now();

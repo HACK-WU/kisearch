@@ -1,6 +1,7 @@
 import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { loadConfig, getScopeCleanConfig } from './config.js';
 import { getSource, getLocalKbDir, getRelationsCachePath } from './scope.js';
+import { readAllGroupCaches, hasShardedLayout, loadGroupCache, writeGroupCache } from './group-cache.js';
 import { readJson, writeJson } from './store.js';
 import type { Relation } from './scoring.js';
 import { buildChunkEntries } from './chunk-entries.js';
@@ -8,7 +9,7 @@ import { MAX_CHUNKS_PER_FILE } from './chunker.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 import { buildRelationContent } from './path-vectorize.js';
-import { generateDocId, vectorBulkStore, vectorDelete, vectorFetchDocs } from './vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, generateDocId, vectorBulkStore, vectorDelete, vectorFetchDocs } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { writeBackToWiki } from './wiki-sync.js';
 import { beginPublishLease, contentRevision, endPublishLease, metadataRevision, loadDraft, saveDraft,
@@ -73,7 +74,7 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
   const cleanCfg = getScopeCleanConfig(config, draft.scope);
   const imported = !!relation.sourcePath;
   const chunked = imported || draft.content.length > 5_000 || (relation.editChunkCount ?? 0) > 1;
-  const mode = relationIndexMode(relation);
+  const mode = draft.targetMode ?? relationIndexMode(relation);
   let indexedText = draft.content;
   if (chunked && cleanCfg?.enabled !== false) {
     indexedText = cleanMarkdownText(indexedText, cleanCfg?.rules);
@@ -177,10 +178,10 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
 }
 
 function otherReferences(scope: string, targetGroup?: string, targetRelation?: string): Set<string> {
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(getRelationsCachePath(scope));
+  // 批次 2（W5）：全量读双轨（本函数真正需要全量——枚举除目标外全部 relation 的 ID 引用）
   const ids = new Set<string>();
-  for (const [group, data] of Object.entries(cache?.groups ?? {})) {
-    for (const relation of data.hot_relations ?? []) {
+  for (const [group, data] of readAllGroupCaches(scope)) {
+    for (const relation of data.hot_relations) {
       if (targetGroup !== undefined && group === targetGroup && relation.text === targetRelation) continue;
       for (const id of relationDenseIds(relation)) ids.add(id);
       for (const id of relation.ftsIds ?? []) ids.add(id);
@@ -199,8 +200,7 @@ export async function discardUnpublishedIndex(draft: RelationEditDraft): Promise
   const fts = (draft.newFtsIds ?? []).filter((id) => !previous.has(id) && !active.has(id));
   if (dense.length > 0) {
     const result = await vectorDelete({ scope: draft.scope, ids: dense });
-    const failed = result.errors.filter((item) => item.code !== 'NOT_FOUND');
-    if (failed.length) throw new Error(`草稿向量清理失败：${failed.map((item) => item.id).join(',')}`);
+    if (result.failedIds.length) throw new Error(`草稿向量清理失败：${result.failedIds.join(',')}`);
   }
   if (fts.length > 0) {
     const result = await ftsDeleteByIds({ scope: draft.scope, ids: fts });
@@ -210,11 +210,17 @@ export async function discardUnpublishedIndex(draft: RelationEditDraft): Promise
 
 function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void {
   const kbPath = getLocalKbDir(draft.scope, draft.group);
-  const cachePath = getRelationsCachePath(draft.scope);
   const kb = readJson<Record<string, string>>(kbPath);
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(cachePath);
-  const relation = cache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
-  if (!kb || !cache || !relation) throw new Error('发布前 Relation 已不存在');
+  // 批次 2（W5）：单组读双轨——新布局只读目标组分片（发布临界区语义不变：
+  // KB 写→分片写，均为 WAL 单文件原子；写失败补偿回滚 KB 同旧）
+  const sharded = hasShardedLayout(draft.scope);
+  const cachePath = getRelationsCachePath(draft.scope);
+  const legacyCache = sharded ? null : readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(cachePath);
+  const groupDoc = sharded ? loadGroupCache(draft.scope, draft.group) : null;
+  const relation = sharded
+    ? groupDoc?.hot_relations.find((item) => item.text === draft.relation)
+    : legacyCache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
+  if (!kb || !relation || (sharded ? !groupDoc : !legacyCache)) throw new Error('发布前 Relation 已不存在');
   const currentRevision = contentRevision(kb[draft.relation] ?? '');
   if (currentRevision !== draft.baseRevision) {
     throw new Error('正式正文在编辑期间已变化，拒绝覆盖；请重新创建草稿');
@@ -246,7 +252,23 @@ function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void
     }
     relation.editChunkCount = plan.chunkCount;
     try {
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+      // S-04 I2 补口（2026-10-10）：缓存/分片落盘必须入「元数据提交窗口」—— 自 I4 起读与写
+      // 任务**并行**，窗外写会让读看到"KB 已新、列表仍旧"的**跨文件**不一致。
+      // 本路径顺序本就正确（① KB 写 → ② 分片写 ⇒ I1 安全，中间态 = 已接受形态），
+      // 这里补的是 I2；窗口只包住本组缓存写（毫秒级），对读的影响是极短排队。
+      getSharedOperationCoordinator().withMetadataCommitSync(draft.scope, () => {
+        if (sharded) {
+          writeGroupCache(draft.scope, draft.group, {
+            version: 1,
+            scope: draft.scope,
+            hot_relations: groupDoc!.hot_relations,
+            keywords: groupDoc!.keywords ?? [],
+            updatedAt: null,
+          });
+        } else {
+          writeJson(cachePath, legacyCache as unknown as Record<string, unknown>);
+        }
+      });
     } catch (err) {
       // 正常异常立即补偿；进程被强杀的窗口由 recoverInterruptedPublication 处理。
       kb[draft.relation] = priorContent;
@@ -276,8 +298,9 @@ export function recoverInterruptedPublication(draft: RelationEditDraft): boolean
   const kbPath = getLocalKbDir(draft.scope, draft.group);
   const kb = readJson<Record<string, string>>(kbPath);
   if (!kb || contentRevision(kb[draft.relation] ?? '') !== draft.revision) return false;
-  const cache = readJson<{ groups?: Record<string, { hot_relations?: Relation[] }> }>(getRelationsCachePath(draft.scope));
-  const relation = cache?.groups?.[draft.group]?.hot_relations?.find((item) => item.text === draft.relation);
+  // 批次 2（W5）：单组读双轨（判据用）
+  const relation = loadGroupCache(draft.scope, draft.group)
+    ?.hot_relations.find((item) => item.text === draft.relation);
   if (!relation || cacheHasPublishedIds(draft, relation)) return false;
   kb[draft.relation] = draft.baseContent;
   writeJson(kbPath, kb);
@@ -310,7 +333,7 @@ async function cleanupOldIds(draft: RelationEditDraft): Promise<void> {
   const errors: string[] = [];
   if (oldDense.length > 0) {
     const deleted = await vectorDelete({ scope: draft.scope, ids: oldDense });
-    errors.push(...deleted.errors.filter((item) => item.code !== 'NOT_FOUND').map((item) => `${item.id}: ${item.reason}`));
+    errors.push(...deleted.errors.map((item) => `${item.id}: ${item.reason}`));
   }
   if (oldFts.length > 0) {
     const deleted = await ftsDeleteByIds({ scope: draft.scope, ids: oldFts });
@@ -320,6 +343,7 @@ async function cleanupOldIds(draft: RelationEditDraft): Promise<void> {
 }
 
 async function runFinish(editId: string, scope: string): Promise<void> {
+  assertNoPendingVectorMigration(scope);
   const draft = loadDraft(scope, editId);
   draft.status = 'running';
   saveDraft(draft);
@@ -359,6 +383,7 @@ async function runFinish(editId: string, scope: string): Promise<void> {
         nonRetryable('Relation 标签、来源或索引模式已变化，拒绝覆盖；请重新创建草稿');
       }
       const plan = await buildIndexPlan(draft, live.relation);
+      if (plan.mode === 'dense') await assertVectorDimensionCompatible(scope);
       // docId 按正文、scope、tag 生成，可能已被 ki_store 等非 Relation 写入口占用。
       // 仅首次提交前记录既存 ID；重试时重新扫描会把本草稿的部分写入误认成外部数据。
       if (plan.mode === 'dense' && draft.preexistingDenseIds === undefined) {
@@ -396,10 +421,12 @@ async function runFinish(editId: string, scope: string): Promise<void> {
       }
       publishLocalKbAndCache(draft, plan);
     }
-    const wiki = writeBackToWiki(scope, draft.group, draft.relation, draft.content);
-    draft.wikiSynced = wiki.synced;
-    if (!wiki.synced) draft.wikiReason = wiki.reason;
-    else delete draft.wikiReason;
+    if (!draft.skipWikiWriteback) {
+      const wiki = writeBackToWiki(scope, draft.group, draft.relation, draft.content);
+      draft.wikiSynced = wiki.synced;
+      if (!wiki.synced) draft.wikiReason = wiki.reason;
+      else delete draft.wikiReason;
+    }
     await cleanupOldIds(draft);
     draft.status = 'published';
     delete draft.error;
@@ -414,6 +441,19 @@ async function runFinish(editId: string, scope: string): Promise<void> {
       saveDraft(draft);
     } catch { /* 尽力而为：无法持久化失败态时保持运行中状态，由 view 的中断恢复兜底 */ }
   }
+}
+
+/** 已在同 scope OperationCoordinator 内的 HTTP 编辑请求直接发布，避免重复入队自等待。 */
+export async function finishRelationEditNow(draft: RelationEditDraft): Promise<RelationEditDraft> {
+  if (activeJobs.has(draft.editId)) throw new Error('编辑发布已在进行中');
+  const task = runFinish(draft.editId, draft.scope);
+  activeJobs.set(draft.editId, task);
+  try {
+    await task;
+  } finally {
+    activeJobs.delete(draft.editId);
+  }
+  return loadDraft(draft.scope, draft.editId);
 }
 
 /** 排进同 scope 队列，工具调用立即返回；任务结果通过 view 查询。 */

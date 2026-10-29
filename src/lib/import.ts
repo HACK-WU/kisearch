@@ -7,15 +7,16 @@
  *   Phase 4: writeRelations      → 写 relations-cache + local KB（含 memoryId/sourcePath）
  *   Phase 5: recordSource        → 写 group-index.source 块（含切分参数）
  *
- * 幂等追加语义承载增量更新：同 sourcePath 覆盖、同名不同 sourcePath 跳过、新文件导入。
+ * 幂等追加语义承载增量更新：同 sourcePath 重导默认走幂等覆盖（`skip` 策略下改为跳过），
+ * 同名不同 sourcePath 按所选策略处理（默认覆盖 / `skip` 跳过 / `suffix` 加后缀），新文件导入。
  */
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 
 import {
   getGroupIndexPath,
-  getRelationsCachePath,
   getLocalKbDir,
   getAssetsDir,
   setSource,
@@ -25,6 +26,13 @@ import {
 } from './scope.js';
 import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './store.js';
 import { parseContentTags, type PartitionConfig } from './constants.js';
+import { DEFAULT_EXTENSIONS, resolveImportExtensions } from './config.js';
+import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasNoRelationsData, type LegacyRelationsCacheShape } from './group-cache.js';
+import { writeImportIncomplete, clearImportIncomplete, readImportIncompleteStatus, backupImportIncomplete } from './import-retry.js';
+// S-01（REQ-20261009-003）：静态导入协调器 —— 回滚等**同步**路径需要同步版元数据提交窗口
+import { getSharedOperationCoordinator } from './operation-coordinator.js';
+// S-02：导入收尾**异步**入队一次索引整理（不等待 —— 「可用」不得被整理推迟）
+import { scheduleIndexMaintenance } from './index-maintenance.js';
 import type { Relation } from './scoring.js';
 import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
 import {
@@ -35,7 +43,10 @@ import {
   toPosix,
 } from './chunk-entries.js';
 
-import { deriveGroupPath, type ScanResultEntry } from './ai-results.js';
+import type { ScanResultEntry } from './ai-results.js';
+// 落点推导与重复判据共用同一实现（debug：group 吸收路径前缀时的疑似重复误判）
+import { resolveGroupForSource } from './import-path.js';
+import { writeImportedDocsToWiki, type WikiImportWritebackResult } from './wiki-sync.js';
 
 // 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
 export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
@@ -49,9 +60,10 @@ import {
   bulkStorePaths,
   type PathVectorizeEntry,
 } from './path-vectorize.js';
-import { generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, generateDocId, vectorBulkStore, vectorDelete } from './vector-client.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId } from './fts-client.js';
 import { closeFtsEngine } from './fts-client.js';
+import { classifyVectorizationStop, type VectorizationStopReason } from '../zvec-engine/errors.js';
 import {
   resolveImportConflict,
   validateImportConflictMode,
@@ -59,6 +71,11 @@ import {
   type ImportConflictAction,
   type ImportConflictMode,
 } from './import-conflict.js';
+import { resolveImportBudget, preflightImportBudget, budgetViolationMessage, IMPORT_BUDGET_EXCEEDED, type ImportBudget } from './import-budget.js';
+// REQ-20261019-002：疑似重复判据的单一真相（本模块**不得**反向 import import-preflight.ts，会成环）
+import { collectDuplicateHits, type DuplicateHit } from './duplicate-index.js';
+// REQ-20261019-001：目录导入后的清理候选（纯计算，见 import-prune.ts 头注释的三条判定前提）
+import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import {
   logPhaseStart,
   logPhaseDone,
@@ -104,10 +121,76 @@ export interface ImportStats {
   vector: boolean;
   /** 已复制进 KB 的本地图片附件数（REQ-20260904-001；--no-assets 或配置关闭时为 0） */
   assets: number;
-  /** 同一 Group 下不同 sourcePath 的真实同名冲突数量。 */
+  /**
+   * 冲突明细条数（= 结果里 `conflicts.length`）：不同 sourcePath 的真实同名冲突，
+   * 以及 `skip` 策略下被跳过的同源文件（详见 {@link ImportConflict.skipReason}）。
+   */
   conflicts: number;
   /** 写入 FTS-only Collection 的 chunk 文档数（--no-vector 模式）。 */
   fullTextIndexed: number;
+  /**
+   * R1（REQ-20261009-001）：文件级完成度。
+   * 成功单元 = 文件（全部 chunk 向量化成功才算完成），是「完成 N / 未完成 M」
+   * 的唯一口径（CLI 与 Web 同源）。
+   */
+  files: {
+    /** 本次参与导入的文件数 */
+    total: number;
+    /** 文件级完成（已提交元数据与原文） */
+    completed: number;
+    /** 未完成（未提交元数据；已写入的部分向量按 D1 回滚删除） */
+    incomplete: number;
+    /** 本次扫描到的文件数（分母）：恒等式 `completed + incomplete + skipped = scanned` */
+    scanned: number;
+    /** 未进入最终处理的文件数（过大 / chunk 超限 / hook 失败 / 冲突跳过 / 同批覆盖替换） */
+    skipped: number;
+    /**
+     * R3（REQ-20261010-001）：增量导入下「内容未变、跳过重算」的文件数。
+     * 它是 completed 的**子集**（数据本就完整在位，无需重做），故不单独占一项，
+     * 恒等式 `completed + incomplete + skipped = scanned` 仍然成立。
+     */
+    unchanged: number;
+    /**
+     * REQ-20261019-002：因「疑似重复」被跳过的文件数，是 `skipped` 的**子集**
+     * （与 `unchanged` 之于 `completed` 同构）。恒等式不变。
+     * 未传 `skipDuplicates` 时恒为 0。
+     */
+    duplicatesSkipped: number;
+  };
+}
+
+/** REQ-20261019-002：跳过明细条目（结果区可展开核对用） */
+export interface ImportDuplicateSkipItem {
+  /** 本次待导入文件的相对路径（与 rel 同口径） */
+  path: string;
+  existingGroup: string;
+  existingRelation: string;
+}
+
+/** REQ-20261019-002：跳过明细上限（超出截断，计数仍取完整值） */
+export const MAX_DUPLICATE_DETAIL = 500;
+
+/**
+ * 本次**新建**文档明细的条数上限（按 group+relation 去重后）。
+ * 与 {@link MAX_DUPLICATE_DETAIL} 同量级：任务台账单文件上限 32KB，超了会被判不可读。
+ */
+export const MAX_CREATED_DETAIL = 500;
+
+/** 一条「本次新建」的文档（= 知识库此前没有这个 relation） */
+export interface ImportCreatedItem {
+  /** 落点组（知识库侧路径） */
+  group: string;
+  /** 文档名（relation） */
+  relation: string;
+}
+
+/** R1：未完成文件条目（文件级；已成功文件不出现在清单中） */
+export interface ImportIncompleteItem {
+  /** 相对源目录的文件路径 */
+  path: string;
+  group: string;
+  relation: string;
+  reason: string;
 }
 
 export interface ImportConflict {
@@ -115,6 +198,19 @@ export interface ImportConflict {
   originalRelation: string;
   relation: string;
   action: ImportConflictAction;
+  /**
+   * R4（2026-10-10）：仅 `action === 'skip'` 时有意义——跳过成因为
+   * `already-imported`（本文件此前已导入，同 sourcePath，跳过=不重算）或
+   * `same-name`（同 Group 内同名但来源不同，真正的"同名冲突"）。
+   * 供 CLI/Web 摘要区分，避免把"重导同一目录"的跳过写成「同名冲突」。
+   */
+  skipReason?: 'already-imported' | 'same-name';
+  /**
+   * 实际结果补充（2026-10-19 debug）：该条冲突**最终没有执行**——增量导入判定「内容未变」后跳过。
+   * ★ `action` 表达的是"按策略将如何处理"，不是"实际做了什么"：不区分时前端会把
+   *   `overwrite` 渲染成「已覆盖」，而实际一个字节都没写（用户报的"报告说覆盖、原文没变"）。
+   */
+  unchanged?: boolean;
 }
 
 export interface ImportResult {
@@ -122,10 +218,62 @@ export interface ImportResult {
   action: 'import';
   scope: string;
   stats: ImportStats;
+  /**
+   * R1（REQ-20261009-001）：部分成功——已提交文件级完成的部分，但仍有未完成文件。
+   * 注意退出码语义（Q2）：partial 仍属**成功**（CLI 退出码 0 + 警告），
+   * 不再是「全批回滚 + 抛错」。
+   */
+  partial: boolean;
+  /** R1：未完成文件清单（供 CLI 打印与 Web「重试未完成 N 篇」） */
+  incomplete: ImportIncompleteItem[];
+  /** R1：系统性停止原因（若有）——与 partial 一起解释"为什么没导完" */
+  stopReason?: { kind: string; code: string; phase: 'embedding' | 'persist'; reason: string };
+  /** D2：本次收到取消请求（取消与系统停止同一条提交语义） */
+  cancelled?: true;
+  /**
+   * R2：本次是「只重试未完成子集」时的过滤账目——
+   * `requested` 清单条数 / `matched` 在源目录命中并实际处理的条数 / `missing` 已找不到的路径
+   * （文件被删除或改名；这些条目会在未完成清单里保留，不会静默消失）。
+   */
+  retryFilter?: { requested: number; matched: number; missing: string[]; invalid?: string[] };
   errors: { path: string; error: string }[];
   conflicts: ImportConflict[];
+  /**
+   * REQ-20261019-002：本次因「疑似重复」被跳过的文件明细（按 path 升序，最多 {@link MAX_DUPLICATE_DETAIL} 条）。
+   * 未传 `skipDuplicates` 时恒为 `[]`。
+   */
+  duplicatesSkipped: ImportDuplicateSkipItem[];
+  /** 跳过明细被截断（完整条数见 `stats.files.duplicatesSkipped`） */
+  duplicatesSkippedTruncated: boolean;
+  /**
+   * 本次**新建**的文档明细：`create`（新文件）与 `suffix`（同名冲突改名后新建）计入，
+   * `overwrite`（覆盖已有）不计。同一批次内被后续覆盖的同名条目会被剔除。
+   * 最多 {@link MAX_CREATED_DETAIL} 条，完整条数见 {@link createdTotal}。
+   */
+  created: ImportCreatedItem[];
+  /** 本次新建文档总数（去重后，不受 {@link MAX_CREATED_DETAIL} 截断影响） */
+  createdTotal: number;
+  /** {@link created} 是否被截断 */
+  createdTruncated: boolean;
+  /**
+   * REQ-20261019-001：目录导入后的「库中存在、本次目录已没有」候选（双闸门 + token）。
+   * 仅 `pruneStale` 开启时存在；不开启时**不出现该字段**（既有消费方零影响）。
+   */
+  prune?: ImportPrunePlan;
   groups: string[];
   source: GroupIndexSource;
+  /**
+   * S-02（REQ-20261009-003）：索引整理入队结果。
+   * **不等整理完成**——"可用"在元数据提交那一刻即成立；是否需要等待由调用方决定
+   *（CLI 等待并打印阶段；HTTP job 保持 open 至整理落定）。
+   * 可选：早退路径（无文件 / 全部未变）不产生整理，故不返回该字段。
+   */
+  indexMaintenance?: { scheduled: boolean; merged: boolean };
+  /**
+   * CLI 导入的可选 wiki 写回结果（仅 `wikiWriteback: true` 且 scope 配置了
+   * wikiSync.enabled + sourceDir 时出现；未配置时不返回该字段）。
+   */
+  wikiWriteback?: WikiImportWritebackResult;
 }
 
 export interface HandleDirectImportArgs {
@@ -146,14 +294,62 @@ export interface HandleDirectImportArgs {
   cleanEnabled?: boolean;
   /** 内置清洗规则覆盖（--clean-rules 解析结果） */
   cleanRules?: Partial<import('./clean.js').CleanRules>;
+  /**
+   * R2（REQ-20261009-001）：**只重试这些文件**（相对源目录的路径清单）。
+   * 未列出的文件本轮完全不处理（不读原文、不复制附件、不写 KB、不向量化），
+   * 用于「重试未完成部分」——已完成文件不重传、不重算 embedding、不产生 `_1` 副本。
+   * 缺省 = 处理全部扫描到的文件（既有行为）。
+   */
+  onlyRelPaths?: string[];
+  /**
+   * REQ-20261021-003：数据源 Git 增量。
+   * `onlyRelPaths` 是变更子集，但 `files` 已完成全量扫描，候选计算可按全量差集进行。
+   * 缺省/`false` ⇒ 保持现有「重试未完成」语义（`SUBSET_RETRY` 跳过候选）。
+   */
+  pruneSubsetFullScan?: boolean;
+  /**
+   * REQ-20261019-002：跳过「内容与库中已有文档一致、但 sourcePath 不同」的文件。
+   *
+   * 缺省 `false`：**不计算跳过集**，预算、进度、统计完全走既有口径（行为等价）。
+   * `true`：在预算预检与进度分母**之前**算出跳过集并从待处理集剔除；
+   * 剔除后为空 → 抛 `ALL_FILES_DUPLICATES`（fail-loud，不得静默成功 0 篇）。
+   */
+  skipDuplicates?: boolean;
+  /**
+   * REQ-20261019-001：本次上传的选择方式。`'dir'` 才会计算清理候选；
+   * `'files'` / `'mixed'` 一律不产候选（路径口径与目录导入不一致）。
+   *
+   * ★ **仅 Web 路径使用**：CLI（`src/import.ts`）与 daemon RPC 都不传 `pickMode`/`pruneStale`，
+   *   因而恒不产候选；缺省 `undefined` 同样落在 `NOT_DIR_MODE` 的 graceful 分支
+   *   （不产候选、不报错），既有导入行为不变。
+   */
+  pickMode?: 'dir' | 'files' | 'mixed';
+  /** REQ-20261019-001：是否计算清理候选（默认 false；缺省时 ImportResult 无 `prune` 字段） */
+  pruneStale?: boolean;
+  /**
+   * 上传阶段失败的文件 rel：视为「本次有」，永不进候选（R11 体验路径）。
+   *
+   * ⚠️ 当前**无生产调用方**：Web 前端不收集失败清单，上传不完整时由 {@link uploadIncomplete}
+   * 硬闸门整次关掉清理；本字段留给脚本/未来的「只排除失败文件、其余照常清理」路径。
+   * 若某调用方给 run 传了它，`/api/import/prune` 必须传同一份，否则候选集偏大 → token 恒失配。
+   */
+  preserveRels?: string[];
+  /** 上传会话存在失败批次/文件且无失败清单 —— 硬门槛，直接不产候选（R11 安全路径） */
+  uploadIncomplete?: boolean;
   /** 文档级自定义标签（逗号分隔多个）。无论是否向量化均持久化到 relation.tags（供 rebuild-vector/restore 恢复）；向量化时额外为每个导入文件每个 tag 写一条内容向量 */
   tags?: string;
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端对图片引用显示占位块） */
   assets?: boolean;
-  /** 同一 Group 下不同 sourcePath 的同名处理策略，默认 suffix。 */
+  /**
+   * 同名文档处理策略，默认 `incremental`（见 {@link DEFAULT_IMPORT_CONFLICT_MODE}）。
+   * 覆盖两类判定：同 sourcePath 重导（skip 跳过 / 其余幂等覆盖）与同 Group 同名不同
+   * sourcePath（skip 跳过 / 默认与 overwrite 覆盖 / suffix 加后缀）。
+   */
   conflictMode?: ImportConflictMode;
   /** 自动后缀模板，默认 _{n}。 */
   conflictSuffix?: string;
+  /** 整批预算覆盖（S0-3，REQ-20260930-002）：显式参数 > scope 配置 import.batch > 默认值 */
+  budget?: ImportBudget;
   /** daemon HTTP job 使用：报告可观测进度；不影响 CLI 输出。 */
   onProgress?: (progress: {
     phase: 'scan' | 'vectorize' | 'persist';
@@ -164,8 +360,40 @@ export interface HandleDirectImportArgs {
     failed?: number;
     cancelled?: number;
   }) => void;
+  /**
+   * 任务归属（2026-10-13）：本批导入对应的任务记录 ID（CLI daemonJobId / HTTP job.id /
+   * daemon dispatch 注入的 context.jobId）。仅用于写进未完成清单的 `taskId`，
+   * 供任务中心校验「这份清单是否属于该任务」；不传则不写该字段（旧调用不受影响）。
+   */
+  jobId?: string;
   /** daemon HTTP job 使用：在当前批次完成后安全中止，不强行打断 zvec/embedding 调用。 */
   abortSignal?: AbortSignal;
+  /** 直连 CLI 在同步退出前落下取消任务终态。 */
+  onInterrupt?: () => void;
+  /**
+   * 是否把本次 `dir/chunkSize/chunkOverlap` 写进 `group-index.json.source`（默认 true）。
+   *
+   * 数据源同步传 `false`（Q-C 裁决）：数据源与「一次性导入源」存储隔离，
+   * 否则 `sync_relation` 的 wiki 写回会持续指向用户源文档目录。
+   */
+  writeSourceBlock?: boolean;
+  /**
+   * 导入成功后把本次完成的文档按 wiki 格式写回 `scopes.<scope>.wikiSync.sourceDir`
+   * （已存在文件跳过）。CLI `ki import` 传 `true`；Web 上传 / 数据源同步保持缺省 false。
+   */
+  wikiWriteback?: boolean;
+  /**
+   * 候选所有权基线（数据源路径用）：只有这些相对路径能进入待删候选。
+   * 缺省 = 现有 Web 导入行为（全 scope 差集）；**首次同步须传空数组**而非 undefined。
+   */
+  pruneEligibleRels?: string[];
+  /** 候选超限时仍生成 token（数据源分批删除用；缺省 false） */
+  pruneEmitTokenWhenOverLimit?: boolean;
+  /**
+   * 全量扫描完成后回调（与候选计算、导入处理共用同一份 `files`）。
+   * 数据源用它写 `lastSync.seenRels`——自己再扫一遍会多一次 IO 且可能不一致。
+   */
+  onScannedFiles?: (files: string[]) => void;
 }
 
 // ─── 工具函数 ───────────────────────────────────────────
@@ -174,31 +402,15 @@ export interface HandleDirectImportArgs {
 // rebuild 共用同一实现，避免两条链路的向量粒度/文本漂移）；本模块只做 re-export。
 
 /**
- * 推导文件的 groupPath（rootName 概念移除后的落点规则）
+ * 落点推导已提取到 `import-path.ts`：`resolveGroupForSource` 与
+ * `duplicate-index.ts` 的「是否同一篇文档」判据必须共用同一套规则，
+ * 否则 group 吸收路径前缀时会把幂等更新误判成疑似重复（debug 2026-10-19）。
  *
- * - 显式 --group（非空）：沿用旧语义——group 作为统一根前缀，文件相对子目录挂其下。
- *   `deriveGroupPath(group, rel)` = `group` 或 `group/<子目录>`。
- * - 缺省 --group（空）：
- *   - 目录导入：文件的相对目录即 groupPath（顶层子目录名 = 根节点）；根目录下的顶层 .md 归 scope name 根。
- *   - 单文件导入：groupPath = scope name。
- *
- * @param group 显式 group（可空）
- * @param rel 文件相对 sourceDir 的 posix 路径
- * @param scope scope name（缺省 group 时的兜底根）
+ * 规则保持：显式 group ⇒ `group` 或 `group/<子目录>`；缺省 ⇒ 文件相对目录，
+ * 根下文件归 scope 根；单文件（rel 无目录）缺省时归 scope 根。
  */
-function resolveGroupForSource(group: string, rel: string, scope: string): string {
-  if (group) {
-    return deriveGroupPath(group, rel);
-  }
-  // 缺省 group：取文件相对目录为 groupPath（顶层子目录名即根节点）
-  const dir = path.posix.dirname(toPosix(rel));
-  return dir === '.' ? scope : dir;
-}
 
 // ─── 直导（原文直导 + 切分）工具 ─────────────────────────
-
-/** 默认格式白名单：.md（REQ-08，可配置扩展 .markdown 等） */
-export const DEFAULT_EXTENSIONS = ['.md'];
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 
 /** 图片附件后缀白名单（REQ-20260904-001：仅本地相对路径引用会被复制进 KB） */
@@ -213,7 +425,7 @@ export const DEFAULT_MAX_ASSET_SIZE = 5 * 1024 * 1024;
  * @param extensions 格式白名单（默认 [.md]）；传空数组时用默认
  * @returns files=白名单文件列表；skippedNonMd=非白名单文件相对路径列表（汇总提示用）
  */
-function collectMarkdownFiles(sourceDir: string, extensions: string[] = DEFAULT_EXTENSIONS): { files: string[]; skippedNonMd: string[] } {
+export function collectMarkdownFiles(sourceDir: string, extensions: string[] = DEFAULT_EXTENSIONS): { files: string[]; skippedNonMd: string[] } {
   const out: string[] = [];
   const skippedNonMd: string[] = [];
   const exts = extensions.length > 0 ? extensions.map((e) => e.toLowerCase()) : DEFAULT_EXTENSIONS;
@@ -380,10 +592,75 @@ export function collectAndCopyAssets(opts: {
       continue;
     }
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.copyFileSync(abs, dst); // 幂等重导：同名覆盖
+    // 幂等重导：同名覆盖。**原子化**（2026-10-13 修复，配合 /api/asset 改走 read 通道）：
+    //   ① 先拷到同目录临时文件（同文件系统 rename 才原子）；
+    //   ② rename 覆盖目标（POSIX 原子）。目标是只读文件/软链/目录等 rename 失败时，
+    //      退回 REQ-20261010-001 的"先删后拷"——该分支存在极短的"目标缺失"窗口，
+    //      读侧表现为 404（可接受的 fail-loud，且非重导常态）。
+    // 为什么必须原子：附件读取自 2026-10-13 起以 `read` 入队（不再排在导入长任务之后），
+    // 复制与读会并发 —— 半写文件会渲染成破图，而"旧图/404"都能随重试自愈。
+    const tmp = `${dst}.ki-tmp-${crypto.randomUUID()}`;
+    try {
+      fs.copyFileSync(abs, tmp);
+      try {
+        fs.renameSync(tmp, dst);
+      } catch {
+        if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
+        fs.renameSync(tmp, dst);
+      }
+    } finally {
+      if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true });
+    }
     copied.push(rel);
   }
   return { copied, warnings };
+}
+
+/**
+ * R3（REQ-20261010-001）：判定某文件「内容未变」——可安全跳过切分 / embedding / 写入。
+ *
+ * 判据（全部本地计算，不调用 embedding）：
+ *   1. local KB 原文与本次读到的原文逐字符相同（local KB 存原文，原文一致才谈得上未变）；
+ *   2. 由「本次清洗 + 切分结果」推导的 docId 集合与 `relation.memoryIds` **完全一致**——
+ *      chunk 内容向量（tag `ki-search`）+ 自定义标签向量（tag=<tag>，text=**文件原文**）。
+ *      id 集合一致本身即蕴含"清洗与切分结果一致"，故切分参数/清洗规则变化会被自动识别为"变了"；
+ *   3. FTS 侧不处于未完成态（`ftsIndexComplete === false` 时需重做以修复全文索引）；
+ *      FTS **id 集合不参与比对**（`ftsIds` 只在 --no-vector 模式写入，见函数末尾说明）；
+ *   4. 仅向量模式启用（`--no-vector` 的全文口径另行处理，暂不跳过）。
+ *
+ * 已知取舍（用户 2026-10-10 拍板）：不校验向量是否真的存在 —— `memoryIds` 一致即认为索引可用，
+ * 向量丢失的场景由 `ki restore --rebuild-vector` 兜底。
+ *
+ * 降级行为：若上一次导入的**标签向量**写失败（memoryIds 缺 tag id），集合对不上 → 判定"变了"
+ * → 本次重做全部（浪费一次，但不丢数据、可自愈）。
+ */
+function isContentUnchanged(args: {
+  fileText: string;
+  previousLocalText?: string;
+  previousRelation?: Relation;
+  entries: { text: string }[];
+  /** 本次导入的自定义标签：标签变了集合就对不上 → 视为"变了"并重做 */
+  tags: string[];
+  scope: string;
+}): boolean {
+  const previous = args.previousRelation;
+  if (!previous) return false;
+  if (typeof args.previousLocalText !== 'string' || args.previousLocalText !== args.fileText) return false;
+  if (previous.ftsIndexComplete === false) return false;
+  const stored = new Set(relationMemoryIds(previous));
+  if (stored.size === 0) return false;
+  const expected = new Set<string>();
+  for (const entry of args.entries) expected.add(generateDocId(entry.text, args.scope, 'ki-search'));
+  for (const tag of args.tags) expected.add(generateDocId(args.fileText, args.scope, tag));
+  if (expected.size !== stored.size) return false;
+  for (const id of expected) if (!stored.has(id)) return false;
+  // 全文索引为何**不**纳入 id 集合比对（challenger 质疑 2026-10-10 的处置）：
+  // `ftsIds` 只在 `--no-vector`（FTS-only）模式写入，向量模式下恒为空 —— 若把它纳入判据，
+  // 判定永远不成立、增量导入整体失效（实测：二次导入 unchanged 由 2 变 0）。
+  // 而 FTS-only 模式本就不启用跳过（本函数只在 `vector` 为真时被调用），所以不存在
+  // "跳过导致全文索引长期不修"的路径；上一个 FTS-only 导入留下的 relation 因 memoryIds 为空
+  // 必然判"变了" → 会正常重做并转成 dense。
+  return true;
 }
 
 /** 读取文件内容并按参数切分；未超限返回单 chunk */
@@ -394,6 +671,13 @@ export function readFileToChunks(absPath: string, chunkSize: number, chunkOverla
 
 /** 直导入口：把 sourceDir 下的 Markdown 目录直接导入（无 AI 依赖，方案 D：local KB 文件原文 + memoryIds 多值；幂等追加） */
 export async function handleDirectImport(
+  args: HandleDirectImportArgs
+): Promise<ImportResult> {
+  const { withScopeWriteLock } = await import('./scope-write-lock.js');
+  return withScopeWriteLock(args.scope, 'import', () => handleDirectImportUnlocked(args));
+}
+
+async function handleDirectImportUnlocked(
   args: HandleDirectImportArgs
 ): Promise<ImportResult> {
   const scope = args.scope;
@@ -418,6 +702,8 @@ export async function handleDirectImport(
   }
 
   let processedFileCount = 0;
+  /** R3（REQ-20261010-001）：增量导入跳过重算的文件数（内容未变；计入 completed，单列可观测） */
+  let unchangedFileCount = 0;
   let totalFileCount = 0;
   let cleanedUp = false;
   let lockAcquired = false;
@@ -449,7 +735,22 @@ export async function handleDirectImport(
       code: 'IMPORT_CANCELLED',
     });
   };
+  /**
+   * 取消请求的**统一收口**（D2，REQ-20261009-001）：进入向量写入阶段之后再收到取消，
+   * 不再抛错丢弃全批——改为记下取消标记，让已完成（文件级）的部分继续提交、未完成
+   * 清单随结果返回。原因：原实现在此处抛错会留下「向量已写入、元数据未落盘」的
+   * 第三种中间态（能搜到、看不到），与系统停止路径分叉成两套语义。
+   * 前置阶段（扫描/切分/原文 flush 之前）仍保留 fail-fast 抛错——那时没有任何
+   * 已完成文件可提交。
+   */
+  let cancelRequested = false;
+  const noteCancel = () => {
+    if (args.abortSignal?.aborted) cancelRequested = true;
+  };
   checkCancelled();
+  assertNoPendingVectorMigration(scope);
+  // 上传后的本地 KB/缓存修改前一次性拒绝维度冲突，避免每个文件重复失败。
+  if (vector) await assertVectorDimensionCompatible(scope);
 
   // 单文件导入支持：sourceDir 可为单个 .md 文件（缺省 group 时用 scope name）
   const sourceIsFile = fs.existsSync(sourceDir) && fs.statSync(sourceDir).isFile();
@@ -478,6 +779,7 @@ export async function handleDirectImport(
         // 中断路径同步清锁（N4：避免 SIGTERM 后 import.lock 残留）；保留中断标记供引导（不清标记）
         clearImportLock(scope);
         lockAcquired = false;
+        args.onInterrupt?.();
       } catch { /* 标记/锁清理失败不阻断退出 */ }
       process.exit(130);
     };
@@ -489,7 +791,7 @@ export async function handleDirectImport(
   const { loadConfig, getScopeImportConfig, getScopeCleanConfig } = await import('./config.js');
   const cfg = loadConfig();
   const importCfg = getScopeImportConfig(cfg, scope);
-  const extensions = importCfg?.extensions ?? DEFAULT_EXTENSIONS;
+  const extensions = resolveImportExtensions(cfg, scope);
   const maxFileSizeBytes = args.maxFileSizeBytes ?? importCfg?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES; // 默认 1MB（REQ-08）
   // REQ-20260904-001：附件收集开关（--no-assets / config assets:false 关闭）与单附件上限（默认 5MB）
   const assetsEnabled = args.assets !== false && importCfg?.assets !== false;
@@ -515,11 +817,137 @@ export async function handleDirectImport(
   if (skippedNonMd.length > 0) {
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);
   }
+  // 数据源同步：把**同一份**全量扫描结果交给编排层写 lastSync.seenRels
+  //（必须与候选计算同源；编排层自己再扫会多一次 IO 且两次结果可能不一致）
+  args.onScannedFiles?.(files);
 
-  const relationsCachePath0 = getRelationsCachePath(scope);
-  const relationsCache0 = readJson<RelationsCache>(relationsCachePath0);
-  if (!relationsCache0) {
-    throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+  // REQ-20261019-001：清理候选（库中存在、本次目录已没有）。在**任何早退之前**算一次，
+  // 三条 return 路径统一带出（早退①"整批未变"恰恰是最需要清理的场景）。
+  // ★ 必须用 `files`（全量扫描）而不是 filesForImport / budgetFiles：skipDuplicates 剔除、
+  //   预算剔除、增量未变的文件虽然没被写入，但仍"在本次目录里"，误用会把它们判成本地已删。
+  const prune: ImportPrunePlan | undefined = args.pruneStale
+    ? planImportPrune({
+      scope,
+      group,
+      scannedRels: files,
+      preserveRels: args.preserveRels,
+      importedGroups: [...new Set(files.map((rel) => resolveGroupForSource(group, rel, scope)))],
+      precheck: {
+        pruneStale: true,
+        pickMode: args.pickMode,
+        subsetRetry: Array.isArray(args.onlyRelPaths) && args.onlyRelPaths.length > 0 && args.pruneSubsetFullScan !== true,
+        uploadIncomplete: args.uploadIncomplete === true,
+        scannedCount: files.length,
+      },
+      eligibleRels: args.pruneEligibleRels,
+      emitTokenWhenOverLimit: args.pruneEmitTokenWhenOverLimit === true,
+    })
+    : undefined;
+
+  // REQ-20261019-002：跳过疑似重复（内容一致但 sourcePath 不同）。
+  // 判据只有一份（duplicate-index.ts），且必须**先于预算预检**剔除：
+  // 否则"全量超限、剔除后在预算内"的批次会被误判 IMPORT_BUDGET_EXCEEDED。
+  // 不传 skipDuplicates 时本段完全不执行（AC8：预算/进度/统计保持既有口径）。
+  /**
+   * 路径净化（R2 引入，P1 review：三端同一防护）——绝对路径 / 含 `..` / 空值 / 超长一律拒绝。
+   * 定义上移是因为「跳过重复」需要在预算预检前解析白名单；下方 onlyRelPaths 解析段复用同一
+   * 实现，避免两份口径漂移。
+   */
+  const sanitizeRelPath = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const rel = value.trim();
+    if (!rel || rel.length > 4096) return null;
+    if (path.isAbsolute(rel)) return null;
+    if (rel.split(/[\\/]/).includes('..')) return null;
+    return rel;
+  };
+  /** 白名单后、剔除重复前 —— `scanned` 的基准（见下方 scannedBaseCount） */
+  let baseAfterOnly: string[] = files;
+  let dupSkipMap: Map<string, DuplicateHit> | null = null;
+  if (args.skipDuplicates) {
+    const rawOnly = Array.isArray(args.onlyRelPaths) ? args.onlyRelPaths : null;
+    const allowed = new Set<string>();
+    for (const item of rawOnly ?? []) {
+      const rel = sanitizeRelPath(item);
+      if (rel) allowed.add(rel);
+    }
+    // 与既有解析段同口径：声明了清单但全部非法 → fail-loud（不静默退化为整批）
+    if (rawOnly && rawOnly.length > 0 && allowed.size === 0) {
+      throw new Error(
+        `onlyRelPaths 的 ${rawOnly.length} 条路径全部非法（绝对路径 / 含 .. / 空值或超长），`
+        + '已拒绝执行以免误处理整批文件；请检查重试清单或重新导入',
+      );
+    }
+    baseAfterOnly = allowed.size > 0 ? files.filter((rel) => allowed.has(rel)) : files;
+    const startedAt = Date.now();
+    // ★ 传 group：判据要按「本次真实落点（group + rel）」与库中比较，
+    //   否则 group 吸收了路径前缀时，幂等更新会被当成「来源不同」而误剔除（debug 2026-10-19）
+    dupSkipMap = collectDuplicateHits({ scope, sourceDir, relPaths: baseAfterOnly, group });
+    logInfo(`重复导入判定：${dupSkipMap.size} / ${baseAfterOnly.length} 篇为疑似重复，耗时 ${Date.now() - startedAt}ms`);
+  }
+  /** 真正待处理的文件（跳过集已剔除；未传跳过时等于 `files`） */
+  const filesForImport = dupSkipMap && dupSkipMap.size > 0
+    ? baseAfterOnly.filter((rel) => !dupSkipMap!.has(rel))
+    : baseAfterOnly;
+  /** 预算预检输入：跳过时用剔除后列表；否则沿用既有 `files`（AC8） */
+  const budgetFiles = args.skipDuplicates ? filesForImport : files;
+
+  // 批次 2（W1）：预读改双轨（loadCurrentLayoutCache 统一入口）——新布局从分片聚合
+  // 重建内存结构；旧布局读旧单文件（随后写入时惰性迁移）。内存结构 RelationsCache
+  // 形状不变，全流程（冲突检测/upsert/回填）无需改动。
+  let relationsCache0: RelationsCache;
+  try {
+    // 双轨读统一入口（group-cache.loadCacheShape）：新布局分片聚合 / 旧布局旧单文件。
+    // 第二轮审查 P1：原实现自带一份手抄双读，与公共兼容层构成第二套语义（易漂移）。
+    relationsCache0 = loadCacheShape(scope) as unknown as RelationsCache;
+  } catch (err) {
+    // 兼容旧报错文案（scope 未初始化的既有提示）；「数据在但读失败（损坏）」原样透出
+    if (hasNoRelationsData(scope)) {
+      throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
+    }
+    throw err;
+  }
+
+  // S0-3（REQ-20260930-002）：整批预算预检——读取任何文件内容/写入 KB 之前，
+  // 仅凭文件清单 + stat 做三项检查（文件数/总字节/预计 chunk 数），超限 fail-loud。
+  // 预估 chunk 用原始字节数上界近似（清洗只删不增），真实 chunk 数由扫描阶段产出。
+  {
+    // 先解析预算：bytes/chunks 两项均被显式关闭时跳过 stat 循环
+    //（文件数检查仅用 files.length，大目录免白白付一轮 stat）
+    const budget = resolveImportBudget(args.budget, importCfg?.batch);
+    const needStat = budget.maxBatchBytes !== undefined || budget.maxBatchChunks !== undefined;
+    let preflightBytes = 0;
+    let preflightChunks = 0;
+    if (needStat) {
+      // REQ-20261019-002：跳过重复时按剔除后清单算预算（未跳过时 budgetFiles === files）
+      for (const rel of budgetFiles) {
+        const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
+        try {
+          const size = fs.statSync(absPath).size;
+          preflightBytes += size;
+          preflightChunks += Math.ceil(size / chunkSize) + 1;
+        } catch (err) {
+          // collect 与 stat 之间的瞬态删除：不计入字节，扫描阶段会以既有口径
+          //（单文件跳过/报错）处理——预检不为竞态窗口整批 fail
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw new Error(`文件不可读：${absPath}（${(err as Error).message}）`);
+        }
+      }
+    }
+    const preflight = preflightImportBudget({
+      files: budgetFiles,
+      totalBytes: preflightBytes,
+      estimatedChunks: preflightChunks,
+      budget,
+    });
+    if (!preflight.ok) {
+      const err = new Error(budgetViolationMessage(preflight));
+      (err as Error & { code?: string }).code = IMPORT_BUDGET_EXCEEDED;
+      throw err;
+    }
+    if (needStat) {
+      logInfo(`整批预算预检通过：files=${preflight.stats.fileCount} bytes=${preflight.stats.totalBytes} estChunks=${preflight.stats.estimatedChunks}`);
+    }
   }
 
   // 仅在文件通过所有可跳过的前置处理、即将覆盖 local KB 时才失效旧状态；
@@ -541,16 +969,110 @@ export async function handleDirectImport(
   }[] = [];
   const skipped: string[] = [];
   const conflicts: ImportConflict[] = [];
+  /**
+   * 本次新建的文档（group\u0000relation → 条目）。
+   * 用 Map 而不是数组：同一批次内 `a.md` 新建后又被 `a.md`（另一 sourcePath）覆盖时，
+   * 前者已从 fileRecords 剔除，不该再算作"新增"。
+   */
+  const createdMap = new Map<string, ImportCreatedItem>();
+  /** D7：组级原文写缓冲（groupPath → relation → 原文）；扫描循环内只进缓冲，
+   *  扫描结束后每组一次 loadLocalKb+合并+writeJson 落盘（O(文档数)→O(组数)）。
+   *  键在循环前由 ensureGroupBuffer 预建，避免热路径重复判空。 */
+  const pendingKbWrites = new Map<string, Map<string, string>>();
+  const ensureGroupBuffer = (groupPath: string): Map<string, string> => {
+    let buf = pendingKbWrites.get(groupPath);
+    if (!buf) {
+      buf = new Map<string, string>();
+      pendingKbWrites.set(groupPath, buf);
+    }
+    return buf;
+  };
   /** 当前批次已接受的文件级 relation；避免同一批上传内重名漏判。 */
   const plannedRelations = new Map<string, Relation[]>();
   /** 附件收集告警（未命中/超限/越界等，循环后汇总）与已落盘的唯一附件集合（REQ-20260904-001） */
   const assetWarnings: string[] = [];
   /** 用 Set 去重：同一附件被多篇 md 引用时仅计一次（复制为同名覆盖，计数语义 = 落盘文件数） */
   const assetCopied = new Set<string>();
-  totalFileCount = files.length; // 中断标记总文件数（REQ-01）
-  args.onProgress?.({ phase: 'scan', done: 0, total: files.length });
+  // R2（REQ-20261009-001）：只重试未完成子集——名单外的文件本轮完全不处理（不读原文、
+  // 不复制附件、不写 KB、不向量化，也不计入 skipped/errors）。未命中的清单条目
+  //（源文件已删除/改名）单独记账，不静默消失。
+  // P1（review）：重试清单可能被手工编辑或外部污染 → 在**核心层**统一净化。
+  // 净化实现见本函数上方 `sanitizeRelPath`（与「跳过重复」的白名单解析共用，单一实现）。
+  const requestedRaw = Array.isArray(args.onlyRelPaths) ? args.onlyRelPaths : null;
+  const invalidRelPaths: string[] = [];
+  const requestedRels = new Set<string>();
+  for (const raw of requestedRaw ?? []) {
+    const rel = sanitizeRelPath(raw);
+    if (rel) requestedRels.add(rel);
+    else invalidRelPaths.push(String(raw));
+  }
+  if (requestedRaw && requestedRaw.length > 0 && requestedRels.size === 0) {
+    throw new Error(
+      `onlyRelPaths 的 ${requestedRaw.length} 条路径全部非法（绝对路径 / 含 .. / 空值或超长），`
+      + '已拒绝执行以免误处理整批文件；请检查重试清单或重新导入',
+    );
+  }
+  const onlySet = requestedRels.size > 0 ? requestedRels : null;
+  const fileSet = new Set(files);
+  const retryFilter = onlySet
+    ? {
+      requested: onlySet.size,
+      matched: 0,
+      missing: [...onlySet].filter((rel) => !fileSet.has(rel)),
+      ...(invalidRelPaths.length > 0 ? { invalid: invalidRelPaths } : {}),
+    }
+    : undefined;
+  if (retryFilter && retryFilter.missing.length > 0) {
+    logWarn(`重试清单中有 ${retryFilter.missing.length} 个文件在当前源目录找不到（已删除或改名）：${retryFilter.missing.slice(0, 5).join('、')}${retryFilter.missing.length > 5 ? ' …' : ''}`);
+  }
+  if (invalidRelPaths.length > 0) {
+    logWarn(`重试清单中有 ${invalidRelPaths.length} 条非法路径已忽略（绝对路径 / 含 .. / 空值或超长）：${invalidRelPaths.slice(0, 5).join('、')}${invalidRelPaths.length > 5 ? ' …' : ''}`);
+  }
+  if (onlySet && retryFilter && retryFilter.missing.length === onlySet.size) {
+    throw new Error(
+      `重试清单中的 ${onlySet.size} 个文件在当前源目录均不存在（已删除或改名）：${[...onlySet].slice(0, 5).join('、')}`
+      + `；请确认 --source 指向原目录`,
+    );
+  }
+  /** 本轮实际处理的文件（重试模式下 = 清单 ∩ 源目录，且已剔除跳过重复）——进度分母/中断标记
+   * 分母都必须用它，否则子集重试会显示 done 3/100 永不达 100%（复审 P2），中断标记也记全量。 */
+  const effectiveFiles = onlySet ? filesForImport.filter((rel) => onlySet.has(rel)) : filesForImport;
+  // REQ-20261019-002：`matched` 语义 = 「清单 ∩ 源目录」**再减去跳过集**（跳过项不算本轮处理），
+  // 与 `retryFilter.requested` 的差额可能大于 `missing`——差额里含被跳过的重复项。
+  if (retryFilter) retryFilter.matched = effectiveFiles.length;
 
-  for (const rel of files) {
+  // REQ-20261019-002：全部被剔除 → fail-loud。放在「重试清单全部不存在」之后，
+  // 避免遮蔽既有错误码（清单全缺失时用户该看到的是"源文件没了"，不是"全部重复"）。
+  if (args.skipDuplicates && effectiveFiles.length === 0) {
+    const err = new Error(
+      `本批 ${baseAfterOnly.length} 篇全部为疑似重复文档，跳过重复将不导入任何文件；`
+      + '如需新建副本请改用「仍然导入」；如为重试，请检查重试清单',
+    ) as Error & { code?: string };
+    err.code = 'ALL_FILES_DUPLICATES';
+    throw err;
+  }
+
+  /**
+   * REQ-20261019-002：统计基准。
+   * - 跳过时 = 白名单后、剔除前（含将被跳过的重复项）⇒ `skipped` 自动吸收跳过数；
+   * - 未跳过时 = 既有 `effectiveFiles.length`（逐字保持原口径，AC8）。
+   * ⚠️ `skipped` 必须用同一基准反算，**不得**再额外 `+ dupSkipCount`（会重复计数）。
+   */
+  const scannedBaseCount = args.skipDuplicates ? baseAfterOnly.length : effectiveFiles.length;
+  const dupSkipCount = dupSkipMap?.size ?? 0;
+  const dupSkipDetail: ImportDuplicateSkipItem[] = dupSkipMap
+    ? [...dupSkipMap.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, MAX_DUPLICATE_DETAIL)
+      .map(([rel, hit]) => ({ path: rel, existingGroup: hit.existingGroup, existingRelation: hit.existingRelation }))
+    : [];
+  // 计数与明细已固化：释放完整 Map（大库数万条时避免整批常驻内存到导入结束）
+  dupSkipMap = null;
+
+  totalFileCount = effectiveFiles.length; // 中断标记总文件数（REQ-01）
+  args.onProgress?.({ phase: 'scan', done: 0, total: effectiveFiles.length });
+
+  for (const rel of effectiveFiles) {
     checkCancelled();
     // 单文件导入：rel 是 basename，absPath 即 sourceDir 本身（避免 xxx.md/xxx.md 的 ENOTDIR）
     const absPath = sourceIsFile ? sourceDir : path.resolve(sourceDir, rel);
@@ -559,7 +1081,7 @@ export async function handleDirectImport(
     if (stat.size > maxFileSizeBytes) {
       skipped.push(rel);
       processedFileCount++;
-      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
       logWarn(`文件过大已跳过（${stat.size} bytes > ${maxFileSizeBytes}）：${rel}，可手动切分后导入`);
       continue;
     }
@@ -568,18 +1090,27 @@ export async function handleDirectImport(
     const originalRelation = deriveRelationText(rel); // 文件级 relation（basename 去 .md）
     const groupData = relationsCache0.groups[groupPath];
     const currentBatchRelations = plannedRelations.get(groupPath) ?? [];
+    // R2（REQ-20261010-001）：库中已有关系与本批已计划关系**分开传**——本批重复 rel 不再
+    // 走「同 sourcePath 幂等覆盖」，而是当作撞名交给用户所选策略（否则 skip/suffix 失效）。
     const resolution = resolveImportConflict({
-      relations: [...(groupData?.hot_relations ?? []), ...currentBatchRelations],
+      relations: groupData?.hot_relations ?? [],
+      batchRelations: currentBatchRelations,
       baseRelation: originalRelation,
       sourcePath: rel,
       mode: conflictMode,
       suffix: conflictSuffix,
     });
     if (resolution.action === 'skip') {
-      conflicts.push({ path: rel, originalRelation, relation: resolution.relation, action: 'skip' });
+      const skipReason = resolution.existing?.sourcePath === rel ? 'already-imported' : 'same-name';
+      conflicts.push({ path: rel, originalRelation, relation: resolution.relation, action: 'skip', skipReason });
       processedFileCount++;
-      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
-      logWarn(`relation 冲突已跳过（同 group "${groupPath}" 下已有 "${originalRelation}"）：${rel}`);
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
+      // R4：「跳过同名文件」= 库中已有就什么都不做。两种成因要分开说清——
+      // ① 同 sourcePath（本文件此前已导入）：跳过即"不重算"；② 同名不同来源（真撞名）。
+      const reason = skipReason === 'already-imported'
+        ? '本文件已导入过'
+        : `同 group "${groupPath}" 下已有同名文档 "${resolution.existing?.text ?? originalRelation}"`;
+      logInfo(`按「跳过同名文件」策略未处理（${reason}）：${rel}`);
       continue;
     }
     const relation = resolution.relation;
@@ -594,9 +1125,15 @@ export async function handleDirectImport(
       previousLocalText = replacedBatchRecord.previousLocalText;
       const replacedIndex = fileRecords.indexOf(replacedBatchRecord);
       if (replacedIndex >= 0) fileRecords.splice(replacedIndex, 1);
+      // 被同批覆盖的那条若刚被记为"新建"，现在它不会落库 —— 撤销
+      createdMap.delete(`${groupPath}\u0000${relation}`);
     }
     if (resolution.conflicted) {
       conflicts.push({ path: rel, originalRelation, relation, action: resolution.action as ImportConflictAction });
+    }
+    // 新增口径 = 知识库此前没有这个 relation：create（新文件）+ suffix（冲突改名后仍新建）
+    if (resolution.action === 'create' || resolution.action === 'suffix') {
+      createdMap.set(`${groupPath}\u0000${relation}`, { group: groupPath, relation });
     }
     const previousRelationSnapshot = previousRelation ? cloneRelation(previousRelation) : undefined;
     const previousFtsKey = `${groupPath}\u0000${relation}`;
@@ -617,9 +1154,11 @@ export async function handleDirectImport(
       if (!hookResult.ok) {
         // P-7：所有 hooks 均失败 → 不写入向量，也不覆盖旧 local KB，文件计入 skipped。
         skipped.push(rel);
+        // 被跳过的文件不会落库，不能留在「新建」明细里
+        createdMap.delete(`${groupPath}\u0000${relation}`);
         logWarn(`清洗 hook 失败已跳过（${rel}）：${hookResult.failedHooks.join(', ')}，未覆盖旧 local KB`);
         processedFileCount++;
-        args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
+        args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
         continue;
       }
       textForVector = hookResult.text;
@@ -637,10 +1176,11 @@ export async function handleDirectImport(
     });
     if (chunks.length > MAX_CHUNKS_PER_FILE) {
       skipped.push(rel);
+      createdMap.delete(`${groupPath}\u0000${relation}`);
       logWarn(`文件切分 chunk 数超限已跳过（${chunks.length} > ${MAX_CHUNKS_PER_FILE}）：${rel}，可增大 --chunk-size 或手动拆分后导入`);
       // chunk 超限发生在覆盖之前，旧 local KB 与索引状态均保持不变。
       processedFileCount++;
-      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
       continue;
     }
     // 文件已通过所有可跳过的前置处理，即将覆盖 local KB。旧 FTS relation 先持久化
@@ -652,12 +1192,19 @@ export async function handleDirectImport(
       const cached = relationsCache0.groups[groupPath]?.hot_relations.find((item) => item.text === relation);
       if (cached) {
         cached.ftsIndexComplete = false;
-        writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+        // 批次 2：incomplete 预标记立即落盘（中断安全语义保持；新布局=分片批写，
+        // 旧布局=整文件回退），不并入批末。
+        persistTouchedGroups(scope, relationsCache0, new Set([groupPath]));
       }
     }
     // 方案 D：文件级原文（未清洗）仅在检查通过后写入。
-    writeLocalKb(scope, groupPath, relation, fileText);
-    // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚
+    // D7（批次 2）：写入组级内存缓冲——同组 N 篇聚合为每 KB index.json 一次落盘
+    //（原逐篇读改写整个 index.json，111 篇的组 = 111 次读改写 4.5MB）。
+    // 中断安全性：缓冲在 hook 失败/chunk 超限回滚点**之后**才并入，被跳过文件不进缓冲；
+    // 进程中断时本批缓冲丢失 → local KB 保持导入前状态，与旧"逐篇写"的已写部分
+    // 相比少了部分推进，但幂等重导语义不变（重跑全量覆盖）。
+    // 附件收集（REQ-20260904-001）：置于两个回滚点（hook 失败 / chunk 超限）之后 → 被跳过文件不产生孤儿附件，无需回滚。
+    // R3：置于「内容未变」判定**之前** —— 正文未变但引用的图片已改时，附件仍会替换（同名先删后写）。
     if (assetsEnabled) {
       const assetResult = collectAndCopyAssets({
         // 单文件导入时 sourceDir 是文件路径，源根应取其所在目录（否则同级图片全部判为越界）
@@ -671,6 +1218,30 @@ export async function handleDirectImport(
       for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
       assetWarnings.push(...assetResult.warnings);
     }
+    // R3（REQ-20261010-001）：增量导入——内容未变则跳过切分 / embedding / 写入 / 原文重写
+    // （附件已按上面照常复制）。计完成而非跳过：该文件的数据本就完整在位。
+    if (conflictMode === 'incremental' && vector
+      && isContentUnchanged({
+        fileText,
+        previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
+        previousRelation: previousRelationSnapshot,
+        entries,
+        tags: customTags,
+        scope,
+      })) {
+      unchangedFileCount += 1;
+      // 回写冲突明细的实际结果：判定为 overwrite 但被「内容未变」拦下，不得让报告说"已覆盖"
+      // （不用 findLast：tsconfig 的 lib 不含 es2023）
+      for (let index = conflicts.length - 1; index >= 0; index -= 1) {
+        const item = conflicts[index];
+        if (item.path === rel && item.action === 'overwrite') { item.unchanged = true; break; }
+      }
+      logInfo(`内容未变，增量跳过重算（${rel}）`);
+      processedFileCount++;
+      args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
+      continue;
+    }
+    ensureGroupBuffer(groupPath).set(relation, fileText);
     fileRecords.push({
       rel,
       groupPath,
@@ -697,18 +1268,69 @@ export async function handleDirectImport(
     processedFileCount++;
     // 进度 = 已处理文件数（O-01 文件数分母）。不传 detail（文件名）：避免 TTY \r 刷新时
     // 长路径残留叠加成乱码（bug-impact-analysis），进度条仅显示文件数 + 百分比。
-    logProgress(fileRecords.length, files.length);
-    args.onProgress?.({ phase: 'scan', done: processedFileCount, total: files.length });
+    logProgress(fileRecords.length, effectiveFiles.length);
+    args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
   }
   if (skipped.length > 0) {
     logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
   }
   const skippedConflicts = conflicts.filter((item) => item.action === 'skip');
   if (skippedConflicts.length > 0) {
-    logWarn(`跳过 ${skippedConflicts.length} 个文件（relation 冲突）：${skippedConflicts.map((item) => item.path).join(', ')}`);
+    // 列表截断：整目录重导（skip 策略）时命中数可达上千，逐条拼进一行会撑爆日志
+    const preview = skippedConflicts.slice(0, 10).map((item) => item.path).join(', ');
+    const rest = skippedConflicts.length > 10 ? ` ...等 ${skippedConflicts.length} 个` : '';
+    logWarn(`按「跳过同名文件」策略未处理 ${skippedConflicts.length} 个文件（库中已存在，不重算）：${preview}${rest}`);
   }
   if (assetWarnings.length > 0) {
     logWarn(`附件收集告警 ${assetWarnings.length} 条：${assetWarnings.slice(0, 10).join('；')}${assetWarnings.length > 10 ? ` ...等 ${assetWarnings.length} 条` : ''}`);
+  }
+  if (unchangedFileCount > 0) {
+    logInfo(`增量导入：${unchangedFileCount} 个文件内容未变，已跳过重算（不重切分 / 不重算 embedding / 不重写向量与原文）`);
+  }
+  // R3：整批都未变（且没有其他待处理文件）不是"无可导入文件"，而是增量导入的正常终态——必须成功返回。
+  // 该分支**不做任何写入**（含不更新 group-index.source、不写 local KB/向量/元数据）——
+  // 这正是增量导入"零重算"的含义；files.total 因此为 0，而 completed = 未变文件数。
+  if (fileRecords.length === 0 && unchangedFileCount > 0) {
+    releaseImportLock(scope);
+    lockAcquired = false;
+    return {
+      ok: true,
+      action: 'import',
+      scope,
+      stats: {
+        total: 0,
+        vectorized: 0,
+        errors: 0,
+        skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + dupSkipCount,
+        vector,
+        assets: assetCopied.size,
+        conflicts: conflicts.length,
+        // 整批未变时无任何写入，全文索引自然为 0
+        fullTextIndexed: 0,
+        files: {
+          total: 0,
+          completed: unchangedFileCount,
+          incomplete: 0,
+          scanned: scannedBaseCount,
+          skipped: Math.max(0, scannedBaseCount - unchangedFileCount),
+          unchanged: unchangedFileCount,
+          duplicatesSkipped: dupSkipCount,
+        },
+      },
+      partial: false,
+      incomplete: [],
+      errors: [],
+      conflicts,
+      duplicatesSkipped: dupSkipDetail,
+      duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+      // 早退分支没有任何写入，也就不可能新建文档
+      created: [],
+      createdTotal: 0,
+      createdTruncated: false,
+      ...(prune ? { prune } : {}),
+      groups: [],
+      source: { dir: sourceDir, chunkSize, chunkOverlap },
+    };
   }
   if (fileRecords.length === 0) {
     const skippedConflictCount = conflicts.filter((item) => item.action === 'skip').length;
@@ -725,14 +1347,35 @@ export async function handleDirectImport(
           total: 0,
           vectorized: 0,
           errors: 0,
-          skipped: skippedConflictCount,
+          skipped: skippedConflictCount + dupSkipCount,
           vector,
           assets: 0,
           conflicts: conflicts.length,
           fullTextIndexed: 0,
+          // R4：全部文件因策略被跳过时仍要如实报出扫描 / 跳过数——此前固定写 0，
+          // 使「重导同一目录 + 跳过同名」在结果摘要里显示「扫描 0（跳过 0）」，
+          // 与同屏的「已存在跳过 N 个」自相矛盾。
+          files: {
+            total: 0,
+            completed: 0,
+            incomplete: 0,
+            scanned: scannedBaseCount,
+            skipped: Math.max(0, scannedBaseCount - fileRecords.length - unchangedFileCount),
+            unchanged: 0,
+            duplicatesSkipped: dupSkipCount,
+          },
         },
+        partial: false,
+        incomplete: [],
         errors: [],
         conflicts,
+        duplicatesSkipped: dupSkipDetail,
+        duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+        // 全部被跳过时同样没有新建
+        created: [],
+        createdTotal: 0,
+        createdTruncated: false,
+        ...(prune ? { prune } : {}),
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
       };
@@ -744,15 +1387,35 @@ export async function handleDirectImport(
   const entries: ScanResultEntry[] = fileRecords.flatMap((r) => r.entries);
   logInfo(`切分完成：共 ${entries.length} 个 chunk（来自 ${fileRecords.length} 个文件，跳过 ${skipped.length + conflicts.filter((item) => item.action === 'skip').length}）`);
 
+  // D7（批次 2）：flush 组级原文缓冲——每组一次 loadLocalKb+合并+writeJson
+  //（替代逐篇读改写；O(文档数)→O(组数) 落盘）。回滚路径（hook 失败等）不走缓冲、
+  // 已即时写回，此 flush 只含最终接受导入的文件。
+  //
+  // S-01（REQ-20261009-003）已知残留中间态：本 flush 不在「元数据提交窗口」内，
+  // 因此从这一刻到 Phase 4 提交 relations 分片之间，**覆盖导入的文档可能出现
+  // "正文已新、列表元数据仍旧"**（用户拍板选项 b 时接受的形态）。
+  // 反向的"列表里有、点开 404"不会发生：正常路径不删 KB，删除只出现在回滚路径，
+  // 且回滚会同步落盘分片（见 restoreLocalKb / persistTouchedGroups 调用点）。
+  for (const [groupPath, relations] of pendingKbWrites) {
+    if (relations.size === 0) continue;
+    const localKbPath = getLocalKbDir(scope, groupPath);
+    fs.mkdirSync(path.dirname(localKbPath), { recursive: true });
+    const localKb = loadLocalKb(localKbPath);
+    for (const [relationText, content] of relations) {
+      localKb[relationText] = content;
+    }
+    writeJson(localKbPath, localKb);
+  }
+  pendingKbWrites.clear();
+
   // 2) Phase 2~5
   const TOTAL = 5;
   const memoryMap = new Map<string, string>();
   checkCancelled();
   args.onProgress?.({ phase: 'vectorize', done: 0, total: Math.max(entries.length, 1) });
 
-  // ── 预读 group-index（relations-cache 已在步骤 0 预读为 relationsCache0）──
+  // ── 预读 group-index（relations 元数据已在步骤 0 预读为 relationsCache0）──
   const groupIndexPath = getGroupIndexPath(scope);
-  const relationsCachePath = getRelationsCachePath(scope);
   const groupIndex = readGroupIndex(scope);
   if (!groupIndex) {
     throw new Error(`scope 初始化异常：基础索引文件缺失，请删除 scope 目录后重新 import 或从 _template/ 复制`);
@@ -780,8 +1443,8 @@ export async function handleDirectImport(
           });
         },
       });
-  checkCancelled();
-  args.onProgress?.({ phase: 'vectorize', done: entries.length, total: Math.max(entries.length, 1) });
+  noteCancel(); // D2：向量已开始写入 → 取消转为"提交已完成 + 未完成清单"
+  args.onProgress?.({ phase: 'vectorize', done: Math.max(0, entries.length - (vectorizeResult.notProcessed ?? 0)), total: Math.max(entries.length, 1) });
 
   // ── 文档级自定义 tag 向量写入（可选）：为每个成功导入文件写一条 tag 内容向量 ──
   // 机制对齐 sync-relation：text=文件原文、tags=自定义 tag（每个 tag 各一条），
@@ -790,13 +1453,40 @@ export async function handleDirectImport(
   const tagErrors: { path: string; error: string }[] = [];
   const vectorCleanupErrors: { path: string; error: string }[] = [];
   const failedRecords = new Set<typeof fileRecords[number]>();
+  let systemStopReason: VectorizationStopReason | undefined = vectorizeResult.stopReason;
+  let systemStopStats: {
+    scope: string;
+    phase: 'embedding' | 'persist';
+    total: number;
+    succeeded: number;
+    failed: number;
+    notProcessed: number;
+    partialCommitted: number;
+  } | undefined;
+  const partialCommittedIds = new Set<string>();
+  if (systemStopReason) {
+    const notProcessed = vectorizeResult.notProcessed ?? 0;
+    systemStopStats = {
+      scope,
+      phase: vectorizeResult.stopReason?.phase ?? 'embedding',
+      total: entries.length,
+      succeeded: vectorizeResult.ok.size,
+      failed: vectorizeResult.failed ?? Math.max(0, vectorizeResult.errors.length - notProcessed),
+      notProcessed,
+      partialCommitted: 0,
+    };
+  }
+  // R1（REQ-20261009-001，用户拍板 Q1）：**文件级完成判定，不做全批连坐**——
+  // 系统性向量故障时也只把「存在未成功 chunk」的文件算未完成，其余文件照常提交
+  // （原实现在此把全批塞进 failedRecords，导致已成功的文件也被回滚删除）。
+  // 零完成（activeFileRecords 为空）仍走下方既有失败分支，不会把"全失败"当成功。
   for (const rec of fileRecords) {
     if (vector && rec.entries.some((entry) => !vectorizeResult.ok.has(entry.path))) {
       failedRecords.add(rec);
     }
   }
-  checkCancelled();
-  if (vector && customTags.length > 0) {
+  noteCancel(); // D2：取消不再丢弃已写入的向量
+  if (vector && !systemStopReason && customTags.length > 0) {
     logPhaseStart(2, TOTAL, `写入自定义标签向量（${customTags.join(', ')}）...`);
     const tagEntries: { text: string; tags: string; group: string }[] = [];
     const tagRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
@@ -820,18 +1510,55 @@ export async function handleDirectImport(
             arr.push(item.memoryId);
             newMap.set(rec.rel, arr);
           } else {
-            failedRecords.add(rec);
-            tagErrors.push({ path: rec.rel, error: `标签向量写入失败：${item.error || 'unknown error'}` });
+            // R1（REQ-20261009-001，P0-2）：标签向量属**辅助向量**——写失败不再把文件标为
+            // 「未完成」（否则正文向量已成功的文档会被回滚删除、整批不可用）。降级为记账 +
+            // 提示重建：正文照常提交可浏览/可检索，仅 `ki search -t <tag>` 暂时召回不到该文件。
+            tagErrors.push({
+              path: rec.rel,
+              error: `标签向量写入失败：${item.error || 'unknown error'}（不影响正文，可用 ki restore ${scope} --rebuild-vector 重建标签向量）`,
+            });
           }
         }
         tagMemoryMap = newMap;
+        if (tagResult.stopReason) {
+          systemStopReason = tagResult.stopReason;
+          systemStopStats = {
+            scope,
+            phase: tagResult.stopReason.phase,
+            total: tagEntries.length,
+            succeeded: tagResult.succeeded,
+            failed: tagResult.failed,
+            notProcessed: tagResult.notProcessed ?? 0,
+            partialCommitted: 0,
+          };
+          if ((tagResult.notProcessed ?? 0) > 0) {
+            tagErrors.push({
+              path: '<tags>',
+              error: `标签向量有 ${tagResult.notProcessed} 条未处理（系统性停止：${tagResult.stopReason.kind}/${tagResult.stopReason.code}）；正文已提交，标签可用 ki restore ${scope} --rebuild-vector 重建`,
+            });
+          }
+          logWarn(`标签向量系统性停止（${tagResult.stopReason.kind}/${tagResult.stopReason.code}）：成功 ${tagResult.succeeded}/${tagEntries.length}，已降级为辅助向量缺失（不影响正文可用性）`);
+        }
         logInfo(`自定义标签向量写入完成：成功 ${tagResult.results.filter((r) => r.success).length}/${tagEntries.length}`);
       } catch (err) {
+        systemStopReason = classifyVectorizationStop(err as Error, 'embedding');
+        systemStopStats = {
+          scope,
+          phase: 'embedding',
+          total: tagEntries.length,
+          succeeded: 0,
+          failed: tagEntries.length,
+          notProcessed: 0,
+          partialCommitted: 0,
+        };
+        // R1（P0-2）：同上——批量调用失败只让「标签向量」缺失，不标文件未完成、不回滚正文。
         for (const rec of tagRecords) {
-          failedRecords.add(rec);
-          tagErrors.push({ path: rec.rel, error: `标签向量写入失败：${(err as Error).message}` });
+          tagErrors.push({
+            path: rec.rel,
+            error: `标签向量写入失败：${(err as Error).message}（不影响正文，可用 ki restore ${scope} --rebuild-vector 重建标签向量）`,
+          });
         }
-        logWarn(`自定义标签向量写入失败：${(err as Error).message}`);
+        logWarn(`自定义标签向量写入失败：${(err as Error).message}（已降级：正文照常提交，标签可用 ki restore ${scope} --rebuild-vector 重建）`);
       }
     }
     logPhaseDone(2, TOTAL, `标签向量写入完成`);
@@ -863,12 +1590,15 @@ export async function handleDirectImport(
     ];
     const rollbackIds = newIds.filter((id) => !oldIds.has(id) && !allKnownVectorIds.has(id));
     restoreLocalKb(scope, rec.groupPath, rec.relation, rec.previousLocalText);
-    await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`);
+    for (const id of await deleteVectorIds(scope, rollbackIds, `回滚文档 ${rec.rel} 的新向量`, false, vectorCleanupErrors)) {
+      partialCommittedIds.add(id);
+    }
   }
 
   // 向量化失败的文件已恢复旧 local KB，且其旧 FTS ID 未被清理；恢复原完成标记。
   // 活跃文件仍保持 incomplete，直到 Phase 4 持久化本次最终 dense/FTS 状态。
   let ftsStatusRestored = false;
+  const restoredGroups = new Set<string>();
   for (const rec of failedRecords) {
     const previous = rec.previousRelation;
     if (!previous?.ftsIds?.length) continue;
@@ -877,8 +1607,34 @@ export async function handleDirectImport(
     if (previous.ftsIndexComplete === undefined) delete relation.ftsIndexComplete;
     else relation.ftsIndexComplete = previous.ftsIndexComplete;
     ftsStatusRestored = true;
+    restoredGroups.add(rec.groupPath);
   }
-  if (ftsStatusRestored) writeJson(relationsCachePath0, relationsCache0 as unknown as Record<string, unknown>);
+  // 批次 2：中断安全回写改分片——只写被触达的组（旧布局则保持旧写整文件的回退语义）
+  if (ftsStatusRestored) persistTouchedGroups(scope, relationsCache0, restoredGroups);
+
+  // R1（REQ-20261009-001）：系统性停止**不再抛错回滚全批**——已完成（文件级）的部分
+  // 继续走 Phase 3/4/5 提交并对外可用，未完成清单随结果返回（CLI 退出码 0 + 警告、
+  // Web 任务 partial，与 Q2「CLI/Web 同口径」一致）。
+  // 停止信息保留在结果里（stopReason + stats.files），供两端展示与"只重试未完成"使用。
+  let stopReport: { kind: string; code: string; phase: 'embedding' | 'persist'; reason: string } | undefined;
+  if (systemStopReason) {
+    const stats = systemStopStats ?? {
+      scope,
+      phase: 'embedding' as const,
+      total: entries.length,
+      succeeded: vectorizeResult.ok.size,
+      failed: vectorizeResult.failed ?? Math.max(0, vectorizeResult.errors.length - (vectorizeResult.notProcessed ?? 0)),
+      notProcessed: vectorizeResult.notProcessed ?? 0,
+      partialCommitted: 0,
+    };
+    stats.partialCommitted = partialCommittedIds.size;
+    stopReport = {
+      kind: systemStopReason.kind,
+      code: systemStopReason.code,
+      phase: stats.phase,
+      reason: systemStopReason.reason,
+    };
+  }
 
   const activeFileRecords = fileRecords.filter((rec) => !failedRecords.has(rec));
   if (vector && activeFileRecords.length === 0) {
@@ -908,20 +1664,23 @@ export async function handleDirectImport(
     // 先按未完成处理；FTS 批次失败、或只写入了部分 entries 时不能沿用旧成功状态。
     // 对覆盖已有 Relation 的情况，先原子持久化 false：进程若在 FTS 写入后、Phase 4 前中断，
     // 页面也不会继续把可能已部分覆盖的旧索引显示为完整。新 Relation 尚未登记，无需预写。
-    const persistedCache = readJson<RelationsCache>(relationsCachePath);
-    if (!persistedCache) throw new Error(`relations-cache.json 不存在：${relationsCachePath}`);
+    // 批次 2：persistedCache 改双轨读（新布局=分片聚合，旧布局=旧文件）；
+    // 预写改分片单组写（persistTouchedGroups）。
+    const persistedCache = loadCacheShape(scope) as unknown as RelationsCache;
     let completionInvalidated = false;
+    const invalidatedGroups = new Set<string>();
     for (const rec of activeFileRecords) {
       fullTextCompleteByKey.set(`${rec.groupPath}\u0000${rec.relation}`, false);
       const cached = persistedCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
       if (cached) {
         cached.ftsIndexComplete = false;
         completionInvalidated = true;
+        invalidatedGroups.add(rec.groupPath);
       }
       const inMemory = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
       if (inMemory) inMemory.ftsIndexComplete = false;
     }
-    if (completionInvalidated) writeJson(relationsCachePath, persistedCache as unknown as Record<string, unknown>);
+    if (completionInvalidated) persistTouchedGroups(scope, persistedCache, invalidatedGroups);
     const ftsEntries = activeFileRecords.flatMap((rec) => rec.entries.flatMap((entry) => [
       { text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag: 'ki-search' },
       ...customTags.map((tag) => ({ text: entry.text, scope, group: rec.groupPath, relation: rec.relation, tag })),
@@ -988,9 +1747,71 @@ export async function handleDirectImport(
       fullTextErrors.push({ path: '<fts>', error: `全文索引写入失败：${(err as Error).message}` });
     }
   }
+  // 关系/路径辅助向量也先写新值，再进入旧向量清理；若某个 relation 的新辅助向量
+  // 写失败，则保留该 relation 的旧辅助向量，避免先删后写造成导航索引空洞。
+  noteCancel(); // D2：取消不再丢弃已写入的向量
+  const pathEntries: PathVectorizeEntry[] = [];
+  const groupSet = new Set<string>();
+  for (const e of activeEntries) {
+    const groupPath = e.groupPath;
+    groupSet.add(groupPath);
+    pathEntries.push({
+      text: buildRelationContent(e.chunkRelation || deriveChunkRelation(e.path.split('#')[0], Number(e.path.split('#')[1])), groupPath),
+      tag: 'ki-relation',
+      scope,
+      group: groupPath,
+    });
+  }
+  for (const groupPath of groupSet) {
+    pathEntries.push({ text: buildGroupPathContent(groupPath), tag: 'ki-path', scope });
+  }
+  const failedRelationPathTexts = new Set<string>();
+  const auxiliaryErrors: { path: string; error: string }[] = [];
+  // R1（REQ-20261009-001）：本次运行已系统性停止 / 已取消时**跳过关系与路径辅助向量**。
+  // 必要性（不只是省一次请求）：该阶段自带"失败即回滚本批已提交内容"的收尾（见下方
+  // pathResult.stopReason 分支）——嵌 provider 仍不可用时它会删掉刚提交成功的正文向量，
+  // 把 R1 的"部分可用"抵消掉。辅助向量可由 `ki restore <scope> --rebuild-vector` 重建，不影响已完成文档
+  // 的浏览与检索。
+  if (vector && !systemStopReason && !cancelRequested && pathEntries.length > 0) {
+    const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
+    if (pathResult.stopReason) {
+      // R1（REQ-20261009-001，P1-1）：辅助向量阶段**降级而非整批回滚**——正文/标签向量此时
+      // 均已成功写入，回滚它们等于把「已完成」重新变成「不可用」（用户视角与修复前一致：文档消失）。
+      // 降级口径：① 未写入成功的 `ki-relation` 条目登记为「路径写入失败」，使下方旧向量清理
+      // 保留其旧索引（导航仍可用，不产生空洞）；② 汇总一条 error 说明辅助向量缺失并给重建出路；
+      // ③ 正文/标签/元数据照常提交。
+      const stopRelationPathTexts = new Set(
+        pathEntries.filter((entry) => entry.tag === 'ki-relation').map((entry) => entry.text),
+      );
+      let pathUnwritten = 0;
+      for (const entry of pathEntries) {
+        if (pathResult.ok.has(entry.text)) continue;
+        pathUnwritten += 1;
+        if (stopRelationPathTexts.has(entry.text)) failedRelationPathTexts.add(entry.text);
+      }
+      auxiliaryErrors.push({
+        path: '<ki-path/ki-relation>',
+        error: `关系/路径辅助向量未全部写入（${pathResult.stopReason.kind}/${pathResult.stopReason.code}）：`
+          + `成功 ${pathResult.ok.size}，未写入 ${pathUnwritten}；未写入部分沿用旧索引，可用 ki restore ${scope} --rebuild-vector 重建（不影响已完成文档的浏览与检索）`,
+      });
+      logWarn(`关系/路径辅助向量系统性停止（${pathResult.stopReason.kind}/${pathResult.stopReason.code}）：成功 ${pathResult.ok.size}/${pathEntries.length}，已降级为辅助索引缺失（正文不受影响）`);
+    }
+    const relationPathTexts = new Set(pathEntries.filter((entry) => entry.tag === 'ki-relation').map((entry) => entry.text));
+    for (const item of pathResult.errors) {
+      if (relationPathTexts.has(item.text)) failedRelationPathTexts.add(item.text);
+      auxiliaryErrors.push({ path: item.text, error: `路径向量写入失败：${item.error}` });
+    }
+    logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
+  } else if (vector && (systemStopReason || cancelRequested) && pathEntries.length > 0) {
+    auxiliaryErrors.push({
+      path: '<ki-path/ki-relation>',
+      error: `本次运行${cancelRequested ? '已取消' : '因系统性向量故障停止'}，关系/路径辅助向量已跳过；`
+        + `可用 ki restore ${scope} --rebuild-vector 重建（不影响已完成文档的浏览与检索）`,
+    });
+  }
+
   if (vector && activeFileRecords.length > 0) {
-    // 文档从 --no-vector 切换回 hybrid 时，先成功写入 dense，再清理该 relation
-    // 以前的 FTS-only 文档；删除失败则保留 ftsIds，避免缓存宣称已清理。
+    // 正文、标签和路径辅助向量均收束后，再清理旧 FTS-only 索引。
     for (const rec of activeFileRecords) {
       const oldIds = rec.previousRelation?.ftsIds ?? [];
       const oldLocators = rec.previousRelation?.ftsLocators ?? [];
@@ -1012,36 +1833,6 @@ export async function handleDirectImport(
         fullTextErrors.push({ path: rec.rel, error: `切换到向量模式时旧全文索引清理失败：${(err as Error).message}` });
       }
     }
-  }
-
-  // 关系/路径辅助向量也先写新值，再进入旧向量清理；若某个 relation 的新辅助向量
-  // 写失败，则保留该 relation 的旧辅助向量，避免先删后写造成导航索引空洞。
-  checkCancelled();
-  const pathEntries: PathVectorizeEntry[] = [];
-  const groupSet = new Set<string>();
-  for (const e of activeEntries) {
-    const groupPath = e.groupPath;
-    groupSet.add(groupPath);
-    pathEntries.push({
-      text: buildRelationContent(e.chunkRelation || deriveChunkRelation(e.path.split('#')[0], Number(e.path.split('#')[1])), groupPath),
-      tag: 'ki-relation',
-      scope,
-      group: groupPath,
-    });
-  }
-  for (const groupPath of groupSet) {
-    pathEntries.push({ text: buildGroupPathContent(groupPath), tag: 'ki-path', scope });
-  }
-  const failedRelationPathTexts = new Set<string>();
-  const auxiliaryErrors: { path: string; error: string }[] = [];
-  if (vector && pathEntries.length > 0) {
-    const pathResult = await bulkStorePaths(pathEntries, { abortSignal: args.abortSignal });
-    const relationPathTexts = new Set(pathEntries.filter((entry) => entry.tag === 'ki-relation').map((entry) => entry.text));
-    for (const item of pathResult.errors) {
-      if (relationPathTexts.has(item.text)) failedRelationPathTexts.add(item.text);
-      auxiliaryErrors.push({ path: item.text, error: `路径向量写入失败：${item.error}` });
-    }
-    logInfo(`路径向量写入完成：成功 ${pathResult.ok.size}，失败 ${pathResult.errors.length}`);
   }
 
   // 仅清理受影响 relation 的旧内容/标签/路径向量；FTS-only 覆盖只在新 FTS 完整后
@@ -1125,11 +1916,12 @@ export async function handleDirectImport(
     }
   }
 
-  // 取消请求在向量化批次完成后生效。
-  checkCancelled();
+  // 取消请求在向量化批次完成后生效（D2：只记标记，仍走提交——元数据写入是毫秒级，
+  // 跳过它才是真正的数据不一致来源）。
+  noteCancel();
 
   // ── Phase 3/4：Group 树 + relation-cache（串行，KB 写入近实时无并行损失）──
-  checkCancelled();
+  noteCancel();
   args.onProgress?.({ phase: 'persist', done: 0, total: 1 });
   // groups 初始集：缺省 group 时为空（由 phase3EnsureGroups 从 entries 反推），显式 group 时含该根
   const ctx: ImportContext = {
@@ -1188,24 +1980,43 @@ export async function handleDirectImport(
       }
     }
   }
-  writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
-  writeJson(relationsCachePath, relationsCache as unknown as Record<string, unknown>);
+  // S-01（REQ-20261009-003）：**元数据提交窗口**——只在真实落盘这几行挡同 scope 的读任务；
+  // 向量化长尾（Phase 2）与 Group 树构建（Phase 3）不挡读。目的：读不再等整段导入，
+  // 同时避免"列表里在、点开 404"这类跨文件中间态（选项 b）。
+  // S-04 I2（REQ-20261009-003）：Phase 5 的 source 块同属元数据，提前进窗原子写——
+  // 否则它是"窗口外的第三处写"，并发读可看到半新半旧（group-index 与分片不同步）。
+  const source: GroupIndexSource = { dir: sourceDir, chunkSize, chunkOverlap };
+  await getSharedOperationCoordinator().runMetadataCommit(scope, () => {
+    writeJson(groupIndexPath, groupIndex as unknown as Record<string, unknown>);
+    // 批次 2（W1）：元数据落盘改 per-Group 分片——旧布局先惰性迁移，再批写全量组
+    //（内存 relationsCache 为全量聚合，批写保证分片与内存一致）。批内共享一次 bump + 一次失效。
+    migrateLegacyRelationsCache(scope);
+    persistTouchedGroups(scope, relationsCache, new Set(Object.keys(relationsCache.groups)));
+    // Q-C（2026-10-21）：数据源同步不写 source 块——该块只由一次性 `ki import` 维护，
+    // 否则 wiki 写回会持续指向用户源目录（数据源把目录从"一次性"变成"长期"）。
+    if (args.writeSourceBlock !== false) setSource(scope, source);
+  });
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
   const kbResult = ctx;
 
   // Phase 5: 记录 source（含切分参数持久化 H-18；不再依赖 git commit——增量由幂等追加承载）
+  // ★ S-04 I2：实际写入已提前到 Phase 4 的「元数据提交窗口」内（见上），此处仅保留阶段日志。
   logPhaseStart(5, TOTAL, '记录 source ...');
-  const source: GroupIndexSource = {
-    dir: sourceDir,
-    chunkSize,
-    chunkOverlap,
-  };
-  setSource(scope, source);
-  logPhaseDone(5, TOTAL, `source 已记录（dir=${sourceDir}）`);
+  logPhaseDone(5, TOTAL, args.writeSourceBlock === false
+    ? 'source 块已跳过（数据源同步不写 group-index.source）'
+    : `source 已记录（dir=${sourceDir}）`);
 
   const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
-  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
+  // ★ created 在扫描阶段记录，后续向量化/元数据提交失败的文件并不会真正落库 ——
+  //   必须剔除，否则失败会被报成「新增」。排序与待删候选同口径（group/relation 升序）。
+  const failedKeys = new Set([...failedRecords].map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
+  const createdItems = [...createdMap.entries()]
+    .filter(([key]) => !failedKeys.has(key))
+    .map(([, item]) => item)
+    .sort((a, b) => `${a.group}/${a.relation}`.localeCompare(`${b.group}/${b.relation}`));
+
+  logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  unchanged=${unchangedFileCount}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
   // REQ-02 生命周期②：成功导入清除中断标记 + 释放导入锁（N4）
   releaseImportLock(scope);
@@ -1213,6 +2024,122 @@ export async function handleDirectImport(
   if (onInterrupt) {
     process.removeListener('SIGINT', onInterrupt);
     process.removeListener('SIGTERM', onInterrupt);
+  }
+
+  // R1：未完成清单（文件级）——逐文件给出路径/组/relation 与原因，供 CLI 打印与
+  // Web「重试未完成 N 篇」使用。已完成的文件不出现在此清单（守 #1/#4）。
+  const vectorErrorByPath = new Map<string, string>();
+  for (const item of vectorizeResult.errors) {
+    if (item?.path && !vectorErrorByPath.has(item.path)) vectorErrorByPath.set(item.path, item.error);
+  }
+  const incompleteList = [...failedRecords].map((rec) => {
+    const detail = rec.entries.map((entry) => vectorErrorByPath.get(entry.path)).find((value) => !!value);
+    return {
+      path: rec.rel,
+      group: rec.groupPath,
+      relation: rec.relation,
+      reason: detail
+        ?? (stopReport ? `向量化终止（${stopReport.kind}/${stopReport.code}）：${stopReport.reason}` : '存在未完成的 chunk'),
+    };
+  }).sort((a, b) => (a.path + a.relation).localeCompare(b.path + b.relation));
+
+  // R2（REQ-20261009-001）：维护 scope 级「未完成清单」——部分成功则覆盖写入
+  // （供 CLI `--retry-incomplete` / Web「重试未完成」跨会话使用），全量成功则删除。
+  const retryParams = {
+    group: group || undefined,
+    chunkSize: source.chunkSize,
+    chunkOverlap: source.chunkOverlap,
+    vector,
+    tags: args.tags,
+    conflictMode: args.conflictMode,
+    conflictSuffix: args.conflictSuffix,
+  };
+  // P1/P2（review）：清单是 scope 级单文件——覆盖/清除前先比对来源目录，跨源时先把旧清单
+  // 备份为 `.ki-import-incomplete.prev.json` 并告警（不静默抹掉上一批的未完成项）；
+  // 写入失败必须告警（否则用户以为还能 --retry-incomplete，实际没有清单）。
+  const previousRetryStatus = readImportIncompleteStatus(scope);
+  const previousRecord = previousRetryStatus.record;
+  const crossSource = Boolean(previousRecord && previousRecord.sourceDir !== sourceDir);
+  if (failedRecords.size > 0) {
+    if (crossSource) {
+      const prevPath = backupImportIncomplete(scope);
+      logWarn(
+        `上一批未完成清单来自另一源目录（${previousRecord!.sourceDir}，${previousRecord!.items.length} 项）：`
+        + `已备份为 ${prevPath ?? '备份失败（已被本次覆盖）'}；如需先处理旧批次：ki import --source ${previousRecord!.sourceDir} --retry-incomplete`,
+      );
+    }
+    const written = writeImportIncomplete(scope, {
+      version: 1,
+      scope,
+      createdAt: new Date().toISOString(),
+      sourceDir,
+      params: retryParams,
+      items: incompleteList,
+      ...(stopReport ? { stopReason: stopReport } : {}),
+      ...(cancelRequested ? { cancelled: true } : {}),
+      // 归属任务（2026-10-13）：任务中心据此校验"这份清单是否属于该任务"
+      ...(args.jobId ? { taskId: args.jobId } : {}),
+    });
+    if (!written) {
+      logWarn('未完成清单未能落盘：本次未完成文件将无法通过 --retry-incomplete 找回，请检查 scope 目录权限与磁盘空间');
+    }
+  } else if (crossSource) {
+    const prevPath = backupImportIncomplete(scope);
+    logWarn(
+      `本批全部成功，但上一批未完成清单来自另一源目录（${previousRecord!.sourceDir}，${previousRecord!.items.length} 项）：`
+      + `已保留为 ${prevPath ?? '备份失败（主清单未清除）'}，未随本批结果一并丢弃`,
+    );
+  } else {
+    clearImportIncomplete(scope);
+  }
+
+  // S-02 / R4（REQ-20261009-003）：元数据已提交 = **「可用」此刻成立**；索引整理**异步入队**，
+  // 不在此等待（"可用"不得被整理推迟 = 护栏 2）。仅当本批确实写了 dense 向量时入队：
+  // 全量 unchanged / 跳过 / FTS-only 的导入没有新增 dense 数据，整理是空转。
+  // 是否等待由调用方决定（CLI 等；HTTP job 保持 open）。
+  const indexMaintenance = (vector && mergedMap.size > 0)
+    ? scheduleIndexMaintenance(scope, { reason: 'import' })
+    : { accepted: false, merged: false };
+
+  // CLI 导入的可选 wiki 写回（wikiSync 未配置/关闭 → null，既有导入零变化）。
+  // 只写本次「文件级完成」的文档；已存在文件由 writeImportedDocsToWiki 跳过。
+  let wikiWriteback: WikiImportWritebackResult | undefined;
+  if (args.wikiWriteback === true && activeFileRecords.length > 0) {
+    const kbByGroup = new Map<string, Record<string, unknown>>();
+    const items = activeFileRecords.map((rec) => {
+      let kb = kbByGroup.get(rec.groupPath);
+      if (!kb) {
+        kb = readLocalKb(scope, rec.groupPath);
+        kbByGroup.set(rec.groupPath, kb);
+      }
+      const raw = kb[rec.relation];
+      const content = typeof raw === 'string'
+        ? raw
+        : ((raw as { moduleInfo?: string; content?: string } | null)?.moduleInfo
+          ?? (raw as { content?: string } | null)?.content
+          ?? '');
+      return {
+        group: rec.groupPath,
+        relation: rec.relation,
+        content,
+        sourcePath: sourceIsFile ? sourceDir : path.resolve(sourceDir, rec.rel),
+      };
+    });
+    try {
+      const written = writeImportedDocsToWiki(scope, items);
+      if (written) {
+        wikiWriteback = written;
+        logInfo(`wiki 同步：写入 ${written.written} 篇，跳过 ${written.skipped} 篇（已存在/源在 wiki 内），失败 ${written.failed.length} 篇`);
+        if (written.failed.length > 0) {
+          const detail = written.failed.slice(0, 5)
+            .map((item) => `${item.group}/${item.relation}: ${item.reason}`)
+            .join('；');
+          logWarn(`wiki 同步失败 ${written.failed.length} 篇（不影响导入结果）：${detail}${written.failed.length > 5 ? ' …' : ''}`);
+        }
+      }
+    } catch (err) {
+      logWarn(`wiki 同步异常（不影响导入结果）：${(err as Error).message}`);
+    }
   }
 
   return {
@@ -1224,16 +2151,49 @@ export async function handleDirectImport(
       vectorized: mergedMap.size,
       errors: importErrors.length,
       // skipped 合并：过大/超限/hook 失败 + relation 冲突（REQ-06：冲突计入 skipped）
-      skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + failedRecords.size,
+      skipped: skipped.length + conflicts.filter((item) => item.action === 'skip').length + failedRecords.size + dupSkipCount,
       vector,
       assets: assetCopied.size,
       conflicts: conflicts.length,
       fullTextIndexed,
+      // R1：文件级完成度（CLI/Web 展示「完成 N / 未完成 M」的唯一口径）
+      files: {
+        total: fileRecords.length,
+        // R3：增量跳过的文件数据本就完整在位 —— 计入 completed（否则会破坏 R1 的恒等式）
+        completed: fileRecords.length - failedRecords.size + unchangedFileCount,
+        incomplete: failedRecords.size,
+        // P2（review）：补分母与跳过数，使「扫描 = 完成 + 未完成 + 跳过」可自洽核算
+        // REQ-20261019-002：基准换成 scannedBaseCount（白名单后、剔除前）；
+        // 跳过数被 scannedBaseCount - fileRecords - unchanged 自动吸收，**不得**再 + dupSkipCount。
+        scanned: scannedBaseCount,
+        skipped: Math.max(0, scannedBaseCount - fileRecords.length - unchangedFileCount),
+        unchanged: unchangedFileCount,
+        duplicatesSkipped: dupSkipCount,
+      },
     },
+    /** R1：部分成功（提交了已完成文件，但仍有未完成文件） */
+    partial: failedRecords.size > 0,
+    /** R1：未完成文件清单（文件级；已成功文件不在此列） */
+    incomplete: incompleteList,
+    /** R1：系统性停止原因（若有）——连同 partial 一起用于两端展示 */
+    ...(stopReport ? { stopReason: stopReport } : {}),
+    /** D2：本次是否收到取消请求（取消与系统停止走同一条提交语义） */
+    ...(cancelRequested ? { cancelled: true } : {}),
+    /** R2：只重试子集的过滤账目（缺省=处理全部） */
+    ...(retryFilter ? { retryFilter } : {}),
     errors: importErrors,
     conflicts,
+    duplicatesSkipped: dupSkipDetail,
+    duplicatesSkippedTruncated: dupSkipCount > dupSkipDetail.length,
+    created: createdItems.slice(0, MAX_CREATED_DETAIL),
+    createdTotal: createdItems.length,
+    createdTruncated: createdItems.length > MAX_CREATED_DETAIL,
+    ...(prune ? { prune } : {}),
     groups: [...kbResult.groups].sort(),
     source,
+    /** S-02：只报告"是否入队"，不等整理完成 */
+    indexMaintenance: { scheduled: indexMaintenance.accepted, merged: indexMaintenance.merged },
+    ...(wikiWriteback ? { wikiWriteback } : {}),
   };
   } finally {
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
@@ -1363,11 +2323,29 @@ function restoreLocalKb(
   relationText: string,
   previousText: string | undefined,
 ): void {
-  if (previousText !== undefined) {
-    writeLocalKb(scope, groupPath, relationText, previousText);
-  } else {
-    removeFromLocalKb(scope, groupPath, relationText);
-  }
+  // S-01（REQ-20261009-003）：回滚会**删除 KB 条目**，必须落在「元数据提交窗口」内——
+  // 否则读（已可旁路导入长任务）可能与删除并发，出现"列表里在、点开 404"（challenger 质疑 C1）。
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+    if (previousText !== undefined) {
+      writeLocalKb(scope, groupPath, relationText, previousText);
+    } else {
+      removeFromLocalKb(scope, groupPath, relationText);
+    }
+  });
+}
+
+function makeVectorizationStopError(
+  stopReason: VectorizationStopReason,
+  stats: { scope: string; phase: 'embedding' | 'persist'; total: number; succeeded: number; failed: number; notProcessed: number; partialCommitted: number },
+): Error & { code: string; stopReason: VectorizationStopReason; stats: typeof stats } {
+  const error = new Error(
+    `scope "${stats.scope}" ${stats.phase} 阶段因系统性向量故障停止（${stopReason.kind}/${stopReason.code}）：${stopReason.reason}；`
+    + `成功 ${stats.succeeded}，失败 ${stats.failed}，未处理 ${stats.notProcessed}，补偿未完成 ${stats.partialCommitted}`
+  ) as Error & { code: string; stopReason: VectorizationStopReason; stats: typeof stats };
+  error.code = 'VECTORIZATION_STOPPED';
+  error.stopReason = stopReason;
+  error.stats = stats;
+  return error;
 }
 
 async function deleteVectorIds(
@@ -1389,10 +2367,11 @@ async function deleteVectorIds(
     logWarn(message);
     return uniqueIds;
   }
-  const failedErrors = result.errors.filter((item) => item.code !== 'NOT_FOUND');
-  const failedIds = failedErrors.map((item) => item.id);
-  if (failedErrors.length > 0) {
-    const message = `${label}失败：${failedErrors.map((item) => `${item.id}: ${item.reason}`).join('; ')}`;
+  // vectorDelete 已把 NOT_FOUND 归一化为幂等成功，这里直接用 failedIds
+  const failedErrors = result.errors;
+  const failedIds = result.failedIds;
+  if (failedIds.length > 0) {
+    const message = `${label}失败：${failedErrors.map((item) => `${item.id}: ${item.reason}`).join('; ') || `${failedIds.length} 条未确认删除`}`;
     errors?.push({ path: '<vector-cleanup>', error: message });
     if (strict) throw new Error(message);
     logWarn(message);
@@ -1406,6 +2385,24 @@ function writeLocalKb(scope: string, groupPath: string, relationText: string, mo
   const localKb = loadLocalKb(localKbPath);
   localKb[relationText] = moduleInfo;
   writeJson(localKbPath, localKb);
+}
+
+/**
+ * 批次 2 helper：把内存 cache 中「被触达的组」落到当前布局（中断安全预写/回写专用）。
+ *
+ * 第二轮审查 P1 修复：原实现是本函数的手抄副本，且**未做 Map 键归一**——新布局下
+ * 若触达组键与分片键写法不一致（历史 `项目根/` 前缀），`cache.groups[groupPath]`
+ * 取不到值 → `continue` 静默跳过落盘，import 的三个中断安全点（FTS 预标记 / 失败回滚 /
+ * 路径向量回滚）对该组全部失效。现统一委托 group-cache.persistCacheShape（单一实现）。
+ */
+function persistTouchedGroups(scope: string, cache: RelationsCache, touchedGroups: Set<string>): void {
+  // S-01（REQ-20261009-003）：分片落盘必须落在「元数据提交窗口」内——
+  // 覆盖两条路径：① 正常路径（Phase 4 已在外层开窗，此处靠重入计数）；② **失败回滚路径**
+  //（此前未开窗，且读已可旁路 engine-only 长任务 → 可能与"重落分片/删 KB"并发，
+  //  出现"列表里在、点开 404"；challenger 质疑 C1）。
+  getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+    persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+  });
 }
 
 /** 从 local KB 删除单条记录（P-7 hook 失败回滚用）；返回是否真的删了 */

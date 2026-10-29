@@ -16,6 +16,7 @@
 
 import type { ScanResultEntry } from './ai-results.js';
 import { vectorStore, vectorBulkStore, vectorDelete } from './vector-client.js';
+import { classifyVectorizationStop, type VectorizationStopReason } from '../zvec-engine/errors.js';
 import { logProgress } from './progress.js';
 
 const VECTORIZE_TAG = 'ki-search';
@@ -24,6 +25,11 @@ export interface BatchVectorizeResult {
   /** path → docId（成功条目） */
   ok: Map<string, string>;
   errors: { path: string; error: string }[];
+  /** 实际尝试后失败的条目数；不含取消或未处理条目。 */
+  failed?: number;
+  /** 系统性故障会停止后续批次；单条内容错误不设置此字段。 */
+  stopReason?: VectorizationStopReason;
+  notProcessed?: number;
 }
 
 export interface BatchVectorizeOptions {
@@ -133,15 +139,30 @@ export async function deleteMemory(
 /** 向量化分批大小（REQ-05 O-03：批量 embed 分批提交，避免一次性提交全部条目无中间态） */
 const VECTORIZE_BATCH_SIZE = 200;
 
+/** 依赖注入（测试用；与 rebuild-vector 的 deps 同构，缺省走真实实现）。 */
+export interface BulkVectorizeDeps {
+  bulkStore?: typeof vectorBulkStore;
+}
+
 export async function bulkVectorize(
   entries: ScanResultEntry[],
   scope: string,
-  options: BatchVectorizeOptions = {}
+  options: BatchVectorizeOptions = {},
+  deps: BulkVectorizeDeps = {}
 ): Promise<BatchVectorizeResult> {
+  const bulkStore = deps.bulkStore ?? vectorBulkStore;
   const ok = new Map<string, string>();
   const errors: { path: string; error: string }[] = [];
+  /**
+   * errors 里逐条保留的「尝试后失败」明细上限（超出只留一条汇总）。
+   * 必要性（challenger 质疑 2026-10-12）：B 策略熔断让**未达阈值的间歇失败批**继续跑，
+   * 每批失败都把整批条目逐条写进 errors —— provider 半挂（每次失败几个批）时总量仍会爆炸。
+   */
+  const MAX_DETAILED_FAILURES = 50;
+  let detailedFailures = 0;
+  let suppressedFailures = 0;
 
-  if (entries.length === 0) return { ok, errors };
+  if (entries.length === 0) return { ok, errors, failed: 0, notProcessed: 0 };
 
   // REQ-05 O-03：分批提交（200 条/批）+ 批间进度反馈（引擎内部批量 embed 无中间态，分批后用户可感知进度）
   const totalBatches = Math.ceil(entries.length / VECTORIZE_BATCH_SIZE);
@@ -149,11 +170,13 @@ export async function bulkVectorize(
   let cumulativeMetadataPending = 0;
   let cumulativeFailed = 0;
   let cumulativeCancelled = 0;
+  let notProcessed = 0;
+  let stopReason: VectorizationStopReason | undefined;
   for (let b = 0; b < totalBatches && !options.abortSignal?.aborted; b++) {
     const slice = entries.slice(b * VECTORIZE_BATCH_SIZE, (b + 1) * VECTORIZE_BATCH_SIZE);
     let currentProgress = { persisted: 0, metadataPending: 0, failed: 0, cancelled: 0 };
     try {
-      const result = await vectorBulkStore({
+      const result = await bulkStore({
         scope,
         entries: slice.map((e) => ({
           text: buildVectorizeContent(e),
@@ -180,17 +203,39 @@ export async function bulkVectorize(
       cumulativeMetadataPending += currentProgress.metadataPending;
       cumulativeFailed += currentProgress.failed;
       cumulativeCancelled += currentProgress.cancelled;
+      // 系统性停止时，批内「未尝试」条目标了 notProcessed（见 vector-client 的映射）。
+      // 单独计数、不逐条进 errors，与剩余条目合并成一条汇总；真实失败仍逐条保留。
+      let countedNotProcessed = 0;
       for (const item of result.results) {
         const entry = slice[item.index];
         if (!entry) continue;
         if (item.success && item.memoryId) {
           ok.set(entry.path, item.memoryId);
-        } else {
+        } else if (item.notProcessed === true) {
+          countedNotProcessed++;
+        } else if (detailedFailures < MAX_DETAILED_FAILURES) {
+          detailedFailures++;
           errors.push({ path: entry.path, error: item.error || 'unknown error' });
+        } else {
+          suppressedFailures++;
         }
       }
+      if (result.stopReason) {
+        stopReason = result.stopReason;
+        const remaining = entries.slice((b + 1) * VECTORIZE_BATCH_SIZE);
+        const batchNotProcessed = result.notProcessed ?? countedNotProcessed;
+        notProcessed += batchNotProcessed + remaining.length;
+        // P0 输出治理：停止后的未处理条目**不再逐条展开**——整库导入（1.5 万+ chunk）会把
+        // CLI stdout / HTTP job 结果刷成上万条同因条目（表现为"一直在超时"，还遮蔽真正的失败）。
+        // 数量由 notProcessed 承载，文件级明细由 result.incomplete / stats.files 承载。
+        errors.push({
+          path: '<not-processed>',
+          error: `系统性向量故障后未处理 ${batchNotProcessed + remaining.length} 条`
+            + `（本批 ${batchNotProcessed} + 其后 ${remaining.length}）：${stopReason.reason}`,
+        });
+      }
       options.onVectorProgress?.({
-        done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
+        done: Math.max(0, Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE) - (result.notProcessed ?? 0)),
         total: entries.length,
         persisted: cumulativePersisted,
         metadataPending: cumulativeMetadataPending,
@@ -200,9 +245,25 @@ export async function bulkVectorize(
     } catch (err) {
       const errMsg = `bulk-store 失败: ${(err as Error).message}`;
       for (const entry of slice) {
+        if (detailedFailures >= MAX_DETAILED_FAILURES) {
+          suppressedFailures++;
+          continue;
+        }
+        detailedFailures++;
         errors.push({ path: entry.path, error: errMsg });
       }
       cumulativeFailed += slice.length;
+      const failure = err instanceof Error ? err : new Error(String(err));
+      const embeddingSetupFailure = /embedding\.(?:apiKey|model|baseURL|dimension)|EmbeddingConfig|provider 配置/i.test(failure.message);
+      stopReason = classifyVectorizationStop(failure, embeddingSetupFailure ? 'embedding' : 'persist');
+      const remaining = entries.slice((b + 1) * VECTORIZE_BATCH_SIZE);
+      notProcessed += remaining.length;
+      if (remaining.length > 0) {
+        errors.push({
+          path: '<not-processed>',
+          error: `系统性向量故障后未处理 ${remaining.length} 条：${stopReason.reason}`,
+        });
+      }
       options.onVectorProgress?.({
         done: Math.min(entries.length, (b + 1) * VECTORIZE_BATCH_SIZE),
         total: entries.length,
@@ -214,8 +275,16 @@ export async function bulkVectorize(
     }
     // 批间进度（仅多批时输出，避免单批场景刷屏）
     if (totalBatches > 1) {
-      logProgress(Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
+      logProgress(Math.max(0, Math.min((b + 1) * VECTORIZE_BATCH_SIZE, entries.length) - (stopReason ? notProcessed : 0)), entries.length, `向量化批次 ${b + 1}/${totalBatches}`);
     }
+    if (stopReason) break;
+  }
+
+  if (suppressedFailures > 0) {
+    errors.push({
+      path: '<truncated>',
+      error: `另有 ${suppressedFailures} 条失败明细未逐条列出（逐条上限 ${MAX_DETAILED_FAILURES} 条）`,
+    });
   }
 
   if (options.abortSignal?.aborted && errors.length === 0) {
@@ -228,5 +297,5 @@ export async function bulkVectorize(
     options.onProgress(completed, errors.length);
   }
 
-  return { ok, errors };
+  return { ok, errors, failed: cumulativeFailed, stopReason, notProcessed };
 }

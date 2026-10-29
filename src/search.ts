@@ -12,7 +12,7 @@
 import { Command } from 'commander';
 import { validateScope, parseScopes, getLocalKbDir } from './lib/scope.js';
 import { loadConfig, resolveScope, getScopeMode } from './lib/config.js';
-import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections } from './lib/vector-client.js';
+import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections, SEARCH_TOPK_MAX } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
 import { hiddenEditIndexIds } from './lib/relation-edit-draft.js';
@@ -93,7 +93,7 @@ export type SearchResult =
       /** 多 scope 检索时实际检索的 scope 列表（单 scope 不返回，向后兼容） */
       scopes?: string[];
       results: SearchHit[];
-      /** 被跳过的 scope 及原因（多 scope 下未注册；或任意 scope 缺向量 Collection；无跳过时不返回） */
+      /** 被跳过或受召回上限影响的 scope 及原因（多 scope 未注册 / 任意 scope 缺向量 Collection / 引擎候选上限导致的召回受限；无则省略） */
       skipped?: { scope: string; reason: string }[];
       /** O1：语义侧降级为 FTS-only（查询 embedding 超时/网络失败）时置 true */
       degraded?: boolean;
@@ -104,7 +104,16 @@ export type SearchResult =
       /** 当前返回的文档结果数。fulltext 模式按文档聚合后计数。 */
       total?: number;
     }
-  | { ok: false; error: string; degraded?: boolean };
+  | {
+      ok: false;
+      error: string;
+      degraded?: boolean;
+      /**
+       * 结构化错误码（如 VECTOR_DIMENSION_MISMATCH）。前端据此显示与导入页一致的
+       * 处置指引——只给文案会让前端退回字符串匹配，检索页与导入页口径分叉。
+       */
+      code?: string;
+    };
 
 /** REQ-09：从 local KB 按 (group, relation) 取文件级原文；失败返回 null + hint */
 export function fetchOriginal(scope: string, group: string, relation: string): { original: string; hint?: string } | null {
@@ -234,8 +243,9 @@ async function executeSearchLocal(params: {
     }
 
     // 显式传 tags → 单次查询（多 tag OR，复用 vectorSearch 的 buildScopeTagFilter）。
-    // 不传 tags（默认搜全部）→ 按 tag 分查：每个 tag 最多取 limit 条（组内按 score 降序），
-    // 再按 TAG_PRIORITY 排序（ki-search 内容优先），总条数 = 各 tag 上限之和。
+    // 不传 tags（默认搜全部）→ 单次多 tag OR 查询：内部按 tag 分组取候选并保证
+    // TAG_PRIORITY（ki-search 内容优先）；无论哪条路径，最终都按 limit 统一截断。
+    // 引擎单次检索 topk 上限为 1000（SEARCH_TOPK_MAX），所有放大都要先收敛。
     // 多 scope：各 Collection fan-out 后应用层合并，query vector 在 fan-out 前只生成一次。
     const hiddenByScope = new Map(scopes.map((scope) => [scope, hiddenEditIndexIds(scope)]));
     const hiddenTotal = [...hiddenByScope.values()].reduce((sum, ids) => sum + ids.size, 0);
@@ -256,8 +266,17 @@ async function executeSearchLocal(params: {
     };
     let raw: VectorSearchResult[];
     let fullTextCandidateLimit = 0;
+    // 未传 tags = 搜全部 tag：最终结果需要恢复 TAG_PRIORITY 顺序再截断 limit。
+    let implicitAllTags = false;
     if (isFullText) {
-      fullTextCandidateLimit = Math.max((params.limit ?? 10) * 10, 50) + hiddenHeadroom;
+      const requestedCandidateLimit = Math.max((params.limit ?? 10) * 10, 50) + hiddenHeadroom;
+      fullTextCandidateLimit = Math.min(requestedCandidateLimit, SEARCH_TOPK_MAX);
+      if (requestedCandidateLimit > fullTextCandidateLimit) {
+        skipped.push({
+          scope: scopes.join(','),
+          reason: `全文检索候选数 ${requestedCandidateLimit} 超过引擎单次检索上限 ${SEARCH_TOPK_MAX}；已按上限检索，结果可能少于 limit。可降低 limit`,
+        });
+      }
       raw = await fullTextSearch({
         scopes,
         query: params.query,
@@ -267,10 +286,18 @@ async function executeSearchLocal(params: {
         tags: params.tags,
       });
     } else if (params.tags) {
+      const requestedTopk = (params.limit ?? 10) + hiddenHeadroom;
+      const topk = Math.min(requestedTopk, SEARCH_TOPK_MAX);
+      if (requestedTopk > topk) {
+        skipped.push({
+          scope: scopes.join(','),
+          reason: `limit ${params.limit ?? 10} 加隐藏补位 ${hiddenHeadroom} 超过引擎单次检索上限 ${SEARCH_TOPK_MAX}；已按 ${topk} 检索，结果可能少于 limit`,
+        });
+      }
       raw = await vectorSearch({
         scopes,
         query: params.query,
-        limit: (params.limit ?? 10) + hiddenHeadroom,
+        limit: topk,
         threshold: params.threshold,
         tags: params.tags,
         timeoutMs: params.timeoutMs,
@@ -287,17 +314,27 @@ async function executeSearchLocal(params: {
         raw = [];
       } else {
         // 单次查询（多 tag OR 过滤）：每个 scope 内多 tag 只做 1 次 embedding（逐 tag
-        // 分查会对同一 query 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按 tag 数放大保障
-        // 每 tag 召回上限，查询后按 tag 分组限额 + TAG_PRIORITY 排序。
-        // ⚠️ 与原逐 tag 分查近似等价：topk 为全局分配，极端场景（单 tag 命中数
-        // 超过 limit×N 且 score 全面占优）下其他 tag 可能被挤出——多数场景因下游
-        // (scope, group, relation) 去重（同文档多 tag 各写一条）而效果一致。
+        // 分查会对同一 query 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按
+        // tag 数放大保障每 tag 候选，但必须收敛到引擎上限（超出会让整次检索失败）；
+        // 查询后按 tag 分组限额 + TAG_PRIORITY 排序，最终仍由 limit 统一截断。
+        // ⚠️ topk 为全局分配，极端场景（单 tag 命中数占满 topk 且 score 全面占优）下
+        // 其他 tag 可能被挤出——多数场景因下游 (scope, group, relation) 去重
+        //（同文档多 tag 各写一条）而效果一致。
         // 传数组而非 join(',')：tag 值本身可能含逗号，join/split 往返会错拆。
         const limit = params.limit ?? 10;
+        const requestedTopk = limit * tagNames.length + hiddenHeadroom;
+        const topk = Math.min(requestedTopk, SEARCH_TOPK_MAX);
+        if (requestedTopk > topk) {
+          skipped.push({
+            scope: scopes.join(','),
+            reason: `未传 tags 时按 ${tagNames.length} 个 tag 分配候选（limit ${limit}${hiddenHeadroom > 0 ? ` + 隐藏补位 ${hiddenHeadroom}` : ''} → topk ${requestedTopk}），超过引擎单次检索上限 ${SEARCH_TOPK_MAX}；已按 ${SEARCH_TOPK_MAX} 检索，部分 tag 的召回可能减少。可显式传 tags 缩小范围或降低 limit`,
+          });
+        }
+        implicitAllTags = true;
         const hits = await vectorSearch({
           scopes,
           query: params.query,
-          limit: limit * tagNames.length + hiddenHeadroom,
+          limit: topk,
           threshold: params.threshold,
           tags: tagNames,
           timeoutMs: params.timeoutMs,
@@ -552,7 +589,19 @@ async function executeSearchLocal(params: {
         results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
       }
     }
-    
+
+    // limit 是整次检索的返回条数上限（MCP 工具/CLI 的公开契约）：上面的 per-tag 分组
+    // 只决定候选与优先级，去重后统一截断。未传 tags 时恢复 TAG_PRIORITY 顺序
+    //（ki-search 内容优先），同优先级内按分数降序——去重分支会改按分数排序，
+    // 不恢复会让辅助向量（ki-relation/ki-path）挤进 limit。
+    if (implicitAllTags) {
+      results.sort((a, b) => {
+        const byPriority = tagPriority(a.tag ?? '') - tagPriority(b.tag ?? '');
+        return byPriority !== 0 ? byPriority : (b.score ?? 0) - (a.score ?? 0);
+      });
+    }
+    results.splice(params.limit ?? 10);
+
     // 非全文模式保持原有 include_original 的完整原文去重行为；全文模式已在上方聚合。
     if (includeOriginal && !isFullText) {
       const seen = new Set<string>();
@@ -579,7 +628,9 @@ async function executeSearchLocal(params: {
       ? { ok: true, scope: scopes[0], scopes, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
       : { ok: true, scope: scopes[0], results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const e = err as Error & { code?: string };
+    // 保留 code：HTTP/MCP 两条出口都按 code 透传，前端才能区分"维度不匹配需重建"与普通失败
+    return { ok: false, error: e.message, ...(e.code ? { code: e.code } : {}) };
   }
 }
 
@@ -618,9 +669,9 @@ program
   .argument('[query]', '自然语言查询文本（位置参数，REQ-12；--query 保留兼容）')
   .option('-s, --scope <scope>', '项目隔离标识（多个用逗号分隔聚合检索；default 模式可省略，默认 default；strict 模式必填）')
   .option('-q, --query <query>', '自然语言查询文本')
-  .option('--limit <limit>', '返回条数上限', '10')
+  .option('--limit <limit>', '返回条数上限（整次检索最多返回的文档数；未传 --tags 时内部按 tag 取候选，最终仍按该值截断；引擎单次候选上限 1000，超出时部分 tag 召回可能减少）', '10')
   .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
-  .option('--tags <tags>', '过滤标签（不传则搜索全部；多个用逗号分隔，OR 组合）')
+  .option('--tags <tags>', '过滤标签（不传则搜索全部 tag：内部按 tag 取候选，最终仍按 --limit 截断，ki-search 内容优先；多个用逗号分隔，OR 组合）')
   .option('--timeout <seconds>', '查询 embedding 超时（秒，范围 0.001-60；未传则使用配置值）')
   .option('--original', '返回 local KB 文件级原文（默认不返回，仅返回向量匹配数据，REQ-09）')
   .option('--mode <mode>', '检索模式：hybrid 或 fulltext', 'hybrid')

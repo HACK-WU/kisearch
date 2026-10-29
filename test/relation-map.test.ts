@@ -156,14 +156,24 @@ describe('getRelationMap', () => {
     assert.equal(map.size, 0);
   });
 
-  it('relations-cache.json 损坏（非法 JSON）→ 空 Map（不抛错）', () => {
+  it('元数据损坏（非法 JSON）→ 抛错 fail-loud（不再静默空 Map）', () => {
+    // 第二轮审查 P1：原实现整体 catch → 返回空 Map 且被身份三元组「认证」缓存 10 分钟，
+    // 把「数据在但读失败」降级成"该 scope 检索结果全部丢失定位字段"，无从感知。
     setupConfig();
     const p = getRelationsCachePath('default');
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, '{ invalid json !!!', 'utf-8');
 
-    const map = getRelationMap('default');
-    assert.equal(map.size, 0);
+    assert.throws(() => getRelationMap('default'), /损坏|CORRUPT_JSON|解析错误/, '损坏必须 fail-loud');
+  });
+
+  it('新布局分片损坏 → 抛错 fail-loud（不缓存空 Map）', async () => {
+    setupConfig();
+    const { writeGroupCache, getGroupCachePath } = await import('../src/lib/group-cache.js');
+    writeGroupCache('default', 'g', { version: 1, scope: 'default', hot_relations: [], keywords: [] });
+    fs.writeFileSync(getGroupCachePath('default', 'g'), '{ broken', 'utf-8');
+
+    assert.throws(() => getRelationMap('default'), /损坏|CORRUPT_JSON|解析错误/, '分片损坏必须 fail-loud');
   });
 
   it('缓存命中：mtime 未变时返回同一 Map 实例（不重复读文件）', () => {
@@ -220,5 +230,42 @@ describe('getRelationMap', () => {
     assert.ok(!def.has('ma'));
     assert.ok(alpha.has('ma'));
     assert.ok(!alpha.has('md'));
+  });
+
+  it('批次 2 R10：新布局（relations/ 分片，无旧单文件）反查正常——旧实现恒空 Map', async () => {
+    setupConfig();
+    const { writeGroupCacheBatch } = await import('../src/lib/group-cache.js');
+    // 直接种新布局（不经 import 链路）：两分片，dense + FTS 各一
+    writeGroupCacheBatch('default', new Map([
+      ['a/b', { version: 1, scope: 'default', hot_relations: [{ id: 'r1', text: '文档A', score: 1, memoryIds: ['m-a1', 'm-a2'] } as never], keywords: [] }],
+      ['c', { version: 1, scope: 'default', hot_relations: [{ id: 'r2', text: '文档B', score: 1, ftsIds: ['f-b1'] } as never], keywords: [] }],
+    ]));
+
+    const map = getRelationMap('default');
+    assert.equal(map.size, 3, 'dense 双 ID + FTS 单 ID 全部建立反查（新布局不再恒空）');
+    assert.equal(map.get('m-a1')?.group, 'a/b');
+    assert.equal(map.get('m-a1')?.relation, '文档A');
+    assert.equal(map.get('f-b1')?.relation, '文档B');
+  });
+
+  it('批次 2 R10：新布局写路径 bump revision → 身份变化立即失效（不等 TTL）', async () => {
+    setupConfig();
+    const { writeGroupCache, writeGroupCacheBatch } = await import('../src/lib/group-cache.js');
+    writeGroupCacheBatch('default', new Map([
+      ['a', { version: 1, scope: 'default', hot_relations: [{ id: 'r1', text: '旧', score: 1, memoryId: 'm-old' } as never], keywords: [] }],
+    ]));
+    const first = getRelationMap('default');
+    assert.ok(first.has('m-old'));
+
+    // 走正式写原语 bump revision（模拟 import/sync 写后）
+    writeGroupCache('default', 'a', {
+      version: 1, scope: 'default',
+      hot_relations: [{ id: 'r1', text: '旧', score: 1, memoryId: 'm-old' }, { id: 'r2', text: '新', score: 1, memoryId: 'm-new' }] as never,
+      keywords: [],
+      updatedAt: null,
+    });
+    const second = getRelationMap('default');
+    assert.ok(second.has('m-new'), 'revision bump 后新写入数据立即可见（不等 TTL）');
+    assert.ok(second.has('m-old'));
   });
 });

@@ -71,6 +71,24 @@ export function resolveDefaultDataPaths(includeEnv = false): ResolvedDefaultPath
   return { dataDir, backupDir: path.join(home, '.ki', 'backup') };
 }
 
+/**
+ * 会话存储根目录的默认值（REQ-20260924-001 · S02 §3.1）。
+ *
+ * ★ **基准派生自 `dataDir`**（与 `dataDir` 平级，即其父目录下），**不得硬编码 `~/.ki`**。
+ * 理由（注意：`vectorDir` 也硬编码了 homedir，**不是**同源先例 —— 此处不重复既有债务）：
+ * 1. **修真实用户问题**：硬编码会绕过 config 链路 → 用户配置 `dataDir` 后
+ *    chat 数据**不跟随**，会话落在与该实例无关的目录里。
+ *    （默认 `dataDir` = `~/.ki/kb` → `chatDir` = `~/.ki/chat`，这只是同源推导的**结果**）
+ * 2. **让测试可隔离**：基准走 `loadConfig()` 链路后，测试只需用 `KI_CONFIG_PATH`
+ *    指向含 `chatDir:` 的临时配置即可隔离，无需污染真实 `~/.ki/chat/`。
+ *
+ * 与 `dataDir` **同口径**：**运行时不做 env 回退**（见 `resolveDefaultDataPaths` 注释
+ * 与 docs/cli.md），故此处不引入 `KI_CHAT_DIR`，避免造出不对称语义。
+ */
+export function resolveDefaultChatDir(dataDir: string): string {
+  return path.join(path.dirname(dataDir), DEFAULT_CHAT_DIR_NAME);
+}
+
 // ─── 类型 ───
 
 export interface WikiSyncConfig {
@@ -100,6 +118,12 @@ export interface CleanConfig {
 export interface ImportConfig {
   extensions?: string[];                  // 格式白名单（默认 [.md]）
   maxFileSize?: number;                   // 单文件大小上限（字节，默认 1MB）
+  /** 整批预算（S0-3，REQ-20260930-002）：文件数/总字节/预计 chunk 数，超限在写入前拒绝 */
+  batch?: {
+    maxBatchFiles?: number;
+    maxBatchBytes?: number;
+    maxBatchChunks?: number;
+  };
   /** 附件（本地图片）收集开关（REQ-20260904-001，默认 true；false = 不复制附件，前端显示占位块） */
   assets?: boolean;
   /** 单附件大小上限（字节，REQ-20260904-001，默认 5MB；超限跳过该附件并告警，不阻断导入） */
@@ -127,13 +151,82 @@ export interface McpConfig {
 export interface VectorResourceConfig {
   /** daemon 进程最多同时保留的 Collection handle；未配置时使用保守默认值。 */
   maxOpenCollections?: number;
+  /** 索引整理（S-01，REQ-20261009-003）：导入收尾异步触发 optimize 的口径 */
+  optimize?: {
+    enabled?: boolean;
+    /** 整理线程数；未配置 = 引擎自动（实验 1：1 ≈ 1.0 核） */
+    concurrency?: number;
+    /** 等待上限；超时按"中断"处理（默认 600000） */
+    timeoutMs?: number;
+  };
 }
+
+/**
+ * 模型配置段（REQ-20260924-001 · S01 §3 + §9.1）。
+ *
+ * ⚠️ **无内置默认模型**（D8）：用户必须自填 baseURL / model / apiKey；
+ * 缺任一项即由 `resolveLlmStatus` 判为未就绪（`enabled:false` + `CHAT_DISABLED`），
+ * 不落任何默认模型（否则会把第三方服务与计费绑定到项目上）。
+ */
+export interface LlmConfig {
+  /** 必填，OpenAI 兼容地址（如 https://host/compatible-mode/v1） */
+  baseURL: string;
+  /** 必填，用户自填，不预置默认（D8） */
+  model: string;
+  /** 必填，**已解析**（支持 ${ENV_VAR} 引用，与 embedding.apiKey 同款解析） */
+  apiKey: string;
+  /** 默认不传（不下发 max_tokens）：该上游 reasoning token 与 max_tokens 关系不确定，设小值有截断答案风险 */
+  maxTokens?: number;
+  /** 默认 0.7 */
+  temperature?: number;
+  /** 默认 300000（D13 后重估，见 S01 §9.2）；旧配置 180000 写法仍可加载 */
+  requestTimeoutMs?: number;
+  /** 默认 30000，仅约束"建立连接并收到首个 chunk" */
+  firstByteTimeoutMs?: number;
+  /** 可选，新建会话的初始提示词 */
+  defaultSystemPrompt?: string;
+  /** 默认 false：模型是否支持图片输入（用户手填，不自动探测 —— D11，本期不实现，字段保留） */
+  supportsImages?: boolean;
+  /** 默认 4：单条消息最多携带图片数（本期不实现，字段保留） */
+  maxImagesPerMessage?: number;
+  /** 默认 4MB：单图原始大小上限（本期不实现，字段保留） */
+  maxImageBytes?: number;
+  // ── v2（D13）────────────────────────────────
+  /** 默认 true：模型是否支持 function calling（T10）。false → 走预检索降级（S07 §3.7） */
+  supportsTools?: boolean;
+  /** 默认 false：用户是否已确认"知识库内容外发"（T12）。false → 面板阻塞发送（S07 §3.8） */
+  kbDisclosureAck?: boolean;
+  // ── v3（REQ-20261013-001）──────────────────────────
+  /**
+   * 上下文上限（**字符数**，默认 1000000 = 1000K）。仅用于面板占比与阈值预警的**分母**，
+   * 不是模型的真实窗口（模型按 token 计；字符口径偏保守，见需求 REQ-20261013-001 §4）。
+   */
+  contextChars?: number;
+  // ── v4（REQ-20261016-001）──────────────────────────
+  /**
+   * 思考级别：**可选档位清单**（面板选项来源 + 合法性白名单）。
+   *
+   * 按 **OpenAI 通用协议纯透传**，本地**不校验具体取值**（D5：不做厂商适配）；
+   * 只校验：元素为 1–64 字符非空字符串、≤20 个、不重复、不得等于保留字 `__follow_default__`。
+   */
+  reasoningEfforts?: string[];
+  /**
+   * 思考级别：**部署默认档**（运维级）。若存在必须 ∈ `reasoningEfforts`（跨字段校验见 config-schema）。
+   *
+   * 与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发**。
+   */
+  reasoningEffort?: string;
+}
+
+/** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
+export const DEFAULT_CHAT_DIR_NAME = 'chat';
 
 export interface EmbeddingConfig {
   provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
   model: string;         // 模型名称
-  dimension: number;     // 向量维度（必须 === collection.dimension，kisearch 固定 4096）
+  dimension: number;     // 向量维度：必须与集合 dimension、上游模型输出维度三者一致
+                         // （随配置，不固定；改维度需重建集合 —— schema 无 alter API）
   apiKey?: string;       // API 密钥：支持明文（sk-xxx）或环境变量引用（${VAR_NAME}）；
                          // 缺省则不解析（KI 层 fail-loud），不做任何隐式 env 回退
   /** 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 参数按秒覆盖本值。 */
@@ -150,6 +243,8 @@ export interface KiConfig {
   scopes: Record<string, ScopeConfig>;   // 保留（KB 目录映射；strict 模式下 key 兼作 scope 白名单）
   vector?: VectorResourceConfig;         // Collection handle/worker 资源治理
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
+  llm?: LlmConfig;                       // 【新增】模型配置段（REQ-20260924-001）；缺失 = 未配置（fail-loud）
+  chatDir?: string;                      // 【新增】会话存储根目录（默认 ~/.ki/chat，独立于 kb/）
   /** 字段校验告警（废弃字段 / null scope 条目等）：不阻断加载，由 ki doctor 报告 */
   _fieldWarnings?: ConfigIssue[];
   _configPath?: string;                  // 配置文件路径（内部）
@@ -168,6 +263,9 @@ const DEFAULT_EMBEDDING: EmbeddingConfig = {
 
 const DEFAULT_VECTOR_RESOURCES: VectorResourceConfig = {
   maxOpenCollections: 8,
+  // S-01：默认自动整理。**concurrency 默认 1**（设计 D5：实验 1 实测 1 ≈ 1.0 核；
+  // 不传（引擎自动）峰值可达 4.3 核，与"整理不得打满 CPU"的诉求相悖）
+  optimize: { enabled: true, concurrency: 1, timeoutMs: 600_000 },
 };
 
 /** 请求级配置快照，贯穿 daemon/HTTP 请求的排队与执行链。 */
@@ -495,6 +593,41 @@ function parseAndExpand(configFile: string): KiConfig {
     ? expandPath(String(raw.vectorDir), configDir)
     : path.join(os.homedir(), '.ki', 'vector');
 
+  // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）。
+  // 独立于 kb/ 与 vectorDir：快照恢复/删除 Group 只操作 kb/，会话因此天然免疫（D4）。
+  // ★ 默认值派生自 `dataDir`（见 resolveDefaultChatDir），不硬编码 `~/.ki`。
+  const chatDir = raw.chatDir
+    ? expandPath(String(raw.chatDir), configDir)
+    : resolveDefaultChatDir(dataDir);
+
+  // 【新增】llm：模型配置段（REQ-20260924-001 · S01 §3 + §9.1）。
+  // ⚠️ 不给默认模型（D8）：缺失时留 undefined，由 resolveLlmStatus 判「未就绪」返回
+  // enabled:false + CHAT_DISABLED（GET /api/chat/config 仍返回 200 + ok:true）。
+  // apiKey 复用 resolveApiKey 预解析（与 embedding.apiKey 同款）：支持 ${ENV} 且集中一处解析规则。
+  let llm: LlmConfig | undefined;
+  if (raw.llm && typeof raw.llm === 'object' && !Array.isArray(raw.llm)) {
+    const rl = raw.llm as Record<string, unknown>;
+    llm = {
+      baseURL: rl.baseURL ? String(rl.baseURL) : '',
+      model: rl.model ? String(rl.model) : '',
+      apiKey: resolveApiKey(rl.apiKey) ?? '',
+      maxTokens: rl.maxTokens !== undefined ? Number(rl.maxTokens) : undefined,
+      temperature: rl.temperature !== undefined ? Number(rl.temperature) : undefined,
+      requestTimeoutMs: rl.requestTimeoutMs !== undefined ? Number(rl.requestTimeoutMs) : undefined,
+      firstByteTimeoutMs: rl.firstByteTimeoutMs !== undefined ? Number(rl.firstByteTimeoutMs) : undefined,
+      defaultSystemPrompt: rl.defaultSystemPrompt !== undefined ? String(rl.defaultSystemPrompt) : undefined,
+      supportsImages: rl.supportsImages !== undefined ? Boolean(rl.supportsImages) : undefined,
+      maxImagesPerMessage: rl.maxImagesPerMessage !== undefined ? Number(rl.maxImagesPerMessage) : undefined,
+      maxImageBytes: rl.maxImageBytes !== undefined ? Number(rl.maxImageBytes) : undefined,
+      supportsTools: rl.supportsTools !== undefined ? Boolean(rl.supportsTools) : undefined,
+      kbDisclosureAck: rl.kbDisclosureAck !== undefined ? Boolean(rl.kbDisclosureAck) : undefined,
+      contextChars: rl.contextChars !== undefined ? Number(rl.contextChars) : undefined,
+      // REQ-20261016-001：思考级别（字段校验见 config-schema；此处只做形状归一化）
+      reasoningEfforts: Array.isArray(rl.reasoningEfforts) ? rl.reasoningEfforts.map((v) => String(v)) : undefined,
+      reasoningEffort: rl.reasoningEffort !== undefined ? String(rl.reasoningEffort) : undefined,
+    };
+  }
+
   // 【新增】embedding：与默认合并，允许部分覆盖
   const rawEmbedding = (raw.embedding && typeof raw.embedding === 'object')
     ? raw.embedding as Record<string, unknown>
@@ -526,10 +659,21 @@ function parseAndExpand(configFile: string): KiConfig {
   const rawVector = raw.vector && typeof raw.vector === 'object'
     ? raw.vector as Record<string, unknown>
     : {};
+  const rawOptimize = rawVector.optimize && typeof rawVector.optimize === 'object'
+    ? rawVector.optimize as Record<string, unknown>
+    : {};
   const vector: VectorResourceConfig = {
     maxOpenCollections: rawVector.maxOpenCollections !== undefined
       ? Number(rawVector.maxOpenCollections)
       : DEFAULT_VECTOR_RESOURCES.maxOpenCollections,
+    // S-01（REQ-20261009-003）：索引整理口径（缺省沿用 DEFAULT_VECTOR_RESOURCES.optimize）
+    optimize: {
+      enabled: rawOptimize.enabled !== undefined ? rawOptimize.enabled !== false : true,
+      ...(rawOptimize.concurrency !== undefined ? { concurrency: Number(rawOptimize.concurrency) } : {}),
+      timeoutMs: rawOptimize.timeoutMs !== undefined
+        ? Number(rawOptimize.timeoutMs)
+        : DEFAULT_VECTOR_RESOURCES.optimize?.timeoutMs,
+    },
   };
 
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'
@@ -579,13 +723,29 @@ function parseAndExpand(configFile: string): KiConfig {
             hooks: Array.isArray(c.hooks) ? (c.hooks as unknown[]).map(String) : undefined,
           };
         }
-        // 【新增】import 配置（REQ-08）
+        // 【新增】import 配置（REQ-08；batch 为 S0-3 增补）
         let imp: ImportConfig | undefined;
         if (s.import && typeof s.import === 'object') {
           const im = s.import as Record<string, unknown>;
+          // batch 数值防御：NaN/Infinity/非法字符串/空串一律视为未配置（回落默认预算），
+          // 不得进入 resolveImportBudget 的 ≤0=显式关闭分支（否则笔误会静默拆掉护栏；
+          // 显式关闭仍用数值 0 / 负数表达）
+          const batchNum = (v: unknown): number | undefined => {
+            if (v === undefined || v === null) return undefined;
+            if (typeof v === 'string' && v.trim() === '') return undefined;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : undefined;
+          };
           imp = {
             extensions: Array.isArray(im.extensions) ? (im.extensions as unknown[]).map(String) : undefined,
             maxFileSize: im.maxFileSize !== undefined ? Number(im.maxFileSize) : undefined,
+            ...(im.batch && typeof im.batch === 'object' ? {
+              batch: {
+                maxBatchFiles: batchNum((im.batch as Record<string, unknown>).maxBatchFiles),
+                maxBatchBytes: batchNum((im.batch as Record<string, unknown>).maxBatchBytes),
+                maxBatchChunks: batchNum((im.batch as Record<string, unknown>).maxBatchChunks),
+              },
+            } : {}),
           };
         }
         scopes[name] = {
@@ -603,7 +763,7 @@ function parseAndExpand(configFile: string): KiConfig {
   }
 
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, vector, mcp, llm, chatDir,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };
@@ -621,6 +781,9 @@ function buildDefaults(): KiConfig {
     vector: { ...DEFAULT_VECTOR_RESOURCES },
     scopeMode: 'default',
     scopes: {},
+    // llm 刻意不给默认值（D8）：无配置即"未配置"，由 resolveLlmStatus 判 CHAT_DISABLED。
+    // chatDir 给默认值（会话目录是纯本地路径，无需用户配置即可工作），★ 基准派生自 dataDir。
+    chatDir: resolveDefaultChatDir(dataDir),
   };
 }
 
@@ -663,6 +826,21 @@ export function getScopeCleanConfig(config: KiConfig, scope: string): CleanConfi
  */
 export function getScopeImportConfig(config: KiConfig, scope: string): ImportConfig | null {
   return config.scopes[scope]?.import ?? null;
+}
+
+/** 默认格式白名单：.md（REQ-08，可通过 `scopes.<scope>.import.extensions` 扩展） */
+export const DEFAULT_EXTENSIONS = ['.md'];
+
+/**
+ * scope 的导入扩展名白名单 —— **唯一解析入口**。
+ *
+ * 导入扫描（run）、候选重算（prune）、数据源 add 校验、上传校验必须共用：
+ * 各自写一份会让两次扫描的文件集合不同 ⇒ 候选漂移 + token 恒失配。
+ * 先例：`/api/import/prune` 曾用默认 `.md`，放宽过 `.mdx` 的 scope 会把仍在本地
+ * 的大批文件判成「已删除」（2026-10-20 code review Q2，P0）。
+ */
+export function resolveImportExtensions(config: KiConfig, scope: string): string[] {
+  return getScopeImportConfig(config, scope)?.extensions ?? DEFAULT_EXTENSIONS;
 }
 
 /**
@@ -769,7 +947,7 @@ export function removeScopeFromConfigFile(scope: string): RemoveScopeResult {
  *  2. rename 会用临时文件的权限覆盖目标，而配置可能含 apiKey 明文；
  *     原本 0600 的文件被改成默认 0644 就是密钥泄露，故必须显式沿用原 mode。
  */
-function atomicWriteConfig(configPath: string, content: string): void {
+export function atomicWriteConfig(configPath: string, content: string): void {
   const tmp = `${configPath}.tmp-${process.pid}`;
   let mode: number | undefined;
   try {

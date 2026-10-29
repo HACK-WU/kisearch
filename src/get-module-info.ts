@@ -20,6 +20,9 @@ import type { Relation } from './lib/scoring.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { hasShardedLayout, listGroupPaths, loadGroupCache, loadPartitionConfig, writeGroupCache, buildGroupMatchContext } from './lib/group-cache.js';
+// S-04 I2 补口（2026-10-10）：本文件是**读详情**路径，但会回写评分（元数据）→ 必须入提交窗口
+import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
@@ -56,22 +59,28 @@ export interface GetModuleInfoParams {
 }
 
 export type GetModuleInfoResult =
-  | { ok: true; scope: string; content: string; revision: string; totalLines: number; hint?: string }
+  | { ok: true; scope: string; content: string; revision: string; totalLines: number; hint?: string; /** 落点来源（REQ-20261021-001）：仅兜底写入时下发，缺省即显式 */ groupSource?: 'scope-fallback' }
   | { ok: false; error: string; hint?: string };
 
 /**
  * 在 Group 内查找 Relation：先精确匹配（id 或名称），未命中再走向量模糊兜底。
  * 供单条/批量两条链路复用；searchPath 自带降级（向量不可用返回 null，静默跳过模糊匹配）。
+ *
+ * @param noVectorFallback true = **跳过**向量兜底（纯元数据读，不打开 zvec）。
+ *   这是 HTTP `/api/doc/get` 能以 `read` 类型入队的前提（read 契约要求不触碰引擎，
+ *   见 operation-coordinator.ts 的 TaskKind 说明）。
  */
 async function findRelationWithFuzzy(
   groupData: GroupData,
   relation: string,
-  scope: string
+  scope: string,
+  noVectorFallback = false
 ): Promise<{ rel: Relation; fuzzyHint?: string } | null> {
   const exact = groupData.hot_relations.find(
     (r) => r.id === relation || r.text === relation
   );
   if (exact) return { rel: exact };
+  if (noVectorFallback) return null;
 
   const fuzzyRel = await searchPath(relation, 'ki-relation', scope);
   if (fuzzyRel && fuzzyRel.matched) {
@@ -87,7 +96,20 @@ async function findRelationWithFuzzy(
   return null;
 }
 
-async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<GetModuleInfoResult> {
+/**
+ * 读详情的选项（REQ 2026-10-13 读通道解耦）：
+ * `noVectorFallback=true` 时全程不打开 zvec —— 不做 group 路径与 relation 名的向量模糊兜底。
+ * 这是 HTTP `/api/doc/get` 能以 `read` 类型入队的前提（read 只与「元数据提交窗口」互斥、
+ * 可旁路导入/向量化长任务；见 operation-coordinator.ts 的 TaskKind 契约）。
+ */
+export interface GetModuleInfoReadOptions {
+  noVectorFallback?: boolean;
+}
+
+export async function executeGetModuleInfoLocal(
+  params: GetModuleInfoParams,
+  opts: GetModuleInfoReadOptions = {}
+): Promise<GetModuleInfoResult> {
   try {
     const { scope, relation } = params;
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
@@ -95,15 +117,35 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     validateScope(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+    // 批次 2（R1，S0-5 核心收益点）：单文档读取改单组读——新布局只读目标组分片
+    //（树匹配用 listGroupPaths 轻量枚举键，不聚合全量 relation），评分回写只写该组。
+    // 旧布局保持整读整写（兼容期行为不变）。
+    const hasSharded = hasShardedLayout(scope);
+    let groupsContext: Record<string, unknown>;
+    let partitionConfig: PartitionConfig;
+    if (hasSharded) {
+      const keys = listGroupPaths(scope);
+      // 占位值须为真值对象（resolveGroupPath 用 truthy 判断；传 null 会让树/cache 不同步时
+      // 的“直接匹配”兜底分支失效——批次 2 审查 P1-2）
+      groupsContext = buildGroupMatchContext(keys);
+      partitionConfig = loadPartitionConfig(scope);
+    } else {
+      const cache = readJson<RelationsCache>(getRelationsCachePath(scope));
+      if (!cache) {
+        return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+      }
+      groupsContext = cache.groups;
+      partitionConfig = cache.partition_config || DEFAULT_PARTITION_CONFIG;
     }
 
     const groupIndex = readGroupIndex(scope);
-    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups, scope);
+    // 不传 scope ⇒ 关闭 resolveGroupPath 步骤 7 的向量语义兜底（noVectorFallback 场景）
+    const resolved = await resolveGroupPath(
+      group,
+      groupIndex || { version: 1, scope, groups: {}, updatedAt: null },
+      groupsContext,
+      opts.noVectorFallback ? undefined : scope
+    );
 
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到有效路径`, hint: resolved.hint };
@@ -113,7 +155,11 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     const hints: string[] = [];
     if (resolved.hint) hints.push(resolved.hint);
 
-    const groupData = cache.groups[resolvedGroup];
+    // R1：新布局按 resolvedGroup 精确读目标组分片；旧布局读整文件中该组（兼容）
+    // R1：按 resolvedGroup 精确读目标组（新布局=单组分片；旧布局=整文件中该组）
+    const groupData: GroupData | null = hasSharded
+      ? loadGroupCache(scope, resolvedGroup)
+      : (groupsContext[resolvedGroup] as GroupData | undefined) ?? null;
     if (!groupData) {
       return {
         ok: false,
@@ -124,7 +170,7 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
 
     let rel: Relation | null = null;
     {
-      const found = await findRelationWithFuzzy(groupData, relation, scope);
+      const found = await findRelationWithFuzzy(groupData, relation, scope, opts.noVectorFallback === true);
       if (found) {
         rel = found.rel;
         if (found.fuzzyHint) hints.push(found.fuzzyHint);
@@ -171,12 +217,45 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
     // 更新评分（recordUse）
     const now = Date.now();
     const updatedRel = recordUse(rel, now);
-    const config = cache!.partition_config || DEFAULT_PARTITION_CONFIG;
-    updatedRel.score = calculateScore(updatedRel.useCount, updatedRel.lastUsedTime, now, config.halfLifeHours);
+    updatedRel.score = calculateScore(updatedRel.useCount, updatedRel.lastUsedTime, now, partitionConfig.halfLifeHours);
 
     const relIdx = groupData.hot_relations.findIndex((r) => r.id === rel.id);
     groupData.hot_relations[relIdx] = updatedRel;
-    writeJson(cachePath, cache! as unknown as Record<string, unknown>);
+    // R1（S0-5 核心收益）：评分回写只写该组分片（三步曲：bump→WAL→失效）；
+    // 旧布局保持整文件回写（兼容期行为不变）。
+    //
+    // 第二轮审查 P2：布局在本函数 `await resolveGroupPath`（含向量兜底，窗口可达秒级）
+    // 期间可能被另一进程惰性迁移——按入口快照写会把评分回写进已改名 `.bak` 的旧文件，
+    // 此后无人读（静默丢失）。这里按**写入时刻**的布局重判。
+    const writeShard = (): void => {
+      writeGroupCache(scope, resolvedGroup, {
+        version: 1,
+        scope,
+        hot_relations: groupData.hot_relations,
+        keywords: groupData.keywords ?? [],
+        updatedAt: null,
+      });
+    };
+    // ★ S-04 I2 补口（2026-10-10）：评分回写属**元数据写**，必须入「元数据提交窗口」。
+    // 本函数是**读详情**路径（工具调用本身串行），但自 I4 起 `read` 通道任务可与写任务
+    // 并行 ⇒ 窗外写会让并发读看到"半新半旧"（跨文件不一致）。
+    // 窗口只包住写本身（毫秒级），**不含**上面的 `await resolveGroupPath`（可达秒级）。
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+      if (hasShardedLayout(scope)) {
+        writeShard();
+      } else {
+        // 旧布局：读改写完整 cache（partition_config 等顶层字段不可丢）
+        const legacyPath = getRelationsCachePath(scope);
+        const fullCache = readJson<RelationsCache>(legacyPath);
+        if (fullCache) {
+          fullCache.groups[resolvedGroup] = groupData;
+          writeJson(legacyPath, fullCache as unknown as Record<string, unknown>);
+        } else {
+          // 旧文件已在本轮 await 期间被迁移（改名 .bak）→ 补写分片
+          writeShard();
+        }
+      }
+    });
 
     return {
       ok: true,
@@ -185,6 +264,8 @@ async function executeGetModuleInfoLocal(params: GetModuleInfoParams): Promise<G
       revision: contentRevision(markdown),
       totalLines: markdown.split(/\r?\n/).length,
       ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
+      // 落点来源留痕（REQ-20261021-001）：只在兜底时下发
+      ...(rel.groupSource ? { groupSource: rel.groupSource } : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -268,21 +349,34 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     validateScope(scope);
     ensureScopeDir(scope);
 
-    const cachePath = getRelationsCachePath(scope);
-    const cache = readJson<RelationsCache>(cachePath);
-    if (!cache) {
-      return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+    // 批次 2（R1 批量）：单组读（同单条模式——批量本就限定同一 Group）
+    const batchSharded = hasShardedLayout(scope);
+    let batchGroupsContext: Record<string, unknown>;
+    let batchPartitionConfig: PartitionConfig;
+    if (batchSharded) {
+      const keys = listGroupPaths(scope);
+      batchGroupsContext = buildGroupMatchContext(keys);
+      batchPartitionConfig = loadPartitionConfig(scope);
+    } else {
+      const cache = readJson<RelationsCache>(getRelationsCachePath(scope));
+      if (!cache) {
+        return { ok: false, error: 'relations-cache.json 不存在', hint: '请先使用 sync-relation.ts 写入关系' };
+      }
+      batchGroupsContext = cache.groups;
+      batchPartitionConfig = cache.partition_config || DEFAULT_PARTITION_CONFIG;
     }
 
     // Group 路径解析：批量只做一次（省 N-1 次向量语义兜底调用）
     const groupIndex = readGroupIndex(scope);
-    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, cache.groups, scope);
+    const resolved = await resolveGroupPath(group, groupIndex || { version: 1, scope, groups: {}, updatedAt: null }, batchGroupsContext, scope);
     if (!resolved.matched) {
       return { ok: false, error: `Group "${group}" 未匹配到有效路径`, hint: resolved.hint };
     }
     const resolvedGroup = resolved.resolvedPath;
 
-    const groupData = cache.groups[resolvedGroup];
+    const groupData: GroupData | null = batchSharded
+      ? loadGroupCache(scope, resolvedGroup)
+      : (batchGroupsContext[resolvedGroup] as GroupData | undefined) ?? null;
     if (!groupData) {
       return {
         ok: false,
@@ -307,7 +401,7 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     const now = Date.now();
-    const config = cache.partition_config || DEFAULT_PARTITION_CONFIG;
+    const config = batchPartitionConfig;
     const results: BatchRelationResult[] = [];
     let scoreUpdated = false;
 
@@ -356,7 +450,24 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     if (scoreUpdated) {
-      writeJson(cachePath, cache as unknown as Record<string, unknown>);
+      // ★ S-04 I2 补口（见上处说明）：批量查询的评分回写同样入窗
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        if (batchSharded) {
+          writeGroupCache(scope, resolvedGroup, {
+            version: 1,
+            scope,
+            hot_relations: groupData.hot_relations,
+            keywords: groupData.keywords ?? [],
+            updatedAt: null,
+          });
+        } else {
+          const fullCache = readJson<RelationsCache>(getRelationsCachePath(scope));
+          if (fullCache) {
+            fullCache.groups[resolvedGroup] = groupData;
+            writeJson(getRelationsCachePath(scope), fullCache as unknown as Record<string, unknown>);
+          }
+        }
+      });
     }
 
     const failed = results.filter((r) => !r.ok).length;

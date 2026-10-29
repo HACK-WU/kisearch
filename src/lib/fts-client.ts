@@ -198,11 +198,12 @@ export async function ftsDeleteByFilter(params: {
   scope: string;
   group?: string;
   relation?: string;
+  tag?: string;
 }): Promise<number> {
   const scope = resolveScope(loadConfig(), params.scope);
   if (!collectionExists(scope)) return 0;
   return withEngine(scope, async (engine) => {
-    const ids = await engine.listIds(filterForScope(scope, params.group, params.relation), 10_000);
+    const ids = await engine.listIds(filterForScope(scope, params.group, params.relation, params.tag), 10_000);
     if (ids.length === 0) return 0;
     const result = await engine.delete(ids);
     return result.ok;
@@ -230,6 +231,20 @@ export async function ftsDeleteByIds(params: { scope: string; ids: string[] }): 
       failedIds,
     };
   });
+}
+
+/**
+ * 删除某 scope 的 FTS-only collection 目录（scope delete / clear 用）。
+ * 先关闭本进程内的 engine，再按 getScopeFtsCollectionPath 的路径守卫删除目录。
+ */
+export async function deleteFtsCollection(scopeInput: string): Promise<{ removed: boolean; path: string }> {
+  const config = loadConfig();
+  const scope = resolveScope(config, scopeInput);
+  await closeFtsEngine(scope);
+  const target = getScopeFtsCollectionPath(config, scope);
+  if (!fs.existsSync(target)) return { removed: false, path: target };
+  fs.rmSync(target, { recursive: true, force: true });
+  return { removed: true, path: target };
 }
 
 export async function closeFtsEngine(scope?: string): Promise<void> {

@@ -38,15 +38,15 @@ const ICON_FOLDER_SM = (
   <svg className="ki-gtree-icon" viewBox="0 0 16 16" fill="none">
     <path
       d="M1.5 3.2c0-.5.4-.9.9-.9h3.2l1.5 1.6h6c.5 0 .9.4.9.9v7.1c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V3.2z"
-      fill="#7db3ef"
-      stroke="#5f97d6"
-      strokeWidth="0.6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
     />
   </svg>
 );
 
 /** 递归 Group 树（点击节点选中并关闭）；activePath 用于高亮当前选中项 */
-function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: GTreeNode[]; onPick: (n: GTreeNode) => void; activePath?: string; allowParentPick: boolean }): JSX.Element {
+function GroupTreeView({ nodes, onPick, activePath, allowParentPick, disabled = false }: { nodes: GTreeNode[]; onPick: (n: GTreeNode) => void; activePath?: string; allowParentPick: boolean; disabled?: boolean }): JSX.Element {
   const [tree, setTree] = useState<GTreeNode[]>(nodes);
   useEffect(() => setTree(nodes), [nodes]);
 
@@ -61,6 +61,7 @@ function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: 
    * - 不可选父目录（浏览场景的纯目录）：仅展开/折叠
    */
   const activate = (n: GTreeNode): void => {
+    if (disabled) return;
     if (isGroupSelectable(n, allowParentPick)) {
       onPick(n);
       return;
@@ -79,16 +80,18 @@ function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: 
         <div
           className={`ki-gtree-dir${activePath && n.path === activePath ? ' ki-gtree-dir--active' : ''}`}
           role="treeitem"
-          tabIndex={0}
+          tabIndex={disabled ? -1 : 0}
           title={label}
           aria-label={label}
           aria-expanded={hasSub ? n.open : undefined}
           aria-selected={activePath === n.path}
           onClick={(e) => {
+            if (disabled) return;
             e.stopPropagation();
             activate(n);
           }}
           onKeyDown={(e) => {
+            if (disabled) return;
             if (e.target !== e.currentTarget) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
@@ -101,6 +104,7 @@ function GroupTreeView({ nodes, onPick, activePath, allowParentPick }: { nodes: 
               type="button"
               tabIndex={-1}
               aria-hidden="true"
+              disabled={disabled}
               onClick={(e) => { e.stopPropagation(); toggleOpen(n.path); }}
             >
               {n.open ? '▾' : '▸'}
@@ -133,9 +137,11 @@ interface GroupPathSelectProps {
    * 浏览/筛选场景使用（输入不存在的 Group 只会得到空列表）；导入等需要新建 Group 的场景保持默认 false。
    */
   selectOnly?: boolean;
+  /** 禁止在目标 Scope 未确认时操作 Group。 */
+  disabled?: boolean;
 }
 
-export function GroupPathSelect({ scope, value, onChange, placeholder, hint, error, selectOnly = false }: GroupPathSelectProps): JSX.Element {
+export function GroupPathSelect({ scope, value, onChange, placeholder, hint, error, selectOnly = false, disabled = false }: GroupPathSelectProps): JSX.Element {
   const [open, setOpen] = useState(false);
   /** 是否已确认（回车确认或从下拉选中） */
   const [confirmed, setConfirmed] = useState(false);
@@ -175,6 +181,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
   };
 
   const openPicker = (): void => {
+    if (disabled) return;
     setFilter('');
     setOpen(true);
   };
@@ -183,11 +190,18 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setOpen(false);
   };
 
-  /** 只选模式下按关键字过滤后的树；非只选模式恒为原树（filter 始终为空）。
+  useEffect(() => {
+    if (!disabled) return;
+    setOpen(false);
+    setFilter('');
+  }, [disabled]);
+
+  /** 只选模式按独立搜索词过滤；可新建模式按当前输入值过滤（输入既有路径片段即搜索，
+   *  输入不存在路径时树为空、底部给出「将新建」）。
    *  memo 化：否则每次渲染都重建节点对象，子组件同步本地展开态的 effect 会被反复触发。 */
   const filtered = useMemo(
-    () => filterGroupTree(tree, selectOnly ? filter : ''),
-    [tree, filter, selectOnly],
+    () => filterGroupTree(tree, selectOnly ? filter : value),
+    [tree, filter, selectOnly, value],
   );
   const searching = selectOnly && filter.trim().length > 0;
 
@@ -196,6 +210,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
    * 只选模式为搜索语义 —— 唯一匹配直接选中，否则仅收起面板（不会写入任何新路径）。
    */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (disabled) return;
     if (e.key === 'Escape' && selectOnly && open) {
       e.preventDefault();
       closePicker();
@@ -218,7 +233,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
   const isNew = !selectOnly && value && !isPathInTree(tree, value);
 
   return (
-    <div className={`ki-combobox${selectOnly ? ' ki-combobox--select-only' : ''}`} ref={rootRef}>
+    <div className={`ki-combobox${selectOnly ? ' ki-combobox--select-only' : ''}`} ref={rootRef} aria-disabled={disabled || undefined}>
       <div className="ki-combobox__input-wrap">
         <input
           className={`ki-form-input${isNew ? ' ki-form-input--new' : ''}${!selectOnly && confirmed ? ' ki-form-input--confirmed' : ''}${error ? ' ki-form-input--error' : ''}`}
@@ -228,6 +243,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
               : placeholder ?? '选择或输入 Group 路径，如：wiki/我的文档'
           }
           value={selectOnly && open ? filter : value}
+          disabled={disabled}
           onChange={(e) => {
             // 只选模式：输入只作为过滤词，不写入 Group 值
             if (selectOnly) {
@@ -248,6 +264,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
           type="button"
           className={`ki-combobox__toggle${open ? ' ki-combobox__toggle--open' : ''}`}
           tabIndex={-1}
+          disabled={disabled}
           onClick={(e) => {
             e.stopPropagation();
             if (open) closePicker();
@@ -263,10 +280,12 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
             <div className="ki-cell-sub" style={{ padding: 6 }}>
               {selectOnly
                 ? searching ? '没有匹配的 Group' : '当前 scope 暂无 Group'
-                : '当前 scope 暂无 Group，可直接输入新建'}
+                : value.trim()
+                  ? `没有匹配的 Group（回车将新建：${value.trim()}）`
+                  : '当前 scope 暂无 Group，可直接输入新建'}
             </div>
           ) : (
-            <GroupTreeView nodes={filtered.nodes} onPick={pick} activePath={selectOnly ? value : undefined} allowParentPick={!selectOnly} />
+            <GroupTreeView nodes={filtered.nodes} onPick={pick} activePath={selectOnly ? value : undefined} allowParentPick={!selectOnly} disabled={disabled} />
           )}
         </div>
         <div className="ki-combobox__footer">
@@ -282,9 +301,15 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
             ) : confirmed ? (
               <span style={{ color: 'var(--ki-color-success)' }}>✓ 已确认：{value}</span>
             ) : value && !isPathInTree(tree, value) ? (
-              <span style={{ color: 'var(--ki-color-success)' }}>✚ 将新建 Group：{value}（回车确认）</span>
+              <span style={{ color: 'var(--ki-color-success)' }}>
+                {filtered.matches.length > 0
+                  ? `${filtered.matches.length} 个匹配 · 回车新建「${value}」`
+                  : `✚ 将新建 Group：${value}（回车确认）`}
+              </span>
             ) : value ? (
-              <span style={{ color: 'var(--ki-color-primary)' }}>✓ 已有 Group</span>
+              <span style={{ color: 'var(--ki-color-primary)' }}>
+                {filtered.matches.length > 0 ? `${filtered.matches.length} 个匹配 · ` : ''}✓ 已有 Group
+              </span>
             ) : (
               '输入新路径可新建 Group'
             )}

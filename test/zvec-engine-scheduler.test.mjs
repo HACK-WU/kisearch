@@ -75,3 +75,32 @@ test('ZvecEngine：Embedding 并行、单 writer 写入与逐批进度闭环', a
   const fetched = await engine.fetch(['doc-0', 'doc-1', 'doc-2', 'doc-3', 'doc-4']);
   assert.deepEqual(fetched.map((doc) => doc.id).sort(), ['doc-0', 'doc-1', 'doc-2', 'doc-3', 'doc-4']);
 });
+
+test('ZvecEngine：兼容串行入口遇到系统性 provider 故障后停止后续批次', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'zvec-serial-stop-'));
+  let calls = 0;
+  const embedding = {
+    dimension: DIM,
+    async embed(texts) {
+      calls++;
+      throw Object.assign(new Error('embedding service unavailable'), { code: 'HTTP_503' });
+    },
+  };
+  const engine = await ZvecEngine.create(makeConfig(join(root, 'db'), embedding));
+  t.after(async () => {
+    await engine.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await engine.upsert(
+    Array.from({ length: 129 }, (_, index) => ({ id: `serial-${index}`, text: `doc ${index}` })),
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(result.ok, 0);
+  assert.equal(result.failed, 64);
+  assert.equal(result.notProcessed, 65);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stopReason?.kind, 'provider-unavailable');
+  assert.deepEqual(result.notProcessedItems, Array.from({ length: 65 }, (_, index) => `serial-${index + 64}`));
+});

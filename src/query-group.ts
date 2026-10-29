@@ -11,6 +11,7 @@
  *   --subtree <path>：以指定 Group 为根输出子树结构（结构导航视角，与 --groups 互斥）
  */
 
+import fs from 'node:fs';
 import { Command } from 'commander';
 import { readJson, ensureScopeDir, readGroupIndex } from './lib/store.js';
 import {
@@ -24,6 +25,7 @@ import type { Relation, PartitionResult as ScoringPartitionResult } from './lib/
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
+import { loadCacheShape, hasShardedLayout, getRelationsManifestPath } from './lib/group-cache.js';
 import type { ResolveResult } from './lib/group-resolve.js';
 import { vectorSearch, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -88,7 +90,7 @@ function loadGroupIndex(scope: string): GroupIndex | null {
  *
  * 抛出点位于 executeQueryGroup 的 try 内，对外仍表现为 {ok:false, error}，
  * 不违背「executeXxx 不抛异常、失败以 ok:false 返回」的可复用纯函数契约
- * （MCP 层 ki_query_group 将其转为 isError:true + 同文案；web 前端不调用本工具）。
+ * （MCP 层 ki_group_list 将其转为 isError:true + 同文案；web 前端不调用本工具）。
  *
  * ⚠ 口径差异是有意的，勿误「统一」：同一份 relations-cache，
  * `mcp-http-api.ts::buildDocList` 用宽松降级（`hot_relations?` + `?? []`）。因为那里只是
@@ -98,18 +100,18 @@ function loadGroupIndex(scope: string): GroupIndex | null {
  * group/relation 标注）；而 `wiki-sync.ts::backfillWiki` 则 fail-loud（数据源不完整时
  * 写出的 wiki 是错的）。判据统一为：**降级后会不会产出错误结论**——会则 fail-loud。
  */
-function assertCacheShape(cache: RelationsCache, scope: string, cachePath: string): void {
+function assertCacheShape(cache: RelationsCache, scope: string, source: string): void {
   const MAX_SHOW = 5;
   // 出路刻意不预置 --yes：restore.ts 对快照还原是「先预览总览 → 再加 --yes 执行」的两步门禁
   // （NEG-11，previewAndRequireYes）。预置 --yes 等于替使用者跳过预览，直接触发不可逆的
   // 「删除 + 覆盖 scope 目录」，且看不到将使用哪个快照（默认取最新，可能早于现有数据）；
-  // 本文案还会经 MCP ki_query_group（isError:true）原样流给 AI agent，被照抄执行的风险更高。
+  // 本文案还会经 MCP ki_group_list（isError:true）原样流给 AI agent，被照抄执行的风险更高。
   const hint = `建议：先执行 ki restore ${scope} --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；`
     + `或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）`;
 
   if (!cache.groups || typeof cache.groups !== 'object') {
     throw new Error(
-      `CACHE_SHAPE_INVALID: relations-cache.json 缺少 groups 对象：${cachePath}\n${hint}`
+      `CACHE_SHAPE_INVALID: relations 元数据缺少 groups 对象：${source}\n${hint}`
     );
   }
 
@@ -123,18 +125,34 @@ function assertCacheShape(cache: RelationsCache, scope: string, cachePath: strin
     lines.push(`  ...（另有 ${broken.length - MAX_SHOW} 个 Group 同样损坏，修正以上问题后继续检查）`);
   }
   throw new Error(
-    `CACHE_SHAPE_INVALID: relations-cache.json 结构校验失败：${cachePath}`
+    `CACHE_SHAPE_INVALID: relations 元数据结构校验失败：${source}`
     + `（共 ${broken.length} 个 Group 损坏）\n${lines.join('\n')}\n${hint}`
   );
 }
 
 function loadRelationsCache(scope: string): RelationsCache | null {
-  const cachePath = getRelationsCachePath(scope);
-  const cache = readJson<RelationsCache>(cachePath);
+  // 批次 2（R2）：双轨读——新布局分片聚合（loadCacheShape，含键清洗），旧布局读旧单文件。
+  // partition_config 同步从 manifest 取（新布局）；返回形状不变，全部消费逻辑零改动。
   // cache 为 null 是合法状态（scope 只有 group-index、尚未写入任何 Relation），保持原降级语义；
-  // JSON 语法损坏由 readJson 抛 CORRUPT_JSON，此处只补结构层校验。
+  // JSON 语法损坏由 readJson 抛 CORRUPT_JSON，loadCacheShape 两侧路径同源。
+  //
+  // 批次 2 审查 P1/M5：原实现把**一切**读取异常都吞成 null → 分片/manifest 损坏时
+  // ki_group_list 静默返回空索引树（与 :82-100 自述的 fail-loud 承诺矛盾）。
+  // 现在只把「两布局均无数据」当 null，其余按原样上抛（由 CLI/MCP 层给出错误）。
+  let cache: RelationsCache | null;
+  try {
+    cache = loadCacheShape(scope) as unknown as RelationsCache;
+  } catch (err) {
+    if (!hasShardedLayout(scope) && !fs.existsSync(getRelationsCachePath(scope))) return null;
+    throw err;
+  }
   if (!cache) return null;
-  assertCacheShape(cache, scope, cachePath);
+  // 损坏提示必须指向真实存在的文件：新布局是 manifest（各组分片由 readGroupCache 拦截）
+  assertCacheShape(
+    cache,
+    scope,
+    hasShardedLayout(scope) ? getRelationsManifestPath(scope) : getRelationsCachePath(scope),
+  );
   return cache;
 }
 
@@ -968,7 +986,7 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
 }
 
 export async function executeQueryGroup(params: QueryGroupParams): Promise<QueryGroupResult> {
-  if (shouldUseDaemonClient()) return callDaemon<QueryGroupResult>('query-group', params);
+  if (shouldUseDaemonClient()) return callDaemon<QueryGroupResult>('group-list', params);
   return executeQueryGroupLocal(params);
 }
 

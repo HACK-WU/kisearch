@@ -229,12 +229,19 @@ export function listAllScopes(): string[] {
   const config = loadConfig();
   const scopeSet = new Set<string>();
 
+  // 批次 2：KB 层 scope 判定布局感知——旧布局 relations-cache.json 或新布局
+  // <scope>/.relations/manifest.json 任一存在即算（惰性迁移把旧文件改名 .bak 后，仅判旧文件
+  // 会让已迁移 scope 从 KB 层"消失"：kb:false、计数 0）。不 import group-cache
+  // （它会反向依赖本模块）——直接按路径约定 stat（同步 group-cache.RELATIONS_ROOT_DIR）。
+  const hasKbData = (scopeDir: string): boolean =>
+    fs.existsSync(path.join(scopeDir, 'relations-cache.json'))
+    || fs.existsSync(path.join(scopeDir, '.relations', 'manifest.json'));
+
   if (fs.existsSync(config.dataDir)) {
     const entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
     for (const e of entries) {
       if (e.isDirectory() && /^[a-zA-Z0-9_-]+$/.test(e.name)) {
-        const scopeDir = path.join(config.dataDir, e.name);
-        if (fs.existsSync(path.join(scopeDir, 'relations-cache.json'))) {
+        if (hasKbData(path.join(config.dataDir, e.name))) {
           scopeSet.add(e.name);
         }
       }
@@ -243,7 +250,7 @@ export function listAllScopes(): string[] {
 
   for (const name of Object.keys(config.scopes)) {
     const kbScopeDir = getKbDir(name);
-    if (fs.existsSync(path.join(kbScopeDir, 'relations-cache.json'))) {
+    if (hasKbData(kbScopeDir)) {
       scopeSet.add(name);
     }
   }
@@ -279,5 +286,12 @@ export function setSource(scope: string, source: GroupIndexSource): void {
   };
   data.updatedAt = new Date().toISOString();
 
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  // S-04 I3（REQ-20261009-003）：**原子写** —— tmp + rename。
+  // 原实现为裸 fs.writeFileSync：跨进程读者（CLI query-group / get-module-info / import）
+  // 可能在写入中途读到**截断的 JSON** 并 CORRUPT_JSON fail-loud。
+  // 此处不引 store.writeJson 以避免 scope.ts ↔ store.ts 循环依赖，语义与其一致
+  //（同目录 tmp + 同文件系统 rename）。
+  const tmpPath = `${filePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmpPath, filePath);
 }

@@ -1,4 +1,4 @@
-## 异常处理与恢复
+# 异常处理与恢复
 
 本文档汇总 `knowledge-index` 当前实现中的**常见报错、警告与恢复方式**。
 
@@ -23,18 +23,18 @@
 
 恢复：只使用字母、数字、连字符、下划线，不要包含 `/`、`..`。
 
-### `manage-index.ts` 参数缺失
+### `group.ts` 参数缺失
 
 常见错误：
 
-- `create` 缺少 `--name`
-- 非 `list-scopes` 操作缺少 `--scope`
+- `create` 缺少位置参数 `<path>`
+- `scopeMode: strict` 下缺少 `--scope`
 
-> 忘记 scope 名称？执行 `ki manage-index --action list-scopes` 列出所有已初始化的 scope。
+> 忘记 scope 名称？执行 `ki scope list` 查看全部 scope 及所在层。
 
 ### `sync-relation.ts` 单条模式参数不完整
 
-单条模式要求同时提供 `--group`、`--relation`、`--module-info`。
+单条模式要求 `--relation` 与 `--module-info`；`--group` 可留空（落到与 scope 同名的组）。
 
 ### 配置文件字段不合法（`CONFIG_FIELD_INVALID`）
 
@@ -54,22 +54,22 @@
 
 ## 二类：数据文件缺失或损坏
 
-### `relations-cache.json` 不存在
+### relations 元数据不存在（`relations-cache.json` / `.relations/manifest.json`）
 
 影响：`sync-relation.ts`、`get-module-info.ts`
 
 恢复：先执行任一会触发 `ensureScopeDir` 的命令初始化 scope。
 
-> `query-group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
+> `group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
 
-### `relations-cache.json` 结构损坏（`CACHE_SHAPE_INVALID`）
+### relations 元数据结构损坏（`CACHE_SHAPE_INVALID`）
 
-影响：`query-group.ts`（CLI 与 `ki_query_group` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
+影响：`group.ts`（CLI 与 `ki_group_list` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
 
 典型现象：
 
 ```
-❌ CACHE_SHAPE_INVALID: relations-cache.json 结构校验失败：/root/.ki/kb/<scope>/relations-cache.json（共 2 个 Group 损坏）
+❌ CACHE_SHAPE_INVALID: relations 元数据结构校验失败：/root/.ki/kb/<scope>/.relations/manifest.json（共 2 个 Group 损坏）
   - 工具库/Redis：hot_relations 缺失或不是数组
   - 部署运维：hot_relations 缺失或不是数组
 建议：先执行 ki restore <scope> --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）
@@ -88,7 +88,7 @@
 
 ### `group-index.json` 损坏
 
-影响：`query-group.ts`、`manage-index.ts`
+影响：`group.ts`、`group.ts`
 
 恢复：从用户备份恢复，或从模板重新初始化。
 
@@ -102,7 +102,6 @@
 
 ## 三类：`src/lib/import.ts`（导入核心）相关错误
 
-> 历史：`--mode incremental` 与 `diff` 子命令已废弃移除（git diff 依赖被「幂等追加」语义替代）。
 
 ### `sourceDir 不存在或不是目录`
 
@@ -116,51 +115,54 @@
 
 恢复：确认 source 目录包含 `.md` 文件，或调整格式白名单配置。
 
-### `--group` 为空
+### `--group` 缺省时的落点
 
-原因：`--group` 传了空值。
+`--group` 可以留空：目录导入按源目录的**顶层子目录名**各建根节点；单文档导入用 **scope 名**。需要固定落点时显式传 `--group <path>`。
 
-恢复：检查 `--group` 参数。缺省不传时落到 `default` group。
+### `scope "X" 没有待重试的未完成清单` / `未完成清单为空，无需重试`
 
-### `Access denied to scope: <scope>`
+原因：`ki import --retry-incomplete` 找不到 `<scope>/.ki-import-incomplete.json`（上次导入全部成功，或从未部分成功过）。
 
-原因：scope 未在 `~/.ki/config.yaml` 的 `scopes.definitions` 中注册。
+恢复：按常规方式执行一次导入（`ki import --scope X --source <dir>`）；若上次已全部成功，无需重试。若提示里带「跨源覆盖前的备份清单」，说明上一批（另一源目录）的未完成项被保留为 `.ki-import-incomplete.prev.json`——如需重试，先把它改名回主清单文件名。
 
-恢复：在 config.yaml 中添加 scope 定义：
+### `scope "X" 的未完成清单损坏`（`... 无法解析`）
+
+原因：`<scope>/.ki-import-incomplete.json` 内容不是合法 JSON（手工编辑、写入被截断、磁盘问题）。清单是「只重试未完成部分」的唯一凭据，损坏时**不会**被静默当成"没有待办"。
+
+恢复：删除该文件后重新导入（幂等追加）；或直接 `ki import --scope X --source <原目录>` 全量重导。HTTP 端同样以 400 明确拒绝，不会退化成"用前端表单参数重试"。
+
+### `上次导入的源目录已不存在：<dir>`
+
+原因：清单记录的原源目录被移动/删除。
+
+恢复：用 `--source` 显式指定当前源目录后重试：`ki import --scope X --source <new-dir> --retry-incomplete`。
+
+### `重试清单中的 N 个文件在当前源目录均不存在`
+
+原因：清单内文件已全部被删除或改名（`retryFilter.missing` 会列出具体路径）。
+
+恢复：确认 `--source` 指向原目录；若文件确已移除，删除清单即可（`rm <scope>/.ki-import-incomplete.json`）。
+
+### `unknown scope: "<scope>"（scopeMode=strict）` / `scopeMode=strict：必须显式传入 scope 参数`
+
+原因：`scopeMode: strict` 下未传 scope，或 scope 未在 `~/.ki/config.yaml` 的 `scopes` 中注册。
+
+恢复：在 config.yaml 注册（key 即 scope 名），或把 `scopeMode` 改为 `default`：
 
 ```yaml
+scopeMode: strict
 scopes:
-  definitions:
-    my-project:
-      description: "项目描述"
-      acl: ["global", "my-project"]
+  my-project:
+    kbDir: /data/kb        # 可选
 ```
 
 ---
 
-## 四类：增量导入相关错误
-
-### 增量删除失败
-
-现象：增量 modify/delete 时 `deleteMemory`（内部函数，非独立命令）返回错误。
-
-处理：不阻塞流程，记录为 warning 继续执行。旧记录可能残留在向量数据库中，但不影响新记录的写入。
-
-### `relations-cache 中未找到 sourcePath`
-
-现象：删除条目时 `removeFromCache` 返回 false。
-
-原因：缓存中没有对应 `sourcePath` 的 relation，可能是首次导入时未写入 `sourcePath`。
-
-处理：记录 warning，继续清理 local KB。
-
----
-
-## 五类：展示参数问题
+## 四类：展示参数问题
 
 ### `--mode` 无效
 
-`query-group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
+`group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
 支持逗号分隔多值，如 `--mode hot,warm`。
 
 无效参数会报错退出并提示有效值列表。

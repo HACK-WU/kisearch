@@ -25,11 +25,20 @@ import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
-import { getSharedOperationCoordinator, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { getSharedOperationCoordinator, kindForMcpToolNames, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
+
+// S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
+// 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
+const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 });
+eventLoopHistogram.enable();
+function eventLoopUtilDelayMs(): number {
+  return eventLoopHistogram.mean / 1e6; // ns → ms；无样本时 HdrHistogram 返回 0
+}
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
 let apiHandlerPromise: Promise<typeof import('./mcp-http-api.js')> | null = null;
@@ -90,7 +99,7 @@ export interface HttpServerOptions {
   /**
    * 每个 MCP 会话新建一个 McpServer 的工厂。
    * 接收该会话的授权 scope 集合（authScopes）：null = 免鉴权（不限）；否则为授权集合（['all'] 或具体列表）。
-   * 供枚举类工具（ki_scope_list / ki_manage_index_list）按授权过滤，避免泄露未授权 scope。
+   * 供枚举类工具（ki_scope_list）按授权过滤，避免泄露未授权 scope。
    */
   buildServer: (authScopes: string[] | null) => McpServer;
   /** 进程退出前的额外清理（如停止 version guard） */
@@ -126,7 +135,7 @@ function isInitializeBody(body: unknown): boolean {
  *
  * ⚠️ 新增 schema 不含 scope 参数的工具时必须同步加入此清单。
  */
-const SCOPE_LESS_TOOLS = new Set(['ki_scope_list', 'ki_manage_index_list']);
+const SCOPE_LESS_TOOLS = new Set(['ki_scope_list']);
 
 /**
  * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
@@ -329,7 +338,17 @@ const STATIC_MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 };
 
-/** 提供 --web 静态页面：GET 请求，支持 SPA fallback（非 /api /mcp 的 404 返回 index.html） */
+/** 固定名文件（index.html 等）：每次回源校验，避免旧 HTML 继续引用已删除的 hash chunk */
+const HTML_CACHE_CONTROL = 'no-cache';
+/** `assets/` 下的 Vite 产物带 content hash：内容变则文件名变，可长缓存 */
+const ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+/**
+ * 提供 --web 静态页面：GET 请求。
+ *
+ * SPA fallback **只对无扩展名的前端路由**生效；`assets/*` 与已知静态扩展名的缺失文件一律 404
+ * （回 index.html 会让动态 import 拿到 HTML，错误信息退化为 MIME 失败，掩盖真因）。
+ */
 export function serveStatic(res: http.ServerResponse, webDir: string, pathname: string): void {
   try {
     // 防路径穿越：decodeURIComponent 后 normalize，确保解析路径仍在 webDir 内
@@ -367,16 +386,35 @@ export function serveStatic(res: http.ServerResponse, webDir: string, pathname: 
       }
     }
 
-    // 读文件；不存在时 SPA fallback（仅对非静态资源扩展名）
+    const ext = path.extname(resolved).toLowerCase();
+    /**
+     * 是否为构建产物（`assets/` 下的 chunk，或已知静态扩展名）。
+     *
+     * 这类文件**缺失必须回 404，不能走 SPA fallback**：回 index.html 会让浏览器拿到一份
+     * `200 + text/html` 的 `.js`，动态 `import()` 只会报「Failed to fetch dynamically imported
+     * module / MIME type mismatch」，把「文件已删」伪装成前端加载故障。
+     * 2026-10-18 实测：重新构建后旧标签页仍在请求已删除的 `mermaid.core-<旧 hash>.js`，
+     * 页面表现为图表红标「渲染不可用」，排查方向一度被误导到 mermaid 语法。
+     */
+    const isBuildAsset = relative.startsWith('assets/') || STATIC_MIME[ext] !== undefined;
+
+    // 读文件；不存在时：构建产物 404，只有**无扩展名的前端路由**才 SPA fallback
     let content: Buffer;
     try {
       content = fs.readFileSync(resolved);
     } catch {
+      if (isBuildAsset) {
+        sendJson(res, 404, { ok: false, error: 'Not Found' });
+        return;
+      }
       // SPA fallback：非 /api /mcp 的 GET 404 都回 index.html（前端路由接管）
       const index = path.join(webDir, 'index.html');
       if (fs.existsSync(index)) {
         content = fs.readFileSync(index);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': HTML_CACHE_CONTROL,
+        });
         res.end(content);
         return;
       }
@@ -384,8 +422,13 @@ export function serveStatic(res: http.ServerResponse, webDir: string, pathname: 
       return;
     }
 
-    const ext = path.extname(resolved).toLowerCase();
-    res.writeHead(200, { 'Content-Type': STATIC_MIME[ext] ?? 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': STATIC_MIME[ext] ?? 'application/octet-stream',
+      // assets/ 下的文件名带 content hash（内容变则文件名变），可长缓存；
+      // 其余（index.html、favicon 等固定名）必须每次回源校验，否则重新构建后
+      // 旧 HTML 会继续引用已删除的 hash chunk（同上 2026-10-18 故障的触发条件）。
+      'Cache-Control': relative.startsWith('assets/') ? ASSET_CACHE_CONTROL : HTML_CACHE_CONTROL,
+    });
     res.end(content);
   } catch {
     sendJson(res, 500, { ok: false, error: 'Internal error serving static file' });
@@ -546,6 +589,24 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         queue: getSharedOperationCoordinator().snapshot(),
         vectorResources: getVectorResourceMetrics(),
         vectorization: getVectorizationMetrics(),
+        // S0-4（REQ-20260930-002）：进程资源证据——导入成功输出后 CPU/内存仍高时，
+        // 先看这里归因（不预设结论）：rss/heap 区分 native 泄漏 vs JS 堆，
+        // cpuUserMs/systemMs 可对比两次采样得增量速率，activeHandles 判断是否有挂起句柄。
+        process: (() => {
+          const mem = process.memoryUsage(); // 单次快照，四字段同源一致
+          const cpu = process.cpuUsage();
+          return {
+            rssBytes: mem.rss,
+            heapUsedBytes: mem.heapUsed,
+            heapTotalBytes: mem.heapTotal,
+            externalBytes: mem.external,
+            cpuUserMs: cpu.user,
+            cpuSystemMs: cpu.system,
+            activeHandles: process.getActiveResourcesCount?.() ?? null,
+            eventLoopDelayMs: Math.round(eventLoopUtilDelayMs() * 100) / 100,
+            uptimeMs: Math.round(process.uptime() * 1000),
+          };
+        })(),
         ...(authEnabled ? { authFailures } : {}),
       });
       return;
@@ -689,21 +750,21 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     const queueScopes = new Set<string>();
     let needsGlobal = false;
     let onlyReadOnly = true;
+    // 本次请求调用的 MCP 工具名（仅 tools/call），供读/写任务类型判定。
+    // 2026-10-13 修复：此前 MCP 通道整批缺省 `write` ⇒ 导入/向量化期间浏览页正文
+    // （ki_get_module_info）被排到队尾（隔离实测 8745ms）。
+    const calledTools: string[] = [];
     for (const message of messages) {
       const method = readMethod(message);
       if (method !== 'tools/call' && method !== 'resources/read' && method !== 'resources/list') continue;
       const toolName = method === 'tools/call' && message && typeof message === 'object'
         ? ((message as { params?: { name?: unknown } }).params?.name)
         : undefined;
+      if (method === 'tools/call' && typeof toolName === 'string') calledTools.push(toolName);
       // scope 枚举只读且自带 fastFail 撞锁降级（“scope 下拉不应因向量锁挂起十余秒”），
       // 归入只读通道：不占用任何 scope，也不被其他 scope 的写操作阻塞。
       if (toolName === 'ki_scope_list') continue;
       onlyReadOnly = false;
-      // 索引树枚举会返回跨 scope 的 Group 结构，需要一致快照，保留全局独占。
-      if (toolName === 'ki_manage_index_list') {
-        needsGlobal = true;
-        continue;
-      }
       const args = message && typeof message === 'object'
         ? ((message as { params?: { arguments?: unknown } }).params?.arguments as { scope?: unknown } | undefined)
         : undefined;
@@ -729,6 +790,10 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         () => handleMcpPostInner(req, res, authScopes, body),
       ))),
       occupied,
+      // 读工具（ki_get_module_info / ki_group_list）判 `read`：它们不写元数据/引擎、
+      // 允许只读访问 zvec（实测导入期间引擎直读 68–220ms）⇒ 不再被导入长任务排到队尾。
+      // 混入任一写工具即整批回退 `write`（见 kindForMcpToolNames）。
+      kindForMcpToolNames(calledTools),
     );
   }
 

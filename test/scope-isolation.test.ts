@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
@@ -52,18 +52,18 @@ describe('scope 物理隔离', () => {
     const sA = await mkScope('iso-a');
     const sB = await mkScope('iso-b');
 
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
+    runJson('group.ts', ['create', 'wiki', '--scope', sA]);
+    runJson('group.ts', ['create', 'wiki', '--scope', sB]);
 
     // scope A: sync relation
     runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/监控', '--relation', '告警-A', '--module-info', '# A\nA内容']);
 
     // scope B: 不应看到 scope A 的 relation
-    const outB = getOut('query-group.ts', ['--scope', sB, '--groups', 'wiki/监控']);
+    const outB = getOut('group.ts', ['list', '--scope', sB, '--groups', 'wiki/监控']);
     assert.ok(!outB.includes('告警-A'));
 
     // scope A: 应看到自己的
-    const outA = getOut('query-group.ts', ['--scope', sA, '--groups', 'wiki/监控']);
+    const outA = getOut('group.ts', ['list', '--scope', sA, '--groups', 'wiki/监控']);
     assert.ok(outA.includes('告警-A'));
   });
 
@@ -71,8 +71,8 @@ describe('scope 物理隔离', () => {
     const sA = await mkScope('iso-rel-a');
     const sB = await mkScope('iso-rel-b');
 
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
+    runJson('group.ts', ['create', 'wiki', '--scope', sA]);
+    runJson('group.ts', ['create', 'wiki', '--scope', sB]);
 
     runJson('sync-relation.ts', ['--scope', sA, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB A\nscope A 的数据库']);
     runJson('sync-relation.ts', ['--scope', sB, '--group', 'wiki/config', '--relation', 'DB', '--module-info', '# DB B\nscope B 的数据库']);
@@ -93,8 +93,8 @@ describe('scope 物理隔离', () => {
     const sA = await mkScope('iso-disk-a');
     const sB = await mkScope('iso-disk-b');
 
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
+    runJson('group.ts', ['create', 'wiki', '--scope', sA]);
+    runJson('group.ts', ['create', 'wiki', '--scope', sB]);
 
     const dirA = getKbDir(sA);
     const dirB = getKbDir(sB);
@@ -108,13 +108,13 @@ describe('scope 物理隔离', () => {
     const sA = await mkScope('iso-del-a');
     const sB = await mkScope('iso-del-b');
 
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'create', '--parent', 'wiki', '--name', 'to-delete']);
-    runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', sB, '--action', 'create', '--parent', 'wiki', '--name', 'to-delete']);
+    runJson('group.ts', ['create', 'wiki', '--scope', sA]);
+    runJson('group.ts', ['create', 'wiki/to-delete', '--scope', sA]);
+    runJson('group.ts', ['create', 'wiki', '--scope', sB]);
+    runJson('group.ts', ['create', 'wiki/to-delete', '--scope', sB]);
 
     // 删除 scope A 中的节点
-    runJson('manage-index.ts', ['--scope', sA, '--action', 'delete', '--parent', 'wiki', '--name', 'to-delete']);
+    runJson('group.ts', ['delete', 'wiki/to-delete', '--yes', '--scope', sA]);
 
     // scope B 中仍应有 'to-delete'
     const { readJson } = await import('../src/lib/store.js');
@@ -123,10 +123,15 @@ describe('scope 物理隔离', () => {
 
     // scope A 中应已删除
     const idxA = readJson<any>(getGroupIndexPath(sA));
-    assert.strictEqual(idxA.groups.wiki['to-delete'], undefined);
+    assert.strictEqual(idxA.groups.wiki?.['to-delete'], undefined);
   });
 
-  it('ki import 直导在不同 scope 下隔离', async () => {
+  it('ki import 直导在不同 scope 下隔离', async (t) => {
+    if (!hasTestEmbeddingKey) {
+      // 向量化导入需要真实 embedding 密钥（测试配置未注入时不写 embedding 段，见 test-config.ts）
+      t.skip('未注入 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY / GITNEXUS_EMBEDDING_API_KEY，跳过向量化导入隔离用例');
+      return;
+    }
     const sA = await mkScope('iso-scan-a');
     const sB = await mkScope('iso-scan-b');
     const src = mkTmp('iso-src');
@@ -138,17 +143,14 @@ describe('scope 物理隔离', () => {
     assert.strictEqual(rA.ok, true);
     assert.strictEqual(rA.stats.total, 1);
 
-    // scope B: 应无任何数据（initScope 会创建空 cache，groups 应为空）
-    const { readJson } = await import('../src/lib/store.js');
-    const { getRelationsCachePath } = await import('../src/lib/scope.js');
-    const rcB = readJson<any>(getRelationsCachePath(sB));
-    assert.ok(rcB !== null);
-    assert.strictEqual(Object.keys(rcB.groups || {}).length, 0, 'scope B 不应有任何 Group');
+    // scope B: 应无任何数据（initScope 会创建空 cache/分片，groups 应为空）
+    // 批次 2：断言改布局无关读原语（import 已写新布局分片）
+    const { readAllGroupCaches } = await import('../src/lib/group-cache.js');
+    assert.strictEqual(readAllGroupCaches(sB).size, 0, 'scope B 不应有任何 Group');
 
-    // scope A: relations-cache 已写入
-    const rcA = readJson<any>(getRelationsCachePath(sA));
-    assert.ok(rcA !== null);
-    assert.ok(rcA.groups['wiki'] !== undefined);
-    assert.strictEqual(rcA.groups['wiki'].hot_relations.length, 1);
+    // scope A: 元数据已写入
+    const rcA = readAllGroupCaches(sA);
+    assert.ok(rcA.get('wiki') !== undefined);
+    assert.strictEqual(rcA.get('wiki')!.hot_relations.length, 1);
   });
 });

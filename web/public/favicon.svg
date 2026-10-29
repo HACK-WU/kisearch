@@ -1,9 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- 蓝色圆角底 -->
-  <rect x="1" y="1" width="30" height="30" rx="7" fill="#2563eb"/>
-  <!-- ki 字母 -->
-  <text x="16" y="22.5" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="17" font-weight="700" fill="#fff">ki</text>
-  <!-- 放大镜（检索） -->
-  <circle cx="21.5" cy="13" r="3.2" fill="none" stroke="#93c5fd" stroke-width="1.8"/>
-  <line x1="23.8" y1="15.4" x2="26" y2="17.6" stroke="#93c5fd" stroke-width="2" stroke-linecap="round"/>
+  <!-- 品牌墨绿圆角底，主色 #2d6755（与侧栏品牌块一致）。
+       注：XML 注释内不得出现连续两个短横，否则整份 SVG 解析失败、浏览器拒绝渲染。 -->
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#2d6755"/>
+  <!-- 字形用纯路径而非 SVG 文字元素：favicon 栅格化时不保证加载字体，用文字画字形可能丢字。
+       k = 竖笔 + 两撇；i = 点 + 竖笔 -->
+  <rect x="8.4" y="8.4" width="3.4" height="15.2" rx="1.5" fill="#fff"/>
+  <path d="M12.6 16.4 L18.4 9.6" fill="none" stroke="#fff" stroke-width="3.3" stroke-linecap="round"/>
+  <path d="M12.8 15.2 L19.2 22.8" fill="none" stroke="#fff" stroke-width="3.3" stroke-linecap="round"/>
+  <circle cx="22.8" cy="10.2" r="2" fill="#fff"/>
+  <rect x="21.1" y="14" width="3.4" height="9.6" rx="1.5" fill="#fff"/>
 </svg>

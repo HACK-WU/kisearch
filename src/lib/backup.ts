@@ -2,12 +2,13 @@
  * backup.ts —— 备份模块
  *
  * 提供：
- *   - autoBackup: import 成功后自动备份（scope 快照）
+ *   - executeBackup: 手动备份（ki backup / daemon RPC / Web 备份 API）
  *   - backupScopeSnapshot: 打包 scope 目录为 tar.gz
  *   - listBackups: 列出现有备份
  *
  * 批次 3（REQ-04）：ai-results 输入契约已删除，备份仅保留 scope 快照。
- * 备份失败不阻断 import 返回（仅输出 stderr 警告）。
+ * 2026-10-08：导入后自动备份已按用户决策取消——自动触发逻辑（原 autoBackup）连同
+ * CLI 调用点一并移除；快照仅在用户显式执行 ki backup / 调用备份 API 时创建。
  */
 
 import fs from 'fs';
@@ -16,6 +17,7 @@ import { execFileSync } from 'child_process';
 import { getBackupDir, getScopeDataDir, loadConfig } from './config.js';
 import type { KiConfig } from './config.js';
 import { checkWritable, checkDiskSpace, estimateDirSize } from './preflight.js';
+import { getRelationsManifestPath } from './group-cache.js';
 
 // ─── 类型 ───
 
@@ -23,7 +25,6 @@ export interface BackupResult {
   ok: boolean;
   action: 'backup';
   scope: string;
-  snapshotBackup?: string;
   snapshot?: string;
   snapshotPath?: string;
   message?: string;
@@ -39,8 +40,14 @@ export function executeBackup(params: BackupOperationParams): BackupResult & { s
   const { scope } = params;
   const scopeDataDir = getScopeDataDir(config, scope);
   if (!fs.existsSync(scopeDataDir)) throw new Error(`scope 数据目录不存在：${scopeDataDir}`);
+  // 批次 2 审查 P0-2 修复：原判定只看旧单文件 relations-cache.json，而惰性迁移会把它
+  // 改名 `.bak`（新布局 scope 只剩去 `.relations/manifest.json`）→ ki backup / daemon
+  // backup / Web 备份全部误报"尚未初始化"。改为两布局任一存在即算已初始化。
   const rcPath = path.join(scopeDataDir, 'relations-cache.json');
-  if (!fs.existsSync(rcPath)) throw new Error(`scope "${scope}" 尚未初始化（缺少 relations-cache.json），请先执行 import`);
+  const manifestPath = getRelationsManifestPath(scope);
+  if (!fs.existsSync(rcPath) && !fs.existsSync(manifestPath)) {
+    throw new Error(`scope "${scope}" 尚未初始化（缺少 relations-cache.json 与 ${path.basename(path.dirname(manifestPath))}/manifest.json），请先执行 import`);
+  }
   const snapshotPath = backupScopeSnapshot(config.backupDir, scope, scopeDataDir);
   return {
     ok: true,
@@ -149,31 +156,6 @@ export function backupScopeSnapshot(
   }
 
   return targetFile;
-}
-
-/**
- * 自动备份：import 成功后调用
- * 1. 打包 scope 目录到快照目录
- *
- * 备份失败仅输出 stderr 警告，不阻断调用方
- */
-export function autoBackup(
-  config: KiConfig,
-  scope: string
-): BackupResult {
-  const backupDir = getBackupDir(config);
-  const result: BackupResult = { ok: true, action: 'backup', scope };
-
-  try {
-    result.snapshotBackup = backupScopeSnapshot(backupDir, scope, getScopeDataDir(config, scope));
-  } catch (err) {
-    process.stderr.write(
-      `警告：scope 快照备份失败 — ${(err as Error).message}\n`
-    );
-    result.ok = false;
-  }
-
-  return result;
 }
 
 /**

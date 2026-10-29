@@ -4,15 +4,22 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
-import { useDocList, useVectorAvailability } from '@/lib/hooks';
+import { useDocList } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { GroupTreePanel, type DirectoryScrollPosition } from '@/components/GroupTreePanel';
+import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
 import { scopeError } from '@/lib/validators';
+import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
+import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } from '@/lib/searchHistory';
+import { cleanSearchUrl } from '@/lib/searchUrlCleanup';
+import { readDocHighlight, writeDocHighlight } from '@/lib/searchPrefs';
+import { decideDocHighlight } from '@/lib/searchHighlight';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -20,40 +27,6 @@ const THRESHOLD_MAX = 0.2;
 const THRESHOLD_STEP = 0.005;
 const QUERY_TIMEOUT_MIN_SECONDS = 0.001;
 const QUERY_TIMEOUT_MAX_SECONDS = 60;
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function splitSearchTerms(query: string): string[] {
-  return query.trim().split(/[\s_.,，。:：;；!?！？()[\]{}-]+/).filter(Boolean);
-}
-
-/** 全文检索结果中高亮查询词；按 FTS 常见分隔符拆分，兼容中文连续查询与英文多词查询。 */
-function highlightMatch(text: string, query: string): JSX.Element {
-  const terms = splitSearchTerms(query).map(escapeRegExp);
-  if (terms.length === 0) return <>{text}</>;
-  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
-  return <>{text.split(pattern).map((part, index) =>
-    terms.some((term) => new RegExp(`^${term}$`, 'i').test(part))
-      ? <mark key={index} className="ki-search-hit-mark">{part}</mark>
-      : <Fragment key={index}>{part}</Fragment>
-  )}</>;
-}
-
-/** 将全文结果裁剪到命中词附近，避免整篇原文的开头把命中位置挤出可视区域。 */
-function makeSearchSnippet(content: string, query: string, maxLength = 480): string {
-  const normalized = content.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxLength) return normalized;
-  const lower = normalized.toLowerCase();
-  const firstMatch = splitSearchTerms(query)
-    .map((term) => lower.indexOf(term.toLowerCase()))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0] ?? -1;
-  const start = firstMatch > 120 ? firstMatch - 120 : 0;
-  const end = Math.min(normalized.length, start + maxLength);
-  return `${start > 0 ? '…' : ''}${normalized.slice(start, end)}${end < normalized.length ? '…' : ''}`;
-}
 
 /** 步进调整 threshold：clamp 到 [0, MAX]，toFixed 防浮点漂移 */
 const stepThreshold = (cur: number, dir: 1 | -1): number => {
@@ -66,6 +39,8 @@ interface Result {
   relation?: string;
   score?: number;
   original?: string;
+  /** true 时 original 为完整 local KB 原文；false 时 original 仅是命中 chunk 回退。 */
+  originalRetrieved?: boolean;
   /** 向量文档内容 */
   content?: string;
   /** 命中向量对应的标签（多 tag 文档去重后仅其一） */
@@ -74,11 +49,75 @@ interface Result {
   tags?: string[];
   /** 向量数据标识（doc id） */
   memoryId?: string;
+  /**
+   * 导入源相对路径（后端 `SearchHit.sourcePath`，与 DocItem.path 同源）。
+   * 超过 doc/list 500 条上限的文档在 `docData.docs` 里查不到，用它兜底。
+   */
+  sourcePath?: string;
+}
+
+interface SearchHistoryEntry {
+  query: string;
+  mode: 'hybrid' | 'fulltext';
+  /** 空数组表示使用默认 ki-search 标签。 */
+  selectedTags: string[];
+  threshold: number;
+  limit: number;
+  timeout?: number;
+  savedAt: number;
+}
+
+const SEARCH_HISTORY_LIMIT = 10;
+
+function searchHistoryKey(scope: string): string {
+  return `ki-search-history:${encodeURIComponent(scope)}`;
+}
+
+function readSearchHistory(scope: string): SearchHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(searchHistoryKey(scope));
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const valid = parsed.filter((item): item is SearchHistoryEntry => {
+      if (!item || typeof item !== 'object') return false;
+      const entry = item as Partial<SearchHistoryEntry>;
+      return typeof entry.query === 'string'
+        && entry.query.trim().length > 0
+        && (entry.mode === 'hybrid' || entry.mode === 'fulltext')
+        && Array.isArray(entry.selectedTags)
+        && entry.selectedTags.every((tag) => typeof tag === 'string')
+        && typeof entry.threshold === 'number'
+        && Number.isFinite(entry.threshold)
+        && entry.threshold >= 0
+        && entry.threshold <= THRESHOLD_MAX
+        && typeof entry.limit === 'number'
+        && Number.isInteger(entry.limit)
+        && entry.limit > 0
+        && typeof entry.savedAt === 'number'
+        && Number.isFinite(entry.savedAt)
+        && (entry.timeout === undefined || (typeof entry.timeout === 'number' && Number.isFinite(entry.timeout) && entry.timeout >= QUERY_TIMEOUT_MIN_SECONDS && entry.timeout <= QUERY_TIMEOUT_MAX_SECONDS));
+    });
+    // 归一化：修复前的老数据可能同 query 存了两条（混合 / 全文各一），读取即收敛成一条。
+    return dedupeSearchHistory(valid).slice(0, SEARCH_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writeSearchHistory(scope: string, entries: SearchHistoryEntry[]): boolean {
+  try {
+    localStorage.setItem(searchHistoryKey(scope), JSON.stringify(entries.slice(0, SEARCH_HISTORY_LIMIT)));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function SearchPage(): JSX.Element {
   const { scope, setScope } = useScope();
-  const [searchParams] = useSearchParams();
+  const activeScopeRef = useRef(scope);
+  activeScopeRef.current = scope;
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedScope = searchParams.get('scope');
   const requestedScopeApplied = useRef(false);
   useEffect(() => {
@@ -101,28 +140,89 @@ export function SearchPage(): JSX.Element {
   /** 与当前结果绑定的查询词/模式；输入框清空或修改后，结果仍保持原查询的高亮口径。 */
   const [resultQuery, setResultQuery] = useState('');
   const [resultMode, setResultMode] = useState<'hybrid' | 'fulltext' | null>(null);
+  /**
+   * 混合检索「文档内高亮」开关（REQ-20261014-003 R2）：纯展示偏好 —— 只影响点开文档后的
+   * 正文高亮，不进入检索请求；默认开，用户意图持久化（不进 URL：分享链接不该替接收者决定）。
+   */
+  const [docHighlight, setDocHighlight] = useState<boolean>(() => readDocHighlight());
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** 错误码（如 VECTOR_DIMENSION_MISMATCH）：与导入页共用同一判定口径，不再靠错误串猜 */
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [viewing, setViewing] = useState<DocumentView | null>(null);
+  const directoryScrollRef = useRef<DirectoryScrollPosition | null>(null);
   const [history, setHistory] = useState<DocumentView[]>([]);
   const [forwardHistory, setForwardHistory] = useState<DocumentView[]>([]);
+  const [readerFullscreen, setReaderFullscreen] = useState(false);
+  const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
   /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
-  const vectorAvailability = useVectorAvailability();
-  const vectorAvailable = vectorAvailability.status === 'available';
-  const fullTextSearch = !vectorAvailable || fullTextOnly;
+
+  /**
+   * 「文档内高亮」决策（REQ-20261014-003 §0.1）——判据集中在 `lib/searchHighlight.ts`（可单测），
+   * 这里只把**结果属性**喂进去：`resultMode` / `degradeReason` 都在检索完成时写入
+   * （run 内 setResultMode / setDegradeReason），是"当前结果"的属性。
+   * **不得改用 `fullTextOnly`**（模式按钮的选择态，点了就变，会让"搜完混合 → 点全文不重搜"
+   * 时开关与列表错位）。
+   */
+  const {
+    listHighlight,
+    docHighlightQuery,
+    switchDisabled: docHighlightSwitchDisabled,
+    autoScroll: docHighlightAutoScroll,
+  } = decideDocHighlight({
+    resultMode,
+    degraded: degradeReason !== null,
+    switchOn: docHighlight,
+    query: resultQuery,
+  });
+
+  /** 切换「文档内高亮」：纯展示偏好 —— 只写 state + localStorage，**不重跑检索**（R2 / N3） */
+  const toggleDocHighlight = useCallback((): void => {
+    if (docHighlightSwitchDisabled) return;
+    const next = !docHighlight;
+    setDocHighlight(next);
+    writeDocHighlight(next);
+  }, [docHighlight, docHighlightSwitchDisabled]);
   /** 供「清空」后把焦点交还输入框，用户可直接打下一次查询 */
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Tag 过滤
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [recentSearches, setRecentSearches] = useState<SearchHistoryEntry[]>([]);
+  const [historyScope, setHistoryScope] = useState<string | null>(null);
+  const [historyStorageWarning, setHistoryStorageWarning] = useState('');
   const { data: docData } = useDocList(scope);
 
+  useEffect(() => {
+    // 地址栏清理：旧版检索参数（q/mode/tags/… 已不再消费）+ 切 scope 后失效的 scope 参数。
+    // 判据与例外见 lib/searchUrlCleanup —— 跨页深链（scope 与当前一致）必须保留。
+    const cleaned = cleanSearchUrl(searchParams.toString(), scope);
+    if (cleaned !== null) setSearchParams(new URLSearchParams(cleaned), { replace: true });
+    setHistoryScope(scope);
+    setRecentSearches(readSearchHistory(scope));
+    setHistoryStorageWarning('');
+    setResults(null);
+    setTotal(0);
+    setResultQuery('');
+    setResultMode(null);
+    setError(null);
+    setErrorCode(null);
+    setDegradeReason(null);
+    setSkippedScopes([]);
+    setViewing(null);
+    setHistory([]);
+    setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
+  }, [scope]);
+
   /** 手动打开搜索结果是新的导航起点。 */
-  const openDocument = useCallback((doc: DocumentView): void => {
+  const openDocument = useCallback((doc: DocumentView, preserveDirectoryPosition = false): void => {
+    if (!preserveDirectoryPosition) directoryScrollRef.current = null;
     setHistory([]);
     setForwardHistory([]);
     setViewing(doc);
@@ -131,6 +231,8 @@ export function SearchPage(): JSX.Element {
   const closeDocument = useCallback((): void => {
     setHistory([]);
     setForwardHistory([]);
+    setReaderFullscreen(false);
+    setReaderOutlineCollapsed(true);
     setViewing(null);
   }, []);
 
@@ -169,10 +271,17 @@ export function SearchPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
-    fetchTags(scope).then((res) => {
-      if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const refreshTags = (): void => {
+      fetchTags(scope).then((res) => {
+        if (!cancelled && res.ok) setAvailableTags(res.tags.map((t) => t.tag));
+      }).catch(() => {});
+    };
+    const onImportCompleted = (event: Event): void => {
+      if ((event as CustomEvent<{ scope: string }>).detail?.scope === scope) refreshTags();
+    };
+    refreshTags();
+    window.addEventListener('ki-import-completed', onImportCompleted);
+    return () => { cancelled = true; window.removeEventListener('ki-import-completed', onImportCompleted); };
   }, [scope]);
 
   useEffect(() => {
@@ -191,45 +300,76 @@ export function SearchPage(): JSX.Element {
     return () => { cancelled = true; };
   }, []);
 
-  const run = async (): Promise<void> => {
-    if (!query.trim()) return;
+  const run = async (modeOverride?: 'fulltext', replay?: SearchHistoryEntry): Promise<void> => {
+    const searchQuery = replay?.query ?? query.trim();
+    if (!searchQuery) return;
+    const searchMode = replay?.mode ?? modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
+    const searchScope = scope;
+    const historyTags = replay?.selectedTags ?? selectedTags;
+    const searchThreshold = replay?.threshold ?? threshold;
+    const searchLimit = replay?.limit ?? (Number(limit) || 10);
     // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
-    const timeout = queryTimeoutTouched.current && queryTimeout !== undefined
-      ? Number(queryTimeout)
-      : undefined;
+    const timeout = replay
+      ? replay.timeout
+      : queryTimeoutTouched.current && queryTimeout !== undefined
+        ? Number(queryTimeout)
+        : undefined;
     if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < QUERY_TIMEOUT_MIN_SECONDS || timeout > QUERY_TIMEOUT_MAX_SECONDS)) {
       setError(`Timeout 必须是 ${QUERY_TIMEOUT_MIN_SECONDS}-${QUERY_TIMEOUT_MAX_SECONDS} 秒之间的数字`);
       return;
     }
+    // 检索态**不写 URL**（2026-10-14 用户裁决）：输入框清空时地址栏不留 q，刷新即重置为干净的当页页面。
+    // 想复用上次查询用下面的「最近检索」（localStorage，按 scope 分桶）。
     setLoading(true);
     setError(null);
+    setErrorCode(null);
     setResults(null);
     setDegradeReason(null);
     setSkippedScopes([]);
     try {
       // Tag 过滤语义：选中具体 tag 时精确过滤（不含 ki-search），"全部"才用默认 ki-search
-      const searchTags = selectedTags.length > 0
-        ? selectedTags          // 仅用户选中的 tag（精确过滤）
+      const searchTags = historyTags.length > 0
+        ? historyTags           // 仅用户选中的 tag（精确过滤）
         : ['ki-search'];        // 默认全部（ki-search）
-      const res = await kiSearch(query.trim(), {
-        scope,
+      const res = await kiSearch(searchQuery, {
+        scope: searchScope,
         tags: searchTags,
-        threshold: threshold || undefined,
-        limit: Number(limit) || 10,
-        mode: fullTextSearch ? 'fulltext' : 'hybrid',
+        threshold: searchMode === 'fulltext' ? undefined : searchThreshold || undefined,
+        limit: searchLimit,
+        mode: searchMode,
         ...(timeout !== undefined ? { timeout } : {}),
       });
-      // 后端业务层错误（如向量库锁定）
+      if (activeScopeRef.current !== searchScope) return;
+      // 后端业务层错误（如向量库锁定 / 维度不匹配）
       if ((res as Record<string, unknown>).ok === false) {
         const errMsg = (res as Record<string, unknown>).error as string | undefined;
         setError(errMsg ?? '搜索服务暂不可用');
+        setErrorCode((res.code as string | undefined) ?? null);
         return;
       }
       const hits = (res.results ?? []) as Result[];
       setResults(hits);
       setTotal(hits.length);
-      setResultQuery(query.trim());
-      setResultMode(fullTextSearch ? 'fulltext' : 'hybrid');
+      setResultQuery(searchQuery);
+      setResultMode(searchMode);
+      const historyEntry: SearchHistoryEntry = {
+        query: searchQuery,
+        mode: searchMode,
+        selectedTags: [...historyTags],
+        threshold: searchThreshold,
+        limit: searchLimit,
+        ...(timeout !== undefined ? { timeout } : {}),
+        savedAt: Date.now(),
+      };
+      const previous = readSearchHistory(searchScope);
+      // 同 query + 同标签即同一条记录（模式不参与身份），保留最近一次执行 —— 详见 lib/searchHistory.ts。
+      const nextHistory = upsertSearchHistory(historyEntry, previous, SEARCH_HISTORY_LIMIT);
+      const historySaved = writeSearchHistory(searchScope, nextHistory);
+      if (activeScopeRef.current === searchScope) {
+        setRecentSearches(nextHistory);
+        setHistoryScope(searchScope);
+        setHistoryStorageWarning(historySaved ? '' : '搜索已完成，但浏览器无法保存本地检索历史。');
+      }
       // O1：降级时后端返回 BM25 原始分（量级可达几十），与混合 RRF 分（~0.01–0.03）
       // 不可比，必须显式提示，否则用户只会看到分数"无故暴涨"。
       setDegradeReason(
@@ -237,10 +377,38 @@ export function SearchPage(): JSX.Element {
       );
       setSkippedScopes(Array.isArray(res.skipped) ? res.skipped : []);
     } catch (e) {
-      setError((e as Error).message);
+      if (activeScopeRef.current === searchScope) setError((e as Error).message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const replaySearch = (entry: SearchHistoryEntry): void => {
+    setQuery(entry.query);
+    setSelectedTags([...entry.selectedTags]);
+    setThreshold(entry.threshold);
+    setLimit(String(entry.limit));
+    setFullTextOnly(entry.mode === 'fulltext');
+    setQueryTimeout(entry.timeout === undefined ? undefined : String(entry.timeout));
+    queryTimeoutTouched.current = entry.timeout !== undefined;
+    setQueryTimeoutStatus('ready');
+    void run(undefined, entry);
+  };
+
+  // ★ 「带 `q` 进来自动重跑一次」的 URL 恢复逻辑已于 2026-10-14 删除（用户裁决：检索态不进 URL、
+  //   刷新重置当页）。旧链接的 `q` 等参数由上面的 cleanSearchUrl 清掉，不再触发检索。
+
+  const removeRecentSearch = (entry: SearchHistoryEntry): void => {
+    const next = removeSearchHistoryEntry(entry, recentSearches);
+    const historySaved = writeSearchHistory(scope, next);
+    setRecentSearches(next);
+    setHistoryStorageWarning(historySaved ? '' : '无法更新本地检索历史，请检查浏览器存储设置。');
+  };
+
+  const clearRecentSearches = (): void => {
+    const historySaved = writeSearchHistory(scope, []);
+    setRecentSearches([]);
+    setHistoryStorageWarning(historySaved ? '' : '无法清除浏览器中的检索历史，请检查浏览器存储设置。');
   };
 
   /** 只清空搜索输入，保留当前结果列表，方便用户继续查看或复制结果。 */
@@ -257,7 +425,6 @@ export function SearchPage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
-          <h1>语义搜索</h1>
           <p>向量 + BM25 混合检索 · 原文内容 + Group 路径</p>
         </div>
       </div>
@@ -286,13 +453,17 @@ export function SearchPage(): JSX.Element {
           <button
             type="button"
             className="ki-btn ki-btn--secondary"
-            style={{ height: 42, padding: '0 18px' }}
+            style={{ padding: '0 18px' }}
             disabled={loading || (!query && results === null)}
             onClick={clearAll}
           >
             清空
           </button>
-          <button className="ki-btn ki-btn--primary" style={{ height: 42, padding: '0 24px' }} disabled={loading || !query.trim()}>
+          <div className="ki-segmented ki-search-mode" role="group" aria-label="检索模式">
+            <button type="button" aria-pressed={!fullTextOnly} onClick={() => setFullTextOnly(false)}>混合</button>
+            <button type="button" aria-pressed={fullTextOnly} onClick={() => setFullTextOnly(true)}>全文</button>
+          </div>
+          <button className="ki-btn ki-btn--primary" style={{ padding: '0 24px' }} disabled={loading || !query.trim()}>
             {loading ? '搜索中…' : '搜索'}
           </button>
         </div>
@@ -326,14 +497,14 @@ export function SearchPage(): JSX.Element {
               max={THRESHOLD_MAX}
               step={THRESHOLD_STEP}
               value={threshold}
-              disabled={fullTextSearch}
+              disabled={fullTextOnly}
               onChange={(e) => setThreshold(Number(e.target.value))}
             />
             <button
               type="button"
               className="ki-step-btn"
               aria-label="降低阈值"
-              disabled={fullTextSearch || threshold <= 0}
+              disabled={fullTextOnly || threshold <= 0}
               onClick={() => setThreshold((v) => stepThreshold(v, -1))}
             >−</button>
             <span className="ki-threshold-val">{threshold.toFixed(3)}</span>
@@ -341,7 +512,7 @@ export function SearchPage(): JSX.Element {
               type="button"
               className="ki-step-btn"
               aria-label="提高阈值"
-              disabled={fullTextSearch || threshold >= THRESHOLD_MAX}
+              disabled={fullTextOnly || threshold >= THRESHOLD_MAX}
               onClick={() => setThreshold((v) => stepThreshold(v, 1))}
             >+</button>
           </div>
@@ -354,7 +525,7 @@ export function SearchPage(): JSX.Element {
               max={QUERY_TIMEOUT_MAX_SECONDS}
               step="any"
               value={queryTimeout ?? ''}
-              disabled={fullTextSearch}
+              disabled={fullTextOnly}
               placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
               onChange={(e) => {
                 queryTimeoutTouched.current = true;
@@ -375,31 +546,57 @@ export function SearchPage(): JSX.Element {
               <option value="20">20</option>
             </select>
           </div>
+          {/* 混合检索「文档内高亮」开关（R2/R7）：只影响点开文档后的正文高亮，不进检索请求。
+              全文结果下无意义（恒高亮）→ 禁用灰掉，避免"点了没反应"（R4/Q5）。 */}
           <div className="ki-query-option">
-            <span className="ki-form-label">全文</span>
-            <button
-              type="button"
-              className={`ki-switch${fullTextSearch ? ' ki-switch--on' : ''}`}
+            <span className="ki-form-label">文档内高亮</span>
+            <div
+              className={`ki-switch${docHighlight ? ' ki-switch--on' : ''}${docHighlightSwitchDisabled ? ' ki-switch--disabled' : ''}`}
               role="switch"
-              aria-checked={fullTextSearch}
-              aria-label="仅进行全文检索"
-              disabled={!vectorAvailable}
-              title={vectorAvailability.reason}
-              onClick={() => setFullTextOnly((value) => !value)}
+              aria-checked={docHighlight}
+              aria-disabled={docHighlightSwitchDisabled}
+              title={docHighlightSwitchDisabled
+                ? '全文检索（含降级）的正文高亮始终开启，不受此开关影响'
+                : '混合检索时，点开文档是否在正文中高亮查询词（不自动跳转，工具条可逐个跳转）'}
+              onClick={toggleDocHighlight}
             >
               <div className="ki-switch__knob" />
-            </button>
-            <span className={`ki-form-suffix${!vectorAvailable ? ' ki-vector-status-hint' : ''}`}>
-              {!vectorAvailable
-                ? vectorAvailability.status === 'unavailable'
-                  ? '向量不可用，仅全文检索'
-                  : vectorAvailability.status === 'checking'
-                    ? '正在检查向量，暂用全文检索'
-                    : '无法确认向量状态，暂用全文检索'
-                : fullTextOnly ? '仅全文，不调用 embedding' : '语义 + 全文'}
-            </span>
+            </div>
+            {/* 禁用只在「当前结果是全文」时发生 ⇒ 给出**可见**说明，不依赖 hover（用户反馈：灰掉却不说为什么） */}
+            {docHighlightSwitchDisabled && (
+              <span className="ki-cell-sub">全文检索始终高亮</span>
+            )}
           </div>
         </div>
+        {historyScope === scope && recentSearches.length > 0 && (
+          <section className="ki-search-history" aria-label="最近检索记录">
+            <span className="ki-search-history__label">最近检索</span>
+            <div className="ki-search-history__list">
+              {recentSearches.map((entry) => (
+                <div className="ki-search-history__item" key={`${entry.query}:${entry.mode}:${entry.savedAt}`}>
+                  <button
+                    type="button"
+                    className="ki-search-history__query"
+                    onClick={() => replaySearch(entry)}
+                    disabled={loading}
+                    title={`${entry.query} · ${entry.mode === 'fulltext' ? '仅全文' : '语义 + 全文'}${entry.selectedTags.length > 0 ? ` · ${entry.selectedTags.join(', ')}` : ' · 默认标签'}`}
+                    aria-label={`重跑检索：${entry.query}`}
+                  >{entry.query}</button>
+                  <button
+                    type="button"
+                    className="ki-search-history__remove"
+                    onClick={() => removeRecentSearch(entry)}
+                    disabled={loading}
+                    aria-label={`删除检索记录：${entry.query}`}
+                    title="删除这条记录"
+                  >×</button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="ki-btn ki-btn--ghost ki-btn--small" onClick={clearRecentSearches} disabled={loading}>清空历史</button>
+          </section>
+        )}
+        {historyStorageWarning && <div className="ki-form-hint" role="status">{historyStorageWarning}</div>}
       </form>
 
       {/* 空状态引导 */}
@@ -408,27 +605,40 @@ export function SearchPage(): JSX.Element {
           <div>
             <div style={{ fontSize: 32, marginBottom: 8 }}>⌕</div>
             <h3>输入查询开始搜索</h3>
-            <p>{!fullTextSearch
-              ? '混合检索当前 scope 的知识库内容，命中结果可定位原文。'
-              : vectorAvailable
-                ? '仅全文检索已开启，查询不调用 embedding。'
-              : vectorAvailability.status === 'unavailable'
-                ? '向量服务不可用，当前仅使用全文索引检索。'
-                : vectorAvailability.status === 'checking'
-                  ? '正在检查向量服务，检查完成前仅使用全文索引检索。'
-                  : '无法确认向量服务状态，当前仅使用全文索引检索。'}</p>
+            <p>混合检索当前 scope 的知识库内容，命中结果可定位原文。</p>
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="ki-empty" style={{ padding: 40 }}>
-          <div>
-            <h3>搜索失败</h3>
-            <p>{error}</p>
+      {error && (() => {
+        // 维度不匹配判定：优先用后端 code（单一真源）；文案兜底必须包含 zvec 原生文案
+        // "vector dimension mismatch: expected X, got Y" —— 旧正则只认写入路径的
+        // "embedding.dimension ... persisted dimension"，于是检索页只显示一行英文报错，
+        // 而导入页（走维度状态接口）却能给出"请先重建向量"的指引，两页口径分叉。
+        const dimensionMismatch = errorCode === 'VECTOR_DIMENSION_MISMATCH'
+          || /embedding\.dimension|persisted dimension|VECTOR_DIMENSION_MISMATCH|vector dimension mismatch/.test(error);
+        return (
+          <div className="ki-empty" style={{ padding: 40 }}>
+            <div>
+              <h3>搜索失败</h3>
+              <p>{error}</p>
+              {dimensionMismatch && (
+                <p style={{ color: '#d4380d' }}>
+                  scope「{scope}」的旧向量集合维度与当前 embedding 配置不一致，语义检索不可用。
+                  请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>，完成后刷新页面再检索。全文检索仍可使用。
+                </p>
+              )}
+              {!fullTextOnly && dimensionMismatch && (
+                <div className="ki-empty__actions">
+                  <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
+                    使用全文搜索重试
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 结果 */}
       {results !== null && (
@@ -451,7 +661,7 @@ export function SearchPage(): JSX.Element {
                 )}
                 {skippedScopes.length > 0 && (
                   <>
-                    <span>已跳过 {skippedScopes.length} 个 scope，结果可能不完整</span>
+                    <span>已跳过或受限 {skippedScopes.length} 项，结果可能不完整</span>
                     <span className="ki-cell-sub">
                       {skippedScopes.map((s) => `${s.scope}：${s.reason}`).join('；')}
                     </span>
@@ -462,7 +672,10 @@ export function SearchPage(): JSX.Element {
           )}
           <div className="ki-results">
             <div className="ki-results__head">
-              <span className="ki-results__title">搜索结果</span>
+              <span className="ki-panel-heading">
+                <span className="ki-panel-kicker">RESULTS</span>
+                <span className="ki-results__title">检索结果</span>
+              </span>
               <span className="ki-results__meta">
                 {total} 条结果{loading ? ' · 搜索中…' : ''}
               </span>
@@ -492,10 +705,15 @@ export function SearchPage(): JSX.Element {
                     const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
                     openDocument({
                       module: r.relation ?? r.group ?? 'doc',
-                      content: r.original,
+                      // 原文未取到时 original 是命中 chunk 回退；不把片段当整篇文档，
+                      // 让 ModuleDrawer 通过 ki_get_module_info 获取完整标题结构。
+                      content: r.originalRetrieved === true ? r.original : undefined,
+                      fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
                       group: r.group,
-                      path: doc?.path,
-                      highlightQuery: resultMode === 'fulltext' ? resultQuery : undefined,
+                      // doc 来自 useDocList（前 500 条），超过上限的文档查不到；检索命中自带 sourcePath，
+                      // 与 DocItem.path 同源（relation.sourcePath），用它兜底避免丢掉本地链接解析上下文
+                      path: doc?.path ?? r.sourcePath,
+                      highlightQuery: docHighlightQuery,
                     });
                   }}
                 >
@@ -504,11 +722,22 @@ export function SearchPage(): JSX.Element {
                     {/* 文档名称 + Group 路径 */}
                     <div className="ki-qr-title">
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
-                      <span className="ki-badge ki-badge--kb">{r.group ?? '(无 Group)'}</span>
+                      <span className="ki-badge ki-badge--kb" title={[r.group, r.relation].filter(Boolean).join('/')}>
+                        {[r.group, r.relation].filter(Boolean).join('/') || '(无文档路径)'}
+                      </span>
+                      {r.group && (
+                        <Link
+                          className="ki-qr-group-browse"
+                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}${r.relation ? `&relation=${encodeURIComponent(r.relation)}` : ''}` }}
+                          onClick={(event) => event.stopPropagation()}
+                          aria-label={r.relation ? `在目录中定位文档 ${r.group}/${r.relation}` : `浏览 Group ${r.group} 中的文档`}
+                        >{r.relation ? '定位文档 ↗' : '浏览此 Group ↗'}</Link>
+                      )}
                     </div>
-                    {/* 原文 / 向量内容；仅全文模式高亮，避免把语义近似结果误标成精确命中 */}
+                    {/* 原文 / 向量内容；全文**与降级**（结果实为 BM25 字面命中）高亮，
+                        纯混合（语义近似）不高亮 —— 避免把语义召回误标成精确命中（REQ-20261014-003 R5） */}
                     <div className="ki-qr-content">
-                      {resultMode === 'fulltext' ? (() => {
+                      {listHighlight ? (() => {
                         // 全文命中的 content 通常是命中 chunk；original 是文件级原文，优先展示前者。
                         const matchedContent = r.content ?? r.original ?? r.relation ?? '(无内容)';
                         return highlightMatch(makeSearchSnippet(matchedContent, resultQuery), resultQuery);
@@ -554,7 +783,11 @@ export function SearchPage(): JSX.Element {
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}
+          fallbackContent={viewing.fallbackContent}
           highlightQuery={viewing.highlightQuery}
+          /* 混合检索（含降级）打开文档时不自动跳转：命中全部标记 + 工具条给 `1/N`，
+             视口停在顶部；全文检索保持"定位到命中"的既有语义（REQ-20261014-003 Q8）。 */
+          highlightAutoScroll={docHighlightAutoScroll}
           onClose={closeDocument}
           fetcher={kiGetModuleInfo}
           onLocalLink={handleLocalLink}
@@ -562,6 +795,24 @@ export function SearchPage(): JSX.Element {
           onBack={goBack}
           canGoForward={forwardHistory.length > 0}
           onForward={goForward}
+          fullscreenNavigation={
+            <GroupTreePanel
+              scope={scope}
+              activeGroup={viewing.group}
+              activeDocName={viewing.module}
+              scrollPositionRef={directoryScrollRef}
+              onOpenDoc={({ group, name, path }) => openDocument({ module: name, group, path }, true)}
+            />
+          }
+          fullscreen={readerFullscreen}
+          fullscreenActions={<ChatToggleButton />}
+          onFullscreenChange={(fullscreen) => {
+            setReaderFullscreen(fullscreen);
+            // 大纲进出全屏一律折叠（用户要求默认折叠，需要时手动展开）
+            setReaderOutlineCollapsed(true);
+          }}
+          outlineCollapsed={readerOutlineCollapsed}
+          onOutlineCollapsedChange={setReaderOutlineCollapsed}
         />
       )}
     </>

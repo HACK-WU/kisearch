@@ -117,10 +117,15 @@ export function toggleNodeOpen(nodes: GroupTreeNode[], path: string): GroupTreeN
   });
 }
 
-/** 全部展开/折叠（新树；状态未变时返回原引用） */
+/**
+ * 全部展开/折叠（新树；状态未变时返回原引用）。
+ * 作用于**所有节点**（含只有文档的叶子 Group）：叶子折叠后其文档列表隐藏，
+ * 与单目录点击、demo「折叠全部目录」的行为保持一致。
+ * 此前跳过叶子节点（`children.length === 0` 直接 return null），
+ * 导致树里全是叶子目录时点「折叠全部」毫无反应。
+ */
 export function withAllOpen(nodes: GroupTreeNode[], open: boolean): GroupTreeNode[] {
   return rewriteTree(nodes, (node, children) => {
-    if (node.children.length === 0) return null;
     if (node.open === open && children === node.children) return null;
     return { ...node, open, children };
   });
@@ -136,5 +141,31 @@ export function revealGroupPath(nodes: GroupTreeNode[], path: string): GroupTree
     if (!isAncestor) return null;
     if (node.open && children === node.children) return null;
     return { ...node, open: true, children };
+  });
+}
+
+/** 收集树中所有「已展开」节点的路径（先根后子，同层保持树序）—— 供目录展开态持久化。 */
+export function collectOpenPaths(nodes: GroupTreeNode[]): string[] {
+  const paths: string[] = [];
+  const walk = (list: GroupTreeNode[]): void => {
+    for (const node of list) {
+      if (node.open) paths.push(node.path);
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return paths;
+}
+
+/**
+ * 按路径集合设置展开态（新树）：集合内的节点展开，其余一律折叠。
+ * 与其余操作一致——无任何变更时返回原引用，调用方可用引用比较跳过渲染。
+ */
+export function applyOpenPaths(nodes: GroupTreeNode[], paths: readonly string[]): GroupTreeNode[] {
+  const wanted = new Set(paths);
+  return rewriteTree(nodes, (node, children) => {
+    const open = wanted.has(node.path);
+    if (node.open === open && children === node.children) return null;
+    return { ...node, open, children };
   });
 }

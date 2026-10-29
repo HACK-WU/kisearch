@@ -120,3 +120,35 @@ describe('已删除命令走未知命令分支', () => {
     });
   }
 });
+
+/**
+ * 顶层帮助清单的**覆盖性**（2026-10-12 补）
+ *
+ * 背景：`index-optimize` 注册进 COMMANDS 后**未加入 `ki -h` 的命令清单** —— 命令能用，
+ * 但用户照帮助找不到入口（`migrate-relation-cache` 同样漏，属既有）。本用例把
+ * 「COMMANDS ⊆ 帮助清单」变成结构断言：新增命令若忘记登记帮助，**本套件直接红**。
+ *
+ * 匹配规则：只认「行首两空格 + 命令名 + 空白」的行，避免描述文本里出现同名子串造成假通过。
+ */
+describe('顶层帮助清单必须覆盖全部已注册命令', () => {
+  it('COMMANDS 的每个命令都必须出现在 ki -h 的「命令：」区段', () => {
+    const { stdout, status } = runCli(['-h']);
+    assert.strictEqual(status, 0, `ki -h 应退出 0，实际 status=${status}`);
+    const block = /命令：([\s\S]*?)\n\n全局参数：/.exec(stdout)?.[1];
+    assert.ok(block, '未能从顶层帮助解析出「命令：」区段 —— 帮助格式已变，请同步本测试的解析规则');
+    const listed = new Set(
+      block
+        .split('\n')
+        .map((line) => /^ {2}([a-z][a-z-]*)\s/.exec(line)?.[1])
+        .filter((x): x is string => Boolean(x)),
+    );
+    // fail-loud：解析到空清单时拒绝「空跑绿」（否则本用例静默失去守护作用）
+    assert.ok(listed.size > 0, '未从帮助解析到任何命令行 —— 解析规则已失效，不得以空清单跑绿');
+    const missing = SUB_COMMANDS.filter((cmd) => !listed.has(cmd));
+    assert.deepEqual(
+      missing,
+      [],
+      `以下命令已注册进 COMMANDS 但未出现在 ki -h 帮助清单（用户照帮助找不到入口）：${missing.join(', ')}`,
+    );
+  });
+});

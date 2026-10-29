@@ -1,8 +1,6 @@
 # 向量引擎实现原理（基于 zvec 引擎）
 
-> 状态：已完成（2026-07-17 需求落地）
-> 调研来源：代码搜索 ✓（src/zvec-engine/ 目录、src/store.ts、src/search.ts、src/bulk-store.ts、src/sync-relation.ts）
-> 调研范围：文本向量化、文本向量检索、zvec 引擎层封装
+> 说明 kisearch 的向量层：为什么用进程内 zvec 引擎、核心模块、写入与检索链路。
 
 ## 1. 架构定位：kisearch 自有向量引擎
 
@@ -23,7 +21,7 @@ kisearch 现在**拥有自己的向量引擎**（基于 `@zvec/zvec` 的 Rust �
 │  ZvecEngine（src/zvec-engine/engine.ts）                  │
 │  - 常驻进程内，无冷启动                                    │
 │  - 原生混合检索（dense + FTS）                              │
-│  - metadata 过滤（tags/scope/doc_id）                    │
+│  - metadata 过滤（tag/scope/group）                    │
 │  - Embedding 集成（SiliconFlow Qwen3-Embedding-8B）       │
 └───────────────┬─────────────────────────────────────┘
                 │  @zvec/zvec Node 绑定
@@ -56,28 +54,29 @@ zvec 引擎层位于 `src/zvec-engine/`，提供完整的向量数据库能力�
 ### 3.1 生命周期
 
 ```typescript
-// 创建新集合（首次写入时）
+// 创建新集合（首次写入时；dbPath = <vectorDir>/collections/<scope>）
 const engine = await ZvecEngine.create({
-  dbPath: '/path/to/vector.db',
+  dbPath: '/path/to/vector/collections/my-scope',
   collection: {
-    name: 'ki-main',
-    denseField: 'embedding',
-    dimension: 4096,
+    name: 'kisearch',
+    denseField: 'dense',
+    dimension: 4096,                 // 与 config.embedding.dimension 一致
     metric: 'COSINE',
     scalarFields: [
+      { name: 'tag', dataType: 'STRING', indexed: true },
       { name: 'scope', dataType: 'STRING', indexed: true },
-      { name: 'tags', dataType: 'STRING', indexed: true },
-      { name: 'doc_id', dataType: 'STRING', indexed: true },
+      { name: 'group', dataType: 'STRING', indexed: true },
+      { name: 'content', dataType: 'STRING' },   // FTS 字段
     ],
-    fts: { field: 'text', tokenizer: 'jieba' },  // 中文分词
+    fts: { field: 'content', tokenizer: 'jieba' },  // 中文分词
   },
   embedding: new SiliconFlowProvider(...),
 });
 
 // 打开已有集合（查询时）
 const engine = await ZvecEngine.open({
-  dbPath: '/path/to/vector.db',
-  collectionName: 'ki-main',
+  dbPath: '/path/to/vector/collections/my-scope',
+  collectionName: 'kisearch',
   embedding: new SiliconFlowProvider(...),
 });
 
@@ -95,12 +94,12 @@ await engine.close();
 // 单条/批量写入
 const result = await engine.insert([
   {
-    id: 'scope:project/relation:README',
+    id: generateDocId(text, 'project', 'ki-search'),   // sha256(text+scope+tag) 前 32 位
     text: '项目简介内容...',
     fields: {
+      tag: 'ki-search',
       scope: 'project',
-      tags: 'ki-search',
-      doc_id: 'project:README',
+      group: '项目/简介',
     },
   },
 ]);
@@ -136,7 +135,7 @@ const hits = await engine.hybridSearch({
   queryText: '如何配置告警',    // 语义侧
   fts: '告警 配置',             // 关键词侧
   topk: 5,
-  filter: { field: 'tags', op: '==', value: 'ki-search' },
+  filter: { field: 'tag', op: '==', value: 'ki-search' },
   rerank: { type: 'rrf' },      // RRF 融合
 });
 
@@ -161,14 +160,14 @@ const hits = await engine.hybridSearch({
 {
   and: [
     { field: 'scope', op: '==', value: 'monitor' },
-    { field: 'tags', op: '==', value: 'ki-search' },
+    { field: 'tag', op: '==', value: 'ki-search' },
   ]
 }
 
 // 嵌套
 {
   or: [
-    { field: 'tags', op: '==', value: 'ki-path' },
+    { field: 'tag', op: '==', value: 'ki-path' },
     { not: { field: 'scope', op: '==', value: 'test' } },
   ]
 }
@@ -178,15 +177,15 @@ const hits = await engine.hybridSearch({
 
 ### 4.1 store / search / bulk-store
 
-`src/store.ts`、`src/search.ts`、`src/bulk-store.ts` 现在直接调用 `ZvecEngine` API，不再通过 `mem-client.ts` spawn mem CLI：
+`src/store.ts`、`src/search.ts`、`src/bulk-store.ts` 现在直接调用 `ZvecEngine` API（进程内，无 shell 调用）：
 
 ```typescript
 // src/store.ts 简化逻辑
 const engine = await getOrCreateEngine(config);
 const result = await engine.insert([{
-  id: generateDocId(scope, text),
+  id: generateDocId(text, scope, 'ki-search'),
   text: text,
-  fields: { scope, tags, doc_id },
+  fields: { tag: 'ki-search', scope },
 }]);
 return { memoryId: result.id };
 ```
@@ -207,13 +206,13 @@ return { memoryId: result.id };
 `src/lib/path-search.ts` 的 `searchPath()` 现在调用 `engine.ftsSearch()` 或 `engine.hybridSearch()`，不再直接 spawn mem：
 
 - 标签固定为 `ki-path` 或 `ki-relation`
-- 用 metadata filter 限定 tags
+- 用 metadata filter 限定 tag
 - 匹配阈值 `DEFAULT_THRESHOLD = 0.75`
 - 任何异常**静默降级返回 null**
 
 ## 5. 标签体系（三层隔离）
 
-zvec 引擎通过 metadata 字段 `tags` 实现向量空间隔离，语义与原 `mem --tags` 一致：
+zvec 引擎通过 metadata 字段 `tag` 实现向量空间隔离，语义与原 `mem --tags` 一致：
 
 | 标签 | 用途 | 写入位置 |
 |------|------|----------|
@@ -221,16 +220,18 @@ zvec 引擎通过 metadata 字段 `tags` 实现向量空间隔离，语义与原
 | `ki-path` | Group 路径定位 | `path-vectorize.ts` |
 | `ki-relation` | Relation 名称 / 归属查询 | `path-vectorize.ts` / `sync-relation` |
 
-**实现**：通过 `filter: { field: 'tags', op: '==', value: 'ki-search' }` 实现硬过滤，不再依赖客户端 post-filter。
+**实现**：通过 `filter: { field: 'tag', op: '==', value: 'ki-search' }` 实现硬过滤，不再依赖客户端 post-filter。
 
 ## 6. Scope 与配置
 
-- 所有向量操作都绑定 `scope`（metadata 字段），实现项目物理隔离
-- 配置文件：`~/.ki/config.yaml`，结构为 `scopes.definitions.<scope>`
-- 首次使用某 scope 前必须先在配置中注册（通过 `ki manage-index` 或 `ki config init`）
-- **无需全局 mem 安装**：`@zvec/zvec` 是 npm 依赖，版本锁定在 `package.json`
+- 每个 scope 使用独立 Collection（`vectorDir/collections/<scope>`），且所有向量都带 `scope` metadata，双重隔离
+- 配置：`~/.ki/config.yaml` 的 `embedding` 段（模型 / 维度 / 超时）与可选的 `scopes.<scope>` 段
+- `scopeMode: default`（默认）下无需注册 scope；`strict` 下需先在 `scopes` 中登记
+- `@zvec/zvec` 是 npm 依赖，版本锁定在 `package.json`
 
-## 7. 性能对比（zvec vs 旧 mem CLI）
+## 7. 选型参考：与旧 mem CLI 的对比（历史数据）
+
+> 数据采集于迁移期，仅作选型参考；当前行为以 zvec 实现为准。
 
 | 指标 | zvec 引擎（当前） | mem CLI（旧） |
 |------|------------------|--------------|
@@ -248,7 +249,7 @@ zvec 引擎通过 metadata 字段 `tags` 实现向量空间隔离，语义与原
 
 kisearch 的文本向量化与向量检索现在基于**进程内 zvec 引擎**，彻底消除了对外部 `mem` CLI 的依赖：
 
-- **向量化** = `engine.insert()` / `engine.upsert()`（text + metadata → doc_id）
+- **向量化** = `engine.insert()` / `engine.upsert()`（text + metadata → tag/scope/group）
 - **检索** = `engine.hybridSearch()`（自然语言 query → 带 score 的 Hit[]）
 - **本地索引** = Group 树 + `relations-cache` + `local KB`，与向量库解耦，可独立恢复
 - **异步双写** = `sync-relation` 先落本地索引，再用 `setImmediate` + `engine.upsert()` 后台向量化

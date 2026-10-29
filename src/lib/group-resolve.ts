@@ -161,22 +161,30 @@ export async function resolveGroupPath(
   }
 
   // 6. 整段补全失败 → 尝试部分匹配，收集提示信息（不立即返回，留给向量兜底一次机会）
+  //
+  // ★ 只有「在某个顶层组下真的匹配到 top 之外的前缀」才是有效线索：`top` 本身必然
+  //   存在于树中，故 longestPrefix 至少等于 top；若把 longestPrefix === top 也当成命中，
+  //   任何未匹配的路径都会得到一句「补全为 <第一个顶层组>/<输入>」——凭空捏造一个
+  //   挂在别人下面的落点（2026-10-27 实测：全新分组被说成补全到某个无关顶层组）。
+  //   多个顶层组都有前缀时取最长的一个，不再 break 后直接用第一个。
   let partialMatchHint: string | null = null;
+  let bestPrefix = '';
 
   for (const top of topGroups) {
     const fullCandidate = `${top}/${userInput}`;
     const longestPrefix = findLongestExistingPrefix(groupIndex.groups, fullCandidate);
 
-    if (longestPrefix && longestPrefix !== fullCandidate) {
-      const failedPart = fullCandidate.slice(longestPrefix.length + 1);
-      const children = getDirectChildren(groupIndex.groups, longestPrefix);
-      const childHint = children.length > 0
-        ? `"${longestPrefix}" 下的子节点：${children.join(', ')}`
-        : `"${longestPrefix}" 下无子节点`;
+    if (!longestPrefix || longestPrefix === top || longestPrefix === fullCandidate) continue;
+    if (longestPrefix.length <= bestPrefix.length) continue;
 
-      partialMatchHint = `⚠️ 路径 "${userInput}" 补全为 "${fullCandidate}" 后，"${failedPart}" 不存在。\n${childHint}`;
-      break;
-    }
+    const failedPart = fullCandidate.slice(longestPrefix.length + 1);
+    const children = getDirectChildren(groupIndex.groups, longestPrefix);
+    const childHint = children.length > 0
+      ? `"${longestPrefix}" 下的子节点：${children.join(', ')}`
+      : `"${longestPrefix}" 下无子节点`;
+
+    bestPrefix = longestPrefix;
+    partialMatchHint = `⚠️ 路径 "${userInput}" 未匹配到任何 Group；相近的是 "${longestPrefix}"，但它下面没有 "${failedPart}"。\n${childHint}`;
   }
 
   // 7. 向量语义兜底（仅当 scope 提供时启用）

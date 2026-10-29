@@ -34,6 +34,8 @@ backupDir   # 备份目录
 vectorDir   # zvec 向量库 collection 目录
 vector.maxOpenCollections # daemon 同时保留的 Collection handle 上限（LRU）
 embedding   # Embedding 提供商配置
+llm         # 对话模型配置（Web 侧边栏 AI 对话；整段可缺省 = 不启用）
+chatDir     # 会话存储根目录（默认与 dataDir 平级，即其父目录下）
 scopeMode   # scope 护栏模式（default | strict）
 scopes      # scope → KB 目录映射
 mcp         # MCP HTTP 传输默认值
@@ -74,16 +76,26 @@ zvec 向量库 collection 目录，存储向量数据与索引。
 - **观测**：`GET /healthz` 的 `vectorResources` 提供当前打开数、峰值、打开/释放次数及耗时累计。
 - **注意**：该上限不改变既有 idle-close 参数；idle-close 仍按原配置运行。
 
+### `vector.optimize`
+
+导入收尾的索引整理（`optimize`）开关与预算。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | `boolean` | `true` | 导入收尾是否自动触发索引整理 |
+| `concurrency` | 正整数 | `1` | 整理线程数（`0` = 引擎自动） |
+| `timeoutMs` | 正整数 | `600000` | 等待整理落定的上限，超时按「中断」处理（任务会提示用 `ki index-optimize` 重试） |
+
 ### `embedding`
 
 Embedding 提供商配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `provider` | `string` | `siliconflow` | `siliconflow` \| `openai-compatible`（OpenAI 兼容客户端，实际提供商由 baseURL 决定） |
-| `baseURL` | `string` | `https://api.siliconflow.cn/v1` | API 端点，决定实际对接的提供商 |
+| `provider` | `string` | `siliconflow` | **自由文本，不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为**错误文案里的显示名**（`dashscope /embeddings timeout …`），不切换实现。实现恒为 OpenAI 兼容客户端，实际厂商由 `baseURL` 决定 |
+| `baseURL` | `string` | `https://api.siliconflow.cn/v1` | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议，如 `https://host/compatible-mode/v1`）；换厂商只改这里。URL 是否真的兼容只能在真实请求时暴露（`ki doctor` 的连通性/密钥/维度三合一探测即此用途） |
 | `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
-| `dimension` | `number` | `4096` | 向量维度，必须等于 collection.dimension（kisearch 固定 4096） |
+| `dimension` | `number` | `4096` | 向量维度，必须与建库时写入 collection 的维度一致；可配置（如 `1024`），更改后需重建向量 |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
 | `queryTimeoutMs` | `number` | `3000` | 查询 embedding 超时（ms），范围 `1-60000`；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `scheduler` | `object` | 见下表 | import/restore/rebuild 的有界 Embedding 调度与背压护栏 |
@@ -95,10 +107,11 @@ Embedding 提供商配置。
 | `batchSize` | `16` | 每次逻辑 provider 调用的文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数 |
 | `maxConcurrency` | `25` | 单任务同时在途的逻辑 provider 调用数；出现 429/超时优先下调 |
 | `maxGlobalConcurrency` | `25` | daemon 内所有任务共享的逻辑调用槽数（含 provider 重试/退避）；必须 ≥ `maxConcurrency` |
-| `maxPrefetchBatches` | `25` | 单任务预取批次数；**可省略**：省略时自动取 `max(maxConcurrency, 2)`；显式设置时不能小于 `maxConcurrency`，否则实际并发会被静默压低（worker 数取两者最小值） |
+| `maxPrefetchBatches` | `25` | 单任务预取批次数；**建议省略**：省略且默认值小于 `maxConcurrency` 时自动抬到 `maxConcurrency`；显式设置时若小于 `maxConcurrency`，配置加载会 fail-loud（不会静默压低并发） |
 | `maxBufferedVectorBytes` | `67108864` | 单任务待持久化向量估算上限，超限背压 |
 | `globalBufferedVectorBytes` | `134217728` | daemon 级待持久化向量估算上限 |
 | `requestTimeoutMs` | `60000` | 单次 provider 请求超时（ms），上限 `600000`；超时按既有策略重试，**单批最坏耗时 ≈ 本值 ×(重试次数+1)**（重试 3 次时即 4 倍） |
+| `consecutiveFailureThreshold` | `3` | **熔断阈值**：连续这么多次 provider 调用失败后停止剩余批次（成功一次即清零，不被历史抖动累计触发），上限 `100`（配得更大等于不熔断，会 fail-loud）。只对「服务商暂时不可用」（超时 / 网络错 / 429 / 5xx）计容忍额度；认证、维度、配置、持久化类错误**首次即停**（重试无意义）。设为 `1` = 回到「一次失败即停」的旧行为 |
 
 > **通常只需设置 `batchSize` 与 `maxConcurrency`**，其余字段省略即用默认值：
 > `maxPrefetchBatches` 省略时会自动跟随 `maxConcurrency`（无需手动配对），
@@ -122,9 +135,46 @@ embedding:
     maxBufferedVectorBytes: 67108864
     globalBufferedVectorBytes: 134217728
     requestTimeoutMs: 60000
+    consecutiveFailureThreshold: 3
 ```
 
 > **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。
+
+### `llm`
+
+Web 侧边栏「AI 对话」所使用的**对话模型**配置。**整段可缺省**：缺省时对话功能关闭（前端据 `GET /api/chat/config` 的 `enabled:false` 显示「未配置模型」，其余功能不受影响）。
+
+- **类型**：对象（下表全部字段均可选，但 `baseURL` / `model` / `apiKey` 缺任一即判为**未就绪**）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `baseURL` | `string` | — | **必填**（就绪前提），OpenAI 兼容地址，如 `https://host/compatible-mode/v1`。请求发往 `${baseURL}/chat/completions` |
+| `model` | `string` | — | **必填**，用户自填，**无内置默认**（避免把第三方服务与计费绑定到项目上） |
+| `apiKey` | `string` | — | **必填**（就绪前提），支持 `${ENV_VAR}` 引用，与 `embedding.apiKey` 同款解析 |
+| `maxTokens` | 正整数 | 不传 | **默认不下发** `max_tokens`：该上游 reasoning token 与 `max_tokens` 关系不确定，设小值有截断答案风险 |
+| `temperature` | `number` | 不传 | 透传给上游 |
+| `requestTimeoutMs` | 正整数 | `300000` | 单次上游调用**整体**超时（不约束工具轮次） |
+| `firstByteTimeoutMs` | 正整数 | `30000` | 只约束「建立连接并收到首个 chunk」 |
+| `defaultSystemPrompt` | `string` | 空 | 新建会话未显式传 `systemPrompt` 时使用的默认系统提示词 |
+| `supportsTools` | `boolean` | `true` | 上游是否支持 function calling。`false` → 走「daemon 代跑一次检索 + `degraded` 明示」的降级路径（**不是**禁用检索） |
+| `kbDisclosureAck` | `boolean` | `false` | 隐私确认（T12）。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
+| `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 图片能力**本期未实现**（后置 V2），保留字段 |
+| `reasoningEfforts` | `string[]` | 不配置 | **思考级别可选档位清单**（对话配置面板下拉的来源 + 合法性白名单）。按 **OpenAI 通用协议**原样透传（请求体顶层 `reasoning_effort`），**不做任何厂商适配**、本地不校验具体取值；仅约束形状：元素 1–64 字符非空、≤20 个、不重复、不得为保留字 `__follow_default__`。**不配置 ⇒ 面板该项不可调、且不下发该参数** |
+| `reasoningEffort` | `string` | 不配置 | 思考级别的**部署默认档**，必须 ∈ `reasoningEfforts`（否则配置加载阶段即报错，会阻断全部 `ki` 命令）。与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发** |
+| `contextChars` | 正整数 | `1000000` | 上下文窗口刻度（字符数，默认 1000K）：只作占比分母与 80% / 90% 预警基准，不参与截断或拒绝。对话配置层可覆盖 |
+
+> - **不含 `supportsTools` 也能用**：默认按「支持工具」走，上游真不支持时会由错误特征自动降级。
+> - **不要把 `apiKey` 明文提交到仓库**：用 `${ENV_VAR}` 引用环境变量（与 `embedding.apiKey` 一致）。
+> - 未就绪时 `GET /api/chat/config` 仍返回 **200 + `enabled:false`**（配置缺失属可预期产品状态，不是配置错误，也不会让 `ki doctor` 变红）。
+
+### `chatDir`
+
+AI 对话的**会话存储根目录**（每个 scope 一个子目录：`{chatDir}/{scope}/c-*.json`）。
+
+- **类型**：`string`
+- **默认值**：与 `dataDir` **平级**（即 `path.dirname(dataDir)/chat`）。默认 `dataDir` 为 `~/.ki/kb` → 默认 `chatDir` 为 `~/.ki/chat`；这只是**同源推导的结果**，不是写死的值。
+- **说明**：⚠️ 该目录**独立于 `kb/`**，会话文件只写在这里，绝不会触碰知识库资产（`kb/{scope}/`）。
+- **为什么要派生而非硬编码**：若写死 `~/.ki/chat`，用户配置 `dataDir` 后会话数据不跟随，会落到与该实例无关的目录里；派生后也便于测试用临时配置隔离。
 
 ### `scopeMode`
 
@@ -143,7 +193,7 @@ scope → KB 目录映射。每个 scope 可独立配置数据来源与导入/�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `kbDir` | `string` | 无 | KB **基础目录**。程序自动拼接 `kb/{scope}` 子目录（如 `kbDir=/data/kb`、scope=monitor → 实际数据目录 `/data/kb/kb/monitor`），**不要**在 `kbDir` 里带上 scope 名。未配置时回退到 `dataDir/{scope}` |
-| `wikiSync` | `object` | — | wiki 写回/回收站的源目录定位（`sourceDir`）与开关（`enabled`）|
+| `wikiSync` | `object` | — | wiki 写回目录的源目录定位（`sourceDir`）与开关（`enabled`）；与删除无关（删除不进回收站）|
 | `clean` | `object` | — | 数据清洗配置 |
 | `import` | `object` | — | 导入配置 |
 
@@ -166,9 +216,13 @@ scopes:
 | `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
 | `sourceDir` | `string` | 无 | 源文档目录 |
 
+> 开启时除 `sync-relation` 写回外，`ki group create` 会在 `sourceDir` 下创建同名目录，
+> CLI `ki import` 会把导入成功的文档写入 `<sourceDir>/<group>/<relation>.md`（已存在跳过）；
+> Web 上传与 `ki datasource sync` 不写回。
+
 #### `scopes.<scope>.clean`
 
-数据清洗配置（REQ-06/07）。清洗只作用于**向量化输入**（local KB 始终保存文件原文），
+数据清洗配置。清洗只作用于**向量化输入**（local KB 始终保存文件原文），
 且 `ki import` 与 `restore --rebuild-vector` **共用同一套规则与 hooks** —— 两条链路的
 向量文本因此保持一致（rebuild 会按 `group-index.source` 记录的切分参数重新切 chunk）。
 
@@ -195,7 +249,7 @@ scopes:
 
 #### `scopes.<scope>.import`
 
-导入配置（REQ-08）。
+导入配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -236,6 +290,18 @@ embedding:
   dimension: 4096
   apiKey: ${SILICONFLOW_API_KEY}
   queryTimeoutMs: 3000
+
+# 侧边栏 AI 对话（整段可缺省；缺省 = 对话功能关闭，其余功能不受影响）
+llm:
+  baseURL: https://api.siliconflow.cn/v1
+  model: Qwen/Qwen3-235B-A22B-Instruct-2507
+  apiKey: ${SILICONFLOW_API_KEY}
+  # 可选：requestTimeoutMs / firstByteTimeoutMs / maxTokens / temperature
+  # supportsTools: true       # 上游不支持 function calling 时置 false → 走「预检索 + 明示」降级
+  # kbDisclosureAck: true     # 隐私确认；也可由前端确认入口（POST /api/chat/config/ack）写入
+  # reasoningEfforts: [low, high, max]  # 思考级别可选档位（面板下拉的来源；按 OpenAI 通用协议透传，不做厂商适配）
+  # reasoningEffort: high               # 部署默认档，必须在上面的清单里；两者都不配 = 不下发该参数
+chatDir: /data/ki-chat        # 会话存储根目录（默认 = dataDir 的父目录下 chat/；与 kb/ 完全分离）
 
 scopeMode: default
 
@@ -304,6 +370,7 @@ mcp:
 > - `ki doctor` 会展示加载成功后的残余 ⚠️ 告警（`配置字段` 检查项）。
 > - scope 名本身是用户自定义的自由键（如 `monitot` 这种拼错的业务名）**不会**被当作未知字段报错，只有配置字段名参与校验。
 > - 空配置文件（仅注释）合法，全部走内置默认值。
+> - **`llm` 段整体可缺省，段内也不做「必填」校验**：`baseURL` / `model` / `apiKey` 缺失属**可预期的产品状态**（由 `GET /api/chat/config` 的 `enabled:false` 表达），不是配置错误。若在此 fail-loud，未使用对话功能的用户升级后 `ki doctor` 会变红。
 > - **YAML 锚点**：整值引用可用，根层模板键建议以 `x-` 开头（这类键不参与字段名校验）：
 >   ```yaml
 >   x-common: &tpl
@@ -332,6 +399,11 @@ vi ~/.ki/config.yaml
 ```
 
 修改后重新运行 `ki` 命令即生效（配置在命令启动时加载）。若已在运行 `ki mcp --http`，需重启服务以加载新配置。
+
+**例外（对话相关配置可热生效）**：`llm` 段与 `chatDir` 在**每次 `/api/chat/*` 请求**时按请求级配置快照读取，因此修改后**无需重启** `ki mcp --http` 即生效。其中：
+
+- `supportsTools` 改动 → 下次提问即切换「工具路径 / 预检索降级路径」。
+- `kbDisclosureAck` 由前端确认入口（`POST /api/chat/config/ack`）写入，写入采用**原子写**并立即清配置缓存 → 无需重启、无需手动编辑。
 
 ---
 

@@ -40,6 +40,8 @@ interface PendingEntry {
 }
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5000;
+/** opening 状态下 close 前等待 open 落定的窗口（避免 terminate 掉已持锁的 worker） */
+const OPENING_SETTLE_GRACE_MS = 1500;
 
 export class ZvecEngineProxy {
   private worker: Worker | null = null;
@@ -133,7 +135,14 @@ export class ZvecEngineProxy {
       return;
     }
     if (this.state !== 'open') {
-      // opening 中调 close：直接 terminate
+      // opening 中调 close：原生 ZVecOpen 可能已经拿到 flock，直接 terminate 会让
+      // `<dbPath>/LOCK` 永久滞留在本进程（"幽灵占用"：此后连本进程自己 probe 都判 locked）。
+      // 先给 open 一个有限收敛窗口，落定即走正常 close（worker closeSync 真正释放 LOCK）。
+      if (this.state === 'opening') {
+        await this.waitForOpenSettled(OPENING_SETTLE_GRACE_MS);
+        // 经方法读取状态：等待期间 spawn() 的后续逻辑会改状态，TS 对 this.state 的旧收窄不适用
+        if (this.currentState() === 'open') return this.close(drainTimeoutMs);
+      }
       await this.terminate();
       this.state = 'closed';
       return;
@@ -174,6 +183,34 @@ export class ZvecEngineProxy {
 
   isOpen(): boolean {
     return this.state === 'open';
+  }
+
+  /**
+   * 等待「open 落定」（成功 → open / 失败 → failed / 崩溃 → crashed）。
+   * 用于避免在 opening 状态下 terminate：原生 open 一旦拿到 flock 后被杀，
+   * 文件锁会永久泄漏在进程内。返回是否已落定（false = 超时仍在 opening）。
+   */
+  async waitForOpenSettled(timeoutMs: number): Promise<boolean> {
+    const started = Date.now();
+    while (this.state === 'opening' && Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return this.state !== 'opening';
+  }
+
+  /** 读取当前状态（经方法读取可绕过调用点的控制流收窄；等待/异步后判断状态时使用） */
+  currentState(): State {
+    return this.state;
+  }
+
+  /**
+   * 让 worker 不再阻塞进程退出（unref）。
+   * 仅用于"已登记为孤儿、仍在等原生 open 收束"的 probe worker：
+   * 这类 worker 不能 terminate（会泄漏 flock），但也不能把短命令的进程吊住不退出——
+   * unref 后：进程退出时由 OS 释放其全部 fd/锁；进程继续存活时它照常完成 close 并回收。
+   */
+  unrefWorker(): void {
+    try { this.worker?.unref(); } catch { /* ignore */ }
   }
 
   getPersistedSchema(): PersistedSchema | null {

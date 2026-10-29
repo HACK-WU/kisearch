@@ -12,6 +12,7 @@
 import { Command } from 'commander';
 import { validateScope } from './lib/scope.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { vectorStore, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
@@ -57,7 +58,9 @@ export async function executeStore(params: {
   tags?: string;
 }): Promise<StoreResult> {
   if (shouldUseDaemonClient()) return callDaemon<StoreResult>('store', params);
-  return executeStoreLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'store', () => executeStoreLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
 
 // ─── CLI ───

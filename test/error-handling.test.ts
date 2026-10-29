@@ -21,6 +21,10 @@ function runJson(script: string, args: string[]): any {
   } catch (err: any) { try { return JSON.parse((err.stdout || '{}').trim()); } catch { return { ok: false }; } }
 }
 
+function createGroup(scope: string, groupPath: string): any {
+  return runJson('group.ts', ['create', groupPath, '--scope', scope]);
+}
+
 function getOut(script: string, args: string[]): string {
   try {
     return execFileSync('npx', ['jiti', path.join(SCRIPTS_DIR, script), ...args], {
@@ -45,11 +49,11 @@ after(async () => {
 // ─── §2 通用参数校验 ───
 describe('参数校验', () => {
   it('非法 scope 字符被拒绝', () => {
-    const r = runJson('query-group.ts', ['--scope', '../etc']);
+    const r = runJson('group.ts', ['list', '--scope', '../etc']);
     assert.strictEqual(r.ok, false);
   });
   it('scope 含特殊字符被拒绝', () => {
-    const r = runJson('query-group.ts', ['--scope', 'bad/scope']);
+    const r = runJson('group.ts', ['list', '--scope', 'bad/scope']);
     assert.strictEqual(r.ok, false);
   });
 });
@@ -58,32 +62,41 @@ describe('参数校验', () => {
 describe('Group 树索引异常', () => {
   it('查询不存在的 Group 不崩溃', async () => {
     const s = await mkScope('err-g');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const out = getOut('query-group.ts', ['--scope', s, '--groups', 'wiki/nope']);
+    createGroup(s, 'wiki');
+    const out = getOut('group.ts', ['list', '--scope', s, '--groups', 'wiki/nope']);
     assert.ok(out.includes('暂无 Relations'));
   });
   it('损坏的 group-index.json', async () => {
     const s = await mkScope('err-g');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
     const { getGroupIndexPath } = await import('../src/lib/scope.js');
     fs.writeFileSync(getGroupIndexPath(s), '{{{broken');
-    const r = runJson('query-group.ts', ['--scope', s]);
+    const r = runJson('group.ts', ['list', '--scope', s]);
     assert.strictEqual(r.ok, false);
   });
   it('已存在 Group', async () => {
     const s = await mkScope('err-g');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
+    const r = createGroup(s, 'wiki');
     assert.strictEqual(r.ok, false);
   });
-  it('删除非空节点被拒绝', async () => {
+  it('ki group delete 默认只预览（零写入），--yes 才执行', async () => {
     const s = await mkScope('err-g');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--parent', 'wiki', '--name', '父']);
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--parent', 'wiki/父', '--name', '子']);
-    const r = runJson('manage-index.ts', ['--scope', s, '--action', 'delete', '--parent', 'wiki', '--name', '父']);
-    assert.strictEqual(r.ok, false);
-    assert.ok(r.error.includes('非空'));
+    createGroup(s, 'wiki');
+    createGroup(s, 'wiki/父');
+    createGroup(s, 'wiki/父/子');
+
+    const preview = runJson('group.ts', ['delete', 'wiki/父', '--scope', s]);
+    assert.strictEqual(preview.ok, true);
+    assert.ok(String(preview.hint).includes('--yes'));
+    const { getGroupIndexPath } = await import('../src/lib/scope.js');
+    const before = JSON.parse(fs.readFileSync(getGroupIndexPath(s), 'utf-8'));
+    assert.ok(before.groups.wiki['父'], '预览不得删除节点');
+
+    const executed = runJson('group.ts', ['delete', 'wiki/父', '--yes', '--scope', s]);
+    assert.strictEqual(executed.ok, true);
+    const after = JSON.parse(fs.readFileSync(getGroupIndexPath(s), 'utf-8'));
+    assert.strictEqual(after.groups.wiki?.['父'], undefined);
   });
 });
 
@@ -91,14 +104,14 @@ describe('Group 树索引异常', () => {
 describe('Relations 缓存异常', () => {
   it('sync-relation 空 module-info 被拒绝', async () => {
     const s = await mkScope('err-r');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
     const r = runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'x', '--module-info', '']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('需要'));
   });
   it('单条模式缺少参数', async () => {
     const s = await mkScope('err-r');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
     const r = runJson('sync-relation.ts', ['--scope', s]);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('需要'));
@@ -109,7 +122,7 @@ describe('Relations 缓存异常', () => {
 describe('本地 KB 异常', () => {
   it('get-module-info 本地 KB 缺失', async () => {
     const s = await mkScope('err-kb');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
     runJson('sync-relation.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A', '--module-info', '# A\nA内容']);
     const { getLocalKbDir } = await import('../src/lib/scope.js');
     fs.rmSync(getLocalKbDir(s, 'wiki/t'));
@@ -119,7 +132,7 @@ describe('本地 KB 异常', () => {
   });
   it('relations-cache 缺失', async () => {
     const s = await mkScope('err-kb');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
+    createGroup(s, 'wiki');
     const { getRelationsCachePath } = await import('../src/lib/scope.js');
     fs.rmSync(getRelationsCachePath(s));
     const r = runJson('get-module-info.ts', ['--scope', s, '--group', 'wiki/t', '--relation', 'A']);
@@ -132,15 +145,15 @@ describe('本地 KB 异常', () => {
 describe('展示参数校验', () => {
   it('无效 mode', async () => {
     const s = await mkScope('err-display');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('query-group.ts', ['--scope', s, '--mode', 'invalid']);
+    createGroup(s, 'wiki');
+    const r = runJson('group.ts', ['list', '--scope', s, '--mode', 'invalid']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('无效值'));
   });
   it('无效 mode 多值', async () => {
     const s = await mkScope('err-display');
-    runJson('manage-index.ts', ['--scope', s, '--action', 'create', '--name', 'wiki']);
-    const r = runJson('query-group.ts', ['--scope', s, '--mode', 'hot,invalid']);
+    createGroup(s, 'wiki');
+    const r = runJson('group.ts', ['list', '--scope', s, '--mode', 'hot,invalid']);
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('无效值'));
   });

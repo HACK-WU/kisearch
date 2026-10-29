@@ -76,8 +76,8 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 |------|------|
 | `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
 | `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
-| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
-| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`MCP_TOKEN_NOT_FOUND`） |
+| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`TOKEN_NOT_FOUND`） |
+| `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`TOKEN_NOT_FOUND`） |
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
 
@@ -107,14 +107,39 @@ ki mcp --http --web
 
 | 路由 | 方法 | 说明 |
 |------|------|------|
-| `/api/health` | GET | 健康报告（`runHealthCheck` doctor 逻辑，含 zvec 探活，10s 超时） |
+| `/api/health` | GET | 健康报告（复用 `runHealthCheck` doctor 逻辑，含 zvec 探活）。embedding 探测按 4s 单次预算收紧、网络类失败记 warn，整体 deadline 由探测预算派生 |
 | `/api/search-config` | GET | 语义检索默认 `timeout`（秒），仅返回非敏感配置 |
-| `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` 文件名模糊搜索，默认分页上限 500，带缓存） |
+| `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` **名称 / 路径**模糊搜索：`group` 与导入源 `sourcePath` 按最长重叠段合并为「逻辑路径」，无 `sourcePath` 时退回 `group/name`；检索词与候选都做归一 —— 反斜杠与全角 `／` 统一为 `/`、去分隔符两侧空白、折叠重复 `/`、去 `./` 与前导/尾随 `/`、大小写不敏感，**纯分隔符/空白视为无检索词**（按不过滤返回）；带 `q` 时每条命中文档附 `matchedBy`（`name` / `path`）与 `logicalPath`。默认分页上限 500，带缓存） |
 | `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |
-| `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`），返回 `uploadId`；同一相对路径不同内容不得静默覆盖，同 `uploadId` 同内容重试幂等 |
-| `/api/import/run` | POST | 触发导入（幂等追加到 `group`，异步 job，返回 `jobId`）；支持 `conflictMode: overwrite|skip|suffix` 与 `conflictSuffix`（默认 `_{n}`） |
+| `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`）；分批上传可传 `batchIndex`/`batchCount`，最后一批传 `finalize` 后由后端启动导入并返回 `jobId`；同内容重试幂等 |
+| `/api/import/upload-status` | GET | 按 `scope`、`uploadId` 查询上传会话状态与 `jobId`，用于标签页重开后找回已启动的导入任务 |
+| `/api/import/run` | POST | 兼容原有两步调用：显式触发导入（异步 job，返回 `jobId`）；同一 `uploadId` 且参数一致时返回已有任务，不重复启动。可选 body：`skipDuplicates?: boolean`（缺省 `false`，跳过「内容与库中一致但 `sourcePath` 不同」的疑似重复文档，判定由服务端按预检同一判据重算）、`pickMode?: 'dir'\|'files'\|'mixed'`（本次选择方式，**只有 `'dir'` 才会计算清理候选**）、`pruneStale?: boolean`（是否计算清理候选，缺省关）、`preserveRels?: string[]`（上传失败文件，视为「本次有」，当前无生产调用方）。参数不一致时：job **运行中** → `409 { code: 'IMPORT_JOB_PARAMS_MISMATCH' }`；job **已终态** → 允许新建 job。剔除后为空 → job `failed` + `errorCode: 'ALL_FILES_DUPLICATES'`（`/api/import/status` 会回传 `errorCode`） |
+| `/api/import/preflight` | POST | **重复导入预检（只读，无任何写入）**：body `{ scope, uploadId, onlyRelPaths? }`；返回本次文件与库中已有文档「原文一致但 `sourcePath` 不同」的清单 `{ files:{scanned,matched}, duplicates:[{rel,existingGroup,existingRelation,existingSourcePath}], truncated }`，供前端确认后再调 `/api/import/run` |
+| `/api/import/prune` | POST | **目录同步清理（破坏性，不可恢复）**：删除「库中存在、本次目录已没有」的文档。body `{ scope, group?, uploadId?, scannedRels?, preserveRels?, token?, selected, dryRun? }`。服务端**重算**候选并校验 `token`（候选集指纹），对不上 → `409 PRUNE_TOKEN_STALE`；`selected` 必填（缺失 → `400`，不允许「缺省 = 全删」）；`dryRun:true` 只重算并返回 `{ plan }`（含新 token），不删除。候选为空 → `200 { allDone: true }`；候选 > 500 → `400 PRUNE_OVER_LIMIT`；闸门（坐标重合率 <80% / 删除占比 >80%）不通过 → `400 PRUNE_CHECK_DISABLED`。删除复用 `executeBatchDelete`（scope 写锁 + 草稿卫兵 + 物理删除，**无回收站**） |
+| `/api/datasource/list` | GET | **数据源列表（只读，跨 scope）**：`?scope=` 可选；省略时**必须按 token 授权范围过滤** `sources/missing/corrupt`（只读白名单只约束「以 default 身份能否调用」，不限制返回范围）。返回 `{ total, sources[], missing[], corrupt[] }`（2026-10-21 起不再返回 `migrationHints`）；`sources[].type` 为 `directory\|git`，`sources[].git` 为 `{repoRoot,relativeRoot,branch,managed,shortCommit,commitTime,untrackedMarkdown}`（非 git 为 `null`），`sources[].syncAvailability` 为 `{allowed,nextAvailableAt,retryAfterSec,reason}`（`active` / `cooldown` / `null`；旧 daemon 不返回）。`sources[].activeState` 取自任务台账 `operation='datasource-sync'`（`'queued' \| 'running' \| null`，同 scope 运行优先于排队），`sources[].activeStartedAt` 为本次开始时间（排队中为 `null`），`sources[].running = activeState !== null`（派生值），`stale` = 超过 24h 未同步（从未同步也为 true） |
+| `/api/datasource/detail` | GET | **数据源详情（只读，单 scope）**：`?scope=` 必填；返回完整 `datasource.json`（含 `lastSync.result` / `lastSync.git` / `lastSync.warnings` 与 `pendingDelete`）+ `running` / `activeState` / `activeStartedAt` / `syncAvailability`（口径同 list）。`lastSync.result.files` 含 `fullScanned` / `changed`；`lastSync.result.created[]{group,relation}` + `createdTotal` + `createdTruncated` 是上次同步**新建**的文档（`create`/`suffix` 计入、`overwrite` 不计；旧快照不返回这三个字段）；`pendingDelete.candidateSourcePaths` 与 `seenRels` 是服务端内部基线，**不下发** |
+| `/api/datasource/sync` | POST | **页面触发同步**：body `{ scope, full? }`。同 scope 已有 `datasource-sync` 的 queued/running → `409 SYNC_ALREADY_RUNNING`（带 `taskId`）；普通目录 `lastSync.state='ok'` 且不足 30 分钟 → `429 SYNC_RATE_LIMITED`（带 `nextAvailableAt` / `retryAfterSec`）；源目录不可达 → `409 SOURCE_UNREACHABLE`；任务台账不可读 → `503 TASK_REGISTRY_UNAVAILABLE`。成功 `200 { ok:true, scope, taskId, mode:'incremental'\|'full', state:'queued' }`；返回后任务异步执行，进度/终态见 `/api/tasks` 与 `datasource.json.lastSync`（`partial` 不启动冷却） |
+| `/api/datasource/add-remote` | POST | **页面添加 Git 数据源（S-05）**：body `{ scope, url, branch?, subdir?, group?, vector?, conflictMode?, conflictSuffix? }`。同步前置校验：`INVALID_SCOPE` / `INVALID_GIT_URL` / `GIT_URL_CREDENTIALS` / `GIT_SCHEME_UNSUPPORTED` / `INVALID_SUBDIR` / `INVALID_BRANCH` / `INVALID_GROUP` → 400；`DATASOURCE_EXISTS` / `SYNC_ALREADY_RUNNING` → 409；台账不可读 → 503；无权限 → 403。成功 `200 { ok:true, scope, taskId, state:'queued' }`：scope 不存在时由登记流程自动初始化（页面支持新建 Scope，名称校验同 CLI）；同一 `remote + 分支` 已有托管 clone 时复用该副本（不重复 clone），并在建任务前校验子目录（不存在 → `400 INVALID_SUBDIR`，错误含仓库顶层目录）；任务 `datasource-add-remote` 在服务端 clone/复用 + 登记（持 scope 与 remote/clone 锁），完成后自动入队 `datasource-sync`（`full`），其任务 id 见 add 任务详情的 `result.syncTaskId`（null = 入队失败）。clone 失败以任务 `errorCode` 回报（`GIT_AUTH_FAILED` / `GIT_REPO_NOT_FOUND` / `GIT_NETWORK_FAILED` / `GIT_BRANCH_NOT_FOUND` / `GIT_CLONE_TIMEOUT` / `SOURCE_EMPTY` / `CLONE_FAILED`）；`file://` 默认拒绝，仅 `KI_DATASOURCE_ALLOW_FILE_URL=1` 的隔离测试环境放行 |
+| `/api/datasource/prune` | POST | **数据源待删候选的唯一删除接口**（同步触发的写入口是 `/api/datasource/sync`）：body `{ scope, token, selected:[{group,relation}], dryRun? }`。服务端按当前源目录重算候选（扩展名/group/基线均与同步同源）并校验 token（失配 `409`）；`selected` 必填且 ≤500（超出 → `400 PRUNE_SELECTION_TOO_LARGE`），只删「所选 ∩ 可见候选」；**强制 `wikiDelete:false`** —— 只删知识库记录，不动源目录文件。成功回执带剩余 `pendingDelete`（新 token），支持分批删除 |
 | `/api/import/status` | GET | 轮询导入进度/结果（按 `jobId`） |
 | `/api/import/cancel` | POST | 请求在当前 embedding/zvec 批次完成后取消导入（body: `{ "jobId": "..." }`） |
+
+**其余路由**（鉴权与入队规则同上）：
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/tags` | GET | scope 下 tag 及文档数；会打开 Collection，走 write 通道 |
+| `/api/doc/get` | GET | 读取单篇文档原文；只读 `read` 通道，导入期间不被排队 |
+| `/api/doc/edit` | GET / POST | 读取 / 保存文档编辑 |
+| `/api/import/config` | GET | 当前 scope 的导入配置（扩展名 / 大小上限）+ 向量维度快照 |
+| `/api/import/incomplete` | GET | 未完成重试清单；只读 `read` 通道 |
+| `/api/import/retry-incomplete` | POST | 按清单重试未完成文件 |
+| `/api/restore/status` | GET | restore / rebuild 任务进度与结果 |
+| `/api/vector/status` | GET | 向量维度快照（读取，不排队） |
+| `/api/vector/status/refresh` | POST | 主动刷新维度快照；引擎 5s 未响应时降级返回上次快照 |
+| `/api/vector/optimize` | POST | 触发索引整理（同 `ki index-optimize`） |
+| `/api/tasks` | GET | 任务列表（只含计数，明细走单条） |
+| `/api/tasks/:id` | GET | 任务详情 |
 
 `/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 
@@ -122,8 +147,46 @@ ki mcp --http --web
 
 导入完成结果中的 `stats.conflicts` 和 `conflicts[]` 会报告同名文件的原 relation、最终 relation 及动作；向量更新只清理受影响文档，无关 Scope 文档不会被全量清空。
 
+Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，每批发送 `{scope, uploadId, batchIndex, batchCount, files}`——**不再在最后一批带 `finalize`**：全部批次上传完成后，前端先调 `/api/import/preflight` 做重复导入预检，`files.matched === 0` 直接调 `/api/import/run`（body 带 `group?/chunkSize?/chunkOverlap?/vector?/tags?/conflictMode?/conflictSuffix?`）启动导入，`matched > 0` 则展示清单等用户确认：可选「跳过重复文档」（`run` 带 `skipDuplicates: true`，服务端重算并剔除重复项后导入其余）、「仍然导入（会新建副本）」或「取消」（**取消则不导入任何内容**）。`skipDuplicates` 只在 Web 提供（CLI 无对应参数）。全部文件均为疑似重复时按钮禁用；服务端兜底 `ALL_FILES_DUPLICATES`，前端按 `errorCode` 渲染为可纠正提示（不落红色失败态）并恢复面板供改选。把「上传」与「起导入」解耦的原因：`finalize` 会在最后一批上传时就启动导入，届时取消已无法保证零写入。`/api/import/run` 对同一 `uploadId` 幂等——已有 job 时返回它，不重复启动。标签页重开时，前端先用 `/api/import/upload-status` 查询 `uploadId`：已生成 `jobId` 则继续查询导入结果，尚未传完则清除本地任务记录，由用户重新选择文件。旧客户端仍可先调用 `/api/import/upload`，再调用 `/api/import/run`。
+
+**目录同步清理（`POST /api/import/prune`）**：导入页可选「导入后提示清理」，`run` 带 `pruneStale:true` + `pickMode:'dir'` 时，导入结果会多一个 `prune` 块（`{ total, items:[{group,relation,sourcePath,untouched}], token, skipReason?, … }`），**只提示不自动删**。用户勾选后再调 `/api/import/prune`。三条不可破的同源约束：① `scannedRels` 必须与 run 用**同一扩展名白名单**重扫暂存目录（`scopes.<scope>.import.extensions`）；② `group` 取 run 时写入的 `uploadId` 会话快照，不用前端表单实时值；③ `preserveRels` 两侧一致。任一不同源 → 候选集漂移 → `token` 恒失配（`409`）。删除成功后候选集已变，前端会用 `dryRun:true` 重算换新 token（否则「失败项可重试」无法成立）。双闸门：本次路径与库中 `sourcePath` 重合率 <80%（多半是选错目录层级）或候选占比 >80% 时整体关闭，不产候选。
+
+上传中站内切页不会取消任务；关闭或刷新标签页后，未传完的文件需要重新选择并上传。尚未启动导入的暂存目录在空闲满 24 小时后，于**下一次新上传**时惰性清理，不做定时扫描。已启动导入的上传目录会登记为源目录，后续编辑/同步可能使用，因此不参与这项清理。`/api/import/status` 的 job 仍是进程内状态，服务重启后可能无法查询，客户端应显示“状态待确认”。
+
 - `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
 - 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。
+
+### `/api/chat/*`（侧边栏 AI 对话）
+
+需在配置文件的 `llm` 段填写 `baseURL` / `model` / `apiKey`（见 [`docs/configuration.md`](./configuration.md#llm)）。**未配置时接口仍可访问**：`GET /api/chat/config` 返回 `200 + enabled:false`，生成类接口返回 `503 CHAT_DISABLED`。会话文件落在 `{chatDir}/{scope}/`，与 `kb/` **完全分离**。
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/chat/config` | GET | 对话可用性：`enabled` / `model` / `baseURLHost` / `requestTimeoutMs` / `supportsTools` / `retrievalEnabled` / `ackRequired` / `maxToolRounds`。**不含 `apiKey` 与完整 URL 路径**；未就绪时仍 200 |
+| `/api/chat/config/ack` | POST | 隐私确认（`{"ack":true}`，幂等）→ 原子写落盘 `llm.kbDisclosureAck: true` 并即时生效。**不支持取消确认**（撤销入口在配置文件） |
+| `/api/chat/conversations` | GET | 会话列表（`?scope=&archived=0\|1&limit=&cursor=`），按 `(updatedAt, id)` 倒序；损坏文件该条标 `corrupted:true`、其余正常返回 |
+| `/api/chat/conversations` | POST | 新建会话（`{scope, title?, systemPrompt?}`；title ≤48 字、systemPrompt ≤4000 字） |
+| `/api/chat/conversations` | DELETE | 清空该 scope 全部会话（`?scope=`，幂等；**绝不触碰 `kb/`**） |
+| `/api/chat/conversations/:id` | GET | 会话详情（含消息） |
+| `/api/chat/conversations/:id` | PATCH | 改 `title` / `systemPrompt`；无任何可改字段 → 400 |
+| `/api/chat/conversations/:id` | DELETE | 物理删除（级联删该会话的本地图片；**绝不动 `kb/`**） |
+| `/api/chat/conversations/:id/archive` | POST | 归档 / 恢复（`{archived:boolean}`，幂等） |
+| `/api/chat/conversations/:id/messages` | POST | 发消息（**SSE**） |
+| `/api/chat/conversations/:id/regenerate` | POST | 重新生成（**SSE**；不新增 user 消息、`messageCount` 不变） |
+| `/api/chat/conversations/:id/messages/:msgId` | PATCH | 编辑并重发（**SSE**；服务端在同一把会话锁内原子截断其后全部消息；只能编辑 user 消息） |
+
+**SSE 事件序**（前端按 `data.type` 分派，**不使用** SSE `event:` 字段）：
+
+```text
+meta → [tool_start → tool_end]* → reasoning* → content* → sources? → usage? → done
+```
+
+- `done.warning`：`tool-rounds-exhausted`（已达检索轮次上限）/ `conversation-too-long`（建议新建会话）。
+- `degraded.reason`：`tools-unsupported`（上游不支持工具调用）/ `retrieval-unavailable`（检索不可用）/ `semantic-degraded`（语义检索降级为全文）。**至多一条**，且必须向用户可见（N17 禁止静默降级）。
+- 中止：客户端 abort → 服务端落盘已生成部分并回 `aborted`；`content` 为空则不落盘（不产生空气泡）。
+- 错误分层：流建立**前**失败 → HTTP 状态码（`403 DISCLOSURE_REQUIRED` / `503 CHAT_DISABLED` / `409 CONVERSATION_GENERATING` / `404 CONVERSATION_NOT_FOUND`）；流建立**后**失败 → `error` 事件（不抛）。
+- 鉴权与其他 `/api/*` 一致；**访问他 scope 的会话返回 403 而非 404**（防状态码探测枚举）。
+- 同一会话**同时只允许一次生成**，并发请求返回 `409 CONVERSATION_GENERATING`。
 
 ## 状态自查（`ki mcp --status`）
 
@@ -161,9 +224,9 @@ ki mcp --status --host 127.0.0.1 --port 7423
 
 Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Token）> 多 Token 存储 `~/.ki/mcp-tokens.json`（`ki mcp token generate --scope <...>` 创建），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，按明文在存储中匹配（常量时间比较）得到授权 scope 集合，失败返回 401。
 
-**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_manage_index_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
+**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
 
-**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_manage_index_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。免鉴权（回环）或 `all` 权限时不过滤。
+**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。免鉴权（回环）或 `all` 权限时不过滤。
 
 > ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。同理，回环绑定不会读取多 Token 存储。如需鉴权请绑定非回环地址。
 
@@ -250,7 +313,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 - **鉴权失败（401）**：Token 无效或缺失。核对客户端 `Authorization: Bearer` 与 `ki mcp token list` 输出的明文完全一致（整段复制勿手抄）；若用全权临时 Token，确认 `--token`/`KI_MCP_TOKEN` 仍在生效。服务端 stderr 有失败原因日志。
-- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。多 scope（逗号分隔）调用逐段校验，任一段越权即整体拒绝。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_manage_index_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
+- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。多 scope（逗号分隔）调用逐段校验，任一段越权即整体拒绝。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_scope_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
 
 ## 会话模型
 

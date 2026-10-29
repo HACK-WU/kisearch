@@ -223,7 +223,7 @@ test('TC-REQ-01-36: 空数组写入 → { ok:0, failed:0 }', async (t) => {
   assert.equal(result.failed, 0);
 });
 
-test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影响（S-03 §4a.2）', async (t) => {
+test('TC-U4: 系统性 embed 故障停止后续批次，含 noEmbed 组一并进 notProcessed（S-03 §4a.2）', async (t) => {
   // 自定义 embedding：任一小批含 "BOOM" 则该批整体抛错（模拟 provider 单次 HTTP 抛错）
   const failing = {
     dimension: DIM,
@@ -236,9 +236,9 @@ test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影�
   t.after(() => engine.close());
 
   // 构造跨 2 个 embed 小批（batchSize=64）：
-  //   batch0 = [boom, b0-0..b0-62]（64 条、含 BOOM → 整批失败）
-  //   batch1 = [b1]（1 条 → 成功）
-  //   另加 1 条预计算 vector 的 noEmbed doc（永不受 embed 影响）
+  //   batch0 = [boom, b0-0..b0-62]（64 条、含 BOOM → 整批失败并触发系统性停止）
+  //   batch1 = [b1]（1 条；本可成功，但停止后不再发起 → 进 notProcessed）
+  //   另加 1 条预计算 vector 的 noEmbed doc（不参与 embed，但停止下同样不写入）
   const docs = [{ id: 'boom', text: 'BOOM trigger', fields: { tag: 'A' } }];
   for (let i = 0; i < 63; i++) docs.push({ id: `b0-${i}`, text: `alpha-${i}`, fields: { tag: 'A' } });
   docs.push({ id: 'b1', text: 'lonely-second-batch', fields: { tag: 'A' } });
@@ -246,15 +246,21 @@ test('TC-U4: embed 小批失败仅标该批，其余批次+noEmbed 组不受影�
 
   const result = await engine.upsert(docs);
 
-  // batch0 的1 boom + 63 b0-* = 64 条全标 EMBEDDING_FAILED；batch1 的 b1 + noEmbed pre 成功
-  assert.equal(result.failed, 64, 'batch0（含 BOOM）整批失败');
-  assert.equal(result.ok, 2, 'batch1 的 b1 + 预计算 pre 成功写入');
+  // 批量故障止损（025976d）：mock 抛的是普通 Error（非单条内容参数错误），按系统性
+  // provider/配置故障处理 —— 停止发起后续 embed 批次，且不再写入任何待写项
+  // （含 noEmbed 的预计算 vector），统一进 notProcessedItems 交由调用方处置。
+  assert.equal(result.failed, 64, 'batch0（含 BOOM）整批标 EMBEDDING_FAILED');
+  assert.equal(result.ok, 0, '系统性故障停止后不再写入任何文档');
+  assert.equal(result.notProcessed, 2, 'batch1 的 b1 与 noEmbed 的 pre 均未被处理');
+  assert.deepEqual(result.notProcessedItems, ['b1', 'pre']);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stopReason?.phase, 'embedding');
+  assert.equal(result.stopReason?.kind, 'configuration');
   assert.ok(result.errors.every((e) => e.code === 'EMBEDDING_FAILED'), '失败项均为 EMBEDDING_FAILED');
   assert.ok(result.errors.some((e) => e.id === 'boom'));
-  // b1/pre 应可 fetch 到，boom 与同批 b0-* 不应写入
+  // 停止后 b1/pre 同样不写入，boom 与同批 b0-* 也不写入
   const fetched = await engine.fetch(['b1', 'pre', 'boom', 'b0-0']);
-  const ids = fetched.map((d) => d.id).sort();
-  assert.deepEqual(ids, ['b1', 'pre'], 'b1/pre 成功写入，boom/b0-0 未写入');
+  assert.deepEqual(fetched.map((d) => d.id), [], '停止后无任何文档写入');
 });
 
 test('TC-REQ-01-28: update 传 text → 重嵌 + 同步 FTS', async (t) => {
@@ -334,4 +340,106 @@ test('TC-REQ-01-56: send 非 open 状态 → WorkerUnavailableError', async (t) 
     () => engine.info(),
     WorkerUnavailableError,
   );
+});
+
+test('embedding 单请求上限（provider 声明 25）触发时自动降批，不把整批判失败', async (t) => {
+  // 回归场景：engine 内置 embed 路径固定按 64 条切分，而服务商（阿里云百炼兼容模式）上限 25
+  // → 整批 400，64 条全判 EMBEDDING_FAILED（批量导入/FTS-only 写入会大面积失败）。
+  // 期望：命中该类 4xx 后按 provider 声明上限降批重发，全部落库且无失败项。
+  const DECLARED_LIMIT = 25;
+  const requestSizes = [];
+  const rejectingProvider = {
+    dimension: DIM,
+    async embed(texts) {
+      requestSizes.push(texts.length);
+      if (texts.length > DECLARED_LIMIT) {
+        throw Object.assign(
+          new Error(
+            'SiliconFlow /embeddings HTTP 400: <400> InternalError.Algo.InvalidParameter: '
+            + 'Value error, batch size is invalid, it should not be larger than 25.: input.contents',
+          ),
+          { code: 'HTTP_400' },
+        );
+      }
+      return texts.map((text) => hashVector(text));
+    },
+  };
+
+  const engine = await ZvecEngine.create(
+    makeConfig(makeDbPath('zvec-batchlimit-'), { embedding: rejectingProvider }),
+  );
+  t.after(() => engine.close());
+
+  const docs = Array.from({ length: 70 }, (_, i) => ({ id: `bl-${i}`, text: `batch limit doc ${i}` }));
+  const result = await engine.upsert(docs);
+
+  assert.equal(result.failed, 0, '不得因批次超限把文档判失败');
+  assert.equal(result.errors?.length ?? 0, 0);
+  // 首次按 64 切分被拒（证明该路径确实会撞上限），随后自动降到 ≤25
+  assert.equal(requestSizes[0], 64);
+  assert.equal(requestSizes.slice(1).every((size) => size <= DECLARED_LIMIT), true);
+  assert.equal((await engine.listIds()).length, 70, '降批后全部文档应可检索');
+});
+
+// ─── 删组清扫依赖的 group 过滤契约（REQ-20261019-005 跟进项）─────────────
+// `ki group delete` 靠「按 group 标量字段枚举 ki-relation / ki-path」清扫辅助向量；
+// 这里验证引擎侧三个前提：中文组名、含单引号值、无 group 字段的文档不被命中。
+test('TC-GROUP-01: 按 group 标量字段过滤（中文 / 单引号 / 缺字段文档边界 / limit 截断）', async (t) => {
+  const cfg = makeConfig(makeDbPath('zvec-group-'), {
+    collection: {
+      scalarFields: [
+        { name: 'tag', dataType: 'STRING', indexed: true },
+        { name: 'scope', dataType: 'STRING', indexed: true },
+        { name: 'group', dataType: 'STRING', indexed: true },
+        { name: 'content', dataType: 'STRING' },
+      ],
+    },
+  });
+  const engine = await ZvecEngine.create(cfg);
+  t.after(() => engine.close());
+
+  await engine.upsert([
+    { id: 'r1', text: 'a-01', fields: { tag: 'ki-relation', scope: 's1', group: '验收/子组' } },
+    { id: 'r2', text: 'b-01', fields: { tag: 'ki-relation', scope: 's1', group: "it's 组" } },
+    { id: 'p1', text: '验收', fields: { tag: 'ki-path', scope: 's1', group: '验收' } },
+    { id: 'c1', text: 'content', fields: { tag: 'ki-search', scope: 's1' } },
+  ]);
+
+  // ① 中文组名 + tag OR + group OR（清扫实际使用的结构）
+  const ids = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { or: [
+        { field: 'tag', op: '==', value: 'ki-relation' },
+        { field: 'tag', op: '==', value: 'ki-path' },
+      ] },
+      { or: [
+        { field: 'group', op: '==', value: '验收/子组' },
+        { field: 'group', op: '==', value: '验收' },
+      ] },
+    ],
+  });
+  assert.deepEqual(ids.sort(), ['p1', 'r1']);
+
+  // ② 含单引号的组名必须命中（转义正确性）
+  const quoted = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { field: 'group', op: '==', value: "it's 组" },
+    ],
+  });
+  assert.deepEqual(quoted, ['r2']);
+
+  // ③ 无 group 字段的文档不会被 group 条件命中（历史向量的清扫边界，已有文档化说明）
+  const missing = await engine.listIds({
+    and: [
+      { field: 'scope', op: '==', value: 's1' },
+      { field: 'group', op: '==', value: 'no-such-group' },
+    ],
+  });
+  assert.deepEqual(missing, []);
+
+  // ④ limit 截断可观测：清扫据此判定 truncated，避免把"没枚举完"当"无残留"
+  const truncated = await engine.listIds({ and: [{ field: 'scope', op: '==', value: 's1' }] }, 2);
+  assert.equal(truncated.length, 2);
 });

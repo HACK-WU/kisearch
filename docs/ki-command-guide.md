@@ -1,25 +1,25 @@
 # ki 命令参考
 
-> 本文件是 `codekb-agent-guide` 和 `memory-agent-guide` 的公共命令参考。
-> 各规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
+> 本文件是 Agent 规则（[codekb-agent-guide](./codekb-agent-guide.md)）的公共命令参考。
+> 规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
 
 ---
 
 ## 公共命令
 
-以下命令的 `<scope>` 为占位符，各规则替换为实际 scope 值：
+以下命令的 `<scope>` 为占位符，使用时替换为实际 scope 值：
 
-| 规则 | scope 值 |
+| 用途 | scope 值 |
 |------|----------|
-| codekb-agent-guide | `${scope}` |
-| memory-agent-guide | `${scope}-memory` |
+| 代码知识库 | `${scope}` |
+| 记忆类内容 | `${scope}-memory` |
 
 > 用户画像已迁移至 AGENTS.md"用户画像"章节直接存储，不再使用 `user-profile` scope（见 `agents-md-init` skill）。
 
 ### 1. 拉取全景索引
 
 ```bash
-ki query-group --scope <scope> --mode full
+ki group list --scope <scope> --mode full
 ```
 
 **用途**：获取 scope 下所有 Group 的索引树和热度信息。
@@ -49,7 +49,7 @@ my-project/ (score: 25.2) [热]
 ### 2. 查 Group 热区
 
 ```bash
-ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
+ki group list --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ```
 
 **用途**：查看指定 Group 下的热门知识和新兴热区（近 48 小时内频繁使用的知识）。
@@ -68,7 +68,7 @@ ki query-group --scope <scope> --groups "目标Group路径" --mode hot,emerging
 ```
 === my-project/API ===
 
-🔥 热门知识 (Top 3):
+热门索引 (Top 3):
 ├── 用户登录接口 (score: 8.5) [热]
 ├── 数据查询接口 (score: 6.2) [热]
 └── 文件上传接口 (score: 4.8) [常温]
@@ -141,49 +141,55 @@ ki sync-relation --scope <scope> --input /path/to/batch.json
 ### 5. 管理 Group
 
 ```bash
-# 列出所有已初始化的 scope（不需要 --scope 参数）
-ki manage-index --action list-scopes
+# 列出所有 scope（不需要 --scope 参数）
+ki scope list --json
 
-# 创建顶层 Group（不指定 --parent 即创建顶层）
-ki manage-index --scope <scope> --action create --name "Group名称"
+# 创建顶层 Group（位置参数即完整路径）
+ki group create "Group名称" --scope <scope>
 
 # 创建子 Group
-ki manage-index --scope <scope> --action create --parent "父Group路径" --name "新Group名"
+ki group create "父Group路径/新Group名" --scope <scope>
 
 # 删除 Group（含子数据）
-ki manage-index --scope <scope> --action delete --parent "父Group路径" --name "目标Group名" --force
+ki group delete "父Group路径/目标Group名" --yes --scope <scope>
 ```
 
-**`list-scopes` 输出示例**：
+**`ki scope list` 输出示例**：
 
 ```json
 {
   "ok": true,
+  "scopeMode": "default",
+  "vectorAvailable": true,
+  "count": 2,
   "scopes": [
-    { "scope": "my-project", "topGroups": ["我的项目"], "registered": true, "initialized": true },
-    { "scope": "qoder-wiki", "topGroups": ["QoderWiki"], "registered": true, "initialized": true }
-  ],
-  "total": 2
+    { "scope": "my-project", "kb": true, "vector": true, "registered": true,
+      "wikiCount": 12, "ftsOnlyDocCount": 0, "ftsDocCount": 12,
+      "topGroups": ["我的项目"], "topGroupsStale": false },
+    { "scope": "qoder-wiki", "kb": true, "vector": false, "registered": false,
+      "wikiCount": 30, "ftsOnlyDocCount": 0, "ftsDocCount": 0,
+      "topGroups": ["QoderWiki"], "topGroupsStale": false }
+  ]
 }
 ```
 
 **Group 操作输出示例**：
 
 ```json
-{ "ok": true, "path": "父Group路径/新Group名" }
+{ "ok": true, "scope": "my-project", "path": "父Group路径/新Group名", "createdScope": false }
 ```
 
-**`--force` 会删除 Group 以及所有子 Relation。**
+**删除默认只预览，追加 `--yes` 才执行；不触碰 `source.dir` / wiki 源目录。**
 
-**`create` 不带 `--parent` vs 带 `--parent`**：
-- 不带 `--parent`：创建顶层 Group
-- 带 `--parent`：在已有 Group 下创建子节点（需 `--parent` + `--name`）
+**`create` 的位置参数就是完整路径**：
+- 顶层：`ki group create "API" --scope <scope>`
+- 子节点：`ki group create "API/用户" --scope <scope>`（父路径必须已存在）
 
-**`list-scopes`**：列出 `kb/` 下所有已初始化的 scope 及其顶层 Group 名称，不需要 `--scope` 参数
+**`ki scope list`**：列出 KB、向量层与配置中出现的全部 scope，并标注所在层与注册状态；不需要 `--scope` 参数
 
 ---
 
-## 超长 module-info 提示（REQ-10）
+## 超长 module-info 提示
 
 `sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `ki import --source` 自动切分），但仍正常写入单条。
 
@@ -193,22 +199,22 @@ ki manage-index --scope <scope> --action delete --parent "父Group路径" --name
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `scope not found` | scope 尚未创建 | 先用 `ki manage-index --action list-scopes` 确认已有 scope，再执行 `ki manage-index --action create --name "名称"` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
-| Group 不存在 | 尚未创建该 Group | 执行 `ki manage-index --action create --name "名称"` 创建 |
-| Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki query-group --mode full` 确认路径 |
+| `scope not found` | scope 尚未创建 | 先用 `ki scope list` 确认已有 scope，再执行 `ki group create "名称" --scope <scope>` 创建顶层 Group，或执行 `ki sync-relation` 写入任意一条数据自动创建 |
+| Group 不存在 | 尚未创建该 Group | 执行 `ki group create "名称" --scope <scope>` 创建 |
+| Group 路径不精确 | 路径拼写、别名或简称 | CLI 已内置向量语义兜底，自动模糊匹配并输出 `💡 近似匹配`。若仍失败，用 `ki group list --mode full` 确认路径 |
 | `--module-info 内容不能为空` | 未传或空内容 | 补充 `--module-info "<markdown>"` |
 | `${scope}` 仍是字面量 | 用户未指定 scope | 暂停，先问用户确认 scope |
-| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki query-group --mode full` 确认实际名称 |
+| Relation 名称与预期不符 | 使用了错误的名称 | 用 `ki group list --mode full` 确认实际名称 |
 | 写入到错误的 scope | 混淆了 scope | 确认写入目标 scope 是否正确 |
 
 ---
 
 ## 写入后刷新缓存
 
-每次写入操作（`sync-relation` / `ki import` / `manage-index create`）完成后，必须重新拉取全景：
+每次写入操作（`sync-relation` / `ki import` / `ki group create`）完成后，必须重新拉取全景：
 
 ```bash
-ki query-group --scope <scope> --mode full
+ki group list --scope <scope> --mode full
 ```
 
-> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由各规则文件（`codekb-agent-guide.md` / `memory-agent-guide.md`）定义。
+> 本文件仅定义命令语法和通用规则。各命令的使用时机、判断流程、禁忌清单等行为逻辑由 [codekb-agent-guide.md](./codekb-agent-guide.md) 定义。

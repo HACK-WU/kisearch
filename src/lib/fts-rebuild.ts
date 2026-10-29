@@ -10,11 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, getScopeCleanConfig } from './config.js';
 import { getLocalKbDir, getRelationsCachePath, getSource } from './scope.js';
+import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, type LegacyRelationsCacheShape } from './group-cache.js';
 import { buildChunkEntries } from './chunk-entries.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { parseContentTags } from './constants.js';
 import { writeJson } from './store.js';
 import { ftsBulkStore, ftsDeleteByIds, getFtsDocId, type FtsStoreEntry } from './fts-client.js';
+// S-04 I2 补口（REQ-20261009-003）：本文件的两处分片落盘必须入「元数据提交窗口」
+import { getSharedOperationCoordinator } from './operation-coordinator.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 
 interface FtsRelation {
@@ -46,9 +49,21 @@ function hasDenseRelation(rel: FtsRelation): boolean {
 
 /** 重建 scope 中所有没有 dense memoryId 的 relation（可安全重复执行）。 */
 export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): Promise<FtsRebuildResult> {
+  // 批次 2（R4）：双轨读（FtsCache 内存形状不变；新布局分片聚合，旧布局整文件）
   const cachePath = getRelationsCachePath(scope);
-  if (!fs.existsSync(cachePath)) return { indexed: 0, relations: 0, errors: [] };
-  const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as FtsCache;
+  let cache: FtsCache;
+  try {
+    cache = loadCacheShape(scope) as unknown as FtsCache;
+  } catch (err) {
+    // 批次 2 审查 P1-3：必须区分「两布局均无数据（空 scope）」与「数据在但读失败（损坏）」。
+    // 原实现一律返回 indexed:0 —— 分片损坏时 restore 尾部重建会静默假成功（旧实现是 fail-loud）。
+    if (!hasShardedLayout(scope) && !fs.existsSync(cachePath)) {
+      return { indexed: 0, relations: 0, errors: [] };
+    }
+    return { indexed: 0, relations: 0, errors: [{ group: '-', relation: '-', error: `读取 relations 元数据失败：${(err as Error).message}` }] };
+  }
+  // 触达组采集（两处落盘点只写这些组）
+  const touchedGroups = new Set<string>();
   const config = loadConfig();
   const cleanConfig = getScopeCleanConfig(config, scope);
   const source = getSource(scope);
@@ -67,6 +82,7 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
       if (relation.ftsIndexComplete !== false) {
         relation.ftsIndexComplete = false;
         completionStateChanged = true;
+        touchedGroups.add(group);
       }
       const localKbPath = getLocalKbDir(scope, group);
       let localKb: Record<string, string>;
@@ -119,7 +135,18 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
   }
 
   // 若本地原文缺失，或后续 FTS 写入抛错，不能继续沿用快照/旧 cache 中的成功状态。
-  if (completionStateChanged) writeJson(cachePath, cache as unknown as Record<string, unknown>);
+  // 批次 2：预写改触达组（中断安全语义保持——预写必须立即落盘）
+  if (completionStateChanged) {
+    migrateLegacyRelationsCache(scope);
+    // S-04 I2 补口（2026-10-10）：分片落盘必须落在「元数据提交窗口」内 —— 自 I4 起读与
+    // 写任务**并行**，窗外的分片写会让读看到半新半旧（跨文件不一致）。
+    // 窗口只包住"本组分片写"（毫秒级），对读的影响是**极短排队**，不是阻塞。
+    // 本路径**不写 KB**（只读原文重建 FTS）且不删 Relation ⇒ I1（分片可见 ⇒ KB 可取）
+    // 天然不适用；此处补的是 I2（两次元数据写不得跨窗）。
+    getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+      persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, touchedGroups);
+    });
+  }
 
   if (allEntries.length === 0) {
     return { indexed: 0, relations: records.length, errors };
@@ -174,6 +201,18 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
     record.relation.ftsLocators = [...locatorMap.values()];
   }
   if (stored.failed > 0) errors.push({ group: '<batch>', relation: '<fts>', error: `全文索引写入失败 ${stored.failed} 条` });
-  writeJson(cachePath, cache as unknown as Record<string, unknown>);
+  // 批次 2：最终落盘改触达组批写（records 的组；到达此处必然 records.length > 0）
+  {
+    const finalTouched = new Set(records.map((r) => r.group));
+    if (finalTouched.size > 0) {
+      migrateLegacyRelationsCache(scope);
+      // 同上（S-04 I2 补口）：最终落盘同样入窗。★ 顺序不变 —— FTS 写入/清理在前
+      //（`ftsBulkStore` / `ftsDeleteByIds`），分片状态（ftsIds/ftsIndexComplete）在后，
+      // 保证"分片说完整 ⇒ 引擎里真的有"。
+      getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
+        persistCacheShape(scope, cache as unknown as LegacyRelationsCacheShape, finalTouched);
+      });
+    }
+  }
   return { indexed, relations: records.length, errors };
 }

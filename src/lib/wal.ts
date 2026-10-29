@@ -17,6 +17,14 @@ const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
 /** 自旋重试间隔（毫秒） */
 const LOCK_RETRY_INTERVAL_MS = 50;
+/**
+ * 抢占失败的重试上限与退避基数（毫秒）。
+ * 外部安全删除守卫（如 CodeBuddy 的 safe-delete shim，经 NODE_OPTIONS 注入）会拦截删除操作，
+ * 若无上限地抢占重试，每轮都会同步拉起守卫进程（约 80ms）→ 单线程事件循环被打满、
+ * 整个 HTTP 服务无响应（2026-10-02 事故：锁文件被反复 trash 461 次，所有接口 hang）。
+ */
+const LOCK_PREEMPT_MAX_ATTEMPTS = 3;
+const LOCK_PREEMPT_BACKOFF_MS = 100;
 
 /**
  * 同步睡眠（不依赖异步，适配 walWrite 的同步语义）。
@@ -28,15 +36,40 @@ function sleepSync(ms: number): void {
   Atomics.wait(view, 0, 0, ms);
 }
 
+/** 读取锁文件中的持有者 PID（格式 `<pid> <iso>`）；无法解析返回 null */
+function readLockPid(lockPath: string): number | null {
+  try {
+    const pid = Number.parseInt(fs.readFileSync(lockPath, 'utf8').trim().split(/\s+/)[0] ?? '', 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 锁文件年龄（毫秒）；不可读返回 null（可能在检查间隙被释放） */
+function lockAgeMs(lockPath: string): number | null {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 获取目标文件的跨进程写锁。
  * 用 O_CREAT|O_EXCL 创建 `${filePath}.lock`，被占用则自旋等待；
  * 锁陈旧或超时则抢占，避免持锁进程崩溃导致永久死锁。
+ *
+ * 两条防死锁红线（2026-10-02 事故后补）：
+ * 1) 锁由本进程持有时直接视为已持有（同进程重入），绝不「抢占自己的锁」；
+ * 2) 抢占（删除）失败必须退避并限次，最终快速抛错——删除可能被外部守卫或权限限制拦截。
+ *
  * @returns 锁文件路径（用于释放）
  */
 function acquireLock(filePath: string): string {
   const lockPath = `${filePath}.lock`;
   const start = Date.now();
+  let preemptAttempts = 0;
 
   for (;;) {
     try {
@@ -46,27 +79,36 @@ function acquireLock(filePath: string): string {
       return lockPath;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-
-      // 锁已存在：检查是否陈旧（持有者可能已崩溃）
-      try {
-        const age = Date.now() - fs.statSync(lockPath).mtimeMs;
-        if (age > LOCK_STALE_MS) {
-          fs.unlinkSync(lockPath); // 抢占陈旧锁
-          continue;
-        }
-      } catch {
-        // 锁在检查间隙被释放，重试
-        continue;
-      }
-
-      // 超时兜底：抢占以避免死锁
-      if (Date.now() - start > LOCK_ACQUIRE_TIMEOUT_MS) {
-        try { fs.unlinkSync(lockPath); } catch { /* 已被释放 */ }
-        continue;
-      }
-
-      sleepSync(LOCK_RETRY_INTERVAL_MS);
     }
+
+    // ① 本进程已持有：同进程重入，直接放过（原先缺此判断 → 会「抢占自己的锁」）
+    if (readLockPid(lockPath) === process.pid) return lockPath;
+
+    const age = lockAgeMs(lockPath);
+    if (age === null) {
+      sleepSync(LOCK_RETRY_INTERVAL_MS); // 锁在检查间隙被释放；退避一拍，避免紧循环
+      continue;
+    }
+
+    // ② 陈旧 / 超时 → 抢占；删除失败则退避限次，避免无限自旋打满事件循环
+    if (age > LOCK_STALE_MS || Date.now() - start > LOCK_ACQUIRE_TIMEOUT_MS) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch (unlinkErr) {
+        if ((unlinkErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        preemptAttempts += 1;
+        if (preemptAttempts >= LOCK_PREEMPT_MAX_ATTEMPTS) {
+          throw new Error(
+            `获取文件锁失败：陈旧锁 ${lockPath} 无法删除（${(unlinkErr as Error).message}）。`
+            + '请检查是否有安全删除守卫或权限限制拦截了删除，手动清理该锁文件后重试。',
+          );
+        }
+        sleepSync(LOCK_PREEMPT_BACKOFF_MS * preemptAttempts);
+      }
+      continue;
+    }
+
+    sleepSync(LOCK_RETRY_INTERVAL_MS);
   }
 }
 

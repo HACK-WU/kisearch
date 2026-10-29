@@ -23,9 +23,11 @@ import {
   InvalidSchemaError,
   WorkerCrashedError,
   ZvecEngineError,
+  classifyVectorizationStop,
 } from './errors.js';
 import { compileFilter, buildAllowedFields } from './filter/compiler.js';
 import type { EmbeddingProvider } from './embedding/provider.js';
+import { isSplittableParameterError, parseProviderBatchLimit } from './embedding/batch-scheduler.js';
 import { ZvecEngineProxy } from './proxy.js';
 import { routeSearch, type RouterContext } from './search/router.js';
 import { toHit } from './search/normalize.js';
@@ -168,25 +170,31 @@ export class ZvecEngine {
     }
 
     const probeProxy = new ZvecEngineProxy();
+    // openPromise 必须在 try 外声明：超时/异常路径要拿它判断 worker 是否已落定，
+    // 据此决定"安全 close"还是"登记孤儿"，避免 terminate 掉已持锁的 worker。
+    const openPromise = probeProxy.spawn(
+      { dbPath, collectionName: '', embedding: dummyEmbeddingProvider, readOnly: true },
+      'open',
+    );
     try {
-      const openPromise = probeProxy.spawn(
-        { dbPath, collectionName: '', embedding: dummyEmbeddingProvider, readOnly: true },
-        'open',
-      );
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new ProbeTimeoutError('probe timeout')), timeoutMs),
       );
       await Promise.race([openPromise, timeoutPromise]);
       // 先经 worker closeSync 释放句柄/LOCK 再 terminate：直接 terminate 不会触发
       // 原生 close，会泄漏 rocksdb 后台线程与文件锁（常驻进程内永久泄漏）
-      await closeProbeProxyBounded(probeProxy);
+      await closeProbeProxyNow(probeProxy);
       return { exists: true, locked: false, healthy: true };
     } catch (err) {
-      await closeProbeProxyBounded(probeProxy);
       if (err instanceof ProbeTimeoutError) {
-        // 超时未返回 → 判定为锁占用（zvec 持锁时 ZVecOpen 阻塞）
+        // 超时未返回 → 判定为锁占用（zvec 持锁时 ZVecOpen 阻塞）。
+        // 此刻 worker 仍卡在原生 ZVecOpen 内：绝不能 terminate（它可能刚拿到 flock），
+        // 登记孤儿等它落定后立即 close 释放 LOCK；本次立即返回，不阻塞调用方重试。
+        registerProbeOrphan(probeProxy, openPromise);
         return { exists: true, locked: true, healthy: true };
       }
+      // 非超时错误 = open 已落定（拒绝），无锁可泄，可直接安全关闭。
+      await closeProbeProxyNow(probeProxy);
       if (err instanceof CollectionLockedException) {
         return { exists: true, locked: true, healthy: true };
       }
@@ -210,6 +218,7 @@ export class ZvecEngine {
       ...(info.metric ? { metric: info.metric as 'COSINE' } : {}),
       ...(info.denseDataType ? { denseDataType: info.denseDataType as 'FP32' | 'FP16' } : {}),
       docCount: info.docCount,
+      ...(info.indexCompleteness ? { indexCompleteness: info.indexCompleteness } : {}),
       scalarFields: info.scalarFields,
       fts: info.fts,
       locked: false,
@@ -323,8 +332,16 @@ export class ZvecEngine {
     await this.proxy.send('dropIndex', { field });
   }
 
-  async optimize(): Promise<void> {
-    await this.proxy.send('optimize', {});
+  /**
+   * 触发索引整理（optimize）。
+   *
+   * S-01（REQ-20261009-003）：改走原生**异步** `optimize(options)`（原实现走同步
+   * `optimizeSync()`，阻塞 worker 线程且无法限核）。
+   * @param options.concurrency 整理线程数（未传 = 引擎自动）。实验 1 实测：
+   *        `concurrency:1` ≈ 1.0 核；不传（自动）峰值可达 4.3 核。
+   */
+  async optimize(options?: { concurrency?: number }): Promise<void> {
+    await this.proxy.send('optimize', options?.concurrency !== undefined ? { concurrency: options.concurrency } : {});
   }
 
   // ─── 内部：写入编排 ───
@@ -349,6 +366,20 @@ export class ZvecEngine {
       }
     }
 
+    // Open 阶段允许 embedding 配置与持久化 schema 暂时不同，以支持 FTS/读取/删除；
+    // 但任何需要 dense embedding 的写入必须在调用 provider 前拒绝维度不匹配。
+    if (
+      needsEmbed.length > 0
+      && this.schema.dimension !== undefined
+      && this.embedding
+      && this.embedding.dimension !== this.schema.dimension
+    ) {
+      throw new DimensionMismatchError(
+        `embedding.dimension (${this.embedding.dimension}) !== persisted dimension (${this.schema.dimension})`,
+        { data: { embeddingDim: this.embedding.dimension, persistedDim: this.schema.dimension } },
+      );
+    }
+
     const allErrors: Array<{ id: string; code: WriteErrorCode; reason: string }> = [];
 
     // 新调度路径：provider 批次可并行，批次完成后进入同一 writer 链；
@@ -357,12 +388,21 @@ export class ZvecEngine {
       return this.writeDocsWithScheduler(docs, mode, needsEmbed, noEmbed, allErrors, options);
     }
 
-    // embed needsEmbed：engine 自己按 EMBED_BATCH_SIZE 切小批、逐批 embed（S-03 §4a.2 步骤 2-3）。
+    // embed needsEmbed：engine 自己按批切分、逐批 embed（S-03 §4a.2 步骤 2-3）。
     // 小批为最小失败单元：某批抛错只把该批 doc 标 EMBEDDING_FAILED，其余批次与 noEmbed 组不受影响，
     // 兑现「失败项进 errors[]，成功项正常写入」契约（S-03 §+6），避免单次抖动导致整批静默存 0。
+    //
+    // provider 可能对单请求 inputs 数设硬上限（实测阿里云百炼兼容模式为 25）：此时固定的 64 条切分
+    // 会被整批 400 拒绝，上面的"失败粒度"保护完全失效（一次 400 让 64 条全部判失败）。
+    // 故命中「批次超限」类 4xx 时按 provider 声明的上限下调本进程后续批大小并重试本片——一次自愈，
+    // 不把已能成功的文本判失败（与 batch-scheduler 的降批策略同源）。
+    let effectiveEmbedBatchSize = EMBED_BATCH_SIZE;
     const embeddedVectors = new Map<string, number[]>();
-    for (let start = 0; start < needsEmbed.length; start += EMBED_BATCH_SIZE) {
-      const batch = needsEmbed.slice(start, start + EMBED_BATCH_SIZE);
+    const notProcessedDocs: DocInput[] = [];
+    let stopReason: WriteResult['stopReason'];
+    for (let start = 0; start < needsEmbed.length; ) {
+      const size = Math.min(effectiveEmbedBatchSize, needsEmbed.length - start);
+      const batch = needsEmbed.slice(start, start + size);
       // 批内去重（M5）：相同 text 只需 embed 一次，向量复用给所有同文本 doc。
       // 同文本必产出同向量，故语义完全一致；仅消除重复 embedding HTTP 调用
       // （sync-relation 多 tag 场景：同一 moduleInfo 打 N 个 tag → N 个 doc 同 text，原先被 embed N 次）。
@@ -379,7 +419,7 @@ export class ZvecEngine {
       try {
         // 传 batchSize 使 provider 不再二次细分，令失败粒度恰好等于本批
         if (!this.embedding) throw new InvalidDocInputError('embedding provider is required for vectorized writes');
-        const vectors = await this.embedding.embed(uniqueTexts, { batchSize: EMBED_BATCH_SIZE });
+        const vectors = await this.embedding.embed(uniqueTexts, { batchSize: uniqueTexts.length });
         const vectorByText = new Map<string, number[]>();
         for (let i = 0; i < vectors.length; i++) {
           vectorByText.set(uniqueTexts[i], vectors[i]);
@@ -388,10 +428,26 @@ export class ZvecEngine {
           const vec = vectorByText.get(d.text!);
           if (vec) embeddedVectors.set(d.id, vec);
         }
+        start += size;
       } catch (err) {
-        const reason = (err as Error).message;
+        const error = err instanceof Error ? err : new Error(String(err));
+        // provider 声明了更小的单请求上限：降批重试本片（不改判失败），下一次循环用新的批大小
+        const declaredLimit = parseProviderBatchLimit(error);
+        if (declaredLimit !== undefined && declaredLimit < size) {
+          effectiveEmbedBatchSize = declaredLimit;
+          continue;
+        }
+        const reason = error.message;
         for (const d of batch) {
           allErrors.push({ id: d.id, code: 'EMBEDDING_FAILED', reason });
+        }
+        start += size;
+        // 明确属于单条内容参数错误时，沿用既有逐批隔离行为；其余错误视为
+        // provider/配置等系统性故障，停止发起后续批次并明确标记未处理项。
+        if (!isSplittableParameterError(error)) {
+          stopReason = classifyVectorizationStop(error, 'embedding');
+          notProcessedDocs.push(...needsEmbed.slice(start));
+          break;
         }
       }
     }
@@ -401,9 +457,13 @@ export class ZvecEngine {
     const embedFailedIds = new Set(
       allErrors.filter((e) => e.code === 'EMBEDDING_FAILED').map((e) => e.id),
     );
+    const notProcessedIds = new Set([
+      ...notProcessedDocs.map((doc) => doc.id),
+      ...(stopReason ? noEmbed.map((doc) => doc.id) : []),
+    ]);
     const toWrite: WriteDocPayload[] = [];
     for (const d of [...needsEmbed, ...noEmbed]) {
-      if (embedFailedIds.has(d.id)) continue;
+      if (embedFailedIds.has(d.id) || notProcessedIds.has(d.id)) continue;
       const vector = embeddedVectors.get(d.id) ?? d.vector;
       // 校验：写入路径必须至少有 vector 或 text（upsert/insert）
       // update 模式的输入校验由 update() 入口负责（Z-03：缺 dense vector 抛 InconsistentUpdateError）
@@ -461,9 +521,23 @@ export class ZvecEngine {
       reason: e.reason,
     }));
     const merged = [...allErrors, ...zvecErrors];
+    const failed = writeResult.failed + allErrors.length;
+    const notProcessedItems = [...notProcessedIds];
+    const systemicWriteError = zvecErrors.find((error) => error.code === 'ZVEC_WRITE_ERROR');
+    if (systemicWriteError && !stopReason) {
+      stopReason = classifyVectorizationStop(
+        Object.assign(new Error(systemicWriteError.reason || 'zvec collection write failed'), { code: 'ZVEC_WRITE_ERROR' }),
+        'persist',
+      );
+    }
     return {
       ok: writeResult.ok,
-      failed: writeResult.failed + allErrors.length,
+      failed,
+      attempted: docs.length - notProcessedItems.length,
+      notProcessed: notProcessedItems.length,
+      notProcessedItems: notProcessedItems.length > 0 ? notProcessedItems : undefined,
+      status: stopReason ? 'failed' : writeResult.ok === docs.length ? 'succeeded' : writeResult.ok > 0 ? 'partial' : failed > 0 ? 'failed' : 'succeeded',
+      stopReason,
       errors: merged.length > 0 ? merged : undefined,
     };
   }
@@ -605,8 +679,11 @@ export class ZvecEngine {
           persisted -= batchMetadataPending;
         }
       }
-      if (zvecFailed > 0) {
-        fatalWriteError = Object.assign(new Error(`zvec 批次持久化失败（成功 ${zvecPersisted}，失败 ${zvecFailed}），已停止后续批次`), {
+      const systemicWriteError = (writeResult.errors ?? []).find((error) => error.code === 'ZVEC_WRITE_ERROR');
+      if (systemicWriteError) {
+        fatalWriteError = Object.assign(new Error(
+          systemicWriteError.reason || `zvec 批次持久化失败（成功 ${zvecPersisted}，失败 ${zvecFailed}），已停止后续批次`,
+        ), {
           code: 'ZVEC_WRITE_ERROR',
         });
       }
@@ -638,8 +715,15 @@ export class ZvecEngine {
       // scheduler 已把 writer 失败转换为 failure-drain 结果；这里继续汇总，
       // 让调用方拿到逐项 failed/cancelled，而不是丢失批次级诊断。
     }
+    // 最后一批没有后续 writer 回调触发 fatalWriteError 守门时，也要把系统性
+    // zvec 失败写入任务终态；否则结果会被误报为普通部分成功。
+    if (fatalWriteError) {
+      scheduleOutcome.fatalError ??= fatalWriteError;
+      scheduleOutcome.stopReason ??= classifyVectorizationStop(fatalWriteError, 'persist');
+    }
 
     const cancelledItems = scheduleOutcome.cancelledItems.map((item) => item.docId);
+    const notProcessedItems = scheduleOutcome.notProcessedItems.map((item) => item.docId);
     // noEmbed 文档不需要 provider；仍沿用同一 zvec writer 进行一次持久化。
     if (!scheduleOutcome.fatalError && !options.abortSignal?.aborted && noEmbed.length > 0) {
       const noEmbedPayload = noEmbed.map((doc) => validateAndBuild(doc, doc.vector));
@@ -652,6 +736,13 @@ export class ZvecEngine {
       for (const error of noEmbedResult.errors ?? []) {
         allErrors.push({ id: error.id, code: error.code as WriteErrorCode, reason: error.reason });
       }
+      const systemicWriteError = (noEmbedResult.errors ?? []).find((error) => error.code === 'ZVEC_WRITE_ERROR');
+      if (systemicWriteError) {
+        scheduleOutcome.fatalError ??= Object.assign(new Error(systemicWriteError.reason || 'zvec collection write failed'), {
+          code: 'ZVEC_WRITE_ERROR',
+        });
+        scheduleOutcome.stopReason ??= classifyVectorizationStop(scheduleOutcome.fatalError, 'persist');
+      }
     }
 
     if (scheduleOutcome.fatalError) {
@@ -661,21 +752,28 @@ export class ZvecEngine {
     const failedItems = scheduleOutcome.failedItems.map((item) => item.docId);
     const totalFailed = failed + Math.max(0, allErrors.length - failed - metadataPending);
     const ok = Math.max(0, persisted);
-    const status: WriteResult['status'] = cancelled > 0
+    const notProcessed = scheduleOutcome.notProcessed + (scheduleOutcome.stopReason ? noEmbed.length : 0);
+    if (scheduleOutcome.stopReason) notProcessedItems.push(...noEmbed.map((doc) => doc.id));
+    const status: WriteResult['status'] = scheduleOutcome.stopReason
+      ? 'failed'
+      : cancelled > 0
       ? (ok > 0 ? 'partial' : 'cancelled')
       : ok === docs.length ? 'succeeded' : ok > 0 ? 'partial' : 'failed';
-    options.onProgress?.({ phase: 'persist', done: Math.min(docs.length, ok + metadataPending + totalFailed + cancelled), total: docs.length, persisted: ok, failed: totalFailed, metadataPending, cancelled });
+    options.onProgress?.({ phase: 'persist', done: Math.min(docs.length, ok + metadataPending + totalFailed + cancelled + notProcessed), total: docs.length, persisted: ok, failed: totalFailed, metadataPending, cancelled });
     return {
       ok,
-      failed: Math.max(0, docs.length - ok - metadataPending - cancelled),
+      failed: Math.max(0, docs.length - ok - metadataPending - cancelled - notProcessed),
       attempted: scheduleOutcome.attempted,
       errors: allErrors.length > 0 ? allErrors : undefined,
       cancelled,
       cancelledItems,
+      notProcessed,
+      notProcessedItems,
       failedItems,
       metadataPending,
       metadataPendingItems,
       status,
+      stopReason: scheduleOutcome.stopReason,
     };
   }
 
@@ -693,6 +791,12 @@ export class ZvecEngine {
     if (routed.needsEmbed && routed.embedTexts) {
       if (!this.embedding) {
         throw new InvalidSchemaError('query embedding is unavailable for this collection');
+      }
+      if (this.schema.dimension !== undefined && this.embedding.dimension !== this.schema.dimension) {
+        throw new DimensionMismatchError(
+          `embedding.dimension (${this.embedding.dimension}) !== persisted dimension (${this.schema.dimension})`,
+          { data: { embeddingDim: this.embedding.dimension, persistedDim: this.schema.dimension } },
+        );
       }
       const vectors = await this.embedding.embed(routed.embedTexts);
       const vector = Float32Array.from(vectors[0]);
@@ -787,15 +891,54 @@ class ProbeTimeoutError extends Error {
  *   故整体加 2s 上限：超时则放弃等待（宁可泄漏一个 worker，不能让
  *   probe 自身挂死拖垂整个调用链）
  */
-async function closeProbeProxyBounded(proxy: ZvecEngineProxy, timeoutMs = 2000): Promise<void> {
-  const bounded = new Promise<void>((r) => setTimeout(r, timeoutMs));
-  try {
-    await Promise.race([
-      (async () => {
-        try { await proxy.close(500); } catch { /* worker 可能已死 */ }
-        await proxy.terminate();
-      })(),
-      bounded,
-    ]);
-  } catch { /* ignore */ }
+/** probe 临时 proxy 的 close 超时与孤儿上限 */
+const PROBE_CLOSE_TIMEOUT_MS = 3_000;
+/** 同时滞留的孤儿 probe worker 上限：超过后对最老的做兜底 terminate（见注释的取舍） */
+const MAX_PROBE_ORPHANS = 32;
+const probeOrphans = new Set<ZvecEngineProxy>();
+
+/**
+ * 关闭已落定的 probe proxy（open 成功或已拒绝）。
+ * 正常路径下 state=open → closeSync 释放 LOCK 后 terminate；已 failed/crashed 则立即返回。
+ */
+async function closeProbeProxyNow(proxy: ZvecEngineProxy): Promise<void> {
+  try { await proxy.close(PROBE_CLOSE_TIMEOUT_MS); } catch { /* 已无句柄可泄 */ }
+}
+
+/**
+ * 登记"未落定"的 probe 孤儿 worker。
+ *
+ * **关键约束**：worker 卡在原生 ZVecOpen 内（opening）时绝不能 terminate ——
+ * 原生 open 一旦已拿到 flock 而 JS 侧未收到 ready，terminate 会让 `<dbPath>/LOCK`
+ * 永久留在本进程内，形成"幽灵占用"：此后所有进程（含本进程自己）probe 都超时判 locked，
+ * CLI 只能刷"向量库被其他进程占用"，而持锁者其实是一个早已死掉的 worker。
+ * 历史实现正是「close(500) 与 2s 赛跑，超时即 terminate」，在锁竞争下必然命中该窗口
+ * （实测 daemon 自报 openCount=0，却持有 8 个 scope 的 LOCK，连自己都打不开）。
+ *
+ * 改为：等 open 落定（成功→closeSync 释放 LOCK；失败→无锁可泄）后立即 close。
+ * 超过 MAX_PROBE_ORPHANS 才兜底 terminate，避免线程/内存无界增长（极端场景的最后手段）。
+ */
+function registerProbeOrphan(proxy: ZvecEngineProxy, openPromise: Promise<unknown>): void {
+  if (probeOrphans.size >= MAX_PROBE_ORPHANS) {
+    const oldest = probeOrphans.values().next().value as ZvecEngineProxy | undefined;
+    if (oldest) {
+      probeOrphans.delete(oldest);
+      process.stderr.write(
+        `[kisearch] probe 孤儿 worker 超过 ${MAX_PROBE_ORPHANS} 个，对最老的执行兜底 terminate；`
+        + '若此时该 worker 已持有 LOCK，锁会滞留在本进程直到退出（请检查向量库是否长期被占用）。\n',
+      );
+      void oldest.terminate().catch(() => { /* ignore */ });
+    }
+  }
+  probeOrphans.add(proxy);
+  // 不让孤儿 worker 吊住进程退出：CLI 短命令 probe 到被占用的库时，旧实现 terminate 立即
+  // 结束进程（但泄漏 flock）；本实现改为等它落定后 close，若不 unref 则进程要等原生 open
+  // 返回才退出——表现为"命令卡住不退出"（实测 30s+ 直到持锁方释放）。
+  // unref 后：进程退出由 OS 释放其 fd/锁；常驻进程内该 worker 照常完成 close 并回收。
+  proxy.unrefWorker();
+  const reap = (): void => {
+    probeOrphans.delete(proxy);
+    void closeProbeProxyNow(proxy);
+  };
+  openPromise.then(reap, reap);
 }

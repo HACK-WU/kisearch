@@ -75,6 +75,82 @@ function httpUrl(value: unknown, path: string, add: AddFn): void {
   }
 }
 
+// ─── 思考级别校验（REQ-20261016-001 · 设计 §9.1）───────────────
+//
+// D5 口径：**只走 OpenAI 通用协议、不做厂商适配** ⇒ 这里**不维护任何内置取值表**
+//   （`low/high/max` 只是调试样本），清单本身就是权威白名单。
+// 但"不校验取值"≠"不校验形状"：长度/数量/重复/保留字仍需护栏（否则误粘贴即可撑爆面板）。
+
+/** 前端保留字：面板用"跟随模型默认"表示它，**不得**出现在配置中（设计 §2 / §4.3）。 */
+export const REASONING_EFFORT_RESERVED = '__follow_default__';
+/** 单值长度上限（`prompt-config` 的覆盖值校验**同源引用**本常量，避免两处漂移） */
+export const REASONING_EFFORT_MAX_CHARS = 64;
+/** 清单数量上限（与 `MAX_SKILLS = 20` 同风格） */
+const EFFORT_MAX_ITEMS = 20;
+
+/** 清单元素校验（类型由 `stringArray` 分支负责；此处只看取值形状）。 */
+function validateEffortsList(value: unknown, path: string, add: AddFn): void {
+  const list = value as unknown[];
+  // 显式空清单合法：语义是"没有可选档位"（面板禁用 + 引导补档位），与"未配置"区分
+  if (list.length > EFFORT_MAX_ITEMS) {
+    add(path, `最多 ${EFFORT_MAX_ITEMS} 个档位，实际 ${list.length}`);
+    return;
+  }
+  const seen = new Set<string>();
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    if (typeof item !== 'string') continue; // 元素类型问题已由 stringArray 分支报出
+    if (!item.trim()) {
+      add(`${path}[${i}]`, '档位值不能为空字符串');
+    } else if (item.length > REASONING_EFFORT_MAX_CHARS) {
+      add(`${path}[${i}]`, `档位值不得超过 ${REASONING_EFFORT_MAX_CHARS} 字符，实际 ${item.length}`);
+    } else if (item === REASONING_EFFORT_RESERVED) {
+      add(`${path}[${i}]`, `"${REASONING_EFFORT_RESERVED}" 是内部保留值（表示"跟随模型默认"），不能作为档位；请填写上游真实取值`);
+    } else if (seen.has(item)) {
+      add(`${path}[${i}]`, `档位值重复：${item}`);
+    }
+    seen.add(item);
+  }
+}
+
+/** 默认档（单值）校验：不校验是否在清单内 —— 那是跨字段的事（见下）。 */
+function validateEffortValue(value: unknown, path: string, add: AddFn): void {
+  const s = value as string;
+  if (!s.trim()) {
+    add(path, '档位值不能为空字符串');
+  } else if (s.length > REASONING_EFFORT_MAX_CHARS) {
+    add(path, `档位值不得超过 ${REASONING_EFFORT_MAX_CHARS} 字符，实际 ${s.length}`);
+  } else if (s === REASONING_EFFORT_RESERVED) {
+    add(path, `"${REASONING_EFFORT_RESERVED}" 是内部保留值（表示"跟随模型默认"）；如需"不传"请直接删除本字段`);
+  }
+}
+
+/**
+ * 跨字段校验：默认档必须落在清单内（设计 §5 决策 1 —— 单字段 validate 拿不到兄弟字段，
+ * 故挂在 `llm` 的 **object 节点** 上；`walkValue` 的 validate 调用位于 switch 之后，对 object 同样执行）。
+ *
+ * ⚠️ 该错误会**阻断全部 ki 命令**（配置加载阶段 fail-loud）⇒ 文案必须给出两条出路。
+ */
+function validateEffortCrossField(value: unknown, path: string, add: AddFn): void {
+  const obj = value as Record<string, unknown>;
+  const def = obj.reasoningEffort;
+  if (typeof def !== 'string' || !def.trim()) return; // 未配置 / 类型问题已在上方报出
+  const list = obj.reasoningEfforts;
+  const at = `${path}.reasoningEffort`;
+  if (!Array.isArray(list)) {
+    add(at, '配置了思考级别默认档但缺少可选档位清单：请补 llm.reasoningEfforts，或删除本字段（删除 = 不传该参数）');
+    return;
+  }
+  const items = list.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+  if (!items.includes(def)) {
+    add(
+      at,
+      `默认档 "${def}" 不在可选档位清单内（可用：${items.length > 0 ? items.join(' | ') : '（清单为空）'}）；`
+      + '请同步修改本字段或删除它。⚠️ 该错误会让全部 ki 命令在加载配置阶段即报错（含排障入口）',
+    );
+  }
+}
+
 // ─── Schema 声明（与 docs/configuration.md 字段表一一对应） ───
 
 const SCOPE_ENTRY: ConfigNode = {
@@ -151,6 +227,8 @@ const CONFIG_SCHEMA: ConfigNode = {
             maxBufferedVectorBytes: { type: 'number', validate: positiveInt },
             globalBufferedVectorBytes: { type: 'number', validate: positiveInt },
             requestTimeoutMs: { type: 'number', validate: positiveInt },
+            // B 策略熔断（2026-10-12）：连续失败多少次 provider 调用后停止剩余批次
+            consecutiveFailureThreshold: { type: 'number', validate: positiveInt },
           },
         },
       },
@@ -170,6 +248,18 @@ const CONFIG_SCHEMA: ConfigNode = {
       type: 'object',
       fields: {
         maxOpenCollections: { type: 'number', validate: positiveInt },
+        // S-01（REQ-20261009-003）：索引整理（optimize）——见 ki index-optimize / 导入收尾
+        optimize: {
+          type: 'object',
+          fields: {
+            /** 导入收尾是否自动触发索引整理（默认 true） */
+            enabled: { type: 'boolean' },
+            /** 整理线程数（0 = 引擎自动；1 ≈ 1 核，实验 1 实测） */
+            concurrency: { type: 'number', validate: positiveInt },
+            /** 整理等待上限，超过即判定"超时 = 中断"（默认 600000） */
+            timeoutMs: { type: 'number', validate: positiveInt },
+          },
+        },
       },
     },
     mcp: {
@@ -185,6 +275,40 @@ const CONFIG_SCHEMA: ConfigNode = {
         },
       },
     },
+    // 【新增】llm 段（REQ-20260924-001 · S01 §3 + §9.1）
+    // ⚠️ 整段可选：旧配置无 llm 段必须正常加载（回归点）。
+    //    段内 baseURL/model/apiKey 也不做「必填」校验 —— 缺失是**可预期的产品状态**
+    //    （由 GET /api/chat/config 返回 enabled:false 表达），而非配置错误。
+    //    若在此处 fail-loud，未使用对话功能的用户升级后在 doctor 会变红。
+    llm: {
+      type: 'object',
+      fields: {
+        baseURL: { type: 'string' },
+        model: { type: 'string' },
+        apiKey: { type: 'string' },
+        maxTokens: { type: 'number', validate: positiveInt },
+        temperature: { type: 'number' },
+        requestTimeoutMs: { type: 'number', validate: positiveInt },
+        firstByteTimeoutMs: { type: 'number', validate: positiveInt },
+        defaultSystemPrompt: { type: 'string' },
+        supportsImages: { type: 'boolean' },
+        maxImagesPerMessage: { type: 'number', validate: positiveInt },
+        maxImageBytes: { type: 'number', validate: positiveInt },
+        // ── v2（D13）──
+        supportsTools: { type: 'boolean' },
+        kbDisclosureAck: { type: 'boolean' },
+        // ── v3（REQ-20261013-001）── 上下文上限（字符数，默认 1000K）
+        contextChars: { type: 'number', validate: positiveInt },
+        // ── v4（REQ-20261016-001）── 思考级别（OpenAI 通用协议纯透传；不做厂商适配 = D5）
+        /** 可选档位清单：面板选项来源 + 合法性白名单（**不校验具体取值**） */
+        reasoningEfforts: { type: 'stringArray', validate: validateEffortsList },
+        /** 部署默认档：必须 ∈ `reasoningEfforts`（跨字段校验挂在本 object 节点上） */
+        reasoningEffort: { type: 'string', validate: validateEffortValue },
+      },
+      validate: validateEffortCrossField,
+    },
+    // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）
+    chatDir: { type: 'string' },
   },
 };
 

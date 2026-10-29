@@ -1,4 +1,5 @@
 import { loadConfig, resolveScope } from './lib/config.js';
+import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { ensureScopeDir } from './lib/store.js';
 import {
   applyLineEdits,
@@ -180,5 +181,7 @@ export async function executeEditRelation(params: EditRelationParams): Promise<R
   if (shouldUseDaemonClient()) {
     return callDaemon<Record<string, unknown>>('edit-relation', params, editRelationRpcTimeoutMs(params.action));
   }
-  return executeEditRelationLocal(params);
+  try {
+    return await withScopeWriteLock(resolveScope(loadConfig(), params.scope), 'edit-relation', () => executeEditRelationLocal(params));
+  } catch (error) { return { ok: false, error: (error as Error).message }; }
 }
