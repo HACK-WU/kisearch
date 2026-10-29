@@ -5455,19 +5455,29 @@ select.ki-chat-cfg__ta--select {
 /* 宽屏按比例分配：源目录不再吃掉全部剩余宽度（1685px 下 523px → 340px），
    避免「源目录」与「落点 Group」之间出现大片空白。 */
 .ki-ds-table__head th:nth-child(1) { width: 15%; }
-.ki-ds-table__head th:nth-child(2) { width: 6%; }
-.ki-ds-table__head th:nth-child(3) { width: 24%; }
+/* 类型列 6% → 9%（2026-10-29）：要能同排放「目录/Git」+「定时」两个徽标。
+   实测 8.5% 在「Git + 定时⚠」最宽组合下仍折行，故给到 9%；多出的 3% 从
+   下方「源目录」24% → 21% 借出，总宽仍是 100%。 */
+.ki-ds-table__head th:nth-child(2) { width: 9.5%; }
+.ki-ds-table__head th:nth-child(3) { width: 18.5%; }
 .ki-ds-table__head th:nth-child(4) { width: 15%; }
 .ki-ds-table__head th:nth-child(5) { width: 16%; white-space: nowrap; }
 .ki-ds-table__head th:nth-child(6) { width: 9%; }
 .ki-ds-table__head th:nth-child(7) { width: 6%; }
-.ki-ds-table__head th:nth-child(8) { width: 9%; text-align: center; }
+/* 操作列 9% → 11%（2026-10-29）：「同步 + 定时」实测 52 + 6 + 46 = 104px，
+   9% 在内容区 ≤1500px 时只剩 95~99px，必然被挤成两行（1400~1500 笔记本视口最常见）。
+   11% 在 1170px 表格（1400 视口）下留 105px，是能并排的最小档。 */
+.ki-ds-table__head th:nth-child(8) { width: 11%; text-align: center; }
 .ki-ds-table__row { cursor: pointer; }
 .ki-ds-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
   text-align: left; vertical-align: middle;
 }
 .ki-ds-table__row td:nth-child(5) { white-space: nowrap; }
+/* 类型徽标与定时徽标必须同行（2026-10-29）：列宽已在 nth-child(2) 按最宽组合
+   「Git + 定时⚠」留足；这里禁止折行兜底 —— 一旦折行，「定时」会被读成另一个字段，
+   而非「这个源开了定时」。宽度再不够时宁可溢出，也不要掉到第二行。 */
+.ki-ds-table__row td.ki-ds-col--type { white-space: nowrap; }
 .ki-ds-table__row:last-child td { border-bottom: 0; }
 .ki-ds-table__row:hover { background: var(--ki-color-bg-secondary); }
 .ki-ds-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
@@ -5893,7 +5903,9 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-table__head th:nth-child(1) { width: 190px; }
   .ki-ds-table__head th:nth-child(3) { width: auto; }
   .ki-ds-table__head th:nth-child(6) { width: 96px; }
-  .ki-ds-table__head th:nth-child(8) { width: 96px; }
+  /* 96 → 130：此断点隐藏了 4 列、空间充裕，96px 扣 padding 只剩 72px，
+     「同步 / 定时」必然堆成两行；130px 才有 106px 可用宽（需 104px）。 */
+  .ki-ds-table__head th:nth-child(8) { width: 130px; }
 }
 @media (max-width: 960px) {
   .ki-detail { width: 100vw; }
@@ -7094,7 +7106,8 @@ select.ki-chat-cfg__ta--select {
 
 /* ── 数据源定时同步（REQ-20261029-001） ───────────────── */
 .ki-ds-sched-badge {
-  display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 999px;
+  /* padding 6 → 5：与类型徽标同排时要省出几像素（最宽态是「Git + 定时⚠」） */
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 999px;
   font-size: var(--ki-font-size-xs); line-height: 18px; font-weight: 600;
   color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
   white-space: nowrap; vertical-align: middle;
@@ -7106,25 +7119,94 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ki-task-source-badge--scheduler { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
 
-.ki-ds-sched-dialog { width: min(520px, 92vw); max-width: 92vw; }
+/* 弹窗 520 → 560（2026-10-29）：88px 标签列 + 控件后剩余宽度才够放
+   120/110 的间隔控件与 250 的时间控件，不再被挤成 96px 小框。
+   ★ 同时必须自己限高：本次新增「设置区卡片 + 两列元信息」让弹窗在 375 宽下从
+   549px 涨到 638px，而 `.ki-dialog--form` 是 `max-height: none; overflow: visible`
+   —— 矮视口（375×600）下弹窗顶端被顶出屏幕、且无法滚动，保存按钮点不到。
+   限高后由 body 滚动、head/foot 固定。 */
+.ki-ds-sched-dialog { width: min(560px, 92vw); max-width: 92vw; max-height: calc(100vh - 24px); overflow: hidden; }
+/* 滚动条与项目其它滚动容器同口径（细条、随主题），否则内容被裁时看不出还能滚 */
+.ki-ds-sched-dialog .ki-dialog__body {
+  min-height: 0; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
 .ki-ds-sched-sub { margin: 4px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
 .ki-ds-sched-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: center; margin-top: 12px; }
 .ki-ds-sched-label { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
 .ki-ds-sched-control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .ki-ds-sched-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
-.ki-ds-sched-modes { gap: 16px; }
-.ki-ds-sched-radio { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer; }
 .ki-ds-sched-inline { gap: 8px; }
-.ki-ds-sched-number { width: 96px; }
-.ki-ds-sched-unit { width: 96px; }
-.ki-ds-sched-datetime { width: 210px; max-width: 100%; }
+.ki-ds-sched-number { width: 120px; }
+.ki-ds-sched-unit { width: 110px; }
+.ki-ds-sched-datetime { width: 250px; max-width: 100%; }
+/* 日历按钮的热区只有图标本身（约 12px），补 padding 放大可点范围 */
+.ki-ds-sched-datetime::-webkit-calendar-picker-indicator { cursor: pointer; padding: 6px; margin-right: -6px; }
+
+/* 模式 / 重复：原生 radio / checkbox → 分段控件
+   （热区 51×18 → 96×34；沿用全站 `.ki-segmented` 的「浅底胶囊 + 选中白底」视觉） */
+.ki-ds-sched-seg {
+  display: inline-flex; gap: 2px; padding: 3px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-sched-seg button {
+  min-width: 96px; min-height: 34px; padding: 0 20px;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--ki-color-text-muted); font-family: var(--ki-font-family);
+  font-size: var(--ki-font-size-md); cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-ds-sched-seg button:hover { color: var(--ki-color-text); }
+.ki-ds-sched-seg button:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-ds-sched-seg button[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-primary);
+  font-weight: 650; box-shadow: var(--ki-shadow-1);
+}
+
+/* 设置区卡片：把「开关 / 要配置的项 / 只读信息」三层分开，别挤成一列 */
+.ki-ds-sched-panel {
+  margin-top: 14px; padding: 14px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-sched-panel__title {
+  display: block; font-size: var(--ki-font-size-xs); font-weight: 600;
+  letter-spacing: .04em; color: var(--ki-color-text-subtle);
+}
+.ki-ds-sched-panel__title + .ki-ds-sched-row { margin-top: 10px; }
+/* 卡片底色本身偏灰：输入框回到 surface，否则与卡片只差几个灰阶、看不出边界。
+   ★ 必须用 background-color —— 用 background 简写会把 .ki-form-select 的箭头
+   background-image 一起清掉，下拉框会退化成纯文本框。 */
+.ki-ds-sched-panel .ki-form-input,
+.ki-ds-sched-panel .ki-form-select { background-color: var(--ki-color-surface); }
+
+/* 字段下方说明：默认引导语气（灰）；只有「填了但不合法」才转告警色，
+   避免一切到「指定时间」就跳红字（2026-10-29） */
+.ki-ds-sched-tip { margin: 8px 0 0 98px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-tip--warn { color: var(--ki-color-warning); }
+
 .ki-ds-sched-error { margin: 8px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-danger-ink); }
 .ki-ds-sched-warn { margin-bottom: 4px; padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-warning-soft); color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
 .ki-ds-sched-warn-line { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
-.ki-ds-sched-hint-block { margin: 12px 0 0; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
-.ki-ds-sched-meta { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); display: grid; gap: 4px; }
-.ki-ds-sched-meta > div { display: flex; justify-content: space-between; gap: 12px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); }
-.ki-ds-sched-meta b { font-weight: 600; color: var(--ki-color-text); }
+
+/* 只读元信息：两列小卡片（原「单块两行 + `> div` 横排」结构已随改版移除） */
+.ki-ds-sched-meta { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ki-ds-sched-meta__card { padding: 10px 12px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); }
+.ki-ds-sched-meta__label { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-meta__value {
+  display: block; margin-top: 2px; font-size: var(--ki-font-size-md); font-weight: 600;
+  color: var(--ki-color-text); white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.ki-ds-sched-meta .ki-ds-sched-warn-line { grid-column: 1 / -1; }
+
+/* 关闭态：既然没有下次运行，就别摆一张「下次运行 —」的空卡 */
+.ki-ds-sched-offnote {
+  margin: 14px 0 0; padding: 10px 12px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary); color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+}
+
 .ki-ds-sched-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
 .ki-ds-sched-discard { margin-right: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
 @media (max-width: 640px) {
@@ -7134,6 +7216,10 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-sched-footer .ki-btn { flex: 1 1 auto; }
   .ki-ds-sched-datetime, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
   .ki-ds-sched-inline { flex-direction: column; align-items: stretch; }
+  .ki-ds-sched-tip { margin-left: 0; }
+  .ki-ds-sched-meta { grid-template-columns: minmax(0, 1fr); }
+  .ki-ds-sched-seg { width: 100%; }
+  .ki-ds-sched-seg button { flex: 1 1 auto; min-width: 0; }
   .ki-ds-missing-row { flex-direction: column; align-items: flex-start; }
 }
 
