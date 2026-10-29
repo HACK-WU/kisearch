@@ -47,6 +47,10 @@ export interface DataSourcePendingGroup {
 
 /** 结果概览：hero 大数字 + 分段进度条 + 图例（2026-10-22 视觉改造） */
 export interface DataSourceSummary {
+  /**
+   * hero 分母 = **本轮处理量**（`files.scanned`，恒等式 `completed + incomplete + skipped = scanned`）。
+   * ★ 不要用 `fullScanned`：Git 增量同步时它是仓库全量（如 2226），会把「完成 48」显示成 2.2%。
+   */
   scanned: number;
   completed: number;
   unchanged: number;
@@ -465,9 +469,10 @@ export function buildDataSourceDetail(
 
   // 概览与指标把「完成 / 未变 / 跳过 / 失败」拆成可比较的数字：
   // hero 表达"这次同步到底成了多少"，指标网格补齐其余维度（完成不在网格里，避免与 hero 重复）
+  // ★ 分母取 files.scanned（本轮处理量），与任务详情同源；fullScanned 只作「全量扫描」明细。
   const summary: DataSourceSummary | null = result
     ? {
-      scanned: fullScanned,
+      scanned: result.files.scanned,
       completed: result.files.completed,
       unchanged: result.files.unchanged,
       skipped: result.files.skipped,

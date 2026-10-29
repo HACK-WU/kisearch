@@ -196,11 +196,12 @@ describe('buildDataSourceDetail 头部与时间口径', () => {
 
 describe('buildDataSourceDetail Git / 增量口径', () => {
   const base = lastSync();
+  // 增量同步的真实形态：仓库全量 241、本轮只处理 3 篇变更（scanned = 本轮处理量）
   const gitSync = lastSync({
     params: { ...base.params, mode: 'incremental' },
     result: {
       ...base.result,
-      files: { ...base.result.files, fullScanned: 241, changed: 3 },
+      files: { ...base.result.files, scanned: 3, completed: 3, unchanged: 0, fullScanned: 241, changed: 3 },
     },
     git: {
       commit: 'a'.repeat(40),
@@ -248,7 +249,28 @@ describe('buildDataSourceDetail Git / 增量口径', () => {
     const byLabel = new Map(model.results.map((row) => [row.label, row]));
     assert.equal(byLabel.get('全量扫描').value, '241');
     assert.equal(byLabel.get('本次变更').value, '3');
-    assert.equal(byLabel.get('处理').value, '241');
+    assert.equal(byLabel.get('处理').value, '3');
+  });
+
+  it('hero 分母取本轮处理量：增量同步完成后是 100%，不是 3/241', () => {
+    const model = buildDataSourceDetail(gitRecord);
+    assert.equal(model.summary.scanned, 3);
+    assert.equal(model.summary.completed, 3);
+    const percent = Math.round((model.summary.completed / model.summary.scanned) * 1000) / 10;
+    assert.equal(percent, 100);
+    // 全量扫描仍是仓库全量（上下文数字，只进指标网格）
+    const byLabel = new Map(model.metrics.map((metric) => [metric.label, metric]));
+    assert.equal(byLabel.get('全量扫描').value, 241);
+    assert.equal(byLabel.get('处理').value, 3);
+  });
+
+  it('目录源全量同步时 hero 分母 = 处理量 = 全量扫描', () => {
+    const model = buildDataSourceDetail(record({ type: 'directory', lastSync: lastSync() }));
+    assert.equal(model.summary.scanned, 241);
+    assert.equal(model.summary.completed, 241);
+    assert.equal(new Map(model.metrics.map((metric) => [metric.label, metric])).get('全量扫描').value, 241);
+    // 内容未变的子集仍以 hint 给在「完成」行上
+    const byLabel = new Map(model.results.map((row) => [row.label, row]));
     assert.equal(byLabel.get('完成').hint, '其中内容未变 29 篇');
   });
 
