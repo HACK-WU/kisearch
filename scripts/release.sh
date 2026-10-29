@@ -104,7 +104,16 @@ git push origin "$TAG" --force
 # 9. 创建 GitHub Release 并上传 tarball
 RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 
-\`ki mcp\` 启动 MCP Server，暴露 14 个工具（查询、写入、批量同步、索引管理、Scope/Tag 管理等）。
+\`ki mcp\` 启动 MCP Server，暴露 13 个工具（检索 / 读取 / 写入 / 组织与删除 / Scope·Tag 管理）。
+
+### 本次更新（v1.1.0-beta → v1.2.0-beta）
+
+- **数据源**：新增数据源登记与同步（CLI 登记/同步、Git URL 托管 clone、页面只读查看与详情抽屉）
+- **命令**：\`ki group\` 命令族上线，下线 \`manage-index\` / \`query-group\`（不兼容变更，见 docs/cli.md）
+- **导入**：目录同步清理库中已删除文档、跳过重复文档、导入进度常驻可见，同名策略默认改为增量导入
+- **检索**：混合检索支持文档内高亮（可关闭）、浏览页支持按路径匹配，\`limit\` 改为总返回条数上限
+- **前端**：新增「资源」页；代码块语法高亮与 mermaid 主题跟随；多语言代码块切换；文档内 Ctrl+F 查找；AI 对话页可折叠侧栏、可选思考级别与历史证据回放
+- **修复**：单文件导入的 source 块被误当 wiki 目录（ENOTDIR）、写入页必填项不可发现、侧栏 MCP 端口写死、删组残留辅助向量、MCP/CLI 建组未自动初始化 scope
 
 ### 安装
 
