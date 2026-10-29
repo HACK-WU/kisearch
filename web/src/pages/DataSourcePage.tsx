@@ -4,7 +4,10 @@
  * 信息架构（2026-10-21 用户定稿）：
  *  - 主区是**全宽列表**（不再用左右分栏）：Scope / 源目录 / 落点 / 上次同步 / 状态 / 待删
  *  - 点击某行 → 右侧面板展示该数据源上一次同步详情 + 待删段（URL `/datasource/:scope`，可分享/刷新恢复）
- *  - 页面只读；唯一写动作是面板里的「删除待删候选」
+ *  - 写动作只有三个，语义必须分清（2026-10-29 新增第三个）：
+ *      ① 行内「同步」= 触发同步   ② 面板「删除所选」= 删**库内文档**（待删候选）
+ *      ③ 行内「移除」= 取消**数据源登记**（库内文档保留，见 removeDataSource）
+ *    「移除」是破坏性操作：必须二次确认，且同步/添加任务进行中一律禁用（服务端 409 兜底）。
  *  - **面板是模态浮层**（V5，2026-10-22 用户定稿）：宽度 70vw + 左侧遮罩压暗 ⇒ 点遮罩/外部关闭。
  *    历史：V3 曾定「非模态不铺遮罩」，V5 按用户要求加回遮罩；不要再按 V3 结论去掉。
  *  - **列表不再自带卡片标题**（PM 走查）：页面身份由顶栏 H1 唯一承载，总数在页头副标题；
@@ -16,9 +19,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useDataSourceDetail, useDataSourceList } from '@/lib/hooks';
+import { useDataSourceDetail, useDataSourceList, useScopeList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
-import { addRemoteDataSource, getDocContent, pruneDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceScheduleView } from '@/api/httpApi';
+// upstream 侧新增定时设置视图（DataSourceScheduleView），本地侧新增移除接口（removeDataSource）
+import { addRemoteDataSource, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceScheduleView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
 import { DatasourceScheduleDialog } from '@/components/DatasourceScheduleDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
@@ -41,6 +45,20 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 
 const keyOf = (item: { group: string; relation: string }): string => `${item.group}\u0000${item.relation}`;
+
+/**
+ * 待移除的数据源：正常登记来自列表行；`corrupt` 来自损坏提示（列表里没有这一行、记录也无法解析）。
+ * ★ corrupt 必须带 `corrupt` 原因走 `force` 分支，否则后端按 CORRUPT 拒绝 —— 坏文件解析不了，
+ *   这里是它唯一的清理出口（CLI `remove` 同样拒绝解析坏登记）。
+ */
+interface RemoveTarget {
+  scope: string;
+  type?: 'directory' | 'git';
+  dir?: string;
+  lastSyncAt?: number | null;
+  managed?: boolean;
+  corrupt?: string;
+}
 
 const PAGE_SIZE_DEFAULT = 10;
 
@@ -131,6 +149,13 @@ export function DataSourcePage(): JSX.Element {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const [syncingScope, setSyncingScope] = useState<string | null>(null);
+  // 行级操作结果条（同步 / 移除数据源共用同一位置，避免两套提示抢位）
+  const [rowNotice, setRowNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
+  /**
+   * 定时设置结果条（upstream「定时同步」用）。
+   * ★ 与 rowNotice 并存而非合并：定时弹窗关闭后要留下"下次何时运行"，而行内「同步 / 移除」
+   *   刚产生的提示不该被它顶掉；两条分别渲染（见下方两段 notice）。
+   */
   const [rowSyncNotice, setRowSyncNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState({ scope: '', url: '', branch: '', subdir: '', group: '' });
@@ -155,6 +180,16 @@ export function DataSourcePage(): JSX.Element {
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
   const lastScopeRef = useRef<string | null>(null);
+  // 移除数据源登记（2026-10-29）：行内入口 / 损坏提示入口共用同一个确认弹窗
+  const [removeTarget, setRemoveTarget] = useState<RemoveTarget | null>(null);
+  const [removePurge, setRemovePurge] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removeDialogRef = useRef<HTMLElement>(null);
+  /** 移除成功后行已消失：焦点要落在结果提示上，不能掉到 body（键盘用户会丢失位置） */
+  const rowNoticeRef = useRef<HTMLParagraphElement>(null);
+  // 确认框里的「库内文档 N 篇」：走已缓存的 scope 列表，不为弹窗单独打接口
+  const scopeListQuery = useScopeList();
 
   useEffect(() => {
     scopeRef.current = scope;
@@ -188,10 +223,13 @@ export function DataSourcePage(): JSX.Element {
     setError(null);
     setReceipt(null);
     setSyncingScope(null);
-    setRowSyncNotice(null);
+    setRowNotice(null);
     setCollapsedDirs(new Set());
     setShowAllFailures(false);
     setDocTarget(null);
+    setRemoveTarget(null);
+    setRemoveError(null);
+    setRemoving(false);
   }, [scope]);
 
   // 关闭抽屉后把焦点还给打开它的行（否则焦点掉到 body）
@@ -208,16 +246,32 @@ export function DataSourcePage(): JSX.Element {
     });
   }, [scope]);
 
-  // Esc 关闭抽屉（与站内其他浮层同口径）；添加弹窗 / 文档抽屉打开时由它们独占 Esc，
+  // Esc 关闭抽屉（与站内其他浮层同口径）；添加弹窗 / 移除弹窗 / 文档抽屉打开时由它们独占 Esc，
   // 否则一次 Esc 会把文档抽屉和数据源详情一起关掉
   useEffect(() => {
-    if (!scope || addOpen || docTarget) return undefined;
+    if (!scope || addOpen || docTarget || removeTarget) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') navigate('/datasource');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [scope, navigate, addOpen, docTarget]);
+  }, [scope, navigate, addOpen, docTarget, removeTarget]);
+
+  // 移除确认弹窗：打开时聚焦容器、Esc 关闭（移除进行中不响应，避免"关了但请求还在跑"）
+  useEffect(() => {
+    if (!removeTarget) return undefined;
+    const timer = window.setTimeout(() => removeDialogRef.current?.focus(), 0);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || removing) return;
+      setRemoveTarget(null);
+      setRemoveError(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [removeTarget, removing]);
 
   // 旧 daemon 只返回 running：统一在这里归一，避免 `undefined !== null` 把空闲判成进行中
   const activeState = resolveDataSourceActiveState(detailQuery.data?.activeState, detailQuery.data?.running);
@@ -490,11 +544,11 @@ export function DataSourcePage(): JSX.Element {
   const triggerSync = async (targetScope: string, full = false): Promise<void> => {
     if (syncingScope !== null) return;
     setSyncingScope(targetScope);
-    setRowSyncNotice(null);
+    setRowNotice(null);
     try {
       const result = await syncDataSource({ scope: targetScope, full });
       const message = `已提交${result.mode === 'full' ? '全量' : '增量'}同步（${targetScope}，任务 ${result.taskId.slice(0, 8)}）`;
-      setRowSyncNotice({ tone: 'info', text: message });
+      setRowNotice({ tone: 'info', text: message });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', targetScope] }),
         queryClient.invalidateQueries({ queryKey: ['dataSourceList'] }),
@@ -509,7 +563,7 @@ export function DataSourcePage(): JSX.Element {
       else if (e.status === 409) message = e.body?.error ?? '已有同步任务在排队或执行中';
       else if (e.status === 403) message = '没有该知识库的同步权限';
       else message = `同步失败：${e.message}`;
-      setRowSyncNotice({ tone: 'warn', text: message });
+      setRowNotice({ tone: 'warn', text: message });
       await queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', targetScope] });
     } finally {
       setSyncingScope(null);
@@ -534,6 +588,87 @@ export function DataSourcePage(): JSX.Element {
     const trigger = scheduleTriggerRef.current;
     scheduleTriggerRef.current = null;
     if (trigger) requestAnimationFrame(() => trigger.focus());
+  };
+
+  // ── 移除数据源登记（2026-10-29）────────────────────────
+  const openRemove = (target: RemoveTarget): void => {
+    setRemoveTarget(target);
+    // 托管 clone 默认随登记一起删（工具自有目录，登记一删即成死数据）；引用计数在后端兜底
+    setRemovePurge(target.managed === true);
+    setRemoveError(null);
+  };
+
+  const closeRemove = (): void => {
+    if (removing) return;
+    setRemoveTarget(null);
+    setRemoveError(null);
+  };
+
+  // 「库内文档 N 篇」来自已缓存的 scope 列表（不为此单独打接口）；取不到时显示「—」
+  const removeDocCount = removeTarget
+    ? scopeListQuery.data?.scopes.find((item) => item.scope === removeTarget.scope)?.wikiCount
+    : undefined;
+
+  const submitRemove = async (): Promise<void> => {
+    const target = removeTarget;
+    if (!target || removing) return;
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      const result = await removeDataSource({
+        scope: target.scope,
+        ...(target.corrupt ? { force: true } : {}),
+        ...(!target.corrupt && removePurge && target.managed ? { purge: true } : {}),
+      });
+      setRemoveTarget(null);
+      // 详情抽屉正开着被移除的 scope：直接回列表，别停在已失效的详情上
+      if (scope === target.scope) navigate('/datasource');
+      const kept = target.corrupt
+        ? ''
+        : removeDocCount !== undefined
+          ? `，库内 ${removeDocCount} 篇文档保留`
+          : '，库内文档保留';
+      const clone = result.cloneRemoved
+        ? '；托管 clone 已删除'
+        : result.cloneRemoveSkipped
+          ? `；${result.cloneRemoveReason ?? '托管 clone 仍被其他 scope 使用，已保留'}`
+          // 失败必须带目录：否则用户不知道去哪手工清理（后端有下发 managedCloneDir）
+          : result.cloneRemoveError
+            ? `；托管 clone 未删除，请手动清理 ${result.managedCloneDir ?? '托管目录'}：${result.cloneRemoveError}`
+            : '';
+      setRowNotice({
+        tone: result.cloneRemoveError ? 'warn' : 'info',
+        text: result.removed
+          ? `已移除 ${target.scope} 的数据源登记${kept}${clone}`
+          : `${target.scope} 的数据源登记已不存在（可能在别处已移除）`,
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dataSourceList'] }),
+        queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', target.scope] }),
+        queryClient.invalidateQueries({ queryKey: ['docList'] }),
+        queryClient.invalidateQueries({ queryKey: ['scopeList'] }),
+      ]);
+      requestAnimationFrame(() => {
+        // 成功移除后该行已不存在 → 焦点交给结果提示；失败（409/404）行还在 → 还原到原按钮
+        const trigger = document.querySelector<HTMLElement>(`[data-ds-remove="${CSS.escape(target.scope)}"]`);
+        if (trigger) trigger.focus();
+        else rowNoticeRef.current?.focus();
+      });
+    } catch (err) {
+      const e = err as Error & { status?: number; body?: { code?: string; error?: string } };
+      let message: string;
+      if (e.status === 409 && e.body?.code === 'DATASOURCE_BUSY') {
+        message = e.body?.error ?? '该数据源正在同步或添加，任务结束后再移除';
+      } else if (e.status === 409) message = e.body?.error ?? '该知识库正在写入，请稍后再试';
+      else if (e.status === 404) message = '该数据源登记已不存在（可能在别处已移除）';
+      else if (e.status === 403) message = '没有该知识库的操作权限';
+      else message = e.body?.error ?? `移除失败：${e.message}`;
+      setRemoveError(message);
+      // 409/404 多由别处已并发操作的现实状态导致：刷新列表，别让页面停在旧数据上
+      await queryClient.invalidateQueries({ queryKey: ['dataSourceList'] });
+    } finally {
+      setRemoving(false);
+    }
   };
 
   // ── S-05：页面添加 Git URL 数据源 ──────────────────────
@@ -826,11 +961,115 @@ export function DataSourcePage(): JSX.Element {
         />
       ) : null}
 
+      {/* 移除数据源登记确认（2026-10-29）：破坏性操作，二次确认 + 明示"库内文档保留"。
+          语义口径见文件头：这是取消登记，不是删文档。 */}
+      {removeTarget ? (
+        <div
+          className="ki-overlay ki-overlay--show ki-overlay--front"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeRemove();
+          }}
+        >
+          <section
+            ref={removeDialogRef}
+            className="ki-dialog ki-dialog--form"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ki-ds-remove-title"
+            tabIndex={-1}
+          >
+            <header className="ki-dialog__head">
+              <div>
+                <h3 className="ki-dialog__title" id="ki-ds-remove-title">移除数据源</h3>
+                <p className="ki-ds-add__sub">取消登记后不再自动同步，也不再产生待删候选</p>
+              </div>
+              <button type="button" className="ki-dialog__close" aria-label="关闭移除确认" disabled={removing} onClick={closeRemove}>✕</button>
+            </header>
+            <div className="ki-dialog__body">
+              <div className="ki-ds-remove__grid">
+                <div className="ki-ds-remove__row">
+                  <span className="ki-ds-remove__label">Scope</span>
+                  <span className="ki-ds-remove__value">{removeTarget.scope}</span>
+                </div>
+                {removeTarget.corrupt ? (
+                  <div className="ki-ds-remove__row">
+                    <span className="ki-ds-remove__label">登记状态</span>
+                    <span className="ki-ds-remove__value ki-ds-remove__value--danger">损坏：{removeTarget.corrupt}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="ki-ds-remove__row">
+                      <span className="ki-ds-remove__label">类型</span>
+                      <span className="ki-ds-remove__value">
+                        {removeTarget.type === 'git' ? 'Git 仓库' : '普通目录'}
+                        {removeTarget.managed ? '（服务端托管 clone）' : ''}
+                      </span>
+                    </div>
+                    <div className="ki-ds-remove__row">
+                      <span className="ki-ds-remove__label">源目录</span>
+                      <span className="ki-ds-remove__value ki-ds-remove__value--mono" title={removeTarget.dir}>{removeTarget.dir}</span>
+                    </div>
+                    <div className="ki-ds-remove__row">
+                      <span className="ki-ds-remove__label">上次同步</span>
+                      <span className="ki-ds-remove__value">
+                        {removeTarget.lastSyncAt ? formatDateTime(removeTarget.lastSyncAt) : '尚未同步过'}
+                      </span>
+                    </div>
+                    <div className="ki-ds-remove__row">
+                      <span className="ki-ds-remove__label">库内文档</span>
+                      <span className="ki-ds-remove__value">
+                        {removeDocCount !== undefined ? `${removeDocCount} 篇 · ` : ''}
+                        <span className="ki-ds-remove__keep">保留，不会被删除</span>
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {removeTarget.managed && !removeTarget.corrupt ? (
+                <label className="ki-ds-remove__check">
+                  <input
+                    type="checkbox"
+                    checked={removePurge}
+                    disabled={removing}
+                    onChange={(event) => setRemovePurge(event.target.checked)}
+                  />
+                  同时删除服务端托管 clone 目录（释放磁盘；其他 scope 仍复用时自动保留）
+                </label>
+              ) : null}
+
+              <p className="ki-ds-remove__note">
+                {removeTarget.corrupt
+                  ? '登记文件已损坏、无法解析；移除只删除登记文件，不影响库内文档与源目录。'
+                  : '库内文档不会被删除，仍可被检索。如需清理这些文档，请先在详情抽屉的「待删除」里处理候选；移除后本页不再产生候选。'}
+                {removeTarget.corrupt ? null : (
+                  <>
+                    <br />
+                    登记参数（落点 Group / 同名策略 / 切分 / 向量化）不会保留，重新登记需再填一次。
+                  </>
+                )}
+              </p>
+
+              {removeError ? <p className="ki-write-error" role="alert">{removeError}</p> : null}
+            </div>
+            <footer className="ki-dialog__foot">
+              <button type="button" className="ki-btn ki-btn--secondary" disabled={removing} onClick={closeRemove}>取消</button>
+              <button type="button" className="ki-btn ki-btn--danger" disabled={removing} onClick={() => { void submitRemove(); }}>
+                {removing ? '移除中…' : '确认移除'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
       <div className="ki-ds-callout" role="note">
         <span className="ki-ds-callout__icon" aria-hidden>ⓘ</span>
         <span>
           Git 仓库可在本页「添加 Git 数据源」（服务端 clone）；本地目录数据源通过命令行登记：<code className="ki-ds-callout__cmd">ki datasource add --scope &lt;scope&gt; --source &lt;目录&gt;</code>。
-          <strong>手动同步有 30 分钟冷却</strong>（CLI 可强制）；<strong>定时同步在列表「定时」中按源开启，默认关闭</strong>。本页的删除仅针对待删候选，不动源目录文件。
+          <strong>同步可在本页触发</strong>（普通目录 30 分钟一次，CLI 可强制；<strong>手动同步另有冷却</strong>）；
+          <strong>定时同步在列表「定时」中按源开启，默认关闭</strong>。
+          两个删除动作语义不同：行内<strong>「移除」</strong>只取消数据源登记（<strong>库内文档保留</strong>）；
+          详情抽屉里的<strong>「删除所选」</strong>才删除库内文档。两者都不动源目录文件。
         </span>
       </div>
 
@@ -841,6 +1080,18 @@ export function DataSourcePage(): JSX.Element {
       {rowSyncNotice ? (
         <p className={`ki-task-notice ki-task-notice--${rowSyncNotice.tone}`} role={rowSyncNotice.tone === 'warn' ? 'alert' : undefined}>
           {rowSyncNotice.text}
+        </p>
+      ) : null}
+
+      {rowNotice ? (
+        /* tabIndex=-1：仅作「操作后焦点落点」用，不进入 Tab 序（见 submitRemove） */
+        <p
+          ref={rowNoticeRef}
+          tabIndex={-1}
+          className={`ki-task-notice ki-task-notice--${rowNotice.tone} ki-ds-notice--focus`}
+          role={rowNotice.tone === 'warn' ? 'alert' : undefined}
+        >
+          {rowNotice.text}
         </p>
       ) : null}
 
@@ -857,7 +1108,18 @@ export function DataSourcePage(): JSX.Element {
         </div>
       ))}
       {corrupt.map((item) => (
-        <p key={item.scope} className="ki-task-notice ki-task-notice--warn">⚠ {item.scope} 登记损坏：{item.reason}</p>
+        /* 损坏登记不在列表里（无行可选），这里是唯一清理出口：走 force 移除坏文件 */
+        <p key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-notice--action">
+          <span>⚠ {item.scope} 登记损坏：{item.reason}</span>
+          <button
+            type="button"
+            data-ds-remove={item.scope}
+            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+            aria-label={`移除 ${item.scope} 的损坏登记`}
+            disabled={removing}
+            onClick={() => openRemove({ scope: item.scope, corrupt: item.reason })}
+          >移除登记</button>
+        </p>
       ))}
 
       <section className="ki-card">
@@ -979,6 +1241,7 @@ export function DataSourcePage(): JSX.Element {
                       {source.lastSync ? formatSyncDuration(source.lastSync.durationMs) : '—'}
                     </td>
                     <td className="ki-ds-table__actions">
+                      {/* flex 包一层：td 不能自己变 flex（会丢 table-cell 布局） */}
                       <div className="ki-ds-row-actions">
                         <button
                           type="button"
@@ -1003,6 +1266,29 @@ export function DataSourcePage(): JSX.Element {
                             }}
                           >定时</button>
                         ) : null}
+                        <button
+                          type="button"
+                          data-ds-remove={source.scope}
+                          className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+                          disabled={source.running || rowSyncing}
+                          title={source.running
+                            ? '同步进行中，任务结束后可移除'
+                            : rowSyncing
+                              ? '正在提交同步，稍后可移除'
+                              : `移除 ${source.scope} 的数据源登记（库内文档保留）`}
+                          aria-label={`移除数据源 ${source.scope}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (source.running || rowSyncing) return;
+                            openRemove({
+                              scope: source.scope,
+                              type: source.type,
+                              dir: source.dir,
+                              lastSyncAt: source.lastSync?.at ?? null,
+                              managed: source.git?.managed === true,
+                            });
+                          }}
+                        >移除</button>
                       </div>
                     </td>
                   </tr>

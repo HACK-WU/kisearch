@@ -927,3 +927,34 @@ export async function pruneDataSource(input: {
     body: JSON.stringify(input),
   });
 }
+
+/** 取消数据源登记的结果（不删库内文档） */
+export interface RemoveDataSourceResponse {
+  ok: boolean;
+  scope: string;
+  /** false = 读到之后、删除之前登记已被并发移除（按成功处理，不是失败） */
+  removed: boolean;
+  /** 托管 clone 根目录（仅要求 purge 且为托管源时返回） */
+  managedCloneDir?: string;
+  cloneRemoved?: boolean;
+  /** 其他 scope 仍在复用该 clone，已跳过删除 */
+  cloneRemoveSkipped?: boolean;
+  cloneRemoveReason?: string;
+  cloneRemoveError?: string;
+}
+
+/**
+ * 移除数据源登记（等价 CLI `ki datasource remove`），**不删库内文档**。
+ * - `purge`：一并删除服务端托管的 clone 目录（受引用计数保护）
+ * - `force`：仅用于不可解析的登记（CORRUPT / INVALID）——坏文件解析不了，这是唯一出口
+ */
+export async function removeDataSource(input: {
+  scope: string;
+  purge?: boolean;
+  force?: boolean;
+}): Promise<RemoveDataSourceResponse> {
+  return req<RemoveDataSourceResponse>('/api/datasource/remove', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}

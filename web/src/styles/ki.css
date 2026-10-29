@@ -5455,19 +5455,20 @@ select.ki-chat-cfg__ta--select {
 /* 宽屏按比例分配：源目录不再吃掉全部剩余宽度（1685px 下 523px → 340px），
    避免「源目录」与「落点 Group」之间出现大片空白。 */
 .ki-ds-table__head th:nth-child(1) { width: 15%; }
-/* 类型列 6% → 9%（2026-10-29）：要能同排放「目录/Git」+「定时」两个徽标。
-   实测 8.5% 在「Git + 定时⚠」最宽组合下仍折行，故给到 9%；多出的 3% 从
-   下方「源目录」24% → 21% 借出，总宽仍是 100%。 */
+/* 类型列 6% → 9.5%（2026-10-29）：要能同排放「目录/Git」+「定时」两个徽标。
+   实测 8.5% 在「Git + 定时⚠」最宽组合下仍折行，故给到 9.5%。
+   ★ 操作列因新增「移除」按钮需要更多宽度（见下方 nth-child(8)），这部分从
+   「源目录」18.5% → 16% 与「落点」15% → 14.5% 借出；八列合计仍是 100%。 */
 .ki-ds-table__head th:nth-child(2) { width: 9.5%; }
-.ki-ds-table__head th:nth-child(3) { width: 18.5%; }
-.ki-ds-table__head th:nth-child(4) { width: 15%; }
+.ki-ds-table__head th:nth-child(3) { width: 16%; }
+.ki-ds-table__head th:nth-child(4) { width: 14.5%; }
 .ki-ds-table__head th:nth-child(5) { width: 16%; white-space: nowrap; }
-.ki-ds-table__head th:nth-child(6) { width: 9%; }
+.ki-ds-table__head th:nth-child(6) { width: 8%; }
 .ki-ds-table__head th:nth-child(7) { width: 6%; }
-/* 操作列 9% → 11%（2026-10-29）：「同步 + 定时」实测 52 + 6 + 46 = 104px，
-   9% 在内容区 ≤1500px 时只剩 95~99px，必然被挤成两行（1400~1500 笔记本视口最常见）。
-   11% 在 1170px 表格（1400 视口）下留 105px，是能并排的最小档。 */
-.ki-ds-table__head th:nth-child(8) { width: 11%; text-align: center; }
+/* 操作列 9% → 15%（2026-10-29）：合并后是「同步 + 定时 + 移除」三个小按钮，
+   实测 52 + 6 + 46 + 6 + 46 ≈ 156px。上游只排「同步 + 定时」时的 11%（1170px 表格下 129px）
+   已不够；15% 在 1170px 下约 175px，是三者并排的最小档。 */
+.ki-ds-table__head th:nth-child(8) { width: 15%; text-align: center; }
 .ki-ds-table__row { cursor: pointer; }
 .ki-ds-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
@@ -5500,6 +5501,40 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__head th.ki-ds-col--actions { text-align: center; }
 .ki-ds-table__row td.ki-ds-table__actions { text-align: center; }
 .ki-ds-sync-btn { min-width: 52px; }
+/* 行内操作组（2026-10-29）：td 保持 table-cell，按钮排布交给内部 flex */
+.ki-ds-row-actions { display: flex; align-items: center; justify-content: center; gap: 6px; }
+/* 移除数据源登记：破坏性但非主操作 —— 走次要按钮底，仅文字/悬停用 danger 色，
+   避免整行被实心红按钮抢焦点（实心危险色留给确认框里的「确认移除」） */
+.ki-ds-remove-btn { color: var(--ki-color-danger-ink); white-space: nowrap; }
+.ki-ds-remove-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ki-color-danger) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ki-color-danger) 40%, transparent);
+}
+/* 损坏登记提示行：文案 + 移除按钮，窄屏换行不挤压 */
+.ki-ds-notice--action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* 提示行的「程序化焦点落点」：不画焦点环（它是结果提示，不是可操作控件） */
+.ki-ds-notice--focus:focus, .ki-ds-notice--focus:focus-visible { outline: none; }
+/* 移除确认弹窗：信息行（标签 72px + 值自适应），值可折行防长路径撑破 */
+.ki-ds-remove__grid { display: flex; flex-direction: column; gap: 8px; }
+.ki-ds-remove__row {
+  display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px;
+  align-items: baseline; font-size: var(--ki-font-size-sm);
+}
+.ki-ds-remove__label { color: var(--ki-color-text-subtle); }
+.ki-ds-remove__value { color: var(--ki-color-text); min-width: 0; overflow-wrap: anywhere; }
+.ki-ds-remove__value--mono { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); }
+.ki-ds-remove__value--danger { color: var(--ki-color-danger-ink); }
+.ki-ds-remove__keep { color: var(--ki-color-success); font-weight: 600; }
+.ki-ds-remove__check {
+  display: flex; align-items: flex-start; gap: 8px; margin-top: 14px;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer;
+}
+.ki-ds-remove__check input { margin: 2px 0 0; accent-color: var(--ki-color-primary); flex: none; }
+.ki-ds-remove__note {
+  margin: 14px 0 0; padding: 10px 12px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-warning-soft); color: var(--ki-color-warning);
+  font-size: var(--ki-font-size-xs); line-height: 1.6;
+}
 .ki-ds-table__dir,
 .ki-ds-table__group {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
