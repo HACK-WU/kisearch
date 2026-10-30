@@ -168,4 +168,14 @@ describe('validateChunkParams（写入入口的范围闸门）', () => {
     assert.match(err.message, new RegExp(`建议 ${SUGGESTED_CHUNK_SIZE_MIN}–${SUGGESTED_CHUNK_SIZE_MAX}`));
     assert.match(err.message, /99999/);
   });
+
+  it('★ 非数字输入不把 "NaN" 拼进文案（CLI --chunk-size abc）', () => {
+    const sizeErr = validateChunkParams({ chunkSize: Number('abc') });
+    assert.equal(sizeErr?.field, 'chunkSize');
+    assert.doesNotMatch(sizeErr?.message ?? '', /NaN/);
+    assert.match(sizeErr?.message ?? '', /必须是数字/);
+    const overlapErr = validateChunkParams({ chunkOverlap: Number('xyz') });
+    assert.equal(overlapErr?.field, 'chunkOverlap');
+    assert.doesNotMatch(overlapErr?.message ?? '', /NaN/);
+  });
 });

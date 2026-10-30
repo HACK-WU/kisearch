@@ -75,7 +75,13 @@ export function validateChunkParams(values: {
   const { chunkSize, chunkOverlap } = values;
   if (chunkSize !== undefined && chunkSize !== null) {
     if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
-      return { field: 'chunkSize', message: `段长必须为正整数（当前 ${chunkSize}）` };
+      // NaN（如 CLI 传了 --chunk-size abc）拼进文案会变成「当前 NaN」，对用户是噪音
+      return {
+        field: 'chunkSize',
+        message: Number.isFinite(chunkSize)
+          ? `段长必须为正整数（当前 ${chunkSize}）`
+          : '段长必须是数字（收到非数字输入）',
+      };
     }
     if (chunkSize < MIN_CHUNK_SIZE || chunkSize > MAX_CHUNK_SIZE) {
       return {
@@ -87,7 +93,12 @@ export function validateChunkParams(values: {
   }
   if (chunkOverlap !== undefined && chunkOverlap !== null) {
     if (!Number.isInteger(chunkOverlap) || chunkOverlap < 0) {
-      return { field: 'chunkOverlap', message: `重叠必须为非负整数（当前 ${chunkOverlap}）` };
+      return {
+        field: 'chunkOverlap',
+        message: Number.isFinite(chunkOverlap)
+          ? `重叠必须为非负整数（当前 ${chunkOverlap}）`
+          : '重叠必须是数字（收到非数字输入）',
+      };
     }
     if (chunkOverlap > MAX_CHUNK_OVERLAP) {
       return { field: 'chunkOverlap', message: `重叠需不超过 ${MAX_CHUNK_OVERLAP}（当前 ${chunkOverlap}）` };
