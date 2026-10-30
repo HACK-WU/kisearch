@@ -130,38 +130,110 @@ export function scheduleBadge(
   return schedule.consecutiveFailures >= SCHEDULE_FAILURE_WARN ? '定时⚠' : '定时';
 }
 
+/**
+ * 「下次同步」列的两行视图（2026-10-30 用户定稿：从「上次同步」副行升为独立列）。
+ *
+ * ★ 主值（`value`）只放「什么时候会再跑」这一个事实，用正文字号 + 600 承重；
+ *   周期 / 模式 / 未开启等限定信息全部下沉副行（`sub`），别在主值里拼长句
+ *   —— 主值一旦变成「下次 20:35 · 每 3 分钟」，独立成列就又退化成一行字。
+ * ★ 列宽内放不下的（完整时刻、连续失败原因）一律进 `title`，不靠折行。
+ */
+export interface ScheduleNextView {
+  /** 主值：下次执行时刻；无待执行时为「—」 */
+  value: string;
+  /** 副行：周期或模式（未开启 / 未上报 / 仅一次 / 每天 …） */
+  sub: string;
+  /** warn = 即将补跑或连续失败，整列转告警色 */
+  tone: 'muted' | 'warn';
+  /**
+   * 无待执行（主值是「—」）：渲染层据此把主值降回弱色。
+   * ★ 必须由数据层给出，别在 JSX 里比 `value === '—'` —— 主值的「—」是「没有下次」的
+   *   业务结论，不是排版占位；用字符串比对会让以后新增的空值文案悄悄漏掉弱化。
+   */
+  empty: boolean;
+  /** 悬浮说明（title） */
+  title: string;
+}
+
 export function scheduleNextLine(
   schedule: DataSourceScheduleView | undefined | null,
   now = Date.now(),
-): { text: string; tone: 'muted' | 'warn' } | null {
-  if (!schedule?.enabled) return null;
-  const warn = schedule.consecutiveFailures >= 3;
-  const suffix = warn ? ` · 连续失败 ${schedule.consecutiveFailures} 次，仍会尝试` : '';
-  if (schedule.mode === 'interval') {
-    const label = `每 ${schedule.intervalValue ?? '?'} ${UNIT_LABEL[schedule.intervalUnit ?? 'hour']}`;
-    if (schedule.nextRunAt !== null && schedule.nextRunAt <= now) {
-      return { text: `即将补跑 · ${label}${suffix}`, tone: 'warn' };
-    }
+): ScheduleNextView {
+  // 旧 daemon 不下发 schedule ≠「未开启」：口径与总览页 summarizeSchedules 的 known 一致
+  if (schedule === undefined || schedule === null) {
     return {
-      text: `下次 ${schedule.nextRunAt === null ? '—' : formatShortTime(schedule.nextRunAt)} · ${label}${suffix}`,
-      tone: warn ? 'warn' : 'muted',
+      value: '—',
+      sub: '未上报',
+      tone: 'muted',
+      empty: true,
+      title: '当前服务端（daemon）不返回定时计划（旧版本），升级后可显示',
     };
   }
-  if (schedule.repeat === 'once') {
-    if (schedule.lastAutoFor !== null && schedule.lastAutoState !== null) {
-      return { text: `已执行 · 仅一次${suffix}`, tone: warn ? 'warn' : 'muted' };
-    }
-    if (schedule.nextRunAt !== null && schedule.nextRunAt <= now) {
-      return { text: `即将补跑（${formatShortTime(schedule.nextRunAt)}）${suffix}`, tone: 'warn' };
-    }
+  if (!schedule.enabled) {
     return {
-      text: `下次 ${formatDateTime(schedule.nextRunAt)} · 仅一次${suffix}`,
-      tone: warn ? 'warn' : 'muted',
+      value: '—',
+      sub: '未开启定时',
+      tone: 'muted',
+      empty: true,
+      title: '定时同步未开启；点行内「编辑」可设置',
     };
   }
+  const fails = schedule.consecutiveFailures;
+  const warn = fails >= SCHEDULE_FAILURE_WARN;
+  const failNote = warn ? `连续失败 ${fails} 次，仍会尝试` : '';
+  /**
+   * 告警必须落在**副行看得见**的位置，不能只塞进 title（hover 才有 = 等于没说）。
+   * 有下次运行时副行改报失败次数、周期退到 title —— 「要处理的事」优先于「配置值」。
+   */
+  const warnSub = `连续失败 ${fails} 次`;
+  const intervalLabel = `每 ${schedule.intervalValue ?? '?'} ${UNIT_LABEL[schedule.intervalUnit ?? 'hour']}`;
+  const modeLabel = schedule.mode === 'interval'
+    ? intervalLabel
+    : `${schedule.repeat === 'daily' ? '每天' : '仅一次'}`;
+  const planLabel = schedule.mode === 'interval'
+    ? intervalLabel
+    : `${formatDateTime(schedule.at)} · ${modeLabel}`;
+  const title = (lead: string): string => [lead, `计划 ${planLabel}`, failNote].filter((part) => part !== '').join('；');
+  // 「仅一次」已执行过就不要再画过去的下次时间（判断必须早于 overdue）
+  const doneOnce = schedule.mode === 'at'
+    && schedule.repeat === 'once'
+    && schedule.lastAutoFor !== null
+    && schedule.lastAutoState !== null;
+  if (doneOnce) {
+    return {
+      value: '—',
+      sub: '已执行 · 仅一次',
+      // 已结束的计划没有「待处理事项」：不再转 warn 色，也不再暗示「仍会尝试」
+      tone: 'muted',
+      empty: true,
+      title: `仅此一次的计划已执行，无下次运行；计划 ${planLabel}${warn ? `；连续失败 ${fails} 次` : ''}`,
+    };
+  }
+  if (schedule.nextRunAt !== null && schedule.nextRunAt <= now) {
+    return {
+      value: '即将补跑',
+      sub: warn ? warnSub : modeLabel,
+      tone: 'warn',
+      empty: false,
+      title: title(`已到计划时间（${formatDateTime(schedule.nextRunAt)}），等待调度器执行`),
+    };
+  }
+  const emptyTitle = '暂无待执行的下次运行';
+  // 先落到局部变量再判空：对 `schedule.nextRunAt` 这种属性访问，TS 无法把收窄结果
+  // 带进三元分支（中间有函数调用），只能靠 `as number` 硬断言；用局部 const 就不必断言。
+  const nextRunAt = schedule.nextRunAt;
+  const noNext = nextRunAt === null;
   return {
-    text: `下次 ${schedule.nextRunAt === null ? '—' : formatDateTime(schedule.nextRunAt)} · 每天${suffix}`,
+    // 当天只给时分（跨天才带日期）：与「上次同步」列的完整时刻并排时不抢宽度
+    value: noNext
+      ? '—'
+      : schedule.mode === 'interval'
+        ? formatShortTime(nextRunAt, now)
+        : formatDateTime(nextRunAt),
+    sub: warn ? warnSub : modeLabel,
     tone: warn ? 'warn' : 'muted',
+    empty: noNext,
+    title: title(noNext ? emptyTitle : `下次运行 ${formatDateTime(nextRunAt)}`),
   };
 }
 

@@ -17,6 +17,12 @@ import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-ds-sched-api-'));
 process.env.HOME = tmpHome;
+// Node 在 Windows 上由 USERPROFILE 解析 `os.homedir()`（HOME 不生效）。本配置不写 dataDir，
+// 默认值 = `os.homedir()/.ki/kb`（config.ts::resolveDefaultDataPaths）⇒ 不镜像 HOME 的话，
+// addDataSource 会把登记写进**真实**用户目录，留下一个指向已删临时目录的幽灵数据源，
+// 用户下次在 Windows 启动 ki 就会在数据源页看到「sched-api 目录不可读」。
+// 同一处理见 test/mcp-http-api.test.ts、test/mcp-daemon.test.ts。
+process.env.USERPROFILE = tmpHome;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'config.json');
 fs.writeFileSync(process.env.KI_CONFIG_PATH, JSON.stringify({
   scopeMode: 'default',

@@ -5624,27 +5624,31 @@ select.ki-chat-cfg__ta--select {
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
 }
 /* 宽屏按比例分配：源目录不再吃掉全部剩余宽度（1685px 下 523px → 340px），
-   避免「源目录」与「落点 Group」之间出现大片空白。 */
-.ki-ds-table__head th:nth-child(1) { width: 15%; }
-/* 类型列 6% → 9.5%（2026-10-29）：要能同排放「目录/Git」+「定时」两个徽标。
-   实测 8.5% 在「Git + 定时⚠」最宽组合下仍折行，故给到 9.5%。
-   ★ 操作列因新增「移除」按钮需要更多宽度（见下方 nth-child(8)），这部分从
-   「源目录」18.5% → 16% 与「落点」15% → 14.5% 借出；八列合计仍是 100%。 */
+   避免「源目录」与「落点 Group」之间出现大片空白。
+   ★ 2026-10-30 九列（新增「下次同步」）：新增的 10.5% 从 Scope、源目录、落点、
+     状态、操作各借一点；只有「类型 9.5%」与「上次同步 16%」不许再压 ——
+     前者是「Git + 定时⚠」实测最宽组合的下限，后者要放下 19 字符完整时刻。
+   ★ 改列数必须整套重编号（这里与下方 td:nth-child(5) nowrap、窄屏媒体查询三处联动的）。 */
+.ki-ds-table__head th:nth-child(1) { width: 12.5%; }
 .ki-ds-table__head th:nth-child(2) { width: 9.5%; }
-.ki-ds-table__head th:nth-child(3) { width: 16%; }
-.ki-ds-table__head th:nth-child(4) { width: 14.5%; }
+.ki-ds-table__head th:nth-child(3) { width: 12%; }
+.ki-ds-table__head th:nth-child(4) { width: 11%; }
 .ki-ds-table__head th:nth-child(5) { width: 16%; white-space: nowrap; }
-.ki-ds-table__head th:nth-child(6) { width: 8%; }
-.ki-ds-table__head th:nth-child(7) { width: 6%; }
-/* 操作列 15%（2026-10-30）：行内「定时」并入「编辑」后是三个小按钮，
+/* 下次同步 10.5%（2026-10-30 实测 @1440，内容宽 103px）：最长主值跨天 `10-31 20:35` 85px、
+   最长副行「已执行 · 仅一次」77px。不许再压到 8%（≈94px）以下 —— 跨天主值会顶到相邻列。 */
+.ki-ds-table__head th:nth-child(6) { width: 10.5%; white-space: nowrap; }
+.ki-ds-table__head th:nth-child(7) { width: 7%; }
+.ki-ds-table__head th:nth-child(8) { width: 6%; }
+/* 操作列 15.5%（2026-10-30）：行内「定时」并入「编辑」后是三个小按钮，
    实测 52 + 6 + 46 + 6 + 46 ≈ 156px；15% 在 1170px 表格下约 175px，与改版前同档。 */
-.ki-ds-table__head th:nth-child(8) { width: 15%; text-align: center; }
+.ki-ds-table__head th:nth-child(9) { width: 15.5%; text-align: center; }
 .ki-ds-table__row { cursor: pointer; }
 .ki-ds-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
   text-align: left; vertical-align: middle;
 }
-.ki-ds-table__row td:nth-child(5) { white-space: nowrap; }
+.ki-ds-table__row td:nth-child(5),
+.ki-ds-table__row td.ki-ds-col--next { white-space: nowrap; }
 /* 类型徽标与定时徽标必须同行（2026-10-29）：列宽已在 nth-child(2) 按最宽组合
    「Git + 定时⚠」留足；这里禁止折行兜底 —— 一旦折行，「定时」会被读成另一个字段，
    而非「这个源开了定时」。宽度再不够时宁可溢出，也不要掉到第二行。 */
@@ -6254,7 +6258,9 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-failbox__list::-webkit-scrollbar-button,
 .ki-ds-tree::-webkit-scrollbar-button { display: none; }
 
-/* 中窄屏（≤1199）：固定三列 —— 六列在 ~1200 以下会横向溢出 */
+/* 中窄屏（≤1399）：九列放不下，只留五列 —— Scope / 下次同步 / 源目录 / 状态 / 操作。
+   ★ 下次同步保留独立列（2026-10-30 用户定稿）：此前它下沉成 Scope 名下的小字，
+     同一条信息两种宽度两个长相；独立列后不论视口都只有一套读法。 */
 @media (max-width: 1399px) {
   .ki-ds-col--group,
   .ki-ds-col--type,
@@ -6262,10 +6268,21 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-col--duration { display: none; }
   .ki-ds-table__head th:nth-child(1) { width: 190px; }
   .ki-ds-table__head th:nth-child(3) { width: auto; }
-  .ki-ds-table__head th:nth-child(6) { width: 96px; }
+  /* 118px（2026-10-30 实测）：跨天主值 85px + padding 24px = 109px，留 9px 余量。
+     nowrap 下列宽算少就会顶到相邻列，故按最长态收口，不按「20:35」这种常态。 */
+  .ki-ds-table__head th:nth-child(6) { width: 118px; }
+  .ki-ds-table__head th:nth-child(7) { width: 96px; }
   /* 186px（2026-10-30）：行内为「同步 / 编辑 / 移除」三个按钮，需 52 + 6 + 46 + 6 + 46 = 156px；
      186px 扣 padding 24px 才有 162px。定时设置已并入编辑弹窗，不再单独占位。 */
-  .ki-ds-table__head th:nth-child(8) { width: 186px; }
+  .ki-ds-table__head th:nth-child(9) { width: 186px; }
+}
+/* 375 档（≤640）：五列固定宽合计约 582px 已超视口，不给滚动就会把「状态 / 操作」
+   直接裁掉 —— 用户连「同步 / 编辑 / 移除」都点不到。宽屏不加，避免多出滚动条。 */
+@media (max-width: 640px) {
+  .ki-datasource-page .ki-card__body--flush { overflow-x: auto; }
+  /* 固定列已占 190 + 110 + 96 + 186 = 582px，不给 min-width 时「源目录」会被压成 0 宽
+     （表头还在、内容全无，比裁掉更难解释） */
+  .ki-datasource-page .ki-ds-table { min-width: 720px; }
 }
 @media (max-width: 960px) {
   .ki-detail { width: 100vw; }
@@ -7705,8 +7722,25 @@ select.ki-chat-cfg__ta--select {
   white-space: nowrap; vertical-align: middle;
 }
 .ki-ds-sched-badge--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
-.ki-ds-sched-next { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); white-space: nowrap; }
-.ki-ds-sched-next--warn { color: var(--ki-color-warning); }
+/* 「下次同步」单元格（2026-10-30 独立成列）：主值承重、副行解释。
+   ★ 主值 13px + 600 + 正文字色 —— 与 scope 名同级，比「持续时间」重；
+     不许回退成 xs + subtle（那正是它原先挤在「上次同步」副行里被忽略的原因）。
+   ★ 两行合计与操作列 32px 按钮同档，加它不改变行高。 */
+.ki-ds-next { display: flex; flex-direction: column; gap: 1px; }
+.ki-ds-next__value {
+  font-size: var(--ki-font-size-md); font-weight: 600; line-height: 17px;
+  color: var(--ki-color-text); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ki-ds-next__sub {
+  font-size: var(--ki-font-size-xs); line-height: 14px;
+  color: var(--ki-color-text-subtle); white-space: nowrap;
+}
+/* 无待执行（empty）：「—」不该比真实时刻还重。实测未开定时的源占多数时，
+   4 行黑色 600 的「—」把唯一一行真时刻（21:24）压成了配角。 */
+.ki-ds-next--empty .ki-ds-next__value { color: var(--ki-color-text-subtle); font-weight: 400; }
+/* warn 必须排在 empty 之后：同特异性下靠声明顺序取胜，告警色不能被弱化规则吃掉 */
+.ki-ds-next--warn .ki-ds-next__value,
+.ki-ds-next--warn .ki-ds-next__sub { color: var(--ki-color-warning); }
 /* 同步状态徽标（2026-10-30）：跟在 scope 名后，承载「同步中 / 排队中」。
    原先是把状态写在行内「同步」按钮的文案里，按钮一被撑宽就换行（见 .ki-ds-row-actions 注释）。
    ★ 尺寸与定时徽标同档（line-height 18px），实测 7 档视口（1440→375）下加它**不改变行高**：
@@ -7733,24 +7767,10 @@ select.ki-chat-cfg__ta--select {
 @media (prefers-reduced-motion: reduce) {
   .ki-ds-sync-badge__dot { animation: none; }
 }
-.ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* 定时同步（2026-10-30）：原先与 CLI 同为实心浅绿，两种来源在来源列分不出来 ——
    改紫色系（自动 / 调度语义），与 网页(灰) / CLI(绿) / 后台服务(黄) 四色可辨。 */
 .ki-task-source-badge--scheduler { color: var(--ki-color-purple); background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); }
 
-/* 弹窗 520 → 560（2026-10-29）：88px 标签列 + 控件后剩余宽度才够放
-   120/110 的间隔控件与 250 的时间控件，不再被挤成 96px 小框。
-   ★ 同时必须自己限高：本次新增「设置区卡片 + 两列元信息」让弹窗在 375 宽下从
-   549px 涨到 638px，而 `.ki-dialog--form` 是 `max-height: none; overflow: visible`
-   —— 矮视口（375×600）下弹窗顶端被顶出屏幕、且无法滚动，保存按钮点不到。
-   限高后由 body 滚动、head/foot 固定。 */
-.ki-ds-sched-dialog { width: min(560px, 92vw); max-width: 92vw; max-height: calc(100vh - 24px); overflow: hidden; }
-/* 滚动条与项目其它滚动容器同口径（细条、随主题），否则内容被裁时看不出还能滚 */
-.ki-ds-sched-dialog .ki-dialog__body {
-  min-height: 0; overflow-y: auto;
-  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
-}
-.ki-ds-sched-sub { margin: 4px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
 .ki-ds-sched-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: center; margin-top: 12px; }
 .ki-ds-sched-label { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
 .ki-ds-sched-control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
@@ -7894,7 +7914,6 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-sched-tip { margin: 8px 0 0 98px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
 .ki-ds-sched-tip--warn { color: var(--ki-color-warning); }
 
-.ki-ds-sched-error { margin: 8px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-danger-ink); }
 .ki-ds-sched-warn { margin-bottom: 4px; padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-warning-soft); color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
 .ki-ds-sched-warn-line { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
 
@@ -7922,10 +7941,9 @@ select.ki-chat-cfg__ta--select {
   font-size: var(--ki-font-size-sm);
 }
 
-.ki-ds-sched-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
 .ki-ds-sched-discard { margin-right: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
 
-/* ── 编辑数据源弹窗（2026-10-30）：三段式 640 宽；与定时弹窗同口径自行限高 + body 滚动 ── */
+/* ── 编辑数据源弹窗（2026-10-30）：三段式 640 宽；自行限高 + body 滚动 ── */
 /* 添加弹窗：新增「只读开关」后 375×600 会顶出屏幕且不可滚（.ki-dialog--form 是全局
    max-height:none；只在本弹窗限高，body 滚动，head/foot 固定）。 */
 .ki-ds-add { max-height: calc(100vh - 24px); overflow: hidden; }
@@ -7943,7 +7961,7 @@ select.ki-chat-cfg__ta--select {
 /* 原先是三张同灰卡片（dialog 白 > section 灰 > 同步设置/关闭说明/meta 卡 灰），
    内层块与父卡同色，边界只剩 1px 描边、看着糊成一片（2026-10-30）。
    改法：section 不再当卡片，退成「分组标题 + 1px 下分隔线」，内层灰块这才显出来 ——
-   也让它与定时弹窗的层级（dialog 白 > 灰块，本来就没有 section 这层）一致。 */
+   层级回到「dialog 白 > 灰块」两层。 */
 .ki-ds-edit__section {
   border: 0; border-radius: 0; padding: 0; background: transparent;
 }
@@ -8001,22 +8019,11 @@ select.ki-chat-cfg__ta--select {
 }
 @media (max-width: 640px) {
   .ki-ds-sched-row { grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: start; }
-  .ki-ds-sched-dialog { width: 100%; max-width: 100%; }
-  .ki-ds-sched-footer { flex-wrap: wrap; }
-  .ki-ds-sched-footer .ki-btn { flex: 1 1 auto; }
   .ki-dtp-field, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
   .ki-ds-sched-inline { flex-direction: column; align-items: stretch; }
   .ki-ds-sched-tip { margin-left: 0; }
   .ki-ds-sched-meta { grid-template-columns: minmax(0, 1fr); }
   .ki-ds-sched-seg { width: 100%; }
   .ki-ds-sched-seg button { flex: 1 1 auto; min-width: 0; }
-  .ki-ds-missing-row { flex-direction: column; align-items: flex-start; }
 }
 
-/* 窄屏（≤1399）类型/上次同步列会隐藏：把定时徽标与下次运行下沉到 Scope 列 */
-.ki-ds-sched-badge--compact,
-.ki-ds-sched-next--compact { display: none; }
-@media (max-width: 1399px) {
-  .ki-ds-sched-badge--compact { display: inline-block; }
-  .ki-ds-sched-next--compact { display: block; }
-}

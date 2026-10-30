@@ -137,29 +137,70 @@ describe('scheduleBadge', () => {
   });
 });
 
-describe('scheduleNextLine', () => {
-  it('未开启不占第二行', () => {
-    assert.equal(scheduleNextLine(schedule({ enabled: false }), NOW), null);
-    assert.equal(scheduleNextLine(undefined, NOW), null);
+describe('scheduleNextLine（下次同步列：主值 / 副行两段）', () => {
+  /** title 不参与下表：它承载列宽里放不下的完整信息，逐条断言会在改文案时噪声过大 */
+  const twoLines = (view) => ({ value: view.value, sub: view.sub, tone: view.tone });
+
+  it('未上报（旧 daemon 不下发 schedule）与未开启不是同一件事', () => {
+    assert.deepEqual(twoLines(scheduleNextLine(undefined, NOW)), { value: '—', sub: '未上报', tone: 'muted' });
+    assert.deepEqual(twoLines(scheduleNextLine(null, NOW)), { value: '—', sub: '未上报', tone: 'muted' });
+    assert.deepEqual(
+      twoLines(scheduleNextLine(schedule({ enabled: false }), NOW)),
+      { value: '—', sub: '未开启定时', tone: 'muted' },
+    );
   });
 
-  it('周期模式：给「下次时刻 + 模式」，今天内只显示时分', () => {
-    assert.deepEqual(scheduleNextLine(schedule(), NOW), {
-      text: '下次 10:05 · 每 30 分钟',
-      tone: 'muted',
+  it('empty 由数据层给出：无待执行的主值才能在渲染层转弱色', () => {
+    for (const input of [undefined, null, schedule({ enabled: false }), schedule({ nextRunAt: null })]) {
+      assert.equal(scheduleNextLine(input, NOW).empty, true);
+    }
+    assert.equal(scheduleNextLine(schedule(), NOW).empty, false);
+    assert.equal(scheduleNextLine(schedule({ nextRunAt: NOW - MIN }), NOW).empty, false);
+  });
+
+  it('周期模式：主值只给时分，周期下沉副行（不在主值里拼长句）', () => {
+    assert.deepEqual(twoLines(scheduleNextLine(schedule(), NOW)), {
+      value: '10:05', sub: '每 30 分钟', tone: 'muted',
     });
   });
 
-  it('周期模式已到期：显示「即将补跑」，tone=warn（不显示过去的时刻）', () => {
-    const line = scheduleNextLine(schedule({ nextRunAt: NOW - MIN }), NOW);
-    assert.equal(line.text, '即将补跑 · 每 30 分钟');
-    assert.equal(line.tone, 'warn');
+  it('周期模式已到期：主值「即将补跑」，tone=warn（不显示过去的时刻）', () => {
+    assert.deepEqual(
+      twoLines(scheduleNextLine(schedule({ nextRunAt: NOW - MIN }), NOW)),
+      { value: '即将补跑', sub: '每 30 分钟', tone: 'warn' },
+    );
   });
 
-  it('连续失败 ≥3：追加「连续失败 N 次，仍会尝试」并转 warn', () => {
+  it('连续失败 ≥3：副行改报失败次数（看得见），周期退到 title', () => {
     const line = scheduleNextLine(schedule({ consecutiveFailures: 3 }), NOW);
-    assert.equal(line.text, '下次 10:05 · 每 30 分钟 · 连续失败 3 次，仍会尝试');
+    assert.equal(line.value, '10:05');
+    assert.equal(line.sub, '连续失败 3 次');
     assert.equal(line.tone, 'warn');
+    // 周期不能让位给告警后彻底消失
+    assert.match(line.title, /每 30 分钟/);
+  });
+
+  it('即将补跑 + 连续失败：副行只报失败次数，周期仍在 title', () => {
+    const line = scheduleNextLine(schedule({ nextRunAt: NOW - MIN, consecutiveFailures: 5 }), NOW);
+    assert.equal(line.value, '即将补跑');
+    assert.equal(line.sub, '连续失败 5 次');
+    assert.equal(line.tone, 'warn');
+    assert.match(line.title, /每 30 分钟/);
+  });
+
+  it('仅一次已执行：不再追加「仍会尝试」（已经结束了，别暗示还会重试）', () => {
+    const line = scheduleNextLine(schedule({
+      mode: 'at',
+      at: '2026-11-01T09:30',
+      repeat: 'once',
+      consecutiveFailures: 4,
+      lastAutoFor: 1,
+      lastAutoState: 'failed',
+      nextRunAt: null,
+    }), NOW);
+    assert.equal(line.value, '—');
+    assert.equal(line.sub, '已执行 · 仅一次');
+    assert.doesNotMatch(line.title, /仍会尝试/);
   });
 
   it('仅一次：已执行过就显示「已执行」，不再画过去的下次时间', () => {
@@ -171,34 +212,43 @@ describe('scheduleNextLine', () => {
       lastAutoState: 'ok',
       nextRunAt: null,
     }), NOW);
-    assert.equal(line.text, '已执行 · 仅一次');
+    assert.equal(line.value, '—');
+    assert.equal(line.sub, '已执行 · 仅一次');
     assert.equal(line.tone, 'muted');
   });
 
   it('仅一次：未执行且时间未到 → 完整日期；已过期 → 即将补跑', () => {
     const future = todayAt(23, 59) + 24 * 60 * MIN;
-    assert.equal(scheduleNextLine(schedule({
+    const upcoming = scheduleNextLine(schedule({
       mode: 'at', at: '2026-11-01T09:30', repeat: 'once', nextRunAt: future,
-    }), NOW).text, `下次 ${formatDateTime(future)} · 仅一次`);
+    }), NOW);
+    assert.equal(upcoming.value, formatDateTime(future));
+    assert.equal(upcoming.sub, '仅一次');
 
     const overdue = scheduleNextLine(schedule({
       mode: 'at', at: '2026-11-01T09:30', repeat: 'once', nextRunAt: NOW - MIN,
     }), NOW);
-    assert.equal(overdue.text, `即将补跑（${formatDateTime(NOW - MIN).slice(11)}）`);
+    assert.equal(overdue.value, '即将补跑');
+    assert.equal(overdue.sub, '仅一次');
     assert.equal(overdue.tone, 'warn');
+    // 原定时刻不能丢：主值换成「即将补跑」后，只有 title 还留着它
+    assert.match(overdue.title, new RegExp(formatDateTime(NOW - MIN)));
   });
 
-  it('每天重复：标「每天」', () => {
+  it('每天重复：主值给完整时刻，副行标「每天」', () => {
+    const next = NOW + 24 * 60 * MIN;
     const line = scheduleNextLine(schedule({
-      mode: 'at', at: '2026-11-01T09:30', repeat: 'daily', nextRunAt: NOW + 24 * 60 * MIN,
+      mode: 'at', at: '2026-11-01T09:30', repeat: 'daily', nextRunAt: next,
     }), NOW);
-    assert.ok(line.text.startsWith('下次 '), line.text);
-    assert.ok(line.text.endsWith(' · 每天'), line.text);
+    assert.equal(line.value, formatDateTime(next));
+    assert.equal(line.sub, '每天');
+    assert.equal(line.tone, 'muted');
   });
 
-  it('nextRunAt 为 null（仅一次已完成 / 无下次）不渲染 "null"', () => {
+  it('nextRunAt 为 null（无下次）不渲染 "null"，主值回 —', () => {
     const line = scheduleNextLine(schedule({ nextRunAt: null }), NOW);
-    assert.equal(line.text, '下次 — · 每 30 分钟');
+    assert.equal(line.value, '—');
+    assert.equal(line.sub, '每 30 分钟');
   });
 
   it('formatDateTime 对空值与非法值统一回 —（页面不留空白单元格）', () => {

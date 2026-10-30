@@ -21,10 +21,9 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList, useScopeList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
-// upstream 侧新增定时设置视图（DataSourceScheduleView），本地侧新增移除接口（removeDataSource）
-import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView, type DataSourceScheduleView } from '@/api/httpApi';
+// upstream 侧记录/列表自带 schedule（定时同步），本地侧新增移除接口（removeDataSource）
+import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
-import { DatasourceScheduleDialog } from '@/components/DatasourceScheduleDialog';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
 import { applyRowOrder, mergeRowOrder } from '@/lib/datasourceOrder';
@@ -60,6 +59,11 @@ interface RemoveTarget {
   lastSyncAt?: number | null;
   managed?: boolean;
   corrupt?: string;
+  /**
+   * 源目录不可读（`/api/datasource/list` 的 `missing[]`）：
+   * 登记本身合法、只是 `dir` 已不在，故移除不需要 force，与 corrupt 是两种处境。
+   */
+  missing?: string;
 }
 
 const PAGE_SIZE_DEFAULT = 10;
@@ -178,7 +182,7 @@ export function DataSourcePage(): JSX.Element {
   // 行级操作结果条（同步 / 移除数据源共用同一位置，避免两套提示抢位）
   const [rowNotice, setRowNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   /**
-   * 行内「编辑」结果条（同步参数 / 定时同步）与「缺失登记」的定时弹窗结果都落这里。
+   * 行内「编辑」结果条（同步参数 / 定时同步）落这里。
    * ★ 与 rowNotice 并存而非合并：保存完成要留下"改了什么 / 下次何时运行"，
    *   而行内「同步 / 移除」刚产生的提示不该被它顶掉；两条分别渲染（见下方两段 notice）。
    */
@@ -201,12 +205,6 @@ export function DataSourcePage(): JSX.Element {
   const addTriggerRef = useRef<HTMLButtonElement>(null);
   const addDialogRef = useRef<HTMLElement>(null);
   const addWasOpenRef = useRef(false);
-  const [scheduleTarget, setScheduleTarget] = useState<{
-    scope: string;
-    schedule?: DataSourceScheduleView;
-    schedulerDisabled?: boolean;
-  } | null>(null);
-  const scheduleTriggerRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const deleteBtnRef = useRef<HTMLButtonElement>(null);
   const lastScopeRef = useRef<string | null>(null);
@@ -661,19 +659,6 @@ export function DataSourcePage(): JSX.Element {
     }
   };
 
-  const openSchedule = (
-    targetScope: string,
-    schedule: DataSourceScheduleView | undefined,
-    trigger: HTMLElement | null,
-  ): void => {
-    scheduleTriggerRef.current = trigger;
-    setScheduleTarget({
-      scope: targetScope,
-      ...(schedule ? { schedule } : {}),
-      schedulerDisabled: listQuery.data?.schedulerDisabled,
-    });
-  };
-
   // 编辑入口：先拉详情（含切分参数 / revision），成功后再开弹窗
   const openEdit = async (targetScope: string): Promise<void> => {
     if (editLoadingScope !== null) return;
@@ -700,13 +685,6 @@ export function DataSourcePage(): JSX.Element {
     requestAnimationFrame(() => {
       document.querySelector<HTMLElement>(`[data-ds-edit="${CSS.escape(targetScope)}"]`)?.focus();
     });
-  };
-
-  const closeSchedule = (): void => {
-    setScheduleTarget(null);
-    const trigger = scheduleTriggerRef.current;
-    scheduleTriggerRef.current = null;
-    if (trigger) requestAnimationFrame(() => trigger.focus());
   };
 
   // ── 移除数据源登记（2026-10-29）────────────────────────
@@ -1103,25 +1081,6 @@ export function DataSourcePage(): JSX.Element {
         </div>
       ) : null}
 
-      {scheduleTarget ? (
-        <DatasourceScheduleDialog
-          key={scheduleTarget.scope}
-          scope={scheduleTarget.scope}
-          schedule={scheduleTarget.schedule}
-          schedulerDisabled={scheduleTarget.schedulerDisabled}
-          onClose={closeSchedule}
-          onSaved={(response) => {
-            setRowSyncNotice({
-              tone: 'info',
-              text: `定时设置已保存（${response.scope}）：${describeSchedule(response.schedule)}${response.nextRunAt ? `，下次 ${formatDateTime(response.nextRunAt)}` : ''}${response.schedulerDisabled ? '（服务端已禁用调度，不会自动执行）' : ''}`,
-            });
-            closeSchedule();
-            void queryClient.invalidateQueries({ queryKey: ['dataSourceList'] });
-            void queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', response.scope] });
-          }}
-        />
-      ) : null}
-
       {editTarget ? (
         <DatasourceEditDialog
           key={editTarget.record.scope}
@@ -1165,9 +1124,11 @@ export function DataSourcePage(): JSX.Element {
                 <div className="ki-ds-remove__heading-text">
                   <h3 className="ki-dialog__title" id="ki-ds-remove-title">移除数据源</h3>
                   <p className="ki-ds-remove__sub">
-                    {removeTarget.corrupt
-                      ? '登记文件已损坏、无法解析，移除只是清掉这个坏文件'
-                      : '取消登记后不再自动同步，也不再产生待删候选'}
+                    {removeTarget.missing
+                      ? '源目录已不存在，移除只是清掉这条失效登记'
+                      : removeTarget.corrupt
+                        ? '登记文件已损坏、无法解析，移除只是清掉这个坏文件'
+                        : '取消登记后不再自动同步，也不再产生待删候选'}
                   </p>
                 </div>
               </div>
@@ -1179,7 +1140,13 @@ export function DataSourcePage(): JSX.Element {
                 <h4 className="ki-ds-remove__card-title">将被移除的登记</h4>
                 <div className="ki-ds-remove__ident">
                   <span className="ki-ds-remove__scope">{removeTarget.scope}</span>
-                  {removeTarget.corrupt ? (
+                  {removeTarget.missing ? (
+                    /* missing 项只有 { scope, reason }，没有 type/dir —— 不渲染类型徽标，
+                       否则会误显示成「目录」类型（那是缺省值，不是事实） */
+                    <span className="ki-ds-remove__managed ki-ds-remove__managed--danger">
+                      源目录不存在
+                    </span>
+                  ) : removeTarget.corrupt ? (
                     <span className="ki-ds-remove__managed ki-ds-remove__managed--danger">
                       登记文件损坏：{removeTarget.corrupt}
                     </span>
@@ -1196,7 +1163,13 @@ export function DataSourcePage(): JSX.Element {
                     </>
                   )}
                 </div>
-                {!removeTarget.corrupt && removeTarget.dir ? (
+                {removeTarget.missing ? (
+                  /* 失效路径：reason 已含完整路径（`目录不存在：C:\...`），单列一行便于对照 */
+                  <p className="ki-ds-remove__path">
+                    <span className="ki-ds-remove__path-key">已失效</span>{removeTarget.missing}
+                  </p>
+                ) : null}
+                {!removeTarget.corrupt && !removeTarget.missing && removeTarget.dir ? (
                   <dl className="ki-ds-remove__kv">
                     <dt>源目录</dt>
                     <dd className="ki-ds-remove__v--mono" title={removeTarget.dir}>{removeTarget.dir}</dd>
@@ -1230,9 +1203,11 @@ export function DataSourcePage(): JSX.Element {
                   </li>
                 </ul>
                 <p className="ki-ds-remove__guide">
-                  {removeTarget.corrupt
-                    ? '库内文档与源目录文件都不受影响，随时可以重新登记'
-                    : '如需清理这些文档，请先在详情抽屉「待删除」处理候选；移除后本页不再产生候选'}
+                  {removeTarget.missing
+                    ? '目录恢复后可用 ki datasource add 重新登记；届时需全量同步（上次同步基线不保留）'
+                    : removeTarget.corrupt
+                      ? '库内文档与源目录文件都不受影响，随时可以重新登记'
+                      : '如需清理这些文档，请先在详情抽屉「待删除」处理候选；移除后本页不再产生候选'}
                 </p>
               </section>
 
@@ -1264,11 +1239,13 @@ export function DataSourcePage(): JSX.Element {
             </div>
             <footer className="ki-dialog__foot ki-ds-remove__foot">
               <p className={`ki-ds-remove__foot-note${!removeTarget.corrupt && removeTarget.managed === true && removePurge ? ' ki-ds-remove__foot-note--strong' : ''}`}>
-                {removeTarget.corrupt
-                  ? '只清掉损坏的登记文件，库内文档与源目录不动'
-                  : removeTarget.managed === true && removePurge
-                    ? '将同时删除 clone 目录，此操作不可撤销'
-                    : '此操作不可撤销，源目录文件不受影响'}
+                {removeTarget.missing
+                  ? '只删除这条失效登记，库内文档不动'
+                  : removeTarget.corrupt
+                    ? '只清掉损坏的登记文件，库内文档与源目录不动'
+                    : removeTarget.managed === true && removePurge
+                      ? '将同时删除 clone 目录，此操作不可撤销'
+                      : '此操作不可撤销，源目录文件不受影响'}
               </p>
               <div className="ki-ds-remove__actions">
                 <button type="button" className="ki-btn ki-btn--secondary" disabled={removing} onClick={closeRemove}>取消</button>
@@ -1320,16 +1297,22 @@ export function DataSourcePage(): JSX.Element {
       ) : null}
 
       {missing.map((item) => (
-        <div key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-missing-row">
+        /* 目录不可读的登记不进表格（无行可选），这里是它唯一的清理出口。
+           与 corrupt 行同构：文字 + 一枚「移除登记」。
+           ★ 2026-10-30 用户拍板：删除这里原有的「定时」按钮 —— 定时设置的唯一入口是
+             行内「编辑」弹窗；missing 行没有可点的行，也就不该有第二个入口
+             （原按钮是 DatasourceScheduleDialog 的唯一使用方，已随组件一并删除）。 */
+        <p key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-notice--action">
           <span>⚠ {item.scope} 目录不可读：{item.reason}</span>
-          {item.schedule !== undefined ? (
-            <button
-              type="button"
-              className="ki-btn ki-btn--secondary ki-btn--small"
-              onClick={(event) => openSchedule(item.scope, item.schedule, event.currentTarget)}
-            >定时</button>
-          ) : null}
-        </div>
+          <button
+            type="button"
+            data-ds-remove={item.scope}
+            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+            aria-label={`移除登记 ${item.scope}（目录不可读）`}
+            disabled={removing}
+            onClick={() => openRemove({ scope: item.scope, missing: item.reason })}
+          >移除登记</button>
+        </p>
       ))}
       {corrupt.map((item) => (
         /* 损坏登记不在列表里（无行可选），这里是唯一清理出口：走 force 移除坏文件 */
@@ -1339,7 +1322,7 @@ export function DataSourcePage(): JSX.Element {
             type="button"
             data-ds-remove={item.scope}
             className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
-            aria-label={`移除 ${item.scope} 的损坏登记`}
+            aria-label={`移除登记 ${item.scope}（登记损坏）`}
             disabled={removing}
             onClick={() => openRemove({ scope: item.scope, corrupt: item.reason })}
           >移除登记</button>
@@ -1383,6 +1366,7 @@ export function DataSourcePage(): JSX.Element {
                     <th scope="col">源目录</th>
                     <th scope="col" className="ki-ds-col--group">落点 Group</th>
                     <th scope="col" className="ki-ds-col--time">上次同步</th>
+                    <th scope="col" className="ki-ds-col--next">下次同步</th>
                     <th scope="col">状态</th>
                     <th scope="col" className="ki-ds-col--duration">持续时间</th>
                     <th scope="col" className="ki-ds-col--actions">操作</th>
@@ -1417,14 +1401,16 @@ export function DataSourcePage(): JSX.Element {
                           : '同步（Git 源为增量）';
                   const typeLabel = source.type === 'git' ? 'Git' : '目录';
                   const schedBadge = scheduleBadge(source.schedule);
-                  const nextLine = scheduleNextLine(source.schedule);
+                  const nextView = scheduleNextLine(source.schedule);
+                  // 始终带「下次同步」：tr 的 aria-label 会覆盖单元格文本，漏掉这截等于读屏用户看不到这一列
+                  const nextAria = `，下次同步 ${nextView.value}（${nextView.sub}）`;
                   const rowTitleWithSchedule = `${rowTitle}${source.schedule?.enabled ? `；定时同步已开启（${describeSchedule(source.schedule)}）` : ''}`;
                   return (
                   <tr
                     key={source.scope}
                     tabIndex={0}
                     data-ds-scope={source.scope}
-                    aria-label={`${source.scope}，${typeLabel}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${source.lastSync ? `，持续时间 ${formatSyncDuration(source.lastSync.durationMs)}` : ''}`}
+                    aria-label={`${source.scope}，${typeLabel}，${source.dir}，${status.label}${lastSyncLabel ? `，上次同步 ${lastSyncLabel}` : ''}${source.lastSync ? `，持续时间 ${formatSyncDuration(source.lastSync.durationMs)}` : ''}${nextAria}`}
                     className={`ki-ds-table__row${scope === source.scope ? ' is-active' : ''}`}
                     onClick={() => navigate(`/datasource/${encodeURIComponent(source.scope)}`)}
                     onKeyDown={(event) => {
@@ -1438,12 +1424,9 @@ export function DataSourcePage(): JSX.Element {
                     <td>
                       <span className="ki-ds-table__scope" title={source.scope}>
                         <span className="ki-ds-table__scope-name">{source.scope}</span>
-                        {schedBadge ? (
-                          <span
-                            className={`ki-ds-sched-badge ki-ds-sched-badge--compact${schedBadge === '定时⚠' ? ' ki-ds-sched-badge--warn' : ''}`}
-                            title={source.schedule ? describeSchedule(source.schedule) : undefined}
-                          >{schedBadge}</span>
-                        ) : null}
+                        {/* 「定时」徽标只在类型列（2026-10-30）：原先窄屏隐藏类型列后靠
+                            --compact 在 scope 名下补位；现在「下次同步」任何宽度都是独立列，
+                            副行已写明「每 3 分钟 / 未开启定时」，补位徽标成了同一条信息的第二遍。 */}
                         {/* 同步状态徽标：脉冲圆点 + 文字（2026-10-30）。
                             实测 7 档视口（1440→375）下加它不改变行高，只把长 scope 名压到省略号。 */}
                         {scopeSyncLabel ? (
@@ -1456,9 +1439,6 @@ export function DataSourcePage(): JSX.Element {
                           </span>
                         ) : null}
                       </span>
-                      {nextLine ? (
-                        <div className={`ki-ds-sched-next ki-ds-sched-next--compact ki-ds-sched-next--${nextLine.tone}`}>{nextLine.text}</div>
-                      ) : null}
                     </td>
                     <td className="ki-ds-col--type">
                       <span className={`ki-ds-type-badge ki-ds-type-badge--${source.type === 'git' ? 'git' : 'dir'}`}>{typeLabel}</span>
@@ -1471,11 +1451,18 @@ export function DataSourcePage(): JSX.Element {
                     </td>
                     <td className="ki-ds-table__dir" title={source.dir}>{source.dir}</td>
                     <td className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</td>
-                    <td className="ki-ds-col--time">
-                      <div>{lastSyncLabel ?? '—'}</div>
-                      {nextLine ? (
-                        <div className={`ki-ds-sched-next ki-ds-sched-next--${nextLine.tone}`}>{nextLine.text}</div>
-                      ) : null}
+                    <td className="ki-ds-col--time">{lastSyncLabel ?? '—'}</td>
+                    {/* 下次同步独立成列（2026-10-30 用户定稿）：主值是「什么时候会再跑」，
+                        用正文字号 + 600；周期/模式下沉副行。原先挤在「上次同步」副行里，
+                        既是全表最弱的一行，又只能到过去时的列里去找未来。 */}
+                    <td className="ki-ds-col--next">
+                      <div
+                        className={`ki-ds-next ki-ds-next--${nextView.tone}${nextView.empty ? ' ki-ds-next--empty' : ''}`}
+                        title={nextView.title}
+                      >
+                        <span className="ki-ds-next__value">{nextView.value}</span>
+                        <span className="ki-ds-next__sub">{nextView.sub}</span>
+                      </div>
                     </td>
                     <td>
                       <span
