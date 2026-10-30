@@ -29,6 +29,7 @@ const vite = await createServer({
 
 const {
   buildEmbeddingConfigSnippet,
+  buildLlmConfigSnippet,
   describeEmbeddingStatus,
   EMBEDDING_API_KEY_URL,
   EMBEDDING_API_KEY_URL_LABEL,
@@ -38,6 +39,9 @@ const {
   EMBEDDING_RELOAD_HINT,
   embeddingConsistencyView,
   embeddingSourceLabel,
+  formatCharsK,
+  formatDimensionCheckedAt,
+  formatTimeoutSeconds,
   RESOURCE_TOPICS,
 } = await vite.ssrLoadModule('/src/lib/resourcesPage.ts');
 after(async () => vite.close());
@@ -233,6 +237,124 @@ describe('维度一致性', () => {
     assert.equal(stale.tone, 'off');
     assert.equal(stale.text, '未确认');
     assert.ok(stale.detail.includes('快照缺失'));
+  });
+});
+
+/**
+ * 结论块分层（用户 2026-10-30：一句话药丸 → 状态卡 + 维度对比）。
+ *
+ * 页面同时消费 `headline`（主行短词）与 `compare`（维度对比数字），`text` 只作
+ * aria-label / 降级文本。此处锁三件事：三者由同一分支产出、缺值时不硬造对比、
+ * 文案不得再指向已删除的「重新检查」按钮。
+ */
+describe('一致性结论块', () => {
+  it('一致 → headline 短词 + compare 相等关系', () => {
+    const view = embeddingConsistencyView({
+      apiKeyConfigured: true, state: 'compatible', configured: 1024, persisted: 1024, scope: 's',
+    });
+    assert.equal(view.headline, '一致');
+    assert.deepEqual(view.compare, { collection: 1024, configured: 1024, relation: 'eq' });
+  });
+
+  it('失配 → headline 不一致 + compare 失配关系 + 可复制命令', () => {
+    const view = embeddingConsistencyView({
+      apiKeyConfigured: true, state: 'mismatch', configured: 1024, persisted: 768, scope: 'wiki',
+    });
+    assert.equal(view.headline, '不一致');
+    assert.deepEqual(view.compare, { collection: 768, configured: 1024, relation: 'ne' });
+    assert.equal(view.command, 'ki restore wiki --rebuild-vector --yes');
+  });
+
+  it('★ 配置维度未知时不给 compare（不得拿 persisted 顶替两边）', () => {
+    const view = embeddingConsistencyView({
+      apiKeyConfigured: true, state: 'mismatch', persisted: 768, scope: 's',
+    });
+    assert.equal(view.tone, 'warn');
+    assert.equal(view.compare, undefined);
+    assert.ok(view.text.includes('768'));
+  });
+
+  it('未配置 Key / 未建索引 / 无法确认 → 都不给 compare', () => {
+    const noKey = embeddingConsistencyView({
+      apiKeyConfigured: false, state: 'compatible', configured: 1024, persisted: 1024, scope: 's',
+    });
+    assert.equal(noKey.headline, '暂不校验');
+    assert.equal(noKey.compare, undefined);
+
+    const noIndex = embeddingConsistencyView({ apiKeyConfigured: true, state: 'compatible', configured: 1024, scope: 's' });
+    assert.equal(noIndex.headline, '尚未建向量索引');
+    assert.equal(noIndex.compare, undefined);
+
+    const failed = embeddingConsistencyView({ apiKeyConfigured: true, state: 'unknown', hasError: true, scope: 's' });
+    assert.equal(failed.headline, '无法确认');
+    assert.equal(failed.compare, undefined);
+  });
+
+  it('★ 文案不得再指向已删除的「重新检查」按钮，也不得承诺「自动更新」', () => {
+    const views = [
+      embeddingConsistencyView({ apiKeyConfigured: true, state: 'mismatch', configured: 1024, persisted: 768, scope: 's' }),
+      embeddingConsistencyView({ apiKeyConfigured: true, state: 'unknown', hasError: true, scope: 's' }),
+      embeddingConsistencyView({ apiKeyConfigured: true, state: 'unknown', scope: 's' }),
+    ];
+    for (const view of views) {
+      assert.equal(`${view.headline}${view.text}${view.detail}`.includes('重新检查'), false);
+    }
+    // ★ 本页给的 rebuild 命令是 CLI 的，CLI 重建不产生 Web 任务记录 ⇒ AppShell 的任务完成
+    //   失效钩子不触发，写「自动更新」就是假承诺（全站同口径是「完成后刷新页面」）。
+    const mismatch = embeddingConsistencyView({
+      apiKeyConfigured: true, state: 'mismatch', configured: 1024, persisted: 768, scope: 's',
+    });
+    assert.equal(mismatch.detail.includes('自动更新'), false);
+    assert.ok(mismatch.detail.includes('刷新本页'));
+  });
+});
+
+describe('检查时刻文案', () => {
+  it('格式化到「月-日 时:分 检查」', () => {
+    const ts = new Date(2026, 9, 30, 16, 12, 45).getTime();
+    assert.equal(formatDimensionCheckedAt(ts), '10-30 16:12 检查');
+  });
+
+  it('缺值 / 非法值返回空串（页面据此不渲染这一格）', () => {
+    assert.equal(formatDimensionCheckedAt(undefined), '');
+    assert.equal(formatDimensionCheckedAt(Number.NaN), '');
+    assert.equal(formatDimensionCheckedAt(Number.POSITIVE_INFINITY), '');
+  });
+});
+
+/**
+ * 单位换算（用户 2026-10-30：字符用「1000K」，超时用秒）。
+ *
+ * ★ 这里同时锁住「只改展示、不改配置片段」：snippet 是复制进 config.yaml 的内容，
+ *   把 `requestTimeoutMs: 300000` 改写成 `300s` 会让人照着写错配置。
+ */
+describe('单位换算', () => {
+  it('字符数 → K 刻度（去尾随零）', () => {
+    assert.equal(formatCharsK(1_000_000), '1000K');
+    assert.equal(formatCharsK(250_000), '250K');
+    assert.equal(formatCharsK(1_500), '1.5K');
+    assert.equal(formatCharsK(800), '800');
+    assert.equal(formatCharsK(0), '0');
+  });
+
+  it('字符数异常值 → —', () => {
+    assert.equal(formatCharsK(undefined), '—');
+    assert.equal(formatCharsK(Number.NaN), '—');
+    assert.equal(formatCharsK(-1), '—');
+  });
+
+  it('毫秒 → 秒', () => {
+    assert.equal(formatTimeoutSeconds(300_000), '300s');
+    assert.equal(formatTimeoutSeconds(3_000), '3s');
+    assert.equal(formatTimeoutSeconds(1_500), '1.5s');
+    assert.equal(formatTimeoutSeconds(0), '0s');
+    assert.equal(formatTimeoutSeconds(undefined), '—');
+    assert.equal(formatTimeoutSeconds(Number.NaN), '—');
+  });
+
+  it('★ 配置示例片段仍用 ms 原值（展示换算不得渗进 snippet）', () => {
+    assert.ok(buildLlmConfigSnippet().includes('requestTimeoutMs: 300000'));
+    assert.ok(buildEmbeddingConfigSnippet({ queryTimeoutMs: 3000 }).includes('queryTimeoutMs: 3000'));
   });
 });
 

@@ -21,7 +21,6 @@ import { useScopeValue } from '@/lib/scopeContext';
 import { useVectorAvailability, useVectorDimensionStatus } from '@/lib/hooks';
 import { ackDisclosure, getChatConfig } from '@/api/chatApi';
 import { getEmbeddingSummary } from '@/api/embeddingApi';
-import { refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { kiScopeList, type ScopeInfo } from '@/api/mcpClient';
 import {
   AGENTS_MD_TRIGGER,
@@ -49,6 +48,9 @@ import {
   EMBEDDING_RELOAD_HINT,
   embeddingConsistencyView,
   embeddingSourceLabel,
+  formatCharsK,
+  formatDimensionCheckedAt,
+  formatTimeoutSeconds,
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
   LLM_FIELD_NOTES,
@@ -553,19 +555,47 @@ function LlmSection(): JSX.Element {
           {/* 已配置时**不再展示占位模板**：那段是「怎么配」，不是「现在是什么」，
               之前标题写「当前生效配置」却给 your-host / your-model，等于误导 */}
           <h3 className="res-subhead">当前生效配置（只读）</h3>
-          <ul className="res-notes">
-            <li>模型 <code>{data.model}</code> · 上游 <code>{data.baseURLHost}</code></li>
-            <li>
-              上下文刻度 <code>contextChars</code>：
-              {typeof data.contextChars === 'number' ? data.contextChars.toLocaleString('en-US') : '—'} 字符
-              （只作面板占比分母，不截断内容）
-            </li>
-            <li>
-              工具调用：{data.supportsTools ? '支持' : '不支持（走预检索降级）'}
-              {' · '}单次超时：{data.requestTimeoutMs ? `${data.requestTimeoutMs}ms` : '默认'}
-            </li>
-            <li>apiKey 不在页面展示；要改配置请编辑上面的文件后保存，可调项见配置文档。</li>
-          </ul>
+          {/* 字段卡（用户 2026-10-30 选定 B 方案：每字段一枚独立小卡）。
+              原先是一行行 disc 灰字，六项等重、看不出主次；apiKey 那条本不是字段，
+              降为卡下脚注，不再占一格。 */}
+          <div className="res-kv">
+            <div className="res-kv__cell">
+              <div className="res-kv__label"><span>模型 <span className="res-kv__key">model</span></span></div>
+              <div className="res-kv__value"><code>{data.model}</code></div>
+            </div>
+            <div className="res-kv__cell">
+              <div className="res-kv__label"><span>上游 <span className="res-kv__key">baseURL</span></span></div>
+              <div className="res-kv__value"><code>{data.baseURLHost}</code></div>
+            </div>
+            <div className="res-kv__cell">
+              <div className="res-kv__label">
+                <span>上下文刻度 <span className="res-kv__key">contextChars</span></span>
+              </div>
+              <div className="res-kv__value">
+                <code>{formatCharsK(data.contextChars)}</code>
+              </div>
+              <div className="res-kv__hint">只作面板占比分母，不截断内容</div>
+            </div>
+            <div className="res-kv__cell">
+              <div className="res-kv__label">
+                <span>单次超时 <span className="res-kv__key">requestTimeoutMs</span></span>
+              </div>
+              <div className="res-kv__value">
+                {data.requestTimeoutMs ? <code>{formatTimeoutSeconds(data.requestTimeoutMs)}</code> : '默认'}
+              </div>
+            </div>
+            <div className="res-kv__cell">
+              <div className="res-kv__label">
+                <span>工具调用 <span className="res-kv__key">supportsTools</span></span>
+              </div>
+              <div className="res-kv__value">
+                {data.supportsTools ? '支持' : '不支持（走预检索降级）'}
+              </div>
+            </div>
+          </div>
+          <p className="res-kv__foot">
+            apiKey 不在页面展示；要改配置请编辑上面的文件后保存，可调项见配置文档。
+          </p>
           {/* 已配置时也直接展开示例（用户 2026-10-28：不要折叠） */}
           <h3 className="res-subhead">完整配置示例（含可选字段）</h3>
           <CodeBlock code={snippet} label="config.yaml" ariaLabel="llm 完整配置示例" />
@@ -608,12 +638,9 @@ function LlmSection(): JSX.Element {
 function SourceTag({ source }: { source?: string }): JSX.Element | null {
   const label = embeddingSourceLabel(source);
   if (!label) return null;
+  // 间距交给容器（`.res-kv__label` 的 gap）—— 内联 marginLeft 会和 gap 叠加成 12px
   return (
-    <span
-      className="ki-badge ki-badge--off"
-      style={{ marginLeft: 6 }}
-      title="该字段没有写在配置文件里，当前用的是内置默认值"
-    >
+    <span className="ki-badge ki-badge--off" title="该字段没有写在配置文件里，当前用的是内置默认值">
       {label}
     </span>
   );
@@ -624,9 +651,13 @@ function SourceTag({ source }: { source?: string }): JSX.Element | null {
  *
  * ★ Q1 = 纯只读：没有表单、没有「测试连接」、不写 config.yaml。
  * ★ Q2 = 一致性只看当前 scope：复用 AppShell/总览同一 queryKey，不产生额外请求。
+ * ★ 一致性区块**没有重查按钮**（用户 2026-10-30 要求去掉）：
+ *   · Web 任务中心触发的 `rebuild-vector` 完成后，AppShell 的失效钩子会重取同一 queryKey；
+ *   · 但本页给的是 **CLI** 命令，CLI 重建不产生 Web 任务记录 ⇒ 不会自动更新，必须刷新页面
+ *     （全站同口径，见 SearchPage / ImportPage 的「完成后刷新页面」）；
+ *   · 异常态顶栏 banner 仍有「重新检查」兜底，所以入口没有全部消失。
  */
 function EmbeddingSection(): JSX.Element {
-  const queryClient = useQueryClient();
   const currentScope = useScopeValue();
   const summaryQuery = useQuery({ queryKey: ['embeddingSummary'], queryFn: getEmbeddingSummary, retry: false });
   const dimensionQuery = useVectorDimensionStatus(currentScope);
@@ -646,16 +677,6 @@ function EmbeddingSection(): JSX.Element {
       queryTimeoutMs: v?.queryTimeoutMs?.value,
     });
   }, [summaryQuery.data]);
-
-  const refreshDimension = async (): Promise<void> => {
-    try {
-      // 与 AppShell 同口径：把**本次响应**写回 cache，避免 invalidate 后重新 GET 命中的仍是旧快照
-      const res = await refreshVectorDimensionStatus(currentScope);
-      queryClient.setQueryData(['vectorDimensionStatus', currentScope], res);
-    } catch {
-      await queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', currentScope] });
-    }
-  };
 
   if (summaryQuery.isLoading) {
     return <p className="res-help">正在读取向量模型配置…</p>;
@@ -687,6 +708,19 @@ function EmbeddingSection(): JSX.Element {
     scope: currentScope,
   });
   const timeoutMs = s?.queryTimeoutMs?.value;
+  /**
+   * 检查时刻：按钮去掉后这块右侧的空白由它填，同时回答「这个结果多新」。
+   * ★ 未配置 API Key 时不显示：那种态的主行写的是「暂不校验」，旁边再挂一个「18:41 检查」
+   *   会自相矛盾（既然没校验，时刻从哪来）。其余态（含读取失败 / 尚未建索引）都显示 ——
+   *   它表示快照里上次检查的时间，与顶栏 banner 同口径。
+   */
+  const checkedAtLabel = s?.apiKeyConfigured ? formatDimensionCheckedAt(dim?.checkedAt) : '';
+  /**
+   * 首屏加载中不得渲染 detail：`dim` 为空时 `embeddingConsistencyView` 会判成
+   * 「未确认 / 尚未取到集合维度（快照缺失或已过期）」—— 那是「还没读到」，
+   * 直接显示等于把加载态说成故障（与 D-2 同一类错误）。
+   */
+  const dimensionLoading = dimensionQuery.isLoading;
 
   return (
     <>
@@ -712,58 +746,100 @@ function EmbeddingSection(): JSX.Element {
       </div>
 
       <h3 className="res-subhead">当前生效配置（只读）</h3>
-      <ul className="res-notes">
-        <li>
-          provider <code>{s?.provider?.value ?? '—'}</code>（仅错误文案里的显示名，不切换实现）
-          <SourceTag source={s?.provider?.source} />
-        </li>
-        <li>
-          上游 <code style={{ overflowWrap: 'anywhere' }}>{s?.baseURL?.value ?? '—'}</code>
-          <SourceTag source={s?.baseURL?.source} />
-        </li>
-        <li>
-          模型 <code style={{ overflowWrap: 'anywhere' }}>{s?.model?.value ?? '—'}</code>
-          <SourceTag source={s?.model?.source} />
-        </li>
-        <li>
-          维度 <code>{s?.dimension?.value ?? '—'}</code>
-          <SourceTag source={s?.dimension?.source} />
-        </li>
-        <li>
-          查询超时（默认） <code>{typeof timeoutMs === 'number' ? `${timeoutMs}ms` : '—'}</code>
-          <SourceTag source={s?.queryTimeoutMs?.source} />
-          <span className="res-note">（检索页可按请求单独指定，覆盖此值）</span>
-        </li>
-        <li>
-          API Key：{s?.apiKeyConfigured ? '已设置（不在页面展示明文）' : '未配置'}
-          {' · '}
-          <a className="res-link" href={EMBEDDING_API_KEY_URL} target="_blank" rel="noopener noreferrer">
-            {EMBEDDING_API_KEY_URL_LABEL} ↗
-          </a>
-        </li>
-      </ul>
-      <p className="res-note">{EMBEDDING_API_KEY_URL_NOTE}</p>
+      {/* 同对话模型：字段卡（B 方案），6 个字段排 3 行 2 列；密钥那格的链接放 hint 行 */}
+      <div className="res-kv">
+        <div className="res-kv__cell">
+          <div className="res-kv__label">
+            <span>provider <span className="res-kv__key">显示名</span></span>
+            <SourceTag source={s?.provider?.source} />
+          </div>
+          <div className="res-kv__value"><code>{s?.provider?.value ?? '—'}</code></div>
+          <div className="res-kv__hint">仅错误文案里的显示名，不切换实现</div>
+        </div>
+        <div className="res-kv__cell">
+          <div className="res-kv__label">
+            <span>上游 <span className="res-kv__key">baseURL</span></span>
+            <SourceTag source={s?.baseURL?.source} />
+          </div>
+          <div className="res-kv__value"><code>{s?.baseURL?.value ?? '—'}</code></div>
+        </div>
+        <div className="res-kv__cell">
+          <div className="res-kv__label">
+            <span>模型 <span className="res-kv__key">model</span></span>
+            <SourceTag source={s?.model?.source} />
+          </div>
+          <div className="res-kv__value"><code>{s?.model?.value ?? '—'}</code></div>
+        </div>
+        <div className="res-kv__cell">
+          <div className="res-kv__label">
+            <span>维度 <span className="res-kv__key">dimension</span></span>
+            <SourceTag source={s?.dimension?.source} />
+          </div>
+          <div className="res-kv__value"><code>{s?.dimension?.value ?? '—'}</code></div>
+        </div>
+        <div className="res-kv__cell">
+          <div className="res-kv__label">
+            <span>查询超时 <span className="res-kv__key">queryTimeoutMs</span></span>
+            <SourceTag source={s?.queryTimeoutMs?.source} />
+          </div>
+          <div className="res-kv__value">
+            {typeof timeoutMs === 'number' ? <code>{formatTimeoutSeconds(timeoutMs)}</code> : '—'}
+          </div>
+          <div className="res-kv__hint">检索页可按请求单独覆盖</div>
+        </div>
+        <div className="res-kv__cell">
+          <div className="res-kv__label"><span>API Key</span></div>
+          <div className="res-kv__value">
+            {s?.apiKeyConfigured ? '已设置（不在页面展示明文）' : '未配置'}
+          </div>
+          <div className="res-kv__hint">
+            <a className="res-link" href={EMBEDDING_API_KEY_URL} target="_blank" rel="noopener noreferrer">
+              {EMBEDDING_API_KEY_URL_LABEL} ↗
+            </a>
+          </div>
+        </div>
+      </div>
+      <p className="res-kv__foot">{EMBEDDING_API_KEY_URL_NOTE}</p>
 
       <h3 className="res-subhead">当前知识库（{currentScope}）的向量一致性</h3>
-      <div className="res-service__line">
-        <span className={`ki-badge ki-badge--${consistency.tone}`}>{consistency.text}</span>
-        <button
-          type="button"
-          className="ki-btn ki-btn--secondary"
-          style={{ marginLeft: 'auto' }}
-          disabled={dimensionQuery.isFetching}
-          onClick={() => void refreshDimension()}
-        >
-          {dimensionQuery.isFetching ? '检查中…' : '重新检查'}
-        </button>
-      </div>
-      {consistency.detail ? <p className="res-note">{consistency.detail}</p> : null}
-      {consistency.command ? (
-        <div className="res-service__line res-service__line--endpoint">
-          <code className="res-service__endpoint">{consistency.command}</code>
-          <CopyButton text={consistency.command} label="重建命令" />
+      {/* 结论块：主行短词 + 集合/配置维度对比（原先是一枚 11px 药丸，两个关键数字几乎看不见）。
+          `text` 是同一分支产出的完整句，用 sr-only 给屏幕阅读器，避免视觉与朗读两套口径。 */}
+      <div className={`res-dim res-dim--${consistency.tone}`} aria-busy={dimensionLoading || undefined}>
+        <div className="res-dim__head">
+          <span className="res-dim__dot" aria-hidden="true" />
+          <span className="res-dim__title">
+            {dimensionLoading ? '读取中…' : consistency.headline}
+          </span>
+          <span className="res-sr-only">{dimensionLoading ? '正在读取向量维度状态' : consistency.text}</span>
+          {checkedAtLabel ? <span className="res-dim__meta">{checkedAtLabel}</span> : null}
         </div>
-      ) : null}
+        {consistency.compare ? (
+          <div className="res-dim__cmp">
+            <span className={`res-dim__side${consistency.compare.relation === 'ne' ? ' res-dim__side--bad' : ''}`}>
+              <span>集合维度</span>
+              <b>{consistency.compare.collection}</b>
+              <span>维</span>
+            </span>
+            <span className="res-dim__op" aria-hidden="true">
+              {consistency.compare.relation === 'eq' ? '=' : '≠'}
+            </span>
+            <span className="res-dim__side">
+              <span>配置维度</span>
+              <b>{consistency.compare.configured}</b>
+              <span>维</span>
+            </span>
+          </div>
+        ) : null}
+        {consistency.detail && !dimensionLoading ? (
+          <p className="res-dim__detail">{consistency.detail}</p>
+        ) : null}
+        {consistency.command ? (
+          <div className="res-dim__cmd">
+            <code>{consistency.command}</code>
+            <CopyButton text={consistency.command} label="重建命令" small />
+          </div>
+        ) : null}
+      </div>
 
       <h3 className="res-subhead">完整配置示例</h3>
       <CodeBlock code={snippet} label="config.yaml" ariaLabel="embedding 配置示例" />

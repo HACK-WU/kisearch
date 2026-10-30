@@ -764,14 +764,70 @@ export interface EmbeddingConsistencyInput {
   scope: string;
 }
 
+/** 维度对比：集合实际维度 vs 当前配置维度（两个值都可判定时才提供） */
+export interface EmbeddingConsistencyCompare {
+  collection: number;
+  configured: number;
+  /** eq = 相等（且 state 为 compatible）；ne = 失配 */
+  relation: 'eq' | 'ne';
+}
+
 export interface EmbeddingConsistencyCopy {
   tone: 'ok' | 'warn' | 'off';
-  /** 一句话结论（页面主行） */
+  /**
+   * 短结论词（页面主行）：一致 / 不一致 / 暂不校验 / 无法确认 / 尚未建向量索引 / 未确认。
+   * 用户 2026-10-30 把结论从一个 11px 药丸改成一整块状态卡后，主行需要能独立成句的短词。
+   */
+  headline: string;
+  /** 完整一句话结论（供 aria-label 与拿不到对比数据时降级展示） */
   text: string;
   /** 副行说明（可为空） */
   detail: string;
   /** 需要用户去 CLI 执行时的命令（仅失配时给） */
   command?: string;
+  /** 渲染成「集合维度 1024 维 = 配置维度 1024 维」；缺任一维度时不给 */
+  compare?: EmbeddingConsistencyCompare;
+}
+
+/**
+ * 维度检查时刻（`res-dim__meta`）：`10-30 16:12 检查`。
+ *
+ * 为什么由前端格式化而不由后端给字符串：该时间是快照里的毫秒时间戳，本地时区才是用户眼里的
+ * 「刚刚 / 昨天」；后端在别的时区格式化会错位。非法值一律返回空串（页面不渲染这一格）。
+ */
+export function formatDimensionCheckedAt(timestamp?: number): string {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return '';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} 检查`;
+}
+
+/**
+ * 字符数 → 「1000K」紧凑刻度（资源页静态配置展示用，用户 2026-10-30）。
+ *
+ * ★ 为什么不复用 `contextUsage.formatK` / `formatKUnit`：那两个是**用量占比**口径，
+ *   刻意保留 1~2 位小数（`1000.0K` / `0.48K`）——占比要能看出细微变化。
+ *   本处是「配置文件里写了多少」的静态值，尾随 `.0` 只是噪声；且改那两处会波及
+ *   对话面板的占比显示，属跨模块搭车变更，不值得。
+ * 规则：< 1000 给原数，≥ 1000 除以 1000、最多 1 位小数、去掉尾随零。
+ */
+export function formatCharsK(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '—';
+  if (value < 1000) return String(Math.round(value));
+  return `${Number((value / 1000).toFixed(1))}K`;
+}
+
+/**
+ * 毫秒 → 「300s」秒（资源页超时配置展示用，用户 2026-10-30）。
+ *
+ * 配置里以 ms 书写（`requestTimeoutMs` / `queryTimeoutMs`），但 `300000ms` 要多位数数零。
+ * ★ 只改**展示**：配置示例片段（`buildLlmConfigSnippet` / `buildEmbeddingConfigSnippet`）
+ *   里仍是 ms 原值 —— 那是「复制进 config.yaml 的内容」，换算成秒会让人照着写错。
+ */
+export function formatTimeoutSeconds(milliseconds?: number): string {
+  if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds) || milliseconds < 0) return '—';
+  return `${Number((milliseconds / 1000).toFixed(2))}s`;
 }
 
 /**
@@ -785,46 +841,84 @@ export interface EmbeddingConsistencyCopy {
  *   4. `persisted` 缺失但 `state === 'compatible'` → 后端**确实**这么返回（无集合分支），
  *      文案要写「尚未建向量索引」，**不能**因为 state 是 compatible 就显示「一致」；
  *   5. 其余 → 未确认（快照缺失 / 已过期）。
+ *
+ * 输出两套口径供页面分层渲染：`headline`（主行短词）+ `compare`（集合/配置维度对比），
+ * `text` 保留完整句子作 aria-label 与无对比数据时的降级文本 —— 三者由同一分支产出，
+ * 不允许页面自行拼装，否则又会出现「text 说一致、compare 却缺值」这类同屏矛盾。
  */
 export function embeddingConsistencyView(input: EmbeddingConsistencyInput): EmbeddingConsistencyCopy {
-  const configured = typeof input.configured === 'number' && Number.isFinite(input.configured)
-    ? `配置 ${input.configured} 维`
-    : '配置维度未知';
+  const configuredNum = typeof input.configured === 'number' && Number.isFinite(input.configured)
+    ? input.configured
+    : undefined;
+  const configured = configuredNum !== undefined ? `配置 ${configuredNum} 维` : '配置维度未知';
 
   if (!input.apiKeyConfigured) {
-    return { tone: 'off', text: '未配置 API Key，暂不校验', detail: '填入 API Key 后再回来看这一项。' };
+    return {
+      tone: 'off',
+      headline: '暂不校验',
+      text: '未配置 API Key，暂不校验',
+      detail: '填入 API Key 后再回来看这一项。',
+    };
   }
   if (input.hasError || input.statusError) {
     const reason = input.statusError ? `：${input.statusError}` : '';
     return {
       tone: 'off',
+      headline: '无法确认',
       text: '无法确认',
-      detail: `维度状态读取失败${reason}；可点「重新检查」重试，或执行 ki doctor 排查。`,
+      // 不再引导点「重新检查」：该按钮已移除（用户 2026-10-30），页内没有这个出口
+      detail: `维度状态读取失败${reason}；刷新页面可重试，或执行 ki doctor 排查。`,
     };
   }
   if (input.state === 'mismatch' && input.persisted !== undefined) {
     const scope = input.scope || '<scope>';
     return {
       tone: 'warn',
+      headline: '不一致',
       text: `集合 ${input.persisted} 维，与${configured}不一致`,
-      detail: '该知识库的语义检索不可用（全文检索仍可用）；重建后回本页点「重新检查」。',
+      // ★ 不能写「自动更新」：本页给的是 **CLI** 命令，CLI 重建不产生 Web 任务记录，
+      //   AppShell 的任务完成失效钩子（只认 import / rebuild-vector / restore-snapshot 任务）
+      //   不会触发。全站同口径见 SearchPage / ImportPage：「完成后刷新页面」。
+      detail: '该知识库的语义检索不可用（全文检索仍可用）；重建完成后刷新本页查看结果。',
       command: `ki restore ${scope} --rebuild-vector --yes`,
+      compare: configuredNum !== undefined
+        ? { collection: input.persisted, configured: configuredNum, relation: 'ne' }
+        : undefined,
     };
   }
   if (input.persisted === undefined) {
     if (input.state === 'compatible') {
       return {
         tone: 'off',
+        headline: '尚未建向量索引',
         text: '该知识库尚未建向量索引',
         detail: '首次导入或重建后会写入集合维度，之后再回来看。',
       };
     }
-    return { tone: 'off', text: '未确认', detail: '尚未取到集合维度（快照缺失或已过期）。' };
+    return {
+      tone: 'off',
+      headline: '未确认',
+      text: '未确认',
+      detail: '尚未取到集合维度（快照缺失或已过期）。',
+    };
   }
   if (input.state === 'compatible') {
-    return { tone: 'ok', text: `集合 ${input.persisted} 维，与${configured}一致`, detail: '' };
+    return {
+      tone: 'ok',
+      headline: '一致',
+      text: `集合 ${input.persisted} 维，与${configured}一致`,
+      detail: '',
+      compare: configuredNum !== undefined
+        ? { collection: input.persisted, configured: configuredNum, relation: 'eq' }
+        : undefined,
+    };
   }
-  return { tone: 'off', text: '未确认', detail: '维度状态与预期不符；可点「重新检查」重试。' };
+  return {
+    tone: 'off',
+    headline: '未确认',
+    text: '未确认',
+    detail: '维度状态与预期不符；刷新页面可重试。',
+  };
 }
 
 // ─── Scope 与 Wiki 同步 ─────────────────────────────────────────────────
@@ -909,7 +1003,7 @@ export function buildScopeConfigSnippet(scope: string = 'my-project'): string {
     '    kbDir: /data/kb            # 可选：KB 基础目录（程序自动拼 kb/<scope>）',
     '    wikiSync:',
     '      enabled: true            # 开启 wiki 回写；缺省视为开启，显式 false 才关闭',
-    '      sourceDir: ./wiki        # wiki 写回目录（不配则写不回去）',
+    '      sourceDir: /data/wiki    # 写回目录：必须绝对路径（不配则写不回去）',
     '      autoBackfill: true       # 目标目录为空时自动补齐历史关系',
   ].join('\n');
 }
@@ -939,10 +1033,11 @@ export const SCOPE_CONFIG_BENEFITS: ScopeBenefit[] = [
   },
 ];
 
-/** 配置口径提醒（写错的三种典型） */
+/** 配置口径提醒（写错的典型） */
 export const SCOPE_CONFIG_NOTES: string[] = [
   'kbDir 是基础目录：程序自动拼 kb/<scope>，不要在里面带上 scope 名。',
   'Wiki 写回目录必须写在 wikiSync.sourceDir；顶层 scopes.<scope>.sourceDir 已废弃（旧值会被忽略，ki doctor 会提示迁移）。',
+  'wikiSync.sourceDir 必须是绝对路径（可用 $HOME/wiki、~/wiki 前缀，它们会展开成绝对路径）；写 ./wiki 这类相对路径会被配置校验直接拒绝（CONFIG_FIELD_INVALID）。',
   '改完保存即生效，不用重启服务（配置按文件 mtime 热加载）。',
 ];
 
