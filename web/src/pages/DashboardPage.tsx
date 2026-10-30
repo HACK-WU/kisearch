@@ -479,7 +479,7 @@ export function DashboardPage(): JSX.Element {
                 <div className="ki-empty" style={{ border: 'none' }}>
                   <div>
                     <h3>配置里还没有注册任何 scope</h3>
-                    <p>注册后可获得白名单护栏、独立 KB 目录与 Wiki 写回配置位。</p>
+                    <p>注册后可获得白名单护栏、独立 KB 目录与 Wiki 回写配置位。</p>
                   </div>
                 </div>
               ) : (
@@ -489,12 +489,12 @@ export function DashboardPage(): JSX.Element {
                       <th>Scope</th>
                       <th>层状态</th>
                       <th style={{ textAlign: 'right' }}>文档数</th>
-                      <th>Wiki 写回</th>
+                      <th>Wiki 回写</th>
                     </tr>
                   </thead>
                   <tbody>
                     {registeredScopes.map((s) => {
-                      // 文案唯一来源：与资源页同一函数（enabled ≠ 可写回）
+                      // 文案唯一来源：与资源页同一函数（enabled ≠ 可回写）
                       const wiki = describeWikiSync(s.wikiSync);
                       return (
                         <tr key={s.scope}>
@@ -508,7 +508,7 @@ export function DashboardPage(): JSX.Element {
                                   className={`ki-reg-scope__wiki-inline ki-reg-scope__wiki--${wiki.tone}`}
                                   title={wiki.title}
                                 >
-                                  Wiki 写回：{wiki.label}
+                                  Wiki 回写：{wiki.label}
                                 </span>
                               </span>
                             </div>
@@ -539,7 +539,7 @@ export function DashboardPage(): JSX.Element {
               )}
               <div className="ki-reg-scope__foot">
                 <span>配置方式：</span>
-                <Link to="/resources/scope">资源 › 注册 scope ↗</Link>
+                <Link to="/resources/scope">资源 › Wiki 回写 ↗</Link>
               </div>
             </>
           )}

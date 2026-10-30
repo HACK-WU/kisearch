@@ -99,7 +99,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_search', purpose: '语义检索（hybrid 混合 / fulltext 只查全文）' },
       { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
       { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
-      { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 wiki 写回可用性' },
+      { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 Wiki 回写可用性' },
       { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
     ],
   },
@@ -320,8 +320,11 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     docAnchor: 'doctor',
   },
   {
-    id: 'scope', group: 'config', label: '注册 scope', title: '注册 scope 与配置方式', kicker: '02 · SCOPE',
-    summary: '把 scope 写进配置能换来什么（白名单护栏、独立目录、Wiki 写回），以及 scopes 段怎么配。',
+    id: 'scope', group: 'config', label: 'Wiki 回写', title: 'Wiki 回写', kicker: '02 · SCOPE',
+    // 2026-10-30 用户定稿：标题直接叫「Wiki 回写」（此前是「注册 scope」，改名后又缩短）。
+    // 页面里的 `02 · SCOPE` kicker 仍表明它属于配置组、与 scope 相关。
+    // 摘要必须与标题同口径：Wiki 回写是这页的核心能力，不是"注册能换来的好处之一"。
+    summary: '注册一个 scope = 给这个库定好三件事：KB 放哪、Wiki 回写写到哪、导入怎么清洗。',
     docAnchor: 'scope',
     configAnchor: 'scopes',
   },
@@ -438,6 +441,10 @@ export function topicExamples(id: ResourceTopicId, scope: string): TopicExample[
     case 'scope':
       return [
         { label: '查看已注册 / 已存在的 scope', command: 'ki scope list' },
+        // 两条补齐命令与「历史关系怎么办」里的说明共用 wikiBackfillCommand，
+        // 防止两处各写一份导致参数写法漂移
+        { label: '把 KB 中已有关系补齐到 wiki（缺省跳过已存在文件）', command: wikiBackfillCommand(s) },
+        { label: '全量覆盖，刷新已存在文件的 exportedAt', command: wikiBackfillCommand(s, true) },
       ];
     case 'export':
       return [
@@ -944,7 +951,7 @@ export interface WikiSyncCopy {
  * 刻意把「开关」「配置」「实际落点」分开表达：
  *   · `enabled:true` 但目录不可用 → 必须说清「开了但写不进去」；
  *   · **没配 wikiSync 时不算"已配置"** —— 此时 `writableDir` 来自 group-index 的 source 块
- *     （导入源目录，Web 上传的多为一次性暂存目录），只是"若发生写回会落到哪"，
+ *     （导入源目录，Web 上传的多为一次性暂存目录），只是"若发生回写会落到哪"，
  *     不能写成 ✓ 让用户以为配对过（2026-10-28 用户反馈 default / kisearch 误显示 ✓）。
  */
 export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncCopy {
@@ -956,7 +963,7 @@ export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncC
     return {
       tone: 'ok',
       label: `✓ ${ws.writableDir}`,
-      title: '可写回（来源：wikiSync.sourceDir）',
+      title: '可回写（来源：wikiSync.sourceDir）',
     };
   }
   if (ws.writableDir) {
@@ -965,14 +972,14 @@ export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncC
       return {
         tone: 'ok',
         label: `✓ ${ws.writableDir}`,
-        title: '可写回（实际落点来自导入源目录，优先级高于 wikiSync.sourceDir）',
+        title: '可回写（实际落点来自导入源目录，优先级高于 wikiSync.sourceDir）',
       };
     }
-    // ③ 没配 wikiSync：source 块只是导入源，不等于"配置了写回"
+    // ③ 没配 wikiSync：source 块只是导入源，不等于"配置了回写"
     return {
       tone: 'muted',
       label: '未配置',
-      title: `未配置 wikiSync（或已显式关闭）；若未关闭，写回会落到导入源目录：${ws.writableDir}`,
+      title: `未配置 wikiSync（或已显式关闭）；若未关闭，回写会落到导入源目录：${ws.writableDir}`,
     };
   }
   if (ws.enabled) {
@@ -980,7 +987,7 @@ export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncC
       tone: 'warn',
       label: '⚠ 已开启但无可用目录',
       title: ws.rejectReason
-        ? `${ws.rejectReason}；配置 wikiSync.sourceDir 后可写回`
+        ? `${ws.rejectReason}；配置 wikiSync.sourceDir 后可回写`
         : '未配置 wikiSync.sourceDir，也无法从 source 块推导目录',
     };
   }
@@ -991,7 +998,7 @@ export function describeWikiSync(ws: WikiSyncLike | null | undefined): WikiSyncC
 }
 
 /**
- * `config.yaml` 的 `scopes` 段：注册一个 scope + 打开 wiki 写回。
+ * `config.yaml` 的 `scopes` 段：注册一个 scope + 打开 Wiki 回写。
  *
  * 字段与默认值以 `docs/configuration.md` 的 `scopes` / `scopes.<scope>.wikiSync` 两节为准。
  */
@@ -1002,13 +1009,18 @@ export function buildScopeConfigSnippet(scope: string = 'my-project'): string {
     `  ${name}:`,
     '    kbDir: /data/kb            # 可选：KB 基础目录（程序自动拼 kb/<scope>）',
     '    wikiSync:',
-    '      enabled: true            # 开启 wiki 回写；缺省视为开启，显式 false 才关闭',
-    '      sourceDir: /data/wiki    # 写回目录：必须绝对路径（不配则写不回去）',
+    '      enabled: true            # 开启 Wiki 回写；缺省视为开启，显式 false 才关闭',
+    '      sourceDir: /data/wiki    # 回写目录：必须绝对路径（不配则不会回写）',
     '      autoBackfill: true       # 目标目录为空时自动补齐历史关系',
   ].join('\n');
 }
 
-/** 注册 scope 能带来什么 —— 每条都对得上代码/文档的既有行为，不写"可能" */
+/**
+ * 注册 scope 的**次要**收益。
+ *
+ * ★ Wiki 回写不在这里（2026-10-30 用户定稿）：它是本页的核心能力，单独占一个
+ *   带落点图的核心区，不与该列表里的其他三条并列 —— 并列等于把它降级成"配置项之一"。
+ */
 export interface ScopeBenefit {
   title: string;
   detail: string;
@@ -1024,10 +1036,6 @@ export const SCOPE_CONFIG_BENEFITS: ScopeBenefit[] = [
     detail: '配 kbDir 可把该 scope 的文档放到任意位置；不配则回退 dataDir/<scope>。',
   },
   {
-    title: 'Wiki 写回的前提',
-    detail: 'sync_relation 想写回 Markdown，就得有地方配 wikiSync.sourceDir —— 只有注册后才能在配置里给它。',
-  },
-  {
     title: '按 scope 定制导入与清洗',
     detail: 'clean（清洗规则 / 外部 hooks）与 import（导入行为）都是 per-scope 配置，互不影响。',
   },
@@ -1036,10 +1044,183 @@ export const SCOPE_CONFIG_BENEFITS: ScopeBenefit[] = [
 /** 配置口径提醒（写错的典型） */
 export const SCOPE_CONFIG_NOTES: string[] = [
   'kbDir 是基础目录：程序自动拼 kb/<scope>，不要在里面带上 scope 名。',
-  'Wiki 写回目录必须写在 wikiSync.sourceDir；顶层 scopes.<scope>.sourceDir 已废弃（旧值会被忽略，ki doctor 会提示迁移）。',
+  'Wiki 回写目录必须写在 wikiSync.sourceDir；顶层 scopes.<scope>.sourceDir 已废弃（旧值会被忽略，ki doctor 会提示迁移）。',
   'wikiSync.sourceDir 必须是绝对路径（可用 $HOME/wiki、~/wiki 前缀，它们会展开成绝对路径）；写 ./wiki 这类相对路径会被配置校验直接拒绝（CONFIG_FIELD_INVALID）。',
+  'wikiSync.sourceDir 不能指向 KB 数据目录内部 —— 会被拒绝，只在日志里告警。',
+  '导入过目录的 scope（CLI 与 Web 上传都会把当时源目录记进 group-index），回写优先落到那个源目录，wikiSync.sourceDir 只作兜底 —— 状态表「来源」列会标出「导入源（优先）」。',
   '改完保存即生效，不用重启服务（配置按文件 mtime 热加载）。',
 ];
+
+// ─── Wiki 回写（本页核心区） ─────────────────────────────────────────────
+//
+// 事实来源（全部代码可查，不要凭印象改写）：
+//   · 三处落点：KB local/group 索引 + 向量 collection + wiki Markdown（wiki-sync.ts）
+//   · 会/不会：sync-relation.ts:349 / relation-edit-publish.ts:426（写入、编辑发布）
+//             import.ts:2146 且 args.wikiWriteback 仅 CLI 传 true（Web 上传、数据源同步不回写）
+//             group-create.ts:126（建组建同名目录）/ delete-relation（删对应 .md）
+//   · 文件格式：markdown-gen.ts:31-38（groupPath / relation / exportedAt 三段 frontmatter）
+//   · 历史补齐：wiki-sync.ts:398 backfillWiki（autoBackfill 只在"目录不存在或为空"时触发）
+
+/** 落点图的一个节点 */
+export interface WikiFlowNode {
+  title: string;
+  desc: string;
+  state: string;
+  /** 第三处落点：视觉上必须与另两处明显不同 */
+  key?: boolean;
+}
+
+/** 落点图的源节点 */
+export const WIKI_FLOW_SOURCE = {
+  title: 'AI 编辑 / MCP 写入',
+  code: 'ki_sync_relation',
+} as const;
+
+export const WIKI_FLOW_NODES: WikiFlowNode[] = [
+  { title: 'KB 原文', desc: '检索拿到完整正文', state: '总是生效' },
+  { title: '向量索引', desc: '语义检索命中', state: '总是生效' },
+  { title: '你的 Wiki', desc: 'Markdown 文件落盘 · git 可管', state: '配 wikiSync 才生效（可关）', key: true },
+];
+
+/**
+ * 落点图下方那句限定语。
+ *
+ * ★ 必须有：回写是**容错**而非事务（writeBackToWiki 失败只返回 {synced:false,reason}，
+ *   不抛异常、不回滚 KB 与向量）。不写这句，用户会把"wiki 没写成功"当成"数据没存上"。
+ */
+export const WIKI_FLOW_NOTE =
+  '三处是并列落点，不是事务：Wiki 回写失败只在日志里告警，KB 与向量照常成功。';
+
+/** 会 / 不会回写的一行文案；`code` 渲染成句末的等宽 chip */
+export interface WikiActionLine {
+  text: string;
+  code?: string;
+}
+
+export const WIKI_WRITE_ACTIONS: WikiActionLine[] = [
+  // 三个 MCP 工具都要单列：AI「改一条 / 批量改 / 局部改」触发的是不同工具，
+  // 合并成一行会让人以为只有 ki_sync_relation 会回写（ki_edit_relation 的 finish
+  // 同样经 relation-edit-publish 回写 —— 见 edit-relation.ts 读 draft.wikiSynced）。
+  { text: 'AI 写入或更新整条（MCP）', code: 'ki_sync_relation' },
+  { text: 'AI 批量写入（MCP）', code: 'ki_bulk_sync_relation' },
+  { text: 'AI 局部编辑后 finish（MCP）', code: 'ki_edit_relation' },
+  { text: 'CLI 导入（只补缺，不覆盖已有文件）', code: 'ki import' },
+  { text: '建组时在 wiki 下建同名目录', code: 'ki group create' },
+  { text: '删文档时删对应 .md（来源不匹配则拒绝删）', code: 'ki delete-relation' },
+];
+
+/**
+ * Web 在线编辑保存为什么不在这两张清单里 —— 必须单独说清。
+ *
+ * ★ 它走的是「直写这篇文档自己的源文件（sourcePath）」，**不走** wikiSync 的
+ *   `<sourceDir>/<Group>/<Relation>.md` 规则：`document-editor.ts:249` 建草稿时
+ *   显式 `skipWikiWriteback: true`，`relation-edit-publish.ts:426` 那道通用回写因此不执行，
+ *   改由 `writeSourceAtomically(file, …)` 覆盖源文件；`!file` 时只返回一句 warning，
+ *   **不产生任何 wiki 文件**。
+ *
+ * 把这条塞进「会回写」清单是最容易犯的错：用户会以为网页改一篇文章，wikiSync 目录里
+ * 就会多/变一个 md —— 只有那篇文档本身就在 wiki 目录里时才成立。
+ */
+export const WIKI_EDIT_SAVE_NOTE =
+  'Web 在线编辑保存改的是这篇文档自己的源文件，不按 wikiSync 的目录规则落盘；没有源文件的文档编辑后不会产生 wiki 文件。';
+
+export const WIKI_NO_WRITE_ACTIONS: WikiActionLine[] = [
+  { text: 'Web 上传文档' },
+  { text: '数据源同步', code: 'ki datasource sync' },
+  { text: '向量重建 / 索引整理' },
+  { text: '反向也不成立：手工改 wiki 文件不会回灌 KB，要重新导入', code: 'ki import' },
+];
+
+/**
+ * 写出来的文件长什么样。
+ *
+ * 字段与顺序必须与 `src/lib/markdown-gen.ts` 的 generateMarkdown 一致
+ * （该文件 2026 批次 3 已移除 keywords 字段，示例里不得再出现）。
+ */
+export const WIKI_FILE_SAMPLE = [
+  '---',
+  'groupPath: 部署运维',
+  'relation: 灰度发布流程',
+  'exportedAt: 2026-10-30T10:22:31.204Z',
+  '---',
+  '',
+  'AI 写入的正文原样落在这里；YAML 头由程序生成，用于回溯 Group 与 Relation。',
+].join('\n');
+
+/** 落点规则（与 wiki-sync.ts 的拼路径逻辑同形） */
+export const WIKI_FILE_PATH_NOTE = '落点：<sourceDir>/<Group>/<Relation>.md';
+
+/** 手动补齐命令（与「常用示例」共用，防止两处写法漂移） */
+export function wikiBackfillCommand(scope: string, force = false): string {
+  return `ki wiki-backfill ${scopeOr(scope)}${force ? ' --force' : ''}`;
+}
+
+/**
+ * 「历史关系怎么办」的四条说明。
+ *
+ * 前两条讲自动补齐的**边界**（目录非空就不补）—— 这是"配了但历史文档没出现"的头号原因；
+ * 后两条讲手动补齐的幂等语义（缺省跳过已存在、不刷 exportedAt，git 不会全量脏 diff）。
+ */
+export function wikiBackfillNotes(scope: string): WikiActionLine[] {
+  return [
+    { text: '目标目录不存在或为空时，写第一条前会自动全量补齐历史关系（wikiSync.autoBackfill，默认开）。' },
+    { text: '目录里已经有文件则不会自动补齐 —— 这是「配了但历史文档没出现」最常见的原因。' },
+    { text: '手动补齐（缺省跳过已存在文件、不刷新 exportedAt）：', code: wikiBackfillCommand(scope) },
+    { text: '要刷新已存在文件的时间戳，全量覆盖：', code: wikiBackfillCommand(scope, true) },
+  ];
+}
+
+/** 回写状态表的一行 */
+export interface WikiWritebackRow {
+  tone: 'ok' | 'warn' | 'muted';
+  /** 状态列文案 */
+  state: string;
+  /** 落点目录；不可用时给「—」而不是留空 */
+  dir: string;
+  /** 来源列文案：wikiSync / 导入源（优先） / — */
+  source: string;
+  /** 来源是否需要警示配色（导入源会压过配置，属"配了但落到别处"） */
+  sourceWarn?: boolean;
+  /** 悬停说明（复用 describeWikiSync 的口径） */
+  title: string;
+}
+
+/**
+ * 回写状态表的四列口径。
+ *
+ * ★ 必须与 {@link describeWikiSync} 同源：本函数直接取它的 `tone` / `title`，
+ *   只额外产出「状态 / 目录 / 来源」三列。否则会出现总览页说"未配置"、
+ *   资源页却说"已配置"的同屏矛盾（两页各写一套判定就是这么来的）。
+ *
+ * 四种状态（顺序即优先级，不可交换）：
+ *   ① 没人给过信息（旧 daemon）→ —         ② 显式配了 wikiSync → ✔ + 来源 wikiSync
+ *   ③ 有目录且开关开着（落点是导入源）→ ✔ + 来源 导入源（优先）
+ *   ④ 开关开着但无可用目录 → ⚠           ⑤ 其余 → ○ 未配置
+ */
+export function describeWikiWriteback(ws: WikiSyncLike | null | undefined): WikiWritebackRow {
+  const copy = describeWikiSync(ws);
+  const base = { tone: copy.tone, title: copy.title };
+  if (!ws) return { ...base, state: '—', dir: '—', source: '—' };
+  if (ws.writableFrom === 'wiki-sync' && ws.writableDir) {
+    return { ...base, state: '✔ 已配置', dir: ws.writableDir, source: 'wikiSync' };
+  }
+  if (ws.writableDir && ws.enabled) {
+    return { ...base, state: '✔ 已配置', dir: ws.writableDir, source: '导入源（优先）', sourceWarn: true };
+  }
+  if (ws.enabled) {
+    return { ...base, state: '⚠ 无可用目录', dir: '—', source: '—' };
+  }
+  return { ...base, state: '○ 未配置', dir: '—', source: '—' };
+}
+
+/**
+ * 状态表下方那句限定语 —— 「✔」的准确含义。
+ *
+ * ★ 不能省：`resolveWikiRootDir` 只 statSync 判目录，**不探测写权限**
+ *   （只读挂载、容器无权限时页面仍是 ✔，实际回写会失败）。不写这句等于让 ✓ 冒充保证。
+ */
+export const WIKI_WRITEBACK_CAVEAT =
+  '✔ 只表示「回写目录已解析」，不保证目录还存在（导入源可能已被清理）；目录存在 ≠ 可写，只读挂载或权限不足时仍会失败，原因见日志。';
 
 // ─── 并发与资源 ─────────────────────────────────────────────────────────
 

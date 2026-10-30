@@ -39,7 +39,7 @@ import {
   configDocUrl,
   describeEmbeddingStatus,
   describeLlmStatus,
-  describeWikiSync,
+  describeWikiWriteback,
   EMBEDDING_API_KEY_URL,
   EMBEDDING_API_KEY_URL_LABEL,
   EMBEDDING_API_KEY_URL_NOTE,
@@ -80,9 +80,20 @@ import {
   TOPIC_GROUPS,
   topicExamples,
   topicsByGroup,
+  WIKI_EDIT_SAVE_NOTE,
+  WIKI_FILE_PATH_NOTE,
+  WIKI_FILE_SAMPLE,
+  WIKI_FLOW_NODES,
+  WIKI_FLOW_NOTE,
+  WIKI_FLOW_SOURCE,
+  WIKI_NO_WRITE_ACTIONS,
+  WIKI_WRITEBACK_CAVEAT,
+  WIKI_WRITE_ACTIONS,
+  wikiBackfillNotes,
   type McpTab,
   type ResourceTopic,
   type ResourceTopicId,
+  type WikiActionLine,
 } from '@/lib/resourcesPage';
 
 const MCP_TABS: Array<{ id: McpTab; label: string; suffix?: string }> = [
@@ -867,14 +878,89 @@ function EmbeddingSection(): JSX.Element {
 
 // ─── 功能项：说明 + 示例 + 更多说明 ─────────────────────────────────────
 
+// ─── 配置项：注册 scope 与 Wiki 回写 ─────────────────────────────────────
+//
+// 该页是「Wiki 回写」唯一的说明入口（2026-10-30 用户定稿：这是核心能力，
+// 不是注册收益之一），因此结构与文案全部集中在 resourcesPage.ts，这里只做渲染。
+// 文案/判定为什么这么写，见该文件「Wiki 回写（本页核心区）」段的事实来源注释。
+
+/** 落点图：AI 写一次 → KB / 向量 / 你的 Wiki（第三处高亮） */
+function WikiFlow(): JSX.Element {
+  return (
+    <div className="res-wiki">
+      <div className="res-flow">
+        <div className="res-flow__src">
+          <span className="res-flow__src-title">{WIKI_FLOW_SOURCE.title}</span>
+          <span className="res-flow__src-code">{WIKI_FLOW_SOURCE.code}</span>
+        </div>
+        <div className="res-flow__stem" aria-hidden="true" />
+        <div className="res-flow__nodes">
+          {WIKI_FLOW_NODES.map((node) => (
+            <div
+              className={node.key ? 'res-flow__node res-flow__node--key' : 'res-flow__node'}
+              key={node.title}
+            >
+              <span className="res-flow__node-title">{node.title}</span>
+              <span className="res-flow__node-desc">{node.desc}</span>
+              <span className="res-flow__node-state">{node.state}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <p className="res-wiki__note">
+        <span>
+          {WIKI_FLOW_NOTE}
+          {' '}
+          <code className="res-inline-cmd">{WIKI_FILE_PATH_NOTE}</code>
+        </span>
+      </p>
+    </div>
+  );
+}
+
+/** 带句末命令 chip 的说明列表 */
+function WikiLines({ lines }: { lines: WikiActionLine[] }): JSX.Element {
+  return (
+    <ul className="res-notes">
+      {lines.map((line) => (
+        <li key={line.text}>
+          {line.text}
+          {line.code ? <> <code className="res-inline-cmd">{line.code}</code></> : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** 会 / 不会 回写的单列 */
+function WikiActionBox({ tone, title, items }: {
+  tone: 'yes' | 'no';
+  title: string;
+  items: WikiActionLine[];
+}): JSX.Element {
+  return (
+    <div className={`res-colbox res-colbox--${tone}`}>
+      <span className="res-colbox__head">{title}</span>
+      <ul className="res-colbox__list">
+        {items.map((item) => (
+          <li key={item.text}>
+            {item.text}
+            {item.code ? <> <code>{item.code}</code></> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
- * 已注册的 scope（只列 `registered` 的，附 wiki 写回状态）。
+ * 已注册 scope 的回写状态表（四列：scope / 状态 / 落点目录 / 来源）。
  *
- * 为什么是轻量列表而不是原来的四列表格：本项目的重心是「注册 + 怎么配」，
- * KB / 向量层是否存在的运行态诊断属 `ki scope list` 的职责，页面不重复。
- * 但 wiki 写回状态保留 —— 它直接决定 `sync_relation` 能不能落盘。
+ * 为什么多出「来源」列：回写优先落到 group-index 的 source 块（导入源），
+ * wikiSync.sourceDir 反而只是兜底。少了这列，用户配完发现"写到了别的地方"
+ * 在页面上找不到任何解释（2026-10-30 之前就是这样）。
  */
-function RegisteredScopes(): JSX.Element {
+function WikiWritebackTable(): JSX.Element {
   const query = useQuery({ queryKey: ['scopeList'], queryFn: kiScopeList, retry: false });
 
   if (query.isLoading) return <p className="res-help">正在读取 scope 列表…</p>;
@@ -890,29 +976,111 @@ function RegisteredScopes(): JSX.Element {
   const registered = all.filter((item) => item.registered);
 
   if (registered.length === 0) {
-    return <p className="res-help">配置里还没有注册任何 scope —— 按下面的方式加一个即可。</p>;
+    // 页面变长后「下面」指向模糊（状态表与配置片段之间还隔着 4 个小节），改为点名章节
+    return <p className="res-help">配置里还没有注册任何 scope —— 按「怎么配置（config.yaml）」一节加一个即可。</p>;
   }
 
   return (
     <>
-      <ul className="res-registered">
+      {/* 语义：这不是可点的数据表（.ki-table 的 td 是 nowrap + 行 hover + 手型，且不能换行），
+          但仍是表格关系 —— 用 ARIA role 补语义；窄屏折单列时表头隐藏，
+          改由每个单元格的 data-label 由 CSS 补出标签（视觉可达，读屏按行线性播报）。 */}
+      <div className="res-wslist" role="table" aria-label="已注册 scope 的 Wiki 回写状态">
+        <div className="res-wslist__row res-wslist__row--head" role="row">
+          <span role="columnheader">scope</span>
+          <span role="columnheader">状态</span>
+          <span role="columnheader">落点目录</span>
+          <span role="columnheader">来源</span>
+        </div>
         {registered.map((item) => {
-          const wiki = describeWikiSync(item.wikiSync);
+          const row = describeWikiWriteback(item.wikiSync);
           return (
-            <li className="res-registered__item" key={item.scope}>
-              <code className="res-registered__name">{item.scope}</code>
-              <span className={`res-wikisync res-wikisync--${wiki.tone}`} title={wiki.title}>
-                Wiki 写回：{wiki.label}
+            <div className="res-wslist__row" role="row" key={item.scope}>
+              <code className="res-wslist__name" role="cell" data-label="scope">{item.scope}</code>
+              <span
+                className={`res-wslist__state res-wslist__state--${row.tone}`}
+                role="cell"
+                data-label="状态"
+                title={row.title}
+              >
+                {row.state}
               </span>
-            </li>
+              <code className="res-wslist__dir" role="cell" data-label="落点目录">{row.dir}</code>
+              <span
+                className={row.sourceWarn ? 'res-wslist__from res-wslist__from--warn' : 'res-wslist__from'}
+                role="cell"
+                data-label="来源"
+              >
+                {row.source}
+              </span>
+            </div>
           );
         })}
-      </ul>
+      </div>
+      <p className="res-note res-mt-2">{WIKI_WRITEBACK_CAVEAT}</p>
       {all.length > registered.length ? (
         <p className="res-note res-mt-2">
           另有 {all.length - registered.length} 个 scope 只有目录或向量数据、但未写进配置（未注册）。
         </p>
       ) : null}
+    </>
+  );
+}
+
+function ScopeSection({ scope }: { scope: string }): JSX.Element {
+  return (
+    <>
+      <h3 className="res-subhead">
+        AI 改一次，三处同时生效
+        <span className="res-subhead__hint">Wiki 回写就是第三处落点</span>
+      </h3>
+      <WikiFlow />
+
+      <h3 className="res-subhead">
+        当前 scope 的回写状态
+        <span className="res-subhead__hint">来源决定实际写到哪</span>
+      </h3>
+      <WikiWritebackTable />
+
+      <h3 className="res-subhead">什么会回写 / 什么不会</h3>
+      <div className="res-cols2">
+        <WikiActionBox tone="yes" title="会回写 ✔" items={WIKI_WRITE_ACTIONS} />
+        <WikiActionBox tone="no" title="不会回写 ✘" items={WIKI_NO_WRITE_ACTIONS} />
+      </div>
+      {/* 网页编辑是第三种情况：写入源文件、不走上面这条目录规则 —— 单独说，不混进清单 */}
+      <p className="res-note res-mt-2">{WIKI_EDIT_SAVE_NOTE}</p>
+
+      <h3 className="res-subhead">
+        写出来的文件长什么样
+        <span className="res-subhead__hint">YAML 头由程序生成</span>
+      </h3>
+      <CodeBlock code={WIKI_FILE_SAMPLE} label="markdown" ariaLabel="Wiki 回写文件示例" />
+
+      <h3 className="res-subhead">
+        历史关系怎么办
+        <span className="res-subhead__hint">开启后只写「之后」的，历史要补</span>
+      </h3>
+      <WikiLines lines={wikiBackfillNotes(scope)} />
+
+      <h3 className="res-subhead">怎么配置（config.yaml）</h3>
+      <CodeBlock
+        code={buildScopeConfigSnippet(scope)}
+        label="config.yaml"
+        ariaLabel="scopes 段配置示例"
+      />
+      <ul className="res-notes">
+        {SCOPE_CONFIG_NOTES.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+
+      <h3 className="res-subhead">注册还能拿到什么</h3>
+      <ul className="res-benefits">
+        {SCOPE_CONFIG_BENEFITS.map((benefit) => (
+          <li className="res-benefit" key={benefit.title}>
+            <strong>{benefit.title}</strong>
+            <span>{benefit.detail}</span>
+          </li>
+        ))}
+      </ul>
     </>
   );
 }
@@ -926,32 +1094,7 @@ function FeatureSection({ topic }: { topic: ResourceTopic }): JSX.Element {
     <>
       <p className="res-help">{topic.summary}</p>
 
-      {topic.id === 'scope' ? (
-        <>
-          <h3 className="res-subhead">当前已注册的 scope</h3>
-          <RegisteredScopes />
-
-          <h3 className="res-subhead">注册有什么好处</h3>
-          <ul className="res-benefits">
-            {SCOPE_CONFIG_BENEFITS.map((benefit) => (
-              <li className="res-benefit" key={benefit.title}>
-                <strong>{benefit.title}</strong>
-                <span>{benefit.detail}</span>
-              </li>
-            ))}
-          </ul>
-
-          <h3 className="res-subhead">怎么配置（config.yaml）</h3>
-          <CodeBlock
-            code={buildScopeConfigSnippet(scope)}
-            label="config.yaml"
-            ariaLabel="scopes 段配置示例"
-          />
-          <ul className="res-notes">
-            {SCOPE_CONFIG_NOTES.map((note) => <li key={note}>{note}</li>)}
-          </ul>
-        </>
-      ) : null}
+      {topic.id === 'scope' ? <ScopeSection scope={scope} /> : null}
 
       {topic.id === 'concurrency' ? (
         <>

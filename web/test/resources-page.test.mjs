@@ -39,6 +39,7 @@ const {
   configDocUrl,
   describeLlmStatus,
   describeWikiSync,
+  describeWikiWriteback,
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
   isLoopbackHost,
@@ -66,6 +67,17 @@ const {
   TOPIC_GROUPS,
   topicExamples,
   topicsByGroup,
+  WIKI_EDIT_SAVE_NOTE,
+  WIKI_FILE_PATH_NOTE,
+  WIKI_FILE_SAMPLE,
+  WIKI_FLOW_NODES,
+  WIKI_FLOW_NOTE,
+  WIKI_FLOW_SOURCE,
+  WIKI_NO_WRITE_ACTIONS,
+  WIKI_WRITEBACK_CAVEAT,
+  WIKI_WRITE_ACTIONS,
+  wikiBackfillCommand,
+  wikiBackfillNotes,
 } = await vite.ssrLoadModule('/src/lib/resourcesPage.ts');
 after(async () => vite.close());
 
@@ -363,9 +375,15 @@ describe('并发与资源（纯配置项）', () => {
 });
 
 describe('注册 scope：好处与配置方式', () => {
-  it('目录项叫「注册 scope」，副标题指向配置文档', () => {
+  it('目录项与页头都叫「Wiki 回写」，副标题指向配置文档', () => {
     const scope = RESOURCE_TOPICS.find((t) => t.id === 'scope');
-    assert.equal(scope.label, '注册 scope');
+    // 2026-10-30 用户定稿：标题直接叫「Wiki 回写」（先后从「注册 scope」改为
+    // 「注册 scope 与 Wiki 回写」，再缩短为「Wiki 回写」）
+    assert.equal(scope.label, 'Wiki 回写');
+    assert.equal(scope.title, 'Wiki 回写');
+    // ★ 摘要与标题同口径：不得再写回"白名单护栏/独立目录/Wiki 回写"三者并列
+    assert.ok(scope.summary.includes('Wiki 回写'), '摘要要点名 Wiki 回写');
+    assert.equal(scope.summary.includes('白名单'), false, '摘要不再列注册收益（已降为次要区）');
     assert.equal(scope.configAnchor, 'scopes');
     assert.equal(
       configDocUrl(scope.configAnchor),
@@ -381,8 +399,8 @@ describe('注册 scope：好处与配置方式', () => {
     assert.ok(text.includes('wikiSync:'));
     assert.ok(text.includes('sourceDir:'));
     assert.ok(text.includes('autoBackfill:'));
-    // 用户 2026-10-28：enabled 那行要写明它开的是「wiki 回写」，不能只写「开关」
-    assert.ok(/enabled: true\s+#\s*开启 wiki 回写/.test(text), 'enabled 注释要写明开启 wiki 回写');
+    // 用户 2026-10-28：enabled 那行要写明它开的是「Wiki 回写」，不能只写「开关」
+    assert.ok(/enabled: true\s+#\s*开启 Wiki 回写/.test(text), 'enabled 注释要写明开启 Wiki 回写');
   });
 
   it('★ 片段不使用已废弃的顶层 scopes.<scope>.sourceDir', () => {
@@ -422,6 +440,174 @@ describe('注册 scope：好处与配置方式', () => {
     assert.ok(SCOPE_CONFIG_NOTES.length >= 2);
     // 已废弃字段必须在提醒里点名，否则用户会继续写旧写法
     assert.ok(SCOPE_CONFIG_NOTES.some((note) => note.includes('废弃')));
+  });
+});
+
+describe('Wiki 回写（本页核心区）', () => {
+  it('落点图：三处落点，只有最后一处是 key（用户的 wiki）', () => {
+    assert.equal(WIKI_FLOW_NODES.length, 3);
+    assert.deepEqual(WIKI_FLOW_NODES.map((n) => n.title), ['KB 原文', '向量索引', '你的 Wiki']);
+    assert.deepEqual(WIKI_FLOW_NODES.filter((n) => n.key).map((n) => n.title), ['你的 Wiki']);
+    for (const node of WIKI_FLOW_NODES) {
+      assert.ok(node.desc.length > 0, node.title);
+      assert.ok(node.state.length > 0, node.title);
+    }
+    assert.equal(WIKI_FLOW_SOURCE.code, 'ki_sync_relation');
+    // 前两处必须写明"总是生效"，否则读者会以为没配 wikiSync 就连 KB 都不写
+    assert.deepEqual(
+      WIKI_FLOW_NODES.filter((n) => !n.key).map((n) => n.state),
+      ['总是生效', '总是生效'],
+    );
+    assert.ok(WIKI_FLOW_NODES[2].state.includes('wikiSync'));
+  });
+
+  it('★ 落点图必须声明「不是事务」—— 否则回写失败会被误读成数据没存上', () => {
+    assert.ok(WIKI_FLOW_NOTE.includes('不是事务'));
+    assert.ok(WIKI_FLOW_NOTE.includes('KB 与向量'));
+    assert.ok(WIKI_FILE_PATH_NOTE.includes('<Group>'));
+    assert.ok(WIKI_FILE_PATH_NOTE.includes('<Relation>.md'));
+  });
+
+  it('会回写清单覆盖三个 MCP 写工具 + 导入 / 建组 / 删文档', () => {
+    const codes = WIKI_WRITE_ACTIONS.map((a) => a.code).filter(Boolean);
+    for (const cmd of [
+      'ki_sync_relation',
+      'ki_bulk_sync_relation',
+      'ki_edit_relation',
+      'ki import',
+      'ki group create',
+      'ki delete-relation',
+    ]) {
+      assert.ok(codes.includes(cmd), `会回写清单缺 ${cmd}`);
+    }
+    // 删除会动 wiki 文件，最容易被误以为"wiki 只读"，必须有
+    assert.ok(WIKI_WRITE_ACTIONS.some((a) => a.text.includes('删对应 .md')));
+  });
+
+  it('不会回写清单点名 Web 上传 / 数据源同步，并说明反向也不成立', () => {
+    const texts = WIKI_NO_WRITE_ACTIONS.map((a) => a.text).join('|');
+    assert.ok(texts.includes('Web 上传'));
+    assert.ok(texts.includes('数据源同步'));
+    assert.ok(texts.includes('向量重建'));
+    assert.ok(texts.includes('不会回灌 KB'), '必须说明 wiki 是单向输出，改文件不进 KB');
+  });
+
+  it('★ Web 在线编辑保存不在「会回写」清单里（它直写源文件，走的是另一条路）', () => {
+    // document-editor.ts:249 建草稿时 skipWikiWriteback=true，改写 sourcePath 而非按
+    // wikiSync 的 <sourceDir>/<Group>/<Relation>.md 落盘 —— 混进清单会让人以为
+    // 网页改一篇文章，wikiSync 目录就会多出一个 md。
+    assert.equal(WIKI_WRITE_ACTIONS.some((a) => a.text.includes('在线编辑')), false);
+    assert.ok(WIKI_EDIT_SAVE_NOTE.includes('源文件'));
+    assert.ok(WIKI_EDIT_SAVE_NOTE.includes('不按 wikiSync'));
+    assert.ok(WIKI_EDIT_SAVE_NOTE.includes('不会产生 wiki 文件'));
+  });
+
+  it('补齐命令按当前 scope 实填，--force 只加在 force 分支', () => {
+    assert.equal(wikiBackfillCommand('monitor'), 'ki wiki-backfill monitor');
+    assert.equal(wikiBackfillCommand('monitor', true), 'ki wiki-backfill monitor --force');
+    assert.equal(wikiBackfillCommand('   '), 'ki wiki-backfill default');
+  });
+
+  it('★ 补齐说明点明「目录非空就不自动补」这条边界，命令与 command 函数同源', () => {
+    const notes = wikiBackfillNotes('monitor');
+    assert.equal(notes.length, 4);
+    assert.ok(notes.every((n) => n.text.length > 0));
+    assert.ok(notes.some((n) => n.text.includes('不会自动补齐')), '必须写清自动补齐的边界');
+    const codes = notes.map((n) => n.code).filter(Boolean);
+    assert.deepEqual(codes, [wikiBackfillCommand('monitor'), wikiBackfillCommand('monitor', true)]);
+    assert.ok(notes.some((n) => n.text.includes('exportedAt')), '要说明不刷时间戳（git 脏 diff）');
+  });
+
+  it('文件示例与 markdown-gen 一致：字段齐全，且无已移除的 keywords', () => {
+    const lines = WIKI_FILE_SAMPLE.split('\n');
+    assert.equal(lines[0], '---');
+    assert.ok(lines.includes('groupPath: 部署运维'));
+    assert.ok(lines.includes('relation: 灰度发布流程'));
+    assert.ok(lines.some((l) => l.startsWith('exportedAt: ')));
+    assert.equal(WIKI_FILE_SAMPLE.includes('keywords'), false, 'markdown-gen 已移除 keywords');
+  });
+
+  it('「✔」的含义被限定：只表示目录已解析，不冒充可写', () => {
+    assert.ok(WIKI_WRITEBACK_CAVEAT.includes('已解析'));
+    assert.ok(WIKI_WRITEBACK_CAVEAT.includes('≠ 可写'));
+  });
+
+  it('★ 术语统一为「回写」：本区文案里不得再出现「写回」', () => {
+    const texts = [
+      ...WIKI_FLOW_NODES.flatMap((n) => [n.title, n.desc, n.state]),
+      WIKI_FLOW_SOURCE.title,
+      WIKI_FLOW_NOTE,
+      WIKI_EDIT_SAVE_NOTE,
+      WIKI_FILE_PATH_NOTE,
+      WIKI_FILE_SAMPLE,
+      WIKI_WRITEBACK_CAVEAT,
+      ...WIKI_WRITE_ACTIONS.flatMap((a) => [a.text, a.code ?? '']),
+      ...WIKI_NO_WRITE_ACTIONS.flatMap((a) => [a.text, a.code ?? '']),
+      ...wikiBackfillNotes('demo').flatMap((n) => [n.text, n.code ?? '']),
+    ];
+    for (const text of texts) {
+      assert.equal(text.includes('写回'), false, `文案里出现「写回」：${text}`);
+    }
+  });
+});
+
+describe('describeWikiWriteback（状态表四列）', () => {
+  const cases = [
+    {
+      name: '显式配了 wikiSync',
+      ws: { enabled: true, writableDir: '/w', writableFrom: 'wiki-sync' },
+      expect: { state: '✔ 已配置', dir: '/w', source: 'wikiSync', tone: 'ok' },
+    },
+    {
+      name: '落点来自导入源（压过配置）',
+      ws: { enabled: true, writableDir: '/src', writableFrom: 'source' },
+      expect: { state: '✔ 已配置', dir: '/src', source: '导入源（优先）', tone: 'ok' },
+    },
+    {
+      name: '开了但无可用目录',
+      ws: { enabled: true, writableDir: null, writableFrom: null, rejectReason: 'source 指向的是文件' },
+      expect: { state: '⚠ 无可用目录', dir: '—', source: '—', tone: 'warn' },
+    },
+    {
+      name: '没配 wikiSync，只有导入源',
+      ws: { enabled: false, writableDir: '/tmp/upload', writableFrom: 'source' },
+      expect: { state: '○ 未配置', dir: '—', source: '—', tone: 'muted' },
+    },
+    {
+      name: '旧 daemon 无该字段',
+      ws: undefined,
+      expect: { state: '—', dir: '—', source: '—', tone: 'muted' },
+    },
+  ];
+
+  for (const item of cases) {
+    it(item.name, () => {
+      const row = describeWikiWriteback(item.ws);
+      assert.equal(row.state, item.expect.state);
+      assert.equal(row.dir, item.expect.dir);
+      assert.equal(row.source, item.expect.source);
+      assert.equal(row.tone, item.expect.tone);
+      assert.ok(row.title.length > 0);
+    });
+  }
+
+  it('★ tone 必须与 describeWikiSync 完全一致（两页各写一套判定就会同屏矛盾）', () => {
+    for (const item of cases) {
+      assert.equal(describeWikiWriteback(item.ws).tone, describeWikiSync(item.ws).tone, item.name);
+    }
+  });
+
+  it('★ 未配置时不得把导入源路径当落点展示（2026-10-28 用户反馈的回归点）', () => {
+    const row = describeWikiWriteback({ enabled: false, writableDir: '/tmp/upload-xxx', writableFrom: 'source' });
+    assert.equal(row.dir, '—');
+    assert.equal(row.source, '—');
+    // 但说明里要保留"若没关会落到哪"，供排障
+    assert.ok(row.title.includes('/tmp/upload-xxx'));
+  });
+
+  it('导入源态标记 sourceWarn，其他态不标', () => {
+    assert.equal(describeWikiWriteback({ enabled: true, writableDir: '/s', writableFrom: 'source' }).sourceWarn, true);
+    assert.equal(describeWikiWriteback({ enabled: true, writableDir: '/w', writableFrom: 'wiki-sync' }).sourceWarn, undefined);
   });
 });
 

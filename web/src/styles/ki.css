@@ -7181,26 +7181,142 @@ select.ki-chat-cfg__ta--select {
 .res-llm-status__body span { color: var(--ki-color-text-muted); font-size: 12px; line-height: 1.6; }
 .res-llm-ack { display: grid; margin-top: var(--ki-space-3); justify-items: start; }
 
-/* ── 已注册 scope（轻量列表）+ 配置说明 ── */
-.res-registered {
-  display: grid; gap: 0;
+/* ── Wiki 回写：落点图 + 状态表 + 会/不会（2026-10-30 用户定稿） ──
+   本页核心区。三条视觉约束：
+   ① 第三处落点（用户的 wiki）必须与另两处明显不同 —— 只改文字色在浅底上看不出来，
+      故用「描边 + 淡底 + 左侧色条」三重；② 分叉线必须连续（见下方 ::after 的 7px 说明）；
+   ③ 长目录要能换行，不能撑出横向滚动。 */
+
+/* 落点图容器：与 .res-kv 同一视觉家族（细描边 + 淡底），内距更松（内部是图不是字段表） */
+.res-wiki {
+  display: grid; gap: 14px;
+  padding: 16px 18px 17px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+.res-flow { display: grid; justify-items: center; }
+.res-flow__src {
+  display: grid; gap: 2px; justify-items: center;
+  padding: 8px 14px 9px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  text-align: center;
+}
+.res-flow__src-title { font-size: 12.5px; font-weight: 650; color: var(--ki-color-text); }
+.res-flow__src-code { font: 11px var(--ki-font-mono); color: var(--ki-color-text-subtle); }
+/* 竖杆 32px：分叉横线画在杆的**中点**（节点 top:-16px）。
+   若把横线画在与源框底边同一 y 上，看起来像"线从框里穿出来"（demo 实测）。 */
+.res-flow__stem { width: 1px; height: 32px; background: var(--ki-color-border-strong); }
+.res-flow__nodes {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px; width: 100%;
+}
+.res-flow__node {
+  position: relative;
+  display: grid; gap: 3px; align-content: start;
+  padding: 11px 13px 12px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+}
+/* 分叉线：横线跨出半格 gap（6px，**故意取 7px 叠 1px**）—— 三等分列宽是 273.33px，
+   按 6px 正好相接时浏览器取整会在格子交界处留 1~4px 的缝（实测可见）。
+   首尾两格各收一半，避免线头超出最外侧节点。 */
+.res-flow__node::before,
+.res-flow__node::after {
+  content: ""; position: absolute; background: var(--ki-color-border-strong);
+}
+.res-flow__node::before { top: -16px; left: 50%; width: 1px; height: 16px; }
+.res-flow__node::after { top: -16px; left: -7px; right: -7px; height: 1px; }
+.res-flow__node:first-child::after { left: 50%; }
+.res-flow__node:last-child::after { right: 50%; }
+.res-flow__node-title { font-size: 12.5px; font-weight: 650; color: var(--ki-color-text); }
+.res-flow__node-desc { font-size: 11.5px; color: var(--ki-color-text-muted); line-height: 1.5; }
+.res-flow__node-state {
+  margin-top: 2px;
+  font: 600 10.5px/1.4 var(--ki-font-mono);
+  color: var(--ki-color-text-subtle);
+}
+.res-flow__node--key {
+  border-color: var(--ki-color-primary);
+  background: var(--ki-color-primary-soft);
+  box-shadow: inset 3px 0 0 var(--ki-color-primary);
+}
+.res-flow__node--key .res-flow__node-title,
+.res-flow__node--key .res-flow__node-state { color: var(--ki-color-primary); }
+.res-wiki__note {
+  display: flex; gap: 7px; align-items: flex-start;
+  padding-top: 12px;
+  border-top: 1px dashed var(--ki-color-border);
+  color: var(--ki-color-text-subtle);
+  font-size: 12px; line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+/* 回写状态表：4 列。不用 .ki-table —— 它的 td 是 nowrap + 行 hover + 手型，
+   而这里的行不可点、长目录必须换行 */
+.res-wslist {
+  display: grid;
   border: 1px solid var(--ki-color-border);
   border-radius: var(--ki-radius-md);
   overflow: hidden;
 }
-.res-registered__item {
-  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-  padding: 8px 12px;
+.res-wslist__row {
+  display: grid;
+  grid-template-columns: minmax(104px, 160px) 92px minmax(0, 1fr) 128px;
+  gap: 12px; align-items: center;
+  padding: 9px 13px;
   border-top: 1px solid var(--ki-color-border);
   background: var(--ki-color-surface);
   font-size: 12.5px;
 }
-.res-registered__item:first-child { border-top: 0; }
-.res-registered__name { color: var(--ki-color-text); font: 600 12.5px var(--ki-font-mono); }
-.res-wikisync { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
-.res-wikisync--ok { color: var(--ki-color-success); }
-.res-wikisync--warn { color: var(--ki-color-warning); }
-.res-wikisync--muted { color: var(--ki-color-text-subtle); }
+.res-wslist__row:first-child { border-top: 0; }
+.res-wslist__row--head {
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-subtle);
+  font: 650 10.5px/1.4 var(--ki-font-mono);
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.res-wslist__name { color: var(--ki-color-text); font: 600 12.5px/1.5 var(--ki-font-mono); overflow-wrap: anywhere; }
+.res-wslist__state { font-size: 12px; font-weight: 600; }
+.res-wslist__state--ok { color: var(--ki-color-success); }
+.res-wslist__state--warn { color: var(--ki-color-warning); }
+.res-wslist__state--muted { color: var(--ki-color-text-subtle); font-weight: 400; }
+.res-wslist__dir { color: var(--ki-color-text-muted); font: 11.5px/1.6 var(--ki-font-mono); overflow-wrap: anywhere; }
+.res-wslist__from { color: var(--ki-color-text-subtle); font-size: 11.5px; }
+.res-wslist__from--warn { color: var(--ki-color-warning); font-weight: 600; }
+
+/* 会回写 / 不会回写 */
+.res-cols2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.res-colbox {
+  display: grid; gap: 8px; align-content: start;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+}
+.res-colbox__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; }
+.res-colbox--yes .res-colbox__head { color: var(--ki-color-success); }
+.res-colbox--no .res-colbox__head { color: var(--ki-color-text-subtle); }
+.res-colbox__list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.res-colbox__list li {
+  position: relative; padding-left: 11px;
+  font-size: 12px; line-height: 1.6; color: var(--ki-color-text-muted);
+  overflow-wrap: anywhere;
+}
+.res-colbox__list li::before {
+  content: ""; position: absolute; left: 0; top: 7px;
+  width: 4px; height: 4px; border-radius: 50%;
+  background: currentColor; opacity: .42;
+}
+.res-colbox code {
+  padding: 0 4px; border-radius: 3px;
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  font: 11px var(--ki-font-mono);
+}
 
 /* ── MCP 工具清单（接入后能用什么） ──
    三组各自成块 + 行间细线 + 组标题带语义色点：
@@ -7318,6 +7434,25 @@ select.ki-chat-cfg__ta--select {
 .res-kv__foot code { font-family: var(--ki-font-mono); }
 @media (max-width: 720px) {
   .res-kv { grid-template-columns: 1fr; }
+  /* 三落点竖排后分叉线无意义：只留竖杆，横线全部隐藏。
+     首格的竖杆缩到 7px —— 否则它接到 32px 主杆后面会多出一段。 */
+  .res-flow__nodes { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .res-flow__stem { height: 7px; }
+  .res-flow__node::after { display: none; }
+  .res-flow__node::before { top: -14px; height: 14px; }
+  .res-flow__node:first-child::before { top: -7px; height: 7px; }
+  .res-cols2 { grid-template-columns: minmax(0, 1fr); }
+  /* 状态表竖排：表头隐藏，改由每格的 data-label 补出标签 ——
+     只隐藏表头会让「/data/wiki」和「wikiSync」变成两行无主语的文本。 */
+  .res-wslist__row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .res-wslist__row--head { display: none; }
+  .res-wslist__row > [data-label]::before {
+    content: attr(data-label) "  ";
+    margin-right: 2px;
+    color: var(--ki-color-text-subtle);
+    font: 650 10px/1 var(--ki-font-mono);
+    letter-spacing: .04em;
+  }
 }
 
 /* ── 当前 scope 的向量一致性结论块 ──
