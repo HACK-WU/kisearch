@@ -14,8 +14,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
-
+import { useTempHome } from './isolate-home.js';
 import { writeBackToWiki, backfillWiki } from '../src/lib/wiki-sync.js';
 import { registerTestScope, cleanupTestConfig, testConfigPath } from './test-config.js';
 import { getRelationsCachePath, getLocalKbDir, setSource, getGroupIndexPath } from '../src/lib/scope.js';
@@ -24,8 +23,8 @@ import { ensureScopeDir } from '../src/lib/store.js';
 
 // ─── 测试隔离：临时 HOME（wiki 目标目录 + 独立配置） ───
 
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-wbf-'));
-const savedHome = process.env.HOME;
+const tempHome = useTempHome('ki-wbf-');
+const tmpHome = tempHome.home;
 let savedCfg: string | undefined = process.env.KI_CONFIG_PATH;
 
 const scope = `wbf-test-${Date.now()}`;
@@ -77,7 +76,7 @@ function seedKb(): void {
 }
 
 before(() => {
-  process.env.HOME = tmpHome;
+  // HOME / USERPROFILE 已由顶层 `useTempHome('ki-wbf-')` 挂到 tmpHome，此处不再重复设置
   savedCfg = process.env.KI_CONFIG_PATH;
   registerTestScope(scope);
   ensureScopeDir(scope); // 确保 group-index.json 存在（setSource 前置）
@@ -85,11 +84,11 @@ before(() => {
 });
 
 after(() => {
-  process.env.HOME = savedHome;
   if (savedCfg === undefined) delete process.env.KI_CONFIG_PATH;
   else process.env.KI_CONFIG_PATH = savedCfg;
   cleanupTestConfig();
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  tempHome.restore();
 });
 
 describe('A. writeBackToWiki enabled 门禁', () => {

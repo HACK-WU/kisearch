@@ -1,7 +1,9 @@
 /**
  * 定时同步表单体（2026-10-30 从 DatasourceScheduleDialog 抽出）：
- * 「启用开关 + 周期/指定时间 + 元信息」。弹窗与编辑弹窗共用，避免两套 UI 漂移。
- * 开关是启用状态的唯一入口（关闭时隐藏设置区并给出说明）。
+ * 「启用开关 + 周期/指定时间 + 元信息」。开关是启用状态的唯一入口（关闭时隐藏设置区并给出说明）。
+ *
+ * ★ 使用者只有 `DatasourceEditDialog`：原独立定时弹窗（`DatasourceScheduleDialog`）已于同日删除
+ *   —— 定时设置收敛为「行内编辑」一个入口（含目录不可读的 missing 行，它也只能从页面移除登记）。
  */
 import { useRef } from 'react';
 import type { DataSourceScheduleView } from '@/api/httpApi';

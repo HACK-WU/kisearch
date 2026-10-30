@@ -72,8 +72,11 @@ before(() => {
   savedEnv = {
     KI_CONFIG_PATH: process.env.KI_CONFIG_PATH,
     HOME: process.env.HOME,
+    // Windows 上 os.homedir() 读 USERPROFILE：不同时改，隔离会失效（见 isolate-home.ts）
+    USERPROFILE: process.env.USERPROFILE,
   };
   process.env.HOME = tmpRoot;
+  process.env.USERPROFILE = tmpRoot;
 
   const wikiDir = path.join(tmpRoot, 'wiki-ok');
   fs.mkdirSync(wikiDir, { recursive: true });

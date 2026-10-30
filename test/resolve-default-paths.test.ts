@@ -9,8 +9,8 @@
  *   A. 恒定默认：~/.ki/kb 与 ~/.ki/backup，不受任何旧路径存在性影响
  *   B. KI_DATA_DIR 仅 init 模板（includeEnv=true）显式覆盖；运行时忽略；空白串视为未设置
  *
- * 实现说明：os.homedir() 在 POSIX 下优先读 $HOME 环境变量，
- * 测试通过临时 HOME 隔离真实用户目录。
+ * 实现说明：os.homedir() 在 POSIX 下读 $HOME、在 Windows 下读 USERPROFILE，
+ * 测试通过临时家目录（两者一起改，见 isolate-home.ts）隔离真实用户目录。
  *
  * 运行：npx jiti test/resolve-default-paths.test.ts
  */
@@ -18,13 +18,13 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
+import { useTempHome, type TempHome } from './isolate-home.js';
 import { resolveDefaultDataPaths } from '../src/lib/config.js';
 
 let tmpHome: string;
-let savedHome: string | undefined;
+let tempHome: TempHome;
 const savedKiDataDir: string | undefined = process.env.KI_DATA_DIR;
 
 /** mkdir -p 并写入一个文件（构成"有数据的旧默认路径"） */
@@ -34,16 +34,14 @@ function seed(dir: string): void {
 }
 
 beforeEach(() => {
-  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-rdp-home-'));
-  savedHome = process.env.HOME;
-  process.env.HOME = tmpHome;
+  tempHome = useTempHome('ki-rdp-home-');
+  tmpHome = tempHome.home;
 });
 
 afterEach(() => {
-  if (savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = savedHome;
   if (savedKiDataDir === undefined) delete process.env.KI_DATA_DIR;
   else process.env.KI_DATA_DIR = savedKiDataDir;
+  tempHome.restore();
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 

@@ -14,11 +14,11 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+import { useTempHome } from './isolate-home.js';
 import {
   extractImageRefs,
   isCollectibleRelativeAsset,
@@ -29,9 +29,9 @@ import { createMcpHttpServer } from '../src/lib/mcp-http.js';
 import { getAssetsDir } from '../src/lib/scope.js';
 import { ensureScopeDir } from '../src/lib/store.js';
 
-// ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-assets-test-'));
-process.env.HOME = tmpHome;
+// ─── 测试隔离：临时家目录（HOME + USERPROFILE 一起改，见 isolate-home.ts）───
+const tempHome = useTempHome('ki-assets-test-');
+const tmpHome = tempHome.home;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'ki-config.json');
 fs.writeFileSync(
   process.env.KI_CONFIG_PATH,
@@ -224,6 +224,7 @@ before(async () => {
 after(async () => {
   if (closeServer) await closeServer();
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  tempHome.restore();
 });
 
 describe('GET /api/asset', () => {

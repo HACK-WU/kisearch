@@ -21,11 +21,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { useTempHome } from './isolate-home.js';
 import { registerTestScope, cleanupTestConfig, testConfigPath } from './test-config.js';
 
-// ─── 测试隔离：tmp HOME（`getUploadsRoot()` = $HOME/.ki/import-uploads）──
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-prune-api-'));
-process.env.HOME = tmpHome;
+// ─── 测试隔离：临时家目录（`getUploadsRoot()` = $HOME/.ki/import-uploads）──
+// HOME 与 USERPROFILE 必须一起改：Windows 上 os.homedir() 读后者（见 isolate-home.ts），
+// 只设 HOME 会让被测代码去真实 ~/.ki/import-uploads 找暂存目录。
+const tempHome = useTempHome('ki-prune-api-');
+const tmpHome = tempHome.home;
 
 const { handleApiRequest } = await import('../src/lib/mcp-http-api.js');
 const { handleDirectImport } = await import('../src/lib/import.js');
@@ -77,6 +80,7 @@ after(async () => {
   cleanupTestConfig();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  tempHome.restore();
 });
 
 /** 直接驱动 `/api/*` 分发（`ctx` 可注入来源地址与 Token 授权集合） */

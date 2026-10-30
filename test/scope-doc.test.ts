@@ -40,6 +40,8 @@ before(() => {
     KI_CONFIG_PATH: process.env.KI_CONFIG_PATH,
     SILICONFLOW_API_KEY: process.env.SILICONFLOW_API_KEY,
     HOME: process.env.HOME,
+    // Windows 上 os.homedir() 读 USERPROFILE：不同时改，隔离会失效（见 isolate-home.ts）
+    USERPROFILE: process.env.USERPROFILE,
     KI_DATASOURCE_CLONE_ROOT: process.env.KI_DATASOURCE_CLONE_ROOT,
   };
 });
@@ -150,9 +152,11 @@ describe('A. config —— removeScopeFromConfigFile', () => {
 
   it('无配置文件（默认路径）→ removed:false', () => {
     // 指向一个只有空 .ki 的 HOME，findConfigFile 返回 null → buildDefaults（无 _configPath）
+    // HOME 与 USERPROFILE 必须一起改：Windows 上 os.homedir() 读后者（见 isolate-home.ts）
     const emptyHome = fs.mkdtempSync(path.join(tmpRoot, 'home-'));
     delete process.env.KI_CONFIG_PATH;
     process.env.HOME = emptyHome;
+    process.env.USERPROFILE = emptyHome;
     resetConfigCache();
 
     const res = removeScopeFromConfigFile('whatever');

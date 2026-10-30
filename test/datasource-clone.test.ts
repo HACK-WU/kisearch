@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { useTempHomeAt, type TempHome } from './isolate-home.js';
 import type { KiConfig } from '../src/lib/config.js';
 import type { CloneManagedInput, CloneResult } from '../src/lib/datasource-clone.js';
 
@@ -21,7 +22,7 @@ let bare: string;
 let emptyBare: string;
 let symBare: string;
 let config: KiConfig;
-let originalHome: string | undefined;
+let tempHome: TempHome;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], {
@@ -42,9 +43,8 @@ before(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-ds-clone-'));
   tmpHome = path.join(root, 'home');
   fs.mkdirSync(tmpHome, { recursive: true });
-  // 仓库常量在模块加载时读取 homedir ⇒ 先改 HOME 再动态 import，隔离到临时目录
-  originalHome = process.env.HOME;
-  process.env.HOME = tmpHome;
+  // 仓库常量在模块加载时读取 homedir ⇒ 先挂临时家目录（HOME + USERPROFILE）再动态 import
+  tempHome = useTempHomeAt(tmpHome);
   clone = await import('../src/lib/datasource-clone.js');
 
   const work = path.join(root, 'work');
@@ -106,8 +106,7 @@ before(async () => {
 });
 
 after(() => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  tempHome.restore();
   fs.rmSync(root, { recursive: true, force: true });
 });
 

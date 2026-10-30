@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { useTempHomeAt } from './isolate-home.js';
+
 interface RpcFrame {
   ok?: boolean;
   type?: string;
@@ -44,7 +46,6 @@ function rpc(socketPath: string, request: object): Promise<RpcFrame[]> {
 }
 
 test('daemon IPC endpoint supports RPC streaming, singleton ownership, and restart', async () => {
-  const originalHome = process.env.HOME;
   const originalConfig = process.env.KI_CONFIG_PATH;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-daemon-rpc-'));
   const configPath = path.join(home, 'config.yaml');
@@ -55,7 +56,8 @@ test('daemon IPC endpoint supports RPC streaming, singleton ownership, and resta
     'scopes:',
     '  default: {}',
   ].join('\n'));
-  process.env.HOME = home;
+  // HOME + USERPROFILE 一起改：Windows 上 os.homedir() 读 USERPROFILE（见 isolate-home.ts）
+  const tempHome = useTempHomeAt(home);
   process.env.KI_CONFIG_PATH = configPath;
 
   try {
@@ -110,8 +112,7 @@ test('daemon IPC endpoint supports RPC streaming, singleton ownership, and resta
     const restartedServer = await startDaemonRpcServer();
     await new Promise<void>((resolve) => restartedServer.close(() => resolve()));
   } finally {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    tempHome.restore();
     if (originalConfig === undefined) delete process.env.KI_CONFIG_PATH;
     else process.env.KI_CONFIG_PATH = originalConfig;
   }

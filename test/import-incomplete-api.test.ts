@@ -15,14 +15,16 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-// ─── 测试隔离：临时 HOME（uploadsRoot / kb 全落 tmpHome），避免污染真实 ~/.ki ───
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-incomplete-api-'));
-process.env.HOME = tmpHome;
+import { useTempHome } from './isolate-home.js';
+
+// ─── 测试隔离：临时家目录（uploadsRoot / kb 全落 tmpHome；HOME + USERPROFILE 一起改，
+//     否则 Windows 上 os.homedir() 仍指向真实用户目录 → 污染真实 ~/.ki）───
+const tempHome = useTempHome('ki-incomplete-api-');
+const tmpHome = tempHome.home;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'ki-config.json');
 fs.writeFileSync(
   process.env.KI_CONFIG_PATH,
@@ -68,6 +70,7 @@ before(async () => {
 after(async () => {
   await handle?.close();
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  tempHome.restore();
 });
 
 beforeEach(() => {

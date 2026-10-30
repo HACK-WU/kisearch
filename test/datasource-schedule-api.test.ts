@@ -5,24 +5,22 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+import { useTempHome } from './isolate-home.js';
 import { createMcpHttpServer } from '../src/lib/mcp-http.js';
 import { addDataSource, readDataSource } from '../src/lib/datasource.js';
 import { closeFtsEngine } from '../src/lib/fts-client.js';
 import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-ds-sched-api-'));
-process.env.HOME = tmpHome;
-// Node 在 Windows 上由 USERPROFILE 解析 `os.homedir()`（HOME 不生效）。本配置不写 dataDir，
-// 默认值 = `os.homedir()/.ki/kb`（config.ts::resolveDefaultDataPaths）⇒ 不镜像 HOME 的话，
-// addDataSource 会把登记写进**真实**用户目录，留下一个指向已删临时目录的幽灵数据源，
-// 用户下次在 Windows 启动 ki 就会在数据源页看到「sched-api 目录不可读」。
-// 同一处理见 test/mcp-http-api.test.ts、test/mcp-daemon.test.ts。
-process.env.USERPROFILE = tmpHome;
+// ─── 测试隔离：临时家目录（HOME + USERPROFILE 一起改，见 isolate-home.ts）───
+// 本配置不写 dataDir ⇒ 默认 dataDir = `os.homedir()/.ki/kb`；Windows 上若只设 HOME，
+// addDataSource 会把登记写进**真实**用户目录，留下指向已删临时目录的幽灵数据源
+// （曾导致数据源页出现「sched-api 目录不可读」）。
+const tempHome = useTempHome('ki-ds-sched-api-');
+const tmpHome = tempHome.home;
 process.env.KI_CONFIG_PATH = path.join(tmpHome, 'config.json');
 fs.writeFileSync(process.env.KI_CONFIG_PATH, JSON.stringify({
   scopeMode: 'default',
@@ -73,6 +71,7 @@ after(async () => {
   await closeServer?.();
   try { await closeFtsEngine(); } catch { /* ignore */ }
   fs.rmSync(tmpHome, { recursive: true, force: true });
+  tempHome.restore();
 });
 
 describe('POST /api/datasource/schedule', () => {
