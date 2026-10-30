@@ -15,6 +15,14 @@ import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
 import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import {
+  MAX_CHUNK_OVERLAP,
+  MAX_CHUNK_SIZE,
+  MIN_CHUNK_SIZE,
+  SUGGESTED_CHUNK_SIZE_MAX,
+  SUGGESTED_CHUNK_SIZE_MIN,
+  validateChunkFields,
+} from '@/lib/datasourceEdit';
 import { Notice } from '@/components/Notice';
 import {
   SCOPE_READONLY_BLOCKED_HINT,
@@ -450,10 +458,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   /** 只读 scope（REQ-20261029-001）：页面仍可进入、可切库，但写入类动作全部不可用 */
   const scopeReadonly = useScopeReadonly(scopeConfirmed ? scope : undefined);
   const fileInput = useRef<HTMLInputElement>(null);
-  /** 「开始导入」被阻塞时的引导目标：未确认 Scope → Scope 区；未选文件 → 拖拽区 */
+  /** 「开始导入」被阻塞时的引导目标：未确认 Scope → Scope 区；未选文件 → 拖拽区；切分参数非法 → 高级卡片 */
   const scopeFieldRef = useRef<HTMLDivElement>(null);
   const dropzoneRef = useRef<HTMLDivElement>(null);
-  const [attention, setAttention] = useState<'scope' | 'files' | null>(null);
+  const chunkCardRef = useRef<HTMLDivElement>(null);
+  const [attention, setAttention] = useState<'scope' | 'files' | 'chunk' | null>(null);
   /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默按旧 scope 导入 */
   const [scopeDraft, setScopeDraft] = useState('');
   /**
@@ -582,6 +591,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
   const suffixInUse = conflictMode === 'suffix';
   const conflictSuffixErr = suffixInUse ? conflictSuffixError(conflictSuffix) : null;
+
+  // 切分参数范围（段长 100–4000、重叠 0–500，且重叠 < 段长）：输入即校验，红框 + 就地文案，
+  // 提交前 `start` 再拦一次，后端 `chunker.validateChunkParams` 兜底。
+  // 此前只有 input 的 `min`/`max` 属性——`type=number` 对手动输入不生效，等于没校验。
+  const chunkParamErr = validateChunkFields(chunkSize, chunkOverlap);
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -1539,6 +1553,12 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
       setError(conflictSuffixErr);
       return;
     }
+    if (chunkParamErr) {
+      // 错误提示在折叠的高级卡片里，自动展开，否则用户只看到一句顶部 error 找不到出处
+      setAdvOpen(true);
+      setError(chunkParamErr.message ?? '切分参数不合法');
+      return;
+    }
     if (selectedDocuments.length === 0) {
       setFailureStage('scan');
       setError('没有可导入的 Markdown 文件');
@@ -1944,7 +1964,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
         ? '请先在上方确认目标 Scope，再开始导入'
         : files.length === 0
           ? '请先选择要导入的 Markdown 文件或目录'
-          : null;
+          : chunkParamErr
+            ? `切分参数不合法：${chunkParamErr.message}`
+            : null;
   /** 点击「开始导入」：被阻塞则引导定位，否则真正开跑 */
   const runClick = (): void => {
     // 只读库：按钮已置灰，这里防键盘/程序触发（后端仍会 409 兜底）
@@ -1952,14 +1974,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     // R6：预检待确认时不允许再点（否则会以新 uploadId 重新上传整批）。
     // 按钮此时 `disabled={busyPhase}`（awaiting-confirm 属 busy），这里只是防御性兜底。
     if (preflightConfirm) return;
-    const target = scopeDraftDirty || !scopeConfirmed ? 'scope' : files.length === 0 ? 'files' : null;
+    const target = scopeDraftDirty || !scopeConfirmed
+      ? 'scope'
+      : files.length === 0
+        ? 'files'
+        : chunkParamErr
+          ? 'chunk'
+          : null;
     if (target) {
-      (target === 'scope' ? scopeFieldRef : dropzoneRef).current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
+      // 切分参数在折叠卡片里：先展开，等一帧渲染出目标再滚（否则 ref 为空、滚不动）
+      if (target === 'chunk') setAdvOpen(true);
+      const el = target === 'scope' ? scopeFieldRef : target === 'files' ? dropzoneRef : chunkCardRef;
+      window.requestAnimationFrame(() => {
+        el.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setAttention(target);
+        window.setTimeout(() => setAttention(null), 1300);
       });
-      setAttention(target);
-      window.setTimeout(() => setAttention(null), 1300);
       return;
     }
     void start();
@@ -2378,7 +2408,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
               现改为与「目录同步清理 / 向量化」同构的卡片行：整行可点（卡片总高 48px，与同级同像素）、
               右端常显当前值 + ▾/▴、展开体与卡片连体（用分隔线，不再叠第二层描边）。
               ★ 折叠态也显示当前值是有意的：用户不必展开就能发现「值被改过」。 */}
-          <div className="ki-adv-card">
+          <div
+            className={`ki-adv-card${attention === 'chunk' ? ' ki-attention' : ''}`}
+            ref={chunkCardRef}
+          >
             <button
               type="button"
               className="ki-adv-card__head"
@@ -2406,28 +2439,39 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                   <div className="ki-form-group">
                     <label className="ki-form-label">Chunk Size（字符）</label>
                     <input
-                      className="ki-form-input"
+                      className={`ki-form-input${chunkParamErr?.field === 'chunkSize' ? ' ki-form-input--error' : ''}`}
                       type="number"
                       value={chunkSize}
-                      min={100}
-                      max={4000}
+                      min={MIN_CHUNK_SIZE}
+                      max={MAX_CHUNK_SIZE}
+                      aria-invalid={chunkParamErr?.field === 'chunkSize' || undefined}
                       onChange={(e) => setChunkSize(e.target.value)}
                     />
                     {/* 含义就地说明：此前只有标签 + 一个数字，用户不知道它在控制什么。
-                        区间（与 input 的 min/max 同源）与「调大调小的取舍」一并写清，避免被当成越大越好。 */}
-                    <div className="ki-form-hint">每段目标字符数（100–4000）；越小越精准、上下文越碎，越大反之</div>
+                        区间（与 input 的 min/max 同源）与「调大调小的取舍」一并写清，避免被当成越大越好。
+                        ★ `type=number` 的 min/max 对手动输入不生效（不拦提交），真正的校验在 `chunkParamErr`。 */}
+                    <div className="ki-form-hint">
+                      每段目标字符数（{MIN_CHUNK_SIZE}–{MAX_CHUNK_SIZE}，建议 {SUGGESTED_CHUNK_SIZE_MIN}–{SUGGESTED_CHUNK_SIZE_MAX}）；越小越精准、上下文越碎，越大反之
+                    </div>
+                    {chunkParamErr?.field === 'chunkSize' && (
+                      <div className="ki-form-error" role="alert">{chunkParamErr.message}</div>
+                    )}
                   </div>
                   <div className="ki-form-group">
                     <label className="ki-form-label">Chunk Overlap（字符）</label>
                     <input
-                      className="ki-form-input"
+                      className={`ki-form-input${chunkParamErr?.field === 'chunkOverlap' ? ' ki-form-input--error' : ''}`}
                       type="number"
                       value={chunkOverlap}
                       min={0}
-                      max={500}
+                      max={MAX_CHUNK_OVERLAP}
+                      aria-invalid={chunkParamErr?.field === 'chunkOverlap' || undefined}
                       onChange={(e) => setChunkOverlap(e.target.value)}
                     />
-                    <div className="ki-form-hint">相邻两段重复的字符数（0–500），避免关键句被切断；需小于段长</div>
+                    <div className="ki-form-hint">相邻两段重复的字符数（0–{MAX_CHUNK_OVERLAP}），避免关键句被切断；需小于段长</div>
+                    {chunkParamErr?.field === 'chunkOverlap' && (
+                      <div className="ki-form-error" role="alert">{chunkParamErr.message}</div>
+                    )}
                   </div>
                 </div>
                 <div className="ki-form-hint">切分规则：段落边界优先（\n\n → \n → 。 → ；），超过上限强制按长度切。</div>

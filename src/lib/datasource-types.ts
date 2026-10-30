@@ -232,6 +232,12 @@ export interface DataSourceRecord {
   chunkOverlap: number | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * 配置修订号：仅在**登记 / 编辑同步参数**时 +1。
+   * 同步、定时保存、调度写回都不改它 —— 否则一次定时保存就会让打开中的编辑表单 409。
+   * 旧记录缺省 = 0（normalizeRecord 补）。
+   */
+  revision: number;
   /** 定时计划（缺省 = 关闭；normalizeRecord 会补默认值） */
   schedule: DataSourceSchedule;
   lastSync: DataSourceLastSync | null;

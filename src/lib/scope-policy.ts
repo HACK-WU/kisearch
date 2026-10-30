@@ -38,6 +38,7 @@ export const EXEMPT_OPS: ReadonlySet<string> = new Set([
   'datasource-sync',
   'datasource-add',
   'datasource-add-remote',
+  'datasource-update',
   'datasource-remove',
   'datasource-schedule',
   'datasource-schedule-reset',

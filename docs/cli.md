@@ -83,8 +83,8 @@ ki import \
 | `--source` | 是（`--retry-incomplete` 时可省略） | Markdown 目录绝对路径；重试模式下缺省沿用上次导入记录的源目录 |
 | `--retry-incomplete` | 否 | 只重试上次未完成的文件：读 `<scope>/.ki-import-incomplete.json`，只处理清单内文件；已完成文件不重传、不重算 embedding、不产生 `_1` 副本。详见 [ki import 详解](./import.md#部分成功可用与只重试未完成) |
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
-| `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
-| `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--chunk-size` | 否 | 切分块大小（字符，默认 1000，取值 100–4000） |
+| `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150，取值 0–500，且须小于段长） |
 | `--tags <t1,t2>` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复）。注意：不带 `--tags` 重导会清除该文件已有标签（导入为覆盖语义，区别于重建的只增不减） |
 | `--conflict-mode` | 否 | 同名文档处理策略，默认 `incremental`（增量导入：内容未变则跳过重算；同名不同来源直接覆盖）；另有 `overwrite` / `skip`（已存在的一律不动，只导入新文件） / `suffix` |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |

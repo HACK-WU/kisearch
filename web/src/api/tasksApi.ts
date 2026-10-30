@@ -88,6 +88,8 @@ export interface TaskResultSnapshot {
   createdTruncated?: boolean;
   /** S-05：add-remote 成功后自动入队的首次同步任务 ID；null = 入队失败 */
   syncTaskId?: string | null;
+  /** S-05：登记成功但只读未设置成功（需按提示补设） */
+  readonlyWarning?: string;
   errorCode?: string;
 }
 

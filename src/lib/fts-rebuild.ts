@@ -12,6 +12,7 @@ import { loadConfig, getScopeCleanConfig } from './config.js';
 import { getLocalKbDir, getRelationsCachePath, getSource } from './scope.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, type LegacyRelationsCacheShape } from './group-cache.js';
 import { buildChunkEntries } from './chunk-entries.js';
+import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './chunker.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { parseContentTags } from './constants.js';
 import { writeJson } from './store.js';
@@ -67,8 +68,8 @@ export async function rebuildFtsOnlyScope(scope: string, groupFilter?: string): 
   const config = loadConfig();
   const cleanConfig = getScopeCleanConfig(config, scope);
   const source = getSource(scope);
-  const chunkSize = source?.chunkSize ?? 1000;
-  const chunkOverlap = source?.chunkOverlap ?? 150;
+  const chunkSize = source?.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const chunkOverlap = source?.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
   const cleanEnabled = cleanConfig?.enabled !== false;
   const allEntries: FtsStoreEntry[] = [];
   const records: { group: string; relation: FtsRelation; original: string; oldIds: string[]; entryStart: number; entryEnd: number; chunks: Array<{ index: number; text: string }> }[] = [];

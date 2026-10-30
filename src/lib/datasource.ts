@@ -29,6 +29,14 @@ import {
   type ImportResult,
 } from './import.js';
 import { resolveImportExtensions } from './config.js';
+import {
+  validateChunkParams,
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_CHUNK_OVERLAP,
+  MIN_CHUNK_SIZE,
+  MAX_CHUNK_SIZE,
+  MAX_CHUNK_OVERLAP,
+} from './chunker.js';
 import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import type {
@@ -260,6 +268,9 @@ function normalizeRecord(scope: string, raw: unknown): DataSourceRecord | null {
     chunkOverlap: typeof v.chunkOverlap === 'number' ? v.chunkOverlap : null,
     createdAt: typeof v.createdAt === 'number' ? v.createdAt : Date.now(),
     updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : Date.now(),
+    revision: typeof v.revision === 'number' && Number.isFinite(v.revision)
+      ? Math.max(0, Math.trunc(v.revision))
+      : 0,
     schedule: normalizeDataSourceSchedule(v.schedule),
     lastSync: normalizeLastSync(v.lastSync),
   };
@@ -380,14 +391,9 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
   const conflictSuffix = validateImportConflictSuffix(input.conflictSuffix);
   const chunkSize = input.chunkSize ?? null;
   const chunkOverlap = input.chunkOverlap ?? null;
-  if (chunkSize !== null && (!Number.isInteger(chunkSize) || chunkSize <= 0)) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-size 必须为正整数：${chunkSize}` };
-  }
-  if (chunkOverlap !== null && (!Number.isInteger(chunkOverlap) || chunkOverlap < 0)) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap 必须为非负整数：${chunkOverlap}` };
-  }
-  if (chunkSize !== null && chunkOverlap !== null && chunkOverlap >= chunkSize) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap（${chunkOverlap}）必须小于 --chunk-size（${chunkSize}）` };
+  const chunkErr = validateChunkParams({ chunkSize, chunkOverlap });
+  if (chunkErr) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: chunkErr.message };
   }
 
   const dirCheck = checkSourceDir(dir, config, scope);
@@ -475,6 +481,8 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     chunkOverlap,
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
+    // 重新登记（add --force）也是一次配置写入：bump 修订号，让打开中的编辑表单失效
+    revision: prev ? (prev.revision ?? 0) + 1 : 0,
     schedule: prev?.schedule ?? defaultDataSourceSchedule(),
     lastSync,
   };
@@ -487,6 +495,123 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     next: `ki datasource sync --scope ${scope}`,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+}
+
+// ─── 编辑同步参数（2026-10-30）────────────────────────────
+
+/** 可编辑字段：身份字段（scope / dir / git / group）不在其中，改源需移除后重加 */
+export interface DataSourceConfigPatch {
+  conflictMode?: string;
+  conflictSuffix?: string;
+  vector?: boolean;
+  chunkSize?: number | null;
+  chunkOverlap?: number | null;
+}
+
+export type UpdateDataSourceConfigResult =
+  | { ok: true; scope: string; record: DataSourceRecord; changed: string[] }
+  | { ok: false; scope: string; code: string; error: string; field?: string; current?: DataSourceRecord };
+
+/**
+ * 页面编辑数据源同步参数（唯一写入口）。
+ * - 只覆盖传入字段，未传保持原值；全等时**不 bump** revision
+ * - `baseRevision` 乐观锁（多标签页）；运行中同步由 scope 写锁直接拒绝（SCOPE_OPERATION_BUSY）
+ * - 不触碰 `lastSync` / `schedule`：新参数自下次同步起生效，历史文档不回填
+ */
+export async function updateDataSourceConfig(input: {
+  scope: string;
+  baseRevision?: number;
+  patch: DataSourceConfigPatch;
+  config?: KiConfig;
+}): Promise<UpdateDataSourceConfigResult> {
+  const config = input.config ?? loadConfig();
+  let scope: string;
+  try {
+    scope = resolveScope(config, input.scope);
+  } catch (err) {
+    return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
+  }
+  const patch = input.patch ?? {};
+  if (patch.conflictMode !== undefined && typeof patch.conflictMode !== 'string') {
+    return { ok: false, scope, code: 'INVALID_CONFLICT', error: '同名策略不合法', field: 'conflictMode' };
+  }
+  if (patch.conflictSuffix !== undefined && typeof patch.conflictSuffix !== 'string') {
+    return { ok: false, scope, code: 'INVALID_CONFLICT', error: '同名后缀不合法', field: 'conflictSuffix' };
+  }
+  if (patch.vector !== undefined && typeof patch.vector !== 'boolean') {
+    return { ok: false, scope, code: 'INVALID_VECTOR', error: '向量化开关不合法', field: 'vector' };
+  }
+  // ★ 只校验本次 patch 传入的字段（不按合并后的生效值做**范围**校验）：存量里可能存着
+  // 旧版放行的超界值（此前只有 ">0" 下界、无上界），若拿合并值判范围，用户只想改「同名策略」
+  // 也会被历史值拦住、整条配置改不动。合并值仍参与「overlap 必须小于段长」的关系校验（见下）。
+  const chunkErr = validateChunkParams({ chunkSize: patch.chunkSize, chunkOverlap: patch.chunkOverlap });
+  if (chunkErr) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: chunkErr.message, field: chunkErr.field };
+  }
+  try {
+    return await withScopeWriteLock(scope, 'datasource-update', async (): Promise<UpdateDataSourceConfigResult> => {
+      const read = readDataSource(scope);
+      if (!read.ok) return { ok: false, scope, code: read.code, error: read.error };
+      const prev = read.record;
+      if (input.baseRevision !== undefined && input.baseRevision !== (prev.revision ?? 0)) {
+        return {
+          ok: false,
+          scope,
+          code: 'DATASOURCE_STALE',
+          error: '数据源配置已在别处修改，请刷新后重试',
+          current: prev,
+        };
+      }
+      let conflictMode = prev.conflictMode;
+      let conflictSuffix = prev.conflictSuffix;
+      try {
+        if (patch.conflictMode !== undefined) conflictMode = validateImportConflictMode(patch.conflictMode);
+        if (patch.conflictSuffix !== undefined) conflictSuffix = validateImportConflictSuffix(patch.conflictSuffix);
+      } catch (err) {
+        return { ok: false, scope, code: 'INVALID_CONFLICT', error: (err as Error).message };
+      }
+      const vector = patch.vector !== undefined ? patch.vector : prev.vector;
+      const chunkSize = patch.chunkSize !== undefined ? patch.chunkSize : prev.chunkSize;
+      const chunkOverlap = patch.chunkOverlap !== undefined ? patch.chunkOverlap : prev.chunkOverlap;
+      // 默认值与 chunker 一致（1000 / 150）：只改其中一个也要按**生效值**校验
+      if ((chunkOverlap ?? DEFAULT_CHUNK_OVERLAP) >= (chunkSize ?? DEFAULT_CHUNK_SIZE)) {
+        return {
+          ok: false,
+          scope,
+          code: 'INVALID_CHUNK',
+          error: `重叠（${chunkOverlap ?? DEFAULT_CHUNK_OVERLAP}）必须小于段长（${chunkSize ?? DEFAULT_CHUNK_SIZE}）`,
+          field: 'chunkOverlap',
+        };
+      }
+      const changed: string[] = [];
+      if (conflictMode !== prev.conflictMode) changed.push('conflictMode');
+      if (conflictSuffix !== prev.conflictSuffix) changed.push('conflictSuffix');
+      if (vector !== prev.vector) changed.push('vector');
+      if (chunkSize !== prev.chunkSize) changed.push('chunkSize');
+      if (chunkOverlap !== prev.chunkOverlap) changed.push('chunkOverlap');
+      if (changed.length === 0) return { ok: true, scope, record: prev, changed };
+      const next: DataSourceRecord = {
+        ...prev,
+        conflictMode,
+        conflictSuffix,
+        vector,
+        chunkSize,
+        chunkOverlap,
+        revision: (prev.revision ?? 0) + 1,
+        updatedAt: Date.now(),
+      };
+      writeDataSource(scope, next);
+      return { ok: true, scope, record: next, changed };
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException & { code?: string }).code ?? 'DATASOURCE_UPDATE_FAILED';
+    return {
+      ok: false,
+      scope,
+      code,
+      error: code === 'SCOPE_OPERATION_BUSY' ? '该知识库正在同步，完成后再修改同步参数' : (err as Error).message,
+    };
+  }
 }
 
 // ─── 共享托管 clone（同一 remote+branch 只保留一份工作副本）────
@@ -666,14 +791,9 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
   }
   const chunkSize = input.chunkSize ?? null;
   const chunkOverlap = input.chunkOverlap ?? null;
-  if (chunkSize !== null && (!Number.isInteger(chunkSize) || chunkSize <= 0)) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-size 必须为正整数：${chunkSize}` };
-  }
-  if (chunkOverlap !== null && (!Number.isInteger(chunkOverlap) || chunkOverlap < 0)) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap 必须为非负整数：${chunkOverlap}` };
-  }
-  if (chunkSize !== null && chunkOverlap !== null && chunkOverlap >= chunkSize) {
-    return { ok: false, scope, code: 'INVALID_CHUNK', error: `--chunk-overlap（${chunkOverlap}）必须小于 --chunk-size（${chunkSize}）` };
+  const chunkErr = validateChunkParams({ chunkSize, chunkOverlap });
+  if (chunkErr) {
+    return { ok: false, scope, code: 'INVALID_CHUNK', error: chunkErr.message };
   }
   const precheck = readDataSource(scope);
   if (precheck.ok) {
@@ -1201,6 +1321,49 @@ function planFor(
   });
 }
 
+/**
+ * 存量切分参数归一（同步路径专用）。
+ *
+ * `datasource.json` 里可能存着**旧版放行的超界值**（旧版只校验 ">0"、无上下限）。
+ * 新校验的语义是「拦住用户新输入」，不该让历史配置的同步直接失败 —— 尤其定时同步，
+ * 用户根本看不到报错。这里把超界值钳到最近边界并留可见 warning，同步照常进行；
+ * 钳制后重切分与用户手动改参数同效应（本来就要重建）。
+ */
+export function normalizeStoredChunkParams(
+  chunkSize: number | null,
+  chunkOverlap: number | null,
+): { chunkSize: number | null; chunkOverlap: number | null; warnings: DataSourceWarning[] } {
+  const warnings: DataSourceWarning[] = [];
+  let size = chunkSize;
+  let overlap = chunkOverlap;
+  if (size !== null && (size < MIN_CHUNK_SIZE || size > MAX_CHUNK_SIZE)) {
+    const fixed = Math.min(MAX_CHUNK_SIZE, Math.max(MIN_CHUNK_SIZE, Math.trunc(size)));
+    warnings.push(warning(
+      'CHUNK_PARAM_CLAMPED',
+      `切分段长 ${size} 超出 ${MIN_CHUNK_SIZE}–${MAX_CHUNK_SIZE}，本次按 ${fixed} 执行；请在「编辑同步参数」中改成合法值`,
+    ));
+    size = fixed;
+  }
+  if (overlap !== null && (overlap < 0 || overlap > MAX_CHUNK_OVERLAP)) {
+    const fixed = Math.min(MAX_CHUNK_OVERLAP, Math.max(0, Math.trunc(overlap)));
+    warnings.push(warning(
+      'CHUNK_PARAM_CLAMPED',
+      `切分重叠 ${overlap} 超出 0–${MAX_CHUNK_OVERLAP}，本次按 ${fixed} 执行；请在「编辑同步参数」中改成合法值`,
+    ));
+    overlap = fixed;
+  }
+  // 段长被调小后可能反而不大于重叠：保底让重叠小于段长，避免同步因关系非法再次失败
+  if (size !== null && overlap !== null && overlap >= size) {
+    const fixed = Math.max(0, size - 1);
+    warnings.push(warning(
+      'CHUNK_PARAM_CLAMPED',
+      `切分重叠 ${overlap} 不小于段长 ${size}，本次按 ${fixed} 执行；请在「编辑同步参数」中改成合法值`,
+    ));
+    overlap = fixed;
+  }
+  return { chunkSize: size, chunkOverlap: overlap, warnings };
+}
+
 async function importAndPersist(args: {
   scope: string;
   record: DataSourceRecord;
@@ -1223,6 +1386,7 @@ async function importAndPersist(args: {
   let scannedForBaseline: string[] = [];
   let scannedCaptured = false;
   let result: ImportResult;
+  const chunkParams = normalizeStoredChunkParams(record.chunkSize, record.chunkOverlap);
   try {
     result = await handleDirectImport({
       scope,
@@ -1231,8 +1395,8 @@ async function importAndPersist(args: {
       conflictMode: record.conflictMode,
       conflictSuffix: record.conflictSuffix,
       vector: record.vector,
-      ...(record.chunkSize !== null ? { chunkSize: record.chunkSize } : {}),
-      ...(record.chunkOverlap !== null ? { chunkOverlap: record.chunkOverlap } : {}),
+      ...(chunkParams.chunkSize !== null ? { chunkSize: chunkParams.chunkSize } : {}),
+      ...(chunkParams.chunkOverlap !== null ? { chunkOverlap: chunkParams.chunkOverlap } : {}),
       ...(args.onlyRelPaths && args.onlyRelPaths.length > 0 ? { onlyRelPaths: args.onlyRelPaths } : {}),
       pruneSubsetFullScan: args.pruneSubsetFullScan,
       pickMode: 'dir',
@@ -1248,7 +1412,11 @@ async function importAndPersist(args: {
       onScannedFiles: (files) => { scannedForBaseline = files; scannedCaptured = true; },
     });
   } catch (err) {
-    const warnings = [...(git?.warnings ?? []), warning((err as { code?: string }).code ?? 'SYNC_FAILED', (err as Error).message)];
+    const warnings = [
+      ...(git?.warnings ?? []),
+      ...chunkParams.warnings,
+      warning((err as { code?: string }).code ?? 'SYNC_FAILED', (err as Error).message),
+    ];
     const gitState = git
       ? buildGitState({
         update: git.update, prevCommit: git.prevCommit, runCommit: git.runCommit,
@@ -1284,7 +1452,7 @@ async function importAndPersist(args: {
   snapshot.files.fullScanned = fullScanned;
   snapshot.files.changed = changed;
 
-  const warnings = [...(git?.warnings ?? [])];
+  const warnings = [...(git?.warnings ?? []), ...chunkParams.warnings];
   const missing = result.retryFilter?.missing?.length ?? 0;
   if (missing > 0) warnings.push(warning('GIT_CHANGESET_MISSING_PATHS', `有 ${missing} 个变更文件在扫描前已不存在，已跳过`));
 

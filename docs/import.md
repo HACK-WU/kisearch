@@ -28,8 +28,8 @@ ki import \
 | `--scope` | 否 | 项目隔离标识（default 模式缺省；strict 模式必填） |
 | `--source` | 是（`--retry-incomplete` 时可省略） | Markdown 目录绝对路径；重试模式下缺省沿用上次导入记录的源目录 |
 | `--group` | 否 | 目标 Group 落点（不存在时自动新建，含父路径，支持多级如 `wiki/部署运维`）。缺省时：目录导入按顶层子目录名各建根节点，单文档导入用 scope name |
-| `--chunk-size` | 否 | 切分块大小（字符，默认 1000） |
-| `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150） |
+| `--chunk-size` | 否 | 切分块大小（字符，默认 1000，取值 100–4000） |
+| `--chunk-overlap` | 否 | 相邻 chunk 重叠（字符，默认 150，取值 0–500，且须小于段长） |
 | `--tags` | 否 | 文档级自定义标签（逗号分隔）：为导入文件附加标签，每个 tag 各写一条内容向量，可被 `ki search -t <tag>` 召回；`--no-vector` 时仅持久化到 `relation.tags`（后续 `restore --rebuild-vector` 可恢复） |
 | `--conflict-mode` | 否 | 同名文档处理策略，默认 **`incremental`**（增量导入：同 `sourcePath` 且内容未变则跳过重算；同名不同 `sourcePath` 与同批重复 rel 一律**直接覆盖**）；另有 `overwrite` 覆盖、`skip` 跳过（库中已存在的一律不动、**不比对内容**，只导入新文件）、`suffix` 自动后缀 |
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |

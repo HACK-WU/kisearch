@@ -22,9 +22,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList, useScopeList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
 // upstream 侧新增定时设置视图（DataSourceScheduleView），本地侧新增移除接口（removeDataSource）
-import { addRemoteDataSource, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceScheduleView } from '@/api/httpApi';
+import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView, type DataSourceScheduleView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
 import { DatasourceScheduleDialog } from '@/components/DatasourceScheduleDialog';
+import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
 import {
   buildDataSourceDetail,
@@ -152,20 +153,24 @@ export function DataSourcePage(): JSX.Element {
   // 行级操作结果条（同步 / 移除数据源共用同一位置，避免两套提示抢位）
   const [rowNotice, setRowNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   /**
-   * 定时设置结果条（upstream「定时同步」用）。
-   * ★ 与 rowNotice 并存而非合并：定时弹窗关闭后要留下"下次何时运行"，而行内「同步 / 移除」
-   *   刚产生的提示不该被它顶掉；两条分别渲染（见下方两段 notice）。
+   * 行内「编辑」结果条（同步参数 / 定时同步）与「缺失登记」的定时弹窗结果都落这里。
+   * ★ 与 rowNotice 并存而非合并：保存完成要留下"改了什么 / 下次何时运行"，
+   *   而行内「同步 / 移除」刚产生的提示不该被它顶掉；两条分别渲染（见下方两段 notice）。
    */
   const [rowSyncNotice, setRowSyncNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState({ scope: '', url: '', branch: '', subdir: '', group: '' });
   const [addScopeConfirmed, setAddScopeConfirmed] = useState(false);
+  /** 「新建 Scope」模式才提供「创建为只读库」；已有 scope 只展示状态（改只读走 CLI） */
+  const [addScopeMode, setAddScopeMode] = useState<'existing' | 'new'>('existing');
+  const [addReadonly, setAddReadonly] = useState(false);
   const [addState, setAddState] = useState<{
     phase: 'idle' | 'submitting' | 'cloning' | 'done';
     taskId?: string;
     progress?: number;
     error?: string;
     notice?: string;
+    noticeWarn?: boolean;
   }>({ phase: 'idle' });
   const scopeRef = useRef<string | undefined>(scope);
   const addTriggerRef = useRef<HTMLButtonElement>(null);
@@ -190,6 +195,14 @@ export function DataSourcePage(): JSX.Element {
   const rowNoticeRef = useRef<HTMLParagraphElement>(null);
   // 确认框里的「库内文档 N 篇」：走已缓存的 scope 列表，不为弹窗单独打接口
   const scopeListQuery = useScopeList();
+  // 编辑数据源（2026-10-30）：列表行不带切分参数 / 修订号，点开时按 scope 拉详情
+  const [editTarget, setEditTarget] = useState<{ record: DataSourceRecordView } | null>(null);
+  const [editLoadingScope, setEditLoadingScope] = useState<string | null>(null);
+  // 能力声明：旧 daemon 不返回 ⇒ 隐藏「编辑」与只读开关（而不是让人填完再报错）
+  const canUpdateDatasource = listQuery.data?.capabilities?.datasourceUpdate === true;
+  const canSetReadonly = listQuery.data?.capabilities?.scopeReadonly === true;
+  const selectedScopeReadonly = scopeListQuery.data?.scopes
+    .find((item) => item.scope === addForm.scope.trim())?.readonly === true;
 
   useEffect(() => {
     scopeRef.current = scope;
@@ -583,6 +596,34 @@ export function DataSourcePage(): JSX.Element {
     });
   };
 
+  // 编辑入口：先拉详情（含切分参数 / revision），成功后再开弹窗
+  const openEdit = async (targetScope: string): Promise<void> => {
+    if (editLoadingScope !== null) return;
+    setEditLoadingScope(targetScope);
+    try {
+      const detail = await getDataSourceDetail(targetScope);
+      setEditTarget({ record: detail.source });
+    } catch (err) {
+      const e = err as Error & { status?: number; body?: { error?: string } };
+      setRowSyncNotice({
+        tone: 'warn',
+        text: e.status === 404
+          ? `读取 ${targetScope} 配置失败：数据源不存在（可能已被移除）`
+          : `读取 ${targetScope} 配置失败：${e.body?.error ?? e.message}`,
+      });
+    } finally {
+      setEditLoadingScope(null);
+    }
+  };
+
+  // 关闭编辑弹窗：焦点归还触发按钮（键盘用户不丢位置，与移除弹窗同口径）
+  const closeEdit = (targetScope: string): void => {
+    setEditTarget(null);
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-ds-edit="${CSS.escape(targetScope)}"]`)?.focus();
+    });
+  };
+
   const closeSchedule = (): void => {
     setScheduleTarget(null);
     const trigger = scheduleTriggerRef.current;
@@ -693,12 +734,17 @@ export function DataSourcePage(): JSX.Element {
         }
         if (task.state === 'succeeded') {
           const syncTaskId = task.result?.syncTaskId ?? null;
+          // 只读写失败不回滚登记：必须用警告语气显式告诉用户"只读没设上"
+          const readonlyWarning = task.result?.readonlyWarning;
           const targetScope = task.scope;
           setAddState({
             phase: 'done',
-            notice: syncTaskId
-              ? `已登记 ${targetScope}；首次全量同步已入队（任务 ${syncTaskId.slice(0, 8)}）`
-              : `已登记 ${targetScope}；首次同步入队失败，请执行 ki datasource sync --scope ${targetScope}`,
+            noticeWarn: Boolean(readonlyWarning),
+            notice: readonlyWarning
+              ? `已登记 ${targetScope}；${readonlyWarning}`
+              : syncTaskId
+                ? `已登记 ${targetScope}；首次全量同步已入队（任务 ${syncTaskId.slice(0, 8)}）`
+                : `已登记 ${targetScope}；首次同步入队失败，请执行 ki datasource sync --scope ${targetScope}`,
           });
           setAddOpen(false);
           await Promise.all([
@@ -749,6 +795,7 @@ export function DataSourcePage(): JSX.Element {
         ...(addForm.branch.trim() ? { branch: addForm.branch.trim() } : {}),
         ...(addForm.subdir.trim() ? { subdir: addForm.subdir.trim() } : {}),
         group: addForm.group.trim() || null,
+        ...(addReadonly && addScopeMode === 'new' ? { readonly: true } : {}),
       });
       setAddState({ phase: 'cloning', taskId: result.taskId });
     } catch (err) {
@@ -776,6 +823,8 @@ export function DataSourcePage(): JSX.Element {
           onClick={() => {
             setAddForm({ scope: '', url: '', branch: '', subdir: '', group: '' });
             setAddScopeConfirmed(false);
+            setAddScopeMode('existing');
+            setAddReadonly(false);
             setAddState({ phase: 'idle' });
             setAddOpen(true);
           }}
@@ -783,7 +832,7 @@ export function DataSourcePage(): JSX.Element {
       </div>
 
       {addState.notice ? (
-        <p className="ki-task-notice ki-task-notice--info">{addState.notice}</p>
+        <p className={`ki-task-notice ki-task-notice--${addState.noticeWarn ? 'warn' : 'info'}`}>{addState.notice}</p>
       ) : null}
       {!addOpen && addState.error ? (
         <p className="ki-task-notice ki-task-notice--warn" role="alert">{addState.error}</p>
@@ -796,7 +845,7 @@ export function DataSourcePage(): JSX.Element {
             if (event.target === event.currentTarget) setAddOpen(false);
           }}
         >
-          <section ref={addDialogRef} className="ki-dialog ki-dialog--form" id="ki-ds-add-form" role="dialog" aria-modal="true" aria-labelledby="ki-ds-add-title" tabIndex={-1}>
+          <section ref={addDialogRef} className="ki-dialog ki-dialog--form ki-ds-add" id="ki-ds-add-form" role="dialog" aria-modal="true" aria-labelledby="ki-ds-add-title" tabIndex={-1}>
             <header className="ki-dialog__head">
               <div>
                 <h3 className="ki-dialog__title" id="ki-ds-add-title">添加 Git 数据源</h3>
@@ -821,13 +870,47 @@ export function DataSourcePage(): JSX.Element {
                       setAddForm((prev) => (value !== prev.scope ? { ...prev, scope: value, group: '' } : { ...prev, scope: value }));
                       setAddScopeConfirmed(confirmed);
                     }}
-                    onModeChange={() => setAddScopeConfirmed(false)}
+                    onModeChange={(mode) => {
+                      setAddScopeConfirmed(false);
+                      setAddScopeMode(mode);
+                      // 切回「选择已有」时清掉只读勾选，避免把只读带到别的 scope
+                      if (mode === 'existing') setAddReadonly(false);
+                    }}
                     autoConfirmNew
                     placeholder="按名称筛选已有 Scope，如：kafka"
                     hint="从已有 Scope 搜索选择；切到「新建 Scope」直接输入名称即可，无需再点创建。"
                     disabled={addBusy}
                   />
                 </div>
+
+                {canSetReadonly && addScopeMode === 'new' ? (
+                  <div className="ki-ds-add__switch">
+                    <div className="ki-ds-add__switch-text">
+                      <span className="ki-form-label">创建为只读库</span>
+                      <p className="ki-form-hint">
+                        禁止逐条写入（含 Web 导入）；数据源同步与批量导入仍可更新。
+                        可随时用 <code>ki scope readonly {addForm.scope.trim() || '<scope>'} --off</code> 解除。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className={`ki-switch${addReadonly ? ' ki-switch--on' : ''}${addBusy ? ' ki-switch--disabled' : ''}`}
+                      role="switch"
+                      aria-checked={addReadonly}
+                      aria-label="创建为只读库"
+                      disabled={addBusy}
+                      onClick={() => setAddReadonly((value) => !value)}
+                    >
+                      <span className="ki-switch__knob" />
+                    </button>
+                  </div>
+                ) : null}
+                {canSetReadonly && addScopeMode === 'existing' && selectedScopeReadonly ? (
+                  <p className="ki-ds-add__ro-state">
+                    该 Scope 当前为只读（数据源同步仍可用）；如需写入请先执行{' '}
+                    <code>ki scope readonly {addForm.scope} --off</code>
+                  </p>
+                ) : null}
 
                 <div className="ki-ds-add__field">
                   <label className="ki-form-label" htmlFor="ki-ds-add-url">Git 仓库地址 *</label>
@@ -957,6 +1040,22 @@ export function DataSourcePage(): JSX.Element {
             closeSchedule();
             void queryClient.invalidateQueries({ queryKey: ['dataSourceList'] });
             void queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', response.scope] });
+          }}
+        />
+      ) : null}
+
+      {editTarget ? (
+        <DatasourceEditDialog
+          key={editTarget.record.scope}
+          record={editTarget.record}
+          schedulerDisabled={listQuery.data?.schedulerDisabled}
+          onClose={() => closeEdit(editTarget.record.scope)}
+          onSaved={(message, tone = 'info') => {
+            const scopeName = editTarget.record.scope;
+            closeEdit(scopeName);
+            setRowSyncNotice({ tone, text: `${scopeName}：${message}` });
+            void queryClient.invalidateQueries({ queryKey: ['dataSourceList'] });
+            void queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', scopeName] });
           }}
         />
       ) : null}
@@ -1109,7 +1208,7 @@ export function DataSourcePage(): JSX.Element {
         <span>
           Git 仓库可在本页「添加 Git 数据源」（服务端 clone）；本地目录数据源通过命令行登记：<code className="ki-ds-callout__cmd">ki datasource add --scope &lt;scope&gt; --source &lt;目录&gt;</code>。
           <strong>同步可在本页触发</strong>（普通目录 30 分钟一次，CLI 可强制；<strong>手动同步另有冷却</strong>）；
-          <strong>定时同步在列表「定时」中按源开启，默认关闭</strong>。
+          <strong>定时同步在行内「编辑」中按源开启，默认关闭</strong>。
           两个删除动作语义不同：行内<strong>「移除」</strong>只取消数据源登记（<strong>库内文档保留</strong>）；
           详情抽屉里的<strong>「删除所选」</strong>才删除库内文档。两者都不动源目录文件。
         </span>
@@ -1296,17 +1395,24 @@ export function DataSourcePage(): JSX.Element {
                             if (rowCanSync) void triggerSync(source.scope);
                           }}
                         >{rowSyncing ? '提交中…' : source.running ? (source.activeState === 'queued' ? '排队中' : '同步中') : '同步'}</button>
-                        {source.schedule !== undefined ? (
+                        {canUpdateDatasource ? (
                           <button
                             type="button"
-                            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sched-btn"
-                            title={`设置定时同步${source.schedule?.enabled ? `（当前：${describeSchedule(source.schedule)}）` : '（默认关闭）'}`}
-                            aria-label={`设置定时同步 ${source.scope}`}
+                            data-ds-edit={source.scope}
+                            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-edit-btn"
+                            disabled={source.running || rowSyncing || editLoadingScope === source.scope}
+                            title={source.running
+                              ? '同步进行中，任务结束后可编辑'
+                              : rowSyncing
+                                ? '正在提交同步，稍后可编辑'
+                                : `编辑 ${source.scope}：同步参数与定时同步`}
+                            aria-label={`编辑数据源 ${source.scope}`}
                             onClick={(event) => {
                               event.stopPropagation();
-                              openSchedule(source.scope, source.schedule, event.currentTarget);
+                              if (source.running || rowSyncing) return;
+                              void openEdit(source.scope);
                             }}
-                          >定时</button>
+                          >{editLoadingScope === source.scope ? '读取…' : '编辑'}</button>
                         ) : null}
                         <button
                           type="button"
@@ -1522,7 +1628,7 @@ export function DataSourcePage(): JSX.Element {
                     <DetailParams rows={model.params} />
                   </DetailSection>
 
-                  {/* ── 定时同步（只读）：配置入口在列表「定时」弹窗，这里只展示 ── */}
+                  {/* ── 定时同步（只读）：配置入口在行内「编辑」弹窗，这里只展示 ── */}
                   {model.schedule.available ? (
                     <DetailSection material="meta" title="定时同步（只读）">
                       <DetailParams rows={model.schedule.rows} />

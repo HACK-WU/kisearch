@@ -207,9 +207,11 @@ describe('R1：系统性向量故障下的文件级部分成功', () => {
     vectorDeleteCalls = [];
     clearRelationMapCache();
     try {
-      // b 需要 ≥2 个 chunk 才能构造"部分 chunk 已写入"：内容加长 + chunkSize 调小
+      // b 需要 ≥2 个 chunk 才能构造"部分 chunk 已写入"：内容加长 + chunkSize 取小值。
+      // ★ 取 100（`MIN_CHUNK_SIZE` 下限）而非更小值：`handleDirectImport` 现在会拒绝越界参数。
+      // b 正文 244 字符，100 已能切出 ≥2 块。
       const src = mkSource({ 'a.md': '# a\n\na 成功', 'b.md': `# b\n\n${'半成品正文。'.repeat(40)}` });
-      const result = await handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true, chunkSize: 60 });
+      const result = await handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true, chunkSize: 100 });
 
       assert.equal(result.partial, true);
       assert.deepEqual(result.incomplete.map((i) => i.path), ['b.md'], 'b 为未完成文件');

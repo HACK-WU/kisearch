@@ -5,7 +5,7 @@ import { readAllGroupCaches, hasShardedLayout, loadGroupCache, writeGroupCache }
 import { readJson, writeJson } from './store.js';
 import type { Relation } from './scoring.js';
 import { buildChunkEntries } from './chunk-entries.js';
-import { MAX_CHUNKS_PER_FILE } from './chunker.js';
+import { MAX_CHUNKS_PER_FILE, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from './chunker.js';
 import { cleanMarkdownText, runCleanHooks } from './clean.js';
 import { buildChunkLineRanges, type FtsLocator } from './original-locator.js';
 import { buildRelationContent } from './path-vectorize.js';
@@ -88,7 +88,9 @@ async function buildIndexPlan(draft: RelationEditDraft, relation: Relation): Pro
   }
   const chunks = chunked
     ? buildChunkEntries({ fileKey: relation.sourcePath ?? `${draft.relation}.md`, groupPath: draft.group,
-      text: indexedText, chunkSize: source?.chunkSize ?? 1000, chunkOverlap: source?.chunkOverlap ?? 150,
+      text: indexedText,
+      chunkSize: source?.chunkSize ?? DEFAULT_CHUNK_SIZE,
+      chunkOverlap: source?.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP,
       relationName: draft.relation })
     : { chunks: [{ index: 1, text: indexedText }], entries: [{ text: indexedText, chunkRelation: draft.relation }] };
   // 超限、空正文对同一份草稿是确定性失败（重跑必然再次失败），标为非可重试，

@@ -122,6 +122,8 @@ export interface TaskResultSnapshot {
    * 页面据此跟随首次同步；为 null = 入队失败（登记仍成功，需手动同步）。
    */
   syncTaskId?: string | null;
+  /** S-05：数据源已登记成功，但 scopeReadonly 写入失败（只读未生效，需按提示补设） */
+  readonlyWarning?: string;
   /** 可判别错误码（如 ALL_FILES_DUPLICATES / VECTORIZATION_STOPPED） */
   errorCode?: string;
 }

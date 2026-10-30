@@ -25,6 +25,84 @@ export interface ChunkOptions {
 /** 单文件 chunk 数上限（P-7）：超限视为"超大文件"，防单文件向量爆炸 */
 export const MAX_CHUNKS_PER_FILE = 500;
 
+// ─── 切分参数取值范围（全项目单一事实源）───
+// 前端 web/src/lib/datasourceEdit.ts 复制了一份同值常量（web 与 src 是两套 tsconfig，
+// 无法跨目录 import），改动时必须两边同时改。
+
+/** 目标长度默认值（字符） */
+export const DEFAULT_CHUNK_SIZE = 1000;
+/** 相邻 chunk 重叠默认值（字符） */
+export const DEFAULT_CHUNK_OVERLAP = 150;
+
+/**
+ * 目标长度硬下限：100 字符 ≈ 半句话，再小语义不完整、chunk 数还会成倍上涨。
+ * 仅在词条 / 表格行这类"一句一条"的语料上才有意义。
+ */
+export const MIN_CHUNK_SIZE = 100;
+/**
+ * 目标长度硬上限：4000 字符（中文 ≈ 3000 token）配 1024 维向量已是 ~3:1 压缩，
+ * 再大语义稀释、检索精度明显下降。
+ * 注意这不是**模型**的上限——`qwen3.7-text-embedding-flash` 支持 128K token，
+ * 此处取的是"效果尚可"的边界。
+ */
+export const MAX_CHUNK_SIZE = 4000;
+/** 重叠字符数硬上限（与前端提示同源）；下限为 0（不重叠） */
+export const MAX_CHUNK_OVERLAP = 500;
+
+/** 建议取值区间（只用于提示文案，不阻塞）：低于 500 语义偏碎，高于 2000 检索偏粗 */
+export const SUGGESTED_CHUNK_SIZE_MIN = 500;
+export const SUGGESTED_CHUNK_SIZE_MAX = 2000;
+
+/** 切分参数校验出错的字段（供调用方定位到具体输入框） */
+export type ChunkParamField = 'chunkSize' | 'chunkOverlap';
+
+export interface ChunkParamError {
+  field: ChunkParamField;
+  message: string;
+}
+
+/**
+ * 校验切分参数取值范围 + 二者关系（overlap 必须小于段长）。
+ *
+ * `null` / `undefined` 表示"未指定，用默认值"，该字段**跳过校验**——这样
+ * 「只改了其中一个字段」的更新路径可以只校验本次传入的值，
+ * 不会被存量里已超界的旧值拦住（存量值读得到、改得动，只有新值受约束）。
+ */
+export function validateChunkParams(values: {
+  chunkSize?: number | null;
+  chunkOverlap?: number | null;
+}): ChunkParamError | null {
+  const { chunkSize, chunkOverlap } = values;
+  if (chunkSize !== undefined && chunkSize !== null) {
+    if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+      return { field: 'chunkSize', message: `段长必须为正整数（当前 ${chunkSize}）` };
+    }
+    if (chunkSize < MIN_CHUNK_SIZE || chunkSize > MAX_CHUNK_SIZE) {
+      return {
+        field: 'chunkSize',
+        message: `段长需在 ${MIN_CHUNK_SIZE}–${MAX_CHUNK_SIZE} 之间（当前 ${chunkSize}）；`
+          + `建议 ${SUGGESTED_CHUNK_SIZE_MIN}–${SUGGESTED_CHUNK_SIZE_MAX}`,
+      };
+    }
+  }
+  if (chunkOverlap !== undefined && chunkOverlap !== null) {
+    if (!Number.isInteger(chunkOverlap) || chunkOverlap < 0) {
+      return { field: 'chunkOverlap', message: `重叠必须为非负整数（当前 ${chunkOverlap}）` };
+    }
+    if (chunkOverlap > MAX_CHUNK_OVERLAP) {
+      return { field: 'chunkOverlap', message: `重叠需不超过 ${MAX_CHUNK_OVERLAP}（当前 ${chunkOverlap}）` };
+    }
+  }
+  if (
+    chunkSize !== undefined && chunkSize !== null
+    && chunkOverlap !== undefined && chunkOverlap !== null
+    && chunkOverlap >= chunkSize
+  ) {
+    return { field: 'chunkOverlap', message: `重叠（${chunkOverlap}）必须小于段长（${chunkSize}）` };
+  }
+  return null;
+}
+
 /** 分隔符优先级：优先在更干净的语义边界切断 */
 const BREAK_PATTERNS: string[] = ['\n\n', '\n', '。', '；'];
 
@@ -92,10 +170,13 @@ function findBreakPoint(text: string, start: number, chunkSize: number): number 
  * 输入：完整文本 + 切分参数；输出：Chunk[]（内存中，不落盘）。
  */
 export function splitIntoChunks(text: string, options: ChunkOptions = {}): Chunk[] {
-  const chunkSize = options.chunkSize ?? 1000;
-  const overlap = options.overlap ?? 150;
+  const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const overlap = options.overlap ?? DEFAULT_CHUNK_OVERLAP;
 
   if (!text) return [];
+  // 只拦"无法切分"的非法值（<=0）。上下限（MIN/MAX_CHUNK_SIZE）**故意不在此拦**：
+  // `group-index.json.source.chunkSize` 可能存着历史超界值，重建 / 编辑发布会复用
+  // 它重新切分，硬抛会让老 scope 再也跑不起来。范围约束统一在各写入入口做。
   if (chunkSize <= 0) throw new Error(`chunkSize 必须为正数：${chunkSize}`);
   if (text.length <= chunkSize) return [{ index: 1, text }];
 

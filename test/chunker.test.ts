@@ -12,7 +12,16 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { splitIntoChunks, MAX_CHUNKS_PER_FILE } from '../src/lib/chunker.js';
+import {
+  splitIntoChunks,
+  validateChunkParams,
+  MAX_CHUNKS_PER_FILE,
+  MIN_CHUNK_SIZE,
+  MAX_CHUNK_SIZE,
+  MAX_CHUNK_OVERLAP,
+  SUGGESTED_CHUNK_SIZE_MIN,
+  SUGGESTED_CHUNK_SIZE_MAX,
+} from '../src/lib/chunker.js';
 
 describe('splitIntoChunks', () => {
   it('空文本 → 空数组', () => {
@@ -107,5 +116,56 @@ describe('splitIntoChunks', () => {
     const text = '无'.repeat(501 * 100);
     const chunks = splitIntoChunks(text, { chunkSize: 100, overlap: 0 });
     assert.ok(chunks.length > MAX_CHUNKS_PER_FILE, `chunks=${chunks.length} 应超 500 触发消费层防护`);
+  });
+
+  it('★ 上下限不在切分器内硬拦（历史超界值仍能重跑）', () => {
+    // group-index.json.source.chunkSize 可能是旧版放行的超界值，重建 / 编辑发布会复用
+    // 它重新切分。这里硬抛会让老 scope 再也跑不起来，所以范围约束只在写入入口做。
+    assert.doesNotThrow(() => splitIntoChunks('无'.repeat(10000), { chunkSize: MAX_CHUNK_SIZE + 1, overlap: 0 }));
+    assert.doesNotThrow(() => splitIntoChunks('无'.repeat(2000), { chunkSize: 1000, overlap: MAX_CHUNK_OVERLAP + 500 }));
+  });
+});
+
+describe('validateChunkParams（写入入口的范围闸门）', () => {
+  it('未指定（undefined / null）→ 跳过校验', () => {
+    assert.strictEqual(validateChunkParams({}), null);
+    assert.strictEqual(validateChunkParams({ chunkSize: null, chunkOverlap: null }), null);
+    assert.strictEqual(validateChunkParams({ chunkSize: 1000, chunkOverlap: 150 }), null);
+  });
+
+  it('段长范围 100–4000，端点合法', () => {
+    assert.strictEqual(validateChunkParams({ chunkSize: MIN_CHUNK_SIZE }), null);
+    assert.strictEqual(validateChunkParams({ chunkSize: MAX_CHUNK_SIZE }), null);
+    assert.strictEqual(validateChunkParams({ chunkSize: MIN_CHUNK_SIZE - 1 })?.field, 'chunkSize');
+    assert.strictEqual(validateChunkParams({ chunkSize: MAX_CHUNK_SIZE + 1 })?.field, 'chunkSize');
+  });
+
+  it('段长必须为正整数', () => {
+    assert.strictEqual(validateChunkParams({ chunkSize: 0 })?.field, 'chunkSize');
+    assert.strictEqual(validateChunkParams({ chunkSize: -100 })?.field, 'chunkSize');
+    assert.strictEqual(validateChunkParams({ chunkSize: 1000.5 })?.field, 'chunkSize');
+  });
+
+  it('重叠范围 0–500', () => {
+    assert.strictEqual(validateChunkParams({ chunkOverlap: 0 }), null);
+    assert.strictEqual(validateChunkParams({ chunkOverlap: MAX_CHUNK_OVERLAP }), null);
+    assert.strictEqual(validateChunkParams({ chunkOverlap: MAX_CHUNK_OVERLAP + 1 })?.field, 'chunkOverlap');
+    assert.strictEqual(validateChunkParams({ chunkOverlap: -1 })?.field, 'chunkOverlap');
+  });
+
+  it('重叠 < 段长：仅两者同时传入时校验', () => {
+    assert.strictEqual(validateChunkParams({ chunkSize: 100, chunkOverlap: 100 })?.field, 'chunkOverlap');
+    assert.strictEqual(validateChunkParams({ chunkSize: 100, chunkOverlap: 99 }), null);
+    // 只传其一时不做关系校验 —— 调用方各自按「合并后的生效值」判（update 场景）
+    assert.strictEqual(validateChunkParams({ chunkSize: 100 }), null);
+    assert.strictEqual(validateChunkParams({ chunkOverlap: 400 }), null);
+  });
+
+  it('错误文案带可照做的范围与建议区间', () => {
+    const err = validateChunkParams({ chunkSize: 99999 });
+    assert.ok(err);
+    assert.match(err.message, new RegExp(`${MIN_CHUNK_SIZE}–${MAX_CHUNK_SIZE}`));
+    assert.match(err.message, new RegExp(`建议 ${SUGGESTED_CHUNK_SIZE_MIN}–${SUGGESTED_CHUNK_SIZE_MAX}`));
+    assert.match(err.message, /99999/);
   });
 });

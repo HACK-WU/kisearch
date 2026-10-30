@@ -25,7 +25,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, setScopeReadonlyInConfigFile, type KiConfig } from './config.js';
 import { isLoopbackAddr } from './net-addr.js';
 import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
 import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
@@ -40,6 +40,7 @@ import {
   type ImportResult,
 } from './import.js';
 import { resolveImportExtensions } from './config.js';
+import { validateChunkParams } from './chunker.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
 import {
   assertHttpChannelWritable,
@@ -63,7 +64,7 @@ import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
 // upstream 侧新增「定时同步」（resetScheduleFailures / saveDataSourceSchedule），
 // 本地侧新增「移除登记」（removeDataSource / countManagedRepoRefs / purgeManagedCloneDir）—— 两边都要
-import { addRemoteDataSource, checkSourceReachable, countManagedRepoRefs, findReusableManagedClone, readDataSource, removeDataSource, resetScheduleFailures, saveDataSourceSchedule, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
+import { addRemoteDataSource, checkSourceReachable, countManagedRepoRefs, findReusableManagedClone, readDataSource, removeDataSource, resetScheduleFailures, saveDataSourceSchedule, scanDataSources, syncDataSource, toClientPending, updateDataSourceConfig, withManagedCloneLock, type DataSourceConfigPatch, type SyncDataSourceResult } from './datasource.js';
 import { checkManagedSubdir, isSafeRelativeSubdir, purgeManagedCloneDir, validateBranchName, validateGitUrl } from './datasource-clone.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
@@ -768,6 +769,7 @@ export async function handleApiRequest(
     if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
     if (p === '/datasource/schedule' && req.method === 'POST') return void (await handleDatasourceSchedule(req, res, authScopes, requestConfig));
     if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig));
+    if (p === '/datasource/update' && req.method === 'POST') return void (await handleDatasourceUpdate(req, res, authScopes, requestConfig));
     if (p === '/datasource/remove' && req.method === 'POST') return void (await handleDatasourceRemove(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
@@ -1614,6 +1616,14 @@ async function handleImportRun(
     sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
     return;
   }
+  // 切分参数范围：与 `handleDirectImport` 内的校验同口径，但**提前到建 job 之前**——
+  // 否则用户要等任务跑起来才看到 INVALID_CHUNK，任务台账里还白占一条失败记录。
+  // 只校验本次显式传入的值；重试回落的历史参数由 handleDirectImport 兜底。
+  const chunkErr = validateChunkParams({ chunkSize: body.chunkSize, chunkOverlap: body.chunkOverlap });
+  if (chunkErr) {
+    sendJson(res, 400, { ok: false, error: chunkErr.message, field: chunkErr.field });
+    return;
+  }
   // scope 越权校验（body.scope 必填）
   if (authScopes !== null && !scopeAllowed(authScopes, body.scope)) {
     rejectScopeViolation(res, body.scope, '/import/run');
@@ -2172,6 +2182,8 @@ function handleDatasourceList(
   sendJson(res, 200, {
     ok: true,
     total: sources.length,
+    // 能力声明：旧 daemon 不返回 ⇒ 页面隐藏「编辑」与只读开关（而不是让用户填完再报错）
+    capabilities: { datasourceUpdate: true, scopeReadonly: true },
     schedulerDisabled: isDataSourceSchedulerDisabled(),
     sources,
     missing: scan.missing
@@ -2548,6 +2560,8 @@ async function handleDatasourceAddRemote(
   let body: {
     scope?: unknown; url?: unknown; branch?: unknown; subdir?: unknown; group?: unknown;
     vector?: unknown; conflictMode?: unknown; conflictSuffix?: unknown;
+    /** 新建 scope 时同时设为只读（写 config.scopeReadonly；失败降级为任务警告） */
+    readonly?: unknown;
   } = {};
   try {
     body = await readJsonBody(req) as typeof body;
@@ -2706,6 +2720,19 @@ async function handleDatasourceAddRemote(
           return;
         }
         task.update({ phase: 'queued-sync' });
+        // 只读：登记**成功后**才写配置 —— 添加失败不留"只读空库"；写失败不回滚登记（只给显式警告）
+        let readonlyWarning: string | undefined;
+        if (body.readonly === true) {
+          // 写配置**不得**把已成功的登记判失败（否则用户重试会撞 DATASOURCE_EXISTS）
+          try {
+            const applied = setScopeReadonlyInConfigFile(scope, true);
+            if (!applied.ok) {
+              readonlyWarning = `已登记，但只读未设置成功：${applied.error}；请执行 ki scope readonly ${scope}`;
+            }
+          } catch (err) {
+            readonlyWarning = `已登记，但只读未设置成功：${(err as Error).message}；请执行 ki scope readonly ${scope}`;
+          }
+        }
         let syncTaskId: string | null = null;
         let syncWarning: string | undefined;
         try {
@@ -2714,7 +2741,7 @@ async function handleDatasourceAddRemote(
           syncWarning = `登记成功，但首次同步入队失败：${(err as Error).message}`;
         }
         task.finish('succeeded', {
-          result: { syncTaskId },
+          result: { syncTaskId, ...(readonlyWarning ? { readonlyWarning } : {}) },
           ...(syncWarning ? { errorCode: 'SYNC_ENQUEUE_FAILED', recoveryHint: `请执行 ki datasource sync --scope ${scope}` } : {}),
         });
       } catch (err) {
@@ -2732,6 +2759,90 @@ async function handleDatasourceAddRemote(
   });
 
   sendJson(res, 200, { ok: true, scope, taskId, state: 'queued' });
+}
+
+// ─── POST /api/datasource/update（2026-10-30 需求：编辑同步参数）───────
+
+/**
+ * 编辑数据源同步参数（仅配置，不触发任务）。
+ * - 运行中同步 → 409（改一半会被任务覆盖；scope 写锁也会兜底拒绝）
+ * - `baseRevision` 不符 → 409 DATASOURCE_STALE（多标签页）
+ * - 身份字段（scope / 源目录 / Git URL / 分支 / 子目录 / 落点 Group）不可改
+ */
+async function handleDatasourceUpdate(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: { scope?: unknown; baseRevision?: unknown; patch?: unknown } = {};
+  try {
+    body = await readJsonBody(req) as typeof body;
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/update');
+    return;
+  }
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+  if (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_PATCH', error: '缺少 patch（要修改的字段）' });
+    return;
+  }
+  const active = activeDatasourceSyncByScope(requestConfig).get(scope) ?? null;
+  if (active) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'SYNC_IN_PROGRESS',
+      error: '该知识库正在同步，完成后再修改同步参数',
+    });
+    return;
+  }
+  const baseRevision = typeof body.baseRevision === 'number' && Number.isFinite(body.baseRevision)
+    ? body.baseRevision
+    : undefined;
+  const result = await updateDataSourceConfig({
+    scope,
+    baseRevision,
+    patch: body.patch as DataSourceConfigPatch,
+    config: requestConfig,
+  });
+  if (!result.ok) {
+    const status = result.code === 'NOT_FOUND'
+      ? 404
+      : result.code === 'DATASOURCE_STALE' || result.code === 'SCOPE_OPERATION_BUSY'
+        ? 409
+        : 400;
+    sendJson(res, status, {
+      ok: false,
+      code: result.code,
+      error: result.error,
+      ...(result.field ? { field: result.field } : {}),
+      ...(result.current ? { current: result.current } : {}),
+    });
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  sendJson(res, 200, {
+    ok: true,
+    scope,
+    record: result.record,
+    changed: result.changed,
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
+  });
 }
 
 // ─── POST /api/datasource/remove（2026-10-29 用户需求）─────────────

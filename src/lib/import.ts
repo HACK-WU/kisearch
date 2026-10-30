@@ -34,7 +34,14 @@ import { getSharedOperationCoordinator } from './operation-coordinator.js';
 // S-02：导入收尾**异步**入队一次索引整理（不等待 —— 「可用」不得被整理推迟）
 import { scheduleIndexMaintenance } from './index-maintenance.js';
 import type { Relation } from './scoring.js';
-import { splitIntoChunks, MAX_CHUNKS_PER_FILE, type Chunk } from './chunker.js';
+import {
+  splitIntoChunks,
+  MAX_CHUNKS_PER_FILE,
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_CHUNK_OVERLAP,
+  validateChunkParams,
+  type Chunk,
+} from './chunker.js';
 import {
   buildChunkEntries,
   deriveChunkRelation,
@@ -673,6 +680,16 @@ export function readFileToChunks(absPath: string, chunkSize: number, chunkOverla
 export async function handleDirectImport(
   args: HandleDirectImportArgs
 ): Promise<ImportResult> {
+  // 切分参数范围校验必须在**拿写锁 / 扫描 / 向量化之前**（fail-fast）：超界值会让每个
+  // chunk 都超出合理输入区间，等 embedding 阶段才失败既慢又难定位。
+  // 这里是 `ki import`、`/api/import/run`、数据源同步三条链路的共同入口，校验一次即全覆盖。
+  const chunkErr = validateChunkParams({ chunkSize: args.chunkSize, chunkOverlap: args.chunkOverlap });
+  if (chunkErr) {
+    throw Object.assign(new Error(chunkErr.message), {
+      code: 'INVALID_CHUNK',
+      field: chunkErr.field,
+    });
+  }
   const { withScopeWriteLock } = await import('./scope-write-lock.js');
   return withScopeWriteLock(args.scope, 'import', () => handleDirectImportUnlocked(args));
 }
@@ -684,8 +701,8 @@ async function handleDirectImportUnlocked(
   const sourceDir = path.resolve(args.sourceDir);
   // group 缺省时传空串，由 resolveGroupForSource 根据 source 类型（目录/单文件）推断
   const group = (args.group ?? '').trim();
-  const chunkSize = args.chunkSize ?? 1000;
-  const chunkOverlap = args.chunkOverlap ?? 150;
+  const chunkSize = args.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const chunkOverlap = args.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
   const vector = args.vector !== false;
   const conflictMode = validateImportConflictMode(args.conflictMode);
   const conflictSuffix = validateImportConflictSuffix(args.conflictSuffix);

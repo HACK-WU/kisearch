@@ -794,6 +794,8 @@ export interface DataSourceRecordView {
   chunkOverlap: number | null;
   createdAt: number;
   updatedAt: number;
+  /** 配置修订号（仅登记/编辑同步参数 +1；旧 daemon 不返回，按 0 处理） */
+  revision?: number;
   /** 旧 daemon 不下发 → 页面隐藏定时入口 */
   schedule?: DataSourceScheduleView;
   lastSync: DataSourceLastSyncView | null;
@@ -838,6 +840,11 @@ export interface DataSourceListRow {
 export interface DataSourceListResponse {
   ok: boolean;
   total: number;
+  /** 能力声明：旧 daemon 不返回 ⇒ 隐藏「编辑」与只读开关 */
+  capabilities?: {
+    datasourceUpdate?: boolean;
+    scopeReadonly?: boolean;
+  };
   schedulerDisabled?: boolean;
   sources: DataSourceListRow[];
   missing: { scope: string; reason: string; schedule?: DataSourceScheduleView }[];
@@ -920,8 +927,41 @@ export async function addRemoteDataSource(input: {
   subdir?: string;
   group?: string | null;
   vector?: boolean;
+  /** 新建 scope 时同时设为只读（写 config.scopeReadonly；失败由任务警告回报） */
+  readonly?: boolean;
 }): Promise<AddRemoteDataSourceResponse> {
   return req<AddRemoteDataSourceResponse>('/api/datasource/add-remote', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** 编辑同步参数（2026-10-30）：只改传入字段；身份字段不在其中 */
+export interface UpdateDataSourceConfigInput {
+  scope: string;
+  /** 乐观锁：打开编辑弹窗时的 record.revision */
+  baseRevision?: number;
+  patch: {
+    conflictMode?: string;
+    conflictSuffix?: string;
+    vector?: boolean;
+    chunkSize?: number | null;
+    chunkOverlap?: number | null;
+  };
+}
+
+export interface UpdateDataSourceConfigResponse {
+  ok: boolean;
+  scope: string;
+  record: DataSourceRecordView;
+  changed: string[];
+  schedulerDisabled?: boolean;
+}
+
+export async function updateDataSourceConfig(
+  input: UpdateDataSourceConfigInput,
+): Promise<UpdateDataSourceConfigResponse> {
+  return req<UpdateDataSourceConfigResponse>('/api/datasource/update', {
     method: 'POST',
     body: JSON.stringify(input),
   });
