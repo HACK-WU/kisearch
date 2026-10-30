@@ -106,7 +106,7 @@ ki import \
 
 - 标签（`--tags`）向量阶段系统性停止 → 文件照常提交，`errors[]` 记录「标签向量写入失败」（不影响正文），可用 `ki restore <scope> --rebuild-vector` 重建标签向量；`stopReason` 仍带回停止原因，`partial`/`files.incomplete` 不受影响；
 - 关系/路径辅助向量停止 → 未写入的关系沿用**旧索引**（已存在文档的导航不出现空洞；本次新增的文档此时没有旧索引可沿用，语义兜底会缺失，可 `ki restore <scope> --rebuild-vector` 补建），`errors[]` 记一条 `<ki-path/ki-relation>` 汇总；
-- 只有**正文 chunk** 的成功与否决定文件级完成（守 Q1 拍板口径）。
+- 只有**正文 chunk** 的成功与否决定文件级完成。
 
 **FTS-only（`--no-vector`）的口径**：文件级完成度只覆盖 dense 向量阶段。全文索引写入失败只体现在 `stats.errors` 与 `errors[]` 明细（关系标记 `ftsIndexComplete:false`），**不**产生 `partial` / `files.incomplete`，也**不**写未完成清单——修复后重新导入（幂等追加）即可。
 

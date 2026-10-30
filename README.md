@@ -257,7 +257,7 @@ ki mcp token delete <id>
 | 入门 | [首次构建](./docs/build-kb.md)、[配置](./docs/configuration.md)、[导入](./docs/import.md)、[验证](./docs/verify-index.md) |
 | 操作 | [查询](./docs/query-kb.md)、[Group 管理](./docs/group.md)、[备份恢复](./docs/backup-restore.md)、[典型工作流](./docs/workflows.md) |
 | 参考 | [CLI](./docs/cli.md)、[MCP HTTP](./docs/mcp-http.md)、[MCP 工具](./docs/mcp-tools.md)、[错误处理](./docs/error-handling.md) |
-| 机制 | [架构](./docs/architecture.md)、[向量引擎](./docs/vector-engine-mem.md)、[标签设计](./docs/tags-design.md) |
+| 机制 | [架构（含向量层与三层标签）](./docs/architecture.md) |
 | Agent | [Skill / Rule 集成](./docs/agent-integration.md)、[命令速查](./docs/ki-command-guide.md)、[行为规则](./docs/codekb-agent-guide.md) |
 
 ## <a id="constraints"></a>🔒 设计约束

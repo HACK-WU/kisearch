@@ -964,7 +964,7 @@ export function DataSourcePage(): JSX.Element {
       {/* 移除数据源登记确认（2026-10-29 改版）：破坏性操作，二次确认 + 明示"库内文档保留"。
           语义口径见文件头：这是取消登记，不是删文档。
           视觉结构 = danger 顶条 + 三块分组（登记 / 影响 / 附加操作），
-          规格见 docs/ui-design/datasource-remove-dialog.md；不要改回平铺键值表。
+          设计台账：.plans/2026-10-29-datasource-remove-dialog-restyle/（本地目录，不入库）。
           ★ 宽度与限高只挂在 .ki-ds-remove 上：.ki-dialog--form 是其它表单弹窗共用的全局类。 */}
       {removeTarget ? (
         <div

@@ -90,5 +90,5 @@ ki sync-relation \
 
 - [cli.md](./cli.md) —— `search` / `group list` / `get-module-info` 完整参数
 - [mcp-tools.md](./mcp-tools.md) —— MCP 工具参数
-- [tags-design.md](./tags-design.md) —— 三层标签的语义
+- [architecture.md · 三层标签](./architecture.md#三层标签) —— 三类标签的语义
 - [error-handling.md](./error-handling.md) —— 完整报错清单

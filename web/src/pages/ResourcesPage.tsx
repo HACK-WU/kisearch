@@ -1,7 +1,8 @@
 /**
  * ResourcesPage.tsx —— 资源（接入 + 常用功能手册，双栏）
  *
- * 设计稿：docs/ui-design/resources-page.md
+ * 布局：左目录 240px 纵向 + 右详情内滚；≤1100 转横向 chips 单栏（页面自身滚动）。
+ * 设计台账：.plans/2026-10-27-resources-page-v2/（本地目录，不入库）。
  * 约束：
  *   · MCP 地址/端口由 window.location 推导，不硬编码 7423；
  *   · 页面只给参考命令与示例，不执行命令、不展示真实 Token / apiKey；

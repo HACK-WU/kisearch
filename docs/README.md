@@ -34,9 +34,7 @@
 
 | 内容 | 文档 |
 |---|---|
-| 数据文件、运行链路、导入链路 | [architecture.md](./architecture.md) |
-| 向量引擎（zvec）与检索实现 | [vector-engine-mem.md](./vector-engine-mem.md) |
-| `ki-search` / `ki-relation` / `ki-path` 三层标签 | [tags-design.md](./tags-design.md) |
+| 数据文件、运行链路、导入链路、向量层与三层标签 | [architecture.md](./architecture.md) |
 | 文档多语言代码块写法（`::: code-group`） | [markdown-multilang.md](./markdown-multilang.md) |
 
 ## Agent 集成

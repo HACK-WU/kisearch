@@ -86,7 +86,7 @@ ki group delete <path> [--yes] [--scope <s>]
 > `ki-relation` / `ki-path` 辅助向量的 docId 不含 group，只有执行时按 group 元数据枚举才知道条数，故不计入预览；
 > 且跨组共享的 docId 会被保留，**实际删除数可能少于预览值**（结果里的 `sharedKept` / `sharedContentKept` 会说明保留了哪些）。
 >
-> ⚠️ 历史遗留（仅理论边界）：只有在 **2026-08-05 之前**的版本写入过关系向量的库，才会有"没有 `group` 字段"的辅助向量，
+> ⚠️ 历史遗留（仅理论边界）：只有早期版本写入过关系向量的库，才会有"没有 `group` 字段"的辅助向量，
 > 按 group 枚举不到它们，需要用 `ki restore <scope> --rebuild-vector` 重建清理；此后版本写入的向量都带 `group`。
 
 带 `--yes` 执行后：

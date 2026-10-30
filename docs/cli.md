@@ -161,7 +161,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 - clone 使用临时目录 + rename，失败不残留半成品；同一 scope 的托管目录已存在时报 `CLONE_TARGET_EXISTS`（不自动清空）。
 - 首次同步必然是 `full`（无 commit 水位），之后按 `git diff <lastCommit>..HEAD` 增量；托管副本同步前 `fetch` + `reset --hard origin/<branch>` + `clean -fdx`（**禁止手工修改托管副本**）。
 - `remove --purge` 只对 `git.managed=true` 生效；先删登记再删目录，删除失败时登记已删并返回 `cloneRemoved=false` + `cloneRemoveError`。
-- **共享托管 clone（2026-10-22）**：同一 `remote + 分支` 已存在托管副本时，新 scope 直接复用该副本（不重复 clone）；`repoRoot` 可能属于先登记的 scope，各 scope 只用自己的 `relativeRoot`。
+- **共享托管 clone**：同一 `remote + 分支` 已存在托管副本时，新 scope 直接复用该副本（不重复 clone）；`repoRoot` 可能属于先登记的 scope，各 scope 只用自己的 `relativeRoot`。
   - `remove --purge` / `scope delete` 按**引用计数**：还有其他 scope 引用时保留 clone，最后一个引用删除时才清理。
   - 共享副本的同步、子目录校验与删除由 clone 级锁串行化，避免多个 scope 同时 reset/clean 同一工作树。
 - `ki scope delete <scope> --yes` 会一并删除该 scope 的托管 clone（预览中显示路径；共享副本会按引用计数保留）。
@@ -174,7 +174,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 - `--type`：缺省自动探测目录是否为 Git 仓库；`git` 显式要求（探测失败 fail-loud）；`directory` 显式关闭增量（即使目录是仓库也按全量）
 - Git 数据源同步：`git fetch` + 自动更新（本地仓库只 `merge --ff-only`；工具托管的 clone 才 `reset --hard` + `clean`），只导入 tracked 变更；untracked 不进入增量，页面/CLI 会给出计数警告；首次同步无 commit 水位 → 全量；`--full` 处理全部文件（含 untracked）。commit 水位只在本次同步完整成功时推进
 - 页面手动同步：普通目录成功同步后 30 分钟冷却内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409。**30 分钟是手动冷却，不是自动同步**
-- 定时同步（REQ-20261029-001）：配置**只在页面**（数据源列表操作列「定时」弹窗），无 CLI 配置命令；计划落 `<kbDir>/datasource.json` 的 `schedule` 字段，默认关闭，`directory` / `git` 均可开启。调度器**只在 HTTP daemon 内运行**（无 daemon 即不调度），没有任何启用计划时不建定时器；到期后全局同时最多 1 个自动同步，同 scope 已有运行中/排队任务、或共享托管 clone 忙时**跳过本次**（不排队、不建任务、不计失败）。daemon 启动时若已过预定时间，会补跑一次。连续失败只累计与提示，不阻断下个周期。定时同步同样**只导入 + 算候选，永不删除**；`KI_DISABLE_DATASOURCE_SCHEDULER=1` 可整体关闭调度（测试/开发用），当前状态见 `/healthz` 的 `datasourceScheduler`。周期计划带一个**启用锚点** `enabledAt`（开启时写入、改间隔不重置、关闭时清空）；若某条记录既无 `lastSync.at`/`lastAutoAt` 也无 `enabledAt`（旧版本写入或从旧快照 `restore` 恢复），会被判定为**已到期并在下一次调度刷新时补跑一次**，之后回到正常周期
+- 定时同步：配置**只在页面**（数据源列表操作列「定时」弹窗），无 CLI 配置命令；计划落 `<kbDir>/datasource.json` 的 `schedule` 字段，默认关闭，`directory` / `git` 均可开启。调度器**只在 HTTP daemon 内运行**（无 daemon 即不调度），没有任何启用计划时不建定时器；到期后全局同时最多 1 个自动同步，同 scope 已有运行中/排队任务、或共享托管 clone 忙时**跳过本次**（不排队、不建任务、不计失败）。daemon 启动时若已过预定时间，会补跑一次。连续失败只累计与提示，不阻断下个周期。定时同步同样**只导入 + 算候选，永不删除**；`KI_DISABLE_DATASOURCE_SCHEDULER=1` 可整体关闭调度（测试/开发用），当前状态见 `/healthz` 的 `datasourceScheduler`。周期计划带一个**启用锚点** `enabledAt`（开启时写入、改间隔不重置、关闭时清空）；若某条记录既无 `lastSync.at`/`lastAutoAt` 也无 `enabledAt`（旧版本写入或从旧快照 `restore` 恢复），会被判定为**已到期并在下一次调度刷新时补跑一次**，之后回到正常周期
 - `sync` 只导入 + 计算待删候选：候选只在「上一次成功同步见过的 rel 集合」内产生，首次同步零候选；**永不删除**，库内文档数只增不减
 - `--dry-run` 零写入（不导入、不写 `lastSync`，也不 fetch/自动更新）
 - `prune` 执行时服务端按**当前源目录**重算候选并与 `token` 比对（失配 `409`），只删「所选 ∩ 可见候选」，且**不动源目录文件**（`wikiDelete:false`）
@@ -262,7 +262,7 @@ ki scope list --json   # JSON（脚本解析用）
 
 ### `readonly` 子命令
 
-设置 / 解除某个 scope 的**只读**状态（REQ-20261029-001）。状态存于配置文件顶层 `scopeReadonly`，**不写进 `scopes` 条目**（因此不会让该 scope 变成 registered）。
+设置 / 解除某个 scope 的**只读**状态。状态存于配置文件顶层 `scopeReadonly`，**不写进 `scopes` 条目**（因此不会让该 scope 变成 registered）。
 
 ```bash
 ki scope readonly my-project          # 设为只读
@@ -828,7 +828,7 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 只删除**单个 Relation** 及其关联数据（relations-cache + 本地 KB 原文 + wiki 源文件 + 向量 + 全文索引）。
 
-> ⚠️ **删除不可恢复**：wiki 源文件走物理 `unlink`（`delete-relation.ts` 的 `unlinkWithinSourceDir`），**不存在回收站**——`.ki/trash` 已移除（见 [group.md](group.md)）。删完只能靠备份或重新导入恢复。
+> ⚠️ **删除不可恢复**：wiki 源文件走物理删除（`unlink`），**不存在回收站**——`.ki/trash` 已移除（见 [group.md](group.md)）。删完只能靠备份或重新导入恢复。
 
 ### 文档级删除（`--group` + `--relation`，两者必填）
 

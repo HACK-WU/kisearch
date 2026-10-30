@@ -188,7 +188,7 @@ scope 护栏模式。
 
 ### `scopeReadonly`
 
-只读 scope 名单（**顶层节点**，`string[]`，默认 `[]`；REQ-20261029-001）。
+只读 scope 名单（**顶层节点**，`string[]`，默认 `[]`）。
 
 ```yaml
 scopeReadonly:
@@ -437,6 +437,5 @@ vi ~/.ki/config.yaml
 ## 相关文档
 
 - [`docs/cli.md`](./cli.md) — CLI 命令完整参考
-- [`docs/vector-engine-mem.md`](./vector-engine-mem.md) — 向量引擎（zvec）设计说明
-- [`docs/tags-design.md`](./tags-design.md) — 三层标签设计
+- [`docs/architecture.md`](./architecture.md) — 数据布局、向量层与三层标签
 - [`docs/import.md`](./import.md) — 导入流程详解

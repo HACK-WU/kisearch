@@ -52,33 +52,14 @@ flowchart LR
 | `group-index.json` | Group 树结构索引 + `source` 块（`dir` + 切分参数） | 所有脚本读写 | 永久，随 Group 增删改 |
 | `.relations/<groupPath>/cache.json` | Relation 缓存分片（评分/分区，存储不设上限），含 `memoryIds`/`sourcePath`；per-Group 一份 | 所有脚本读写 | 永久，随 Relation 使用动态更新 |
 | `.relations/manifest.json` | scope 级元数据：`partition_config` + `revision`（缓存失效身份锚，每次写递增） | 存储原语自动维护 | 永久 |
-| ~~`relations-cache.json`~~ | 旧布局单文件（v3 前）；首次写自动迁移为分片布局，原名改名 `.bak` 保留 | 迁移/回退用 | 过渡期保留 |
+| `relations-cache.json`（旧布局） | 单文件时代的关系缓存；首次写入时自动迁移为分片布局，旧文件改名 `.bak` 保留 | 仅回退用 | 过渡期保留 |
 | `kb/{scope}/{group}/index.json` | 本地 KB 原文 | get-module-info 读，sync-relation/import 写 | 永久，随知识沉淀积累 |
 
-> **存储布局（2026-10-09 v3，per-Group 分片）**：Relation 元数据从 scope 级单文件
-> `relations-cache.json` 拆分为 `<scope>/.relations/<groupPath>/cache.json`（每组一份）
-> + `<scope>/.relations/manifest.json`（scope 级字段与 revision 缓存身份锚）。分片根用
-> 点号保留名 `.relations/`：local-kb 的组目录是 `<scope>/<groupPath>/index.json`，若根目录叫
-> `relations/`，一个名为 `relations` 的顶层组会在删除时连根带走全部元数据。收益：
-> 读单篇文档只读写该组分片（原为整份 scope 缓存）。**兼容期双读**：新布局优先，
-> 仅旧文件时读旧并保持旧写；任一正式写路径首写该 scope 时自动迁移（旧文件改名
-> `.bak` 保留，可手动回退）。显式批量迁移：`ki migrate-relation-cache <scope>` /
-> `--all`（幂等）。对外 API/CLI/MCP 契约零变化。
+> **关联元数据按 Group 分片**：每组一份 `<scope>/.relations/<groupPath>/cache.json`，scope 级字段（`partition_config` + `revision`）在 `.relations/manifest.json`，读单篇文档只碰该组分片。分片根用点号保留名 `.relations/`，避免与名为 `relations` 的顶层组目录冲突（删组时会连根带走全部元数据）。旧单文件布局的库在首次写入时自动迁移，旧文件改名 `.bak` 保留。
 >
-> **键不变量（2026-10-09 第二轮审查 P0 修复）**：组键**原样**作为分片路径段——同一个
-> `groupPath` 同时是 ①`group-index.json` 的树节点路径 ②本地 KB 目录
->（`kb/<scope>/<groupPath>/index.json`）③分片目录。任何单侧改写（早期实现无条件剥
-> 历史 `项目根/` 前缀）都会让三者分叉，导致 `ki export` 静默导出 0 条、
-> `ki group list` 报「暂无 Relations」、`delete-*` 收集不到 relation（向量/FTS 残留）
-> 与分片残留；且剥前缀是**非单射**映射（`项目根/X` 与 `X` 会撞同一分片互相覆盖）。
-> 唯一合法的前缀剥离时机是 `store.ts` 的 `roots → groups` 迁移——那里树里的 `项目根`
-> 节点被提升掉，`renameGroupCacheShards` 会把分片键一起改名（单文件与分片两种布局都覆盖）。
+> **组键原样作路径段**：同一个 `groupPath` 同时是 `group-index.json` 的树节点、本地 KB 目录（`kb/<scope>/<groupPath>/`）与分片目录；任一侧改写都会让三者分叉。
 >
-> **分区上限语义**：`partition_config.maxHotCount`（默认 `10`）仅是 `ki group list` 展示侧 hot 分区的截断上限（`scoring.ts` `partitionByScore`，新兴席位优先保留），**不是存储上限**——Relation 全量持久于 `hot_relations`，无逐出机制（历史上的"容量 10 条静默逐出"已于 2026-09-01 移除）。warm/cold 同理仅为展示分区（上限 50 / 不截断）。
->
-> **分区守恒不变量（2026-09-04 修复）**：展示侧截断只改变条目所属分区，不会让条目消失——热区溢出回流常温/冷区、常温溢出回流冷区，`hot + warm + cold` 恒等于全量（唯一例外：显式配置 `maxColdCount` 时的冷区末端截断）。修复前规模 ≥ 34 时被截断条目会在**所有 mode 下都查不到**（且被兜底标记为 `[冷]` 却筛不到）。`warmPercent` 以热区之外的候选池为基准；Group 聚合分取组内 Relation 评分的**均值**（非求和，避免规模压倒活跃度）。
->
-> **已清理的字段/函数**：`GroupData.max_hot_count`（只写不读的死字段，2026-09-01 存储上限 bug 残留）、`partition_config.decayStep` 与 `scoring.ts` 的 `boundaryDecay`/`hybridPartition`（生产零调用死代码；且 boundaryDecay 修改的 score 会被下次 `calculateScore` 重算覆盖，与派生评分模型不兼容）均已删除；存量 cache 中残留的同名键不被读取，无需迁移。
+> **分区上限只是展示口径**：`partition_config.maxHotCount`（默认 10）只截断 `ki group list` 的 hot 展示区，**不是存储上限**——Relation 全量持久化于 `hot_relations`，无逐出机制；热区溢出回流常温/冷区，`hot + warm + cold` 恒等于全量（唯一例外：显式配置 `maxColdCount` 时冷区末端截断）。`warmPercent` 以热区之外的候选池为基准；Group 聚合分取组内 Relation 评分的**均值**，避免规模压倒活跃度。
 
 ### `group-index.json` 的 `source` 块
 
@@ -98,34 +79,17 @@ flowchart LR
 
 - `dir`：外部知识库目录绝对路径（`ki import` 自动记录，Wiki 写回据此定位源文件）
 - `chunkSize` / `chunkOverlap`：切分参数持久化（缺失时回退默认值）
-- ~~`rootName` / `commit`~~：已彻底移除（rootName 概念废弃、incremental 废弃后不再保留，无向后兼容读取）
 
 ### relations 元数据的 `memoryIds` / `sourcePath`
 
-关联字段写入 `hot_relations` 每条 relation（方案 D：`ki import` 为**文件级 relation**，挂该文件全部 chunk 的 memoryIds 多值）：
+`ki import` 产生的是**文件级 relation**：一条 relation 挂该文件全部 chunk 的向量 ID。
 
-```json
-{
-  "id": "rel_003",
-  "text": "Scope 隔离机制",
-  "score": 0,
-  "useCount": 0,
-  "lastUsedTime": null,
-  "isImported": true,
-  "memoryIds": ["dbc6f2a0-d62b-47cb-835a-371942fdc08a", "9f3ab1c4-e2d5-48a0-b7c6-0a1b2c3d4e5f"],
-  "sourcePath": "核心概念/Scope 隔离机制.md"
-}
-```
+| 字段 | 含义 |
+|------|------|
+| `memoryIds` | 该文件全部 chunk 的向量 ID。`ki search` 命中任一 ID 即可反查同一文件、返回原文（开启 `--original` 时）；旧数据可能是单值 `memoryId` |
+| `sourcePath` | 相对 `source.dir` 的 posix 路径，幂等判定与同名冲突策略都以它为准 |
 
-- `memoryIds`：向量数据库中该文件全部 chunk 的 ID 列表（方案 D 多值）；`ki search` 命中任一 memoryId → 反查到同一文件级 relation → 返回文件原文（`--original`/`include_original` 开启时）。旧数据兼容单值 `memoryId` 字段
-- `sourcePath`：相对 `source.dir` 的 posix 路径，用于幂等判定（同 sourcePath 重导默认幂等覆盖、`skip` 策略下跳过；不同 sourcePath 同名按所选策略处理）
-
-### `index.json` 的 key 因写入来源不同而异
-
-| 写入脚本 | key 来源 | 示例 |
-|---------|---------|------|
-| `ki import` | 文件名去 `.md` 扩展名 | `"多项目隔离"` |
-| `sync-relation.ts` | `--relation` 参数原文 | `"标签系统"` |
+`index.json` 的 key 由写入方决定：`ki import` 用文件名（去 `.md`），`ki sync-relation` 用 `--relation` 原文。
 
 ## 运行时主链路
 
@@ -146,7 +110,7 @@ flowchart TD
     D --> A
 ```
 
-## 外部知识库导入链路（S-04 统一流程）
+## 外部知识库导入链路
 
 ```mermaid
 flowchart LR
@@ -168,6 +132,32 @@ flowchart LR
 ```
 
 > 增量更新由「幂等追加」承载：重复执行同一条命令即同步变更，不依赖 git。
+
+## 向量层（zvec）
+
+检索由进程内嵌的 zvec 引擎提供（`@zvec/zvec` 的 Rust 内核 + Node 绑定），不经外部 CLI、无需额外进程：
+
+- **隔离**：每个 scope 一个独立 Collection，向量同时带 `scope` metadata，双重隔离
+- **混合检索**：dense 向量与全文索引（`jieba` 分词）同时召回后用 RRF 融合，也可单独走语义或全文
+- **自动向量化**：写入时由引擎按 `text` 调用 embedding，模型与维度见 [configuration.md · embedding](./configuration.md#embedding)
+- **硬过滤**：按 metadata（`tag` / `scope` / `group`）在引擎内过滤，不做客户端 post-filter
+
+选择嵌入式引擎而不是外部 CLI，是因为延迟与召回：外部 CLI 每次调用都要冷启动（秒级），进程内常驻后单次查询在毫秒级，同一批数据的召回率也更高。
+
+## 三层标签
+
+向量库用 metadata 字段 `tag` 把三类内容物理隔离，召回时互不污染：
+
+| 标签 | 定位 | 写入方 | 消费方 |
+|------|------|--------|--------|
+| `ki-path` | Group 路径层级索引，每个 Group 一条 | `ki import` | 路径模糊匹配（`ki group list`、语义兜底） |
+| `ki-relation` | Relation 名称索引，每个 Relation 一条 | `ki import`、`ki sync-relation` | Relation 名称模糊匹配 |
+| `ki-search` | 通用语义检索 | `ki import`、`ki store`、`ki bulk-store`、`ki sync-relation`、`ki edit-relation`（含文档编辑）、MCP 写入 | `ki search` / MCP 检索（默认） |
+
+- `ki-path` / `ki-relation` 是**内部基础设施**，只为路径与关系名的模糊匹配服务；`ki-search` 才是用户与 Agent 日常检索的数据源。
+- 写入时用 `tag` 字段（批量接口参数名为 `tags`）指定归属，缺省落 `ki-search`——辅助标签必须显式传，否则内容会混进通用检索空间。
+- 额外业务标签（`--tags`）以「同内容多 doc」实现——每个标签一条记录，id 由 `text + scope + tag` 派生；检索时按 OR 召回，内部保留标签会被过滤。
+- 标签只影响**新写入**：改了查询侧标签，历史数据不会跟着改，召回范围随之变化；需要重建时用 `ki restore <scope> --rebuild-vector`（三类标签向量按同一规则重算）。
 
 ## 知识库与 Agent 记忆的关系
 
