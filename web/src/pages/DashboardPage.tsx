@@ -10,6 +10,7 @@ import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { describeWikiSync } from '@/lib/resourcesPage';
 import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
+import { scheduleSummaryView, summarizeSchedules } from '@/lib/datasourceSchedule';
 import {
   normalizeScopeMode,
   registeredScopesOf,
@@ -263,7 +264,7 @@ function HealthList({
 export function DashboardPage(): JSX.Element {
   const { data: scopes, isLoading, isError, error, refetch } = useScopeList();
   // 数据源（REQ-20261020-001 Q4）：总览第 4 卡由「注册」改为「数据源」数
-  const { data: dsList } = useDataSourceList();
+  const { data: dsList, error: dsError } = useDataSourceList();
   const { data: health, error: healthError, isPending: healthPending } = useHealth();
   const healthSummary = summarizeHealth(health, healthError, healthPending);
   const scope = useScopeValue();
@@ -287,6 +288,10 @@ export function DashboardPage(): JSX.Element {
   const totalDocs = list.reduce((s, x) => s + (x.wikiCount ?? 0), 0);
   const kbCount = list.filter((x) => x.kb).length;
   const vecCount = list.filter((x) => x.vector).length;
+  // 定时同步（M1 2026-10-30）：已开启定时的数据源数，复用数据源列表、不新增请求
+  const scheduleCard = scheduleSummaryView(
+    summarizeSchedules(dsList, { error: dsError ? (dsError as Error).message : undefined }),
+  );
 
   // 当前 scope 概览（切换 scope 时实时更新）
   const { data: scopeDocs } = useDocList(scope);
@@ -333,7 +338,7 @@ export function DashboardPage(): JSX.Element {
       <HealthBanner />
 
       {/* 统计条 */}
-      <section className="ki-stats">
+      <section className="ki-stats ki-stats--overview">
         <div className="ki-stat-card">
           <div className="ki-stat-label">Scopes</div>
           <div className="ki-stat-value ki-stat-value--primary">{list.length}</div>
@@ -350,6 +355,15 @@ export function DashboardPage(): JSX.Element {
         <div className="ki-stat-card">
           <div className="ki-stat-label">数据源</div>
           <div className="ki-stat-value">{dsList ? dsList.total : '—'}</div>
+        </div>
+        <div className="ki-stat-card" title={scheduleCard.title}>
+          <div className="ki-stat-label">定时同步</div>
+          <div className="ki-stat-value">{scheduleCard.value}</div>
+          {scheduleCard.sub !== '' && (
+            <div className={`ki-stat-sub${scheduleCard.tone === 'warn' ? ' ki-stat-sub--warn' : ''}`}>
+              {scheduleCard.sub}
+            </div>
+          )}
         </div>
       </section>
 

@@ -639,6 +639,8 @@ a:hover { text-decoration: underline; }
   background: var(--ki-color-surface); border-radius: var(--ki-radius-lg);
   padding: 20px; border: 1px solid var(--ki-color-border);
 }
+/* 总览统计条 5 卡：≥1025 五等分；≤1024 第 5 张跨 2 列；≤640 单列（响应式见文件末尾） */
+.ki-stats--overview { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .ki-stat-card--soft { background: var(--ki-color-bg-secondary); }
 .ki-stat-label {
   color: var(--ki-color-text-subtle);
@@ -654,6 +656,7 @@ a:hover { text-decoration: underline; }
 }
 .ki-stat-value--primary { color: var(--ki-color-primary); }
 .ki-stat-sub { margin-top: 4px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-stat-sub--warn { color: var(--ki-color-warning); }
 /* 软底小卡（当前知识库 2×2）：中文标签 14px/600，数值 22px（对齐 demo 规格） */
 .ki-stat-card--soft .ki-stat-label {
   font: 600 var(--ki-font-size-md) var(--ki-font-family);
@@ -1199,10 +1202,13 @@ a:hover { text-decoration: underline; }
 /* 响应式 */
 @media (max-width: 1024px) {
   .ki-stats { grid-template-columns: repeat(2, 1fr); }
+  /* 5 卡在 2 列下会 2+2+1：第 5 张跨满整行，避免孤立的半行卡 */
+  .ki-stats--overview > .ki-stat-card:last-child { grid-column: span 2; }
 }
 @media (max-width: 640px) {
   .ki-content { padding: 16px; }
   .ki-stats { grid-template-columns: 1fr; }
+  .ki-stats--overview > .ki-stat-card:last-child { grid-column: auto; }
   .ki-form-row { grid-template-columns: 1fr; }
   .ki-table th:nth-child(3), .ki-table td:nth-child(3),
   .ki-table th:nth-child(4), .ki-table td:nth-child(4) { display: none; }
