@@ -29,6 +29,17 @@ export const UNIT_LABEL: Record<DataSourceScheduleUnit, string> = {
   day: '天',
 };
 
+/**
+ * 同步状态中文化（`lastSync.state` 与 `lastAutoState` 同源同一套枚举）。
+ * 放在这里而不是各弹窗里，避免「上次同步 · 成功」与「上次自动 · ok」两种口径并存。
+ */
+export const SYNC_STATE_LABEL: Record<string, string> = {
+  ok: '成功',
+  partial: '部分成功',
+  failed: '失败',
+  cancelled: '已取消',
+};
+
 export function formFromSchedule(schedule?: DataSourceScheduleView | null): ScheduleFormState {
   if (!schedule) {
     return { enabled: false, mode: 'interval', intervalValue: '24', intervalUnit: 'hour', at: '', repeat: 'once' };
@@ -41,6 +52,46 @@ export function formFromSchedule(schedule?: DataSourceScheduleView | null): Sche
     at: schedule.at ?? '',
     repeat: schedule.repeat ?? 'once',
   };
+}
+
+/** 默认执行时间：现在 + 30 分钟，秒归零（`datetime-local` 只认到分钟） */
+export function defaultScheduleAt(nowMs: number = Date.now()): string {
+  const base = new Date(nowMs + 30 * 60 * 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`
+    + `T${pad(base.getHours())}:${pad(base.getMinutes())}`;
+}
+
+export interface ScheduleModeSwitch {
+  patch: Partial<ScheduleFormState>;
+  /** 传回给下一次调用：记录「哪个值是自动填的」，切回周期时据此撤回 */
+  autoAt: string | null;
+}
+
+/**
+ * 切换「周期 / 指定时间」时该怎么处理 `at`。
+ *
+ * - 切到指定时间且 `at` 为空 → 填 `now + 30min`，并记住它是自动填的
+ * - 切回周期且 `at` 仍是那个自动值 → 一并清空
+ *   否则「点一下指定时间再点回周期」就会变成待保存（`toScheduleInput` 在周期模式下
+ *   把 at 置 null，这次保存写不回任何东西，白发一次请求、revision 还会 +1）
+ * - 已有计划自带 `at`（编辑已有计划）时一律不动它
+ */
+export function switchScheduleMode(
+  form: ScheduleFormState,
+  nextMode: ScheduleFormState['mode'],
+  opts: { nowMs?: number; autoAt?: string | null } = {},
+): ScheduleModeSwitch {
+  const autoAt = opts.autoAt ?? null;
+  if (nextMode === 'interval') {
+    if (autoAt !== null && form.at === autoAt) {
+      return { patch: { mode: 'interval', at: '' }, autoAt: null };
+    }
+    return { patch: { mode: 'interval' }, autoAt };
+  }
+  if (form.at !== '') return { patch: { mode: 'at' }, autoAt };
+  const at = defaultScheduleAt(opts.nowMs);
+  return { patch: { mode: 'at', at }, autoAt: at };
 }
 
 export function describeSchedule(schedule: DataSourceScheduleView | undefined | null): string {

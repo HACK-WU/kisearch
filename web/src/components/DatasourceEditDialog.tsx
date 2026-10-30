@@ -18,12 +18,15 @@ import {
   formatDateTime,
   formFromSchedule,
   isSameForm,
+  SYNC_STATE_LABEL,
   toScheduleInput,
   validateScheduleForm,
   type ScheduleFormState,
 } from '@/lib/datasourceSchedule';
 import {
   CONFLICT_OPTIONS,
+  DEFAULT_CHUNK_OVERLAP,
+  DEFAULT_CHUNK_SIZE,
   MAX_CHUNK_OVERLAP,
   MAX_CHUNK_SIZE,
   MIN_CHUNK_SIZE,
@@ -44,13 +47,6 @@ export interface DatasourceEditDialogProps {
   onClose: () => void;
   onSaved: (message: string, tone?: 'info' | 'warn') => void;
 }
-
-const SYNC_STATE_LABEL: Record<string, string> = {
-  ok: '成功',
-  partial: '部分成功',
-  failed: '失败',
-  cancelled: '已取消',
-};
 
 function apiError(err: unknown, fallback: string): string {
   const e = err as Error & { status?: number; body?: { code?: string; error?: string } };
@@ -77,7 +73,7 @@ export function DatasourceEditDialog({
   const [discardOpen, setDiscardOpen] = useState(false);
   /** 配置已落盘、定时写失败：关闭确认要说明"丢的只是定时修改" */
   const [partialSaved, setPartialSaved] = useState(false);
-  const firstFieldRef = useRef<HTMLSelectElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
 
   const configDirty = isConfigDirty(base, configForm);
   const scheduleDirty = !isSameForm(scheduleForm, formFromSchedule(scheduleBase));
@@ -99,8 +95,10 @@ export function DatasourceEditDialog({
     && (!scheduleDirty || scheduleValidation.ok)
     && !saving;
 
+  // 焦点落在弹窗容器，不落到首个字段：否则一打开就是一整圈主色光晕，
+  // 视觉重心错位（用户会以为要改「同名策略」）。键盘 Tab 一次即到首个字段。
   useEffect(() => {
-    firstFieldRef.current?.focus();
+    dialogRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -193,6 +191,7 @@ export function DatasourceEditDialog({
       }}
     >
       <section
+        ref={dialogRef}
         className="ki-dialog ki-dialog--form ki-ds-edit"
         role="dialog"
         aria-modal="true"
@@ -252,7 +251,6 @@ export function DatasourceEditDialog({
               <span className="ki-ds-edit__label">同名策略</span>
               <div className="ki-ds-edit__control">
                 <select
-                  ref={firstFieldRef}
                   className="ki-form-select"
                   value={configForm.conflictMode}
                   aria-label="同名策略"
@@ -328,8 +326,8 @@ export function DatasourceEditDialog({
                   role={chunkValidation.ok ? undefined : 'alert'}
                 >
                   {chunkValidation.ok
-                    ? `每段目标字符数（${MIN_CHUNK_SIZE}–${MAX_CHUNK_SIZE}，建议 ${SUGGESTED_CHUNK_SIZE_MIN}–${SUGGESTED_CHUNK_SIZE_MAX}）`
-                      + ' / 相邻两段重叠字符数；留空 = 默认 1000 / 150'
+                    ? `每段 ${MIN_CHUNK_SIZE}–${MAX_CHUNK_SIZE}（建议 ${SUGGESTED_CHUNK_SIZE_MIN}–${SUGGESTED_CHUNK_SIZE_MAX}）`
+                      + ` · 重叠 0–${MAX_CHUNK_OVERLAP} · 留空取默认 ${DEFAULT_CHUNK_SIZE} / ${DEFAULT_CHUNK_OVERLAP}`
                     : chunkValidation.message}
                 </p>
                 {chunkRangeWarn && (
@@ -344,7 +342,7 @@ export function DatasourceEditDialog({
               <span className="ki-ds-edit__label">落点 Group</span>
               <div className="ki-ds-edit__control">
                 <span className="ki-ds-edit__static">{base.group ?? '自动：按顶层子目录'}</span>
-                <p className="ki-form-hint">只读。如需更换落点，请移除登记后重新添加（会重建同步水位）</p>
+                <p className="ki-form-hint">只读。要换落点须移除登记后重新添加，会从头同步一遍</p>
               </div>
             </div>
 
@@ -357,6 +355,9 @@ export function DatasourceEditDialog({
               />
               保存后立即全量同步（历史文档按新参数重新切分/向量化）
             </label>
+            {!configDirty && (
+              <p className="ki-ds-edit__check-hint">修改上面任一项后可勾选</p>
+            )}
           </section>
 
           {/* ③ 定时同步（启用开关 + 设置） */}
@@ -367,6 +368,7 @@ export function DatasourceEditDialog({
               onChange={patchSchedule}
               schedule={scheduleBase}
               schedulerDisabled={schedulerDisabled}
+              dirty={scheduleDirty}
             />
           </section>
 

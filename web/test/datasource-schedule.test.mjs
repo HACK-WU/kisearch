@@ -7,7 +7,9 @@
  *   3) 仅一次模式已执行 → 「已执行」，不再画一个已经过去的下次时间；
  *   4) 客户端校验与服务端同界：≥1 分钟（正整数）、≤365 天；关闭态不校验（允许保留半填状态）；
  *   5) 提交体按 mode 互斥：interval 不下发 at/repeat，at 不下发 interval；baseRevision 仅在显式传入时出现
- *      （缺省不下发 = 兼容旧页面，不触发 409）。
+ *      （缺省不下发 = 兼容旧页面，不触发 409）；
+ *   6) 切到「指定时间」要自动填 now+30min（秒归零、跨天跨月正确）；切回「周期」要把这个自动值撤掉，
+ *      否则「点一下模式再点回来」会平白变成待保存；已有计划自带的时间一律不覆盖。
  *
  * 运行：cd web && npm test
  */
@@ -27,7 +29,10 @@ const vite = await createServer({
 });
 const {
   UNIT_LABEL,
+  SYNC_STATE_LABEL,
   formFromSchedule,
+  defaultScheduleAt,
+  switchScheduleMode,
   describeSchedule,
   formatDateTime,
   scheduleBadge,
@@ -283,5 +288,70 @@ describe('isSameForm', () => {
     ]) {
       assert.equal(isSameForm(a, { ...a, ...patch }), false, JSON.stringify(patch));
     }
+  });
+});
+
+describe('defaultScheduleAt', () => {
+  it('现在 + 30 分钟，秒归零（datetime-local 只认到分钟）', () => {
+    assert.equal(defaultScheduleAt(new Date('2026-10-30T10:55:42').getTime()), '2026-10-30T11:25');
+  });
+
+  it('跨小时 / 跨天 / 跨月 / 跨年都要正确进位', () => {
+    assert.equal(defaultScheduleAt(new Date('2026-10-30T23:40:00').getTime()), '2026-10-31T00:10');
+    assert.equal(defaultScheduleAt(new Date('2026-10-31T23:40:00').getTime()), '2026-11-01T00:10');
+    assert.equal(defaultScheduleAt(new Date('2026-12-31T23:45:00').getTime()), '2027-01-01T00:15');
+    assert.equal(defaultScheduleAt(new Date('2026-01-31T23:45:00').getTime()), '2026-02-01T00:15');
+  });
+
+  it('个位数的月/日/时/分补零（否则 datetime-local 收到非法值直接显示空白）', () => {
+    assert.equal(defaultScheduleAt(new Date('2026-01-02T03:04:00').getTime()), '2026-01-02T03:34');
+  });
+});
+
+describe('switchScheduleMode', () => {
+  const NOW = new Date('2026-10-30T10:55:00').getTime();
+  const intervalForm = { enabled: true, mode: 'interval', intervalValue: '24', intervalUnit: 'hour', at: '', repeat: 'once' };
+  const AUTO = '2026-10-30T11:25';
+
+  it('切到指定时间且原本为空 → 填 now+30min，并记下这是自动值', () => {
+    const r = switchScheduleMode(intervalForm, 'at', { nowMs: NOW });
+    assert.deepEqual(r.patch, { mode: 'at', at: AUTO });
+    assert.equal(r.autoAt, AUTO);
+  });
+
+  it('已有时间（编辑已有计划）→ 原样保留，且不算自动值', () => {
+    const r = switchScheduleMode({ ...intervalForm, at: '2026-11-01T09:30' }, 'at', { nowMs: NOW });
+    assert.deepEqual(r.patch, { mode: 'at' });
+    assert.equal(r.autoAt, null);
+  });
+
+  it('切回周期且时间仍是自动值 → 一并清空（否则点一下模式就变成待保存）', () => {
+    const r = switchScheduleMode({ ...intervalForm, mode: 'at', at: AUTO }, 'interval', { autoAt: AUTO });
+    assert.deepEqual(r.patch, { mode: 'interval', at: '' });
+    assert.equal(r.autoAt, null);
+  });
+
+  it('切回周期但用户已改过时间 → 保留用户填的值', () => {
+    const r = switchScheduleMode(
+      { ...intervalForm, mode: 'at', at: '2026-11-05T08:00' },
+      'interval',
+      { autoAt: AUTO },
+    );
+    assert.deepEqual(r.patch, { mode: 'interval' });
+    assert.equal(r.autoAt, AUTO);
+  });
+
+  it('从没自动填过时切回周期 → 不动 at', () => {
+    const r = switchScheduleMode({ ...intervalForm, mode: 'at', at: '' }, 'interval', {});
+    assert.deepEqual(r.patch, { mode: 'interval' });
+    assert.equal(r.autoAt, null);
+  });
+});
+
+describe('SYNC_STATE_LABEL', () => {
+  it('后端四种同步状态都有中文（别再把 ok 直出到界面）', () => {
+    assert.deepEqual(SYNC_STATE_LABEL, {
+      ok: '成功', partial: '部分成功', failed: '失败', cancelled: '已取消',
+    });
   });
 });

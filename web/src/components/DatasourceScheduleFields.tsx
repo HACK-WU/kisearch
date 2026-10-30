@@ -3,21 +3,25 @@
  * 「启用开关 + 周期/指定时间 + 元信息」。弹窗与编辑弹窗共用，避免两套 UI 漂移。
  * 开关是启用状态的唯一入口（关闭时隐藏设置区并给出说明）。
  */
-import type { Ref } from 'react';
+import { useRef } from 'react';
 import type { DataSourceScheduleView } from '@/api/httpApi';
 import {
   formatDateTime,
+  switchScheduleMode,
+  SYNC_STATE_LABEL,
   UNIT_LABEL,
   validateScheduleForm,
   type ScheduleFormState,
 } from '@/lib/datasourceSchedule';
+import { DateTimePicker } from './DateTimePicker';
 
 export interface DatasourceScheduleFieldsProps {
   form: ScheduleFormState;
   onChange: (next: Partial<ScheduleFormState>) => void;
   schedule?: DataSourceScheduleView | null;
   schedulerDisabled?: boolean;
-  firstFieldRef?: Ref<HTMLButtonElement>;
+  /** 表单相对基准是否已改动：改动后「下次运行」就不准了，需要就地声明 */
+  dirty?: boolean;
 }
 
 export function DatasourceScheduleFields({
@@ -25,7 +29,7 @@ export function DatasourceScheduleFields({
   onChange,
   schedule,
   schedulerDisabled,
-  firstFieldRef,
+  dirty,
 }: DatasourceScheduleFieldsProps): JSX.Element {
   const validation = validateScheduleForm(form);
   // 字段下方说明：默认是引导语气（灰字）。只有「填了但不合法」才转告警色。
@@ -34,8 +38,20 @@ export function DatasourceScheduleFields({
     : (validation.message ?? null);
   const tipWarn = !validation.ok && !(form.mode === 'at' && form.at === '');
   const lastAuto = schedule?.lastAutoAt
-    ? `${formatDateTime(schedule.lastAutoAt)}${schedule.lastAutoState ? ` · ${schedule.lastAutoState}` : ''}`
+    ? `${formatDateTime(schedule.lastAutoAt)}${schedule.lastAutoState ? ` · ${SYNC_STATE_LABEL[schedule.lastAutoState] ?? schedule.lastAutoState}` : ''}`
     : '—';
+  /**
+   * 记录「哪个 at 值是切模式时自动填的」。切回周期时据此撤回，
+   * 否则「点一下指定时间再点回来」会平白变成待保存。
+   * 用 ref 不用 state：它不参与渲染，只是给下一次点击读的上下文。
+   */
+  const autoAtRef = useRef<string | null>(null);
+
+  const changeMode = (nextMode: ScheduleFormState['mode']): void => {
+    const { patch, autoAt } = switchScheduleMode(form, nextMode, { autoAt: autoAtRef.current });
+    autoAtRef.current = autoAt;
+    onChange(patch);
+  };
 
   return (
     <>
@@ -49,7 +65,6 @@ export function DatasourceScheduleFields({
         <span className="ki-ds-sched-label">自动同步</span>
         <div className="ki-ds-sched-control">
           <button
-            ref={firstFieldRef}
             type="button"
             className={`ki-switch${form.enabled ? ' ki-switch--on' : ''}`}
             role="switch"
@@ -75,12 +90,12 @@ export function DatasourceScheduleFields({
                   <button
                     type="button"
                     aria-pressed={form.mode === 'interval'}
-                    onClick={() => onChange({ mode: 'interval' })}
+                    onClick={() => changeMode('interval')}
                   >周期</button>
                   <button
                     type="button"
                     aria-pressed={form.mode === 'at'}
-                    onClick={() => onChange({ mode: 'at' })}
+                    onClick={() => changeMode('at')}
                   >指定时间</button>
                 </div>
               </div>
@@ -116,12 +131,11 @@ export function DatasourceScheduleFields({
                 <div className="ki-ds-sched-row">
                   <span className="ki-ds-sched-label">时间</span>
                   <div className="ki-ds-sched-control">
-                    <input
-                      type="datetime-local"
-                      className="ki-form-input ki-ds-sched-datetime"
+                    {/* 自建面板：原生日历弹层由浏览器绘制、边框无法样式化（白块糊在白弹窗上） */}
+                    <DateTimePicker
                       value={form.at}
-                      aria-label="执行时间"
-                      onChange={(event) => onChange({ at: event.target.value })}
+                      onChange={(next) => onChange({ at: next })}
+                      ariaLabel="执行时间"
                     />
                   </div>
                 </div>
@@ -155,8 +169,12 @@ export function DatasourceScheduleFields({
 
           <div className="ki-ds-sched-meta">
             <div className="ki-ds-sched-meta__card">
-              <span className="ki-ds-sched-meta__label">下次运行（重算后）</span>
-              <span className="ki-ds-sched-meta__value">{schedule?.nextRunAt ? formatDateTime(schedule.nextRunAt) : '—'}</span>
+              {/* 「重算后」是内部说法：这里显示的是**保存前**服务端下发的值，不会随表单实时重算 */}
+              <span className="ki-ds-sched-meta__label">下次运行</span>
+              <span className={`ki-ds-sched-meta__value${dirty && schedule?.nextRunAt ? ' ki-ds-sched-meta__value--muted' : ''}`}>
+                {schedule?.nextRunAt ? formatDateTime(schedule.nextRunAt) : '—'}
+              </span>
+              {dirty ? <span className="ki-ds-sched-meta__flag">保存后更新</span> : null}
             </div>
             <div className="ki-ds-sched-meta__card">
               <span className="ki-ds-sched-meta__label">上次自动</span>

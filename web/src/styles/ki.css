@@ -7273,6 +7273,103 @@ select.ki-chat-cfg__ta--select {
   font-size: 12px; line-height: 1.7;
 }
 
+/* ── 当前生效配置：字段卡（B 方案，用户 2026-10-30 定稿） ──
+   原先两个接入页（对话模型 / 向量模型）都用 `.res-notes` 的 disc 列表，
+   一行行灰字等重、看不出主次。改为每字段一枚独立小卡：
+   label（中文名 + 等宽字段键 + 来源角标）/ 值 / 可选 hint。
+   ★ 字段数为奇数时最后一行空一格是网格的自然留白 —— **不要**用 `span 2` 补，
+     试过：宽格内容靠左、右半空，反而像缺了一块。 */
+.res-kv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.res-kv__cell {
+  display: grid; gap: 5px; align-content: start;
+  min-width: 0;
+  padding: 10px 13px 11px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+.res-kv__label {
+  display: flex; align-items: center; justify-content: flex-start;
+  gap: 6px; flex-wrap: wrap;
+  color: var(--ki-color-text-subtle);
+  font-size: 11px; font-weight: 650; letter-spacing: .01em;
+}
+/* 英文字段键：比中文标签更弱，只用于对照配置文档 */
+.res-kv__key { color: var(--ki-color-text-subtle); opacity: .72; font: 400 10.5px/1.4 var(--ki-font-mono); }
+/* 覆盖 .ki-badge 默认内距：角标要紧跟标签，且不能把 label 行撑高 */
+.res-kv__label .ki-badge { min-height: 16px; padding: 0 5px; font-size: 10px; font-weight: 600; }
+.res-kv__value {
+  color: var(--ki-color-text);
+  font-size: 13px; line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.res-kv__value code {
+  padding: 0; background: none;
+  color: var(--ki-color-text);
+  font: 600 12.5px/1.5 var(--ki-font-mono);
+  overflow-wrap: anywhere;
+}
+.res-kv__hint { color: var(--ki-color-text-subtle); font-size: 11.5px; line-height: 1.5; }
+.res-kv__foot { margin-top: 9px; color: var(--ki-color-text-subtle); font-size: 11.5px; line-height: 1.6; }
+.res-kv__foot code { font-family: var(--ki-font-mono); }
+@media (max-width: 720px) {
+  .res-kv { grid-template-columns: 1fr; }
+}
+
+/* ── 当前 scope 的向量一致性结论块 ──
+   取代「11px 药丸 + 重新检查按钮」：主行结论词 + 集合/配置维度对比 + 出路命令。
+   按钮已移除（用户 2026-10-30）——重建任务完成会自动失效本页缓存，请求失败刷新页面重试，
+   异常态顶栏 banner 另有「重新检查」。语义色只用于状态点与描边，不铺满整块。 */
+.res-dim {
+  display: grid; gap: 10px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+.res-dim--ok {
+  border-color: color-mix(in srgb, var(--ki-color-success) 30%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-success) 4%, var(--ki-color-bg-secondary));
+}
+.res-dim--warn {
+  border-color: color-mix(in srgb, var(--ki-color-warning) 34%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-warning) 5%, var(--ki-color-bg-secondary));
+}
+.res-dim__head { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.res-dim__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.res-dim--ok .res-dim__dot {
+  background: var(--ki-color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-success) 14%, transparent);
+}
+.res-dim--warn .res-dim__dot {
+  background: var(--ki-color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-warning) 16%, transparent);
+}
+.res-dim--off .res-dim__dot { background: var(--ki-color-border-strong); }
+.res-dim__title { font-size: 13px; font-weight: 650; }
+.res-dim__meta { margin-left: auto; color: var(--ki-color-text-subtle); font-size: 11.5px; white-space: nowrap; }
+.res-dim__cmp { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.res-dim__side { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.res-dim__side span { color: var(--ki-color-text-subtle); font-size: 11.5px; }
+.res-dim__side b { color: var(--ki-color-text); font: 650 17px/1.15 var(--ki-font-mono); }
+.res-dim--warn .res-dim__side--bad b { color: var(--ki-color-danger-ink); }
+.res-dim__op { font: 700 15px/1 var(--ki-font-mono); color: var(--ki-color-text-subtle); }
+.res-dim--ok .res-dim__op { color: var(--ki-color-success); }
+.res-dim--warn .res-dim__op { color: var(--ki-color-warning); }
+.res-dim__detail { color: var(--ki-color-text-muted); font-size: 12px; line-height: 1.6; }
+.res-dim__cmd {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 10px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface-muted);
+}
+.res-dim__cmd code { min-width: 0; font: 600 12px/1.5 var(--ki-font-mono); overflow-wrap: anywhere; }
+.res-dim__cmd .res-copy { margin-left: auto; min-height: 26px; }
+
 /* ── 示例 ── */
 .res-examples { display: grid; gap: var(--ki-space-3); }
 .res-example { display: grid; gap: 5px; min-width: 0; }
@@ -7472,9 +7569,98 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-sched-inline { gap: 8px; }
 .ki-ds-sched-number { width: 120px; }
 .ki-ds-sched-unit { width: 110px; }
-.ki-ds-sched-datetime { width: 250px; max-width: 100%; }
-/* 日历按钮的热区只有图标本身（约 12px），补 padding 放大可点范围 */
-.ki-ds-sched-datetime::-webkit-calendar-picker-indicator { cursor: pointer; padding: 6px; margin-right: -6px; }
+/* ── 自建日期时间选择器（2026-10-30）──────────────────────────────
+   原生 `<input type="datetime-local">` 的弹层由浏览器绘制，不在 DOM 里、
+   也没有可用伪元素（`::picker()` 只对 select 生效），边框无法样式化 ——
+   白面板贴在白弹窗上完全看不出边界。故自建面板：所有视觉走站内 token。 */
+.ki-dtp-field { position: relative; display: inline-flex; width: 250px; max-width: 100%; }
+/* 只用直接子选择器：面板也挂在 field 内部，否则会把「时 / 分」两个小输入框也撑成 100% */
+.ki-dtp-field > .ki-form-input { width: 100%; }
+/* 隐藏原生日历按钮：点它会把原生弹层又拉出来，与自建面板打架 */
+.ki-dtp-input::-webkit-calendar-picker-indicator { display: none; }
+.ki-dtp-input { padding-right: 38px; }
+/* 热区盖满整块：点框内任意位置都开自建面板；tabIndex=-1 + aria-hidden，键盘仍 Tab 进 input 逐段键入 */
+.ki-dtp-hit {
+  position: absolute; inset: 0;
+  border: 0; padding: 0; margin: 0; background: transparent; cursor: pointer;
+}
+.ki-dtp-icon {
+  position: absolute; top: 50%; right: 12px; transform: translateY(-50%);
+  display: inline-flex; color: var(--ki-color-text-subtle); pointer-events: none;
+}
+.ki-dtp-input:focus ~ .ki-dtp-icon { color: var(--ki-color-primary); }
+
+/* 面板：fixed 定位（弹窗 body 是 overflow:auto，absolute 会被裁掉） */
+.ki-dtp-panel {
+  position: fixed; z-index: 1200;
+  padding: 12px;
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-md);
+  box-shadow: var(--ki-shadow-2);
+}
+.ki-dtp-head { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.ki-dtp-head-gap { flex: 1 1 auto; }
+.ki-dtp-month { font-size: var(--ki-font-size-sm); font-weight: 650; color: var(--ki-color-text); }
+.ki-dtp-nav {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-md); line-height: 1; cursor: pointer;
+}
+.ki-dtp-nav:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-dtp-nav:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+
+.ki-dtp-week,
+.ki-dtp-grid { display: grid; grid-template-columns: repeat(7, 1fr); }
+.ki-dtp-week { margin-bottom: 2px; }
+.ki-dtp-week span {
+  display: flex; align-items: center; justify-content: center;
+  height: 22px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-dtp-day {
+  display: flex; align-items: center; justify-content: center;
+  height: 30px; margin: 1px; padding: 0; border: 0; border-radius: 50%;
+  background: transparent; color: var(--ki-color-text);
+  font: inherit; font-size: var(--ki-font-size-sm);
+  font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.ki-dtp-day:hover { background: var(--ki-color-hover); }
+.ki-dtp-day:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -1px; }
+.ki-dtp-day--outside { color: var(--ki-color-text-subtle); opacity: .55; }
+/* 今天：只加一圈描边，不与「选中」抢实心底色 */
+.ki-dtp-day--today { box-shadow: inset 0 0 0 1px var(--ki-color-border-strong); }
+.ki-dtp-day--selected,
+.ki-dtp-day--selected:hover {
+  background: var(--ki-color-primary); color: #fff; font-weight: 650;
+  box-shadow: none;
+}
+
+.ki-dtp-time {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--ki-color-border);
+}
+.ki-dtp-time__label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-dtp-time__input {
+  width: 68px; min-height: 32px; padding: 4px 8px;
+  text-align: center; font-variant-numeric: tabular-nums;
+  background-color: var(--ki-color-bg);
+}
+.ki-dtp-time__sep { color: var(--ki-color-text-subtle); }
+
+.ki-dtp-foot { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.ki-dtp-link {
+  padding: 0; border: 0; background: transparent;
+  color: var(--ki-color-primary); font: inherit; font-size: var(--ki-font-size-sm); cursor: pointer;
+}
+.ki-dtp-link:hover { text-decoration: underline; }
+.ki-dtp-done {
+  margin-left: auto; min-height: 30px; padding: 0 12px;
+  border: 1px solid var(--ki-color-primary); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-primary); color: #fff;
+  font: inherit; font-size: var(--ki-font-size-sm); font-weight: 650; cursor: pointer;
+}
+.ki-dtp-done:hover { background: var(--ki-color-primary-hover); border-color: var(--ki-color-primary-hover); }
 
 /* 模式 / 重复：原生 radio / checkbox → 分段控件
    （热区 51×18 → 96×34；沿用全站 `.ki-segmented` 的「浅底胶囊 + 选中白底」视觉） */
@@ -7531,6 +7717,13 @@ select.ki-chat-cfg__ta--select {
   display: block; margin-top: 2px; font-size: var(--ki-font-size-md); font-weight: 600;
   color: var(--ki-color-text); white-space: nowrap; font-variant-numeric: tabular-nums;
 }
+/* 「下次运行」显示的是**保存前**服务端下发的值，不随表单实时重算：
+   表单一改动就降为次要色并挂一行「保存后更新」，别让人以为它会跟着变（2026-10-30） */
+.ki-ds-sched-meta__value--muted { color: var(--ki-color-text-subtle); font-weight: 400; }
+.ki-ds-sched-meta__flag {
+  display: block; margin-top: 2px;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
 .ki-ds-sched-meta .ki-ds-sched-warn-line { grid-column: 1 / -1; }
 
 /* 关闭态：既然没有下次运行，就别摆一张「下次运行 —」的空卡 */
@@ -7555,17 +7748,28 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-edit { width: min(640px, 94vw); max-width: 94vw; max-height: calc(100vh - 24px); overflow: hidden; }
 .ki-ds-edit__body {
   min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 14px;
+  display: flex; flex-direction: column; gap: 20px;
   scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
 }
+/* 原先是三张同灰卡片（dialog 白 > section 灰 > 同步设置/关闭说明/meta 卡 灰），
+   内层块与父卡同色，边界只剩 1px 描边、看着糊成一片（2026-10-30）。
+   改法：section 不再当卡片，退成「分组标题 + 1px 下分隔线」，内层灰块这才显出来 ——
+   也让它与定时弹窗的层级（dialog 白 > 灰块，本来就没有 section 这层）一致。 */
 .ki-ds-edit__section {
-  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
-  padding: 14px 16px; background: var(--ki-color-bg-secondary);
+  border: 0; border-radius: 0; padding: 0; background: transparent;
 }
-.ki-ds-edit__title { margin-bottom: 8px; font-size: var(--ki-font-size-sm); font-weight: 650; color: var(--ki-color-text); }
-.ki-ds-edit__facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 0; }
-.ki-ds-edit__facts > div { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-.ki-ds-edit__facts dt { flex: none; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-edit__title {
+  margin-bottom: 12px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-sm); font-weight: 650; color: var(--ki-color-text);
+}
+/* 去掉卡片内边距后，紧跟标题的第一行要撤掉自带的 12px 上边距，否则标题下方空一大块 */
+.ki-ds-edit__title + .ki-ds-edit__row,
+.ki-ds-edit__title + .ki-ds-sched-row { margin-top: 0; }
+.ki-ds-edit__facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 18px; margin: 0; }
+.ki-ds-edit__facts > div { display: flex; gap: 8px; align-items: baseline; min-width: 0; padding: 3px 0; }
+/* 标签定宽：否则右列的值紧贴左列的值，两列被读成一行 */
+.ki-ds-edit__facts dt { flex: 0 0 60px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
 .ki-ds-edit__facts dd {
   margin: 0; min-width: 0; font-size: var(--ki-font-size-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -7584,6 +7788,11 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-edit__check { display: flex; gap: 8px; align-items: flex-start; margin-top: 14px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
 .ki-ds-edit__check.is-disabled { opacity: .6; }
 .ki-ds-edit__check input { margin-top: 2px; }
+/* 禁用态勾选框补一句为什么不能勾（否则只有一个灰掉的框，用户不知道为什么） */
+.ki-ds-edit__check-hint {
+  margin: 6px 0 0 24px;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
 .ki-ds-edit .ki-ds-sched-row { grid-template-columns: 88px minmax(0, 1fr); }
 /* 添加弹窗的「创建为只读库」开关行：左侧文案、右侧 switch */
 .ki-ds-add__switch {
@@ -7606,7 +7815,7 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-sched-dialog { width: 100%; max-width: 100%; }
   .ki-ds-sched-footer { flex-wrap: wrap; }
   .ki-ds-sched-footer .ki-btn { flex: 1 1 auto; }
-  .ki-ds-sched-datetime, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
+  .ki-dtp-field, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
   .ki-ds-sched-inline { flex-direction: column; align-items: stretch; }
   .ki-ds-sched-tip { margin-left: 0; }
   .ki-ds-sched-meta { grid-template-columns: minmax(0, 1fr); }

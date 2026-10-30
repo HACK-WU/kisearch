@@ -47,13 +47,13 @@ export function DatasourceScheduleDialog({
   const [error, setError] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
-  const firstFieldRef = useRef<HTMLButtonElement>(null);
 
   const dirty = !isSameForm(form, baseline);
   const validation = validateScheduleForm(form);
 
+  // 与编辑弹窗同口径：焦点落在弹窗容器，而不是首个开关
   useEffect(() => {
-    firstFieldRef.current?.focus();
+    dialogRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -127,7 +127,7 @@ export function DatasourceScheduleDialog({
             onChange={patch}
             schedule={schedule}
             schedulerDisabled={schedulerDisabled}
-            firstFieldRef={firstFieldRef}
+            dirty={dirty}
           />
           {error ? <p className="ki-ds-sched-error" role="alert">{error}</p> : null}
         </div>
