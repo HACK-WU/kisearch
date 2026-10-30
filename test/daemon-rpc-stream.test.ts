@@ -43,7 +43,7 @@ function rpc(socketPath: string, request: object): Promise<RpcFrame[]> {
   });
 }
 
-test('daemon RPC streaming progress/status and pre-execute cancel tombstone', async () => {
+test('daemon IPC endpoint supports RPC streaming, singleton ownership, and restart', async () => {
   const originalHome = process.env.HOME;
   const originalConfig = process.env.KI_CONFIG_PATH;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-daemon-rpc-'));
@@ -61,10 +61,20 @@ test('daemon RPC streaming progress/status and pre-execute cancel tombstone', as
   try {
     const { startDaemonRpcServer } = await import('../src/lib/daemon-rpc.js');
     const { getDaemonSocketPath } = await import('../src/lib/daemon-protocol.js');
+    const socketPath = getDaemonSocketPath();
+    if (process.platform === 'win32') {
+      assert.ok(socketPath.startsWith('\\\\.\\pipe\\kisearch-'), `expected a Windows named pipe, got ${socketPath}`);
+    } else {
+      assert.ok(socketPath.endsWith('.sock'), `expected a Unix-domain socket path, got ${socketPath}`);
+    }
     const server = await startDaemonRpcServer();
     try {
+      await assert.rejects(
+        startDaemonRpcServer(),
+        { code: process.platform === 'win32' ? 'EADDRINUSE' : 'DAEMON_ALREADY_RUNNING' },
+      );
       const jobId = `rpc-stream-${Date.now()}`;
-      const frames = await rpc(getDaemonSocketPath(), {
+      const frames = await rpc(socketPath, {
         id: 'execute-1',
         method: 'execute',
         operation: 'scope-list',
@@ -76,15 +86,15 @@ test('daemon RPC streaming progress/status and pre-execute cancel tombstone', as
       assert.equal(final.ok, true);
       assert.equal(final.final, true);
       assert.equal(final.jobId, jobId);
-      const status = (await rpc(getDaemonSocketPath(), { id: 'status-1', method: 'status', jobId }))[0];
+      const status = (await rpc(socketPath, { id: 'status-1', method: 'status', jobId }))[0];
       assert.equal(status.ok, true);
       assert.equal(status.job?.state, 'succeeded');
 
       const cancelledId = `rpc-cancel-before-${Date.now()}`;
-      const cancel = (await rpc(getDaemonSocketPath(), { id: 'cancel-1', method: 'cancel', jobId: cancelledId }))[0];
+      const cancel = (await rpc(socketPath, { id: 'cancel-1', method: 'cancel', jobId: cancelledId }))[0];
       assert.equal(cancel.ok, true);
       assert.equal(cancel.state, 'pending');
-      const cancelled = (await rpc(getDaemonSocketPath(), {
+      const cancelled = (await rpc(socketPath, {
         id: 'execute-2', method: 'execute', operation: 'scope-list', params: {},
         jobId: cancelledId, streamProgress: true,
       })).at(-1)!;
@@ -97,6 +107,8 @@ test('daemon RPC streaming progress/status and pre-execute cancel tombstone', as
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+    const restartedServer = await startDaemonRpcServer();
+    await new Promise<void>((resolve) => restartedServer.close(() => resolve()));
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;

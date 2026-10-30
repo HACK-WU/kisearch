@@ -17,6 +17,7 @@ import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { jitiCliPath } from '../src/lib/jiti-cli.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -219,9 +220,10 @@ try {
   // 行为，导致关闭终端后服务不退出、成为继续占用 HTTP 端口/RPC socket/zvec 锁的孤儿。
   if (isDaemon) childEnv.KI_DAEMON_DETACHED = '1';
 
-  // 使用 jiti 执行 TypeScript 脚本（spawn 异步 + 信号转发）
+  // 使用当前 Node 进程直接执行本地 jiti CLI，避免 Windows 下无法 spawn npx.cmd。
+  // spawn 异步 + 信号转发保持原有行为。
   // cwd 设为用户当前目录，确保相对路径参数（如 --results）正确解析
-  const child = spawn('npx', ['jiti', scriptPath, ...scriptArgs], {
+  const child = spawn(process.execPath, [jitiCliPath, scriptPath, ...scriptArgs], {
     stdio: isDaemon ? 'ignore' : 'inherit',
     detached: isDaemon,
     cwd: process.cwd(),
@@ -229,6 +231,9 @@ try {
   });
 
   if (isDaemon) {
+    // Windows cold starts can spend longer loading jiti before argument/config
+    // validation exits; a 3s probe reports success for failures that arrive just after it.
+    const startupFailureProbeMs = process.platform === 'win32' ? 10_000 : 3_000;
     // 启动期存活探测（bug 修复）：token 缺失/参数非法/端口冲突等 fail-loud
     // 发生在子进程启动早期（parseMcpArgs/预检阶段）。此前父进程 spawn 后
     // 立即打印"已在后台启动"，子进程随后退出 → 假成功（实测：非回环无
@@ -239,7 +244,7 @@ try {
       const timer = setTimeout(() => {
         child.removeAllListeners('exit');
         resolve(null);
-      }, 3000);
+      }, startupFailureProbeMs);
       child.on('exit', (code) => {
         clearTimeout(timer);
         resolve({ code });
