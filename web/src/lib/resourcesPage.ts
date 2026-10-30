@@ -42,7 +42,7 @@ export const PRIMARY_SKILL_TOOLS = SKILL_TOOLS.slice(0, 4);
 export const MORE_SKILL_TOOLS = SKILL_TOOLS.slice(4);
 
 export const TOKEN_COMMAND = 'ki mcp token generate --scope all';
-export const STATUS_COMMAND = 'ki mcp --status';
+export const STATUS_COMMAND = 'ki mcp status';
 export const SKILLS_LIST_COMMAND = 'npx skills list';
 export const NODE_REQUIREMENT = 'Node ≥ 22.20';
 

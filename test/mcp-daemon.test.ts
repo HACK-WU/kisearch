@@ -5,6 +5,7 @@
  *   - --daemon / -d 不带 --http 时报错（MCP_DAEMON_REQUIRES_HTTP），不落入 stdio 启动
  *   - -d 短别名被正确归一为 --daemon（报错文案一致，而非「未知参数 -d」）
  *   - mcp 帮助输出包含 --daemon/-d 与 restart 子命令
+ *   - status 子命令（原 --status 的弃用别名仍可用，`-status` 提示新写法）
  * 运行：npx jiti test/mcp-daemon.test.ts
  */
 
@@ -13,7 +14,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
@@ -59,8 +60,8 @@ describe('--daemon/-d 仅 HTTP 模式', () => {
 
   it('--daemon 与 --http 组合不再报错（daemon 校验通过）', () => {
     // 仅验证参数层：--http 不应落入「仅 HTTP 模式」报错分支。
-    // （不用 -d + --status 组合：daemon 存活探测会把它判为"子进程退出"失败）
-    const { stdout } = runCli(['mcp', '--http', '--status']);
+    // （不用 -d + status 组合：daemon 存活探测会把它判为"子进程退出"失败）
+    const { stdout } = runCli(['mcp', '--http', 'status']);
     assert.doesNotMatch(stdout, /MCP_DAEMON_REQUIRES_HTTP/);
   });
 });
@@ -81,17 +82,77 @@ describe('mcp 帮助包含新增能力', () => {
   });
 });
 
+describe('status 子命令（原 --status 迁移）', () => {
+  it('-h 帮助用子命令写法 `ki mcp status`，不再出现 --status', () => {
+    const { stdout } = runCli(['mcp', '-h']);
+    assert.match(stdout, /ki mcp status/);
+    assert.doesNotMatch(stdout, /--status/);
+  });
+
+  it('`ki mcp status` 输出 JSON 状态（等价旧 --status）', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-sub-'));
+    try {
+      const { stdout, status } = runCli(['mcp', 'status'], { HOME: home });
+      assert.equal(status, 0, stdout);
+      const out = JSON.parse(stdout);
+      assert.equal(typeof out.running, 'boolean');
+      assert.ok(out.target, '应包含 target（探测目标 host/port）');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('布尔 flag 后的 status 不被当作 flag 值吞掉（--http status 仍走诊断，不启动服务）', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-flag-'));
+    try {
+      const { stdout, status } = runCli(['mcp', '--http', 'status'], { HOME: home });
+      assert.equal(status, 0, stdout);
+      assert.equal(typeof JSON.parse(stdout).running, 'boolean');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('旧写法 --status 仍可用（弃用别名），并在 stderr 提示迁移', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-alias-'));
+    try {
+      // 需要同时拿到 stdout(JSON) 与 stderr(迁移提示)，故不走 runCli（它在成功路径丢弃 stderr）。
+      // Windows 上 os.homedir() 取 USERPROFILE，与 runCli 的隔离口径保持一致。
+      const env: Record<string, string> = { ...process.env, HOME: home, NODE_NO_WARNINGS: '1' } as Record<string, string>;
+      if (process.platform === 'win32') env.USERPROFILE = home;
+      const res = spawnSync('node', [CLI, 'mcp', '--status'], {
+        encoding: 'utf-8',
+        timeout: 30000,
+        env,
+      });
+      assert.equal(res.status, 0, res.stderr ?? '');
+      assert.equal(typeof JSON.parse(res.stdout).running, 'boolean');
+      assert.match(res.stderr ?? '', /请改用 ki mcp status/);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('-status 单横线 → 未知参数，提示改用 ki mcp status', () => {
+    // 错误契约走 stdout（failJson → console.log），帮助文本走 stderr
+    const { stdout, status } = runCli(['mcp', '-status']);
+    assert.equal(status, 1);
+    assert.match(stdout, /未知参数/);
+    assert.match(stdout, /子命令写法，不带横线/);
+  });
+});
+
 describe('--no-web 显式关闭前端页面', () => {
   it('--http --no-web 不被判为未知参数（known flag 覆盖）', () => {
     // 仅验证参数层：--no-web 应被 detectUnknownFlags 接受，不输出 UNKNOWN_OPTION。
     // 真实启动会进入探活/预检，这里断言它不报未知参数即通过。
-    const { stdout } = runCli(['mcp', '--http', '--no-web', '--status']);
+    const { stdout } = runCli(['mcp', '--http', '--no-web', 'status']);
     assert.doesNotMatch(stdout, /UNKNOWN_OPTION/);
     assert.doesNotMatch(stdout, /未知参数/);
   });
 
   it('--http --web --no-web 同时出现时不报未知参数（no-web 覆盖 web）', () => {
-    const { stdout } = runCli(['mcp', '--http', '--web', '--no-web', '--status']);
+    const { stdout } = runCli(['mcp', '--http', '--web', '--no-web', 'status']);
     assert.doesNotMatch(stdout, /UNKNOWN_OPTION/);
     assert.doesNotMatch(stdout, /未知参数/);
   });
@@ -261,7 +322,7 @@ describe('daemon 启动期存活探测（假成功修复）', () => {
   });
 });
 
-describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修复）', () => {
+describe('status 探测目标 lock 回退（同机 daemon 地址不一致修复）', () => {
   /** 在隔离 HOME 写 lock 文件 */
   function writeLock(home: string, lock: Record<string, unknown>): void {
     fs.mkdirSync(path.join(home, '.ki'), { recursive: true });
@@ -272,11 +333,11 @@ describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修�
     fs.writeFileSync(path.join(home, '.ki', `mcp-http-${identity}.lock`), JSON.stringify(lock));
   }
 
-  it('裸 --status → target 回退到存活 lock 的 host/port（而非默认 127.0.0.1:7423）', () => {
+  it('裸 status → target 回退到存活 lock 的 host/port（而非默认 127.0.0.1:7423）', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-lock-'));
     try {
       writeLock(home, { pid: process.pid, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString(), web: false });
-      const { stdout } = runCli(['mcp', '--status'], { HOME: home });
+      const { stdout } = runCli(['mcp', 'status'], { HOME: home });
       const out = JSON.parse(stdout);
       assert.equal(out.target.host, '192.168.1.5');
       assert.equal(out.target.port, 19876);
@@ -289,7 +350,7 @@ describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修�
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-dead-'));
     try {
       writeLock(home, { pid: 999999999, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString() });
-      const { stdout } = runCli(['mcp', '--status'], { HOME: home });
+      const { stdout } = runCli(['mcp', 'status'], { HOME: home });
       const out = JSON.parse(stdout);
       assert.notEqual(out.target.port, 19876, '死 pid 的 lock 不应参与回退');
       assert.equal(out.target.port, 7423); // 默认
@@ -302,7 +363,7 @@ describe('--status 探测目标 lock 回退（同机 daemon 地址不一致修�
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-st-cli-'));
     try {
       writeLock(home, { pid: process.pid, host: '192.168.1.5', port: 19876, startedAt: new Date().toISOString() });
-      const { stdout } = runCli(['mcp', '--status', '--host', '10.0.0.1', '--port', '12345'], { HOME: home });
+      const { stdout } = runCli(['mcp', 'status', '--host', '10.0.0.1', '--port', '12345'], { HOME: home });
       const out = JSON.parse(stdout);
       assert.equal(out.target.host, '10.0.0.1');
       assert.equal(out.target.port, 12345);

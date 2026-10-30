@@ -180,7 +180,7 @@ describe('命令常量', () => {
 
   it('Token / 状态 / 通用安装命令包含关键参数', () => {
     assert.equal(TOKEN_COMMAND, 'ki mcp token generate --scope all');
-    assert.equal(STATUS_COMMAND, 'ki mcp --status');
+    assert.equal(STATUS_COMMAND, 'ki mcp status');
     assert.equal(GENERIC_INSTALL_COMMAND.includes('--repo HACK-WU/kisearch'), true);
     assert.equal(GENERIC_INSTALL_COMMAND.includes('-t /path/to/your-project'), true);
     assert.equal(GENERIC_INSTALL_COMMAND.includes('skill-install.sh'), true);

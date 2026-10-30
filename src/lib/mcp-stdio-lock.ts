@@ -2,7 +2,7 @@
  * mcp-stdio-lock.ts —— ki mcp stdio 模式的多实例 lock
  *
  * 背景：早期单实例 lock（~/.ki/mcp-stdio.lock 单文件单 pid）无法承载多实例——
- * 后来者 pid 不登记，导致 `ki mcp stop` 只停第一个、`--status` 探测不到。
+ * 后来者 pid 不登记，导致 `ki mcp stop` 只停第一个、`ki mcp status` 探测不到。
  * 现改为「每实例独立 lock 文件」：每个 stdio 实例用自己的文件 ~/.ki/mcp-stdio-<pid>.lock
  * （文件名即 pid），天然支持多实例登记、并发启动互不干扰、退出只删自己的文件。
  *
@@ -133,10 +133,10 @@ export function acquireStdioLock(dir = getStdioLockDir()): StdioLockInfo[] {
     try {
       fs.writeFileSync(myPath, payload, { mode: 0o600 });
     } catch (err) {
-      // 写失败不阻塞启动，但必须告警：lock 缺失会导致 ki mcp stop / --status 对本实例「失明」
+      // 写失败不阻塞启动，但必须告警：lock 缺失会导致 ki mcp stop / status 对本实例「失明」
       process.stderr.write(
         `[kisearch] 警告：无法写入 stdio lock 文件（${myPath}），` +
-          `本实例将无法被 ki mcp stop / --status 定位。原因：${(err as Error).message}\n`,
+          `本实例将无法被 ki mcp stop / status 定位。原因：${(err as Error).message}\n`,
       );
     }
   }

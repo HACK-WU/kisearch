@@ -50,7 +50,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 > 回环绑定（仅本机）免鉴权时，可省略 `headers`。
 >
-> ⚠️ HTTP 客户端仍应使用一致的 `host`/`port`，以便连接同一服务；本机 IDE 也可以继续使用 stdio `command: ki mcp`，它会桥接到该 daemon，不会另开 zvec owner。可用 `ki mcp --status` 和 `/healthz` 查看 owner、布局版本及队列状态。
+> ⚠️ HTTP 客户端仍应使用一致的 `host`/`port`，以便连接同一服务；本机 IDE 也可以继续使用 stdio `command: ki mcp`，它会桥接到该 daemon，不会另开 zvec owner。可用 `ki mcp status` 和 `/healthz` 查看 owner、布局版本及队列状态。
 
 ## 命令行参数
 
@@ -61,7 +61,6 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：读取 HTTP lock + stdio 多实例 lock + 探活，输出实例全貌（JSON，含 `stdioInstances` 存活 stdio 列表与 `managedTokens.count`），不启动服务、跳过预检。读取时**顺带清理已死进程的陈旧 stdio lock**（非纯只读，但为有益副作用） |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
@@ -69,6 +68,10 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 子命令 `ki mcp stop`：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock，见下文「一键关闭」。
 
 子命令 `ki mcp restart`：仅 HTTP 模式，一键重启 HTTP 单例（先关闭现有实例，再以守护进程方式后台常驻重启），见下文「后台常驻与重启」。
+
+子命令 `ki mcp status`：只读诊断（可带 `--host` / `--port` 覆盖探测目标）。读取 HTTP lock + stdio 多实例 lock + 探活，输出实例全貌（JSON，含 `stdioInstances` 存活 stdio 列表与 `managedTokens.count`），不启动服务、跳过预检。读取时**顺带清理已死进程的陈旧 stdio lock**（非纯只读，但为有益副作用），见下文「状态自查」。
+
+> 旧写法 `ki mcp --status` 仍可用，但会提示改用 `ki mcp status`（子命令形式）。
 
 多 Token 子命令（scope 授权 + 访问模式）：
 
@@ -205,12 +208,12 @@ meta → [tool_start → tool_end]* → reasoning* → content* → sources? →
 - 鉴权与其他 `/api/*` 一致；**访问他 scope 的会话返回 403 而非 404**（防状态码探测枚举）。
 - 同一会话**同时只允许一次生成**，并发请求返回 `409 CONVERSATION_GENERATING`。
 
-## 状态自查（`ki mcp --status`）
+## 状态自查（`ki mcp status`）
 
 用于确认「当前是否只有一个持锁进程」以及各 IDE 是否连到同一实例：
 
 ```bash
-ki mcp --status --host 127.0.0.1 --port 7423
+ki mcp status --host 127.0.0.1 --port 7423
 ```
 
 输出为 JSON 契约：
@@ -305,9 +308,9 @@ ki mcp --http --web --daemon    # 含前端页面，同样后台常驻
 ```
 
 - 守护进程脱离终端与父进程组，`ki` 壳退出后服务继续运行，`SSH` 断开不受影响。
-- 启动后终端立即返回，可用 `ki mcp --status` 确认是否就绪（启动含预检，需数秒）。
+- 启动后终端立即返回，可用 `ki mcp status` 确认是否就绪（启动含预检，需数秒）。
 - **不带 `--http` 时 `--daemon`/`-d` 报错**（`MCP_DAEMON_REQUIRES_HTTP`）：stdio 模式依赖 stdin/stdout 通信，后台运行会丢失传输通道。
-- 后台直接启动的进程 stdout/stderr 不落盘（丢弃），排障依赖 `ki mcp --status` 与 `curl http://<host>:<port>/healthz`；`ki mcp restart` 会在停止旧实例前由父进程执行并输出启动预检报告，便于看到 embedding 警告。
+- 后台直接启动的进程 stdout/stderr 不落盘（丢弃），排障依赖 `ki mcp status` 与 `curl http://<host>:<port>/healthz`；`ki mcp restart` 会在停止旧实例前由父进程执行并输出启动预检报告，便于看到 embedding 警告。
 
 ### 一键重启（`ki mcp restart`）
 
@@ -323,7 +326,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - **`--web` 自动延续**：上次以 `--web` 启动（lock 记录 `web:true`）且本次未显式指定时，重启自动补回 `--web`；用 `--no-web` 可显式关闭，用 `--web` 可显式开启（`--no-web` 优先级高于 `--web`）。
 - 输出 JSON 报告：`target`（重启后的 host/port）、`stopped`（被关闭的旧实例）、`cleanedLocks`（清理的 lock）。
 
-> ⚠️ 重启后服务仍需数秒完成预检，`restart` 返回的 `ok:true` 表示已发起后台启动；请用 `ki mcp --status` 确认就绪后再让 IDE 接入。
+> ⚠️ 重启后服务仍需数秒完成预检，`restart` 返回的 `ok:true` 表示已发起后台启动；请用 `ki mcp status` 确认就绪后再让 IDE 接入。
 
 ### 排查
 

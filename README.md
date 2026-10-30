@@ -189,13 +189,13 @@ HTTP 模式（推荐，多 IDE / 远程共享同一进程）：
 
 - 回环绑定（仅本机）免鉴权时可省略 `headers`；跨机访问需绑定 `0.0.0.0` 并强制 Token。
 - stdio 模式用 `{"command": "ki", "args": ["mcp"]}` 即可：它会桥接到本机 daemon，不会另开向量库持锁进程，**Token 与 API Key 都在 daemon 侧，无需在客户端 `env` 里填**。只有 `daemon` 未运行、由 IDE 直接拉起引擎，且配置用 `${ENV_VAR}` 引用密钥时才需要补 `env`（IDE 不继承 shell 环境）。
-- 连接 URL 需与 `ki mcp --status` 输出的 `host` / `port` 完全一致。
+- 连接 URL 需与 `ki mcp status` 输出的 `host` / `port` 完全一致。
 
 ```bash
 ki mcp --http --web                    # 启动（HTTP + 前端）
 ki mcp --http --daemon                 # 后台常驻
 ki mcp restart                         # 重启（幂等，等待就绪后返回）
-ki mcp --status                        # 只读查看状态
+ki mcp status                          # 只读查看状态
 ki mcp stop                            # 关闭本机所有实例并清理 lock
 
 ki mcp token generate --scope team-a   # 生成授权 Token（单个 / 逗号分隔多个 / all）

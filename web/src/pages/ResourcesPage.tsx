@@ -324,7 +324,7 @@ function McpSection(): JSX.Element {
         <div className="res-inline-hint">
           <span>不确定监听地址/端口？</span>
           <code className="res-inline-cmd">{STATUS_COMMAND}</code>
-          <CopyButton text={STATUS_COMMAND} label="ki mcp --status" small />
+          <CopyButton text={STATUS_COMMAND} label="ki mcp status" small />
         </div>
       </div>
 
@@ -349,7 +349,7 @@ function McpSection(): JSX.Element {
             <div className="res-inline-hint">
               <span>反向代理 / 非 --web 打开时，以实际监听为准：</span>
               <code className="res-inline-cmd">{STATUS_COMMAND}</code>
-              <CopyButton text={STATUS_COMMAND} label="ki mcp --status" small />
+              <CopyButton text={STATUS_COMMAND} label="ki mcp status" small />
             </div>
           </div>
         </div>

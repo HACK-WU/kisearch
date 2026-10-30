@@ -51,7 +51,7 @@ export async function startStdioDaemonBridge(): Promise<void> {
     httpTransport.onerror = (error) => {
       process.stderr.write(
         `daemon MCP 连接失败：${error.message}\n`
-        + '请执行 ki mcp --status 确认 daemon 状态，必要时 ki mcp restart 重启。\n',
+        + '请执行 ki mcp status 确认 daemon 状态，必要时 ki mcp restart 重启。\n',
       );
       release();
       void stdio.close();

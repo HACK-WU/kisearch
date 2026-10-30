@@ -130,12 +130,12 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki mcp --http                           # HTTP 共享单例/唯一 zvec owner（默认回环 127.0.0.1，本机免鉴权）
   ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻）
+  ki mcp status                           # 查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/多个/all）
   ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
   ki mcp token update <id> --scope all    # 修改指定 Token 的授权 scope
   ki mcp token delete <id>                # 删除指定 Token（立即失效）
   ki mcp --http --host 0.0.0.0            # 对外监听（远程需 Bearer Token，鉴权基于多 Token 存储）
-  ki mcp --status                         # 查看 HTTP 单例运行状态（只读）
 
 详细帮助：
   ki <command> --help
@@ -239,7 +239,7 @@ try {
     // 立即打印"已在后台启动"，子进程随后退出 → 假成功（实测：非回环无
     // token 时子进程 exit(MCP_HTTP_TOKEN_REQUIRED)，父进程仍报成功）。
     // 探测窗口内退出 → 真实失败暴露；存活 → 正常提示（慢启动容错：超时按
-    // 成功处理，残余失败由 ki mcp --status 兜底，不会误报失败）。
+    // 成功处理，残余失败由 ki mcp status 兜底，不会误报失败）。
     const exited = await new Promise((resolve) => {
       const timer = setTimeout(() => {
         child.removeAllListeners('exit');
@@ -263,11 +263,11 @@ try {
     child.unref();
     if (exited) {
       console.log('kisearch MCP 服务已就绪（检测到已有健康实例，本次未重复启动）。');
-      console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop');
+      console.log('查看状态：ki mcp status    |    关闭：ki mcp stop');
       process.exit(0);
     }
     console.log('kisearch MCP 服务已在后台启动（daemon 模式）。');
-    console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop    |    重启：ki mcp restart');
+    console.log('查看状态：ki mcp status    |    关闭：ki mcp stop    |    重启：ki mcp restart');
     process.exit(0);
   }
 

@@ -1053,7 +1053,7 @@ ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享）�
 ki mcp --http --web                     # HTTP 模式 + 可视化前端页面（浏览器访问 http://127.0.0.1:7423/）
 ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端；--web 组合同样生效）
 ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻；幂等）
-ki mcp --status                         # 只读查看 HTTP 单例运行状态（跳过预检）
+ki mcp status                           # 只读查看 HTTP 单例运行状态（跳过预检）
 ki mcp stop                             # 一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock
 ```
 
@@ -1070,10 +1070,11 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--port <n>` | `7423` | 监听端口（1-65535） |
 | `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
-| `--status` | — | 只读诊断：探活 `/healthz` 并读取当前身份的 `~/.ki/mcp-http-<fingerprint>.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检） |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/search-config`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
+
+> **子命令 `ki mcp status`**（可带 `--host` / `--port` 覆盖探测目标）：只读诊断——探活 `/healthz` 并读取当前身份的 `~/.ki/mcp-http-<fingerprint>.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检）。旧写法 `ki mcp --status` 仍可用但会提示改用子命令形式。
 
 ### 关闭实例（`ki mcp stop`）
 
@@ -1102,7 +1103,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http-<fingerprint>.lock`（记录 pid/host/port）供排查。
 >
-> **状态自查**：`ki mcp --status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, stdioInstances, managedTokens, hint }` JSON（`stdioInstances` 为存活 stdio 实例列表、`managedTokens.count` 为多 Token 存储数量），用于确认实例全貌（HTTP 单例与多个 stdio 实例）；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
+> **状态自查**：`ki mcp status` 组合 `/healthz` 探活与 lock 文件，输出 `{ ok, running, target, healthz, lock, stdioInstances, managedTokens, hint }` JSON（`stdioInstances` 为存活 stdio 实例列表、`managedTokens.count` 为多 Token 存储数量），用于确认实例全貌（HTTP 单例与多个 stdio 实例）；详见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### 暴露的 MCP 工具
 

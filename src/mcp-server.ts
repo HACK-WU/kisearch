@@ -69,7 +69,7 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp --http                 HTTP 共享单例/唯一 zvec owner（默认回环 127.0.0.1:7423，本机免鉴权）
   ki mcp --http --daemon        HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
-  ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
+  ki mcp status                 查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
   ki mcp token generate --scope <scope> [--read-only]  生成授权 Token（scope 必填：单个/逗号分隔多个/all）
   ki mcp token list             列出所有 Token（含明文、授权 scope、访问模式）
@@ -101,7 +101,7 @@ function getFlagValue(args: string[], name: string): string | undefined {
   return undefined;
 }
 
-/** 解析 HTTP 绑定地址（CLI > 配置文件 > 默认），供 --status 与启动共用 */
+/** 解析 HTTP 绑定地址（CLI > 配置文件 > 默认），供 status 与启动共用 */
 function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
   const portRaw = getFlagValue(args, '--port');
   if (portRaw !== undefined) {
@@ -121,6 +121,8 @@ function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
 
 /** 解析 ki mcp 的命令行参数（无 --http 时走 stdio，行为不变） */
 function parseMcpArgs(args: string[]): McpCliOptions {
+  // --status 仅为弃用别名（已改为 `ki mcp status` 子命令，分发在 startMcpServer 中提前 return）；
+  // 保留在 known 里是为了让 `--http --status` 这类混写不被 detectUnknownFlags 误报未知参数。
   const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status', '--web', '--no-web', '--daemon'];
   detectUnknownFlags(args, known, ['--host', '--port', '--token', '--allowed-hosts'], MCP_HELP);
 
@@ -510,8 +512,8 @@ const RESTART_READY_HEARTBEAT_MS = 5_000;
 /**
  * 等待重启后的新实例就绪（healthz ok）。
  * - 子进程在启动阶段退出 / spawn 失败 → fail-loud（复用 bin/ki.mjs 直启探测的语义，补齐 restart 链路缺口）
- * - 就绪 → 返回 true（此时新实例 lock 已写，后续 --status 目标解析正确）
- * - 超时 → 返回 false（不判死，调用方以"仍在启动中"提示收尾，--status 兜底）
+ * - 就绪 → 返回 true（此时新实例 lock 已写，后续 status 目标解析正确）
+ * - 超时 → 返回 false（不判死，调用方以"仍在启动中"提示收尾，status 兜底）
  */
 async function waitForRestartReady(child: ChildProcess, host: string, port: number): Promise<boolean> {
   // 用对象包装承载闭包赋值（TS 不追踪回调内的直接变量赋值收窄）
@@ -657,7 +659,7 @@ async function runRestartCommand(args: string[]): Promise<void> {
   const child = spawnMcpDaemon(spawnArgs);
 
   // 就绪等待（bug 修复）：此前 spawn 后立即 ok:true，新实例尚在 jiti 冷启动/预检阶段，
-  // lock 未写、healthz 未服务——紧随的 --status 读不到 lock 回退默认端口（探错地址）报
+  // lock 未写、healthz 未服务——紧随的 status 读不到 lock 回退默认端口（探错地址）报
   // running:false。现等待 healthz 就绪再返回；子进程早期退出则 fail-loud 暴露真实失败。
   const ready = await waitForRestartReady(child, probeHost(host), port);
 
@@ -672,7 +674,7 @@ async function runRestartCommand(args: string[]): Promise<void> {
         stopped: report.stopped,
         cleanedLocks: report.cleanedLocks,
         hint: !ready
-          ? `已后台重启，但 ${RESTART_READY_TIMEOUT_MS / 1000}s 内未就绪（可能仍在启动），请稍后执行 ki mcp --status 确认。`
+          ? `已后台重启，但 ${RESTART_READY_TIMEOUT_MS / 1000}s 内未就绪（可能仍在启动），请稍后执行 ki mcp status 确认。`
           : nothing
           ? '未发现运行中的实例，已直接后台启动并就绪（幂等）。'
           : '已后台重启 kisearch HTTP 服务（daemon 模式），新实例已就绪。',
@@ -697,24 +699,27 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
-  // ─── 裸参数（positional）校验：仅允许 stop / token / restart 三个子命令 ───
-  // 其他裸参数（如误输入 status 而非 --status）在 detectUnknownFlags 拦截不到
-  //（它只扫 -- 前缀），若不校验会被静默忽略并直接启动 stdio 服务（NEG-01）。
-  // 注意：必须跳过 flag 的分离值（--host 127.0.0.1 中的 127.0.0.1），
-  // 否则会把合法 flag 值误判为裸参数（P1 回归）。
+  // ─── 裸参数（positional）校验：仅允许 status / stop / token / restart 四个子命令 ───
+  // 其他裸参数在 detectUnknownFlags 拦截不到（它只扫 -- 前缀），若不校验会被静默忽略
+  // 并直接启动 stdio 服务（NEG-01）。
+  // 注意：必须跳过「带值 flag」的分离值（--host 127.0.0.1 中的 127.0.0.1），
+  // 否则会把合法 flag 值误判为裸参数（P1 回归）。但只有 valueFlags 里的 flag 才有分离值：
+  // 布尔 flag（--http / --web / --no-web / --daemon …）后面紧跟的裸 token 必须被识别为子命令，
+  // 否则 `ki mcp --http status` 会被漏判成"无子命令"而直接启动服务。
   // 单横线短 flag（-status 等）同样拦截：-h 已在上方 return，此处出现的任何 -xxx 均为未知。
-  const knownPositionals = ['stop', 'token', 'restart'];
+  const valueFlags = new Set(['--host', '--port', '--token', '--allowed-hosts']);
+  const knownPositionals = ['status', 'stop', 'token', 'restart'];
   let positional: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
       // 分离值形式：--flag <value> 时 value 不是 flag，跳过
-      if (!a.includes('=') && i + 1 < argv.length && !argv[i + 1].startsWith('-')) i++;
+      if (!a.includes('=') && valueFlags.has(a) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) i++;
       continue;
     }
     if (a.startsWith('-')) {
       // 未知短 flag（如 -status）：-h 已提前处理，此处应为非法输入
-      const tip = a === '-status' ? '，您是否想输入 --status（注意双横线前缀）？' : '';
+      const tip = a === '-status' ? '，您是否想输入 ki mcp status（子命令写法，不带横线）？' : '';
       process.stderr.write(MCP_HELP + '\n');
       failJson(`未知参数 ${a}${tip}`, 'UNKNOWN_OPTION');
     }
@@ -722,9 +727,8 @@ export async function startMcpServer(): Promise<void> {
     break;
   }
   if (positional !== undefined && !knownPositionals.includes(positional)) {
-    const tip = positional === 'status' ? '，您是否想输入 --status（注意带 -- 前缀）？' : '';
     process.stderr.write(MCP_HELP + '\n');
-    failJson(`未知参数 ${positional}${tip}`, 'UNKNOWN_OPTION');
+    failJson(`未知参数 ${positional}`, 'UNKNOWN_OPTION');
   }
 
   // ─── ki mcp token <generate|reset>：托管 Token 管理，不启动服务、跳过预检 ───
@@ -733,12 +737,17 @@ export async function startMcpServer(): Promise<void> {
     return;
   }
 
-  // ─── ki mcp --status：只读诊断，读 lock + 探活，跳过预检与启动（NEG-01/02） ───
-  if (argv.includes('--status')) {
+  // ─── ki mcp status：只读诊断，读 lock + 探活，跳过预检与启动（NEG-01/02） ───
+  // 旧写法 `--status` 保留为弃用别名（脚本/IDE 配置里可能仍在用），打一行提示引导迁移。
+  // 判定用 positional 而非 argv[0]：`ki mcp --host x status` 也应命中（否则会被静默忽略并启动 stdio 服务）。
+  if (positional === 'status' || argv.includes('--status')) {
+    if (positional !== 'status') {
+      process.stderr.write('提示：--status 已改为子命令写法，请改用 ki mcp status（旧写法本次仍可用）。\n');
+    }
     const config = loadConfig();
     const httpCfg = config.mcp?.http ?? {};
     // 探测目标解析（与 restart 语义对齐）：CLI 显式 > lock（pid 存活的运行值）> 配置 > 默认。
-    // 此前 status 只走 CLI > 配置 > 默认——daemon 启动在非默认地址时，裸 --status 探错地址
+    // 此前 status 只走 CLI > 配置 > 默认——daemon 启动在非默认地址时，裸 status 探错地址
     // 报 running:false，而输出里明明展示了 lock（target 与 lock 同屏不一致却不交叉验证）。
     // 陈旧 lock 防护：pid 已死的 lock 不参与回退（否则服务跑在 config 地址时反而探错）。
     const lock = readHttpLock();

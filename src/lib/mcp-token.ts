@@ -338,7 +338,7 @@ export function isReadOnlyFieldInvalid(record: TokenRecord): boolean {
   return value !== undefined && typeof value !== 'boolean';
 }
 
-/** 查询 Token 记录数量（供 --status 诊断输出，不含明文） */
+/** 查询 Token 记录数量（供 `ki mcp status` 诊断输出，不含明文） */
 export function tokenCount(filePath = getTokensPath()): number {
   return listTokens(filePath).length;
 }

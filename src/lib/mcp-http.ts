@@ -610,7 +610,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // /healthz：免鉴权，供单例探活与运维排查
     if (req.method === 'GET' && url.pathname === '/healthz') {
       // healthz 是配置异常/身份漂移时唯一的诊断入口，绝不允许因 loadConfig 抛错而 500：
-      // 否则配置写坏时 ki mcp --status 会报 running:false，而 daemon 其实活着，
+      // 否则配置写坏时 ki mcp status 会报 running:false，而 daemon 其实活着，
       // 与「漂移/异常时运维必须拿得到诊断端点」的设计意图相反。
       // 同时只调一次 loadConfig：连调两次可能拿到不同快照（配置正在变更）。
       let fingerprint: string | undefined;
@@ -1081,7 +1081,7 @@ export function describeListenError(
   }
 }
 
-/** 输出 ki mcp 运行状态（ki mcp --status）：读取 HTTP lock + stdio lock + 探活，便于确认实例全貌（NEG-01/02） */
+/** 输出 ki mcp 运行状态（ki mcp status）：读取 HTTP lock + stdio lock + 探活，便于确认实例全貌（NEG-01/02） */
 export async function printHttpStatus(host: string, port: number): Promise<void> {
   let lock: unknown = null;
   try {

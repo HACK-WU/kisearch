@@ -153,7 +153,7 @@ export async function callDaemon<T>(
         reject(new Error(
           `daemon RPC 超时（${operation}，${Math.min(timeoutMs, MAX_TIMEOUT_MS)}ms）。`
           + '任务可能仍在 daemon 侧继续执行：请勿清理 import.lock 或重复提交，'
-          + '可用 ki mcp --status 查看队列状态，或对该任务传 timeoutMs=0 取消客户端超时。',
+          + '可用 ki mcp status 查看队列状态，或对该任务传 timeoutMs=0 取消客户端超时。',
         ));
       }, Math.min(timeoutMs, MAX_TIMEOUT_MS));
     }
@@ -199,7 +199,7 @@ export async function callDaemon<T>(
       // 无客户端超时的长任务靠这里感知 daemon 死亡：不能只说“无法连接”，
       // 否则用户不知道已提交的任务是否还在跑。
       reject(new Error(
-        `无法连接 daemon：${err.message}；请检查 ki mcp --status。`
+        `无法连接 daemon：${err.message}；请检查 ki mcp status。`
         + (timer === null ? '本次为无超时任务，连接中断前提交的操作可能已部分执行，重试前请先核对目标 scope 的当前状态。' : ''),
       ));
     });
@@ -207,7 +207,7 @@ export async function callDaemon<T>(
       if (settled) return;
       finish();
       reject(new Error(
-        `daemon RPC 连接已关闭（${operation}）；请检查 ki mcp --status。`
+        `daemon RPC 连接已关闭（${operation}）；请检查 ki mcp status。`
         + (timer === null ? '连接中断前任务可能已部分执行，重试前请先核对目标 scope 的当前状态。' : ''),
       ));
     });
@@ -271,7 +271,7 @@ export async function ensureDaemon(): Promise<void> {
     if (e.message.includes('ping timeout')) {
       throw new Error(
         `daemon 在 ${PING_TIMEOUT_MS}ms 内无响应（可能正在执行同步备份/还原等阻塞操作）；`
-        + '请稍后重试，或用 ki mcp --status 查看队列与在跑操作。',
+        + '请稍后重试，或用 ki mcp status 查看队列与在跑操作。',
       );
     }
     // ENOENT / ECONNREFUSED：socket 不存在或无监听者 → 自动拉起
