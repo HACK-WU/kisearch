@@ -11,6 +11,10 @@ import {
   buildTaskDetail, operationLabel, sourceLabel, stateLabel,
 } from '@/lib/taskDetailModel';
 import { buildTaskListRow } from '@/lib/taskListModel';
+import {
+  DEFAULT_TASK_SORT, TASK_FILTERS, countTasks, nextTaskSort, queryTasks, taskFilterLabel,
+  type TaskFilter, type TaskSortKey, type TaskSortState,
+} from '@/lib/taskQueryModel';
 import { ItemTree } from '@/components/TaskDetailParts';
 import { ReadOnlyPathTree } from '@/components/ReadOnlyPathTree';
 import { buildDataSourcePendingTree } from '@/lib/dataSourceDetailModel';
@@ -21,10 +25,22 @@ import { DetailDrawer, DetailSection, type DetailStatusTone } from '@/components
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
 
-type Filter = 'all' | 'running' | 'failed' | 'recent';
-
 /** 客户端分页（与数据源页同口径：默认 10，可选 50 / 100） */
 const PAGE_SIZE_DEFAULT = 10;
+/** 每页条数可选项（分页条常显，单页也能改回 10） */
+const PAGE_SIZE_OPTIONS = [10, 50, 100] as const;
+/** 页码按钮：单页 1 个；>7 页时中段折叠成 …，保证分页条不换行 */
+function pageNumbers(page: number, pageCount: number): Array<number | '…'> {
+  const items: Array<number | '…'> = [];
+  for (let i = 1; i <= pageCount; i += 1) {
+    if (pageCount > 7 && i > 2 && i < pageCount - 1 && Math.abs(i - page) > 1) {
+      if (items[items.length - 1] !== '…') items.push('…');
+      continue;
+    }
+    items.push(i);
+  }
+  return items;
+}
 
 /**
  * 阶段中文映射 / 索引就绪文案 / 状态与操作文案 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
@@ -520,7 +536,12 @@ function TaskActions({
 }
 
 export function TasksPage(): JSX.Element {
-  const [filter, setFilter] = useState<Filter>('all');
+  /** 筛选态：卡片即入口（全部 / 失败·未知 / 部分完成 / 进行中·排队） */
+  const [filter, setFilter] = useState<TaskFilter>('all');
+  /** 排序：默认开始时间降序（最新在前），与表头箭头同一状态 */
+  const [sort, setSort] = useState<TaskSortState>(DEFAULT_TASK_SORT);
+  /** 搜索：支持知识库 / 任务 / 状态 / 错误 */
+  const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const { id: routeId } = useParams<{ id?: string }>();
@@ -537,12 +558,28 @@ export function TasksPage(): JSX.Element {
     retry: 1,
   });
   const tasks = query.data?.tasks ?? [];
-  const visibleTasks = useMemo(() => tasks.filter((task) => {
-    if (filter === 'running') return task.state === 'queued' || task.state === 'running';
-    if (filter === 'failed') return task.state === 'failed' || task.state === 'unknown';
-    if (filter === 'recent') return task.state !== 'queued' && task.state !== 'running';
-    return true;
-  }), [tasks, filter]);
+  /**
+   * 行视图按 id 缓存：卡片计数、列表渲染、搜索摘要共用同一份 `buildTaskListRow`，
+   * 避免「卡片按一个口径计数、列表按另一个口径过滤」。
+   */
+  const rows = useMemo(
+    () => new Map(tasks.map((task) => [task.id, buildTaskListRow(task)])),
+    [tasks],
+  );
+  const visibleTasks = useMemo(() => queryTasks({
+    tasks,
+    filter,
+    query: search,
+    sort,
+    describe: (task) => {
+      const row = rows.get(task.id);
+      return {
+        summary: row?.resultSummary ?? '',
+        sourceText: row?.sourceLabel ?? '',
+        operationText: row?.operationLabel ?? '',
+      };
+    },
+  }), [tasks, rows, filter, search, sort]);
   const pageCount = Math.max(1, Math.ceil(visibleTasks.length / pageSize));
   // 收敛帧不能直接读超界页码：下面的 effect 回写要到下一次渲染才生效，
   // 直接用 page 切片会渲染一帧「有表头无行」的空表（空态判据看的是 visibleTasks）
@@ -570,9 +607,39 @@ export function TasksPage(): JSX.Element {
     const target = Math.floor(index / pageSize) + 1;
     setPage((prev) => (prev === target ? prev : target));
   }, [selectedId, visibleTasks, pageSize]);
-  const runningCount = tasks.filter((task) => task.state === 'queued' || task.state === 'running').length;
-  const failedCount = tasks.filter((task) => task.state === 'failed' || task.state === 'unknown').length;
-  const partialCount = tasks.filter((task) => task.state === 'partial').length;
+  /**
+   * 卡片数字：与列表过滤同一判据（`taskQueryModel.countTasks`），避免「卡上写 3、点进去 2 条」。
+   * ★ `all` 必须走服务端 total：列表只加载最近 200 条，被截断时 `tasks.length` 会小于真实总数，
+   *   而页头写的也是 total —— 两处不一致会让用户以为任务丢了（分页条另有截断说明）。
+   */
+  const counts = useMemo(() => ({
+    all: query.data?.total ?? tasks.length,
+    failed: countTasks(tasks, 'failed'),
+    partial: countTasks(tasks, 'partial'),
+    running: countTasks(tasks, 'running'),
+  }), [tasks, query.data?.total]);
+  /** 是否有生效中的筛选 / 搜索：决定空态文案与「查看全部任务」入口 */
+  const filtering = filter !== 'all' || search.trim().length > 0;
+  const clearFilters = (): void => {
+    setFilter('all');
+    setSearch('');
+    setPage(1);
+  };
+  const changeSort = (key: TaskSortKey): void => {
+    setSort((prev) => nextTaskSort(prev, key));
+    setPage(1);
+  };
+  /** 再点一次已选中的卡回到「全部」（少一个专门入口）；「全部」卡自身不弹回 */
+  const pickFilter = (key: TaskFilter): void => {
+    setFilter((prev) => (prev === key && key !== 'all' ? 'all' : key));
+    setPage(1);
+  };
+  const sortArrow = (key: TaskSortKey): string => (
+    sort.key === key ? (sort.dir === 'asc' ? '↑' : '↓') : '↕'
+  );
+  const ariaSortOf = (key: TaskSortKey): 'ascending' | 'descending' | 'none' => (
+    sort.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+  );
 
   useEffect(() => {
     if (selectedId) {
@@ -604,35 +671,92 @@ export function TasksPage(): JSX.Element {
     <div className="ki-tasks-page">
       <div className="ki-page-head">
         <div>
-          <p>查看网页导入、CLI 导入与向量重建 · 最近任务保留 1 小时</p>
+          {/* 总数并入副标题：统计卡全部让给筛选（用户 2026-10-30）。自动刷新间隔与顶栏轮询同源（3s / 15s）。 */}
+          <p>
+            查看网页导入、CLI 导入与向量重建 · 共 {query.data?.total ?? 0} 个任务 · 最近任务保留 1 小时
+          </p>
         </div>
         <div className="ki-task-page-actions">
-          <div className="ki-task-filters" role="tablist" aria-label="任务筛选">
-            {([['all', '全部'], ['running', '进行中'], ['failed', '失败'], ['recent', '最近结束']] as const).map(([key, label]) => (
-              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'ki-task-filter ki-task-filter--active' : 'ki-task-filter'} onClick={() => { setFilter(key); setPage(1); }}>
-                {label}
-              </button>
-            ))}
-          </div>
           <button className="ki-btn ki-btn--secondary" onClick={() => void query.refetch()} disabled={query.isFetching}>
             {query.isFetching ? '刷新中…' : '刷新任务'}
           </button>
         </div>
       </div>
 
-      <div className="ki-task-summary-row">
-        <div className="ki-task-summary"><b>{runningCount}</b><span>运行中 / 排队中</span></div>
-        <div className="ki-task-summary ki-task-summary--failure"><b>{failedCount}</b><span>失败 / 状态未知</span></div>
-        <div className="ki-task-summary ki-task-summary--partial"><b>{partialCount}</b><span>部分完成</span></div>
-        <div className="ki-task-summary"><b>{query.data?.total ?? 0}</b><span>可见任务</span></div>
+      {/* 卡片即筛选：整卡是 button，命中态用 aria-pressed + 主色描边（Tab 可达，不只靠 hover） */}
+      <div className="ki-task-summary-row" role="group" aria-label="任务筛选">
+        {TASK_FILTERS.map((def) => {
+          const active = filter === def.key;
+          const tone = def.key === 'failed'
+            ? ' ki-task-summary--failure'
+            : def.key === 'partial' ? ' ki-task-summary--partial' : '';
+          return (
+            <button
+              type="button"
+              key={def.key}
+              className={`ki-task-summary ki-task-summary--filter${tone}${active ? ' is-active' : ''}`}
+              aria-pressed={active}
+              onClick={() => pickFilter(def.key)}
+            >
+              <b>{counts[def.key]}</b>
+              <span>
+                {def.label}
+                <small className="ki-task-summary__hint">
+                  {active ? '✓ 当前筛选' : `点击筛选 · ${def.hint}`}
+                </small>
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       <section className="ki-card ki-task-list-card">
         <div className="ki-card__body ki-card__body--flush">
+          {/* 工具条：左＝当前筛选 + 计数，右＝搜索（支持状态词）+ 排序提示。筛选与列表同容器，消除原先 111px 断联。 */}
+          <div className="ki-task-toolbar">
+            {/* 长关键词由 CSS 截断（否则撑破工具条），完整内容进 title */}
+            <span
+              className="ki-task-toolbar__count"
+              aria-live="polite"
+              title={search.trim() ? `搜索「${search.trim()}」· ${taskFilterLabel(filter)} · ${visibleTasks.length} 个` : undefined}
+            >
+              {search.trim() ? `搜索「${search.trim()}」· ` : ''}
+              {taskFilterLabel(filter)} · <b>{visibleTasks.length}</b> 个
+            </span>
+            <span className="ki-task-toolbar__spacer" />
+            <label className="ki-task-search">
+              <span className="ki-task-search__icon" aria-hidden="true">⌕</span>
+              <input
+                id="search-input"
+                type="search"
+                value={search}
+                onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+                placeholder="搜索知识库 / 任务 / 状态 / 错误…"
+                aria-label="搜索任务（支持状态，如「失败」「进行中」）"
+              />
+            </label>
+            <span className="ki-task-toolbar__hint">点击表头箭头可排序</span>
+          </div>
           {query.error ? <div className="ki-task-error">无法读取后台任务。请检查服务连接和数据目录权限。</div> : null}
           {query.isPending ? <div className="ki-task-muted">正在读取任务…</div> : null}
           {!query.error && !query.isPending && visibleTasks.length === 0 ? (
-            <div className="ki-empty"><div><h3>暂无任务</h3><p>CLI 或网页启动导入、向量重建后，任务会自动出现在这里。</p></div></div>
+            <div className="ki-empty">
+              <div>
+                <h3>{filtering ? '当前筛选下没有任务' : '暂无任务'}</h3>
+                <p>
+                  {filtering
+                    ? `筛选：${taskFilterLabel(filter)}${search.trim() ? ` · 关键词「${search.trim()}」` : ''}；共 ${tasks.length} 个任务在其它筛选条件下可见。`
+                    : 'CLI 或网页启动导入、向量重建后，任务会自动出现在这里。'}
+                </p>
+                {filtering ? (
+                  <div className="ki-empty__actions">
+                    <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" onClick={clearFilters}>
+                      查看全部任务
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
           ) : null}
           {visibleTasks.length > 0 ? (
             <table className="ki-task-table" aria-label="任务列表">
@@ -643,13 +767,24 @@ export function TasksPage(): JSX.Element {
                   <th scope="col" className="ki-task-col--scope">知识库</th>
                   <th scope="col" className="ki-task-col--source">来源</th>
                   <th scope="col" className="ki-task-col--result">结果摘要</th>
-                  <th scope="col" className="ki-task-col--time">开始时间</th>
-                  <th scope="col">持续时间</th>
+                  {/* 排序下沉到表头：箭头就地跟在列名后（当前列实心 ↑/↓，其它列灰色 ↕） */}
+                  <th scope="col" className="ki-task-col--time" aria-sort={ariaSortOf('start')}>
+                    <button type="button" className="ki-task-sort" onClick={() => changeSort('start')} title="按开始时间排序">
+                      开始时间<span className="ki-task-sort__arrow" aria-hidden="true">{sortArrow('start')}</span>
+                    </button>
+                  </th>
+                  <th scope="col" aria-sort={ariaSortOf('duration')}>
+                    <button type="button" className="ki-task-sort" onClick={() => changeSort('duration')} title="按持续时间排序">
+                      <span className="ki-sort-full">持续时间</span><span className="ki-sort-short">耗时</span>
+                      <span className="ki-task-sort__arrow" aria-hidden="true">{sortArrow('duration')}</span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {pageTasks.map((task) => {
-                  const row = buildTaskListRow(task);
+                  // 复用卡片计数那一份行视图（同一口径），缺失时兜底重算
+                  const row = rows.get(task.id) ?? buildTaskListRow(task);
                   const active = selectedId === task.id;
                   const openTask = (): void => {
                     navigate(`/tasks/${encodeURIComponent(task.id)}`);
@@ -718,14 +853,13 @@ export function TasksPage(): JSX.Element {
               </tbody>
             </table>
           ) : null}
-          {/* 客户端分页（照搬数据源页）：单页时不渲染，但以下两种情况必须保留 ——
-              ① `pageSize !== 默认`：否则用户改成 100 后页数变 1，选择器一起消失、改不回 10；
-              ② 列表被截断（truncated）：否则切到「失败」只剩几篇时整条说明一起消失，
-                 用户会以为列表就是全部任务。 */}
-          {visibleTasks.length > 0 && (pageCount > 1 || pageSize !== PAGE_SIZE_DEFAULT || truncated) ? (
+          {/* 客户端分页（照搬数据源页）+ 每页条数选择器。
+              ★ 一直显示（用户 2026-10-30 要求）：单页 / 空态也给分页条 ——
+                否则筛选后只剩 3 条时整条消失，页面高度跳变、每页条数也改不回来。 */}
+          {!query.error && !query.isPending ? (
             <div className="ki-ds-pager" role="navigation" aria-label="任务分页">
               <span className="ki-ds-pager__info" aria-live="polite">
-                第 {currentPage} / {pageCount} 页 · 共 {visibleTasks.length} 个
+                第 {currentPage} / {pageCount} 页 · 共 {visibleTasks.length} 个任务
                 {/* 后端 total 是全部可见任务数，而列表只取最近 200 条：两者不一致时说明差异，
                     否则页头计数与可翻页条数对不上（用户只会觉得少了任务）。
                     文案必须给每个数字贴标签：筛选后「共 5 个」与「200 条 / 350 个」并排时，
@@ -735,17 +869,29 @@ export function TasksPage(): JSX.Element {
               <label className="ki-ds-pager__size">
                 每页
                 <select
+                  id="page-size"
                   value={pageSize}
                   onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}
                   aria-label="每页条数"
                 >
-                  <option value={10}>10</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
+                  {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size}</option>)}
                 </select>
                 条
               </label>
               <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={currentPage <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
+              {pageNumbers(currentPage, pageCount).map((item, index) => (item === '…'
+                ? <span key={`gap-${index}`} className="ki-ds-pager__gap">…</span>
+                : (
+                  <button
+                    type="button"
+                    key={item}
+                    className="ki-ds-pager__page"
+                    aria-current={item === currentPage ? 'page' : undefined}
+                    onClick={() => setPage(item)}
+                  >
+                    {item}
+                  </button>
+                )))}
               <button type="button" className="ki-btn ki-btn--secondary ki-btn--small" disabled={currentPage >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
             </div>
           ) : null}

@@ -120,11 +120,15 @@ const CONFLICT_MODE_LABEL: Record<string, string> = {
   skip: '跳过同名',
 };
 
+/**
+ * 来源类型中文名（2026-10-30：`scheduler` 由「定时」改为「定时同步」——
+ * 用户在来源列按「类型」识别，两个字既看不出是谁触发的、也和 CLI 的徽标同色）。
+ */
 const SOURCE_LABEL: Record<TaskRecord['source'], string> = {
   web: '网页',
   cli: 'CLI',
   daemon: '后台服务',
-  scheduler: '定时',
+  scheduler: '定时同步',
 };
 
 /** 来源中文名（列表行与详情共用，避免两套映射） */

@@ -3261,11 +3261,66 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-summary span { color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-task-summary--failure b { color: var(--ki-color-danger); }
 .ki-task-summary--partial b { color: var(--ki-color-warning); }
+/* ── 卡片即筛选（2026-10-30 用户要求）──
+   整卡是 <button>：hover 主色描边、命中态 aria-pressed + 浅主色底 + 内描边，
+   Tab 可达、Enter/Space 可触发（不只靠 hover）。深色下用实色令牌，不走 color-mix。 */
+.ki-task-summary--filter {
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+  transition: border-color var(--ki-motion-fast), background var(--ki-motion-fast), box-shadow var(--ki-motion-fast);
+}
+.ki-task-summary--filter:hover { border-color: var(--ki-color-primary); background: var(--ki-color-bg-secondary); }
+.ki-task-summary--filter:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
+/* 选中态（2026-10-30 用户反馈「颜色太亮」后压淡）：
+   原先是 primary-soft 实色底 + border 与 inset 描边叠成 2px 实线，整块偏重。
+   现在 = 8% 主色底（比 primary-soft 淡一档）+ 柔化的 1px 边、去掉内描边。
+   ★ 深色必须单独给值：深色下 8% 混色几乎无差（见 2026-10-29 踩坑记录）。 */
+.ki-task-summary--filter.is-active {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 55%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, var(--ki-color-surface));
+}
+[data-theme="dark"] .ki-task-summary--filter.is-active {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 42%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-primary) 16%, var(--ki-color-surface));
+}
+.ki-task-summary--filter.is-active span { color: var(--ki-color-primary); font-weight: 600; }
+.ki-task-summary__hint {
+  display: block; margin-top: 2px;
+  color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); font-weight: 400;
+}
+.ki-task-summary--filter.is-active .ki-task-summary__hint { color: var(--ki-color-primary); }
 .ki-task-list-card { min-width: 0; }
 .ki-task-page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
-.ki-task-filters { display: flex; align-items: center; gap: 4px; }
-.ki-task-filter { padding: 5px 9px; border: 0; border-radius: var(--ki-radius-sm); background: transparent; color: var(--ki-color-text-muted); font: inherit; font-size: var(--ki-font-size-xs); cursor: pointer; }
-.ki-task-filter:hover, .ki-task-filter--active { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
+
+/* ── 列表卡工具条（2026-10-30）──
+   筛选从页头搬进卡片后，工具条承担「当前筛选 + 结果计数 + 搜索 + 排序提示」；
+   搜索支持状态关键词（输入「失败」「进行中」即可过滤）。 */
+.ki-task-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+  border-radius: var(--ki-radius-lg) var(--ki-radius-lg) 0 0;
+}
+/* 计数里带搜索关键词，长文本必须能截断：否则 flex 项按内容撑到近千像素，
+   把搜索框挤到中间、整条工具条换行（2026-10-30 实测 760/375 直接溢出）。 */
+.ki-task-toolbar__count {
+  min-width: 0; max-width: 48%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm);
+}
+.ki-task-toolbar__count b { color: var(--ki-color-text); font-variant-numeric: tabular-nums; }
+.ki-task-toolbar__spacer { flex: 1 1 24px; }
+.ki-task-toolbar__hint { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); white-space: nowrap; }
+.ki-task-search {
+  display: flex; align-items: center; gap: 6px; flex: 0 1 300px; min-width: 200px;
+  padding: 0 10px; height: 32px; border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border-strong); background: var(--ki-color-surface);
+}
+.ki-task-search:focus-within { border-color: var(--ki-color-primary); box-shadow: 0 0 0 2px var(--ki-color-primary-soft); }
+.ki-task-search input {
+  flex: 1 1 auto; min-width: 0; border: 0; outline: 0; background: transparent;
+  color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-sm);
+}
+.ki-task-search__icon { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
 .ki-task-muted { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-task-state { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 20px; padding: 1px 7px; border-radius: var(--ki-radius-tag); color: var(--ki-color-text-muted); background: var(--ki-color-bg-muted); font-size: var(--ki-font-size-xs); font-weight: 650; }
 .ki-task-state--running { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
@@ -3285,13 +3340,33 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   background: var(--ki-color-bg-secondary);
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
 }
+/* 表头排序（2026-10-30 用户要求「箭头和列名挨在一起」）：箭头就地跟在列名后，
+   当前列实心 ↑/↓（主色），其它列灰色 ↕ 提示可点；不额外占工具条空间。 */
+.ki-task-sort {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin: -3px -5px; padding: 3px 5px; border: 0; border-radius: 4px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap;
+}
+.ki-task-sort:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-task-sort:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 0; }
+.ki-task-sort__arrow { font-size: 10px; line-height: 1; opacity: 0.38; }
+.ki-task-sort:hover .ki-task-sort__arrow { opacity: 0.7; }
+.ki-task-table__head th[aria-sort="ascending"] .ki-task-sort,
+.ki-task-table__head th[aria-sort="descending"] .ki-task-sort { color: var(--ki-color-primary); }
+.ki-task-table__head th[aria-sort="ascending"] .ki-task-sort__arrow,
+.ki-task-table__head th[aria-sort="descending"] .ki-task-sort__arrow { opacity: 1; }
+/* 窄屏列宽放不下「持续时间」4 字时换短标签（≤1199 生效，见下方断点） */
+.ki-sort-short { display: none; }
+
 .ki-task-table__head th:nth-child(1) { width: 9%; }
 .ki-task-table__head th:nth-child(2) { width: 15%; }
 .ki-task-table__head th:nth-child(3) { width: 14%; }
 .ki-task-table__head th:nth-child(4) { width: 10%; }
-.ki-task-table__head th:nth-child(5) { width: 29%; }
-/* 开始时间要给「10月30日 10:55」整行放得下（约 108px + 左右内距 24px），13% 在 1200 视口会差 6px */
-.ki-task-table__head th:nth-child(6) { width: 14%; }
+.ki-task-table__head th:nth-child(5) { width: 27%; }
+/* 开始时间改 2026-10-30 15:57:55（19 字符 / 12px 自然宽 128px）后需 152px 单元格：
+   14% 在 1200 视口只有 136px 会压到「持续时间」上；16% 在 1200 = 155px 刚好，
+   1440 = 193px 略宽但换来不换行（实测值见 2026-10-30 走查记录） */
+.ki-task-table__head th:nth-child(6) { width: 16%; }
 .ki-task-table__head th:nth-child(7) { width: 9%; }
 .ki-task-table__row { cursor: pointer; }
 .ki-task-table__row td {
@@ -3332,7 +3407,9 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-table__error { color: var(--ki-color-danger-ink); }
 .ki-task-table__result--warn .ki-task-table__summary { color: var(--ki-color-warning); }
 .ki-task-table__result--danger .ki-task-table__summary { color: var(--ki-color-danger-ink); }
-.ki-task-table__time { display: flex; flex-direction: column; gap: 2px; color: var(--ki-color-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 时间列：`2026-10-30 15:57:55` 完整格式（19 字符）。12px 自然宽 128px，
+   14px 需 149px —— 小一号换来整行不换行（用户 2026-10-30 选定 12px） */
+.ki-task-table__time { display: flex; flex-direction: column; gap: 2px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* 列表贴边（与数据源列表同口径）：卡片 body 走 --flush，单元格自带内距 */
 .ki-tasks-page .ki-card__body--flush > .ki-task-muted { padding: 16px 12px; }
 .ki-tasks-page .ki-card__body--flush > .ki-task-error { margin: 12px; }
@@ -3346,10 +3423,14 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-col--source { display: none; }
   .ki-task-table__head th:nth-child(1) { width: 96px; }
   .ki-task-table__head th:nth-child(2) { width: auto; }
-  .ki-task-table__head th:nth-child(5) { width: 35%; }
-  .ki-task-table__head th:nth-child(6) { width: 132px; }
-  .ki-task-table__head th:nth-child(7) { width: 78px; }
+  .ki-task-table__head th:nth-child(5) { width: 33%; }
+  /* 2026-10-30：132 → 152（完整时间戳要 152px）；78 → 84（「耗时 ↕」需 37px + 内距） */
+  .ki-task-table__head th:nth-child(6) { width: 152px; }
+  .ki-task-table__head th:nth-child(7) { width: 84px; }
   .ki-task-table__task-scope { display: block; }
+  /* 「持续时间 ↕」在 84/80px 列里放不下 4 个汉字 + 箭头 → 换短标签 */
+  .ki-sort-full { display: none; }
+  .ki-sort-short { display: inline; }
 }
 /* 结果摘要自然宽 223px（成功/跳过/未完成 + 新增文档 N 篇）：≤880 时无论怎么分列都放不下
    （实测 761 视口表宽 655px，摘要列只有 205px，省略号会把「新增文档 N 篇」吃掉），
@@ -3361,11 +3442,22 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 @media (max-width: 760px) {
   .ki-task-table__head th:nth-child(1) { width: 82px; }
   .ki-task-table__head th:nth-child(2) { width: auto; }
+  /* 完整时间戳 128px + 内距 24px = 152px 是零余量，会贴住「持续时间」；留 12px 余量取 164px。
+     ★ 不再折成两行（旧格式 96px 时的折行兜底已随格式升级移除） */
+  .ki-task-table__head th:nth-child(6) { width: 164px; }
+  .ki-task-table__head th:nth-child(7) { width: 80px; }
+  /* 窄屏：卡片副行与工具条提示挤占空间，直接藏掉（筛选态靠描边仍可辨认） */
+  .ki-task-summary__hint,
+  .ki-task-toolbar__hint { display: none; }
+}
+/* ≤520（375 手机）：82 + 164 + 80 三列固定宽已吃掉整张表（内容区仅 269px），
+   任务列会被压成 0 —— 时间回到两行 + 96px，持续时间列整列隐藏，宽度还给任务列。
+   ★ 这是 375 视口的历史遗留结构问题（任务列本来就只剩 23px），本次先保证「不比改版前更差」。 */
+@media (max-width: 520px) {
   .ki-task-table__head th:nth-child(6) { width: 96px; }
-  .ki-task-table__head th:nth-child(7) { width: 68px; }
-  /* 「10月30日 10:55」自然宽 108px，96px 列内 nowrap 会溢出 24px 压到「持续时间」上
-     （600/700 实测）—— 窄屏折成「10月30日」+「10:55」两行，行高本来就由任务列撑开 */
   .ki-task-table__time { white-space: normal; }
+  .ki-task-table__head th:nth-child(7),
+  .ki-task-table__duration { display: none; }
 }
 /* 明细 / 落点折叠（原生 <details>：零 JS、键盘可达）
    ★ 折叠行必须**自己做标记与焦点态**（2026-10-20 用户截图反馈）：原来只写了
@@ -3565,7 +3657,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-vector-dimension-banner__copy { flex-basis: calc(100% - 42px); }
   .ki-vector-dimension-banner__copy code { overflow-wrap: anywhere; }
   .ki-vector-dimension-banner > button { margin-left: 40px; }
-  .ki-task-filters { flex-wrap: wrap; justify-content: flex-end; }
   .ki-task-summary-row { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -5686,6 +5777,19 @@ select.ki-chat-cfg__ta--select {
   padding: 3px 6px; border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
   background: var(--ki-color-surface); color: var(--ki-color-text); font-size: var(--ki-font-size-xs);
 }
+/* 页码直达（2026-10-30 任务页新增；数据源页只有上一页 / 下一页，未受影响） */
+.ki-ds-pager__page {
+  min-width: 26px; min-height: 26px; padding: 0 7px; border-radius: var(--ki-radius-sm);
+  border: 1px solid transparent; background: transparent; color: var(--ki-color-text-muted);
+  font: inherit; font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.ki-ds-pager__page:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.ki-ds-pager__page:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-ds-pager__page[aria-current="page"] {
+  border-color: var(--ki-color-primary); background: var(--ki-color-primary-soft);
+  color: var(--ki-color-primary); font-weight: 650;
+}
+.ki-ds-pager__gap { padding: 0 2px; }
 
 /* ═══ 详情抽屉（数据源详情 / 任务详情共用）═══
    视觉基线 = 数据源详情（2026-10-22 定稿）：右侧滑入、头部两行、三材质分区。
@@ -7279,7 +7383,9 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-sched-next--warn { color: var(--ki-color-warning); }
 .ki-ds-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.ki-task-source-badge--scheduler { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+/* 定时同步（2026-10-30）：原先与 CLI 同为实心浅绿，两种来源在来源列分不出来 ——
+   改紫色系（自动 / 调度语义），与 网页(灰) / CLI(绿) / 后台服务(黄) 四色可辨。 */
+.ki-task-source-badge--scheduler { color: var(--ki-color-purple); background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); }
 
 /* 弹窗 520 → 560（2026-10-29）：88px 标签列 + 控件后剩余宽度才够放
    120/110 的间隔控件与 250 的时间控件，不再被挤成 96px 小框。

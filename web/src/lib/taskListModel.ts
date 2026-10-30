@@ -13,13 +13,13 @@ export interface TaskListRowView {
   operationLabel: string;
   scope: string;
   sourceLabel: string;
-  /** 摘要单行：成功/跳过/未完成，有新建文档快照时以 ` · 新增文档 N 篇` 续在后面 */
+  /** 摘要单行：成功/跳过/未完成，有新建文档快照时以 ` · 新增文档 N 篇` 续在后面；全 0 时压缩为「无变更」 */
   resultSummary: string;
   /** 失败/未知时的短错误；与摘要并列展示，不互相覆盖 */
   resultError?: string;
   resultTone: 'normal' | 'warn' | 'danger';
   timeLabel: string;
-  /** 完整时间（悬停提示；列表只显示月/日 时:分） */
+  /** 悬停提示：与开始时间不同的创建时间（排队过的任务）才额外补充，否则同 `timeLabel` */
   timeTitle: string;
   /** 持续时间（终态给实际耗时；运行中/排队中给状态或「—」） */
   durationLabel: string;
@@ -27,15 +27,29 @@ export interface TaskListRowView {
   ariaLabel: string;
 }
 
-function formatListTime(ts?: number): { label: string; title: string } {
-  if (!ts) return { label: '—', title: '—' };
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+
+/**
+ * 列表时间：`2026-10-30 15:57:55`（用户 2026-10-30 指定，需精确到秒）。
+ * ★ 只改列表，不动详情抽屉：详情「时间」段是 163px 双列栅格，日期由 hint 承载，
+ *   换成完整格式会折行（详情口径见 `taskDetailModel.timeRows`）。
+ */
+function formatListTimeMs(ts?: number): string {
+  if (!ts) return '—';
   const date = new Date(ts);
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  return {
-    // 月日中文写法（用户 2026-10-26：`10/26` 看起来像分数）：`10月26日 15:57`
-    label: `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`,
-    title: new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' }).format(ts),
-  };
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+    + ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+function formatListTime(task: TaskRecord): { label: string; title: string } {
+  const started = task.startedAt;
+  const created = task.createdAt;
+  const label = formatListTimeMs(started ?? created);
+  // 排队过的任务：开始时间与创建时间不同，悬停补出创建时间；否则提示与正文相同没有意义
+  const title = started !== undefined && created !== undefined && started !== created
+    ? `创建 ${formatListTimeMs(created)} · 开始 ${formatListTimeMs(started)}`
+    : label;
+  return { label, title };
 }
 
 function formatDuration(ms: number): string {
@@ -62,12 +76,28 @@ function progressPercentOf(task: TaskRecord): number | null {
   return Math.min(100, Math.round((progress.done / progress.total) * 100));
 }
 
+/**
+ * 「无变更」压缩（用户 2026-10-30 Q5 选定）：
+ * 导入类任务全部计数为 0 时，`成功 0 · 跳过 0 · 未完成 0 · 新增文档 0 篇` 只会占满整列。
+ * ★ 异常终态**不压缩**：失败 / 状态未知 / 已取消 —— 否则「快照还原 · 已取消」显示成「无变更」，
+ *   把中断伪装成正常结束（取消是用户主动中断，不是「跑完没变化」）。
+ * ★ 没有 `result.files` 的行（运行中 / 排队中 / 旧记录）走进度或阶段文案，不参与压缩。
+ */
+function isNoChangeSummary(task: TaskRecord): boolean {
+  if (task.state === 'failed' || task.state === 'unknown' || task.state === 'cancelled') return false;
+  const files = task.result?.files;
+  if (!files) return false;
+  if (files.completed !== 0 || files.skipped !== 0 || files.incomplete !== 0) return false;
+  const created = task.result?.createdTotal ?? task.result?.created?.length ?? 0;
+  return created === 0;
+}
+
 export function buildTaskListRow(task: TaskRecord): TaskListRowView {
-  const time = formatListTime(task.startedAt ?? task.createdAt);
+  const time = formatListTime(task);
   const created = taskCreatedLine(task);
   // 摘要与新建文档数同一行（2026-10-30 用户要求横排）
   const base = taskSummaryLine(task);
-  const summary = created ? `${base} · ${created}` : base;
+  const summary = isNoChangeSummary(task) ? '无变更' : (created ? `${base} · ${created}` : base);
   const error = task.error?.trim() || undefined;
   const operation = operationLabel(task.operation);
   const source = sourceLabel(task.source);
