@@ -18,11 +18,15 @@ import { copyText } from '@/lib/clipboard';
 import { Icon } from '@/components/icons';
 import { Notice } from '@/components/Notice';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useVectorAvailability, useVectorDimensionStatus } from '@/lib/hooks';
 import { ackDisclosure, getChatConfig } from '@/api/chatApi';
+import { getEmbeddingSummary } from '@/api/embeddingApi';
+import { refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { kiScopeList, type ScopeInfo } from '@/api/mcpClient';
 import {
   AGENTS_MD_TRIGGER,
   buildConcurrencyConfigSnippet,
+  buildEmbeddingConfigSnippet,
   buildLlmConfigSnippet,
   buildLocalMcpConfig,
   buildMcpEndpoint,
@@ -34,8 +38,17 @@ import {
   cliDocUrl,
   CONCURRENCY_CONFIG_NOTES,
   configDocUrl,
+  describeEmbeddingStatus,
   describeLlmStatus,
   describeWikiSync,
+  EMBEDDING_API_KEY_URL,
+  EMBEDDING_API_KEY_URL_LABEL,
+  EMBEDDING_API_KEY_URL_NOTE,
+  EMBEDDING_CONSEQUENCE_NOTES,
+  EMBEDDING_FIELD_NOTES,
+  EMBEDDING_RELOAD_HINT,
+  embeddingConsistencyView,
+  embeddingSourceLabel,
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
   LLM_FIELD_NOTES,
@@ -584,6 +597,198 @@ function LlmSection(): JSX.Element {
   );
 }
 
+// ─── 接入 4：向量模型（REQ-20261030-001） ─────────────────────────────────
+
+/**
+ * 字段来源角标：只有「内置默认」才提示。
+ *
+ * ★ 这是既有缺陷 D-1 的修法：总览页把内置默认值当「已配置」显示，用户会以为
+ *   `qwen3.7-text-embedding-flash / 1024` 是自己配过的。这里把来源摊开写。
+ */
+function SourceTag({ source }: { source?: string }): JSX.Element | null {
+  const label = embeddingSourceLabel(source);
+  if (!label) return null;
+  return (
+    <span
+      className="ki-badge ki-badge--off"
+      style={{ marginLeft: 6 }}
+      title="该字段没有写在配置文件里，当前用的是内置默认值"
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * 向量模型（embedding）只读页。
+ *
+ * ★ Q1 = 纯只读：没有表单、没有「测试连接」、不写 config.yaml。
+ * ★ Q2 = 一致性只看当前 scope：复用 AppShell/总览同一 queryKey，不产生额外请求。
+ */
+function EmbeddingSection(): JSX.Element {
+  const queryClient = useQueryClient();
+  const currentScope = useScopeValue();
+  const summaryQuery = useQuery({ queryKey: ['embeddingSummary'], queryFn: getEmbeddingSummary, retry: false });
+  const dimensionQuery = useVectorDimensionStatus(currentScope);
+  /**
+   * 顶栏同源的向量可用性：本页只读配置、不发 embedding 请求，
+   * 只有接上它才不会出现「页面绿色已配置 / 顶栏黄色向量不可用」的同屏矛盾。
+   */
+  const vectorAvailability = useVectorAvailability();
+  // 片段用「当前生效值」（不是硬编码默认）——复制即现状，不会把用户 768 维的库写成 1024
+  const snippet = useMemo(() => {
+    const v = summaryQuery.data;
+    return buildEmbeddingConfigSnippet({
+      provider: v?.provider?.value,
+      baseURL: v?.baseURL?.value,
+      model: v?.model?.value,
+      dimension: v?.dimension?.value,
+      queryTimeoutMs: v?.queryTimeoutMs?.value,
+    });
+  }, [summaryQuery.data]);
+
+  const refreshDimension = async (): Promise<void> => {
+    try {
+      // 与 AppShell 同口径：把**本次响应**写回 cache，避免 invalidate 后重新 GET 命中的仍是旧快照
+      const res = await refreshVectorDimensionStatus(currentScope);
+      queryClient.setQueryData(['vectorDimensionStatus', currentScope], res);
+    } catch {
+      await queryClient.invalidateQueries({ queryKey: ['vectorDimensionStatus', currentScope] });
+    }
+  };
+
+  if (summaryQuery.isLoading) {
+    return <p className="res-help">正在读取向量模型配置…</p>;
+  }
+  if (summaryQuery.error) {
+    return (
+      <Notice tone="warn" title="读取向量模型配置失败">
+        {(summaryQuery.error as Error).message}。导入、检索等其它功能不受影响。
+      </Notice>
+    );
+  }
+
+  const s = summaryQuery.data;
+  const status = describeEmbeddingStatus({
+    apiKeyConfigured: s?.apiKeyConfigured,
+    model: s?.model?.value,
+    dimension: s?.dimension?.value,
+    warning: s?.warning,
+    availability: vectorAvailability,
+  });
+  const dim = dimensionQuery.data?.status;
+  const consistency = embeddingConsistencyView({
+    apiKeyConfigured: s?.apiKeyConfigured,
+    state: dim?.state,
+    configured: dim?.configured ?? s?.dimension?.value,
+    persisted: dim?.persisted,
+    hasError: Boolean(dimensionQuery.error),
+    statusError: dim?.error,
+    scope: currentScope,
+  });
+  const timeoutMs = s?.queryTimeoutMs?.value;
+
+  return (
+    <>
+      <div className={`res-llm-status res-llm-status--${status.tone}`}>
+        <span className="res-llm-status__dot" aria-hidden="true" />
+        <div className="res-llm-status__body">
+          <strong>{status.title}</strong>
+          <span>{status.detail}</span>
+        </div>
+      </div>
+
+      <p className="res-help res-mt-3">
+        即 embedding：导入、检索、写入的向量化都靠它。未配置时这些功能降级为纯全文检索，
+        文件管理、全文搜索等其它能力不受影响。
+      </p>
+
+      <div className="res-service__line res-service__line--endpoint res-mt-3">
+        <span className="res-service__label">配置位置</span>
+        <code className="res-service__endpoint">
+          {s?.configPath ?? '（没有配置文件，当前全部使用内置默认值）'}
+        </code>
+        {s?.configPath ? <CopyButton text={s.configPath} label="配置文件路径" /> : null}
+      </div>
+
+      <h3 className="res-subhead">当前生效配置（只读）</h3>
+      <ul className="res-notes">
+        <li>
+          provider <code>{s?.provider?.value ?? '—'}</code>（仅错误文案里的显示名，不切换实现）
+          <SourceTag source={s?.provider?.source} />
+        </li>
+        <li>
+          上游 <code style={{ overflowWrap: 'anywhere' }}>{s?.baseURL?.value ?? '—'}</code>
+          <SourceTag source={s?.baseURL?.source} />
+        </li>
+        <li>
+          模型 <code style={{ overflowWrap: 'anywhere' }}>{s?.model?.value ?? '—'}</code>
+          <SourceTag source={s?.model?.source} />
+        </li>
+        <li>
+          维度 <code>{s?.dimension?.value ?? '—'}</code>
+          <SourceTag source={s?.dimension?.source} />
+        </li>
+        <li>
+          查询超时（默认） <code>{typeof timeoutMs === 'number' ? `${timeoutMs}ms` : '—'}</code>
+          <SourceTag source={s?.queryTimeoutMs?.source} />
+          <span className="res-note">（检索页可按请求单独指定，覆盖此值）</span>
+        </li>
+        <li>
+          API Key：{s?.apiKeyConfigured ? '已设置（不在页面展示明文）' : '未配置'}
+          {' · '}
+          <a className="res-link" href={EMBEDDING_API_KEY_URL} target="_blank" rel="noopener noreferrer">
+            {EMBEDDING_API_KEY_URL_LABEL} ↗
+          </a>
+        </li>
+      </ul>
+      <p className="res-note">{EMBEDDING_API_KEY_URL_NOTE}</p>
+
+      <h3 className="res-subhead">当前知识库（{currentScope}）的向量一致性</h3>
+      <div className="res-service__line">
+        <span className={`ki-badge ki-badge--${consistency.tone}`}>{consistency.text}</span>
+        <button
+          type="button"
+          className="ki-btn ki-btn--secondary"
+          style={{ marginLeft: 'auto' }}
+          disabled={dimensionQuery.isFetching}
+          onClick={() => void refreshDimension()}
+        >
+          {dimensionQuery.isFetching ? '检查中…' : '重新检查'}
+        </button>
+      </div>
+      {consistency.detail ? <p className="res-note">{consistency.detail}</p> : null}
+      {consistency.command ? (
+        <div className="res-service__line res-service__line--endpoint">
+          <code className="res-service__endpoint">{consistency.command}</code>
+          <CopyButton text={consistency.command} label="重建命令" />
+        </div>
+      ) : null}
+
+      <h3 className="res-subhead">完整配置示例</h3>
+      <CodeBlock code={snippet} label="config.yaml" ariaLabel="embedding 配置示例" />
+      <ul className="res-notes">
+        {EMBEDDING_FIELD_NOTES.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+
+      <h3 className="res-subhead">改动后果（改之前先看）</h3>
+      <ul className="res-notes">
+        {EMBEDDING_CONSEQUENCE_NOTES.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+
+      <p className="res-note res-mt-3">
+        <Icon name="check" className="ki-icon res-foot__icon" />
+        {EMBEDDING_RELOAD_HINT}
+      </p>
+      <p className="res-note res-mt-2">
+        并发数 / 批大小 / 失败阈值等调参见
+        {' '}
+        <a className="res-link" href={configDocUrl('embedding')} target="_blank" rel="noopener noreferrer">配置文档 ↗</a>
+      </p>
+    </>
+  );
+}
+
 // ─── 功能项：说明 + 示例 + 更多说明 ─────────────────────────────────────
 
 /**
@@ -821,6 +1026,7 @@ export function ResourcesPage(): JSX.Element {
           {topic.id === 'mcp' ? <McpSection /> : null}
           {topic.id === 'skill' ? <SkillSection /> : null}
           {topic.id === 'llm' ? <LlmSection /> : null}
+          {topic.id === 'embedding' ? <EmbeddingSection /> : null}
           {/* 功能组与配置组共用同一套「说明 + 示例 / 配置片段」渲染 */}
           {topic.group !== 'access' ? <FeatureSection topic={topic} /> : null}
         </div>

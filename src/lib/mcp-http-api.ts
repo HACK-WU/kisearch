@@ -42,6 +42,8 @@ import {
 import { resolveImportExtensions } from './config.js';
 import { validateChunkParams } from './chunker.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
+// REQ-20261030-001：资源页「向量模型」只读摘要（纯读文件，不发 embedding / zvec 请求）
+import { buildEmbeddingSummary } from './embedding-summary.js';
 import {
   assertHttpChannelWritable,
   isScopeReadonlyError,
@@ -577,6 +579,12 @@ export async function handleApiRequest(
     if (p === '/vector/status' && req.method === 'GET') {
       const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
       sendJson(res, 200, { ok: true, status: readVectorDimensionSnapshot(requestConfig, scope) });
+      return;
+    }
+    // REQ-20261030-001：资源页「向量模型」只读摘要。
+    // ★ 不带 scope 参数 ⇒ 不进上面的越权白名单；也刻意不碰 zvec / embedding 网络。
+    if (p === '/embedding/summary' && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, ...buildEmbeddingSummary(requestConfig) });
       return;
     }
     if (p === '/vector/status/refresh' && req.method === 'POST') {

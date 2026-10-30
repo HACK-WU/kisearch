@@ -178,9 +178,9 @@ describe('命令常量', () => {
 // ─── v2：双栏目录 + 功能示例 + LLM / wikiSync 文案 ───────────────────────
 
 describe('目录定义（左栏）', () => {
-  it('分三组：接入 3 + 功能 8 + 配置 4', () => {
+  it('分三组：接入 4 + 功能 9 + 配置 4', () => {
     assert.deepEqual(TOPIC_GROUPS, ['access', 'feature', 'config']);
-    assert.deepEqual(topicsByGroup('access').map((t) => t.id), ['mcp', 'skill', 'llm']);
+    assert.deepEqual(topicsByGroup('access').map((t) => t.id), ['mcp', 'skill', 'llm', 'embedding']);
     assert.deepEqual(
       topicsByGroup('feature').map((t) => t.id),
       ['search', 'import', 'datasource', 'rebuild', 'deleteDoc', 'export', 'backup', 'group', 'scopeOps'],
@@ -189,7 +189,7 @@ describe('目录定义（左栏）', () => {
       topicsByGroup('config').map((t) => t.id),
       ['doctor', 'scope', 'token', 'concurrency'],
     );
-    assert.equal(RESOURCE_TOPICS.length, 16);
+    assert.equal(RESOURCE_TOPICS.length, 17);
     assert.deepEqual(GROUP_LABEL, { access: '接入', feature: '功能', config: '配置' });
   });
 

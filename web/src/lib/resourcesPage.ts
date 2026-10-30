@@ -138,7 +138,7 @@ export type TopicGroup = 'access' | 'feature' | 'config';
 
 export type ResourceTopicId =
   // 接入
-  | 'mcp' | 'skill' | 'llm'
+  | 'mcp' | 'skill' | 'llm' | 'embedding'
   // 功能（对数据做的操作）
   | 'import' | 'datasource' | 'search' | 'backup' | 'export' | 'rebuild' | 'group' | 'deleteDoc' | 'scopeOps'
   // 配置（改配置 / 管凭据 / 诊断）
@@ -198,6 +198,10 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
   {
     id: 'llm', group: 'access', label: '对话模型', title: '配置对话模型', kicker: '03 · LLM',
     summary: '侧边栏「AI 对话」使用的模型；不配置不影响其它功能。',
+  },
+  {
+    id: 'embedding', group: 'access', label: '向量模型', title: '配置向量模型', kicker: '04 · EMBED',
+    summary: '导入 / 检索 / 写入的向量化都用它（embedding）；不配置会降级为纯全文检索。',
   },
   // ── 功能：对数据做的操作 ──
   {
@@ -323,10 +327,12 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
   },
   {
     id: 'token', group: 'config', label: 'MCP Token 管理', title: 'MCP Token 管理', kicker: '03 · TOKEN',
-    summary: '跨机访问 MCP 时要 Token。每个 Token 限定授权 scope，可改权限，也可立即失效。',
+    summary: '跨机访问 MCP 时要 Token。每个 Token 限定授权 scope，可设为只读（只用来看，不显示写工具），也可立即失效。',
     docAnchor: 'mcp',
     params: [
       { flag: '--scope <s|all>', desc: '生成时必填：具体 scope / 逗号分隔多个 / all。也是 Token 的授权范围' },
+      { flag: '--read-only', desc: '生成时加即为只读：远程 AI 连上后只看到读工具，构造调用写工具也会被拒' },
+      { flag: 'update <id> --read-only', desc: '只切访问模式，不动授权范围（--read-write 切回读写）；两项也可一起改' },
       { flag: 'update <id> --scope', desc: '改授权范围（id 从 list 拿）；改错会直接放大或缩小该 Token 的权限' },
       { flag: 'delete <id>', desc: '立即失效；已连接的客户端下次请求即被拒' },
     ],
@@ -419,8 +425,10 @@ export function topicExamples(id: ResourceTopicId, scope: string): TopicExample[
     case 'token':
       return [
         { label: '生成 Token（只授权这个 scope）', command: `ki mcp token generate --scope ${s}` },
-        { label: '列出所有 Token 与授权范围', command: 'ki mcp token list' },
+        { label: '生成只读 Token（AI 看不到写工具）', command: `ki mcp token generate --scope ${s} --read-only` },
+        { label: '列出所有 Token、授权范围与访问模式', command: 'ki mcp token list' },
         { label: '改授权 scope（id 从 list 拿）', command: `ki mcp token update <id> --scope ${s}` },
+        { label: '切换只读 / 读写', command: 'ki mcp token update <id> --read-only' },
         { label: '立即失效', command: 'ki mcp token delete <id>' },
       ];
     case 'doctor':
@@ -586,6 +594,238 @@ export function describeLlmStatus(status: LlmStatusView | null | undefined): Llm
  * 改动后下一次请求即读到新值；这条信息此前没有任何界面告诉用户。
  */
 export const LLM_RELOAD_HINT = '改完保存即可，无需重启服务 —— 下一次 AI 对话就会用新配置。';
+
+// ─── 接入：向量模型（embedding，REQ-20261030-001） ───────────────────────────
+
+/**
+ * Embedding API Key 的获取地址。
+ *
+ * ★ 权威源：`README.md`「Embedding API 密钥获取」。同一地址还出现在
+ *   `src/config.ts`（`config init` 模板与输出）、`docs/configuration.md`、
+ *   `docs/cli.md`、`docs/build-kb.md` —— 改地址时必须同步本常量
+ *   （`web/test/resource-embedding.test.mjs` 有一条读 README 的守卫断言）。
+ * ★ 只对**默认 DashScope 兼容端点**成立：`embedding.baseURL` 可配任意 OpenAI 兼容端点，
+ *   `provider` 只是错误文案里的显示名（`docs/configuration.md#embedding`）⇒ 必须带限定语。
+ */
+export const EMBEDDING_API_KEY_URL = 'https://platform.qianwenai.com/home/api-keys';
+
+/** 链接文字（带 ↗ 由页面补，与既有 `configDocUrl` 的外链写法一致） */
+export const EMBEDDING_API_KEY_URL_LABEL = '获取 DashScope 密钥';
+
+export const EMBEDDING_API_KEY_URL_NOTE =
+  '上面是「默认 DashScope 兼容端点」的获取地址；若你把 baseURL 换成了别家厂商，请向对应厂商索取密钥。';
+
+/** `buildEmbeddingConfigSnippet` 的取值来源（不传则用内置默认，与 `ki config init` 模板一致） */
+export interface EmbeddingSnippetValues {
+  provider?: string;
+  baseURL?: string;
+  model?: string;
+  dimension?: number;
+  queryTimeoutMs?: number;
+}
+
+/**
+ * 可复制的 `embedding` 段片段。
+ *
+ * ★ **必须用「当前生效值」而不是硬编码默认值**（本次评审修正）：维度的代价远大于对话模型 ——
+ *   用户若照抄一段写死 `dimension: 1024` 的示例去覆盖自己 768 维的配置，
+ *   **所有已建库的语义检索会立刻不可用**。所以片段给的是「复制即当前状态」。
+ * ★ 用 `${DASHSCOPE_API_KEY}` 而不是明文：配置层对 `apiKey` 支持 `${ENV_VAR}` 引用
+ *   （与 `llm.apiKey` 同款解析），避免把密钥明文写进 config.yaml。
+ */
+export function buildEmbeddingConfigSnippet(values: EmbeddingSnippetValues = {}): string {
+  const provider = values.provider?.trim() || 'dashscope';
+  const baseURL = values.baseURL?.trim() || 'https://maas.qianwenaiapi.com/compatible-mode/v1';
+  const model = values.model?.trim() || 'qwen3.7-text-embedding-flash';
+  const dimension = typeof values.dimension === 'number' && Number.isFinite(values.dimension)
+    ? values.dimension
+    : 1024;
+  const timeoutMs = typeof values.queryTimeoutMs === 'number' && Number.isFinite(values.queryTimeoutMs)
+    ? values.queryTimeoutMs
+    : 3000;
+  return [
+    'embedding:',
+    `  provider: ${provider}            # 仅错误文案里的显示名，实际厂商由 baseURL 决定`,
+    `  baseURL: ${baseURL}`,
+    `  model: ${model}`,
+    `  dimension: ${dimension}                # 必须与已建库一致；改了要重建向量`,
+    '  apiKey: ${DASHSCOPE_API_KEY}   # 支持 ${ENV_VAR} 引用，避免明文落盘',
+    `  queryTimeoutMs: ${timeoutMs}           # 查询 embedding 超时（ms），范围 1-60000`,
+  ].join('\n');
+}
+
+/** 字段口径提醒（写错代价最大的三个） */
+export const EMBEDDING_FIELD_NOTES: string[] = [
+  'dimension 必须与已建库的集合维度一致：改大改小都会让旧库的语义检索直接不可用。',
+  'provider 只是错误文案里的显示名、不切换实现 —— 换厂商只改 baseURL（必须是 OpenAI 兼容的 /embeddings 端点）。',
+  'apiKey 支持 ${ENV_VAR} 引用；引用的变量不存在时等同未配置，导入会直接报错（不做隐式回退）。',
+];
+
+/**
+ * 「改模型 / 改维度」的后果预告。
+ *
+ * ★ Q1 = 纯只读、不做参数试算，所以这些代价必须写在页面上，
+ *   否则用户会「改完才发现在建库全废」。第 2 条尤其重要 ——
+ *   现有产品任何位置都没讲过「换模型不换维度 = 静默劣化」。
+ */
+export const EMBEDDING_CONSEQUENCE_NOTES: string[] = [
+  '改维度 → 所有已建库的集合维度不再匹配，语义检索直接不可用，必须逐个执行 ki restore <scope> --rebuild-vector --yes 重建。',
+  '只换模型、维度不变 → 系统不会报错（集合只记维度、不记模型名），但新旧向量不在同一语义空间，检索质量会静默劣化 —— 同样必须重建。',
+  '改前先跑 ki doctor：它会真发一次 embedding 请求，报出上游实际返回的维度，能提前发现「声明 1024、实际 4096」这类错配。',
+];
+
+/** 改完是否需要重启（与 llm 同判据：`loadConfig` 按 mtime/size 指纹热加载） */
+export const EMBEDDING_RELOAD_HINT = '改完保存即可，无需重启服务 —— 下一次导入 / 检索就会用新配置。';
+
+/** 字段来源角标：`configured` 不显示（避免噪声），`builtin-default` 才提醒 */
+export function embeddingSourceLabel(source: string | undefined): string {
+  return source === 'builtin-default' ? '内置默认' : '';
+}
+
+/** 只读诊断所需的向量模型状态子集（来自 `GET /api/embedding/summary`） */
+export interface EmbeddingStatusView {
+  apiKeyConfigured?: boolean;
+  model?: string;
+  dimension?: number;
+  warning?: string;
+  /**
+   * 顶栏同源的向量可用性（`lib/vectorAvailability.ts` 的 `VectorAvailability`）。
+   * ★ 本页只读配置文件、**不验证** key 有效性与上游连通性，所以必须由它补这一半：
+   *   否则会出现「页面绿色已配置 / 顶栏黄色向量不可用」同屏矛盾（评审质疑 #1）。
+   *   缺省（undefined）= 未评估，按原样展示不做断言。
+   */
+  availability?: { status: string; reason?: string };
+}
+
+export interface EmbeddingStatusCopy {
+  tone: 'ok' | 'warn';
+  title: string;
+  detail: string;
+}
+
+/**
+ * 状态条文案。
+ *
+ * ★ 未配置时**必须说明「当前显示的是内置默认值」**：否则用户会把
+ *   `qwen3.7-text-embedding-flash / 1024` 当成自己配好过的东西（既有缺陷 D-1 的根源）。
+ * ★ 已配置时**不得只凭配置文件就说可用**：key 存在但 401 / 上游挂掉时，
+ *   页面必须跟着顶栏的可用性一起降级。
+ */
+export function describeEmbeddingStatus(view: EmbeddingStatusView | null | undefined): EmbeddingStatusCopy {
+  if (!view) {
+    return { tone: 'warn', title: '状态未知', detail: '暂时读不到向量模型配置，请确认服务可用后重试。' };
+  }
+  if (!view.apiKeyConfigured) {
+    return {
+      tone: 'warn',
+      title: '尚未配置 API Key',
+      detail: '导入、检索、写入都会降级为纯全文。当前显示的是内置默认值，不是你的配置。',
+    };
+  }
+  const model = view.model?.trim() || '已配置模型';
+  const dim = typeof view.dimension === 'number' && Number.isFinite(view.dimension)
+    ? ` · ${view.dimension} 维`
+    : '';
+  const title = `${model}${dim}`;
+  const reason = view.availability?.reason ? `：${view.availability.reason}` : '';
+
+  if (view.availability?.status === 'unavailable') {
+    return {
+      tone: 'warn',
+      title,
+      detail: `配置已就绪，但上游当前不可用${reason} —— 向量化会失败，检索降级为全文。`,
+    };
+  }
+  if (view.availability?.status === 'unknown') {
+    return {
+      tone: 'warn',
+      title,
+      detail: `配置已就绪，但暂时无法确认上游是否可用${reason}；完整诊断见顶栏服务状态或 ki doctor。`,
+    };
+  }
+  return {
+    tone: 'ok',
+    // 只说「已配置」，不说「可用」：本页没有发过任何 embedding 请求
+    title,
+    detail: view.warning
+      ?? '已配置。上游连通性与密钥有效性看顶栏服务状态（或 ki doctor）；改模型或维度前先看下面「改动后果」。',
+  };
+}
+
+export interface EmbeddingConsistencyInput {
+  apiKeyConfigured?: boolean;
+  state?: string;
+  configured?: number;
+  persisted?: number;
+  /** 整个 query 失败（网络 / 越权 / 旧 daemon） */
+  hasError?: boolean;
+  /** 后端 `status.error`（探测失败的具体原因，脱敏后） */
+  statusError?: string;
+  scope: string;
+}
+
+export interface EmbeddingConsistencyCopy {
+  tone: 'ok' | 'warn' | 'off';
+  /** 一句话结论（页面主行） */
+  text: string;
+  /** 副行说明（可为空） */
+  detail: string;
+  /** 需要用户去 CLI 执行时的命令（仅失配时给） */
+  command?: string;
+}
+
+/**
+ * 当前 scope 的向量一致性文案。
+ *
+ * ★ 判定顺序不可换（每步都对应一条负向需求）：
+ *   1. 未配 API Key → 不判（否则会出现「未配置但集合一致」的绿色错觉，缺陷 D-2）；
+ *   2. 请求/探测失败 → 「无法确认」。**必须排在「无 persisted」之前**：探测失败时
+ *      `persisted` 本来就没有，先判会把它说成「尚未建索引」，把故障伪装成正常；
+ *   3. mismatch → 给可复制的 rebuild 命令；
+ *   4. `persisted` 缺失但 `state === 'compatible'` → 后端**确实**这么返回（无集合分支），
+ *      文案要写「尚未建向量索引」，**不能**因为 state 是 compatible 就显示「一致」；
+ *   5. 其余 → 未确认（快照缺失 / 已过期）。
+ */
+export function embeddingConsistencyView(input: EmbeddingConsistencyInput): EmbeddingConsistencyCopy {
+  const configured = typeof input.configured === 'number' && Number.isFinite(input.configured)
+    ? `配置 ${input.configured} 维`
+    : '配置维度未知';
+
+  if (!input.apiKeyConfigured) {
+    return { tone: 'off', text: '未配置 API Key，暂不校验', detail: '填入 API Key 后再回来看这一项。' };
+  }
+  if (input.hasError || input.statusError) {
+    const reason = input.statusError ? `：${input.statusError}` : '';
+    return {
+      tone: 'off',
+      text: '无法确认',
+      detail: `维度状态读取失败${reason}；可点「重新检查」重试，或执行 ki doctor 排查。`,
+    };
+  }
+  if (input.state === 'mismatch' && input.persisted !== undefined) {
+    const scope = input.scope || '<scope>';
+    return {
+      tone: 'warn',
+      text: `集合 ${input.persisted} 维，与${configured}不一致`,
+      detail: '该知识库的语义检索不可用（全文检索仍可用）；重建后回本页点「重新检查」。',
+      command: `ki restore ${scope} --rebuild-vector --yes`,
+    };
+  }
+  if (input.persisted === undefined) {
+    if (input.state === 'compatible') {
+      return {
+        tone: 'off',
+        text: '该知识库尚未建向量索引',
+        detail: '首次导入或重建后会写入集合维度，之后再回来看。',
+      };
+    }
+    return { tone: 'off', text: '未确认', detail: '尚未取到集合维度（快照缺失或已过期）。' };
+  }
+  if (input.state === 'compatible') {
+    return { tone: 'ok', text: `集合 ${input.persisted} 维，与${configured}一致`, detail: '' };
+  }
+  return { tone: 'off', text: '未确认', detail: '维度状态与预期不符；可点「重新检查」重试。' };
+}
 
 // ─── Scope 与 Wiki 同步 ─────────────────────────────────────────────────
 
