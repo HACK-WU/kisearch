@@ -131,7 +131,7 @@ scopes:
   #   kbDir: /data/special-kb          # 实际数据在 /data/special-kb/kb/my-project
   #   wikiSync:                        # 可选: Wiki 写回/回收站的源目录定位
   #     enabled: true
-  #     sourceDir: ~/projects/my-wiki
+  #     sourceDir: ~/projects/my-wiki  # 必须是绝对路径（~ / $HOME 前缀可用；相对路径会被配置校验拒绝）
   #   import:                          # 可选: 导入行为（不写即用括号内默认值）
   #     extensions: [.md]              # 格式白名单，非白名单文件跳过
   #     maxFileSize: 1048576           # 单文件上限（字节，默认 1MB），超限跳过该文件

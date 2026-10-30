@@ -1365,7 +1365,7 @@ scopes:
 | `scopes.default` | scope | 默认 scope，由 `ki config init` 自动生成（空对象 `{}`）；未传 `--scope` 时使用，数据落在 `dataDir/default`，`ki doctor` 会检查其是否存在 |
 | `scopes.<scope>.kbDir` | scope | 覆盖该 scope 的 KB 基础目录，实际数据存于 `kbDir/kb/{scope}`（自动嵌套子目录，避免污染源目录）；未配置时回退到 `dataDir/{scope}` |
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
-| `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
+| `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录（**必须绝对路径**；`~`/`$HOME` 前缀可用，相对路径加载即报 `CONFIG_FIELD_INVALID`） |
 
 > `apiKey` 是向量化功能的必需项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的厂商密钥变量，如 `SILICONFLOW_API_KEY`），以免在非该厂商的 `baseURL` 下误用密钥。默认配置示例用 `apiKey: ${DASHSCOPE_API_KEY}`；密钥获取地址：<https://platform.qianwenai.com/home/api-keys>。缺少 key 时 MCP 仍会启动并提示警告；`ki doctor` 仍报告配置失败，向量化导入会报错，`sync-relation` 会返回 `vectorStored:false` 和 `vectorReason`。
 >

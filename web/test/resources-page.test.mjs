@@ -393,6 +393,20 @@ describe('注册 scope：好处与配置方式', () => {
     assert.ok(/\n {6}sourceDir:/.test(text), 'sourceDir 必须缩进在 wikiSync 段内');
   });
 
+  it('★ 片段里 sourceDir 给绝对路径示例（相对路径会被配置校验直接拒绝）', () => {
+    const text = buildScopeConfigSnippet('demo');
+    const line = text.split('\n').find((l) => /^ {6}sourceDir:/.test(l));
+    assert.ok(line, 'sourceDir 行应存在');
+    const value = line.replace(/^ {6}sourceDir:\s*/, '').split(/\s+#/)[0].trim();
+    assert.match(value, /^(\/|~\/|\$HOME\/)/, `sourceDir 应为绝对路径示例，实际 "${value}"`);
+    assert.match(line, /绝对路径/, '注释必须点明「必须绝对路径」');
+    // 口径提醒里也要有，否则用户点「复制」前不会去看字段表
+    assert.ok(
+      SCOPE_CONFIG_NOTES.some((note) => note.includes('绝对路径')),
+      'SCOPE_CONFIG_NOTES 应有一条说明 sourceDir 必须绝对路径',
+    );
+  });
+
   it('空 scope 名回退占位名，不产生空 key', () => {
     const text = buildScopeConfigSnippet('   ');
     assert.ok(text.includes('my-project'));

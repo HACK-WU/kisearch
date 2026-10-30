@@ -14,6 +14,8 @@
  *   - 收集全部问题后一次性报告，避免用户「改一个报一个」挤牙膏
  */
 
+import { isAbsolute } from 'path';
+
 import { validateQueryTimeoutMs } from './query-timeout.js';
 
 // ─── 节点模型 ───
@@ -73,6 +75,29 @@ function httpUrl(value: unknown, path: string, add: AddFn): void {
   if (!/^https?:\/\//.test(s)) {
     add(path, '应为 http(s):// 开头的 URL');
   }
+}
+
+/**
+ * 绝对路径校验（供 `wikiSync.sourceDir` 使用）。
+ *
+ * 为什么禁止相对路径：`loadConfig` 对相对路径的解析基准是**配置文件所在目录**
+ * （`expandPath` 的 `path.resolve(baseDir, …)`，baseDir = `path.dirname(configFile)`），
+ * 而用户写 `./wiki` 时想的是**当前仓库 / 当前 shell 的 cwd**。配置放在 `~/.ki/config.yaml`
+ * 时两者相差极远（`./wiki` → `~/.ki/wiki`），写回会静默写到错误位置 —— 语义猜不对，
+ * 因此不猜：直接拒绝并要求写绝对路径（fail-loud + 给出路）。
+ *
+ * 允许 `~` / `$HOME` 前缀（展开后即绝对路径，且跨机器可移植，模板与文档都用这种写法）。
+ * `${HOME}/…` **不**支持：`expandPath` 不认该写法，会拼成字面量目录 `${HOME}`。
+ */
+function absolutePath(value: unknown, path: string, add: AddFn): void {
+  const s = value as string;
+  if (!s.trim()) return; // 空串：由 string 分支的 warn 处理（按"未配置"）
+  if (/^(\$HOME|~)(?=$|[\\/])/.test(s) || isAbsolute(s)) return;
+  add(
+    path,
+    `必须是绝对路径（如 /data/wiki，或 $HOME/wiki、~/wiki）：实际为 "${s}"。`
+    + '相对路径的解析基准是配置文件所在目录而非 shell 当前目录，极易静默落到错误位置，故不支持'
+  );
 }
 
 // ─── 思考级别校验（REQ-20261016-001 · 设计 §9.1）───────────────
@@ -161,7 +186,8 @@ const SCOPE_ENTRY: ConfigNode = {
       type: 'object',
       fields: {
         enabled: { type: 'boolean' },
-        sourceDir: { type: 'string' },
+        // 必须是绝对路径：相对路径会按「配置文件所在目录」展开，与用户直觉（shell cwd）不符
+        sourceDir: { type: 'string', validate: absolutePath },
         autoBackfill: { type: 'boolean' },
       },
     },

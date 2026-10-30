@@ -766,7 +766,13 @@ function parseAndExpand(configFile: string): KiConfig {
           kbDir: s.kbDir ? expandPath(String(s.kbDir), configDir) : undefined,
           wikiSync: ws ? {
             enabled: ws.enabled !== false,  // 默认 true
-            sourceDir: ws.sourceDir ? expandPath(String(ws.sourceDir), configDir) : undefined,
+            // 相对路径已由 config-schema 的 absolutePath 在校验阶段拒绝（CONFIG_FIELD_INVALID），
+            // 这里只剩「绝对路径」与「~ / $HOME 前缀」两种形态，expandPath 只做前缀展开。
+            // 纯空白按「未配置」处理：schema 的 string 分支已告警「将按未配置处理」，若这里用
+            // truthy 判断，空白串会被 path.resolve 拼成一个带空格的目录，与告警文案不符。
+            sourceDir: ws.sourceDir && String(ws.sourceDir).trim()
+              ? expandPath(String(ws.sourceDir), configDir)
+              : undefined,
             autoBackfill: ws.autoBackfill !== false,  // 默认 true
           } : undefined,
           clean,

@@ -92,7 +92,7 @@ scopes:
 | `backupDir` | 备份快照目录 |
 | `kbDir` | scope 级自定义 KB 存储路径，覆盖全局 `dataDir` |
 | `wikiSync.enabled` | 是否在 `sync-relation` 写入后同步到外部 Wiki 目录 |
-| `wikiSync.sourceDir` | Wiki 写回目标目录（source 块导入后优先使用 source 目录） |
+| `wikiSync.sourceDir` | Wiki 写回目标目录（**必须绝对路径**，`~`/`$HOME` 前缀可用；source 块导入后优先使用 source 目录） |
 
 > **注意**：如果 scope 已有数据，修改 `kbDir` 后需要手动迁移或重新导入。
 

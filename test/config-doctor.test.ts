@@ -449,6 +449,56 @@ describe('A2. 字段校验 —— 类型与取值', () => {
   });
 });
 
+describe('A2. 字段校验 —— wikiSync.sourceDir 必须是绝对路径', () => {
+  const withSourceDir = (raw: string): string =>
+    ['scopes:', '  p:', '    wikiSync:', `      sourceDir: ${raw}`].join('\n');
+
+  it('./wiki → 报错并给出绝对路径写法（相对路径基准是配置文件目录，不是 cwd）', () => {
+    assert.throws(
+      () => writeAndLoad('config.yaml', withSourceDir('./wiki')),
+      /CONFIG_FIELD_INVALID[\s\S]*scopes\.p\.wikiSync\.sourceDir：必须是绝对路径[\s\S]*实际为 "\.\/wiki"/
+    );
+  });
+
+  it('裸目录名 wiki 与 ../wiki 同样拒绝（三种相对写法都堵上）', () => {
+    for (const raw of ['wiki', '../wiki']) {
+      assert.throws(() => writeAndLoad('config.yaml', withSourceDir(raw)), /必须是绝对路径/, raw);
+    }
+  });
+
+  it('${HOME}/wiki 不被展开 → 也按相对路径拒绝（否则会拼出字面量目录 ${HOME}）', () => {
+    assert.throws(
+      () => writeAndLoad('config.yaml', withSourceDir('${HOME}/wiki')),
+      /必须是绝对路径/
+    );
+  });
+
+  it('绝对路径与 ~ / $HOME 前缀放行，且都展开成绝对路径', () => {
+    const home = os.homedir();
+    const cases: Array<[string, string]> = [
+      ['/abs/wiki', '/abs/wiki'],
+      ['~/wiki', path.join(home, 'wiki')],
+      ['$HOME/wiki', path.join(home, 'wiki')],
+    ];
+    for (const [raw, expected] of cases) {
+      const ws = getScopeWikiSync(writeAndLoad('config.yaml', withSourceDir(raw)), 'p');
+      assert.strictEqual(ws?.sourceDir, expected, raw);
+    }
+  });
+
+  it('纯空白也按「未配置」处理（不能被拼成带空格的目录）', () => {
+    // 与 string 分支的告警文案保持一致：告警说「按未配置处理」，归一化就必须真的落到 undefined
+    const cfg = writeAndLoad('config.yaml', withSourceDir('"   "'));
+    assert.strictEqual(getScopeWikiSync(cfg, 'p')?.sourceDir, undefined);
+  });
+
+  it('空串仍按「未配置」仅告警（不误报路径错误）', () => {
+    const { errors, warns } = validateConfigFields({ scopes: { p: { wikiSync: { sourceDir: '' } } } });
+    assert.deepStrictEqual(errors, []);
+    assert.strictEqual(warns.length, 1);
+  });
+});
+
 describe('A2. 字段校验 —— 告警不阻断 + 直测 validateConfigFields', () => {
   it('YAML 裸写 default:（null）→ 仅告警，loadConfig 不抛错', () => {
     // 现行为保留：null scope 条目被丢弃，但不再是静默陷阱

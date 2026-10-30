@@ -241,7 +241,17 @@ scopes:
 |------|------|--------|------|
 | `enabled` | `boolean` | `true` | 是否启用 Wiki 写回（显式 `false` 时禁用一切写回，含 source 块路径）|
 | `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
-| `sourceDir` | `string` | 无 | 源文档目录 |
+| `sourceDir` | `string` | 无 | 源文档目录，**必须是绝对路径**（`~`/`$HOME` 前缀可用，会展开为绝对路径）。相对路径（`./wiki`、`wiki`）在加载配置时即报 `CONFIG_FIELD_INVALID` |
+
+> `sourceDir` 为什么强制绝对路径：相对路径的唯一解析基准是**配置文件所在目录**
+> （`path.dirname(config.yaml)`），而 `./wiki` 在用户心里指的是**当前 shell / 当前仓库**。
+> 配置落在 `~/.ki/config.yaml` 时 `./wiki` 会展开成 `~/.ki/wiki`，写回位置静默跑偏，
+> 因此改为加载即报错，不做猜测。`${HOME}/wiki` 写法**不支持**（不会被展开，会拼成字面量目录），
+> 请写 `~/wiki` 或 `$HOME/wiki`。
+>
+> 校验与 `enabled` 无关：即使 `wikiSync.enabled: false`，残留的相对 `sourceDir` 仍会被拒绝
+> （单字段校验看不到兄弟字段；关掉写回就该把这段配置清理掉，而不是留一个坏值）。
+> 空值 / 纯空白按「未配置」处理（`ki doctor` 会以 ⚠️ 提示）。
 
 > 开启时除 `sync-relation` 写回外，`ki group create` 会在 `sourceDir` 下创建同名目录，
 > CLI `ki import` 会把导入成功的文档写入 `<sourceDir>/<group>/<relation>.md`（已存在跳过）；
@@ -378,6 +388,7 @@ mcp:
 | 类型不符（如 `dimension: "4096"`） | ❌ 报错，指出期望类型与实际值 |
 | 只写键名未赋值（如 `dataDir:` 后空着） | ❌ 报错，提示“实际为 null（只写了键名未赋值？）” |
 | 取值非法（如 `scopeMode: strick`、`port: 99999`、`baseURL` 非 http(s) URL） | ❌ 报错，列出合法取值范围 |
+| `wikiSync.sourceDir` 写相对路径（`./wiki`） | ❌ 报错，提示改绝对路径（`~`/`$HOME` 前缀可用）。其它路径字段（`dataDir` / `kbDir`）仍允许相对，按配置文件目录展开 |
 | 废弃字段（`scopes.<scope>.sourceDir`） | ⚠️ 仅告警，仍按“被忽略”加载 |
 | YAML 裸写 `default:`（解析为 null） | ⚠️ 仅告警，该 scope 被丢弃 |
 | 字符串字段写空值（`dataDir: ""`） | ⚠️ 仅告警，实际按“未配置”落默认值 |
