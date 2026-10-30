@@ -684,7 +684,6 @@ export function TasksPage(): JSX.Element {
                       <td>
                         <span className="ki-task-table__task">
                           <b>{row.operationLabel}</b>
-                          <code title={row.id}>#{row.shortId}</code>
                           <small className="ki-task-table__task-scope" title={row.scope}>{row.scope}</small>
                           <small
                             className="ki-task-table__task-result"

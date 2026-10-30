@@ -652,3 +652,18 @@ export function taskSummaryLine(task: TaskRecord): string {
   if (progress.text) return progress.text;
   return phaseLabel(task.phase);
 }
+
+/**
+ * 列表摘要的追加段：本次**新建**文档数（`create` + `suffix`，覆盖与「内容未变」不计）。
+ * 与详情「新增的文档 N 篇」同口径；`createdTotal` 不受明细截断影响。
+ * 旧记录 / 旧 daemon 没有该快照 ⇒ 返回 `undefined`（不能显示成「0 篇」）；
+ * 调用方负责与 {@link taskSummaryLine} 用 ` · ` 拼成同一行，窄屏则由任务列回退行承载。
+ */
+export function taskCreatedLine(task: TaskRecord): string | undefined {
+  const result = task.result;
+  if (!result) return undefined;
+  const raw = result.created;
+  if (raw === undefined && result.createdTotal === undefined) return undefined;
+  const total = typeof result.createdTotal === 'number' ? result.createdTotal : (raw ?? []).length;
+  return `新增文档 ${total} 篇`;
+}

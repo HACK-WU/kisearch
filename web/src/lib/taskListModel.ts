@@ -5,17 +5,15 @@
  * 状态、来源、摘要、时间、进度单位必须与详情同口径，并可用单测锁死。
  */
 import type { TaskRecord, TaskState } from '@/api/tasksApi';
-import { operationLabel, sourceLabel, stateLabel, taskSummaryLine } from '@/lib/taskDetailModel';
+import { operationLabel, sourceLabel, stateLabel, taskCreatedLine, taskSummaryLine } from '@/lib/taskDetailModel';
 
 export interface TaskListRowView {
-  id: string;
-  /** 短 ID：列表只留 8 位，完整 ID 进抽屉 */
-  shortId: string;
   state: TaskState;
   stateLabel: string;
   operationLabel: string;
   scope: string;
   sourceLabel: string;
+  /** 摘要单行：成功/跳过/未完成，有新建文档快照时以 ` · 新增文档 N 篇` 续在后面 */
   resultSummary: string;
   /** 失败/未知时的短错误；与摘要并列展示，不互相覆盖 */
   resultError?: string;
@@ -66,7 +64,10 @@ function progressPercentOf(task: TaskRecord): number | null {
 
 export function buildTaskListRow(task: TaskRecord): TaskListRowView {
   const time = formatListTime(task.startedAt ?? task.createdAt);
-  const summary = taskSummaryLine(task);
+  const created = taskCreatedLine(task);
+  // 摘要与新建文档数同一行（2026-10-30 用户要求横排）
+  const base = taskSummaryLine(task);
+  const summary = created ? `${base} · ${created}` : base;
   const error = task.error?.trim() || undefined;
   const operation = operationLabel(task.operation);
   const source = sourceLabel(task.source);
@@ -79,8 +80,6 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
   const durationLabel = durationLabelOf(task);
 
   return {
-    id: task.id,
-    shortId: task.id.slice(0, 8),
     state: task.state,
     stateLabel: stateText,
     operationLabel: operation,

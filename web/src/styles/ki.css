@@ -3280,12 +3280,13 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); font-weight: 600;
 }
 .ki-task-table__head th:nth-child(1) { width: 9%; }
-.ki-task-table__head th:nth-child(2) { width: 22%; }
-.ki-task-table__head th:nth-child(3) { width: 15%; }
-.ki-task-table__head th:nth-child(4) { width: 11%; }
-.ki-task-table__head th:nth-child(5) { width: 19%; }
-.ki-task-table__head th:nth-child(6) { width: 12%; }
-.ki-task-table__head th:nth-child(7) { width: 12%; }
+.ki-task-table__head th:nth-child(2) { width: 15%; }
+.ki-task-table__head th:nth-child(3) { width: 14%; }
+.ki-task-table__head th:nth-child(4) { width: 10%; }
+.ki-task-table__head th:nth-child(5) { width: 29%; }
+/* 开始时间要给「10月30日 10:55」整行放得下（约 108px + 左右内距 24px），13% 在 1200 视口会差 6px */
+.ki-task-table__head th:nth-child(6) { width: 14%; }
+.ki-task-table__head th:nth-child(7) { width: 9%; }
 .ki-task-table__row { cursor: pointer; }
 .ki-task-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
@@ -3300,7 +3301,6 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-table__bar { width: 100%; max-width: 74px; }
 .ki-task-table__task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; }
 .ki-task-table__task b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.ki-task-table__task code { flex: none; color: var(--ki-color-text-subtle); font-size: 11px; }
 .ki-task-table__task-scope,
 .ki-task-table__task-result {
   display: none;
@@ -3340,19 +3340,26 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-col--source { display: none; }
   .ki-task-table__head th:nth-child(1) { width: 96px; }
   .ki-task-table__head th:nth-child(2) { width: auto; }
-  .ki-task-table__head th:nth-child(5) { width: 30%; }
-  .ki-task-table__head th:nth-child(6) { width: 118px; }
+  .ki-task-table__head th:nth-child(5) { width: 35%; }
+  .ki-task-table__head th:nth-child(6) { width: 132px; }
   .ki-task-table__head th:nth-child(7) { width: 78px; }
   .ki-task-table__task-scope { display: block; }
 }
-@media (max-width: 760px) {
+/* 结果摘要自然宽 223px（成功/跳过/未完成 + 新增文档 N 篇）：≤880 时无论怎么分列都放不下
+   （实测 761 视口表宽 655px，摘要列只有 205px，省略号会把「新增文档 N 篇」吃掉），
+   改由「任务」列的回退行承载 —— 与 ≤760 同一套机制，只是提前到放不下的宽度生效。 */
+@media (max-width: 880px) {
   .ki-task-col--result { display: none; }
+  .ki-task-table__task-result { display: block; }
+}
+@media (max-width: 760px) {
   .ki-task-table__head th:nth-child(1) { width: 82px; }
   .ki-task-table__head th:nth-child(2) { width: auto; }
   .ki-task-table__head th:nth-child(6) { width: 96px; }
   .ki-task-table__head th:nth-child(7) { width: 68px; }
-  .ki-task-table__task-result { display: block; }
-  .ki-task-table__time small { display: none; }
+  /* 「10月30日 10:55」自然宽 108px，96px 列内 nowrap 会溢出 24px 压到「持续时间」上
+     （600/700 实测）—— 窄屏折成「10月30日」+「10:55」两行，行高本来就由任务列撑开 */
+  .ki-task-table__time { white-space: normal; }
 }
 /* 明细 / 落点折叠（原生 <details>：零 JS、键盘可达）
    ★ 折叠行必须**自己做标记与焦点态**（2026-10-20 用户截图反馈）：原来只写了

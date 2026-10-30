@@ -5,7 +5,7 @@
  *   - 状态 / 任务 / 知识库 / 来源 / 结果摘要 / 时间；
  *   - 失败错误与摘要并列，不互相覆盖；
  *   - 运行中进度、排队/运行中时间提示；
- *   - 短 ID 只用于展示，完整 ID 留在 title / 详情抽屉。
+ *   - 任务列不再展示任务 ID（完整 ID 在详情抽屉）。
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -53,15 +53,15 @@ function baseTask(overrides = {}) {
 }
 
 describe('任务列表行：六列口径', () => {
-  it('完成态给出操作 / 状态 / 来源 / 摘要 / 短 ID / 持续时间', () => {
+  it('完成态给出操作 / 状态 / 来源 / 摘要 / 持续时间（不再带任务 ID）', () => {
     const row = buildTaskListRow(baseTask());
     assert.equal(row.stateLabel, '已完成');
     assert.equal(row.operationLabel, '上传导入');
     assert.equal(row.sourceLabel, '网页');
     assert.equal(row.scope, 'langchain');
     assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0');
-    assert.equal(row.shortId, 'abcdef12');
-    assert.equal(row.id, 'abcdef1234567890');
+    assert.equal('shortId' in row, false, '列表行不再输出短 ID');
+    assert.equal('id' in row, false, '列表行不再输出任务 ID');
     assert.equal(row.durationLabel, '7s');
     assert.equal(row.progressPercent, null);
     assert.equal(row.resultTone, 'normal');
@@ -128,6 +128,35 @@ describe('任务列表行：六列口径', () => {
       progress: { phase: 'persist', done: 1, total: 1 },
     }));
     assert.equal(row.progressPercent, null);
+  });
+});
+
+describe('结果摘要：新增文档数与摘要横排', () => {
+  const withResult = (result) => baseTask({ result: { ...baseTask().result, ...result } });
+
+  it('createdTotal 优先，接在摘要后面同一行', () => {
+    const row = buildTaskListRow(withResult({
+      createdTotal: 308,
+      created: [['langchain', 'a.md']],
+    }));
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 308 篇', '明细被截断也按总数显示');
+    assert.match(row.ariaLabel, /新增文档 308 篇/);
+  });
+
+  it('只有 created 明细时退回条目数', () => {
+    const row = buildTaskListRow(withResult({
+      created: [['langchain', 'a.md'], ['langchain', 'b.md']],
+    }));
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 2 篇');
+  });
+
+  it('新增 0 篇照实显示（增量同步未变时不能消失）', () => {
+    const row = buildTaskListRow(withResult({ createdTotal: 0, created: [] }));
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 0 篇');
+  });
+
+  it('旧记录没有该快照时摘要不变（不能显示成 0 篇）', () => {
+    assert.equal(buildTaskListRow(baseTask()).resultSummary, '成功 251 · 跳过 0 · 未完成 0');
   });
 });
 
