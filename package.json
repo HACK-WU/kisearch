@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.src.json",
     "test": "npx jiti test/group-create.test.ts",
     "test:all": "node scripts/run-tests.mjs",
+    "test:serial": "node scripts/run-tests.mjs --serial",
     "test:chat": "node scripts/run-tests.mjs test/chat",
     "test:group-create": "npx jiti test/group-create.test.ts",
     "test:group-delete": "npx jiti test/delete-group.test.ts",
