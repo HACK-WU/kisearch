@@ -677,6 +677,46 @@ a:hover { text-decoration: underline; }
 }
 .ki-stats--pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
+/* 合并格「KB ｜ RAG 」（2026-10-30 用户选定「状态点」形态）：两列，每列
+   「● 标签」+ 下一行状态词。此前用过纯符号 `✓ / ✓` 两列，实测四个元素被拉得很散、
+   且细对勾比左边的「1882」轻太多，整格显得空 —— 加圆点与状态词把重量补回来。
+   标签口径与 `.ki-stat-card--soft .ki-stat-label` 一致（14px/600/muted）。 */
+.ki-layers { display: flex; gap: 24px; }
+.ki-layers__item { min-width: 0; }
+.ki-layers__head { display: flex; align-items: center; gap: 6px; }
+.ki-layers__dot {
+  flex: none; box-sizing: border-box;
+  /* 8px 是下限：7px + 1.5px 边框时内径只剩 4px，1x 屏上空心态几乎糊成实心点 */
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.ki-layers__dot--ok { background: var(--ki-color-success); }
+.ki-layers__dot--off { background: var(--ki-color-text-subtle); }
+/* 未知用空心圈：不只靠颜色区分（灰实心 = 确认没有，灰空心 = 没查到） */
+.ki-layers__dot--unknown { background: transparent; border: 2px solid var(--ki-color-text-subtle); }
+.ki-layers__label {
+  font: 600 var(--ki-font-size-md) var(--ki-font-family);
+  color: var(--ki-color-text-muted);
+}
+.ki-layers__state {
+  display: block;
+  /* 18px 与 `.ki-stat-value--state` 同档；margin-top 10px + 行高补偿后与其他格等高 */
+  margin-top: 10px;
+  font-size: 18px; font-weight: 650; letter-spacing: 0;
+}
+/* 非「可用」的状态词弱化，避免"不可用/未知"读起来像正常值 */
+.ki-layers__item--off .ki-layers__state,
+.ki-layers__item--unknown .ki-layers__state { color: var(--ki-color-text-subtle); }
+
+/* 状态词型数值（读写权限 / Wiki 回写）。中文词视觉重量远大于数字，沿用 22px 数字口径
+   会压过同一行的「文档 1882」，取 18px（与 .ki-stat-value--text 同档）。
+   ⚠️ 必须带 `.ki-stat-card--soft` 前缀才盖得住上面的
+   `.ki-stat-card--soft .ki-stat-value { font-size: 22px }`（特异性 0-2-0 > 0-1-0）。 */
+.ki-stat-card--soft .ki-stat-value--state,
+.ki-stat-value--state { font-size: 18px; font-weight: 650; letter-spacing: 0; }
+/* 保护态（只读 / 无可用目录）走警示色系，不用红色（红色语义是错误） */
+.ki-stat-value--warn { color: var(--ki-color-warning); }
+.ki-stat-value--muted { color: var(--ki-color-text-subtle); }
+
 /* 总览双卡（当前知识库 ｜ 健康状态）：等宽等高，<960px 纵排 */
 .ki-dash-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
 .ki-dash-grid > .ki-card { height: 100%; }
@@ -755,6 +795,20 @@ a:hover { text-decoration: underline; }
 .ki-panel-kicker { display: block; color: var(--ki-color-text-subtle); font: 600 var(--ki-font-size-xs)/1.2 var(--ki-font-mono); letter-spacing: 0.08em; }
 .ki-panel-heading .ki-card__title,
 .ki-panel-heading .ki-results__title { display: block; margin-top: 3px; }
+/* 卡头「当前知识库 + scope 名」同一基线并排（2026-10-30 用户定稿）。
+   此前 scope 名藏在右侧 12px 副标题里，切库后要读完整句才认得出"我在看哪个库"。
+   刻意不用 chip 底框 —— 用户要的是"和标题左右对齐"，底框会被读成另一个独立元素。
+   ⚠️ 必须写在这里而不是统计卡那一段：上面这条 `.ki-panel-heading .ki-card__title
+   { display: block }` 特异性同为 0-2-0，写在它**前面**会被它盖掉（flex/gap 全失效，
+   长 scope 名也拿不到 overflow 省略，会撑破 62px 卡头）。同分靠后定义胜出。 */
+.ki-panel-heading .ki-card__title--scope { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.ki-scope-current {
+  min-width: 0;
+  font-family: var(--ki-font-mono);
+  font-size: 18px; font-weight: 680; letter-spacing: -0.01em;
+  color: var(--ki-color-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 折叠/展开全部按钮：demo 同款状态高亮（当前动作为「展开」时着色，提示可展开） */
 .ki-icon-button[data-action="expand"] { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
 /* 刷新中：图标旋转（复用既有 ki-spin 关键帧）；按钮不再禁用，转圈给可见反馈 */

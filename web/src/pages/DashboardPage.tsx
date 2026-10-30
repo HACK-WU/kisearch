@@ -9,6 +9,7 @@ import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensio
 import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { describeWikiSync } from '@/lib/resourcesPage';
+import { layerColumns, readModeCard, wikiWritebackCard } from '@/lib/dashboardScopeCards';
 import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
 import { scheduleSummaryView, summarizeSchedules } from '@/lib/datasourceSchedule';
 import {
@@ -296,8 +297,9 @@ export function DashboardPage(): JSX.Element {
   // 当前 scope 概览（切换 scope 时实时更新）
   const { data: scopeDocs } = useDocList(scope);
   const currentMeta = list.find((s) => s.scope === scope);
-  // 计数取 `total` / `groups`：doc/list 无 group 时上限 500，列表长度与由它去重的分组数都是截断值
-  const { docTotal: curDocTotal, groupCount: curGroups } = scopeOverviewCounts(scopeDocs);
+  // 计数取 `total`：doc/list 无 group 时上限 500，列表长度是截断值（`groups` 同理，
+  // 但 2026-10-30 起总览不再展示分组数，该字段已无消费方）
+  const { docTotal: curDocTotal } = scopeOverviewCounts(scopeDocs);
 
   // 「显示注册 scope」卡片：数据全部来自同一份 scopeList（0 新增请求、0 后端改动）
   const scopeMode = normalizeScopeMode(scopes?.scopeMode);
@@ -318,6 +320,12 @@ export function DashboardPage(): JSX.Element {
     scope,
   });
   const modelTitle = embeddingIdentityTitle(embeddingStatus);
+
+  // 六宫格「状态类」三格（2026-10-30）：判定与文案统一收在 lib/dashboardScopeCards.ts，
+  // 页面只负责渲染 —— 读写/Wiki 的三态与四态判定不允许在这里就地拼装。
+  const readMode = readModeCard(scope, currentMeta?.readonly);
+  const layers = layerColumns(currentMeta, vectorDegraded);
+  const wikiCard = wikiWritebackCard(scope, currentMeta?.readonly, currentMeta?.wikiSync);
 
   return (
     <>
@@ -373,11 +381,17 @@ export function DashboardPage(): JSX.Element {
           <div className="ki-card__head">
             <span className="ki-panel-heading">
               <span className="ki-panel-kicker">CURRENT SCOPE</span>
-              <span className="ki-card__title">当前知识库</span>
+              {/* scope 名与标题同一基线并排（用户 2026-10-30：「要和标题左右对齐，
+                  不要在它的斜下方」）。不放 chip 底框 —— 底框会被读成另一个独立元素。 */}
+              <span className="ki-card__title ki-card__title--scope">
+                当前知识库
+                <span className="ki-scope-current" title={`当前 scope：${scope}`}>
+                  {scope}
+                </span>
+              </span>
             </span>
-            <span className="ki-card__sub">
-              顶栏切换 scope 即时刷新 · 当前：{scope}
-            </span>
+            {/* scope 名已上移到标题行，此处只留操作说明，不再重复一遍名字 */}
+            <span className="ki-card__sub">顶栏切换 scope 即时刷新</span>
           </div>
           <div className="ki-card__body">
             <div className="ki-stats ki-stats--pair">
@@ -385,20 +399,42 @@ export function DashboardPage(): JSX.Element {
                 <div className="ki-stat-label">文档</div>
                 <div className="ki-stat-value">{curDocTotal}</div>
               </div>
+              {/* KB / RAG 合并为一格（2026-10-30 用户定稿）：原来两格各一个 ✓ 信息密度太低。
+                  两列**必须各自可读**，不能压成一个总 ✓ —— `KB ✓ / RAG ✗` 是最需要被看见的坏状态。 */}
               <div className="ki-stat-card ki-stat-card--soft">
-                <div className="ki-stat-label">分组</div>
-                <div className="ki-stat-value">{curGroups}</div>
-              </div>
-              <div className="ki-stat-card ki-stat-card--soft">
-                <div className="ki-stat-label">KB 层</div>
-                <div className="ki-stat-value">
-                  {currentMeta ? (currentMeta.kb ? '✓' : '✗') : '—'}
+                <div className="ki-layers">
+                  <div className={`ki-layers__item ki-layers__item--${layers.kb.tone}`} title={layers.kb.title}>
+                    <span className="ki-layers__head">
+                      <span className={`ki-layers__dot ki-layers__dot--${layers.kb.tone}`} aria-hidden="true" />
+                      <span className="ki-layers__label">KB</span>
+                    </span>
+                    <span className="ki-layers__state">{layers.kb.label}</span>
+                  </div>
+                  <div className={`ki-layers__item ki-layers__item--${layers.rag.tone}`} title={layers.rag.title}>
+                    <span className="ki-layers__head">
+                      <span className={`ki-layers__dot ki-layers__dot--${layers.rag.tone}`} aria-hidden="true" />
+                      <span className="ki-layers__label">RAG</span>
+                    </span>
+                    <span className="ki-layers__state">{layers.rag.label}</span>
+                  </div>
                 </div>
               </div>
               <div className="ki-stat-card ki-stat-card--soft">
-                <div className="ki-stat-label">向量层</div>
-                <div className="ki-stat-value">
-                  {currentMeta ? (currentMeta.vector ? '✓' : '✗') : '—'}
+                <div className="ki-stat-label">读写权限</div>
+                <div
+                  className={`ki-stat-value ki-stat-value--state${readMode.tone === 'warn' ? ' ki-stat-value--warn' : ''}${readMode.tone === 'muted' ? ' ki-stat-value--muted' : ''}`}
+                  title={readMode.title}
+                >
+                  {readMode.label}
+                </div>
+              </div>
+              <div className="ki-stat-card ki-stat-card--soft">
+                <div className="ki-stat-label">Wiki 回写</div>
+                <div
+                  className={`ki-stat-value ki-stat-value--state${wikiCard.tone === 'warn' ? ' ki-stat-value--warn' : ''}${wikiCard.tone === 'muted' ? ' ki-stat-value--muted' : ''}`}
+                  title={wikiCard.title}
+                >
+                  {wikiCard.label}
                 </div>
               </div>
               {/* REQ-20261016-002：嵌入模型 / 向量维度（值来自 /api/vector/status，与顶栏同一份缓存） */}
