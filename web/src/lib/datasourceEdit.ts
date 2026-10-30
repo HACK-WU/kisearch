@@ -47,11 +47,29 @@ export function formFromRecord(record: DataSourceRecordView): EditConfigForm {
   };
 }
 
-export interface ChunkValidation {
-  ok: boolean;
-  field?: 'chunkSize' | 'chunkOverlap';
-  message?: string;
-}
+export type ChunkField = 'chunkSize' | 'chunkOverlap';
+
+/**
+ * 校验结果（判别联合）：**成功时没有 `field` / `message` 字段**。
+ *
+ * ★ 不要把它当「错误对象或 null」直接用 —— `{ ok: true }` 是 **truthy**。
+ * 导入页曾写成 `const chunkParamErr = validateChunkFields(...); if (chunkParamErr) 拦截`，
+ * 结果合法参数也被永久拦死，页面报「切分参数不合法：undefined」
+ * （2026-10-30，`.debug/import-chunk-params-20261030`）。只需要错误对象的调用方请用 `chunkFieldsError()`。
+ *
+ * 写成判别联合而不是 `{ ok: boolean; field?; message? }`，是为了让这类误用在 `tsc` 阶段就暴露：
+ * `validateChunkFields(...).message` / `.field` 现在直接报错
+ * （`Property 'message' does not exist on type '{ ok: true; }'`，已用临时探针实测）。
+ */
+export type ChunkValidation =
+  | { ok: true }
+  | { ok: false; field: ChunkField; message: string };
+
+/**
+ * 切分参数错误：`field` 用于定位输入框，`message` 可直接展示。
+ * 从 `ChunkValidation` 派生（而非另行声明），`ChunkValidation` 加字段时这里自动跟上，不会漂移。
+ */
+export type ChunkFieldError = Extract<ChunkValidation, { ok: false }>;
 
 /**
  * 与后端同口径：留空 = 默认（1000 / 150）；段长 100–4000、重叠 0–500；
@@ -100,6 +118,23 @@ export function validateChunkFields(
     return { ok: false, field: 'chunkOverlap', message: `重叠（${effOverlap}）必须小于段长（${effSize}）` };
   }
   return { ok: true };
+}
+
+/**
+ * `validateChunkFields` 的「错误或 null」视图：成功返回 `null`，可直接 `if (err)` / `err?.field` 判空。
+ *
+ * 导入页这类「只需要有没有错、并把错误显示出来」的调用方用这个；
+ * 「既要知道有没有错、又要区分成功态其它信息」（如编辑弹窗的存量软提示）才用 `validateChunkFields`。
+ *
+ * 实现上直接把收窄后的结果原样返回（不新建对象），`ChunkValidation` 增删字段时不会在这里被悄悄裁掉。
+ */
+export function chunkFieldsError(
+  chunkSize: string,
+  chunkOverlap: string,
+  base?: Pick<EditConfigForm, 'chunkSize' | 'chunkOverlap'>,
+): ChunkFieldError | null {
+  const result = validateChunkFields(chunkSize, chunkOverlap, base);
+  return result.ok ? null : result;
 }
 
 /**

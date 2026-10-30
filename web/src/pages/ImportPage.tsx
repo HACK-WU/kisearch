@@ -21,7 +21,7 @@ import {
   MIN_CHUNK_SIZE,
   SUGGESTED_CHUNK_SIZE_MAX,
   SUGGESTED_CHUNK_SIZE_MIN,
-  validateChunkFields,
+  chunkFieldsError,
 } from '@/lib/datasourceEdit';
 import { Notice } from '@/components/Notice';
 import {
@@ -595,7 +595,9 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   // 切分参数范围（段长 100–4000、重叠 0–500，且重叠 < 段长）：输入即校验，红框 + 就地文案，
   // 提交前 `start` 再拦一次，后端 `chunker.validateChunkParams` 兜底。
   // 此前只有 input 的 `min`/`max` 属性——`type=number` 对手动输入不生效，等于没校验。
-  const chunkParamErr = validateChunkFields(chunkSize, chunkOverlap);
+  // ★ 必须是「错误或 null」视图（`chunkFieldsError`），不能直接用 `validateChunkFields`：
+  // 后者成功时返回 `{ ok: true }`（truthy），当可空判会让合法参数也进不来。
+  const chunkParamErr = chunkFieldsError(chunkSize, chunkOverlap);
 
   // 加载可用 tag 列表（当前 scope）
   useEffect(() => {
@@ -1556,7 +1558,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     if (chunkParamErr) {
       // 错误提示在折叠的高级卡片里，自动展开，否则用户只看到一句顶部 error 找不到出处
       setAdvOpen(true);
-      setError(chunkParamErr.message ?? '切分参数不合法');
+      setError(chunkParamErr.message);
       return;
     }
     if (selectedDocuments.length === 0) {

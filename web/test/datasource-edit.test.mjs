@@ -16,8 +16,9 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { formFromRecord, validateChunkFields, chunkRangeNotice, buildConfigPatch, isConfigDirty } =
-  await vite.ssrLoadModule('/src/lib/datasourceEdit.ts');
+const {
+  formFromRecord, validateChunkFields, chunkFieldsError, chunkRangeNotice, buildConfigPatch, isConfigDirty,
+} = await vite.ssrLoadModule('/src/lib/datasourceEdit.ts');
 after(async () => vite.close());
 
 const record = (over = {}) => ({
@@ -97,6 +98,39 @@ describe('validateChunkFields', () => {
     assert.equal(validateChunkFields('6001', '200', base).ok, false);
     // 不传 base（新输入场景）→ 全量校验
     assert.equal(validateChunkFields('6000', '200').ok, false);
+  });
+});
+
+describe('chunkFieldsError（导入页用的「错误或 null」视图）', () => {
+  // 回归：2026-10-30 导入页直接用了 validateChunkFields 的返回值判空，
+  // 而成功态是 truthy 的 `{ ok: true }` → 合法参数也被永久拦住，报「切分参数不合法：undefined」。
+  // 见 .debug/import-chunk-params-20261030。
+  it('★ 合法参数（1000 / 150 及留空默认）→ 必须返回 null，否则导入会被永久拦死', () => {
+    assert.equal(chunkFieldsError('1000', '150'), null);
+    assert.equal(chunkFieldsError('', ''), null);
+    assert.equal(chunkFieldsError('800', ''), null);
+  });
+
+  it('非法参数 → 返回可直接展示的 field + message（不含 undefined）', () => {
+    const sizeErr = chunkFieldsError('99999', '');
+    assert.equal(sizeErr?.field, 'chunkSize');
+    assert.match(sizeErr?.message ?? '', /100–4000/);
+    assert.doesNotMatch(sizeErr?.message ?? '', /undefined/);
+
+    const overlapErr = chunkFieldsError('1000', '600');
+    assert.equal(overlapErr?.field, 'chunkOverlap');
+    assert.match(overlapErr?.message ?? '', /500/);
+
+    const relErr = chunkFieldsError('300', '400');
+    assert.equal(relErr?.field, 'chunkOverlap');
+    assert.match(relErr?.message ?? '', /必须小于段长/);
+  });
+
+  it('与 validateChunkFields 同口径（含 base 放行存量超界值）', () => {
+    const base = { chunkSize: '6000', chunkOverlap: '200' };
+    assert.equal(chunkFieldsError('6000', '200', base), null);
+    assert.equal(chunkFieldsError('6001', '200', base)?.field, 'chunkSize');
+    assert.equal(chunkFieldsError('6000', '200')?.field, 'chunkSize');
   });
 });
 
