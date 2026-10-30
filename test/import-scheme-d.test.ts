@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
 
 // ki import 为扁平命令（2026-09-07 由 `ki scan-kb import` 扁平化）：参数数组不再带 'import' 子命令名，
 // 带上去会被 commander 报 `too many arguments`（无守卫），故各调用点均不得遗留该元素。
@@ -24,7 +24,7 @@ function runImport(args: string[]): any {
   const { execFileSync } = require('node:child_process');
   let out: string;
   try {
-    out = execFileSync('npx', ['jiti', SCRIPT, ...args], {
+    out = execFileSync(process.execPath, [JITI_CLI, SCRIPT, ...args], {
       encoding: 'utf-8',
       env: getTestEnv(),
       cwd: path.resolve('.'),
@@ -404,7 +404,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
   it('--tags 全为保留标签：不打标 + stderr 警告（fail-loud 提示，不静默）', () => {
     const src = mkSource({ 't3.md': '# T3\n内容' });
     const { spawnSync } = require('node:child_process');
-    const res = spawnSync('npx', ['jiti', SCRIPT, '--scope', scope, '--source', src, '--group', 'tagkb-c', '--no-vector', '--tags', 'ki-search,ki-path'], {
+    const res = spawnSync(process.execPath, [JITI_CLI, SCRIPT, '--scope', scope, '--source', src, '--group', 'tagkb-c', '--no-vector', '--tags', 'ki-search,ki-path'], {
       encoding: 'utf-8',
       env: getTestEnv(),
       cwd: path.resolve('.'),
@@ -425,7 +425,7 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     // 辅助：跑一次，返回 { code, stdout, stderr }（commander 对未知参数/命令输出 help 文本，非 JSON）
     const runRaw = (args: string[]) => {
       try {
-        const out = execFileSync('npx', ['jiti', SCRIPT, ...args], { encoding: 'utf-8', env: getTestEnv(), cwd: path.resolve('.') });
+        const out = execFileSync(process.execPath, [JITI_CLI, SCRIPT, ...args], { encoding: 'utf-8', env: getTestEnv(), cwd: path.resolve('.') });
         return { code: 0, stdout: out, stderr: '' };
       } catch (e: any) {
         return { code: e.status ?? 1, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString() };

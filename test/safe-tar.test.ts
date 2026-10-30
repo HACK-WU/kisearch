@@ -9,6 +9,7 @@ import { backupScopeSnapshot } from '../src/lib/backup.js';
 import { restoreSnapshotLocal } from '../src/lib/restore-snapshot.js';
 import { getKbDir } from '../src/lib/scope.js';
 import { registerTestScope, testConfigPath } from './test-config.js';
+import { tarPathArgs, tarFormatArgs, tarPath } from '../src/lib/tar-compat.js';
 
 test('restore 快照解压拒绝 scope 外部符号链接', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-safe-tar-'));
@@ -22,7 +23,7 @@ test('restore 快照解压拒绝 scope 外部符号链接', () => {
   fs.mkdirSync(outside, { recursive: true });
   fs.writeFileSync(path.join(scopeDir, 'index.json'), '{}');
   fs.symlinkSync(outside, path.join(scopeDir, 'escape'), 'dir');
-  execFileSync('tar', ['-czf', archive, '-C', source, 'scope-a']);
+  execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(archive), '-C', tarPath(source), 'scope-a']);
 
   assert.throws(
     () => extractScopeSnapshot(archive, path.join(destination, 'scope-a')),
@@ -44,7 +45,7 @@ test('快照排除编辑草稿目录，且还原后草稿不会被复活', async
   fs.writeFileSync(path.join(scopeDir, 'index.json'), JSON.stringify({ R: 'body' }));
   fs.writeFileSync(path.join(scopeDir, '.relation-edits', draftA), '{}');
   const snapshot = backupScopeSnapshot(path.join(root, 'backup'), backupScope, scopeDir);
-  const listing = execFileSync('tar', ['-tzf', snapshot], { encoding: 'utf8' });
+  const listing = execFileSync('tar', [...tarPathArgs(), '-tzf', tarPath(snapshot)], { encoding: 'utf8' });
   assert.match(listing, /index\.json/);
   assert.doesNotMatch(listing, /relation-edits/, '草稿是中间态，不应进入快照');
 
@@ -64,7 +65,7 @@ test('快照排除编辑草稿目录，且还原后草稿不会被复活', async
   fs.writeFileSync(path.join(stage, scope, 'index.json'), JSON.stringify({ R: 'restored' }));
   fs.writeFileSync(path.join(stage, scope, '.relation-edits', draftB), '{}');
   const legacySnapshot = path.join(root, 'legacy.tar.gz');
-  execFileSync('tar', ['-czf', legacySnapshot, '-C', stage, scope]);
+  execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(legacySnapshot), '-C', tarPath(stage), scope]);
 
   const restored = await restoreSnapshotLocal(scope, { snapshotFile: legacySnapshot });
   assert.equal(restored.ok, true);

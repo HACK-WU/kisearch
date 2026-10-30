@@ -8,13 +8,13 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runJson(script: string, args: string[]): any {
   try {
-    const out = execFileSync('npx', ['jiti', path.join(SCRIPTS_DIR, script), ...args], {
+    const out = execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
       encoding: 'utf-8', env: getTestEnv(),
     });
     return JSON.parse(out.trim() || '{}');
@@ -27,7 +27,7 @@ function createGroup(scope: string, groupPath: string): any {
 
 function getOut(script: string, args: string[]): string {
   try {
-    return execFileSync('npx', ['jiti', path.join(SCRIPTS_DIR, script), ...args], {
+    return execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
       encoding: 'utf-8', env: getTestEnv(),
     });
   } catch (err: any) { return err.stdout || ''; }

@@ -191,7 +191,7 @@ export interface RunHookResult {
 
 /**
  * 顺序执行外部清洗钩子（stdin→stdout 管道，一次一个文件）。
- * - 每个 hook 用 `sh -c` 执行；输入经 stdin，输出取 stdout
+ * - 每个 hook 用系统 shell 执行（POSIX `sh -c`，Windows `cmd /d /s /c`）；输入经 stdin，输出取 stdout
  * - 超时（默认 10s）→ SIGKILL 终止（N5：防孤儿进程）
  * - hook 失败（非零退出/超时）→ 跳过该 hook + 记入 failedHooks（不阻断后续）
  * @param text 待清洗内容（文件原文，local KB 已先行写入）
@@ -203,14 +203,21 @@ export async function runCleanHooks(text: string, hooks: string[]): Promise<RunH
     return { ok: true, text, failedHooks: [] };
   }
   const { spawn } = await import('node:child_process');
+  const isWindows = process.platform === 'win32';
+  const shell = isWindows ? (process.env.ComSpec || 'cmd.exe') : 'sh';
+  // hook 本身就是一行命令：Windows 下必须原样交给 cmd，Node 默认的引号转义
+  // （`\"`）cmd 不识别，会把 `node -e "..."` 这类命令拆坏。
+  const shellArgs = (hook: string): string[] => (isWindows ? ['/d', '/s', '/c', hook] : ['-c', hook]);
+  const spawnOptions = isWindows ? { windowsVerbatimArguments: true } : {};
   const failedHooks: string[] = [];
   let current = text;
 
   for (const hook of hooks) {
     try {
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn('sh', ['-c', hook], {
+        const child = spawn(shell, shellArgs(hook), {
           stdio: ['pipe', 'pipe', 'pipe'],
+          ...spawnOptions,
         });
         let stdout = '';
         let stderr = '';

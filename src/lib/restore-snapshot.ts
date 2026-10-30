@@ -40,7 +40,7 @@ function ensureTarAvailable(): void {
   try {
     execFileSync('tar', ['--version'], { stdio: 'ignore' });
   } catch {
-    throw new Error('tar 命令不可用，请安装 tar（Linux/macOS 内置，Windows 请安装 Git for Windows）');
+    throw new Error('tar 命令不可用，请安装 tar（Linux/macOS 内置；Windows 10+ 内置，或安装 Git for Windows 后重试）');
   }
 }
 

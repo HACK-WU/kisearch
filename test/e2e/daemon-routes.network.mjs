@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { tarPathArgs, tarPath } from '../../src/lib/tar-compat.js';
 import {
   probeHealth,
   startIsolatedDaemon,
@@ -135,7 +136,7 @@ test('阶段 3：backup/export/wiki-backfill daemon 路由黑盒验收', {
     assert.equal(backup.action, 'backup');
     assert.equal(typeof backup.snapshotPath, 'string');
     assert.equal(fs.existsSync(backup.snapshotPath), true, JSON.stringify(backup));
-    const tarListing = execFileSync('tar', ['-tzf', backup.snapshotPath], { encoding: 'utf8' });
+    const tarListing = execFileSync('tar', [...tarPathArgs(), '-tzf', tarPath(backup.snapshotPath)], { encoding: 'utf8' });
     assert.match(tarListing, new RegExp(`${SCOPE}/group-index\\.json`));
     assert.match(tarListing, new RegExp(`${SCOPE}/relations-cache\\.json`));
     assert.match(tarListing, new RegExp(`${SCOPE}/${GROUP}/index\\.json`));

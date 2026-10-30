@@ -9,8 +9,15 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { jitiCliPath } from '../src/lib/jiti-cli.mjs';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
+
+/**
+ * 跨平台执行 jiti：Windows 无法直接 spawn `npx`（实际是 npx.cmd，execFile 需 shell），
+ * 统一改为「当前 Node 进程 + 本地 jiti CLI」，与 bin/ki.mjs 的启动方式一致。
+ */
+export const JITI_CLI = jitiCliPath;
 
 /** 每个测试进程共享一个临时配置文件 */
 const TEST_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-test-'));

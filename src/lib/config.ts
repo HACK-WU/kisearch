@@ -523,10 +523,14 @@ function findConfigFile(explicitPath?: string): string | null {
 // ─── 路径展开 ───
 
 function expandPath(input: string, baseDir: string): string {
-  let result = input;
   const home = os.homedir();
-  result = result.replace(/^\$HOME\b/, home);
-  result = result.replace(/^~/, home);
+  let result = input;
+  const homeMatch = result.match(/^(\$HOME|~)(?=$|[\\/])/);
+  if (homeMatch) {
+    // `$HOME/foo` 与 `$HOME\foo` 都要拼成原生分隔符，否则 Windows 会得到 `C:\Users\x/foo`
+    const rest = result.slice(homeMatch[0].length).replace(/^[\\/]+/, '');
+    result = rest ? path.join(home, rest) : home;
+  }
   if (!path.isAbsolute(result)) {
     result = path.resolve(baseDir, result);
   }

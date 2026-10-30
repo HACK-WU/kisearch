@@ -22,6 +22,7 @@ import net from 'node:net';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
+import { JITI_CLI } from './test-config.js';
 
 import {
   loadConfig,
@@ -543,8 +544,8 @@ describe('B. config init —— 生成 YAML 模板', () => {
 
   function runInit(extraArgs: string[] = []): { ok: boolean; [k: string]: unknown } {
     const out = execFileSync(
-      'npx',
-      ['jiti', CONFIG_SCRIPT, 'init', '--dir', projDir, ...extraArgs],
+      process.execPath,
+      [JITI_CLI, CONFIG_SCRIPT, 'init', '--dir', projDir, ...extraArgs],
       {
         encoding: 'utf-8',
         env: {

@@ -16,6 +16,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync, spawnSync } from 'child_process';
+import { JITI_CLI } from './test-config.js';
+import { tarPathArgs, tarFormatArgs, tarPath } from '../src/lib/tar-compat.js';
 
 const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'restore.ts');
 
@@ -76,10 +78,12 @@ function setupScope(opts: { backupInCustom?: boolean } = {}): {
   const snapDir = path.join(snapshotHostDir, scope, 'snapshots');
   fs.mkdirSync(snapDir, { recursive: true });
   execFileSync('tar', [
+    ...tarPathArgs(),
+    ...tarFormatArgs(),
     '-czf',
-    path.join(snapDir, 'snapshot.20260618-021614.tar.gz'),
+    tarPath(path.join(snapDir, 'snapshot.20260618-021614.tar.gz')),
     '-C',
-    stageDir,
+    tarPath(stageDir),
     scope,
   ]);
 
@@ -99,7 +103,7 @@ function setupScope(opts: { backupInCustom?: boolean } = {}): {
 
 function runRestore(configPath: string, args: string[]): any {
   try {
-    const stdout = execFileSync('npx', ['jiti', SCRIPT_PATH, ...args], {
+    const stdout = execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
       encoding: 'utf-8',
       env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
     });
@@ -295,7 +299,7 @@ describe('NEG：--group/--tags 参数负向防护（不得静默降级为全量�
 
   it('列表模式误传重建参数的警告内容：stderr 明确提示需配合 --rebuild-vector', () => {
     const { configPath, scope } = setupScope();
-    const res = spawnSync('npx', ['jiti', SCRIPT_PATH, scope, '--group', 'wiki'], {
+    const res = spawnSync(process.execPath, [JITI_CLI, SCRIPT_PATH, scope, '--group', 'wiki'], {
       encoding: 'utf-8',
       env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
     });

@@ -25,6 +25,7 @@ import url from 'node:url';
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 import { registerTestScope, getTestEnv } from '../test-config.ts';
+import { jitiCliPath } from '../../src/lib/jiti-cli.mjs';
 
 // ─── apiKey 守卫（对齐同目录 *.e2e.network.mjs 惯例）──────────────────────
 // 本套件的 runImport 不带 --no-vector，会真实调用 embedding；缺 key 时导入在 apiKey
@@ -53,12 +54,12 @@ function makeDir(files) {
 
 function runImport(scope, sourceDir, group = 'default') {
   const args = [
-    'jiti', 'src/import.ts',
+    'src/import.ts',
     '--scope', scope,
     '--source', sourceDir,
     '--group', group,
   ];
-  const stdout = execFileSync('npx', args, {
+  const stdout = execFileSync(process.execPath, [jitiCliPath, ...args], {
     cwd: path.resolve(__dirname, '..', '..'),
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -14,13 +14,13 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey, JITI_CLI } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runScript(script: string, args: string[]): { stdout: string; status: number } {
   try {
-    const stdout = execFileSync('npx', ['jiti', path.join(SCRIPTS_DIR, script), ...args], {
+    const stdout = execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
       encoding: 'utf-8',
       env: getTestEnv()
     });

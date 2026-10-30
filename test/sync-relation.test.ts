@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
 
 // ─── 辅助 ───
 
@@ -24,7 +24,7 @@ const SCRIPT_PATH = path.resolve(
 
 function runSync(args: string[]): any {
   try {
-    const output = execFileSync('npx', ['jiti', SCRIPT_PATH, ...args], {
+    const output = execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
       encoding: 'utf-8',
       env: getTestEnv()
     });

@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { tarPathArgs, tarFormatArgs, tarPath } from './tar-compat.js';
 import { getBackupDir, getScopeDataDir, loadConfig } from './config.js';
 import type { KiConfig } from './config.js';
 import { checkWritable, checkDiskSpace, estimateDirSize } from './preflight.js';
@@ -106,7 +107,7 @@ function ensureTarAvailable(): void {
   } catch {
     _tarAvailable = false;
     throw new Error(
-      'tar 命令不可用，请安装 tar（Linux/macOS 内置，Windows 请安装 Git for Windows）'
+      'tar 命令不可用，请安装 tar（Linux/macOS 内置；Windows 10+ 内置，或安装 Git for Windows 后重试）'
     );
   }
 }
@@ -145,8 +146,8 @@ export function backupScopeSnapshot(
     // 快照原样还原会让草稿复活——其 baseRevision 与还原后的正文未必匹配，甚至
     // 触发中断恢复把已还原的正文回滚成 baseContent。正文本身在 index.json 里，
     // 快照价值不受影响（restore 侧也会兜底清空该目录，覆盖历史快照）。
-    execFileSync('tar', ['-czf', targetFile, '--exclude', `${scopeDirName}/.relation-edits`,
-      '-C', scopeDirParent, scopeDirName], {
+    execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(targetFile),
+      '--exclude', `${scopeDirName}/.relation-edits`, '-C', tarPath(scopeDirParent), scopeDirName], {
       stdio: 'ignore',
     });
   } catch (err) {

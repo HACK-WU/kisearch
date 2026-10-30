@@ -257,7 +257,7 @@ scopes:
 |------|------|--------|------|
 | `enabled` | `boolean` | `true` | 总开关，`false` 等效 `--no-clean`（连 hooks 一起关闭） |
 | `rules` | `object` | 全部开启 | 内置清洗规则逐项开关 |
-| `hooks` | `string[]` | 无 | 外部清洗钩子命令（stdin→stdout 管道，按序执行） |
+| `hooks` | `string[]` | 无 | 外部清洗钩子命令（stdin→stdout 管道，按序执行）。Linux/macOS 经 `sh -c` 执行，Windows 经 `cmd /d /s /c` 执行 —— 钩子要按所在系统的 shell 语法编写 |
 
 `rules` 支持的子项及作用（默认均开启）：
 

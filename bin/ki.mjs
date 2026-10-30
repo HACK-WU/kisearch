@@ -250,7 +250,10 @@ try {
         resolve({ code });
       });
     });
-    if (exited) {
+    // 预检窗口内 exit 0 不是失败：目标 host:port 已有健康实例时，子进程会复用它
+    // 并以 0 退出（startHttpMcpServer 的幂等单例语义）。只有非 0 退出/被信号杀死
+    // 才是真失败（token 缺失、参数非法、端口冲突等 fail-loud）。
+    if (exited && exited.code !== 0) {
       const fgArgs = scriptArgs.filter((a) => a !== '--daemon' && a !== '-d').join(' ');
       console.error(`错误：daemon 启动失败 —— 子进程在预检阶段退出（exit ${exited.code ?? 'signal'}）。`);
       console.error('请前台运行同样命令（去掉 -d/--daemon）查看具体错误：');
@@ -258,6 +261,11 @@ try {
       process.exit(1);
     }
     child.unref();
+    if (exited) {
+      console.log('kisearch MCP 服务已就绪（检测到已有健康实例，本次未重复启动）。');
+      console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop');
+      process.exit(0);
+    }
     console.log('kisearch MCP 服务已在后台启动（daemon 模式）。');
     console.log('查看状态：ki mcp --status    |    关闭：ki mcp stop    |    重启：ki mcp restart');
     process.exit(0);
