@@ -107,7 +107,7 @@ function assertCacheShape(cache: RelationsCache, scope: string, source: string):
   // 「删除 + 覆盖 scope 目录」，且看不到将使用哪个快照（默认取最新，可能早于现有数据）；
   // 本文案还会经 MCP ki_group_list（isError:true）原样流给 AI agent，被照抄执行的风险更高。
   const hint = `建议：先执行 ki restore ${scope} --from-snapshot 查看快照总览（还原会删除并覆盖该 scope 目录，确认来源快照无误后再按提示加 --yes 执行）；`
-    + `或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []）`;
+    + `或手动修正下列 Group 的 hot_relations 字段（应为数组，无 Relation 时为 []；元素须含 useCount 非负整数、lastUsedTime 为 null 或毫秒时间戳）`;
 
   if (!cache.groups || typeof cache.groups !== 'object') {
     throw new Error(
@@ -118,16 +118,47 @@ function assertCacheShape(cache: RelationsCache, scope: string, source: string):
   const broken = Object.entries(cache.groups)
     .filter(([, data]) => !data || typeof data !== 'object' || !Array.isArray(data.hot_relations))
     .map(([groupPath]) => groupPath);
-  if (broken.length === 0) return;
-
-  const lines = broken.slice(0, MAX_SHOW).map((p) => `  - ${p}：hot_relations 缺失或不是数组`);
-  if (broken.length > MAX_SHOW) {
-    lines.push(`  ...（另有 ${broken.length - MAX_SHOW} 个 Group 同样损坏，修正以上问题后继续检查）`);
+  if (broken.length > 0) {
+    const lines = broken.slice(0, MAX_SHOW).map((p) => `  - ${p}：hot_relations 缺失或不是数组`);
+    if (broken.length > MAX_SHOW) {
+      lines.push(`  ...（另有 ${broken.length - MAX_SHOW} 个 Group 同样损坏，修正以上问题后继续检查）`);
+    }
+    throw new Error(
+      `CACHE_SHAPE_INVALID: relations 元数据结构校验失败：${source}`
+      + `（共 ${broken.length} 个 Group 损坏）\n${lines.join('\n')}\n${hint}`
+    );
   }
-  throw new Error(
-    `CACHE_SHAPE_INVALID: relations 元数据结构校验失败：${source}`
-    + `（共 ${broken.length} 个 Group 损坏）\n${lines.join('\n')}\n${hint}`
-  );
+
+  // 元素级校验：元素缺 useCount 会让评分变 NaN（聚合侧被静默吞成 0 分，Group 排名失真），
+  // 元素为 null 会让下游裸抛 TypeError——都属缓存被改坏，按 fail-loud 报出来而不是带病计算。
+  const badElements: string[] = [];
+  for (const [groupPath, data] of Object.entries(cache.groups)) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.hot_relations)) continue;
+    data.hot_relations.forEach((item, idx) => {
+      const rel = item as unknown as Record<string, unknown> | null;
+      if (!rel || typeof rel !== 'object') {
+        badElements.push(`${groupPath} 第 ${idx + 1} 条：元素不是对象`);
+        return;
+      }
+      const label = typeof rel.text === 'string' ? `${groupPath}/${rel.text}` : `${groupPath} 第 ${idx + 1} 条`;
+      if (!Number.isFinite(rel.useCount)) {
+        badElements.push(`${label}：useCount 缺失或不是数字（应为 0 或正整数）`);
+      }
+      if (rel.lastUsedTime != null && !Number.isFinite(rel.lastUsedTime)) {
+        badElements.push(`${label}：lastUsedTime 应为 null 或毫秒时间戳`);
+      }
+    });
+  }
+  if (badElements.length > 0) {
+    const lines = badElements.slice(0, MAX_SHOW).map((line) => `  - ${line}`);
+    if (badElements.length > MAX_SHOW) {
+      lines.push(`  ...（另有 ${badElements.length - MAX_SHOW} 条同样损坏，修正以上问题后继续检查）`);
+    }
+    throw new Error(
+      `CACHE_SHAPE_INVALID: relations 元数据条目校验失败：${source}`
+      + `（共 ${badElements.length} 条 Relation 损坏）\n${lines.join('\n')}\n${hint}`
+    );
+  }
 }
 
 function loadRelationsCache(scope: string): RelationsCache | null {
@@ -222,7 +253,8 @@ function getGroupAggregateScores(
     const totalScore = relations.reduce((sum, rel) => {
       return sum + calculateScore(rel.useCount, rel.lastUsedTime, now, halfLifeHours);
     }, 0);
-    scores.set(path, totalScore / relations.length);
+    // NaN 是 falsy，直接进 Map 会在读取侧被 `|| 0` 静默吞成 0 分；这里显式归零
+    scores.set(path, Number.isFinite(totalScore) ? totalScore / relations.length : 0);
   }
   return scores;
 }
@@ -258,7 +290,7 @@ function partitionGroups(
 
   const result = partitionByScore(allPaths, {
     getId: (p) => p,
-    getScore: (p) => groupScores.get(p) || 0,
+    getScore: (p) => safeScore(groupScores.get(p)),
     isEmerging: isGroupEmerging,
   }, config);
 
@@ -283,6 +315,11 @@ function getPartitionLabel(
 }
 
 // ─── 格式化 ───
+
+/** Map 中的分数可能是 NaN（历史缓存元素缺 useCount 等）：统一按 0 处理，不用 `||` 兜底 */
+function safeScore(score: number | undefined): number {
+  return typeof score === 'number' && Number.isFinite(score) ? score : 0;
+}
 
 function fmtScore(score: number): string {
   return score % 1 === 0 ? score.toString() : score.toFixed(1);
@@ -393,7 +430,7 @@ function renderTree(
   const topNames = Object.keys(groups);
   topNames.forEach((name, idx) => {
     const isLast = idx === topNames.length - 1;
-    const score = groupScores.get(name) || 0;
+    const score = safeScore(groupScores.get(name));
     const label = getPartitionLabel(name, partition);
 
     if (!filterSet || hasVisibleDescendant(groups[name] as Record<string, unknown>, name, filterSet)) {
@@ -454,7 +491,7 @@ function renderTreeChildren(
     const isLast = idx === visibleChildren.length - 1;
     const connector = isLast ? '└── ' : '├── ';
     const childPrefix = `${parentPath}/${key}`;
-    const score = groupScores.get(childPrefix) || 0;
+    const score = safeScore(groupScores.get(childPrefix));
     const label = getPartitionLabel(childPrefix, partition);
     const childNode = value as Record<string, unknown>;
     const hasChildren = Object.keys(childNode).length > 0;
@@ -484,7 +521,7 @@ function renderSubtree(
   depth: number
 ): string {
   const lines: string[] = [];
-  const rootScore = groupScores.get(rootPath) || 0;
+  const rootScore = safeScore(groupScores.get(rootPath));
   lines.push(`${rootPath}/ (score: ${fmtScore(rootScore)}) ${getPartitionLabel(rootPath, partition)}`);
   renderTreeChildren(rootNode, rootPath, '', 1, depth, groupScores, partition, null, lines);
   return lines.join('\n');

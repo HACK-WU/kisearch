@@ -461,6 +461,41 @@ describe('query-group relations-cache 结构校验', () => {
     }
   });
 
+  it('hot_relations 元素缺 useCount → CACHE_SHAPE_INVALID（不静默算成 0 分）', async () => {
+    const output = await runWithCacheGroups({
+      '模块A': {
+        hot_relations: [
+          { id: 'rel_1', text: '损坏条目', score: 0, lastUsedTime: null, isImported: false },
+        ],
+        keywords: [],
+      },
+    });
+    assert.ok(output.includes('CACHE_SHAPE_INVALID'), `应 fail-loud，实际：${output.slice(0, 200)}`);
+    assert.ok(output.includes('useCount'), '应指出缺失字段');
+    assert.ok(output.includes('模块A/损坏条目'), '应指出具体 Group 与 Relation');
+    assert.ok(output.includes('ki restore'), '元素级校验同样要给出路');
+  });
+
+  it('hot_relations 含 null 元素 → CACHE_SHAPE_INVALID（不裸抛 TypeError）', async () => {
+    const output = await runWithCacheGroups({ '模块A': { hot_relations: [null], keywords: [] } });
+    assert.ok(output.includes('CACHE_SHAPE_INVALID'), `实际：${output.slice(0, 200)}`);
+    assert.ok(output.includes('元素不是对象'));
+    assert.ok(!output.includes('TypeError'), '不得退化成裸 TypeError');
+  });
+
+  it('元素 lastUsedTime 非数字 → CACHE_SHAPE_INVALID', async () => {
+    const output = await runWithCacheGroups({
+      '模块A': {
+        hot_relations: [
+          { id: 'rel_1', text: '时间戳损坏', score: 0, useCount: 2, lastUsedTime: 'yesterday', isImported: false },
+        ],
+        keywords: [],
+      },
+    });
+    assert.ok(output.includes('CACHE_SHAPE_INVALID'));
+    assert.ok(output.includes('lastUsedTime'));
+  });
+
   it('缺 groups 对象 → CACHE_SHAPE_INVALID（走独立分支）', async () => {
     const output = await runWithCacheGroups(undefined);
 

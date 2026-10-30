@@ -11,6 +11,7 @@
  */
 
 import {
+  DEFAULT_PARTITION_CONFIG,
   MIN_RECORD_INTERVAL_MINUTES,
   MAX_USE_COUNT,
   type PartitionConfig,
@@ -76,6 +77,9 @@ export function isFtsOnlyIndexedRelation(
 /**
  * 计算评分
  * score = useCount / (1 + hoursSinceLastUse / halfLifeHours)
+ *
+ * 缓存被外部改坏时 useCount / lastUsedTime 可能是 undefined 或 NaN。这里按「无使用记录」
+ * 处理而不是让 NaN 外溢——NaN 会一路污染 Group 聚合分，再被读取侧的兜底吞成 0 分。
  */
 export function calculateScore(
   useCount: number,
@@ -83,13 +87,17 @@ export function calculateScore(
   now: number,
   halfLifeHours: number = 24
 ): number {
-  if (useCount === 0) return 0;
+  const count = Number.isFinite(useCount) && useCount > 0 ? useCount : 0;
+  if (count === 0) return 0;
 
-  const hoursSinceLastUse = lastUsedTime
-    ? (now - lastUsedTime) / (60 * 60 * 1000)
-    : 0;
+  const hoursSinceLastUse =
+    typeof lastUsedTime === 'number' && Number.isFinite(lastUsedTime)
+      ? (now - lastUsedTime) / (60 * 60 * 1000)
+      : 0;
 
-  return useCount / (1 + hoursSinceLastUse / halfLifeHours);
+  const halfLife = Number.isFinite(halfLifeHours) && halfLifeHours > 0 ? halfLifeHours : 24;
+
+  return count / (1 + hoursSinceLastUse / halfLife);
 }
 
 // ─── 使用记录 ───
@@ -124,6 +132,35 @@ export interface PartitionResult<T> {
 }
 
 /**
+ * 归一化分区参数。partition_config 在读取侧只做整体 `?? DEFAULT` 回退、没有字段级校验，
+ * 手改缓存或迁移中断可能留下负数上限 / NaN 百分比：
+ * - 负数上限会让 `hot.length = -1` 直接抛 RangeError（报错不含 scope，难以定位）
+ * - NaN 百分比会让席位计算全为 NaN，条目全部落进热区（分层静默失效）
+ *
+ * 归一口径：上限 null / 非有限数 → 不限制，负数 → 0（该区不展示）；百分比非有限数 → 默认值、
+ * 越界夹到 [0, 1]；席位数非有限数 → 默认值、负数 → 0。
+ */
+function normalizePartitionConfig(config: PartitionConfig): PartitionConfig {
+  const ratio = (value: number, fallback: number): number =>
+    Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : fallback;
+  const count = (value: number, fallback: number): number =>
+    Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+  const cap = (value: number | null | undefined): number | null =>
+    value == null || !Number.isFinite(value) ? null : Math.max(0, Math.trunc(value));
+
+  return {
+    ...config,
+    hotPercent: ratio(config.hotPercent, DEFAULT_PARTITION_CONFIG.hotPercent),
+    warmPercent: ratio(config.warmPercent, DEFAULT_PARTITION_CONFIG.warmPercent),
+    reservedEmerging: count(config.reservedEmerging, DEFAULT_PARTITION_CONFIG.reservedEmerging),
+    minHotCount: count(config.minHotCount, DEFAULT_PARTITION_CONFIG.minHotCount),
+    maxHotCount: cap(config.maxHotCount),
+    maxWarmCount: cap(config.maxWarmCount),
+    maxColdCount: cap(config.maxColdCount),
+  };
+}
+
+/**
  * 泛型冷热分区算法
  *
  * 将新兴识别、评分排序、热/温/冷分配、上限截断统一为一个函数，
@@ -154,9 +191,9 @@ export function partitionByScore<T>(
   config: PartitionConfig
 ): PartitionResult<T> {
   const {
-    hotPercent, warmPercent, reservedEmerging,
-    minHotCount, maxHotCount, maxWarmCount, maxColdCount,
-  } = config;
+    hotPercent, warmPercent, reservedEmerging, minHotCount,
+    maxHotCount, maxWarmCount, maxColdCount,
+  } = normalizePartitionConfig(config);
 
   const scored = items.map((item) => ({ item, score: accessors.getScore(item) }));
   scored.sort((a, b) => b.score - a.score);

@@ -165,6 +165,22 @@ describe('评分公式 calculateScore', () => {
     const score = calculateScore(2, now - 48 * 3600000, now);
     assert.ok(Math.abs(score - 0.67) < 0.1);
   });
+
+  it('缓存损坏（useCount 缺失 / NaN / 负数）按无使用记录计 0，不外溢 NaN', () => {
+    for (const bad of [undefined, NaN, -3]) {
+      const score = calculateScore(bad as unknown as number, null, now);
+      assert.strictEqual(score, 0, `useCount=${String(bad)} 应为 0，实际 ${score}`);
+      assert.ok(Number.isFinite(score));
+    }
+  });
+
+  it('lastUsedTime / halfLifeHours 为非法值时不产生 NaN', () => {
+    const score = calculateScore(5, NaN as unknown as number, now);
+    assert.strictEqual(score, 5); // 视为 null → 不衰减
+    const score2 = calculateScore(5, now - 24 * 3600000, now, 0);
+    assert.strictEqual(score2, 2.5); // halfLife 非法 → 回退 24h
+    assert.ok(Number.isFinite(score2));
+  });
 });
 
 // ─── recordUse 测试 ───
@@ -474,5 +490,59 @@ describe('partitionByScore 冷热分区', () => {
     partition(items);
 
     assert.deepStrictEqual(items, snapshot);
+  });
+
+  it('上限为负数 → 该区不展示，不抛 RangeError', () => {
+    const relations = [
+      makeRelation('r1', 10, 0.1), makeRelation('r2', 5, 1),
+      makeRelation('r3', 2, 48), makeRelation('r4', 1, 168),
+    ];
+    for (const bad of [-1, -100]) {
+      const result = partition(relations, { ...DEFAULT_PARTITION_CONFIG, maxHotCount: bad });
+      assert.strictEqual(result.hot.length, 0, `maxHotCount=${bad} 应视为 0（不展示）`);
+      assert.strictEqual(
+        result.hot.length + result.warm.length + result.cold.length, relations.length,
+        '截断为 0 时条目仍须守恒（回流常温/冷区）'
+      );
+    }
+    const warmNegative = partition(relations, { ...DEFAULT_PARTITION_CONFIG, maxWarmCount: -5 });
+    assert.strictEqual(warmNegative.warm.length, 0);
+    assert.strictEqual(
+      warmNegative.hot.length + warmNegative.warm.length + warmNegative.cold.length, relations.length
+    );
+  });
+
+  it('百分比 / 席位数为 NaN 时回退默认，不出现「全部落热区」', () => {
+    const relations = Array.from({ length: 20 }, (_, i) => makeRelation(`r${i}`, 20 - i, 100 + i));
+    const result = partition(relations, {
+      ...DEFAULT_PARTITION_CONFIG,
+      hotPercent: NaN,
+      warmPercent: NaN,
+      reservedEmerging: NaN,
+      minHotCount: NaN,
+    });
+    assert.strictEqual(
+      result.hot.length, Math.ceil(relations.length * DEFAULT_PARTITION_CONFIG.hotPercent),
+      'NaN 百分比应回退默认 0.3'
+    );
+    assert.strictEqual(
+      result.hot.length + result.warm.length + result.cold.length, relations.length
+    );
+  });
+
+  it('上限为 NaN / null 时视为不限制（不丢条目）', () => {
+    const relations = Array.from({ length: 30 }, (_, i) => makeRelation(`r${i}`, 30 - i, 100 + i));
+    for (const cap of [NaN, null]) {
+      const result = partition(relations, {
+        ...DEFAULT_PARTITION_CONFIG,
+        maxHotCount: cap as unknown as number,
+        maxWarmCount: cap as unknown as number,
+        maxColdCount: cap as unknown as number,
+      });
+      assert.strictEqual(
+        result.hot.length + result.warm.length + result.cold.length, relations.length,
+        `上限=${String(cap)} 时不得丢条目`
+      );
+    }
   });
 });

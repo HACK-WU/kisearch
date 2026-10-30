@@ -23,7 +23,7 @@
 
 恢复：只使用字母、数字、连字符、下划线，不要包含 `/`、`..`。
 
-### `group.ts` 参数缺失
+### `ki group` 参数缺失
 
 常见错误：
 
@@ -32,7 +32,7 @@
 
 > 忘记 scope 名称？执行 `ki scope list` 查看全部 scope 及所在层。
 
-### `sync-relation.ts` 单条模式参数不完整
+### `ki sync-relation` 单条模式参数不完整
 
 单条模式要求 `--relation` 与 `--module-info`；`--group` 可留空（落到与 scope 同名的组）。
 
@@ -56,15 +56,15 @@
 
 ### relations 元数据不存在（`relations-cache.json` / `.relations/manifest.json`）
 
-影响：`sync-relation.ts`、`get-module-info.ts`
+影响：`ki sync-relation`、`ki get-module-info`
 
 恢复：先执行任一会触发 `ensureScopeDir` 的命令初始化 scope。
 
-> `group.ts` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
+> `ki group list` 对“cache 不存在”是**合法降级**（视为该 scope 尚无 Relation，不报错）；只有下述结构损坏才 fail-loud。
 
 ### relations 元数据结构损坏（`CACHE_SHAPE_INVALID`）
 
-影响：`group.ts`（CLI 与 `ki_group_list` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
+影响：`ki group list`（CLI 与 `ki_group_list` MCP 工具，后者表现为 `ok:false` + 同文案 `error`，不抛异常）
 
 典型现象：
 
@@ -77,30 +77,27 @@
 
 原因：`groups[*].hot_relations` 是必需字段（写入方建组时即初始化为 `[]`），缺失或不是数组只可能是文件被外部改坏或迁移中断。这里**故意不做静默降级**：把损坏的 Group 当成“0 分 / 0 条 Relation”会让人误判该模块没有知识，而且据此算出的冷热分区本身就是错的。
 
-与 `CORRUPT_JSON` 分层互补：JSON **语法**解析失败由 `readJson` 报 `CORRUPT_JSON`；语法正确但**结构**不合法报本错误（口径同 `CONFIG_FIELD_INVALID`：语法正确 ≠ 内容合法）。
+条目级损坏同样报此错（报错文案为「relations 元数据条目校验失败」，会列出具体的 Group 与 Relation）：`hot_relations` 元素不是对象、缺 `useCount`、或 `lastUsedTime` 既不是 `null` 也不是毫秒时间戳。这几种数据会让评分变成 `NaN`（Group 排名静默失真）或直接抛 `TypeError`，因此同样按损坏拦截。
+
+与 `CORRUPT_JSON` 分层互补：JSON **语法**解析失败报 `CORRUPT_JSON`；语法正确但**结构**不合法报本错误（口径同 `CONFIG_FIELD_INVALID`：语法正确 ≠ 内容合法）。
 
 恢复：优先 `ki restore <scope> --from-snapshot` **先预览快照总览**（会列出即将删除覆盖的目录与还原来源快照），确认无误后按提示加 `--yes` 重新执行——错误提示里刻意不预置 `--yes`，因为快照还原是「删除 + 覆盖 scope 目录」的不可逆操作，且默认取最新快照（可能早于现有数据）；无备份时按错误清单手动补齐 `hot_relations`（一次最多列 5 个 Group，修完重跑会继续报下一批）。
 
-已知边界（本校验**不**覆盖的两类损坏）：
-
-- `partition_config` 缺字段不走本校验（整体回退 `DEFAULT_PARTITION_CONFIG`，无字段级合并）；字段为负数时也不拦（如 `maxHotCount: -1` 会在截断处抛 `RangeError: Invalid array length`，错误信息不含可诊断上下文）。缺字段的后果比报错更隐蔽：`{}` 或缺 `hotPercent`/`warmPercent`/`reservedEmerging` 时 NaN 传播会让**冷热分层退化**（实测：40 个 Group → 热区 40 / 常温 0 / 冷区 0；1 个 Group 内 40 条 Relation → 全进热区），此时「三区之和 = 总数」的守恒形式上仍成立，但分层已失效。
-- 只校验 `hot_relations` 是否为**数组**，不校验数组**元素**形态。元素缺 `useCount` 时评分为 `NaN`、渲染出 `undefined (score: NaN)`，且 Group 聚合分被 `|| 0` 吞成 0 分（静默失真）；元素为 `null` 时退化为裸 TypeError。
-
 ### `group-index.json` 损坏
 
-影响：`group.ts`、`group.ts`
+影响：`ki group list` 等 Group 命令
 
 恢复：从用户备份恢复，或从模板重新初始化。
 
 ### 本地 KB 文件不存在
 
-影响：`get-module-info.ts`
+影响：`ki get-module-info`
 
-恢复：使用 `sync-relation.ts` 重新写入 `module-info`。
+恢复：使用 `ki sync-relation` 重新写入 `module-info`。
 
 ---
 
-## 三类：`src/lib/import.ts`（导入核心）相关错误
+## 三类：导入相关错误
 
 
 ### `sourceDir 不存在或不是目录`
@@ -162,7 +159,7 @@ scopes:
 
 ### `--mode` 无效
 
-`group.ts` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
+`ki group list` 的 `--mode` 有效值：`hot` / `warm` / `cold` / `emerging` / `full`。
 支持逗号分隔多值，如 `--mode hot,warm`。
 
 无效参数会报错退出并提示有效值列表。
