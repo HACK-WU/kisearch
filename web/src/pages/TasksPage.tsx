@@ -12,7 +12,8 @@ import {
 } from '@/lib/taskDetailModel';
 import { buildTaskListRow } from '@/lib/taskListModel';
 import {
-  DEFAULT_TASK_SORT, TASK_FILTERS, countTasks, nextTaskSort, queryTasks, taskFilterLabel,
+  DEFAULT_TASK_SORT, TASK_FILTERS, countTasks, nextTaskSort, queryTasks, shouldShowTaskPager,
+  taskFilterLabel,
   type TaskFilter, type TaskSortKey, type TaskSortState,
 } from '@/lib/taskQueryModel';
 import { ItemTree } from '@/components/TaskDetailParts';
@@ -27,7 +28,7 @@ import { Notice } from '@/components/Notice';
 
 /** 客户端分页（与数据源页同口径：默认 10，可选 50 / 100） */
 const PAGE_SIZE_DEFAULT = 10;
-/** 每页条数可选项（分页条常显，单页也能改回 10） */
+/** 每页条数可选项（单页时也保留选择器，才改得回 10；0 条时整条收起） */
 const PAGE_SIZE_OPTIONS = [10, 50, 100] as const;
 /** 页码按钮：单页 1 个；>7 页时中段折叠成 …，保证分页条不换行 */
 function pageNumbers(page: number, pageCount: number): Array<number | '…'> {
@@ -585,8 +586,20 @@ export function TasksPage(): JSX.Element {
   // 直接用 page 切片会渲染一帧「有表头无行」的空表（空态判据看的是 visibleTasks）
   const currentPage = Math.min(page, pageCount);
   const pageTasks = visibleTasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  /** 后端 total 是全部可见任务数，列表只取最近 200 条：两者不一致时必须给出说明 */
+  /**
+   * 期望「后端 total = 全部可见任务数，列表只取最近 200 条」，两者不一致时说明差异。
+   * ★ 现状（2026-10-30 核实 `mcp-http-api.ts::handleTaskList`）：`total: summarized.length` 是
+   *   **截断后**的条数，与本列表 `tasks.length` 恒等 ⇒ 真实环境此判据恒为 false，超过 200 条时
+   *   页面只显示「共 200 个」且无任何截断提示。属后端 total 语义问题（会牵连顶栏任务徽标等
+   *   共用该接口的消费方），单独修；此处保留判据以便后端改口径后自动生效。
+   */
   const truncated = (query.data?.total ?? 0) > tasks.length;
+  /** 分页栏是否渲染（0 条收起 / 单页保留，口径见 `shouldShowTaskPager`） */
+  const showPager = shouldShowTaskPager({
+    loading: query.isPending,
+    hasError: Boolean(query.error),
+    visibleCount: visibleTasks.length,
+  });
   // 任务列表会自动刷新（顶栏同 queryKey 每 3–15s）：条目变少时把页码收回，避免停在空白页
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
@@ -854,9 +867,11 @@ export function TasksPage(): JSX.Element {
             </table>
           ) : null}
           {/* 客户端分页（照搬数据源页）+ 每页条数选择器。
-              ★ 一直显示（用户 2026-10-30 要求）：单页 / 空态也给分页条 ——
-                否则筛选后只剩 3 条时整条消失，页面高度跳变、每页条数也改不回来。 */}
-          {!query.error && !query.isPending ? (
+              ★ 可见性口径见 `shouldShowTaskPager`（用户 2026-10-30 二次定稿）：
+                0 条时整条收起 —— 空态卡片已说明「暂无任务」，再画一条
+                「第 1/1 页 · 共 0 个任务 / 上一页 / ① / 下一页」是自相矛盾的噪音；
+                有数据时即使只有 1 页也保留，否则每页条数改不回来（上一轮的理由仍成立）。 */}
+          {showPager ? (
             <div className="ki-ds-pager" role="navigation" aria-label="任务分页">
               <span className="ki-ds-pager__info" aria-live="polite">
                 第 {currentPage} / {pageCount} 页 · 共 {visibleTasks.length} 个任务

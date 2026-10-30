@@ -192,3 +192,30 @@ export function queryTasks(input: TaskQueryInput): TaskRecord[] {
     : filtered;
   return sortTasks(searched, input.sort);
 }
+
+/* ══════════ 分页栏可见性 ══════════ */
+
+export interface TaskPagerVisibilityInput {
+  /** 列表请求进行中（首屏 pending） */
+  loading: boolean;
+  /** 列表请求失败 */
+  hasError: boolean;
+  /** **当前筛选下**的条数（`visibleTasks.length`，不是后端 total） */
+  visibleCount: number;
+}
+
+/**
+ * 分页栏是否渲染（用户 2026-10-30 口径，两次反转后定稿）：
+ *   - **0 条时整条收起** —— 空态卡片已经说明「暂无任务」，再画一条
+ *     「第 1/1 页 · 共 0 个任务 / 上一页(禁用) / ① / 下一页(禁用)」是自相矛盾的噪音；
+ *   - **有数据时即使只有 1 页也显示** —— 保留「每页」选择器，否则用户把每页改成
+ *     50/100、或筛选后只剩几条时，选择器随之消失，本会话内再也改不回 10；
+ *   - 加载中 / 失败不渲染（各自有专门提示，此时的页数没有意义）。
+ *
+ * ★ 判据必须用 `visibleCount`（当前筛选），不能用后端 `total`：筛到 0 条时表体是空态卡片，
+ *   分页栏却会显示「共 0 个任务」，两者由不同数据源驱动必然对不上。
+ */
+export function shouldShowTaskPager(input: TaskPagerVisibilityInput): boolean {
+  if (input.loading || input.hasError) return false;
+  return input.visibleCount > 0;
+}

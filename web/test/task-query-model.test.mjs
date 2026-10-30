@@ -23,7 +23,7 @@ const vite = await createServer({
 });
 const {
   TASK_FILTERS, DEFAULT_TASK_SORT, countTasks, matchesTaskFilter, matchesTaskSearch,
-  nextTaskSort, queryTasks, sortTasks, taskDurationSeconds, taskFilterLabel,
+  nextTaskSort, queryTasks, shouldShowTaskPager, sortTasks, taskDurationSeconds, taskFilterLabel,
 } = await vite.ssrLoadModule('/src/lib/taskQueryModel.ts');
 
 after(async () => { await vite.close(); });
@@ -168,5 +168,44 @@ describe('组合查询', () => {
     const source = [...tasks];
     queryTasks({ tasks: source, filter: 'all', query: '', sort: DEFAULT_TASK_SORT, describe: () => text() });
     assert.deepEqual(source.map((t) => t.id), ['a', 'b', 'c']);
+  });
+});
+
+/**
+ * 分页栏可见性（2026-10-30 二次反转定稿）：
+ * 空态整条收起，单页仍显示（保留「每页」选择器）。
+ * 回归点：`b89dcaa` 曾要求「单页 / 空态都显示」，导致 0 条时页脚画出
+ * 「第 1/1 页 · 共 0 个任务」——与空态卡片「暂无任务」自相矛盾。
+ */
+describe('shouldShowTaskPager', () => {
+  it('0 条 → 不渲染（本次修复的核心口径）', () => {
+    assert.equal(shouldShowTaskPager({ loading: false, hasError: false, visibleCount: 0 }), false);
+  });
+
+  it('有数据但只有 1 页 → 仍渲染（每页选择器要在）', () => {
+    assert.equal(shouldShowTaskPager({ loading: false, hasError: false, visibleCount: 3 }), true);
+    assert.equal(shouldShowTaskPager({ loading: false, hasError: false, visibleCount: 1 }), true);
+  });
+
+  it('加载中 / 失败 → 不渲染（各自有专门提示）', () => {
+    assert.equal(shouldShowTaskPager({ loading: true, hasError: false, visibleCount: 0 }), false);
+    assert.equal(shouldShowTaskPager({ loading: true, hasError: false, visibleCount: 10 }), false);
+    assert.equal(shouldShowTaskPager({ loading: false, hasError: true, visibleCount: 10 }), false);
+  });
+
+  it('判据吃「当前筛选条数」而非后端 total：筛到 0 条必须收起', () => {
+    // 后端有 42 个任务，但当前筛选下 0 条 —— 表体是空态卡片，页脚不能写「共 0 个任务」
+    const visibleTasks = queryTasks({
+      tasks: [task({ id: 'n1' }), task({ id: 'n2' })],
+      filter: 'failed',
+      query: '',
+      sort: DEFAULT_TASK_SORT,
+      describe: () => text(),
+    });
+    assert.equal(visibleTasks.length, 0);
+    assert.equal(
+      shouldShowTaskPager({ loading: false, hasError: false, visibleCount: visibleTasks.length }),
+      false,
+    );
   });
 });
