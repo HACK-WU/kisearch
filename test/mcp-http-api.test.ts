@@ -31,6 +31,7 @@ import { getSharedOperationCoordinator } from '../src/lib/operation-coordinator.
 import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config.js';
 import { createTaskReporter, getTaskRecord } from '../src/lib/task-registry.js';
 import { closeFtsEngine, deleteFtsCollection } from '../src/lib/fts-client.js';
+import type { TokenAuth } from '../src/lib/mcp-token.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -48,7 +49,7 @@ fs.writeFileSync(
   JSON.stringify({ scopeMode: 'default', embedding: { provider: 'mock', model: 'mock' } }),
 );
 
-function buildTestServer(_authScopes: string[] | null = null): McpServer {
+function buildTestServer(_auth: TokenAuth | null = null): McpServer {
   const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
@@ -1864,7 +1865,7 @@ describe('/api/tasks scope 授权', () => {
       buildServer: buildTestServer,
       webDir: null,
       resolveClientAddr: () => '192.168.1.10',
-      resolveTokenScopes: (token) => token === 'scoped-token' ? [allowedScope] : undefined,
+      resolveTokenAuth: (token) => token === 'scoped-token' ? { scopes: [allowedScope], readOnly: false } : undefined,
     });
     await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
     const addr = httpServer.address() as AddressInfo;

@@ -2,20 +2,12 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { registerGroupListTool } from './lib/mcp-tools/group-list.js';
-import { registerGetModuleInfoTool } from './lib/mcp-tools/get-module-info.js';
-import { registerSyncRelationTool } from './lib/mcp-tools/sync-relation.js';
-import { registerEditRelationTool } from './lib/mcp-tools/edit-relation.js';
-import { registerBulkSyncRelationTool } from './lib/mcp-tools/bulk-sync-relation.js';
-import { registerGroupTools } from './lib/mcp-tools/group.js';
-import { registerSearchTool } from './lib/mcp-tools/search.js';
-import { registerStoreTool } from './lib/mcp-tools/store.js';
-import { registerBulkStoreTool } from './lib/mcp-tools/bulk-store.js';
-import { registerDeleteRelationTool } from './lib/mcp-tools/delete-relation.js';
-import { registerScopeListTool } from './lib/mcp-tools/scope-list.js';
-import { registerTagListTool } from './lib/mcp-tools/tag-list.js';
+import { buildKiMcpServer } from './lib/mcp-server-factory.js';
 import { enableIdleClose } from './lib/vector-client.js';
+
+// MCP Server 装配已抽到 lib/mcp-server-factory.ts —— 本文件末尾有 startMcpServer() 入口副作用，
+// 任何单测 import 它都会真的把服务跑起来。这里 re-export 保持既有契约（stdio 与 HTTP 共用同一工厂）。
+export { buildKiMcpServer };
 import { loadConfig, invalidateConfigFreshness, getConfigLoadIssue } from './lib/config.js';
 import { captureDaemonIdentity, isDaemonIdentityDrifted } from './lib/scope-collection.js';
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
@@ -50,38 +42,14 @@ const VECTOR_IDLE_CLOSE_MS = 30_000;
 import { stopMcpInstances } from './lib/mcp-stop.js';
 import {
   createToken,
-  updateTokenScopes,
+  updateToken,
   deleteToken,
   listTokensStrict,
   resolveScopesArg,
   tokenCount,
+  isReadOnlyFieldInvalid,
   ALL_SCOPES,
 } from './lib/mcp-token.js';
-
-/**
- * 构建一个 kisearch McpServer 并注册全部工具。
- * stdio 与 HTTP 传输复用同一工厂：HTTP 模式下每个会话新建一个实例，
- * daemon 进程内按 scope 复用 Collection engine，并由 coordinator 统一调度。
- */
-export function buildKiMcpServer(authScopes: string[] | null = null): McpServer {
-  const server = new McpServer({
-    name: SERVICE_NAME,
-    version: readKiVersion(),
-  });
-  registerGroupListTool(server);
-  registerGetModuleInfoTool(server);
-  registerSyncRelationTool(server);
-  registerEditRelationTool(server);
-  registerBulkSyncRelationTool(server);
-  registerGroupTools(server);
-  registerSearchTool(server);
-  registerStoreTool(server);
-  registerBulkStoreTool(server);
-  registerDeleteRelationTool(server);
-  registerScopeListTool(server, authScopes);
-  registerTagListTool(server);
-  return server;
-}
 
 interface McpCliOptions {
   http: boolean;
@@ -103,10 +71,14 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp --status               查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
-  ki mcp token generate --scope <scope>  生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
-  ki mcp token list             列出所有 Token（含明文与授权 scope）
-  ki mcp token update <id> --scope <scope>  修改指定 Token 的授权 scope
+  ki mcp token generate --scope <scope> [--read-only]  生成授权 Token（scope 必填：单个/逗号分隔多个/all）
+  ki mcp token list             列出所有 Token（含明文、授权 scope、访问模式）
+  ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
+                                改授权 scope / 切换只读（两项至少给一个）
   ki mcp token delete <id>      删除指定 Token（立即失效）
+
+只读 Token：远程 MCP 客户端连上后看不到写工具（new/update/delete 均不可用），
+  且即使构造 tools/call 也会被拒绝。适用于只应检索、不应改库的 AI 客户端。
 
 HTTP 模式参数：
   --host <addr>                 绑定地址（默认 127.0.0.1；非回环绑定需鉴权 Token）
@@ -237,15 +209,76 @@ function resolveScopesFlag(args: string[], action: string): string[] {
   return resolveScopesArg(raw);
 }
 
-/** ki mcp token <generate|list|update|delete> 子命令：多 Token + scope 授权的全生命周期管理 */
+/**
+ * `ki mcp token` 子命令允许的 flag。
+ * ⚠️ 缺了这道校验，`--readonly`（少一个连字符）、`--readOnly` 这类拼错会被静默忽略 ——
+ * 用户以为已经设成只读，实际仍是读写（安全属性静默失效）。
+ */
+const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write'];
+
+/**
+ * 拼写近似匹配：把 `--readonly` / `--readOnly` / `--Read-Only` 这类写法归一到
+ * `--read-only`，在错误文案里给出「您是否想输入 …？」。
+ *
+ * ★ 不把这些变体做成别名：`--read-only` 与 `--read-write` 是成对语义，
+ *   多一套拼写只会让文档与 `--help` 分裂；而拼错必须**报错**——
+ *   改动前 `--readonly` 会被静默忽略，命令返回 ok 但 Token 仍是读写（安全属性静默失效）。
+ */
+function suggestTokenFlag(name: string): string | undefined {
+  const normalize = (s: string): string => s.replace(/^-+/, '').replace(/[-_]/g, '').toLowerCase();
+  const target = normalize(name);
+  return TOKEN_ALLOWED_FLAGS.find((f) => normalize(f) === target);
+}
+
+function rejectUnknownTokenFlags(args: string[]): void {
+  for (const a of args) {
+    if (!a.startsWith('--')) continue; // action / id 等位置参数
+    const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a;
+    if (TOKEN_ALLOWED_FLAGS.includes(name)) continue;
+    const suggestion = suggestTokenFlag(name);
+    failJson(
+      `未知参数 ${name}（ki mcp token 支持：${TOKEN_ALLOWED_FLAGS.join(' / ')}）。`
+        + (suggestion
+          ? `您是否想输入 ${suggestion}？`
+          : '注意：--read-only 与 --read-write 需完整连字符，不是 --readonly。'),
+      'MCP_TOKEN_UNKNOWN_OPTION',
+    );
+  }
+}
+
+/** 解析 `--read-only` / `--read-write` → boolean；都没传返回 undefined（保持当前模式）；同传报冲突 */
+function resolveAccessModeFlag(args: string[]): boolean | undefined {
+  const wantReadOnly = args.includes('--read-only');
+  const wantReadWrite = args.includes('--read-write');
+  if (wantReadOnly && wantReadWrite) {
+    failJson(
+      '--read-only 与 --read-write 不能同时使用：请二选一（都不传则保持当前访问模式）。',
+      'MCP_TOKEN_FLAGS_CONFLICT',
+    );
+  }
+  if (wantReadOnly) return true;
+  if (wantReadWrite) return false;
+  return undefined;
+}
+
+/** 访问模式标签（generate / list / update 输出统一口径） */
+function accessModeLabel(readOnly: boolean): string {
+  return readOnly ? '只读' : '读写';
+}
+
+/** ki mcp token <generate|list|update|delete> 子命令：多 Token + scope 授权 + 访问模式的生命周期管理 */
 function runTokenCommand(args: string[]): void {
   const action = args[0];
+  // 未知参数校验在**所有子命令**统一做（含 list/delete）：`--readonly` 这类拼错若被静默忽略，
+  // 用户会以为设置已生效，而实际权限没变（安全属性静默失效）。
+  rejectUnknownTokenFlags(args);
 
-  // generate：生成授权 Token，必须显式指定 scope
+  // generate：生成授权 Token，必须显式指定 scope；--read-only 生成只读 Token
   if (action === 'generate') {
     try {
       const scopes = resolveScopesFlag(args, 'generate');
-      const record = createToken(scopes);
+      const readOnly = resolveAccessModeFlag(args) === true;
+      const record = createToken(scopes, undefined, readOnly);
       console.log(
         JSON.stringify(
           {
@@ -253,10 +286,17 @@ function runTokenCommand(args: string[]): void {
             id: record.id,
             token: record.token,
             scopes: record.scopes,
+            readOnly,
+            accessMode: accessModeLabel(readOnly),
             createdAt: record.createdAt,
             hint:
               'Token 已生成（0600 落盘到 ~/.ki/mcp-tokens.json）。' +
-              `授权 scope：${record.scopes.join(', ')}。` +
+              `授权 scope：${record.scopes.join(', ')}；访问模式：${accessModeLabel(readOnly)}。` +
+              (readOnly
+                ? '远程 MCP 客户端连上后只会看到读工具（检索/读取），写工具不会出现在工具列表里，构造调用也会被拒绝。'
+                  + '注意：只读仅对**非回环来源**生效——本机 127.0.0.1 直连免鉴权，不受该限制；'
+                  + '验证请从其他机器（或本机非回环 IP）连接。'
+                : '该 Token 可读写。') +
               'IDE 客户端配置 Authorization: Bearer <token>。请勿将明文粘贴到公开渠道。',
           },
           null,
@@ -270,19 +310,37 @@ function runTokenCommand(args: string[]): void {
     return;
   }
 
-  // list：列出所有 Token（含明文与授权 scope，用户明确要求）
+  // list：列出所有 Token（含明文、授权 scope、访问模式，用户明确要求）
   if (action === 'list') {
     try {
       const records = listTokensStrict(); // 损坏时报错（MCP_TOKEN_CORRUPT），避免静默空列表误导
+      const tokens = records.map((r) => {
+        const readOnly = r.readOnly === true;
+        // 字段被手改坏（"true" / 1）时按读写处理 —— 必须显式告警，否则只读限制静默失效
+        const invalid = isReadOnlyFieldInvalid(r);
+        return {
+          ...r,
+          readOnly,
+          accessMode: accessModeLabel(readOnly),
+          ...(invalid
+            ? {
+              warning:
+                `readOnly 字段非法（值：${JSON.stringify(r.readOnly)}），已按读写处理；` +
+                `如需只读请执行 ki mcp token update ${r.id} --read-only`,
+            }
+            : {}),
+        };
+      });
       console.log(
         JSON.stringify(
           {
             ok: true,
-            count: records.length,
-            tokens: records,
+            count: tokens.length,
+            tokens,
             hint:
               'Token 明文已列出（按需回显）。请勿将输出粘贴到公开渠道；' +
-              '用 ki mcp token delete <id> 吊销，ki mcp token update <id> --scope <...> 改权限。',
+              '用 ki mcp token delete <id> 吊销，' +
+              'ki mcp token update <id> [--scope <...>] [--read-only|--read-write] 改权限。',
           },
           null,
           2,
@@ -295,26 +353,44 @@ function runTokenCommand(args: string[]): void {
     return;
   }
 
-  // update <id> --scope <...>：修改授权 scope
+  // update <id> [--scope <...>] [--read-only|--read-write]：改授权 scope / 切换访问模式
   if (action === 'update') {
     const id = args[1];
     if (!id) {
       failJson(
-        'update 需要指定 Token 短 ID：ki mcp token update <id> --scope <...>（用 ki mcp token list 查看 id）。',
+        'update 需要指定 Token 短 ID：ki mcp token update <id> [--scope <...>] [--read-only|--read-write]'
+          + '（用 ki mcp token list 查看 id）。',
         'MCP_TOKEN_ID_REQUIRED',
       );
     }
     try {
-      const scopes = resolveScopesFlag(args, 'update');
-      const record = updateTokenScopes(id, scopes);
+      // scope 与访问模式均可单独修改：只想切只读时不必复述 scope（避免顺手改错授权范围）
+      const patch: { scopes?: string[]; readOnly?: boolean } = {};
+      const scopeRaw = getFlagValue(args, '--scope');
+      if (scopeRaw !== undefined) patch.scopes = resolveScopesArg(scopeRaw);
+      const mode = resolveAccessModeFlag(args);
+      if (mode !== undefined) patch.readOnly = mode;
+      if (patch.scopes === undefined && patch.readOnly === undefined) {
+        failJson(
+          'update 至少需要一项变更：--scope <...> 或 --read-only/--read-write（都不传则无任何改动）。',
+          'MCP_TOKEN_UPDATE_NOTHING_TO_DO',
+        );
+      }
+      const record = updateToken(id, patch);
+      const readOnly = record.readOnly === true;
       console.log(
         JSON.stringify(
           {
             ok: true,
             id: record.id,
             scopes: record.scopes,
+            readOnly,
+            accessMode: accessModeLabel(readOnly),
             createdAt: record.createdAt,
-            hint: `Token（id: ${record.id}）授权 scope 已更新为：${record.scopes.join(', ')}。`,
+            hint: `Token（id: ${record.id}）已更新：授权 scope = ${record.scopes.join(', ')}，`
+              + `访问模式 = ${accessModeLabel(readOnly)}。`
+              + '该变更对新请求立即生效；已连接的客户端需重连（或重启 IDE）才能刷新工具列表'
+              + `（切回读写后写工具才会重新出现）。`,
           },
           null,
           2,

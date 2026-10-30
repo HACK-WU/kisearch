@@ -30,8 +30,28 @@ export interface TokenRecord {
   token: string;
   /** 授权 scope 集合：['all'] 表示全部；否则为具体 scope 列表 */
   scopes: string[];
-  /** 创建时间（ISO 8601） */
-  createdAt: string;
+  /**
+   * 是否只读（动作维度，与 scopes 的「数据维度」正交）。
+   *
+   * - 缺省 / `false`：读写（全量 13 个 MCP 工具）
+   * - `true`：只读（只注册并只允许 5 个读工具，见 `mcp-tools/tool-access.ts`）
+   *
+   * ★ 兼容与兜底：旧记录无此字段 ⇒ 视为读写（无需迁移）；
+   *   字段值非法（`"true"` / `1` / `null`）⇒ **同样视为读写**，只有严格 `=== true` 才只读。
+   *   理由：fail-closed（非法即只读）会把用户彻底锁死，且 Token 本身仍受 scopes 约束；
+   *   代价是该限制可能静默失效，故 `ki mcp token list` 必须对非法值显式告警。
+   */
+  readOnly?: boolean;
+}
+
+/** 会话级访问授权：scope 集合 + 动作模式（供 MCP 会话装配工具集） */
+export interface TokenAuth {
+  /** Token 短 ID（供拒绝文案定位到具体 Token；进程级临时 Token 无 id） */
+  id?: string;
+  /** 授权 scope 集合（['all'] 或具体列表） */
+  scopes: string[];
+  /** 是否只读 */
+  readOnly: boolean;
 }
 
 /** scope 合法字符正则（对齐 scope.ts::validateScope：字母数字连字符下划线） */
@@ -178,11 +198,14 @@ function writeTokens(records: TokenRecord[], filePath = getTokensPath()): void {
 /**
  * 生成并持久化一条 Token 记录。
  * @param scopes 授权 scope 集合（已归一化，含 'all' 或具体 scope 列表）
+ * @param filePath 存储文件（缺省 ~/.ki/mcp-tokens.json；单测注入临时路径）
+ * @param readOnly 是否只读（缺省 false = 读写）
  * @returns 完整记录（含 id + token 明文）
  */
 export function createToken(
   scopes: string[],
   filePath = getTokensPath(),
+  readOnly = false,
 ): TokenRecord {
   // 严格读取：文件损坏时拒绝覆盖写回（否则会永久丢失全部现有记录）
   const records = listTokensStrict(filePath);
@@ -194,6 +217,8 @@ export function createToken(
     token: generateTokenValue(),
     scopes,
     createdAt: new Date().toISOString(),
+    // 仅只读时落字段：读写保持旧格式（旧版本读到无此字段同样按读写处理）
+    ...(readOnly ? { readOnly: true } : {}),
   };
   records.push(record);
   writeTokens(records, filePath);
@@ -201,14 +226,23 @@ export function createToken(
 }
 
 /**
- * 按短 ID 更新授权 scope 集合。
- * @throws Error（code: TOKEN_NOT_FOUND）id 不存在时
+ * 按短 ID 局部更新：可只改 scopes、只改 readOnly，或两者同改。
+ *
+ * ★ 为什么需要它：`updateTokenScopes` 强制传 scopes，用户只想把某个 Token 切成只读时
+ *   必须复述一遍 scope，极易顺手改错授权范围（放宽或收窄权限）。
+ * @throws Error（code: TOKEN_NOT_FOUND）id 不存在；`MCP_TOKEN_UPDATE_NOTHING_TO_DO` 两项都没给
  */
-export function updateTokenScopes(
+export function updateToken(
   id: string,
-  scopes: string[],
+  patch: { scopes?: string[]; readOnly?: boolean },
   filePath = getTokensPath(),
 ): TokenRecord {
+  if (patch.scopes === undefined && patch.readOnly === undefined) {
+    throw Object.assign(
+      new Error('update 至少需要一项变更：--scope <...> 或 --read-only/--read-write。'),
+      { code: 'MCP_TOKEN_UPDATE_NOTHING_TO_DO' },
+    );
+  }
   const records = listTokensStrict(filePath);
   const target = records.find((r) => r.id === id);
   if (!target) {
@@ -216,9 +250,26 @@ export function updateTokenScopes(
       code: 'TOKEN_NOT_FOUND',
     });
   }
-  target.scopes = scopes;
+  if (patch.scopes !== undefined) target.scopes = patch.scopes;
+  if (patch.readOnly !== undefined) {
+    // 切回读写时删除字段（不写 false），保持文件格式与旧版一致
+    if (patch.readOnly) target.readOnly = true;
+    else delete target.readOnly;
+  }
   writeTokens(records, filePath);
   return target;
+}
+
+/**
+ * 按短 ID 更新授权 scope 集合（仅 scope，保留只读标记）。
+ * @throws Error（code: TOKEN_NOT_FOUND）id 不存在时
+ */
+export function updateTokenScopes(
+  id: string,
+  scopes: string[],
+  filePath = getTokensPath(),
+): TokenRecord {
+  return updateToken(id, { scopes }, filePath);
 }
 
 /**
@@ -238,24 +289,53 @@ export function deleteToken(id: string, filePath = getTokensPath()): void {
 }
 
 /**
- * 鉴权查询：按 Token 明文查找授权 scope 集合。
+ * 按 Token 明文查找记录。
  * 遍历所有记录做常量时间比较（timingSafeEqual），避免时序侧信道泄露匹配位置。
- * @returns 命中记录的 scopes；未命中返回 undefined
  */
-export function findTokenScopes(
-  tokenValue: string,
-  filePath = getTokensPath(),
-): string[] | undefined {
+function findTokenRecord(tokenValue: string, filePath: string): TokenRecord | undefined {
   const records = listTokens(filePath);
   const provided = Buffer.from(tokenValue);
   for (const r of records) {
     const expected = Buffer.from(r.token);
     if (provided.length !== expected.length) continue;
     if (crypto.timingSafeEqual(provided, expected)) {
-      return r.scopes;
+      return r;
     }
   }
   return undefined;
+}
+
+/**
+ * 鉴权查询：按 Token 明文查找授权 scope 集合。
+ * @returns 命中记录的 scopes；未命中返回 undefined
+ */
+export function findTokenScopes(
+  tokenValue: string,
+  filePath = getTokensPath(),
+): string[] | undefined {
+  return findTokenRecord(tokenValue, filePath)?.scopes;
+}
+
+/**
+ * 鉴权查询（完整授权）：scope 集合 + 动作模式，供 MCP 会话装配工具集与 tools/call 拦截。
+ *
+ * 只读判定为**严格** `readOnly === true`：字段缺失或类型非法（`"true"` / `1` / `null`）一律按读写，
+ * 避免手改/迁移中断把用户彻底锁死；非法值由 `ki mcp token list` 显式告警。
+ * @returns 命中返回 { scopes, readOnly }；未命中返回 undefined
+ */
+export function findTokenAuth(
+  tokenValue: string,
+  filePath = getTokensPath(),
+): TokenAuth | undefined {
+  const record = findTokenRecord(tokenValue, filePath);
+  if (!record) return undefined;
+  return { id: record.id, scopes: record.scopes, readOnly: record.readOnly === true };
+}
+
+/** `readOnly` 字段是否非法（存在但不是布尔）——供 list 命令告警，undefined 属正常（缺省读写） */
+export function isReadOnlyFieldInvalid(record: TokenRecord): boolean {
+  const value: unknown = (record as { readOnly?: unknown }).readOnly;
+  return value !== undefined && typeof value !== 'boolean';
 }
 
 /** 查询 Token 记录数量（供 --status 诊断输出，不含明文） */

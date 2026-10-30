@@ -21,7 +21,8 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
-import { findTokenScopes, tokenCount, ALL_SCOPES } from './mcp-token.js';
+import { findTokenAuth, tokenCount, ALL_SCOPES, type TokenAuth } from './mcp-token.js';
+import { isReadOnlyTool, readonlyRejectMessage, TOKEN_READONLY } from './mcp-tools/tool-access.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
@@ -99,10 +100,11 @@ export interface HttpServerOptions {
   allowedHosts?: string[];
   /**
    * 每个 MCP 会话新建一个 McpServer 的工厂。
-   * 接收该会话的授权 scope 集合（authScopes）：null = 免鉴权（不限）；否则为授权集合（['all'] 或具体列表）。
-   * 供枚举类工具（ki_scope_list）按授权过滤，避免泄露未授权 scope。
+   * 接收该会话的完整授权（scope 集合 + 访问模式）：null = 免鉴权（不限且可读写）。
+   * - scope 集合供枚举类工具（ki_scope_list）按授权过滤，避免泄露未授权 scope
+   * - readOnly 让只读会话只注册读工具（tools/list 不出现写工具）
    */
-  buildServer: (authScopes: string[] | null) => McpServer;
+  buildServer: (auth: TokenAuth | null) => McpServer;
   /** 进程退出前的额外清理（如停止 version guard） */
   onShutdown?: () => void;
   /** --web：同时提供前端静态页面（默认 webDir，浏览器访问 http://<host>:<port>/） */
@@ -193,6 +195,56 @@ function rejectScopeViolationRequest(
   sendJson(res, 403, {
     jsonrpc: '2.0',
     error: { code: -32002, message: 'Forbidden: 无权访问该 scope' },
+    id: extractJsonRpcId(body),
+  });
+  return true;
+}
+
+/**
+ * 校验请求体中所有 tools/call 是否越出只读 Token 的工具白名单。
+ * 逐个 tools/call 校验（含 batch 数组），任一为写工具即拒绝。
+ *
+ * ★ 为什么必须做这道闸门（只"不注册"是不够的）：
+ *   ① MCP 客户端可能缓存建连时的 tools/list，权限变更后仍按旧列表发 tools/call；
+ *   ② 客户端可以直接构造任意 JSON-RPC，不经过 tools/list。
+ *   白名单方向（不在 `READ_ONLY_TOOL_NAMES` 即拒）保证新增工具漏登记时默认被拒（fail-safe）。
+ * @returns 违规的工具名；null 表示无需拒绝（非 tools/call 或全部在白名单内）
+ * @internal 导出仅供单测（白盒验证 batch 逐项校验）；非稳定公共 API。
+ */
+export function findReadOnlyViolation(body: unknown): string | null {
+  const items = Array.isArray(body) ? body : [body];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const m = item as { method?: unknown; params?: { name?: unknown } };
+    if (m.method !== 'tools/call') continue;
+    const name = m.params?.name;
+    if (typeof name !== 'string') continue;
+    if (!isReadOnlyTool(name)) return name;
+  }
+  return null;
+}
+
+/** 只读 Token 调用写工具的统一 403 响应；返回 true 表示请求已被拒绝。 */
+function rejectReadOnlyRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  body: unknown,
+  auth: TokenAuth | null,
+): boolean {
+  if (auth === null || !auth.readOnly) return false;
+  const violation = findReadOnlyViolation(body);
+  if (violation === null) return false;
+  process.stderr.write(
+    `[kisearch] 只读 Token 拦截写入：来自 ${req.socket.remoteAddress ?? '未知'}，`
+    + `工具 "${violation}" 不在只读白名单内。\n`,
+  );
+  sendJson(res, 403, {
+    jsonrpc: '2.0',
+    error: {
+      code: -32003,
+      message: readonlyRejectMessage(violation, auth.id),
+      data: { code: TOKEN_READONLY },
+    },
     id: extractJsonRpcId(body),
   });
   return true;
@@ -446,8 +498,8 @@ export interface HttpAppOptions {
   token?: string;
   /** DNS rebinding 保护允许的 Host 头（可选） */
   allowedHosts?: string[];
-  /** 每个 MCP 会话新建一个 McpServer 的工厂（接收该会话的授权 scope 集合，见 HttpServerOptions） */
-  buildServer: (authScopes: string[] | null) => McpServer;
+  /** 每个 MCP 会话新建一个 McpServer 的工厂（接收该会话的完整授权，见 HttpServerOptions） */
+  buildServer: (auth: TokenAuth | null) => McpServer;
   /** 对外暴露的绑定地址（写入 /healthz，便于客户端确认连接目标一致，NEG-01） */
   advertiseAddr?: { host: string; port: number };
   /** 最大并发会话数（缺省 DEFAULT_MAX_SESSIONS） */
@@ -462,11 +514,11 @@ export interface HttpAppOptions {
    */
   resolveClientAddr?: (req: http.IncomingMessage) => string | undefined;
   /**
-   * 按 Token 明文查询授权 scope 集合（RBAC 鉴权）。
-   * 默认走多 Token 存储 `findTokenScopes`（读 ~/.ki/mcp-tokens.json）；测试可注入返回固定 scopes，
-   * 以验证 scope 越权校验（无需触碰真实 HOME 存储）。
+   * 按 Token 明文查询完整授权（scope 集合 + 只读标记）。
+   * 默认走多 Token 存储 `findTokenAuth`（读 ~/.ki/mcp-tokens.json）；测试可注入返回固定授权，
+   * 以验证 scope 越权与只读拦截（无需触碰真实 HOME 存储）。
    */
-  resolveTokenScopes?: (token: string) => string[] | undefined;
+  resolveTokenAuth?: (token: string) => TokenAuth | undefined;
 }
 
 export interface McpHttpApp {
@@ -487,8 +539,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const webDir = opts.webDir ?? null;
   // 解析请求客户端地址：默认取 socket.remoteAddress，测试可注入覆盖（验证远程来源需鉴权）
   const resolveClientAddr = opts.resolveClientAddr ?? ((req: http.IncomingMessage) => req.socket.remoteAddress);
-  // 按 Token 查授权 scope：默认走多 Token 存储，测试可注入覆盖
-  const resolveTokenScopes = opts.resolveTokenScopes ?? ((t: string) => findTokenScopes(t));
+  // 按 Token 查完整授权（scope + 只读）：默认走多 Token 存储，测试可注入覆盖
+  const resolveTokenAuth = opts.resolveTokenAuth ?? ((t: string) => findTokenAuth(t));
 
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -663,7 +715,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
           authEnabled,
           token,
           clientAddr: resolveClientAddr(req),
-          resolveTokenScopes,
+          // /api/* 目前只有 scope 维度（只读 Token 的写工具限制仅作用于 MCP 通道，见 docs/mcp-http.md「只读 Token」）
+          resolveTokenScopes: (t: string) => resolveTokenAuth(t)?.scopes,
         }),
       ));
       return;
@@ -680,23 +733,24 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     }
 
     // 鉴权：对外绑定（authEnabled）时，本地回环来源（127.0.0.1/::1）免鉴权，远程来源需 Bearer Token。
-    // 同时解析该 Token 的授权 scope 集合（全权临时 Token → ['all']；否则查多 Token 存储），
-    // 供 handleMcpPost 做 tools/call 的 scope 越权校验。authScopes 为 null 表示免鉴权（不限）。
-    let authScopes: string[] | null = null;
+    // 同时解析该 Token 的完整授权（scope 集合 + 只读标记），供 handleMcpPost 做
+    // tools/call 的 scope 越权校验与只读写工具拦截。null 表示免鉴权（不限、可读写）。
+    let sessionAuth: TokenAuth | null = null;
     if (authEnabled && !isLoopbackAddr(resolveClientAddr(req))) {
-      const auth = req.headers['authorization'];
-      const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
-        ? auth.slice('Bearer '.length).trim()
+      const authHeader = req.headers['authorization'];
+      const bearer = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
         : '';
-      let scopes: string[] | undefined;
+      let resolved: TokenAuth | undefined;
       if (bearer && token && tokenMatches(bearer, token)) {
-        // 全权临时 Token（--token/KI_MCP_TOKEN）：授权全部 scope
-        scopes = [ALL_SCOPES];
+        // 全权临时 Token（--token/KI_MCP_TOKEN）：全部 scope，且**永远读写**
+        //（只读能力只作用于托管 Token；临时 Token 本就是应急全权凭据，不参与降权）
+        resolved = { scopes: [ALL_SCOPES], readOnly: false };
       } else if (bearer) {
-        // 多 Token 存储：按明文查找授权 scope 集合（常量时间比较）
-        scopes = resolveTokenScopes(bearer);
+        // 多 Token 存储：按明文查找授权（常量时间比较）
+        resolved = resolveTokenAuth(bearer);
       }
-      if (!scopes) {
+      if (!resolved) {
         const reason = !bearer
           ? '请求未携带 Authorization: Bearer 头'
           : 'Token 无效（未在托管 Token 存储中匹配到）';
@@ -711,11 +765,11 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         );
         return;
       }
-      authScopes = scopes;
+      sessionAuth = resolved;
     }
 
     if (req.method === 'POST') {
-      await handleMcpPost(req, res, authScopes, requestConfig ?? loadConfig());
+      await handleMcpPost(req, res, sessionAuth, requestConfig ?? loadConfig());
       return;
     }
     if (req.method === 'GET' || req.method === 'DELETE') {
@@ -729,7 +783,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   async function handleMcpPost(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    authScopes: string[] | null,
+    sessionAuth: TokenAuth | null,
     requestConfig: KiConfig,
   ): Promise<void> {
     const body = await readJsonBody(req);
@@ -747,7 +801,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       return method === 'tools/call' || method === 'resources/read' || method === 'resources/list';
     });
     if (!touchesState) {
-      return handleMcpPostInner(req, res, authScopes, body);
+      return handleMcpPostInner(req, res, sessionAuth, body);
     }
     const queueScopes = new Set<string>();
     let needsGlobal = false;
@@ -781,7 +835,10 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     const occupied = needsGlobal ? [GLOBAL_SCOPE] : (onlyReadOnly ? [] : [...queueScopes]);
     // 预计算会触发外部 embedding，必须先完成与正式执行路径相同的 scope 鉴权，
     // 防止无权请求利用 timeout=60 消耗 provider 资源。
-    if (rejectScopeViolationRequest(req, res, body, authScopes)) return;
+    if (rejectScopeViolationRequest(req, res, body, sessionAuth?.scopes ?? null)) return;
+    // 只读 Token：写工具一律拒绝。工具未注册只解决"看不到"——
+    // 客户端缓存列表或直接构造 JSON-RPC 时仍会发过来，必须在任何副作用之前兜住。
+    if (rejectReadOnlyRequest(req, res, body, sessionAuth)) return;
     // O3：embedding 预计算在 submit 之前完成（无锁阶段），使网络等待不再占用 scope 窗口——
     // 同 scope 串行时慢 embed 不再阻塞队列中的后续请求。结果经 AsyncLocalStorage 传递。
     const precomputedVectors = await precomputeSearchQueryVectors(messages, requestConfig);
@@ -789,7 +846,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       { operation: 'mcp-request', params: body },
       () => runWithPrecomputedQueryVectors(precomputedVectors, () => runWithConfigSnapshot(requestConfig, () => runWithVectorSource(
         describeMcpSource(body),
-        () => handleMcpPostInner(req, res, authScopes, body),
+        () => handleMcpPostInner(req, res, sessionAuth, body),
       ))),
       occupied,
       // 读工具（ki_get_module_info / ki_group_list）判 `read`：它们不写元数据/引擎、
@@ -802,12 +859,13 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   async function handleMcpPostInner(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    authScopes: string[] | null,
+    sessionAuth: TokenAuth | null,
     body: unknown,
   ): Promise<void> {
 
     // scope 越权校验已在预计算前执行；这里再守一层，覆盖无状态请求与未来调用方。
-    if (rejectScopeViolationRequest(req, res, body, authScopes)) return;
+    if (rejectScopeViolationRequest(req, res, body, sessionAuth?.scopes ?? null)) return;
+    if (rejectReadOnlyRequest(req, res, body, sessionAuth)) return;
 
     const sid = req.headers['mcp-session-id'];
     const sessionId = Array.isArray(sid) ? sid[0] : sid;
@@ -845,7 +903,10 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       newTransport.onclose = () => {
         if (newTransport.sessionId) dropSession(newTransport.sessionId);
       };
-      const server = buildServer(authScopes);
+      // 会话建立时按该 Token 的访问模式装配工具集：
+      // 只读会话只注册读工具（tools/list 即不含写工具）；权限变更后需重连才刷新列表，
+      // 但 tools/call 侧每次都按当次请求解析的 sessionAuth 实时拦截（见 rejectReadOnlyRequest）。
+      const server = buildServer(sessionAuth);
       await server.connect(newTransport);
       transport = newTransport;
     } else {

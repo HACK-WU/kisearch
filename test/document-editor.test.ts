@@ -107,7 +107,9 @@ describe('document editor', () => {
       authEnabled: true,
       token: 'admin-only',
       resolveClientAddr: () => '192.0.2.10',
-      resolveTokenScopes: (token: string) => token === 'limited' ? ['another-scope'] : token === 'editor' ? [scope] : undefined,
+      resolveTokenAuth: (token: string) => token === 'limited'
+        ? { scopes: ['another-scope'], readOnly: false }
+        : token === 'editor' ? { scopes: [scope], readOnly: false } : undefined,
       buildServer: () => new McpServer({ name: 'editor-test', version: '0' }),
       webDir: null,
     });

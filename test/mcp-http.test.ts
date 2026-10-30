@@ -28,9 +28,10 @@ import {
   getHttpLockPath,
 } from '../src/lib/mcp-http.js';
 import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
+import type { TokenAuth } from '../src/lib/mcp-token.js';
 
 // ─── 测试用最小 McpServer 工厂（不触碰向量引擎） ───
-function buildTestServer(_authScopes: string[] | null = null): McpServer {
+function buildTestServer(_auth: TokenAuth | null = null): McpServer {
   const server = new McpServer({ name: 'kisearch', version: '0.0.0-test' });
   server.tool('ping', 'test ping', {}, async () => ({
     content: [{ type: 'text', text: 'pong' }],
@@ -55,8 +56,8 @@ async function startTestServer(
     maxSessions?: number;
     advertiseAddr?: { host: string; port: number };
     clientAddr?: string;
-    resolveTokenScopes?: (token: string) => string[] | undefined;
-    buildServer?: (authScopes: string[] | null) => McpServer;
+    resolveTokenAuth?: (token: string) => TokenAuth | undefined;
+    buildServer?: (auth: TokenAuth | null) => McpServer;
   } = { authEnabled: false },
 ): Promise<TestHandle> {
   const { httpServer, closeAllSessions } = createMcpHttpServer({
@@ -66,7 +67,7 @@ async function startTestServer(
     advertiseAddr: opts.advertiseAddr,
     // 测试注入客户端地址：缺省为本地回环（127.0.0.1）；传入 clientAddr 模拟远程来源以验证远程鉴权
     resolveClientAddr: () => opts.clientAddr ?? '127.0.0.1',
-    resolveTokenScopes: opts.resolveTokenScopes,
+    resolveTokenAuth: opts.resolveTokenAuth,
     buildServer: opts.buildServer ?? buildTestServer,
   });
   await new Promise<void>((resolve) =>
@@ -489,7 +490,7 @@ describe('scope 越权校验（RBAC）', () => {
     srv = await startTestServer({
       authEnabled: true,
       clientAddr: '192.168.1.10', // 远程来源，强制鉴权
-      resolveTokenScopes: (t) => (t === 'team-a-token' ? ['team-a'] : undefined),
+      resolveTokenAuth: (t) => (t === 'team-a-token' ? { scopes: ['team-a'], readOnly: false } : undefined),
     });
   });
   after(async () => {
@@ -573,7 +574,7 @@ describe('scope 越权校验（RBAC）', () => {
     const srv2 = await startTestServer({
       authEnabled: true,
       clientAddr: '192.168.1.10',
-      resolveTokenScopes: (t) => (t === 'admin-token' ? ['all'] : undefined),
+      resolveTokenAuth: (t) => (t === 'admin-token' ? { scopes: ['all'], readOnly: false } : undefined),
     });
     try {
       const { sid } = await initialize(srv2.base, 'admin-token');
@@ -585,33 +586,53 @@ describe('scope 越权校验（RBAC）', () => {
     }
   });
 
-  it('授权 scope 集合正确传递到 buildServer 工厂（枚举工具过滤依据）', async () => {
-    let received: string[] | null = null;
+  it('授权（scope + 只读标记）正确传递到 buildServer 工厂（枚举过滤与工具集装配依据）', async () => {
+    let received: TokenAuth | null = null;
     const srv2 = await startTestServer({
       authEnabled: true,
       clientAddr: '192.168.1.10',
-      resolveTokenScopes: (t) => (t === 'team-a-token' ? ['team-a'] : undefined),
-      buildServer: (authScopes) => {
-        received = authScopes;
-        return buildTestServer(authScopes);
+      resolveTokenAuth: (t) => (t === 'team-a-token' ? { scopes: ['team-a'], readOnly: false } : undefined),
+      buildServer: (auth) => {
+        received = auth;
+        return buildTestServer(auth);
       },
     });
     try {
       const { sid } = await initialize(srv2.base, 'team-a-token');
       assert.ok(sid);
-      assert.deepEqual(received, ['team-a']);
+      assert.deepEqual(received, { scopes: ['team-a'], readOnly: false });
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it('只读 Token 的 readOnly 标记同样传递到 buildServer（决定是否注册写工具）', async () => {
+    let received: TokenAuth | null = null;
+    const srv2 = await startTestServer({
+      authEnabled: true,
+      clientAddr: '192.168.1.10',
+      resolveTokenAuth: (t) => (t === 'ro-token' ? { id: 'ro123456', scopes: ['team-a'], readOnly: true } : undefined),
+      buildServer: (auth) => {
+        received = auth;
+        return buildTestServer(auth);
+      },
+    });
+    try {
+      const { sid } = await initialize(srv2.base, 'ro-token');
+      assert.ok(sid);
+      assert.deepEqual(received, { id: 'ro123456', scopes: ['team-a'], readOnly: true });
     } finally {
       await srv2.close();
     }
   });
 
   it('免鉴权（回环）时 buildServer 收到 null（不过滤）', async () => {
-    let received: string[] | null = 'unset' as unknown as string[] | null;
+    let received: TokenAuth | null = 'unset' as unknown as TokenAuth | null;
     const srv2 = await startTestServer({
       authEnabled: false,
-      buildServer: (authScopes) => {
-        received = authScopes;
-        return buildTestServer(authScopes);
+      buildServer: (auth) => {
+        received = auth;
+        return buildTestServer(auth);
       },
     });
     try {
@@ -621,5 +642,62 @@ describe('scope 越权校验（RBAC）', () => {
     } finally {
       await srv2.close();
     }
+  });
+});
+
+/**
+ * 只读 Token：tools/list 里不出现写工具由 buildKiMcpServer 保证
+ * （白盒用例见 test/mcp-token-readonly.test.ts）。
+ * 这里验证 HTTP 层 tools/call 的兜底拦截 —— 客户端缓存旧列表或直接构造 JSON-RPC 时仍必须被拒。
+ */
+describe('只读 Token：tools/call 拦截（fail-safe 白名单）', () => {
+  let srv: TestHandle;
+  before(async () => {
+    srv = await startTestServer({
+      authEnabled: true,
+      clientAddr: '192.168.1.10', // 远程来源，强制鉴权
+      resolveTokenAuth: (t) => (t === 'ro-token'
+        ? { id: 'ro123456', scopes: ['all'], readOnly: true }
+        : t === 'rw-token' ? { scopes: ['all'], readOnly: false } : undefined),
+    });
+  });
+  after(async () => {
+    await srv.close();
+  });
+
+  it('只读 Token 可正常建连（initialize 200）', async () => {
+    const { status, sid } = await initialize(srv.base, 'ro-token');
+    assert.equal(status, 200);
+    assert.ok(sid);
+  });
+
+  it('只读 Token 构造非白名单工具调用（不经过 tools/list）→ 403 + 只读文案', async () => {
+    const { sid } = await initialize(srv.base, 'ro-token');
+    assert.ok(sid);
+    const res = await callToolRaw(srv.base, sid!, 'ro-token', 'ping');
+    assert.equal(res.status, 403);
+    assert.match(res.body, /只读/);
+    assert.ok(!res.body.includes('scope readonly'), '不得引导调用方去关掉库级只读保护');
+  });
+
+  it('只读 Token 调用白名单内的读工具 → 200（不误伤）', async () => {
+    const { sid } = await initialize(srv.base, 'ro-token');
+    assert.ok(sid);
+    const res = await callToolRaw(srv.base, sid!, 'ro-token', 'ki_scope_list', {});
+    assert.equal(res.status, 200);
+  });
+
+  it('读写 Token 调用同一工具 → 200（拦截不扩大到读写）', async () => {
+    const { sid } = await initialize(srv.base, 'rw-token');
+    assert.ok(sid);
+    const res = await callToolRaw(srv.base, sid!, 'rw-token', 'ping', { scope: 'all' });
+    assert.equal(res.status, 200);
+  });
+
+  it('只读 Token 的 batch 请求 → 整体 403（逐项判定，不只校验首项）', async () => {
+    const { sid } = await initialize(srv.base, 'ro-token');
+    assert.ok(sid);
+    const res = await callToolBatch(srv.base, sid!, 'ro-token', ['all', 'all']);
+    assert.equal(res.status, 403);
   });
 });

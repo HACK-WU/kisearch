@@ -1044,8 +1044,10 @@ ki bulk-store -s <scope> -i batch.json
 ki mcp                                  # stdio 模式（默认，启动时经多实例冲突守卫）
 ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
 ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
-ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
+ki mcp token generate --scope team-a --read-only  # 生成只读 Token（看不到也调不动写工具）
+ki mcp token list                       # 列出所有 Token（含明文、授权 scope、访问模式）
 ki mcp token update <id> --scope all    # 修改指定 Token 的授权 scope
+ki mcp token update <id> --read-only    # 只切访问模式，不动授权 scope（--read-write 切回读写）
 ki mcp token delete <id>                # 删除指定 Token（立即失效）
 ki mcp --http --host 0.0.0.0            # 对外监听（远程/跨机共享），鉴权基于多 Token 存储
 ki mcp --http --web                     # HTTP 模式 + 可视化前端页面（浏览器访问 http://127.0.0.1:7423/）
@@ -1087,10 +1089,12 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 | 命令 | 说明 |
 |------|------|
-| `ki mcp token generate --scope <scope>` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`） |
-| `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、创建时间） |
-| `ki mcp token update <id> --scope <scope>` | 按短 ID 修改授权 scope；id 不存在报错（`TOKEN_NOT_FOUND`） |
+| `ki mcp token generate --scope <scope> [--read-only]` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`）；`--read-only` 生成只读 Token |
+| `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、访问模式、创建时间） |
+| `ki mcp token update <id> [--scope <scope>] [--read-only\|--read-write]` | 改授权 scope / 切换访问模式，两项至少给一个（否则 `MCP_TOKEN_UPDATE_NOTHING_TO_DO`）；可只改其中一项；id 不存在报错（`TOKEN_NOT_FOUND`） |
 | `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`TOKEN_NOT_FOUND`） |
+
+> **只读 Token**：远程 MCP 客户端连上后只看到 5 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读只约束 MCP 通道（`/api/*` 与 chat 通道不受限），语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
 
 > **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储或 `--token` 全权临时 Token）。
 >
