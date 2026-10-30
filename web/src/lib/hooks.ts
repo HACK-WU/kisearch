@@ -207,14 +207,20 @@ export function useGroupDocs(scope: string, group: string | null, tag?: string) 
 
 // ─── 数据源（REQ-20261020-001） ─────────────────────────
 
-/** 数据源列表（跨 scope；页面只读）。固定 15s 轮询：CLI 在别处启动同步时页面也能感知 */
+/**
+ * 数据源列表（跨 scope；页面只读）。
+ * 轮询：**有任何一行正在同步就 3s，否则 15s**（2026-10-30）。
+ * ★ 原先是固定 15s：实测「点同步 → 任务 0.8s 跑完 → 页面要等 15.2s 才从「同步中」恢复成「成功」」，
+ *   用户看到的就是"持续时间不到 1s，页面却过了十几秒才变"。同步中的行需要更快的收敛速度，
+ *   与 useDataSourceDetail 的 3s 口径保持一致；空闲时退回 15s，兼顾 CLI 在别处启动同步的感知。
+ */
 export function useDataSourceList() {
   return useQuery<DataSourceListResponse>({
     queryKey: ['dataSourceList'],
     queryFn: () => getDataSourceList(),
     staleTime: 15_000,
     retry: 1,
-    refetchInterval: 15_000,
+    refetchInterval: (query) => (query.state.data?.sources?.some((item) => item.running) ? 3_000 : 15_000),
   });
 }
 

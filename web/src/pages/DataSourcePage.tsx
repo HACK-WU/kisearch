@@ -27,6 +27,7 @@ import { getTask } from '@/api/tasksApi';
 import { DatasourceScheduleDialog } from '@/components/DatasourceScheduleDialog';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
+import { applyRowOrder, mergeRowOrder } from '@/lib/datasourceOrder';
 import {
   buildDataSourceDetail,
   buildDataSourceListSummary,
@@ -65,6 +66,23 @@ const PAGE_SIZE_DEFAULT = 10;
 
 /** 失败明细默认展示条数；超出折叠，展开后由 CSS 限高滚动 */
 const FAILURE_PREVIEW = 5;
+
+/**
+ * 成功类浮层提示的停留时长（2026-10-30 用户指定 1s）。
+ * ★ 只作用于 info（已提交/已保存）；warn 不自动消失，必须由用户关掉。
+ */
+const INFO_FLASH_MS = 1000;
+
+/**
+ * 行级提示的语气映射（复用站内 `Notice` 组件，2026-10-30）。
+ * `info` 在这里都是"动作成功了"（已提交同步 / 已保存定时 / 已移除登记），
+ * 若直传 info 会拿到 Notice 的淡黄语气（读起来像警告），所以映射成 success（绿）；
+ * `warn` 原样保留 —— 它同时承载"真失败"和"部分成功"（如只读未设上但已登记），
+ * 一律升级成 danger（红）会过度渲染。
+ */
+function flashTone(tone: 'info' | 'warn'): 'success' | 'warn' {
+  return tone === 'info' ? 'success' : 'warn';
+}
 
 const FOLDER_ICON = (
   <svg
@@ -149,7 +167,14 @@ export function DataSourcePage(): JSX.Element {
   const [docTarget, setDocTarget] = useState<DataSourcePendingItem | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
-  const [syncingScope, setSyncingScope] = useState<string | null>(null);
+  /**
+   * 正在提交同步请求的 scope 集合。
+   * ★ 2026-10-30 由单个 `syncingScope` 改为 Set：原条件 `syncingScope === null` 会让
+   *   点一行时**整列**同步按钮一起变灰，而"变灰"正是本次改版唯一的点击反馈，
+   *   整列闪灰太扎眼。改为只灰被点的那行；不同 scope 并发提交由后端各自的 scope 锁 /
+   *   冷却（409 / 429）兜底，语义不变。
+   */
+  const [syncingScopes, setSyncingScopes] = useState<Set<string>>(new Set());
   // 行级操作结果条（同步 / 移除数据源共用同一位置，避免两套提示抢位）
   const [rowNotice, setRowNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   /**
@@ -235,7 +260,7 @@ export function DataSourcePage(): JSX.Element {
     setSubmitting(false);
     setError(null);
     setReceipt(null);
-    setSyncingScope(null);
+    setSyncingScopes(new Set());
     setRowNotice(null);
     setCollapsedDirs(new Set());
     setShowAllFailures(false);
@@ -244,6 +269,40 @@ export function DataSourcePage(): JSX.Element {
     setRemoveError(null);
     setRemoving(false);
   }, [scope]);
+
+  /**
+   * 关闭行级结果浮层。
+   * ★ 浮层是「移除数据源成功」后的程序化焦点落点（见 submitRemove），点✕时焦点也在✕上；
+   *   元素一旦卸载，`document.activeElement` 会掉到 body —— 键盘用户就此失去位置。
+   *   所以关闭前先判断焦点是否在浮层内，是则交还到列表首行（表格为空时退到「添加」按钮）。
+   */
+  const dismissFlash = (kind: 'row' | 'sync'): void => {
+    const active = document.activeElement;
+    const stack = document.querySelector('.ki-ds-flash-stack');
+    if (stack && active instanceof Node && stack.contains(active)) {
+      const next = document.querySelector<HTMLElement>('.ki-ds-table__row') ?? addTriggerRef.current;
+      next?.focus();
+    }
+    if (kind === 'row') setRowNotice(null); else setRowSyncNotice(null);
+  };
+
+  // 浮层提示自动消失（2026-10-30）：info 只报"已提交/已保存"，按用户要求 **1s** 即走
+  // （6s → 3s → 1s，用户两次反馈"停留太久"）；warn 必须留到用户关掉，否则失败原因
+  // 一闪而过（fail-loud：错误不能被定时器吞掉）。时长读 `INFO_FLASH_MS`，要调只改常量。
+  useEffect(() => {
+    if (rowNotice?.tone !== 'info') return undefined;
+    const timer = window.setTimeout(() => dismissFlash('row'), INFO_FLASH_MS);
+    return () => window.clearTimeout(timer);
+    // dismissFlash 是渲染期新建的闭包，依赖里只放 rowNotice 即可（它每次渲染都捕获最新 state）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowNotice]);
+
+  useEffect(() => {
+    if (rowSyncNotice?.tone !== 'info') return undefined;
+    const timer = window.setTimeout(() => dismissFlash('sync'), INFO_FLASH_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowSyncNotice]);
 
   // 关闭抽屉后把焦点还给打开它的行（否则焦点掉到 body）
   useEffect(() => {
@@ -448,9 +507,22 @@ export function DataSourcePage(): JSX.Element {
   const sources = listQuery.data?.sources ?? [];
   const missing = listQuery.data?.missing ?? [];
   const corrupt = listQuery.data?.corrupt ?? [];
-  const total = sources.length;
+  /**
+   * 冻结行序（2026-10-30 用户定稿 D 方案）。
+   * 后端按「最久未同步在前」升序返回（`src/lib/datasource.ts` 的 registered.sort），
+   * 于是某行同步完成后 lastSync 变成最新 → 立刻沉到最底；分页时还会**跨页消失**，
+   * 用户会以为数据源跑丢了。这里在首屏记下顺序，此后只把新出现的 scope 追加到末尾，
+   * 已存在的行永不换位；刷新页面（组件重挂）才重新按最新顺序排。
+   */
+  const [rowOrder, setRowOrder] = useState<readonly string[]>([]);
+  useEffect(() => {
+    const scopes = (listQuery.data?.sources ?? []).map((item) => item.scope);
+    setRowOrder((prev) => mergeRowOrder(prev, scopes));
+  }, [listQuery.data]);
+  const orderedSources = useMemo(() => applyRowOrder(rowOrder, sources), [sources, rowOrder]);
+  const total = orderedSources.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const pageSources = sources.slice((page - 1) * pageSize, page * pageSize);
+  const pageSources = orderedSources.slice((page - 1) * pageSize, page * pageSize);
   // 失败时不得再报「加载中…」：该文案会一直挂着，与卡内的失败提示自相矛盾。
   const listSummary = listQuery.isError
     ? '数据源列表读取失败'
@@ -555,8 +627,9 @@ export function DataSourcePage(): JSX.Element {
   };
 
   const triggerSync = async (targetScope: string, full = false): Promise<void> => {
-    if (syncingScope !== null) return;
-    setSyncingScope(targetScope);
+    // 同一 scope 连点仍然拦掉；不同 scope 允许并发（各自有服务端 scope 锁）
+    if (syncingScopes.has(targetScope)) return;
+    setSyncingScopes((prev) => new Set(prev).add(targetScope));
     setRowNotice(null);
     try {
       const result = await syncDataSource({ scope: targetScope, full });
@@ -579,7 +652,12 @@ export function DataSourcePage(): JSX.Element {
       setRowNotice({ tone: 'warn', text: message });
       await queryClient.invalidateQueries({ queryKey: ['dataSourceDetail', targetScope] });
     } finally {
-      setSyncingScope(null);
+      setSyncingScopes((prev) => {
+        if (!prev.has(targetScope)) return prev;
+        const next = new Set(prev);
+        next.delete(targetScope);
+        return next;
+      });
     }
   };
 
@@ -1218,22 +1296,27 @@ export function DataSourcePage(): JSX.Element {
         <p className="ki-task-notice ki-task-notice--warn">⚠ 当前 daemon 不支持定时同步，请升级并重启</p>
       ) : null}
 
-      {rowSyncNotice ? (
-        <p className={`ki-task-notice ki-task-notice--${rowSyncNotice.tone}`} role={rowSyncNotice.tone === 'warn' ? 'alert' : undefined}>
-          {rowSyncNotice.text}
-        </p>
-      ) : null}
-
-      {rowNotice ? (
-        /* tabIndex=-1：仅作「操作后焦点落点」用，不进入 Tab 序（见 submitRemove） */
-        <p
-          ref={rowNoticeRef}
-          tabIndex={-1}
-          className={`ki-task-notice ki-task-notice--${rowNotice.tone} ki-ds-notice--focus`}
-          role={rowNotice.tone === 'warn' ? 'alert' : undefined}
-        >
-          {rowNotice.text}
-        </p>
+      {/* 行级结果提示（2026-10-30 改浮层）：原先插在这里会把下面的表格整块下推 61px。
+          改成 position:fixed 的底部居中浮层 —— 不参与文档流，出现/消失都不移动任何内容。
+          info 6s 自动消失；warn 常驻并带关闭按钮（失败原因要看得见、留得住）。
+          ★ tabIndex=-1：仅作「操作后焦点落点」用，不进入 Tab 序（见 submitRemove）。 */}
+      {rowSyncNotice || rowNotice ? (
+        <div className="ki-ds-flash-stack">
+          {rowSyncNotice ? (
+            <div className="ki-ds-flash">
+              <Notice tone={flashTone(rowSyncNotice.tone)} onClose={() => dismissFlash('sync')}>{rowSyncNotice.text}</Notice>
+            </div>
+          ) : null}
+          {rowNotice ? (
+            <div
+              ref={rowNoticeRef}
+              tabIndex={-1}
+              className="ki-ds-flash ki-ds-flash--focus"
+            >
+              <Notice tone={flashTone(rowNotice.tone)} onClose={() => dismissFlash('row')}>{rowNotice.text}</Notice>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {missing.map((item) => (
@@ -1310,8 +1393,19 @@ export function DataSourcePage(): JSX.Element {
                   const status = dataSourceStatusView({ activeState: source.activeState, running: source.running, lastSync: source.lastSync });
                   const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
                   const rowAvailability = source.syncAvailability;
-                  const rowSyncing = syncingScope === source.scope;
-                  const rowCanSync = !source.running && rowAvailability?.allowed === true && syncingScope === null;
+                  const rowSyncing = syncingScopes.has(source.scope);
+                  // 只禁本行：别的行仍可点（不同 scope 各有服务端锁）
+                  const rowCanSync = !source.running && rowAvailability?.allowed === true && !rowSyncing;
+                  /**
+                   * scope 名后的同步状态徽标（2026-10-30）：按钮文案恒定后，状态在这里表达。
+                   * 顺序：本地「已提交、列表还没刷新」→ 服务端 running（排队 / 进行中）。
+                   */
+                  const scopeSyncLabel = source.running
+                    ? (source.activeState === 'queued' ? '排队中' : '同步中')
+                    : rowSyncing
+                      ? '同步中'
+                      : null;
+                  const scopeSyncQueued = source.running && source.activeState === 'queued';
                   const rowTitle = rowSyncing
                     ? '正在提交同步请求'
                     : source.running
@@ -1349,6 +1443,17 @@ export function DataSourcePage(): JSX.Element {
                             className={`ki-ds-sched-badge ki-ds-sched-badge--compact${schedBadge === '定时⚠' ? ' ki-ds-sched-badge--warn' : ''}`}
                             title={source.schedule ? describeSchedule(source.schedule) : undefined}
                           >{schedBadge}</span>
+                        ) : null}
+                        {/* 同步状态徽标：脉冲圆点 + 文字（2026-10-30）。
+                            实测 7 档视口（1440→375）下加它不改变行高，只把长 scope 名压到省略号。 */}
+                        {scopeSyncLabel ? (
+                          <span
+                            className={`ki-ds-sync-badge${scopeSyncQueued ? ' ki-ds-sync-badge--queued' : ''}`}
+                            title={scopeSyncQueued ? '同步已排队，等待同知识库的其他任务完成' : '同步进行中'}
+                          >
+                            <span className="ki-ds-sync-badge__dot" aria-hidden="true" />
+                            {scopeSyncLabel}
+                          </span>
                         ) : null}
                       </span>
                       {nextLine ? (
@@ -1394,7 +1499,11 @@ export function DataSourcePage(): JSX.Element {
                             event.stopPropagation();
                             if (rowCanSync) void triggerSync(source.scope);
                           }}
-                        >{rowSyncing ? '提交中…' : source.running ? (source.activeState === 'queued' ? '排队中' : '同步中') : '同步'}</button>
+                        >{/* ★ 文案恒定（2026-10-30）：原先 提交中…/同步中/排队中 会把按钮撑到
+                              58~70px，三按钮合计 174px > 操作列可用的 158px，操作组换行 →
+                              行高 55→93、整表下移 38px、请求返回再回弹 = 用户看到的"抖动"。
+                              现在只变灰（disabled），状态改由 scope 名后的徽标表达。 */}
+                          {'同步'}</button>
                         {canUpdateDatasource ? (
                           <button
                             type="button"

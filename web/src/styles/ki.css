@@ -3588,6 +3588,13 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   white-space: pre-wrap;
 }
 .ki-notice--slim { align-items: center; padding: 8px 12px; }
+/* 可关闭提示（2026-10-30）：仅当调用方传了 `onClose` 才渲染，其余 Notice 不受影响 */
+.ki-notice__close {
+  flex: none; margin: -3px -5px 0 0; padding: 2px 4px;
+  border: 0; border-radius: var(--ki-radius-tag); background: none;
+  color: var(--notice-ink); font-size: var(--ki-font-size-sm); line-height: 1; cursor: pointer; opacity: .65;
+}
+.ki-notice__close:hover { opacity: 1; background: color-mix(in srgb, var(--notice-ink) 14%, transparent); }
 .ki-notice--slim .ki-notice__icon { margin-top: 0; }
 .ki-notice--slim .ki-notice__text { color: var(--ki-color-text); }
 .ki-notice--info {
@@ -5611,7 +5618,11 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__row td.ki-ds-table__actions { text-align: center; }
 .ki-ds-sync-btn { min-width: 52px; }
 /* 行内操作组（2026-10-29）：td 保持 table-cell，按钮排布交给内部 flex */
-.ki-ds-row-actions { display: flex; align-items: center; justify-content: center; gap: 6px; }
+/* 行内操作组（2026-10-30 定稿）：td 保持 table-cell，按钮排布交给内部 flex。
+   ★ flex-wrap 必须是 nowrap：曾用过 wrap（下方 7384 那条重复定义已删），点「同步」时
+     按钮文案一变长（52 → 70px）就换行，行高 55 → 93、整表下移 38px、回弹 = 用户报的"抖动"。
+     现在按钮文案恒定 + nowrap 双保险，结构上不可能再撑高行。 */
+.ki-ds-row-actions { display: flex; align-items: center; justify-content: center; flex-wrap: nowrap; gap: 6px; }
 /* 移除数据源登记：破坏性但非主操作 —— 走次要按钮底，仅文字/悬停用 danger 色，
    避免整行被实心红按钮抢焦点（实心危险色留给确认框里的「确认移除」） */
 .ki-ds-remove-btn { color: var(--ki-color-danger-ink); white-space: nowrap; }
@@ -5621,8 +5632,37 @@ select.ki-chat-cfg__ta--select {
 }
 /* 损坏登记提示行：文案 + 移除按钮，窄屏换行不挤压 */
 .ki-ds-notice--action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-/* 提示行的「程序化焦点落点」：不画焦点环（它是结果提示，不是可操作控件） */
-.ki-ds-notice--focus:focus, .ki-ds-notice--focus:focus-visible { outline: none; }
+/* 行级结果浮层（2026-10-30）：行内「同步 / 移除 / 编辑」的结果提示。
+   ★ 为什么是 fixed：原先这几条 `.ki-task-notice` 渲染在表格**之前**，出现时把
+     `.ki-card` 从 176 推到 237（+61px）—— 与操作组换行的 ±38px 叠在一起就是用户报的"抖动"。
+     浮层不参与文档流，出现/消失都不移动任何内容。
+   ★ 落点「顶部居中」（2026-10-30 二次调整）：第一版放 `bottom: 24px`，用户反馈"位置太往下了"
+     —— 表格只有 5~10 行时，提示离操作位置隔着整屏空白，看着像掉到页面底部。
+     实测 1440×900：顶栏 8~42、页头 42~104（中间是空的）、提示条 104~164、表格 177 起。
+     取 `top: 56px`：紧贴顶栏下方、落在页头中段的空白处，既不挡表格也不挡右上角「添加」按钮。
+     z-index 1100 —— 高于详情抽屉遮罩（1020）、低于表单弹窗（1200），开抽屉时仍可见。
+   ★ 长文案靠 max-width + overflow-wrap 换行，不用省略号：失败原因必须完整可读。 */
+.ki-ds-flash-stack {
+  position: fixed; left: 50%; top: 56px; transform: translateX(-50%);
+  z-index: 1100; display: flex; flex-direction: column; gap: 8px;
+  width: max-content; max-width: min(560px, calc(100vw - 32px));
+  pointer-events: none;
+}
+/* ★ 内容直接用站内的 `Notice` 组件（图标 + 语气底色 + 语气描边），
+   浮层只负责「定位 + 阴影」，不再自造配色。
+   历史：第一版浅灰底被嫌"不醒目"、第二版改成实心深色块又被要求"复用现成样式"，
+   最终收敛为 Notice —— 要调语气色请改 `--notice-*` 令牌，不要再给这里加自有配色。 */
+.ki-ds-flash {
+  border-radius: var(--ki-radius-md);
+  box-shadow: var(--ki-shadow-2);
+  pointer-events: auto;
+}
+/* 程序化焦点落点（移除成功后焦点交给它）：不画焦点环 */
+.ki-ds-flash--focus:focus, .ki-ds-flash--focus:focus-visible { outline: none; }
+@media (max-width: 640px) {
+  /* 窄屏通栏同样贴顶：底部会被输入框/浏览器工具条挤，且离操作位置更远 */
+  .ki-ds-flash-stack { left: 12px; right: 12px; top: 52px; transform: none; width: auto; max-width: none; }
+}
 /* 移除确认弹窗（2026-10-29 改版）：danger 顶条 + 三块分组卡片，规格见
    docs/ui-design/datasource-remove-dialog.md。原「5 行平铺键值 + 单个黄块」已废弃，
    不要再改回 .ki-ds-remove__grid/row/label/value/keep/note 那套结构。
@@ -7381,7 +7421,32 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-sched-badge--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-ds-sched-next { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); white-space: nowrap; }
 .ki-ds-sched-next--warn { color: var(--ki-color-warning); }
-.ki-ds-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 同步状态徽标（2026-10-30）：跟在 scope 名后，承载「同步中 / 排队中」。
+   原先是把状态写在行内「同步」按钮的文案里，按钮一被撑宽就换行（见 .ki-ds-row-actions 注释）。
+   ★ 尺寸与定时徽标同档（line-height 18px），实测 7 档视口（1440→375）下加它**不改变行高**：
+     行高由操作列 32px 按钮 + td padding 决定，scope 单元格 16→18px 撑不动。
+   ★ 动画只动 opacity / transform；动 width / margin / padding 会重新引入布局位移。 */
+.ki-ds-sync-badge {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  margin-left: 6px; padding: 0 6px 0 5px; border-radius: 999px;
+  font-size: var(--ki-font-size-xs); line-height: 18px; font-weight: 600;
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  white-space: nowrap; vertical-align: middle;
+}
+.ki-ds-sync-badge__dot {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  animation: ki-ds-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ki-ds-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.7); }
+}
+/* 排队态：换语气色，别在排队时写「同步中」 */
+.ki-ds-sync-badge--queued { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .ki-ds-sync-badge__dot { animation: none; }
+}
 .ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* 定时同步（2026-10-30）：原先与 CLI 同为实心浅绿，两种来源在来源列分不出来 ——
    改紫色系（自动 / 调度语义），与 网页(灰) / CLI(绿) / 后台服务(黄) 四色可辨。 */

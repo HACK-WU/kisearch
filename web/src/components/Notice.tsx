@@ -24,9 +24,15 @@ export interface NoticeProps {
   /** 单行形态：卡片内补充说明 / 表格行内 */
   slim?: boolean;
   className?: string;
+  /**
+   * 传了就渲染右上角 ✕（用于可关闭的浮层提示）。
+   * ★ 不传时与原先完全一致 —— 站内其它 Notice 调用点不需要改动。
+   */
+  onClose?: () => void;
+  closeLabel?: string;
 }
 
-export function Notice({ tone, title, children, slim = false, className }: NoticeProps): JSX.Element {
+export function Notice({ tone, title, children, slim = false, className, onClose, closeLabel }: NoticeProps): JSX.Element {
   const classes = [
     'ki-notice',
     `ki-notice--${tone}`,
@@ -40,6 +46,9 @@ export function Notice({ tone, title, children, slim = false, className }: Notic
         {title ? <p className="ki-notice__title">{title}</p> : null}
         <div className="ki-notice__text">{children}</div>
       </div>
+      {onClose ? (
+        <button type="button" className="ki-notice__close" aria-label={closeLabel ?? '关闭提示'} onClick={onClose}>✕</button>
+      ) : null}
     </div>
   );
 }
