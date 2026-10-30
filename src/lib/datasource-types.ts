@@ -14,6 +14,60 @@ export type DataSourceKind = 'directory' | 'git';
 
 export type DataSourceSyncMode = 'incremental' | 'full';
 
+export type DataSourceScheduleMode = 'interval' | 'at';
+export type DataSourceScheduleUnit = 'minute' | 'hour' | 'day';
+export type DataSourceScheduleRepeat = 'once' | 'daily';
+
+/**
+ * 定时计划（S-01）。配置字段由页面写；运行态字段只由调度器写。
+ * ★ 运行态写回不修改 `updatedAt`；并发保存用 `revision` 做乐观锁
+ *   （不能用 `updatedAt`：每次同步都会更新它）。
+ */
+export interface DataSourceSchedule {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  /** 周期模式：用户输入值（整数） */
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  /** 指定时间模式：daemon 本地时间 'YYYY-MM-DDTHH:mm'（无时区） */
+  at: string | null;
+  /** 指定时间模式：仅一次 / 从 at 起每天重复 */
+  repeat: DataSourceScheduleRepeat | null;
+  /** 配置版本；每次页面保存 +1，用于多标签页乐观锁 */
+  revision: number;
+  /**
+   * 启用锚点：由服务端在「关闭 → 开启」时写入（客户端不可写）。
+   * ★ 周期模式必须有持久锚点：从未同步过的数据源没有 `lastSync.at`，
+   *   若以 `now` 当基准，`nextRunAt` 会随每次读取向后滑，`due` 永远为 false ⇒ 永不触发。
+   */
+  enabledAt: number | null;
+
+  consecutiveFailures: number;
+  lastAutoAt: number | null;
+  /** 最近一次已执行的槽位（daily 去重；once 判断是否已执行） */
+  lastAutoFor: number | null;
+  lastAutoState: DataSourceSyncState | null;
+  lastSkipReason: string | null;
+  lastSkipAt: number | null;
+}
+
+/** 页面可编辑字段（运行态字段不接受客户端写入） */
+export interface DataSourceScheduleInput {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  at: string | null;
+  repeat: DataSourceScheduleRepeat | null;
+  /** 乐观锁：打开弹窗时的 revision；缺省不校验（兼容旧页面） */
+  baseRevision?: number;
+}
+
+/** 读接口下发的计划（附带服务端计算的下次运行时间） */
+export interface DataSourceScheduleView extends DataSourceSchedule {
+  nextRunAt: number | null;
+}
+
 export interface DataSourceGitInfo {
   /** 仓库根绝对路径（可能是 dir 的祖先） */
   repoRoot: string;
@@ -178,6 +232,8 @@ export interface DataSourceRecord {
   chunkOverlap: number | null;
   createdAt: number;
   updatedAt: number;
+  /** 定时计划（缺省 = 关闭；normalizeRecord 会补默认值） */
+  schedule: DataSourceSchedule;
   lastSync: DataSourceLastSync | null;
 }
 
@@ -209,5 +265,7 @@ export interface DataSourceSummary {
   } | null;
   running: boolean;
   stale: boolean;
+  /** 定时计划视图（旧 daemon 不下发；页面据此隐藏入口） */
+  schedule?: DataSourceScheduleView;
 }
 

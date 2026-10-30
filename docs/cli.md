@@ -28,7 +28,7 @@
 | [`import`](#import) | 外部 Markdown 导入（幂等追加） |
 | [`datasource`](#datasource) | 数据源登记与同步 |
 | [`group`](#group) | Group 创建 / 删除 / 列表 |
-| [`scope`](#scope) | scope 列表 / 删除 / 清空 |
+| [`scope`](#scope) | scope 列表 / 只读开关 / 删除 / 清空 |
 | [`tag`](#tag) | tag 发现 |
 | [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
 | [`doc`](#doc) | 向量文档查看 / 删除 |
@@ -137,7 +137,7 @@ ki import --scope my-project --source <dir> --retry-incomplete  # 源目录已�
 
 ## datasource
 
-本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录 30 分钟一次，CLI 可强制）。
+本地目录用 `--source` 登记；远程仓库用 `--git-url` 登记（clone 到 `~/.ki/datasources/<scope>/repo`，`git.managed=true`）。页面可添加 Git 数据源并触发同步（普通目录手动同步冷却 30 分钟，CLI 可强制）。
 
 ```bash
 ki datasource add --scope <s> --source <dir> [--type git|directory] [--group <g>] \
@@ -151,6 +151,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 ```
 
 `list` 默认输出对齐表格（`SCOPE / TYPE / SOURCE / LAST SYNC / STATE / PENDING`）：时间按本地时区 `YYYY-MM-DD HH:mm`；托管 Git 源显示 `host/owner/repo › 子目录 @commit`（保留 host，避免不同实例的同名仓库混淆）；`PENDING` 为 0 时显示 `-`，未计算（stale / 被闸门拦）显示 `未算`；终端较窄时 `SOURCE` 中间省略（`[同目录]` 这类标记不会被裁），**重定向 / 管道（非 TTY）不截断**；同一本地目录被多个 scope 登记会标 `[同目录]` 并在表下列出。**人类可读格式不作为稳定契约，脚本请用 `--json`。**
+已启用定时计划的数据源会在表格下方追加 `定时：` 脚注（模式 + 下次运行 / 待补跑 / 已执行 + 连续失败次数；无启用计划时该脚注不出现，输出与旧版一致）。**这是只读展示** —— 定时配置的唯一入口是页面「数据源 → 定时」，没有 CLI 配置命令；`--json` 的每条 `sources[]` 增 `schedule` 字段（与 `/api/datasource/list` 同口径，含服务端算出的 `nextRunAt`）。
 
 `--git-url` 规则（S-05）：
 
@@ -172,7 +173,8 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 - 清单落 `<kbDir>/datasource.json`（每 scope 一个，0600 原子写）；**不写** `group-index.json.source` —— `sync_relation` 的 wiki 写回不会指向用户源目录
 - `--type`：缺省自动探测目录是否为 Git 仓库；`git` 显式要求（探测失败 fail-loud）；`directory` 显式关闭增量（即使目录是仓库也按全量）
 - Git 数据源同步：`git fetch` + 自动更新（本地仓库只 `merge --ff-only`；工具托管的 clone 才 `reset --hard` + `clean`），只导入 tracked 变更；untracked 不进入增量，页面/CLI 会给出计数警告；首次同步无 commit 水位 → 全量；`--full` 处理全部文件（含 untracked）。commit 水位只在本次同步完整成功时推进
-- 页面同步：普通目录成功同步后 30 分钟内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409
+- 页面手动同步：普通目录成功同步后 30 分钟冷却内不可再触发（`partial` 不冷却，允许重试）；CLI `sync` 不受此限；同 scope 有运行中/排队任务时页面触发返回 409。**30 分钟是手动冷却，不是自动同步**
+- 定时同步（REQ-20261029-001）：配置**只在页面**（数据源列表操作列「定时」弹窗），无 CLI 配置命令；计划落 `<kbDir>/datasource.json` 的 `schedule` 字段，默认关闭，`directory` / `git` 均可开启。调度器**只在 HTTP daemon 内运行**（无 daemon 即不调度），没有任何启用计划时不建定时器；到期后全局同时最多 1 个自动同步，同 scope 已有运行中/排队任务、或共享托管 clone 忙时**跳过本次**（不排队、不建任务、不计失败）。daemon 启动时若已过预定时间，会补跑一次。连续失败只累计与提示，不阻断下个周期。定时同步同样**只导入 + 算候选，永不删除**；`KI_DISABLE_DATASOURCE_SCHEDULER=1` 可整体关闭调度（测试/开发用），当前状态见 `/healthz` 的 `datasourceScheduler`。周期计划带一个**启用锚点** `enabledAt`（开启时写入、改间隔不重置、关闭时清空）；若某条记录既无 `lastSync.at`/`lastAutoAt` 也无 `enabledAt`（旧版本写入或从旧快照 `restore` 恢复），会被判定为**已到期并在下一次调度刷新时补跑一次**，之后回到正常周期
 - `sync` 只导入 + 计算待删候选：候选只在「上一次成功同步见过的 rel 集合」内产生，首次同步零候选；**永不删除**，库内文档数只增不减
 - `--dry-run` 零写入（不导入、不写 `lastSync`，也不 fetch/自动更新）
 - `prune` 执行时服务端按**当前源目录**重算候选并与 `token` 比对（失配 `409`），只删「所选 ∩ 可见候选」，且**不动源目录文件**（`wikiDelete:false`）
@@ -214,9 +216,11 @@ ki group delete <path> [--yes] [--scope <s>]
 
 ## scope
 
-scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `delete` / `clear` 三个子命令。
+scope 生命周期管理，**同时作用于 KB 目录层与向量语义层**。包含 `list` / `readonly` / `delete` / `clear` 四个子命令。
 
 > **两层一致性**：`delete` / `clear` 为破坏性操作，需向量服务可用且强制 `--yes`；向量服务不可用时拒绝执行，以免两层不一致。
+>
+> **只读库的破坏性运维**：若目标 scope 已设为只读，`delete` / `clear` 还须额外传 `--force-readonly`（`--yes` 不足以确认清空一个只读库）。
 
 ### `list` 子命令
 
@@ -255,6 +259,36 @@ ki scope list --json   # JSON（脚本解析用）
 | `topGroups` / `topGroupsStale` | 顶层组名（第一层）/ 该结果是否可能过期 |
 
 > 向量服务不可用时降级：`vectorAvailable:false` + `vectorReason`，`scopes` 仅依 KB 目录与配置列出。
+
+### `readonly` 子命令
+
+设置 / 解除某个 scope 的**只读**状态（REQ-20261029-001）。状态存于配置文件顶层 `scopeReadonly`，**不写进 `scopes` 条目**（因此不会让该 scope 变成 registered）。
+
+```bash
+ki scope readonly my-project          # 设为只读
+ki scope readonly my-project --off    # 解除只读（恢复可写）
+```
+
+只读语义（**边界极重要**）：
+
+| 通道 | 只读下的行为 |
+|------|-------------|
+| `ki import`、`ki datasource sync`（含 Web 数据源页「同步」） | ✅ **放行** —— 内容仍可批量更新 |
+| `ki scope clear / delete`、`ki restore`、`ki rebuild-vector` | ✅ 放行（`clear/delete` 需额外 `--force-readonly`） |
+| Web 上传导入页、知识写入页、阅读页「编辑文档 / 添加链接」 | ⛔ 拒绝（HTTP 409 / `SCOPE_READONLY`） |
+| MCP 写工具（`ki_store`、`ki_sync_relation` 等 8 个） | ⛔ 拒绝 |
+| CLI 单条写入（`ki store`、`ki sync-relation`、`ki group create` 等） | ⛔ 拒绝 |
+| 检索 / 浏览 / 导出 / 备份 | ✅ 不受影响 |
+
+输出（`--json` 字段节选）：
+```json
+{ "ok": true, "scope": "my-project", "readonly": true, "changed": true,
+  "configPath": "/root/.ki/config.yaml" }
+```
+
+> `changed:false` 表示状态本就如此（幂等）。stderr 会额外回显一行「`my-project` 现在 只读/可写」——`--off` 语义是**解除只读**，回显可避免反向误读。
+>
+> ⚠️ 无配置文件时该命令 **fail-loud**（提示先 `ki config init`），不会静默成功。
 
 ### `delete` 子命令
 

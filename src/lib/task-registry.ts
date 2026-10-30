@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { KiConfig } from './config.js';
 
-export type TaskSource = 'cli' | 'daemon' | 'web';
+export type TaskSource = 'cli' | 'daemon' | 'web' | 'scheduler';
 export type TaskState = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'unknown';
 
 export interface TaskProgress {
@@ -461,7 +461,7 @@ function readRecordFile(file: string, expectedId: string): TaskRecord | null {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_TASK_FILE_BYTES) return null;
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as TaskRecord;
     if (!parsed || parsed.id !== expectedId || !TASK_ID_RE.test(parsed.id)
-      || !['cli', 'daemon', 'web'].includes(parsed.source)
+      || !['cli', 'daemon', 'web', 'scheduler'].includes(parsed.source)
       || !['queued', 'running', 'succeeded', 'partial', 'failed', 'cancelled'].includes(parsed.state)
       || typeof parsed.operation !== 'string' || typeof parsed.scope !== 'string'
       || !Number.isFinite(parsed.createdAt) || !Number.isFinite(parsed.updatedAt) || !Number.isFinite(parsed.heartbeatAt)) return null;

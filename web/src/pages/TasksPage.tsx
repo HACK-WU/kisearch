@@ -15,6 +15,8 @@ import { ItemTree } from '@/components/TaskDetailParts';
 import { ReadOnlyPathTree } from '@/components/ReadOnlyPathTree';
 import { buildDataSourcePendingTree } from '@/lib/dataSourceDetailModel';
 import { DetailHero, DetailMetrics, DetailParams } from '@/components/DetailParts';
+import { useScopeReadonly } from '@/lib/hooks';
+import { SCOPE_READONLY_BLOCKED_HINT, scopeReadonlyUnlockHint } from '@/lib/scopeReadonly';
 import { DetailDrawer, DetailSection, type DetailStatusTone } from '@/components/DetailDrawer';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
@@ -332,8 +334,15 @@ function TaskActions({
     runningImports,
   });
 
+  /**
+   * 只读 scope（REQ-20261029-001 屏 7）：任务页**不属于上传导入页**，
+   * 但「重试未完成导入」等于继续一次写入 —— 只读库必须在此禁用并给出 CLI 出路，
+   * 否则用户会点出一个没有任何页面标识的裸 409。
+   */
+  const scopeReadonly = useScopeReadonly(task.scope);
+
   const startRetry = async (): Promise<void> => {
-    if (retrying || retryLocked) return;
+    if (retrying || retryLocked || scopeReadonly) return;
     setRetrying(true);
     setRetryError(null);
     try {
@@ -409,11 +418,20 @@ function TaskActions({
           <button
             className="ki-btn ki-btn--primary ki-btn--small"
             onClick={() => void startRetry()}
-            disabled={retrying || retryLocked}
+            disabled={retrying || retryLocked || scopeReadonly}
+            aria-disabled={retrying || retryLocked || scopeReadonly}
+            title={scopeReadonly ? SCOPE_READONLY_BLOCKED_HINT : undefined}
           >
             {retrying ? '正在提交重试…' : retryLocked ? '已提交重试' : action.label}
           </button>
-          {action.hint ? <span className="ki-task-action__hint">{action.hint}</span> : null}
+          {scopeReadonly ? (
+            <span className="ki-task-action__hint">
+              ⚠ 该库为只读：页面无法重试，请用 CLI 继续（`ki import --scope {task.scope} --source &lt;原目录&gt;`）；
+              解除：{scopeReadonlyUnlockHint(task.scope)}
+            </span>
+          ) : action.hint ? (
+            <span className="ki-task-action__hint">{action.hint}</span>
+          ) : null}
         </div>
       );
     }

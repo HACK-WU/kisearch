@@ -99,7 +99,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_search', purpose: '语义检索（hybrid 混合 / fulltext 只查全文）' },
       { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
       { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
-      { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态与 wiki 写回可用性' },
+      { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 wiki 写回可用性' },
       { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
     ],
   },
@@ -301,9 +301,10 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     summary: '清空或删除某个 scope 实际存的数据（KB 目录 + 向量两层）。破坏性操作，都需 --yes 且不可撤销。',
     docAnchor: 'scope',
     params: [
-      { flag: 'list [--json]', desc: '列出 scope 及 kb / vector / registered / wikiCount / topGroups 等字段' },
-      { flag: 'clear <name> [--tags] --yes', desc: '清内容（KB + 向量），保留目录与配置；带 --tags 只清该 tag 的向量' },
-      { flag: 'delete <name> --yes', desc: '连目录与配置条目一起删；default 不可删；不带 --yes 只预览' },
+      { flag: 'list [--json]', desc: '列出 scope 及 kb / vector / registered / readonly / wikiCount / topGroups 等字段' },
+      { flag: 'readonly <name> [--off]', desc: '设为 / 解除只读：禁止逐条写入（Web/MCP/CLI），但 ki import 与数据源同步仍可更新' },
+      { flag: 'clear <name> [--tags] --yes', desc: '清内容（KB + 向量），保留目录与配置；带 --tags 只清该 tag 的向量；只读库需额外 --force-readonly' },
+      { flag: 'delete <name> --yes', desc: '连目录与配置条目一起删；default 不可删；不带 --yes 只预览；只读库需额外 --force-readonly' },
     ],
   },
 

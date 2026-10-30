@@ -731,6 +731,48 @@ export interface DataSourceLastSyncView {
 /** 当前同步运行态（来自任务台账）：null = 空闲 */
 export type DataSourceActiveState = 'queued' | 'running';
 
+export type DataSourceScheduleMode = 'interval' | 'at';
+export type DataSourceScheduleUnit = 'minute' | 'hour' | 'day';
+export type DataSourceScheduleRepeat = 'once' | 'daily';
+
+export interface DataSourceScheduleView {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  at: string | null;
+  repeat: DataSourceScheduleRepeat | null;
+  revision: number;
+  /** 启用锚点（服务端写，客户端只读）：周期模式的起算基准之一，旧 daemon 不返回 */
+  enabledAt?: number | null;
+  consecutiveFailures: number;
+  lastAutoAt: number | null;
+  lastAutoFor: number | null;
+  lastAutoState: DataSourceSyncState | null;
+  lastSkipReason: string | null;
+  lastSkipAt: number | null;
+  nextRunAt: number | null;
+}
+
+export interface DataSourceScheduleInput {
+  enabled: boolean;
+  mode: DataSourceScheduleMode;
+  intervalValue: number | null;
+  intervalUnit: DataSourceScheduleUnit | null;
+  at: string | null;
+  repeat: DataSourceScheduleRepeat | null;
+  baseRevision?: number;
+}
+
+export interface DataSourceScheduleResponse {
+  ok: boolean;
+  scope: string;
+  schedule: DataSourceScheduleView;
+  nextRunAt: number | null;
+  warnings: { code: string; message: string }[];
+  schedulerDisabled: boolean;
+}
+
 export interface DataSourceRecordView {
   version: number;
   scope: string;
@@ -752,6 +794,8 @@ export interface DataSourceRecordView {
   chunkOverlap: number | null;
   createdAt: number;
   updatedAt: number;
+  /** 旧 daemon 不下发 → 页面隐藏定时入口 */
+  schedule?: DataSourceScheduleView;
   lastSync: DataSourceLastSyncView | null;
 }
 
@@ -787,13 +831,16 @@ export interface DataSourceListRow {
   /** 本次同步开始时间（仅 running） */
   activeStartedAt?: number | null;
   stale: boolean;
+  /** 定时计划视图（旧 daemon 不下发） */
+  schedule?: DataSourceScheduleView;
 }
 
 export interface DataSourceListResponse {
   ok: boolean;
   total: number;
+  schedulerDisabled?: boolean;
   sources: DataSourceListRow[];
-  missing: { scope: string; reason: string }[];
+  missing: { scope: string; reason: string; schedule?: DataSourceScheduleView }[];
   corrupt?: { scope: string; reason: string }[];
 }
 
@@ -805,6 +852,7 @@ export interface DataSourceDetailResponse {
   activeStartedAt?: number | null;
   /** 旧 daemon 缺省 → 页面隐藏同步入口并提示升级 */
   syncAvailability?: SyncAvailabilityView;
+  schedulerDisabled?: boolean;
   source: DataSourceRecordView;
 }
 
@@ -846,6 +894,17 @@ export async function syncDataSource(input: {
   });
 }
 
+/** 保存定时设置（唯一配置入口；baseRevision 用于多标签页乐观锁） */
+export async function saveDataSourceSchedule(input: {
+  scope: string;
+  schedule: DataSourceScheduleInput;
+}): Promise<DataSourceScheduleResponse> {
+  return req<DataSourceScheduleResponse>('/api/datasource/schedule', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 /** S-05：页面添加 Git URL 数据源（服务端 clone + 登记 + 自动入队首次同步） */
 export interface AddRemoteDataSourceResponse {
   ok: boolean;
@@ -874,6 +933,37 @@ export async function pruneDataSource(input: {
   selected: { group: string; relation: string }[];
 }): Promise<DataSourcePruneResponse> {
   return req<DataSourcePruneResponse>('/api/datasource/prune', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** 取消数据源登记的结果（不删库内文档） */
+export interface RemoveDataSourceResponse {
+  ok: boolean;
+  scope: string;
+  /** false = 读到之后、删除之前登记已被并发移除（按成功处理，不是失败） */
+  removed: boolean;
+  /** 托管 clone 根目录（仅要求 purge 且为托管源时返回） */
+  managedCloneDir?: string;
+  cloneRemoved?: boolean;
+  /** 其他 scope 仍在复用该 clone，已跳过删除 */
+  cloneRemoveSkipped?: boolean;
+  cloneRemoveReason?: string;
+  cloneRemoveError?: string;
+}
+
+/**
+ * 移除数据源登记（等价 CLI `ki datasource remove`），**不删库内文档**。
+ * - `purge`：一并删除服务端托管的 clone 目录（受引用计数保护）
+ * - `force`：仅用于不可解析的登记（CORRUPT / INVALID）——坏文件解析不了，这是唯一出口
+ */
+export async function removeDataSource(input: {
+  scope: string;
+  purge?: boolean;
+  force?: boolean;
+}): Promise<RemoveDataSourceResponse> {
+  return req<RemoveDataSourceResponse>('/api/datasource/remove', {
     method: 'POST',
     body: JSON.stringify(input),
   });

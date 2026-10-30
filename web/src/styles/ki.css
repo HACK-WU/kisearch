@@ -797,6 +797,10 @@ a:hover { text-decoration: underline; }
 /* 通过态角标（总览「向量维度」= 集合与配置一致，REQ-20261016-002）；与 .ki-badge--tag 同款成功色调 */
 .ki-badge--ok { background: color-mix(in srgb, var(--ki-color-success) 10%, transparent); color: var(--ki-color-success); }
 .ki-badge--fts { background: color-mix(in srgb, var(--ki-color-warning, #d97706) 10%, transparent); color: var(--ki-color-warning, #b45309); }
+/* 只读 scope 角标（REQ-20261029-001）：保护态用警示色系，**不用红色**（红色语义是错误） */
+.ki-badge--readonly { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+/* 选择器内的只读后缀：纯文本、弱化色，不新增图标 */
+.ki-scope-picker__ro { font-size: 11px; color: var(--ki-color-warning); margin-left: 6px; }
 .ki-badge-group { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .ki-num { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); }
@@ -905,6 +909,8 @@ a:hover { text-decoration: underline; }
 .ki-form-input--error, .ki-form-textarea--error { border-color: var(--ki-color-danger); }
 .ki-form-error { font-size: var(--ki-font-size-xs); color: var(--ki-color-danger); margin-top: 4px; }
 .ki-form-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-top: 4px; }
+/* 向量能力不可用的就地说明（windows 4e9d624 的 .ki-vector-status-hint，合并 66c3c19 时随 ki.css 丢失，2026-10-29 接回） */
+.ki-vector-status-hint { color: var(--ki-color-warning); }
 .ki-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .ki-checkbox-label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); font-weight: 500; cursor: pointer; }
 
@@ -5455,19 +5461,30 @@ select.ki-chat-cfg__ta--select {
 /* 宽屏按比例分配：源目录不再吃掉全部剩余宽度（1685px 下 523px → 340px），
    避免「源目录」与「落点 Group」之间出现大片空白。 */
 .ki-ds-table__head th:nth-child(1) { width: 15%; }
-.ki-ds-table__head th:nth-child(2) { width: 6%; }
-.ki-ds-table__head th:nth-child(3) { width: 24%; }
-.ki-ds-table__head th:nth-child(4) { width: 15%; }
+/* 类型列 6% → 9.5%（2026-10-29）：要能同排放「目录/Git」+「定时」两个徽标。
+   实测 8.5% 在「Git + 定时⚠」最宽组合下仍折行，故给到 9.5%。
+   ★ 操作列因新增「移除」按钮需要更多宽度（见下方 nth-child(8)），这部分从
+   「源目录」18.5% → 16% 与「落点」15% → 14.5% 借出；八列合计仍是 100%。 */
+.ki-ds-table__head th:nth-child(2) { width: 9.5%; }
+.ki-ds-table__head th:nth-child(3) { width: 16%; }
+.ki-ds-table__head th:nth-child(4) { width: 14.5%; }
 .ki-ds-table__head th:nth-child(5) { width: 16%; white-space: nowrap; }
-.ki-ds-table__head th:nth-child(6) { width: 9%; }
+.ki-ds-table__head th:nth-child(6) { width: 8%; }
 .ki-ds-table__head th:nth-child(7) { width: 6%; }
-.ki-ds-table__head th:nth-child(8) { width: 9%; text-align: center; }
+/* 操作列 9% → 15%（2026-10-29）：合并后是「同步 + 定时 + 移除」三个小按钮，
+   实测 52 + 6 + 46 + 6 + 46 ≈ 156px。上游只排「同步 + 定时」时的 11%（1170px 表格下 129px）
+   已不够；15% 在 1170px 下约 175px，是三者并排的最小档。 */
+.ki-ds-table__head th:nth-child(8) { width: 15%; text-align: center; }
 .ki-ds-table__row { cursor: pointer; }
 .ki-ds-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
   text-align: left; vertical-align: middle;
 }
 .ki-ds-table__row td:nth-child(5) { white-space: nowrap; }
+/* 类型徽标与定时徽标必须同行（2026-10-29）：列宽已在 nth-child(2) 按最宽组合
+   「Git + 定时⚠」留足；这里禁止折行兜底 —— 一旦折行，「定时」会被读成另一个字段，
+   而非「这个源开了定时」。宽度再不够时宁可溢出，也不要掉到第二行。 */
+.ki-ds-table__row td.ki-ds-col--type { white-space: nowrap; }
 .ki-ds-table__row:last-child td { border-bottom: 0; }
 .ki-ds-table__row:hover { background: var(--ki-color-bg-secondary); }
 .ki-ds-table__row:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
@@ -5490,6 +5507,149 @@ select.ki-chat-cfg__ta--select {
 .ki-ds-table__head th.ki-ds-col--actions { text-align: center; }
 .ki-ds-table__row td.ki-ds-table__actions { text-align: center; }
 .ki-ds-sync-btn { min-width: 52px; }
+/* 行内操作组（2026-10-29）：td 保持 table-cell，按钮排布交给内部 flex */
+.ki-ds-row-actions { display: flex; align-items: center; justify-content: center; gap: 6px; }
+/* 移除数据源登记：破坏性但非主操作 —— 走次要按钮底，仅文字/悬停用 danger 色，
+   避免整行被实心红按钮抢焦点（实心危险色留给确认框里的「确认移除」） */
+.ki-ds-remove-btn { color: var(--ki-color-danger-ink); white-space: nowrap; }
+.ki-ds-remove-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ki-color-danger) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ki-color-danger) 40%, transparent);
+}
+/* 损坏登记提示行：文案 + 移除按钮，窄屏换行不挤压 */
+.ki-ds-notice--action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* 提示行的「程序化焦点落点」：不画焦点环（它是结果提示，不是可操作控件） */
+.ki-ds-notice--focus:focus, .ki-ds-notice--focus:focus-visible { outline: none; }
+/* 移除确认弹窗（2026-10-29 改版）：danger 顶条 + 三块分组卡片，规格见
+   docs/ui-design/datasource-remove-dialog.md。原「5 行平铺键值 + 单个黄块」已废弃，
+   不要再改回 .ki-ds-remove__grid/row/label/value/keep/note 那套结构。
+   ★ 宽度与限高只挂在本专属类上 —— .ki-dialog--form 是其它表单弹窗共用的全局类，
+     且它把 .ki-dialog 的 max-height 覆盖成 none，直接复用会让矮视口点不到按钮。 */
+.ki-ds-remove { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
+.ki-ds-remove:focus { outline: none; }
+/* 危险的唯一色块：3px 顶条（其余靠分组与图标表达，不用整块红底） */
+.ki-ds-remove__bar {
+  flex: none; height: 3px; background: var(--ki-color-danger);
+  border-radius: var(--ki-radius-md) var(--ki-radius-md) 0 0;
+}
+/* 头部：圆形 ! + 标题 + 副标题同组，关闭按钮顶对齐 */
+.ki-ds-remove .ki-dialog__head { align-items: flex-start; gap: 10px; padding: 13px 18px 12px; }
+.ki-ds-remove__heading { display: flex; gap: 10px; min-width: 0; }
+.ki-ds-remove__mark {
+  flex: none; display: grid; place-items: center;
+  width: 20px; height: 20px; margin-top: 1px;
+  border-radius: var(--ki-radius-track);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-size: 12px; font-weight: 700; line-height: 1;
+}
+.ki-ds-remove__heading-text { min-width: 0; }
+.ki-ds-remove .ki-dialog__title { font-size: var(--ki-font-size-lg); font-weight: 650; }
+.ki-ds-remove__sub { margin: 2px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove .ki-dialog__close { margin-top: -2px; }
+/* 正文：滚动容器 + 三块分组（滚动条与其它容器同口径，否则内容被裁时看不出还能滚） */
+.ki-ds-remove .ki-dialog__body {
+  display: flex; flex-direction: column; gap: 10px;
+  min-height: 0; overflow-y: auto; padding: 12px 18px 14px;
+  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-ds-remove__card {
+  padding: 11px 13px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+/* 分组标题：3px 竖条 + 小字（与 .ki-detail-sec__head 的 mark 同口径） */
+.ki-ds-remove__card-title {
+  display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+  font-size: var(--ki-font-size-xs); font-weight: 640; letter-spacing: .04em;
+  color: var(--ki-color-text-subtle);
+}
+.ki-ds-remove__card-title::before {
+  content: ""; flex: none; width: 3px; height: 11px; border-radius: 2px;
+  background: var(--ki-color-border-strong);
+}
+.ki-ds-remove__ident { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ki-ds-remove__scope {
+  font-family: var(--ki-font-mono); font-size: 13px; font-weight: 650;
+  color: var(--ki-color-text); overflow-wrap: anywhere;
+}
+.ki-ds-remove__managed { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+.ki-ds-remove__managed--danger { color: var(--ki-color-danger-ink); }
+/* 灰卡上类型徽标改白底描边：列表里的 12% 混色在 bg-secondary 上与卡底同色，看不出边界 */
+.ki-ds-remove__card .ki-ds-type-badge { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); }
+.ki-ds-remove__card .ki-ds-type-badge--git { border-color: color-mix(in srgb, var(--ki-color-primary) 28%, transparent); }
+/* 次级键值：标签 60px，路径单行截断 + title 保全文 */
+.ki-ds-remove__kv {
+  display: grid; grid-template-columns: 60px minmax(0, 1fr);
+  gap: 4px 10px; align-items: baseline; margin: 8px 0 0;
+  font-size: var(--ki-font-size-sm);
+}
+.ki-ds-remove__kv dt { color: var(--ki-color-text-subtle); }
+.ki-ds-remove__kv dd { margin: 0; min-width: 0; color: var(--ki-color-text); }
+.ki-ds-remove__v--mono {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-ds-remove__v--num { font-variant-numeric: tabular-nums; }
+/* 影响行：保留 / 丢失分语气，取代原来"一整块黄底装两件事" */
+.ki-ds-remove__facts { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ki-ds-remove__fact {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 9px; border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-sm); line-height: 1.55;
+}
+.ki-ds-remove__fact-icon {
+  flex: none; display: grid; place-items: center;
+  width: 15px; height: 15px; margin-top: 1px;
+  border-radius: var(--ki-radius-track);
+  font-size: 10px; font-weight: 700; line-height: 1;
+}
+.ki-ds-remove__fact--keep { background: color-mix(in srgb, var(--ki-color-success) 10%, var(--ki-color-surface)); color: var(--ki-color-text); }
+.ki-ds-remove__fact--keep .ki-ds-remove__fact-icon { background: color-mix(in srgb, var(--ki-color-success) 22%, transparent); color: var(--ki-color-success); }
+.ki-ds-remove__fact--keep b { color: var(--ki-color-success); font-weight: 700; font-variant-numeric: tabular-nums; }
+.ki-ds-remove__fact--lose { background: var(--ki-color-warning-soft); color: var(--ki-color-warning); }
+.ki-ds-remove__fact--lose .ki-ds-remove__fact-icon { background: color-mix(in srgb, var(--ki-color-warning) 18%, transparent); color: var(--ki-color-warning); }
+/* 后续动作：不再占一行强调色，降为引导 */
+.ki-ds-remove__guide { margin: 8px 0 0; padding-left: 23px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__guide::before { content: "→ "; }
+/* 附加操作：勾选项 + 缩进说明 + 勾选后展开的删除路径 */
+.ki-ds-remove__check { display: flex; align-items: flex-start; gap: 8px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); cursor: pointer; }
+.ki-ds-remove__check input { flex: none; margin: 2px 0 0; accent-color: var(--ki-color-primary); }
+.ki-ds-remove__check input:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; }
+.ki-ds-remove__check-sub { display: block; margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__path {
+  margin: 8px 0 0 22px; padding: 6px 9px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  line-height: 1.5; overflow-wrap: anywhere;
+}
+.ki-ds-remove__path-key { font-family: var(--ki-font-family); font-weight: 650; margin-right: 4px; }
+/* 底栏：左侧不可撤销提示（原来整块空着）+ 右侧按钮 */
+.ki-ds-remove__foot { align-items: center; gap: 10px; padding: 13px 18px; }
+.ki-ds-remove__foot-note { margin: 0 auto 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-remove__foot-note--strong { color: var(--ki-color-danger-ink); font-weight: 600; }
+.ki-ds-remove__actions { display: flex; gap: 8px; }
+.ki-ds-remove__error {
+  margin: 0; padding: 8px 10px;
+  border: 1px solid var(--ki-color-danger); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-size: var(--ki-font-size-sm);
+}
+/* 窄屏：键值改单列堆叠，底栏提示换到按钮上方
+   ★ 不要写 max-height:100% —— 父级 overlay 是 flex + 高度 auto，100% 解析成 none，
+     会抹掉上面的 calc(100vh - 24px) 限高，矮视口下弹窗顶出屏幕且按钮点不到。 */
+@media (max-width: 640px) {
+  /* 不要再写 width:100% —— 基础规则是 min(560px, calc(100vw - 24px))，100% 会让
+     窄屏弹窗左右贴边（全站其它弹窗都留边距）。左右边距交给基础规则即可。 */
+  .ki-ds-remove .ki-dialog__head { padding: 12px 14px 10px; }
+  .ki-ds-remove .ki-dialog__body { padding: 10px 14px 12px; }
+  .ki-ds-remove__kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ki-ds-remove__kv dt { font-size: var(--ki-font-size-xs); }
+  .ki-ds-remove__foot { flex-wrap: wrap; padding: 12px 14px; }
+  .ki-ds-remove__foot-note { flex: 1 1 100%; margin: 0 0 2px; }
+  .ki-ds-remove__actions { width: 100%; }
+  .ki-ds-remove__actions .ki-btn { flex: 1 1 auto; }
+}
 .ki-ds-table__dir,
 .ki-ds-table__group {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -5893,7 +6053,9 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-table__head th:nth-child(1) { width: 190px; }
   .ki-ds-table__head th:nth-child(3) { width: auto; }
   .ki-ds-table__head th:nth-child(6) { width: 96px; }
-  .ki-ds-table__head th:nth-child(8) { width: 96px; }
+  /* 96 → 130：此断点隐藏了 4 列、空间充裕，96px 扣 padding 只剩 72px，
+     「同步 / 定时」必然堆成两行；130px 才有 106px 可用宽（需 104px）。 */
+  .ki-ds-table__head th:nth-child(8) { width: 130px; }
 }
 @media (max-width: 960px) {
   .ki-detail { width: 100vw; }
@@ -7090,4 +7252,131 @@ select.ki-chat-cfg__ta--select {
   .res-nav__body { gap: 5px; padding: 8px; }
   .res-nav__item { padding: 5px 8px; font-size: 12px; }
   .res-nav__grouplabel { font-size: 10px; padding-bottom: 4px; }
+}
+
+/* ── 数据源定时同步（REQ-20261029-001） ───────────────── */
+.ki-ds-sched-badge {
+  /* padding 6 → 5：与类型徽标同排时要省出几像素（最宽态是「Git + 定时⚠」） */
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 999px;
+  font-size: var(--ki-font-size-xs); line-height: 18px; font-weight: 600;
+  color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  white-space: nowrap; vertical-align: middle;
+}
+.ki-ds-sched-badge--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-ds-sched-next { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); white-space: nowrap; }
+.ki-ds-sched-next--warn { color: var(--ki-color-warning); }
+.ki-ds-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ki-ds-missing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ki-task-source-badge--scheduler { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+
+/* 弹窗 520 → 560（2026-10-29）：88px 标签列 + 控件后剩余宽度才够放
+   120/110 的间隔控件与 250 的时间控件，不再被挤成 96px 小框。
+   ★ 同时必须自己限高：本次新增「设置区卡片 + 两列元信息」让弹窗在 375 宽下从
+   549px 涨到 638px，而 `.ki-dialog--form` 是 `max-height: none; overflow: visible`
+   —— 矮视口（375×600）下弹窗顶端被顶出屏幕、且无法滚动，保存按钮点不到。
+   限高后由 body 滚动、head/foot 固定。 */
+.ki-ds-sched-dialog { width: min(560px, 92vw); max-width: 92vw; max-height: calc(100vh - 24px); overflow: hidden; }
+/* 滚动条与项目其它滚动容器同口径（细条、随主题），否则内容被裁时看不出还能滚 */
+.ki-ds-sched-dialog .ki-dialog__body {
+  min-height: 0; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--ki-color-scrollbar) transparent;
+}
+.ki-ds-sched-sub { margin: 4px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: center; margin-top: 12px; }
+.ki-ds-sched-label { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-ds-sched-control { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.ki-ds-sched-hint { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-inline { gap: 8px; }
+.ki-ds-sched-number { width: 120px; }
+.ki-ds-sched-unit { width: 110px; }
+.ki-ds-sched-datetime { width: 250px; max-width: 100%; }
+/* 日历按钮的热区只有图标本身（约 12px），补 padding 放大可点范围 */
+.ki-ds-sched-datetime::-webkit-calendar-picker-indicator { cursor: pointer; padding: 6px; margin-right: -6px; }
+
+/* 模式 / 重复：原生 radio / checkbox → 分段控件
+   （热区 51×18 → 96×34；沿用全站 `.ki-segmented` 的「浅底胶囊 + 选中白底」视觉） */
+.ki-ds-sched-seg {
+  display: inline-flex; gap: 2px; padding: 3px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-sched-seg button {
+  min-width: 96px; min-height: 34px; padding: 0 20px;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--ki-color-text-muted); font-family: var(--ki-font-family);
+  font-size: var(--ki-font-size-md); cursor: pointer;
+  transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
+}
+.ki-ds-sched-seg button:hover { color: var(--ki-color-text); }
+.ki-ds-sched-seg button:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-ds-sched-seg button[aria-pressed="true"] {
+  background: var(--ki-color-surface); color: var(--ki-color-primary);
+  font-weight: 650; box-shadow: var(--ki-shadow-1);
+}
+
+/* 设置区卡片：把「开关 / 要配置的项 / 只读信息」三层分开，别挤成一列 */
+.ki-ds-sched-panel {
+  margin-top: 14px; padding: 14px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+}
+.ki-ds-sched-panel__title {
+  display: block; font-size: var(--ki-font-size-xs); font-weight: 600;
+  letter-spacing: .04em; color: var(--ki-color-text-subtle);
+}
+.ki-ds-sched-panel__title + .ki-ds-sched-row { margin-top: 10px; }
+/* 卡片底色本身偏灰：输入框回到 surface，否则与卡片只差几个灰阶、看不出边界。
+   ★ 必须用 background-color —— 用 background 简写会把 .ki-form-select 的箭头
+   background-image 一起清掉，下拉框会退化成纯文本框。 */
+.ki-ds-sched-panel .ki-form-input,
+.ki-ds-sched-panel .ki-form-select { background-color: var(--ki-color-surface); }
+
+/* 字段下方说明：默认引导语气（灰）；只有「填了但不合法」才转告警色，
+   避免一切到「指定时间」就跳红字（2026-10-29） */
+.ki-ds-sched-tip { margin: 8px 0 0 98px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-tip--warn { color: var(--ki-color-warning); }
+
+.ki-ds-sched-error { margin: 8px 0 0; font-size: var(--ki-font-size-xs); color: var(--ki-color-danger-ink); }
+.ki-ds-sched-warn { margin-bottom: 4px; padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-warning-soft); color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
+.ki-ds-sched-warn-line { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
+
+/* 只读元信息：两列小卡片（原「单块两行 + `> div` 横排」结构已随改版移除） */
+.ki-ds-sched-meta { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ki-ds-sched-meta__card { padding: 10px 12px; border-radius: var(--ki-radius-sm); background: var(--ki-color-bg-secondary); }
+.ki-ds-sched-meta__label { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-ds-sched-meta__value {
+  display: block; margin-top: 2px; font-size: var(--ki-font-size-md); font-weight: 600;
+  color: var(--ki-color-text); white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.ki-ds-sched-meta .ki-ds-sched-warn-line { grid-column: 1 / -1; }
+
+/* 关闭态：既然没有下次运行，就别摆一张「下次运行 —」的空卡 */
+.ki-ds-sched-offnote {
+  margin: 14px 0 0; padding: 10px 12px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary); color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+}
+
+.ki-ds-sched-footer { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+.ki-ds-sched-discard { margin-right: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
+@media (max-width: 640px) {
+  .ki-ds-sched-row { grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: start; }
+  .ki-ds-sched-dialog { width: 100%; max-width: 100%; }
+  .ki-ds-sched-footer { flex-wrap: wrap; }
+  .ki-ds-sched-footer .ki-btn { flex: 1 1 auto; }
+  .ki-ds-sched-datetime, .ki-ds-sched-number, .ki-ds-sched-unit { width: 100%; }
+  .ki-ds-sched-inline { flex-direction: column; align-items: stretch; }
+  .ki-ds-sched-tip { margin-left: 0; }
+  .ki-ds-sched-meta { grid-template-columns: minmax(0, 1fr); }
+  .ki-ds-sched-seg { width: 100%; }
+  .ki-ds-sched-seg button { flex: 1 1 auto; min-width: 0; }
+  .ki-ds-missing-row { flex-direction: column; align-items: flex-start; }
+}
+
+/* 窄屏（≤1399）类型/上次同步列会隐藏：把定时徽标与下次运行下沉到 Scope 列 */
+.ki-ds-sched-badge--compact,
+.ki-ds-sched-next--compact { display: none; }
+@media (max-width: 1399px) {
+  .ki-ds-sched-badge--compact { display: inline-block; }
+  .ki-ds-sched-next--compact { display: block; }
 }

@@ -26,6 +26,7 @@ import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
 import { getSharedOperationCoordinator, kindForMcpToolNames, GLOBAL_SCOPE } from './operation-coordinator.js';
+import { getDataSourceSchedulerState } from './datasource-scheduler.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
@@ -587,6 +588,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         ...(identityDrift !== undefined ? { identityDrift } : {}),
         ...(configError !== undefined ? { configError } : {}),
         queue: getSharedOperationCoordinator().snapshot(),
+        datasourceScheduler: getDataSourceSchedulerState(),
         vectorResources: getVectorResourceMetrics(),
         vectorization: getVectorizationMetrics(),
         // S0-4（REQ-20260930-002）：进程资源证据——导入成功输出后 CPU/内存仍高时，

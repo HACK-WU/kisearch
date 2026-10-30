@@ -93,7 +93,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   search            语义检索知识库内容
   store             存储文本到向量索引
   bulk-store        批量存储文本到向量索引
-  scope             scope 管理：list / delete / clear（KB + 向量两层）
+  scope             scope 管理：list / readonly / delete / clear（KB + 向量两层）
   doc               向量文档管理：list / delete
   tag               向量 tag 发现：list（只读，含文档数）
   config            配置管理：init（生成 YAML）

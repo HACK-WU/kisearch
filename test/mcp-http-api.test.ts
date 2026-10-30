@@ -486,6 +486,191 @@ describe('/api/datasource/sync', () => {
   });
 });
 
+describe('/api/datasource/remove', () => {
+  function makeScope(): string {
+    return `api_ds_remove_${crypto.randomUUID().slice(0, 8)}`;
+  }
+
+  function datasourceFile(scope: string): string {
+    return path.join(getKbDir(scope), 'datasource.json');
+  }
+
+  function writeDatasource(scope: string, dir: string): void {
+    const file = datasourceFile(scope);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      scope,
+      dir,
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: null,
+    }));
+  }
+
+  async function postRemove(body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+    const res = await fetch(`${handle!.base}/api/datasource/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  }
+
+  it('缺少 scope → 400', async () => {
+    const { status, body } = await postRemove({});
+    assert.equal(status, 400);
+    assert.equal(body.code, 'DATASOURCE_REMOVE_MISSING_SCOPE');
+  });
+
+  it('未登记 → 404 DATASOURCE_NOT_FOUND', async () => {
+    const { status, body } = await postRemove({ scope: makeScope() });
+    assert.equal(status, 404);
+    assert.equal(body.code, 'DATASOURCE_NOT_FOUND');
+  });
+
+  it('200：只删登记文件，group-index 与源目录不受影响', async () => {
+    const scope = makeScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-remove-src-'));
+    writeDatasource(scope, dir);
+    const groupIndex = path.join(getKbDir(scope), 'group-index.json');
+    fs.writeFileSync(groupIndex, JSON.stringify({ version: 1, groups: [], source: { dir } }));
+    try {
+      const { status, body } = await postRemove({ scope, purge: true });
+      assert.equal(status, 200);
+      assert.equal(body.ok, true);
+      assert.equal(body.removed, true);
+      // 非托管源：purge 不适用于 clone，不得报错也不得回 cloneRemoved
+      assert.equal(body.cloneRemoved, undefined);
+      assert.equal(fs.existsSync(datasourceFile(scope)), false);
+      assert.equal(fs.existsSync(groupIndex), true, 'group-index 的 source 块不随登记删除');
+      assert.equal(fs.existsSync(dir), true, '源目录不得被删除');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('同步进行中 → 409 DATASOURCE_BUSY（不删登记）', async () => {
+    const scope = makeScope();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-remove-busy-'));
+    writeDatasource(scope, dir);
+    const reporter = createTaskReporter(loadConfig(), {
+      id: crypto.randomUUID(),
+      source: 'cli',
+      operation: 'datasource-sync',
+      scope,
+    });
+    reporter.update({ state: 'running', startedAt: Date.now() });
+    try {
+      const { status, body } = await postRemove({ scope });
+      assert.equal(status, 409);
+      assert.equal(body.code, 'DATASOURCE_BUSY');
+      assert.equal(fs.existsSync(datasourceFile(scope)), true);
+    } finally {
+      reporter.finish('succeeded');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** 托管 git 登记：repoRoot 必须落在 <cloneRoot>/<owner>/repo，否则 managedCloneDirOf 推导不出目录 */
+  function writeManagedGitDatasource(scope: string, owner: string): string {
+    const repoRoot = path.join(tmpHome, 'datasources', owner, 'repo');
+    fs.mkdirSync(repoRoot, { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, 'a.md'), '# a\n');
+    const file = datasourceFile(scope);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      version: 2,
+      scope,
+      type: 'git',
+      dir: repoRoot,
+      git: { repoRoot, relativeRoot: '', branch: 'main', remoteUrl: 'https://example.com/x.git', managed: true, remoteBranch: 'main' },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: null,
+    }));
+    return repoRoot;
+  }
+
+  it('purge：托管 clone 目录随登记一并删除', async () => {
+    const scope = makeScope();
+    const repoRoot = writeManagedGitDatasource(scope, scope);
+    const cloneDir = path.dirname(repoRoot);
+    const { status, body } = await postRemove({ scope, purge: true });
+    assert.equal(status, 200);
+    assert.equal(body.removed, true);
+    assert.equal(body.cloneRemoved, true);
+    assert.equal(fs.existsSync(cloneDir), false);
+    assert.equal(fs.existsSync(datasourceFile(scope)), false);
+    // 源目录概念上就是 clone 目录，已被删；父级 cloneRoot 必须保留
+    assert.equal(fs.existsSync(path.join(tmpHome, 'datasources')), true);
+  });
+
+  it('purge：其他 scope 仍复用同一 clone → 保留目录并回报原因', async () => {
+    const owner = makeScope();
+    const scopeA = makeScope();
+    const scopeB = makeScope();
+    const repoRoot = writeManagedGitDatasource(scopeA, owner);
+    // B 复用 A 的托管目录（CLI 支持 shared clone）：repoRoot 相同、scope 不同
+    const fileB = datasourceFile(scopeB);
+    fs.mkdirSync(path.dirname(fileB), { recursive: true });
+    fs.writeFileSync(fileB, JSON.stringify({
+      version: 2,
+      scope: scopeB,
+      type: 'git',
+      dir: repoRoot,
+      git: { repoRoot, relativeRoot: '', branch: 'main', remoteUrl: 'https://example.com/x.git', managed: true, remoteBranch: 'main' },
+      group: null,
+      conflictMode: 'incremental',
+      conflictSuffix: '_{n}',
+      vector: false,
+      chunkSize: null,
+      chunkOverlap: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastSync: null,
+    }));
+    try {
+      const { status, body } = await postRemove({ scope: scopeA, purge: true });
+      assert.equal(status, 200);
+      assert.equal(body.cloneRemoved, false);
+      assert.equal(body.cloneRemoveSkipped, true);
+      assert.match(String(body.cloneRemoveReason), /其他 1 个 scope/);
+      assert.equal(fs.existsSync(path.dirname(repoRoot)), true, '被复用的 clone 目录不得删除');
+    } finally {
+      fs.rmSync(path.dirname(repoRoot), { recursive: true, force: true });
+    }
+  });
+
+  it('登记损坏：默认 400，带 force 才移除（页面唯一清理出口）', async () => {
+    const scope = makeScope();
+    const file = datasourceFile(scope);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{ "version": 1, ');
+    const first = await postRemove({ scope });
+    assert.equal(first.status, 400);
+    assert.equal(first.body.code, 'CORRUPT');
+    assert.equal(fs.existsSync(file), true, '未显式 force 时不得删掉坏登记');
+
+    const forced = await postRemove({ scope, force: true });
+    assert.equal(forced.status, 200);
+    assert.equal(forced.body.removed, true);
+    assert.equal(fs.existsSync(file), false);
+  });
+});
+
 describe('/api/datasource/add-remote', () => {
   const cloneRoot = path.join(tmpHome, 'datasources');
 

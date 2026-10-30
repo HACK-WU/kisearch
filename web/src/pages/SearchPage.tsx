@@ -9,7 +9,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
 import { fetchTags, getSearchConfig } from '@/api/httpApi';
-import { useDocList } from '@/lib/hooks';
+import { useDocList, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupTreePanel, type DirectoryScrollPosition } from '@/components/GroupTreePanel';
 import { ChatToggleButton } from '@/chat/ChatToggleButton';
@@ -135,6 +135,19 @@ export function SearchPage(): JSX.Element {
   const queryTimeoutTouched = useRef(false);
   const [limit, setLimit] = useState('10');
   const [fullTextOnly, setFullTextOnly] = useState(false);
+  /**
+   * 向量能力可用性（windows 4e9d624 的能力，合并 66c3c19 时随 hooks.ts 丢失，2026-10-29 接回）：
+   * 不可用时**强制全文**，阈值 / 超时等只在混合检索下生效的控件一并置灰 —— 否则是"能调但不生效"。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
+  /**
+   * 生效模式 = 用户手选全文 **或** 向量不可用。
+   * ★ 派生而非覆盖 state：探测恢复后自动回到用户原来的选择（`fullTextOnly` 未被改写）。
+   * ★ 不得用它替换 `decideDocHighlight` 的入参：那里的判据是**结果属性**（resultMode /
+   *   degradeReason），与"当前选择"不同语义（见下方原注释）。
+   */
+  const effectiveFullTextOnly = fullTextOnly || !vectorAvailable;
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<Result[] | null>(null);
   /** 与当前结果绑定的查询词/模式；输入框清空或修改后，结果仍保持原查询的高亮口径。 */
@@ -303,7 +316,12 @@ export function SearchPage(): JSX.Element {
   const run = async (modeOverride?: 'fulltext', replay?: SearchHistoryEntry): Promise<void> => {
     const searchQuery = replay?.query ?? query.trim();
     if (!searchQuery) return;
-    const searchMode = replay?.mode ?? modeOverride ?? (fullTextOnly ? 'fulltext' : 'hybrid');
+    /**
+     * ★ 把 `effectiveFullTextOnly` 放在**最外层**：历史重放（`replay.mode`）是用户过去的意图，
+     *   向量不可用时继续按 hybrid 发请求只会必然失败/降级 —— 强制走全文比"照旧撞墙"好。
+     *   可用时行为与改动前完全一致（replay.mode > modeOverride > 手选开关）。
+     */
+    const searchMode = effectiveFullTextOnly ? 'fulltext' : (replay?.mode ?? modeOverride ?? 'hybrid');
     const searchScope = scope;
     const historyTags = replay?.selectedTags ?? selectedTags;
     const searchThreshold = replay?.threshold ?? threshold;
@@ -425,7 +443,8 @@ export function SearchPage(): JSX.Element {
     <>
       <div className="ki-page-head">
         <div>
-          <p>向量 + BM25 混合检索 · 原文内容 + Group 路径</p>
+          {/* 向量不可用时实际只走全文，页头说明必须跟着变，否则与降级后的行为自相矛盾 */}
+          <p>{vectorAvailable ? '向量 + BM25 混合检索 · 原文内容 + Group 路径' : '全文检索（BM25）· 原文内容 + Group 路径'}</p>
         </div>
       </div>
 
@@ -460,14 +479,30 @@ export function SearchPage(): JSX.Element {
             清空
           </button>
           <div className="ki-segmented ki-search-mode" role="group" aria-label="检索模式">
-            <button type="button" aria-pressed={!fullTextOnly} onClick={() => setFullTextOnly(false)}>混合</button>
-            <button type="button" aria-pressed={fullTextOnly} onClick={() => setFullTextOnly(true)}>全文</button>
+            <button
+              type="button"
+              aria-pressed={!effectiveFullTextOnly}
+              disabled={!vectorAvailable}
+              title={vectorAvailable ? undefined : vectorAvailabilityHint(vectorAvailability)}
+              onClick={() => setFullTextOnly(false)}
+            >
+              混合
+            </button>
+            <button type="button" aria-pressed={effectiveFullTextOnly} onClick={() => setFullTextOnly(true)}>全文</button>
           </div>
           <button className="ki-btn ki-btn--primary" style={{ padding: '0 24px' }} disabled={loading || !query.trim()}>
             {loading ? '搜索中…' : '搜索'}
           </button>
         </div>
         <div className="ki-query-options">
+          {/* 向量不可用时的就地说明（整行，避免挤压模式按钮与搜索按钮的排布） */}
+          {!vectorAvailable && (
+            <div className="ki-query-option" style={{ flex: '1 0 100%' }}>
+              <span className="ki-form-hint ki-vector-status-hint" role="status" aria-live="polite">
+                {vectorAvailabilityHint(vectorAvailability)}
+              </span>
+            </div>
+          )}
           <div className="ki-query-option" style={{ flex: '1 0 100%' }}>
             <span className="ki-form-label" style={{ marginRight: 8 }}>Tags</span>
             <div className="ki-tag-select">
@@ -497,14 +532,14 @@ export function SearchPage(): JSX.Element {
               max={THRESHOLD_MAX}
               step={THRESHOLD_STEP}
               value={threshold}
-              disabled={fullTextOnly}
+              disabled={effectiveFullTextOnly}
               onChange={(e) => setThreshold(Number(e.target.value))}
             />
             <button
               type="button"
               className="ki-step-btn"
               aria-label="降低阈值"
-              disabled={fullTextOnly || threshold <= 0}
+              disabled={effectiveFullTextOnly || threshold <= 0}
               onClick={() => setThreshold((v) => stepThreshold(v, -1))}
             >−</button>
             <span className="ki-threshold-val">{threshold.toFixed(3)}</span>
@@ -512,7 +547,7 @@ export function SearchPage(): JSX.Element {
               type="button"
               className="ki-step-btn"
               aria-label="提高阈值"
-              disabled={fullTextOnly || threshold >= THRESHOLD_MAX}
+              disabled={effectiveFullTextOnly || threshold >= THRESHOLD_MAX}
               onClick={() => setThreshold((v) => stepThreshold(v, 1))}
             >+</button>
           </div>
@@ -525,7 +560,7 @@ export function SearchPage(): JSX.Element {
               max={QUERY_TIMEOUT_MAX_SECONDS}
               step="any"
               value={queryTimeout ?? ''}
-              disabled={fullTextOnly}
+              disabled={effectiveFullTextOnly}
               placeholder={queryTimeoutStatus === 'loading' ? '读取中' : queryTimeoutStatus === 'error' ? '服务端默认' : '3'}
               onChange={(e) => {
                 queryTimeoutTouched.current = true;
@@ -605,7 +640,7 @@ export function SearchPage(): JSX.Element {
           <div>
             <div style={{ fontSize: 32, marginBottom: 8 }}>⌕</div>
             <h3>输入查询开始搜索</h3>
-            <p>混合检索当前 scope 的知识库内容，命中结果可定位原文。</p>
+            <p>{vectorAvailable ? '混合检索' : '全文检索'}当前 scope 的知识库内容，命中结果可定位原文。</p>
           </div>
         </div>
       )}
@@ -628,7 +663,7 @@ export function SearchPage(): JSX.Element {
                   请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>，完成后刷新页面再检索。全文检索仍可使用。
                 </p>
               )}
-              {!fullTextOnly && dimensionMismatch && (
+              {!effectiveFullTextOnly && dimensionMismatch && (
                 <div className="ki-empty__actions">
                   <button type="button" className="ki-btn ki-btn--primary ki-btn--small" onClick={() => { setFullTextOnly(true); void run('fulltext'); }}>
                     使用全文搜索重试

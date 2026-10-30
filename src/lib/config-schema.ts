@@ -234,6 +234,9 @@ const CONFIG_SCHEMA: ConfigNode = {
       },
     },
     scopeMode: { type: 'literal', values: ['default', 'strict'] },
+    // REQ-20261029-001：只读 scope 名单。**顶层节点**（不进 scopes）——
+    // 写进 scopes 条目会让 registered=true，strict 模式下等于把只读库加进检索白名单。
+    scopeReadonly: { type: 'stringArray' },
     scopes: {
       type: 'object',
       value: SCOPE_ENTRY,

@@ -22,7 +22,8 @@ import {
   shortRemote,
   type DataSourceListRow,
 } from '../src/lib/datasource-format.js';
-import type { DataSourceLastSync, DataSourceRecord } from '../src/lib/datasource-types.js';
+import type { DataSourceLastSync, DataSourceRecord, DataSourceSchedule } from '../src/lib/datasource-types.js';
+import { defaultDataSourceSchedule } from '../src/lib/datasource-schedule.js';
 
 function syncOf(over: Partial<DataSourceLastSync> = {}): DataSourceLastSync {
   return {
@@ -206,6 +207,33 @@ describe('buildDataSourceList', () => {
       { scope: 'y', record: recordOf({ scope: 'y', dir: '/tmp/y' }) },
     ]);
     assert.deepEqual(model.explicitGroups, [{ scope: 'x', group: 'wiki/API' }]);
+  });
+
+  it('定时计划：只收启用中的，关闭/缺字段都不进脚注（默认用户输出不变）', () => {
+    const now = new Date(2026, 9, 29, 10, 0).getTime();
+    const withSchedule = (scope: string, schedule: Partial<DataSourceSchedule> | undefined) => ({
+      scope,
+      record: recordOf({
+        scope,
+        dir: `/tmp/${scope}`,
+        ...(schedule === undefined ? {} : { schedule: { ...defaultDataSourceSchedule(), ...schedule } }),
+      }),
+    });
+    const off = buildDataSourceList([withSchedule('off', { enabled: false })], now);
+    assert.deepEqual(off.schedules, []);
+    const legacy = buildDataSourceList([{ scope: 'old', record: recordOf({ scope: 'old', dir: '/tmp/old' }) }], now);
+    assert.deepEqual(legacy.schedules, [], '缺 schedule 字段（旧记录/旧夹具）不得抛错');
+
+    const model = buildDataSourceList([
+      // 正常保存过的计划都带启用锚点（无锚点的旧记录见 datasource-schedule 的「待补跑」用例）
+      withSchedule('daily-x', { enabled: true, mode: 'interval', intervalValue: 2, intervalUnit: 'hour', enabledAt: now }),
+      withSchedule('off', { enabled: false }),
+      withSchedule('sick', { enabled: true, mode: 'interval', intervalValue: 30, intervalUnit: 'minute', enabledAt: now, consecutiveFailures: 3 }),
+    ], now);
+    assert.deepEqual(model.schedules, [
+      { scope: 'daily-x', text: '每2小时 · 下次 12:00', warn: false },
+      { scope: 'sick', text: '每30分钟 · 下次 10:30 · 连续失败 3 次', warn: true },
+    ]);
   });
 });
 

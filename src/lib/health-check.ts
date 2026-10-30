@@ -155,6 +155,9 @@ async function checkEmbedding(
 
   // 有效密钥：仅取配置 apiKey（明文 / ${ENV_VAR} 已解析）。
   // 不做隐式 env 回退：提供商由 baseURL 自由配置，固定厂商密钥变量不应跨厂商注入。
+  // ⚠️ 下面三个项名 + 上游的 'apiKey' 被前端 `web/src/lib/healthSummary.ts` 的
+  //    `VECTOR_HEALTH_CHECK_NAMES` 硬绑定（用于"仅向量不可用"的降级判定与三页面动作层保护）。
+  //    改这里的 name 必须同步改前端常量，否则前端会退化成"整体故障"并把向量功能误判为未知。
   const effectiveApiKey = emb.apiKey;
 
   // apiKey 缺失时无法发起请求；MCP 启动可降级提示，但 doctor/API 仍如实报失败。

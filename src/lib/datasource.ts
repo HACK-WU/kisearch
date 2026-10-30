@@ -39,6 +39,8 @@ import type {
   DataSourcePendingDelete,
   DataSourceRecord,
   DataSourceResultSnapshot,
+  DataSourceSchedule,
+  DataSourceScheduleInput,
   DataSourceStaleReason,
   DataSourceSyncMode,
   DataSourceSyncState,
@@ -47,6 +49,7 @@ import type {
 import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
 import { checkManagedSubdir, cloneManagedRepo, managedCloneDirForRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
+import { defaultDataSourceSchedule, intervalMinutes, normalizeDataSourceSchedule, parseAtLocal, validateScheduleInput } from './datasource-schedule.js';
 
 export const DATASOURCE_FILE = 'datasource.json';
 
@@ -257,6 +260,7 @@ function normalizeRecord(scope: string, raw: unknown): DataSourceRecord | null {
     chunkOverlap: typeof v.chunkOverlap === 'number' ? v.chunkOverlap : null,
     createdAt: typeof v.createdAt === 'number' ? v.createdAt : Date.now(),
     updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : Date.now(),
+    schedule: normalizeDataSourceSchedule(v.schedule),
     lastSync: normalizeLastSync(v.lastSync),
   };
 }
@@ -471,6 +475,7 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     chunkOverlap,
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
+    schedule: prev?.schedule ?? defaultDataSourceSchedule(),
     lastSync,
   };
   writeDataSource(scope, record);
@@ -494,8 +499,8 @@ export interface ReusableManagedClone {
   ownerScope: string;
 }
 
-/** 读取所有已登记记录（不做源目录可达性过滤；共享 clone/引用计数必须看到它们）。 */
-function listRegisteredDataSourceRecords(config: KiConfig): { scope: string; record: DataSourceRecord }[] {
+/** 读取所有已登记记录（不做源目录可达性过滤；共享 clone/引用计数/调度器必须看到它们）。 */
+export function listRegisteredDataSourceRecords(config: KiConfig): { scope: string; record: DataSourceRecord }[] {
   const out: { scope: string; record: DataSourceRecord }[] = [];
   let entries: fs.Dirent[] = [];
   try {
@@ -1637,6 +1642,163 @@ export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDa
       code: (err as NodeJS.ErrnoException & { code?: string }).code ?? 'SYNC_FAILED',
       error: (err as Error).message,
     };
+  }
+}
+
+// ─── 定时计划保存 / 运行态（S-01 / S-03）────────────────────
+
+export type SaveDataSourceScheduleResult =
+  | { ok: true; scope: string; record: DataSourceRecord; warnings: { code: string; message: string }[] }
+  | { ok: false; scope: string; code: string; error: string; field?: string; current?: DataSourceSchedule };
+
+/**
+ * 页面保存定时设置（唯一写入口）。
+ * 读改写全程在 scope 写锁内；`baseRevision` 用于多标签页乐观锁。
+ */
+export async function saveDataSourceSchedule(input: {
+  scope: string;
+  schedule: unknown;
+  config?: KiConfig;
+}): Promise<SaveDataSourceScheduleResult> {
+  const config = input.config ?? loadConfig();
+  let scope: string;
+  try {
+    scope = resolveScope(config, input.scope);
+  } catch (err) {
+    return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
+  }
+  const validation = validateScheduleInput(input.schedule);
+  if (!validation.ok) {
+    return { ok: false, scope, code: validation.code, error: validation.message, field: validation.field };
+  }
+  const warnings: { code: string; message: string }[] = [];
+  try {
+    return await withScopeWriteLock(scope, 'datasource-schedule', async (): Promise<SaveDataSourceScheduleResult> => {
+      const read = readDataSource(scope);
+      if (!read.ok) return { ok: false, scope, code: read.code, error: read.error };
+      const prev = read.record;
+      const value = validation.value;
+      if (value.baseRevision !== undefined && value.baseRevision !== prev.schedule.revision) {
+        return {
+          ok: false,
+          scope,
+          code: 'SCHEDULE_STALE',
+          error: '定时设置已在别处修改，请刷新后重试',
+          current: prev.schedule,
+        };
+      }
+      const atChanged = value.mode === 'at' && value.at !== prev.schedule.at;
+      /**
+       * 启用锚点：只在「关闭 → 开启」时写一次，之后改间隔沿用旧锚点
+       * （否则每次保存都把周期起点往后推，等于永不触发）；关闭时清空，再开重新等一个周期。
+       */
+      const enabledAt = !value.enabled
+        ? null
+        : prev.schedule.enabled === false || prev.schedule.enabledAt === null
+          ? Date.now()
+          : prev.schedule.enabledAt;
+      const schedule: DataSourceSchedule = {
+        ...prev.schedule,
+        enabled: value.enabled,
+        mode: value.mode,
+        intervalValue: value.intervalValue,
+        intervalUnit: value.intervalUnit,
+        at: value.at,
+        repeat: value.repeat,
+        revision: prev.schedule.revision + 1,
+        enabledAt,
+        ...(atChanged ? { lastAutoFor: null, lastAutoState: null } : {}),
+      };
+      if (schedule.enabled && schedule.mode === 'at' && schedule.repeat === 'once') {
+        const atMs = parseAtLocal(schedule.at);
+        if (atMs !== null && atMs <= Date.now()) {
+          warnings.push({ code: 'SCHEDULE_AT_IN_PAST', message: '执行时间已过，保存后将立即补跑一次' });
+        }
+      }
+      if (schedule.enabled && schedule.mode === 'interval' && prev.type === 'directory') {
+        const minutes = intervalMinutes(schedule.intervalValue, schedule.intervalUnit);
+        if (minutes !== null && minutes < 30) {
+          warnings.push({ code: 'SCHEDULE_DIRECTORY_HIGH_FREQ', message: '普通目录间隔小于 30 分钟会频繁全量扫描，请确认' });
+        }
+      }
+      const next: DataSourceRecord = { ...prev, schedule, updatedAt: Date.now() };
+      writeDataSource(scope, next);
+      return { ok: true, scope, record: next, warnings };
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException & { code?: string }).code ?? 'SCHEDULE_WRITE_FAILED';
+    return {
+      ok: false,
+      scope,
+      code,
+      error: code === 'SCOPE_OPERATION_BUSY'
+        ? '该知识库正在同步，完成后再修改定时设置'
+        : (err as Error).message,
+    };
+  }
+}
+
+export type ScheduleRunOutcome = 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'skipped';
+
+/**
+ * 写回一次调度结果（S-03 调用）。
+ * ★ 调用方必须已持有该 scope 写锁（调度器外层锁）；本函数不再取锁，
+ *   否则会与同步/保存形成二次锁等待。不修改 `updatedAt`。
+ */
+export function applyScheduleRunResult(scope: string, result: {
+  outcome: ScheduleRunOutcome;
+  reason?: string;
+  slot: number | null;
+  at: number;
+}): void {
+  const read = readDataSource(scope);
+  if (!read.ok) return;
+  const prev = read.record;
+  const schedule: DataSourceSchedule = { ...prev.schedule };
+  if (result.outcome === 'skipped') {
+    schedule.lastSkipReason = result.reason ?? 'skipped';
+    schedule.lastSkipAt = result.at;
+    writeDataSource(scope, { ...prev, schedule });
+    return;
+  }
+  schedule.lastAutoAt = result.at;
+  schedule.lastAutoState = result.outcome === 'succeeded'
+    ? 'ok'
+    : result.outcome === 'partial'
+      ? 'partial'
+      : result.outcome === 'failed'
+        ? 'failed'
+        : 'cancelled';
+  if (result.outcome !== 'cancelled') schedule.lastAutoFor = result.slot ?? schedule.lastAutoFor;
+  if (result.outcome === 'failed') schedule.consecutiveFailures += 1;
+  else if (result.outcome !== 'cancelled') schedule.consecutiveFailures = 0;
+  schedule.lastSkipReason = null;
+  schedule.lastSkipAt = null;
+  // 仅一次：非跳过完成即关闭（cancelled 留给下次补跑）
+  if (schedule.mode === 'at' && schedule.repeat === 'once' && result.outcome !== 'cancelled') {
+    schedule.enabled = false;
+    // 不变式：enabled=false ⇒ enabledAt=null（关闭的计划不留启用锚点，重新开启时由保存路径写新锚点）
+    schedule.enabledAt = null;
+  }
+  writeDataSource(scope, { ...prev, schedule });
+}
+
+/** 手动同步成功/部分成功后清零连续失败（best-effort；锁占用时返回 false，下次自动成功再清） */
+export async function resetScheduleFailures(scope: string): Promise<boolean> {
+  try {
+    return await withScopeWriteLock(scope, 'datasource-schedule-reset', async () => {
+      const read = readDataSource(scope);
+      if (!read.ok) return false;
+      const schedule = read.record.schedule;
+      if (schedule.consecutiveFailures === 0 && schedule.lastSkipReason === null) return false;
+      writeDataSource(scope, {
+        ...read.record,
+        schedule: { ...schedule, consecutiveFailures: 0, lastSkipReason: null, lastSkipAt: null },
+      });
+      return true;
+    });
+  } catch {
+    return false;
   }
 }
 

@@ -37,6 +37,7 @@ import {
 import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
+import { startDataSourceScheduler, stopDataSourceScheduler } from './lib/datasource-scheduler.js';
 
 /**
  * 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection。
@@ -843,10 +844,13 @@ export async function startMcpServer(): Promise<void> {
     web: opts.web,
     buildServer: buildKiMcpServer,
     onShutdown: () => {
+      stopDataSourceScheduler();
       stopVersionGuard();
       daemonRpc.close();
     },
   });
+  // HTTP 服务已监听成功后才启动调度（重复实例会在 startHttpMcpServer 内直接 exit）
+  startDataSourceScheduler();
 }
 
 // 入口

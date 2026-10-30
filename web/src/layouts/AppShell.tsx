@@ -5,7 +5,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, useServerInfo, useVectorDimensionStatus, type HealthLevel } from '@/lib/hooks';
+import {
+  summarizeHealth, useHealth, useServerInfo, useVectorAvailability, useVectorDimensionStatus,
+  vectorBadgeLabel, type HealthLevel,
+} from '@/lib/hooks';
 import { ScopeSelect } from '@/components/ScopeSelect';
 import { HealthDetailPanel } from '@/components/HealthDetailPanel';
 import { DocumentEditor } from '@/components/DocumentEditor';
@@ -114,6 +117,12 @@ const DOT_CLASS: Record<HealthLevel, string> = {
 function ServiceBadge(): JSX.Element {
   const { data, error, isPending, isFetching, refetch, dataUpdatedAt } = useHealth();
   const s = summarizeHealth(data, error, isPending);
+  /**
+   * 向量降级：仅"只是向量不可用"时替换文案与点色（判据见 lib/vectorAvailability.ts
+   * `vectorBadgeLabel`）。明细面板仍收 `s`（真实 fail 项不隐藏）。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorLabel = vectorBadgeLabel(s, vectorAvailability);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -150,10 +159,12 @@ function ServiceBadge(): JSX.Element {
         onClick={() => setOpen((prev) => !prev)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title="点击查看服务健康明细（含每项原因与修复指引）"
+        title={vectorLabel
+          ? `向量不可用${vectorAvailability.reason ?? (s.detail ? `：${s.detail}` : '')}（点击查看服务健康明细）`
+          : '点击查看服务健康明细（含每项原因与修复指引）'}
       >
-        <span className={`ki-dot ${DOT_CLASS[s.level]}`} aria-hidden="true" />
-        <span className="ki-service-badge__text">{s.label}</span>
+        <span className={`ki-dot ${vectorLabel ? DOT_CLASS.warn : DOT_CLASS[s.level]}`} aria-hidden="true" />
+        <span className="ki-service-badge__text">{vectorLabel ?? s.label}</span>
       </button>
       {open && (
         <HealthDetailPanel

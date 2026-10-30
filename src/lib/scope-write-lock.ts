@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loadConfig } from './config.js';
+import { assertOperationWritable } from './scope-policy.js';
 
 const heldLocks = new AsyncLocalStorage<Set<string>>();
 
@@ -12,7 +13,18 @@ function busy(): Error {
 
 /** 跨进程 scope 写锁；同一异步调用链内允许 restore → rebuild 嵌套。 */
 export async function withScopeWriteLock<T>(scope: string, operation: string, run: () => Promise<T>): Promise<T> {
-  const dir = path.join(loadConfig().dataDir, '.ki-scope-locks');
+  /**
+   * 只读门禁（REQ-20261029-001）——**取锁之前**判定：
+   * ① 放行集见 `EXEMPT_OPS`（import / 数据源 / 运维），拦 `BLOCKED_OPS`（逐条写入）；
+   * ② 放在此处而非锁内：只读库的写请求应立刻失败，否则会排在一个长导入后面十余秒才报错；
+   * ③ 复用同一份 config 取 dataDir，避免重复 `loadConfig()`（每次含一次 statSync）。
+   *
+   * ⚠️ `scope-readonly` op 不得走到这里（否则只读库永远解除不了）；
+   * `cloneLockScope(repoRoot)` 这类**合成锁键**不是业务 scope，名单精确匹配天然不命中。
+   */
+  const config = loadConfig();
+  assertOperationWritable(scope, operation, config);
+  const dir = path.join(config.dataDir, '.ki-scope-locks');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink()) throw busy();
   const key = path.join(dir, `${crypto.createHash('sha256').update(scope).digest('hex')}.lock`);

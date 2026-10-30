@@ -41,6 +41,11 @@ import {
 } from './import.js';
 import { resolveImportExtensions } from './config.js';
 import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './import-preflight.js';
+import {
+  assertHttpChannelWritable,
+  isScopeReadonlyError,
+  scopeReadonlyBody,
+} from './scope-policy.js';
 // S-02/S-03：两级完成口径 —— 整理等待/状态 + A11 就绪判据
 import {
   whenIndexMaintenanceIdle,
@@ -56,11 +61,16 @@ import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
 import { executeDatasourcePrune } from './datasource-prune.js';
-import { addRemoteDataSource, checkSourceReachable, findReusableManagedClone, readDataSource, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
-import { checkManagedSubdir, isSafeRelativeSubdir, validateBranchName, validateGitUrl } from './datasource-clone.js';
+// upstream 侧新增「定时同步」（resetScheduleFailures / saveDataSourceSchedule），
+// 本地侧新增「移除登记」（removeDataSource / countManagedRepoRefs / purgeManagedCloneDir）—— 两边都要
+import { addRemoteDataSource, checkSourceReachable, countManagedRepoRefs, findReusableManagedClone, readDataSource, removeDataSource, resetScheduleFailures, saveDataSourceSchedule, scanDataSources, syncDataSource, toClientPending, withManagedCloneLock, type SyncDataSourceResult } from './datasource.js';
+import { checkManagedSubdir, isSafeRelativeSubdir, purgeManagedCloneDir, validateBranchName, validateGitUrl } from './datasource-clone.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { computeSyncAvailability } from './datasource-policy.js';
+import { toScheduleView } from './datasource-schedule.js';
+import { datasourceSyncMode, datasourceSyncParams, toDatasourceSyncResultSnapshot } from './datasource-task.js';
+import { isDataSourceSchedulerDisabled, refreshDataSourceScheduler } from './datasource-scheduler.js';
 import { rebuildScopeVectors, type RebuildVectorOptions, type RebuildVectorResult } from './rebuild-vector.js';
 import { restoreSnapshotLocal, type RestoreSnapshotResult } from './restore-snapshot.js';
 import { executeTagList, type TagListResult } from '../tag.js';
@@ -317,6 +327,28 @@ function createJob(
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(payload));
+}
+
+/**
+ * 第一段只读门禁（REQ-20261029-001）：**Web 用户通道**的写接口在只读 scope 上直接 409。
+ *
+ * 为什么不能只靠 `withScopeWriteLock` 内的第二段：`import` op 被 CLI、Web、数据源同步
+ * 三方共用（`lib/datasource.ts:1222` / `lib/mcp-http-api.ts:3046` / `src/import.ts:187`），
+ * 第二段必须放行它以保住数据源同步；Web 侧只能在这里挡。
+ *
+ * 返回 true = 已响应（调用方直接 return）。
+ */
+function rejectIfScopeReadonly(res: http.ServerResponse, scope: string, action: string): boolean {
+  try {
+    assertHttpChannelWritable(scope, action);
+    return false;
+  } catch (err) {
+    if (isScopeReadonlyError(err)) {
+      sendJson(res, 409, scopeReadonlyBody(err));
+      return true;
+    }
+    throw err;
+  }
 }
 
 /** 读取 JSON 请求体（复用 mcp-http readJsonBody 逻辑） */
@@ -659,6 +691,8 @@ export async function handleApiRequest(
         rejectScopeViolation(res, scope, p);
         return;
       }
+      // 只读门禁（REQ-20261029-001）：阅读页「编辑文档 / 添加链接」的保存入口
+      if (rejectIfScopeReadonly(res, scope, 'http:/api/doc/edit')) return;
       await getSharedOperationCoordinator().submit(
         { operation: 'doc-edit-write', params: { scope } },
         () => runWithConfigSnapshot(requestConfig, async () => withScopeWriteLock(scope, 'doc-edit-write', async () => {
@@ -732,7 +766,9 @@ export async function handleApiRequest(
     if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
     if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
     if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
+    if (p === '/datasource/schedule' && req.method === 'POST') return void (await handleDatasourceSchedule(req, res, authScopes, requestConfig));
     if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig));
+    if (p === '/datasource/remove' && req.method === 'POST') return void (await handleDatasourceRemove(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
     if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
@@ -1236,6 +1272,9 @@ async function processImportUpload(
       return;
     }
   }
+  // 只读门禁（REQ-20261029-001）：上传暂存也拒——否则文件先落到 `~/.ki/import-uploads`，
+  // 到 run 才被拒，留下无人清理的残留
+  if (rejectIfScopeReadonly(res, resolveScope(loadConfig(), body?.scope), 'http:/api/import/upload')) return;
   if (!body || !Array.isArray(body.files) || body.files.length === 0) {
     sendJson(res, 400, { ok: false, error: '缺少 files 数组（{ scope, files: [{ name, content }] }）' });
     return;
@@ -1581,6 +1620,9 @@ async function handleImportRun(
     return;
   }
   const scope = resolveScope(requestConfig, body.scope);
+  // 只读门禁（REQ-20261029-001）：在上传导入页发起导入前拒绝，**不创建 job**
+  // （避免任务列表里出现一个必然失败的导入任务）
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/import/run')) return;
   const sourceDir = path.join(getUploadsRoot(), uploadId);
   if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
     sendJson(res, 400, { ok: false, error: `uploadId 不存在（${uploadId}）` });
@@ -1788,6 +1830,9 @@ async function handleImportPrune(
   }
   const scope = resolveScope(requestConfig, scopeRaw);
   const dryRun = body?.dryRun === true;
+  // 只读门禁（REQ-20261029-001）：dryRun 是查询语义（只列候选、不删除）⇒ 放行；
+  // 真正删除时拒绝（只读库不允许经 Web 删除文档）。
+  if (!dryRun && rejectIfScopeReadonly(res, scope, 'http:/api/import/prune')) return;
   const token = typeof body?.token === 'string' ? body.token : '';
   const selectedRaw = body?.selected;
   if (!dryRun && !token) {
@@ -2113,6 +2158,7 @@ function handleDatasourceList(
         activeState: active?.state ?? null,
         activeStartedAt: active?.startedAt ?? null,
         stale: record.lastSync ? now - record.lastSync.at > DATASOURCE_STALE_MS : true,
+        schedule: toScheduleView(record.schedule, record.lastSync, now),
         syncAvailability: computeSyncAvailability({
           type: record.type,
           lastSync: record.lastSync,
@@ -2126,8 +2172,18 @@ function handleDatasourceList(
   sendJson(res, 200, {
     ok: true,
     total: sources.length,
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
     sources,
-    missing: scan.missing.filter(({ scope }) => visible(scope) && inFilter(scope)),
+    missing: scan.missing
+      .filter(({ scope }) => visible(scope) && inFilter(scope))
+      .map(({ scope, reason }) => {
+        const read = readDataSource(scope);
+        return {
+          scope,
+          reason,
+          ...(read.ok ? { schedule: toScheduleView(read.record.schedule, read.record.lastSync, now) } : {}),
+        };
+      }),
     corrupt: scan.corrupt.filter(({ scope }) => visible(scope) && inFilter(scope)),
   });
 }
@@ -2184,7 +2240,12 @@ function handleDatasourceDetail(
       lastSync: read.record.lastSync,
       active: running,
     }),
-    source: { ...read.record, lastSync },
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
+    source: {
+      ...read.record,
+      lastSync,
+      schedule: toScheduleView(read.record.schedule, read.record.lastSync),
+    },
   });
 }
 
@@ -2196,40 +2257,6 @@ function handleDatasourceDetail(
  * 任务 finish / submit 失败都必须释放。
  */
 const pageSyncGates = new Map<string, string>();
-
-function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): TaskResultSnapshot | undefined {
-  if (!result.ok || result.dryRun) return undefined;
-  const summary = result.summary;
-  return {
-    ...(summary.files
-      ? {
-        files: {
-          scanned: summary.files.scanned,
-          completed: summary.files.completed,
-          incomplete: summary.files.incomplete,
-          skipped: summary.files.skipped,
-          unchanged: summary.files.unchanged,
-          duplicatesSkipped: summary.files.duplicatesSkipped,
-        },
-      }
-      : {}),
-    vectorized: summary.vectorized,
-    fullTextIndexed: summary.fullTextIndexed,
-    groups: summary.groups,
-    // 数据源同步任务的详情也要有「新增的文档」，否则同一份快照在数据源页有、任务页说"没有记录"
-    ...(summary.created && summary.created.length > 0
-      ? {
-        created: summary.created
-          .slice(0, MAX_SNAPSHOT_CREATED)
-          .map((item) => [item.group, item.relation] as [string, string]),
-      }
-      : {}),
-    ...(typeof summary.createdTotal === 'number' ? { createdTotal: summary.createdTotal } : {}),
-    ...(summary.createdTruncated || (summary.created?.length ?? 0) > MAX_SNAPSHOT_CREATED
-      ? { createdTruncated: true }
-      : {}),
-  };
-}
 
 /**
  * 同步任务执行体（页面 `POST /datasource/sync` 与 add-remote 首次同步共用）。
@@ -2270,28 +2297,74 @@ async function runDatasourceSyncTask(
           : {}),
       },
     );
+    if (state === 'ok' || state === 'partial') await resetScheduleFailures(scope);
   } catch (err) {
     task.finish('failed', { errorCode: (err as { code?: string }).code ?? 'SYNC_FAILED', error: (err as Error).message });
+  } finally {
+    // 手动同步完成后 nextRunAt 以新的 lastSync.at 重算
+    refreshDataSourceScheduler();
   }
 }
 
-/** 首次同步没有 commit 水位时必然是 full；不能只看 type/full */
-function datasourceSyncMode(record: DataSourceRecord, full: boolean): 'incremental' | 'full' {
-  return record.type === 'git' && !full && Boolean(record.lastSync?.git?.commit) ? 'incremental' : 'full';
-}
+// ─── POST /api/datasource/schedule（S-01）────────────────
 
-/** 登记参数快照（页面 sync 与 add-remote 首次同步同口径） */
-function datasourceSyncParams(record: DataSourceRecord, full: boolean): TaskParamSnapshot | undefined {
-  return toParamSnapshot('datasource-sync', {
-    sourceDir: record.dir,
-    type: record.type,
-    mode: datasourceSyncMode(record, full),
-    ...(record.group ? { group: record.group } : {}),
-    vector: record.vector,
-    conflictMode: record.conflictMode,
-    conflictSuffix: record.conflictSuffix,
-    ...(record.chunkSize !== null ? { chunkSize: record.chunkSize } : {}),
-    ...(record.chunkOverlap !== null ? { chunkOverlap: record.chunkOverlap } : {}),
+async function handleDatasourceSchedule(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: { scope?: unknown; schedule?: unknown } = {};
+  try {
+    body = await readJsonBody(req) as { scope?: unknown; schedule?: unknown };
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'SCHEDULE_MISSING_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/schedule');
+    return;
+  }
+  const result = await saveDataSourceSchedule({
+    scope: scopeRaw,
+    schedule: body.schedule,
+    config: requestConfig,
+  });
+  if (!result.ok) {
+    const status = result.code === 'INVALID_SCOPE'
+      ? 400
+      : result.code === 'NOT_FOUND' || result.code === 'NOT_REGISTERED'
+        ? 404
+        : result.code === 'SCHEDULE_STALE' || result.code === 'SCOPE_OPERATION_BUSY'
+          ? 409
+          : result.code === 'CORRUPT'
+            ? 400
+            : result.code.startsWith('SCHEDULE_') ? 400 : 500;
+    sendJson(res, status, {
+      ok: false,
+      scope: result.scope,
+      code: result.code === 'NOT_FOUND' ? 'DATASOURCE_NOT_FOUND' : result.code,
+      error: result.error,
+      ...(result.field ? { details: { field: result.field } } : {}),
+      ...(result.current ? { current: result.current } : {}),
+    });
+    return;
+  }
+  refreshDataSourceScheduler();
+  const now = Date.now();
+  const view = toScheduleView(result.record.schedule, result.record.lastSync, now);
+  sendJson(res, 200, {
+    ok: true,
+    scope: result.scope,
+    schedule: view,
+    nextRunAt: view.nextRunAt,
+    warnings: result.warnings,
+    schedulerDisabled: isDataSourceSchedulerDisabled(),
   });
 }
 
@@ -2661,6 +2734,128 @@ async function handleDatasourceAddRemote(
   sendJson(res, 200, { ok: true, scope, taskId, state: 'queued' });
 }
 
+// ─── POST /api/datasource/remove（2026-10-29 用户需求）─────────────
+
+/**
+ * 取消数据源登记（等价 CLI `ki datasource remove`）：**只删 datasource.json，不删库内文档**。
+ *
+ * 安全边界：
+ *  - 鉴权同 sync（`scopeAllowed`，含 `all` 通配）
+ *  - 同步 / 添加任务排队或执行中 → 409（此时删登记会让任务写到一半的 `lastSync` 落空）
+ *  - `purge` 只清**托管 clone** 目录，且带引用计数：其他 scope 仍在复用时保留并回报原因
+ *  - 登记已不存在 → 404 `DATASOURCE_NOT_FOUND`（不是 500）；`removed:false` 只出现在
+ *    "读到之后、unlink 之前被并发删掉"的竞态里，按成功处理
+ *  - 不可解析登记（CORRUPT/INVALID）默认 400；带 `force:true` 才移除——坏文件无法解析，
+ *    这是页面唯一的清理出口（CLI `remove` 同样拒绝解析）
+ */
+async function handleDatasourceRemove(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: KiConfig,
+): Promise<void> {
+  let body: { scope?: unknown; purge?: unknown } = {};
+  try {
+    body = await readJsonBody(req) as typeof body;
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: '请求体不是合法 JSON' });
+    return;
+  }
+  const scopeRaw = typeof body.scope === 'string' ? body.scope.trim() : '';
+  if (!scopeRaw) {
+    sendJson(res, 400, { ok: false, code: 'DATASOURCE_REMOVE_MISSING_SCOPE', error: '缺少 scope' });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, scopeRaw)) {
+    rejectScopeViolation(res, scopeRaw, '/datasource/remove');
+    return;
+  }
+  let scope: string;
+  try {
+    scope = resolveScope(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_SCOPE', error: (err as Error).message });
+    return;
+  }
+  const read = readDataSource(scope);
+  if (!read.ok) {
+    // 不可解析的登记（CORRUPT = JSON 坏 / INVALID = 字段非法）是页面唯一能清理的出口
+    // （CLI remove 同样拒绝解析坏登记）：必须 `force:true` 显式表态。removeDataSource
+    // 只 unlink 不解析，故坏文件也能移除；其余错误码照常拒绝。
+    const forced = (read.code === 'CORRUPT' || read.code === 'INVALID') && body.force === true;
+    if (!forced) {
+      sendJson(res, read.code === 'NOT_FOUND' ? 404 : 400, {
+        ok: false,
+        scope,
+        code: read.code === 'NOT_FOUND' ? 'DATASOURCE_NOT_FOUND' : read.code,
+        error: read.code === 'NOT_FOUND' ? `scope「${scope}」没有数据源登记` : read.error,
+      });
+      return;
+    }
+  }
+  // 严格读台账：读失败必须 503，不能靠"看起来没任务"就删登记
+  let tasks: ReturnType<typeof listTaskRecords>;
+  try {
+    tasks = listTaskRecords(requestConfig);
+  } catch (err) {
+    sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `任务台账不可读，移除未执行：${(err as Error).message}` });
+    return;
+  }
+  const activeTask = tasks.find((task) => task.scope === scope
+    && (task.operation === 'datasource-sync' || task.operation === 'datasource-add-remote')
+    && (task.state === 'queued' || task.state === 'running'));
+  if (activeTask || pageSyncGates.has(scope) || datasourceAddGates.has(scope)) {
+    sendJson(res, 409, {
+      ok: false,
+      scope,
+      code: 'DATASOURCE_BUSY',
+      error: '该数据源正在同步或添加，任务结束后再移除',
+      taskId: activeTask?.id ?? pageSyncGates.get(scope) ?? datasourceAddGates.get(scope),
+    });
+    return;
+  }
+
+  const purge = body.purge === true;
+  const result = await removeDataSource(scope, requestConfig);
+  if (!result.ok) {
+    const status = result.code === 'SCOPE_OPERATION_BUSY'
+      ? 409
+      : result.code === 'REMOVE_FAILED' ? 500 : 400;
+    sendJson(res, status, { ok: false, scope, code: result.code, error: result.error });
+    return;
+  }
+
+  const payload: Record<string, unknown> = { ok: true, scope, removed: result.removed };
+  // 托管 clone 只在 purge 且确属托管源时清理；引用计数 >0 一律保留（可能被其他 scope 复用）
+  if (purge && result.managedCloneDir) {
+    const managedDir = result.managedCloneDir;
+    const repoRoot = path.join(managedDir, 'repo');
+    payload.managedCloneDir = managedDir;
+    try {
+      const locked = await withManagedCloneLock(repoRoot, 'datasource-purge', async () => {
+        const refs = countManagedRepoRefs(repoRoot, requestConfig, scope);
+        if (refs > 0) return { refs, purge: null };
+        return { refs, purge: await purgeManagedCloneDir(managedDir) };
+      });
+      if (locked.refs > 0) {
+        payload.cloneRemoved = false;
+        payload.cloneRemoveSkipped = true;
+        payload.cloneRemoveReason = `其他 ${locked.refs} 个 scope 仍在使用该 clone，已保留 ${managedDir}`;
+      } else if (locked.purge && locked.purge.removed) {
+        payload.cloneRemoved = true;
+      } else {
+        payload.cloneRemoved = false;
+        const reason = locked.purge && 'error' in locked.purge ? locked.purge.error : '未能清理托管目录';
+        if (reason) payload.cloneRemoveError = reason;
+      }
+    } catch (err) {
+      payload.cloneRemoved = false;
+      payload.cloneRemoveError = (err as Error).message;
+    }
+  }
+  sendJson(res, 200, payload);
+}
+
 // ─── 「重试未完成」的并发闸门（2026-10-13 用户反馈）─────────────//
 // 现象：连点两次重试各起一个 job（第一次 running、第二次 queued）——重复处理同一批未完成文件。
 // 根因是"能否重试"只看清单，而重试 job 结束前清单不会变（`taskId` 仍是旧任务）。
@@ -2763,6 +2958,9 @@ async function handleImportRetryIncomplete(
     return;
   }
   const scope = resolveScope(requestConfig, body.scope);
+  // 只读门禁（REQ-20261029-001）：重试 = 继续一次写入。
+  // 注意调用方不止上传导入页——后台任务页也提供重试，故 S04 在任务页同步置灰并给出 CLI 出路。
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/import/retry-incomplete')) return;
   const requestedTaskId = typeof body.taskId === 'string' && body.taskId.trim() ? body.taskId.trim() : undefined;
 
   const status = readImportIncompleteStatus(scope);

@@ -22,7 +22,13 @@ import path from 'path';
 import { listAllScopes, getKbDir, getRelationsCachePath, getGroupIndexPath, validateScope } from './lib/scope.js';
 import { readJson } from './lib/store.js';
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
-import { loadConfig, removeScopeFromConfigFile, getScopeWikiSync } from './lib/config.js';
+import {
+  loadConfig,
+  removeScopeFromConfigFile,
+  getScopeWikiSync,
+  isScopeReadonly,
+  setScopeReadonlyInConfigFile,
+} from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
@@ -69,6 +75,11 @@ export interface ScopeEntry {
   kb: boolean;         // 存在于 KB 目录层
   vector: boolean;     // 存在于向量语义层
   registered: boolean; // 在 config.scopes 中注册
+  /**
+   * 只读（REQ-20261029-001）：该 scope 禁止**逐条写入**（Web / MCP / CLI 单条）。
+   * 批量更新（`ki import`、数据源同步）与运维通道仍放行，读侧不受影响。
+   */
+  readonly: boolean;
   /** KB 层文档数（relations-cache 的 hot_relations 总数 = 文件级 relation 数；无 cache 时为 0） */
   wikiCount: number;
   /** 完整登记在 FTS-only Collection 且没有 dense 向量的文档数。 */
@@ -206,7 +217,14 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
     vectorReason = avail.reason;
   }
 
-  const all = new Set<string>([...kbScopes, ...vectorScopes, ...Object.keys(config.scopes)]);
+  // 只读名单也纳入枚举：否则"设了只读但该 scope 尚无数据/未注册"时列表里看不到，
+  // 用户无法确认设置是否生效（REQ-20261029-001 验收 1）。
+  const all = new Set<string>([
+    ...kbScopes,
+    ...vectorScopes,
+    ...Object.keys(config.scopes),
+    ...config.scopeReadonly,
+  ]);
   const scopes: ScopeEntry[] = [...all].sort().map((s) => {
     // 逐 scope 兜底：单个 scope 的 relations 元数据损坏不应让整个 scope 列表不可用，
     // 但必须留下可见告警（不再静默当成 0 条）
@@ -256,6 +274,7 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
       kb: kbScopes.has(s),
       vector: vectorScopes.has(s),
       registered: Object.prototype.hasOwnProperty.call(config.scopes, s),
+      readonly: isScopeReadonly(config, s),
       ...docCounts,
       topGroups,
       topGroupsStale,
@@ -318,11 +337,20 @@ async function managedCloneDirForScope(scope: string): Promise<string | null> {
   }
 }
 
-async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
+async function executeScopeDeleteLocal(params: { scope: string; yes: boolean; forceReadonly?: boolean }): Promise<ScopeDeleteResult> {
   try {
     validateScope(params.scope);
     if (params.scope === 'default') {
       return { ok: false, error: 'default scope 不可删除' };
+    }
+    // D17（REQ-20261029-001）：只读库的破坏性运维保留能力，但 `--yes` 不足以确认
+    //（只读挡得住"改一个字"，挡不住"清空整库"——不可逆操作多拦一道）
+    if (isScopeReadonly(loadConfig(), params.scope) && params.forceReadonly !== true) {
+      return {
+        ok: false,
+        error: `scope "${params.scope}" 为只读，破坏性操作需额外确认：加 --force-readonly`,
+        requireConfirm: true,
+      };
     }
 
     const avail = await ensureVectorAvailable();
@@ -413,7 +441,7 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean }):
   }
 }
 
-export async function executeScopeDelete(params: { scope: string; yes: boolean }): Promise<ScopeDeleteResult> {
+export async function executeScopeDelete(params: { scope: string; yes: boolean; forceReadonly?: boolean }): Promise<ScopeDeleteResult> {
   if (shouldUseDaemonClient()) return callDaemon<ScopeDeleteResult>('scope-delete', params);
   try {
     return await withScopeWriteLock(params.scope, 'scope-delete', () => executeScopeDeleteLocal(params));
@@ -442,9 +470,17 @@ export type ScopeClearResult =
       willDelete?: { vectorCount: number; kbWillClear: boolean };
     };
 
-async function executeScopeClearLocal(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
+async function executeScopeClearLocal(params: { scope: string; tags?: string[]; yes: boolean; forceReadonly?: boolean }): Promise<ScopeClearResult> {
   try {
     validateScope(params.scope);
+    // D17：只读库的破坏性运维需额外确认（理由同 scope delete）
+    if (isScopeReadonly(loadConfig(), params.scope) && params.forceReadonly !== true) {
+      return {
+        ok: false,
+        error: `scope "${params.scope}" 为只读，破坏性操作需额外确认：加 --force-readonly`,
+        requireConfirm: true,
+      };
+    }
 
     const avail = await ensureVectorAvailable();
     if (!avail.available) {
@@ -495,11 +531,83 @@ async function executeScopeClearLocal(params: { scope: string; tags?: string[]; 
   }
 }
 
-export async function executeScopeClear(params: { scope: string; tags?: string[]; yes: boolean }): Promise<ScopeClearResult> {
+export async function executeScopeClear(params: { scope: string; tags?: string[]; yes: boolean; forceReadonly?: boolean }): Promise<ScopeClearResult> {
   if (shouldUseDaemonClient()) return callDaemon<ScopeClearResult>('scope-clear', params);
   try {
     return await withScopeWriteLock(params.scope, 'scope-clear', () => executeScopeClearLocal(params));
   } catch (error) { return { ok: false, error: (error as Error).message }; }
+}
+
+// ─── 纯函数：scope readonly（REQ-20261029-001） ───
+
+export type ScopeSetReadonlyResult =
+  | {
+    ok: true;
+    scope: string;
+    readonly: boolean;
+    /** 状态是否真的发生变化（false = 幂等重复设置） */
+    changed: boolean;
+    configPath: string;
+    warning?: string;
+  }
+  | {
+    ok: false;
+    error: string;
+    code?: 'NO_CONFIG_FILE' | 'WRITE_FAILED' | 'BAD_SCOPE' | 'DAEMON_OUTDATED';
+  };
+
+/**
+ * 设置 / 解除只读（本地执行）。
+ *
+ * ⚠️ **不得包 `withScopeWriteLock`**：该函数写的是配置文件（策略本身），不是 scope 内容；
+ * 若加锁且 op 未进 `EXEMPT_OPS`，只读库将永远无法解除只读（自锁死锁）。
+ */
+export function executeScopeSetReadonlyLocal(params: { scope: string; readonly: boolean }): ScopeSetReadonlyResult {
+  try {
+    validateScope(params.scope);
+  } catch (err) {
+    return { ok: false, code: 'BAD_SCOPE', error: (err as Error).message };
+  }
+  let result: ReturnType<typeof setScopeReadonlyInConfigFile>;
+  try {
+    result = setScopeReadonlyInConfigFile(params.scope, params.readonly);
+  } catch (err) {
+    // 配置文件本身损坏（YAML 解析失败）时 `loadConfig()` 会在写回函数入口抛错：
+    // 转成结构化失败，避免 CLI 甩出裸堆栈（文件未被改动，属安全失败）
+    return { ok: false, code: 'WRITE_FAILED', error: `读取/写入配置失败：${(err as Error).message}` };
+  }
+  if (!result.ok) return { ok: false, code: result.code, error: result.error };
+  // 尚无数据的 scope 允许预锁：仅在"设为只读"时提示其未来创建/写入会被拒，
+  // 解除时不提示（避免 --off 也回显"锁定后…"这类误导文案）
+  const warning = params.readonly && !kbDirExists(params.scope)
+    ? '该 scope 当前无数据，锁定后其创建与单条写入将被拒绝（导入/数据源同步仍可创建）'
+    : undefined;
+  return {
+    ok: true,
+    scope: result.scope,
+    readonly: result.readonly,
+    changed: result.changed,
+    configPath: result.configPath,
+    ...(warning ? { warning } : {}),
+  };
+}
+
+export async function executeScopeSetReadonly(params: {
+  scope: string;
+  readonly: boolean;
+}): Promise<ScopeSetReadonlyResult> {
+  /**
+   * **本地写，不走 daemon RPC**（实施期决策，见 .plans/2026-10-29-scope-readonly 「决策与偏差」）。
+   *
+   * 原因：`callDaemon` 会先 `ensureDaemon()`——为改一个配置项而**拉起整个 daemon** 属明显过重，
+   * 且 daemon 预检失败时会让"设置只读"直接不可用（实测复现）。
+   *
+   * 常驻 daemon 的时效性由 `setScopeReadonlyInConfigFile` 末尾的 `utimes` 保证：
+   * `loadConfig` 以 `mtime+size` 判新鲜度，抬高 mtime 后 daemon 下一次取配置必然重读
+   * ⇒ 无需进程内 reset 也能立即生效（等长名单改写同样覆盖）。
+   * daemon 侧仍保留 `scope-readonly` op（幂等、无害），供将来需要进程内立即 reset 时使用。
+   */
+  return executeScopeSetReadonlyLocal(params);
 }
 
 // ─── 辅助 ───
@@ -538,7 +646,7 @@ program
     }
     // 人类可读表格输出（默认）——动态列宽适配长 scope 名
     const nameWidth = Math.max(10, ...result.scopes.map((s) => s.scope.length));
-    const header = `  ${'scope'.padEnd(nameWidth)}  KB     Vector   Registered  Docs`;
+    const header = `  ${'scope'.padEnd(nameWidth)}  KB     Vector   Registered  Readonly  Docs`;
     const sep = '─'.repeat(header.length + 2);
     console.log(`\nScopes (${result.count}) — mode: ${result.scopeMode}`);
     console.log(sep);
@@ -546,7 +654,7 @@ program
     console.log(sep);
     for (const s of result.scopes) {
       console.log(
-        `  ${s.scope.padEnd(nameWidth)}  ${s.kb ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.vector ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.registered ? '✓'.padEnd(9) : '✗'.padEnd(9)}  ${s.wikiCount}`
+        `  ${s.scope.padEnd(nameWidth)}  ${s.kb ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.vector ? '✓'.padEnd(6) : '✗'.padEnd(6)}  ${s.registered ? '✓'.padEnd(9) : '✗'.padEnd(9)}  ${(s.readonly ? '✓' : '✗').padEnd(8)}  ${s.wikiCount}`
       );
     }
     console.log(sep);
@@ -563,8 +671,9 @@ program
   .description('彻底删除 scope（向量 + KB 目录 + 配置条目）；default 不可删除')
   .argument('<name>', 'scope 名称')
   .option('--yes', '确认执行（缺省则仅预览并拒绝）', false)
+  .option('--force-readonly', '该 scope 为只读时仍执行（破坏性操作需额外确认）', false)
   .action(async (name: string, opts) => {
-    const result = await executeScopeDelete({ scope: name, yes: !!opts.yes });
+    const result = await executeScopeDelete({ scope: name, yes: !!opts.yes, forceReadonly: !!opts.forceReadonly });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();
     if (result.ok && result.managedCloneShared) {
@@ -581,11 +690,46 @@ program
   .argument('<name>', 'scope 名称')
   .option('--tags <tags>', '仅清指定标签，逗号分隔多值（省略则清全部并清 KB 目录内容）')
   .option('--yes', '确认执行（缺省则仅预览并拒绝）', false)
+  .option('--force-readonly', '该 scope 为只读时仍执行（破坏性操作需额外确认）', false)
   .action(async (name: string, opts) => {
-    const result = await executeScopeClear({ scope: name, tags: parseTags(opts.tags), yes: !!opts.yes });
+    const result = await executeScopeClear({
+      scope: name,
+      tags: parseTags(opts.tags),
+      yes: !!opts.yes,
+      forceReadonly: !!opts.forceReadonly,
+    });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();
     if (!result.ok) process.exit(1);
+  });
+
+program
+  .command('readonly')
+  .description('设置 scope 只读（禁止逐条写入；导入/数据源同步与运维仍放行）；--off 解除只读')
+  .argument('<name>', 'scope 名称')
+  .option('--off', '解除只读（恢复可写）', false)
+  .option('--yes', '确认对 default scope 生效（default 为兜底 scope，影响所有未显式指定 scope 的写入）', false)
+  .action(async (name: string, opts) => {
+    const readonly = !opts.off;
+    // default 是兜底 scope：设只读会波及所有未显式传 scope 的写入，要求显式确认
+    if (name === 'default' && readonly && !opts.yes) {
+      console.error(JSON.stringify({
+        ok: false,
+        code: 'BAD_SCOPE',
+        error: 'default 为兜底 scope：设只读会让所有未显式传 scope 的写入被拒。确需如此请加 --yes',
+      }, null, 2));
+      await closeEngine();
+      process.exit(1);
+    }
+    const result = await executeScopeSetReadonly({ scope: name, readonly });
+    console.log(JSON.stringify(result, null, 2));
+    await closeEngine();
+    if (!result.ok) process.exit(1);
+    // 强制回显最终状态：`--off` 是"解除只读"，语义易反转，必须让人一眼看到当前状态
+    process.stderr.write(
+      `ⓘ ${result.scope} 现在 ${result.readonly ? '只读' : '可写'}${result.changed ? '' : '（状态未变化）'}\n`,
+    );
+    if (result.warning) process.stderr.write(`ⓘ ${result.warning}\n`);
   });
 
 // 仅在直接运行时解析参数（被 import 时不执行）

@@ -7,8 +7,9 @@ import { executeDeleteRelation, executeBatchDelete } from '../delete-relation.js
 import { executeGroupCreate } from './group-create.js';
 import { executeGroupDelete } from './group-delete.js';
 import { handleDirectImport } from './import.js';
-import { syncDataSource } from './datasource.js';
-import { executeScopeList, executeScopeDelete, executeScopeClear } from '../scope.js';
+import { resetScheduleFailures, syncDataSource } from './datasource.js';
+import { refreshDataSourceScheduler } from './datasource-scheduler.js';
+import { executeScopeList, executeScopeDelete, executeScopeClear, executeScopeSetReadonlyLocal } from '../scope.js';
 import { executeQueryGroup } from '../query-group.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../get-module-info.js';
 import { executeTagList } from '../tag.js';
@@ -57,17 +58,41 @@ const HANDLERS: Record<string, Handler> = {
   import: handleDirectImport,
   // 数据源同步：复用 handleDirectImport（不写 source 块、按 seenRels 收窄候选）。
   // 取消/进度由 dispatchOperation 注入（见下方 datasource-sync 分支）。
-  'datasource-sync': (params) => syncDataSource({
-    scope: String(params?.scope ?? ''),
-    dryRun: params?.dryRun === true,
-    full: params?.full === true,
-    ...(typeof params?.taskId === 'string' ? { taskId: params.taskId } : {}),
-    ...(params?.abortSignal ? { abortSignal: params.abortSignal as AbortSignal } : {}),
-    ...(params?.onProgress ? { onProgress: params.onProgress } : {}),
-  }),
+  'datasource-sync': async (params) => {
+    const scope = String(params?.scope ?? '');
+    const result = await syncDataSource({
+      scope,
+      dryRun: params?.dryRun === true,
+      full: params?.full === true,
+      ...(typeof params?.taskId === 'string' ? { taskId: params.taskId } : {}),
+      ...(params?.abortSignal ? { abortSignal: params.abortSignal as AbortSignal } : {}),
+      ...(params?.onProgress ? { onProgress: params.onProgress } : {}),
+    });
+    if (result.ok && !result.dryRun && (result.summary.state === 'ok' || result.summary.state === 'partial')) {
+      // 手动同步成功/部分成功 → 清零自动同步的连续失败（下一次到期按新 lastSync 重算）
+      await resetScheduleFailures(scope);
+    }
+    refreshDataSourceScheduler();
+    return result;
+  },
   'scope-list': executeScopeList,
-  'scope-delete': executeScopeDelete,
-  'scope-clear': executeScopeClear,
+  'scope-delete': async (params) => {
+    const result = await executeScopeDelete(params);
+    refreshDataSourceScheduler();
+    return result;
+  },
+  'scope-clear': async (params) => {
+    const result = await executeScopeClear(params);
+    refreshDataSourceScheduler();
+    return result;
+  },
+  // wiki 只读开关（REQ-20261029-001）。⚠️ 刻意**不包 withScopeWriteLock**：它写的是配置文件
+  // （策略本身），若被自身门禁拦下，只读库将永远无法解除只读（自锁死锁）。
+  // 走 daemon 执行的意义：进程内写配置 + resetConfigCache ⇒ 常驻进程立即读到新名单。
+  'scope-readonly': async (params) => executeScopeSetReadonlyLocal({
+    scope: String(params?.scope ?? ''),
+    readonly: params?.readonly !== false,
+  }),
   'get-module-info': executeGetModuleInfo,
   'get-module-info-batch': executeGetModuleInfoBatch,
   'tag-list': executeTagList,
@@ -94,7 +119,7 @@ const HANDLERS: Record<string, Handler> = {
     if (params?.yes !== true) {
       throw Object.assign(new Error('daemon 还原操作必须显式确认 --yes'), { code: 'CONFIRMATION_REQUIRED' });
     }
-    return withScopeWriteLock(params.scope, 'restore-snapshot', async () => {
+    const result = await withScopeWriteLock(params.scope, 'restore-snapshot', async () => {
     const restored = await restoreSnapshotLocal(params.scope, {
       timestamp: params.timestamp,
       backupDir: params.backupDir,
@@ -110,6 +135,9 @@ const HANDLERS: Record<string, Handler> = {
     );
     return { ...restored, rebuildVector: rebuilt };
     });
+    // 快照会连带恢复 datasource.json（含 schedule），恢复后重算
+    refreshDataSourceScheduler();
+    return result;
   },
   backup: (params) => executeBackup({ scope: params.scope }),
   'backup-list': (params) => executeBackupList(params.scope),

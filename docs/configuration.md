@@ -186,6 +186,33 @@ scope 护栏模式。
   - `default`：允许使用未在 `scopes` 显式注册的 scope（按需传入 scope 名即可）
   - `strict`：`scopes` 的 key 兼作 scope 白名单，必须显式传入已注册的 scope，否则报错（fail-loud）
 
+### `scopeReadonly`
+
+只读 scope 名单（**顶层节点**，`string[]`，默认 `[]`；REQ-20261029-001）。
+
+```yaml
+scopeReadonly:
+  - my-project
+  - wiki-mirror
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `scopeReadonly` | `string[]` | `[]` | 列出的 scope **禁止逐条写入**；批量更新与运维通道仍放行，读侧完全不受影响 |
+
+**边界（务必分清）**：
+
+| 通道 | 只读下 |
+|------|--------|
+| `ki import`、`ki datasource sync`（含 Web 数据源页同步） | 放行 —— 内容仍可批量更新 |
+| `ki scope clear / delete`（需 `--force-readonly`）、`ki restore`、`ki rebuild-vector` | 放行 |
+| Web 上传导入 / 知识写入 / 阅读页编辑与加链接、MCP 8 个写工具、CLI 单条写入 | 拒绝（`SCOPE_READONLY`） |
+| 检索 / 浏览 / 导出 / 备份 | 不受影响 |
+
+> ⚠️ **不要写成 `scopes.<scope>.readonly`**：那会让该 scope 的 `registered` 变 `true`，而 `scopeMode: strict` 下 `scopes` 的 key 兼作检索白名单 —— 锁一个库等于给它开检索权限。只读状态与"是否注册"刻意正交。
+>
+> 设置方式：`ki scope readonly <name> [--off]`（见 [CLI 文档](./cli.md#scope)）。手工编辑也可，元素类型错误会按 schema 校验 fail-loud（`CONFIG_FIELD_INVALID`）。
+
 ### `scopes`
 
 scope → KB 目录映射。每个 scope 可独立配置数据来源与导入/清洗行为。
