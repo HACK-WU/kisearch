@@ -222,7 +222,7 @@ export interface LlmConfig {
 export const DEFAULT_CHAT_DIR_NAME = 'chat';
 
 export interface EmbeddingConfig {
-  provider: string;      // "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
+  provider: string;      // "dashscope" | "siliconflow" | "openai-compatible"（OpenAI 兼容客户端，实际提供商由 baseURL 决定）
   baseURL: string;       // API 端点（决定实际对接的提供商）
   model: string;         // 模型名称
   dimension: number;     // 向量维度：必须与集合 dimension、上游模型输出维度三者一致
@@ -263,10 +263,10 @@ export interface KiConfig {
 // ─── 内置向量默认值 ───
 
 const DEFAULT_EMBEDDING: EmbeddingConfig = {
-  provider: 'siliconflow',
-  baseURL: 'https://api.siliconflow.cn/v1',
-  model: 'Qwen/Qwen3-Embedding-8B',
-  dimension: 4096,
+  provider: 'dashscope',
+  baseURL: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+  model: 'qwen3.7-text-embedding-flash',
+  dimension: 1024,
   queryTimeoutMs: DEFAULT_QUERY_EMBED_TIMEOUT_MS,
   scheduler: { ...DEFAULT_EMBEDDING_SCHEDULER },
 };

@@ -236,9 +236,10 @@ describe('A. lib/config —— YAML/JSON 双格式与 embedding 默认合并', (
   it('缺省 embedding 使用内置默认值', () => {
     const cfg = writeAndLoad('config.yaml', 'dataDir: /abs/data');
     const emb = getEmbeddingConfig(cfg);
-    assert.strictEqual(emb.provider, 'siliconflow');
-    assert.strictEqual(emb.model, 'Qwen/Qwen3-Embedding-8B');
-    assert.strictEqual(emb.dimension, 4096);
+    assert.strictEqual(emb.provider, 'dashscope');
+    assert.strictEqual(emb.baseURL, 'https://maas.qianwenaiapi.com/compatible-mode/v1');
+    assert.strictEqual(emb.model, 'qwen3.7-text-embedding-flash');
+    assert.strictEqual(emb.dimension, 1024);
     assert.strictEqual(emb.queryTimeoutMs, 3000);
   });
 
@@ -258,8 +259,8 @@ describe('A. lib/config —— YAML/JSON 双格式与 embedding 默认合并', (
     );
     const emb = getEmbeddingConfig(cfg);
     assert.strictEqual(emb.model, 'custom-model');
-    assert.strictEqual(emb.provider, 'siliconflow');
-    assert.strictEqual(emb.dimension, 4096);
+    assert.strictEqual(emb.provider, 'dashscope');
+    assert.strictEqual(emb.dimension, 1024);
   });
 });
 
@@ -573,7 +574,12 @@ describe('B. config init —— 生成 YAML 模板', () => {
     const text = fs.readFileSync(configFile, 'utf-8');
     assert.match(text, /^\s*default:\s*\{\}\s*$/m, '默认 scope 应为 default: {}');
     assert.match(text, /scopeMode:\s*default/);
-    assert.match(text, /provider:\s*siliconflow/);
+    assert.match(text, /provider:\s*dashscope/);
+    assert.match(text, /baseURL:\s*https:\/\/maas\.qianwenaiapi\.com\/compatible-mode\/v1/);
+    assert.match(text, /model:\s*qwen3\.7-text-embedding-flash/);
+    assert.match(text, /dimension:\s*1024/);
+    assert.match(text, /DASHSCOPE_API_KEY/);
+    assert.match(text, /platform\.qianwenai\.com\/home\/api-keys/);
     assert.match(text, /queryTimeoutMs:\s*3000/);
   });
 

@@ -92,10 +92,10 @@ Embedding 提供商配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `provider` | `string` | `siliconflow` | **自由文本，不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为**错误文案里的显示名**（`dashscope /embeddings timeout …`），不切换实现。实现恒为 OpenAI 兼容客户端，实际厂商由 `baseURL` 决定 |
-| `baseURL` | `string` | `https://api.siliconflow.cn/v1` | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议，如 `https://host/compatible-mode/v1`）；换厂商只改这里。URL 是否真的兼容只能在真实请求时暴露（`ki doctor` 的连通性/密钥/维度三合一探测即此用途） |
-| `model` | `string` | `Qwen/Qwen3-Embedding-8B` | 模型名称 |
-| `dimension` | `number` | `4096` | 向量维度，必须与建库时写入 collection 的维度一致；可配置（如 `1024`），更改后需重建向量 |
+| `provider` | `string` | `dashscope` | **自由文本，不做校验**（如 `dashscope` / `siliconflow` / `openai-compatible`）：仅作为**错误文案里的显示名**（`dashscope /embeddings timeout …`），不切换实现。实现恒为 OpenAI 兼容客户端，实际厂商由 `baseURL` 决定 |
+| `baseURL` | `string` | `https://maas.qianwenaiapi.com/compatible-mode/v1` | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议，如 `https://host/compatible-mode/v1`）；默认为本项目使用的 MaaS 兼容地址，无访问权限时替换为任意兼容端点。URL 是否真的兼容只能在真实请求时暴露（`ki doctor` 的连通性/密钥/维度三合一探测即此用途） |
+| `model` | `string` | `qwen3.7-text-embedding-flash` | 模型名称 |
+| `dimension` | `number` | `1024` | 向量维度，必须与建库时写入 collection 的维度一致；更改后需重建向量。**存量 4096 维库请显式保留 `4096` 或重建向量**，不要沿用新默认 |
 | `apiKey` | `string` | 无 | 密钥：支持明文 `sk-xxx` 或环境变量引用 `${VAR_NAME}`；缺省则不解析（KI 层 fail-loud，不做隐式 env 回退） |
 | `queryTimeoutMs` | `number` | `3000` | 查询 embedding 超时（ms），范围 `1-60000`；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `scheduler` | `object` | 见下表 | import/restore/rebuild 的有界 Embedding 调度与背压护栏 |
@@ -121,11 +121,11 @@ Embedding 提供商配置。
 
 ```yaml
 embedding:
-  provider: siliconflow
-  baseURL: https://api.siliconflow.cn/v1
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096
-  apiKey: ${SILICONFLOW_API_KEY}
+  provider: dashscope
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1
+  model: qwen3.7-text-embedding-flash
+  dimension: 1024
+  apiKey: ${DASHSCOPE_API_KEY}
   queryTimeoutMs: 3000
   scheduler:
     batchSize: 16
@@ -138,7 +138,7 @@ embedding:
     consecutiveFailureThreshold: 3
 ```
 
-> **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。
+> **安全建议**：`apiKey` 优先使用环境变量引用 `${VAR_NAME}`，不要把密钥明文写入配置文件。DashScope 兼容端点的密钥获取地址：<https://platform.qianwenai.com/home/api-keys>。
 
 ### `llm`
 
@@ -311,11 +311,11 @@ backupDir: /data/ki-backup
 vectorDir: /root/.ki/vector
 
 embedding:
-  provider: siliconflow
-  baseURL: https://api.siliconflow.cn/v1
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096
-  apiKey: ${SILICONFLOW_API_KEY}
+  provider: dashscope
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1
+  model: qwen3.7-text-embedding-flash
+  dimension: 1024
+  apiKey: ${DASHSCOPE_API_KEY}
   queryTimeoutMs: 3000
 
 # 侧边栏 AI 对话（整段可缺省；缺省 = 对话功能关闭，其余功能不受影响）

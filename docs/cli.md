@@ -1299,7 +1299,7 @@ ki config init
   "configPath": "/Users/me/.ki/config.yaml",
   "existed": false,
   "createdDirs": ["/Users/me/.ki/kb", "/Users/me/.ki/backup", "/Users/me/.ki/vector"],
-  "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 ${VAR_NAME} 引用环境变量（不做隐式回退）。"
+  "message": "配置文件已生成（YAML）：/Users/me/.ki/config.yaml\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 ${VAR_NAME} 引用环境变量（不做隐式回退）。\nAPI 密钥获取：https://platform.qianwenai.com/home/api-keys"
 }
 ```
 
@@ -1314,11 +1314,11 @@ vector:
   maxOpenCollections: 8      # daemon 同时保留的 Collection handle 上限（LRU）
 
 embedding:                    # Embedding 提供方（实现恒为 OpenAI 兼容客户端，实际厂商由 baseURL 决定）
-  provider: siliconflow       # 自由文本，仅用于错误文案展示（不校验、不切换实现）
-  baseURL: https://api.siliconflow.cn/v1  # 必须指向 OpenAI 兼容端点（/embeddings 协议），换厂商只改这里
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096             # 向量维度（必须与建库时一致）
-  apiKey: ${SILICONFLOW_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量（变量名自定义）
+  provider: dashscope         # 自由文本，仅用于错误文案展示（不校验、不切换实现）
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1  # 必须指向 OpenAI 兼容端点（/embeddings 协议），换厂商只改这里
+  model: qwen3.7-text-embedding-flash
+  dimension: 1024             # 向量维度（必须与建库时一致；存量 4096 维库请显式保留 4096 或重建向量）
+  apiKey: ${DASHSCOPE_API_KEY}  # 必填：明文 sk-xxx 或 ${VAR_NAME} 引用环境变量；密钥获取：https://platform.qianwenai.com/home/api-keys
   queryTimeoutMs: 3000        # 查询 embedding 超时（ms）；timeout 参数可按请求覆盖，范围 1-60000
   scheduler:
     batchSize: 16             # 每次逻辑 provider 调用的文本数（单批约 18 万字符 ≈10s）
@@ -1350,10 +1350,10 @@ scopes:
 | `backupDir` | 顶级 | 备份快照存储目录 |
 | `vectorDir` | 顶级 | zvec 向量库目录，每个 scope 使用 `collections/<scope>` 独立 Collection（独立，不进备份） |
 | `vector.maxOpenCollections` | `vector` | daemon 同时保留的 Collection handle 上限；达到上限后释放空闲 LRU 句柄，默认 8 |
-| `embedding.provider` | 顶级 | **自由文本、不做校验**（如 `siliconflow` / `dashscope` / `openai-compatible`）：仅作为错误文案里的显示名，不切换实现（实现恒为 OpenAI 兼容客户端） |
-| `embedding.baseURL` | 顶级 | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议）；实际厂商由它决定，换厂商只改此处 |
-| `embedding.model` | 顶级 | 模型名称 |
-| `embedding.dimension` | 顶级 | 向量维度，必须与建库时一致 |
+| `embedding.provider` | 顶级 | **自由文本、不做校验**（如 `dashscope` / `siliconflow` / `openai-compatible`）：仅作为错误文案里的显示名，不切换实现（实现恒为 OpenAI 兼容客户端） |
+| `embedding.baseURL` | 顶级 | **必须指向 OpenAI 兼容端点**（`/embeddings` 协议）；默认 `https://maas.qianwenaiapi.com/compatible-mode/v1`，实际厂商由它决定，换厂商只改此处 |
+| `embedding.model` | 顶级 | 模型名称，默认 `qwen3.7-text-embedding-flash` |
+| `embedding.dimension` | 顶级 | 向量维度，默认 `1024`，必须与建库时一致；**存量 4096 维库请显式保留 `4096` 或重建向量** |
 | `embedding.apiKey` | 顶级 | API 密钥（**必填**）：支持明文（`sk-xxx`）或环境变量引用（`${VAR_NAME}`，变量名自定义）；不做任何隐式回退 |
 | `embedding.queryTimeoutMs` | 顶级 | 查询 embedding 超时（ms），默认 3000，范围 1-60000；CLI/MCP/Web 可用 `timeout` 按请求覆盖 |
 | `embedding.scheduler` | 顶级 | import/restore/rebuild 的有界 Embedding 并发与向量缓冲背压；默认批大小 16、单任务并发 25、daemon 全局 25、单请求超时 60s、**熔断阈值 `consecutiveFailureThreshold: 3`**（连续 3 次 provider 调用失败才停止剩余批次；认证/维度/配置类错误首次即停） |
@@ -1363,7 +1363,7 @@ scopes:
 | `scopes.<scope>.wikiSync.enabled` | scope | 是否启用 Wiki 写回（默认 `true`） |
 | `scopes.<scope>.wikiSync.sourceDir` | scope | Wiki 写回目标目录 |
 
-> `apiKey` 是向量化功能的必需项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的 `SILICONFLOW_API_KEY`），以免在非硅基流动提供商下误用密钥。若仍想用 `SILICONFLOW_API_KEY`，显式写 `apiKey: ${SILICONFLOW_API_KEY}` 即可。缺少 key 时 MCP 仍会启动并提示警告；`ki doctor` 仍报告配置失败，向量化导入会报错，`sync-relation` 会返回 `vectorStored:false` 和 `vectorReason`。
+> `apiKey` 是向量化功能的必需项，写在配置文件 `embedding.apiKey`：可直接写明文密钥，或用 `${VAR_NAME}` 引用任意同名环境变量（推荐，避免明文入库）。系统**不做任何隐式回退**（不会回退到固定的厂商密钥变量，如 `SILICONFLOW_API_KEY`），以免在非该厂商的 `baseURL` 下误用密钥。默认配置示例用 `apiKey: ${DASHSCOPE_API_KEY}`；密钥获取地址：<https://platform.qianwenai.com/home/api-keys>。缺少 key 时 MCP 仍会启动并提示警告；`ki doctor` 仍报告配置失败，向量化导入会报错，`sync-relation` 会返回 `vectorStored:false` 和 `vectorReason`。
 >
 > ⚠️ **向后不兼容变更**：旧版仅靠环境变量 `SILICONFLOW_API_KEY`（未写 `embedding.apiKey`）的配置，升级后需在配置文件显式声明 `apiKey`。
 

@@ -130,15 +130,18 @@ dataDir: $HOME/.ki/kb
 backupDir: $HOME/.ki/backup
 vectorDir: $HOME/.ki/vector        # 每个 scope 独立 Collection：collections/<scope>
 embedding:
-  provider: siliconflow
-  apiKey: ${SILICONFLOW_API_KEY}   # 显式引用环境变量，不做隐式回退
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096                  # 必须与建库时一致
+  provider: dashscope              # 仅错误文案显示名，实际厂商由 baseURL 决定
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1
+  apiKey: ${DASHSCOPE_API_KEY}     # 显式引用环境变量，不做隐式回退
+  model: qwen3.7-text-embedding-flash
+  dimension: 1024                  # 必须与建库时一致
   queryTimeoutMs: 3000             # 查询 embedding 超时（ms）
 scopeMode: default                 # default 自动创建 scope；strict 需显式注册
 ```
 
-> 用 `${SILICONFLOW_API_KEY}` 这类引用时，该变量必须对**实际执行引擎的进程**可见：daemon 由 `ki mcp` 启动则继承 shell 环境即可；**由 IDE 以 stdio 直接拉起引擎**时 IDE 不继承 shell 环境，才需要在客户端 `env` 补上（正常用 stdio 桥接 daemon 时不需要）。完整配置项见 [`docs/configuration.md`](./docs/configuration.md)。
+> **Embedding API 密钥获取**：<https://platform.qianwenai.com/home/api-keys>。将密钥填到 `embedding.apiKey`（明文），或用 `${DASHSCOPE_API_KEY}` 引用同名环境变量（推荐）；系统不做任何隐式回退。
+>
+> 用 `${DASHSCOPE_API_KEY}` 这类引用时，该变量必须对**实际执行引擎的进程**可见：daemon 由 `ki mcp` 启动则继承 shell 环境即可；**由 IDE 以 stdio 直接拉起引擎**时 IDE 不继承 shell 环境，才需要在客户端 `env` 补上（正常用 stdio 桥接 daemon 时不需要）。完整配置项见 [`docs/configuration.md`](./docs/configuration.md)。
 
 ### 3. 导入外部 Wiki
 

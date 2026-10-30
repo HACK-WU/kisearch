@@ -90,19 +90,21 @@ vectorDir: ${v.vectorDir}
 vector:
   maxOpenCollections: 8
 
-# Embedding 提供方配置
+# Embedding 提供方配置（默认：DashScope 兼容端点）
 # provider / baseURL / model 可自由配置任意 OpenAI 兼容提供商（实际提供商由 baseURL 决定）
+# API 密钥获取：https://platform.qianwenai.com/home/api-keys
+# 默认端点为本项目使用的 MaaS 兼容地址；如无访问权限，替换为任意 OpenAI 兼容端点即可
 # apiKey 为必填项，支持两种写法（二选一）：
 #   1. 明文密钥：  apiKey: sk-xxxxxxxx
-#   2. 环境变量引用：apiKey: \${OPENAI_API_KEY}   # 变量名可自定义，运行时从同名环境变量读取
+#   2. 环境变量引用：apiKey: \${DASHSCOPE_API_KEY}   # 变量名可自定义，运行时从同名环境变量读取
 # 注：不做任何隐式回退。未配置 apiKey 则向量操作会 fail-loud（避免跨提供商误用密钥）
 embedding:
-  provider: siliconflow                    # 自由文本，仅用于错误文案展示（如 dashscope / openai-compatible），不校验、不切换实现
-  baseURL: https://api.siliconflow.cn/v1   # 【必须】OpenAI 兼容端点（/embeddings 协议）——实际厂商由它决定，换厂商只改这里
-  model: Qwen/Qwen3-Embedding-8B           # 模型名称
-  dimension: 4096                          # 向量维度（必须与建库时一致）
+  provider: dashscope                      # 自由文本，仅用于错误文案展示（如 dashscope / siliconflow / openai-compatible），不校验、不切换实现
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1   # 【必须】OpenAI 兼容端点（/embeddings 协议）——实际厂商由它决定，换厂商只改这里
+  model: qwen3.7-text-embedding-flash      # 模型名称
+  dimension: 1024                          # 向量维度（必须与建库时一致；存量 4096 维库请显式保留 4096 或重建向量）
   queryTimeoutMs: 3000                     # 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 可按请求覆盖，范围 1-60000
-  # apiKey: \${SILICONFLOW_API_KEY}          # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
+  # apiKey: \${DASHSCOPE_API_KEY}            # 必填：推荐用 \${VAR_NAME} 引用环境变量，避免明文入库
   scheduler:
     batchSize: 16                          # 每批文本数（单批约 18 万字符 ≈10s）；短文本场景可调大以降低请求数
     maxConcurrency: 25                     # 单任务并发（同时在途的 provider 请求数）；遇 429/超时优先下调
@@ -192,7 +194,7 @@ function handleConfigInit(options: ConfigInitOptions): void {
     configPath: configFile,
     existed: false,
     createdDirs,
-    message: `配置文件已生成（YAML）：${configFile}\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 \${VAR_NAME} 引用环境变量（不做隐式回退）。`,
+    message: `配置文件已生成（YAML）：${configFile}\n请根据实际需要修改 dataDir / vectorDir / embedding / scopes 字段。\napiKey 为必填：可在 embedding.apiKey 中写明文，或用 \${VAR_NAME} 引用环境变量（不做隐式回退）。\nAPI 密钥获取：https://platform.qianwenai.com/home/api-keys`,
   });
 }
 

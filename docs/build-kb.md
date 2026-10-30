@@ -38,15 +38,16 @@ ki config init --dir /path/to/test
 
 ```yaml
 embedding:
-  provider: siliconflow
-  apiKey: ${SILICONFLOW_API_KEY}
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 4096              # 必须与建库时一致
+  provider: dashscope
+  baseURL: https://maas.qianwenaiapi.com/compatible-mode/v1
+  apiKey: ${DASHSCOPE_API_KEY}   # 密钥获取：https://platform.qianwenai.com/home/api-keys
+  model: qwen3.7-text-embedding-flash
+  dimension: 1024              # 必须与建库时一致
   queryTimeoutMs: 3000         # 查询 embedding 超时（ms）
 ```
 
-> 使用其他 OpenAI 兼容服务时，把 `provider` 改为 `openai-compatible` 并显式配置 `baseURL`。
-> `dimension` 必须与已有向量库一致，否则启动或检索会报维度不匹配。
+> 如需更换服务商：改 `baseURL` / `model` / `dimension` 即可（`provider` 仅作错误文案显示名）。
+> `dimension` 必须与已有向量库一致，否则启动或检索会报维度不匹配；存量 4096 维库请显式保留 `4096`，或重建向量。
 
 ### 3. 注册 scope（可选）
 
