@@ -491,6 +491,8 @@ function spawnMcpDaemon(args: string[]): ChildProcess {
     detached: true,
     stdio: 'ignore',
     env: process.env,
+    // Windows：与 bin/ki.mjs 一致，detached 子进程不显示控制台窗口
+    windowsHide: true,
   });
   child.unref();
   return child;

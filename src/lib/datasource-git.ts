@@ -49,6 +49,9 @@ function execGit(args: string[], cwd?: string, options: GitExecOptions = {}): Pr
       maxBuffer: options.maxBuffer ?? 1024 * 1024,
       env: gitEnv(),
       encoding: 'utf8',
+      // Windows：daemon 以 detached 方式常驻（自身无控制台），每次 spawn console 程序
+      // 都会新建一个黑窗口并闪一下。windowsHide 让子进程用 CREATE_NO_WINDOW 启动。
+      windowsHide: true,
     }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stderr: typeof stderr === 'string' ? stderr : '' }));

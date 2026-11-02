@@ -19,7 +19,7 @@ export function extractScopeSnapshot(snapshotPath: string, scopeDataDir: string)
   fs.mkdirSync(parent, { recursive: true });
   const staging = fs.mkdtempSync(path.join(parent, `.${expectedRoot}.restore-`));
   try {
-    execFileSync('tar', [...tarPathArgs(), '-xzf', tarPath(snapshotPath), '-C', tarPath(staging)], { stdio: 'ignore' });
+    execFileSync('tar', [...tarPathArgs(), '-xzf', tarPath(snapshotPath), '-C', tarPath(staging)], { stdio: 'ignore', windowsHide: true });
     const extractedRoot = path.join(staging, expectedRoot);
     if (!fs.existsSync(extractedRoot) || !fs.statSync(extractedRoot).isDirectory()) {
       throw new Error(`快照缺少目标 scope 目录：${expectedRoot}`);
@@ -41,10 +41,10 @@ function validateTarEntries(snapshotPath: string, expectedRoot: string): void {
   let listing: string;
   let verboseListing: string;
   try {
-    listing = execFileSync('tar', [...tarPathArgs(), '-tzf', tarPath(snapshotPath)], { encoding: 'utf8' });
+    listing = execFileSync('tar', [...tarPathArgs(), '-tzf', tarPath(snapshotPath)], { encoding: 'utf8', windowsHide: true });
     // 在解压前拒绝链接条目。仅在 staging 解压后检查 symlink 太晚：恶意
     // archive 可能先创建外链，再让后续条目沿链接写到 staging 外部。
-    verboseListing = execFileSync('tar', [...tarPathArgs(), '-tvzf', tarPath(snapshotPath)], { encoding: 'utf8' });
+    verboseListing = execFileSync('tar', [...tarPathArgs(), '-tvzf', tarPath(snapshotPath)], { encoding: 'utf8', windowsHide: true });
   } catch (err) {
     throw new Error(`无法读取快照目录清单：${(err as Error).message}`);
   }

@@ -102,7 +102,7 @@ let _tarAvailable: boolean | null = null;
 function ensureTarAvailable(): void {
   if (_tarAvailable !== null) return;
   try {
-    execFileSync('tar', ['--version'], { stdio: 'ignore' });
+    execFileSync('tar', ['--version'], { stdio: 'ignore', windowsHide: true });
     _tarAvailable = true;
   } catch {
     _tarAvailable = false;
@@ -149,6 +149,7 @@ export function backupScopeSnapshot(
     execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(targetFile),
       '--exclude', `${scopeDirName}/.relation-edits`, '-C', tarPath(scopeDirParent), scopeDirName], {
       stdio: 'ignore',
+      windowsHide: true,
     });
   } catch (err) {
     // 中断/失败清理半截产物（NEG-09），避免残留损坏的 tar.gz

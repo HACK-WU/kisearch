@@ -116,6 +116,8 @@ function gitExec(args: string[], cwd?: string): Promise<{ stdout: string; stderr
       maxBuffer: 1024 * 1024,
       env: { ...process.env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
       encoding: 'utf8',
+      // Windows：daemon 无控制台（detached），不隐藏会为每条 git 命令弹一个黑窗口
+      windowsHide: true,
     }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stderr: typeof stderr === 'string' ? stderr : '' }));
@@ -329,6 +331,8 @@ export async function cloneManagedRepo(input: CloneManagedInput): Promise<CloneO
       const child = execFile('git', args, {
         timeout: input.timeoutMs ?? CLONE_TIMEOUT_MS,
         maxBuffer: 32 * 1024 * 1024,
+        // Windows：同上，clone 期间不留控制台窗口
+        windowsHide: true,
         env: {
           ...process.env,
           LC_ALL: 'C',

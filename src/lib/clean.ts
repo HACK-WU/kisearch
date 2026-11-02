@@ -217,6 +217,8 @@ export async function runCleanHooks(text: string, hooks: string[]): Promise<RunH
       const output = await new Promise<string>((resolve, reject) => {
         const child = spawn(shell, shellArgs(hook), {
           stdio: ['pipe', 'pipe', 'pipe'],
+          // Windows 下 shell 是 cmd.exe：daemon 无控制台时会弹黑窗口
+          windowsHide: true,
           ...spawnOptions,
         });
         let stdout = '';

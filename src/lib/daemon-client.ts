@@ -311,6 +311,8 @@ async function startDaemon(): Promise<void> {
     stdio: 'ignore',
     cwd: process.cwd(),
     env: { ...process.env },
+    // Windows：detached 会新建控制台（DETACHED_PROCESS），不加此项会闪一个黑窗口
+    windowsHide: true,
   });
   child.unref();
   // 预检失败、端口冲突或配置错误时，daemon 子进程会很快退出。

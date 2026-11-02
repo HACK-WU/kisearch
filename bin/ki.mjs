@@ -232,6 +232,11 @@ try {
     detached: isDaemon,
     cwd: process.cwd(),
     env: childEnv,
+    // Windows：daemon 模式是 detached（DETACHED_PROCESS 会新建控制台窗口），必须用
+    // CREATE_NO_WINDOW 启动；非 daemon 前台进程本就继承当前终端、不会弹窗，而
+    // CREATE_NO_WINDOW 会让子进程拿不到 console 句柄（isTTY 变 false，颜色/进度条失效），
+    // 故只在 daemon 分支开启。
+    ...(isDaemon ? { windowsHide: true } : {}),
   });
 
   if (isDaemon) {

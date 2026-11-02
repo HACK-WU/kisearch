@@ -5,7 +5,7 @@ let isGnu: boolean | null = null;
 function isGnuTar(): boolean {
   if (isGnu === null) {
     try {
-      isGnu = /GNU tar/i.test(execFileSync('tar', ['--version'], { encoding: 'utf8' }));
+      isGnu = /GNU tar/i.test(execFileSync('tar', ['--version'], { encoding: 'utf8', windowsHide: true }));
     } catch {
       // tar 不可用：交给调用方的可用性检查给出可读错误
       isGnu = false;
