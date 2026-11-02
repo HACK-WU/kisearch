@@ -3597,19 +3597,10 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
    ★ 只包一层 flex，不改 `.ki-task-notice` 本体 —— 任务页/导入页那几处是单段文本，
    改成 flex 会让长文本与内联 code 的换行行为变样。 */
 .ki-ds-vector-block { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
-.ki-ds-vector-block__text { flex: 1 1 320px; }
-/* 行内标记：与状态徽标并排，不参与表格列宽分配（nowrap + 11px） */
-.ki-ds-blocked-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
-  color: var(--ki-color-warning);
-  background: var(--ki-color-warning-soft);
-}
+/* 正文与「原因」上下两段：原因单独成行（拼在正文末尾时会在句中断开）。
+   `min-width: 0` 必须有 —— flex 子项默认 min-width:auto，长原因会把容器顶出横向溢出。 */
+.ki-ds-vector-block__text { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ki-ds-vector-block__reason { opacity: .88; }
 
 /* ═══ 提示信息卡片（Notice）═══
    视觉参考库 ui-tools/design-reference v1.0.0（components/notice.html + spec）。
@@ -7782,6 +7773,10 @@ select.ki-chat-cfg__ta--select {
 }
 /* 排队态：换语气色，别在排队时写「同步中」 */
 .ki-ds-sync-badge--queued { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+/* 向量不可用（2026-11-02）：复用同步徽标的外形与占位 —— 放「状态」列会折行撑高行高，
+   放 scope 名后不改变行高。去掉脉冲动画：它是持续状态，不是"正在发生"。 */
+.ki-ds-sync-badge--vector { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.ki-ds-sync-badge--vector .ki-ds-sync-badge__dot { animation: none; }
 @media (prefers-reduced-motion: reduce) {
   .ki-ds-sync-badge__dot { animation: none; }
 }

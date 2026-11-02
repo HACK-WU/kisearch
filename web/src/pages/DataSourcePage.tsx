@@ -905,9 +905,15 @@ export function DataSourcePage(): JSX.Element {
       {vectorBlockedSources.length > 0 ? (
         <div className="ki-task-notice ki-task-notice--warn ki-ds-vector-block" role="status">
           <span className="ki-ds-vector-block__text">
-            向量服务不可用：{vectorBlockedSources.length} 个已开启「向量化」的数据源同步会失败，定时同步将跳过。
-            在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后自动恢复。
-            {vectorAvailability.reason ? `原因：${vectorAvailability.reason}` : ''}
+            <span>
+              向量服务不可用：{vectorBlockedSources.length} 个已开启「向量化」的数据源同步会失败，定时同步将跳过。
+              在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后自动恢复。
+            </span>
+            {/* 原因独立成行（2026-11-02 用户定稿）：拼在正文末尾时，长原因会在句中断开，
+                读起来像正文写歪了；它本身是"证据/诊断"，单独一行也更好扫。 */}
+            {vectorAvailability.reason ? (
+              <span className="ki-ds-vector-block__reason">原因：{vectorAvailability.reason}</span>
+            ) : null}
           </span>
           <button
             type="button"
@@ -1479,6 +1485,20 @@ export function DataSourcePage(): JSX.Element {
                             {scopeSyncLabel}
                           </span>
                         ) : null}
+                        {/* 向量不可用（2026-11-02 用户定稿 A 方案）：**放 scope 名后**而不是「状态」列 ——
+                            状态列只有 7%（约 76px 可用），塞两个徽标必然折行，有标记的行会比别的行高，
+                            正是之前反复避免的行高抖动。此处复用 `ki-ds-sync-badge` 的外形与占位
+                            （实测 7 档视口不改变行高，代价是长 scope 名更早省略，与「同步中」同款）。
+                            只标开了向量化的行：关闭向量化的源在同样环境下照常同步，标它等于误伤。 */}
+                        {rowVectorBlocked ? (
+                          <span
+                            className="ki-ds-sync-badge ki-ds-sync-badge--vector"
+                            title="向量服务不可用：该源已开启「向量化」，同步会整体失败；在「编辑」里关闭向量化或修复 embedding 后恢复"
+                          >
+                            <span className="ki-ds-sync-badge__dot" aria-hidden="true" />
+                            仅全文
+                          </span>
+                        ) : null}
                       </span>
                     </td>
                     <td className="ki-ds-col--type">
@@ -1510,13 +1530,6 @@ export function DataSourcePage(): JSX.Element {
                         className={`ki-task-state ki-task-state--${status.tone}`}
                         title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
                       >{status.label}</span>
-                      {/* 只标开了向量化的行：关闭向量化的源在同样环境下照常同步，标它等于误伤 */}
-                      {rowVectorBlocked ? (
-                        <span
-                          className="ki-ds-blocked-badge"
-                          title="向量服务不可用：该源已开启「向量化」，同步会整体失败；在「编辑」里关闭向量化或修复 embedding 后恢复"
-                        >向量不可用</span>
-                      ) : null}
                     </td>
                     <td className="ki-ds-col--duration">
                       {source.lastSync ? formatSyncDuration(source.lastSync.durationMs) : '—'}
