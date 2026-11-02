@@ -709,14 +709,17 @@ describe('executeBulkSyncRelation 批量同步（非向量化）', () => {
 });
 
 /**
- * Group 留空兜底（2026-10-21 · Q2 口径统一）
+ * Group 留空兜底（2026-11-02 起落点是根保留键 `__root__`）
  *
  * 三处调用方（写入页 / MCP 工具 / CLI）都必须同口径：group 留空不再是错误，
- * 而是落到**与 scope 同名的组**（对齐 import-path.ts resolveGroupForSource 的根目录口径），
+ * 而是落到**根**（`import-path.ts` 的 `ROOT_GROUP_KEY`，与导入的根目录口径一致），
  * 并且必须通过 hint 让调用方看见实际落点——否则字会"悄悄"写到一个用户没指定的组里。
+ *
+ * 为什么不再用 scope 名：2026-11-02 实测确认它会与「源目录里真实存在同名子目录」共用
+ * group 键，同名文档被判幂等重导后内容丢失（见 `.debug/import-root-files-scope-group-20261102/`）。
  */
 describe('sync-relation Group 留空兜底', () => {
-  it('省略 --group → 落到与 scope 同名的组，hint 回显落点', async () => {
+  it('省略 --group → 落到根，hint 回显落点', async () => {
     const relation = '空组兜底文档';
     const result = runSync([
       '--scope', scope,
@@ -726,18 +729,25 @@ describe('sync-relation Group 留空兜底', () => {
     ]);
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.match(String(result.hint ?? ''), /Group 为空/, 'hint 必须说明留空兜底');
-    assert.ok(String(result.hint ?? '').includes(scope), 'hint 必须回显实际落点组名');
+    assert.match(String(result.hint ?? ''), /根目录/, 'hint 必须回显落点是根');
+    assert.ok(!String(result.hint ?? '').includes('__root__'), 'hint 不得把内部保留键铺给用户');
 
+    const { ROOT_GROUP_KEY } = await import('../src/lib/import-path.js');
     const { readJson } = await import('../src/lib/store.js');
     const { getLocalKbDir } = await import('../src/lib/scope.js');
-    const localKb = readJson<any>(getLocalKbDir(scope, scope));
-    assert.ok(localKb?.[relation], '本地 KB 应落在 <kb>/<scope>/index.json');
+    const localKb = readJson<any>(getLocalKbDir(scope, ROOT_GROUP_KEY));
+    assert.ok(localKb?.[relation], '本地 KB 应落在 <kb>/__root__/index.json');
 
     const { loadCacheShape } = await import('../src/lib/group-cache.js');
     const cache = loadCacheShape(scope) as any;
     assert.ok(
-      cache.groups[scope]?.hot_relations.some((item: any) => item.text === relation),
-      '元数据应记在 <scope> 同名组下',
+      cache.groups[ROOT_GROUP_KEY]?.hot_relations.some((item: any) => item.text === relation),
+      '元数据应记在根组下',
+    );
+    assert.equal(
+      cache.groups[scope]?.hot_relations.some((item: any) => item.text === relation) ?? false,
+      false,
+      '不得再落到与 scope 同名的组（那会与同名子目录合并）',
     );
   });
 
@@ -753,9 +763,9 @@ describe('sync-relation Group 留空兜底', () => {
     assert.doesNotMatch(String(result.hint ?? ''), /Group 为空/);
   });
 
-  it('落点来源留痕：兜底写 scope-fallback，显式写入清除该字段', async () => {
+  it('落点来源留痕：兜底写 scope-fallback，显式写入不带该字段', async () => {
     const relation = '落点来源文档';
-    // 1) 留空 → 落 scope 同名组，元数据应带 groupSource
+    // 1) 留空 → 落根组，元数据应带 groupSource
     const r1 = runSync([
       '--scope', scope,
       '--relation', relation,
@@ -764,27 +774,46 @@ describe('sync-relation Group 留空兜底', () => {
     ]);
     assert.equal(r1.ok, true, JSON.stringify(r1));
 
+    const { ROOT_GROUP_KEY } = await import('../src/lib/import-path.js');
     const { loadCacheShape } = await import('../src/lib/group-cache.js');
     let cache = loadCacheShape(scope) as any;
-    let item = cache.groups[scope]?.hot_relations.find((r: any) => r.text === relation);
-    assert.ok(item, '应写入 scope 同名组');
+    let item = cache.groups[ROOT_GROUP_KEY]?.hot_relations.find((r: any) => r.text === relation);
+    assert.ok(item, '应写入根组');
     assert.equal(item.groupSource, 'scope-fallback', '兜底写入必须留痕');
 
-    // 2) 同一 (group, relation) 显式写入 → 覆盖语义：字段被清除（缺省即 explicit）
+    // 2) 显式组写入同一 relation → 是**另一个组**（不再与根共用键），不带兜底标记
     const r2 = runSync([
       '--scope', scope,
-      '--group', scope,
+      '--group', '显式落点组',
       '--relation', relation,
       '--module-info', '# 落点来源\n\n正文（显式）',
       '--no-vector',
     ]);
     assert.equal(r2.ok, true, JSON.stringify(r2));
     cache = loadCacheShape(scope) as any;
-    item = cache.groups[scope]?.hot_relations.find((r: any) => r.text === relation);
-    assert.equal(item.groupSource, undefined, '显式写入应清除兜底标记');
+    item = cache.groups['显式落点组']?.hot_relations.find((r: any) => r.text === relation);
+    assert.ok(item, '显式组应有该文档');
+    assert.equal(item.groupSource, undefined, '显式写入不带兜底标记');
+    // 根组那份仍在：显式写不同组不再覆盖根文档（旧口径下二者共用键才会互相覆盖）
+    assert.ok(
+      cache.groups[ROOT_GROUP_KEY]?.hot_relations.some((r: any) => r.text === relation),
+      '根组那份应保留',
+    );
   });
 
-  it('批量模式 item.group 留空同样落 scope 同名组，且整批只提示一次', async () => {
+  it('用户手写保留键被拒（根只能靠留空到达）', () => {
+    const result = runSync([
+      '--scope', scope,
+      '--group', '__root__',
+      '--relation', '手写根键',
+      '--module-info', '# x\n\n正文',
+      '--no-vector',
+    ]);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.match(String(result.error ?? ''), /保留名/);
+  });
+
+  it('批量模式 item.group 留空同样落根，且整批只提示一次', async () => {
     const bulkScope = `sync-bulk-group-empty-${Date.now()}`;
     registerTestScope(bulkScope);
     const { initScope } = await import('../src/lib/store.js');
@@ -811,11 +840,13 @@ describe('sync-relation Group 留空兜底', () => {
         1,
         `兜底提示应整批只出现一次，实际：${JSON.stringify(hints)}`,
       );
-      assert.ok(hints.some((h) => h.includes(bulkScope)), 'hint 必须回显落点组名');
+      assert.ok(hints.some((h) => h.includes('根目录')), 'hint 必须回显落点是根');
+      assert.ok(!hints.some((h) => h.includes('__root__')), 'hint 不得泄露内部保留键');
 
+      const { ROOT_GROUP_KEY } = await import('../src/lib/import-path.js');
       const { loadCacheShape } = await import('../src/lib/group-cache.js');
       const cache = loadCacheShape(bulkScope) as any;
-      const texts = (cache.groups[bulkScope]?.hot_relations ?? []).map((item: any) => item.text);
+      const texts = (cache.groups[ROOT_GROUP_KEY]?.hot_relations ?? []).map((item: any) => item.text);
       assert.ok(texts.includes('批量空组A') && texts.includes('批量空组B'), JSON.stringify(texts));
     } finally {
       const kbDir = getKbDir(bulkScope);

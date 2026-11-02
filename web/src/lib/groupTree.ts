@@ -8,6 +8,25 @@
  */
 
 import type { DocGroup } from '@/api/httpApi';
+// 根散文件的落点键与展示名：唯一定义在零依赖模块里（`chat/format.ts` 走 jiti 时也能复用）
+export { ROOT_GROUP_KEY, ROOT_GROUP_LABEL, groupDisplayName, isRootGroup } from './rootGroup';
+import { isRootGroup } from './rootGroup';
+
+/**
+ * 把 groups 列表拆成「根组」与「普通组」。
+ *
+ * 根组不进入目录树（`buildGroupTree` 也会跳过它，双保险：任何调用方只过滤一处都不会把
+ * `根` 渲染成一个名叫「__root__」的文件夹）。
+ */
+export function splitRootGroup(groups: DocGroup[]): { rootCount: number; rest: DocGroup[] } {
+  let rootCount = 0;
+  const rest: DocGroup[] = [];
+  for (const group of groups) {
+    if (isRootGroup(group.name)) rootCount += group.count;
+    else rest.push(group);
+  }
+  return { rootCount, rest };
+}
 
 export interface GroupTreeNode {
   name: string;
@@ -32,6 +51,8 @@ export function buildGroupTree(groups: DocGroup[]): GroupTreeNode[] {
   };
 
   for (const group of groups) {
+    // 根散文件不是目录：跳过后由调用方裸挂在树顶（见 splitRootGroup）
+    if (isRootGroup(group.name)) continue;
     const segments = group.name.split('/').filter(Boolean);
     let parent: GroupTreeNode | null = null;
     for (let i = 0; i < segments.length; i++) {

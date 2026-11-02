@@ -22,6 +22,7 @@ import {
   type GroupIndex,
 } from './lib/scope.js';
 import { generateMarkdown } from './lib/markdown-gen.js';
+import { groupToRelDir } from './lib/import-path.js';
 import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './lib/group-cache.js';
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable } from './lib/preflight.js';
@@ -278,7 +279,9 @@ export function handleExport(options: ExportOptions): ExportResult {
   const relPathFor = (groupPath: string): string => {
     if (!group) {
       // 缺省全量：顶层名 = scope name，后面接完整 groupPath
-      return path.join(scope, groupPath);
+      // 根散文件（`__root__`）不留内部键目录：直接落在 scope 顶层
+      const relDir = groupToRelDir(groupPath);
+      return relDir ? path.join(scope, relDir) : scope;
     }
     // 显式 --group：父目录名 = group 最后一段；groupPath 去掉该 group 前缀后接其后
     const segs = groupPath.split('/').filter(Boolean);

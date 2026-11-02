@@ -64,8 +64,8 @@ export function WritePage(): JSX.Element {
   const bodyRef = useRef<HTMLTextAreaElement>(null);
 
   /**
-   * Group 允许留空：落点由 `resolveWriteGroup` 统一推导（留空 → 与 scope 同名的 Group，
-   * 与 `ki import` 的根目录口径一致）。推导规则与后端保持一致，见 `@/lib/writeGroup`。
+   * Group 允许留空：落点由 `resolveWriteGroup` 统一推导（留空 → 根），
+   * 与 `ki import` 的根目录口径一致。推导规则与后端保持一致，见 `@/lib/writeGroup`。
    */
   const { group: targetGroup, fellBack: groupFellBack } = resolveWriteGroup(group, scope);
 
@@ -176,7 +176,7 @@ export function WritePage(): JSX.Element {
         if (res.ok) setAvailableTags(res.tags.map((tag) => tag.tag));
       }).catch(() => {});
       setResult(
-        `写入成功${groupFellBack ? `（Group 留空 → 写入「${target.group}」组）` : ''}` +
+        `写入成功${groupFellBack ? '（Group 留空 → 写入根目录）' : ''}` +
         `${effectiveVector ? '' : '（未向量化）'}${selectedTags.length > 0 ? `（标签：${selectedTags.join(', ')}）` : ''}`,
       );
       setSavedTarget(target);
@@ -308,7 +308,7 @@ export function WritePage(): JSX.Element {
                 placeholder={`留空 = 写入「${scope || currentScope}」组，或输入路径如：告警系统/告警收敛`}
                 hint={
                   scopeConfirmed
-                    ? `斜杠分隔层级，下拉选择已有 Group 或直接输入新建；留空则写入与 scope 同名的组「${scope}」。禁止包含 \\ 和 ..`
+                    ? `斜杠分隔层级，下拉选择已有 Group 或直接输入新建；留空则写入「根」目录。禁止包含 \\ 和 ..`
                     : '下拉来自当前 Scope；保存前需确认上方目标 Scope。'
                 }
                 error={groupErr}

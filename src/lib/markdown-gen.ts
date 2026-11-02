@@ -6,6 +6,7 @@
  *
  * 批次 3（REQ-05）：frontmatter 移除 keywords 字段。
  */
+import { groupDisplayName } from './import-path.js';
 
 /**
  * YAML 安全字符串：用 JSON.stringify 包裹，生成合法 YAML 双引号字符串
@@ -21,6 +22,9 @@ export function yamlSafe(input: string): string {
 
 /**
  * 生成带 YAML frontmatter 的 Markdown 文件内容
+ *
+ * ★ `groupPath` 是**面向人**的元数据：根散文件的存储键 `__root__` 必须在这里显示为「根」
+ *   （`groupDisplayName`），否则导出的 markdown / wiki 回写文件里会留下这个内部保留名。
  */
 export function generateMarkdown(
   groupPath: string,
@@ -30,7 +34,7 @@ export function generateMarkdown(
 ): string {
   const frontmatter = [
     '---',
-    `groupPath: ${yamlSafe(groupPath)}`,
+    `groupPath: ${yamlSafe(groupDisplayName(groupPath))}`,
     `relation: ${yamlSafe(relation)}`,
     `exportedAt: ${yamlSafe(exportedAt)}`,
     '---',

@@ -50,7 +50,7 @@ program
   // 非 requiredOption：`--retry-incomplete` 允许省略 --source（沿用上次导入记录的源目录），
   // 缺省校验移到 action 内（见下方「必须提供 --source」），以便给出更准确的提示
   .option('--source <sourceDir>', '外部 Markdown Wiki 根目录（原文直导，无 AI 依赖，自动切分）；--retry-incomplete 时可省略')
-  .option('--group <group>', '目标 Group 落点（不存在时自动新建，含父路径）。缺省时目录导入按顶层子目录名各建根节点，单文档导入用 scope name')
+  .option('--group <group>', '目标 Group 落点（不存在时自动新建，含父路径）。缺省时按相对目录建组，源目录根下的散文件落到「根」')
   .option('--chunk-size <chunkSize>', '切分目标长度（字符，默认 1000）')
   .option('--chunk-overlap <chunkOverlap>', '切分重叠字符数（默认 150）')
   .option('--no-vector', 'FTS-only 模式：不调用 embedding，不写 dense 向量；清洗后的 chunk 写入独立全文 Collection，可被 fulltext 检索')

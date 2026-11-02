@@ -18,6 +18,41 @@ export function toPosixPath(value: string): string {
 }
 
 /**
+ * 「根散文件」的固定落点键。
+ *
+ * 为什么需要一个保留键，而不是继续用 scope 名（2026-11-02 实测缺陷）：
+ * 缺省 Group 时根下散文件若落到 `scope` 名，就与「源目录里真实存在一个与 scope 同名的
+ * 子目录」共用同一个 group 键 —— 两篇不同物理源的 `x.md` 会解析成同一个 `group + relation`，
+ * 被 `duplicate-index` 误判成「同一篇文档幂等重导」，**后一篇内容静默丢失**。
+ * 实测：`src/root.md` + `src/<scope>/root.md` 导入后组内只剩一篇。
+ *
+ * 用保留键而不是空 Group（`''`）：空键在分片路径、persistCacheShape、分片枚举、路径向量
+ * docId、`/api/doc/list?group=` 语义上都不可表达（详见 `sync-relation.ts` 的 5 条约束）。
+ *
+ * ★ 该键只用于**存储**。所有面向人的出口（CLI / Web / 日志）都要经
+ *   `groupDisplayName()` 映射成「根」，不能把 `__root__` 直接铺给用户。
+ */
+export const ROOT_GROUP_KEY = '__root__';
+
+/** 是否为根散文件的落点键 */
+export function isRootGroup(group: string): boolean {
+  return group === ROOT_GROUP_KEY;
+}
+
+/**
+ * Group → 相对目录（根组 = 空串，即 Wiki 回写落在 wiki 根目录下）。
+ * 用于一切「group 拼文件路径」的地方，避免在用户目录里凭空出现 `__root__/` 文件夹。
+ */
+export function groupToRelDir(group: string): string {
+  return isRootGroup(group) ? '' : group;
+}
+
+/** Group → 展示名（根组显示为「根」；其余原样） */
+export function groupDisplayName(group: string): string {
+  return isRootGroup(group) ? '根' : group;
+}
+
+/**
  * 显式 group 下的落点：`group` 或 `group/<文件所在子目录>`。
  * 与 `ai-results.deriveGroupPath` 同义（此处不复用其模块，避免拖入 AI 结果链路依赖）。
  */
@@ -29,13 +64,16 @@ export function deriveGroupPath(group: string, relPath: string): string {
 /**
  * 推导文件落点的 groupPath（`--group` 语义）：
  * - 显式 group（非空）：group 作为统一根前缀，文件相对子目录挂其下；
- * - 缺省 group：目录导入用文件相对目录（顶层子目录名即根），根下文件归 scope 根；
- * - 单文件导入（rel 无目录）且缺省 group：归 scope 根。
+ * - 缺省 group：目录导入用文件相对目录（顶层子目录名即根），根下文件归 `ROOT_GROUP_KEY`；
+ * - 单文件导入（rel 无目录）且缺省 group：同样归 `ROOT_GROUP_KEY`。
+ *
+ * ★ 2026-11-02 起不再用 `scope` 名做根：那样会与「源目录里真实存在的同名子目录」共用
+ *   同一个 group 键，导致同名 relation 被误判幂等重导且后一篇内容丢失（见 ROOT_GROUP_KEY 注释）。
  */
-export function resolveGroupForSource(group: string, rel: string, scope: string): string {
+export function resolveGroupForSource(group: string, rel: string, _scope?: string): string {
   if (group) return deriveGroupPath(group, rel);
   const dir = path.posix.dirname(toPosixPath(rel));
-  return dir === '.' ? scope : dir;
+  return dir === '.' ? ROOT_GROUP_KEY : dir;
 }
 
 /**
@@ -48,6 +86,22 @@ export function isSafeGroupPath(group: string): boolean {
   if (group === '') return true;
   if (group.startsWith('/') || group.includes('\\')) return false;
   return !group.split('/').includes('..');
+}
+
+/**
+ * 用户可**显式指定**的 Group 路径。
+ *
+ * 与 `isSafeGroupPath` 的分工（别合并成一个）：
+ * - `isSafeGroupPath` = 这个 group 键能否用于内部存储/路径拼接；
+ * - 本函数 = 用户能否自己填这个名字。
+ *
+ * `ROOT_GROUP_KEY` 对前者合法（导入会写到它、Wiki 回写要拼它），对后者非法：
+ * 根是「Group 留空」的落点，用户手写 `__root__` 会绕过语义（以为建了个普通目录）。
+ * ★ 用户输入侧（`/api/import/preflight`、`/api/import/run`、数据源 group 配置、
+ *   `ki sync-relation --group`）必须用本函数；内部生成值只走 `isSafeGroupPath`。
+ */
+export function isUserAssignableGroup(group: string): boolean {
+  return isSafeGroupPath(group) && !isRootGroup(group);
 }
 
 /**

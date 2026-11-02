@@ -14,6 +14,8 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
+// 根散文件的 group 键（`__root__`）只用于存储，展示统一映射成「根」
+import { groupDisplayName } from '@/lib/groupTree';
 import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
 import {
   MAX_CHUNK_OVERLAP,
@@ -2204,7 +2206,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 value={group}
                 onChange={setGroup}
                 placeholder="选择或输入 Group 路径，如：wiki/我的文档"
-                hint={scopeConfirmed ? "留空则按文件所在子目录各建根节点（根目录下的散文件归 scope 名称）；选择后文件写入该路径下并保留相对目录结构。禁止包含 \\ 和 .." : '下拉来自当前 Scope；开始导入前需确认上方目标 Scope。'}
+                hint={scopeConfirmed ? "留空则按文件所在子目录各建组，源目录根下的散文件落到「根」；选择后文件写入该路径下并保留相对目录结构。禁止包含 \\ 和 .." : '下拉来自当前 Scope；开始导入前需确认上方目标 Scope。'}
                 error={groupErr}
               />
             </div>
@@ -2588,10 +2590,10 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                     <span className="ki-preflight__arrow" aria-hidden="true">→</span>
                     <span
                       className="ki-preflight__existing"
-                      title={`${item.existingRelation}${item.existingGroup ? ` · ${item.existingGroup}` : ''}${item.existingSourcePath ? ` · 来源 ${item.existingSourcePath}` : ' · 来源未记录'}`}
+                      title={`${item.existingRelation}${item.existingGroup ? ` · ${groupDisplayName(item.existingGroup)}` : ''}${item.existingSourcePath ? ` · 来源 ${item.existingSourcePath}` : ' · 来源未记录'}`}
                     >
                       <b>{item.existingRelation}</b>
-                      {item.existingGroup ? <span className="ki-preflight__group">· {item.existingGroup}</span> : null}
+                      {item.existingGroup ? <span className="ki-preflight__group">· {groupDisplayName(item.existingGroup)}</span> : null}
                     </span>
                   </div>
                 ))}
@@ -2866,7 +2868,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                       {pruneReceipt.failed.length > 0 && `；${pruneReceipt.failed.length} 篇失败：`}
                       {pruneReceipt.failed.map((item) => (
                         <div key={pruneKeyOf(item)}>
-                          {item.group} / {item.relation}：{item.reason}
+                          {groupDisplayName(item.group)} / {item.relation}：{item.reason}
                         </div>
                       ))}
                     </div>
@@ -3059,7 +3061,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                                   });
                                 }}
                               />
-                              <span>{groupPath}</span>
+                              <span>{groupDisplayName(groupPath)}</span>
                               <span
                                 className="ki-cell-sub"
                                 style={{ fontWeight: 400, flex: 'none' }}
@@ -3257,7 +3259,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                             ? '当前没有选中任何文档。'
                             : pruneWholeGroups.length > 0
                               ? `${pruneWholeGroups.length} 个组将被整组清空（${pruneWholeGroups
-                                .map((entry) => `${entry.group} ${entry.items.length} 篇`)
+                                .map((entry) => `${groupDisplayName(entry.group)} ${entry.items.length} 篇`)
                                 .join('、')}）。原文、向量与全文索引一并物理删除，不可恢复。`
                               : '原文、向量与全文索引一并物理删除，不可恢复。'}
                         </div>
@@ -3328,7 +3330,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                     <ul style={{ margin: '6px 0 0 18px', padding: 0, overflowWrap: 'anywhere' }}>
                       {duplicatesSkippedList.map((item) => (
                         <li key={item.path}>
-                          {item.path} ↔ 已有「{item.existingRelation}」（{item.existingGroup}）
+                          {item.path} ↔ 已有「{item.existingRelation}」（{groupDisplayName(item.existingGroup)}）
                         </li>
                       ))}
                     </ul>
@@ -3363,7 +3365,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
                 <ul>
                   {incompleteItems.slice(0, 10).map((item, index) => (
                     <li key={`${item.path ?? 'incomplete'}-${index}`}>
-                      {item.path ?? '文件'}{item.group ? `（${item.group}）` : ''}：{item.reason ?? '未完成'}
+                      {item.path ?? '文件'}{item.group ? `（${groupDisplayName(item.group)}）` : ''}：{item.reason ?? '未完成'}
                     </li>
                   ))}
                   {incompleteItems.length > 10 && <li>…另有 {incompleteItems.length - 10} 个未完成文件</li>}

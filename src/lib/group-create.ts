@@ -16,6 +16,7 @@ import { assertNoPendingVectorMigration } from './vector-client.js';
 import { callDaemon, shouldUseDaemonClient } from './daemon-client.js';
 import { normalizeGroupPath } from './group-delete.js';
 import { ensureWikiGroupDir } from './wiki-sync.js';
+import { ROOT_GROUP_KEY, isRootGroup } from './import-path.js';
 
 export interface GroupCreateOptions {
   scope?: string;
@@ -87,6 +88,10 @@ function createLocal(scope: string, rawPath: string): GroupCreateResult {
     canonical = normalizeGroupPath(rawPath);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
+  }
+  // 根保留名不能被手动创建：它由「Group 留空」自动使用，手建会让人以为多了个普通目录
+  if (isRootGroup(canonical)) {
+    return { ok: false, error: `"${ROOT_GROUP_KEY}" 是根保留名，不能手动创建；写入根目录请留空 Group` };
   }
   const segs = canonical.split('/');
   const name = segs[segs.length - 1];

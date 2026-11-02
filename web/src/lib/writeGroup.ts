@@ -1,19 +1,21 @@
 /**
  * writeGroup.ts —— 写入落点推导（前端唯一实现）
  *
- * Group 允许留空：留空落到**与 scope 同名的 Group**——与 `ki import` 的根目录口径一致
- * （`src/lib/import-path.ts` 的 `resolveGroupForSource`：根下散文件归 `scope` 名）。
+ * Group 允许留空：留空落到**根**（后端 `__root__` 保留键）——与 `ki import` 的根目录口径一致
+ * （`src/lib/import-path.ts` 的 `resolveGroupForSource`：源目录根下的散文件归根）。
  *
- * ★ 为什么不引入"空 group 键"（让文档真正落在 scope 根）：
- *   - 分片路径：`group-cache.ts` 里 `''.split('/')` = `['']` 命中 `s === ''` ⇒ 直接抛"非法的 Group 路径"；
- *   - 落盘兼容桥：`persistCacheShape` 的 `if (!groupPath) continue` ⇒ 内存写成功、磁盘静默丢弃；
- *   - 分片枚举：`collectShardGroupPaths` 只收**目录**，根组成 `.relations/cache.json`（文件）⇒ 写进去永远读不到；
- *   - 路径向量：`buildGroupPathContent('')` = `''` ⇒ 所有根路径向量撞同一 docId 互相覆盖；
- *   - HTTP 语义：`/api/doc/list` 的 `group=` 空值已表示"全部文档"，二义；
- *   - 删除预览：`group-delete` 用 `path.dirname(getLocalKbDir(scope, ''))` ⇒ 把整个 scope 当成要删的组。
+ * ★ 为什么不直接用空串表示根（`''` 作 group 键）：空键在分片路径、persistCacheShape、
+ *   分片枚举、路径向量 docId、`/api/doc/list?group=` 语义上都不可表达（各条约束见后端注释）。
  *
- * 因此这里只做"回退到一个合法且语义一致的真实组"，不改变存储模型。
+ * ★ 为什么曾经用「与 scope 同名的组」而改掉：2026-11-02 实测确认它会与「源目录里真实存在
+ *   一个与 scope 同名的子目录」共用同一个 group 键，两篇不同来源的同名文档被判成
+ *   「幂等重导」，后一篇内容静默丢失。改成保留键后二者天然分离。
+ *
+ * ★ 根是「留空」的落点，用户不能手写：前端提交前把 `__root__` 视为空（与后端
+ *   `isUserAssignableGroup` 的拒收口径对齐）。
  */
+
+import { ROOT_GROUP_KEY } from './groupTree';
 
 export interface WriteGroupTarget {
   /**
@@ -21,7 +23,7 @@ export interface WriteGroupTarget {
    * 由调用方的 scope 确认/校验先行拦截，不应以该状态提交）。
    */
   group: string;
-  /** 是否走了"留空 → scope 同名组"的兜底（用于成功提示回显落点） */
+  /** 是否走了"留空 → 根"的兜底（用于成功提示回显落点） */
   fellBack: boolean;
 }
 
@@ -32,7 +34,9 @@ export interface WriteGroupTarget {
  */
 export function resolveWriteGroup(group: string, scope: string): WriteGroupTarget {
   const trimmedGroup = (group ?? '').trim();
-  if (trimmedGroup) return { group: trimmedGroup, fellBack: false };
+  // 保留名一律当"留空"处理：根只能通过留空到达（后端也会拒收手写的保留名）
+  if (trimmedGroup && trimmedGroup !== ROOT_GROUP_KEY) return { group: trimmedGroup, fellBack: false };
   const trimmedScope = (scope ?? '').trim();
-  return { group: trimmedScope, fellBack: trimmedScope.length > 0 };
+  // scope 为空时交回空串，由调用方的 scope 校验给出可读错误（不要凭空造一个根）
+  return { group: trimmedScope ? ROOT_GROUP_KEY : '', fellBack: trimmedScope.length > 0 };
 }

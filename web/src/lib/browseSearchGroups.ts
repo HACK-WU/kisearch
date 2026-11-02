@@ -8,6 +8,7 @@
  *   1) `splitSearchDocs`：按后端 `matchedBy` 拆成名称命中 / 路径命中两个分区；
  *   2) `searchResultSummary`：结果头分开报三个数，不再相加掩盖。
  */
+import { groupDisplayName } from '@/lib/groupTree';
 
 export interface SearchDocSection<T> {
   nameHits: T[];
@@ -41,9 +42,12 @@ export function hasNameOrPathHit(section: { nameHits: unknown[]; pathHits: unkno
 /**
  * 展示用路径：优先后端合并好的 `logicalPath`（Group + 导入源路径），
  * 旧 daemon 无该字段时退回 `path` / group（至少能看出在哪一组）。
+ *
+ * ★ 根散文件的 group 是内部保留键（`__root__`），展示时映射为「根」——
+ *   这类文档通常有 `path`，只有 MCP/CLI 直写（无 sourcePath）时才会走到最后这一档。
  */
 export function docDisplayPath(doc: { group: string; path?: string; logicalPath?: string }): string {
-  return doc.logicalPath ?? doc.path ?? doc.group;
+  return doc.logicalPath ?? doc.path ?? groupDisplayName(doc.group);
 }
 
 /**

@@ -21,6 +21,8 @@
  * 与 `web/test/path-highlight.test.mjs` 的用例**。
  */
 
+import { isRootGroup } from './import-path.js';
+
 /** 反斜杠与全角斜杠统一成 `/`（Windows 复制粘贴 / 中文输入法常见形态） */
 const SEPARATOR_CHARS = /[\\／]/g;
 
@@ -70,9 +72,11 @@ function splitSegments(value: string): string[] {
  *   - `sourcePath` 已含 group 前缀（`aiops/algorithms/rca/x.md` @ group `aiops/algorithms/rca`）→ 原样返回
  *   - `sourcePath` 缺 group 前缀（`API接口文档/x.md` @ group `wiki/API接口文档`）→ 补上 `wiki/`
  *   - 无 `sourcePath`（MCP / CLI 写入）→ 退回 `group/name`
+ *
+ * ★ 根散文件（`ROOT_GROUP_KEY`）不贡献路径段：内部保留键不能出现在检索结果/文档路径里。
  */
 export function logicalDocPath(doc: SearchableDoc): string {
-  const groupSegments = splitSegments(doc.group);
+  const groupSegments = isRootGroup(doc.group) ? [] : splitSegments(doc.group);
   const fileSegments = doc.path ? splitSegments(doc.path) : splitSegments(doc.name);
   // 最长重叠：group 的后缀 == path 的前缀
   let overlap = 0;

@@ -225,7 +225,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     params: [
       { flag: '<scope>', desc: '目标库，也可写作 -s；strict 模式必填' },
       { flag: '--source <dir>', desc: 'Markdown 目录或文件；--retry-incomplete 时可省略，沿用上次记录的源' },
-      { flag: '--group <path>', desc: '落点 Group，不存在时自动建（含父路径）。缺省：目录导入按顶层子目录各建根，单文档用 scope 名' },
+      { flag: '--group <path>', desc: '落点 Group，不存在时自动建（含父路径）。缺省：按源目录的相对目录建组，根下的散文件落到「根」' },
       { flag: '--conflict-mode', desc: '同名策略，默认 incremental（内容未变跳过重算、同名不同来源覆盖）；另有 overwrite / skip / suffix' },
       { flag: '--tags t1,t2', desc: '给导入文件打标签。注意：不带 --tags 重导会清除该文件已有标签（导入是覆盖语义）' },
       { flag: '--chunk-size', desc: '切分块大小（字符），默认 1000' },

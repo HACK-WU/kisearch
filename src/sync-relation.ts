@@ -29,6 +29,8 @@ import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG, parseContentTags } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
 import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShardedLayout, hasNoRelationsData, type LegacyRelationsCacheShape } from './lib/group-cache.js';
+// 根保留键（Group 留空 → 根）：用户不能手写，系统内部使用
+import { ROOT_GROUP_KEY, isRootGroup } from './lib/import-path.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
 import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorizationStopReason } from './zvec-engine/errors.js';
@@ -553,11 +555,11 @@ async function executeBulkSyncRelationLocal(params: {
     const shardedAtEntry = hasShardedLayout(scope);
     for (const item of items) {
       const relation = String(item.relation || '');
-      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      // 与单条模式同口径：item.group 留空 → 落到根（`__root__` 保留键）
       const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
-      let group = normalizeGroupKeyForWrite(shardedAtEntry, rawItemGroup.trim() === '' ? scope : rawItemGroup);
+      let group = normalizeGroupKeyForWrite(shardedAtEntry, rawItemGroup.trim() === '' ? ROOT_GROUP_KEY : rawItemGroup);
       if (!String(item.module_info || '').trim() || !relation || !group || isUnsafeRelationName(relation)) continue;
-      if (groupIndex) {
+      if (groupIndex && !isRootGroup(group)) {
         try {
           const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
           if (resolved.matched) group = resolved.resolvedPath;
@@ -598,10 +600,10 @@ async function executeBulkSyncRelationLocal(params: {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      // 与单条模式同口径：item.group 留空 → 落到与 scope 同名的组
+      // 与单条模式同口径：item.group 留空 → 落到根（`__root__` 保留键，见 import-path.ts）
       const rawItemGroup = String(item.group || '').replace(/^\/+|\/+$/g, '');
       const itemGroupFellBack = rawItemGroup.trim() === '';
-      const group = normalizeGroupKeyForWrite(shardedAtEntry, itemGroupFellBack ? scope : rawItemGroup);
+      const group = normalizeGroupKeyForWrite(shardedAtEntry, itemGroupFellBack ? ROOT_GROUP_KEY : rawItemGroup);
       const relation = item.relation || '';
       const moduleInfo = item.module_info || '';
 
@@ -657,8 +659,9 @@ async function executeBulkSyncRelationLocal(params: {
 
       try {
         // Group 路径自动补全（对齐单条模式 executeSyncRelation:809-819）
+        // ★ 根保留键由系统生成，不参与补全：否则首写时会得到"未匹配任何现有 Group"的噪音提示
         let resolvedGroup = group;
-        if (groupIndex) {
+        if (groupIndex && !isRootGroup(group)) {
           const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
           if (resolved.matched) {
             resolvedGroup = resolved.resolvedPath;
@@ -666,9 +669,9 @@ async function executeBulkSyncRelationLocal(params: {
           // 透出路径解析提示（自动补全 / 多候选歧义 / 部分匹配 / 未匹配），供调用方感知路径是否精确命中
           if (resolved.hint) hints.push(resolved.hint);
         }
-        // 留空兜底必须可见（否则文档"悄悄"落到 scope 同名组）；整批只提示一次
+        // 留空兜底必须可见（否则文档"悄悄"落进用户没指定的组）；整批只提示一次
         if (itemGroupFellBack && !groupFallbackHintPushed) {
-          hints.push(`💡 Group 为空，已落到与 scope 同名的组「${resolvedGroup}」`);
+          hints.push('💡 Group 为空，已落到根目录');
           groupFallbackHintPushed = true;
         }
 
@@ -1157,8 +1160,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     // scope 护栏：default 模式下缺省回退 default，strict 模式下强制显式且须注册
     const scope = resolveScope(loadConfig(), params.scope);
     /**
-     * Group 留空 → 落到**与 scope 同名的组**（与 `ki import` 的根目录口径一致，
-     * 见 lib/import-path.ts resolveGroupForSource：根下散文件归 scope 名）。
+     * Group 留空 → 落到**根**（`ROOT_GROUP_KEY` 保留键，与 `ki import` 的根目录口径一致，
+     * 见 lib/import-path.ts resolveGroupForSource：根下散文件归根）。
      * 前端写入页、MCP 工具、CLI 三处因此同口径：都不再因 group 为空而报错。
      * ⚠️ 不引入"空 group 键"：分片路径 `''.split('/')` 会被判非法抛错、
      * persistCacheShape 会静默丢空组、分片枚举收不到（写进去读不到）、
@@ -1166,8 +1169,12 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
      */
     const rawGroup = String(params.group ?? '').replace(/^\/+|\/+$/g, '');
     const groupFellBack = rawGroup.trim() === '';
+    // 用户不能自己写保留键：根只能由"Group 留空"到达，否则会以为建了个普通目录
+    if (!groupFellBack && isRootGroup(rawGroup.trim())) {
+      return { ok: false, error: `--group 不能使用保留名「${ROOT_GROUP_KEY}」；要写入根目录请留空 Group` };
+    }
     // 批次 2（护栏 #7）：组键归一（布局感知，见 normalizeGroupKeyForWrite；入口一次性判定）
-    let group = normalizeGroupKeyForWrite(hasShardedLayout(scope), groupFellBack ? scope : rawGroup);
+    let group = normalizeGroupKeyForWrite(hasShardedLayout(scope), groupFellBack ? ROOT_GROUP_KEY : rawGroup);
     const relation = params.relation;
 
     if (!group || !relation || !moduleInfo) {
@@ -1199,16 +1206,17 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       return { ok: false, error: hasNoRelationsData(scope) ? 'relations-cache.json 不存在' : (err as Error).message };
     }
 
-    // Group 路径提示：留空兜底必须始终可见（否则文档"悄悄"落到 scope 同名组），
+    // Group 路径提示：留空兜底必须始终可见（否则文档"悄悄"落进用户没指定的组），
     // 与自动补全/未匹配提示同一条 hint 通道，多条时用「；」拼接而不互相覆盖。
     let pathHint: string | undefined = groupFellBack
-      ? `💡 Group 为空，已落到与 scope 同名的组「${group}」`
+      ? '💡 Group 为空，已落到根目录'
       : undefined;
     const appendHint = (hint: string): void => {
       pathHint = pathHint ? `${pathHint}；${hint}` : hint;
     };
     const groupIndex = readGroupIndex(scope);
-    if (groupIndex) {
+    // 根保留键由系统生成，不参与路径补全（否则会得到"未匹配任何现有 Group"的噪音提示）
+    if (groupIndex && !isRootGroup(group)) {
       const resolved = await resolveGroupPath(group, groupIndex, cache.groups || {});
       if (resolved.matched && resolved.resolvedPath !== group) {
         appendHint(`💡 Group 路径已自动补全："${group}" → "${resolved.resolvedPath}"`);
@@ -1354,7 +1362,7 @@ program
   .showHelpAfterError()
   .description('关系回写：写入缓存 + 本地 KB')
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
-  .option('-g, --group <group>', 'Group 路径（单条模式）；留空则写入与 scope 同名的组（对齐 ki import 的根目录口径）')
+  .option('-g, --group <group>', 'Group 路径（单条模式）；留空则写入「根」目录（对齐 ki import 的根目录口径）')
   .option('-r, --relation <relation>', 'Relation 描述文本（单条模式）')
   .option('--module-info <moduleInfo>', '模块信息 Markdown（单条模式）')
   .option('-i, --input <input>', 'JSON 输入文件路径（批量模式）')

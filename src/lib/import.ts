@@ -52,7 +52,7 @@ import {
 
 import type { ScanResultEntry } from './ai-results.js';
 // 落点推导与重复判据共用同一实现（debug：group 吸收路径前缀时的疑似重复误判）
-import { resolveGroupForSource } from './import-path.js';
+import { ROOT_GROUP_KEY, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
 import { writeImportedDocsToWiki, type WikiImportWritebackResult } from './wiki-sync.js';
 
 // 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
@@ -701,6 +701,15 @@ async function handleDirectImportUnlocked(
   const sourceDir = path.resolve(args.sourceDir);
   // group 缺省时传空串，由 resolveGroupForSource 根据 source 类型（目录/单文件）推断
   const group = (args.group ?? '').trim();
+  // 保留键对用户非法：根只能靠「Group 留空」到达——手写 `__root__` 会让这批文件与真正的
+  // 根散文件共用键、互相覆盖（真机实测：`--group __root__` 曾静默覆盖已有根文档）。
+  // 放在此函数而非各入口：`ki import` / `/api/import/run` / 数据源同步三条链路都经过这里。
+  if (group && !isUserAssignableGroup(group)) {
+    throw Object.assign(
+      new Error(`非法 Group 路径：${group}（不可使用保留名 "${ROOT_GROUP_KEY}"；要写入根目录请留空 Group）`),
+      { code: 'INVALID_GROUP', field: 'group' },
+    );
+  }
   const chunkSize = args.chunkSize ?? DEFAULT_CHUNK_SIZE;
   const chunkOverlap = args.chunkOverlap ?? DEFAULT_CHUNK_OVERLAP;
   const vector = args.vector !== false;
@@ -830,6 +839,22 @@ async function handleDirectImportUnlocked(
     : collectMarkdownFiles(sourceDir, extensions);
   if (files.length === 0) {
     throw new Error(`未发现 .md 文件（格式白名单：${extensions.join(', ')}）：${sourceDir}`);
+  }
+  // 保留名目录防护（challenger 2026-11-02）：源目录里若真有名为 `__root__` 的子目录，
+  // 缺省 group 时它算出的 group 恰好等于根的保留键（`dir === ROOT_GROUP_KEY`），
+  // 于是与根散文件共用键 —— 重现「同名 relation 被判幂等重导、后一篇内容丢失」那个缺陷。
+  // 概率极低但后果是静默丢文档（无日志无提示），因此直接 fail-loud 让用户改名。
+  // 显式 group 时该目录会变成 `group/__root__`，与根键不同，故只在缺省 group 下检查。
+  if (!group) {
+    const reservedHit = files.find((rel) => toPosix(rel).split('/').includes(ROOT_GROUP_KEY));
+    if (reservedHit) {
+      throw Object.assign(
+        new Error(
+          `源目录含保留名目录「${ROOT_GROUP_KEY}」（如 ${reservedHit}），与「根」的存储键冲突；请重命名该目录后再导入`,
+        ),
+        { code: 'INVALID_GROUP', field: 'source' },
+      );
+    }
   }
   if (skippedNonMd.length > 0) {
     logWarn(`跳过 ${skippedNonMd.length} 个不支持格式的文件：${skippedNonMd.slice(0, 10).join(', ')}${skippedNonMd.length > 10 ? ` ...等 ${skippedNonMd.length} 个` : ''}`);

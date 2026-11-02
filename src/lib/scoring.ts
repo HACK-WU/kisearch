@@ -47,7 +47,7 @@ export interface Relation {
   tags?: string[];
   /**
    * 落点来源留痕（REQ-20261021-001）：`scope-fallback` = 写入时 Group 留空、
-   * 由「与 scope 同名组」兜底落进来。**缺省即 explicit**（用户显式指定了 Group），
+   * 由「Group 留空 → 根（`__root__`）」兜底落进来。**缺省即 explicit**（用户显式指定了 Group），
    * 因此显式写入时会删除该字段，避免给绝大多数文档加冗余字段。
    * 该字段只进元数据，**不得**参与向量文本 / docId 计算。
    */

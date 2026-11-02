@@ -49,6 +49,7 @@ import {
 } from '@/lib/browseReadMode';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
+  ROOT_GROUP_KEY,
   applyOpenPaths,
   buildGroupTree,
   countDocs,
@@ -56,6 +57,7 @@ import {
   firstGroupWithDocuments,
   isGroupSelectable,
   revealGroupPath,
+  splitRootGroup,
   toggleNodeOpen,
   withAllOpen,
   withDefaultOpen,
@@ -649,6 +651,29 @@ export function BrowsePage(): JSX.Element {
       });
   }, [scope, queryClient]);
 
+  /**
+   * 根散文件单独补齐。
+   * 为什么不能只靠首层 `/api/doc/list`：它按 limit 截断（默认 500），根散文件可能排在后面；
+   * 而根组不是树节点、没有「展开时补」的时机，漏了就会在树顶少显示几篇。
+   */
+  const rootDocsLoadedRef = useRef(false);
+  useEffect(() => {
+    rootDocsLoadedRef.current = false;
+  }, [scope]);
+  useEffect(() => {
+    if (data?.scope !== scope) return;
+    const rootCount = (data.groups ?? []).find((g) => g.name === ROOT_GROUP_KEY)?.count ?? 0;
+    if (!rootCount || rootDocsLoadedRef.current) return;
+    if ((docsByGroup[ROOT_GROUP_KEY]?.length ?? 0) >= rootCount) {
+      rootDocsLoadedRef.current = true;
+      return;
+    }
+    rootDocsLoadedRef.current = true;
+    void fetchGroupDocsAll(scope, ROOT_GROUP_KEY)
+      .then((res) => setDocsByGroup((prev) => ({ ...prev, [ROOT_GROUP_KEY]: res.docs ?? [] })))
+      .catch(() => { rootDocsLoadedRef.current = false; });
+  }, [data?.scope, data?.groups, scope, docsByGroup]);
+
   /** 关闭文档后再次打开时从头开始记录导航历史。 */
   const closeDocument = useCallback((): void => {
     setHistory([]);
@@ -732,9 +757,16 @@ export function BrowsePage(): JSX.Element {
     if (open) collectGroupPaths(tree).forEach((path) => ensureGroupDocs(path));
   };
 
-  /** 树卡头计数：恒为树内文档总数（搜索不再改写目录，命中数以右侧结果面板为准） */
+  /**
+   * 树卡头计数：恒为树内文档总数（搜索不再改写目录，命中数以右侧结果面板为准）。
+   * 根散文件用 `groups` 里的精确计数（不受 docs 分页截断影响），与目录节点口径一致。
+   */
+  const rootGroupCount = useMemo(
+    () => splitRootGroup(data?.groups ?? []).rootCount,
+    [data?.groups],
+  );
   const visibleDocCount =
-    tree.reduce((sum, node) => sum + countDocs(node), 0);
+    tree.reduce((sum, node) => sum + countDocs(node), 0) + rootGroupCount;
   /** 全部 Group 已展开 → 折叠按钮呈现「折叠」动作（单按钮切换，对齐 demo） */
   const allExpanded = tree.length > 0 && isAllOpen(tree);
 
@@ -769,6 +801,47 @@ export function BrowsePage(): JSX.Element {
     [showingResults, searchDocs],
   );
 
+  /** 树内文档叶子的统一过滤（tag 筛选 + 搜索命中集） */
+  const filterDoc = useCallback((d: DocItem): boolean =>
+    (!selectedTag || (d.tags ?? []).includes(selectedTag)) &&
+    (!matchedDocKeys || matchedDocKeys.has(`${d.group}\u0000${d.name}`)), [selectedTag, matchedDocKeys]);
+
+  /**
+   * 根散文件：后端把「源目录根下的散文件」存在 `__root__` 组里，界面上它们**不是目录**，
+   * 直接裸挂在树顶（用户 2026-11-02 拍板）。这是全程唯一取该组文档的地方。
+   */
+  const rootDocs = useMemo(
+    () => (docsByGroup[ROOT_GROUP_KEY] ?? []).filter(filterDoc),
+    [docsByGroup, filterDoc],
+  );
+
+  /**
+   * 单个文档叶子（组内文档与根散文件共用同一套 DOM / 交互）。
+   * title 里的路径：根散文件的 group 是内部保留键，不能铺给用户看。
+   */
+  const renderDocButton = (doc: DocItem): JSX.Element => (
+    <button
+      key={`${doc.group}\u0000${doc.name}`}
+      type="button"
+      className={`ki-tree-doc${currentViewing?.group === doc.group && currentViewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
+      data-ki-group={doc.group}
+      data-ki-document={doc.name}
+      onClick={() => {
+        // 结果列表可见时从树打开也走抽屉，避免把结果列表顶掉；
+        // 页内阅读态则就地替换正文，不再叠一个抽屉（REQ-20261018-001 R6）。
+        openDocument(
+          { module: doc.name, group: doc.group, path: doc.path },
+          showingResults ? 'drawer' : 'inline',
+        );
+        setMobileReaderOpen(true);
+      }}
+      title={doc.path ?? (doc.group === ROOT_GROUP_KEY ? doc.name : `${doc.group} / ${doc.name}`)}
+    >
+      <Icon name="file" className="ki-icon ki-icon--sm" />
+      <span className="ki-tree-doc__name">{doc.name}</span>
+    </button>
+  );
+
   /** hideSelf=true 时跳过本行、只渲染其子内容（全屏展平单根目录用） */
   const renderNode = (node: TreeNode, hideSelf = false): JSX.Element => {
     const hasSub = node.children.length > 0;
@@ -776,9 +849,7 @@ export function BrowsePage(): JSX.Element {
     const totalDocs = countDocs(node);
     const countLabel = hasSub ? `本组 ${node.count} 条；含子组共 ${totalDocs} 条` : `本组 ${node.count} 条`;
     const nodeDocs = node.open
-      ? (docsByGroup[node.path] ?? []).filter((d) =>
-          (!selectedTag || (d.tags ?? []).includes(selectedTag)) &&
-          (!matchedDocKeys || matchedDocKeys.has(`${d.group}\u0000${d.name}`)))
+      ? (docsByGroup[node.path] ?? []).filter(filterDoc)
       : [];
     return (
       <Fragment key={node.path}>
@@ -817,28 +888,7 @@ export function BrowsePage(): JSX.Element {
         )}
         {node.open && (hasSub || nodeDocs.length > 0) && (
           <div className="ki-tree-group">
-            {nodeDocs.map((doc) => (
-              <button
-                key={`${doc.group}\u0000${doc.name}`}
-                type="button"
-                className={`ki-tree-doc${currentViewing?.group === doc.group && currentViewing.module === doc.name ? ' ki-tree-doc--active' : ''}`}
-                data-ki-group={doc.group}
-                data-ki-document={doc.name}
-                onClick={() => {
-                  // 结果列表可见时从树打开也走抽屉，避免把结果列表顶掉；
-                  // 页内阅读态则就地替换正文，不再叠一个抽屉（REQ-20261018-001 R6）。
-                  openDocument(
-                    { module: doc.name, group: doc.group, path: doc.path },
-                    showingResults ? 'drawer' : 'inline',
-                  );
-                  setMobileReaderOpen(true);
-                }}
-                title={doc.path ?? `${doc.group} / ${doc.name}`}
-              >
-                <Icon name="file" className="ki-icon ki-icon--sm" />
-                <span className="ki-tree-doc__name">{doc.name}</span>
-              </button>
-            ))}
+            {nodeDocs.map(renderDocButton)}
             {node.children.map((child) => renderNode(child))}
           </div>
         )}
@@ -880,7 +930,7 @@ export function BrowsePage(): JSX.Element {
             </div>
           </div>
         </div>
-      ) : tree.length === 0 ? (
+      ) : tree.length === 0 && rootDocs.length === 0 ? (
         <div className="ki-empty" style={{ padding: 24 }}>
           <div>
             <h3>空知识库</h3>
@@ -894,6 +944,8 @@ export function BrowsePage(): JSX.Element {
         </div>
       ) : (
         <div className="ki-tree-root" role="tree" aria-label="Group 树">
+          {/* 根散文件裸挂在树顶（不是目录，不占一层）：用户 2026-11-02 拍板的形态 */}
+          {rootDocs.map(renderDocButton)}
           {flattenRoot && tree.length === 1
             ? renderNode({ ...tree[0], open: true }, true)
             : tree.map((node) => renderNode(node))}

@@ -34,7 +34,7 @@
 
 ### `ki sync-relation` 单条模式参数不完整
 
-单条模式要求 `--relation` 与 `--module-info`；`--group` 可留空（落到与 scope 同名的组）。
+单条模式要求 `--relation` 与 `--module-info`；`--group` 可留空（落到「根」目录）。
 
 ### 配置文件字段不合法（`CONFIG_FIELD_INVALID`）
 

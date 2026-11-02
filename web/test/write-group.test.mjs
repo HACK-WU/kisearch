@@ -1,11 +1,15 @@
 /**
- * 写入落点推导单测（2026-10-21）
+ * 写入落点推导单测（2026-11-02 修订：留空→根保留键）
  *
- * 锁住四条不变量：
+ * 锁住五条不变量：
  *   1) Group 有值 → 原样使用（含多级路径），且**不受 scope 影响**；
- *   2) Group 为空白（空格 / 制表 / 全空白）→ 回退为 scope 名，并置 fellBack；
+ *   2) Group 为空白（空格 / 制表 / 全空白）→ 落到根保留键 `__root__`，并置 fellBack；
  *   3) 两侧空白一律 trim（与提交给后端的值一致，避免 `" a/b "` 写出奇怪组名）；
- *   4) group 与 scope 都空 → 返回空串且 fellBack=false（调用方须先行拦截，不得提交）。
+ *   4) group 与 scope 都空 → 返回空串且 fellBack=false（调用方须先行拦截，不得提交）；
+ *   5) 用户手写保留名 `__root__` → 视同留空（根只能靠「留空」到达，与后端拒收口径对齐）。
+ *
+ * 为什么不再用 scope 名：会与「源目录里真实存在的同名子目录」共用 group 键，
+ * 同名文档被判幂等重导后内容丢失（`.debug/import-root-files-scope-group-20261102/`）。
  *
  * 运行：cd web && npm run test
  */
@@ -24,6 +28,7 @@ const vite = await createServer({
   logLevel: 'silent',
 });
 const { resolveWriteGroup } = await vite.ssrLoadModule('/src/lib/writeGroup.ts');
+const { ROOT_GROUP_KEY } = await vite.ssrLoadModule('/src/lib/groupTree.ts');
 after(async () => vite.close());
 
 describe('resolveWriteGroup', () => {
@@ -41,13 +46,15 @@ describe('resolveWriteGroup', () => {
     assert.equal(target.fellBack, false);
   });
 
-  it('Group 留空 → 落到与 scope 同名的组，并标记 fellBack', () => {
-    assert.deepEqual(resolveWriteGroup('', 'bulk-test'), { group: 'bulk-test', fellBack: true });
+  it('Group 留空 → 落到根保留键，并标记 fellBack', () => {
+    assert.deepEqual(resolveWriteGroup('', 'bulk-test'), { group: ROOT_GROUP_KEY, fellBack: true });
+    // 落点与 scope 无关：换 scope 不影响根键
+    assert.equal(resolveWriteGroup('', 'kisearch').group, ROOT_GROUP_KEY);
   });
 
-  it('Group 全空白（空格 / 制表 / 换行）同样回退', () => {
+  it('Group 全空白（空格 / 制表 / 换行）同样落到根', () => {
     for (const raw of ['   ', '\t', '\n', ' \t\n ']) {
-      assert.deepEqual(resolveWriteGroup(raw, 'kisearch'), { group: 'kisearch', fellBack: true }, JSON.stringify(raw));
+      assert.deepEqual(resolveWriteGroup(raw, 'kisearch'), { group: ROOT_GROUP_KEY, fellBack: true }, JSON.stringify(raw));
     }
   });
 
@@ -56,11 +63,12 @@ describe('resolveWriteGroup', () => {
       group: '项目根/测试模块',
       fellBack: false,
     });
-    assert.deepEqual(resolveWriteGroup('', '  kafka  '), { group: 'kafka', fellBack: true });
+    assert.deepEqual(resolveWriteGroup('', '  kafka  '), { group: ROOT_GROUP_KEY, fellBack: true });
   });
 
-  it('scope 带空白时回退结果也是 trim 后的值', () => {
-    assert.equal(resolveWriteGroup(' ', ' xpert-memory ').group, 'xpert-memory');
+  it('用户手写保留名视同留空（根只能靠留空到达）', () => {
+    assert.deepEqual(resolveWriteGroup('__root__', 'kafka'), { group: ROOT_GROUP_KEY, fellBack: true });
+    assert.deepEqual(resolveWriteGroup('  __root__  ', 'kafka'), { group: ROOT_GROUP_KEY, fellBack: true });
   });
 
   it('group 与 scope 都空 → 空串且不标记回退（调用方须先行拦截 scope）', () => {
@@ -69,11 +77,11 @@ describe('resolveWriteGroup', () => {
   });
 
   it('null / undefined 容错（不抛，视同留空）', () => {
-    assert.deepEqual(resolveWriteGroup(null, 'kafka'), { group: 'kafka', fellBack: true });
+    assert.deepEqual(resolveWriteGroup(null, 'kafka'), { group: ROOT_GROUP_KEY, fellBack: true });
     assert.deepEqual(resolveWriteGroup(undefined, undefined), { group: '', fellBack: false });
   });
 
-  it('回退结果通过 Group 路径校验（scope 名只允许 [A-Za-z0-9_-]）', async () => {
+  it('回退结果通过 Group 路径校验', async () => {
     const { groupError } = await vite.ssrLoadModule('/src/lib/validators.ts');
     for (const scope of ['default', 'bulk-test', 'xpert_memory', 'kisearch2']) {
       const { group } = resolveWriteGroup('', scope);

@@ -59,7 +59,8 @@ import {
 import type { ImportConflictMode } from './import-conflict.js';
 import { readImportIncompleteStatus, summarizeImportIncomplete, uploadIdFromSourceDir } from './import-retry.js';
 // Group 路径校验：preflight 与 run 同口径（debug 2026-10-19 的 R1 行动项）
-import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
+// isUserAssignableGroup = isSafeGroupPath + 拒收根保留名（用户只能靠"留空"落根）
+import { isSafeGroupPath, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
 // REQ-20261019-001：清理候选（与 import.ts 同源计算，保证「看到的 = 删掉的」）
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
@@ -1592,9 +1593,9 @@ function handleImportPreflight(
       return;
     }
     const requestedGroup = typeof body.group === 'string' ? body.group.trim() : '';
-    // 只读预检不接受可疑路径（`..` / 反斜杠 / 绝对路径）：避免拿它拼出奇怪落点参与比较
-    if (!isSafeGroupPath(requestedGroup)) {
-      sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
+    // 只读预检不接受可疑路径（`..` / 反斜杠 / 绝对路径）与保留名：避免拿它拼出奇怪落点参与比较
+    if (!isUserAssignableGroup(requestedGroup)) {
+      sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "__root__"）' });
       return;
     }
     const uploadId = body.uploadId.trim();
@@ -1678,8 +1679,8 @@ async function handleImportRun(
   }
   // Group 合法性：与 `/api/import/preflight` 同口径（否则会出现"预检 400 而 run 放行"的分叉）
   const requestedGroup = typeof body.group === 'string' ? body.group.trim() : '';
-  if (!isSafeGroupPath(requestedGroup)) {
-    sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径或含 .. / 反斜杠）' });
+  if (!isUserAssignableGroup(requestedGroup)) {
+    sendJson(res, 400, { ok: false, error: '非法 group（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "__root__"）' });
     return;
   }
   // 切分参数范围：与 `handleDirectImport` 内的校验同口径，但**提前到建 job 之前**——
@@ -2674,8 +2675,8 @@ async function handleDatasourceAddRemote(
     }
   }
   const group = typeof body.group === 'string' ? body.group.trim() : '';
-  if (group && !isSafeGroupPath(group)) {
-    sendJson(res, 400, { ok: false, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}` });
+  if (group && !isUserAssignableGroup(group)) {
+    sendJson(res, 400, { ok: false, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "__root__"）` });
     return;
   }
 

@@ -38,7 +38,7 @@ import {
   MAX_CHUNK_OVERLAP,
 } from './chunker.js';
 import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
-import { isSafeGroupPath, resolveGroupForSource } from './import-path.js';
+import { ROOT_GROUP_KEY, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
 import type {
   DataSourceGitInfo,
   DataSourceGitSyncState,
@@ -426,10 +426,10 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
   }
 
   const group = (input.group ?? '').trim() || null;
-  // group 会拼进 local-kb / 分片路径：绝对路径、反斜杠、`..` 一律拒绝
+  // group 会拼进 local-kb / 分片路径：绝对路径、反斜杠、`..` 与根保留名一律拒绝
   // （与 `/api/import/run`、`/api/import/preflight` 同口径）
-  if (group !== null && !isSafeGroupPath(group)) {
-    return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径，或含 .. / 反斜杠）` };
+  if (group !== null && !isUserAssignableGroup(group)) {
+    return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "${ROOT_GROUP_KEY}"）` };
   }
   const existing = readDataSource(scope);
   if (!existing.ok && existing.code !== 'NOT_FOUND') {
@@ -780,8 +780,8 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
   const group = (input.group ?? '').trim() || null;
   const branch = (input.branch ?? '').trim() || null;
   const subdir = (input.subdir ?? '').trim().replace(/^\/+|\/+$/g, '');
-  if (group !== null && !isSafeGroupPath(group)) {
-    return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径，或含 .. / 反斜杠）` };
+  if (group !== null && !isUserAssignableGroup(group)) {
+    return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "${ROOT_GROUP_KEY}"）` };
   }
   try {
     validateImportConflictMode(input.conflictMode);

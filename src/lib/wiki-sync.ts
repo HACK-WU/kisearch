@@ -18,7 +18,7 @@ import { getSource, getRelationsCachePath, getLocalKbDir, getKbDir } from './sco
 import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './group-cache.js';
 import { loadConfig, getScopeWikiSync, resolveImportExtensions } from './config.js';
 import { generateMarkdown } from './markdown-gen.js';
-import { isSafeGroupPath } from './import-path.js';
+import { groupToRelDir, isSafeGroupPath } from './import-path.js';
 
 // ─── 类型 ───
 
@@ -149,7 +149,9 @@ export function ensureWikiGroupDir(scope: string, group: string): WikiGroupDirRe
   if (!isSafeGroupPath(group)) {
     return { ok: false, reason: `非法 Group 路径：${group}` };
   }
-  const dir = group ? path.join(targetDir, group) : targetDir;
+  // 根散文件（`__root__`）不建同名目录：它在 wiki 里就是 wiki 根目录本身
+  const relDir = groupToRelDir(group);
+  const dir = relDir ? path.join(targetDir, relDir) : targetDir;
   const rel = path.relative(targetDir, dir);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     return { ok: false, reason: `Group 路径越出 wiki 目录：${group}` };
@@ -228,8 +230,10 @@ export function writeImportedDocsToWiki(
       result.skipped++;
       continue;
     }
-    const dest = item.group
-      ? path.join(targetDir, item.group, `${item.relation}.md`)
+    // 根散文件（`__root__`）回写到 wiki 根目录，不额外套一层 `__root__/`
+    const itemRelDir = groupToRelDir(item.group);
+    const dest = itemRelDir
+      ? path.join(targetDir, itemRelDir, `${item.relation}.md`)
       : path.join(targetDir, `${item.relation}.md`);
     const rel = path.relative(targetDir, dest);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -329,9 +333,11 @@ function writeBackToWikiInner(
   }
 
   // 构建文件路径（group 即完整相对路径，rootName 概念已移除，不做前缀剥离）
+  // 根散文件（`__root__`）落在 wiki 根目录
   const fileName = `${relation}.md`;
-  const filePath = group
-    ? path.join(sourceDir, group, fileName)
+  const relDir = groupToRelDir(group);
+  const filePath = relDir
+    ? path.join(sourceDir, relDir, fileName)
     : path.join(sourceDir, fileName);
 
   try {

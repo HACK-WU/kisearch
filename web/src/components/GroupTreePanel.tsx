@@ -9,6 +9,7 @@ import type { DocItem } from '@/api/httpApi';
 import { useDocList, useGroupDocs } from '@/lib/hooks';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
+  ROOT_GROUP_KEY,
   buildGroupTree,
   countDocs,
   findGroupNode,
@@ -142,7 +143,9 @@ export function GroupTreePanel({
 
   const toggleOpen = (path: string): void => setUserTree(toggleNodeOpen(tree, path));
   const allExpanded = tree.length > 0 && isAllOpen(tree);
-  const totalDocs = tree.reduce((sum, node) => sum + countDocs(node), 0);
+  /** 根散文件不是目录：裸挂在树顶（与浏览页口径一致，见 lib/groupTree.ROOT_GROUP_KEY） */
+  const rootDocs = docsByGroup.get(ROOT_GROUP_KEY) ?? [];
+  const totalDocs = tree.reduce((sum, node) => sum + countDocs(node), 0) + rootDocs.length;
 
   /** hideSelf=true 时跳过本行、只渲染其内容（展平单根目录用） */
   const renderNode = (node: GroupTreeNode, hideSelf = false): JSX.Element => {
@@ -239,6 +242,21 @@ export function GroupTreePanel({
           }
         }}
       >
+        {/* 根散文件裸挂在树顶：它们没有目录层级，不该占一层壳 */}
+        {rootDocs.map((doc) => (
+          <button
+            key={`${doc.group}\u0000${doc.name}`}
+            type="button"
+            className={`ki-tree-doc${activeGroup === doc.group && activeDocName === doc.name ? ' ki-tree-doc--active' : ''}`}
+            data-ki-group={doc.group}
+            data-ki-document={doc.name}
+            onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path })}
+            title={doc.path ?? doc.name}
+          >
+            <Icon name="file" className="ki-icon ki-icon--sm" />
+            <span className="ki-tree-doc__name">{doc.name}</span>
+          </button>
+        ))}
         {/* 单根目录（如 consul）展平：scope 已确定，根行只是冗余壳（用户要求） */}
         {tree.length === 1
           ? renderNode({ ...tree[0], open: true }, true)
