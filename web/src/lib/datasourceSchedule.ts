@@ -223,6 +223,35 @@ export function scheduleNextLine(
   // 带进三元分支（中间有函数调用），只能靠 `as number` 硬断言；用局部 const 就不必断言。
   const nextRunAt = schedule.nextRunAt;
   const noNext = nextRunAt === null;
+  /**
+   * 上次到点被「向量不可用」跳过（2026-11-02）：跳过 ≠ 失败 ≠ 没到点，三者必须分开说 ——
+   * 后端对这种情形记 skipped（不计连续失败），否则页面会显示"连续失败 N 次"，把
+   * embedding 故障说成数据源坏了。
+   * 只在最近一次跳过**晚于**最近一次自动运行时才显示：修好 embedding 并成功同步后，
+   * 旧的跳过原因不能一直挂在列表上（比不显示更糟）。
+   */
+  const skippedByVector = schedule.lastSkipReason === 'vector-unavailable'
+    && schedule.lastSkipAt !== null
+    && schedule.lastSkipAt > (schedule.lastAutoAt ?? 0);
+  if (skippedByVector) {
+    /**
+     * ★ `noNext` 时也要出现：once 计划被跳过、或 daily 今日那一刻已跳过时，
+     * 后端会把该 slot 记为已处理（避免每 tick 重复跳过），于是 nextRunAt 变 null。
+     * 此时若只在有下次运行时才提示，用户恰好在"跳过一次"的计划上什么也看不到 ——
+     * 主值仍是「—」（确实没有待执行），但副行必须说清原因。
+     */
+    return {
+      value: noNext
+        ? '—'
+        : schedule.mode === 'interval'
+          ? formatShortTime(nextRunAt, now)
+          : formatDateTime(nextRunAt),
+      sub: '已跳过 · 向量不可用',
+      tone: 'warn',
+      empty: noNext,
+      title: title('上次到点已跳过：向量服务不可用，本次未写入任何文档；修复 embedding 或关闭该源「向量化」后自动恢复'),
+    };
+  }
   return {
     // 当天只给时分（跨天才带日期）：与「上次同步」列的完整时刻并排时不抢宽度
     value: noNext

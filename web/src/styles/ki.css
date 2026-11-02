@@ -3593,6 +3593,24 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-task-notice--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .ki-task-notice--danger { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 
+/* 数据源页「向量不可用」（2026-11-02）：文本 + 动作按钮同排，窄屏自动换行。
+   ★ 只包一层 flex，不改 `.ki-task-notice` 本体 —— 任务页/导入页那几处是单段文本，
+   改成 flex 会让长文本与内联 code 的换行行为变样。 */
+.ki-ds-vector-block { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.ki-ds-vector-block__text { flex: 1 1 320px; }
+/* 行内标记：与状态徽标并排，不参与表格列宽分配（nowrap + 11px） */
+.ki-ds-blocked-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--ki-color-warning);
+  background: var(--ki-color-warning-soft);
+}
+
 /* ═══ 提示信息卡片（Notice）═══
    视觉参考库 ui-tools/design-reference v1.0.0（components/notice.html + spec）。
    结构：图标 + 标题 + 正文（+ 操作/关闭）；颜色只做语气，浅底 + 1px 语气描边，
@@ -8027,3 +8045,12 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-sched-seg button { flex: 1 1 auto; min-width: 0; }
 }
 
+
+/* 编辑数据源弹窗「向量化」下方说明（2026-11-02）：开关不置灰，靠这段文字给出路。
+   用 warn 色而非 subtle —— 它陈述的是"照这样做会失败"，不是补充说明。 */
+.ki-ds-vector-hint {
+  margin: 2px 0 0 0;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-warning);
+  overflow-wrap: anywhere;
+}

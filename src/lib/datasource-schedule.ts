@@ -215,7 +215,13 @@ export function computeNextRun(input: {
     const minutes = intervalMinutes(schedule.intervalValue, schedule.intervalUnit);
     if (minutes === null || minutes < MIN_INTERVAL_MINUTES || minutes > MAX_INTERVAL_MINUTES) return NEVER;
     const intervalMs = minutes * 60_000;
-    const base = Math.max(input.lastSyncAt ?? 0, schedule.lastAutoAt ?? 0, schedule.enabledAt ?? 0);
+    /**
+     * 「向量不可用」跳过也占用一个周期（2026-11-02）：否则 `lastAutoAt` 不变 ⇒ due 恒为 true
+     * ⇒ 调度器每 tick 重复跳过 + 反复写盘。只让这一个 reason 参与，竞态类跳过
+     * （clone-busy / active-task / scope-lock-busy）保持"下一 tick 立即重试"。
+     */
+    const skipBase = schedule.lastSkipReason === 'vector-unavailable' ? (schedule.lastSkipAt ?? 0) : 0;
+    const base = Math.max(input.lastSyncAt ?? 0, schedule.lastAutoAt ?? 0, schedule.enabledAt ?? 0, skipBase);
     /**
      * 三个基准都缺失 = **锚点字段出现之前**写入的旧记录，或从旧快照 `restore` 回来的记录
      * （正常开启路径一定会写 `enabledAt`，不会是 0）。

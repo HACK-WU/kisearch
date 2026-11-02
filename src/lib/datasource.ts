@@ -1412,10 +1412,19 @@ async function importAndPersist(args: {
       onScannedFiles: (files) => { scannedForBaseline = files; scannedCaptured = true; },
     });
   } catch (err) {
+    const errCode = (err as { code?: string }).code ?? 'SYNC_FAILED';
+    /**
+     * 数据源同步**没有** `--no-vector` 这个开关（那是 `ki import` 的参数）。
+     * `handleDirectImport` 的通用文案在这里会给出用户照做不了的指引，必须换成数据源的出路：
+     * 页面「编辑」里关闭该源的「向量化」改走仅全文，或修好 embedding 后自动恢复。
+     */
+    const errMessage = errCode === 'VECTOR_UNAVAILABLE'
+      ? `${(err as Error).message}（数据源同步不使用 --no-vector：请在数据源「编辑」里关闭该源的「向量化」，或修复 embedding 后重试）`
+      : (err as Error).message;
     const warnings = [
       ...(git?.warnings ?? []),
       ...chunkParams.warnings,
-      warning((err as { code?: string }).code ?? 'SYNC_FAILED', (err as Error).message),
+      warning(errCode, errMessage),
     ];
     const gitState = git
       ? buildGitState({
@@ -1425,8 +1434,8 @@ async function importAndPersist(args: {
       : undefined;
     return failSync(
       scope, input, record,
-      (err as { code?: string }).code ?? 'SYNC_FAILED',
-      (err as Error).message,
+      errCode,
+      errMessage,
       'not-recomputed',
       { ...(gitState ? { git: gitState } : {}), warnings },
     );
@@ -1926,6 +1935,16 @@ export function applyScheduleRunResult(scope: string, result: {
   if (result.outcome === 'skipped') {
     schedule.lastSkipReason = result.reason ?? 'skipped';
     schedule.lastSkipAt = result.at;
+    /**
+     * ★ 向量不可用是**确定性长态阻断**（key 没配/欠费，可能持续数天），与 clone-busy 这类
+     * 瞬态竞态不同：必须把本次 slot 记为"已处理"，否则 `computeNextRun` 会认为仍然到期，
+     * 调度器每个 tick 重复跳过 —— 每次都写一次 datasource.json + 打一条日志，
+     * 一天上千次写放大。once/daily 模式正是用 `lastAutoFor` 做 slot 去重。
+     * 其它 reason 保持原语义（下一 tick 立刻重试）。
+     */
+    if (result.reason === 'vector-unavailable' && result.slot !== null) {
+      schedule.lastAutoFor = result.slot;
+    }
     writeDataSource(scope, { ...prev, schedule });
     return;
   }

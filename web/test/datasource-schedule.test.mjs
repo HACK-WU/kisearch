@@ -405,3 +405,53 @@ describe('SYNC_STATE_LABEL', () => {
     });
   });
 });
+
+/**
+ * 向量不可用导致的「定时跳过」（2026-11-02）：
+ * 后端对 VECTOR_UNAVAILABLE 记 skipped（不计连续失败），前端必须把"跳过"与"失败/没到点"分开说，
+ * 否则用户会看到"连续失败 N 次"并以为数据源本身坏了。
+ */
+describe('scheduleNextLine · 向量不可用跳过', () => {
+  it('最近一次跳过是向量不可用 → 副行「已跳过 · 向量不可用」且转 warn', () => {
+    const view = scheduleNextLine(schedule({
+      lastSkipReason: 'vector-unavailable',
+      lastSkipAt: NOW - MIN,
+      lastAutoAt: null,
+      nextRunAt: NOW + 10 * MIN,
+    }), NOW);
+    assert.equal(view.sub, '已跳过 · 向量不可用');
+    assert.equal(view.tone, 'warn');
+    assert.equal(view.empty, false);
+    assert.match(view.title, /向量服务不可用/);
+  });
+
+  it('跳过早于一次成功的自动运行 → 不再显示（不得一直挂着旧原因）', () => {
+    const view = scheduleNextLine(schedule({
+      lastSkipReason: 'vector-unavailable',
+      lastSkipAt: NOW - 60 * MIN,
+      lastAutoAt: NOW - 10 * MIN,
+      lastAutoState: 'ok',
+      nextRunAt: NOW + 10 * MIN,
+    }), NOW);
+    assert.notEqual(view.sub, '已跳过 · 向量不可用');
+  });
+});
+
+describe('scheduleNextLine · 跳过后没有下次运行', () => {
+  it('once 计划被跳过（nextRunAt=null）仍要说明原因，不能只给「—」', () => {
+    const view = scheduleNextLine(schedule({
+      mode: 'at',
+      repeat: 'once',
+      at: '2026-11-01T09:00',
+      lastSkipReason: 'vector-unavailable',
+      lastSkipAt: NOW - MIN,
+      lastAutoAt: null,
+      lastAutoFor: NOW - MIN,
+      nextRunAt: null,
+    }), NOW);
+    assert.equal(view.value, '—');
+    assert.equal(view.sub, '已跳过 · 向量不可用');
+    assert.equal(view.tone, 'warn');
+    assert.equal(view.empty, true);
+  });
+});

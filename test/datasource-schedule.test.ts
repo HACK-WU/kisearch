@@ -294,3 +294,35 @@ describe('scheduleListSummary（`datasource list` 只读脚注）', () => {
     assert.equal(summarize({ ...base, consecutiveFailures: 2 }).warn, false);
   });
 });
+
+/**
+ * 向量不可用跳过必须占用一个周期（2026-11-02）：
+ * 否则 `computeNextRun` 认为仍然到期，调度器每 tick 重复跳过 —— 每次写一次 datasource.json
+ * 再打一条日志，一天上千次写放大。竞态类跳过（clone-busy 等）不受影响，保持立即重试。
+ */
+describe('computeNextRun · 向量不可用跳过占用周期', () => {
+  const NOW = 1_800_000_000_000;
+  const base = {
+    ...defaultDataSourceSchedule(),
+    enabled: true,
+    mode: 'interval' as const,
+    intervalValue: 30,
+    intervalUnit: 'minute' as const,
+    enabledAt: NOW - 60 * 60_000,
+  };
+
+  it('未跳过时已到期；因向量不可用跳过后顺延一个周期', () => {
+    const fresh = computeNextRun({ schedule: base, lastSyncAt: null, now: NOW });
+    assert.equal(fresh.due, true, '前置：正常情况下此刻应到期');
+
+    const skipped = { ...base, lastSkipReason: 'vector-unavailable', lastSkipAt: NOW };
+    const after = computeNextRun({ schedule: skipped, lastSyncAt: null, now: NOW + 60_000 });
+    assert.equal(after.due, false, '跳过后不得每 tick 重复到期');
+    assert.ok((after.nextRunAt ?? 0) > NOW + 60_000);
+  });
+
+  it('其它跳过原因不占用周期（竞态类仍须立即重试）', () => {
+    const raced = { ...base, lastSkipReason: 'clone-busy', lastSkipAt: NOW };
+    assert.equal(computeNextRun({ schedule: raced, lastSyncAt: null, now: NOW + 60_000 }).due, true);
+  });
+});

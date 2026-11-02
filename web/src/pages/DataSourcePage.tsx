@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useDataSourceDetail, useDataSourceList, useScopeList } from '@/lib/hooks';
+import { useDataSourceDetail, useDataSourceList, useScopeList, useVectorAvailability } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
 // upstream 侧记录/列表自带 schedule（定时同步），本地侧新增移除接口（removeDataSource）
 import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
@@ -864,6 +864,18 @@ export function DataSourcePage(): JSX.Element {
     }
   };
 
+  /**
+   * 向量不可用对数据源的影响（2026-11-02）：开了「向量化」的源同步必然整体失败
+   * （`handleDirectImport` 零完成 → VECTOR_UNAVAILABLE），定时同步则是跳过。
+   * 判据复用 `useVectorAvailability`（/api/health + scope 层），与导入/检索/写入三页同一口径，
+   * 避免这里自判一套、别处又说一套。关闭向量化的源完全不受影响，不参与提示。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
+  const vectorBlockedSources = vectorAvailable
+    ? []
+    : (listQuery.data?.sources ?? []).filter((item) => item.vector);
+
   return (
     <div className={`ki-datasource-page${scope ? ' ki-datasource-page--drawer' : ''}`}>
       <div className="ki-page-head">
@@ -886,6 +898,26 @@ export function DataSourcePage(): JSX.Element {
           }}
         >添加 Git 数据源</button>
       </div>
+
+      {/* 向量不可用提示（2026-11-02）：只点名开了向量化的源 —— 关闭向量化的源不受影响，
+          提示它们会让用户以为整页都坏了。文案必须给出两条出路（关向量化 / 修 embedding），
+          否则用户只知道"同步失败"却无处下手。 */}
+      {vectorBlockedSources.length > 0 ? (
+        <div className="ki-task-notice ki-task-notice--warn ki-ds-vector-block" role="status">
+          <span className="ki-ds-vector-block__text">
+            向量服务不可用：{vectorBlockedSources.length} 个已开启「向量化」的数据源同步会失败，定时同步将跳过。
+            在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后自动恢复。
+            {vectorAvailability.reason ? `原因：${vectorAvailability.reason}` : ''}
+          </span>
+          <button
+            type="button"
+            className="ki-btn ki-btn--ghost ki-btn--small"
+            onClick={() => navigate('/resources')}
+          >
+            去资源 › 向量模型 ↗
+          </button>
+        </div>
+      ) : null}
 
       {addState.notice ? (
         <p className={`ki-task-notice ki-task-notice--${addState.noticeWarn ? 'warn' : 'info'}`}>{addState.notice}</p>
@@ -1378,8 +1410,15 @@ export function DataSourcePage(): JSX.Element {
                   const lastSyncLabel = source.lastSync ? formatDateTime(source.lastSync.at) : null;
                   const rowAvailability = source.syncAvailability;
                   const rowSyncing = syncingScopes.has(source.scope);
+                  /**
+                   * 该行开了向量化、但向量服务当前不可用（2026-11-02）：同步必然零完成失败，
+                   * 直接禁用并说明原因 —— 放行只会让用户白等一次全目录扫描（大仓库数分钟）。
+                   * 关闭向量化（编辑弹窗里可改）或修好 embedding 后自动恢复可点。
+                   */
+                  const rowVectorBlocked = source.vector === true && !vectorAvailable;
                   // 只禁本行：别的行仍可点（不同 scope 各有服务端锁）
-                  const rowCanSync = !source.running && rowAvailability?.allowed === true && !rowSyncing;
+                  const rowCanSync = !source.running && rowAvailability?.allowed === true && !rowSyncing
+                    && !rowVectorBlocked;
                   /**
                    * scope 名后的同步状态徽标（2026-10-30）：按钮文案恒定后，状态在这里表达。
                    * 顺序：本地「已提交、列表还没刷新」→ 服务端 running（排队 / 进行中）。
@@ -1394,8 +1433,10 @@ export function DataSourcePage(): JSX.Element {
                     ? '正在提交同步请求'
                     : source.running
                       ? (source.activeState === 'queued' ? '同步已排队' : '同步进行中')
-                      : rowAvailability === undefined
-                        ? '当前 daemon 不支持页面同步，请升级并重启'
+                      : rowVectorBlocked
+                        ? '向量服务不可用：本次同步会失败。请在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后重试'
+                        : rowAvailability === undefined
+                          ? '当前 daemon 不支持页面同步，请升级并重启'
                         : rowAvailability.reason === 'cooldown'
                           ? `距上次成功同步不足 30 分钟；如需立即同步：ki datasource sync --scope ${source.scope}`
                           : '同步（Git 源为增量）';
@@ -1469,6 +1510,13 @@ export function DataSourcePage(): JSX.Element {
                         className={`ki-task-state ki-task-state--${status.tone}`}
                         title={status.state === 'running' ? '本次同步进行中' : status.state === 'queued' ? '等待同知识库的其他任务完成' : undefined}
                       >{status.label}</span>
+                      {/* 只标开了向量化的行：关闭向量化的源在同样环境下照常同步，标它等于误伤 */}
+                      {rowVectorBlocked ? (
+                        <span
+                          className="ki-ds-blocked-badge"
+                          title="向量服务不可用：该源已开启「向量化」，同步会整体失败；在「编辑」里关闭向量化或修复 embedding 后恢复"
+                        >向量不可用</span>
+                      ) : null}
                     </td>
                     <td className="ki-ds-col--duration">
                       {source.lastSync ? formatSyncDuration(source.lastSync.durationMs) : '—'}

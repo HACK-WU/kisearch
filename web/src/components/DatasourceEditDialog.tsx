@@ -14,6 +14,7 @@ import {
   type DataSourceRecordView,
   type DataSourceScheduleView,
 } from '@/api/httpApi';
+import { useVectorAvailability } from '@/lib/hooks';
 import {
   formatDateTime,
   formFromSchedule,
@@ -64,6 +65,13 @@ export function DatasourceEditDialog({
   onSaved,
 }: DatasourceEditDialogProps): JSX.Element {
   const [base, setBase] = useState<DataSourceRecordView>(record);
+  /**
+   * 向量可用性（2026-11-02）：只用于**说明**，不置灰开关 ——
+   * 「向量化」是持久配置，开关置灰会把用户唯一的自救路径（关掉它改走仅全文）锁死；
+   * 与导入页不同，那里的开关只作用于"本次导入"，所以可以置灰。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
   const [configForm, setConfigForm] = useState<EditConfigForm>(() => formFromRecord(record));
   const [scheduleBase, setScheduleBase] = useState<DataSourceScheduleView | null | undefined>(record.schedule);
   const [scheduleForm, setScheduleForm] = useState<ScheduleFormState>(() => formFromSchedule(record.schedule));
@@ -290,6 +298,18 @@ export function DatasourceEditDialog({
                 <span className="ki-ds-sched-hint">{configForm.vector ? '开启（写入向量层）' : '关闭（仅全文）'}</span>
               </div>
             </div>
+            {/* 向量不可用时的说明（2026-11-02 用户定稿）：**不置灰开关**，只说明后果与出路。
+                开关在此处是持久配置 —— 置灰等于把用户唯一的自救路径（关掉它改走仅全文）锁死。 */}
+            {vectorAvailable ? null : (
+              <p className="ki-ds-vector-hint" role="status">
+                {configForm.vector ? '⚠ 当前向量服务不可用' : '当前按「仅全文」同步'}
+                {configForm.vector && vectorAvailability.reason ? `（${vectorAvailability.reason}）` : ''}
+                {configForm.vector
+                  ? '：保持开启时同步会整体失败；关闭后按「仅全文」同步，正文与全文索引正常写入，'
+                    + '之后可用 ki restore <scope> --rebuild-vector 补齐向量。'
+                  : '：不生成向量，全文检索可用（修好 embedding 后可 ki restore <scope> --rebuild-vector 补齐）。'}
+              </p>
+            )}
 
             <div className="ki-ds-edit__row">
               <span className="ki-ds-edit__label">切分参数</span>

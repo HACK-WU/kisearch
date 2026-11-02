@@ -1662,12 +1662,17 @@ async function handleDirectImportUnlocked(
     // 文案必须给两条出路（否则用户只能去猜）：修 embedding，或 --no-vector 走 FTS-only。
     // 后者不是降级妥协 —— 正文/全文索引照常写入，只是没有 dense 向量，
     // 修好 embedding 后 `ki restore --rebuild-vector` 可原样补齐。
-    throw new Error(
+    // ★ code 让调用方能区分「向量不可用」与「数据源/参数坏了」：定时同步据此把本次
+    //   记为 skipped 而不是 failed（否则连续失败计数会被 embedding 故障污染），
+    //   前端也能给出「向量不可用」而不是笼统的同步失败。
+    const unavailable = new Error(
       `本次导入的 ${fileRecords.length} 个文件均未完成向量化；旧文档已保留，请修复 embedding 后重试`
       + '；或加 --no-vector 以 FTS-only 模式继续（不生成 dense 向量，正文仍可全文检索，'
       + `之后可用 ki restore ${args.scope} --rebuild-vector 补齐）` +
       (failureDetails ? `。失败详情：${failureDetails}` : ''),
-    );
+    ) as Error & { code?: string };
+    unavailable.code = 'VECTOR_UNAVAILABLE';
+    throw unavailable;
   }
   const activeEntries = activeFileRecords.flatMap((rec) => rec.entries);
   const activeEntryPaths = new Set(activeEntries.map((entry) => entry.path));

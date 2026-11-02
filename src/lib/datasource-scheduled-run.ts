@@ -142,6 +142,19 @@ export async function runScheduledSync(input: ScheduledRunInput): Promise<Schedu
             return skipped('clone-busy', startedAt);
           }
 
+          // 5b) 向量不可用（401/402/维度不符等 embedding 故障）：与「数据源本身坏了」区分开 ——
+          //     记 skipped 而不是 failed，否则连续失败计数被 embedding 故障污染（页面会显示
+          //     "连续失败 N 次"却指向错误的原因），且用户修好 key 后计数仍需等很久才回落。
+          //     本次不写任何文档（handleDirectImport 抛错时旧文档保持不变），下次到点自动重试。
+          if (!thrown && result && !result.ok && result.code === 'VECTOR_UNAVAILABLE') {
+            applyScheduleRunResult(input.scope, { outcome: 'skipped', reason: 'vector-unavailable', slot: input.slot, at: Date.now() });
+            task.finish('cancelled', {
+              errorCode: 'VECTOR_UNAVAILABLE',
+              error: '向量服务不可用，本次同步跳过（未写入任何文档）；修复 embedding 或关闭该源的「向量化」后自动恢复',
+            });
+            return skipped('vector-unavailable', startedAt);
+          }
+
           // 6) 收尾：先写运行态（避免崩溃后重复补跑），再 finish 任务
           let outcome: ScheduleRunOutcome;
           if (input.abortSignal?.aborted) {
