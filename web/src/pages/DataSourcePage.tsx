@@ -237,6 +237,7 @@ export function DataSourcePage(): JSX.Element {
       // 只聚焦弹窗容器：聚焦 Scope 输入框会触发它的 onFocus 自动展开列表
       const timer = window.setTimeout(() => addDialogRef.current?.focus(), 0);
       const onKey = (event: KeyboardEvent): void => {
+        // 关闭不做二次确认（2026-11-02 用户拍板）：表单重填成本低，不是危险操作
         if (event.key === 'Escape') setAddOpen(false);
       };
       window.addEventListener('keydown', onKey);
