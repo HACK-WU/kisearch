@@ -228,7 +228,24 @@ function safeErrorSummary(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   let category: string;
   const importFailures = /^(\d+) 项导入处理有错误$/.exec(value);
-  if (/SCOPE_OPERATION_BUSY|已有导入或还原任务/.test(value)) category = '同一知识库已有写入任务，请等待后重试';
+  /**
+   * ★ Git 数据源的错误必须**前置判定**（REQ-20261102 任务诊断日志 S-01）：
+   *   下面 embedding 白名单里的「超时」「NETWORK」会吃掉 git 的失败串 ——
+   *   `clone 超时（10 分钟）` → 误报「Embedding 服务请求超时」；
+   *   `无法连接远端（… network is unreachable）` → 误报「Embedding 服务暂不可用」。
+   *   判定一律用 Git 独有词（不走 `NETWORK` / `超时` 这类通用词），避免反向污染 embedding 分类。
+   */
+  if (/GIT_CLONE_TIMEOUT|clone 超时/.test(value)) category = 'Git 克隆超时';
+  else if (/GIT_NETWORK_FAILED|无法连接远端|could not resolve host/i.test(value)) category = '无法连接远端仓库';
+  else if (/GIT_AUTH_FAILED|认证失败：请在运行 daemon/.test(value)) category = 'Git 仓库认证失败';
+  else if (/GIT_BRANCH_NOT_FOUND|远端分支不存在/.test(value)) category = '远端分支不存在';
+  else if (/GIT_REPO_NOT_FOUND|仓库不存在或当前凭据无权访问/.test(value)) category = '仓库不存在或无权访问';
+  else if (/CLONE_TARGET_EXISTS|托管目录已存在/.test(value)) category = '托管目录已存在';
+  else if (/SOURCE_EMPTY|没有可导入文件/.test(value)) category = '没有可导入的文档';
+  else if (/GIT_SCHEME_UNSUPPORTED|不支持明文 http|不支持该 Git 传输协议|本地目录请使用 --source/.test(value)) category = 'Git 地址或协议不受支持';
+  else if (/INVALID_BRANCH|分支名非法|只支持远端分支/.test(value)) category = 'Git 分支不可用';
+  else if (/CLONE_FAILED|clone 失败/.test(value)) category = 'Git 克隆失败';
+  else if (/SCOPE_OPERATION_BUSY|已有导入或还原任务/.test(value)) category = '同一知识库已有写入任务，请等待后重试';
   else if (/embedding\.apiKey|API[_ -]?KEY.*未配置/i.test(value)) category = 'Embedding API Key 未配置或不可用';
   else if (/VECTOR_DIMENSION_MISMATCH|维度.*(?:不匹配|变化)|dimension mismatch/i.test(value)) category = '当前 embedding 与已有向量集合维度不匹配';
   else if (/\b(?:HTTP[_ ]?(?:401|403)|UNAUTHORIZED|FORBIDDEN|鉴权失败)\b/i.test(value)) category = 'Embedding 服务鉴权失败';

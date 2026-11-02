@@ -168,6 +168,15 @@ scopes:
 
 ## 推荐排障顺序
 
+**若是一次任务执行失败（从 Web 任务详情或任务列表拿到了任务 ID），先查任务运行诊断**——它直接给出错误码与错误类别，比逐条猜测快得多：
+
+```bash
+ki log <taskId>          # 失败原因 / 错误码 / 恢复提示（任务台账保留 1 小时）
+ki log --scope <scope> --failed   # 不知道该查哪个 ID 时，看最近的失败任务
+```
+
+再按下面的顺序排查：
+
 1. **先看命令参数是否完整**
 2. **再看 `--scope` 是否正确且已注册**
 3. **再看输入路径是否真的存在**
@@ -186,6 +195,7 @@ scope 先注册
 
 ## 相关文档
 
+- 任务失败诊断：[`cli.md` 的 `ki log` 章节](./cli.md#log)
 - `ki import` 详细流程：[`import.md`](./import.md)
 - 典型工作流：[`workflows.md`](./workflows.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)

@@ -44,6 +44,7 @@ const COMMANDS = {
   'tag': 'src/tag.ts',
   'config': 'src/config.ts',
   'doctor': 'src/doctor.ts',
+  'log': 'src/log.ts',
   'backup': 'src/backup.ts',
   'restore': 'src/restore.ts',
   'export': 'src/export.ts',
@@ -98,6 +99,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   tag               向量 tag 发现：list（只读，含文档数）
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）
+  log               任务运行诊断：按任务 ID 查看失败原因（只读；台账保留 1 小时）
   backup            备份 scope 目录快照
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
@@ -111,6 +113,8 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
 示例：
   ki config init
   ki doctor
+  ki log 46aa5f08-14c0-425b-af8a-c47bcb8199c2   # 任务失败原因（任务 ID 从任务详情复制）
+  ki log --scope my-project --failed             # 某知识库最近的失败任务
   ki import --scope my-project --source ./wiki --group wiki
   ki datasource add --scope my-project --source ./wiki --group wiki
   ki datasource sync --scope my-project          # 导入 + 算待删候选（不删除）
