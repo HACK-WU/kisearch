@@ -29,7 +29,7 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { resolveVectorAvailability, vectorAvailabilityHint, vectorBadgeLabel } =
+const { resolveVectorAvailability, vectorAvailabilityHint, editorVectorizeHint, vectorBadgeLabel } =
   await vite.ssrLoadModule('/src/lib/vectorAvailability.ts');
 const { summarizeHealth, vectorOnlyFailureLabel, isVectorHealthCheck, VECTOR_HEALTH_CHECK_NAMES } =
   await vite.ssrLoadModule('/src/lib/healthSummary.ts');
@@ -238,5 +238,56 @@ describe('展示文案', () => {
     const s = summarizeHealth(healthOf([item('目录可读', 'fail', '权限')]), null, false);
     assert.equal(vectorBadgeLabel(s, { status: 'unavailable' }), null);
     assert.equal(s.label, '1 项异常 · 目录可读');
+  });
+});
+
+/**
+ * 编辑文档「保存时向量化」开关的就地说明（2026-11-02）。
+ *
+ * 锁住两条不变量：
+ *   1) 只有 `available` 允许说"默认关闭"这层常规说明；其余三态**必须**同时讲清后果
+ *      （"本次只写全文索引（FTS）"）—— 只灰化开关不说后果，用户会以为保存后仍是 dense；
+ *   2) 后端给出的 `reason` 原样透出（它通常自带 `ki restore …` 之类的修复指引），
+ *      无 reason 时不能留下一个悬空的冒号。
+ */
+describe('editorVectorizeHint（编辑器开关说明）', () => {
+  it('available：常驻常规说明，不提降级', () => {
+    const text = editorVectorizeHint({ status: 'available' });
+    assert.equal(text, '默认关闭；关闭时普通编辑写入 FTS');
+  });
+
+  it('unavailable：讲清后果 + 透出后端原因', () => {
+    const text = editorVectorizeHint({ status: 'unavailable', reason: '密钥无效（HTTP_401）' });
+    assert.ok(text.includes('向量服务不可用'), text);
+    assert.ok(text.includes('只写全文索引（FTS）'), text);
+    assert.ok(text.includes('密钥无效（HTTP_401）'), text);
+  });
+
+  it('unavailable 且无原因：不留下悬空冒号', () => {
+    const text = editorVectorizeHint({ status: 'unavailable' });
+    assert.ok(!text.includes('：'), text);
+    assert.ok(text.includes('只写全文索引（FTS）'), text);
+  });
+
+  it('checking：说明还在探测、且本次按全文处理', () => {
+    const text = editorVectorizeHint({ status: 'checking' });
+    assert.ok(text.includes('正在检查'), text);
+    assert.ok(text.includes('只写全文索引（FTS）'), text);
+  });
+
+  it('unknown：可行动（刷新可重试）+ 透出原因', () => {
+    const text = editorVectorizeHint({ status: 'unknown', reason: 'Failed to fetch' });
+    assert.ok(text.includes('无法确认'), text);
+    assert.ok(text.includes('只写全文索引（FTS）'), text);
+    assert.ok(text.includes('刷新页面可重试'), text);
+  });
+
+  it('除 available 外，任一只读态都必须讲清"只写全文索引"', () => {
+    for (const status of ['unavailable', 'checking', 'unknown']) {
+      assert.ok(
+        editorVectorizeHint({ status }).includes('只写全文索引（FTS）'),
+        `${status} 未讲清后果`,
+      );
+    }
   });
 });

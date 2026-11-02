@@ -1001,6 +1001,10 @@ a:hover { text-decoration: underline; }
 .ki-switch--on .ki-switch__knob { transform: translateX(20px); }
 /* 禁用态：该开关对当前结果无意义（如全文检索下的「文档内高亮」，REQ-20261014-003 R4） */
 .ki-switch--disabled { cursor: not-allowed; opacity: .5; }
+/* 键盘焦点：全站每个可聚焦控件都显式给过 `:focus-visible`（见 .ki-service-badge / .ki-segmented
+   等），`.ki-switch` 此前只挂在不可聚焦的 div 上才一直没有。2026-11-02 起编辑器的拨杆改用原生
+   <button>（可 Tab 聚焦）→ 补上；`outline-offset: 2px` 让描边离开圆角轨道的边。 */
+.ki-switch:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
 
 /* 分段控件（tabs） */
 .ki-tabs { display: flex; gap: 2px; background: var(--ki-color-surface); border-radius: var(--ki-radius-sm); padding: 2px; border: 1px solid var(--ki-color-border); }
@@ -2125,7 +2129,15 @@ a:hover { text-decoration: underline; }
 .ki-editor__status { white-space: nowrap; }
 .ki-editor__actions { display: flex; align-items: center; gap: 12px; min-width: 0; margin-left: auto; }
 .ki-editor__vector-control { display: flex; flex: 0 1 420px; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
-.ki-editor__vector { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; font-size: 12px; }
+/* 保存时向量化（2026-11-02 由原生 checkbox 改为拨杆，与导入页/写入页的开关形态对齐）：
+   footer 是**操作条**而非表单区 ⇒ 不套 `.ki-vec-switch` 的卡片描边，否则与「保存」按钮并列成
+   两个块、且多占 20px 高度。说明行缩进到标题左缘（拨杆 44 + 行内 gap 10 = 54），
+   形成「拨杆 → 标题 / 说明」两级层次；缩进量写死是因为拨杆尺寸由 `.ki-switch` 固定。 */
+.ki-editor__vector-row { display: flex; align-items: center; gap: 10px; }
+.ki-editor__vector-title { font-size: 12px; color: var(--ki-color-text); white-space: nowrap; }
+.ki-editor__vector-desc { margin-left: 54px; font-size: 12px; line-height: 1.4; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+/* 不可用时与导入页 `.ki-vector-status-hint` 同色：同一故障不在一处变红、一处变灰 */
+.ki-editor__vector-desc--blocked { color: var(--ki-color-warning); }
 .ki-editor__vector-error { display: flex; align-items: flex-start; gap: 8px; width: min(100%, 420px); box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ki-color-danger); border-radius: var(--ki-radius-sm); background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink); font-size: 13px; line-height: 1.4; }
 .ki-editor__vector-error-icon { display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--ki-color-danger); color: var(--ki-color-surface); font-size: 12px; font-weight: 700; }
 .ki-editor__layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; flex: 1; }

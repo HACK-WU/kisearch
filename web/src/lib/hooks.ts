@@ -47,7 +47,7 @@ export {
 } from './healthSummary';
 export type { HealthLevel, HealthIssue, HealthSummary } from './healthSummary';
 // 向量可用性判据同样独立成纯逻辑（lib/vectorAvailability.ts），可零依赖单测
-export { resolveVectorAvailability, vectorAvailabilityHint, vectorBadgeLabel } from './vectorAvailability';
+export { resolveVectorAvailability, vectorAvailabilityHint, editorVectorizeHint, vectorBadgeLabel } from './vectorAvailability';
 export type { VectorAvailability, VectorAvailabilityStatus } from './vectorAvailability';
 
 /**

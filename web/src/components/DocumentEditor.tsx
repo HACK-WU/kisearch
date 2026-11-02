@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getEditableDocument, saveEditableDocument, type EditableDocument, type SaveDocumentResponse } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
+import { editorVectorizeHint, useVectorAvailability } from '@/lib/hooks';
 
 interface Props {
   scope: string;
@@ -24,9 +25,20 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
   const [message, setMessage] = useState('');
   const [indexError, setIndexError] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * 向量可用性（2026-11-02）：判据与顶栏徽标 / 导入 / 检索 / 写入共用 `useVectorAvailability`
+   * （两路既有 query 的薄封装，不产生额外请求），不在此自判一套。
+   *
+   * ★ `effectiveVectorize` 用**派生**而非 effect 覆盖 state：探测恢复后自动回到用户原来的
+   *   选择（同 ImportPage 的 effectiveVector 口径）；所有提交点只读派生值，避免"勾着但写不了"
+   *   的状态被真的提交出去 —— 向量不可用时 dense 发布必然失败（DOC_INDEX_INCOMPLETE）。
+   */
+  const vectorAvailability = useVectorAvailability();
+  const vectorAvailable = vectorAvailability.status === 'available';
+  const effectiveVectorize = vectorize && vectorAvailable;
   const dirty = loaded !== null && draft !== loaded.content;
   const modeChange = loaded !== null && (dirty || vectorizeTouched)
-    && (vectorize ? loaded.indexMode !== 'dense' : loaded.indexMode !== 'fts');
+    && (effectiveVectorize ? loaded.indexMode !== 'dense' : loaded.indexMode !== 'fts');
   const hasUnsavedChanges = dirty || modeChange || Boolean(editId);
   const canSave = hasUnsavedChanges;
 
@@ -71,7 +83,7 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
         scope, group, relation, content: draft,
         expectedRevision: loaded.revision,
         expectedSourceRevision: loaded.sourceRevision,
-        vectorize,
+        vectorize: effectiveVectorize,
         editId,
       });
       onSaved(draft, result);
@@ -96,7 +108,7 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
                 : '草稿仍在编辑器中，可重试。';
       setMessage(`保存失败：${failure.message}。${detail ? `源文件 ${detail.source ?? '未知'} / KB ${detail.kb ?? '未知'} / 索引 ${detail.index ?? '未知'}。` : ''}${nextStep}`);
       if (detail?.index === 'incomplete') {
-        const modeLabel = vectorize ? '向量化' : 'FTS 全文';
+        const modeLabel = effectiveVectorize ? '向量化' : 'FTS 全文';
         setIndexError(`${modeLabel}索引未完成，请查看上方错误详情和处理建议。`);
       }
     } finally {
@@ -130,10 +142,41 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
           </div>
         </div>
         <footer className="ki-editor__foot">
-          <span className="ki-editor__status">{dirty ? '有未保存修改' : modeChange ? `保存将切换为${vectorize ? 'dense 向量' : 'FTS 全文'}` : '无未保存修改'}</span>
+          <span className="ki-editor__status">{dirty ? '有未保存修改' : modeChange ? `保存将切换为${effectiveVectorize ? 'dense 向量' : 'FTS 全文'}` : '无未保存修改'}</span>
           <div className="ki-editor__actions">
             <div className="ki-editor__vector-control">
-              <label className="ki-editor__vector"><input type="checkbox" checked={vectorize} disabled={busy} onChange={(event) => { setMessage(''); setIndexError(''); setVectorize(event.target.checked); setVectorizeTouched(true); }} />保存时向量化（默认关闭；关闭时普通编辑写入 FTS）</label>
+              <div className="ki-editor__vector-row">
+                {/*
+                  * 拨杆用 <button role="switch">（不是 div）：导入页/写入页那两处是 div + onClick，
+                  * 无 tabIndex ⇒ 键盘用户切不了。原生 button 自带可达性与 disabled 语义，
+                  * 视觉完全由 .ki-switch 决定，与那两处同款。
+                  */}
+                <button
+                  type="button"
+                  className={`ki-switch${effectiveVectorize ? ' ki-switch--on' : ''}${vectorAvailable ? '' : ' ki-switch--disabled'}`}
+                  role="switch"
+                  aria-checked={effectiveVectorize}
+                  aria-label="保存时向量化"
+                  aria-describedby="ki-editor-vector-desc"
+                  disabled={busy || !vectorAvailable}
+                  onClick={() => { setMessage(''); setIndexError(''); setVectorize((prev) => !prev); setVectorizeTouched(true); }}
+                >
+                  <span className="ki-switch__knob" />
+                </button>
+                <span className="ki-editor__vector-title">保存时向量化</span>
+              </div>
+              {/*
+                * 常驻说明行（2026-11-02 用户定稿）：可用时说默认值，不可用时**原地**换成告警文案，
+                * 不追加第三行。★ 但文案变长仍会折行（实测 1440 下 footer 73px → 90px、375 下 159px），
+                * 别把这里当成"固定高度"来依赖。
+                */}
+              <p
+                id="ki-editor-vector-desc"
+                className={`ki-editor__vector-desc${vectorAvailable ? '' : ' ki-editor__vector-desc--blocked'}`}
+                role={vectorAvailable ? undefined : 'status'}
+              >
+                {editorVectorizeHint(vectorAvailability)}
+              </p>
               {indexError && <div className="ki-editor__vector-error" role="alert">
                 <span className="ki-editor__vector-error-icon" aria-hidden="true">!</span>
                 <span>{indexError}</span>
