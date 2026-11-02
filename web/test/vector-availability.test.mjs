@@ -242,31 +242,33 @@ describe('展示文案', () => {
 });
 
 /**
- * 编辑文档「保存时向量化」开关的就地说明（2026-11-02）。
+ * 编辑文档「保存时向量化」开关的**行内**说明（2026-11-02）。
  *
- * 锁住两条不变量：
+ * 锁住三条不变量：
  *   1) 只有 `available` 允许说"默认关闭"这层常规说明；其余三态**必须**同时讲清后果
  *      （"本次只写全文索引（FTS）"）—— 只灰化开关不说后果，用户会以为保存后仍是 dense；
- *   2) 后端给出的 `reason` 原样透出（它通常自带 `ki restore …` 之类的修复指引），
- *      无 reason 时不能留下一个悬空的冒号。
+ *   2) **不拼 `availability.reason`**：这句话挂在开关右边同一行，拼上后端原因
+ *      （如「密钥无效（HTTP_401）：请更新 embedding.apiKey…后重启 ki mcp」）会拖成三行、
+ *      把 footer 顶高 —— 这是 2026-11-02 用户明确否掉的观感。完整原因在顶栏徽标的健康明细里，
+ *      故这里连 reason 都不许出现，`reason` 只作为入参存在、不参与输出；
+ *   3) 文案必须短：行内单句，超过一定长度必然折行（窄屏由样式兜底折到第二行）。
  */
 describe('editorVectorizeHint（编辑器开关说明）', () => {
-  it('available：常驻常规说明，不提降级', () => {
+  it('available：常规说明（括号形式，跟在标题后面）', () => {
     const text = editorVectorizeHint({ status: 'available' });
-    assert.equal(text, '默认关闭；关闭时普通编辑写入 FTS');
+    assert.equal(text, '（默认关闭；关闭时普通编辑写入 FTS）');
   });
 
-  it('unavailable：讲清后果 + 透出后端原因', () => {
-    const text = editorVectorizeHint({ status: 'unavailable', reason: '密钥无效（HTTP_401）' });
-    assert.ok(text.includes('向量服务不可用'), text);
-    assert.ok(text.includes('只写全文索引（FTS）'), text);
-    assert.ok(text.includes('密钥无效（HTTP_401）'), text);
+  it('unavailable：一句说明，不带后端原因', () => {
+    const text = editorVectorizeHint({ status: 'unavailable', reason: '密钥无效（HTTP_401）：请更新 embedding.apiKey' });
+    assert.equal(text, '向量服务不可用，本次只写全文索引（FTS）');
   });
 
-  it('unavailable 且无原因：不留下悬空冒号', () => {
-    const text = editorVectorizeHint({ status: 'unavailable' });
-    assert.ok(!text.includes('：'), text);
-    assert.ok(text.includes('只写全文索引（FTS）'), text);
+  it('★ 任何状态都不许把 reason 拼进文案（否则行内折成三行）', () => {
+    for (const status of ['available', 'unavailable', 'checking', 'unknown']) {
+      const text = editorVectorizeHint({ status, reason: 'MAGIC-REASON-TOKEN' });
+      assert.ok(!text.includes('MAGIC-REASON-TOKEN'), `${status} 把 reason 拼进了文案：${text}`);
+    }
   });
 
   it('checking：说明还在探测、且本次按全文处理', () => {
@@ -275,11 +277,10 @@ describe('editorVectorizeHint（编辑器开关说明）', () => {
     assert.ok(text.includes('只写全文索引（FTS）'), text);
   });
 
-  it('unknown：可行动（刷新可重试）+ 透出原因', () => {
-    const text = editorVectorizeHint({ status: 'unknown', reason: 'Failed to fetch' });
+  it('unknown：无法确认，但仍讲清本次写全文', () => {
+    const text = editorVectorizeHint({ status: 'unknown' });
     assert.ok(text.includes('无法确认'), text);
     assert.ok(text.includes('只写全文索引（FTS）'), text);
-    assert.ok(text.includes('刷新页面可重试'), text);
   });
 
   it('除 available 外，任一只读态都必须讲清"只写全文索引"', () => {
@@ -288,6 +289,13 @@ describe('editorVectorizeHint（编辑器开关说明）', () => {
         editorVectorizeHint({ status }).includes('只写全文索引（FTS）'),
         `${status} 未讲清后果`,
       );
+    }
+  });
+
+  it('行内单句：非 available 文案不超过 24 个字（防再被拼长）', () => {
+    for (const status of ['unavailable', 'checking', 'unknown']) {
+      const text = editorVectorizeHint({ status });
+      assert.ok([...text].length <= 24, `${status} 文案过长（${[...text].length}）：${text}`);
     }
   });
 });

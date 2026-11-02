@@ -137,27 +137,28 @@ export function vectorAvailabilityHint(availability: VectorAvailability): string
 }
 
 /**
- * 编辑文档「保存时向量化」开关的就地说明（2026-11-02）。
+ * 编辑文档「保存时向量化」开关的行内说明（2026-11-02）。
  *
  * ★ 与 `vectorAvailabilityHint` 分开：那句的主语是**检索**（"已自动降级为全文检索"），
  *   而本开关决定的是**这次保存写哪层索引**，照搬检索文案会让用户以为只是搜不到、
  *   不知道保存后文档被降级成了 FTS-only。
- * ★ `available` 返回常规说明而非空串：这行在编辑器里是**常驻**的（开关下方第二行），
- *   可用时说明默认值，不可用时整行原地换成告警文案 —— 只替换不追加，footer 不会凭空多出一行。
- *   但**文案变长仍会折行**（实测 1440 宽下 1 行 → 2 行，footer 73px → 90px；375 下 5 行 / 159px），
- *   所以别据此断言"高度恒定"，只能说"不追加第三行"。
+ * ★ **刻意不拼 `availability.reason`**（2026-11-02 用户定稿）：这句话现在跟在开关**右边同一行**，
+ *   拼上后端原因（如「密钥无效（HTTP_401）：请更新 embedding.apiKey…后重启 ki mcp」）会拖成
+ *   三行、把 footer 顶高，观感很差。完整原因在顶栏徽标点开后的健康明细里已有，不在两处重复；
+ *   本行只负责一句话说清"这次保存写哪层索引"。
+ * ★ 返回的是一句短语而非整段：调用方按行内元素渲染（`<span>`），不换行成段落。
  */
 export function editorVectorizeHint(availability: VectorAvailability): string {
-  const suffix = availability.reason ? `：${availability.reason}` : '';
   switch (availability.status) {
     case 'available':
-      return '默认关闭；关闭时普通编辑写入 FTS';
+      // 括号保留：它跟在标题「保存时向量化」后面，是补充说明而非独立句子
+      return '（默认关闭；关闭时普通编辑写入 FTS）';
     case 'unavailable':
-      return `向量服务不可用，本次只写全文索引（FTS）${suffix}`;
+      return '向量服务不可用，本次只写全文索引（FTS）';
     case 'checking':
-      return '正在检查向量可用性，检查完成前本次只写全文索引（FTS）';
+      return '正在检查向量可用性，本次只写全文索引（FTS）';
     default:
-      return `无法确认向量可用性，本次只写全文索引（FTS）${suffix}（刷新页面可重试）`;
+      return '无法确认向量可用性，本次只写全文索引（FTS）';
   }
 }
 

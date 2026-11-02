@@ -164,19 +164,20 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
                   <span className="ki-switch__knob" />
                 </button>
                 <span className="ki-editor__vector-title">保存时向量化</span>
+                {/*
+                  * 说明**跟在开关右边同一行**（2026-11-02 用户定稿，此前是开关下方独立一行）：
+                  * 行内一句短语即可，别把后端 reason 拼进来 —— 那句会拖成三行、把 footer 顶高，
+                  * 而完整原因在顶栏徽标点开后的健康明细里已有，不在此重复。
+                  * 窄屏放不下时整段折到第二行并缩进对齐标题（样式见 ki.css 的 800px 媒体查询）。
+                  */}
+                <span
+                  id="ki-editor-vector-desc"
+                  className={`ki-editor__vector-note${vectorAvailable ? '' : ' ki-editor__vector-note--blocked'}`}
+                  role={vectorAvailable ? undefined : 'status'}
+                >
+                  {editorVectorizeHint(vectorAvailability)}
+                </span>
               </div>
-              {/*
-                * 常驻说明行（2026-11-02 用户定稿）：可用时说默认值，不可用时**原地**换成告警文案，
-                * 不追加第三行。★ 但文案变长仍会折行（实测 1440 下 footer 73px → 90px、375 下 159px），
-                * 别把这里当成"固定高度"来依赖。
-                */}
-              <p
-                id="ki-editor-vector-desc"
-                className={`ki-editor__vector-desc${vectorAvailable ? '' : ' ki-editor__vector-desc--blocked'}`}
-                role={vectorAvailable ? undefined : 'status'}
-              >
-                {editorVectorizeHint(vectorAvailability)}
-              </p>
               {indexError && <div className="ki-editor__vector-error" role="alert">
                 <span className="ki-editor__vector-error-icon" aria-hidden="true">!</span>
                 <span>{indexError}</span>

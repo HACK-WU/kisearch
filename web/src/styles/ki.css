@@ -2131,13 +2131,15 @@ a:hover { text-decoration: underline; }
 .ki-editor__vector-control { display: flex; flex: 0 1 420px; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
 /* 保存时向量化（2026-11-02 由原生 checkbox 改为拨杆，与导入页/写入页的开关形态对齐）：
    footer 是**操作条**而非表单区 ⇒ 不套 `.ki-vec-switch` 的卡片描边，否则与「保存」按钮并列成
-   两个块、且多占 20px 高度。说明行缩进到标题左缘（拨杆 44 + 行内 gap 10 = 54），
-   形成「拨杆 → 标题 / 说明」两级层次；缩进量写死是因为拨杆尺寸由 `.ki-switch` 固定。 */
-.ki-editor__vector-row { display: flex; align-items: center; gap: 10px; }
+   两个块、且多占 20px 高度。
+   说明跟在标题**右边同一行**（用户定稿）：行内只放一句短语，不拼后端原因 —— 拼上会拖成三行、
+   把 footer 顶高。窄屏放不下时由下方 800px 媒体查询整段折到第二行，并缩进到标题左缘
+   （拨杆 44 + 行内 gap 10 = 54；缩进量写死是因为拨杆尺寸由 `.ki-switch` 固定）。 */
+.ki-editor__vector-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ki-editor__vector-title { font-size: 12px; color: var(--ki-color-text); white-space: nowrap; }
-.ki-editor__vector-desc { margin-left: 54px; font-size: 12px; line-height: 1.4; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+.ki-editor__vector-note { font-size: 12px; line-height: 1.4; color: var(--ki-color-text-subtle); min-width: 0; overflow-wrap: anywhere; }
 /* 不可用时与导入页 `.ki-vector-status-hint` 同色：同一故障不在一处变红、一处变灰 */
-.ki-editor__vector-desc--blocked { color: var(--ki-color-warning); }
+.ki-editor__vector-note--blocked { color: var(--ki-color-warning); }
 .ki-editor__vector-error { display: flex; align-items: flex-start; gap: 8px; width: min(100%, 420px); box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ki-color-danger); border-radius: var(--ki-radius-sm); background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink); font-size: 13px; line-height: 1.4; }
 .ki-editor__vector-error-icon { display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--ki-color-danger); color: var(--ki-color-surface); font-size: 12px; font-weight: 700; }
 .ki-editor__layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; flex: 1; }
@@ -2149,7 +2151,10 @@ a:hover { text-decoration: underline; }
 .ki-editor__preview { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
 .ki-editor__notice, .ki-editor__error { padding: 8px 18px; background: color-mix(in srgb, var(--ki-color-primary) 12%, var(--ki-color-surface)); font-size: 13px; }
 .ki-editor__error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
-@media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__foot { flex-wrap: wrap; align-items: flex-start; } .ki-editor__status { flex: 1 1 100%; } .ki-editor__actions { flex: 1 1 100%; } .ki-editor__vector-control { flex: 1 1 0; } }
+@media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__foot { flex-wrap: wrap; align-items: flex-start; } .ki-editor__status { flex: 1 1 100%; } .ki-editor__actions { flex: 1 1 100%; } .ki-editor__vector-control { flex: 1 1 0; }
+  /* 行内说明折到第二行：`flex-basis: 100%` 独占整行，缩进用 padding 而非 margin
+     （全局 border-box ⇒ padding 计入宽度，加 margin 会让「100% + 54px」横向溢出）。 */
+  .ki-editor__vector-note { flex: 1 0 100%; padding-left: 54px; } }
 /* 提示条（复制失败 / 选区不合规 / 保存结果）：独立于加载错误，正文保留。
    悬浮在正文之上：原 sticky 仍占文档流、会把正文整体下推（用户反馈「挤占下面的文档内容」），
    改 absolute（相对 .ki-drawer__body 定位，滚动时不随之移出）。 */
