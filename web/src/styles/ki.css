@@ -3683,6 +3683,23 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 /* recoveryHint 已并入 `.ki-task-notice--warn`（三段布局），`.ki-task-recovery` 规则删除 */
 .ki-task-error { margin-top: 14px; padding: 10px 12px; border-radius: var(--ki-radius-sm); overflow-wrap: anywhere; font-size: var(--ki-font-size-sm); color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
 .ki-task-id { display: block; margin-top: 14px; color: var(--ki-color-text-subtle); overflow-wrap: anywhere; }
+
+/* 原因与日志（S-04）：日志正文限高滚动，避免 100 行把其它区块挤出视野 */
+.ki-task-log__meta { margin: 0 0 6px; }
+.ki-task-log__lines {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--ki-color-bg-muted);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.55;
+  white-space: pre;
+}
+.ki-task-log__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 /* 任务详情动作区（2026-10-13）：按 `state × source × 清单可重试性` 渲染出路
    （重试未完成 / 整批重导 / CLI 命令 / 重新检查），替代此前恒定显示的「前往导入页处理」。 */
 .ki-task-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }

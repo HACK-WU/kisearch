@@ -2,14 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  getTask, getTasks, getImportIncomplete, retryImportIncomplete, activeImportCount,
+  getTask, getTasks, getTaskLog, getImportIncomplete, retryImportIncomplete, activeImportCount,
   type TaskRecord, type ImportIncompleteStatus,
 } from '@/api/tasksApi';
 import { cancelImport, getDocContent, getDataSourceDetail } from '@/api/httpApi';
 import { taskDetailActions, type TaskAction } from '@/lib/taskActions';
 import {
-  buildTaskDetail, operationLabel, sourceLabel, stateLabel,
+  buildLogSection, buildTaskDetail, operationLabel, sourceLabel, stateLabel,
+  type TaskLogState,
 } from '@/lib/taskDetailModel';
+import { copyText } from '@/lib/clipboard';
 import { buildTaskListRow } from '@/lib/taskListModel';
 import {
   DEFAULT_TASK_SORT, TASK_FILTERS, countTasks, nextTaskSort, queryTasks, shouldShowTaskPager,
@@ -125,6 +127,44 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
   });
   const pending = dsQuery.data?.source.lastSync?.pendingDelete;
 
+  /**
+   * S-04：运行日志独立拉取 —— 不塞进 `/api/tasks/:id`（列表每 3–15s 拉 200 条，
+   * 日志可达数十 KB，塞进去会拖垮轮询）。成功任务不请求。
+   */
+  const logQuery = useQuery({
+    /**
+     * ★ queryKey 必须带 `state`：任务从 running → failed 时要重拉，
+     *   否则抽屉里永远是「打开那一刻」的日志（漏掉失败那行），用户只能手动点「重新读取日志」。
+     */
+    queryKey: ['taskLog', id, task?.state ?? 'none'],
+    queryFn: () => getTaskLog(id),
+    enabled: Boolean(task && task.state !== 'succeeded'),
+    staleTime: 0,
+    retry: false,
+  });
+  const logState: TaskLogState = !task || task.state === 'succeeded'
+    ? { phase: 'idle' }
+    : logQuery.isPending
+      ? { phase: 'loading' }
+      : logQuery.error
+        ? ((logQuery.error as Error & { status?: number }).status === 404
+          ? { phase: 'missing' }
+          : { phase: 'error', message: logQuery.error.message })
+        : logQuery.data
+          ? { phase: 'ready', log: logQuery.data }
+          : { phase: 'idle' };
+  const logSection = task ? buildLogSection(task, logState) : null;
+  const [logCopy, setLogCopy] = useState<{ key: string; ok: boolean } | null>(null);
+  const doCopyLog = async (key: string, text: string): Promise<void> => {
+    let ok = true;
+    try {
+      await copyText(text);
+    } catch {
+      ok = false; // 剪贴板不可用（非 https / 权限拒绝）：文本本身可见可手选
+    }
+    setLogCopy({ key, ok });
+  };
+
   return (
     <>
     <DetailDrawer
@@ -157,6 +197,61 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
           {detail.notices.map((notice, index) => (
             <Notice key={`${notice.tone}-${index}`} tone={notice.tone}>{notice.text}</Notice>
           ))}
+
+          {/* S-04：原因与日志（成功任务整区不渲染；正文限高滚动，不做受控 details） */}
+          {logSection && logSection.visible ? (
+            <DetailSection
+              material="data"
+              title={logSection.title}
+              hint={logSection.metaRows.find((row) => row.label === '错误码')?.value}
+            >
+              {logSection.metaRows.length > 0 ? <DetailParams rows={logSection.metaRows} /> : null}
+              {logSection.body.kind === 'loading' ? <p className="ki-task-muted">正在读取运行日志…</p> : null}
+              {logSection.body.kind === 'empty' || logSection.body.kind === 'error' ? (
+                <Notice tone={logSection.body.kind === 'error' ? 'warn' : 'info'}>
+                  {logSection.body.notice}
+                </Notice>
+              ) : null}
+              {logSection.body.kind === 'lines' ? (
+                <>
+                  <p className="ki-task-muted ki-task-log__meta">
+                    共 {logSection.body.total} 行{logSection.body.rotated ? '（更早的已滚动到 .log.1）' : ''}
+                  </p>
+                  <pre className="ki-task-log__lines">{logSection.body.lines.join('\n')}</pre>
+                </>
+              ) : null}
+              <div className="ki-task-log__actions">
+                {logSection.command ? (
+                  <button
+                    className="ki-btn ki-btn--secondary ki-btn--small"
+                    type="button"
+                    onClick={() => void doCopyLog('cmd', logSection.command!)}
+                  >
+                    {logCopy?.key === 'cmd' && logCopy.ok ? '已复制命令' : '复制排查命令'}
+                  </button>
+                ) : null}
+                {logSection.copyText ? (
+                  <button
+                    className="ki-btn ki-btn--secondary ki-btn--small"
+                    type="button"
+                    onClick={() => void doCopyLog('log', logSection.copyText!)}
+                  >
+                    {logCopy?.key === 'log' && logCopy.ok ? '已复制日志' : '复制整段日志'}
+                  </button>
+                ) : null}
+                <button
+                  className="ki-btn ki-btn--secondary ki-btn--small"
+                  type="button"
+                  onClick={() => void logQuery.refetch()}
+                >
+                  重新读取日志
+                </button>
+              </div>
+              {logCopy && !logCopy.ok ? (
+                <p className="ki-task-muted">复制失败：请手动选择文本</p>
+              ) : null}
+            </DetailSection>
+          ) : null}
 
           {detail.summary || detail.showProgress || detail.progressText || detail.results.length > 0 ? (
             <DetailSection

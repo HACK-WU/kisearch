@@ -90,6 +90,8 @@ import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './docu
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskParamSnapshot, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
+// S-02：任务运行日志读取（与台账独立的 7 天保留期）
+import { readTaskLog } from './task-log.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
 import { MAX_SNAPSHOT_CREATED, toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
@@ -564,6 +566,50 @@ export async function handleApiRequest(
       const visible = listTaskRecords(requestConfig)
         .filter((task) => authScopes === null || scopeAllowed(authScopes, task.scope));
       sendJson(res, 200, { ok: true, tasks: visible.slice(0, limit), total: visible.length, retainedForMs: 60 * 60 * 1000 });
+      return;
+    }
+    /**
+     * 任务运行日志（S-02）：与 `/tasks/:id` 的关键差异是**不依赖台账** ——
+     * 台账只活 1 小时、日志活 7 天；过期后仍应可读，否则「事后能查」不成立。
+     * ★ 必须放在 `/tasks/:id` **之前**：`/tasks/<id>/log` 会先命中下面的 `startsWith('/tasks/')`。
+     */
+    if (p.startsWith('/tasks/') && p.endsWith('/log') && req.method === 'GET') {
+      const id = decodeURIComponent(p.slice('/tasks/'.length, -'/log'.length));
+      if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
+        sendJson(res, 400, { ok: false, code: 'TASK_ID_INVALID', error: '任务 id 非法' });
+        return;
+      }
+      const requestedTail = Number(url.searchParams.get('tail') ?? '100');
+      const tail = Number.isFinite(requestedTail) ? Math.max(0, Math.min(1000, Math.floor(requestedTail))) : 100;
+      const log = readTaskLog(requestConfig, id, tail);
+      const task = getTaskRecord(requestConfig, id);
+      if (!log && !task) {
+        sendJson(res, 404, { ok: false, code: 'TASK_LOG_NOT_FOUND', error: 'task log not found（任务记录已过期且无运行日志）' });
+        return;
+      }
+      // 鉴权依据：台账优先，其次日志头行（台账过期降级）
+      const logScope = task?.scope ?? log?.head?.scope;
+      if (!logScope) {
+        // 日志在、但头行损坏 ⇒ 无法定 scope：保守 403（判 404 等于把已有日志判没）
+        sendJson(res, 403, { ok: false, code: 'TASK_LOG_SCOPE_UNKNOWN', error: '日志元信息不可读，无法校验 scope；请在终端执行 ki log <id>' });
+        return;
+      }
+      if (authScopes !== null && !scopeAllowed(authScopes, logScope)) {
+        rejectScopeViolation(res, logScope, '/tasks/log');
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        taskId: id,
+        expired: !task,
+        // ★ 只回文件名：台账刻意把绝对路径替换为 [path]，且 HTTP 可能对外暴露
+        logFile: log ? path.basename(log.path) : null,
+        head: log?.head ?? null,
+        lines: log?.lines ?? [],
+        totalLines: log?.totalLines ?? 0,
+        rotated: log?.rotated ?? false,
+        bytes: log?.bytes ?? 0,
+      });
       return;
     }
     if (p.startsWith('/tasks/') && req.method === 'GET') {

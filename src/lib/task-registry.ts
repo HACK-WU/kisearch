@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createTaskLogWriter } from './task-log.js';
+import type { TaskLogWriter } from './task-log.js';
 import type { KiConfig } from './config.js';
 
 export type TaskSource = 'cli' | 'daemon' | 'web' | 'scheduler';
@@ -181,6 +183,11 @@ export interface TaskReporter {
     /** 可判别错误码（会合并进 result.errorCode，便于 UI 单点读取） */
     errorCode?: string;
   }): void;
+  /**
+   * [S-02] 主动往任务运行日志写一行 INFO。
+   * 任务 JSON 只存压缩后的错误类别，原文落这里；writer 不可用时为 no-op。
+   */
+  note(text: string): void;
   stop(): void;
 }
 
@@ -515,6 +522,20 @@ export function createTaskReporter(
     ...(typeof input.retryOf === 'string' && TASK_ID_RE.test(input.retryOf) ? { retryOf: input.retryOf } : {}),
   };
   writeRecord(config, record, true);
+  /**
+   * [S-02] 任务运行日志：**原始**错误落这里（task JSON 只存 `safeErrorSummary` 压缩后的类别）。
+   * ★ 刻在 reporter 内部接入 —— 10 个调用点零改动，新增入口自动获得日志（见设计 S-02 D-5）。
+   * ★ writer 为 null（目录不可写 / 磁盘满 / 符号链接）时全部退化为 no-op，绝不影响任务执行。
+   */
+  const log: TaskLogWriter | null = createTaskLogWriter(config, {
+    id: record.id,
+    source: record.source,
+    operation: record.operation,
+    scope: record.scope,
+    createdAt: record.createdAt,
+    pid: process.pid,
+  });
+  log?.event('queued');
   let stopped = false;
   let lastWriteWarningAt = 0;
   const reportWriteFailure = (error: unknown): void => {
@@ -548,6 +569,12 @@ export function createTaskReporter(
       updatedAt: Date.now(),
       heartbeatAt: Date.now(),
     };
+    /**
+     * [S-02] 只记**状态 / 阶段迁移**（writer 内部按 state+phase 去重）：
+     * 心跳 `update({})`（5s）与纯进度更新不产生任何日志 IO。
+     * ★ 错误原文不在这里记 —— 只在 `finish()` 写，避免压缩版与原文两处混写。
+     */
+    log?.event(updated.state, updated.phase !== undefined ? { phase: updated.phase } : undefined);
     try {
       writeRecord(config, updated);
       Object.assign(record, updated);
@@ -597,6 +624,18 @@ export function createTaskReporter(
             ...(options.errorCode !== undefined ? { errorCode: options.errorCode } : {}),
           }
         : undefined;
+      /**
+       * [S-02] 终态日志：`options.error` 是 `safeErrorSummary` **压缩之前**的原文 ——
+       * 这正是本子需求存在的意义（task JSON 存类别、日志存原文）。
+       * 顺序：先记状态迁移（让 writer 的内部去重对齐，随后 `update()` 里的 event 会跳过），
+       * 再记错误详情。两行语义不同：卡在哪一步 + 为什么。
+       * 先写日志再写台账：台账写失败会进 `pendingFinish` 重试，日志只记一次事实。
+       */
+      log?.event(state, {
+        ...(record.phase ? { phase: record.phase } : {}),
+        ...(options.errorCode !== undefined ? { code: options.errorCode } : {}),
+      });
+      if (options.error) log?.error(options.errorCode, options.error, options.recoveryHint);
       const terminalPatch = {
         state,
         finishedAt: Date.now(),
@@ -614,9 +653,13 @@ export function createTaskReporter(
         timer.ref?.();
       }
     },
+    note: (text: string) => {
+      log?.note(text);
+    },
     stop: () => {
       stopped = true;
       clearInterval(timer);
+      log?.close();
     },
   };
 }

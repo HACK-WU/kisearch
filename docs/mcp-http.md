@@ -160,6 +160,7 @@ ki mcp --http --web
 | `/api/vector/optimize` | POST | 触发索引整理（同 `ki index-optimize`） |
 | `/api/tasks` | GET | 任务列表（只含计数，明细走单条） |
 | `/api/tasks/:id` | GET | 任务详情 |
+| `/api/tasks/:id/log` | GET | **任务运行日志**：`?tail=N`（0–1000，默认 100）。与台账解耦——台账只活 1 小时、日志活 7 天，故记录过期后仍可能 `200` 并带 `expired:true` + 从日志头行恢复的 `head`。响应 `{ ok, taskId, expired, logFile, head, lines, totalLines, rotated, bytes }`；`logFile` **只返回文件名**（台账刻意不回绝对路径）。`400 TASK_ID_INVALID` / `403 TASK_LOG_SCOPE_UNKNOWN`（日志在但头行损坏，无法校验 scope——不判 404，否则等于把已有日志判没）/ `403` scope 越权 / `404 TASK_LOG_NOT_FOUND`（台账与日志都没有） |
 
 `/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 

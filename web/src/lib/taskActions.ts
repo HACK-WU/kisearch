@@ -75,10 +75,17 @@ const RECOVERABLE_STATES = new Set(['partial', 'failed', 'cancelled']);
  * 各操作的 CLI 出路（Web 端刻意不提供执行入口的操作用它给可复制命令）。
  * ★ 不带任何真实路径：`--retry-incomplete` 会从清单读源目录；整批重导的占位符由用户替换。
  */
-export function cliCommandFor(operation: string, scope: string): string | undefined {
+export function cliCommandFor(operation: string, scope: string, taskId?: string): string | undefined {
   if (operation === 'import') return `ki import -s ${scope} --retry-incomplete`;
   if (operation === 'rebuild-vector') return `ki restore ${scope} --rebuild-vector --yes`;
   if (operation === 'restore-snapshot') return `ki restore ${scope} --from-snapshot --yes`;
+  /**
+   * S-04：数据源类操作 Web 端不提供执行入口，此前落到兜底分支只有一句
+   * 「请在终端执行对应命令」却**没有任何命令**。现在至少给出可复制的排查命令。
+   */
+  if (taskId && (operation === 'datasource-add-remote' || operation === 'datasource-sync')) {
+    return `ki log ${taskId}`;
+  }
   return undefined;
 }
 
@@ -228,11 +235,15 @@ export function taskDetailActions(input: {
     return { actions: [{ kind: 'goto-import', label: '前往导入页' }] };
   }
 
-  // 向量重建 / 快照还原：Web 端不提供执行入口（范围裁剪），只给可复制命令
-  const command = cliCommandFor(task.operation, task.scope);
+  // 向量重建 / 快照还原 / 数据源类：Web 端不提供执行入口（范围裁剪），只给可复制命令
+  const command = cliCommandFor(task.operation, task.scope, task.id);
   return {
-    actions: command ? [{ kind: 'cli-command', label: '复制恢复命令', command }] : [],
-    note: 'Web 端暂不提供该操作的执行入口：请在终端执行对应命令后回到本页确认。',
+    actions: command
+      ? [{ kind: 'cli-command', label: task.operation.startsWith('datasource') ? '复制排查命令' : '复制恢复命令', command }]
+      : [],
+    note: command
+      ? '在终端执行该命令查看失败原因；也可直接展开上方的「原因与日志」。'
+      : 'Web 端暂不提供该操作的执行入口：请在终端执行对应命令后回到本页确认。',
     noteTone: 'info',
   };
 }

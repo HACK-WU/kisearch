@@ -7,7 +7,9 @@
  *
  * 原则：组件只渲染本文件的输出，不再做条件判断。
  */
-import type { TaskIndexReadiness, TaskRecord, TaskResultSnapshot, TaskState } from '@/api/tasksApi';
+import type { TaskIndexReadiness, TaskLogResponse, TaskRecord, TaskResultSnapshot, TaskState } from '@/api/tasksApi';
+import { cliCommandFor } from './taskActions';
+import { describeErrorText, describeTaskError, formatTaskError } from './taskErrorCatalog';
 
 export type DetailTone = 'normal' | 'warn' | 'danger';
 
@@ -455,7 +457,8 @@ function readableError(task: TaskRecord): string | undefined {
   if (!raw) return undefined;
   const cliFallback = /查看发起端的命令输出或服务日志/.test(raw);
   if (cliFallback && task.source !== 'cli') {
-    return '任务失败（未记录可判别原因）；可重新导入，或查看下方可用的处理入口。';
+    // S-02 起"未记录可判别原因"已不准确：日志里有原文，只是没有错误码可映射
+    return '任务失败（未记录可判别原因）；可展开「原因与日志」，或按下方命令在终端排查。';
   }
   return raw;
 }
@@ -469,7 +472,15 @@ function noticesOf(task: TaskRecord): TaskNotice[] {
   } else if (errorCode === 'IMPORT_CANCELLED') {
     notices.push({ tone: 'info', text: '导入已取消；已完成部分已保留。' });
   }
-  const errorText = readableError(task);
+  /**
+   * S-01：其余码走单源码表 —— `result.errorCode` 早就存在，此前只消费上面两个码，
+   * 于是 Git 等失败一律显示成「未记录可判别原因」（与事实不符）。未知码仍回退原文（不吞信息）。
+   */
+  const cataloged = errorCode === 'ALL_FILES_DUPLICATES' || errorCode === 'IMPORT_CANCELLED'
+    ? undefined
+    : (describeTaskError(errorCode) ?? describeErrorText(task.error));
+  if (cataloged) notices.push({ tone: cataloged.tone, text: formatTaskError(cataloged) });
+  const errorText = cataloged ? undefined : readableError(task);
   if (errorText) {
     const tone: TaskNotice['tone'] = errorCode === 'ALL_FILES_DUPLICATES' || errorCode === 'IMPORT_CANCELLED' ? 'warn' : 'danger';
     // 失败/取消路径没有文件级统计（result.files 缺失是预期），N/M 只存在于 error 文案里
@@ -610,6 +621,98 @@ function createdViewOf(task: TaskRecord): TaskDetailView['created'] {
     total: typeof result?.createdTotal === 'number' ? result.createdTotal : items.length,
     truncated: result?.createdTruncated === true,
     available,
+  };
+}
+
+// ─── 原因与日志（S-04）───────────────────────────────────────────────
+
+/** 日志加载态：由组件用 `useQuery` 驱动，本层只做展示模型 */
+export type TaskLogState =
+  | { phase: 'idle' }
+  | { phase: 'loading' }
+  | { phase: 'ready'; log: TaskLogResponse }
+  | { phase: 'missing' }
+  | { phase: 'error'; message: string };
+
+export interface TaskLogSection {
+  title: string;
+  /** 成功任务整区不渲染（没有待查的事，避免噪音） */
+  visible: boolean;
+  metaRows: Array<{ label: string; value: string }>;
+  body:
+    | { kind: 'loading' }
+    | { kind: 'lines'; lines: string[]; rotated: boolean; total: number }
+    | { kind: 'empty'; notice: string }
+    | { kind: 'error'; notice: string };
+  /** `ki log <taskId>`：与 CLI 侧逐字一致，失败态必有 */
+  command: string | undefined;
+  /** 「复制整段日志」的文本；无正文时为 null */
+  copyText: string | null;
+}
+
+function durationLabelOf(task: TaskRecord): string | undefined {
+  if (task.finishedAt === undefined || task.startedAt === undefined) return undefined;
+  const ms = task.finishedAt - task.startedAt;
+  if (ms < 1000) return '<1s';
+  const sec = Math.round(ms / 1000);
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
+}
+
+/**
+ * 「原因与日志」区模型。
+ *
+ * ★ 日志正文与台账解耦：台账过期（抽屉停留超 1 小时）时后端仍可能返回日志，
+ *   此时 `expired: true`，meta 顶部标注来源。「过期仍可查」的主路径在 CLI，
+ *   Web 端不作为对外承诺（列表里已没有该任务，用户点不进来）。
+ */
+export function buildLogSection(task: TaskRecord, state: TaskLogState): TaskLogSection {
+  const visible = task.state !== 'succeeded';
+  const metaRows: Array<{ label: string; value: string }> = [];
+  if (task.result?.errorCode) metaRows.push({ label: '错误码', value: task.result.errorCode });
+  if (task.phase) metaRows.push({ label: '阶段', value: task.phase });
+  const duration = durationLabelOf(task);
+  if (duration) metaRows.push({ label: '耗时', value: duration });
+
+  let body: TaskLogSection['body'];
+  let copyText: string | null = null;
+  switch (state.phase) {
+    case 'ready': {
+      const { log } = state;
+      if (log.expired) metaRows.unshift({ label: '记录', value: '台账已过期，元信息来自日志头行' });
+      if (log.lines.length > 0) {
+        body = { kind: 'lines', lines: log.lines, rotated: log.rotated, total: log.totalLines };
+        copyText = log.lines.join('\n');
+      } else {
+        body = {
+          kind: 'empty',
+          notice: log.logFile
+            ? '日志文件存在但还没有正文（任务刚开始或已被滚动清理）。'
+            : '该任务没有运行日志（早于日志能力上线，或已被 7 天保留期清理）。',
+        };
+      }
+      break;
+    }
+    case 'missing':
+      body = { kind: 'empty', notice: '该任务没有运行日志（早于日志能力上线，或已被 7 天保留期清理）。' };
+      break;
+    case 'error':
+      body = { kind: 'error', notice: `日志读取失败：${state.message}` };
+      break;
+    case 'loading':
+      body = { kind: 'loading' };
+      break;
+    default:
+      body = { kind: 'loading' };
+      break;
+  }
+
+  return {
+    title: '原因与日志',
+    visible,
+    metaRows,
+    body,
+    command: cliCommandFor(task.operation, task.scope, task.id),
+    copyText,
   };
 }
 

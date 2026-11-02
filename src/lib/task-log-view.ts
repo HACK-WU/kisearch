@@ -5,16 +5,22 @@
  *   被测试或 MCP 导入时会把当前进程的 argv 当命令参数解析。
  *   本模块不 import commander，可安全被任何调用方导入。
  *
- * 数据来源：任务台账（`{dataDir}/.ki-tasks/<taskId>.json`，只保留 1 小时）。
- * 运行日志落盘（`.ki-tasks/logs/<taskId>.log`）尚未启用（S-02），
- * 接入后本模块的 `executeTaskLog` 追加读取日志正文即可，命令形态不变。
+ * 数据来源（两条，互不依赖）：
+ *   1. 任务台账 `{dataDir}/.ki-tasks/<taskId>.json` —— 只活 1 小时，有状态/参数/压缩后的类别
+ *   2. 任务运行日志 `{dataDir}/.ki-tasks/logs/<taskId>.log` —— 活 7 天，有**原始**错误
+ * 台账过期但日志仍在时走「过期降级」：从日志头行恢复 scope/operation 继续输出。
  */
 
 import { getTaskRecord, listTaskRecords } from './task-registry.js';
+import { hasTaskLog, pruneTaskLogs, readTaskLog } from './task-log.js';
+import type { TaskLogMeta, TaskLogPresence } from './task-log.js';
 import type { TaskRecord, TaskState } from './task-registry.js';
 import type { KiConfig } from './config.js';
 
 const TASK_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
+/** 日志正文显示上限（`--full` 时） */
+const MAX_TAIL = 10_000;
+const DEFAULT_TAIL = 100;
 
 const STATE_LABEL: Record<TaskState, string> = {
   queued: '排队中',
@@ -41,6 +47,10 @@ export interface LogCommandInput {
   scope?: string;
   failed?: boolean;
   limit?: number;
+  /** 日志显示最后 N 行（默认 100，夹紧 0–10000；0 = 不显示正文） */
+  tail?: number;
+  /** 读日志全部行（等价 tail = 上限） */
+  full?: boolean;
 }
 
 export interface LogTaskView {
@@ -61,10 +71,29 @@ export interface LogTaskView {
   recoveryHint?: string;
   params?: Record<string, unknown>;
   files?: { scanned: number; completed: number; incomplete: number; skipped: number };
+  /** 列表模式的日志存在性 */
+  hasLog?: TaskLogPresence;
+}
+
+/** 运行日志正文（已脱敏） */
+export interface TaskLogSection {
+  path: string;
+  lines: string[];
+  totalLines: number;
+  rotated: boolean;
+  bytes: number;
 }
 
 export type LogCommandResult =
-  | { kind: 'task'; task: LogTaskView }
+  | {
+      kind: 'task';
+      task: LogTaskView;
+      log: TaskLogSection | null;
+      /** 台账已过期，`task` 由日志头行恢复 */
+      expired: boolean;
+      /** 日志存在但头行损坏，无法恢复元信息 */
+      metaUnreadable: boolean;
+    }
   | { kind: 'list'; scope?: string; rows: LogTaskView[] }
   | { kind: 'not-found'; taskId: string; next: string[] }
   | { kind: 'invalid'; message: string };
@@ -101,6 +130,32 @@ function toView(task: TaskRecord): LogTaskView {
   };
 }
 
+/**
+ * 台账已过期：用日志头行拼一个最小视图（状态/错误未知，渲染时另行标注）。
+ *
+ * ★ `head` 可能为 null（日志在但头行损坏）：必须容忍 —— 早期版本直接 `head.id`，
+ *   在「台账过期 + 头行损坏」这个组合下会抛 `Cannot read properties of null`。
+ */
+function viewFromHead(head: TaskLogMeta | null, taskId: string): LogTaskView {
+  const base = {
+    id: taskId,
+    operation: head?.operation ?? 'unknown',
+    scope: head?.scope ?? 'unknown',
+    source: head?.source ?? 'unknown',
+    state: 'unknown' as TaskState,
+    stateLabel: '状态未知',
+    createdAt: head?.createdAt ?? 0,
+  };
+  return head ? { ...base, id: head.id } : base;
+}
+
+function clampTail(input: LogCommandInput): number {
+  if (input.full) return MAX_TAIL;
+  const raw = input.tail ?? DEFAULT_TAIL;
+  if (!Number.isFinite(raw)) return DEFAULT_TAIL;
+  return Math.max(0, Math.min(MAX_TAIL, Math.trunc(raw)));
+}
+
 /** 纯函数：不写 stdout，便于单测。渲染交给 `renderTask` / `renderList`。 */
 export function executeTaskLog(
   config: Pick<KiConfig, 'dataDir'>,
@@ -117,7 +172,13 @@ export function executeTaskLog(
       };
     }
     const task = getTaskRecord(config, taskId);
-    if (!task) {
+    const tail = clampTail(input);
+    const raw = readTaskLog(config, taskId, tail);
+    const log: TaskLogSection | null = raw
+      ? { path: raw.path, lines: raw.lines, totalLines: raw.totalLines, rotated: raw.rotated, bytes: raw.bytes }
+      : null;
+
+    if (!task && !log) {
       return {
         exitCode: 1,
         result: {
@@ -128,21 +189,34 @@ export function executeTaskLog(
               ? `ki log --scope ${scope} --failed    该知识库最近的失败任务`
               : 'ki log --scope <scope> --failed    某知识库最近的失败任务',
             'ki log                              最近 10 个任务',
-            '任务台账只保留 1 小时；重新发起该操作并等待失败后，再执行本命令即可取到记录',
+            '任务台账只保留 1 小时、运行日志保留 7 天；两者都已过期时只能重新复现',
           ],
         },
       };
     }
-    if (scope && scope !== task.scope) {
+
+    // scope 校验：台账优先，其次日志头行（过期降级）
+    const actualScope = task?.scope ?? raw?.head?.scope;
+    if (scope && actualScope && scope !== actualScope) {
       return {
         exitCode: 2,
         result: {
           kind: 'invalid',
-          message: `任务 ${taskId} 属于 scope ${task.scope}，与 --scope ${scope} 不符（去掉 --scope 即可查询）`,
+          message: `任务 ${taskId} 属于 scope ${actualScope}，与 --scope ${scope} 不符（去掉 --scope 即可查询）`,
         },
       };
     }
-    return { exitCode: 0, result: { kind: 'task', task: toView(task) } };
+
+    return {
+      exitCode: 0,
+      result: {
+        kind: 'task',
+        task: task ? toView(task) : viewFromHead(raw?.head ?? null, taskId),
+        log,
+        expired: !task,
+        metaUnreadable: !task && !raw?.head,
+      },
+    };
   }
 
   const limit = Math.max(1, Math.min(100, input.limit ?? 10));
@@ -151,12 +225,14 @@ export function executeTaskLog(
    * 但只有需要过滤时才多读：无过滤的 `ki log` 只读 limit 条，避免为 10 行输出读 500 个 JSON。
    */
   const scanLimit = input.failed || scope ? 500 : limit;
+  // 列表顺带清理过期日志（与 writer 侧的 10 分钟节流互补：长期只读的用户也会被清）
+  pruneTaskLogs(config);
   const all = listTaskRecords(config, scanLimit);
   const rows = all
     .filter((task) => (scope ? task.scope === scope : true))
     .filter((task) => (input.failed ? RECOVERABLE.has(task.state) : true))
     .slice(0, limit)
-    .map(toView);
+    .map((task) => ({ ...toView(task), hasLog: hasTaskLog(config, task.id) }));
   return { exitCode: 0, result: { kind: 'list', ...(scope ? { scope } : {}), rows } };
 }
 
@@ -211,33 +287,70 @@ function renderParams(params: Record<string, unknown> | undefined): string | und
   return parts.length > 0 ? parts.join('  ') : undefined;
 }
 
-export function renderTask(view: LogTaskView): string {
+const LOG_PRESENCE_LABEL: Record<TaskLogPresence, string> = {
+  yes: '有',
+  no: '无',
+  rotated: '已滚动',
+};
+
+export interface RenderTaskOptions {
+  expired?: boolean;
+  metaUnreadable?: boolean;
+}
+
+export function renderTask(
+  view: LogTaskView,
+  log?: TaskLogSection | null,
+  options: RenderTaskOptions = {},
+): string {
   const lines: string[] = [`任务  ${view.id}`];
-  const rows = [
-    kv('操作', view.operation),
-    kv('知识库', view.scope),
-    kv('来源', SOURCE_LABEL[view.source] ?? view.source),
-    kv('状态', `${view.stateLabel}（${view.state}）`),
-    kv('阶段', view.phase),
-    kv('创建', fmtTime(view.createdAt)),
-    kv('结束', view.finishedAt !== undefined ? fmtTime(view.finishedAt) : '—'),
-    kv('耗时', view.durationMs !== undefined ? fmtDuration(view.durationMs) : undefined),
-    kv('错误码', view.errorCode),
-    kv('错误', view.error),
-    kv('提示', view.recoveryHint),
-    kv('参数', renderParams(view.params)),
-    kv('文件', view.files
-      ? `扫描 ${view.files.scanned} / 完成 ${view.files.completed} / 未完成 ${view.files.incomplete} / 跳过 ${view.files.skipped}`
-      : undefined),
-  ].filter((line): line is string => line !== null);
-  lines.push(...rows);
+  if (options.expired) {
+    // 过期降级：head 能提供的元信息别浪费（早期版本只打一行「已过期」，operation/scope 全丢）
+    lines.push(...[
+      kv('记录', '台账已过期（只保留 1 小时），以下元信息来自日志头行'),
+      kv('操作', view.operation === 'unknown' ? undefined : view.operation),
+      kv('知识库', view.scope === 'unknown' ? undefined : view.scope),
+      kv('来源', view.source === 'unknown' ? undefined : (SOURCE_LABEL[view.source] ?? view.source)),
+      kv('创建', view.createdAt > 0 ? fmtTime(view.createdAt) : undefined),
+    ].filter((line): line is string => line !== null));
+  } else {
+    lines.push(...[
+      kv('操作', view.operation),
+      kv('知识库', view.scope),
+      kv('来源', SOURCE_LABEL[view.source] ?? view.source),
+      kv('状态', `${view.stateLabel}（${view.state}）`),
+      kv('阶段', view.phase),
+      kv('创建', fmtTime(view.createdAt)),
+      kv('结束', view.finishedAt !== undefined ? fmtTime(view.finishedAt) : '—'),
+      kv('耗时', view.durationMs !== undefined ? fmtDuration(view.durationMs) : undefined),
+      kv('错误码', view.errorCode),
+      kv('错误', view.error),
+      kv('提示', view.recoveryHint),
+      kv('参数', renderParams(view.params)),
+      kv('文件', view.files
+        ? `扫描 ${view.files.scanned} / 完成 ${view.files.completed} / 未完成 ${view.files.incomplete} / 跳过 ${view.files.skipped}`
+        : undefined),
+    ].filter((line): line is string => line !== null));
+  }
+
   lines.push('');
-  /**
-   * ★ S-02 接入点（勿漏）：日志落盘启用后，这两行必须改成「有日志 → 输出正文；无日志 → 才打印本提示」。
-   *   当前硬编码是为了让本版本**诚实披露能力边界**——不能让用户以为已经看过完整日志。
-   */
-  lines.push('本任务暂无运行日志：运行日志落盘尚未启用，以上信息来自任务台账');
-  lines.push('任务台账只保留 1 小时；过期后本命令将查不到该任务');
+  if (log) {
+    const shown = log.lines.length;
+    const clipNote = shown === 0
+      ? `共 ${log.totalLines} 行（--tail 0：不显示正文）`
+      : shown < log.totalLines ? `共 ${log.totalLines} 行，显示最后 ${shown} 行` : `共 ${shown} 行`;
+    lines.push(`日志  ${log.path}   ${clipNote}`);
+    if (log.rotated) lines.push('      （更早日志已滚动到同名 .log.1）');
+    lines.push('─'.repeat(56));
+    lines.push(...log.lines);
+    if (options.metaUnreadable) {
+      lines.push('');
+      lines.push('⚠ 日志头行损坏：无法从日志恢复操作/知识库等元信息');
+    }
+  } else {
+    lines.push('该任务没有运行日志（早于日志能力上线，或已被 7 天保留期清理）');
+    lines.push('任务台账只保留 1 小时；过期后本命令将查不到该任务');
+  }
   return lines.join('\n');
 }
 
@@ -257,13 +370,14 @@ export function renderList(result: Extract<LogCommandResult, { kind: 'list' }>):
     ].join('\n');
   }
   // 列宽按显示宽度而非字符数（表头含中文，用 String.length 会让表头与数据错位）
-  const COLS = { id: 10, operation: 26, state: 10, finished: 21, code: 20 } as const;
+  const COLS = { id: 10, operation: 24, state: 10, finished: 21, code: 18, log: 8 } as const;
   const body = result.rows.map((row) => [
     padCol(row.id.slice(0, 8), COLS.id),
     padCol(row.operation, COLS.operation),
     padCol(row.state, COLS.state),
     padCol(row.finishedAt !== undefined ? fmtTime(row.finishedAt) : '—', COLS.finished),
     padCol(row.errorCode ?? '—', COLS.code),
+    padCol(row.hasLog ? LOG_PRESENCE_LABEL[row.hasLog] : '—', COLS.log),
     row.scope,
   ].join(''));
   return [
@@ -274,12 +388,22 @@ export function renderList(result: Extract<LogCommandResult, { kind: 'list' }>):
       padCol('状态', COLS.state),
       padCol('结束时间', COLS.finished),
       padCol('错误码', COLS.code),
+      padCol('日志', COLS.log),
       '知识库',
     ].join(''),
     ...body,
     '',
-    '提示：ki log <任务ID> 查看详情',
+    '提示：ki log <任务ID> 查看详情与日志正文',
   ].join('\n');
+}
+
+/**
+ * `--json` 载荷（`ok` 与 `exitCode` 跟随结果类型）。
+ * ★ 抽成纯函数是为了可测：CLI 壳（`src/log.ts`）顶层 `program.parse()`，导入即执行，无法单测。
+ */
+export function toJsonPayload(result: LogCommandResult, exitCode: number): Record<string, unknown> {
+  const ok = result.kind === 'task' || result.kind === 'list';
+  return { ok, exitCode, ...result };
 }
 
 /**

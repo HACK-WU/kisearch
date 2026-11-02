@@ -10,6 +10,7 @@ import {
   normalizeTaskLogArgv,
   renderList,
   renderTask,
+  toJsonPayload,
 } from '../src/lib/task-log-view.ts';
 
 function withTempConfig<T>(run: (config: { dataDir: string }) => T): T {
@@ -102,12 +103,14 @@ test('按任务 ID 查到台账信息（含 errorCode）', () => {
     // 「卡在哪一步」是排障第一问，必须带出失败阶段
     assert.equal(result.task.phase, 'clone');
     assert.ok(result.task.durationMs !== undefined && result.task.durationMs >= 0);
-    const text = renderTask(result.task);
+    const text = renderTask(result.task, result.log, { expired: result.expired });
     assert.match(text, /操作\s+datasource-add-remote/);
     assert.match(text, /阶段\s+clone/);
     assert.match(text, /错误码\s+GIT_NETWORK_FAILED/);
-    // 诚实披露：日志落盘尚未启用，不得让用户以为能看到完整日志
-    assert.match(text, /本任务暂无运行日志/);
+    // S-02 之后：reporter 自动落日志，正常任务应能直接看到正文与路径
+    assert.ok(result.log, '应读到运行日志');
+    assert.match(text, /日志\s+\S+\.log/);
+    assert.match(text, /state running phase=clone/);
   });
 });
 
@@ -221,7 +224,9 @@ test('单任务输出所有键值行的值统一从第 13 列起始', () => {
     const { result } = executeTaskLog(config, { taskId: 'align' });
     assert.equal(result.kind, 'task');
     if (result.kind !== 'task') return;
-    const kvLines = renderTask(result.task).split('\n').filter((line) => line.startsWith('  '));
+    const kvLines = renderTask(result.task, null)
+      .split('\n')
+      .filter((line) => line.startsWith('  ') && !line.startsWith('  | '));
     assert.ok(kvLines.length >= 8, `键值行数量异常：${kvLines.length}`);
     for (const line of kvLines) {
       const char = charAtDisplay(line, 12);
@@ -245,13 +250,91 @@ test('列表表头与数据行的列边界一致', () => {
     assert.ok(header, '缺少表头');
     const row = lines.find((line) => line.startsWith('list-a'));
     assert.ok(row, '缺少数据行');
-    // 五列起点：任务ID / 操作 / 状态 / 结束时间 / 错误码
-    for (const boundary of [10, 36, 46, 67, 87]) {
+    // 六列起点：任务ID 10 / 操作 24 / 状态 10 / 结束时间 21 / 错误码 18 / 日志 8
+    for (const boundary of [10, 34, 44, 65, 83, 91]) {
       for (const line of [header!, row!]) {
         const char = charAtDisplay(line, boundary);
         assert.ok(char !== undefined && char !== ' ', `第 ${boundary} 列错位：${JSON.stringify(line)}`);
       }
     }
+    // 「日志」列取值
+    assert.match(header!, /日志/);
+    assert.match(row!, /有|已滚动|无/);
+  });
+});
+
+test('台账过期但日志仍在：过期降级仍可读（exit 0）', () => {
+  withTempConfig((config) => {
+    const reporter = createTaskReporter(config, {
+      id: 'expire-me', source: 'web', operation: 'datasource-add-remote', scope: 'ai-docs',
+    });
+    try {
+      reporter.update({ state: 'running', startedAt: Date.now(), phase: 'clone' });
+      reporter.finish('failed', {
+        errorCode: 'GIT_NETWORK_FAILED',
+        error: '无法连接远端（Could not resolve host: x.invalid）',
+      });
+    } finally {
+      reporter.stop();
+    }
+    // 模拟台账过期清理：只删 JSON，日志留着
+    fs.rmSync(path.join(config.dataDir, '.ki-tasks', 'expire-me.json'));
+
+    const { exitCode, result } = executeTaskLog(config, { taskId: 'expire-me' });
+    assert.equal(exitCode, 0, '台账过期不应判「找不到」');
+    assert.equal(result.kind, 'task');
+    if (result.kind !== 'task') return;
+    assert.equal(result.expired, true);
+    assert.equal(result.metaUnreadable, false);
+    assert.equal(result.task.scope, 'ai-docs');
+    assert.ok(result.log?.lines.some((line) => /Could not resolve host/.test(line)));
+    const text = renderTask(result.task, result.log, { expired: true });
+    assert.match(text, /台账已过期/);
+    assert.match(text, /Could not resolve host/);
+  });
+});
+
+test('台账过期且日志头损坏：不崩，标注元信息不可读', () => {
+  withTempConfig((config) => {
+    const logsDir = path.join(config.dataDir, '.ki-tasks', 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    // 头行不是 JSON ⇒ readTaskLog 的 head 为 null，而台账也不存在
+    fs.writeFileSync(
+      path.join(logsDir, 'broken-head.log'),
+      'not-json\n2026-11-02T00:00:00.000Z INFO  state queued\n',
+    );
+    const { exitCode, result } = executeTaskLog(config, { taskId: 'broken-head' });
+    assert.equal(exitCode, 0, '日志存在就不该判找不到');
+    assert.equal(result.kind, 'task');
+    if (result.kind !== 'task') return;
+    assert.equal(result.expired, true);
+    assert.equal(result.metaUnreadable, true);
+    assert.equal(result.task.id, 'broken-head');
+    assert.equal(result.task.operation, 'unknown');
+    const text = renderTask(result.task, result.log, { expired: true, metaUnreadable: true });
+    assert.match(text, /台账已过期/);
+    assert.match(text, /日志头行损坏/);
+  });
+});
+
+test('--tail 0 只给元信息与总行数，不输出正文', () => {
+  withTempConfig((config) => {
+    const reporter = createTaskReporter(config, {
+      id: 'tail-zero', source: 'web', operation: 'import', scope: 'ai-docs',
+    });
+    try {
+      reporter.update({ state: 'running', phase: 'vector' });
+      reporter.finish('failed', { error: 'HTTP 429: too many requests' });
+    } finally {
+      reporter.stop();
+    }
+    const { result } = executeTaskLog(config, { taskId: 'tail-zero', tail: 0 });
+    assert.equal(result.kind, 'task');
+    if (result.kind !== 'task') return;
+    assert.equal(result.log?.lines.length, 0);
+    const text = renderTask(result.task, result.log, {});
+    assert.match(text, /--tail 0：不显示正文/);
+    assert.doesNotMatch(text, /state running/);
   });
 });
 
@@ -262,4 +345,21 @@ test('-id 归一化为 --id，且不把 -i / -d 静默当别名', () => {
   );
   assert.deepEqual(normalizeTaskLogArgv(['-i', '-d']), ['-i', '-d']);
   assert.deepEqual(normalizeTaskLogArgv(['--id', 'abc']), ['--id', 'abc']);
+});
+
+test('--json 载荷：ok / exitCode 跟随结果类型，且平铺结果字段', () => {
+  withTempConfig((config) => {
+    const found = executeTaskLog(config, { taskId: 'no-such' });
+    const payload = toJsonPayload(found.result, found.exitCode);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.exitCode, 1);
+    assert.equal(payload.kind, 'not-found');
+    assert.ok(Array.isArray(payload.next));
+
+    const list = executeTaskLog(config, {});
+    const listPayload = toJsonPayload(list.result, list.exitCode);
+    assert.equal(listPayload.ok, true);
+    assert.equal(listPayload.exitCode, 0);
+    assert.ok(Array.isArray(listPayload.rows));
+  });
 });

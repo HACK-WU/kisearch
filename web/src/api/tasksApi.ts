@@ -190,6 +190,30 @@ export function getTask(id: string): Promise<{ ok: boolean; task: TaskRecord }> 
 }
 
 /**
+ * 任务运行日志（S-04）。与 `/api/tasks/:id` 的关键差异：**不依赖任务台账**。
+ * 台账只活 1 小时、日志活 7 天，所以记录过期后 `expired: true` 仍可能返回 200。
+ * 404 表示台账与日志都没有（含"日志能力上线前的旧任务"）。
+ */
+export interface TaskLogResponse {
+  ok: boolean;
+  taskId: string;
+  expired: boolean;
+  /** 只有文件名（后端刻意不回绝对路径）；无日志时为 null */
+  logFile: string | null;
+  head: { v?: number; source: string; operation: string; scope: string; createdAt: string } | null;
+  lines: string[];
+  totalLines: number;
+  rotated: boolean;
+  bytes: number;
+}
+
+export function getTaskLog(id: string, tail = 100): Promise<TaskLogResponse> {
+  return request<TaskLogResponse>(
+    `/api/tasks/${encodeURIComponent(id)}/log?tail=${encodeURIComponent(String(tail))}`,
+  );
+}
+
+/**
  * R8（REQ-20261009-003）：辅助读超时降级标记 —— 引擎未在超时上限内响应时，后端返回
  * **上次快照**（`status.state` 已置为 `'unknown'`，防止被误读为"刚刷新成功"）+ 本标记。
  * ★ 语义是"本次未确认"，不是"快照缺失/故障"（N9）—— UI 文案必须区分。
