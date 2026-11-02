@@ -162,7 +162,7 @@ export interface DataSourcePendingDelete {
   skipDetail?: string;
 }
 
-/** 一次同步的结果快照（页面详情据此渲染，不读 1h TTL 的任务台账） */
+/** 一次同步的结果快照（页面详情据此渲染，不读 TTL 到期即清的任务台账） */
 export interface DataSourceResultSnapshot {
   files: {
     /** 导入管线本次处理基准（子集导入时 = 变更数） */
@@ -195,7 +195,7 @@ export interface DataSourceLastSync {
   at: number;
   durationMs: number;
   state: DataSourceSyncState;
-  /** 对应任务台账（1h 内可查；过期不影响本快照） */
+  /** 对应任务台账（7 天内可查；过期不影响本快照） */
   taskId?: string;
   params: DataSourceSyncParams;
   result: DataSourceResultSnapshot;

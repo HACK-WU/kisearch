@@ -191,14 +191,32 @@ export interface TaskReporter {
   stop(): void;
 }
 
-/** 任务记录保留时长；`/api/tasks` 用它作为 retainedForMs 返回给前端。 */
-export const TASK_TTL_MS = 60 * 60 * 1000;
+/**
+ * 终态任务记录保留时长（7 天）；`/api/tasks` 用它作为 `retainedForMs` 返回给前端，
+ * 前端「最近任务保留 X」文案据此渲染，不另存副本。
+ *
+ * ★ 与运行日志 `LOG_TTL_MS`（`task-log.ts`）同窗口：台账先过期时 `ki log` 只能走
+ *   「从日志头行恢复元信息」的降级路径，两个保留期不一致会让事后排查莫名缺字段。
+ */
+export const TASK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 非终态任务的「心跳存活窗口」——心跳停超过此值即判定进程已死，记录直接清理。
+ *
+ * ★ 刻意与 `TASK_TTL_MS` 解耦：daemon 崩溃 / 被 kill 的任务永远停在 `running`，
+ *   读侧 30s 后就把它改判为 `unknown`，而 `unknown` 属前端顶栏「需关注」徽章的
+ *   失败档（`web/src/lib/taskNotice.ts` 的 `FAILURE_STATES`）。若这里跟随保留期
+ *   改成 7 天，一次崩溃就会让红徽章挂满一周、任务列表里躺一条假死记录。
+ *   维持 1 小时 = 与「保留期仍是 1 小时」时的心跳行为完全一致。
+ */
+const TASK_HEARTBEAT_TTL_MS = 60 * 60 * 1000;
 const STALE_AFTER_MS = 30 * 1000;
 const HEARTBEAT_INTERVAL_MS = 5 * 1000;
 const MAX_TASK_FILES = 2_000;
 const MAX_SCAN_FILES = 10_000;
 const MAX_TASK_FILE_BYTES = 32 * 1024;
 const TASK_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
+/** 台账文件名（`<id>.json`）：必须与 `TASK_ID_RE` 同源，改一处就要改另一处 */
+const TASK_FILE_RE = /^[A-Za-z0-9-]{1,128}\.json$/;
 
 function getTaskDir(config: Pick<KiConfig, 'dataDir'>): string {
   return path.join(config.dataDir, '.ki-tasks');
@@ -664,6 +682,58 @@ export function createTaskReporter(
   };
 }
 
+/**
+ * 台账目录溢出（文件数 > `maxFiles`）时的**按数量删档**，返回删除条数。
+ * 导出仅为单测覆盖（`listTaskRecords` 唯一调用方，不要从别处调用）。
+ *
+ * **为什么需要这一段**：`listTaskRecords` 原先只按保留期删过期文件。保留期还是 1 小时时，
+ * 超 1 万个文件意味着 1 小时内产生 1 万个任务，删过期几乎必然把数量降下来——能自愈。
+ * 保留期改成 7 天后，阈值同样是 7 天：若 7 天内累积超 1 万个文件，**一个都不算过期**，
+ * 清理后仍然超限 ⇒ 抛 `TASK_REGISTRY_LIMIT`（503），而且不会自愈（新任务还在产生）。
+ * 这一段按 mtime 从旧到新删到 `maxFiles - margin`，把"永久不可读"变回"最旧的先让位"。
+ *
+ * ★ **不碰 `keepRecentMs` 内修改过的文件**：活任务的心跳每 5s 刷新 mtime，
+ *   按数量硬删会把正在跑的任务记录删掉（任务还在跑、记录却没了，比报错更糟）。
+ *   因此极端情况（全部都是新文件）仍会走到 503 —— 有意的 fail-loud，不是漏改。
+ */
+export function pruneOverflowingTaskDir(
+  dir: string,
+  maxFiles: number,
+  keepRecentMs: number,
+  margin = 1_000,
+): number {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((name) => TASK_FILE_RE.test(name));
+  } catch {
+    return 0;
+  }
+  if (names.length <= maxFiles) return 0;
+  const entries: Array<{ file: string; mtimeMs: number }> = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    try {
+      const stat = fs.lstatSync(file);
+      if (stat.isFile() && !stat.isSymbolicLink()) entries.push({ file, mtimeMs: stat.mtimeMs });
+    } catch { /* 并发 owner 可能刚替换或删除文件 */ }
+  }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const target = Math.max(0, maxFiles - margin);
+  const now = Date.now();
+  let remaining = entries.length;
+  let removed = 0;
+  for (const entry of entries) {
+    if (remaining <= target) break;
+    if (now - entry.mtimeMs < keepRecentMs) break;
+    try {
+      fs.unlinkSync(entry.file);
+      remaining -= 1;
+      removed += 1;
+    } catch { /* next read retries */ }
+  }
+  return removed;
+}
+
 export function listTaskRecords(config: Pick<KiConfig, 'dataDir'>, limit = MAX_TASK_FILES): TaskRecord[] {
   let dir: string;
   try {
@@ -671,9 +741,9 @@ export function listTaskRecords(config: Pick<KiConfig, 'dataDir'>, limit = MAX_T
   } catch (error) {
     throw Object.assign(new Error(`任务状态暂不可读：${(error as Error).message}`), { code: 'TASK_REGISTRY_UNAVAILABLE', status: 503 });
   }
-  let names = fs.readdirSync(dir).filter((name) => /^[A-Za-z0-9-]{1,128}\.json$/.test(name));
+  let names = fs.readdirSync(dir).filter((name) => TASK_FILE_RE.test(name));
   if (names.length > MAX_SCAN_FILES) {
-    // 先按文件修改时间清理明显过期记录，避免大量旧文件让列表永久不可读。
+    // ① 先按文件修改时间清理明显过期记录，避免大量旧文件让列表永久不可读。
     const threshold = Date.now() - TASK_TTL_MS;
     for (const name of names) {
       try {
@@ -682,7 +752,9 @@ export function listTaskRecords(config: Pick<KiConfig, 'dataDir'>, limit = MAX_T
         if (stat.isFile() && !stat.isSymbolicLink() && stat.mtimeMs < threshold) fs.unlinkSync(file);
       } catch { /* 并发 owner 可能刚替换或删除文件 */ }
     }
-    names = fs.readdirSync(dir).filter((name) => /^[A-Za-z0-9-]{1,128}\.json$/.test(name));
+    // ② 仍超限：按数量兜底（保留期口径删不掉时的唯一自愈路径，见函数注释）
+    pruneOverflowingTaskDir(dir, MAX_SCAN_FILES, TASK_HEARTBEAT_TTL_MS);
+    names = fs.readdirSync(dir).filter((name) => TASK_FILE_RE.test(name));
     if (names.length > MAX_SCAN_FILES) {
       throw Object.assign(new Error('任务记录过多，请稍后重试'), { code: 'TASK_REGISTRY_LIMIT', status: 503 });
     }
@@ -695,7 +767,7 @@ export function listTaskRecords(config: Pick<KiConfig, 'dataDir'>, limit = MAX_T
     const record = readRecordFile(file, id);
     if (!record) continue;
     const active = record.state === 'queued' || record.state === 'running';
-    if ((active && now - record.heartbeatAt > TASK_TTL_MS)
+    if ((active && now - record.heartbeatAt > TASK_HEARTBEAT_TTL_MS)
       || (!active && now - (record.finishedAt ?? record.updatedAt) > TASK_TTL_MS)) {
       try { fs.unlinkSync(file); } catch { /* next read retries */ }
       continue;
@@ -709,6 +781,68 @@ export function listTaskRecords(config: Pick<KiConfig, 'dataDir'>, limit = MAX_T
   return records.sort((a, b) => b.createdAt - a.createdAt).slice(0, Math.max(1, Math.min(MAX_TASK_FILES, limit)));
 }
 
+/** 服务重启打断任务时的台账文案（写死，不经 `safeErrorSummary` 压缩，保证用户看到原话） */
+const INTERRUPTED_ERROR = '任务在执行中被服务重启打断，结果未落定';
+const INTERRUPTED_HINT = '重新发起该操作；已完成的部分不会回滚，重复执行按同名/幂等策略处理';
+
+/**
+ * 服务重启收尾：把上一个进程遗留的 `queued` / `running` 记录改判为 `failed`，注明中断原因。
+ *
+ * **为什么需要**：daemon 的 job 表是**进程内 Map**（`mcp-http-api.ts` 的 `jobs`），重启即全丢；
+ * 而台账里的记录会永远停在 `running` —— 心跳随进程停止 ⇒ 30s 后读侧改判 `unknown`
+ * ⇒ 1 小时后按心跳窗口**物理删除**。用户看到的是「转着转着变成状态未知，然后没了」，
+ * 既不知道原因，也不知道该不该重发。
+ *
+ * **判据**：HTTP 单例锁保证启动瞬间本进程尚无任何任务 ⇒ 台账里所有非终态记录都属于
+ * 已退出的进程，**一律改判**。刻意不按 `STALE_AFTER_MS` 筛：重启可能只要 2 秒，
+ * 按 30s 阈值筛会漏掉"刚重启"的记录，而那条记录同样永远不会再跑。
+ *
+ * **不抛错**：台账问题不能挡住服务启动；单条失败只跳过该条（下次启动会再试）。
+ * 返回被改判的任务 ID，供启动日志输出。
+ */
+export function markInterruptedTasks(config: Pick<KiConfig, 'dataDir'>): string[] {
+  const marked: string[] = [];
+  let dir: string;
+  let names: string[];
+  try {
+    dir = ensureTaskDir(config);
+    names = fs.readdirSync(dir).filter((name) => TASK_FILE_RE.test(name));
+  } catch {
+    return marked;
+  }
+  const now = Date.now();
+  for (const name of names) {
+    const id = name.slice(0, -5);
+    const record = readRecordFile(path.join(dir, name), id);
+    if (!record || (record.state !== 'queued' && record.state !== 'running')) continue;
+    const next: TaskRecord = {
+      ...record,
+      state: 'failed',
+      finishedAt: now,
+      updatedAt: now,
+      error: INTERRUPTED_ERROR,
+      recoveryHint: INTERRUPTED_HINT,
+      // 结构化错误码：让「重启中断」在数据层可判别（前端码表未收录时回落原文，不会吞文案）
+      result: { ...record.result, errorCode: 'SERVICE_RESTART_INTERRUPTED' },
+    };
+    try {
+      // 日志正文也留一行：排障时先看日志，只有台账记录会让人觉得"没跑过"
+      const writer = createTaskLogWriter(config, {
+        id: record.id,
+        source: record.source,
+        operation: record.operation,
+        scope: record.scope,
+        createdAt: record.createdAt,
+      });
+      writer?.error('SERVICE_RESTART_INTERRUPTED', INTERRUPTED_ERROR, INTERRUPTED_HINT);
+      writer?.close();
+      writeRecord(config, next);
+      marked.push(id);
+    } catch { /* 单条失败不影响其余记录，也不阻断启动 */ }
+  }
+  return marked;
+}
+
 export function getTaskRecord(config: Pick<KiConfig, 'dataDir'>, id: string): TaskRecord | null {
   if (!TASK_ID_RE.test(id)) return null;
   let dir: string;
@@ -717,7 +851,7 @@ export function getTaskRecord(config: Pick<KiConfig, 'dataDir'>, id: string): Ta
   if (!record) return null;
   const now = Date.now();
   const active = record.state === 'queued' || record.state === 'running';
-  if ((active && now - record.heartbeatAt > TASK_TTL_MS)
+  if ((active && now - record.heartbeatAt > TASK_HEARTBEAT_TTL_MS)
     || (!active && now - (record.finishedAt ?? record.updatedAt) > TASK_TTL_MS)) return null;
   if (active && now - record.heartbeatAt > STALE_AFTER_MS) {
     return { ...record, state: 'unknown' };

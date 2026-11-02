@@ -343,7 +343,7 @@ export function AppShell(): JSX.Element {
   };
   /**
    * 进入顶栏徽章的「需关注任务」：失败/未知 + 部分完成，两条消解规则（自动消除 / 手动忽略）
-   * 见 lib/taskNotice.ts —— 部分完成此前没有手动消除入口，会一直挂到 1 小时 TTL 到期。
+   * 见 lib/taskNotice.ts —— 部分完成此前没有手动消除入口，会一直挂到任务台账 TTL 到期。
    */
   const { failed: failedTasks, partial: partialTasks } = useMemo(
     () => visibleTaskNotices(taskQuery.data?.tasks ?? [], dismissal),

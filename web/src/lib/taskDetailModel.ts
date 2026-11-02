@@ -10,6 +10,7 @@
 import type { TaskIndexReadiness, TaskLogResponse, TaskRecord, TaskResultSnapshot, TaskState } from '@/api/tasksApi';
 import { cliCommandFor } from './taskActions';
 import { describeErrorText, describeTaskError, formatTaskError } from './taskErrorCatalog';
+import { formatRetention } from './taskRetention';
 
 export type DetailTone = 'normal' | 'warn' | 'danger';
 
@@ -291,7 +292,7 @@ function progressOf(task: TaskRecord): { show: boolean; text: string; percent: n
   return { show: false, text: phase ? phaseLabel(phase) : '处理中', percent: null };
 }
 
-function paramRows(task: TaskRecord): DetailRow[] {
+function paramRows(task: TaskRecord, retentionMs?: number): DetailRow[] {
   const params = task.params;
   // R9：知识库可一键跳到 Browse（scope 合法才给链接，非法时退化为纯文本）
   const rows: DetailRow[] = [{
@@ -322,10 +323,12 @@ function paramRows(task: TaskRecord): DetailRow[] {
     });
     rows.push({ label: '疑似重复', value: params.skipDuplicates ? '已启用跳过' : '未启用' });
     if (task.retryOf) {
+      // 保留期取自接口的 retainedForMs（权威口径）；拿不到时只说「可能已清理」，不猜数字
+      const retention = formatRetention(retentionMs);
       rows.push({
         label: '重试自',
         value: `${task.retryOf.slice(0, 8)}…`,
-        hint: '原任务保留 1 小时，可能已清理',
+        hint: retention ? `原任务保留 ${retention}，可能已清理` : '原任务可能已清理',
       });
     }
   }
@@ -661,9 +664,9 @@ function durationLabelOf(task: TaskRecord): string | undefined {
 /**
  * 「原因与日志」区模型。
  *
- * ★ 日志正文与台账解耦：台账过期（抽屉停留超 1 小时）时后端仍可能返回日志，
- *   此时 `expired: true`，meta 顶部标注来源。「过期仍可查」的主路径在 CLI，
- *   Web 端不作为对外承诺（列表里已没有该任务，用户点不进来）。
+ * ★ 日志正文与台账解耦：两者保留期同为 7 天但清理机制不同（日志另有 50MB 总量上限），
+ *   台账已被清理时后端仍可能返回日志 —— 此时 `expired: true`，meta 顶部标注来源。
+ *   「过期仍可查」的主路径在 CLI，Web 端不作为对外承诺（列表里已没有该任务，用户点不进来）。
  */
 export function buildLogSection(task: TaskRecord, state: TaskLogState): TaskLogSection {
   const visible = task.state !== 'succeeded';
@@ -716,7 +719,11 @@ export function buildLogSection(task: TaskRecord, state: TaskLogState): TaskLogS
   };
 }
 
-export function buildTaskDetail(task: TaskRecord): TaskDetailView {
+/**
+ * @param retentionMs 任务台账保留期（`/api/tasks` 的 `retainedForMs`）。
+ *   只用于「重试自」一行的阈值说明；缺省时该行退化为不带数字的文案。
+ */
+export function buildTaskDetail(task: TaskRecord, retentionMs?: number): TaskDetailView {
   const legacy = isLegacy(task);
   const progress = progressOf(task);
   const notices = noticesOf(task);
@@ -731,7 +738,7 @@ export function buildTaskDetail(task: TaskRecord): TaskDetailView {
   }
   return {
     legacy,
-    params: paramRows(task),
+    params: paramRows(task, retentionMs),
     results,
     summary,
     metrics,

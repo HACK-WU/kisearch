@@ -2,7 +2,7 @@
  * task-snapshot.ts —— 任务台账的参数快照 / 结果摘要抽取（REQ-20261019-004 S-02）
  *
  * 背景：三端（web job / CLI 直连 / daemon RPC）创建任务时只写 `{operation, scope}`，
- * 导入参数与结果统计只活在内存 Job 或 CLI stdout，1h 后不可回看。
+ * 导入参数与结果统计只活在内存 Job 或 CLI stdout，台账到期后不可回看。
  *
  * 设计约束（见 DESIGN.md D2-2）：抽取逻辑**只有这一份实现**——三端只调用，不各自组装。
  * 本项目已因"两处入口各写一份判断"漏标过 coordinator kind（daemon-rpc.ts:492-493 有注释）。
@@ -55,7 +55,7 @@ export function toParamSnapshot(
   uploadsRoot: string = DEFAULT_UPLOADS_ROOT,
 ): TaskParamSnapshot | undefined {
   // 数据源同步复用导入参数形态（sourceDir/group/conflict/vector/chunk）；
-  // 结果快照不写入台账——完整结果在 datasource.json.lastSync（SSOT，不受 1h TTL 影响）。
+  // 结果快照不写入台账——完整结果在 datasource.json.lastSync（SSOT，不受台账 TTL 影响）。
   if ((operation !== 'import' && operation !== 'datasource-sync') || !args) return undefined;
   const snapshot: TaskParamSnapshot = {};
   const sourceDir = typeof args.sourceDir === 'string' ? args.sourceDir : '';

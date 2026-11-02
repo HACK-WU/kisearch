@@ -33,6 +33,7 @@ import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, ty
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
+import { markInterruptedTasks } from './task-registry.js';
 
 // S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
 // 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
@@ -1170,6 +1171,19 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     });
     httpServer.listen(port, host, () => resolve());
   });
+
+  /**
+   * 服务重启收尾（2026-11-02）：把上一个进程遗留的 non-terminal 任务改判为 failed 并注明中断原因。
+   * 放在 listen 之后——此时单例守卫已过，本进程尚未创建任何任务，台账里的 `queued`/`running`
+   * 全部属于已退出进程。不抛错，台账异常不阻断启动。
+   */
+  const interrupted = markInterruptedTasks(loadConfig());
+  if (interrupted.length > 0) {
+    process.stderr.write(
+      `已收尾 ${interrupted.length} 个被上次服务重启打断的任务（标记为失败，可在「后台任务」页查看原因）：` +
+        `${interrupted.slice(0, 3).join('、')}${interrupted.length > 3 ? ' 等' : ''}\n`,
+    );
+  }
 
   writeLockFile(lockPath, host, port, opts.web === true);
 

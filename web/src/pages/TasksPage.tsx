@@ -13,6 +13,7 @@ import {
 } from '@/lib/taskDetailModel';
 import { copyText } from '@/lib/clipboard';
 import { buildTaskListRow } from '@/lib/taskListModel';
+import { formatRetention } from '@/lib/taskRetention';
 import {
   DEFAULT_TASK_SORT, TASK_FILTERS, countTasks, nextTaskSort, queryTasks, shouldShowTaskPager,
   taskFilterLabel,
@@ -92,9 +93,14 @@ function taskStatusTone(state: TaskRecord['state']): DetailStatusTone {
  * ★ 所有判定在 `buildTaskDetail` / `taskActions` 里，组件只渲染。
  * ★ 任务页跨 scope：详情、落点与动作全部使用 `task.scope`，不跟随顶部当前 scope。
  */
-function TaskDetailDrawer({ id, tasks, onClose }: {
+function TaskDetailDrawer({ id, tasks, retainedForMs, onClose }: {
   id: string;
   tasks: TaskRecord[];
+  /**
+   * 台账保留期（`/api/tasks` 下发）。`/api/tasks/:id` 的响应**不带**该字段，
+   * 只能由列表 query 传进来——所以它是可选，缺省时文案退化为不带数字。
+   */
+  retainedForMs?: number;
   onClose: () => void;
 }): JSX.Element {
   const { data, isPending, error, refetch } = useQuery({
@@ -110,7 +116,8 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
     retry: false,
   });
   const task = data?.task;
-  const detail = task ? buildTaskDetail(task) : null;
+  const retention = formatRetention(retainedForMs);
+  const detail = task ? buildTaskDetail(task, retainedForMs) : null;
   const title = task ? `${operationLabel(task.operation)} · ${task.scope}` : '任务详情';
   // 「新增的文档」点开正文：与数据源「待删除」卡一致（阅读用同一套 ModuleDrawer）
   const [docTarget, setDocTarget] = useState<{ scope: string; group: string; relation: string } | null>(null);
@@ -184,7 +191,9 @@ function TaskDetailDrawer({ id, tasks, onClose }: {
       {isPending ? <p className="ki-task-muted">正在读取任务详情…</p> : null}
       {error ? (
         <>
-          <Notice tone="danger">记录已清理或读取失败：任务仅保留 1 小时。</Notice>
+          <Notice tone="danger">
+            记录已清理或读取失败{retention ? `：任务仅保留 ${retention}` : ''}。
+          </Notice>
           <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={() => void refetch()}>
             重试
           </button>
@@ -682,11 +691,11 @@ export function TasksPage(): JSX.Element {
   const currentPage = Math.min(page, pageCount);
   const pageTasks = visibleTasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   /**
-   * 期望「后端 total = 全部可见任务数，列表只取最近 200 条」，两者不一致时说明差异。
-   * ★ 现状（2026-10-30 核实 `mcp-http-api.ts::handleTaskList`）：`total: summarized.length` 是
-   *   **截断后**的条数，与本列表 `tasks.length` 恒等 ⇒ 真实环境此判据恒为 false，超过 200 条时
-   *   页面只显示「共 200 个」且无任何截断提示。属后端 total 语义问题（会牵连顶栏任务徽标等
-   *   共用该接口的消费方），单独修；此处保留判据以便后端改口径后自动生效。
+   * 「后端 total = 全部可见任务数，列表只取最近 200 条」，两者不一致时说明差异。
+   * ★ 2026-11-02 起**判据已生效**：`handleTaskList` 的 total 改为「授权过滤后、分页前」的真实条数
+   *   （此前取 `summarized.length`，即截断后长度，与 `tasks.length` 恒等 ⇒ 判据恒为 false）。
+   *   保留期 1 小时时任务很少过百、看不出问题；改成 7 天后列表常超 200，失效的判据会让
+   *   页头「共 200 个」与实际数量对不上，且截断提示永不出现。
    */
   const truncated = (query.data?.total ?? 0) > tasks.length;
   /** 分页栏是否渲染（0 条收起 / 单页保留，口径见 `shouldShowTaskPager`） */
@@ -726,6 +735,11 @@ export function TasksPage(): JSX.Element {
     partial: countTasks(tasks, 'partial'),
     running: countTasks(tasks, 'running'),
   }), [tasks, query.data?.total]);
+  /**
+   * 台账保留期文案：由 `/api/tasks` 的 `retainedForMs` 派生，前端**不硬编码**数字
+   * （2026-11-02 保留期 1 小时 → 7 天，此前三处文案各自写死，全部变成谎话）。
+   */
+  const retention = formatRetention(query.data?.retainedForMs);
   /** 是否有生效中的筛选 / 搜索：决定空态文案与「查看全部任务」入口 */
   const filtering = filter !== 'all' || search.trim().length > 0;
   const clearFilters = (): void => {
@@ -781,7 +795,8 @@ export function TasksPage(): JSX.Element {
         <div>
           {/* 总数并入副标题：统计卡全部让给筛选（用户 2026-10-30）。自动刷新间隔与顶栏轮询同源（3s / 15s）。 */}
           <p>
-            查看网页导入、CLI 导入与向量重建 · 共 {query.data?.total ?? 0} 个任务 · 最近任务保留 1 小时
+            查看网页导入、CLI 导入与向量重建 · 共 {query.data?.total ?? 0} 个任务
+            {retention ? ` · 最近任务保留 ${retention}` : ''}
           </p>
         </div>
         <div className="ki-task-page-actions">
@@ -1012,7 +1027,13 @@ export function TasksPage(): JSX.Element {
           否则上一个任务的重试状态（已提交 / jobId / 错误）会串到当前任务上。
           `tasks` 传入用于「该 scope 是否已有导入在跑」的判据（用户反馈的重复重试修复）。 */}
       {selectedId ? (
-        <TaskDetailDrawer key={selectedId} id={selectedId} tasks={tasks} onClose={() => navigate('/tasks')} />
+        <TaskDetailDrawer
+          key={selectedId}
+          id={selectedId}
+          tasks={tasks}
+          retainedForMs={query.data?.retainedForMs}
+          onClose={() => navigate('/tasks')}
+        />
       ) : null}
     </div>
   );

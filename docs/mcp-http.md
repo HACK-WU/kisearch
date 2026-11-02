@@ -158,9 +158,9 @@ ki mcp --http --web
 | `/api/vector/status` | GET | 向量维度快照（读取，不排队） |
 | `/api/vector/status/refresh` | POST | 主动刷新维度快照；引擎 5s 未响应时降级返回上次快照 |
 | `/api/vector/optimize` | POST | 触发索引整理（同 `ki index-optimize`） |
-| `/api/tasks` | GET | 任务列表（只含计数，明细走单条） |
+| `/api/tasks` | GET | 任务列表（只含计数，明细走单条）。`?limit=` 1–500（默认 100）**只约束返回条数**；`total` 是**授权过滤后、分页前**的真实条数（上限为台账读取上限 2000），故 `total > tasks.length` 即表示被截断；`retainedForMs` 是台账保留期（当前 7 天），前端「最近任务保留 X」文案据此渲染 |
 | `/api/tasks/:id` | GET | 任务详情 |
-| `/api/tasks/:id/log` | GET | **任务运行日志**：`?tail=N`（0–1000，默认 100）。与台账解耦——台账只活 1 小时、日志活 7 天，故记录过期后仍可能 `200` 并带 `expired:true` + 从日志头行恢复的 `head`。响应 `{ ok, taskId, expired, logFile, head, lines, totalLines, rotated, bytes }`；`logFile` **只返回文件名**（台账刻意不回绝对路径）。`400 TASK_ID_INVALID` / `403 TASK_LOG_SCOPE_UNKNOWN`（日志在但头行损坏，无法校验 scope——不判 404，否则等于把已有日志判没）/ `403` scope 越权 / `404 TASK_LOG_NOT_FOUND`（台账与日志都没有） |
+| `/api/tasks/:id/log` | GET | **任务运行日志**：`?tail=N`（0–1000，默认 100）。与台账解耦——两者保留期同为 7 天但清理机制不同（日志另有 50MB 总量上限、可能先被挤掉），故台账已清理时仍可能 `200` 并带 `expired:true` + 从日志头行恢复的 `head`。响应 `{ ok, taskId, expired, logFile, head, lines, totalLines, rotated, bytes }`；`logFile` **只返回文件名**（台账刻意不回绝对路径）。`400 TASK_ID_INVALID` / `403 TASK_LOG_SCOPE_UNKNOWN`（日志在但头行损坏，无法校验 scope——不判 404，否则等于把已有日志判没）/ `403` scope 越权 / `404 TASK_LOG_NOT_FOUND`（台账与日志都没有） |
 
 `/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 

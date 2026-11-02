@@ -193,6 +193,35 @@ describe('/api/tasks 与 /api/vector/status', () => {
       reporter.stop();
     }
   });
+
+  it('total 是真实条数而非当前页长度（limit 只约束返回条数）', async () => {
+    const config = loadConfig();
+    const created: string[] = [];
+    const reporters: Array<{ stop: () => void }> = [];
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        const id = `api-total-${crypto.randomUUID()}`;
+        const reporter = createTaskReporter(config, {
+          id, source: 'cli', operation: 'import', scope: 'api_task_scope',
+        });
+        reporter.finish('succeeded');
+        created.push(id);
+        reporters.push(reporter);
+      }
+      const body = await (await fetch(`${handle!.base}/api/tasks?limit=2`)).json() as any;
+      assert.equal(body.tasks.length, 2, 'limit 只约束返回条数');
+      assert.ok(body.total > 2, `total 必须大于页大小（实际 ${body.total}）`);
+      assert.ok(body.total >= created.length, 'total 至少包含本次新建的 3 条');
+      // 排序仍是 createdAt 倒序：最新建的必须落在第一页
+      const ids = body.tasks.map((task: { id: string }) => task.id);
+      assert.ok(ids.some((id) => created.includes(id)), '最新任务应出现在第一页');
+    } finally {
+      for (const reporter of reporters) reporter.stop();
+      for (const id of created) {
+        try { fs.unlinkSync(path.join(config.dataDir, '.ki-tasks', `${id}.json`)); } catch { /* 已清理 */ }
+      }
+    }
+  });
 });
 
 describe('/api/datasource/list|detail', () => {

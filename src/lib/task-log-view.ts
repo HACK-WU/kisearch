@@ -6,9 +6,10 @@
  *   本模块不 import commander，可安全被任何调用方导入。
  *
  * 数据来源（两条，互不依赖）：
- *   1. 任务台账 `{dataDir}/.ki-tasks/<taskId>.json` —— 只活 1 小时，有状态/参数/压缩后的类别
+ *   1. 任务台账 `{dataDir}/.ki-tasks/<taskId>.json` —— 活 7 天，有状态/参数/压缩后的类别
  *   2. 任务运行日志 `{dataDir}/.ki-tasks/logs/<taskId>.log` —— 活 7 天，有**原始**错误
- * 台账过期但日志仍在时走「过期降级」：从日志头行恢复 scope/operation 继续输出。
+ * 两者保留期同窗口，但清理机制不同（台账按终态时间惰性删，日志另受 50MB 总量硬上限约束），
+ * 故「台账已清理、日志仍在」仍可能出现，走「过期降级」：从日志头行恢复 scope/operation 继续输出。
  */
 
 import { getTaskRecord, listTaskRecords } from './task-registry.js';
@@ -189,7 +190,7 @@ export function executeTaskLog(
               ? `ki log --scope ${scope} --failed    该知识库最近的失败任务`
               : 'ki log --scope <scope> --failed    某知识库最近的失败任务',
             'ki log                              最近 10 个任务',
-            '任务台账只保留 1 小时、运行日志保留 7 天；两者都已过期时只能重新复现',
+            '任务台账与运行日志均保留 7 天；两者都已过期时只能重新复现',
           ],
         },
       };
@@ -307,7 +308,7 @@ export function renderTask(
   if (options.expired) {
     // 过期降级：head 能提供的元信息别浪费（早期版本只打一行「已过期」，operation/scope 全丢）
     lines.push(...[
-      kv('记录', '台账已过期（只保留 1 小时），以下元信息来自日志头行'),
+      kv('记录', '台账已过期（保留 7 天），以下元信息来自日志头行'),
       kv('操作', view.operation === 'unknown' ? undefined : view.operation),
       kv('知识库', view.scope === 'unknown' ? undefined : view.scope),
       kv('来源', view.source === 'unknown' ? undefined : (SOURCE_LABEL[view.source] ?? view.source)),
@@ -349,24 +350,24 @@ export function renderTask(
     }
   } else {
     lines.push('该任务没有运行日志（早于日志能力上线，或已被 7 天保留期清理）');
-    lines.push('任务台账只保留 1 小时；过期后本命令将查不到该任务');
+    lines.push('任务台账保留 7 天；过期后本命令将查不到该任务');
   }
   return lines.join('\n');
 }
 
 export function renderList(result: Extract<LogCommandResult, { kind: 'list' }>): string {
   const head = result.scope
-    ? `scope ${result.scope} 的任务（台账保留 1 小时，本页 ${result.rows.length} 条；--limit 可扩大）`
-    : `最近任务（台账保留 1 小时，本页 ${result.rows.length} 条；--limit 可扩大）`;
+    ? `scope ${result.scope} 的任务（台账保留 7 天，本页 ${result.rows.length} 条；--limit 可扩大）`
+    : `最近任务（台账保留 7 天，本页 ${result.rows.length} 条；--limit 可扩大）`;
   if (result.rows.length === 0) {
     return [
       head,
       '',
       result.scope
         ? `没有匹配的任务：scope ${result.scope}（没有失败任务，或满足条件的任务已过期）`
-        : '当前没有任务记录（可能从未执行过写操作，或记录已过 1 小时保留期）',
+        : '当前没有任务记录（可能从未执行过写操作，或记录已过 7 天保留期）',
       '',
-      '提示：任务记录在操作执行后 1 小时内可查；重新发起操作可再产生记录',
+      '提示：任务记录在操作执行后 7 天内可查；重新发起操作可再产生记录',
     ].join('\n');
   }
   // 列宽按显示宽度而非字符数（表头含中文，用 String.length 会让表头与数据错位）

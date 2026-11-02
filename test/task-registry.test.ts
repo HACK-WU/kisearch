@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createTaskReporter, getTaskRecord, MAX_TASK_DETAIL_ITEMS } from '../src/lib/task-registry.ts';
+import { createTaskReporter, getTaskRecord, listTaskRecords, markInterruptedTasks, pruneOverflowingTaskDir, MAX_TASK_DETAIL_ITEMS } from '../src/lib/task-registry.ts';
+import { hasTaskLog } from '../src/lib/task-log.ts';
 
 test('终态首次落盘失败后保持进程活跃并重试写入', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-retry-'));
@@ -136,6 +137,163 @@ test('预算按 UTF-8 字节计算：中文明细超限时必须被裁剪（不�
     assert.equal(record?.result?.truncated, true);
   } finally {
     reporter.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ─── 保留期（2026-11-02：终态 1 小时 → 7 天，心跳窗口刻意不跟随）─────────────
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/** 直接写台账文件：需要伪造时间戳，走 reporter 只能拿到 now */
+function seedRecord(root: string, record: Record<string, unknown>): void {
+  const dir = path.join(root, '.ki-tasks');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${String(record.id)}.json`), JSON.stringify(record), 'utf8');
+}
+
+function recordOf(id: string, overrides: Record<string, unknown>): Record<string, unknown> {
+  const now = Date.now();
+  return {
+    id, source: 'cli', operation: 'import', scope: 'default', state: 'succeeded',
+    createdAt: now, updatedAt: now, heartbeatAt: now, ...overrides,
+  };
+}
+
+test('保留期 7 天：终态任务结束 3 天后仍可查、8 天后才过期', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-ttl-'));
+  const config = { dataDir: root };
+  const now = Date.now();
+  try {
+    seedRecord(root, recordOf('recent-failed', {
+      state: 'failed', finishedAt: now - 3 * DAY, updatedAt: now - 3 * DAY, heartbeatAt: now - 3 * DAY,
+    }));
+    seedRecord(root, recordOf('expired-ok', {
+      state: 'succeeded', finishedAt: now - 8 * DAY, updatedAt: now - 8 * DAY, heartbeatAt: now - 8 * DAY,
+    }));
+
+    assert.equal(getTaskRecord(config, 'recent-failed')?.state, 'failed', '3 天前的终态记录必须还在（旧口径 1 小时就会消失）');
+    assert.equal(getTaskRecord(config, 'expired-ok'), null, '超过 7 天必须过期');
+
+    const visible = listTaskRecords(config).map((task) => task.id);
+    assert.ok(visible.includes('recent-failed'));
+    assert.ok(!visible.includes('expired-ok'));
+    assert.equal(fs.existsSync(path.join(root, '.ki-tasks', 'expired-ok.json')), false, '列表读取应顺带清掉过期文件');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('心跳窗口不跟随保留期：未终态任务心跳停 2 小时即清理，活着的老任务仍保留', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-heartbeat-'));
+  const config = { dataDir: root };
+  const now = Date.now();
+  try {
+    // daemon 崩溃留下的假 running：心跳停在 2 小时前
+    seedRecord(root, recordOf('dead-running', {
+      state: 'running', createdAt: now - 2 * HOUR, updatedAt: now - 2 * HOUR, heartbeatAt: now - 2 * HOUR,
+    }));
+    // 真在跑的老任务：3 天前创建，但心跳是 10 秒前
+    seedRecord(root, recordOf('live-running', {
+      state: 'running', createdAt: now - 3 * DAY, updatedAt: now - 10 * 1000, heartbeatAt: now - 10 * 1000,
+    }));
+
+    assert.equal(
+      getTaskRecord(config, 'dead-running'), null,
+      '心跳超过 1 小时必须判死并清理（若跟随 7 天保留期，这条假 running 会挂一周）',
+    );
+    assert.equal(getTaskRecord(config, 'live-running')?.state, 'running', '心跳新鲜的任务不受创建时间影响');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('服务重启收尾：遗留 queued/running 改判 failed 并写明原因，终态记录与幂等性都锁住', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-interrupt-'));
+  const config = { dataDir: root };
+  const now = Date.now();
+  try {
+    seedRecord(root, recordOf('stale-queued', {
+      state: 'queued', createdAt: now - 60_000, updatedAt: now - 2_000, heartbeatAt: now - 2_000,
+    }));
+    seedRecord(root, recordOf('stale-running', {
+      state: 'running', createdAt: now - 60_000, updatedAt: now - 2_000, heartbeatAt: now - 2_000,
+      params: { sourceKind: 'external', group: 'raw' },
+    }));
+    seedRecord(root, recordOf('done-failed', {
+      state: 'failed', finishedAt: now - DAY, updatedAt: now - DAY, heartbeatAt: now - DAY,
+    }));
+    seedRecord(root, recordOf('done-ok', {
+      state: 'succeeded', finishedAt: now - DAY, updatedAt: now - DAY, heartbeatAt: now - DAY,
+    }));
+
+    assert.deepEqual(markInterruptedTasks(config).sort(), ['stale-queued', 'stale-running']);
+
+    const rescued = getTaskRecord(config, 'stale-running');
+    assert.equal(rescued?.state, 'failed');
+    assert.equal(rescued?.error, '任务在执行中被服务重启打断，结果未落定');
+    assert.match(rescued?.recoveryHint ?? '', /重新发起该操作/);
+    assert.equal(rescued?.result?.errorCode, 'SERVICE_RESTART_INTERRUPTED');
+    assert.ok((rescued?.finishedAt ?? 0) > now - 5_000, '终态时间应写成收尾时刻');
+    // 原有快照必须保留：否则用户连"做到哪一步"都看不到
+    assert.equal(rescued?.params?.group, 'raw');
+    assert.equal(hasTaskLog(config, 'stale-running'), 'yes', '日志正文要留一行，否则排障时像是没跑过');
+
+    // 终态记录不能被误改（心跳同样陈旧）
+    assert.equal(getTaskRecord(config, 'done-failed')?.state, 'failed');
+    assert.equal(getTaskRecord(config, 'done-ok')?.state, 'succeeded');
+
+    // 幂等：第二次启动没有非终态记录可改
+    assert.deepEqual(markInterruptedTasks(config), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('服务重启收尾：台账目录尚不存在时不抛错（不能挡住服务启动）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-interrupt-empty-'));
+  try {
+    assert.deepEqual(markInterruptedTasks({ dataDir: path.join(root, 'not-created-yet') }), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('台账溢出兜底：按数量从旧删到上限，但心跳窗口内的文件一个都不碰（活任务）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-overflow-'));
+  const dir = path.join(root, '.ki-tasks');
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    const stale = new Date(Date.now() - 2 * HOUR);
+    for (let i = 0; i < 5; i += 1) {
+      const file = path.join(dir, `old-${i}.json`);
+      fs.writeFileSync(file, '{}');
+      fs.utimesSync(file, stale, stale);
+    }
+    for (let i = 0; i < 5; i += 1) fs.writeFileSync(path.join(dir, `new-${i}.json`), '{}');
+
+    // 上限 6、留余量 2 ⇒ 目标 4；共 10 个 ⇒ 需减 6，但窗口内只有 0 个可动
+    const removed = pruneOverflowingTaskDir(dir, 6, HOUR, 2);
+    assert.equal(removed, 5, '只删得掉窗口外的 5 个旧文件');
+    const left = fs.readdirSync(dir).sort();
+    assert.equal(left.length, 5);
+    assert.ok(left.every((name) => name.startsWith('new-')), '心跳窗口内的文件必须全部保留');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('台账溢出兜底：未超上限时不做任何删除', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-overflow-noop-'));
+  const dir = path.join(root, '.ki-tasks');
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    for (let i = 0; i < 3; i += 1) fs.writeFileSync(path.join(dir, `t-${i}.json`), '{}');
+    assert.equal(pruneOverflowingTaskDir(dir, 10, HOUR), 0);
+    assert.equal(fs.readdirSync(dir).length, 3);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

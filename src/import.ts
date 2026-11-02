@@ -241,7 +241,7 @@ program
               } else {
                 // ★ 兜底：等待窗口到点仍未落定，或 `last` 属**其他 scope** ⇒ 无法确认本次整理结果。
                 //   早前实现直接跳过更新，任务 phase 会永久停在 'indexing' ⇒ 前端顶栏一直挂
-                //   「索引整理中 · 文档已可用」且无消除入口（记录 1h TTL 才清）；
+                //   「索引整理中 · 文档已可用」且无消除入口（记录 TTL 才清）；
                 //   daemon 路径（mcp-http-api.ts）与 restore 路径（restore.ts）本就有同口径兜底。
                 process.stderr.write(
                   '⚠️  索引整理未在等待窗口内落定（超时，或结果属于其他 scope）\n'

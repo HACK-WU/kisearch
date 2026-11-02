@@ -125,7 +125,7 @@ export interface IndexMaintenanceOutcome {
  *   3. **`last` 缺失（等待超时、整理未落定）或属于其他 scope** → `available` + 通用重试线索。
  *
  * 情形 3 是本次补的兜底：早前实现直接跳过更新，任务 `phase` 会**永久停在 `indexing`**
- * ⇒ 前端顶栏一直挂「索引整理中 · 文档已可用」且没有消除入口，直到任务记录 1h TTL 到期。
+ * ⇒ 前端顶栏一直挂「索引整理中 · 文档已可用」且没有消除入口，直到任务记录 TTL 到期。
  * 与 daemon 路径同口径（`mcp-http-api.ts` 的 else 恒收敛为 `available`）。
  */
 export function resolveIndexMaintenanceOutcome(

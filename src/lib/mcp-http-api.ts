@@ -565,12 +565,13 @@ export async function handleApiRequest(
       const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(200, Math.floor(requestedLimit))) : 50;
       const visible = listTaskRecords(requestConfig)
         .filter((task) => authScopes === null || scopeAllowed(authScopes, task.scope));
-      sendJson(res, 200, { ok: true, tasks: visible.slice(0, limit), total: visible.length, retainedForMs: 60 * 60 * 1000 });
+      sendJson(res, 200, { ok: true, tasks: visible.slice(0, limit), total: visible.length, retainedForMs: TASK_TTL_MS });
       return;
     }
     /**
      * 任务运行日志（S-02）：与 `/tasks/:id` 的关键差异是**不依赖台账** ——
-     * 台账只活 1 小时、日志活 7 天；过期后仍应可读，否则「事后能查」不成立。
+     * 台账与日志各自 7 天且清理机制不同（日志另受 50MB 上限挤压）；
+     * 台账已清理时仍应可读，否则「事后能查」不成立。
      * ★ 必须放在 `/tasks/:id` **之前**：`/tasks/<id>/log` 会先命中下面的 `startsWith('/tasks/')`。
      */
     if (p.startsWith('/tasks/') && p.endsWith('/log') && req.method === 'GET') {
@@ -921,19 +922,30 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
 function handleTaskList(res: http.ServerResponse, url: URL, config: KiConfig, authScopes: string[] | null): void {
   const raw = Number(url.searchParams.get('limit') ?? '100');
   const limit = Number.isFinite(raw) ? Math.min(Math.max(1, Math.floor(raw)), 500) : 100;
-  let tasks = listTaskRecords(config, limit);
-  if (authScopes !== null) tasks = tasks.filter((task) => scopeAllowed(authScopes, task.scope));
+  /**
+   * ★ `total` 必须取**授权过滤后、分页前**的真实条数（2026-11-02）。
+   *   旧实现把 `limit` 直接传给 `listTaskRecords`（内部先 slice）⇒ total 恒等于页大小，
+   *   与内部 RPC 的口径（`:566` 传完整列表、total 取过滤后长度）不一致。
+   *   保留期只有 1 小时时任务很少过百，这个失真基本看不见；改成 7 天后列表常超 100：
+   *   页头「共 100 个任务」直接说谎，`TasksPage` 的截断判据（`total > tasks.length`）也恒为 false、
+   *   截断提示永不出现。与 `/api/doc/list` 的 S0-2 修复同口径：total=真实匹配数，列表=当前页。
+   *   注意 `listTaskRecords` 自身返回上限 `MAX_TASK_FILES`（2000），故 total 上限即 2000。
+   *   传 limit 与否不改变 IO——该函数本来就要遍历并解析全部任务文件。
+   */
+  let visible = listTaskRecords(config);
+  if (authScopes !== null) visible = visible.filter((task) => scopeAllowed(authScopes, task.scope));
+  const total = visible.length;
   /**
    * 列表只回计数，不回明细（code-review P1-3）：`AppShell` 每 3–15s 拉 200 条，
    * 每条最多 20+20 条明细（~4KB），而列表行只用 `result.files` 的计数。
    * 明细由 `/api/tasks/:id` 单独提供。
    */
-  const summarized = tasks.map((task) => {
+  const summarized = visible.slice(0, limit).map((task) => {
     if (!task.result || (!task.result.duplicates && !task.result.conflicts)) return task;
     const { duplicates: _duplicates, conflicts: _conflicts, ...rest } = task.result;
     return { ...task, result: rest };
   });
-  sendJson(res, 200, { ok: true, tasks: summarized, total: summarized.length, retainedForMs: TASK_TTL_MS });
+  sendJson(res, 200, { ok: true, tasks: summarized, total, retainedForMs: TASK_TTL_MS });
 }
 
 /** 单个任务详情；记录已被 TTL 清理时返回 404，由前端提示重新发起。 */
@@ -3025,7 +3037,7 @@ async function handleDatasourceRemove(
 // 现象：连点两次重试各起一个 job（第一次 running、第二次 queued）——重复处理同一批未完成文件。
 // 根因是"能否重试"只看清单，而重试 job 结束前清单不会变（`taskId` 仍是旧任务）。
 // 判据与任务中心列表同源（任务台账）；★ `unknown`（心跳过期）刻意**不计入**——它可能是死任务，
-// 计入会让用户在 1h TTL 内彻底无法重试。
+// 计入会让用户在任务台账 TTL（7 天）内彻底无法重试。
 
 /**
  * 同 scope 正在跑的导入任务（`queued` / `running`）。

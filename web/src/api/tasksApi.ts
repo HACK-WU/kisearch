@@ -115,7 +115,7 @@ export interface TaskRecord {
   params?: TaskParamSnapshot;
   /** REQ-20261019-004：结果摘要（运行中 / 失败中断 / 旧记录可能缺失） */
   result?: TaskResultSnapshot;
-  /** REQ-20261019-004：重试血缘（原任务 ID，1h 后原任务可能已被清理） */
+  /** REQ-20261019-004：重试血缘（原任务 ID，台账 TTL 后原任务可能已被清理） */
   retryOf?: string;
 }
 
@@ -176,7 +176,7 @@ export function scopeImportRunning(tasks: TaskRecord[] | undefined, scope: strin
  * 同 scope 正在跑的导入任务数（`queued` / `running`）—— 任务详情「重试未完成」的可用性判据
  * （2026-10-13 用户反馈：连点两次重试各起一个 job，重复处理同一批未完成文件）。
  *
- * ★ 刻意**不含** `unknown`（心跳过期）：它可能是死任务，计入会让重试入口在 1h TTL 内彻底
+ * ★ 刻意**不含** `unknown`（心跳过期）：它可能是死任务，计入会让重试入口在整个台账 TTL 内彻底
  * 不可用。与后端 409 闸门（`INCOMPLETE_IMPORT_RUNNING`）**同口径**（同：queued + running）。
  */
 export function activeImportCount(tasks: TaskRecord[] | undefined, scope: string): number {
@@ -191,7 +191,8 @@ export function getTask(id: string): Promise<{ ok: boolean; task: TaskRecord }> 
 
 /**
  * 任务运行日志（S-04）。与 `/api/tasks/:id` 的关键差异：**不依赖任务台账**。
- * 台账只活 1 小时、日志活 7 天，所以记录过期后 `expired: true` 仍可能返回 200。
+ * 台账与日志保留期同为 7 天，但日志另有 50MB 总量硬上限、可能先被挤掉，
+ * 所以台账已清理而后端仍有日志时，`expired: true` 仍可能返回 200。
  * 404 表示台账与日志都没有（含"日志能力上线前的旧任务"）。
  */
 export interface TaskLogResponse {
