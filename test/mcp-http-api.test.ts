@@ -868,12 +868,44 @@ describe('/api/datasource/add-remote', () => {
     assert.match(badSubdir.body.error, /仓库顶层目录/);
     assert.equal(fs.existsSync(getKbDir(badScope)), false, '预检失败不应创建 scope');
 
+    // 远端不可达：fetch 失败不阻断添加（降级按现有工作树校验），但错误里必须明示目录列表可能滞后
+    const movedBare = `${bare}.moved`;
+    fs.renameSync(bare, movedBare);
+    try {
+      const offlineScope = `api_ds_remote_offline_${crypto.randomUUID().slice(0, 8)}`;
+      const offline = await postAdd({ scope: offlineScope, url: `file://${bare}`, subdir: 'still-not-a-dir', vector: false });
+      assert.equal(offline.status, 400, JSON.stringify(offline.body));
+      assert.equal(offline.body.code, 'INVALID_SUBDIR');
+      assert.match(offline.body.error, /目录列表可能滞后/);
+      assert.equal(fs.existsSync(getKbDir(offlineScope)), false);
+    } finally {
+      fs.renameSync(movedBare, bare);
+    }
+
+    // 远端新增顶层目录后，复用旧副本也必须先 fetch 对齐才能识别（2026-11-02 回归：
+    // 之前只 readdir 陈旧工作树，远端刚新增的子目录被判「子目录不存在」）
+    fs.mkdirSync(path.join(work, 'agent-engineering'), { recursive: true });
+    fs.writeFileSync(path.join(work, 'agent-engineering', 'lesson.md'), '# lesson\n');
+    git(work, 'add', '.');
+    git(work, 'commit', '-q', '-m', 'add agent-engineering');
+    git(work, 'push', '-q', bare, 'main');
+    const freshScope = `api_ds_remote_fresh_${crypto.randomUUID().slice(0, 8)}`;
+    const fresh = await postAdd({ scope: freshScope, url: `file://${bare}`, subdir: 'agent-engineering', vector: false });
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+    const freshTask = await waitTask(fresh.body.taskId);
+    assert.equal(freshTask.state, 'succeeded', freshTask.error ?? '');
+    const freshSync = await waitTask(freshTask.result.syncTaskId);
+    assert.equal(freshSync.state, 'succeeded', freshSync.error ?? '');
+    assert.equal(fs.existsSync(path.join(cloneRoot, freshScope)), false, '复用不应为远端新目录再 clone 一份');
+
     // 已有登记 → 409
     const exists = await postAdd({ scope, url: `file://${bare}` });
     assert.equal(exists.status, 409);
     assert.equal(exists.body.code, 'DATASOURCE_EXISTS');
 
     // 清理（不依赖 scope delete 打开向量引擎）
+    fs.rmSync(getKbDir(freshScope), { recursive: true, force: true });
+    await deleteFtsCollection(freshScope);
     fs.rmSync(getKbDir(reuseScope), { recursive: true, force: true });
     await deleteFtsCollection(reuseScope);
     fs.rmSync(getKbDir(scope), { recursive: true, force: true });

@@ -54,7 +54,7 @@ import type {
   DataSourceSyncState,
   DataSourceWarning,
 } from './datasource-types.js';
-import { collectGitChanges, prepareGitSync, probeGit, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
+import { collectGitChanges, prepareGitSync, probeGit, refreshManagedClone, sanitizeGitError, sanitizeRemoteUrl, type GitUpdateResult } from './datasource-git.js';
 import { checkManagedSubdir, cloneManagedRepo, managedCloneDirForRepo, managedCloneDirOf, purgeManagedCloneDir } from './datasource-clone.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { defaultDataSourceSchedule, intervalMinutes, normalizeDataSourceSchedule, parseAtLocal, validateScheduleInput } from './datasource-schedule.js';
@@ -818,13 +818,15 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
           if (reusable) {
             try {
               return await withManagedCloneLock(reusable.repoRoot, 'datasource-add-reuse', async () => {
+                // 复用前先 fetch 对齐远端：否则远端新增的子目录会被陈旧工作树判成「不存在」
+                const refreshed = await refreshManagedClone(reusable.repoRoot, reusable.remoteBranch);
                 const checked = checkManagedSubdir(reusable.repoRoot, subdir, config, scope);
                 if (!checked.ok) {
                   return {
                     ok: false,
                     scope,
                     code: checked.code,
-                    error: checked.error,
+                    error: refreshed.staleWarning ? `${checked.error}；${refreshed.staleWarning}` : checked.error,
                     ...(checked.hint ? { hint: checked.hint } : {}),
                   };
                 }
@@ -859,7 +861,8 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
                     repoRoot: reusable.repoRoot,
                     dir: checked.dir,
                     branch: reusable.branch,
-                    headCommit: null,
+                    // 复用后的真实 HEAD（对齐远端失败时为本地 HEAD），此前固定为 null
+                    headCommit: refreshed.headCommit,
                   },
                   ...(added.warnings && added.warnings.length > 0 ? { warnings: added.warnings } : {}),
                 };

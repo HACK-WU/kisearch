@@ -341,6 +341,49 @@ export async function prepareGitSync(input: {
   };
 }
 
+export interface ManagedCloneRefresh {
+  /** git fetch 是否成功；false 时后面的 update 只落在本地已有 ref 上，不代表远端最新 */
+  fetched: boolean;
+  update: GitUpdateState;
+  headCommit: string | null;
+  /** 未能对齐远端时的一句话说明：调用方降级继续校验，并把这句话附在错误里 */
+  staleWarning?: string;
+}
+
+/**
+ * 复用已有托管副本前先对齐远端。
+ *
+ * 背景（2026-11-02）：`add-remote` 在「同 remote 已有托管副本」时复用该副本做子目录预检，
+ * 但只 readdir 工作树、从不 fetch，于是远端新增的子目录被判成「子目录不存在」
+ * （远端 34 个顶层目录 / 陈旧副本 32 个 → `INVALID_SUBDIR`，与 GitHub 页面直接矛盾）。
+ *
+ * 语义与同步前置一致（managed ⇒ fetch + reset --hard + clean -fdx）；
+ * 失败不抛：本地副本可能本来够用（目标子目录就在工作树里），
+ * 由调用方带 `staleWarning` 继续校验，并在最终错误里如实说明「可能滞后」。
+ */
+export async function refreshManagedClone(
+  repoRoot: string,
+  remoteBranch: string | null,
+): Promise<ManagedCloneRefresh> {
+  // 超时沿用同步前置的默认口径（fetch 15s / reset 30s），与 `ki datasource sync` 完全一致
+  const result = await prepareGitSync({ repoRoot, managed: true, branch: remoteBranch });
+  const fetched = result.fetch === 'ok';
+  let staleWarning: string | undefined;
+  if (!fetched) {
+    staleWarning = `本地托管副本未能从远端更新（${result.fetchDetail ?? '未执行 git fetch'}），目录列表可能滞后`;
+  } else if (result.update === 'failed') {
+    staleWarning = `本地托管副本未能切到远端最新提交（${result.updateDetail ?? 'git reset 失败'}），目录列表可能滞后`;
+  } else if (result.update === 'skipped') {
+    staleWarning = '本地托管副本无法解析远端分支，目录列表可能滞后';
+  }
+  return {
+    fetched,
+    update: result.update,
+    headCommit: result.headCommit,
+    ...(staleWarning ? { staleWarning } : {}),
+  };
+}
+
 function toRelative(repoPath: string, relativeRoot: string): string | null {
   const value = repoPath.replaceAll('\\', '/');
   if (!relativeRoot) return value;

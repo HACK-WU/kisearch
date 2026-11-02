@@ -69,6 +69,7 @@ import { executeDatasourcePrune } from './datasource-prune.js';
 // 本地侧新增「移除登记」（removeDataSource / countManagedRepoRefs / purgeManagedCloneDir）—— 两边都要
 import { addRemoteDataSource, checkSourceReachable, countManagedRepoRefs, findReusableManagedClone, readDataSource, removeDataSource, resetScheduleFailures, saveDataSourceSchedule, scanDataSources, syncDataSource, toClientPending, updateDataSourceConfig, withManagedCloneLock, type DataSourceConfigPatch, type SyncDataSourceResult } from './datasource.js';
 import { checkManagedSubdir, isSafeRelativeSubdir, purgeManagedCloneDir, validateBranchName, validateGitUrl } from './datasource-clone.js';
+import { refreshManagedClone } from './datasource-git.js';
 import type { DataSourceRecord } from './datasource-types.js';
 import { pickActiveDatasourceSync, type DataSourceActiveSync } from './datasource-runtime.js';
 import { computeSyncAvailability } from './datasource-policy.js';
@@ -2694,25 +2695,34 @@ async function handleDatasourceAddRemote(
     return;
   }
 
-  // 已有同 remote+branch 的托管 clone 时，子目录可立即校验（不 clone、不建任务）
+  // 已有同 remote+branch 的托管 clone 时，子目录可立即校验（不 clone、不建任务）。
+  // 复用前先 fetch 对齐远端：只 readdir 陈旧工作树会把远端新增的子目录判成「不存在」。
   const reusable = findReusableManagedClone(requestConfig, urlCheck.url, branch || null);
   if (reusable) {
-    let invalid: { code: string; error: string; hint?: string } | null = null;
+    let invalid: { code: string; error: string; hint?: string; staleWarning?: string } | null = null;
     try {
       await withManagedCloneLock(reusable.repoRoot, 'datasource-add-preflight', async () => {
+        const refreshed = await refreshManagedClone(reusable.repoRoot, reusable.remoteBranch);
         const checked = checkManagedSubdir(reusable.repoRoot, subdir, requestConfig, scope);
-        if (!checked.ok) invalid = { code: checked.code, error: checked.error, ...(checked.hint ? { hint: checked.hint } : {}) };
+        if (!checked.ok) {
+          invalid = {
+            code: checked.code,
+            error: checked.error,
+            ...(checked.hint ? { hint: checked.hint } : {}),
+            ...(refreshed.staleWarning ? { staleWarning: refreshed.staleWarning } : {}),
+          };
+        }
       });
     } catch (err) {
       // 正在同步时不做前置判断，交给任务内的复用校验（会返回 CLONE_BUSY 或校验结果）
       if ((err as NodeJS.ErrnoException).code !== 'SCOPE_OPERATION_BUSY') throw err;
     }
     if (invalid) {
-      const detail = invalid as { code: string; error: string; hint?: string };
+      const detail = invalid as { code: string; error: string; hint?: string; staleWarning?: string };
       sendJson(res, 400, {
         ok: false,
         code: detail.code,
-        error: `${detail.error}${detail.hint ? `；${detail.hint}` : ''}`,
+        error: `${detail.error}${detail.hint ? `；${detail.hint}` : ''}${detail.staleWarning ? `；${detail.staleWarning}` : ''}`,
       });
       return;
     }
