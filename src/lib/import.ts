@@ -1659,8 +1659,13 @@ async function handleDirectImportUnlocked(
       .slice(0, 5)
       .map((item) => `${item.path}: ${item.error}`)
       .join('；');
+    // 文案必须给两条出路（否则用户只能去猜）：修 embedding，或 --no-vector 走 FTS-only。
+    // 后者不是降级妥协 —— 正文/全文索引照常写入，只是没有 dense 向量，
+    // 修好 embedding 后 `ki restore --rebuild-vector` 可原样补齐。
     throw new Error(
-      `本次导入的 ${fileRecords.length} 个文件均未完成向量化；旧文档已保留，请修复 embedding 后重试` +
+      `本次导入的 ${fileRecords.length} 个文件均未完成向量化；旧文档已保留，请修复 embedding 后重试`
+      + '；或加 --no-vector 以 FTS-only 模式继续（不生成 dense 向量，正文仍可全文检索，'
+      + `之后可用 ki restore ${args.scope} --rebuild-vector 补齐）` +
       (failureDetails ? `。失败详情：${failureDetails}` : ''),
     );
   }

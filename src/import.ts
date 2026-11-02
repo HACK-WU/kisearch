@@ -17,7 +17,7 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, resolveScope, runWithConfigSnapshot } from './lib/config.js';
+import { loadConfig, getEmbeddingConfig, resolveScope, runWithConfigSnapshot } from './lib/config.js';
 import { readImportIncompleteStatus } from './lib/import-retry.js';
 
 import { handleDirectImport } from './lib/import.js';
@@ -113,6 +113,18 @@ program
       const chunkOverlap = opts.chunkOverlap ? Number(opts.chunkOverlap) : retryRecord?.params.chunkOverlap;
       // --no-vector 才是显式关闭；未显式传时沿用上次导入的向量化口径
       const vector = opts.vector === false ? false : (retryRecord?.params.vector ?? (opts.vector !== false));
+      // ── 前置拦截：明确要向量化、但配置里根本没有 apiKey ──
+      // 放在扫描/切分/写锁之前：大目录扫完才告诉用户"加 --no-vector"等于白等一场。
+      // 只拦这一档 —— 401/402/维度不符这类必须发请求才知道的原因，由
+      // handleDirectImport 的「零完成」文案兜底（那条同样带 --no-vector 出路）。
+      if (vector && !getEmbeddingConfig(requestConfig).apiKey) {
+        throw new Error(
+          'embedding.apiKey 未配置，无法生成向量。请二选一：'
+          + '① 在配置中填写 embedding.apiKey（明文或 ${ENV_VAR} 引用的环境变量）后重试；'
+          + '② 加 --no-vector 以 FTS-only 模式导入（不生成 dense 向量，正文仍可全文检索，'
+          + `之后可用 ki restore ${scope} --rebuild-vector 补齐）`,
+        );
+      }
       // 清洗开关：--no-clean 关闭全部；--clean-rules 覆盖内置规则
       const cleanEnabled = opts.clean !== false;
       const cleanRules: CleanRules | undefined = parseCleanRules(opts.cleanRules);

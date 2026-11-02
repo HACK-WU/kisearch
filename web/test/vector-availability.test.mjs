@@ -121,6 +121,25 @@ describe('四态判定（顺序不可调换）', () => {
     assert.equal(v.reason, '401 Unauthorized');
   });
 
+  /**
+   * 401/403 与维度不符自 2026-11-02 起改为「可降级」：MCP 启动不再拒绝，健康报告里这几项变 warn。
+   * 判据必须把 warn 与 fail 同等视为不可用（`status !== 'pass'`）—— 锁住此点，
+   * 否则将来有人改成 `=== 'fail'`，401 用户会看到"向量可用"却一用就失败。
+   */
+  it('向量探测项 warn（401/维度不符降级后的真实形态）→ 同样 unavailable，reason 透出修复指引', () => {
+    const v = resolveVectorAvailability({
+      health: slice(healthOf([
+        item('apiKey', 'pass'),
+        item('URL 连通性', 'pass'),
+        item('密钥有效性', 'warn', '密钥无效（HTTP_401）：请更新 embedding.apiKey'),
+        item('维度匹配', 'warn', '未获取到向量，无法校验维度'),
+      ])),
+      scopeList: slice({ ok: true, scopes: [], vectorAvailable: false }),
+    });
+    assert.equal(v.status, 'unavailable');
+    assert.match(v.reason, /请更新 embedding\.apiKey/);
+  });
+
   it('unavailable 优先于 unknown：另一次请求失败不改判「未知」', () => {
     const v = resolveVectorAvailability({
       health: slice(healthOf([item('维度匹配', 'fail', '768 ≠ 1024')])),
@@ -199,6 +218,20 @@ describe('展示文案', () => {
   it('vectorBadgeLabel：报告无 fail 但 scope 层降级 → 向量不可用', () => {
     const s = summarizeHealth(healthOf(vectorAllPass()), null, false);
     assert.equal(vectorBadgeLabel(s, { status: 'unavailable', reason: '被持锁' }), '向量不可用');
+  });
+
+  it('vectorBadgeLabel：401 降级为 warn（报告无 fail）→ 仍是「向量不可用」而非「N 项告警」', () => {
+    const s = summarizeHealth(healthOf([
+      item('配置文件', 'pass'),
+      item('密钥有效性', 'warn', '密钥无效（HTTP_401）'),
+      item('维度匹配', 'warn', '未获取到向量'),
+    ]), null, false);
+    assert.equal(s.level, 'warn');
+    assert.equal(
+      vectorBadgeLabel(s, { status: 'unavailable', reason: '密钥无效（HTTP_401）' }),
+      '向量不可用',
+      '顶栏必须点明"向量不可用"，而不是笼统的"N 项告警"',
+    );
   });
 
   it('vectorBadgeLabel：非向量 fail 存在时不降级到向量文案', () => {

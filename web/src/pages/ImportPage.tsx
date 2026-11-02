@@ -2513,10 +2513,14 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
 
           {/* 向量化开关。★ 不可用时置灰并就地说明（windows 4e9d624 的能力，合并 66c3c19 时丢失，
               2026-10-29 接回）；真正提交的值由 `effectiveVector` 钳制 —— 只置灰不改值会"能点但必失败"。 */}
-          {effectiveVector && importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
+          {/* 维度不匹配红框 ★ 判定**不带 `effectiveVector`**：向量不可用时 `effectiveVector` 恒 false，
+              带上它会让"集合维度不符"这条最需要重建指引的提示恰好被藏起来（用户只看到开关灰掉，
+              以为在等重试）。语义检索的恢复路径只有重建，与本次是否勾向量化无关。 */}
+          {importConfig?.scope === scope && importConfig.vectorDimension?.compatible === false && (
             <div className="ki-form-error" role="alert" style={{ marginTop: 12 }}>
-              当前 embedding 为 {importConfig.vectorDimension.configured} 维，旧向量集合为 {importConfig.vectorDimension.persisted} 维。
-              请先执行 <code>ki restore {scope} --rebuild-vector --yes</code>；完成后刷新页面再导入。全文检索仍可使用。
+              当前 embedding 为 {importConfig.vectorDimension.configured} 维，旧向量集合为 {importConfig.vectorDimension.persisted} 维，
+              语义检索不可用（本次最多只写全文索引）。
+              请执行 <code>ki restore {scope} --rebuild-vector --yes</code> 重建后再导入，完成后刷新页面。
             </div>
           )}
           <div className="ki-vec-switch" style={{ marginTop: 12 }}>

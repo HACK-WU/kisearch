@@ -711,6 +711,17 @@ describe('C. health-check —— runHealthCheck', () => {
     return report.items.find((i) => i.name === name);
   }
 
+  /**
+   * 打桩全局 fetch：`siliconflow.js` 在**构造 provider 时**取 `config.fetchImpl ?? fetch`，
+   * 因此在调用 runHealthCheck 之前替换 `globalThis.fetch` 即可拦住真实网络请求
+   * （无需起 https mock + 自签证书；provider 强制 https 校验让本地 http mock 走不通）。
+   */
+  function stubFetch(handler: () => Response): () => void {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => handler()) as typeof fetch;
+    return () => { globalThis.fetch = original; };
+  }
+
   it('无 apiKey：doctor 报失败，MCP 启动预检只告警', async () => {
     const report = await runHealthCheck(baseConfig());
     assert.strictEqual(itemOf(report, 'scopes.default')?.status, 'pass');
@@ -759,8 +770,110 @@ describe('C. health-check —— runHealthCheck', () => {
       { ...config, embedding: { ...config.embedding, baseURL: 'http://invalid.example/v1' } },
       { embeddingFailure: 'warn' },
     );
-    assert.strictEqual(itemOf(invalidConfigReport, 'URL 连通性')?.status, 'fail');
-    assert.ok(invalidConfigReport.fail > 0);
+    // 2026-11-02 用户拍板：embedding 侧任何错误都只意味着"向量不可用"，启动预检一律 warn
+    // （构造期校验失败也在此列 —— 请求根本发不出去，与远端 4xx 对用户是同一后果）。
+    assert.strictEqual(itemOf(invalidConfigReport, 'URL 连通性')?.status, 'warn');
+    assert.strictEqual(invalidConfigReport.fail, 0, '本地配置非法也不得阻断启动');
+
+    const invalidConfigDoctor = await runHealthCheck(
+      { ...config, embedding: { ...config.embedding, baseURL: 'http://invalid.example/v1' } },
+    );
+    assert.strictEqual(itemOf(invalidConfigDoctor, 'URL 连通性')?.status, 'fail', 'doctor 语义仍须红灯');
+    assert.ok(invalidConfigDoctor.fail > 0);
+  });
+
+  /**
+   * 401/403 与维度不符在 user-facing 语义上与「未配置 apiKey」完全一致（都是"向量能力不可用"），
+   * 必须走同一条降级路径 —— 否则填错 key 的用户比根本不填 key 的用户更惨（服务完全起不来，
+   * 连全文检索与 Web 界面都用不了）。doctor 语义不受影响，仍保持红灯。
+   */
+  it('密钥无效（401）：MCP 启动预检降级为 warn，doctor 仍 fail，detail 带修复指引', async () => {
+    const restore = stubFetch(() => new Response(
+      JSON.stringify({ error: { code: 'invalid_api_key', message: 'Invalid API-key provided.' } }),
+      { status: 401, headers: { 'content-type': 'application/json' } },
+    ));
+    const config = baseConfig({
+      embedding: { ...baseConfig().embedding, apiKey: 'sk-invalid' },
+    });
+    try {
+      const startupReport = await runHealthCheck(config, {
+        embeddingFailure: 'warn',
+        checkEmbeddingBatchSize: false,
+      });
+      assert.strictEqual(itemOf(startupReport, 'URL 连通性')?.status, 'pass', '401 证明端点可达');
+      assert.strictEqual(itemOf(startupReport, '密钥有效性')?.status, 'warn');
+      assert.strictEqual(itemOf(startupReport, '维度匹配')?.status, 'warn');
+      assert.strictEqual(startupReport.fail, 0, '密钥无效不得计入 fail（否则 MCP 拒绝启动）');
+      assert.match(
+        itemOf(startupReport, '密钥有效性')?.detail ?? '',
+        /请更新 embedding\.apiKey/,
+        '前端把该项 detail 原样透出到页面，必须自带修复路径',
+      );
+
+      const doctorReport = await runHealthCheck(config, { checkEmbeddingBatchSize: false });
+      assert.strictEqual(itemOf(doctorReport, '密钥有效性')?.status, 'fail');
+      assert.ok(doctorReport.fail > 0, 'doctor 语义必须保持红灯，不得被启动降级掩盖');
+    } finally {
+      restore();
+    }
+  });
+
+  it('维度不符：MCP 启动预检降级为 warn，detail 带重建指引', async () => {
+    const actualDim = 8;
+    const restore = stubFetch(() => new Response(
+      JSON.stringify({ data: [{ index: 0, embedding: new Array(actualDim).fill(0) }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const config = baseConfig({
+      embedding: { ...baseConfig().embedding, dimension: 1024, apiKey: 'sk-ok' },
+    });
+    try {
+      const startupReport = await runHealthCheck(config, {
+        embeddingFailure: 'warn',
+        checkEmbeddingBatchSize: false,
+      });
+      assert.strictEqual(itemOf(startupReport, 'URL 连通性')?.status, 'pass');
+      assert.strictEqual(itemOf(startupReport, '密钥有效性')?.status, 'pass');
+      assert.strictEqual(itemOf(startupReport, '维度匹配')?.status, 'warn');
+      assert.strictEqual(startupReport.fail, 0);
+      const detail = itemOf(startupReport, '维度匹配')?.detail ?? '';
+      assert.match(detail, new RegExp(`实际=${actualDim}`));
+      assert.match(detail, /rebuild-vector/, '降级后页面只剩这条恢复路径，不能只报数字');
+
+      const doctorReport = await runHealthCheck(config, { checkEmbeddingBatchSize: false });
+      assert.strictEqual(itemOf(doctorReport, '维度匹配')?.status, 'fail');
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * 402（账户欠费）对用户与 401 是同一件事：key 在，但服务不肯给向量。
+   * 它落在「其它 4xx（nonRetryable）」分支 —— 2026-11-02 用户拍板后该分支同样降级：
+   * 余额续上后无需改任何配置，重启即恢复；若为此拒绝启动，欠费期间整个产品停摆。
+   */
+  it('402 欠费：MCP 启动预检降级为 warn，detail 透出上游原因', async () => {
+    const restore = stubFetch(() => new Response(
+      JSON.stringify({ code: 30001, message: 'Sorry, your account balance is insufficient' }),
+      { status: 402, headers: { 'content-type': 'application/json' } },
+    ));
+    const config = baseConfig({
+      embedding: { ...baseConfig().embedding, apiKey: 'sk-no-balance' },
+    });
+    try {
+      const startupReport = await runHealthCheck(config, {
+        embeddingFailure: 'warn',
+        checkEmbeddingBatchSize: false,
+      });
+      assert.strictEqual(itemOf(startupReport, 'URL 连通性')?.status, 'warn');
+      assert.strictEqual(startupReport.fail, 0, '402 不得阻断启动');
+      assert.match(itemOf(startupReport, 'URL 连通性')?.detail ?? '', /HTTP_402/);
+
+      const doctorReport = await runHealthCheck(config, { checkEmbeddingBatchSize: false });
+      assert.strictEqual(itemOf(doctorReport, 'URL 连通性')?.status, 'fail', 'doctor 仍须红灯');
+    } finally {
+      restore();
+    }
   });
 
   it('无 default scope → scopes.default warn', async () => {

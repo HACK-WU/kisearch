@@ -259,7 +259,7 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 
 1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
 2. 检查升级前遗留的 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的旧版直连 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid；新版本 stdio 是 daemon 桥，不会产生这类 zvec owner 冲突。
-3. 通过守卫后执行启动预检，再 `listen`。embedding 网络/可重试服务故障会重试 1 次，仍失败时记录为 ⚠️ 警告并继续启动；未配置 `embedding.apiKey` 也只告警并继续。配置文件、目录、无效密钥或维度不匹配等硬错误仍 fail-loud。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
+3. 通过守卫后执行启动预检，再 `listen`。**embedding 侧的任何失败都只记录为 ⚠️ 警告并继续启动 —— 没有例外**：网络/超时/5xx/429、未配置 `embedding.apiKey`、密钥无效（401/403）、402 账户欠费、模型不存在等其它 4xx、实测维度与 `embedding.dimension` 不符，以及 `apiKey`/`baseURL` 的构造期校验失败（`EmbeddingConfigError`，请求根本发不出去）。理由：这些失败只有一个共同含义 —— **向量能力不可用**，而进程本身完全能服务：全文检索（FTS）、浏览、FTS-only 导入，以及前端三页面（导入/写入/检索）的动作层降级都不依赖 embedding；用拒绝启动来"提醒配置错了"，会把「向量暂缺」放大成整个产品不可用（含所有依赖 daemon 的 CLI 与 MCP 检索工具）。真正拒绝启动的只有**本地硬失败**：配置文件语法/字段校验失败（`loadConfig` 阶段抛错）、目录不存在/不可写、flock 冲突等。`ki doctor` 保持严格语义（上述 embedding 项仍报 ❌ 并以退出码 1 结束），`/api/health` 与启动预检同口径（降级为 warn）。降级期间页面对应提示：顶栏徽标「向量不可用」、导入/写入页禁用向量化并说明本次只写全文索引、检索页强制全文；CLI/MCP 检索自动降级为全文并返回 `degraded:true`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
 4. 成功监听后写按身份派生的 `~/.ki/mcp-http-<fingerprint>.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
 因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程——且不要求这些环境都能通过预检。

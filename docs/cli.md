@@ -90,6 +90,11 @@ ki import \
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；写入独立全文 Collection，使用 `ki search --mode fulltext` 召回。`memoryId` 仍为空，语义 hybrid 检索不会召回该文档 |
 
+> **向量化不可用时的出路（2026-11-02 起）**：`ki import` 默认要向量化。
+> ① **`embedding.apiKey` 未配置** → 在**扫描/切分之前**即 fail-loud（exit 1），错误信息直接给出 `--no-vector` 选项 —— 避免大目录白扫一遍才失败；
+> ② 密钥无效（401/403）、欠费（402）、维度不符等**只有发请求才知道**的原因 → 走到向量化阶段失败时报「均未完成向量化」，文案同样带 `--no-vector` 出路与 `ki restore <scope> --rebuild-vector` 补齐方式。
+> `--no-vector` 导入只写 FTS-only：正文与全文索引完整，`ki search --mode fulltext` 可召回；补齐 dense 向量需修好 embedding 后执行 `ki restore <scope> --rebuild-vector`。
+
 **示例：首次导入**
 
 ```bash
@@ -551,6 +556,8 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 | `--original` | 返回 local KB 文件级原文（`original` 字段，未清洗；同一文件多 chunk 命中去重） | 不传（默认仅返回向量匹配数据，不含 `original`） |
 
 > 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
+
+> **向量不可用不阻塞全文检索**（2026-11-02 起）：`hybrid` 模式下若向量能力不可用（未配置/无效 key、向量库被占用）、或向量库里没有任何 dense 索引（库内文档全是 `--no-vector` 导入的 FTS-only 内容），命令**不再以 `ok:false` 报错**，而是自动降级为全文检索并返回结果，响应里带 `mode:"fulltext"` + `degraded:true` + `degradedReason`。降级后的分数是 BM25 口径（与混合 RRF 不可比）。
 
 **示例：**
 
@@ -1408,7 +1415,7 @@ ki doctor
 
 > 字段校验失败（`CONFIG_FIELD_INVALID`）时报告不会输出，而是直接打印错误清单并以退出码 `1` 结束；错误项内已含字段路径与相近字段建议，修正后重跑即可。
 
-> `ki mcp` 在启动前会自动执行健康检查，报告写入 stderr（不污染 stdio 协议）；embedding 网络/可重试服务故障在重试 1 次后、以及未配置 `embedding.apiKey` 时，按 ⚠️ 警告处理并继续启动。配置文件、目录、无效密钥或维度不匹配等硬失败仍拒绝启动。`ki doctor` 保持严格诊断语义，缺少 key 或 embedding 检查失败仍以 ❌ 退出码 1 报告。
+> `ki mcp` 在启动前会自动执行健康检查，报告写入 stderr（不污染 stdio 协议）；**embedding 侧的任何失败都按 ⚠️ 警告处理并继续启动，没有例外**：网络/超时/5xx/429、未配置 `embedding.apiKey`、密钥无效（401/403）、402 账户欠费、模型不存在等其它 4xx、实测维度与 `embedding.dimension` 不符，以及 `apiKey`/`baseURL` 构造期校验失败。理由：它们只意味着「向量不可用」，而全文检索、浏览、FTS-only 导入与前端三页面的降级保护都不依赖 embedding，拒绝启动会让「向量暂缺」变成整个产品不可用。真正拒绝启动的只有本地硬失败（配置文件语法/字段校验失败、目录不存在/不可写、flock 冲突等）。`ki doctor` 保持严格诊断语义，上述 embedding 项仍以 ❌ 退出码 1 报告。
 
 ---
 

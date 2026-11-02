@@ -828,7 +828,11 @@ export async function startMcpServer(): Promise<void> {
   }
 
   // ─── 启动预检（REQ-16）：复用 ki doctor 检查逻辑 ───
-  // stdio 协议占用 stdout，报告一律写 stderr；embedding 外部服务失败仅警告，配置/目录等硬失败仍拒绝启动。
+  // stdio 协议占用 stdout，报告一律写 stderr。
+  // 拒绝启动的只有「进程无法安全提供服务」的本地硬失败（配置非法 / 目录不可用 / flock 冲突）；
+  // 「向量能力不可用」（网络故障、缺 key、**密钥无效 401/403**、维度不符）一律 ⚠️ 继续启动 ——
+  // 全文检索、浏览、FTS-only 导入与前端三页面的动作层降级都不依赖 embedding，
+  // 用拒绝启动来"提醒配置错了"会把向量暂缺放大成整个产品不可用（含所有需 daemon 的 CLI）。
   // ⚠️ 不做逐 Collection 维度诊断（O(scope)：1000 个 scope 会让启动阻塞数分钟，且开机对每个
   // Collection 做 probe/open 正是历史上批量撞锁/泄漏 flock 的放大器）。维度冲突改为按需拦截：
   // 写入/检索命中时返回 VECTOR_DIMENSION_MISMATCH + 重建指引，前端两个页面也按该状态提示。

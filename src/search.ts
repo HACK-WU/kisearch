@@ -37,6 +37,15 @@ import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './lib/query-
  */
 const TAG_PRIORITY = ['ki-search', 'ki-relation', 'ki-path'];
 
+/**
+ * 「无向量 Collection」跳过项的文案前缀。
+ *
+ * 降级为全文后必须按它把这类项移除：本次查询根本没有查向量，
+ * "无向量 Collection … 请执行 ki import 重新导入" 与 "已降级为全文并给出结果" 同时出现时，
+ * 用户看到的是"搜到了，但请重新导入"这种自相矛盾的提示（实测于 2026-11-02 降级验证）。
+ */
+const MISSING_COLLECTION_REASON_PREFIX = '无向量 Collection';
+
 function tagPriority(tag: string): number {
   const idx = TAG_PRIORITY.indexOf(tag);
   return idx === -1 ? TAG_PRIORITY.length : idx;
@@ -216,18 +225,26 @@ async function executeSearchLocal(params: {
       scopes = effective;
     }
 
-    const isFullText = params.mode === 'fulltext';
+    // ★ let 而非 const：默认 hybrid 但向量库无任何 tag（库内全是 FTS-only 文档）时，
+    //   下方会回退为全文检索 —— 那次查询的语义与返回字段（mode/total、原文命中行号生成）
+    //   都必须按全文处理，否则会返回"有结果却没有 excerpt/行号"的半成品。
+    let isFullText = params.mode === 'fulltext';
 
     // 全文模式不依赖 embedding provider，也不要求 hybrid Collection 存在。
     if (!isFullText) {
       // 向量服务可用性检测（以首个 scope 触发中断标记前置检测引导）
       const avail = await ensureVectorAvailable(scopes[0]);
       if (!avail.available) {
-        return {
-          ok: false,
-          error: `向量检索暂不可用（${avail.reason || '未检测到向量服务'}）`,
-          degraded: true,
-        };
+        /**
+         * ★ 向量能力不可用（未配置/无效 key、向量库被占用…）不应让**全文检索一起不可用**。
+         * 原文返回 `ok:false`：降级启动（`ki mcp` 允许 embedding 不可用仍启动）生效后，
+         * CLI 默认搜索与 MCP 的检索工具会整体报错 —— 用户明明有 FTS 索引却搜不到任何东西，
+         * 与"至少能用全文检索"的降级目标直接冲突（Web 端不受影响：SearchPage 在
+         * `vectorAvailable=false` 时本来就改发 `mode:'fulltext'`）。
+         * 现改为降级到全文并继续执行，原因写进 degradedReason（禁止静默降级）。
+         */
+        isFullText = true;
+        degradeReason = `向量检索不可用（${avail.reason || '未检测到向量服务'}），已降级为全文检索`;
       }
     }
 
@@ -238,7 +255,7 @@ async function executeSearchLocal(params: {
     for (const missing of isFullText ? [] : findMissingScopeCollections(scopes)) {
       skipped.push({
         scope: missing,
-        reason: '无向量 Collection（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入',
+        reason: `${MISSING_COLLECTION_REASON_PREFIX}（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入`,
       });
     }
 
@@ -311,7 +328,28 @@ async function executeSearchLocal(params: {
       }
       const tagNames = [...tagUnion.keys()];
       if (tagNames.length === 0) {
-        raw = [];
+        /**
+         * ★ 向量库没有任何 tag ⇒ 库内文档全是 FTS-only（`import --no-vector` 导入，或
+         * embedding 不可用期间导入的那批）。原实现直接 `raw = []`：既不查全文，也不打
+         * degraded，用户看到"搜不到"却拿不到任何可诊断信息 —— 而降级启动生效后，
+         * 这恰恰是最常见的形态（密钥无效 → 页面/CLI 只能写全文索引）。
+         * 改为回退到全文检索（与 `--mode fulltext` 同一条路径），并显式标记降级原因。
+         */
+        const requestedCandidateLimit = Math.max((params.limit ?? 10) * 10, 50) + hiddenHeadroom;
+        fullTextCandidateLimit = Math.min(requestedCandidateLimit, SEARCH_TOPK_MAX);
+        raw = await fullTextSearch({
+          scopes,
+          query: params.query,
+          limit: fullTextCandidateLimit,
+          tags: params.tags,
+        });
+        isFullText = true;
+        degradeReason ??= '向量库无任何索引（文档可能仅有全文索引），已降级为全文检索';
+        // 本次查询不查向量 ⇒ 前面那条「无向量 Collection … 请执行 ki import 重新导入」不再成立，
+        // 与结果同屏会误导（用户刚用 --no-vector 导入过，重导也不会产生 dense 向量）。
+        for (let i = skipped.length - 1; i >= 0; i--) {
+          if (skipped[i].reason.startsWith(MISSING_COLLECTION_REASON_PREFIX)) skipped.splice(i, 1);
+        }
       } else {
         // 单次查询（多 tag OR 过滤）：每个 scope 内多 tag 只做 1 次 embedding（逐 tag
         // 分查会对同一 query 重复 embedding N 次，tag 多时线性放大检索延迟）。topk 按

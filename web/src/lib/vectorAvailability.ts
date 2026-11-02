@@ -66,13 +66,17 @@ export function resolveVectorAvailability(input: VectorAvailabilityInput): Vecto
   const { health, scopeList } = input;
   const items = health.data?.report?.items ?? [];
   const vectorItems = items.filter((item) => isVectorHealthCheck(item.name));
-  const failedVectorItem = vectorItems.find((item) => item.status !== 'pass');
+  // ★ 命名是 nonPass 而非 failed：自 2026-11-02 起 401/403 与维度不符在启动预检/
+  //   /api/health 语境下是 **warn**（原来会导致 daemon 拒绝启动），而 warn 对用户
+  //   同样是"向量不能用"，必须同等判定为 unavailable —— 只看 fail 会让这类用户
+  //   看到"向量可用"却一用就失败。
+  const nonPassVectorItem = vectorItems.find((item) => item.status !== 'pass');
   const unavailableByScope = scopeList.data?.vectorAvailable === false;
 
-  if (unavailableByScope || failedVectorItem) {
+  if (unavailableByScope || nonPassVectorItem) {
     return {
       status: 'unavailable',
-      reason: scopeList.data?.vectorReason ?? failedVectorItem?.detail ?? failedVectorItem?.message,
+      reason: scopeList.data?.vectorReason ?? nonPassVectorItem?.detail ?? nonPassVectorItem?.message,
     };
   }
 

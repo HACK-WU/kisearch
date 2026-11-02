@@ -204,7 +204,7 @@ ki mcp token update <id> --scope team-b
 ki mcp token delete <id>
 ```
 
-> 启动前会自动预检：配置/目录/无效密钥等硬错误 fail-loud；embedding 网络暂不可用只告警并继续启动。详见 [`docs/mcp-http.md`](./docs/mcp-http.md)。
+> 启动前会自动预检：配置文件语法/字段错误、目录不可用等**本地硬错误** fail-loud；**embedding（向量模型）侧的任何失败都只告警并继续启动**（网络故障、未配置 key、密钥无效 401、402 欠费、维度不符……）—— 全文检索、浏览与 FTS-only 导入不受影响，页面会把向量功能降级并显示具体原因（密钥失效、维度不符等能给出修复路径的会一并带出）。详见 [`docs/mcp-http.md`](./docs/mcp-http.md)。
 
 ## <a id="cli-commands"></a>🛠️ 命令与工具
 

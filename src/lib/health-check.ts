@@ -11,8 +11,15 @@
  *     URL 连通性 + 密钥有效性 + 维度匹配（复用 SiliconFlowProvider 现成错误语义）
  *   - 探测预算默认 8s ×(1+1 次重试)，可经 options.embeddingProbe 按调用方收紧；
  *     健康检查默认将 embedding 失败记为 fail，MCP 启动预检与 /api/health 显式降级为 warn，
- *     避免外部服务故障阻断 MCP / 误报服务不可用。401/403、配置非法、维度不符属
- *     non-degradable，任何调用方都保持 fail（真配置错误不被告警掩盖）。
+ *     避免外部服务故障阻断 MCP / 误报服务不可用。
+ *     **embedding 侧的失败没有"可降级 / 不可降级"之分：一律降级**（2026-11-02 用户拍板）。
+ *     覆盖网络/超时/5xx/429、未配置 apiKey、密钥无效 401/403、402 欠费、模型不存在、
+ *     实测维度与配置不符、乃至 apiKey/baseURL 构造期校验失败。理由：这些故障的共同点只有
+ *     一个 —— **向量能力不可用**，而进程本身完全能提供服务：全文检索（FTS）、浏览、
+ *     FTS-only 导入、前端的向量降级保护都不依赖 embedding；拒绝启动会把"向量暂缺"
+ *     放大成"整个产品不可用"（含所有依赖 daemon 的 CLI 与 MCP 检索工具）。
+ *     `ki doctor` 不受影响：它传 `embeddingFailure:'fail'`，仍逐项如实报 ❌
+ *     —— 配置错误依然可见，只是不再连坐整个服务。
  *   - 给本检查套请求级 deadline 的调用方，须用 healthCheckWorstCaseMs() 推导预算上界
  *   - zvec Collection 用按 scope 根目录下的子目录判定（不 open，避开与常驻 server 的文件锁冲突）
  */
@@ -104,9 +111,14 @@ export interface HealthCheckOptions {
 }
 
 interface EmbeddingCheckResult {
+  /**
+   * 三合一探测结果。
+   *
+   * ★ 2026-11-02 起**取消 `degradable` 分类**：embedding 侧任何失败都只意味着
+   * "向量能力不可用"，MCP 启动预检里一律降级为 warn（见文件头注释）。
+   * 保留外层对象是为了给"未来新增字段"留位置，不必再逐个改 return 点。
+   */
   items: HealthItem[];
-  /** 缺少 apiKey 或可重试的网络/HTTP 故障，可在 MCP 启动预检中降级。 */
-  degradable: boolean;
 }
 
 /** 目录存在且可写检查 */
@@ -169,7 +181,6 @@ async function checkEmbedding(
         { name: nameKey, status: 'fail', detail },
         { name: nameDim, status: 'fail', detail },
       ],
-      degradable: true,
     };
   }
 
@@ -184,7 +195,9 @@ async function checkEmbedding(
       providerLabel: emb.provider,
     });
   } catch (err) {
-    // 构造期错误（EmbeddingConfigError）：apiKey / baseURL 非法
+    // 构造期错误（EmbeddingConfigError）：apiKey / baseURL 非法。
+    // 它同样只代表"向量不可用"（请求根本发不出去），所以启动预检降级为 warn；
+    // doctor 语义仍如实 fail —— 配置写错依旧可见，只是不再连带拒绝启动。
     const detail = (err as Error).message;
     return {
       items: [
@@ -192,7 +205,6 @@ async function checkEmbedding(
         { name: nameKey, status: 'fail', detail },
         { name: nameDim, status: 'fail', detail },
       ],
-      degradable: false,
     };
   }
 
@@ -213,15 +225,19 @@ async function checkEmbedding(
           detail: `config=${emb.dimension}, 实际=${actualDim}`,
         },
       ],
-      degradable: false,
     };
   } catch (err) {
     const e = err as Error & { code?: string; data?: Record<string, unknown> };
     const code = e.code ?? '';
     const msg = e.message;
 
-    // 维度不匹配：请求到达且鉴权通过，仅维度不符
+    // 维度不匹配：请求到达且鉴权通过，仅维度不符。
+    // 可降级：全文检索/导入不受影响；但**必须把修复路径写进 detail** —— 前端
+    // `vectorAvailability` 把该项 detail 原样透出到页面（导入/写入/检索页的降级提示），
+    // 只报「config=1024, 实际=4096」用户知道错了却不知道下一步做什么。
     if (e.data && e.data.actualDim !== undefined) {
+      const expected = e.data.expectedDim ?? emb.dimension;
+      const actual = e.data.actualDim;
       return {
         items: [
           { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
@@ -229,22 +245,27 @@ async function checkEmbedding(
           {
             name: nameDim,
             status: 'fail',
-            detail: `config=${e.data.expectedDim ?? emb.dimension}, 实际=${e.data.actualDim}`,
+            detail: `config=${expected}, 实际=${actual}；`
+              + `请把 embedding.dimension 改为 ${actual}（或换回原来的模型），`
+              + '已有集合需执行 ki restore <scope> --rebuild-vector --yes 重建后才能语义检索',
           },
         ],
-        degradable: false,
       };
     }
 
-    // 401 / 403：连通但密钥无效
+    // 401 / 403：连通但密钥无效。可降级 —— 与「未配置 apiKey」同为"向量不可用"，
+    // 不让它连带拒绝启动（否则用户为了能启动反而要把 key 删掉）。detail 同样带修复路径。
     if (code === 'HTTP_401' || code === 'HTTP_403') {
       return {
         items: [
           { name: nameConn, status: 'pass', detail: `${emb.baseURL}/embeddings 可达` },
-          { name: nameKey, status: 'fail', detail: `密钥无效（${code}）` },
+          {
+            name: nameKey,
+            status: 'fail',
+            detail: `密钥无效（${code}）：请更新 embedding.apiKey（明文或 \${ENV_VAR} 引用的环境变量）后重启 ki mcp`,
+          },
           { name: nameDim, status: 'fail', detail: '未获取到向量，无法校验维度' },
         ],
-        degradable: false,
       };
     }
 
@@ -266,7 +287,6 @@ async function checkEmbedding(
         { name: nameKey, status: 'fail', detail: '连通性失败，跳过' },
         { name: nameDim, status: 'fail', detail: '连通性失败，跳过' },
       ],
-      degradable: e.data?.nonRetryable !== true,
     };
   }
 }
@@ -398,7 +418,9 @@ export async function runHealthCheck(config: KiConfig, options: HealthCheckOptio
     const probe = options.embeddingProbe
       ?? { timeoutMs: EMBED_PROBE_TIMEOUT_MS, retries: EMBED_PROBE_RETRIES };
     const embeddingResult = await checkEmbedding(config, probe);
-    const normalizedEmbeddingItems = embeddingFailureStatus === 'warn' && embeddingResult.degradable
+    // 无例外：warn 语义下 embedding 项一律 fail→warn（含 401/402/维度不符/配置非法）。
+    // fail 语义（ki doctor）原样透出，保证配置错误仍以 ❌ + 退出码 1 可见。
+    const normalizedEmbeddingItems = embeddingFailureStatus === 'warn'
       ? embeddingResult.items.map((item) => item.status === 'fail' ? { ...item, status: 'warn' as const } : item)
       : embeddingResult.items;
     items.push(...normalizedEmbeddingItems);

@@ -249,8 +249,10 @@ describe('R1：系统性向量故障下的文件级部分成功', () => {
       const src = mkSource({ 'a.md': '# a\n\n正文', 'b.md': '# b\n\n正文' });
       await assert.rejects(
         () => handleDirectImport({ scope, sourceDir: src, group: 'G', vector: true }),
-        /均未完成向量化/,
-        '零完成必须 fail-loud',
+        // fail-loud 的同时必须给出第二条出路：--no-vector 走 FTS-only。
+        // 只说"请修复 embedding"等于让没有可用 key 的用户原地卡死（2026-11-02 用户要求）。
+        /均未完成向量化[\s\S]*--no-vector/,
+        '零完成必须 fail-loud 且提示 --no-vector 出路',
       );
       const groups = readAllGroupCaches(scope);
       assert.equal((groups.get('G')?.hot_relations ?? []).length, 0, '零完成不得写入任何元数据');
