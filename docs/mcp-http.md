@@ -88,13 +88,12 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 `scopes` 管「能碰哪些 scope」（数据维度），`readOnly` 管「能对数据做什么」（动作维度），两者正交：只读 Token 同样必须指定 `--scope`。
 
-- **工具可见性**：只读会话只注册 5 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。
-- **服务端兜底**：`tools/call` 另有一道白名单拦截（含 batch 逐项），只读 Token 一旦调用写工具即返回 `403` + `TOKEN_READONLY`。所以「客户端缓存了建连时的旧列表」或「直接构造 JSON-RPC」都写不进去；新增工具漏登记时默认被拒（fail-safe）。
-- **AI 可感知**：只读会话在 MCP `initialize` 的 `instructions` 里声明「当前为只读」，AI 不必靠猜为什么没有写入工具。
-- **生效时机**：拦截按**每个请求**重新解析 Token 记录，`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
-- **同一会话不要复用不同 Token**：工具集是建连（`initialize`）时按**该请求的 Token** 装配的。若把 `mcp-session-id` 挪给另一个 Token 复用，`tools/list` 仍返回原 Token 权限下的列表（`tools/call` 始终按当次请求的 Token 校验，不会越权）。正常 MCP 客户端一条连接配一个 Token，不触发此情形。
+- **工具可见性**：只读会话只暴露 5 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。
+- **越权兜底**：即使客户端缓存了建连时的旧工具列表、或直接构造 JSON-RPC 调用写工具，同样会被拒绝（`403` + `TOKEN_READONLY`），写不进去。
+- **AI 可感知**：只读会话建连时即告知 AI「当前为只读」，无需靠工具缺失反推，也不必反复重试。
+- **生效时机**：`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
 - **不影响的范围**：`--token` / `KI_MCP_TOKEN` 进程级临时 Token 始终全权（不参与降权）；stdio 与回环访问本就免鉴权，不受只读约束。
-- **已知边界（本期刻意不覆盖）**：只读只约束 **MCP 通道**。`/api/*` 扩展路由与 chat 工具通道仍按 scope 授权放行——持有只读 Token 的调用方若直接 `curl -H "Authorization: Bearer <只读token>" -X POST .../api/import/run`，仍可写入。仅当 Token 只发给可信内部客户端时可接受；如需彻底封堵，需另行在 `/api/*` 增加动作维度拦截。
+- **安全边界**：只读只约束 **MCP 通道**。`/api/*` 扩展路由与 chat 工具通道仍按 scope 授权放行——只读 Token 仍可经这些通道写入。请只把只读 Token 发给不需要写权限的客户端。
 - **与「只读库」的区别**：`ki scope readonly <scope> --on` 是**整个 scope 对所有身份禁写**（错误码 `SCOPE_READONLY`，出路是 `--off`）；Token 只读只约束**这一个 Token**（错误码 `TOKEN_READONLY`，出路是改用读写 Token 或 `ki mcp token update <id> --read-write`）。两者可叠加，写操作需同时通过两道门禁。
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。
@@ -103,7 +102,7 @@ CLI 参数优先于配置文件默认值。
 
 ## 前端页面服务（`--web`）与 `/api/*` 扩展路由
 
-`ki mcp --http --web` 在提供 MCP 协议的同时，一并提供**可视化前端静态页面**（浏览器访问 `http://127.0.0.1:7423/`）和**`/api/*` 扩展接口**（方案 A，补齐 MCP 缺失能力，如导入与文档列表）。
+`ki mcp --http --web` 在提供 MCP 协议的同时，一并提供**可视化前端静态页面**（浏览器访问 `http://127.0.0.1:7423/`）和**`/api/*` 扩展接口**（补齐 MCP 协议之外的能力，如导入与文档列表）。
 
 ```bash
 # 启动（需先构建前端产物）
@@ -137,7 +136,7 @@ ki mcp --http --web
 | `/api/datasource/list` | GET | **数据源列表（只读，跨 scope）**：`?scope=` 可选；省略时**必须按 token 授权范围过滤** `sources/missing/corrupt`（只读白名单只约束「以 default 身份能否调用」，不限制返回范围）。返回 `{ total, sources[], missing[], corrupt[] }`；`sources[].type` 为 `directory\|git`，`sources[].git` 为 `{repoRoot,relativeRoot,branch,managed,shortCommit,commitTime,untrackedMarkdown}`（非 git 为 `null`），`sources[].syncAvailability` 为 `{allowed,nextAvailableAt,retryAfterSec,reason}`（`active` / `cooldown` / `null`；旧 daemon 不返回）。`sources[].activeState` 取自任务台账 `operation='datasource-sync'`（`'queued' \| 'running' \| null`，同 scope 运行优先于排队），`sources[].activeStartedAt` 为本次开始时间（排队中为 `null`），`sources[].running = activeState !== null`（派生值），`stale` = 超过 24h 未同步（从未同步也为 true）。另有 `sources[].schedule`（定时计划 + 服务端算出的 `nextRunAt`；旧 daemon 不返回 → 页面显示「当前 daemon 不支持定时同步」）与顶层 `schedulerDisabled`（`KI_DISABLE_DATASOURCE_SCHEDULER=1` 的只读回显）；顶层 `capabilities` 为 `{ datasourceUpdate, scopeReadonly }`（旧 daemon 不返回 → 页面隐藏「编辑」按钮与只读开关，不做假成功） |
 | `/api/datasource/detail` | GET | **数据源详情（只读，单 scope）**：`?scope=` 必填；返回完整 `datasource.json`（含 `lastSync.result` / `lastSync.git` / `lastSync.warnings` 与 `pendingDelete`）+ `running` / `activeState` / `activeStartedAt` / `syncAvailability`（口径同 list）。`lastSync.result.files` 含 `fullScanned` / `changed`；`lastSync.result.created[]{group,relation}` + `createdTotal` + `createdTruncated` 是上次同步**新建**的文档（`create`/`suffix` 计入、`overwrite` 不计；旧快照不返回这三个字段）；`pendingDelete.candidateSourcePaths` 与 `seenRels` 是服务端内部基线，**不下发**；`schedule` 与 `schedulerDisabled` 口径同 list；`source.revision` 为配置修订号（仅在登记 / 编辑同步参数时 +1，用于编辑弹窗乐观锁；旧记录缺省 0） |
 | `/api/datasource/sync` | POST | **页面触发同步**：body `{ scope, full? }`。同 scope 已有 `datasource-sync` 的 queued/running → `409 SYNC_ALREADY_RUNNING`（带 `taskId`）；普通目录 `lastSync.state='ok'` 且不足 30 分钟 → `429 SYNC_RATE_LIMITED`（带 `nextAvailableAt` / `retryAfterSec`）；源目录不可达 → `409 SOURCE_UNREACHABLE`；任务台账不可读 → `503 TASK_REGISTRY_UNAVAILABLE`。成功 `200 { ok:true, scope, taskId, mode:'incremental'\|'full', state:'queued' }`；返回后任务异步执行，进度/终态见 `/api/tasks` 与 `datasource.json.lastSync`（`partial` 不启动冷却） |
-| `/api/datasource/add-remote` | POST | **页面添加 Git 数据源（S-05）**：body `{ scope, url, branch?, subdir?, group?, vector?, conflictMode?, conflictSuffix?, readonly? }`。`readonly:true` 时在**登记成功后**把 scope 写入 `config.scopeReadonly`（添加失败不写、不留只读空库）；写配置失败不回滚登记，改由任务结果 `result.readonlyWarning` 显式回报（页面按警告展示并给出 `ki scope readonly <scope>` 命令）。同步前置校验：`INVALID_SCOPE` / `INVALID_GIT_URL` / `GIT_URL_CREDENTIALS` / `GIT_SCHEME_UNSUPPORTED` / `INVALID_SUBDIR` / `INVALID_BRANCH` / `INVALID_GROUP` → 400；`DATASOURCE_EXISTS` / `SYNC_ALREADY_RUNNING` → 409；台账不可读 → 503；无权限 → 403。成功 `200 { ok:true, scope, taskId, state:'queued' }`：scope 不存在时由登记流程自动初始化（页面支持新建 Scope，名称校验同 CLI）；同一 `remote + 分支` 已有托管 clone 时复用该副本（不重复 clone），**复用前先 `fetch` + `reset --hard origin/<branch>` 把副本对齐远端**再校验子目录（不存在 → `400 INVALID_SUBDIR`，错误含仓库顶层目录；fetch 失败降级为按现有工作树校验，并在错误里注明「目录列表可能滞后」）；任务 `datasource-add-remote` 在服务端 clone/复用 + 登记（持 scope 与 remote/clone 锁），完成后自动入队 `datasource-sync`（`full`），其任务 id 见 add 任务详情的 `result.syncTaskId`（null = 入队失败）。clone 失败以任务 `errorCode` 回报（`GIT_AUTH_FAILED` / `GIT_REPO_NOT_FOUND` / `GIT_NETWORK_FAILED` / `GIT_BRANCH_NOT_FOUND` / `GIT_CLONE_TIMEOUT` / `SOURCE_EMPTY` / `CLONE_FAILED`）；`file://` 默认拒绝，仅 `KI_DATASOURCE_ALLOW_FILE_URL=1` 的隔离测试环境放行 |
+| `/api/datasource/add-remote` | POST | **页面添加 Git 数据源**：body `{ scope, url, branch?, subdir?, group?, vector?, conflictMode?, conflictSuffix?, readonly? }`。`readonly:true` 时在**登记成功后**把 scope 写入 `config.scopeReadonly`（添加失败不写、不留只读空库）；写配置失败不回滚登记，改由任务结果 `result.readonlyWarning` 显式回报（页面按警告展示并给出 `ki scope readonly <scope>` 命令）。同步前置校验：`INVALID_SCOPE` / `INVALID_GIT_URL` / `GIT_URL_CREDENTIALS` / `GIT_SCHEME_UNSUPPORTED` / `INVALID_SUBDIR` / `INVALID_BRANCH` / `INVALID_GROUP` → 400；`DATASOURCE_EXISTS` / `SYNC_ALREADY_RUNNING` → 409；台账不可读 → 503；无权限 → 403。成功 `200 { ok:true, scope, taskId, state:'queued' }`：scope 不存在时由登记流程自动初始化（页面支持新建 Scope，名称校验同 CLI）；同一 `remote + 分支` 已有托管 clone 时复用该副本（不重复 clone），**复用前先 `fetch` + `reset --hard origin/<branch>` 把副本对齐远端**再校验子目录（不存在 → `400 INVALID_SUBDIR`，错误含仓库顶层目录；fetch 失败降级为按现有工作树校验，并在错误里注明「目录列表可能滞后」）；任务 `datasource-add-remote` 在服务端 clone/复用 + 登记（持 scope 与 remote/clone 锁），完成后自动入队 `datasource-sync`（`full`），其任务 id 见 add 任务详情的 `result.syncTaskId`（null = 入队失败）。clone 失败以任务 `errorCode` 回报（`GIT_AUTH_FAILED` / `GIT_REPO_NOT_FOUND` / `GIT_NETWORK_FAILED` / `GIT_BRANCH_NOT_FOUND` / `GIT_CLONE_TIMEOUT` / `SOURCE_EMPTY` / `CLONE_FAILED`）；`file://` 默认拒绝，仅 `KI_DATASOURCE_ALLOW_FILE_URL=1` 的隔离测试环境放行 |
 | `/api/datasource/update` | POST | **编辑同步参数（唯一写入口，不触发同步任务）**：body `{ scope, baseRevision?, patch:{ conflictMode?, conflictSuffix?, vector?, chunkSize?, chunkOverlap? } }`。只覆盖传入字段；身份字段（scope / 源目录 / Git URL / 分支 / 子目录 / 落点 Group）不可改（换源需移除后重加）。`chunkSize` 留空 = 默认 1000、`chunkOverlap` 留空 = 默认 150，重叠必须小于段长；`chunkSize` 取值 100–4000、`chunkOverlap` 取值 0–500，越界 → `400 INVALID_CHUNK`（只校验本次传入的字段，库里存的旧超界值不会阻塞改其它字段）。**不触碰 `lastSync` / `schedule`**：新参数自下次同步起生效，历史文档不回填（页面另提供「保存后立即全量同步」走 `/api/datasource/sync`）。`baseRevision` 与 `source.revision` 不一致 → `409 DATASOURCE_STALE`（多标签页乐观锁）；同 scope 有 `datasource-sync` 排队/运行 → `409 SYNC_IN_PROGRESS`（scope 写锁也会以 `SCOPE_OPERATION_BUSY` 兜底）；未登记 → 404；校验失败 → 400（`INVALID_CONFLICT` / `INVALID_CHUNK` / `INVALID_VECTOR`）。成功 `200 { ok:true, scope, record, changed[] }`（`changed` 为空表示无实际变更，不 bump revision） |
 | `/api/datasource/prune` | POST | **数据源待删候选的唯一删除接口**（同步触发的写入口是 `/api/datasource/sync`）：body `{ scope, token, selected:[{group,relation}], dryRun? }`。服务端按当前源目录重算候选（扩展名/group/基线均与同步同源）并校验 token（失配 `409`）；`selected` 必填且 ≤500（超出 → `400 PRUNE_SELECTION_TOO_LARGE`），只删「所选 ∩ 可见候选」；**强制 `wikiDelete:false`** —— 只删知识库记录，不动源目录文件。成功回执带剩余 `pendingDelete`（新 token），支持分批删除 |
 | `/api/datasource/schedule` | POST | **定时同步配置的唯一写入口**：body `{ scope, schedule: { enabled, mode:'interval'\|'at', intervalValue?, intervalUnit?:'minute'\|'hour'\|'day', at?, repeat?:'once'\|'daily', baseRevision? } }`。写 `datasource.json` 的 `schedule` 字段（scope 写锁 + 原子写），保存后立即重算调度器。校验失败 `400`：`SCHEDULE_INVALID` / `SCHEDULE_INVALID_MODE` / `SCHEDULE_INVALID_INTERVAL` / `SCHEDULE_INTERVAL_TOO_SMALL`（< 1 分钟）/ `SCHEDULE_INTERVAL_TOO_LARGE`（> 365 天）/ `SCHEDULE_AT_INVALID`（含夏令时跳变时刻）/ `SCHEDULE_INVALID_REPEAT`；`baseRevision` 与当前 `revision` 不一致 → `409 SCHEDULE_STALE`（多标签页乐观锁，带当前值）。成功 `200 { ok:true, scope, schedule, nextRunAt, schedulerDisabled }`；`schedulerDisabled` 为 `KI_DISABLE_DATASOURCE_SCHEDULER=1` 的只读回显（保存成功但不会自动执行）。运行态字段（`enabledAt` / `consecutiveFailures` / `lastAutoAt` / `lastAutoFor` / `lastAutoState` / `lastSkipReason` / `lastSkipAt`）只由服务端写，不接受客户端提交。其中 `enabledAt` 是**启用锚点**：「关闭 → 开启」时写入、关闭时清空、改间隔不重置；周期模式的 `nextRunAt` 依次以 `lastSync.at` → `lastAutoAt` → `enabledAt` 为基准（从未同步过的源靠锚点才不会让下次时间随每次读取向后滑）。三者都缺失（旧版本写入 / 从旧快照恢复）时按**已到期**返回（`nextRunAt = now`、`due`），调度器会补跑一次再回到正常节奏 |
@@ -160,7 +159,7 @@ ki mcp --http --web
 | `/api/vector/optimize` | POST | 触发索引整理（同 `ki index-optimize`） |
 | `/api/tasks` | GET | 任务列表（只含计数，明细走单条）。`?limit=` 1–500（默认 100）**只约束返回条数**；`total` 是**授权过滤后、分页前**的真实条数（上限为台账读取上限 2000），故 `total > tasks.length` 即表示被截断；`retainedForMs` 是台账保留期（当前 7 天），前端「最近任务保留 X」文案据此渲染 |
 | `/api/tasks/:id` | GET | 任务详情 |
-| `/api/tasks/:id/log` | GET | **任务运行日志**：`?tail=N`（0–1000，默认 100）。与台账解耦——两者保留期同为 7 天但清理机制不同（日志另有 50MB 总量上限、可能先被挤掉），故台账已清理时仍可能 `200` 并带 `expired:true` + 从日志头行恢复的 `head`。响应 `{ ok, taskId, expired, logFile, head, lines, totalLines, rotated, bytes }`；`logFile` **只返回文件名**（台账刻意不回绝对路径）。`400 TASK_ID_INVALID` / `403 TASK_LOG_SCOPE_UNKNOWN`（日志在但头行损坏，无法校验 scope——不判 404，否则等于把已有日志判没）/ `403` scope 越权 / `404 TASK_LOG_NOT_FOUND`（台账与日志都没有） |
+| `/api/tasks/:id/log` | GET | **任务运行日志**：`?tail=N`（0–1000，默认 100）。与台账解耦——两者保留期同为 7 天但清理机制不同（日志另有 50MB 总量上限、可能先被挤掉），故台账已清理时仍可能 `200` 并带 `expired:true` + 从日志头行恢复的 `head`。响应 `{ ok, taskId, expired, logFile, head, lines, totalLines, rotated, bytes }`；`logFile` **只返回文件名**（不暴露绝对路径）。`400 TASK_ID_INVALID` / `403 TASK_LOG_SCOPE_UNKNOWN`（日志在但头行损坏，无法校验 scope——不判 404，否则等于把已有日志判没）/ `403` scope 越权 / `404 TASK_LOG_NOT_FOUND`（台账与日志都没有） |
 
 `/api/search-config` 返回 `{ "ok": true, "timeout": 3 }` 形式的秒级默认值；只读接口沿用 `/api/*` 的鉴权规则，配置读取异常按现有 API 错误契约返回 JSON 错误，不暴露 embedding API 密钥或端点。
 
@@ -203,7 +202,7 @@ meta → [tool_start → tool_end]* → reasoning* → content* → sources? →
 ```
 
 - `done.warning`：`tool-rounds-exhausted`（已达检索轮次上限）/ `conversation-too-long`（建议新建会话）。
-- `degraded.reason`：`tools-unsupported`（上游不支持工具调用）/ `retrieval-unavailable`（检索不可用）/ `semantic-degraded`（语义检索降级为全文）。**至多一条**，且必须向用户可见（N17 禁止静默降级）。
+- `degraded.reason`：`tools-unsupported`（上游不支持工具调用）/ `retrieval-unavailable`（检索不可用）/ `semantic-degraded`（语义检索降级为全文）。**至多一条**，且必须向用户可见，不允许静默降级。
 - 中止：客户端 abort → 服务端落盘已生成部分并回 `aborted`；`content` 为空则不落盘（不产生空气泡）。
 - 错误分层：流建立**前**失败 → HTTP 状态码（`403 DISCLOSURE_REQUIRED` / `503 CHAT_DISABLED` / `409 CONVERSATION_GENERATING` / `404 CONVERSATION_NOT_FOUND`）；流建立**后**失败 → `error` 事件（不抛）。
 - 鉴权与其他 `/api/*` 一致；**访问他 scope 的会话返回 403 而非 404**（防状态码探测枚举）。
@@ -260,7 +259,7 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 
 1. 向 `host:port/healthz` 发探活（免鉴权，短超时）。若命中健康的 kisearch 实例 → 打印“已有健康实例（含 pid），复用，退出”并 `exit(0)`，**全程不执行启动预检**——即使在缺 embedding API Key 等环境不完整的 shell 里重复执行也能正常复用。探活地址会将 `0.0.0.0` / `::` / `localhost` 归一到 `127.0.0.1`，确保同机不同写法命中同一实例。
 2. 检查升级前遗留的 stdio 实例 lock（`~/.ki/mcp-stdio-<pid>.lock`，每实例一个，pid 存活校验）。若存在存活的旧版直连 stdio 实例 → 拒绝启动（`exit 1`）并指明冲突来源 pid；新版本 stdio 是 daemon 桥，不会产生这类 zvec owner 冲突。
-3. 通过守卫后执行启动预检，再 `listen`。**embedding 侧的任何失败都只记录为 ⚠️ 警告并继续启动 —— 没有例外**：网络/超时/5xx/429、未配置 `embedding.apiKey`、密钥无效（401/403）、402 账户欠费、模型不存在等其它 4xx、实测维度与 `embedding.dimension` 不符，以及 `apiKey`/`baseURL` 的构造期校验失败（`EmbeddingConfigError`，请求根本发不出去）。理由：这些失败只有一个共同含义 —— **向量能力不可用**，而进程本身完全能服务：全文检索（FTS）、浏览、FTS-only 导入，以及前端三页面（导入/写入/检索）的动作层降级都不依赖 embedding；用拒绝启动来"提醒配置错了"，会把「向量暂缺」放大成整个产品不可用（含所有依赖 daemon 的 CLI 与 MCP 检索工具）。真正拒绝启动的只有**本地硬失败**：配置文件语法/字段校验失败（`loadConfig` 阶段抛错）、目录不存在/不可写、flock 冲突等。`ki doctor` 保持严格语义（上述 embedding 项仍报 ❌ 并以退出码 1 结束），`/api/health` 与启动预检同口径（降级为 warn）。降级期间页面对应提示：顶栏徽标「向量不可用」、导入/写入页禁用向量化并说明本次只写全文索引、检索页强制全文；CLI/MCP 检索自动降级为全文并返回 `degraded:true`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
+3. 通过守卫后执行启动预检，再 `listen`。**embedding 侧的任何失败都只记录为 ⚠️ 警告并继续启动 —— 没有例外**：网络/超时/5xx/429、未配置 `embedding.apiKey`、密钥无效（401/403）、402 账户欠费、模型不存在等其它 4xx、实测维度与 `embedding.dimension` 不符，以及 `apiKey`/`baseURL` 在构造期就校验失败（请求根本发不出去）。理由：这些失败只有一个共同含义 —— **向量能力不可用**，而进程本身完全能服务：全文检索（FTS）、浏览、FTS-only 导入，以及前端三页面（导入/写入/检索）的动作层降级都不依赖 embedding；用拒绝启动来"提醒配置错了"，会把「向量暂缺」放大成整个产品不可用（含所有依赖 daemon 的 CLI 与 MCP 检索工具）。真正拒绝启动的只有**本地硬失败**：配置文件语法/字段校验失败（加载阶段即报错）、目录不存在/不可写、flock 冲突等。`ki doctor` 保持严格语义（上述 embedding 项仍报 ❌ 并以退出码 1 结束），`/api/health` 与启动预检同口径（降级为 warn）。降级期间页面对应提示：顶栏徽标「向量不可用」、导入/写入页禁用向量化并说明本次只写全文索引、检索页强制全文；CLI/MCP 检索自动降级为全文并返回 `degraded:true`。监听失败按错误码给出可诊断提示：`EADDRINUSE`（端口被占用且探活未命中健康实例，提示排查/换端口）、`EACCES`（<1024 端口需提权，建议换高位端口）、`EADDRNOTAVAIL`（本机无该地址）、`ENOTFOUND`（host 无法解析）——均 fail-loud，不自动 kill。
 4. 成功监听后写按身份派生的 `~/.ki/mcp-http-<fingerprint>.lock`（记录 `pid` / `host` / `port` / `startedAt`），退出时清理。
 
 因此在多台 IDE 的启动脚本里重复执行 `ki mcp --http` 是安全的：第一台真正拉起服务，其余探活命中后直接退出、复用同一持锁进程——且不要求这些环境都能通过预检。
@@ -369,7 +368,7 @@ mcp:
 
 ## 优雅退出
 
-收到 `SIGINT` / `SIGTERM` 时：关闭所有会话 transport（含空闲清扫定时器）→ 强制断开残留的 keep-alive / SSE 长连接（`closeAllConnections`）→ `closeEngine()` 释放向量库锁 → 关闭 http server → 删除 lock 文件。整个流程有 5 秒兜底超时，超时则强制 `exit`，杜绝残留进程仍持锁。
+收到 `SIGINT` / `SIGTERM` 时：关闭所有会话 transport（含空闲清扫定时器）→ 强制断开残留的 keep-alive / SSE 长连接 → 释放向量库锁 → 关闭 http server → 删除 lock 文件。整个流程有 5 秒兜底超时，超时则强制 `exit`，杜绝残留进程仍持锁。
 
 > 注意：`kill -9`（SIGKILL）/ 断电不会触发优雅退出，lock 文件会残留但无害（下次启动真实探活后覆盖）；正常停机请用 `SIGTERM` / `SIGINT`（`Ctrl-C`）。
 

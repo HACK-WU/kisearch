@@ -107,7 +107,7 @@ scopes:
      │
      ▼
 [Step 1] ki import --source <dir> --group <group>
-     │  （内部：递归扫描 .md → 逐文件切分 → 向量化 → 写 cache + local KB）
+     │  （内部：递归扫描 .md → 逐文件切分 → 向量化 → 写入向量层 + local KB）
      ▼
 知识索引构建完成
 ```

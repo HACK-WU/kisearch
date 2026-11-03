@@ -49,7 +49,7 @@ ki import \
 - **同名但 sourcePath 不同**（不同文件同名）：按 `--conflict-mode` 处理——默认（`incremental`）与 `overwrite` 都是**直接覆盖**（后者胜出，不留副本）；`suffix` 生成 `foo_1`、`foo_2`（目标名已占用时继续递增）；`skip` 跳过后者
 - **新文件**：正常导入
 
-> **入口路径口径**：Web 导入页（拖拽 / 目录选择器 / 目录回退）在上传前会**剥离被选目录的顶层段**，使 `sourcePath` 与 CLI `--source <目录>` 保持一致——同一目录无论从哪个入口导入，都是同一次幂等更新（否则会被当作全新文档，实测出现过文档翻倍）。
+> **入口路径口径**：Web 导入页（拖拽 / 目录选择器 / 目录回退）在上传前会**剥离被选目录的顶层段**，使 `sourcePath` 与 CLI `--source <目录>` 保持一致——同一目录无论从哪个入口导入，都是同一次幂等更新（否则同一目录会被当作全新文档重复导入）。
 
 同一 `sourcePath` 优先命中已有 relation（`skip` 策略下则直接跳过、不更新），因此即使该文档此前通过自动后缀导入，重复导入也会覆盖原逻辑 relation，不会继续产生新后缀。自动后缀只改变逻辑 relation 名，不改写 `sourcePath`。
 
@@ -95,7 +95,7 @@ ki import \
 - **已成功的文件**照常提交（local KB + 向量 + 元数据三处一致），导入结束后即可 `ki search` / `ki group list` / Web 文档列表看到；
 - **失败或未处理的文件**不写元数据、不留在文档列表，进入「未完成清单」；
 - **全部文件都未完成**时仍是 fail-loud（`ok:false`），不做"零提交假成功"；
-- 结果里新增 `partial`、`stats.files{total,completed,incomplete,scanned,skipped,unchanged,duplicatesSkipped}`（`unchanged` 是增量导入下「内容未变、跳过重算」的文件数，属 `completed` 的子集；`duplicatesSkipped` 是「疑似重复被跳过」的文件数，属 `skipped` 的子集；恒等式均不变）（恒等式 `completed + incomplete + skipped = scanned`）、`incomplete[]{path,group,relation,reason}`、`duplicatesSkipped[]{path,existingGroup,existingRelation}` 与 `duplicatesSkippedTruncated`（仅 Web 的 `skipDuplicates` 场景非空，明细上限 500 条）、`created[]{group,relation}` + `createdTotal` + `createdTruncated`（本次**新建**的文档：`create` 与 `suffix` 计入、`overwrite` 不计，同一批次内被后续覆盖的条目会剔除，明细上限 500 条）、`stopReason`（取消时 `cancelled:true`）；只重试子集时另有 `retryFilter{requested,matched,missing,invalid}`（`requested`=净化去重后的清单条数、`matched`=源目录命中并纳入本轮处理的条数、`missing`=源文件已删除/改名、`invalid`=被拒绝的非法路径：绝对路径 / 含 `..` / 空值或超长）；
+- 结果里返回 `partial`、`stats.files{total,completed,incomplete,scanned,skipped,unchanged,duplicatesSkipped}`（`unchanged` 是增量导入下「内容未变、跳过重算」的文件数，属 `completed` 的子集；`duplicatesSkipped` 是「疑似重复被跳过」的文件数，属 `skipped` 的子集；恒等式 `completed + incomplete + skipped = scanned`）、`incomplete[]{path,group,relation,reason}`、`duplicatesSkipped[]{path,existingGroup,existingRelation}` 与 `duplicatesSkippedTruncated`（仅 Web 的 `skipDuplicates` 场景非空，明细上限 500 条）、`created[]{group,relation}` + `createdTotal` + `createdTruncated`（本次**新建**的文档：`create` 与 `suffix` 计入、`overwrite` 不计，同一批次内被后续覆盖的条目会剔除，明细上限 500 条）、`stopReason`（取消时 `cancelled:true`）；只重试子集时另有 `retryFilter{requested,matched,missing,invalid}`（`requested`=净化去重后的清单条数、`matched`=源目录命中并纳入本轮处理的条数、`missing`=源文件已删除/改名、`invalid`=被拒绝的非法路径：绝对路径 / 含 `..` / 空值或超长）；
 - **CLI 部分成功 = 退出码 0 + stderr 警告块**（与 Web 任务 `partial` 同口径）；脚本要严格判定可读 JSON 的 `partial` 字段。
 
 **未完成清单落盘**：部分成功时写入 `<scope>/.ki-import-incomplete.json`（含源目录、原批次参数、未完成项与停止原因）；全部完成时自动删除。它让「重试」跨进程/跨会话可用。
@@ -129,7 +129,7 @@ ki import --scope my-project --source /new/path/to/wiki --retry-incomplete
 - 后续向同一 group 追加新文档，重复执行同命令即可
 - 修改已有文档，重新导入即覆盖更新
 
-### 数据模型（方案 D）
+### 数据模型
 
 local KB 存**文件级原文**（一个文件一条，key=文件级 relation，basename 去扩展名）；relation-cache 文件级 relation 挂 **`memoryIds` 多值**（该文件全部 chunk 的向量 docId）；`sourcePath` 存文件路径（无 `#N`）。清洗只作用于**向量化输入**（local KB 保留原文，未被清洗）。
 
@@ -137,7 +137,7 @@ local KB 存**文件级原文**（一个文件一条，key=文件级 relation，
 
 ### 清洗
 
-默认开启：内置规则（BOM/frontmatter/mermaid/代码块先剥→路径/空行折叠）→ 外部 hooks（config `scopes.<scope>.clean.hooks`，stdin→stdout 管道，超时 10s，失败跳过）。hook 全部失败 → 文件跳过 + local KB 回滚（P-7）。
+默认开启：内置规则（BOM/frontmatter/mermaid/代码块先剥→路径/空行折叠）→ 外部 hooks（config `scopes.<scope>.clean.hooks`，stdin→stdout 管道，超时 10s，失败跳过）。hook 全部失败 → 文件跳过 + local KB 回滚。
 
 ### 格式与大小限制
 

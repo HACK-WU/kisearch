@@ -157,8 +157,8 @@ Web 侧边栏「AI 对话」所使用的**对话模型**配置。**整段可缺�
 | `firstByteTimeoutMs` | 正整数 | `30000` | 只约束「建立连接并收到首个 chunk」 |
 | `defaultSystemPrompt` | `string` | 空 | 新建会话未显式传 `systemPrompt` 时使用的默认系统提示词 |
 | `supportsTools` | `boolean` | `true` | 上游是否支持 function calling。`false` → 走「daemon 代跑一次检索 + `degraded` 明示」的降级路径（**不是**禁用检索） |
-| `kbDisclosureAck` | `boolean` | `false` | 隐私确认（T12）。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
-| `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 图片能力**本期未实现**（后置 V2），保留字段 |
+| `kbDisclosureAck` | `boolean` | `false` | 隐私确认。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
+| `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 当前版本**只解析不使用**这三个字段（为图片能力预留）：配置不报错、也不产生任何效果 |
 | `reasoningEfforts` | `string[]` | 不配置 | **思考级别可选档位清单**（对话配置面板下拉的来源 + 合法性白名单）。按 **OpenAI 通用协议**原样透传（请求体顶层 `reasoning_effort`），**不做任何厂商适配**、本地不校验具体取值；仅约束形状：元素 1–64 字符非空、≤20 个、不重复、不得为保留字 `__follow_default__`。**不配置 ⇒ 面板该项不可调、且不下发该参数** |
 | `reasoningEffort` | `string` | 不配置 | 思考级别的**部署默认档**，必须 ∈ `reasoningEfforts`（否则配置加载阶段即报错，会阻断全部 `ki` 命令）。与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发** |
 | `contextChars` | 正整数 | `1000000` | 上下文窗口刻度（字符数，默认 1000K）：只作占比分母与 80% / 90% 预警基准，不参与截断或拒绝。对话配置层可覆盖 |
@@ -209,7 +209,7 @@ scopeReadonly:
 | Web 上传导入 / 知识写入 / 阅读页编辑与加链接、MCP 8 个写工具、CLI 单条写入 | 拒绝（`SCOPE_READONLY`） |
 | 检索 / 浏览 / 导出 / 备份 | 不受影响 |
 
-> ⚠️ **不要写成 `scopes.<scope>.readonly`**：那会让该 scope 的 `registered` 变 `true`，而 `scopeMode: strict` 下 `scopes` 的 key 兼作检索白名单 —— 锁一个库等于给它开检索权限。只读状态与"是否注册"刻意正交。
+> ⚠️ **不要写成 `scopes.<scope>.readonly`**：那会让该 scope 的 `registered` 变 `true`，而 `scopeMode: strict` 下 `scopes` 的 key 兼作检索白名单 —— 锁一个库等于给它开检索权限。只读状态与「是否注册」互不影响。
 >
 > 设置方式：`ki scope readonly <name> [--off]`（见 [CLI 文档](./cli.md#scope)）。手工编辑也可，元素类型错误会按 schema 校验 fail-loud（`CONFIG_FIELD_INVALID`）。
 
@@ -243,8 +243,8 @@ scopes:
 | `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
 | `sourceDir` | `string` | 无 | 源文档目录，**必须是绝对路径**（`~`/`$HOME` 前缀可用，会展开为绝对路径）。相对路径（`./wiki`、`wiki`）在加载配置时即报 `CONFIG_FIELD_INVALID` |
 
-> `sourceDir` 为什么强制绝对路径：相对路径的唯一解析基准是**配置文件所在目录**
-> （`path.dirname(config.yaml)`），而 `./wiki` 在用户心里指的是**当前 shell / 当前仓库**。
+> `sourceDir` 为什么强制绝对路径：相对路径的唯一解析基准是**配置文件所在目录**，
+> 而 `./wiki` 在用户心里指的是**当前 shell / 当前仓库**。
 > 配置落在 `~/.ki/config.yaml` 时 `./wiki` 会展开成 `~/.ki/wiki`，写回位置静默跑偏，
 > 因此改为加载即报错，不做猜测。`${HOME}/wiki` 写法**不支持**（不会被展开，会拼成字面量目录），
 > 请写 `~/wiki` 或 `$HOME/wiki`。

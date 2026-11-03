@@ -36,7 +36,7 @@ ki group create <path> [--scope <s>]
 
 - 只创建**单个节点**，父路径必须已存在（不自动补祖先，也没有 `--parents`）。
 - **不做语义补全**：近似路径直接报错，并返回候选列表。
-- scope 不存在时自动创建，返回 `createdScope: true`（`agents-md-init` 依赖此语义）。
+- scope 不存在时自动创建，返回 `createdScope: true`。
 
 ```bash
 ki group create "我的项目" --scope my-project
@@ -86,7 +86,7 @@ ki group delete <path> [--yes] [--scope <s>]
 > `ki-relation` / `ki-path` 辅助向量的 docId 不含 group，只有执行时按 group 元数据枚举才知道条数，故不计入预览；
 > 且跨组共享的 docId 会被保留，**实际删除数可能少于预览值**（结果里的 `sharedKept` / `sharedContentKept` 会说明保留了哪些）。
 >
-> ⚠️ 历史遗留（仅理论边界）：只有早期版本写入过关系向量的库，才会有"没有 `group` 字段"的辅助向量，
+> ⚠️ 早期版本写入的旧数据：只有早期版本写入过关系向量的库，才会有不带 `group` 字段的辅助向量，
 > 按 group 枚举不到它们，需要用 `ki restore <scope> --rebuild-vector` 重建清理；此后版本写入的向量都带 `group`。
 
 带 `--yes` 执行后：

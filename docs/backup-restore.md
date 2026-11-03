@@ -195,7 +195,7 @@ ki restore scope-name --rebuild-vector --tags api,auth
 # 删除损坏的 scope 目录（dataDir 默认 ~/.ki/kb）
 rm -rf ~/.ki/kb/{scope}
 
-# 触发自动初始化（写入类命令会调用 ensureScopeDir；只读命令不会）
+# 触发自动初始化（写入类命令会触发；只读命令不会）
 ki sync-relation --scope {scope} --group "初始化" --relation "初始条目" --module-info "初始化"
 
 # 重新导入数据（原文直导，幂等追加）

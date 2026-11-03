@@ -4,7 +4,7 @@
 
 **CLI 简化约定**
 - **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-n`(--name)。
-  > `-o`(--output) 未实现：`export` 走手写 argv 解析，只认 `--output` 长选项。
+  > `-o`(--output) 不支持：`export` 只认 `--output` 长选项。
 - **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 可直接传位置参数；`--query` / `--text` 保留兼容，位置参数优先。
 - **超长内容警告**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分。
 
@@ -91,7 +91,7 @@ ki import \
 | `--conflict-suffix` | 否 | 自动后缀模板，必须包含且只能包含一个 `{n}`，默认 `_{n}`；例如 `-副本_{n}` |
 | `--no-vector` | 否 | FTS-only 模式：不调用 embedding、不写 dense 向量；写入独立全文 Collection，使用 `ki search --mode fulltext` 召回。`memoryId` 仍为空，语义 hybrid 检索不会召回该文档 |
 
-> **向量化不可用时的出路（2026-11-02 起）**：`ki import` 默认要向量化。
+> **向量化不可用时的出路**：`ki import` 默认要向量化。
 > ① **`embedding.apiKey` 未配置** → 在**扫描/切分之前**即 fail-loud（exit 1），错误信息直接给出 `--no-vector` 选项 —— 避免大目录白扫一遍才失败；
 > ② 密钥无效（401/403）、欠费（402）、维度不符等**只有发请求才知道**的原因 → 走到向量化阶段失败时报「均未完成向量化」，文案同样带 `--no-vector` 出路与 `ki restore <scope> --rebuild-vector` 补齐方式。
 > `--no-vector` 导入只写 FTS-only：正文与全文索引完整，`ki search --mode fulltext` 可召回；补齐 dense 向量需修好 embedding 后执行 `ki restore <scope> --rebuild-vector`。
@@ -159,7 +159,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 `list` 默认输出对齐表格（`SCOPE / TYPE / SOURCE / LAST SYNC / STATE / PENDING`）：时间按本地时区 `YYYY-MM-DD HH:mm`；托管 Git 源显示 `host/owner/repo › 子目录 @commit`（保留 host，避免不同实例的同名仓库混淆）；`PENDING` 为 0 时显示 `-`，未计算（stale / 被闸门拦）显示 `未算`；终端较窄时 `SOURCE` 中间省略（`[同目录]` 这类标记不会被裁），**重定向 / 管道（非 TTY）不截断**；同一本地目录被多个 scope 登记会标 `[同目录]` 并在表下列出。**人类可读格式不作为稳定契约，脚本请用 `--json`。**
 已启用定时计划的数据源会在表格下方追加 `定时：` 脚注（模式 + 下次运行 / 待补跑 / 已执行 + 连续失败次数；无启用计划时该脚注不出现，输出与旧版一致）。**这是只读展示** —— 定时配置的唯一入口是页面「数据源 → 定时」，没有 CLI 配置命令；`--json` 的每条 `sources[]` 增 `schedule` 字段（与 `/api/datasource/list` 同口径，含服务端算出的 `nextRunAt`）。
 
-`--git-url` 规则（S-05）：
+`--git-url` 规则：
 
 - 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。
 - 私有仓库使用**当前进程环境**的 SSH agent / credential helper（CLI 不落盘凭据；页面添加由 daemon 环境提供）。
@@ -426,7 +426,7 @@ ki tag list --scope my-project
 | `--hot-count <n>` | `ki group list` | 热门分区展示个数；默认 `5` |
 | `--scan-limit <n>` | `tag list` | **扫描上限**（引擎扫描条数上限，超出则 `truncated:true` 近似）；默认 `10000` |
 
-> 三者语义不同：`--limit` 截断**返回**条数，`--scan-limit` 限制**扫描**条数，`--hot-count` 控制展示个数。历史命名保留（统一为 `--limit` 语义易混淆，本期仅文档化标注）。
+> 三者语义不同：`--limit` 截断**返回**条数，`--scan-limit` 限制**扫描**条数，`--hot-count` 控制展示个数。参数名沿用历史命名，注意不要互相替代。
 
 ---
 
@@ -545,7 +545,7 @@ ki search "<自然语言查询>" [-s <scope>] [--limit <n>] [--threshold <score>
 
 > 位置参数与 `-q/--query` 双通道均可（位置参数优先）；两者都缺时明确报错。
 
-> **向量不可用不阻塞全文检索**（2026-11-02 起）：`hybrid` 模式下若向量能力不可用（未配置/无效 key、向量库被占用）、或向量库里没有任何 dense 索引（库内文档全是 `--no-vector` 导入的 FTS-only 内容），命令**不再以 `ok:false` 报错**，而是自动降级为全文检索并返回结果，响应里带 `mode:"fulltext"` + `degraded:true` + `degradedReason`。降级后的分数是 BM25 口径（与混合 RRF 不可比）。
+> **向量不可用不阻塞全文检索**：`hybrid` 模式下若向量能力不可用（未配置/无效 key、向量库被占用）、或向量库里没有任何 dense 索引（库内文档全是 `--no-vector` 导入的 FTS-only 内容），命令**不再以 `ok:false` 报错**，而是自动降级为全文检索并返回结果，响应里带 `mode:"fulltext"` + `degraded:true` + `degradedReason`。降级后的分数是 BM25 口径（与混合 RRF 不可比）。
 
 **示例：**
 
@@ -595,7 +595,7 @@ ki search "告警静默策略" -s monitor,alerting
 ki search --query "仪表盘配置" --scope monitor --threshold 0.03
 ```
 
-（实测保留 score ≥ 0.03 的高度相关命中、过滤边缘结果；阈值需按数据校准——RRF 融合分与 topk 相关。）
+（示例取值偏严格：保留两路都强命中的高度相关结果、过滤边缘结果；具体阈值建议按实际数据微调——RRF 融合分与 topk 相关。）
 
 **threshold 建议区间**：`0.02 ~ 0.03`。RRF 融合分（`rankConstant=60`）的理论上限约 **0.033**（向量 + 全文两路都排第 1 时），因此：
 - `0.03`：最严格，只留两路强命中的高度相关结果
@@ -881,7 +881,7 @@ ki sync-relation \
 >
 > **MCP 工具 `ki_sync_relation` 同样支持**：入参 `vector: boolean`（默认 `true`），传 `false` 即非向量化——CLI 与 MCP 行为一致。
 
-> **自定义标签（`--tags` / MCP `tags`）**：为**文档内容**（`module-info`）额外指定多个业务标签（逗号分隔），叠加在默认 `ki-search` 之上。`ki-search` 始终写入；自定义标签各写一条内容向量（zvec tag 单值字段，多 tag 以「同内容多 doc」实现）。不传则只写 `ki-search`（与旧行为一致）。指定后可按 `ki search --tags <自定义标签>` 定向召回：
+> **自定义标签（`--tags` / MCP `tags`）**：为**文档内容**（`module-info`）额外指定多个业务标签（逗号分隔），叠加在默认 `ki-search` 之上。`ki-search` 始终写入；每个自定义标签各写一条内容向量（标签字段只能存单值，因此多标签 = 同一内容的多条向量）。不传则只写 `ki-search`（与旧行为一致）。指定后可按 `ki search --tags <自定义标签>` 定向召回：
 > ```bash
 > # 内容打 api + auth 两个自定义标签（叠加 ki-search）
 > ki sync-relation -s <scope> -g <group> -r <text> --module-info <md> --tags "api,auth"
@@ -947,7 +947,7 @@ ki sync-relation -s my-project -i batch-input.json
 
 **批量模式默认向量化**（`--no-vector` 关闭）：一次 embedding HTTP + 一次向量批量写入，取代多次单条调用的 N 次独立 embedding + N 次串行写入，性能显著提升。
 
-> ⚠️ **行为变更（breaking）**：旧版 `sync-relation --input` 走 `syncBatch`，参数虽叫 `vector=true` 但**实际只写 KB 层**（不产生向量与 `memoryId`）。新版批量模式默认真正向量化——存量调用方若依赖旧的「仅 KB」行为，需显式加 `--no-vector` 保持原语义。
+> ⚠️ **行为变更（breaking）**：旧版 `sync-relation --input` 的参数虽叫 `vector=true`，但**实际只写 KB 层**（不产生向量与 `memoryId`）。新版批量模式默认真正向量化——存量调用方若依赖旧的「仅 KB」行为，需显式加 `--no-vector` 保持原语义。
 
 > **批量写入策略**：虽然一次可传大量 `items`，但一次性组织大量文档数据耗时、占上下文、易出错。推荐**分批调用，每批 ≤5 条**（分多次 `--input` 文件调用）。服务端每次仍是批量 embed + 批量写入，总耗时几乎不变，但组织成本更低、单批失败只重试该批。
 
@@ -1440,22 +1440,22 @@ ki log <taskId> --json                            # 脚本消费
 
 | 产物 | 位置 | 保留 |
 |---|---|---|
-| 任务台账 | `{dataDir}/.ki-tasks/<taskId>.json` | **7 天**（`TASK_TTL_MS`）。终态按结束时间计；**未终态按心跳计，超 1 小时即视为进程已死并清理**（两者刻意解耦，避免崩溃任务长期占用列表与顶栏告警） |
+| 任务台账 | `{dataDir}/.ki-tasks/<taskId>.json` | **7 天**。终态按结束时间计；**未终态按心跳计，超 1 小时即视为进程已死并清理**（两类记录分开计时，避免崩溃任务长期占用列表与顶栏告警） |
 | 运行日志 | `{dataDir}/.ki-tasks/logs/<taskId>.log` | **7 天**；≤200 文件、总量 ≤50MB（硬约束，先到者清理）；单文件 2MB 滚动为 `.log.1` |
 
 所以**保留期相同但清理机制不同**：日志可能因 50MB 总量上限先被挤掉，台账也可能因未终态心跳超时被提前清理。台账已清理而日志仍在时，输出会标注「台账已过期（保留 7 天），以下元信息来自日志头行」，日志正文仍可读。两者都没了才真正查不到。
 
-**服务重启与中断任务**（2026-11-02）：daemon 的 job 表是**进程内**的，重启即丢失，因此在跑的任务不会续跑。为避免「记录永远停在 running → 30s 后变状态未知 → 1 小时后消失」这种无交代的结局，daemon **启动时会扫一遍台账**，把遗留的 `queued` / `running` 记录改判为 `failed`，写入：
+**服务重启与中断任务**：服务只在内存中保存任务队列，重启即丢失，因此在跑的任务不会续跑。为避免「记录永远停在 running → 30s 后变状态未知 → 1 小时后消失」这种没有交代的结局，服务**启动时会扫一遍台账**，把遗留的 `queued` / `running` 记录改判为 `failed`，写入：
 
 - `error`：`任务在执行中被服务重启打断，结果未落定`
 - `recoveryHint`：`重新发起该操作；已完成的部分不会回滚，重复执行按同名/幂等策略处理`
 - `result.errorCode`：`SERVICE_RESTART_INTERRUPTED`，日志正文同时追加一条同名 ERROR 行
 
-**终态任务（成功/失败/部分完成）不受影响**，它们本来就在台账文件里，重启不删文件。判断依据是单例锁——启动瞬间本进程还没有任何任务，台账里的非终态记录必然来自已退出的进程。
+**终态任务（成功/失败/部分完成）不受影响**，它们本来就在台账文件里，重启不删文件。
 
 - 若 Web 端显示的「任务 ID」查不到，先确认是不是执行任务的服务用了另一份配置（`--config` 指向同一配置文件）
 
-**能力边界**（2026-11-02）：
+**能力边界**：
 
 - CLI 的 `ki datasource add` **不写任务台账**（只有 Web 添加与 `datasource sync` 写），因此 CLI 添加失败后用本命令查不到；Web 端添加失败可正常查询
 - 日志只记**状态迁移与原始错误**，不记每次进度心跳（否则长任务会被 5s 一行的噪音淹没）

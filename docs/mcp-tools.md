@@ -32,7 +32,7 @@
 | `ki_group_delete_empty` | 删除空 Group 节点 | 仅限无子组、无 relation、无 KB 文件；非空节点请用 CLI `ki group delete <path> --yes` |
 | `ki_delete_relation` | 删除单条 Relation（cache + KB + wiki + 向量四层） | 有未结束的 `ki_edit_relation` 草稿时会拒绝，需先 cancel/finish |
 
-## 刻意不暴露的能力
+## MCP 未提供的能力
 
 MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。
 
