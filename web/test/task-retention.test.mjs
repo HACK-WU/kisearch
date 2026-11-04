@@ -100,4 +100,21 @@ describe('源码守卫', () => {
       assert.doesNotMatch(source, /保留 1 小时|保留 7 天/, `${path.basename(file)} 仍在硬编码保留期`);
     }
   });
+
+  // CLI 帮助文本拿不到接口口径，只能写字面量；上面那条守卫查不到 bin/ki.mjs，
+  // 所以用 TASK_TTL_MS 反算天数把它锁住，避免后端改常量后 `ki --help` 又变成谎话
+  it('CLI help 的保留期与 TASK_TTL_MS 一致', () => {
+    const registry = fs.readFileSync(path.join(webRoot, '../src/lib/task-registry.ts'), 'utf8');
+    const ttl = registry.match(/export const TASK_TTL_MS\s*=\s*([^;]+);/);
+    assert.ok(ttl, '未能从 task-registry.ts 解析出 TASK_TTL_MS');
+    const days = Math.round(Function(`return (${ttl[1]});`)() / DAY);
+    assert.ok(days > 0, `TASK_TTL_MS 反算天数异常：${days}`);
+
+    const cli = fs.readFileSync(path.join(webRoot, '../bin/ki.mjs'), 'utf8');
+    const logLine = cli.split('\n').find((line) => /\blog\s+任务运行诊断/.test(line));
+    assert.ok(logLine, 'bin/ki.mjs 中未找到 log 命令的 help 行');
+    const declared = logLine.match(/台账保留\s*(\d+)\s*天/);
+    assert.ok(declared, `log help 未声明「台账保留 N 天」：${logLine.trim()}`);
+    assert.equal(Number(declared[1]), days, `log help 写的是 ${declared[1]} 天，但 TASK_TTL_MS 是 ${days} 天`);
+  });
 });

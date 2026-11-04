@@ -99,7 +99,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   tag               向量 tag 发现：list（只读，含文档数）
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）
-  log               任务运行诊断：按任务 ID 查看失败原因（只读；台账保留 1 小时）
+  log               任务运行诊断：按任务 ID 查看失败原因（只读；台账保留 7 天）
   backup            备份 scope 目录快照
   restore           从快照还原
   export            导出 KB 为 Wiki Markdown
