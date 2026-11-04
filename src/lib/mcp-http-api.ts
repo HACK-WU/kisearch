@@ -26,7 +26,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, setScopeReadonlyInConfigFile, type KiConfig } from './config.js';
-import { ALL_SCOPES, type TokenAuth } from './mcp-token.js';
+import {
+  ALL_SCOPES,
+  LOCAL_ADMIN_OWNER_ID,
+  createToken,
+  deleteToken,
+  deleteTokensByOwner,
+  listTokens,
+  listTokensByOwner,
+  resolveScopesArg,
+  tokenCreator,
+  tokenLabel,
+  type TokenAuth,
+  type TokenRecord,
+} from './mcp-token.js';
 import {
   authScopesForPrincipal,
   capabilitiesForPrincipal,
@@ -47,11 +60,13 @@ import {
   createUser,
   deleteUserById,
   findUserById,
+  isUserActive,
   listUsers,
   resetUserPassword,
   updateUserById,
   verifyCredentials,
   verifyPassword,
+  type UserView,
 } from './user-store.js';
 import {
   ALL_CAPABILITIES,
@@ -545,10 +560,113 @@ function sendUserStoreError(res: http.ServerResponse, error: unknown): boolean {
   if (!(error instanceof UserStoreError)) return false;
   let status = 400;
   if (error.code === 'USER_STORE_CORRUPT' || error.code === 'USER_STORE_LOCKED') status = 503;
-  else if (error.code === 'USER_LAST_ADMIN' || error.code === 'USER_EXISTS') status = 409;
+  else if (
+    error.code === 'USER_LAST_ADMIN'
+    || error.code === 'USER_EXISTS'
+    || error.code === 'USER_ADMIN_EXISTS'
+    || error.code === 'USER_ADMIN_PROTECTED'
+    || error.code === 'USER_SELF_PROTECTED'
+  ) status = 409;
   else if (error.code === 'USER_NOT_FOUND') status = 404;
   sendJson(res, status, { ok: false, code: error.code, error: error.message });
   return true;
+}
+
+const TOKEN_LIMIT_USER = 10;
+
+interface TokenOwner {
+  id: string;
+  username: string;
+  role: UserView['role'];
+  disabled: boolean;
+  expiresAt: string | null;
+}
+
+function ownerFromView(user: UserView): TokenOwner {
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    disabled: user.disabled,
+    expiresAt: user.expiresAt,
+  };
+}
+
+/** 当前 principal 的自助 Token owner；token principal 不允许走 /me/tokens */
+function selfTokenOwner(principal: WebPrincipal, usersPath?: string): TokenOwner | null {
+  if (principal.kind === 'local-admin') {
+    // 有真实 admin 记录时，本机管理员使用同一 owner：CLI 创建的 Token 默认归该 admin，
+    // 本机免登录进入个人中心也应能看到/管理它们。
+    try {
+      const admins = listUsers(usersPath).filter((user) => user.role === 'admin');
+      const admin = admins.find((user) => isUserActive(user)) ?? admins[0];
+      if (admin) return ownerFromView(admin);
+    } catch {
+      /* 账号文件损坏时退回 local-admin 虚拟 owner */
+    }
+    return {
+      id: LOCAL_ADMIN_OWNER_ID,
+      username: '本机管理员',
+      role: 'admin',
+      disabled: false,
+      expiresAt: null,
+    };
+  }
+  if (principal.kind !== 'session') return null;
+  const user = findUserById(principal.userId, usersPath);
+  return user ? ownerFromView(user) : null;
+}
+
+function tokenLimitForOwner(owner: TokenOwner): number {
+  return owner.role === 'admin' ? Infinity : TOKEN_LIMIT_USER;
+}
+
+function tokenView(record: TokenRecord, owner: TokenOwner): Record<string, unknown> {
+  const createdReadOnly = record.readOnly === true;
+  return {
+    id: record.id,
+    label: tokenLabel(record),
+    readOnly: createdReadOnly || owner.role === 'viewer',
+    createdReadOnly,
+    scopes: record.scopes,
+    createdBy: tokenCreator(record),
+    createdAt: record.createdAt,
+    ...(record.ownerId ? { ownerId: record.ownerId } : {}),
+  };
+}
+
+function ownerTokensView(owner: TokenOwner): Record<string, unknown>[] {
+  return listTokensByOwner(owner.id)
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((record) => tokenView(record, owner));
+}
+
+function validateTokenLabel(value: unknown): { label: string } | { error: string } {
+  if (typeof value !== 'string') return { error: 'Token 名称必须是字符串' };
+  const label = value.trim();
+  if (!label || label.length > 64) return { error: 'Token 名称长度需为 1-64 个字符' };
+  return { label };
+}
+
+function scopesFromBody(value: unknown): { scopes: string[] } | { error: string } {
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== 'string')) {
+    return { error: '访问范围必须是非空字符串数组' };
+  }
+  try {
+    return { scopes: resolveScopesArg(value.join(',')) };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+function tokenError(
+  res: http.ServerResponse,
+  status: number,
+  code: string,
+  error: string,
+): void {
+  sendJson(res, status, { ok: false, code, error });
 }
 
 /** 无 datasource.read 的账号看任务时脱敏数据源字段（当前快照无路径字段，保留为未来防线） */
@@ -653,6 +771,7 @@ function handleAuthMe(
   principal: WebPrincipal | null,
   requestConfig: KiConfig,
   localAdminOverride: boolean,
+  usersPath?: string,
 ): void {
   const localAdminEnabled = localAdminOverride && ((requestConfig as {
     mcp?: { http?: { localAdmin?: boolean } };
@@ -675,7 +794,15 @@ function handleAuthMe(
       authenticated: true,
       source: 'local',
       localAdminEnabled,
-      user: { id: null, username: '本机管理员', role: 'admin' },
+      user: {
+        id: null,
+        username: '本机管理员',
+        role: 'admin',
+        expiresAt: null,
+        disabled: false,
+        createdAt: null,
+        lastLoginAt: null,
+      },
       permissions: [...ALL_CAPABILITIES],
     });
     return;
@@ -691,12 +818,21 @@ function handleAuthMe(
     });
     return;
   }
+  const record = findUserById(principal.userId, usersPath);
   sendJson(res, 200, {
     ok: true,
     authenticated: true,
     source: 'session',
     localAdminEnabled,
-    user: { id: principal.userId, username: principal.username, role: principal.role },
+    user: {
+      id: principal.userId,
+      username: principal.username,
+      role: principal.role,
+      expiresAt: record?.expiresAt ?? null,
+      disabled: record?.disabled === true,
+      createdAt: record?.createdAt ?? null,
+      lastLoginAt: record?.lastLoginAt ?? null,
+    },
     permissions: permissionsForRole(principal.role),
   });
 }
@@ -794,7 +930,7 @@ export async function handleApiRequest(
     return;
   }
   if (p === '/auth/me' && req.method === 'GET') {
-    handleAuthMe(res, principal, requestConfig, ctx.localAdmin !== false);
+    handleAuthMe(res, principal, requestConfig, ctx.localAdmin !== false, ctx.usersPath);
     return;
   }
   if (p === '/auth/logout' && req.method === 'POST') {
@@ -857,9 +993,192 @@ export async function handleApiRequest(
   }
 
   try {
-    // ── 用户管理（REQ-20261103-001 · S-04）──
+    // ── 自己的 MCP Token（REQ-20261104-001；所有登录角色可用）──
+    if (p === '/me/tokens' || p.startsWith('/me/tokens/')) {
+      const owner = selfTokenOwner(principal, ctx.usersPath);
+      if (!owner) {
+        tokenError(res, 403, 'TOKEN_FORBIDDEN', '当前身份不能管理自助 Token');
+        return;
+      }
+      if (!isUserActive(owner)) {
+        tokenError(res, 409, 'TOKEN_OWNER_INACTIVE', '账号已禁用或已过期，无法管理 Token');
+        return;
+      }
+      if (p === '/me/tokens' && req.method === 'GET') {
+        const tokens = ownerTokensView(owner);
+        sendJson(res, 200, {
+          ok: true,
+          tokens,
+          count: tokens.length,
+          limit: owner.role === 'admin' ? null : TOKEN_LIMIT_USER,
+          unlimited: owner.role === 'admin',
+        });
+        return;
+      }
+      if (p === '/me/tokens' && req.method === 'POST') {
+        const body = (await readJsonBody(req)) as {
+          label?: unknown;
+          readOnly?: unknown;
+          scopes?: unknown;
+        } | undefined;
+        if (!body) {
+          tokenError(res, 400, 'TOKEN_INVALID', '缺少 Token 参数');
+          return;
+        }
+        const labelResult = validateTokenLabel(body.label);
+        if ('error' in labelResult) {
+          tokenError(res, 400, 'TOKEN_INVALID', labelResult.error);
+          return;
+        }
+        const scopeResult = scopesFromBody(body.scopes);
+        if ('error' in scopeResult) {
+          tokenError(res, 400, 'TOKEN_INVALID', scopeResult.error);
+          return;
+        }
+        if (body.readOnly !== undefined && typeof body.readOnly !== 'boolean') {
+          tokenError(res, 400, 'TOKEN_INVALID', 'readOnly 必须是布尔值');
+          return;
+        }
+        const existing = listTokensByOwner(owner.id);
+        if (existing.some((record) => tokenLabel(record).toLowerCase() === labelResult.label.toLowerCase())) {
+          tokenError(res, 409, 'TOKEN_LABEL_EXISTS', '该账号下已存在同名 Token');
+          return;
+        }
+        if (existing.length >= tokenLimitForOwner(owner)) {
+          tokenError(res, 409, 'TOKEN_LIMIT_REACHED', `普通账号最多 ${TOKEN_LIMIT_USER} 个 Token`);
+          return;
+        }
+        const readOnly = owner.role === 'viewer' ? true : body.readOnly === true;
+        const record = createToken(scopeResult.scopes, undefined, readOnly, {
+          label: labelResult.label,
+          ownerId: owner.id,
+          createdBy: 'self',
+        });
+        sendJson(res, 201, { ok: true, token: record.token, item: tokenView(record, owner) });
+        return;
+      }
+      if (p.startsWith('/me/tokens/') && req.method === 'DELETE') {
+        let tokenId = '';
+        try {
+          tokenId = decodeURIComponent(p.slice('/me/tokens/'.length));
+        } catch {
+          tokenError(res, 400, 'TOKEN_INVALID', '非法 Token id');
+          return;
+        }
+        const record = listTokensByOwner(owner.id).find((item) => item.id === tokenId);
+        if (!record) {
+          tokenError(res, 404, 'TOKEN_NOT_FOUND', 'Token 不存在或不属于当前账号');
+          return;
+        }
+        deleteToken(record.id);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      sendJson(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Method Not Allowed' });
+      return;
+    }
+
+    // ── 管理员代管某账号的 MCP Token（/api/users/:id/tokens）──
+    const tokenRoute = /^\/users\/([^/]+)\/tokens(?:\/([^/]+))?$/.exec(p);
+    if (tokenRoute && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
+      let ownerId = '';
+      let tokenId = '';
+      try {
+        ownerId = decodeURIComponent(tokenRoute[1]);
+        tokenId = tokenRoute[2] ? decodeURIComponent(tokenRoute[2]) : '';
+      } catch {
+        tokenError(res, 400, 'TOKEN_INVALID', '非法用户或 Token id');
+        return;
+      }
+      const target = findUserById(ownerId, ctx.usersPath);
+      if (!target) {
+        tokenError(res, 404, 'TOKEN_OWNER_NOT_FOUND', '账号不存在');
+        return;
+      }
+      const owner = ownerFromView(target);
+      if (req.method === 'GET' && !tokenId) {
+        const tokens = ownerTokensView(owner);
+        sendJson(res, 200, {
+          ok: true,
+          tokens,
+          count: tokens.length,
+          limit: owner.role === 'admin' ? null : TOKEN_LIMIT_USER,
+          unlimited: owner.role === 'admin',
+        });
+        return;
+      }
+      if (req.method === 'POST' && !tokenId) {
+        if (!isUserActive(owner)) {
+          tokenError(res, 409, 'TOKEN_OWNER_INACTIVE', '账号已禁用或已过期，无法创建 Token');
+          return;
+        }
+        const body = (await readJsonBody(req)) as {
+          label?: unknown;
+          readOnly?: unknown;
+          scopes?: unknown;
+        } | undefined;
+        if (!body) {
+          tokenError(res, 400, 'TOKEN_INVALID', '缺少 Token 参数');
+          return;
+        }
+        const labelResult = validateTokenLabel(body.label);
+        if ('error' in labelResult) {
+          tokenError(res, 400, 'TOKEN_INVALID', labelResult.error);
+          return;
+        }
+        const scopeResult = scopesFromBody(body.scopes);
+        if ('error' in scopeResult) {
+          tokenError(res, 400, 'TOKEN_INVALID', scopeResult.error);
+          return;
+        }
+        if (body.readOnly !== undefined && typeof body.readOnly !== 'boolean') {
+          tokenError(res, 400, 'TOKEN_INVALID', 'readOnly 必须是布尔值');
+          return;
+        }
+        const existing = listTokensByOwner(owner.id);
+        if (existing.some((record) => tokenLabel(record).toLowerCase() === labelResult.label.toLowerCase())) {
+          tokenError(res, 409, 'TOKEN_LABEL_EXISTS', '该账号下已存在同名 Token');
+          return;
+        }
+        if (existing.length >= tokenLimitForOwner(owner)) {
+          tokenError(res, 409, 'TOKEN_LIMIT_REACHED', `普通账号最多 ${TOKEN_LIMIT_USER} 个 Token`);
+          return;
+        }
+        const readOnly = owner.role === 'viewer' ? true : body.readOnly === true;
+        const record = createToken(scopeResult.scopes, undefined, readOnly, {
+          label: labelResult.label,
+          ownerId: owner.id,
+          createdBy: 'admin',
+        });
+        sendJson(res, 201, { ok: true, token: record.token, item: tokenView(record, owner) });
+        return;
+      }
+      if (req.method === 'DELETE' && tokenId) {
+        const record = listTokensByOwner(owner.id).find((item) => item.id === tokenId);
+        if (!record) {
+          tokenError(res, 404, 'TOKEN_NOT_FOUND', 'Token 不存在或不属于该账号');
+          return;
+        }
+        deleteToken(record.id);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      tokenError(res, 400, 'TOKEN_INVALID', 'Token 路径不完整');
+      return;
+    }
+
+    // ── 用户管理（REQ-20261103-001 · S-04；REQ-20261104-001 扩展）──
     if (p === '/users' && req.method === 'GET') {
-      sendJson(res, 200, { ok: true, users: listUsers(ctx.usersPath) });
+      const counts = new Map<string, number>();
+      for (const token of listTokens()) {
+        if (!token.ownerId) continue;
+        counts.set(token.ownerId, (counts.get(token.ownerId) ?? 0) + 1);
+      }
+      const users = listUsers(ctx.usersPath).map((user) => ({
+        ...user,
+        tokenCount: counts.get(user.id) ?? 0,
+      }));
+      sendJson(res, 200, { ok: true, users });
       return;
     }
     if (p === '/users' && req.method === 'POST') {
@@ -867,15 +1186,33 @@ export async function handleApiRequest(
         username?: unknown;
         password?: unknown;
         role?: unknown;
+        expiresAt?: unknown;
       } | undefined;
       if (!body || typeof body.username !== 'string' || typeof body.password !== 'string'
         || typeof body.role !== 'string') {
         sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '缺少用户名、密码或角色' });
         return;
       }
+      if (body.role === 'admin') {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'USER_ADMIN_CLI_ONLY',
+          error: '管理员账号只能通过命令行创建：ki user create <用户名> --role admin',
+        });
+        return;
+      }
+      if (body.expiresAt !== undefined && body.expiresAt !== null && typeof body.expiresAt !== 'string') {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID_EXPIRY', error: '有效期必须是 ISO 时间字符串或留空' });
+        return;
+      }
       try {
         const user = createUser(
-          { username: body.username, password: body.password, role: body.role },
+          {
+            username: body.username,
+            password: body.password,
+            role: body.role,
+            ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string | null } : {}),
+          },
           ctx.usersPath,
         );
         sendJson(res, 201, { ok: true, user });
@@ -898,9 +1235,20 @@ export async function handleApiRequest(
         return;
       }
       if (req.method === 'DELETE') {
+        if (principal.kind === 'session' && principal.userId === id) {
+          sendJson(res, 409, { ok: false, code: 'USER_SELF_PROTECTED', error: '不能删除当前登录账号' });
+          return;
+        }
         try {
           const user = deleteUserById(id, ctx.usersPath);
-          sendJson(res, 200, { ok: true, user });
+          deleteUserSessions(id);
+          let tokenCleanupWarning: string | undefined;
+          try {
+            deleteTokensByOwner(id);
+          } catch (error) {
+            tokenCleanupWarning = (error as Error).message;
+          }
+          sendJson(res, 200, { ok: true, user, ...(tokenCleanupWarning ? { tokenCleanupWarning } : {}) });
         } catch (error) {
           if (sendUserStoreError(res, error)) return;
           throw error;
@@ -912,15 +1260,22 @@ export async function handleApiRequest(
         role?: unknown;
         password?: unknown;
         disabled?: unknown;
+        expiresAt?: unknown;
       } | undefined;
-      if (!body || (body.role === undefined && body.password === undefined && body.disabled === undefined)) {
+      if (!body || (body.role === undefined && body.password === undefined
+        && body.disabled === undefined && body.expiresAt === undefined)) {
         sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '没有可修改的字段' });
         return;
       }
       if ((body.role !== undefined && typeof body.role !== 'string')
         || (body.password !== undefined && typeof body.password !== 'string')
-        || (body.disabled !== undefined && typeof body.disabled !== 'boolean')) {
+        || (body.disabled !== undefined && typeof body.disabled !== 'boolean')
+        || (body.expiresAt !== undefined && body.expiresAt !== null && typeof body.expiresAt !== 'string')) {
         sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '字段类型不合法' });
+        return;
+      }
+      if (principal.kind === 'session' && principal.userId === id && body.disabled === true) {
+        sendJson(res, 409, { ok: false, code: 'USER_SELF_PROTECTED', error: '不能禁用当前登录账号' });
         return;
       }
       try {
@@ -928,6 +1283,7 @@ export async function handleApiRequest(
           ...(body.role !== undefined ? { role: body.role } : {}),
           ...(body.password !== undefined ? { password: body.password } : {}),
           ...(body.disabled !== undefined ? { disabled: body.disabled } : {}),
+          ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt as string | null } : {}),
         }, ctx.usersPath);
         sendJson(res, 200, { ok: true, user });
       } catch (error) {

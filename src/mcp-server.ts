@@ -49,6 +49,9 @@ import {
   resolveScopesArg,
   tokenCount,
   isReadOnlyFieldInvalid,
+  tokenLabel,
+  tokenCreator,
+  resolveDefaultCliTokenOwner,
   ALL_SCOPES,
 } from './lib/mcp-token.js';
 
@@ -74,7 +77,7 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp restart                重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp status                 查看 HTTP 单例运行状态（只读，不启动服务）
   ki mcp stop                   关闭本机所有 ki mcp 实例并清理 lock
-  ki mcp token generate --scope <scope> [--read-only]  生成授权 Token（scope 必填：单个/逗号分隔多个/all）
+  ki mcp token generate --scope <scope> [--label <name>] [--read-only]  生成授权 Token（scope 必填：单个/逗号分隔多个/all）
   ki mcp token list             列出所有 Token（含明文、授权 scope、访问模式）
   ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
                                 改授权 scope / 切换只读（两项至少给一个）
@@ -101,7 +104,7 @@ const TOKEN_HELP = `ki mcp token - 管理 MCP 授权 Token
 
 用法：
   ki mcp token list
-  ki mcp token generate --scope <scope> [--read-only]
+  ki mcp token generate --scope <scope> [--label <name>] [--read-only]
   ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
   ki mcp token delete <id>
 
@@ -113,6 +116,7 @@ const TOKEN_HELP = `ki mcp token - 管理 MCP 授权 Token
 
 参数：
   --scope <scope>        授权范围：单个 scope / 逗号分隔多个 / all（表示全部）
+  --label <name>         展示名称（generate 用；缺省按日期生成）；CLI 创建的 Token 默认归属管理员
   --read-only            只读模式：远程客户端看不到写工具，构造 tools/call 也会被拒绝
   --read-write           读写模式（update 用于切回读写；与 --read-only 互斥）
 
@@ -277,7 +281,7 @@ function resolveScopesFlag(args: string[], action: string): string[] {
  * ⚠️ 缺了这道校验，`--readonly`（少一个连字符）、`--readOnly` 这类拼错会被静默忽略 ——
  * 用户以为已经设成只读，实际仍是读写（安全属性静默失效）。
  */
-const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write'];
+const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write', '--label'];
 
 /**
  * 拼写近似匹配：把 `--readonly` / `--readOnly` / `--Read-Only` 这类写法归一到
@@ -341,12 +345,23 @@ function runTokenCommand(args: string[]): void {
     try {
       const scopes = resolveScopesFlag(args, 'generate');
       const readOnly = resolveAccessModeFlag(args) === true;
-      const record = createToken(scopes, undefined, readOnly);
+      const label = getFlagValue(args, '--label')?.trim() || `CLI Token ${new Date().toISOString().slice(0, 10)}`;
+      if (label.length > 64) {
+        failJson('Token 名称长度需为 1-64 个字符。', 'MCP_TOKEN_LABEL_INVALID');
+      }
+      const record = createToken(scopes, undefined, readOnly, {
+        label,
+        ownerId: resolveDefaultCliTokenOwner(),
+        createdBy: 'cli',
+      });
       console.log(
         JSON.stringify(
           {
             ok: true,
             id: record.id,
+            label: record.label,
+            ownerId: record.ownerId,
+            createdBy: record.createdBy,
             token: record.token,
             scopes: record.scopes,
             readOnly,
@@ -383,6 +398,8 @@ function runTokenCommand(args: string[]): void {
         const invalid = isReadOnlyFieldInvalid(r);
         return {
           ...r,
+          label: tokenLabel(r),
+          creator: tokenCreator(r),
           readOnly,
           accessMode: accessModeLabel(readOnly),
           ...(invalid

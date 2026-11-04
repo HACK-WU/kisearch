@@ -25,6 +25,8 @@ export interface UserRecord {
   passwordHash: string;
   role: Role;
   disabled?: boolean;
+  /** 账号到期时间（ISO）；缺省 = 永久 */
+  expiresAt?: string;
   createdAt: string;
   updatedAt: string;
   passwordUpdatedAt: string;
@@ -42,6 +44,8 @@ export interface UserView {
   username: string;
   role: Role;
   disabled: boolean;
+  /** null = 永久 */
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
   passwordUpdatedAt: string;
@@ -62,9 +66,13 @@ export type UserStoreErrorCode =
   | 'USER_NOT_FOUND'
   | 'USER_INVALID_ROLE'
   | 'USER_INVALID_USERNAME'
+  | 'USER_INVALID_EXPIRY'
   | 'USER_PASSWORD_REQUIRED'
   | 'USER_PASSWORD_TOO_WEAK'
   | 'USER_LAST_ADMIN'
+  | 'USER_ADMIN_EXISTS'
+  | 'USER_ADMIN_PROTECTED'
+  | 'USER_SELF_PROTECTED'
   | 'USER_STORE_CORRUPT'
   | 'USER_STORE_LOCKED'
   | 'USER_CONFIRM_REQUIRED';
@@ -259,12 +267,40 @@ function generateUserId(existing: Set<string>): string {
   }
 }
 
+/** 账号是否已过期（缺省 = 永久） */
+export function isUserExpired(user: Pick<UserRecord | UserView, 'expiresAt'>, now = Date.now()): boolean {
+  if (!user.expiresAt) return false;
+  const at = Date.parse(user.expiresAt);
+  return Number.isFinite(at) && at <= now;
+}
+
+/** 账号是否可登录/可作为 Token owner（启用且未过期） */
+export function isUserActive(
+  user: Pick<UserRecord | UserView, 'disabled' | 'expiresAt'>,
+  now = Date.now(),
+): boolean {
+  return user.disabled !== true && !isUserExpired(user, now);
+}
+
+function normalizeExpiresAt(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') {
+    throw new UserStoreError('USER_INVALID_EXPIRY', '账号有效期必须是 ISO 时间字符串或留空');
+  }
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) {
+    throw new UserStoreError('USER_INVALID_EXPIRY', '账号有效期不是合法时间');
+  }
+  return new Date(at).toISOString();
+}
+
 function toView(record: UserRecord): UserView {
   return {
     id: record.id,
     username: record.username,
     role: record.role,
     disabled: record.disabled === true,
+    expiresAt: record.expiresAt ?? null,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     passwordUpdatedAt: record.passwordUpdatedAt,
@@ -299,6 +335,13 @@ function parseStore(raw: string, filePath: string): UserStoreFile {
     if (r.disabled !== undefined && typeof r.disabled !== 'boolean') {
       throw corrupt(filePath, `用户 ${r.username} 的 disabled 字段非法`);
     }
+    let expiresAt: string | undefined;
+    if (r.expiresAt !== undefined && r.expiresAt !== null && r.expiresAt !== '') {
+      if (typeof r.expiresAt !== 'string' || !Number.isFinite(Date.parse(r.expiresAt))) {
+        throw corrupt(filePath, `用户 ${r.username} 的 expiresAt 字段非法`);
+      }
+      expiresAt = new Date(Date.parse(r.expiresAt)).toISOString();
+    }
     const createdAt = typeof r.createdAt === 'string' ? r.createdAt : '';
     const updatedAt = typeof r.updatedAt === 'string' ? r.updatedAt : createdAt;
     const passwordUpdatedAt = typeof r.passwordUpdatedAt === 'string' ? r.passwordUpdatedAt : updatedAt;
@@ -313,6 +356,8 @@ function parseStore(raw: string, filePath: string): UserStoreFile {
       passwordHash: r.passwordHash,
       role: r.role as Role,
       ...(r.disabled === true ? { disabled: true } : {}),
+      // 管理员固定永久有效：历史数据即便写了 expiresAt 也不参与判定，避免把管理员锁死
+      ...(expiresAt && r.role !== 'admin' ? { expiresAt } : {}),
       createdAt,
       updatedAt,
       passwordUpdatedAt,
@@ -389,6 +434,40 @@ function assertNotLastEnabledAdmin(store: UserStoreFile, target: UserRecord, act
   }
 }
 
+function hasAdmin(store: UserStoreFile, exceptId?: string): boolean {
+  return store.users.some((u) => u.role === 'admin' && u.id !== exceptId);
+}
+
+function assertAdminSlotAvailable(store: UserStoreFile, exceptId?: string): void {
+  if (hasAdmin(store, exceptId)) {
+    throw new UserStoreError(
+      'USER_ADMIN_EXISTS',
+      '系统只能有一个管理员；如需更换管理员，请先处理现有管理员账号',
+    );
+  }
+}
+
+/**
+ * 管理员账号受保护：唯一管理员不可降级/禁用/删除/设置有效期。
+ * ★ 兼容历史多管理员数据：存在其他管理员时允许清理多余管理员，最后由
+ *   assertNotLastEnabledAdmin 保证至少留下一个启用中的管理员；有效期始终不允许改。
+ */
+function assertAdminProtected(store: UserStoreFile, target: UserRecord, action: string, allowPeerAdmin = false): void {
+  if (target.role !== 'admin') return;
+  if (!hasAdmin(store, target.id)) {
+    throw new UserStoreError(
+      'USER_ADMIN_PROTECTED',
+      `管理员账号不可${action}；管理员权限固定、永久有效，只能修改密码`,
+    );
+  }
+  if (!allowPeerAdmin) {
+    throw new UserStoreError(
+      'USER_ADMIN_PROTECTED',
+      `管理员账号不可${action}；管理员权限固定、永久有效，只能修改密码`,
+    );
+  }
+}
+
 export function listUsers(filePath = getUsersPath()): UserView[] {
   return readStoreStrict(filePath).users.map(toView);
 }
@@ -431,18 +510,22 @@ export interface CreateUserInput {
   username: string;
   password: string;
   role: Role | string;
+  /** ISO 时间；null/缺省 = 永久。管理员忽略此字段（固定永久） */
+  expiresAt?: string | null;
 }
 
 export function createUser(input: CreateUserInput, filePath = getUsersPath()): UserView {
   const { username, usernameLower } = validateUsername(input.username);
   const role = assertRole(String(input.role));
   const password = validatePassword(input.password);
+  const expiresAt = normalizeExpiresAt(input.expiresAt);
 
   return withUsersLock(filePath, () => {
     const store = readStoreStrict(filePath);
     if (findIndex(store, username) >= 0) {
       throw new UserStoreError('USER_EXISTS', `用户名已存在：${username}`);
     }
+    if (role === 'admin') assertAdminSlotAvailable(store);
     const now = new Date().toISOString();
     const record: UserRecord = {
       id: generateUserId(new Set(store.users.map((u) => u.id))),
@@ -450,6 +533,7 @@ export function createUser(input: CreateUserInput, filePath = getUsersPath()): U
       usernameLower,
       passwordHash: hashPassword(password),
       role,
+      ...(role !== 'admin' && expiresAt ? { expiresAt } : {}),
       createdAt: now,
       updatedAt: now,
       passwordUpdatedAt: now,
@@ -491,8 +575,16 @@ export function setUserRole(
     const idx = findIndex(store, username);
     if (idx < 0) throw new UserStoreError('USER_NOT_FOUND', `账号不存在：${username}`);
     const user = store.users[idx];
+    if (user.role === 'admin' && nextRole !== 'admin') assertAdminProtected(store, user, '降级', true);
     if (nextRole !== 'admin') assertNotLastEnabledAdmin(store, user, '降级');
+    if (nextRole === 'admin' && user.role !== 'admin') {
+      assertAdminSlotAvailable(store, user.id);
+      if (user.disabled === true) {
+        throw new UserStoreError('USER_ADMIN_PROTECTED', '不能把已禁用账号提升为管理员；请先启用该账号');
+      }
+    }
     user.role = nextRole;
+    if (nextRole === 'admin') delete user.expiresAt;
     user.updatedAt = new Date().toISOString();
     writeStore(store, filePath);
     return toView(user);
@@ -509,6 +601,7 @@ export function setUserDisabled(
     const idx = findIndex(store, username);
     if (idx < 0) throw new UserStoreError('USER_NOT_FOUND', `账号不存在：${username}`);
     const user = store.users[idx];
+    if (disabled) assertAdminProtected(store, user, '禁用', true);
     if (disabled) assertNotLastEnabledAdmin(store, user, '禁用');
     if (disabled) user.disabled = true;
     else delete user.disabled;
@@ -522,6 +615,8 @@ export interface UserPatch {
   role?: Role | string;
   password?: string;
   disabled?: boolean;
+  /** ISO 时间；null = 永久；undefined = 不修改 */
+  expiresAt?: string | null;
 }
 
 export function updateUserById(
@@ -531,12 +626,24 @@ export function updateUserById(
 ): UserView {
   const nextRole = patch.role !== undefined ? assertRole(String(patch.role)) : undefined;
   const nextPassword = patch.password !== undefined ? validatePassword(patch.password) : undefined;
+  const nextExpiresAt = patch.expiresAt !== undefined ? normalizeExpiresAt(patch.expiresAt) : undefined;
 
   return withUsersLock(filePath, () => {
     const store = readStoreStrict(filePath);
     const idx = store.users.findIndex((u) => u.id === id);
     if (idx < 0) throw new UserStoreError('USER_NOT_FOUND', `账号不存在：${id}`);
     const user = store.users[idx];
+    if (user.role === 'admin') {
+      if (nextRole !== undefined && nextRole !== 'admin') assertAdminProtected(store, user, '降级', true);
+      if (patch.disabled === true) assertAdminProtected(store, user, '禁用', true);
+      if (patch.expiresAt !== undefined) assertAdminProtected(store, user, '设置有效期', false);
+    }
+    const finalRole = nextRole ?? user.role;
+    const finalDisabled = patch.disabled !== undefined ? patch.disabled : user.disabled === true;
+    if (nextRole === 'admin' && user.role !== 'admin') assertAdminSlotAvailable(store, user.id);
+    if (finalRole === 'admin' && finalDisabled) {
+      throw new UserStoreError('USER_ADMIN_PROTECTED', '管理员账号必须保持启用；请先启用账号再提升为管理员');
+    }
     if (nextRole !== undefined && nextRole !== 'admin') {
       assertNotLastEnabledAdmin(store, user, '降级');
     }
@@ -546,8 +653,13 @@ export function updateUserById(
 
     const now = new Date().toISOString();
     if (nextRole !== undefined) user.role = nextRole;
+    if (user.role === 'admin') delete user.expiresAt;
     if (patch.disabled === true) user.disabled = true;
     else if (patch.disabled === false) delete user.disabled;
+    if (patch.expiresAt !== undefined && user.role !== 'admin') {
+      if (nextExpiresAt) user.expiresAt = nextExpiresAt;
+      else delete user.expiresAt;
+    }
     if (nextPassword !== undefined) {
       user.passwordHash = hashPassword(nextPassword);
       user.passwordUpdatedAt = now;
@@ -564,6 +676,7 @@ export function deleteUserById(id: string, filePath = getUsersPath()): UserView 
     const idx = store.users.findIndex((u) => u.id === id);
     if (idx < 0) throw new UserStoreError('USER_NOT_FOUND', `账号不存在：${id}`);
     const user = store.users[idx];
+    assertAdminProtected(store, user, '删除', true);
     assertNotLastEnabledAdmin(store, user, '删除');
     store.users.splice(idx, 1);
     writeStore(store, filePath);
@@ -577,6 +690,7 @@ export function deleteUser(username: string, filePath = getUsersPath()): UserVie
     const idx = findIndex(store, username);
     if (idx < 0) throw new UserStoreError('USER_NOT_FOUND', `账号不存在：${username}`);
     const user = store.users[idx];
+    assertAdminProtected(store, user, '删除', true);
     assertNotLastEnabledAdmin(store, user, '删除');
     store.users.splice(idx, 1);
     writeStore(store, filePath);
@@ -619,7 +733,7 @@ export function verifyCredentials(
     return null;
   }
   const user = store.users[idx];
-  if (user.disabled === true) {
+  if (!isUserActive(user)) {
     verifyPassword(password, DUMMY_PASSWORD_HASH);
     return null;
   }

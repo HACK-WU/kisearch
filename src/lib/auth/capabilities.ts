@@ -19,6 +19,7 @@ export type Capability =
   | 'tasks.cancel'
   | 'tasks.delete'
   | 'users.manage'
+  | 'tokens.self'
   | 'ops.write';
 
 export const ALL_CAPABILITIES: readonly Capability[] = [
@@ -33,6 +34,7 @@ export const ALL_CAPABILITIES: readonly Capability[] = [
   'tasks.cancel',
   'tasks.delete',
   'users.manage',
+  'tokens.self',
   'ops.write',
 ];
 
@@ -45,8 +47,9 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
     'chat.writeTools',
     'datasource.read',
     'tasks.read',
+    'tokens.self',
   ]),
-  viewer: new Set<Capability>(['knowledge.read', 'chat.use', 'tasks.read']),
+  viewer: new Set<Capability>(['knowledge.read', 'chat.use', 'tasks.read', 'tokens.self']),
 };
 
 /**
@@ -54,7 +57,8 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
  * Token 仍受 scope 约束；本表只防止能力白名单给 Token 扩权。
  */
 export const TOKEN_CAPABILITIES: ReadonlySet<Capability> = new Set(
-  ALL_CAPABILITIES.filter((capability) => capability !== 'users.manage' && capability !== 'tasks.delete'),
+  ALL_CAPABILITIES.filter((capability) =>
+    capability !== 'users.manage' && capability !== 'tasks.delete' && capability !== 'tokens.self'),
 );
 
 /** 动作维度为写的集合（用于错误码映射：viewer → USER_READONLY） */

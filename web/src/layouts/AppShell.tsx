@@ -315,7 +315,11 @@ export function AppShell(): JSX.Element {
   }, [isChatRoute, chatOpen, chatStore, searchParams, setSearchParams]);
   const currentLabel = navItems.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
-  )?.label ?? (location.pathname === '/users' ? '用户管理' : '总览');
+  )?.label ?? (location.pathname.startsWith('/users')
+    ? '用户管理'
+    : location.pathname.startsWith('/profile')
+      ? '个人中心'
+      : '总览');
   const { theme, toggle } = useTheme();
   /** 左侧主导航收起态：本地持久化（2026-10-13，此前只存 state、刷新即复位） */
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
@@ -647,6 +651,9 @@ export function AppShell(): JSX.Element {
                         <strong>{displayName}</strong>
                         <span>{roleLabel}{source === 'local' ? ' · 本机' : ''}</span>
                       </div>
+                      <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); navigate('/profile'); }}>
+                        个人中心
+                      </button>
                       {can('users.manage') ? (
                         <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); navigate('/users'); }}>
                           用户管理

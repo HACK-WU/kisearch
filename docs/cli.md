@@ -382,7 +382,7 @@ Web 登录账号管理（**只用于登录 Web 页面**，与 MCP Token 相互�
 ### 用法
 
 ```bash
-ki user create <username> --role <admin|editor|viewer> [--password-stdin]
+ki user create <username> --role <admin|editor|viewer> [--password-stdin] [--expires-at <ISO>]
 ki user list [--json]
 ki user reset-password <username> [--password-stdin]
 ki user set-role <username> --role <admin|editor|viewer>
@@ -393,7 +393,9 @@ ki user delete <username> --yes
 
 - **角色**：`admin`（全部权限，含数据源与用户管理）、`editor`（写知识；数据源页面只读；无运维/账号权限）、`viewer`（只读 + 聊天，工具只读）。
 - **密码**：交互终端下隐藏输入并二次确认；自动化用 `--password-stdin`。不接受 `--password <明文>`，避免进入进程列表/命令历史。
-- **最后管理员保护**：不能删除、降级或禁用最后一个启用中的 `admin`，否则返回 `USER_LAST_ADMIN`。
+- **唯一管理员**：系统只允许一个 `admin`；管理员不可在 Web 上创建，也不能降级、禁用、删除或设置有效期，只能改密码。历史多管理员数据可通过 CLI 逐个清理（最后一个启用中的管理员仍受保护）。
+- **账号有效期**：`--expires-at` 接受 ISO 时间（如 `2026-12-31T23:59`）；缺省永久。过期账号无法登录，现有会话与名下 Token 立即失效。
+- **删除清理**：`ki user delete` 同时删除该账号名下的 MCP Token，避免残留失效记录。
 - **生效时间**：创建/改密/改角色/禁用后无需重启 daemon，下一请求立即生效（鉴权每次重读账号文件）。
 
 ### 账号文件
@@ -1126,8 +1128,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 | 命令 | 说明 |
 |------|------|
-| `ki mcp token generate --scope <scope> [--read-only]` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`）；`--read-only` 生成只读 Token |
-| `ki mcp token list` | 列出所有 Token（含短 ID、明文、授权 scope、访问模式、创建时间） |
+| `ki mcp token generate --scope <scope> [--label <name>] [--read-only]` | 生成强随机 Token（32 字节熵）+ 短 ID，落盘到 `~/.ki/mcp-tokens.json`（0600）。**必须显式指定 `--scope`**（单个 / 逗号分隔多个 / `all` 表示全部），缺省报错（`MCP_TOKEN_SCOPE_REQUIRED`）；`--label` 设置展示名；`--read-only` 生成只读 Token。CLI 创建的 Token 默认归属唯一管理员 |
+| `ki mcp token list` | 列出所有 Token（含短 ID、名称、归属、创建者、明文、授权 scope、访问模式、创建时间） |
 | `ki mcp token update <id> [--scope <scope>] [--read-only\|--read-write]` | 改授权 scope / 切换访问模式，两项至少给一个（否则 `MCP_TOKEN_UPDATE_NOTHING_TO_DO`）；可只改其中一项；id 不存在报错（`TOKEN_NOT_FOUND`） |
 | `ki mcp token delete <id>` | 按短 ID 删除 Token，立即失效；id 不存在报错（`TOKEN_NOT_FOUND`） |
 

@@ -46,6 +46,9 @@ const RULES: Rule[] = [
   pattern('GET', /^\/tasks\/[^/]+$/, 'permission', 'tasks.read'),
   pattern('DELETE', /^\/tasks\/[^/]+$/, 'permission', 'tasks.delete'),
 
+  // ── 自己的 MCP Token（所有登录角色可用；Token principal 不在能力表内）──
+  { method: '*', test: (p) => p === '/me/tokens' || p.startsWith('/me/tokens/'), kind: 'permission', capability: 'tokens.self' },
+
   // ── 用户管理（S-04 实现；当前 admin 命中后由分发器 404）──
   { method: '*', test: (p) => p === '/users' || p.startsWith('/users/'), kind: 'permission', capability: 'users.manage' },
 

@@ -19,6 +19,8 @@ import {
   resetUserPassword,
   setUserDisabled,
   setUserRole,
+  updateUserById,
+  isUserExpired,
   verifyCredentials,
   verifyPassword,
 } from '../src/lib/user-store.js';
@@ -103,22 +105,80 @@ describe('user-store', () => {
     assert.ok(verifyCredentials(name, 'NewPassw0rd!', usersPath));
   });
 
-  it('最后一个启用中的 admin 不能删除 / 降级 / 禁用', () => {
-    const name = uniqueName('onlyadmin');
-    createUser({ username: name, password: 'Passw0rd!', role: 'admin' }, usersPath);
-    // 其他测试可能已创建 admin；先确保当前文件里只有本测试的 admin 不可能，
-    // 故用独立文件验证“唯一 admin”语义。
+  it('唯一管理员：第二个 admin 被拒；管理员不可删除 / 降级 / 禁用 / 设置有效期', () => {
     const soloPath = path.join(tempDir, `solo-${seq++}.json`);
-    createUser({ username: 'solo-admin', password: 'Passw0rd!', role: 'admin' }, soloPath);
-    expectCode(() => deleteUser('solo-admin', soloPath), 'USER_LAST_ADMIN');
-    expectCode(() => setUserRole('solo-admin', 'editor', soloPath), 'USER_LAST_ADMIN');
-    expectCode(() => setUserDisabled('solo-admin', true, soloPath), 'USER_LAST_ADMIN');
+    const admin = createUser({ username: 'solo-admin', password: 'Passw0rd!', role: 'admin' }, soloPath);
+    expectCode(
+      () => createUser({ username: 'second-admin', password: 'Passw0rd!', role: 'admin' }, soloPath),
+      'USER_ADMIN_EXISTS',
+    );
+    expectCode(() => deleteUser('solo-admin', soloPath), 'USER_ADMIN_PROTECTED');
+    expectCode(() => setUserRole('solo-admin', 'editor', soloPath), 'USER_ADMIN_PROTECTED');
+    expectCode(() => setUserDisabled('solo-admin', true, soloPath), 'USER_ADMIN_PROTECTED');
+    expectCode(
+      () => updateUserById(admin.id, { expiresAt: '2027-01-01T00:00:00.000Z' }, soloPath),
+      'USER_ADMIN_PROTECTED',
+    );
+    const reset = resetUserPassword('solo-admin', 'NewPassw0rd!', soloPath);
+    assert.equal(reset.role, 'admin');
+    assert.ok(verifyCredentials('solo-admin', 'NewPassw0rd!', soloPath));
+  });
 
-    createUser({ username: 'second-admin', password: 'Passw0rd!', role: 'admin' }, soloPath);
-    const demoted = setUserRole('solo-admin', 'editor', soloPath);
-    assert.equal(demoted.role, 'editor');
-    expectCode(() => setUserDisabled('second-admin', true, soloPath), 'USER_LAST_ADMIN');
-    assert.equal(deleteUser(name, usersPath).username, name);
+  it('账号有效期：设置 / 清除 / 过期后拒绝登录', () => {
+    const expiryPath = path.join(tempDir, `expiry-${seq++}.json`);
+    const future = '2099-12-31T23:59:00.000Z';
+    const created = createUser(
+      { username: 'expiry-user', password: 'Passw0rd!', role: 'editor', expiresAt: future },
+      expiryPath,
+    );
+    assert.equal(created.expiresAt, future);
+    assert.equal(isUserExpired(created), false);
+    assert.ok(verifyCredentials('expiry-user', 'Passw0rd!', expiryPath));
+
+    const past = '2020-01-01T00:00:00.000Z';
+    updateUserById(created.id, { expiresAt: past }, expiryPath);
+    assert.equal(isUserExpired(listUsers(expiryPath)[0]), true);
+    assert.equal(verifyCredentials('expiry-user', 'Passw0rd!', expiryPath), null);
+
+    const cleared = updateUserById(created.id, { expiresAt: null }, expiryPath);
+    assert.equal(cleared.expiresAt, null);
+    assert.ok(verifyCredentials('expiry-user', 'Passw0rd!', expiryPath));
+  });
+
+  it('历史双 admin：只有一个启用中 admin 时仍不能降级/禁用', () => {
+    const pathMulti = path.join(tempDir, `multi-admin-${seq++}.json`);
+    const first = createUser({ username: 'admin-a', password: 'Passw0rd!', role: 'admin' }, pathMulti);
+    const raw = JSON.parse(fs.readFileSync(pathMulti, 'utf8')) as { users: Array<Record<string, unknown>> };
+    raw.users.push({
+      ...raw.users[0],
+      id: 'adminBxx',
+      username: 'admin-b',
+      usernameLower: 'admin-b',
+    });
+    fs.writeFileSync(pathMulti, JSON.stringify(raw), 'utf8');
+
+    setUserDisabled('admin-b', true, pathMulti);
+    expectCode(() => setUserRole('admin-a', 'editor', pathMulti), 'USER_LAST_ADMIN');
+    expectCode(() => setUserDisabled('admin-a', true, pathMulti), 'USER_LAST_ADMIN');
+    expectCode(() => updateUserById(first.id, { role: 'editor' }, pathMulti), 'USER_LAST_ADMIN');
+    expectCode(() => updateUserById(first.id, { disabled: true }, pathMulti), 'USER_ADMIN_PROTECTED');
+
+    // 多余的禁用 admin 可以被 CLI/存储层清理，最后仍保留一个启用中的 admin
+    const removed = deleteUser('admin-b', pathMulti);
+    assert.equal(removed.username, 'admin-b');
+    assert.equal(getUserStoreStatus(pathMulti).enabledAdmins, 1);
+  });
+
+  it('不能把禁用账号提升为管理员（避免产生禁用 admin）', () => {
+    const pathPromote = path.join(tempDir, `promote-${seq++}.json`);
+    const editor = createUser({ username: 'disabled-editor', password: 'Passw0rd!', role: 'editor' }, pathPromote);
+    setUserDisabled('disabled-editor', true, pathPromote);
+    expectCode(() => setUserRole('disabled-editor', 'admin', pathPromote), 'USER_ADMIN_PROTECTED');
+    expectCode(() => updateUserById(editor.id, { role: 'admin' }, pathPromote), 'USER_ADMIN_PROTECTED');
+    expectCode(
+      () => updateUserById(editor.id, { role: 'admin', disabled: true }, pathPromote),
+      'USER_ADMIN_PROTECTED',
+    );
   });
 
   it('禁用 / 启用 / 角色切换 / 删除', () => {

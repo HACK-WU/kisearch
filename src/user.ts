@@ -20,12 +20,14 @@ import { UserStoreError, ROLES, type UserView } from './lib/user-store.js';
 import {
   createUser,
   deleteUser,
+  isUserExpired,
   listUsers,
   resetUserPassword,
   setUserDisabled,
   setUserRole,
 } from './lib/user-store.js';
 import { toErrorPayload } from './lib/cli-args.js';
+import { deleteTokensByOwner } from './lib/mcp-token.js';
 
 interface PasswordOptions {
   passwordStdin?: boolean;
@@ -43,7 +45,8 @@ function printUserTable(users: UserView[]): void {
   const rows = users.map((u) => ({
     用户名: u.username,
     角色: u.role,
-    状态: u.disabled ? '禁用' : '启用',
+    状态: u.disabled ? '禁用' : isUserExpired(u) ? '已过期' : '启用',
+    有效期: u.expiresAt ?? '永久',
     最近登录: u.lastLoginAt ?? '—',
     创建时间: u.createdAt,
   }));
@@ -129,9 +132,15 @@ program
   .argument('<username>', '用户名（字母/数字/点/连字符/下划线，1-64）')
   .requiredOption('--role <role>', `角色：${ROLES.join(' / ')}`)
   .option('--password-stdin', '从标准输入读取密码（非交互终端）')
-  .action(async (username: string, opts: { role: string; passwordStdin?: boolean }) => {
+  .option('--expires-at <iso>', '账号到期时间（ISO，例如 2026-12-31T23:59；缺省永久）')
+  .action(async (username: string, opts: { role: string; passwordStdin?: boolean; expiresAt?: string }) => {
     const password = await readPassword(opts, true);
-    const user = createUser({ username, password, role: parseRole(opts.role) });
+    const user = createUser({
+      username,
+      password,
+      role: parseRole(opts.role),
+      ...(opts.expiresAt ? { expiresAt: opts.expiresAt } : {}),
+    });
     output({ ok: true, user });
   });
 
@@ -194,7 +203,14 @@ program
         `删除账号 ${username} 需确认：请追加 --yes`,
       );
     }
-    output({ ok: true, user: deleteUser(username) });
+    const user = deleteUser(username);
+    let tokenCleanupWarning: string | undefined;
+    try {
+      deleteTokensByOwner(user.id);
+    } catch (error) {
+      tokenCleanupWarning = (error as Error).message;
+    }
+    output({ ok: true, user, ...(tokenCleanupWarning ? { tokenCleanupWarning } : {}) });
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

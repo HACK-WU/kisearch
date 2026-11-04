@@ -16,11 +16,23 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import {
+  findUserById,
+  getUsersPath,
+  isUserActive,
+  listUsers,
+  type UserRecord,
+} from './user-store.js';
 
 /** 多 Token 存储文件路径：~/.ki/mcp-tokens.json（与 HTTP lock 同目录） */
 export function getTokensPath(): string {
   return path.join(os.homedir(), '.ki', 'mcp-tokens.json');
 }
+
+/** 本机免登录管理员的虚拟 owner id（没有 users.json 记录时使用） */
+export const LOCAL_ADMIN_OWNER_ID = 'local-admin';
+
+export type TokenCreator = 'self' | 'admin' | 'cli';
 
 /** 单条 Token 记录 */
 export interface TokenRecord {
@@ -28,8 +40,16 @@ export interface TokenRecord {
   id: string;
   /** Token 明文（32 字节熵，base64url） */
   token: string;
+  /** 展示名称；旧记录缺省时按 `Token <id>` 兜底 */
+  label?: string;
+  /** 归属账号 id；旧记录缺省 = 未归属（仍有效，不计入任何人的上限） */
+  ownerId?: string;
+  /** 创建来源；旧记录缺省按 CLI 兜底 */
+  createdBy?: TokenCreator;
   /** 授权 scope 集合：['all'] 表示全部；否则为具体 scope 列表 */
   scopes: string[];
+  /** 创建时间（ISO） */
+  createdAt: string;
   /**
    * 是否只读（动作维度，与 scopes 的「数据维度」正交）。
    *
@@ -166,6 +186,72 @@ export function listTokensStrict(filePath = getTokensPath()): TokenRecord[] {
   return records;
 }
 
+/** 展示名：旧记录无 label 时按短 ID 兜底 */
+export function tokenLabel(record: TokenRecord): string {
+  if (typeof record.label === 'string' && record.label.trim()) return record.label.trim();
+  return `Token ${record.id}`;
+}
+
+/** 创建来源：旧记录视为 CLI（历史 Token 均由 CLI 生成） */
+export function tokenCreator(record: TokenRecord): TokenCreator {
+  return record.createdBy === 'self' || record.createdBy === 'admin' || record.createdBy === 'cli'
+    ? record.createdBy
+    : 'cli';
+}
+
+/** 某个账号名下的 Token（旧记录无 ownerId，不归属任何人） */
+export function listTokensByOwner(ownerId: string, filePath = getTokensPath()): TokenRecord[] {
+  return listTokens(filePath).filter((record) => record.ownerId === ownerId);
+}
+
+export function countTokensByOwner(ownerId: string, filePath = getTokensPath()): number {
+  return listTokensByOwner(ownerId, filePath).length;
+}
+
+/** 删除某账号名下的全部 Token（删除账号时清理）；返回删除数量 */
+export function deleteTokensByOwner(ownerId: string, filePath = getTokensPath()): number {
+  const records = listTokensStrict(filePath);
+  const kept = records.filter((record) => record.ownerId !== ownerId);
+  const removed = records.length - kept.length;
+  if (removed > 0) writeTokens(kept, filePath);
+  return removed;
+}
+
+/**
+ * CLI 创建 Token 的默认归属：users.json 中唯一的管理员；没有管理员记录时归本机管理员。
+ * 优先选启用中的 admin；若仅有禁用/过期 admin，则仍取该记录（Token 会随 owner 失效）。
+ */
+export function resolveDefaultCliTokenOwner(usersPath = getUsersPath()): string {
+  try {
+    const admins = listUsers(usersPath).filter((user) => user.role === 'admin');
+    const active = admins.find((user) => isUserActive(user));
+    const chosen = active ?? admins[0];
+    return chosen ? chosen.id : LOCAL_ADMIN_OWNER_ID;
+  } catch {
+    return LOCAL_ADMIN_OWNER_ID;
+  }
+}
+
+/** Token 的有效授权：owner 缺失按旧记录；owner 禁用/过期 → 失效；owner 为 viewer → 强制只读 */
+function effectiveTokenAuth(
+  record: TokenRecord,
+  usersPath: string,
+): { readOnly: boolean; owner?: UserRecord } | undefined {
+  if (!record.ownerId) return { readOnly: record.readOnly === true };
+  if (record.ownerId === LOCAL_ADMIN_OWNER_ID) return { readOnly: record.readOnly === true };
+  let owner: UserRecord | undefined;
+  try {
+    owner = findUserById(record.ownerId, usersPath);
+  } catch {
+    return undefined;
+  }
+  if (!owner || !isUserActive(owner)) return undefined;
+  return {
+    owner,
+    readOnly: record.readOnly === true || owner.role === 'viewer',
+  };
+}
+
 /**
  * 原子写回全部 Token 记录（0600，目录 0700）。
  * 先写同目录临时文件（0600），再 rename 覆盖目标：rename 在同目录内原子，
@@ -202,10 +288,17 @@ function writeTokens(records: TokenRecord[], filePath = getTokensPath()): void {
  * @param readOnly 是否只读（缺省 false = 读写）
  * @returns 完整记录（含 id + token 明文）
  */
+export interface CreateTokenMeta {
+  label?: string;
+  ownerId?: string;
+  createdBy?: TokenCreator;
+}
+
 export function createToken(
   scopes: string[],
   filePath = getTokensPath(),
   readOnly = false,
+  meta: CreateTokenMeta = {},
 ): TokenRecord {
   // 严格读取：文件损坏时拒绝覆盖写回（否则会永久丢失全部现有记录）
   const records = listTokensStrict(filePath);
@@ -219,6 +312,9 @@ export function createToken(
     createdAt: new Date().toISOString(),
     // 仅只读时落字段：读写保持旧格式（旧版本读到无此字段同样按读写处理）
     ...(readOnly ? { readOnly: true } : {}),
+    ...(meta.label?.trim() ? { label: meta.label.trim() } : {}),
+    ...(meta.ownerId ? { ownerId: meta.ownerId } : {}),
+    ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
   };
   records.push(record);
   writeTokens(records, filePath);
@@ -312,8 +408,9 @@ function findTokenRecord(tokenValue: string, filePath: string): TokenRecord | un
 export function findTokenScopes(
   tokenValue: string,
   filePath = getTokensPath(),
+  usersPath = getUsersPath(),
 ): string[] | undefined {
-  return findTokenRecord(tokenValue, filePath)?.scopes;
+  return findTokenAuth(tokenValue, filePath, usersPath)?.scopes;
 }
 
 /**
@@ -326,10 +423,13 @@ export function findTokenScopes(
 export function findTokenAuth(
   tokenValue: string,
   filePath = getTokensPath(),
+  usersPath = getUsersPath(),
 ): TokenAuth | undefined {
   const record = findTokenRecord(tokenValue, filePath);
   if (!record) return undefined;
-  return { id: record.id, scopes: record.scopes, readOnly: record.readOnly === true };
+  const effective = effectiveTokenAuth(record, usersPath);
+  if (!effective) return undefined;
+  return { id: record.id, scopes: record.scopes, readOnly: effective.readOnly };
 }
 
 /** `readOnly` 字段是否非法（存在但不是布尔）——供 list 命令告警，undefined 属正常（缺省读写） */

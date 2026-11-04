@@ -344,7 +344,7 @@ describe('/api/auth', () => {
       headers: { cookie },
     });
     assert.equal(lastAdmin.status, 409);
-    assert.equal(lastAdmin.body.code, 'USER_LAST_ADMIN');
+    assert.equal(lastAdmin.body.code, 'USER_SELF_PROTECTED');
   });
 
   it('任务列表/详情返回 operator（viewer 可读）', async () => {

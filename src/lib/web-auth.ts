@@ -15,7 +15,7 @@ import * as crypto from 'node:crypto';
 import * as net from 'node:net';
 import { isLoopbackAddr } from './net-addr.js';
 import { ALL_SCOPES, findTokenAuth, type TokenAuth } from './mcp-token.js';
-import { findUserById, type Role, type UserRecord } from './user-store.js';
+import { findUserById, isUserActive, type Role, type UserRecord } from './user-store.js';
 import type { TaskOperator } from './task-registry.js';
 import {
   ALL_CAPABILITIES,
@@ -182,7 +182,7 @@ export function resolveWebPrincipal(
     }
     const resolved = ctx.resolveTokenAuth
       ? ctx.resolveTokenAuth(bearer)
-      : findTokenAuth(bearer);
+      : findTokenAuth(bearer, undefined, ctx.usersPath);
     if (resolved) return { principal: tokenAuthToPrincipal(resolved) };
     if (ctx.resolveTokenScopes) {
       const scopes = ctx.resolveTokenScopes(bearer);
@@ -203,7 +203,7 @@ export function resolveWebPrincipal(
     // 用户存储损坏：按未登录处理，避免把未知状态当成有效会话
     return { principal: null };
   }
-  if (!user || user.disabled === true || user.passwordUpdatedAt !== session.passwordUpdatedAt) {
+  if (!user || !isUserActive(user) || user.passwordUpdatedAt !== session.passwordUpdatedAt) {
     deleteSession(session.id);
     return { principal: null };
   }

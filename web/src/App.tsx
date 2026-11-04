@@ -8,6 +8,7 @@ import { ScopeProvider } from '@/lib/scopeContext';
 import { AuthProvider } from '@/lib/authContext';
 import { AppRoutes } from '@/router/routes';
 import './styles/ki.css';
+import './styles/users-v2.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {

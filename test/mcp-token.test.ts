@@ -22,11 +22,15 @@ import {
   updateTokenScopes,
   deleteToken,
   findTokenScopes,
+  findTokenAuth,
+  resolveDefaultCliTokenOwner,
+  LOCAL_ADMIN_OWNER_ID,
   tokenCount,
   getTokensPath,
   isScopeAuthorized,
   ALL_SCOPES,
 } from '../src/lib/mcp-token.js';
+import { createUser, updateUserById } from '../src/lib/user-store.js';
 
 let tmpDir: string;
 let tokensPath: string;
@@ -265,5 +269,35 @@ describe('listTokensStrict（文件损坏保护）', () => {
 describe('getTokensPath', () => {
   it('默认路径位于 ~/.ki/mcp-tokens.json（与 lock 文件同目录）', () => {
     assert.equal(getTokensPath(), path.join(os.homedir(), '.ki', 'mcp-tokens.json'));
+  });
+});
+
+
+describe('CLI Token 默认归属与 owner 有效权限', () => {
+  it('有 admin 记录时归 admin；无 admin 记录时归 local-admin', () => {
+    const usersPath = path.join(tmpDir, 'users.json');
+    const admin = createUser({ username: 'cli-admin', password: 'Passw0rd!', role: 'admin' }, usersPath);
+    assert.equal(resolveDefaultCliTokenOwner(usersPath), admin.id);
+    assert.equal(resolveDefaultCliTokenOwner(path.join(tmpDir, 'missing.json')), LOCAL_ADMIN_OWNER_ID);
+  });
+
+  it('owner 降为 viewer → 只读；禁用/过期 → Token 失效', () => {
+    const usersPath = path.join(tmpDir, 'owner-users.json');
+    const editor = createUser({ username: 'token-editor', password: 'Passw0rd!', role: 'editor' }, usersPath);
+    const record = createToken(['all'], tokensPath, false, {
+      label: 'owner-token',
+      ownerId: editor.id,
+      createdBy: 'cli',
+    });
+    assert.equal(findTokenAuth(record.token, tokensPath, usersPath)?.readOnly, false);
+
+    updateUserById(editor.id, { role: 'viewer' }, usersPath);
+    assert.equal(findTokenAuth(record.token, tokensPath, usersPath)?.readOnly, true);
+
+    updateUserById(editor.id, { disabled: true }, usersPath);
+    assert.equal(findTokenAuth(record.token, tokensPath, usersPath), undefined);
+
+    updateUserById(editor.id, { disabled: false, expiresAt: '2020-01-01T00:00:00.000Z' }, usersPath);
+    assert.equal(findTokenAuth(record.token, tokensPath, usersPath), undefined);
   });
 });

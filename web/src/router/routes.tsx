@@ -11,6 +11,7 @@ import { ChatPage } from '@/pages/ChatPage';
 import { ResourcesPage } from '@/pages/ResourcesPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { UsersPage } from '@/pages/UsersPage';
+import { ProfilePage } from '@/pages/ProfilePage';
 import { useAuth } from '@/lib/authContext';
 
 function RequireAuth({ children }: { children: ReactNode }): JSX.Element {
@@ -34,6 +35,12 @@ function RequireAuth({ children }: { children: ReactNode }): JSX.Element {
 function RequireCapability({ cap, children }: { cap: string; children: ReactNode }): JSX.Element {
   const { can } = useAuth();
   if (!can(cap)) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+function RequireUsersManage({ children }: { children: ReactNode }): JSX.Element {
+  const { can } = useAuth();
+  if (!can('users.manage')) return <Navigate to="/profile" replace />;
   return <>{children}</>;
 }
 
@@ -73,10 +80,12 @@ export function AppRoutes(): JSX.Element {
         <Route path="resources" element={<ResourcesPage />} />
         {/* :topic 为目录深链（/resources/import 等），刷新与分享可复原 */}
         <Route path="resources/:topic" element={<ResourcesPage />} />
+        {/* 个人中心（REQ-20261104-001）：所有登录账号 */}
+        <Route path="profile" element={<ProfilePage />} />
         {/* 用户管理（REQ-20261103-001）：仅完整管理员 */}
         <Route
           path="users"
-          element={<RequireCapability cap="users.manage"><UsersPage /></RequireCapability>}
+          element={<RequireUsersManage><UsersPage /></RequireUsersManage>}
         />
       </Route>
     </Routes>
