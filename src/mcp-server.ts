@@ -79,6 +79,7 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
                                 改授权 scope / 切换只读（两项至少给一个）
   ki mcp token delete <id>      删除指定 Token（立即失效）
+  ki mcp token -h               查看 token 子命令与参数说明
 
 只读 Token：远程 MCP 客户端连上后看不到写工具（new/update/delete 均不可用），
   且即使构造 tools/call 也会被拒绝。适用于只应检索、不应改库的 AI 客户端。
@@ -94,6 +95,32 @@ HTTP 模式参数：
   --daemon, -d                  后台常驻运行（仅 HTTP 模式，含 --web；脱离终端）
 
 提示：CLI、stdio MCP、HTTP MCP 共用同一 daemon；daemon 不可用时客户端会自动拉起，失败将明确报错。`;
+
+/** 帮助文本：`ki mcp token -h/--help` 专用（含四个子命令各自的参数） */
+const TOKEN_HELP = `ki mcp token - 管理 MCP 授权 Token
+
+用法：
+  ki mcp token list
+  ki mcp token generate --scope <scope> [--read-only]
+  ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
+  ki mcp token delete <id>
+
+子命令：
+  list                   列出所有 Token（含短 ID、明文、授权 scope、访问模式、创建时间）
+  generate               生成授权 Token（scope 必填：单个 / 逗号分隔多个 / all 表示全部）
+  update                 改授权 scope / 切换访问模式（两项至少给一个，可只改其中一项）
+  delete                 删除指定 Token（立即失效）
+
+参数：
+  --scope <scope>        授权范围：单个 scope / 逗号分隔多个 / all（表示全部）
+  --read-only            只读模式：远程客户端看不到写工具，构造 tools/call 也会被拒绝
+  --read-write           读写模式（update 用于切回读写；与 --read-only 互斥）
+
+说明：
+  - Token 明文落盘在 ~/.ki/mcp-tokens.json（0600），请勿粘贴到公开渠道
+  - <id> 为 8 位短 ID，用 ki mcp token list 查看
+  - 只读仅对非回环来源生效：本机 127.0.0.1 直连免鉴权，不受该限制
+  - 已连接的 MCP 客户端需重连才能刷新工具列表（新请求立即按新权限校验）`;
 
 /** 从 args 取 --flag 的值（支持 --flag=value 与 --flag value 两种形式） */
 function getFlagValue(args: string[], name: string): string | undefined {
@@ -728,6 +755,19 @@ export async function startMcpServer(): Promise<void> {
   // 必须在 positional 检测之前：否则 -d 会被下方「未知短 flag」分支拦截报错。
   argv = argv.map((a) => (a === '-d' ? '--daemon' : a));
 
+  // token 子命令判定只做一次：帮助门禁与下方分发必须用同一条件，
+  // 两处各写一遍 `argv[0] === 'token'` 一旦漂移，就会出现「-h 打印 token 帮助、
+  // 但 token 命令实际落到了别的分支」的错配。
+  const isTokenCommand = argv[0] === 'token';
+
+  // ─── ki mcp token -h/--help：打印 token 子命令帮助 ───
+  // 必须排在下方全局 help 门禁**之前**：否则 `ki mcp token -h` 会被当作 `ki mcp -h`
+  // 打印父级帮助，token 的子命令与参数说明永远看不到（子命令帮助被父级吞掉）。
+  if (isTokenCommand && (argv.includes('-h') || argv.includes('--help'))) {
+    console.log(TOKEN_HELP);
+    return;
+  }
+
   // ─── ki mcp -h/--help：打印帮助后直接退出，绝不落入默认 stdio 启动 ───
   //（-h 不带 -- 前缀，detectUnknownFlags 拦不住；必须在所有分发之前处理）
   if (argv.includes('-h') || argv.includes('--help')) {
@@ -768,7 +808,7 @@ export async function startMcpServer(): Promise<void> {
   }
 
   // ─── ki mcp token <generate|reset>：托管 Token 管理，不启动服务、跳过预检 ───
-  if (argv[0] === 'token') {
+  if (isTokenCommand) {
     runTokenCommand(argv.slice(1));
     return;
   }

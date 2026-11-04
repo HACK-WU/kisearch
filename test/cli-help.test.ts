@@ -88,6 +88,44 @@ describe('所有子命令支持 -h / --help', () => {
   }
 });
 
+/**
+ * 嵌套子命令帮助（2026-11-04 补）
+ *
+ * 背景：`ki mcp token -h` 曾被全局 `-h` 门禁当作 `ki mcp -h`，打印父级帮助——
+ * token 的四个子命令与参数说明永远看不到。本组把「子命令帮助不得被父级吞掉」
+ * 变成结构断言：既要求 token 帮助含子命令与参数，也要求父级帮助不被劫持。
+ */
+describe('嵌套子命令 `ki mcp token` 支持 -h / --help', () => {
+  for (const flag of ['-h', '--help']) {
+    it(`ki mcp token ${flag} 输出 token 子命令帮助而非 mcp 顶层帮助`, () => {
+      const { stdout, status } = runCli(['mcp', 'token', flag]);
+      assert.strictEqual(status, 0, `stdout=${stdout}`);
+      assert.match(stdout, /ki mcp token - /, '应输出 token 子命令帮助标题');
+      for (const word of ['list', 'generate', 'update', 'delete']) {
+        assert.match(stdout, new RegExp(`\\b${word}\\b`), `token 帮助应列出子命令 ${word}`);
+      }
+      for (const flagName of ['--scope', '--read-only', '--read-write']) {
+        assert.ok(stdout.includes(flagName), `token 帮助应列出参数 ${flagName}`);
+      }
+      assert.doesNotMatch(stdout, /HTTP 模式参数/, '不应输出 mcp 顶层帮助的 HTTP 参数段');
+    });
+  }
+
+  it('ki mcp token generate -h 同样输出 token 帮助（不依赖子命令位置）', () => {
+    const { stdout, status } = runCli(['mcp', 'token', 'generate', '-h']);
+    assert.strictEqual(status, 0, `stdout=${stdout}`);
+    assert.match(stdout, /ki mcp token - /);
+    assert.ok(stdout.includes('--scope'));
+  });
+
+  it('ki mcp -h 仍输出顶层帮助（不被 token 帮助劫持）', () => {
+    const { stdout, status } = runCli(['mcp', '-h']);
+    assert.strictEqual(status, 0, `stdout=${stdout}`);
+    assert.match(stdout, /HTTP 模式参数/);
+    assert.doesNotMatch(stdout, /^ki mcp token - /m);
+  });
+});
+
 describe('手写解析命令的 -h 不被当作 scope 参数', () => {
   const manual: Array<{ cmd: string; help: RegExp }> = [
     { cmd: 'backup', help: /ki backup -/ },
