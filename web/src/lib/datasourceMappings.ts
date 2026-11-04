@@ -156,6 +156,46 @@ export function mappingRowsEqual(
   return left.every((item, index) => item.subdir === right[index].subdir && item.group === right[index].group);
 }
 
+/**
+ * 落点配置区该用哪种形态（REQ-20261104-002 修复：目录源不该出现映射表）。
+ *
+ * - `editor`：Git 源且 daemon 支持多映射 → 可增删改的映射表；
+ * - `single`：**普通目录源** → 只有一个落点 Group（子目录映射对它没有含义，
+ *   后端也会以 `INVALID_SUBDIR` 拒绝），渲染成单行只读；
+ * - `readonly`：旧 daemon 不下发 `mappings` → 只读展示并提示升级（不做假功能）。
+ *
+ * ★ 别退回「`mappings !== undefined` 就出编辑器」：`normalizeRecord` 对**所有**记录
+ *   都会填 `mappings`（目录源得到 1 条根映射），那样目录源又会冒出三列映射表。
+ */
+export type MappingUiMode = 'editor' | 'single' | 'readonly';
+
+/** 是否 Git 源：旧 daemon 可能不返回 `type`，有 `git` 元信息同样按 Git 处理 */
+function isGitSource(record: { type?: string; git?: unknown }): boolean {
+  return record.type === 'git' || record.git !== undefined;
+}
+
+export function mappingUiMode(record: {
+  type?: string;
+  git?: unknown;
+  mappings?: unknown;
+}): MappingUiMode {
+  // 目录源永远只有一个落点（与 daemon 版本无关）——先判类型，不能先判 mappings，
+  // 否则旧 daemon 的目录源会落到「升级后就能增删映射」的误导文案上
+  if (!isGitSource(record)) return 'single';
+  if (record.mappings === undefined) return 'readonly';
+  return 'editor';
+}
+
+/**
+ * 基本信息里的「源类型」文案。
+ *
+ * ★ 必须与 `mappingUiMode` **解耦**：旧 daemon 的 Git 源 `mappingUiMode` 是 `readonly`，
+ *   若用"能否编辑映射"反推类型，就会把它显示成「普通目录」（2026-11-04 自查发现）。
+ */
+export function sourceTypeLabel(record: { type?: string; git?: unknown }): 'Git 仓库' | '普通目录' {
+  return isGitSource(record) ? 'Git 仓库' : '普通目录';
+}
+
 /** 子目录展示：空 = 仓库根 */
 export function subdirLabel(subdir: string): string {
   return normalizeSubdir(subdir) || '（仓库根）';

@@ -2,7 +2,9 @@
  * 编辑数据源（2026-10-30）：同步参数 + 定时同步，单按钮保存。
  *
  * 语义边界：
- *  - 身份字段只读（scope / 仓库来源 / 分支 / 子目录 / 源目录 / 落点 Group）——换源需移除后重加
+ *  - 身份字段只读（scope / 仓库来源 / 分支 / 源目录）——换源需移除后重加
+ *  - 「子目录 → 落点 Group」映射**可编辑**（REQ-20261104-002，仅 Git 源）；
+ *    普通目录源只有一个落点、不支持子目录映射（后端会以 INVALID_SUBDIR 拒绝）
  *  - 参数自**下次同步**起生效；历史文档不回填（勾「保存后立即全量同步」才会重建）
  *  - 配置与定时是两个写接口：先配置后定时，任一步失败都会明确"哪部分已保存"
  */
@@ -42,7 +44,9 @@ import {
 } from '@/lib/datasourceEdit';
 import {
   mappingRowsEqual,
+  mappingUiMode,
   rowsFromMappings,
+  sourceTypeLabel,
   toMappingPayload,
   validateMappingRows,
   type MappingRow,
@@ -91,8 +95,18 @@ export function DatasourceEditDialog({
   const [partialSaved, setPartialSaved] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
 
-  /** 映射（REQ-20261104-002）：旧 daemon 不下发 mappings ⇒ 只读展示，不提供编辑（不做假功能） */
-  const mappingEditable = record.mappings !== undefined;
+  /**
+   * 落点区形态（REQ-20261104-002）：
+   *  - `editor`：Git 源 + daemon 下发 mappings；
+   *  - `single`：**普通目录源** —— 只有一个落点，子目录映射对它无意义（后端也会拒），只读展示；
+   *  - `readonly`：旧 daemon 不下发 mappings ⇒ 只读 + 提示升级。
+   * ★ 不能再用 `record.mappings !== undefined` 判断：归一化对**所有**记录都填 mappings，
+   *   那样目录源也会冒出三列映射表（2026-11-04 用户反馈的缺陷）。
+   */
+  const mappingMode = mappingUiMode(record);
+  /** 类型文案独立取（不能用 mappingMode 反推：旧 daemon 的 Git 源 mappingMode 是 readonly） */
+  const sourceType = sourceTypeLabel(record);
+  const mappingEditable = mappingMode === 'editor';
   const legacyMapping = { relativeRoot: record.git?.relativeRoot ?? '', group: record.group };
   const [mappingRows, setMappingRows] = useState<MappingRow[]>(
     () => rowsFromMappings(record.mappings, legacyMapping),
@@ -249,6 +263,11 @@ export function DatasourceEditDialog({
                 <dt>知识库</dt>
                 <dd>{base.scope}</dd>
               </div>
+              {/* 源类型：目录源与 Git 源的落点规则完全不同，编辑时必须能一眼看出（2026-11-04 用户反馈） */}
+              <div>
+                <dt>源类型</dt>
+                <dd>{sourceType}</dd>
+              </div>
               {git ? (
                 <>
                   <div>
@@ -272,9 +291,13 @@ export function DatasourceEditDialog({
               </div>
             </dl>
 
-            {/* ④ 目录 → 落点 Group（REQ-20261104-002）：自本需求起**可编辑**（旧 daemon 无 mappings → 只读） */}
-            <div className="ki-ds-edit__title" style={{ marginTop: 14 }}>目录 → 落点 Group</div>
-            {mappingEditable ? (
+            {/* ④ 落点（REQ-20261104-002）：只有 Git 源才有「子目录 → Group」映射表；
+                目录源只可能有一个落点，且**后端会拒绝带子目录的映射**（INVALID_SUBDIR），
+                所以这里绝不能渲染映射表 —— 那是注定失败的操作（2026-11-04 用户反馈）。 */}
+            <div className="ki-ds-edit__title" style={{ marginTop: 14 }}>
+              {mappingMode === 'editor' ? '目录 → 落点 Group' : '落点 Group'}
+            </div>
+            {mappingMode === 'editor' ? (
               <>
                 <DatasourceMappingsEditor
                   idPrefix="ki-ds-edit"
@@ -291,6 +314,14 @@ export function DatasourceEditDialog({
                     删除某条映射：该子目录的文档本次不会自动列入待删候选（下次同步后按新的映射重算）。
                   </p>
                 ) : null}
+              </>
+            ) : mappingMode === 'single' ? (
+              <>
+                <span className="ki-ds-edit__static">{base.group ?? '自动：按顶层子目录'}</span>
+                <p className="ki-form-hint">
+                  只读。普通目录数据源只支持一个落点 Group，不支持「仓库子目录」映射；
+                  换落点需移除登记后重新添加，会从头同步一遍。
+                </p>
               </>
             ) : (
               <p className="ki-form-hint">

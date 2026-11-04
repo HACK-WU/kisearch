@@ -30,6 +30,8 @@ const {
   toMappingPayload,
   validateMappingRows,
   mappingRowsEqual,
+  mappingUiMode,
+  sourceTypeLabel,
   subdirLabel,
   groupLabel,
   summarizeGroupColumn,
@@ -121,6 +123,26 @@ describe('多映射表单模型', () => {
     ]);
     assert.equal(many.text, '2 个映射');
     assert.equal(many.title, 'docs/guide → 指南\ndocs/api → 自动');
+  });
+
+  it('落点区形态：Git 源可编辑、目录源单只读落点、旧 daemon 只读降级', () => {
+    // Git 源（含旧 daemon 不返回 type、但有 git 元信息的情况）
+    assert.equal(mappingUiMode({ type: 'git', git: { repoRoot: '/r' }, mappings: [] }), 'editor');
+    assert.equal(mappingUiMode({ git: { repoRoot: '/r' }, mappings: [{}] }), 'editor');
+    // 普通目录源：归一化同样会给它一条根映射，但**绝不能**因此出映射表
+    assert.equal(mappingUiMode({ type: 'directory', mappings: [{ subdir: '', group: null }] }), 'single');
+    assert.equal(mappingUiMode({ type: 'directory' }), 'single');
+    // 旧 daemon：不下发 mappings
+    assert.equal(mappingUiMode({ type: 'git', git: { repoRoot: '/r' } }), 'readonly');
+  });
+
+  it('源类型文案与落点形态解耦：旧 daemon 的 Git 源仍显示「Git 仓库」', () => {
+    // 若用「能否编辑映射」反推类型，这一条会错成「普通目录」
+    assert.equal(sourceTypeLabel({ type: 'git', git: { repoRoot: '/r' } }), 'Git 仓库');
+    assert.equal(sourceTypeLabel({ git: { repoRoot: '/r' } }), 'Git 仓库');
+    assert.equal(sourceTypeLabel({ type: 'git', git: { repoRoot: '/r' }, mappings: [] }), 'Git 仓库');
+    assert.equal(sourceTypeLabel({ type: 'directory', mappings: [{ subdir: '', group: null }] }), '普通目录');
+    assert.equal(sourceTypeLabel({ type: 'directory' }), '普通目录');
   });
 
   it('emptyRow：默认一条根映射', () => {
