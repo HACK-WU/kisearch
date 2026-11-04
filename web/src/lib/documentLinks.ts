@@ -16,6 +16,14 @@ const DOCUMENT_EXTENSIONS = /\.(?:md|markdown)$/i;
 /** 文档抽屉当前项/历史项；content 仅在搜索结果已有原文时复用。 */
 export interface DocumentView {
   module: string;
+  /**
+   * 文档实际所属的知识库（REQ-20261104-003）。
+   *
+   * 视图模式下顶栏 scope 是**视图名**，而 `doc/get` 只接受真实 scope ——
+   * 不带上这个字段，抽屉会去读 `dataDir/<视图名>/` 而**静默得到空正文**。
+   * 单库模式下不填，调用方回落顶栏值。
+   */
+  scope?: string;
   group?: string;
   path?: string;
   content?: string;

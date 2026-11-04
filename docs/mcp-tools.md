@@ -47,3 +47,22 @@ MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需�
 | 遗忘 | `ki_delete_relation` |
 
 > `ki_store` / `ki_bulk_store` 只写向量层，不写 relations-cache 与本地 KB，容易产生孤儿向量；持久化记忆请优先使用 `ki_sync_relation` / `ki_bulk_sync_relation`。
+
+---
+
+## 知识视图（view）在 MCP 工具中的行为
+
+`scope` 参数既接受**知识库名**，也接受**视图名**。用了视图时：
+
+| 工具 | 视图下的行为 |
+|---|---|
+| `ki_search` | 展开为成员库检索；响应多出 `matchedViews` 与 `scopes`，每条命中带来源 `scope` |
+| `ki_scope_list` | 响应多出 `views[]`，含 `memberMeta[]`（每个成员的 `kb` / `vector` / `readonly`） |
+| `ki_group_list` | **按成员库分桶**（`buckets`），不合并同名 Group |
+| `ki_tag_list` | **合并各库 tag 并累加计数**，每条带 `scopes` 标明来源库 |
+| `ki_get_module_info` | 新增可选 `member`。未指定时逐库查：唯一命中直接返回；**多命中 fail-loud** 列候选；批量查询（`relations`）在视图下**必须**指定 `member` |
+
+**单库请求零变化**：`scope` 不是视图时，响应字段一个不多一个不少（无 `buckets` / `matchedViews` / `views`）。
+
+**鉴权**：Token 可被授权视图（`ki mcp token generate --view <视图>`），与授权 scope 分字段存储。
+授权视图 **不等于** 授权其成员名——单独请求成员 `--scope <成员>` 仍需该成员的授权。

@@ -9,7 +9,7 @@ export function registerSearchTool(server: McpServer): void {
     'ki_search',
     '语义检索知识库内容',
     {
-      scope: z.string().optional().default('default').describe('项目隔离标识（多个用逗号分隔聚合检索，结果统一排序并标注来源；省略则用 default；strict 模式下必须传且须在白名单内）'),
+      scope: z.string().optional().default('default').describe('知识库名或视图名（多个用逗号分隔聚合检索，视图会自动展开为成员库；结果统一排序并按来源库标注；省略则用 default；strict 模式下必须传且须在白名单内）'),
       query: z.string().describe('自然语言查询文本'),
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限（整次检索最多返回的文档数；未传 tags 时内部按 tag 取候选，最终仍按该值截断；引擎单次候选上限 1000）'),
       threshold: z.number().min(0).max(1).optional().describe('相似度阈值（0-1）'),

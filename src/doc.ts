@@ -27,6 +27,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { resolveScopeTargets } from './lib/scope-view.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
@@ -176,13 +177,41 @@ program
   .option('--tags <tags>', '过滤标签，逗号分隔多值（不传=全部）')
   .option('--full', '显示完整内容（默认截断预览 200 字）', false)
   .action(async (opts) => {
-    const scope = resolveScope(loadConfig(), opts.scope);
-    const result = await executeDocList({
-      scope,
+    const listOpts = {
       tags: parseTags(opts.tags),
       limit: parseIntArg(opts.limit, 10, '--limit', { min: 1 }),
       full: !!opts.full,
-    });
+    };
+
+    /**
+     * 视图模式：按成员库**分桶**（与 group list 同口径）。
+     * 向量文档的 docid 在库之间可能重复，合并成一个列表会无法追溯归属。
+     */
+    const config = loadConfig();
+    const targets = resolveScopeTargets(config, opts.scope);
+    if (targets.views.length > 0 && targets.scopes.length > 1) {
+      const buckets: { scope: string; result?: unknown; error?: string }[] = [];
+      for (const member of targets.scopes) {
+        try {
+          const r = await executeDocList({ scope: member, ...listOpts });
+          buckets.push(r.ok ? { scope: member, result: r } : { scope: member, error: r.error });
+        } catch (err) {
+          buckets.push({ scope: member, error: (err as Error).message });
+        }
+      }
+      console.log(JSON.stringify({
+        ok: true,
+        view: targets.views[0],
+        members: targets.scopes,
+        buckets,
+        ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+      }, null, 2));
+      await closeEngine();
+      return;
+    }
+
+    const scope = resolveScope(loadConfig(), opts.scope);
+    const result = await executeDocList({ scope, ...listOpts });
     console.log(JSON.stringify(result, null, 2));
     await closeEngine();
     if (!result.ok) process.exit(1);

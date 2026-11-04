@@ -15,6 +15,7 @@ import { Command } from 'commander';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { validateScope } from './lib/scope.js';
 import { closeEngine, optimizeVectorIndex } from './lib/vector-client.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 
 const program = new Command();
 
@@ -27,6 +28,8 @@ program
   .action(async (opts: { scope: string; concurrency?: string; timeoutMs?: string }) => {
     const scope = resolveScope(loadConfig(), opts.scope);
     validateScope(scope);
+    // 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+    assertNotScopeViewCli(scope, 'index-optimize');
     const outcome = await optimizeVectorIndex(scope, {
       ...(opts.concurrency !== undefined ? { concurrency: Number(opts.concurrency) } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: Number(opts.timeoutMs) } : {}),

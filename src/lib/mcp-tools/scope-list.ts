@@ -24,9 +24,28 @@ export function registerScopeListTool(server: McpServer, authScopes: string[] | 
         const visible = authScopes === null
           ? result.scopes
           : result.scopes.filter((s) => isScopeAuthorized(authScopes, s.scope));
+        /**
+         * 视图按「视图本身的授权」过滤，不做成员级过滤。
+         *
+         * 为什么不滤成员：授权视图即授权其成员内容（S-04 D3）；隐藏库名会让前端的
+         * 「来源库标记」无法解释，也会让浏览页拿不到成员的只读态（memberMeta）。
+         *
+         * ⚠️ REQ-20261104-004 将收紧为「授权视图 ∧ 授权全部成员」才可见（全有或全无），
+         * 届时只改这一处过滤条件。
+         */
+        const visibleViews = result.views === undefined
+          ? undefined
+          : authScopes === null
+            ? result.views
+            : result.views.filter((v) => isScopeAuthorized(authScopes, v.view));
         const payload = authScopes === null
           ? result
-          : { ...result, count: visible.length, scopes: visible };
+          : {
+            ...result,
+            count: visible.length,
+            scopes: visible,
+            ...(visibleViews === undefined ? { views: undefined } : { views: visibleViews }),
+          };
         return {
           content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
         };

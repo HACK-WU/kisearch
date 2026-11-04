@@ -445,6 +445,36 @@ vi ~/.ki/config.yaml
 
 ---
 
+## 视图存储（views.json）
+
+**知识视图不是配置字段**，它存在独立文件里：
+
+```
+~/.ki/views.json          # 与 config.yaml 同目录；用 --config 时跟随该目录
+```
+
+```json
+{
+  "version": 1,
+  "views": {
+    "team": { "members": ["kisearch", "kisearch-memory", "team-docs"] }
+  },
+  "updatedAt": "2026-11-04T10:00:00.000Z"
+}
+```
+
+**为什么不放进 `config.yaml`**：
+
+- `config-schema` 对**未知字段是错误而非告警**。视图写进配置后，一旦回滚到不支持视图的旧版本，
+  `loadConfig` 会 `CONFIG_FIELD_INVALID` fail-loud，`ki` **全部命令不可用**（运维事故级）；
+  独立文件对旧版本完全不可见，回滚后只是视图功能静默失效。
+- 配置写回没有文件锁；独立文件可以套 `.lock`，避免并发 `ki view add` 丢成员。
+
+**维护方式**：只用 `ki view *` 命令，不要手改（手改坏了会 `VIEWS_CORRUPT` fail-loud，
+且**拒绝写入**以保护原文件）。删除该文件等价于"没有任何视图"，不影响任何知识库数据。
+
+---
+
 ## 相关文档
 
 - [`docs/cli.md`](./cli.md) — CLI 命令完整参考

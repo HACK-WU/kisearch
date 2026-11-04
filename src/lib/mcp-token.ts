@@ -48,6 +48,22 @@ export interface TokenRecord {
   createdBy?: TokenCreator;
   /** 授权 scope 集合：['all'] 表示全部；否则为具体 scope 列表 */
   scopes: string[];
+  /**
+   * 【授权视图集合】与 scopes 并列，**不复用 scopes**。
+   *
+   * 为什么不把视图名混进 scopes：
+   *  ① scopes 里的字符串无法区分「库」与「视图」——将来若开放页面编辑视图
+   *    （届时「仅 CLI 可改」的安全前提失效，必须改回授权快照），迁移时无法自动
+   *    判定哪些条目是视图授权，只能靠猜；
+   *  ② 审计时需要一眼看出「这个 Token 读的是哪些库 / 哪些视图」。
+   *
+   * ★ 安全前提：视图只能通过 CLI 创建/修改 ⇒ 改视图需要本机 shell 权限 ≈ 管理员。
+   *   因此「给视图加库 = 扩大一批 Token 的可读范围」的起点永远是管理员动作，
+   *   动态跟随不构成普通用户的越权通道。
+   *   ⚠️ 一旦开放「页面创建/编辑视图」，该前提立即失效，必须改为授权时快照成员
+   *   并重新授权；届时把 viewGrants 展开进 scopes 即可完成迁移。
+   */
+  viewGrants?: string[];
   /** 创建时间（ISO） */
   createdAt: string;
   /**
@@ -68,8 +84,10 @@ export interface TokenRecord {
 export interface TokenAuth {
   /** Token 短 ID（供拒绝文案定位到具体 Token；进程级临时 Token 无 id） */
   id?: string;
-  /** 授权 scope 集合（['all'] 或具体列表） */
+  /** 可授权名字的**全集**：record.scopes ∪ record.viewGrants（已合并） */
   scopes: string[];
+  /** 其中属于「视图授权」的部分（供审计与列表分类展示） */
+  viewGrants: string[];
   /** 是否只读 */
   readOnly: boolean;
 }
@@ -386,6 +404,8 @@ export interface CreateTokenMeta {
   label?: string;
   ownerId?: string;
   createdBy?: TokenCreator;
+  /** 授权视图集合（与 scopes 并列落盘） */
+  viewGrants?: string[];
 }
 
 export function createToken(
@@ -410,6 +430,7 @@ export function createToken(
       ...(meta.label?.trim() ? { label: meta.label.trim() } : {}),
       ...(meta.ownerId ? { ownerId: meta.ownerId } : {}),
       ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
+      ...(meta.viewGrants && meta.viewGrants.length > 0 ? { viewGrants: [...meta.viewGrants] } : {}),
     };
     records.push(record);
     writeTokens(records, filePath);
@@ -476,10 +497,10 @@ export function createOwnedToken(
  */
 export function updateToken(
   id: string,
-  patch: { scopes?: string[]; readOnly?: boolean },
+  patch: { scopes?: string[]; viewGrants?: string[]; readOnly?: boolean },
   filePath = getTokensPath(),
 ): TokenRecord {
-  if (patch.scopes === undefined && patch.readOnly === undefined) {
+  if (patch.scopes === undefined && patch.viewGrants === undefined && patch.readOnly === undefined) {
     throw Object.assign(
       new Error('update 至少需要一项变更：--scope <...> 或 --read-only/--read-write。'),
       { code: 'MCP_TOKEN_UPDATE_NOTHING_TO_DO' },
@@ -494,6 +515,11 @@ export function updateToken(
       });
     }
     if (patch.scopes !== undefined) target.scopes = patch.scopes;
+    if (patch.viewGrants !== undefined) {
+      // 空数组时删除字段，保持与旧格式一致
+      if (patch.viewGrants.length > 0) target.viewGrants = [...patch.viewGrants];
+      else delete target.viewGrants;
+    }
     if (patch.readOnly !== undefined) {
       // 切回读写时删除字段（不写 false），保持文件格式与旧版一致
       if (patch.readOnly) target.readOnly = true;
@@ -579,7 +605,15 @@ export function findTokenAuth(
   if (!record) return undefined;
   const effective = effectiveTokenAuth(record, usersPath);
   if (!effective) return undefined;
-  return { id: record.id, scopes: record.scopes, readOnly: effective.readOnly };
+  const viewGrants = Array.isArray(record.viewGrants)
+    ? record.viewGrants.filter((v): v is string => typeof v === 'string')
+    : [];
+  // ★ 唯一合并点：下游 isScopeAuthorized / findScopeViolation / scopeAllowed / 工具注册
+  //   全部只看「名字在不在授权集合里」，因此它们零改动。
+  const merged = record.scopes.includes(ALL_SCOPES)
+    ? [ALL_SCOPES]
+    : [...record.scopes, ...viewGrants];
+  return { id: record.id, scopes: merged, viewGrants, readOnly: effective.readOnly };
 }
 
 /** `readOnly` 字段是否非法（存在但不是布尔）——供 list 命令告警，undefined 属正常（缺省读写） */
@@ -591,4 +625,21 @@ export function isReadOnlyFieldInvalid(record: TokenRecord): boolean {
 /** 查询 Token 记录数量（供 `ki mcp status` 诊断输出，不含明文） */
 export function tokenCount(filePath = getTokensPath()): number {
   return listTokens(filePath).length;
+}
+
+/**
+ * 列出「授权了某个视图」的全部 Token（供 `ki mcp token list --granting-view <view>`）。
+ *
+ * 用途：删除/修改视图前核对影响面。`ki view delete` 的提示文案指向本能力，
+ * 但**不调用它**（否则 S-01 会依赖 S-04，与 DAG 成环），只是静态字符串。
+ */
+export function listTokensGrantingView(
+  view: string,
+  filePath = getTokensPath(),
+): TokenRecord[] {
+  return listTokens(filePath).filter((r) => {
+    const grants = Array.isArray(r.viewGrants) ? r.viewGrants : [];
+    // 兼容历史记录：视图名曾混写在 scopes 里
+    return grants.includes(view) || r.scopes.includes(view);
+  });
 }

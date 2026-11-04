@@ -45,6 +45,7 @@ export {
   vectorOnlyFailureLabel,
   VECTOR_HEALTH_CHECK_NAMES,
 } from './healthSummary';
+import { useScopeValue } from './scopeContext';
 export type { HealthLevel, HealthIssue, HealthSummary } from './healthSummary';
 // 向量可用性判据同样独立成纯逻辑（lib/vectorAvailability.ts），可零依赖单测
 export { resolveVectorAvailability, vectorAvailabilityHint, editorVectorizeHint, vectorBadgeLabel } from './vectorAvailability';
@@ -236,3 +237,39 @@ export function useDataSourceDetail(scope: string | null) {
     refetchInterval: (query) => (query.state.data?.running ? 3_000 : 15_000),
   });
 }
+
+/**
+ * 视图成员的只读态（REQ-20261104-003 / S-05）。
+ *
+ * ★ 为什么不能复用 `useScopeReadonly(成员名)`：`scopes[]` 按 Token 授权过滤，
+ *   成员库通常**不在授权列表里**（授权视图 ≠ 授权成员名），查不到条目会回落成
+ *   `readonly=false` —— 于是**只读库在视图模式下被显示成可写**。
+ *   唯一可靠来源是 `views[].memberMeta[].readonly`。
+ */
+export function useViewMemberReadonly(view: string | undefined, member: string | undefined): boolean {
+  const { data } = useScopeList();
+  if (!view || !member) return false;
+  const entry = data?.views?.find((v) => v.view === view);
+  const meta = entry?.memberMeta.find((m) => m.scope === member);
+  return meta?.readonly === true;
+}
+
+/** 当前顶栏选中的名字是否是视图（旧版 daemon 无 views 字段时恒 false） */
+export function useIsViewName(name: string | undefined): boolean {
+  const { data } = useScopeList();
+  if (!name) return false;
+  return (data?.views ?? []).some((v) => v.view === name);
+}
+
+/**
+ * 可写 scope：写 / 导入 / 数据源三页用它。
+ *
+ * 顶栏选中视图时返回 `null` —— 这三页保持「未选择知识库」的既有形态，
+ * **不会把视图名发进写请求**（否则每页都会撞 VIEW_NOT_WRITABLE）。
+ */
+export function useWritableScope(): string | null {
+  const name = useScopeValue();
+  const isView = useIsViewName(name);
+  return isView ? null : name;
+}
+

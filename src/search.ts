@@ -10,8 +10,9 @@
  */
 
 import { Command } from 'commander';
-import { validateScope, parseScopes, getLocalKbDir } from './lib/scope.js';
-import { loadConfig, resolveScope, getScopeMode } from './lib/config.js';
+import { getLocalKbDir } from './lib/scope.js';
+import { resolveScopeTargets } from './lib/scope-view.js';
+import { loadConfig } from './lib/config.js';
 import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections, SEARCH_TOPK_MAX } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap } from './lib/relation-map.js';
@@ -101,6 +102,13 @@ export type SearchResult =
       scope: string;
       /** 多 scope 检索时实际检索的 scope 列表（单 scope 不返回，向后兼容） */
       scopes?: string[];
+      /**
+       * 本次请求涉及的视图名（REQ-20261104-003）。缺省 = 纯 scope 请求。
+       *
+       * 刻意叫 `matchedViews` 而不是 `views`：`ki_scope_list` 的响应里已有一个
+       * `views: ViewInfo[]`（对象数组），同名不同类型在实现时极易混用。
+       */
+      matchedViews?: string[];
       results: SearchHit[];
       /** 被跳过或受召回上限影响的 scope 及原因（多 scope 未注册 / 任意 scope 缺向量 Collection / 引擎候选上限导致的召回受限；无则省略） */
       skipped?: { scope: string; reason: string }[];
@@ -187,42 +195,39 @@ async function executeSearchLocal(params: {
   mode?: 'hybrid' | 'fulltext';
 }): Promise<SearchResult> {
   try {
-    // scope 解析（支持逗号分隔多 scope）：去空格/去重/保序，逐个字符集校验（非法快速失败）
+    // scope 解析（支持逗号分隔多 scope + 视图名）：去重保序、逐段字符集校验（非法快速失败）。
+    // ★ 视图名 → 成员 scope 的**唯一展开点**在这里（scope-view.ts::resolveScopeTargets）。
+    //   下游（vector-client fan-out / 命中回填 / 原文读取）只认真实 scope，完全不感知视图。
     const config = loadConfig();
-    const parsed = parseScopes(params.scope);
-    const multi = parsed.length > 1;
-
-    // scope 护栏：
-    //  - 单 scope：保持现状（default 模式缺省回退 default；strict 未注册 fail-loud）
-    //  - 多 scope：strict 未注册 → 跳过+提示（容忍个别 scope 配置缺失，不阻塞其余检索）
-    let scopes: string[];
-    const skipped: { scope: string; reason: string }[] = [];
+    const expandStartedAt = Date.now();
+    const targets = resolveScopeTargets(config, params.scope);
+    const scopes = targets.scopes;
+    const skipped: { scope: string; reason: string }[] = [...targets.skipped];
+    /**
+     * 是否走多库响应结构（返回 scopes / 命中标来源库）。
+     * ★ 用「请求形态」而不是「生效数量」：strict 下 `--scope a,b` 可能只剩 1 个生效，
+     *   但响应仍须给 scopes（既有调用方据此知道实际检索了哪些库）。
+     */
+    const multi = targets.multiRequested || targets.views.length > 0;
     // O1：查询 embedding 降级为 FTS-only 时记录一次（两处 vectorSearch 调用共用）
     let degradeReason: string | undefined;
-    if (!multi) {
-      // 单段但含空段（如 'a,'）时用归一化结果，与多 scope 解析语义一致；
-      // 解析为空（未传/纯空白）才回退原始参数走缺省/必填校验（保持现状）
-      const singleRaw = parsed.length === 1 ? parsed[0] : params.scope;
-      const scope = resolveScope(config, singleRaw);
-      validateScope(scope);
-      scopes = [scope];
-    } else {
-      const strict = getScopeMode(config) === 'strict';
-      const effective: string[] = [];
-      for (const s of parsed) {
-        if (strict && !Object.prototype.hasOwnProperty.call(config.scopes, s)) {
-          skipped.push({ scope: s, reason: '未注册（scopeMode=strict，不在配置 scopes 白名单）' });
-          continue;
-        }
-        effective.push(s);
-      }
-      if (effective.length === 0) {
-        return {
-          ok: false,
-          error: `无可检索的 scope：${skipped.map((k) => `${k.scope}（${k.reason}）`).join('；')}`,
-        };
-      }
-      scopes = effective;
+
+    if (scopes.length === 0) {
+      return {
+        ok: false,
+        error: `无可检索的 scope：${skipped.map((k) => `${k.scope}（${k.reason}）`).join('；')}`,
+      };
+    }
+
+    // 展开可观测（S-02 B13）：视图把 N 个库折叠成一个名字后，"慢在展开还是慢在 fan-out"
+    // 从外部完全看不出来，故打一行；成员多或展开慢时升为 ⚠ 以便直接扫到。
+    if (targets.views.length > 0) {
+      const costMs = Date.now() - expandStartedAt;
+      const heavy = scopes.length >= 10 || costMs > 50;
+      process.stderr.write(
+        `${heavy ? '⚠ ' : ''}[view] ${targets.views.join(',')} → ${scopes.length} 个成员`
+        + `（展开 ${costMs}ms${skipped.length > 0 ? `，跳过 ${skipped.length}` : ''}）\n`,
+      );
     }
 
     // ★ let 而非 const：默认 hybrid 但向量库无任何 tag（库内全是 FTS-only 文档）时，
@@ -662,9 +667,11 @@ async function executeSearchLocal(params: {
     const degradeFields = degradeReason !== undefined
       ? { degraded: true, degradedReason: degradeReason }
       : {};
+    // 纯 scope 请求不加该字段（与改造前逐字节一致）；只要用过视图就带上
+    const viewFields = targets.views.length > 0 ? { matchedViews: targets.views } : {};
     return multi
-      ? { ok: true, scope: scopes[0], scopes, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
-      : { ok: true, scope: scopes[0], results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
+      ? { ok: true, scope: scopes[0], scopes, ...viewFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
+      : { ok: true, scope: scopes[0], ...viewFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
     const e = err as Error & { code?: string };
     // 保留 code：HTTP/MCP 两条出口都按 code 透传，前端才能区分"维度不匹配需重建"与普通失败

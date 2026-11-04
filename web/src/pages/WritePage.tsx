@@ -7,9 +7,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useScopeValue } from '@/lib/scopeContext';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { useScopeValue } from '@/lib/scopeContext';
 import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
@@ -17,12 +17,22 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
 import { resolveWriteGroup } from '@/lib/writeGroup';
-import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint, useWritableScope } from '@/lib/hooks';
 import { Notice } from '@/components/Notice';
 import { SCOPE_READONLY_BLOCKED_HINT, scopeReadonlyNotice } from '@/lib/scopeReadonly';
 
 export function WritePage(): JSX.Element {
-  const currentScope = useScopeValue();
+  /**
+   * 顶栏值可能是**视图名**（REQ-20261104-003）。三个写类页面一律不认视图：
+   * 视图不是知识库，写路径会 fail-loud。这里把视图名归一成空串，
+   * 让「当前 scope」标记与 Group 下拉都退回「未选择」状态 —— 绝不把视图名发进任何请求。
+   *
+   * ★ 写目标本身来自页面内 `scope` 状态（ScopePathSelect 选择并确认），不受影响。
+   */
+  const topScope = useScopeValue();
+  const currentScope = useWritableScope() ?? '';
+  /** 顶栏停在视图上：写页没有落点，需要显式提示（而不是让用户点保存后才看到后端报错） */
+  const topbarIsView = currentScope === '' && topScope !== '';
   const queryClient = useQueryClient();
   const [scope, setScope] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
@@ -256,6 +266,18 @@ export function WritePage(): JSX.Element {
       {scopeReadonly && scopeConfirmed && (
         <Notice tone="warn" title="该库为只读">
           {scopeReadonlyNotice(scope)}
+        </Notice>
+      )}
+
+      {/*
+        视图是只读聚合，写页没有落点（REQ-20261104-003 §3.4）。
+        这里显式打断：否则用户填完表单点保存才看到后端 VIEW_NOT_WRITABLE，
+        而顶栏还停在视图上，看不出该怎么改。
+      */}
+      {topbarIsView && (
+        <Notice tone="warn" title="顶栏当前是知识视图">
+          视图是只读聚合，不能作为写入目标。请在上方「目标 Scope」里选择一个具体知识库；
+          把顶栏切回单个知识库后，本提示会自动消失。
         </Notice>
       )}
 

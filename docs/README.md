@@ -25,6 +25,7 @@
 | 内容 | 文档 |
 |---|---|
 | 全部 CLI 命令与参数 | [cli.md](./cli.md) |
+| 把多个知识库聚合成一个名字（知识视图） | [cli.md 的 `view` 章节](./cli.md#view) · [configuration.md](./configuration.md#视图存储viewsjson) |
 | 配置项逐条说明与字段校验 | [configuration.md](./configuration.md) |
 | MCP HTTP 共享单例、鉴权、`/api/*` 路由 | [mcp-http.md](./mcp-http.md) |
 | 13 个 MCP 工具及参数 | [mcp-tools.md](./mcp-tools.md) |

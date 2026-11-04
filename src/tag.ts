@@ -26,6 +26,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { resolveScopeTargets } from './lib/scope-view.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 纯函数（供 CLI / MCP 共享） ───
@@ -69,11 +70,61 @@ program
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .option('--scan-limit <n>', '扫描上限（显式指定则为硬上限，结果为近似 truncated:true；缺省取全）')
   .action(async (opts) => {
-    const scope = resolveScope(loadConfig(), opts.scope);
     // 缺省不传 → 不下传 → vectorListTags 倍增取全；显式传入才解析（无效输入回落取全）
     const scanLimit = opts.scanLimit !== undefined
       ? parseIntArg(opts.scanLimit, 0, '--scan-limit', { min: 1, max: SCAN_HARD_CAP })
       : 0;
+
+    /**
+     * 视图模式：**合并 + 计数累加**（与 group/doc 的分桶不同）。
+     *
+     * 为什么这里合并而不是分桶：tag 是「跨库筛选维度」，用户要的是"整个视图里
+     * 有哪些 tag、各多少篇"；分桶后得逐库看一遍才知道全貌，且浏览页的 tag 下拉
+     * 只能吃一个扁平列表。同名 tag 的 count 直接相加，并用 scopes 标明来源库（S-07 D2）。
+     */
+    const config = loadConfig();
+    const targets = resolveScopeTargets(config, opts.scope);
+    if (targets.views.length > 0 && targets.scopes.length > 1) {
+      const merged = new Map<string, { tag: string; count: number; scopes: string[] }>();
+      const skipped: { scope: string; reason: string }[] = [...targets.skipped];
+      for (const member of targets.scopes) {
+        // 单个成员失败（向量服务不可用 / daemon 起不来）不应让整个视图抛裸堆栈：
+        // 记进 skipped 继续，其余成员照常合并（与 group/doc 的分桶口径一致）
+        let r: Awaited<ReturnType<typeof executeTagList>>;
+        try {
+          r = await executeTagList({ scope: member, ...(scanLimit > 0 ? { scanLimit } : {}) });
+        } catch (err) {
+          skipped.push({ scope: member, reason: (err as Error).message });
+          continue;
+        }
+        if (!r.ok) {
+          skipped.push({ scope: member, reason: r.error });
+          continue;
+        }
+        for (const t of r.tags) {
+          const hit = merged.get(t.tag);
+          if (hit) {
+            hit.count += t.count;
+            if (!hit.scopes.includes(member)) hit.scopes.push(member);
+          } else {
+            merged.set(t.tag, { tag: t.tag, count: t.count, scopes: [member] });
+          }
+        }
+      }
+      const tags = [...merged.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+      console.log(JSON.stringify({
+        ok: true,
+        view: targets.views[0],
+        members: targets.scopes,
+        count: tags.length,
+        tags,
+        ...(skipped.length > 0 ? { skipped } : {}),
+      }, null, 2));
+      await closeEngine();
+      return;
+    }
+
+    const scope = resolveScope(loadConfig(), opts.scope);
     const result = await executeTagList({
       scope,
       ...(scanLimit > 0 ? { scanLimit } : {}),

@@ -33,6 +33,7 @@ import { loadConfig, resolveScope } from './lib/config.js';
 import { listAllScopes, validateScope, getRelationsCachePath } from './lib/scope.js';
 import { hasShardedLayout, migrateLegacyRelationsCache, listGroupPaths, readGroupCache } from './lib/group-cache.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 
 const MIGRATE_HELP = `ki migrate-relation-cache - 显式迁移 relations 元数据到 per-Group 分片布局
 
@@ -162,6 +163,8 @@ async function main(): Promise<void> {
     if (!all) {
       const scope = resolveScope(config, scopeArg!);
       validateScope(scope);
+      // 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+      assertNotScopeViewCli(scope, 'migrate-relation-cache');
       const result = await migrateOne(scope);
       output({ action: 'migrate-relation-cache', ...result });
       if (!result.ok) process.exitCode = 1;

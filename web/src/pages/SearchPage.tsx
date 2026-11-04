@@ -36,6 +36,11 @@ const stepThreshold = (cur: number, dir: 1 | -1): number => {
 };
 
 interface Result {
+  /**
+   * 该命中实际所属的知识库（REQ-20261104-003）。
+   * 多 scope / 视图检索时后端逐条回填；单库模式缺省。
+   */
+  scope?: string;
   group?: string;
   relation?: string;
   score?: number;
@@ -740,6 +745,8 @@ export function SearchPage(): JSX.Element {
                   onClick={() => {
                     const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
                     openDocument({
+                      // 视图模式下必须带命中自带的来源库，否则抽屉读到空目录
+                      scope: r.scope ?? scope,
                       module: r.relation ?? r.group ?? 'doc',
                       // 原文未取到时 original 是命中 chunk 回退；不把片段当整篇文档，
                       // 让 ModuleDrawer 通过 ki_get_module_info 获取完整标题结构。
@@ -758,6 +765,16 @@ export function SearchPage(): JSX.Element {
                     {/* 文档名称 + Group 路径 */}
                     <div className="ki-qr-title">
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
+                      {/*
+                        来源库标记：仅当命中来自「非当前顶栏值」的库时出现
+                        （视图/多库检索）。单库模式下 r.scope 缺省或等于顶栏值 → 不显示，
+                        否则顶栏已经写了库名，标记只是重复噪音。
+                      */}
+                      {r.scope && r.scope !== scope && (
+                        <span className="ki-badge ki-badge--scope" title={`该文档属于知识库 ${r.scope}`}>
+                          {r.scope}
+                        </span>
+                      )}
                       {/* 路径徽标是**展示**：根散文件的 group 是保留键 `__root__`，整段省略（退化成文档名）；
                           下面的 `to` 里仍用原始 group 作深链参数（跳转要打得开） */}
                       <span className="ki-badge ki-badge--kb" title={[groupPathSegment(r.group), r.relation].filter(Boolean).join('/')}>
@@ -766,7 +783,7 @@ export function SearchPage(): JSX.Element {
                       {r.group && (
                         <Link
                           className="ki-qr-group-browse"
-                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}${r.relation ? `&relation=${encodeURIComponent(r.relation)}` : ''}` }}
+                          to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(r.scope ?? scope)}&group=${encodeURIComponent(r.group)}${r.relation ? `&relation=${encodeURIComponent(r.relation)}` : ''}` }}
                           onClick={(event) => event.stopPropagation()}
                           aria-label={r.relation
                             ? `在目录中定位文档 ${[groupPathSegment(r.group), r.relation].filter(Boolean).join('/')}`
@@ -818,8 +835,10 @@ export function SearchPage(): JSX.Element {
 
       {viewing && (
         <ModuleDrawer
-          key={`${scope}:${viewing.group ?? ''}:${viewing.module}`}
-          scope={scope}
+          key={`${viewing.scope ?? scope}:${viewing.group ?? ''}:${viewing.module}`}
+          /* ★ 用文档实际所属的库，而不是顶栏值：视图模式下顶栏是视图名，
+             传下去会让 doc/get 读到空目录、useScopeReadonly 也查不到只读态 */
+          scope={viewing.scope ?? scope}
           module={viewing.module}
           group={viewing.group}
           initialContent={viewing.content}

@@ -87,6 +87,10 @@ export interface SearchResult {
   mode?: 'hybrid' | 'fulltext';
   /** 被跳过或受召回上限影响的 scope（strict 未注册 / 无向量 Collection / 引擎候选上限）——不展示即为静默漏召回 */
   skipped?: { scope: string; reason: string }[];
+  /** 多 scope / 视图检索时实际检索的库列表（单库不返回） */
+  scopes?: string[];
+  /** 本次请求涉及的视图名（缺省 = 纯 scope 请求） */
+  matchedViews?: string[];
   /** 结构化错误码（ok=false 时），如 VECTOR_DIMENSION_MISMATCH */
   code?: string;
   [k: string]: unknown;
@@ -180,11 +184,35 @@ export async function callTool<T = unknown>(name: string, args: Record<string, u
 
 // ─── 业务工具封装 ─────────────────────────────────────
 
+/** 视图成员的元信息（视图模式下判断只读/向量可用性的唯一来源） */
+export interface ViewMemberMeta {
+  scope: string;
+  kb: boolean;
+  vector: boolean;
+  readonly: boolean;
+}
+
+/** 知识视图：多个 scope 的只读聚合，可当 scope 用 */
+export interface ViewInfo {
+  view: string;
+  members: string[];
+  /** 与 members 同序 */
+  memberMeta: ViewMemberMeta[];
+  availableCount: number;
+  /** 两层（KB/向量）都不存在的成员 */
+  missing: string[];
+}
+
 export interface ScopeListResponse {
   ok?: boolean;
   scopeMode?: string;
   count?: number;
   scopes: ScopeInfo[];
+  /**
+   * 视图定义。缺省 = 旧版 daemon 不支持视图（前端按「无视图」降级，
+   * 顶栏退化成改造前的平面列表）。
+   */
+  views?: ViewInfo[];
   /** 向量层是否可用；false 表示已降级为仅 KB 层枚举（如向量库被导入进程持锁） */
   vectorAvailable?: boolean;
   /** 向量层不可用原因（降级时用于悬停提示） */

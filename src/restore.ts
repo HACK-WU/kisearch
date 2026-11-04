@@ -50,6 +50,7 @@ import { createTaskReporter } from './lib/task-registry.js';
 import type { TaskReporter } from './lib/task-registry.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { refreshVectorDimensionSnapshot } from './lib/vector-dimension-snapshot.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 
 // ─── 工具 ───
 
@@ -378,6 +379,8 @@ if (!scope || scope.startsWith('--')) {
   console.error(RESTORE_HELP);
   process.exit(1);
 }
+// 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+assertNotScopeViewCli(scope, 'restore');
 
 const fromSnapshot = args.some(
   (a) => a === '--from-snapshot' || a.startsWith('--from-snapshot=')

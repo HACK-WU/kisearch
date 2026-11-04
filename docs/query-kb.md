@@ -92,3 +92,20 @@ ki sync-relation \
 - [mcp-tools.md](./mcp-tools.md) —— MCP 工具参数
 - [architecture.md · 三层标签](./architecture.md#三层标签) —— 三类标签的语义
 - [error-handling.md](./error-handling.md) —— 完整报错清单
+
+---
+
+## 一次检索多个知识库：知识视图
+
+跨库检索不必每次写逗号串，先用 `ki view` 固化成一个名字：
+
+```bash
+ki view create team --members kisearch,kisearch-memory
+ki search "登录流程" --scope team
+```
+
+视图可当 scope 用于所有**读**命令（`search` / `group list` / `tag list` / `doc list` / `get-module-info`），
+**写命令一律拒绝**并提示改用某个成员。详见 [`cli.md` 的 `view` 章节](cli.md#view)。
+
+> `ki scope list` 的文本输出**默认不含视图**（保持脚本可解析）；要看视图请用 `ki view list`
+> 或 `ki scope list --views`。

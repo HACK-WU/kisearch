@@ -19,8 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useDataSourceDetail, useDataSourceList, useScopeList, useVectorAvailability } from '@/lib/hooks';
-import { useScopeValue } from '@/lib/scopeContext';
+import { useDataSourceDetail, useDataSourceList, useScopeList, useVectorAvailability, useWritableScope } from '@/lib/hooks';
 import { useAuth } from '@/lib/authContext';
 // upstream 侧记录/列表自带 schedule（定时同步），本地侧新增移除接口（removeDataSource）
 import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
@@ -171,7 +170,14 @@ export function DataSourcePage(): JSX.Element {
   const canDeleteDatasource = can('datasource.delete');
   const listQuery = useDataSourceList();
   const detailQuery = useDataSourceDetail(scope ?? null);
-  const currentScope = useScopeValue();
+  /**
+   * 顶栏值可能是**视图名**（REQ-20261104-003）。三个写类页面一律不认视图：
+   * 视图不是知识库，写路径会 fail-loud。这里把视图名归一成空串，
+   * 让「当前 scope」标记与 Group 下拉都退回「未选择」状态 —— 绝不把视图名发进任何请求。
+   *
+   * ★ 写目标本身来自页面内 `scope` 状态（ScopePathSelect 选择并确认），不受影响。
+   */
+  const currentScope = useWritableScope() ?? '';
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);

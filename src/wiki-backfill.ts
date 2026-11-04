@@ -15,6 +15,7 @@ import { loadConfig, resolveScope } from './lib/config.js';
 import { backfillWiki } from './lib/wiki-sync.js';
 import { validateScope } from './lib/scope.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 
 const WIKI_BACKFILL_HELP = `ki wiki-backfill - 将 KB 中已有 Relations 全量写回 Wiki（历史补齐）
 
@@ -60,6 +61,8 @@ async function main(): Promise<void> {
     const config = loadConfig();
     const scope = resolveScope(config, scopeArg);
     validateScope(scope);
+    // 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+    assertNotScopeViewCli(scope, 'wiki-backfill');
     const result = shouldUseDaemonClient()
       ? await callDaemon<Record<string, unknown>>('wiki-backfill', { scope, force: flags.includes('--force') }, 0)
       : backfillWiki(scope, { force: flags.includes('--force') });

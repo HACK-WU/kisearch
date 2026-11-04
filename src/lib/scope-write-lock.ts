@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loadConfig } from './config.js';
-import { assertOperationWritable } from './scope-policy.js';
+import { assertOperationWritable, assertNotScopeView } from './scope-policy.js';
 
 const heldLocks = new AsyncLocalStorage<Set<string>>();
 
@@ -24,6 +24,12 @@ export async function withScopeWriteLock<T>(scope: string, operation: string, ru
    */
   const config = loadConfig();
   assertOperationWritable(scope, operation, config);
+  /**
+   * 视图门禁（REQ-20261104-003）：必须在**建目录/取锁之前**。
+   * 视图名同样能通过字符集校验，漏拦会走到 getScopeDataDir() 凭空建出
+   * `dataDir/<视图名>/` —— 静默产出脏目录，且后续「写错库」极难定位。
+   */
+  assertNotScopeView(scope, operation, config);
   const dir = path.join(config.dataDir, '.ki-scope-locks');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink()) throw busy();

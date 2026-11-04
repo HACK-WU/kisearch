@@ -26,6 +26,7 @@ import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { resolveScopeTargets, getViewMembers } from './lib/scope-view.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { contentRevision } from './lib/relation-edit-draft.js';
 
@@ -501,7 +502,82 @@ program
   .option('-s, --scope <scope>', '项目隔离标识（default 模式可省略，默认 default；strict 模式必填）')
   .requiredOption('-g, --group <group>', 'Group 路径')
   .requiredOption('-r, --relation <relation>', 'Relation ID 或名称（多个用逗号分隔，≤10 条批量查询，须同 Group）')
+  .option('--member <scope>', '视图模式下指定来源知识库（同一 group+relation 在多个库都存在时必填）')
   .action(async (opts) => {
+    const config = loadConfig();
+    const targets = resolveScopeTargets(config, opts.scope);
+
+    /**
+     * 视图模式：`group + relation` 在成员库之间**可能多命中**，不能静默选一个。
+     *
+     * 静默选一个 = 让用户读错库的文档，而且事后无法发现（两份文档可能同名而异义）。
+     * 因此：显式 `--member` 优先；否则全部试一遍，唯一命中才返回，多命中 fail-loud
+     * 并给出可直接复制执行的 `--member` 命令（S-07 D3）。
+     */
+    if (targets.views.length > 0 && targets.scopes.length > 1) {
+      const viewName = targets.views[0];
+      let candidates: string[];
+      if (opts.member) {
+        const members = getViewMembers(config, viewName);
+        if (!members.includes(opts.member)) {
+          output({
+            ok: false,
+            view: viewName,
+            error: `--member "${opts.member}" 不是视图 ${viewName} 的成员。`,
+            hint: `该视图的成员：${members.join('、')}`,
+          });
+          await closeEngine();
+          process.exit(1);
+        }
+        candidates = [opts.member];
+      } else {
+        candidates = targets.scopes;
+      }
+
+      const hits: { scope: string; sourcePath?: string }[] = [];
+      for (const member of candidates) {
+        const r = await executeGetModuleInfo({ scope: member, group: opts.group, relation: opts.relation });
+        if (r.ok) hits.push({ scope: member, ...(r.sourcePath ? { sourcePath: r.sourcePath } : {}) });
+        // 单个成员失败不视为命中；若是显式 --member 则直接报错
+        else if (opts.member) {
+          output({ ok: false, scope: member, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
+          await closeEngine();
+          process.exit(1);
+        }
+      }
+
+      if (hits.length === 1) {
+        const only = hits[0];
+        const r = await executeGetModuleInfo({ scope: only.scope, group: opts.group, relation: opts.relation });
+        if (r.ok) {
+          if (r.hint) console.error(r.hint);
+          console.log(`[scope: ${only.scope}]\n${r.content}`);
+        }
+        await closeEngine();
+        if (!r.ok) process.exit(1);
+        return;
+      }
+      if (hits.length === 0) {
+        output({
+          ok: false,
+          view: viewName,
+          error: `在视图 ${viewName} 的 ${candidates.length} 个成员库中均未找到该文档。`,
+          hint: `已在以下库中查找：${candidates.join('、')}`,
+        });
+        await closeEngine();
+        process.exit(1);
+      }
+      output({
+        ok: false,
+        view: viewName,
+        error: `该文档在视图 ${viewName} 的多个知识库中同时存在，请指定来源库。`,
+        candidates: hits,
+        hint: `ki get-module-info --scope ${viewName} -g "${opts.group}" -r "${opts.relation}" --member <scope>`,
+      });
+      await closeEngine();
+      process.exit(1);
+    }
+
     const scope = resolveScope(loadConfig(), opts.scope);
     const relationArgs = String(opts.relation || '').split(',').map((s: string) => s.trim()).filter(Boolean);
 

@@ -29,6 +29,7 @@
 | [`datasource`](#datasource) | 数据源登记与同步 |
 | [`group`](#group) | Group 创建 / 删除 / 列表 |
 | [`scope`](#scope) | scope 列表 / 只读开关 / 删除 / 清空 |
+| [`view`](#view) | 知识视图：把多个 scope 聚合成一个可寻址名字 |
 | [`user`](#user) | Web 登录账号（与 MCP Token 独立） |
 | [`tag`](#tag) | tag 发现 |
 | [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
@@ -373,6 +374,51 @@ ki scope clear my-project --tags ki-search --yes
   "kbCleared": false
 }
 ```
+
+---
+
+## view
+
+**知识视图**：一个带名字的有序 scope 列表，可当 scope 用于**所有读命令**。
+
+```bash
+ki view list   [--json]
+ki view show   <name> [--json]
+ki view create <name> --members a,b      # 或 --add a --add b
+ki view add    <name> <scope>
+ki view remove <name> <scope>
+ki view delete <name> --yes
+```
+
+### 语义
+
+| 方面 | 规则 |
+|---|---|
+| 命名空间 | 视图名与 scope 名**共用且唯一**，撞名即拒绝。保留名：`all` / `default` / `__global__` / `__root__` |
+| 成员 | 必须是真实 scope；**不支持嵌套视图**，也不支持引用自身 |
+| 只读使用 | `ki search / group list / tag list / doc list / get-module-info` 均可 `--scope <视图名>` |
+| 写入 | **一律拒绝**（`VIEW_NOT_WRITABLE`）并给出逐成员命令 —— 视图不是知识库，没有落点 |
+| 空视图 | 拒绝（至少要有一个成员）；移空成员也会被拒，解散请用 `ki view delete` |
+| 删除 | 只解散组合，**不动任何知识库数据** |
+
+### 存储
+
+定义存 `<config 所在目录>/views.json`（默认 `~/.ki/views.json`），**不是** `config.yaml` 的字段。
+这样回滚到不支持视图的旧版本时，旧版本完全看不见该文件，不会因未知字段 fail-loud 起不来。
+
+### 示例
+
+```bash
+ki view create team --members kisearch,kisearch-memory
+ki search "登录流程" --scope team          # 一次检索两个库，命中带来源 scope
+ki group list --scope team --json          # 按库分桶返回（buckets）
+ki tag list --scope team                   # 合并各库 tag 并累加计数
+ki store --scope team "..."                # 拒绝：视图不能作为写入目标
+ki view delete team --yes
+```
+
+> 视图模式下 `ki search` 会往 stderr 打一行 `[view] team → 2 个成员（展开 0ms）`，
+> 用于区分"慢在展开"还是"慢在 fan-out"。
 
 ---
 

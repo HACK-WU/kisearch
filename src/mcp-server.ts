@@ -9,6 +9,7 @@ import { enableIdleClose } from './lib/vector-client.js';
 // 任何单测 import 它都会真的把服务跑起来。这里 re-export 保持既有契约（stdio 与 HTTP 共用同一工厂）。
 export { buildKiMcpServer };
 import { loadConfig, invalidateConfigFreshness, getConfigLoadIssue } from './lib/config.js';
+import { listViewNames } from './lib/scope-view.js';
 import { captureDaemonIdentity, isDaemonIdentityDrifted } from './lib/scope-collection.js';
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
@@ -271,17 +272,59 @@ function parseMcpArgs(args: string[]): McpCliOptions {
   return { http: true, host, port, token: resolvedToken, allowedHosts, localAdmin, web };
 }
 
-/** 从 args 解析并校验 --scope 参数（必须显式指定），返回归一化后的 scope 集合 */
-function resolveScopesFlag(args: string[], action: string): string[] {
-  const raw = getFlagValue(args, '--scope');
-  if (!raw || !raw.trim()) {
+/**
+ * 把 `--scope` 里的名字按「当前是否已存在同名视图」分流到 scopes / viewGrants。
+ *
+ * 为什么按当前视图表判定：用户敲 `--scope team` 时的**意图**取决于 team 是什么。
+ * 若 team 已是视图，就应记成视图授权（便于将来迁移与审计）；如果先授权、后建视图
+ * （前向声明），当时会落进 scopes —— 运行时两者同权，不影响安全，
+ * 由 `ki mcp token list` 标「分类可能过时」，可用 `--view` 一键纠正。
+ *
+ * @param forcedViews `--view` 显式声明的名字，**无条件**归入 viewGrants
+ */
+function splitGrants(scopeRaw: string | undefined, viewRaw: string | undefined): { scopes: string[]; viewGrants: string[] } {
+  let known: Set<string>;
+  try {
+    known = new Set(listViewNames(loadConfig()));
+  } catch {
+    known = new Set(); // 视图文件损坏时不阻塞授权，退化为全部记入 scopes
+  }
+
+  const viewGrants: string[] = [];
+  const addView = (name: string): void => {
+    if (!viewGrants.includes(name)) viewGrants.push(name);
+  };
+
+  for (const v of (viewRaw ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(v)) {
+      failJson(`视图名 "${v}" 不合法：仅允许字母、数字、连字符(-)、下划线(_)`, 'MCP_TOKEN_VIEW_INVALID');
+    }
+    addView(v);
+  }
+
+  const scopes: string[] = [];
+  if (scopeRaw && scopeRaw.trim()) {
+    for (const name of resolveScopesArg(scopeRaw)) {
+      if (name === ALL_SCOPES) return { scopes: [ALL_SCOPES], viewGrants: [] };
+      if (known.has(name)) addView(name);
+      else scopes.push(name);
+    }
+  }
+  return { scopes, viewGrants };
+}
+
+/** 从 args 解析授权（`--scope` 与 `--view` 至少给一个） */
+function resolveGrantsFlag(args: string[], action: string): { scopes: string[]; viewGrants: string[] } {
+  const scopeRaw = getFlagValue(args, '--scope');
+  const viewRaw = getFlagValue(args, '--view');
+  if ((!scopeRaw || !scopeRaw.trim()) && (!viewRaw || !viewRaw.trim())) {
     failJson(
-      `${action} 必须显式指定 --scope（单个 / 多个逗号分隔 / ${ALL_SCOPES} 表示全部）。` +
-        `例如：ki mcp token ${action}${action === 'generate' ? '' : ' <id>'} --scope team-a,team-b`,
+      `${action} 必须显式指定 --scope 或 --view（--scope 可逗号分隔多个，或用 ${ALL_SCOPES} 表示全部）。` +
+        `例如：ki mcp token ${action}${action === 'generate' ? '' : ' <id>'} --scope team-a --view work`,
       'MCP_TOKEN_SCOPE_REQUIRED',
     );
   }
-  return resolveScopesArg(raw);
+  return splitGrants(scopeRaw, viewRaw);
 }
 
 /**
@@ -289,7 +332,7 @@ function resolveScopesFlag(args: string[], action: string): string[] {
  * ⚠️ 缺了这道校验，`--readonly`（少一个连字符）、`--readOnly` 这类拼错会被静默忽略 ——
  * 用户以为已经设成只读，实际仍是读写（安全属性静默失效）。
  */
-const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write', '--label', '--owner', '--id'];
+const TOKEN_ALLOWED_FLAGS = ['--scope', '--view', '--granting-view', '--read-only', '--read-write', '--label', '--owner', '--id'];
 
 /**
  * 拼写近似匹配：把 `--readonly` / `--readOnly` / `--Read-Only` 这类写法归一到
@@ -351,7 +394,7 @@ function runTokenCommand(args: string[]): void {
   // generate：生成授权 Token，必须显式指定 scope；--read-only 生成只读 Token
   if (action === 'generate') {
     try {
-      const scopes = resolveScopesFlag(args, 'generate');
+      const { scopes, viewGrants } = resolveGrantsFlag(args, 'generate');
       const readOnly = resolveAccessModeFlag(args) === true;
       const label = getFlagValue(args, '--label')?.trim() || `CLI Token ${new Date().toISOString().slice(0, 10)}`;
       if (label.length > 64) {
@@ -361,6 +404,7 @@ function runTokenCommand(args: string[]): void {
         label,
         ownerId: resolveDefaultCliTokenOwner(),
         createdBy: 'cli',
+        viewGrants,
       });
       console.log(
         JSON.stringify(
@@ -372,12 +416,15 @@ function runTokenCommand(args: string[]): void {
             createdBy: record.createdBy,
             token: record.token,
             scopes: record.scopes,
+            viewGrants: record.viewGrants ?? [],
             readOnly,
             accessMode: accessModeLabel(readOnly),
             createdAt: record.createdAt,
             hint:
               'Token 已生成（0600 落盘到 ~/.ki/mcp-tokens.json）。' +
-              `授权 scope：${record.scopes.join(', ')}；访问模式：${accessModeLabel(readOnly)}。` +
+              `授权 scope：${record.scopes.length > 0 ? record.scopes.join(', ') : '（无）'}`
+              + `${(record.viewGrants ?? []).length > 0 ? `；授权视图：${(record.viewGrants ?? []).join(', ')}` : ''}`
+              + `；访问模式：${accessModeLabel(readOnly)}。` +
               (readOnly
                 ? '远程 MCP 客户端连上后只会看到读工具（检索/读取），写工具不会出现在工具列表里，构造调用也会被拒绝。'
                   + '注意：只读仅对**非回环来源**生效——本机 127.0.0.1 直连免鉴权，不受该限制；'
@@ -399,15 +446,38 @@ function runTokenCommand(args: string[]): void {
   // list：列出所有 Token（含明文、授权 scope、访问模式，用户明确要求）
   if (action === 'list') {
     try {
-      const records = listTokensStrict(); // 损坏时报错（MCP_TOKEN_CORRUPT），避免静默空列表误导
+      const grantingView = getFlagValue(args, '--granting-view')?.trim();
+      let records = listTokensStrict(); // 损坏时报错（MCP_TOKEN_CORRUPT），避免静默空列表误导
+      if (grantingView) {
+        const viewNames = new Set(listViewNamesSafe());
+        // 核对影响面：显式授权该视图的 + 视图名混写在 scopes 里的（历史记录）
+        records = records.filter((r) => (r.viewGrants ?? []).includes(grantingView)
+          || r.scopes.includes(grantingView));
+        // 视图已不存在时给提示，避免用户以为"没人授权"其实是名字拼错
+        if (!viewNames.has(grantingView) && records.length === 0) {
+          // 不中断：仍返回空列表，但带上说明
+        }
+      }
       const tokens = records.map((r) => {
         const readOnly = r.readOnly === true;
         // 字段被手改坏（"true" / 1）时按读写处理 —— 必须显式告警，否则只读限制静默失效
         const invalid = isReadOnlyFieldInvalid(r);
+        const viewGrants = Array.isArray(r.viewGrants) ? r.viewGrants : [];
+        const viewSet = new Set(listViewNamesSafe());
+        // 分类可能过时：先授权后建视图 / 视图改名，名字会停留在 scopes 里
+        const staleViews = r.scopes.filter((x) => viewSet.has(x));
         return {
           ...r,
           label: tokenLabel(r),
           creator: tokenCreator(r),
+          viewGrants,
+          ...(staleViews.length > 0
+            ? {
+              classificationWarning:
+                `scopes 中含视图名：${staleViews.join(', ')}（分类可能过时）；`
+                + `如需纠正：ki mcp token update ${r.id} --view ${staleViews[0]}`,
+            }
+            : {}),
           readOnly,
           accessMode: accessModeLabel(readOnly),
           ...(invalid
@@ -423,12 +493,14 @@ function runTokenCommand(args: string[]): void {
         JSON.stringify(
           {
             ok: true,
+            ...(grantingView ? { grantingView } : {}),
             count: tokens.length,
             tokens,
-            hint:
-              'Token 明文已列出（按需回显）。请勿将输出粘贴到公开渠道；' +
-              '用 ki mcp token delete <id> 吊销，' +
-              'ki mcp token update <id> [--scope <...>] [--read-only|--read-write] 改权限。',
+            hint: grantingView
+              ? `以上是授权了视图「${grantingView}」的 Token。删除该视图后，这些 Token 将失去该视图的访问。`
+              : 'Token 明文已列出（按需回显）。请勿将输出粘贴到公开渠道；' +
+                '用 ki mcp token delete <id> 吊销，' +
+                'ki mcp token update <id> [--scope <...>] [--view <...>] [--read-only|--read-write] 改权限。',
           },
           null,
           2,
@@ -452,15 +524,25 @@ function runTokenCommand(args: string[]): void {
       );
     }
     try {
-      // scope 与访问模式均可单独修改：只想切只读时不必复述 scope（避免顺手改错授权范围）
-      const patch: { scopes?: string[]; readOnly?: boolean } = {};
+      // scope / 视图 / 访问模式均可单独修改：只想切只读时不必复述授权范围（避免顺手改错）
+      const patch: { scopes?: string[]; viewGrants?: string[]; readOnly?: boolean } = {};
       const scopeRaw = getFlagValue(args, '--scope');
-      if (scopeRaw !== undefined) patch.scopes = resolveScopesArg(scopeRaw);
+      const viewRaw = getFlagValue(args, '--view');
+      if (scopeRaw !== undefined || viewRaw !== undefined) {
+        const grants = splitGrants(scopeRaw, viewRaw);
+        // 传了哪个就替换哪个，没传的那一类保持原样（避免顺手清空另一半授权）
+        if (scopeRaw !== undefined) patch.scopes = grants.scopes;
+        if (viewRaw !== undefined) patch.viewGrants = grants.viewGrants;
+        // 只改 --scope 且其中含视图名：分类结果里的视图部分也要落盘
+        if (scopeRaw !== undefined && viewRaw === undefined && grants.viewGrants.length > 0) {
+          patch.viewGrants = grants.viewGrants;
+        }
+      }
       const mode = resolveAccessModeFlag(args);
       if (mode !== undefined) patch.readOnly = mode;
-      if (patch.scopes === undefined && patch.readOnly === undefined) {
+      if (patch.scopes === undefined && patch.viewGrants === undefined && patch.readOnly === undefined) {
         failJson(
-          'update 至少需要一项变更：--scope <...> 或 --read-only/--read-write（都不传则无任何改动）。',
+          'update 至少需要一项变更：--scope <...> / --view <...> 或 --read-only/--read-write（都不传则无任何改动）。',
           'MCP_TOKEN_UPDATE_NOTHING_TO_DO',
         );
       }
@@ -472,10 +554,12 @@ function runTokenCommand(args: string[]): void {
             ok: true,
             id: record.id,
             scopes: record.scopes,
+            viewGrants: record.viewGrants ?? [],
             readOnly,
             accessMode: accessModeLabel(readOnly),
             createdAt: record.createdAt,
-            hint: `Token（id: ${record.id}）已更新：授权 scope = ${record.scopes.join(', ')}，`
+            hint: `Token（id: ${record.id}）已更新：授权 scope = ${record.scopes.join(', ') || '（无）'}`
+              + `${(record.viewGrants ?? []).length > 0 ? `、授权视图 = ${(record.viewGrants ?? []).join(', ')}` : ''}，`
               + `访问模式 = ${accessModeLabel(readOnly)}。`
               + '该变更对新请求立即生效；已连接的客户端需重连（或重启 IDE）才能刷新工具列表'
               + `（切回读写后写工具才会重新出现）。`,
@@ -1118,3 +1202,12 @@ startMcpServer().catch((err: unknown) => {
   }
   process.exit(1);
 });
+
+/** 读当前视图名；视图文件损坏时返回空数组（不阻塞 token list） */
+function listViewNamesSafe(): string[] {
+  try {
+    return listViewNames(loadConfig());
+  } catch {
+    return [];
+  }
+}

@@ -27,6 +27,7 @@ import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from '
 import { detectUnknownFlags, toErrorPayload } from './lib/cli-args.js';
 import { checkWritable } from './lib/preflight.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 // ─── 类型 ───
 
 export interface ExportOptions {
@@ -398,6 +399,8 @@ const scope = args[0];
 if (!scope || scope.startsWith('--')) {
   fail('用法：ki export <scope> --output <dir> [--group <path>]');
 }
+// 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+assertNotScopeViewCli(scope, 'export');
 
 // 提取 --output
 let outputDir: string | undefined;

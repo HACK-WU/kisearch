@@ -14,6 +14,7 @@ import {
 } from './lib/backup.js';
 import { detectUnknownFlags, failJson, toErrorPayload } from './lib/cli-args.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
+import { assertNotScopeViewCli } from './lib/scope-policy.js';
 
 // ─── 工具 ───
 
@@ -55,6 +56,8 @@ const scope = filteredArgs[0];
 if (!scope) {
   failJson('用法：ki backup <scope> [--list]', 'MISSING_SCOPE');
 }
+// 视图不是知识库：产物/落点都是 per-scope，视图名一律拒绝（REQ-20261104-003）
+assertNotScopeViewCli(scope, 'backup');
 
 // ─── 主逻辑 ───
 

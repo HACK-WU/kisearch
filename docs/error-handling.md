@@ -199,3 +199,37 @@ scope 先注册
 - `ki import` 详细流程：[`import.md`](./import.md)
 - 典型工作流：[`workflows.md`](./workflows.md)
 - 备份与恢复：[`backup-restore.md`](./backup-restore.md)
+
+---
+
+## 七类：视图相关错误（REQ-20261104-003）
+
+知识视图（`ki view`）是多个 scope 的只读聚合。它的错误都属**参数/契约类**，不会产生脏数据。
+
+| 错误码 | 触发 | 处置 |
+|---|---|---|
+| `INVALID_VIEW_NAME` | 视图名含非法字符 | 仅允许字母、数字、连字符、下划线（与 scope 同字符集） |
+| `RESERVED_VIEW_NAME` | 用了保留名 | `all` / `default` / `__global__` / `__root__` 不可作视图名 |
+| `VIEW_NAME_CONFLICT` | 与已有 scope 或视图撞名 | 换一个名字（视图与知识库共用命名空间） |
+| `VIEW_NOT_FOUND` | 查/改/删不存在的视图 | `ki view list` 看现有视图 |
+| `VIEW_EMPTY` | 视图没有成员 | `ki view add <视图> <scope>`；或 `ki view delete` 解散 |
+| `VIEW_MEMBER_IS_VIEW` | 成员是视图（含自身） | 成员必须是真实 scope，不支持嵌套 |
+| `VIEW_MEMBER_NOT_REGISTERED` | `scopeMode=strict` 下成员未注册 | 先在配置 `scopes` 里注册该 scope |
+| `INVALID_VIEW_MEMBER` | `doc/get`、`get-module-info` 的 `member` 不在该视图内 | 用 `ki view show <视图>` 看成员清单 |
+| **`VIEW_NOT_WRITABLE`** | **写路径收到视图名** | **最常见**：错误文本会列出成员并给出可直接执行的逐库命令 |
+| `VIEWS_FILE_LOCKED` | `views.json` 被占用超时 | 稍后重试；确认无进程操作可删 `views.json.lock` |
+| `VIEWS_CORRUPT` | `views.json` 结构损坏 | 修复或删除该文件后重建；**损坏时会拒绝写入以保护原内容** |
+| `VIEWS_READ_FAILED` / `VIEWS_WRITE_FAILED` | 文件读写失败（权限等） | 检查 `views.json` 及其目录权限 |
+
+### `VIEW_NOT_WRITABLE` 长什么样
+
+```
+$ ki store "..." --scope team
+视图 team 是只读聚合，不是知识库，不能作为写入目标（operation=store）。
+  它的成员：kisearch、kisearch-memory
+  请改用其中一个成员，例如：
+    ki store --scope kisearch
+```
+
+产物类命令（`export` / `backup` / `restore` / `wiki-backfill` / `index-optimize` /
+`migrate-relation-cache`）因为产物是"每个知识库一套目录"，给的是**逐库命令清单**而不是示例。

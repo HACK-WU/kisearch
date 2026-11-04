@@ -7,7 +7,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
-import { useScopeValue } from '@/lib/scopeContext';
 import { getTasks, activeImportCount } from '@/api/tasksApi';
 import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, getDocContent, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPruneCandidate, type ImportPrunePlan } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
@@ -16,7 +15,7 @@ import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
 // 根散文件的 group 键（`__root__`）只用于存储：组标签显示「根」，路径段位置整段省略
 import { groupDisplayName, groupPathSegment } from '@/lib/groupTree';
-import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
+import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint, useWritableScope } from '@/lib/hooks';
 import {
   MAX_CHUNK_OVERLAP,
   MAX_CHUNK_SIZE,
@@ -451,7 +450,14 @@ function clearImportCredentialIf(owner: { uploadId?: string; jobId?: string }): 
 }
 
 export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskSummary | null) => void }): JSX.Element {
-  const currentScope = useScopeValue();
+  /**
+   * 顶栏值可能是**视图名**（REQ-20261104-003）。三个写类页面一律不认视图：
+   * 视图不是知识库，写路径会 fail-loud。这里把视图名归一成空串，
+   * 让「当前 scope」标记与 Group 下拉都退回「未选择」状态 —— 绝不把视图名发进任何请求。
+   *
+   * ★ 写目标本身来自页面内 `scope` 状态（ScopePathSelect 选择并确认），不受影响。
+   */
+  const currentScope = useWritableScope() ?? '';
   const vectorAvailability = useVectorAvailability();
   const vectorAvailable = vectorAvailability.status === 'available';
   const queryClient = useQueryClient();

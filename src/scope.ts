@@ -30,6 +30,7 @@ import {
   setScopeReadonlyInConfigFile,
 } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
+import { readViews, isViewName, getViewMembers } from './lib/scope-view.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
   vectorListScopes,
@@ -185,6 +186,32 @@ function computeScopeDocCounts(scope: string): ScopeDocCounts {
   }
 }
 
+/**
+ * 视图的成员元信息。
+ *
+ * ★ 必需原因：`scopes[]` 按 Token 授权过滤，而视图成员通常**不在授权列表内**
+ * （授权视图 ≠ 授权成员名）。前端在视图模式下要判断「这个成员是不是只读库」
+ * 「有没有向量索引」，只能从这里取；缺了它，`useScopeReadonly(成员名)` 查不到条目
+ * → readonly 默认 false → **只读库在视图下被显示成可写**。
+ */
+export interface ViewMemberMeta {
+  scope: string;
+  kb: boolean;
+  vector: boolean;
+  readonly: boolean;
+}
+
+export interface ViewInfo {
+  view: string;
+  members: string[];
+  /** 与 members 同序 */
+  memberMeta: ViewMemberMeta[];
+  /** 至少有一层（KB 或向量）存在的成员数 */
+  availableCount: number;
+  /** 两层都不存在的成员名 */
+  missing: string[];
+}
+
 export type ScopeListResult = {
   ok: true;
   scopeMode: 'default' | 'strict';
@@ -192,9 +219,11 @@ export type ScopeListResult = {
   vectorReason?: string;
   count: number;
   scopes: ScopeEntry[];
+  /** 视图定义（按当前 Token 的授权过滤在工具层做；这里给全集） */
+  views?: ViewInfo[];
 };
 
-async function executeScopeListLocal(): Promise<ScopeListResult> {
+export async function executeScopeListLocal(): Promise<ScopeListResult> {
   const config = loadConfig();
   const kbScopes = new Set(listAllScopes());
 
@@ -282,6 +311,35 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
     };
   });
 
+  // 视图：只在存在定义时带上该字段（无视图的用户响应与改造前完全一致）
+  let views: ViewInfo[] | undefined;
+  try {
+    const viewsMap = readViews(config);
+    const names = Object.keys(viewsMap).sort();
+    if (names.length > 0) {
+      views = names.map((name) => {
+        const members = viewsMap[name].members;
+        const memberMeta: ViewMemberMeta[] = members.map((m) => ({
+          scope: m,
+          kb: kbScopes.has(m),
+          vector: vectorScopes.has(m),
+          readonly: isScopeReadonly(config, m),
+        }));
+        const missing = memberMeta.filter((x) => !x.kb && !x.vector).map((x) => x.scope);
+        return {
+          view: name,
+          members,
+          memberMeta,
+          availableCount: members.length - missing.length,
+          missing,
+        };
+      });
+    }
+  } catch (err) {
+    // 视图文件损坏不应让整个 scope 列表不可用；告警后按「无视图」返回
+    console.warn(`⚠️ 视图定义读取失败，已按无视图处理：${(err as Error).message}`);
+  }
+
   return {
     ok: true,
     scopeMode: config.scopeMode,
@@ -289,6 +347,7 @@ async function executeScopeListLocal(): Promise<ScopeListResult> {
     vectorReason,
     count: scopes.length,
     scopes,
+    ...(views ? { views } : {}),
   };
 }
 
@@ -568,6 +627,29 @@ export function executeScopeSetReadonlyLocal(params: { scope: string; readonly: 
   } catch (err) {
     return { ok: false, code: 'BAD_SCOPE', error: (err as Error).message };
   }
+  /**
+   * 视图不是知识库：拒绝设置只读态。
+   *
+   * 为什么挂在这里而不是写锁：`scope-readonly` **刻意不经过 `withScopeWriteLock`**
+   * （否则只读库永远解不开，见本函数上方注释），所以 S-03 的写门禁覆盖不到它，
+   * 必须在本路径单独拦。
+   */
+  try {
+    if (isViewName(loadConfig(), params.scope)) {
+      let members: string[] = [];
+      try { members = getViewMembers(loadConfig(), params.scope); } catch { members = []; }
+      const hint = members.length > 0
+        ? `\n  成员库如需只读：${members.map((m) => `ki scope readonly ${m}`).join('；')}`
+        : '';
+      return {
+        ok: false,
+        code: 'BAD_SCOPE',
+        error: `「${params.scope}」是一个视图，不是知识库，无法设置只读状态。${hint}`,
+      };
+    }
+  } catch {
+    // 视图文件损坏时按「不是视图」处理，与 isViewName 内部策略一致
+  }
   let result: ReturnType<typeof setScopeReadonlyInConfigFile>;
   try {
     result = setScopeReadonlyInConfigFile(params.scope, params.readonly);
@@ -627,6 +709,11 @@ program
   .command('list')
   .description('列出所有 scope（两层并集，标注所在层）')
   .option('--json', '以 JSON 格式输出（脚本解析用）', false)
+  /**
+   * 视图段默认**不输出**：该命令长期被脚本按行解析（docs/query-kb.md 教用户用它），
+   * 追加段落会打断 grep/awk 类脚本且不报错。要看视图请显式加 --views，或用 ki view list。
+   */
+  .option('--views', '附加输出「视图」段（默认不输出，保持文本格式向后兼容）', false)
   .action(async (opts) => {
     // 结构化错误处理：relations 元数据损坏（manifest 无法解析）时 executeScopeList 会
     // fail-loud 抛错，裸抛会变成 unhandled rejection（堆栈 + 退出码 1，用户看不到出路）。
@@ -645,6 +732,7 @@ program
       return;
     }
     // 人类可读表格输出（默认）——动态列宽适配长 scope 名
+    // 视图段：仅在 --views 时追加（见上面 option 注释）
     const nameWidth = Math.max(10, ...result.scopes.map((s) => s.scope.length));
     const header = `  ${'scope'.padEnd(nameWidth)}  KB     Vector   Registered  Readonly  Docs`;
     const sep = '─'.repeat(header.length + 2);
@@ -658,6 +746,19 @@ program
       );
     }
     console.log(sep);
+    // 视图段：默认不打印（保持既有文本格式供脚本解析），显式 --views 才追加
+    if (opts.views) {
+      const views = result.views ?? [];
+      if (views.length === 0) {
+        console.log('\nViews (0) — 尚无视图定义；创建：ki view create <名称> --members <scope1>,<scope2>');
+      } else {
+        console.log(`\nViews (${views.length}) — 视图可当 scope 用于所有读命令`);
+        for (const v of views) {
+          const tail = v.missing.length > 0 ? `   ⚠ 缺失：${v.missing.join(', ')}` : '';
+          console.log(`  ${v.view}  ${v.availableCount}/${v.members.length} 可用   ${v.members.join(' / ')}${tail}`);
+        }
+      }
+    }
     if (!result.vectorAvailable) {
       console.log(`\n⚠ 向量层不可用：${result.vectorReason || '未知原因'}`);
       console.log('  （scope 列表来自 KB 目录层 + config；向量层数据暂不可见）');

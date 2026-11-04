@@ -10,6 +10,7 @@
 import { Command } from 'commander';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
+import { resolveScopeTargets } from './lib/scope-view.js';
 import { readJson } from './lib/store.js';
 import { getGroupIndexPath } from './lib/scope.js';
 import { executeGroupCreate } from './lib/group-create.js';
@@ -166,6 +167,62 @@ program
         process.exitCode = 1;
         return;
       }
+      /**
+       * 视图模式必须在 `--json` 分支**之前**处理：json 分支走的是
+       * `buildListJson({ scope })` 单库路径，先走它会拿视图名去读
+       * `dataDir/<视图名>/relations` 而直接报「scope 元数据不存在」。
+       */
+      const viewConfig = loadConfig();
+      const viewTargets = resolveScopeTargets(viewConfig, opts.scope);
+      if (viewTargets.views.length > 0 && viewTargets.scopes.length > 1) {
+        const buckets: { scope: string; output?: string; groups?: unknown; error?: string }[] = [];
+        for (const member of viewTargets.scopes) {
+          try {
+            if (opts.json) {
+              buckets.push({ scope: member, groups: buildListJson({
+                scope: member,
+                path: groupPath,
+                groups: opts.groups,
+                withCounts: !!opts.withCounts,
+              }) });
+            } else {
+              const r = await executeQueryGroup({
+                scope: member,
+                groupsParam: opts.groups,
+                subtreeParam: groupPath,
+                hotCount: Number(opts.hotCount) || 5,
+                depth: Number(opts.depth) || 4,
+                modes: String(opts.mode ?? 'full').split(',').map((m) => m.trim()).filter(Boolean),
+                autoFallback: opts.autoFallback,
+              });
+              buckets.push(r.ok ? { scope: member, output: r.output } : { scope: member, error: r.error });
+            }
+          } catch (err) {
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        if (opts.json) {
+          output({
+            ok: true,
+            view: viewTargets.views[0],
+            members: viewTargets.scopes,
+            buckets,
+            ...(viewTargets.skipped.length > 0 ? { skipped: viewTargets.skipped } : {}),
+          });
+          return;
+        }
+        console.log(`视图 ${viewTargets.views.join(',')}（${viewTargets.scopes.length} 个成员）\n`);
+        for (const b of buckets) {
+          console.log(`── ${b.scope} ${'─'.repeat(Math.max(4, 40 - b.scope.length))}`);
+          console.log(b.error ? `✗ ${b.error}` : b.output);
+          console.log('');
+        }
+        if (viewTargets.skipped.length > 0) {
+          console.error(`⚠ 已跳过：${viewTargets.skipped.map((k) => `${k.scope}（${k.reason}）`).join('；')}`);
+        }
+        return;
+      }
+
       if (opts.json) {
         try {
           output(buildListJson({
@@ -181,15 +238,56 @@ program
         return;
       }
 
-      const result = await executeQueryGroup({
-        scope: opts.scope,
+      const queryOpts = {
         groupsParam: opts.groups,
         subtreeParam: groupPath,
         hotCount: Number(opts.hotCount) || 5,
         depth: Number(opts.depth) || 4,
         modes: String(opts.mode ?? 'full').split(',').map((m) => m.trim()).filter(Boolean),
         autoFallback: opts.autoFallback,
-      });
+      };
+
+      /**
+       * 视图模式：**按成员库分桶**，绝不合并同名组。
+       * 两个库都有 `projects` 时各自一棵树——合并后看不出文档属于哪个库，
+       * 且同名组必然撞（S-07 D1）。
+       */
+      const config = loadConfig();
+      const targets = resolveScopeTargets(config, opts.scope);
+      if (targets.views.length > 0 && targets.scopes.length > 1) {
+        const buckets: { scope: string; output?: string; error?: string }[] = [];
+        for (const member of targets.scopes) {
+          try {
+            const r = await executeQueryGroup({ scope: member, ...queryOpts });
+            buckets.push(r.ok ? { scope: member, output: r.output } : { scope: member, error: r.error });
+          } catch (err) {
+            // 单个成员的索引损坏不应让整个视图不可用（告警在桶内）
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        if (opts.json) {
+          output({
+            ok: true,
+            view: targets.views[0],
+            members: targets.scopes,
+            buckets,
+            ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+          });
+          return;
+        }
+        console.log(`视图 ${targets.views.join(',')}（${targets.scopes.length} 个成员）\n`);
+        for (const b of buckets) {
+          console.log(`── ${b.scope} ${'─'.repeat(Math.max(4, 40 - b.scope.length))}`);
+          console.log(b.error ? `✗ ${b.error}` : b.output);
+          console.log('');
+        }
+        if (targets.skipped.length > 0) {
+          console.error(`⚠ 已跳过：${targets.skipped.map((k) => `${k.scope}（${k.reason}）`).join('；')}`);
+        }
+        return;
+      }
+
+      const result = await executeQueryGroup({ scope: opts.scope, ...queryOpts });
       if (result.ok) {
         console.log(`[scope: ${result.scope}]\n${result.output}`);
       } else {
