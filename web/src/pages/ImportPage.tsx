@@ -14,8 +14,8 @@ import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
-// 根散文件的 group 键（`__root__`）只用于存储，展示统一映射成「根」
-import { groupDisplayName } from '@/lib/groupTree';
+// 根散文件的 group 键（`__root__`）只用于存储：组标签显示「根」，路径段位置整段省略
+import { groupDisplayName, groupPathSegment } from '@/lib/groupTree';
 import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint } from '@/lib/hooks';
 import {
   MAX_CHUNK_OVERLAP,
@@ -2111,7 +2111,7 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
             <span style={{ display: 'block', marginTop: 2 }}>导入设置</span>
           </span>
           <span className="ki-card__sub">
-            {scopeConfirmed ? `${scope}${group ? ` / ${group}` : ''}` : '目标待确认'}
+            {scopeConfirmed ? `${scope}${groupPathSegment(group) ? ` / ${groupPathSegment(group)}` : ''}` : '目标待确认'}
           </span>
         </div>
         <div className="ki-card__body" style={{ padding: 20 }}>

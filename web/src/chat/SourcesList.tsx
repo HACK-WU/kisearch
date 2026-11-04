@@ -21,6 +21,8 @@
 import { useId, useState } from 'react';
 import type { SourceRef } from '@/api/chatContract';
 import { formatLineRange } from './format';
+// 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，不留空槽
+import { groupPathSegment } from '../lib/rootGroup';
 
 export interface SourcesListProps {
   sources: SourceRef[];
@@ -55,7 +57,9 @@ export function SourcesList({ sources, onOpen }: SourcesListProps): JSX.Element 
               纯装饰信息 → aria-hidden，避免把摘要塞进按钮的可访问名称里 */}
           <span className="ki-chat-src__pop" role="tooltip" aria-hidden="true">
             <b>{s.doc}</b>
-            <em>{s.group}{formatLineRange(s) ? ` · ${formatLineRange(s)}` : ''}</em>
+            {groupPathSegment(s.group) || formatLineRange(s) ? (
+              <em>{[groupPathSegment(s.group), formatLineRange(s)].filter(Boolean).join(' · ')}</em>
+            ) : null}
             {s.snippet ? <q>{s.snippet}</q> : null}
             <u>打开原文并定位</u>
           </span>
@@ -83,12 +87,14 @@ export function SourcesList({ sources, onOpen }: SourcesListProps): JSX.Element 
                 type="button"
                 className="ki-chat-srcs__row"
                 onClick={onOpen ? () => onOpen(s) : undefined}
-                title={[s.doc, s.group, formatLineRange(s), s.snippet].filter(Boolean).join('\n')}
+                title={[s.doc, groupPathSegment(s.group), formatLineRange(s), s.snippet].filter(Boolean).join('\n')}
               >
                 <span className="ki-chat-src__no">{i + previewCount + 1}</span>
                 <span className="ki-chat-srcs__detail">
                   <span className="ki-chat-srcs__doc">{s.doc}</span>
-                  <span className="ki-chat-srcs__path">{s.group}</span>
+                  {groupPathSegment(s.group) ? (
+                    <span className="ki-chat-srcs__path">{groupPathSegment(s.group)}</span>
+                  ) : null}
                 </span>
                 {formatLineRange(s) ? <span className="ki-chat-src__lines">{formatLineRange(s)}</span> : null}
               </button>

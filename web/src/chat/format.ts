@@ -10,7 +10,7 @@
 //    `acceptance-sr02.test.ts` 正是通过本模块读取 `DEGRADED_LABELS` 的。
 import type { SourceRef } from '../api/chatContract';
 // 相对路径 + 零依赖模块（`lib/rootGroup`）：jiti 不认 `@/` 别名
-import { groupDisplayName } from '../lib/rootGroup';
+import { groupPathSegment } from '../lib/rootGroup';
 
 /**
  * 行号区间显示。
@@ -36,10 +36,8 @@ export function formatLineRange(ref: Pick<SourceRef, 'lineStart' | 'lineEnd'>): 
  */
 export { DEGRADED_LABELS } from '../api/chatContract';
 
-/** 来源引用的标题（`group / doc / 行号`），行号缺失时省略该段 */
+/** 来源引用的标题（`doc · group · 行号`），group / 行号缺失时整段省略 */
 export function sourceRefTitle(ref: SourceRef): string {
-  const lines = formatLineRange(ref);
-  // 根散文件的 group 是内部保留键（`__root__`），展示成「根」（见 lib/rootGroup）
-  const group = groupDisplayName(ref.group);
-  return lines ? `${ref.doc} · ${group} · ${lines}` : `${ref.doc} · ${group}`;
+  // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，退化成 `doc · 行号`
+  return [ref.doc, groupPathSegment(ref.group), formatLineRange(ref)].filter(Boolean).join(' · ');
 }

@@ -13,6 +13,7 @@ import {
   buildGroupTree,
   countDocs,
   findGroupNode,
+  groupPathSegment,
   revealGroupPath,
   toggleNodeOpen,
   withAllOpen,
@@ -196,7 +197,7 @@ export function GroupTreePanel({
                 data-ki-group={doc.group}
                 data-ki-document={doc.name}
                 onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path })}
-                title={doc.path ?? `${doc.group} / ${doc.name}`}
+                title={doc.path ?? [groupPathSegment(doc.group), doc.name].filter(Boolean).join(' / ')}
               >
                 <Icon name="file" className="ki-icon ki-icon--sm" />
                 <span className="ki-tree-doc__name">{doc.name}</span>

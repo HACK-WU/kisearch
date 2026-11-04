@@ -49,6 +49,8 @@ import {
 } from '@/api/chatApi';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
 import { buildRefCandidate, checkRefAdd, drawerOfSelection, type RefAddResult } from './refSelection';
+// 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，不留空槽
+import { groupPathSegment } from '../lib/rootGroup';
 import {
   CONTEXT_MEASURE_NOTE,
   CONTEXT_PART_ROWS,
@@ -1725,7 +1727,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                   type="button"
                   className="ki-chat-refbar__chip"
                   onClick={() => handleRemoveRef(i)}
-                  title={`移除引用：${r.group} / ${r.doc}\n${r.text.slice(0, 60)}${r.text.length > 60 ? '…' : ''}`}
+                  title={`移除引用：${[groupPathSegment(r.group), r.doc].filter(Boolean).join(' / ')}\n${r.text.slice(0, 60)}${r.text.length > 60 ? '…' : ''}`}
                 >
                   <span className="ki-chat-refbar__no">{i + 1}</span>
                   <span className="ki-chat-refbar__doc">{r.doc}</span>
@@ -2272,7 +2274,9 @@ function MessageBubble({
                 <li key={`${r.group}/${r.doc}/${i}`} className="ki-chat-refs__item" title={r.text}>
                   <span className="ki-chat-refs__no">{i + 1}</span>
                   <span className="ki-chat-refs__doc">{r.doc}</span>
-                  <span className="ki-chat-refs__group">{r.group}</span>
+                  {groupPathSegment(r.group) ? (
+                    <span className="ki-chat-refs__group">{groupPathSegment(r.group)}</span>
+                  ) : null}
                 </li>
               ))}
             </ul>

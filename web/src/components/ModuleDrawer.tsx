@@ -17,6 +17,8 @@ import {
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
+// 根散文件的 group 是内部保留键（`__root__`）：路径段位置整段省略（连分隔符一起）
+import { groupPathSegment } from '@/lib/groupTree';
 import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
 import { useScopeReadonly } from '@/lib/hooks';
@@ -1470,12 +1472,12 @@ export function ModuleDrawer({
                 </div>
                 <div className="ki-drawer__meta">
                   <span className="ki-badge ki-badge--kb" style={{ fontSize: 11 }}>{scope}</span>
-                  {group && (
+                  {groupPathSegment(group) ? (
                     <>
                       <span className="ki-drawer__sep">·</span>
-                      <span className="ki-drawer__path">{group}</span>
+                      <span className="ki-drawer__path">{groupPathSegment(group)}</span>
                     </>
-                  )}
+                  ) : null}
                 </div>
               </div>
               {fullscreen && fullscreenToolbar ? (

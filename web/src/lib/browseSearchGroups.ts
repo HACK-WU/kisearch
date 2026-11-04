@@ -8,7 +8,7 @@
  *   1) `splitSearchDocs`：按后端 `matchedBy` 拆成名称命中 / 路径命中两个分区；
  *   2) `searchResultSummary`：结果头分开报三个数，不再相加掩盖。
  */
-import { groupDisplayName } from '@/lib/groupTree';
+import { groupPathSegment } from '@/lib/groupTree';
 
 export interface SearchDocSection<T> {
   nameHits: T[];
@@ -47,7 +47,8 @@ export function hasNameOrPathHit(section: { nameHits: unknown[]; pathHits: unkno
  *   这类文档通常有 `path`，只有 MCP/CLI 直写（无 sourcePath）时才会走到最后这一档。
  */
 export function docDisplayPath(doc: { group: string; path?: string; logicalPath?: string }): string {
-  return doc.logicalPath ?? doc.path ?? groupDisplayName(doc.group);
+  // 兜底到 group 时按**路径段**口径：根散文件不贡献段（返回空串 = 无路径可显示），不显示「根」
+  return doc.logicalPath ?? doc.path ?? groupPathSegment(doc.group);
 }
 
 /**

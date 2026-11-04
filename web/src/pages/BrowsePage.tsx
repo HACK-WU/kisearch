@@ -52,6 +52,7 @@ import {
   ROOT_GROUP_KEY,
   applyOpenPaths,
   buildGroupTree,
+  groupPathSegment,
   countDocs,
   findGroupNode,
   firstGroupWithDocuments,
@@ -993,7 +994,7 @@ export function BrowsePage(): JSX.Element {
           className="ki-browse-fulltext__open-inline"
           onClick={() => openDocumentInline(target)}
           title="在页内打开（替换当前结果列表）"
-          aria-label={`在页内打开 ${doc.group} / ${doc.name}`}
+          aria-label={`在页内打开 ${[groupPathSegment(doc.group), doc.name].filter(Boolean).join(' / ')}`}
         >
           <Icon name="open-inline" className="ki-icon ki-icon--sm" />
         </button>
@@ -1120,7 +1121,7 @@ export function BrowsePage(): JSX.Element {
                         }}
                       >
                         <span className="ki-browse-fulltext__title">{relation || '未命名文档'}</span>
-                        <span className="ki-browse-fulltext__path">{group}</span>
+                        <span className="ki-browse-fulltext__path">{groupPathSegment(group)}</span>
                         <span className="ki-browse-fulltext__snippet">
                           {/* 与语义检索页全文模式同口径：命中 chunk（content）优先于文件级原文（original），
                               否则整篇原文的开头会把命中位置挤出片段，高亮看起来「消失」 */}
@@ -1136,7 +1137,9 @@ export function BrowsePage(): JSX.Element {
                         }}
                         disabled={!canOpen}
                         title={canOpen ? '在页内打开（替换当前结果列表）' : '缺少 Group 或文档名，无法在页内打开'}
-                        aria-label={canOpen ? `在页内打开 ${group} / ${relation}` : '无法在页内打开：缺少文档定位信息'}
+                        aria-label={canOpen
+                          ? `在页内打开 ${[groupPathSegment(group), relation].filter(Boolean).join(' / ')}`
+                          : '无法在页内打开：缺少文档定位信息'}
                       >
                         <Icon name="open-inline" className="ki-icon ki-icon--sm" />
                       </button>
@@ -1301,6 +1304,16 @@ export function BrowsePage(): JSX.Element {
     return () => window.cancelAnimationFrame(frame);
   }, [readingInline]);
 
+  /**
+   * 页头路径的 Group 段：根散文件**整段省略**（2026-11-04 用户拍板）。
+   *
+   * 根散文件的 group 是内部保留键 `__root__`（只用于存储），它**不是目录**：
+   * 写成「根 / 文档名」等于凭空造出一级路径，所以这里连「根」和后面的 `/` 一起省掉，
+   * 页头直接是 `scope · 原文阅读 · 文档名`。其余出口（抽屉、来源列表等）仍显示「根」，
+   * 因为那些位置是独立字段，省略会留下空槽。
+   */
+  const headGroup = groupPathSegment(currentViewing?.group);
+
   return (
     <>
       {/* 页头副标题：由「功能罗列」改为**当前上下文路径**（用户 2026-10-16）。
@@ -1309,14 +1322,25 @@ export function BrowsePage(): JSX.Element {
       <div className="ki-page-head" style={{ flexShrink: 0 }}>
         <div>
           {currentViewing ? (
-            <p className="ki-page-head__path" title={`${scope} / ${currentViewing.group} / ${currentViewing.module}`}>
+            <p
+              className="ki-page-head__path"
+              title={headGroup
+                ? `${scope} / ${headGroup} / ${currentViewing.module}`
+                : `${scope} / ${currentViewing.module}`}
+            >
               {/* scope 芯片在最前（用户 2026-10-16：参考抽屉 meta 行的 scope 徽标样式），
-                  其后是「主题短语 · Group 路径 / 文档名」—— 与检索页/总览页页头同句式 */}
+                  其后是「主题短语 · Group 路径 / 文档名」—— 与检索页/总览页页头同句式。
+                  ★ Group 段可能缺席（根散文件，见 headGroup）：缺席时时连 `/` 一起省略，
+                    不留 `根 /` 也不留孤立分隔符。 */}
               <span className="ki-badge ki-badge--kb ki-page-head__scope">{scope}</span>
               <span className="ki-page-head__hint">原文阅读</span>
               <span className="ki-page-head__sep">·</span>
-              <span className="ki-page-head__group">{currentViewing.group}</span>
-              <span className="ki-page-head__sep">/</span>
+              {headGroup ? (
+                <>
+                  <span className="ki-page-head__group">{headGroup}</span>
+                  <span className="ki-page-head__sep">/</span>
+                </>
+              ) : null}
               <span className="ki-page-head__doc">{currentViewing.module}</span>
             </p>
           ) : (

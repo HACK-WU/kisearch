@@ -27,6 +27,8 @@ import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSourc
 import { getTask } from '@/api/tasksApi';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
+// 根散文件的 group 是保留键（`__root__`）：落点列用它所属的「根目录」描述，不回显内部键
+import { ROOT_GROUP_FIELD_LABEL, isRootGroup } from '@/lib/rootGroup';
 import { applyRowOrder, mergeRowOrder } from '@/lib/datasourceOrder';
 import {
   buildDataSourceDetail,
@@ -1529,7 +1531,13 @@ export function DataSourcePage(): JSX.Element {
                       ) : null}
                     </td>
                     <td className="ki-ds-table__dir" title={source.dir}>{source.dir}</td>
-                    <td className="ki-ds-table__group ki-ds-col--group" title={source.group ?? '(自动)'}>{source.group ?? '(自动)'}</td>
+                    {/* 落点列是"这条源写到哪儿"的结论：根散文件即落在库根，用「根目录」而不是回显保留键 */}
+                    <td
+                      className="ki-ds-table__group ki-ds-col--group"
+                      title={source.group ? (isRootGroup(source.group) ? ROOT_GROUP_FIELD_LABEL : source.group) : '(自动)'}
+                    >
+                      {source.group ? (isRootGroup(source.group) ? ROOT_GROUP_FIELD_LABEL : source.group) : '(自动)'}
+                    </td>
                     <td className="ki-ds-col--time">{lastSyncLabel ?? '—'}</td>
                     {/* 下次同步独立成列（2026-10-30 用户定稿）：主值是「什么时候会再跑」，
                         用正文字号 + 600；周期/模式下沉副行。原先挤在「上次同步」副行里，

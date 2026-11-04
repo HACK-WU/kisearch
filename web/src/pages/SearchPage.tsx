@@ -14,6 +14,7 @@ import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { GroupTreePanel, type DirectoryScrollPosition } from '@/components/GroupTreePanel';
 import { ChatToggleButton } from '@/chat/ChatToggleButton';
 import { resolveDocumentLink, type DocumentView } from '@/lib/documentLinks';
+import { groupPathSegment } from '@/lib/groupTree';
 import { scopeError } from '@/lib/validators';
 import { highlightMatch, makeSearchSnippet } from '@/lib/searchText';
 import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } from '@/lib/searchHistory';
@@ -757,15 +758,19 @@ export function SearchPage(): JSX.Element {
                     {/* 文档名称 + Group 路径 */}
                     <div className="ki-qr-title">
                       <span className="ki-qr-name">{r.relation ?? '(未知文档)'}</span>
-                      <span className="ki-badge ki-badge--kb" title={[r.group, r.relation].filter(Boolean).join('/')}>
-                        {[r.group, r.relation].filter(Boolean).join('/') || '(无文档路径)'}
+                      {/* 路径徽标是**展示**：根散文件的 group 是保留键 `__root__`，整段省略（退化成文档名）；
+                          下面的 `to` 里仍用原始 group 作深链参数（跳转要打得开） */}
+                      <span className="ki-badge ki-badge--kb" title={[groupPathSegment(r.group), r.relation].filter(Boolean).join('/')}>
+                        {[groupPathSegment(r.group), r.relation].filter(Boolean).join('/') || '(无文档路径)'}
                       </span>
                       {r.group && (
                         <Link
                           className="ki-qr-group-browse"
                           to={{ pathname: '/browse', search: `?scope=${encodeURIComponent(scope)}&group=${encodeURIComponent(r.group)}${r.relation ? `&relation=${encodeURIComponent(r.relation)}` : ''}` }}
                           onClick={(event) => event.stopPropagation()}
-                          aria-label={r.relation ? `在目录中定位文档 ${r.group}/${r.relation}` : `浏览 Group ${r.group} 中的文档`}
+                          aria-label={r.relation
+                            ? `在目录中定位文档 ${[groupPathSegment(r.group), r.relation].filter(Boolean).join('/')}`
+                            : `浏览 ${groupPathSegment(r.group) || '根目录'} 中的文档`}
                         >{r.relation ? '定位文档 ↗' : '浏览此 Group ↗'}</Link>
                       )}
                     </div>

@@ -10,6 +10,7 @@
 import type { TaskIndexReadiness, TaskLogResponse, TaskRecord, TaskResultSnapshot, TaskState } from '@/api/tasksApi';
 import { cliCommandFor } from './taskActions';
 import { describeErrorText, describeTaskError, formatTaskError } from './taskErrorCatalog';
+import { ROOT_GROUP_FIELD_LABEL, isRootGroup } from './rootGroup';
 import { formatRetention } from './taskRetention';
 
 export type DetailTone = 'normal' | 'warn' | 'danger';
@@ -320,7 +321,11 @@ function paramRows(task: TaskRecord, retentionMs?: number): DetailRow[] {
   if (params) {
     rows.push({
       label: 'Group',
-      value: params.group ? dash(params.group) : '未指定（按源目录派生）',
+      // 数据源未指定 group、仓库根下就有文件时，记录值是根保留键 `__root__`。
+      // 参数行是键值对，留空会被读成"没设置"，故用 ROOT_GROUP_FIELD_LABEL（「根目录」）
+      value: params.group
+        ? dash(isRootGroup(params.group) ? ROOT_GROUP_FIELD_LABEL : params.group)
+        : '未指定（按源目录派生）',
     });
     rows.push({ label: '标签', value: params.tags && params.tags.length > 0 ? params.tags.join(' / ') : '未设置' });
     rows.push({

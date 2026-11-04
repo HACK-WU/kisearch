@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { getEditableDocument, saveEditableDocument, type EditableDocument, type SaveDocumentResponse } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { editorVectorizeHint, useVectorAvailability } from '@/lib/hooks';
+// 根散文件的 group 是保留键（`__root__`）：编辑器头部路径段整段省略
+import { groupPathSegment } from '@/lib/groupTree';
 
 interface Props {
   scope: string;
@@ -120,7 +122,10 @@ export function DocumentEditor({ scope, group, relation, readerSelection, onSave
     <div className="ki-editor-overlay" role="presentation">
       <section className="ki-editor" role="dialog" aria-modal="true" aria-label={`编辑 ${relation}`}>
         <header className="ki-editor__head">
-          <div><strong>编辑 {relation}</strong><small>{group}</small></div>
+          <div>
+            <strong>编辑 {relation}</strong>
+            {groupPathSegment(group) ? <small>{groupPathSegment(group)}</small> : null}
+          </div>
           <button className="ki-btn ki-btn--secondary" type="button" onClick={close} disabled={busy}>关闭</button>
         </header>
         {loaded?.warning && <div className="ki-editor__notice" role="status">{loaded.warning}</div>}

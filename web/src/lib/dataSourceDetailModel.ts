@@ -7,6 +7,7 @@
 import type { DataSourceActiveState, DataSourceLastSyncView, DataSourcePendingItem, DataSourceRecordView, DataSourceSyncState } from '@/api/httpApi';
 import type { DetailItem, DetailRow } from '@/lib/taskDetailModel';
 import { describeSchedule } from '@/lib/datasourceSchedule';
+import { ROOT_GROUP_FIELD_LABEL, isRootGroup } from '@/lib/rootGroup';
 
 export type DataSourceStatusState = DataSourceSyncState | 'never' | DataSourceActiveState;
 export type DataSourceStatusTone = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
@@ -75,11 +76,15 @@ export interface DataSourceMetric {
  *   - sourcePath 已含 group 后缀前缀（`aiops/rca/x.md` @ group `aiops/rca`）→ 原样
  *   - sourcePath 缺 group 前缀（`API文档/x.md` @ group `wiki/API文档`）→ 补 group
  *   - 无 sourcePath（MCP / CLI 写入）→ 退回 `group/name`
+ *   - group 为根保留键（`__root__`）→ **不贡献路径段**（保留键只用于存储，不进任何路径）
  * 按「最长重叠段」判定，不要改成简单字符串拼接 —— 拼接会把 group 重复一层。
  */
 export function mergeGroupSourcePath(group: string, sourcePath: string | undefined, name: string): string {
   const split = (value: string): string[] => value.replace(/[\\/]+/g, '/').split('/').map((s) => s.trim()).filter(Boolean);
-  const groupSegments = split(group);
+  // 根散文件（`ROOT_GROUP_KEY`）不贡献路径段 —— 数据源未指定 group、仓库根下就有文件时，
+  // 同步写进来的 group 正是这个保留键（后端 `resolveGroupForSource`），
+  // 不摘掉它，待删树就会长出一个名叫「__root__」的目录（2026-11-04 补齐，与后端 doc-path 同口径）
+  const groupSegments = isRootGroup(group) ? [] : split(group);
   const fileSegments = sourcePath ? split(sourcePath) : split(name);
   let overlap = 0;
   const max = Math.min(groupSegments.length, fileSegments.length);
@@ -472,7 +477,7 @@ export function buildDataSourceDetail(
     },
     ...gitRows,
     // 落点 Group 放最后：它是"这条数据源写到哪里"的结论，放在参数末尾读起来更顺
-    { label: '落点 Group', value: effGroup ?? '自动：按顶层子目录', full: true },
+    { label: '落点 Group', value: effGroup ? (isRootGroup(effGroup) ? ROOT_GROUP_FIELD_LABEL : effGroup) : '自动：按顶层子目录', full: true },
   ];
 
   const scheduleView = record.schedule;

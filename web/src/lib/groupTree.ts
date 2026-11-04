@@ -9,7 +9,7 @@
 
 import type { DocGroup } from '@/api/httpApi';
 // 根散文件的落点键与展示名：唯一定义在零依赖模块里（`chat/format.ts` 走 jiti 时也能复用）
-export { ROOT_GROUP_KEY, ROOT_GROUP_LABEL, groupDisplayName, isRootGroup } from './rootGroup';
+export { ROOT_GROUP_KEY, ROOT_GROUP_LABEL, ROOT_GROUP_FIELD_LABEL, groupDisplayName, groupPathSegment, isRootGroup } from './rootGroup';
 import { isRootGroup } from './rootGroup';
 
 /**

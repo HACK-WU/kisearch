@@ -6,6 +6,8 @@ import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupTreePanel } from '@/components/GroupTreePanel';
 import { Icon } from '@/components/icons';
 import { useDocSearch } from '@/lib/hooks';
+// 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略；请求/键值仍用原键
+import { groupPathSegment } from '@/lib/groupTree';
 import { hasSearchTerm } from '@/lib/browseSearchGroups';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatRef } from '@/api/chatContract';
 import { anchorBlock, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
@@ -385,7 +387,9 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
                           onClick={() => { setSelectedDoc({ group: d.group, name: d.name }); setRefText(''); setMessage(''); }}
                         >
                           <span className="ki-chat-refpicker__result-name">{d.name}</span>
-                          <span className="ki-chat-refpicker__result-group">{d.group}</span>
+                          {groupPathSegment(d.group) ? (
+                            <span className="ki-chat-refpicker__result-group">{groupPathSegment(d.group)}</span>
+                          ) : null}
                         </button>
                       </li>
                     ))}
@@ -407,7 +411,10 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
           </aside>
           <div className="ki-reader-link-dialog__target">
             <div className="ki-reader-link-dialog__target-head">
-              <div><small>{selectedDoc.group}</small><h3>{selectedDoc.name || (isRef ? '请选择文档' : '')}</h3></div>
+              <div>
+                {groupPathSegment(selectedDoc.group) ? <small>{groupPathSegment(selectedDoc.group)}</small> : null}
+                <h3>{selectedDoc.name || (isRef ? '请选择文档' : '')}</h3>
+              </div>
               {/* 大纲：长文档快速定位到章节再划选/跳转——link 与 ref 同需（用户反馈「大纲呢，怎么没加」） */}
               <div className="ki-reader-link-dialog__outline-wrap">
                 <button type="button" className="ki-reader-link-dialog__outline-button" onClick={() => setOutlineOpen(!outlineOpen)} aria-expanded={outlineOpen}>☷ 大纲 ▾</button>
