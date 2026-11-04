@@ -28,7 +28,7 @@ import { getTask } from '@/api/tasksApi';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
 // 根散文件的 group 是保留键（`__root__`）：落点列用它所属的「根目录」描述，不回显内部键
-import { ROOT_GROUP_FIELD_LABEL, isRootGroup } from '@/lib/rootGroup';
+import { ROOT_GROUP_FIELD_LABEL, ROOT_GROUP_KEY } from '@/lib/rootGroup';
 import { applyRowOrder, mergeRowOrder } from '@/lib/datasourceOrder';
 import {
   buildDataSourceDetail,
@@ -45,8 +45,15 @@ import { DetailDrawer, DetailSection, DetailStatus } from '@/components/DetailDr
 import { ReadOnlyPathTree } from '@/components/ReadOnlyPathTree';
 import { DetailHero, DetailMetrics, DetailParams } from '@/components/DetailParts';
 import { Icon } from '@/components/icons';
-import { GroupPathSelect } from '@/components/GroupPathSelect';
+import { DatasourceMappingsEditor } from '@/components/DatasourceMappingsEditor';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
+import {
+  emptyRow,
+  summarizeGroupColumn,
+  toMappingPayload,
+  validateMappingRows,
+  type MappingRow,
+} from '@/lib/datasourceMappings';
 
 const keyOf = (item: { group: string; relation: string }): string => `${item.group}\u0000${item.relation}`;
 
@@ -194,7 +201,10 @@ export function DataSourcePage(): JSX.Element {
    */
   const [rowSyncNotice, setRowSyncNotice] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState({ scope: '', url: '', branch: '', subdir: '', group: '' });
+  // 映射（REQ-20261104-002）：默认 1 条根映射，与旧的「单个子目录 + 单个 Group」等价
+  const [addForm, setAddForm] = useState<{ scope: string; url: string; branch: string; mappings: MappingRow[] }>({
+    scope: '', url: '', branch: '', mappings: [emptyRow()],
+  });
   const [addScopeConfirmed, setAddScopeConfirmed] = useState(false);
   /** 「新建 Scope」模式才提供「创建为只读库」；已有 scope 只展示状态（改只读走 CLI） */
   const [addScopeMode, setAddScopeMode] = useState<'existing' | 'new'>('existing');
@@ -850,14 +860,20 @@ export function DataSourcePage(): JSX.Element {
       setAddState({ phase: 'idle', error: '请填写 Git 仓库地址' });
       return;
     }
+    // 映射前置校验：不合法的映射不提交（错误同时由编辑器就地展示）
+    const mappingIssue = validateMappingRows(addForm.mappings);
+    if (mappingIssue) {
+      setAddState({ phase: 'idle', error: mappingIssue.message });
+      return;
+    }
     setAddState({ phase: 'submitting' });
     try {
       const result = await addRemoteDataSource({
         scope: targetScope,
         url,
         ...(addForm.branch.trim() ? { branch: addForm.branch.trim() } : {}),
-        ...(addForm.subdir.trim() ? { subdir: addForm.subdir.trim() } : {}),
-        group: addForm.group.trim() || null,
+        // 映射是权威：单值 subdir / group 不再传（服务端以 mappings[0] 回填兼容位）
+        mappings: toMappingPayload(addForm.mappings),
         ...(addReadonly && addScopeMode === 'new' ? { readonly: true } : {}),
       });
       setAddState({ phase: 'cloning', taskId: result.taskId });
@@ -897,7 +913,7 @@ export function DataSourcePage(): JSX.Element {
             aria-haspopup="dialog"
             aria-expanded={addOpen}
             onClick={() => {
-              setAddForm({ scope: '', url: '', branch: '', subdir: '', group: '' });
+              setAddForm({ scope: '', url: '', branch: '', mappings: [emptyRow()] });
               setAddScopeConfirmed(false);
               setAddScopeMode('existing');
               setAddReadonly(false);
@@ -977,7 +993,10 @@ export function DataSourcePage(): JSX.Element {
                     confirmed={addScopeConfirmed}
                     currentScope={currentScope}
                     onChange={(value, confirmed) => {
-                      setAddForm((prev) => (value !== prev.scope ? { ...prev, scope: value, group: '' } : { ...prev, scope: value }));
+                      // 换 scope 时清空各行 Group：Group 树是按 scope 拉的，留着旧值会被误当成新库里的路径
+                      setAddForm((prev) => (value !== prev.scope
+                        ? { ...prev, scope: value, mappings: prev.mappings.map((row) => ({ ...row, group: '' })) }
+                        : { ...prev, scope: value }));
                       setAddScopeConfirmed(confirmed);
                     }}
                     onModeChange={(mode) => {
@@ -1048,33 +1067,18 @@ export function DataSourcePage(): JSX.Element {
                   />
                 </div>
 
-                <div className="ki-ds-add__field">
-                  <label className="ki-form-label" htmlFor="ki-ds-add-subdir">仓库子目录</label>
-                  <input
-                    id="ki-ds-add-subdir"
-                    className="ki-form-input"
-                    type="text"
-                    placeholder="如 docs/guide（留空 = 仓库根）"
-                    value={addForm.subdir}
+                {/* 映射块用**单列**栅格：`.ki-ds-add__field` 默认是 `96px | 1fr` 两列，
+                    映射表本身还有三列，塞进 1fr 里会挤成三四十像素宽（静态检查发现，未真机验证） */}
+                <div className="ki-ds-add__field" style={{ gridTemplateColumns: '1fr' }}>
+                  <span className="ki-form-label">目录 → 落点 Group</span>
+                  <DatasourceMappingsEditor
+                    idPrefix="ki-ds-add"
+                    scope={addScopeConfirmed ? addForm.scope : ''}
+                    rows={addForm.mappings}
+                    onChange={(mappings) => setAddForm((prev) => ({ ...prev, mappings }))}
                     disabled={addBusy}
-                    onChange={(event) => setAddForm((prev) => ({ ...prev, subdir: event.target.value }))}
+                    error={validateMappingRows(addForm.mappings)}
                   />
-                </div>
-
-                <div className="ki-ds-add__field">
-                  <span className="ki-form-label">落点 Group</span>
-                  {addScopeConfirmed && addForm.scope ? (
-                    <GroupPathSelect
-                      scope={addForm.scope}
-                      value={addForm.group}
-                      onChange={(value) => setAddForm((prev) => ({ ...prev, group: value }))}
-                      placeholder="搜索或输入新 Group，如：docs/guide"
-                      hint="下拉来自当前 Scope；输入新路径可新建 Group。留空 = 按子目录自动。"
-                      disabled={addBusy}
-                    />
-                  ) : (
-                    <input className="ki-form-input" disabled placeholder="请先选择 Scope" />
-                  )}
                 </div>
               </div>
               {addState.error ? (
@@ -1126,7 +1130,12 @@ export function DataSourcePage(): JSX.Element {
                 <button
                   type="button"
                   className="ki-btn ki-btn--primary"
-                  disabled={!addScopeConfirmed || !addForm.scope.trim() || !addForm.url.trim()}
+                  disabled={
+                    !addScopeConfirmed
+                    || !addForm.scope.trim()
+                    || !addForm.url.trim()
+                    || validateMappingRows(addForm.mappings) !== null
+                  }
                   onClick={() => { void submitAdd(); }}
                 >添加并开始首次同步</button>
               ) : null}
@@ -1467,6 +1476,11 @@ export function DataSourcePage(): JSX.Element {
                           ? `距上次成功同步不足 30 分钟；如需立即同步：ki datasource sync --scope ${source.scope}`
                           : '同步（Git 源为增量）';
                   const typeLabel = source.type === 'git' ? 'Git' : '目录';
+                  // 落点列：单映射保持旧观感（根保留键仍显示「根目录」），多映射显示「N 个映射」
+                  const groupSummary = summarizeGroupColumn(source.mappings, source.group ?? null);
+                  const groupCell = groupSummary.text === ROOT_GROUP_KEY
+                    ? { text: ROOT_GROUP_FIELD_LABEL, title: ROOT_GROUP_FIELD_LABEL }
+                    : groupSummary;
                   const schedBadge = scheduleBadge(source.schedule);
                   const nextView = scheduleNextLine(source.schedule);
                   // 始终带「下次同步」：tr 的 aria-label 会覆盖单元格文本，漏掉这截等于读屏用户看不到这一列
@@ -1531,13 +1545,9 @@ export function DataSourcePage(): JSX.Element {
                       ) : null}
                     </td>
                     <td className="ki-ds-table__dir" title={source.dir}>{source.dir}</td>
-                    {/* 落点列是"这条源写到哪儿"的结论：根散文件即落在库根，用「根目录」而不是回显保留键 */}
-                    <td
-                      className="ki-ds-table__group ki-ds-col--group"
-                      title={source.group ? (isRootGroup(source.group) ? ROOT_GROUP_FIELD_LABEL : source.group) : '(自动)'}
-                    >
-                      {source.group ? (isRootGroup(source.group) ? ROOT_GROUP_FIELD_LABEL : source.group) : '(自动)'}
-                    </td>
+                    {/* 落点列是"这条源写到哪儿"的结论：根散文件即落在库根，用「根目录」而不是回显保留键。
+                        多映射（REQ-20261104-002）：1 条显示原值保持旧观感，≥2 条显示「N 个映射」+ title 全量。 */}
+                    <td className="ki-ds-table__group ki-ds-col--group" title={groupCell.title}>{groupCell.text}</td>
                     <td className="ki-ds-col--time">{lastSyncLabel ?? '—'}</td>
                     {/* 下次同步独立成列（2026-10-30 用户定稿）：主值是「什么时候会再跑」，
                         用正文字号 + 600；周期/模式下沉副行。原先挤在「上次同步」副行里，

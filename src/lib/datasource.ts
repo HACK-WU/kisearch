@@ -39,11 +39,16 @@ import {
 } from './chunker.js';
 import { planImportPrune, type ImportPrunePlan } from './import-prune.js';
 import { ROOT_GROUP_KEY, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
+// 映射（REQ-20261104-002）：归一 / 校验 / 基线分桶的唯一实现
+import { mappingsOf, mappingTargetDir, normalizeMappingInput, normalizeSubdir, resolveMappings, sameMappings, splitSeenRelsByMapping, validateMappings } from './datasource-mappings.js';
+// 多映射结果合并（纯函数；commit 水位与基线分桶的判据都在这里）
+import { failedMappingPart, mappingParams, mergeMappingSync, type MappingSyncPart } from './datasource-sync-merge.js';
 import type {
   DataSourceGitInfo,
   DataSourceGitSyncState,
   DataSourceKind,
   DataSourceLastSync,
+  DataSourceMappingItem,
   DataSourcePendingDelete,
   DataSourceRecord,
   DataSourceResultSnapshot,
@@ -234,6 +239,17 @@ function normalizeLastSync(raw: unknown): DataSourceLastSync | null {
     ...(optionalString(s.taskId) ? { taskId: optionalString(s.taskId) as string } : {}),
     params: {
       group: optionalString(paramsRaw.group),
+      // 多映射快照：缺省（旧快照）不补字段 —— 页面据此区分「上次同步用了哪套映射」与「现在登记的是什么」
+      ...(Array.isArray(paramsRaw.mappings) && paramsRaw.mappings.length > 0
+        ? {
+          mappings: (paramsRaw.mappings as Array<{ subdir?: unknown; group?: unknown }>)
+            .filter((item) => item && typeof item === 'object')
+            .map((item) => ({
+              subdir: normalizeSubdir(typeof item.subdir === 'string' ? item.subdir : ''),
+              group: optionalString(item.group),
+            })),
+        }
+        : {}),
       conflictMode: validateImportConflictMode(typeof paramsRaw.conflictMode === 'string' ? paramsRaw.conflictMode : undefined),
       vector: paramsRaw.vector !== false,
       chunkSize: typeof paramsRaw.chunkSize === 'number' ? paramsRaw.chunkSize : null,
@@ -262,13 +278,27 @@ function normalizeRecord(scope: string, raw: unknown): DataSourceRecord | null {
 
   const conflictMode = validateImportConflictMode(typeof v.conflictMode === 'string' ? v.conflictMode : undefined);
   const groupRaw = typeof v.group === 'string' ? v.group.trim() : '';
+  /**
+   * 多映射迁移（REQ-20261104-002 / R1）：`mappings` 优先，旧记录由 `git.relativeRoot` + `group`
+   * 合成 1 条 —— 单条映射的语义与升级前**逐字节一致**（护栏 #5）。
+   *
+   * ★ `group` / `git.relativeRoot` / `dir` 三个兼容位继续由 `mappings[0]` 回填，
+   *   凡是在这里直接信旧字段的地方都会在多映射记录上读到"第一条"，不要再新增这种读法。
+   */
+  const mappings = resolveMappings({
+    mappings: v.mappings,
+    relativeRoot: git?.relativeRoot ?? '',
+    group: groupRaw ? groupRaw : null,
+  });
+  const primary = mappings[0];
   return {
-    version: 2,
+    version: 3,
     scope,
     type,
     dir: path.resolve(v.dir),
     ...(git ? { git } : {}),
-    group: groupRaw ? groupRaw : null,
+    group: primary.group,
+    mappings,
     conflictMode,
     conflictSuffix: typeof v.conflictSuffix === 'string'
       ? validateImportConflictSuffix(v.conflictSuffix)
@@ -361,7 +391,13 @@ export interface AddDataSourceInput {
   type?: DataSourceKind;
   /** S-05 托管 clone 直接注入，避免重复探测 */
   gitInfo?: DataSourceGitInfo;
+  /**
+   * 单值落点（兼容位）。传了 `mappings` 时忽略它（以 `mappings[0].group` 为准）。
+   * ★ 不传 `mappings` 且已登记记录为多映射时，登记会被拒绝（R9 / 护栏 #4）。
+   */
   group?: string | null;
+  /** 「子目录 → 落点 Group」映射（页面入口专用；CLI 不传） */
+  mappings?: DataSourceMappingItem[];
   conflictMode?: string;
   conflictSuffix?: string;
   vector?: boolean;
@@ -435,7 +471,21 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     }
   }
 
-  const group = (input.group ?? '').trim() || null;
+  // 映射（REQ-20261104-002）：传入 mappings 时它是权威，`group` 退化为 mappings[0].group
+  // 的兼容位；未传（CLI / 旧调用方）则沿用「单子目录 + 单 group」合成 1 条。
+  // ★ 传了 `mappings` 就走严格归一（空数组 / 全脏 → `validateMappings` 报 MAPPING_EMPTY），
+  //   不能退回 `resolveMappings` 的"旧字段兜底"——那会把空数组静默当成一条根映射。
+  const mappings = input.mappings !== undefined
+    ? (normalizeMappingInput(input.mappings) ?? [])
+    : resolveMappings({
+      relativeRoot: git?.relativeRoot ?? '',
+      group: (input.group ?? '').trim() || null,
+    });
+  const mappingIssue = validateMappings(mappings);
+  if (mappingIssue) {
+    return { ok: false, scope, code: mappingIssue.code, error: mappingIssue.error };
+  }
+  const group = mappings[0].group;
   // group 会拼进 local-kb / 分片路径：绝对路径、反斜杠、`..` 与根保留名一律拒绝
   // （与 `/api/import/run`、`/api/import/preflight` 同口径）
   if (group !== null && !isUserAssignableGroup(group)) {
@@ -446,10 +496,28 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     return { ok: false, scope, code: existing.code, error: existing.error };
   }
   const prev = existing.ok ? existing.record : null;
-  if (prev && !input.force && ((prev.dir !== dir) || (prev.group !== group))) {
+  /**
+   * 护栏 #4 / R9：CLI 写入口只有单值 `--subdir` / `--group`，覆盖多映射记录会把 N 条静默压成 1 条。
+   * 入口是「页面支持、CLI 不支持」（用户 2026-11-04 拍板 Q4），这里对**未传 mappings 的调用方**
+   * 一律拒绝并指向页面 —— 宁可让 CLI 报错，也不静默丢配置。
+   */
+  const prevMappings = prev ? mappingsOf(prev) : [];
+  if (input.mappings === undefined && prevMappings.length > 1) {
+    return {
+      ok: false,
+      scope,
+      code: 'MULTI_MAPPING_UNSUPPORTED',
+      error: `该数据源已有 ${prevMappings.length} 条「子目录 → Group」映射，CLI 不支持修改；请在页面「编辑数据源」里调整`,
+    };
+  }
+  const mappingChanged = prev !== null && !sameMappings(prevMappings, mappings);
+  if (prev && !input.force && ((prev.dir !== dir) || (prev.group !== group) || mappingChanged)) {
     const changes: string[] = [];
     if (prev.dir !== dir) changes.push(`--source：${prev.dir} → ${dir}（旧路径下的文档会在下次同步进入待删候选，本次不会自动删）`);
-    if (prev.group !== group) changes.push(`--group：${prev.group ?? '(自动)'} → ${group ?? '(自动)'}（旧 group 的文档会保留并产生重复，需手动清理）`);
+    if (mappingChanged && prev.group !== group) {
+      changes.push(`--group：${prev.group ?? '(自动)'} → ${group ?? '(自动)'}（旧 group 的文档会保留并产生重复，需手动清理）`);
+    }
+    if (mappingChanged) changes.push('子目录 / 落点映射已变更（旧映射下的文档会在下次同步进入待删候选，改 Group 的会保留并产生重复）');
     return {
       ok: false,
       scope,
@@ -466,7 +534,7 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     || prev.git?.relativeRoot !== git?.relativeRoot
     || prev.git?.managed !== git?.managed
   );
-  const changed = prev !== null && (prev.dir !== dir || prev.group !== group || gitChanged);
+  const changed = prev !== null && (prev.dir !== dir || prev.group !== group || mappingChanged || gitChanged);
   // 改 --source / --group / 类型 / 仓库根：保留 seenRels（旧文档下次同步仍能进候选），
   // 但清掉旧候选/token 与 commit 水位——它们属于旧目录/旧仓库。
   let lastSync = prev?.lastSync ?? null;
@@ -478,12 +546,13 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     };
   }
   const record: DataSourceRecord = {
-    version: 2,
+    version: 3,
     scope,
     type,
     dir,
     ...(git ? { git } : {}),
     group,
+    mappings,
     conflictMode,
     conflictSuffix,
     vector: input.vector !== false,
@@ -509,8 +578,16 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
 
 // ─── 编辑同步参数（2026-10-30）────────────────────────────
 
-/** 可编辑字段：身份字段（scope / dir / git / group）不在其中，改源需移除后重加 */
+/**
+ * 可编辑字段：仓库来源 / 分支仍不可改（改源需移除后重加）。
+ * `mappings` 自 REQ-20261104-002 起可编辑（页面入口），其余身份字段仍只读。
+ */
 export interface DataSourceConfigPatch {
+  /**
+   * 「子目录 → Group」映射（REQ-20261104-002）：传入即整体替换（不是增量合并）。
+   * 只影响**下次同步**；历史文档不回填（改 Group 会保留旧组文档并产生重复，见页面二次确认）。
+   */
+  mappings?: DataSourceMappingItem[];
   conflictMode?: string;
   conflictSuffix?: string;
   vector?: boolean;
@@ -580,6 +657,29 @@ export async function updateDataSourceConfig(input: {
       } catch (err) {
         return { ok: false, scope, code: 'INVALID_CONFLICT', error: (err as Error).message };
       }
+      // ── 映射（REQ-20261104-002）：整体替换 + 三条硬约束 ──
+      let nextMappings = mappingsOf(prev);
+      if (patch.mappings !== undefined) {
+        const incoming = normalizeMappingInput(patch.mappings);
+        if (incoming === null) {
+          return { ok: false, scope, code: 'INVALID_MAPPINGS', error: 'mappings 必须是数组（[{ subdir, group }]）', field: 'mappings' };
+        }
+        const issue = validateMappings(incoming);
+        if (issue) {
+          return { ok: false, scope, code: issue.code, error: issue.error, field: 'mappings' };
+        }
+        // 普通目录数据源没有「仓库内子目录」概念：只允许一条根映射
+        if (prev.type !== 'git' && incoming.some((item) => normalizeSubdir(item.subdir) !== '')) {
+          return {
+            ok: false,
+            scope,
+            code: 'INVALID_SUBDIR',
+            error: '普通目录数据源不支持「仓库子目录」映射，只能用一条根映射（子目录留空）',
+            field: 'mappings',
+          };
+        }
+        nextMappings = incoming;
+      }
       const vector = patch.vector !== undefined ? patch.vector : prev.vector;
       const chunkSize = patch.chunkSize !== undefined ? patch.chunkSize : prev.chunkSize;
       const chunkOverlap = patch.chunkOverlap !== undefined ? patch.chunkOverlap : prev.chunkOverlap;
@@ -599,16 +699,44 @@ export async function updateDataSourceConfig(input: {
       if (vector !== prev.vector) changed.push('vector');
       if (chunkSize !== prev.chunkSize) changed.push('chunkSize');
       if (chunkOverlap !== prev.chunkOverlap) changed.push('chunkOverlap');
+      const mappingsChanged = !sameMappings(mappingsOf(prev), nextMappings);
+      if (mappingsChanged) changed.push('mappings');
       if (changed.length === 0) return { ok: true, scope, record: prev, changed };
+      const nowUpdate = Date.now();
+      const primary = nextMappings[0];
+      // 兼容位继续跟随首条映射：`dir` / `group` / `git.relativeRoot` 全是旧读方的入口
+      const nextDir = prev.type === 'git' && prev.git
+        ? mappingTargetDir(prev.git.repoRoot, primary.subdir)
+        : prev.dir;
       const next: DataSourceRecord = {
         ...prev,
+        dir: nextDir,
+        group: primary.group,
+        mappings: nextMappings,
+        ...(prev.git ? { git: { ...prev.git, relativeRoot: primary.subdir } } : {}),
         conflictMode,
         conflictSuffix,
         vector,
         chunkSize,
         chunkOverlap,
         revision: (prev.revision ?? 0) + 1,
-        updatedAt: Date.now(),
+        updatedAt: nowUpdate,
+        // 落点变了 ⇒ 两件事必须一起做（与 addDataSource 的 changed 分支同口径）：
+        //  ① 旧候选与它的 token 作废，否则删除按钮会拿旧 token 去删新候选；
+        //  ② **丢掉 commit 水位**（含 `git`），让下次同步退回全量 —— 否则新增/改动的子目录
+        //     只会 diff「上次 commit 之后」的变更，**它历史上已有的文件永远导不进来**。
+        // seenRels 保留：下次同步要靠它判断「库里哪些旧文档还在」。
+        ...(mappingsChanged && prev.lastSync
+          ? {
+            lastSync: ((): DataSourceLastSync => {
+              const { git: _prevGit, warnings: _prevWarnings, ...rest } = prev.lastSync as DataSourceLastSync;
+              return {
+                ...rest,
+                pendingDelete: { ...emptyPending(nowUpdate), stale: true, staleReason: 'not-recomputed' as const },
+              };
+            })(),
+          }
+          : {}),
       };
       writeDataSource(scope, next);
       return { ok: true, scope, record: next, changed };
@@ -746,8 +874,12 @@ export interface AddRemoteDataSourceInput {
   scope: string;
   url: string;
   branch?: string | null;
+  /** 单值子目录（兼容位）。传了 `mappings` 时以 `mappings[0].subdir` 为准 */
   subdir?: string | null;
+  /** 单值落点（兼容位）。传了 `mappings` 时以 `mappings[0].group` 为准 */
   group?: string | null;
+  /** 「子目录 → 落点 Group」映射（页面入口专用，1..N 条） */
+  mappings?: DataSourceMappingItem[];
   conflictMode?: string;
   conflictSuffix?: string;
   vector?: boolean;
@@ -787,9 +919,21 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
     return { ok: false, scope: input.scope, code: 'INVALID_SCOPE', error: (err as Error).message };
   }
   // 参数校验必须早于 clone：否则一次几分钟的 clone 后才失败
-  const group = (input.group ?? '').trim() || null;
+  // 映射是权威；单值 subdir / group 只在未传 mappings 时参与（兼容 CLI）。
+  // 传了 mappings 就用严格归一：空数组必须报 MAPPING_EMPTY，而不是静默变成一条根映射。
+  const mappings = input.mappings !== undefined
+    ? (normalizeMappingInput(input.mappings) ?? [])
+    : resolveMappings({
+      relativeRoot: input.subdir,
+      group: input.group,
+    });
+  const mappingIssue = validateMappings(mappings);
+  if (mappingIssue) {
+    return { ok: false, scope, code: mappingIssue.code, error: mappingIssue.error };
+  }
+  const group = mappings[0].group;
   const branch = (input.branch ?? '').trim() || null;
-  const subdir = (input.subdir ?? '').trim().replace(/^\/+|\/+$/g, '');
+  const subdir = mappings[0].subdir;
   if (group !== null && !isUserAssignableGroup(group)) {
     return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "${ROOT_GROUP_KEY}"）` };
   }
@@ -830,19 +974,25 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
               return await withManagedCloneLock(reusable.repoRoot, 'datasource-add-reuse', async () => {
                 // 复用前先 fetch 对齐远端：否则远端新增的子目录会被陈旧工作树判成「不存在」
                 const refreshed = await refreshManagedClone(reusable.repoRoot, reusable.remoteBranch);
-                const checked = checkManagedSubdir(reusable.repoRoot, subdir, config, scope);
-                if (!checked.ok) {
-                  return {
-                    ok: false,
-                    scope,
-                    code: checked.code,
-                    error: refreshed.staleWarning ? `${checked.error}；${refreshed.staleWarning}` : checked.error,
-                    ...(checked.hint ? { hint: checked.hint } : {}),
-                  };
+                // 逐条校验子目录（Q5：任一不存在 → 整源失败，并指明是第几条）
+                let primaryDir = '';
+                for (let i = 0; i < mappings.length; i += 1) {
+                  const checkedOne = checkManagedSubdir(reusable.repoRoot, mappings[i].subdir, config, scope);
+                  if (!checkedOne.ok) {
+                    return {
+                      ok: false,
+                      scope,
+                      code: checkedOne.code,
+                      error: `${mappings.length > 1 ? `第 ${i + 1} 条映射：` : ''}${checkedOne.error}${refreshed.staleWarning ? `；${refreshed.staleWarning}` : ''}`,
+                      ...(checkedOne.hint ? { hint: checkedOne.hint } : {}),
+                    };
+                  }
+                  if (i === 0) primaryDir = checkedOne.dir;
                 }
                 const added = await addDataSource({
                   scope,
-                  dir: checked.dir,
+                  dir: primaryDir,
+                  mappings,
                   type: 'git',
                   gitInfo: {
                     repoRoot: reusable.repoRoot,
@@ -869,7 +1019,7 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
                   reused: true,
                   clone: {
                     repoRoot: reusable.repoRoot,
-                    dir: checked.dir,
+                    dir: primaryDir,
                     branch: reusable.branch,
                     // 复用后的真实 HEAD（对齐远端失败时为本地 HEAD），此前固定为 null
                     headCommit: refreshed.headCommit,
@@ -903,9 +1053,27 @@ export async function addRemoteDataSource(input: AddRemoteDataSourceInput): Prom
             };
           }
 
+          // 其余映射的子目录同样必须存在（Q5：任一不存在 → 整源失败，并回收 clone）
+          for (let i = 1; i < mappings.length; i += 1) {
+            const checkedOne = checkManagedSubdir(cloned.value.repoRoot, mappings[i].subdir, config, scope);
+            if (checkedOne.ok) continue;
+            const cleanup = await purgeManagedCloneDir(path.dirname(cloned.value.repoRoot));
+            return {
+              ok: false,
+              scope,
+              code: checkedOne.code,
+              error: `第 ${i + 1} 条映射：${checkedOne.error}`,
+              ...(checkedOne.hint ? { hint: checkedOne.hint } : {}),
+              ...(cleanup.removed === false && 'error' in cleanup
+                ? { cleanupWarning: `子目录校验失败且托管目录未清理：${cleanup.error}` }
+                : {}),
+            };
+          }
+
           const added = await addDataSource({
             scope,
             dir: cloned.value.dir,
+            mappings,
             type: 'git',
             gitInfo: {
               repoRoot: cloned.value.repoRoot,
@@ -1091,6 +1259,12 @@ export interface SyncSummary {
   modified?: { group: string; relation: string }[];
   modifiedTotal?: number;
   modifiedTruncated?: boolean;
+  /**
+   * 本次写入的候选基线（裸 rel，相对本次 sourceDir）。
+   * 多映射编排据此合成分桶后的 `lastSync.seenRels`（REQ-20261104-002）——
+   * 单映射路径不读它（lastSync 已直接落盘）。
+   */
+  seenRels?: string[];
 }
 
 export type SyncDataSourceResult =
@@ -1304,8 +1478,15 @@ function buildGitState(args: {
   fullScanned: number;
   untrackedMarkdown: number;
   state: DataSourceSyncState;
+  /**
+   * 多映射编排用：水位由合并层按「全映射成功」判定（护栏 #3），
+   * 不能只按 `state === 'ok'` —— partial 是允许推进的，而「任一映射 failed」必须回退。
+   */
+  commitOverride?: string | null;
 }): DataSourceGitSyncState {
-  const commit = args.state === 'ok' ? args.runCommit : args.prevCommit;
+  const commit = args.commitOverride !== undefined
+    ? args.commitOverride
+    : args.state === 'ok' ? args.runCommit : args.prevCommit;
   return {
     commit,
     runCommit: args.runCommit,
@@ -1394,6 +1575,8 @@ async function importAndPersist(args: {
   startedAt: number;
   onlyRelPaths?: string[];
   pruneSubsetFullScan: boolean;
+  /** 多映射编排：拿到本次**将要落盘**的完整快照（合并层需要 conflicts / failures 明细） */
+  capture?: (lastSync: DataSourceLastSync) => void;
   git?: {
     update: GitUpdateResult;
     prevCommit: string | null;
@@ -1511,6 +1694,7 @@ async function importAndPersist(args: {
     ...(gitState ? { git: gitState } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+  args.capture?.(lastSync);
   const nextRecord = git && git.update.branch && record.git && git.update.branch !== record.git.branch
     ? { ...record, git: { ...record.git, branch: git.update.branch }, updatedAt: now, lastSync }
     : { ...record, updatedAt: now, lastSync };
@@ -1526,6 +1710,7 @@ async function importAndPersist(args: {
       files: snapshot.files,
       pendingDelete,
       mode,
+      seenRels,
       ...(gitState ? { git: gitState } : {}),
       warnings,
       vectorized: snapshot.vectorized,
@@ -1553,6 +1738,8 @@ async function finalizeNoChangeGit(args: {
   changes: Awaited<ReturnType<typeof collectGitChanges>>;
   warnings: DataSourceWarning[];
   runCommit: string | null;
+  /** 多映射编排：拿到本次将要落盘的完整快照 */
+  capture?: (lastSync: DataSourceLastSync) => void;
 }): Promise<SyncDataSourceResult> {
   const files = collectMarkdownFiles(args.record.dir, resolveImportExtensions(args.config, args.scope)).files;
   const plan = planFor(args.scope, args.record, args.config, files, args.prevSeen);
@@ -1600,6 +1787,7 @@ async function finalizeNoChangeGit(args: {
     git: gitState,
     ...(args.warnings.length > 0 ? { warnings: args.warnings } : {}),
   };
+  args.capture?.(lastSync);
   const nextRecord = args.gitUpdate.branch && args.record.git && args.gitUpdate.branch !== args.record.git.branch
     ? { ...args.record, git: { ...args.record.git, branch: args.gitUpdate.branch }, updatedAt: now, lastSync }
     : { ...args.record, updatedAt: now, lastSync };
@@ -1614,6 +1802,7 @@ async function finalizeNoChangeGit(args: {
       files: lastSync.result.files,
       pendingDelete,
       mode: 'incremental',
+      seenRels,
       git: gitState,
       warnings: args.warnings,
       vectorized: 0,
@@ -1669,6 +1858,8 @@ async function syncGit(
   prevSeen: string[],
   prevCommit: string | null,
   startedAt: number,
+  /** 多映射编排用：复用仓库级 prepare 结果 + 回传本次快照（不传 = 单映射路径原样） */
+  ctx?: { gitUpdate?: GitUpdateResult; capture?: (lastSync: DataSourceLastSync) => void },
 ): Promise<SyncDataSourceResult> {
   if (!record.git) {
     return failSync(scope, input, record, 'INVALID_GIT_RECORD', '数据源类型为 git 但缺少 git 元信息，请重新 add', 'not-recomputed');
@@ -1716,16 +1907,22 @@ async function syncGit(
   }
 
   // ── 真实同步：fetch → 自动更新 → 判空 → diff → 导入 ──
+  // 多映射编排（`ctx.gitUpdate`）：仓库级 fetch/update/clean 只做一次，
+  // 否则 N 条映射会把同一个工作树 fetch + reset 硬 N 遍（慢且互相踩工作树）。
   let gitUpdate: GitUpdateResult;
-  try {
-    gitUpdate = await prepareGitSync({
-      repoRoot: record.git.repoRoot,
-      managed: record.git.managed,
-      branch: record.git.branch,
-      onPhase: input.onPhase,
-    });
-  } catch (err) {
-    return failSync(scope, input, record, 'GIT_UPDATE_FAILED', (err as Error).message, 'not-recomputed');
+  if (ctx?.gitUpdate) {
+    gitUpdate = ctx.gitUpdate;
+  } else {
+    try {
+      gitUpdate = await prepareGitSync({
+        repoRoot: record.git.repoRoot,
+        managed: record.git.managed,
+        branch: record.git.branch,
+        onPhase: input.onPhase,
+      });
+    } catch (err) {
+      return failSync(scope, input, record, 'GIT_UPDATE_FAILED', (err as Error).message, 'not-recomputed');
+    }
   }
   if (gitUpdate.fetch === 'failed') {
     warnings.push(warning('GIT_FETCH_FAILED', `远端更新检查失败：${gitUpdate.fetchDetail ?? '未知原因'}；本次同步基于本地内容`));
@@ -1789,6 +1986,7 @@ async function syncGit(
     return finalizeNoChangeGit({
       scope, record, input, config, prevSeen, prevCommit, startedAt,
       gitUpdate, changes, warnings, runCommit,
+      ...(ctx?.capture ? { capture: ctx.capture } : {}),
     });
   }
 
@@ -1796,6 +1994,7 @@ async function syncGit(
     scope, record, input, config, mode, prevSeen, startedAt,
     ...(mode === 'incremental' ? { onlyRelPaths: changes.changedRels } : {}),
     pruneSubsetFullScan: mode === 'incremental',
+    ...(ctx?.capture ? { capture: ctx.capture } : {}),
     git: {
       update: gitUpdate,
       prevCommit,
@@ -1804,6 +2003,313 @@ async function syncGit(
       warnings,
     },
   });
+}
+
+/**
+ * 多映射同步编排（REQ-20261104-002 / 工作项 5）。
+ *
+ * 结构：**一次**仓库级 prepare → 逐映射跑**现有单映射链路** → 合并结果写一次。
+ * 为什么不去改 import 内部（护栏 #1）：幂等 / 冲突 / 切分 / 向量 / 失败重试 / 候选计算
+ * 全在 import 里，改它等于把整条链路重做一遍，且落点判据一变就会误删。
+ *
+ * 三条必须守住的语义：
+ *  - Q5：**任一映射的子目录缺失 / 为空 → 整源失败**，错误里指明是第几条映射；
+ *  - 护栏 #2：基线按映射切桶（`subdir/rel`），失败映射回退它自己的旧桶；
+ *  - 护栏 #3：commit 水位**只有全部映射成功**才推进，否则保留旧值（否则失败文件永久漏同步）。
+ */
+async function syncGitMappings(
+  scope: string,
+  record: DataSourceRecord,
+  input: SyncDataSourceInput,
+  config: KiConfig,
+  mappings: DataSourceMappingItem[],
+  prevSeen: string[],
+  prevCommit: string | null,
+  startedAt: number,
+): Promise<SyncDataSourceResult> {
+  const git = record.git;
+  if (!git) {
+    return failSync(scope, input, record, 'INVALID_GIT_RECORD', '数据源类型为 git 但缺少 git 元信息，请重新 add', 'not-recomputed');
+  }
+  const reachable = checkGitReachable(record.dir);
+  if (!reachable.ok) {
+    return failSync(scope, input, record, reachable.code, reachable.error, staleReasonOf(reachable.code));
+  }
+
+
+  // ── 预检：每条映射的目录都必须存在且有可导入文件（Q5：整源失败，早于任何写入） ──
+  const dirs = mappings.map((item) => mappingTargetDir(git.repoRoot, item.subdir));
+  for (let i = 0; i < dirs.length; i += 1) {
+    const checked = checkSourceDir(dirs[i], config, scope);
+    if (checked.ok) continue;
+    return failSync(
+      scope, input, record,
+      checked.code,
+      `第 ${i + 1} 条映射（${mappings[i].subdir || '仓库根'}）：${checked.error}`,
+      staleReasonOf(checked.code),
+    );
+  }
+
+  const buckets = splitSeenRelsByMapping(prevSeen, mappings);
+  const now = Date.now();
+  const parts: (MappingSyncPart | null)[] = mappings.map(() => null);
+  const warnings: DataSourceWarning[] = [];
+  const seenWarnings = new Set<string>();
+  const pushWarning = (item: DataSourceWarning): void => {
+    const key = `${item.code}\u0000${item.message}`;
+    if (seenWarnings.has(key)) return; // N 条映射会重复报同一条 fetch/update 警告
+    seenWarnings.add(key);
+    warnings.push(item);
+  };
+
+  /**
+   * dry-run 是**只读**语义（`ki datasource sync --dry-run`）：绝不 fetch / 不更新工作树。
+   * 单映射路径由 `syncGit` 自己的 dryRun 分支保证；这里必须**在 prepare 之前**拦下，
+   * 否则多映射的 dry-run 会把工作树真 reset 一遍 —— 那是写操作。
+   */
+  if (input.dryRun) {
+    let plannedFiles = 0;
+    let changedFiles = 0;
+    let untrackedMarkdown = 0;
+    let wouldFallbackFull = false;
+    let dryMode: DataSourceSyncMode = input.full || !prevCommit ? 'full' : 'incremental';
+    const dryParts: (MappingSyncPart | null)[] = mappings.map(() => null);
+    for (let i = 0; i < mappings.length; i += 1) {
+      const mapping = mappings[i];
+      const virtualRecord: DataSourceRecord = {
+        ...record,
+        dir: dirs[i],
+        group: mapping.group,
+        mappings: [mapping],
+        git: { ...git, relativeRoot: mapping.subdir },
+      };
+      const one = await syncGit(scope, virtualRecord, input, config, buckets[i], prevCommit, startedAt);
+      if (!one.ok) return one;
+      if (one.dryRun !== true) return one;
+      plannedFiles += one.plannedFiles;
+      changedFiles += one.changedFiles;
+      untrackedMarkdown += one.untrackedMarkdown;
+      if (one.wouldFallbackFull) wouldFallbackFull = true;
+      if (one.mode === 'full') dryMode = 'full';
+      for (const item of one.warnings) pushWarning(item);
+      dryParts[i] = {
+        state: 'ok',
+        result: {
+          files: {
+            scanned: 0, fullScanned: 0, changed: 0, completed: 0,
+            unchanged: 0, skipped: 0, incomplete: 0, duplicatesSkipped: 0,
+          },
+          vectorized: 0,
+          fullTextIndexed: 0,
+          groups: [],
+          conflicts: [],
+          failures: [],
+        },
+        seenRels: buckets[i],
+        pendingDelete: one.pendingDelete ?? {
+          computedAt: now, total: 0, overLimit: false, truncated: false, items: [],
+          candidateSourcePaths: [], untouchedGroups: [], unableCount: 0, eligibleCount: 0,
+          stale: true, staleReason: 'not-recomputed', blocked: null,
+        },
+      };
+    }
+    const dryMerged = mergeMappingSync({
+      mappings,
+      parts: dryParts,
+      prevBuckets: buckets,
+      params: {
+        group: record.group,
+        conflictMode: record.conflictMode,
+        vector: record.vector,
+        chunkSize: record.chunkSize,
+        chunkOverlap: record.chunkOverlap,
+        mode: dryMode,
+      },
+      at: now,
+      computedAt: now,
+    });
+    return {
+      ok: true,
+      scope,
+      dryRun: true,
+      plannedFiles,
+      mode: dryMode,
+      changedFiles,
+      untrackedMarkdown,
+      wouldFallbackFull,
+      warnings,
+      pendingDelete: dryMerged.pendingDelete,
+    };
+  }
+
+  // 仓库级 prepare 只做一次
+  let gitUpdate: GitUpdateResult;
+  try {
+    gitUpdate = await prepareGitSync({
+      repoRoot: git.repoRoot,
+      managed: git.managed,
+      branch: git.branch,
+      onPhase: input.onPhase,
+    });
+  } catch (err) {
+    return failSync(scope, input, record, 'GIT_UPDATE_FAILED', (err as Error).message, 'not-recomputed');
+  }
+  if (gitUpdate.clean === 'failed') {
+    return failSync(scope, input, record, 'GIT_CLEAN_FAILED', `托管副本清理失败：${gitUpdate.cleanDetail ?? '未知原因'}`, 'not-recomputed');
+  }
+
+  let firstFailure: { code: string; error: string } | null = null;
+  let runCommit = gitUpdate.headCommit ?? prevCommit;
+  let mode: DataSourceSyncMode = input.full || !prevCommit ? 'full' : 'incremental';
+  // 未跟踪文件数按映射求和：它是「本次有文件没参与增量」警告的依据，漏加会让页面少报
+  let untrackedMarkdown = 0;
+
+  /**
+   * 进度汇聚：单映射链路每条都会从 `done:0 / total:自身文件数` 重新报，
+   * 直接透传会让页面进度条在每条映射开始时**跳回 0**。这里把已完成映射的
+   * done/total 作为基数累加，保证 done 单调、total 只增不减。
+   */
+  const progressBase = { done: 0, total: 0 };
+  type ProgressEvent = Parameters<NonNullable<SyncDataSourceInput['onProgress']>>[0];
+
+  for (let i = 0; i < mappings.length; i += 1) {
+    const mapping = mappings[i];
+    let captured: DataSourceLastSync | null = null;
+    let mappingTotal = 0;
+    const virtualInput: SyncDataSourceInput = input.onProgress
+      ? {
+        ...input,
+        onProgress: (event: ProgressEvent) => {
+          mappingTotal = Math.max(mappingTotal, event.total);
+          input.onProgress?.({ ...event, done: progressBase.done + event.done, total: progressBase.total + mappingTotal });
+        },
+      }
+      : input;
+    const virtualRecord: DataSourceRecord = {
+      ...record,
+      dir: dirs[i],
+      group: mapping.group,
+      mappings: [mapping],
+      git: { ...git, relativeRoot: mapping.subdir },
+    };
+    const result = await syncGit(
+      scope, virtualRecord, virtualInput, config, buckets[i], prevCommit, startedAt,
+      { gitUpdate, capture: (lastSync) => { captured = lastSync; } },
+    );
+    progressBase.done += mappingTotal;
+    progressBase.total += mappingTotal;
+    if (!captured) {
+      // 失败 / 中断：该映射回退它自己的旧桶并按失败记账；**其余映射继续跑**
+      // （一条映射坏掉不该让别的子目录白等），最终状态取最差、水位不推进。
+      if (!firstFailure) {
+        firstFailure = { code: result.ok ? 'SYNC_FAILED' : result.code, error: result.ok ? '同步未产出快照' : result.error };
+      }
+      parts[i] = failedMappingPart(buckets[i], now);
+      continue;
+    }
+    const snapshot: DataSourceLastSync = captured;
+    parts[i] = {
+      state: snapshot.state,
+      result: snapshot.result,
+      seenRels: snapshot.seenRels ?? buckets[i],
+      pendingDelete: snapshot.pendingDelete,
+    };
+    // 本次用的是全量还是增量，以单映射链路自己算出的 mode 为准（任一映射全量 ⇒ 汇总记全量）
+    if (snapshot.params.mode === 'full') mode = 'full';
+    if (snapshot.git?.runCommit) runCommit = snapshot.git.runCommit;
+    untrackedMarkdown += snapshot.git?.untrackedMarkdown ?? 0;
+    for (const item of snapshot.warnings ?? []) pushWarning(item);
+  }
+
+  const merged = mergeMappingSync({
+    mappings,
+    parts,
+    prevBuckets: buckets,
+    params: {
+      group: record.group,
+      conflictMode: record.conflictMode,
+      vector: record.vector,
+      chunkSize: record.chunkSize,
+      chunkOverlap: record.chunkOverlap,
+      mode,
+    },
+    at: now,
+    computedAt: now,
+  });
+
+  // 护栏 #3：水位只在全成功时推进
+  const commit = merged.canAdvanceCommit ? runCommit : prevCommit;
+  const gitState = buildGitState({
+    update: gitUpdate,
+    prevCommit,
+    runCommit,
+    changedCount: merged.files.changed,
+    fullScanned: merged.files.fullScanned,
+    untrackedMarkdown,
+    state: merged.state,
+    commitOverride: commit,
+  });
+
+  const lastSync: DataSourceLastSync = {
+    at: now,
+    durationMs: now - startedAt,
+    state: merged.state,
+    ...(input.taskId ? { taskId: input.taskId } : {}),
+    params: mappingParams({
+      group: record.group,
+      conflictMode: record.conflictMode,
+      vector: record.vector,
+      chunkSize: record.chunkSize,
+      chunkOverlap: record.chunkOverlap,
+      mode,
+    }, mappings),
+    result: {
+      files: merged.files,
+      vectorized: merged.vectorized,
+      fullTextIndexed: merged.fullTextIndexed,
+      groups: merged.groups,
+      conflicts: merged.conflicts,
+      failures: merged.failures,
+      ...(merged.created ? { created: merged.created } : {}),
+      ...(merged.createdTotal !== undefined ? { createdTotal: merged.createdTotal } : {}),
+      ...(merged.createdTruncated ? { createdTruncated: true } : {}),
+      ...(merged.modified ? { modified: merged.modified } : {}),
+      ...(merged.modifiedTotal !== undefined ? { modifiedTotal: merged.modifiedTotal } : {}),
+      ...(merged.modifiedTruncated ? { modifiedTruncated: true } : {}),
+    },
+    seenRels: merged.seenRels,
+    pendingDelete: merged.pendingDelete,
+    git: gitState,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+  const nextRecord = gitUpdate.branch && record.git && gitUpdate.branch !== record.git.branch
+    ? { ...record, git: { ...record.git, branch: gitUpdate.branch }, updatedAt: now, lastSync }
+    : { ...record, updatedAt: now, lastSync };
+  writeDataSource(scope, nextRecord);
+
+  const summary: SyncSummary = {
+    state: merged.state,
+    durationMs: lastSync.durationMs,
+    files: merged.files,
+    pendingDelete: merged.pendingDelete,
+    mode,
+    seenRels: merged.seenRels,
+    git: gitState,
+    warnings,
+    vectorized: merged.vectorized,
+    fullTextIndexed: merged.fullTextIndexed,
+    groups: merged.groups,
+    ...(merged.created ? { created: merged.created } : {}),
+    ...(merged.createdTotal !== undefined ? { createdTotal: merged.createdTotal } : {}),
+    ...(merged.createdTruncated ? { createdTruncated: true } : {}),
+    ...(merged.modified ? { modified: merged.modified } : {}),
+    ...(merged.modifiedTotal !== undefined ? { modifiedTotal: merged.modifiedTotal } : {}),
+    ...(merged.modifiedTruncated ? { modifiedTruncated: true } : {}),
+  };
+  if (firstFailure) {
+    return { ok: false, scope, code: firstFailure.code, error: firstFailure.error, summary };
+  }
+  return { ok: true, scope, dryRun: false, summary };
 }
 
 export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDataSourceResult> {
@@ -1822,8 +2328,13 @@ export async function syncDataSource(input: SyncDataSourceInput): Promise<SyncDa
     const prevSeen = record.lastSync?.seenRels ?? [];
     const prevCommit = record.lastSync?.git?.commit ?? null;
     const startedAt = Date.now();
+    // 多映射（REQ-20261104-002）：>1 条走合并编排；1 条继续走原单映射链路，
+    // 保证「单条映射行为与升级前逐字节一致」（护栏 #5）。
+    const mappings = mappingsOf(record);
     const execute = record.type === 'git'
-      ? () => syncGit(scope, record, input, config, prevSeen, prevCommit, startedAt)
+      ? (mappings.length > 1
+        ? () => syncGitMappings(scope, record, input, config, mappings, prevSeen, prevCommit, startedAt)
+        : () => syncGit(scope, record, input, config, prevSeen, prevCommit, startedAt))
       : () => syncDirectory(scope, record, input, config, prevSeen, startedAt);
     // 托管 clone 可能被多个 scope 共享：scope 锁不足以覆盖跨 scope 的工作树竞争
     if (record.type === 'git' && record.git?.managed && record.git.repoRoot) {

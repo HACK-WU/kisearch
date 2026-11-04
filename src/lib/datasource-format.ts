@@ -5,6 +5,7 @@
  */
 
 import { scheduleListSummary } from './datasource-schedule.js';
+import { mappingsOf } from './datasource-mappings.js';
 import type { DataSourceRecord, DataSourceSyncState } from './datasource-types.js';
 
 export interface DataSourceListEntry {
@@ -138,10 +139,15 @@ export function buildDataSourceList(entries: DataSourceListEntry[], now = Date.n
   const rows = entries.map(({ scope, record }): DataSourceListRow => {
     const sync = record.lastSync;
     const git = record.git;
+    const mappings = mappingsOf(record);
     let source = record.dir;
     if (git?.managed && git.remoteUrl) {
       const repo = shortRemote(git.remoteUrl);
-      source = git.relativeRoot ? `${repo} › ${git.relativeRoot}` : repo;
+      // 多映射（REQ-20261104-002）：CLI 不支持配置多映射，但**读输出必须不撒谎** ——
+      // 只显示第一条子目录会让人以为整源只导了它。
+      source = mappings.length > 1
+        ? `${repo} › ${mappings.length} 个目录`
+        : git.relativeRoot ? `${repo} › ${git.relativeRoot}` : repo;
     }
     if (sync?.git?.shortCommit) source += ` @${sync.git.shortCommit}`;
     const isSharedDir = !git?.managed && (scopeByDir.get(record.dir)?.length ?? 0) > 1;
@@ -163,9 +169,18 @@ export function buildDataSourceList(entries: DataSourceListEntry[], now = Date.n
     sharedDirs: [...scopeByDir.entries()]
       .filter(([, scopes]) => scopes.length > 1)
       .map(([dir, scopes]) => ({ dir, scopes })),
-    explicitGroups: entries
-      .filter(({ record }) => record.group !== null)
-      .map(({ scope, record }) => ({ scope, group: record.group as string })),
+    // 落点脚注：单映射保持原文案；多映射把各条 Group 并列并标注条数（CLI 读输出不撒谎）
+    explicitGroups: entries.flatMap(({ scope, record }) => {
+      const mappings = mappingsOf(record);
+      const groups = mappings
+        .map((item) => item.group)
+        .filter((group): group is string => group !== null && group.length > 0);
+      if (groups.length === 0) return [];
+      const text = mappings.length > 1
+        ? `${groups.join(' / ')}（${mappings.length} 条映射）`
+        : groups[0];
+      return [{ scope, group: text }];
+    }),
     // 旧记录/旧测试夹具可能没有 schedule 字段：缺省视为未配置，不进脚注
     schedules: entries
       .map(({ scope, record }) => ({

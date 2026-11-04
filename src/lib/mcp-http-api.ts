@@ -108,6 +108,8 @@ import { readImportIncompleteStatus, summarizeImportIncomplete, uploadIdFromSour
 // Group 路径校验：preflight 与 run 同口径（debug 2026-10-19 的 R1 行动项）
 // isUserAssignableGroup = isSafeGroupPath + 拒收根保留名（用户只能靠"留空"落根）
 import { isSafeGroupPath, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
+// 映射归一 / 校验（REQ-20261104-002）：与 datasource 侧同一实现，避免 HTTP 与登记口径分叉
+import { mappingsOf, normalizeMappingInput, validateMappings } from './datasource-mappings.js';
 // REQ-20261019-001：清理候选（与 import.ts 同源计算，保证「看到的 = 删掉的」）
 import { planImportPrune, verifyPruneToken } from './import-prune.js';
 import { executeBatchDelete } from '../delete-relation.js';
@@ -2962,6 +2964,8 @@ function handleDatasourceList(
           : null,
         dir: record.dir,
         group: record.group,
+        // 映射（REQ-20261104-002）：页面唯一真相；`group` / `git.relativeRoot` 只是首条兼容位
+        mappings: mappingsOf(record),
         conflictMode: record.conflictMode,
         vector: record.vector,
         registeredAt: record.createdAt,
@@ -3386,6 +3390,8 @@ async function handleDatasourceAddRemote(
 ): Promise<void> {
   let body: {
     scope?: unknown; url?: unknown; branch?: unknown; subdir?: unknown; group?: unknown;
+    /** 多映射（REQ-20261104-002）：`[{ subdir, group }]`，传了就以它为准 */
+    mappings?: unknown;
     vector?: unknown; conflictMode?: unknown; conflictSuffix?: unknown;
     /** 新建 scope 时同时设为只读（写 config.scopeReadonly；失败降级为任务警告） */
     readonly?: unknown;
@@ -3438,6 +3444,28 @@ async function handleDatasourceAddRemote(
   if (group && !isUserAssignableGroup(group)) {
     sendJson(res, 400, { ok: false, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "__root__"）` });
     return;
+  }
+  /**
+   * 多映射（REQ-20261104-002）：`mappings` 为权威；未传时退回单值 subdir / group（CLI 与旧页面）。
+   * 校验放在这里而不是等 clone 完成后 —— 校验失败不该让人等一次几分钟的 clone。
+   */
+  // ★ 传了 mappings 就必须严格归一：空数组 / 全脏项 → 由 validateMappings 报 MAPPING_EMPTY，
+  //   不能退回"旧字段兜底"（那会把空数组静默当成一条根映射，用户以为改成功）。
+  const mappingsInput = body.mappings !== undefined
+    ? (normalizeMappingInput(body.mappings) ?? [])
+    : undefined;
+  if (mappingsInput) {
+    const mappingIssue = validateMappings(mappingsInput);
+    if (mappingIssue) {
+      sendJson(res, 400, {
+        ok: false,
+        code: mappingIssue.code,
+        error: mappingIssue.error,
+        ...(mappingIssue.index !== undefined ? { mappingIndex: mappingIssue.index } : {}),
+        ...(mappingIssue.conflictIndex !== undefined ? { conflictIndex: mappingIssue.conflictIndex } : {}),
+      });
+      return;
+    }
   }
 
   const read = readDataSource(scope);
@@ -3541,6 +3569,7 @@ async function handleDatasourceAddRemote(
           branch: branch || null,
           subdir: subdir || null,
           group: group || null,
+          ...(mappingsInput ? { mappings: mappingsInput } : {}),
           ...(body.vector === false ? { vector: false } : {}),
           ...(typeof body.conflictMode === 'string' && body.conflictMode.trim() ? { conflictMode: body.conflictMode.trim() } : {}),
           ...(typeof body.conflictSuffix === 'string' && body.conflictSuffix.trim() ? { conflictSuffix: body.conflictSuffix.trim() } : {}),

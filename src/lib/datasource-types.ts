@@ -68,6 +68,17 @@ export interface DataSourceScheduleView extends DataSourceSchedule {
   nextRunAt: number | null;
 }
 
+/**
+ * 一条「仓库子目录 → 落点 Group」映射（REQ-20261104-002）。
+ *
+ * - `subdir`：仓库内相对路径，空串 = 仓库根；
+ * - `group`：落点 Group 前缀，null = 按该子目录内的顶层目录自动命名。
+ */
+export interface DataSourceMappingItem {
+  subdir: string;
+  group: string | null;
+}
+
 export interface DataSourceGitInfo {
   /** 仓库根绝对路径（可能是 dir 的祖先） */
   repoRoot: string;
@@ -113,7 +124,15 @@ export interface DataSourceWarning {
 
 /** 同步参数快照（= 本次实际使用的登记参数） */
 export interface DataSourceSyncParams {
+  /**
+   * 落点 Group（**单值兼容位**）。
+   *
+   * 多映射记录下它等于 `mappings[0].group`；判断"本次用的是哪套落点"一律看
+   * {@link mappings}，不要用这个字段 —— 它只为了让旧读方（旧页面 / 旧 CLI）不崩。
+   */
   group: string | null;
+  /** 本次同步实际使用的映射快照（REQ-20261104-002；旧快照缺省 = 由 group 合成 1 条） */
+  mappings?: DataSourceMappingItem[];
   conflictMode: ImportConflictMode;
   vector: boolean;
   chunkSize: number | null;
@@ -220,16 +239,34 @@ export interface DataSourceLastSync {
 }
 
 export interface DataSourceRecord {
-  version: 2;
+  /**
+   * 3 = 支持多映射（REQ-20261104-002）；2 = 单子目录 + 单落点。
+   * 读入时 v2 自动迁移为「1 条映射」，写回时一律 v3。
+   */
+  version: 3;
   scope: string;
   /** directory = 普通目录（全量）；git = 仓库（增量） */
   type: DataSourceKind;
-  /** 绝对路径（add 时 resolve，~ 已展开） */
+  /**
+   * 绝对路径（add 时 resolve，~ 已展开）。
+   *
+   * ★ 多映射下它是 **`mappings[0]` 的目录**（兼容位）：`checkSourceDir`、待删路径、
+   *   CLI list 等既有消费方读这一处，换掉它们的读取口径收益远小于风险。
+   *   真正的目录集合请用 `mappings` + `git.repoRoot` 推导。
+   */
   dir: string;
   /** type='git' 时必填 */
   git?: DataSourceGitInfo;
-  /** null = 按顶层子目录自动落点 */
+  /**
+   * 落点 Group（**单值兼容位**，等于 `mappings[0].group`）。
+   * 判断落点一律看 {@link mappings}；该字段只保证旧读方不崩。
+   */
   group: string | null;
+  /**
+   * 映射列表（REQ-20261104-002）：1..N 条，至少 1 条。
+   * `normalizeRecord` 保证它恒非空 —— 旧记录由 `git.relativeRoot` + `group` 合成。
+   */
+  mappings: DataSourceMappingItem[];
   conflictMode: ImportConflictMode;
   conflictSuffix: string;
   /** false = --no-vector（仅 FTS） */
@@ -265,7 +302,10 @@ export interface DataSourceSummary {
     commitTime: number | null;
     untrackedMarkdown: number;
   };
+  /** 单值兼容位（= `mappings[0].group`） */
   group: string | null;
+  /** 映射列表（1..N）。旧 daemon 不下发 → 页面降级为 1 条并置灰编辑 */
+  mappings: DataSourceMappingItem[];
   conflictMode: ImportConflictMode;
   vector: boolean;
   registeredAt: number;

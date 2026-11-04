@@ -16,6 +16,7 @@ import { resolveImportExtensions, type KiConfig } from './config.js';
 import { collectMarkdownFiles } from './import.js';
 import { validateScope } from './scope.js';
 import { probeGit, sanitizeGitError, sanitizeRemoteUrl } from './datasource-git.js';
+import { isSafeRelativeSubdir } from './datasource-mappings.js';
 import type { DataSourceRecord } from './datasource-types.js';
 
 export const DATASOURCE_CLONE_ROOT = path.join(os.homedir(), '.ki', 'datasources');
@@ -97,16 +98,12 @@ export function validateGitUrl(raw: string, opts: { allowFile?: boolean } = {}):
   return { ok: false, code: 'INVALID_GIT_URL', error: 'Git URL 格式非法（支持 https/ssh/scp-like）' };
 }
 
-/** 子目录：相对路径、无 .. / 反斜杠 / 空段 / .git 段；空字符串 = 仓库根 */
-export function isSafeRelativeSubdir(raw: string): boolean {
-  const value = raw.trim();
-  if (!value) return true;
-  if (value.length > 1024) return false;
-  if (value.startsWith('/') || value.includes('\\') || value.includes('\0')) return false;
-  const segments = value.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..' || segment === '.git')) return false;
-  return true;
-}
+/**
+ * 子目录合法性：**唯一实现已移到 `datasource-mappings.ts`**（REQ-20261104-002，多映射校验要复用它）。
+ * 这里只做 re-export，保持既有 import 路径可用 —— 两处各写一份必然出现
+ * 「预检放行、同步拒绝」这类分叉。
+ */
+export { isSafeRelativeSubdir };
 
 function gitExec(args: string[], cwd?: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {

@@ -165,6 +165,7 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 - 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。
 - 私有仓库使用**当前进程环境**的 SSH agent / credential helper（CLI 不落盘凭据；页面添加由 daemon 环境提供）。
 - `--branch` 只接受远端分支（tag 会 detached，后续无法 `reset --hard origin/<tag>`）；`--subdir` 为仓库内相对路径（空 = 仓库根）。已有同 remote/分支的托管副本时，**复用前先把该副本 `fetch` 对齐远端**再校验子目录；不存在的子目录会直接报错并列出仓库顶层目录。远端不可达时不阻断添加（降级为按现有工作树校验），此时错误里会注明「目录列表可能滞后」，表示这次的判断依据是本地副本而非远端；恢复网络后重试即可拿到远端最新目录。
+- **多映射（仓库子目录 → 落点 Group）只能从页面配置**（REQ-20261104-002）：CLI 的 `--subdir` / `--group` 仍只建 **1 条**映射。对已有多条映射的记录执行 `ki datasource add`（含 `--force`）会报 `MULTI_MAPPING_UNSUPPORTED`，**不会**把 N 条压成 1 条（静默丢配置）。`ki datasource list` 对多映射源的 `SOURCE` 列显示 `host/owner/repo › N 个目录`，落点脚注显示 `g1 / g2（N 条映射）`。
 - clone 使用临时目录 + rename，失败不残留半成品；同一 scope 的托管目录已存在时报 `CLONE_TARGET_EXISTS`（不自动清空）。
 - 首次同步必然是 `full`（无 commit 水位），之后按 `git diff <lastCommit>..HEAD` 增量；托管副本同步前 `fetch` + `reset --hard origin/<branch>` + `clean -fdx`（**禁止手工修改托管副本**）。
 - `remove --purge` 只对 `git.managed=true` 生效；先删登记再删目录，删除失败时登记已删并返回 `cloneRemoved=false` + `cloneRemoveError`。

@@ -425,12 +425,27 @@ export function buildDataSourceDetail(
   // add 改过策略/切分/落点后二者会不同，用 record 会让人误以为结果来自新配置。
   const p = sync?.params;
   const effGroup = p ? p.group : record.group;
+  /**
+   * 落点映射（REQ-20261104-002）：优先「上次同步实际使用的映射」，其次当前登记，最后旧字段合成。
+   * 三条降级都必须保留 —— 旧快照没有 `params.mappings`、旧 daemon 没有 `record.mappings`。
+   */
+  const legacyMapping = [{ subdir: record.git?.relativeRoot ?? '', group: record.group }];
+  const effMappings = (p?.mappings && p.mappings.length > 0)
+    ? p.mappings
+    : (record.mappings && record.mappings.length > 0 ? record.mappings : legacyMapping);
+  const currentMappings = record.mappings && record.mappings.length > 0 ? record.mappings : legacyMapping;
   const effConflict = p ? p.conflictMode : record.conflictMode;
   const effVector = p ? p.vector : record.vector;
   const effChunkSize = p ? p.chunkSize : record.chunkSize;
   const effChunkOverlap = p ? p.chunkOverlap : record.chunkOverlap;
   if (p) {
-    const changed = p.group !== record.group
+    // 映射按「子目录 + Group」逐项比；旧快照无 mappings ⇒ 退回单值 group 比较（不能一律判"已变更"）
+    const sameMappings = p.mappings && p.mappings.length > 0
+      ? p.mappings.length === currentMappings.length
+        && p.mappings.every((item, index) => item.subdir === currentMappings[index].subdir
+          && (item.group ?? null) === (currentMappings[index].group ?? null))
+      : p.group === record.group;
+    const changed = !sameMappings
       || p.conflictMode !== record.conflictMode
       || p.vector !== record.vector
       || p.chunkSize !== record.chunkSize
@@ -476,8 +491,21 @@ export function buildDataSourceDetail(
       hint: `每段目标 ${chunkSizeShown} 字符；相邻两段重叠 ${chunkOverlapShown} 字符，避免跨段语义被切断`,
     },
     ...gitRows,
-    // 落点 Group 放最后：它是"这条数据源写到哪里"的结论，放在参数末尾读起来更顺
-    { label: '落点 Group', value: effGroup ? (isRootGroup(effGroup) ? ROOT_GROUP_FIELD_LABEL : effGroup) : '自动：按顶层子目录', full: true },
+    // 落点放最后：它是"这条数据源写到哪里"的结论。
+    // 多映射（REQ-20261104-002）：一条「N 条」概览 + 逐条「子目录 → Group」；
+    // 单映射保持原「落点 Group」单行（根保留键仍映射成「根目录」），旧观感不变。
+    ...(effMappings.length > 1
+      ? [
+        { label: '目录 → 落点 Group', value: `${effMappings.length} 条`, full: true as const },
+        ...effMappings.map((item) => ({
+          label: item.subdir || '（仓库根）',
+          value: item.group
+            ? (isRootGroup(item.group) ? ROOT_GROUP_FIELD_LABEL : item.group)
+            : '自动：按顶层子目录',
+          full: true as const,
+        })),
+      ]
+      : [{ label: '落点 Group', value: effGroup ? (isRootGroup(effGroup) ? ROOT_GROUP_FIELD_LABEL : effGroup) : '自动：按顶层子目录', full: true as const }]),
   ];
 
   const scheduleView = record.schedule;

@@ -716,6 +716,17 @@ export interface DataSourceWarningView {
   message: string;
 }
 
+/**
+ * 一条「仓库子目录 → 落点 Group」映射（REQ-20261104-002）。
+ * 后端 `DataSourceMappingItem` 的镜像；旧 daemon 不下发 → 页面按单值降级（见 rowsFromMappings）。
+ */
+export interface DataSourceMappingView {
+  /** 仓库内相对路径；空串 = 仓库根 */
+  subdir: string;
+  /** null = 按该子目录内的顶层目录自动命名 */
+  group: string | null;
+}
+
 export interface DataSourceLastSyncView {
   at: number;
   durationMs: number;
@@ -723,6 +734,8 @@ export interface DataSourceLastSyncView {
   taskId?: string;
   params: {
     group: string | null;
+    /** 本次同步实际使用的映射（旧快照缺省 → 由 group 合成 1 条） */
+    mappings?: DataSourceMappingView[];
     conflictMode: string;
     vector: boolean;
     chunkSize: number | null;
@@ -797,6 +810,11 @@ export interface DataSourceRecordView {
     remoteBranch: string | null;
   };
   group: string | null;
+  /**
+   * 映射列表（1..N）。**旧 daemon 不下发** → 页面降级为 1 条（`relativeRoot` + `group`）
+   * 并把映射编辑置灰，不做「提交了但没生效」的假功能。
+   */
+  mappings?: DataSourceMappingView[];
   conflictMode: string;
   conflictSuffix: string;
   vector: boolean;
@@ -826,6 +844,8 @@ export interface DataSourceListRow {
   syncAvailability?: SyncAvailabilityView;
   dir: string;
   group: string | null;
+  /** 映射列表（旧 daemon 不下发 → 列表按 `group` 单值显示） */
+  mappings?: DataSourceMappingView[];
   conflictMode: string;
   vector: boolean;
   registeredAt: number;
@@ -934,8 +954,12 @@ export async function addRemoteDataSource(input: {
   scope: string;
   url: string;
   branch?: string;
+  /** 单值兼容位（未传 mappings 时生效） */
   subdir?: string;
+  /** 单值兼容位（未传 mappings 时生效） */
   group?: string | null;
+  /** 映射列表（页面入口）：传了就以它为准 */
+  mappings?: DataSourceMappingView[];
   vector?: boolean;
   /** 新建 scope 时同时设为只读（写 config.scopeReadonly；失败由任务警告回报） */
   readonly?: boolean;
@@ -952,6 +976,8 @@ export interface UpdateDataSourceConfigInput {
   /** 乐观锁：打开编辑弹窗时的 record.revision */
   baseRevision?: number;
   patch: {
+    /** 整体替换映射（REQ-20261104-002）；只影响下次同步 */
+    mappings?: DataSourceMappingView[];
     conflictMode?: string;
     conflictSuffix?: string;
     vector?: boolean;

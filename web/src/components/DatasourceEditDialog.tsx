@@ -40,6 +40,14 @@ import {
   validateChunkFields,
   type EditConfigForm,
 } from '@/lib/datasourceEdit';
+import {
+  mappingRowsEqual,
+  rowsFromMappings,
+  toMappingPayload,
+  validateMappingRows,
+  type MappingRow,
+} from '@/lib/datasourceMappings';
+import { DatasourceMappingsEditor } from './DatasourceMappingsEditor';
 import { DatasourceScheduleFields } from './DatasourceScheduleFields';
 
 export interface DatasourceEditDialogProps {
@@ -83,7 +91,16 @@ export function DatasourceEditDialog({
   const [partialSaved, setPartialSaved] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
 
-  const configDirty = isConfigDirty(base, configForm);
+  /** 映射（REQ-20261104-002）：旧 daemon 不下发 mappings ⇒ 只读展示，不提供编辑（不做假功能） */
+  const mappingEditable = record.mappings !== undefined;
+  const legacyMapping = { relativeRoot: record.git?.relativeRoot ?? '', group: record.group };
+  const [mappingRows, setMappingRows] = useState<MappingRow[]>(
+    () => rowsFromMappings(record.mappings, legacyMapping),
+  );
+  const mappingError = mappingEditable ? validateMappingRows(mappingRows) : null;
+  const mappingsDirty = mappingEditable
+    && !mappingRowsEqual(mappingRows, record.mappings, legacyMapping);
+  const configDirty = isConfigDirty(base, configForm) || mappingsDirty;
   const scheduleDirty = !isSameForm(scheduleForm, formFromSchedule(scheduleBase));
   const dirty = configDirty || scheduleDirty;
   // 传存量基准：值未改动时跳过范围校验，避免历史超界值把"只改同名策略"也拦住
@@ -100,6 +117,7 @@ export function DatasourceEditDialog({
   const scheduleValidation = validateScheduleForm(scheduleForm);
   const canSave = dirty
     && chunkValidation.ok
+    && mappingError === null
     && (!scheduleDirty || scheduleValidation.ok)
     && !saving;
 
@@ -146,13 +164,21 @@ export function DatasourceEditDialog({
     const didConfig = configDirty;
     try {
       if (configDirty) {
-        const patch = buildConfigPatch(base, configForm);
+        const patch = {
+          ...buildConfigPatch(base, configForm),
+          ...(mappingsDirty ? { mappings: toMappingPayload(mappingRows) } : {}),
+        };
         const response = await updateDataSourceConfig({
           scope: base.scope,
           baseRevision: base.revision ?? 0,
           patch,
         });
         setBase(response.record);
+        // 服务端会归一（去空白 / 空 Group→null），按返回值回填，避免"看起来改了但没生效"
+        setMappingRows(rowsFromMappings(response.record.mappings, {
+          relativeRoot: response.record.git?.relativeRoot ?? '',
+          group: response.record.group,
+        }));
         notes.push(`同步参数已保存（${response.changed.length} 项）`);
       }
       if (scheduleDirty) {
@@ -233,10 +259,6 @@ export function DatasourceEditDialog({
                     <dt>分支</dt>
                     <dd>{git.branch ?? 'detached'}</dd>
                   </div>
-                  <div>
-                    <dt>仓库子目录</dt>
-                    <dd>{git.relativeRoot || '（仓库根）'}</dd>
-                  </div>
                 </>
               ) : (
                 <div>
@@ -249,6 +271,34 @@ export function DatasourceEditDialog({
                 <dd>{lastSync}</dd>
               </div>
             </dl>
+
+            {/* ④ 目录 → 落点 Group（REQ-20261104-002）：自本需求起**可编辑**（旧 daemon 无 mappings → 只读） */}
+            <div className="ki-ds-edit__title" style={{ marginTop: 14 }}>目录 → 落点 Group</div>
+            {mappingEditable ? (
+              <>
+                <DatasourceMappingsEditor
+                  idPrefix="ki-ds-edit"
+                  scope={base.scope}
+                  rows={mappingRows}
+                  onChange={setMappingRows}
+                  disabled={saving}
+                  error={mappingError}
+                  hint="保存后**下次同步**生效。"
+                />
+                {mappingsDirty ? (
+                  <p className="ki-form-hint ki-ds-edit__hint--warn" role="status">
+                    改 Group：旧组文档会保留并产生重复，需在「待删除的文档」里手动清理；
+                    删除某条映射：该子目录的文档本次不会自动列入待删候选（下次同步后按新的映射重算）。
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p className="ki-form-hint">
+                当前 daemon 不支持多映射（旧版本）：这里只读显示
+                「{git?.relativeRoot || '（仓库根）'} → {base.group ?? '自动：按顶层子目录'}」。
+                升级并重启 daemon 后可在此增删映射。
+              </p>
+            )}
           </section>
 
           {/* ② 同步参数 */}
@@ -358,13 +408,8 @@ export function DatasourceEditDialog({
               </div>
             </div>
 
-            <div className="ki-ds-edit__row">
-              <span className="ki-ds-edit__label">落点 Group</span>
-              <div className="ki-ds-edit__control">
-                <span className="ki-ds-edit__static">{base.group ?? '自动：按顶层子目录'}</span>
-                <p className="ki-form-hint">只读。要换落点须移除登记后重新添加，会从头同步一遍</p>
-              </div>
-            </div>
+            {/* 落点 Group 已上移到「基本信息 → 目录 → 落点 Group」（2026-11-04 多映射），
+                这里不再重复一份只读值 —— 两处显示同一个配置会让人以为有两套设置。 */}
 
             <label className={`ki-ds-edit__check${configDirty ? '' : ' is-disabled'}`}>
               <input
