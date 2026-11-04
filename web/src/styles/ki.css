@@ -8312,3 +8312,70 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-tree-dir--lib:hover { background: var(--ki-color-hover-strong); }
 .ki-tree-dir--lib .ki-tree-dir__name { color: var(--ki-color-primary); }
+
+/* ── 顶栏 scope 选择器：视图 / 知识库 的类型区分（REQ-20261104-003） ──
+   两者共用命名空间、都是"一个名字"，必须让用户看出当前在只读聚合还是具体库。
+   徽标放在选择器**右侧**：框内会挤占名字空间、还要加左内边距，
+   而它只是补充说明，放外面既不压字也不与输入内容抢位置。 */
+.ki-scope-picker__input-wrap { position: relative; }
+
+/* 收起态：等高的只读展示层，名字与类型后缀在同一行自然排布（间距 4px） */
+.ki-scope-picker__display {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: text;
+  overflow: hidden;
+  padding-right: 30px;   /* 只给 ▾ 留位，不预留输入用的 34px */
+}
+
+/*
+ * 顶栏里**收起态贴合内容**：`ki.css:352` 给的是固定 180px，
+ * 名字短时右侧会空出一大段（用户连续两次指出）。
+ * 展开时才需要行宽，用 `--open` 单独给 200px。
+ * 两条规则都写在 `.ki-workspace-header__actions` 下，与 352 行同特异性、靠后生效。
+ */
+.ki-workspace-header__actions .ki-scope-picker {
+  width: max-content;
+  min-width: 0;
+  max-width: 240px;
+}
+.ki-workspace-header__actions .ki-scope-picker--open {
+  width: 200px;
+}
+
+/*
+ * ★ 面板必须给最小宽度：收起态控件只有 ~116px（贴合内容），
+ *   而面板是 `left:0; width:100%`，会跟着变得同样窄 ——
+ *   选项里的「kisearch-memory · 只读」这类长文本会被压扁/截断。
+ *   面板是浮层，不受控件宽度约束，给 240px 才装得下最长的库名 + 徽标。
+ */
+.ki-workspace-header__actions .ki-scope-picker .ki-scope-picker__panel {
+  min-width: 240px;
+  max-width: calc(100vw - 24px);   /* 窄屏兜底：面板比控件宽，别顶出视口 */
+}
+
+.ki-scope-picker__display:focus-visible {
+  outline: 2px solid var(--ki-color-focus);
+  outline-offset: -1px;
+}
+.ki-scope-picker__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 视图后缀：浅灰小字，紧贴名字 */
+.ki-scope-picker__kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ki-color-text-subtle);
+  white-space: nowrap;
+}
+
+/*
+ * 视图与知识库**同款样式**，只有徽标文字不同（库 / 视图）。
+ * 刻意不做配色区分：顶栏已经够挤，再加边框色与色块只会抢注意力；
+ * 「是视图还是库」用一个小标签说明就够，用户不需要第二层强调。
+ */
