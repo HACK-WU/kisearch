@@ -7,6 +7,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { DocItem } from '@/api/httpApi';
 import { useDocList, useGroupDocs } from '@/lib/hooks';
+import { normalizeDocData } from '@/lib/viewBuckets';
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
   ROOT_GROUP_KEY,
@@ -67,7 +68,13 @@ export function GroupTreePanel({
   scrollPositionRef,
   onOpenDoc,
 }: GroupTreePanelProps): JSX.Element {
-  const { data, isLoading } = useDocList(scope);
+  const { data: rawDocList, isLoading } = useDocList(scope);
+  /**
+   * 视图模式下 `/api/doc/list` 返回的是 buckets，`docs`/`groups` 都在桶里。
+   * 不归一的话全屏阅读器的导航树是**空的**（不报错，只是没内容）。
+   * 单库模式原样返回。
+   */
+  const data = normalizeDocData(rawDocList);
   const activeGroupDocs = useGroupDocs(scope, activeGroup || null);
   const docs = data?.docs ?? [];
   /** 展开态保存在本地树：首次由 groups 构建，之后文档刷新不重置用户的展开选择 */

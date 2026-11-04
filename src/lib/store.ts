@@ -230,6 +230,22 @@ function migrateShardedKeys(scope: string): void {
 }
 
 /**
+ * scope 的 KB 目录是否已存在（**只读判断，绝不建目录**）。
+ *
+ * 读接口必须用它而不是 `ensureScopeDir`：后者会从模板建出目录与
+ * `group-index.json` / `relations-cache.json`，让一次「查一个不存在的库」
+ * 变成「凭空多出一个空库」—— 视图名被误传成 scope 时尤其致命。
+ */
+export function scopeDirExists(scope: string): boolean {
+  try {
+    validateScope(scope);
+    return fs.existsSync(getKbDir(scope));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 确保 kb/{scope}/ 目录存在，不存在则从 _template 初始化
  *
  * 校验规则：仅 scopeMode=strict 时强制 scope 注册白名单；

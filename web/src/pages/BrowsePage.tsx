@@ -18,6 +18,7 @@ import {
 import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
+import { isViewDocList, normalizeDocData, decodeGroupPath, type DocListViewPayload } from '@/lib/viewBuckets';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
 import { getDocContent, type DocItem } from '@/api/httpApi';
 import { kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
@@ -222,7 +223,19 @@ export function BrowsePage(): JSX.Element {
   const directTargetKey = browseLinkKey(directTarget);
   const hasDirectDocumentTarget = searchParams.get('scope') === scope
     && Boolean(searchParams.get('group') && searchParams.get('relation'));
-  const { data, isLoading, isError, error, refetch } = useDocList(scope);
+  const { data: rawData, isLoading, isError, error, refetch } = useDocList(scope);
+  /**
+   * 视图模式（REQ-20261104-005）：把分桶响应折成单库形状，成员库的 group 统一加
+   * 「库名/」前缀 —— 于是浏览页所有以 group 为键的索引（缓存 / 已知文档 / 命中集 / 树路径）
+   * **天然跨库唯一**，不需要逐处改键。
+   * 单库（或旧版 daemon）原样返回，行为与改造前逐字节一致。
+   */
+  const data = useMemo(() => normalizeDocData(rawData), [rawData]);
+  /** 视图成员（单库模式为空）—— 懒加载时用来反解「库名/组路径」 */
+  const viewMembers = useMemo<string[]>(
+    () => (isViewDocList(rawData) ? (rawData as unknown as DocListViewPayload).members ?? [] : []),
+    [rawData],
+  );
 
   /**
    * 阅读态 → URL（replace）：URL 承担「刷新后恢复现场」与复制分享，
@@ -462,7 +475,7 @@ export function BrowsePage(): JSX.Element {
     retry: 1,
     placeholderData: (previousData) => previousData,
   });
-  const searchDocs = searchQuery.data?.docs ?? [];
+  const searchDocs = useMemo(() => normalizeDocData(searchQuery.data)?.docs ?? [], [searchQuery.data]);
   /** 名称命中 / 路径命中分区（后端 matchedBy 决定；旧 daemon 无该字段时全部归名称，不丢结果） */
   const searchSections = useMemo(() => splitSearchDocs(searchDocs), [searchDocs]);
   const isSearching = hasSearchTerm(q);
@@ -608,7 +621,17 @@ export function BrowsePage(): JSX.Element {
     if (!first) return;
     autoOpenRef.current = true;
     // 默认打开不是用户导航：不强制展开目录（保留用户持久化的折叠偏好）
-    openDocument({ module: first.name, group: first.group, path: first.path }, 'inline', false);
+    openDocument(
+      {
+        module: first.name,
+        group: first.group,
+        path: first.path,
+        scope: (first as DocItem & { scope?: string }).scope,
+        apiGroup: (first as DocItem & { rawGroup?: string }).rawGroup ?? first.group,
+      },
+      'inline',
+      false,
+    );
   }, [currentViewing, isLoading, isSearching, knownDocs, openDocument, scope, searchParams]);
 
   // ── 树内文档叶子 ──
@@ -635,22 +658,26 @@ export function BrowsePage(): JSX.Element {
 
   /** 展开某 Group 时补齐其文档（全量列表被截断的 scope 用；失败则回退为仅目录）
    *  S0-2：改用 fetchGroupDocsAll 翻页取全，单 Group >500 篇不再被首页截断 */
-  const ensureGroupDocs = useCallback((group: string): void => {
-    if (!group || loadedGroupsRef.current.has(group)) return;
-    loadedGroupsRef.current.add(group);
+  const ensureGroupDocs = useCallback((groupPath: string): void => {
+    if (!groupPath || loadedGroupsRef.current.has(groupPath)) return;
+    loadedGroupsRef.current.add(groupPath);
+    // 视图模式下 groupPath 是「库名/组路径」，要还原成真实的 scope + group 才能取数
+    const { member, group } = decodeGroupPath(groupPath, viewMembers, scope);
     void queryClient
       .fetchQuery({
-        queryKey: ['docList', scope, 'group', group, ''],
-        queryFn: () => fetchGroupDocsAll(scope, group),
+        queryKey: ['docList', member, 'group', group, ''],
+        queryFn: () => fetchGroupDocsAll(member, group),
         staleTime: 30_000,
       })
       .then((res) => {
-        setDocsByGroup((prev) => ({ ...prev, [group]: res.docs ?? [] }));
+        // 回填时把 group 改回树路径，并补上来源库——否则抽屉会拿视图名去读正文（读到空）
+        const docs = (res.docs ?? []).map((d) => ({ ...d, group: groupPath, rawGroup: group, scope: member }));
+        setDocsByGroup((prev) => ({ ...prev, [groupPath]: docs }));
       })
       .catch(() => {
-        loadedGroupsRef.current.delete(group);
+        loadedGroupsRef.current.delete(groupPath);
       });
-  }, [scope, queryClient]);
+  }, [scope, queryClient, viewMembers]);
 
   /**
    * 根散文件单独补齐。
@@ -831,7 +858,15 @@ export function BrowsePage(): JSX.Element {
         // 结果列表可见时从树打开也走抽屉，避免把结果列表顶掉；
         // 页内阅读态则就地替换正文，不再叠一个抽屉（REQ-20261018-001 R6）。
         openDocument(
-          { module: doc.name, group: doc.group, path: doc.path },
+          {
+            module: doc.name,
+            group: doc.group,
+            path: doc.path,
+            // 视图模式下 docsByGroup 里的文档带来源库，带上它抽屉才能读到正文；
+            // apiGroup 是后端真实 group（树路径带库名前缀，直接传会 404）
+            scope: (doc as DocItem & { scope?: string }).scope,
+            apiGroup: (doc as DocItem & { rawGroup?: string }).rawGroup ?? doc.group,
+          },
           showingResults ? 'drawer' : 'inline',
         );
         setMobileReaderOpen(true);
@@ -852,11 +887,16 @@ export function BrowsePage(): JSX.Element {
     const nodeDocs = node.open
       ? (docsByGroup[node.path] ?? []).filter(filterDoc)
       : [];
+    /**
+     * 库节点（REQ-20261104-005）：视图模式下顶层节点就是成员库。
+     * 加图标 + 底色区分「库」与「组」——否则 `k8s/k8s` 这种同名组合看不出哪段是库。
+     */
+    const isLibrary = viewMembers.includes(node.path);
     return (
       <Fragment key={node.path}>
         {!hideSelf && (
         <div
-          className={`ki-tree-dir${node.open ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}`}
+          className={`ki-tree-dir${node.open ? ' ki-tree-dir--open' : ''}${isActive ? ' ki-tree-dir--active' : ''}${isLibrary ? ' ki-tree-dir--lib' : ''}`}
           role="treeitem"
           data-ki-group={node.path}
           tabIndex={0}
@@ -1227,11 +1267,24 @@ export function BrowsePage(): JSX.Element {
     if (!currentViewing) return null;
     return (
       <ModuleDrawer
-        key={`${asDrawer ? 'drawer' : 'inline'}:${scope}:${currentViewing.group}:${currentViewing.module}`}
+        /* ★ 视图模式下必须用**文档实际所属的库**：顶栏是视图名，直接传下去
+           doc/get 会去读 dataDir/<视图名>/ → 正文一片空白（不报错）。
+           单库模式 currentViewing.scope 为空 → 回落顶栏值，行为不变。 */
+        key={`${asDrawer ? 'drawer' : 'inline'}:${currentViewing.scope ?? scope}:${currentViewing.group}:${currentViewing.module}`}
         inline={!asDrawer}
-        scope={scope}
+        scope={currentViewing.scope ?? scope}
         module={currentViewing.module}
-        group={currentViewing.group}
+        /*
+         * 后端只认真实 group。视图模式下 `currentViewing.group` 是**树路径**：
+         *   - 普通组   `ai-docs/aiops/x` → 真实 `aiops/x`
+         *   - 根散文件 `blog-es`        → 真实 `__root__`
+         * 所以只要确定是视图（viewMembers 非空），就以反解结果为准；
+         * `apiGroup` 只作为反解不出时的补充（深链首帧 members 可能还没到）。
+         * 单库模式 viewMembers 为空 → 原样透传，行为与改造前一致。
+         */
+        group={viewMembers.length > 0
+          ? decodeGroupPath(currentViewing.group ?? '', viewMembers, scope).group
+          : (currentViewing.apiGroup ?? currentViewing.group)}
         highlightQuery={currentViewing.highlightQuery}
         targetAnchor={currentViewing.anchor}
         editable

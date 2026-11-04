@@ -24,6 +24,8 @@ export interface DocumentView {
    * 单库模式下不填，调用方回落顶栏值。
    */
   scope?: string;
+  /** 后端真实 group（视图模式下 `group` 是带库名前缀的树路径，不能直接拿去查） */
+  apiGroup?: string;
   group?: string;
   path?: string;
   content?: string;

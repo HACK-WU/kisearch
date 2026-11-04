@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
+import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, useIsViewName, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
 import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { describeWikiSync } from '@/lib/resourcesPage';
@@ -20,6 +20,7 @@ import {
 import { getLastRttMs } from '@/api/httpApi';
 import { getTasks } from '@/api/tasksApi';
 import { useScopeValue } from '@/lib/scopeContext';
+import { normalizeDocData } from '@/lib/viewBuckets';
 import { HealthBanner } from '@/components/HealthBanner';
 import { Icon } from '@/components/icons';
 import type { HealthReport, HealthItem } from '@/api/httpApi';
@@ -302,7 +303,9 @@ export function DashboardPage(): JSX.Element {
   const currentMeta = list.find((s) => s.scope === scope);
   // 计数取 `total`：doc/list 无 group 时上限 500，列表长度是截断值（`groups` 同理，
   // 但 2026-10-30 起总览不再展示分组数，该字段已无消费方）
-  const { docTotal: curDocTotal } = scopeOverviewCounts(scopeDocs);
+  // 视图模式下 `/api/doc/list` 返回 buckets，`docs`/`total` 都在桶里 ——
+  // 不归一的话概览会显示 0 篇（静默错数，比报错更难发现）
+  const { docTotal: curDocTotal } = scopeOverviewCounts(normalizeDocData(scopeDocs));
 
   // 「显示注册 scope」卡片：数据全部来自同一份 scopeList（0 新增请求、0 后端改动）
   const scopeMode = normalizeScopeMode(scopes?.scopeMode);
@@ -326,7 +329,16 @@ export function DashboardPage(): JSX.Element {
 
   // 六宫格「状态类」三格（2026-10-30）：判定与文案统一收在 lib/dashboardScopeCards.ts，
   // 页面只负责渲染 —— 读写/Wiki 的三态与四态判定不允许在这里就地拼装。
-  const readMode = readModeCard(scope, currentMeta?.readonly);
+  /**
+   * 视图是只读聚合，不是知识库 —— `currentMeta` 查不到（scope 列表已剔除视图），
+   * 不特判会显示成「可写」，与事实相反。
+   *
+   * 判据用 `useIsViewName`（读 `ki_scope_list` 的 `views[]`）而不是嗅探
+   * doc/list 响应的 `view` 字段：后者在接口未返回时是 undefined，会把视图误判成可写；
+   * 且该响应可能来自缓存，与顶栏当前值不同步。
+   */
+  const isViewScope = useIsViewName(scope);
+  const readMode = readModeCard(scope, isViewScope ? true : currentMeta?.readonly);
   const layers = layerColumns(currentMeta, vectorDegraded);
   const wikiCard = wikiWritebackCard(scope, currentMeta?.readonly, currentMeta?.wikiSync);
 

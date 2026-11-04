@@ -8300,3 +8300,15 @@ select.ki-chat-cfg__ta--select {
   cursor: pointer;
 }
 .ki-scope-picker__back:hover { background: var(--ki-color-hover); }
+
+/* ── 知识视图：库节点（REQ-20261104-005）─────────────────────────
+   视图模式下顶层节点就是成员库。必须与组节点在视觉上分开：
+   库名和组名同名的组合（如 scope `k8s` 内含组 `k8s`）否则看不出哪段是库。 */
+.ki-tree-dir--lib {
+  font-weight: 650;
+  letter-spacing: .01em;
+  background: var(--ki-color-surface-muted);
+  border-radius: var(--ki-radius-sm);
+}
+.ki-tree-dir--lib:hover { background: var(--ki-color-hover-strong); }
+.ki-tree-dir--lib .ki-tree-dir__name { color: var(--ki-color-primary); }

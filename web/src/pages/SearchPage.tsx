@@ -743,7 +743,11 @@ export function SearchPage(): JSX.Element {
                   key={i}
                   className="ki-qr-item"
                   onClick={() => {
-                    const doc = docData?.docs.find((item) => item.group === r.group && item.name === r.relation);
+                    // ★ 必须是 `docs?.find`：视图模式下 `/api/doc/list` 返回的是 buckets，
+                    //   `docs` 为 undefined；写成 `docData?.docs.find` 会在点击时抛
+                    //   "Cannot read properties of undefined (reading 'find')"，
+                    //   表现为**点结果毫无反应**（异常吞在事件回调里，界面不变）。
+                    const doc = docData?.docs?.find((item) => item.group === r.group && item.name === r.relation);
                     openDocument({
                       // 视图模式下必须带命中自带的来源库，否则抽屉读到空目录
                       scope: r.scope ?? scope,
@@ -752,7 +756,10 @@ export function SearchPage(): JSX.Element {
                       // 让 ModuleDrawer 通过 ki_get_module_info 获取完整标题结构。
                       content: r.originalRetrieved === true ? r.original : undefined,
                       fallbackContent: r.originalRetrieved === true && r.original ? undefined : r.original ?? r.content,
+                      // 视图模式下 `r.scope` 是命中的来源库，`r.group` 是**成员内的真实组**，
+                      // 两者配对即为后端要的 (scope, group)，无需再反解
                       group: r.group,
+                      apiGroup: r.group,
                       // doc 来自 useDocList（前 500 条），超过上限的文档查不到；检索命中自带 sourcePath，
                       // 与 DocItem.path 同源（relation.sourcePath），用它兜底避免丢掉本地链接解析上下文
                       path: doc?.path ?? r.sourcePath,

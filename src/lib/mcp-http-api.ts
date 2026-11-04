@@ -146,6 +146,7 @@ import { readTaskLog } from './task-log.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
 import { MAX_SNAPSHOT_CREATED, toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
+import { resolveScopeTargets } from './scope-view.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 import { withTimeoutFallback } from './timeout.js';
 
@@ -1945,22 +1946,83 @@ async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
  * 评分回写（recordUse）与 MCP 路径同源：仍在 `withMetadataCommitSync` 窗口内。
  */
 async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
-  const scope = resolveScope(loadConfig(), url.searchParams.get('scope') ?? '');
+  const scopeRaw = url.searchParams.get('scope') ?? '';
   const group = url.searchParams.get('group') ?? '';
   const relation = url.searchParams.get('relation') ?? '';
   if (!group.trim() || !relation.trim()) {
     sendJson(res, 400, { ok: false, error: '缺少 group/relation 参数' });
     return;
   }
+
+  const config = loadConfig();
+  let targets;
+  try {
+    targets = resolveScopeTargets(config, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, error: (err as Error).message });
+    return;
+  }
+
+  /**
+   * 视图（REQ-20261104-003 / 005）：`group + relation` 在成员库之间可能多命中，
+   * 不能静默挑一个 —— 两份同名文档可能语义完全不同，事后无从发现选错了。
+   * 唯一命中直接返回并**回填来源库**（前端据此展示与后续编辑）。
+   */
+  if (targets.views.length > 0 && targets.scopes.length > 1) {
+    const members = url.searchParams.get('member')?.trim();
+    const candidates = members ? [members] : targets.scopes;
+    if (members && !targets.scopes.includes(members)) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'INVALID_VIEW_MEMBER',
+        error: `member "${members}" 不是视图 ${targets.views[0]} 的成员`,
+        members: targets.scopes,
+      });
+      return;
+    }
+    const hits: { scope: string; result: unknown }[] = [];
+    for (const m of candidates) {
+      const r = await executeGetModuleInfoLocal({ scope: m, group, relation }, { noVectorFallback: true });
+      if (r.ok) hits.push({ scope: m, result: r });
+    }
+    if (hits.length === 1) {
+      const only = hits[0];
+      sendJson(res, 200, { ...(only.result as Record<string, unknown>), scope: only.scope, member: only.scope });
+      return;
+    }
+    if (hits.length === 0) {
+      sendJson(res, 404, {
+        ok: false,
+        view: targets.views[0],
+        error: `在视图 ${targets.views[0]} 的 ${candidates.length} 个成员库中均未找到该文档`,
+        searched: candidates,
+      });
+      return;
+    }
+    sendJson(res, 409, {
+      ok: false,
+      view: targets.views[0],
+      code: 'AMBIGUOUS_VIEW_DOC',
+      error: `该文档在视图 ${targets.views[0]} 的多个知识库中同时存在，请指定 member`,
+      candidates: hits.map((h) => h.scope),
+    });
+    return;
+  }
+
+  const scope = resolveScope(config, scopeRaw);
   const result = await executeGetModuleInfoLocal({ scope, group, relation }, { noVectorFallback: true });
   sendJson(res, result.ok ? 200 : 404, result);
 }
 
 // ─── GET /api/doc/list ────────────────────────────────
 
-async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
-  const scopeRaw = url.searchParams.get('scope') ?? '';
-  const scope = resolveScope(loadConfig(), scopeRaw);
+/**
+ * 组装单个知识库的 doc/list 响应体（**不写 res**）。
+ *
+ * 抽成纯函数是为了让视图模式能**逐成员复用同一份逻辑**：
+ * 视图下按成员分桶返回，而不是让前端发 N 次请求（5 库 = 5 次 IO + 5 次 500 条截断 + 5 套独立失败处理）。
+ */
+function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
   // 路径检索（2026-10-20）：检索词归一化后与「逻辑路径」（Group 路径 + 导入源 sourcePath，
   // 按最长重叠段合并，见 doc-path.ts）比较。归一处后为空 = 无有效检索词（纯空格 / 纯 `/`），
   // 按「不过滤」处理 —— 不能当成"搜不到任何文档"。
@@ -2014,8 +2076,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     const groupMatched = all
       .filter((d) => d.group === groupRaw && matchQuery(d) && matchTag(d));
     const docs = groupMatched.slice(offset, offset + limit);
-    sendJson(res, 200, {
-      ok: true,
+    return {
       scope,
       docs: withSearchMeta(docs),
       offset,
@@ -2023,8 +2084,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
       truncated: offset + docs.length < groupMatched.length,
       groups,
       tags,
-    });
-    return;
+    };
   }
 
   // 不带 group 参数时：
@@ -2034,8 +2094,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   const filtered = all.filter(matchQuery).filter(matchTag);
   const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
   const docs = filtered.slice(offset, offset + searchLimit);
-  sendJson(res, 200, {
-    ok: true,
+  return {
     scope,
     docs: withSearchMeta(docs),
     offset,
@@ -2043,7 +2102,56 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     truncated: offset + docs.length < filtered.length,
     groups,
     tags,
-  });
+  };
+}
+
+/**
+ * `GET /api/doc/list`
+ *
+ * - **单库**（或单成员视图）：响应结构逐字节不变（无 `view` / `buckets` 字段）
+ * - **多成员视图**：`{ ok, view, members, buckets: [{ scope, ...payload } | { scope, error }], tags }`
+ *   - 每个成员独立组装，单个成员失败只污染自己的桶，不拖垮整个视图
+ *   - 顶层 `tags` 合并去重（供前端 tag 下拉，它只能吃一个扁平列表）
+ */
+async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
+  const scopeRaw = url.searchParams.get('scope') ?? '';
+  const config = loadConfig();
+
+  let targets;
+  try {
+    targets = resolveScopeTargets(config, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, error: (err as Error).message });
+    return;
+  }
+
+  // 多成员视图 → 分桶
+  if (targets.views.length > 0 && targets.scopes.length > 1) {
+    const buckets: Record<string, unknown>[] = [];
+    const tagSet = new Set<string>();
+    for (const member of targets.scopes) {
+      try {
+        const payload = buildDocListPayload(url, member);
+        buckets.push(payload);
+        for (const t of (payload.tags as string[]) ?? []) tagSet.add(t);
+      } catch (err) {
+        // 单成员失败隔离：该库自己的桶里报错，其余库照常
+        buckets.push({ scope: member, error: (err as Error).message });
+      }
+    }
+    sendJson(res, 200, {
+      ok: true,
+      view: targets.views[0],
+      members: targets.scopes,
+      buckets,
+      tags: Array.from(tagSet).sort(),
+      ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+    });
+    return;
+  }
+
+  const scope = resolveScope(config, scopeRaw);
+  sendJson(res, 200, { ok: true, ...buildDocListPayload(url, scope) });
 }
 
 // ─── POST /api/import/upload ──────────────────────────

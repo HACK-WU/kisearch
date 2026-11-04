@@ -136,7 +136,7 @@
 
 ### `重试清单中的 N 个文件在当前源目录均不存在`
 
-原因：清单内文件已全部被删除或改名（`retryFilter.missing` 会列出具体路径）。
+原因：清单内文件已全部被删除或改名（`retryFilter.missing` 会列出具体路径）。![![alt text](image-1.png)](image.png)
 
 恢复：确认 `--source` 指向原目录；若文件确已移除，删除清单即可（`rm <scope>/.ki-import-incomplete.json`）。
 

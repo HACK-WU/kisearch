@@ -13,7 +13,7 @@
 
 import fs from 'node:fs';
 import { Command } from 'commander';
-import { readJson, ensureScopeDir, readGroupIndex } from './lib/store.js';
+import { readJson, scopeDirExists, readGroupIndex } from './lib/store.js';
 import {
   getGroupIndexPath,
   getRelationsCachePath,
@@ -835,7 +835,14 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
     }
 
     validateScope(scope);
-    ensureScopeDir(scope);
+    // 读路径不得建目录（同 get-module-info）：不存在就报尚未导入
+    if (!scopeDirExists(scope)) {
+      return {
+        ok: false,
+        error: `知识库 "${scope}" 尚未导入（KB 目录不存在）`,
+        hint: `确认 scope 名是否正确；需要新建请执行 ki import --scope ${scope} …`,
+      };
+    }
 
     const groupIndex = loadGroupIndex(scope);
     const relationsCache = loadRelationsCache(scope);

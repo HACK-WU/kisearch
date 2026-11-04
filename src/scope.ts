@@ -248,12 +248,25 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
 
   // 只读名单也纳入枚举：否则"设了只读但该 scope 尚无数据/未注册"时列表里看不到，
   // 用户无法确认设置是否生效（REQ-20261029-001 验收 1）。
+  /**
+   * ★ 视图不是知识库：必须从 scope 列表里剔除。
+   *
+   * 即便磁盘上真有 `dataDir/<视图名>/`（历史遗留的脏目录），也不能把它当作一个
+   * scope 展示 —— 用户会看到一个 0 篇、无向量、可写的同名「知识库」，
+   * 而实际上它是只读聚合。视图只出现在下面的 `views[]` 里。
+   */
+  let viewNames = new Set<string>();
+  try {
+    viewNames = new Set(Object.keys(readViews(config)));
+  } catch {
+    viewNames = new Set();   // 视图文件损坏时不阻塞 scope 列表
+  }
   const all = new Set<string>([
     ...kbScopes,
     ...vectorScopes,
     ...Object.keys(config.scopes),
     ...config.scopeReadonly,
-  ]);
+  ].filter((s) => !viewNames.has(s)));
   const scopes: ScopeEntry[] = [...all].sort().map((s) => {
     // 逐 scope 兜底：单个 scope 的 relations 元数据损坏不应让整个 scope 列表不可用，
     // 但必须留下可见告警（不再静默当成 0 条）

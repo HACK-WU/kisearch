@@ -21,7 +21,8 @@ import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 import { groupPathSegment } from '@/lib/groupTree';
 import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
-import { useScopeReadonly } from '@/lib/hooks';
+import { useScopeReadonly, useViewMemberReadonly } from '@/lib/hooks';
+import { useScopeValue } from '@/lib/scopeContext';
 import { SCOPE_READONLY_BLOCKED_HINT } from '@/lib/scopeReadonly';
 import {
   DOC_FIND_DEBOUNCE_MS,
@@ -1036,11 +1037,23 @@ export function ModuleDrawer({
    * ③ 待选模式下再点一次 → 取消。
    */
   /**
-   * 只读 scope（REQ-20261029-001）：**内部按 scope 派生**，5 个挂载点零改动
-   * （BrowsePage / SearchPage / DataSourcePage / TasksPage / ChatPanel 各传一遍必漏）。
-   * 与 `useScopeList` 共用 query key，全局 ScopeSelect 已预热 ⇒ 无额外请求。
+   * 只读判定（REQ-20261029-001 + REQ-20261104-003 / 005）。
+   *
+   * 内部按 scope 派生，5 个挂载点零改动（BrowsePage / SearchPage / DataSourcePage /
+   * TasksPage / ChatPanel 各传一遍必漏）；与 `useScopeList` 共用 query key，
+   * 全局 ScopeSelect 已预热 ⇒ 无额外请求。
+   *
+   * ★ 视图模式下 `scope` 是成员库名，而成员库通常**不在 `scopes[]` 里**
+   *   （授权视图 ≠ 授权成员名），`useScopeReadonly` 查不到条目会回落 false
+   *   → 只读库被显示成**可写**，用户能点编辑并提交，再由后端 409 打回。
+   *   故必须补一条来自 `views[].memberMeta[].readonly` 的判定。
+   *
+   * 两个 hook 都必须**无条件调用**（不能写成 `a() || b()`，短路会让后一个 hook 时有时无）。
    */
-  const scopeReadonly = useScopeReadonly(scope);
+  const topScope = useScopeValue();
+  const directReadonly = useScopeReadonly(scope);
+  const viewMemberReadonly = useViewMemberReadonly(topScope, scope);
+  const scopeReadonly = directReadonly || viewMemberReadonly;
 
   const openReaderLinkComposer = useCallback((): void => {
     // 只读库入口兜底（按钮已置灰；防键盘/程序触发）

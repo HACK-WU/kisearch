@@ -9,7 +9,7 @@
  */
 
 import { Command } from 'commander';
-import { readJson, writeJson, ensureScopeDir, readGroupIndex } from './lib/store.js';
+import { readJson, writeJson, scopeDirExists, readGroupIndex } from './lib/store.js';
 import {
   getRelationsCachePath,
   getLocalKbDir,
@@ -116,7 +116,14 @@ export async function executeGetModuleInfoLocal(
     const group = String(params.group).replace(/^\/+|\/+$/g, '');
 
     validateScope(scope);
-    ensureScopeDir(scope);
+    // 读路径不得建目录：scope 不存在就如实报「尚未导入」，而不是凭空造一个空库
+    if (!scopeDirExists(scope)) {
+      return {
+        ok: false as const,
+        error: `知识库 "${scope}" 尚未导入（KB 目录不存在）`,
+        hint: `确认 scope 名是否正确；需要新建请执行 ki import --scope ${scope} …`,
+      };
+    }
 
     // 批次 2（R1，S0-5 核心收益点）：单文档读取改单组读——新布局只读目标组分片
     //（树匹配用 listGroupPaths 轻量枚举键，不聚合全量 relation），评分回写只写该组。
@@ -348,7 +355,14 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
     }
 
     validateScope(scope);
-    ensureScopeDir(scope);
+    // 读路径不得建目录：scope 不存在就如实报「尚未导入」，而不是凭空造一个空库
+    if (!scopeDirExists(scope)) {
+      return {
+        ok: false as const,
+        error: `知识库 "${scope}" 尚未导入（KB 目录不存在）`,
+        hint: `确认 scope 名是否正确；需要新建请执行 ki import --scope ${scope} …`,
+      };
+    }
 
     // 批次 2（R1 批量）：单组读（同单条模式——批量本就限定同一 Group）
     const batchSharded = hasShardedLayout(scope);
