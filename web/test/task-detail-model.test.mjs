@@ -114,8 +114,9 @@ describe('缺字段与旧记录', () => {
   it('旧记录（终态且无 params/result）给出说明且不渲染参数段', () => {
     const view = buildTaskDetail(baseTask({ state: 'succeeded' }));
     assert.equal(view.legacy, true);
-    assert.equal(view.params.length, 2, '仅保留「知识库」「来源」两行，其余参数无从得知');
+    assert.equal(view.params.length, 3, '保留「知识库」「来源」「操作者」三行，其余参数无从得知');
     assert.equal(view.params.some((row) => row.label === 'Group'), false);
+    assert.equal(view.params.find((row) => row.label === '操作者')?.value, '—');
     assert.ok(view.notices.some((notice) => /旧记录/.test(notice.text)));
   });
 

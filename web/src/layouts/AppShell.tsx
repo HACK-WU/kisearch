@@ -3,7 +3,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link, NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuth, formatRole } from '@/lib/authContext';
+import { ChangePasswordDialog } from '@/components/ChangePasswordDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   summarizeHealth, useHealth, useServerInfo, useVectorAvailability, useVectorDimensionStatus,
@@ -180,6 +182,43 @@ function ServiceBadge(): JSX.Element {
 }
 
 export function AppShell(): JSX.Element {
+  const { user, source, can, signOut } = useAuth();
+  const navigate = useNavigate();
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+  const displayName = user?.username ?? (source === 'token' ? 'Token' : '未登录');
+  const roleLabel = formatRole(user?.role);
+  const initial = displayName.trim().slice(0, 1).toUpperCase() || 'U';
+
+  useEffect(() => {
+    if (!userMenuOpen) return undefined;
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!userMenuRef.current?.contains(event.target as Node)) setUserMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setUserMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [userMenuOpen]);
+
+  const handleLogout = async (): Promise<void> => {
+    setUserMenuOpen(false);
+    await signOut();
+    navigate('/login', { replace: true });
+  };
+
+  const navItems = NAV_MAIN.filter((item) => {
+    if (!can('knowledge.write') && (item.to === '/import' || item.to === '/write')) return false;
+    if (!can('datasource.read') && item.to === '/datasource') return false;
+    return true;
+  });
+
   const [searchParams, setSearchParams] = useSearchParams();
   // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
   //   因此 store 在此创建一次；ChatPanel 只是视图，不持有业务状态（否则关面板会丢内容并连带 abort）
@@ -274,9 +313,9 @@ export function AppShell(): JSX.Element {
     if (chatOpenFromSearch(searchParams.toString()) === intent) return;
     setSearchParams((prev) => withChatOpenParam(prev, intent), { replace: true });
   }, [isChatRoute, chatOpen, chatStore, searchParams, setSearchParams]);
-  const currentLabel = NAV_MAIN.find((item) =>
+  const currentLabel = navItems.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
-  )?.label ?? '总览';
+  )?.label ?? (location.pathname === '/users' ? '用户管理' : '总览');
   const { theme, toggle } = useTheme();
   /** 左侧主导航收起态：本地持久化（2026-10-13，此前只存 state、刷新即复位） */
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
@@ -486,7 +525,7 @@ export function AppShell(): JSX.Element {
           <div className="ki-sidebar__section-head">
             <span className="ki-sidebar__section-label">工作空间</span>
           </div>
-          {NAV_MAIN.map((item) => {
+          {navItems.map((item) => {
             /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
             const busy = item.to === '/chat' && chatStreaming;
             return (
@@ -589,8 +628,54 @@ export function AppShell(): JSX.Element {
                 )}
                 <ScopeSelect />
                 <ServiceBadge />
+                <div className="ki-user-menu" ref={userMenuRef}>
+                  <button
+                    type="button"
+                    className="ki-user-menu__trigger"
+                    aria-haspopup="menu"
+                    aria-expanded={userMenuOpen}
+                    onClick={() => setUserMenuOpen((open) => !open)}
+                    title={`${displayName} · ${roleLabel}`}
+                  >
+                    <span className="ki-user-menu__avatar" aria-hidden="true">{initial}</span>
+                    <span className="ki-user-menu__name">{displayName}</span>
+                    <span className="ki-user-menu__caret" aria-hidden="true">▾</span>
+                  </button>
+                  {userMenuOpen ? (
+                    <div className="ki-user-menu__pop" role="menu">
+                      <div className="ki-user-menu__meta">
+                        <strong>{displayName}</strong>
+                        <span>{roleLabel}{source === 'local' ? ' · 本机' : ''}</span>
+                      </div>
+                      {can('users.manage') ? (
+                        <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); navigate('/users'); }}>
+                          用户管理
+                        </button>
+                      ) : null}
+                      {source === 'session' ? (
+                        <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); setPasswordOpen(true); }}>
+                          修改密码
+                        </button>
+                      ) : null}
+                      {source === 'session' ? (
+                        <button type="button" role="menuitem" onClick={() => void handleLogout()}>
+                          退出登录
+                        </button>
+                      ) : null}
+                      {source === 'local' ? (
+                        <p className="ki-user-menu__note">本机管理员 · 无需登录</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </header>
+            {!can('knowledge.write') ? (
+              <div className="ki-readonly-banner" role="status">
+                <strong>当前账号为只读</strong>
+                <span>导入、编辑、写入等操作已禁用；如需写入请联系管理员调整权限。</span>
+              </div>
+            ) : null}
             {dimensionNotice?.kind === 'mismatch' ? (
               <div className="ki-vector-dimension-banner" role="alert">
                 <span className="ki-vector-dimension-banner__icon" aria-hidden="true">!</span>
@@ -643,6 +728,12 @@ export function AppShell(): JSX.Element {
         chatToggleRef.current?.focus();
       }} />
     </div>
+    {passwordOpen ? (
+      <ChangePasswordDialog
+        onClose={() => setPasswordOpen(false)}
+        onSaved={() => setPasswordOpen(false)}
+      />
+    ) : null}
     {editorRequest && (
       <DocumentEditor
         key={`${editorRequest.scope}/${editorRequest.group}/${editorRequest.relation}`}

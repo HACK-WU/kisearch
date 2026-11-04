@@ -102,9 +102,18 @@ export interface TaskResultSnapshot {
   errorCode?: string;
 }
 
+export interface TaskOperator {
+  type: 'user' | 'local' | 'cli' | 'daemon' | 'token' | 'scheduler' | 'legacy';
+  label: string;
+  userId?: string;
+  tokenId?: string;
+}
+
 export interface TaskRecord {
   id: string;
   source: TaskSource;
+  /** 发起者快照；旧记录缺省（展示 `—`） */
+  operator?: TaskOperator;
   operation: string;
   scope: string;
   state: TaskState;

@@ -69,6 +69,8 @@ import { newMessageId } from '../chat-store.js';
 import { buildSystemMessages } from './retrieval-skill.js';
 import { findEnabledSkill, promptSnapshotBlocks, readPromptConfig, type PromptConfig } from '../prompt-config.js';
 import { applyBudgetDefault, enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { canUseTool } from '../../auth/tool-permissions.js';
+import type { Capability } from '../../auth/capabilities.js';
 import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
 import { toSourceRefs } from './projection.js';
 import { serializeToolResponse } from './tool-response.js';
@@ -95,6 +97,8 @@ export interface ToolLoopInput {
    */
   refs?: readonly ChatRef[];
   signal?: AbortSignal;
+  /** 当前 principal 能力；缺省 = 不按能力过滤（兼容旧调用方/测试） */
+  capabilities?: ReadonlySet<Capability>;
 }
 
 /** 运行期上下文（从配置解析；不改变冻结的 ToolLoopInput 签名） */
@@ -557,7 +561,11 @@ async function* toolLoopPath(
   const refsChars = renderRefsBlock(input.refs)?.length ?? 0;
   // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
   //   属用户显式配置、非故障，不发 degraded）
-  const toolDefs = runtime.toolEntries.map((e) => e.def);
+  const capabilities = input.capabilities;
+  const toolEntries = capabilities
+    ? runtime.toolEntries.filter((entry) => canUseTool(capabilities, entry.name))
+    : runtime.toolEntries;
+  const toolDefs = toolEntries.map((e) => e.def);
   // ★ skill 目录非空 ⇒ 追加 `use_skill`（2026-10-13）：无可用 skill 时不暴露，减少无谓调用面
   const callableIds = callableSkillIds(input.conv, runtime);
   if (callableIds.length > 0) toolDefs.push(useSkillToolDef());
@@ -716,6 +724,20 @@ async function* toolLoopPath(
         const errText = `未知工具 ${call.name || '(未命名)'}：不在本次暴露的工具列表中，请仅使用系统提供的工具`;
         const response = serializeToolResponse({ error: errText }, runtime.budget.responseChars);
         yield { type: 'tool_start', name: call.name || 'unknown', ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}) };
+        yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
+        messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
+        continue;
+      }
+
+      // S-03：构造式调用也要按能力拦截（工具列表过滤只解决“看不到”）。
+      if (input.capabilities && !canUseTool(input.capabilities, entry.name)) {
+        const errText = `当前账号无权调用工具 ${entry.name}（权限不足）`;
+        const response = serializeToolResponse({ error: errText }, runtime.budget.responseChars);
+        yield {
+          type: 'tool_start',
+          name: entry.name,
+          ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}),
+        };
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
         continue;

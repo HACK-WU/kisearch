@@ -11,6 +11,7 @@ import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCop
 import { describeWikiSync } from '@/lib/resourcesPage';
 import { layerColumns, readModeCard, wikiWritebackCard } from '@/lib/dashboardScopeCards';
 import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
+import { useAuth } from '@/lib/authContext';
 import { scheduleSummaryView, summarizeSchedules } from '@/lib/datasourceSchedule';
 import {
   normalizeScopeMode,
@@ -263,9 +264,11 @@ function HealthList({
 }
 
 export function DashboardPage(): JSX.Element {
+  const { can } = useAuth();
   const { data: scopes, isLoading, isError, error, refetch } = useScopeList();
   // 数据源（REQ-20261020-001 Q4）：总览第 4 卡由「注册」改为「数据源」数
-  const { data: dsList, error: dsError } = useDataSourceList();
+  // viewer 没有 datasource.read：不请求（否则总览会稳定出现 403），卡片显示 —
+  const { data: dsList, error: dsError } = useDataSourceList(can('datasource.read'));
   const { data: health, error: healthError, isPending: healthPending } = useHealth();
   const healthSummary = summarizeHealth(health, healthError, healthPending);
   const scope = useScopeValue();

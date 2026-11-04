@@ -110,6 +110,7 @@ export async function runScheduledSync(input: ScheduledRunInput): Promise<Schedu
             task = createTaskReporter(input.config, {
               id: taskId,
               source: 'scheduler',
+              operator: { type: 'scheduler', label: '定时同步' },
               operation: 'datasource-sync',
               scope: input.scope,
             });

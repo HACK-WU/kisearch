@@ -21,6 +21,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList, useScopeList, useVectorAvailability } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useAuth } from '@/lib/authContext';
 // upstream 侧记录/列表自带 schedule（定时同步），本地侧新增移除接口（removeDataSource）
 import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
@@ -156,6 +157,9 @@ export function DataSourcePage(): JSX.Element {
   const { scope } = useParams<{ scope?: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { can } = useAuth();
+  const canWriteDatasource = can('datasource.write');
+  const canDeleteDatasource = can('datasource.delete');
   const listQuery = useDataSourceList();
   const detailQuery = useDataSourceDetail(scope ?? null);
   const currentScope = useScopeValue();
@@ -883,22 +887,30 @@ export function DataSourcePage(): JSX.Element {
         <div>
           <p>{listSummary}</p>
         </div>
-        <button
-          type="button"
-          ref={addTriggerRef}
-          className="ki-btn ki-btn--secondary"
-          aria-haspopup="dialog"
-          aria-expanded={addOpen}
-          onClick={() => {
-            setAddForm({ scope: '', url: '', branch: '', subdir: '', group: '' });
-            setAddScopeConfirmed(false);
-            setAddScopeMode('existing');
-            setAddReadonly(false);
-            setAddState({ phase: 'idle' });
-            setAddOpen(true);
-          }}
-        >添加 Git 数据源</button>
+        {canWriteDatasource ? (
+          <button
+            type="button"
+            ref={addTriggerRef}
+            className="ki-btn ki-btn--secondary"
+            aria-haspopup="dialog"
+            aria-expanded={addOpen}
+            onClick={() => {
+              setAddForm({ scope: '', url: '', branch: '', subdir: '', group: '' });
+              setAddScopeConfirmed(false);
+              setAddScopeMode('existing');
+              setAddReadonly(false);
+              setAddState({ phase: 'idle' });
+              setAddOpen(true);
+            }}
+          >添加 Git 数据源</button>
+        ) : null}
       </div>
+
+      {!canWriteDatasource ? (
+        <Notice tone="info" title="数据源只读">
+          当前账号为读写账号，无权管理数据源；可正常上传导入、编辑知识。数据源的新增 / 同步 / 编辑 / 移除请联系管理员。
+        </Notice>
+      ) : null}
 
       {/* 向量不可用提示（2026-11-02）：只点名开了向量化的源 —— 关闭向量化的源不受影响，
           提示它们会让用户以为整页都坏了。文案必须给出两条出路（关向量化 / 修 embedding），
@@ -1343,28 +1355,32 @@ export function DataSourcePage(): JSX.Element {
              （原按钮是 DatasourceScheduleDialog 的唯一使用方，已随组件一并删除）。 */
         <p key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-notice--action">
           <span>⚠ {item.scope} 目录不可读：{item.reason}</span>
-          <button
-            type="button"
-            data-ds-remove={item.scope}
-            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
-            aria-label={`移除登记 ${item.scope}（目录不可读）`}
-            disabled={removing}
-            onClick={() => openRemove({ scope: item.scope, missing: item.reason })}
-          >移除登记</button>
+          {canDeleteDatasource ? (
+            <button
+              type="button"
+              data-ds-remove={item.scope}
+              className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+              aria-label={`移除登记 ${item.scope}（目录不可读）`}
+              disabled={removing}
+              onClick={() => openRemove({ scope: item.scope, missing: item.reason })}
+            >移除登记</button>
+          ) : null}
         </p>
       ))}
       {corrupt.map((item) => (
         /* 损坏登记不在列表里（无行可选），这里是唯一清理出口：走 force 移除坏文件 */
         <p key={item.scope} className="ki-task-notice ki-task-notice--warn ki-ds-notice--action">
           <span>⚠ {item.scope} 登记损坏：{item.reason}</span>
-          <button
-            type="button"
-            data-ds-remove={item.scope}
-            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
-            aria-label={`移除登记 ${item.scope}（登记损坏）`}
-            disabled={removing}
-            onClick={() => openRemove({ scope: item.scope, corrupt: item.reason })}
-          >移除登记</button>
+          {canDeleteDatasource ? (
+            <button
+              type="button"
+              data-ds-remove={item.scope}
+              className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+              aria-label={`移除登记 ${item.scope}（登记损坏）`}
+              disabled={removing}
+              onClick={() => openRemove({ scope: item.scope, corrupt: item.reason })}
+            >移除登记</button>
+          ) : null}
         </p>
       ))}
 
@@ -1538,22 +1554,24 @@ export function DataSourcePage(): JSX.Element {
                     <td className="ki-ds-table__actions">
                       {/* flex 包一层：td 不能自己变 flex（会丢 table-cell 布局） */}
                       <div className="ki-ds-row-actions">
-                        <button
-                          type="button"
-                          className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sync-btn"
-                          disabled={!rowCanSync}
-                          title={rowTitleWithSchedule}
-                          aria-label={`同步 ${source.scope}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (rowCanSync) void triggerSync(source.scope);
-                          }}
-                        >{/* ★ 文案恒定（2026-10-30）：原先 提交中…/同步中/排队中 会把按钮撑到
-                              58~70px，三按钮合计 174px > 操作列可用的 158px，操作组换行 →
-                              行高 55→93、整表下移 38px、请求返回再回弹 = 用户看到的"抖动"。
-                              现在只变灰（disabled），状态改由 scope 名后的徽标表达。 */}
-                          {'同步'}</button>
-                        {canUpdateDatasource ? (
+                        {canWriteDatasource ? (
+                          <button
+                            type="button"
+                            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sync-btn"
+                            disabled={!rowCanSync}
+                            title={rowTitleWithSchedule}
+                            aria-label={`同步 ${source.scope}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (rowCanSync) void triggerSync(source.scope);
+                            }}
+                          >{/* ★ 文案恒定（2026-10-30）：原先 提交中…/同步中/排队中 会把按钮撑到
+                                58~70px，三按钮合计 174px > 操作列可用的 158px，操作组换行 →
+                                行高 55→93、整表下移 38px、请求返回再回弹 = 用户看到的"抖动"。
+                                现在只变灰（disabled），状态改由 scope 名后的徽标表达。 */}
+                            {'同步'}</button>
+                        ) : null}
+                        {canWriteDatasource && canUpdateDatasource ? (
                           <button
                             type="button"
                             data-ds-edit={source.scope}
@@ -1572,29 +1590,31 @@ export function DataSourcePage(): JSX.Element {
                             }}
                           >{editLoadingScope === source.scope ? '读取…' : '编辑'}</button>
                         ) : null}
-                        <button
-                          type="button"
-                          data-ds-remove={source.scope}
-                          className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
-                          disabled={source.running || rowSyncing}
-                          title={source.running
-                            ? '同步进行中，任务结束后可移除'
-                            : rowSyncing
-                              ? '正在提交同步，稍后可移除'
-                              : `移除 ${source.scope} 的数据源登记（库内文档保留）`}
-                          aria-label={`移除数据源 ${source.scope}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (source.running || rowSyncing) return;
-                            openRemove({
-                              scope: source.scope,
-                              type: source.type,
-                              dir: source.dir,
-                              lastSyncAt: source.lastSync?.at ?? null,
-                              managed: source.git?.managed === true,
-                            });
-                          }}
-                        >移除</button>
+                        {canDeleteDatasource ? (
+                          <button
+                            type="button"
+                            data-ds-remove={source.scope}
+                            className="ki-btn ki-btn--secondary ki-btn--small ki-ds-remove-btn"
+                            disabled={source.running || rowSyncing}
+                            title={source.running
+                              ? '同步进行中，任务结束后可移除'
+                              : rowSyncing
+                                ? '正在提交同步，稍后可移除'
+                                : `移除 ${source.scope} 的数据源登记（库内文档保留）`}
+                            aria-label={`移除数据源 ${source.scope}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (source.running || rowSyncing) return;
+                              openRemove({
+                                scope: source.scope,
+                                type: source.type,
+                                dir: source.dir,
+                                lastSyncAt: source.lastSync?.at ?? null,
+                                managed: source.git?.managed === true,
+                              });
+                            }}
+                          >移除</button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -1922,15 +1942,21 @@ export function DataSourcePage(): JSX.Element {
                               />
                               全选（{visibleItems.length}）
                             </label>
-                            <button
-                              type="button"
-                              ref={deleteBtnRef}
-                              className="ki-btn ki-btn--danger ki-btn--small"
-                              disabled={!selectable || selectedCount === 0 || submitting}
-                              onClick={() => setConfirming(true)}
-                            >
-                              删除所选 {selectedCount} 篇…
-                            </button>
+                            {canDeleteDatasource ? (
+                              <button
+                                type="button"
+                                ref={deleteBtnRef}
+                                className="ki-btn ki-btn--danger ki-btn--small"
+                                disabled={!selectable || selectedCount === 0 || submitting}
+                                onClick={() => setConfirming(true)}
+                              >
+                                删除所选 {selectedCount} 篇…
+                              </button>
+                            ) : (
+                              <p className="ki-ds-pending__note" style={{ margin: 0 }}>
+                                当前账号无权删除待删文档；请联系管理员。
+                              </p>
+                            )}
                           </div>
 
                           <div className="ki-ds-subcard">

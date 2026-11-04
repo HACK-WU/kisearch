@@ -316,6 +316,7 @@ function paramRows(task: TaskRecord, retentionMs?: number): DetailRow[] {
     ? `${SOURCE_LABEL[task.source]} · ${SOURCE_KIND_LABEL[params.sourceKind]}`
     : SOURCE_LABEL[task.source];
   rows.push({ label: '来源', value: sourceText });
+  rows.push({ label: '操作者', value: task.operator?.label?.trim() || '—' });
   if (params) {
     rows.push({
       label: 'Group',

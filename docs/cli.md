@@ -29,6 +29,7 @@
 | [`datasource`](#datasource) | 数据源登记与同步 |
 | [`group`](#group) | Group 创建 / 删除 / 列表 |
 | [`scope`](#scope) | scope 列表 / 只读开关 / 删除 / 清空 |
+| [`user`](#user) | Web 登录账号（与 MCP Token 独立） |
 | [`tag`](#tag) | tag 发现 |
 | [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
 | [`doc`](#doc) | 向量文档查看 / 删除 |
@@ -373,6 +374,44 @@ ki scope clear my-project --tags ki-search --yes
 ```
 
 ---
+
+## user
+
+Web 登录账号管理（**只用于登录 Web 页面**，与 MCP Token 相互独立）。
+
+### 用法
+
+```bash
+ki user create <username> --role <admin|editor|viewer> [--password-stdin]
+ki user list [--json]
+ki user reset-password <username> [--password-stdin]
+ki user set-role <username> --role <admin|editor|viewer>
+ki user disable <username>
+ki user enable <username>
+ki user delete <username> --yes
+```
+
+- **角色**：`admin`（全部权限，含数据源与用户管理）、`editor`（写知识；数据源页面只读；无运维/账号权限）、`viewer`（只读 + 聊天，工具只读）。
+- **密码**：交互终端下隐藏输入并二次确认；自动化用 `--password-stdin`。不接受 `--password <明文>`，避免进入进程列表/命令历史。
+- **最后管理员保护**：不能删除、降级或禁用最后一个启用中的 `admin`，否则返回 `USER_LAST_ADMIN`。
+- **生效时间**：创建/改密/改角色/禁用后无需重启 daemon，下一请求立即生效（鉴权每次重读账号文件）。
+
+### 账号文件
+
+`~/.ki/users.json`（目录 0700、文件 0600）。密码使用 scrypt 哈希，不落明文；文件损坏时登录返回 `USER_STORE_CORRUPT`，`ki user list` 会拒绝覆盖并提示人工检查。
+
+### 示例
+
+```bash
+ki user create admin --role admin
+ki user create alice --role editor
+ki user create guest --role viewer
+ki user list
+ki user disable alice
+ki user delete guest --yes
+```
+
+> 本机 `127.0.0.1` / `localhost` 默认免登录自动管理员（可用 `--no-local-admin` 或配置 `mcp.http.localAdmin: false` 关闭）。远程访问需要登录账号；MCP 客户端仍需 Bearer Token。
 
 ## tag
 
@@ -1037,7 +1076,7 @@ ki bulk-store -s <scope> -i batch.json
 
 ```bash
 ki mcp                                  # stdio 模式（默认，启动时经多实例冲突守卫）
-ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，免鉴权，开箱即用）
+ki mcp --http                           # HTTP 模式，默认绑定 127.0.0.1:7423（回环，本机免登录，开箱即用）
 ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/逗号分隔多个/all）
 ki mcp token generate --scope team-a --read-only  # 生成只读 Token（看不到也调不动写工具）
 ki mcp token list                       # 列出所有 Token（含明文、授权 scope、访问模式）
@@ -1061,10 +1100,11 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio） |
-| `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
+| `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）下本机免登录；对外监听改 `0.0.0.0`，启动时需已有 Token 或至少一个启用账号 |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
+| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。非回环绑定时 Token 与 Web 账号至少存在一个；MCP 远程客户端仍需 Token |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
+| `--no-local-admin` | — | 关闭本机回环免登录（本机访问也需登录）；等价于配置 `mcp.http.localAdmin: false` |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/search-config`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
@@ -1092,9 +1132,9 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 
 > **只读 Token**：远程 MCP 客户端连上后只看到 5 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读只约束 MCP 通道（`/api/*` 与 chat 通道不受限），语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
 
-> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储或 `--token` 全权临时 Token）。
+> **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储、`--token` 全权临时 Token 或 `ki user` 创建 Web 账号）。
 >
-> **条件鉴权 + scope 越权校验**：绑定回环地址时免鉴权；绑定非回环地址（`0.0.0.0`/外网 IP）时，请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。
+> **条件鉴权 + scope 越权校验**：绑定回环地址时本机免登录（`--no-local-admin` 可关闭）；绑定非回环地址（`0.0.0.0`/外网 IP）时，启动需有 Bearer Token 或至少一个启用的 Web 账号。MCP 请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。Web 账号与 Token 相互独立，账号只用于页面登录。
 >
 > **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http-<fingerprint>.lock`（记录 pid/host/port）供排查。
 >
@@ -1147,7 +1187,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 }
 ```
 
-> 绑定回环地址（仅本机）时免鉴权，可省略 `headers`。完整说明见 [MCP HTTP 共享单例模式](./mcp-http.md)。
+> 绑定回环地址（仅本机）时本机免登录，可省略 `headers`；可用 `--no-local-admin` 关闭本机免登录。完整说明见 [MCP HTTP 共享单例模式](./mcp-http.md)。
 
 ### 工具参数说明
 

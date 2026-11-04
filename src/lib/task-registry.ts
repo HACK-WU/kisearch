@@ -6,6 +6,16 @@ import type { TaskLogWriter } from './task-log.js';
 import type { KiConfig } from './config.js';
 
 export type TaskSource = 'cli' | 'daemon' | 'web' | 'scheduler';
+
+export type TaskOperatorType = 'user' | 'local' | 'cli' | 'daemon' | 'token' | 'scheduler' | 'legacy';
+
+/** 任务发起者快照（REQ-20261103-001 · S-05）；创建时写入，之后不可变 */
+export interface TaskOperator {
+  type: TaskOperatorType;
+  label: string;
+  userId?: string;
+  tokenId?: string;
+}
 export type TaskState = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'unknown';
 
 export interface TaskProgress {
@@ -143,6 +153,8 @@ export interface TaskResultSnapshot {
 export interface TaskRecord {
   id: string;
   source: TaskSource;
+  /** 发起者快照；旧记录没有此字段 ⇒ 视为 legacy（展示 `—`） */
+  operator?: TaskOperator;
   operation: string;
   scope: string;
   state: TaskState;
@@ -252,6 +264,24 @@ function ensureTaskDir(config: Pick<KiConfig, 'dataDir'>): string {
 function taskPath(config: Pick<KiConfig, 'dataDir'>, id: string): string {
   if (!TASK_ID_RE.test(id)) throw Object.assign(new Error('非法任务 ID'), { code: 'TASK_ID_INVALID' });
   return path.join(getTaskDir(config), `${id}.json`);
+}
+
+const OPERATOR_TYPES: readonly TaskOperatorType[] = [
+  'user', 'local', 'cli', 'daemon', 'token', 'scheduler', 'legacy',
+];
+
+function sanitizeOperator(value: TaskOperator | undefined): TaskOperator | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const type = OPERATOR_TYPES.includes(value.type) ? value.type : 'legacy';
+  const label = sanitizedText(value.label, 80) ?? '—';
+  const userId = sanitizedText(value.userId, 80);
+  const tokenId = sanitizedText(value.tokenId, 80);
+  return {
+    type,
+    label,
+    ...(userId ? { userId } : {}),
+    ...(tokenId ? { tokenId } : {}),
+  };
 }
 
 function sanitizedText(value: unknown, max = 400): string | undefined {
@@ -572,14 +602,18 @@ export function createTaskReporter(
     source: TaskSource;
     operation: string;
     scope: string;
+    /** 发起者快照；缺省 = legacy（旧调用方/旧任务） */
+    operator?: TaskOperator;
     /** 重试血缘：本任务重试自哪个任务（缺省 = 非重试任务） */
     retryOf?: string;
   },
 ): TaskReporter {
   const now = Date.now();
+  const operator = sanitizeOperator(input.operator);
   const record: TaskRecord = {
     id: input.id ?? crypto.randomUUID(),
     source: input.source,
+    ...(operator ? { operator } : {}),
     operation: sanitizedText(input.operation, 80) ?? 'unknown',
     scope: sanitizedText(input.scope, 120) ?? 'unknown',
     state: 'queued',
@@ -601,6 +635,7 @@ export function createTaskReporter(
     scope: record.scope,
     createdAt: record.createdAt,
     pid: process.pid,
+    ...(record.operator?.label ? { operator: record.operator.label } : {}),
   });
   log?.event('queued');
   let stopped = false;
@@ -882,6 +917,7 @@ export function markInterruptedTasks(config: Pick<KiConfig, 'dataDir'>): string[
         operation: record.operation,
         scope: record.scope,
         createdAt: record.createdAt,
+        ...(record.operator?.label ? { operator: record.operator.label } : {}),
       });
       writer?.error('SERVICE_RESTART_INTERRUPTED', INTERRUPTED_ERROR, INTERRUPTED_HINT);
       writer?.close();

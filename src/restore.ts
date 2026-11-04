@@ -488,6 +488,7 @@ async function rebuildAndReport(scopeName: string, opts: RebuildVectorOptions = 
   const task = useDaemon ? undefined : compositeTask ?? createTaskReporter(requestConfig, {
     id: jobId,
     source: 'cli',
+    operator: { type: 'cli', label: '本机 CLI' },
     operation: 'rebuild-vector',
     scope: scopeName,
   });
@@ -698,7 +699,10 @@ async function main() {
         return;
       }
       const compositeTask = skipYes ? createTaskReporter(loadConfig(), {
-        source: 'cli', operation: rebuildVector ? 'restore-snapshot+rebuild-vector' : 'restore-snapshot', scope,
+        source: 'cli',
+        operator: { type: 'cli', label: '本机 CLI' },
+        operation: rebuildVector ? 'restore-snapshot+rebuild-vector' : 'restore-snapshot',
+        scope,
       }) : undefined;
       compositeTask?.update({ state: 'running', phase: 'restore', startedAt: Date.now() });
       try {

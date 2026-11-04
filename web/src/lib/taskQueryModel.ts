@@ -95,6 +95,8 @@ export interface TaskSearchText {
   sourceText: string;
   /** 操作中文名（上传导入 / 数据源同步 / 向量重建…） */
   operationText: string;
+  /** 操作者展示名（旧任务 `—`） */
+  operatorText?: string;
 }
 
 /**
@@ -114,6 +116,8 @@ export function matchesTaskSearch(
     text.summary,
     text.sourceText,
     text.operationText,
+    text.operatorText,
+    task.operator?.label,
     task.operation,
     ...(STATE_SEARCH_ALIAS[task.state] ?? []),
   ]

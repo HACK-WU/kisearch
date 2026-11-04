@@ -394,6 +394,7 @@ async function handleRpcLine(socket: net.Socket, line: string, coordinator: Oper
       taskReporter = createTaskReporter(requestConfig, {
         id: jobId,
         source: 'cli',
+        operator: { type: 'cli', label: '本机 CLI' },
         operation: req.operation,
         scope,
         ...(typeof retryOf === 'string' ? { retryOf } : {}),

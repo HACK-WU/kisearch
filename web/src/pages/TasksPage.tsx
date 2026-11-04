@@ -716,6 +716,7 @@ export function TasksPage(): JSX.Element {
       return {
         summary: row?.resultSummary ?? '',
         sourceText: row?.sourceLabel ?? '',
+        operatorText: row?.operatorLabel ?? '',
         operationText: row?.operationLabel ?? '',
       };
     },
@@ -924,6 +925,7 @@ export function TasksPage(): JSX.Element {
                   <th scope="col">任务</th>
                   <th scope="col" className="ki-task-col--scope">知识库</th>
                   <th scope="col" className="ki-task-col--source">来源</th>
+                  <th scope="col" className="ki-task-col--operator">操作者</th>
                   <th scope="col" className="ki-task-col--result">结果摘要</th>
                   {/* 排序下沉到表头：箭头就地跟在列名后（当前列实心 ↑/↓，其它列灰色 ↕） */}
                   <th scope="col" className="ki-task-col--time" aria-sort={ariaSortOf('start')}>
@@ -991,6 +993,9 @@ export function TasksPage(): JSX.Element {
                       </td>
                       <td className="ki-task-col--source">
                         <span className={`ki-task-source-badge ki-task-source-badge--${task.source}`}>{row.sourceLabel}</span>
+                      </td>
+                      <td className="ki-task-col--operator">
+                        <span className="ki-task-table__operator" title={row.operatorTitle}>{row.operatorLabel}</span>
                       </td>
                       <td className="ki-task-col--result">
                         <span

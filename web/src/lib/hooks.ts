@@ -214,10 +214,11 @@ export function useGroupDocs(scope: string, group: string | null, tag?: string) 
  *   用户看到的就是"持续时间不到 1s，页面却过了十几秒才变"。同步中的行需要更快的收敛速度，
  *   与 useDataSourceDetail 的 3s 口径保持一致；空闲时退回 15s，兼顾 CLI 在别处启动同步的感知。
  */
-export function useDataSourceList() {
+export function useDataSourceList(enabled = true) {
   return useQuery<DataSourceListResponse>({
     queryKey: ['dataSourceList'],
     queryFn: () => getDataSourceList(),
+    enabled,
     staleTime: 15_000,
     retry: 1,
     refetchInterval: (query) => (query.state.data?.sources?.some((item) => item.running) ? 3_000 : 15_000),

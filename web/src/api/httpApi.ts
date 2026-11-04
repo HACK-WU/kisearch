@@ -5,6 +5,8 @@
  * dev 模式下经 Vite proxy 转发到 daemon（目标见 `vite.config.ts` 的 `KI_API_TARGET`，默认 :7433）。
  */
 
+import { notifyUnauthorized } from '@/lib/authEvents';
+
 // ─── 类型（对齐 mcp-http-api.ts 返回） ────────────────
 
 export interface HealthItem {
@@ -260,6 +262,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     /* 非 JSON（如 404 HTML） */
   }
   if (!res.ok || !body) {
+    if (res.status === 401) notifyUnauthorized('api');
     const err = (body as { error?: string } | undefined)?.error ?? `HTTP ${res.status}`;
     throw Object.assign(new Error(err), { status: res.status, body });
   }

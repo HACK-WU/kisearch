@@ -183,6 +183,7 @@ program
           const task = createTaskReporter(requestConfig, {
             id: daemonJobId,
             source: 'cli',
+            operator: { type: 'cli', label: '本机 CLI' },
             operation: 'import',
             scope,
             // REQ-20261019-004：重试血缘（清单无 taskId 的 legacy 场景为 undefined）

@@ -168,7 +168,13 @@ export function decodeCursor(cursor: string): { updatedAt: string; id: string } 
  */
 export async function listConversations(
   scope: string,
-  opts: { archived?: boolean; limit?: number; cursor?: string | null },
+  opts: {
+    archived?: boolean;
+    limit?: number;
+    cursor?: string | null;
+    /** 只返回该 owner 的会话；缺省 = 不按 owner 过滤（admin/旧调用方） */
+    ownerUserId?: string | null;
+  },
 ): Promise<{ items: ConversationSummary[]; nextCursor: string | null }> {
   validateScope(scope);
   const dir = chatDirFor(scope);
@@ -192,9 +198,14 @@ export async function listConversations(
       const conv = readJson<ConversationFile>(path.join(dir, name));
       if (!conv) continue;
       if (conv.archived !== wantArchived) continue;
+      if (opts.ownerUserId !== undefined) {
+        const owner = typeof conv.ownerUserId === 'string' ? conv.ownerUserId : null;
+        if (owner !== opts.ownerUserId) continue;
+      }
       summaries.push({
         id: typeof conv.id === 'string' && conv.id ? conv.id : id,
         scope,
+        ownerUserId: typeof conv.ownerUserId === 'string' ? conv.ownerUserId : null,
         title: typeof conv.title === 'string' ? conv.title : '',
         archived: conv.archived === true,
         updatedAt: typeof conv.updatedAt === 'string' ? conv.updatedAt : '',
@@ -271,7 +282,7 @@ export const SYSTEM_PROMPT_MAX_LEN = 4000;
 /** 新建会话。id 形如 `c-{base36(Date.now())}-{rand4}`；`title` 默认取首条用户消息前 24 字 */
 export async function createConversation(
   scope: string,
-  input: { title?: string; systemPrompt?: string },
+  input: { title?: string; systemPrompt?: string; ownerUserId?: string | null },
 ): Promise<ConversationFile> {
   validateScope(scope);
   const now = new Date().toISOString();
@@ -279,6 +290,7 @@ export async function createConversation(
     version: 1,
     id: newConversationId(),
     scope,
+    ...(input.ownerUserId !== undefined ? { ownerUserId: input.ownerUserId } : {}),
     title: input.title?.trim() || '新会话',
     systemPrompt: input.systemPrompt ?? '',
     archived: false,

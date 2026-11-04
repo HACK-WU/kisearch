@@ -234,6 +234,8 @@ export interface ConversationFile {
   version: 1;
   id: string;
   scope: string;
+  /** 会话归属（REQ-20261103-001）：session 用户 id；local-admin/token 为 null；旧会话缺省 */
+  ownerUserId?: string | null;
   title: string;
   systemPrompt: string;
   archived: boolean;
@@ -256,6 +258,7 @@ export interface ConversationFile {
 export interface ConversationSummary {
   id: string;
   scope: string;
+  ownerUserId?: string | null;
   title: string;
   archived: boolean;
   updatedAt: string;

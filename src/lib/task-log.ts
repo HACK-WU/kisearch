@@ -104,6 +104,8 @@ export interface TaskLogMeta {
   scope: string;
   createdAt: number;
   pid?: number;
+  /** 发起者展示标签（REQ-20261103-001）；旧日志缺省 */
+  operator?: string;
 }
 
 export interface TaskLogWriter {
@@ -163,6 +165,7 @@ export function createTaskLogWriter(
         scope: meta.scope,
         createdAt: toIso(meta.createdAt),
         ...(meta.pid !== undefined ? { pid: meta.pid } : {}),
+        ...(meta.operator ? { operator: meta.operator } : {}),
       });
       fs.writeFileSync(file, `${head}\n`, { mode: 0o600 });
     }
@@ -287,6 +290,7 @@ export function readTaskLog(
           scope: String(parsed.scope ?? 'unknown'),
           createdAt: typeof parsed.createdAt === 'string' ? Date.parse(parsed.createdAt) : 0,
           ...(typeof parsed.pid === 'number' ? { pid: parsed.pid } : {}),
+          ...(typeof parsed.operator === 'string' ? { operator: parsed.operator } : {}),
         };
         body = allLines.slice(1);
       }

@@ -60,6 +60,7 @@ describe('任务列表行：六列口径', () => {
     assert.equal(row.stateLabel, '已完成');
     assert.equal(row.operationLabel, '上传导入');
     assert.equal(row.sourceLabel, '网页');
+    assert.equal(row.operatorLabel, '—', '旧任务无 operator → —');
     assert.equal(row.scope, 'langchain');
     assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0');
     assert.equal('shortId' in row, false, '列表行不再输出短 ID');
@@ -70,6 +71,16 @@ describe('任务列表行：六列口径', () => {
     assert.equal(row.resultError, undefined);
     assert.match(row.timeLabel, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     assert.match(row.ariaLabel, /已完成，上传导入，langchain，网页/);
+  });
+
+  it('操作者：新任务显示 label，账号型带 userId 进 title', () => {
+    const row = buildTaskListRow(baseTask({
+      operator: { type: 'user', label: 'alice', userId: 'u-123' },
+    }));
+    assert.equal(row.operatorLabel, 'alice');
+    assert.match(row.operatorTitle, /alice/);
+    assert.match(row.operatorTitle, /u-123/);
+    assert.match(row.ariaLabel, /操作者 alice/);
   });
 
   it('失败态：错误与摘要并列，颜色转 danger', () => {

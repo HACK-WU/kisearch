@@ -191,7 +191,9 @@ describe('actual SSE parser with controlled HTTP body', () => {
       cancel() { cancelled = true; },
     }));
     try {
-      const { streamMessage } = load('src/api/chatApi.ts');
+      const { streamMessage } = load('src/api/chatApi.ts', {
+        '@/lib/authEvents': { notifyUnauthorized: () => {} },
+      });
       const ctrl = new AbortController(); const iterator = streamMessage('A', 'question', ctrl.signal);
       assert.equal((await iterator.next()).value.type, 'meta'); ctrl.abort();
       assert.equal((await iterator.next()).done, true); assert.equal(cancelled, true);

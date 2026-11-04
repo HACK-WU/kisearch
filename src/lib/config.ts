@@ -142,6 +142,8 @@ export interface McpHttpConfig {
   host?: string;          // 监听地址，缺省 127.0.0.1（回环，免鉴权；对外监听改 0.0.0.0）
   port?: number;          // 监听端口，缺省 DEFAULT_MCP_HTTP_PORT
   allowedHosts?: string[]; // DNS rebinding 保护允许的 Host 头（可选）
+  /** 本机回环免登录自动管理员（默认 true；false = 本机也必须登录） */
+  localAdmin?: boolean;
 }
 
 export interface McpConfig {

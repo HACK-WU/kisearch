@@ -59,6 +59,8 @@ export interface LogTaskView {
   operation: string;
   scope: string;
   source: string;
+  /** 发起者展示标签；旧任务/旧日志缺省 */
+  operator?: string;
   state: TaskState;
   stateLabel: string;
   /** 失败/停顿发生时的阶段（`clone` / `queued-sync` / `vector` …）——「卡在哪一步」的关键信息 */
@@ -116,6 +118,7 @@ function toView(task: TaskRecord): LogTaskView {
     operation: task.operation,
     scope: task.scope,
     source: task.source,
+    ...(task.operator?.label ? { operator: task.operator.label } : {}),
     state: task.state,
     stateLabel: STATE_LABEL[task.state] ?? task.state,
     ...(task.phase ? { phase: task.phase } : {}),
@@ -143,6 +146,7 @@ function viewFromHead(head: TaskLogMeta | null, taskId: string): LogTaskView {
     operation: head?.operation ?? 'unknown',
     scope: head?.scope ?? 'unknown',
     source: head?.source ?? 'unknown',
+    ...(head?.operator ? { operator: head.operator } : {}),
     state: 'unknown' as TaskState,
     stateLabel: '状态未知',
     createdAt: head?.createdAt ?? 0,
@@ -312,6 +316,7 @@ export function renderTask(
       kv('操作', view.operation === 'unknown' ? undefined : view.operation),
       kv('知识库', view.scope === 'unknown' ? undefined : view.scope),
       kv('来源', view.source === 'unknown' ? undefined : (SOURCE_LABEL[view.source] ?? view.source)),
+      kv('操作者', view.operator),
       kv('创建', view.createdAt > 0 ? fmtTime(view.createdAt) : undefined),
     ].filter((line): line is string => line !== null));
   } else {
@@ -319,6 +324,7 @@ export function renderTask(
       kv('操作', view.operation),
       kv('知识库', view.scope),
       kv('来源', SOURCE_LABEL[view.source] ?? view.source),
+      kv('操作者', view.operator),
       kv('状态', `${view.stateLabel}（${view.state}）`),
       kv('阶段', view.phase),
       kv('创建', fmtTime(view.createdAt)),

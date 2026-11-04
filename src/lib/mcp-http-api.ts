@@ -26,8 +26,40 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, setScopeReadonlyInConfigFile, type KiConfig } from './config.js';
-import { isLoopbackAddr } from './net-addr.js';
-import { findTokenScopes, ALL_SCOPES } from './mcp-token.js';
+import { ALL_SCOPES, type TokenAuth } from './mcp-token.js';
+import {
+  authScopesForPrincipal,
+  capabilitiesForPrincipal,
+  checkLoginRateLimit,
+  clearLoginFailures,
+  clearSessionCookie,
+  getSessionIdFromRequest,
+  recordLoginFailure,
+  resolveWebPrincipal,
+  serializeSessionCookie,
+  taskOperatorForPrincipal,
+  type WebPrincipal,
+} from './web-auth.js';
+import type { TaskOperator, TaskRecord } from './task-registry.js';
+import { createSession, deleteSession, deleteUserSessions } from './web-session-store.js';
+import {
+  UserStoreError,
+  createUser,
+  deleteUserById,
+  findUserById,
+  listUsers,
+  resetUserPassword,
+  updateUserById,
+  verifyCredentials,
+  verifyPassword,
+} from './user-store.js';
+import {
+  ALL_CAPABILITIES,
+  WRITE_CAPABILITIES,
+  permissionsForRole,
+  type Capability,
+} from './auth/capabilities.js';
+import { matchRoute } from './auth/route-permissions.js';
 import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import {
@@ -290,8 +322,11 @@ function createJob(
   scope: string,
   operation: Job['operation'],
   config: KiConfig,
-  /** REQ-20261019-004：重试血缘（`/api/import/retry-incomplete` 传入原任务 ID） */
-  extras?: { retryOf?: string },
+  extras: {
+    operator: TaskOperator;
+    /** REQ-20261019-004：重试血缘（`/api/import/retry-incomplete` 传入原任务 ID） */
+    retryOf?: string;
+  },
 ): Job {
   // 清理过期 job，防止 Map 无界增长
   const now = Date.now();
@@ -307,8 +342,8 @@ function createJob(
   let taskReporter: TaskReporter;
   try {
     taskReporter = createTaskReporter(config, {
-      id, source: 'web', operation, scope,
-      ...(extras?.retryOf ? { retryOf: extras.retryOf } : {}),
+      id, source: 'web', operator: extras.operator, operation, scope,
+      ...(extras.retryOf ? { retryOf: extras.retryOf } : {}),
     });
   } catch {
     throw Object.assign(new Error('后台任务状态登记失败，任务未启动。请检查数据目录权限后重试。'), {
@@ -384,14 +419,6 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
     req.on('error', reject);
     req.on('aborted', () => reject(new Error('request aborted')));
   });
-}
-
-/** 常量时间比较 Bearer Token（与 mcp-http 一致） */
-function tokenMatches(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
 }
 
 /** 判断 scope 是否在授权集合内（'all' 通配全部） */
@@ -506,6 +533,233 @@ export interface ApiRequestCtx {
   clientAddr?: string;
   /** 按 Token 明文查询授权 scope（缺省走多 Token 存储；测试可注入覆盖） */
   resolveTokenScopes?: (token: string) => string[] | undefined;
+  /** 按 Token 明文查询完整授权（scope + readOnly）；优先于 resolveTokenScopes */
+  resolveTokenAuth?: (token: string) => TokenAuth | undefined;
+  /** 本机回环免登录开关（缺省 true；false = 本机也必须登录） */
+  localAdmin?: boolean;
+  /** 测试注入；缺省 ~/.ki/users.json */
+  usersPath?: string;
+}
+
+function sendUserStoreError(res: http.ServerResponse, error: unknown): boolean {
+  if (!(error instanceof UserStoreError)) return false;
+  let status = 400;
+  if (error.code === 'USER_STORE_CORRUPT' || error.code === 'USER_STORE_LOCKED') status = 503;
+  else if (error.code === 'USER_LAST_ADMIN' || error.code === 'USER_EXISTS') status = 409;
+  else if (error.code === 'USER_NOT_FOUND') status = 404;
+  sendJson(res, status, { ok: false, code: error.code, error: error.message });
+  return true;
+}
+
+/** 无 datasource.read 的账号看任务时脱敏数据源字段（当前快照无路径字段，保留为未来防线） */
+function taskViewForPrincipal(task: TaskRecord, principal: WebPrincipal): TaskRecord {
+  const caps = capabilitiesForPrincipal(principal);
+  if (caps.has('datasource.read') || !task.params) return task;
+  const params = { ...task.params } as Record<string, unknown>;
+  let changed = false;
+  for (const key of ['source', 'remoteUrl', 'subdir', 'branch']) {
+    if (key in params) {
+      delete params[key];
+      changed = true;
+    }
+  }
+  return changed ? { ...task, params: params as TaskRecord['params'] } : task;
+}
+
+function denyCapability(
+  res: http.ServerResponse,
+  principal: WebPrincipal,
+  capability: Capability,
+): void {
+  if (principal.kind === 'session' && principal.role === 'viewer'
+    && WRITE_CAPABILITIES.has(capability)) {
+    sendJson(res, 403, {
+      ok: false,
+      code: 'USER_READONLY',
+      error: '当前账号为只读，不能执行写操作',
+    });
+    return;
+  }
+  if (capability.startsWith('datasource.')) {
+    sendJson(res, 403, {
+      ok: false,
+      code: 'DATA_SOURCE_FORBIDDEN',
+      error: '当前账号无权管理数据源',
+    });
+    return;
+  }
+  if (principal.kind === 'session'
+    && (capability === 'ops.write' || capability === 'users.manage'
+      || capability === 'tasks.cancel' || capability === 'tasks.delete')) {
+    sendJson(res, 403, {
+      ok: false,
+      code: 'OPS_FORBIDDEN',
+      error: '当前账号无权执行该管理操作',
+    });
+    return;
+  }
+  sendJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '当前账号无此操作权限' });
+}
+
+async function handleAuthLogin(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: ApiRequestCtx,
+): Promise<void> {
+  const body = (await readJsonBody(req)) as { username?: unknown; password?: unknown } | undefined;
+  if (!body || typeof body.username !== 'string' || typeof body.password !== 'string'
+    || !body.username.trim() || !body.password) {
+    sendJson(res, 400, { ok: false, code: 'AUTH_INVALID', error: '缺少用户名或密码' });
+    return;
+  }
+  const clientAddr = ctx.clientAddr ?? req.socket.remoteAddress ?? '';
+  const username = body.username.trim();
+  const rate = checkLoginRateLimit(clientAddr, username);
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((rate.retryAfterMs ?? 0) / 1000))));
+    sendJson(res, 429, {
+      ok: false,
+      code: 'AUTH_RATE_LIMITED',
+      error: '尝试过于频繁，请稍后再试',
+    });
+    return;
+  }
+
+  let user;
+  try {
+    user = verifyCredentials(username, body.password, ctx.usersPath);
+  } catch (error) {
+    if (sendUserStoreError(res, error)) return;
+    throw error;
+  }
+  if (!user) {
+    recordLoginFailure(clientAddr, username);
+    sendJson(res, 401, { ok: false, code: 'AUTH_INVALID', error: '用户名或密码不正确' });
+    return;
+  }
+
+  clearLoginFailures(clientAddr, username);
+  const session = createSession(user.id, user.passwordUpdatedAt);
+  res.setHeader('Set-Cookie', serializeSessionCookie(session.id));
+  sendJson(res, 200, {
+    ok: true,
+    user: { id: user.id, username: user.username, role: user.role },
+    permissions: permissionsForRole(user.role),
+  });
+}
+
+function handleAuthMe(
+  res: http.ServerResponse,
+  principal: WebPrincipal | null,
+  requestConfig: KiConfig,
+  localAdminOverride: boolean,
+): void {
+  const localAdminEnabled = localAdminOverride && ((requestConfig as {
+    mcp?: { http?: { localAdmin?: boolean } };
+  }).mcp?.http?.localAdmin) !== false;
+
+  if (!principal) {
+    sendJson(res, 200, {
+      ok: true,
+      authenticated: false,
+      source: 'anonymous',
+      localAdminEnabled,
+      user: null,
+      permissions: [],
+    });
+    return;
+  }
+  if (principal.kind === 'local-admin') {
+    sendJson(res, 200, {
+      ok: true,
+      authenticated: true,
+      source: 'local',
+      localAdminEnabled,
+      user: { id: null, username: '本机管理员', role: 'admin' },
+      permissions: [...ALL_CAPABILITIES],
+    });
+    return;
+  }
+  if (principal.kind === 'token') {
+    sendJson(res, 200, {
+      ok: true,
+      authenticated: true,
+      source: 'token',
+      localAdminEnabled,
+      user: null,
+      permissions: [],
+    });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    authenticated: true,
+    source: 'session',
+    localAdminEnabled,
+    user: { id: principal.userId, username: principal.username, role: principal.role },
+    permissions: permissionsForRole(principal.role),
+  });
+}
+
+function handleAuthLogout(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const sessionId = getSessionIdFromRequest(req);
+  if (sessionId) deleteSession(sessionId);
+  res.setHeader('Set-Cookie', clearSessionCookie());
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleAuthPassword(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  principal: WebPrincipal | null,
+  usersPath?: string,
+): Promise<void> {
+  if (!principal || principal.kind !== 'session') {
+    sendJson(res, 400, {
+      ok: false,
+      code: 'AUTH_PASSWORD_UNSUPPORTED',
+      error: '本机管理员或 Token 无需修改密码',
+    });
+    return;
+  }
+  const body = (await readJsonBody(req)) as {
+    oldPassword?: unknown;
+    newPassword?: unknown;
+  } | undefined;
+  if (!body || typeof body.oldPassword !== 'string' || typeof body.newPassword !== 'string') {
+    sendJson(res, 400, { ok: false, code: 'AUTH_INVALID', error: '缺少旧密码或新密码' });
+    return;
+  }
+
+  let user;
+  try {
+    user = findUserById(principal.userId, usersPath);
+  } catch (error) {
+    if (sendUserStoreError(res, error)) return;
+    throw error;
+  }
+  if (!user) {
+    sendJson(res, 401, { ok: false, code: 'AUTH_REQUIRED', error: '账号不存在或会话已失效' });
+    return;
+  }
+  if (!verifyPassword(body.oldPassword, user.passwordHash)) {
+    sendJson(res, 400, { ok: false, code: 'AUTH_INVALID', error: '旧密码不正确' });
+    return;
+  }
+
+  let updated;
+  try {
+    updated = resetUserPassword(user.username, body.newPassword, usersPath);
+  } catch (error) {
+    if (sendUserStoreError(res, error)) return;
+    throw error;
+  }
+
+  deleteUserSessions(user.id, principal.sessionId);
+  deleteSession(principal.sessionId);
+  const session = createSession(user.id, updated.passwordUpdatedAt);
+  res.setHeader('Set-Cookie', serializeSessionCookie(session.id));
+  sendJson(res, 200, { ok: true });
 }
 
 /**
@@ -521,32 +775,73 @@ export async function handleApiRequest(
   // 直接调用测试/嵌入方也要在入口捕获快照；生产 HTTP 调用由 mcp-http 外层
   // 再建立同一快照，避免队列出队后回到磁盘最新配置。
   const requestConfig = loadConfig();
-  // 鉴权（与 /mcp 一致）：对外绑定（authEnabled）时，本地回环来源免鉴权，远程来源需 Bearer Token。
-  // 同时解析该 Token 的授权 scope 集合（全权临时 Token → ['all']；否则查多 Token 存储），
-  // 供后续 handler 做 scope 越权校验。authScopes 为 null 表示免鉴权（不限）。
-  // clientAddr 由 mcp-http.ts 的 resolveClientAddr 解析传入（支持测试注入模拟远程来源）
-  let authScopes: string[] | null = null;
-  if (ctx.authEnabled && !isLoopbackAddr(ctx.clientAddr ?? req.socket.remoteAddress)) {
-    const auth = req.headers['authorization'];
-    const bearer = typeof auth === 'string' && auth.startsWith('Bearer ')
-      ? auth.slice('Bearer '.length).trim()
-      : '';
-    let scopes: string[] | undefined;
-    if (bearer && ctx.token && tokenMatches(bearer, ctx.token)) {
-      scopes = [ALL_SCOPES];
-    } else if (bearer) {
-      scopes = ctx.resolveTokenScopes
-        ? ctx.resolveTokenScopes(bearer)
-        : findTokenScopes(bearer);
-    }
-    if (!scopes) {
-      sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid or missing Bearer token' });
+  const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
+  const clientAddr = ctx.clientAddr ?? req.socket.remoteAddress ?? '';
+  const authResult = resolveWebPrincipal(req, {
+    authEnabled: ctx.authEnabled,
+    ...(ctx.token ? { token: ctx.token } : {}),
+    clientAddr,
+    ...(ctx.localAdmin !== undefined ? { localAdmin: ctx.localAdmin } : {}),
+    ...(ctx.usersPath ? { usersPath: ctx.usersPath } : {}),
+    ...(ctx.resolveTokenAuth ? { resolveTokenAuth: ctx.resolveTokenAuth } : {}),
+    ...(ctx.resolveTokenScopes ? { resolveTokenScopes: ctx.resolveTokenScopes } : {}),
+  });
+  const principal = authResult.principal;
+
+  // 认证端点：登录/登出/me 公开；改密要求 session。
+  if (p === '/auth/login' && req.method === 'POST') {
+    await handleAuthLogin(req, res, { ...ctx, clientAddr });
+    return;
+  }
+  if (p === '/auth/me' && req.method === 'GET') {
+    handleAuthMe(res, principal, requestConfig, ctx.localAdmin !== false);
+    return;
+  }
+  if (p === '/auth/logout' && req.method === 'POST') {
+    handleAuthLogout(req, res);
+    return;
+  }
+  if (p === '/auth/password' && req.method === 'POST') {
+    if (authResult.rejected) {
+      sendJson(res, 401, {
+        ok: false,
+        code: 'AUTH_REQUIRED',
+        error: 'Unauthorized: invalid or missing Bearer token',
+      });
       return;
     }
-    authScopes = scopes;
+    await handleAuthPassword(req, res, principal, ctx.usersPath);
+    return;
   }
 
-  const p = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '') || '/';
+  if (authResult.rejected) {
+    sendJson(res, 401, {
+      ok: false,
+      code: 'AUTH_REQUIRED',
+      error: 'Unauthorized: invalid or missing Bearer token',
+    });
+    return;
+  }
+  if (!principal) {
+    sendJson(res, 401, { ok: false, code: 'AUTH_REQUIRED', error: 'Unauthorized: 请先登录' });
+    return;
+  }
+  const authScopes = authScopesForPrincipal(principal);
+  const capabilities = capabilitiesForPrincipal(principal);
+  const operator = taskOperatorForPrincipal(principal);
+
+  // S-03：能力白名单 + 默认拒绝。未登记路径 404；能力不足 403（按角色映射错误码）。
+  const route = matchRoute(req.method ?? 'GET', p);
+  if (route.kind === 'unknown') {
+    sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
+    return;
+  }
+  if (route.kind === 'permission' && route.capability) {
+    if (!capabilities.has(route.capability)) {
+      denyCapability(res, principal, route.capability);
+      return;
+    }
+  }
 
   // query scope 越权校验：对带 scope 参数的只读接口（tags / doc/list / asset）生效；
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
@@ -562,11 +857,92 @@ export async function handleApiRequest(
   }
 
   try {
+    // ── 用户管理（REQ-20261103-001 · S-04）──
+    if (p === '/users' && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, users: listUsers(ctx.usersPath) });
+      return;
+    }
+    if (p === '/users' && req.method === 'POST') {
+      const body = (await readJsonBody(req)) as {
+        username?: unknown;
+        password?: unknown;
+        role?: unknown;
+      } | undefined;
+      if (!body || typeof body.username !== 'string' || typeof body.password !== 'string'
+        || typeof body.role !== 'string') {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '缺少用户名、密码或角色' });
+        return;
+      }
+      try {
+        const user = createUser(
+          { username: body.username, password: body.password, role: body.role },
+          ctx.usersPath,
+        );
+        sendJson(res, 201, { ok: true, user });
+      } catch (error) {
+        if (sendUserStoreError(res, error)) return;
+        throw error;
+      }
+      return;
+    }
+    if (p.startsWith('/users/') && (req.method === 'PATCH' || req.method === 'DELETE')) {
+      let id = '';
+      try {
+        id = decodeURIComponent(p.slice('/users/'.length));
+      } catch {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '非法用户 id' });
+        return;
+      }
+      if (!id || id.includes('/')) {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '非法用户 id' });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        try {
+          const user = deleteUserById(id, ctx.usersPath);
+          sendJson(res, 200, { ok: true, user });
+        } catch (error) {
+          if (sendUserStoreError(res, error)) return;
+          throw error;
+        }
+        return;
+      }
+
+      const body = (await readJsonBody(req)) as {
+        role?: unknown;
+        password?: unknown;
+        disabled?: unknown;
+      } | undefined;
+      if (!body || (body.role === undefined && body.password === undefined && body.disabled === undefined)) {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '没有可修改的字段' });
+        return;
+      }
+      if ((body.role !== undefined && typeof body.role !== 'string')
+        || (body.password !== undefined && typeof body.password !== 'string')
+        || (body.disabled !== undefined && typeof body.disabled !== 'boolean')) {
+        sendJson(res, 400, { ok: false, code: 'USER_INVALID', error: '字段类型不合法' });
+        return;
+      }
+      try {
+        const user = updateUserById(id, {
+          ...(body.role !== undefined ? { role: body.role } : {}),
+          ...(body.password !== undefined ? { password: body.password } : {}),
+          ...(body.disabled !== undefined ? { disabled: body.disabled } : {}),
+        }, ctx.usersPath);
+        sendJson(res, 200, { ok: true, user });
+      } catch (error) {
+        if (sendUserStoreError(res, error)) return;
+        throw error;
+      }
+      return;
+    }
+
     if (p === '/tasks' && req.method === 'GET') {
       const requestedLimit = Number(url.searchParams.get('limit') ?? 50);
       const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(200, Math.floor(requestedLimit))) : 50;
       const visible = listTaskRecords(requestConfig)
-        .filter((task) => authScopes === null || scopeAllowed(authScopes, task.scope));
+        .filter((task) => authScopes === null || scopeAllowed(authScopes, task.scope))
+        .map((task) => taskViewForPrincipal(task, principal));
       sendJson(res, 200, { ok: true, tasks: visible.slice(0, limit), total: visible.length, retainedForMs: TASK_TTL_MS });
       return;
     }
@@ -622,7 +998,7 @@ export async function handleApiRequest(
         sendJson(res, 404, { ok: false, code: 'TASK_NOT_FOUND', error: '任务不存在或已过期' });
         return;
       }
-      sendJson(res, 200, { ok: true, task });
+      sendJson(res, 200, { ok: true, task: taskViewForPrincipal(task, principal) });
       return;
     }
     if (p === '/vector/status' && req.method === 'GET') {
@@ -802,9 +1178,9 @@ export async function handleApiRequest(
       );
       return;
     }
-    if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes));
+    if (p === '/import/upload' && req.method === 'POST') return void (await handleImportUpload(req, res, authScopes, operator));
     if (p === '/import/upload-status' && req.method === 'GET') return void handleImportUploadStatus(res, url, authScopes);
-    if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes));
+    if (p === '/import/run' && req.method === 'POST') return void (await handleImportRun(req, res, authScopes, operator));
     if (p === '/import/preflight' && req.method === 'POST') return void handleImportPreflight(req, res, authScopes);
     if (p === '/import/status' && req.method === 'GET') return void (await handleImportStatus(res, url, authScopes));
     if (p === '/import/cancel' && req.method === 'POST') return void (await handleImportCancel(req, res, authScopes));
@@ -820,17 +1196,17 @@ export async function handleApiRequest(
       );
       return;
     }
-    if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig));
+    if (p === '/import/retry-incomplete' && req.method === 'POST') return void (await handleImportRetryIncomplete(req, res, authScopes, requestConfig, operator));
     if (p === '/datasource/list' && req.method === 'GET') return void handleDatasourceList(res, url, requestConfig, authScopes);
     if (p === '/datasource/detail' && req.method === 'GET') return void handleDatasourceDetail(res, url, requestConfig, authScopes);
-    if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig));
+    if (p === '/datasource/sync' && req.method === 'POST') return void (await handleDatasourceSync(req, res, authScopes, requestConfig, operator));
     if (p === '/datasource/schedule' && req.method === 'POST') return void (await handleDatasourceSchedule(req, res, authScopes, requestConfig));
-    if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig));
+    if (p === '/datasource/add-remote' && req.method === 'POST') return void (await handleDatasourceAddRemote(req, res, authScopes, requestConfig, operator));
     if (p === '/datasource/update' && req.method === 'POST') return void (await handleDatasourceUpdate(req, res, authScopes, requestConfig));
     if (p === '/datasource/remove' && req.method === 'POST') return void (await handleDatasourceRemove(req, res, authScopes, requestConfig));
     if (p === '/import/prune' && req.method === 'POST') return void (await handleImportPrune(req, res, authScopes, requestConfig));
     if (p === '/datasource/prune' && req.method === 'POST') return void (await handleDatasourcePrune(req, res, authScopes, requestConfig));
-    if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig));
+    if (p === '/restore/run' && req.method === 'POST') return void (await handleRestoreRun(req, res, authScopes, requestConfig, operator));
     if (p === '/restore/status' && req.method === 'GET') return void (await handleJobStatus(res, url, authScopes));
     if (p === '/restore/cancel' && req.method === 'POST') return void (await handleJobCancel(req, res, authScopes));
     if (p === '/tasks' && req.method === 'GET') return void handleTaskList(res, url, requestConfig, authScopes);
@@ -841,7 +1217,13 @@ export async function handleApiRequest(
     // ════════ chat 模块（REQ-20260924-001 · SR-01 独占挂载点）════════
     // 单行挂载：/api/chat/* 全部路由由 chat-routes.ts 内部处理（本文件已 1065 行，不再逐条加分支）
     // 越权白名单：API-02/04/14（带 scope 参数的 GET）仍须登记在上方只读接口列表
-    if (await handleChatRoutes(req, res, url, { authScopes, configSnapshot: requestConfig })) return;
+    if (await handleChatRoutes(req, res, url, {
+      authScopes,
+      capabilities,
+      userId: principal.kind === 'session' ? principal.userId : undefined,
+      role: principal.kind === 'session' ? principal.role : 'admin',
+      configSnapshot: requestConfig,
+    })) return;
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
     // status 允许 handler 表达「服务在、但这个检查暂时给不出结果」（503），
@@ -1304,12 +1686,13 @@ async function handleImportUpload(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   authScopes: string[] | null,
+  operator: TaskOperator,
 ): Promise<void> {
   const headerId = req.headers['x-ki-upload-id'];
   const activeId = typeof headerId === 'string' && UPLOAD_ID_RE.test(headerId) ? headerId : null;
   if (activeId) activeUploadRequests.set(activeId, (activeUploadRequests.get(activeId) ?? 0) + 1);
   try {
-    await processImportUpload(req, res, authScopes, activeId);
+    await processImportUpload(req, res, authScopes, activeId, operator);
   } finally {
     if (activeId) {
       const remaining = (activeUploadRequests.get(activeId) ?? 1) - 1;
@@ -1324,6 +1707,7 @@ async function processImportUpload(
   res: http.ServerResponse,
   authScopes: string[] | null,
   headerId: string | null,
+  operator: TaskOperator,
 ): Promise<void> {
   const body = (await readJsonBody(req)) as {
     scope?: string;
@@ -1495,7 +1879,7 @@ async function processImportUpload(
       sendJson(res, 409, { ok: false, error: '仍有批次未上传，不能启动导入', uploadId });
       return;
     }
-    const job = createJob(scope, 'import', requestConfig);
+    const job = createJob(scope, 'import', requestConfig, { operator });
     session = { ...session, state: 'importing', jobId: job.id, updatedAt: Date.now() };
     try { writeUploadSession(dir, session); } catch (error) {
       job.taskReporter.finish('failed', { error: '上传任务状态登记失败' });
@@ -1644,6 +2028,7 @@ async function handleImportRun(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   authScopes: string[] | null,
+  operator: TaskOperator,
 ): Promise<void> {
   const requestConfig = loadConfig();
   const body = (await readJsonBody(req)) as {
@@ -1822,7 +2207,7 @@ async function handleImportRun(
   //    导入改由「预检 → 确认 → run」显式启动）；若将来恢复该用法需同样调用本闸门。
   if (rejectIfImportBusy(res, requestConfig, scope)) return;
 
-  const job = createJob(scope, 'import', requestConfig);
+  const job = createJob(scope, 'import', requestConfig, { operator });
   // 本次**实际生效**的 group（显式值 > 子集重试的上次快照 > 空）；只算一处，
   // 既用于 run 入参，也写进 session 快照供 `/api/import/prune` 同源重算（设计 S02 N-2）。
   const effectiveGroup = requestedGroup || retryParams?.group || '';
@@ -2453,6 +2838,7 @@ async function handleDatasourceSync(
   res: http.ServerResponse,
   authScopes: string[] | null,
   requestConfig: KiConfig,
+  operator: TaskOperator,
 ): Promise<void> {
   let body: { scope?: unknown; full?: unknown } = {};
   try {
@@ -2555,7 +2941,9 @@ async function handleDatasourceSync(
 
   let task: TaskReporter;
   try {
-    task = createTaskReporter(requestConfig, { id: taskId, source: 'web', operation: 'datasource-sync', scope });
+    task = createTaskReporter(requestConfig, {
+      id: taskId, source: 'web', operator, operation: 'datasource-sync', scope,
+    });
   } catch (err) {
     pageSyncGates.delete(scope);
     sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `后台任务状态登记失败，任务未启动：${(err as Error).message}` });
@@ -2598,11 +2986,17 @@ const datasourceAddGates = new Map<string, string>();
  * ★ 不 await submit：当前 add 任务还占着队列槽，await 会自死锁；
  *   submit 排在 add 之后，add 释放槽位即开始执行。
  */
-function enqueueFirstDatasourceSync(scope: string, record: DataSourceRecord, config: KiConfig): string {
+function enqueueFirstDatasourceSync(
+  scope: string,
+  record: DataSourceRecord,
+  config: KiConfig,
+  operator: TaskOperator,
+): string {
   const syncTaskId = crypto.randomUUID();
   const syncTask = createTaskReporter(config, {
     id: syncTaskId,
     source: 'web',
+    operator,
     operation: 'datasource-sync',
     scope,
   });
@@ -2624,6 +3018,7 @@ async function handleDatasourceAddRemote(
   res: http.ServerResponse,
   authScopes: string[] | null,
   requestConfig: KiConfig,
+  operator: TaskOperator,
 ): Promise<void> {
   let body: {
     scope?: unknown; url?: unknown; branch?: unknown; subdir?: unknown; group?: unknown;
@@ -2761,7 +3156,9 @@ async function handleDatasourceAddRemote(
   datasourceAddGates.set(scope, taskId);
   let task: TaskReporter;
   try {
-    task = createTaskReporter(requestConfig, { id: taskId, source: 'web', operation: 'datasource-add-remote', scope });
+    task = createTaskReporter(requestConfig, {
+      id: taskId, source: 'web', operator, operation: 'datasource-add-remote', scope,
+    });
   } catch (err) {
     datasourceAddGates.delete(scope);
     sendJson(res, 503, { ok: false, code: 'TASK_REGISTRY_UNAVAILABLE', error: `后台任务状态登记失败，任务未启动：${(err as Error).message}` });
@@ -2813,7 +3210,7 @@ async function handleDatasourceAddRemote(
         let syncTaskId: string | null = null;
         let syncWarning: string | undefined;
         try {
-          syncTaskId = enqueueFirstDatasourceSync(scope, added.record, requestConfig);
+          syncTaskId = enqueueFirstDatasourceSync(scope, added.record, requestConfig, operator);
         } catch (err) {
           syncWarning = `登记成功，但首次同步入队失败：${(err as Error).message}`;
         }
@@ -3134,6 +3531,7 @@ async function handleImportRetryIncomplete(
   res: http.ServerResponse,
   authScopes: string[] | null,
   requestConfig: KiConfig,
+  operator: TaskOperator,
 ): Promise<void> {
   const body = (await readJsonBody(req)) as { scope?: string; taskId?: string } | undefined;
   if (!body?.scope) {
@@ -3242,7 +3640,7 @@ async function handleImportRetryIncomplete(
   }
 
   // REQ-20261019-004：血缘——本任务重试自哪个任务（清单归属，可能为 undefined 的 legacy 场景）
-  const job = createJob(scope, 'import', requestConfig, { retryOf: requestedTaskId });
+  const job = createJob(scope, 'import', requestConfig, { operator, retryOf: requestedTaskId });
   void runImportJob(job, {
     scope,
     sourceDir,
@@ -3548,6 +3946,7 @@ async function handleRestoreRun(
   res: http.ServerResponse,
   authScopes: string[] | null,
   requestConfig: KiConfig,
+  operator: TaskOperator,
 ): Promise<void> {
   const body = await readJsonBody(req) as {
     scope?: string;
@@ -3569,7 +3968,7 @@ async function handleRestoreRun(
   const scope = resolveScope(requestConfig, body.scope);
   const rebuildOnly = body.rebuildOnly === true;
   const rebuildVector = rebuildOnly || body.rebuildVector === true;
-  const job = createJob(scope, rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', requestConfig);
+  const job = createJob(scope, rebuildOnly ? 'rebuild-vector' : 'restore-snapshot', requestConfig, { operator });
   const args: RestoreJobArgs = {
     scope,
     timestamp: body.timestamp,

@@ -42,6 +42,7 @@ const COMMANDS = {
   'scope': 'src/scope.ts',
   'doc': 'src/doc.ts',
   'tag': 'src/tag.ts',
+  'user': 'src/user.ts',
   'config': 'src/config.ts',
   'doctor': 'src/doctor.ts',
   'log': 'src/log.ts',
@@ -97,6 +98,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   scope             scope 管理：list / readonly / delete / clear（KB + 向量两层）
   doc               向量文档管理：list / delete
   tag               向量 tag 发现：list（只读，含文档数）
+  user              Web 登录账号：create / list / reset-password / set-role / disable / enable / delete
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）
   log               任务运行诊断：按任务 ID 查看失败原因（只读；台账保留 7 天）
@@ -135,6 +137,9 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki mcp --http --daemon                  # HTTP 模式后台常驻运行（-d 同义，脱离终端）
   ki mcp restart                          # 重启 HTTP 单例（仅 HTTP 模式，后台常驻）
   ki mcp status                           # 查看 HTTP 单例运行状态（只读，不启动服务）
+  ki user create admin --role admin       # 创建 Web 登录账号（管理员）
+  ki user create viewer --role viewer     # 创建只读账号
+  ki user list                            # 列出 Web 账号（不显示密码）
   ki mcp token generate --scope team-a    # 生成授权 Token（必须指定 scope：单个/多个/all）
   ki mcp token list                       # 列出所有 Token（含明文与授权 scope）
   ki mcp token update <id> --scope all    # 修改指定 Token 的授权 scope

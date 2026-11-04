@@ -22,6 +22,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { readKiVersion } from './version-guard.js';
 import { findTokenAuth, tokenCount, ALL_SCOPES, type TokenAuth } from './mcp-token.js';
+import { resolveWebPrincipal, toTokenAuth } from './web-auth.js';
+import { checkRequestSecurity } from './auth/request-security.js';
 import { isReadOnlyTool, readonlyRejectMessage, TOKEN_READONLY } from './mcp-tools/tool-access.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
@@ -99,6 +101,8 @@ export interface HttpServerOptions {
   token?: string;
   /** DNS rebinding 保护允许的 Host 头（可选） */
   allowedHosts?: string[];
+  /** 本机回环免登录自动管理员（缺省 true；false = 本机也必须登录） */
+  localAdmin?: boolean;
   /**
    * 每个 MCP 会话新建一个 McpServer 的工厂。
    * 接收该会话的完整授权（scope 集合 + 访问模式）：null = 免鉴权（不限且可读写）。
@@ -112,7 +116,7 @@ export interface HttpServerOptions {
   web?: boolean;
 }
 
-import { isLoopbackAddr, isLoopbackHost } from './net-addr.js';
+import { isLoopbackHost } from './net-addr.js';
 // re-export isLoopbackHost 保持向后兼容（外部/测试从 mcp-http 引用）
 export { isLoopbackHost };
 
@@ -304,14 +308,6 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
-/** 常量时间比较 Bearer Token */
-function tokenMatches(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
 /** /healthz 返回体结构 */
 export interface HealthzInfo {
   ok: boolean;
@@ -499,6 +495,8 @@ export interface HttpAppOptions {
   token?: string;
   /** DNS rebinding 保护允许的 Host 头（可选） */
   allowedHosts?: string[];
+  /** 本机回环免登录自动管理员（缺省 true；false = 本机也必须登录） */
+  localAdmin?: boolean;
   /** 每个 MCP 会话新建一个 McpServer 的工厂（接收该会话的完整授权，见 HttpServerOptions） */
   buildServer: (auth: TokenAuth | null) => McpServer;
   /** 对外暴露的绑定地址（写入 /healthz，便于客户端确认连接目标一致，NEG-01） */
@@ -535,6 +533,7 @@ export interface McpHttpApp {
  */
 export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const { authEnabled, token, allowedHosts, buildServer, advertiseAddr } = opts;
+  const localAdmin = opts.localAdmin !== false;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const webDir = opts.webDir ?? null;
@@ -706,6 +705,26 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       }
     }
 
+    // S-06：浏览器写请求安全基线（Origin / Sec-Fetch-Site / JSON Content-Type）。
+    // 非浏览器客户端通常不带 Origin，因此 Bearer / 本机脚本不受影响。
+    if (url.pathname.startsWith('/api/') || url.pathname === '/mcp') {
+      const securityError = checkRequestSecurity(req);
+      if (securityError) {
+        sendJson(res, securityError.status, url.pathname === '/mcp'
+          ? {
+              jsonrpc: '2.0',
+              error: {
+                code: -32003,
+                message: securityError.message,
+                data: { code: securityError.code },
+              },
+              id: null,
+            }
+          : { ok: false, code: securityError.code, error: securityError.message });
+        return;
+      }
+    }
+
     // /api/*：方案 A 扩展接口（导入/健康/文档列表），与 MCP 会话隔离
     // 注意：/api/* 未匹配的请求返回 JSON 404（不 fallback 到静态页面，防止前端 JSON.parse 崩溃）
     if (url.pathname.startsWith('/api/')) {
@@ -716,8 +735,10 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
           authEnabled,
           token,
           clientAddr: resolveClientAddr(req),
+          localAdmin,
           // /api/* 目前只有 scope 维度（只读 Token 的写工具限制仅作用于 MCP 通道，见 docs/mcp-http.md「只读 Token」）
           resolveTokenScopes: (t: string) => resolveTokenAuth(t)?.scopes,
+          resolveTokenAuth,
         }),
       ));
       return;
@@ -733,41 +754,32 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       return;
     }
 
-    // 鉴权：对外绑定（authEnabled）时，本地回环来源（127.0.0.1/::1）免鉴权，远程来源需 Bearer Token。
-    // 同时解析该 Token 的完整授权（scope 集合 + 只读标记），供 handleMcpPost 做
-    // tools/call 的 scope 越权校验与只读写工具拦截。null 表示免鉴权（不限、可读写）。
-    let sessionAuth: TokenAuth | null = null;
-    if (authEnabled && !isLoopbackAddr(resolveClientAddr(req))) {
-      const authHeader = req.headers['authorization'];
-      const bearer = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-        ? authHeader.slice('Bearer '.length).trim()
-        : '';
-      let resolved: TokenAuth | undefined;
-      if (bearer && token && tokenMatches(bearer, token)) {
-        // 全权临时 Token（--token/KI_MCP_TOKEN）：全部 scope，且**永远读写**
-        //（只读能力只作用于托管 Token；临时 Token 本就是应急全权凭据，不参与降权）
-        resolved = { scopes: [ALL_SCOPES], readOnly: false };
-      } else if (bearer) {
-        // 多 Token 存储：按明文查找授权（常量时间比较）
-        resolved = resolveTokenAuth(bearer);
-      }
-      if (!resolved) {
-        const reason = !bearer
-          ? '请求未携带 Authorization: Bearer 头'
-          : 'Token 无效（未在托管 Token 存储中匹配到）';
-        logAuthFailure(req, reason);
-        res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
-        res.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            error: { code: -32001, message: 'Unauthorized: invalid or missing Bearer token' },
-            id: null,
-          }),
-        );
-        return;
-      }
-      sessionAuth = resolved;
+    // 鉴权：local-admin（回环 + Host 回环 + 无 XFF）→ Bearer → 会话 Cookie。
+    // Bearer 存在但无效时 401，不回退 Cookie；Bearer 优先于 Cookie。
+    const clientAddr = resolveClientAddr(req);
+    const principalResult = resolveWebPrincipal(req, {
+      authEnabled,
+      ...(token ? { token } : {}),
+      clientAddr,
+      localAdmin,
+      resolveTokenAuth,
+    });
+    if (principalResult.rejected || !principalResult.principal) {
+      const reason = principalResult.rejected === 'invalid-token'
+        ? 'Token 无效（未在托管 Token 存储中匹配到）'
+        : '请求未携带有效身份（Bearer Token 或 Web 登录）';
+      logAuthFailure(req, reason);
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Unauthorized: invalid or missing credentials' },
+          id: null,
+        }),
+      );
+      return;
     }
+    const sessionAuth = toTokenAuth(principalResult.principal);
 
     if (req.method === 'POST') {
       await handleMcpPost(req, res, sessionAuth, requestConfig ?? loadConfig());
@@ -1127,7 +1139,7 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
  * 若目标 host:port 已有健康的 kisearch 实例，则复用并 process.exit(0)。
  */
 export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void> {
-  const { host, port, buildServer, allowedHosts, onShutdown } = opts;
+  const { host, port, buildServer, allowedHosts, onShutdown, localAdmin = true } = opts;
   const authEnabled = !isLoopbackHost(host);
   const token = opts.token;
   // 固定本实例的 lock 路径；即使运行期间配置文件发生身份漂移，退出时也必须
@@ -1159,6 +1171,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     authEnabled,
     token,
     allowedHosts,
+    localAdmin,
     buildServer,
     advertiseAddr: { host, port },
     webDir,
@@ -1189,10 +1202,15 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
 
   process.stderr.write(
     `kisearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
-      `（鉴权：${authEnabled ? '开启，需 Bearer Token' : '关闭，回环绑定'}）` +
+      `（鉴权：${authEnabled ? '开启，Bearer Token 或 Web 登录' : '关闭，回环绑定'}）` +
       (webDir ? `；前端页面：http://${host}:${port}/` : '') +
       '\n',
   );
+  if (!localAdmin) {
+    process.stderr.write(
+      '本机免登录已关闭（--no-local-admin / mcp.http.localAdmin=false）：本机访问也需要登录。\n',
+    );
+  }
   if (allowedHosts && allowedHosts.length > 0) {
     process.stderr.write(
       `DNS rebinding 保护已开启，仅允许 Host 头：${allowedHosts.join(', ')}` +

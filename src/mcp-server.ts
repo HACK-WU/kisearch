@@ -30,6 +30,7 @@ import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 import { startDataSourceScheduler, stopDataSourceScheduler } from './lib/datasource-scheduler.js';
+import { getUserStoreStatus } from './lib/user-store.js';
 
 /**
  * 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection。
@@ -57,6 +58,8 @@ interface McpCliOptions {
   port: number;
   token?: string;
   allowedHosts?: string[];
+  /** 本机回环免登录自动管理员（默认 true；--no-local-admin 或配置 false 关闭） */
+  localAdmin: boolean;
   /** --web：HTTP 模式下同时提供前端静态页面（web/dist） */
   web: boolean;
 }
@@ -85,6 +88,7 @@ HTTP 模式参数：
   --port <port>                 端口（默认 7423）
   --token <value>               全权临时 Token（进程级，优先级高于多 Token 存储；也可用环境变量 KI_MCP_TOKEN）
   --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
+  --no-local-admin              关闭本机回环免登录（本机访问也需登录；配置 mcp.http.localAdmin=false 同义）
   --web                         HTTP 模式下同时提供前端静态页面（web/dist，浏览器访问 http://<host>:<port>/）
   --no-web                      显式关闭前端页面（restart 时用于覆盖上次的 --web 延续）
   --daemon, -d                  后台常驻运行（仅 HTTP 模式，含 --web；脱离终端）
@@ -123,7 +127,7 @@ function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
 function parseMcpArgs(args: string[]): McpCliOptions {
   // --status 仅为弃用别名（已改为 `ki mcp status` 子命令，分发在 startMcpServer 中提前 return）；
   // 保留在 known 里是为了让 `--http --status` 这类混写不被 detectUnknownFlags 误报未知参数。
-  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--status', '--web', '--no-web', '--daemon'];
+  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--no-local-admin', '--status', '--web', '--no-web', '--daemon'];
   detectUnknownFlags(args, known, ['--host', '--port', '--token', '--allowed-hosts'], MCP_HELP);
 
   const http = args.includes('--http');
@@ -138,7 +142,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
         'MCP_DAEMON_REQUIRES_HTTP',
       );
     }
-    return { http: false, host: '', port: 0, web };
+    return { http: false, host: '', port: 0, localAdmin: true, web };
   }
 
   const config = loadConfig();
@@ -169,6 +173,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
   const allowedHosts = allowedHostsRaw
     ? allowedHostsRaw.split(',').map((s) => s.trim()).filter(Boolean)
     : httpCfg.allowedHosts;
+  const localAdmin = !args.includes('--no-local-admin') && httpCfg.localAdmin !== false;
 
   // 非回环绑定必须可鉴权（远程裸奔不安全）：
   //   - 显式全权临时 Token（--token/env）优先，进程级生效，优先级高于存储；
@@ -176,16 +181,45 @@ function parseMcpArgs(args: string[]): McpCliOptions {
   // 回环绑定不校验存储：鉴权本就禁用，Token 不会生效。
   if (!isLoopbackHost(host) && (!resolvedToken || !resolvedToken.trim())) {
     const count = tokenCount();
-    if (count === 0) {
+    const userStatus = getUserStoreStatus();
+    if (userStatus.corrupt) {
+      failJson(
+        `账号文件损坏或无法解析（~/.ki/users.json）。请先在本机执行 ki user list 检查并修复，` +
+          `修复前拒绝启动，避免把损坏状态当成“无账号”。`,
+        'USER_STORE_CORRUPT',
+      );
+    }
+    if (count === 0 && userStatus.enabled === 0) {
+      if (userStatus.total > 0) {
+        failJson(
+          `HTTP 模式绑定非回环地址（${host}）时，所有 Web 账号均被禁用且没有 MCP Token：` +
+            `请在本机执行 ki user enable <username>，或 ki user create <username> --role admin；` +
+            `也可执行 ki mcp token generate --scope <...> 创建 Token。`,
+          'MCP_HTTP_ALL_ACCOUNTS_DISABLED',
+        );
+      }
       failJson(
         `HTTP 模式绑定非回环地址（${host}）时需配置鉴权：` +
           `推荐执行 ki mcp token generate --scope <...> 创建授权 Token，` +
-          `或设置环境变量 KI_MCP_TOKEN / 传入 --token <值>（全权临时 Token）。` +
+          `或设置环境变量 KI_MCP_TOKEN / 传入 --token <值>（全权临时 Token）；` +
+          `也可执行 ki user create <username> --role admin 创建 Web 登录账号。` +
           `（若仅本机访问，可用默认回环绑定免鉴权）`,
         'MCP_HTTP_TOKEN_REQUIRED',
       );
     }
-    tokenSource = `多 Token 存储（~/.ki/mcp-tokens.json，共 ${count} 个）`;
+    if (count > 0) {
+      tokenSource = `多 Token 存储（~/.ki/mcp-tokens.json，共 ${count} 个）`;
+      if (userStatus.enabled === 0) {
+        process.stderr.write(
+          '警告：当前没有可用的 Web 登录账号；Web 登录不可用，MCP 客户端请使用 Bearer Token。\n',
+        );
+      }
+    } else {
+      process.stderr.write(
+        `提示：当前没有 MCP Token；Web 登录使用账号（${userStatus.enabled} 个启用），` +
+          `MCP 远程客户端需先执行 ki mcp token generate --scope <...>。\n`,
+      );
+    }
   }
 
   // REQ-04：非回环模式明示 Token 来源，避免“改了文件/环境变量为何不生效”的困惑
@@ -195,7 +229,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     );
   }
 
-  return { http: true, host, port, token: resolvedToken, allowedHosts, web };
+  return { http: true, host, port, token: resolvedToken, allowedHosts, localAdmin, web };
 }
 
 /** 从 args 解析并校验 --scope 参数（必须显式指定），返回归一化后的 scope 集合 */
@@ -932,6 +966,7 @@ export async function startMcpServer(): Promise<void> {
     port: opts.port,
     token: opts.token,
     allowedHosts: opts.allowedHosts,
+    localAdmin: opts.localAdmin,
     web: opts.web,
     buildServer: buildKiMcpServer,
     onShutdown: () => {

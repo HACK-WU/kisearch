@@ -5,6 +5,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 import { ScopeProvider } from '@/lib/scopeContext';
+import { AuthProvider } from '@/lib/authContext';
 import { AppRoutes } from '@/router/routes';
 import './styles/ki.css';
 
@@ -22,7 +23,9 @@ export function App(): JSX.Element {
     <QueryClientProvider client={queryClient}>
       <ScopeProvider>
         <BrowserRouter>
-          <AppRoutes />
+          <AuthProvider>
+            <AppRoutes />
+          </AuthProvider>
         </BrowserRouter>
       </ScopeProvider>
     </QueryClientProvider>

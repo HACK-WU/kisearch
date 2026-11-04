@@ -3434,15 +3434,17 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-sort-short { display: none; }
 
 .ki-task-table__head th:nth-child(1) { width: 9%; }
-.ki-task-table__head th:nth-child(2) { width: 15%; }
-.ki-task-table__head th:nth-child(3) { width: 14%; }
-.ki-task-table__head th:nth-child(4) { width: 10%; }
-.ki-task-table__head th:nth-child(5) { width: 27%; }
+.ki-task-table__head th:nth-child(2) { width: 13%; }
+.ki-task-table__head th:nth-child(3) { width: 12%; }
+.ki-task-table__head th:nth-child(4) { width: 9%; }
+/* 操作者（REQ-20261103-001 S-05）：放在来源之后；旧任务显示 — */
+.ki-task-table__head th:nth-child(5) { width: 9%; }
+.ki-task-table__head th:nth-child(6) { width: 25%; }
 /* 开始时间改 2026-10-30 15:57:55（19 字符 / 12px 自然宽 128px）后需 152px 单元格：
    14% 在 1200 视口只有 136px 会压到「持续时间」上；16% 在 1200 = 155px 刚好，
    1440 = 193px 略宽但换来不换行（实测值见 2026-10-30 走查记录） */
-.ki-task-table__head th:nth-child(6) { width: 16%; }
-.ki-task-table__head th:nth-child(7) { width: 9%; }
+.ki-task-table__head th:nth-child(7) { width: 14%; }
+.ki-task-table__head th:nth-child(8) { width: 9%; }
 .ki-task-table__row { cursor: pointer; }
 .ki-task-table__row td {
   padding: 11px 12px; border-bottom: 1px solid var(--ki-color-border);
@@ -3476,6 +3478,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   color: var(--ki-color-text-subtle); background: var(--ki-color-bg-secondary);
 }
 .ki-task-source-badge--cli { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+.ki-task-table__operator { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-task-table__result { display: flex; flex-direction: column; gap: 2px; min-width: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
 .ki-task-table__summary,
 .ki-task-table__error { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3498,10 +3501,11 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-col--source { display: none; }
   .ki-task-table__head th:nth-child(1) { width: 96px; }
   .ki-task-table__head th:nth-child(2) { width: auto; }
-  .ki-task-table__head th:nth-child(5) { width: 33%; }
+  .ki-task-table__head th:nth-child(5) { width: 90px; }
+  .ki-task-table__head th:nth-child(6) { width: 33%; }
   /* 2026-10-30：132 → 152（完整时间戳要 152px）；78 → 84（「耗时 ↕」需 37px + 内距） */
-  .ki-task-table__head th:nth-child(6) { width: 152px; }
-  .ki-task-table__head th:nth-child(7) { width: 84px; }
+  .ki-task-table__head th:nth-child(7) { width: 152px; }
+  .ki-task-table__head th:nth-child(8) { width: 84px; }
   .ki-task-table__task-scope { display: block; }
   /* 「持续时间 ↕」在 84/80px 列里放不下 4 个汉字 + 箭头 → 换短标签 */
   .ki-sort-full { display: none; }
@@ -3511,6 +3515,7 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
    （实测 761 视口表宽 655px，摘要列只有 205px，省略号会把「新增 N 篇」吃掉），
    改由「任务」列的回退行承载 —— 与 ≤760 同一套机制，只是提前到放不下的宽度生效。 */
 @media (max-width: 880px) {
+  .ki-task-col--operator,
   .ki-task-col--result { display: none; }
   .ki-task-table__task-result { display: block; }
 }
@@ -3519,8 +3524,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-task-table__head th:nth-child(2) { width: auto; }
   /* 完整时间戳 128px + 内距 24px = 152px 是零余量，会贴住「持续时间」；留 12px 余量取 164px。
      ★ 不再折成两行（旧格式 96px 时的折行兜底已随格式升级移除） */
-  .ki-task-table__head th:nth-child(6) { width: 164px; }
-  .ki-task-table__head th:nth-child(7) { width: 80px; }
+  .ki-task-table__head th:nth-child(7) { width: 164px; }
+  .ki-task-table__head th:nth-child(8) { width: 80px; }
   /* 窄屏：卡片副行与工具条提示挤占空间，直接藏掉（筛选态靠描边仍可辨认） */
   .ki-task-summary__hint,
   .ki-task-toolbar__hint { display: none; }
@@ -3529,9 +3534,9 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
    任务列会被压成 0 —— 时间回到两行 + 96px，持续时间列整列隐藏，宽度还给任务列。
    ★ 这是 375 视口的历史遗留结构问题（任务列本来就只剩 23px），本次先保证「不比改版前更差」。 */
 @media (max-width: 520px) {
-  .ki-task-table__head th:nth-child(6) { width: 96px; }
+  .ki-task-table__head th:nth-child(7) { width: 96px; }
   .ki-task-table__time { white-space: normal; }
-  .ki-task-table__head th:nth-child(7),
+  .ki-task-table__head th:nth-child(8),
   .ki-task-table__duration { display: none; }
 }
 /* 明细 / 落点折叠（原生 <details>：零 JS、键盘可达）
@@ -8096,4 +8101,148 @@ select.ki-chat-cfg__ta--select {
   font-size: var(--ki-font-size-xs);
   color: var(--ki-color-warning);
   overflow-wrap: anywhere;
+}
+
+/* ════════════════════════════════════════════════════════════
+   账号登录 / 用户管理 / 用户菜单（REQ-20261103-001 · S-04）
+   ════════════════════════════════════════════════════════════ */
+
+.ki-auth-loading {
+  min-height: 60vh;
+  display: grid;
+  place-items: center;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-sm);
+}
+
+.ki-login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--ki-color-bg);
+}
+
+.ki-login-card {
+  width: min(420px, calc(100vw - 32px));
+  padding: 30px 28px 24px;
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: 16px;
+  box-shadow: var(--ki-shadow-lg, 0 18px 48px rgb(0 0 0 / 12%));
+}
+
+.ki-login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 26px; }
+.ki-login-logo {
+  display: grid; place-items: center;
+  width: 34px; height: 34px; border-radius: 10px;
+  background: var(--ki-color-primary); color: #fff;
+  font-weight: 800; letter-spacing: -0.04em;
+}
+.ki-login-brand-text { display: flex; flex-direction: column; line-height: 1.2; }
+.ki-login-brand-text strong { font-size: 15px; }
+.ki-login-brand-text span { font-size: 9px; letter-spacing: 0.12em; color: var(--ki-color-text-subtle); }
+.ki-login-title { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+.ki-login-sub { margin: 6px 0 20px; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
+.ki-login-form { display: grid; gap: 14px; }
+.ki-login-field { display: grid; gap: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.ki-login-field .ki-form-input { width: 100%; box-sizing: border-box; }
+.ki-login-error { margin: 0; color: var(--ki-color-danger); font-size: var(--ki-font-size-sm); }
+.ki-login-submit { width: 100%; justify-content: center; }
+.ki-login-hint { margin: 18px 0 0; text-align: center; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+
+.ki-user-menu { position: relative; }
+.ki-user-menu__trigger {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 32px; padding: 0 8px 0 4px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 999px;
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  cursor: pointer;
+}
+.ki-user-menu__trigger:hover { border-color: var(--ki-color-border-strong, var(--ki-color-border)); }
+.ki-user-menu__avatar {
+  display: grid; place-items: center;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: color-mix(in srgb, var(--ki-color-primary) 16%, var(--ki-color-surface));
+  color: var(--ki-color-primary);
+  font-size: 11px; font-weight: 700;
+}
+.ki-user-menu__name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--ki-font-size-sm); }
+.ki-user-menu__caret { color: var(--ki-color-text-subtle); font-size: 10px; }
+.ki-user-menu__pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
+  min-width: 210px; padding: 6px;
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: 10px;
+  box-shadow: var(--ki-shadow-md, 0 12px 32px rgb(0 0 0 / 14%));
+}
+.ki-user-menu__meta { display: grid; gap: 2px; padding: 8px 10px 10px; border-bottom: 1px solid var(--ki-color-border); margin-bottom: 4px; }
+.ki-user-menu__meta strong { font-size: var(--ki-font-size-sm); }
+.ki-user-menu__meta span { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-user-menu__pop button {
+  display: block; width: 100%; padding: 8px 10px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--ki-color-text); text-align: left; cursor: pointer;
+  font-size: var(--ki-font-size-sm);
+}
+.ki-user-menu__pop button:hover { background: var(--ki-color-surface-hover, color-mix(in srgb, var(--ki-color-text) 6%, transparent)); }
+.ki-user-menu__note { margin: 6px 4px 2px; padding: 6px 6px 2px; border-top: 1px solid var(--ki-color-border); color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+
+.ki-readonly-banner {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  margin: 0 16px 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-warning) 28%, var(--ki-color-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ki-color-warning) 8%, var(--ki-color-surface));
+  color: var(--ki-color-text);
+  font-size: var(--ki-font-size-sm);
+}
+.ki-readonly-banner strong { color: var(--ki-color-warning); }
+.ki-readonly-banner span { color: var(--ki-color-text-muted); }
+
+.ki-users-page { display: grid; gap: 16px; }
+.ki-users-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 12px; align-items: end;
+  padding: 0 20px 20px;
+}
+.ki-users-create .ki-form-input,
+.ki-users-create .ki-form-select { width: 100%; box-sizing: border-box; }
+.ki-users-table-wrap { overflow-x: auto; }
+.ki-users-table { width: 100%; border-collapse: collapse; font-size: var(--ki-font-size-sm); }
+.ki-users-table th,
+.ki-users-table td { padding: 10px 14px; border-bottom: 1px solid var(--ki-color-border); text-align: left; vertical-align: middle; }
+.ki-users-table th { color: var(--ki-color-text-subtle); font-weight: 600; white-space: nowrap; }
+.ki-users-table tr:last-child td { border-bottom: 0; }
+.ki-users-row--disabled td { opacity: 0.62; }
+.ki-users-role { width: 132px; }
+.ki-users-status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.ki-users-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ki-users-status--on { color: var(--ki-color-success); }
+.ki-users-status--off { color: var(--ki-color-text-subtle); }
+.ki-users-self { margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: var(--ki-color-surface-hover, #eee); color: var(--ki-color-text-subtle); font-size: 10px; }
+.ki-users-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.ki-auth-dialog { width: min(440px, calc(100vw - 24px)); }
+.ki-form-error { margin: 6px 0 0; color: var(--ki-color-danger); font-size: var(--ki-font-size-sm); }
+
+@media (max-width: 1100px) {
+  .ki-users-create { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .ki-users-create > button { grid-column: 1 / -1; justify-self: end; }
+}
+@media (max-width: 640px) {
+  .ki-users-create { grid-template-columns: minmax(0, 1fr); }
+  .ki-users-create > button { justify-self: stretch; }
+  .ki-user-menu__name { display: none; }
+  .ki-readonly-banner { margin: 0 12px 10px; }
+}
+
+.ki-dialog__sub {
+  margin: 4px 0 0;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
 }

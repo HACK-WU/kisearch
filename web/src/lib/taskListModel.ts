@@ -13,6 +13,9 @@ export interface TaskListRowView {
   operationLabel: string;
   scope: string;
   sourceLabel: string;
+  /** 操作者展示（旧任务 `—`） */
+  operatorLabel: string;
+  operatorTitle: string;
   /** 摘要单行：成功/跳过/未完成，有快照时以 ` · 新增 N 篇 · 变更 N 篇` 续在后面；全 0 时压缩为「无变更」 */
   resultSummary: string;
   /** 失败/未知时的短错误；与摘要并列展示，不互相覆盖 */
@@ -105,6 +108,10 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
   const error = task.error?.trim() || undefined;
   const operation = operationLabel(task.operation);
   const source = sourceLabel(task.source);
+  const operatorLabel = task.operator?.label?.trim() || '—';
+  const operatorTitle = task.operator?.type === 'user' && task.operator.userId
+    ? `${operatorLabel}（账号 ${task.operator.userId}）`
+    : operatorLabel;
   const stateText = stateLabel(task.state);
   const tone: TaskListRowView['resultTone'] = task.state === 'failed' || task.state === 'unknown'
     ? 'danger'
@@ -119,6 +126,8 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
     operationLabel: operation,
     scope: task.scope,
     sourceLabel: source,
+    operatorLabel,
+    operatorTitle,
     resultSummary: summary,
     ...(error ? { resultError: error } : {}),
     resultTone: tone,
@@ -126,6 +135,6 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
     timeTitle: time.title,
     durationLabel,
     progressPercent: progressPercentOf(task),
-    ariaLabel: `${stateText}，${operation}，${task.scope}，${source}，${summary}${error ? `，${error}` : ''}，${time.title}，持续时间 ${durationLabel}`,
+    ariaLabel: `${stateText}，${operation}，${task.scope}，${source}，操作者 ${operatorLabel}，${summary}${error ? `，${error}` : ''}，${time.title}，持续时间 ${durationLabel}`,
   };
 }

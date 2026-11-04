@@ -23,6 +23,7 @@ import type {
   PromptConfigOk,
   PromptConfigSaveOk,
 } from '@/api/chatContract';
+import { notifyUnauthorized } from '@/lib/authEvents';
 
 /** chat 接口基础路径（导出以便其他模块复用，避免多处硬编码） */
 export const CHAT_API_BASE = '/api/chat';
@@ -72,7 +73,10 @@ async function reqJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
-  if (!res.ok) throw await toApiError(res);
+  if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized('chat');
+    throw await toApiError(res);
+  }
   return (await res.json()) as T;
 }
 
@@ -368,7 +372,10 @@ async function* postSse(
   });
 
   // 流建立前失败 → HTTP 错误（带 code）；建立后失败 → error 事件（不抛）
-  if (!res.ok) throw await toApiError(res);
+  if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized('chat');
+    throw await toApiError(res);
+  }
 
   yield* readSseEvents(res, signal);
 }

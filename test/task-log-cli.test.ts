@@ -363,3 +363,31 @@ test('--json 载荷：ok / exitCode 跟随结果类型，且平铺结果字段',
     assert.ok(Array.isArray(listPayload.rows));
   });
 });
+
+test('操作者：台账快照、日志头与 ki log 输出', () => {
+  withTempConfig((config) => {
+    const reporter = createTaskReporter(config, {
+      id: 'task-operator',
+      source: 'web',
+      operator: { type: 'user', label: 'alice', userId: 'u-1' },
+      operation: 'import',
+      scope: 'demo',
+    });
+    try {
+      reporter.update({ state: 'running', startedAt: Date.now() });
+      const record = getTaskRecord(config, 'task-operator');
+      assert.equal(record?.operator?.label, 'alice');
+      assert.equal(record?.operator?.userId, 'u-1');
+
+      const { result } = executeTaskLog(config, { taskId: 'task-operator' });
+      assert.equal(result.kind, 'task');
+      if (result.kind === 'task') {
+        assert.equal(result.task.operator, 'alice');
+        const text = renderTask(result.task, null);
+        assert.match(text, /操作者\s+alice/);
+      }
+    } finally {
+      reporter.stop();
+    }
+  });
+});

@@ -300,6 +300,8 @@ const CONFIG_SCHEMA: ConfigNode = {
             host: { type: 'string' },
             port: { type: 'number', validate: portRange },
             allowedHosts: { type: 'stringArray' },
+            /** 本机回环免登录自动管理员（默认 true；false = 本机也必须登录） */
+            localAdmin: { type: 'boolean' },
           },
         },
       },

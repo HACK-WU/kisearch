@@ -27,10 +27,10 @@ POST /api/restore/cancel   {"jobId":"<id>"}
 在服务器上手动启动一次（幂等，重复运行安全）：
 
 ```bash
-# 仅本机访问（默认即回环绑定 127.0.0.1，免鉴权，开箱即用）
+# 仅本机访问（默认即回环绑定 127.0.0.1，本机免登录，开箱即用）
 ki mcp --http
 
-# 远程跨机访问（非回环绑定，强制 Token）：生成授权 Token 后直接启动
+# 远程跨机访问（非回环绑定，需 Token 或 Web 账号；MCP 客户端仍需 Token）：生成授权 Token 后直接启动
 ki mcp token generate --scope team-a   # 输出短 ID + Token 明文，持久化到 ~/.ki/mcp-tokens.json（0600）
 ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无需 export
 ```
@@ -48,7 +48,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 }
 ```
 
-> 回环绑定（仅本机）免鉴权时，可省略 `headers`。
+> 回环绑定（仅本机）本机免登录时，可省略 `headers`；可用 `--no-local-admin` 关闭本机免登录。
 >
 > ⚠️ HTTP 客户端仍应使用一致的 `host`/`port`，以便连接同一服务；本机 IDE 也可以继续使用 stdio `command: ki mcp`，它会桥接到该 daemon，不会另开 zvec owner。可用 `ki mcp status` 和 `/healthz` 查看 owner、布局版本及队列状态。
 
@@ -57,10 +57,11 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--http` | — | 启用 Streamable HTTP 传输（不传则走 stdio，启动时同样经过启动守卫，见下文「HTTP 启动守卫」与「stdio 启动守卫」） |
-| `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）免鉴权；对外监听改 `0.0.0.0` 并必须带 Token |
+| `--host <h>` | `127.0.0.1` | 监听地址。默认回环（`127.0.0.1`/`localhost`/`::1`）下本机免登录；对外监听改 `0.0.0.0`，启动时需已有 Token 或至少一个启用账号 |
 | `--port <n>` | `7423` | 监听端口（1-65535） |
-| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。**非回环绑定时需有 Token**（临时全权或存储中的授权 Token），推荐 `ki mcp token generate --scope <...>` 托管 |
+| `--token <t>` | — | 全权临时 Token（进程级，优先级高于多 Token 存储，也可用环境变量 `KI_MCP_TOKEN`）。非回环绑定时 Token 与 Web 账号至少存在一个；MCP 远程客户端仍需 Token |
 | `--allowed-hosts <a,b>` | — | 开启 DNS rebinding 保护并限定允许的 Host 头（逗号分隔） |
+| `--no-local-admin` | — | 关闭本机回环免登录（本机访问也需登录）；等价于配置 `mcp.http.localAdmin: false` |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
@@ -92,7 +93,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 - **越权兜底**：即使客户端缓存了建连时的旧工具列表、或直接构造 JSON-RPC 调用写工具，同样会被拒绝（`403` + `TOKEN_READONLY`），写不进去。
 - **AI 可感知**：只读会话建连时即告知 AI「当前为只读」，无需靠工具缺失反推，也不必反复重试。
 - **生效时机**：`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
-- **不影响的范围**：`--token` / `KI_MCP_TOKEN` 进程级临时 Token 始终全权（不参与降权）；stdio 与回环访问本就免鉴权，不受只读约束。
+- **不影响的范围**：`--token` / `KI_MCP_TOKEN` 进程级临时 Token 始终全权（不参与降权）；stdio 与本机回环访问本就免登录，不受只读约束。
 - **安全边界**：只读只约束 **MCP 通道**。`/api/*` 扩展路由与 chat 工具通道仍按 scope 授权放行——只读 Token 仍可经这些通道写入。请只把只读 Token 发给不需要写权限的客户端。
 - **与「只读库」的区别**：`ki scope readonly <scope> --on` 是**整个 scope 对所有身份禁写**（错误码 `SCOPE_READONLY`，出路是 `--off`）；Token 只读只约束**这一个 Token**（错误码 `TOKEN_READONLY`，出路是改用读写 Token 或 `ki mcp token update <id> --read-write`）。两者可叠加，写操作需同时通过两道门禁。
 
@@ -173,7 +174,7 @@ Web 导入页在第一批上传前生成 UUID `uploadId` 并存入浏览器，�
 
 上传中站内切页不会取消任务；关闭或刷新标签页后，未传完的文件需要重新选择并上传。尚未启动导入的暂存目录在空闲满 24 小时后，于**下一次新上传**时惰性清理，不做定时扫描。已启动导入的上传目录会登记为源目录，后续编辑/同步可能使用，因此不参与这项清理。`/api/import/status` 的 job 仍是进程内状态，服务重启后可能无法查询，客户端应显示“状态待确认”。
 
-- `/api/*` 与 MCP 会话隔离；鉴权规则与 MCP 一致（非回环绑定强制 Bearer Token）。
+- `/api/*` 与 MCP 会话隔离；非回环绑定时 Web 页面使用账号登录，MCP 客户端使用 Bearer Token。
 - 前端**不启动/不关闭任何服务**，仅检测 MCP HTTP 状态并给出手动指引；向量可视化 zvec-studio 作为独立工具由用户手动启动，前端不集成跳转入口。
 
 ### `/api/chat/*`（侧边栏 AI 对话）
@@ -239,19 +240,44 @@ ki mcp status --host 127.0.0.1 --port 7423
 
 是否启用 Bearer Token 鉴权**由绑定地址决定**：
 
-- **回环地址**（`127.0.0.1` / `localhost` / `::1`）：无网络暴露面，**免鉴权**，Token 可省略。
-  > ⚠️ **反向代理 / SSH 隧道会让远程请求"看起来来自本机"**：`/mcp` 与 `/api/*` 的鉴权判定基于 TCP 源地址，经 nginx、frp、SSH 端口转发接入时源地址就是 `127.0.0.1` ⇒ 视为本机来源、**免鉴权**，Token 与只读限制**都不生效**。这类部署必须在代理层自行完成鉴权，或改为直连 `ki mcp --http --host <外网地址>` 的鉴权端口。
-- **非回环地址**（`0.0.0.0` / 外网 IP，即远程跨机）：**强制 Bearer Token**，未提供则拒绝启动（fail-loud）。
+- **回环地址**（`127.0.0.1` / `localhost` / `::1`）：本机来源 + Host 回环 + 无 `X-Forwarded-For`/`X-Real-IP` 时，自动以管理员身份进入（免登录）；可用 `--no-local-admin` 或配置 `mcp.http.localAdmin: false` 关闭，关闭后本机也需登录。
+  > ⚠️ **反向代理 / SSH 隧道**：本机管理员判定现在同时校验 TCP 源地址与 Host 头。nginx 保留外部 Host 时不会被误判为本机；SSH 端口转发通常源地址与 Host 都是本机，仍会免登录——对外暴露时请使用 `--no-local-admin`，并在代理层自行鉴权。
+- **非回环地址**（`0.0.0.0` / 外网 IP，即远程跨机）：启动时必须有 **Bearer Token 或至少一个启用的 Web 账号**，否则拒绝启动（fail-loud）。Web 用户经 `/login` 登录；MCP 客户端仍使用 Bearer Token。
 
 Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Token）> 多 Token 存储 `~/.ki/mcp-tokens.json`（`ki mcp token generate --scope <...>` 创建），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，按明文在存储中匹配（常量时间比较）得到授权 scope 集合，失败返回 401。
+
+**Web 账号与 MCP Token 相互独立**：账号只用于登录页面（`ki user create` 管理），Token 只用于 MCP 客户端；Web 登录不会让 MCP 客户端获得访问权，反之亦然。管理员、读写账号、只读账号的权限边界见 [CLI · user](./cli.md#user)。
 
 **scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
 
 **只读校验（动作维度）**：同一鉴权链还会解析该 Token 的 `readOnly`。只读 Token 的会话只注册读工具（`tools/list` 不含写工具），且 `tools/call` 中对任何不在读工具白名单内的调用（含 batch 逐项）返回 `403 { code: 'TOKEN_READONLY' }`；详见上文「只读 Token」。
 
-**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。免鉴权（回环）或 `all` 权限时不过滤。
+**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。本机免登录（回环）或 `all` 权限时不过滤。
 
-> ⚠️ **回环绑定时提供 Token 会被忽略**：回环地址鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效，避免误以为已鉴权。同理，回环绑定不会读取多 Token 存储。如需鉴权请绑定非回环地址。
+> ⚠️ **回环绑定时提供 Bearer Token 会被忽略**：回环地址的 Bearer 鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效。Web 页面仍可登录（`--no-local-admin` 时本机也需登录）；如需 Bearer 鉴权请绑定非回环地址。
+
+## 浏览器写请求安全基线
+
+对 `POST/PUT/PATCH/DELETE`（`/api/*` 与 `/mcp`）：
+
+- **Origin**：必须与请求 Host 的 host + port 一致；scheme 允许 http/https（TLS 常由代理终止）。跨站 Origin、`Origin: null` 一律 403 `CSRF_ORIGIN_REJECTED`。
+- **无 Origin**：若带 `Sec-Fetch-Site: cross-site`，同样 403；非浏览器客户端（Bearer / 本机脚本）通常无 Origin，不受影响。
+- **Content-Type**：有请求体时必须为 `application/json` 或 `application/*+json`，否则 415 `UNSUPPORTED_CONTENT_TYPE`；无 body 的 POST（如登出）跳过。
+- 反向代理必须保留外部 Host（或使用 `--no-local-admin` 并自行鉴权），否则同源请求可能被判跨站。
+- 开发模式（Vite `:5173` / preview `:4173`）的 proxy 已保持浏览器 Host，不再改写为 daemon 地址，避免 Origin 与 Host 不一致。
+
+## 启动守卫
+
+非回环绑定启动时按凭据状态分支：
+
+| 状态 | 行为 |
+|---|---|
+| `users.json` 损坏 | 拒绝启动 `USER_STORE_CORRUPT`，提示 `ki user list` |
+| 无 Token + 无账号 | 拒绝启动 `MCP_HTTP_TOKEN_REQUIRED`，给出 `ki mcp token generate` / `ki user create` 两条出路 |
+| 无 Token + 账号全部禁用 | 拒绝启动 `MCP_HTTP_ALL_ACCOUNTS_DISABLED`，提示 `ki user enable` / `ki user create` |
+| 仅 Token | 允许启动；stderr 警告无可用 Web 账号，Web 登录不可用 |
+| 仅启用账号 | 允许启动；stderr 警告 MCP 远程客户端仍需 Token |
+| Token + 启用账号 | 正常启动 |
 
 ## 幂等单例守护
 

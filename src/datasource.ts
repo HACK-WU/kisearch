@@ -500,7 +500,7 @@ program
       return;
     }
 
-    const task = createTaskReporter(config, { id: jobId, source: 'cli', operation: 'datasource-sync', scope });
+    const task = createTaskReporter(config, { id: jobId, source: 'cli', operator: { type: 'cli', label: '本机 CLI' }, operation: 'datasource-sync', scope });
     task.update({ state: 'running', startedAt: Date.now(), params: taskParamsOf(record, dryRun, full) });
     const abort = new AbortController();
     let settled = false;

@@ -8,6 +8,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import webPackage from '../../package.json';
+import { notifyUnauthorized } from '@/lib/authEvents';
 
 // ─── 类型（对齐 ki 后端返回结构） ─────────────────────
 
@@ -139,30 +140,40 @@ export async function reconnect(): Promise<void> {
  * 调用 MCP 工具，返回解析后的 JSON。
  * callTool 的 content[0].text 是 JSON 字符串（ki 工具返回结构化数据）。
  */
+function isUnauthorized(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 401 || code === '401';
+}
+
+async function callOnce<T>(name: string, args: Record<string, unknown>): Promise<T> {
+  const c = await getClient();
+  const res = await c.callTool({ name, arguments: args });
+  const content = res.content as { type?: string; text?: unknown }[] | undefined;
+  const text = content?.[0]?.text;
+  if (typeof text !== 'string') return text as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
+}
+
 export async function callTool<T = unknown>(name: string, args: Record<string, unknown>): Promise<T> {
   try {
-    const c = await getClient();
-    const res = await c.callTool({ name, arguments: args });
-    const content = res.content as { type?: string; text?: unknown }[] | undefined;
-    const text = content?.[0]?.text;
-    if (typeof text !== 'string') return text as T;
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      return text as unknown as T;
-    }
+    return await callOnce<T>(name, args);
   } catch (err) {
-    // 会话失效（如服务重启）→ 重建后重试一次
+    // 401 = 会话失效，交给 AuthProvider 统一跳登录；不要重连后重复请求
+    if (isUnauthorized(err)) {
+      notifyUnauthorized('mcp');
+      throw err;
+    }
+    // 其它错误（如服务重启）→ 重建后重试一次
     await reconnect();
-    const c = await getClient();
-    const res = await c.callTool({ name, arguments: args });
-    const content = res.content as { type?: string; text?: unknown }[] | undefined;
-    const text = content?.[0]?.text;
-    if (typeof text !== 'string') return text as T;
     try {
-      return JSON.parse(text) as T;
-    } catch {
-      return text as unknown as T;
+      return await callOnce<T>(name, args);
+    } catch (retryErr) {
+      if (isUnauthorized(retryErr)) notifyUnauthorized('mcp');
+      throw retryErr;
     }
   }
 }

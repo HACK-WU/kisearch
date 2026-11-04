@@ -16,10 +16,16 @@ const API_TARGET = process.env.KI_API_TARGET ?? 'http://127.0.0.1:7433';
  *   当文件找（404 / 返回 index.html），等于「预览构建产物」时所有功能都不可用；
  *   侧栏页脚也会因为拿不到 `/healthz` 而回落到 4173（一个不存在的 MCP 端口）。
  */
+/**
+ * ★ changeOrigin 必须为 false（REQ-20261103-001 S-06）：
+ * daemon 的 CSRF 校验要求浏览器 Origin 的 host+port 与请求 Host 一致；
+ * changeOrigin=true 会把 Host 改成 daemon 地址，而 Origin 仍是 Vite 的 5173/4173，
+ * 同源请求会被误判为跨站。保持 Host=浏览器地址后，Origin 与 Host 才能对上。
+ */
 const PROXY = {
-  '/api': { target: API_TARGET, changeOrigin: true },
-  '/mcp': { target: API_TARGET, changeOrigin: true },
-  '/healthz': { target: API_TARGET, changeOrigin: true },
+  '/api': { target: API_TARGET, changeOrigin: false },
+  '/mcp': { target: API_TARGET, changeOrigin: false },
+  '/healthz': { target: API_TARGET, changeOrigin: false },
 };
 export default defineConfig({
   plugins: [react()],

@@ -60,6 +60,8 @@ import {
   type LlmStatus,
 } from './llm-client.js';
 import { loadConfig, atomicWriteConfig, resetConfigCache, type KiConfig } from '../config.js';
+import type { Capability } from '../auth/capabilities.js';
+import type { Role } from '../user-store.js';
 import { validateScope, ScopeError } from '../scope.js';
 import {
   ConversationNotFoundError,
@@ -105,6 +107,12 @@ import {
 export interface ChatRouteContext {
   /** 已鉴权的 scope 集合；null = 鉴权未启用 */
   authScopes: string[] | null;
+  /** 当前 principal 的能力集合；缺省 = 不按能力过滤（兼容旧调用方/测试） */
+  capabilities?: ReadonlySet<Capability>;
+  /** 当前 session 用户 id；local-admin/token 缺省 */
+  userId?: string;
+  /** 当前角色；缺省 = 不按 owner 过滤（兼容旧调用方/测试） */
+  role?: Role;
   /** 当前请求配置快照（沿用 `runWithConfigSnapshot` 语义） */
   configSnapshot: unknown;
   /** 配置文件路径（供 fail-loud 文案引用）；未传时由实现自行解析 */
@@ -307,7 +315,15 @@ async function resolveConversationInScopes(
     return null;
   }
 
-  return authorized[0]!;
+  const hit = authorized[0]!;
+  if (ctx.role !== undefined && ctx.role !== 'admin') {
+    const owner = typeof hit.conv.ownerUserId === 'string' ? hit.conv.ownerUserId : null;
+    if (!ctx.userId || owner !== ctx.userId) {
+      sendErr(res, 403, 'SCOPE_FORBIDDEN', 'Forbidden: 无权访问该会话');
+      return null;
+    }
+  }
+  return hit;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -680,10 +696,22 @@ export async function handleConversationList(res: ServerResponse, url: URL, ctx:
   }
   const cursor = url.searchParams.get('cursor');
 
-  const { items, nextCursor } = await listConversations(scope, { archived, limit, cursor });
+  const ownerFilter = ctx.role !== undefined && ctx.role !== 'admin'
+    ? { ownerUserId: ctx.userId ?? '__no_user__' }
+    : {};
+  const { items, nextCursor } = await listConversations(scope, {
+    archived,
+    limit,
+    cursor,
+    ...ownerFilter,
+  });
 
   // total：当前视图下总条数（不含性能敏感的全文统计）—— 用全量扫描计数
-  const all = await listConversations(scope, { archived, limit: Number.MAX_SAFE_INTEGER });
+  const all = await listConversations(scope, {
+    archived,
+    limit: Number.MAX_SAFE_INTEGER,
+    ...ownerFilter,
+  });
   const total = all.items.length;
 
   sendOk(res, 200, { scope, items, total, nextCursor });
@@ -714,6 +742,7 @@ export async function handleConversationCreate(req: IncomingMessage, res: Server
   const conv = await createConversation(scope, {
     ...(title !== undefined ? { title } : {}),
     systemPrompt: effectiveSystemPrompt,
+    ownerUserId: ctx.userId ?? null,
   });
 
   sendOk(res, 201, {
@@ -905,6 +934,10 @@ export async function handleConversationDelete(res: ServerResponse, id: string, 
  * · ★ 绝不触碰 `kb/{scope}/`
  */
 export async function handleConversationsClear(res: ServerResponse, url: URL, ctx: ChatRouteContext): Promise<void> {
+  if (ctx.role !== undefined && ctx.role !== 'admin') {
+    sendErr(res, 403, 'OPS_FORBIDDEN', 'Forbidden: 只有管理员可以清空会话');
+    return;
+  }
   const scope = resolveListScope(url);
   if (!requireScope(ctx, scope, '/conversations', res)) return;
   const deleted = await deleteAllConversations(scope);
@@ -1043,6 +1076,7 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
     userText: text,
     mode: 'append-user',
     refs,
+    capabilities: ctx.capabilities,
   });
 }
 
@@ -1071,6 +1105,7 @@ export async function handleConversationRegenerate(req: IncomingMessage, res: Se
     convId: id,
     userText: lastUser.content,
     mode: 'regenerate',
+    capabilities: ctx.capabilities,
   });
 }
 
@@ -1107,12 +1142,15 @@ export async function handleMessageEdit(req: IncomingMessage, res: ServerRespons
     userText: text,
     mode: 'edit',
     msgId,
+    capabilities: ctx.capabilities,
   });
 }
 
 /** 生成参数（三个生成类接口共用） */
 interface GenerationSpec {
   scope: string;
+  /** 当前 principal 能力；缺省 = 不过滤（兼容旧调用方/测试） */
+  capabilities?: ReadonlySet<Capability>;
   convId: string;
   userText: string;
   mode: 'append-user' | 'regenerate' | 'edit';
@@ -1268,6 +1306,7 @@ async function runGeneration(
       convSystemPrompt: convAfterPrep.systemPrompt,
       refs: effectiveRefs,
       signal: ac.signal,
+      capabilities: spec.capabilities,
     });
 
     for await (const ev of events) {
