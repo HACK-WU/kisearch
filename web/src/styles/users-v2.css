@@ -368,3 +368,9 @@
 }
 
 .ki-detail-sec .u2-token-note { margin: 8px 0 10px; }
+
+
+/* 桌面双列压缩 Token 内联表单高度；390 保持单列 */
+@media (min-width: 700px) {
+  .u2-inline-panel__row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

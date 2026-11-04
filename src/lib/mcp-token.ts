@@ -89,6 +89,63 @@ export function isScopeAuthorized(authScopes: string[] | null, scope: string): b
   return authScopes.includes(ALL_SCOPES) || authScopes.includes(scope);
 }
 
+const TOKENS_LOCK_TIMEOUT_MS = 5_000;
+const TOKENS_LOCK_STALE_MS = 30_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Token 读-改-写文件锁（与 users.json 同思路）。
+ * 原子 rename 只能防半写，不能防两个进程同时读旧文件再各自覆盖；
+ * 创建/更新/删除/按 owner 清理必须串行。纯读路径不拿锁。
+ */
+function withTokensLock<T>(filePath: string, fn: () => T): T {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + TOKENS_LOCK_TIMEOUT_MS;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+      try {
+        fs.writeFileSync(fd, String(process.pid));
+      } catch (writeError) {
+        try { fs.closeSync(fd); } catch { /* ignore */ }
+        fd = undefined;
+        try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+        throw writeError;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > TOKENS_LOCK_STALE_MS) {
+          fs.rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch {
+        // 锁刚好被释放：重试即可
+      }
+      if (Date.now() >= deadline) {
+        throw Object.assign(
+          new Error(`Token 存储被占用（${lockPath}）。请稍后重试；若确认无进程操作，可删除该锁文件。`),
+          { code: 'MCP_TOKEN_LOCKED' },
+        );
+      }
+      sleepSync(10);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+    try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+  }
+}
+
 /** 短 ID 字母表（去除易混淆字符 0/O/1/l/I） */
 const ID_ALPHABET = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -210,11 +267,13 @@ export function countTokensByOwner(ownerId: string, filePath = getTokensPath()):
 
 /** 删除某账号名下的全部 Token（删除账号时清理）；返回删除数量 */
 export function deleteTokensByOwner(ownerId: string, filePath = getTokensPath()): number {
-  const records = listTokensStrict(filePath);
-  const kept = records.filter((record) => record.ownerId !== ownerId);
-  const removed = records.length - kept.length;
-  if (removed > 0) writeTokens(kept, filePath);
-  return removed;
+  return withTokensLock(filePath, () => {
+    const records = listTokensStrict(filePath);
+    const kept = records.filter((record) => record.ownerId !== ownerId);
+    const removed = records.length - kept.length;
+    if (removed > 0) writeTokens(kept, filePath);
+    return removed;
+  });
 }
 
 /**
@@ -230,6 +289,41 @@ export function resolveDefaultCliTokenOwner(usersPath = getUsersPath()): string 
   } catch {
     return LOCAL_ADMIN_OWNER_ID;
   }
+}
+
+/**
+ * 把 ownerless 旧 Token 显式迁移到指定 owner。
+ * - tokenId 为空：迁移全部无归属 Token；否则只迁移指定 id
+ * - Token 已归属或不存在 → fail-loud
+ * - 不会自动在读取/启动路径调用；只由 `ki mcp token adopt` 触发
+ */
+export function adoptOwnerlessTokens(
+  ownerId: string,
+  tokenId?: string,
+  filePath = getTokensPath(),
+): TokenRecord[] {
+  if (!ownerId) throw new Error('adopt 需要指定 owner');
+  return withTokensLock(filePath, () => {
+    const records = listTokensStrict(filePath);
+    let targets: TokenRecord[];
+    if (tokenId) {
+      const target = records.find((record) => record.id === tokenId);
+      if (!target) {
+        throw Object.assign(new Error(`Token 不存在（id: ${tokenId}）。`), { code: 'TOKEN_NOT_FOUND' });
+      }
+      if (target.ownerId) {
+        throw Object.assign(new Error(`Token 已归属账号 ${target.ownerId}，无需迁移。`), {
+          code: 'TOKEN_ALREADY_OWNED',
+        });
+      }
+      targets = [target];
+    } else {
+      targets = records.filter((record) => !record.ownerId);
+    }
+    for (const target of targets) target.ownerId = ownerId;
+    if (targets.length > 0) writeTokens(records, filePath);
+    return targets;
+  });
 }
 
 /** Token 的有效授权：owner 缺失按旧记录；owner 禁用/过期 → 失效；owner 为 viewer → 强制只读 */
@@ -300,25 +394,77 @@ export function createToken(
   readOnly = false,
   meta: CreateTokenMeta = {},
 ): TokenRecord {
-  // 严格读取：文件损坏时拒绝覆盖写回（否则会永久丢失全部现有记录）
-  const records = listTokensStrict(filePath);
-  const existingIds = new Set(records.map((r) => r.id));
-  let id = generateShortId();
-  while (existingIds.has(id)) id = generateShortId();
-  const record: TokenRecord = {
-    id,
-    token: generateTokenValue(),
-    scopes,
-    createdAt: new Date().toISOString(),
-    // 仅只读时落字段：读写保持旧格式（旧版本读到无此字段同样按读写处理）
-    ...(readOnly ? { readOnly: true } : {}),
-    ...(meta.label?.trim() ? { label: meta.label.trim() } : {}),
-    ...(meta.ownerId ? { ownerId: meta.ownerId } : {}),
-    ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
-  };
-  records.push(record);
-  writeTokens(records, filePath);
-  return record;
+  return withTokensLock(filePath, () => {
+    // 严格读取：文件损坏时拒绝覆盖写回（否则会永久丢失全部现有记录）
+    const records = listTokensStrict(filePath);
+    const existingIds = new Set(records.map((r) => r.id));
+    let id = generateShortId();
+    while (existingIds.has(id)) id = generateShortId();
+    const record: TokenRecord = {
+      id,
+      token: generateTokenValue(),
+      scopes,
+      createdAt: new Date().toISOString(),
+      // 仅只读时落字段：读写保持旧格式（旧版本读到无此字段同样按读写处理）
+      ...(readOnly ? { readOnly: true } : {}),
+      ...(meta.label?.trim() ? { label: meta.label.trim() } : {}),
+      ...(meta.ownerId ? { ownerId: meta.ownerId } : {}),
+      ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
+    };
+    records.push(record);
+    writeTokens(records, filePath);
+    return record;
+  });
+}
+
+export interface CreateOwnedTokenInput {
+  scopes: string[];
+  label: string;
+  ownerId: string;
+  createdBy: TokenCreator;
+  readOnly: boolean;
+  /** 普通账号上限；管理员传 Infinity */
+  maxTokens: number;
+}
+
+/**
+ * 原子创建「归属账号」的 Token：重名/上限判断与写入必须在同一把锁内。
+ * 如果先把 cap 检查放在锁外，两个并发请求可同时通过 9/10 的检查。
+ */
+export function createOwnedToken(
+  input: CreateOwnedTokenInput,
+  filePath = getTokensPath(),
+): TokenRecord {
+  const label = input.label.trim();
+  if (!label || label.length > 64) {
+    throw Object.assign(new Error('Token 名称长度需为 1-64 个字符'), { code: 'TOKEN_INVALID' });
+  }
+  return withTokensLock(filePath, () => {
+    const records = listTokensStrict(filePath);
+    const owned = records.filter((record) => record.ownerId === input.ownerId);
+    if (owned.some((record) => tokenLabel(record).toLowerCase() === label.toLowerCase())) {
+      throw Object.assign(new Error('该账号下已存在同名 Token'), { code: 'TOKEN_LABEL_EXISTS' });
+    }
+    if (owned.length >= input.maxTokens) {
+      throw Object.assign(new Error(`已达 Token 上限（${input.maxTokens}）`), { code: 'TOKEN_LIMIT_REACHED' });
+    }
+    const existingIds = new Set(records.map((record) => record.id));
+    let id = generateShortId();
+    while (existingIds.has(id)) id = generateShortId();
+    const record: TokenRecord = {
+      id,
+      token: generateTokenValue(),
+      label,
+      ownerId: input.ownerId,
+      createdBy: input.createdBy,
+      scopes: input.scopes,
+      createdAt: new Date().toISOString(),
+      ...(input.readOnly ? { readOnly: true } : {}),
+    };
+    records.push(record);
+    writeTokens(records, filePath);
+    return record;
+  });
 }
 
 /**
@@ -339,21 +485,23 @@ export function updateToken(
       { code: 'MCP_TOKEN_UPDATE_NOTHING_TO_DO' },
     );
   }
-  const records = listTokensStrict(filePath);
-  const target = records.find((r) => r.id === id);
-  if (!target) {
-    throw Object.assign(new Error(`Token 不存在（id: ${id}）。请用 ki mcp token list 查看有效 id。`), {
-      code: 'TOKEN_NOT_FOUND',
-    });
-  }
-  if (patch.scopes !== undefined) target.scopes = patch.scopes;
-  if (patch.readOnly !== undefined) {
-    // 切回读写时删除字段（不写 false），保持文件格式与旧版一致
-    if (patch.readOnly) target.readOnly = true;
-    else delete target.readOnly;
-  }
-  writeTokens(records, filePath);
-  return target;
+  return withTokensLock(filePath, () => {
+    const records = listTokensStrict(filePath);
+    const target = records.find((r) => r.id === id);
+    if (!target) {
+      throw Object.assign(new Error(`Token 不存在（id: ${id}）。请用 ki mcp token list 查看有效 id。`), {
+        code: 'TOKEN_NOT_FOUND',
+      });
+    }
+    if (patch.scopes !== undefined) target.scopes = patch.scopes;
+    if (patch.readOnly !== undefined) {
+      // 切回读写时删除字段（不写 false），保持文件格式与旧版一致
+      if (patch.readOnly) target.readOnly = true;
+      else delete target.readOnly;
+    }
+    writeTokens(records, filePath);
+    return target;
+  });
 }
 
 /**
@@ -373,15 +521,17 @@ export function updateTokenScopes(
  * @throws Error（code: TOKEN_NOT_FOUND）id 不存在时
  */
 export function deleteToken(id: string, filePath = getTokensPath()): void {
-  const records = listTokensStrict(filePath);
-  const idx = records.findIndex((r) => r.id === id);
-  if (idx === -1) {
-    throw Object.assign(new Error(`Token 不存在（id: ${id}）。请用 ki mcp token list 查看有效 id。`), {
-      code: 'TOKEN_NOT_FOUND',
-    });
-  }
-  records.splice(idx, 1);
-  writeTokens(records, filePath);
+  withTokensLock(filePath, () => {
+    const records = listTokensStrict(filePath);
+    const idx = records.findIndex((r) => r.id === id);
+    if (idx === -1) {
+      throw Object.assign(new Error(`Token 不存在（id: ${id}）。请用 ki mcp token list 查看有效 id。`), {
+        code: 'TOKEN_NOT_FOUND',
+      });
+    }
+    records.splice(idx, 1);
+    writeTokens(records, filePath);
+  });
 }
 
 /**

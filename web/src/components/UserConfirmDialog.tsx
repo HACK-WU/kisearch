@@ -1,7 +1,7 @@
 /**
  * 用户管理 v2 通用确认弹窗（删除账号 / 撤销 Token）。
  */
-import type { JSX, ReactNode } from 'react';
+import { useEffect, useRef, type JSX, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { UserDialog } from './UserDialog';
 
@@ -15,6 +15,18 @@ export interface UserConfirmDialogProps {
 }
 
 export function UserConfirmDialog({ title, body, confirmLabel, busy, onConfirm, onClose }: UserConfirmDialogProps): JSX.Element {
+  // 渲染时抓取触发元素：子 UserDialog 的 mount effect 会把焦点移进弹窗，
+  // 放到 useEffect 里再抓只会抓到弹窗容器本身。
+  const returnFocusRef = useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+  useEffect(() => () => {
+    const target = returnFocusRef.current;
+    if (target && document.contains(target)) window.setTimeout(() => target.focus(), 0);
+  }, []);
+
   return createPortal(
     <UserDialog
       title={title}

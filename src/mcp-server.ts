@@ -30,7 +30,7 @@ import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 import { startDataSourceScheduler, stopDataSourceScheduler } from './lib/datasource-scheduler.js';
-import { getUserStoreStatus } from './lib/user-store.js';
+import { getUserStoreStatus, isUserActive, listUsers } from './lib/user-store.js';
 
 /**
  * 向量库空闲释放锁超时（ms）：daemon 空闲后释放已打开的 Collection。
@@ -52,6 +52,8 @@ import {
   tokenLabel,
   tokenCreator,
   resolveDefaultCliTokenOwner,
+  adoptOwnerlessTokens,
+  LOCAL_ADMIN_OWNER_ID,
   ALL_SCOPES,
 } from './lib/mcp-token.js';
 
@@ -82,6 +84,8 @@ const MCP_HELP = `ki mcp - 启动 kisearch MCP Server
   ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
                                 改授权 scope / 切换只读（两项至少给一个）
   ki mcp token delete <id>      删除指定 Token（立即失效）
+  ki mcp token adopt [--owner <admin>] [--id <tokenId>]
+                                把旧 ownerless Token 显式迁移给管理员
   ki mcp token -h               查看 token 子命令与参数说明
 
 只读 Token：远程 MCP 客户端连上后看不到写工具（new/update/delete 均不可用），
@@ -107,16 +111,20 @@ const TOKEN_HELP = `ki mcp token - 管理 MCP 授权 Token
   ki mcp token generate --scope <scope> [--label <name>] [--read-only]
   ki mcp token update <id> [--scope <scope>] [--read-only|--read-write]
   ki mcp token delete <id>
+  ki mcp token adopt [--owner <admin>] [--id <tokenId>]
 
 子命令：
   list                   列出所有 Token（含短 ID、明文、授权 scope、访问模式、创建时间）
   generate               生成授权 Token（scope 必填：单个 / 逗号分隔多个 / all 表示全部）
   update                 改授权 scope / 切换访问模式（两项至少给一个，可只改其中一项）
   delete                 删除指定 Token（立即失效）
+  adopt                  把旧版本无归属 Token 显式迁移给管理员；不改 owner 的其他记录
 
 参数：
   --scope <scope>        授权范围：单个 scope / 逗号分隔多个 / all（表示全部）
   --label <name>         展示名称（generate 用；缺省按日期生成）；CLI 创建的 Token 默认归属管理员
+  --owner <admin>        adopt 目标管理员（用户名或 id；缺省唯一启用管理员 / local-admin）
+  --id <tokenId>         adopt 只迁移指定 Token（缺省全部 ownerless Token）
   --read-only            只读模式：远程客户端看不到写工具，构造 tools/call 也会被拒绝
   --read-write           读写模式（update 用于切回读写；与 --read-only 互斥）
 
@@ -281,7 +289,7 @@ function resolveScopesFlag(args: string[], action: string): string[] {
  * ⚠️ 缺了这道校验，`--readonly`（少一个连字符）、`--readOnly` 这类拼错会被静默忽略 ——
  * 用户以为已经设成只读，实际仍是读写（安全属性静默失效）。
  */
-const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write', '--label'];
+const TOKEN_ALLOWED_FLAGS = ['--scope', '--read-only', '--read-write', '--label', '--owner', '--id'];
 
 /**
  * 拼写近似匹配：把 `--readonly` / `--readOnly` / `--Read-Only` 这类写法归一到
@@ -479,6 +487,68 @@ function runTokenCommand(args: string[]): void {
     } catch (err) {
       const e = err as Error & { code?: string };
       failJson(e.message, e.code ?? 'MCP_TOKEN_UPDATE_FAILED');
+    }
+    return;
+  }
+
+  // adopt：把旧版本 ownerless Token 显式迁移给管理员（不自动在读取/启动时改归属）
+  if (action === 'adopt') {
+    try {
+      const ownerRaw = getFlagValue(args, '--owner')?.trim();
+      let ownerId = '';
+      let ownerLabel = '';
+      if (ownerRaw === LOCAL_ADMIN_OWNER_ID) {
+        if (listUsers().some((user) => user.role === 'admin')) {
+          failJson(
+            '已有管理员账号，请用 --owner <admin> 指定；local-admin 仅用于没有 admin 记录的部署。',
+            'TOKEN_OWNER_LOCAL_ADMIN_CONFLICT',
+          );
+        }
+        ownerId = LOCAL_ADMIN_OWNER_ID;
+        ownerLabel = '本机管理员';
+      } else {
+        const users = listUsers();
+        if (ownerRaw) {
+          const wanted = ownerRaw.toLowerCase();
+          const owner = users.find((user) => user.username.toLowerCase() === wanted || user.id === ownerRaw);
+          if (!owner) failJson(`账号不存在：${ownerRaw}`, 'TOKEN_OWNER_NOT_FOUND');
+          if (owner.role !== 'admin') failJson('迁移目标必须是管理员账号', 'TOKEN_OWNER_NOT_ADMIN');
+          if (!isUserActive(owner)) failJson('目标管理员已禁用或已过期', 'TOKEN_OWNER_INACTIVE');
+          ownerId = owner.id;
+          ownerLabel = owner.username;
+        } else {
+          ownerId = resolveDefaultCliTokenOwner();
+          ownerLabel = ownerId === LOCAL_ADMIN_OWNER_ID
+            ? '本机管理员'
+            : (users.find((user) => user.id === ownerId)?.username ?? ownerId);
+          if (ownerId !== LOCAL_ADMIN_OWNER_ID) {
+            const owner = users.find((user) => user.id === ownerId);
+            if (!owner) failJson('找不到默认管理员账号', 'TOKEN_OWNER_NOT_FOUND');
+            if (!isUserActive(owner)) failJson('默认管理员已禁用或已过期', 'TOKEN_OWNER_INACTIVE');
+          }
+        }
+      }
+      const tokenId = getFlagValue(args, '--id')?.trim() || undefined;
+      const adopted = adoptOwnerlessTokens(ownerId, tokenId);
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            ownerId,
+            owner: ownerLabel,
+            count: adopted.length,
+            tokens: adopted.map((record) => ({ id: record.id, label: tokenLabel(record) })),
+            hint: adopted.length > 0
+              ? `已迁移 ${adopted.length} 个无归属 Token 给 ${ownerLabel}；旧 Token 在迁移前仍可鉴权。`
+              : '没有需要迁移的 Token（只处理 ownerless 记录；已归属 Token 不会被改动）。',
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      failJson(e.message, e.code ?? 'MCP_TOKEN_ADOPT_FAILED');
     }
     return;
   }

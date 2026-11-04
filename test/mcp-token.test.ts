@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 
 import {
   generateTokenValue,
@@ -23,7 +24,10 @@ import {
   deleteToken,
   findTokenScopes,
   findTokenAuth,
+  listTokensByOwner,
+  createOwnedToken,
   resolveDefaultCliTokenOwner,
+  adoptOwnerlessTokens,
   LOCAL_ADMIN_OWNER_ID,
   tokenCount,
   getTokensPath,
@@ -299,5 +303,122 @@ describe('CLI Token 默认归属与 owner 有效权限', () => {
 
     updateUserById(editor.id, { disabled: false, expiresAt: '2020-01-01T00:00:00.000Z' }, usersPath);
     assert.equal(findTokenAuth(record.token, tokensPath, usersPath), undefined);
+  });
+});
+
+
+describe('Token 存储锁', () => {
+  it('创建/更新/删除后不残留 .lock/.tmp', () => {
+    const r = createToken(['a'], tokensPath);
+    updateTokenScopes(r.id, ['a', 'b'], tokensPath);
+    deleteToken(r.id, tokensPath);
+    const files = fs.readdirSync(path.dirname(tokensPath));
+    assert.deepEqual(files.filter((f) => f.endsWith('.lock') || f.endsWith('.tmp')), []);
+  });
+
+  it('stale 锁可自动恢复', () => {
+    const lockPath = `${tokensPath}.lock`;
+    fs.writeFileSync(lockPath, '999999');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(lockPath, old, old);
+    const record = createToken(['a'], tokensPath, false, { label: 'stale-lock' });
+    assert.ok(record.id);
+    assert.equal(fs.existsSync(lockPath), false);
+  });
+});
+
+describe('adoptOwnerlessTokens', () => {
+  it('只迁移 ownerless Token，且迁移后可被 owner 管理', () => {
+    const usersPath = path.join(tmpDir, 'adopt-users.json');
+    const admin = createUser({ username: 'adopt-admin', password: 'Passw0rd!', role: 'admin' }, usersPath);
+    const legacy = createToken(['all'], tokensPath, false, { label: 'legacy' });
+    const owned = createToken(['all'], tokensPath, false, {
+      label: 'owned',
+      ownerId: 'other-user',
+      createdBy: 'cli',
+    });
+
+    const adopted = adoptOwnerlessTokens(admin.id, undefined, tokensPath);
+    assert.deepEqual(adopted.map((record) => record.id), [legacy.id]);
+    assert.equal(listTokensByOwner(admin.id, tokensPath).length, 1);
+    assert.equal(findTokenAuth(legacy.token, tokensPath, usersPath)?.readOnly, false);
+    assert.equal(findTokenAuth(owned.token, tokensPath, usersPath), undefined);
+
+    assert.deepEqual(adoptOwnerlessTokens(admin.id, undefined, tokensPath), []);
+    assert.throws(
+      () => adoptOwnerlessTokens(admin.id, legacy.id, tokensPath),
+      (err: Error & { code?: string }) => err.code === 'TOKEN_ALREADY_OWNED',
+    );
+    assert.throws(
+      () => adoptOwnerlessTokens(admin.id, 'nope1234', tokensPath),
+      (err: Error & { code?: string }) => err.code === 'TOKEN_NOT_FOUND',
+    );
+  });
+});
+
+
+describe('Token 存储并发', () => {
+  it('4 个进程并发各写 10 条：无丢更新、无锁残留', async () => {
+    const repoRoot = process.cwd();
+    const jitiCli = path.join(repoRoot, 'node_modules', 'jiti', 'lib', 'jiti-cli.mjs');
+    const modulePath = path.join(repoRoot, 'src', 'lib', 'mcp-token.js');
+    const scriptPath = path.join(tmpDir, 'concurrent-create.ts');
+    fs.writeFileSync(scriptPath, [
+      `import { createToken } from ${JSON.stringify(modulePath)};`,
+      `const [tokensPath, worker] = process.argv.slice(2);`,
+      `for (let i = 0; i < 10; i += 1) {`,
+      `  createToken(['all'], tokensPath, false, { label: worker + '-' + i, ownerId: 'concurrent-owner', createdBy: 'cli' });`,
+      `}`,
+    ].join('\n'));
+
+    const runWorker = (worker: number): Promise<void> => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [jitiCli, scriptPath, tokensPath, String(worker)], {
+        stdio: 'ignore',
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`worker ${worker} exit ${code}`));
+      });
+    });
+
+    await Promise.all([0, 1, 2, 3].map(runWorker));
+    assert.equal(listTokens(tokensPath).length, 40);
+    assert.equal(listTokensByOwner('concurrent-owner', tokensPath).length, 40);
+    assert.equal(fs.existsSync(`${tokensPath}.lock`), false);
+  });
+});
+
+
+describe('Token 上限并发原子性', () => {
+  it('4 进程并发各尝试 10 次：最终只允许 10 个', async () => {
+    const repoRoot = process.cwd();
+    const jitiCli = path.join(repoRoot, 'node_modules', 'jiti', 'lib', 'jiti-cli.mjs');
+    const modulePath = path.join(repoRoot, 'src', 'lib', 'mcp-token.js');
+    const scriptPath = path.join(tmpDir, 'concurrent-cap.ts');
+    fs.writeFileSync(scriptPath, [
+      `import { createOwnedToken } from ${JSON.stringify(modulePath)};`,
+      `const [tokensPath, worker] = process.argv.slice(2);`,
+      `for (let i = 0; i < 10; i += 1) {`,
+      `  try {`,
+      `    createOwnedToken({ scopes: ['all'], label: worker + '-' + i, ownerId: 'cap-owner', createdBy: 'cli', readOnly: false, maxTokens: 10 }, tokensPath);`,
+      `  } catch { /* 上限/重名竞争失败，继续 */ }`,
+      `}`,
+    ].join('\n'));
+
+    const runWorker = (worker: number): Promise<void> => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [jitiCli, scriptPath, tokensPath, String(worker)], {
+        stdio: 'ignore',
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`worker ${worker} exit ${code}`));
+      });
+    });
+
+    await Promise.all([0, 1, 2, 3].map(runWorker));
+    assert.equal(listTokensByOwner('cap-owner', tokensPath).length, 10);
+    assert.equal(fs.existsSync(`${tokensPath}.lock`), false);
   });
 });

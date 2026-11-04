@@ -160,12 +160,16 @@ export function TokenCreateForm({ ownerRole, busy, submitLabel = '创建 Token',
   const [scopeMode, setScopeMode] = useState<'all' | 'specific'>('all');
   const [scopes, setScopes] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const labelRef = useRef<HTMLInputElement>(null);
   const { data } = useScopeList();
   const availableScopes = data?.scopes?.map((item) => item.scope) ?? [];
 
   useEffect(() => {
-    const timer = window.setTimeout(() => labelRef.current?.focus(), 0);
+    const timer = window.setTimeout(() => {
+      rootRef.current?.scrollIntoView({ block: 'nearest' });
+      labelRef.current?.focus();
+    }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -192,7 +196,7 @@ export function TokenCreateForm({ ownerRole, busy, submitLabel = '创建 Token',
   };
 
   return (
-    <div className="u2-inline-panel">
+    <div className="u2-inline-panel" ref={rootRef}>
       <div className="u2-inline-panel__head">
         <span className="u2-inline-panel__title">新增 Token</span>
         <span className="u2-hint">明文只显示一次</span>

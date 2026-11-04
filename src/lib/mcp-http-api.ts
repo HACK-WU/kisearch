@@ -29,7 +29,7 @@ import { getScopeImportConfig, loadConfig, resolveScope, runWithConfigSnapshot, 
 import {
   ALL_SCOPES,
   LOCAL_ADMIN_OWNER_ID,
-  createToken,
+  createOwnedToken,
   deleteToken,
   deleteTokensByOwner,
   listTokens,
@@ -669,6 +669,38 @@ function tokenError(
   sendJson(res, status, { ok: false, code, error });
 }
 
+/** 在 Token 存储锁内完成「重名 + 上限 + 写入」，避免并发创建突破上限 */
+function createTokenForOwner(
+  res: http.ServerResponse,
+  owner: TokenOwner,
+  createdBy: 'self' | 'admin',
+  label: string,
+  scopes: string[],
+  readOnly: boolean,
+): TokenRecord | null {
+  try {
+    return createOwnedToken({
+      scopes,
+      label,
+      ownerId: owner.id,
+      createdBy,
+      readOnly,
+      maxTokens: tokenLimitForOwner(owner),
+    });
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'TOKEN_LABEL_EXISTS' || code === 'TOKEN_LIMIT_REACHED') {
+      tokenError(res, 409, code, (error as Error).message);
+      return null;
+    }
+    if (code === 'TOKEN_INVALID') {
+      tokenError(res, 400, code, (error as Error).message);
+      return null;
+    }
+    throw error;
+  }
+}
+
 /** 无 datasource.read 的账号看任务时脱敏数据源字段（当前快照无路径字段，保留为未来防线） */
 function taskViewForPrincipal(task: TaskRecord, principal: WebPrincipal): TaskRecord {
   const caps = capabilitiesForPrincipal(principal);
@@ -1039,21 +1071,9 @@ export async function handleApiRequest(
           tokenError(res, 400, 'TOKEN_INVALID', 'readOnly 必须是布尔值');
           return;
         }
-        const existing = listTokensByOwner(owner.id);
-        if (existing.some((record) => tokenLabel(record).toLowerCase() === labelResult.label.toLowerCase())) {
-          tokenError(res, 409, 'TOKEN_LABEL_EXISTS', '该账号下已存在同名 Token');
-          return;
-        }
-        if (existing.length >= tokenLimitForOwner(owner)) {
-          tokenError(res, 409, 'TOKEN_LIMIT_REACHED', `普通账号最多 ${TOKEN_LIMIT_USER} 个 Token`);
-          return;
-        }
         const readOnly = owner.role === 'viewer' ? true : body.readOnly === true;
-        const record = createToken(scopeResult.scopes, undefined, readOnly, {
-          label: labelResult.label,
-          ownerId: owner.id,
-          createdBy: 'self',
-        });
+        const record = createTokenForOwner(res, owner, 'self', labelResult.label, scopeResult.scopes, readOnly);
+        if (!record) return;
         sendJson(res, 201, { ok: true, token: record.token, item: tokenView(record, owner) });
         return;
       }
@@ -1135,21 +1155,9 @@ export async function handleApiRequest(
           tokenError(res, 400, 'TOKEN_INVALID', 'readOnly 必须是布尔值');
           return;
         }
-        const existing = listTokensByOwner(owner.id);
-        if (existing.some((record) => tokenLabel(record).toLowerCase() === labelResult.label.toLowerCase())) {
-          tokenError(res, 409, 'TOKEN_LABEL_EXISTS', '该账号下已存在同名 Token');
-          return;
-        }
-        if (existing.length >= tokenLimitForOwner(owner)) {
-          tokenError(res, 409, 'TOKEN_LIMIT_REACHED', `普通账号最多 ${TOKEN_LIMIT_USER} 个 Token`);
-          return;
-        }
         const readOnly = owner.role === 'viewer' ? true : body.readOnly === true;
-        const record = createToken(scopeResult.scopes, undefined, readOnly, {
-          label: labelResult.label,
-          ownerId: owner.id,
-          createdBy: 'admin',
-        });
+        const record = createTokenForOwner(res, owner, 'admin', labelResult.label, scopeResult.scopes, readOnly);
+        if (!record) return;
         sendJson(res, 201, { ok: true, token: record.token, item: tokenView(record, owner) });
         return;
       }

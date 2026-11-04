@@ -40,6 +40,43 @@ export function UserDialog({
     return () => window.removeEventListener('keydown', onKey);
   }, [busy, onClose]);
 
+  useEffect(() => {
+    const root = dialogRef.current;
+    if (!root) return undefined;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab') return;
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), '
+        + 'textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => (
+        !element.closest('[hidden]')
+        && (element.offsetWidth > 0 || element.offsetHeight > 0 || element === document.activeElement)
+      ));
+      if (focusables.length === 0) {
+        event.preventDefault();
+        root.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (!root.contains(active)) {
+        event.preventDefault();
+        first.focus();
+        return;
+      }
+      if (event.shiftKey && (active === first || active === root)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    root.addEventListener('keydown', onKey);
+    return () => root.removeEventListener('keydown', onKey);
+  }, []);
+
   const classes = [
     'ki-dialog',
     'u2-dialog',
