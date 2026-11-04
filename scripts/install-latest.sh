@@ -5,7 +5,6 @@
 set -e
 
 REPO="HACK-WU/kisearch"
-INSTALL_CMD="npm install -g"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -60,6 +59,12 @@ get_release_via_api() {
   else
     LATEST_VERSION=$(echo "$BODY" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/"tag_name": *"//;s/"//')
     DOWNLOAD_URL=$(echo "$BODY" | grep -o '"browser_download_url": *"[^"]*\.tgz"' | head -1 | sed 's/"browser_download_url": *"//;s/"//')
+  fi
+  
+  # 方法2 / 方法3 都在返回前校验非空，这里对齐：release 漏传 .tgz 资产时
+  # 拿到空下载地址，应降级到下一个方法，而不是让 npm 收到空参数后抛 usage 错误
+  if [ -z "$LATEST_VERSION" ] || [ -z "$DOWNLOAD_URL" ]; then
+    return 1
   fi
   
   return 0
@@ -139,20 +144,29 @@ check_current_version() {
 install_package() {
   info "最新版本: $LATEST_VERSION"
   info "下载地址: $DOWNLOAD_URL"
-  
-  if [ "$CURRENT_VERSION" != "未安装" ] && [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
-    info "已是最新版本，无需更新"
+
+  # release tag 形如 vX.Y.Z，而 `ki --version` 输出不带 v 前缀，比较前统一去掉
+  local current_stripped="${CURRENT_VERSION#v}"
+  local latest_stripped="${LATEST_VERSION#v}"
+
+  if [ "$CURRENT_VERSION" != "未安装" ] && [ -n "$latest_stripped" ] && [ "$current_stripped" = "$latest_stripped" ]; then
+    info "本地版本与最新 release 一致（$CURRENT_VERSION），跳过安装"
     exit 0
+  fi
+  
+  # 这里只做等值判断，不比较版本大小（sort -V 在 BSD/macOS 上不可用）：
+  # 把 from → to 打出来，本地版本更高时用户能一眼看出这实际是降级
+  if [ "$CURRENT_VERSION" != "未安装" ]; then
+    info "版本变化: $CURRENT_VERSION → $LATEST_VERSION"
   fi
   
   info "开始安装..."
   
+  # 直接以参数形式传 URL，不做字符串拼接进 shell 求值（原先 --local 分支已是此写法）
   if [ -n "$1" ] && [ "$1" = "--local" ]; then
     info "使用本地模式安装"
-    npm install -g "$DOWNLOAD_URL"
-  else
-    eval "$INSTALL_CMD $DOWNLOAD_URL"
   fi
+  npm install -g "$DOWNLOAD_URL"
   
   info "安装完成！"
   ki --version 2>/dev/null && info "版本验证成功" || warn "版本验证失败，请手动检查"
