@@ -188,12 +188,3 @@ ki_search(scope: "${scope}", query: "核心词", limit: 4, threshold: 0.02, tags
 
 ---
 
-## 7. 数据存储位置
-
-```
-<ki安装路径>/kb/${scope}/
-├── group-index.json / relations-cache.json
-└── {Group}/index.json
-```
-
-`ki_search` 向量数据：`~/.local/share/memory-mcp/lancedb/`
