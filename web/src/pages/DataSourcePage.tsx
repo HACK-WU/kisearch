@@ -945,13 +945,14 @@ export function DataSourcePage(): JSX.Element {
         <p className="ki-task-notice ki-task-notice--warn" role="alert">{addState.error}</p>
       ) : null}
 
+      {/* 添加弹窗的遮罩**不响应点击**（2026-11-04 用户拍板，缺陷修复）：
+          表单有 Scope + 仓库地址 + 分支 + 子目录 + Group 五处输入，误点遮罩就整套丢失。
+          关闭入口收敛为 ✕ / Esc /「取消」三个**显式**动作，且一律直接关（仍不做二次确认）。
+          历史：2026-11-02 曾定为「点遮罩直接关」，用户真机操作后判定为缺陷。
+          守卫：`web/test/datasource-add-close.test.mjs` —— 遮罩必须保持纯容器
+          （只有 className，不挂任何鼠标/指针/键盘事件），别再把关闭口径加回来。 */}
       {addOpen ? (
-        <div
-          className="ki-overlay ki-overlay--show ki-overlay--front"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setAddOpen(false);
-          }}
-        >
+        <div className="ki-overlay ki-overlay--show ki-overlay--front">
           <section ref={addDialogRef} className="ki-dialog ki-dialog--form ki-ds-add" id="ki-ds-add-form" role="dialog" aria-modal="true" aria-labelledby="ki-ds-add-title" tabIndex={-1}>
             <header className="ki-dialog__head">
               <div>
