@@ -205,6 +205,16 @@ function normalizeLastSync(raw: unknown): DataSourceLastSync | null {
       : {}),
     ...(typeof resultRaw.createdTotal === 'number' ? { createdTotal: Math.max(0, Math.trunc(resultRaw.createdTotal)) } : {}),
     ...(resultRaw.createdTruncated === true ? { createdTruncated: true } : {}),
+    // 变更明细：旧快照没有该字段 ⇒ 保持 undefined（页面据此显示"未记录"，不能当成 0 篇）
+    ...(Array.isArray(resultRaw.modified)
+      ? {
+        modified: (resultRaw.modified as Array<{ group?: unknown; relation?: unknown }>)
+          .filter((item) => typeof item?.group === 'string' && typeof item?.relation === 'string')
+          .map((item) => ({ group: String(item.group), relation: String(item.relation) })),
+      }
+      : {}),
+    ...(typeof resultRaw.modifiedTotal === 'number' ? { modifiedTotal: Math.max(0, Math.trunc(resultRaw.modifiedTotal)) } : {}),
+    ...(resultRaw.modifiedTruncated === true ? { modifiedTruncated: true } : {}),
   };
   const pendingRaw = s.pendingDelete && typeof s.pendingDelete === 'object'
     ? s.pendingDelete as DataSourcePendingDelete & { candidateSourcePaths?: unknown }
@@ -1077,6 +1087,10 @@ export interface SyncSummary {
   created?: { group: string; relation: string }[];
   createdTotal?: number;
   createdTruncated?: boolean;
+  /** 本次变更（覆盖重写）的文档（与 `result.modified` 同源；渲染「变更的文档」） */
+  modified?: { group: string; relation: string }[];
+  modifiedTotal?: number;
+  modifiedTruncated?: boolean;
 }
 
 export type SyncDataSourceResult =
@@ -1164,6 +1178,9 @@ function resultSnapshot(result: ImportResult): DataSourceResultSnapshot {
     created: (result.created ?? []).map((item) => ({ group: item.group, relation: item.relation })),
     createdTotal: result.createdTotal ?? result.created?.length ?? 0,
     ...(result.createdTruncated ? { createdTruncated: true } : {}),
+    modified: (result.modified ?? []).map((item) => ({ group: item.group, relation: item.relation })),
+    modifiedTotal: result.modifiedTotal ?? result.modified?.length ?? 0,
+    ...(result.modifiedTruncated ? { modifiedTruncated: true } : {}),
     conflicts: (result.conflicts ?? []).slice(0, 50).map((item) => ({
       path: item.path,
       relation: item.relation,
@@ -1517,6 +1534,9 @@ async function importAndPersist(args: {
       ...(snapshot.created ? { created: snapshot.created } : {}),
       ...(typeof snapshot.createdTotal === 'number' ? { createdTotal: snapshot.createdTotal } : {}),
       ...(snapshot.createdTruncated ? { createdTruncated: true } : {}),
+      ...(snapshot.modified ? { modified: snapshot.modified } : {}),
+      ...(typeof snapshot.modifiedTotal === 'number' ? { modifiedTotal: snapshot.modifiedTotal } : {}),
+      ...(snapshot.modifiedTruncated ? { modifiedTruncated: true } : {}),
     },
   };
 }
@@ -1570,6 +1590,10 @@ async function finalizeNoChangeGit(args: {
       groups: [],
       conflicts: [],
       failures: [],
+      // 本轮没有任何变更 ⇒ 数据源快照也明确「变更 0 篇」（否则页面会当成旧快照的"未记录"，
+      // 与任务详情的 0 篇口径打架）
+      modified: [],
+      modifiedTotal: 0,
     },
     seenRels,
     pendingDelete,
@@ -1598,6 +1622,9 @@ async function finalizeNoChangeGit(args: {
       // 本轮没有任何变更 ⇒ 明确「新建 0 篇」，而不是让页面当成"没有记录"
       created: [],
       createdTotal: 0,
+      // 同理：本轮无变更 ⇒ 明确「变更 0 篇」
+      modified: [],
+      modifiedTotal: 0,
     },
   };
 }

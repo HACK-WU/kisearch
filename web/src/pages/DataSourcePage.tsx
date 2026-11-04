@@ -1720,6 +1720,8 @@ export function DataSourcePage(): JSX.Element {
                           skipped={model.summary.skipped}
                           failed={model.summary.failed}
                           unchanged={model.summary.unchanged}
+                          // 变更段：旧快照没记录时传 undefined（图例整段不渲染，不冒充「变更 0」）
+                          modified={model.modified.available ? model.modified.total : undefined}
                         />
                         <DetailMetrics metrics={model.metrics} />
 
@@ -1827,6 +1829,44 @@ export function DataSourcePage(): JSX.Element {
                         {model.created.truncated ? (
                           <p className="ki-ds-pending__note">
                             仅显示前 {model.created.items.length} 篇（共 {model.created.total} 篇）。
+                          </p>
+                        ) : null}
+                      </>
+                    )}
+                  </DetailSection> : null}
+
+                  {/* ── 变更的文档（2026-11-04）：本次被覆盖重写的文档，形态与「新增的文档」完全一致
+                       —— 同外壳、同白底子卡、同目录树、同可点开正文，仅材质色不同（信息蓝）。
+                       ★ 后端只记文档标识，不含内容差异（用户 2026-11-04 定）。 ── */}
+                  {model.summary ? <DetailSection
+                    material="modified"
+                    title={model.modified.available ? `变更的文档 ${model.modified.total} 篇` : '变更的文档'}
+                    hint={model.modified.truncated ? '明细未完整显示' : undefined}
+                  >
+                    {!model.modified.available ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        这次同步没有记录变更明细（旧版本同步快照）。重新同步一次即可看到。
+                      </p>
+                    ) : model.modified.total === 0 ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        本次没有文档被覆盖重写。
+                      </p>
+                    ) : model.modified.items.length === 0 ? (
+                      <p className="ki-ds-pending__note" style={{ marginTop: 0 }}>
+                        共 {model.modified.total} 篇，但明细未保留（同步快照被裁剪）。
+                      </p>
+                    ) : (
+                      <>
+                        <div className="ki-ds-subcard">
+                          <ReadOnlyPathTree
+                            nodes={buildDataSourcePendingTree(model.modified.items)}
+                            label="变更的文档目录"
+                            onOpenDoc={(item) => setDocTarget(item)}
+                          />
+                        </div>
+                        {model.modified.truncated ? (
+                          <p className="ki-ds-pending__note">
+                            仅显示前 {model.modified.items.length} 篇（共 {model.modified.total} 篇）。
                           </p>
                         ) : null}
                       </>

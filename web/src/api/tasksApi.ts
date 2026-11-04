@@ -86,6 +86,15 @@ export interface TaskResultSnapshot {
   createdTotal?: number;
   /** `created` 是否被截断（旧记录不返回 = 未截断） */
   createdTruncated?: boolean;
+  /**
+   * 本次**变更**（被覆盖重写）的文档 `[group, relation]`（只记标识，不含内容/差异）。
+   * 旧 daemon 不返回该字段 → 详情卡显示"未记录"而非"0 篇"。
+   */
+  modified?: [string, string][];
+  /** 变更文档总数（不受 modified 截断影响） */
+  modifiedTotal?: number;
+  /** `modified` 是否被截断（旧记录不返回 = 未截断） */
+  modifiedTruncated?: boolean;
   /** S-05：add-remote 成功后自动入队的首次同步任务 ID；null = 入队失败 */
   syncTaskId?: string | null;
   /** S-05：登记成功但只读未设置成功（需按提示补设） */

@@ -183,6 +183,13 @@ export const MAX_DUPLICATE_DETAIL = 500;
  */
 export const MAX_CREATED_DETAIL = 500;
 
+/**
+ * 本次**变更**（覆盖重写）文档明细的条数上限。
+ * ★ 口径（用户 2026-11-04 定）：只记「哪个文档被覆盖重写」，**不采集内容、不做原文比对**。
+ * 与 {@link MAX_CREATED_DETAIL} 同量级：任务台账单文件上限 32KB。
+ */
+export const MAX_MODIFIED_DETAIL = 500;
+
 /** 一条「本次新建」的文档（= 知识库此前没有这个 relation） */
 export interface ImportCreatedItem {
   /** 落点组（知识库侧路径） */
@@ -262,6 +269,18 @@ export interface ImportResult {
   createdTotal: number;
   /** {@link created} 是否被截断 */
   createdTruncated: boolean;
+  /**
+   * 本次**被覆盖重写**的文档明细（`action === 'overwrite'`）。
+   * ★ 只记文档标识（group + relation），**不采集内容、不存差异、不比对原文**。
+   * 因此增量导入下「内容未变」的文件不算（它们在扫描阶段已被 `isContentUnchanged` 拦下
+   * 并 `continue`，压根到不了记账点）；非增量策略下「覆盖即变更」，可能含内容未变的重写。
+   * 同一批次内被后续覆盖的同名条目会被剔除；最多 {@link MAX_MODIFIED_DETAIL} 条。
+   */
+  modified: ImportCreatedItem[];
+  /** 本次变更文档总数（去重后，不受 {@link MAX_MODIFIED_DETAIL} 截断影响） */
+  modifiedTotal: number;
+  /** {@link modified} 是否被截断 */
+  modifiedTruncated: boolean;
   /**
    * REQ-20261019-001：目录导入后的「库中存在、本次目录已没有」候选（双闸门 + token）。
    * 仅 `pruneStale` 开启时存在；不开启时**不出现该字段**（既有消费方零影响）。
@@ -1017,6 +1036,12 @@ async function handleDirectImportUnlocked(
    * 前者已从 fileRecords 剔除，不该再算作"新增"。
    */
   const createdMap = new Map<string, ImportCreatedItem>();
+  /**
+   * 本次**变更**的文档（group\u0000relation → 条目）：走了 `overwrite` 覆盖重写路径的文件。
+   * ★ 只记标识，不读原文、不比内容。与 createdMap 一样用 Map，并在「同批被后者顶掉」时撤销
+   *   —— 只有真正落库的那条才配出现在清单里。
+   */
+  const modifiedMap = new Map<string, ImportCreatedItem>();
   /** D7：组级原文写缓冲（groupPath → relation → 原文）；扫描循环内只进缓冲，
    *  扫描结束后每组一次 loadLocalKb+合并+writeJson 落盘（O(文档数)→O(组数)）。
    *  键在循环前由 ensureGroupBuffer 预建，避免热路径重复判空。 */
@@ -1169,6 +1194,8 @@ async function handleDirectImportUnlocked(
       if (replacedIndex >= 0) fileRecords.splice(replacedIndex, 1);
       // 被同批覆盖的那条若刚被记为"新建"，现在它不会落库 —— 撤销
       createdMap.delete(`${groupPath}\u0000${relation}`);
+      // 同理：前者若被记为"变更"，它同样没落库 —— 撤销，否则变更清单会虚报一条
+      modifiedMap.delete(`${groupPath}\u0000${relation}`);
     }
     if (resolution.conflicted) {
       conflicts.push({ path: rel, originalRelation, relation, action: resolution.action as ImportConflictAction });
@@ -1283,6 +1310,13 @@ async function handleDirectImportUnlocked(
       args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
       continue;
     }
+    // 变更口径 = 本次覆盖重写了知识库里已有的文档（`create`/`suffix` 是新建，不算）。
+    // ★ 记账点选在「确定要写入」这一刻：上方三处 continue（跳过同名 / hook 失败 / chunk 超限）
+    //   与「增量内容未变」的 continue 都已越过 → 天然只记真正落库的文件，无需回滚。
+    // ★ 只在这里登记标识，不比对内容、不存正文（口径见 MAX_MODIFIED_DETAIL 注释）。
+    if (resolution.action === 'overwrite') {
+      modifiedMap.set(`${groupPath}\u0000${relation}`, { group: groupPath, relation });
+    }
     ensureGroupBuffer(groupPath).set(relation, fileText);
     fileRecords.push({
       rel,
@@ -1369,6 +1403,10 @@ async function handleDirectImportUnlocked(
       created: [],
       createdTotal: 0,
       createdTruncated: false,
+      // 早退分支同样没有任何覆盖重写
+      modified: [],
+      modifiedTotal: 0,
+      modifiedTruncated: false,
       ...(prune ? { prune } : {}),
       groups: [],
       source: { dir: sourceDir, chunkSize, chunkOverlap },
@@ -1417,6 +1455,10 @@ async function handleDirectImportUnlocked(
         created: [],
         createdTotal: 0,
         createdTruncated: false,
+        // 全部被跳过 ⇒ 没有任何文件被覆盖重写
+        modified: [],
+        modifiedTotal: 0,
+        modifiedTruncated: false,
         ...(prune ? { prune } : {}),
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
@@ -2067,6 +2109,11 @@ async function handleDirectImportUnlocked(
     .filter(([key]) => !failedKeys.has(key))
     .map(([, item]) => item)
     .sort((a, b) => `${a.group}/${a.relation}`.localeCompare(`${b.group}/${b.relation}`));
+  // 变更清单同口径剔除：失败的文件没有落库（旧内容仍在），不能报成「已变更」
+  const modifiedItems = [...modifiedMap.entries()]
+    .filter(([key]) => !failedKeys.has(key))
+    .map(([, item]) => item)
+    .sort((a, b) => `${a.group}/${a.relation}`.localeCompare(`${b.group}/${b.relation}`));
 
   logSummary(`直导完成：files=${files.length}  chunks=${entries.length}  vectorized=${mergedMap.size}  fulltext=${fullTextIndexed}  skipped=${skipped.length + failedRecords.size}  unchanged=${unchangedFileCount}  errors=${importErrors.length}  assets=${assetCopied.size}${vector ? '' : '  [FTS-only:不写dense]'}${assetsEnabled ? '' : '  [附件收集已关闭]'}`);
 
@@ -2240,6 +2287,9 @@ async function handleDirectImportUnlocked(
     created: createdItems.slice(0, MAX_CREATED_DETAIL),
     createdTotal: createdItems.length,
     createdTruncated: createdItems.length > MAX_CREATED_DETAIL,
+    modified: modifiedItems.slice(0, MAX_MODIFIED_DETAIL),
+    modifiedTotal: modifiedItems.length,
+    modifiedTruncated: modifiedItems.length > MAX_MODIFIED_DETAIL,
     ...(prune ? { prune } : {}),
     groups: [...kbResult.groups].sort(),
     source,

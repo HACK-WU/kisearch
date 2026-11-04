@@ -234,6 +234,41 @@ describe('新增的文档视图（2026-10-29）', () => {
   });
 });
 
+describe('变更的文档视图（2026-11-04）', () => {
+  it('没有 modified 快照 = 旧记录：available=false，不得冒充「0 篇」', () => {
+    const view = buildTaskDetail(baseTask({ result: { files: FILES } }));
+    assert.equal(view.modified.available, false);
+    assert.deepEqual(view.modified.items, []);
+  });
+
+  it('明细被字节预算裁掉时仍可展示总数与截断标记', () => {
+    const view = buildTaskDetail(baseTask({ result: { modifiedTotal: 251, modifiedTruncated: true } }));
+    assert.equal(view.modified.available, true);
+    assert.equal(view.modified.total, 251);
+    assert.equal(view.modified.truncated, true);
+    assert.deepEqual(view.modified.items, []);
+  });
+
+  it('二元组映射为 group/relation（与新增明细同格式）', () => {
+    const view = buildTaskDetail(baseTask({
+      result: { modified: [['wiki/docs', 'a'], ['wiki/docs', 'b']], modifiedTotal: 2 },
+    }));
+    assert.deepEqual(view.modified.items, [
+      { group: 'wiki/docs', relation: 'a' },
+      { group: 'wiki/docs', relation: 'b' },
+    ]);
+    assert.equal(view.modified.total, 2);
+    assert.equal(view.modified.truncated, false);
+  });
+
+  it('变更 0 篇是「本次没有覆盖重写」，与旧记录区分开', () => {
+    const view = buildTaskDetail(baseTask({ result: { modified: [], modifiedTotal: 0 } }));
+    assert.equal(view.modified.available, true);
+    assert.equal(view.modified.total, 0);
+    assert.deepEqual(view.modified.items, []);
+  });
+});
+
 describe('明细树形缩进（2026-10-20）', () => {
   it('明细按目录建树，说明只挂在条目行', () => {
     const lines = buildPathTree([

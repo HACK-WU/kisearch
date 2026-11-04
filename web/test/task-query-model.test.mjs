@@ -95,7 +95,7 @@ describe('搜索：支持状态关键词', () => {
     assert.equal(matchesTaskSearch(task(), '数据源同步', text('', '网页', '数据源同步')), true);
     assert.equal(matchesTaskSearch(task({ source: 'scheduler' }), '定时同步', text('', '定时同步')), true);
     assert.equal(matchesTaskSearch(task({ error: '磁盘写满' }), '磁盘', text()), true);
-    assert.equal(matchesTaskSearch(task(), '新增文档 3 篇', text('成功 3 · 新增文档 3 篇')), true);
+    assert.equal(matchesTaskSearch(task(), '新增 3 篇', text('成功 3 · 新增 3 篇')), true);
   });
 });
 

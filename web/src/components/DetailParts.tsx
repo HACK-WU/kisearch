@@ -20,13 +20,18 @@ export interface DetailHeroProps {
   failed?: number;
   /** 完成数中内容未变的子集（来源文档未变、未重算） */
   unchanged?: number;
+  /**
+   * 本次被覆盖重写的文档数（2026-11-04）。
+   * ★ `undefined` = 该快照没记录（旧任务/旧数据源）⇒ 整段不渲染，**不得**显示成「变更 0」。
+   */
+  modified?: number;
   /** 量词（默认「篇」） */
   unit?: string;
   /** 「失败」一档的文案（任务详情用「未完成」，数据源用「失败」） */
   failedLabel?: string;
 }
 
-export function DetailHero({ completed, total, skipped = 0, failed = 0, unchanged = 0, unit = '篇', failedLabel = '失败' }: DetailHeroProps): JSX.Element {
+export function DetailHero({ completed, total, skipped = 0, failed = 0, unchanged = 0, modified, unit = '篇', failedLabel = '失败' }: DetailHeroProps): JSX.Element {
   const totalSafe = Math.max(1, total);
   const percent = Math.round((completed / totalSafe) * 1000) / 10;
   const segments = [
@@ -71,6 +76,13 @@ export function DetailHero({ completed, total, skipped = 0, failed = 0, unchange
           ) : (
             <span className="ki-detail-legend__item">{failedLabel} 0</span>
           )}
+          {/* 变更段：快照未记录时整段隐藏（不能把"没查"说成"没变"） */}
+          {typeof modified === 'number' ? (
+            <>
+              <span className="ki-detail-legend__dot" aria-hidden>·</span>
+              <span className="ki-detail-legend__item ki-detail-legend__item--modified">变更 {modified}</span>
+            </>
+          ) : null}
         </div>
       </div>
     </div>

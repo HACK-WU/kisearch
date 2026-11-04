@@ -5,7 +5,7 @@
  * 状态、来源、摘要、时间、进度单位必须与详情同口径，并可用单测锁死。
  */
 import type { TaskRecord, TaskState } from '@/api/tasksApi';
-import { operationLabel, sourceLabel, stateLabel, taskCreatedLine, taskSummaryLine } from '@/lib/taskDetailModel';
+import { operationLabel, sourceLabel, stateLabel, taskCreatedLine, taskModifiedLine, taskSummaryLine } from '@/lib/taskDetailModel';
 
 export interface TaskListRowView {
   state: TaskState;
@@ -13,7 +13,7 @@ export interface TaskListRowView {
   operationLabel: string;
   scope: string;
   sourceLabel: string;
-  /** 摘要单行：成功/跳过/未完成，有新建文档快照时以 ` · 新增文档 N 篇` 续在后面；全 0 时压缩为「无变更」 */
+  /** 摘要单行：成功/跳过/未完成，有快照时以 ` · 新增 N 篇 · 变更 N 篇` 续在后面；全 0 时压缩为「无变更」 */
   resultSummary: string;
   /** 失败/未知时的短错误；与摘要并列展示，不互相覆盖 */
   resultError?: string;
@@ -78,7 +78,7 @@ function progressPercentOf(task: TaskRecord): number | null {
 
 /**
  * 「无变更」压缩（用户 2026-10-30 Q5 选定）：
- * 导入类任务全部计数为 0 时，`成功 0 · 跳过 0 · 未完成 0 · 新增文档 0 篇` 只会占满整列。
+ * 导入类任务全部计数为 0 时，`成功 0 · 跳过 0 · 未完成 0 · 新增 0 篇 · 变更 0 篇` 只会占满整列。
  * ★ 异常终态**不压缩**：失败 / 状态未知 / 已取消 —— 否则「快照还原 · 已取消」显示成「无变更」，
  *   把中断伪装成正常结束（取消是用户主动中断，不是「跑完没变化」）。
  * ★ 没有 `result.files` 的行（运行中 / 排队中 / 旧记录）走进度或阶段文案，不参与压缩。
@@ -89,15 +89,19 @@ function isNoChangeSummary(task: TaskRecord): boolean {
   if (!files) return false;
   if (files.completed !== 0 || files.skipped !== 0 || files.incomplete !== 0) return false;
   const created = task.result?.createdTotal ?? task.result?.created?.length ?? 0;
-  return created === 0;
+  // 只改不增的任务同样有实际发生的事，不能被压缩成「无变更」
+  const modified = task.result?.modifiedTotal ?? task.result?.modified?.length ?? 0;
+  return created === 0 && modified === 0;
 }
 
 export function buildTaskListRow(task: TaskRecord): TaskListRowView {
   const time = formatListTime(task);
   const created = taskCreatedLine(task);
-  // 摘要与新建文档数同一行（2026-10-30 用户要求横排）
+  const modified = taskModifiedLine(task);
+  // 摘要与新建/变更文档数同一行（2026-10-30 用户要求横排；2026-11-04 追加变更段）
   const base = taskSummaryLine(task);
-  const summary = isNoChangeSummary(task) ? '无变更' : (created ? `${base} · ${created}` : base);
+  const extras = [created, modified].filter(Boolean).join(' · ');
+  const summary = isNoChangeSummary(task) ? '无变更' : (extras ? `${base} · ${extras}` : base);
   const error = task.error?.trim() || undefined;
   const operation = operationLabel(task.operation);
   const source = sourceLabel(task.source);

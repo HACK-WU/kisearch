@@ -89,7 +89,7 @@ const STATE_SEARCH_ALIAS: Record<TaskState, readonly string[]> = {
 
 /** 搜索用的行文案（由展示层 `buildTaskListRow` 提供，本模块不重复做文案映射） */
 export interface TaskSearchText {
-  /** 结果摘要单行（含「成功 N」「新增文档 N 篇」，可被搜到） */
+  /** 结果摘要单行（含「成功 N」「新增 N 篇」「变更 N 篇」，可被搜到） */
   summary: string;
   /** 来源中文名（网页 / CLI / 后台服务 / 定时同步） */
   sourceText: string;

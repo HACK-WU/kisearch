@@ -684,6 +684,13 @@ export interface DataSourceResultView {
   created?: { group: string; relation: string }[];
   createdTotal?: number;
   createdTruncated?: boolean;
+  /**
+   * 本次**变更**（被覆盖重写）的文档。只记标识，服务端不采集内容/差异。
+   * 旧快照不返回该字段 → 卡片显示"未记录"而非"0 篇"。
+   */
+  modified?: { group: string; relation: string }[];
+  modifiedTotal?: number;
+  modifiedTruncated?: boolean;
 }
 
 export interface DataSourceGitSyncView {

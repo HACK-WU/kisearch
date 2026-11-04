@@ -120,6 +120,16 @@ export interface TaskResultSnapshot {
   /** `created` 是否被截断 */
   createdTruncated?: boolean;
   /**
+   * 本次**变更**（被覆盖重写）的文档，格式同 `created`（二元组省字节）。
+   * ★ 只记标识，不含内容/差异；上限 {@link MAX_SNAPSHOT_MODIFIED} 比 created 小，
+   *   因为 32KB 台账预算已被 created 占用大半（见 `fitToBudget` 裁剪顺序）。
+   */
+  modified?: [string, string][];
+  /** 本次变更文档总数（未被 modified 截断影响） */
+  modifiedTotal?: number;
+  /** `modified` 是否被截断 */
+  modifiedTruncated?: boolean;
+  /**
    * S-05：`datasource-add-remote` 成功后自动入队的首次同步任务 ID。
    * 页面据此跟随首次同步；为 null = 入队失败（登记仍成功，需手动同步）。
    */
@@ -165,6 +175,12 @@ export const MAX_TASK_DETAIL_ITEMS = 20;
  * 值受 32KB 单文件上限约束（二元组约 40~60 字节/条），仍由 `fitToBudget` 兜底裁剪。
  */
 export const MAX_SNAPSHOT_CREATED = 400;
+
+/**
+ * 变更文档明细的独立上限：比 created 小（created 已占预算大半）。
+ * 超出只丢明细，`modifiedTotal` 仍然精确 —— 页面显示「共 N 篇，明细未保留」。
+ */
+export const MAX_SNAPSHOT_MODIFIED = 200;
 
 /** 可更新字段白名单（`params` 在 args 就绪后单独写入一次；`result` 只在 finish 时写） */
 type TaskPatch = Partial<Pick<TaskRecord,
@@ -431,6 +447,20 @@ function normalizeResult(input: TaskResultSnapshot | undefined): TaskResultSnaps
   if (created.length > 0) out.created = created;
   if (countish(input.createdTotal) !== undefined) out.createdTotal = countish(input.createdTotal);
   if (input.createdTruncated === true) out.createdTruncated = true;
+  // 变更明细：与 created 同格式（二元组）、同白名单校验 —— 读侧不认就会把写入的字段丢掉
+  const modifiedRaw = (Array.isArray(input.modified) ? input.modified : [])
+    .map((entry) => {
+      if (!Array.isArray(entry) || entry.length < 2) return null;
+      const group = safeRelPath(entry[0]);
+      const relation = sanitizedText(entry[1], MAX_SNAPSHOT_TEXT);
+      return group && relation ? [group, relation] as [string, string] : null;
+    })
+    .filter((entry): entry is [string, string] => entry !== null);
+  if (modifiedRaw.length > MAX_SNAPSHOT_MODIFIED) out.modifiedTruncated = true;
+  const modified = modifiedRaw.slice(0, MAX_SNAPSHOT_MODIFIED);
+  if (modified.length > 0) out.modified = modified;
+  if (countish(input.modifiedTotal) !== undefined) out.modifiedTotal = countish(input.modifiedTotal);
+  if (input.modifiedTruncated === true) out.modifiedTruncated = true;
   if (input.truncated === true) out.truncated = true;
   if (input.syncTaskId === null) out.syncTaskId = null;
   else if (typeof input.syncTaskId === 'string' && TASK_ID_RE.test(input.syncTaskId)) out.syncTaskId = input.syncTaskId;
@@ -462,11 +492,30 @@ function fitToBudget(record: TaskRecord): TaskRecord {
   delete withoutDetails.duplicates;
   const trimmed: TaskRecord = { ...record, result: withoutDetails };
   if (sizeOf(trimmed) <= limit) return trimmed;
+  /**
+   * 变更明细先于新建明细裁（两级都保留 total ⇒ 页面仍能显示「共 N 篇，明细未保留」）。
+   * ★ 必须进这条链：只加字段不裁剪的话，超预算时它不会被删 → 文件仍 > 32KB →
+   *   `readRecordFile` 判不可读 → 任务从列表静默消失。
+   */
+  const withoutModified: TaskResultSnapshot = { ...withoutDetails };
+  // 只在「本来真的有变更明细」时才标 truncated：否则一个从未有过变更的任务
+  // 被裁到这里会显示「明细未完整显示」，把"没有"说成"丢了"。
+  const hadModified = Array.isArray(withoutModified.modified);
+  delete withoutModified.modified;
+  const trimmedModified: TaskRecord = {
+    ...record,
+    result: { ...withoutModified, ...(hadModified ? { modifiedTruncated: true } : {}) },
+  };
+  if (sizeOf(trimmedModified) <= limit) return trimmedModified;
   // 新建明细放在最后砍：它是用户主动要看的（「新增了哪些目录」），
   // 但宁可丢明细也不能让整个任务文件超限（超了任务会从列表静默消失）
-  const withoutCreated: TaskResultSnapshot = { ...withoutDetails };
+  const withoutCreated: TaskResultSnapshot = { ...withoutModified };
   delete withoutCreated.created;
-  return { ...record, result: { ...withoutCreated, createdTruncated: true } };
+  return {
+    ...record,
+    // created 侧保持既有语义（原实现无条件标记），只让 modified 这一档按实际情况标
+    result: { ...withoutCreated, ...(hadModified ? { modifiedTruncated: true } : {}), createdTruncated: true },
+  };
 }
 
 function writeRecord(config: Pick<KiConfig, 'dataDir'>, record: TaskRecord, createOnly = false): void {

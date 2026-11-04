@@ -5,7 +5,7 @@
  */
 import type { DataSourceRecord } from './datasource-types.js';
 import type { SyncDataSourceResult } from './datasource.js';
-import { MAX_SNAPSHOT_CREATED, toParamSnapshot } from './task-snapshot.js';
+import { MAX_SNAPSHOT_CREATED, MAX_SNAPSHOT_MODIFIED, toParamSnapshot } from './task-snapshot.js';
 import type { TaskParamSnapshot, TaskResultSnapshot } from './task-registry.js';
 
 /** 首次同步没有 commit 水位时必然是 full；不能只看 type/full */
@@ -57,6 +57,18 @@ export function toDatasourceSyncResultSnapshot(result: SyncDataSourceResult): Ta
     ...(typeof summary.createdTotal === 'number' ? { createdTotal: summary.createdTotal } : {}),
     ...(summary.createdTruncated || (summary.created?.length ?? 0) > MAX_SNAPSHOT_CREATED
       ? { createdTruncated: true }
+      : {}),
+    // 变更文档：任务详情页据此渲染「变更的文档」卡（缺这段会出现"数据源页有卡、任务页没卡"）
+    ...(summary.modified && summary.modified.length > 0
+      ? {
+        modified: summary.modified
+          .slice(0, MAX_SNAPSHOT_MODIFIED)
+          .map((item) => [item.group, item.relation] as [string, string]),
+      }
+      : {}),
+    ...(typeof summary.modifiedTotal === 'number' ? { modifiedTotal: summary.modifiedTotal } : {}),
+    ...(summary.modifiedTruncated || (summary.modified?.length ?? 0) > MAX_SNAPSHOT_MODIFIED
+      ? { modifiedTruncated: true }
       : {}),
   };
 }

@@ -195,6 +195,13 @@ export interface DataSourceDetailModel {
     truncated: boolean;
     available: boolean;
   };
+  /** 上次同步变更（被覆盖重写）的文档；只记标识，无内容/差异 */
+  modified: {
+    items: DataSourcePendingItem[];
+    total: number;
+    truncated: boolean;
+    available: boolean;
+  };
   pending: {
     total: number;
     items: DataSourcePendingItem[];
@@ -554,6 +561,14 @@ export function buildDataSourceDetail(
     truncated: sync?.result.createdTruncated === true,
     available: createdRaw !== undefined || sync?.result.createdTotal !== undefined,
   };
+  // 变更文档同口径：`available=false` 表示旧快照没记录，不能显示成「0 篇」
+  const modifiedRaw = sync?.result.modified;
+  const modified = {
+    items: (modifiedRaw ?? []).map((item) => ({ group: item.group, relation: item.relation })),
+    total: sync?.result.modifiedTotal ?? modifiedRaw?.length ?? 0,
+    truncated: sync?.result.modifiedTruncated === true,
+    available: modifiedRaw !== undefined || sync?.result.modifiedTotal !== undefined,
+  };
 
   return {
     header: {
@@ -580,6 +595,7 @@ export function buildDataSourceDetail(
     },
     times,
     created,
+    modified,
     pending: {
       total: pendingDelete?.total ?? 0,
       items,

@@ -187,6 +187,14 @@ export interface DataSourceResultSnapshot {
   created?: { group: string; relation: string }[];
   createdTotal?: number;
   createdTruncated?: boolean;
+  /**
+   * 本次**变更**的文档（走了 `overwrite` 覆盖重写路径的）。
+   * ★ 只记文档标识，**不含内容与差异**（用户 2026-11-04 定：后端不采集被修改的内容）。
+   * 上限沿用导入侧 `MAX_MODIFIED_DETAIL`，完整条数见 `modifiedTotal`。
+   */
+  modified?: { group: string; relation: string }[];
+  modifiedTotal?: number;
+  modifiedTruncated?: boolean;
   conflicts: { path: string; relation: string; action: string; unchanged?: boolean }[];
   failures: { path: string; reason: string }[];
 }

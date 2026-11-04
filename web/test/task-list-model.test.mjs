@@ -133,7 +133,7 @@ describe('任务列表行：六列口径', () => {
   });
 });
 
-describe('结果摘要：新增文档数与摘要横排', () => {
+describe('结果摘要：新增数与摘要横排', () => {
   const withResult = (result) => baseTask({ result: { ...baseTask().result, ...result } });
 
   it('createdTotal 优先，接在摘要后面同一行', () => {
@@ -141,24 +141,72 @@ describe('结果摘要：新增文档数与摘要横排', () => {
       createdTotal: 308,
       created: [['langchain', 'a.md']],
     }));
-    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 308 篇', '明细被截断也按总数显示');
-    assert.match(row.ariaLabel, /新增文档 308 篇/);
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增 308 篇', '明细被截断也按总数显示');
+    assert.match(row.ariaLabel, /新增 308 篇/);
   });
 
   it('只有 created 明细时退回条目数', () => {
     const row = buildTaskListRow(withResult({
       created: [['langchain', 'a.md'], ['langchain', 'b.md']],
     }));
-    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 2 篇');
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增 2 篇');
   });
 
   it('新增 0 篇照实显示（增量同步未变时不能消失）', () => {
     const row = buildTaskListRow(withResult({ createdTotal: 0, created: [] }));
-    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增文档 0 篇');
+    assert.equal(row.resultSummary, '成功 251 · 跳过 0 · 未完成 0 · 新增 0 篇');
   });
 
   it('旧记录没有该快照时摘要不变（不能显示成 0 篇）', () => {
     assert.equal(buildTaskListRow(baseTask()).resultSummary, '成功 251 · 跳过 0 · 未完成 0');
+  });
+});
+
+describe('结果摘要：变更数（2026-11-04）', () => {
+  const withResult = (result) => baseTask({ result: { ...baseTask().result, ...result } });
+
+  it('变更数追加在新增之后，同一行（省掉「文档」二字）', () => {
+    const row = buildTaskListRow(withResult({
+      createdTotal: 0,
+      created: [],
+      modifiedTotal: 2,
+      modified: [['wiki/docs', 'a'], ['wiki/docs', 'b']],
+    }));
+    assert.equal(
+      row.resultSummary,
+      '成功 251 · 跳过 0 · 未完成 0 · 新增 0 篇 · 变更 2 篇',
+    );
+    assert.match(row.ariaLabel, /变更 2 篇/);
+  });
+
+  it('变更 0 篇照实显示（与新增 0 篇同款，不省略）', () => {
+    const row = buildTaskListRow(withResult({
+      createdTotal: 0,
+      created: [],
+      modifiedTotal: 0,
+      modified: [],
+    }));
+    assert.match(row.resultSummary, /新增 0 篇 · 变更 0 篇/);
+  });
+
+  it('只有变更、没有新增时不得压缩成「无变更」', () => {
+    const task = baseTask({
+      state: 'succeeded',
+      result: {
+        files: { scanned: 0, completed: 0, incomplete: 0, skipped: 0, unchanged: 0, duplicatesSkipped: 0 },
+        createdTotal: 0,
+        created: [],
+        modifiedTotal: 2,
+        modified: [['wiki/docs', 'a'], ['wiki/docs', 'b']],
+      },
+    });
+    const summary = buildTaskListRow(task).resultSummary;
+    assert.notEqual(summary, '无变更', '改过内容的任务不能读成「跑完没变化」');
+    assert.match(summary, /变更 2 篇/);
+  });
+
+  it('旧记录没有该快照时不显示变更段', () => {
+    assert.doesNotMatch(buildTaskListRow(baseTask()).resultSummary, /变更 \d+ 篇/);
   });
 });
 
@@ -209,7 +257,7 @@ describe('结果摘要：全 0 压缩为「无变更」', () => {
   it('有新建立即不压缩', () => {
     const task = zero();
     task.result.createdTotal = 3;
-    assert.match(buildTaskListRow(task).resultSummary, /新增文档 3 篇/);
+    assert.match(buildTaskListRow(task).resultSummary, /新增 3 篇/);
   });
 });
 

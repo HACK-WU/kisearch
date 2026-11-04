@@ -278,6 +278,8 @@ function TaskDetailDrawer({ id, tasks, retainedForMs, onClose }: {
                     skipped={detail.summary.skipped}
                     failed={detail.summary.incomplete}
                     unchanged={detail.summary.unchanged}
+                    // 变更段：旧记录没记录时传 undefined（图例整段不渲染，不冒充「变更 0」）
+                    modified={detail.modified.available ? detail.modified.total : undefined}
                     failedLabel="未完成"
                   />
                   <DetailMetrics metrics={detail.metrics} />
@@ -341,6 +343,39 @@ function TaskDetailDrawer({ id, tasks, retainedForMs, onClose }: {
                 </div>
                 {detail.created.truncated ? (
                   <p className="ki-task-muted">仅显示前 {detail.created.items.length} 篇（共 {detail.created.total} 篇）。</p>
+                ) : null}
+              </>
+            )}
+          </DetailSection>
+
+          {/* 变更的文档（2026-11-04）：与「新增的文档」同款卡片与目录树，仅材质色不同（信息蓝）。
+              只展示文档标识 —— 后端不采集内容差异（用户 2026-11-04 定）。 */}
+          <DetailSection
+            material="modified"
+            title={detail.modified.available ? `变更的文档 ${detail.modified.total} 篇` : '变更的文档'}
+            hint={detail.modified.truncated ? '明细未完整显示' : undefined}
+          >
+            {!detail.modified.available ? (
+              <p className="ki-task-muted">
+                {detail.legacy
+                  ? '该任务创建于台账扩展之前，没有变更明细。'
+                  : '该任务没有变更明细（未完成、非导入任务或旧记录）。'}
+              </p>
+            ) : detail.modified.total === 0 ? (
+              <p className="ki-task-muted">本次没有文档被覆盖重写。</p>
+            ) : detail.modified.items.length === 0 ? (
+              <p className="ki-task-muted">共 {detail.modified.total} 篇，但明细未保留（任务记录超限被裁剪）。</p>
+            ) : (
+              <>
+                <div className="ki-ds-subcard">
+                  <ReadOnlyPathTree
+                    nodes={buildDataSourcePendingTree(detail.modified.items)}
+                    label="变更的文档目录"
+                    onOpenDoc={(item) => setDocTarget({ scope: task.scope, group: item.group, relation: item.relation })}
+                  />
+                </div>
+                {detail.modified.truncated ? (
+                  <p className="ki-task-muted">仅显示前 {detail.modified.items.length} 篇（共 {detail.modified.total} 篇）。</p>
                 ) : null}
               </>
             )}

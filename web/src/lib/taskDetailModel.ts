@@ -90,6 +90,16 @@ export interface TaskDetailView {
     truncated: boolean;
     available: boolean;
   };
+  /**
+   * 本次**变更**（被覆盖重写）的文档。只记标识，服务端不采集内容/差异。
+   * `available === false` 表示旧记录没有这份快照（要说"未记录"，不能说"0 篇"）。
+   */
+  modified: {
+    items: { group: string; relation: string }[];
+    total: number;
+    truncated: boolean;
+    available: boolean;
+  };
   notices: TaskNotice[];
   showProgress: boolean;
   progressText: string;
@@ -627,6 +637,22 @@ function createdViewOf(task: TaskRecord): TaskDetailView['created'] {
   };
 }
 
+/** 变更文档视图：与 created 同口径（旧记录 `available=false`，不能显示成「0 篇」） */
+function modifiedViewOf(task: TaskRecord): TaskDetailView['modified'] {
+  const result = task.result;
+  const raw = result?.modified;
+  const available = raw !== undefined || result?.modifiedTotal !== undefined;
+  const items = (raw ?? [])
+    .filter((entry) => Array.isArray(entry) && entry.length >= 2)
+    .map(([group, relation]) => ({ group, relation }));
+  return {
+    items,
+    total: typeof result?.modifiedTotal === 'number' ? result.modifiedTotal : items.length,
+    truncated: result?.modifiedTruncated === true,
+    available,
+  };
+}
+
 // ─── 原因与日志（S-04）───────────────────────────────────────────────
 
 /** 日志加载态：由组件用 `useQuery` 驱动，本层只做展示模型 */
@@ -746,6 +772,7 @@ export function buildTaskDetail(task: TaskRecord, retentionMs?: number): TaskDet
     times: timeRows(task),
     ...detailItemsOf(task),
     created: createdViewOf(task),
+    modified: modifiedViewOf(task),
     notices,
     showProgress: progress.show,
     progressText: progress.text,
@@ -779,5 +806,21 @@ export function taskCreatedLine(task: TaskRecord): string | undefined {
   const raw = result.created;
   if (raw === undefined && result.createdTotal === undefined) return undefined;
   const total = typeof result.createdTotal === 'number' ? result.createdTotal : (raw ?? []).length;
-  return `新增文档 ${total} 篇`;
+  // 2026-11-04 用户定稿：摘要里省掉「文档」二字 —— `新增 0 篇 · 变更 3 篇`（窄列更省宽）
+  return `新增 ${total} 篇`;
+}
+
+/**
+ * 列表摘要的追加段：本次**变更**（被覆盖重写）文档数。
+ * 与详情「变更的文档 N 篇」同口径；`modifiedTotal` 不受明细截断影响。
+ * 旧记录 / 旧 daemon 没有该快照 ⇒ 返回 `undefined`（不能显示成「0 篇」）。
+ * ★ 0 篇照实显示（`变更 0 篇`），与「新增 0 篇」同款 —— 用户 2026-11-04 定稿。
+ */
+export function taskModifiedLine(task: TaskRecord): string | undefined {
+  const result = task.result;
+  if (!result) return undefined;
+  const raw = result.modified;
+  if (raw === undefined && result.modifiedTotal === undefined) return undefined;
+  const total = typeof result.modifiedTotal === 'number' ? result.modifiedTotal : (raw ?? []).length;
+  return `变更 ${total} 篇`;
 }

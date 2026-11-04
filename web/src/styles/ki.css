@@ -25,6 +25,8 @@
   --ki-color-primary-active: #1c4234;
   --ki-color-primary-soft: #e8f3ed;
   --ki-color-purple: #af52de;
+  /* 信息蓝：只用于「变更」语义（新增=primary 绿 / 变更=info 蓝 / 待删除=warning 黄） */
+  --ki-color-info: #2f6f9f;
   --ki-color-success: #2a8055;
   --ki-color-warning: #8a6208;
   --ki-color-warning-soft: #fbf3db;
@@ -107,6 +109,8 @@
   --ki-color-primary-hover: #74c3a0;
   --ki-color-primary-active: #4e9a79;
   --ki-color-primary-soft: #17322a;
+  /* 信息蓝（暗色）：提亮并降饱和，保证 8% surface 混合后仍可辨 */
+  --ki-color-info: #6fb3d9;
   --ki-color-success: #6cc194;
   --ki-color-warning: #d9ad5c;
   --ki-color-warning-soft: #362d18;
@@ -3503,8 +3507,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   .ki-sort-full { display: none; }
   .ki-sort-short { display: inline; }
 }
-/* 结果摘要自然宽 223px（成功/跳过/未完成 + 新增文档 N 篇）：≤880 时无论怎么分列都放不下
-   （实测 761 视口表宽 655px，摘要列只有 205px，省略号会把「新增文档 N 篇」吃掉），
+/* 结果摘要自然宽 223px（成功/跳过/未完成 + 新增 N 篇 + 变更 N 篇）：≤880 时无论怎么分列都放不下
+   （实测 761 视口表宽 655px，摘要列只有 205px，省略号会把「新增 N 篇」吃掉），
    改由「任务」列的回退行承载 —— 与 ≤760 同一套机制，只是提前到放不下的宽度生效。 */
 @media (max-width: 880px) {
   .ki-task-col--result { display: none; }
@@ -6071,6 +6075,14 @@ select.ki-chat-cfg__ta--select {
 }
 .ki-detail-sec--created .ki-detail-sec__mark { background: var(--ki-color-primary); }
 .ki-detail-sec--created .ki-detail-sec__title { color: var(--ki-color-primary); }
+/* 变更的文档：信息蓝，取 8%（强度与 created 一致，靠色相区分）。
+   绿=新增 / 蓝=变更 / 黄=待删除 —— 三色语言；暗色同样按 surface 混合，靠 token 自动切换。 */
+.ki-detail-sec--modified {
+  border-color: color-mix(in srgb, var(--ki-color-info) 20%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-info) 8%, var(--ki-color-surface));
+}
+.ki-detail-sec--modified .ki-detail-sec__mark { background: var(--ki-color-info); }
+.ki-detail-sec--modified .ki-detail-sec__title { color: var(--ki-color-info); }
 
 /* ── 执行结果 hero：完成数 + 分段条 + 图例 ── */
 .ki-detail-hero {
@@ -6110,6 +6122,8 @@ select.ki-chat-cfg__ta--select {
 .ki-detail-legend__item--done::before { background: var(--ki-color-primary); }
 .ki-detail-legend__item--failed { color: var(--ki-color-danger-ink); font-weight: 600; }
 .ki-detail-legend__item--failed::before { background: var(--ki-color-danger); }
+/* 变更段：与「变更的文档」卡片同色（信息蓝），图例点也取同色便于对照 */
+.ki-detail-legend__item--modified::before { background: var(--ki-color-info); }
 .ki-detail-legend__sub { color: var(--ki-color-text-subtle); font-weight: 400; }
 .ki-detail-legend__dot { color: var(--ki-color-border-strong); }
 .ki-detail-hero__empty {

@@ -141,6 +141,63 @@ test('预算按 UTF-8 字节计算：中文明细超限时必须被裁剪（不�
   }
 });
 
+test('变更明细进入 32KB 裁剪链：超限先裁 modified 但保留计数，台账仍可读', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-modified-budget-'));
+  const config = { dataDir: root };
+  const reporter = createTaskReporter(config, {
+    id: 'modified-budget', source: 'web', operation: 'datasource-sync', scope: 'default',
+  });
+  try {
+    // 中文路径：每条约 720 字节（3 字节/字），400+400 条远超 32KB
+    const bulky = (): [string, string][] => Array.from({ length: 400 }, (_, index) => [
+      `${'中'.repeat(120)}-${index}`,
+      `${'文'.repeat(120)}-${index}`,
+    ]);
+    reporter.finish('succeeded', {
+      result: {
+        modified: bulky(),
+        modifiedTotal: 400,
+        created: bulky(),
+        createdTotal: 400,
+      },
+    });
+    const record = getTaskRecord(config, 'modified-budget');
+    assert.ok(record, '超预算裁剪后记录必须仍可读（否则任务会静默消失）');
+    const size = fs.statSync(path.join(root, '.ki-tasks', 'modified-budget.json')).size;
+    assert.ok(size < 32 * 1024, `台账文件必须小于 32KB（实际 ${size}）`);
+    // 变更明细先于新建明细被裁，但计数保留 ⇒ 页面可显示「共 N 篇，明细未保留」
+    assert.equal(record?.result?.modified, undefined, '超限的变更明细必须被裁掉');
+    assert.equal(record?.result?.modifiedTruncated, true);
+    assert.equal(record?.result?.modifiedTotal, 400);
+  } finally {
+    reporter.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('没有变更明细的任务被裁到最末档时，不得虚标 modifiedTruncated', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-no-modified-'));
+  const config = { dataDir: root };
+  const reporter = createTaskReporter(config, {
+    id: 'no-modified', source: 'web', operation: 'import', scope: 'default',
+  });
+  try {
+    // 只有超大的 created（中文），没有 modified ⇒ 裁到最后一档也不该出现「变更明细被裁」
+    const bulky = Array.from({ length: 400 }, (_, index) => [
+      `${'中'.repeat(120)}-${index}`,
+      `${'文'.repeat(120)}-${index}`,
+    ]) as [string, string][];
+    reporter.finish('succeeded', { result: { created: bulky, createdTotal: 400 } });
+    const record = getTaskRecord(config, 'no-modified');
+    assert.ok(record, '裁剪后记录必须仍可读');
+    assert.ok(fs.statSync(path.join(root, '.ki-tasks', 'no-modified.json')).size < 32 * 1024);
+    assert.equal(record?.result?.modifiedTruncated, undefined, '从来没有变更明细，不能说成「明细被裁」');
+  } finally {
+    reporter.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ─── 保留期（2026-11-02：终态 1 小时 → 7 天，心跳窗口刻意不跟随）─────────────
 
 const MINUTE = 60 * 1000;
