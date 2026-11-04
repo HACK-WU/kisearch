@@ -9,7 +9,7 @@ import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensio
 import { scopeOverviewCounts } from '@/lib/scopeCounts';
 import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCopy';
 import { describeWikiSync } from '@/lib/resourcesPage';
-import { layerColumns, readModeCard, wikiWritebackCard } from '@/lib/dashboardScopeCards';
+import { layerColumns, readModeCard, wikiWritebackCard, currentScopeHeading, viewCountCard } from '@/lib/dashboardScopeCards';
 import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
 import { useAuth } from '@/lib/authContext';
 import { scheduleSummaryView, summarizeSchedules } from '@/lib/datasourceSchedule';
@@ -293,6 +293,8 @@ export function DashboardPage(): JSX.Element {
   const totalDocs = list.reduce((s, x) => s + (x.wikiCount ?? 0), 0);
   const kbCount = list.filter((x) => x.kb).length;
   const vecCount = list.filter((x) => x.vector).length;
+  // 「视图」卡（2026-11-04）：视图数量，复用同一份 scopeList（0 新增请求）
+  const viewCard = viewCountCard(scopes);
   // 定时同步（M1 2026-10-30）：已开启定时的数据源数，复用数据源列表、不新增请求
   const scheduleCard = scheduleSummaryView(
     summarizeSchedules(dsList, { error: dsError ? (dsError as Error).message : undefined }),
@@ -338,7 +340,11 @@ export function DashboardPage(): JSX.Element {
    * 且该响应可能来自缓存，与顶栏当前值不同步。
    */
   const isViewScope = useIsViewName(scope);
-  const readMode = readModeCard(scope, isViewScope ? true : currentMeta?.readonly);
+  /** 视图模式下卡头换口径（当前视图 / CURRENT VIEW），见 lib/dashboardScopeCards.ts */
+  const heading = currentScopeHeading(isViewScope, scope);
+  const readMode = readModeCard(scope, isViewScope ? true : currentMeta?.readonly, {
+    isView: isViewScope,
+  });
   const layers = layerColumns(currentMeta, vectorDegraded);
   const wikiCard = wikiWritebackCard(scope, currentMeta?.readonly, currentMeta?.wikiSync);
 
@@ -388,6 +394,12 @@ export function DashboardPage(): JSX.Element {
             </div>
           )}
         </div>
+        {/* 视图（2026-11-04，用户定稿：排在「定时同步」右边）：已定义的只读聚合个数；
+            列表未就绪时显示 —，不冒充 0 */}
+        <div className="ki-stat-card" title={viewCard.title}>
+          <div className="ki-stat-label">视图</div>
+          <div className="ki-stat-value">{viewCard.value}</div>
+        </div>
       </section>
 
       {/* 双卡：当前知识库 ｜ 健康状态 */}
@@ -395,18 +407,18 @@ export function DashboardPage(): JSX.Element {
         <div className="ki-card">
           <div className="ki-card__head">
             <span className="ki-panel-heading">
-              <span className="ki-panel-kicker">CURRENT SCOPE</span>
+              <span className="ki-panel-kicker">{heading.kicker}</span>
               {/* scope 名与标题同一基线并排（用户 2026-10-30：「要和标题左右对齐，
                   不要在它的斜下方」）。不放 chip 底框 —— 底框会被读成另一个独立元素。 */}
               <span className="ki-card__title ki-card__title--scope">
-                当前知识库
-                <span className="ki-scope-current" title={`当前 scope：${scope}`}>
+                {heading.title}
+                <span className="ki-scope-current" title={heading.scopeTitle}>
                   {scope}
                 </span>
               </span>
             </span>
             {/* scope 名已上移到标题行，此处只留操作说明，不再重复一遍名字 */}
-            <span className="ki-card__sub">顶栏切换 scope 即时刷新</span>
+            <span className="ki-card__sub">{heading.switchHint}</span>
           </div>
           <div className="ki-card__body">
             <div className="ki-stats ki-stats--pair">

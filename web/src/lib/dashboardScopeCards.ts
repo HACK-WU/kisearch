@@ -1,5 +1,5 @@
 /**
- * dashboardScopeCards.ts —— 总览「当前知识库」六宫格的判定与文案（2026-10-30）
+ * dashboardScopeCards.ts —— 总览「当前知识库 / 当前视图」卡（卡头 + 六宫格）与「视图」统计卡的判定与文案
  *
  * ★ 单一来源：本文件**不**重新判定「能不能回写」——`wikiWritebackCard` 直接消费
  *   `describeWikiSync()` 的 `tone`，只把带完整路径的 label 换成卡内放得下的短状态词。
@@ -33,8 +33,25 @@ export interface CardValue {
  *   `readonly === false` 才是「可写」；`undefined` → `—`。
  *   注意**不能**复用 `readonlyBadge()` 的宽松口径（`readonly !== true` 就不渲染）：
  *   徽标"少显示"没损失，状态卡"少显示"会变成 `—`，但错标成「可写」是安全事故。
+ *
+ * ★ 视图必须走 `isView` 分支：视图**没有** readonly 配置项（`config.scopes` 里查不到它），
+ *   套用 scope 口径会给出 `ki scope readonly demo-view --off` 这种必然失败的命令，
+ *   还会说"ki import 与数据源同步仍可更新"——视图根本不能作为写入目标。
  */
-export function readModeCard(scope: string, readonly: boolean | undefined): CardValue {
+export function readModeCard(
+  scope: string,
+  readonly: boolean | undefined,
+  opts: { isView?: boolean } = {},
+): CardValue {
+  if (opts.isView) {
+    return {
+      tone: 'warn',
+      label: '只读',
+      // 色标沿用只读（warn）不变色：视图恒只读是事实，不必额外加视觉噪声
+      title:
+        '视图是多个 scope 的只读聚合（成员库逐个展开后读取）：不能对视图本身写入，也不存在「解除只读」，要写请切到单个知识库；成员库各自的只读状态见顶栏选择器',
+    };
+  }
   if (readonly === true) {
     return { tone: 'warn', label: '只读', title: scopeReadonlyTitle(scope) };
   }
@@ -193,4 +210,80 @@ export function wikiWritebackCard(
     return { tone: copy.tone, label: '⚠ 无可用目录', title: withNote(copy.title) };
   }
   return { tone: copy.tone, label: '未开启', title: withNote(copy.title) };
+}
+
+// ─── 视图：卡头文案 + 「视图」统计卡（2026-11-04） ────────────────────────
+
+/** 「当前知识库 / 当前视图」卡头 */
+export interface CurrentScopeHeading {
+  /** 卡头英文 kicker（与 "CURRENT SCOPE" 同款全大写形态） */
+  kicker: string;
+  /** 卡头中文主标题 */
+  title: string;
+  /** 名字的 hover / 无障碍说明 */
+  scopeTitle: string;
+  /** 卡头右侧操作说明 */
+  switchHint: string;
+}
+
+/**
+ * 卡头文案随「顶栏选中的是不是视图」切换。
+ *
+ * ★ 视图是**多个 scope 的只读聚合**，不是知识库：仍写「当前知识库」会把下面六格读成
+ *   "这个库自己的属性"（文档数 / 读写权限 / 嵌入模型……），而其中至少 3 格是聚合值或
+ *   全局配置。顶栏选择器收起态早就按同一口径显示「· 视图」（`ScopeSelect.tsx:133`），
+ *   同一屏里顶栏与卡片各说各话是最容易被抓的一类矛盾。
+ */
+export function currentScopeHeading(isView: boolean, name: string): CurrentScopeHeading {
+  if (isView) {
+    return {
+      kicker: 'CURRENT VIEW',
+      title: '当前视图',
+      scopeTitle: `当前视图：${name}（只读聚合，成员库逐个展开后统计）`,
+      switchHint: '顶栏切换视图即时刷新',
+    };
+  }
+  return {
+    kicker: 'CURRENT SCOPE',
+    title: '当前知识库',
+    scopeTitle: `当前 scope：${name}`,
+    switchHint: '顶栏切换 scope 即时刷新',
+  };
+}
+
+/** 顶部统计条「视图」卡 */
+export interface ViewCountCard {
+  /** 卡内可见值：数字串，或 `—`（未知） */
+  value: string;
+  title: string;
+}
+
+/**
+ * 顶部统计条「视图」卡 —— 已定义的视图个数。
+ *
+ * ★ `list === undefined`（scope 列表尚未返回 / 读取失败）→ `—`，**不得显示 0**：
+ *   0 会被读成"确实一个视图都没建"，而事实是"还不知道"。与「数据源」「定时同步」两卡同口径。
+ * ★ 后端**只在存在视图定义时**才带 `views` 字段（`src/scope.ts` 的 `ki_scope_list`），
+ *   所以「列表已到、没有 views」有两种成因：真的没建，或 daemon 是旧版（根本不上报）。
+ *   顶栏选择器对这两者同样退化成平面列表（`ScopeSelect` 的 `data?.views ?? []`），
+ *   这里跟随同一口径显示 0，但 **title 必须把第二种可能说出来**，不能让人以为是功能坏了。
+ */
+export function viewCountCard(
+  list: { views?: ReadonlyArray<{ view: string }> } | undefined | null,
+): ViewCountCard {
+  if (!list) {
+    return { value: '—', title: 'scope 列表尚未就绪（加载中或读取失败），暂无法统计视图数量' };
+  }
+  const names = (list.views ?? []).map((v) => v.view);
+  if (names.length === 0) {
+    return {
+      value: '0',
+      title:
+        '当前没有视图可用：尚未创建（ki view create <名称> --members a,b），或当前 daemon 版本不上报视图定义；视图是多个 scope 的只读聚合',
+    };
+  }
+  return {
+    value: String(names.length),
+    title: `已定义 ${names.length} 个视图（多个 scope 的只读聚合，可在顶栏选择器切换）：${names.join('、')}`,
+  };
 }

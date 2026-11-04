@@ -643,8 +643,10 @@ a:hover { text-decoration: underline; }
   background: var(--ki-color-surface); border-radius: var(--ki-radius-lg);
   padding: 20px; border: 1px solid var(--ki-color-border);
 }
-/* 总览统计条 5 卡：≥1025 五等分；≤1024 第 5 张跨 2 列；≤640 单列（响应式见文件末尾） */
-.ki-stats--overview { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* 总览统计条 6 卡（2026-11-04 新增「视图」卡）：≥1200 六等分；1025–1199 三等分（两行，
+   见文件末尾响应式）；≤1024 两列；≤640 单列。
+   6 能被 6/3/2/1 整除 ⇒ 原「5 卡最后一张跨 2 列」的兜底已删除。 */
+.ki-stats--overview { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .ki-stat-card--soft { background: var(--ki-color-bg-secondary); }
 .ki-stat-label {
   color: var(--ki-color-text-subtle);
@@ -1262,15 +1264,19 @@ a:hover { text-decoration: underline; }
 .ki-split__side .ki-card__body { overflow-x: auto; }
 
 /* 响应式 */
+/* 总览 6 卡在 1025–1199 六等分时单卡内宽只剩 ~83px：12px 中文副行（「未开启定时同步」）
+   会折成两行并把整行卡撑高（2026-10-30 五列时实测阈值是 108px）⇒ 此区间三等分两行。
+   ⚠️ 下面 1024 档的 `.ki-stats`(2 列) 与它特异性相同（都是一个类）且在其后 ⇒ ≤1024 由它接管。 */
+@media (max-width: 1199px) {
+  .ki-stats--overview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 1024px) {
   .ki-stats { grid-template-columns: repeat(2, 1fr); }
-  /* 5 卡在 2 列下会 2+2+1：第 5 张跨满整行，避免孤立的半行卡 */
-  .ki-stats--overview > .ki-stat-card:last-child { grid-column: span 2; }
+  /* 6 卡在 2 列下正好 3 行，无需跨列兜底 */
 }
 @media (max-width: 640px) {
   .ki-content { padding: 16px; }
   .ki-stats { grid-template-columns: 1fr; }
-  .ki-stats--overview > .ki-stat-card:last-child { grid-column: auto; }
   .ki-form-row { grid-template-columns: 1fr; }
   .ki-table th:nth-child(3), .ki-table td:nth-child(3),
   .ki-table th:nth-child(4), .ki-table td:nth-child(4) { display: none; }

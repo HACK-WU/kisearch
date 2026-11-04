@@ -1,13 +1,16 @@
 /**
- * 总览「当前知识库」六宫格判定单测（2026-10-30）
+ * 总览「当前知识库 / 当前视图」卡与「视图」统计卡判定单测
  *
- * 锁住四条不变量（每条都对应一次真实的误读风险）：
+ * 锁住以下不变量（每条都对应一次真实的误读风险）：
  *   ① `readonly === undefined` 必须是「—」，不得渲染成「可写」（旧 daemon 不返回该字段）；
  *   ② 向量服务不可用时 RAG 列必须是 `?` 而不是 `✗` —— 后端此时 `vectorScopes` 为空集，
  *      所有 scope 的 `vector` 都返回 false（src/scope.ts:210-218 → :275），渲染 ✗ 是谎报；
  *   ③ Wiki 回写卡的 `tone` 必须与 describeWikiSync 全等（两套判定会出现"总览说未开启、
  *      资源页说已开启"的同屏矛盾）；
- *   ④ 卡内 label 不含路径（用户 2026-10-30 明确要求），路径只在 title 里。
+ *   ④ 卡内 label 不含路径（用户 2026-10-30 明确要求），路径只在 title 里；
+ *   ⑤ 顶栏选中视图时卡头必须是「当前视图 / CURRENT VIEW」（2026-11-04 用户要求），
+ *      且该卡的 title 不得给出对视图无效的解锁命令；
+ *   ⑥ 「视图」统计卡在 scope 列表未就绪时是 `—`，不得显示 0。
  *
  * 运行：cd web && npm run test
  */
@@ -25,8 +28,14 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { readModeCard, layerColumns, wikiWritebackCard, readonlyWikiNote } =
-  await vite.ssrLoadModule('/src/lib/dashboardScopeCards.ts');
+const {
+  readModeCard,
+  layerColumns,
+  wikiWritebackCard,
+  readonlyWikiNote,
+  currentScopeHeading,
+  viewCountCard,
+} = await vite.ssrLoadModule('/src/lib/dashboardScopeCards.ts');
 const { describeWikiSync } = await vite.ssrLoadModule('/src/lib/resourcesPage.ts');
 after(async () => vite.close());
 
@@ -51,6 +60,18 @@ describe('readModeCard（读写权限三态）', () => {
     assert.equal(card.tone, 'muted');
     assert.match(card.title, /未提供只读状态/);
     assert.doesNotMatch(card.label, /可写/);
+  });
+
+  it('视图（isView）→ 只读，且 title 不得给出对视图无效的解锁命令', () => {
+    const card = readModeCard('demo-view', true, { isView: true });
+    assert.equal(card.label, '只读');
+    assert.match(card.title, /只读聚合/);
+    // 视图不在 config.scopes 里，`ki scope readonly <view> --off` 必然失败
+    assert.doesNotMatch(card.title, /ki scope readonly/);
+    // 视图根本不能作为写入目标，"仍可更新"会误导
+    assert.doesNotMatch(card.title, /仍可更新/);
+    // 普通 scope 的口径不受影响（两套并存，别互相污染）
+    assert.match(readModeCard('demo', true).title, /ki scope readonly demo --off/);
   });
 });
 
@@ -180,6 +201,68 @@ describe('wikiWritebackCard（Wiki 回写四态）', () => {
     assert.match(ro.title, /只读库下逐条写入会被拒绝/);
     // 非只读时不追加
     assert.doesNotMatch(wikiWritebackCard('demo', undefined, undefined).title, /只读库下/);
+  });
+});
+
+describe('currentScopeHeading（卡头：当前知识库 / 当前视图）', () => {
+  it('scope → CURRENT SCOPE / 当前知识库', () => {
+    const h = currentScopeHeading(false, 'kisearch');
+    assert.equal(h.kicker, 'CURRENT SCOPE');
+    assert.equal(h.title, '当前知识库');
+    assert.equal(h.switchHint, '顶栏切换 scope 即时刷新');
+    assert.match(h.scopeTitle, /当前 scope：kisearch/);
+  });
+
+  it('视图 → CURRENT VIEW / 当前视图（不得再叫知识库）', () => {
+    const h = currentScopeHeading(true, 'demo-view');
+    assert.equal(h.kicker, 'CURRENT VIEW');
+    assert.equal(h.title, '当前视图');
+    assert.doesNotMatch(h.title, /知识库/);
+    assert.doesNotMatch(h.kicker, /SCOPE/);
+    assert.equal(h.switchHint, '顶栏切换视图即时刷新');
+    assert.match(h.scopeTitle, /只读聚合/);
+    assert.match(h.scopeTitle, /demo-view/);
+  });
+
+  it('kicker 与 title 必须成对切换（漏改英文会出现「当前视图 / CURRENT SCOPE」）', () => {
+    const pairs = [
+      [false, 'CURRENT SCOPE', '当前知识库'],
+      [true, 'CURRENT VIEW', '当前视图'],
+    ];
+    for (const [isView, kicker, title] of pairs) {
+      const h = currentScopeHeading(isView, 'x');
+      assert.equal(h.kicker, kicker);
+      assert.equal(h.title, title);
+    }
+  });
+});
+
+describe('viewCountCard（顶部「视图」统计卡）', () => {
+  it('列表未就绪（undefined / null）→ —，必须能区分"不知道"与"0 个"', () => {
+    for (const list of [undefined, null]) {
+      const card = viewCountCard(list);
+      assert.equal(card.value, '—');
+      assert.match(card.title, /尚未就绪/);
+    }
+  });
+
+  it('列表已到但没有 views 字段 → 0 + 创建命令 + 「旧 daemon 不上报」这条歧义', () => {
+    const card = viewCountCard({ scopes: [] });
+    assert.equal(card.value, '0');
+    assert.match(card.title, /ki view create/);
+    // 后端只在有视图时才带 views 字段（src/scope.ts:327-331）⇒ 0 有两种成因，title 必须都覆盖
+    assert.match(card.title, /daemon 版本不上报/);
+  });
+
+  it('views 为空数组（后端只在有视图时才带该字段，等价于 0）', () => {
+    assert.equal(viewCountCard({ views: [] }).value, '0');
+  });
+
+  it('N 个视图 → N，title 点名（不必去顶栏逐个找）', () => {
+    const card = viewCountCard({ views: [{ view: 'work' }, { view: 'demo-view' }] });
+    assert.equal(card.value, '2');
+    assert.match(card.title, /work/);
+    assert.match(card.title, /demo-view/);
   });
 });
 
