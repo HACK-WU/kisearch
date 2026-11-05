@@ -332,8 +332,21 @@ export interface DocContentResponse {
  * 代价：不做向量模糊兜底 —— group/relation 须精确（浏览页本就来自文档列表/深链接）。
  * 未命中时后端返回 404 + error/hint，这里拼成一条消息抛出（与 MCP 路径的提示口径一致）。
  */
-export async function getDocContent(scope: string, group: string, relation: string): Promise<DocContentResponse> {
+export async function getDocContent(
+  scope: string,
+  group: string,
+  relation: string,
+  /**
+   * 来源库（视图模式必传）。
+   *
+   * 视图下 `scope` 是**视图名**，`group + relation` 可能同时存在于多个成员库 —— 后端此时
+   * 返回 409 `AMBIGUOUS_VIEW_DOC`（不静默挑一个：两份同名文档可能语义完全不同）。
+   * 传 `member` 即指定读哪个成员库。单库模式不传，行为与改造前一致。
+   */
+  member?: string,
+): Promise<DocContentResponse> {
   const params = new URLSearchParams({ scope, group, relation });
+  if (member) params.set('member', member);
   try {
     return await req<DocContentResponse>(`/api/doc/get?${params.toString()}`);
   } catch (err) {

@@ -311,7 +311,14 @@ export function BrowsePage(): JSX.Element {
       // 深链接 / 刷新恢复也算「该 scope 已自动展示过」：否则用户随后关闭文档时会被
       // autoOpen 抢回第一篇（与该标记「主动关闭后不再抢回焦点」的约定相悖）。
       autoOpenRef.current = true;
-      setViewing({ scope, group, module: relation, anchor: params.get('anchor') ?? undefined });
+      // 刷新/深链接恢复：来源库优先取 URL 的 member（首帧 members 还没加载，反解不出来）
+      setViewing({
+        scope,
+        group,
+        module: relation,
+        member: params.get('member') ?? undefined,
+        anchor: params.get('anchor') ?? undefined,
+      });
     } else {
       // scope / scope+group 是浏览入口：前者显示默认 Group，后者显示指定 Group；都不打开命中文档。
       setViewing(null);
@@ -580,7 +587,17 @@ export function BrowsePage(): JSX.Element {
     setHistory([]);
     setForwardHistory([]);
     if (syncDirectory) syncDirectoryTo(doc.group);
-    const target = { ...doc, scope };
+    /*
+     * ★ 不能写 `{ ...doc, scope }`：那是 shorthand，会把**顶栏 scope**（视图模式下是视图名）
+     *   覆盖到 doc 自带的来源库上 —— 于是 doc/get 带着视图名去查，多成员库命中同一
+     *   `group + relation` 时后端返回 409 AMBIGUOUS_VIEW_DOC，浏览页就只剩「加载失败·重试」。
+     *   两个值必须分开：`scope` 保持导航值，`member` 存来源库。
+     */
+    const target: ScopedDocumentView = {
+      ...doc,
+      scope,
+      member: doc.scope ?? doc.member,
+    };
     setViewing(target);
     writeBrowseUrl(target, readerFullscreen);
   }, [scope, readerFullscreen, writeBrowseUrl, syncDirectoryTo]);
@@ -1273,6 +1290,8 @@ export function BrowsePage(): JSX.Element {
         key={`${asDrawer ? 'drawer' : 'inline'}:${currentViewing.scope ?? scope}:${currentViewing.group}:${currentViewing.module}`}
         inline={!asDrawer}
         scope={currentViewing.scope ?? scope}
+        /* 视图模式下正文要从来源库读：只传 scope（视图名）会 409 AMBIGUOUS_VIEW_DOC */
+        member={currentViewing.member}
         module={currentViewing.module}
         /*
          * 后端只认真实 group。视图模式下 `currentViewing.group` 是**树路径**：

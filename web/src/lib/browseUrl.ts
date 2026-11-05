@@ -25,6 +25,8 @@ export function browseSearch(view: ScopedDocumentView | null, fullscreen: boolea
     group: view.group,
     relation: view.module,
   });
+  // 来源库要写进 URL：刷新时 members 还没加载、反解不出库名，靠它才能一次读对正文
+  if (view.member) params.set('member', view.member);
   if (view.anchor) params.set('anchor', view.anchor);
   if (fullscreen) params.set(FULLSCREEN_PARAM, '1');
   return params.toString();

@@ -24,6 +24,14 @@ export interface DocumentView {
    * 单库模式下不填，调用方回落顶栏值。
    */
   scope?: string;
+  /**
+   * 正文读取用的**来源库**（视图模式）。
+   *
+   * 与 `scope` 分工：`scope` 是导航值（顶栏，视图模式下是视图名，URL 与顶栏都用它），
+   * `member` 是真正去哪个成员库读正文。视图下同一 `group + relation` 可能存在于多个
+   * 成员库，后端会返回 409 `AMBIGUOUS_VIEW_DOC`，必须靠 `member` 消歧。
+   */
+  member?: string;
   /** 后端真实 group（视图模式下 `group` 是带库名前缀的树路径，不能直接拿去查） */
   apiGroup?: string;
   group?: string;

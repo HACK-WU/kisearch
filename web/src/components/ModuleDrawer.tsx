@@ -349,7 +349,15 @@ interface ModuleDrawerProps {
   targetAnchor?: string;
   editable?: boolean;
   onClose: () => void;
-  fetcher?: (scope: string, group: string, relation: string) => Promise<{ content?: string; error?: string; hint?: string }>;
+  fetcher?: (scope: string, group: string, relation: string, member?: string) => Promise<{ content?: string; error?: string; hint?: string }>;
+  /**
+   * 来源库（视图模式必传）：`scope` 是视图名时，正文要从**哪个成员库**读。
+   *
+   * 视图下同一 `group + relation` 可能存在于多个成员库，后端返回 409
+   * `AMBIGUOUS_VIEW_DOC` 而不是静默挑一个（两份同名文档可能语义完全不同）。
+   * 单库模式不传，`scope` 自己就是真实库。
+   */
+  member?: string;
   onLocalLink?: (href: string) => boolean;
   canGoBack?: boolean;
   onBack?: () => void;
@@ -430,6 +438,7 @@ export function ModuleDrawer({
   editable = false,
   onClose,
   fetcher,
+  member,
   onLocalLink,
   canGoBack = false,
   onBack,
@@ -744,7 +753,7 @@ export function ModuleDrawer({
     }
     setLoading(true);
     setError(null);
-    fetcher(scope, group, module)
+    fetcher(scope, group, module, member)
       .then((res) => {
         if (res.content) setContent(res.content);
         else {
@@ -756,7 +765,7 @@ export function ModuleDrawer({
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scope, module, group, content, fetcher, loadAttempt]);
+  }, [scope, module, group, member, content, fetcher, loadAttempt]);
 
   const retryLoad = useCallback((): void => {
     setContent(null);
