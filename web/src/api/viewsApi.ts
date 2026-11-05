@@ -19,6 +19,15 @@ export interface ViewMemberMeta {
   scheduled?: boolean;
   /** 定时**上一次自动执行失败** → 页面显示「定时（上次失败）」 */
   scheduledFailed?: boolean;
+  /**
+   * 向量集合维度与当前 `embedding.dimension` 的比对结果：
+   * `mismatch` = 已确认不一致（语义检索会直接跳过该库）；
+   * `unknown` = 快照缺失/过期，状态未确认；
+   * `undefined` = 无向量集合，或旧版 daemon 不下发该字段。
+   *
+   * ⚠ 「已确认清单」而非全量保证：没标 `mismatch` 不代表维度正常。
+   */
+  dimensionState?: 'ok' | 'mismatch' | 'unknown';
 }
 
 export interface ViewEntry {

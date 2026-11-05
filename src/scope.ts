@@ -31,6 +31,7 @@ import {
 } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { readViews, isViewName, getViewMembers } from './lib/scope-view.js';
+import { readViewDimensionState } from './lib/view-dimension-state.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
   vectorListScopes,
@@ -196,11 +197,26 @@ function computeScopeDocCounts(scope: string): ScopeDocCounts {
  * 「有没有向量索引」，只能从这里取；缺了它，`useScopeReadonly(成员名)` 查不到条目
  * → readonly 默认 false → **只读库在视图下被显示成可写**。
  */
+/**
+ * 视图成员的向量集合维度状态（相对当前 `config.embedding.dimension`）。
+ *
+ * 三态是刻意的：读不到快照时只能说「未确认」，不能默认「一致」——
+ * 维度不一致会让语义检索**直接跳过该库**，把不清楚写成没问题等于静默漏召回。
+ */
+export type ViewDimensionState = 'ok' | 'mismatch' | 'unknown';
+
 export interface ViewMemberMeta {
   scope: string;
   kb: boolean;
   vector: boolean;
   readonly: boolean;
+  /**
+   * 向量集合维度状态。`mismatch` = 已确认不一致（语义检索会跳过该库）；
+   * `unknown` = 快照缺失或过期，未确认；`undefined` = 无 dense 集合或旧数据。
+   *
+   * ⚠ 这是「已确认清单」而非全量保证：没标 mismatch 不代表维度正常。
+   */
+  dimensionState?: ViewDimensionState;
   /**
    * 该成员库的文档数（`countScopeDocs().wikiCount`，与 scope 列表「N 篇」同一口径）。
    *
@@ -383,6 +399,20 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
     } catch {
       scheduledScopes = new Map(); // 数据源文件损坏不阻断 scope 列表，只是不标「定时」
     }
+    /*
+     * 维度状态：纯 fs 读 `.vector-status` 快照（零锁），按 scope 缓存一次算好，
+     * 供所有视图复用。与 /api/views 走同一个 readViewDimensionState，
+     * 避免页面与 MCP 给出两套事实。
+     */
+    const dimensionCache = new Map<string, ViewDimensionState>();
+    const dimensionStateOf = (s: string): ViewDimensionState => {
+      let state = dimensionCache.get(s);
+      if (state === undefined) {
+        state = readViewDimensionState(config, s);
+        dimensionCache.set(s, state);
+      }
+      return state;
+    };
     if (names.length > 0) {
       views = names.map((name) => {
         const def = viewsMap[name];
@@ -407,6 +437,7 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
             }
           },
           scheduledScopes,
+          dimensionStateOf,
         });
         return {
           view: name,

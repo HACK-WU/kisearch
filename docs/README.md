@@ -26,6 +26,7 @@
 |---|---|
 | 全部 CLI 命令与参数 | [cli.md](./cli.md) |
 | 把多个知识库聚合成一个名字（知识视图） | [cli.md 的 `view` 章节](./cli.md#view) · [configuration.md](./configuration.md#视图存储viewsjson) |
+| 多库一起查时，结果为什么这样排序、分数怎么读 | [multi-scope-ranking.md](./multi-scope-ranking.md) |
 | 配置项逐条说明与字段校验 | [configuration.md](./configuration.md) |
 | MCP HTTP 共享单例、鉴权、`/api/*` 路由 | [mcp-http.md](./mcp-http.md) |
 | 13 个 MCP 工具及参数 | [mcp-tools.md](./mcp-tools.md) |
@@ -36,6 +37,7 @@
 | 内容 | 文档 |
 |---|---|
 | 数据文件、运行链路、导入链路、向量层与三层标签 | [architecture.md](./architecture.md) |
+| 多库联合查询（视图 / `--scope a,b`）的排序规则与分数怎么读 | [multi-scope-ranking.md](./multi-scope-ranking.md) |
 | 文档多语言代码块写法（`::: code-group`） | [markdown-multilang.md](./markdown-multilang.md) |
 
 ## Agent 集成

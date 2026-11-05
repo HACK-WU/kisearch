@@ -405,6 +405,8 @@ ki view delete <name> --yes
 
 > `ki tag list --scope <视图>` 会合并各成员库的 tag；成员很多时可能只合并到一部分，
 > 响应里的 `skipped` 会标注没合并到哪些库。
+>
+> 多库一起查询时结果如何排序、分数怎么读，见 [多库联合查询的排序规则](./multi-scope-ranking.md)。
 
 ### 存储
 

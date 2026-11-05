@@ -111,9 +111,10 @@ ki search "登录流程" --scope team
 
 - **只有一个成员时，返回结构不变**：`ki view create solo --members a` 之后 `--scope solo`
   返回的仍是视图结构（`view` + 一份成员数据），不是单库结构。
-- **返回名额可能被单个库占满**：多库结果按相关度统一排序、受 `--limit` 截断，
-  所以某个库可能占满全部名额。`ki search` 的响应里带 `matchedByScope`（结果来自哪些库、各多少条），
-  Web 检索页会显示「覆盖 N/M 个库」并列出本次没有命中的库。
+- **结果可能集中在少数几个库**：多库结果按相关度统一排序、受 `--limit` 截断，
+  相关内容集中在某个库时，名额就会被它占满（这是正常结果）。`ki search` 的响应里带
+  `matchedByScope`（结果来自哪些库、各多少条），Web 检索页会显示「覆盖 N/M 个库」
+  并列出本次没有命中的库。排序规则见 [多库联合查询的排序规则](./multi-scope-ranking.md)。
 
 > `ki scope list` 的文本输出**默认不含视图**（保持脚本可解析）；要看视图请用 `ki view list`
 > 或 `ki scope list --views`。

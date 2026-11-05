@@ -33,6 +33,7 @@ import { listTokens, type TokenRecord } from './mcp-token.js';
 import { listRegisteredDataSourceRecords } from './datasource.js';
 import { vectorListScopes } from './vector-client.js';
 import { buildMemberMeta } from './view-member-meta.js';
+import { readViewDimensionState } from './view-dimension-state.js';
 import { listUsers } from './user-store.js';
 import { isScopeReadonly, type KiConfig } from './config.js';
 import type { WebPrincipal } from './web-auth.js';
@@ -45,7 +46,7 @@ import { readJsonBody } from './http-body.js';
  * 曾经把 `countScopeDocs` 也写成 `from './scope.js'`，类型检查没拦住（jiti 运行时才暴露），
  * 表现为 `(0, _scope.countScopeDocs) is not a function` → 文档数统计全失败 → 空库标不出来。
  */
-import { countScopeDocs, type ViewInfo, type ViewMemberMeta } from '../scope.js';
+import { countScopeDocs, type ViewDimensionState, type ViewInfo, type ViewMemberMeta } from '../scope.js';
 import { listAllScopes, ScopeError } from './scope.js';
 
 /** 当前操作者：userId + 是否管理员 */
@@ -132,12 +133,14 @@ function memberAvailability(
   kbScopes: Set<string>,
   vectorScopes: Set<string>,
   scheduledScopes: Map<string, boolean> = new Map(),
+  dimensionStateOf: (scope: string) => ViewDimensionState = () => 'unknown',
 ): Pick<ViewInfo, 'memberMeta' | 'availableCount' | 'missing'> {
   return buildMemberMeta({
     members,
     kbScopes,
     vectorScopes,
     isReadonly: (scope) => isScopeReadonly(config, scope),
+    dimensionStateOf,
     docCountOf: (scope) => {
       try {
         return countScopeDocs(scope).wikiCount;
@@ -322,6 +325,20 @@ export async function handleViewsApi(
       } catch {
         scheduledScopes = new Map(); // 数据源文件损坏不阻断视图列表，只是不标「定时」
       }
+      /*
+       * 维度状态：纯 fs 读 `.vector-status` 快照（零锁、不 withEngine），按 scope
+       * 缓存一次算好供所有视图复用。★ 不调用 getVectorDimensionStatus —— 那会
+       * ZVecOpen 拿进程锁，撞锁时 3×2s 重试，会把列表接口拖到分钟级。
+       */
+      const dimensionCache = new Map<string, ViewDimensionState>();
+      const dimensionStateOf = (s: string): ViewDimensionState => {
+        let state = dimensionCache.get(s);
+        if (state === undefined) {
+          state = readViewDimensionState(config, s);
+          dimensionCache.set(s, state);
+        }
+        return state;
+      };
       // 影响面：token 只取一次，逐视图算（demo §4.4 的「行内常驻摘要」）
       const tokens = listTokens();
       const resolveViewName = makeViewNameResolver(config);
@@ -329,7 +346,7 @@ export async function handleViewsApi(
         const def = viewsMap[name];
         const createdByName = def.createdBy ? userNames.get(def.createdBy) : undefined;
         return toDto(name, def, {
-          ...memberAvailability(config, def.members, kbScopes, vectorScopes, scheduledScopes),
+          ...memberAvailability(config, def.members, kbScopes, vectorScopes, scheduledScopes, dimensionStateOf),
         }, actor, {
           ...(createdByName ? { createdByName } : {}),
           impactCount: computeImpact(tokens, def.members, name, def.id, resolveViewName).length,

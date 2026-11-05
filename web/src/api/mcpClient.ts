@@ -192,6 +192,8 @@ export interface ViewMemberMeta {
   kb: boolean;
   vector: boolean;
   readonly: boolean;
+  /** 向量集合维度状态；旧 daemon 不下发（与 viewsApi.ts 同口径） */
+  dimensionState?: 'ok' | 'mismatch' | 'unknown';
 }
 
 /** 知识视图：多个 scope 的只读聚合，可当 scope 用 */

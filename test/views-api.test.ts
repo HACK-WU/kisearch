@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type http from 'node:http';
 
@@ -270,6 +271,61 @@ describe('/api/views 全链路', () => {
     // 断言数量会依赖本机真实 token 文件，这里只校验"只统计被授权该视图的"这一结构约定
     for (const item of out.body!.affected as { id: string }[]) {
       assert.equal(typeof item.id, 'string');
+    }
+  });
+});
+
+describe('成员维度状态（方案 A：只标已确认不一致）', () => {
+  it('mismatch / unknown 三态由后端给出，列表接口不打开向量引擎', async () => {
+    reset();
+    /*
+     * vectorListScopes() 只扫 collections 目录名（不启引擎），造目录即可让成员
+     * 进入「有向量集合」分支 —— 否则 dimensionState 恒为 undefined，测不到口径。
+     */
+    const collectionsRoot = path.join(tmpDir, 'vector', 'collections');
+    fs.mkdirSync(path.join(collectionsRoot, 'dim-a'), { recursive: true });
+    fs.mkdirSync(path.join(collectionsRoot, 'dim-b'), { recursive: true });
+
+    const dim = cfg().embedding.dimension;
+    const statusDir = path.join(tmpDir, 'kb', '.vector-status');
+    fs.mkdirSync(statusDir, { recursive: true });
+    const snapFile = path.join(
+      statusDir, `${crypto.createHash('sha256').update('dim-a').digest('hex')}.json`,
+    );
+    fs.writeFileSync(snapFile, JSON.stringify({
+      scope: 'dim-a',
+      state: 'mismatch',
+      configured: dim,
+      model: 'm',
+      provider: 'p',
+      baseURL: 'http://localhost',
+      persisted: dim + 1,
+      checkedAt: Date.now(),
+      staleAfterMs: 5 * 60 * 1000,
+    }), 'utf-8');
+
+    try {
+      const created = await call('POST', '/views', ADMIN, { name: 'dimcheck', members: ['dim-a', 'dim-b'] });
+      assert.equal(created.status, 201);
+
+      const list = await call('GET', '/views', ADMIN);
+      assert.equal(list.status, 200);
+      const entry = (list.body?.views as {
+        memberMeta: { scope: string; dimensionState?: string }[];
+      }[])[0];
+      assert.equal(
+        entry.memberMeta.find((x) => x.scope === 'dim-a')?.dimensionState,
+        'mismatch',
+        '已确认不一致的成员必须标 mismatch',
+      );
+      assert.equal(
+        entry.memberMeta.find((x) => x.scope === 'dim-b')?.dimensionState,
+        'unknown',
+        '没有快照的成员必须是 unknown，不能默认一致',
+      );
+    } finally {
+      fs.rmSync(collectionsRoot, { recursive: true, force: true });
+      fs.rmSync(statusDir, { recursive: true, force: true });
     }
   });
 });

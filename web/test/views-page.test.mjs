@@ -19,6 +19,7 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf-8');
 
 const page = read('src/pages/ViewsPage.tsx');
 const apiClient = read('src/api/viewsApi.ts');
+const css = read('src/styles/views.css');
 
 test('写权限只用后端 canEdit / mine，页面不比对 userId', () => {
   assert.ok(!/userId\s*===/.test(page), '页面不得自行比对 userId');
@@ -47,4 +48,32 @@ test('页面复用 AppShell，不照搬 demo 的 pv-* 外壳与内联令牌兜�
 test('影响面按 R-05 口径由后端计算，页面只展示', () => {
   assert.ok(apiClient.includes('/api/views/impact'), '影响面应由后端接口提供');
   assert.ok(!/members\.every/.test(page), '页面不得自己算影响面（口径必须单点）');
+});
+
+test('维度不一致只标「已确认」，且后果说明与配色齐备', () => {
+  assert.ok(page.includes("tags.push('维度不一致')"), '成员 chip 应追加「维度不一致」后缀');
+  assert.ok(/dimensionState === 'mismatch'/.test(page), '判据必须是后端已确认的 mismatch');
+  assert.ok(!/dimensionState\s*!==\s*'ok'/.test(page), '不得用 !ok 把 unknown 也标成不一致');
+  assert.ok(page.includes('语义检索会直接跳过该库'), 'hover 应说明「语义检索直接跳过」的后果');
+  assert.ok(page.includes('--rebuild-vector --yes'), 'hover 应给出修复命令');
+  assert.ok(page.includes('views-chip--dim-mismatch'), '应有专属配色类');
+  assert.ok(css.includes('.views-chip--dim-mismatch'), 'CSS 变体应存在');
+});
+
+test('维度三态逐个可见：unknown 必须与 ok 区分，且能定位到具体 scope', () => {
+  assert.ok(page.includes("dimensionState === 'unknown'"), '页面应识别未确认成员');
+  assert.ok(page.includes("tags.push('维度未确认')"), 'unknown 的 chip 必须逐个追加后缀');
+  assert.ok(page.includes('没有可用的维度检查快照'), 'unknown 的 hover 应说明原因');
+  assert.ok(page.includes('views-chip--dim-unknown'), 'unknown 应有专属样式类');
+  assert.ok(css.includes('.views-chip--dim-unknown'), 'CSS 变体应存在');
+  // 只给一个数字仍看不出是哪个库：行级提示必须列名字 + title 全量
+  assert.ok(page.includes('个库维度未确认：'), '行级提示应带库名列表');
+  assert.ok(page.includes('hover 看全部'), '应提示 hover 可看全量名单');
+  assert.ok(page.includes('views-row__warn--dim'), '未确认提示应有独立样式');
+});
+
+test('编辑态同步：已选成员与候选面板复用同一份维度状态', () => {
+  assert.ok(page.includes('dimensionByScope'), '应由 /api/views 的 memberMeta 聚合，避免两处产出');
+  assert.ok(page.includes("' · 维度未确认'"), '编辑表单已选 chip 也应标出未确认');
+  assert.ok(page.includes('views-picker__opt-meta'), '候选面板应保持渲染');
 });

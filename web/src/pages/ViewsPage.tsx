@@ -155,6 +155,24 @@ export function ViewsPage(): JSX.Element {
   };
 
   const scopeMeta = useMemo(() => new Map(scopes.map((s) => [s.scope, s])), [scopes]);
+  /*
+   * 维度状态按 scope 聚合：编辑表单已选 chip 与候选面板都要能看到
+   * 「这个库会被语义检索跳过」，否则列表页看得到、选人时看不到。
+   * 数据源只取 /api/views 的 memberMeta（与列表同一个后端口径），不再扩展
+   * ki_scope_list 的 scopes[] —— 避免同一事实两处产出。
+   * ★ 同一 scope 出现在多个视图时以 mismatch 为准（宁可多提示，不可漏）。
+   * ⚠ 没出现在任何视图里的库没有状态：按「未确认」处理，不标、也不当成正常。
+   */
+  const dimensionByScope = useMemo(() => {
+    const map = new Map<string, 'ok' | 'mismatch' | 'unknown'>();
+    for (const v of views) {
+      for (const meta of v.memberMeta) {
+        if (meta.dimensionState === 'mismatch') map.set(meta.scope, 'mismatch');
+        else if (meta.dimensionState && !map.has(meta.scope)) map.set(meta.scope, meta.dimensionState);
+      }
+    }
+    return map;
+  }, [views]);
   /** 候选 = 未选中的库，按输入过滤 */
   const candidates = useMemo(() => {
     const kw = pickerFilter.trim().toLowerCase();
@@ -246,18 +264,24 @@ export function ViewsPage(): JSX.Element {
                 {draft.members.length === 0 && <span className="views-hint">还没有选择知识库</span>}
                 {draft.members.map((m) => {
                   const meta = scopeMeta.get(m);
-                  const tip = meta?.readonly
-                    ? '只读库：可作为检索成员，但不可写入'
-                    : (meta && !meta.kb && !meta.vector ? '尚未导入文档，检索时会跳过' : `点击移除 ${m}`);
+                  const dimMismatch = dimensionByScope.get(m) === 'mismatch';
+                  const dimUnknown = dimensionByScope.get(m) === 'unknown';
+                  const tip = dimMismatch
+                    ? `语义检索会直接跳过该库（向量集合维度与当前配置不一致）；修复：ki restore ${m} --rebuild-vector --yes。依据上次维度检查，若已重建请重新检查`
+                    : (dimUnknown
+                      ? '没有可用的维度检查快照，不能断定该库维度正常；导入 / 重建或刷新维度检查后可确认'
+                      : (meta?.readonly
+                        ? '只读库：可作为检索成员，但不可写入'
+                        : (meta && !meta.kb && !meta.vector ? '尚未导入文档，检索时会跳过' : `点击移除 ${m}`)));
                   return (
                     <button
                       key={m}
                       type="button"
-                      className={`views-chip views-chip--pick${meta?.readonly ? ' views-chip--ro' : ''}`}
+                      className={`views-chip views-chip--pick${dimMismatch ? ' views-chip--dim-mismatch' : (meta?.readonly ? ' views-chip--ro' : '')}`}
                       title={tip}
                       onClick={() => removeMember(m)}
                     >
-                      {m}{meta?.readonly ? ' · 只读' : ''}
+                      {m}{dimMismatch ? ' · 维度不一致' : ''}{dimUnknown ? ' · 维度未确认' : ''}{meta?.readonly ? ' · 只读' : ''}
                       <span className="views-chip__x" aria-hidden="true">×</span>
                     </button>
                   );
@@ -326,6 +350,12 @@ export function ViewsPage(): JSX.Element {
                         >
                           <span className="views-picker__opt-name">{s.scope}</span>
                           <span className="views-picker__opt-meta">
+                            {dimensionByScope.get(s.scope) === 'mismatch' && (
+                              <span
+                                className="views-tag views-tag--dim-mismatch"
+                                title="语义检索会直接跳过该库：向量集合维度与当前配置不一致（依据上次维度检查，若已重建请重新检查）"
+                              >维度不一致</span>
+                            )}
                             {!s.vector && <span className="views-tag views-tag--kbonly">仅全文</span>}
                             {s.readonly && <span className="views-tag views-tag--ro">只读</span>}
                           </span>
@@ -417,12 +447,32 @@ export function ViewsPage(): JSX.Element {
                      */
                     const empty = !missing && meta?.docCount === 0;
                     const onlyFullText = !missing && !empty && meta?.kb === true && meta?.vector === false;
+                    /*
+                     * 维度不一致（已确认）：默认 hybrid 检索里该库会被整库跳过
+                     * （onScopeError → return []），其余成员照常出结果。
+                     * 只在「已确认」时标；unknown 不标、也不当成正常，由行内
+                     * 「N 个库维度状态未确认」另行兜底（方案 A 的诚实性要求）。
+                     */
+                    const dimMismatch = !missing && meta?.dimensionState === 'mismatch';
+                    const dimUnknown = !missing && meta?.dimensionState === 'unknown';
                     const tags: string[] = [];
                     const tips: string[] = [];
                     if (missing) {
                       tags.push('缺失');
                       tips.push('KB 与向量层都没有数据（库不可用），检索时会跳过');
                     } else {
+                      if (dimMismatch) {
+                        tags.push('维度不一致');
+                        tips.push(`语义检索会直接跳过该库（向量集合维度与当前配置不一致），其余可用的库照常出结果；修复：ki restore ${m} --rebuild-vector --yes。依据上次维度检查，若已重建请重新检查`);
+                      }
+                      if (dimUnknown) {
+                        /*
+                         * 三态必须逐个可见：只给行级「N 个未确认」时用户看不出是哪个库。
+                         * `ok` 的库保持无标记，避免 12 个 chip 全部变长。
+                         */
+                        tags.push('维度未确认');
+                        tips.push('没有可用的维度检查快照，不能断定该库维度正常；导入 / 重建或刷新维度检查后可确认');
+                      }
                       if (empty) {
                         tags.push('空');
                         tips.push('该库还没有任何文档，检索时会跳过');
@@ -447,15 +497,25 @@ export function ViewsPage(): JSX.Element {
                       }
                     }
                     const suffix = tags.length > 0 ? ` · ${tags.join(' · ')}` : '';
+                    /* 配色优先级：缺失 > 维度不一致 > 空 > 只读（维度不一致要压过只读/空） */
                     const stateClass = missing
                       ? ' views-chip--missing'
-                      : (empty ? ' views-chip--empty' : (meta?.readonly ? ' views-chip--ro' : ''));
+                      : (dimMismatch ? ' views-chip--dim-mismatch'
+                        : (empty ? ' views-chip--empty' : (meta?.readonly ? ' views-chip--ro' : '')));
                     /* 定时失败只在没有主状态色时叠加（否则会盖掉缺失/空/只读的语义） */
                     const failClass = stateClass === '' && meta?.scheduledFailed
                       ? ' views-chip--sched-failed'
                       : '';
+                    /*
+                     * 维度未确认是**最低优先级**的中性虚线：只在既无主状态色、
+                     * 也无定时失败虚线时叠加，避免两套虚线打架。文字后缀不受此限，
+                     * 即使 chip 已有「空」「只读」的底色也照样显示。
+                     */
+                    const unknownClass = stateClass === '' && failClass === '' && dimUnknown
+                      ? ' views-chip--dim-unknown'
+                      : '';
                     return (
-                      <span key={m} title={tips.join('；')} className={`views-chip${stateClass}${failClass}`}>
+                      <span key={m} title={tips.join('；')} className={`views-chip${stateClass}${failClass}${unknownClass}`}>
                         {m}{suffix}
                       </span>
                     );
@@ -472,6 +532,31 @@ export function ViewsPage(): JSX.Element {
                     <span>全部已授权 Token 都能看到此视图</span>
                   </div>
                 )}
+                {/*
+                 * 方案 A 的诚实性兜底：三态都要可见。
+                 * chip 上的「· 维度未确认」负责逐个定位；这里再给汇总 + 名单
+                 * （正文只列前 3 个，hover 看全量），避免只有一个数字时用户仍
+                 * 不知道是哪几个库没检查过。
+                 */}
+                {(() => {
+                  const names = v.memberMeta
+                    .filter((x) => x.dimensionState === 'unknown')
+                    .map((x) => x.scope);
+                  if (names.length === 0) return null;
+                  return (
+                    <div
+                      className="views-row__warn views-row__warn--dim"
+                      title={`维度未确认的库：${names.join('、')}`}
+                    >
+                      <span aria-hidden="true">?</span>
+                      <span>
+                        {names.length} 个库维度未确认：{names.slice(0, 3).join('、')}
+                        {names.length > 3 ? ` 等 ${names.length} 个` : ''}
+                        （hover 看全部；chip 上标「· 维度未确认」）
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
               <div className="views-row__side">
                 <button

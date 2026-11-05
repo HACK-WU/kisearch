@@ -122,6 +122,39 @@
   color: var(--ki-color-text-subtle);
 }
 
+/*
+ * 维度状态未确认：信息色，不抢「影响面」的警示色。
+ * 用户据此知道「没标维度不一致」≠「维度正常」。
+ */
+.views-row__warn--dim {
+  color: var(--ki-color-info);
+}
+
+/*
+ * 维度不一致（已确认）：danger 色实线 + 不填底。
+ *   · 不填底：红底是「缺失」的表达方式，填了会与它抢语义
+ *   · 不用虚线：虚线已用于「定时上次失败」（链路问题），这里是库本身的问题
+ * 优先级：缺失 > 维度不一致 > 空 > 只读（由 ViewsPage 的 stateClass 保证单选）
+ */
+.views-chip--dim-mismatch {
+  border-color: var(--ki-color-danger);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-danger);
+}
+
+/*
+ * 维度未确认（信息不足）：**中性虚线 + 不填底**，全套 chip 里优先级最低。
+ *   · 中性色而非红/蓝/黄：它是「还没查」，不是「坏了」「空了」「受限」
+ *   · 虚线只在此处与「定时上次失败」共用，但后者是警示黄，颜色可分
+ *   · 只在 ViewsPage 判定无主状态色、且无定时失败虚线时才叠加，避免两套虚线打架
+ * 文字后缀「· 维度未确认」不受此限：空 / 只读底色的 chip 也照样显示。
+ */
+.views-chip--dim-unknown {
+  border-style: dashed;
+  border-color: var(--ki-color-border-strong);
+  color: var(--ki-color-text-subtle);
+}
+
 .views-badge {
   padding: 3px 6px;
   border-radius: var(--ki-radius-tag);
@@ -497,6 +530,12 @@
 .views-tag--ro {
   background: var(--ki-color-warning-soft);
   color: var(--ki-color-warning);
+}
+
+/* 候选面板里的「维度不一致」：与只读（黄）区分，用 danger 色 */
+.views-tag--dim-mismatch {
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
 }
 
 /* 表单底部：左侧统计 + 右侧按钮 */

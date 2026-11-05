@@ -99,17 +99,66 @@ export async function refreshVectorDimensionSnapshot(
     writeSnapshot(config, snapshot);
     return snapshot;
   } catch (error) {
+    /*
+     * ★ 保留上次确认的 `persisted`：refresh 失败只代表「这一次没查成」，不代表
+     *   集合维度变了。视图页的「维度不一致」标记依赖 readPersistedVectorDimension
+     *   读这个结构性事实；若在这里抹掉，一次偶发的锁冲突 / embedding 超时就会
+     *   让已确认的 mismatch 静默消失（fail-loud 退化成静默漏标）。
+     *   `state` 仍为 unknown，顶栏 banner / 总览面板的「未确认」语义不受影响
+     *   （readVectorDimensionSnapshot 遇 state==='unknown' 一律返回 unknown()）。
+     *   本机实证：2 份 unknown 快照（非法 scope）均无 persisted，正是该分支产物。
+     */
+    const previousPersisted = readPersistedVectorDimension(config, scope);
     const snapshot: VectorDimensionSnapshot = {
       scope,
       state: 'unknown',
       configured: config.embedding.dimension,
       ...configuredIdentity(config),
+      ...(previousPersisted !== undefined ? { persisted: previousPersisted } : {}),
       checkedAt: Date.now(),
       error: safeError(error),
       staleAfterMs: SNAPSHOT_TTL_MS,
     };
     writeSnapshot(config, snapshot);
     return snapshot;
+  }
+}
+
+/**
+ * 读快照里「上次确认的集合 dense 维度」——**不看 TTL**。
+ *
+ * 为什么与 `readVectorDimensionSnapshot` 分开：后者表达「最近一次体检结论」，
+ * 5 分钟没复查就降级 unknown 并丢掉 persisted，供顶栏 banner / 总览面板使用
+ * （那两处必须诚实说明「没刚查过」）。而集合的 dense schema 维度是**结构性事实**：
+ * 只有删集合、rebuild-vector 或重新导入才会变，这些路径都会 refresh 写新快照
+ * （`restore.ts` / `import.ts` / 任务收尾）。把它按 5 分钟 TTL 丢掉，会让视图页
+ * 的「维度不一致」标记在真实数据里一个都不出现 —— 本机实测 178 份快照全部过期，
+ * 含一份 `persisted=4096 / configured=1024` 的真实 mismatch。
+ *
+ * ⚠ 代价：集合被外部手段重建却没刷新快照时可能误报 mismatch。按 fail-loud 取舍，
+ *    宁可多提示并给重建命令，也不能把「语义检索静默跳过该库」吞掉；调用方应在
+ *    hover 里说明「依据上次维度检查」并给出重新检查的出路。
+ *
+ * 安全校验与 `readVectorDimensionSnapshot` 同口径：非符号链接、≤8KB、scope 匹配；
+ * persisted 额外要求**正整数**（维度只能是正整数，避免伪造/损坏值被当成 mismatch）。
+ * 任何异常一律 `undefined`（调用方据此降级为「未确认」）。
+ * 本函数只读文件，不打开 zvec、不加进程锁。
+ */
+export function readPersistedVectorDimension(
+  config: Pick<KiConfig, 'dataDir' | 'embedding'>,
+  scope: string,
+): number | undefined {
+  try {
+    const file = snapshotPath(config, scope);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024) return undefined;
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8')) as VectorDimensionSnapshot;
+    const persisted = stored.persisted;
+    if (stored.scope !== scope || typeof persisted !== 'number'
+      || !Number.isInteger(persisted) || persisted <= 0) return undefined;
+    return persisted;
+  } catch {
+    return undefined;
   }
 }
 

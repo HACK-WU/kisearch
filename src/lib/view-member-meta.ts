@@ -8,10 +8,11 @@
  * 而且不会报错（只是字段没有）。
  *
  * ★ 本模块**只做拼装**，不 import 任何会反向依赖调用方的模块（避免成环）：
- *   数据由调用方算好传入（`docCountOf` / `scheduledScopes` / `isReadonly`）。
+ *   数据由调用方算好传入（`docCountOf` / `scheduledScopes` / `isReadonly` /
+ *   `dimensionStateOf`）。
  */
 
-import type { ViewMemberMeta } from '../scope.js';
+import type { ViewDimensionState, ViewMemberMeta } from '../scope.js';
 
 export interface MemberMetaInput {
   members: string[];
@@ -27,6 +28,13 @@ export interface MemberMetaInput {
   docCountOf: (scope: string) => number | undefined;
   /** scope → 定时上次自动执行是否失败；不在表里 = 未配定时 */
   scheduledScopes: Map<string, boolean>;
+  /**
+   * scope → 向量集合维度状态。缺省 = 调用方不具备该能力，此时**不输出**
+   * `dimensionState`（兼容旧调用方，也避免把「没查」写成「已确认」）。
+   *
+   * ★ 只对 `vector === true` 的成员调用：没有 dense 集合的库无从比对维度。
+   */
+  dimensionStateOf?: (scope: string) => ViewDimensionState;
 }
 
 export interface MemberMetaResult {
@@ -45,9 +53,12 @@ export interface MemberMetaResult {
  * - `docCount === 0` → 空（库在、0 篇）
  * - `readonly` → 只读
  * - `scheduled` / `scheduledFailed` → 定时 / 定时（上次失败）
+ * - `dimensionState === 'mismatch'` → 维度不一致（语义检索会跳过该库）
  */
 export function buildMemberMeta(input: MemberMetaInput): MemberMetaResult {
-  const { members, kbScopes, vectorScopes, isReadonly, docCountOf, scheduledScopes } = input;
+  const {
+    members, kbScopes, vectorScopes, isReadonly, docCountOf, scheduledScopes, dimensionStateOf,
+  } = input;
 
   const memberMeta: ViewMemberMeta[] = members.map((scope) => {
     const kb = kbScopes.has(scope);
@@ -55,6 +66,7 @@ export function buildMemberMeta(input: MemberMetaInput): MemberMetaResult {
     // 没有 KB 数据时文档数必然是 0（也用于「缺失」之外的展示一致性）
     const docCount = kb ? docCountOf(scope) : 0;
     const scheduledFailed = scheduledScopes.get(scope);
+    const dimensionState = vector && dimensionStateOf ? dimensionStateOf(scope) : undefined;
 
     return {
       scope,
@@ -62,6 +74,7 @@ export function buildMemberMeta(input: MemberMetaInput): MemberMetaResult {
       vector,
       readonly: isReadonly(scope),
       ...(docCount === undefined ? {} : { docCount }),
+      ...(dimensionState !== undefined ? { dimensionState } : {}),
       ...(scheduledScopes.has(scope)
         ? { scheduled: true, ...(scheduledFailed ? { scheduledFailed: true } : {}) }
         : {}),
