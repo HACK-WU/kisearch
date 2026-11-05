@@ -202,14 +202,14 @@ scope 先注册
 
 ---
 
-## 七类：视图相关错误（REQ-20261104-003）
+## 七类：视图相关错误
 
-知识视图（`ki view`）是多个 scope 的只读聚合。它的错误都属**参数/契约类**，不会产生脏数据。
+知识视图（`ki view`）是多个 scope 的只读聚合，这些错误都不会改动任何知识库数据。
 
 | 错误码 | 触发 | 处置 |
 |---|---|---|
-| `INVALID_VIEW_NAME` | 视图名含非法字符 | 仅允许字母、数字、连字符、下划线（与 scope 同字符集） |
-| `RESERVED_VIEW_NAME` | 用了保留名 | `all` / `default` / `__global__` / `__root__` 不可作视图名 |
+| `INVALID_VIEW_NAME` | 视图名含非法字符 | 支持中文、字母数字、`-` `_` `.`；禁空格 / 逗号 / 斜杠 / `..` / 控制字符 / **shell 元字符**（`$ ( ) \` ; \| & < > * ? ! # ~` 等）。错误文案会逐字列出非法字符 |
+| `RESERVED_VIEW_NAME` | 用了保留名 | `all` / `default` / `__global__` / `__root__` / `__proto__` / `prototype` / `constructor` 不能作视图名 |
 | `VIEW_NAME_CONFLICT` | 与已有 scope 或视图撞名 | 换一个名字（视图与知识库共用命名空间） |
 | `VIEW_NOT_FOUND` | 查/改/删不存在的视图 | `ki view list` 看现有视图 |
 | `VIEW_EMPTY` | 视图没有成员 | `ki view add <视图> <scope>`；或 `ki view delete` 解散 |

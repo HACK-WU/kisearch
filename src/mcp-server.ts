@@ -286,16 +286,33 @@ function splitGrants(scopeRaw: string | undefined, viewRaw: string | undefined):
   let known: Set<string>;
   /** 视图名 → 稳定 ID（D7：授权落 ID，改名不断授权） */
   let idByName: Map<string, string>;
+  /** 视图名 → 成员（授权视图时自动带上成员，见下面的 autoMembers） */
+  let membersByName: Map<string, string[]>;
   try {
     const views = readViews(loadConfig());
     known = new Set(Object.keys(views));
     idByName = new Map(Object.entries(views).map(([name, def]) => [name, def.id]));
+    membersByName = new Map(Object.entries(views).map(([name, def]) => [name, [...def.members]]));
   } catch {
     known = new Set(); // 视图文件损坏时不阻塞授权，退化为全部记入 scopes
     idByName = new Map();
+    membersByName = new Map();
   }
 
   const viewGrants: string[] = [];
+  /**
+   * 授权视图时**自动带上成员**（落进 scopes）。
+   *
+   * 为什么必须自动补：运行期规则是「视图名被授权 ∧ 全部成员也被授权」才放行
+   * （`scope-access.ts`）。只写 `--view team` 而不写成员，会得到一个
+   * 「授权成功、但所有读都 403」的 Token —— 用户看到的是"授权了却用不了"，
+   * 且 403 文案为了防枚举刻意不解释原因，极难自查。
+   *
+   * 自动补全后：MCP 与 REST 两条通道结论一致，且 `token list` 里仍能看到被补了哪些库。
+   * 反向（视图后续新增成员）不会被自动补 —— 那属于扩大可读范围，必须管理员显式动作。
+   */
+  const autoMembers: string[] = [];
+
   /**
    * 记录一条视图授权。
    * 已知视图 → 落**稳定 ID**（改名免疫）；未知名字 → 按原样保留（003 §3.2 的前向声明）。
@@ -303,6 +320,9 @@ function splitGrants(scopeRaw: string | undefined, viewRaw: string | undefined):
   const addView = (nameOrId: string): void => {
     const grant = idByName.get(nameOrId) ?? nameOrId;
     if (!viewGrants.includes(grant)) viewGrants.push(grant);
+    for (const m of membersByName.get(nameOrId) ?? []) {
+      if (!autoMembers.includes(m)) autoMembers.push(m);
+    }
   };
 
   for (const v of (viewRaw ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
@@ -339,6 +359,20 @@ function splitGrants(scopeRaw: string | undefined, viewRaw: string | undefined):
       }
       for (const name of resolveScopesArg(segment)) scopes.push(name);
     }
+  }
+
+  // 视图成员补全：只补"新增的"，并把补了什么明确打印出来（不静默扩大授权）
+  const added: string[] = [];
+  for (const m of autoMembers) {
+    if (scopes.includes(m)) continue;
+    scopes.push(m);
+    added.push(m);
+  }
+  if (added.length > 0) {
+    process.stderr.write(
+      `[kisearch] 已一并授权视图成员：${added.join(', ')}（视图授权需成员授权才生效；`
+      + '可用 ki mcp token update <id> --scope ... 调整）\n',
+    );
   }
   return { scopes, viewGrants };
 }

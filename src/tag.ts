@@ -26,7 +26,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
-import { resolveScopeTargets } from './lib/scope-view.js';
+import { isViewRequest, resolveScopeTargets } from './lib/scope-view.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
 // ─── 纯函数（供 CLI / MCP 共享） ───
@@ -84,7 +84,18 @@ program
      */
     const config = loadConfig();
     const targets = resolveScopeTargets(config, opts.scope);
-    if (targets.views.length > 0 && targets.scopes.length > 1) {
+    if (isViewRequest(targets)) {
+      if (targets.scopes.length === 0) {
+        // 成员全被跳过（strict 未注册等）：显式报错，不能返回 ok:true + 空 tags 冒充"没有 tag"
+        console.log(JSON.stringify({
+          ok: false,
+          view: targets.views[0],
+          error: `视图 ${targets.views[0]} 没有可用的成员库`,
+          skipped: targets.skipped,
+        }, null, 2));
+        await closeEngine();
+        process.exit(1);
+      }
       const merged = new Map<string, { tag: string; count: number; scopes: string[] }>();
       const skipped: { scope: string; reason: string }[] = [...targets.skipped];
       for (const member of targets.scopes) {

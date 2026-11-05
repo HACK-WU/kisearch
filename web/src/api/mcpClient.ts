@@ -85,8 +85,10 @@ export interface SearchResult {
   /** 降级原因，用于向用户解释分数口径变化 */
   degradedReason?: string;
   mode?: 'hybrid' | 'fulltext';
-  /** 被跳过或受召回上限影响的 scope（strict 未注册 / 无向量 Collection / 引擎候选上限）——不展示即为静默漏召回 */
+  /** 被跳过或受召回上限影响的 scope（strict 未注册 / 无向量 Collection / 单成员检索失败 / 引擎候选上限）——不展示即为静默漏召回 */
   skipped?: { scope: string; reason: string }[];
+  /** 返回结果按来源库计数（仅多库 / 视图检索）：用于判断覆盖面，避免"单库吃满名额"被误读为其他库没内容 */
+  matchedByScope?: { scope: string; count: number }[];
   /** 多 scope / 视图检索时实际检索的库列表（单库不返回） */
   scopes?: string[];
   /** 本次请求涉及的视图名（缺省 = 纯 scope 请求） */

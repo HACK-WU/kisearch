@@ -33,7 +33,12 @@ fs.writeFileSync(configPath, JSON.stringify({
 }), 'utf-8');
 fs.writeFileSync(viewsPath, JSON.stringify({
   version: 1,
-  views: { team: { members: ['kisearch', 'kisearch-memory'] } },
+  views: {
+    team: { members: ['kisearch', 'kisearch-memory'] },
+    // ★ 单成员视图：判据必须是「名字命中视图」，叠加 scopes.length>1 会让它落到单库分支，
+    //   拿视图名当 scope 名去读 KB（报「尚未导入」「元数据不存在」或返回空 tag 列表）。
+    solo: { members: ['kisearch'] },
+  },
   updatedAt: new Date().toISOString(),
 }, null, 2), 'utf-8');
 process.env.KI_CONFIG_PATH = configPath;
@@ -120,5 +125,42 @@ describe('ki_get_module_info 视图成员约束', () => {
     assert.equal(res.isError, true);
     assert.match(res.content[0].text, /必须指定 member/);
     assert.match(res.content[0].text, /kisearch/);
+  });
+});
+
+/**
+ * ★ 单成员视图回归（Q1）：判据必须是「名字命中视图」，不能叠加 `scopes.length > 1`。
+ *   叠加后单成员视图会落到单库分支，把**视图名**当 scope 名用：
+ *   group_list / get_module_info 报「尚未导入 / 元数据不存在」，tag_list 静默返回空列表。
+ */
+describe('单成员视图：三个工具都必须走视图分支', () => {
+  it('ki_group_list 返回 buckets（1 个桶），不是「尚未导入」', async () => {
+    const res = await handlers.get('ki_group_list')!({ scope: 'solo', mode: 'full' });
+    const data = parse(res);
+    assert.equal(data.view, 'solo', `应进入视图分支，实际：${JSON.stringify(data).slice(0, 160)}`);
+    assert.deepEqual(data.members, ['kisearch']);
+    assert.equal(data.buckets.length, 1);
+    // 桶的 scope 必须是**成员库**，不能是视图名（视图名当 scope 是这条 bug 的特征）
+    assert.equal(data.buckets[0].scope, 'kisearch');
+  });
+
+  it('ki_tag_list 返回合并形状（view/members），不是依赖视图名的空结果', async () => {
+    const res = await handlers.get('ki_tag_list')!({ scope: 'solo' });
+    const data = parse(res);
+    assert.equal(data.view, 'solo', `应进入视图合并分支，实际：${JSON.stringify(data).slice(0, 160)}`);
+    assert.deepEqual(data.members, ['kisearch']);
+  });
+
+  it('ki_get_module_info 按成员库查找，不把视图名当 scope', async () => {
+    const res = await handlers.get('ki_get_module_info')!({ scope: 'solo', group: 'g', relation: 'r' });
+    const data = parse(res);
+    assert.equal(data.view, 'solo', `应走视图语义，实际：${JSON.stringify(data).slice(0, 160)}`);
+    assert.deepEqual(data.searched, ['kisearch']);
+  });
+
+  it('单成员视图的批量查询免 member（无歧义）', async () => {
+    const res = await handlers.get('ki_get_module_info')!({ scope: 'solo', group: 'g', relations: ['r1'] });
+    // 不再要求 member：应落到成员库 kisearch 的批量结果（无 KB 时是 not found，而不是参数错误）
+    assert.doesNotMatch(res.content[0].text, /必须指定 member/);
   });
 });

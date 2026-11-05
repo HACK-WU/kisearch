@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../../get-module-info.js';
 import { loadConfig } from '../config.js';
-import { resolveScopeTargets, getViewMembers } from '../scope-view.js';
+import { resolveScopeTargets, getViewMembers, isViewRequest } from '../scope-view.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerGetModuleInfoTool(server: McpServer): void {
@@ -36,8 +36,22 @@ export function registerGetModuleInfoTool(server: McpServer): void {
          * 规则：显式 member 优先；否则逐库试，唯一命中才返回，多命中 fail-loud 列候选。
          */
         const targets = resolveScopeTargets(loadConfig(), args.scope);
-        if (targets.views.length > 0 && targets.scopes.length > 1) {
+        if (isViewRequest(targets)) {
           const viewName = targets.views[0];
+          if (targets.scopes.length === 0) {
+            return {
+              isError: true,
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ok: false,
+                  view: viewName,
+                  error: `视图 ${viewName} 没有可用的成员库`,
+                  skipped: targets.skipped,
+                }, null, 2),
+              }],
+            };
+          }
           let candidates = targets.scopes;
           if (args.member) {
             const members = getViewMembers(loadConfig(), viewName);
@@ -54,7 +68,13 @@ export function registerGetModuleInfoTool(server: McpServer): void {
           }
 
           if (args.relations) {
-            if (!args.member) {
+            /**
+             * 批量查询落到单一成员库。★ 单成员视图无歧义 → 自动取唯一成员，
+             * 不强制 member：否则「刚建好、还没扩成员」的视图连批量读都不可用。
+             */
+            const member = args.member
+              ?? (targets.scopes.length === 1 ? targets.scopes[0] : undefined);
+            if (!member) {
               return {
                 isError: true,
                 content: [{
@@ -65,14 +85,21 @@ export function registerGetModuleInfoTool(server: McpServer): void {
               };
             }
             const batch = await withTimeout(
-              executeGetModuleInfoBatch({ scope: args.member, group: args.group, relations: args.relations }),
+              executeGetModuleInfoBatch({ scope: member, group: args.group, relations: args.relations }),
               TOOL_TIMEOUT.READ,
               'ki_get_module_info'
             );
             return { content: [{ type: 'text', text: JSON.stringify(batch, null, 2) }] };
           }
 
-          const hits: { scope: string; sourcePath?: string }[] = [];
+          // 逐库探测：命中结果**直接复用**，不再重读一次（曾为"探针 + 正式读"两次全量 IO）
+          const hits: { scope: string; result: Record<string, unknown> }[] = [];
+          /**
+           * 探测失败（不是"没这篇文档"，而是引擎锁 / 维度不匹配 / 索引损坏）单独收起来。
+           * 不分流的话，0 命中时只能报"均未找到"——把故障说成"文档不存在"，
+           * 用户会去别的库重导，问题永远不会被发现。
+           */
+          const failures: { scope: string; reason: string }[] = [];
           for (const member of candidates) {
             try {
               const r = await withTimeout(
@@ -80,23 +107,25 @@ export function registerGetModuleInfoTool(server: McpServer): void {
                 TOOL_TIMEOUT.READ,
                 'ki_get_module_info'
               );
-              if (r.ok) hits.push({ scope: member, ...(r.sourcePath ? { sourcePath: r.sourcePath } : {}) });
+              if (r.ok) hits.push({ scope: member, result: r as unknown as Record<string, unknown> });
               else if (args.member) {
                 return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+              } else {
+                failures.push({ scope: member, reason: r.hint ? `${r.error}（${r.hint}）` : r.error });
               }
-            } catch {
-              // 单库失败不视为命中；显式 member 时由上面分支直接返回错误
+            } catch (err) {
+              failures.push({ scope: member, reason: (err as Error).message });
             }
           }
 
           if (hits.length === 1) {
-            const only = hits[0].scope;
-            const r = await withTimeout(
-              executeGetModuleInfo({ scope: only, group: args.group, relation: args.relation as string }),
-              TOOL_TIMEOUT.READ,
-              'ki_get_module_info'
-            );
-            return { content: [{ type: 'text', text: JSON.stringify({ ...r, member: only }, null, 2) }] };
+            const only = hits[0];
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({ ...only.result, member: only.scope }, null, 2),
+              }],
+            };
           }
           const payload = hits.length === 0
             ? {
@@ -104,6 +133,9 @@ export function registerGetModuleInfoTool(server: McpServer): void {
               view: viewName,
               error: `在视图 ${viewName} 的 ${candidates.length} 个成员库中均未找到该文档。`,
               searched: candidates,
+              ...(failures.length > 0
+                ? { failed: failures, hint: '部分成员库读取失败（非"文档不存在"），见 failed 明细' }
+                : {}),
             }
             : {
               ok: false,

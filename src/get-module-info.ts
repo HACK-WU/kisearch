@@ -26,7 +26,7 @@ import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { searchPath } from './lib/path-search.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
-import { resolveScopeTargets, getViewMembers } from './lib/scope-view.js';
+import { resolveScopeTargets, getViewMembers, isViewRequest } from './lib/scope-view.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { contentRevision } from './lib/relation-edit-draft.js';
 
@@ -528,8 +528,20 @@ program
      * 因此：显式 `--member` 优先；否则全部试一遍，唯一命中才返回，多命中 fail-loud
      * 并给出可直接复制执行的 `--member` 命令（S-07 D3）。
      */
-    if (targets.views.length > 0 && targets.scopes.length > 1) {
+    if (isViewRequest(targets)) {
       const viewName = targets.views[0];
+      if (targets.scopes.length === 0) {
+        output({
+          ok: false,
+          view: viewName,
+          error: `视图 ${viewName} 没有可用的成员库`,
+          skipped: targets.skipped,
+        });
+        await closeEngine();
+        process.exit(1);
+      }
+
+      const relationArgs = String(opts.relation || '').split(',').map((s: string) => s.trim()).filter(Boolean);
       let candidates: string[];
       if (opts.member) {
         const members = getViewMembers(config, viewName);
@@ -548,27 +560,57 @@ program
         candidates = targets.scopes;
       }
 
-      const hits: { scope: string; sourcePath?: string }[] = [];
+      /**
+       * 批量（`-r a,b`）在视图下必须落到**单一成员库**（一次查询只能对一个库）。
+       * ★ 单成员视图无歧义，自动取唯一成员，不强制 `--member`：
+       *   否则 `ki view create solo --members a` 之后连批量读都会被要求 `--member a`，
+       *   等于把一个「还没扩成员的视图」判成不可用。
+       */
+      if (relationArgs.length > 1) {
+        const member = opts.member ?? (targets.scopes.length === 1 ? targets.scopes[0] : undefined);
+        if (!member) {
+          output({
+            ok: false,
+            view: viewName,
+            error: '视图模式下批量查询必须指定 --member（一次批量只能查一个库）。',
+            hint: `候选库：${candidates.join('、')}；例：ki get-module-info --scope ${viewName} -g "${opts.group}" -r "${opts.relation}" --member ${candidates[0]}`,
+          });
+          await closeEngine();
+          process.exit(1);
+        }
+        const batch = await executeGetModuleInfoBatch({
+          scope: member,
+          group: opts.group,
+          relations: relationArgs,
+        });
+        output(batch as unknown as Record<string, unknown>);
+        await closeEngine();
+        if (!batch.ok) process.exit(1);
+        return;
+      }
+
+      // 逐库探测：命中结果**直接复用**，不再重读一次（曾经是"探针 + 正式读"两次全量 IO）
+      const hits: { scope: string; result: GetModuleInfoResult & { ok: true } }[] = [];
+      /** 探测失败（引擎锁 / 维度不匹配…）与"没这篇文档"必须分流，否则故障会被说成不存在 */
+      const failures: { scope: string; reason: string }[] = [];
       for (const member of candidates) {
         const r = await executeGetModuleInfo({ scope: member, group: opts.group, relation: opts.relation });
-        if (r.ok) hits.push({ scope: member, ...(r.sourcePath ? { sourcePath: r.sourcePath } : {}) });
+        if (r.ok) hits.push({ scope: member, result: r });
         // 单个成员失败不视为命中；若是显式 --member 则直接报错
         else if (opts.member) {
           output({ ok: false, scope: member, error: r.error, ...(r.hint ? { hint: r.hint } : {}) });
           await closeEngine();
           process.exit(1);
+        } else {
+          failures.push({ scope: member, reason: r.hint ? `${r.error}（${r.hint}）` : r.error });
         }
       }
 
       if (hits.length === 1) {
         const only = hits[0];
-        const r = await executeGetModuleInfo({ scope: only.scope, group: opts.group, relation: opts.relation });
-        if (r.ok) {
-          if (r.hint) console.error(r.hint);
-          console.log(`[scope: ${only.scope}]\n${r.content}`);
-        }
+        if (only.result.hint) console.error(only.result.hint);
+        console.log(`[scope: ${only.scope}]\n${only.result.content}`);
         await closeEngine();
-        if (!r.ok) process.exit(1);
         return;
       }
       if (hits.length === 0) {
@@ -577,6 +619,9 @@ program
           view: viewName,
           error: `在视图 ${viewName} 的 ${candidates.length} 个成员库中均未找到该文档。`,
           hint: `已在以下库中查找：${candidates.join('、')}`,
+          ...(failures.length > 0
+            ? { failed: failures, note: '部分成员库读取失败（不是"文档不存在"），见 failed 明细' }
+            : {}),
         });
         await closeEngine();
         process.exit(1);
@@ -585,7 +630,7 @@ program
         ok: false,
         view: viewName,
         error: `该文档在视图 ${viewName} 的多个知识库中同时存在，请指定来源库。`,
-        candidates: hits,
+        candidates: hits.map((h) => ({ scope: h.scope, sourcePath: (h.result as { sourcePath?: string }).sourcePath })),
         hint: `ki get-module-info --scope ${viewName} -g "${opts.group}" -r "${opts.relation}" --member <scope>`,
       });
       await closeEngine();

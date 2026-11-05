@@ -44,12 +44,20 @@ export const VIEW_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
  *  - `default`    缺省 scope 回退
  *  - `__global__` 调度器「独占全部 scope」标记
  *  - `__root__`   根散文件保留键
+ *  - `__proto__` / `prototype` / `constructor`
+ *                 ★ 原型污染名：视图表是普通对象，`views['__proto__'] = {...}`
+ *                 走的是 setter 而不是新增属性 —— 于是「创建成功」但 `views.json`
+ *                 里根本没有它（`Object.keys` 也不含），表现为视图静默消失。
+ *                 读取侧 `Object.hasOwn` 判断同样会漏判。直接在命名层挡住最省事。
  */
 export const RESERVED_VIEW_NAMES: ReadonlySet<string> = new Set([
   'all',
   'default',
   '__global__',
   '__root__',
+  '__proto__',
+  'prototype',
+  'constructor',
 ]);
 
 export type ViewErrorCode =
@@ -624,11 +632,33 @@ function takenScopeNames(config: KiConfig): Set<string> {
 const VIEW_NAME_MAX_LENGTH = 40;
 
 /**
+ * 视图名里**必须拒绝**的 shell 元字符。
+ *
+ * 判据与"为什么禁逗号/空格"完全同源：这个名字会作为 `--scope` 的值被用户复制到
+ * shell 里执行，也会被无引号插进提示文案（如 `ki view add <名字> <scope>`）。
+ * 早先只禁了空白 / 逗号 / 斜杠，于是 `ki view create '$(id)'` 能成功创建，
+ * 后续提示文案 `ki view add $(id) x` 被复制即触发命令替换。
+ *
+ * 名单取舍：`-` `.` `_` 与中文/字母数字保留（正常命名需要）；`$()` `` ` `` `;|&<>`
+ * `'"` `*?!#~{}[]()^` 一律拒绝（视图名没有任何使用它们的理由）。
+ */
+// eslint-disable-next-line no-useless-escape
+const SHELL_METACHARS = /[;|&$<>`'"(){}[\]*?!#~^]/;
+
+/** 名字里所有非法字符的去重清单（供错误文案逐字指出） */
+function illegalCharsOf(name: string): string[] {
+  return Array.from(new Set(Array.from(name).filter(
+    (c) => SHELL_METACHARS.test(c) || /[\s,，/\\]/.test(c),
+  )));
+}
+
+/**
  * 视图名字符集校验（D5 / §1.4）：**支持中文**。
  *
  * 关键约束不在"能不能存"，而在这个名字会被当成 `--scope` 的值传出去：
  *   - 半角逗号是 `--scope a,b` 的分隔符 → 必禁；全角逗号一并禁（避免"看起来像分隔符"）
  *   - 空白 / `/` / `\` / `..` 是 shell 与路径语义 → 必禁
+ *   - `$()` `` ` `` `;|&<>` 等 shell 元字符 → 必禁（会被复制执行的提示文案里出现）
  * scope 名本身的规则**没变**（仍 `^[a-zA-Z0-9_-]+$`，见 `scope.ts::validateScope`），
  * 所以"含非 ASCII 的名字一定是视图名"，不需要额外标记位。
  */
@@ -639,13 +669,21 @@ export function viewNameCharsetError(name: string): string | null {
   }
   if (/[\s,，/\\]/.test(name)) {
     // 保留「指出具体非法字符」的能力：只说"不合法"用户还得自己找
-    const illegal = Array.from(new Set(name.split('').filter((c) => /[\s,，/\\]/.test(c))));
     return '视图名不能包含空格、半角/全角逗号、斜杠（半角逗号是 --scope 的分隔符）'
-      + `\n  非法字符：${illegal.map((c) => JSON.stringify(c)).join(', ')}`;
+      + `\n  非法字符：${illegalCharsOf(name).map((c) => JSON.stringify(c)).join(', ')}`;
   }
   if (name.includes('..')) return '视图名不能包含「..」';
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(name)) return '视图名不能包含控制字符';
+  if (SHELL_METACHARS.test(name)) {
+    /*
+     * 只禁"会进 shell"这一小撮，别扩大到全 ASCII 标点：视图名在报错文案里会被
+     * 直接抄进命令提示（`ki view add <name> <scope>`），含命令替换/管道/重定向
+     * 字符就能在用户复制粘贴时执行本机命令。
+     */
+    return '视图名不能包含 shell 元字符（它会被复制到命令里执行）'
+      + `\n  非法字符：${illegalCharsOf(name).map((c) => JSON.stringify(c)).join(', ')}`;
+  }
   return null;
 }
 
@@ -879,4 +917,23 @@ export function resolveScopeTargets(config: KiConfig, raw?: string): ScopeTarget
 /** 用当前配置执行展开；CLI 里省掉一次显式 loadConfig */
 export function resolveTargets(raw?: string): ScopeTargets {
   return resolveScopeTargets(loadConfig(), raw);
+}
+
+/**
+ * 本次请求是否应按「视图」处理（分桶 / 合并 / 逐成员探测）。
+ *
+ * ★ 判据只能是「名字命中视图」，**不能**叠加 `scopes.length > 1`。
+ *   单成员视图（`members: ['a']`，`ki view create solo --members a` 或 `view remove`
+ *   后只剩一个）同样是视图请求；叠加成员数判断会把它落到「单库分支」，
+ *   而单库分支用的是**原始 `--scope` 值（视图名）**去当 scope 名：
+ *   `resolveScope(config,'solo')` 在 default 模式原样返回 'solo' →
+ *   `getKbDir('solo')` / `relations-cache('solo')` 都不存在 →
+ *   用户看到「scope 元数据不存在」「知识库尚未导入」甚至「tag 列表为空」，
+ *   中文视图名还会先撞 `validateScope` 的 ASCII 校验（`INVALID_SCOPE`）。
+ *
+ * 单成员视图的分桶结果就是 1 个桶 —— 结构一致比省一层分支更重要：
+ * 前端与 AI 调用方靠 `view` / `buckets` 字段判断"这是视图"，不该再猜成员数。
+ */
+export function isViewRequest(targets: ScopeTargets): boolean {
+  return targets.views.length > 0;
 }

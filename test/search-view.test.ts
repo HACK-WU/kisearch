@@ -94,6 +94,28 @@ describe('视图展开进入检索链路', () => {
     assert.deepEqual(r.scopes, ['a']);
   });
 
+  /**
+   * 覆盖面字段（Q4）：视图把 N 个库折叠成一个名字后，只看 results 无法判断
+   * "是不是只有一两个库有内容"。字段必须存在（无命中时是空数组），
+   * 单库请求则不得凭空出现。
+   */
+  it('视图请求带 matchedByScope（无命中时为空数组）', async () => {
+    reset({ team: ['a', 'b'] });
+    const r = await q('team');
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.ok(Array.isArray(r.matchedByScope), 'matchedByScope 必须是数组');
+    assert.equal(r.matchedByScope!.length, 0, '无索引时可命中数为 0');
+  });
+
+  it('单库请求不出现 matchedByScope', async () => {
+    reset({ team: ['a', 'b'] });
+    const r = await q('kisearch');
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal('matchedByScope' in r, false);
+  });
+
   it('视图与真实 scope 混写', async () => {
     reset({ team: ['a', 'b'] });
     const r = await q('team,kisearch');

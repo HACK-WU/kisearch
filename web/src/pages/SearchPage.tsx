@@ -4,7 +4,7 @@
  * 调 ki_search（include_original: true, tag: ki-search）→ 原文内容 + Group 路径。
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useScope } from '@/lib/scopeContext';
 import { kiGetModuleInfo, kiSearch } from '@/api/mcpClient';
@@ -176,8 +176,32 @@ export function SearchPage(): JSX.Element {
   const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   /** O1：本次查询降级为关键词检索时的原因；null 表示语义检索正常（分数为混合 RRF 口径） */
   const [degradeReason, setDegradeReason] = useState<string | null>(null);
-  /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection）：不展示即静默漏召回 */
+  /** 本次被跳过的 scope（strict 未注册 / 无向量 Collection / 单成员检索失败）：不展示即静默漏召回 */
   const [skippedScopes, setSkippedScopes] = useState<{ scope: string; reason: string }[]>([]);
+  /** 本次实际检索的库（多 scope / 视图时后端给 scopes；单库为空） */
+  const [searchedScopes, setSearchedScopes] = useState<string[]>([]);
+  /**
+   * 返回结果按来源库计数（后端 `matchedByScope`）。
+   *
+   * ★ 为什么必须展示：跨库合并是"每库取 limit 条候选 → 平铺 → 按分数全局截断"，
+   *   单个高分库完全可能吃满全部名额。没有这行汇总时，用户只看到 10 条结果，
+   *   无法知道"12 个库里只有 1 个库有命中"，会误判成"其他库没内容"。
+   */
+  const [matchedByScope, setMatchedByScope] = useState<{ scope: string; count: number }[]>([]);
+  /**
+   * 本次检索了但零命中的库（仅多库 / 视图有值）。
+   *
+   * ★ 要排掉已被 `skippedScopes` 上报的库：那类库是"压根没查成"（未注册 / 缺向量集合 /
+   *   单成员检索失败），已经在上面那条提示里说明；再算进"无命中"会让同一个库
+   *   以两种原因各出现一次，读者反而分不清是没内容还是没查。
+   */
+  const emptySearchedScopes = useMemo(() => {
+    if (searchedScopes.length <= 1) return [];
+    const skippedSet = new Set(skippedScopes.map((s) => s.scope));
+    return searchedScopes.filter(
+      (s) => !skippedSet.has(s) && !matchedByScope.some((m) => m.scope === s),
+    );
+  }, [searchedScopes, matchedByScope, skippedScopes]);
 
   /**
    * 「文档内高亮」决策（REQ-20261014-003 §0.1）——判据集中在 `lib/searchHighlight.ts`（可单测），
@@ -350,6 +374,8 @@ export function SearchPage(): JSX.Element {
     setResults(null);
     setDegradeReason(null);
     setSkippedScopes([]);
+    setSearchedScopes([]);
+    setMatchedByScope([]);
     try {
       // Tag 过滤语义：选中具体 tag 时精确过滤（不含 ki-search），"全部"才用默认 ki-search
       const searchTags = historyTags.length > 0
@@ -400,6 +426,8 @@ export function SearchPage(): JSX.Element {
         res.degraded === true ? (res.degradedReason ?? '查询向量计算失败') : null,
       );
       setSkippedScopes(Array.isArray(res.skipped) ? res.skipped : []);
+      setSearchedScopes(Array.isArray(res.scopes) ? res.scopes : []);
+      setMatchedByScope(Array.isArray(res.matchedByScope) ? res.matchedByScope : []);
     } catch (e) {
       if (activeScopeRef.current === searchScope) setError((e as Error).message);
     } finally {
@@ -686,7 +714,7 @@ export function SearchPage(): JSX.Element {
         <section>
           {/* 结果完整性提示：降级（分数口径变化）+ 跳过 scope（漏召回）。
               两者后端都已返回，不展示即静默降级 / 静默漏召回。 */}
-          {(degradeReason !== null || skippedScopes.length > 0) && (
+          {(degradeReason !== null || skippedScopes.length > 0 || emptySearchedScopes.length > 0) && (
             <div className="ki-banner" role="status" style={{ marginBottom: 12 }}>
               <div
                 className="ki-banner__msg"
@@ -708,6 +736,15 @@ export function SearchPage(): JSX.Element {
                     </span>
                   </>
                 )}
+                {emptySearchedScopes.length > 0 && (
+                  <>
+                    <span>{emptySearchedScopes.length} 个库本次无命中</span>
+                    <span className="ki-cell-sub">
+                      {emptySearchedScopes.join('、')}
+                      {' —— 跨库结果按分数全局截断，名额可能被单个库占满。'}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -719,6 +756,9 @@ export function SearchPage(): JSX.Element {
               </span>
               <span className="ki-results__meta">
                 {total} 条结果{loading ? ' · 搜索中…' : ''}
+                {!loading && searchedScopes.length > 1
+                  ? ` · 覆盖 ${matchedByScope.length}/${searchedScopes.length} 个库`
+                  : ''}
               </span>
             </div>
             {results.length === 0 && !loading ? (

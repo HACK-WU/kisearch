@@ -86,8 +86,15 @@ export interface TokenAuth {
   id?: string;
   /** 可授权名字的**全集**：record.scopes ∪ record.viewGrants（已合并） */
   scopes: string[];
-  /** 其中属于「视图授权」的部分（供审计与列表分类展示） */
-  viewGrants: string[];
+  /**
+   * 其中属于「视图授权」的部分（供审计与列表分类展示）。
+   *
+   * ★ **可选**：只有"从 Token 记录解析出来"的会话才有这个信息；
+   *   Web 登录会话（`web-auth.ts::toTokenAuth`）本来就是按角色授权，没有"视图授权"这个概念，
+   *   强行填 `[]` 会让"没有视图授权"和"未知"无法区分。判定与工具注册只看 `scopes`，
+   *   不依赖本字段，缺席不影响鉴权。
+   */
+  viewGrants?: string[];
   /** 是否只读 */
   readOnly: boolean;
 }

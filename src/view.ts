@@ -160,6 +160,42 @@ program
     }
   });
 
+/**
+ * 打印「已授权该视图、但缺少这些成员授权」的 Token，并按 D3（视图 ∧ 全部成员）解释后果。
+ *
+ * 为什么要在 add / create 时就算出来：`--view` 授权已经会**自动补全当时的全部成员**，
+ * 于是用户会形成"授权一次就够"的印象；而视图**事后新增成员不会自动授权**——
+ * 那一刻起该 Token 对这个视图整体失效（全有或全无），且报错只有一句 403。
+ * 只给"请自己核对"的静态文案，等于把发现问题的成本推给用户。
+ *
+ * @returns 是否真的打印了内容（调用方据此决定要不要追加通用提示）
+ */
+function warnTokensMissingMembers(view: string, members: string[]): boolean {
+  if (members.length === 0) return false;
+  let tokens: ReturnType<typeof listTokensGrantingView>;
+  try {
+    tokens = listTokensGrantingView(view);
+  } catch {
+    return false; // 没有 Token 文件 / 不可读 → 无授权可核对
+  }
+  const affected = tokens
+    .map((t) => {
+      const scopes = Array.isArray(t.scopes) ? t.scopes : [];
+      if (scopes.includes(ALL_SCOPES)) return null; // 全量授权不受成员收紧影响
+      const missing = members.filter((m) => !isScopeAuthorized(scopes, m));
+      return missing.length > 0 ? { token: t, missing } : null;
+    })
+    .filter((row): row is { token: ReturnType<typeof listTokensGrantingView>[number]; missing: string[] } => row !== null);
+
+  if (affected.length === 0) return false;
+  console.log(`\n  ⚠ ${affected.length} 个已授权此视图的 Token 缺少成员授权，将看不到该视图：`);
+  for (const { token, missing } of affected) {
+    console.log(`     - ${token.label ?? '(未命名)'}  ${token.id}  缺 ${missing.join(', ')}`);
+  }
+  console.log('     补救：ki mcp token update <id> --scope <原有授权>,<缺的成员>');
+  return true;
+}
+
 // ─── audit-grants ────────────────────────────────────────
 
 program
@@ -301,6 +337,7 @@ program
       }
       console.log(`已创建视图 ${name}（${members.length} 个库）：${members.join(' / ')}`);
       console.log(`  现在可以用：ki search "<查询词>" --scope ${name}`);
+      warnTokensMissingMembers(name, members);
     } catch (err) {
       fail(err);
     }
@@ -382,8 +419,11 @@ program
         return;
       }
       console.log(`已在视图 ${name} 中加入 ${scope}（现 ${(next ?? []).length} 个库）。`);
-      console.log('  ⚠ 若该视图已被 Token 授权，缺少新成员授权的 Token 将看不到此视图。');
-      console.log(`     核对：ki mcp token list --granting-view ${name}`);
+      // 静态提示 + 实际影响面：只给"请自己核对"等于把发现问题的成本推给用户
+      if (!warnTokensMissingMembers(name, [scope])) {
+        console.log('  ⚠ 若该视图已被 Token 授权，缺少新成员授权的 Token 将看不到此视图。');
+        console.log(`     核对：ki mcp token list --granting-view ${name}`);
+      }
     } catch (err) {
       fail(err);
     }

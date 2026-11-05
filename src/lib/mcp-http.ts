@@ -33,6 +33,7 @@ import { getDataSourceSchedulerState } from './datasource-scheduler.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
 import { makeViewNameResolver, readViews } from './scope-view.js';
+import { isScopeAccessAllowed } from './scope-access.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
@@ -188,16 +189,18 @@ export function findScopeViolation(
       : [];
     const effectiveList = segments.length > 0 ? segments : ['default'];
     for (const effective of effectiveList) {
-      if (scopes.includes(ALL_SCOPES)) continue;
-      // ① 名字本身必须被授权（视图名或 scope 名，二者共用命名空间）
-      if (!scopes.includes(effective)) return effective;
-      // ② 是视图的话，还要求**全部成员**被授权（全有或全无，不做部分可见）
-      if (!viewMembers) continue;
-      const members = viewMembers(effective);
-      if (members && members.length > 0) {
-        const allAuthorized = members.every((member) => scopes.includes(member));
-        if (!allAuthorized) return effective;
+      if (viewMembers) {
+        /*
+         * 判定收敛到 `scope-access`：与 Web REST 通道（/api/doc/list、/api/doc/get…）
+         * 共用同一份实现，避免"同一份授权，一条通道放行、另一条拒绝"。
+         * 规则 = 名字被授权 ∧ 是视图时全部成员也被授权（全有或全无）。
+         */
+        if (!isScopeAccessAllowed(scopes, effective, { viewMembers })) return effective;
+        continue;
       }
+      // 不传 resolver：退化为 003 时代的「只校验名字」（仅供既有单测与不涉及视图的调用方）
+      if (scopes.includes(ALL_SCOPES)) continue;
+      if (!scopes.includes(effective)) return effective;
     }
   }
   return null;

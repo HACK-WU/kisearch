@@ -455,23 +455,38 @@ vi ~/.ki/config.yaml
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "views": {
-    "team": { "members": ["kisearch", "kisearch-memory", "team-docs"] }
+    "team": {
+      "id": "v_09ccd52b",
+      "members": ["kisearch", "kisearch-memory", "team-docs"],
+      "createdBy": "mCWCPcwK",
+      "createdAt": "2026-11-04T10:00:00.000Z",
+      "updatedBy": "mCWCPcwK",
+      "updatedAt": "2026-11-04T11:20:00.000Z",
+      "revision": 2
+    }
   },
-  "updatedAt": "2026-11-04T10:00:00.000Z"
+  "updatedAt": "2026-11-04T11:20:00.000Z"
 }
 ```
 
-**为什么不放进 `config.yaml`**：
+常见字段：
 
-- `config-schema` 对**未知字段是错误而非告警**。视图写进配置后，一旦回滚到不支持视图的旧版本，
-  `loadConfig` 会 `CONFIG_FIELD_INVALID` fail-loud，`ki` **全部命令不可用**（运维事故级）；
-  独立文件对旧版本完全不可见，回滚后只是视图功能静默失效。
-- 配置写回没有文件锁；独立文件可以套 `.lock`，避免并发 `ki view add` 丢成员。
+| 字段 | 说明 |
+|---|---|
+| `id` | 视图的固定标识。**改名不影响已发出的 Token 授权**（授权记的是它，不是名字） |
+| `members` | 成员知识库列表。顺序只影响展示，不影响检索排序 |
+| `createdBy` / `createdAt` / `updatedBy` / `updatedAt` | 创建人、创建时间、最后修改人与时间 |
+| `revision` | 每修改一次 +1，用于提示「这个视图刚被别人改过」 |
 
-**维护方式**：只用 `ki view *` 命令，不要手改（手改坏了会 `VIEWS_CORRUPT` fail-loud，
-且**拒绝写入**以保护原文件）。删除该文件等价于"没有任何视图"，不影响任何知识库数据。
+> 旧版（`version: 1`）的文件会被自动升级并补齐上述字段，无需手工处理；重复升级不会改变 `id`。
+
+**放在独立文件、而不是配置里**：回滚到不支持视图的旧版本时，那份版本完全看不见这个文件，
+其余命令照常可用。
+
+**维护方式**：用 `ki view *` 命令管理，不要手工编辑（编辑出错会报 `VIEWS_CORRUPT`，
+此时写入会被拒绝以免覆盖原内容）。删除该文件等价于"没有任何视图"，不影响任何知识库数据。
 
 ---
 

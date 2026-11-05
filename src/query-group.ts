@@ -809,7 +809,8 @@ export interface QueryGroupParams {
 
 export type QueryGroupResult =
   | { ok: true; scope: string; output: string }
-  | { ok: false; error: string };
+  /** `hint` = 给下一步动作（如"确认 scope 名 / 先 ki import"）；缺省表示无需额外引导 */
+  | { ok: false; error: string; hint?: string };
 
 async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGroupResult> {
   try {

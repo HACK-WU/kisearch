@@ -1002,6 +1002,19 @@ export async function vectorSearch(params: {
    * 调用方据此在响应上标注 degraded，避免"静默降级"被误认为语义检索正常。
    */
   onDegrade?: (reason: string) => void;
+  /**
+   * 单成员失败回调（视图 / 多 scope）。
+   *
+   * 提供后：某个 scope 的检索失败（维度不匹配 / 库被占用…）只**跳过该成员**，
+   * 其余成员照常返回，失败信息交给调用方上报；
+   * 不提供：保持原行为（整次检索失败），供只查一个库的调用方用。
+   *
+   * ★ 为什么需要：视图把「跨时期导入的一批库」聚成一个名字，其中某个库残留旧维度
+   *   是常态。此时若整单失败，其余 N-1 个完好库一条也搜不到；而"Collection 不存在"
+   *   这条兄弟错误路径一直是「跳过 + 上报」的（`findMissingScopeCollections`），
+   *   两者口径必须一致。
+   */
+  onScopeError?: (scope: string, error: Error) => void;
 }): Promise<VectorSearchResult[]> {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
@@ -1043,7 +1056,7 @@ export async function vectorSearch(params: {
   // 引擎层硬上限（MAX_TOPK=1000）：adapter 先收敛，避免任何调用方组合出 >1000 的 topk
   // 直接被引擎拒绝（CLI/MCP 的 limit 无上界，放大路径见 search.ts 的 tag 数乘法）。
   const topk = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
-  const perScope = await Promise.all(existingScopes.map(async (scope) => {
+  const perScope = await Promise.all(existingScopes.map(async (scope): Promise<Hit[]> => {
     const filter = buildScopeTagFilter([scope], tagList);
     try {
       return await withEngine(scope, (engine) => engine.hybridSearch({
@@ -1056,7 +1069,16 @@ export async function vectorSearch(params: {
       // 保留底层 code（如 VECTOR_DIMENSION_MISMATCH）：HTTP 层按 code 回给前端，
       // 这里若丢掉，检索页就只能靠错误串猜，与导入页的口径会分叉。
       const cause = err as Error & { code?: string };
-      throw Object.assign(new Error(`scope "${scope}" 检索失败：${cause.message}`), { code: cause.code });
+      const wrapped = Object.assign(
+        new Error(`scope "${scope}" 检索失败：${cause.message}`),
+        { code: cause.code },
+      );
+      // 调用方接了回调 = 允许「跳过坏成员、保留好成员」（视图 / 多 scope）
+      if (params.onScopeError) {
+        params.onScopeError(scope, wrapped);
+        return [];
+      }
+      throw wrapped;
     }
   }));
   const hits: Hit[] = perScope.flat();
@@ -1089,6 +1111,8 @@ export async function fullTextSearch(params: {
   query: string;
   limit?: number;
   tags?: string | string[];
+  /** 同 {@link vectorSearch} 的 onScopeError：提供后单成员失败只跳过该成员 */
+  onScopeError?: (scope: string, error: Error) => void;
 }): Promise<VectorSearchResult[]> {
   const config = loadConfig();
   const scopes = (params.scopes ?? [params.scope ?? '']).map((s) => resolveScope(config, s));
@@ -1100,39 +1124,61 @@ export async function fullTextSearch(params: {
       ? params.tags.split(',').map((t) => t.trim()).filter(Boolean)
       : undefined;
 
+  /** 统一的单成员失败处理：有回回调就跳过该成员，否则按原行为抛出 */
+  const handleScopeFailure = (scope: string, err: unknown): VectorSearchResult[] => {
+    const cause = err as Error & { code?: string };
+    const wrapped = Object.assign(
+      new Error(`scope "${scope}" 全文检索失败：${cause.message}`),
+      { code: cause.code },
+    );
+    if (params.onScopeError) {
+      params.onScopeError(scope, wrapped);
+      return [];
+    }
+    throw wrapped;
+  };
+
   const hybridScopes = scopes.filter((scope) => scopeCollectionExists(scope));
   const hybridHits = await Promise.all(hybridScopes.map(async (scope) => {
     const filter = buildScopeTagFilter([scope], tagList);
-    const hits = await withEngine(scope, (engine) => engine.ftsSearch({
-      match: params.query,
-      topk: limit,
-      filter,
-    }));
-    return hits.map((hit) => ({
-      memoryId: hit.id,
-      indexType: 'dense' as const,
-      content: hit.text ?? String(hit.fields?.[FTS_FIELD] ?? ''),
-      score: hit.score,
-      tag: hit.fields?.[TAG_FIELD] !== undefined ? String(hit.fields[TAG_FIELD]) : undefined,
-      group: hit.fields?.[GROUP_FIELD] !== undefined ? String(hit.fields[GROUP_FIELD]) : undefined,
-      scope: hit.fields?.[SCOPE_FIELD] !== undefined ? String(hit.fields[SCOPE_FIELD]) : scope,
-    } satisfies VectorSearchResult));
+    try {
+      const hits = await withEngine(scope, (engine) => engine.ftsSearch({
+        match: params.query,
+        topk: limit,
+        filter,
+      }));
+      return hits.map((hit) => ({
+        memoryId: hit.id,
+        indexType: 'dense' as const,
+        content: hit.text ?? String(hit.fields?.[FTS_FIELD] ?? ''),
+        score: hit.score,
+        tag: hit.fields?.[TAG_FIELD] !== undefined ? String(hit.fields[TAG_FIELD]) : undefined,
+        group: hit.fields?.[GROUP_FIELD] !== undefined ? String(hit.fields[GROUP_FIELD]) : undefined,
+        scope: hit.fields?.[SCOPE_FIELD] !== undefined ? String(hit.fields[SCOPE_FIELD]) : scope,
+      } satisfies VectorSearchResult));
+    } catch (err) {
+      return handleScopeFailure(scope, err);
+    }
   }));
 
   const ftsOnlyHits = await Promise.all(scopes.flatMap((scope) => {
     const requestedTags = tagList && tagList.length > 0 ? tagList : [undefined];
     return requestedTags.map(async (tag) => {
-      const hits = await ftsOnlySearch({ scope, query: params.query, limit, tag });
-      return hits.map((hit) => ({
-        memoryId: hit.ftsId,
-        indexType: 'fts' as const,
-        ftsId: hit.ftsId,
-        content: hit.content,
-        score: hit.score,
-        tag: hit.tag,
-        group: hit.group,
-        scope: hit.scope ?? scope,
-      } satisfies VectorSearchResult));
+      try {
+        const hits = await ftsOnlySearch({ scope, query: params.query, limit, tag });
+        return hits.map((hit) => ({
+          memoryId: hit.ftsId,
+          indexType: 'fts' as const,
+          ftsId: hit.ftsId,
+          content: hit.content,
+          score: hit.score,
+          tag: hit.tag,
+          group: hit.group,
+          scope: hit.scope ?? scope,
+        } satisfies VectorSearchResult));
+      } catch (err) {
+        return handleScopeFailure(scope, err);
+      }
     });
   }));
 

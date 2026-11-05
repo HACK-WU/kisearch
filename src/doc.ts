@@ -27,7 +27,7 @@ import {
 } from './lib/vector-client.js';
 import { parseIntArg } from './lib/cli-args.js';
 import { loadConfig, resolveScope } from './lib/config.js';
-import { resolveScopeTargets } from './lib/scope-view.js';
+import { isViewRequest, resolveScopeTargets } from './lib/scope-view.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 
@@ -189,7 +189,17 @@ program
      */
     const config = loadConfig();
     const targets = resolveScopeTargets(config, opts.scope);
-    if (targets.views.length > 0 && targets.scopes.length > 1) {
+    if (isViewRequest(targets)) {
+      if (targets.scopes.length === 0) {
+        console.log(JSON.stringify({
+          ok: false,
+          view: targets.views[0],
+          error: `视图 ${targets.views[0]} 没有可用的成员库`,
+          skipped: targets.skipped,
+        }, null, 2));
+        await closeEngine();
+        process.exit(1);
+      }
       const buckets: { scope: string; result?: unknown; error?: string }[] = [];
       for (const member of targets.scopes) {
         try {

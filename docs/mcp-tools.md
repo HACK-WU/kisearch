@@ -52,17 +52,31 @@ MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需�
 
 ## 知识视图（view）在 MCP 工具中的行为
 
-`scope` 参数既接受**知识库名**，也接受**视图名**。用了视图时：
+`scope` 参数既接受**知识库名**，也接受**视图名**。使用视图时，各工具的响应会发生这些变化：
 
 | 工具 | 视图下的行为 |
 |---|---|
-| `ki_search` | 展开为成员库检索；响应多出 `matchedViews` 与 `scopes`，每条命中带来源 `scope` |
-| `ki_scope_list` | 响应多出 `views[]`，含 `memberMeta[]`（每个成员的 `kb` / `vector` / `readonly`） |
-| `ki_group_list` | **按成员库分桶**（`buckets`），不合并同名 Group |
-| `ki_tag_list` | **合并各库 tag 并累加计数**，每条带 `scopes` 标明来源库 |
-| `ki_get_module_info` | 新增可选 `member`。未指定时逐库查：唯一命中直接返回；**多命中 fail-loud** 列候选；批量查询（`relations`）在视图下**必须**指定 `member` |
+| ki_search | 展开为成员库检索，结果按分数统一排序；响应多出 `matchedViews`、`scopes`、`matchedByScope`，每条命中带来源 `scope` |
+| ki_scope_list | 响应多出 `views[]`，含 `memberMeta[]`（每个成员的 `kb` / `vector` / `readonly`） |
+| ki_group_list | **按成员库分桶**（`buckets`），不合并同名 Group |
+| ki_tag_list | **合并各库 tag 并累加计数**，每条带 `scopes` 标明来源库 |
+| ki_get_module_info | 支持可选 `member` 指定来源库。同一文档在多个成员库都存在时必须指定；批量查询（`relations`）也需指定 `member`（视图只有一个成员时自动采用） |
 
-**单库请求零变化**：`scope` 不是视图时，响应字段一个不多一个不少（无 `buckets` / `matchedViews` / `views`）。
+**单库请求零变化**：`scope` 不是视图时，响应里不会出现 `buckets` / `matchedViews` / `matchedByScope` / `views`。
 
-**鉴权**：Token 可被授权视图（`ki mcp token generate --view <视图>`），与授权 scope 分字段存储。
-授权视图 **不等于** 授权其成员名——单独请求成员 `--scope <成员>` 仍需该成员的授权。
+**只有一个成员时行为相同**：视图只含一个知识库时，返回结构与多成员视图一致（`view` + 一个桶），不会退化成单库响应。
+
+**检索覆盖面**：视图 / 多库检索的响应带 `matchedByScope`，说明本次结果来自哪些库、各多少条：
+
+```json
+[{ "scope": "kisearch", "count": 7 }, { "scope": "ai-docs", "count": 3 }]
+```
+
+跨库结果按分数统一截断，**单个库可能占满返回名额** —— 用它区分某个库是「没命中」还是「没有内容」。
+
+**授权视图**：
+
+- 用法：`ki mcp token generate --view <视图>`。
+- 规则：Token 必须同时拥有该视图**及其全部成员库**的权限；缺任一个都读不到这个视图（不会只给一部分）。
+- 授权时会自动带上当时的全部成员；之后给视图**新增**成员不会自动授权，需要再授权一次，否则该视图对这个 Token 不可用。`ki view add` 会列出受影响的 Token，`ki view audit-grants` 可随时复查。
+- MCP 工具与 Web 页面使用同一套授权规则：一处能访问，另一处也能访问。

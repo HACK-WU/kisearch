@@ -110,8 +110,17 @@ export type SearchResult =
        */
       matchedViews?: string[];
       results: SearchHit[];
-      /** 被跳过或受召回上限影响的 scope 及原因（多 scope 未注册 / 任意 scope 缺向量 Collection / 引擎候选上限导致的召回受限；无则省略） */
+      /** 被跳过或受召回上限影响的 scope 及原因（多 scope 未注册 / 任意 scope 缺向量 Collection / 单成员检索失败 / 引擎候选上限导致的召回受限；无则省略） */
       skipped?: { scope: string; reason: string }[];
+      /**
+       * 本次**返回结果**按来源库的条数（仅多 scope / 视图请求返回，按条数降序）。
+       *
+       * 用途：视图把 N 个库折叠成一个名字后，只看 `results` 无法判断"是不是只有一两个库
+       * 有内容"。跨库合并是按分数全局截断的（每库 topk=limit 后平铺排序），
+       * 单库完全可能吃满 limit —— 有了这个字段，调用方能立刻看出覆盖面，
+       * 而不是把"其余 N-1 个库没命中"误读成"这些库没内容"。
+       */
+      matchedByScope?: { scope: string; count: number }[];
       /** O1：语义侧降级为 FTS-only（查询 embedding 超时/网络失败）时置 true */
       degraded?: boolean;
       /** O1：降级原因（供调用方与用户诊断） */
@@ -257,7 +266,8 @@ async function executeSearchLocal(params: {
     // 「已解析为合法 scope、但 Collection 目录不存在或为空」的分片（避免查询意外
     // 创建新库）。不上报就是静默漏召回：存量未迁移或目录被外部删除都会表现为
     // “搜不到”且零可诊断信息，故在此显式记录并给出出路。
-    for (const missing of isFullText ? [] : findMissingScopeCollections(scopes)) {
+    const missingCollections = isFullText ? [] : findMissingScopeCollections(scopes);
+    for (const missing of missingCollections) {
       skipped.push({
         scope: missing,
         reason: `${MISSING_COLLECTION_REASON_PREFIX}（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入`,
@@ -286,6 +296,33 @@ async function executeSearchLocal(params: {
       const hitScope = hit.scope ?? (scopes.length === 1 ? scopes[0] : undefined);
       return !hitScope || !hiddenByScope.get(hitScope)?.has(hit.ftsId ?? hit.memoryId);
     };
+    /**
+     * 单成员失败（维度不匹配 / 库被占用 / 索引损坏…）：**跳过该成员并上报**，
+     * 其余库照常出结果。
+     *
+     * 与「Collection 不存在」的处理口径对齐（那条路径一直走 skipped）；
+     * 视图把跨时期导入的一批库聚在一起，其中残留旧维度是常态，
+     * 若整单失败，N-1 个完好库一条也搜不到，用户无从知道是哪一环的问题。
+     */
+    const scopeErrors: { scope: string; reason: string; code?: string }[] = [];
+    const onScopeError = (scope: string, err: Error): void => {
+      const code = (err as Error & { code?: string }).code;
+      scopeErrors.push({ scope, reason: err.message, ...(code ? { code } : {}) });
+      skipped.push({ scope, reason: err.message });
+    };
+    /**
+     * 全部成员都失败时不能返回"空结果"（会被误读成"没有命中"）—— 保留 fail-loud。
+     * 分母是**真正参与查询的库**（缺 Collection 的库已单独进 skipped，不参与 fan-out）。
+     */
+    const abortIfAllScopesFailed = (): SearchResult | null => {
+      const queried = scopes.length - missingCollections.length;
+      if (scopeErrors.length === 0 || scopeErrors.length < queried) return null;
+      return {
+        ok: false,
+        error: `所有成员库检索失败：${scopeErrors.map((e) => `${e.scope}（${e.reason}）`).join('；')}`,
+        ...(scopeErrors[0]?.code ? { code: scopeErrors[0].code } : {}),
+      };
+    };
     let raw: VectorSearchResult[];
     let fullTextCandidateLimit = 0;
     // 未传 tags = 搜全部 tag：最终结果需要恢复 TAG_PRIORITY 顺序再截断 limit。
@@ -306,6 +343,7 @@ async function executeSearchLocal(params: {
         // 避免同一文档的多个 chunk 占满 MCP 的文档结果名额。
         limit: fullTextCandidateLimit,
         tags: params.tags,
+        onScopeError,
       });
     } else if (params.tags) {
       const requestedTopk = (params.limit ?? 10) + hiddenHeadroom;
@@ -324,6 +362,7 @@ async function executeSearchLocal(params: {
         tags: params.tags,
         timeoutMs: params.timeoutMs,
         onDegrade: (reason) => { degradeReason ??= reason; },
+        onScopeError,
       });
     } else {
       const tagUnion = new Map<string, number>();
@@ -347,6 +386,7 @@ async function executeSearchLocal(params: {
           query: params.query,
           limit: fullTextCandidateLimit,
           tags: params.tags,
+          onScopeError,
         });
         isFullText = true;
         degradeReason ??= '向量库无任何索引（文档可能仅有全文索引），已降级为全文检索';
@@ -382,6 +422,7 @@ async function executeSearchLocal(params: {
           tags: tagNames,
           timeoutMs: params.timeoutMs,
           onDegrade: (reason) => { degradeReason ??= reason; },
+          onScopeError,
         });
         const byTag = new Map<string, VectorSearchResult[]>();
         for (const h of hits.filter(isVisibleHit)) {
@@ -398,6 +439,10 @@ async function executeSearchLocal(params: {
         raw = perTag.flatMap((p) => p.hits);
       }
     }
+
+    // 全部成员都检索失败 → 保留 fail-loud（不能返回空结果冒充"没有命中"）
+    const allScopesFailed = abortIfAllScopesFailed();
+    if (allScopesFailed) return allScopesFailed;
 
     // 编辑发布期间，新索引尚未成为正式版本；清理失败的旧索引也不应继续召回。
     // 草稿清单先于 zvec 写入持久化，故读路径可按 ID 排除两类中间态。
@@ -645,6 +690,25 @@ async function executeSearchLocal(params: {
     }
     results.splice(params.limit ?? 10);
 
+    /**
+     * 覆盖面统计（仅多 scope / 视图）：返回结果按来源库计数。
+     *
+     * 跨库合并是"每库 topk=limit → 平铺 → 按分数全局截断"，单库完全可能吃满 limit；
+     * 没有这个字段时，"其余 N-1 个库一条没出"与"这些库本来就没内容"在响应上无法区分。
+     */
+    const matchedByScope = (() => {
+      if (!multi) return undefined;
+      const counts = new Map<string, number>();
+      for (const hit of results) {
+        const hitScope = hit.scope ?? (scopes.length === 1 ? scopes[0] : undefined);
+        if (!hitScope) continue;
+        counts.set(hitScope, (counts.get(hitScope) ?? 0) + 1);
+      }
+      return [...counts.entries()]
+        .map(([scope, count]) => ({ scope, count }))
+        .sort((a, b) => b.count - a.count || a.scope.localeCompare(b.scope));
+    })();
+
     // 非全文模式保持原有 include_original 的完整原文去重行为；全文模式已在上方聚合。
     if (includeOriginal && !isFullText) {
       const seen = new Set<string>();
@@ -669,9 +733,10 @@ async function executeSearchLocal(params: {
       : {};
     // 纯 scope 请求不加该字段（与改造前逐字节一致）；只要用过视图就带上
     const viewFields = targets.views.length > 0 ? { matchedViews: targets.views } : {};
+    const coverageFields = matchedByScope ? { matchedByScope } : {};
     return multi
-      ? { ok: true, scope: scopes[0], scopes, ...viewFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
-      : { ok: true, scope: scopes[0], ...viewFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
+      ? { ok: true, scope: scopes[0], scopes, ...viewFields, ...coverageFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields }
+      : { ok: true, scope: scopes[0], ...viewFields, ...coverageFields, results, ...(isFullText ? { total: results.length } : {}), ...(skipped.length > 0 ? { skipped } : {}), ...(isFullText ? { mode: 'fulltext' as const } : {}), ...degradeFields };
   } catch (err) {
     const e = err as Error & { code?: string };
     // 保留 code：HTTP/MCP 两条出口都按 code 透传，前端才能区分"维度不匹配需重建"与普通失败

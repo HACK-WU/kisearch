@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeTagList } from '../../tag.js';
 import { loadConfig } from '../config.js';
-import { resolveScopeTargets } from '../scope-view.js';
+import { isViewRequest, resolveScopeTargets } from '../scope-view.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerTagListTool(server: McpServer): void {
@@ -20,7 +20,25 @@ export function registerTagListTool(server: McpServer): void {
          * 分桶会让它逐库调一遍才知道全貌。
          */
         const targets = resolveScopeTargets(loadConfig(), args.scope);
-        if (targets.views.length > 0 && targets.scopes.length > 1) {
+        /*
+         * ★ 判据是「名字命中视图」，不能叠加成员数：单成员视图落到单库分支
+         *   会拿视图名去 `vectorListTags`，返回空列表冒充"没有 tag"（静默错误答案）。
+         */
+        if (isViewRequest(targets)) {
+          if (targets.scopes.length === 0) {
+            return {
+              isError: true,
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ok: false,
+                  view: targets.views[0],
+                  error: `视图 ${targets.views[0]} 没有可用的成员库`,
+                  skipped: targets.skipped,
+                }, null, 2),
+              }],
+            };
+          }
           const merged = new Map<string, { tag: string; count: number; scopes: string[] }>();
           const skipped: { scope: string; reason: string }[] = [...targets.skipped];
           for (const member of targets.scopes) {

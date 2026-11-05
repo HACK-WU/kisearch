@@ -10,7 +10,7 @@
 import { Command } from 'commander';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
-import { resolveScopeTargets } from './lib/scope-view.js';
+import { isViewRequest, resolveScopeTargets } from './lib/scope-view.js';
 import { readJson } from './lib/store.js';
 import { getGroupIndexPath } from './lib/scope.js';
 import { executeGroupCreate } from './lib/group-create.js';
@@ -174,7 +174,17 @@ program
        */
       const viewConfig = loadConfig();
       const viewTargets = resolveScopeTargets(viewConfig, opts.scope);
-      if (viewTargets.views.length > 0 && viewTargets.scopes.length > 1) {
+      if (isViewRequest(viewTargets)) {
+        if (viewTargets.scopes.length === 0) {
+          output({
+            ok: false,
+            view: viewTargets.views[0],
+            error: `视图 ${viewTargets.views[0]} 没有可用的成员库`,
+            skipped: viewTargets.skipped,
+          });
+          process.exitCode = 1;
+          return;
+        }
         const buckets: { scope: string; output?: string; groups?: unknown; error?: string }[] = [];
         for (const member of viewTargets.scopes) {
           try {
@@ -254,7 +264,17 @@ program
        */
       const config = loadConfig();
       const targets = resolveScopeTargets(config, opts.scope);
-      if (targets.views.length > 0 && targets.scopes.length > 1) {
+      if (isViewRequest(targets)) {
+        if (targets.scopes.length === 0) {
+          output({
+            ok: false,
+            view: targets.views[0],
+            error: `视图 ${targets.views[0]} 没有可用的成员库`,
+            skipped: targets.skipped,
+          });
+          process.exitCode = 1;
+          return;
+        }
         const buckets: { scope: string; output?: string; error?: string }[] = [];
         for (const member of targets.scopes) {
           try {

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeQueryGroup } from '../../query-group.js';
 import { loadConfig } from '../config.js';
-import { resolveScopeTargets } from '../scope-view.js';
+import { isViewRequest, resolveScopeTargets } from '../scope-view.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerGroupListTool(server: McpServer): void {
@@ -35,9 +35,26 @@ export function registerGroupListTool(server: McpServer): void {
         /**
          * 视图：**按成员库分桶**，不合并同名 Group。
          * 两个库都有 `projects` 时各自一棵树 —— 合并后 Agent 无法判断文档属于哪个库。
+         *
+         * ★ 判据是「名字命中视图」（`isViewRequest`），不能叠加成员数：
+         *   单成员视图落到单库分支会拿视图名当 scope，报「尚未导入 / 元数据不存在」。
          */
         const targets = resolveScopeTargets(loadConfig(), args.scope);
-        if (targets.views.length > 0 && targets.scopes.length > 1) {
+        if (isViewRequest(targets)) {
+          if (targets.scopes.length === 0) {
+            return {
+              isError: true,
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ok: false,
+                  view: targets.views[0],
+                  error: `视图 ${targets.views[0]} 没有可用的成员库`,
+                  skipped: targets.skipped,
+                }, null, 2),
+              }],
+            };
+          }
           const buckets: { scope: string; output?: string; error?: string }[] = [];
           for (const member of targets.scopes) {
             try {

@@ -148,7 +148,8 @@ import { readTaskLog } from './task-log.js';
 // REQ-20261019-004：任务台账的参数快照 / 结果摘要（与 CLI、daemon 同一实现）
 import { MAX_SNAPSHOT_CREATED, toParamSnapshot, toResultSnapshot } from './task-snapshot.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
-import { resolveScopeTargets } from './scope-view.js';
+import { isViewRequest, resolveScopeTargets } from './scope-view.js';
+import { isScopeAccessAllowed } from './scope-access.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 import { withTimeoutFallback } from './timeout.js';
 
@@ -181,6 +182,15 @@ const VECTOR_STATUS_REFRESH_TIMEOUT_MS = 5_000;
  * Collection，与 refresh 同属"可失败的辅助读" —— 同值但保持独立常量（口径可各自调整）。
  */
 const TAG_LIST_TIMEOUT_MS = 5_000;
+
+/**
+ * `/api/tags` 在**视图**下的整体时间预算。
+ *
+ * 单库是一个 5s 上限；视图要逐成员查（每个成员一次引擎打开），
+ * 逐成员各给 5s 时 12 个成员就是 60s —— tag 列表只是刷新筛选下拉的辅助读，
+ * 挂这么久会让浏览器放弃、并长期占住该 scope 的队列槽。预算耗尽即停，剩余成员进 skipped。
+ */
+const VIEW_TAGS_BUDGET_MS = 5_000;
 
 /** 上传根目录：~/.ki/import-uploads/ */
 function getUploadsRoot(): string {
@@ -420,9 +430,17 @@ function rejectIfScopeReadonly(res: http.ServerResponse, scope: string, action: 
  */
 const readJsonBody = (req: http.IncomingMessage): Promise<unknown> => readApiJsonBody(req, MAX_BODY);
 
-/** 判断 scope 是否在授权集合内（'all' 通配全部） */
+/**
+ * 判断 scope 是否在授权集合内（'all' 通配全部）。
+ *
+ * ★ 规则与 MCP `tools/call` 闸门**必须完全一致**（`scope-access.ts::isScopeAccessAllowed`）：
+ *   名字被授权 **∧** 若它是视图则全部成员也被授权。
+ *   早先这里只比对名字，于是 `ki mcp token generate --view team` 产生的 Token
+ *   在 MCP 里全 403、在 REST 里却能读到 team 全部成员的正文 —— 同一份授权
+ *   两条通道给出相反结论，且宽松的那条构成越权读取。
+ */
 function scopeAllowed(scopes: string[], scope: string): boolean {
-  return scopes.includes(ALL_SCOPES) || scopes.includes(scope);
+  return isScopeAccessAllowed(scopes, scope);
 }
 
 /**
@@ -1783,7 +1801,7 @@ function handleSearchConfig(res: http.ServerResponse, config: KiConfig): void {
 
 async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
-  const scope = resolveScope(loadConfig(), scopeRaw);
+  const requestConfig = loadConfig();
   // ★ R8 二期（REQ-20261009-003）：tag 列表要打开/扫描 zvec Collection，属"可失败的辅助读"——
   //   引擎被占（残留进程持 flock）时会长时间挂住，把该 scope 的队列槽占死。
   //   超时上界必须包在**本 handler 内部**：coordinator 的 release() 在 handler 返回后才执行，
@@ -1804,6 +1822,99 @@ async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
   //   （与 refresh 对齐）；`TagListResult.degraded` 是 **boolean**（"向量服务不可用"，见 tag.ts），
   //   **不得** `{...result}` 直接透传，否则前端按对象读 `degraded.reason` 会得到 undefined。
   const timeoutError = `引擎未在 ${TAG_LIST_TIMEOUT_MS / 1000}s 内响应，本次未取到 tag 列表（状态未知，非故障）`;
+
+  /*
+   * 视图：**合并各成员库的 tag 并累加计数**（与 MCP `ki_tag_list` 同口径）。
+   *
+   * 不补这一段的话，检索页顶栏选中视图后 `fetchTags(<视图名>)` 会走到
+   * `vectorListTags(视图名)` —— 那个 Collection 不存在，返回 `tags: []`，
+   * 于是「按 tag 过滤」的下拉在视图模式下永远是空的（而实际每个成员库都有 tag）。
+   */
+  let viewTargets;
+  try {
+    viewTargets = resolveScopeTargets(requestConfig, scopeRaw);
+  } catch (err) {
+    sendJson(res, 400, { ok: false, error: (err as Error).message, tags: [], scope: scopeRaw });
+    return;
+  }
+  if (isViewRequest(viewTargets)) {
+    const viewName = viewTargets.views[0];
+    const reserved = new Set(['ki-search', 'ki-relation', 'ki-path']);
+    if (viewTargets.scopes.length === 0) {
+      sendJson(res, 200, {
+        ok: false,
+        error: `视图 ${viewName} 没有可用的成员库`,
+        tags: [],
+        scope: viewName,
+        skipped: viewTargets.skipped,
+      });
+      return;
+    }
+    const merged = new Map<string, { tag: string; count: number; scopes: string[] }>();
+    const skipped: { scope: string; reason: string }[] = [...viewTargets.skipped];
+    let succeeded = 0;
+    /*
+     * ★ **整体时间预算**（不是逐成员各自 5s）。
+     *   逐成员给满 5s 时，12 个成员的视图最坏 = 60s，而 tag 列表只是"刷新下拉"的
+     *   辅助读 —— 浏览器早就断开、队列槽被占死。预算耗尽即停止，剩余成员进 skipped，
+     *   前端按 `ok:true` + 已有结果渲染（比挂 1 分钟好）。
+     */
+    const deadline = Date.now() + VIEW_TAGS_BUDGET_MS;
+    for (const member of viewTargets.scopes) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        skipped.push({ scope: member, reason: `视图 tag 合并超出 ${VIEW_TAGS_BUDGET_MS}ms 预算，未查询该成员` });
+        continue;
+      }
+      const outcome = await withTimeoutFallback(
+        executeTagList({ scope: member }),
+        (): TagListResult => ({ ok: false, error: timeoutError }),
+        Math.min(TAG_LIST_TIMEOUT_MS, remaining),
+      );
+      if (outcome.timedOut) {
+        skipped.push({ scope: member, reason: timeoutError });
+        continue;
+      }
+      if (!outcome.value.ok) {
+        skipped.push({ scope: member, reason: outcome.value.error });
+        continue;
+      }
+      succeeded += 1;
+      for (const t of outcome.value.tags) {
+        if (reserved.has(t.tag)) continue;
+        const hit = merged.get(t.tag);
+        if (hit) {
+          hit.count += t.count;
+          if (!hit.scopes.includes(member)) hit.scopes.push(member);
+        } else {
+          merged.set(t.tag, { tag: t.tag, count: t.count, scopes: [member] });
+        }
+      }
+    }
+    // 一个成员都没成功：保持「状态未知，非故障」语义（ok:false，前端保留现有标签）
+    if (succeeded === 0) {
+      sendJson(res, 200, {
+        ok: false,
+        error: `视图 ${viewName} 的成员库均未取到 tag 列表`,
+        tags: [],
+        scope: viewName,
+        skipped,
+      });
+      return;
+    }
+    const tags = [...merged.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    sendJson(res, 200, {
+      ok: true,
+      tags,
+      scope: viewName,
+      view: viewName,
+      members: viewTargets.scopes,
+      ...(skipped.length > 0 ? { skipped } : {}),
+    });
+    return;
+  }
+
+  const scope = resolveScope(requestConfig, scopeRaw);
   const outcome = await withTimeoutFallback(
     executeTagList({ scope }),
     // 超时时 value 一定来自本 fallback（哨兵以 race 实际结果为准）→ 下方 timedOut 分支据此必然 ok:false；
@@ -1956,8 +2067,20 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
    * 视图（REQ-20261104-003 / 005）：`group + relation` 在成员库之间可能多命中，
    * 不能静默挑一个 —— 两份同名文档可能语义完全不同，事后无从发现选错了。
    * 唯一命中直接返回并**回填来源库**（前端据此展示与后续编辑）。
+   *
+   * ★ 判据是 `isViewRequest`（名字命中视图），不是「成员数 > 1」：
+   *   单成员视图落到单库分支时会拿**视图名**当 scope 去读 KB → 404「文档不存在」。
    */
-  if (targets.views.length > 0 && targets.scopes.length > 1) {
+  if (isViewRequest(targets)) {
+    if (targets.scopes.length === 0) {
+      sendJson(res, 404, {
+        ok: false,
+        view: targets.views[0],
+        error: `视图 ${targets.views[0]} 没有可用的成员库`,
+        skipped: targets.skipped,
+      });
+      return;
+    }
     const members = url.searchParams.get('member')?.trim();
     const candidates = members ? [members] : targets.scopes;
     if (members && !targets.scopes.includes(members)) {
@@ -1979,12 +2102,16 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
       sendJson(res, 200, { ...(only.result as Record<string, unknown>), scope: only.scope, member: only.scope });
       return;
     }
+    // 未命中 / 多命中都要带上 skipped：strict 下被跳过的成员不列出来，
+    // 用户会以为"整个视图里没有这篇文档"（其实是没查）。
+    const skippedFields = targets.skipped.length > 0 ? { skipped: targets.skipped } : {};
     if (hits.length === 0) {
       sendJson(res, 404, {
         ok: false,
         view: targets.views[0],
         error: `在视图 ${targets.views[0]} 的 ${candidates.length} 个成员库中均未找到该文档`,
         searched: candidates,
+        ...skippedFields,
       });
       return;
     }
@@ -1994,6 +2121,7 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
       code: 'AMBIGUOUS_VIEW_DOC',
       error: `该文档在视图 ${targets.views[0]} 的多个知识库中同时存在，请指定 member`,
       candidates: hits.map((h) => h.scope),
+      ...skippedFields,
     });
     return;
   }
@@ -2097,10 +2225,14 @@ function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
 /**
  * `GET /api/doc/list`
  *
- * - **单库**（或单成员视图）：响应结构逐字节不变（无 `view` / `buckets` 字段）
- * - **多成员视图**：`{ ok, view, members, buckets: [{ scope, ...payload } | { scope, error }], tags }`
+ * - **单库请求**（`scope` 不是视图）：响应结构逐字节不变（无 `view` / `buckets` 字段）
+ * - **视图请求**（含**单成员**视图）：
+ *   `{ ok, view, members, buckets: [{ scope, ...payload } | { scope, error }], tags }`
  *   - 每个成员独立组装，单个成员失败只污染自己的桶，不拖垮整个视图
  *   - 顶层 `tags` 合并去重（供前端 tag 下拉，它只能吃一个扁平列表）
+ *   - ★ 单成员视图**也走这条分支**（返回 1 个桶）：判据是"名字命中视图"。
+ *     用「成员数 > 1」判断会让单成员视图落到单库分支，拿视图名当 scope 读空目录，
+ *     前端还看不出这是视图；结构一致比省一层分支更重要。
  */
 async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
@@ -2114,8 +2246,23 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     return;
   }
 
-  // 多成员视图 → 分桶
-  if (targets.views.length > 0 && targets.scopes.length > 1) {
+  // 视图请求（含单成员）→ 分桶
+  if (isViewRequest(targets)) {
+    /*
+     * 成员全被跳过（strict 未注册等）：显式 400，不能返回 ok:true + 空桶冒充"空视图"。
+     * 用非 2xx 是为了让前端进入错误态并显示原因 —— 200 + ok:false 会被列表渲染吞掉。
+     */
+    if (targets.scopes.length === 0) {
+      sendJson(res, 400, {
+        ok: false,
+        view: targets.views[0],
+        members: [],
+        buckets: [],
+        error: `视图 ${targets.views[0]} 没有可用的成员库`,
+        skipped: targets.skipped,
+      });
+      return;
+    }
     const buckets: Record<string, unknown>[] = [];
     const tagSet = new Set<string>();
     for (const member of targets.scopes) {
