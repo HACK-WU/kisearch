@@ -20,7 +20,15 @@ export type Capability =
   | 'tasks.delete'
   | 'users.manage'
   | 'tokens.self'
-  | 'ops.write';
+  | 'ops.write'
+  /** 视图读：所有登录角色都有（团队共享，D1） */
+  | 'views.read'
+  /**
+   * 视图写：所有登录角色都有（D6「任何登录用户都能建自己的视图」）。
+   * ★ **不能**放进 `WRITE_CAPABILITIES`：那里用来把 viewer 映射成 `USER_READONLY`，
+   *   放进去会让「viewer 能建视图」与「viewer 只读」自相矛盾。
+   */
+  | 'views.write';
 
 export const ALL_CAPABILITIES: readonly Capability[] = [
   'knowledge.read',
@@ -36,6 +44,8 @@ export const ALL_CAPABILITIES: readonly Capability[] = [
   'users.manage',
   'tokens.self',
   'ops.write',
+  'views.read',
+  'views.write',
 ];
 
 export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
@@ -48,8 +58,18 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
     'datasource.read',
     'tasks.read',
     'tokens.self',
+    'views.read',
+    'views.write',
   ]),
-  viewer: new Set<Capability>(['knowledge.read', 'chat.use', 'tasks.read', 'tokens.self']),
+  // viewer 也有 views.write：D6 的「只能改自己创建的」隐含「能创建」（否则无从谈起）
+  viewer: new Set<Capability>([
+    'knowledge.read',
+    'chat.use',
+    'tasks.read',
+    'tokens.self',
+    'views.read',
+    'views.write',
+  ]),
 };
 
 /**
@@ -58,7 +78,11 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
  */
 export const TOKEN_CAPABILITIES: ReadonlySet<Capability> = new Set(
   ALL_CAPABILITIES.filter((capability) =>
-    capability !== 'users.manage' && capability !== 'tasks.delete' && capability !== 'tokens.self'),
+    capability !== 'users.manage'
+    && capability !== 'tasks.delete'
+    && capability !== 'tokens.self'
+    // Token 是机器身份：可以读视图列表，但不该通过 HTTP 创建/修改视图（归属无法界定）
+    && capability !== 'views.write'),
 );
 
 /** 动作维度为写的集合（用于错误码映射：viewer → USER_READONLY） */

@@ -43,6 +43,8 @@ import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
 import { deleteFtsCollection, ftsDeleteByFilter } from './lib/fts-client.js';
 import { removeScopeCollection } from './lib/scope-collection.js';
 import { getRelationsCacheIdentity, loadCacheShape, onScopeRelationsInvalidated } from './lib/group-cache.js';
+import { listRegisteredDataSourceRecords } from './lib/datasource.js';
+import { buildMemberMeta } from './lib/view-member-meta.js';
 import { resolveWikiRootDir } from './lib/wiki-sync.js';
 
 // ─── KB 目录辅助 ───
@@ -134,7 +136,7 @@ onScopeRelationsInvalidated((scope) => {
   scopeDocCountCache.delete(getRelationsCachePath(scope));
 });
 
-function countScopeDocs(scope: string): ScopeDocCounts {
+export function countScopeDocs(scope: string): ScopeDocCounts {
   // 布局感知身份（R6）：新布局 manifest / 旧布局单文件 / 均无 = null
   const identity = getRelationsCacheIdentity(scope);
   const cachePath = getRelationsCachePath(scope);
@@ -199,10 +201,43 @@ export interface ViewMemberMeta {
   kb: boolean;
   vector: boolean;
   readonly: boolean;
+  /**
+   * 该成员库的文档数（`countScopeDocs().wikiCount`，与 scope 列表「N 篇」同一口径）。
+   *
+   * 用途：区分**空库**（库存在但 0 篇）与**缺失**（KB 与向量层都没有）——
+   * 两者在页面上必须不同标记，否则用户看到 `iso-scan-…` 与 `grp-dbg2` 长得一样，
+   * 分不清是"还没导入"还是"库没了"。
+   *
+   * ⚠ 缺省（undefined）= 未统计（计数失败时不要报 0，否则会把统计失败误标成空库）。
+   */
+  docCount?: number;
+  /**
+   * 该成员库配了**定时同步**（数据源 `schedule.enabled === true`）。
+   *
+   * 页面标 `· 定时`：视图成员会自己跟着计划更新，用户据此判断"这个库是不是最新"。
+   * 缺省 = 未配置（不是"未知"）。
+   */
+  scheduled?: boolean;
+  /**
+   * 定时**上一次自动执行失败**（`schedule.lastAutoState === 'failed'`）。
+   *
+   * 页面据此区分 `定时` 与 `定时（上次失败）`：只显示「定时」会让一直跑挂的源
+   * 看起来仍是最新的，用户不会去查。
+   * 仅在 `scheduled === true` 时有意义。
+   */
+  scheduledFailed?: boolean;
 }
 
+/**
+ * 视图摘要（`ki_scope_list` / `ki scope list` 的 `views[]` 元素）。
+ *
+ * ⚠ `canEdit` **不在这里**：MCP / CLI 没有"登录用户"上下文，判断不了写权限。
+ * 它由页面入口 `/api/views` 在服务端算好返回（D6 / §1.6），前端不得自己比 userId。
+ */
 export interface ViewInfo {
   view: string;
+  /** 稳定 ID（D7）：`viewGrants` 以它为锚，改名不变 */
+  id: string;
   members: string[];
   /** 与 members 同序 */
   memberMeta: ViewMemberMeta[];
@@ -210,6 +245,14 @@ export interface ViewInfo {
   availableCount: number;
   /** 两层都不存在的成员名 */
   missing: string[];
+  /** 创建者 userId（不是显示名）；旧视图缺失 = 无主，仅管理员可改 */
+  createdBy?: string;
+  /** ISO 8601 UTC；旧视图缺失 → 不伪造，前端显示 `—` */
+  createdAt?: string;
+  updatedBy?: string;
+  updatedAt?: string;
+  /** 乐观锁（N7）：页面保存时回传，不符则 409 */
+  revision: number;
 }
 
 export type ScopeListResult = {
@@ -329,22 +372,55 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
   try {
     const viewsMap = readViews(config);
     const names = Object.keys(viewsMap).sort();
+    // 配了定时同步的 scope → 上次自动执行是否失败（与 /api/views 同源，一次算好）
+    let scheduledScopes = new Map<string, boolean>();
+    try {
+      scheduledScopes = new Map(
+        listRegisteredDataSourceRecords(config)
+          .filter(({ record }) => record.schedule?.enabled === true)
+          .map(({ scope, record }) => [scope, record.schedule?.lastAutoState === 'failed']),
+      );
+    } catch {
+      scheduledScopes = new Map(); // 数据源文件损坏不阻断 scope 列表，只是不标「定时」
+    }
     if (names.length > 0) {
       views = names.map((name) => {
-        const members = viewsMap[name].members;
-        const memberMeta: ViewMemberMeta[] = members.map((m) => ({
-          scope: m,
-          kb: kbScopes.has(m),
-          vector: vectorScopes.has(m),
-          readonly: isScopeReadonly(config, m),
-        }));
-        const missing = memberMeta.filter((x) => !x.kb && !x.vector).map((x) => x.scope);
+        const def = viewsMap[name];
+        const members = def.members;
+        /*
+         * ★ 成员元信息走共享实现：`/api/views` 与这里必须是同一份口径，
+         *   否则页面有 docCount/scheduled、MCP 侧没有 —— 同一 DTO 两套事实。
+         */
+        const { memberMeta, missing, availableCount } = buildMemberMeta({
+          members,
+          kbScopes,
+          vectorScopes,
+          isReadonly: (scope) => isScopeReadonly(config, scope),
+          docCountOf: (scope) => {
+            try {
+              return countScopeDocs(scope).wikiCount;
+            } catch (err) {
+              console.warn(
+                `⚠️ scope "${scope}" 的文档数统计失败，成员不标「空」：${(err as Error).message}`,
+              );
+              return undefined;
+            }
+          },
+          scheduledScopes,
+        });
         return {
           view: name,
+          id: def.id,
           members,
           memberMeta,
-          availableCount: members.length - missing.length,
+          availableCount,
           missing,
+          // 缺失字段一律不输出（而不是给空串）：前端据此区分「旧视图没有记录」与「记录为空」
+          ...(def.createdBy ? { createdBy: def.createdBy } : {}),
+          ...(def.createdAt ? { createdAt: def.createdAt } : {}),
+          ...(def.updatedBy ? { updatedBy: def.updatedBy } : {}),
+          ...(def.updatedAt ? { updatedAt: def.updatedAt } : {}),
+          revision: def.revision,
         };
       });
     }

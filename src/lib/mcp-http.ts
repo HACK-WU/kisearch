@@ -32,6 +32,7 @@ import { getSharedOperationCoordinator, kindForMcpToolNames, GLOBAL_SCOPE } from
 import { getDataSourceSchedulerState } from './datasource-scheduler.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { loadConfig, getConfigLoadIssue, resolveScope, runWithConfigSnapshot, type KiConfig } from './config.js';
+import { makeViewNameResolver, readViews } from './scope-view.js';
 import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors, type PrecomputedQueryVector } from './query-vector-precompute.js';
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
@@ -149,10 +150,22 @@ const SCOPE_LESS_TOOLS = new Set(['ki_scope_list']);
  * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
  * 逐个 tools/call 校验（含 batch 数组），任一越权即拒绝，防止「batch 首项合法、后续越权」绕过。
  * 白名单工具（SCOPE_LESS_TOOLS）跳过此校验，由工具层 authScopes 过滤兜底。
+ *
+ * ★ **视图的两段判定**（REQ-20261104-004 D3 / R-09）：
+ *   只校验「视图名本身是否被授权」是不够的 —— 那样 token `['team','a']`（team=[a,b]）
+ *   仍能用 `--scope team` 读到未授权的 b。所以名字通过后，还要 `viewMembers(name)`
+ *   拿到成员并逐个校验（**全有或全无**，缺任一即整段拒绝）。
+ *
+ * @param viewMembers 视图名 → 成员；返回 null 表示「不是视图」。
+ *   不传则退化为旧行为（只校验名字），供不涉及视图的调用方与单测使用。
  * @returns 违规的 scope（需拒绝）；null 表示无需拒绝（非 tools/call 或全部 scope 被授权）
  * @internal 导出仅供单测（白盒验证多 scope 逐段校验）；非稳定公共 API。
  */
-export function findScopeViolation(body: unknown, scopes: string[]): string | null {
+export function findScopeViolation(
+  body: unknown,
+  scopes: string[],
+  viewMembers?: (name: string) => string[] | null,
+): string | null {
   const items = Array.isArray(body) ? body : [body];
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
@@ -175,8 +188,16 @@ export function findScopeViolation(body: unknown, scopes: string[]): string | nu
       : [];
     const effectiveList = segments.length > 0 ? segments : ['default'];
     for (const effective of effectiveList) {
-      if (scopes.includes(ALL_SCOPES) || scopes.includes(effective)) continue;
-      return effective;
+      if (scopes.includes(ALL_SCOPES)) continue;
+      // ① 名字本身必须被授权（视图名或 scope 名，二者共用命名空间）
+      if (!scopes.includes(effective)) return effective;
+      // ② 是视图的话，还要求**全部成员**被授权（全有或全无，不做部分可见）
+      if (!viewMembers) continue;
+      const members = viewMembers(effective);
+      if (members && members.length > 0) {
+        const allAuthorized = members.every((member) => scopes.includes(member));
+        if (!allAuthorized) return effective;
+      }
     }
   }
   return null;
@@ -190,7 +211,39 @@ function rejectScopeViolationRequest(
   authScopes: string[] | null,
 ): boolean {
   if (authScopes === null) return false;
-  const violation = findScopeViolation(body, authScopes);
+
+  /*
+   * 视图成员表**惰性加载**：只有「名字已通过授权」的段才会触发读盘。
+   * 越权请求在第一段就被拒，不会碰磁盘；一次请求最多读一次 views.json。
+   */
+  let lookup: ((name: string) => string[] | null) | null = null;
+  const viewMembers = (name: string): string[] | null => {
+    if (!lookup) {
+      const views = readViews(loadConfig());
+      lookup = (n) => views[n]?.members ?? null;
+    }
+    return lookup(name);
+  };
+
+  let violation: string | null;
+  try {
+    violation = findScopeViolation(body, authScopes, viewMembers);
+  } catch (err) {
+    /*
+     * ★ fail-closed：views.json 损坏时**绝不能**当成「没有视图」放行 ——
+     *   那会让 `--scope <视图名>` 直接读到未授权成员（D3 被静默绕过）。
+     *   宁可返回 503 也不越权；运维修好文件即自动恢复。
+     */
+    process.stderr.write(
+      `[kisearch] 视图成员校验失败，按拒绝处理（不降级为放行）：${(err as Error).message}\n`,
+    );
+    sendJson(res, 503, {
+      jsonrpc: '2.0',
+      error: { code: -32603, message: 'Service Unavailable: 视图定义不可读，请检查 views.json' },
+      id: extractJsonRpcId(body),
+    });
+    return true;
+  }
   if (violation === null) return false;
   // 响应体不下发具体 scope，避免被用于枚举探测；服务端日志保留诊断信息。
   process.stderr.write(
@@ -539,8 +592,20 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const webDir = opts.webDir ?? null;
   // 解析请求客户端地址：默认取 socket.remoteAddress，测试可注入覆盖（验证远程来源需鉴权）
   const resolveClientAddr = opts.resolveClientAddr ?? ((req: http.IncomingMessage) => req.socket.remoteAddress);
-  // 按 Token 查完整授权（scope + 只读）：默认走多 Token 存储，测试可注入覆盖
-  const resolveTokenAuth = opts.resolveTokenAuth ?? ((t: string) => findTokenAuth(t));
+  /*
+   * 按 Token 查完整授权（scope + 只读）：默认走多 Token 存储，测试可注入覆盖。
+   *
+   * 第 4 参注入「视图 ID → 当前名字」（D7）：`viewGrants` 存稳定 ID，改名后靠它翻成新名字，
+   * 于是改名不需要重新签发 token。解析器**惰性构建**——只有真的出现 ID 需要翻译时才读
+   * views.json，纯 scope 的 Token 不会多付一次磁盘 IO。
+   */
+  const resolveTokenAuth = opts.resolveTokenAuth ?? ((t: string) => {
+    let resolveViewName: ((idOrName: string) => string | null) | undefined;
+    return findTokenAuth(t, undefined, undefined, (idOrName) => {
+      resolveViewName ??= makeViewNameResolver(loadConfig());
+      return resolveViewName(idOrName);
+    });
+  });
 
   // 每会话一个 transport + 最近活跃时间（用于空闲回收）
   const transports = new Map<string, StreamableHTTPServerTransport>();

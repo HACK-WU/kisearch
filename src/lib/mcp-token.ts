@@ -600,6 +600,17 @@ export function findTokenAuth(
   tokenValue: string,
   filePath = getTokensPath(),
   usersPath = getUsersPath(),
+  /**
+   * 视图 ID → 当前视图名（D7，REQ-20261104-004）。
+   *
+   * `viewGrants` 存的是**稳定 ID**：改名后 ID 不变，靠这里翻成新名字，
+   * 于是改名不需要重新签发 token。翻译不出来（旧数据里的名字 / 指向已删视图的 ID）
+   * 就原样保留 —— 旧数据照旧按名字匹配，指向已删视图的 ID 自然匹配不上任何名字。
+   *
+   * ⚠ **本模块不能 import `scope-view`**（会成环：`scope-view → config → mcp-token`），
+   * 所以解析器只能由调用方注入。不注入时退化为「只认名字」。
+   */
+  resolveViewName?: (idOrName: string) => string | null,
 ): TokenAuth | undefined {
   const record = findTokenRecord(tokenValue, filePath);
   if (!record) return undefined;
@@ -608,11 +619,15 @@ export function findTokenAuth(
   const viewGrants = Array.isArray(record.viewGrants)
     ? record.viewGrants.filter((v): v is string => typeof v === 'string')
     : [];
+  // ID → 当前名字；翻不出来就原样当作名字（旧数据 / 指向已删视图的 ID）
+  const viewGrantNames = resolveViewName
+    ? viewGrants.map((g) => resolveViewName(g) ?? g)
+    : viewGrants;
   // ★ 唯一合并点：下游 isScopeAuthorized / findScopeViolation / scopeAllowed / 工具注册
   //   全部只看「名字在不在授权集合里」，因此它们零改动。
   const merged = record.scopes.includes(ALL_SCOPES)
     ? [ALL_SCOPES]
-    : [...record.scopes, ...viewGrants];
+    : [...record.scopes, ...viewGrantNames];
   return { id: record.id, scopes: merged, viewGrants, readOnly: effective.readOnly };
 }
 

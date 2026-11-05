@@ -6,6 +6,7 @@
  *   ki view list   [--json]
  *   ki view show   <name> [--json]
  *   ki view create <name> --members a,b   （或 --add a --add b）
+ *   ki view rename <old> <new>            （ID 不变，token 授权不受影响）
  *   ki view add    <name> <scope>
  *   ki view remove <name> <scope>
  *   ki view delete <name> --yes
@@ -28,11 +29,29 @@ import {
   getViewsPath,
   listViewNames,
   readViews,
+  renameView,
   updateView,
   validateViewMembers,
   validateViewName,
   type ViewConfig,
 } from './lib/scope-view.js';
+import {
+  ALL_SCOPES,
+  isScopeAuthorized,
+  listTokens,
+  listTokensGrantingView,
+  resolveDefaultCliTokenOwner,
+} from './lib/mcp-token.js';
+import { listUsers } from './lib/user-store.js';
+
+/** userId → 显示名。用户文件不可读时返回空表（只影响展示，不阻断命令） */
+function safeUserNames(): Map<string, string> {
+  try {
+    return new Map(listUsers().map((u) => [u.id, u.username]));
+  } catch {
+    return new Map();
+  }
+}
 
 /** 统一错误出口：ViewError 打印 code + 文案，其他错误原样透出 */
 function fail(err: unknown): void {
@@ -94,14 +113,29 @@ program
       const names = listViewNames(config);
 
       if (opts.json) {
+        const userNames = safeUserNames();
         printJson({
           ok: true,
           path: getViewsPath(config),
           count: names.length,
           views: names.map((name) => ({
             view: name,
+            // R-07 / R-12：id 是 token 授权的锚点，审计字段供页面展示
+            id: views[name].id,
             members: views[name].members,
             missing: views[name].members.filter((m) => !memberHasKb(m)),
+            createdBy: views[name].createdBy ?? null,
+            /*
+             * 同时给显示名：`createdBy` 是 userId，用户看到一串 ID 等于没信息
+             * （页面侧已由 `/api/views` 翻译，CLI 侧不能落后）。
+             */
+            ...(views[name].createdBy && userNames.has(views[name].createdBy)
+              ? { createdByName: userNames.get(views[name].createdBy) }
+              : {}),
+            createdAt: views[name].createdAt ?? null,
+            updatedBy: views[name].updatedBy ?? null,
+            updatedAt: views[name].updatedAt ?? null,
+            revision: views[name].revision,
           })),
         });
         return;
@@ -121,6 +155,75 @@ program
         const tail = missing.length > 0 ? `   ⚠ 缺失：${missing.join(', ')}` : '';
         console.log(`  ${name.padEnd(width)}  ${String(members.length).padStart(2)} 个库   ${members.join(' / ')}${tail}`);
       }
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+// ─── audit-grants ────────────────────────────────────────
+
+program
+  .command('audit-grants')
+  .description('检查「授权了视图但缺少成员授权」的 Token —— D3 收紧后这些 Token 将看不到该视图')
+  .option('--json', '输出结构化 JSON', false)
+  .action((opts) => {
+    try {
+      const config = loadConfig();
+      const views = readViews(config);
+      const byId = new Map(Object.entries(views).map(([name, def]) => [def.id, name]));
+
+      let tokens: ReturnType<typeof listTokens>;
+      try {
+        tokens = listTokens();
+      } catch (err) {
+        console.log(`没有可读的 Token 文件，无需检查。(${(err as Error).message})`);
+        return;
+      }
+
+      const affected: { id: string; label: string | null; view: string; missing: string[] }[] = [];
+      for (const token of tokens) {
+        const scopes = Array.isArray(token.scopes) ? token.scopes : [];
+        // ALL_SCOPES 是全量授权，不受成员收紧影响
+        if (scopes.includes(ALL_SCOPES)) continue;
+
+        const grants = Array.isArray(token.viewGrants) ? token.viewGrants : [];
+        const grantedViews = new Set<string>();
+        for (const g of grants) {
+          const name = byId.get(g);
+          if (name) grantedViews.add(name);
+          else if (Object.prototype.hasOwnProperty.call(views, g)) grantedViews.add(g); // 存量按名字记录
+        }
+        // 历史写法：视图名混在 scopes 里
+        for (const s of scopes) {
+          if (Object.prototype.hasOwnProperty.call(views, s)) grantedViews.add(s);
+        }
+
+        for (const viewName of grantedViews) {
+          const missing = views[viewName].members.filter((m) => !isScopeAuthorized(scopes, m));
+          if (missing.length > 0) {
+            affected.push({ id: token.id, label: token.label ?? null, view: viewName, missing });
+          }
+        }
+      }
+
+      if (opts.json) {
+        printJson({ ok: true, affected: affected.length, tokens: affected });
+        return;
+      }
+
+      if (affected.length === 0) {
+        console.log('✅ 没有 Token 受影响：已授权的视图，其成员也都已授权。');
+        return;
+      }
+
+      console.log(`⚠ ${affected.length} 处授权会在升级后失效（D3：授权视图 ∧ 授权全部成员，缺一即不可见）：\n`);
+      for (const row of affected) {
+        console.log(`  - ${row.label ?? '(未命名)'}  ${row.id}`);
+        console.log(`      ${row.view} → 缺 ${row.missing.join(', ')}`);
+        const all = [...new Set([...views[row.view].members])];
+        console.log(`    修复：ki mcp token update ${row.id} --scope ${all.join(',')}`);
+      }
+      console.log('\n说明：视图名本身仍然有效，但成员未授权时该视图不会出现在 ki_scope_list，也读不到内容。');
     } catch (err) {
       fail(err);
     }
@@ -188,14 +291,65 @@ program
 
       validateViewName(config, name);
       // 存在性判定与写入都在锁内完成（并发重复创建只会有一次成功）
-      createView(config, name, members);
+      // D8：CLI 无登录态，创建的视图记到**默认管理员**名下；否则会变成"无主"视图
+      createView(config, name, members, { createdBy: resolveDefaultCliTokenOwner() });
 
       if (opts.json) {
-        printJson({ ok: true, view: name, members, path: getViewsPath(config) });
+        const created = readViews(config)[name];
+        printJson({ ok: true, view: name, id: created?.id, members, path: getViewsPath(config) });
         return;
       }
       console.log(`已创建视图 ${name}（${members.length} 个库）：${members.join(' / ')}`);
       console.log(`  现在可以用：ki search "<查询词>" --scope ${name}`);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+// ─── rename ──────────────────────────────────────────────
+
+program
+  .command('rename')
+  .description('给视图改名（ID 不变 → token 授权与页面选中态不受影响；旧名字的深链会失效）')
+  .argument('<old>', '现视图名')
+  .argument('<new>', '新视图名')
+  .option('--json', '输出结构化 JSON', false)
+  .action((oldName: string, newName: string, opts) => {
+    try {
+      const config = loadConfig();
+      if (!readViews(config)[oldName]) {
+        throw new ViewError('VIEW_NOT_FOUND', `视图「${oldName}」不存在；用 ki view list 查看全部视图`, oldName);
+      }
+      // N3 / R-05：改名的影响面必须在改**之前**说清楚（当前 token 侧仍按**名字**记录授权）
+      const affected = listTokensGrantingView(oldName);
+
+      renameView(config, oldName, newName, { updatedBy: resolveDefaultCliTokenOwner() });
+      const after = readViews(config)[newName];
+
+      if (opts.json) {
+        printJson({
+          ok: true,
+          from: oldName,
+          to: newName,
+          id: after?.id,
+          path: getViewsPath(config),
+          affectedTokens: affected.map((r) => ({ id: r.id, label: r.label ?? null })),
+        });
+        return;
+      }
+      console.log(`已改名：${oldName} → ${newName}（ID ${after?.id ?? '?'} 不变）`);
+      console.log(`  ⚠ 旧名字会失效：脚本 / 深链里的 --scope ${oldName} 需改成 --scope ${newName}`);
+      if (affected.length > 0) {
+        /*
+         * 诚实暴露当前实现边界：`viewGrants` 里存的还是**名字**（存 ID 的方案随 B2 的
+         * 页面授权一起落地），所以改名会让这些 Token 失去该视图。不静默，必须报出来。
+         */
+        console.log(`  ⚠ 该视图当前被 ${affected.length} 个 Token 按旧名字授权，改名后它们将看不到此视图：`);
+        for (const token of affected) {
+          console.log(`      - ${token.label ?? '(未命名)'}  ${token.id}`);
+        }
+        console.log(`    补救：ki mcp token update ${affected[0].id} --view ${newName}（逐个处理）`);
+      }
     } catch (err) {
       fail(err);
     }

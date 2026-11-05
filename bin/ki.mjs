@@ -97,7 +97,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   store             存储文本到向量索引
   bulk-store        批量存储文本到向量索引
   scope             scope 管理：list / readonly / delete / clear（KB + 向量两层）
-  view              知识视图管理：list / show / create / add / remove / delete（多个 scope 的只读聚合）
+  view              知识视图管理：list / show / create / rename / add / remove / delete（多个 scope 的只读聚合）
   doc               向量文档管理：list / delete
   tag               向量 tag 发现：list（只读，含文档数）
   user              Web 登录账号：create / list / reset-password / set-role / disable / enable / delete
@@ -126,6 +126,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   ki index-optimize -s my-project         # 整理索引：构建 dense 索引（导入收尾已自动做，失败可重跑）
   ki scope list
   ki view create work --members kisearch,kisearch-memory  # 建视图（可当 scope 用）
+  ki view rename work 工作台                              # 改名：ID 不变，token 授权不受影响
   ki search --scope work --query "登录流程"                # 一次检索多个库
   ki doc list --scope my-project --limit 10
   ki tag list --scope my-project

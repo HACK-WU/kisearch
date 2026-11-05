@@ -9,7 +9,7 @@ import { enableIdleClose } from './lib/vector-client.js';
 // 任何单测 import 它都会真的把服务跑起来。这里 re-export 保持既有契约（stdio 与 HTTP 共用同一工厂）。
 export { buildKiMcpServer };
 import { loadConfig, invalidateConfigFreshness, getConfigLoadIssue } from './lib/config.js';
-import { listViewNames } from './lib/scope-view.js';
+import { getViewId, listViewNames, readViews, viewNameCharsetError } from './lib/scope-view.js';
 import { captureDaemonIdentity, isDaemonIdentityDrifted } from './lib/scope-collection.js';
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { runHealthCheck, renderHealthReport } from './lib/health-check.js';
@@ -284,33 +284,81 @@ function parseMcpArgs(args: string[]): McpCliOptions {
  */
 function splitGrants(scopeRaw: string | undefined, viewRaw: string | undefined): { scopes: string[]; viewGrants: string[] } {
   let known: Set<string>;
+  /** 视图名 → 稳定 ID（D7：授权落 ID，改名不断授权） */
+  let idByName: Map<string, string>;
   try {
-    known = new Set(listViewNames(loadConfig()));
+    const views = readViews(loadConfig());
+    known = new Set(Object.keys(views));
+    idByName = new Map(Object.entries(views).map(([name, def]) => [name, def.id]));
   } catch {
     known = new Set(); // 视图文件损坏时不阻塞授权，退化为全部记入 scopes
+    idByName = new Map();
   }
 
   const viewGrants: string[] = [];
-  const addView = (name: string): void => {
-    if (!viewGrants.includes(name)) viewGrants.push(name);
+  /**
+   * 记录一条视图授权。
+   * 已知视图 → 落**稳定 ID**（改名免疫）；未知名字 → 按原样保留（003 §3.2 的前向声明）。
+   */
+  const addView = (nameOrId: string): void => {
+    const grant = idByName.get(nameOrId) ?? nameOrId;
+    if (!viewGrants.includes(grant)) viewGrants.push(grant);
   };
 
   for (const v of (viewRaw ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
-    if (!/^[a-zA-Z0-9_-]+$/.test(v)) {
-      failJson(`视图名 "${v}" 不合法：仅允许字母、数字、连字符(-)、下划线(_)`, 'MCP_TOKEN_VIEW_INVALID');
+    /*
+     * ★ 这里**不能**只放宽 ASCII 正则了事：一旦放开，任意字符串（含 `a,b`、`../x`）
+     *   都能被写进 token 授权。改用 §1.4 的视图名规则做字符集校验，
+     *   既支持中文，又挡住分隔符与路径语义。
+     */
+    const formatError = viewNameCharsetError(v);
+    if (formatError) {
+      failJson(`视图名 "${v}" 不合法：${formatError}`, 'MCP_TOKEN_VIEW_INVALID');
+    }
+    if (!known.has(v)) {
+      // 前向声明：允许先授权、后建视图（003 §3.2），但要提醒它还没绑定 ID
+      process.stderr.write(
+        `[kisearch] 视图「${v}」尚不存在，已按名字记录授权；创建该视图后请重新授权以绑定稳定 ID。\n`,
+      );
     }
     addView(v);
   }
 
   const scopes: string[] = [];
   if (scopeRaw && scopeRaw.trim()) {
-    for (const name of resolveScopesArg(scopeRaw)) {
-      if (name === ALL_SCOPES) return { scopes: [ALL_SCOPES], viewGrants: [] };
-      if (known.has(name)) addView(name);
-      else scopes.push(name);
+    /*
+     * ★ 解析顺序（§1.4 硬要求）：**先按视图名比对**，命中才归 viewGrants；
+     *   未命中的段才交给 `resolveScopesArg`（ASCII-only）。反过来的话，
+     *   中文视图名会先被 scope 正则拒掉（`INVALID_SCOPE`），永远授权不了。
+     */
+    for (const segment of scopeRaw.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (segment === ALL_SCOPES) return { scopes: [ALL_SCOPES], viewGrants: [] };
+      if (known.has(segment)) {
+        addView(segment);
+        continue;
+      }
+      for (const name of resolveScopesArg(segment)) scopes.push(name);
     }
   }
   return { scopes, viewGrants };
+}
+
+/**
+ * 把 `viewGrants` 渲染成人可读的名字。
+ *
+ * D7 之后授权存**稳定 ID**，直接 `join` 会让用户看到一串 `v_xxxxxxxx`
+ * 无从与视图对照；这里反查成名字，翻不出来（前向声明的名字 / 已删视图的 ID）就原样显示。
+ */
+function formatViewGrants(grants: string[]): string {
+  if (grants.length === 0) return '';
+  let idToName: Map<string, string>;
+  try {
+    const views = readViews(loadConfig());
+    idToName = new Map(Object.entries(views).map(([name, def]) => [def.id, name]));
+  } catch {
+    idToName = new Map();
+  }
+  return grants.map((g) => idToName.get(g) ?? g).join(', ');
 }
 
 /** 从 args 解析授权（`--scope` 与 `--view` 至少给一个） */
@@ -423,7 +471,7 @@ function runTokenCommand(args: string[]): void {
             hint:
               'Token 已生成（0600 落盘到 ~/.ki/mcp-tokens.json）。' +
               `授权 scope：${record.scopes.length > 0 ? record.scopes.join(', ') : '（无）'}`
-              + `${(record.viewGrants ?? []).length > 0 ? `；授权视图：${(record.viewGrants ?? []).join(', ')}` : ''}`
+              + `${(record.viewGrants ?? []).length > 0 ? `；授权视图：${formatViewGrants(record.viewGrants ?? [])}` : ''}`
               + `；访问模式：${accessModeLabel(readOnly)}。` +
               (readOnly
                 ? '远程 MCP 客户端连上后只会看到读工具（检索/读取），写工具不会出现在工具列表里，构造调用也会被拒绝。'
@@ -450,9 +498,23 @@ function runTokenCommand(args: string[]): void {
       let records = listTokensStrict(); // 损坏时报错（MCP_TOKEN_CORRUPT），避免静默空列表误导
       if (grantingView) {
         const viewNames = new Set(listViewNamesSafe());
-        // 核对影响面：显式授权该视图的 + 视图名混写在 scopes 里的（历史记录）
-        records = records.filter((r) => (r.viewGrants ?? []).includes(grantingView)
-          || r.scopes.includes(grantingView));
+        /*
+         * ★ viewGrants 存的是稳定 ID，用户敲的是名字 —— 必须先把名字换成 ID 再比对，
+         *   否则「这个视图被哪些 Token 授权」永远返回空（影响面核对直接失效）。
+         *   同时保留按名字匹配，兼容 003 阶段写入的存量记录与 scopes 混写。
+         */
+        let grantKey = grantingView;
+        try {
+          grantKey = getViewId(loadConfig(), grantingView) ?? grantingView;
+        } catch {
+          grantKey = grantingView; // 视图文件损坏时不阻断列表
+        }
+        records = records.filter((r) => {
+          const grants = r.viewGrants ?? [];
+          return grants.includes(grantKey)
+            || grants.includes(grantingView)
+            || r.scopes.includes(grantingView);
+        });
         // 视图已不存在时给提示，避免用户以为"没人授权"其实是名字拼错
         if (!viewNames.has(grantingView) && records.length === 0) {
           // 不中断：仍返回空列表，但带上说明
@@ -559,7 +621,7 @@ function runTokenCommand(args: string[]): void {
             accessMode: accessModeLabel(readOnly),
             createdAt: record.createdAt,
             hint: `Token（id: ${record.id}）已更新：授权 scope = ${record.scopes.join(', ') || '（无）'}`
-              + `${(record.viewGrants ?? []).length > 0 ? `、授权视图 = ${(record.viewGrants ?? []).join(', ')}` : ''}，`
+              + `${(record.viewGrants ?? []).length > 0 ? `、授权视图 = ${formatViewGrants(record.viewGrants ?? [])}` : ''}，`
               + `访问模式 = ${accessModeLabel(readOnly)}。`
               + '该变更对新请求立即生效；已连接的客户端需重连（或重启 IDE）才能刷新工具列表'
               + `（切回读写后写工具才会重新出现）。`,

@@ -9,6 +9,7 @@ import { TasksPage } from '@/pages/TasksPage';
 import { DataSourcePage } from '@/pages/DataSourcePage';
 import { ChatPage } from '@/pages/ChatPage';
 import { ResourcesPage } from '@/pages/ResourcesPage';
+import { ViewsPage } from '@/pages/ViewsPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { UsersPage } from '@/pages/UsersPage';
 import { ProfilePage } from '@/pages/ProfilePage';
@@ -76,6 +77,11 @@ export function AppRoutes(): JSX.Element {
         {/* 独立对话页（REQ-20261008-001）；:convId 为会话深链（URL 契约 §2.4） */}
         <Route path="chat" element={<ChatPage />} />
         <Route path="chat/:convId" element={<ChatPage />} />
+        {/* 知识视图（REQ-20261104-004）：团队共享的多库聚合管理页 */}
+        <Route
+          path="views"
+          element={<RequireCapability cap="views.read"><ViewsPage /></RequireCapability>}
+        />
         {/* 资源：接入（MCP / Skill / LLM）+ 常用功能手册 */}
         <Route path="resources" element={<ResourcesPage />} />
         {/* :topic 为目录深链（/resources/import 等），刷新与分享可复原 */}

@@ -82,13 +82,47 @@ describe('views.json 落点与读取', () => {
     sv.validateViewMembers(config, ['a', 'b'], 'team');
     sv.createView(config, 'team', ['a', 'b']);
 
-    assert.deepEqual(sv.readViews(config), { team: { members: ['a', 'b'] } });
+    // Ｒ-12：落盘形状多了 id / createdAt / revision，不再与「只有 members」全等
+    const views = sv.readViews(config);
+    assert.deepEqual(views.team.members, ['a', 'b']);
+    assert.match(views.team.id, /^v_[0-9a-f]{8}$/, '应生成稳定 ID');
+    assert.equal(views.team.revision, 0);
+    assert.ok(typeof views.team.createdAt === 'string', '应记录创建时间');
+
     const mode = fs.statSync(viewsPath).mode & 0o777;
     assert.equal(mode, 0o600, `期望 0600，实际 ${mode.toString(8)}`);
 
     const raw = JSON.parse(fs.readFileSync(viewsPath, 'utf-8'));
-    assert.equal(raw.version, 1);
+    assert.equal(raw.version, 2, '落盘应写 v2');
     assert.ok(typeof raw.updatedAt === 'string');
+  });
+
+  it('v1 旧文件：读时补 id（由名字派生）、不伪造 createdAt，写入后固化为 v2', () => {
+    reset();
+    // 手工造一份 003 时代的文件（只有 members）
+    fs.writeFileSync(viewsPath, JSON.stringify({
+      version: 1,
+      views: { team: { members: ['a', 'b'] } },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }, null, 2));
+    configLib.resetConfigCache();
+
+    const config = cfg();
+    const first = sv.readViews(config);
+    assert.deepEqual(first.team.members, ['a', 'b']);
+    assert.match(first.team.id, /^v_[0-9a-f]{8}$/, '应由名字派生 ID');
+    assert.equal(first.team.createdAt, undefined, '旧视图不得伪造创建时间（§1.5 迁移第 4 条）');
+
+    // 任意一次写都会带出 needsMigration → 强制写回固化
+    sv.updateView(config, 'team', (cur) => [...cur, 'c']);
+    const raw = JSON.parse(fs.readFileSync(viewsPath, 'utf-8'));
+    assert.equal(raw.version, 2, '迁移后应写成 v2');
+    assert.equal(raw.views.team.id, first.team.id, 'ID 必须固化，二次读取不得重算');
+    assert.equal(raw.views.team.createdAt, undefined, '迁移不得补 createdAt');
+
+    // 幂等：再读一次 ID 仍然是同一个
+    configLib.resetConfigCache();
+    assert.equal(sv.readViews(cfg()).team.id, first.team.id, '重复读取必须幂等');
   });
 
   it('del 后不再出现在定义里', () => {

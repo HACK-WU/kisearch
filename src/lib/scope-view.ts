@@ -22,10 +22,20 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { loadConfig, resolveScope, getScopeMode, type KiConfig } from './config.js';
-import { parseScopes, validateScope, listAllScopes } from './scope.js';
+import { ScopeError, validateScope, listAllScopes } from './scope.js';
+// 方向是 scope-view → mcp-token（mcp-token 不反向依赖本模块，无环）：
+// 改名后要把 Token 里按**旧名字**记录的授权换成 ID，否则旧数据改名即断授权。
+import { listTokens, updateToken } from './mcp-token.js';
 
-/** 视图名合法字符：与 scope 完全一致（共用命名空间，字符集必须同源） */
+/**
+ * ⚠ **不再是视图名的唯一校验规则**（D5 / §1.4 起视图名支持中文）。
+ *
+ * 保留导出仅为兼容既有引用；真正的判定见 `viewNameCharsetError()`。
+ * `scope` 名仍然只用 ASCII（`scope.ts::validateScope`），两者**故意不对称**：
+ * scope 名会落磁盘目录、进 shell 参数，视图不落盘。
+ */
 export const VIEW_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 /**
@@ -72,13 +82,36 @@ export function isViewError(err: unknown): err is ViewError {
   return err instanceof ViewError;
 }
 
+/**
+ * 单个视图定义。
+ *
+ * ★ 落盘形状：`views` 仍是 `Record<视图名, ViewConfig>`（**按名做键**），
+ *   `id` 存在值里。这与早期方案（按 ID 做键）不同，理由：
+ *   - 按名做键时 `readViews()` 的签名与全部 8 处读路径（`scope.ts`、`view.ts`、
+ *     `scope-policy.ts`、4 个 MCP 工具、`group.ts`…）零改动，回归面小一个数量级；
+ *   - 按 ID 做键要额外维护「名字 → ID」索引，且 `--scope <名字>` 的解析要先查索引；
+ *   - 改名只是一次原子写（删旧键 + 插新键，值里的 `id` 不动），不需要事务。
+ *   D7 的诉求（**改名不影响 token 授权 / localStorage / 深链**）由 `id` 不变满足，
+ *   与"键是什么"无关。
+ */
 export interface ViewConfig {
+  /** 不可变标识（D7）。改名不动它；token 授权以它为锚 */
+  id: string;
   /** 有序成员列表（顺序只影响展示，不影响检索排序） */
   members: string[];
+  /** 创建者 userId（D6 / R-07）。旧视图缺失 = 无主，仅管理员可改 */
+  createdBy?: string;
+  /** ISO 8601 UTC。旧视图缺失 → **不伪造**，列表显示 `—`（§1.5 迁移第 4 条） */
+  createdAt?: string;
+  updatedBy?: string;
+  updatedAt?: string;
+  /** 乐观锁计数（N7）：成员或名称每次变更 +1；旧视图缺失按 0 处理 */
+  revision: number;
 }
 
 export interface ViewsFile {
-  version: 1;
+  /** 1 = 003 时代（只有 members）；2 = 本需求（含 id / 审计字段 / revision） */
+  version: 1 | 2;
   views: Record<string, ViewConfig>;
   updatedAt: string;
 }
@@ -123,19 +156,45 @@ export function getViewsPath(config: KiConfig): string {
 // ─── 读 ──────────────────────────────────────────────────
 
 /**
- * 读取全部视图定义。
+ * 由名字派生稳定 ID —— **仅用于迁移 v1 旧视图**。
  *
- * - 文件不存在 → 返回 `{}`（不是错误：视图是可选能力）
+ * ★ 派生后必须固化写回（`withViewsFile` 的 `needsMigration` 会强制写）：
+ *   若每次读取都重新按名字算，用户改名后 hash 就变了，ID 等于没稳定。
+ */
+function deriveViewId(name: string): string {
+  return `v_${crypto.createHash('sha256').update(name).digest('hex').slice(0, 8)}`;
+}
+
+/** 新视图 ID：随机 8 位 hex，避让已有 ID */
+function generateViewId(taken: Set<string>): string {
+  for (let i = 0; i < 100; i += 1) {
+    const id = `v_${crypto.randomBytes(4).toString('hex')}`;
+    if (!taken.has(id)) return id;
+  }
+  // 兜底：4 字节撞 100 次的概率可忽略，但仍给一个更长且必然不同的
+  return `v_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/**
+ * 读取全部视图定义，并**顺带给出「是否需要迁移写回」**。
+ *
+ * - 文件不存在 → 返回空表（不是错误：视图是可选能力）
  * - JSON 损坏 / 结构非法 → `VIEWS_CORRUPT` fail-loud，**不允许静默当成空表**
  *   （否则下一次写入会把用户定义整体覆盖掉）
+ * - v1 条目缺 `id` / `revision` → 就地补齐（id 由名字派生）并把 `needsMigration` 置位，
+ *   由 `withViewsFile` 强制写回，完成**一次性固化**（幂等：固化后再读不会重复派生）
  */
-export function readViews(config: KiConfig): Record<string, ViewConfig> {
+function readViewsDetailed(config: KiConfig): { views: Record<string, ViewConfig>; needsMigration: boolean } {
   const filePath = getViewsPath(config);
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { views: {}, needsMigration: false };
     throw new ViewError(
       'VIEWS_READ_FAILED',
       `读取视图文件失败：${filePath}\n  ${(err as Error).message}`,
@@ -162,9 +221,14 @@ export function readViews(config: KiConfig): Record<string, ViewConfig> {
     );
   }
 
+  let needsMigration = (parsed as Partial<ViewsFile> | null)?.version !== 2;
+
   const out: Record<string, ViewConfig> = {};
+  const usedIds = new Set<string>();
+
   for (const [name, cfg] of Object.entries(views as Record<string, unknown>)) {
-    const members = (cfg as { members?: unknown } | null)?.members;
+    const raw = (cfg ?? {}) as Record<string, unknown>;
+    const members = raw.members;
     if (!Array.isArray(members) || members.some((m) => typeof m !== 'string')) {
       throw new ViewError(
         'VIEWS_CORRUPT',
@@ -172,9 +236,49 @@ export function readViews(config: KiConfig): Record<string, ViewConfig> {
         name,
       );
     }
-    out[name] = { members: [...(members as string[])] };
+
+    let id = asOptionalString(raw.id);
+    if (!id) {
+      needsMigration = true;
+      id = deriveViewId(name);
+      // 派生 ID 撞车概率极低，但同一份文件里必须唯一
+      let suffix = 1;
+      while (usedIds.has(id)) id = `${deriveViewId(name)}_${suffix++}`;
+    }
+    usedIds.add(id);
+
+    const rawRevision = raw.revision;
+    const revision = typeof rawRevision === 'number' && Number.isFinite(rawRevision) && rawRevision >= 0
+      ? Math.floor(rawRevision)
+      : 0;
+    if (rawRevision !== revision) needsMigration = true;
+
+    const createdBy = asOptionalString(raw.createdBy);
+    const createdAt = asOptionalString(raw.createdAt);
+    const updatedBy = asOptionalString(raw.updatedBy);
+    const updatedAt = asOptionalString(raw.updatedAt);
+
+    out[name] = {
+      id,
+      members: [...(members as string[])],
+      revision,
+      ...(createdBy ? { createdBy } : {}),
+      ...(createdAt ? { createdAt } : {}),
+      ...(updatedBy ? { updatedBy } : {}),
+      ...(updatedAt ? { updatedAt } : {}),
+    };
   }
-  return out;
+  return { views: out, needsMigration };
+}
+
+/**
+ * 读取全部视图定义（对外 API，签名与 003 时代一致）。
+ *
+ * 迁移细节见 {@link readViewsDetailed}：调用本函数**不会**触发写回，
+ * 固化只发生在 `withViewsFile` 内的读-改-写路径上。
+ */
+export function readViews(config: KiConfig): Record<string, ViewConfig> {
+  return readViewsDetailed(config).views;
 }
 
 // ─── 写 ──────────────────────────────────────────────────
@@ -253,7 +357,7 @@ function atomicWriteViews(filePath: string, views: Record<string, ViewConfig>): 
   for (const key of Object.keys(views).sort()) sorted[key] = views[key];
 
   const payload: ViewsFile = {
-    version: 1,
+    version: 2,
     views: sorted,
     updatedAt: new Date().toISOString(),
   };
@@ -283,10 +387,11 @@ function atomicWriteViews(filePath: string, views: Record<string, ViewConfig>): 
 function withViewsFile<T>(config: KiConfig, fn: (views: Record<string, ViewConfig>) => T): T {
   const filePath = getViewsPath(config);
   return withViewsLock(filePath, () => {
-    const views = readViews(config);
+    const { views, needsMigration } = readViewsDetailed(config);
     const before = JSON.stringify(views);
     const result = fn(views);
-    if (JSON.stringify(views) !== before) atomicWriteViews(filePath, views);
+    // ★ needsMigration 时即使 fn 没改任何东西也要写回：v1 → v2 的 ID 固化靠这一次写
+    if (needsMigration || JSON.stringify(views) !== before) atomicWriteViews(filePath, views);
     return result;
   });
 }
@@ -294,7 +399,12 @@ function withViewsFile<T>(config: KiConfig, fn: (views: Record<string, ViewConfi
 /**
  * 创建视图。已存在则在**锁内**抛 `VIEW_NAME_CONFLICT`（防并发重复创建）。
  */
-export function createView(config: KiConfig, name: string, members: string[]): void {
+export function createView(
+  config: KiConfig,
+  name: string,
+  members: string[],
+  meta?: { createdBy?: string },
+): void {
   // 名字校验放在**函数内部**而不是只靠调用方：createView 是公开 API，
   // 将来新增入口（HTTP / MCP 工具）若忘了先调 validateViewName，
   // 非法名/保留名/与 scope 撞名就会直接落盘。这里做一次自校验，成本是一次正则。
@@ -308,7 +418,15 @@ export function createView(config: KiConfig, name: string, members: string[]): v
       );
     }
     validateViewMembers(config, members, name);
-    views[name] = { members: [...members] };
+    const taken = new Set(Object.values(views).map((v) => v.id));
+    const createdBy = asOptionalString(meta?.createdBy);
+    views[name] = {
+      id: generateViewId(taken),
+      members: [...members],
+      createdAt: new Date().toISOString(),
+      revision: 0,
+      ...(createdBy ? { createdBy } : {}),
+    };
   });
 }
 
@@ -322,6 +440,7 @@ export function updateView(
   config: KiConfig,
   name: string,
   updater: (current: string[]) => string[] | null,
+  meta?: { updatedBy?: string },
 ): string[] | null {
   return withViewsFile(config, (views) => {
     const entry = views[name];
@@ -332,7 +451,16 @@ export function updateView(
       return null;
     }
     validateViewMembers(config, next, name);
-    views[name] = { members: [...next] };
+    const updatedBy = asOptionalString(meta?.updatedBy);
+    // ★ 必须 `...entry` 展开：只写 members 会把 id / createdBy / createdAt 丢掉，
+    //   下一次读时 id 被重新派生 → 改名与 token 授权锚点全部失效。
+    views[name] = {
+      ...entry,
+      members: [...next],
+      revision: entry.revision + 1,
+      updatedAt: new Date().toISOString(),
+      ...(updatedBy ? { updatedBy } : {}),
+    };
     return [...next];
   });
 }
@@ -345,6 +473,138 @@ export function deleteView(config: KiConfig, name: string): void {
     }
     delete views[name];
   });
+}
+
+/**
+ * 改名（D7）：只换**键与展示名**，`id` 不变。
+ *
+ * 因此 token 的 `viewGrants`（存 ID）、前端 localStorage 选中态都不受影响；
+ * 唯一代价是**旧名字的深链会失效**（要提示「视图可能已改名」，不能静默 404）。
+ *
+ * @throws VIEW_NOT_FOUND 旧名不存在 / VIEW_NAME_CONFLICT 新名撞其他视图或 scope
+ */
+export function renameView(
+  config: KiConfig,
+  oldName: string,
+  newName: string,
+  meta?: {
+    updatedBy?: string;
+    /**
+     * Token 存储路径。**仅供测试隔离**：生产留空即用 `~/.ki/mcp-tokens.json`。
+     * 不留这个口子的话，单测会去改写开发者真实目录下的 token 文件。
+     */
+    tokensPath?: string;
+  },
+): void {
+  if (oldName === newName) return;
+  validateViewName(config, newName);
+  withViewsFile(config, (views) => {
+    const entry = views[oldName];
+    if (!entry) throw new ViewError('VIEW_NOT_FOUND', `视图「${oldName}」不存在`, oldName);
+    if (Object.prototype.hasOwnProperty.call(views, newName)) {
+      throw new ViewError(
+        'VIEW_NAME_CONFLICT',
+        `视图「${newName}」已存在，不能改成同名（视图名共用命名空间且唯一）`,
+        newName,
+      );
+    }
+    const updatedBy = asOptionalString(meta?.updatedBy);
+    delete views[oldName];
+    views[newName] = {
+      ...entry,
+      revision: entry.revision + 1,
+      updatedAt: new Date().toISOString(),
+      ...(updatedBy ? { updatedBy } : {}),
+    };
+  });
+
+  // ★ views 锁已释放，再做 token 同步：避免在 views 临界区里嵌套 tokens 锁
+  syncTokenGrantsOnRename(config, oldName, newName, meta?.tokensPath);
+}
+
+/**
+ * 改名后把 Token 里**按旧名字**记录的授权迁到新名字 / 稳定 ID。
+ *
+ * 为什么需要：`viewGrants` 存 ID 是 D7 的目标，但**存量 token 里存的是名字**
+ * （003 阶段写入）。不做这一步，旧数据一改名就静默失去视图。
+ *
+ * 迁移策略（渐进、不做一次性全量改写）：
+ *   - `viewGrants` 命中旧名 → 换成该视图的 `id`（此后永久免疫改名）
+ *   - `scopes` 命中旧名（历史兼容写法）→ 换成新名字
+ *
+ * 单条 Token 失败只告警不中断：改名本身已成功，不能因为一个坏记录回滚。
+ */
+function syncTokenGrantsOnRename(
+  config: KiConfig,
+  oldName: string,
+  newName: string,
+  tokensPath?: string,
+): void {
+  let tokens: ReturnType<typeof listTokens>;
+  try {
+    tokens = listTokens(tokensPath);
+  } catch {
+    return; // 没有 token 文件 / 不可读 → 无授权可同步
+  }
+  const id = getViewId(config, newName);
+  for (const token of tokens) {
+    const grants = Array.isArray(token.viewGrants) ? token.viewGrants : [];
+    const scopes = Array.isArray(token.scopes) ? token.scopes : [];
+    const grantsHit = grants.includes(oldName);
+    const scopesHit = scopes.includes(oldName);
+    if (!grantsHit && !scopesHit) continue;
+
+    const patch: { viewGrants?: string[]; scopes?: string[] } = {};
+    if (grantsHit) patch.viewGrants = grants.map((g) => (g === oldName ? id ?? newName : g));
+    if (scopesHit) patch.scopes = scopes.map((s) => (s === oldName ? newName : s));
+
+    try {
+      updateToken(token.id, patch, tokensPath);
+    } catch (err) {
+      process.stderr.write(
+        `[kisearch] 改名后同步 Token ${token.id} 的视图授权失败（需手动处理）：${(err as Error).message}\n`,
+      );
+    }
+  }
+}
+
+/**
+ * 按稳定 ID 反查视图名。
+ *
+ * token 的 `viewGrants` 存的是 **ID**（D7），判定可见性 / 分类展示时要换回名字。
+ * 视图量级是「几十」以内，线性扫足够；不建索引以免索引与文件不同步。
+ */
+export function findViewNameById(config: KiConfig, id: string): string | null {
+  if (!id) return null;
+  for (const [name, cfg] of Object.entries(readViews(config))) {
+    if (cfg.id === id) return name;
+  }
+  return null;
+}
+
+/** 取某视图的稳定 ID（不存在 → null） */
+export function getViewId(config: KiConfig, name: string): string | null {
+  return readViews(config)[name]?.id ?? null;
+}
+
+/**
+ * 造一个「视图 ID → 当前名字」的解析器，供 `findTokenAuth(..., resolveViewName)` 注入。
+ *
+ * 语义：
+ *   - 传入的是**已存在的视图 ID** → 返回它当前的名字（改名后自动跟随，D7 的核心）
+ *   - 传入的是**名字**且该视图存在 → 原样返回（兼容 003 阶段按名字写入的存量授权）
+ *   - 都匹配不上（指向已删视图 / 垃圾值）→ `null`，调用方会退回原值
+ *
+ * 快照语义：内部一次性读取 views，一次请求内不会因为文件变化而中途改变结果。
+ */
+export function makeViewNameResolver(config: KiConfig): (idOrName: string) => string | null {
+  const views = readViews(config);
+  const nameById = new Map(Object.entries(views).map(([name, def]) => [def.id, name]));
+  return (idOrName) => {
+    const byId = nameById.get(idOrName);
+    if (byId) return byId;
+    return Object.prototype.hasOwnProperty.call(views, idOrName) ? idOrName : null;
+  };
 }
 
 // ─── 校验 ────────────────────────────────────────────────
@@ -360,6 +620,35 @@ function takenScopeNames(config: KiConfig): Set<string> {
   return names;
 }
 
+/** 视图名长度上限（按 Unicode 码点计，一个汉字算 1） */
+const VIEW_NAME_MAX_LENGTH = 40;
+
+/**
+ * 视图名字符集校验（D5 / §1.4）：**支持中文**。
+ *
+ * 关键约束不在"能不能存"，而在这个名字会被当成 `--scope` 的值传出去：
+ *   - 半角逗号是 `--scope a,b` 的分隔符 → 必禁；全角逗号一并禁（避免"看起来像分隔符"）
+ *   - 空白 / `/` / `\` / `..` 是 shell 与路径语义 → 必禁
+ * scope 名本身的规则**没变**（仍 `^[a-zA-Z0-9_-]+$`，见 `scope.ts::validateScope`），
+ * 所以"含非 ASCII 的名字一定是视图名"，不需要额外标记位。
+ */
+export function viewNameCharsetError(name: string): string | null {
+  const length = [...name].length;
+  if (length > VIEW_NAME_MAX_LENGTH) {
+    return `视图名最多 ${VIEW_NAME_MAX_LENGTH} 个字符（当前 ${length} 个）`;
+  }
+  if (/[\s,，/\\]/.test(name)) {
+    // 保留「指出具体非法字符」的能力：只说"不合法"用户还得自己找
+    const illegal = Array.from(new Set(name.split('').filter((c) => /[\s,，/\\]/.test(c))));
+    return '视图名不能包含空格、半角/全角逗号、斜杠（半角逗号是 --scope 的分隔符）'
+      + `\n  非法字符：${illegal.map((c) => JSON.stringify(c)).join(', ')}`;
+  }
+  if (name.includes('..')) return '视图名不能包含「..」';
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(name)) return '视图名不能包含控制字符';
+  return null;
+}
+
 /**
  * 视图名合法性：字符集 → 保留名 → 与已有 scope 撞名。
  * @throws ViewError
@@ -368,14 +657,9 @@ export function validateViewName(config: KiConfig, name: string): void {
   if (!name || typeof name !== 'string') {
     throw new ViewError('INVALID_VIEW_NAME', '视图名不能为空');
   }
-  if (!VIEW_NAME_PATTERN.test(name)) {
-    const illegal = Array.from(new Set(name.split('').filter((c) => !/[a-zA-Z0-9_-]/.test(c))));
-    throw new ViewError(
-      'INVALID_VIEW_NAME',
-      `视图名 "${name}" 不合法：仅允许字母、数字、连字符(-)、下划线(_)`
-        + (illegal.length > 0 ? `\n  非法字符：${illegal.map((c) => JSON.stringify(c)).join(', ')}` : ''),
-      name,
-    );
+  const charsetError = viewNameCharsetError(name);
+  if (charsetError) {
+    throw new ViewError('INVALID_VIEW_NAME', charsetError, name);
   }
   if (RESERVED_VIEW_NAMES.has(name)) {
     throw new ViewError(
@@ -479,10 +763,39 @@ export function getViewMembers(config: KiConfig, name: string): string[] {
 // ─── 展开（唯一入口） ────────────────────────────────────
 
 /**
+ * 把 `--scope` 原始值拆成段，并**只对不是视图名的段**做 scope 校验。
+ *
+ * ★ 为什么不直接复用 `parseScopes`：它对**每一段**都调 `validateScope`（ASCII-only），
+ *   而视图名允许中文（D5 / §1.4）—— 直接复用会让 `--scope 团队研发` 在"是否视图"
+ *   判断之前就被判成非法 scope，中文视图永远不可用。
+ * ★ 安全不变量必须保住：**非视图段**照样逐个 `validateScope`，
+ *   `--scope ../etc`、`--scope a/b` 依旧在解析层被拒。
+ */
+function splitTargetSegments(config: KiConfig, raw?: string): string[] {
+  if (raw === undefined || raw === null) return [];
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (raw.trim().length > 0 && parts.length === 0) {
+    throw new ScopeError('EMPTY_SCOPE', `scope "${raw}" 解析为空：逗号分隔列表无有效段`);
+  }
+  const viewsMap = readViews(config);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of parts) {
+    if (!Object.prototype.hasOwnProperty.call(viewsMap, part)) validateScope(part);
+    if (!seen.has(part)) {
+      seen.add(part);
+      out.push(part);
+    }
+  }
+  return out;
+}
+
+/**
  * 把 `--scope` 的原始值展开为真实 scope 列表。
  *
- * ★ 安全：全程复用 `parseScopes`（`src/lib/scope.ts`），它对**每个原始段**调
- *   `validateScope` —— `--scope ../etc` 在这里被拒。不要为省一次调用而内联拆分。
+ * ★ 安全：**非视图段**逐个走 `validateScope`（见 {@link splitTargetSegments}）——
+ *   `--scope ../etc` 在这里被拒。视图名豁免字符集校验（D5 允许中文），
+ *   但豁免的前提是它确实是已注册视图。
  *
  * 行为（设计 S-01 §3.3，与 S-02 D5 协调后：成员缺失不在本层判断）：
  *   - 空 / 未传      → `[resolveScope(config, undefined)]`（default 模式为 `default`）
@@ -495,7 +808,7 @@ export function resolveScopeTargets(config: KiConfig, raw?: string): ScopeTarget
   const scopes: string[] = [];
   const skipped: { scope: string; reason: string }[] = [];
 
-  const parsed = parseScopes(raw);
+  const parsed = splitTargetSegments(config, raw);
   const multi = parsed.length > 1;
 
   if (!multi) {

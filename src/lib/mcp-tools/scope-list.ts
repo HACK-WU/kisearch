@@ -25,19 +25,22 @@ export function registerScopeListTool(server: McpServer, authScopes: string[] | 
           ? result.scopes
           : result.scopes.filter((s) => isScopeAuthorized(authScopes, s.scope));
         /**
-         * 视图按「视图本身的授权」过滤，不做成员级过滤。
+         * 视图可见性（REQ-20261104-004 D3 / R-02）：**授权视图 ∧ 授权全部成员**，
+         * 缺任一则整个视图不出现（全有或全无，**不做部分可见**）。
          *
-         * 为什么不滤成员：授权视图即授权其成员内容（S-04 D3）；隐藏库名会让前端的
-         * 「来源库标记」无法解释，也会让浏览页拿不到成员的只读态（memberMeta）。
+         * 为什么必须是"与"而不是"或"：只判视图名授权时，给一个视图授权就等于给了它
+         * 全部成员的内容 —— 视图会变成越权通道。收紧之后视图才退化为纯便利层。
          *
-         * ⚠️ REQ-20261104-004 将收紧为「授权视图 ∧ 授权全部成员」才可见（全有或全无），
-         * 届时只改这一处过滤条件。
+         * 注意：**成员列表本身仍不过滤**（看得到视图 = 看得到它的全部成员名）。
+         * 隐藏库名会让前端的「来源库标记」无法解释，也会让浏览页拿不到成员的只读态。
          */
         const visibleViews = result.views === undefined
           ? undefined
           : authScopes === null
             ? result.views
-            : result.views.filter((v) => isScopeAuthorized(authScopes, v.view));
+            : result.views.filter((v) =>
+              isScopeAuthorized(authScopes, v.view)
+              && v.members.every((m) => isScopeAuthorized(authScopes, m)));
         const payload = authScopes === null
           ? result
           : {

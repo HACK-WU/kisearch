@@ -69,7 +69,8 @@ describe('createToken：readOnly 落盘与向后兼容', () => {
     const r = createToken(['team-a'], tokensPath, true);
     assert.equal(r.readOnly, true);
     const auth = findTokenAuth(r.token, tokensPath);
-    assert.deepEqual(auth, { id: r.id, scopes: ['team-a'], readOnly: true });
+    // 003 起 TokenAuth 多了 viewGrants（视图授权与库授权分存），这里必须一并列出
+    assert.deepEqual(auth, { id: r.id, scopes: ['team-a'], viewGrants: [], readOnly: true });
   });
 
   it('缺省（不传）为读写，且**不写** readOnly 字段（保持旧文件格式）', () => {
@@ -88,7 +89,7 @@ describe('createToken：readOnly 落盘与向后兼容', () => {
       createdAt: new Date().toISOString(),
     }]), 'utf-8');
     const auth = findTokenAuth('legacy-token', tokensPath);
-    assert.deepEqual(auth, { id: 'legacy01', scopes: [ALL_SCOPES], readOnly: false });
+    assert.deepEqual(auth, { id: 'legacy01', scopes: [ALL_SCOPES], viewGrants: [], readOnly: false });
     assert.equal(isReadOnlyFieldInvalid({ id: 'x', token: 'y', scopes: [], createdAt: '' }), false);
   });
 

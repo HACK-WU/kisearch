@@ -91,6 +91,15 @@ const RULES: Rule[] = [
   exact('POST', '/datasource/prune', 'permission', 'datasource.delete'),
   exact('POST', '/import/prune', 'permission', 'datasource.delete'),
 
+  // ── 知识视图（REQ-20261104-004 / D2、D6）──
+  // 读：所有登录角色（团队共享，D1）；写：所有登录角色，**创建者过滤在 handler 里做**。
+  // ⚠ 写不能用 knowledge.write：viewer 也要能建自己的视图（D6）。
+  exact('GET', '/views', 'permission', 'views.read'),
+  exact('GET', '/views/impact', 'permission', 'views.read'),
+  exact('POST', '/views', 'permission', 'views.write'),
+  pattern('PATCH', /^\/views\/[^/]+$/, 'permission', 'views.write'),
+  pattern('DELETE', /^\/views\/[^/]+$/, 'permission', 'views.write'),
+
   // ── 运维 / 任务取消 ──
   exact('POST', '/restore/run', 'permission', 'ops.write'),
   exact('GET', '/restore/status', 'permission', 'tasks.read'),

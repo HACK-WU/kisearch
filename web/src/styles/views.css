@@ -1,0 +1,700 @@
+/**
+ * views.css —— 知识视图页（REQ-20261104-004）
+ *
+ * 只依赖 ki.css 的令牌（--ki-*），不依赖其组件类，避免与全局样式互相覆盖。
+ * 宽度约束：名称输入框与成员选择同宽（340px），窄屏撑满。
+ */
+
+/*
+ * ★ 不要设 `max-width` + `margin: 0 auto`：
+ *   项目其它页（总览 / 后台任务 / 数据源）都是**撑满主区**的，只有本页收在 1120px 居中，
+ *   宽屏下左右各空一大片，跟导航切换过去像两个产品（用户 2026-11-05 截图对比指出）。
+ *
+ * ★ `width: 100%` 不能省：AppShell 主区是 flex 容器，flex item 默认按内容收缩。
+ */
+.views-page {
+  width: 100%;
+  padding-bottom: 40px;
+}
+
+.views-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.views-head__sub {
+  margin: 0;
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+}
+
+.views-head .views-btn {
+  margin-left: auto;
+}
+
+.views-card {
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  overflow: hidden;
+}
+
+.views-card + .views-card,
+.views-form + .views-card,
+.views-card + .views-form {
+  margin-top: 12px;
+}
+
+/* ── 列表行 ── */
+.views-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px 18px;
+  padding: 15px 20px;
+  border-top: 1px solid var(--ki-color-border);
+}
+
+.views-row:first-child {
+  border-top: 0;
+}
+
+.views-row:hover {
+  background: var(--ki-color-surface-muted);
+}
+
+.views-row__main {
+  min-width: 0;
+}
+
+.views-row__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ★ 图标用 `.ki-icon`（描边由 ki.css 提供 fill:none/stroke:currentColor），
+ *   只在这里调尺寸与颜色 —— 传自定义 className 覆盖掉 ki-icon 会变成实心黑块。 */
+.views-row__title .ki-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--ki-color-primary);
+  flex: none;
+}
+
+.views-row__name {
+  font-size: var(--ki-font-size-sm);
+  font-weight: 650;
+}
+
+.views-row__meta {
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-xs);
+}
+
+/* 行内按钮对齐 demo 的 `pv-btn--sm`（24px），比表单按钮小一档 */
+.views-row__side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.views-row__side .views-btn {
+  height: 24px;
+  padding: 0 8px;
+}
+
+/* 行内常驻影响面摘要（demo §4.4） */
+.views-row__warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-warning);
+  line-height: 1.5;
+}
+
+.views-row__warn--ok {
+  color: var(--ki-color-text-subtle);
+}
+
+.views-badge {
+  padding: 3px 6px;
+  border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-muted);
+  font: 600 var(--ki-font-size-xs) / 1 var(--ki-font-mono);
+}
+
+.views-badge--mine {
+  background: var(--ki-color-primary-soft);
+  color: var(--ki-color-primary);
+  font-family: inherit;
+}
+
+/* ── 成员 chips ── */
+.views-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  min-height: 21px;
+}
+
+.views-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 21px;
+  padding: 0 7px;
+  border-radius: var(--ki-radius-tag);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-muted);
+  font: 500 var(--ki-font-size-xs) / 1 var(--ki-font-mono);
+  white-space: nowrap;
+}
+
+.views-chip--ro {
+  border-color: var(--ki-color-warning);
+  background: var(--ki-color-warning-soft);
+  color: var(--ki-color-warning);
+}
+
+.views-chip--missing {
+  border-color: var(--ki-color-danger);
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
+}
+
+/*
+ * 定时上次失败：**警示色虚线边框**（不填底色）。
+ *   · 不填底色：填充是「缺失」（红底）与「空」（蓝底）的表达方式，填了会与它们抢语义
+ *   · 用虚线：一眼区分「这条链路有问题」与「这个库有问题」
+ * 只在 chip 没有状态色（非缺失/空/只读）时附加，避免覆盖主状态。
+ */
+.views-chip--sched-failed {
+  border-style: dashed;
+  border-color: var(--ki-color-warning);
+  color: var(--ki-color-warning);
+}
+
+/*
+ * 空库 = 库在、0 篇文档。用**信息蓝**（不是警示色，也不是透明）：
+ *   · 透明/虚线在白色卡片上几乎看不见（用户 2026-11-05：「你这空用白色，太不明显了吧」）
+ *   · 也不能用红/黄：那是"缺失"和"只读"的语义
+ * 蓝底 + 蓝字，与普通库（灰）、只读（黄）、缺失（红）三向可分。
+ */
+.views-chip--empty {
+  border-color: color-mix(in srgb, var(--ki-color-info) 45%, var(--ki-color-border));
+  background: color-mix(in srgb, var(--ki-color-info) 14%, var(--ki-color-surface));
+  color: var(--ki-color-info);
+}
+
+.views-chip--pick {
+  cursor: pointer;
+  background: var(--ki-color-surface);
+  border-color: var(--ki-color-border-strong);
+  color: var(--ki-color-text);
+}
+
+.views-chip--pick:hover {
+  border-color: var(--ki-color-danger);
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
+}
+
+.views-chip__x {
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+/* ── 表单 ── */
+/*
+ * 表单卡片保持**接近白色**的浅底。
+ * 不能直接用 `--ki-color-surface-muted`：那是半透明黑，铺在页面底色 `--ki-color-bg`
+ * 上会变成明显的灰块；demo 里它叠在白色卡片内，所以看起来只是"很浅的灰"。
+ */
+.views-form {
+  padding: 18px 20px;
+  background: var(--ki-color-bg-secondary);
+  margin-bottom: 12px;
+}
+
+/* 表单头：标题 + 右侧副标题（demo §4.2 同款） */
+.views-form__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.views-form__title {
+  font-size: var(--ki-font-size-sm);
+  font-weight: 650;
+}
+
+.views-form__sub {
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+
+.views-form__row {
+  margin-bottom: 16px;
+}
+
+.views-label {
+  display: block;
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.views-label__sub {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--ki-color-text-subtle);
+}
+
+.views-input {
+  width: 100%;
+  max-width: 340px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+}
+
+.views-input:focus {
+  outline: 2px solid var(--ki-color-focus);
+  outline-offset: -1px;
+  border-color: var(--ki-color-primary);
+}
+
+.views-hint {
+  margin: 5px 0 0;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  line-height: 1.5;
+}
+
+.views-impact {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-warning);
+  background: var(--ki-color-warning-soft);
+}
+
+.views-impact__head {
+  font-size: var(--ki-font-size-xs);
+  font-weight: 650;
+  color: var(--ki-color-warning);
+  margin-bottom: 6px;
+}
+
+.views-impact__list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-muted);
+  line-height: 1.7;
+}
+
+.views-mono {
+  font-family: var(--ki-font-mono);
+  color: var(--ki-color-text-subtle);
+}
+
+/* ── 成员可搜索下拉（对齐 demo §4.3） ── */
+.views-picker {
+  position: relative;
+}
+
+.views-picker__selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 7px;
+  min-height: 21px;
+}
+
+.views-picker__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.views-picker__field .ki-icon {
+  position: absolute;
+  left: 10px;
+  width: 13px;
+  height: 13px;
+  color: var(--ki-color-text-subtle);
+  pointer-events: none;
+}
+
+.views-picker__input {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 28px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+}
+
+.views-picker__input:focus {
+  outline: 2px solid var(--ki-color-focus);
+  outline-offset: -1px;
+  border-color: var(--ki-color-primary);
+}
+
+.views-picker__input::placeholder {
+  color: var(--ki-color-text-subtle);
+}
+
+.views-picker__toggle {
+  position: absolute;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.views-picker__toggle:hover {
+  background: var(--ki-color-hover);
+  color: var(--ki-color-text);
+}
+
+/*
+ * 候选面板走**常规流**而非绝对定位浮层：它是表单最后一项，浮层会盖住
+ * 「影响面提示」与「保存」按钮，而影响面正是选成员时要一直盯着的。
+ */
+/*
+ * 面板 = 固定页脚 + 可滚动候选区，两层分开。
+ * ★ 不要再用「滚动区里的 sticky 提示行」：sticky 贴的是滚动容器的 padding edge，
+ *   容器若带 padding，滚动内容会从 padding 里透出来（提示行下方漏半行字）。
+ */
+.views-picker__panel {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  max-height: 200px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-1);
+  overflow: hidden; /* 圆角裁剪，同时保证内容不越出面板 */
+}
+
+.views-picker__scroll {
+  flex: 1 1 auto;
+  min-height: 0; /* flex 子项要能收缩，否则 overflow 不生效 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0; /* 行距靠 padding 撑，不额外留缝：gap 会让整列显得松散 */
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+/*
+ * 每项 27px（5px 上下 + 17px 行高）。
+ * ★ 别再往上加 padding：项高 32px 时文字上下各留 7px 空白，整列看起来"一条一条隔很远"；
+ *   列表项之间靠 padding 分隔就够了，不需要额外 gap。
+ */
+.views-picker__opt {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ki-color-text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.4;
+  min-height: 27px;
+}
+
+.views-picker__opt:hover {
+  background: var(--ki-color-hover);
+}
+
+.views-picker__opt--active {
+  background: var(--ki-color-primary-soft);
+  box-shadow: inset 2px 0 0 var(--ki-color-primary);
+}
+
+.views-picker__opt--active .views-picker__opt-name {
+  color: var(--ki-color-primary);
+}
+
+.views-picker__opt-name {
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+}
+
+.views-picker__opt-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.views-picker__note {
+  padding: 9px 10px;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+
+/* 快捷键提示是面板的固定页脚：参与 flex 布局、不参与滚动，永远贴着底边 */
+.views-picker__hint {
+  flex: none;
+  margin: 0;
+  padding: 7px 10px;
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ki-color-text-subtle);
+  white-space: nowrap;
+}
+
+.views-tag {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-subtle);
+}
+
+.views-tag--ro {
+  background: var(--ki-color-warning-soft);
+  color: var(--ki-color-warning);
+}
+
+/* 表单底部：左侧统计 + 右侧按钮 */
+.views-form__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ki-color-border);
+}
+
+.views-form__note {
+  margin-right: auto;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+
+/* ── 按钮 ── */
+.views-btn {
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.views-btn:hover:not(:disabled) {
+  background: var(--ki-color-hover);
+  color: var(--ki-color-text);
+}
+
+.views-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.views-btn--primary {
+  height: 32px;
+  padding: 0 12px;
+  background: var(--ki-color-primary);
+  border-color: var(--ki-color-primary);
+  color: #fff;
+  font-size: var(--ki-font-size-sm);
+}
+
+.views-btn--primary:hover:not(:disabled) {
+  background: var(--ki-color-primary-hover);
+  color: #fff;
+}
+
+.views-btn--danger {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+}
+
+.views-btn--danger:hover:not(:disabled) {
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
+}
+
+.views-btn--danger-solid {
+  background: var(--ki-color-danger);
+  border-color: var(--ki-color-danger);
+}
+
+.views-btn--danger-solid:hover:not(:disabled) {
+  background: var(--ki-color-danger);
+  filter: brightness(0.94);
+}
+
+/* ── 空态 ── */
+.views-empty {
+  min-height: 260px;
+  padding: 48px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.views-empty .ki-icon {
+  width: 40px;
+  height: 40px;
+  color: var(--ki-color-text-subtle);
+  opacity: 0.55;
+  margin-bottom: 14px;
+}
+
+.views-empty__title {
+  font-size: var(--ki-font-size-lg);
+  font-weight: 650;
+  margin-bottom: 8px;
+}
+
+.views-empty__desc {
+  margin: 0;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  line-height: 1.7;
+}
+
+.views-empty .views-btn--primary {
+  margin-top: 18px;
+}
+
+.views-empty__note {
+  margin: 16px 0 0;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  opacity: 0.85;
+}
+
+/* ── 删除确认：遮罩不关闭（对齐 2026-11-04 既有口径） ── */
+.views-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--ki-scrim);
+}
+
+.views-modal {
+  width: 100%;
+  max-width: 440px;
+  padding: 20px;
+  border-radius: var(--ki-radius-lg);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-2);
+}
+
+.views-modal__title {
+  font-size: var(--ki-font-size-md);
+  font-weight: 650;
+  margin-bottom: 8px;
+}
+
+.views-modal__body {
+  margin: 0;
+  font-size: var(--ki-font-size-sm);
+  color: var(--ki-color-text-muted);
+  line-height: 1.65;
+}
+
+.views-modal__body b {
+  color: var(--ki-color-text);
+}
+
+.views-modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* ── Toast ── */
+.views-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 80;
+  padding: 9px 13px;
+  border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-success);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-1);
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text);
+}
+
+.views-toast--err {
+  border-color: var(--ki-color-danger);
+}
+
+@media (max-width: 680px) {
+  .views-row {
+    grid-template-columns: 1fr;
+  }
+
+  .views-row__side {
+    justify-content: flex-end;
+  }
+
+  .views-input {
+    max-width: none;
+  }
+}

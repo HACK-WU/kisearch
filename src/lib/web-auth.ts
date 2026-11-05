@@ -15,6 +15,8 @@ import * as crypto from 'node:crypto';
 import * as net from 'node:net';
 import { isLoopbackAddr } from './net-addr.js';
 import { ALL_SCOPES, findTokenAuth, type TokenAuth } from './mcp-token.js';
+import { loadConfig } from './config.js';
+import { makeViewNameResolver } from './scope-view.js';
 import { findUserById, isUserActive, type Role, type UserRecord } from './user-store.js';
 import type { TaskOperator } from './task-registry.js';
 import {
@@ -182,7 +184,8 @@ export function resolveWebPrincipal(
     }
     const resolved = ctx.resolveTokenAuth
       ? ctx.resolveTokenAuth(bearer)
-      : findTokenAuth(bearer, undefined, ctx.usersPath);
+      // 第 4 参注入「视图 ID → 当前名字」（D7），否则 viewGrants 里的 ID 匹配不上任何 scope
+      : findTokenAuth(bearer, undefined, ctx.usersPath, makeViewNameResolver(loadConfig()));
     if (resolved) return { principal: tokenAuthToPrincipal(resolved) };
     if (ctx.resolveTokenScopes) {
       const scopes = ctx.resolveTokenScopes(bearer);

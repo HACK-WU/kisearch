@@ -75,6 +75,8 @@ import {
   type Capability,
 } from './auth/capabilities.js';
 import { matchRoute } from './auth/route-permissions.js';
+import { handleViewsApi } from './views-api.js';
+import { readJsonBody as readApiJsonBody } from './http-body.js';
 import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 import {
@@ -411,33 +413,12 @@ function rejectIfScopeReadonly(res: http.ServerResponse, scope: string, action: 
   }
 }
 
-/** 读取 JSON 请求体（复用 mcp-http readJsonBody 逻辑） */
-function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on('data', (c: Buffer) => {
-      size += c.length;
-      if (size > MAX_BODY) {
-        reject(new Error('request body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      const text = Buffer.concat(chunks).toString('utf-8').trim();
-      if (!text) return resolve(undefined);
-      try {
-        resolve(JSON.parse(text));
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-    req.on('error', reject);
-    req.on('aborted', () => reject(new Error('request aborted')));
-  });
-}
+/*
+ * 读取 JSON 请求体：实现在 `http-body.ts`。
+ * 抽出去是为了让 `views-api` 不必反向 import 本文件（会与分发器构成循环依赖），
+ * 同时保证限长只在一处定义。
+ */
+const readJsonBody = (req: http.IncomingMessage): Promise<unknown> => readApiJsonBody(req, MAX_BODY);
 
 /** 判断 scope 是否在授权集合内（'all' 通配全部） */
 function scopeAllowed(scopes: string[], scope: string): boolean {
@@ -1028,6 +1009,14 @@ export async function handleApiRequest(
   }
 
   try {
+    // ── 知识视图（REQ-20261104-004）：canEdit 在服务端算，见 views-api.ts ──
+    if (p === '/views' || p.startsWith('/views/')) {
+      await handleViewsApi(req, res, url, p, principal, requestConfig, {
+        ...(ctx.usersPath ? { usersPath: ctx.usersPath } : {}),
+      });
+      return;
+    }
+
     // ── 自己的 MCP Token（REQ-20261104-001；所有登录角色可用）──
     if (p === '/me/tokens' || p.startsWith('/me/tokens/')) {
       const owner = selfTokenOwner(principal, ctx.usersPath);

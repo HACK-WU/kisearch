@@ -73,6 +73,8 @@ const NAV_MAIN = [
   { to: '/write', label: '知识写入', icon: 'edit' },
   { to: '/datasource', label: '数据源', icon: 'database' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
+  // 知识视图（REQ-20261104-004）：多库聚合视图的团队共享管理页
+  { to: '/views', label: '知识视图', icon: 'layers' },
   // 资源（MCP 接入 / Agent Skill 安装）
   { to: '/resources', label: '资源', icon: 'compass' },
 ];
