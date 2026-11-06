@@ -21,6 +21,16 @@ import { dedupeSearchHistory, removeSearchHistoryEntry, upsertSearchHistory } fr
 import { cleanSearchUrl } from '@/lib/searchUrlCleanup';
 import { readDocHighlight, writeDocHighlight } from '@/lib/searchPrefs';
 import { decideDocHighlight } from '@/lib/searchHighlight';
+import {
+  isSearchLimitOutOfRange,
+  normalizeSearchLimit,
+  parseSearchLimit,
+  stepSearchLimit,
+  SEARCH_LIMIT_DEFAULT,
+  SEARCH_LIMIT_MAX,
+  SEARCH_LIMIT_MIN,
+  SEARCH_LIMIT_STEP,
+} from '@/lib/searchLimit';
 
 /** Threshold 滑块上限：实际检索分数量级 ~0.0x，max=1 无意义 */
 const THRESHOLD_MAX = 0.2;
@@ -44,6 +54,14 @@ interface Result {
   group?: string;
   relation?: string;
   score?: number;
+  /** 字面分（BM25 原值）；仅多库检索携带 */
+  ftsScore?: number;
+  /** 向量路绝对相似度（0.33~1）；仅多库检索携带 */
+  vectorScore?: number;
+  /** 名次分（两路 Σ1/(60+rank)）；仅多库检索携带 */
+  rrfScore?: number;
+  /** 定标加权分（不含语义补充）；仅多库检索携带 */
+  baseScore?: number;
   original?: string;
   /** true 时 original 为完整 local KB 原文；false 时 original 仅是命中 chunk 回退。 */
   originalRetrieved?: boolean;
@@ -139,7 +157,22 @@ export function SearchPage(): JSX.Element {
   const [queryTimeout, setQueryTimeout] = useState<string | undefined>();
   const [queryTimeoutStatus, setQueryTimeoutStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const queryTimeoutTouched = useRef(false);
-  const [limit, setLimit] = useState('10');
+  /** 返回条数输入框的原始字符串：允许录入中间态（空 / 超范围），只在失焦与检索时归一化。 */
+  const [limit, setLimit] = useState(String(SEARCH_LIMIT_DEFAULT));
+  /** 越界时标红：失焦会把 5000 改写成 1000，不给可见信号就成了静默改写（空串不算越界）。 */
+  const limitOutOfRange = isSearchLimitOutOfRange(limit);
+  /**
+   * TEMP(算法对比)：多库排序算法选择器。
+   *
+   * - `weighted`：两路归一加权（字面 6 成 / 名次 4 成 + 缺失项 25 分位补偿）= 默认
+   * - `dynamic-ratio`：`rrf + 1e-5 × bm25/rrf`（实验算法，`rrf=0` 时用最小名次分兜底）
+   *
+   * 仅多库（视图 / `--scope a,b`）生效；单库与全文模式忽略该值。
+   * 对比完成后应连同后端 `MultiRankingAlgorithm` 的该分支一起移除。
+   */
+  const [ranking, setRanking] = useState<'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive'>('weighted');
+  /** 语义补充系数（仅「定标加权·语义补充」生效）：最终分 = 定标加权 + 系数 × 语义分 */
+  const [semanticBonus, setSemanticBonus] = useState('0.1');
   const [fullTextOnly, setFullTextOnly] = useState(false);
   /**
    * 向量能力可用性（windows 4e9d624 的能力，合并 66c3c19 时随 hooks.ts 丢失，2026-10-29 接回）：
@@ -355,7 +388,7 @@ export function SearchPage(): JSX.Element {
     const searchScope = scope;
     const historyTags = replay?.selectedTags ?? selectedTags;
     const searchThreshold = replay?.threshold ?? threshold;
-    const searchLimit = replay?.limit ?? (Number(limit) || 10);
+    const searchLimit = replay?.limit ?? parseSearchLimit(limit);
     // 未手动调整时不发送覆盖值，让服务端每次使用最新配置；手动调整后才发送请求级 timeout。
     const timeout = replay
       ? replay.timeout
@@ -384,6 +417,8 @@ export function SearchPage(): JSX.Element {
       const res = await kiSearch(searchQuery, {
         scope: searchScope,
         tags: searchTags,
+        ranking,
+        semanticBonus: ranking === 'calibrated-semantic' ? Number(semanticBonus) : undefined,
         threshold: searchMode === 'fulltext' ? undefined : searchThreshold || undefined,
         limit: searchLimit,
         mode: searchMode,
@@ -439,12 +474,15 @@ export function SearchPage(): JSX.Element {
     setQuery(entry.query);
     setSelectedTags([...entry.selectedTags]);
     setThreshold(entry.threshold);
-    setLimit(String(entry.limit));
+    // 历史条目来自 localStorage，可能被手改过（校验只要求正整数）：
+    // 重放前先归一，避免输入框显示 5000 而实际只返回 1000 的错位
+    const replayLimit = normalizeSearchLimit(entry.limit);
+    setLimit(String(replayLimit));
     setFullTextOnly(entry.mode === 'fulltext');
     setQueryTimeout(entry.timeout === undefined ? undefined : String(entry.timeout));
     queryTimeoutTouched.current = entry.timeout !== undefined;
     setQueryTimeoutStatus('ready');
-    void run(undefined, entry);
+    void run(undefined, replayLimit === entry.limit ? entry : { ...entry, limit: replayLimit });
   };
 
   // ★ 「带 `q` 进来自动重跑一次」的 URL 恢复逻辑已于 2026-10-14 删除（用户裁决：检索态不进 URL、
@@ -607,14 +645,83 @@ export function SearchPage(): JSX.Element {
             />
             <span className="ki-form-suffix">s</span>
           </div>
+          {/* Limit：数字输入 + −/+ 步进（原为 5/10/20 固定下拉，用户填不了其它条数）。
+              ★ 编辑期不做 clamp：先删光再输 12 时，逐字符 clamp 会把人卡在 1 上；
+              归一化只在 onBlur 与发起检索（parseSearchLimit）两处发生。
+              ★ 越界值失焦即回写成边界值，用户能看见被收窄，不会以为「填了 5000 只回 1000」。 */}
           <div className="ki-query-option">
             <span className="ki-form-label">Limit</span>
-            <select className="ki-form-select" style={{ width: 'auto', minWidth: 72 }} value={limit} onChange={(e) => setLimit(e.target.value)}>
-              <option value="5">5</option>
-              <option value="10">10</option>
-              <option value="20">20</option>
+            <button
+              type="button"
+              className="ki-step-btn"
+              aria-label="减少返回条数"
+              disabled={parseSearchLimit(limit) <= SEARCH_LIMIT_MIN}
+              onClick={() => setLimit(String(stepSearchLimit(limit, -1)))}
+            >−</button>
+            <input
+              className={`ki-form-input${limitOutOfRange ? ' ki-form-input--error' : ''}`}
+              type="number"
+              inputMode="numeric"
+              min={SEARCH_LIMIT_MIN}
+              max={SEARCH_LIMIT_MAX}
+              step={SEARCH_LIMIT_STEP}
+              value={limit}
+              onChange={(e) => setLimit(e.target.value)}
+              onBlur={() => setLimit(String(parseSearchLimit(limit)))}
+              onKeyDown={(e) => {
+                // 回车本来就在表单内触发检索；这里只把越界/空值先归位，免得提交值与应用值不一致
+                if (e.key === 'Enter') setLimit(String(parseSearchLimit(limit)));
+              }}
+              aria-label={`返回条数（${SEARCH_LIMIT_MIN}–${SEARCH_LIMIT_MAX}）`}
+              aria-invalid={limitOutOfRange || undefined}
+              title={limitOutOfRange
+                ? `超出范围：仅 ${SEARCH_LIMIT_MIN}–${SEARCH_LIMIT_MAX}，离开输入框后按边界值处理`
+                : `返回条数：${SEARCH_LIMIT_MIN}–${SEARCH_LIMIT_MAX}，留空按 ${SEARCH_LIMIT_DEFAULT} 条。上限来自引擎单次检索上限 ${SEARCH_LIMIT_MAX}；全文与多库模式会先放大候选再截断，实际条数可能少于所填值（结果区会提示）`}
+              style={{ width: 76 }}
+            />
+            <button
+              type="button"
+              className="ki-step-btn"
+              aria-label="增加返回条数"
+              disabled={parseSearchLimit(limit) >= SEARCH_LIMIT_MAX}
+              onClick={() => setLimit(String(stepSearchLimit(limit, 1)))}
+            >+</button>
+          </div>
+          {/* TEMP(算法对比)：多库排序算法选择器 —— 仅视图 / 多库检索生效，单库与全文模式忽略该值。
+              对比完成后连同后端 MultiRankingAlgorithm 的 dynamic-ratio 分支一起移除。 */}
+          <div className="ki-query-option">
+            <span className="ki-form-label">排序算法</span>
+            <select
+              className="ki-form-select"
+              style={{ width: 'auto', minWidth: 108 }}
+              value={ranking}
+              onChange={(e) => setRanking(e.target.value as 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive')}
+              title={'仅多库（视图）检索生效，单库与全文模式忽略。\n定标加权：字面分固定除以 1000，名次分带 0.5 权重（不依赖候选池最大值）\n定标加权·自适应：在定标加权基础上，按候选池内的字面分相对位置微调（±10%）\n加权融合：两路按候选池最大值归一后加权（对照方案）'}
+            >
+              <option value="weighted">加权融合</option>
+              <option value="dynamic-ratio">定标加权</option>
+              <option value="semantic-first">语义优先（实验）</option>
+              <option value="calibrated-semantic">定标加权·语义补充（实验）</option>
+              <option value="calibrated-adaptive">定标加权·自适应（实验）</option>
             </select>
           </div>
+          {/* 语义权重：仅「定标加权·语义补充」生效 —— 最终分 = 定标加权 + 权重 × 语义分 */}
+          {ranking === 'calibrated-semantic' && (
+            <div className="ki-query-option">
+              <span className="ki-form-label">语义权重</span>
+              <input
+                type="number"
+                className="ki-form-input"
+                style={{ width: 76 }}
+                min={0}
+                max={0.5}
+                step={0.01}
+                value={semanticBonus}
+                onChange={(e) => setSemanticBonus(e.target.value)}
+                title="最终分 = 定标加权 + 权重 × 语义分。0 = 不用语义；0.1 = 语义分贡献约等于定标项的 2.5 倍"
+              />
+            </div>
+          )}
           {/* 混合检索「文档内高亮」开关（R2/R7）：只影响点开文档后的正文高亮，不进检索请求。
               全文结果下无意义（恒高亮）→ 禁用灰掉，避免"点了没反应"（R4/Q5）。 */}
           <div className="ki-query-option">
@@ -861,10 +968,19 @@ export function SearchPage(): JSX.Element {
                         {r.memoryId ? `vector: ${r.memoryId.slice(0, 12)}…` : 'vector: -'}
                       </span>
                       <span className="ki-cell-sub">点击查看原文</span>
+                      {/* 分数构成：仅多库检索携带分路分；单库没有这些字段时不渲染 */}
+                      {(r.ftsScore !== undefined || r.vectorScore !== undefined || r.rrfScore !== undefined) && (
+                        <span className="ki-cell-sub ki-score-parts" title="字面分 = BM25 原值；语义 = 余弦相似度；名次 = 两路 Σ1/(60+rank)；定标 = 定标加权分（不含语义补充）">
+                          字面 {r.ftsScore !== undefined ? r.ftsScore.toFixed(2) : '—'}
+                          {' · '}语义 {r.vectorScore !== undefined ? r.vectorScore.toFixed(3) : '—'}
+                          {' · '}名次 {r.rrfScore !== undefined ? r.rrfScore.toFixed(4) : '—'}
+                          {r.baseScore !== undefined && <>{' · '}定标 {r.baseScore.toFixed(4)}</>}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="ki-qr-score">
-                    {(r.score ?? 0).toFixed(3)}
+                    {(r.score ?? 0).toFixed(5)}
                     {/* 降级时 score 是 BM25 原值（可达几十），不 clamp 会算出 7000%+ 宽度撑出卡片 */}
                     <div className="ki-score-bar-bg">
                       <div

@@ -102,6 +102,11 @@ export function routeSearch(req: AnySearchReq, ctx: RouterContext): RoutedSearch
           : undefined,
         outputFields: req.outputFields,
         includeVector: req.includeVector ?? false,
+        // 跨库合并需要分路原始分；单库请求不传，走原生 multiQuerySync（零变化）
+        withRouteScores: hybrid.withRouteScores ?? false,
+        ...(hybrid.ranking !== undefined ? { ranking: hybrid.ranking } : {}),
+        ...(hybrid.semanticBonus !== undefined ? { semanticBonus: hybrid.semanticBonus } : {}),
+        ...(hybrid.requireSemanticRecall !== undefined ? { requireSemanticRecall: hybrid.requireSemanticRecall } : {}),
       } as MultiQueryPayload,
       queryType: 'hybrid',
       needsEmbed: hasQueryText,

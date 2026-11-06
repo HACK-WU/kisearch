@@ -17,6 +17,8 @@ export function registerSearchTool(server: McpServer): void {
       timeout: z.number().positive().max(60).optional().describe('查询 embedding 超时（秒，最大 60；未传则使用配置值）'),
       include_original: z.boolean().optional().default(false).describe('是否返回 local KB 文件级完整原文（默认 false）；fulltext 模式即使关闭也会返回最多 3 个原文命中片段、行号区间、matchCount、matchCountComplete 和 totalLines。chunk fallback 无法可靠映射，或候选池饱和且仍可能有额外 fallback 区域时，matchCount 是已确认下界，matchCountComplete=false'),
       mode: z.enum(['hybrid', 'fulltext']).optional().default('hybrid').describe('检索模式：hybrid=语义+全文（默认，可能调用 embedding）；fulltext=仅全文，不调用 embedding'),
+      semantic_bonus: z.number().min(0).max(1).optional().describe('语义补充系数（仅 calibrated-semantic 生效，默认 0.1）。越大语义越主导'),
+      ranking: z.enum(['weighted', 'dynamic-ratio', 'semantic-first', 'calibrated-semantic', 'calibrated-adaptive']).optional().describe('多库（视图）排序算法，默认 weighted。dynamic-ratio 为临时对比用实验算法，验证后会移除'),
     },
     async (args) => {
       try {
@@ -30,6 +32,8 @@ export function registerSearchTool(server: McpServer): void {
             timeoutMs: args.timeout === undefined ? undefined : timeoutSecondsToMs(args.timeout),
             includeOriginal: args.include_original,
             mode: args.mode,
+            ranking: args.ranking,
+            semanticBonus: args.semantic_bonus,
           }),
           TOOL_TIMEOUT.WRITE,
           'ki_search'

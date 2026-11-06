@@ -2974,6 +2974,24 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 .ki-step-btn:hover:not(:disabled) { border-color: var(--ki-color-primary); color: var(--ki-color-primary); }
 .ki-step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .ki-threshold-val { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); min-width: 40px; text-align: center; }
+/* 检索参数区的数字输入（Timeout 秒数、Limit 条数）：隐藏浏览器原生 spin 按钮。
+   · 只在 hover / focus 时冒出来，会把 76px 宽框里的数字往左挤 —— 一悬停就跳一下；
+   · Limit 旁边已有 − / + 步进按钮，spinner 是重复控件（键盘 ↑↓ 仍然生效）。
+   作用域限定在 `.ki-query-option`：全站其它 number 输入（导入切分参数等）保持原样。 */
+.ki-query-option input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.ki-query-option input[type="number"]::-webkit-outer-spin-button,
+.ki-query-option input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* Limit 越界态必须在**聚焦时**也可见：`.ki-form-input:focus`（ki.css:908，特异性 0,2,0）
+   会盖掉 `.ki-form-input--error`（0,1,0），而越界正是在聚焦编辑途中发生的 ——
+   实测聚焦下只剩主色描边，等于没提示。此处只提高本区块的特异性，不动全站 error 基类。
+   `outline-color` 一并改红：全站 `:focus-visible`（ki.css:4623）给的是主色描边，
+   数字输入框用鼠标聚焦同样命中它，不改就会红框套绿圈。 */
+.ki-query-option .ki-form-input--error,
+.ki-query-option .ki-form-input--error:focus {
+  border-color: var(--ki-color-danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-danger) 14%, transparent);
+  outline-color: var(--ki-color-danger);
+}
 
 /* ── 导入页 ── */
 /* 导入页「切分参数」折叠行（2026-10-20 改版）：

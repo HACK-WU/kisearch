@@ -28,6 +28,7 @@ import {
   type ZVecVector,
 } from '@zvec/zvec';
 import { mapZvecOpenError } from './schema/validator.js';
+import { normalizeVectorScore } from './search/normalize.js';
 import { buildCollectionSchema } from './schema/builder.js';
 import type {
   CreateRequestPayload,
@@ -44,6 +45,7 @@ import type {
   WriteResultPayload,
 } from './worker-protocol.js';
 import { serializeError } from './worker-protocol.js';
+import { MIN_FTS_SCORE, RRF_FLOOR, SEMANTIC_BONUS, dynamicRatioScore } from './scoring.js';
 
 if (!parentPort) {
   throw new Error('worker.ts must be run as a worker_threads worker');
@@ -142,7 +144,7 @@ async function dispatch(req: WorkerRequest): Promise<unknown> {
     case 'query':
       return handleQuery(req.payload as QueryPayload);
     case 'multiQuery':
-      return handleMultiQuery(req.payload as MultiQueryPayload);
+      return await handleMultiQuery(req.payload as MultiQueryPayload);
     case 'optimize': {
       // S-01（REQ-20261009-003）：改原生**异步** optimize(options)，支持限核
       //（原实现 optimizeSync 阻塞 worker 且无法限核）。
@@ -437,11 +439,140 @@ function handleQuery(payload: QueryPayload): RawHitPayload[] {
   return docs.map((d) => toRawHit(d, isFts, payload.includeVector ?? false));
 }
 
-function handleMultiQuery(payload: MultiQueryPayload): RawHitPayload[] {
+async function handleMultiQuery(payload: MultiQueryPayload): Promise<RawHitPayload[]> {
   const c = ensureCollection();
+  const rankConstant = payload.rerankRrf?.rankConstant ?? 60;
+
+  /**
+   * 需要分路分数时：逐路查询 + 自行融合。
+   *
+   * 为什么不能继续用 `multiQuerySync`：它内部融合后只返回一个 `score`，
+   * 两路各自的分数被丢弃。而上层做跨库合并时必须拿到「字面路的 BM25」与
+   * 「向量路的绝对相似度」，否则只能再跑一整轮跨库检索（实测 12 库会把 3s 拖到分钟级）。
+   *
+   * 融合公式与原实现一致（RRF `Σ 1/(k+rank)`；加权则按权重求和），所以**排序不变**，
+   * 只是额外带出分路分数。仅多库请求走这条路径，单库仍用 `multiQuerySync`（零变化）。
+   */
+  if (payload.withRouteScores) {
+    /**
+     * 每路取 **2 倍候选**（下限 40）作为「算分原料」，而不是只取 `topk` 条。
+     *
+     * ★ 为什么必须放大：两路召回的文档集几乎不重叠（实测同一次查询里重合 0~3 条）。
+     *   各取 `topk` 条时，「只在字面路排第一、语义路没召回」的文档会漏在外面，
+     *   后面的评分公式根本没机会看到它 —— 这正是「字面分最高的文档排不进前 20」的原因。
+     */
+    // 只有 dynamic-ratio 需要在库内按最终分截断，才必须多取原料；
+    // 其余算法仍按融合分截断（不放大 = 不为拿不到收益的路径付双倍查询成本）。
+    const routeTopk = payload.ranking === 'dynamic-ratio'
+      || payload.ranking === 'calibrated-semantic'
+      || payload.ranking === 'calibrated-adaptive'
+      ? Math.min(Math.max(payload.topk * 2, 40), 1000)
+      : payload.topk;
+    // 两路**并行**（原生异步 query）：串行会让每个库的耗时翻倍，
+    // 12 库并发时总耗时也跟着涨（实测 3s → 7s）；并行后回到接近单次查询。
+    const perRoute = await Promise.all(payload.queries.map((q) => c.query({
+      fieldName: q.fieldName,
+      topk: routeTopk,
+      ...(q.vector !== undefined ? { vector: q.vector } : {}),
+      ...(q.ftsMatchString !== undefined ? { fts: { matchString: q.ftsMatchString } } : {}),
+      ...(payload.filterSql !== undefined ? { filter: payload.filterSql } : {}),
+      ...(payload.outputFields !== undefined ? { outputFields: payload.outputFields } : {}),
+      includeVector: payload.includeVector ?? false,
+    })));
+
+    // 按文档 id 对齐：同一条文档把两路分数都留下（不是「去重留一份」）
+    const acc = new Map<string, { doc: ZVecDoc; ranks: number[]; scores: number[] }>();
+    perRoute.forEach((docs, routeIdx) => {
+      /**
+       * ★ 向量路的 `doc.score` 是**距离**（COSINE，越小越相似），必须转成相似度。
+       *   漏转会让 `vectorScore` 语义反掉（0.75 实际比 0.63 更不相似），
+       *   「语义优先」算法也会把排序算反。
+       */
+      const isVectorRoute = payload.queries[routeIdx]?.vector !== undefined;
+      docs.forEach((d, i) => {
+        const cur = acc.get(d.id) ?? { doc: d, ranks: [], scores: [] };
+        cur.ranks[routeIdx] = i + 1;
+        cur.scores[routeIdx] = isVectorRoute
+          ? normalizeVectorScore(d.score ?? 0, 'COSINE')
+          : (d.score ?? 0);
+        acc.set(d.id, cur);
+      });
+    });
+
+    /**
+     * 动态比值：**在库内就算出最终分，并按最终分截断**。
+     *
+     * 分数 = (名次分 + 字面分 / 10^(d+1)) / 2，d = 名次分首位有效数字的位置。
+     * 它只依赖名次分的**量级**（不含候选池最大值），所以库内算完即可跨库比较 ——
+     * 不需要上层再重排一次。
+     */
+    if (
+      payload.ranking === 'dynamic-ratio'
+      || payload.ranking === 'calibrated-semantic'
+      || payload.ranking === 'calibrated-adaptive'
+    ) {
+      // 后两者的基线都是定标加权；calibrated-adaptive 还要由上层做候选池自适应校正
+      /**
+       * 单库语义检索的准入规则（`requireSemanticRecall`）：
+       * 只保留**被向量路召回**的文档 —— `vectorScore = 0` 直接丢弃，不参与排序；
+       * 保留的文档若字面分为 0，按 `MIN_FTS_SCORE` 兜底，避免字面项被抹成 0。
+       */
+      const candidates = payload.requireSemanticRecall
+        ? [...acc.values()].filter((e) => (e.scores[0] ?? 0) > 0)
+        : [...acc.values()];
+
+      const scored = candidates.map((e) => {
+        const rrf = e.ranks.reduce((sum, r) => sum + (r ? 1 / (rankConstant + r) : 0), 0);
+        // rrf=0 只会出现在「两路都没名次」的防御场景：按单路 rank1 归入 d=2 档
+        const rrfSafe = rrf > 0 ? rrf : RRF_FLOOR;
+        const rawFts = e.scores[1] ?? 0; // queries[1] = 字面路（router 固定顺序）
+        const ftsScore = payload.requireSemanticRecall ? Math.max(rawFts, MIN_FTS_SCORE) : rawFts;
+        const vecScore = e.scores[0] ?? 0; // 已转成相似度（0.33~1）；未被向量路召回时为 0
+        const base = dynamicRatioScore(rrfSafe, ftsScore);
+        // 定标加权 + 语义补充：语义分为 0 表示未被语义路召回，该项即为 0，不做补偿
+        const bonus = payload.semanticBonus ?? SEMANTIC_BONUS;
+        const score = payload.ranking === 'calibrated-semantic'
+          ? base + bonus * vecScore
+          : base;
+        return { e, score, rrf: rrfSafe, base };
+      });
+      return scored
+        .sort((a, b) => b.score - a.score)
+        .slice(0, payload.topk)
+        .map(({ e, score, rrf, base }) => ({
+          ...toRawHit(e.doc, false, payload.includeVector ?? false, true),
+          score,
+          routeScores: e.scores.map((v) => v ?? 0),
+          rrf,
+          baseScore: base,
+        }));
+    }
+
+    // 其余算法：仍按融合分截断，由上层统一重排（它们的公式依赖候选池最大值，库里算不出来）
+    const weights = payload.rerankWeighted?.weights;
+    return [...acc.values()]
+      .map((e) => ({
+        e,
+        fused: weights
+          ? e.scores.reduce((sum, v, i) => sum + (v ?? 0) * (weights[i] ?? 1), 0)
+          : e.ranks.reduce((sum, r, i) => sum + (r ? 1 / (rankConstant + r) : 0), 0),
+      }))
+      .sort((a, b) => b.fused - a.fused)
+      .slice(0, payload.topk)
+      .map(({ e, fused }) => ({
+        ...toRawHit(e.doc, false, payload.includeVector ?? false, true),
+        rrf: fused,
+        // ★ 必须显式写回融合分：`toRawHit` 取的是 `doc.score`，那是**单路查询的原始分**
+        //   （fts 路 = BM25，量级几十）。漏掉这行时上层拿 BM25 当 RRF 用，
+        //   两种加权公式都会算出离谱的分数（表现为「动态比值恒等于 bm25」「加权恒等于满分」）。
+        score: fused,
+        routeScores: e.scores.map((v) => v ?? 0),
+      }));
+  }
+
   const rerank = payload.rerankWeighted
     ? { type: 'weighted' as const, weights: payload.rerankWeighted.weights }
-    : { type: 'rrf' as const, rankConstant: payload.rerankRrf?.rankConstant ?? 60 };
+    : { type: 'rrf' as const, rankConstant };
 
   const docs = c.multiQuerySync({
     queries: payload.queries.map((q) => ({

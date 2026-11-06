@@ -56,6 +56,10 @@ export function toHit(raw: RawHitPayload, opts: ToHitOptions): Hit | null {
     fields: raw.fields as Record<string, ScalarValue>,
     text: raw.text,
   };
+  // 分路原始分（仅 hybrid + withRouteScores 时存在）：跨库合并要用它做两路加权
+  if (raw.routeScores) hit.routeScores = raw.routeScores;
+  if (raw.rrf !== undefined) hit.rrf = raw.rrf;
+  if (raw.baseScore !== undefined) hit.baseScore = raw.baseScore;
   if (opts.includeVector && raw.vector) {
     hit.vector = Array.from(raw.vector);
   }

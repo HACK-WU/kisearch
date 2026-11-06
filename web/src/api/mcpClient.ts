@@ -229,7 +229,18 @@ export async function kiScopeList(): Promise<ScopeListResponse> {
 
 export async function kiSearch(
   query: string,
-  opts: { scope?: string; tags?: string[]; threshold?: number; limit?: number; timeout?: number; mode?: 'hybrid' | 'fulltext' } = {},
+  opts: {
+    scope?: string;
+    tags?: string[];
+    threshold?: number;
+    limit?: number;
+    timeout?: number;
+    mode?: 'hybrid' | 'fulltext';
+    /** 多库（视图）排序算法；dynamic-ratio 为临时对比用实验算法 */
+    ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive';
+    /** 语义补充系数（仅 calibrated-semantic 生效） */
+    semanticBonus?: number;
+  } = {},
 ): Promise<SearchResult> {
   return callTool<SearchResult>('ki_search', {
     query,
@@ -239,6 +250,8 @@ export async function kiSearch(
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
     ...(opts.mode ? { mode: opts.mode } : {}),
+    ...(opts.ranking ? { ranking: opts.ranking } : {}),
+    ...(opts.semanticBonus !== undefined ? { semantic_bonus: opts.semanticBonus } : {}),
     include_original: true,
   });
 }
