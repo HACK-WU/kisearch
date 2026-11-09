@@ -25,6 +25,7 @@ const vite = await createServer({
   logLevel: 'silent',
 });
 const {
+  AGENTS_MD_TRIGGER,
   buildConcurrencyConfigSnippet,
   buildLlmConfigSnippet,
   buildLocalMcpConfig,
@@ -43,6 +44,7 @@ const {
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
   isLoopbackHost,
+  KI_UPLOAD_TRIGGER,
   MEMORY_RULE_FILE,
   MCP_TOOL_COUNT,
   MCP_TOOLS,
@@ -321,10 +323,10 @@ describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
 });
 
 describe('MCP 工具清单（接入后能用什么）', () => {
-  it('13 个工具分三组：读 5 / 写 5 / 组织与删除 3', () => {
-    assert.equal(MCP_TOOL_COUNT, 13);
+  it('14 个工具分三组：读 6 / 写 5 / 组织与删除 3', () => {
+    assert.equal(MCP_TOOL_COUNT, 14);
     assert.deepEqual(MCP_TOOLS.map((g) => g.label), ['读', '写', '组织与删除']);
-    assert.deepEqual(MCP_TOOLS.map((g) => g.items.length), [5, 5, 3]);
+    assert.deepEqual(MCP_TOOLS.map((g) => g.items.length), [6, 5, 3]);
   });
 
   it('★ 工具名与 docs/mcp-tools.md 的清单逐条一致（防文档漂移）', () => {
@@ -612,12 +614,34 @@ describe('describeWikiWriteback（状态表四列）', () => {
 });
 
 describe('Agent Skill 说明', () => {
-  it('列出仓库内的 2 个 Skill，且 agents-md-init 标为手动触发', () => {
-    assert.deepEqual(SKILL_ITEMS.map((s) => s.name), ['ki-search', 'agents-md-init']);
-    const manual = SKILL_ITEMS.find((s) => s.name === 'agents-md-init');
-    assert.equal(manual.activation, 'manual');
-    assert.equal(manual.activationLabel, '需手动触发');
+  it('列出仓库内的 3 个 Skill，且 agents-md-init / ki-upload 标为手动触发', () => {
+    assert.deepEqual(SKILL_ITEMS.map((s) => s.name), ['ki-search', 'agents-md-init', 'ki-upload']);
+    for (const name of ['agents-md-init', 'ki-upload']) {
+      const item = SKILL_ITEMS.find((s) => s.name === name);
+      assert.equal(item.activation, 'manual', name);
+      assert.equal(item.activationLabel, '需手动触发', name);
+    }
     assert.equal(SKILL_ITEMS.find((s) => s.name === 'ki-search').activation, 'auto');
+  });
+
+  it('每项都有说明行，且触发话术落在自己的说明里（不串项）', () => {
+    for (const item of SKILL_ITEMS) {
+      assert.equal(typeof item.note, 'string', item.name);
+      assert.ok(item.note.length > 0, item.name);
+    }
+    assert.ok(SKILL_ITEMS.find((s) => s.name === 'agents-md-init').note.includes(AGENTS_MD_TRIGGER));
+    assert.ok(SKILL_ITEMS.find((s) => s.name === 'ki-upload').note.includes(KI_UPLOAD_TRIGGER));
+    // 反向守一条：ki-upload 的说明不能复述 agents-md-init 的话术（旧实现按 activation 硬编码过）
+    assert.ok(!SKILL_ITEMS.find((s) => s.name === 'ki-upload').note.includes(AGENTS_MD_TRIGGER));
+  });
+
+  it('说明行的轻标记成对（未闭合会被当普通字符渲染，页面静默显示反引号 / 星号）', () => {
+    for (const item of SKILL_ITEMS) {
+      const ticks = (item.note.match(/`/g) ?? []).length;
+      const bolds = (item.note.match(/\*\*/g) ?? []).length;
+      assert.equal(ticks % 2, 0, `${item.name} 反引号未成对`);
+      assert.equal(bolds % 2, 0, `${item.name} 的 ** 未成对`);
+    }
   });
 
   it('记忆闭环清单与规则文件路径不为空（安装器不装 Rules）', () => {

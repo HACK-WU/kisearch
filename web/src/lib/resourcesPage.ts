@@ -86,7 +86,7 @@ export interface McpToolGroup {
 }
 
 /**
- * `ki mcp` 暴露的全部 13 个工具，按「读 / 写 / 组织与删除」分组。
+ * `ki mcp` 暴露的全部 14 个工具，按「读 / 写 / 组织与删除」分组。
  *
  * 权威源：`docs/mcp-tools.md`（工具定义以 `src/lib/mcp-tools/` 为准）。
  * 页面只给"叫什么、干什么"，参数细节走文档外链 —— 否则就是第二份会漂移的参数表。
@@ -100,6 +100,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
       { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
       { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 Wiki 回写可用性' },
+      { name: 'ki_list_views', purpose: '列出知识视图（多个库的只读聚合，可当 scope 用）' },
       { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
     ],
   },
@@ -125,7 +126,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
   },
 ];
 
-/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 13 个」一致，单测锁） */
+/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 14 个」一致，单测锁） */
 export const MCP_TOOL_COUNT = MCP_TOOLS.reduce((sum, group) => sum + group.items.length, 0);
 
 /** 工具清单的边界说明：MCP 刻意不暴露的能力 */
@@ -474,13 +475,31 @@ export interface SkillItem {
   /** 生效方式：装完即生效 / 需手动触发 */
   activation: 'auto' | 'manual';
   activationLabel: string;
+  /**
+   * 说明行（装完到底会不会自己动）。支持两种轻标记，渲染见 `ResourcesPage.tsx` 的
+   * `renderSkillNote`：`` `code` `` → 等宽高亮（触发话术 / 依赖名），`**bold**` → 关键否定。
+   * 标记两侧不要留空格 —— 间距由 `.res-skill__trigger` 的 flex gap 提供。
+   */
+  note: string;
 }
 
+/** `agents-md-init` 的触发话术（用户必须知道这句，否则文件永远不会生成） */
+export const AGENTS_MD_TRIGGER = '初始化 AGENTS.md';
+
+/** `ki-upload` 的触发话术（同上：不说这句，AI 不会主动上传） */
+export const KI_UPLOAD_TRIGGER = '把这个目录传到 ki';
+
 /**
- * 本仓库（`HACK-WU/kisearch`）`skills/` 下的全部 Skill —— 只有这两个。
+ * 本仓库（`HACK-WU/kisearch`）`skills/` 下的全部 Skill —— 目前三个。
  *
- * `agents-md-init` 是**手动触发**（其 SKILL.md 明写「手动触发」）：装完不会自动生成
- * AGENTS.md，必须由用户对 AI 说一句触发话术。此前页面完全没提，用户装完以为已经生成。
+ * 三者生效方式与前置条件都不同，页面必须逐项写清，否则用户装完会以为已经能用：
+ * - `ki-search`：装完即生效，规则直接约束 AI 的检索行为；
+ * - `agents-md-init`：**手动触发**（其 SKILL.md 明写），不说触发话术就不会生成 AGENTS.md；
+ * - `ki-upload`：**手动触发 + 另有环境前置**（`httpflex`、`KI_URL` / `KI_TOKEN`），
+ *   只装 skill 不配依赖，一遇到上传需求就失败。
+ *
+ * 安装命令 `npx skills add HACK-WU/kisearch -a <agent>` 不带 `--skill` 过滤，
+ * 装的本来就是仓库 `skills/` 下全部 Skill —— 新增条目只是补上页面展示，安装侧无需同步改。
  */
 export const SKILL_ITEMS: SkillItem[] = [
   {
@@ -488,17 +507,23 @@ export const SKILL_ITEMS: SkillItem[] = [
     purpose: '代码知识库检索行为规则：先查项目记忆，再做定位级 / 理解级检索',
     activation: 'auto',
     activationLabel: '装完即生效',
+    note: 'AI 遇到代码 / 架构 / 排查类问题时自动按规则先查 ki。',
   },
   {
     name: 'agents-md-init',
     purpose: '初始化 / 重建项目根目录的 AGENTS.md 结构与索引缓存',
     activation: 'manual',
     activationLabel: '需手动触发',
+    note: `装完**不会自动生成**AGENTS.md：对 AI 说一句\`${AGENTS_MD_TRIGGER}\`（或「刷新索引缓存」）才会执行。`,
+  },
+  {
+    name: 'ki-upload',
+    purpose: '把本地文档或整个目录上传到远端 ki，等导入完成再返回结果',
+    activation: 'manual',
+    activationLabel: '需手动触发',
+    note: `装完**不会自动上传**：对 AI 说一句\`${KI_UPLOAD_TRIGGER}\`才会执行；需先装\`httpflex\`（非 PyPI）、配好\`KI_URL\`/\`KI_TOKEN\`。`,
   },
 ];
-
-/** `agents-md-init` 的触发话术（用户必须知道这句，否则文件永远不会生成） */
-export const AGENTS_MD_TRIGGER = '初始化 AGENTS.md';
 
 // ─── 记忆闭环（安装器只装 Skills，Rules 需手动放置） ──────────────────────
 

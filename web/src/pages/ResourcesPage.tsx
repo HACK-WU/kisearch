@@ -23,7 +23,6 @@ import { ackDisclosure, getChatConfig } from '@/api/chatApi';
 import { getEmbeddingSummary } from '@/api/embeddingApi';
 import { kiScopeList, type ScopeInfo } from '@/api/mcpClient';
 import {
-  AGENTS_MD_TRIGGER,
   buildConcurrencyConfigSnippet,
   buildEmbeddingConfigSnippet,
   buildLlmConfigSnippet,
@@ -407,11 +406,38 @@ function McpSection(): JSX.Element {
 
 // ─── 接入 2：Agent Skill ────────────────────────────────────────────────
 
+/**
+ * `SkillItem.note` 的轻标记渲染：`` `code` `` → 等宽高亮，`**bold**` → 关键否定。
+ *
+ * 为什么不在数据里直接存 JSX：`resourcesPage.ts` 是纯数据模块（测试按数据断言），
+ * 而三项的说明文案各不相同，按 `activation` 二分硬编码会让新条目复述别人的话。
+ */
+function renderSkillNote(note: string): JSX.Element[] {
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*/g;
+  const nodes: JSX.Element[] = [];
+  let cursor = 0;
+  let hit = pattern.exec(note);
+  while (hit !== null) {
+    if (hit.index > cursor) {
+      nodes.push(<span key={`t${cursor}`}>{note.slice(cursor, hit.index)}</span>);
+    }
+    nodes.push(
+      hit[1] !== undefined
+        ? <code className="res-inline-cmd" key={`c${hit.index}`}>{hit[1]}</code>
+        : <strong key={`s${hit.index}`}>{hit[2]}</strong>,
+    );
+    cursor = hit.index + hit[0].length;
+    hit = pattern.exec(note);
+  }
+  if (cursor < note.length) nodes.push(<span key={`t${cursor}`}>{note.slice(cursor)}</span>);
+  return nodes;
+}
+
 function SkillSection(): JSX.Element {
   return (
     <>
       <p className="res-help">
-        本仓库含 <b>2 个 Skill</b>，装完不会都自动生效 —— 下面标了各自什么时候起作用。
+        本仓库含 <b>{SKILL_ITEMS.length} 个 Skill</b>，装完不会都自动生效 —— 下面标了各自什么时候起作用。
       </p>
 
       <div className="res-skills">
@@ -424,22 +450,14 @@ function SkillSection(): JSX.Element {
               </span>
             </div>
             <p className="res-skill__purpose">{item.purpose}</p>
-            {item.activation === 'manual' ? (
-              <p className="res-skill__trigger">
-                装完<strong>不会自动生成</strong> AGENTS.md：对 AI 说一句
-                <code className="res-inline-cmd">{AGENTS_MD_TRIGGER}</code>
-                （或「刷新索引缓存」）才会执行。
-              </p>
-            ) : (
-              <p className="res-skill__trigger">AI 遇到代码 / 架构 / 排查类问题时自动按规则先查 ki。</p>
-            )}
+            <p className="res-skill__trigger">{renderSkillNote(item.note)}</p>
           </div>
         ))}
       </div>
 
       <h3 className="res-subhead">安装到你的 AI 工具</h3>
       <p className="res-help res-mb-2">
-        在项目根目录执行（会一次装上面 2 个 Skill）。
+        在项目根目录执行（会一次装上面 {SKILL_ITEMS.length} 个 Skill）。
       </p>
       <div className="res-tools">
         {PRIMARY_SKILL_TOOLS.map((tool) => {
