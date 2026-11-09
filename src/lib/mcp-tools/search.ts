@@ -12,7 +12,11 @@ export function registerSearchTool(server: McpServer): void {
       scope: z.string().optional().default('default').describe('知识库名或视图名（多个用逗号分隔聚合检索，视图会自动展开为成员库；结果统一排序并按来源库标注；省略则用 default；strict 模式下必须传且须在白名单内）'),
       query: z.string().describe('自然语言查询文本'),
       limit: z.number().int().positive().optional().default(10).describe('返回条数上限（整次检索最多返回的文档数；未传 tags 时内部按 tag 取候选，最终仍按该值截断；引擎单次候选上限 1000）'),
-      threshold: z.number().min(0).max(1).optional().describe('分数下限（0-1）：低于此值的命中被丢弃。单库分数约 0.02~0.4，多库 / 视图约 0.3~4 —— 0.6 以上可筛出强相关'),
+      threshold: z.number().min(0).max(1).optional().describe(
+        '分数下限：低于该值的结果直接丢弃（0 或省略 = 不过滤，只过滤不排序）。'
+        + '单库建议 0.02~0.03，多库 / 视图建议 0.6~0.8（两者量级不同，勿混用）；'
+        + '全文模式与降级检索下不生效。',
+      ),
       tags: z.string().optional().describe('过滤标签（不传则搜索全部 tag：内部按 tag 取候选，最终仍按 limit 截断，ki-search 内容优先；多个用逗号分隔，OR 组合）'),
       timeout: z.number().positive().max(60).optional().describe('查询 embedding 超时（秒，最大 60；未传则使用配置值）'),
       include_original: z.boolean().optional().default(false).describe('是否返回 local KB 文件级完整原文（默认 false）；fulltext 模式即使关闭也会返回最多 3 个原文命中片段、行号区间、matchCount、matchCountComplete 和 totalLines。chunk fallback 无法可靠映射，或候选池饱和且仍可能有额外 fallback 区域时，matchCount 是已确认下界，matchCountComplete=false'),

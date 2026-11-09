@@ -40,6 +40,7 @@
 | 多库联合查询（视图 / `--scope a,b`）的执行流程：哪些库参与、每库取多少、超时与降级 | [multi-scope-query.md](./multi-scope-query.md) |
 | 多库联合查询的排序分数怎么算、怎么读 | [multi-scope-ranking.md](./multi-scope-ranking.md) |
 | 单库查询的排序分数怎么算（字面倍率、名次分、候选范围） | [single-scope-ranking.md](./single-scope-ranking.md) |
+| 检索阈值（Threshold）该设多少：单库与多库为什么不能套用同一个值 | [search-threshold.md](./search-threshold.md) |
 | 文档多语言代码块写法（`::: code-group`） | [markdown-multilang.md](./markdown-multilang.md) |
 
 ## Agent 集成
