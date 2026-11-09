@@ -1164,6 +1164,8 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `--no-local-admin` | — | 关闭本机回环免登录（本机访问也需登录）；等价于配置 `mcp.http.localAdmin: false` |
 | `--web` | — | HTTP 模式下同时提供可视化前端静态页面（`web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动。含 `/api/*` 扩展路由（`/api/health`、`/api/search-config`、`/api/doc/list`、`/api/import/*`），详见 [MCP HTTP 共享单例模式](./mcp-http.md) |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
+| `--no-upload-api` | — | 关闭第三方程序上传接口（`/open/v1/import/*` 返回 404）。Web 页面、`/mcp` 工具、`/healthz` 不受影响；也可用配置 `mcp.http.uploadApi: false` |
+| `--upload-api` | — | 显式开启上传接口（`--no-upload-api` 的反义）。用于 `restart` 时覆盖上次的关闭状态；两者同时出现时 `--no-upload-api` 优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错（`MCP_DAEMON_REQUIRES_HTTP`） |
 
 > **子命令 `ki mcp status`**（可带 `--host` / `--port` 覆盖探测目标）：只读诊断——探活 `/healthz` 并读取当前身份的 `~/.ki/mcp-http-<fingerprint>.lock`，输出 JSON 状态（含多 Token 存储数量 `managedTokens.count`；不启动服务、跳过预检）。旧写法 `ki mcp --status` 仍可用但会提示改用子命令形式。

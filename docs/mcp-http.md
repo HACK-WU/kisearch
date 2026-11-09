@@ -64,6 +64,8 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 | `--no-local-admin` | — | 关闭本机回环免登录（本机访问也需登录）；等价于配置 `mcp.http.localAdmin: false` |
 | `--web` | — | HTTP 模式下同时提供前端静态页面（默认 `web/dist`，浏览器访问 `http://<host>:<port>/`）；未找到构建产物时提示但不阻塞 MCP 启动 |
 | `--no-web` | — | 显式关闭前端页面（`--web` 的反义）。主要用于 `restart` 时覆盖上次 `--web` 的自动延续；与 `--web` 同时出现时 `--no-web` 优先 |
+| `--no-upload-api` | — | 关闭第三方程序上传接口（`/open/v1/import/*` 返回 404）。Web 页面、`/mcp` 工具、`/healthz` 全部不受影响 |
+| `--upload-api` | — | 显式开启上传接口（`--no-upload-api` 的反义）。主要用于 `restart` 时覆盖上次的关闭状态；与 `--no-upload-api` 同时出现时后者优先 |
 | `--daemon` / `-d` | — | **仅 HTTP 模式**：后台常驻运行，脱离终端/父进程组，SSH 断开后服务仍存活（`--web` 组合同样生效）；不带 `--http` 时报错 |
 
 子命令 `ki mcp stop`：一键关闭本机所有 ki mcp 实例（stdio + HTTP）并清理残留 lock，见下文「一键关闭」。
@@ -209,6 +211,20 @@ meta → [tool_start → tool_end]* → reasoning* → content* → sources? →
 - 鉴权与其他 `/api/*` 一致；**访问他 scope 的会话返回 403 而非 404**（防状态码探测枚举）。
 - 同一会话**同时只允许一次生成**，并发请求返回 `409 CONVERSATION_GENERATING`。
 
+## 第三方程序上传接口（`/open/v1`）
+
+给**不在 ki 所在机器上的程序**（典型是 AI Agent）用的上传通道：对方只需要 `curl` / `tar`，不需要安装 ki。
+
+它与 `/mcp`、`/api/*` 完全隔离，区别只在鉴权：
+
+| 前缀 | 谁在用 | 鉴权方式 | 默认 |
+|------|--------|----------|------|
+| `/mcp` | IDE 里的 MCP 客户端 | Bearer Token（本机回环可免） | 永远开 |
+| `/api/*` | 浏览器页面 | 页面登录 / 本机免登录 | 永远开 |
+| `/open/v1/*` | 第三方程序 | **只认 Bearer Token**（本机也要带） | 默认开，`--no-upload-api` 可关 |
+
+完整用法（curl / tar 示例、参数表、上限与调大方法、错误码、关闭方式）见 **[open-api.md](./open-api.md)**。
+
 ## 状态自查（`ki mcp status`）
 
 用于确认「当前是否只有一个持锁进程」以及各 IDE 是否连到同一实例：
@@ -242,6 +258,7 @@ ki mcp status --host 127.0.0.1 --port 7423
 
 - **回环地址**（`127.0.0.1` / `localhost` / `::1`）：本机来源 + Host 回环 + 无 `X-Forwarded-For`/`X-Real-IP` 时，自动以管理员身份进入（免登录）；可用 `--no-local-admin` 或配置 `mcp.http.localAdmin: false` 关闭，关闭后本机也需登录。
   > ⚠️ **反向代理 / SSH 隧道**：本机管理员判定现在同时校验 TCP 源地址与 Host 头。nginx 保留外部 Host 时不会被误判为本机；SSH 端口转发通常源地址与 Host 都是本机，仍会免登录——对外暴露时请使用 `--no-local-admin`，并在代理层自行鉴权。
+  > ⚠️ **升级提示**：`mcp.http.localAdmin` 此前只写进配置却不生效（等于永远按 `true` 运行）。该问题已修复，配置从此真正生效——如果配置文件里写着 `false` 而本机一直在免登录使用，升级并重启后会开始要求登录，请先确认本机有可用账号或 Token。
 - **非回环地址**（`0.0.0.0` / 外网 IP，即远程跨机）：启动时必须有 **Bearer Token 或至少一个启用的 Web 账号**，否则拒绝启动（fail-loud）。Web 用户经 `/login` 登录；MCP 客户端仍使用 Bearer Token。
 
 Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Token）> 多 Token 存储 `~/.ki/mcp-tokens.json`（`ki mcp token generate --scope <...>` 创建），**绝不写入配置文件明文**；非回环启动时会在 stderr 明示本次生效的 Token 来源。鉴权中间件对 `/mcp` 所有方法校验 `Authorization: Bearer <token>`，按明文在存储中匹配（常量时间比较）得到授权 scope 集合，失败返回 401。
@@ -390,6 +407,9 @@ mcp:
     port: 7423
     allowedHosts:
       - ide.example.com
+    localAdmin: true        # false = 本机访问也需登录
+    uploadApi: true         # false = 关闭 /open/v1/import/*
+    uploadMaxBytes: 536870912   # 第三方上传单次请求体上限（默认 512MB）
 ```
 
 ## 优雅退出
@@ -400,5 +420,6 @@ mcp:
 
 ## 相关文档
 
+- [给外部程序的上传接口（`/open/v1`）](./open-api.md) — `curl` / `tar` 推送文档、进度查询、开关
 - [CLI 参考 · `mcp` 命令](./cli.md) — 完整命令与工具清单
 - [架构与协作关系](./architecture.md) — 分层关系、向量层与三层标签

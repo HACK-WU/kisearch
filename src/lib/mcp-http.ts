@@ -38,6 +38,10 @@ import { mapWithConcurrency, queryVectorCacheKey, runWithPrecomputedQueryVectors
 import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './query-timeout.js';
 import { configFingerprint, daemonIdentityFingerprint, VECTOR_LAYOUT_VERSION, assertDaemonIdentityCurrent, isDaemonIdentityDrifted } from './scope-collection.js';
 import { markInterruptedTasks } from './task-registry.js';
+import { DEFAULT_UPLOAD_MAX_BYTES } from './open-api/constants.js';
+import { handleOpenApiRequest, isOpenApiPath } from './open-api/index.js';
+import { sendOpenApiError } from './open-api/respond.js';
+import { describeUploadApiReuseMismatch, resolveUploadApi } from './upload-api-flag.js';
 
 // S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
 // 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
@@ -116,6 +120,16 @@ export interface HttpServerOptions {
   onShutdown?: () => void;
   /** --web：同时提供前端静态页面（默认 webDir，浏览器访问 http://<host>:<port>/） */
   web?: boolean;
+  /**
+   * 第三方上传 API（`/open/v1/import/*`）开关，缺省 true。
+   *
+   * 关闭只拦该前缀：`/api/*`、`/mcp`、`/healthz`、`/open/v1/ping` 全部不受影响
+   * —— 这是本需求的硬边界（见 design/S03 §3.3）。生效值会写进 lock 供
+   * `ki mcp status` 与 `ki mcp restart` 读取。
+   */
+  uploadApi?: boolean;
+  /** 第三方上传单次请求体上限（字节，缺省 512MB）：只用于启动日志回显与后续路由限流 */
+  uploadMaxBytes?: number;
 }
 
 import { isLoopbackHost } from './net-addr.js';
@@ -559,6 +573,10 @@ export interface HttpAppOptions {
   advertiseAddr?: { host: string; port: number };
   /** 最大并发会话数（缺省 DEFAULT_MAX_SESSIONS） */
   maxSessions?: number;
+  /** 第三方上传 API（`/open/v1/import/*`）开关，缺省 true（关闭只影响该前缀） */
+  uploadApi?: boolean;
+  /** 第三方上传单次请求体上限（字节，缺省 512MB） */
+  uploadMaxBytes?: number;
   /** 会话空闲超时毫秒（缺省 DEFAULT_SESSION_IDLE_MS） */
   sessionIdleMs?: number;
   /** --web：静态文件根目录（缺省不提供静态页面）；为 null/undefined 时禁用 */
@@ -590,6 +608,9 @@ export interface McpHttpApp {
 export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const { authEnabled, token, allowedHosts, buildServer, advertiseAddr } = opts;
   const localAdmin = opts.localAdmin !== false;
+  // 第三方通道的两个生效值：开关决定 `/open/v1/import/*` 是否 404，上限供 ping 回显与后续路由限流
+  const uploadApi = opts.uploadApi !== false;
+  const uploadMaxBytes = opts.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
   const webDir = opts.webDir ?? null;
@@ -791,6 +812,30 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
           : { ok: false, code: securityError.code, error: securityError.message });
         return;
       }
+    }
+
+    // /open/v1/*：第三方程序 API（Bearer-only，独立于前端 /api 与 MCP 通道）
+    //
+    // 位置要求：必须在静态页 fallback 之前，否则 GET /open/v1/ping 会被 SPA fallback 成 index.html。
+    // 这里只做「前缀分发 + 请求级上下文」，路由语义（哪些算上传、开关拦谁）归 open-api 自己，
+    // 否则 mcp-http 会逐渐理解 open-api 的内部路由（design S-03 §3.3 的分层要求）。
+    if (isOpenApiPath(url.pathname)) {
+      let openCfg: KiConfig;
+      try {
+        openCfg = requestConfig ?? loadConfig();
+      } catch (err) {
+        sendOpenApiError(res, 503, 'OPEN_API_INTERNAL', `配置加载失败：${(err as Error).message}`);
+        return;
+      }
+      await runWithConfigSnapshot(openCfg, () => runWithVectorSource(`open-api:${url.pathname}`, () =>
+        handleOpenApiRequest(req, res, url, {
+          resolveTokenAuth,
+          uploadApi,
+          uploadMaxBytes,
+          config: openCfg,
+        }),
+      ));
+      return;
     }
 
     // /api/*：方案 A 扩展接口（导入/健康/文档列表），与 MCP 会话隔离
@@ -1173,6 +1218,22 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
   const info = await fetchHealthz(host, port);
   const running = info?.ok === true && info?.name === SERVICE_NAME;
   const tokenTotal = tokenCount();
+  // 上传 API 开关回显：lock（运行实例的真实值）> 配置 > 默认，并标注来源。
+  // 配置读坏时不能整个 status 挂掉——它是「服务起不来时唯一能看的诊断入口」。
+  const lockRecord = (lock && typeof lock === 'object') ? lock as { uploadApi?: unknown } : null;
+  let configUploadApi: boolean | undefined;
+  try {
+    configUploadApi = loadConfig().mcp?.http?.uploadApi;
+  } catch {
+    configUploadApi = undefined;
+  }
+  const uploadResolution = resolveUploadApi({
+    configValue: configUploadApi,
+    // ★ 只在实例**确实在跑**时采信 lock：残留 lock（进程已被 kill -9 / 断电）里记的是
+    //   上一次运行的开关，用它回显等于告诉运维「现在是关的」，而实际下次启动会按配置/默认开。
+    //   与 status 里 host/port 的 liveLock 校验同一口径（陈旧 lock 不参与回退）。
+    lockValue: running && typeof lockRecord?.uploadApi === 'boolean' ? lockRecord.uploadApi : undefined,
+  });
   // stdio 多实例：遍历 lock 目录，报告所有存活实例（排除当前进程）
   const stdioInstances = listLiveStdioLocks().map((l) => ({ pid: l.pid, startedAt: l.startedAt }));
   console.log(
@@ -1183,6 +1244,13 @@ export async function printHttpStatus(host: string, port: number): Promise<void>
         target: { host: probeHost(host), port },
         healthz: running ? info : null,
         lock: lock ?? null,
+        // 第三方上传 API 开关（设计 S-03 §3.2 的 status 回显）：`uploadApiSource` 标注可信度——
+        // 只有 lock 来自运行中的实例，config/default 表示「没读到运行值，按配置推断」。
+        uploadApi: uploadResolution.uploadApi,
+        uploadApiSource: uploadResolution.source,
+        ...(uploadResolution.uploadApi
+          ? {}
+          : { uploadApiHint: '上传通道已关闭（/open/v1/import/* 返回 404）；恢复：ki mcp restart --upload-api，或配置 mcp.http.uploadApi: true' }),
         // stdio 多实例：存活实例列表（stdio 可与 HTTP daemon 同时存在，仅用于进程管理）
         stdioInstances,
         // 多 Token 存储：仅报告数量，绝不回显明文
@@ -1210,6 +1278,8 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   const { host, port, buildServer, allowedHosts, onShutdown, localAdmin = true } = opts;
   const authEnabled = !isLoopbackHost(host);
   const token = opts.token;
+  const uploadApi = opts.uploadApi !== false;
+  const uploadMaxBytes = opts.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   // 固定本实例的 lock 路径；即使运行期间配置文件发生身份漂移，退出时也必须
   // 清理启动时的 lock，而不能按新配置计算出另一条路径。
   const lockPath = getHttpLockPath(loadConfig());
@@ -1219,6 +1289,10 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     process.stderr.write(
       `已有健康的 kisearch 实例在 ${probeHost(host)}:${port}，复用该实例，本次不再启动。\n`,
     );
+    // 开关类参数在复用路径下不会生效：本进程直接退出，运行中的实例仍按它启动时的值工作。
+    // （CLI 正常路径已由 `mcp-server` 的启动守卫先拦下并提示；此处是库调用方的兜底。）
+    const reuseHint = describeUploadApiReuseMismatch(readLockUploadApi(lockPath), uploadApi);
+    if (reuseHint) process.stderr.write(reuseHint);
     onShutdown?.();
     process.exit(0);
   }
@@ -1240,6 +1314,8 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     token,
     allowedHosts,
     localAdmin,
+    uploadApi,
+    uploadMaxBytes,
     buildServer,
     advertiseAddr: { host, port },
     webDir,
@@ -1266,13 +1342,20 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     );
   }
 
-  writeLockFile(lockPath, host, port, opts.web === true);
+  writeLockFile(lockPath, host, port, opts.web === true, uploadApi);
 
   process.stderr.write(
     `kisearch MCP HTTP 服务已启动：http://${host}:${port}/mcp` +
       `（鉴权：${authEnabled ? '开启，Bearer Token 或 Web 登录' : '关闭，回环绑定'}）` +
       (webDir ? `；前端页面：http://${host}:${port}/` : '') +
       '\n',
+  );
+  // 上限必须打在启动日志里：反向代理（client_max_body_size 默认 1MB）会在应用层看不到请求，
+  // 现场排查第一句永远是「服务端到底放多大」。
+  process.stderr.write(
+    uploadApi
+      ? `第三方上传 API：开启（/open/v1，单次请求体上限 ${formatBytes(uploadMaxBytes)}）\n`
+      : '第三方上传 API：已关闭（--no-upload-api，/open/v1/import/* 返回 404；/api/* 与 MCP 工具不受影响）\n',
   );
   if (!localAdmin) {
     process.stderr.write(
@@ -1320,7 +1403,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   process.on('SIGTERM', () => void shutdown(0));
 }
 
-function writeLockFile(lockPath: string, host: string, port: number, web: boolean): void {
+function writeLockFile(lockPath: string, host: string, port: number, web: boolean, uploadApi: boolean): void {
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(
@@ -1332,6 +1415,9 @@ function writeLockFile(lockPath: string, host: string, port: number, web: boolea
           port,
           startedAt: new Date().toISOString(),
           web,
+          // 开关状态必须落 lock：否则 `ki mcp restart` 无从知道上次是否关闭，
+          // 只能回到默认开启 —— 那正是「关掉后重启又开了」的安全回退。
+          uploadApi,
           identityFingerprint: path.basename(lockPath).slice('mcp-http-'.length, -'.lock'.length),
         },
         null,
@@ -1341,6 +1427,22 @@ function writeLockFile(lockPath: string, host: string, port: number, web: boolea
   } catch {
     /* lock 文件仅供排查，写失败不阻塞启动 */
   }
+}
+
+/** 读取 lock 里记录的上传 API 开关（无 lock / 旧版 lock 无该字段 / 解析失败 → undefined） */
+function readLockUploadApi(lockPath: string): boolean | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as { uploadApi?: unknown };
+    return typeof raw.uploadApi === 'boolean' ? raw.uploadApi : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 字节数转人类可读（只用于日志/回显，不参与任何判定） */
+function formatBytes(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return Number.isInteger(mib) ? `${mib}MB（${bytes} 字节）` : `${bytes} 字节`;
 }
 
 function removeLockFile(lockPath: string): void {

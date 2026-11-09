@@ -2,7 +2,13 @@ import { execFileSync } from 'node:child_process';
 
 let isGnu: boolean | null = null;
 
-function isGnuTar(): boolean {
+/**
+ * 当前 tar 是否为 GNU 实现。
+ *
+ * 供需要解析 `tar -tvzf` 人类可读输出的调用方使用（GNU 与 bsdtar 的字段排布不同）：
+ * 解析不出来时必须**退化为更保守的策略**，而不是把 0 当成「包很小」。
+ */
+export function isGnuTar(): boolean {
   if (isGnu === null) {
     try {
       isGnu = /GNU tar/i.test(execFileSync('tar', ['--version'], { encoding: 'utf8', windowsHide: true }));

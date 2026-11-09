@@ -144,6 +144,10 @@ export interface McpHttpConfig {
   allowedHosts?: string[]; // DNS rebinding 保护允许的 Host 头（可选）
   /** 本机回环免登录自动管理员（默认 true；false = 本机也必须登录） */
   localAdmin?: boolean;
+  /** 第三方上传 API 开关（默认 true；false = 关闭 /open/v1/import/*，其余一切不变） */
+  uploadApi?: boolean;
+  /** 第三方上传单次请求体上限（字节，默认 512MB；见 open-api/constants.ts） */
+  uploadMaxBytes?: number;
 }
 
 export interface McpConfig {
@@ -695,7 +699,13 @@ function parseAndExpand(configFile: string): KiConfig {
   // 【新增】scopeMode：仅接受 'strict'，其余（含缺省/非法值）一律归为 'default'
   const scopeMode: 'default' | 'strict' = raw.scopeMode === 'strict' ? 'strict' : 'default';
 
-  // 【新增】mcp.http：仅解析默认监听地址/端口/allowedHosts（token 不从配置读取）
+  // mcp.http：监听地址/端口/allowedHosts + 开关类字段（token 不从配置读取）
+  //
+  // ★ 每个新字段都必须在这里**显式赋值**。历史坑：`localAdmin` 在 schema 有定义、
+  //   类型有字段、消费端（mcp-server）有读取，唯独本解析块从未赋值 → 写进 YAML 静默无效，
+  //   只有命令行 `--no-local-admin` 生效，而 docs 却声称配置可关。
+  //   布尔值只在「确实是布尔」时采信：字符串 "false" 已由 schema 校验拦下，此处不做宽松转换，
+  //   避免把非法值悄悄当成 true/false。
   let mcp: McpConfig | undefined;
   if (raw.mcp && typeof raw.mcp === 'object') {
     const rawMcp = raw.mcp as Record<string, unknown>;
@@ -708,6 +718,9 @@ function parseAndExpand(configFile: string): KiConfig {
           allowedHosts: Array.isArray(h.allowedHosts)
             ? (h.allowedHosts as unknown[]).map(String)
             : undefined,
+          localAdmin: typeof h.localAdmin === 'boolean' ? h.localAdmin : undefined,
+          uploadApi: typeof h.uploadApi === 'boolean' ? h.uploadApi : undefined,
+          uploadMaxBytes: h.uploadMaxBytes !== undefined ? Number(h.uploadMaxBytes) : undefined,
         },
       };
     }

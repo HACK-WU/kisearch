@@ -17,6 +17,7 @@
 import { isAbsolute } from 'path';
 
 import { validateQueryTimeoutMs } from './query-timeout.js';
+import { MAX_UPLOAD_MAX_BYTES } from './open-api/constants.js';
 
 // ─── 节点模型 ───
 
@@ -67,6 +68,23 @@ function portRange(value: unknown, path: string, add: AddFn): void {
   const n = value as number;
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
     add(path, `应为 1-65535 之间的整数，实际=${n}`);
+  }
+}
+
+/**
+ * `mcp.http.uploadMaxBytes` 校验：必须是正整数且不超过 4GiB。
+ *
+ * 越界**不回落默认值**（fail-loud）：静默改成 512MB 会让「我明明调大了」变成
+ * 上传到一半被 413 打断，而配置里看不出来为什么要改。
+ */
+function uploadMaxBytesRange(value: unknown, path: string, add: AddFn): void {
+  const n = value as number;
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_UPLOAD_MAX_BYTES) {
+    add(
+      path,
+      `应为 1 ~ ${MAX_UPLOAD_MAX_BYTES}（4GiB）之间的整数（单位：字节），实际=${n}。` +
+        `这是第三方上传接口的单次请求体上限，不要与 scopes.<scope>.import.maxFileSize（单文件上限）混淆`,
+    );
   }
 }
 
@@ -302,6 +320,16 @@ const CONFIG_SCHEMA: ConfigNode = {
             allowedHosts: { type: 'stringArray' },
             /** 本机回环免登录自动管理员（默认 true；false = 本机也必须登录） */
             localAdmin: { type: 'boolean' },
+            /**
+             * 第三方上传 API（`/open/v1/import/*`）开关，默认 true。
+             *
+             * ⚠️ 本字段**必须在 `config.ts` 的 mcp.http 解析块里同步赋值**：只加 schema
+             * 不赋值的后果是「配置写了、校验过了、消费端也读了，但值永远是 undefined」——
+             * 这正是 `localAdmin` 长期静默失效的成因（docs 曾声称配置可关，实际只有 CLI 生效）。
+             */
+            uploadApi: { type: 'boolean' },
+            /** 第三方上传单次请求体上限（字节，默认 512MB，上界 4GiB） */
+            uploadMaxBytes: { type: 'number', validate: uploadMaxBytesRange },
           },
         },
       },

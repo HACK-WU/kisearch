@@ -192,8 +192,8 @@ const TAG_LIST_TIMEOUT_MS = 5_000;
  */
 const VIEW_TAGS_BUDGET_MS = 5_000;
 
-/** 上传根目录：~/.ki/import-uploads/ */
-function getUploadsRoot(): string {
+/** 上传根目录：~/.ki/import-uploads/（第三方通道复用同根，见 design S-02 D-05） */
+export function getUploadsRoot(): string {
   return path.join(os.homedir(), '.ki', 'import-uploads');
 }
 
@@ -208,7 +208,7 @@ const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
  */
 const MAX_ONLY_REL_PATHS = 50_000;
 
-interface UploadSession {
+export interface UploadSession {
   scope: string;
   updatedAt: number;
   state: 'uploading' | 'importing' | 'done' | 'failed';
@@ -229,7 +229,7 @@ interface UploadSession {
   params?: { skipDuplicates?: boolean; pickMode?: 'dir' | 'files' | 'mixed'; group?: string };
 }
 
-function readUploadSession(dir: string): UploadSession | null {
+export function readUploadSession(dir: string): UploadSession | null {
   const file = path.join(dir, UPLOAD_SESSION_FILE);
   if (!fs.existsSync(file)) return null;
   if (!fs.lstatSync(file).isFile()) throw new Error('非法上传任务元数据');
@@ -240,7 +240,7 @@ function readUploadSession(dir: string): UploadSession | null {
   return value;
 }
 
-function writeUploadSession(dir: string, session: UploadSession): void {
+export function writeUploadSession(dir: string, session: UploadSession): void {
   const file = path.join(dir, UPLOAD_SESSION_FILE);
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
   try {
@@ -293,7 +293,7 @@ async function cleanupExpiredUploads(): Promise<void> {
   }
 }
 
-function bindUploadScope(dir: string, scope: string): boolean {
+export function bindUploadScope(dir: string, scope: string): boolean {
   const scopeFile = path.join(dir, UPLOAD_SCOPE_FILE);
   if (fs.existsSync(scopeFile)) {
     if (!fs.lstatSync(scopeFile).isFile()) return false;
@@ -305,7 +305,7 @@ function bindUploadScope(dir: string, scope: string): boolean {
 
 // ─── job 管理（内存 Map） ─────────────────────────────
 
-interface Job {
+export interface Job {
   id: string;
   scope: string;
   operation: 'import' | 'restore-snapshot' | 'rebuild-vector';
@@ -342,13 +342,32 @@ interface Job {
    */
   indexMaintenanceUnknown?: boolean;
   indexReadiness?: IndexReadiness;
+  /**
+   * 本 job 还在等 scope 写锁（尚未真正开始执行）。
+   *
+   * 为什么必须显式标记：`state` 在 createJob 时就是 'running'，排队中的 job 与执行中的
+   * job 在响应里长得一模一样；第三方轮询方会把「排队」误判为「卡住」，进而取消或重复提交
+   * （design S-02 §3.8 推演问题 3）。只有 `/open/v1/import/status` 读它，Web 端零影响。
+   */
+  waitingForScopeLock?: boolean;
 }
 
 const jobs = new Map<string, Job>();
 const MAX_JOBS = 50;
 const JOB_TTL_MS = 60 * 60 * 1000; // 1h
 
-function createJob(
+/**
+ * 按 id 取进程内 job —— **唯一**的任务状态入口。
+ *
+ * `/api/import/status`、`/open/v1/import/status`、任务台账三者必须看到同一个 job，
+ * 所以第三方通道不得另建 Map，只能经此函数访问现有 `jobs`（design S-02 D-07）。
+ * 取不到时调用方再按「台账 → 日志」逐级回落，不要在这里伪造终态。
+ */
+export function getJobById(id: string): Job | undefined {
+  return jobs.get(id);
+}
+
+export function createJob(
   scope: string,
   operation: Job['operation'],
   config: KiConfig,
@@ -453,7 +472,7 @@ function rejectScopeViolation(res: http.ServerResponse, scope: string, via: stri
   sendJson(res, 403, { ok: false, error: 'Forbidden: 无权访问该 scope' });
 }
 
-function sanitizeFileName(name: string): string {
+export function sanitizeFileName(name: string): string {
   // 仅允许相对路径文件名（支持子目录），拒绝绝对路径与穿越
   const normalized = path.normalize(name);
   if (path.isAbsolute(normalized) || normalized.startsWith('..')) {
@@ -4303,7 +4322,7 @@ async function handleImportRetryIncomplete(
   });
 }
 
-interface RunImportArgs {
+export interface RunImportArgs {
   scope: string;
   sourceDir: string;
   group?: string;
@@ -4329,15 +4348,19 @@ interface RunImportArgs {
   budget?: HandleDirectImportArgs['budget'];
 }
 
-async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
+export async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
   // REQ-20261019-004（challenger 意见 2）：参数快照必须在**进入队列之前**写入——
   // 否则「排队中」的任务点开详情参数全为空，而那正是用户想确认策略的时刻。
   // `state/startedAt` 仍留在出队后（排队 ≠ 开始执行）。
   job.taskReporter.update({ params: toParamSnapshot('import', args, getUploadsRoot()) });
+  // 入队前标记「在等锁」，拿到执行权（进入 coordinator 的 handler）时翻转。
+  // 第三方轮询据此区分「排队」与「卡住」（其余消费方不读该字段）。
+  job.waitingForScopeLock = true;
   try {
     const result = await getSharedOperationCoordinator().submit(
       { operation: 'import', params: { ...args, jobId: job.id } },
       () => runWithConfigSnapshot(requestConfig, async () => {
+        job.waitingForScopeLock = false;
         job.taskReporter.update({ state: 'running', startedAt: Date.now() });
         try { await refreshVectorDimensionSnapshot(requestConfig, args.scope); } catch { /* 诊断失败不阻断导入 */ }
         try {
@@ -4483,6 +4506,9 @@ async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConf
     });
   } finally {
     job.finishedAt = Date.now();
+    // 失败/取消路径也必须清掉「等锁」标记：否则排队期间就失败的 job 会被第三方
+    // status 永远报成 queued（它靠这个标记判定排队，不读 state）。
+    job.waitingForScopeLock = false;
     try {
       const session = readUploadSession(args.sourceDir);
       if (session?.jobId === job.id) {

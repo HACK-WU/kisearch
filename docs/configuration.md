@@ -304,8 +304,15 @@ MCP HTTP 传输默认值（子字段挂在 `mcp.http` 下）。
 | `mcp.http.host` | `string` | `127.0.0.1` | 监听地址（回环免鉴权；对外监听改 `0.0.0.0`） |
 | `mcp.http.port` | `number` | 内置默认端口 | 监听端口（1-65535） |
 | `mcp.http.allowedHosts` | `string[]` | 无 | DNS rebinding 保护允许的 Host 头 |
+| `mcp.http.localAdmin` | `boolean` | `true` | 本机回环免登录。`false` = 本机访问也需登录（等价 `--no-local-admin`） |
+| `mcp.http.uploadApi` | `boolean` | `true` | 是否开放第三方程序上传接口（`/open/v1/import/*`）。`false` 时该前缀返回 404，Web 页面与 MCP 工具不受影响 |
+| `mcp.http.uploadMaxBytes` | `number` | `536870912`（512MB） | 第三方上传**单次请求体**总字节上限（1 ~ 4294967296）。与单文件上限 `import.maxFileSize` 是两回事 |
 
-**优先级**：`mcp.http` 是**传输默认值**，实际生效顺序为 `--host/--port` CLI 参数 > `mcp.http.host/port` 配置 > 内置默认（`127.0.0.1` / `7423`）。即命令行参数优先于配置文件。
+**优先级**：`mcp.http` 是**传输默认值**，实际生效顺序为 `--host/--port` CLI 参数 > `mcp.http.host/port` 配置 > 内置默认（`127.0.0.1` / `7423`）。即命令行参数优先于配置文件。上传开关同理：`--upload-api` / `--no-upload-api` > `mcp.http.uploadApi` > 上次运行时的状态 > 默认开启。
+
+> `mcp.http.uploadMaxBytes` 写越界值（0、小数、超过 4GiB）会**启动即报错**并指出该字段，不会悄悄退回默认值。
+>
+> **升级提示**：`mcp.http.localAdmin` 曾经只写进配置却不生效（等价于永远按 `true` 运行），本次修复后**开始真正生效**。如果你的配置里写着 `localAdmin: false` 却一直享受本机免登录，升级重启后本机访问将要求登录——请先确认本机有可用账号或 Token。
 
 > **安全说明**：MCP 接入 token 只走 CLI 参数或环境变量，**绝不写入配置文件**。
 

@@ -31,6 +31,8 @@ import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 import { startDataSourceScheduler, stopDataSourceScheduler } from './lib/datasource-scheduler.js';
+import { DEFAULT_UPLOAD_MAX_BYTES } from './lib/open-api/constants.js';
+import { describeUploadApiReuseMismatch, resolveUploadApi } from './lib/upload-api-flag.js';
 import { getUserStoreStatus, isUserActive, listUsers } from './lib/user-store.js';
 
 /**
@@ -68,6 +70,10 @@ interface McpCliOptions {
   localAdmin: boolean;
   /** --web：HTTP 模式下同时提供前端静态页面（web/dist） */
   web: boolean;
+  /** 第三方上传 API 开关（CLI > 配置 > 默认 true） */
+  uploadApi: boolean;
+  /** 第三方上传单次请求体上限（字节，配置 mcp.http.uploadMaxBytes 或内置默认） */
+  uploadMaxBytes: number;
 }
 
 /** 帮助文本：-h/--help 与未知参数时共用 */
@@ -98,6 +104,8 @@ HTTP 模式参数：
   --token <value>               全权临时 Token（进程级，优先级高于多 Token 存储；也可用环境变量 KI_MCP_TOKEN）
   --allowed-hosts <a,b>         允许的 Host 头白名单（逗号分隔）
   --no-local-admin              关闭本机回环免登录（本机访问也需登录；配置 mcp.http.localAdmin=false 同义）
+  --no-upload-api               关闭第三方上传 API（/open/v1/import/* 返回 404；Web 与 MCP 不受影响）
+  --upload-api                  显式开启第三方上传 API（restart 时用于覆盖上次的 --no-upload-api）
   --web                         HTTP 模式下同时提供前端静态页面（web/dist，浏览器访问 http://<host>:<port>/）
   --no-web                      显式关闭前端页面（restart 时用于覆盖上次的 --web 延续）
   --daemon, -d                  后台常驻运行（仅 HTTP 模式，含 --web；脱离终端）
@@ -167,7 +175,7 @@ function resolveHttpPort(args: string[], httpCfg: { port?: number }): number {
 function parseMcpArgs(args: string[]): McpCliOptions {
   // --status 仅为弃用别名（已改为 `ki mcp status` 子命令，分发在 startMcpServer 中提前 return）；
   // 保留在 known 里是为了让 `--http --status` 这类混写不被 detectUnknownFlags 误报未知参数。
-  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--no-local-admin', '--status', '--web', '--no-web', '--daemon'];
+  const known = ['--http', '--host', '--port', '--token', '--allowed-hosts', '--no-local-admin', '--status', '--web', '--no-web', '--daemon', '--upload-api', '--no-upload-api'];
   detectUnknownFlags(args, known, ['--host', '--port', '--token', '--allowed-hosts'], MCP_HELP);
 
   const http = args.includes('--http');
@@ -182,11 +190,21 @@ function parseMcpArgs(args: string[]): McpCliOptions {
         'MCP_DAEMON_REQUIRES_HTTP',
       );
     }
-    return { http: false, host: '', port: 0, localAdmin: true, web };
+    // 上传开关只对 HTTP 服务有意义：stdio 模式不监听端口，提示一行而不是报错
+    // （报错会让既有的 IDE 配置里多一个 flag 就起不来）。
+    if (args.includes('--upload-api') || args.includes('--no-upload-api')) {
+      process.stderr.write(
+        '提示：stdio 模式没有 HTTP 服务，--upload-api / --no-upload-api 不生效；如需开关上传通道请用 ki mcp --http --daemon。\n',
+      );
+    }
+    return { http: false, host: '', port: 0, localAdmin: true, web, uploadApi: true, uploadMaxBytes: DEFAULT_UPLOAD_MAX_BYTES };
   }
 
   const config = loadConfig();
   const httpCfg = config.mcp?.http ?? {};
+  // 启动时没有「上次运行值」可言（那是 restart 的事），故只按 CLI > 配置 > 默认 解析
+  const upload = resolveUploadApi({ cliArgs: args, configValue: httpCfg.uploadApi });
+  const uploadMaxBytes = httpCfg.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
 
   const host = getFlagValue(args, '--host') ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
 
@@ -269,7 +287,17 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     );
   }
 
-  return { http: true, host, port, token: resolvedToken, allowedHosts, localAdmin, web };
+  return {
+    http: true,
+    host,
+    port,
+    token: resolvedToken,
+    allowedHosts,
+    localAdmin,
+    web,
+    uploadApi: upload.uploadApi,
+    uploadMaxBytes,
+  };
 }
 
 /**
@@ -780,13 +808,14 @@ function isPidAlive(pid?: number): boolean {
   }
 }
 
-/** 读取 HTTP 单例 lock 文件（host/port/web 供 restart 沿用上次运行值），缺失/损坏返回 null */
+/** 读取 HTTP 单例 lock 文件（host/port/web/uploadApi 供 restart 沿用上次运行值），缺失/损坏返回 null */
 function readHttpLock(): {
   pid?: number;
   host?: string;
   port?: number;
   startedAt?: string;
   web?: boolean;
+  uploadApi?: boolean;
 } | null {
   try {
     const raw = JSON.parse(fs.readFileSync(getHttpLockPath(), 'utf-8')) as {
@@ -795,8 +824,13 @@ function readHttpLock(): {
       port?: number;
       startedAt?: string;
       web?: boolean;
+      /** 旧版 lock 无该字段：undefined 交由 resolveUploadApi 回落配置/默认 */
+      uploadApi?: unknown;
     };
-    return raw;
+    return {
+      ...raw,
+      uploadApi: typeof raw.uploadApi === 'boolean' ? raw.uploadApi : undefined,
+    };
   } catch {
     return null;
   }
@@ -985,6 +1019,16 @@ async function runRestartCommand(args: string[]): Promise<void> {
   // --no-web 显式关闭优先（可覆盖 lock 延续，让用户能去掉 web）；--web 显式开启则原样透传。
   const webExplicit = hasFlagValue(filteredArgs, '--web') || hasFlagValue(filteredArgs, '--no-web');
   if (!webExplicit && lock?.web === true) spawnArgs.push('--web');
+  // 上传 API 开关延续：与 --web 同一体例，但语义更硬 —— 不显式补回就会落到默认开启，
+  // 即「关掉后重启又开了」的安全回退（验收锚点 A9）。取值优先级 CLI > 配置 > lock > 默认，
+  // 与实际启动（parseMcpArgs）共用 resolveUploadApi，避免两处口径分叉。
+  const uploadExplicit = filteredArgs.includes('--upload-api') || filteredArgs.includes('--no-upload-api');
+  const uploadResolution = resolveUploadApi({
+    cliArgs: filteredArgs,
+    configValue: httpCfg.uploadApi,
+    lockValue: lock?.uploadApi,
+  });
+  if (!uploadExplicit) spawnArgs.push(uploadResolution.uploadApi ? '--upload-api' : '--no-upload-api');
   spawnArgs.push(...filteredArgs);
   const child = spawnMcpDaemon(spawnArgs);
 
@@ -1001,6 +1045,8 @@ async function runRestartCommand(args: string[]): Promise<void> {
         restarted: true,
         ready,
         target: { host: probeHost(host), port },
+        uploadApi: uploadResolution.uploadApi,
+        uploadApiSource: uploadResolution.source,
         stopped: report.stopped,
         cleanedLocks: report.cleanedLocks,
         hint: !ready
@@ -1155,6 +1201,15 @@ export async function startMcpServer(): Promise<void> {
     process.stderr.write(
       `已有健康的 kisearch 实例在 ${opts.host}:${opts.port}（pid ${live.pid}），复用该实例，本次不再启动。\n`,
     );
+    // 复用时本进程直接退出，开关类参数不会生效；运行中实例仍按它启动时的值工作。
+    // 不提示的话 `--no-upload-api` 会被当成已关闭，而通道其实还开着。
+    // 只采信「pid 存活」的 lock：健康实例正在应答，但 lock 可能是别的进程残留的。
+    const liveLock = (() => {
+      const l = readHttpLock();
+      return l && isPidAlive(l.pid) ? l : null;
+    })();
+    const reuseHint = describeUploadApiReuseMismatch(liveLock?.uploadApi, opts.uploadApi);
+    if (reuseHint) process.stderr.write(reuseHint);
     process.exit(0);
   }
   // 旧版 stdio 实例仍可能直接持有旧布局的 zvec 锁；拒绝其与新 owner 并存，
@@ -1275,6 +1330,8 @@ export async function startMcpServer(): Promise<void> {
     allowedHosts: opts.allowedHosts,
     localAdmin: opts.localAdmin,
     web: opts.web,
+    uploadApi: opts.uploadApi,
+    uploadMaxBytes: opts.uploadMaxBytes,
     buildServer: buildKiMcpServer,
     onShutdown: () => {
       stopDataSourceScheduler();
