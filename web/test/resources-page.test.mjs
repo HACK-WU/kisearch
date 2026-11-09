@@ -50,6 +50,7 @@ const {
   MCP_TOOLS,
   MCP_TOOLS_NOTE,
   mcpToolsDocUrl,
+  openApiDocUrl,
   MEMORY_SKILLS,
   LLM_FIELD_NOTES,
   LLM_PROTOCOL_NOTE,
@@ -197,27 +198,36 @@ describe('目录定义（左栏）', () => {
     assert.deepEqual(topicsByGroup('access').map((t) => t.id), ['mcp', 'skill', 'llm', 'embedding']);
     assert.deepEqual(
       topicsByGroup('feature').map((t) => t.id),
-      ['search', 'import', 'datasource', 'rebuild', 'deleteDoc', 'export', 'backup', 'group', 'scopeOps'],
+      ['search', 'import', 'openApi', 'datasource', 'rebuild', 'deleteDoc', 'export', 'backup', 'group', 'scopeOps'],
     );
     assert.deepEqual(
       topicsByGroup('config').map((t) => t.id),
       ['doctor', 'scope', 'token', 'concurrency'],
     );
-    assert.equal(RESOURCE_TOPICS.length, 17);
+    assert.equal(RESOURCE_TOPICS.length, 18);
     assert.deepEqual(GROUP_LABEL, { access: '接入', feature: '功能', config: '配置' });
   });
 
-  it('id 唯一；每项都有锚点（命令 → cli.md，配置 → configuration.md）', () => {
+  it('id 唯一；每项都有锚点（命令 → cli.md，配置 → configuration.md，独立文档 → docUrl）', () => {
     const ids = RESOURCE_TOPICS.map((t) => t.id);
     assert.equal(new Set(ids).size, ids.length);
     for (const topic of RESOURCE_TOPICS) {
       if (topic.group === 'access') continue;
       assert.ok(
-        typeof topic.docAnchor === 'string' || typeof topic.configAnchor === 'string',
-        `${topic.id} 缺文档锚点`,
+        typeof topic.docAnchor === 'string'
+        || typeof topic.configAnchor === 'string'
+        || typeof topic.docUrl === 'string',
+        `${topic.id} 缺文档锚点 / 文档地址`,
       );
       assert.ok(topic.title.length > 0);
       assert.ok(topic.kicker.length > 0);
+    }
+  });
+
+  it('summary 必须是纯文本（页面按 {topic.summary} 渲染，写 ** / 反引号只会原样显示）', () => {
+    for (const topic of RESOURCE_TOPICS) {
+      assert.equal(topic.summary.includes('`'), false, `${topic.id} 的 summary 含反引号`);
+      assert.equal(topic.summary.includes('**'), false, `${topic.id} 的 summary 含 **`);
     }
   });
 
@@ -237,6 +247,9 @@ describe('目录定义（左栏）', () => {
 });
 
 describe('功能示例（scope 实填）', () => {
+  /** `openApi` 面向外部程序，示例形态就是 curl / tar，不是 `ki` 子命令（2026-11-09 定） */
+  const EXTERNAL_HTTP = new Set(['openApi']);
+
   it('★ 所有示例都不留占位符，且需要 scope 的命令已实填当前 scope', () => {
     const scope = 'my-project';
     const ids = topicsByGroup('feature').map((t) => t.id);
@@ -253,7 +266,11 @@ describe('功能示例（scope 实填）', () => {
         );
       }
       for (const example of examples) {
-        assert.ok(example.command.startsWith('ki '), `${id}: 命令必须以 ki 开头`);
+        if (EXTERNAL_HTTP.has(id)) {
+          assert.match(example.command, /^(curl|tar) /, `${id}: 示例应以 curl / tar 开头`);
+        } else {
+          assert.ok(example.command.startsWith('ki '), `${id}: 命令必须以 ki 开头`);
+        }
         assert.equal(example.command.includes('<scope>'), false, `${id}: 不得留 <scope> 占位符`);
         assert.equal(example.command.includes('<s>'), false, `${id}: 不得留 <s> 占位符`);
         assert.equal(/--scope\s+<[^>]+>/.test(example.command), false, `${id}: --scope 不得是占位符`);
@@ -272,6 +289,7 @@ describe('功能示例（scope 实填）', () => {
       'import', 'datasource', 'group', 'scope', 'backup', 'restore', 'export', 'index-optimize', 'doctor', 'search', 'mcp', 'delete-relation', 'doc',
     ]);
     for (const id of topicsByGroup('feature').map((t) => t.id)) {
+      if (EXTERNAL_HTTP.has(id)) continue;  // curl / tar 不属 CLI 子命令
       for (const example of topicExamples(id, 'demo')) {
         const verb = example.command.split(/\s+/)[1];
         assert.ok(allowed.has(verb), `${id}: 未知子命令 ${verb}`);
@@ -308,6 +326,58 @@ describe('功能项的参数说明', () => {
   });
 });
 
+describe('Open API 功能项（第三方上传通道）', () => {
+  const findOpenApi = () => RESOURCE_TOPICS.find((t) => t.id === 'openApi');
+
+  it('挂在「功能」组、排在「导入」之后，kicker 为 03', () => {
+    const ids = topicsByGroup('feature').map((t) => t.id);
+    assert.equal(ids.indexOf('openApi'), ids.indexOf('import') + 1);
+    assert.equal(findOpenApi().group, 'feature');
+    assert.equal(findOpenApi().kicker, '03 · OPEN API');
+  });
+
+  it('文档指向 docs/open-api.md（不硬塞进 cli.md 的锚点）', () => {
+    assert.equal(openApiDocUrl(), `${REPO_DOCS_BASE}/open-api.md`);
+    assert.equal(findOpenApi().docUrl, openApiDocUrl());
+    assert.equal(findOpenApi().docAnchor, undefined);
+  });
+
+  it('示例是 curl / tar，地址按当前站点实填、scope 实填', () => {
+    const origin = 'http://10.0.0.5:7423';
+    const examples = topicExamples('openApi', 'prod', origin);
+    assert.equal(examples.length, 4);
+    for (const example of examples) {
+      assert.match(example.command, /^(curl|tar) /, example.label);
+      assert.ok(example.command.includes(origin), `${example.label}: 地址未实填`);
+      assert.equal(example.command.includes('<scope>'), false, `${example.label}: 不得留 <scope>`);
+    }
+    assert.ok(examples.some((e) => e.command.includes('scope=prod')), '至少一条带当前 scope');
+    assert.ok(examples.some((e) => e.command.includes('/open/v1/import/upload')));
+  });
+
+  it('参数覆盖 URL 查询串那 7 项', () => {
+    assert.deepEqual(
+      findOpenApi().params.map((p) => p.flag),
+      ['scope', 'group', 'tags', 'vector', 'conflictMode', 'chunkSize', 'chunkOverlap'],
+    );
+  });
+
+  it('配套 Skill 指向 Agent Skill 清单里真实存在的那一项', () => {
+    const companion = findOpenApi().companionSkill;
+    assert.ok(companion, 'openApi 缺配套 Skill');
+    assert.equal(companion.name, 'ki-upload');
+    assert.ok(companion.note.includes(KI_UPLOAD_TRIGGER), '说明里要给出触发话术');
+    // 交叉断言：任何配套 Skill 都必须真能在页面上装到，防指向不存在的技能
+    for (const topic of RESOURCE_TOPICS) {
+      if (!topic.companionSkill) continue;
+      assert.ok(
+        SKILL_ITEMS.some((s) => s.name === topic.companionSkill.name),
+        `${topic.id}: 配套 Skill ${topic.companionSkill.name} 不在 SKILL_ITEMS 里`,
+      );
+    }
+  });
+});
+
 describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
   it('cliDocUrl 指向 docs/cli.md，可带锚点', () => {
     assert.equal(REPO_DOCS_BASE, 'https://github.com/HACK-WU/kisearch/blob/master/docs');
@@ -315,8 +385,12 @@ describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
     assert.equal(cliDocUrl('import'), `${REPO_DOCS_BASE}/cli.md#import`);
   });
 
-  it('锚点与 docs/cli.md 的章节名同形（小写 / 连字符）', () => {
+  it('锚点与 docs/cli.md 的章节名同形（小写 / 连字符）；有 docUrl 的项不参与', () => {
     for (const topic of topicsByGroup('feature')) {
+      if (topic.docUrl !== undefined) {
+        assert.equal(topic.docAnchor, undefined, `${topic.id} 同时给了 docUrl 与 docAnchor`);
+        continue;
+      }
       assert.match(topic.docAnchor, /^[a-z][a-z-]*$/, `${topic.id} 锚点格式异常`);
     }
   });

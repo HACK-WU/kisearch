@@ -50,6 +50,16 @@ export const GENERIC_INSTALL_COMMAND =
   'curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \\\n'
   + '  bash -s -- --repo HACK-WU/kisearch -t /path/to/your-project';
 
+/**
+ * Skill 的触发话术（用户必须知道这句，否则 AI 不会动手）。
+ *
+ * 提到模块顶层而不是挨着 `SKILL_ITEMS`：`RESOURCE_TOPICS` 里的「配套 Skill」说明要引用它们，
+ * 而 `const` 有 TDZ —— 声明在后面的会被判 ReferenceError。
+ */
+export const AGENTS_MD_TRIGGER = '初始化 AGENTS.md';
+/** `ki-upload` 的触发话术（同上：不说这句，AI 不会主动上传） */
+export const KI_UPLOAD_TRIGGER = '把这个目录传到 ki';
+
 // ─── 文档外链（页面内**唯一**允许的 GitHub 链接，见设计稿 §1） ───────────────
 
 export const REPO_DOCS_BASE = 'https://github.com/HACK-WU/kisearch/blob/master/docs';
@@ -67,6 +77,11 @@ export function configDocUrl(anchor?: string): string {
 /** `docs/mcp-tools.md`（MCP 工具全表；与 CLI 文档分开） */
 export function mcpToolsDocUrl(): string {
   return `${REPO_DOCS_BASE}/mcp-tools.md`;
+}
+
+/** `docs/open-api.md`（第三方上传接口 `/open/v1`；不属 CLI 命令，故不带锚点） */
+export function openApiDocUrl(): string {
+  return `${REPO_DOCS_BASE}/open-api.md`;
 }
 
 // ─── MCP 工具清单（接入后能用什么） ────────────────────────────────────────
@@ -100,7 +115,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
       { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
       { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 Wiki 回写可用性' },
-      { name: 'ki_list_views', purpose: '列出知识视图（多个库的只读聚合，可当 scope 用）' },
+      { name: 'ki_view_list', purpose: '列出知识视图（多个库的只读聚合，可当 scope 用）' },
       { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
     ],
   },
@@ -141,7 +156,7 @@ export type ResourceTopicId =
   // 接入
   | 'mcp' | 'skill' | 'llm' | 'embedding'
   // 功能（对数据做的操作）
-  | 'import' | 'datasource' | 'search' | 'backup' | 'export' | 'rebuild' | 'group' | 'deleteDoc' | 'scopeOps'
+  | 'import' | 'openApi' | 'datasource' | 'search' | 'backup' | 'export' | 'rebuild' | 'group' | 'deleteDoc' | 'scopeOps'
   // 配置（改配置 / 管凭据 / 诊断）
   | 'scope' | 'token' | 'doctor' | 'concurrency';
 
@@ -158,10 +173,24 @@ export interface ResourceTopic {
   summary: string;
   /** `docs/cli.md` 的章节锚点（功能项必有） */
   docAnchor?: string;
+  /**
+   * 整条文档地址（优先于 `docAnchor` / `configAnchor`）。
+   *
+   * 给「文档不在 `cli.md` 里」的功能项用：`Open API` 的说明在 `docs/open-api.md`，
+   * 硬塞进 `cli.md#anchor` 会链到不存在的章节。
+   */
+  docUrl?: string;
   /** `docs/configuration.md` 的章节锚点（配置类功能项才有） */
   configAnchor?: string;
   /** 常用参数说明（只列关键的几条，完整参数表在 docs） */
   params?: TopicParam[];
+  /**
+   * 配套 Skill：这东西已经有现成的客户端封装时填，页面在「常用示例」之后提示。
+   *
+   * `name` 必须是 `SKILL_ITEMS` 里真实存在的一项（测试有交叉断言），
+   * 否则会指向一个装不上的技能。
+   */
+  companionSkill?: { name: string; note: string };
 }
 
 /** 一条参数说明 */
@@ -235,7 +264,32 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'datasource', group: 'feature', label: '数据源', title: '数据源登记与同步', kicker: '03 · DATASOURCE',
+    // 2026-11-09 用户定稿：放在「导入」之后 —— 两者都是「把外部内容弄进来」，
+    // 区别只在通道：`ki import` 需要文件与 ki 同机，`/open/v1` 给的是跨机程序。
+    // 文档在 `docs/open-api.md`（不属 CLI 命令），故用 docUrl 而不是 docAnchor。
+    id: 'openApi', group: 'feature', label: 'Open API', title: '第三方上传接口', kicker: '03 · OPEN API',
+    // summary 按纯文本渲染（见 FeatureSection），不要写反引号之类的标记
+    summary: '给不在 ki 机器上的程序（AI Agent / CI / 采集器）用的上传通道：只认 Bearer Token，'
+      + 'curl -F 传单文件、tar | curl 传整目录，对方不需要装 ki。',
+    docUrl: openApiDocUrl(),
+    params: [
+      { flag: 'scope', desc: '目标库（写进 URL 查询串），默认 default；不在 Token 授权集合内返回 403' },
+      { flag: 'group', desc: '落点目录；不能是绝对路径、不能含 ..、不能写保留名 __root__（要落根就留空）' },
+      { flag: 'tags', desc: '逗号分隔的自定义标签，与 Web 导入页的标签同义' },
+      { flag: 'vector', desc: '1 = 做向量化（默认）；0 = 只建全文索引，等价 ki import --no-vector' },
+      { flag: 'conflictMode', desc: '同名策略，默认 incremental；另有 overwrite / skip / suffix' },
+      { flag: 'chunkSize', desc: '切分长度 100–4000，超出即报 OPEN_API_INVALID_CHUNK' },
+      { flag: 'chunkOverlap', desc: '切分重叠 0–500，且必须小于 chunkSize' },
+    ],
+    companionSkill: {
+      name: 'ki-upload',
+      note: '这套调用已封装成 skill（Python + httpflex：上传前自检、上传后自动轮询导入进度，'
+        + '并按 import.state 判成功）。不想手写 curl 时，说一句「' + KI_UPLOAD_TRIGGER + '」让 AI 走它即可；'
+        + '补依赖与 Token 的步骤见左栏「Agent Skill」。',
+    },
+  },
+  {
+    id: 'datasource', group: 'feature', label: '数据源', title: '数据源登记与同步', kicker: '04 · DATASOURCE',
     summary: '登记本地目录或 Git 源后按需同步。同步只「导入 + 计算待删候选」，永不自动删除 —— 删除必须另行确认。',
     docAnchor: 'datasource',
     params: [
@@ -248,8 +302,9 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'rebuild', group: 'feature', label: '向量重建', title: '向量重建', kicker: '04 · REBUILD',
-    summary: '换过 embedding 模型 / 维度，或索引损坏时重建。会**全库重算**，耗时与文档量成正比。',
+    id: 'rebuild', group: 'feature', label: '向量重建', title: '向量重建', kicker: '05 · REBUILD',
+    // summary 按纯文本渲染（见 FeatureSection），不要写 ** / 反引号：页面不会解析，只会原样显示
+    summary: '换过 embedding 模型 / 维度，或索引损坏时重建。会全库重算，耗时与文档量成正比。',
     docAnchor: 'restore',
     params: [
       { flag: '--rebuild-vector', desc: '重建向量；可配 --group 只重建子树（幂等，不清其它向量）、--tags 给重建范围打标' },
@@ -258,7 +313,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'deleteDoc', group: 'feature', label: '删除文档', title: '删除文档', kicker: '05 · DELETE',
+    id: 'deleteDoc', group: 'feature', label: '删除文档', title: '删除文档', kicker: '06 · DELETE',
     summary: '按 Group + 文档名删一条知识文档，连带清理 KB 原文、wiki 源文件、向量与全文索引 —— 不可恢复，没有回收站。',
     docAnchor: 'delete-relation',
     params: [
@@ -269,7 +324,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'export', group: 'feature', label: '导出为 Wiki', title: '导出为 Wiki', kicker: '06 · EXPORT',
+    id: 'export', group: 'feature', label: '导出为 Wiki', title: '导出为 Wiki', kicker: '07 · EXPORT',
     summary: '把知识库反向导出成 Markdown Wiki，便于迁移或对外发布。',
     docAnchor: 'export',
     params: [
@@ -280,7 +335,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'backup', group: 'feature', label: '备份与还原', title: '备份与还原', kicker: '07 · BACKUP',
+    id: 'backup', group: 'feature', label: '备份与还原', title: '备份与还原', kicker: '08 · BACKUP',
     summary: '备份 scope 目录快照；还原可指定快照文件，也可顺带重建向量。',
     docAnchor: 'backup',
     params: [
@@ -292,8 +347,8 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'group', group: 'feature', label: 'Group 操作', title: 'Group 操作', kicker: '08 · GROUP',
-    summary: 'Group 是知识目录的层级路径（如 `项目/API`）。创建可带父路径，删除不写 `--yes` 只预览。',
+    id: 'group', group: 'feature', label: 'Group 操作', title: 'Group 操作', kicker: '09 · GROUP',
+    summary: 'Group 是知识目录的层级路径（如「项目/API」）。创建可带父路径，删除不写 --yes 只预览。',
     docAnchor: 'group',
     params: [
       { flag: '<path>', desc: 'Group 路径，支持多级（如 项目/API）；create 要求父级已存在' },
@@ -302,7 +357,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
     ],
   },
   {
-    id: 'scopeOps', group: 'feature', label: 'Scope 数据操作', title: 'Scope 数据操作', kicker: '09 · SCOPE OPS',
+    id: 'scopeOps', group: 'feature', label: 'Scope 数据操作', title: 'Scope 数据操作', kicker: '10 · SCOPE OPS',
     summary: '清空或删除某个 scope 实际存的数据（KB 目录 + 向量两层）。破坏性操作，都需 --yes 且不可撤销。',
     docAnchor: 'scope',
     params: [
@@ -382,14 +437,37 @@ function scopeOr(scope: string): string {
  *
  * ⚠️ scope **实填**（用户 2026-10-27 要求）：复制即可执行，不留 `<scope>` 占位符。
  * 命令语法以 `ki --help` + `docs/cli.md` 为准，不得臆造参数。
+ *
+ * `origin` 只给 `openApi` 用：那个通道是 HTTP，示例要给完整的服务地址；
+ * 地址由页面按 `window.location.origin` 实填（沿用「不硬编码 7423」约束），
+ * 不传时留空（单测按纯字符串断言，不关心地址）。
  */
-export function topicExamples(id: ResourceTopicId, scope: string): TopicExample[] {
+export function topicExamples(id: ResourceTopicId, scope: string, origin = ''): TopicExample[] {
   const s = scopeOr(scope);
   switch (id) {
     case 'import':
       return [
         { label: '导入整个目录', command: `ki import --scope ${s} --source ./wiki --group wiki` },
         { label: '强制覆盖同名文档（默认 incremental：内容没变就跳过重算）', command: `ki import --scope ${s} --source ./wiki --group wiki --conflict-mode overwrite` },
+      ];
+    case 'openApi':
+      return [
+        {
+          label: '自检：确认 Token 与服务正常，顺带看这个库的上限',
+          command: `curl -s -H "Authorization: Bearer $KI_TOKEN" "${origin}/open/v1/ping?scope=${s}"`,
+        },
+        {
+          label: '上传一份文档（multipart，不用 base64）',
+          command: `curl -s -H "Authorization: Bearer $KI_TOKEN" -F "files=@big.md" "${origin}/open/v1/import/upload?scope=${s}&group=wiki"`,
+        },
+        {
+          label: '上传整个目录（打包根 = 知识库根，层级不会下沉）',
+          command: `tar czf - -C ./docs . | curl -s -H "Authorization: Bearer $KI_TOKEN" -H 'Content-Type: application/gzip' --data-binary @- "${origin}/open/v1/import/upload?scope=${s}"`,
+        },
+        {
+          label: '查导入进度（taskId 用上一步返回的值）',
+          command: `curl -s -H "Authorization: Bearer $KI_TOKEN" "${origin}/open/v1/import/status?taskId=<taskId>"`,
+        },
       ];
     case 'datasource':
       return [
@@ -482,12 +560,6 @@ export interface SkillItem {
    */
   note: string;
 }
-
-/** `agents-md-init` 的触发话术（用户必须知道这句，否则文件永远不会生成） */
-export const AGENTS_MD_TRIGGER = '初始化 AGENTS.md';
-
-/** `ki-upload` 的触发话术（同上：不说这句，AI 不会主动上传） */
-export const KI_UPLOAD_TRIGGER = '把这个目录传到 ki';
 
 /**
  * 本仓库（`HACK-WU/kisearch`）`skills/` 下的全部 Skill —— 目前三个。

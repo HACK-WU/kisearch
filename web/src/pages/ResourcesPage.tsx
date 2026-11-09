@@ -6,7 +6,8 @@
  * 约束：
  *   · MCP 地址/端口由 window.location 推导，不硬编码 7423；
  *   · 页面只给参考命令与示例，不执行命令、不展示真实 Token / apiKey；
- *   · 页面内**唯一** GitHub 外链是 docs/cli.md（用户 2026-10-27 放宽原「不跳 GitHub」约束）；
+ *   · 页面内的 GitHub 外链**只限文档**：docs/cli.md / configuration.md / mcp-tools.md / open-api.md
+ *     （用户 2026-10-27 放宽原「不跳 GitHub」约束；原写「唯一 cli.md」已与实现不符）；
  *   · 示例命令的 scope 由顶栏当前 scope 实填，不留 `<scope>` 占位符。
  */
 
@@ -112,6 +113,13 @@ const FEATURE_CAUTION: Partial<Record<ResourceTopicId, { tone: 'warn' | 'info'; 
     tone: 'warn',
     title: '重建会全库重算，耗时与文档量成正比',
     body: '执行期间检索可能变慢；换过 embedding 模型或维度不一致时才需要重建。',
+  },
+  openApi: {
+    tone: 'warn',
+    title: '默认单文件上限只有 1MB',
+    body: '「一份大文档」是最先撞上的场景：单文件上限由 scopes.<库名>.import.maxFileSize 决定，'
+      + '整次请求体上限是 mcp.http.uploadMaxBytes。若前面还有 nginx 之类的反向代理，'
+      + '它的 client_max_body_size 默认也是 1MB，会在请求到达 ki 之前就拒掉 —— 此时 ki 日志里什么都看不到。',
   },
   group: {
     tone: 'info',
@@ -1103,9 +1111,16 @@ function ScopeSection({ scope }: { scope: string }): JSX.Element {
   );
 }
 
+/** `…/docs/open-api.md` → `open-api.md`（外链括号里那半句，避免文件名写两处） */
+function docFileName(url: string): string {
+  return url.slice(url.lastIndexOf('/') + 1);
+}
+
 function FeatureSection({ topic }: { topic: ResourceTopic }): JSX.Element {
   const scope = useScopeValue();
-  const examples = topicExamples(topic.id, scope);
+  // Open API 的示例是 curl / tar，要给完整服务地址（按当前站点推导，不硬编码端口）；
+  // 其余功能项都是 CLI 命令，忽略这个参数。
+  const examples = topicExamples(topic.id, scope, window.location.origin);
   const caution = FEATURE_CAUTION[topic.id];
 
   return (
@@ -1159,6 +1174,21 @@ function FeatureSection({ topic }: { topic: ResourceTopic }): JSX.Element {
         </>
       ) : null}
 
+      {/* 配套 Skill 是补充信息、不是警示：不用 Notice（info 语气是黄底，看着像出错），
+          也不做纯灰字（太弱、混在正文里看不见）。用 `.res-callout` —— 与向量一致性结论块
+          同一套视觉，但取品牌色，不带状态语义。 */}
+      {topic.companionSkill ? (
+        <div className="res-callout">
+          <div className="res-callout__head">
+            <span className="res-callout__dot" aria-hidden="true" />
+            <span className="res-callout__title">
+              配套 Skill · <code>{topic.companionSkill.name}</code>
+            </span>
+          </div>
+          <p className="res-callout__body">{topic.companionSkill.note}</p>
+        </div>
+      ) : null}
+
       {topic.params && topic.params.length > 0 ? (
         <>
           <h3 className="res-subhead">
@@ -1184,7 +1214,19 @@ function FeatureSection({ topic }: { topic: ResourceTopic }): JSX.Element {
         <Icon name="info" className="ki-icon res-foot__icon" />
         <span>
           这里只列常用部分。
-          {topic.configAnchor ? (
+          {topic.docUrl ? (
+            <>
+              <a
+                className="res-link"
+                href={topic.docUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                接口文档与完整参数表 ↗
+              </a>
+              （docs/{docFileName(topic.docUrl)}）
+            </>
+          ) : topic.configAnchor ? (
             <>
               <a
                 className="res-link"

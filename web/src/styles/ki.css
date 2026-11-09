@@ -3502,6 +3502,8 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
   color: var(--ki-color-text-subtle); background: var(--ki-color-bg-secondary);
 }
 .ki-task-source-badge--cli { color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); }
+/* 第三方程序（/open/v1 上传）：与「网页」「CLI」都要一眼分开 —— 这类任务不是人点的 */
+.ki-task-source-badge--open-api { color: var(--ki-color-info); background: color-mix(in srgb, var(--ki-color-info) 12%, transparent); }
 .ki-task-table__operator { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); }
 .ki-task-table__result { display: flex; flex-direction: column; gap: 2px; min-width: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
 .ki-task-table__summary,
@@ -7611,6 +7613,36 @@ select.ki-chat-cfg__ta--select {
     letter-spacing: .04em;
   }
 }
+
+/* ── 页面内信息块（res-callout）──
+   给「有实质信息、但不是警示」的补充说明用（如资源页的「配套 Skill」）。
+   视觉照搬 `.res-dim`（浅底 + 1px 描边 + 圆点标题 + 正文），
+   但用品牌色而不是 success / warning 语义色 —— 它没有「状态」含义，
+   也不该像 `.ki-notice--info` 那样铺一块黄底（那看着像出错了）。 */
+.res-callout {
+  display: grid; gap: 6px;
+  margin-top: var(--ki-space-3);
+  padding: 11px 13px 12px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-primary) 20%, var(--ki-color-border));
+  border-radius: var(--ki-radius-md);
+  background: color-mix(in srgb, var(--ki-color-primary) 4%, var(--ki-color-bg-secondary));
+}
+.res-callout__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.res-callout__dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--ki-color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 14%, transparent);
+}
+.res-callout__title { color: var(--ki-color-text); font-size: 13px; font-weight: 650; }
+.res-callout__title code {
+  padding: 1px 5px;
+  border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-primary);
+  font: 600 12px var(--ki-font-mono);
+}
+/* 块内正文：比 `.res-help` 略收一点，避免整段抢走圆点标题的层级 */
+.res-callout__body { margin: 0; color: var(--ki-color-text-muted); font-size: 12.5px; line-height: 1.65; }
 
 /* ── 当前 scope 的向量一致性结论块 ──
    取代「11px 药丸 + 重新检查按钮」：主行结论词 + 集合/配置维度对比 + 出路命令。
