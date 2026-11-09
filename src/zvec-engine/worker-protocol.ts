@@ -58,6 +58,24 @@ export interface MultiQueryPayload {
   topk: number;
   rerankRrf?: { rankConstant?: number };
   rerankWeighted?: { weights: number[] };
+  /**
+   * 额外返回**分路原始分**（`routeScores`）。
+   *
+   * 为 true 时 worker 改为「逐路查询 + 自行融合」，因为 zvec 的 `multiQuerySync`
+   * 融合后只保留融合分，拿不到两路各自的分数。仅跨库合并需要它；
+   * 单库请求保持 false，走原生的 `multiQuerySync`（零变化）。
+   */
+  withRouteScores?: boolean;
+  /**
+   * 库内评分算法。仅 `withRouteScores=true` 时生效。
+   *
+   * - `dynamic-ratio`：库内直接算最终分并按最终分截断（绝对分，跨库可比）；
+   * - `fts-weighted-rrf`：单库专用（`向量名次分 + (bm25/50) × 字面名次分`），同样库内截断；
+   * - 其余（或缺省）：只带出分路分数，仍按融合分截断，由上层统一重排。
+   */
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf';
+  /** 语义补充系数（calibrated-semantic 专用）；缺省用 scoring.ts 的 SEMANTIC_BONUS */
+  semanticBonus?: number;
   filterSql?: string;
   outputFields?: string[];
   includeVector?: boolean;
@@ -116,6 +134,12 @@ export interface RawHitPayload {
   fields: Record<string, ScalarValue>;
   text?: string;
   vector?: Float32Array;      // Transferable
+  /** hybrid 且 withRouteScores=true 时的分路原始分：[向量路, 字面路] */
+  routeScores?: number[];
+  /** 名次分（两路 `Σ 1/(k+rank)`）；用于前端展示分数构成 */
+  rrf?: number;
+  /** 定标加权分（不含语义补充）；用于前端展示分数构成 */
+  baseScore?: number;
 }
 
 export interface DocPayload {

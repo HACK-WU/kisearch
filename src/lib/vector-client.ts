@@ -34,6 +34,7 @@ import {
 } from '../../dist/zvec-engine/index.js';
 import type { EmbeddingProvider } from '../zvec-engine/embedding/provider.js';
 import { EmbeddingSchedulerRuntime, type EmbeddingSchedulerConfig, type EmbeddingSchedulerMetrics } from '../zvec-engine/embedding/batch-scheduler.js';
+import { SINGLE_SCOPE_RANKING } from '../zvec-engine/scoring.js';
 import type { ZvecWriteOptions } from '../zvec-engine/types.js';
 import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 import { loadConfig, getEmbeddingConfig, resolveScope } from './config.js';
@@ -62,6 +63,17 @@ export interface VectorSearchResult {
   group?: string;
   /** 命中所属 scope（多 scope 检索时供上层区分来源/反查定位；旧库缺字段时可能缺失） */
   scope?: string;
+  /**
+   * 向量路**绝对相似度**（0.33~1，1/(1+cosine distance)）。
+   * hybrid 走逐路查询时携带（单库与多库都有）；某路没召回该文档时为 0。
+   */
+  vectorScore?: number;
+  /** 字面路 **BM25 原值**（可与跨库合并直接比较的量级）。hybrid 逐路查询时携带。 */
+  ftsScore?: number;
+  /** 名次分（两路 `Σ 1/(k+rank)`，最大 2/61≈0.0328）。hybrid 逐路查询时携带。 */
+  rrfScore?: number;
+  /** 定标加权分（不含语义补充）。仅多库的 dynamic-ratio / calibrated-* 携带。 */
+  baseScore?: number;
 }
 
 export interface VectorStoreResult {
@@ -319,6 +331,15 @@ export function isQueryEmbedDegradable(err: unknown): boolean {
 //   - 空闲释放锁：常驻 daemon 空闲超时后释放所有 Collection；CLI 短命令不启用。
 
 /** 撞锁后重试等待间隔（ms） */
+/**
+ * 单个成员的检索上限（仅多库 / 视图请求启用）。
+ *
+ * 单库请求**不设**此上限：大库冷启动可能超过 5s，给它加超时等于让单库检索更容易失败。
+ * 多库时则相反 —— 一个库卡住会拖住整次响应，跳过它并上报（与「缺 Collection 跳过」同口径）
+ * 比让用户等更划算。
+ */
+const PER_SCOPE_SEARCH_TIMEOUT_MS = 5_000;
+
 const LOCK_RETRY_INTERVAL_MS = 2_000;
 /** 撞锁重试上限次数（最多额外等待 LOCK_RETRY_INTERVAL_MS × LOCK_RETRY_MAX 后仍锁则报错） */
 const LOCK_RETRY_MAX = 3;
@@ -995,6 +1016,18 @@ export async function vectorSearch(params: {
   threshold?: number;
   /** 查询 embedding 超时（ms）；未传时使用 embedding.queryTimeoutMs。 */
   timeoutMs?: number;
+  /**
+   * 库内评分算法（**仅多库 / 视图生效**）。
+   *
+   * `dynamic-ratio` 时由引擎在**库内**算好最终分并按最终分截断，上层不再重排 ——
+   * 这样「字面分最高但名次一般」的文档不会在库内就被名次挤掉。
+   *
+   * ★ 单库不读这个值：单库固定用「字面加权 RRF」（`fts-weighted-rrf`，见 scoring.ts），
+   *   与本参数列出的跨库算法不可比，混用会让单库结果随多库算法切换而漂移。
+   */
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive';
+  /** 语义补充系数（calibrated-semantic 专用） */
+  semanticBonus?: number;
   /** 测试/嵌入适配器注入；生产调用不传，默认使用配置中的 provider。 */
   embeddingProvider?: Pick<EmbeddingProvider, 'embed' | 'dimension'>;
   /**
@@ -1056,15 +1089,56 @@ export async function vectorSearch(params: {
   // 引擎层硬上限（MAX_TOPK=1000）：adapter 先收敛，避免任何调用方组合出 >1000 的 topk
   // 直接被引擎拒绝（CLI/MCP 的 limit 无上界，放大路径见 search.ts 的 tag 数乘法）。
   const topk = Math.min(params.limit ?? 10, SEARCH_TOPK_MAX);
+  /** 单成员上限只在「调用方会处理成员级失败」时启用（多库 / 视图）；单库不设，避免大库冷启动被误杀 */
+  const perScopeTimeoutMs = params.onScopeError ? PER_SCOPE_SEARCH_TIMEOUT_MS : undefined;
+  /** 请求形态是否多库（视图 / `--scope a,b`）：决定走跨库算法还是单库算法 */
+  const multiScopeRequest = existingScopes.length > 1;
+  /**
+   * 逐路查询，换取**分路原始分**（向量绝对相似度 / 字面 BM25）。
+   *
+   * 两条路都要它：
+   * - 单库：单库公式是「向量名次分 + 字面权重 × 字面名次分」，没有 BM25 就算不出来；
+   * - 多库：跨库合并要用两路绝对分，否则只能再跑一轮跨库全文检索
+   *   （实测 12 库会把 3s 拖到分钟级）。
+   *
+   * 代价：一次 hybrid 变成两路查询。引擎内部两路**并行**，单库耗时接近原来的一次查询
+   * （候选放大见下方 routeTopk），但仍比原生 `multiQuerySync` 多一次索引访问。
+   */
+  const wantRouteScores = true;
+  /**
+   * 单库固定用「字面加权 RRF」，多库用调用方选的跨库算法。
+   *
+   * `params.ranking` 是多库算法（weighted / dynamic-ratio…），对单库无意义 ——
+   * 单库若跟着走，用户切换算法会让单库结果一起漂移，而两套公式的分数不可比。
+   */
+  const engineRanking = multiScopeRequest ? params.ranking : SINGLE_SCOPE_RANKING;
   const perScope = await Promise.all(existingScopes.map(async (scope): Promise<Hit[]> => {
     const filter = buildScopeTagFilter([scope], tagList);
     try {
-      return await withEngine(scope, (engine) => engine.hybridSearch({
+      const run = withEngine(scope, (engine) => engine.hybridSearch({
         ...(queryVector !== undefined ? { vector: queryVector } : {}),
         fts: params.query,
         topk,
         filter,
+        ...(wantRouteScores
+          ? {
+              withRouteScores: true,
+              ...(engineRanking !== undefined ? { ranking: engineRanking } : {}),
+              ...(params.semanticBonus !== undefined ? { semanticBonus: params.semanticBonus } : {}),
+            }
+          : {}),
       }));
+      if (perScopeTimeoutMs === undefined) return await run;
+      const outcome = await withTimeoutFallback(run, (): Hit[] => [], perScopeTimeoutMs);
+      if (outcome.timedOut) {
+        // 超时与「抛错」同一处置：跳过该成员并上报，其余成员照常返回
+        params.onScopeError?.(
+          scope,
+          new Error(`scope "${scope}" 检索超过 ${perScopeTimeoutMs / 1000}s 未返回（已跳过该成员，其余库结果不受影响）`),
+        );
+        return [];
+      }
+      return outcome.value;
     } catch (err) {
       // 保留底层 code（如 VECTOR_DIMENSION_MISMATCH）：HTTP 层按 code 回给前端，
       // 这里若丢掉，检索页就只能靠错误串猜，与导入页的口径会分叉。
@@ -1090,11 +1164,22 @@ export async function vectorSearch(params: {
       tag: h.fields?.[TAG_FIELD] !== undefined ? String(h.fields[TAG_FIELD]) : undefined,
       group: h.fields?.[GROUP_FIELD] !== undefined ? String(h.fields[GROUP_FIELD]) : undefined,
       scope: h.fields?.[SCOPE_FIELD] !== undefined ? String(h.fields[SCOPE_FIELD]) : undefined,
+      // 分路原始分：[向量路绝对相似度, 字面路 BM25]（仅多库请求携带）
+      ...(h.routeScores
+        ? { vectorScore: h.routeScores[0] ?? 0, ftsScore: h.routeScores[1] ?? 0 }
+        : {}),
+      ...(h.rrf !== undefined ? { rrfScore: h.rrf } : {}),
+      ...(h.baseScore !== undefined ? { baseScore: h.baseScore } : {}),
     }))
     // 降级（FTS-only）时跳过 threshold：FTS 分数尺度（BM25 量级）与混合 RRF 分数
     // （~0.01–0.03 量级）不可比，套用用户按混合分数设定的阈值会造成不可预期的空结果；
     // 宁可多返回，由上层 degraded 标记告知调用方。
+    //
+    // ★ 多库 dynamic-ratio 同样跳过：它的分数是「(名次分 + 字面加成)/2」的**最终分**（0~0.1 量级），
+    //   而 Threshold 滑块按加权融合（0~2.5 量级）设计 —— 用户沿用旧阈值（如 0.15）会把结果一次清空。
+    //   单库不走这条算法（`ranking` 仅多库生效），仍然按原来的 RRF 分数与阈值比较。
     .filter((r) => degradeReason !== undefined
+      || (multiScopeRequest && params.ranking === 'dynamic-ratio')
       || params.threshold === undefined
       || r.score >= params.threshold);
   return mergeVectorSearchHits([normalized], topk);

@@ -137,6 +137,26 @@ export interface HybridSearchReq extends SearchOptions {
     weights?: Record<string, number>;
     rankConstant?: number;
   };
+  /**
+   * 额外返回分路原始分（`Hit.routeScores`）。
+   *
+   * 打开后引擎改为「逐路查询 + 自行融合」，排序结果与原生多路融合一致，
+   * 但能多带出「向量路绝对相似度 / 字面路 BM25」——跨库合并靠它做加权，
+   * 不必再单独跑一轮全文检索。
+   */
+  withRouteScores?: boolean;
+  /**
+   * 库内评分算法（仅 `withRouteScores=true` 时生效）。
+   *
+   * - `dynamic-ratio`：库内直接算出最终分并按最终分截断 —— 公式只依赖名次分的量级，
+   *   不含候选池最大值，所以库内算完即可跨库比较；
+   * - `fts-weighted-rrf`：**单库专用**（`向量名次分 + (bm25/50) × 字面名次分`），
+   *   库内按最终分截断；由 adapter 固定注入，不作为用户可选算法；
+   * - 其余：只带出分路分数，仍按融合分截断，由上层统一重排。
+   */
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf';
+  /** 语义补充系数（calibrated-semantic 专用） */
+  semanticBonus?: number;
 }
 
 export interface Hit {
@@ -152,6 +172,18 @@ export interface Hit {
   fields: Record<string, ScalarValue>;
   text?: string;
   vector?: number[];
+  /**
+   * hybrid 且请求了 `withRouteScores` 时的**分路原始分**：`[向量路, 字面路]`。
+   *
+   * 向量路是绝对相似度（1/(1+distance)），字面路是 BM25 原值 —— 两者都带绝对意义，
+   * 上层做跨库合并时可以直接用它们，**不必再跑一轮检索**去取字面分。
+   * 某一路没召回该文档时，该位为 0。
+   */
+  routeScores?: number[];
+  /** 名次分（两路 `Σ 1/(k+rank)`）；用于展示分数构成 */
+  rrf?: number;
+  /** 定标加权分（不含语义补充）；用于展示分数构成 */
+  baseScore?: number;
 }
 
 // ─── 写入结果（S-06 §4b） ───
