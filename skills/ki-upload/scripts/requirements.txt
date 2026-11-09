@@ -1,0 +1,4 @@
+# httpflex 尚未发布到 PyPI（pip install httpflex 会失败），从仓库安装：
+#   pip install -r requirements.txt
+# 需要 Python >= 3.11；运行期仅依赖 requests（由 httpflex 带入）。
+httpflex @ git+https://github.com/HACK-WU/httpflex.git
