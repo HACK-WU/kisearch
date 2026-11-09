@@ -30,7 +30,7 @@
 | 配置项逐条说明与字段校验 | [configuration.md](./configuration.md) |
 | **给外部程序（AI Agent / CI）上传文档**：`curl` / `tar` 推文件、进度查询、Token 与开关 | [open-api.md](./open-api.md) |
 | MCP HTTP 共享单例、鉴权、`/api/*` 路由 | [mcp-http.md](./mcp-http.md) |
-| 13 个 MCP 工具及参数 | [mcp-tools.md](./mcp-tools.md) |
+| 14 个 MCP 工具及参数 | [mcp-tools.md](./mcp-tools.md) |
 | 常见报错与恢复方式 | [error-handling.md](./error-handling.md) |
 
 ## 机制与设计

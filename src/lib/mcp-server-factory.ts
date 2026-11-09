@@ -19,6 +19,7 @@ import { registerStoreTool } from './mcp-tools/store.js';
 import { registerBulkStoreTool } from './mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './mcp-tools/delete-relation.js';
 import { registerScopeListTool } from './mcp-tools/scope-list.js';
+import { registerViewListTool } from './mcp-tools/view-list.js';
 import { registerTagListTool } from './mcp-tools/tag-list.js';
 import { READ_ONLY_INSTRUCTIONS } from './mcp-tools/tool-access.js';
 import { readKiVersion } from './version-guard.js';
@@ -43,13 +44,14 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     },
     readOnly ? { instructions: READ_ONLY_INSTRUCTIONS } : undefined,
   );
-  // ── 读工具（5 个）：只读会话同样注册 ──
+  // ── 读工具（6 个）：只读会话同样注册 ──
   // ⚠️ 新增读工具时同步加入 mcp-tools/tool-access.ts::READ_ONLY_TOOL_NAMES，
   //    否则只读 Token 看不见它（方向安全，但功能缺失）。
   registerSearchTool(server);
   registerGetModuleInfoTool(server);
   registerGroupListTool(server);
   registerScopeListTool(server, authScopes);
+  registerViewListTool(server, authScopes);
   registerTagListTool(server);
   // ── 写工具（8 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；

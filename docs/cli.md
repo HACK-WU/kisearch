@@ -1194,7 +1194,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **并发写入**：Token 创建/更新/删除/归属迁移使用 `~/.ki/mcp-tokens.json.lock` 文件锁串行化；锁等待超过 5 秒返回 `MCP_TOKEN_LOCKED`，异常退出后 30 秒可自动恢复 stale 锁。纯读取不加锁。
 
-> **只读 Token**：远程 MCP 客户端连上后只看到 5 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读只约束 MCP 通道（`/api/*` 与 chat 通道不受限），语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
+> **只读 Token**：远程 MCP 客户端连上后只看到 6 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读只约束 MCP 通道（`/api/*` 与 chat 通道不受限），语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
 
 > **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储、`--token` 全权临时 Token 或 `ki user` 创建 Web 账号）。
 >
@@ -1848,7 +1848,7 @@ wiki-output/
 - [文档索引](./README.md) - 按使用意图查找文档
 - [架构与协作关系](./architecture.md) - kisearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
-- [MCP 工具参考](./mcp-tools.md) - 13 个工具及参数
+- [MCP 工具参考](./mcp-tools.md) - 14 个工具及参数
 - [ki import 详解](./import.md) - 导入流程、参数与幂等追加语义（原文直导，无 AI）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案
 - [典型工作流](./workflows.md) - 完整的使用场景和最佳实践

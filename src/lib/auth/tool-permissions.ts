@@ -9,11 +9,12 @@
 import type { Capability } from './capabilities.js';
 
 export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
-  // 读工具（5）
+  // 读工具（6）
   ki_search: 'knowledge.read',
   ki_get_module_info: 'knowledge.read',
   ki_group_list: 'knowledge.read',
   ki_scope_list: 'knowledge.read',
+  ki_view_list: 'knowledge.read',
   ki_tag_list: 'knowledge.read',
   // 写工具（8）
   ki_store: 'knowledge.write',

@@ -217,6 +217,14 @@ export interface ScopeListResponse {
    * 顶栏退化成改造前的平面列表）。
    */
   views?: ViewInfo[];
+  /**
+   * 视图定义读取失败（已按「无视图」降级）。
+   *
+   * ★ 与 `views` 缺省是两件事：有该字段 = **没读成**，此时 `views` 缺省
+   *   不代表"一个视图都没建"。页面当前不展示它（视图数据走 `/api/views`），
+   *   但契约必须收录，否则将来要用时无从察觉。
+   */
+  viewsWarning?: string;
   /** 向量层是否可用；false 表示已降级为仅 KB 层枚举（如向量库被导入进程持锁） */
   vectorAvailable?: boolean;
   /** 向量层不可用原因（降级时用于悬停提示） */

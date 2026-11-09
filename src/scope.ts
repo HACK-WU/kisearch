@@ -28,6 +28,7 @@ import {
   getScopeWikiSync,
   isScopeReadonly,
   setScopeReadonlyInConfigFile,
+  type KiConfig,
 } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { readViews, isViewName, getViewMembers } from './lib/scope-view.js';
@@ -280,18 +281,41 @@ export type ScopeListResult = {
   scopes: ScopeEntry[];
   /** 视图定义（按当前 Token 的授权过滤在工具层做；这里给全集） */
   views?: ViewInfo[];
+  /**
+   * 视图定义读取失败（已按「无视图」降级）。
+   *
+   * ★ 与 `views` 是两件事，必须分开表达：没有该字段 = 读过且确实没有视图；
+   *   有该字段 = **没读成**，此时 `views` 缺省不代表"一个都没建"。
+   */
+  viewsWarning?: string;
 };
 
-export async function executeScopeListLocal(): Promise<ScopeListResult> {
-  const config = loadConfig();
+/**
+ * scope 的两层枚举结果（KB 目录层 + 向量语义层）。
+ *
+ * 抽出来的原因：视图成员元信息（`availableCount` / `missing`）依赖这两层判定，
+ * 而 `ki_scope_list` 与 `ki_view_list` 都要用 —— 各写一份必然漂移成两套事实。
+ */
+export interface ScopeLayers {
+  kbScopes: Set<string>;
+  vectorScopes: Set<string>;
+  vectorAvailable: boolean;
+  vectorReason?: string;
+}
+
+/**
+ * 枚举 scope 的两层存在性，供 scope 列表与视图列表共用。
+ *
+ * fastFail：scope 枚举走单次 probe，撞锁立即降级为仅 KB 层（不依赖向量引擎），
+ * 不像写入/检索路径那样重试等锁——scope 下拉不应因向量锁挂起十余秒。
+ */
+export async function collectScopeLayers(): Promise<ScopeLayers> {
   const kbScopes = new Set(listAllScopes());
 
   let vectorScopes = new Set<string>();
   let vectorAvailable = true;
   let vectorReason: string | undefined;
 
-  // fastFail：scope 枚举走单次 probe，撞锁立即降级为仅 KB 层（不依赖向量引擎），
-  // 不像写入/检索路径那样重试等锁——scope 下拉不应因向量锁挂起十余秒
   const avail = await ensureVectorAvailable(undefined, { fastFail: true });
   if (avail.available) {
     try {
@@ -304,6 +328,117 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
     vectorAvailable = false;
     vectorReason = avail.reason;
   }
+
+  return { kbScopes, vectorScopes, vectorAvailable, vectorReason };
+}
+
+export interface ViewsBuildResult {
+  /** 无视图定义时**不带**该字段（与 `executeScopeListLocal` 的既有口径一致） */
+  views?: ViewInfo[];
+  /** 非空 = 视图定义文件损坏，已按「无视图」降级 */
+  warning?: string;
+}
+
+/**
+ * 组装视图摘要（`ki_scope_list` / `ki_view_list` 共用的**唯一**实现）。
+ *
+ * 为什么单独抽：视图 DTO 的组装一旦各写一份，就会出现「页面有 docCount/scheduled、
+ * MCP 侧没有」的静默差异 —— 同一个类型、同一份语义、多个入口给不同的东西。
+ *
+ * @param kbScopes     KB 目录层存在的 scope（决定 `memberMeta.kb` / `docCount`）
+ * @param vectorScopes 向量语义层存在的 scope（决定 `memberMeta.vector` / `dimensionState`）
+ */
+export function buildViews(
+  config: KiConfig,
+  kbScopes: Set<string>,
+  vectorScopes: Set<string>,
+): ViewsBuildResult {
+  try {
+    const viewsMap = readViews(config);
+    const names = Object.keys(viewsMap).sort();
+    // 配了定时同步的 scope → 上次自动执行是否失败（与 /api/views 同源，一次算好）
+    let scheduledScopes = new Map<string, boolean>();
+    try {
+      scheduledScopes = new Map(
+        listRegisteredDataSourceRecords(config)
+          .filter(({ record }) => record.schedule?.enabled === true)
+          .map(({ scope, record }) => [scope, record.schedule?.lastAutoState === 'failed']),
+      );
+    } catch {
+      scheduledScopes = new Map(); // 数据源文件损坏不阻断 scope 列表，只是不标「定时」
+    }
+    /*
+     * 维度状态：纯 fs 读 `.vector-status` 快照（零锁），按 scope 缓存一次算好，
+     * 供所有视图复用。与 /api/views 走同一个 readViewDimensionState，
+     * 避免页面与 MCP 给出两套事实。
+     */
+    const dimensionCache = new Map<string, ViewDimensionState>();
+    const dimensionStateOf = (s: string): ViewDimensionState => {
+      let state = dimensionCache.get(s);
+      if (state === undefined) {
+        state = readViewDimensionState(config, s);
+        dimensionCache.set(s, state);
+      }
+      return state;
+    };
+
+    if (names.length === 0) return {};
+
+    return {
+      views: names.map((name) => {
+        const def = viewsMap[name];
+        const members = def.members;
+        /*
+         * ★ 成员元信息走共享实现：`/api/views` 与这里必须是同一份口径，
+         *   否则页面有 docCount/scheduled、MCP 侧没有 —— 同一 DTO 两套事实。
+         */
+        const { memberMeta, missing, availableCount } = buildMemberMeta({
+          members,
+          kbScopes,
+          vectorScopes,
+          isReadonly: (scope) => isScopeReadonly(config, scope),
+          docCountOf: (scope) => {
+            try {
+              return countScopeDocs(scope).wikiCount;
+            } catch (err) {
+              console.warn(
+                `⚠️ scope "${scope}" 的文档数统计失败，成员不标「空」：${(err as Error).message}`,
+              );
+              return undefined;
+            }
+          },
+          scheduledScopes,
+          dimensionStateOf,
+        });
+        return {
+          view: name,
+          id: def.id,
+          members,
+          memberMeta,
+          availableCount,
+          missing,
+          // 缺失字段一律不输出（而不是给空串）：前端据此区分「旧视图没有记录」与「记录为空」
+          ...(def.createdBy ? { createdBy: def.createdBy } : {}),
+          ...(def.createdAt ? { createdAt: def.createdAt } : {}),
+          ...(def.updatedBy ? { updatedBy: def.updatedBy } : {}),
+          ...(def.updatedAt ? { updatedAt: def.updatedAt } : {}),
+          revision: def.revision,
+        };
+      }),
+    };
+  } catch (err) {
+    const message = (err as Error).message;
+    // 视图文件损坏不应让整个 scope 列表不可用；告警后按「无视图」返回。
+    console.warn(`⚠️ 视图定义读取失败，已按无视图处理：${message}`);
+    // ★ 同时透出给调用方：否则 MCP 客户端只看到「没有 views 字段」，
+    //   模型会把"读坏了"当成"一个都没建"讲给用户。
+    return { warning: `视图定义读取失败，已按无视图返回：${message}` };
+  }
+}
+
+export async function executeScopeListLocal(): Promise<ScopeListResult> {
+  const config = loadConfig();
+  const { kbScopes, vectorScopes, vectorAvailable, vectorReason } = await collectScopeLayers();
 
   // 只读名单也纳入枚举：否则"设了只读但该 scope 尚无数据/未注册"时列表里看不到，
   // 用户无法确认设置是否生效（REQ-20261029-001 验收 1）。
@@ -384,81 +519,7 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
   });
 
   // 视图：只在存在定义时带上该字段（无视图的用户响应与改造前完全一致）
-  let views: ViewInfo[] | undefined;
-  try {
-    const viewsMap = readViews(config);
-    const names = Object.keys(viewsMap).sort();
-    // 配了定时同步的 scope → 上次自动执行是否失败（与 /api/views 同源，一次算好）
-    let scheduledScopes = new Map<string, boolean>();
-    try {
-      scheduledScopes = new Map(
-        listRegisteredDataSourceRecords(config)
-          .filter(({ record }) => record.schedule?.enabled === true)
-          .map(({ scope, record }) => [scope, record.schedule?.lastAutoState === 'failed']),
-      );
-    } catch {
-      scheduledScopes = new Map(); // 数据源文件损坏不阻断 scope 列表，只是不标「定时」
-    }
-    /*
-     * 维度状态：纯 fs 读 `.vector-status` 快照（零锁），按 scope 缓存一次算好，
-     * 供所有视图复用。与 /api/views 走同一个 readViewDimensionState，
-     * 避免页面与 MCP 给出两套事实。
-     */
-    const dimensionCache = new Map<string, ViewDimensionState>();
-    const dimensionStateOf = (s: string): ViewDimensionState => {
-      let state = dimensionCache.get(s);
-      if (state === undefined) {
-        state = readViewDimensionState(config, s);
-        dimensionCache.set(s, state);
-      }
-      return state;
-    };
-    if (names.length > 0) {
-      views = names.map((name) => {
-        const def = viewsMap[name];
-        const members = def.members;
-        /*
-         * ★ 成员元信息走共享实现：`/api/views` 与这里必须是同一份口径，
-         *   否则页面有 docCount/scheduled、MCP 侧没有 —— 同一 DTO 两套事实。
-         */
-        const { memberMeta, missing, availableCount } = buildMemberMeta({
-          members,
-          kbScopes,
-          vectorScopes,
-          isReadonly: (scope) => isScopeReadonly(config, scope),
-          docCountOf: (scope) => {
-            try {
-              return countScopeDocs(scope).wikiCount;
-            } catch (err) {
-              console.warn(
-                `⚠️ scope "${scope}" 的文档数统计失败，成员不标「空」：${(err as Error).message}`,
-              );
-              return undefined;
-            }
-          },
-          scheduledScopes,
-          dimensionStateOf,
-        });
-        return {
-          view: name,
-          id: def.id,
-          members,
-          memberMeta,
-          availableCount,
-          missing,
-          // 缺失字段一律不输出（而不是给空串）：前端据此区分「旧视图没有记录」与「记录为空」
-          ...(def.createdBy ? { createdBy: def.createdBy } : {}),
-          ...(def.createdAt ? { createdAt: def.createdAt } : {}),
-          ...(def.updatedBy ? { updatedBy: def.updatedBy } : {}),
-          ...(def.updatedAt ? { updatedAt: def.updatedAt } : {}),
-          revision: def.revision,
-        };
-      });
-    }
-  } catch (err) {
-    // 视图文件损坏不应让整个 scope 列表不可用；告警后按「无视图」返回
-    console.warn(`⚠️ 视图定义读取失败，已按无视图处理：${(err as Error).message}`);
-  }
+  const { views, warning: viewsWarning } = buildViews(config, kbScopes, vectorScopes);
 
   return {
     ok: true,
@@ -468,6 +529,7 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
     count: scopes.length,
     scopes,
     ...(views ? { views } : {}),
+    ...(viewsWarning ? { viewsWarning } : {}),
   };
 }
 

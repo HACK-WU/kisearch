@@ -21,6 +21,14 @@ import {
 } from '../src/lib/auth/capabilities.js';
 import { CHAT_MCP_TOOLS } from '../src/lib/chat/mcp-tool-registry.js';
 import { READ_ONLY_TOOL_NAMES } from '../src/lib/mcp-tools/tool-access.js';
+import { buildKiMcpServer } from '../src/lib/mcp-server-factory.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+
+/** 读取 McpServer 已注册的工具名（SDK 未公开的注册表，白盒断言用） */
+function registeredToolNames(server: McpServer): string[] {
+  const internal = server as unknown as { _registeredTools?: Record<string, unknown> };
+  return Object.keys(internal._registeredTools ?? {}).sort();
+}
 
 describe('capability coverage', () => {
   it('所有 handler 路径字面量都在路由注册表中', () => {
@@ -59,11 +67,23 @@ describe('capability coverage', () => {
     assert.equal(matchRoute('GET', '/nope').kind, 'unknown');
   });
 
-  it('所有 chat/MCP 工具都有能力；默认拒绝未知工具', () => {
-    const names = CHAT_MCP_TOOLS.map((t) => t.name);
-    assert.equal(names.length, 13);
-    assert.deepEqual(new Set(ALL_TOOL_NAMES), new Set(names));
-    for (const name of names) {
+  it('所有 MCP 主通道工具都有能力（chat 是子集）；默认拒绝未知工具', () => {
+    /*
+     * 对齐口径用「MCP 主通道实际注册的工具」而不是 chat 工具清单：
+     * chat 通道**刻意只暴露一部分**（如 ki_view_list 这类枚举工具对会话级模型无用），
+     * 用 chat 清单当全集会让"注册了但没登记能力"漏检，也让新增仅主通道工具必然挂测试。
+     */
+    const registered = registeredToolNames(buildKiMcpServer(null));
+    assert.deepEqual(
+      new Set(ALL_TOOL_NAMES),
+      new Set(registered),
+      '能力登记表与主通道实际注册工具集必须一一对应',
+    );
+
+    const chatNames = CHAT_MCP_TOOLS.map((t) => t.name);
+    assert.equal(chatNames.length, 13);
+    for (const name of chatNames) {
+      assert.ok(registered.includes(name), `chat 工具未在主通道注册：${name}`);
       assert.ok(TOOL_CAPABILITIES[name], `工具未登记：${name}`);
     }
     for (const name of READ_ONLY_TOOL_NAMES) {

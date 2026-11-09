@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { SCOPE_LESS_ENUM_TOOL_NAMES } from './mcp-tools/tool-access.js';
 
 export interface OperationRequest {
   operation: string;
@@ -118,18 +119,21 @@ const CHAT_MCP_PREFIX = 'chat-mcp-';
 
 /**
  * MCP HTTP 通道（一次请求可含多个 tools/call）：**全部**工具都属读白名单
- *（或只读的 `ki_scope_list`，它走不占 scope 的只读通道）时才判 `read`；
- * 出现任何写工具即回退 `write`（保守）。
+ *（或无 scope 的枚举工具 `ki_scope_list` / `ki_view_list`，它们走不占 scope 的只读通道）
+ * 时才判 `read`；出现任何写工具即回退 `write`（保守）。
  *
  * 为什么必须整批判定：批量请求里混入一个写工具，若整体判 read，写就会绕过与
  * 长任务/短写的互斥（数据风险），故宁可让整批退回 write。
+ *
+ * ⚠️ 枚举工具清单取自 `mcp-tools/tool-access.ts::SCOPE_LESS_ENUM_TOOL_NAMES`
+ *   （口径是「无 scope 参数的本地枚举」，与只读 Token 白名单是两个不同维度，故不合并）。
  */
 export function kindForMcpToolNames(toolNames: readonly (string | undefined)[]): TaskKind {
   let sawTool = false;
   for (const name of toolNames) {
     if (name === undefined) continue;
     sawTool = true;
-    if (name === 'ki_scope_list') continue;
+    if (SCOPE_LESS_ENUM_TOOL_NAMES.includes(name)) continue;
     if (!READ_MCP_TOOLS.has(name)) return 'write';
   }
   // 无 tools/call（resources/read 等）不在此判定范围内：保守回退 write。

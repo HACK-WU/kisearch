@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - TokenRecord.readOnly 的创建 / 兼容 / 严格布尔兜底 / 局部更新
- *   - READ_ONLY_TOOL_NAMES 名单内容与 13 个工具的关系（读 5 / 写 8）
+ *   - READ_ONLY_TOOL_NAMES 名单内容与 14 个工具的关系（读 6 / 写 8）
  *   - findReadOnlyViolation：单条、batch、未知工具名（fail-safe）、非 tools/call
  *   - 拒绝文案四要素且不含会误关库级只读的 `ki scope readonly`
  *
@@ -164,10 +164,10 @@ describe('updateToken：scope 与访问模式可独立修改', () => {
 // ─────────────────────────────────────────────
 
 describe('READ_ONLY_TOOL_NAMES：名单内容', () => {
-  it('恰好 5 个读工具，与 8 个写工具互不重叠', () => {
+  it('恰好 6 个读工具，与 8 个写工具互不重叠', () => {
     assert.deepEqual(
       [...READ_ONLY_TOOL_NAMES].sort(),
-      ['ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_search', 'ki_tag_list'],
+      ['ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list'],
     );
     for (const writeTool of WRITE_TOOLS) {
       assert.equal(isReadOnlyTool(writeTool), false, `${writeTool} 不得出现在只读白名单`);
@@ -268,22 +268,22 @@ function serverInstructions(server: McpServer): string | undefined {
 }
 
 describe('buildKiMcpServer：按访问模式装配工具集', () => {
-  it('只读会话只注册 5 个读工具（写工具不出现在 tools/list）', () => {
+  it('只读会话只注册 6 个读工具（写工具不出现在 tools/list）', () => {
     const server = buildKiMcpServer({ scopes: ['all'], readOnly: true });
     assert.deepEqual(registeredToolNames(server), [...READ_ONLY_TOOL_NAMES].sort());
   });
 
-  it('读写会话注册全部 13 个工具（5 读 + 8 写）', () => {
+  it('读写会话注册全部 14 个工具（6 读 + 8 写）', () => {
     const server = buildKiMcpServer({ scopes: ['all'], readOnly: false });
     const names = registeredToolNames(server);
-    assert.equal(names.length, 13);
+    assert.equal(names.length, 14);
     for (const name of READ_ONLY_TOOL_NAMES) assert.ok(names.includes(name), `缺读工具 ${name}`);
     for (const name of WRITE_TOOLS) assert.ok(names.includes(name), `缺写工具 ${name}`);
   });
 
   it('免鉴权（null，stdio / 回环）与读写会话等价，且不注入只读 instructions', () => {
     const server = buildKiMcpServer(null);
-    assert.equal(registeredToolNames(server).length, 13);
+    assert.equal(registeredToolNames(server).length, 14);
     assert.equal(serverInstructions(server), undefined);
   });
 

@@ -91,7 +91,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 `scopes` 管「能碰哪些 scope」（数据维度），`readOnly` 管「能对数据做什么」（动作维度），两者正交：只读 Token 同样必须指定 `--scope`。
 
-- **工具可见性**：只读会话只暴露 5 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。
+- **工具可见性**：只读会话只暴露 6 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_view_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。
 - **越权兜底**：即使客户端缓存了建连时的旧工具列表、或直接构造 JSON-RPC 调用写工具，同样会被拒绝（`403` + `TOKEN_READONLY`），写不进去。
 - **AI 可感知**：只读会话建连时即告知 AI「当前为只读」，无需靠工具缺失反推，也不必反复重试。
 - **生效时机**：`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
@@ -265,11 +265,11 @@ Token 来源优先级：`--token`/环境变量 `KI_MCP_TOKEN`（全权临时 Tok
 
 **Web 账号与 MCP Token 相互独立**：账号只用于登录页面（`ki user create` 管理），Token 只用于 MCP 客户端；Web 登录不会让 MCP 客户端获得访问权，反之亦然。管理员、读写账号、只读账号的权限边界见 [CLI · user](./cli.md#user)。
 
-**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
+**scope 越权校验（RBAC）**：鉴权通过后，中间件会拦截 MCP `tools/call` 请求，提取其 `arguments.scope`（缺省 `default`；完全省略 `arguments` 字段时按缺省 `default` 参与校验），校验是否在该 Token 的授权 scope 集合内（`all` 通配全部）；越权返回 `403`。**例外**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_view_list`）不做此单点校验，直接放行给工具层按授权集合过滤输出。`/api/*` 接口同样按其 scope 参数（query 或 body）做越权校验。
 
 **只读校验（动作维度）**：同一鉴权链还会解析该 Token 的 `readOnly`。只读 Token 的会话只注册读工具（`tools/list` 不含写工具），且 `tools/call` 中对任何不在读工具白名单内的调用（含 batch 逐项）返回 `403 { code: 'TOKEN_READONLY' }`；详见上文「只读 Token」。
 
-**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_scope_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。本机免登录（回环）或 `all` 权限时不过滤。
+**枚举工具按授权过滤**：无 scope 参数的枚举工具（`ki_scope_list`、`ki_view_list`）会在**工具层按授权 scope 集合过滤返回结果**——持有限定 scope Token 的客户端只能看到自己被授权的 scope，无法通过枚举泄露其他 scope 的存在与结构（多租户下 scope 名往往即项目/客户代号）。本机免登录（回环）或 `all` 权限时不过滤。
 
 > ⚠️ **回环绑定时提供 Bearer Token 会被忽略**：回环地址的 Bearer 鉴权已禁用，若此时仍传 `--token` 或设了 `KI_MCP_TOKEN`，启动会打印提示告知 Token 不生效。Web 页面仍可登录（`--no-local-admin` 时本机也需登录）；如需 Bearer 鉴权请绑定非回环地址。
 
@@ -379,7 +379,7 @@ ki mcp restart --no-web         # 重启但关闭前端页面（覆盖上次 --w
 - 探活：`curl http://<host>:7423/healthz` → `{"ok":true,"name":"kisearch","pid":...,"version":"..."}`
 - 若端口被占用且探活失败：确认是否为非 ki 进程占用，或换用 `--port` 另起端口。
 - **鉴权失败（401）**：Token 无效或缺失。核对客户端 `Authorization: Bearer` 与 `ki mcp token list` 输出的明文完全一致（整段复制勿手抄）；若用全权临时 Token，确认 `--token`/`KI_MCP_TOKEN` 仍在生效。服务端 stderr 有失败原因日志。
-- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。多 scope（逗号分隔）调用逐段校验，任一段越权即整体拒绝。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list`/`ki_scope_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
+- **越权拒绝（403）**：Token 有效但请求的 scope 不在授权内。多 scope（逗号分隔）调用逐段校验，任一段越权即整体拒绝。用 `ki mcp token update <id> --scope <scope>` 扩大该 Token 的授权（或确认客户端请求的 scope 正确）；服务端 stderr 日志含被拒的具体 scope 与授权范围。注意：无 scope 参数的枚举工具（`ki_scope_list` / `ki_view_list`）无参调用不受此校验限制，出现 403 说明请求的是带 scope 参数的工具或 /api 接口。
 
 ## 会话模型
 

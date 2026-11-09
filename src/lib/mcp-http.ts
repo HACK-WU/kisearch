@@ -24,7 +24,12 @@ import { readKiVersion } from './version-guard.js';
 import { findTokenAuth, tokenCount, ALL_SCOPES, type TokenAuth } from './mcp-token.js';
 import { resolveWebPrincipal, toTokenAuth } from './web-auth.js';
 import { checkRequestSecurity } from './auth/request-security.js';
-import { isReadOnlyTool, readonlyRejectMessage, TOKEN_READONLY } from './mcp-tools/tool-access.js';
+import {
+  isReadOnlyTool,
+  readonlyRejectMessage,
+  SCOPE_LESS_ENUM_TOOL_NAMES,
+  TOKEN_READONLY,
+} from './mcp-tools/tool-access.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
@@ -157,9 +162,10 @@ function isInitializeBody(body: unknown): boolean {
  * scope」，不适用「缺省 default」的单点越权规则——否则受限 Token（授权不含 default）
  * 按契约无参调用会天然被 403（其安全边界由工具层 authScopes 过滤兜住，不受影响）。
  *
- * ⚠️ 新增 schema 不含 scope 参数的工具时必须同步加入此清单。
+ * ⚠️ 清单本体在 `mcp-tools/tool-access.ts::SCOPE_LESS_ENUM_TOOL_NAMES`（与只读调度口径同源），
+ *    新增 schema 不含 scope 参数的工具时改那一处即可。
  */
-const SCOPE_LESS_TOOLS = new Set(['ki_scope_list']);
+const SCOPE_LESS_TOOLS = new Set(SCOPE_LESS_ENUM_TOOL_NAMES);
 
 /**
  * 校验请求体中所有 tools/call 的 scope 是否均在授权集合内。
@@ -943,9 +949,9 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         ? ((message as { params?: { name?: unknown } }).params?.name)
         : undefined;
       if (method === 'tools/call' && typeof toolName === 'string') calledTools.push(toolName);
-      // scope 枚举只读且自带 fastFail 撞锁降级（“scope 下拉不应因向量锁挂起十余秒”），
+      // scope / 视图枚举都是只读且自带 fastFail 撞锁降级（“下拉不应因向量锁挂起十余秒”），
       // 归入只读通道：不占用任何 scope，也不被其他 scope 的写操作阻塞。
-      if (toolName === 'ki_scope_list') continue;
+      if (typeof toolName === 'string' && SCOPE_LESS_TOOLS.has(toolName)) continue;
       onlyReadOnly = false;
       const args = message && typeof message === 'object'
         ? ((message as { params?: { arguments?: unknown } }).params?.arguments as { scope?: unknown } | undefined)

@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-`ki mcp` 共暴露 **13 个**工具。所有工具均接受可选 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
+`ki mcp` 共暴露 **14 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受可选 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
 
 > 工具定义以 [`src/lib/mcp-tools/`](../src/lib/mcp-tools/) 为准。接入方式见 [mcp-http.md](./mcp-http.md)。
 
@@ -11,7 +11,8 @@
 | `ki_search` | 语义检索（hybrid / fulltext） | `query`（必填）、`limit`（默认 10，总条数上限）、`tags`（不传=搜全部）、`mode`、`threshold`、`timeout`、`include_original` |
 | `ki_group_list` | Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量兜底 | `groups`（单数别名 `group`）、`subtree`、`mode`（默认 hot）、`hot_count`、`depth`、`auto_fallback` |
 | `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条 | `group`（必填）、`relation` 或 `relations[]`（二选一） |
-| `ki_scope_list` | 列出所有 scope 及 KB/向量状态；每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如 source 块指向单文件） | — |
+| `ki_scope_list` | 列出所有 scope 及 KB/向量状态；每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如 source 块指向单文件）。视图定义读取失败时响应带 `viewsWarning`（此时 `views` 缺省 ≠ 没有视图） | — |
+| `ki_view_list` | 列出知识视图（多个知识库的只读聚合）。默认每条含 `view` / `id` / `members` / `availableCount` / `missing` / **`usableCount`**（真能参与语义检索的成员数）；有成员不可用时给 **`degradedReason`**（如「3 个向量维度不一致（语义检索会跳过）」），维度不一致的库名另列 `dimensionMismatch`。`verbose` 展开 `memberMeta` 与审计字段（健康摘要同样保留）。没有视图、被授权过滤光、视图文件损坏三种"空"分别给 `hint` / `warning` | `verbose` |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
 
 ## 写
@@ -58,6 +59,7 @@ MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需�
 |---|---|
 | ki_search | 展开为成员库检索，结果按分数统一排序；响应多出 `matchedViews`、`scopes`、`matchedByScope`，每条命中带来源 `scope` |
 | ki_scope_list | 响应多出 `views[]`，含 `memberMeta[]`（每个成员的 `kb` / `vector` / `readonly`） |
+| ki_view_list | 只回视图本身（不带 scope 段），字段与 `ki_scope_list` 的 `views[]` 同源；视图文件损坏时响应带 `warning` |
 | ki_group_list | **按成员库分桶**（`buckets`），不合并同名 Group |
 | ki_tag_list | **合并各库 tag 并累加计数**，每条带 `scopes` 标明来源库 |
 | ki_get_module_info | 支持可选 `member` 指定来源库。同一文档在多个成员库都存在时必须指定；批量查询（`relations`）也需指定 `member`（视图只有一个成员时自动采用） |

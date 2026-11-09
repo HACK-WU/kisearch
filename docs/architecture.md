@@ -30,7 +30,7 @@ flowchart TB
 | 组件 | 主要职责 |
 |------|------|
 | `knowledge-index` | Group 导航、热门 Relation 缓存、本地 Markdown 原文交付、CLI 命令 |
-| `ki MCP Server` | 常驻 MCP 服务，暴露 13 个工具（检索 / 读取 / 写入 / 组织 / 删除），见 [mcp-tools.md](./mcp-tools.md) |
+| `ki MCP Server` | 常驻 MCP 服务，暴露 14 个工具（检索 / 读取 / 写入 / 组织 / 删除），见 [mcp-tools.md](./mcp-tools.md) |
 | `ZvecEngine` | 进程内向量引擎：insert/upsert/hybridSearch，Embedding 集成 |
 
 ## knowledge-index 内部结构

@@ -231,7 +231,7 @@ ki mcp token delete <id>
 | `mcp` | MCP 服务（stdio / `--http` / `--status` / `token`） |
 
 > 完整参数：`ki <command> --help` 或 [`docs/cli.md`](./docs/cli.md)。
-> MCP 共暴露 **13 个工具**，参数见 [`docs/mcp-tools.md`](./docs/mcp-tools.md)。MCP 不提供 scope / doc 级联删除与 `--force` 操作，需要时用 CLI。
+> MCP 共暴露 **14 个工具**，参数见 [`docs/mcp-tools.md`](./docs/mcp-tools.md)。MCP 不提供 scope / doc 级联删除与 `--force` 操作，需要时用 CLI。
 
 ## <a id="web"></a>🖥️ 内置 Web 前端
 
