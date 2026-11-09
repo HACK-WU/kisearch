@@ -53,7 +53,7 @@ import {
   taskOperatorForPrincipal,
   type WebPrincipal,
 } from './web-auth.js';
-import type { TaskOperator, TaskRecord } from './task-registry.js';
+import type { TaskOperator, TaskRecord, TaskSource } from './task-registry.js';
 import { createSession, deleteSession, deleteUserSessions } from './web-session-store.js';
 import {
   UserStoreError,
@@ -375,6 +375,12 @@ export function createJob(
     operator: TaskOperator;
     /** REQ-20261019-004：重试血缘（`/api/import/retry-incomplete` 传入原任务 ID） */
     retryOf?: string;
+    /**
+     * 发起通道（默认 `web` = 前端页面）。第三方上传走 `open-api`：
+     * 任务列表要据此显示「open api upload」，来源列也不能谎称「网页」。
+     * ★ 加新值必须同步 `task-registry.ts` 读侧白名单，否则记录被判不可读 → 任务从列表消失。
+     */
+    source?: TaskSource;
   },
 ): Job {
   // 清理过期 job，防止 Map 无界增长
@@ -391,7 +397,7 @@ export function createJob(
   let taskReporter: TaskReporter;
   try {
     taskReporter = createTaskReporter(config, {
-      id, source: 'web', operator: extras.operator, operation, scope,
+      id, source: extras.source ?? 'web', operator: extras.operator, operation, scope,
       ...(extras.retryOf ? { retryOf: extras.retryOf } : {}),
     });
   } catch {

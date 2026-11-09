@@ -124,7 +124,9 @@ export function taskDetailActions(input: {
     // 页面导入（source='web'）可从任务中心停止：`/api/import/cancel` 只认 HTTP 入口启动的
     // job（2026-10-13 用户要求）。CLI / daemon 发起的任务在另一条通道，取消要在终端中断——这里
     // 如实指路而不是给一个点了没用的按钮。
-    if (task.operation === 'import' && task.source === 'web') {
+    // 第三方上传（open-api）同样经 createJob 登记在 daemon 的 jobs Map 里，
+    // `/api/import/cancel` 按 jobId 能找到它，所以「停止任务」对它同样有效。
+    if (task.operation === 'import' && (task.source === 'web' || task.source === 'open-api')) {
       return {
         actions: [{ kind: 'stop-import', label: '停止任务' }],
         note: '停止 = 当前 embedding / 向量批次完成后停止写入；已完成文档保留，未完成部分进入未完成清单（可再重试）。',

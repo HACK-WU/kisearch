@@ -411,3 +411,21 @@ test('大目录导入超预算时保留 created 样本，不得整批丢弃（20
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+test('来源 open-api 的任务记录必须可读（新增 TaskSource 值必须同步读侧白名单）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-open-api-source-'));
+  const config = { dataDir: root };
+  const reporter = createTaskReporter(config, {
+    id: 'open-api-source', source: 'open-api', operation: 'import', scope: 'default',
+    operator: { type: 'token', label: 'Token abc123' },
+  });
+  try {
+    reporter.finish('succeeded', { result: { created: [['__root__', 'a']], createdTotal: 1 } });
+    const record = getTaskRecord(config, 'open-api-source');
+    // 读侧白名单漏加 'open-api' 时这里返回 null —— 任务会从列表静默消失，比不被识别更糟
+    assert.ok(record, '新增来源必须同步 task-registry 读侧白名单，否则任务不可读');
+    assert.equal(record?.source, 'open-api');
+  } finally {
+    reporter.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

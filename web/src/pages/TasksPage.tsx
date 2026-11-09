@@ -118,7 +118,7 @@ function TaskDetailDrawer({ id, tasks, retainedForMs, onClose }: {
   const task = data?.task;
   const retention = formatRetention(retainedForMs);
   const detail = task ? buildTaskDetail(task, retainedForMs) : null;
-  const title = task ? `${operationLabel(task.operation)} · ${task.scope}` : '任务详情';
+  const title = task ? `${operationLabel(task.operation, task.source)} · ${task.scope}` : '任务详情';
   // 「新增的文档」点开正文：与数据源「待删除」卡一致（阅读用同一套 ModuleDrawer）
   const [docTarget, setDocTarget] = useState<{ scope: string; group: string; relation: string } | null>(null);
   /**

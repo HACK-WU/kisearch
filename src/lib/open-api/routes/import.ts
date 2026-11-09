@@ -165,7 +165,8 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
   // 不能带着「可能被清理」的状态继续启动导入。
   let job: Job | undefined;
   try {
-    job = createJob(scope, 'import', ctx.config, { operator });
+    // 来源标 open-api：任务列表显示「open api upload」，来源列显示「OpenAPI」
+    job = createJob(scope, 'import', ctx.config, { operator, source: 'open-api' });
     writeSession(received.dir, scope, 'importing', job.id);
   } catch (err) {
     // job 已登记但会话目录写不进去：把它标成失败，否则它会以 'running' 永远挂在

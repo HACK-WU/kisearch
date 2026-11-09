@@ -142,6 +142,8 @@ const SOURCE_LABEL: Record<TaskRecord['source'], string> = {
   web: '网页',
   cli: 'CLI',
   daemon: '后台服务',
+  // 第三方程序经 /open/v1 上传：它不是「网页」，也不是 CLI
+  'open-api': 'OpenAPI',
   scheduler: '定时同步',
 };
 
@@ -173,8 +175,14 @@ const OPERATION_LABEL: Record<string, string> = {
   'datasource-add-remote': '添加 Git 数据源',
 };
 
-/** 任务操作中文名（列表、抽屉头部共用） */
-export function operationLabel(operation: string): string {
+/**
+ * 任务操作中文名（列表、抽屉头部共用）。
+ *
+ * `source` 参与命名是为了把**第三方程序上传**与网页导入区分开：两者的 operation 都是
+ * `import`，但用户看到「上传导入」会以为是自己从页面传的。来源不同 → 名字不同。
+ */
+export function operationLabel(operation: string, source?: TaskRecord['source']): string {
+  if (source === 'open-api' && operation === 'import') return 'open api upload';
   return OPERATION_LABEL[operation] ?? operation;
 }
 

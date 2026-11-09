@@ -5,7 +5,7 @@ import { createTaskLogWriter } from './task-log.js';
 import type { TaskLogWriter } from './task-log.js';
 import type { KiConfig } from './config.js';
 
-export type TaskSource = 'cli' | 'daemon' | 'web' | 'scheduler';
+export type TaskSource = 'cli' | 'daemon' | 'web' | 'open-api' | 'scheduler';
 
 export type TaskOperatorType = 'user' | 'local' | 'cli' | 'daemon' | 'token' | 'scheduler' | 'legacy';
 
@@ -608,7 +608,7 @@ function readRecordFile(file: string, expectedId: string): TaskRecord | null {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_TASK_FILE_BYTES) return null;
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as TaskRecord;
     if (!parsed || parsed.id !== expectedId || !TASK_ID_RE.test(parsed.id)
-      || !['cli', 'daemon', 'web', 'scheduler'].includes(parsed.source)
+      || !['cli', 'daemon', 'web', 'open-api', 'scheduler'].includes(parsed.source)
       || !['queued', 'running', 'succeeded', 'partial', 'failed', 'cancelled'].includes(parsed.state)
       || typeof parsed.operation !== 'string' || typeof parsed.scope !== 'string'
       || !Number.isFinite(parsed.createdAt) || !Number.isFinite(parsed.updatedAt) || !Number.isFinite(parsed.heartbeatAt)) return null;

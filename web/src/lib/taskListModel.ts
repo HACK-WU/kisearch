@@ -106,7 +106,7 @@ export function buildTaskListRow(task: TaskRecord): TaskListRowView {
   const extras = [created, modified].filter(Boolean).join(' · ');
   const summary = isNoChangeSummary(task) ? '无变更' : (extras ? `${base} · ${extras}` : base);
   const error = task.error?.trim() || undefined;
-  const operation = operationLabel(task.operation);
+  const operation = operationLabel(task.operation, task.source);
   const source = sourceLabel(task.source);
   const operatorLabel = task.operator?.label?.trim() || '—';
   const operatorTitle = task.operator?.type === 'user' && task.operator.userId
