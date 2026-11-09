@@ -537,8 +537,32 @@ function fitToBudget(record: TaskRecord): TaskRecord {
     result: { ...withoutModified, ...(hadModified ? { modifiedTruncated: true } : {}) },
   };
   if (sizeOf(trimmedModified) <= limit) return trimmedModified;
-  // 新建明细放在最后砍：它是用户主动要看的（「新增了哪些目录」），
-  // 但宁可丢明细也不能让整个任务文件超限（超了任务会从列表静默消失）
+  /**
+   * ★ 新建明细先**按预算保留样本**，装不下才整批丢弃（2026-11-09 现场修复）。
+   *
+   * 为什么必须有这一档：`MAX_SNAPSHOT_CREATED=400` 与 32KB 预算不是同一量纲 ——
+   * 长中文 group 路径下 400 条约 35KB，**刚越过阈值就被整批删掉**，页面只能显示
+   * 「共 N 篇，明细未保留」。用户上传了 614 篇文档，一条名字都看不到，还以为没导进去。
+   * 而前端早已支持 `items>0 && truncated` 的「仅显示前 N 篇」渲染，缺的只是后端给样本。
+   *
+   * 取半数递减而不是写死 20 条：能装多少装多少（400→200→100…），既保住预算硬上限，
+   * 又尽量让用户看到更多真实条目。
+   */
+  const createdRaw = Array.isArray(withoutModified.created) ? withoutModified.created : [];
+  for (let n = Math.floor(createdRaw.length / 2); n >= 1; n = Math.floor(n / 2)) {
+    const sampled: TaskRecord = {
+      ...record,
+      result: {
+        ...withoutModified,
+        created: createdRaw.slice(0, n),
+        createdTruncated: true,
+        ...(hadModified ? { modifiedTruncated: true } : {}),
+      },
+    };
+    if (sizeOf(sampled) <= limit) return sampled;
+  }
+  // 连 1 条都装不下（极端超长路径）：宁可丢明细也不能让整个任务文件超限，
+  // 否则 `readRecordFile` 判不可读，任务会从列表静默消失
   const withoutCreated: TaskResultSnapshot = { ...withoutModified };
   delete withoutCreated.created;
   return {

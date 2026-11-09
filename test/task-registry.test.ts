@@ -374,3 +374,40 @@ test('无法识别的 errorCode 与冲突 action 被丢弃', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+test('大目录导入超预算时保留 created 样本，不得整批丢弃（2026-11-09 现场回归）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-task-created-sample-'));
+  const config = { dataDir: root };
+  const reporter = createTaskReporter(config, {
+    id: 'created-sample', source: 'web', operation: 'import', scope: 'xpert-experts',
+  });
+  try {
+    // 复刻现场：614 篇真实目录 → 快照 400 条；group 为长中文路径（每条 ~120 字节），
+    // 400 条约 35KB，刚好越过 32KB-512 的裁剪阈值 —— 旧实现会把 created 整批删掉。
+    const groups = [
+      '前端专题/Xpert 工作台专家/sub-experts/工作区子专家/implementation',
+      '后端专题/平台底座与集成专家/sub-experts/基础字典与客户端壳子专家/implementation',
+      '后端专题/平台底座与集成专家/sub-experts/集成与扩展点子专家/test',
+    ];
+    const created = Array.from({ length: 500 }, (_, index) => [
+      groups[index % groups.length],
+      `文档-${index}-${'名'.repeat(8)}`,
+    ]) as [string, string][];
+    reporter.finish('succeeded', {
+      result: { created, createdTotal: 614, groups: [...new Set(groups)] },
+    });
+
+    const record = getTaskRecord(config, 'created-sample');
+    assert.ok(record, '裁剪后记录必须仍可读（否则任务会从列表静默消失）');
+    const size = fs.statSync(path.join(root, '.ki-tasks', 'created-sample.json')).size;
+    assert.ok(size < 32 * 1024, `台账文件必须小于 32KB（实际 ${size}）`);
+
+    const kept = record?.result?.created ?? [];
+    assert.ok(kept.length > 0, '超预算时必须保留 created 样本，不能整批丢弃（否则页面只剩「明细未保留」）');
+    assert.ok(kept.length < created.length, `样本必须少于原始条数（实际保留 ${kept.length}）`);
+    assert.equal(record?.result?.createdTruncated, true, '保留样本时必须标记明细被截断');
+    assert.equal(record?.result?.createdTotal, 614, '总数不受样本裁剪影响');
+  } finally {
+    reporter.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

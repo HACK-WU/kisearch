@@ -144,9 +144,7 @@ export function buildDataSourcePendingTree(items: DataSourcePendingItem[]): Data
     const logical = mergeGroupSourcePath(item.group, item.sourcePath, item.relation);
     const segments = split(logical);
     if (segments.length === 0) continue;
-    const parent = ensureDir(segments.slice(0, -1));
-    if (!parent) continue;
-    parent.children.push({
+    const file: DataSourcePendingTreeNode = {
       kind: 'file',
       name: segments[segments.length - 1],
       path: logical,
@@ -154,7 +152,17 @@ export function buildDataSourcePendingTree(items: DataSourcePendingItem[]): Data
       direct: 0,
       total: 0,
       item,
-    });
+    };
+    /**
+     * 根散文档（group 是保留键 `__root__`，或 sourcePath 只有文件名）没有父目录：
+     * `ensureDir([])` 返回 null，早前直接 `continue` 会把这条**文件**丢掉 ——
+     * 表现是任务/数据源详情「新增的文档 N 篇」下面渲染空白（2026-11-09 现场：
+     * 根目录的 archive.md 上传成功后，卡片里一篇都看不到）。
+     * 正确做法是把它挂到顶层，而不是丢弃。
+     */
+    const parent = segments.length > 1 ? ensureDir(segments.slice(0, -1)) : null;
+    if (parent) parent.children.push(file);
+    else roots.push(file);
   }
 
   const countFiles = (nodes: DataSourcePendingTreeNode[]): number => nodes
