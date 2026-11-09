@@ -15,7 +15,7 @@ import { resolveScopeTargets } from './lib/scope-view.js';
 import { loadConfig } from './lib/config.js';
 import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, closeEngine, findMissingScopeCollections, SEARCH_TOPK_MAX } from './lib/vector-client.js';
 import type { VectorSearchResult } from './lib/vector-client.js';
-import { getRelationMap } from './lib/relation-map.js';
+import { getRelationMap, getRelationAuxIndex, resolveAuxHit, AUX_PATH_TAG, AUX_RELATION_TAG } from './lib/relation-map.js';
 import { hiddenEditIndexIds } from './lib/relation-edit-draft.js';
 import { readJson } from './lib/store.js';
 import {
@@ -634,6 +634,16 @@ async function executeSearchLocal(params: {
     const relationMaps = new Map<string, ReturnType<typeof getRelationMap>>(
       scopes.map((s) => [s, getRelationMap(s)]),
     );
+    // 辅助通道（ki-relation / ki-path）命中反推用的索引：这类向量的 docId 按设计
+    // 不写入 relations-cache，纯按 id 反查看不到 → 「group 有值、relation 为空」。
+    // 与 relationMaps 共用同一份缓存条目，不额外产生一次分片全量读；并且只在本次
+    // 确实召回到辅助通道时才构建（否则白做一次分组 + 排序）。
+    const hasAuxHit = raw.some((r) => r.tag === AUX_RELATION_TAG || r.tag === AUX_PATH_TAG);
+    const relationAuxIndexes = hasAuxHit
+      ? new Map<string, ReturnType<typeof getRelationAuxIndex>>(
+          scopes.map((s) => [s, getRelationAuxIndex(s)]),
+        )
+      : new Map<string, ReturnType<typeof getRelationAuxIndex>>();
     const results: SearchHit[] = raw.map((r) => {
       const hit: SearchHit = { ...r };
       // 命中归属 scope：向量字段透出；单 scope 兜底唯一检索 scope（字段由全部写入路径填充，兜底仅防御）
@@ -642,10 +652,17 @@ async function executeSearchLocal(params: {
       if (multi && hitScope) hit.scope = hitScope;
       const map = hitScope ? relationMaps.get(hitScope) : undefined;
       const lookupId = r.ftsId ?? r.memoryId;
-      const meta = map?.get(lookupId);
+      let meta = map?.get(lookupId);
+      if (!meta && hitScope) {
+        // 兜底：辅助通道命中用向量自带字段反推父文档（ki-relation 的 content 是 chunk 名、
+        // ki-path 的 content 是路径文本）。其他 tag 不适用，resolveAuxHit 内部直接返回 undefined。
+        const auxIndex = relationAuxIndexes.get(hitScope);
+        if (auxIndex) meta = resolveAuxHit(auxIndex, r);
+      }
       if (meta) {
         hit.group = meta.group;
-        hit.relation = meta.relation;
+        // ki-path 命中只能定位到 Group（没有单一文件可指），relation 为空串时保持不写入
+        if (meta.relation) hit.relation = meta.relation;
         if (meta.sourcePath) hit.sourcePath = meta.sourcePath;
         // 附加文档全量自定义标签（tag 字段仅是本条命中的向量 tag，多 tag 文档会去重丢标签）
         if (meta.tags && meta.tags.length > 0) hit.tags = meta.tags;
