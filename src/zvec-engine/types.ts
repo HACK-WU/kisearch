@@ -152,9 +152,11 @@ export interface HybridSearchReq extends SearchOptions {
    *   不含候选池最大值，所以库内算完即可跨库比较；
    * - `fts-weighted-rrf`：**单库专用**（`向量名次分 + (bm25/50) × 字面名次分`），
    *   库内按最终分截断；由 adapter 固定注入，不作为用户可选算法；
+   * - `semantic-similarity`：**多库**（`绝对相似度 + (bm25/50) × 1/61`），
+   *   两项都不含库内名次，库内按最终分截断；
    * - 其余：只带出分路分数，仍按融合分截断，由上层统一重排。
    */
-  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf';
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf' | 'semantic-similarity' | 'semantic-fts-dominant' | 'semantic-fts-boost';
   /** 语义补充系数（calibrated-semantic 专用） */
   semanticBonus?: number;
 }

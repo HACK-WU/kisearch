@@ -38,6 +38,98 @@ import { DEFAULT_QUERY_EMBED_TIMEOUT_MS, timeoutSecondsToMs } from './lib/query-
  */
 const TAG_PRIORITY = ['ki-search', 'ki-relation', 'ki-path'];
 
+/** 跨库重排的两路权重：字面分占 6 成、名次分占 4 成（等价 1 : 1.5） */
+const MULTI_RERANK_BM25_WEIGHT = 1.5;
+
+/** 分位数（升序取第 p 位；空数组返回 0） */
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+/**
+ * 多库（视图 / `--scope a,b`）跨库重排。
+ *
+ * 问题：跨库合并拿到的 `score` 是**各库内部**的 RRF 名次分 ——「2 篇小库的第 1 名」
+ * 与「千篇大库的第 1 名」同分，于是内容极少的小库能把无关文档顶到最前。
+ *
+ * 做法：用引擎随 hybrid 一起返回的**分路原始分**（`ftsScore` = 字面路 BM25），
+ * 与名次分各自按本次候选的最高分归一后加权（字面 6 成 / 名次 4 成）。
+ * 某一路没召回该文档时用该路的 25 分位补偿 —— 直接记 0 会把「没被这一路召回」
+ * 误判成「完全不相关」，语义相关但用词不同的文档会被埋掉。
+ *
+ * ★ 不需要额外检索：分路分数在单次 hybrid 调用里就带出来了，所以没有
+ *   「再 fan-out 一轮」的性能代价。
+ */
+function rerankMultiScope(
+  raw: VectorSearchResult[],
+  ranking: MultiRankingAlgorithm = 'weighted',
+): VectorSearchResult[] {
+  if (raw.length <= 1) return raw;
+  // 引擎没给出分路分（旧 daemon / 旧索引）时保持原序，避免用全 0 重排造成乱序
+  if (!raw.some((h) => h.ftsScore !== undefined || h.vectorScore !== undefined)) return raw;
+
+  /**
+   * 定标加权 + 候选池自适应校正。
+   *
+   * 基线 `h.score` 是引擎在**库内**按定标加权算好的最终分（含 ratio≥10 压制档），
+   * 这里只用候选池的 `bMax` 做 ±α 的微调：字面分高于池内中位则放大、低于则缩小。
+   *
+   * 为什么需要：定标加权的字面项是绝对量（b/1000），当整批候选字面分都很低时
+   * （如泛词查询），字面项几乎为零、排序完全由名次决定，小库又会冒头。
+   * 归一化能放大相对差异，但它本身依赖候选池 —— 所以只当**微调**，不当主公式。
+   */
+  if (ranking === 'calibrated-adaptive') {
+    const bMax = Math.max(...raw.map((h) => h.ftsScore ?? 0), 1e-9);
+    return [...raw]
+      .map((h) => ({
+        hit: h,
+        score: (h.score ?? 0) * (1 + ADAPTIVE_ALPHA * ((h.ftsScore ?? 0) / bMax - 0.5)),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((x) => ({ ...x.hit, score: x.score }));
+  }
+
+  /**
+   * TEMP(算法对比)：语义优先 —— 用**向量路绝对相似度**当主项，字面分只做辅助。
+   *
+   * 与 weighted 的差别：weighted 的语义项是 `rrf`（库内名次），小库的头名天然满分；
+   * 这里换成 `vectorScore`（1/(1+cosine distance)，0.33~1），与库大小无关。
+   * 权重 2:1 —— 「语义满分 + 无字面」= 1.0 分，高于「无语义 + 字面满分」= 0.5 分。
+   */
+  if (ranking === 'semantic-first') {
+    const vecValues = raw.map((h) => h.vectorScore ?? 0).filter((v) => v > 0);
+    const vecMax = Math.max(...vecValues, 1e-9);
+    const ftsVals = raw.map((h) => h.ftsScore ?? 0).filter((v) => v > 0);
+    const ftsMax2 = Math.max(...ftsVals, 1e-9);
+    return [...raw]
+      .map((h) => ({
+        hit: h,
+        score: (h.vectorScore ?? 0) / vecMax + 0.5 * ((h.ftsScore ?? 0) / ftsMax2),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((x) => ({ ...x.hit, score: x.score }));
+  }
+
+  const rrfMax = Math.max(...raw.map((h) => h.score ?? 0), 1e-9);
+  const ftsValues = raw.map((h) => h.ftsScore ?? 0).filter((v) => v > 0);
+  const ftsMax = Math.max(...ftsValues, 1e-9);
+  // 补偿值：该路有效样本不足 3 条时分位不可信，按 0 处理
+  const ftsFloor = ftsValues.length >= 3 ? percentile(ftsValues, 0.25) : 0;
+
+  return [...raw]
+    .map((h) => {
+      const rrf = (h.score ?? 0) / rrfMax;
+      const fts = ((h.ftsScore ?? 0) > 0 ? (h.ftsScore ?? 0) : ftsFloor) / ftsMax;
+      return { hit: h, score: rrf + MULTI_RERANK_BM25_WEIGHT * fts };
+    })
+    .sort((a, b) => b.score - a.score)
+    // 分数写回：前端与 MCP 都按 score 展示，重排后必须同步，否则顺序与数值对不上
+    .map((x) => ({ ...x.hit, score: x.score }));
+}
+
+
 /**
  * 「无向量 Collection」跳过项的文案前缀。
  *
@@ -191,10 +283,48 @@ function buildOriginalExcerpt(matches?: OriginalMatch[]): string | undefined {
   return matches.map((match) => match.excerpt).join('\n…\n');
 }
 
+/**
+ * 多库重排算法。
+ * - `semantic-similarity`：`绝对相似度 + (bm25/50) × 1/61` —— 两项都不含库内名次
+ * - `weighted`：两路归一加权（字面 6 成 / 名次 4 成 + 25 分位补偿）
+ * - `dynamic-ratio`：`rrf + 1e-5 × bm25/rrf`，**仅用于页面上的临时算法对比**，验证后删除
+ */
+export type MultiRankingAlgorithm =
+  | 'semantic-similarity'
+  | 'semantic-fts-dominant'
+  | 'semantic-fts-boost'
+  | 'weighted'
+  | 'dynamic-ratio'
+  | 'semantic-first'
+  | 'calibrated-semantic'
+  | 'calibrated-adaptive';
+
+/**
+ * 由**引擎在库内算出最终分**的算法 —— 上层不能再重排（否则同一份分数被改两遍），
+ * 候选原料也要放大（引擎需要更多候选才能按最终分选出正确的 top-N）。
+ */
+const ENGINE_FINAL_RANKINGS = new Set<MultiRankingAlgorithm>([
+  'semantic-similarity',
+  'semantic-fts-dominant',
+  'semantic-fts-boost',
+  'dynamic-ratio',
+  'calibrated-semantic',
+]);
+
+/**
+ * 自适应校正的幅度（仅 `calibrated-adaptive` 生效）。
+ *
+ * 校正因子 = `1 + α·(b/bMax − 0.5)`：字面分高于候选池中位的放大、低于的缩小。
+ * 实测 α=0.2 时无关小库条数 0.50 → 0.17，库覆盖不变；α=0.3 能压到 0 但覆盖从 2.33 降到 2.17。
+ */
+const ADAPTIVE_ALPHA = 0.2;
+
 async function executeSearchLocal(params: {
   scope?: string;
   query: string;
   limit?: number;
+  ranking?: MultiRankingAlgorithm;
+  semanticBonus?: number;
   threshold?: number;
   tags?: string;
   /** 查询 embedding 超时（ms）；CLI/MCP/Web 的 timeout 按秒转换后传入。 */
@@ -204,6 +334,13 @@ async function executeSearchLocal(params: {
   mode?: 'hybrid' | 'fulltext';
 }): Promise<SearchResult> {
   try {
+    /**
+     * 多库排序算法：未指定时用「字面主导」（`semantic-fts-dominant`）——
+     * `语义相似度 + 字面分 ÷ 100`，两项都是绝对量、跨库可比。
+     *
+     * 页面上已不再提供算法选择，调用方（CLI / MCP）仍可显式传入用于排查对比。
+     */
+    const ranking = params.ranking ?? 'semantic-fts-dominant';
     // scope 解析（支持逗号分隔多 scope + 视图名）：去重保序、逐段字符集校验（非法快速失败）。
     // ★ 视图名 → 成员 scope 的**唯一展开点**在这里（scope-view.ts::resolveScopeTargets）。
     //   下游（vector-client fan-out / 命中回填 / 原文读取）只认真实 scope，完全不感知视图。
@@ -270,7 +407,11 @@ async function executeSearchLocal(params: {
     for (const missing of missingCollections) {
       skipped.push({
         scope: missing,
-        reason: `${MISSING_COLLECTION_REASON_PREFIX}（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入`,
+        // 多库时口径不同：这些库是「没有语义能力」而不只是「没建索引」，
+        // 提示要直接给替代路径，否则用户只会看到「一个库被跳过」。
+        reason: multi
+          ? `${MISSING_COLLECTION_REASON_PREFIX}；该库没有向量索引，未参与本次语义检索。如需检索它，请用全文模式（--mode fulltext）或单独指定该库`
+          : `${MISSING_COLLECTION_REASON_PREFIX}（尚未导入，或仍是旧版单 Collection 布局）；当前不支持旧布局迁移，请执行 ki import 重新导入`,
       });
     }
 
@@ -346,7 +487,11 @@ async function executeSearchLocal(params: {
         onScopeError,
       });
     } else if (params.tags) {
-      const requestedTopk = (params.limit ?? 10) + hiddenHeadroom;
+      // 多库时候选池放大：让跨库重排有足够候选可挑（合并后仍按 limit 截断）
+      // dynamic-ratio：引擎内部按「每路 2 倍」取原料再按最终分截断，这里只传每库配额；
+      // 其余算法在合并层重排，仍需要 2 倍候选池（否则上层看到的候选更少）
+      const mergeBoost = multi && !ENGINE_FINAL_RANKINGS.has(ranking) ? 2 : 1;
+      const requestedTopk = ((params.limit ?? 10) + hiddenHeadroom) * mergeBoost;
       const topk = Math.min(requestedTopk, SEARCH_TOPK_MAX);
       if (requestedTopk > topk) {
         skipped.push({
@@ -363,6 +508,10 @@ async function executeSearchLocal(params: {
         timeoutMs: params.timeoutMs,
         onDegrade: (reason) => { degradeReason ??= reason; },
         onScopeError,
+        // ★ 必须传套用默认值后的 `ranking`：传 `params.ranking` 会让不显式传参的调用方
+        //   （页面 / MCP）落到引擎的「其余算法」分支，分数退回库内融合分。
+        ranking,
+        semanticBonus: params.semanticBonus,
       });
     } else {
       const tagUnion = new Map<string, number>();
@@ -405,7 +554,9 @@ async function executeSearchLocal(params: {
         //（同文档多 tag 各写一条）而效果一致。
         // 传数组而非 join(',')：tag 值本身可能含逗号，join/split 往返会错拆。
         const limit = params.limit ?? 10;
-        const requestedTopk = limit * tagNames.length + hiddenHeadroom;
+        // dynamic-ratio 由引擎内部放大取原料；其余算法在上层重排，仍需 2 倍候选池
+        const perTagLimit = limit * (multi && !ENGINE_FINAL_RANKINGS.has(ranking) ? 2 : 1);
+        const requestedTopk = perTagLimit * tagNames.length + hiddenHeadroom;
         const topk = Math.min(requestedTopk, SEARCH_TOPK_MAX);
         if (requestedTopk > topk) {
           skipped.push({
@@ -423,6 +574,8 @@ async function executeSearchLocal(params: {
           timeoutMs: params.timeoutMs,
           onDegrade: (reason) => { degradeReason ??= reason; },
           onScopeError,
+          ranking,
+          semanticBonus: params.semanticBonus,
         });
         const byTag = new Map<string, VectorSearchResult[]>();
         for (const h of hits.filter(isVisibleHit)) {
@@ -433,7 +586,7 @@ async function executeSearchLocal(params: {
         }
         const perTag: { priority: number; hits: VectorSearchResult[] }[] = [];
         for (const group of byTag.values()) {
-          perTag.push({ priority: tagPriority(group[0].tag ?? ''), hits: group.slice(0, limit) });
+          perTag.push({ priority: tagPriority(group[0].tag ?? ''), hits: group.slice(0, perTagLimit) });
         }
         perTag.sort((a, b) => a.priority - b.priority);
         raw = perTag.flatMap((p) => p.hits);
@@ -447,6 +600,24 @@ async function executeSearchLocal(params: {
     // 编辑发布期间，新索引尚未成为正式版本；清理失败的旧索引也不应继续召回。
     // 草稿清单先于 zvec 写入持久化，故读路径可按 ID 排除两类中间态。
     raw = raw.filter(isVisibleHit);
+
+    /**
+     * 多库跨库重排：把「库内名次分」与「字面绝对分」归一后加权，压住小库的虚高排名。
+     *
+     * 数据来自引擎随 hybrid 一起返回的 `ftsScore`（分路 BM25），**不需要再 fan-out 一轮**。
+     * 不重排的三种情况：单库（零回归）、全文模式（本来就是字面排序）、
+     * 本次已降级（两路已合并成一路，再加权等于同一份分数算两遍）。
+     */
+    /**
+     * 多库跨库重排。
+     *
+     * ★ `dynamic-ratio` 不走这里：它的公式只依赖名次分的量级，引擎已经在**库内**
+     *   算好最终分并按最终分截断 —— 再排一次等于把同一份分数改两遍。
+     *   其余算法（依赖候选池最大值）仍在合并层做。
+     */
+    if (multi && !isFullText && degradeReason === undefined && !ENGINE_FINAL_RANKINGS.has(ranking)) {
+      raw = rerankMultiScope(raw, ranking);
+    }
 
     // 按 memoryId 反查 relations-cache：命中附加 group / relation 定位原文。
     // 多 scope：按命中所属 scope 选对应 relation-map（跨 scope 不错配）；
@@ -754,6 +925,10 @@ export async function executeSearch(params: {
   timeoutMs?: number;
   includeOriginal?: boolean;
   mode?: 'hybrid' | 'fulltext';
+  /** 多库重排算法（默认 weighted；dynamic-ratio 仅用于算法对比，见 TEMP 注释） */
+  ranking?: MultiRankingAlgorithm;
+  /** 语义补充系数（仅 calibrated-semantic 生效）；未传时用 scoring.ts 的默认值 */
+  semanticBonus?: number;
 }): Promise<SearchResult> {
   if (shouldUseDaemonClient()) {
     // CLI/stdio 通过 daemon 时也要使用调用方配置文件的默认值，不能因请求未显式
@@ -780,11 +955,13 @@ program
   .option('-s, --scope <scope>', '项目隔离标识（多个用逗号分隔聚合检索；default 模式可省略，默认 default；strict 模式必填）')
   .option('-q, --query <query>', '自然语言查询文本')
   .option('--limit <limit>', '返回条数上限（整次检索最多返回的文档数；未传 --tags 时内部按 tag 取候选，最终仍按该值截断；引擎单次候选上限 1000，超出时部分 tag 召回可能减少）', '10')
-  .option('--threshold <threshold>', '相似度阈值（融合得分，略过低于此值的命中；默认 0 不过滤）', '0')
+  .option('--threshold <threshold>', '分数下限：低于此值的命中被丢弃（默认 0 不过滤；单库约 0.02~0.4，多库 / 视图约 0.3~4）', '0')
   .option('--tags <tags>', '过滤标签（不传则搜索全部 tag：内部按 tag 取候选，最终仍按 --limit 截断，ki-search 内容优先；多个用逗号分隔，OR 组合）')
   .option('--timeout <seconds>', '查询 embedding 超时（秒，范围 0.001-60；未传则使用配置值）')
   .option('--original', '返回 local KB 文件级原文（默认不返回，仅返回向量匹配数据，REQ-09）')
   .option('--mode <mode>', '检索模式：hybrid 或 fulltext', 'hybrid')
+  .option('--ranking <algo>', '多库（视图）排序算法：semantic-fts-dominant（默认，字面主导） | semantic-similarity | semantic-fts-boost | weighted | dynamic-ratio | semantic-first | calibrated-semantic | calibrated-adaptive', 'semantic-fts-dominant')
+  .option('--semantic-bonus <n>', '语义补充系数（calibrated-semantic 专用，默认 0.1）')
   .action(async (query: string | undefined, opts) => {
     const finalQuery = query ?? opts.query;
     if (!finalQuery) {
@@ -811,6 +988,18 @@ program
       timeoutMs,
       includeOriginal: opts.original === true,
       mode: opts.mode === 'fulltext' ? 'fulltext' : 'hybrid',
+      // 白名单外的值静默回退到默认算法（commander 不做枚举校验）
+      ranking:
+        opts.ranking === 'semantic-similarity'
+        || opts.ranking === 'semantic-fts-boost'
+        || opts.ranking === 'weighted'
+        || opts.ranking === 'dynamic-ratio'
+        || opts.ranking === 'semantic-first'
+        || opts.ranking === 'calibrated-semantic'
+        || opts.ranking === 'calibrated-adaptive'
+          ? opts.ranking
+          : 'semantic-fts-dominant',
+      ...(opts.semanticBonus !== undefined ? { semanticBonus: Number(opts.semanticBonus) } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
     // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出

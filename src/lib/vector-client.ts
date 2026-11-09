@@ -1024,8 +1024,10 @@ export async function vectorSearch(params: {
    *
    * ★ 单库不读这个值：单库固定用「字面加权 RRF」（`fts-weighted-rrf`，见 scoring.ts），
    *   与本参数列出的跨库算法不可比，混用会让单库结果随多库算法切换而漂移。
+   *
+   * `semantic-similarity`：绝对语义相似度 + 字面强度加成，两项都不含库内名次。
    */
-  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive';
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'semantic-similarity' | 'semantic-fts-dominant' | 'semantic-fts-boost';
   /** 语义补充系数（calibrated-semantic 专用） */
   semanticBonus?: number;
   /** 测试/嵌入适配器注入；生产调用不传，默认使用配置中的 provider。 */

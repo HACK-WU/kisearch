@@ -45,7 +45,17 @@ import type {
   WriteResultPayload,
 } from './worker-protocol.js';
 import { serializeError } from './worker-protocol.js';
-import { RRF_FLOOR, SEMANTIC_BONUS, SINGLE_SCOPE_RANKING, dynamicRatioScore, ftsWeightedRrfScore } from './scoring.js';
+import {
+  RRF_FLOOR,
+  SEMANTIC_BONUS,
+  SEMANTIC_RANKING_MODES,
+  SEMANTIC_SIMILARITY_RANKING,
+  SINGLE_SCOPE_RANKING,
+  dynamicRatioScore,
+  ftsWeightedRrfScore,
+  semanticSimilarityScore,
+  type SemanticFtsMode,
+} from './scoring.js';
 
 if (!parentPort) {
   throw new Error('worker.ts must be run as a worker_threads worker');
@@ -463,10 +473,15 @@ async function handleMultiQuery(payload: MultiQueryPayload): Promise<RawHitPaylo
      */
     // 按「最终分」截断的算法必须先拿够原料，否则名次一般但字面强的文档会在库内被提前挤掉；
     // 其余算法仍按融合分截断（不放大 = 不为拿不到收益的路径付双倍查询成本）。
+    /** 多库绝对分的字面口径（三种策略共用同一个分支，只是加成方式不同） */
+    const semanticMode: SemanticFtsMode | undefined = payload.ranking !== undefined
+      ? SEMANTIC_RANKING_MODES[payload.ranking]
+      : undefined;
     const engineFinalScoring = payload.ranking === 'dynamic-ratio'
       || payload.ranking === 'calibrated-semantic'
       || payload.ranking === 'calibrated-adaptive'
-      || payload.ranking === SINGLE_SCOPE_RANKING;
+      || payload.ranking === SINGLE_SCOPE_RANKING
+      || semanticMode !== undefined;
     const routeTopk = engineFinalScoring
       ? Math.min(Math.max(payload.topk * 2, 40), 1000)
       : payload.topk;
@@ -537,6 +552,37 @@ async function handleMultiQuery(payload: MultiQueryPayload): Promise<RawHitPaylo
           routeScores: e.scores.map((v) => v ?? 0),
           rrf,
           baseScore: base,
+        }));
+    }
+
+    /**
+     * 多库：**绝对语义相似度 + 字面加成** —— `sim_v + f(bm25)`（见 scoring.ts）。
+     *
+     * 向量项换成绝对相似度：库内名次跨库不可比（只有两篇文档的库，头名同样是 `1/61`），
+     * 而相似度只由向量接近程度决定，与库大小无关。
+     * 字面项把名次固定为 1、只留强度，具体加成方式由 `semanticMode` 决定（三种策略并存）。
+     *
+     * 分数已跨库可比、且不含候选池最大值，所以库内算完即可直接按最终分截断。
+     */
+    if (semanticMode !== undefined) {
+      const vectorRouteIdx = payload.queries.findIndex((q) => q.vector !== undefined);
+      const ftsRouteIdx = payload.queries.findIndex((q) => q.ftsMatchString !== undefined);
+      return [...acc.values()]
+        .map((e) => ({
+          e,
+          score: semanticSimilarityScore(
+            vectorRouteIdx >= 0 ? (e.scores[vectorRouteIdx] ?? 0) : 0,
+            // ★ 未命中字面路时必须是 undefined：传 0 会让 ftsWeight(0)=1，白送一份字面分
+            ftsRouteIdx >= 0 ? e.scores[ftsRouteIdx] : undefined,
+            semanticMode,
+          ),
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, payload.topk)
+        .map(({ e, score }) => ({
+          ...toRawHit(e.doc, false, payload.includeVector ?? false, true),
+          score,
+          routeScores: e.scores.map((v) => v ?? 0),
         }));
     }
 

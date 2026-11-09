@@ -650,7 +650,7 @@ ki search "仪表盘配置" -s monitor
 ki search "告警静默策略" -s monitor,alerting
 ```
 
-输出（`score` 为 RRF 融合分，值域通常为 0.0x 级别，非异常；`content` 为向量层存储文本）：
+输出（`score` 的量级随检索范围不同：单库是融合分、通常 `0.0x`；多库 / 视图是「语义相似度 + 字面分 ÷ 100」、通常 `0.3 ~ 4` —— 数值小或大都不是异常；`content` 为向量层存储文本）：
 
 ```json
 {

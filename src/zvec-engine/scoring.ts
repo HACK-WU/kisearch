@@ -133,3 +133,81 @@ export function ftsWeightedRrfScore(
   const ftsPart = ftsRank ? ftsWeight(bm25) / (rankConstant + ftsRank) : 0;
   return roundSignificant(vectorPart + ftsPart, SEARCH_SCORE_DIGITS);
 }
+
+// ─── 多库检索：绝对语义相似度 + 字面强度加成 ───
+
+/**
+ * 多库检索的「绝对分」算法标识：`sim_v + w(bm25) / 61`。
+ *
+ * 与单库 `fts-weighted-rrf` 的差别只在**向量项**：单库用库内名次（`1/(60+r_v)`），
+ * 多库用绝对相似度（`sim_v`，0.33~1）。
+ *
+ * 为什么必须换：名次是「在**这个**库里排第几」，跨库不可比 —— 只有两篇文档的库，
+ * 头名照样拿 `1/61`；而相似度只由「查询向量与文档向量的接近程度」决定，与库大小无关。
+ */
+export const SEMANTIC_SIMILARITY_RANKING = 'semantic-similarity' as const;
+
+/**
+ * 多库字面项的**基准**（字面名次按 1 计）。
+ *
+ * 不用单路的 `1/61`：语义主项是 `0.33~1` 的绝对相似度，`1/61 ≈ 0.0164` 只占 2.4%，
+ * 排序几乎完全由相似度决定。取 `1/23 ≈ 0.0435`，与「同族文档之间典型的相似度差距
+ * （实测 0.04）」同量级。
+ *
+ * ★ 注意它只是**公共加数**：当两篇文档 `bm25` 都 ≤ 50（`w` 同为 1）时，抬高基准对两者
+ *   等量加成，**相对差距不变、排序也不变**。要改变这类排序，必须让 `w` 连续反映 BM25。
+ */
+export const SEMANTIC_FTS_BASE = 1 / 23;
+
+/**
+ * 多库绝对分的字面口径（三种策略并存，供对比）。
+ *
+ * - `balanced`：`w × 1/23` —— 字面只做小幅加成（默认）
+ * - `dominant`：`bm25 / 100` —— 线性、无门槛，字面能真正决定名次
+ * - `boost`：`bm25 > 30 ? 0.05 : w × 1/23` —— 只让「字面显著强」的文档跳一级
+ */
+export type SemanticFtsMode = 'balanced' | 'dominant' | 'boost';
+
+/** `boost` 口径的触发门槛与跳档加成 */
+export const SEMANTIC_BOOST_MIN_BM25 = 30;
+export const SEMANTIC_BOOST_BONUS = 0.05;
+
+/**
+ * 多库绝对分：`sim_v + 字面加成`。
+ *
+ * 字面项把名次固定为 1，即**只保留强度、丢掉库内名次** —— 否则小库字面路只召回一条时
+ * 必然拿满档，又会把「库内名次虚高」带回来。
+ *
+ * @param sim  向量路绝对相似度（0.33~1；未被向量路召回时传 0）
+ * @param bm25 字面路 BM25 原值。**未被字面路召回时必须传 undefined** ——
+ *             传 0 会让 `ftsWeight(0) = 1`，白送一份字面分
+ * @param mode 字面口径，见 {@link SemanticFtsMode}
+ */
+export function semanticSimilarityScore(
+  sim: number,
+  bm25: number | undefined,
+  mode: SemanticFtsMode = 'balanced',
+): number {
+  if (bm25 === undefined) return roundSignificant(sim, SEARCH_SCORE_DIGITS);
+  let ftsPart: number;
+  switch (mode) {
+    case 'dominant':
+      ftsPart = bm25 / 100;
+      break;
+    case 'boost':
+      ftsPart = bm25 > SEMANTIC_BOOST_MIN_BM25
+        ? SEMANTIC_BOOST_BONUS
+        : ftsWeight(bm25) * SEMANTIC_FTS_BASE;
+      break;
+    default:
+      ftsPart = ftsWeight(bm25) * SEMANTIC_FTS_BASE;
+  }
+  return roundSignificant(sim + ftsPart, SEARCH_SCORE_DIGITS);
+}
+
+/** ranking 标识 → 字面口径（三者共用同一个库内分支） */
+export const SEMANTIC_RANKING_MODES: Record<string, SemanticFtsMode> = {
+  'semantic-similarity': 'balanced',
+  'semantic-fts-dominant': 'dominant',
+  'semantic-fts-boost': 'boost',
+};

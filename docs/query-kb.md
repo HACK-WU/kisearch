@@ -43,7 +43,7 @@ ki search "用户登录流程" -s <scope>
 | 参数 | 说明 |
 |---|---|
 | `--limit <n>` | 整次检索返回的**总条数**上限（默认 10；引擎单次候选上限 1000） |
-| `--threshold <score>` | 融合分阈值，建议 `0.02 ~ 0.03`（RRF 理论上限约 0.033，超过会过滤掉全部结果） |
+| `--threshold <score>` | 分数阈值。单库建议 `0.02 ~ 0.03`（融合分上限约 0.033）；多库 / 视图建议 `0.6 ~ 0.8`（分数为「语义相似度 + 字面分 ÷ 100」，见 [多库排序规则](./multi-scope-ranking.md)） |
 | `--tags t1,t2` | 按标签过滤（OR）；不传 = 搜全部标签，`ki-search` 内容优先 |
 | `--mode hybrid\|fulltext` | `hybrid` 默认（语义 + 全文）；`fulltext` 只查全文索引，不调用 embedding |
 | `--timeout <seconds>` | 查询 embedding 超时，超时后降级为关键词检索并在结果中标记 `degraded` |
@@ -51,7 +51,7 @@ ki search "用户登录流程" -s <scope>
 
 每条结果都带定位字段：`group` / `relation` / `tag` / `score` / `content`。需要整篇原文时用 `--original`，或拿 `group` + `relation` 走路径 1 的 `ki get-module-info`。
 
-> `score` 是 RRF 融合分（通常 0.0x），不是相似度百分比。降级为关键词检索时分数是 BM25 量级，两套尺度不可直接比较。
+> `score` 的量级取决于查了几个库：单库是融合分（通常 `0.0x`），多库 / 视图是「语义相似度 + 字面分 ÷ 100」（通常 `0.3 ~ 4`）。两者都不是相似度百分比；降级为关键词检索时分数是 BM25 量级，与前两者都不可直接比较。
 
 ## 路径 3：未命中
 

@@ -71,9 +71,10 @@ export interface MultiQueryPayload {
    *
    * - `dynamic-ratio`：库内直接算最终分并按最终分截断（绝对分，跨库可比）；
    * - `fts-weighted-rrf`：单库专用（`向量名次分 + (bm25/50) × 字面名次分`），同样库内截断；
+   * - `semantic-similarity`：多库（`绝对相似度 + (bm25/50) × 1/61`），同样库内截断；
    * - 其余（或缺省）：只带出分路分数，仍按融合分截断，由上层统一重排。
    */
-  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf';
+  ranking?: 'weighted' | 'dynamic-ratio' | 'semantic-first' | 'calibrated-semantic' | 'calibrated-adaptive' | 'fts-weighted-rrf' | 'semantic-similarity' | 'semantic-fts-dominant' | 'semantic-fts-boost';
   /** 语义补充系数（calibrated-semantic 专用）；缺省用 scoring.ts 的 SEMANTIC_BONUS */
   semanticBonus?: number;
   filterSql?: string;
