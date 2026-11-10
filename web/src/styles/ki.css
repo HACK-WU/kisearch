@@ -5929,6 +5929,38 @@ select.ki-chat-cfg__ta--select {
   .ki-ds-remove__actions { width: 100%; }
   .ki-ds-remove__actions .ki-btn { flex: 1 1 auto; }
 }
+/* 同步确认（2026-11-09）：非破坏性操作，只做「这是哪一行 + 它会怎么跑」的信息确认。
+   骨架与 .ki-ds-remove 同源（.ki-dialog / .ki-overlay），但不加 danger 顶条、按钮不用 danger。 */
+.ki-ds-sync .ki-dialog__head { align-items: flex-start; }
+.ki-ds-sync__sub { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0; }
+.ki-ds-sync__scope {
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); font-weight: 650;
+  color: var(--ki-color-text); overflow-wrap: anywhere;
+}
+/* 键值：标签列固定窄（最长 4 字），值列可折行 —— 路径不截断，用户拿它核对是不是这一行 */
+.ki-ds-sync__kv {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr);
+  gap: 7px 12px; align-items: baseline; margin: 0;
+  font-size: var(--ki-font-size-sm);
+}
+.ki-ds-sync__kv dt { color: var(--ki-color-text-subtle); }
+.ki-ds-sync__kv dd { margin: 0; min-width: 0; color: var(--ki-color-text); overflow-wrap: anywhere; }
+.ki-ds-sync__mono { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs); }
+.ki-ds-sync__num { font-variant-numeric: tabular-nums; }
+/* 底部提示：灰底小字、语气中性（不是警告块） */
+.ki-ds-sync__note {
+  margin: 14px 0 0; padding: 8px 10px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  font-size: var(--ki-font-size-xs); line-height: 1.6;
+  color: var(--ki-color-text-subtle);
+}
+@media (max-width: 640px) {
+  .ki-ds-sync__kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ki-ds-sync__kv dt { font-size: var(--ki-font-size-xs); }
+  .ki-ds-sync .ki-dialog__foot .ki-btn { flex: 1 1 auto; }
+}
+
 .ki-ds-table__dir,
 .ki-ds-table__group {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

@@ -22,7 +22,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useDataSourceDetail, useDataSourceList, useScopeList, useVectorAvailability, useWritableScope } from '@/lib/hooks';
 import { useAuth } from '@/lib/authContext';
 // upstream 侧记录/列表自带 schedule（定时同步），本地侧新增移除接口（removeDataSource）
-import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
+import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSource, removeDataSource, syncDataSource, type DataSourceListRow, type DataSourcePendingItem, type DataSourceRecordView } from '@/api/httpApi';
 import { getTask } from '@/api/tasksApi';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
@@ -238,6 +238,17 @@ export function DataSourcePage(): JSX.Element {
   const removeDialogRef = useRef<HTMLElement>(null);
   /** 移除成功后行已消失：焦点要落在结果提示上，不能掉到 body（键盘用户会丢失位置） */
   const rowNoticeRef = useRef<HTMLParagraphElement>(null);
+  /**
+   * 同步二次确认（2026-11-09 用户要求）：误点会白跑一次全目录扫描（大仓库数分钟）并占任务队列。
+   * 语义上不是破坏性操作 ⇒ 不套 danger 顶条、主按钮用 primary；真正的价值是弹窗里写明 scope ——
+   * 点错行时用户能当场看见，而不是等一次莫名其妙的同步跑起来。
+   */
+  const [syncTarget, setSyncTarget] = useState<DataSourceListRow | null>(null);
+  const [syncSubmitting, setSyncSubmitting] = useState(false);
+  /** 默认焦点落「取消」：Enter 不误发请求（用户 2026-11-09 拍板） */
+  const syncCancelRef = useRef<HTMLButtonElement>(null);
+  /** 触发按钮：取消 / Esc 关闭后焦点还给它；提交后按钮置灰，改交给结果提示 */
+  const syncTriggerRef = useRef<HTMLButtonElement | null>(null);
   // 确认框里的「库内文档 N 篇」：走已缓存的 scope 列表，不为弹窗单独打接口
   const scopeListQuery = useScopeList();
   // 编辑数据源（2026-10-30）：列表行不带切分参数 / 修订号，点开时按 scope 拉详情
@@ -342,13 +353,14 @@ export function DataSourcePage(): JSX.Element {
   // Esc 关闭抽屉（与站内其他浮层同口径）；添加弹窗 / 移除弹窗 / 文档抽屉打开时由它们独占 Esc，
   // 否则一次 Esc 会把文档抽屉和数据源详情一起关掉
   useEffect(() => {
-    if (!scope || addOpen || docTarget || removeTarget) return undefined;
+    // 任何模态开着都不关抽屉：否则 Esc 会「关两层」，用户丢掉正在看的详情
+    if (!scope || addOpen || docTarget || removeTarget || syncTarget) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') navigate('/datasource');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [scope, navigate, addOpen, docTarget, removeTarget]);
+  }, [scope, navigate, addOpen, docTarget, removeTarget, syncTarget]);
 
   // 移除确认弹窗：打开时聚焦容器、Esc 关闭（移除进行中不响应，避免"关了但请求还在跑"）
   useEffect(() => {
@@ -365,6 +377,40 @@ export function DataSourcePage(): JSX.Element {
       window.removeEventListener('keydown', onKey);
     };
   }, [removeTarget, removing]);
+
+  // 同步确认弹窗：打开时聚焦「取消」（Enter 不误发请求）、Esc 关闭（提交中不响应，避免"关了但请求还在跑"）
+  useEffect(() => {
+    if (!syncTarget) return undefined;
+    const timer = window.setTimeout(() => syncCancelRef.current?.focus(), 0);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || syncSubmitting) return;
+      setSyncTarget(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [syncTarget, syncSubmitting]);
+
+  /**
+   * 弹窗关闭后焦点归位（取消 / Esc / 点遮罩 / 提交成功都走这一条）。
+   * 行还在、按钮可点 → 还给按钮（与编辑/移除弹窗同口径）；
+   * 按钮已置灰（同步中 / 冷却 / 向量不可用）→ 落行内结果提示，绝不把焦点丢给 body。
+   */
+  useEffect(() => {
+    const trigger = syncTriggerRef.current;
+    if (syncTarget !== null || !trigger) return undefined;
+    syncTriggerRef.current = null;
+    const timer = window.setTimeout(() => {
+      if (document.contains(trigger) && !trigger.disabled) {
+        trigger.focus();
+        return;
+      }
+      rowNoticeRef.current?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [syncTarget]);
 
   // 旧 daemon 只返回 running：统一在这里归一，避免 `undefined !== null` 把空闲判成进行中
   const activeState = resolveDataSourceActiveState(detailQuery.data?.activeState, detailQuery.data?.running);
@@ -388,6 +434,42 @@ export function DataSourcePage(): JSX.Element {
 
   /** 待删除段常显：无候选时也要给一句说明（否则用户以为功能消失） */
   const pendingEmpty = model ? model.pending.total === 0 && !model.pending.blocked : false;
+
+  /**
+   * 同步确认框展示的行快照（打开那一刻，不再随列表刷新跳动）。
+   * 落点沿用列表列的口径：根散文件显示「根目录」，不回显内部保留键 `__root__`。
+   */
+  const syncTargetView = useMemo(() => {
+    if (!syncTarget) return null;
+    const groupText = summarizeGroupColumn(syncTarget.mappings, syncTarget.group ?? null).text;
+    const rowStatus = dataSourceStatusView({
+      activeState: syncTarget.activeState,
+      running: syncTarget.running,
+      lastSync: syncTarget.lastSync,
+    });
+    /**
+     * ★ 同步方式必须按真实模式推导，不能写死「增量」。
+     * 后端 `datasourceSyncMode`（`src/lib/datasource-task.ts:12`）：只有 **Git 源且上次同步过**
+     * 才是 incremental，**目录源恒为 full（全目录重扫）**。弹框若对目录源说「只处理有变化的文件」，
+     * 用户会以为很轻，点下去却是整目录扫描 —— 与二次确认的初衷正相反。
+     * 判定依据用列表下发的 `git.shortCommit`（= `lastSync.git.shortCommit`，与后端同一来源）。
+     */
+    const incremental = syncTarget.type === 'git' && Boolean(syncTarget.git?.shortCommit);
+    return {
+      group: groupText === ROOT_GROUP_KEY ? ROOT_GROUP_FIELD_LABEL : groupText,
+      lastSync: syncTarget.lastSync
+        ? `${formatDateTime(syncTarget.lastSync.at)} · ${rowStatus.label} · ${formatSyncDuration(syncTarget.lastSync.durationMs)}`
+        : '尚未同步过',
+      mode: incremental ? '增量（只处理有变化的文件）' : '全量（重新扫描全部文件）',
+      modeHint: incremental
+        ? '只重新处理本次变更的文件，未变化的文档沿用上次结果。'
+        : '会重新扫描整个源目录；目录较大时耗时数分钟。',
+      // 旧 daemon 不下发 schedule（页面顶部另有「不支持定时同步」警告）→ 这里用「—」表示未知
+      schedule: syncTarget.schedule === undefined
+        ? '—'
+        : syncTarget.schedule.enabled ? describeSchedule(syncTarget.schedule) : '未开启',
+    };
+  }, [syncTarget]);
 
   const lastSync = detailQuery.data?.source.lastSync ?? null;
   const whenLabel = lastSync
@@ -679,6 +761,36 @@ export function DataSourcePage(): JSX.Element {
         next.delete(targetScope);
         return next;
       });
+    }
+  };
+
+  // ── 同步二次确认（2026-11-09）──────────────────────────
+  /** 只在按钮可点时才走到这里；把整行快照带进弹窗，省一次详情请求 */
+  const openSyncConfirm = (source: DataSourceListRow, trigger: HTMLButtonElement): void => {
+    syncTriggerRef.current = trigger;
+    setSyncTarget(source);
+  };
+
+  const closeSyncConfirm = (): void => {
+    if (syncSubmitting) return;
+    setSyncTarget(null);
+  };
+
+  /**
+   * 确认后才真正发请求。`triggerSync` 自己吞掉 429/409/403 并写行内提示，
+   * 所以这里不需要 try/catch 分支，只负责收尾（关弹窗 + 焦点落点）。
+   */
+  const submitSyncConfirm = async (): Promise<void> => {
+    const target = syncTarget;
+    if (!target || syncSubmitting) return;
+    setSyncSubmitting(true);
+    try {
+      await triggerSync(target.scope);
+    } finally {
+      setSyncSubmitting(false);
+      // 焦点归还统一由 syncTarget 那个 effect 做（与「取消」同一条路径）：
+      // 两处都写会靠时序抢焦点，实测「提交后」曾被按钮抢回去 —— 只留一处。
+      setSyncTarget(null);
     }
   };
 
@@ -1327,6 +1439,87 @@ export function DataSourcePage(): JSX.Element {
         </div>
       ) : null}
 
+      {/* 同步二次确认（2026-11-09 用户要求）：不是破坏性操作 ⇒ 无 danger 顶条、主按钮 primary；
+          信息只答"我要同步的是哪一行、它会怎么跑"，与「移除」弹窗共用 .ki-dialog 骨架。
+          ★ 默认焦点在「取消」：Enter 不该把同步发出去（见 syncCancelRef 的聚焦 effect）。 */}
+      {syncTarget && syncTargetView ? (
+        <div
+          className="ki-overlay ki-overlay--show ki-overlay--front"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeSyncConfirm();
+          }}
+        >
+          <section
+            className="ki-dialog ki-ds-sync"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ki-ds-sync-title"
+            aria-describedby="ki-ds-sync-note"
+          >
+            <header className="ki-dialog__head">
+              <div>
+                <h3 className="ki-dialog__title" id="ki-ds-sync-title">同步数据源</h3>
+                <p className="ki-ds-sync__sub">
+                  <span className="ki-ds-sync__scope">{syncTarget.scope}</span>
+                  <span className={`ki-ds-type-badge ${syncTarget.type === 'git' ? 'ki-ds-type-badge--git' : 'ki-ds-type-badge--dir'}`}>
+                    {syncTarget.type === 'git' ? 'Git' : '目录'}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                className="ki-dialog__close"
+                aria-label="关闭同步确认"
+                disabled={syncSubmitting}
+                onClick={closeSyncConfirm}
+              >✕</button>
+            </header>
+            <div className="ki-dialog__body">
+              <dl className="ki-ds-sync__kv">
+                <dt>源目录</dt>
+                <dd className="ki-ds-sync__mono" title={syncTarget.dir}>{syncTarget.dir || '—'}</dd>
+                <dt>落点</dt>
+                {/* 落点与列表列同口径（未指定 Group 时显示「(自动)」）；悬停补一句它到底指什么。
+                    ★ 这里比对的是 summarizeGroupColumn 的 `'(自动)'` 文案：上游改文案则 title 静默失效（不影响功能），
+                    真要动那句文案请同步改这里。 */}
+                <dd title={syncTargetView.group === '(自动)' ? '未指定落点 Group，同步时按源目录自动推导' : undefined}>
+                  {syncTargetView.group || '—'}
+                </dd>
+                <dt>上次同步</dt>
+                <dd className="ki-ds-sync__num">{syncTargetView.lastSync}</dd>
+                <dt>同步方式</dt>
+                {/* 由 type + 上次 commit 推导（见 syncTargetView），不要写死「增量」 */}
+                <dd>{syncTargetView.mode}</dd>
+                <dt>定时同步</dt>
+                <dd>{syncTargetView.schedule}</dd>
+              </dl>
+              <p className="ki-ds-sync__note" id="ki-ds-sync-note">
+                {`${syncTargetView.modeHint}${
+                  syncTarget.type === 'git'
+                    ? 'Git 源不受 30 分钟冷却限制。'
+                    : '同步成功后 30 分钟内不可再次触发，失败可直接重试。'
+                }`}
+              </p>
+            </div>
+            <footer className="ki-dialog__foot">
+              <button
+                ref={syncCancelRef}
+                type="button"
+                className="ki-btn ki-btn--secondary"
+                disabled={syncSubmitting}
+                onClick={closeSyncConfirm}
+              >取消</button>
+              <button
+                type="button"
+                className="ki-btn ki-btn--primary"
+                disabled={syncSubmitting}
+                onClick={() => { void submitSyncConfirm(); }}
+              >{syncSubmitting ? '提交中…' : '开始同步'}</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
       <div className="ki-ds-callout" role="note">
         <span className="ki-ds-callout__icon" aria-hidden>ⓘ</span>
         <span>
@@ -1582,13 +1775,15 @@ export function DataSourcePage(): JSX.Element {
                         {canWriteDatasource ? (
                           <button
                             type="button"
+                            data-ds-sync={source.scope}
                             className="ki-btn ki-btn--secondary ki-btn--small ki-ds-sync-btn"
                             disabled={!rowCanSync}
                             title={rowTitleWithSchedule}
                             aria-label={`同步 ${source.scope}`}
+                            // 2026-11-09：先弹确认框，确认后才发请求（误点会白跑一次全目录扫描）
                             onClick={(event) => {
                               event.stopPropagation();
-                              if (rowCanSync) void triggerSync(source.scope);
+                              if (rowCanSync) openSyncConfirm(source, event.currentTarget);
                             }}
                           >{/* ★ 文案恒定（2026-10-30）：原先 提交中…/同步中/排队中 会把按钮撑到
                                 58~70px，三按钮合计 174px > 操作列可用的 158px，操作组换行 →
