@@ -159,10 +159,11 @@
 .u2-inline-panel__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .u2-inline-panel__field > span { font-size: 11px; color: var(--ki-color-text-subtle); }
 .u2-inline-panel__field .ki-form-input { min-height: 34px; padding: 6px 10px; font-size: 13px; }
+/* 「权限」与「访问范围」始终上下单列（2026-11-10 用户拍板）：不要再加桌面双列覆盖 ——
+   并排时「访问范围」偏到右半屏、与主字段脱节，且「指定」展开的知识库芯片不知属于哪个字段。 */
 .u2-inline-panel__row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .u2-inline-panel__seg { display: inline-flex; width: auto; align-self: flex-start; }
 .u2-inline-panel__seg button { flex: 1; min-width: 96px; }
-.u2-inline-panel__body .u2-scope-chips { margin-top: 0; }
 .u2-inline-panel__body .u2-hint,
 .u2-inline-panel__body .u2-inline-error { margin: 0; }
 .u2-inline-panel__actions {
@@ -176,8 +177,6 @@
 }
 .u2-token-created-inline .u2-token-secret { margin-top: 8px; }
 .u2-token-created-inline .u2-hint { overflow-wrap: anywhere; }
-.u2-scope-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; max-height: 150px; overflow-y: auto; }
-.u2-scope-chips .ki-chip { min-height: 28px; }
 .u2-seg { margin-top: 2px; }
 .u2-seg button { min-height: 32px; }
 .u2-seg button:disabled { opacity: .45; cursor: not-allowed; }
@@ -368,9 +367,3 @@
 }
 
 .ki-detail-sec .u2-token-note { margin: 8px 0 10px; }
-
-
-/* 桌面双列压缩 Token 内联表单高度；390 保持单列 */
-@media (min-width: 700px) {
-  .u2-inline-panel__row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}

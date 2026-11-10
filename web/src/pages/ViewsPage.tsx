@@ -13,11 +13,12 @@
  *   等描边属性，图标会渲染成实心黑块（真机对比 demo 时发现）。尺寸/颜色在容器 CSS 里调。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { JSX, KeyboardEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { JSX } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Icon } from '@/components/icons';
-import { kiScopeList, type ScopeInfo } from '@/api/mcpClient';
+import { ScopeMultiPicker } from '@/components/ScopeMultiPicker';
+import { kiScopeList } from '@/api/mcpClient';
 import '@/styles/views.css';
 import {
   createView,
@@ -77,41 +78,12 @@ export function ViewsPage(): JSX.Element {
   const [deleteTarget, setDeleteTarget] = useState<ViewEntry | null>(null);
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
 
-  /* ── 成员选择器状态 ── */
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerFilter, setPickerFilter] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
-  const pickerInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!toast) return undefined;
     const t = window.setTimeout(() => setToast(null), 2400);
     return () => window.clearTimeout(t);
   }, [toast]);
-
-  /*
-   * 点外部收起候选（对齐 demo 踩过的两个坑）：
-   *   · 不能在 pointerdown 当场收起 —— 面板走常规流，收起会让下方「保存」上移，
-   *     本次点击的 mouseup 落到按钮外，click 不触发（"点保存没反应"）。
-   *   · 不能在 click 里用 contains 判断 —— 候选项是重新渲染的，target 可能已脱离文档。
-   * 所以 pointerdown 只记录 inside，click 阶段才决定收起。
-   */
-  useEffect(() => {
-    let inside = true;
-    const onDown = (e: PointerEvent): void => {
-      inside = Boolean(pickerRef.current?.contains(e.target as Node));
-    };
-    const onClick = (): void => {
-      if (!inside) setPickerOpen(false);
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    document.addEventListener('click', onClick, true);
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      document.removeEventListener('click', onClick, true);
-    };
-  }, []);
 
   const impact = useQuery({
     queryKey: ['views-impact', draft?.members ?? [], draft?.id ?? ''],
@@ -145,13 +117,9 @@ export function ViewsPage(): JSX.Element {
 
   const openNew = (): void => {
     setDraft({ id: null, name: '', members: [], baseRevision: 0 });
-    setPickerFilter('');
-    setPickerOpen(false);
   };
   const openEdit = (v: ViewEntry): void => {
     setDraft({ id: v.id, name: v.view, members: [...v.members], baseRevision: v.revision });
-    setPickerFilter('');
-    setPickerOpen(false);
   };
 
   const scopeMeta = useMemo(() => new Map(scopes.map((s) => [s.scope, s])), [scopes]);
@@ -173,54 +141,6 @@ export function ViewsPage(): JSX.Element {
     }
     return map;
   }, [views]);
-  /** 候选 = 未选中的库，按输入过滤 */
-  const candidates = useMemo(() => {
-    const kw = pickerFilter.trim().toLowerCase();
-    return scopes
-      .filter((s) => !(draft?.members ?? []).includes(s.scope))
-      .filter((s) => !kw || s.scope.toLowerCase().includes(kw))
-      .sort((a, b) => a.scope.localeCompare(b.scope));
-  }, [scopes, draft?.members, pickerFilter]);
-
-  const addMember = (name: string): void => {
-    if (!draft || draft.members.includes(name)) return;
-    setDraft({ ...draft, members: [...draft.members, name] });
-    setPickerFilter('');
-    setActiveIndex(0);
-    setPickerOpen(true);
-    pickerInputRef.current?.focus();
-  };
-  const removeMember = (name: string): void => {
-    if (!draft) return;
-    setDraft({ ...draft, members: draft.members.filter((m) => m !== name) });
-    setActiveIndex(0);
-  };
-
-  const onPickerKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault(); // 否则光标会在输入框里跳到首/尾
-      if (!pickerOpen) {
-        setPickerOpen(true);
-        return;
-      }
-      if (candidates.length === 0) return;
-      setActiveIndex((i) => (e.key === 'ArrowDown'
-        ? (i + 1) % candidates.length
-        : (i - 1 + candidates.length) % candidates.length));
-      return;
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const target = candidates[activeIndex] ?? candidates[0];
-      if (target) addMember(target.scope);
-      return;
-    }
-    if (e.key === 'Escape' && pickerOpen) {
-      e.stopPropagation();
-      setPickerOpen(false);
-    }
-  };
-
   const readonlySelected = draft
     ? draft.members.filter((m) => scopeMeta.get(m)?.readonly).length
     : 0;
@@ -259,116 +179,48 @@ export function ViewsPage(): JSX.Element {
               包含哪些知识库<span className="views-label__sub">只列出你可访问的</span>
             </span>
 
-            <div className="views-picker" ref={pickerRef} style={{ maxWidth: 340 }}>
-              <div className="views-picker__selected">
-                {draft.members.length === 0 && <span className="views-hint">还没有选择知识库</span>}
-                {draft.members.map((m) => {
-                  const meta = scopeMeta.get(m);
-                  const dimMismatch = dimensionByScope.get(m) === 'mismatch';
-                  const dimUnknown = dimensionByScope.get(m) === 'unknown';
-                  const tip = dimMismatch
-                    ? `语义检索会直接跳过该库（向量集合维度与当前配置不一致）；修复：ki restore ${m} --rebuild-vector --yes。依据上次维度检查，若已重建请重新检查`
-                    : (dimUnknown
-                      ? '没有可用的维度检查快照，不能断定该库维度正常；导入 / 重建或刷新维度检查后可确认'
-                      : (meta?.readonly
-                        ? '只读库：可作为检索成员，但不可写入'
-                        : (meta && !meta.kb && !meta.vector ? '尚未导入文档，检索时会跳过' : `点击移除 ${m}`)));
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      className={`views-chip views-chip--pick${dimMismatch ? ' views-chip--dim-mismatch' : (meta?.readonly ? ' views-chip--ro' : '')}`}
-                      title={tip}
-                      onClick={() => removeMember(m)}
-                    >
-                      {m}{dimMismatch ? ' · 维度不一致' : ''}{dimUnknown ? ' · 维度未确认' : ''}{meta?.readonly ? ' · 只读' : ''}
-                      <span className="views-chip__x" aria-hidden="true">×</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="views-picker__field">
-                <Icon name="search" />
-                <input
-                  ref={pickerInputRef}
-                  className="views-picker__input"
-                  value={pickerFilter}
-                  placeholder="搜索并添加知识库…"
-                  aria-expanded={pickerOpen}
-                  onFocus={() => setPickerOpen(true)}
-                  onClick={() => { if (!pickerOpen) setPickerOpen(true); }}
-                  onChange={(e) => {
-                    setPickerFilter(e.target.value);
-                    setPickerOpen(true);
-                    setActiveIndex(0);
-                  }}
-                  onKeyDown={onPickerKeyDown}
-                />
-                <button
-                  className="views-picker__toggle"
-                  type="button"
-                  aria-label={pickerOpen ? '收起候选' : '展开候选'}
-                  tabIndex={-1}
-                  onClick={() => {
-                    // 收起时不要再 focus 输入框：focus 的语义是"展开"，会立刻弹回来
-                    if (pickerOpen) {
-                      setPickerOpen(false);
-                      return;
-                    }
-                    setPickerOpen(true);
-                    pickerInputRef.current?.focus();
-                  }}
-                >
-                  ▾
-                </button>
-              </div>
-
-              {pickerOpen && (
-                <div className="views-picker__panel">
-                  {/*
-                   * 候选区与提示行**分开两层**：提示行固定在面板底部、不参与滚动。
-                   * 之前把提示行放在滚动区里用 `position: sticky; bottom: 0` ——
-                   * sticky 贴的是滚动容器的 padding edge，面板还有 5px padding，
-                   * 滚动内容会从那 5px 里透出来（表现为"提示行下方漏出半行字"）。
-                   */}
-                  <div className="views-picker__scroll">
-                    {candidates.length === 0 ? (
-                      <div className="views-picker__note">
-                        {draft.members.length === scopes.length
-                          ? `已添加全部 ${scopes.length} 个知识库`
-                          : `没有匹配「${pickerFilter}」的知识库`}
-                      </div>
-                    ) : (
-                      candidates.map((s: ScopeInfo, i) => (
-                        <button
-                          key={s.scope}
-                          type="button"
-                          className={`views-picker__opt${i === activeIndex ? ' views-picker__opt--active' : ''}`}
-                          onMouseEnter={() => setActiveIndex(i)}
-                          onClick={() => addMember(s.scope)}
-                        >
-                          <span className="views-picker__opt-name">{s.scope}</span>
-                          <span className="views-picker__opt-meta">
-                            {dimensionByScope.get(s.scope) === 'mismatch' && (
-                              <span
-                                className="views-tag views-tag--dim-mismatch"
-                                title="语义检索会直接跳过该库：向量集合维度与当前配置不一致（依据上次维度检查，若已重建请重新检查）"
-                              >维度不一致</span>
-                            )}
-                            {!s.vector && <span className="views-tag views-tag--kbonly">仅全文</span>}
-                            {s.readonly && <span className="views-tag views-tag--ro">只读</span>}
-                          </span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                  {candidates.length > 0 && (
-                    <div className="views-picker__hint">↑↓ 选择 · 回车添加 · Esc 收起 · 点已选项可移除</div>
+            <ScopeMultiPicker
+              scopes={scopes}
+              value={draft.members}
+              /* 函数式更新：连点两个候选时不会用渲染时的旧 draft 覆盖前一次添加 */
+              onChange={(next) => setDraft((prev) => (prev ? { ...prev, members: next } : prev))}
+              emptyHint="还没有选择知识库"
+              placeholder="搜索并添加知识库…"
+              chipLabel={(m) => {
+                const meta = scopeMeta.get(m);
+                const dimMismatch = dimensionByScope.get(m) === 'mismatch';
+                const dimUnknown = dimensionByScope.get(m) === 'unknown';
+                return `${m}${dimMismatch ? ' · 维度不一致' : ''}${dimUnknown ? ' · 维度未确认' : ''}${meta?.readonly ? ' · 只读' : ''}`;
+              }}
+              /* 配色优先级：维度不一致 > 只读（与列表行 chips 同口径） */
+              chipClassName={(m) => (dimensionByScope.get(m) === 'mismatch'
+                ? ' sp-chip--dim-mismatch'
+                : (scopeMeta.get(m)?.readonly ? ' sp-chip--ro' : ''))}
+              chipTitle={(m) => {
+                const meta = scopeMeta.get(m);
+                const dimMismatch = dimensionByScope.get(m) === 'mismatch';
+                const dimUnknown = dimensionByScope.get(m) === 'unknown';
+                return dimMismatch
+                  ? `语义检索会直接跳过该库（向量集合维度与当前配置不一致）；修复：ki restore ${m} --rebuild-vector --yes。依据上次维度检查，若已重建请重新检查`
+                  : (dimUnknown
+                    ? '没有可用的维度检查快照，不能断定该库维度正常；导入 / 重建或刷新维度检查后可确认'
+                    : (meta?.readonly
+                      ? '只读库：可作为检索成员，但不可写入'
+                      : (meta && !meta.kb && !meta.vector ? '尚未导入文档，检索时会跳过' : `点击移除 ${m}`)));
+              }}
+              optionMeta={(s) => (
+                <>
+                  {dimensionByScope.get(s.scope) === 'mismatch' && (
+                    <span
+                      className="sp-tag sp-tag--dim-mismatch"
+                      title="语义检索会直接跳过该库：向量集合维度与当前配置不一致（依据上次维度检查，若已重建请重新检查）"
+                    >维度不一致</span>
                   )}
-                </div>
+                  {!s.vector && <span className="sp-tag">仅全文</span>}
+                  {s.readonly && <span className="sp-tag sp-tag--ro">只读</span>}
+                </>
               )}
-            </div>
+            />
 
             <p className="views-hint">至少要选择一个知识库</p>
           </div>

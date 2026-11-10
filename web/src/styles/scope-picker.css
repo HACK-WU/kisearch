@@ -1,0 +1,274 @@
+/**
+ * scope-picker.css —— 知识库多选下拉（组件：components/ScopeMultiPicker.tsx）
+ *
+ * 全局引入（App.tsx），两个调用方共用：
+ *   · 知识视图页「包含哪些知识库」（新建 / 编辑视图）
+ *   · 个人中心「创建 MCP Token → 访问范围 · 指定」
+ *
+ * 这套样式原写在按页引入的 views.css 里（类名 views-picker / views-chip--pick），
+ * Token 弹窗拿不到 —— 抽成跨页组件样式后统一改名为 sp-*（scope picker），
+ * 与视图列表行仍用的 views-chip（只读展示、有缺失 / 空 / 定时等状态色）明确分开：
+ * 前者是"可点击增删"的交互件，后者是"只读"的状态标签，视觉本就不同。
+ */
+
+/* ── 容器 ───────────────────────────────── */
+.sp-picker {
+  position: relative;
+}
+
+/* 已选项区域：即使为空也占 21px，避免选第一个时整块向下跳一行 */
+.sp-picker__selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 7px;
+  min-height: 21px;
+}
+
+.sp-picker__empty {
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.5;
+  color: var(--ki-color-text-subtle);
+}
+
+/* ── 搜索框 ─────────────────────────────── */
+.sp-picker__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* 放大镜压在输入框内左侧：pointer-events:none 让点击穿透到输入框（聚焦即展开候选） */
+.sp-picker__field .ki-icon {
+  position: absolute;
+  left: 10px;
+  width: 13px;
+  height: 13px;
+  color: var(--ki-color-text-subtle);
+  pointer-events: none;
+}
+
+.sp-picker__input {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 28px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-text);
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+}
+
+.sp-picker__input:focus {
+  outline: 2px solid var(--ki-color-focus);
+  outline-offset: -1px;
+  border-color: var(--ki-color-primary);
+}
+
+.sp-picker__input::placeholder {
+  color: var(--ki-color-text-subtle);
+}
+
+.sp-picker__toggle {
+  position: absolute;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ki-color-text-subtle);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.sp-picker__toggle:hover {
+  background: var(--ki-color-hover);
+  color: var(--ki-color-text);
+}
+
+/* ── 候选面板 ───────────────────────────── */
+/*
+ * 面板走**常规流**而非绝对定位浮层：它是表单的最后一项，浮层会盖住
+ * 下方的提示与「保存 / 创建」按钮，而那些正是选库时要一直盯着的。
+ *
+ * 面板 = 固定页脚 + 可滚动候选区，两层分开。
+ * ★ 不要再用「滚动区里的 sticky 提示行」：sticky 贴的是滚动容器的 padding edge，
+ *   容器若带 padding，滚动内容会从 padding 里透出来（提示行下方漏半行字）。
+ */
+.sp-picker__panel {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  max-height: 200px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-1);
+  overflow: hidden; /* 圆角裁剪，同时保证内容不越出面板 */
+}
+
+.sp-picker__scroll {
+  flex: 1 1 auto;
+  min-height: 0; /* flex 子项要能收缩，否则 overflow 不生效 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0; /* 行距靠 padding 撑，不额外留缝：gap 会让整列显得松散 */
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+/*
+ * 浮层变体（Token 创建弹窗，由组件按输入框位置写内联 top/left/width/maxHeight）：
+ * fixed 而非 absolute —— 那条链路上 .u2-inline-panel / .u2-dialog__body /
+ * .u2-dialog / .ki-dialog 全都设了 overflow，absolute 会被逐层裁掉（实测少 117px）。
+ * z-index 1200 高于 .ki-overlay--front(1100)：面板虽在弹窗 DOM 内，但要压住
+ * 弹窗的 body 与 footer。它不会跑出弹窗自身的层叠上下文，故不会盖住遮罩以外的 UI。
+ */
+.sp-picker__panel--floating {
+  position: fixed;
+  z-index: 1200;
+  margin-top: 0;
+}
+
+/*
+ * 每项 27px（5px 上下 + 17px 行高）。
+ * ★ 别再往上加 padding：项高 32px 时文字上下各留 7px 空白，整列看起来"一条一条隔很远"；
+ *   列表项之间靠 padding 分隔就够了，不需要额外 gap。
+ */
+.sp-picker__opt {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ki-color-text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.4;
+  min-height: 27px;
+}
+
+.sp-picker__opt:hover {
+  background: var(--ki-color-hover);
+}
+
+/* 键盘高亮项：浅主色底 + 左侧主色条（鼠标 hover 与 ↑↓ 共用 activeIndex） */
+.sp-picker__opt--active {
+  background: var(--ki-color-primary-soft);
+  box-shadow: inset 2px 0 0 var(--ki-color-primary);
+}
+
+.sp-picker__opt--active .sp-picker__opt-name {
+  color: var(--ki-color-primary);
+}
+
+.sp-picker__opt-name {
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+}
+
+.sp-picker__opt-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.sp-picker__note {
+  padding: 9px 10px;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+}
+
+/* 快捷键提示是面板的固定页脚：参与 flex 布局、不参与滚动，永远贴着底边 */
+.sp-picker__hint {
+  flex: none;
+  margin: 0;
+  padding: 7px 10px;
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ki-color-text-subtle);
+  white-space: nowrap;
+}
+
+/* ── 已选 chips（可点击移除） ─────────────── */
+.sp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 21px;
+  padding: 0 7px;
+  border-radius: var(--ki-radius-tag);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-muted);
+  font: 500 var(--ki-font-size-xs) / 1 var(--ki-font-mono);
+  white-space: nowrap;
+}
+
+.sp-chip--pick {
+  cursor: pointer;
+  background: var(--ki-color-surface);
+  border-color: var(--ki-color-border-strong);
+  color: var(--ki-color-text);
+}
+
+/* hover 转 danger：这一下是"移除"，与相邻的只读 / 缺失状态色不冲突（它是临时态） */
+.sp-chip--pick:hover {
+  border-color: var(--ki-color-danger);
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
+}
+
+/* 只读库：可作为检索成员，但 Token 即便读写也写不进去 */
+.sp-chip--ro {
+  border-color: var(--ki-color-warning);
+  background: var(--ki-color-warning-soft);
+  color: var(--ki-color-warning);
+}
+
+/* 维度不一致：danger 色实线 + 不填底（红底是"缺失"的语义，填了会抢） */
+.sp-chip--dim-mismatch {
+  border-color: var(--ki-color-danger);
+  background: var(--ki-color-surface);
+  color: var(--ki-color-danger);
+}
+
+.sp-chip__x {
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+/* ── 候选项右侧徽标 ───────────────────────── */
+.sp-tag {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-subtle);
+}
+
+.sp-tag--ro {
+  background: var(--ki-color-warning-soft);
+  color: var(--ki-color-warning);
+}
+
+/* 与只读（黄）区分，用 danger 色 */
+.sp-tag--dim-mismatch {
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger);
+}

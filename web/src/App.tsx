@@ -9,6 +9,8 @@ import { AuthProvider } from '@/lib/authContext';
 import { AppRoutes } from '@/router/routes';
 import './styles/ki.css';
 import './styles/users-v2.css';
+/* 知识库多选下拉：视图页与 Token 创建表单共用（全局引入，不随页面懒加载） */
+import './styles/scope-picker.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {

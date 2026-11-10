@@ -20,6 +20,8 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf-8');
 const page = read('src/pages/ViewsPage.tsx');
 const apiClient = read('src/api/viewsApi.ts');
 const css = read('src/styles/views.css');
+/** 选库交互已下沉到公共组件（视图页与 Token 创建表单共用） */
+const picker = read('src/components/ScopeMultiPicker.tsx');
 
 test('写权限只用后端 canEdit / mine，页面不比对 userId', () => {
   assert.ok(!/userId\s*===/.test(page), '页面不得自行比对 userId');
@@ -75,5 +77,6 @@ test('维度三态逐个可见：unknown 必须与 ok 区分，且能定位到�
 test('编辑态同步：已选成员与候选面板复用同一份维度状态', () => {
   assert.ok(page.includes('dimensionByScope'), '应由 /api/views 的 memberMeta 聚合，避免两处产出');
   assert.ok(page.includes("' · 维度未确认'"), '编辑表单已选 chip 也应标出未确认');
-  assert.ok(page.includes('views-picker__opt-meta'), '候选面板应保持渲染');
+  assert.ok(page.includes('ScopeMultiPicker'), '选库交互应走公共组件（与 Token 创建表单共用一份实现）');
+  assert.ok(picker.includes('sp-picker__opt-meta'), '候选面板应保持渲染');
 });

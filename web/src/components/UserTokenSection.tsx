@@ -3,6 +3,7 @@
  */
 import { useEffect, useRef, useState, type JSX } from 'react';
 import type { Role, UserTokenView } from '@/api/authApi';
+import { ScopeMultiPicker } from '@/components/ScopeMultiPicker';
 import { useScopeList } from '@/lib/hooks';
 import {
   tokenCreatorLabel,
@@ -163,7 +164,6 @@ export function TokenCreateForm({ ownerRole, busy, submitLabel = '创建 Token',
   const rootRef = useRef<HTMLDivElement>(null);
   const labelRef = useRef<HTMLInputElement>(null);
   const { data } = useScopeList();
-  const availableScopes = data?.scopes?.map((item) => item.scope) ?? [];
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -243,20 +243,30 @@ export function TokenCreateForm({ ownerRole, busy, submitLabel = '创建 Token',
           </div>
         </div>
         {scopeMode === 'specific' ? (
-          <div className="u2-scope-chips">
-            {availableScopes.length === 0 ? <span className="u2-hint">暂无可选知识库</span> : availableScopes.map((scope) => {
-              const on = scopes.includes(scope);
-              return (
-                <button
-                  key={scope}
-                  type="button"
-                  className={`ki-chip${on ? ' ki-chip--on' : ''}`}
-                  aria-pressed={on}
-                  onClick={() => setScopes((prev) => (on ? prev.filter((item) => item !== scope) : [...prev, scope]))}
-                >{scope}</button>
-              );
-            })}
-          </div>
+          /*
+           * 与「新建视图 → 包含哪些知识库」共用同一个选择器：库多时（几十个）
+           * 平铺 chips 只能滚动找，也没有"已选 / 未选"的分层。
+           * 这里不显示「维度不一致」—— 那份数据来自 /api/views 的 memberMeta，
+           * 不属于 Token 表单的口径；「只读 / 仅全文」对"授权后能做什么"有影响，保留。
+           */
+          <ScopeMultiPicker
+            scopes={data?.scopes ?? []}
+            value={scopes}
+            onChange={setScopes}
+            emptyHint="还没有选择知识库"
+            maxWidth="100%"
+            /* 弹窗内没有多余高度：面板浮层展开，避免把提示行与「创建」按钮推出可视区 */
+            floating
+            optionMeta={(info) => (
+              <>
+                {!info.vector && <span className="sp-tag">仅全文</span>}
+                {info.readonly && <span className="sp-tag sp-tag--ro">只读</span>}
+              </>
+            )}
+            optionTitle={(info) => (info.readonly
+              ? '只读库：Token 授权后也只能检索，不能写入'
+              : undefined)}
+          />
         ) : null}
         <p className="u2-hint">
           {viewer ? '只读账号只能创建只读 Token。' : 'Token 权限不会超过账号权限。'}
