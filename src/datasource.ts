@@ -113,18 +113,18 @@ program
   .command('add')
   .description('登记/更新该 scope 的唯一数据源（--source 本地目录 或 --git-url 托管 clone，二选一）')
   .requiredOption('-s, --scope <scope>', '目标 scope（必填）')
-  .option('--source <dir>', '源目录（~ 会展开为绝对路径；与 --git-url 互斥）')
+  .option('--source <dir>', '源目录（~ 会展开为绝对路径；缺省按普通目录登记，不识别 Git 仓库；与 --git-url 互斥）')
   .option('--git-url <url>', 'Git 仓库地址（https/ssh/scp-like；clone 到 ~/.ki/datasources/<scope>/repo）')
   .option('--branch <branch>', '仅 --git-url：跟踪的远端分支（缺省 = 仓库默认分支）')
   .option('--subdir <path>', '仅 --git-url：仓库内的导入子目录（缺省 = 仓库根）')
-  .option('--type <type>', '仅 --source：数据源类型 git|directory（缺省自动探测）')
+  .option('--type <type>', '仅 --source：数据源类型 git|directory（缺省 directory；git 会探测仓库，失败即报错）')
   .option('-g, --group <group>', '落点 Group（留空 = 按顶层子目录自动）')
   .option('--conflict-mode <mode>', '同名文档策略：incremental|overwrite|skip|suffix（默认 incremental）')
   .option('--conflict-suffix <suffix>', '自动后缀模板（默认 _{n}）')
   .option('--chunk-size <n>', '切分目标长度（默认 1000）', intArg)
   .option('--chunk-overlap <n>', '切分重叠（默认 150）', intArg)
   .option('--no-vector', '只写 FTS 全文索引（不向量化）')
-  .option('--force', '改 --source / --group 时必须显式确认')
+  .option('--force', '改 --source / --group / --type 时必须显式确认')
   .action(async (opts) => {
     const hasSource = typeof opts.source === 'string' && opts.source.trim() !== '';
     const hasGitUrl = typeof opts.gitUrl === 'string' && opts.gitUrl.trim() !== '';

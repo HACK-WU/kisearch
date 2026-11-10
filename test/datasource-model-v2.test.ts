@@ -1,5 +1,5 @@
 /**
- * S-01：DataSourceRecord v2 / v1 兼容 / 类型探测 / 写锁 / 异步 add-remove。
+ * S-01：DataSourceRecord v2 / v1 兼容 / 类型决议（缺省目录，不探测）/ 写锁 / 异步 add-remove。
  * 运行：npx jiti test/datasource-model-v2.test.ts
  */
 import { describe, it, before, after } from 'node:test';
@@ -72,7 +72,8 @@ after(() => {
 describe('DataSourceRecord v3（含 v1/v2 → v3 迁移）', () => {
   it('git 源写入 v3 记录并持久化 type/git + 单条映射', async () => {
     const config = loadConfig();
-    const result = await addDataSource({ scope: gitScope, dir: repo, config });
+    // 显式 --type git 是唯一会探测仓库的入口（2026-11-10 取消自动识别）
+    const result = await addDataSource({ scope: gitScope, dir: repo, type: 'git', config });
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(result.record.version, 3);
@@ -91,13 +92,36 @@ describe('DataSourceRecord v3（含 v1/v2 → v3 迁移）', () => {
     assert.equal((raw.git as Record<string, unknown>).repoRoot, fs.realpathSync(repo));
   });
 
-  it('普通目录自动探测回退为 directory 并给出 warning', async () => {
-    const result = await addDataSource({ scope: plainScope, dir: plain, config: loadConfig() });
+  it('缺省不探测：Git 仓库目录也按 directory 登记，且不产生 Git 相关 warning', async () => {
+    const scope = `ds-noprobe-${process.pid}`;
+    const result = await addDataSource({ scope, dir: repo, config: loadConfig() });
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.equal(result.record.type, 'directory');
     assert.equal(result.record.git, undefined);
-    assert.ok((result.warnings ?? []).some((item) => item.includes('未识别为 Git 仓库')));
+    assert.deepEqual(result.warnings ?? [], []);
+  });
+
+  it('已有 Git 登记（同目录）重跑 add 且不带 --type：沿用 git，不静默降级', async () => {
+    const result = await addDataSource({ scope: gitScope, dir: repo, config: loadConfig() });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.record.type, 'git');
+    assert.equal(result.record.git?.repoRoot, fs.realpathSync(repo));
+  });
+
+  it('显式 --type directory 改类型必须 --force，--force 后 git 元信息被清除', async () => {
+    const blocked = await addDataSource({ scope: gitScope, dir: repo, type: 'directory', config: loadConfig() });
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) return;
+    assert.equal(blocked.code, 'NEEDS_FORCE');
+    assert.ok(blocked.error.includes('git → directory'));
+
+    const forced = await addDataSource({ scope: gitScope, dir: repo, type: 'directory', force: true, config: loadConfig() });
+    assert.equal(forced.ok, true);
+    if (!forced.ok) return;
+    assert.equal(forced.record.type, 'directory');
+    assert.equal(forced.record.git, undefined);
   });
 
   it('显式 --type git 在非仓库目录上 fail-loud', async () => {

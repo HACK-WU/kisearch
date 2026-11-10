@@ -343,6 +343,20 @@ export function resolveSourceDirInput(input: string): string {
 }
 
 /**
+ * 两个源目录是否指向同一目录（`add` 幂等判定用）。
+ * `resolveSourceDirInput` 只做 resolve 不 realpath，符号链接 / 大小写差异会让字符串不等，
+ * 此时回退 realpath 比较；取不到（目录已删）则判为不同 —— 宁可走目录默认，也不误沿用旧仓库。
+ */
+function sameSourceDir(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 目录可导入性校验（add 与 sync 共用）。
  * 不可读**必须 fail-loud**，绝不当成「0 个文件」——否则会诱导用户删除全部候选。
  */
@@ -387,7 +401,11 @@ export function checkSourceDir(dir: string, config: KiConfig, scope: string): So
 export interface AddDataSourceInput {
   scope: string;
   dir: string;
-  /** directory = 显式普通目录；git = 显式 Git（探测失败 fail-loud）；缺省 = 自动探测 */
+  /**
+   * git = 显式 Git（唯一会探测 `.git` 的入口，探测失败 fail-loud）；directory = 普通目录。
+   * **缺省 = directory，不做任何 Git 探测**；仅当已有同目录的 Git 登记时沿用原类型
+   * （2026-11-10 取消「目录在 Git 仓库里就自动变 git」的自动识别）。
+   */
   type?: DataSourceKind;
   /** S-05 托管 clone 直接注入，避免重复探测 */
   gitInfo?: DataSourceGitInfo;
@@ -407,6 +425,12 @@ export interface AddDataSourceInput {
   config?: KiConfig;
 }
 
+/**
+ * `warnings` 目前**没有产出来源**：2026-11-10 取消 Git 自动识别后，add 里唯一那条
+ * 「未识别为 Git 仓库…」已删除。字段保留是因为 CLI（`result.warnings ?? []`）与
+ * `addRemoteDataSource`（`added.warnings && length > 0` 过滤）都按可选读，
+ * 删字段会连带改远端 add 的返回结构，收益不抵风险。将来 add 要报新警告时直接复用。
+ */
 export type AddDataSourceResult =
   | { ok: true; scope: string; record: DataSourceRecord; created: boolean; next: string; warnings?: string[] }
   | { ok: false; scope: string; code: string; error: string };
@@ -449,26 +473,38 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     return { ok: false, scope, code: 'INVALID_TYPE', error: `--type 只能是 git 或 directory：${String(input.type)}` };
   }
 
-  const warnings: string[] = [];
+  // 已有登记必须先读：缺省类型的沿用判定要依赖它（见下方类型决议第 4 条）
+  const existing = readDataSource(scope);
+  if (!existing.ok && existing.code !== 'NOT_FOUND') {
+    return { ok: false, scope, code: existing.code, error: existing.error };
+  }
+  const prev = existing.ok ? existing.record : null;
+
+  /**
+   * 类型决议（2026-11-10 用户拍板：取消 Git 仓库自动识别）：
+   *   1) `gitInfo`（托管 clone / 副本复用，内部注入）→ git；
+   *   2) 显式 `--type git` → **唯一**会调 `probeGit` 的入口，非仓库 fail-loud；
+   *   3) 未指定 → directory，**不探测**（不再「目录在仓库里就自动变 git」；
+   *      连带省掉每次 add 的 4 次 git 子进程）；
+   *   4) 未指定且已有**同目录** Git 登记 → 沿用原类型：add 必须幂等，否则一条
+   *      `add --group <g>` 就会把增量源静默降级成全量重扫并丢掉 commit 水位。
+   */
   let type: DataSourceKind;
   let git: DataSourceGitInfo | undefined;
-  if (input.type === 'directory') {
-    type = 'directory';
-  } else if (input.gitInfo) {
+  if (input.gitInfo) {
     git = normalizeGitInfo(input.gitInfo) ?? undefined;
     if (!git) return { ok: false, scope, code: 'INVALID_GIT_INFO', error: 'gitInfo 非法（repoRoot 必须是绝对路径）' };
     type = 'git';
-  } else {
+  } else if (input.type === 'git') {
     const probe = await probeGit(dir);
-    if (probe.ok) {
-      type = 'git';
-      git = { ...probe.value, managed: false, remoteBranch: null };
-    } else if (input.type === 'git') {
-      return { ok: false, scope, code: probe.code, error: probe.error };
-    } else {
-      type = 'directory';
-      warnings.push(`未识别为 Git 仓库（${probe.error}），已按普通目录登记；如需增量请使用 --type git`);
-    }
+    if (!probe.ok) return { ok: false, scope, code: probe.code, error: probe.error };
+    type = 'git';
+    git = { ...probe.value, managed: false, remoteBranch: null };
+  } else if (input.type === undefined && prev?.type === 'git' && prev.git && sameSourceDir(prev.dir, dir)) {
+    type = 'git';
+    git = prev.git;
+  } else {
+    type = 'directory';
   }
 
   // 映射（REQ-20261104-002）：传入 mappings 时它是权威，`group` 退化为 mappings[0].group
@@ -491,11 +527,6 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
   if (group !== null && !isUserAssignableGroup(group)) {
     return { ok: false, scope, code: 'INVALID_GROUP', error: `非法 Group 路径：${group}（不可为绝对路径、含 .. / 反斜杠，或使用保留名 "${ROOT_GROUP_KEY}"）` };
   }
-  const existing = readDataSource(scope);
-  if (!existing.ok && existing.code !== 'NOT_FOUND') {
-    return { ok: false, scope, code: existing.code, error: existing.error };
-  }
-  const prev = existing.ok ? existing.record : null;
   /**
    * 护栏 #4 / R9：CLI 写入口只有单值 `--subdir` / `--group`，覆盖多映射记录会把 N 条静默压成 1 条。
    * 入口是「页面支持、CLI 不支持」（用户 2026-11-04 拍板 Q4），这里对**未传 mappings 的调用方**
@@ -511,9 +542,20 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     };
   }
   const mappingChanged = prev !== null && !sameMappings(prevMappings, mappings);
-  if (prev && !input.force && ((prev.dir !== dir) || (prev.group !== group) || mappingChanged)) {
+  /**
+   * 类型变更只可能来自**显式** `--type`（缺省时已沿用原类型，见上方类型决议第 4 条）。
+   * git → directory 会丢 commit 水位、下次退回全量重扫；directory → git 会改同步语义。
+   * 与「改源 / 改落点」同档：必须 --force，不能静默换类型。
+   */
+  const typeChanged = prev !== null && prev.type !== type;
+  if (prev && !input.force && ((prev.dir !== dir) || (prev.group !== group) || mappingChanged || typeChanged)) {
     const changes: string[] = [];
     if (prev.dir !== dir) changes.push(`--source：${prev.dir} → ${dir}（旧路径下的文档会在下次同步进入待删候选，本次不会自动删）`);
+    if (typeChanged) {
+      changes.push(type === 'directory'
+        ? '类型：git → directory（下次同步改为全量重扫，Git 元信息与 commit 水位会被清除；如需保留增量请省略 --type）'
+        : '类型：directory → git（下次同步起改为按 commit 差异增量，本目录必须能被 git 探测到）');
+    }
     if (mappingChanged && prev.group !== group) {
       changes.push(`--group：${prev.group ?? '(自动)'} → ${group ?? '(自动)'}（旧 group 的文档会保留并产生重复，需手动清理）`);
     }
@@ -572,7 +614,6 @@ async function addDataSourceUnlocked(scope: string, input: AddDataSourceInput, c
     record,
     created: !prev,
     next: `ki datasource sync --scope ${scope}`,
-    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 

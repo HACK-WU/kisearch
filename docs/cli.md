@@ -161,6 +161,13 @@ ki datasource remove --scope <s> [--yes] [--purge]  # 默认只取消登记；--
 `list` 默认输出对齐表格（`SCOPE / TYPE / SOURCE / LAST SYNC / STATE / PENDING`）：时间按本地时区 `YYYY-MM-DD HH:mm`；托管 Git 源显示 `host/owner/repo › 子目录 @commit`（保留 host，避免不同实例的同名仓库混淆）；`PENDING` 为 0 时显示 `-`，未计算（stale / 被闸门拦）显示 `未算`；终端较窄时 `SOURCE` 中间省略（`[同目录]` 这类标记不会被裁），**重定向 / 管道（非 TTY）不截断**；同一本地目录被多个 scope 登记会标 `[同目录]` 并在表下列出。**人类可读格式不作为稳定契约，脚本请用 `--json`。**
 已启用定时计划的数据源会在表格下方追加 `定时：` 脚注（模式 + 下次运行 / 待补跑 / 已执行 + 连续失败次数；无启用计划时该脚注不出现，输出与旧版一致）。**这是只读展示** —— 定时配置的唯一入口是页面「数据源 → 定时」，没有 CLI 配置命令；`--json` 的每条 `sources[]` 增 `schedule` 字段（与 `/api/datasource/list` 同口径，含服务端算出的 `nextRunAt`）。
 
+`--source` 规则：
+
+- **缺省按普通目录登记，不会自动识别 Git 仓库**：目录里有 `.git` 也一样（每次同步都是全量重扫，没有 commit 增量）。
+- 想要按 commit 差异增量，显式加 `--type git`；目录不是 Git 仓库时**直接报错**（不会偷偷降级成普通目录）。
+- 对已登记的数据源重跑 `add` 且不带 `--type` 时**保持原类型不变**（改 `--group` 之类的操作不会把 Git 源变成普通目录）。
+- 显式改类型（`--type` 与当前类型不同）必须加 `--force`：`git → directory` 会清除 Git 信息与 commit 水位，下次同步退回全量；`directory → git` 之后才开始按差异增量。
+
 `--git-url` 规则：
 
 - 只支持 `https://` / `ssh://` / `git+ssh://` / `user@host:path`；拒绝 `http://`、`git://`、`file://`、任意 `xxx::` 传输、URL 内嵌密码、查询串凭据（`token` / `access_token` / `private_token` / `secret` / `api_key` 等）、以 `-` 开头的值。

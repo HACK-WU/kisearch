@@ -115,7 +115,8 @@ after(async () => {
 
 describe('Git 增量同步', () => {
   it('首次全量同步记录 commit 水位', async () => {
-    const added = await addDataSource({ scope, dir: work, vector: false, config: loadConfig() });
+    // 增量同步只对 git 源成立：缺省（directory）不再自动识别仓库，必须显式指定
+    const added = await addDataSource({ scope, dir: work, type: 'git', vector: false, config: loadConfig() });
     assert.equal(added.ok, true);
     if (!added.ok) return;
     assert.equal(added.record.type, 'git');
