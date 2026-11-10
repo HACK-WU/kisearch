@@ -1,6 +1,6 @@
 ---
 name: agents-md-template
-description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search）与置顶安全底线（代码、测试、配置、示例禁止写入私钥、线上地址、真实 IP、账号口令、个人信息，须用占位符）、项目记忆索引（${scope}-memory）、团队约定（同步 ${scope}-memory「团队约定」Group，空则写"无"）、用户画像、近期工作与历史工作记录（均直接存储）、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md 文件、需要确认 AGENTS.md 章节结构时使用。
+description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search）与置顶安全底线（敏感信息用占位符）、项目记忆索引（${scope}-memory）、团队约定、知识文档入库（运行期产出入库约定）、用户画像、近期工作与历史工作记录、更新日志等章节的结构与占位说明。当初始化或更新 AGENTS.md、需要确认章节结构时使用。
 ---
 
 # AGENTS.md - AI AGENT 项目记忆文件
@@ -9,7 +9,9 @@ description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search
 
 **遇到任何不知道的问题、信息或不确定的内容，先用 `ki_search` MCP 工具查项目记忆，不凭记忆猜、不凭印象答。**
 
-- 查询顺序：先 `ki_search(scope: "${scope}-memory", ...)` 查项目上下文与决策；确认主题在代码库时再查 `${scope}`（代码知识）
+- 查询顺序：先 `ki_search(scope: "${scope}-memory", ...)` 查项目上下文与决策；确认主题在代码库时再查 `${scope}`（代码知识）。**项目已有既定检索口径时以项目为准**，不要按模板强行改写
+- **该看视图的两个信号**：① 单库 `ki_search` 结果不足或文不对题；② 问题横跨多域（代码 + 运维 + 专家经验 + 项目决策）。命中时先 `ki_view_list()` 找现成聚合视图；**没有合适视图时**再显式拼多段 scope（`ki_search(scope: "a,b", ...)`，勿长期硬拼）。视图是多个库的**只读**聚合，**视图名可直接当 scope** 传给 `ki_search` / `ki_group_list` / `ki_tag_list` / `ki_get_module_info`。**成员含 `${scope}`、`${scope}-memory` 或 `${scope}-*` 同词根的视图才与本项目相关**，其余忽略；本文件**不缓存视图列表**（会变），每次实时查。同时看 `usableCount / availableCount` 与 `degradedReason` —— 有降级说明时部分成员不参与语义检索。**`threshold` 量级不同**：单库 `0.02~0.03`、视图（多库）`0.6~0.8`，混用会全灭或全留
+- **视图只读**：写入（`ki_sync_relation` / 上传文档）必须用真实库名，用视图名会被拒
 - 同源约定：`rules/ai-codekb-memory.md`「第一性原则：遇事不决 ki-search」
 
 ---
@@ -53,6 +55,7 @@ ki_group_create(scope: "${scope}-memory", path: "团队约定")
 #### Group 结构
 
 > 从 `ki_group_list(scope: "${scope}-memory", mode: "full", depth: 4)` 的树形输出逐层转写，组名原样照抄。
+> **批量导入组折叠**：组路径**含独立 `文档` 段**的组（`ki-upload` 批量导入的文档，如 `错误库/文档`、`错误库/文档/sub`）折叠成一行并附前 3 篇篇名：`- 错误库/文档（12 篇：A、B、C…）`，不逐条列 relation；其余组照旧逐条列，**不凭印象折叠**。
 
 - 背景与目标
 - 技术栈选型
@@ -102,6 +105,21 @@ ki_group_create(scope: "${scope}-memory", path: "团队约定")
 - 无
 
 <!-- 有约定时逐条列：`- {Relation 名}: {一句话要点}`；最后同步日期: YYYY-MM-DD -->
+
+---
+
+## 知识文档入库
+
+> **运行期约定**：开发 / 设计 / 排查过程产出**可复用**文档时，按此入库，让下次会话直接检索到。
+> **判据**：换个会话、换个人，这份文档能不能省掉一次重复调研？不能就不传。
+> **该传**：设计文档、需求报告、排查结论、调研报告、上线手册 ｜ **不传**：源码、临时草稿、日志、原始证据。
+
+- **落点**：上传到 `${scope}-memory`；`--group` 必填且**路径里要有一层 `文档`**（如 `专题记忆/{模块}/文档`、`错误库/文档`）——索引据此机械折叠，别改名
+- **通道**：本机文档 → `use_skill("ki-upload")` 的 `upload` / `upload-dir`；正文已在上下文里的短内容 → `ki_sync_relation`
+- **上传后**：`ki_search(scope: "${scope}-memory", query: "<文档里的一句话>")` 命中或 `ki_group_list` 能看到该 relation 名才算入库，然后在「近期工作」记一行
+- **缺能力时**（Python / httpflex / `KI_URL` / `KI_TOKEN`）：打印可执行命令让用户自己跑，**不阻塞、不报错**
+
+<!-- 本节不登记已入库文档清单：入库后在「近期工作」记一行即可，归档规则统一由 §5 管，避免出现第二套账 -->
 
 ---
 
