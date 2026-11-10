@@ -54,14 +54,6 @@ export interface ScopeMultiPickerProps {
   maxWidth?: number | string;
   /** 面板页脚的快捷键提示，默认开启 */
   showShortcutHint?: boolean;
-  /**
-   * 候选面板是否浮层展开（不占文档流、不挤压下方内容）。
-   *
-   * 默认 false = 常规流：视图页用它 —— 面板下方是「影响面提示」，选成员时要一直盯着。
-   * true = 浮层：Token 创建弹窗用它 —— 弹窗里没有多余高度，常规流会把提示行和
-   * 「创建」按钮推出可视区。
-   */
-  floating?: boolean;
 }
 
 export function ScopeMultiPicker({
@@ -77,7 +69,6 @@ export function ScopeMultiPicker({
   optionTitle,
   maxWidth = 340,
   showShortcutHint = true,
-  floating = false,
 }: ScopeMultiPickerProps): JSX.Element {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('');
@@ -87,43 +78,56 @@ export function ScopeMultiPicker({
   const [box, setBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
   /*
-   * 浮层定位：按输入框的视口位置现算，**必须 fixed 而不是 absolute**。
-   * 实测 Token 弹窗这条路径上有四层 overflow 裁剪（.u2-inline-panel /
-   * .u2-dialog__body / .u2-dialog / .ki-dialog 都是 hidden 或 auto），
-   * absolute 面板会被切掉一半（实测被裁 117px）。fixed 脱离这些裁剪容器；
-   * .ki-overlay 只是 position:fixed 且无 transform，所以参照系仍是视口。
+   * 候选面板**浮层展开**（2026-11-10 用户两次拍板：Token 弹窗、新建/编辑视图都要，
+   * 不要向下挤压其他组件）。这里按输入框的视口位置现算坐标。
+   *
+   * 为什么必须 fixed 而不是 absolute：
+   *   · Token 弹窗那条链路上有四层 overflow（.u2-inline-panel: hidden /
+   *     .u2-dialog__body: auto / .u2-dialog: hidden / .ki-dialog: auto），
+   *     注入 absolute 实测面板从 200px 被裁到 83px；
+   *   · 视图页同样被 .views-card: hidden 裁掉 101px。
+   * fixed 脱离这些裁剪容器；.ki-overlay 只是 position:fixed 且无 transform，
+   * 所以参照系仍是视口。
    */
   const reposition = useCallback((): void => {
-    if (!floating) return;
     const trigger = inputRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
     const GAP = 6;
     const MARGIN = 8;
     const spaceBelow = window.innerHeight - rect.bottom - GAP - MARGIN;
-    setBox({
+    const next = {
       top: rect.bottom + GAP,
       left: rect.left,
       width: rect.width,
+      /* 下限 80 保证矮屏至少露出 2 项；上限 200 与设计的 max-height 一致 */
       maxHeight: Math.min(200, Math.max(80, spaceBelow)),
-    });
-  }, [floating]);
+    };
+    // 滚动事件很密集，位置没变就不 setState（面板跟随输入框，多数滚动帧位置不变）
+    setBox((prev) => (prev
+      && Math.abs(prev.top - next.top) < 0.5
+      && Math.abs(prev.left - next.left) < 0.5
+      && Math.abs(prev.width - next.width) < 0.5
+      && Math.abs(prev.maxHeight - next.maxHeight) < 0.5
+      ? prev
+      : next));
+  }, []);
 
   // 滚动（含弹窗 body 内部滚动，故用 capture）与缩放都要重算，否则浮层与输入框脱位
   useEffect(() => {
-    if (!floating || !open) return undefined;
+    if (!open) return undefined;
     window.addEventListener('scroll', reposition, true);
     window.addEventListener('resize', reposition);
     return () => {
       window.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
     };
-  }, [floating, open, reposition]);
+  }, [open, reposition]);
 
   // 打开瞬间与「已选项增减导致输入框换行移位」时重算；放 layout effect 里，避免首帧闪一下在流内
   useLayoutEffect(() => {
-    if (floating && open) reposition();
-  }, [floating, open, value.length, reposition]);
+    if (open) reposition();
+  }, [open, value.length, reposition]);
 
   useEffect(() => {
     let inside = true;
@@ -278,13 +282,11 @@ export function ScopeMultiPicker({
         </button>
       </div>
 
-      {open ? (
+      {open && box ? (
         <div
-          className={`sp-picker__panel${floating ? ' sp-picker__panel--floating' : ''}`}
+          className="sp-picker__panel"
           /* 浮层坐标走内联样式：随输入框位置变化，写不进静态 CSS */
-          style={floating && box
-            ? { top: box.top, left: box.left, width: box.width, maxHeight: box.maxHeight }
-            : undefined}
+          style={{ top: box.top, left: box.left, width: box.width, maxHeight: box.maxHeight }}
         >
           {/* 候选区与提示行分两层：提示行固定在面板底部、不参与滚动 */}
           <div className="sp-picker__scroll" role="listbox" id={listboxId} aria-label="可选知识库">

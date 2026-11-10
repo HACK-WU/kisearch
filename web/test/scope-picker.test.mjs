@@ -69,17 +69,18 @@ test('ARIA combobox 关联完整：Tab 不可达必须由 activeDescendant 补�
   assert.ok(picker.includes('aria-selected={i === activeIndex}'), '高亮项要标 aria-selected');
 });
 
-test('浮层模式只给 Token 用，且必须 fixed + 跟随滚动', () => {
-  assert.ok(/\bfloating\b/.test(tokenSection), 'Token 表单应启用浮层（弹窗里没有多余高度，常规流会把按钮推出可视区）');
-  assert.ok(!viewsPage.includes('floating'), '视图页保持常规流：面板下方的「影响面提示」选成员时必须一直可见');
-  assert.ok(pickerCss.includes('.sp-picker__panel--floating'), '浮层样式应存在');
+test('候选面板恒为浮层：不挤压下方内容，且必须 fixed + 跟随滚动', () => {
   assert.ok(
-    /\.sp-picker__panel--floating\s*\{[\s\S]*?position:\s*fixed/.test(pickerCss),
-    '必须 fixed：那条链路上 .u2-inline-panel / .u2-dialog__body / .u2-dialog / .ki-dialog 都有 overflow，absolute 会被裁掉一半（实测少 117px）',
+    /\.sp-picker__panel\s*\{[\s\S]*?position:\s*fixed/.test(pickerCss),
+    '必须 fixed：Token 弹窗有 .u2-inline-panel/.u2-dialog__body/.u2-dialog/.ki-dialog 四层 overflow，'
+    + '视图页有 .views-card，absolute 会被裁掉（实测 200px → 83px / 99px）',
   );
+  assert.ok(pickerCss.includes('z-index: 150'), '层级取 150：高于页面内下拉 30~120，低于侧栏 990 / 聊天面板 1030');
+  assert.ok(!pickerCss.includes('--floating'), '不再有浮层开关变体（两处调用方都用浮层）');
+  assert.ok(!tokenSection.includes('floating') && !viewsPage.includes('floating'), '调用方不再需要开关');
   assert.ok(
     picker.includes("addEventListener('scroll', reposition, true)"),
-    '弹窗 body 内部滚动要用 capture 才收得到，否则浮层与输入框脱位',
+    '容器内部滚动（弹窗 body / 页面）要用 capture 才收得到，否则浮层与输入框脱位',
   );
   assert.ok(picker.includes("addEventListener('resize', reposition)"), '窗口缩放要重算位置');
   assert.ok(picker.includes('useLayoutEffect'), '首帧必须在 paint 前定位，否则会闪一下在文档流里');

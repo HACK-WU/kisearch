@@ -93,17 +93,30 @@
 
 /* ── 候选面板 ───────────────────────────── */
 /*
- * 面板走**常规流**而非绝对定位浮层：它是表单的最后一项，浮层会盖住
- * 下方的提示与「保存 / 创建」按钮，而那些正是选库时要一直盯着的。
+ * 面板**浮层展开**（2026-11-10 用户拍板：Token 弹窗与新建/编辑视图都不要向下挤压
+ * 其他组件）。坐标由组件按输入框位置写成内联 style，这里只管形态。
+ *
+ * ★ position 必须是 fixed，不能是 absolute：
+ *   两条调用链路上都有 overflow 裁剪 ——
+ *     Token 弹窗：.u2-inline-panel(hidden) → .u2-dialog__body(auto) →
+ *                 .u2-dialog(hidden) → .ki-dialog(auto)
+ *     视图页：    .views-card(hidden)
+ *   注入 absolute 实测被裁：Token 200px→83px、视图页 200px→99px。
+ *   fixed 脱离这些容器；两处祖先都无 transform，故参照系仍是视口。
+ *
+ * z-index 取 150：高于页面内的各类下拉（30 / 60 / 100 / 120），
+ * 低于侧栏 990 与聊天面板 1030 —— 滚到顶栏下方时不会盖住导航。
+ * 弹窗内它同样能盖住 body 与 footer（弹窗内部没有更高层级）。
  *
  * 面板 = 固定页脚 + 可滚动候选区，两层分开。
  * ★ 不要再用「滚动区里的 sticky 提示行」：sticky 贴的是滚动容器的 padding edge，
  *   容器若带 padding，滚动内容会从 padding 里透出来（提示行下方漏半行字）。
  */
 .sp-picker__panel {
+  position: fixed;
+  z-index: 150;
   display: flex;
   flex-direction: column;
-  margin-top: 6px;
   max-height: 200px;
   border: 1px solid var(--ki-color-border-strong);
   border-radius: var(--ki-radius-sm);
@@ -121,19 +134,6 @@
   gap: 0; /* 行距靠 padding 撑，不额外留缝：gap 会让整列显得松散 */
   padding: 4px;
   scrollbar-width: thin;
-}
-
-/*
- * 浮层变体（Token 创建弹窗，由组件按输入框位置写内联 top/left/width/maxHeight）：
- * fixed 而非 absolute —— 那条链路上 .u2-inline-panel / .u2-dialog__body /
- * .u2-dialog / .ki-dialog 全都设了 overflow，absolute 会被逐层裁掉（实测少 117px）。
- * z-index 1200 高于 .ki-overlay--front(1100)：面板虽在弹窗 DOM 内，但要压住
- * 弹窗的 body 与 footer。它不会跑出弹窗自身的层叠上下文，故不会盖住遮罩以外的 UI。
- */
-.sp-picker__panel--floating {
-  position: fixed;
-  z-index: 1200;
-  margin-top: 0;
 }
 
 /*

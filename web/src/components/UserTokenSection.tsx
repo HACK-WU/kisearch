@@ -255,8 +255,6 @@ export function TokenCreateForm({ ownerRole, busy, submitLabel = '创建 Token',
             onChange={setScopes}
             emptyHint="还没有选择知识库"
             maxWidth="100%"
-            /* 弹窗内没有多余高度：面板浮层展开，避免把提示行与「创建」按钮推出可视区 */
-            floating
             optionMeta={(info) => (
               <>
                 {!info.vector && <span className="sp-tag">仅全文</span>}
