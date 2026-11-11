@@ -53,7 +53,8 @@ it('preserves the same actual bounded response in SSE, model input and reloaded 
         assert.equal(stream.status, 200);
         const events = (await stream.text()).split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.slice(6)));
         assert.equal(events.at(-1).type, 'done');
-        const expected = serializeToolResponse(await runKbSearch('default', { query }));
+        // 2026-11-11：截断标记带上了工具名（`ki_search: 工具返回超过 …`），这里按真实调用补齐参数
+        const expected = serializeToolResponse(await runKbSearch('default', { query }), undefined, 'ki_search');
         if (supportsTools) {
           const end = events.find((event) => event.type === 'tool_end');
           assert.deepEqual(end!.response, expected);

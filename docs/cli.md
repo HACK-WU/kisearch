@@ -895,6 +895,30 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 ki get-module-info --scope my-project --group "项目/API" --relation "用户登录接口,鉴权中间件"
 ```
 
+**分段读取超长文档**
+
+默认返回全文。文档很长、或调用方对单次长度有上限时，用 `--max-chars` 限定本次返回的字符数，再按返回的 `nextStart` 继续读：
+
+```bash
+# 第一次：读前 8000 字符
+ki get-module-info --scope my-project --group "项目/API" --relation "用户登录接口" --max-chars 8000
+# 续读：把上次返回的 nextStart.line 传给 --start-line
+ki get-module-info --scope my-project --group "项目/API" --relation "用户登录接口" --max-chars 8000 --start-line 121
+```
+
+| 选项 | 说明 |
+|------|------|
+| `--max-chars <n>` | 本次正文的字符上限；**不传 = 返回全文**（与以前完全一致） |
+| `--start-line <n>` | 起始行（1-based，默认 1）；**必须同时给 `--max-chars`**，只给起点会直接报错 |
+| `--start-char <n>` | 起始行内字符偏移（默认 0）；仅当上次返回的 `nextStart.char > 0` 时才需要 |
+
+分段时返回体额外带 `startLine` / `endLine` / `totalLines` / `truncated` / `nextStart`：
+
+- `truncated: true` = 后面还有内容，按 `nextStart` 继续读；`truncated: false` = 已到文末；
+- 分段边界落在**整行**上，返回的 JSON 始终完整可解析；
+- `revision` 始终是整篇的修订号，分段读取不影响后续编辑；
+- 批量（逗号分隔多个 relation）不支持 `--start-line`（传了会直接报错）；`--max-chars` 会按条数均分给每条。
+
 输出：
 ```markdown
 ## 登录流程
@@ -1280,8 +1304,15 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `group` | string | 是 | Group 路径（支持模糊匹配） |
 | `relation` | string | 二选一 | Relation 名称（单条查询） |
 | `relations` | string[] | 二选一 | 同 Group 下批量查询（**≤10 条**，超限报错）；逐条返回 `results`（含 `matchedRelation` 近似命中名），部分失败不影响其他条目；Group 解析与 localKB 读取只做一次 |
+| `start_line` | number | 否 | 分段读取的起始行（1-based，默认 1）；与 `relations` 互斥，同时传会报错 |
+| `start_char` | number | 否 | 起始行内字符偏移（默认 0）；仅当上次返回的 `nextStart.char > 0` 时需要 |
+| `max_chars` | number | 否 | 本次正文的字符上限；**不传 = 返回全文**。批量时该上限按条数均分给每条 |
 
 单条查询成功时还返回 `revision`（正文 SHA-256）与 `totalLines`，供 `ki_edit_relation` 进行多轮行号编辑。
+
+传了 `max_chars` 时返回体额外带 `startLine` / `endLine` / `truncated` / `nextStart`：`truncated: true` 表示后面还有内容，按 `nextStart`（`line` + `char`）继续读；分段边界落在整行上，返回的 JSON 始终完整可解析。`revision` 始终是整篇的修订号，分段读取不影响后续编辑。
+
+> AI 对话内的调用**默认自动分段**：工具会按本轮「工具返回上限」自动取窗口，不再出现「返回被截断、JSON 不闭合且无法续读」的情况。
 
 #### `ki_sync_relation`
 

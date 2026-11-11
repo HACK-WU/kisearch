@@ -80,3 +80,12 @@ export function applyBudgetDefault(name: string, args: Record<string, unknown>, 
   if (name !== 'ki_search' || args.limit !== undefined) return args;
   return { ...args, limit: hitsDefault };
 }
+
+/**
+ * 读窗口补全（2026-11-11 长文档分页）：语义与真实注册表的 `applyReadWindowDefault` 一致，
+ * 窗口 = 预算的 75%（下限 500）。同样必须与真实模块的导出保持同步。
+ */
+export function applyReadWindowDefault(name: string, args: Record<string, unknown>, responseChars: number): Record<string, unknown> {
+  if (name !== 'ki_get_module_info' || args.max_chars !== undefined) return args;
+  return { ...args, max_chars: Math.max(500, Math.floor(responseChars * 0.75)) };
+}

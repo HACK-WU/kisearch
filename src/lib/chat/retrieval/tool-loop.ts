@@ -68,7 +68,7 @@ import { loadConfig } from '../../config.js';
 import { newMessageId } from '../chat-store.js';
 import { buildSystemMessages } from './retrieval-skill.js';
 import { findEnabledSkill, promptSnapshotBlocks, readPromptConfig, type PromptConfig } from '../prompt-config.js';
-import { applyBudgetDefault, enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { applyBudgetDefault, applyReadWindowDefault, enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
 import { canUseTool } from '../../auth/tool-permissions.js';
 import type { Capability } from '../../auth/capabilities.js';
 import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
@@ -756,6 +756,10 @@ async function* toolLoopPath(
       //   必须在**执行必经点**（此处）而非包装 registry 的 `run` —— 执行走 `getChatTool()` 的
       //   **原始 entry**，包装 `enabledChatToolEntries` 返回值的 `run` 不会被调用（challenger 意见 1，🔴）。
       if (parsed) parsed = applyBudgetDefault(entry.name, parsed, runtime.budget.hitsPerCall);
+      // ★ 长文档分页（2026-11-11）：`ki_get_module_info` 未显式给窗口时，按本轮工具返回预算
+      //   推导 `max_chars`。同在**执行必经点**注入，理由与上一条完全相同 —— 工具自己切行边界，
+      //   才不会轮到 `serializeToolResponse` 按码点硬切（那会把 JSON 切坏、且没有续读出路）。
+      if (parsed) parsed = applyReadWindowDefault(entry.name, parsed, runtime.budget.responseChars);
 
       const desc = parsed ? entry.describe(parsed) : {};
       yield {
@@ -768,7 +772,7 @@ async function* toolLoopPath(
 
       if (parseError || !parsed) {
         // 解析失败：发 tool_end 带 error（★ 抛错也必须发，否则前端永久停留在"正在调用…"）
-        const response = serializeToolResponse({ error: parseError ?? '参数解析失败' }, runtime.budget.responseChars);
+        const response = serializeToolResponse({ error: parseError ?? '参数解析失败' }, runtime.budget.responseChars, entry.name);
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: parseError ?? '参数解析失败', response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
         continue;
@@ -803,7 +807,7 @@ async function* toolLoopPath(
       // 页面与模型共用实际返回文本，仅施加总字符预算（上限取自本轮 runtime 的工具预算）。
       // ★ 失败也序列化**原始结果**（ok:false 的 JSON 含 error/code/details，模型可见失败详情；
       //   与旧行为一致），仅当执行抛错（result 为空）时退化为 {error} 摘要。
-      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' }, runtime.budget.responseChars);
+      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' }, runtime.budget.responseChars, entry.name);
       yield { type: 'tool_end', hits, durationMs, ...(runError ? { error: runError } : {}), response };
       messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
 

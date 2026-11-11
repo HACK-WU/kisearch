@@ -31,7 +31,7 @@ import { runWithConfigSnapshot, loadConfig } from '../config.js';
 import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { executeSearch } from '../../search.js';
 import { executeQueryGroup } from '../../query-group.js';
-import { executeGetModuleInfo, executeGetModuleInfoBatch } from '../../get-module-info.js';
+import { executeGetModuleInfo, executeGetModuleInfoBatch, PAGE_MIN_CHARS, PAGE_MAX_CHARS } from '../../get-module-info.js';
 import { executeTagList } from '../../tag.js';
 import { executeScopeList } from '../../scope.js';
 import { executeGroupCreate } from '../group-create.js';
@@ -274,6 +274,23 @@ export function applyBudgetDefault(name: string, args: ChatToolArgs, hitsDefault
   return { ...args, limit: hitsDefault };
 }
 
+/**
+ * 读窗口补全（长文档分页）：`ki_get_module_info` 未显式传 `max_chars` 时，
+ * 按本轮「工具返回预算」推导一个分段窗口。
+ *
+ * ★ 与 `applyBudgetDefault` 同一条铁律：必须在 `tool-loop.ts` 的**执行必经点**
+ *   （`entry.parse()` 之后）调用 —— 执行走 `getChatTool()` 的原始 entry，
+ *   包装 `enabledChatToolEntries` 返回值里的 `run` 永远不会被调用（配置会静默失效）。
+ *
+ * 为什么只取预算的 75%：工具结果是 `JSON.stringify(value, null, 2)`，正文里的换行会被
+ * 转义成 `\n`（每行 +1 字符），再加固定包装与缩进通常 +2%~5%。留 25% 余量后，
+ * 即使整篇都是短行也不会溢出 —— 从而彻底避开序列化层的「按码点硬切」（那会把 JSON 切坏）。
+ */
+export function applyReadWindowDefault(name: string, args: ChatToolArgs, responseChars: number): ChatToolArgs {
+  if (name !== 'ki_get_module_info' || args.max_chars !== undefined) return args;
+  return { ...args, max_chars: Math.max(PAGE_MIN_CHARS, Math.floor(responseChars * 0.75)) };
+}
+
 // ─── 14 个工具注册 ────────────────────────────────────────────────────
 
 /** 工具入口工厂（specs → parse/describe 的公共装配） */
@@ -406,13 +423,16 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       type: 'function',
       function: {
         name: 'ki_get_module_info',
-        description: '读取当前会话知识库中指定 Group 下某个/多个 Relation（文档）的本地 KB Markdown 全文（批量 ≤10 条，须同 Group）。检索只拿到片段、需要完整原文时使用。',
+        description: '读取当前会话知识库中指定 Group 下某个/多个 Relation（文档）的本地 KB Markdown 正文（批量 ≤10 条，须同 Group）。检索只拿到片段、需要完整原文时使用。长文档会自动分段：返回 truncated:true 时按 nextStart 带上 start_line 继续读取，直到 truncated:false 才算读完。',
         parameters: {
           type: 'object',
           properties: {
             group: { type: 'string', description: 'Group 路径（支持向量语义兜底）' },
             relation: { type: 'string', description: 'Relation（文档）名称，精确匹配。单条查询用；与 relations 二选一' },
-            relations: { type: 'array', items: { type: 'string' }, maxItems: 10, description: '同 Group 下批量查询（≤10 条）。与 relation 二选一' },
+            relations: { type: 'array', items: { type: 'string' }, maxItems: 10, description: '同 Group 下批量查询（≤10 条）。与 relation 二选一；批量不支持 start_line / start_char' },
+            start_line: { type: 'integer', minimum: 1, description: '分段读取：起始行（1-based）。上次返回 nextStart 时用它续读；不传从第 1 行开始' },
+            start_char: { type: 'integer', minimum: 0, description: '分段读取：起始行内字符偏移。仅当上次返回的 nextStart.char > 0 时才需要带上' },
+            max_chars: { type: 'integer', minimum: PAGE_MIN_CHARS, maximum: PAGE_MAX_CHARS, description: `分段读取：本次正文的字符上限（${PAGE_MIN_CHARS}–${PAGE_MAX_CHARS}）。不传时按本轮工具返回预算自动取值` },
           },
           required: ['group'],
         },
@@ -422,17 +442,34 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       { key: 'group', type: 'string', required: true },
       { key: 'relation', type: 'string' },
       { key: 'relations', type: 'stringArray', maxItems: 10 },
+      { key: 'start_line', type: 'int', min: 1 },
+      { key: 'start_char', type: 'int', min: 0 },
+      { key: 'max_chars', type: 'int', min: PAGE_MIN_CHARS, max: PAGE_MAX_CHARS },
     ],
     run: (scope, a) => submitScoped('ki_get_module_info', scope, async () => {
+      // 分段参数：只在模型（或预算注入）真的给了才下传，缺省仍走全文语义
+      const page = {
+        ...(a.start_line !== undefined ? { startLine: a.start_line as number } : {}),
+        ...(a.start_char !== undefined ? { startChar: a.start_char as number } : {}),
+        ...(a.max_chars !== undefined ? { maxChars: a.max_chars as number } : {}),
+      };
       if (a.relations !== undefined) {
         return withTimeout(
-          executeGetModuleInfoBatch({ scope, group: a.group as string, relations: a.relations as string[] }),
+          executeGetModuleInfoBatch({
+            scope,
+            group: a.group as string,
+            relations: a.relations as string[],
+            // 起点参数下传而非丢弃：批量下它们无意义，由核心函数 fail-loud 指路
+            ...(a.start_line !== undefined ? { startLine: a.start_line as number } : {}),
+            ...(a.start_char !== undefined ? { startChar: a.start_char as number } : {}),
+            ...(a.max_chars !== undefined ? { maxChars: a.max_chars as number } : {}),
+          }),
           TOOL_TIMEOUT.READ,
           'ki_get_module_info',
         );
       }
       return withTimeout(
-        executeGetModuleInfo({ scope, group: a.group as string, relation: a.relation as string }),
+        executeGetModuleInfo({ scope, group: a.group as string, relation: a.relation as string, ...page }),
         TOOL_TIMEOUT.READ,
         'ki_get_module_info',
       );

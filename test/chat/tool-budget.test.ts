@@ -13,7 +13,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CHAT_BUDGET } from '../../src/lib/chat/chat-contract.js';
-import { applyBudgetDefault } from '../../src/lib/chat/mcp-tool-registry.js';
+import { applyBudgetDefault, applyReadWindowDefault } from '../../src/lib/chat/mcp-tool-registry.js';
+import { PAGE_MIN_CHARS } from '../../src/get-module-info.js';
 import { serializeToolResponse } from '../../src/lib/chat/retrieval/tool-response.js';
 import { normalizePromptConfig, type PromptConfigIssue } from '../../src/lib/chat/prompt-config.js';
 
@@ -106,5 +107,30 @@ describe('工具预算 · normalizePromptConfig 两字段', () => {
     );
     assert.equal(out.toolResponseChars, CHAT_BUDGET.toolResponseCharsMin);
     assert.equal(out.searchHitsPerCall, CHAT_BUDGET.maxHitsPerCallHardMax);
+  });
+});
+
+describe('长文档分页 · applyReadWindowDefault（同为执行必经点注入）', () => {
+  it('ki_get_module_info 未传 max_chars 时按预算的 75% 补窗口', () => {
+    const out = applyReadWindowDefault('ki_get_module_info', { group: 'g', relation: 'r' }, 10000);
+    assert.equal(out.max_chars, 7500);
+  });
+
+  it('窗口占预算的比例留了余量（序列化换行转义后不溢出）', () => {
+    for (const budget of [1000, 10000, 50000, 100000]) {
+      const out = applyReadWindowDefault('ki_get_module_info', { group: 'g' }, budget) as { max_chars: number };
+      assert.ok(out.max_chars < budget, `budget=${budget} 时应留余量`);
+      assert.ok(out.max_chars >= PAGE_MIN_CHARS, `budget=${budget} 时不应低于最小窗口`);
+    }
+  });
+
+  it('模型显式传了 max_chars 时原样保留（同一引用，零开销）', () => {
+    const args = { group: 'g', max_chars: 3000, start_line: 5 };
+    assert.equal(applyReadWindowDefault('ki_get_module_info', args, 10000), args);
+  });
+
+  it('其他工具原样透传（不得影响 ki_search 等既有预算）', () => {
+    const other = { query: 'x' };
+    assert.equal(applyReadWindowDefault('ki_search', other, 10000), other);
   });
 });
