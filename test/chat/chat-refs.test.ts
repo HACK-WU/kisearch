@@ -172,6 +172,24 @@ describe('用户引用 · 上游注入（并入本轮 user）', () => {
     assert.ok(!users[0]!.content.includes('用户指定的参考资料'), '历史那条不得被污染');
   });
 
+  it('围栏显式标注 group 是路径（模型不会把前段当成文档名）', async () => {
+    const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [REF_A]);
+    const block = refsBlockOf(cap)!;
+    assert.ok(
+      block.includes('group 路径：k8s / 01-概述'),
+      `应显式告诉模型前半段是 group 路径，实际：${block.split('\n').find((l) => l.startsWith('--- 引用'))}`,
+    );
+  });
+
+  it('根散文件的存储键 __root__ 不得原样铺给模型（映射成「根目录」）', async () => {
+    const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [
+      { group: '__root__', doc: '散落的文档', text: '片段正文' },
+    ]);
+    const block = refsBlockOf(cap)!;
+    assert.ok(!block.includes('__root__'), '内部保留键不得出现在模型上下文里');
+    assert.ok(block.includes('group 路径：根目录 / 散落的文档'), '应映射成人能读的「根目录」');
+  });
+
   it('多条引用按序编号且内容齐全', async () => {
     const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [REF_A, REF_B]);
     const block = refsBlockOf(cap)!;

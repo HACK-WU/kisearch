@@ -251,9 +251,23 @@ describe('证据回放 · 渲染与附加', () => {
     assert.ok(block);
     assert.match(block, /不要为确认而重复检索相同内容/);
     assert.match(block, /不是用户本轮的新输入/);
-    assert.match(block, /\[更早第 1 次提问 · 用户引用\] 《k8s\.md》/);
+    // 2026-11-11：ref 头部补「group 路径：X / 」（与本轮引用围栏同口径，防同名文档混淆）
+    assert.match(block, /\[更早第 1 次提问 · 用户引用\] group 路径：wiki \/ 《k8s\.md》/);
     assert.match(block, /\[更早第 1 次提问 · ki_search 命中 5 条\]（当时已截断）/);
     assert.ok(block.includes('引用原文') && block.includes('检索正文'));
+  });
+
+  it('更早轮次的引用同样做 __root__ 映射（存储保留键不得进模型上下文）', () => {
+    const conv = {
+      messages: [
+        ...turnOf([ref('__root__', '散落的文档.md', '引用原文')], []),
+        user('本轮'),
+      ],
+    };
+    const block = renderEvidenceBlock(collectReplayItems(conv));
+    assert.ok(block, '应有证据块');
+    assert.ok(!block.includes('__root__'), '内部保留键不得出现在模型上下文里');
+    assert.match(block, /group 路径：根目录 \/ 《散落的文档\.md》/);
   });
 
   it('截断时剩余空间连标记都放不下 → 整条丢弃（**不超预算**）', () => {
