@@ -54,6 +54,13 @@ function extractConstNumber(src: string, name: string): number {
   return Number(m![1]);
 }
 
+/** 提取 `export type NAME = ...;` 右侧原文（用于非联合类型的别名，`extractTypeUnion` 对它恒为空） */
+function extractTypeAliasBody(src: string, name: string): string {
+  const m = src.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
+  assert.ok(m, `未找到 type ${name}`);
+  return m![1]!.replace(/\s+/g, ' ').trim();
+}
+
 describe('契约对齐 · SSE 事件协议', () => {
   it('meta 两侧都携带可选的已提交 userMessageId，失败/停止无需推算或重取 id', () => {
     for (const p of [BACK, FRONT]) assert.match(read(p), /type: 'meta';[^\n]+userMessageId\?: string/);
@@ -96,6 +103,16 @@ describe('契约对齐 · 数据模型', () => {
       const fields = extractInterfaceFields(read(p), 'ChatConfigOk');
       for (const k of need) assert.ok(fields.includes(k), `${p} 缺少 ${k}`);
     }
+  });
+
+  it('ChatToolArgsDisplay 别名两侧一致（工具入参结构化摘要，2026-11-11）', () => {
+    // 它是 `Record<...>` 而非字符串字面量联合 —— extractTypeUnion 对它恒返回空数组，
+    // 比对等于没比，故用原文比对。
+    assert.equal(
+      extractTypeAliasBody(read(FRONT), 'ChatToolArgsDisplay'),
+      extractTypeAliasBody(read(BACK), 'ChatToolArgsDisplay'),
+    );
+    assert.equal(extractTypeAliasBody(read(BACK), 'ChatToolArgsDisplay'), 'Record<string, string | number | boolean>');
   });
 
   it('CHAT_REF_* 上限常量两侧一致（REQ-20261009-002）', () => {

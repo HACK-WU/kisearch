@@ -47,7 +47,7 @@ import {
   patchConversation,
   undoCompactConversation,
 } from '@/api/chatApi';
-import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
 import { buildRefCandidate, checkRefAdd, drawerOfSelection, type RefAddResult } from './refSelection';
 // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，不留空槽
 import { groupPathSegment } from '../lib/rootGroup';
@@ -2372,7 +2372,8 @@ function formatMsgTime(iso: string): string {
 function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): ProgressStep[] | undefined {
   if (!steps || steps.length === 0) return undefined;
   // 复用 useChatStream 的同一套文案函数 → "生成中看到的"与"刷新后回看的"措辞一致；
-  // 摘要字段（name/mode/hits/durationMs/error）一并透传，供时间线行与卡片渲染
+  // 摘要字段（name/mode/query/args/hits/durationMs/error）一并透传，供时间线行与卡片渲染。
+  // ★ query/args 自 2026-11-11 起随 progress 落盘 → 入参在刷新/切会话后不再消失。
   return steps.map((s) => {
     // skill 加载步骤（2026-10-13）：单事件、无 start/end 配对，走 skillStep 的同一套文案
     if (s.kind === 'skill') {
@@ -2391,7 +2392,7 @@ function chatProgressToSteps(steps: readonly ChatProgressStep[] | undefined): Pr
     }
     return s.phase === 'end'
       ? { ...toolEndStep(s.hits ?? 0, s.error, { name: s.name, mode: s.mode, durationMs: s.durationMs, response: s.response }), afterChars: s.afterChars }
-      : { ...toolStartStep(s.mode, s.name), afterChars: s.afterChars };
+      : { ...toolStartStep(s.mode, s.name, s.query, s.args), afterChars: s.afterChars };
   });
 }
 
@@ -2476,10 +2477,17 @@ function AnswerFlow({
   );
 }
 
-/** 时间线工具行（demo D9）：动作名 + 工具胶囊 + 状态 + 展开卡；无摘要字段时退化为纯文本行 */
+/**
+ * 时间线工具行（demo D9）：动作名 + 工具胶囊 + 状态 + 展开卡；无摘要字段时退化为纯文本行。
+ *
+ * ★ 检索类判定 = `mode !== undefined`（只有 `ki_search` 的 describe 给 mode）。
+ *   「N 命中」是检索独有的语义：其余工具的 `hits` 恒为 0（tool-loop 只给 producesSources 赋值），
+ *   照搬显示等于在每一行都印一个假的「0 命中」（2026-11-11 用户指出）。
+ */
 function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const hasDetail = Boolean(n.name || n.mode || n.query || n.hits !== undefined || n.error || n.response);
+  const isSearch = n.mode !== undefined;
+  const hasDetail = Boolean(n.name || n.mode || n.query || n.args || n.hits !== undefined || n.error || n.response);
   if (!hasDetail) {
     // 退化行（无摘要字段的旧数据）：不带 --tool 类 —— 否则 D9 的 cursor:pointer + hover
     // 会暗示可点击，而它其实没有展开内容
@@ -2489,13 +2497,18 @@ function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
       </div>
     );
   }
+  const modePrefix = n.mode !== undefined ? `${n.mode} · ` : '';
   const stat = n.error
     ? '失败'
     : n.running
-      ? `${n.mode ? `${n.mode} · ` : ''}检索中…`
-      : n.hits !== undefined
-        ? `${n.mode ? `${n.mode} · ` : ''}${n.hits} 命中${n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}`
-        : n.label;
+      ? (isSearch ? `${modePrefix}检索中…` : '调用中…')
+      : isSearch && n.hits !== undefined
+        ? `${modePrefix}${n.hits} 命中${n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}`
+        // 非检索工具只留耗时：它是唯一有信息量的读数（`ki_edit_relation` 偶尔几十秒，
+        // 用户需要看见），而「0 命中」是恒定值、纯噪音
+        : n.durationMs !== undefined
+          ? `${n.durationMs}ms`
+          : n.label;
   const toggle = (): void => setOpen((v) => !v);
   return (
     <>
@@ -2605,42 +2618,67 @@ function SkillCard({ n }: { n: TimelineNode }): JSX.Element {
  * 展开卡片：原样展示后端统一限长的实际返回文本；旧记录明确标记正文缺失。
  */
 function ToolCard({ n }: { n: TimelineNode }): JSX.Element {
-  const args: Record<string, string> = {};
-  if (n.query) args.query = n.query;
-  if (n.mode) args.mode = n.mode;
-  const hasQuery = Object.keys(args).length > 0;
-  const hasArgs = hasQuery || Boolean(n.args);
+  const isSearch = n.mode !== undefined;
+  /**
+   * 入参统一收成一个扁平对象再渲染（2026-11-11）。
+   *
+   * 原来只有检索类的 query/mode 走 JSON，其余工具的 `args` 是 `k=v` 拼接串、走 `<pre>` 横排 ——
+   * 同一张卡片两种形态，用户看不出 `ki_get_module_info` / `ki_edit_relation` 到底传了什么。
+   * 现在后端 `describe` 直接产对象，这里合并后一律 JSON。
+   */
+  const argObj: ChatToolArgsDisplay = {
+    ...(n.query !== undefined ? { query: n.query } : {}),
+    ...(n.mode !== undefined ? { mode: n.mode } : {}),
+    // `n.args` 里也可能有 mode（如 ki_group_list 的展示分区 hot|full）—— 与顶层的检索模式
+    // 是两回事：顶层 mode 只有 ki_search 会带，且它不进 args，故两者不会互相覆盖。
+    ...(n.args ?? {}),
+  };
+  const hasArgs = Object.keys(argObj).length > 0;
   return (
     <div className="ki-chat-tool">
       {hasArgs ? (
         <section className="ki-chat-tool__sec">
-          <div className="ki-chat-tool__label">入参{n.mode ? <em>mode {n.mode}</em> : null}</div>
-          {hasQuery ? <JsonCode obj={args} /> : null}
-          {n.args ? <pre className="ki-chat-tool__code">{n.args}</pre> : null}
+          {/* mode 已经进了下面的 JSON 主体，标题右侧不再重复标注 */}
+          <div className="ki-chat-tool__label">入参</div>
+          <JsonCode obj={argObj} />
         </section>
       ) : null}
       {n.response ? (
         <section className="ki-chat-tool__sec">
-          <div className="ki-chat-tool__label">响应<em>{n.hits} 命中{n.durationMs !== undefined ? ` · ${n.durationMs}ms` : ''}</em></div>
+          <div className="ki-chat-tool__label">响应<em>{resultsStat(n)}</em></div>
           {n.response.truncated ? <p className="ki-chat-tool__note ki-chat-tool__note--warn">原返回 {n.response.originalChars} 字符，{n.response.limit !== undefined ? `超过 ${n.response.limit} 字符已截断` : '已截断'}。AI 收到相同内容。</p> : null}
           <pre className="ki-chat-tool__code ki-chat-tool__code--response">{n.response.text}</pre>
         </section>
       ) : n.hits !== undefined && !n.error ? (
         <section className="ki-chat-tool__sec">
           <div className="ki-chat-tool__label">响应摘要</div>
-          <p className="ki-chat-tool__note">命中 {n.hits} 条。旧记录未保存工具返回正文。</p>
+          <p className="ki-chat-tool__note">{isSearch ? `命中 ${n.hits} 条。` : ''}旧记录未保存工具返回正文。</p>
         </section>
       ) : null}
       {n.error ? (
         <section className="ki-chat-tool__sec">
-          <div className="ki-chat-tool__label">错误<em>未产生检索结果</em></div>
+          <div className="ki-chat-tool__label">错误{isSearch ? <em>未产生检索结果</em> : null}</div>
           <pre className="ki-chat-tool__err">{n.error}</pre>
-          <p className="ki-chat-tool__note ki-chat-tool__note--warn">这一步没有检索结果，回答未引用其内容。</p>
+          <p className="ki-chat-tool__note ki-chat-tool__note--warn">
+            {isSearch ? '这一步没有检索结果，回答未引用其内容。' : '这一步调用失败，AI 已收到该错误并可能改道。'}
+          </p>
         </section>
       ) : null}
-      {n.running ? <p className="ki-chat-tool__note">本步骤进行中，完成后回写命中与耗时。</p> : null}
+      {n.running ? <p className="ki-chat-tool__note">本步骤进行中，完成后回写{isSearch ? '命中与' : '结果与'}耗时。</p> : null}
     </div>
   );
+}
+
+/**
+ * 响应头右侧的读数：`N 命中 · Nms`（检索类） / `Nms`（其余工具）。
+ *
+ * 分开的理由同行内 stat：「命中」只对 `ki_search` 有语义，其余工具的 hits 恒为 0。
+ */
+function resultsStat(n: TimelineNode): string {
+  const parts: string[] = [];
+  if (n.mode !== undefined && n.hits !== undefined) parts.push(`${n.hits} 命中`);
+  if (n.durationMs !== undefined) parts.push(`${n.durationMs}ms`);
+  return parts.join(' · ');
 }
 
 /** 扁平 JSON 着色渲染（demo ki-chat-tool__code 的 .k/.s/.n 同款） */

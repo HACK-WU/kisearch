@@ -149,13 +149,35 @@ describe('工具注册表 · 展示摘要与 sources 标记', () => {
     const sync = getChatTool('ki_sync_relation')!;
     const syncDesc = sync.describe(sync.parse('{"group":"g","relation":"r","module_info":"很长很长的正文…"}'));
     assert.ok(!JSON.stringify(syncDesc).includes('很长很长的正文'), 'module_info 不得进摘要');
-    assert.match(syncDesc.args ?? '', /group=g/);
-    assert.match(syncDesc.args ?? '', /relation=r/);
+    // 2026-11-11：args 由 `k=v` 拼接串改为**结构化对象**（前端统一按 JSON 渲染，不再横排）
+    assert.equal(typeof syncDesc.args, 'object');
+    assert.equal(syncDesc.args?.group, 'g');
+    assert.equal(syncDesc.args?.relation, 'r');
+    assert.ok(!Object.prototype.hasOwnProperty.call(syncDesc.args, 'module_info'), 'module_info 键必须整体缺席');
   });
 
   it('ki_bulk_sync_relation 摘要给条数而非内容', () => {
     const bulk = getChatTool('ki_bulk_sync_relation')!;
     const desc = bulk.describe(bulk.parse('{"items":[{"group":"g","relation":"r","module_info":"m"}]}'));
-    assert.match(desc.args ?? '', /items=1/);
+    assert.equal(desc.args?.items, 1);
+    assert.equal(typeof desc.args?.items, 'number', '条数保留 number 类型（前端按 JSON 类型渲染）');
+    assert.ok(!JSON.stringify(desc).includes('"module_info"'), '批量条目正文不得进摘要');
+  });
+
+  it('defaultDescribe 产结构化对象：字符串值截断 ≤60 字符，number/boolean 保留原类型', () => {
+    const info = getChatTool('ki_get_module_info')!;
+    const longGroup = 'g'.repeat(100);
+    const desc = info.describe(info.parse(JSON.stringify({ group: longGroup, relation: 'r' })));
+    assert.equal(typeof desc.args, 'object');
+    assert.ok((desc.args?.group as string).length <= 61, `长值必须截断（实际 ${(desc.args?.group as string).length}）`);
+    assert.ok((desc.args?.group as string).endsWith('…'), '截断后带省略号');
+    // 同一份摘要喂给前端 JSON 渲染器必须可序列化且不含 undefined
+    assert.equal(JSON.stringify(desc.args).includes('undefined'), false);
+  });
+
+  it('空摘要不产出 args 键（前端据此整块不渲染入参区）', () => {
+    const list = getChatTool('ki_scope_list')!;
+    const desc = list.describe({});
+    assert.equal(Object.prototype.hasOwnProperty.call(desc, 'args'), false);
   });
 });

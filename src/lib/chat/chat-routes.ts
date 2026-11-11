@@ -42,6 +42,7 @@ import YAML from 'yaml';
 import {
   CHAT_BUDGET,
   CHAT_ERROR_CODES,
+  CHAT_PROGRESS_QUERY_MAX,
   CHAT_REF_MAX_COUNT,
   CHAT_REF_TEXT_MAX,
   CHAT_REF_TOTAL_MAX,
@@ -1332,11 +1333,21 @@ async function runGeneration(
       if (ev.type === 'usage') { usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, ...(ev.reasoningTokens !== undefined ? { reasoningTokens: ev.reasoningTokens } : {}) }; writeSseEvent(res, ev); continue; }
       if (ev.type === 'sources') { sources = ev.sources; writeSseEvent(res, ev); continue; }
       if (ev.type === 'tool_start') {
-        // ★ 落盘摘要只记工具名与模式（**不落 query/args**：用户问题已在 user 消息里，N22 最小化；
-        //   args 是展示用摘要，落盘口径维持决策 #13 的"步骤级摘要"不变）
-        // afterChars = 此刻已发出的正文长度 → 前端据此把调用痕迹插在"哪句话之后"（interleave 锚点）
+        /**
+         * 落盘：工具名 + 模式 + **检索词 + 入参摘要**（2026-11-11 变更，推翻原 N22/决策 #13）。
+         *
+         * ★ 原口径是"只记 name/mode，不落 query/args"（最小化会话文件），实测代价太大：
+         *   query/args 只活在流式内存态，刷新或切会话后一律丢失 ⇒ 回看历史时 `ki_search`
+         *   的入参只剩 `mode` 一个字段，其余工具连入参区都不渲染，用户无从核对"AI 到底调了什么"。
+         *   原理由「用户问题已在 user 消息里」对 query 也不成立 —— query 是模型改写后的检索词，
+         *   与原始提问不是一回事。
+         *
+         * · 体积仍受控：`args` 是 describe 摘要（大字段已排除、字符串值 ≤60 字符），
+         *   query 按 CHAT_PROGRESS_QUERY_MAX 截断；
+         * · afterChars = 此刻已发出的正文长度 → 前端据此把调用痕迹插在"哪句话之后"（interleave 锚点）。
+         */
         lastToolName = ev.name;
-        progress.push({ phase: 'start', name: ev.name, mode: ev.mode, afterChars: content.length });
+        progress.push(toProgressStartStep(ev, content.length));
         writeSseEvent(res, ev);
         continue;
       }
@@ -1577,6 +1588,38 @@ function buildAssistantMessage(p: {
   // ★ N22：只落投影后的引用（无来源则不落该字段，与 SSE 语义一致）
   if (p.sources.length > 0) msg.sources = p.sources;
   return msg;
+}
+
+/**
+ * `tool_start` 事件 → 落盘用的进度步骤。
+ *
+ * 单列成函数是为了**可单测**：落盘口径（query 截断、args 原样透传、afterChars 锚点）
+ * 直接跑测试，不必拉起整条 SSE 流。口径说明见调用处的块注释。
+ */
+export function toProgressStartStep(
+  ev: Extract<ChatEvent, { type: 'tool_start' }>,
+  afterChars: number,
+): ChatProgressStep {
+  return {
+    phase: 'start',
+    name: ev.name,
+    // 键只在该工具真有这个参数时才出现 —— 前端一律按「键是否存在」分支渲染，
+    // 写 `mode: undefined` 会造出一个"存在但为空"的键，语义上更容易误判
+    ...(ev.mode !== undefined ? { mode: ev.mode } : {}),
+    ...(ev.query !== undefined ? { query: capProgressQuery(ev.query) } : {}),
+    ...(ev.args !== undefined ? { args: ev.args } : {}),
+    afterChars,
+  };
+}
+
+/**
+ * 落盘前截断检索词（`CHAT_PROGRESS_QUERY_MAX`）。
+ *
+ * 正常路径下 `tool-loop` 发出 `tool_start` 时已截过（流式与落盘必须同一份值），
+ * 这里保留为**幂等兜底**：拦住任何绕过 guard 的调用方（如后续新增的事件来源）。
+ */
+function capProgressQuery(query: string): string {
+  return query.length > CHAT_PROGRESS_QUERY_MAX ? `${query.slice(0, CHAT_PROGRESS_QUERY_MAX)}…` : query;
 }
 
 /** 把内部 throw 映射为 SSE error 事件的 code/retryable */

@@ -56,6 +56,15 @@ export const CHAT_REF_TEXT_MAX = 2000;
 /** 全部引用文本合计上限（字符，与后端一致） */
 export const CHAT_REF_TOTAL_MAX = 6000;
 
+/**
+ * 工具入参的**展示用**扁平摘要（与后端 `ChatToolArgsDisplay` 对齐）。
+ *
+ * · 大字段 `module_info` / `edits` / `text` / `items` 不进来，字符串值 ≤60 字符；
+ * · 生成中（SSE `tool_start.args`）与落盘回看（`ChatProgressStep.args`）是**同一份产物**，
+ *   界面必须渲染成同一个 JSON，不得各拼一套（否则刷新前后两副面孔）。
+ */
+export type ChatToolArgsDisplay = Record<string, string | number | boolean>;
+
 /** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
 export interface ChatToolResponse {
   text: string;
@@ -75,6 +84,10 @@ export interface ChatProgressStep {
   /** 工具名（如 `ki_search`）/ skill 步骤时为 skill 名称 */
   name?: string;
   mode?: string;
+  /** 检索词（`tool_start` 带，仅检索类；后端落盘前截断 200 字符，旧记录无此字段） */
+  query?: string;
+  /** 工具入参摘要（`tool_start` 带，结构化；旧记录无此字段） */
+  args?: ChatToolArgsDisplay;
   hits?: number;
   /** 有界工具返回；旧记录缺失时仅展示摘要。 */
   response?: ChatToolResponse;
@@ -211,10 +224,11 @@ export type ChatEvent =
   | { type: 'meta'; conversationId: string; messageId: string; model: string; discardedCount?: number; userMessageId?: string }
   /**
    * 工具调用开始（批次 2 泛化）：
-   * · 检索类工具（ki_search）带 `query` + `mode`；其余工具带 `args`（参数摘要）
+   * · 检索类工具（ki_search）带 `query` + `mode`；
+   * · 其余工具带 `args`（结构化入参摘要，2026-11-11 由 `k=v` 串改为对象）
    * · 三者均**可选** —— 渲染按存在性分支，不得假设必有
    */
-  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
+  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: ChatToolArgsDisplay }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   /**
    * skill 正文按需加载（2026-10-13 新增；**可多次**，每次一个 skill）。

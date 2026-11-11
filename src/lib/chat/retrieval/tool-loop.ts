@@ -53,7 +53,7 @@
  * @see .plans/2026-10-08-chat-mcp-tools-batch2/plan.md
  */
 
-import { CHAT_BUDGET, type ChatEvent, type ChatRef, type ContextCharsParts, type ConversationFile, type SourceRef } from '../chat-contract.js';
+import { CHAT_BUDGET, CHAT_PROGRESS_QUERY_MAX, type ChatEvent, type ChatRef, type ContextCharsParts, type ConversationFile, type SourceRef } from '../chat-contract.js';
 import type { SearchResult } from '../../../search.js';
 import {
   streamChat,
@@ -532,6 +532,15 @@ function awaitWithAbort<T>(work: () => Promise<T>, signal?: AbortSignal): Promis
  * ⚠️ **不落盘**：本函数只产出事件流；内容落盘由调用方（`chat-routes.ts`）在流结束后执行，
  *    以便复用"生成期间不持锁"的两段式加锁（S02 §3.3）。
  */
+/**
+ * 检索词展示截断（`CHAT_PROGRESS_QUERY_MAX`）。
+ *
+ * 幂等：对已截断的串再跑一次结果不变（`slice(0,200) + '…'`），所以落盘侧的兜底不会二次加省略号。
+ */
+function capQueryForDisplay(query: string): string {
+  return query.length > CHAT_PROGRESS_QUERY_MAX ? `${query.slice(0, CHAT_PROGRESS_QUERY_MAX)}…` : query;
+}
+
 export async function* runToolLoop(input: ToolLoopInput): AsyncGenerator<ChatEvent> {
   const runtime = resolveRuntime();
   const messageId = messageIdFor(input.conv);
@@ -723,7 +732,9 @@ async function* toolLoopPath(
       if (!entry) {
         const errText = `未知工具 ${call.name || '(未命名)'}：不在本次暴露的工具列表中，请仅使用系统提供的工具`;
         const response = serializeToolResponse({ error: errText }, runtime.budget.responseChars);
-        yield { type: 'tool_start', name: call.name || 'unknown', ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}) };
+        // 未知工具走不到 `describe()`（注册表里没有它）→ 原始 arguments 塞进 `raw` 键：
+        // 展示层仍按 JSON 渲染，且明确标出"这是未经摘要的原文"，不与其它工具的摘要混淆。
+        yield { type: 'tool_start', name: call.name || 'unknown', ...(call.arguments ? { args: { raw: call.arguments.slice(0, 80) } } : {}) };
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
         continue;
@@ -736,7 +747,8 @@ async function* toolLoopPath(
         yield {
           type: 'tool_start',
           name: entry.name,
-          ...(call.arguments ? { args: call.arguments.slice(0, 80) } : {}),
+          // 能力拦截发生在 describe 之前 → 同样退回原始 arguments（`raw` 键，理由同上一条）
+          ...(call.arguments ? { args: { raw: call.arguments.slice(0, 80) } } : {}),
         };
         yield { type: 'tool_end', hits: 0, durationMs: 0, error: errText, response };
         messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
@@ -765,7 +777,10 @@ async function* toolLoopPath(
       yield {
         type: 'tool_start',
         name: entry.name,
-        ...(desc.query !== undefined ? { query: desc.query } : {}),
+        // query 是**展示摘要**（不参与执行 —— 执行用的是 `parsed.query`），在这里就按
+        // `CHAT_PROGRESS_QUERY_MAX` 收口：流式与落盘共用同一份值，避免"生成中 2000 字符、
+        // 刷新后 200 字符 + …"的两副面孔（落盘侧 `capProgressQuery` 保留作幂等兜底）。
+        ...(desc.query !== undefined ? { query: capQueryForDisplay(desc.query) } : {}),
         ...(desc.mode !== undefined ? { mode: desc.mode } : {}),
         ...(desc.args ? { args: desc.args } : {}),
       };

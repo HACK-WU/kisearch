@@ -80,6 +80,16 @@ export const CHAT_REF_TEXT_MAX = 2000;
 /** 全部引用文本合计上限（字符）：并入本轮 user 消息前的总预算保护 */
 export const CHAT_REF_TOTAL_MAX = 6000;
 
+/**
+ * 工具入参的**展示用**扁平摘要（2026-11-11）。
+ *
+ * · 来自各工具的 `describe()`（不是模型给的原始 `call.arguments`）：大字段
+ *   `module_info` / `edits` / `text` / `items` 一律排除，字符串值截断 ≤60 字符；
+ * · 生成中（SSE `tool_start.args`）与落盘回看（`ChatProgressStep.args`）共用同一份产物，
+ *   前端据此渲染成 JSON —— 两态形态必须一致，不得各拼一套。
+ */
+export type ChatToolArgsDisplay = Record<string, string | number | boolean>;
+
 /** 本次工具实际返回的文本；仅超过总字符预算时截断，模型与页面共用。 */
 export interface ChatToolResponse {
   text: string;
@@ -91,6 +101,18 @@ export interface ChatToolResponse {
    */
   limit?: number;
 }
+
+/**
+ * 检索词展示上限（`tool_start.query` / `ChatProgressStep.query`）。
+ *
+ * 目的是防「模型给出超长检索词」把会话文件撑大；超过部分对回看核对无信息增量，
+ * 截断后补 `…` 提示"还有"。
+ *
+ * ⚠️ 作用点是**事件出口**（`tool-loop` 发 `tool_start` 时），因此流式与落盘拿到同一份值；
+ *    `chat-routes.capProgressQuery` 再截一次是幂等兜底。**执行**用的是 `parsed.query`（完整值），
+ *    不受本上限影响。
+ */
+export const CHAT_PROGRESS_QUERY_MAX = 200;
 
 /**
  * 检索过程步骤（**步骤级摘要**，落盘进 `ChatMessage.progress`）。
@@ -124,6 +146,15 @@ export interface ChatProgressStep {
   name?: string;
   /** 检索模式（`tool_start` 带） */
   mode?: string;
+  /**
+   * 检索词（`tool_start` 带，仅检索类工具）。
+   *
+   * 2026-11-11 起落盘：此前只活在流式内存态，刷新/切会话后丢失 ⇒ 回看历史时
+   * `ki_search` 的入参只剩 `mode` 一个字段。长度受 `CHAT_PROGRESS_QUERY_MAX` 约束。
+   */
+  query?: string;
+  /** 工具入参摘要（`tool_start` 带；结构化，大字段已排除，与生成中同一份产物） */
+  args?: ChatToolArgsDisplay;
   /** 命中条数（`tool_end` 带） */
   hits?: number;
   /** 有界工具返回；旧记录缺失时仅展示摘要。 */
@@ -307,10 +338,11 @@ export type ChatEvent =
   /**
    * 工具调用开始（批次 2 泛化，D5）：
    * · 检索类工具（ki_search）带 `query` + `mode`（旧行为）
-   * · 其余工具带 `args`（服务端生成的参数摘要，大字段已排除）
+   * · 其余工具带 `args`（**结构化**入参摘要，大字段已排除；2026-11-11 由 `k=v` 串改为对象，
+   *   前端统一按 JSON 渲染，与落盘回看的形态一致）
    * · `query`/`mode`/`args` 均可选 —— 前端按存在性渲染，不得假设必有
    */
-  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: string }
+  | { type: 'tool_start'; name: string; query?: string; mode?: RetrievalMode; args?: ChatToolArgsDisplay }
   | { type: 'tool_end'; hits: number; durationMs: number; error?: string; response?: ChatToolResponse }
   /**
    * skill 正文加载（2026-10-13 新增；**可多次**，每次一个 skill）。

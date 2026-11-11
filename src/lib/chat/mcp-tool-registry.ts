@@ -24,7 +24,7 @@
  * @see .plans/2026-10-08-chat-mcp-tools-batch2/plan.md（决策 D1~D6）
  */
 
-import { CHAT_BUDGET, type RetrievalMode } from './chat-contract.js';
+import { CHAT_BUDGET, type ChatToolArgsDisplay, type RetrievalMode } from './chat-contract.js';
 import type { ToolDef } from './llm-client.js';
 import { getSharedOperationCoordinator } from '../operation-coordinator.js';
 import { runWithConfigSnapshot, loadConfig } from '../config.js';
@@ -45,11 +45,19 @@ import { executeDeleteRelation } from '../../delete-relation.js';
 /** 模型给的原始参数（JSON 解析 + 白名单取键 + 钳制后的结果） */
 export type ChatToolArgs = Record<string, unknown>;
 
-/** tool_start 事件的展示摘要：检索类给 query/mode，其余给 args 串 */
+/** tool_start 事件的展示摘要：检索类给 query/mode，其余给结构化 args */
 export interface ChatToolDescribe {
   query?: string;
   mode?: RetrievalMode;
-  args?: string;
+  /**
+   * 结构化入参摘要（**不是**模型给的原始 `call.arguments`）：
+   * · 大字段（`module_info` / `edits` / `text` / `items`）一律不进摘要 —— 体积与隐私；
+   * · 字符串值截断 ≤60 字符，number / boolean 原样保留。
+   *
+   * 2026-11-11：原为 `k=v` 拼接串，前端只能当纯文本横排展示（与 `ki_search` 的 JSON 形态不一致）；
+   * 改为对象后所有工具入参统一走 JSON 渲染，且能原样落盘（生成中与刷新后形态一致）。
+   */
+  args?: ChatToolArgsDisplay;
 }
 
 export interface ChatMcpToolEntry {
@@ -248,11 +256,24 @@ async function runDirect<T>(fn: () => Promise<T>): Promise<T> {
 
 // ─── 展示摘要（大字段不进摘要）────────────────────────────────────────
 
-function summarize(entries: Array<[string, unknown]>): string {
-  return entries
-    .filter(([, v]) => v !== undefined && v !== null && v !== '')
-    .map(([k, v]) => `${k}=${shorten(String(v))}`)
-    .join(' ');
+/**
+ * 不进展示摘要的大字段（体积 + 隐私双约束）：
+ * 这几个键装的可能是整篇正文（`module_info`）或整批条目（`edits` / `items`），
+ * 一旦进摘要就会随会话文件成倍放大，且把知识库正文写进聊天记录。
+ *
+ * ★ 落盘侧不另有一份排除表 —— 它原样存储 `describe()` 的产物，因此天然继承本表；
+ *   要加排除键只改这里，`chat-routes` 不必跟着改。
+ */
+const EXCLUDED_ARG_KEYS: ReadonlySet<string> = new Set(['module_info', 'edits', 'text', 'items']);
+
+/** 入参 → 展示用扁平对象：过滤空值，字符串截断 ≤60，number/boolean 原样 */
+function summarizeArgs(entries: Array<[string, unknown]>): ChatToolArgsDisplay {
+  const out: ChatToolArgsDisplay = {};
+  for (const [k, v] of entries) {
+    if (v === undefined || v === null || v === '') continue;
+    out[k] = typeof v === 'number' || typeof v === 'boolean' ? v : shorten(String(v));
+  }
+  return out;
 }
 
 function shorten(s: string, max = 60): string {
@@ -300,15 +321,17 @@ function makeEntry(config: {
   readOnly: boolean;
   producesSources?: boolean;
   specs: readonly ArgSpec[];
-  /** 覆盖默认展示摘要（默认：小字段拼 key=value；module_info/edits/text/items 等大字段排除） */
+  /** 覆盖默认展示摘要（默认：小字段收成扁平对象；module_info/edits/text/items 等大字段排除） */
   describe?: (args: ChatToolArgs) => ChatToolDescribe;
   run: (scope: string, args: ChatToolArgs) => Promise<unknown>;
 }): ChatMcpToolEntry {
   const defaultDescribe = (args: ChatToolArgs): ChatToolDescribe => {
     const keys = config.specs
       .map((s) => s.key)
-      .filter((k) => k !== 'module_info' && k !== 'edits' && k !== 'text' && k !== 'items');
-    return { args: summarize(keys.filter((k) => args[k] !== undefined).map((k) => [k, args[k]])) };
+      .filter((k) => !EXCLUDED_ARG_KEYS.has(k) && args[k] !== undefined);
+    const summarized = summarizeArgs(keys.map((k) => [k, args[k]]));
+    // 空对象不下发：`tool_start` 无 `args` 字段 → 前端入参区不渲染（旧行为不变）
+    return Object.keys(summarized).length > 0 ? { args: summarized } : {};
   };
   return {
     name: config.name,
@@ -644,8 +667,9 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       { key: 'vector', type: 'boolean', default: true },
     ],
     describe: (args: ChatToolArgs): ChatToolDescribe => {
+      // 批量条目只给**条数**，正文逐条不进摘要（`items` 在 EXCLUDED_ARG_KEYS 里）
       const count = Array.isArray(args.items) ? (args.items as unknown[]).length : 0;
-      return { args: `items=${count}${args.vector !== undefined ? ` vector=${String(args.vector)}` : ''}` };
+      return { args: { items: count, ...(args.vector !== undefined ? { vector: args.vector as boolean } : {}) } };
     },
     run: (scope, a) => submitScoped('ki_bulk_sync_relation', scope, () =>
       withTimeout(

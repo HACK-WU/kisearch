@@ -1,4 +1,4 @@
-import type { ChatToolResponse } from '@/api/chatContract';
+import type { ChatToolArgsDisplay, ChatToolResponse } from '@/api/chatContract';
 import type { MarkdownBlock } from '@/components/MarkdownPreview';
 import type { ProgressStep, ReasoningSegment } from './chatStore';
 
@@ -50,8 +50,8 @@ export interface TimelineNode {
   name?: string;
   mode?: string;
   query?: string;
-  /** 批次 2：非检索类工具的参数摘要（生成中可见；落盘不含，刷新后无） */
-  args?: string;
+  /** 非检索类工具的结构化入参摘要（与 `ki_search` 的 query/mode 一起渲染成同一个 JSON） */
+  args?: ChatToolArgsDisplay;
   hits?: number;
   response?: ChatToolResponse;
   durationMs?: number;

@@ -20,7 +20,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
-import type { ChatEvent, ChatRef, ChatToolResponse } from '@/api/chatContract';
+import type { ChatEvent, ChatRef, ChatToolArgsDisplay, ChatToolResponse } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 
 export interface ChatStreamApi {
@@ -416,11 +416,34 @@ function applyEvent(store: ChatStore, ev: ChatEvent, mySeq: number, replacingId?
 
 /** `tool_start` → 生成中状态文案（R11a：工具往返期间必须有可见进展） */
 /* 导出：ChatPanel 还原"落盘的历史步骤"时复用同一套文案，否则刷新前后会出现两套措辞 */
-export function toolStartStep(mode: string | undefined, name?: string, query?: string, args?: string): ProgressStep {
+export function toolStartStep(
+  mode: string | undefined,
+  name?: string,
+  query?: string,
+  /**
+   * 类型上允许 `string` 是为了如实描述**运行时**：`tool_start.args` 在 2026-11-11 之前是
+   * `k=v` 拼接串，旧 daemon 仍在发。声明成纯对象会让断言骗过编译器、却漏掉真实入参形态。
+   */
+  args?: ChatToolArgsDisplay | string,
+): ProgressStep {
   // 检索类工具（ki_search，带 mode）沿用检索文案；其余工具按工具名展示（批次 2 泛化）
   const label = mode !== undefined
     ? (mode === 'fulltext' ? '正在检索知识库…（全文）' : '正在检索知识库…（语义）')
     : `正在调用 ${name ?? '工具'}…`;
+  /**
+   * 运行时归一：2026-11-11 前 `tool_start.args` 是 `k=v` 拼接串（如 `group=start mode=full`）。
+   * 前端先升级、daemon 还是旧版本时，这个字符串会被对象展开成
+   * `{"0":"g","1":"r","2":"o",…}`（字符索引键）—— 用户实测看到的就是这个。
+   *
+   * 处理：**原样收进单键**而不是丢弃 —— `k=v` 串按空格切是不安全的（值本身可能含空格，
+   * 如 `group=学习 路径`），无歧义反解做不到；包成一个键至少让人看清"这是旧格式摘要"，
+   * 且重启 daemon 后自动变回结构化 JSON。
+   */
+  const argsObj: ChatToolArgsDisplay | undefined = typeof args === 'object' && args !== null && !Array.isArray(args)
+    ? args
+    : typeof args === 'string' && args.length > 0
+      ? { 参数摘要: args }
+      : undefined;
   return {
     kind: 'tool',
     phase: 'start',
@@ -428,7 +451,8 @@ export function toolStartStep(mode: string | undefined, name?: string, query?: s
     ...(name !== undefined ? { name } : {}),
     ...(query !== undefined ? { query } : {}),
     ...(mode !== undefined ? { mode } : {}),
-    ...(args !== undefined && args !== '' ? { args } : {}),
+    // 空对象不下发（后端 `defaultDescribe` 对空摘要也不产出 args 键，两侧口径一致）
+    ...(argsObj !== undefined && Object.keys(argsObj).length > 0 ? { args: argsObj } : {}),
   };
 }
 
