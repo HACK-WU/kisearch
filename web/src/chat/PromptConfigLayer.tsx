@@ -12,7 +12,16 @@
  *   写入/删除组开启需二次确认（开启 = 授权 AI 直接执行该类操作）。
  */
 
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+} from 'react';
 
 import type { PromptConfig, PromptSkill } from '@/api/chatContract';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
@@ -34,11 +43,43 @@ import {
 } from '@/lib/toolBudget';
 import { EFFORT_FOLLOW_DEFAULT, buildEffortOptions, resolveEffortView } from '@/lib/reasoningEffort';
 
+/**
+ * 危险开关的二次确认。
+ *
+ * ★ 2026-11-11（用户拍板 A 方案）：**不再用遮罩 / 页面级模态** —— 它只是某一个开关的
+ *   一次询问，没必要压暗整页。改为锚定被点开关所在那一行的**行内浮层**（无 scrim、不挤压后续行）。
+ *   旧实现把遮罩就地渲染在 `.ki-chat-cfg`（`position:absolute; z-index:20`）里，被这个层叠
+ *   上下文困住 ⇒ 全屏 / 浮动阅读器（`.ki-drawer` z-index:1000）把卡片整块盖住，
+ *   用户只看到"整屏变黑、确认框不弹"（`.debug/chat-cfg-danger-confirm-blank-20261111`）。
+ */
 interface ConfirmState {
   title: string;
   text: string;
   onYes: () => void;
+  /**
+   * 触发它的开关按钮：浮层以它所在的 `.ki-chat-cfg__tool` 行为定位锚点，关闭时焦点也还给它。
+   * 缺省（如「删除 skill」从编辑模态里发起、模态已关闭）⇒ 落在配置层头部下方。
+   */
+  anchor?: HTMLElement;
 }
+
+/**
+ * 确认浮层的落点，坐标相对 `.ki-chat-cfg`（它的定位父级）。
+ *
+ * ★ 刻意用 `absolute`（不是 `fixed`）+ 相对定位父级的坐标：窄屏浮层 `.ki-chat-panel--overlay`
+ *   带 `animation ... both`，动画停下后 `transform: translateX(0)` **仍在**，会让 `fixed`
+ *   的参照系变成那块面板、坐标全体错位。相对定位父级计算对 transform 免疫。
+ */
+interface ConfirmRect {
+  left: number;
+  width: number;
+  /** 行下方空间足够时用 top；不足则翻到行上方，用 bottom */
+  top?: number;
+  bottom?: number;
+}
+
+/** 行下方至少留这么多高度才往下弹，否则翻到行上方（≈ 卡片高度 + 间距） */
+const CONFIRM_SPACE_BELOW = 170;
 
 type ModalState =
   | { kind: 'prompt' }
@@ -94,15 +135,116 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   const [modal, setModal] = useState<ModalState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [showSavedBar, setShowSavedBar] = useState(false);
+  /** 确认浮层落点；null = 还没量到（首帧先藏起来，避免闪一下在左上角） */
+  const [confirmRect, setConfirmRect] = useState<ConfirmRect | null>(null);
+  const cfgRef = useRef<HTMLElement | null>(null);
+  const confirmRef = useRef<HTMLDivElement | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
 
-  // ── 上下文窗口（REQ-20261014-001）：**随层主「保存」提交**，与其余项同一个文件 ──
+  /**
+   * ═══ 即时生效（2026-11-11 用户拍板 B 方案）═══
+   * 底栏不再有「取消 / 保存」：工具开关、skill 增删改启停、上下文上限、工具预算、思考级别，
+   * **改完即落盘**（用户原话「取消保存的按钮根本不需要，直接实施生效」）。
+   * 为此维护一个"最新草稿 → 串行落盘"的小队列：
+   *  · 串行：`PUT` 是整份替换，并发会让先发的旧快照盖掉后发的新改动
+   *  · 合并：保存期间又改了几次，只补存最后一次（中间态对用户没有意义）
+   *  · 文本输入走防抖（350ms）+ 失焦/关闭前 flush —— 边打字边发请求没有意义
+   */
+  const draftRef = useRef<PromptConfig | null>(null);
+  const queuedRef = useRef<PromptConfig | null>(null);
+  const inflightRef = useRef(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drainRef = useRef<() => void>(() => {});
+
+  const drain = useCallback(async (): Promise<void> => {
+    if (inflightRef.current) return;
+    const next = queuedRef.current;
+    if (!next) return;
+    queuedRef.current = null;
+    inflightRef.current = true;
+    let ok = false;
+    try {
+      ok = await save(next);
+    } finally {
+      // 即使 save 将来改成会抛，也不能把队列钉死在"在途"状态（否则后续改动永远不落盘）
+      inflightRef.current = false;
+    }
+    if (ok) onSaved();
+    // 保存期间又攒了新改动 → 接着存
+    if (queuedRef.current) void drain();
+  }, [save, onSaved]);
+  useEffect(() => {
+    drainRef.current = () => { void drain(); };
+  }, [drain]);
+
+  /** 提交一次改动：改草稿 + 立刻排队落盘 */
+  const commit = useCallback((mutate: (d: PromptConfig) => PromptConfig): void => {
+    const cur = draftRef.current;
+    if (!cur) return;
+    const next = mutate(cur);
+    draftRef.current = next;
+    setDraft(next);
+    queuedRef.current = next;
+    drainRef.current();
+  }, []);
+
+  /** 文本类输入：草稿即时跟随（不打断打字），落盘防抖 350ms */
+  const commitDebounced = useCallback((mutate: (d: PromptConfig) => PromptConfig): void => {
+    const cur = draftRef.current;
+    if (!cur) return;
+    const next = mutate(cur);
+    draftRef.current = next;
+    setDraft(next);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      const latest = draftRef.current;
+      if (!latest) return;
+      queuedRef.current = latest;
+      drainRef.current();
+    }, 350);
+  }, []);
+
+  /** 把还在防抖窗口里的改动立刻写下去（失焦 / 关闭层之前） */
+  const flushPending = useCallback((): void => {
+    if (!debounceRef.current) return;
+    clearTimeout(debounceRef.current);
+    debounceRef.current = null;
+    const latest = draftRef.current;
+    if (!latest) return;
+    queuedRef.current = latest;
+    drainRef.current();
+  }, []);
+
+  /** 关闭配置层：先把防抖里的改动落地，否则「改完立刻关」会丢掉最后一次输入 */
+  const handleClose = useCallback((): void => {
+    flushPending();
+    onClose();
+  }, [flushPending, onClose]);
+
+  /**
+   * 卸载兜底：不是所有退出都走 `handleClose`（关整个 AI 面板、切路由、切会话都会直接卸载），
+   * 那条路径上防抖窗口里的输入不能丢 —— 卸载时补一次 flush。
+   * （flush 里的 `save` 在卸载后仍会发出 PUT；hook 侧的 setState 有 aliveRef 兜着）
+   */
+  useEffect(() => () => {
+    if (!debounceRef.current) return;
+    clearTimeout(debounceRef.current);
+    debounceRef.current = null;
+    const latest = draftRef.current;
+    if (!latest) return;
+    queuedRef.current = latest;
+    drainRef.current();
+  }, []);
+
+  // ── 上下文窗口（REQ-20261014-001）：与其余项同属一份配置、同一个落盘动作 ──
   //    用户裁决（2026-10-14）：`config.yaml` 的 `llm.contextChars` 只作**部署默认**，
   //    界面上改的值单独存在 `prompt-config.json` 的 `contextChars`（**缺省 = 未覆盖**）。
-  //    因此它与 skill / 工具开关同属一份配置、同一个保存动作 —— 不再需要独立「应用」按钮，
-  //    也就不会再有"跨文件写入无法原子"的问题。
+  //    因此它与 skill / 工具开关同文件同一次 PUT —— 不会出现"跨文件写入无法原子"的问题。
+  //    ★ 2026-11-11 起没有底部「保存」按钮：合法输入防抖 350ms 后自动落盘（见上方 commit*）。
   //    输入单位是 **K**（与面板显示同口径），落盘前换算为字符数。
   const [ctxText, setCtxText] = useState('');
-  // ── 工具预算（REQ-20261015-001）：与上下文窗口同层、同一「保存」提交 ──
+  // ── 工具预算（REQ-20261015-001）：与上下文窗口同层、同一份配置 ──
   //    输入单位：返回上限用 **K 字符**（与上面同口径）；条数用 **条**。
   const [toolRespText, setToolRespText] = useState('');
   const [hitsText, setHitsText] = useState('');
@@ -123,22 +265,20 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     setCtxText(v);
     const parsed = parseContextLimitK(v);
     if (parsed !== null) {
-      setDraft((d) => (d ? { ...d, contextChars: parsed } : d));
+      commitDebounced((d) => ({ ...d, contextChars: parsed }));
     } else if (v.trim() === '') {
-      setDraft((d) => {
-        if (!d) return d;
+      commitDebounced((d) => {
         const { contextChars: _drop, ...rest } = d;
         return rest;
       });
     }
-    // 非法（如 "abc"）：草稿保持上一次的合法值，仅由保存按钮禁用 + 提示拦住
+    // 非法（如 "abc"）：不落盘，草稿保持上一次的合法值（输入框旁已有提示）
   };
 
   /** 恢复默认 = **删掉覆盖值**（回到部署默认），不是写死 1000K */
   const handleCtxReset = (): void => {
     setCtxText(contextLimitToKText(ctxDefaultChars));
-    setDraft((d) => {
-      if (!d) return d;
+    commit((d) => {
       const { contextChars: _drop, ...rest } = d;
       return rest;
     });
@@ -181,8 +321,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
 
   /** 选择档位：选「跟随配置默认」= 删字段；其余原样写入草稿（合法性最终由服务端按清单强校验） */
   const handleEffortChange = (v: string): void => {
-    setDraft((d) => {
-      if (!d) return d;
+    commit((d) => {
       if (v === EFFORT_FOLLOW_DEFAULT) {
         const { reasoningEffort: _drop, ...rest } = d;
         return rest;
@@ -192,8 +331,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
   /** 恢复默认 = 删掉覆盖值（回到部署默认档；两者都无 ⇒ 不下发该参数） */
   const handleEffortReset = (): void => {
-    setDraft((d) => {
-      if (!d) return d;
+    commit((d) => {
       const { reasoningEffort: _drop, ...rest } = d;
       return rest;
     });
@@ -205,10 +343,9 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     const parsed = parseKChars(v);
     const inRange = parsed !== null && (trMin === undefined || parsed >= trMin) && (trMax === undefined || parsed <= trMax);
     if (inRange) {
-      setDraft((d) => (d ? { ...d, toolResponseChars: parsed } : d));
+      commitDebounced((d) => ({ ...d, toolResponseChars: parsed }));
     } else if (v.trim() === '') {
-      setDraft((d) => {
-        if (!d) return d;
+      commitDebounced((d) => {
         const { toolResponseChars: _drop, ...rest } = d;
         return rest;
       });
@@ -216,8 +353,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
   const handleToolRespReset = (): void => {
     setToolRespText(String(trDefault / 1000));
-    setDraft((d) => {
-      if (!d) return d;
+    commit((d) => {
       const { toolResponseChars: _drop, ...rest } = d;
       return rest;
     });
@@ -227,10 +363,9 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     setHitsText(v);
     const parsed = parseStrictInt(v);
     if (parsed !== null && parsed >= hitsMin && parsed <= hitsMax) {
-      setDraft((d) => (d ? { ...d, searchHitsPerCall: parsed } : d));
+      commitDebounced((d) => ({ ...d, searchHitsPerCall: parsed }));
     } else if (v.trim() === '') {
-      setDraft((d) => {
-        if (!d) return d;
+      commitDebounced((d) => {
         const { searchHitsPerCall: _drop, ...rest } = d;
         return rest;
       });
@@ -238,8 +373,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
   const handleHitsReset = (): void => {
     setHitsText(String(hitsDefault));
-    setDraft((d) => {
-      if (!d) return d;
+    commit((d) => {
       const { searchHitsPerCall: _drop, ...rest } = d;
       return rest;
     });
@@ -248,9 +382,16 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   // 载入 / 保存成功后（服务端回传了新基线）都重置草稿，保证"内容 = 磁盘"；
   // 输入框文本只在此刻（基线变化）跟随，**不**随草稿逐字符同步 —— 否则用户输入
   // "5000" 的过程中会被归一化成 "500" 而打断输入。
+  //
+  // ⚠️ 即时生效改造（B 方案）后必须防「回写盖掉在途改动」：保存期间用户又改了东西，
+  //    此时服务端回传的是**上一次**的快照，直接铺回本地会让那次改动凭空消失。
+  //    · `queuedRef` 非空 = 还有更新的一版没落盘
+  //    · `debounceRef` 非空 = 用户正在输入（防抖窗口内，草稿已新于基线）
+  //    两者任一成立都跳过本次同步；否则会打断用户正在敲的输入框。
   useEffect(() => {
-    if (!data) return;
+    if (!data || queuedRef.current || debounceRef.current) return;
     const next = cloneConfig(data.config);
+    draftRef.current = next;
     setDraft(next);
     setCtxText(contextLimitToKText(next.contextChars ?? (data.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS)));
     // 工具预算两个输入同样只在「基线变化」时同步（不随草稿逐字符刷新，避免打断输入）
@@ -266,6 +407,88 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     return () => clearTimeout(t);
   }, [savedAt]);
 
+  // ── 危险开关确认浮层：关闭 / 定位 / 点外部收起 ──
+  /** 关闭浮层（= 取消），焦点还给触发它的开关 */
+  const closeConfirm = useCallback((): void => {
+    const anchor = confirm?.anchor;
+    setConfirm(null);
+    setConfirmRect(null);
+    if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+  }, [confirm]);
+
+  /**
+   * 现算落点：以「被点开关所在的那一行」为锚，优先落在行下方 6px；
+   * 下方不足 `CONFIRM_SPACE_BELOW` 则翻到行上方。太靠边的行会做左右夹取，保证不出面板。
+   */
+  const placeConfirm = useCallback((): void => {
+    const host = cfgRef.current;
+    if (!confirm || !host) return;
+    const h = host.getBoundingClientRect();
+    const anchor = confirm.anchor;
+    if (!anchor) {
+      // 无锚点（删除 skill 这类从模态发起的确认）：落在层头部下方，横向撑满内容区
+      const head = host.querySelector('.ki-chat-cfg__head');
+      const top = head ? head.getBoundingClientRect().bottom - h.top + 8 : 56;
+      setConfirmRect({ left: 12, width: Math.max(0, h.width - 24), top });
+      return;
+    }
+    if (!anchor.isConnected) return;
+    const body = host.querySelector('.ki-chat-cfg__body');
+    const row = (anchor.closest('.ki-chat-cfg__tool') as HTMLElement | null) ?? anchor;
+    const a = row.getBoundingClientRect();
+    const b = body?.getBoundingClientRect();
+    // 锚行被滚出可视区（或面板已收起）⇒ 直接收起浮层，不让它悬在别的内容上
+    if (a.width === 0 || (b && (a.bottom < b.top + 4 || a.top > b.bottom - 4))) {
+      closeConfirm();
+      return;
+    }
+    const width = Math.min(a.width, h.width - 8);
+    const left = Math.max(4, Math.min(a.left - h.left, h.width - width - 4));
+    setConfirmRect(
+      h.bottom - a.bottom >= CONFIRM_SPACE_BELOW
+        ? { left, width, top: a.bottom - h.top + 6 }
+        : { left, width, bottom: h.bottom - a.top + 6 },
+    );
+  }, [confirm, closeConfirm]);
+
+  // 首帧在 paint 前定位（不用 effect + 一次可见的重排），滚动 / 缩放跟随
+  useLayoutEffect(() => {
+    if (!confirm) return;
+    placeConfirm();
+    const onMove = (): void => placeConfirm();
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [confirm, placeConfirm]);
+
+  // 点浮层之外一律视为取消（点开关本身除外 —— 它自己的 click 会重新走一遍确认）
+  useEffect(() => {
+    if (!confirm) return;
+    const onDown = (e: MouseEvent): void => {
+      const t = e.target as Node;
+      if (confirmRef.current?.contains(t)) return;
+      if (confirm.anchor?.contains(t)) return;
+      closeConfirm();
+    };
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [confirm, closeConfirm]);
+
+  /**
+   * 打开即把焦点放到「取消」（Enter 不该误开危险工具）。
+   *
+   * ⚠️ 依赖 `placed`：首帧卡片还是 `visibility: hidden`（落点没量到），对隐藏元素
+   *    focus() 是**静默无效**的 —— 实测焦点会留在开关上，这里等落点就位后补一次。
+   */
+  const placed = confirmRect !== null;
+  useEffect(() => {
+    if (!confirm || !placed) return;
+    confirmCancelRef.current?.focus({ preventScroll: true });
+  }, [confirm, placed]);
+
   // Esc 分层退出：确认卡 → 模态（模态自带未保存确认）→ 配置层
   // ⚠️ 真机走查修正：原实现遇到 confirm 直接 return 且**没人在关卡**，
   //    导致"危险确认卡打开时 Esc 完全无效"（demo 有分层，落地时漏了）
@@ -274,14 +497,14 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
       if (e.key !== 'Escape') return;
       if (modal) return; // 模态框自己处理（它还有一层未保存确认）
       if (confirm) {
-        setConfirm(null);
+        closeConfirm();
         return;
       }
-      onClose();
+      handleClose();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [modal, confirm, onClose]);
+  }, [modal, confirm, closeConfirm, handleClose]);
 
   const groups = data?.toolGroups ?? [];
   /** 只读组默认开，危险组默认关 —— 但以配置里的实际值为准 */
@@ -303,21 +526,21 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
   const isDefaultPrompt = (content: string): boolean => data?.defaults.prompt.content === content;
 
-  /** 启用/停用（本地草稿即时生效；落盘仍走"保存"按钮 —— 与其他字段同一语义） */
+  /** 启用/停用：即时生效（B 方案 —— 不再等底部「保存」） */
   const toggleSkill = (id: string): void => {
-    setDraft((d) => (d ? { ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) } : d));
+    commit((d) => ({ ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) }));
   };
 
-  const patchSkill = (id: string, patch: Partial<PromptSkill>) => {
-    setDraft((d) => (d ? { ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, ...patch } : s)) } : d));
+  const patchSkill = (id: string, patch: Partial<PromptSkill>): void => {
+    commit((d) => ({ ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   };
 
-  const handleSave = () => {
-    if (!draft || ctxTextInvalid || trInvalid || hitsInvalid) return;
-    void save(draft).then((ok) => {
-      // 保存成功 → 通知外层重拉 `GET /api/chat/config`（面板分母 / 占比 / 预警随之立即变化）
-      if (ok) onSaved();
-    });
+  /** 落盘失败后的「重试」：把当前草稿重新排进队列（不丢用户改动，也不静默吞错） */
+  const retrySave = (): void => {
+    const latest = draftRef.current;
+    if (!latest) return;
+    queuedRef.current = latest;
+    drainRef.current();
   };
 
   const modalItem: PromptEditDraft | null = (() => {
@@ -334,13 +557,13 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   })();
 
   return (
-    <section className="ki-chat-cfg" data-open="true" role="dialog" aria-modal="true" aria-label="对话配置">
+    <section ref={cfgRef} className="ki-chat-cfg" data-open="true" role="dialog" aria-modal="true" aria-label="对话配置">
       <div className="ki-chat-cfg__savedbar" data-open={showSavedBar} />
 
       <header className="ki-chat-cfg__head">
         <span className="ki-chat-cfg__title">对话配置</span>
         <span className="ki-chat-cfg__spacer" />
-        <button type="button" className="ki-chat-iconbtn" aria-label="关闭配置" onClick={onClose}>
+        <button type="button" className="ki-chat-iconbtn" aria-label="关闭配置" onClick={handleClose}>
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
             <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
           </svg>
@@ -435,6 +658,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                   aria-invalid={ctxTextInvalid || undefined}
                   value={ctxText}
                   onChange={(e) => handleCtxInput(e.target.value)}
+                  onBlur={flushPending}
                 />
                 <span className="ki-chat-cfg__ctxunit">K</span>
                 <span className="ki-chat-cfg__ctxsp" />
@@ -505,6 +729,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                   aria-invalid={trInvalid || undefined}
                   value={toolRespText}
                   onChange={(e) => handleToolRespInput(e.target.value)}
+                  onBlur={flushPending}
                 />
                 <span className="ki-chat-cfg__ctxunit">K 字符</span>
                 <span className="ki-chat-cfg__ctxsp" />
@@ -526,6 +751,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                   aria-invalid={hitsInvalid || undefined}
                   value={hitsText}
                   onChange={(e) => handleHitsInput(e.target.value)}
+                  onBlur={flushPending}
                 />
                 <span className="ki-chat-cfg__ctxunit">条</span>
                 <span className="ki-chat-cfg__ctxsp" />
@@ -612,7 +838,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
               <span className="ki-chat-cfg__label">
                 工具与权限
               </span>
-              <p className="ki-chat-cfg__hint">保存后下一次提问生效：开启的工具将真实暴露给 AI。默认只开只读工具；写入 / 删除开启即授权 AI 执行，请谨慎。</p>
+              <p className="ki-chat-cfg__hint">开关即时生效（下一次提问即按新开关暴露工具）。默认只开只读工具；写入 / 删除开启即授权 AI 执行，请谨慎。</p>
               {toolEntries.map((g) => (
                 <div key={g.key}>
                   <p className={`ki-chat-cfg__group${g.danger ? ' ki-chat-cfg__group--danger' : ''}`}>
@@ -635,14 +861,17 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                         aria-checked={r.on}
                         aria-label={r.name}
                         className={`ki-chat-cfg__sw${g.danger ? ' ki-chat-cfg__sw--danger' : ''}`}
-                        onClick={() => {
+                        onClick={(e) => {
                           const next = !r.on;
-                          const apply = () => setDraft((d) => (d ? { ...d, tools: { ...d.tools, [r.name]: next } } : d));
+                          // 即时生效（B 方案）：确认后立刻落盘，不再等底部「保存」
+                          const apply = () => commit((d) => ({ ...d, tools: { ...d.tools, [r.name]: next } }));
                           if (next && g.danger) {
+                            // anchor = 这个开关：确认浮层贴着它那一行弹出（无遮罩，见 ConfirmState 注释）
                             setConfirm({
                               title: '开启危险工具',
                               text: `${r.name} 会改动当前 scope 的知识库内容。开启后 AI 可在对话中直接执行该操作，请谨慎。`,
                               onYes: apply,
+                              anchor: e.currentTarget,
                             });
                             return;
                           }
@@ -658,22 +887,24 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
         )}
       </div>
 
+      {/* 底栏只作状态说明（2026-11-11 用户拍板）：**没有「取消 / 保存」按钮** ——
+          改动即时落盘，关掉层就等于"改完了"。保存失败必须可见（fail-loud）+ 可重试。 */}
       <footer className="ki-chat-cfg__bar">
-        {saveError && <span className="ki-chat-cfg__err">{saveError}</span>}
-        <span className="ki-chat-cfg__spacer" />
         {/* 生效范围**分开说**（2026-10-13）：提示词/skill 随会话快照冻结，只影响新建会话；
             工具开关是即时读取的，下一次提问即生效 —— 混成一句会让"改了 skill 没反应"看起来像坏了 */}
-        <span className="ki-chat-cfg__scope">作用域：全局 · 提示词与 skill 对之后新建的会话生效，工具开关、上下文上限与工具预算保存后生效</span>
-        <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={onClose}>取消</button>
-        <button
-          type="button"
-          className="ki-chat-btn"
-          disabled={saving || !draft || ctxTextInvalid || trInvalid || hitsInvalid}
-          data-busy={saving}
-          onClick={handleSave}
-        >
-          {saving ? '保存中' : '保存'}
-        </button>
+        <span className="ki-chat-cfg__scope">作用域：全局 · 改动即时生效；提示词与 skill 对之后新建的会话生效</span>
+        <span className="ki-chat-cfg__spacer" />
+        {saveError ? (
+          <>
+            <span className="ki-chat-cfg__err">保存失败：{saveError}</span>
+            <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={retrySave}>重试</button>
+          </>
+        ) : (
+          // 打开时还没存过任何东西：说「改动即时保存」而不是「已自动保存」（后者是谎报状态）
+          <span className="ki-chat-cfg__status" data-busy={saving}>
+            {saving ? '保存中…' : savedAt != null ? '已自动保存' : '改动即时保存'}
+          </span>
+        )}
       </footer>
 
       {fieldErrors.length > 0 && (
@@ -701,8 +932,8 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
           }
           onCancel={() => setModal(null)}
           onSubmit={({ name, content, description }) => {
-            setDraft((d) => {
-              if (!d) return d;
+            // 模态里的「保存」= 该条目的提交动作：提交即落盘（层底栏不再有整体保存）
+            commit((d) => {
               if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
               if (modal.kind === 'new-skill') {
                 return {
@@ -716,7 +947,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
           }}
           onReset={() => {
             if (modal.kind === 'prompt') {
-              setDraft((d) => (d ? { ...d, prompt: { ...d.prompt, content: data!.defaults.prompt.content } } : d));
+              commit((d) => ({ ...d, prompt: { ...d.prompt, content: data!.defaults.prompt.content } }));
               setModal(null);
               return;
             }
@@ -733,29 +964,40 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
             const id = modal.id;
             setConfirm({
               title: '删除 skill',
-              text: '该 skill 将被移除，保存后不可撤销。',
-              onYes: () => setDraft((d) => (d ? { ...d, skills: d.skills.filter((s) => s.id !== id) } : d)),
+              text: '该 skill 将被移除，确认后立即生效、不可撤销。',
+              onYes: () => commit((d) => ({ ...d, skills: d.skills.filter((s) => s.id !== id) })),
             });
             setModal(null);
           }}
         />
       )}
 
+      {/* 危险开关 / 删除 skill 的二次确认：**行内浮层、无遮罩**（2026-11-11 用户拍板 A 方案）。
+          不再有 `.ki-chat-cfg__mask` —— 遮罩是被层叠上下文困住、全屏阅读器下整块看不见的元凶。
+          定位在 useLayoutEffect 里现算（贴着触发它的那一行），未量到前先藏起来避免闪一下。 */}
       {confirm && (
-        <div className="ki-chat-cfg__mask" role="presentation">
-          <div className="ki-chat-cfg__card" role="alertdialog" aria-modal="true">
-            <h4>{confirm.title}</h4>
-            <p>{confirm.text}</p>
-            <div className="ki-chat-cfg__card-acts">
-              <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={() => setConfirm(null)}>取消</button>
-              <button
-                type="button"
-                className="ki-chat-btn ki-chat-btn--danger"
-                onClick={() => { confirm.onYes(); setConfirm(null); }}
-              >
-                确认
-              </button>
-            </div>
+        <div
+          ref={confirmRef}
+          className="ki-chat-cfg__card ki-chat-cfg__confirm"
+          role="dialog"
+          aria-label={confirm.title}
+          style={confirmRect ? ({
+            left: `${confirmRect.left}px`,
+            width: `${confirmRect.width}px`,
+            ...(confirmRect.top !== undefined ? { top: `${confirmRect.top}px` } : { bottom: `${confirmRect.bottom ?? 0}px` }),
+          } as CSSProperties) : { visibility: 'hidden' }}
+        >
+          <h4>{confirm.title}</h4>
+          <p>{confirm.text}</p>
+          <div className="ki-chat-cfg__card-acts">
+            <button ref={confirmCancelRef} type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={closeConfirm}>取消</button>
+            <button
+              type="button"
+              className="ki-chat-btn ki-chat-btn--danger"
+              onClick={() => { confirm.onYes(); closeConfirm(); }}
+            >
+              确认
+            </button>
           </div>
         </div>
       )}

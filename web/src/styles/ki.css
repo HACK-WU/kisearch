@@ -4557,6 +4557,9 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
   padding: var(--ki-space-2) var(--ki-space-3);
   border-top: 1px solid var(--ki-color-border); background: var(--ki-color-bg-secondary);
 }
+/* 自动保存状态（2026-11-11 用户拍板：底栏不再有「取消 / 保存」，改动即时落盘） */
+.ki-chat-cfg__status { flex: 0 0 auto; white-space: nowrap; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-chat-cfg__status[data-busy="true"] { color: var(--ki-color-text-muted); }
 /* 保存反馈：保存中 spinner + 顶部细条（第四轮修正：补齐文档承诺的保存态，不再只有 toast） */
 .ki-chat-cfg__bar .ki-chat-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .ki-chat-cfg__bar .ki-chat-btn[data-busy="true"] { opacity: .75; cursor: default; }
@@ -4600,13 +4603,30 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__scope { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 /* ★ app 级全屏模态遮罩（第七轮补充：用户要求编辑框居中于整个页面，不再局限在 380px 面板内）
    - fixed + inset:0 覆盖整个视口；z-index 1200 高于面板常驻态与窄屏浮层（990）
-   - 危险确认卡复用本类（append 到 body）→ 两者都是页面级模态，DOM 靠后者在上
+   - **仅 `PromptConfigModal`（提示词 / skill 编辑模态）使用**：它 portal 到 body，所以 1200 有效
+   ⚠️ 危险开关的二次确认**不再用本类**（2026-11-11 用户拍板 A 方案）：那张卡就地渲染在
+     `.ki-chat-cfg`（position:absolute + z-index:20）内部，z-index 被困在层叠上下文里，
+     全屏 / 浮动阅读器（`.ki-drawer` z-index:1000）会把卡片整块盖住 —— 表现为"点开关整屏变黑、
+     确认框不弹"（`.debug/chat-cfg-danger-confirm-blank-20261111`）。它现在走 `.ki-chat-cfg__confirm`。
    ⚠️ 落地时应把这类层改为 app 级命名（如 .ki-modal），不再挂在 ki-chat-cfg 前缀下 */
 .ki-chat-cfg__mask { position: fixed; inset: 0; z-index: 1200; background: var(--ki-scrim); display: grid; place-items: center; padding: var(--ki-space-4); }
 /* hidden 必须显式声明：本类的 display:grid 会覆盖浏览器对 [hidden] 的 display:none，
    导致编辑模态框从页面加载起就一直显示空表单（用户截图抓到的 bug） */
 .ki-chat-cfg__mask[hidden] { display: none; }
 .ki-chat-cfg__card { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: var(--ki-space-4); }
+/* 危险开关 / 删除 skill 的二次确认：**行内浮层、无遮罩**（2026-11-11 用户拍板 A 方案）
+   - 落点由 PromptConfigLayer 现算（贴着触发它的那一行，下方不够高就翻到行上方），这里只管"浮起来"的观感
+   - absolute 而非 fixed：窄屏浮层 `.ki-chat-panel--overlay` 动画结束后仍留 `transform`，
+     会把 fixed 的参照系变成那块面板（坐标全体错位）；相对定位父级 `.ki-chat-cfg` 无此问题
+   - z-index 2：只在配置层内部高于列表 / 底栏，不参与 app 级层叠（不再压暗阅读器）
+   - 卡面（背景 / 边框 / 圆角 / 内边距 / 入场动画）复用 `.ki-chat-cfg__card` */
+.ki-chat-cfg__confirm {
+  position: absolute;
+  z-index: 2;
+  max-height: calc(100% - 8px);
+  overflow: auto;
+  box-shadow: 0 16px 36px -16px rgba(15, 27, 52, .30), 0 2px 8px rgba(15, 27, 52, .08);
+}
 .ki-chat-cfg__card h4 { margin: 0 0 var(--ki-space-2); font-weight: 500; font-size: var(--ki-font-size-md); }
 .ki-chat-cfg__card p { margin: 0 0 var(--ki-space-3); color: var(--ki-color-text-muted); font-size: var(--ki-font-size-sm); line-height: 1.6; }
 .ki-chat-cfg__card-acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
