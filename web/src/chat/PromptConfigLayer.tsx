@@ -929,7 +929,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
             // ★ 名称必须英文（2026-11-11 用户拍板）：与后端 `SKILL_NAME_RE` **手工同源**
             //   （服务端仍是最终闸门；这里只为省一次 400 往返，改动需两侧同步）
             !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
-              ? '名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：ki_search'
+              ? '名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：knowledge-retrieval'
               : draft && draft.skills.some((s) => s.id !== modalItem.id && s.name.toLowerCase() === name.toLowerCase())
                 ? '已有同名 skill，请换一个名字'
                 : null

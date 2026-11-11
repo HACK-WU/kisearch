@@ -50,7 +50,7 @@ it('searchHitsPerCall 配置在执行必经点生效：未传 limit 的 ki_searc
     fs.writeFileSync(path.join(chatDir, 'prompt-config.json'), JSON.stringify({
       version: 1,
       prompt: { content: '基础提示词' },
-      skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: '正文', description: '描述' }],
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '正文', description: '描述' }],
       tools: { ki_search: true },
       searchHitsPerCall: 8,
     }));

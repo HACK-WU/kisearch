@@ -163,7 +163,7 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
                 className="ki-chat-cfg__ta ki-chat-cfg__ta--name"
                 type="text"
                 maxLength={nameMaxChars}
-                placeholder={group === 'skill' ? '英文名称，例：ki_search' : '给这个条目起个名字'}
+                placeholder={group === 'skill' ? '英文名称，例：knowledge-retrieval' : '给这个条目起个名字'}
                 value={canRename ? name : item.name}
                 readOnly={!canRename}
                 aria-readonly={!canRename}
@@ -180,7 +180,7 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
               {nameEditableSkill ? (
                 nameErr
                   ? <p className="ki-chat-cfg__warn">{nameErr}</p>
-                  : <p className="ki-chat-cfg__hint">名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：ki_search</p>
+                  : <p className="ki-chat-cfg__hint">名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：knowledge-retrieval</p>
               ) : null}
             </div>
 

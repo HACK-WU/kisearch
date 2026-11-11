@@ -20,7 +20,7 @@
  *   · 用户已保存的 `prompt-config.json` **不会被默认值变更覆盖**（含旧版 skill 文案）：
  *     「恢复默认」与新建时的默认值才用内置最新文案。
  *   · **唯一的例外（2026-11-11）**：内置 skill 的**名称**由服务端常量强制（`BUILTIN_SKILL_NAMES`），
- *     读旧配置时历史中文名（`知识库检索`）会被就地迁移成 `ki_search`。原因是内置条目在界面上
+ *     读旧配置时历史名称（`知识库检索`，或首版的 `ki_search`）会被就地迁移成 `knowledge-retrieval`。原因是内置条目在界面上
  *     不可改名，若不强制用户永远改不掉；名称只影响展示与 AI 目录，不影响 `use_skill` 的调用键（id）。
  */
 
@@ -61,6 +61,10 @@ export const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
  * · 名称会进 AI 的恒注入目录（`renderSkillCatalog`），与 SKILL.md 生态的英文命名保持一致；
  * · **不允许空格**（同一裁决）：名称与 id 在目录同一行展示，空格会让两者边界含糊；
  * · 长度上限已由 `SKILL_NAME_MAX_CHARS` 承担（正则只做保守封顶）。
+ *
+ * ⚠️ **不得与 MCP 工具名重叠**（同日并罚）：目录里 `- xxx：…` 与工具列表同名时，模型会把
+ *   「工具」和「skill」当成一回事（最初取 `ki_search` 就撞了只读工具名）。内置名由
+ *   `BUILTIN_SKILL_NAMES` 定、回归由 `web/test/skill-name-english.test.mjs` 守着。
  *
  * ⚠️ 前端 `PromptConfigLayer.tsx::checkName` 手工同源于此（与 `CONTEXT_CHARS_MAX` 同一约定），改动需两侧同步。
  */
@@ -238,9 +242,12 @@ export class PromptConfigError extends Error {
  * 内置 skill 的**固定名称**（英文）—— 名称的 SSOT。
  *
  * 为什么做成表：内置条目在界面上**不可改名**（`canRename=false`），所以名称只能由服务端定；
- * 读旧配置时也靠它把历史中文名（`知识库检索`）就地迁移成英文名，**不需要单独的迁移脚本**。
+ * 读旧配置时也靠它把历史名称（`知识库检索` / 曾用名 `ki_search`）就地迁移，**不需要迁移脚本**。
+ *
+ * ⚠️ 取值**不得与 MCP 工具名重叠**：`ki_search` 既是 skill 名又是只读工具名时，AI 看目录会
+ *   把两者当成一回事（2026-11-11 首次落地即因此改名）—— 回归见 `web/test/skill-name-english.test.mjs`。
  */
-export const BUILTIN_SKILL_NAMES: Readonly<Record<string, string>> = { 'builtin-retrieval': 'ki_search' };
+export const BUILTIN_SKILL_NAMES: Readonly<Record<string, string>> = { 'builtin-retrieval': 'knowledge-retrieval' };
 
 /** 内置 skill 的固定 id（默认集合 = 可恢复默认 / 不可删除的边界） */
 export const BUILTIN_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_SKILL_NAMES);
@@ -445,7 +452,7 @@ export function normalizePromptConfig(
             || opts?.skillNameSoft === true
             || opts?.existingSkillNames?.has(name) === true;
           if (!exempt && !SKILL_NAME_RE.test(name)) {
-            issues.push({ path: `${at}.name`, message: `名称须为英文：${SKILL_NAME_RULE_HINT}（例：ki_search）` });
+            issues.push({ path: `${at}.name`, message: `名称须为英文：${SKILL_NAME_RULE_HINT}（例：knowledge-retrieval）` });
           } else if (seenNames.has(name.toLowerCase())) {
             issues.push({ path: `${at}.name`, message: `名称重复：${name}` });
           }

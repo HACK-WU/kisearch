@@ -41,10 +41,23 @@ describe('skill 名称必须英文（前后端同源）', () => {
   });
 
   it('内置 skill 名称由服务端常量强制，历史中文名不再作为默认值', () => {
-    assert.match(server, /BUILTIN_SKILL_NAMES[^=]*=\s*\{\s*'builtin-retrieval':\s*'ki_search'/, '内置名应为 ki_search');
+    assert.match(server, /BUILTIN_SKILL_NAMES[^=]*=\s*\{\s*'builtin-retrieval':\s*'knowledge-retrieval'/, '内置名应为 knowledge-retrieval');
     assert.ok(!server.includes("name: '知识库检索'"), '默认值里不得再留中文名（老配置靠迁移，不靠默认值）');
     // 强制点：name 的取值必须优先来自内置表，否则改默认值不会影响已保存配置
     assert.match(server, /const name = builtinName \?\?/, '内置名必须优先于客户端传值（与 builtin 字段同一模式）');
+  });
+
+  it('★ 内置 skill 名称不得与任何 MCP 工具名重叠（首版取名 ki_search 就撞了）', () => {
+    const builtinName = server.match(/BUILTIN_SKILL_NAMES[^=]*=\s*\{\s*'builtin-retrieval':\s*'([^']+)'/)?.[1];
+    assert.ok(builtinName, '未能从源码解析出内置名');
+    const groupsBlock = server.slice(server.indexOf('export const MCP_TOOL_GROUPS'), server.indexOf('export const MCP_TOOL_NAMES'));
+    const toolNames = [...groupsBlock.matchAll(/names:\s*\[([^\]]+)\]/g)]
+      .flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]));
+    assert.ok(toolNames.length >= 13, `工具名解析失败（得到 ${toolNames.length} 个）`);
+    assert.ok(
+      !toolNames.includes(builtinName),
+      `skill 名「${builtinName}」与 MCP 工具同名 —— 模型会把「能力」和「工具」当成一回事`,
+    );
   });
 
   it('读取路径宽松 / 保存路径放行既有名（老配置不得被拖进"回退默认"）', () => {
@@ -59,7 +72,7 @@ describe('skill 名称必须英文（前后端同源）', () => {
   });
 
   it('模态：提示英文规则 + 输入即提示 + 非法时禁用保存', () => {
-    assert.match(modal, /英文名称，例：ki_search/, 'placeholder 应直接示范英文名');
+    assert.match(modal, /英文名称，例：knowledge-retrieval/, 'placeholder 应直接示范英文名');
     assert.match(modal, /以字母开头，只能含字母、数字、下划线、连字符（不能有空格）/, '规则说明应常驻可见');
     assert.ok(modal.includes('nameEditableSkill'), '只对"名称可改的 skill"提示与拦截（提示词条目不受影响）');
     assert.match(modal, /setNameErr\(nameEditableSkill/, '输入时就应计算错误，不等保存才提示');

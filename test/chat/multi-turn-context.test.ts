@@ -194,7 +194,7 @@ describe('多轮上下文 · 上游 messages 形状', () => {
     assert.equal(sys.length, 4, `期望 目录 + 基础规则 + 硬性规则 + 会话 prompt 四条 system，实际 ${sys.length} 条`);
     assert.ok(sys[0].content.startsWith('【可用 skill】'), 'system[0] 应为 skill 目录（AI 先要知道有哪些可用）');
     assert.ok(sys[0].content.includes('builtin-retrieval'), '目录必须带 id（use_skill 的调用键）');
-    assert.ok(sys[1].content.includes('何时使用 ki_search skill'), 'system[1] 应为基础规则');
+    assert.ok(sys[1].content.includes('何时使用 knowledge-retrieval skill'), 'system[1] 应为基础规则');
     assert.ok(sys[2].content.includes('知识库中未找到'), 'system[2] 应为硬性反幻觉规则（恒注入，N17 依赖）');
     assert.equal(sys[3].content, '我的自定义系统提示', 'system[3] 应为会话级 prompt');
     assert.ok(
