@@ -4231,6 +4231,14 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
   width: 100%; border: none; outline: none; resize: vertical; background: transparent;
   color: var(--ki-color-text); font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6;
 }
+/* ★ 焦点环必须显式压 `:focus-visible`，只写上面那条 `outline: none` 不够：
+   本文件下方有一条**无作用域前缀**的全局 `:focus-visible { outline: 2px solid primary; ... }`，
+   与 `.ki-chat-edit__ta` 特异性同为 (0,1,0) 却定义更晚 ⇒ 后者胜出。表现是 `autoFocus`
+   打开编辑态时内层 textarea 长出 2px 主色描边（offset 2px + 圆角 6px），与外层
+   `.ki-chat-edit` 的 1px 主色边框叠成「发光双框」（2026-11-11 用户反馈）。
+   口径与下方 `.ki-chat-composer__ta:focus-visible` 一致：焦点指示由容器边框承担，
+   textarea 自身不再画环。 */
+.ki-chat-edit__ta:focus-visible { outline: none; }
 .ki-chat-edit__warn { font-size: var(--ki-font-size-xs); color: var(--ki-color-warning); }
 .ki-chat-edit__acts { display: flex; justify-content: flex-end; gap: var(--ki-space-2); }
 
