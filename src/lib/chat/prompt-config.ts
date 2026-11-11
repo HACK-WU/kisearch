@@ -19,6 +19,9 @@
  *     `use_skill` 按需加载。⇒ 配置改动的生效范围由「下一次提问」变为「**下一个新建会话**」。
  *   · 用户已保存的 `prompt-config.json` **不会被默认值变更覆盖**（含旧版 skill 文案）：
  *     「恢复默认」与新建时的默认值才用内置最新文案。
+ *   · **唯一的例外（2026-11-11）**：内置 skill 的**名称**由服务端常量强制（`BUILTIN_SKILL_NAMES`），
+ *     读旧配置时历史中文名（`知识库检索`）会被就地迁移成 `ki_search`。原因是内置条目在界面上
+ *     不可改名，若不强制用户永远改不掉；名称只影响展示与 AI 目录，不影响 `use_skill` 的调用键（id）。
  */
 
 import fs from 'fs';
@@ -52,6 +55,18 @@ export const SKILL_DESC_SUGGESTED_CHARS = 120;
 export const MAX_SKILLS = 20;
 /** skill id：小写字母/数字开头，允许连字符（与 scope 命名风格一致，便于后续按 id 引用） */
 export const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/**
+ * skill **名称**：必须是英文（2026-11-11 用户拍板）。
+ *
+ * · 名称会进 AI 的恒注入目录（`renderSkillCatalog`），与 SKILL.md 生态的英文命名保持一致；
+ * · **不允许空格**（同一裁决）：名称与 id 在目录同一行展示，空格会让两者边界含糊；
+ * · 长度上限已由 `SKILL_NAME_MAX_CHARS` 承担（正则只做保守封顶）。
+ *
+ * ⚠️ 前端 `PromptConfigLayer.tsx::checkName` 手工同源于此（与 `CONTEXT_CHARS_MAX` 同一约定），改动需两侧同步。
+ */
+export const SKILL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+/** 名称中不允许出现的字符集合（错误文案里给人看的说明，避免只说"不合法"） */
+export const SKILL_NAME_RULE_HINT = '以英文字母开头，只能含英文字母、数字、下划线、连字符（不允许空格）';
 
 /**
  * 上下文上限的硬上界（字符数，REQ-20261014-001）。
@@ -219,8 +234,16 @@ export class PromptConfigError extends Error {
 
 // ─── 默认值 ───────────────────────────────────────────
 
+/**
+ * 内置 skill 的**固定名称**（英文）—— 名称的 SSOT。
+ *
+ * 为什么做成表：内置条目在界面上**不可改名**（`canRename=false`），所以名称只能由服务端定；
+ * 读旧配置时也靠它把历史中文名（`知识库检索`）就地迁移成英文名，**不需要单独的迁移脚本**。
+ */
+export const BUILTIN_SKILL_NAMES: Readonly<Record<string, string>> = { 'builtin-retrieval': 'ki_search' };
+
 /** 内置 skill 的固定 id（默认集合 = 可恢复默认 / 不可删除的边界） */
-export const BUILTIN_SKILL_IDS: readonly string[] = ['builtin-retrieval'];
+export const BUILTIN_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_SKILL_NAMES);
 
 /**
  * 内置默认时间戳：刻意用**固定值**而不是 `new Date()`
@@ -235,7 +258,7 @@ export function defaultPromptConfig(): PromptConfig {
     skills: [
       {
         id: 'builtin-retrieval',
-        name: '知识库检索',
+        name: BUILTIN_SKILL_NAMES['builtin-retrieval']!,
         // 描述（目录里给 AI 判断用）与正文（按需加载）都取自同一常量，避免文案漂移。
         description: RETRIEVAL_SKILL_DESCRIPTION,
         content: RETRIEVAL_SKILL_PROMPT,
@@ -297,7 +320,8 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
   // ★ REQ-20261016-001（设计 §5 决策 7）：思考级别走**软通道** —— 非法时只忽略该字段，
   //   不把提示词 / skill / 工具开关一起拉进"整份回退默认"。
   const softNotes: string[] = [];
-  const normalized = normalizePromptConfig(parsed, issues, { effortSoft: true, softNotes });
+  // `skillNameSoft`：老配置里的中文名 skill 不得把整份配置拖进"回退默认"（见 options 注释）
+  const normalized = normalizePromptConfig(parsed, issues, { effortSoft: true, softNotes, skillNameSoft: true });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
   }
@@ -309,8 +333,9 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
 /**
  * 把外部输入归一化为合法 `PromptConfig`，问题收集进 `issues`（不抛）。
  *
- * 服务端强制的两处（不信任客户端）：
+ * 服务端强制的三处（不信任客户端）：
  *   · `builtin` 由 id 是否属于内置集合决定（客户端传什么都被覆盖）
+ *   · 内置 skill 的 `name` 由 `BUILTIN_SKILL_NAMES` 决定（同上；老配置的中文名就地迁移）
  *   · `tools` 只接受白名单内的键（未知名报错，不静默丢弃 —— 拼错的开关名会让人以为生效了）
  */
 /** `normalizePromptConfig` 的上下文（REQ-20261016-001）：决定思考级别字段的**软/硬**处理与白名单。 */
@@ -326,6 +351,20 @@ export interface NormalizePromptConfigOptions {
   existingEffort?: string;
   /** 可选档位清单（保存路径传入 = `config.yaml` 的 `llm.reasoningEfforts`；`undefined` = 运维未配置）。 */
   effortOptions?: readonly string[];
+  /**
+   * `true` = **读取路径**（`readPromptConfig`）：skill 名称**不做英文字符校验**。
+   *
+   * 与 `effortSoft` 同一动机：读取时一旦报 issue，`readPromptConfig` 会「任一字段非法 → 整份回退默认」，
+   * 老配置里的中文名 skill 会连累用户的提示词 / 工具开关一起显示成默认值（磁盘内容其实没变）。
+   */
+  skillNameSoft?: boolean;
+  /**
+   * 磁盘上既有的 skill 名称集合（保存路径传入）：**未改名的既有值放行**。
+   *
+   * 场景：升级前用户已建了中文名 skill —— 若保存时一刀切拒收，他改描述 / 开关都会被 400 卡死
+   * （整体替换语义会把那条旧名一起提交）。放行既有名、只拦「新增 / 改名」，是唯一不死锁的口径。
+   */
+  existingSkillNames?: ReadonlySet<string>;
 }
 
 export function normalizePromptConfig(
@@ -385,15 +424,33 @@ export function normalizePromptConfig(
           return;
         }
         seenIds.add(id);
-        const name = typeof it.name === 'string' ? it.name.trim() : '';
+        // ★ 内置 skill 的名称**由服务端强制**（与 `builtin` 字段同一模式，不看客户端传值）：
+        //   内置条目在界面上不可改名，名称只能由 `BUILTIN_SKILL_NAMES` 决定 —— 顺带让老配置里的
+        //   历史中文名（`知识库检索`）在**读取时**即完成迁移，无需单独的迁移脚本。
+        const builtinName = BUILTIN_SKILL_NAMES[id];
+        const name = builtinName ?? (typeof it.name === 'string' ? it.name.trim() : '');
         if (!name) {
           issues.push({ path: `${at}.name`, message: '名称不能为空' });
         } else if (name.length > SKILL_NAME_MAX_CHARS) {
           issues.push({ path: `${at}.name`, message: `名称不得超过 ${SKILL_NAME_MAX_CHARS} 字` });
-        } else if (seenNames.has(name)) {
-          issues.push({ path: `${at}.name`, message: `名称重复：${name}` });
+        } else {
+          /**
+           * 英文口径（2026-11-11 用户拍板）—— 三处豁免，各自对应一种不能炸的场景：
+           *   ① 内置名：常量自己定的，恒合法；
+           *   ② 读取路径（`skillNameSoft`）：报 issue 会导致整份回退默认，老配置会"凭空丢失"；
+           *   ③ 保存路径下与磁盘同名的既有值：老配置里的中文名不能让用户连开关都改不了。
+           * 查重按**小写**比对：目录里 `Foo` 与 `foo` 对 AI 是不可分辨的两条，放过去等于埋歧义。
+           */
+          const exempt = builtinName !== undefined
+            || opts?.skillNameSoft === true
+            || opts?.existingSkillNames?.has(name) === true;
+          if (!exempt && !SKILL_NAME_RE.test(name)) {
+            issues.push({ path: `${at}.name`, message: `名称须为英文：${SKILL_NAME_RULE_HINT}（例：ki_search）` });
+          } else if (seenNames.has(name.toLowerCase())) {
+            issues.push({ path: `${at}.name`, message: `名称重复：${name}` });
+          }
         }
-        seenNames.add(name);
+        seenNames.add(name.toLowerCase());
         // 描述：**允许缺失**（旧配置没有该字段）→ 空串；超上限即不合格（SKILL.md 规范）。
         const description = typeof it.description === 'string' ? it.description.trim() : '';
         if (description.length > SKILL_DESC_MAX_CHARS) {
@@ -550,9 +607,11 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
   const issues: PromptConfigIssue[] = [];
   // ★ REQ-20261016-001（设计 §5 决策 6/7）：保存路径**严格**，但**既有值脱离清单时放行** ——
   //   否则运维改小清单后，用户连 skill 都改不动（整体替换语义会把旧档位值一并提交）。
-  const existingEffort = readPromptConfig(config).config.reasoningEffort;
+  const existing = readPromptConfig(config).config;
   const next = normalizePromptConfig(input, issues, {
-    existingEffort,
+    existingEffort: existing.reasoningEffort,
+    // 同理（2026-11-11 名称英文口径）：升级前建的中文名 skill 是既有值，如实提交（未改名）时放行
+    existingSkillNames: new Set(existing.skills.map((s) => s.name)),
     effortOptions: config.llm?.reasoningEfforts,
   });
   if (issues.length > 0) throw new PromptConfigError(issues);

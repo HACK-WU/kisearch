@@ -122,7 +122,8 @@ describe('读写往返', () => {
     input.prompt.content = '';
     input.skills[0]!.content = '用户自己写的检索策略';
     input.skills[0]!.enabled = false;
-    input.skills.push({ id: 'custom', name: '自定义', description: '自定义 skill 的描述', content: '保留我的风格', builtin: false, enabled: true, at: input.prompt.at });
+    // 名称自 2026-11-11 起必须英文（老配置里的中文名在保存路径靠「既有值放行」，见下方专测）
+    input.skills.push({ id: 'custom', name: 'custom', description: '自定义 skill 的描述', content: '保留我的风格', builtin: false, enabled: true, at: input.prompt.at });
     const saved = savePromptConfig(cfg, input);
     const read = readPromptConfig(cfg).config;
     assert.deepEqual(read, saved);
@@ -138,8 +139,8 @@ describe('读写往返', () => {
     const input = {
       prompt: { content: '你是 kisearch 的知识库助手。' },
       skills: [
-        { id: 'builtin-retrieval', name: '知识库检索', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
-        { id: 'my-style', name: '回答风格', content: '先给结论，再给依据。', enabled: true },
+        { id: 'builtin-retrieval', name: 'ki_search', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
+        { id: 'my-style', name: 'answer-style', content: '先给结论，再给依据。', enabled: true },
       ],
       tools: { ki_search: true, ki_store: true },
     };
@@ -195,7 +196,7 @@ describe('校验（服务端强制）', () => {
   it('内置 skill 可禁用（enabled:false 合法）', () => {
     const issues: Parameters<typeof normalizePromptConfig>[1] = [];
     const out = normalizePromptConfig(
-      { skills: [{ id: 'builtin-retrieval', name: '知识库检索', content: RETRIEVAL_SKILL_PROMPT, enabled: false }] },
+      { skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: RETRIEVAL_SKILL_PROMPT, enabled: false }] },
       issues,
     );
     assert.deepEqual(issues, []);
@@ -237,6 +238,70 @@ describe('校验（服务端强制）', () => {
     assert.deepEqual(issues, []);
     assert.equal(out.skills[0]!.builtin, true);
   });
+
+  // ─── 名称必须英文（2026-11-11 用户拍板）───────────────────────
+  it('内置 skill 名称由服务端强制：老配置里的中文名读回即 ki_search', () => {
+    const onDisk = { skills: [{ id: 'builtin-retrieval', name: '知识库检索', content: 'x', enabled: true }] };
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify(onDisk), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.issue, null, '老中文名不得把整份配置拖进"回退默认"');
+    assert.equal(r.config.skills[0]!.name, 'ki_search');
+    assert.equal(r.config.skills[0]!.content, 'x', '迁移只动名称，正文/开关一律不碰');
+  });
+
+  it('新增 / 改名时名称非英文 → 报错（空格、中文、数字开头都被拒）', () => {
+    for (const bad of ['知识库检索', 'my skill', '1st-skill', '风格']) {
+      const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+      normalizePromptConfig({ skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: '' }, { id: 'x', name: bad, content: '' }] }, issues);
+      assert.ok(
+        issues.some((i) => i.path === 'skills[1].name' && i.message.includes('名称须为英文')),
+        `「${bad}」应被拒，实际 issues=${JSON.stringify(issues)}`,
+      );
+    }
+    const okIssues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig({ skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: '' }, { id: 'x', name: 'my_skill-2', content: '' }] }, okIssues);
+    assert.deepEqual(okIssues, [], '字母开头 + 字母/数字/下划线/连字符 应合法');
+  });
+
+  it('老配置里的中文名自定义 skill：未改名时保存放行（防保存死锁），改名成中文仍拒', () => {
+    const onDisk = {
+      skills: [
+        { id: 'builtin-retrieval', name: '知识库检索', content: 'x', enabled: true },
+        { id: 'legacy', name: '老风格', content: '先给结论', enabled: true },
+      ],
+    };
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify(onDisk), 'utf-8');
+    // ① 原样提交（只改描述）→ 放行
+    const saved = savePromptConfig(cfg, {
+      skills: [
+        { id: 'builtin-retrieval', name: 'ki_search', content: 'x', enabled: true },
+        { id: 'legacy', name: '老风格', description: '改了描述', content: '先给结论', enabled: true },
+      ],
+    });
+    assert.equal(saved.skills[1]!.description, '改了描述');
+    // ② 改名成另一个中文名 → 拒（既有值只放行"没改名"的那种）
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig(
+      { skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: '' }, { id: 'legacy', name: '新名字', content: '' }] },
+      issues,
+    );
+    assert.ok(issues.some((i) => i.path === 'skills[1].name' && i.message.includes('名称须为英文')));
+  });
+
+  it('名称查重大小写不敏感（Foo 与 foo 对 AI 是同一个名字）', () => {
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig(
+      {
+        skills: [
+          { id: 'builtin-retrieval', name: 'ki_search', content: '' },
+          { id: 'a', name: 'Foo', content: '' },
+          { id: 'b', name: 'foo', content: '' },
+        ],
+      },
+      issues,
+    );
+    assert.ok(issues.some((i) => i.path === 'skills[2].name' && i.message.includes('名称重复')));
+  });
 });
 
 describe('损坏配置的回退', () => {
@@ -275,10 +340,10 @@ describe('注入顺序（恒注入块 · 2026-10-13 改口径）', () => {
       {
         prompt: { content: '基础提示词' },
         skills: [
-          { id: 'builtin-retrieval', name: '知识库检索', description: '检索知识库', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
-          { id: 'empty-one', name: '空的', content: '   ', enabled: true },
-          { id: 'style', name: '风格', description: '按我的风格回答', content: '先给结论', enabled: true },
-          { id: 'off', name: '停用的', description: '不该出现', content: '不该出现', enabled: false },
+          { id: 'builtin-retrieval', name: 'ki_search', description: '检索知识库', content: RETRIEVAL_SKILL_PROMPT, enabled: true },
+          { id: 'empty-one', name: 'empty', content: '   ', enabled: true },
+          { id: 'style', name: 'my-style', description: '按我的风格回答', content: '先给结论', enabled: true },
+          { id: 'off', name: 'off-skill', description: '不该出现', content: '不该出现', enabled: false },
         ],
       },
       issues,
@@ -287,10 +352,10 @@ describe('注入顺序（恒注入块 · 2026-10-13 改口径）', () => {
     const blocks = promptSnapshotBlocks(cfg2);
     assert.equal(blocks.length, 3);
     const catalog = blocks[0]!;
-    assert.ok(catalog.includes('知识库检索（builtin-retrieval）：检索知识库'));
-    assert.ok(catalog.includes('风格（style）：按我的风格回答'));
+    assert.ok(catalog.includes('ki_search（builtin-retrieval）：检索知识库'));
+    assert.ok(catalog.includes('my-style（style）：按我的风格回答'));
     assert.ok(catalog.includes('（未填写描述）'), '空描述的条目仍进目录（否则 AI 永远不知道它存在）');
-    assert.ok(!catalog.includes('停用的'), '停用的 skill 不进目录 = 调不到');
+    assert.ok(!catalog.includes('off-skill'), '停用的 skill 不进目录 = 调不到');
     assert.equal(blocks[1], '基础提示词');
     assert.equal(blocks[2], HARD_RULES_BLOCK);
   });
@@ -338,7 +403,7 @@ describe('目录与快照（恒注入的内容与形状）', () => {
   it('目录带 id（调用键）+ 名称 + 描述，并写明"未加载的正文不可见"', () => {
     const catalog = renderSkillCatalog(defaultPromptConfig().skills)!;
     assert.ok(catalog.includes('builtin-retrieval'), 'id 是 use_skill 的调用键，必须出现');
-    assert.ok(catalog.includes('知识库检索'));
+    assert.ok(catalog.includes('ki_search'), '名称必须是英文（2026-11-11 口径）');
     assert.ok(catalog.includes(RETRIEVAL_SKILL_DESCRIPTION));
     assert.ok(catalog.includes('use_skill'));
     assert.ok(catalog.includes('未加载的 skill 正文不在本次上下文中'), '必须防止模型凭名称编造规则');
@@ -372,7 +437,7 @@ describe('目录与快照（恒注入的内容与形状）', () => {
     assert.deepEqual(enabledSkillIds(cfg2), []);
     assert.equal(findEnabledSkill(cfg2, 'builtin-retrieval'), null);
     cfg2.skills[0]!.enabled = true;
-    assert.equal(findEnabledSkill(cfg2, 'builtin-retrieval')?.name, '知识库检索');
+    assert.equal(findEnabledSkill(cfg2, 'builtin-retrieval')?.name, 'ki_search');
     assert.equal(findEnabledSkill(cfg2, 'nope'), null);
   });
 });

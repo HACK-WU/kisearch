@@ -138,7 +138,7 @@ describe('PUT /api/chat/prompt-config', () => {
     const next = {
       prompt: { content: '你是 kisearch 助手。' },
       skills: [
-        { id: 'builtin-retrieval', name: '知识库检索', content: '内置默认内容（被改过）', enabled: true },
+        { id: 'builtin-retrieval', name: 'ki_search', content: '内置默认内容（被改过）', enabled: true },
         { id: 'deploy-search', name: '部署检索', content: '先 ki_query_group 看结构。', enabled: true },
       ],
       tools: { ki_search: true, ki_store: true },
@@ -162,7 +162,7 @@ describe('PUT /api/chat/prompt-config', () => {
 
   it('内置与否由服务端决定：客户端传 builtin:false 也被纠正为 true', async () => {
     const put = await api('PUT', '/api/chat/prompt-config', {
-      skills: [{ id: 'builtin-retrieval', name: '知识库检索', content: 'x', builtin: false, enabled: true }],
+      skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: 'x', builtin: false, enabled: true }],
     });
     assert.equal(put.status, 200);
     const saved = put.json?.config as { skills: Array<{ id: string; builtin: boolean }> };

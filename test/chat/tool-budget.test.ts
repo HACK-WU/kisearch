@@ -21,7 +21,7 @@ import { normalizePromptConfig, type PromptConfigIssue } from '../../src/lib/cha
 /** 最小合法配置骨架（含内置 skill，避免触发「内置不可删除」校验） */
 const baseConfig = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
   prompt: { content: '基础提示词' },
-  skills: [{ id: 'builtin-retrieval', name: '知识库检索', content: '正文', description: '描述' }],
+  skills: [{ id: 'builtin-retrieval', name: 'ki_search', content: '正文', description: '描述' }],
   ...extra,
 });
 

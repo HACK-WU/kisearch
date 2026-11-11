@@ -57,6 +57,8 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
   const [content, setContent] = useState(item.content);
   const [view, setView] = useState<'preview' | 'edit'>(mode === 'new' ? 'edit' : 'preview');
   const [err, setErr] = useState('');
+  /** 名称的**实时**错误（输入即提示，不等保存）：查询走调用方的 `checkName`，本组件不复制规则 */
+  const [nameErr, setNameErr] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const nameRef = useRef<HTMLInputElement>(null);
@@ -73,6 +75,8 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
     content !== item.content ||
     description !== (item.description ?? '') ||
     (canRename && name !== item.name);
+  /** 名称可编辑的 skill（新增 / 自定义）：只有这两种情况需要按「必须英文」的口径提示与拦截 */
+  const nameEditableSkill = canRename && group === 'skill';
 
   useEffect(() => {
     if (view !== 'edit') return;
@@ -115,6 +119,7 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
       const dup = props.checkName(nextName);
       if (dup) {
         setErr(dup);
+        setNameErr(dup);
         nameRef.current?.focus();
         return;
       }
@@ -158,12 +163,25 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
                 className="ki-chat-cfg__ta ki-chat-cfg__ta--name"
                 type="text"
                 maxLength={nameMaxChars}
-                placeholder="给这个 skill 起个名字"
+                placeholder={group === 'skill' ? '英文名称，例：ki_search' : '给这个条目起个名字'}
                 value={canRename ? name : item.name}
                 readOnly={!canRename}
                 aria-readonly={!canRename}
-                onChange={(e) => { setName(e.target.value); setErr(''); }}
+                aria-invalid={nameErr !== ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setName(v);
+                  setErr('');
+                  // 输入即提示（名称规则由调用方 `checkName` 提供，避免两处规则漂移）
+                  setNameErr(nameEditableSkill && v.trim() ? (props.checkName?.(v.trim()) ?? '') : '');
+                }}
               />
+              {/* 名称必须英文（2026-11-11 用户拍板）：规则常驻可见，犯错时同一位置变红色告警 */}
+              {nameEditableSkill ? (
+                nameErr
+                  ? <p className="ki-chat-cfg__warn">{nameErr}</p>
+                  : <p className="ki-chat-cfg__hint">名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：ki_search</p>
+              ) : null}
             </div>
 
             {/* 描述（skill 专用，2026-10-13 新增）：它是 AI 判断"要不要加载这个 skill"的**唯一依据**，
@@ -254,7 +272,15 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
             )}
             <span className="ki-chat-cfg__spacer" />
             <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={requestClose}>取消</button>
-            <button type="button" className="ki-chat-btn" onClick={submit} disabled={over}>保存</button>
+            <button
+              type="button"
+              className="ki-chat-btn"
+              onClick={submit}
+              // 名称非法 / 为空时禁掉保存（原因已在名称字段下方写明，不是无提示的灰色按钮）
+              disabled={over || (nameEditableSkill && (name.trim() === '' || nameErr !== ''))}
+            >
+              保存
+            </button>
           </div>
         </div>
       </div>

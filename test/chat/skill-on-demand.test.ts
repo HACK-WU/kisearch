@@ -41,7 +41,7 @@ import type { ChatEvent, ConversationFile, PromptInjectionSnapshot } from '../..
 
 const SKILL = {
   id: 'builtin-retrieval',
-  name: '知识库检索',
+  name: 'ki_search',
   description: '用知识库片段回答事实问题。触发："查知识库"。',
   content: RETRIEVAL_SKILL_PROMPT,
 };
@@ -55,7 +55,7 @@ describe('resolveUseSkill（纯逻辑：四类结果都不中断生成）', () =
     assert.equal(out.event.error, undefined);
     assert.equal(out.event.alreadyLoaded, undefined);
     assert.equal(out.event.chars, RETRIEVAL_SKILL_PROMPT.length);
-    assert.equal(out.event.name, '知识库检索');
+    assert.equal(out.event.name, 'ki_search');
     assert.equal(out.toolContent, renderSkillLoadedBlock(SKILL), '两处必须逐字节一致（换一处就会行为漂移）');
     assert.ok(out.toolContent.includes('## 指令'));
   });

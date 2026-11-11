@@ -150,7 +150,7 @@ describe('端到端：skill 正文按需进出上下文', () => {
     const toolMsg = captured[1]!.messages.find((m) => m.role === 'tool');
     assert.ok(toolMsg, '第二轮请求必须带 tool 返回（模型就是从这条消息看到正文的）');
     assert.ok(toolMsg!.content.includes('## 指令'), '加载后的正文必须真的进入上下文');
-    assert.equal(toolMsg!.content, renderSkillLoadedBlock({ id: 'builtin-retrieval', name: '知识库检索', content: RETRIEVAL_SKILL_PROMPT }));
+    assert.equal(toolMsg!.content, renderSkillLoadedBlock({ id: 'builtin-retrieval', name: 'ki_search', content: RETRIEVAL_SKILL_PROMPT }));
   });
 
   it('★ 未知 id → 事件带 error，模型看到可用清单并可改道（不中断生成）', async () => {
@@ -171,7 +171,7 @@ describe('端到端：skill 正文按需进出上下文', () => {
     await runTurn(conv, 'Q1');
 
     const first = captured[0]!;
-    const sysSkill = first.messages.find((m) => m.role === 'system' && m.content.includes('【skill：知识库检索'));
+    const sysSkill = first.messages.find((m) => m.role === 'system' && m.content.includes('【skill：ki_search'));
     assert.ok(sysSkill, '已加载的 skill 必须以 system 块重放（无状态上游不会自动重现）');
     assert.ok(sysSkill!.content.includes('## 指令'));
   });
@@ -205,7 +205,7 @@ describe('端到端：skill 正文按需进出上下文', () => {
       const conv = convOf([{ id: 'm1', role: 'user', content: 'Q1' }], { loadedSkillIds: ['builtin-retrieval'] });
       await runTurn(conv, 'Q1');
       assert.ok(
-        !allContent(captured[0]!).includes('【skill：知识库检索'),
+        !allContent(captured[0]!).includes('【skill：ki_search'),
         '停用后不得再重放正文（否则"目录里没有、调不到，但正文还在生效"）',
       );
     } finally {
