@@ -1727,11 +1727,14 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                   type="button"
                   className="ki-chat-refbar__chip"
                   onClick={() => handleRemoveRef(i)}
-                  title={`移除引用：${[groupPathSegment(r.group), r.doc].filter(Boolean).join(' / ')}\n${r.text.slice(0, 60)}${r.text.length > 60 ? '…' : ''}`}
+                  // 悬停预览改由卡片承担（2026-11-11 用户要求与「来源」卡同款），
+                  // 原生 title 会与卡片叠成两套提示，故移除；可访问名称留在 aria-label。
+                  aria-label={`移除引用 ${i + 1}：${r.doc}`}
                 >
                   <span className="ki-chat-refbar__no">{i + 1}</span>
                   <span className="ki-chat-refbar__doc">{r.doc}</span>
                   <span className="ki-chat-refbar__x" aria-hidden="true">✕</span>
+                  <RefPreview item={r} hint="点击移除该引用" />
                 </button>
               ))}
               {/* hover 说明卡：与「来源文档」chip 的预览卡同款（用户口径：原生 title 不够精致）。
@@ -2271,12 +2274,16 @@ function MessageBubble({
           {message.refs && message.refs.length > 0 ? (
             <ul className="ki-chat-refs" aria-label={`本轮引用了 ${message.refs.length} 段内容`}>
               {message.refs.map((r, i) => (
-                <li key={`${r.group}/${r.doc}/${i}`} className="ki-chat-refs__item" title={r.text}>
+                // `tabIndex=0`：这一段原文片段只存在于悬停浮层里，不给焦点位的话键盘 / 读屏用户
+                // 拿不到 —— 与「来源」chip（button，可 focus）保持同一可达性，故可聚焦。
+                <li key={`${r.group}/${r.doc}/${i}`} className="ki-chat-refs__item" tabIndex={0}>
                   <span className="ki-chat-refs__no">{i + 1}</span>
                   <span className="ki-chat-refs__doc">{r.doc}</span>
                   {groupPathSegment(r.group) ? (
                     <span className="ki-chat-refs__group">{groupPathSegment(r.group)}</span>
                   ) : null}
+                  {/* 已发送的引用是只读回显：卡片不带底部动作提示（没有可点的动作） */}
+                  <RefPreview item={r} />
                 </li>
               ))}
             </ul>
@@ -2679,6 +2686,42 @@ function resultsStat(n: TimelineNode): string {
   if (n.mode !== undefined && n.hits !== undefined) parts.push(`${n.hits} 命中`);
   if (n.durationMs !== undefined) parts.push(`${n.durationMs}ms`);
   return parts.join(' · ');
+}
+
+/**
+ * 引用 chip 的悬停预览卡（2026-11-11 用户要求：与「来源」chip 的 `.ki-chat-src__pop` 同款）。
+ *
+ * · 结构照抄来源卡：文档名 → 路径 → 片段原文 → 底部动作提示
+ *   （动作行只有草稿态有 —— 已发送的引用是只读回显，没有可点的动作）；
+ * · `aria-hidden`：纯装饰，chip 的可访问名称由自身文本 / `aria-label` 承担（同 `SourcesList` 口径）；
+ * · 定位锚在**整行**（`.ki-chat-refs` 与 composer），沿用来源卡的既有结论 ——
+ *   chip 换行到右侧时，以 chip 为基准的 300px 浮层会溢出面板被 overflow 裁掉。
+ */
+function RefPreview({ item, hint }: { item: ChatRef; hint?: string }): JSX.Element {
+  const path = groupPathSegment(item.group);
+  const snippet = clipRefSnippet(item.text);
+  return (
+    <span className="ki-chat-ref-pop" role="tooltip" aria-hidden="true">
+      <b>{item.doc}</b>
+      {path ? <em>{path}</em> : null}
+      {snippet ? <q>{snippet}</q> : null}
+      {hint ? <u>{hint}</u> : null}
+    </span>
+  );
+}
+
+/**
+ * 预览卡里片段原文的最大字符数。
+ *
+ * 取 200 是为了与「来源」卡的 `snippet`（后端同为 ≤200 字）同宽同高；`ChatRef.text`
+ * 上限是 2000 字符（`CHAT_REF_TEXT_MAX`），整段塞进浮层会把卡片撑成一面墙。
+ */
+const REF_POP_SNIPPET_MAX = 200;
+
+/** 片段原文按 `REF_POP_SNIPPET_MAX` 截断（超长补省略号，不静默截断） */
+function clipRefSnippet(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > REF_POP_SNIPPET_MAX ? `${trimmed.slice(0, REF_POP_SNIPPET_MAX)}…` : trimmed;
 }
 
 /** 扁平 JSON 着色渲染（demo ki-chat-tool__code 的 .k/.s/.n 同款） */

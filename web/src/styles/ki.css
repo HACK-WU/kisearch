@@ -5263,6 +5263,49 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-refs__doc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-chat-refs__group { opacity: .6; font-size: 11px; }
 
+/* ── 引用 chip 的悬停预览卡（2026-11-11）──
+   用户口径：「鼠标放到引用上的显示效果，和鼠标放在来源上的一样，样式保持一致」
+   → 视觉取值逐项对齐 `.ki-chat-src__pop`（描边 / 圆角 / 阴影 / 内距 / 字号 / 入场位移）。
+   定位基准有两处，都与来源卡同一思路（**不锚 chip** —— chip 换行到右侧时，
+   以它为基准的 300px 浮层会溢出面板被 overflow 裁掉）：
+   · 已发送的引用（只读 li）→ 锚 `.ki-chat-refs` 整行，故本段给容器补 positioning context；
+   · 草稿态引用（button）    → 锚 `.ki-chat-composer`（已是 positioning context），
+     与 `.ki-chat-refbar__pop`（「+ 加入引用」说明卡）**同一坐标**，位置不随 chip 左右漂移。 */
+.ki-chat-refs { position: relative; }
+.ki-chat-ref-pop {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 12;
+  /* ★ 宽度**不能**用 `100%`（来源卡那种写法）：用户气泡 `width:auto` 收缩到内容宽，
+     `.ki-chat-refs` 跟着只有 142px（实测那条消息 5 个 chip）⇒ 卡片被压成同宽、正文挤成 6 行。
+     这里固定上限 300px（与来源卡同宽），只按视口兜底。 */
+  width: min(300px, calc(100vw - 32px)); padding: var(--ki-space-2) var(--ki-space-3);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2);
+  text-align: left; white-space: normal;
+  opacity: 0; pointer-events: none; transform: translateY(4px);
+  transition: opacity var(--ki-motion-fast) ease, transform var(--ki-motion-fast) ease;
+}
+/* 草稿态与来源卡同坐标（`.ki-chat-refbar__pop` 用的也是 left: space-3） */
+.ki-chat-refbar .ki-chat-ref-pop { left: var(--ki-space-3); }
+/* 已发送的引用在**右对齐的用户气泡**里：向左展开才不会把 300px 卡片顶出视口右侧
+   （实测 chip 左边缘 1231 + 300 > 1440）。草稿态在面板左侧，不受影响。 */
+.ki-chat-refs .ki-chat-ref-pop { left: auto; right: 0; }
+/* hover 与键盘聚焦都要触发 —— 已发送的引用是只读 `<li>`，靠 `tabIndex=0` 拿到焦点位
+   （片段原文只在浮层里，只做 hover 等于对键盘用户隐藏）。 */
+.ki-chat-refs__item:hover .ki-chat-ref-pop,
+.ki-chat-refs__item:focus-visible .ki-chat-ref-pop,
+.ki-chat-refbar__chip:hover .ki-chat-ref-pop,
+.ki-chat-refbar__chip:focus-visible .ki-chat-ref-pop {
+  opacity: 1; transform: none;
+}
+/* 以下四条的内容样式与 `.ki-chat-src__pop` 的 b/em/q/u 逐条对应，改一处要同步另一处 */
+.ki-chat-ref-pop b { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text); margin-bottom: 3px; word-break: break-all; }
+.ki-chat-ref-pop em {
+  display: block; font-style: normal; font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); margin-bottom: var(--ki-space-2);
+}
+.ki-chat-ref-pop q { display: block; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); line-height: 1.55; }
+.ki-chat-ref-pop u { display: block; margin-top: var(--ki-space-2); text-decoration: none; font-size: var(--ki-font-size-xs); color: var(--ki-color-primary); }
+
 /* ── 引用选择器（ReaderLinkComposer mode="ref"）在 link 壳内的专属块 ──
    壳（遮罩/头部/双栏/预览/底部确认/说明行）全部复用 `.ki-reader-link-dialog*`；
    此处只保留 ref 特有的两个块：左栏顶部搜索条 + 搜索结果列表。
@@ -7071,6 +7114,8 @@ select.ki-chat-cfg__ta--select {
   .ki-chat-panel .ki-chat-msg__role::after { display: none; }
   .ki-chat-panel .ki-chat-empty__t { font-size: 18px; }
   .ki-chat-panel .ki-chat-src__pop { display: none !important; }
+  /* 触屏/窄屏没有 hover，浮层只会在误触时闪一下把内容顶乱 —— 与来源卡同口径隐藏 */
+  .ki-chat-panel .ki-chat-ref-pop { display: none !important; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ki-chat-panel .ki-chat-ctx__status--live .ki-chat-ctx__dot { animation: none; }
