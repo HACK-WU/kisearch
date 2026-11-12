@@ -94,6 +94,13 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [saveLocked, setSaveLocked] = useState(false);
   const [retryReady, setRetryReady] = useState(false);
+  /**
+   * wiki 回写目标与 KB 正文不一致时的待确认项（2026-11-12 REQ：支持强制覆盖）。
+   *
+   * 只在 `sourceErrorCode === 'CONTENT_DIVERGED'` 时落地 —— 定位/权限类错误没有强制入口，
+   * 沿用原来的直接报错。用户确认后带 `force:true` 重跑同一条保存，不丢已选目标。
+   */
+  const [forceAsk, setForceAsk] = useState<{ target: KiLinkTarget; file?: string } | null>(null);
   const [selectedDoc, setSelectedDoc] = useState<DocItem>(
     initialDoc ? { group: initialDoc.group, name: initialDoc.doc } : { group, name: relation },
   );
@@ -264,10 +271,11 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     onClose();
   };
 
-  const commitTarget = async (target: KiLinkTarget): Promise<void> => {
+  const commitTarget = async (target: KiLinkTarget, force = false): Promise<void> => {
     if (busy || saveLocked) return;
     setBusy(true);
     setMessage('');
+    setForceAsk(null);
     const token = JSON.stringify(target);
     let request: PendingSave | null = null;
     try {
@@ -276,7 +284,14 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
         request = pendingSaveRef.current;
       } else {
         const loaded = await getEditableDocument(scope, group, relation);
-        if (loaded.sourceError) throw new Error(`源文件校验失败：${loaded.sourceError}`);
+        if (loaded.sourceError && !force) {
+          // 内容分叉 → 交给用户确认（不吞掉已选目标）；配置类错误强制也没用，照旧直接报错
+          if (loaded.sourceErrorCode === 'CONTENT_DIVERGED') {
+            setForceAsk({ target, file: loaded.sourceFile });
+            return;
+          }
+          throw new Error(loaded.sourceError);
+        }
         const content = insertReaderLink(loaded.content, linkSelection.text, target);
         request = {
           target,
@@ -287,6 +302,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
             expectedRevision: loaded.revision,
             expectedSourceRevision: loaded.sourceRevision,
             vectorize: loaded.indexMode === 'dense',
+            ...(force ? { force: true } : {}),
           },
         };
       }
@@ -305,7 +321,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
         setRetryReady(false);
       }
       if (request && details?.kb === 'written') {
-        linkPartialSaved(request.content, `KB 正文已更新，但源文件状态为${details.source ?? '未知'}；请处理保存提示`);
+        linkPartialSaved(request.content, `KB 正文已更新，但 wiki 回写目标状态为${details.source ?? '未知'}；请处理保存提示`);
         if (details.retryable === false) setSaveLocked(true);
       }
       setMessage(`保存失败：${failure.message}${details?.retryable && details.editId ? '；可重试当前保存' : ''}`);
@@ -323,6 +339,14 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     if (pendingSaveRef.current) void commitTarget(pendingSaveRef.current.target);
   };
 
+  /** 「以 KB 覆盖 wiki 回写目标」二次确认：破坏性动作，这里用原生 confirm 交代清楚路径与不可撤销。 */
+  const confirmForce = (): void => {
+    const ask = forceAsk;
+    if (!ask || busy) return;
+    if (!window.confirm(`将用 KB 正文覆盖 wiki 回写目标：\n${ask.file ?? relation}\n\n目标文档中与 KB 不一致的内容会被丢弃，无法撤销。确定继续吗？`)) return;
+    void commitTarget(ask.target, true);
+  };
+
   return createPortal(<>
     {!pickerOpen && <section ref={panelRef} className="ki-reader-link-panel" style={panelStyle} aria-label="为选中文字添加跳转">
       <div className="ki-reader-link-panel__head"><strong>为选中文字添加跳转</strong><button type="button" onClick={onClose} aria-label="关闭">×</button></div>
@@ -333,6 +357,10 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
       <div className="ki-reader-link-panel__or">或</div>
       <button className="ki-btn ki-btn--secondary" type="button" onClick={() => { setPickerOpen(true); setMessage(''); }} disabled={busy || retryReady || saveLocked}>选择知识库文档或段落</button>
       {message && <p className="ki-reader-link__error" role="status">{message}</p>}
+      {forceAsk && <div className="ki-reader-link__force" role="status">
+        <span>wiki 回写目标文档与 KB 正文不一致</span>
+        <button type="button" className="ki-btn ki-btn--danger" onClick={confirmForce} disabled={busy}>覆盖回写目标并保存</button>
+      </div>}
     </section>}
     {pickerOpen && <div className="ki-reader-link-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) (isRef ? onClose() : setPickerOpen(false)); }}>
       <section className="ki-reader-link-dialog" role="dialog" aria-modal="true" aria-label={isRef ? '选择要加入提问的文档内容' : '选择跳转位置'}>
@@ -451,7 +479,11 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
             </footer>
           </div>
         </div>
-        <footer className="ki-reader-link-dialog__foot"><span>{message || (isRef ? '划选的段落文本会原样加入提问上下文；重复加入会被去重，标签上的 × 可移除。' : '标题、段落、列表项、表格单元格都能作为落点；重复出现的文字不可选，以免跳错。')}</span>{!isRef && retryReady ? <button type="button" className="ki-btn ki-btn--primary" onClick={retrySave} disabled={busy}>{busy ? '保存中…' : '重试保存'}</button> : <span>Esc 关闭</span>}</footer>
+        <footer className="ki-reader-link-dialog__foot"><span>{message || (isRef ? '划选的段落文本会原样加入提问上下文；重复加入会被去重，标签上的 × 可移除。' : '标题、段落、列表项、表格单元格都能作为落点；重复出现的文字不可选，以免跳错。')}</span>{!isRef && forceAsk
+          ? <button type="button" className="ki-btn ki-btn--danger" onClick={confirmForce} disabled={busy}>覆盖回写目标并保存</button>
+          : !isRef && retryReady
+            ? <button type="button" className="ki-btn ki-btn--primary" onClick={retrySave} disabled={busy}>{busy ? '保存中…' : '重试保存'}</button>
+            : <span>Esc 关闭</span>}</footer>
       </section>
     </div>}
   </>, document.body);

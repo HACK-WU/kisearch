@@ -2025,6 +2025,15 @@ a:hover { text-decoration: underline; }
 .ki-reader-link-panel__or { display: flex; align-items: center; gap: 10px; color: var(--ki-color-text-subtle); font-size: 12px; }
 .ki-reader-link-panel__or::before, .ki-reader-link-panel__or::after { content: ''; flex: 1; height: 1px; background: var(--ki-color-border); }
 .ki-reader-link__error { margin: 0; color: var(--ki-color-danger-ink); font-size: 12px; line-height: 1.45; }
+/* 源文件分叉的强制覆盖入口（2026-11-12）：与错误文案同区，破坏性动作 ⇒ danger 按钮 */
+.ki-reader-link__force {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin: 8px 0 0; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-danger) 28%, transparent);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft); color: var(--ki-color-danger-ink);
+  font-size: 12px; line-height: 1.45;
+}
 .ki-reader-link-overlay {
   position: fixed; inset: 0; z-index: 1150; display: grid; place-items: center;
   padding: 16px; background: var(--ki-scrim); backdrop-filter: blur(2px);
@@ -2160,7 +2169,33 @@ a:hover { text-decoration: underline; }
 .ki-editor__textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 18px; background: transparent; color: inherit; font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .ki-editor__preview { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
 .ki-editor__notice, .ki-editor__error { padding: 8px 18px; background: color-mix(in srgb, var(--ki-color-primary) 12%, var(--ki-color-surface)); font-size: 13px; }
-.ki-editor__error { color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+/* 错误条改为左右布局：右侧挂「覆盖源文件」入口（2026-11-12）。
+   无按钮时单 span 照常左对齐；窄屏 `flex-wrap` 让按钮折到第二行并靠左。 */
+.ki-editor__error { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--ki-color-danger-ink); background: var(--ki-color-danger-soft); }
+.ki-editor__force { flex: none; }
+/* 错误区主体：文案 / 目标路径 / 数据源提示纵向排；路径与提示都用小字，别把提示条顶成三行正文 */
+.ki-editor__error-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ki-editor__error-path {
+  font-family: var(--ki-font-mono); font-size: 12px; line-height: 1.5;
+  word-break: break-all; opacity: .85;
+}
+.ki-editor__error-hint { font-size: 12px; line-height: 1.5; word-break: break-word; }
+/* 强制保存二次确认弹窗：层叠压过编辑器 overlay（1200）；内容为破坏性动作 ⇒ 确认按钮用 danger。 */
+.ki-editor-confirm {
+  position: fixed; inset: 0; z-index: 1300;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: var(--ki-scrim);
+}
+.ki-editor-confirm__panel { width: min(560px, calc(100vw - 32px)); }
+.ki-editor-confirm__label { margin: 0 0 6px; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
+.ki-editor-confirm__path {
+  margin: 0 0 16px; padding: 8px 10px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary); color: var(--ki-color-text);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  line-height: 1.6; word-break: break-all;
+}
+.ki-editor-confirm__warn { margin: 0; color: var(--ki-color-danger-ink); font-size: var(--ki-font-size-sm); line-height: 1.6; }
 @media (max-width: 800px) { .ki-editor-overlay { padding: 0; } .ki-editor { height: 100%; border-radius: 0; } .ki-editor__foot { flex-wrap: wrap; align-items: flex-start; } .ki-editor__status { flex: 1 1 100%; } .ki-editor__actions { flex: 1 1 100%; } .ki-editor__vector-control { flex: 1 1 0; }
   /* 行内说明折到第二行：`flex-basis: 100%` 独占整行，缩进用 padding 而非 margin
      （全局 border-box ⇒ padding 计入宽度，加 margin 会让「100% + 54px」横向溢出）。 */

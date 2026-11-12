@@ -126,6 +126,12 @@ export interface EditableDocument {
   sourceConfigured: boolean;
   sourceRevision?: string;
   sourceError?: string;
+  /** 源文件校验错误的分类：只有 CONTENT_DIVERGED 允许「以 KB 覆盖源文件」 */
+  sourceErrorCode?: 'CONTENT_DIVERGED' | 'SOURCE_MISMATCH' | 'SOURCE_UNAVAILABLE' | 'SOURCE_DISABLED';
+  /** 分叉时回传源文件绝对路径，供强制保存的确认弹窗展示 */
+  sourceFile?: string;
+  /** 该 scope 登记的数据源（仅分叉时回传）；前端只作为「以源为准」的提示，不可点 */
+  dataSource?: { type: 'git' | 'directory'; target: string };
   warning?: string;
   indexMode: 'fts' | 'dense';
 }
@@ -135,6 +141,8 @@ export interface SaveDocumentResponse {
   revision: string;
   sourceConfigured: boolean;
   sourceWritten: boolean;
+  /** 本次走的是「以 KB 覆盖源文件」的强制路径（旧 daemon 不返回，按普通保存处理） */
+  forced?: boolean;
   fullTextUpdated: boolean;
   vectorStored: boolean;
   indexedAs: 'fts' | 'dense' | 'unchanged';
@@ -396,6 +404,8 @@ export async function saveEditableDocument(args: {
   expectedSourceRevision?: string;
   vectorize?: boolean;
   editId?: string;
+  /** 强制以 KB 覆盖源文件（跳过源文件侧校验；KB 侧乐观锁照常生效） */
+  force?: boolean;
 }): Promise<SaveDocumentResponse> {
   return req<SaveDocumentResponse>('/api/doc/edit', { method: 'POST', body: JSON.stringify(args) });
 }

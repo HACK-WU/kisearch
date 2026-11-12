@@ -1541,6 +1541,8 @@ export async function handleApiRequest(
               expectedSourceRevision: typeof body.expectedSourceRevision === 'string' ? body.expectedSourceRevision : undefined,
               vectorize: body.vectorize === true,
               editId: typeof body.editId === 'string' ? body.editId : undefined,
+              // 强制以 KB 覆盖源文件：只放宽源文件侧校验，KB 乐观锁与索引链路不变
+              force: body.force === true,
             });
             docListCache.delete(scope);
             sendJson(res, 200, result);
