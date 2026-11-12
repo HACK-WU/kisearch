@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@plantuml/core": "^1.2026.10",
     "@tanstack/react-query": "^5.100.10",
     "highlight.js": "^11.12.0",
     "marked": "^18.0.9",
