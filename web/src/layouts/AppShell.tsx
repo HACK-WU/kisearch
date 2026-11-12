@@ -462,6 +462,7 @@ export function AppShell(): JSX.Element {
   /**
    * 全局 Ctrl+F / Cmd+F 判定链（REQ-20261014-002 §2.1）：
    *
+   * ⓿ 文档编辑器打开（`.ki-editor-overlay`）→ **不拦截**，交给浏览器原生查找（编辑器是 textarea）；
    * ① 文档查看器可见（内联 / 全屏 / 抽屉任一形态）→ **文档内查找**；
    * ② 无查看器但有应用内搜索框（`data-ki-search-input`）→ 聚焦它（浏览页 / 检索页的全库与语义搜索）；
    * ③ 两者都无 → 不拦截，保留浏览器原生查找（跨节点命中的兜底路径）。
@@ -474,6 +475,15 @@ export function AppShell(): JSX.Element {
     const handler = (e: KeyboardEvent): void => {
       const isFind = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F');
       if (!isFind) return;
+      /**
+       * ⓿ 文档编辑器打开 → **不拦截**，让浏览器原生查找接手（2026-11-12 用户报障修复）。
+       *
+       * 编辑器主体是 `<textarea>`，Chrome / Safari / Firefox 的原生查找都能直接在其中
+       * 定位（这层内容本身就在 DOM 里被渲染）。若让 ①/② 先命中：编辑器是从阅读抽屉里
+       * 打开的，`.ki-drawer` 仍在 ⇒ 查找栏会展开在**被编辑器盖住**的抽屉里，用户看到的
+       * 就是「按 Ctrl+F 没反应」。
+       */
+      if (document.querySelector('.ki-editor-overlay')) return;
       // ① 文档查看器：查找栏已展开则直接聚焦；未展开则请查看器自行展开（组件内部状态不外露）
       if (document.querySelector('.ki-drawer')) {
         e.preventDefault();
