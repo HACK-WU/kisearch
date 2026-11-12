@@ -147,12 +147,18 @@ export function vectorAvailabilityHint(availability: VectorAvailability): string
  *   三行、把 footer 顶高，观感很差。完整原因在顶栏徽标点开后的健康明细里已有，不在两处重复；
  *   本行只负责一句话说清"这次保存写哪层索引"。
  * ★ 返回的是一句短语而非整段：调用方按行内元素渲染（`<span>`），不换行成段落。
+ * ★ `indexMode` 只影响 `available` 分支：fts 文档上开关初始是**灭的**，写「默认关闭」会被
+ *   读成"你把它关了"，故按当前状态陈述（2026-11-12 用户定稿）。其余三态一律讲降级后果，
+ *   与文档自身索引模式无关，故不参与分支。
  */
-export function editorVectorizeHint(availability: VectorAvailability): string {
+export function editorVectorizeHint(availability: VectorAvailability, indexMode?: 'fts' | 'dense'): string {
   switch (availability.status) {
     case 'available':
-      // 括号保留：它跟在标题「保存时向量化」后面，是补充说明而非独立句子
-      return '（默认关闭；关闭时普通编辑写入 FTS）';
+      // 括号保留：它跟在标题「保存时向量化」后面，是补充说明而非独立句子。
+      // 2026-11-12（B 口径）：默认值改为**跟随文档当前索引模式**（dense 开 / fts 关），
+      // 故文案不再说「默认关闭」——那会让 fts-only 文档被隐式升级成 dense 时毫无提示。
+      if (indexMode === 'fts') return '（当前为全文索引；保存保持现状）';
+      return '（默认跟随文档索引；关闭时写 FTS）';
     case 'unavailable':
       return '向量服务不可用，本次只写全文索引（FTS）';
     case 'checking':

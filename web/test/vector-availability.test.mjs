@@ -4,18 +4,21 @@
  * 背景：该能力来自 windows 提交 4e9d624，2026-10-29 合并 66c3c19（windows ← master）时
  * 随 hooks.ts / 三页面被「以 master 为准」整取而丢失；本次以纯函数形式接回，此处锁住不变量。
  *
- * 锁住五条不变量：
+ * 锁住六条不变量：
  *   1) 四态判定顺序：unavailable（scope 降级 / 向量探测项 fail）→ unknown（请求失败 / ok:false）
  *      → available（探测项齐且全 pass **且** scopeList.vectorAvailable === true）→ checking；
  *      "已确诊不可用"不得被另一次请求失败盖成"未知"（两者给用户的动作不同）；
  *   2) 探测项不全（后端未跑完）时保守判 unknown，不误放行为 available；
  *   3) `summarizeHealth` 的 level / label 判定**逐字未变**（新增 vectorFailures 字段不得影响它们）；
  *   4) `vectorOnlyFailureLabel` 只在"全部 fail 项都是向量探测项"时给降级文案；
- *   5) `vectorBadgeLabel` 不对 checking / unreachable / slow 降级（服务本身的问题更该被看到）。
+ *   5) `vectorBadgeLabel` 不对 checking / unreachable / slow 降级（服务本身的问题更该被看到）；
+ *   6) 编辑器「保存时向量化」默认值 = 跟随文档索引（2026-11-12 B 口径）：派生写法、点击取反方式、
+ *      向量不可用降级三条用源码守卫锁住；开关说明按文档当前索引模式分两种说法（见文件末尾 describe）。
  *
  * 运行：cd web && npm run test
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -245,7 +248,7 @@ describe('展示文案', () => {
  * 编辑文档「保存时向量化」开关的**行内**说明（2026-11-02）。
  *
  * 锁住三条不变量：
- *   1) 只有 `available` 允许说"默认关闭"这层常规说明；其余三态**必须**同时讲清后果
+ *   1) 只有 `available` 允许说"默认跟随文档索引"这层常规说明；其余三态**必须**同时讲清后果
  *      （"本次只写全文索引（FTS）"）—— 只灰化开关不说后果，用户会以为保存后仍是 dense；
  *   2) **不拼 `availability.reason`**：这句话挂在开关右边同一行，拼上后端原因
  *      （如「密钥无效（HTTP_401）：请更新 embedding.apiKey…后重启 ki mcp」）会拖成三行、
@@ -254,9 +257,16 @@ describe('展示文案', () => {
  *   3) 文案必须短：行内单句，超过一定长度必然折行（窄屏由样式兜底折到第二行）。
  */
 describe('editorVectorizeHint（编辑器开关说明）', () => {
-  it('available：常规说明（括号形式，跟在标题后面）', () => {
-    const text = editorVectorizeHint({ status: 'available' });
-    assert.equal(text, '（默认关闭；关闭时普通编辑写入 FTS）');
+  it('available + dense 文档：常规说明（括号形式，跟在标题后面）', () => {
+    // 2026-11-12（B 口径）：默认值改为跟随文档当前索引模式，文案不再说"默认关闭"。
+    // 不传 indexMode（加载中）走这条兜底，与 dense 同句。
+    assert.equal(editorVectorizeHint({ status: 'available' }), '（默认跟随文档索引；关闭时写 FTS）');
+    assert.equal(editorVectorizeHint({ status: 'available' }, 'dense'), '（默认跟随文档索引；关闭时写 FTS）');
+  });
+
+  it('available + fts 文档：按当前状态陈述，不说"默认关闭"', () => {
+    // fts 文档上开关初始是灭的，说"默认关闭"会被读成"你把它关了"（2026-11-12 用户定稿）
+    assert.equal(editorVectorizeHint({ status: 'available' }, 'fts'), '（当前为全文索引；保存保持现状）');
   });
 
   it('unavailable：一句说明，不带后端原因', () => {
@@ -297,5 +307,44 @@ describe('editorVectorizeHint（编辑器开关说明）', () => {
       const text = editorVectorizeHint({ status });
       assert.ok([...text].length <= 24, `${status} 文案过长（${[...text].length}）：${text}`);
     }
+  });
+});
+
+/**
+ * 「保存时向量化」默认值的口径（2026-11-12 用户定稿 B）。
+ *
+ * 为什么用源码守卫而不是渲染测试：默认值是**派生**逻辑（`loaded` 异步到达后才成立），
+ * 组件里没有可独立调用的纯函数，跑渲染又要拖起整棵依赖。这三条恰好都是「一行代码就能退回去」
+ * 的形态，锁住源码写法最省事。
+ */
+describe('文档编辑器「保存时向量化」默认值 = 跟随文档索引（B 口径）', () => {
+  const src = readFileSync(path.join(webRoot, 'src/components/DocumentEditor.tsx'), 'utf8');
+
+  it('未手动切换时跟随 loaded.indexMode，不得写死 useState(true)', () => {
+    assert.match(
+      src,
+      /const vectorizeChoice = vectorizeTouched \? vectorize : loaded\?\.indexMode === 'dense'/,
+      '未 touched 时必须读 loaded.indexMode —— 写死 true 会把 fts-only 文档隐式升级成 dense',
+    );
+    assert.doesNotMatch(
+      src,
+      /const \[vectorize, setVectorize\] = useState\(true\)/,
+      'vectorize 初值不得为 true（加载是异步的，初值拿不到 indexMode）',
+    );
+  });
+
+  it('点击按当前显示值取反，不得用 prev => !prev', () => {
+    assert.match(src, /setVectorize\(!effectiveVectorize\)/, '应按显示值取反');
+    // 断言「不得有任何基于 state 的取反」而不是只挡 `prev => !prev`：
+    // 改个形参名（`v => !v`）就能绕过单点匹配，那正是这条守卫要防的退化写法。
+    assert.doesNotMatch(
+      src,
+      /setVectorize\(\s*\(?\s*\w+\s*\)?\s*=>/,
+      '未 touched 时 state 恒为 false，而显示值可能已派生为 true ⇒ 第一下点击会「看着亮却没关掉」',
+    );
+  });
+
+  it('向量不可用时仍强制降级为 FTS（与 2026-11-02 的口径一致）', () => {
+    assert.match(src, /const effectiveVectorize = vectorizeChoice && vectorAvailable/);
   });
 });
