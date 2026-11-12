@@ -145,7 +145,7 @@ describe('多语言代码块（VitePress ::: code-group）', () => {
     ));
 
     assert.equal(countOf(html, /data-ki-code-group/g), 0);
-    assert.match(html, /<h2>后面的标题<\/h2>/);
+    assert.match(html, /<h2 id="后面的标题">后面的标题<\/h2>/);
     assert.match(html, /<p>后续段落<\/p>/);
     assert.match(html, /class="language-python"/);
   });

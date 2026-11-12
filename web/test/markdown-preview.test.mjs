@@ -43,8 +43,8 @@ describe('MarkdownPreview safe interactive Markdown', () => {
       '# 第一章\n\n## 第二节\n\n```md\n# 代码中的文本\n```',
     );
 
-    assert.match(html, /<h1>第一章<\/h1>/);
-    assert.match(html, /<h2>第二节<\/h2>/);
+    assert.match(html, /<h1 id="第一章">第一章<\/h1>/);
+    assert.match(html, /<h2 id="第二节">第二节<\/h2>/);
     assert.equal((html.match(/<h[1-6][^>]*>/g) ?? []).length, 2);
     assert.match(html, /# 代码中的文本/);
   });

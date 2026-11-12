@@ -548,6 +548,35 @@ function codeGroupExtension(preferredLang = ''): TokenizerAndRendererExtension {
 }
 
 /**
+ * 标题 id 的 slug（对齐 GitHub）：去标签 / 去实体、转小写、只留字母数字与 `-` `_`、空格转 `-`。
+ *
+ * 为什么按 GitHub 口径：文档（尤其 AI 生成的 wiki）里的目录锚点就是照这个规则写的，
+ * `## 附录：命令速查与示例` → `#附录命令速查与示例`。中文标点（`、` `：`）一律去掉。
+ */
+export function headingSlug(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, '')
+    .replace(/&[a-z][a-z0-9]*;|&#x?[0-9a-f]+;/gi, ' ')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M}\-_\s]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-');
+}
+
+/**
+ * 锚点匹配用的归一键：只保留字母数字（连空格、连字符、标点全去掉）。
+ *
+ * 为什么需要兜底：作者常把标题原文（含 `、` `：`）直接写进锚点 —— `#一、执行摘要` 与标题
+ * `一、执行摘要` 的 GitHub slug（`一执行摘要`）并不相等，只按 id 精确匹配会漏。
+ */
+export function normalizeAnchorKey(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/**
  * 构造渲染器：image/link 做 scheme 白名单 + src 重写；html 仅白名单放行 `<img>`，其余原生 HTML 丢弃。
  *
  * `highlight: false` 用于**流式渲染中尚未闭合的围栏**：那段代码每个 chunk 都会变，
@@ -558,6 +587,21 @@ function buildRenderer(base?: AssetBase, options?: { highlight?: boolean }) {
   const renderer = new Renderer();
   const inner = (text: string, language?: string): string =>
     options?.highlight === false ? escapeHtml(text) : codeInnerHtml(text, language);
+  // 同一篇文档内重名标题的 id 去重序号（`简介` / `简介-1`）；每次 parse 都新建 renderer，天然按文档计。
+  const headingIds = new Map<string, number>();
+  /**
+   * 标题一律带 id —— 正文里手写/生成的「目录」是 `[条目](#锚点)`，没有 id 就点不动
+   * （marked v5 起移除 headerIds，v18 默认只输出 `<h2>文本</h2>`；实测见
+   * `.debug/md-heading-anchor-no-jump-20261112/`）。
+   */
+  renderer.heading = function ({ tokens, depth, text }) {
+    const inner = this.parser?.parseInline(tokens) ?? escapeHtml(text ?? '');
+    const base = headingSlug(inner) || 'section';
+    const seen = headingIds.get(base) ?? 0;
+    headingIds.set(base, seen + 1);
+    const id = seen === 0 ? base : `${base}-${seen}`;
+    return `<h${depth} id="${escapeAttr(id)}">${inner}</h${depth}>\n`;
+  };
   renderer.code = ({ text, lang }) => {
     // 空内容块（``` 立即闭合、或只有空白字符）不产出容器：否则只会渲染出"灰底空框 + 一个复制按钮"
     // （真机走查 2026-10-09 实测：整块 195px 高、除按钮外零内容像素，点复制得到空串）。
@@ -1023,6 +1067,58 @@ async function copyText(text: string): Promise<void> {
   if (!copied) throw new Error('浏览器未能复制文本');
 }
 
+/** 锚点跳转后标题距容器顶部的留白（与阅读器左栏大纲的 20 一致） */
+const ANCHOR_SCROLL_OFFSET = 20;
+
+/**
+ * 在**本块正文内**解析 `#anchor` 的目标元素：
+ *   1. 精确 id（`<a id>` 或本组件生成的 heading id）；
+ *   2. 归一化兜底：把正文所有标题的文字去标点后与锚点比较（`#一、执行摘要` → `一执行摘要`）。
+ * 只在 root 内找而不查全文档：同一页可能有多篇 markdown（对话流里每条消息一个），
+ * 跨块命中会把用户滚到别的消息里。
+ */
+export function resolveAnchorTarget(root: HTMLElement, rawAnchor: string): HTMLElement | null {
+  let anchor = rawAnchor;
+  try {
+    anchor = decodeURIComponent(rawAnchor);
+  } catch {
+    // 非法百分号编码：按原文匹配
+  }
+  if (!anchor) return null;
+  // 按 id 属性逐个比对，不用 `[id="…"]` 选择器：锚点是外部文本，含换行/引号时选择器会抛
+  // SyntaxError（实测 `[id="a\nb"]` 直接抛，点击变成「控制台报错 + 不跳」）。
+  const byId = Array.from(root.querySelectorAll<HTMLElement>('[id]')).find((el) => el.id === anchor);
+  if (byId) return byId;
+  const key = normalizeAnchorKey(anchor);
+  if (!key) return null;
+  const headings = Array.from(root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'));
+  return headings.find((heading) => normalizeAnchorKey(heading.textContent ?? '') === key) ?? null;
+}
+
+/** 把目标滚到最近可滚动祖先的顶部（阅读器 `.ki-drawer__body`；没有可滚动祖先时退回 scrollIntoView） */
+export function scrollToAnchorTarget(root: HTMLElement, target: HTMLElement): void {
+  // 折叠的 `<details>` 里目标没有布局盒（rect 全 0），直接算会往上跳一小段；先展开外层再滚
+  // （与阅读器深链接定位同口径，见 ModuleDrawer 的 targetAnchor effect）。
+  let details = target.closest('details');
+  while (details) {
+    details.open = true;
+    details = details.parentElement?.closest('details') ?? null;
+  }
+  let scroller: HTMLElement | null = root.parentElement;
+  while (scroller) {
+    const style = window.getComputedStyle(scroller);
+    const scrollable = /(auto|scroll)/.test(style.overflowY);
+    if (scrollable && scroller.scrollHeight > scroller.clientHeight + 4) break;
+    scroller = scroller.parentElement;
+  }
+  if (!scroller) {
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return;
+  }
+  const top = scroller.scrollTop + target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - ANCHOR_SCROLL_OFFSET;
+  scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+}
+
 /** Markdown 预览组件（dangerouslySetInnerHTML 渲染 + mermaid 图表挂载 + 附件占位块） */
 export interface MarkdownPreviewProps {
   text: string;
@@ -1064,6 +1160,30 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
     root.addEventListener('click', handleClick);
     return () => root.removeEventListener('click', handleClick);
   }, [onLocalLink]);
+
+  // 正文内的页内锚点（`[一、执行摘要](#一、执行摘要)`）：浏览器原生 fragment 只在 id 精确命中时生效，
+  // 而作者的锚点常带标点、与 GitHub slug 对不上 ⇒ 这里自己解析并滚动最近的可滚动祖先
+  // （阅读器里是 `.ki-drawer__body`，不是 window；直接 scrollIntoView 会被外层容器吃掉）。
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const handleClick = (event: MouseEvent): void => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest('a[href]') as HTMLAnchorElement | null;
+      if (!link || !root.contains(link)) return;
+      const href = link.getAttribute('href') ?? '';
+      if (!href.startsWith('#') || href.length < 2) return;
+      const element = resolveAnchorTarget(root, href.slice(1));
+      // 解析不到就交回浏览器默认行为（它同样不会滚动，但保持原有语义，例如外链带 hash）
+      if (!element) return;
+      event.preventDefault();
+      scrollToAnchorTarget(root, element);
+    };
+    root.addEventListener('click', handleClick);
+    return () => root.removeEventListener('click', handleClick);
+  }, [html]);
 
   useEffect(() => {
     const root = rootRef.current;
