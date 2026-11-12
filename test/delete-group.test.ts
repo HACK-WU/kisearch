@@ -116,7 +116,9 @@ describe('group-delete：plan / execute', () => {
     // 内容向量 1 条 + 组路径向量 2 条（wiki / wiki/docs）——预览与执行同口径（N-01）
     assert.equal(plan.willDelete.vectors, 3);
     assert.ok(plan.willDelete.groups.includes('wiki/docs'));
-    assert.equal(plan.willKeep.wikiDir, path.join(sourceDir, 'wiki'));
+    // 2026-11-12：wiki 根只认 wikiSync.sourceDir。本 scope 只登记了导入源（source 块），
+    // 预览因此显示「没有 wiki 目录会被清理」——不再把用户导入源目录当删除目标。
+    assert.equal(plan.willKeep.wikiDir, null);
 
     assert.equal(fs.existsSync(path.join(getKbDir(s), 'wiki')), true);
     assert.equal(fs.existsSync(path.join(getKbDir(s), 'relations-cache.json')), true);

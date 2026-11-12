@@ -206,41 +206,39 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       // sourcePath 是导入时的真实相对路径（可能平铺在 sourceDir 根下），优先用它定位；
       // 仅历史数据无 sourcePath 时才回退到 <sourceDir>/<group>/<relation>.md 约定。
       //
-      // ★ 只有根目录确实来自**该次导入的 source 块**时才敢用 sourcePath：根目录退化为
-      //   wikiSync.sourceDir 时（单文件导入的 scope 属这一类），sourcePath 相对的是导入源
-      //   那棵树，套到 wiki 根上会命中同名的 wiki 文件并硬删（无回收站）。这种场景只认
-      //   命名约定 <wiki>/<group>/<relation>.md —— 那正是 writeBackToWiki 写出的镜像文件。
-      const sourcePathFile = sourceDir && root?.from === 'source' && rel?.sourcePath
+      // 删除目标**恒为命名约定路径** `<wiki>/<group>/<relation>.md`（writeBackToWiki 的镜像位置）：
+      // 2026-11-12 起 source 块退出写回定位，sourcePath 相对的是「导入时的源树」，
+      // 直接拿来拼 wiki 根会命中同名的别的文件（曾有手动 wiki 文档被误删的风险）。
+      //
+      // sourcePath 只用于**归属校验**：它与约定路径必须 realpath 相同；不一致、
+      // 或 sourcePath 文件不存在而约定文件在（归属存疑）→ 一律拒绝删除。
+      // 原则：硬删无回收站，宁可删不掉，也不误删同名文件。
+      const sourcePathFile = sourceDir && rel?.sourcePath
         ? path.resolve(sourceDir, rel.sourcePath)
         : null;
-      const fallbackFile = findWikiFile(scope, resolvedGroup, relation);
-      const expectedExists = !!sourcePathFile && fs.existsSync(sourcePathFile);
-      const wikiFile = expectedExists ? sourcePathFile : fallbackFile;
+      const wikiFile = findWikiFile(scope, resolvedGroup, relation);
       if (wikiDeleteDisabled) {
         result.wikiSkipReason = 'wiki-delete-disabled';
       } else if (!sourceDir) {
         result.wikiSkipReason = 'not-configured';
-      } else if (sourcePathFile && !expectedExists && fallbackFile && fs.existsSync(fallbackFile)) {
-        // sourcePath 声明的文件不存在，但按命名约定存在另一份：视为归属不符，拒绝删除
-        result.wikiSkipReason = 'source-mismatch';
-        result.reason = `${result.reason || ''} sourcePath 文件不存在但命名约定文件存在，拒绝删除: ${fallbackFile}`.trim();
       } else if (!wikiFile || !fs.existsSync(wikiFile)) {
         result.wikiSkipReason = 'file-not-found';
       } else {
-        const expected = sourcePathFile;
         let mismatched = false;
-        if (expected) {
+        if (sourcePathFile) {
+          let srcReal: string | null = null;
+          try { srcReal = fs.realpathSync(sourcePathFile); } catch { srcReal = null; }
           try {
-            mismatched = fs.realpathSync(expected) !== fs.realpathSync(wikiFile);
+            mismatched = srcReal === null || srcReal !== fs.realpathSync(wikiFile);
           } catch {
             mismatched = true;
           }
         }
         if (mismatched) {
           result.wikiSkipReason = 'source-mismatch';
-          result.reason = `${result.reason || ''} 源文件与 sourcePath 不符，拒绝删除: ${wikiFile}`.trim();
+          result.reason = `${result.reason || ''} sourcePath 与命名约定路径不是同一个文件，拒绝删除: ${wikiFile}`.trim();
         } else {
-          result.wikiMatch = expected ? 'sourcePath' : 'legacy-name';
+          result.wikiMatch = sourcePathFile ? 'sourcePath' : 'legacy-name';
           const outcome = unlinkWithinSourceDir(sourceDir, wikiFile);
           if (outcome.status === 'deleted') {
             result.wikiRemoved = true;

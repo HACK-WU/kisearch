@@ -1,22 +1,23 @@
 /**
  * wiki-sync.ts — sync_relation 写回外部 Wiki 文件
  *
- * Wiki 目录发现优先级（见 {@link resolveWikiRootDir}）：
- *   1. group-index.json 的 source 块（source.dir）——**须为目录**；
- *      单文件导入时该字段是文件路径，不能当目录用（否则 ENOTDIR），跳过
- *   2. config.json 中 scope 级 wikiSync（wikiSync.sourceDir）
- *   3. 都没有 → 跳过
+ * Wiki 目录发现（见 {@link resolveWikiRootDir}）：
+ *   **只认** config.json 中 scope 级 `wikiSync.sourceDir`；未配置（或 enabled=false）→ 不写回。
+ *
+ * ★ `group-index.json` 的 `source` 块**不再参与**写回定位（2026-11-12 用户裁定）：
+ *   它是「导入源目录」，上传方式导入时指向 `/root/.ki/import-uploads/<uuid>` 的临时副本。
+ *   此前它优先级更高，导致编辑保存 / 写回 / 删除全部落在副本上，用户在自己仓库里看不到
+ *   任何变化，而 config 里显式配的 wikiSync.sourceDir 被静默忽略。
  *
  * 写回路径计算（rootName 概念已移除，group 即完整相对路径）：
- *   source 块: {source.dir}/{group}/{relation}.md
- *   config兜底: {wikiSync.sourceDir}/{group}/{relation}.md
+ *   {wikiSync.sourceDir}/{group}/{relation}.md
  */
 
 import fs from 'fs';
 import path from 'path';
-import { getSource, getRelationsCachePath, getLocalKbDir, getKbDir } from './scope.js';
+import { getRelationsCachePath, getLocalKbDir, getKbDir } from './scope.js';
 import { readAllGroupCaches, hasShardedLayout, getRelationsManifestPath } from './group-cache.js';
-import { loadConfig, getScopeWikiSync, resolveImportExtensions } from './config.js';
+import { loadConfig, getScopeWikiSync } from './config.js';
 import { generateMarkdown } from './markdown-gen.js';
 import { groupToRelDir, isSafeGroupPath } from './import-path.js';
 
@@ -39,77 +40,39 @@ export function isUnsafeRelationName(relation: string): boolean {
   return /[\/\\]/.test(relation) || relation.includes('..');
 }
 
-/**
- * `source` 块能否当**目录**用；不可用时返回原因。
- *
- * 单文件导入（`ki import <file>.md`）把 `source.dir` 记成**该文件的路径**
- * （import.ts 的 `source = { dir: sourceDir }`），直接当目录拼
- * `<dir>/<group>/<relation>.md` 必然 ENOTDIR（2026-10-27 线上报错）。
- *
- * 判定：
- *   - 路径存在 → 必须是目录；
- *   - 路径不存在 → 扩展名命中 scope 导入白名单时仍按「文件」处理
- *     （否则源文件被移走后，写回会在文件原位建出一个同名目录，根目录依旧错）；
- *   - 其余情况维持原有「写回时按需重建」行为。
- */
-function rejectSourceDirAsWikiRoot(dir: string, importExtensions: string[]): string | null {
-  let stat: fs.Stats | null = null;
-  try { stat = fs.statSync(dir); } catch { stat = null; }
-  if (stat) {
-    return stat.isDirectory() ? null : `source 块指向的是文件而不是目录：${dir}`;
-  }
-  const ext = path.extname(dir).toLowerCase();
-  if (ext && importExtensions.some((item) => item.toLowerCase() === ext)) {
-    return `source 块指向单文件导入的源文件（已不存在）：${dir}`;
-  }
-  return null;
-}
-
 export interface WikiRootResult {
   /** 可用的 wiki 文档根目录（绝对路径）；null = 不可用 */
   dir: string | null;
-  /** 根目录来源 */
+  /** 根目录来源（`source` 自 2026-11-12 起不再可能返回，成员保留供旧调用方兼容） */
   from: 'source' | 'wiki-sync' | null;
-  /** `source` 块被判为不可用时的原因（供 fail-loud 文案与诊断使用） */
+  /** 保留字段：`source` 块不再参与定位，恒为 undefined */
   sourceRejected?: string;
 }
 
 /**
- * 解析 wiki **文档根目录**：`source` 块（须为目录）优先 → `wikiSync.sourceDir` 兜底。
+ * 解析 wiki **文档根目录**：**只认** `wikiSync.sourceDir`。
  *
- * 与 {@link resolveWikiSyncTarget} 的分工：后者只认配置，供 import / group create 用
- * （导入源可能是单文件，其 source 块不能当目录）；本函数供「定位写回 / 删除的 wiki
- * 文档根」用，会先验证 `source` 块确实是目录，再决定是否让它优先。
+ * ★ 2026-11-12 用户裁定：`group-index.json` 的 `source` 块是**导入源目录**，上传方式导入时
+ *   指向 `/root/.ki/import-uploads/<uuid>` 的临时副本；把它当写回目标会让「编辑保存 /
+ *   sync_relation 写回 / 删除文档」全部作用在副本上，用户在 config 里显式配的
+ *   `wikiSync.sourceDir` 被静默忽略 —— 界面显示保存成功、自己仓库里却没有任何变化。
+ *
+ * 未配置（或 `enabled: false`）→ `dir: null`，调用方按「不写回、不删文件」处理。
  */
 export function resolveWikiRootDir(scope: string): WikiRootResult {
   const config = loadConfig();
-
-  // 优先级 1：group-index.json 的 source 块（须可当目录用）
-  const source = getSource(scope);
-  let sourceRejected: string | undefined;
-  if (source?.dir) {
-    const sourceDir = path.resolve(source.dir);
-    const rejected = rejectSourceDirAsWikiRoot(sourceDir, resolveImportExtensions(config, scope));
-    if (!rejected) return { dir: sourceDir, from: 'source' };
-    sourceRejected = rejected;
-  }
-
-  // 优先级 2：config.json 的 wikiSync
   // 开关口径与 writeBackToWiki / resolveWikiSyncTarget 统一：`enabled` 缺省视为 true，
-  // 只有显式 false 才算关闭（此前这里要求 enabled 真值，与写入门禁 `=== false` 不一致）。
+  // 只有显式 false 才算关闭。
   const wikiSync = getScopeWikiSync(config, scope);
   if (wikiSync?.enabled !== false && wikiSync?.sourceDir) {
-    return { dir: path.resolve(wikiSync.sourceDir), from: 'wiki-sync', sourceRejected };
+    return { dir: path.resolve(wikiSync.sourceDir), from: 'wiki-sync' };
   }
-
-  return { dir: null, from: null, sourceRejected };
+  return { dir: null, from: null };
 }
 
-/** 无可用目录时的 fail-loud 文案（含 source 块被拒原因） */
-function noWikiRootReason(root: WikiRootResult): string {
-  return root.sourceRejected
-    ? `无可用 wiki 写回目录：${root.sourceRejected}，且未配置 wikiSync.sourceDir`
-    : '无可用 wiki 写回目录（source 块和 wikiSync 均未配置）';
+/** 无可用目录时的 fail-loud 文案 */
+function noWikiRootReason(_root: WikiRootResult): string {
+  return '无可用 wiki 写回目录：未配置 wikiSync.sourceDir（或 wikiSync.enabled=false）';
 }
 
 /**

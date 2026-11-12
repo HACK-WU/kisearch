@@ -103,18 +103,20 @@ describe('A. writeBackToWiki enabled 门禁', () => {
     assert.equal(fs.existsSync(path.join(wikiDir, 'docs', 'gate-test.md')), false);
   });
 
-  it('wikiSync 未配置（null）→ 维持原行为，可写回', () => {
+  it('wikiSync 未配置（null）→ 拒绝写回（2026-11-12 起只认 wikiSync.sourceDir）', () => {
+    // source 块仍在（上一条用例设的），但新口径下它不再参与写回定位
     setWikiSync(null);
     const r = writeBackToWiki(scope, 'docs', 'default-on', '内容');
-    assert.equal(r.synced, true);
-    assert.equal(fs.existsSync(path.join(wikiDir, 'docs', 'default-on.md')), true);
+    assert.equal(r.synced, false);
+    assert.match(String(r.reason), /无可用 wiki 写回目录/);
+    assert.equal(fs.existsSync(path.join(wikiDir, 'docs', 'default-on.md')), false);
   });
 });
 
 describe('B. backfillWiki 历史补齐', () => {
   it('cache + localKB 全量写回 wiki（含多级 group、跳过非法 relation）', () => {
     seedKb();
-    setWikiSync(null); // 走 source.dir 优先级
+    setWikiSync({ enabled: true, sourceDir: wikiDir }); // 2026-11-12：写回只认 wikiSync.sourceDir
     const r = backfillWiki(scope);
     assert.equal(r.ok, true);
     assert.equal(r.stats.total, 3);
@@ -145,7 +147,7 @@ describe('B. backfillWiki 历史补齐', () => {
     assert.notEqual(fs.readFileSync(target, 'utf-8'), before); // 时间戳已刷新
   });
 
-  it('走 wikiSync.sourceDir fallback（清掉 source 块后）', () => {
+  it('只认 wikiSync.sourceDir（清掉 source 块后表现不变）', () => {
     clearSource();
     setWikiSync({ enabled: true, sourceDir: wikiDir });
     const r = backfillWiki(scope);
@@ -180,8 +182,8 @@ describe('D. 写回时自动补齐（目标目录不存在/为空触发）', () 
 
   it('wiki 目录为空 → writeBackToWiki 自动补齐历史 + 写入本条', () => {
     resetWikiDir(true); // 空目录
-    setWikiSync(null);
-    setSource(scope, { dir: wikiDir, chunkSize: 1000, chunkOverlap: 150 });
+    // 2026-11-12：写回只认 wikiSync.sourceDir（source 块不再参与定位）
+    setWikiSync({ enabled: true, sourceDir: wikiDir });
     const r = writeBackToWiki(scope, 'newgrp', 'fresh-entry', '新内容');
     assert.equal(r.synced, true);
     // 历史关系被自动补齐（B 组 seedKb 的数据：docs/api-design.md、guide/intro/quickstart.md）
@@ -212,8 +214,7 @@ describe('D. 写回时自动补齐（目标目录不存在/为空触发）', () 
   it('非空目录 → 不触发自动补齐（只写本条）', () => {
     resetWikiDir(true);
     fs.writeFileSync(path.join(wikiDir, 'unrelated.txt'), 'x'); // 使目录非空
-    setWikiSync(null);
-    setSource(scope, { dir: wikiDir, chunkSize: 1000, chunkOverlap: 150 });
+    setWikiSync({ enabled: true, sourceDir: wikiDir });
     const r = writeBackToWiki(scope, 'nomore', 'just-this', '内容');
     assert.equal(r.synced, true);
     assert.equal(fs.existsSync(path.join(wikiDir, 'docs', 'api-design.md')), false, '非空目录不应触发补齐');

@@ -239,9 +239,9 @@ scopes:
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | `boolean` | `true` | 是否启用 Wiki 写回（显式 `false` 时禁用一切写回，含 source 块路径）|
+| `enabled` | `boolean` | `true` | 是否启用 Wiki 写回（显式 `false` 时禁用一切写回，删除文档时也不会清理 wiki 文件）|
 | `autoBackfill` | `boolean` | `true` | 写回时检测 wiki 目标目录不存在/为空则自动全量补齐历史关系（`ki wiki-backfill` 手动补齐不受此开关影响）|
-| `sourceDir` | `string` | 无 | 源文档目录，**必须是绝对路径**（`~`/`$HOME` 前缀可用，会展开为绝对路径）。相对路径（`./wiki`、`wiki`）在加载配置时即报 `CONFIG_FIELD_INVALID` |
+| `sourceDir` | `string` | 无 | Wiki 写回与删除清理的**唯一目标目录**；不配置时在线编辑只更新 KB、不写任何文件。**必须是绝对路径**（`~`/`$HOME` 前缀可用，会展开为绝对路径）。相对路径（`./wiki`、`wiki`）在加载配置时即报 `CONFIG_FIELD_INVALID` |
 
 > `sourceDir` 为什么强制绝对路径：相对路径的唯一解析基准是**配置文件所在目录**，
 > 而 `./wiki` 在用户心里指的是**当前 shell / 当前仓库**。

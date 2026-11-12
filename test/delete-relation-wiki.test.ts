@@ -29,6 +29,9 @@ function setup(scope: string, sourcePath?: string) {
   const kbDir = getKbDir(scope);
   const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-dr-src-'));
   setSource(scope, { dir: sourceDir });
+  // 2026-11-12 起 wiki 写回/删除只认 wikiSync.sourceDir（source 块退出定位），
+  // 这里把写回目标配成同一个目录，保持本文件「删源文件」的原意图可测。
+  configureWikiSync(scope, sourceDir);
 
   fs.writeFileSync(path.join(kbDir, 'group-index.json'), JSON.stringify({
     version: 1, scope, groups: { wiki: {} }, source: { dir: sourceDir }, updatedAt: new Date().toISOString(),
@@ -181,7 +184,10 @@ describe('delete-relation · 文档级硬删', () => {
     assert.equal(r.ok, true);
     if (!r.ok) return;
     assert.equal(fs.existsSync(decoy), true, 'wiki 根下同名文件必须保留');
-    assert.equal(fs.existsSync(mirror), false, '命名约定镜像应被删除');
-    assert.equal(r.result.wikiMatch, 'legacy-name');
+    // 2026-11-12：sourcePath 与命名约定路径 realpath 不同 → 归属存疑，连镜像也不删
+    // （硬删无回收站，宁可删不掉也不误删；用户可人工处理后重试）
+    assert.equal(r.result.wikiRemoved, false);
+    assert.equal(r.result.wikiSkipReason, 'source-mismatch');
+    assert.equal(fs.existsSync(mirror), true, '归属存疑时镜像同样保留');
   });
 });

@@ -85,57 +85,37 @@ after(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-describe('A. resolveWikiRootDir 判定 source 块能否当目录', () => {
-  it('source.dir 是目录 → 采用 source 块', () => {
-    const { scope, wikiDir } = freshScope(null);
+describe('A. resolveWikiRootDir 只认 wikiSync.sourceDir（2026-11-12 起 source 块退出定位）', () => {
+  it('source.dir 是目录 → 被忽略，仍取 wikiSync.sourceDir', () => {
+    const { scope, wikiDir } = freshScope({});
     const dir = path.join(tmpRoot, `src-dir-${seq++}`);
     fs.mkdirSync(dir, { recursive: true });
     setSource(scope, { dir });
     const root = resolveWikiRootDir(scope);
-    assert.equal(root.dir, path.resolve(dir));
-    assert.equal(root.from, 'source');
+    assert.equal(root.dir, path.resolve(wikiDir), '不得把导入源目录当写回目标');
+    assert.equal(root.from, 'wiki-sync');
     assert.equal(root.sourceRejected, undefined);
-    assert.equal(fs.existsSync(wikiDir), true);
   });
 
-  it('source.dir 是单文件导入的文件路径 → 跳过并兜底到 wikiSync.sourceDir', () => {
+  it('source.dir 是单文件 / 已被移走 → 一律忽略，不影响结果也不产生原因', () => {
     const { scope, wikiDir } = freshScope({});
     const file = importSingleFile(path.join(tmpRoot, `src-file-${seq++}`));
     setSource(scope, { dir: file });
-    const root = resolveWikiRootDir(scope);
-    assert.equal(root.dir, path.resolve(wikiDir));
-    assert.equal(root.from, 'wiki-sync');
-    assert.match(String(root.sourceRejected), /文件而不是目录/);
-    assert.match(String(root.sourceRejected), /ip-chooser-topo-trees-20261021\.md/);
+    assert.equal(resolveWikiRootDir(scope).dir, path.resolve(wikiDir));
+    fs.rmSync(file);
+    const after = resolveWikiRootDir(scope);
+    assert.equal(after.dir, path.resolve(wikiDir));
+    assert.equal(after.sourceRejected, undefined, 'source 块不再参与判定，不应有被拒原因');
   });
 
-  it('源文件已被移走（扩展名命中导入白名单）→ 仍判为文件，不落到同名目录', () => {
-    const { scope, wikiDir } = freshScope({});
-    const file = importSingleFile(path.join(tmpRoot, `src-gone-${seq++}`));
-    setSource(scope, { dir: file });
-    fs.rmSync(file); // 用户"把文件移走"也修不好根目录
-    const root = resolveWikiRootDir(scope);
-    assert.equal(root.dir, path.resolve(wikiDir), '不得把已删除的文件路径当目录用');
-    assert.match(String(root.sourceRejected), /已不存在/);
-  });
-
-  it('目录型 source 被临时移走（无文件扩展名）→ 维持原行为，写回时按需重建', () => {
+  it('有 source 块但未配置 wikiSync → 无可用目录（不再回落到导入源）', () => {
     const { scope } = freshScope(null);
-    const dir = path.join(tmpRoot, `src-moved-${seq++}`);
+    const dir = path.join(tmpRoot, `src-nofb-${seq++}`);
+    fs.mkdirSync(dir, { recursive: true });
     setSource(scope, { dir });
-    const root = resolveWikiRootDir(scope);
-    assert.equal(root.dir, path.resolve(dir));
-    assert.equal(root.from, 'source');
-  });
-
-  it('source 块为文件且未配置 wikiSync → 无可用目录 + 给出原因', () => {
-    const { scope } = freshScope(null);
-    const file = importSingleFile(path.join(tmpRoot, `src-nofb-${seq++}`));
-    setSource(scope, { dir: file });
     const root = resolveWikiRootDir(scope);
     assert.equal(root.dir, null);
     assert.equal(root.from, null);
-    assert.match(String(root.sourceRejected), /文件而不是目录/);
   });
 
   it('wikiSync 只配 sourceDir（未写 enabled）→ 视为启用，与写入门禁同口径', () => {
@@ -172,14 +152,13 @@ describe('B. writeBackToWiki 走兜底目录（源报错的正向回归）', () 
     assert.equal(fs.statSync(file).isFile(), true);
   });
 
-  it('source 块为文件 + 无 wikiSync → fail-loud，文案说明被拒原因', () => {
+  it('无 wikiSync → fail-loud，文案指向 wikiSync.sourceDir', () => {
     const { scope } = freshScope(null);
     const file = importSingleFile(path.join(tmpRoot, `src-fl-${seq++}`));
     setSource(scope, { dir: file });
     const r = writeBackToWiki(scope, 'G', 'R', '内容');
     assert.equal(r.synced, false);
     assert.match(String(r.reason), /无可用 wiki 写回目录/);
-    assert.match(String(r.reason), /文件而不是目录/);
     assert.match(String(r.reason), /wikiSync\.sourceDir/);
   });
 });
@@ -198,7 +177,7 @@ describe('C. backfillWiki 走兜底目录', () => {
     assert.equal(fs.existsSync(path.join(wikiDir, 'API 集成模式', '已有条目.md')), true);
   });
 
-  it('source 块为文件 + 无 wikiSync → 整体拒绝并给出原因', () => {
+  it('无 wikiSync → 整体拒绝并给出原因', () => {
     const { scope } = freshScope(null);
     const file = importSingleFile(path.join(tmpRoot, `src-bf2-${seq++}`));
     setSource(scope, { dir: file });
@@ -206,7 +185,7 @@ describe('C. backfillWiki 走兜底目录', () => {
     const r = backfillWiki(scope);
     assert.equal(r.ok, false);
     assert.match(String(r.error), /无可用 wiki 写回目录/);
-    assert.match(String(r.error), /文件而不是目录/);
+    assert.match(String(r.error), /wikiSync\.sourceDir/);
   });
 });
 

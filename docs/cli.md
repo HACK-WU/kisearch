@@ -957,7 +957,7 @@ ki delete-relation --scope <scope> --group <group> --relation <relation>
 ```
 
 删除单条 Relation。向量删除优先按 `memoryId` 精确删除，无 `memoryId` 时用向量搜索严格匹配兜底。
-wiki 文件按 `relation.sourcePath` 定位（历史无 `sourcePath` 的按文件名兜底），且必须落在 `source.dir` 内才允许删除。
+wiki 文件按 `<wikiSync.sourceDir>/<group>/<relation>.md` 定位；文档记有 `sourcePath` 时，还要求它与该路径指向同一个文件，否则拒绝删除（硬删无回收站，宁可删不掉也不误删同名文件）。
 
 ### 批量删除（`--input`）
 

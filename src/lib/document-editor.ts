@@ -1,9 +1,9 @@
-/** Browse 在线编辑：精确读取、乐观锁和按 sourceDir 配置保存。 */
+/** Browse 在线编辑：精确读取、乐观锁和按 wikiSync.sourceDir 配置保存。 */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadConfig, getScopeWikiSync } from './config.js';
-import { getLocalKbDir, getSource } from './scope.js';
+import { getKbDir, getLocalKbDir } from './scope.js';
 import { loadGroupCache, readAllGroupCaches } from './group-cache.js';
 import { readJson, writeJson } from './store.js';
 import { contentRevision, createDraft, loadDraft, saveDraft, type RelationEditDraft } from './relation-edit-draft.js';
@@ -29,7 +29,17 @@ export interface EditDocumentInput extends DocumentIdentity {
   expectedSourceRevision?: string;
   vectorize?: boolean;
   editId?: string;
+  /**
+   * 强制以 KB 为准覆盖源文件（REQ「强制保存」）：跳过**源文件侧**全部三道校验。
+   *
+   * 覆盖范围严格限定在源文件侧 —— KB 侧乐观锁（`DOC_EDIT_CONFLICT`）与索引发布链路不受影响，
+   * 否则强制保存会变成「谁最后点谁赢」的并发覆写。用户 2026-11-12 拍板：加载后源文件又变化也覆盖。
+   */
+  force?: boolean;
 }
+
+/** 源文件校验错误分类：只有 `CONTENT_DIVERGED` 允许用户选择强制覆盖 */
+export type SourceErrorCode = 'CONTENT_DIVERGED' | 'SOURCE_MISMATCH' | 'SOURCE_UNAVAILABLE' | 'SOURCE_DISABLED';
 
 export class DocumentEditError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string,
@@ -62,35 +72,42 @@ function loadDocument(identity: DocumentIdentity): { relation: RelationRecord; c
   return { relation, content, kbPath };
 }
 
+/**
+ * wiki 回写目标根目录：**只认**配置里的 `wikiSync.sourceDir`（2026-11-12 用户裁定）。
+ *
+ * `group-index.json` 的 `source` 块是「导入源目录」，上传方式导入时它指向
+ * `/root/.ki/import-uploads/<uuid>` 这份**临时副本**。此前它优先级更高，导致：
+ * 编辑保存 / 添加链接 / ki_edit_relation 全部写回副本，而用户在 config 里显式配的
+ * `wikiSync.sourceDir` 被静默忽略 —— 用户改了正文却在自己仓库里看不到任何变化。
+ *
+ * 新口径：开启 wiki 回写（`wikiSync.enabled !== false`）且配了 `sourceDir` 才写回文件；
+ * 否则只写 KB，一个文件都不碰。
+ */
 function configuredSourceDir(scope: string): string | undefined {
-  const sourceDir = getSource(scope)?.dir;
-  if (sourceDir) return sourceDir;
   const config = getScopeWikiSync(loadConfig(), scope);
-  return config?.enabled && config.sourceDir ? config.sourceDir : undefined;
+  // `config?.enabled !== false` 不会把 config 收窄为非 null，后半段必须再带可选链
+  return config?.enabled !== false && config?.sourceDir ? config.sourceDir : undefined;
 }
 
 function resolveSource(identity: DocumentIdentity, relation: RelationRecord): string | undefined {
   const root = configuredSourceDir(identity.scope);
   if (!root) return undefined;
-  if (getScopeWikiSync(loadConfig(), identity.scope)?.enabled === false) {
-    reject(409, 'SOURCE_DISABLED', '已配置 wikiSync.enabled=false，不能写回源文件');
-  }
   const rel = relation.sourcePath?.replace(/\\/g, '/');
   if (!rel || rel.includes('#') || path.posix.isAbsolute(rel)
     || rel.split('/').some((part) => !part || part === '.' || part === '..')) {
-    reject(409, 'SOURCE_MISMATCH', '文档缺少可唯一定位的源文件路径');
+    reject(409, 'SOURCE_MISMATCH', '文档缺少可唯一定位的 wiki 回写目标路径');
   }
   // 批次 2（W6）：全量读双轨（sourcePath owner 唯一性判定需枚举全部 relation）
   const owners = [...readAllGroupCaches(identity.scope).values()].flatMap((entry) => entry.hot_relations)
     .filter((item) => item.sourcePath?.replace(/\\/g, '/') === rel);
-  if (owners.length !== 1) reject(409, 'SOURCE_MISMATCH', `源文件被 ${owners.length} 个 KB 文档引用，不能唯一写回`);
+  if (owners.length !== 1) reject(409, 'SOURCE_MISMATCH', `wiki 回写目标被 ${owners.length} 个 KB 文档引用，不能唯一写回`);
   const stem = path.posix.basename(rel).replace(/\.(?:md|markdown)$/i, '');
   if (stem === path.posix.basename(rel) || stem !== identity.relation) {
-    reject(409, 'SOURCE_MISMATCH', `源文件名与 KB 文档名不一致：${rel} ↔ ${identity.relation}`);
+    reject(409, 'SOURCE_MISMATCH', `wiki 回写目标文件名与 KB 文档名不一致：${rel} ↔ ${identity.relation}`);
   }
   const relativeDir = path.posix.dirname(rel);
   if (relativeDir !== '.' && identity.group !== relativeDir && !identity.group.endsWith(`/${relativeDir}`)) {
-    reject(409, 'SOURCE_MISMATCH', `源文件子路径与 KB Group 不一致：${rel} ↔ ${identity.group}`);
+    reject(409, 'SOURCE_MISMATCH', `wiki 回写目标子路径与 KB Group 不一致：${rel} ↔ ${identity.group}`);
   }
   let rootReal: string;
   let fileReal: string;
@@ -98,26 +115,48 @@ function resolveSource(identity: DocumentIdentity, relation: RelationRecord): st
     rootReal = fs.realpathSync(root);
     const rootStat = fs.statSync(rootReal);
     if (rootStat.isFile()) {
-      if (rel !== path.basename(rootReal)) reject(409, 'SOURCE_MISMATCH', '单文件导入的 sourcePath 与配置源文件不一致');
+      if (rel !== path.basename(rootReal)) reject(409, 'SOURCE_MISMATCH', '单文件导入的 sourcePath 与配置的 wiki 回写目标不一致');
       fileReal = rootReal;
     } else {
       fileReal = fs.realpathSync(path.resolve(rootReal, rel));
     }
   } catch (error) {
     if (error instanceof DocumentEditError) throw error;
-    reject(409, 'SOURCE_UNAVAILABLE', `配置的源目录或文件不可用：${(error as Error).message}`);
+    reject(409, 'SOURCE_UNAVAILABLE', `配置的 wiki 回写目标不可用：${(error as Error).message}`);
   }
   if (fileReal !== rootReal && !fileReal.startsWith(`${rootReal}${path.sep}`)) {
-    reject(409, 'SOURCE_MISMATCH', '源文件不在配置的 sourceDir 内');
+    reject(409, 'SOURCE_MISMATCH', 'wiki 回写目标不在配置的 sourceDir 内');
   }
   try {
-    if (!fs.statSync(fileReal).isFile()) reject(409, 'SOURCE_MISMATCH', '源路径不是文件');
+    if (!fs.statSync(fileReal).isFile()) reject(409, 'SOURCE_MISMATCH', 'wiki 回写目标不是文件');
     fs.accessSync(fileReal, fs.constants.R_OK | fs.constants.W_OK);
   } catch (error) {
     if (error instanceof DocumentEditError) throw error;
-    reject(409, 'SOURCE_UNAVAILABLE', `源文件不可读写：${(error as Error).message}`);
+    reject(409, 'SOURCE_UNAVAILABLE', `wiki 回写目标不可读写：${(error as Error).message}`);
   }
   return fileReal;
+}
+
+/**
+ * 该 scope 是否登记了数据源（供「以源为准」的提示用，前端**只展示不可点**）。
+ *
+ * 之所以在这里顺手读：数据源是「导入上游」，wiki 回写目标是「导出下游」，两者分叉时
+ * 用户最合理的动作往往是「先更新源数据、再同步」（2026-11-12 用户推定为此提示）。
+ * 直接读 `datasource.json` 而不引 `datasource.ts`，避免编辑热路径背上整个数据源模块。
+ */
+function dataSourceHint(scope: string): { type: 'git' | 'directory'; target: string } | undefined {
+  try {
+    const file = path.join(getKbDir(scope), 'datasource.json');
+    if (!fs.existsSync(file)) return undefined;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      type?: string; dir?: string; git?: { remoteUrl?: string };
+    };
+    const target = raw.git?.remoteUrl ?? raw.dir;
+    if (!target) return undefined;
+    return { type: raw.type === 'git' ? 'git' : 'directory', target };
+  } catch {
+    return undefined;
+  }
 }
 
 export function readDocumentForEdit(identity: DocumentIdentity) {
@@ -125,14 +164,27 @@ export function readDocumentForEdit(identity: DocumentIdentity) {
   const sourceConfigured = Boolean(configuredSourceDir(identity.scope));
   let sourceRevision: string | undefined;
   let sourceError: string | undefined;
+  let sourceErrorCode: SourceErrorCode | undefined;
+  let sourceFile: string | undefined;
   if (sourceConfigured) {
     try {
       const file = resolveSource(identity, doc.relation)!;
       const sourceContent = fs.readFileSync(file, 'utf8');
-      if (sourceContent !== doc.content) sourceError = '源文件与 KB 正文不一致，请先人工合并后再编辑';
+      if (sourceContent !== doc.content) {
+        // 主语必须是「wiki 回写目标」而不是「源文件」：后者会被读成数据源/导入源那份文档，
+        // 用户根本不知道说的是哪个文件（2026-11-12 用户指出的歧义）。
+        sourceError = 'wiki 回写目标文档与 KB 正文不一致';
+        // 只有这一类允许用户选择「以 KB 覆盖回写目标」；下面的 SOURCE_* 属定位/权限问题，
+        // 强制也写不进去（或会写错文件），前端据此决定是否露出强制入口。
+        sourceErrorCode = 'CONTENT_DIVERGED';
+        sourceFile = file;
+      }
       sourceRevision = contentRevision(sourceContent);
     } catch (error) {
       sourceError = (error as Error).message;
+      sourceErrorCode = error instanceof DocumentEditError
+        ? (error.code as SourceErrorCode)
+        : 'SOURCE_UNAVAILABLE';
     }
   }
   return {
@@ -144,7 +196,11 @@ export function readDocumentForEdit(identity: DocumentIdentity) {
     sourceConfigured,
     ...(sourceRevision ? { sourceRevision } : {}),
     ...(sourceError ? { sourceError } : {}),
-    ...(!sourceConfigured ? { warning: '未配置 sourceDir：保存只更新 KB；用旧源重导可能覆盖本次修改' } : {}),
+    ...(sourceErrorCode ? { sourceErrorCode } : {}),
+    ...(sourceFile ? { sourceFile } : {}),
+    // 仅分叉时给数据源提示：其余错误（定位/权限）与「以源为准」无关
+    ...(sourceErrorCode === 'CONTENT_DIVERGED' ? { dataSource: dataSourceHint(identity.scope) } : {}),
+    ...(!sourceConfigured ? { warning: '未开启 wiki 回写（未配置 wikiSync.sourceDir）：本次只更新 KB，不写任何文件' } : {}),
   };
 }
 
@@ -154,7 +210,7 @@ function writeSourceAtomically(file: string, content: string, expectedContent: s
     fs.writeFileSync(tmp, content, { encoding: 'utf8', flag: 'wx' });
     fs.chmodSync(tmp, fs.statSync(file).mode);
     if (fs.readFileSync(file, 'utf8') !== expectedContent) {
-      reject(409, 'SOURCE_CONFLICT', '源文件在保存期间再次发生变化，请重新加载');
+      reject(409, 'SOURCE_CONFLICT', 'wiki 回写目标在保存期间再次发生变化，请重新加载');
     }
     fs.renameSync(tmp, file);
   } finally {
@@ -187,7 +243,7 @@ export async function saveDocumentEdit(input: EditDocumentInput) {
     }
     if (draft.content === input.content && draft.targetMode === mode
       && draft.publishedRevision && docRevision !== draft.publishedRevision) {
-      reject(409, 'DOC_EDIT_RETRY_CONFLICT', '该草稿发布后 KB 正文又发生变化，不能用旧草稿写回源文件');
+      reject(409, 'DOC_EDIT_RETRY_CONFLICT', '该草稿发布后 KB 正文又发生变化，不能用旧草稿写回 wiki 回写目标');
     }
   }
   const publishedSourceRetry = Boolean(draft
@@ -199,26 +255,34 @@ export async function saveDocumentEdit(input: EditDocumentInput) {
   const file = resolveSource(input, doc.relation);
   let sourceContent: string | undefined;
   if (file) {
-    sourceContent = fs.readFileSync(file, 'utf8');
-    const sourceRevision = contentRevision(sourceContent);
-    const sourceMatchesLoadedVersion = Boolean(input.expectedSourceRevision)
-      && sourceRevision === input.expectedSourceRevision;
-    if (!sourceMatchesLoadedVersion) {
-      reject(409, 'SOURCE_CONFLICT', '源文件在加载后发生变化，请重新加载并人工合并', {
-        source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
-      });
+    try {
+      sourceContent = fs.readFileSync(file, 'utf8');
+    } catch (error) {
+      // 定位校验通过后在保存瞬间被删除 / 权限变化：强制保存也**不新建**文件，照旧 fail-loud
+      reject(409, 'SOURCE_UNAVAILABLE', `wiki 回写目标在保存时不可读：${(error as Error).message}`);
     }
-    // 新保存必须来自源文件与 KB 一致的读取基线。唯一例外是：索引/KB 已发布、
-    // 源写回失败后，使用同一已发布草稿重试源写回。
-    if (input.expectedRevision !== input.expectedSourceRevision && !publishedSourceRetry) {
-      reject(409, 'SOURCE_CONFLICT', '加载时源文件与 KB 正文已分叉，请人工合并后重新加载', {
-        source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
-      });
-    }
-    if (sourceContent !== doc.content && !publishedSourceRetry) {
-      reject(409, 'SOURCE_CONFLICT', '保存前源文件与 KB 正文已分叉，请人工合并后重新加载', {
-        source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
-      });
+    if (!input.force) {
+      const current = sourceContent!;
+      const sourceRevision = contentRevision(current);
+      const sourceMatchesLoadedVersion = Boolean(input.expectedSourceRevision)
+        && sourceRevision === input.expectedSourceRevision;
+      if (!sourceMatchesLoadedVersion) {
+        reject(409, 'SOURCE_CONFLICT', 'wiki 回写目标在加载后发生变化，请重新加载并人工合并', {
+          source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
+        });
+      }
+      // 新保存必须来自源文件与 KB 一致的读取基线。唯一例外是：索引/KB 已发布、
+      // 源写回失败后，使用同一已发布草稿重试源写回。
+      if (input.expectedRevision !== input.expectedSourceRevision && !publishedSourceRetry) {
+        reject(409, 'SOURCE_CONFLICT', '加载时 wiki 回写目标与 KB 正文已分叉，请人工合并后重新加载', {
+          source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
+        });
+      }
+      if (current !== doc.content && !publishedSourceRetry) {
+        reject(409, 'SOURCE_CONFLICT', '保存前 wiki 回写目标与 KB 正文已分叉，请人工合并后重新加载', {
+          source: 'conflict', kb: 'unchanged', index: 'unchanged', sourcePath: file,
+        });
+      }
     }
   }
 
@@ -275,7 +339,7 @@ export async function saveDocumentEdit(input: EditDocumentInput) {
           index: indexedAs === 'unchanged' ? 'unchanged' : 'complete', sourcePath: file,
         });
       }
-      throw new DocumentEditError(500, 'SOURCE_WRITE_FAILED', `KB 已保存，但源文件写回失败：${(error as Error).message}`, {
+      throw new DocumentEditError(500, 'SOURCE_WRITE_FAILED', `KB 已保存，但 wiki 回写目标写入失败：${(error as Error).message}`, {
         editId, retryable: true, source: 'failed', kb: 'written',
         index: indexedAs === 'unchanged' ? 'unchanged' : 'complete', sourcePath: file,
       });
@@ -286,9 +350,11 @@ export async function saveDocumentEdit(input: EditDocumentInput) {
     revision: contentRevision(input.content),
     sourceConfigured: Boolean(file),
     sourceWritten,
+    /** 本次走的是「以 KB 覆盖源文件」的强制路径（前端据此给不同回执） */
+    forced: input.force === true,
     fullTextUpdated: indexedAs === 'fts',
     vectorStored: indexedAs === 'dense',
     indexedAs,
-    ...(!file ? { warning: '未配置 sourceDir：源 Markdown 未更新；用旧源重导可能覆盖本次修改' } : {}),
+    ...(!file ? { warning: '未开启 wiki 回写（未配置 wikiSync.sourceDir）：本次只更新 KB，未写任何文件' } : {}),
   };
 }

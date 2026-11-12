@@ -127,24 +127,24 @@ describe('ki_scope_list · wikiSync 状态', () => {
     assert.equal(entry.wikiSync.writableDir, null);
   });
 
-  it('★ source 块指向文件 → 不可写回且带 rejectReason（不能被 enabled 骗过）', async () => {
+  it('★ source 块指向文件 → 不参与写回定位，也不再产生 rejectReason（2026-11-12）', async () => {
     const res = await executeScopeList();
     const entry = res.scopes.find((s) => s.scope === 'ws-file');
     assert.ok(entry);
-    assert.equal(entry.wikiSync.writableDir, null, 'source 是文件时不得当成目录');
+    // source 块整体退出定位：文件/目录一律不看，只看 wikiSync.sourceDir
+    assert.equal(entry.wikiSync.writableDir, null);
     assert.equal(entry.wikiSync.writableFrom, null);
-    assert.equal(typeof entry.wikiSync.rejectReason, 'string');
-    assert.ok((entry.wikiSync.rejectReason ?? '').length > 0, 'rejectReason 应给出人话原因');
+    assert.equal(entry.wikiSync.rejectReason, undefined, 'source 块已退出定位，不应再有被拒原因');
     // 没配 wikiSync 段 ⇒ 开关本身是关的（与写回可用性是两个维度）
     assert.equal(entry.wikiSync.enabled, false);
   });
 
-  it('source 块指向目录 → 可写回，来源为 source（wikiSync 开关仍为关）', async () => {
+  it('source 块指向目录 → 同样不参与定位，未配 wikiSync 时不可写回（2026-11-12）', async () => {
     const res = await executeScopeList();
     const entry = res.scopes.find((s) => s.scope === 'ws-source-dir');
     assert.ok(entry);
-    assert.equal(entry.wikiSync.writableFrom, 'source');
-    assert.equal(entry.wikiSync.writableDir, path.join(tmpRoot, 'wiki-ok'));
+    assert.equal(entry.wikiSync.writableFrom, null);
+    assert.equal(entry.wikiSync.writableDir, null, '不再把导入源目录当写回目标');
     assert.equal(entry.wikiSync.enabled, false);
   });
 
