@@ -46,6 +46,7 @@ import {
   CHAT_REF_MAX_COUNT,
   CHAT_REF_TEXT_MAX,
   CHAT_REF_TOTAL_MAX,
+  CHAT_SKILLS_MAX,
   type ChatEvent,
   type ChatMessage,
   type ChatProgressStep,
@@ -100,6 +101,7 @@ import {
   SKILL_NAME_MAX_CHARS,
   buildInjectionSnapshot,
   defaultPromptConfig,
+  findEnabledSkill,
   readPromptConfig,
   savePromptConfig,
 } from './prompt-config.js';
@@ -1050,6 +1052,56 @@ export function parseRefs(body: { refs?: unknown }): ChatRef[] | undefined {
 }
 
 /**
+ * 解析并校验请求体的 `skills`（用户用 `/` 斜杠点名的 skill id，2026-11-12）。
+ *
+ * 口径（与 `parseRefs` 同款，缺省不报错）：
+ *   · 缺省 / null / 空数组 → `undefined`（视为未点名）
+ *   · 非数组 / 元素非字符串或空白 → 400 `MESSAGE_INVALID`
+ *   · 超过 `CHAT_SKILLS_MAX` 条 → 400（fail-loud，不静默截断）
+ *   · 重复 id 去重保序（同一点两次没有额外语义）
+ *
+ * ⚠️ 这里只校验**形状**；id 是否真实存在 / 启用由 `assertSkillIdsUsable` 判定（要读配置）。
+ * 导出仅为测试可直测（纯函数，无副作用）。
+ */
+export function parseSkillIds(body: { skills?: unknown }): string[] | undefined {
+  const raw = body?.skills;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'skills 必须是字符串数组');
+  }
+  if (raw.length === 0) return undefined;
+  if (raw.length > CHAT_SKILLS_MAX) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `一次提问最多点名 ${CHAT_SKILLS_MAX} 个 skill`);
+  }
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string' || item.trim().length === 0) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'skills 每项必须是非空字符串（skill id）');
+    }
+    const id = item.trim();
+    if (id.length > 128) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'skill id 过长（≤128 字符）');
+    }
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 点名 / 回放的 skill 是否真的可用（存在且启用）。
+ *
+ * ★ 为什么必须 fail-loud：本轮注入读的是 `findEnabledSkill`，id 不合法时正文**静默不注入**，
+ *   用户会以为"点名成功了但 AI 没照做"，且没有任何入口能看出原因（用户偏好：fail-loud + 给出路）。
+ *
+ * @returns 不可用的 id 清单（空 = 全部可用）
+ */
+function unusableSkillIds(ids: readonly string[] | undefined): string[] {
+  if (!ids || ids.length === 0) return [];
+  const cfg = readPromptConfig(loadConfig()).config;
+  return ids.filter((id) => findEnabledSkill(cfg, id) === null);
+}
+
+/**
  * API-08 `POST /api/chat/conversations/:id/messages` —— 发消息（SSE）
  *
  * · 非幂等（每次写一条 user 消息）
@@ -1062,10 +1114,12 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/messages`, res);
   if (!hit) return;
 
-  const body = (await readJsonBody(req)) as { text?: unknown; refs?: unknown };
+  const body = (await readJsonBody(req)) as { text?: unknown; refs?: unknown; skills?: unknown };
   const text = requireMessageText(body);
   // 用户手动引用的文档片段（可选）：形状 / 条数 / 长度校验见 parseRefs
   const refs = parseRefs(body);
+  // `/` 斜杠点名的 skill（可选）：形状校验在此，可用性在 runGeneration 前置判（2026-11-12）
+  const skillIds = parseSkillIds(body);
 
   // ② 生成前置（P4 隐私 / CHAT_DISABLED / P5 会话忙）
   const ready = requireGenerationReady(res, ctx, id);
@@ -1077,6 +1131,7 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
     userText: text,
     mode: 'append-user',
     refs,
+    skillIds,
     capabilities: ctx.capabilities,
   });
 }
@@ -1121,8 +1176,10 @@ export async function handleMessageEdit(req: IncomingMessage, res: ServerRespons
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/messages/${msgId}`, res);
   if (!hit) return;
 
-  const body = (await readJsonBody(req)) as { text?: unknown };
+  const body = (await readJsonBody(req)) as { text?: unknown; skills?: unknown };
   const text = requireMessageText(body);
+  // 编辑重发同样可能改动 `/` 点名：缺省 = 保留原消息的 skills，显式空数组 = 清空
+  const skillIds = parseSkillIds(body);
 
   const ready = requireGenerationReady(res, ctx, id);
   if (!ready) return;
@@ -1143,6 +1200,7 @@ export async function handleMessageEdit(req: IncomingMessage, res: ServerRespons
     userText: text,
     mode: 'edit',
     msgId,
+    skillIds,
     capabilities: ctx.capabilities,
   });
 }
@@ -1161,6 +1219,14 @@ interface GenerationSpec {
    * 仅 `append-user` 分支消费；`regenerate` / `edit` 从落盘的 user 消息里读回（见下）。
    */
   refs?: ChatRef[];
+  /**
+   * `/` 斜杠点名的 skill id（2026-11-12）。
+   *
+   * · `append-user` / `edit`：由请求体给出，**不可用即 400**（fail-loud，不落消息）；
+   * · `regenerate`：从落盘的末条 user 消息读回，不可用的**过滤掉**（历史回放降级不阻断 ——
+   *   否则用户停用一个 skill 后，所有带过它的老会话都无法重新生成）。
+   */
+  skillIds?: string[];
 }
 
 /**
@@ -1196,10 +1262,22 @@ async function runGeneration(
   let discardedCount: number | undefined;
   let userText = spec.userText;
   let replaceAnswer = false;
+  /** 本轮实际生效的 `/` 点名（append/edit 来自请求体，regenerate 来自落盘的 user 消息） */
+  let effectiveSkillIds: string[] = [];
 
   // ── ① 锁内前置写（锁随本次 RMW 结束即释放，生成不持锁）──
   let convAfterPrep: ConversationFile | null = null;
   if (mode === 'append-user') {
+    // ★ 点名的 skill 必须可用，否则本轮注入必然落空 → 在**落盘之前** 400
+    const badSkills = unusableSkillIds(spec.skillIds);
+    if (badSkills.length > 0) {
+      throw new ChatApiError(
+        400,
+        CHAT_ERROR_CODES.MESSAGE_INVALID,
+        `skill 不存在或未启用：${badSkills.join('、')}（可在「对话配置 → Skill」中启用后重试）`,
+      );
+    }
+    effectiveSkillIds = spec.skillIds ?? [];
     // user 消息**先落盘**：即使用户立刻关页或上游失败，提问也不丢。
     // id 由 store 在锁内统一为 `m{seq}`（调用方无需猜测 seq）。
     convAfterPrep = await appendMessage(scope, convId, {
@@ -1209,11 +1287,24 @@ async function runGeneration(
       at: new Date().toISOString(),
       // 引用随 user 消息落盘 → 刷新 / 切会话后仍可回显（需求 R11）
       ...(spec.refs && spec.refs.length > 0 ? { refs: spec.refs } : {}),
+      // `/` 点名随消息落盘 → 重新生成 / 编辑重发能复用同一轮语义（2026-11-12）
+      ...(effectiveSkillIds.length > 0 ? { skills: effectiveSkillIds } : {}),
     });
   } else if (mode === 'edit') {
-    const r = await truncateAfterAndEdit(scope, convId, spec.msgId!, spec.userText);
+    const badSkills = unusableSkillIds(spec.skillIds);
+    if (badSkills.length > 0) {
+      throw new ChatApiError(
+        400,
+        CHAT_ERROR_CODES.MESSAGE_INVALID,
+        `skill 不存在或未启用：${badSkills.join('、')}（可在「对话配置 → Skill」中启用后重试）`,
+      );
+    }
+    // skills 传 undefined ⇒ 保留原消息上的（旧客户端）；传数组 ⇒ 覆盖（空数组 = 用户删掉了 `/名称`）
+    const r = await truncateAfterAndEdit(scope, convId, spec.msgId!, spec.userText, spec.skillIds);
     discardedCount = r.discardedCount;
     convAfterPrep = r.conv;
+    const edited = r.conv.messages.find((m) => m.id === spec.msgId);
+    effectiveSkillIds = spec.skillIds ?? edited?.skills ?? [];
   } else {
     // 磁盘旧答保留到提交；上游上下文只保留到本轮 user，防止旧答污染。
     const current = await readConversation(scope, convId);
@@ -1224,6 +1315,10 @@ async function runGeneration(
         throw new ChatApiError(400, CHAT_ERROR_CODES.CONVERSATION_INVALID, '会话无可重新生成的对象（无 user 消息）');
       }
       userText = current.messages[lastUserIndex]!.content;
+      const storedSkills = current.messages[lastUserIndex]!.skills ?? [];
+      // 历史回放：不可用的 id 静默降级（过滤），不阻断 —— 停用 skill 不应让老会话再也无法重新生成
+      const badSkills = unusableSkillIds(storedSkills);
+      effectiveSkillIds = badSkills.length === 0 ? storedSkills : storedSkills.filter((id) => !badSkills.includes(id));
       replaceAnswer = current.messages.at(-1)?.role === 'assistant';
       convAfterPrep = { ...current, messages: current.messages.slice(0, lastUserIndex + 1) };
     }
@@ -1282,6 +1377,14 @@ async function runGeneration(
   let progress: ChatProgressStep[] = [];
   /** 本轮**成功加载**的 skill id（2026-10-13；流结束后并入 `conv.loadedSkillIds`，供后续轮次重放） */
   const loadedSkills: string[] = [];
+  /**
+   * 本轮用 `/` 斜杠**点名**的 skill id（2026-11-12）。
+   *
+   * ★ 刻意**不并入** `loadedSkills` ⇒ 不写 `conv.loadedSkillIds`：点名的语义是"仅这一轮"，
+   *   写进会话级清单会让一次点名**永久**占用后续所有轮次的上下文，且没有移除 API。
+   */
+  const forcedSkillIds = effectiveSkillIds;
+  const forcedSet = new Set(forcedSkillIds);
   let messageId: string | null = null;
   let abortedFlag = false;
   // 批次 2：最近一次 tool_start 的工具名（tool_end 事件本身不带 name，日志用）
@@ -1306,6 +1409,8 @@ async function runGeneration(
       userText,
       convSystemPrompt: convAfterPrep.systemPrompt,
       refs: effectiveRefs,
+      // `/` 点名（2026-11-12）：只影响本轮 system 组，不落 loadedSkillIds
+      ...(forcedSkillIds.length > 0 ? { forcedSkillIds } : {}),
       signal: ac.signal,
       capabilities: spec.capabilities,
     });
@@ -1392,7 +1497,7 @@ async function runGeneration(
           ...(ev.alreadyLoaded === true ? { alreadyLoaded: true } : {}),
           ...(ev.error !== undefined ? { error: ev.error } : {}),
         });
-        if (!ev.error && ev.alreadyLoaded !== true && ev.id && !loadedSkills.includes(ev.id)) {
+        if (!ev.error && ev.alreadyLoaded !== true && ev.id && !loadedSkills.includes(ev.id) && !forcedSet.has(ev.id)) {
           loadedSkills.push(ev.id);
         }
         writeSseEvent(res, ev);

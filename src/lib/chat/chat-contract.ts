@@ -81,6 +81,14 @@ export const CHAT_REF_TEXT_MAX = 2000;
 export const CHAT_REF_TOTAL_MAX = 6000;
 
 /**
+ * 单次提问可**点名**的 skill 个数上限（2026-11-12）。
+ *
+ * 上限只防"请求体塞几百个 id"这类畸形输入 —— 真实场景是用户在草稿里写 1~3 个 `/名称`。
+ * 前端按本值截断（超出时不再解析后续 token），后端据此 400。
+ */
+export const CHAT_SKILLS_MAX = 5;
+
+/**
  * 工具入参的**展示用**扁平摘要（2026-11-11）。
  *
  * · 来自各工具的 `describe()`（不是模型给的原始 `call.arguments`）：大字段
@@ -198,6 +206,17 @@ export interface ChatMessage {
    * 仅 user 消息写入；assistant 的检索来源仍在 `sources` —— 两者语义不同，不得互相替代。
    */
   refs?: ChatRef[];
+  /**
+   * 用户在本轮提问里用 `/` 斜杠**点名**的 skill id（2026-11-12）。
+   *
+   * ⚠️ 与 `ConversationFile.loadedSkillIds` 的区别（改动前必读）：
+   *   · 本字段是**单轮**语义 —— 只把对应 skill 正文注入该消息所属的那一轮；
+   *   · `loadedSkillIds` 是**会话级** —— 写进去之后每轮都重放，且没有移除 API。
+   *   ⇒ `/` 点名**绝不可**写后者，否则一次点名会永久占用后续所有轮次的上下文。
+   *
+   * 仅 user 消息写入；`regenerate` 从末条 user 读回，`edit` 由请求体重新给出。
+   */
+  skills?: string[];
   /**
    * 上下文用量（**字符数**，REQ-20261013-001）。
    * = 最后一次 `context` 事件（该轮请求基数）+ 本轮反问正文长度 → 语义为"此刻会话已占用"，

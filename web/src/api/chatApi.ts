@@ -389,19 +389,20 @@ async function* postSse(
  * @param convId 会话 id（后端保证同一会话的写入串行化）
  * @param text 1~20000 字；空白 → 400 `MESSAGE_INVALID`
  * @param signal 中止信号（切会话 / 点停止 / 删会话时触发）
+ * @param skills `/` 斜杠点名的 skill id（2026-11-12；缺省 / 空数组不写字段）
  */
 export async function* streamMessage(
   convId: string,
   text: string,
   signal?: AbortSignal,
   refs?: readonly ChatRef[],
+  skills?: readonly string[],
 ): AsyncGenerator<ChatEvent> {
-  yield* postSse(
-    `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages`,
-    // 空引用不写字段：后端 parseRefs 对「缺省」与「空数组」等价处理
-    refs && refs.length > 0 ? { text, refs } : { text },
-    signal,
-  );
+  const body: { text: string; refs?: readonly ChatRef[]; skills?: readonly string[] } = { text };
+  // 空引用 / 空点名不写字段：后端对「缺省」与「空数组」等价处理，少写一个键就少一处歧义
+  if (refs && refs.length > 0) body.refs = refs;
+  if (skills && skills.length > 0) body.skills = skills;
+  yield* postSse(`${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages`, body, signal);
 }
 
 /** API-11 重新生成（**不新增 user 消息**，R23）；后端替换最后一条 assistant，`messageCount` 不变 */
@@ -428,13 +429,15 @@ export async function* streamEditMessage(
   msgId: string,
   text: string,
   signal?: AbortSignal,
+  skills?: readonly string[],
 ): AsyncGenerator<ChatEvent> {
+  // `skills` 语义：undefined ⇒ 保留原消息上的点名；数组（含空）⇒ 覆盖（空 = 用户删掉了 `/名称`）
   const res = await fetch(
     `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(skills ? { text, skills } : { text }),
       signal,
     },
   );

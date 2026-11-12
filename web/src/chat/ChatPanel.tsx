@@ -43,11 +43,15 @@ import {
   deleteConversation,
   getChatConfig,
   getConversation,
+  getPromptConfig,
   listConversations,
   patchConversation,
   undoCompactConversation,
 } from '@/api/chatApi';
-import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type PromptSkill, type SourceRef } from '@/api/chatContract';
+import { ComposerMirror } from './ComposerMirror';
+import { SkillSlashMenu } from './SkillSlashMenu';
+import { applySkillToken, filterSkills, hasSlashToken, parseSkillTokenIds, slashTriggerAt, splitSkillSegments } from './skillSlash';
 import { buildRefCandidate, checkRefAdd, drawerOfSelection, type RefAddResult } from './refSelection';
 // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，不留空槽
 import { groupPathSegment } from '../lib/rootGroup';
@@ -130,6 +134,14 @@ const CHAT_PAGE_SIDE_MIN_VIEWPORT = 1024;
 
 const MAX_SEND_CHARS = 20000;
 
+/**
+ * `/` 过滤词的长度上限（字符）。
+ *
+ * 超过即视为"用户已经不在选 skill（而是在写正文）" → 收起浮层，别挡住输入。
+ * 取值依据：最长的 skill 名称约 20 字符，中文描述搜索通常 2~6 字；40 足够宽容。
+ */
+const SLASH_QUERY_MAX = 40;
+
 /** 环形指示几何：viewBox 20×20、半径 8 → 周长用于 `stroke-dasharray/offset` */
 const RING_RADIUS = 8;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
@@ -174,6 +186,27 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [cfgOpen, setCfgOpen] = useState(false);
   /** 引用选择器开合（纯瞬时 UI 态，REQ-20261009-002 需求 B） */
   const [refPickerOpen, setRefPickerOpen] = useState(false);
+  /**
+   * `/` 斜杠点名 skill（2026-11-12）—— 全部是**纯瞬时 UI 态**（不累积、不跨挂载）。
+   *
+   * ★ 业务事实只有一处：草稿文本里的 `/名称`。发送时用 `parseSkillTokenIds` 现解析，
+   *   所以「手删 token」天然等于取消点名，不存在"看不见却仍生效"的隐藏状态。
+   * ★ `slash.start/caret` 记录触发时的文本坐标：插入时按它们做替换，
+   *   不能用「当前光标」—— 从按下 `/` 到回车选中之间用户可能已经移动过光标。
+   */
+  const [slash, setSlash] = useState<{ start: number; query: string; caret: number } | null>(null);
+  const [slashActive, setSlashActive] = useState(0);
+  /** 输入框元素（浮层定位与点外判定的锚点；`taRef` 不触发重渲染，故另存一份 state） */
+  const [composerEl, setComposerEl] = useState<HTMLTextAreaElement | null>(null);
+  /** 选中候选后要把光标放回的位置（提交后由 effect 设置，见下方 pendingCaret effect） */
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null);
+  /** 已启用 skill（null = 还没拉过；配置层关闭后失效重拉） */
+  const [skillList, setSkillList] = useState<PromptSkill[] | null>(null);
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  const skillCacheRef = useRef<PromptSkill[] | null>(null);
+  const skillPromiseRef = useRef<Promise<PromptSkill[]> | null>(null);
+  const slashMenuId = useId();
   /** 上下文用量明细面板开合（纯瞬时 UI 态，REQ-20261013-001） */
   const [ctxPanelOpen, setCtxPanelOpen] = useState(false);
   /**
@@ -363,6 +396,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     setEditing(null);
     setViewing(null);
     setDraft('');
+    // `/` 候选浮层随 scope 收起（草稿已清空，浮层再挂着就是幽灵）
+    setSlash(null);
     // 引用随 scope 清空（REQ-20261009-002 R10：绝不把 A scope 的文档名带入 B scope）
     store.dispatch({ type: 'setRefs', refs: [] });
     setSendError(null);
@@ -408,6 +443,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       // 用户主动切会话 → 引用清空（需求 R10：引用属当前对话框）。
       // 与「首次发送惰性建会话」区分：后者不清（见 chatStore.setActiveConv 处的说明）
       store.dispatch({ type: 'setRefs', refs: [] });
+      // `/` 候选浮层随会话切换收起（草稿不清，但浮层挂在新会话上是幽灵）
+      setSlash(null);
       setOpeningConv(true);
       try {
         const d = await getConversation(id);
@@ -1063,6 +1100,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     taRoRef.current?.disconnect();
     taRoRef.current = null;
     taRef.current = el;
+    // 浮层定位 / 点外判定要读这个元素（ref 本身不触发重渲染，故同步一份 state）
+    setComposerEl(el);
     if (!el) return;
     syncComposerHeight();
     if (typeof ResizeObserver === 'undefined') return;
@@ -1079,6 +1118,153 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   useLayoutEffect(() => {
     syncComposerHeight();
   }, [draft, syncComposerHeight]);
+
+  // ── `/` 斜杠点名 skill（2026-11-12）──
+  //    ⚠️ 全部 hook 必须写在本函数上方 `if (!open) return null` 之前（既有文件结构如此）。
+
+  /**
+   * 拉取**已启用** skill（懒加载 + 并发去重 + 失败可重试）。
+   *
+   * 为什么不用 `config`：`GET /api/chat/config` 只回答"能否对话"，skills 在 prompt-config 里。
+   * 该接口低频，且只在用户真的打 `/`（或发送含 token 的草稿）时才拉，故不做全局缓存。
+   */
+  const ensureSkills = useCallback(async (): Promise<PromptSkill[]> => {
+    if (skillCacheRef.current) return skillCacheRef.current;
+    const inflight = skillPromiseRef.current;
+    if (inflight) return inflight;
+    setSkillLoading(true);
+    setSkillError(null);
+    const task = (async (): Promise<PromptSkill[]> => {
+      try {
+        const ok = await getPromptConfig();
+        const enabled = ok.config.skills.filter((s) => s.enabled);
+        skillCacheRef.current = enabled;
+        setSkillList(enabled);
+        return enabled;
+      } catch (err) {
+        setSkillError(err instanceof Error ? err.message : 'skill 列表读取失败');
+        return [];
+      } finally {
+        setSkillLoading(false);
+        skillPromiseRef.current = null;
+      }
+    })();
+    skillPromiseRef.current = task;
+    return task;
+  }, []);
+
+  /** 配置层关掉后 skill 可能已被启用 / 停用 / 改名 → 丢弃缓存，下一次 `/` 重新拉 */
+  useEffect(() => {
+    if (cfgOpen) return;
+    skillCacheRef.current = null;
+    skillPromiseRef.current = null;
+    setSkillList(null);
+  }, [cfgOpen]);
+
+  /** 按「新文本 + 光标」决定浮层开合（输入事件里调用） */
+  const syncSlash = useCallback((text: string, caret: number): void => {
+    /**
+     * ★ 面板已开时**不再重新判定触发**：过滤词允许含中文等任意非空白字符。
+     *
+     * 为什么：skill 的 `name` 是英文、`description` 是中文，按中文描述搜是主场景；
+     * 若每次输入都重跑 `slashTriggerAt`（字符集只认 `[A-Za-z0-9_-]`），用户打完 `/`
+     * 再敲一个中文字，就会被判成"不是触发态" → 面板当场消失，观感是"我刚打 / 就没了"。
+     * 退出条件写死三条：删掉了 `/`、光标越过空白/换行、过滤词过长。
+     */
+    if (slash !== null
+      && caret > slash.start
+      && text[slash.start] === '/'
+      && !/\s/.test(text.slice(slash.start + 1, caret))
+      && caret - slash.start <= SLASH_QUERY_MAX) {
+      setSlash({ start: slash.start, query: text.slice(slash.start + 1, caret), caret });
+      setSlashActive(0);
+      return;
+    }
+    const trig = slashTriggerAt(text, caret);
+    if (!trig) {
+      setSlash(null);
+      return;
+    }
+    setSlash({ start: trig.start, query: trig.query, caret });
+    setSlashActive(0);
+    void ensureSkills();
+  }, [ensureSkills, slash]);
+
+  /** 选中候选：把触发中的 `/过滤词` 换成 `/名称 `，并把光标放回名称之后 */
+  const pickSkill = useCallback((skill: PromptSkill): void => {
+    if (!slash) return;
+    const next = applySkillToken(draft, { start: slash.start, query: slash.query }, slash.caret, skill.name);
+    setDraft(next.text);
+    setSlash(null);
+    setPendingCaret(next.caret);
+  }, [draft, slash]);
+
+  /**
+   * 插入后恢复焦点与光标。
+   *
+   * ★ 必须在 effect 里做（不能在原生事件处理器里就地 `rAF`）：本项目踩过
+   *   「原生事件里 rAF 在 React 提交前执行 → ref 还是旧节点、聚焦静默失效」的坑。
+   */
+  useEffect(() => {
+    if (pendingCaret === null) return;
+    setPendingCaret(null);
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(pendingCaret, pendingCaret);
+  }, [pendingCaret]);
+
+  /**
+   * 发送 / 编辑重发前：把草稿里的 `/名称` 解析成 skill id。
+   *
+   * 返回 `undefined` 与 `[]` **语义不同**（编辑重发会用到这个区别）：
+   *   · `[]` = 解析成功但没有点名（用户把 `/名称` 删了 → 后端应清空该消息的点名）；
+   *   · `undefined` = **列表没拉到**（先别下结论）→ 后端保留原值。
+   *     否则一次网络抖动就会把用户此前点名的 skill 静默清掉。
+   */
+  const resolveSkillIds = useCallback(async (text: string): Promise<string[] | undefined> => {
+    if (!hasSlashToken(text)) return [];
+    const list = await ensureSkills();
+    if (skillCacheRef.current === null) return undefined;
+    return parseSkillTokenIds(text, list);
+  }, [ensureSkills]);
+
+  /** 过滤后的候选（浮层与键盘导航共用同一份） */
+  const slashRows = useMemo(
+    () => (slash ? filterSkills(skillList ?? [], slash.query) : []),
+    [skillList, slash],
+  );
+
+  /**
+   * 草稿分段（普通文本 / skill token）—— 高亮层与「有没有 token」共用这一个来源。
+   * 无 token 时 `tokenized=false`，输入框完全走原生渲染（零回归面）。
+   */
+  const composerSegments = useMemo(
+    () => splitSkillSegments(draft, skillList ?? []),
+    [draft, skillList],
+  );
+  const tokenized = composerSegments.some((s) => s.kind === 'skill');
+
+  /**
+   * 面板一打开就预热 skill 列表。
+   *
+   * 为什么不等用到才拉：手打 `/名称` 时若列表还没到，高亮要等一次往返才亮（先纯文本、后跳成块）；
+   * 候选面板也是同理（第一次打 `/` 会先看到「正在读取」）。预热把这两处都变成"即开即用"。
+   * 失败不提示（`skillError` 只在用户真的打开候选面板时才展示，不打扰正常输入）。
+   */
+  useEffect(() => {
+    if (!open) return;
+    void ensureSkills();
+  }, [open, ensureSkills]);
+
+  /**
+   * 兜底：配置层关掉后缓存被清空（skill 可能已启用/停用），此时若草稿里已有 token，
+   * 重新拉一次让高亮恢复。`ensureSkills` 自带缓存与并发去重，重复触发不会重复请求。
+   */
+  useEffect(() => {
+    if (skillList !== null || !hasSlashToken(draft)) return;
+    void ensureSkills();
+  }, [draft, skillList, ensureSkills]);
 
   // ★ 硬约束：隐藏而非卸载（返回 null 不触发组件卸载，store 状态与进行中的流均保留）
   if (!open) return null;
@@ -1132,9 +1318,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         //   原先直接用 `state.activeConvId ?? ''` → 打到 /conversations//messages（必然失败）。
         const convId = store.getState().activeConvId ?? (await createNewConversation());
         if (scopeRef.current !== reqScope || operationSeqRef.current !== operation) return;
+        // ★ `/` 点名（2026-11-12）：从草稿文本**现解析**（文本即凭证 —— 删掉 `/名称` 就不再点名）。
+        //   首次使用且草稿含 token 时会补一次 prompt-config 请求（约几十毫秒）。
+        const skillIds = await resolveSkillIds(text);
+        if (scopeRef.current !== reqScope || operationSeqRef.current !== operation) return;
         // ★ 引用**发送后不清空**：Q3 拍板「当前对话框内有效」= 同一会话的多轮提问持续携带，
         //   直到用户主动删除，或切换会话 / 切换 scope（清空点见 chatStore.setActiveConv 与本文件 scope effect）
-        const persisted = await stream.send(convId, text, reqRefs);
+        const persisted = await stream.send(convId, text, reqRefs, skillIds);
         // ★ 只有收到 `done`（服务端确已落盘）才"以服务端为准"重取：
         //   error / aborted / 中断路径下服务端可能没有新内容 → 重取会把刚渲染的回答**覆盖成旧的**
         //   （用户看到回答凭空消失且无提示）。失败路径改由错误槽 + 重试入口承担。
@@ -1198,7 +1388,11 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     const operation = ++operationSeqRef.current;
     void (async () => {
       try {
-        const persisted = await stream.editAndResend(convId, msgId, text.trim());
+        const trimmed = text.trim();
+        // 编辑重发同样现解析：`[]` = 用户把 `/名称` 删掉了 → 后端显式清空该消息的点名
+        const skillIds = await resolveSkillIds(trimmed);
+        if (operationSeqRef.current !== operation) return;
+        const persisted = await stream.editAndResend(convId, msgId, trimmed, skillIds);
         if (persisted) await reloadActive(convId);
         void refreshConversations();
       } catch (err) {
@@ -1783,6 +1977,14 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 </span>
               </span>
             </div>
+            {/* 高亮镜像层与 textarea 必须同处一个定位容器：镜像层 `absolute` 贴合它的
+                client box，排版属性全部从 textarea 现取（见 ComposerMirror 头注释）。
+                `data-tokenized` 只在**真有生效 token** 时出现 —— 否则不渲染镜像、不改 textarea 颜色。 */}
+            <div className="ki-chat-composer__taWrap" data-tokenized={tokenized ? 'true' : undefined}>
+            {/* `composerEl` 必须一并判断：textarea 重挂载（dock 面板重开、切 scope）时
+                `bindComposer` 会先收到 null，这一帧 anchor 为空 —— 镜像层拿不到 textarea 的
+                排版就会用继承样式画在流内顶部，与文字重影闪一下。 */}
+            {tokenized && composerEl ? <ComposerMirror anchor={composerEl} segments={composerSegments} /> : null}
             <textarea
               className="ki-chat-composer__ta"
               ref={bindComposer}
@@ -1790,17 +1992,78 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               maxLength={MAX_SEND_CHARS}
               placeholder={blocked ?? '请输入内容…'}
               disabled={Boolean(config && !config.enabled)}
+              /* `/` 候选浮层：高亮项由这里指认（候选本身 `tabIndex={-1}`，不进 Tab 序） */
+              aria-expanded={slash !== null}
+              aria-controls={slash !== null ? `${slashMenuId}-list` : undefined}
+              aria-activedescendant={
+                slash !== null && slashRows.length > 0
+                  ? `${slashMenuId}-${Math.min(slashActive, slashRows.length - 1)}`
+                  : undefined
+              }
               /* ⚠️ 不标记 data-ki-search-input：否则 AppShell 的 Ctrl+F 会聚焦到这里而非页面搜索框 */
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setDraft(next);
+                // 触发判定必须基于「新文本 + 新光标」，不能用旧的 draft / 旧 selection
+                syncSlash(next, e.target.selectionStart ?? next.length);
+              }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                // 输入法组合态一律放行（Enter 用于上屏，不是"选择候选 / 发送"）
+                const composing = e.nativeEvent.isComposing || e.keyCode === 229;
+                if (slash !== null && !composing) {
+                  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (slashRows.length > 0) {
+                      setSlashActive((i) => (e.key === 'ArrowDown'
+                        ? (i + 1) % slashRows.length
+                        : (i - 1 + slashRows.length) % slashRows.length));
+                    }
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setSlash(null);
+                    return;
+                  }
+                  // ★ 必须排除 shiftKey：Shift+Enter 是**换行**，不能被候选吞掉
+                  //   （用户想在新的一行继续写，结果被插进一个 skill —— 且是静默的）
+                  if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && slashRows.length > 0) {
+                    e.preventDefault();
+                    pickSkill(slashRows[Math.min(slashActive, slashRows.length - 1)]!);
+                    return;
+                  }
+                  // 无匹配时 Enter 仍走"发送"，但要先把浮层收掉（否则发完还挂着旧列表）
+                  if (e.key === 'Enter' && !e.shiftKey) setSlash(null);
+                }
+                if (e.key === 'Enter' && !e.shiftKey && !composing) {
                   e.preventDefault();
                   handleSend();
                 }
               }}
             />
+            </div>
+            {slash !== null ? (
+              <SkillSlashMenu
+                idPrefix={slashMenuId}
+                skills={skillList ?? []}
+                rows={slashRows}
+                loading={skillLoading}
+                error={skillError}
+                active={slashActive}
+                anchor={composerEl}
+                query={slash.query}
+                onPick={pickSkill}
+                onHover={setSlashActive}
+                onClose={() => setSlash(null)}
+              />
+            ) : null}
             <div className="ki-chat-composer__bar">
-              {hint === 'Enter 发送 · Shift+Enter 换行' ? (
+              {slash !== null ? (
+                // 浮层打开期间临时替换底栏提示：此刻 Enter 是"选候选"而不是"发送"
+                <span className="ki-chat-composer__hint ki-chat-composer__hint--keys">
+                  <kbd>Enter</kbd><span>选择</span><kbd>↑</kbd><kbd>↓</kbd><span>切换</span><kbd>Esc</kbd><span>关闭</span>
+                </span>
+              ) : hint === 'Enter 发送 · Shift+Enter 换行' ? (
                 <span className="ki-chat-composer__hint ki-chat-composer__hint--keys">
                   <kbd>Enter</kbd><span>发送</span><kbd>Shift</kbd><span>+</span><kbd>Enter</kbd><span>换行</span>
                 </span>

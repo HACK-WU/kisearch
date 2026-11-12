@@ -56,6 +56,9 @@ export const CHAT_REF_TEXT_MAX = 2000;
 /** 全部引用文本合计上限（字符，与后端一致） */
 export const CHAT_REF_TOTAL_MAX = 6000;
 
+/** 单次提问可 `/` 点名的 skill 个数上限（与后端 `CHAT_SKILLS_MAX` 手工同源） */
+export const CHAT_SKILLS_MAX = 5;
+
 /**
  * 工具入参的**展示用**扁平摘要（与后端 `ChatToolArgsDisplay` 对齐）。
  *
@@ -118,6 +121,13 @@ export interface ChatMessage {
   progress?: ChatProgressStep[];
   /** 用户本轮提问手动引用的文档片段（仅 user 消息；与 assistant 的 `sources` 语义不同） */
   refs?: ChatRef[];
+  /**
+   * 用户本轮用 `/` 斜杠**点名**的 skill id（2026-11-12，仅 user 消息）。
+   *
+   * ⚠️ 与 `ConversationFile.loadedSkillIds`（会话级、每轮重放）**严格区分**：
+   * 本字段是单轮语义，后端只把对应正文注入该条消息所属的那一轮，不写会话级清单。
+   */
+  skills?: string[];
   /**
    * 上下文用量（**字符数**，REQ-20261013-001）= 最后一次 `context` 事件（该轮请求基数）
    * + 本轮回答正文字符数。旧会话无此字段 → 前端按"无数据"渲染（不显示 0）。

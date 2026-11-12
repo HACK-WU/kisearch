@@ -29,12 +29,18 @@ export interface ChatStreamApi {
    *
    * @returns 是否收到 `done`（= 服务端已落盘）。**调用方据此决定能否"以服务端为准"重取**：
    *          为 `false`（error / aborted / 中断）时服务端内容可能缺失，重取会覆盖掉本地已渲染内容。
+   *
+   * @param skills `/` 斜杠点名的 skill id（2026-11-12；缺省 / 空数组不写进请求体）
    */
-  send(convId: string, text: string, refs?: readonly ChatRef[]): Promise<boolean>;
+  send(convId: string, text: string, refs?: readonly ChatRef[], skills?: readonly string[]): Promise<boolean>;
   /** 重新生成（API-11，不新增 user 消息）；返回语义同 `send` */
   regenerate(convId: string): Promise<boolean>;
-  /** 编辑并重发（API-12，后端原子截断）；返回语义同 `send` */
-  editAndResend(convId: string, msgId: string, text: string): Promise<boolean>;
+  /**
+   * 编辑并重发（API-12，后端原子截断）；返回语义同 `send`。
+   *
+   * @param skills `undefined` = 保留原消息的 `/` 点名；数组（含空）= 覆盖（空 = 用户删掉了名称）
+   */
+  editAndResend(convId: string, msgId: string, text: string, skills?: readonly string[]): Promise<boolean>;
   /** 中止当前生成（N6：保留已生成部分并标记「已中止」） */
   abort(): void;
   /** 是否存在活跃流 */
@@ -270,7 +276,7 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
     const tempId = () => `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
     return {
-      async send(convId: string, text: string, refs?: readonly ChatRef[]): Promise<boolean> {
+      async send(convId: string, text: string, refs?: readonly ChatRef[], skills?: readonly string[]): Promise<boolean> {
         const placeholder = tempId();
         // 乐观显示 user 消息（不落盘乐观，只做 UI 立即反馈；失败的可重试入口在错误槽）
         // 引用一并乐观挂上：发出后立即可见"这一问带着哪些引用"（REQ-20261009-002）
@@ -285,7 +291,14 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
             },
           ],
         });
-        return run(convId, placeholder, (signal) => streamMessage(convId, text, signal, refs), undefined, undefined, `local-user-${placeholder}`);
+        return run(
+          convId,
+          placeholder,
+          (signal) => streamMessage(convId, text, signal, refs, skills),
+          undefined,
+          undefined,
+          `local-user-${placeholder}`,
+        );
       },
 
       async regenerate(convId: string): Promise<boolean> {
@@ -297,8 +310,8 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
         return run(convId, tempId(), (signal) => streamRegenerate(convId, signal), undefined, last?.role === 'assistant' ? last.id : undefined);
       },
 
-      async editAndResend(convId: string, msgId: string, text: string): Promise<boolean> {
-        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal), () => {
+      async editAndResend(convId: string, msgId: string, text: string, skills?: readonly string[]): Promise<boolean> {
+        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal, skills), () => {
           // meta is emitted only after the server commits the edit/truncation.
           const messages = store.getState().messages;
           const idx = messages.findIndex((m) => m.id === msgId && m.role === 'user');

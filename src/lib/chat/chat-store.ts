@@ -589,6 +589,14 @@ export async function truncateAfterAndEdit(
   id: string,
   msgId: string,
   newText: string,
+  /**
+   * 本轮 `/` 点名的 skill id（2026-11-12，可选）。
+   *
+   * · 传 `undefined` ⇒ 保留原消息上的 `skills`（旧调用方 / 未启用该能力）；
+   * · 传数组（含空数组）⇒ **覆盖**该消息的 `skills`：空数组表示用户把 `/名称` 删掉了，
+   *   必须真的清掉，否则会出现"文本里看不到却仍在生效"。
+   */
+  skills?: string[],
 ): Promise<{ conv: ConversationFile; discardedCount: number }> {
   validateScope(scope);
   return withConvLock(id, () => {
@@ -606,7 +614,12 @@ export async function truncateAfterAndEdit(
     // 物理截断其后全部（切片而非标记删除）
     conv.messages = conv.messages.slice(0, idx + 1);
     // 用编辑后文本替换该条 content（S07 §3.9 / api/retrieval.md §3 语义）
-    conv.messages[idx] = { ...target, content: newText };
+    const { skills: _prevSkills, ...rest } = target;
+    conv.messages[idx] = skills === undefined
+      ? { ...target, content: newText }
+      : skills.length > 0
+        ? { ...rest, content: newText, skills }
+        : { ...rest, content: newText };
 
     conv.seq += 1;
     conv.messageCount = conv.messages.length;

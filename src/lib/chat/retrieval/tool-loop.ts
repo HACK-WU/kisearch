@@ -97,6 +97,14 @@ export interface ToolLoopInput {
    *   详见 `renderRefsBlock` 的注释。
    */
   refs?: readonly ChatRef[];
+  /**
+   * 本轮用 `/` 斜杠**点名**的 skill id（2026-11-12；可选）。
+   *
+   * 语义 = **仅本轮**：把正文作为 system 块注入这一次请求，并在事件流里告知前端；
+   * ⚠️ 与 `conv.loadedSkillIds`（会话级重放、每轮都注入、无移除 API）**严格区分**，
+   *    本字段既不读也不写那个清单。理由见 `ChatMessage.skills` 的注释。
+   */
+  forcedSkillIds?: readonly string[];
   signal?: AbortSignal;
   /** 当前 principal 能力；缺省 = 不按能力过滤（兼容旧调用方/测试） */
   capabilities?: ReadonlySet<Capability>;
@@ -286,6 +294,48 @@ function loadedSkillBlocks(conv: ConversationFile, runtime: LoopRuntime): string
   return out;
 }
 
+/**
+ * 本轮 `/` 斜杠点名、且**本次真正要注入正文**的 skill（2026-11-12）。
+ *
+ * · 已在本会话加载过（`conv.loadedSkillIds`）的不重复注入 —— 同一份规则在上下文里出现两遍
+ *   既费 token 又会让模型误判"有两个来源"；
+ * · 停用 / 已删除 / 正文为空 → 跳过（路由层已对请求体做过 fail-loud 校验，
+ *   这里兜的是"生成前置写之后、注入之前被改配置"的窄窗口）。
+ */
+function forcedSkills(
+  input: ToolLoopInput,
+  runtime: LoopRuntime,
+): Array<{ id: string; name: string; description: string; content: string }> {
+  const ids = input.forcedSkillIds ?? [];
+  if (ids.length === 0) return [];
+  const already = new Set(input.conv.loadedSkillIds ?? []);
+  const out: Array<{ id: string; name: string; description: string; content: string }> = [];
+  for (const id of ids) {
+    if (already.has(id)) continue;
+    const skill = findEnabledSkill(runtime.promptConfig, id);
+    if (!skill || skill.content.trim().length === 0) continue;
+    if (out.some((s) => s.id === skill.id)) continue;
+    out.push(skill);
+  }
+  return out;
+}
+
+/**
+ * 点名块的 system 组：**说明行 → 各 skill 正文块**。
+ *
+ * 说明行不可省：目录里写着"需要时调用 use_skill 加载"，若不点明"用户已点名、规则已附上"，
+ * 模型可能仍去调工具或反问用户要哪个 skill（正文本就在上下文里）。
+ */
+function forcedSkillBlockGroup(input: ToolLoopInput, runtime: LoopRuntime): string[] {
+  const list = forcedSkills(input, runtime);
+  if (list.length === 0) return [];
+  const names = list.map((s) => `${s.name}（${s.id}）`).join('、');
+  return [
+    `【本轮点名 skill】用户在提问中用 / 明确指定了 ${names}；其完整规则已附在本条之后，本轮回答必须按这些规则执行。`,
+    ...list.map((s) => renderSkillLoadedBlock(s)),
+  ];
+}
+
 /** `use_skill` 的工具定义（**不是 MCP 工具**：只读配置、不碰知识库、不进 coordinator 队列） */
 function useSkillToolDef(): ToolDef {
   return {
@@ -381,6 +431,11 @@ function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): Chat
   // ★ 已加载 skill 的正文（会话级，每轮重放）：紧跟恒定块 —— 与恒定块同属"规则组"，
   //   必须早于压缩摘要与历史消息出现（顺序变化会改变模型对"哪些是当前规则"的判断）。
   for (const block of loadedSkillBlocks(input.conv, runtime)) {
+    msgs.push({ role: 'system', content: block });
+  }
+  // ★ `/` 斜杠点名（2026-11-12）：**仅本轮**，紧跟会话级已加载块（同属"规则组"）。
+  //   刻意不并入 `conv.loadedSkillIds` —— 点名的语义是"这一问"，不是"以后都用"。
+  for (const block of forcedSkillBlockGroup(input, runtime)) {
     msgs.push({ role: 'system', content: block });
   }
   // 手动压缩摘要（REQ-20261013-001 R8）：**独立 system 块**，不动用户自己的 systemPrompt
@@ -577,6 +632,12 @@ async function* toolLoopPath(
   messageId: string,
 ): AsyncGenerator<ChatEvent> {
   const messages = buildUpstreamMessages(input, runtime);
+  // ★ `/` 点名（2026-11-12）：先把"本轮按用户点名注入了哪些 skill"告知前端（时间线可见），
+  //   再开始生成。已在本会话加载过的条目不会出现在这里（本次没重复注入，报了反而误导）。
+  // ⚠️ 路由侧据此发事件但**不**并入 `conv.loadedSkillIds`（见 chat-routes 的 forcedSet 注释）。
+  for (const s of forcedSkills(input, runtime)) {
+    yield { type: 'skill', id: s.id, name: s.name, description: s.description, chars: s.content.length };
+  }
   const maxRounds = runtime.maxToolRounds;
   /** 当轮引用附录块的长度（明细展示用；已包含在 user 分量里） */
   const refsChars = renderRefsBlock(input.refs)?.length ?? 0;
@@ -728,7 +789,9 @@ async function* toolLoopPath(
         const outcome = resolveUseSkill(call.arguments, {
           callableIds,
           skills: runtime.promptConfig.skills,
-          alreadyLoaded: [...(input.conv.loadedSkillIds ?? []), ...loadedThisTurn],
+          // 本轮点名的 skill 正文**已经**在 system 组里 ⇒ 归入 alreadyLoaded，
+          // 否则模型再调一次 use_skill 会把同一份正文重复塞进上下文（2026-11-12）
+          alreadyLoaded: [...(input.conv.loadedSkillIds ?? []), ...(input.forcedSkillIds ?? []), ...loadedThisTurn],
         });
         // 只有"真正加载成功"才记账：失败与重复加载都不得进入已加载集合，
         // 否则下一轮会静默重放一个空 skill（正文取不到，模型却以为规则已生效）。

@@ -8570,3 +8570,103 @@ select.ki-chat-cfg__ta--select {
  * 刻意不做配色区分：顶栏已经够挤，再加边框色与色块只会抢注意力；
  * 「是视图还是库」用一个小标签说明就够，用户不需要第二层强调。
  */
+
+/* ══════════════════════════════════════════════════════════════════
+   `/` 斜杠 skill 候选浮层（2026-11-12）
+
+   · 定位：`position: fixed` + 由 JS 现算 left/width/bottom（src/chat/SkillSlashMenu.tsx）。
+     输入框在对话面板最底部 ⇒ 必须向上弹；用 `absolute` 会被对话面板链路上的多层
+     `overflow`（panel / content / composer / foot）裁掉 —— 与 ScopeMultiPicker 同源的坑。
+   · z-index 150：高于页面内各类下拉（30/60/100/120），低于侧栏（990）与聊天面板（1030）。
+   · 条目两行：`/名称` + 描述单行省略；描述是"要不要用这个 skill"的唯一判断依据，
+     所以不能整行省略成一条。
+   ══════════════════════════════════════════════════════════════════ */
+.ki-chat-slash {
+  position: fixed; z-index: 150;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface); box-shadow: var(--ki-shadow-2);
+  overflow: hidden;
+}
+.ki-chat-slash__head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--ki-space-2);
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); font-weight: 600; color: var(--ki-color-text-muted);
+}
+.ki-chat-slash__head em { font-style: normal; font-weight: 400; color: var(--ki-color-text-subtle); }
+.ki-chat-slash__body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--ki-space-1); }
+.ki-chat-slash__item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 6px var(--ki-space-2);
+  border: none; border-radius: var(--ki-radius-sm);
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ki-chat-slash__item--active { background: var(--ki-color-hover); }
+.ki-chat-slash__name { font-size: var(--ki-font-size-sm); font-weight: 600; color: var(--ki-color-primary); }
+.ki-chat-slash__desc {
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-chat-slash__empty {
+  margin: 0; padding: var(--ki-space-3);
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); text-align: center;
+}
+.ki-chat-slash__empty--err { color: var(--ki-color-danger); }
+.ki-chat-slash__more {
+  padding: 6px var(--ki-space-3); border-top: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   输入框里的 skill token 高亮 + 前置标志（2026-11-12）
+
+   `textarea` 无法只给一段文字加样式 ⇒ 同一份文本由 `.ki-chat-hl`（只读镜像）再画一遍，
+   textarea 文字设为透明、只保留光标与选区。**只在真有 token 时启用**
+   （`[data-tokenized='true']`）：没有 token 的输入框完全走原生渲染。
+
+   ★ 三条不能碰的约束：
+     1. 禁止改 token 的 `font-weight` / `letter-spacing` / `font-size` —— 那会改变字形度量，
+        镜像层的换行点就与 textarea 不一致（textarea 里的文字虽然透明，但换行仍按它自己的度量算）。
+        想加粗用 `text-shadow` 描边（不改度量）。
+     2. 排版属性（字体 / 行高 / 内距 / 换行策略）由 JS 从 textarea 现取，见 `ComposerMirror.tsx`；
+        这里一律不写死，否则会与 `.ki-chat-panel .ki-chat-composer__ta` 的高特异性覆盖打架。
+     3. 块左扩靠 `padding-left` + 等量负 `margin-left` 抵消：文字位置不动，只有可绘区域变大。
+   ══════════════════════════════════════════════════════════════════ */
+.ki-chat-composer__taWrap { position: relative; }
+
+.ki-chat-hl {
+  position: absolute; z-index: 0;
+  color: var(--ki-color-text);
+  overflow: hidden;
+  pointer-events: none; user-select: none;
+  /* top / bottom / left / width 由 JS 设置（见 ComposerMirror：高度必须贴容器而不是读 clientHeight） */
+}
+
+.ki-chat-composer__taWrap[data-tokenized='true'] .ki-chat-composer__ta {
+  position: relative; z-index: 1;
+  /* 文字交给镜像层画；光标 / 选区 / 输入法候选框仍由 textarea 负责 */
+  color: transparent;
+  caret-color: var(--ki-color-text);
+}
+/* ⚠️ 这里刻意**不**补 `::placeholder` 的色：`data-tokenized` 只在真有 token 时出现，
+   而"有 token"蕴含"草稿非空" ⇒ placeholder 本来就不渲染。为它写一条规则只会成为不可达的死代码
+   （将来若改成"始终透明"，必须同时补上，否则占位符会跟着变透明）。 */
+
+.ki-chat-hl__token {
+  position: relative;
+  /* ★ 块**不左扩**：只有背景与文字色变化，字距/字宽一律不动 ⇒ 与 textarea 的排版永远一致，
+     且块左缘与普通文本行对齐（句首句中都是同一套规则，少一份分支就少一处错位） */
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+  color: var(--ki-color-primary);
+  /* 视觉加粗但**不改字形度量**（改 font-weight 会让镜像层换行位置与 textarea 漂移） */
+  text-shadow: 0 0 0.35px currentColor;
+}
+
+/* 标志挂在块左外侧的空格里（行首时落在输入框内边距 + 卡片内距上；镜像层已左扩 14px，不会被裁） */
+.ki-chat-hl__mark {
+  position: absolute; left: -10px; top: 0;
+  font-style: normal; font-size: 10px; line-height: inherit;
+  color: var(--ki-color-primary); opacity: 0.9;
+}
