@@ -32,8 +32,17 @@ import {
   plantumlErrorDetail,
   plantumlFallbackNotice,
   renderPlantuml,
-  type PlantumlFallbackNotice,
 } from '@/lib/plantuml';
+import {
+  echartsErrorDetail,
+  echartsFallbackNotice,
+  echartsOptionError,
+  isBlankEchartsSvg,
+  isEchartsLanguage,
+  isSafeEchartsSvg,
+  loadEcharts,
+  renderEchartsSvg,
+} from '@/lib/echarts';
 import { useDocumentTheme } from '@/lib/theme';
 import { isLocalDocumentHref } from '@/lib/documentLinks';
 import { deepLink, parseKiLink } from '@/lib/kiLinks';
@@ -397,11 +406,19 @@ function findCodeGroupClose(source: string): { index: number; end: number } | nu
 
 /** 组件的 id 前缀：模块级自增，保证同一页面多次渲染也不出现重复 id */
 let codeGroupSeq = 0;
-/** PlantUML 块的 id 前缀（与 code-group 分开计数，便于排查时区分两类块） */
-let plantumlSeq = 0;
+/** 图表块（PlantUML / ECharts）的 id 前缀，与 code-group 分开计数便于排查 */
+let diagramSeq = 0;
+
+/** 走「图表 / 代码」双面板的围栏种类（mermaid 不走这条：它沿用"直接替换源码块"的老形态） */
+export type DiagramKind = 'plantuml' | 'echarts';
+
+const DIAGRAM_PENDING_LABEL: Record<DiagramKind, string> = {
+  plantuml: 'PlantUML 图表加载中…',
+  echarts: 'ECharts 图表加载中…',
+};
 
 /**
- * PlantUML 块：工具条左侧是「图表 / 代码」标签组，右侧仍是常驻复制按钮。
+ * 图表块（PlantUML / ECharts 共用）：工具条左侧是「图表 / 代码」标签组，右侧仍是常驻复制按钮。
  *
  * 为什么复用 code-group 的 DOM 契约（`data-ki-code-group` / `[data-ki-code-tab]` /
  * `[data-ki-code-panel]`）而不是另造一套切换逻辑：那一套已经实现了点击、←/→/Home/End、
@@ -410,8 +427,8 @@ let plantumlSeq = 0;
  * 面板 0 = 图表面板（先放"加载中"，渲染成功后替换成 SVG）；面板 1 = 代码面板（源码原文）。
  * **复制取代码面板**：复制内容永远是源码原文，与当前显示哪个面板无关。
  */
-function plantumlBlockHtml(text: string, language: string): string {
-  const id = `ki-plantuml-${++plantumlSeq}`;
+function diagramBlockHtml(text: string, language: string, kind: DiagramKind): string {
+  const id = `ki-diagram-${++diagramSeq}`;
   const languageClass = ` class="language-${escapeAttr(language)}"`;
   const tabs = [
     { index: 0, label: '图表' },
@@ -420,15 +437,16 @@ function plantumlBlockHtml(text: string, language: string): string {
     + ` aria-controls="${id}-panel-${tab.index}" aria-selected="${tab.index === 0}"`
     + ` tabindex="${tab.index === 0 ? 0 : -1}" data-ki-code-tab="${tab.index}"`
     + ` title="${tab.label}">${tab.label}</button>`).join('');
-  return '<div class="ki-code-block ki-code-group ki-plantuml" data-ki-code-group data-ki-plantuml>'
+  return `<div class="ki-code-block ki-code-group ki-diagram ki-diagram--${kind}" data-ki-code-group`
+    + ` data-ki-diagram="${kind}">`
     + '<div class="ki-code-block__bar">'
-    + `<div class="ki-code-tabs" role="tablist" aria-label="图表与源码" data-ki-plantuml-tabs>${tabs}</div>`
+    + `<div class="ki-code-tabs" role="tablist" aria-label="图表与源码" data-ki-diagram-tabs>${tabs}</div>`
     + '<button class="ki-code-copy" type="button" data-ki-copy-code aria-label="复制代码">复制</button>'
     + '</div>'
     + '<div class="ki-code-panels">'
-    + `<div class="ki-code-panel ki-plantuml__panel" role="tabpanel" id="${id}-panel-0"`
+    + `<div class="ki-code-panel ki-diagram__panel" role="tabpanel" id="${id}-panel-0"`
     + ` aria-labelledby="${id}-tab-0" data-ki-code-panel="0">`
-    + '<span class="ki-plantuml__pending" data-ki-plantuml-pending>PlantUML 图表加载中…</span></div>'
+    + `<span class="ki-diagram__pending" data-ki-diagram-pending>${DIAGRAM_PENDING_LABEL[kind]}</span></div>`
     + `<div class="ki-code-panel" role="tabpanel" id="${id}-panel-1"`
     + ` aria-labelledby="${id}-tab-1" data-ki-code-panel="1" hidden>`
     + `<pre><code${languageClass}>${escapeHtml(text)}</code></pre></div>`
@@ -529,9 +547,10 @@ function buildRenderer(base?: AssetBase, options?: { highlight?: boolean }) {
     // （真机走查 2026-10-09 实测：整块 195px 高、除按钮外零内容像素，点复制得到空串）。
     if (!text.trim()) return '';
     const language = lang?.trim().split(/\s+/, 1)[0];
-    // PlantUML 围栏走「图表 / 代码」双面板结构（见 plantumlBlockHtml）。放在这里而不是另开扩展：
-    // 它本质仍是代码块，只有 DOM 内部多一个会异步填充的面板，走 marked 原生 code 通道最省事。
-    if (language && isPlantumlLanguage(language)) return plantumlBlockHtml(text, language);
+    // 图表围栏（PlantUML / ECharts）走「图表 / 代码」双面板结构（见 diagramBlockHtml）。放在这里
+    // 而不是另开 marked 扩展：它们本质仍是代码块，只是 DOM 里多一个会异步填充的面板。
+    if (language && isPlantumlLanguage(language)) return diagramBlockHtml(text, language, 'plantuml');
+    if (language && isEchartsLanguage(language)) return diagramBlockHtml(text, language, 'echarts');
     const languageClass = language ? ` class="language-${escapeAttr(language)}"` : '';
     // 顶部工具条（左语言名 / 右常驻复制按钮）。按钮此前是绝对定位浮层，靠容器 `padding-right: 72px` 让位——
     // 那条内边距作用于**整列高度**，按钮下方同样被占用，内容区与横向滚动条被永久挤窄（走查 2026-10-09）。
@@ -853,7 +872,7 @@ function markMermaidFallback(pre: HTMLElement, kind: MermaidFallbackKind, detail
 }
 
 /** 在块工具条上插「⚠ …」标记 + 可展开说明（mermaid / PlantUML 共用，文案由调用方给） */
-function markBlockFallback(block: HTMLElement, notice: PlantumlFallbackNotice): void {
+function markBlockFallback(block: HTMLElement, notice: DiagramNotice): void {
   if (block.querySelector('.ki-code-warn')) return;
   const panelId = `ki-code-warn-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -893,23 +912,31 @@ function markBlockFallback(block: HTMLElement, notice: PlantumlFallbackNotice): 
   block.append(warn, panel);
 }
 
+/** 图表兜底提示（PlantUML / ECharts 的 notice 结构一致，统一走一个标记组件） */
+interface DiagramNotice {
+  label: string;
+  title: string;
+  reason: string;
+  hint: string;
+}
+
 /**
- * PlantUML 渲染失败：按已确认的界面口径退回「纯代码块」形态。
+ * 图表渲染失败：按已确认的界面口径退回「纯代码块」形态（PlantUML / ECharts 共用）。
  *
  * 三步都要做，缺一用户就会看到一个空图表面板：
  * ① 标签组换回语言名（此时已没有可切换的两个面板）；
  * ② 图表面板隐藏、代码面板显示；
  * ③ 工具条挂「⚠ …」标记说明原因与去路。
  */
-function failPlantumlBlock(block: HTMLElement, notice: PlantumlFallbackNotice): void {
+function failDiagramBlock(block: HTMLElement, notice: DiagramNotice): void {
   // 打上失败标记：标签组到此已被换成语言名（不可逆），再重试成功只会把图填进隐藏面板、
   // 标记还挂着 —— 反而更让人困惑。文案已给出「刷新页面可重试」，由刷新真正重来。
-  block.dataset.kiPlantumlFailed = '1';
-  const tabs = block.querySelector<HTMLElement>('[data-ki-plantuml-tabs]');
+  block.dataset.kiDiagramFailed = '1';
+  const tabs = block.querySelector<HTMLElement>('[data-ki-diagram-tabs]');
   if (tabs) {
     const language = /\blanguage-([\w+-]+)/.exec(
       block.querySelector<HTMLElement>('[data-ki-code-panel="1"] pre code')?.className ?? '',
-    )?.[1] ?? 'plantuml';
+    )?.[1] ?? 'diagram';
     const label = document.createElement('span');
     label.className = 'ki-code-lang';
     label.textContent = language;
@@ -1042,12 +1069,12 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
       // 多语言块（`::: code-group`）内含多个面板，只取**当前显示**的那一个——否则会复制到
       // 隐藏语言（原型实测：按 DOM 顺序取第一个 `pre code` 会取到未选中的版本）。
       const scope = codeBlock?.querySelector<HTMLElement>('.ki-code-panel:not([hidden])') ?? codeBlock;
-      // PlantUML 块固定复制「代码面板」的原文：图表态下当前面板里只有 SVG，没有可复制的文本；
-      // 且复制口径与显示哪个面板无关（用户点复制拿到的永远是能改的那份源码）。
-      const plantumlSource = codeBlock?.matches('[data-ki-plantuml]')
+      // 图表块（PlantUML / ECharts）固定复制「代码面板」的原文：图表态下当前面板里只有 SVG，
+      // 没有可复制的文本；且复制口径与显示哪个面板无关（拿到的永远是能改的那份源码）。
+      const diagramSource = codeBlock?.matches('[data-ki-diagram]')
         ? codeBlock.querySelector<HTMLElement>('[data-ki-code-panel="1"] pre code')?.textContent
         : undefined;
-      const source = plantumlSource
+      const source = diagramSource
         ?? scope?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
         ?? scope?.querySelector('pre code')?.textContent;
       if (source === undefined) return;
@@ -1238,66 +1265,94 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
     // 主题进依赖：mermaid 的配色写死在 svg 里，只有重绘才能跟随深浅切换
   }, [html, deferMermaid, theme]);
 
-  // PlantUML 图表渲染（纯前端引擎：无 Java、无外部服务、不出网，见 lib/plantuml.ts）。
+  // 图表渲染（PlantUML / ECharts 共用一条通道；两者都是纯前端引擎，无服务端、不出网）。
   // 与 mermaid 的两点差异：① 块内有两个面板，成功后只填图表面板（代码面板留着切回去看源码）；
   // ② 失败按已确认口径退回「纯代码块 + 工具条标记」，而不是留一个空图表面板。
   useEffect(() => {
     const root = rootRef.current;
     // deferMermaid：流式输出期间不渲染（每个 chunk 都重绘一次纯浪费），闭合后那一帧再画
-    if (!root || deferMermaid || !/language-(?:plantuml|puml|uml)\b/i.test(html)) return;
-    const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-ki-plantuml]'));
+    if (!root || deferMermaid || !/language-(?:plantuml|puml|uml|echarts)\b/i.test(html)) return;
+    const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-ki-diagram]'));
     if (blocks.length === 0) return;
     let cancelled = false;
 
+    /** 按块类型渲染出静态 SVG；失败直接抛（由调用方统一转成可见标记） */
+    const renderBlock = async (kind: string, source: string): Promise<{ svg: string; notice?: DiagramNotice }> => {
+      if (kind === 'echarts') {
+        // JSON 错与渲染错要分开讲：前者是"写错了"，后者才是"产品/引擎问题"
+        const jsonError = echartsOptionError(source);
+        if (jsonError) return { svg: '', notice: echartsFallbackNotice('json', jsonError) };
+        const svg = await renderEchartsSvg(source, { dark: theme === 'dark' });
+        if (!isSafeEchartsSvg(svg)) return { svg: '', notice: echartsFallbackNotice('insecure') };
+        if (isBlankEchartsSvg(svg)) return { svg: '', notice: echartsFallbackNotice('blank') };
+        return { svg };
+      }
+      const svg = await renderPlantuml(source, { dark: theme === 'dark' });
+      if (!isSafePlantumlSvg(svg)) return { svg: '', notice: plantumlFallbackNotice('insecure') };
+      // 引擎把语法错误画成红字图并**正常返回**，不判就会当成渲染成功
+      const verdict = classifyPlantumlSvg(svg);
+      if (verdict !== 'ok') return { svg: '', notice: plantumlFallbackNotice(verdict) };
+      return { svg };
+    };
+
     const renderAll = async (): Promise<void> => {
-      try {
-        await loadPlantuml();
-      } catch (error) {
-        // 资源加载失败与「图源码有问题」是两回事，文案与去路不同（刷新可重试 vs 改源码）
-        if (cancelled) return;
-        console.warn('[ki] PlantUML 渲染资源加载失败，图表未渲染：', plantumlErrorDetail(error));
-        for (const block of blocks) failPlantumlBlock(block, plantumlFallbackNotice('unavailable'));
-        return;
+      // 先按需加载各自引擎：加载失败与「源码有问题」是两回事，文案与去路不同（刷新可重试 vs 改源码）。
+      // ⚠️ 某一类引擎挂了只标记该类块，**不能 return** —— 否则同页另一类图表会永远停在"加载中"。
+      const kinds = new Set(blocks.map((block) => block.dataset.kiDiagram ?? 'plantuml'));
+      const failedKinds = new Set<string>();
+      for (const kind of kinds) {
+        try {
+          if (kind === 'echarts') await loadEcharts();
+          else await loadPlantuml();
+        } catch (error) {
+          if (cancelled) return;
+          failedKinds.add(kind);
+          const detail = kind === 'echarts' ? echartsErrorDetail(error) : plantumlErrorDetail(error);
+          console.warn(`[ki] ${kind} 渲染资源加载失败，图表未渲染：`, detail);
+          for (const block of blocks) {
+            if ((block.dataset.kiDiagram ?? 'plantuml') !== kind) continue;
+            failDiagramBlock(block, kind === 'echarts'
+              ? echartsFallbackNotice('unavailable')
+              : plantumlFallbackNotice('unavailable'));
+          }
+        }
       }
       for (const block of blocks) {
         if (cancelled) return;
-        if (block.dataset.kiPlantumlFailed === '1') continue; // 已判失败（见 failPlantumlBlock）
+        if (block.dataset.kiDiagramFailed === '1') continue; // 已判失败（见 failDiagramBlock）
+        const kind = block.dataset.kiDiagram ?? 'plantuml';
+        if (failedKinds.has(kind)) continue; // 该类引擎加载失败，已在上面标记
         // 源码取「代码面板」：即使已经渲染过（主题切换重绘），那份源码也一直在，不依赖 data-copy-text
         const source = block.querySelector<HTMLElement>('[data-ki-code-panel="1"] pre code')?.textContent ?? '';
         if (!source.trim()) continue;
         try {
-          const svg = await renderPlantuml(source, { dark: theme === 'dark' });
+          const { svg, notice } = await renderBlock(kind, source);
           if (cancelled) return;
-          // 守卫一：产物里不得含活动内容（脚本标签 / 事件属性 / 危险 scheme）
-          if (!isSafePlantumlSvg(svg)) {
-            console.warn('[ki] PlantUML 产物含活动内容，已拦下并保留源码块');
-            failPlantumlBlock(block, plantumlFallbackNotice('insecure'));
-            continue;
-          }
-          // 守卫二：引擎把语法错误画成红字图并**正常返回**，不判就会当成渲染成功
-          const verdict = classifyPlantumlSvg(svg);
-          if (verdict !== 'ok') {
-            failPlantumlBlock(block, plantumlFallbackNotice(verdict));
+          if (notice) {
+            console.warn(`[ki] ${kind} 图表未渲染，已保留源码块：`, notice.reason);
+            failDiagramBlock(block, notice);
             continue;
           }
           const panel = block.querySelector<HTMLElement>('[data-ki-code-panel="0"]');
           if (!panel) continue;
-          let figure = panel.querySelector<HTMLElement>('[data-ki-plantuml-figure]');
+          let figure = panel.querySelector<HTMLElement>('[data-ki-diagram-figure]');
           if (!figure) {
             // 首次成功：把「加载中」占位整个换掉（replaceChildren 而非 append，避免残留占位文字）
             panel.replaceChildren();
             figure = document.createElement('div');
-            figure.className = 'ki-plantuml__figure';
-            figure.dataset.kiPlantumlFigure = '1';
+            figure.className = 'ki-diagram__figure';
+            figure.dataset.kiDiagramFigure = '1';
             panel.appendChild(figure);
           }
           figure.dataset.copyText = source; // 复制始终是原文，容错与重绘都不影响
           figure.innerHTML = svg;
         } catch (error) {
           if (cancelled) return;
-          const detail = plantumlErrorDetail(error);
-          console.warn('[ki] PlantUML 渲染失败，已保留源码块：', detail);
-          failPlantumlBlock(block, plantumlFallbackNotice('failed', detail));
+          const detail = kind === 'echarts' ? echartsErrorDetail(error) : plantumlErrorDetail(error);
+          console.warn(`[ki] ${kind} 图表渲染失败，已保留源码块：`, detail);
+          failDiagramBlock(block, kind === 'echarts'
+            ? echartsFallbackNotice('failed', detail)
+            : plantumlFallbackNotice('failed', detail));
         }
       }
     };

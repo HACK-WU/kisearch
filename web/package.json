@@ -14,6 +14,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@plantuml/core": "^1.2026.10",
     "@tanstack/react-query": "^5.100.10",
+    "echarts": "^6.1.0",
     "highlight.js": "^11.12.0",
     "marked": "^18.0.9",
     "mermaid": "^11.16.1",

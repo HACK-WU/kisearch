@@ -57,22 +57,19 @@ interface PlantumlModule {
  */
 import vizGlobalUrl from '@plantuml/core/viz-global.js?url';
 import plantumlEngineUrl from '@plantuml/core/plantuml.js?url';
+import { isSafeDiagramSvg } from './svgGuard.js';
 
 let enginePromise: Promise<PlantumlModule> | null = null;
 let vizPromise: Promise<void> | null = null;
 
-/** 插入 classic script 并等它执行完（viz-global 是 UMD，必须当普通脚本加载才能挂到 globalThis） */
+/**
+ * 插入 classic script 并等它执行完（viz-global 是 UMD，必须当普通脚本加载才能挂到 globalThis）。
+ *
+ * **失败必须把 `<script>` 摘掉**：留着失败节点会让"复用已有节点"的分支挂在一个永远不会再触发
+ * load/error 的元素上 —— 重试就此永久挂起（比失败更糟，用户只能刷新）。
+ */
 function loadViz(): Promise<void> {
   vizPromise ??= new Promise<void>((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>('script[data-ki-plantuml-viz]');
-    if (existing) {
-      if (existing.dataset.kiLoaded === '1') resolve();
-      else {
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error('Graphviz 布局资源加载失败')), { once: true });
-      }
-      return;
-    }
     const script = document.createElement('script');
     // 相对资源路径按**模块**解析（与动态 import 同口径），否则深层文档地址下会按文档 URL 解析到错误目录
     script.src = new URL(vizGlobalUrl, import.meta.url).href;
@@ -82,7 +79,10 @@ function loadViz(): Promise<void> {
       script.dataset.kiLoaded = '1';
       resolve();
     }, { once: true });
-    script.addEventListener('error', () => reject(new Error('Graphviz 布局资源加载失败')), { once: true });
+    script.addEventListener('error', () => {
+      script.remove();
+      reject(new Error('Graphviz 布局资源加载失败'));
+    }, { once: true });
     document.head.appendChild(script);
   });
   // 失败后允许下次重试：chunk 可能因网络抖动失败（与 mermaid 的 loadMermaid 同口径）
@@ -150,35 +150,14 @@ export async function renderPlantuml(
 
 // ─── 输出守卫 ─────────────────────────────────────────
 
-/** 会被浏览器当作活动内容的标签：PlantUML 正常产物里没有，出现即判不可信 */
-const FORBIDDEN_TAGS = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed']);
-
 /**
- * SVG 是否可以安全注入。
+ * SVG 是否可以安全注入（判据见 `lib/svgGuard.ts`，与 ECharts 共用同一份实现）。
  *
- * 只扫**标签片段**（`<tag attr="v">`），不扫文本节点：正文里出现 `onclick=` 这类字样是知识文档的
- * 正常内容，扫全文会把它误判成攻击。属性值里的危险 scheme 也一并拦（`javascript:` / `vbscript:` /
- * `data:text/html`）；`data:image/*` 放行（内联图标是 PlantUML 的合法输出形态）。
+ * 保留本名导出是为了让调用方按"我要注入 PlantUML 产物"来读，而不是记一个通用函数名；
+ * 实现只有一处，改安全判据只需改 `svgGuard.ts`。
  */
 export function isSafePlantumlSvg(svg: string): boolean {
-  if (!svg.trim()) return false;
-  if (!/<svg[\s>]/i.test(svg)) return false;
-  for (const tagMatch of svg.matchAll(/<([a-zA-Z][\w:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
-    const name = tagMatch[1].toLowerCase();
-    // 命名空间前缀（svg:script）也要按本地名判，别被前缀绕过
-    const local = name.includes(':') ? name.slice(name.lastIndexOf(':') + 1) : name;
-    if (FORBIDDEN_TAGS.has(local)) return false;
-    const attrs = tagMatch[2];
-    // 三个分支缺一不可：双引号 / 单引号 / **裸值**（`href=javascript:alert(1)` 没有引号，
-    // 只认带引号的写法会把这条最容易被忽略的形态漏掉）
-    for (const attrMatch of attrs.matchAll(/([\w:-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/g)) {
-      const attrName = attrMatch[1].toLowerCase();
-      const value = attrMatch[2].replace(/^["']|["']$/g, '').replace(/[\u0000-\u0020]/g, '');
-      if (attrName.startsWith('on')) return false;
-      if (/^(?:javascript|vbscript|data:text\/html)/i.test(value)) return false;
-    }
-  }
-  return true;
+  return isSafeDiagramSvg(svg);
 }
 
 /** 引擎把错误画进图里时的成因（都是 onSuccess 返回，不抛异常） */

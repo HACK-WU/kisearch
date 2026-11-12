@@ -39,19 +39,19 @@ const SRC = '@startuml\nactor 用户\n用户 -> R : POST /x\n@enduml';
 describe('PlantUML 围栏 → 图表/代码双面板', () => {
   it('渲染成带两个 tab 与两个面板的块，源码完整落在代码面板', () => {
     const html = renderMarkdownHtml('```plantuml\n' + SRC + '\n```');
-    assert.ok(html.includes('data-ki-plantuml'), '应标记为 PlantUML 块');
+    assert.ok(html.includes('data-ki-diagram="plantuml"'), '应标记为 PlantUML 块');
     assert.ok(html.includes('data-ki-code-tab="0"') && html.includes('data-ki-code-tab="1"'), '应有图表/代码两个 tab');
     assert.ok(html.includes('>图表</button>') && html.includes('>代码</button>'), 'tab 文案应为图表/代码');
     assert.ok(html.includes('aria-selected="true"') && html.includes('aria-selected="false"'), '默认选中图表');
     assert.ok(html.includes('data-ki-code-panel="1" hidden'), '代码面板初始隐藏（图表态）');
-    assert.ok(html.includes('data-ki-plantuml-pending'), '图表面板先给加载占位');
+    assert.ok(html.includes('data-ki-diagram-pending'), '图表面板先给加载占位');
     assert.equal(codeText(html), SRC, '代码面板必须是逐字节原文（复制来源）');
   });
 
   it('三种围栏别名与大小写都识别，且不再产出 mermaid 目标', () => {
     for (const lang of ['plantuml', 'puml', 'uml', 'PlantUML']) {
       const html = renderMarkdownHtml('```' + lang + '\n' + SRC + '\n```');
-      assert.ok(html.includes('data-ki-plantuml'), `${lang} 应识别为 PlantUML`);
+      assert.ok(html.includes('data-ki-diagram="plantuml"'), `${lang} 应识别为 PlantUML`);
       assert.equal(html.includes('language-mermaid'), false, `${lang} 不应进入 mermaid 链路`);
     }
   });
@@ -59,11 +59,11 @@ describe('PlantUML 围栏 → 图表/代码双面板', () => {
   it('mermaid 与普通代码块维持原样（本次不改其渲染路径）', () => {
     const mermaid = renderMarkdownHtml('```mermaid\nsequenceDiagram\n  A->>B: hi\n```');
     assert.ok(mermaid.includes('language-mermaid'));
-    assert.equal(mermaid.includes('data-ki-plantuml'), false, 'mermaid 不应带图表/代码切换');
+    assert.equal(mermaid.includes('data-ki-diagram'), false, 'mermaid 不应带图表/代码切换');
 
     const plain = renderMarkdownHtml('```python\nprint(1)\n```');
     assert.ok(plain.includes('class="ki-code-lang">python<'));
-    assert.equal(plain.includes('data-ki-plantuml'), false);
+    assert.equal(plain.includes('data-ki-diagram'), false);
   });
 
   it('空围栏不产出容器（与既有空块口径一致）', () => {

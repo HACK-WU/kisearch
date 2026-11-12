@@ -2691,14 +2691,14 @@ a:hover { text-decoration: underline; }
 .ki-markdown .ki-code-panel > pre { margin: 0; background: transparent; }
 .ki-markdown .ki-code-panel > .ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; padding: 12px; }
 .ki-code-panel[hidden] { display: none; }
-/* ── PlantUML 图表块（「图表 / 代码」双面板）────────────────────────────────
+/* ── 图表块（PlantUML / ECharts，均为「图表 / 代码」双面板）──────────────────
    骨架直接复用 code-group 的标签组与面板（.ki-code-tabs / .ki-code-tab / .ki-code-panel），
    这里只补两块专属样式：加载占位、图表容器；不新增任何颜色令牌。 */
-.ki-plantuml__pending { display: block; padding: 12px; font-size: 12px; color: var(--ki-color-text-subtle); }
+.ki-diagram__pending { display: block; padding: 12px; font-size: 12px; color: var(--ki-color-text-subtle); }
 /* 图宽按容器等比缩放（与官方渲染一致：宽图缩小而不是横向滚动）；
    高度上限 600px、内部纵向滚动，避免一张大图把整篇文档推出屏外。 */
-.ki-plantuml__figure { padding: 12px; overflow: auto; max-height: 600px; }
-.ki-plantuml__figure > svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+.ki-diagram__figure { padding: 12px; overflow: auto; max-height: 600px; }
+.ki-diagram__figure > svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
 /* ── 代码语法高亮（highlight.js token → `--ki-code-*` 令牌，方案 A「克制品牌色」）────────
    落地口径（2026-10-20 POC 实测）：
    ① 高亮色自成一族 `--ki-code-*`，**不占用 `--ki-color-*` 语义色**（语义色只用于状态徽标）；
