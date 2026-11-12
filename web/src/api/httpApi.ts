@@ -410,6 +410,36 @@ export async function saveEditableDocument(args: {
   return req<SaveDocumentResponse>('/api/doc/edit', { method: 'POST', body: JSON.stringify(args) });
 }
 
+/** 移动文档的返回体（`POST /api/doc/move`，REQ-20261112-002） */
+export interface MoveDocumentResponse {
+  ok: true;
+  from: { scope: string; group: string; relation: string };
+  to: { scope: string; group: string; relation: string };
+  /** wiki 源文件搬迁结果：未配置 wiki 回写时 configured=false、moved=false */
+  source: { configured: boolean; moved: boolean; from?: string; to?: string; reason?: string };
+  indexMode: 'dense' | 'fts';
+  /** 已移动但需要用户知道的事（源文件未搬、回滚失败等），不是错误 */
+  warnings: string[];
+}
+
+/**
+ * 把文档移动到其他 Group（可选同时改名）。
+ *
+ * 错误统一由 `req` 抛出，携带 `status` 与 `body.code`：
+ * `TARGET_EXISTS`（同名，需改名）/ `DATASOURCE_BLOCKED`（数据源维护）/ `SCOPE_READONLY` 等
+ * 由调用方按 code 给不同文案，服务端文案只作兜底。
+ */
+export async function moveDocument(args: {
+  scope: string;
+  group: string;
+  relation: string;
+  targetGroup: string;
+  targetRelation?: string;
+  expectedRevision?: string;
+}): Promise<MoveDocumentResponse> {
+  return req<MoveDocumentResponse>('/api/doc/move', { method: 'POST', body: JSON.stringify(args) });
+}
+
 export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {
   return req<ImportConfigResponse>(`/api/import/config?${new URLSearchParams({ scope }).toString()}`);
 }

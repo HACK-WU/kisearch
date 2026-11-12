@@ -69,6 +69,8 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'group-delete',
   'doc-delete',
   'doc-edit-write',
+  // 文档移动（REQ-20261112-002）：只读库同样不许搬动归属
+  'doc-move-write',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */

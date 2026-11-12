@@ -140,6 +140,8 @@ import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalida
 // 路径检索：检索词归一 + 逻辑路径（group 与 sourcePath 重叠合并）见 doc-path.ts
 import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc } from './doc-path.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
+// 文档移动（REQ-20261112-002）：预检 + 编排 + 回滚，复用 sync / delete 两条已测链路
+import { moveDocument } from './doc-move.js';
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskParamSnapshot, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
@@ -1544,6 +1546,45 @@ export async function handleApiRequest(
               // 强制以 KB 覆盖源文件：只放宽源文件侧校验，KB 乐观锁与索引链路不变
               force: body.force === true,
             });
+            docListCache.delete(scope);
+            sendJson(res, 200, result);
+          } catch (error) {
+            docListCache.delete(scope);
+            sendDocEditError(res, error);
+          }
+        })),
+        [scope],
+      );
+      return;
+    }
+    if (p === '/doc/move' && req.method === 'POST') {
+      // 文档移动到其他 Group（REQ-20261112-002）。写通道 + scope 写锁：
+      // 内部会依次调用 sync-relation / delete-relation 两条链路，锁可重入（同一异步链）。
+      const body = await readJsonBody(req) as Record<string, unknown> | undefined;
+      const scope = resolveScope(requestConfig, typeof body?.scope === 'string' ? body.scope : '');
+      if (authScopes !== null && !scopeAllowed(authScopes, scope)) {
+        rejectScopeViolation(res, scope, p);
+        return;
+      }
+      if (rejectIfScopeReadonly(res, scope, 'http:/api/doc/move')) return;
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-move-write', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, async () => withScopeWriteLock(scope, 'doc-move-write', async () => {
+          try {
+            if (typeof body?.group !== 'string' || typeof body.relation !== 'string'
+              || typeof body.targetGroup !== 'string') {
+              sendJson(res, 400, { ok: false, code: 'DOC_ID_INVALID', error: '缺少移动参数（group / relation / targetGroup）' });
+              return;
+            }
+            const result = await moveDocument({
+              scope,
+              group: body.group,
+              relation: body.relation,
+              targetGroup: body.targetGroup,
+              targetRelation: typeof body.targetRelation === 'string' ? body.targetRelation : undefined,
+              expectedRevision: typeof body.expectedRevision === 'string' ? body.expectedRevision : undefined,
+            });
+            // 移动改变了文档归属：列表缓存必须失效，否则左树与列表还指着旧 Group
             docListCache.delete(scope);
             sendJson(res, 200, result);
           } catch (error) {

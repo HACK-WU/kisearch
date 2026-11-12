@@ -6620,6 +6620,30 @@ select.ki-chat-cfg__ta--select {
 /* 描述贴近标题：头部下边距 16→12，body 上边距 20→8 */
 .ki-dialog--form .ki-dialog__head { padding-bottom: 12px; }
 .ki-dialog--form .ki-dialog__body { padding-top: 8px; }
+/* ── 移动文档弹窗（REQ-20261112-002）───────────────────────────────
+   宽度收到 520（表单默认 640）：内容只有「文档名 + 目标 Group」两行，
+   太宽会让 Group 树拉成一条长带子；且 GroupPathSelect 的下拉面板宽度跟随输入框，
+   520 让树在弹窗里仍然易读。
+   ⚠️ 不要给 .ki-move__body 加 overflow：面板是常规流定位，祖先一裁剪就被切掉
+   （Token 弹窗里 ScopeMultiPicker 踩过四层 overflow 的坑，见 ki 错误库）。 */
+.ki-move { width: min(520px, calc(100vw - 32px)); }
+.ki-move__sub { margin: 4px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-move__body { display: flex; flex-direction: column; gap: 14px; }
+.ki-move__ident {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-hover);
+}
+.ki-move__ident-label { flex: none; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+.ki-move__ident-path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+}
+.ki-move__field { display: flex; flex-direction: column; gap: 6px; }
+.ki-move__notes {
+  margin: 0; padding-left: 18px;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.7;
+}
+.ki-move__hint { margin: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
 .ki-ds-add__sub { margin: 4px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-ds-add__hint {
   margin: 0 0 14px; color: var(--ki-color-text-muted);

@@ -75,6 +75,9 @@ const RULES: Rule[] = [
 
   // ── 知识写 ──
   exact('POST', '/doc/edit', 'permission', 'knowledge.write'),
+  // 文档移动（REQ-20261112-002）：与写入同级。未登记的路由默认 404，漏登记既是"功能不可用"
+  // 也会让路由覆盖率单测转红。
+  exact('POST', '/doc/move', 'permission', 'knowledge.write'),
   exact('POST', '/import/upload', 'permission', 'knowledge.write'),
   exact('POST', '/import/run', 'permission', 'knowledge.write'),
   exact('POST', '/import/preflight', 'permission', 'knowledge.write'),

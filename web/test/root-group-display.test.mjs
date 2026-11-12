@@ -201,6 +201,8 @@ describe('已知出口的源码守卫', () => {
       'src/components/ModuleDrawer.tsx',
       'src/components/GroupTreePanel.tsx',
       'src/components/ReaderLinkComposer.tsx',
+      // 移动弹窗（REQ-20261112-002）：当前路径 `组 / 文档名` 是路径段位置
+      'src/components/DocMoveDialog.tsx',
       'src/chat/SourcesList.tsx',
       'src/chat/ChatPanel.tsx',
     ]) {

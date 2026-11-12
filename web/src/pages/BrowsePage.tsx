@@ -18,6 +18,8 @@ import {
 import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
+// 移动文档的返回体（REQ-20261112-002）：页面据此把 URL / 目录选中 / 列表一起搬过去
+import type { MoveDocumentResponse } from '@/api/httpApi';
 import { isViewDocList, normalizeDocData, decodeGroupPath, type DocListViewPayload } from '@/lib/viewBuckets';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
 import { getDocContent, type DocItem } from '@/api/httpApi';
@@ -51,6 +53,7 @@ import {
 import { revealTreeRow } from '@/lib/treeReveal';
 import {
   ROOT_GROUP_KEY,
+  ROOT_GROUP_FIELD_LABEL,
   applyOpenPaths,
   buildGroupTree,
   groupPathSegment,
@@ -1280,6 +1283,57 @@ export function BrowsePage(): JSX.Element {
    * 文档阅读器：inline = 就地渲染在右侧阅读区（树入口）；
    * 抽屉 = 覆盖式滑出、结果列表留在主区（检索结果入口，与语义检索页一致）。
    */
+  /**
+   * 移动成功后的一句回执。为什么放在页面而不是查看器里：移动会改变 `viewing` 的 group/relation，
+   * 而 ModuleDrawer 的 `key` 含这两项 ⇒ **整块重挂载**，组件内的 `savedNotice` 会随旧实例一起丢掉
+   * （用户看不到任何成功反馈）。改为页面持有，再作为 `initialNotice` 交给新的实例消费一次。
+   */
+  const [moveNotice, setMoveNotice] = useState('');
+  useEffect(() => {
+    if (!moveNotice) return;
+    // 交给新实例消费后立刻置空：留着会在下次重挂载（如切到另一篇）重复弹同一句
+    const timer = window.setTimeout(() => setMoveNotice(''), 0);
+    return () => window.clearTimeout(timer);
+  }, [moveNotice]);
+
+  const handleDocMoved = useCallback((result: MoveDocumentResponse): void => {
+    /*
+     * 移动后必须让三样东西跟着走，漏一样用户就会看到「文档不见了」：
+     * ① 文档列表/目录计数（Group 与叶子都变了）→ 失效 react-query
+     * ② 阅读态与 URL（旧 group+relation 已查不到，刷新会落空）
+     * ③ 左侧目录选中并展开目标组
+     */
+    void queryClient.invalidateQueries({ queryKey: ['docList'] });
+    // 目标组可能已取过叶子，失效后要允许重新取（ensureGroupDocs 用这个 ref 做去重）
+    loadedGroupsRef.current.delete(result.to.group);
+    // 回执里的 group 是「字段值」而不是路径段（`a / b` 拼接）：根要显式写成「根目录」，
+    // 用空串会读成「已移动： → 根」。⚠️ 本文件被 root-group-display 守卫禁止用 groupDisplayName。
+    const groupLabel = (group: string): string => (group === ROOT_GROUP_KEY ? ROOT_GROUP_FIELD_LABEL : group);
+    setMoveNotice(
+      `已移动：${groupLabel(result.from.group)} → ${groupLabel(result.to.group)}`
+      + (result.to.relation !== result.from.relation ? `（改名为 ${result.to.relation}）` : '')
+      + (result.warnings.length > 0 ? `；${result.warnings[0]}` : ''),
+    );
+    // 视图模式下树路径是「库名/组路径」，与后端真实 group 不是一回事
+    const treeGroup = viewMembers.length > 0 ? `${result.to.scope}/${result.to.group}` : result.to.group;
+    if (currentViewing) {
+      const moved: typeof currentViewing = {
+        ...currentViewing,
+        group: treeGroup,
+        module: result.to.relation,
+        // 旧锚点属于旧正文位置，保留会造成莫名滚动；path 由列表刷新后补回
+        anchor: undefined,
+        path: undefined,
+        apiGroup: result.to.group,
+      };
+      setHistory([]);
+      setForwardHistory([]);
+      setViewing(moved);
+      writeBrowseUrl(moved, readerFullscreen);
+    }
+    setActiveGroup(treeGroup);
+  }, [currentViewing, queryClient, readerFullscreen, setActiveGroup, writeBrowseUrl, viewMembers]);
+
   const renderViewer = (asDrawer: boolean, slot?: ReactNode): JSX.Element | null => {
     if (!currentViewing) return null;
     return (
@@ -1312,6 +1366,10 @@ export function BrowsePage(): JSX.Element {
         // 正文读取走 read 通道的 HTTP 接口（不再用 MCP）：导入/向量化期间不被排队
         fetcher={getDocContent}
         onLocalLink={handleLocalLink}
+        /* 移动入口只给「页内阅读态」：检索结果抽屉的头部同时承担结果导航，
+           移动后没有稳定的落点可回到结果列表，宁可不提供入口也不给半截体验。 */
+        onMoved={asDrawer ? undefined : handleDocMoved}
+        initialNotice={asDrawer ? undefined : moveNotice}
         canGoBack={history.length > 0}
         onBack={goBack}
         canGoForward={forwardHistory.length > 0}

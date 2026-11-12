@@ -16,6 +16,8 @@ import {
 } from 'react';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
+import { DocMoveDialog } from '@/components/DocMoveDialog';
+import type { MoveDocumentResponse } from '@/api/httpApi';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 // 根散文件的 group 是内部保留键（`__root__`）：路径段位置整段省略（连分隔符一起）
 import { groupPathSegment } from '@/lib/groupTree';
@@ -424,6 +426,21 @@ interface ModuleDrawerProps {
    * ⚠️ 传入时：文档内查找（Ctrl+F / 「本文」）不响应 —— 正文此刻不是文档，搜它没有意义。
    */
   bodySlot?: ReactNode;
+  /**
+   * 文档被移动到其他 Group / 改名后的回调（REQ-20261112-002）。
+   *
+   * 由页面负责「跟着搬家」：URL、左侧目录选中、文档列表重取。查看器自己不写 URL、
+   * 也不知道左树结构，所以只回传结果，不代页面做导航决定。
+   */
+  onMoved?: (result: MoveDocumentResponse) => void;
+  /**
+   * 挂载后显示一次的成功提示（3.5s 自动消失）。
+   *
+   * 为什么需要：「移动文档」会改变 group/relation，而本组件的 React `key` 含这两项 ⇒ 整块重挂载，
+   * 组件内 `setSavedNotice` 写的那句会随旧实例一起丢掉（用户看不到任何成功反馈）。
+   * 由页面持有文案、交给新实例消费一次；消费后页面应清空该 prop，否则下次重挂载会重复弹。
+   */
+  initialNotice?: string;
 }
 
 export function ModuleDrawer({
@@ -456,6 +473,8 @@ export function ModuleDrawer({
   inlineSearch,
   inlineActions,
   bodySlot,
+  onMoved,
+  initialNotice,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -470,6 +489,8 @@ export function ModuleDrawer({
   const savedNoticeTimer = useRef<number | undefined>(undefined);
   const [readerLinkSelection, setReaderLinkSelection] = useState<ReaderLinkSelection | null>(null);
   const [readerLinkComposerOpen, setReaderLinkComposerOpen] = useState(false);
+  /** 「移动文档」弹窗（REQ-20261112-002）：改变归属是写操作，与「编辑文档」同一套只读门禁 */
+  const [moveOpen, setMoveOpen] = useState(false);
   /** 「添加链接」待选模式：点按钮后等待用户在正文中选中片段，选中即自动弹面板（用户要求的新顺序） */
   const [linkArmed, setLinkArmed] = useState(false);
   /**
@@ -558,6 +579,11 @@ export function ModuleDrawer({
       selectionWarningTimer.current = undefined;
     }, 3000);
   }, []);
+
+  // 页面移交的「一次性回执」（移动文档后本组件会重挂载，见 initialNotice 注释）
+  useEffect(() => {
+    if (initialNotice) showSavedNotice(initialNotice);
+  }, [initialNotice, showSavedNotice]);
 
   useEffect(() => () => {
     window.clearTimeout(selectionWarningTimer.current);
@@ -740,6 +766,7 @@ export function ModuleDrawer({
     savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
     setReaderLinkSelection(null);
     setReaderLinkComposerOpen(false);
+    setMoveOpen(false);
     if (controlledFullscreen === undefined) setInternalFullscreen(next);
     updateOutlineCollapsed(!next);
     onFullscreenChange?.(next);
@@ -1127,7 +1154,7 @@ export function ModuleDrawer({
     document.body.style.overflow = 'hidden';
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
-      if (editor.isOpen || readerLinkComposerOpen) return;
+      if (editor.isOpen || readerLinkComposerOpen || moveOpen) return;
       // 浮层最先关（⋯ 菜单排在查找栏之前）：否则一次 Esc 会连抽屉一起收掉
       if (overflowOpen) { setOverflowOpen(false); return; }
       // 查找栏优先：Esc 只关查找栏，再按一次才退全屏 / 关抽屉（Q3：三个 Esc 语义不能撞车）
@@ -1142,7 +1169,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, onClose, overflowOpen, readerLinkComposerOpen, updateFullscreen]);
+  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, moveOpen, onClose, overflowOpen, readerLinkComposerOpen, updateFullscreen]);
 
   /** 「⋯」菜单：点面板外关闭（与 ScopeSelect 同款做法；ESC 由上面的统一链处理） */
   useEffect(() => {
@@ -1631,6 +1658,18 @@ export function ModuleDrawer({
                 onClick={openEditor}
               >编辑文档</button>
             )}
+            {/* 移动文档（REQ-20261112-002）：与「编辑文档」同一门禁 —— 都是改归属/改内容的写操作。
+                没有 onMoved 的调用方（如 AI 引用预览）不渲染入口：移动后没人负责跟进导航。 */}
+            {editable && group && content !== null && onMoved && (
+              <button
+                className="ki-drawer__copy ki-drawer__copy--move"
+                type="button"
+                disabled={docWriteDisabled}
+                aria-disabled={docWriteDisabled}
+                title={scopeReadonly ? SCOPE_READONLY_BLOCKED_HINT : '移动到其他 Group（可同时改名）'}
+                onClick={() => setMoveOpen(true)}
+              >移动</button>
+            )}
             {displayedContent && (
               <button
                 className={`ki-drawer__copy ki-drawer__copy--copy${copied ? ' ki-drawer__copy--done' : ''}`}
@@ -1675,6 +1714,16 @@ export function ModuleDrawer({
                       className="ki-drawer__overflow-item"
                       onClick={() => { setOverflowOpen(false); openEditor(); }}
                     >编辑文档</button>
+                  )}
+                  {editable && group && content !== null && onMoved && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docWriteDisabled}
+                      aria-disabled={docWriteDisabled}
+                      className="ki-drawer__overflow-item"
+                      onClick={() => { setOverflowOpen(false); setMoveOpen(true); }}
+                    >移动</button>
                   )}
                   {displayedContent && (
                     <button
@@ -1767,6 +1816,18 @@ export function ModuleDrawer({
           }}
           onPartialSaved={(next, warning) => { setContent(next); showSavedNotice(warning); }}
           onClose={() => { setReaderLinkSelection(null); setReaderLinkComposerOpen(false); window.getSelection()?.removeAllRanges(); }}
+        />
+      )}
+      {/* 移动文档（REQ-20261112-002）：成功后由页面负责 URL / 目录 / 列表跟随。
+          回执也由页面给（见 initialNotice）：本组件会因 group/relation 变化而重挂载，
+          自己 setState 的那句会随旧实例一起丢掉。 */}
+      {moveOpen && group && content !== null && onMoved && (
+        <DocMoveDialog
+          scope={scope}
+          group={group}
+          relation={module}
+          onClose={() => setMoveOpen(false)}
+          onMoved={onMoved}
         />
       )}
     </>

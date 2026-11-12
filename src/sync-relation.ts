@@ -395,6 +395,31 @@ export interface SyncRelationParams {
   vector?: boolean;
   /** 文档内容的自定义标签（逗号分隔多个）。ki-search 始终默认写入；自定义 tags 额外各写一条内容向量 */
   tags?: string;
+  /**
+   * 导入源相对路径（`relation.sourcePath`）。
+   *
+   * 只有「移动文档」会传：普通写入不写该字段（缺省 = 无来源），而移动必须把
+   * 新路径登记进去，否则后续编辑定位不到 wiki 回写目标（`resolveSource` 会报
+   * SOURCE_MISMATCH），用户改正文却写不回仓库文件。
+   */
+  sourcePath?: string;
+  /**
+   * 跳过 wiki 写回（移动文档专用）。
+   *
+   * `writeBackToWiki` 走 `generateMarkdown` **重新生成**内容（补 front-matter 与标题），
+   * 而移动的语义是「文件原样搬家」。所以移动先自己 `rename` 源文件，再让这里静默跳过，
+   * 否则会把用户文件重写一遍。
+   */
+  skipWikiWriteback?: boolean;
+  /**
+   * 允许 `group` 直接传根保留键（`__root__`）。**只有移动文档会开**。
+   *
+   * 普通写入必须留空 Group 才落根（`isUserAssignableGroup` 的口径），因为用户手填保留键
+   * 会以为建了个普通目录。但移动是一个"从已有位置 A 到已有位置 B"的动作，B 就是根时
+   * 前端选择器给不出"留空"这种表示法，必须显式传键。开此开关**不会**打 `groupSource`
+   * 兜底标记 —— 这是用户显式选择，不是缺省兜底。
+   */
+  allowRootGroup?: boolean;
 }
 
 // ─── 批量同步（MCP / CLI 共享纯函数） ───
@@ -1170,7 +1195,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     const rawGroup = String(params.group ?? '').replace(/^\/+|\/+$/g, '');
     const groupFellBack = rawGroup.trim() === '';
     // 用户不能自己写保留键：根只能由"Group 留空"到达，否则会以为建了个普通目录
-    if (!groupFellBack && isRootGroup(rawGroup.trim())) {
+    if (!groupFellBack && isRootGroup(rawGroup.trim()) && params.allowRootGroup !== true) {
       return { ok: false, error: `--group 不能使用保留名「${ROOT_GROUP_KEY}」；要写入根目录请留空 Group` };
     }
     // 批次 2（护栏 #7）：组键归一（布局感知，见 normalizeGroupKeyForWrite；入口一次性判定）
@@ -1249,6 +1274,8 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       // 落点来源留痕（REQ-20261021-001）：缺省即 explicit，只有兜底才落字段。
       if (groupFellBack) relRec.groupSource = 'scope-fallback';
       else delete relRec.groupSource;
+      // 移动文档：把新相对路径登记进来（普通写入不传 ⇒ 保持「无来源」语义）
+      if (params.sourcePath) relRec.sourcePath = params.sourcePath;
     }
 
     const fts = params.vector === false
@@ -1305,20 +1332,26 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
       : await vectorWriteBack({ relation, group, moduleInfo, scope, tags: params.tags });
 
-    // Wiki 写回（容错，失败不阻塞）
+    // Wiki 写回（容错，失败不阻塞）。移动文档跳过：文件已由调用方 rename 到位，
+    // 这里再走 generateMarkdown 会把用户文件重写一遍（见 skipWikiWriteback 注释）。
     let wikiSynced: boolean | undefined;
     let wikiFile: string | undefined;
     let wikiReason: string | undefined;
-    try {
-      const wikiResult = writeBackToWiki(scope, group, relation, moduleInfo);
-      wikiSynced = wikiResult.synced;
-      if (wikiResult.synced) {
-        wikiFile = wikiResult.file;
-      } else {
-        wikiReason = wikiResult.reason;
-      }
-    } catch {
+    if (params.skipWikiWriteback) {
       wikiSynced = false;
+      wikiReason = 'skipWikiWriteback：移动文档不重写源文件';
+    } else {
+      try {
+        const wikiResult = writeBackToWiki(scope, group, relation, moduleInfo);
+        wikiSynced = wikiResult.synced;
+        if (wikiResult.synced) {
+          wikiFile = wikiResult.file;
+        } else {
+          wikiReason = wikiResult.reason;
+        }
+      } catch {
+        wikiSynced = false;
+      }
     }
 
     // 透出实际写入的内容标签：两种模式都写入 ki-search；差别仅在底层索引类型。

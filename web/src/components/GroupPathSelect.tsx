@@ -139,9 +139,18 @@ interface GroupPathSelectProps {
   selectOnly?: boolean;
   /** 禁止在目标 Scope 未确认时操作 Group。 */
   disabled?: boolean;
+  /**
+   * 通用「根目录」选项（2026-11-12 用户要求：「增加一个通用的根目录，这样就可以移动到
+   * `__root__` 了」）。**传了才显示**——不改变导入 / 写入页的既有语义（那里的「留空」
+   * 本身就是根，多一个选项只会让人分不清）。
+   *
+   * 组件只负责把它渲染成树里的第一行、点选后原样回传 `value`；`__root__` 这类保留键
+   * 不铺给用户看（输入框与底部提示都显示 `label`）。
+   */
+  rootOption?: { value: string; label: string };
 }
 
-export function GroupPathSelect({ scope, value, onChange, placeholder, hint, error, selectOnly = false, disabled = false }: GroupPathSelectProps): JSX.Element {
+export function GroupPathSelect({ scope, value, onChange, placeholder, hint, error, selectOnly = false, disabled = false, rootOption }: GroupPathSelectProps): JSX.Element {
   const [open, setOpen] = useState(false);
   /** 是否已确认（回车确认或从下拉选中） */
   const [confirmed, setConfirmed] = useState(false);
@@ -180,6 +189,15 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setOpen(false);
   };
 
+  /** 选中「根目录」选项：与树节点选中同一条收尾路径（确认态 + 收面板） */
+  const pickRoot = (): void => {
+    if (disabled || !rootOption) return;
+    onChange(rootOption.value);
+    setConfirmed(true);
+    setFilter('');
+    setOpen(false);
+  };
+
   const openPicker = (): void => {
     if (disabled) return;
     setFilter('');
@@ -196,12 +214,17 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setFilter('');
   }, [disabled]);
 
+  /** 是否已选中「根目录」选项：保留键不进输入框，只显示 label */
+  const rootSelected = Boolean(rootOption && value === rootOption.value);
+
   /** 只选模式按独立搜索词过滤；可新建模式按当前输入值过滤（输入既有路径片段即搜索，
    *  输入不存在路径时树为空、底部给出「将新建」）。
+   *  选中根目录时按空关键词过滤 —— 否则拿 `__root__` 去搜会把整棵树滤空。
    *  memo 化：否则每次渲染都重建节点对象，子组件同步本地展开态的 effect 会被反复触发。 */
+  const keyword = selectOnly ? filter : (rootSelected ? '' : value);
   const filtered = useMemo(
-    () => filterGroupTree(tree, selectOnly ? filter : value),
-    [tree, filter, selectOnly, value],
+    () => filterGroupTree(tree, keyword),
+    [tree, keyword],
   );
   const searching = selectOnly && filter.trim().length > 0;
 
@@ -229,8 +252,8 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     }
   };
 
-  /** 当前输入值是否为新建 Group（不在已有树中）；只选模式不存在新建 */
-  const isNew = !selectOnly && value && !isPathInTree(tree, value);
+  /** 当前输入值是否为新建 Group（不在已有树中）；只选模式不存在新建；根选项不算新建 */
+  const isNew = !selectOnly && !rootSelected && Boolean(value) && !isPathInTree(tree, value);
 
   return (
     <div className={`ki-combobox${selectOnly ? ' ki-combobox--select-only' : ''}`} ref={rootRef} aria-disabled={disabled || undefined}>
@@ -238,11 +261,15 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
         <input
           className={`ki-form-input${isNew ? ' ki-form-input--new' : ''}${!selectOnly && confirmed ? ' ki-form-input--confirmed' : ''}${error ? ' ki-form-input--error' : ''}`}
           placeholder={
-            selectOnly
-              ? open ? '搜索 Group…' : '从列表中选择 Group'
-              : placeholder ?? '选择或输入 Group 路径，如：wiki/我的文档'
+            rootSelected && rootOption
+              // 保留键不进输入框（`__root__` 会被读成一个普通目录名）：显示 label，
+              // 输入框留空——用户直接打字即为「换一个路径」
+              ? `${rootOption.label}（输入路径可改）`
+              : selectOnly
+                ? open ? '搜索 Group…' : '从列表中选择 Group'
+                : placeholder ?? '选择或输入 Group 路径，如：wiki/我的文档'
           }
-          value={selectOnly && open ? filter : value}
+          value={selectOnly && open ? filter : (rootSelected ? '' : value)}
           disabled={disabled}
           onChange={(e) => {
             // 只选模式：输入只作为过滤词，不写入 Group 值
@@ -276,11 +303,33 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
       </div>
       <div className={`ki-combobox__panel${open ? ' ki-combobox__panel--open' : ''}`}>
         <div className="ki-combobox__tree" role="tree" aria-label="Group 树">
+          {/* 通用「根目录」行（传了 rootOption 才有）：与树节点同一套行样式，
+              点选即回传调用方给的 value（如 `__root__`），保留键不出现在文案里 */}
+          {rootOption ? (
+            <div
+              className={`ki-gtree-dir${rootSelected ? ' ki-gtree-dir--active' : ''}`}
+              role="treeitem"
+              tabIndex={disabled ? -1 : 0}
+              aria-selected={rootSelected}
+              title={rootOption.label}
+              aria-label={rootOption.label}
+              onClick={(e) => { e.stopPropagation(); pickRoot(); }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                pickRoot();
+              }}
+            >
+              <span className="ki-gtree-arrow" aria-hidden="true" />
+              {ICON_FOLDER_SM}
+              <span className="ki-gtree-label">{rootOption.label}</span>
+            </div>
+          ) : null}
           {filtered.nodes.length === 0 ? (
             <div className="ki-cell-sub" style={{ padding: 6 }}>
               {selectOnly
                 ? searching ? '没有匹配的 Group' : '当前 scope 暂无 Group'
-                : value.trim()
+                : !rootSelected && value.trim()
                   ? `没有匹配的 Group（回车将新建：${value.trim()}）`
                   : '当前 scope 暂无 Group，可直接输入新建'}
             </div>
@@ -290,7 +339,9 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
         </div>
         <div className="ki-combobox__footer">
           <span className="ki-cell-sub">
-            {selectOnly ? (
+            {rootSelected && rootOption ? (
+              <span style={{ color: 'var(--ki-color-success)' }}>✓ 已选：{rootOption.label}</span>
+            ) : selectOnly ? (
               searching ? (
                 `${filtered.matches.length} 个匹配`
               ) : value ? (
@@ -300,7 +351,7 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
               )
             ) : confirmed ? (
               <span style={{ color: 'var(--ki-color-success)' }}>✓ 已确认：{value}</span>
-            ) : value && !isPathInTree(tree, value) ? (
+            ) : value && !rootSelected && !isPathInTree(tree, value) ? (
               <span style={{ color: 'var(--ki-color-success)' }}>
                 {filtered.matches.length > 0
                   ? `${filtered.matches.length} 个匹配 · 回车新建「${value}」`

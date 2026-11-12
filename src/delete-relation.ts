@@ -106,6 +106,17 @@ export interface DeleteRelationParams {
    * 删源文件是不可逆的数据丢失面，必须由用户显式确认才做——数据源路径暂不提供。
    */
   wikiDelete?: boolean;
+  /**
+   * 跳过「内容向量」删除。**移动文档专用**。
+   *
+   * 内容向量的 docId = `sha256(text + scope + tag)` —— **不含 group 与 relation**
+   * （`vector-client.ts:594`）。移动一篇文档时内容一个字都没改，新位置写入的是**同一批 docId**；
+   * 若这里照常按旧记录的 `memoryIds` 删除，就会把刚写好的向量删掉 ——
+   * 而 cache 仍宣称「已向量化」，语义检索静默搜不到（比报错更难发现）。
+   *
+   * 同时要跳过 `deleteBySearch` 兜底：那条兜底按 relation 名前缀匹配内容，同样会误删。
+   */
+  skipDenseDelete?: boolean;
 }
 
 export type DeleteRelationOutcome =
@@ -258,7 +269,10 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
 
     // 4. 删除向量记忆（rel 可能为 undefined；优先按 memoryIds 多值删多 tag 内容向量，
     //    退化为单 memoryId，无则走 search 兜底）
-    const memOutcome = await deleteMemMemory(scope, relation, rel?.memoryIds ?? (rel?.memoryId ? [rel.memoryId] : undefined));
+    // 移动文档：内容向量 docId 不含 group/relation，新位置写的就是同一批 id —— 不能删
+    const memOutcome = params.skipDenseDelete === true
+      ? { removed: false, method: 'skip' as const, reason: '内容向量 docId 不含 group：同一篇文档移动后 id 不变，已保留（由新位置接续）' }
+      : await deleteMemMemory(scope, relation, rel?.memoryIds ?? (rel?.memoryId ? [rel.memoryId] : undefined));
     result.memRemoved = memOutcome.removed;
     result.memMethod = memOutcome.method;
     if (memOutcome.memoryId) result.memMemoryId = memOutcome.memoryId;
