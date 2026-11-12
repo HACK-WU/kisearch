@@ -409,13 +409,29 @@ let codeGroupSeq = 0;
 /** 图表块（PlantUML / ECharts）的 id 前缀，与 code-group 分开计数便于排查 */
 let diagramSeq = 0;
 
-/** 走「图表 / 代码」双面板的围栏种类（mermaid 不走这条：它沿用"直接替换源码块"的老形态） */
-export type DiagramKind = 'plantuml' | 'echarts';
+/** 走「图表 / 代码」双面板的围栏种类（2026-11-12 起 mermaid 也并入，三种图形态一致） */
+export type DiagramKind = 'plantuml' | 'echarts' | 'mermaid';
 
 const DIAGRAM_PENDING_LABEL: Record<DiagramKind, string> = {
   plantuml: 'PlantUML 图表加载中…',
   echarts: 'ECharts 图表加载中…',
+  mermaid: '图表加载中…',
 };
+
+/** mermaid 实例的最小契约（组件只用 render，不把整个 mermaid 类型包拉进来） */
+interface MermaidApi {
+  render(id: string, code: string): Promise<{ svg: string }>;
+}
+
+/** 围栏语言 → 图表种类（只认这三种） */
+function diagramKindOf(language: string | undefined): DiagramKind | null {
+  const lang = (language ?? '').trim().toLowerCase();
+  if (!lang) return null;
+  if (lang === 'mermaid') return 'mermaid';
+  if (isPlantumlLanguage(lang)) return 'plantuml';
+  if (isEchartsLanguage(lang)) return 'echarts';
+  return null;
+}
 
 /**
  * 图表块（PlantUML / ECharts 共用）：工具条左侧是「图表 / 代码」标签组，右侧仍是常驻复制按钮。
@@ -547,10 +563,10 @@ function buildRenderer(base?: AssetBase, options?: { highlight?: boolean }) {
     // （真机走查 2026-10-09 实测：整块 195px 高、除按钮外零内容像素，点复制得到空串）。
     if (!text.trim()) return '';
     const language = lang?.trim().split(/\s+/, 1)[0];
-    // 图表围栏（PlantUML / ECharts）走「图表 / 代码」双面板结构（见 diagramBlockHtml）。放在这里
-    // 而不是另开 marked 扩展：它们本质仍是代码块，只是 DOM 里多一个会异步填充的面板。
-    if (language && isPlantumlLanguage(language)) return diagramBlockHtml(text, language, 'plantuml');
-    if (language && isEchartsLanguage(language)) return diagramBlockHtml(text, language, 'echarts');
+    // 图表围栏（mermaid / PlantUML / ECharts）走「图表 / 代码」双面板结构（见 diagramBlockHtml）。
+    // 放在这里而不是另开 marked 扩展：它们本质仍是代码块，只是 DOM 里多一个会异步填充的面板。
+    const kind = diagramKindOf(language);
+    if (kind) return diagramBlockHtml(text, language ?? kind, kind);
     const languageClass = language ? ` class="language-${escapeAttr(language)}"` : '';
     // 顶部工具条（左语言名 / 右常驻复制按钮）。按钮此前是绝对定位浮层，靠容器 `padding-right: 72px` 让位——
     // 那条内边距作用于**整列高度**，按钮下方同样被占用，内容区与横向滚动条被永久挤窄（走查 2026-10-09）。
@@ -864,14 +880,8 @@ export function repairMermaidLabelQuotes(src: string): string {
  * 标记是 `<button>` 而非 `<span title>`：详情**不能只靠 hover** —— 触屏没有 hover、键盘用户
  * 也拿不到 title（走查 2026-10-13 的待办）。点击 / 回车展开面板，面板贴在工具条下方
  * （比源码块之后更贴近触发点）。复制按钮位置不动（标记插在它左侧）。
+ * 三种图（mermaid / PlantUML / ECharts）共用本函数，文案由调用方给。
  */
-function markMermaidFallback(pre: HTMLElement, kind: MermaidFallbackKind, detail?: string): void {
-  const block = pre.closest<HTMLElement>('.ki-code-block');
-  if (!block) return;
-  markBlockFallback(block, mermaidFallbackNotice(kind, detail));
-}
-
-/** 在块工具条上插「⚠ …」标记 + 可展开说明（mermaid / PlantUML 共用，文案由调用方给） */
 function markBlockFallback(block: HTMLElement, notice: DiagramNotice): void {
   if (block.querySelector('.ki-code-warn')) return;
   const panelId = `ki-code-warn-${Math.random().toString(36).slice(2, 8)}`;
@@ -1074,9 +1084,7 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
       const diagramSource = codeBlock?.matches('[data-ki-diagram]')
         ? codeBlock.querySelector<HTMLElement>('[data-ki-code-panel="1"] pre code')?.textContent
         : undefined;
-      const source = diagramSource
-        ?? scope?.querySelector<HTMLElement>('.ki-mermaid')?.dataset.copyText
-        ?? scope?.querySelector('pre code')?.textContent;
+      const source = diagramSource ?? scope?.querySelector('pre code')?.textContent;
       if (source === undefined) return;
       const status = codeBlock?.querySelector<HTMLElement>('.ki-code-copy-status');
 
@@ -1172,112 +1180,44 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
     };
   }, [html]);
 
-  // mermaid 代码块异步渲染（动态加载 mermaid，避免无图表时也加载大 chunk）
-  useEffect(() => {
-    const root = rootRef.current;
-    if (!root || deferMermaid || !html.includes('language-mermaid')) return;
-    let cancelled = false;
-    setReady(false);
-    void loadMermaid().then((mod) => {
-      if (cancelled) return;
-      const mermaid = mod.default;
-      // 参数口径（strict 安全围栏 / 主题跟随）见 mermaidInitOptions 的文档注释
-      mermaid.initialize(mermaidInitOptions(theme));
-      /**
-       * 渲染单块：首次失败时按容错规则修一次再重试（AI 生成的图表常在标签串内层写裸引号，
-       * 见 repairMermaidLabelQuotes）；两次都失败则抛出，由调用方走 fail-loud 分支。
-       */
-      const renderMermaidSvg = async (id: string, code: string): Promise<string> => {
-        try {
-          return (await mermaid.render(id, code)).svg;
-        } catch (error) {
-          const repaired = repairMermaidLabelQuotes(code);
-          if (repaired === code) throw error;
-          return (await mermaid.render(`${id}-r`, repaired)).svg;
-        }
-      };
-      /**
-       * 收集待渲染目标，两种形态都要覆盖：
-       * ① 尚未渲染的源码块（`pre > code.language-mermaid`，首次进入）；
-       * ② **已渲染的图表**（`.ki-mermaid[data-copy-text]`）——主题切换时源码 `<pre>` 早被替换掉了，
-       *    只能从 `data-copy-text`（复制用的原文）取回源码重绘。漏了这条，暗色切换后图表仍是浅底白卡。
-       */
-      const collectTargets = (): { code: string; pre: HTMLElement | null; wrapper: HTMLElement | null }[] => {
-        const targets: { code: string; pre: HTMLElement | null; wrapper: HTMLElement | null }[] = [];
-        for (const block of Array.from(root.querySelectorAll<HTMLElement>('pre > code.language-mermaid'))) {
-          targets.push({ code: block.textContent ?? '', pre: block.closest('pre'), wrapper: null });
-        }
-        for (const el of Array.from(root.querySelectorAll<HTMLElement>('.ki-mermaid[data-copy-text]'))) {
-          targets.push({ code: el.dataset.copyText ?? '', pre: null, wrapper: el });
-        }
-        return targets;
-      };
-      const renderAll = async (): Promise<void> => {
-        for (const target of collectTargets()) {
-          if (cancelled) return;
-          try {
-            const svg = await renderMermaidSvg(`ki-mermaid-${Math.random().toString(36).slice(2, 10)}`, target.code);
-            // 无图元的空白图不替换：保留源码块，避免"空白框 + 复制按钮"把源码静默吞掉
-            if (isBlankMermaidSvg(svg)) {
-              if (target.pre) {
-                console.warn('[ki] mermaid 渲染结果为空（无图元），已保留源码块');
-                markMermaidFallback(target.pre, 'blank');
-              } else {
-                console.warn('[ki] mermaid 重渲染结果为空（无图元），已保留原图');
-              }
-              continue;
-            }
-            // 复用已存在的容器（主题切换场景）：原地换 innerHTML 而不是换节点，
-            // 图不会出现"先消失再出现"的空档（走查实测：换节点期间断言会捕捉到两者都不存在的瞬时态）
-            const wrap = target.wrapper ?? document.createElement('div');
-            if (!target.wrapper) wrap.className = 'ki-mermaid';
-            wrap.dataset.copyText = target.code; // 复制始终是**原文**：容错重试只影响渲染输入
-            wrap.innerHTML = svg;
-            if (target.pre) target.pre.replaceWith(wrap);
-          } catch (error) {
-            const detail = mermaidErrorDetail(error);
-            if (target.pre) {
-              // fail-loud（走查 2026-10-13）：解析失败不再静默 —— 保留源码块 + 工具条标注失败原因
-              console.warn('[ki] mermaid 渲染失败，已保留源码块：', detail);
-              markMermaidFallback(target.pre, 'failed', detail);
-            } else {
-              // 重绘失败（源码本身没改过，多半是瞬时问题）：保留旧图比清空好，只记录
-              console.warn('[ki] mermaid 按主题重绘失败，已保留原图：', detail);
-            }
-          }
-        }
-        if (!cancelled) setReady(true);
-      };
-      void renderAll();
-    }).catch((error: unknown) => {
-      // 动态 chunk 加载失败此前无兜底（未处理的 rejection + 页面零反馈）→ 同样 fail-loud
-      if (cancelled) return;
-      console.warn('[ki] mermaid 资源加载失败，图表未渲染：', mermaidErrorDetail(error));
-      for (const block of Array.from(root.querySelectorAll<HTMLElement>('pre > code.language-mermaid'))) {
-        const pre = block.closest('pre');
-        if (pre) markMermaidFallback(pre, 'unavailable');
-      }
-      setReady(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // 主题进依赖：mermaid 的配色写死在 svg 里，只有重绘才能跟随深浅切换
-  }, [html, deferMermaid, theme]);
-
-  // 图表渲染（PlantUML / ECharts 共用一条通道；两者都是纯前端引擎，无服务端、不出网）。
-  // 与 mermaid 的两点差异：① 块内有两个面板，成功后只填图表面板（代码面板留着切回去看源码）；
-  // ② 失败按已确认口径退回「纯代码块 + 工具条标记」，而不是留一个空图表面板。
+  // 图表渲染（mermaid / PlantUML / ECharts 共用一条通道）。三种都是纯前端引擎，无服务端、不出网。
+  // 块内两个面板：成功后只填图表面板（代码面板留着切回去看源码）；失败按已确认口径退回
+  // 「纯代码块 + 工具条标记」，而不是留一个空图表面板。
   useEffect(() => {
     const root = rootRef.current;
     // deferMermaid：流式输出期间不渲染（每个 chunk 都重绘一次纯浪费），闭合后那一帧再画
-    if (!root || deferMermaid || !/language-(?:plantuml|puml|uml|echarts)\b/i.test(html)) return;
+    if (!root || deferMermaid || !/language-(?:mermaid|plantuml|puml|uml|echarts)\b/i.test(html)) return;
     const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-ki-diagram]'));
     if (blocks.length === 0) return;
     let cancelled = false;
+    // mermaid 必须先 initialize(theme) 再 render，且主题不同要重新初始化 → 按本次 effect 复用实例
+    let mermaidApi: MermaidApi | null = null;
+    if (/language-mermaid\b/i.test(html)) setReady(false);
 
     /** 按块类型渲染出静态 SVG；失败直接抛（由调用方统一转成可见标记） */
-    const renderBlock = async (kind: string, source: string): Promise<{ svg: string; notice?: DiagramNotice }> => {
+    const renderBlock = async (kind: DiagramKind, source: string): Promise<{ svg: string; notice?: DiagramNotice }> => {
+      if (kind === 'mermaid') {
+        const api = mermaidApi;
+        if (!api) throw new Error('mermaid 未初始化');
+        /**
+         * 首次失败时按容错规则修一次再重试（AI 生成的图表常在标签串内层写裸引号，见
+         * repairMermaidLabelQuotes）；两次都失败则抛出，由调用方走 fail-loud 分支。
+         */
+        const renderMermaid = async (code: string): Promise<string> => {
+          const id = `ki-mermaid-${Math.random().toString(36).slice(2, 10)}`;
+          try {
+            return (await api.render(id, code)).svg;
+          } catch (error) {
+            const repaired = repairMermaidLabelQuotes(code);
+            if (repaired === code) throw error;
+            return (await api.render(`${id}-r`, repaired)).svg;
+          }
+        };
+        const svg = await renderMermaid(source);
+        // 无图元的空白图不替换：否则只剩一个空框，源码被静默吞掉
+        if (isBlankMermaidSvg(svg)) return { svg: '', notice: mermaidFallbackNotice('blank') };
+        return { svg };
+      }
       if (kind === 'echarts') {
         // JSON 错与渲染错要分开讲：前者是"写错了"，后者才是"产品/引擎问题"
         const jsonError = echartsOptionError(source);
@@ -1298,29 +1238,38 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
     const renderAll = async (): Promise<void> => {
       // 先按需加载各自引擎：加载失败与「源码有问题」是两回事，文案与去路不同（刷新可重试 vs 改源码）。
       // ⚠️ 某一类引擎挂了只标记该类块，**不能 return** —— 否则同页另一类图表会永远停在"加载中"。
-      const kinds = new Set(blocks.map((block) => block.dataset.kiDiagram ?? 'plantuml'));
-      const failedKinds = new Set<string>();
+      const kinds = new Set<DiagramKind>(blocks.map((block) => (block.dataset.kiDiagram as DiagramKind | undefined) ?? 'plantuml'));
+      const failedKinds = new Set<DiagramKind>();
+      /** 三类引擎的失败文案各有一套（原因不同，不能共用话术） */
+      const unavailableNotice = (kind: DiagramKind): DiagramNotice => (kind === 'echarts'
+        ? echartsFallbackNotice('unavailable')
+        : kind === 'mermaid' ? mermaidFallbackNotice('unavailable') : plantumlFallbackNotice('unavailable'));
       for (const kind of kinds) {
         try {
           if (kind === 'echarts') await loadEcharts();
-          else await loadPlantuml();
+          else if (kind === 'mermaid') {
+            const mod = await loadMermaid();
+            if (cancelled) return;
+            // 参数口径（strict 安全围栏 / 主题跟随）见 mermaidInitOptions 的文档注释
+            mod.default.initialize(mermaidInitOptions(theme));
+            mermaidApi = mod.default as unknown as MermaidApi;
+          } else await loadPlantuml();
         } catch (error) {
           if (cancelled) return;
           failedKinds.add(kind);
-          const detail = kind === 'echarts' ? echartsErrorDetail(error) : plantumlErrorDetail(error);
+          const detail = kind === 'echarts' ? echartsErrorDetail(error)
+            : kind === 'mermaid' ? mermaidErrorDetail(error) : plantumlErrorDetail(error);
           console.warn(`[ki] ${kind} 渲染资源加载失败，图表未渲染：`, detail);
           for (const block of blocks) {
             if ((block.dataset.kiDiagram ?? 'plantuml') !== kind) continue;
-            failDiagramBlock(block, kind === 'echarts'
-              ? echartsFallbackNotice('unavailable')
-              : plantumlFallbackNotice('unavailable'));
+            failDiagramBlock(block, unavailableNotice(kind));
           }
         }
       }
       for (const block of blocks) {
         if (cancelled) return;
         if (block.dataset.kiDiagramFailed === '1') continue; // 已判失败（见 failDiagramBlock）
-        const kind = block.dataset.kiDiagram ?? 'plantuml';
+        const kind = (block.dataset.kiDiagram as DiagramKind | undefined) ?? 'plantuml';
         if (failedKinds.has(kind)) continue; // 该类引擎加载失败，已在上面标记
         // 源码取「代码面板」：即使已经渲染过（主题切换重绘），那份源码也一直在，不依赖 data-copy-text
         const source = block.querySelector<HTMLElement>('[data-ki-code-panel="1"] pre code')?.textContent ?? '';
@@ -1340,7 +1289,8 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
             // 首次成功：把「加载中」占位整个换掉（replaceChildren 而非 append，避免残留占位文字）
             panel.replaceChildren();
             figure = document.createElement('div');
-            figure.className = 'ki-diagram__figure';
+            // mermaid 额外保留 `.ki-mermaid`：仓库里既有的走查脚本/选择器都按它定位图
+            figure.className = kind === 'mermaid' ? 'ki-diagram__figure ki-mermaid' : 'ki-diagram__figure';
             figure.dataset.kiDiagramFigure = '1';
             panel.appendChild(figure);
           }
@@ -1348,13 +1298,18 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
           figure.innerHTML = svg;
         } catch (error) {
           if (cancelled) return;
-          const detail = kind === 'echarts' ? echartsErrorDetail(error) : plantumlErrorDetail(error);
+          const detail = kind === 'echarts' ? echartsErrorDetail(error)
+            : kind === 'mermaid' ? mermaidErrorDetail(error) : plantumlErrorDetail(error);
           console.warn(`[ki] ${kind} 图表渲染失败，已保留源码块：`, detail);
           failDiagramBlock(block, kind === 'echarts'
             ? echartsFallbackNotice('failed', detail)
-            : plantumlFallbackNotice('failed', detail));
+            : kind === 'mermaid' ? mermaidFallbackNotice('failed', detail)
+              : plantumlFallbackNotice('failed', detail));
         }
       }
+      // data-mermaid="done" 供既有走查脚本判定"图都画完了"。
+      // 只在文档确实含 mermaid 时置位：plantuml/echarts 文档不该被标成 mermaid 已完成（属性名就是 mermaid）。
+      if (!cancelled && kinds.has('mermaid')) setReady(true);
     };
     void renderAll();
     return () => {

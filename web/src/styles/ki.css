@@ -2699,6 +2699,9 @@ a:hover { text-decoration: underline; }
    高度上限 600px、内部纵向滚动，避免一张大图把整篇文档推出屏外。 */
 .ki-diagram__figure { padding: 12px; overflow: auto; max-height: 600px; }
 .ki-diagram__figure > svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+/* mermaid 图额外带 `.ki-mermaid`（兼容既有选择器与走查脚本），把该类的卡片样式在此归零：
+   否则容器里会再套一层边框/外边距（与 code-group 面板内是同一个坑）。内边距仍由外层 figure 给。 */
+.ki-markdown .ki-diagram__figure.ki-mermaid { margin: 0; border: none; border-radius: 0; background: transparent; }
 /* ── 代码语法高亮（highlight.js token → `--ki-code-*` 令牌，方案 A「克制品牌色」）────────
    落地口径（2026-10-20 POC 实测）：
    ① 高亮色自成一族 `--ki-code-*`，**不占用 `--ki-color-*` 语义色**（语义色只用于状态徽标）；

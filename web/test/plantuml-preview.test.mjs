@@ -56,10 +56,10 @@ describe('PlantUML 围栏 → 图表/代码双面板', () => {
     }
   });
 
-  it('mermaid 与普通代码块维持原样（本次不改其渲染路径）', () => {
+  it('mermaid 现已走同一条双面板通道，普通代码块仍维持原样', () => {
     const mermaid = renderMarkdownHtml('```mermaid\nsequenceDiagram\n  A->>B: hi\n```');
+    assert.ok(mermaid.includes('data-ki-diagram="mermaid"'), 'mermaid 也带「图表 / 代码」切换');
     assert.ok(mermaid.includes('language-mermaid'));
-    assert.equal(mermaid.includes('data-ki-diagram'), false, 'mermaid 不应带图表/代码切换');
 
     const plain = renderMarkdownHtml('```python\nprint(1)\n```');
     assert.ok(plain.includes('class="ki-code-lang">python<'));

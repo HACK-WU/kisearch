@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +110,30 @@ describe('MarkdownPreview safe interactive Markdown', () => {
     // mermaid 不参与着色：它由图表渲染接管，源码块只在渲染失败时兜底展示
     assert.match(html, /<code class="language-mermaid">graph TD/);
     assert.match(html, /class="language-mermaid"/);
+  });
+
+  it('mermaid 块带「图表 / 代码」双面板（与 PlantUML / ECharts 同构）', () => {
+    const html = renderMarkdownHtml('```mermaid\ngraph TD\n  A-->B\n```');
+
+    assert.match(html, /data-ki-diagram="mermaid"/);
+    assert.match(html, />图表<\/button>/);
+    assert.match(html, />代码<\/button>/);
+    // 图表面板先给占位（异步加载引擎），代码面板初始隐藏且存原文
+    assert.match(html, /data-ki-diagram-pending>图表加载中…</);
+    assert.match(html, /data-ki-code-panel="1" hidden><pre><code class="language-mermaid">graph TD/);
+  });
+
+  it('mermaid 围栏大小写都识别（`Mermaid` 同样出双面板）', () => {
+    assert.match(renderMarkdownHtml('```Mermaid\ngraph TD\n  A-->B\n```'), /data-ki-diagram="mermaid"/);
+  });
+
+  it('源码守卫：mermaid 不再有独立的"替换 pre"老路径（防止被加回来形成两套渲染）', () => {
+    const src = fs.readFileSync(path.join(webRoot, 'src/components/MarkdownPreview.tsx'), 'utf8');
+    assert.equal(src.includes("'pre > code.language-mermaid'"), false, '老的 pre 替换路径必须已删除');
+    assert.equal(src.includes("'.ki-mermaid[data-copy-text]'"), false, '老的容器复用路径必须已删除');
+    // 三条分支都必须收敛在同一个 renderBlock 里（data-ki-diagram 是唯一入口）
+    assert.match(src, /kind === 'mermaid'/);
+    assert.match(src, /kind === 'echarts'/);
   });
 
   it('labels each code block toolbar with its language, falling back to 代码', () => {
