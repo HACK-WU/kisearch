@@ -86,6 +86,27 @@ const PATHS: Record<string, JSX.Element> = {
   dash: <path d="M6 12h12" />,
   arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
   refresh: <path d="M20 11a8 8 0 1 0-2.2 6.7M20 4v7h-7" />,
+  // 表头排序指示（REQ-20261112-001）：未激活双向、激活单向。
+  // 用图标而非 ↓/⇅ 文字符号 —— 文字符号在 mono + letter-spacing 的表头里会歪。
+  sort: (
+    <>
+      <path d="M12 4v16" />
+      <path d="m8 8 4-4 4 4" />
+      <path d="m8 16 4 4 4-4" />
+    </>
+  ),
+  'sort-asc': (
+    <>
+      <path d="M12 20V4" />
+      <path d="m6 10 6-6 6 6" />
+    </>
+  ),
+  'sort-desc': (
+    <>
+      <path d="M12 4v16" />
+      <path d="m6 14 6 6 6-6" />
+    </>
+  ),
   folder: (
     <path d="M3 6.5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
   ),

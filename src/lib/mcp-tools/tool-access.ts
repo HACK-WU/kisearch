@@ -48,9 +48,29 @@ export const SCOPE_LESS_ENUM_TOOL_NAMES: readonly string[] = [
   'ki_view_list',
 ];
 
+/**
+ * 「检索类」工具 —— 只有它们计入 scope 用量统计的「查询」列（REQ-20261112-001 S-01）。
+ *
+ * ★ 与 `READ_ONLY_TOOL_NAMES` 刻意不同：那个清单回答「只读 Token 能不能调」，
+ *   本清单回答「算不算一次检索」。`ki_tag_list` / `ki_scope_list` / `ki_view_list`
+ *   是枚举类（全库扫描或无 scope），计入会让「翻页/枚举」被当成「检索」。
+ * ★ 与 `operation-coordinator.ts::READ_MCP_TOOLS` 也不同：那里还有管理类读
+ *   （如 doc 列表），它们**不计**查询次数 —— 否则管理员在浏览页翻几次就能把库刷成「热」。
+ */
+export const SEARCH_TOOL_NAMES: readonly string[] = [
+  'ki_search',
+  'ki_group_list',
+  'ki_get_module_info',
+];
+
 /** 该工具是否允许只读 Token 调用 */
 export function isReadOnlyTool(name: string): boolean {
   return READ_ONLY_TOOL_NAMES.includes(name);
+}
+
+/** 该工具是否计入「查询」调用量 */
+export function isSearchTool(name: string): boolean {
+  return SEARCH_TOOL_NAMES.includes(name);
 }
 
 /**

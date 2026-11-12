@@ -1,5 +1,6 @@
 import os from 'node:os';
-import { SCOPE_LESS_ENUM_TOOL_NAMES } from './mcp-tools/tool-access.js';
+import { SCOPE_LESS_ENUM_TOOL_NAMES, isSearchTool } from './mcp-tools/tool-access.js';
+import { recordScopeUsage, type UsageKind } from './scope-usage.js';
 
 export interface OperationRequest {
   operation: string;
@@ -145,6 +146,71 @@ export interface OperationResult<T = unknown> {
   queue: { scope: string; queuedMs: number; runMs: number; activeWorkers: number; maxWorkers: number };
 }
 
+/** 一次用量记账的目标：某个 scope 上的一次读或写 */
+export interface UsageTarget {
+  scope: string;
+  kind: UsageKind;
+}
+
+/**
+ * 计入「查询」的检索类 operation。
+ *
+ * ★ 与 `READ_OPERATIONS` 刻意不同：那个集合回答「能否与长任务并行」，包含
+ *   `doc-list-api` / `doc-get-api` / `asset-read-api` 等**管理类读**。
+ *   把它们算成「查询」，管理员在浏览页翻几次就能把一个库刷成「热」，
+ *   而它可能一次 AI 检索都没有（REQ-20261112-001 challenger 意见 2）。
+ */
+const SEARCH_OPERATIONS: ReadonlySet<string> = new Set([
+  'search',
+  'group-list',
+  'query-group',
+  'get-module-info',
+  'get-module-info-batch',
+]);
+
+/**
+ * 计入「写入」的 engine-only 操作（真正产生 / 恢复数据的）。
+ * `vector-optimize`（索引优化）、`datasource-add-remote`（登记远程源）属运维动作，不计。
+ */
+const ENGINE_WRITE_OPERATIONS: ReadonlySet<string> = new Set([
+  'import',
+  'datasource-sync',
+  'restore',
+  'rebuild-vector',
+]);
+
+/**
+ * 把「operation + 调度 kind」折算成用量口径：`read` / `write` / **`null`（不计）**。
+ *
+ * 三态而非两态的原因见 `SEARCH_OPERATIONS` 的注释：管理类读既不是检索也不是写入。
+ */
+export function classifyUsage(operation: string, kind: TaskKind): UsageKind | null {
+  if (kind === 'engine-only') {
+    return ENGINE_WRITE_OPERATIONS.has(operation) ? 'write' : null;
+  }
+  if (kind === 'read') {
+    // chat 通道的 operation 形如 `chat-mcp-<tool>`，按工具名判是否检索类
+    if (operation.startsWith(CHAT_MCP_PREFIX)) {
+      return isSearchTool(operation.slice(CHAT_MCP_PREFIX.length)) ? 'read' : null;
+    }
+    return SEARCH_OPERATIONS.has(operation) ? 'read' : null;
+  }
+  return 'write';
+}
+
+/** 未显式提供 usageTargets 时，由 scopes × classifyUsage 推导 */
+function deriveUsageTargets(scopes: string[], kind: TaskKind, operation: string): UsageTarget[] {
+  const usageKind = classifyUsage(operation, kind);
+  if (usageKind === null) return [];
+  const out: UsageTarget[] = [];
+  for (const scope of scopes) {
+    // 全局哨兵不是真实 scope，记进去只会污染统计
+    if (scope === GLOBAL_SCOPE) continue;
+    out.push({ scope, kind: usageKind });
+  }
+  return out;
+}
+
 type Handler = (params: any) => Promise<unknown> | unknown;
 interface Pending {
   request: OperationRequest;
@@ -158,6 +224,12 @@ interface Pending {
   scopes: string[];
   /** 任务类型：`read` = 纯元数据读，只与「元数据提交窗口」互斥（S-01） */
   kind: TaskKind;
+  /**
+   * 用量记账目标。省略时由 `scopes × kind` 推导（`deriveUsageTargets`）。
+   * 只有 MCP HTTP 通道需要显式传 —— 它一个请求可含多个 tools/call，整批 `kind`
+   * 是混算的，必须按工具逐条给出精确的 (scope, read/write)。
+   */
+  usage?: readonly UsageTarget[];
   enqueuedAt: number;
   resolve: (value: OperationResult) => void;
   reject: (reason: unknown) => void;
@@ -226,10 +298,12 @@ export class OperationCoordinator {
     // 缺省 kind 按 operation 名推导（见 `kindForOperation`）——不依赖调用点记得传参；
     // 需要 read 语义的调用点（`/doc/list` 等）仍须显式传 `'read'`。
     kind: TaskKind = kindForOperation(request.operation),
+    /** 精确的 (scope, 读/写) 记账目标；省略时按 scopes × kind 推导 */
+    usage?: readonly UsageTarget[],
   ): Promise<OperationResult> {
     const normalized = normalizeScopes(scopes);
     return new Promise((resolve, reject) => {
-      this.queue.push({ request, handler, scopes: normalized, kind, enqueuedAt: Date.now(), resolve, reject });
+      this.queue.push({ request, handler, scopes: normalized, kind, usage, enqueuedAt: Date.now(), resolve, reject });
       this.pump();
     });
   }
@@ -374,6 +448,21 @@ export class OperationCoordinator {
     } catch (err) {
       failed = true;
       failure = err;
+    } finally {
+      /*
+       * 用量记账（REQ-20261112-001 S-01）。
+       *
+       * 放在 finally 而非 try 内：失败/中止的调用也要计入（需求 D7「失败也计入」）。
+       * 入队前被拒的请求（鉴权失败 / 只读 Token / scope 越权）根本走不到这里 ——
+       * 它们没进调度器，不算一次「对 scope 的调用」。
+       *
+       * 这里只做内存自增，绝不做磁盘写：同 scope 的 coordinator 任务与引擎任务串行，
+       * 请求路径上多一次同步写会放大队列积压（历史事故 `/api/doc/list` 25s 挂死）。
+       */
+      try {
+        const targets = item.usage ?? deriveUsageTargets(item.scopes, item.kind, item.request.operation);
+        for (const target of targets) recordScopeUsage(target.scope, target.kind);
+      } catch { /* 统计永不影响主链路 */ }
     }
     // 先释放占用再计算指标：回传的 activeWorkers 不包含自己，
     // 否则客户端看到的并发数恒虚高 1，且语义无处声明。

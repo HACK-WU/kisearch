@@ -48,6 +48,43 @@ export const DEFAULT_PARTITION_CONFIG: PartitionConfig = {
   maxKeywordCount: 50,
 };
 
+// ─── scope 级用量统计（REQ-20261112-001 S-01）───
+/**
+ * flush 间隔。
+ *
+ * ★ 为什么不做同步写：同一 scope 的 `coordinator.submit()` 与引擎任务串行，导入收尾期
+ *   队列本就会积压（历史事故：`/api/doc/list` 25s 挂死）。请求路径上多一次同步磁盘写
+ *   会直接放大该积压。统计是「天级」指标，30s 的滞后无产品影响。
+ */
+export const USAGE_FLUSH_INTERVAL_MS = 30_000;
+/** 累计事件到达该数量时提前 flush（避免短时爆发要等到下个周期） */
+export const USAGE_FLUSH_THRESHOLD = 500;
+/** 日桶保留天数；`firstSeen` / `lastUsedAt` 不随之裁剪 */
+export const USAGE_RETENTION_DAYS = 90;
+/**
+ * 统计文件容纳的 scope 名上限。
+ * 埋点取的是 `args.scope` 原始字面量（不走 resolveScope）且失败调用也计入，
+ * 没有上限时拼错的名字会无界膨胀统计文件。
+ */
+export const MAX_USAGE_SCOPES = 2000;
+/** 固定三档窗口（服务端一次算全，前端切换零请求） */
+export const SCOPE_USAGE_WINDOWS = [7, 30, 90] as const;
+/** scope / 视图名合法字符集（与 validateScope 对齐），非法名不建统计 key */
+export const SCOPE_USAGE_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * scope 冷热分区配置：以默认值为基线，**刻意偏离两处**。
+ *
+ * - `reservedEmerging: 0`：group 给「新兴」留保底席位是为了新内容曝光；scope 的诉求是
+ *   「谁在被用」，保底会让一个刚被调用 1 次的新库挤掉调用千次的老库。
+ * - `maxWarmCount: null`：列表本就渲染全量 scope，截断会让第 61 个活跃库掉进「冷」区。
+ */
+export const SCOPE_HEAT_CONFIG: PartitionConfig = {
+  ...DEFAULT_PARTITION_CONFIG,
+  reservedEmerging: 0,
+  maxWarmCount: null,
+};
+
 // ─── 默认根节点 ───
 export const DEFAULT_ROOT_NAME = '项目根';
 

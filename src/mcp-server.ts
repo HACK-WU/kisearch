@@ -29,6 +29,7 @@ import {
 } from './lib/mcp-http.js';
 import { listLiveStdioLocks } from './lib/mcp-stdio-lock.js';
 import { startDaemonRpcServer } from './lib/daemon-rpc.js';
+import { initScopeUsage } from './lib/scope-usage.js';
 import { startStdioDaemonBridge } from './lib/daemon-bridge.js';
 import { startDataSourceScheduler, stopDataSourceScheduler } from './lib/datasource-scheduler.js';
 import { DEFAULT_UPLOAD_MAX_BYTES } from './lib/open-api/constants.js';
@@ -1318,6 +1319,17 @@ export async function startMcpServer(): Promise<void> {
       }
     });
   }
+  /*
+   * scope 用量统计的启动点（REQ-20261112-001 S-01）。
+   *
+   * ★ 必须在 daemon 的唯一启动流程里、且在任何入口开始接请求之前初始化：
+   *   RPC（CLI）与 HTTP（MCP/Web）共用本进程，两条通道都会走到 coordinator 埋点。
+   * ★ 刻意**不**放进 `createMcpHttpServer`：它是导出函数，单测与嵌入式调用也会创建，
+   *   放在那里会让每次跑 HTTP 测试都在 dataDir 下真实生成统计文件并拉起定时器，
+   *   「只有 daemon 是统计写者」这条前提当场失效。
+   * ★ 不初始化时 `recordScopeUsage` 静默丢弃 ⇒ CLI 直连、单测零副作用。
+   */
+  initScopeUsage(loadConfig());
   const daemonRpc = await startDaemonRpcServer();
 
   // daemon 启用向量库空闲释放：空闲超时后释放已打开的 Collection，降低 mmap/worker 占用。

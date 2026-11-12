@@ -28,6 +28,7 @@ import {
   isReadOnlyTool,
   readonlyRejectMessage,
   SCOPE_LESS_ENUM_TOOL_NAMES,
+  isSearchTool,
   TOKEN_READONLY,
 } from './mcp-tools/tool-access.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
@@ -942,6 +943,16 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     // 2026-10-13 修复：此前 MCP 通道整批缺省 `write` ⇒ 导入/向量化期间浏览页正文
     // （ki_get_module_info）被排到队尾（隔离实测 8745ms）。
     const calledTools: string[] = [];
+    /**
+     * 用量记账目标（REQ-20261112-001 S-01）。
+     *
+     * ★ 必须按**工具逐条**给出，不能用整批 `kind` × scope 推导：
+     *   `kindForMcpToolNames` 是整批判定（混入一个写工具就整批回退 `write`），
+     *   一个 batch 里 `ki_search(a)` + `ki_store(b)` 会把 a 的查询记成写入。
+     * ★ 三态：检索类 → read；其它读工具（管理类）→ 不计；写工具 → write。
+     * ★ 同批同 scope 去重，write 优先（写是更重的事件，记成读会掩盖一次真实写入）。
+     */
+    const usageMap = new Map<string, 'read' | 'write'>();
     for (const message of messages) {
       const method = readMethod(message);
       if (method !== 'tools/call' && method !== 'resources/read' && method !== 'resources/list') continue;
@@ -960,7 +971,22 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       const scopes = rawScope.split(',').map((scope) => scope.trim()).filter(Boolean);
       // 缺省 scope 与 CLI 的默认 scope 共用同一条队列；否则 MCP/CLI 都未传 scope
       // 时会落到不同的队列，绕过同 scope 串行约束。
-      for (const scope of scopes.length > 0 ? scopes : ['default']) queueScopes.add(scope);
+      const targetScopes = scopes.length > 0 ? scopes : ['default'];
+      for (const scope of targetScopes) queueScopes.add(scope);
+
+      // 用量口径：只有落在统计口径内的工具才记账（三态见 usageMap 注释）
+      if (typeof toolName === 'string') {
+        const usageKind = isSearchTool(toolName)
+          ? 'read'
+          : kindForMcpToolNames([toolName]) === 'read'
+            ? null                                   // 管理类读（doc 列表等）：不计
+            : 'write';
+        if (usageKind !== null) {
+          for (const scope of targetScopes) {
+            if (usageMap.get(scope) !== 'write') usageMap.set(scope, usageKind);
+          }
+        }
+      }
     }
     // 多 scope batch 只需占用它**实际涉及**的分片，不再归入全局屏障：
     // 旧写法把多 scope 请求当成全局独占，会在它排队期间冻结所有无关 scope 的调度。
@@ -985,6 +1011,8 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
       // 允许只读访问 zvec（实测导入期间引擎直读 68–220ms）⇒ 不再被导入长任务排到队尾。
       // 混入任一写工具即整批回退 `write`（见 kindForMcpToolNames）。
       kindForMcpToolNames(calledTools),
+      // 用量记账目标：按工具逐条精确给出（整批 kind 会混算，见 usageMap 注释）
+      [...usageMap].map(([scope, kind]) => ({ scope, kind })),
     );
   }
 

@@ -32,6 +32,11 @@ import {
 } from './lib/config.js';
 import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { readViews, isViewName, getViewMembers } from './lib/scope-view.js';
+import {
+  buildScopeUsageMap,
+  makeEmptyScopeUsage,
+  type ScopeUsage,
+} from './lib/scope-heat.js';
 import { readViewDimensionState } from './lib/view-dimension-state.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
@@ -95,6 +100,14 @@ export interface ScopeEntry {
   topGroups: string[];
   /** topGroups 是否可能过期（该 scope 正在提交窗口内或读取失败） */
   topGroupsStale: boolean;
+  /**
+   * 调用量与冷热（REQ-20261112-001）。
+   *
+   * - `null` = **统计不可用**（统计文件缺失 / 损坏 / 读失败）⇒ 前端渲染 `—`。
+   *   ⚠️ 不得用「全 0 结构」代替：0 会被读成「确实没人用」，而实际是「没在统计」。
+   * - 非 null 时三档固定存在（`d7 / d30 / d90`），前端切换窗口纯本地。
+   */
+  usage: ScopeUsage | null;
   /**
    * Wiki 写回状态（资源页「Scope 与 Wiki 同步」需要）。
    *
@@ -461,6 +474,25 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
     ...Object.keys(config.scopes),
     ...config.scopeReadonly,
   ].filter((s) => !viewNames.has(s)));
+  /*
+   * 调用量与冷热（REQ-20261112-001 S-02）：一次读全量统计文件、三档窗口一次算全。
+   *
+   * - `null` = 统计不可用 ⇒ 所有行 `usage: null` ⇒ 前端 `—`（不用 0 代替）
+   * - 统计可用但某 scope 从未被记录 ⇒ 全 0 结构（`unused`，前端渲染「无调用」）
+   * - 这里失败不得拖垮列表：`buildScopeUsageMap` 内部已对文件损坏/读失败降级
+   */
+  const now = Date.now();
+  // 外层再兜一层：`buildScopeUsageMap` 内部已对文件损坏/读失败降级，但它自己也可能因
+  // 意料外的情况抛错（例如后续新增的档位校验、视图解析异常）。统计是附加信息，
+  // 任何异常都只降级为「无统计」（前端 `—`），绝不让整个 scope 列表不可用。
+  const usageBundle = (() => {
+    try {
+      return buildScopeUsageMap(config, now);
+    } catch {
+      return null;
+    }
+  })();
+
   const scopes: ScopeEntry[] = [...all].sort().map((s) => {
     // 逐 scope 兜底：单个 scope 的 relations 元数据损坏不应让整个 scope 列表不可用，
     // 但必须留下可见告警（不再静默当成 0 条）
@@ -515,6 +547,10 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
       topGroups,
       topGroupsStale,
       wikiSync,
+      // 统计不可用 → null（前端 `—`）；可用但该 scope 无记录 → 全 0（前端「无调用」）
+      usage: usageBundle
+        ? (usageBundle.byScope.get(s) ?? makeEmptyScopeUsage(usageBundle.meta, now))
+        : null,
     };
   });
 

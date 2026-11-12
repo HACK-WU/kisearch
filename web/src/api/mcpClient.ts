@@ -30,6 +30,40 @@ export interface ScopeInfo {
   ftsDocCount?: number;
   /** Wiki 回写可用性（2026-10-27 新增；旧版 daemon 不返回该字段） */
   wikiSync?: ScopeWikiStatusInfo;
+  /**
+   * 调用量与冷热（REQ-20261112-001）。
+   *
+   * - `undefined` / `null` = **统计不可用**（旧版 daemon 未实现 / 统计文件缺失或损坏）
+   *   ⇒ 三列一律渲染 `—`，**不得渲染 0**（0 会被读成「确实没人用」）。
+   * - 非 null 时 `d7 / d30 / d90` 固定存在，切换窗口是纯本地行为、不产生请求。
+   */
+  usage?: ScopeUsageInfo | null;
+}
+
+/** 冷热档位。`'unused'` 的准确含义是「**本窗口内** 0 次调用」，不是「从未使用」 */
+export type ScopeHeat = 'hot' | 'warm' | 'cold' | 'unused';
+
+/** 单个窗口档位的聚合结果 */
+export interface ScopeUsageWindowInfo {
+  /** 窗口内检索类调用次数（含失败；管理类浏览不计） */
+  read: number;
+  write: number;
+  /** 窗口内最近一次调用（毫秒）；0 = 窗口内无调用 */
+  lastUsedAt: number;
+  heat: ScopeHeat;
+  /** 该 scope 在本窗口内被统计覆盖的天数；小于窗口天数时数字加 `*` 角标 */
+  coveredDays: number;
+}
+
+/** 调用量与冷热（`ScopeInfo.usage`） */
+export interface ScopeUsageInfo {
+  d7: ScopeUsageWindowInfo;
+  d30: ScopeUsageWindowInfo;
+  d90: ScopeUsageWindowInfo;
+  /** 统计起始日期（全局最早），YYYY-MM-DD */
+  since: string;
+  /** 最近一次落盘时间（ISO） */
+  updatedAt: string;
 }
 
 /**

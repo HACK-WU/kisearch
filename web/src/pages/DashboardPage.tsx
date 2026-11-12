@@ -2,7 +2,7 @@
  * DashboardPage.tsx —— 总览（对齐 demo：服务横幅 + 统计卡 + scope 表格 + 健康列表）
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { summarizeHealth, useHealth, useScopeList, useDocList, useVectorDimensionStatus, useDataSourceList, useIsViewName, type HealthSummary, type ScopeEntry } from '@/lib/hooks';
@@ -11,6 +11,19 @@ import { dimensionBadge, embeddingIdentityTitle } from '@/lib/vectorDimensionCop
 import { describeWikiSync } from '@/lib/resourcesPage';
 import { layerColumns, readModeCard, wikiWritebackCard, currentScopeHeading, viewCountCard } from '@/lib/dashboardScopeCards';
 import { scopeReadonlyTitle } from '@/lib/scopeReadonly';
+import {
+  DEFAULT_SORT,
+  HEAT_TEXT,
+  USAGE_FULL_WINDOW_DAYS,
+  buildScopeRows,
+  daysSinceLocalDate,
+  formatCount,
+  nextSort,
+  type ScopeRow,
+  type SortDir,
+  type SortKey,
+  type WindowDays,
+} from '@/lib/scopeUsageTable';
 import { useAuth } from '@/lib/authContext';
 import { scheduleSummaryView, summarizeSchedules } from '@/lib/datasourceSchedule';
 import {
@@ -51,6 +64,96 @@ function badgeCell(ok: boolean | undefined, label: string, cls: string): JSX.Ele
     <span className={`ki-badge ${ok ? cls : 'ki-badge--off'}`}>
       {ok ? label : '—'}
     </span>
+  );
+}
+
+// ─── scope 用量列（REQ-20261112-001 S-03）───────────────────────────────
+
+/**
+ * 冷热徽标。
+ *
+ * ★ `row.heat === null` = **统计不可用** ⇒ 渲染 `—`，不渲染「无调用」：
+ *   两者含义完全不同（没在统计 vs 统计正常但窗口内 0 次）。
+ * ★ 零调用档文案是「无调用」而非「未使用」——判据是「本窗口内 0 次」，
+ *   162 行里 100+ 行会命中该档，用「未使用」会诱导批量误删。
+ */
+function HeatBadge({ row, windowDays }: { row: ScopeRow; windowDays: WindowDays }) {
+  if (!row.heat) {
+    return <span className="ki-cell-sub" title="统计不可用（尚未产生统计数据）">—</span>;
+  }
+  const title = row.heat === 'unused'
+    ? `近 ${windowDays} 天内无检索 / 写入调用`
+    : `近 ${windowDays} 天：检索 ${formatCount(row.usage?.read ?? 0)} 次、写入 ${formatCount(row.usage?.write ?? 0)} 次`;
+  return (
+    <span className={`ki-scope-heat ki-scope-heat--${row.heat}`} title={title}>
+      <span className="ki-scope-heat__dot" />
+      <span>{HEAT_TEXT[row.heat]}</span>
+    </span>
+  );
+}
+
+/**
+ * 调用量单元格：千分位，覆盖不足只在 `title` 里说明。
+ *
+ * ★ 刻意**不**在数字旁加 `*` 角标：统计刚上线时 `coveredDays` 对每一行都小于窗口，
+ *   172 行全带星 ⇒ 星号信息量为零、只剩噪声。而「统计从哪天开始」是**全局**事实，
+ *   由卡头统一提示一次即可（`.ki-scope-since`），不必逐行重复。
+ */
+function CountCell({ value, coveredDays, windowDays }: { value: number | null; coveredDays: number | null; windowDays: WindowDays }) {
+  if (value === null) {
+    return <span className="ki-cell-sub" title="统计不可用（尚未产生统计数据）">—</span>;
+  }
+  const partial = coveredDays !== null && coveredDays > 0 && coveredDays < windowDays;
+  const text = formatCount(value);
+  /*
+   * 列宽固定在 9%：7 位以上的数字会被省略号截断（CSS 见 `.ki-scope-table .ki-num`），
+   * 这里只在**可能被截断**时把完整值放进 title；短数字不加 title，否则满屏 tooltip。
+   */
+  const title = [
+    partial ? `仅覆盖 ${coveredDays} 天（该库首次被统计较晚）` : '',
+    text.length >= 7 ? text : '',
+  ].filter(Boolean).join(' · ') || undefined;
+  return (
+    <span className="ki-num" title={title}>
+      {text}
+    </span>
+  );
+}
+
+/**
+ * 可排序表头：同列切换升降序，换列重置为降序。
+ *
+ * ★ 不写内联 `textAlign` / `paddingLeft`：列的对齐与内缩一律交给 CSS
+ *   （`.ki-scope-table` 的 nth-child 规则 —— 查询 / 写入 / 文档数三列左对齐，内缩 32px，
+ *   是常规列 16px 的两倍）。
+ *   内联样式优先级高于样式表，这里写死 left 会让那条规则永远失效。
+ */
+function SortTh({ label, sortKey, sort, onToggle }: {
+  label: string;
+  sortKey: SortKey;
+  sort: { key: SortKey; dir: SortDir };
+  onToggle: (key: SortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  return (
+    <th
+      aria-sort={active ? (sort.dir === 'desc' ? 'descending' : 'ascending') : 'none'}
+    >
+      <button
+        type="button"
+        className={`ki-th-sort${active ? ' ki-th-sort--active' : ''}`}
+        onClick={() => onToggle(sortKey)}
+      >
+        {label}
+        {/* 未激活也显示双向箭头图标：可排序的列应始终可见可排，而不是"点过才知道能点" */}
+        <span className="ki-th-sort__icon" aria-hidden="true">
+          <Icon
+            name={active ? (sort.dir === 'desc' ? 'sort-desc' : 'sort-asc') : 'sort'}
+            className="ki-icon ki-th-sort__svg"
+          />
+        </span>
+      </button>
+    </th>
   );
 }
 
@@ -290,6 +393,17 @@ export function DashboardPage(): JSX.Element {
   };
 
   const list = scopes?.scopes ?? [];
+
+  /*
+   * scope 表的排序 / 搜索 / 窗口（REQ-20261112-001 S-03）。
+   *
+   * 全部是前端状态：`ki_scope_list` 一次返回 d7/d30/d90 三档，切窗口不产生请求，
+   * 也不会分裂 queryKey（全局 ScopeSelect 与总览共用 `['scopeList']` 缓存）。
+   */
+  const [windowDays, setWindowDays] = useState<WindowDays>(7);
+  const [keyword, setKeyword] = useState('');
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>(DEFAULT_SORT);
+
   const totalDocs = list.reduce((s, x) => s + (x.wikiCount ?? 0), 0);
   const kbCount = list.filter((x) => x.kb).length;
   const vecCount = list.filter((x) => x.vector).length;
@@ -312,6 +426,31 @@ export function DashboardPage(): JSX.Element {
   // 「显示注册 scope」卡片：数据全部来自同一份 scopeList（0 新增请求、0 后端改动）
   const scopeMode = normalizeScopeMode(scopes?.scopeMode);
   const registeredScopes = registeredScopesOf(list);
+
+  // 主表行（搜索 + 排序 + 窗口都在纯函数里，便于单测）
+  const scopeRows = useMemo(
+    () => buildScopeRows(list, { keyword, windowDays, sortKey: sort.key, sortDir: sort.dir }),
+    [list, keyword, windowDays, sort.key, sort.dir],
+  );
+  /*
+   * 第二张表「显示注册 scope」：同一套列、同一排序与窗口，但**不跟随搜索**
+   * （在主表搜 `bkmontest` 时不该把「已注册」表搜空 —— 它回答的是另一个问题）。
+   * 注册 scope 通常只有几行，不缓存。
+   */
+  const registeredRows = buildScopeRows(registeredScopes, {
+    keyword: '', windowDays, sortKey: sort.key, sortDir: sort.dir,
+  });
+  const toggleSort = (key: SortKey) => setSort((prev) => nextSort(prev, key));
+
+  /*
+   * 统计起始日提示（全局一次，不逐行标角标）。
+   * 覆盖未满 90 天时，每个数字的「分母」都比窗口短 —— 这是全局事实，写在卡头最省噪。
+   */
+  const usageSince = list.find((s) => s.usage)?.usage?.since ?? null;
+  const usageDays = usageSince ? daysSinceLocalDate(usageSince) : null;
+  const sinceHint = usageDays !== null && usageDays < USAGE_FULL_WINDOW_DAYS
+    ? ` · 统计自 ${usageSince} 起`
+    : '';
   const vectorDegraded = scopes?.vectorAvailable === false;
 
   /**
@@ -546,27 +685,30 @@ export function DashboardPage(): JSX.Element {
                   </div>
                 </div>
               ) : (
-                <table className="ki-table ki-reg-scope__table">
+                <table className="ki-table ki-reg-scope__table ki-scope-table ki-scope-table--reg">
                   <thead>
                     <tr>
                       <th>Scope</th>
                       <th>层状态</th>
-                      <th style={{ textAlign: 'right' }}>文档数</th>
+                      <th>冷热</th>
+                      <th>查询</th>
+                      <th>写入</th>
+                      <th>文档数</th>
                       <th>Wiki 回写</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {registeredScopes.map((s) => {
+                    {registeredRows.map((row) => {
                       // 文案唯一来源：与资源页同一函数（enabled ≠ 可回写）
-                      const wiki = describeWikiSync(s.wikiSync);
+                      const wiki = describeWikiSync(row.wikiSync ?? undefined);
                       return (
-                        <tr key={s.scope}>
+                        <tr key={row.scope}>
                           <td>
                             <div className="ki-scope-name">
                               <span className="ki-scope-name__dot ki-dot--blue" />
                               <span className="ki-reg-scope__name">
-                                <span className="ki-scope-name__text">{s.scope}</span>
-                                {s.scope === scope && <span className="ki-badge">当前</span>}
+                                <span className="ki-scope-name__text">{row.scope}</span>
+                                {row.scope === scope && <span className="ki-badge">当前</span>}
                                 <span
                                   className={`ki-reg-scope__wiki-inline ki-reg-scope__wiki--${wiki.tone}`}
                                   title={wiki.title}
@@ -578,13 +720,30 @@ export function DashboardPage(): JSX.Element {
                           </td>
                           <td>
                             <div className="ki-badge-group">
-                              {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
-                              {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
-                              {readonlyBadge(s.scope, s.readonly)}
+                              {badgeCell(row.kb, 'KB', 'ki-badge--kb')}
+                              {badgeCell(row.vector, 'RAG', 'ki-badge--vec')}
+                              {readonlyBadge(row.scope, row.readonly)}
                             </div>
                           </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <span className="ki-num">{s.wikiCount ?? 0}</span>
+                          <td>
+                            <HeatBadge row={row} windowDays={windowDays} />
+                          </td>
+                          <td>
+                            <CountCell
+                              value={row.usage ? row.usage.read : null}
+                              coveredDays={row.coveredDays}
+                              windowDays={windowDays}
+                            />
+                          </td>
+                          <td>
+                            <CountCell
+                              value={row.usage ? row.usage.write : null}
+                              coveredDays={row.coveredDays}
+                              windowDays={windowDays}
+                            />
+                          </td>
+                          <td>
+                            <span className="ki-num">{formatCount(row.wikiCount)}</span>
                           </td>
                           <td>
                             <span
@@ -617,8 +776,33 @@ export function DashboardPage(): JSX.Element {
               <span className="ki-panel-kicker">SCOPES</span>
               <span className="ki-card__title">知识库</span>
             </span>
-            <span className="ki-card__sub" id="scopeMeta">
-              {isLoading ? '检测中…' : `${list.length} 个 scope`}
+            <span className="ki-scope-tools">
+              <input
+                type="search"
+                className="ki-scope-search"
+                placeholder="搜索 scope"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                aria-label="搜索 scope"
+              />
+              <span className="ki-scope-seg" role="group" aria-label="统计窗口">
+                {([7, 30, 90] as WindowDays[]).map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className={`ki-scope-seg__btn${windowDays === days ? ' is-active' : ''}`}
+                    aria-pressed={windowDays === days}
+                    onClick={() => setWindowDays(days)}
+                  >
+                    近 {days} 天
+                  </button>
+                ))}
+              </span>
+              <span className="ki-card__sub" id="scopeMeta">
+                {isLoading
+                  ? '检测中…'
+                  : `${scopeRows.length}/${list.length} 个 scope${sinceHint}`}
+              </span>
             </span>
           </div>
           <div id="scopeList">
@@ -640,45 +824,72 @@ export function DashboardPage(): JSX.Element {
                 </div>
               </div>
             ) : (
-              <table className="ki-table">
+              <table className="ki-table ki-scope-table ki-scope-table--main">
                 <thead>
                   <tr>
                     <th>Scope</th>
                     <th>层状态</th>
-                    <th style={{ textAlign: 'right' }}>文档数</th>
+                    <SortTh label="冷热" sortKey="heat" sort={sort} onToggle={toggleSort} />
+                    <SortTh label="查询" sortKey="query" sort={sort} onToggle={toggleSort} />
+                    <SortTh label="写入" sortKey="write" sort={sort} onToggle={toggleSort} />
+                    <SortTh label="文档数" sortKey="docs" sort={sort} onToggle={toggleSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {list.map((s) => (
-                    <tr key={s.scope}>
+                  {scopeRows.map((row) => (
+                    <tr key={row.scope}>
                       <td>
-                        <div className="ki-scope-name">
+                        <div className="ki-scope-name" title={row.scope}>
                           <span className="ki-scope-name__dot ki-dot--blue" />
                           <span>
-                            <span className="ki-scope-name__text">{s.scope}</span>
+                            <span className="ki-scope-name__text">{row.scope}</span>
                           </span>
                         </div>
                       </td>
                       <td>
                         <div className="ki-badge-group">
-                          {badgeCell(s.kb, 'KB', 'ki-badge--kb')}
-                          {badgeCell(s.vector, 'RAG', 'ki-badge--vec')}
-                          {s.ftsOnlyDocCount > 0 && (
+                          {badgeCell(row.kb, 'KB', 'ki-badge--kb')}
+                          {badgeCell(row.vector, 'RAG', 'ki-badge--vec')}
+                          {row.ftsOnlyDocCount > 0 && (
                             <span
                               className="ki-badge ki-badge--fts"
                               title="完整建立 FTS-only 索引的文档数（按文档计）"
                             >
-                              FTS {s.ftsOnlyDocCount}
+                              FTS {row.ftsOnlyDocCount}
                             </span>
                           )}
-                          {readonlyBadge(s.scope, s.readonly)}
+                          {readonlyBadge(row.scope, row.readonly)}
                         </div>
                       </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <span className="ki-num">{s.wikiCount ?? 0}</span>
+                      <td>
+                        <HeatBadge row={row} windowDays={windowDays} />
+                      </td>
+                      <td>
+                        <CountCell
+                          value={row.usage ? row.usage.read : null}
+                          coveredDays={row.coveredDays}
+                          windowDays={windowDays}
+                        />
+                      </td>
+                      <td>
+                        <CountCell
+                          value={row.usage ? row.usage.write : null}
+                          coveredDays={row.coveredDays}
+                          windowDays={windowDays}
+                        />
+                      </td>
+                      <td>
+                        <span className="ki-num">{formatCount(row.wikiCount)}</span>
                       </td>
                     </tr>
                   ))}
+                  {scopeRows.length === 0 && (
+                    <tr>
+                      <td colSpan={6}>
+                        <span className="ki-cell-sub">没有匹配的 scope</span>
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             )}

@@ -35,6 +35,12 @@
   --ki-color-danger-ink: #9d3a36;
   --ki-color-focus: #3e765e;
   --ki-color-skeleton: #eef1ec;
+  /* ── 冷热档位色（只服务总览 scope 表「冷热」列的热度条；2026-11-12 用户定稿：
+        热=红 / 温=黄 / 冷=淡蓝）。不复用语义色 —— warning 是褐琥珀、info 是深海蓝，
+        做成 6px 高的小条后都不够亮、彼此也拉不开距离。 */
+  --ki-heat-hot: #c9422f;
+  --ki-heat-warm: #f5c211;
+  --ki-heat-cold: #8ab8dc;
   /* 遮罩（对话框 / 详情抽屉共用一个口径） */
   --ki-scrim: rgba(18, 24, 21, 0.28);
   /* ── 提示信息卡片（Notice）语气色阶：组件级（全局 warning 是褐琥珀，
@@ -119,6 +125,10 @@
   --ki-color-danger-ink: #eda7a2;
   --ki-color-focus: #7fd0aa;
   --ki-color-skeleton: #252e29;
+  /* 冷热档位色（暗色）：在深底上提亮、提纯，否则红/黄都糊成暗块 */
+  --ki-heat-hot: #e2725b;
+  --ki-heat-warm: #ffd23f;
+  --ki-heat-cold: #6fb3d9;
   --ki-color-hover: rgba(255, 255, 255, 0.06);
   --ki-color-hover-strong: rgba(255, 255, 255, 0.08);
   --ki-color-surface-muted: rgba(255, 255, 255, 0.06);
@@ -759,11 +769,13 @@ a:hover { text-decoration: underline; }
    名称下方的长路径若不裁切，会把 Scope 列撑宽、把「层状态」挤出卡片
    （`.ki-card` 是 overflow:hidden，页面级 scrollWidth 仍是 0，肉眼才发现）。 */
 @media (max-width: 960px) {
-  .ki-reg-scope__table { table-layout: fixed; }
-  .ki-reg-scope__table th:nth-child(1) { width: 52%; }
-  .ki-reg-scope__table th:nth-child(2) { width: 26%; }
-  .ki-reg-scope__table th:nth-child(3) { width: 22%; }
-  .ki-reg-scope__table th:nth-child(4), .ki-reg-scope__table td:nth-child(4) { display: none; }
+  /* 7 列在窄屏只留 scope / 层状态 / 冷热，其余收起。
+     ⚠️ 原规则是给**旧的 4 列**写的（隐藏第 4 列 + 52/26/22 三档宽度），
+        加列后列序已变，照用会隐藏「查询」却留下「写入/文档数/Wiki」，列宽也会错乱。 */
+  .ki-scope-table--reg th:nth-child(n+4), .ki-scope-table--reg td:nth-child(n+4) { display: none; }
+  .ki-scope-table--reg th:nth-child(1) { width: 45%; }
+  .ki-scope-table--reg th:nth-child(2) { width: 33%; }
+  .ki-scope-table--reg th:nth-child(3) { width: 22%; }
   .ki-reg-scope__name { width: 100%; min-width: 0; }
   .ki-reg-scope__wiki-inline {
     display: block; flex-basis: 100%; min-width: 0; max-width: 100%;
@@ -771,10 +783,11 @@ a:hover { text-decoration: underline; }
     font-size: var(--ki-font-size-xs);
   }
 }
-/* ≤640：文档数也被通用规则隐藏；重排列宽，避免右侧留下空列 */
+/* ≤640：只剩 scope / 层状态 两列时重排比例，避免右侧留下空列 */
 @media (max-width: 640px) {
-  .ki-reg-scope__table th:nth-child(1) { width: 64%; }
-  .ki-reg-scope__table th:nth-child(2) { width: 36%; }
+  .ki-scope-table--reg th:nth-child(1) { width: 58%; }
+  .ki-scope-table--reg th:nth-child(2) { width: 42%; }
+  .ki-scope-table--reg th:nth-child(3), .ki-scope-table--reg td:nth-child(3) { display: none; }
 }
 
 /* 骨架屏 */
@@ -868,6 +881,216 @@ a:hover { text-decoration: underline; }
 
 .ki-num { font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm); }
 .ki-cell-sub { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/* ══════════ 总览 scope 表（REQ-20261112-001）：排序 / 搜索 / 窗口 / 冷热 ══════════
+   ★ 全部规则限定 `.ki-scope-table`（总览的两张表都带这个类）。
+     `.ki-table` 是全局类，浏览页等多处都在用：直接改它的 padding 或列隐藏规则，
+     会把别的表格一并改坏。 */
+/* ★ 必须 table-layout: fixed + 百分比列宽。
+   用 auto 时浏览器把「剩余宽度」按各列内容比例摊出去 —— Scope 列文字短却占掉一大块、
+   数字列挤在一起，视觉上列距忽远忽近（用户 2026-11-12 指出）。
+   fixed 下每列宽度由下面的百分比决定，列间距才均匀。 */
+.ki-scope-table { table-layout: fixed; }
+.ki-scope-table th, .ki-scope-table td { padding-left: 16px; padding-right: 16px; }
+/* 最后一列右侧要留出与左边界对称的呼吸位：td 的 padding-right 是右边界唯一来源 */
+.ki-scope-table th:last-child, .ki-scope-table td:last-child { padding-right: 24px; }
+
+/* 列宽 = 该列内容的实际宽度 + 大致相等的余量（不是按"重要性"排序分配）。
+   在全部左对齐的前提下，这样每列的空白都落在右侧且宽度接近，间隔才会均匀。 */
+/* 主表 6 列。
+   ★ 数字三列（查询 / 写入 / 文档数）必须**贴着内容宽**，别再给它们留大余量：
+     内容是 1~5 个字符（3~40px），原来给 14%/14%/15%（169/169/181px）时右侧空出
+     130px+，数字像"贴在最左边的孤零零一个数" —— 这才是「数字偏左」的真正来源。
+     只靠加大 padding 往里挪是没用的：在 137px 的空白里挪 16px，肉眼看不出来
+     （用户 2026-11-12 反馈"看不出变化"，实测 24px→32px 前后几乎无差别）。
+     现收到 9%/9%/13%（109/109/157px），空白缩到 60px 上下，列宽与内容量相称。
+   ★ 省出的 12% 给前两列：Scope 23%→29%、层状态 21%→27%。
+     层状态在 `KB RAG FTS 300 只读` 四枚徽标时实测占 187px（327px 可用，余 140px）；
+     长 scope 名（bulk-verify-* 这类）也多一点展示余量。
+   ★ 冷热列保持 13%（157px）：内容只有「● 热」约 45px，是全表最松的一列，
+     再给数字列让位就会把「无调用」挤到换行。 */
+.ki-scope-table--main th:nth-child(1) { width: 29%; }
+.ki-scope-table--main th:nth-child(2) { width: 27%; }
+.ki-scope-table--main th:nth-child(3) { width: 13%; }
+.ki-scope-table--main th:nth-child(4) { width: 9%; }
+.ki-scope-table--main th:nth-child(5) { width: 9%; }
+.ki-scope-table--main th:nth-child(6) { width: 13%; }
+
+/* 第二张表 7 列：内容约 120/75/40/28/28/42/60px，余量各约 60px；
+   Wiki 回写留 30%（路径最长，且它是唯一可能顶满的列） */
+.ki-scope-table--reg th:nth-child(1) { width: 18%; }
+.ki-scope-table--reg th:nth-child(2) { width: 14%; }
+.ki-scope-table--reg th:nth-child(3) { width: 10%; }
+.ki-scope-table--reg th:nth-child(4) { width: 9%; }
+.ki-scope-table--reg th:nth-child(5) { width: 9%; }
+.ki-scope-table--reg th:nth-child(6) { width: 10%; }
+.ki-scope-table--reg th:nth-child(7) { width: 30%; }
+/* fixed 下单元格宽度固定，内部元素必须自己收住：Wiki 路径按列宽截断而不是 38vw */
+.ki-scope-table--reg .ki-reg-scope__wiki { max-width: 100%; }
+
+/* ── 计数列（查询 / 写入 / 文档数）：左对齐，但比常规列（16px）**多缩进一倍** ──
+   两张表这几列都在第 4/5/6 位，一条规则同时覆盖（同一视觉体系，不分开写）。
+   ★ 为什么不居中：内容只有 1~5 个字符、列宽 169px 以上，居中后数字悬在列的半空，
+     与上下左右其他左对齐的文字脱节，观感更散（用户 2026-11-12 试过后否掉）。
+   ★ 为什么不用默认的 16px：贴列左边缘时数字像"贴着边框"，右侧空出 150px+，读着偏左。
+     24px 时用户仍觉得略偏左，再收到 32px（= 16 × 2）才停下（原话「还是左对齐吧，但是不要太偏左」
+     → 「数字往右一点点」）。
+   ★ 只动内缩、不动列宽：`table-layout: fixed` 下列宽由 th 的百分比决定，padding 只挪内容。
+   ★ th 与 td 必须给**同一个值**：表头文字（主表在 `.ki-th-sort` flex 里、第二张表是纯文本）
+     和单元格数字都从 padding 边缘起算，两边一致才不会表头与数字错位。 */
+.ki-scope-table th:nth-child(4), .ki-scope-table td:nth-child(4),
+.ki-scope-table th:nth-child(5), .ki-scope-table td:nth-child(5),
+.ki-scope-table th:nth-child(6), .ki-scope-table td:nth-child(6) {
+  text-align: left;
+  padding-left: 32px;
+}
+/* ★ 收窄列宽后必须自己收住：9% 列宽 − 32px 内缩 − 16px 右 padding ≈ 61px 可用，
+   而 `.ki-table td` 是 nowrap 且 `table-layout: fixed` 不会把列撑开 —— 一旦数字超过
+   7 位（如 90 天累计 123,456 次），超出部分会直接压到右侧列上。
+   这里按 `.ki-scope-name__text` 同款处理：超宽截断 + title 兜完整值（见 CountCell）。 */
+.ki-scope-table .ki-num {
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+
+/* ★ 641~1100px 必须把宽度还给数字列、并把内缩降回 16px。
+   1440px 下 9% = 109px（内容区 61px）够用，但 1100px 时表宽只剩 870px ⇒ 9% = 78px、
+   扣掉 32px 内缩只剩 30px —— 「1,234」这类四位数会被截成「1…」（实测 800px 时
+   文档数列的 `1,882` 已开始截断）。窄屏的优先级是"内容完整"，不是"留白好看"。
+   6 列重新分配：26+24+11+12+12+15 = 100；960px 时查询列仍有 56px 内容区。
+   ⚠️ 下界必须是 641：≤640 时第 4/5/6 列已被隐藏，此时改前 3 列宽度只会让表格右侧空更多。 */
+@media (min-width: 641px) and (max-width: 1100px) {
+  .ki-scope-table--main th:nth-child(1) { width: 24%; }
+  .ki-scope-table--main th:nth-child(2) { width: 22%; }
+  .ki-scope-table--main th:nth-child(3) { width: 15%; }
+  .ki-scope-table--main th:nth-child(4) { width: 12%; }
+  .ki-scope-table--main th:nth-child(5) { width: 12%; }
+  .ki-scope-table--main th:nth-child(6) { width: 15%; }
+  .ki-scope-table th:nth-child(4), .ki-scope-table td:nth-child(4),
+  .ki-scope-table th:nth-child(5), .ki-scope-table td:nth-child(5),
+  .ki-scope-table th:nth-child(6), .ki-scope-table td:nth-child(6) { padding-left: 16px; }
+}
+/* ≤640：第 4/5/6 列已被隐藏，但前 3 列仍沿用宽屏的 29/27/13 —— 390px 视口下
+   冷热列只剩 22px 内容区（热度条需 45px），实测 172 行**全部**溢出到列外。
+   这里按「只剩 3 列」重新分配，并把这列的 32px 内缩降回 16px。
+   （注册表在 ≤960 已有同类重排，不受影响。） */
+@media (max-width: 640px) {
+  .ki-scope-table--main th:nth-child(1) { width: 42%; }
+  .ki-scope-table--main th:nth-child(2) { width: 30%; }
+  .ki-scope-table--main th:nth-child(3) { width: 28%; }
+  .ki-scope-table th:nth-child(3), .ki-scope-table td:nth-child(3) { padding-left: 16px; }
+}
+/* 注册表同理，但下界是 961：≤960 它已隐藏第 4~7 列并重排为 45/33/22，
+   在这里再写宽度（max-width: 1100 会覆盖 ≤960 段）会把三列压成 18/14/9 ⇒ 满行的大片空白。 */
+@media (min-width: 961px) and (max-width: 1100px) {
+  .ki-scope-table--reg th:nth-child(1) { width: 18%; }
+  .ki-scope-table--reg th:nth-child(2) { width: 14%; }
+  .ki-scope-table--reg th:nth-child(3) { width: 11%; }
+  .ki-scope-table--reg th:nth-child(4) { width: 11%; }
+  .ki-scope-table--reg th:nth-child(5) { width: 11%; }
+  .ki-scope-table--reg th:nth-child(6) { width: 11%; }
+  .ki-scope-table--reg th:nth-child(7) { width: 24%; }
+}
+
+
+/* 6 列后 `bulk-verify-1786619558409` 这类长名会顶破布局（td 是 nowrap）：
+   截断 + title 全名。`.ki-card` 是 overflow:hidden，溢出时页面级 scrollWidth 仍为 0，
+   肉眼才能发现，所以必须在这里裁。 */
+.ki-scope-table .ki-scope-name__text {
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+/* flex 子项默认 min-width:auto 不会收缩 —— 不给这两层 min-width:0，长名仍会顶破 fixed 列宽 */
+.ki-scope-table .ki-scope-name { min-width: 0; }
+.ki-scope-table .ki-scope-name > span { min-width: 0; overflow: hidden; }
+
+/* ⚠️ 不要再给某一列单独加 padding-left 来"微调"位置。
+   表头与单元格的位置只由**同一条** `.ki-scope-table th, .ki-scope-table td` 规则决定，
+   任何按 nth-child 打的补丁都可能只命中其中一侧（th 与 td 的结构不同：
+   表头文字在 <button> 里、单元格是纯文本流），结果就是表头与数字错位。 */
+
+/* ── 冷热档位：**热度条**（2026-11-12 用户定稿，替换原来的 8px 圆点） ──
+   为什么换：整列只有「热 / 温 / 冷」三种字，8px 圆点能承载的信息太少，一列排下来
+   几乎看不出差异；条自带"刻度"，满条 / 2⁄3 / 1⁄3 三档一眼能比长短。
+   ★ 类名仍叫 `__dot`（组件里就这一个 span）：改字号是样式层的事，不为它动 DOM。
+   ★ 条宽 24px：注册表冷热列内容区只有 ~89px（10% 列宽 − 32px 内缩），再宽会顶破。 */
+.ki-scope-heat { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.ki-scope-heat__dot {
+  width: 24px; height: 6px; border-radius: 3px; flex-shrink: 0;
+  background: var(--ki-color-bg-muted);
+}
+/* 未填充段用底色（bg-muted），读起来像"量表还剩多少"；满条只给热档 */
+.ki-scope-heat--hot .ki-scope-heat__dot { background: var(--ki-heat-hot); }
+.ki-scope-heat--warm .ki-scope-heat__dot {
+  background: linear-gradient(90deg, var(--ki-heat-warm) 0 66%, var(--ki-color-bg-muted) 66% 100%);
+}
+.ki-scope-heat--cold .ki-scope-heat__dot {
+  background: linear-gradient(90deg, var(--ki-heat-cold) 0 33%, var(--ki-color-bg-muted) 33% 100%);
+}
+/* 文字梯度与条长一致（热加粗 / 温常规 / 冷压淡）：颜色不是唯一区分手段，
+   色弱与灰度截图下靠字重 + 条长仍能读档位。 */
+.ki-scope-heat--hot { color: var(--ki-color-text); font-weight: 650; }
+.ki-scope-heat--warm { color: var(--ki-color-text); font-weight: 600; }
+.ki-scope-heat--cold { color: var(--ki-color-text-muted); }
+/* 零调用：**不画条**（连底槽都不画），文字压淡一档。
+   条表示「有量」，零调用本质是「没有」——画个空槽会被读成第五种档位（用户 2026-11-12 指出）。
+   ★ 不要再用 padding-left 补条让出的宽度（24px 条 + 7px gap）：补了以后「无调用」相对
+     **条 / 表头**会右缩一截，整列出现两条左边缘，看着更乱（用户 2026-11-12 二次指出，
+     选定「贴列左边缘」）。现在它与条、表头共用列左边缘 x0，只是行内比「热 / 温 / 冷」的文字
+     差 31px —— 那是「不画条」的必然结果，不再用 padding 找补。 */
+.ki-scope-heat--unused { color: var(--ki-color-text-subtle); }
+.ki-scope-heat--unused .ki-scope-heat__dot { display: none; }
+
+/* ★ 必须是撑满单元格的块级 flex，不能用 inline-flex / inline。
+   行内级盒子的水平起点受行盒影响，与 `<td>` 里的纯文本流不同源，
+   会导致表头文字比数字「缩进去」一截（用户 2026-11-12 两次指出数字没对齐）。
+   撑满 content box 后，表头与数字都从 td/th 的 padding 边缘起算，完全同源。 */
+.ki-th-sort {
+  display: flex; align-items: center; justify-content: flex-start; gap: 3px;
+  width: 100%; text-align: inherit;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+}
+.ki-th-sort:hover, .ki-th-sort--active { color: var(--ki-color-text); }
+/* 排序图标做成小方块按钮（18×18 圆角 + 极淡底色），未激活双向、激活单向。
+   符号统一用 SVG 而非 ↓/⇅ 文字：表头是 mono + letter-spacing，文字箭头会基线歪、宽度抖。 */
+.ki-th-sort__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 4px;
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-subtle);
+  transition: color var(--ki-motion-fast), background var(--ki-motion-fast);
+}
+.ki-th-sort__svg { width: 12px; height: 12px; }
+.ki-th-sort:hover .ki-th-sort__icon { color: var(--ki-color-text-muted); }
+.ki-th-sort--active .ki-th-sort__icon { color: var(--ki-color-text); }
+
+.ki-scope-tools { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ki-scope-search {
+  width: 240px; padding: 7px 11px; border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border); background: var(--ki-color-surface);
+  color: var(--ki-color-text); font-size: var(--ki-font-size-sm);
+}
+.ki-scope-search:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
+.ki-scope-seg {
+  display: inline-flex; border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm); overflow: hidden;
+}
+/* 与搜索框同高（7px 上下 padding），两者并排时不会一高一矮 */
+.ki-scope-seg__btn {
+  padding: 7px 13px; border: 0; background: var(--ki-color-surface); cursor: pointer;
+  font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted);
+}
+.ki-scope-seg__btn + .ki-scope-seg__btn { border-left: 1px solid var(--ki-color-border); }
+.ki-scope-seg__btn.is-active { background: var(--ki-color-bg-muted); color: var(--ki-color-text); font-weight: 650; }
+
+/* 窄屏：只隐藏 scope 表自己的查询/写入/文档数（第 4/5/6 列）。
+   其他 `.ki-table` 的隐藏行为由下方媒体查询里的 `:not(.ki-scope-table)` 规则维持原样。 */
+@media (max-width: 640px) {
+  .ki-scope-table th:nth-child(4), .ki-scope-table td:nth-child(4),
+  .ki-scope-table th:nth-child(5), .ki-scope-table td:nth-child(5),
+  .ki-scope-table th:nth-child(6), .ki-scope-table td:nth-child(6) { display: none; }
+}
 
 .ki-row-actions { display: flex; gap: 4px; opacity: 0; transition: opacity var(--ki-motion-fast); }
 .ki-table tr:hover .ki-row-actions { opacity: 1; }
@@ -1278,8 +1501,10 @@ a:hover { text-decoration: underline; }
   .ki-content { padding: 16px; }
   .ki-stats { grid-template-columns: 1fr; }
   .ki-form-row { grid-template-columns: 1fr; }
-  .ki-table th:nth-child(3), .ki-table td:nth-child(3),
-  .ki-table th:nth-child(4), .ki-table td:nth-child(4) { display: none; }
+  /* 仅对**非** scope 表生效：scope 表的列结构已变成 6/7 列并有自己的隐藏规则
+     （见上方 `.ki-scope-table` 段），沿用旧规则会把「冷热/查询」两列误隐藏。 */
+  .ki-table:not(.ki-scope-table) th:nth-child(3), .ki-table:not(.ki-scope-table) td:nth-child(3),
+  .ki-table:not(.ki-scope-table) th:nth-child(4), .ki-table:not(.ki-scope-table) td:nth-child(4) { display: none; }
 }
 
 /* ══════════ 页面级补充样式（对齐 demo 各页 <style>） ══════════ */
@@ -1833,9 +2058,13 @@ a:hover { text-decoration: underline; }
    实测依据（temp/probe-bar-width.cjs）：375px 视口下平铺会把头部折成 **3 行 135px**，
    反而高于改造前的 126.5px；收起后回到 2 行 91px，窄窗（AI 面板打开 557px）回到 1 行。
    ⚠️ 平铺版隐藏不等于功能不可达 —— 菜单即它们的入口（护栏 #4 只管"有没有入口"）。 */
-@container reader-drawer (max-width: 620px) {
+/* 620 → 700（2026-11-12，REQ-20261112-002）：新增「移动」一枚文字动作（+约 76px）。
+   阈值只许上调、不许硬塞：早收起只是多一次点击，晚收起会把这排折成两行
+   —— 那两个方向的手感差距，错误库「AI 面板挤压下头部工具栏折两行」有实测记录。 */
+@container reader-drawer (max-width: 700px) {
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--link,
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--edit,
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--move,
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--copy { display: none; }
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__overflow { display: inline-flex; }
   /* 窄容器把搜索框下限从 240 收到 230（其内部固定件：分段 106 + 清空 46 + 输入框最小 64 + gaps）。
