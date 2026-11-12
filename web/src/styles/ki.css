@@ -4667,7 +4667,8 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
   color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .ki-chat-cfg__item-hit:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; border-radius: 4px; }
-.ki-chat-cfg__item[data-disabled="true"] { opacity: 0.6; }
+/* 停用态压暗整卡（0.6 → 0.72）：依赖提示也在卡里，压太狠就"看不见为什么开不了" */
+.ki-chat-cfg__item[data-disabled="true"] { opacity: 0.72; }
 /* skill 启用开关**复用**工具开关的 `.ki-chat-cfg__sw`（同层同一外观语言，
    不另造第二套 switch 样式）—— 见 PromptConfigLayer 卡片渲染处的注释。 */
 /* 描述输入框（skill 专用，2026-10-13）：**紧凑两行**，不参与"撑满剩余高度"。
@@ -4678,6 +4679,9 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__modal .ki-chat-cfg__ta--desc { flex: 0 0 auto; min-height: 0; height: auto; }
 .ki-chat-cfg__badge--warn { color: var(--ki-color-warning); }
 .ki-chat-cfg__badge--over { color: var(--ki-color-danger); }
+/* 卡片保持**单行弹性布局**（点击区 + 开关）—— 2026-11-12 回退：曾把它改成 column 以便把
+   依赖提示做成卡片第二行，结果线上出现「新 DOM + 旧样式表」混搭 ⇒ 结构 div 被压成 1 字宽、
+   中文逐字竖排。现在依赖提示回到 `__item-main` 内部（见 __item-note），结构不再依赖新布局类。 */
 .ki-chat-cfg__item {
   display: flex; align-items: center; gap: var(--ki-space-2); width: 100%; min-width: 0;
   text-align: left; padding: var(--ki-space-2) var(--ki-space-3);
@@ -4803,6 +4807,32 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 }
 .ki-chat-cfg__tool { margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; transition: background 160ms; }
 .ki-chat-cfg__tool:hover { background: var(--ki-color-hover); }
+/* ── skill 前置依赖（2026-11-11）────────────────────────────────
+   ① 卡片说明行「需先启用 xxx 工具」：只在依赖的工具未启用时出现（工具开了这行就消失）；
+   ② 点浮层「去启用」后目标工具行的短暂高亮（revealTool 加/删 class，1.6s 自止）。 */
+/* 依赖提示 = 可点击的说明行（点一下滚到目标工具行并高亮）：只写"需先启用 xxx"却不给路，
+   用户只能在几百行配置里自己翻。
+   ★ `white-space: nowrap` 是**硬兜底**：容器再窄也只会出省略号，绝不会逐字竖排
+     （2026-11-12 真机事故：1 字宽的竖线）。 */
+.ki-chat-cfg__item-note {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%; margin-top: 2px;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-warning);
+  white-space: nowrap; cursor: pointer; border-radius: 3px;
+}
+.ki-chat-cfg__item-note-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ki-chat-cfg__item-note-arw { flex: 0 0 auto; }
+.ki-chat-cfg__item-note:hover .ki-chat-cfg__item-note-txt { text-decoration: underline; }
+.ki-chat-cfg__item-note:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; }
+.ki-chat-cfg__tool--hint {
+  background: var(--ki-color-primary-soft);
+  box-shadow: inset 0 0 0 1px var(--ki-color-primary);
+  animation: ki-cfg-hint 1.6s ease both;
+}
+@keyframes ki-cfg-hint {
+  0%, 55% { background: var(--ki-color-primary-soft); }
+  100% { background: transparent; }
+}
 .ki-chat-cfg__sw { transition: background 160ms ease, border-color 160ms ease; }
 .ki-chat-cfg__sw:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; }
 .ki-chat-cfg__label { color: var(--ki-color-text-muted); }

@@ -64,3 +64,46 @@ describe('对话配置 · 危险开关二次确认（行内浮层、无遮罩）
     assert.match(layer, /\{ visibility: 'hidden' \}/);
   });
 });
+
+/**
+ * 2026-11-12 真机事故：点 doc-editing（依赖 ki_edit_relation 未启用）弹出的确认卡
+ * 只有 **36px 宽**（= 开关按钮宽度），正文可用宽度 2px ⇒ 中文逐字竖排、卡片 892px 高。
+ * 证据：`.debug/cfg-confirm-vertical-20261112/`（w:36 / h4 2×136 / p 2×979 = 51 行）。
+ *
+ * 两个约束缺一不可：
+ *  ① 锚行要认 skill 卡片 `.ki-chat-cfg__item`，否则宽度退化成开关；
+ *  ② 宽度下限兜底，防以后新增的锚点又是窄元素。
+ */
+describe('对话配置 · 确认卡宽度（锚行 + 下限）', () => {
+  it('锚行同时认工具行与 skill 卡片', () => {
+    assert.match(
+      layer,
+      /anchor\.closest\('\.ki-chat-cfg__tool, \.ki-chat-cfg__item'\)/,
+      'skill 开关在卡片里，只认 __tool 会让确认卡退化成开关宽度（36px → 正文逐字竖排）',
+    );
+  });
+
+  it('宽度有下限，且仍夹在配置层内', () => {
+    assert.match(layer, /const CONFIRM_MIN_WIDTH = \d+/, '缺少最小宽度常量');
+    assert.match(
+      layer,
+      /Math\.min\(Math\.max\(a\.width, CONFIRM_MIN_WIDTH\), h\.width - 8\)/,
+      '宽度应取 max(锚行宽, 下限) 后再与面板宽取 min —— 只加下限会顶出面板右边缘',
+    );
+  });
+});
+
+/** 用户 2026-11-12：「提示内容太多了，简洁一点，说明需要先开启 mcp 就可以了」 */
+describe('对话配置 · skill 依赖确认文案保持简短', () => {
+  it('文案一句话，且点明要开的是 MCP 工具', () => {
+    const start = layer.indexOf('const toggleSkill');
+    const end = layer.indexOf('const patchSkill', start);
+    assert.ok(start > 0 && end > start, '未找到 toggleSkill');
+    const body = layer.slice(start, end);
+    const m = body.match(/text: `([^`]*)`/);
+    assert.ok(m, 'toggleSkill 的确认卡应有 text');
+    const text = m[1].replace(/\$\{need\}/g, 'ki_edit_relation');
+    assert.match(text, /MCP/, '要点明"需要先开启的 MCP 工具"');
+    assert.ok(text.length <= 40, `文案要短（当前 ${text.length} 字：${text}）`);
+  });
+});

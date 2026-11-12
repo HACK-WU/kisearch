@@ -30,6 +30,12 @@ import path from 'path';
 import { atomicWriteConfig, resolveDefaultChatDir, type KiConfig } from '../config.js';
 import { REASONING_EFFORT_MAX_CHARS, REASONING_EFFORT_RESERVED } from '../config-schema.js';
 import {
+  DOC_EDITING_SKILL_DESCRIPTION,
+  DOC_EDITING_SKILL_PROMPT,
+  DOC_EDITING_SKILL_ID,
+  DOC_EDITING_REQUIRED_TOOL,
+} from './retrieval/doc-editing-skill.js';
+import {
   DEFAULT_CHAT_PROMPT,
   HARD_RULES_BLOCK,
   RETRIEVAL_SKILL_DESCRIPTION,
@@ -247,7 +253,59 @@ export class PromptConfigError extends Error {
  * ⚠️ 取值**不得与 MCP 工具名重叠**：`ki_search` 既是 skill 名又是只读工具名时，AI 看目录会
  *   把两者当成一回事（2026-11-11 首次落地即因此改名）—— 回归见 `web/test/skill-name-english.test.mjs`。
  */
-export const BUILTIN_SKILL_NAMES: Readonly<Record<string, string>> = { 'builtin-retrieval': 'knowledge-retrieval' };
+export const BUILTIN_SKILL_NAMES: Readonly<Record<string, string>> = {
+  'builtin-retrieval': 'knowledge-retrieval',
+  [DOC_EDITING_SKILL_ID]: 'doc-editing',
+};
+
+/**
+ * 内置 skill 与 MCP 工具的**前置依赖**：skill 启用前，对应工具必须是开启状态（2026-11-11）。
+ *
+ * 两处执行（缺一不可）：
+ *   · 保存路径：skill 开 + 工具关 ⇒ 400（前端有同源拦截，这里是防 API 直连绕过）；
+ *   · 读取路径：不报 issue（否则会触发整份回退默认），改为**就地停用**该 skill 并写明原因。
+ *
+ * ⚠️ 前端 `PromptConfigLayer.tsx::SKILL_REQUIRED_TOOLS` 手工同源，改动需两侧同步（有源码守卫拦）。
+ */
+export const SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
+  [DOC_EDITING_SKILL_ID]: DOC_EDITING_REQUIRED_TOOL,
+};
+
+/** 内置 skill 的正文（「恢复默认」与默认配置共用；不在表内 = 没有内置内容） */
+const BUILTIN_SKILL_CONTENT: Readonly<Record<string, string>> = {
+  'builtin-retrieval': RETRIEVAL_SKILL_PROMPT,
+  [DOC_EDITING_SKILL_ID]: DOC_EDITING_SKILL_PROMPT,
+};
+
+/** 内置 skill 的描述（同上） */
+const BUILTIN_SKILL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'builtin-retrieval': RETRIEVAL_SKILL_DESCRIPTION,
+  [DOC_EDITING_SKILL_ID]: DOC_EDITING_SKILL_DESCRIPTION,
+};
+
+/**
+ * 内置 skill 的默认启用状态。
+ *
+ * `doc-editing` **默认停用**：它会写知识库，且依赖 `ki_edit_relation`（工具默认关）——
+ * 默认开着等于给 AI 一个调不到、还会催促用户授权的入口。
+ */
+const BUILTIN_SKILL_ENABLED: Readonly<Record<string, boolean>> = {
+  'builtin-retrieval': true,
+  [DOC_EDITING_SKILL_ID]: false,
+};
+
+/** 按 id 造一条内置 skill（默认配置与「读取补齐」共用，避免两处漂移） */
+function builtinSkill(id: string, at: string = BUILTIN_AT): PromptSkill {
+  return {
+    id,
+    name: BUILTIN_SKILL_NAMES[id]!,
+    description: BUILTIN_SKILL_DESCRIPTIONS[id] ?? '',
+    content: BUILTIN_SKILL_CONTENT[id] ?? '',
+    builtin: true,
+    enabled: BUILTIN_SKILL_ENABLED[id] ?? false,
+    at,
+  };
+}
 
 /** 内置 skill 的固定 id（默认集合 = 可恢复默认 / 不可删除的边界） */
 export const BUILTIN_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_SKILL_NAMES);
@@ -262,30 +320,20 @@ export function defaultPromptConfig(): PromptConfig {
   return {
     version: 1,
     prompt: { content: DEFAULT_CHAT_PROMPT, at: BUILTIN_AT },
-    skills: [
-      {
-        id: 'builtin-retrieval',
-        name: BUILTIN_SKILL_NAMES['builtin-retrieval']!,
-        // 描述（目录里给 AI 判断用）与正文（按需加载）都取自同一常量，避免文案漂移。
-        description: RETRIEVAL_SKILL_DESCRIPTION,
-        content: RETRIEVAL_SKILL_PROMPT,
-        builtin: true,
-        enabled: true,
-        at: BUILTIN_AT,
-      },
-    ],
+    // 顺序 = `BUILTIN_SKILL_NAMES` 的声明顺序；描述与正文都取自同一常量，避免文案漂移
+    skills: BUILTIN_SKILL_IDS.map((id) => builtinSkill(id)),
     tools: defaultTools(),
   };
 }
 
 /** 内置 skill 的默认内容（供「恢复默认」使用） */
 export function builtinSkillDefaultContent(id: string): string | null {
-  return id === 'builtin-retrieval' ? RETRIEVAL_SKILL_PROMPT : null;
+  return BUILTIN_SKILL_CONTENT[id] ?? null;
 }
 
 /** 内置 skill 的默认描述（供「恢复默认」使用；与 `defaultPromptConfig` 同源） */
 export function builtinSkillDefaultDescription(id: string): string | null {
-  return id === 'builtin-retrieval' ? RETRIEVAL_SKILL_DESCRIPTION : null;
+  return BUILTIN_SKILL_DESCRIPTIONS[id] ?? null;
 }
 
 // ─── 路径 ─────────────────────────────────────────────
@@ -327,8 +375,15 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
   // ★ REQ-20261016-001（设计 §5 决策 7）：思考级别走**软通道** —— 非法时只忽略该字段，
   //   不把提示词 / skill / 工具开关一起拉进"整份回退默认"。
   const softNotes: string[] = [];
-  // `skillNameSoft`：老配置里的中文名 skill 不得把整份配置拖进"回退默认"（见 options 注释）
-  const normalized = normalizePromptConfig(parsed, issues, { effortSoft: true, softNotes, skillNameSoft: true });
+  // 两个读取侧开关，各自挡一种「整份回退默认」：
+  //   skillNameSoft —— 老配置里的中文名 skill；skillDependencySoft —— skill 开着但依赖的工具没开
+  //   （就地停用并透出原因）。内置 skill 缺失由 normalize 无条件补齐，无需额外开关。
+  const normalized = normalizePromptConfig(parsed, issues, {
+    effortSoft: true,
+    softNotes,
+    skillNameSoft: true,
+    skillDependencySoft: true,
+  });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
   }
@@ -372,6 +427,12 @@ export interface NormalizePromptConfigOptions {
    * （整体替换语义会把那条旧名一起提交）。放行既有名、只拦「新增 / 改名」，是唯一不死锁的口径。
    */
   existingSkillNames?: ReadonlySet<string>;
+  /**
+   * `true` = **读取路径**：skill 与其依赖工具不一致时**就地停用该 skill**并写 `softNotes`，不报 issue。
+   *
+   * 保存路径（缺省）严格：400 + 指出缺哪个工具（防 API 直连绕过前端拦截）。
+   */
+  skillDependencySoft?: boolean;
 }
 
 export function normalizePromptConfig(
@@ -479,11 +540,17 @@ export function normalizePromptConfig(
         });
       });
       if (issues.length === 0) {
-        // 内置 skill 不可删除：缺失即报错（可禁用，但不能从列表里消失）
+        /**
+         * 内置 skill「不可删除」的落地口径（2026-11-11 调整）：**缺了就补回默认条目**（追加到末尾），
+         * 不再报错。两个原因：
+         *   · 读取路径若报 issue，会触发「任一字段非法 → 整份回退默认」—— 新增第二个内置 skill 后，
+         *     所有老配置都缺它，用户提示词 / 正文 / 工具开关会一起消失（最贵的翻车）；
+         *   · 保存路径同理：客户端不认识某条内置 skill 时，补回默认比 400 更有用，且与 `builtin`
+         *     字段的服务端强制语义一致（内置内容由服务端说了算，客户端传什么都覆盖不了）。
+         * 补齐沿用**默认启用状态**：`doc-editing` 默认停用，补齐不会凭空获得写库能力。
+         */
         for (const builtinId of BUILTIN_SKILL_IDS) {
-          if (!skills.some((s) => s.id === builtinId)) {
-            issues.push({ path: 'skills', message: `内置 skill「${builtinId}」不可删除（可将其 enabled 置为 false 以停用）` });
-          }
+          if (!skills.some((s) => s.id === builtinId)) skills.push(builtinSkill(builtinId));
         }
         out.skills = skills;
       }
@@ -598,6 +665,30 @@ export function normalizePromptConfig(
       reject(`不在可选档位清单内（可用：${(options as readonly string[]).join(' | ') || '（清单为空）'}）`, false);
     } else {
       out.reasoningEffort = v;
+    }
+  }
+
+  // skill ↔ tool 前置依赖（2026-11-11）：放在最后，因为要看**归一化后**的 tools
+  //   （客户端可能只传 skills 不传 tools，那时 out.tools 是默认值 —— 危险工具默认关）
+  const blocked = out.skills.filter((s) => {
+    const need = SKILL_REQUIRED_TOOLS[s.id];
+    return need !== undefined && s.enabled && out.tools[need] !== true;
+  });
+  if (blocked.length > 0) {
+    if (opts?.skillDependencySoft === true) {
+      // 读取路径：就地停用（保持"工具没开就用不了"的语义），并把原因透给界面，绝不整份回退默认
+      for (const s of blocked) s.enabled = false;
+      for (const s of blocked) {
+        const need = SKILL_REQUIRED_TOOLS[s.id]!;
+        opts.softNotes?.push(`skill「${s.name}」依赖的工具 ${need} 未启用，已自动停用该 skill（其余配置照常读取）`);
+      }
+    } else {
+      for (const s of blocked) {
+        issues.push({
+          path: 'skills',
+          message: `skill「${s.name}」需要先启用工具 ${SKILL_REQUIRED_TOOLS[s.id]}（工具 → 写入 → ${SKILL_REQUIRED_TOOLS[s.id]}），否则它无法工作`,
+        });
+      }
     }
   }
 

@@ -43,7 +43,8 @@ describe('对话配置 · 改动即时生效（无「取消 / 保存」）', () 
 
   it('开关 / 启停 / 增删改都走 commit（不再有裸 setDraft 改动）', () => {
     assert.match(layer, /const apply = \(\) => commit\(/, '危险开关确认后应直接 commit 落盘');
-    assert.match(layer, /const toggleSkill[\s\S]{0,160}commit\(/, 'skill 启停应即时落盘');
+    // 窗口放宽到 1200：toggleSkill 自 2026-11-11 起先做「依赖工具是否已启用」的拦截，再 commit
+    assert.match(layer, /const toggleSkill[\s\S]{0,1200}commit\(/, 'skill 启停应即时落盘');
     assert.match(layer, /onSubmit=\{\(\{ name, content, description \}\)[\s\S]{0,200}commit\(/, '编辑提交应即时落盘');
     assert.match(layer, /onDelete[\s\S]{0,400}commit\(/, '删除 skill 应即时落盘');
   });

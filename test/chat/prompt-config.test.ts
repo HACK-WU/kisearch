@@ -21,6 +21,7 @@ import {
   SKILL_MAX_CHARS,
   PromptConfigError,
   buildInjectionSnapshot,
+  builtinSkillDefaultContent,
   builtinSkillDefaultDescription,
   defaultPromptConfig,
   enabledSkillIds,
@@ -146,7 +147,8 @@ describe('读写往返', () => {
     };
     const saved = savePromptConfig(cfg, input);
     assert.equal(saved.prompt.content, '你是 kisearch 的知识库助手。');
-    assert.equal(saved.skills.length, 2);
+    // 2 条提交 + 1 条内置补齐（builtin-doc-editing；见「内置 skill 缺失即补回」用例）
+    assert.equal(saved.skills.length, 3);
     assert.equal(saved.tools.ki_store, true, '显式开启写入工具应被保存');
 
     assert.equal(promptConfigPath(cfg), path.join(root, 'chat', 'prompt-config.json'));
@@ -187,10 +189,77 @@ describe('校验（服务端强制）', () => {
     assert.ok(issues.some((i) => i.path === 'tools.ki_searh' && i.message.includes('未知工具名')));
   });
 
-  it('内置 skill 不可删除（缺失即报错）', () => {
+  it('内置 skill 缺失即补回默认条目（不报错：报错会让老配置整份回退默认）', () => {
     const issues: Parameters<typeof normalizePromptConfig>[1] = [];
-    normalizePromptConfig({ skills: [{ id: 'my-style', name: 'n', content: '' }] }, issues);
-    assert.ok(issues.some((i) => i.message.includes('不可删除')));
+    const out = normalizePromptConfig({ skills: [{ id: 'my-style', name: 'n', content: '' }] }, issues);
+    assert.deepEqual(issues, []);
+    assert.deepEqual(out.skills.map((s) => s.id), ['my-style', 'builtin-retrieval', 'builtin-doc-editing']);
+    // 补齐沿用默认启用状态：第二个内置 skill 默认停用，补回不会凭空获得写库能力
+    assert.equal(out.skills.find((s) => s.id === 'builtin-doc-editing')?.enabled, false);
+  });
+
+  // ─── 第二个内置 skill：doc-editing（2026-11-11）──────────────
+  it('默认配置含两条内置 skill：doc-editing 默认停用、不进 AI 目录', () => {
+    const d = defaultPromptConfig();
+    assert.deepEqual(d.skills.map((s) => s.id), ['builtin-retrieval', 'builtin-doc-editing']);
+    const doc = d.skills.find((s) => s.id === 'builtin-doc-editing')!;
+    assert.equal(doc.enabled, false, '会写知识库的能力默认必须是关的');
+    assert.equal(doc.name, 'doc-editing');
+    assert.ok(doc.content.includes('ki_edit_relation'), '正文必须点明依赖的工具');
+    assert.ok(doc.content.includes('finish') && doc.content.includes('cancel'), '正文要覆盖真实的草稿流程');
+    assert.ok(!renderSkillCatalog(d.skills)!.includes('doc-editing'), '停用不进目录 = 调不到');
+    assert.equal(builtinSkillDefaultContent('builtin-doc-editing'), doc.content);
+    assert.equal(builtinSkillDefaultDescription('builtin-doc-editing'), doc.description);
+  });
+
+  it('老配置只有一个内置 skill → 读取补齐且 issue 为空（不得整份回退默认）', () => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      prompt: { content: '用户自己的提示词' },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '用户改过的正文', enabled: true }],
+      tools: { ki_search: true },
+    }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.issue, null, '补齐不得产生 issue（否则整份回退默认）');
+    assert.deepEqual(r.config.skills.map((s) => `${s.id}:${s.enabled ? 'on' : 'off'}`), ['builtin-retrieval:on', 'builtin-doc-editing:off']);
+    assert.equal(r.config.prompt.content, '用户自己的提示词', '提示词不得被覆盖');
+    assert.equal(r.config.skills[0]!.content, '用户改过的正文', '正文不得被覆盖');
+  });
+
+  it('skill 启用但依赖工具未开 → 保存报错（防 API 直连绕过前端拦截）', () => {
+    const issues: Parameters<typeof normalizePromptConfig>[1] = [];
+    normalizePromptConfig({
+      skills: [
+        { id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '', enabled: true },
+        { id: 'builtin-doc-editing', name: 'doc-editing', content: '', enabled: true },
+      ],
+      tools: {},
+    }, issues);
+    assert.ok(issues.some((i) => i.path === 'skills' && i.message.includes('ki_edit_relation')));
+
+    // 工具开启后放行
+    const okIssues: Parameters<typeof normalizePromptConfig>[1] = [];
+    const ok = normalizePromptConfig({
+      skills: [
+        { id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '', enabled: true },
+        { id: 'builtin-doc-editing', name: 'doc-editing', content: '', enabled: true },
+      ],
+      tools: { ki_edit_relation: true },
+    }, okIssues);
+    assert.deepEqual(okIssues, []);
+    assert.equal(ok.skills.find((s) => s.id === 'builtin-doc-editing')?.enabled, true);
+  });
+
+  it('读取路径依赖不一致 → 就地停用该 skill 并透出原因（不报 issue）', () => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      skills: [
+        { id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '', enabled: true },
+        { id: 'builtin-doc-editing', name: 'doc-editing', content: '', enabled: true },
+      ],
+      tools: { ki_edit_relation: false },
+    }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.config.skills.find((s) => s.id === 'builtin-doc-editing')?.enabled, false, '工具没开就不能留着生效');
+    assert.ok(String(r.issue).includes('ki_edit_relation'), '原因要透给界面（fail-loud + 给出路）');
   });
 
   it('内置 skill 可禁用（enabled:false 合法）', () => {

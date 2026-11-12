@@ -48,16 +48,19 @@ describe('skill 名称必须英文（前后端同源）', () => {
   });
 
   it('★ 内置 skill 名称不得与任何 MCP 工具名重叠（首版取名 ki_search 就撞了）', () => {
-    const builtinName = server.match(/BUILTIN_SKILL_NAMES[^=]*=\s*\{\s*'builtin-retrieval':\s*'([^']+)'/)?.[1];
-    assert.ok(builtinName, '未能从源码解析出内置名');
+    const namesBlock = server.slice(server.indexOf('BUILTIN_SKILL_NAMES'), server.indexOf('SKILL_REQUIRED_TOOLS'));
+    const builtinNames = [...namesBlock.matchAll(/:\s*'([A-Za-z][A-Za-z0-9_-]*)'/g)].map((m) => m[1]);
+    assert.ok(builtinNames.length >= 2, `内置名解析失败（得到 ${builtinNames.length} 条：${builtinNames.join(',')}）`);
     const groupsBlock = server.slice(server.indexOf('export const MCP_TOOL_GROUPS'), server.indexOf('export const MCP_TOOL_NAMES'));
     const toolNames = [...groupsBlock.matchAll(/names:\s*\[([^\]]+)\]/g)]
       .flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]));
     assert.ok(toolNames.length >= 13, `工具名解析失败（得到 ${toolNames.length} 个）`);
-    assert.ok(
-      !toolNames.includes(builtinName),
-      `skill 名「${builtinName}」与 MCP 工具同名 —— 模型会把「能力」和「工具」当成一回事`,
-    );
+    for (const name of builtinNames) {
+      assert.ok(
+        !toolNames.includes(name),
+        `skill 名「${name}」与 MCP 工具同名 —— 模型会把「能力」和「工具」当成一回事`,
+      );
+    }
   });
 
   it('读取路径宽松 / 保存路径放行既有名（老配置不得被拖进"回退默认"）', () => {

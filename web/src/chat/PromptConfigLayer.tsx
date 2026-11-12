@@ -20,6 +20,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
 } from 'react';
 
@@ -61,7 +62,22 @@ interface ConfirmState {
    * 缺省（如「删除 skill」从编辑模态里发起、模态已关闭）⇒ 落在配置层头部下方。
    */
   anchor?: HTMLElement;
+  /** 主按钮文案（缺省「确认」）。非破坏性指引用动词更好读，如「去启用」 */
+  yesLabel?: string;
+  /** 主按钮是否用危险色（缺省 true —— 既有调用都是危险动作） */
+  yesDanger?: boolean;
 }
+
+/**
+ * skill ↔ MCP 工具的前置依赖（2026-11-11）。
+ *
+ * ⚠️ 与后端 `prompt-config.ts::SKILL_REQUIRED_TOOLS` **手工同源**（服务端仍是最终闸门，400 兜底）；
+ *   回归由 `web/test/skill-name-english.test.mjs` 守着。前端这份只负责「不让人白点」：
+ *   工具没开时点 skill 开关 → 指路；关工具时 → 拦一次并把依赖它的 skill 一起停用。
+ */
+const SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
+  'builtin-doc-editing': 'ki_edit_relation',
+};
 
 /**
  * 确认浮层的落点，坐标相对 `.ki-chat-cfg`（它的定位父级）。
@@ -80,6 +96,15 @@ interface ConfirmRect {
 
 /** 行下方至少留这么多高度才往下弹，否则翻到行上方（≈ 卡片高度 + 间距） */
 const CONFIRM_SPACE_BELOW = 170;
+/**
+ * 确认卡最小宽度。
+ *
+ * ★ 硬兜底，别删（2026-11-12 真机事故）：宽度原先直接取「锚行宽度」，而 skill 的开关在
+ *   `.ki-chat-cfg__item` 卡片里、不在 `.ki-chat-cfg__tool` 行里 ⇒ 锚行退化成了 36px 的开关
+ *   按钮本身，卡片被算成 36px 宽、正文可用宽度只剩 2px，中文逐字竖排成 892px 高的长条。
+ *   现在锚行已扩到卡片（见 placeConfirm），这条下限继续兜住"以后新增锚点又是窄元素"的情况。
+ */
+const CONFIRM_MIN_WIDTH = 240;
 
 type ModalState =
   | { kind: 'prompt' }
@@ -434,7 +459,11 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     }
     if (!anchor.isConnected) return;
     const body = host.querySelector('.ki-chat-cfg__body');
-    const row = (anchor.closest('.ki-chat-cfg__tool') as HTMLElement | null) ?? anchor;
+    // 锚行 = 开关所在的那一整行：工具走 `.ki-chat-cfg__tool`，skill 走 `.ki-chat-cfg__item`
+    //   （卡片）。只认 `__tool` 时 skill 会退化成 36px 的开关按钮，卡片随之被压成一条竖线
+    //   （2026-11-12 真机事故，见 CONFIRM_MIN_WIDTH）。
+    const row =
+      (anchor.closest('.ki-chat-cfg__tool, .ki-chat-cfg__item') as HTMLElement | null) ?? anchor;
     const a = row.getBoundingClientRect();
     const b = body?.getBoundingClientRect();
     // 锚行被滚出可视区（或面板已收起）⇒ 直接收起浮层，不让它悬在别的内容上
@@ -442,7 +471,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
       closeConfirm();
       return;
     }
-    const width = Math.min(a.width, h.width - 8);
+    const width = Math.min(Math.max(a.width, CONFIRM_MIN_WIDTH), h.width - 8);
     const left = Math.max(4, Math.min(a.left - h.left, h.width - width - 4));
     setConfirmRect(
       h.bottom - a.bottom >= CONFIRM_SPACE_BELOW
@@ -526,8 +555,42 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
   };
   const isDefaultPrompt = (content: string): boolean => data?.defaults.prompt.content === content;
 
-  /** 启用/停用：即时生效（B 方案 —— 不再等底部「保存」） */
-  const toggleSkill = (id: string): void => {
+  /**
+   * 「去启用」：把依赖工具那一行滚到视野中间并短暂高亮。
+   *
+   * 刻意**不代替用户打开工具** —— 用户明确要求「必须手动先启用 ki_edit_relation」，
+   * 这里只负责让他一眼看到该点哪一行（危险工具本身还要走一次二次确认）。
+   */
+  const revealTool = (name: string): void => {
+    const el = cfgRef.current?.querySelector(`[data-tool="${name}"]`) as HTMLElement | null;
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('ki-chat-cfg__tool--hint');
+    setTimeout(() => el.classList.remove('ki-chat-cfg__tool--hint'), 1600);
+  };
+
+  /**
+   * 启用/停用：即时生效（B 方案 —— 不再等底部「保存」）。
+   *
+   * ★ 前置依赖（2026-11-11）：skill 依赖的工具没开时**不放行启用**，改为指路浮层。
+   *   停用方向永远放行（关掉不需要任何前置条件）。
+   */
+  const toggleSkill = (id: string, anchor?: HTMLElement): void => {
+    const target = draft?.skills.find((s) => s.id === id);
+    const need = SKILL_REQUIRED_TOOLS[id];
+    if (target && !target.enabled && need && draft?.tools[need] !== true) {
+      setConfirm({
+        title: `需先启用 ${need} 工具`,
+        // 文案刻意一句话：具体在哪个分组、开启后会不会再确认一次，都由「去启用」按钮
+        // 直接跳到那一行呈现，不在这里铺开（用户 2026-11-12 反馈"提示内容太多"）。
+        text: `请先开启这个 MCP 工具，再回来启用该 skill。`,
+        yesLabel: '去启用',
+        yesDanger: false,
+        onYes: () => revealTool(need),
+        ...(anchor ? { anchor } : {}),
+      });
+      return;
+    }
     commit((d) => ({ ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)) }));
   };
 
@@ -610,19 +673,27 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                 停用的不会出现在清单里，AI 也调不到。
               </p>
               <div className="ki-chat-cfg__list">
-                {draft.skills.map((s) => (
-                  <ItemCard
-                    key={s.id}
-                    group="skill"
-                    name={s.name}
-                    description={s.description}
-                    content={s.content}
-                    isDefault={isDefaultSkill(s)}
-                    disabled={!s.enabled}
-                    onToggleEnabled={() => toggleSkill(s.id)}
-                    onClick={() => setModal({ kind: 'skill', id: s.id })}
-                  />
-                ))}
+                {draft.skills.map((s) => {
+                  const need = SKILL_REQUIRED_TOOLS[s.id];
+                  return (
+                    <ItemCard
+                      key={s.id}
+                      group="skill"
+                      name={s.name}
+                      description={s.description}
+                      content={s.content}
+                      isDefault={isDefaultSkill(s)}
+                      disabled={!s.enabled}
+                      // 依赖工具没开时点明「为什么开不了」，并顺手指路（点它直接滚到那行工具）。
+                      // 文案刻意短：卡片剩余宽度只有 ~210px，写全「工具与权限 → 写入」会被省略号吃掉，
+                      // 那段路径说明放 title（hover 可见），点击本来就能直达。
+                      {...(need && draft.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
+                      {...(need ? { onNoteClick: () => revealTool(need) } : {})}
+                      onToggleEnabled={(e) => toggleSkill(s.id, e.currentTarget)}
+                      onClick={() => setModal({ kind: 'skill', id: s.id })}
+                    />
+                  );
+                })}
               </div>
               <button
                 type="button"
@@ -849,7 +920,8 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                     </span>
                   </p>
                   {g.rows.map((r) => (
-                    <div className="ki-chat-cfg__tool" key={r.name}>
+                    // data-tool：依赖它的 skill 点「去启用」时，靠它 scrollIntoView + 高亮（见 revealTool）
+                    <div className="ki-chat-cfg__tool" key={r.name} data-tool={r.name}>
                       <span className="ki-chat-cfg__tool-main">
                         <span className="ki-chat-cfg__tool-name" title={r.name}>{r.name}</span>
                         {g.descs?.[r.name] ? <span className="ki-chat-cfg__tool-desc">{g.descs[r.name]}</span> : null}
@@ -865,6 +937,24 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
                           const next = !r.on;
                           // 即时生效（B 方案）：确认后立刻落盘，不再等底部「保存」
                           const apply = () => commit((d) => ({ ...d, tools: { ...d.tools, [r.name]: next } }));
+                          /**
+                           * ★ 反向联动（2026-11-11）：关掉被 skill 依赖的工具时一并停用该 skill。
+                           *   否则会出现"AI 看到 doc-editing 却调不到 ki_edit_relation"——比不让开更糟。
+                           */
+                          const dependents = draft?.skills.filter((s) => s.enabled && SKILL_REQUIRED_TOOLS[s.id] === r.name) ?? [];
+                          if (!next && dependents.length > 0) {
+                            setConfirm({
+                              title: `关闭 ${r.name} 将同时停用 skill`,
+                              text: `${dependents.map((s) => s.name).join('、')} 依赖该工具；关闭后它会一并停用（否则 AI 会看到一个调不到工具的 skill）。`,
+                              onYes: () => commit((d) => ({
+                                ...d,
+                                tools: { ...d.tools, [r.name]: false },
+                                skills: d.skills.map((s) => (SKILL_REQUIRED_TOOLS[s.id] === r.name ? { ...s, enabled: false } : s)),
+                              })),
+                              anchor: e.currentTarget,
+                            });
+                            return;
+                          }
                           if (next && g.danger) {
                             // anchor = 这个开关：确认浮层贴着它那一行弹出（无遮罩，见 ConfirmState 注释）
                             setConfirm({
@@ -997,10 +1087,11 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
             <button ref={confirmCancelRef} type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={closeConfirm}>取消</button>
             <button
               type="button"
-              className="ki-chat-btn ki-chat-btn--danger"
+              // 破坏性动作（删除 / 开启危险工具）用危险色；「去启用」这类指路动作是普通按钮
+              className={`ki-chat-btn${confirm.yesDanger === false ? '' : ' ki-chat-btn--danger'}`}
               onClick={() => { confirm.onYes(); closeConfirm(); }}
             >
-              确认
+              {confirm.yesLabel ?? '确认'}
             </button>
           </div>
         </div>
@@ -1018,16 +1109,26 @@ function ItemCard(props: {
   content: string;
   isDefault: boolean;
   disabled?: boolean;
-  /** 提供即渲染启用开关（skill 专用：基础提示词是恒定规则，不可停用） */
-  onToggleEnabled?: () => void;
+  /** 依赖提示（如「需先启用 ki_edit_relation 工具」）：有则渲染在描述下一行 */
+  note?: string;
+  /** 提供即渲染启用开关（skill 专用：基础提示词是恒定规则，不可停用）；带 event 供浮层锚点定位 */
+  onToggleEnabled?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
+  /** note 的点击动作（依赖未满足时直接跳到目标工具行 —— 只写一句话不给路，等于没写） */
+  onNoteClick?: () => void;
   onClick: () => void;
 }) {
-  const { group, name, description, content, isDefault, disabled, onToggleEnabled, onClick } = props;
+  const { group, name, description, content, isDefault, disabled, note, onToggleEnabled, onNoteClick, onClick } = props;
   const mod = !isDefault;
   const desc = (description ?? '').trim();
   return (
     // ★ 开关在**卡片内部**（用户裁决：不要单独漏在外面）—— 卡片本身是 div，
     //   内部两枚按钮并列（点击区 + 开关）；按钮不能嵌按钮，故不再让卡片整体是一个 button。
+    //
+    // ★★ 2026-11-12 修正：依赖提示 `note` **必须留在 `__item-main` 里**，不能再拆成卡片第二行的
+    //   独立按钮。原因是它一拆就得靠新样式类 `.ki-chat-cfg__item-row` 撑布局，而线上出现
+    //   "新 DOM + 旧样式表"的混搭 ⇒ 该 div 被当成普通弹性项压到最小内容宽度，
+    //   中文逐字竖排（真机截图：一条 1 字宽的竖线）。现在改成 span[role=button]：
+    //   既不嵌套 button（HTML 合法），又不依赖任何新结构类，旧样式表下也照常横排。
     <div className="ki-chat-cfg__item" data-disabled={disabled}>
       <button type="button" className="ki-chat-cfg__item-hit" onClick={onClick}>
         <span className={`ki-chat-cfg__item-ic ki-chat-cfg__item-ic--${group}`}>{ITEM_IC[group]}</span>
@@ -1039,6 +1140,29 @@ function ItemCard(props: {
               ? (desc || '未填写描述 —— AI 只能凭名称判断要不要加载它')
               : (content.slice(0, 42) || '（空）')}
           </span>
+          {/* 前置依赖没满足时点明原因并**给出去处**：点一下直接滚到那行工具并高亮。
+              用 span 而不是 button：它嵌在卡片点击区里，嵌套 button 是非法 HTML。
+              ★ 箭头用字符 `→` 而不是 <svg>：SVG 没有 CSS 规则时默认 300×150，
+              会把这个 span 挤成一条 1 字宽的竖线（2026-11-12 真机事故的直接原因之一）。 */}
+          {note ? (
+            <span
+              className="ki-chat-cfg__item-note"
+              role="button"
+              tabIndex={0}
+              // 卡片里放不下的完整说明（在哪个分组）放 title，不占布局
+              title={`${note}（工具与权限 → 写入），点击前往`}
+              onClick={(e) => { e.stopPropagation(); onNoteClick?.(); }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                e.stopPropagation();
+                onNoteClick?.();
+              }}
+            >
+              <span className="ki-chat-cfg__item-note-txt">{note}</span>
+              <span className="ki-chat-cfg__item-note-arw" aria-hidden="true">→</span>
+            </span>
+          ) : null}
         </span>
         <span className={`ki-chat-cfg__item-meta${mod ? ' ki-chat-cfg__item-meta--mod' : ''}`}>
           {content.length} 字 · {mod ? '已修改' : '默认'}
