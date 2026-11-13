@@ -63,6 +63,47 @@ export const SEARCH_TOOL_NAMES: readonly string[] = [
   'ki_get_module_info',
 ];
 
+/**
+ * 「模型消耗型」工具 —— 会消耗上游 LLM 额度、且把知识库内容外发给模型（REQ-20261113-001 · S-02 §3.2）。
+ *
+ * ⚠️ 与 `READ_ONLY_TOOL_NAMES` **正交**，不要合并：
+ *   `ki_ask` 在两个名单里都"不在"，但理由完全不同 ——
+ *   不在只读名单是因为**有成本、有外发**（不是"改数据"）。
+ *   若复用 `TOKEN_READONLY` 的错误码与文案，会说成"不能调用写入工具"，
+ *   理由错误、把调用方引去查写权限，排查方向从一开始就偏了。
+ *
+ * 白名单方向仍然安全：只读 Token 的闸门是 `isReadOnlyTool()`，
+ * 新工具不登记进 READ_ONLY_TOOL_NAMES 就默认被拒（fail-safe 不变）。
+ */
+export const MODEL_CONSUMING_TOOL_NAMES: readonly string[] = ['ki_ask'];
+
+/** 该工具是否会消耗模型额度（只读 Token 同样不得调用） */
+export function isModelConsumingTool(name: string): boolean {
+  return MODEL_CONSUMING_TOOL_NAMES.includes(name);
+}
+
+/**
+ * 只读 Token 调用「模型消耗型」工具的专用错误码。
+ * ⚠️ 与 `TOKEN_READONLY` 刻意分开：后者文案讲的是"写入"。
+ */
+export const TOKEN_MODEL_FORBIDDEN = 'TOKEN_MODEL_FORBIDDEN' as const;
+
+/**
+ * 只读 Token 调用模型消耗型工具的拒绝文案。
+ *
+ * 四要素缺一不可（MCP 客户端只看得到这段文本）：
+ * ① 原因（只读 Token 不允许触发模型调用）② 现象解释（工具列表是建连快照）
+ * ③ 正确出路（换读写 Token / 管理员改权限）④ 双因提示（模型未配置时换 Token 也没用）
+ */
+export function modelConsumingRejectMessage(toolName: string, tokenId?: string): string {
+  const idText = tokenId ? `（id: ${tokenId}）` : '';
+  return `Forbidden: 该 Token${idText}为只读，不能调用会消耗模型额度的工具 ${toolName}。`
+    + '注意：这个工具可能仍出现在你当前会话的工具列表里（列表是建连时的快照），但已被禁用。'
+    + '它不是写入工具，拒绝原因也不是权限不足，而是"只读 Token 不允许触发上游模型调用"。'
+    + '请改用读写 Token，或由管理员执行 ki mcp token update <id> --read-write 切换为读写。'
+    + '若模型本身未配置（config.yaml 的 llm 段），即使换成读写 Token 也无法问答。';
+}
+
 /** 该工具是否允许只读 Token 调用 */
 export function isReadOnlyTool(name: string): boolean {
   return READ_ONLY_TOOL_NAMES.includes(name);

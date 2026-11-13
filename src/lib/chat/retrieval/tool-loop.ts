@@ -108,6 +108,23 @@ export interface ToolLoopInput {
   signal?: AbortSignal;
   /** 当前 principal 能力；缺省 = 不按能力过滤（兼容旧调用方/测试） */
   capabilities?: ReadonlySet<Capability>;
+  /**
+   * 覆盖本次循环的**轮次上限**（REQ-20261113-001 · S-01）。
+   *
+   * 缺省 `undefined` ⇒ 沿用 `runtime.maxToolRounds`（对话链路恒 `Infinity`）
+   * ⇒ 存量 3 条链路（messages / regenerate / edit）行为**逐字节不变**。
+   * `ki_ask` 传有限值（默认 6），达上限走既有的「拿掉 tools 再调一次」= 强制作答。
+   */
+  maxToolRounds?: number;
+  /**
+   * **检索阶段**的时间预算（毫秒，REQ-20261113-001 · S-01）。
+   *
+   * 到点视同达上限 → 改为强制作答（**不是** abort：硬切会丢掉已生成内容）。
+   * 缺省 `undefined` ⇒ 不设预算 ⇒ 存量行为不变。
+   *
+   * ⚠️ 语义边界：本预算**不含**最后那次强制作答的耗时（那由调用方的硬预算兜底）。
+   */
+  budgetMs?: number;
 }
 
 /** 运行期上下文（从配置解析；不改变冻结的 ToolLoopInput 签名） */
@@ -638,7 +655,8 @@ async function* toolLoopPath(
   for (const s of forcedSkills(input, runtime)) {
     yield { type: 'skill', id: s.id, name: s.name, description: s.description, chars: s.content.length };
   }
-  const maxRounds = runtime.maxToolRounds;
+  // ★ 入参优先（S-01）：`ki_ask` 传有限值；缺省沿用 runtime（对话链路 = Infinity）
+  const maxRounds = input.maxToolRounds ?? runtime.maxToolRounds;
   /** 当轮引用附录块的长度（明细展示用；已包含在 user 分量里） */
   const refsChars = renderRefsBlock(input.refs)?.length ?? 0;
   // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
@@ -682,6 +700,13 @@ async function* toolLoopPath(
     reasoningEffort: runtime.reasoningEffort,
   };
 
+  /**
+   * 时间预算的起点（S-01）。缺省预算时 `overBudget` 恒 false ⇒ 与改动前等价。
+   * 只统计**检索阶段**：最后那次强制作答仍在预算之外（由调用方硬预算兜底）。
+   */
+  const startedAt = Date.now();
+  let budgetExhausted = false;
+
   while (true) {
     if (isAborted(input.signal)) {
       yield* abortedEvents(messageId, sources, usage);
@@ -689,11 +714,30 @@ async function* toolLoopPath(
     }
 
     // ★ 硬约束 3 + 实现细节 c：达上限后**拿掉 tools 再调一次**（不是截断）
-    const reachedLimit = round >= maxRounds;
-    if (reachedLimit) roundsExhausted = true;
+    //   S-01：时间预算到点复用同一条「强制作答」路径，而不是 abort（硬切会丢已生成内容）
+    const overBudget = input.budgetMs !== undefined && Date.now() - startedAt >= input.budgetMs;
+    const reachedLimit = overBudget || round >= maxRounds;
+    if (round >= maxRounds) roundsExhausted = true;
+    if (overBudget) budgetExhausted = true;
 
     let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
     let roundContent = '';
+
+    // ★ 强制作答前显式"收口"（REQ-20261113-001）：
+    //   拿掉 tools 后，部分上游仍会"想调工具"，把调用意图以**自家标记**写成普通文本混进答案
+    //   —— 实测 deepseek-flash 会输出 `<｜｜DSML｜｜ invoke ...>` 这类片段，导致答案完全不可用
+    //   （复现：`ki_ask` 6 轮用尽后强制作答，13 次工具调用的复杂问题答案 100% 是标记）。
+    //   这里用一条 system 提示把它引导回正常作答。
+    //   ⚠️ 只在达上限的那一轮加一次：该轮 `pendingCalls` 必为空 → 循环随即 break，不会重复注入。
+    //   ⚠️ 对话链路的 `maxToolRounds = Infinity`，永不触发本分支 ⇒ 页面行为不受影响。
+    if (reachedLimit) {
+      messages.push({
+        role: 'system',
+        content: '本轮已达到检索轮次 / 时间上限，**不再提供任何工具**。'
+          + '请立即基于上文已获得的信息直接作答；信息不足时明确说明缺什么。'
+          + '禁止输出工具调用、函数调用或任何自定义标记，只输出给用户看的答案正文。',
+      });
+    }
 
     // ★ 每轮上游请求**之前**发上下文用量（字符口径，REQ-20261013-001）：
     //   首轮即"本轮请求的基数"，比 token 口径的 usage（只在本轮流末尾）早一整个回答时长；
@@ -935,6 +979,7 @@ async function* toolLoopPath(
     aborted: false,
     roundsExhausted,
     conversationTooLong: input.conv.messages.length + 2 > 500,
+    budgetExhausted,
   });
 }
 
@@ -1045,6 +1090,8 @@ async function* finalize(p: {
   aborted: boolean;
   roundsExhausted: boolean;
   conversationTooLong: boolean;
+  /** 因**时间预算**（而非轮次）触发的收口（S-01）；纯聊天路径不传 */
+  budgetExhausted?: boolean;
 }): AsyncGenerator<ChatEvent> {
   // ★ sources 至多一次且在 done 之前；**无来源不发**（而非发空数组）
   if (p.sources.length > 0) {
@@ -1068,6 +1115,8 @@ async function* finalize(p: {
     finishReason: p.finishReason,
     sources: p.sources,
     ...(warning ? { warning } : {}),
+    // ★ 与 warning 分开（S-01）：'tool-rounds-exhausted' 是"轮数用尽"，本字段是"时间用尽"
+    ...(p.budgetExhausted ? { budgetExhausted: true } : {}),
   };
 }
 

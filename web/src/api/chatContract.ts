@@ -274,6 +274,12 @@ export type ChatEvent =
       finishReason: string;
       sources: SourceRef[];
       warning?: 'tool-rounds-exhausted' | 'conversation-too-long';
+      /**
+       * 因**时间预算**（而非轮次）触发的收口（REQ-20261113-001，与后端同源）。
+       * 目前只有 `ki_ask` 会产生；前端**不消费**该字段（沿用 `warning` 的提示口径），
+       * 此处声明是为保持「契约两侧副本一致」——缺了它就成了静默漂移。
+       */
+      budgetExhausted?: boolean;
     }
   | { type: 'aborted'; messageId: string }
   | { type: 'error'; code: string; error: string; retryable?: boolean };

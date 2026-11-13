@@ -1242,6 +1242,7 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `ki_scope_list` | 读 | 列出所有 scope（KB + 向量两层并集） | `scope list` |
 | `ki_tag_list` | 读 | 列出指定 scope 下用过的 tag（含文档数） | `tag list` |
 | `ki_search` | 读 | 检索（默认 hybrid；支持 `mode=fulltext` 仅全文且不调用 embedding，输出 group/relation 定位字段） | `search` |
+| `ki_ask` | 问答 | 让 ki 用自己的模型 + 指定知识库回答一个问题：内部自动多轮检索再合成，返回答案与来源。**每次独立、不保留上下文、不落盘**；耗时通常 5~30 秒，超 45 秒返回部分答案（`truncated=true`） | 仅 MCP |
 | `ki_group_create` | 写 | 创建 Group 节点 | `ki group create` |
 | `ki_sync_relation` | 写 | 写入单条 Relation + 模块说明（可非向量化） | `sync-relation` |
 | `ki_edit_relation` | 写 | 对已有大 Relation 多轮局部修改，完成后一次性更新索引 | 仅 MCP |

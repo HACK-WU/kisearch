@@ -103,6 +103,15 @@ export interface McpToolGroup {
   descs: Readonly<Record<string, string>>;
 }
 
+/**
+ * 对话工具的配置分组（AI 对话面板的开关来源）。
+ *
+ * 🔴 **禁止把 `ki_ask` 加进来**（REQ-20261113-001 · S-02 §3.2 决策）：
+ *   本清单 ∩ `CHAT_MCP_TOOLS` = **内层工具面**。一旦 `ki_ask` 出现在内层工具面，
+ *   模型可以在问答内部再调 `ki_ask`，形成递归；而 `maxToolRounds` 只在最外层计数，
+ *   内层每次自调都会重新计数，上限**挡不住**。
+ *   若日后确实需要"对话里也能让 ki 自己问答"，必须先设计递归深度限制。
+ */
 export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
   {
     key: 'read',

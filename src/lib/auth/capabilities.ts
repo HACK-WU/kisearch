@@ -28,7 +28,14 @@ export type Capability =
    * ★ **不能**放进 `WRITE_CAPABILITIES`：那里用来把 viewer 映射成 `USER_READONLY`，
    *   放进去会让「viewer 能建视图」与「viewer 只读」自相矛盾。
    */
-  | 'views.write';
+  | 'views.write'
+  /**
+   * 一次性问答（`ki_ask`，REQ-20261113-001 · S-02 §3.2）。
+   *
+   * 与 `knowledge.read` 刻意分开：读是零成本，问答会消耗上游模型额度并外发内容，
+   * 同一能力点无法分别授权（也就无法单独撤销）。
+   */
+  | 'knowledge.ask';
 
 export const ALL_CAPABILITIES: readonly Capability[] = [
   'knowledge.read',
@@ -46,6 +53,7 @@ export const ALL_CAPABILITIES: readonly Capability[] = [
   'ops.write',
   'views.read',
   'views.write',
+  'knowledge.ask',
 ];
 
 export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
@@ -55,6 +63,8 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
     'knowledge.write',
     'chat.use',
     'chat.writeTools',
+    // 问答与对话同档：能对话就能问答（两者都消耗模型额度）
+    'knowledge.ask',
     'datasource.read',
     'tasks.read',
     'tokens.self',
@@ -65,6 +75,8 @@ export const ROLE_CAPABILITIES: Record<Role, ReadonlySet<Capability>> = {
   viewer: new Set<Capability>([
     'knowledge.read',
     'chat.use',
+    // 与 chat.use 同档：viewer 能对话就能问答（额度由 ki_ask 的限流兜住，不靠角色区分）
+    'knowledge.ask',
     'tasks.read',
     'tokens.self',
     'views.read',

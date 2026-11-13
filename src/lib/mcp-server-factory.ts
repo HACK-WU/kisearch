@@ -21,6 +21,7 @@ import { registerDeleteRelationTool } from './mcp-tools/delete-relation.js';
 import { registerScopeListTool } from './mcp-tools/scope-list.js';
 import { registerViewListTool } from './mcp-tools/view-list.js';
 import { registerTagListTool } from './mcp-tools/tag-list.js';
+import { registerAskTool } from './mcp-tools/ask.js';
 import { READ_ONLY_INSTRUCTIONS } from './mcp-tools/tool-access.js';
 import { readKiVersion } from './version-guard.js';
 import { SERVICE_NAME } from './constants.js';
@@ -64,6 +65,13 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     registerStoreTool(server);
     registerBulkStoreTool(server);
     registerDeleteRelationTool(server);
+
+    // ── 模型消耗型工具（REQ-20261113-001）：只读会话**不注册** ──
+    // ⚠️ 它**不是写工具**（对库只做只读检索），但会消耗上游 LLM 额度并外发知识库内容，
+    //    所以按"只读 Token 不可用"处理 —— 与写工具同块，理由是准入相同而非语义相同。
+    //    注意读白名单方向：`ki_ask` 不在 READ_ONLY_TOOL_NAMES，只读会话看不见它也调不动
+    //    （tools/call 侧另有 mcp-http 的模型消耗型闸门兜住缓存/构造调用）。
+    registerAskTool(server, auth?.id ?? 'local');
   }
   return server;
 }

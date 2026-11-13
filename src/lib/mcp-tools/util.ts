@@ -39,4 +39,13 @@ export const TOOL_TIMEOUT = {
   WRITE: 60_000,
   /** 批量写入（多条 embedding + 向量批写） */
   BULK: 300_000,
+  /**
+   * 一次性问答（`ki_ask`，REQ-20261113-001）。
+   *
+   * 取值依据：内部硬预算 45s（`ASK_HARD_BUDGET_MS`）+ 序列化/网络余量。
+   * ⚠️ **不得**提高到接近或超过 60s —— MCP 客户端的 `tools/call` 硬超时就是 60s
+   *   （SDK `DEFAULT_REQUEST_TIMEOUT_MSEC`），超过后客户端先失败、服务端仍在烧 token。
+   * ⚠️ **不得**沿用 `READ`（30s）：正常 6 轮问答可达 25~30s，会被误杀。
+   */
+  ASK: 50_000,
 } as const;

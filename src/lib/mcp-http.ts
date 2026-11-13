@@ -30,6 +30,9 @@ import {
   SCOPE_LESS_ENUM_TOOL_NAMES,
   isSearchTool,
   TOKEN_READONLY,
+  TOKEN_MODEL_FORBIDDEN,
+  isModelConsumingTool,
+  modelConsumingRejectMessage,
 } from './mcp-tools/tool-access.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
@@ -316,16 +319,24 @@ function rejectReadOnlyRequest(
   if (auth === null || !auth.readOnly) return false;
   const violation = findReadOnlyViolation(body);
   if (violation === null) return false;
+  /**
+   * 分流（REQ-20261113-001 · S-02 §3.2）：`ki_ask` 这类**模型消耗型**工具不是写入工具，
+   * 复用 `TOKEN_READONLY` 会把"只读 Token 不许烧模型额度"说成"不许写入"，
+   * 把调用方引去查写权限 —— 归因错误比不给原因更浪费时间。
+   */
+  const modelConsuming = isModelConsumingTool(violation);
   process.stderr.write(
-    `[kisearch] 只读 Token 拦截写入：来自 ${req.socket.remoteAddress ?? '未知'}，`
-    + `工具 "${violation}" 不在只读白名单内。\n`,
+    `[kisearch] 只读 Token 拦截${modelConsuming ? '模型消耗型' : '写入'}工具：`
+    + `来自 ${req.socket.remoteAddress ?? '未知'}，工具 "${violation}" 不在只读白名单内。\n`,
   );
   sendJson(res, 403, {
     jsonrpc: '2.0',
     error: {
       code: -32003,
-      message: readonlyRejectMessage(violation, auth.id),
-      data: { code: TOKEN_READONLY },
+      message: modelConsuming
+        ? modelConsumingRejectMessage(violation, auth.id)
+        : readonlyRejectMessage(violation, auth.id),
+      data: { code: modelConsuming ? TOKEN_MODEL_FORBIDDEN : TOKEN_READONLY },
     },
     id: extractJsonRpcId(body),
   });

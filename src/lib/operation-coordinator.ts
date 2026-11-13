@@ -75,7 +75,17 @@ const READ_OPERATIONS = new Set<string>([
  *   （见 `kindForMcpToolNames`）—— 例如 AI 同时调 `ki_search` + `ki_sync_relation`
  *   会整批排队，这是刻意的保守语义。
  */
-const READ_MCP_TOOLS = new Set<string>(['ki_get_module_info', 'ki_group_list', 'ki_search']);
+const READ_MCP_TOOLS = new Set<string>([
+  'ki_get_module_info',
+  'ki_group_list',
+  'ki_search',
+  /**
+   * `ki_ask`（REQ-20261113-001 · S-02 §3.2 决策「调度车道」）：
+   * 对库只做**只读检索**（与 ki_search 同性质），LLM 调用不经过 coordinator。
+   * 若落到 write 串行车道，一次 6~45s 的问答会把同 scope 的导入/写入/同步全部阻塞。
+   */
+  'ki_ask',
+]);
 
 /**
  * 按 operation 名推导任务类型（S-01 的**默认规则**，kind 的唯一真相）。

@@ -88,6 +88,21 @@ function uploadMaxBytesRange(value: unknown, path: string, add: AddFn): void {
   }
 }
 
+/**
+ * `llm.askMaxRounds` 校验：`ki_ask` 单次问答的内层工具轮次上限（1~12）。
+ *
+ * ⚠️ 上界必须与 `chat/ask/ask-contract.ts::ASK_MAX_ROUNDS_LIMIT` 保持一致
+ *    （此处不 import 它：配置层不反向依赖 chat 层，否则分层倒置）。
+ * 越界 fail-loud 而非钳制 —— 用户改了配置却没生效是最难查的一类问题。
+ */
+const ASK_MAX_ROUNDS_MAX = 12;
+function askMaxRoundsRange(value: unknown, path: string, add: AddFn): void {
+  const n = value as number;
+  if (!Number.isInteger(n) || n < 1 || n > ASK_MAX_ROUNDS_MAX) {
+    add(path, `应为 1~${ASK_MAX_ROUNDS_MAX} 之间的整数（ki_ask 内层工具轮次上限），实际=${n}`);
+  }
+}
+
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;
   if (!/^https?:\/\//.test(s)) {
@@ -363,6 +378,12 @@ const CONFIG_SCHEMA: ConfigNode = {
         reasoningEfforts: { type: 'stringArray', validate: validateEffortsList },
         /** 部署默认档：必须 ∈ `reasoningEfforts`（跨字段校验挂在本 object 节点上） */
         reasoningEffort: { type: 'string', validate: validateEffortValue },
+        // ── v5（REQ-20261113-001）── ki_ask 单次问答的内层工具轮次上限
+        /**
+         * 1~12，缺省 6。
+         * 越界 **fail-loud**：静默钳制会让"改了配置却没生效"变成难查的问题。
+         */
+        askMaxRounds: { type: 'number', validate: askMaxRoundsRange },
       },
       validate: validateEffortCrossField,
     },

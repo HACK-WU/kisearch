@@ -273,17 +273,19 @@ describe('buildKiMcpServer：按访问模式装配工具集', () => {
     assert.deepEqual(registeredToolNames(server), [...READ_ONLY_TOOL_NAMES].sort());
   });
 
-  it('读写会话注册全部 14 个工具（6 读 + 8 写）', () => {
+  it('读写会话注册全部 15 个工具（6 读 + 8 写 + 1 模型消耗型）', () => {
     const server = buildKiMcpServer({ scopes: ['all'], readOnly: false });
     const names = registeredToolNames(server);
-    assert.equal(names.length, 14);
+    assert.equal(names.length, 15);
     for (const name of READ_ONLY_TOOL_NAMES) assert.ok(names.includes(name), `缺读工具 ${name}`);
     for (const name of WRITE_TOOLS) assert.ok(names.includes(name), `缺写工具 ${name}`);
+    // 模型消耗型（REQ-20261113-001）：与写工具同块注册（准入相同），但语义不是写
+    assert.ok(names.includes('ki_ask'), '缺模型消耗型工具 ki_ask');
   });
 
   it('免鉴权（null，stdio / 回环）与读写会话等价，且不注入只读 instructions', () => {
     const server = buildKiMcpServer(null);
-    assert.equal(registeredToolNames(server).length, 14);
+    assert.equal(registeredToolNames(server).length, 15);
     assert.equal(serverInstructions(server), undefined);
   });
 

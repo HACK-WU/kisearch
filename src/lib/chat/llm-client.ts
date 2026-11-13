@@ -25,6 +25,7 @@
 
 import type { ChatConfigOk, RetrievalMode } from './chat-contract.js';
 import { CHAT_BUDGET } from './chat-contract.js';
+import { ASK_MAX_ROUNDS_DEFAULT } from './ask/ask-contract.js';
 import type { KiConfig } from '../config.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -54,6 +55,13 @@ export interface LlmStatus {
    * 对话配置层可存用户覆盖值，生效值由 `handleConfigGet` 组装（`覆盖 ?? 本值`）。
    */
   contextChars: number;
+  /**
+   * `ki_ask` 单次问答的**内层工具轮次上限**（取 `llm.askMaxRounds`，缺省 6，范围 1~12）。
+   *
+   * ⚠️ 与 `maxToolRounds`（对话链路，恒 `Infinity`）**互不影响**：
+   *    后者是"页面聊多久都行"，前者是"一次 MCP 调用必须在客户端 60s 内返回"。
+   */
+  askMaxRounds: number;
 }
 
 /** v2 默认预算（SSOT = chat-contract 的 CHAT_BUDGET；此处只取所需两项，避免循环 import 语义混淆） */
@@ -81,6 +89,7 @@ function notReady(reason: string, maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS): LlmS
     maxToolRounds,
     // 未就绪也给出上限：面板仍可显示"已用多少"，只是不能生成
     contextChars: CHAT_BUDGET.defaultContextChars,
+    askMaxRounds: ASK_MAX_ROUNDS_DEFAULT,
   };
 }
 
@@ -123,6 +132,7 @@ export function resolveLlmStatus(cfg: unknown, configPath: string): LlmStatus {
     ackRequired,
     maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
     contextChars: llm.contextChars ?? CHAT_BUDGET.defaultContextChars,
+    askMaxRounds: llm.askMaxRounds ?? ASK_MAX_ROUNDS_DEFAULT,
   };
 }
 

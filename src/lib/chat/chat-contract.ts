@@ -392,6 +392,14 @@ export type ChatEvent =
       finishReason: string;
       sources: SourceRef[];
       warning?: 'tool-rounds-exhausted' | 'conversation-too-long';
+      /**
+       * 因**时间预算**（而非轮次）触发的收口（REQ-20261113-001 · S-01 新增，可选）。
+       *
+       * ★ 与 `warning:'tool-rounds-exhausted'` 刻意分开：前者是"时间用尽"、后者是"轮数用尽"，
+       *   归因不同（`ki_ask` 要把它们映射成 `truncatedReason` 的 `time-budget` / `round-limit`）。
+       * ★ **不新增 warning 枚举值**：加值会让既有前端分派逻辑落入未知分支。
+       */
+      budgetExhausted?: boolean;
     }
   | { type: 'aborted'; messageId: string }
   | { type: 'error'; code: string; error: string; retryable?: boolean };

@@ -91,8 +91,8 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 
 `scopes` 管「能碰哪些 scope」（数据维度），`readOnly` 管「能对数据做什么」（动作维度），两者正交：只读 Token 同样必须指定 `--scope`。
 
-- **工具可见性**：只读会话只暴露 6 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_view_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。
-- **越权兜底**：即使客户端缓存了建连时的旧工具列表、或直接构造 JSON-RPC 调用写工具，同样会被拒绝（`403` + `TOKEN_READONLY`），写不进去。
+- **工具可见性**：只读会话只暴露 6 个读工具（`ki_search` / `ki_get_module_info` / `ki_group_list` / `ki_scope_list` / `ki_view_list` / `ki_tag_list`），8 个写工具（`ki_store` / `ki_bulk_store` / `ki_sync_relation` / `ki_bulk_sync_relation` / `ki_edit_relation` / `ki_group_create` / `ki_group_delete_empty` / `ki_delete_relation`）**不出现在 `tools/list`**。另有 1 个**模型消耗型**工具 `ki_ask`（让 ki 用它自己的模型 + 指定知识库回答一个问题）同样不暴露——它不改数据，但会消耗上游模型额度并把知识库片段外发。
+- **越权兜底**：即使客户端缓存了建连时的旧工具列表、或直接构造 JSON-RPC 调用写工具，同样会被拒绝（`403` + `TOKEN_READONLY`），写不进去；调 `ki_ask` 这类模型消耗型工具返回 `403` + `TOKEN_MODEL_FORBIDDEN`（文案会明确"它不是写入工具、原因也不是权限不足"）。
 - **AI 可感知**：只读会话建连时即告知 AI「当前为只读」，无需靠工具缺失反推，也不必反复重试。
 - **生效时机**：`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
 - **不影响的范围**：`--token` / `KI_MCP_TOKEN` 进程级临时 Token 始终全权（不参与降权）；stdio 与本机回环访问本就免登录，不受只读约束。
