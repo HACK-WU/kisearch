@@ -65,6 +65,10 @@ function okResult(result: AskResult, scope: string): { content: Array<{ type: 't
     sources: result.sources,
     // 净化前的条数：调用方据此判断"来源是被截断了"还是"证据本来就只有这些"
     sourcesTotal: result.sourcesTotal,
+    // 二期：下一次追问把它传回 context_id（不传则每次全新）
+    contextId: result.contextId,
+    expiresAt: result.expiresAt,
+    resumed: result.resumed,
     rounds: result.rounds,
     elapsedMs: result.elapsedMs,
     truncated: result.truncated,
@@ -76,7 +80,7 @@ function okResult(result: AskResult, scope: string): { content: Array<{ type: 't
 
 /** 工具描述：外部 AI 决定"要不要用 / 怎么用"的唯一依据，四要素缺一不可 */
 const TOOL_DESCRIPTION = '让 ki 用它自己的模型 + 指定知识库回答一个问题：内部会自动多轮检索再合成，返回答案与来源。'
-  + '⚠️ 每次调用都是独立问答，不保留上下文——追问请把上文并入 question。'
+  + '默认每次调用都是全新问答；要追问就把上一次返回的 contextId 作为 context_id 传回（10 分钟内有效，每次交互顺延）。'
   + '适合"需要知识库综合结论"的问题；若只要原始文档片段，请用 ki_search。'
   + '单次耗时通常 5~30 秒，超过 45 秒会返回已生成的部分答案（truncated=true）。';
 
@@ -93,7 +97,12 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
         '知识库名（必填）。必须是单个具体知识库，不接受视图名或逗号分隔多库；可用 ki_scope_list 查看',
       ),
       question: z.string().min(1).describe(
-        '自然语言问题（建议一句话并带上必要限定条件；本工具不保留上下文，追问请把上文并入问题）',
+        '自然语言问题（建议一句话并带上必要限定条件）',
+      ),
+      context_id: z.string().optional().describe(
+        '续接上一次问答：传回它返回的 contextId。缺省（推荐）＝每次全新问答。'
+        + '有效期 10 分钟（滑动：每次交互顺延）；过期/不存在/非本人会明确报错，不会静默新开。'
+        + '⚠️ 只在真正追问时传 —— 无关问题传了会把两件事串成一轮对话。',
       ),
     },
     async (args) => {
@@ -182,8 +191,16 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
 
       // ⑥⑦⑧ 执行 → 审计 → 释放（释放必须在 finally）
       try {
+        const contextIdArg = typeof args.context_id === 'string' ? args.context_id.trim() : '';
         const result = await withTimeout(
-          runAsk({ scope, question, capabilities: READ_ONLY_CAPABILITIES }),
+          runAsk({
+            scope,
+            question,
+            ...(contextIdArg.length > 0 ? { contextId: contextIdArg } : {}),
+            // 归属校验用：不同 Token 不能续接同一个 contextId（S-03 §4.3）
+            principalKey,
+            capabilities: READ_ONLY_CAPABILITIES,
+          }),
           TOOL_TIMEOUT.ASK,
           'ki_ask',
         );

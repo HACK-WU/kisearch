@@ -34,6 +34,7 @@ import {
   isModelConsumingTool,
   modelConsumingRejectMessage,
 } from './mcp-tools/tool-access.js';
+import { startAskGc } from './chat/ask/ask-gc.js';
 import { listLiveStdioLocks } from './mcp-stdio-lock.js';
 import { embedQueryOnce, findMissingScopeCollections, getVectorResourceMetrics, getVectorizationMetrics, isQueryEmbedDegradable, runWithVectorSource } from './vector-client.js';
 import { SERVICE_NAME } from './constants.js';
@@ -688,6 +689,11 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
     }
   }, SESSION_SWEEP_INTERVAL_MS);
   sweepTimer.unref();
+
+  // 短会话（`ki_ask` 的 `ka-*`）TTL 回收（REQ-20261113-001 二期 · S-03 §4.4）：
+  // 立即扫一次（兜住停机期间过期的）+ 60s 定时。只碰 `ka-*`，与上面的会话清扫互不干扰。
+  // 幂等：重复启动只会保留一个定时器（测试里会多次 startMcpHttpServer）。
+  startAskGc();
 
   const httpServer = http.createServer((req, res) => {
     void handleRequest(req, res).catch((err) => {

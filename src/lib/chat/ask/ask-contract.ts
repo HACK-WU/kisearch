@@ -42,6 +42,24 @@ export const ASK_MAX_ROUNDS_DEFAULT = 6;
  * 配置越界（<1 或 >本值）→ fail-loud（`config-schema` 校验报错），**不静默钳制**。
  */
 export const ASK_MAX_ROUNDS_LIMIT = 12;
+// ── 二期（S-03）：短会话续接 + 滑动 TTL ─────────────────────────────
+/**
+ * 短会话 TTL：默认 10 分钟，可配置上限 60 分钟。
+ *
+ * **滑动口径**：以最后一次交互（`updatedAt`，由 `writeJson` 自动打戳）起算，
+ * 不是创建时间 —— 用户连续追问会不断顺延（S-03 §3.2 决策）。
+ */
+export const ASK_SESSION_TTL_DEFAULT_MS = 600_000;
+export const ASK_SESSION_TTL_LIMIT_MS = 3_600_000;
+/**
+ * 上下文预算：单条短会话累积的消息条数与字符总量上限。
+ *
+ * **超限显式报错而不是静默截断**（R17）—— 截断会让模型基于"残缺历史"作答，
+ * 而调用方并不知道自己丢了上下文。
+ */
+export const ASK_CONTEXT_MAX_MESSAGES = 20;
+export const ASK_CONTEXT_MAX_CHARS = 60_000;
+
 /** 软预算：检索阶段到点改为强制作答（不再发起新的工具轮） */
 export const ASK_SOFT_BUDGET_MS = 25_000;
 /** 硬预算：整次问答兜底，到点 abort 上游并用已累积内容作答 */
@@ -53,6 +71,17 @@ export interface AskInput {
   scope: string;
   /** 用户问题原文（非空由 S-02 校验） */
   question: string;
+  /**
+   * 续接：传回上一次返回的 `contextId`；**缺省 = 全新问答**（一期语义，行为与一期逐字段一致）。
+   *
+   * 传了但不存在 / 已过期 / 非本人 → 专用错误码，**绝不静默当新会话**（S-03 §4.3）。
+   */
+  contextId?: string;
+  /**
+   * 调用方键（`tokenId` / `'local'`），用于短会话**归属校验**与审计。
+   * 缺省 `'local'`（单测或回环直连）。
+   */
+  principalKey?: string;
   /**
    * **内层工具面的能力上界**（不是"调用方权限校验"）。
    *
@@ -96,4 +125,13 @@ export interface AskResult {
   usage?: { promptTokens: number; completionTokens: number; reasoningTokens?: number };
   /** 失败时缺省 ok:false + error；**对外形状由 S-02 展平为 `{ok,code,message,retryable}`** */
   error?: { code: string; message: string; retryable: boolean };
+  /**
+   * 本次问答的短会话 id（二期）：首轮即新建，续接时为传入值。
+   * 调用方下次**追问**时传回即可复用历史；不传则每次都是全新问答。
+   */
+  contextId: string;
+  /** 短会话过期时刻（ISO，= `updatedAt + ttlMs`，每次交互后顺延） */
+  expiresAt: string;
+  /** 本次是否真的复用了历史（`false` = 新建会话或续接失败但已降级为新建 —— 后者不会发生） */
+  resumed: boolean;
 }

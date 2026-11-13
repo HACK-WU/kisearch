@@ -25,7 +25,7 @@
 
 import type { ChatConfigOk, RetrievalMode } from './chat-contract.js';
 import { CHAT_BUDGET } from './chat-contract.js';
-import { ASK_MAX_ROUNDS_DEFAULT } from './ask/ask-contract.js';
+import { ASK_MAX_ROUNDS_DEFAULT, ASK_SESSION_TTL_DEFAULT_MS } from './ask/ask-contract.js';
 import type { KiConfig } from '../config.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -62,6 +62,8 @@ export interface LlmStatus {
    *    后者是"页面聊多久都行"，前者是"一次 MCP 调用必须在客户端 60s 内返回"。
    */
   askMaxRounds: number;
+  /** 短会话**滑动** TTL（毫秒，缺省 600000 = 10 分钟）—— 二期 S-03 */
+  askSessionTtlMs: number;
 }
 
 /** v2 默认预算（SSOT = chat-contract 的 CHAT_BUDGET；此处只取所需两项，避免循环 import 语义混淆） */
@@ -90,6 +92,7 @@ function notReady(reason: string, maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS): LlmS
     // 未就绪也给出上限：面板仍可显示"已用多少"，只是不能生成
     contextChars: CHAT_BUDGET.defaultContextChars,
     askMaxRounds: ASK_MAX_ROUNDS_DEFAULT,
+    askSessionTtlMs: ASK_SESSION_TTL_DEFAULT_MS,
   };
 }
 
@@ -133,6 +136,7 @@ export function resolveLlmStatus(cfg: unknown, configPath: string): LlmStatus {
     maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
     contextChars: llm.contextChars ?? CHAT_BUDGET.defaultContextChars,
     askMaxRounds: llm.askMaxRounds ?? ASK_MAX_ROUNDS_DEFAULT,
+    askSessionTtlMs: llm.askSessionTtlMs ?? ASK_SESSION_TTL_DEFAULT_MS,
   };
 }
 

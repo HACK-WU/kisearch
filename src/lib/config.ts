@@ -230,6 +230,11 @@ export interface LlmConfig {
    * 后者是"页面聊多久都行"的产品决定，前者是"一次工具调用必须在客户端 60s 内返回"的硬约束。
    */
   askMaxRounds?: number;
+  /**
+   * 短会话**滑动** TTL（毫秒，60000~3600000，缺省 600000 = 10 分钟）—— 二期 S-03。
+   * 以最后一次交互起算，不是创建时间；超时后短会话文件被 GC 删除。
+   */
+  askSessionTtlMs?: number;
 }
 
 /** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
@@ -657,6 +662,8 @@ function parseAndExpand(configFile: string): KiConfig {
       // ⚠️ 本段是**逐字段白名单拷贝**：新增 llm 字段必须同时加在这里，否则类型上有、
       //    运行时永远 undefined（2026-11-13 实测踩过：配置写了 askMaxRounds 却没生效）。
       askMaxRounds: rl.askMaxRounds !== undefined ? Number(rl.askMaxRounds) : undefined,
+      // REQ-20261113-001 二期：短会话滑动 TTL（同上，**必须**加在这段白名单拷贝里）
+      askSessionTtlMs: rl.askSessionTtlMs !== undefined ? Number(rl.askSessionTtlMs) : undefined,
     };
   }
 

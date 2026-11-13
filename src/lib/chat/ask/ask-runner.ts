@@ -34,6 +34,8 @@ import {
 import { runToolLoop } from '../retrieval/tool-loop.js';
 import type { ConversationFile, SourceRef } from '../chat-contract.js';
 import {
+  ASK_CONTEXT_MAX_CHARS,
+  ASK_CONTEXT_MAX_MESSAGES,
   ASK_HARD_BUDGET_MS,
   ASK_MAX_ROUNDS_DEFAULT,
   ASK_MAX_ROUNDS_LIMIT,
@@ -41,10 +43,41 @@ import {
   type AskInput,
   type AskResult,
 } from './ask-contract.js';
+import {
+  appendAskTurn,
+  askSessionExpiresAt,
+  createAskSession,
+  deleteAskSession,
+  isAskSessionExpired,
+  readAskSession,
+  type AskSessionFile,
+  type AskSessionMessage,
+} from './ask-store.js';
+
+/**
+ * 失败收尾：丢掉**本次新建**的短会话（因为它的 id 不会返回给调用方，成了无主文件）。
+ *
+ * 为什么需要：`resolveAskSession` 会**先建会话再跑问答**（否则拿不到 `contextId`），
+ * 而失败（上游超时 / 5xx / 中断）时若不清理，每次失败都会在盘上留一个 `ka-*.json`，
+ * 只能等 10 分钟后的 GC。上游抽风时会堆一片。
+ *
+ * ⚠️ 判定只看 `resumed`，**不看有没有部分答案**：
+ * · 失败路径的 `contextId` **不会返回给调用方**（对外只给 `{ok:false,code,message}`），
+ *   所以这个文件对谁都没用 —— 即使里面存了半截答案，也没人知道它的 id；
+ * · 反之若在这里保留，就是"看不见也续不上"的无主文件，纯占盘。
+ * · 续接的绝不能删 —— 那是调用方还在用的历史（`resumed === true` 直接跳过）。
+ */
+function discardEmptySession(scope: string, contextId: string, resumed: boolean): void {
+  if (resumed || contextId.length === 0) return;
+  deleteAskSession(scope, contextId);
+}
 
 /** 统一失败形状（`ok:false`，不外抛） */
 function failure(
-  partial: Pick<AskResult, 'answer' | 'sources' | 'sourcesTotal' | 'rounds' | 'truncated'> & {
+  partial: Pick<
+    AskResult,
+    'answer' | 'sources' | 'sourcesTotal' | 'rounds' | 'truncated' | 'contextId' | 'expiresAt' | 'resumed'
+  > & {
     startedAt: number;
     truncatedReason?: AskResult['truncatedReason'];
     degraded?: AskResult['degraded'];
@@ -57,6 +90,9 @@ function failure(
     answer: partial.answer,
     sources: partial.sources,
     sourcesTotal: partial.sourcesTotal,
+    contextId: partial.contextId,
+    expiresAt: partial.expiresAt,
+    resumed: partial.resumed,
     rounds: partial.rounds,
     elapsedMs: Date.now() - partial.startedAt,
     truncated: partial.truncated,
@@ -120,8 +156,91 @@ function sanitizeSources(list: SourceRef[]): SourceRef[] {
   return cleaned.slice(0, ASK_MAX_SOURCES);
 }
 
+// ── 二期：短会话解析（S-03 §4.3）────────────────────────────
+
+type SessionResolution =
+  | { ok: true; session: AskSessionFile; history: AskSessionMessage[]; resumed: boolean }
+  | { ok: false; error: NonNullable<AskResult['error']> };
+
+/**
+ * 解析或创建短会话。
+ *
+ * **判定顺序固定**：不存在 → 非本人 → 已过期 → 超预算。
+ * 先判归属再判过期，是为了不让"拿别人的过期 ID"探测到"它曾经存在"
+ * （否则 `EXPIRED` 与 `FORBIDDEN` 的差异就是一个存在性侧信道）。
+ *
+ * 不传 `contextId` ⇒ 新建一个空会话（并把 id 返回给调用方，供下次追问）。
+ */
+async function resolveAskSession(
+  input: AskInput,
+  ownerKey: string,
+  ttlMs: number,
+): Promise<SessionResolution> {
+  if (input.contextId === undefined || input.contextId.length === 0) {
+    const created = await createAskSession(input.scope, ownerKey);
+    return { ok: true, session: created, history: [], resumed: false };
+  }
+
+  const existing = await readAskSession(input.scope, input.contextId);
+  if (existing === null) {
+    return {
+      ok: false,
+      error: {
+        code: 'ASK_CONTEXT_NOT_FOUND',
+        message: `上下文「${input.contextId}」不存在（或已清理）：不传 context_id 即可开启新会话。`,
+        retryable: false,
+      },
+    };
+  }
+  if (existing.ownerKey !== ownerKey) {
+    return {
+      ok: false,
+      error: {
+        code: 'ASK_CONTEXT_FORBIDDEN',
+        message: '该上下文不属于当前凭据：请用创建它的那个 Token 续接，或不传 context_id 开启新会话。',
+        retryable: false,
+      },
+    };
+  }
+  if (isAskSessionExpired(existing, ttlMs)) {
+    deleteAskSession(input.scope, existing.id);
+    return {
+      ok: false,
+      error: {
+        code: 'ASK_CONTEXT_EXPIRED',
+        message: `上下文已过期（最后一次交互超过 ${Math.round(ttlMs / 60_000)} 分钟）：请开启新会话并带上必要上文。`,
+        retryable: false,
+      },
+    };
+  }
+
+  const chars = existing.messages.reduce((sum, m) => sum + m.content.length, 0);
+  if (existing.messages.length + 2 > ASK_CONTEXT_MAX_MESSAGES) {
+    return {
+      ok: false,
+      error: {
+        code: 'ASK_CONTEXT_BUDGET_EXCEEDED',
+        message: `该上下文已累积 ${existing.messages.length} 条消息（上限 ${ASK_CONTEXT_MAX_MESSAGES}）：请开启新会话。`,
+        retryable: false,
+      },
+    };
+  }
+  if (chars + input.question.length > ASK_CONTEXT_MAX_CHARS) {
+    return {
+      ok: false,
+      error: {
+        code: 'ASK_CONTEXT_BUDGET_EXCEEDED',
+        message: `该上下文已累积 ${chars} 字符（上限 ${ASK_CONTEXT_MAX_CHARS}）：请开启新会话。`,
+        retryable: false,
+      },
+    };
+  }
+
+  return { ok: true, session: existing, history: existing.messages, resumed: true };
+}
+
 /** 内存会话骨架：**13 个必填字段**（`chat-contract.ts` 的 `ConversationFile`），可选字段一律不设 */
-function buildMemoryConv(scope: string): ConversationFile {
+function buildMemoryConv(scope: string, history: readonly AskSessionMessage[]): ConversationFile {
   const now = new Date().toISOString();
   return {
     version: 1,
@@ -134,9 +253,16 @@ function buildMemoryConv(scope: string): ConversationFile {
     createdAt: now,
     updatedAt: now,
     seq: 0,
-    messageCount: 0,
-    lastMessagePreview: '',
-    messages: [],
+    messageCount: history.length,
+    lastMessagePreview: history.length > 0 ? history[history.length - 1]!.content.slice(0, 40) : '',
+    // 回放只取 role + content（S-03 §3.2 决策）：reasoning / sources 是展示物，
+    // 回放会放大上下文且违反 N12
+    messages: history.map((m, index) => ({
+      id: `m${index + 1}`,
+      role: m.role,
+      content: m.content,
+      at: m.at,
+    })),
   };
 }
 
@@ -145,7 +271,15 @@ function buildMemoryConv(scope: string): ConversationFile {
  */
 export async function runAsk(input: AskInput): Promise<AskResult> {
   const startedAt = Date.now();
-  const empty = { answer: '', sources: [] as SourceRef[], sourcesTotal: 0, rounds: 0, truncated: false };
+  /**
+   * 前置失败（未配置模型 / 不支持 tools）时还没建立短会话，
+   * 但 `AskResult.contextId`/`expiresAt` 是必填字段 ⇒ 用空串表示"本次未建立"，
+   * 不凭空造一个 id（否则调用方拿它续接必然 NOT_FOUND，等于埋一个假线索）。
+   */
+  const empty = {
+    answer: '', sources: [] as SourceRef[], sourcesTotal: 0, rounds: 0, truncated: false,
+    contextId: '', expiresAt: '', resumed: false,
+  };
 
   // ① 就绪闸门（不发起上游请求）
   const cfg = loadConfig();
@@ -175,8 +309,18 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
     });
   }
 
-  // ② 内存会话骨架 + 硬预算/外部信号联动
-  const conv = buildMemoryConv(input.scope);
+  // ② 短会话（二期）：新建或续接，顺带做归属 / 过期 / 预算判定
+  const ownerKey = input.principalKey ?? 'local';
+  const ttlMs = status.askSessionTtlMs;
+  const resolution = await resolveAskSession(input, ownerKey, ttlMs);
+  if (!resolution.ok) return failure({ ...empty, startedAt }, resolution.error);
+
+  const contextId = resolution.session.id;
+  let expiresAt = askSessionExpiresAt(resolution.session, ttlMs);
+  const resumed = resolution.resumed;
+
+  // ③ 内存会话骨架（**回放历史**）+ 硬预算/外部信号联动
+  const conv = buildMemoryConv(input.scope, resolution.history);
   const controller = new AbortController();
   let hardBudgetHit = false;
   const onOuterAbort = (): void => controller.abort();
@@ -203,6 +347,7 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
     sources: sanitizeSources(sources),
     // 净化**前**的条数（供调用方知道有来源被过滤/截断）
     sourcesTotal: sources.length,
+    contextId, expiresAt, resumed,
     rounds, truncated, startedAt,
     ...(truncatedReason ? { truncatedReason } : {}),
     ...(degraded ? { degraded } : {}),
@@ -258,6 +403,7 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
           }
           break;
         case 'error':
+          discardEmptySession(input.scope, contextId, resumed);
           return failure(snapshot(), {
             code: ev.code === 'LLM_UPSTREAM_ERROR' ? 'ASK_LLM_UPSTREAM' : 'ASK_INTERNAL',
             message: ev.error,
@@ -269,6 +415,7 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
       }
     }
   } catch (err) {
+    discardEmptySession(input.scope, contextId, resumed);
     return failure(snapshot(), mapThrown(err));
   } finally {
     clearTimeout(hardTimer);
@@ -290,10 +437,12 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
         elapsedMs: Date.now() - startedAt,
         truncated: true,
         truncatedReason: 'hard-timeout',
+        contextId, expiresAt, resumed,
         ...(degraded ? { degraded } : {}),
         ...(usage ? { usage } : {}),
       };
     }
+    discardEmptySession(input.scope, contextId, resumed);
     return failure(snapshot(), {
       code: 'ASK_TIMEOUT',
       message: hardBudgetHit
@@ -303,11 +452,26 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
     });
   }
 
+  // ⑤ 追加本轮到短会话 ⇒ `writeJson` 刷新 `updatedAt` ⇒ TTL 顺延（滑动）
+  //   **只写成功的问答**：中止/失败的答案不写 —— 残缺答案留在上下文里会污染下一轮
+  if (answer.length > 0) {
+    const at = new Date().toISOString();
+    const updated = await appendAskTurn(input.scope, contextId, [
+      { role: 'user', content: input.question, at },
+      { role: 'assistant', content: answer, at },
+    ]);
+    // null = 文件已被 GC 删掉或写失败 ⇒ 本次答案照给，调用方下次续接会拿到 NOT_FOUND
+    if (updated !== null) expiresAt = askSessionExpiresAt(updated, ttlMs);
+  }
+
   return {
     ok: true,
     answer,
     sources,
     sourcesTotal,
+    contextId,
+    expiresAt,
+    resumed,
     rounds,
     elapsedMs: Date.now() - startedAt,
     truncated,

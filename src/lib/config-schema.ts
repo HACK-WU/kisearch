@@ -103,6 +103,22 @@ function askMaxRoundsRange(value: unknown, path: string, add: AddFn): void {
   }
 }
 
+/**
+ * `llm.askSessionTtlMs` 校验：短会话滑动 TTL（60s~1h，毫秒）。
+ *
+ * ⚠️ 上界与 `chat/ask/ask-contract.ts::ASK_SESSION_TTL_LIMIT_MS` 保持一致
+ *    （同样不 import：配置层不反向依赖 chat 层）。
+ * 下界 60s：小于一轮问答耗时（5~40s）加一次追问间隔，会让"正常追问"误判过期。
+ */
+const ASK_SESSION_TTL_MIN_MS = 60_000;
+const ASK_SESSION_TTL_MAX_MS = 3_600_000;
+function askSessionTtlRange(value: unknown, path: string, add: AddFn): void {
+  const n = value as number;
+  if (!Number.isFinite(n) || n < ASK_SESSION_TTL_MIN_MS || n > ASK_SESSION_TTL_MAX_MS) {
+    add(path, `应为 ${ASK_SESSION_TTL_MIN_MS}~${ASK_SESSION_TTL_MAX_MS} 之间的毫秒数（默认 600000 = 10 分钟），实际=${n}`);
+  }
+}
+
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;
   if (!/^https?:\/\//.test(s)) {
@@ -384,6 +400,12 @@ const CONFIG_SCHEMA: ConfigNode = {
          * 越界 **fail-loud**：静默钳制会让"改了配置却没生效"变成难查的问题。
          */
         askMaxRounds: { type: 'number', validate: askMaxRoundsRange },
+        // ── v6（REQ-20261113-001 二期）── 短会话滑动 TTL
+        /**
+         * 毫秒，60000~3600000（默认 600000 = 10 分钟）。
+         * 上限 1 小时：再长就失去"短会话"意义（与持久会话的边界会模糊）。
+         */
+        askSessionTtlMs: { type: 'number', validate: askSessionTtlRange },
       },
       validate: validateEffortCrossField,
     },
